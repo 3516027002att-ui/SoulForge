@@ -16,6 +16,7 @@ static class EnvelopeInspection
         var rootFormat = DetectRootFormat(sample, magicEvidence);
         var resourceKind = GuessKind(sourcePath);
         var pathHints = EnvelopeHintScanner.Scan(sample);
+        var binderChildCandidates = BinderChildCandidateScanner.Scan(sample);
         var diagnostics = new List<Diagnostic>
         {
             new(
@@ -52,11 +53,21 @@ static class EnvelopeInspection
                 BridgeResult<object>.MakeSourceUri(sourcePath)));
         }
 
+        if (binderChildCandidates.Count > 0)
+        {
+            diagnostics.Add(new Diagnostic(
+                "info",
+                "BINDER_CHILD_CANDIDATES_FOUND",
+                $"Found {binderChildCandidates.Count} low-confidence visible binder child candidate(s). This is not an authoritative binder table yet.",
+                BridgeResult<object>.MakeSourceUri(sourcePath)));
+        }
+
         var evidence = new List<FormatEvidence>(magicEvidence)
         {
             new("extensionChain", 0, extensionChain, "medium")
         };
         evidence.AddRange(pathHints);
+        evidence.AddRange(binderChildCandidates);
 
         var layers = new List<FormatLayer>
         {
@@ -65,7 +76,14 @@ static class EnvelopeInspection
                 0,
                 length,
                 rootFormat == "unknown" ? "low" : "medium",
-                new { sampleBytes = sample.Length, maxSampleBytes, envelopeOnly = true, pathHints = pathHints.Count })
+                new
+                {
+                    sampleBytes = sample.Length,
+                    maxSampleBytes,
+                    envelopeOnly = true,
+                    pathHints = pathHints.Count,
+                    binderChildCandidates = binderChildCandidates.Count
+                })
         };
 
         return new InspectionResult(
@@ -128,7 +146,7 @@ static class EnvelopeInspection
         };
 
         if (rootFormat == "DCX") steps.Add("Add a reviewed DCX payload boundary before decompression.");
-        if (rootFormat is "BND3" or "BND4") steps.Add("Parse binder child file tables only after fixtures exist.");
+        if (rootFormat is "BND3" or "BND4") steps.Add("Use binderChildCandidate evidence only as hints until a fixture-confirmed binder table parser exists.");
         if (resourceKind == "event") steps.Add("Implement EMEVD event table export in export-event, not inspect.");
         if (resourceKind == "map") steps.Add("Implement MSB entity and region export in export-map, not inspect.");
         if (resourceKind == "param") steps.Add("Implement PARAM row export in export-param, not inspect.");
