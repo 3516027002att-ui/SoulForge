@@ -20,6 +20,7 @@ static class MsgTextExport
         var table = FmgTableParser.TryParse(sample, sourceUri, category);
         if (table != null)
         {
+            var confirmedFixture = table.Confidence == "confirmed-fixture";
             return BridgeResult<object>.Partial(
                 sourcePath,
                 "msg",
@@ -27,8 +28,10 @@ static class MsgTextExport
                 {
                     new Diagnostic(
                         "info",
-                        "MSG_FMG_TABLE_CANDIDATE",
-                        "Exported message entries from a guarded FMG table candidate. This is stronger than raw string scan, but still requires fixture review before being treated as authoritative.",
+                        confirmedFixture ? "MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED" : "MSG_FMG_TABLE_CANDIDATE",
+                        confirmedFixture
+                            ? "Exported message entries from the reviewed SoulForge synthetic FMG fixture layout. This confirms parser plumbing and fixture behavior, not native game-format authority."
+                            : "Exported message entries from a guarded FMG table candidate. This is stronger than raw string scan, but still requires fixture review before being treated as authoritative.",
                         sourceUri,
                         table.Metadata)
                 },
