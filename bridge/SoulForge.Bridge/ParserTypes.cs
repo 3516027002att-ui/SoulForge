@@ -4,22 +4,6 @@ sealed record BridgeResult<T>(string SourceUri, string SourcePath, string Game, 
 {
     public static BridgeResult<T> Unsupported(string sourcePath, string resourceKind, string message)
     {
-        // Temporary compatibility route: Program.cs still enters semantic exports through Unsupported.
-        // The reviewed end state is a direct Program.cs route to each export command.
-        if (File.Exists(sourcePath) && typeof(T) == typeof(object))
-        {
-            if (resourceKind == "msg")
-            {
-                return (BridgeResult<T>)(object)MsgTextExport.Export(sourcePath);
-            }
-
-            var candidate = SemanticCandidateExports.TryExport(sourcePath, resourceKind);
-            if (candidate != null)
-            {
-                return (BridgeResult<T>)(object)candidate;
-            }
-        }
-
         return new BridgeResult<T>(
             MakeSourceUri(sourcePath),
             sourcePath,
