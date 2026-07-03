@@ -13,7 +13,7 @@ export const KNOWN_RESOURCE_DIRS: readonly ResourceKind[] = [
 ] as const;
 
 export function classifyResourceKind(relativePath: string): ResourceKind {
-  const firstSegment = relativePath.replaceAll('\\\\', '/').split('/')[0]?.toLowerCase();
+  const firstSegment = relativePath.replaceAll('\\', '/').split('/')[0]?.toLowerCase();
 
   if (firstSegment && (KNOWN_RESOURCE_DIRS as readonly string[]).includes(firstSegment)) {
     return firstSegment as ResourceKind;
