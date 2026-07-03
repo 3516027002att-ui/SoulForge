@@ -8,6 +8,7 @@ This checkpoint is for reviewing the v0.1 logic layer before more UI work.
 - Bridge inspect returns partial envelope evidence rather than pretending semantic parsing succeeded.
 - Parser result types are separated from Program.cs.
 - Envelope inspection recognizes common native resource envelopes by header magic.
+- Envelope inspection records visible path-like hints as low-confidence evidence.
 - Bridge has a conservative partial message export for readable raw strings.
 - Message export stops at DCX/BND container boundaries until unpacking exists.
 - FMG-like files now get a guarded table-candidate pass before raw string scanning.
@@ -20,6 +21,7 @@ This checkpoint is for reviewing the v0.1 logic layer before more UI work.
 
 - No external parser code is copied.
 - Inspect is evidence only.
+- Path hints are low-confidence evidence and are not binder child tables.
 - Native msg export is still partial; FMG table candidates must be fixture-reviewed before being treated as authoritative.
 - Raw string fallback uses file offsets as temporary text IDs.
 - Event, map, and param semantic exports remain unsupported until each format has fixtures and validation.
@@ -50,7 +52,8 @@ Expected inspect shape:
 - diagnostics is not empty;
 - data.rootFormat exists;
 - data.evidence exists;
-- data.nextSteps exists.
+- data.nextSteps exists;
+- visible resource names may appear as low-confidence pathHint evidence.
 
 Expected export-msg behavior:
 
