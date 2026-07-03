@@ -14,6 +14,8 @@ This checkpoint is for reviewing the v0.1 logic layer before more UI work.
 - FMG-like files now get a guarded table-candidate pass before raw string scanning.
 - Workspace analysis now has a native inspection pass in addition to text and JSON semantic ingestion.
 - Workspace analysis can ingest partial native msg exports when the bridge returns a valid MsgExport shape.
+- WorkspaceIndex exposes stable stats and exact text lookup APIs.
+- AI-safe tools include workspace_stats and lookup_text_id.
 - Native inspection diagnostics are recorded as workspace diagnostics and are not ingested as semantic symbols.
 - Electron IPC now surfaces both parsedFiles and inspectedFiles from analysis.
 
@@ -26,6 +28,7 @@ This checkpoint is for reviewing the v0.1 logic layer before more UI work.
 - Raw string fallback uses file offsets as temporary text IDs.
 - Event, map, and param semantic exports remain unsupported until each format has fixtures and validation.
 - AI and UI must not directly parse native binary resources.
+- AI-safe read tools may query indexes but must not parse files or write files.
 - Writes must remain behind Patch Engine.
 
 ## Commands for reviewer
@@ -61,6 +64,12 @@ Expected export-msg behavior:
 - for FMG-like payloads with a self-consistent table candidate, diagnostics should include MSG_FMG_TABLE_CANDIDATE;
 - for packed DCX/BND containers, parseStatus should remain unsupported;
 - raw fallback text IDs are offsets, while table-candidate text IDs are read from the candidate rows.
+
+Expected AI tool behavior:
+
+- workspace_stats returns file, symbol, and reference counts from WorkspaceIndex;
+- lookup_text_id requires numeric textId and may accept category;
+- lookup_text_id should not scan files directly.
 
 ## Next parser milestones
 
