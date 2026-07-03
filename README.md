@@ -1,193 +1,173 @@
-# SoulForge
+# SoulForge 只狼 Mod 超级编辑器
 
-SoulForge is an AI-native mod workbench for FromSoftware games.
+SoulForge 的目标是做一个面向《只狼》和魂系游戏 Mod 的 AI 超级编辑器。
 
-The project started from **Super Event Editor v0.1**, but the roadmap has now expanded into a full **Super Editor**: a unified desktop workbench for opening native ModEngine-style mod directories, understanding event/map/param/msg relationships, editing resources safely, and eventually allowing AI to perform approved global mod changes through the Patch Engine.
+它不是一个普通的参数表工具，也不是某个现有编辑器的换皮版。它的最终目标是：让 AI 像 Cursor 修改代码一样理解和修改 Mod。用户可以直接提出需求，例如“把这个敌人的奖励改成某个道具”“把这一段剧情事件关联到另一张地图”“检查这些文本 ID 有没有被事件引用”“批量调整一组效果参数”，SoulForge 负责把这些自然语言需求拆成证据、计划、补丁、验证和可回滚的修改。
 
-## Project source
-
-SoulForge comes from a very concrete modding pain: editing FromSoftware mods used to mean unpacking resources, opening Lua or event files in crude text tools, guessing numeric IDs, repacking, launching the game, and hoping nothing silently broke.
-
-The project source and full super-editor vision are recorded in:
-
-- [`docs/PROJECT_SOURCE.md`](docs/PROJECT_SOURCE.md)
-
-Core slogan:
+一句话：
 
 ```text
-Stop modding in the dark.
+不要再摸黑改 Mod。
 ```
 
-## Product direction
+## 为什么要做这个
 
-SoulForge is not a Smithbox clone. Existing tools are references for user experience and domain coverage, but SoulForge rewrites its own architecture around AI-native workflows:
+传统魂系 Mod 工作流非常痛苦：
 
-- Open a native mod directory without requiring manual unpacking.
-- Understand resources across `event`, `map`, `param`, `msg`, and file-level auxiliary resources.
-- Turn opaque numeric IDs into traceable symbols and references.
-- Show evidence chains before AI explains or changes anything.
-- Provide a full Super Editor shell with Events, Params, Text, Maps, Files, AI, and Settings modes.
-- Use a staging/validation/backup/rollback pipeline before saving changes.
-- Keep resource usage low by indexing and parsing lazily.
+- 文件类型多：DCX、BND、EMEVD、MSB、PARAM、FMG 等格式混在一起；
+- 资源关系复杂：事件、地图、参数、文本之间大量靠数字 ID 串联；
+- 工具分散：经常要在多个工具之间来回切换；
+- 修改风险高：改错一个 ID 或打包错误，就可能让游戏静默出问题；
+- AI 很难直接帮忙：如果 AI 看不到可靠证据，它只能猜。
 
-## Roadmap
+SoulForge 要解决的核心问题不是“再做一个表格编辑器”，而是建立一套 AI 能理解、能追踪、能安全修改的 Mod 工作台。
 
-### v0.1 — Super Event Editor logic layer
+## 最终想做成什么
 
-v0.1 is the event-centered foundation.
+SoulForge 最终应该像一个 Mod 领域的 Cursor：
 
-Core chain:
+- 打开原生 ModEngine 风格的 Mod 目录；
+- 自动识别事件、地图、参数、文本和其他资源；
+- 把看不懂的数字 ID 转成可追踪的符号和引用关系；
+- 在 AI 解释或修改之前展示证据链；
+- 让 AI 根据用户目标生成修改计划；
+- 修改前给出影响范围和补丁预览；
+- 修改时进入暂存区，不直接破坏原文件；
+- 修改后做验证、备份、日志记录和回滚。
+
+目标不是让 AI 莽撞地直接改文件，而是让 AI 在证据和 Patch Engine 的约束下，像高级 Mod 助手一样完成跨资源修改。
+
+## 核心资源链
+
+当前最重要的理解链路是：
 
 ```text
 event -> map -> param -> msg
 ```
 
-Goals:
+也就是：
 
-- open a native ModEngine-style mod workspace;
-- scan packaged resources such as DCX/BND/EMEVD/MSB/PARAM/FMG;
-- inspect native resources honestly with diagnostics;
-- build a lightweight evidence graph;
-- provide AI-safe read tools over indexed evidence;
-- keep unsupported resources structured instead of pretending they are parsed.
+- event：事件逻辑，决定什么时候触发、调用什么、引用哪些 ID；
+- map：地图实体、区域、模型、碰撞和对象；
+- param：数值参数、效果、道具、敌人、子弹等数据；
+- msg：文本、道具说明、菜单文字和剧情显示内容。
 
-Status: logic-layer routing, native inspect/export separation, and smoke checks are the current v0.1 closeout focus.
+SoulForge 的第一阶段不是追求一次性解析所有格式，而是先把这条链路建立成可靠的证据系统。AI 只有能看到引用关系，才有资格解释和修改。
 
-Reference docs:
+## 产品形态
 
-- [`docs/V0_1_SUPER_EVENT_EDITOR.md`](docs/V0_1_SUPER_EVENT_EDITOR.md)
-- [`docs/LOGIC_LAYER_REVIEW.md`](docs/LOGIC_LAYER_REVIEW.md)
+桌面端会包含这些主要区域：
 
-### v0.2 — Super Editor shell
+- 开始页：打开 Mod 工作区、查看最近项目；
+- 工作区总览：扫描文件、资源类型、诊断信息；
+- 事件模式：查看事件、指令、参数、引用关系；
+- 参数模式：查看 PARAM 行、字段和相关引用；
+- 文本模式：查看 FMG 文本、文本 ID 和被引用情况；
+- 地图模式：查看地图实体、区域、模型和坐标信息；
+- 文件模式：查看底层文件、容器、格式证据和诊断；
+- AI 侧边栏：解释、搜索、计划修改、生成补丁；
+- 设置：AI provider、权限模式、思考强度、工作区配置。
 
-v0.2 makes SoulForge visibly become a Super Editor rather than only a large event editor.
+AI 侧边栏需要支持 OpenAI 和 Anthropic 两类 API，并提供不同的工作模式，例如只读解释、计划模式和完整权限模式。即使是完整权限模式，AI 也不能绕过 Patch Engine 直接乱写文件。
 
-Target modes:
+## AI 怎么改 Mod
+
+目标工作流是：
 
 ```text
-Start
-  -> Workspace
-    -> Events
-    -> Params
-    -> Text
-    -> Maps
-    -> Files
-    -> AI
-    -> Settings
+用户提出修改需求
+  -> AI 查询索引和证据图
+  -> AI 解释它找到的事件、地图、参数、文本关系
+  -> AI 生成修改计划
+  -> SoulForge 做影响分析
+  -> 生成补丁预览
+  -> 用户确认
+  -> 写入暂存区
+  -> 验证
+  -> 备份原文件
+  -> 原子替换
+  -> 重新索引
+  -> 记录操作日志
+  -> 必要时回滚
 ```
 
-Goals:
+这就是“像 Cursor 一样改 Mod”的含义：AI 不是只聊天，也不是直接胡乱改二进制，而是基于项目上下文、证据链和补丁系统执行可审查的修改。
 
-- start page;
-- workspace shell;
-- top resource-mode navigation;
-- resource tree/list;
-- safe viewer placeholders by resource kind;
-- diagnostics/log panel;
-- AI sidebar/tool-console placeholder;
-- provider and permission mode UI shape.
+## 当前工程状态
 
-Reference doc:
+项目仍处在早期地基阶段，重点是把资源识别、证据、索引、AI 工具和安全写入路径搭起来。
 
-- [`docs/SUPER_EDITOR_MILESTONE.md`](docs/SUPER_EDITOR_MILESTONE.md)
+已经具备或正在推进的方向：
 
-### v0.3 — Fixture-confirmed parsers
+- Electron + React + TypeScript 桌面壳；
+- C# Bridge 负责读取和识别底层资源；
+- 工作区扫描和资源分类；
+- 文件证据、诊断和低置信候选输出；
+- AI 安全读工具；
+- event / map / param / msg 的符号和引用图；
+- synthetic fixture 用于验证解析管线；
+- Patch Engine 作为唯一写入路径的设计。
 
-v0.3 upgrades low-confidence candidate parsers into fixture-confirmed exports.
+当前 v0.3 的重点是 fixture-confirmed parser plumbing：先用小型 synthetic fixture 确认导出形状、ID 稳定性、置信度标记和 AI 可用上下文，再逐步替换为真实格式解析器。
 
-Targets:
+## 解析策略
 
-- FMG text table parser;
-- BND child table listing;
-- EMEVD event and instruction export;
-- PARAM row and field export;
-- MSB entity, region, transform, and model export.
+SoulForge 必须诚实地区分三类数据：
 
-The key rule: candidate outputs may remain as fallbacks, but UI and AI must distinguish confirmed parser output from low-confidence evidence.
+- 已确认解析：由 fixture 或明确格式规则验证过，可以给较高置信度；
+- 候选解析：通过扫描、启发式或可疑结构找到，只能作为线索；
+- 不支持资源：返回结构化诊断，不假装解析成功。
 
-Reference doc:
+这是项目的底线。AI 宁愿说“不确定”，也不能把猜测包装成事实。
 
+## 安全写入策略
+
+所有真实修改都必须经过 Patch Engine：
+
+```text
+修改请求
+  -> 补丁计划
+  -> 暂存副本
+  -> 验证
+  -> 备份
+  -> 原子保存
+  -> 重新索引
+  -> 日志
+  -> 回滚
+```
+
+直接写入 Mod 文件是禁止的。AI 的完整权限也不能绕过这个流程。
+
+## 技术方向
+
+- 桌面端：Electron + React + TypeScript；
+- Bridge / parser：C# helper process；
+- 索引：SQLite + FTS5；
+- AI：OpenAI-compatible、Anthropic-compatible、mock/tool-console provider；
+- 写入：Patch Engine；
+- 外部工具：只做参考，不复制 Smithbox、DSMapStudio、DarkScript、WitchyBND、SoulsFormats 的实现代码。
+
+## 近期优先级
+
+1. 打通 event / map / param / msg 的 synthetic fixture 导出路径；
+2. 让 AI 和 UI 能区分 confirmed / candidate / unsupported；
+3. 完成 FMG、BND、EMEVD、PARAM、MSB 的 fixture-confirmed parser 里程碑；
+4. 建立安全 writer 和 Patch Engine 验证链；
+5. 让 AI 从只读解释升级到可审查、可回滚的 Mod 修改。
+
+## 给 Codex 的当前交接
+
+当前给 Codex 的明确任务记录在：
+
+- [`docs/CODEX_NEXT_ACTIONS.md`](docs/CODEX_NEXT_ACTIONS.md)
+- [`docs/CODEX_TASK_ROUTER_WIREUP.md`](docs/CODEX_TASK_ROUTER_WIREUP.md)
+
+Codex 当前只应做路由接线、类型小修和 smoke script，不应该扩展到真实 native parser、UI 重构或 Patch Engine 改造。
+
+## 相关文档
+
+- [`docs/PROJECT_SOURCE.md`](docs/PROJECT_SOURCE.md)
 - [`docs/V0_3_FORMAT_PARSER_MILESTONE.md`](docs/V0_3_FORMAT_PARSER_MILESTONE.md)
-
-### v0.4 — Safe writer and Patch Engine milestone
-
-v0.4 is the bridge between reliable parsing and safe global editing.
-
-Expected focus:
-
-- writer contracts;
-- staged patch application;
-- text writer;
-- param writer;
-- limited event/map writers where ready;
-- validation hooks;
-- backup and rollback;
-- operation log;
-- AI patch proposal format.
-
-v0.4 exists so v0.5 can enable global AI-driven modifications without turning the editor into a mod-destroying hallucination machine.
-
-### v0.5 — Full Super Editor target
-
-By v0.5, SoulForge should feel like a full-featured all-in-one FromSoftware mod workbench.
-
-AI scope expands from explanation/querying to approved global modification:
-
-```text
-user request
-  -> AI gathers evidence through read-only tools
-  -> AI builds a global change plan
-  -> dependency and impact analysis
-  -> patch proposal
-  -> user review
-  -> apply to staging copies
-  -> validate staged workspace
-  -> show diff and diagnostics
-  -> backup originals
-  -> atomic replace
-  -> re-index changed resources
-  -> operation log
-  -> rollback available
-```
-
-The v0.5 promise is not that AI can freely mutate anything. The promise is that AI can make global mod changes only through evidence, plans, staged patches, validators, backups, logs, and rollback.
-
-Reference doc:
-
-- [`docs/V0_5_FULL_SUPER_EDITOR_TARGET.md`](docs/V0_5_FULL_SUPER_EDITOR_TARGET.md)
-
-## Technical direction
-
-- Desktop shell: Electron + React + TypeScript.
-- Bridge/parser layer: C# helper process.
-- Index: SQLite + FTS5.
-- AI: right sidebar with provider abstraction for OpenAI-compatible, Anthropic-compatible, and mock/tool-console providers.
-- Patch Engine: the only write path for mod resource changes.
-- External tools: reference only. Do not copy Smithbox/DSMapStudio/DarkScript/WitchyBND/SoulsFormats implementation code.
-
-## Safety direction
-
-All writes must go through SoulForge's Patch Engine:
-
-```text
-AI/user change request
-  -> patch proposal
-  -> staging copy
-  -> validation
-  -> backup original
-  -> atomic save
-  -> re-index
-  -> rollback available
-```
-
-Direct writes to mod files are forbidden.
-
-## Current engineering stance
-
-SoulForge should fail honestly:
-
-- `inspect` returns evidence, not fake semantic parsing.
-- Candidate parsers must be labeled low-confidence.
-- Unsupported formats return structured diagnostics.
-- AI tools query indexes and reference graphs; they do not parse or write native files directly.
-- Full-permission AI mode still cannot bypass the Patch Engine.
+- [`docs/V0_3_FMG_SYNTHETIC_FIXTURE.md`](docs/V0_3_FMG_SYNTHETIC_FIXTURE.md)
+- [`docs/V0_3_SYNTHETIC_EVENT_PARAM_FIXTURES.md`](docs/V0_3_SYNTHETIC_EVENT_PARAM_FIXTURES.md)
+- [`docs/V0_3_SYNTHETIC_MAP_FIXTURE.md`](docs/V0_3_SYNTHETIC_MAP_FIXTURE.md)
