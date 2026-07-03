@@ -42,6 +42,8 @@ export interface TextAiContext {
   textId: number;
   category?: string;
   text: string;
+  sourceConfidence?: TextEntrySymbol['confidence'];
+  sourceEvidence?: string;
   summary: {
     inboundReferences: number;
     highConfidenceReferences: number;
@@ -148,6 +150,8 @@ export function buildTextAiContext(entry: TextEntrySymbol, references: readonly 
     textId: entry.textId,
     ...(entry.category ? { category: entry.category } : {}),
     text: entry.text,
+    ...(entry.confidence ? { sourceConfidence: entry.confidence } : {}),
+    ...(entry.raw !== undefined ? { sourceEvidence: summarizeRawEvidence(entry.raw) } : {}),
     summary: {
       inboundReferences: references.length,
       highConfidenceReferences: references.filter((edge) => edge.confidence === 'high').length,
@@ -192,6 +196,8 @@ export function renderTextAiPrompt(context: TextAiContext): string {
   lines.push(`Text URI: ${context.textUri}`);
   lines.push(`Text ID: ${context.textId}`);
   if (context.category) lines.push(`Category: ${context.category}`);
+  if (context.sourceConfidence) lines.push(`Source confidence: ${context.sourceConfidence}`);
+  if (context.sourceEvidence) lines.push(`Source evidence: ${context.sourceEvidence}`);
   lines.push(`Inbound references: ${context.summary.inboundReferences}`);
   lines.push(`High-confidence references: ${context.summary.highConfidenceReferences}`);
   lines.push(`Uncertain references: ${context.summary.uncertainReferences}`);
@@ -206,6 +212,8 @@ function renderTextEvidenceMarkdown(context: TextAiContext): string {
   lines.push('');
   if (context.category) lines.push(`Category: ${context.category}`);
   lines.push(`URI: ${context.textUri}`);
+  if (context.sourceConfidence) lines.push(`Source confidence: ${context.sourceConfidence}`);
+  if (context.sourceEvidence) lines.push(`Source evidence: ${context.sourceEvidence}`);
   lines.push('');
   lines.push('## Text');
   lines.push('');
@@ -227,6 +235,18 @@ function renderTextEvidenceMarkdown(context: TextAiContext): string {
 
 function renderEvidenceItem(item: ReferenceEdge['evidence'][number]): string {
   return item.excerpt ?? `${item.sourceUri}:${String(item.value ?? '')}`;
+}
+
+function summarizeRawEvidence(raw: unknown): string {
+  if (!raw || typeof raw !== 'object') return String(raw ?? 'unknown');
+  const record = raw as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof record.table === 'string') parts.push(`table=${record.table}`);
+  if (typeof record.encoding === 'string') parts.push(`encoding=${record.encoding}`);
+  if (typeof record.confidence === 'string') parts.push(`confidence=${record.confidence}`);
+  if (typeof record.textOffset === 'number') parts.push(`textOffset=${record.textOffset}`);
+  if (typeof record.offset === 'number') parts.push(`offset=${record.offset}`);
+  return parts.length > 0 ? parts.join(', ') : 'structured raw evidence attached';
 }
 
 function confidenceRank(value: ReferenceEdge['confidence']): number {
