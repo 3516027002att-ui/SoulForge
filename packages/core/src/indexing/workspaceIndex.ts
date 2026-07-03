@@ -35,6 +35,17 @@ export interface EventExplanationInput {
   references: ReferenceEdge[];
 }
 
+export interface WorkspaceIndexStats {
+  files: number;
+  filesByKind: Record<ResourceKind, number>;
+  events: number;
+  mapEntities: number;
+  mapRegions: number;
+  paramRows: number;
+  textEntries: number;
+  references: number;
+}
+
 export class WorkspaceIndex {
   readonly workspaceId: string;
 
@@ -87,6 +98,22 @@ export class WorkspaceIndex {
     };
   }
 
+  getStats(): WorkspaceIndexStats {
+    const filesByKind = emptyKindCounts();
+    for (const file of this.filesByUri.values()) filesByKind[file.resourceKind] += 1;
+
+    return {
+      files: this.filesByUri.size,
+      filesByKind,
+      events: this.eventExports.reduce((sum, item) => sum + item.events.length, 0),
+      mapEntities: this.mapExports.reduce((sum, item) => sum + item.entities.length, 0),
+      mapRegions: this.mapExports.reduce((sum, item) => sum + item.regions.length, 0),
+      paramRows: this.paramExports.reduce((sum, item) => sum + item.rows.length, 0),
+      textEntries: this.msgExports.reduce((sum, item) => sum + item.entries.length, 0),
+      references: this.references.length
+    };
+  }
+
   searchResources(options: SearchResourcesOptions): Array<SearchResult<IndexedFile>> {
     const query = normalizeSearch(options.query);
     const limit = options.limit ?? 100;
@@ -117,6 +144,16 @@ export class WorkspaceIndex {
 
   searchTextEntries(query: string, limit = 100): Array<SearchResult<TextEntrySymbol>> {
     return searchSymbols(this.msgExports.flatMap((item) => item.entries), query, limit, textEntrySearchText);
+  }
+
+  lookupTextEntry(textId: number, category?: string): TextEntrySymbol | undefined {
+    const normalizedCategory = category?.toLowerCase();
+    for (const exportItem of this.msgExports) {
+      if (normalizedCategory && (exportItem.category ?? 'default').toLowerCase() !== normalizedCategory) continue;
+      const found = exportItem.entries.find((entry) => entry.textId === textId);
+      if (found) return found;
+    }
+    return undefined;
   }
 
   getFile(uri: string): IndexedFile | undefined {
@@ -200,6 +237,21 @@ function paramRowSearchText(row: ParamRowSymbol): string {
 
 function textEntrySearchText(entry: TextEntrySymbol): string {
   return [entry.uri, entry.category, entry.textId, entry.text].filter(Boolean).join(' ');
+}
+
+function emptyKindCounts(): Record<ResourceKind, number> {
+  return {
+    event: 0,
+    map: 0,
+    param: 0,
+    msg: 0,
+    menu: 0,
+    script: 0,
+    action: 0,
+    ai: 0,
+    sfx: 0,
+    unknown: 0
+  };
 }
 
 function replaceByKey<T>(items: T[], key: string, selectKey: (item: T) => string, value: T): T[] {
