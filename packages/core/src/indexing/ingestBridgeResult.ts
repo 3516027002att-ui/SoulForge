@@ -250,13 +250,17 @@ function parseParamField(value: unknown): ParamFieldSymbol {
 function parseTextEntry(value: unknown, sourceUri: string, index: number): MsgExport['entries'][number][] {
   const record = asRecord(value);
   const textId = asNumber(record.textId);
+  const raw = asRecord(record.raw);
+  const confidence = isConfidence(record.confidence) ? record.confidence : isConfidence(raw.confidence) ? raw.confidence : undefined;
   if (textId === null) return [];
   return [{
     uri: asString(record.uri) || `msg://${asString(record.category, 'default')}/${textId}`,
     sourceUri: asString(record.sourceUri) || sourceUri,
     ...(asString(record.category) ? { category: asString(record.category) } : {}),
     textId,
-    text: asString(record.text, '')
+    text: asString(record.text, ''),
+    ...(confidence ? { confidence } : {}),
+    ...(record.raw === undefined ? {} : { raw: record.raw })
   }];
 }
 
