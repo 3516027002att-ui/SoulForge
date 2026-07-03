@@ -5,3 +5,4 @@ export * from './preview/openResourcePreview.js';
 export * from './patch/patchEngine.js';
 export * from './references/referenceBuilder.js';
 export * from './references/eventEvidence.js';
+export * from './bridge/runBridge.js';
