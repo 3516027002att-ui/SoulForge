@@ -12,6 +12,7 @@ export interface AnalyzeWorkspaceOptions {
   parseTextResources?: boolean;
   parseJsonFixtures?: boolean;
   inspectNativeResources?: boolean;
+  exportNativeMsgResources?: boolean;
   maxFilesToParse?: number;
   maxFilesToInspect?: number;
   bridgeProjectPath?: string;
@@ -44,7 +45,7 @@ export interface AnalyzeWorkspaceResult {
  * Production-shaped v0.1 analysis pipeline.
  *
  * The pipeline has two independent passes:
- * - semantic ingestion for text fixtures and JSON bridge exports;
+ * - semantic ingestion for text fixtures, JSON bridge exports, and conservative native msg exports;
  * - native resource inspection through the C# bridge.
  *
  * Inspect results are evidence only. They are deliberately not ingested as
@@ -77,7 +78,7 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
     throwIfAborted(options.signal);
     const file = parseLimited[i]!;
     options.onProgress?.({ phase: 'parse', current: i + 1, total: parseLimited.length, message: file.relativePath });
-    const parsed = await parseKnownTextOrJson(file, index, options);
+    const parsed = await parseKnownResource(file, index, options);
     diagnostics.push(...parsed.diagnostics);
     if (parsed.accepted) parsedFiles += 1;
   }
@@ -107,7 +108,9 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
 function shouldParse(file: IndexedFile, options: AnalyzeWorkspaceOptions): boolean {
   const parseTextResources = options.parseTextResources ?? true;
   const parseJsonFixtures = options.parseJsonFixtures ?? true;
+  const exportNativeMsgResources = options.exportNativeMsgResources ?? true;
   if (parseJsonFixtures && file.extension === '.json') return true;
+  if (exportNativeMsgResources && isNativeMsgResource(file)) return true;
   if (!parseTextResources) return false;
   if (file.resourceKind === 'event' && (file.relativePath.endsWith('.txt') || file.relativePath.endsWith('.emevd.txt'))) return true;
   if (file.resourceKind === 'msg' && (file.relativePath.endsWith('.tsv') || file.relativePath.endsWith('.csv') || file.relativePath.endsWith('.txt') || file.relativePath.endsWith('.xml') || file.relativePath.endsWith('.json'))) return true;
@@ -154,12 +157,23 @@ async function inspectNativeResource(
   return { accepted: result.parseStatus !== 'failed', diagnostics };
 }
 
-async function parseKnownTextOrJson(
+async function parseKnownResource(
   file: IndexedFile,
   index: WorkspaceIndex,
   options: AnalyzeWorkspaceOptions
 ): Promise<{ accepted: boolean; diagnostics: Diagnostic[] }> {
   try {
+    if (isNativeMsgResource(file)) {
+      const result = await runBridge({
+        command: 'export-msg',
+        filePath: file.absolutePath,
+        ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
+        ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
+      });
+      const ingest = ingestBridgeResult(index, result);
+      return { accepted: ingest.accepted, diagnostics: ingest.diagnostics };
+    }
+
     const text = await readFile(file.absolutePath, 'utf8');
 
     if (file.resourceKind === 'event' && (file.relativePath.endsWith('.txt') || file.relativePath.endsWith('.emevd.txt'))) {
@@ -205,6 +219,12 @@ async function parseKnownTextOrJson(
       ]
     };
   }
+}
+
+function isNativeMsgResource(file: IndexedFile): boolean {
+  if (file.resourceKind !== 'msg') return false;
+  const path = file.relativePath.toLowerCase();
+  return path.endsWith('.fmg') || path.endsWith('.fmg.dcx') || path.includes('msgbnd') || path.includes('.msgbnd');
 }
 
 function inferJsonFixtureKind(file: IndexedFile): ResourceKind | null {
