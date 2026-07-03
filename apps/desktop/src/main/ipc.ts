@@ -19,6 +19,7 @@ const toolRegistry = createDefaultToolRegistry();
 
 export interface AnalyzeWorkspaceSummary {
   parsedFiles: number;
+  inspectedFiles: number;
   referenceStats: {
     high: number;
     medium: number;
@@ -56,6 +57,7 @@ export function registerIpcHandlers(): void {
 
     return {
       parsedFiles: result.parsedFiles,
+      inspectedFiles: result.inspectedFiles,
       referenceStats: result.referenceStats,
       diagnostics: result.diagnostics,
       events: result.index.searchEvents('', 200).map(({ item }) => ({
