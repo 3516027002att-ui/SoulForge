@@ -14,8 +14,8 @@ This checkpoint is for reviewing the v0.1 logic layer before more UI work.
 - FMG-like files now get a guarded table-candidate pass before raw string scanning.
 - Workspace analysis now has a native inspection pass in addition to text and JSON semantic ingestion.
 - Workspace analysis can ingest partial native msg exports when the bridge returns a valid MsgExport shape.
-- WorkspaceIndex exposes stable stats and exact text lookup APIs.
-- AI-safe tools include workspace_stats and lookup_text_id.
+- WorkspaceIndex exposes stable stats and multi-match text lookup APIs.
+- AI-safe tools include workspace_stats, lookup_text_id, and find_text_references.
 - Native inspection diagnostics are recorded as workspace diagnostics and are not ingested as semantic symbols.
 - Electron IPC now surfaces both parsedFiles and inspectedFiles from analysis.
 
@@ -68,8 +68,9 @@ Expected export-msg behavior:
 Expected AI tool behavior:
 
 - workspace_stats returns file, symbol, and reference counts from WorkspaceIndex;
-- lookup_text_id requires numeric textId and may accept category;
-- lookup_text_id should not scan files directly.
+- lookup_text_id accepts numeric textId as a number or numeric string, may accept category, and returns all matching text entries;
+- find_text_references accepts numeric textId as a number or numeric string, may accept category, and returns matching text entries plus inbound references;
+- lookup_text_id and find_text_references should not scan files directly.
 
 ## Next parser milestones
 
