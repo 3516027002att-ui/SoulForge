@@ -1,164 +1,175 @@
-# SoulForge v0.3 — Fixture-Confirmed Parser Milestone
+# SoulForge v0.3 — Fixture-Confirmed Parser 里程碑
 
-v0.3 turns the low-confidence parser candidates from v0.1/v0.2 into reviewed, fixture-confirmed resource exports.
+v0.3 的目标是把早期低置信候选解析，逐步升级为经过 fixture 验证的资源导出。
 
-This milestone is not about expanding the UI surface. v0.2 makes the Super Editor visible; v0.3 makes its core resource understanding more trustworthy.
+这个阶段不是扩 UI，而是让超级编辑器的资源理解更可信。AI 要像 Cursor 一样改 Mod，前提是它看到的 event、map、param、msg、BND child inventory 不能全靠猜。
 
-## Product goal
+## 产品目标
 
-Replace candidate-only resource understanding with fixture-confirmed parsers for the core FromSoftware mod resource chain:
+把只有候选线索的资源理解，升级为可测试、可审查、带证据的导出结果。
+
+核心资源链是：
 
 ```text
 event -> map -> param -> msg
 ```
 
-The goal is not to conquer every format at once. The goal is to upgrade the most important candidate outputs into stable, testable, evidence-backed exports that the Super Editor and AI tools can rely on.
+同时 BND child inventory 是这条链路的容器入口。没有 BND child listing，很多真实资源仍然只能停在包络层。
 
-## Progress snapshot
+目标不是一次性征服所有格式，而是先把最重要的候选输出升级成稳定、可验证、AI 和 UI 都能依赖的结构。
 
-- FMG has a first fixture-confirmed plumbing path through the SoulForge synthetic FMG fixture layout.
-- Synthetic PARAM and event fixture export helpers exist in `SyntheticFixtureExports.cs`.
-- The synthetic fixture paths prove Bridge result shapes, stable IDs, typed fields, instruction argument roles, and diagnostic labeling without committing real game assets.
-- Native FMG, PARAM, and EMEVD authority is still not claimed. Real native support still requires reviewed native fixtures or documented native layout implementations.
-- The guarded native candidates and raw fallbacks remain available and must stay explicitly labeled.
-- Current caveat: synthetic event/PARAM helpers still require final router wire-up through `SemanticCandidateExports.TryExport` or `Program.cs` when GitHub write filtering allows direct router edits.
+## 当前进度快照
 
-## Required parser upgrades
+- FMG 已有 synthetic fixture confirmed path，并已通过 export-msg 接入。
+- Event 和 PARAM synthetic fixture helper 已存在于 `SyntheticFixtureExports.cs`。
+- Map synthetic fixture helper 已存在于 `SyntheticMapFixtureExports.cs`。
+- BND synthetic fixture helper 已存在于 `SyntheticBinderFixtureExports.cs`。
+- Synthetic fixture 用来验证 Bridge result shape、稳定 ID、typed fields、instruction argument roles、child inventory 和 diagnostic labeling。
+- 这些 fixture 都不代表 FromSoftware 原生格式权威。
+- Native FMG、BND、EMEVD、PARAM、MSB 仍需要真实 fixture 或明确格式规则证明。
+- Guarded native candidates 和 raw fallback 仍然保留，并且必须显式标注低置信度。
+- 当前 caveat：event、PARAM、map synthetic helper 仍需要 Codex 完成 router wire-up；BND helper 也需要后续单独设计 inspect/export 接线。
 
-### 1. FMG text table parser
+## 必要 parser 升级
 
-Current state:
+### 1. FMG 文本表 parser
 
-- SoulForge synthetic FMG fixtures can produce confirmed fixture entries through `MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED`.
-- FMG-like payloads may produce guarded table candidates through `MSG_FMG_TABLE_CANDIDATE`.
-- Raw string fallback may use file offsets as temporary text IDs through `MSG_TEXT_EXPORT_PARTIAL`.
+当前状态：
 
-v0.3 target:
+- SoulForge synthetic FMG fixture 可通过 `MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED` 产生 confirmed fixture entries；
+- FMG-like payload 可通过 `MSG_FMG_TABLE_CANDIDATE` 产生 guarded table candidate；
+- raw string fallback 仍可能用 file offset 作为临时 text ID。
 
-- fixture-confirmed native FMG text ID table parsing;
-- stable textId extraction;
-- category inference when available;
-- raw fallback still available but clearly separated from confirmed IDs;
-- tests for little-endian and big-endian fixtures if both are supported.
+v0.3 目标：
 
-Acceptance:
+- fixture-confirmed native FMG text ID table parsing；
+- 稳定 textId 提取；
+- 可用时推断文本类别；
+- raw fallback 继续存在，但必须和 confirmed ID 区分；
+- 如果支持大小端差异，就要有对应 fixture。
 
-- confirmed FMG fixtures export `MsgExport.entries` with stable text IDs;
-- raw offset fallback is never treated as confirmed game text ID;
-- malformed FMG returns structured diagnostics, not crashes.
+验收：
+
+- confirmed FMG fixture 能导出稳定 `MsgExport.entries`；
+- raw offset fallback 不被当作 confirmed game text ID；
+- malformed FMG 返回结构化 diagnostics，不崩溃。
 
 ### 2. BND child table listing
 
-Current state:
+当前状态：
 
-- Inspect can expose low-confidence visible-string `binderChildCandidate` evidence.
+- Inspect 能暴露低置信 visible-string `binderChildCandidate` evidence；
+- `SyntheticBinderFixtureExports.cs` 已定义 synthetic BND child inventory helper；
+- 还没有公开 Bridge route 接入该 helper。
 
-v0.3 target:
+v0.3 目标：
 
-- fixture-confirmed BND3/BND4 child table listing;
-- child names, offsets, compressed/uncompressed sizes where available;
-- child resource kind inference;
-- no eager extraction of large child payloads unless explicitly requested.
+- fixture-confirmed BND3/BND4 child table listing；
+- child name、offset、packed size、unpacked size；
+- child resource kind inference；
+- 不主动提取大型 child payload，除非用户明确请求。
 
-Acceptance:
+验收：
 
-- BND fixtures produce a child inventory;
-- visible-string fallback remains labeled low-confidence;
-- offsets and sizes are bounded and validated before use.
+- BND fixture 能产生 child inventory；
+- visible-string fallback 仍标注低置信；
+- offsets 和 sizes 在使用前必须 bounded validation。
 
-### 3. EMEVD event and instruction export
+### 3. EMEVD 事件和指令导出
 
-Current state:
+当前状态：
 
-- EMEVD candidate export may expose event ID candidates.
-- SoulForge synthetic event fixture export helpers can produce event IDs, instruction rows, one numeric argument, argument roles, and high-confidence fixture metadata.
-- Final router wire-up is still pending if direct edits to the router file are blocked.
+- EMEVD candidate export 可暴露低置信 event ID candidates；
+- synthetic event fixture helper 可导出 event ID、instruction row、一个 numeric argument、argument role 和高置信 fixture metadata；
+- router wire-up 仍待 Codex 完成。
 
-v0.3 target:
+v0.3 目标：
 
-- fixture-confirmed native event table parsing;
-- event IDs;
-- instruction list shape;
-- numeric arguments;
-- raw instruction metadata;
-- confidence labeling for recognized vs unknown instruction semantics.
+- fixture-confirmed event table parsing；
+- event IDs；
+- instruction list shape；
+- numeric arguments；
+- raw instruction metadata；
+- recognized / unknown instruction semantics 的置信度标记。
 
-Acceptance:
+验收：
 
-- event fixtures export `EventExport.events` with instruction arrays;
-- unknown instructions are preserved as raw structured data;
-- event calls, flags, entity IDs, text IDs, and param IDs are only high-confidence when instruction semantics justify it.
+- event fixture 能导出 `EventExport.events` 和 instruction arrays；
+- unknown instructions 保留 raw structured data；
+- event calls、flags、entity IDs、text IDs、param IDs 只有在 instruction semantics 支撑时才给高置信。
 
-### 4. PARAM row and field export
+### 4. PARAM 行和字段导出
 
-Current state:
+当前状态：
 
-- PARAM candidate export may expose low-confidence row ID candidates.
-- SoulForge synthetic PARAM fixture export helpers can produce row IDs, row names, one typed field per row, and high-confidence fixture metadata.
-- Final router wire-up is still pending if direct edits to the router file are blocked.
+- PARAM candidate export 可暴露低置信 row ID candidates；
+- synthetic PARAM fixture helper 可导出 row IDs、row names、每行一个 typed field 和高置信 fixture metadata；
+- router wire-up 仍待 Codex 完成。
 
-v0.3 target:
+v0.3 目标：
 
-- fixture-confirmed native PARAM row table parsing;
-- row IDs;
-- row names where available;
-- typed fields when layout metadata exists;
-- unknown fields preserved without inventing semantics.
+- fixture-confirmed PARAM row table parsing；
+- row IDs；
+- row names；
+- 有 layout evidence 时导出 typed fields；
+- unknown fields 保留，但不发明语义。
 
-Acceptance:
+验收：
 
-- PARAM fixtures export `ParamExport.rows`;
-- fields are typed only when layout evidence exists;
-- candidate row IDs are not mixed with confirmed rows without confidence labels.
+- PARAM fixture 能导出 `ParamExport.rows`；
+- fields 只有在 layout evidence 存在时才 typed；
+- candidate row IDs 不能和 confirmed rows 混在一起而不标置信度。
 
-### 5. MSB entity, region, transform, and model export
+### 5. MSB 实体、区域、transform 和 model 导出
 
-Current state:
+当前状态：
 
-- MSB candidate export may expose visible entity-name candidates.
+- MSB candidate export 可暴露低置信 visible entity-name candidates；
+- synthetic map fixture helper 可导出 entities、regions、position、rotation、size 和高置信 fixture metadata；
+- router wire-up 仍待 Codex 完成。
 
-v0.3 target:
+v0.3 目标：
 
-- fixture-confirmed MSB entity and region tables;
-- entity IDs where available;
-- names;
-- kinds;
-- model references;
-- positions, rotations, and region sizes where available;
-- raw unknown sections preserved.
+- fixture-confirmed MSB entity 和 region tables；
+- entity IDs；
+- names；
+- kinds；
+- model references；
+- positions、rotations、region sizes；
+- raw unknown sections preserved。
 
-Acceptance:
+验收：
 
-- MSB fixtures export `MapExport.entities` and `MapExport.regions`;
-- transforms are not fabricated;
-- visible-name fallback remains low-confidence.
+- MSB fixture 能导出 `MapExport.entities` 和 `MapExport.regions`；
+- transforms 不能伪造；
+- visible-name fallback 仍保持低置信。
 
-## Reference graph upgrade
+## 引用图升级
 
-v0.3 should improve reference confidence.
+v0.3 应提高引用置信度。
 
-High-confidence references are allowed only when parser or instruction semantics identify a value role. Numeric coincidences remain medium or low confidence.
+高置信引用只允许来自 parser 或 instruction semantics 明确标注的 value role。裸数字碰巧匹配仍然只能是 medium 或 low confidence。
 
-Required upgrades:
+必须升级：
 
-- event instruction role mapping feeds reference builder;
-- confirmed map entity IDs can match event args;
-- confirmed param rows can match typed param references;
-- confirmed text IDs can match text references;
-- ambiguous numeric matches stay uncertain.
+- event instruction role mapping feeds reference builder；
+- confirmed map entity IDs 可以匹配 event args；
+- confirmed param rows 可以匹配 typed param references；
+- confirmed text IDs 可以匹配 text references；
+- ambiguous numeric matches 继续保持 uncertain。
 
-## Testing requirements
+## 测试要求
 
-No real game assets or user mods may be committed.
+不能提交真实游戏资产或用户 Mod 文件。
 
-Required test sources:
+测试来源：
 
-- tiny synthetic binary fixtures;
-- handcrafted JSON bridge fixtures;
-- small malformed samples;
-- smoke tests around bridge commands.
+- tiny synthetic binary fixtures；
+- handcrafted JSON bridge fixtures；
+- malformed samples；
+- bridge command smoke tests。
 
-Required commands:
+必要命令：
 
 ```bash
 npm install
@@ -168,7 +179,7 @@ npm test --workspaces --if-present
 dotnet build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj
 ```
 
-Bridge smoke checks should cover:
+Bridge smoke checks 应覆盖：
 
 ```bash
 dotnet run --project bridge/SoulForge.Bridge -- inspect path/to/synthetic.bin
@@ -178,39 +189,41 @@ dotnet run --project bridge/SoulForge.Bridge -- export-param path/to/synthetic.p
 dotnet run --project bridge/SoulForge.Bridge -- export-map path/to/synthetic.msb
 ```
 
-Repository smoke scripts:
+仓库已有 smoke scripts：
 
 ```powershell
 .\bridge\SoulForge.Bridge\scripts\verify-magic.ps1
 .\bridge\SoulForge.Bridge\scripts\verify-fmg-fixture.ps1
 ```
 
-## Hard boundaries
+后续应增加 core synthetic fixture smoke script，覆盖 FMG、event、PARAM、map、BND。
 
-- Do not copy external parser implementations.
-- Do not commit real game assets.
-- Do not claim authoritative native parsing before native fixtures prove it.
-- Do not bypass Bridge for native binary parsing.
-- Do not let renderer parse native binary resources directly.
-- Do not write into user mod workspaces directly.
-- Keep unsupported and failed results structured.
+## 硬边界
 
-## Done definition
+- 不复制外部 parser 实现；
+- 不提交真实游戏资产；
+- 不在 native fixture 证明前声称权威原生解析；
+- 不绕过 Bridge 解析 native binary；
+- renderer 不直接解析 native binary resources；
+- 不直接写用户 Mod 工作区；
+- unsupported 和 failed 必须保持结构化。
 
-v0.3 is done when the Super Editor shell can show confirmed resource data for at least the core chain:
+## 完成定义
+
+v0.3 完成时，超级编辑器至少能展示核心链路上的 confirmed resource data：
 
 ```text
 confirmed text entries
 confirmed binder child inventory
 confirmed event IDs and instruction arrays
 confirmed param rows
-confirmed map entities/regions
+confirmed map entities / regions
 ```
 
-Candidate outputs may still exist as fallbacks, but the UI and AI must be able to distinguish confirmed parser output from low-confidence evidence.
+候选输出仍可作为 fallback 存在，但 UI 和 AI 必须能区分 confirmed parser output 与 low-confidence evidence。
 
-## Relationship to v0.5
+## 和完整超级编辑器目标的关系
 
-v0.3 makes resource understanding reliable enough for large-scale edits.
+v0.3 让资源理解可靠到足以支撑大规模修改。
 
-It does not yet make global AI modification safe. That requires v0.4/v0.5 work on patch planning, dependency analysis, validation, backups, staged writes, rollback, and operation logs.
+它还不负责让 AI 安全执行全局修改。全局修改需要后续 Patch Engine、依赖分析、验证、备份、暂存写入、回滚和操作日志。
