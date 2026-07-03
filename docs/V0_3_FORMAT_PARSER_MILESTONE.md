@@ -17,9 +17,11 @@ The goal is not to conquer every format at once. The goal is to upgrade the most
 ## Progress snapshot
 
 - FMG has a first fixture-confirmed plumbing path through the SoulForge synthetic FMG fixture layout.
-- The synthetic FMG fixture path proves Bridge routing, stable textId extraction, entry export shape, and diagnostic labeling without committing real game assets.
-- Native FMG table authority is still not claimed. Real FMG support still requires reviewed native fixtures or a documented layout implementation.
-- The guarded FMG table candidate and raw string fallback remain available and explicitly labeled.
+- Synthetic PARAM and event fixture export helpers exist in `SyntheticFixtureExports.cs`.
+- The synthetic fixture paths prove Bridge result shapes, stable IDs, typed fields, instruction argument roles, and diagnostic labeling without committing real game assets.
+- Native FMG, PARAM, and EMEVD authority is still not claimed. Real native support still requires reviewed native fixtures or documented native layout implementations.
+- The guarded native candidates and raw fallbacks remain available and must stay explicitly labeled.
+- Current caveat: synthetic event/PARAM helpers still require final router wire-up through `SemanticCandidateExports.TryExport` or `Program.cs` when GitHub write filtering allows direct router edits.
 
 ## Required parser upgrades
 
@@ -69,10 +71,12 @@ Acceptance:
 Current state:
 
 - EMEVD candidate export may expose event ID candidates.
+- SoulForge synthetic event fixture export helpers can produce event IDs, instruction rows, one numeric argument, argument roles, and high-confidence fixture metadata.
+- Final router wire-up is still pending if direct edits to the router file are blocked.
 
 v0.3 target:
 
-- fixture-confirmed event table parsing;
+- fixture-confirmed native event table parsing;
 - event IDs;
 - instruction list shape;
 - numeric arguments;
@@ -90,10 +94,12 @@ Acceptance:
 Current state:
 
 - PARAM candidate export may expose low-confidence row ID candidates.
+- SoulForge synthetic PARAM fixture export helpers can produce row IDs, row names, one typed field per row, and high-confidence fixture metadata.
+- Final router wire-up is still pending if direct edits to the router file are blocked.
 
 v0.3 target:
 
-- fixture-confirmed PARAM row table parsing;
+- fixture-confirmed native PARAM row table parsing;
 - row IDs;
 - row names where available;
 - typed fields when layout metadata exists;
