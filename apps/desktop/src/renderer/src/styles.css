@@ -130,7 +130,8 @@ button {
 }
 
 .search-row input,
-.ai-pane select {
+.ai-pane select,
+.tool-row input {
   width: 100%;
   border: 1px solid #353949;
   background: #10121a;
@@ -227,6 +228,49 @@ pre {
   margin-top: 8px;
   color: #aaa6a0;
   word-break: break-all;
+}
+
+.tool-panel {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #303442;
+}
+
+.tool-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.tool-list span {
+  border: 1px solid #303442;
+  border-radius: 8px;
+  padding: 3px 6px;
+  color: #cfc8bd;
+  font-size: 11px;
+}
+
+.tool-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tool-row button {
+  border: 1px solid #69553d;
+  background: #c18b48;
+  color: #111217;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-weight: 700;
+}
+
+.tool-output {
+  max-height: 240px;
+  margin-top: 12px;
+  white-space: pre-wrap;
 }
 
 .status-bar {

@@ -12,7 +12,11 @@ dotnet run --project bridge/SoulForge.Bridge -- export-event <file>
 dotnet run --project bridge/SoulForge.Bridge -- export-map <file>
 dotnet run --project bridge/SoulForge.Bridge -- export-param <file>
 dotnet run --project bridge/SoulForge.Bridge -- export-msg <file>
+dotnet run --project bridge/SoulForge.Bridge -- validate <file>
 ```
+
+`validate` only checks that a file can be opened and reports basic metadata. It
+does not claim to parse FromSoftware binary formats.
 
 ## Contract
 
