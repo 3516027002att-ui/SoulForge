@@ -94,6 +94,8 @@ export interface TextEntrySymbol {
   category?: string;
   textId: number;
   text: string;
+  confidence?: 'high' | 'medium' | 'low';
+  raw?: unknown;
 }
 
 export interface SymbolBundle {
