@@ -14,7 +14,25 @@ static class MsgTextExport
 
         if (IsPackedContainer(sample))
         {
-            return Unsupported(sourcePath, "MSG_CONTAINER_BOUNDARY", "Message export stopped at a packed container boundary. Use inspect evidence until unpacking is implemented.");
+            return Unsupported(sourcePath, "MSG_CONTAINER_BOUNDARY", "Message export stopped at a packed container boundary. Use inspect evidence until unpacking exists.");
+        }
+
+        var table = FmgTableParser.TryParse(sample, sourceUri, category);
+        if (table != null)
+        {
+            return BridgeResult<object>.Partial(
+                sourcePath,
+                "msg",
+                new[]
+                {
+                    new Diagnostic(
+                        "info",
+                        "MSG_FMG_TABLE_CANDIDATE",
+                        "Exported message entries from a guarded FMG table candidate. This is stronger than raw string scan, but still requires fixture review before being treated as authoritative.",
+                        sourceUri,
+                        table.Metadata)
+                },
+                new { category, entries = table.Entries });
         }
 
         var entries = ExtractStrings(sample)
