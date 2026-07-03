@@ -1,15 +1,3 @@
-import type { Diagnostic, ParseStatus, ResourceKind } from './types.js';
-
-export interface BridgeResult<T = unknown> {
-  sourceUri: string;
-  sourcePath: string;
-  game: string;
-  resourceKind: ResourceKind;
-  parseStatus: ParseStatus;
-  diagnostics: Diagnostic[];
-  data?: T;
-}
-
 export interface EventExport {
   mapId?: string;
   events: EventSymbol[];
