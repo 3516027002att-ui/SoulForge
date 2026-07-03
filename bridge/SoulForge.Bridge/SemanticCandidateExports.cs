@@ -38,7 +38,7 @@ static class SemanticCandidateExports
         {
             uri = $"event://{mapId ?? "unknown"}/{eventId}",
             sourceUri,
-            ...(mapId == null ? EmptyObject() : new { mapId }),
+            mapId,
             eventId,
             name = $"event_candidate_{eventId}",
             instructions = Array.Empty<object>(),
@@ -273,11 +273,6 @@ static class SemanticCandidateExports
     private static bool StartsWith(byte[] sample, byte a, byte b, byte c, byte d)
     {
         return sample.Length >= 4 && sample[0] == a && sample[1] == b && sample[2] == c && sample[3] == d;
-    }
-
-    private static object EmptyObject()
-    {
-        return new { };
     }
 
     private sealed record TextRun(int Offset, string Text, string Encoding);
