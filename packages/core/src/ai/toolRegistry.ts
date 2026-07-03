@@ -1,6 +1,7 @@
 import type { PatchMode, PatchProposal, ReferenceEdge, ResourceKind } from '@soulforge/shared';
 import { createPatchProposal, dryRunPatchProposal } from '../patch/patchEngine.js';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
 
 export type ToolPermission = 'read' | 'plan' | 'write';
 
@@ -153,6 +154,28 @@ export function createDefaultToolRegistry(): ToolRegistry {
         return { entry, references, referenceStats: summarizeReferences(references) };
       });
       return ok({ textId, category, matches: items, totalReferences: items.reduce((sum, item) => sum + item.references.length, 0) });
+    }
+  });
+
+  registry.register({
+    name: 'explain_text_entry',
+    description: 'Build evidence-first AI explanation contexts for a parsed textId.',
+    permission: 'read',
+    run: (input, context) => {
+      const value = asRecord(input);
+      const textId = asNumber(value.textId, Number.NaN);
+      if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'explain_text_entry requires numeric textId.');
+      const category = asOptionalString(value.category);
+      const maxReferences = asNumber(value.maxReferences, 80);
+      const maxMarkdownChars = asNumber(value.maxMarkdownChars, 24_000);
+      const matches = context.workspaceIndex.lookupTextEntries(textId, category);
+      if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
+      const contexts = matches.map((entry) => {
+        const references = context.workspaceIndex.findReferences(entry.uri, 'to');
+        const aiContext = buildTextAiContext(entry, references, { maxReferences, maxMarkdownChars });
+        return { context: aiContext, prompt: renderTextAiPrompt(aiContext) };
+      });
+      return ok({ textId, category, contexts });
     }
   });
 
