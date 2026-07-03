@@ -14,3 +14,5 @@ export * from './jobs/taskQueue.js';
 export * from './ai/toolRegistry.js';
 export * from './parsers/eventTextParser.js';
 export * from './parsers/msgTextParser.js';
+export * from './testing/createMockWorkspace.js';
+export * from './testing/runMockEvidencePipeline.js';
