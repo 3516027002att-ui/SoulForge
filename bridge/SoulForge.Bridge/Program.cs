@@ -38,7 +38,7 @@ static BridgeResult<object> Run(string[] args)
             message: "Usage: soulforge-bridge <inspect|export-event|export-map|export-param|export-msg|validate> <file>");
     }
 
-    var command = args[0];
+    var command = args[0].Trim().ToLowerInvariant();
     var file = args[1];
     var resourceKind = command switch
     {
@@ -52,31 +52,22 @@ static BridgeResult<object> Run(string[] args)
 
     if (!File.Exists(file))
     {
-        return BridgeResult<object>.Failed(
-            sourcePath: file,
-            resourceKind: resourceKind,
-            code: "FILE_NOT_FOUND",
-            message: "Input file does not exist.");
+        return BridgeResult<object>.Failed(file, resourceKind, "FILE_NOT_FOUND", "Input file does not exist.");
+    }
+
+    if (command == "inspect" || command == "validate")
+    {
+        var inspection = EnvelopeInspection.Inspect(file, Array.Empty<byte>(), new FileInfo(file).Length);
+        return BridgeResult<object>.Partial(file, inspection.ResourceKind, inspection.Diagnostics, inspection);
     }
 
     return command switch
     {
-        "inspect" => BridgeResult<object>.Unsupported(file, resourceKind, new
-        {
-            fileName = Path.GetFileName(file),
-            size = new FileInfo(file).Length,
-            extension = Path.GetExtension(file)
-        }),
-        "export-event" => BridgeResult<object>.Unsupported(file, "event", null),
-        "export-map" => BridgeResult<object>.Unsupported(file, "map", null),
-        "export-param" => BridgeResult<object>.Unsupported(file, "param", null),
-        "export-msg" => BridgeResult<object>.Unsupported(file, "msg", null),
-        "validate" => BridgeResult<object>.Validated(file, resourceKind),
-        _ => BridgeResult<object>.Failed(
-            sourcePath: file,
-            resourceKind: resourceKind,
-            code: "UNKNOWN_COMMAND",
-            message: $"Unknown bridge command: {command}")
+        "export-event" => BridgeResult<object>.Unsupported(file, "event", "Semantic EMEVD export is not implemented yet; inspect returns the audit envelope first."),
+        "export-map" => BridgeResult<object>.Unsupported(file, "map", "Semantic MSB export is not implemented yet; inspect returns the audit envelope first."),
+        "export-param" => BridgeResult<object>.Unsupported(file, "param", "Semantic PARAM export is not implemented yet; inspect returns the audit envelope first."),
+        "export-msg" => BridgeResult<object>.Unsupported(file, "msg", "Semantic FMG export is not implemented yet; inspect returns the audit envelope first."),
+        _ => BridgeResult<object>.Failed(file, resourceKind, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}")
     };
 }
 
@@ -87,83 +78,36 @@ static string GuessKindFromPath(string file)
     {
         if (normalized.Contains($"/{kind}/")) return kind;
     }
+
+    var name = Path.GetFileName(file).ToLowerInvariant();
+    if (name.Contains("emevd")) return "event";
+    if (name.Contains("msb")) return "map";
+    if (name.Contains("param")) return "param";
+    if (name.Contains("msg") || name.EndsWith(".fmg")) return "msg";
     return "unknown";
 }
 
-sealed record Diagnostic(
-    string Severity,
-    string Code,
-    string Message,
-    string? SourceUri = null,
-    object? Details = null);
+sealed record Diagnostic(string Severity, string Code, string Message, string? SourceUri = null, object? Details = null);
 
-sealed record BridgeResult<T>(
-    string SourceUri,
-    string SourcePath,
-    string Game,
-    string ResourceKind,
-    string ParseStatus,
-    IReadOnlyList<Diagnostic> Diagnostics,
-    T? Data = default)
+sealed record BridgeResult<T>(string SourceUri, string SourcePath, string Game, string ResourceKind, string ParseStatus, IReadOnlyList<Diagnostic> Diagnostics, T? Data = default)
 {
-    public static BridgeResult<T> Unsupported(string sourcePath, string resourceKind, T? data)
+    public static BridgeResult<T> Unsupported(string sourcePath, string resourceKind, string message)
     {
-        return new BridgeResult<T>(
-            SourceUri: $"file://{Uri.EscapeDataString(sourcePath)}",
-            SourcePath: sourcePath,
-            Game: "unknown",
-            ResourceKind: resourceKind,
-            ParseStatus: "unsupported",
-            Diagnostics: new[]
-            {
-                new Diagnostic(
-                    Severity: "info",
-                    Code: "PARSER_NOT_IMPLEMENTED",
-                    Message: "Bridge command exists, but real format parsing is not implemented yet.")
-            },
-            Data: data);
+        return new BridgeResult<T>(MakeSourceUri(sourcePath), sourcePath, "unknown", resourceKind, "unsupported", new[] { new Diagnostic("info", "SEMANTIC_EXPORT_NOT_IMPLEMENTED", message, MakeSourceUri(sourcePath)) });
     }
 
     public static BridgeResult<T> Failed(string sourcePath, string resourceKind, string code, string message, object? details = null)
     {
-        return new BridgeResult<T>(
-            SourceUri: string.IsNullOrWhiteSpace(sourcePath) ? "file://unknown" : $"file://{Uri.EscapeDataString(sourcePath)}",
-            SourcePath: sourcePath,
-            Game: "unknown",
-            ResourceKind: resourceKind,
-            ParseStatus: "failed",
-            Diagnostics: new[]
-            {
-                new Diagnostic(
-                    Severity: "error",
-                    Code: code,
-                    Message: message,
-                    Details: details)
-            });
+        return new BridgeResult<T>(MakeSourceUri(sourcePath), sourcePath, "unknown", resourceKind, "failed", new[] { new Diagnostic("error", code, message, MakeSourceUri(sourcePath), details) });
     }
 
-    public static BridgeResult<object> Validated(string sourcePath, string resourceKind)
+    public static BridgeResult<T> Partial(string sourcePath, string resourceKind, IEnumerable<Diagnostic> diagnostics, T? data)
     {
-        using var stream = File.Open(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        return new BridgeResult<object>(
-            SourceUri: $"file://{Uri.EscapeDataString(sourcePath)}",
-            SourcePath: sourcePath,
-            Game: "unknown",
-            ResourceKind: resourceKind,
-            ParseStatus: "partial",
-            Diagnostics: new[]
-            {
-                new Diagnostic(
-                    Severity: "info",
-                    Code: "VALIDATION_READABLE",
-                    Message: "File exists and can be opened for read validation. No binary format parsing was attempted.")
-            },
-            Data: new
-            {
-                fileName = Path.GetFileName(sourcePath),
-                size = stream.Length,
-                extension = Path.GetExtension(sourcePath),
-                readable = true
-            });
+        return new BridgeResult<T>(MakeSourceUri(sourcePath), sourcePath, "unknown", resourceKind, "partial", diagnostics.ToArray(), data);
+    }
+
+    private static string MakeSourceUri(string sourcePath)
+    {
+        return string.IsNullOrWhiteSpace(sourcePath) ? "file://unknown" : $"file://{Uri.EscapeDataString(sourcePath)}";
     }
 }
