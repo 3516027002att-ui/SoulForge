@@ -9,12 +9,12 @@ static class EnvelopeInspection
         var resourceKind = GuessKind(sourcePath);
         var evidence = new List<FormatEvidence>
         {
-            new("magic", 0, magic.Replace("\0", "\\0"), rootFormat == "unknown" ? "low" : "high"),
+            new("magic", 0, magic.Replace("\0", "\\0"), string.IsNullOrEmpty(magic) ? "low" : "high"),
             new("extensionChain", 0, BuildExtensionChain(sourcePath), "medium")
         };
         var layers = new List<FormatLayer>
         {
-            new(rootFormat, 0, length, rootFormat == "unknown" ? "low" : "high", new { sampleBytes = sample.Length })
+            new(rootFormat, 0, length, rootFormat == "unknown" ? "low" : "medium", new { sampleBytes = sample.Length, inferredFromPath = string.IsNullOrEmpty(magic) })
         };
         var diagnostics = new List<Diagnostic>
         {
@@ -38,7 +38,15 @@ static class EnvelopeInspection
         if (magic == "BND4") return "BND4";
         if (magic == "EVD\0") return "EMEVD";
         if (magic == "FMG\0") return "FMG";
-        return Path.GetFileName(sourcePath).EndsWith(".fmg", StringComparison.OrdinalIgnoreCase) ? "FMG" : "unknown";
+
+        var name = Path.GetFileName(sourcePath).ToLowerInvariant();
+        if (name.EndsWith(".dcx")) return "DCX";
+        if (name.Contains(".bnd")) return "BND";
+        if (name.Contains("emevd")) return "EMEVD";
+        if (name.Contains("msb")) return "MSB";
+        if (name.Contains("param")) return "PARAM";
+        if (name.EndsWith(".fmg") || name.Contains("msg")) return "FMG";
+        return "unknown";
     }
 
     private static string GuessKind(string sourcePath)
@@ -61,7 +69,7 @@ static class EnvelopeInspection
     {
         var steps = new List<string>();
         if (rootFormat == "DCX") steps.Add("Add reviewed DCX payload reader boundary.");
-        if (rootFormat is "BND3" or "BND4") steps.Add("Parse binder child file table with fixtures.");
+        if (rootFormat is "BND" or "BND3" or "BND4") steps.Add("Parse binder child file table with fixtures.");
         if (resourceKind == "event") steps.Add("Parse EMEVD event, instruction, and argument tables.");
         if (resourceKind == "map") steps.Add("Parse MSB entities and regions.");
         if (resourceKind == "param") steps.Add("Parse PARAM rows and fields.");
