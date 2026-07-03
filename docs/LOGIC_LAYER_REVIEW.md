@@ -1,49 +1,51 @@
-# Logic layer review checklist
+# 逻辑层检查清单
 
-This checkpoint is for reviewing the v0.1 logic layer before more UI work.
+这个文档用于检查 SoulForge 的早期逻辑层状态。它服务于“AI Mod 超级编辑器”的目标，而不是某个单独事件编辑器产品。
 
-## Completed scope
+## 已完成范围
 
-- Bridge uses a bounded prefix reader for inspect and validate.
-- Bridge inspect returns partial envelope evidence rather than pretending semantic parsing succeeded.
-- Parser result types are separated from Program.cs.
-- Program.cs now routes export commands directly instead of relying on BridgeResult.Unsupported compatibility dispatch.
-- export-msg routes to conservative partial message export.
-- export-event, export-param, and export-map route to low-confidence native semantic candidate exports.
-- Envelope inspection recognizes common native resource envelopes by header magic.
-- Envelope inspection records visible path-like hints as low-confidence evidence.
-- Envelope inspection records low-confidence binderChildCandidate evidence for visible BND child names.
-- Envelope inspection records low-confidence nestedMagicCandidate evidence for possible nested native formats.
-- Bridge has a conservative partial message export for readable raw strings.
-- Message export stops at DCX/BND container boundaries until unpacking exists.
-- FMG-like files now get a guarded table-candidate pass before raw string scanning.
-- Bridge has low-confidence candidate exports for EMEVD event IDs, PARAM row IDs, and MSB entity names.
-- Event/map/param candidate exports stop at DCX/BND container boundaries.
-- Workspace analysis now has a native inspection pass in addition to text and JSON semantic ingestion.
-- Workspace analysis can ingest partial native msg exports and low-confidence native semantic candidate exports when the bridge returns a valid shape.
-- WorkspaceIndex exposes stable stats and multi-match text lookup APIs.
-- AI-safe tools include workspace_stats, lookup_text_id, find_text_references, and explain_text_entry.
-- AI context builder can produce evidence-first text explanation prompts.
-- Native inspection diagnostics are recorded as workspace diagnostics and are not ingested as semantic symbols.
-- Electron IPC now surfaces both parsedFiles and inspectedFiles from analysis.
+- Bridge 的 inspect / validate 使用有界前缀读取，避免启动时吞大文件。
+- Bridge inspect 返回资源包络证据和诊断，不假装已经完成语义解析。
+- Parser result 类型已经和 Program.cs 分离。
+- Program.cs 已直接路由 export 命令，不再依赖 BridgeResult.Unsupported 的兼容分发副作用。
+- export-msg 已路由到保守的 partial message export。
+- export-event、export-param、export-map 已路由到低置信 native semantic candidate export。
+- Envelope inspection 能通过 header magic 识别常见资源包络。
+- Envelope inspection 会把可见路径线索记录为低置信证据。
+- Envelope inspection 会把可见 BND child name 记录为低置信 binderChildCandidate evidence。
+- Envelope inspection 会把可能的 nested native formats 记录为低置信 nestedMagicCandidate evidence。
+- Bridge 已有可读 raw string 的 partial message export。
+- Message export 在 DCX/BND 容器边界停止，直到解包能力存在。
+- FMG-like 文件会先走 guarded table-candidate pass，再回落 raw string scan。
+- Bridge 已有 EMEVD event ID、PARAM row ID、MSB entity name 的低置信候选导出。
+- Event / map / param candidate export 会在 DCX/BND 容器边界停止。
+- Workspace analysis 已有 native inspection pass，并且和 text / JSON semantic ingestion 分离。
+- Workspace analysis 可以接收 partial native msg exports 和低置信 native semantic candidate exports。
+- WorkspaceIndex 暴露稳定 stats 和多匹配 text lookup API。
+- AI-safe tools 包括 workspace_stats、lookup_text_id、find_text_references、explain_text_entry。
+- AI context builder 能生成 evidence-first 的 text explanation prompt。
+- Native inspection diagnostics 会记录为 workspace diagnostics，不会被当成 semantic symbols。
+- Electron IPC 会暴露 parsedFiles 和 inspectedFiles。
+- FMG synthetic fixture path 已接入 export-msg。
+- Event、PARAM、map synthetic fixture helpers 已写入，但还需要 Codex 完成 router wire-up。
 
-## Hard boundaries
+## 硬边界
 
-- No external parser code is copied.
-- Inspect is evidence only.
-- Path hints are low-confidence evidence and are not authoritative binder child tables.
-- binderChildCandidate evidence is visible-string evidence only until BND table fixtures confirm offsets, sizes, and names.
-- nestedMagicCandidate evidence is bounded-prefix evidence only until DCX decompression and BND unpacking exist.
-- Native msg export is still partial; FMG table candidates must be fixture-reviewed before being treated as authoritative.
-- EMEVD, PARAM, and MSB candidate exports are low-confidence bootstrap outputs, not final semantic parsers.
-- Raw string fallback uses file offsets as temporary text IDs.
-- AI and UI must not directly parse native binary resources.
-- AI-safe read tools may query indexes and reference graphs but must not parse files or write files.
-- Writes must remain behind Patch Engine.
+- 不复制外部 parser 代码。
+- Inspect 只返回证据，不返回伪语义解析。
+- Path hints 只是低置信证据，不是权威 BND child table。
+- binderChildCandidate 只是 visible-string evidence，直到 BND table fixture 证明 offsets、sizes、names。
+- nestedMagicCandidate 只是 bounded-prefix evidence，直到 DCX 解压和 BND 解包存在。
+- Native msg export 仍是 partial；FMG table candidate 必须经过 fixture review 才能视为权威。
+- EMEVD、PARAM、MSB candidate export 是低置信 bootstrap，不是最终 parser。
+- Raw string fallback 使用 file offset 作为临时 text ID。
+- AI 和 UI 不能直接解析 native binary resource。
+- AI-safe read tools 可以查询 index 和 reference graph，但不能直接解析文件或写文件。
+- 所有写入必须留在 Patch Engine 后面。
 
-## Commands for reviewer
+## Reviewer 命令
 
-Run these from the repository root:
+从仓库根目录运行：
 
 ```bash
 npm install
@@ -52,14 +54,14 @@ npm run build
 dotnet build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj
 ```
 
-Bridge smoke checks:
+Bridge smoke checks：
 
 ```bash
 dotnet run --project bridge/SoulForge.Bridge -- inspect README.md
 dotnet run --project bridge/SoulForge.Bridge -- export-msg README.md
 ```
 
-Native candidate smoke checks, using local fixtures or user-provided files:
+Native candidate smoke checks 可使用本地 fixture 或用户提供文件：
 
 ```bash
 dotnet run --project bridge/SoulForge.Bridge -- export-event path/to/file.emevd
@@ -67,38 +69,48 @@ dotnet run --project bridge/SoulForge.Bridge -- export-param path/to/file.param
 dotnet run --project bridge/SoulForge.Bridge -- export-map path/to/file.msb
 ```
 
-Expected inspect shape:
+## inspect 预期形态
 
-- parseStatus is partial;
-- diagnostics is not empty;
-- data.rootFormat exists;
-- data.evidence exists;
-- data.nextSteps exists;
-- visible resource names may appear as low-confidence pathHint evidence;
-- BND files may expose low-confidence binderChildCandidate evidence;
-- packed/container files may expose low-confidence nestedMagicCandidate evidence.
+- parseStatus 是 partial；
+- diagnostics 非空；
+- data.rootFormat 存在；
+- data.evidence 存在；
+- data.nextSteps 存在；
+- 可见资源名可以作为低置信 pathHint evidence 出现；
+- BND 文件可以出现低置信 binderChildCandidate evidence；
+- packed/container 文件可以出现低置信 nestedMagicCandidate evidence。
 
-Expected export behavior:
+## export 预期行为
 
-- Program.cs routes export commands directly, not through BridgeResult.Unsupported side effects;
-- for readable raw text, export-msg parseStatus may be partial and data.entries should exist;
-- for FMG-like payloads with a self-consistent table candidate, diagnostics should include MSG_FMG_TABLE_CANDIDATE;
-- for packed DCX/BND containers, semantic export parseStatus should remain unsupported with SEMANTIC_EXPORT_CONTAINER_BOUNDARY or equivalent container-boundary diagnostics;
-- raw fallback text IDs are offsets, while table-candidate text IDs are read from the candidate rows;
-- export-event/export-param/export-map candidate outputs must be treated as low-confidence until fixture-confirmed.
+- Program.cs 直接路由 export 命令，不通过 BridgeResult.Unsupported 副作用；
+- 对可读 raw text，export-msg 的 parseStatus 可以是 partial，data.entries 应存在；
+- 对自洽 FMG-like table candidate，diagnostics 应包含 MSG_FMG_TABLE_CANDIDATE；
+- 对 synthetic FMG fixture，diagnostics 应包含 MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED；
+- 对 packed DCX/BND container，semantic export 应保持 unsupported，并返回 container-boundary diagnostics；
+- raw fallback text ID 是 offset，table-candidate text ID 来自 candidate rows；
+- export-event / export-param / export-map candidate outputs 必须保持低置信，直到 fixture-confirmed。
 
-Expected AI tool behavior:
+## AI 工具预期行为
 
-- workspace_stats returns file, symbol, and reference counts from WorkspaceIndex;
-- lookup_text_id accepts numeric textId as a number or numeric string, may accept category, and returns all matching text entries;
-- find_text_references accepts numeric textId as a number or numeric string, may accept category, and returns matching text entries plus inbound references;
-- explain_text_entry returns structured text explanation contexts and prompts;
-- lookup_text_id, find_text_references, and explain_text_entry should not scan files directly.
+- workspace_stats 返回 WorkspaceIndex 中的 file、symbol、reference counts；
+- lookup_text_id 接收 number 或 numeric string，可接收 category，并返回所有匹配文本；
+- find_text_references 接收 number 或 numeric string，可接收 category，并返回匹配文本和 inbound references；
+- explain_text_entry 返回结构化 text explanation context 和 prompt；
+- lookup_text_id、find_text_references、explain_text_entry 不应直接扫描文件。
 
-## Next parser milestones
+## 下一批 parser 里程碑
 
-1. Replace FMG table candidate logic with fixture-confirmed FMG text ID table parsing.
-2. Replace binderChildCandidate visible-string evidence with fixture-confirmed BND child table listing.
-3. Replace EMEVD event ID candidates with fixture-confirmed event and instruction table export.
-4. Replace PARAM row ID candidates with fixture-confirmed row and field export.
-5. Replace MSB visible-name candidates with fixture-confirmed entity, region, transform, and model export.
+1. 用 fixture-confirmed FMG text ID table parsing 替换 FMG table candidate 逻辑。
+2. 用 fixture-confirmed BND child table listing 替换 binderChildCandidate visible-string evidence。
+3. 用 fixture-confirmed event / instruction table export 替换 EMEVD event ID candidates。
+4. 用 fixture-confirmed row / field export 替换 PARAM row ID candidates。
+5. 用 fixture-confirmed entity / region / transform / model export 替换 MSB visible-name candidates。
+
+## Codex 当前入口
+
+Codex 当前应优先阅读：
+
+- docs/CODEX_NEXT_ACTIONS.md
+- docs/CODEX_TASK_ROUTER_WIREUP.md
+
+Codex 当前任务只应做 synthetic fixture router wire-up、类型小修、smoke script 和必要 build 修复。不要在这个任务中扩展到真实 native parser、UI 重构或 Patch Engine 改造。
