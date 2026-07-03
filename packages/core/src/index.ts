@@ -6,3 +6,7 @@ export * from './patch/patchEngine.js';
 export * from './references/referenceBuilder.js';
 export * from './references/eventEvidence.js';
 export * from './bridge/runBridge.js';
+export * from './indexing/workspaceIndex.js';
+export * from './indexing/ingestBridgeResult.js';
+export * from './jobs/taskQueue.js';
+export * from './ai/toolRegistry.js';
