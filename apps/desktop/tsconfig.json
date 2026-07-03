@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "types": ["node", "react", "react-dom"],
+    "noEmit": true
+  },
+  "include": [
+    "electron.vite.config.ts",
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
+  "references": [
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/core" }
+  ]
+}
