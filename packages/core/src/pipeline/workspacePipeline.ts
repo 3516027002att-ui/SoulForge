@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import type { BridgeCommand } from '../bridge/runBridge.js';
 import type { BridgeResult, Diagnostic, IndexedFile, ResourceKind } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { ingestBridgeResult } from '../indexing/ingestBridgeResult.js';
@@ -13,6 +14,7 @@ export interface AnalyzeWorkspaceOptions {
   parseJsonFixtures?: boolean;
   inspectNativeResources?: boolean;
   exportNativeMsgResources?: boolean;
+  exportNativeCandidateResources?: boolean;
   maxFilesToParse?: number;
   maxFilesToInspect?: number;
   bridgeProjectPath?: string;
@@ -45,12 +47,12 @@ export interface AnalyzeWorkspaceResult {
  * Production-shaped v0.1 analysis pipeline.
  *
  * The pipeline has two independent passes:
- * - semantic ingestion for text fixtures, JSON bridge exports, and conservative native msg exports;
+ * - semantic ingestion for text fixtures, JSON bridge exports, conservative native msg exports,
+ *   and low-confidence native semantic candidate exports;
  * - native resource inspection through the C# bridge.
  *
- * Inspect results are evidence only. They are deliberately not ingested as
- * event/map/param/msg symbols until a resource-specific export command returns
- * a reviewed semantic BridgeResult.
+ * Inspect results are evidence only. Native semantic candidates must come from a
+ * resource-specific export command and stay low-confidence until fixture-reviewed.
  */
 export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promise<AnalyzeWorkspaceResult> {
   const diagnostics: Diagnostic[] = [];
@@ -109,8 +111,10 @@ function shouldParse(file: IndexedFile, options: AnalyzeWorkspaceOptions): boole
   const parseTextResources = options.parseTextResources ?? true;
   const parseJsonFixtures = options.parseJsonFixtures ?? true;
   const exportNativeMsgResources = options.exportNativeMsgResources ?? true;
+  const exportNativeCandidateResources = options.exportNativeCandidateResources ?? true;
   if (parseJsonFixtures && file.extension === '.json') return true;
   if (exportNativeMsgResources && isNativeMsgResource(file)) return true;
+  if (exportNativeCandidateResources && isNativeCandidateResource(file)) return true;
   if (!parseTextResources) return false;
   if (file.resourceKind === 'event' && (file.relativePath.endsWith('.txt') || file.relativePath.endsWith('.emevd.txt'))) return true;
   if (file.resourceKind === 'msg' && (file.relativePath.endsWith('.tsv') || file.relativePath.endsWith('.csv') || file.relativePath.endsWith('.txt') || file.relativePath.endsWith('.xml') || file.relativePath.endsWith('.json'))) return true;
@@ -163,9 +167,11 @@ async function parseKnownResource(
   options: AnalyzeWorkspaceOptions
 ): Promise<{ accepted: boolean; diagnostics: Diagnostic[] }> {
   try {
-    if (isNativeMsgResource(file)) {
+    if (isNativeMsgResource(file) || isNativeCandidateResource(file)) {
+      const command = exportCommandFor(file);
+      if (!command) return { accepted: false, diagnostics: [] };
       const result = await runBridge({
-        command: 'export-msg',
+        command,
         filePath: file.absolutePath,
         ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
         ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
@@ -225,6 +231,22 @@ function isNativeMsgResource(file: IndexedFile): boolean {
   if (file.resourceKind !== 'msg') return false;
   const path = file.relativePath.toLowerCase();
   return path.endsWith('.fmg') || path.endsWith('.fmg.dcx') || path.includes('msgbnd') || path.includes('.msgbnd');
+}
+
+function isNativeCandidateResource(file: IndexedFile): boolean {
+  const path = file.relativePath.toLowerCase();
+  if (file.resourceKind === 'event') return path.includes('.emevd');
+  if (file.resourceKind === 'map') return path.includes('.msb');
+  if (file.resourceKind === 'param') return path.includes('.param');
+  return false;
+}
+
+function exportCommandFor(file: IndexedFile): BridgeCommand | null {
+  if (isNativeMsgResource(file)) return 'export-msg';
+  if (file.resourceKind === 'event') return 'export-event';
+  if (file.resourceKind === 'map') return 'export-map';
+  if (file.resourceKind === 'param') return 'export-param';
+  return null;
 }
 
 function inferJsonFixtureKind(file: IndexedFile): ResourceKind | null {
