@@ -310,7 +310,7 @@ function makeInstructionEvidence(instruction: EventInstruction, arg: EventArg): 
   return {
     sourceUri: instruction.uri,
     instructionUri: instruction.uri,
-    fieldName: arg.name,
+    ...(arg.name ? { fieldName: arg.name } : {}),
     value: arg.value,
     excerpt: makeInstructionExcerpt(instruction, arg)
   };
