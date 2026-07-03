@@ -64,12 +64,18 @@ static BridgeResult<object> Run(string[] args)
 
     return command switch
     {
-        "export-event" => BridgeResult<object>.Unsupported(file, "event", "Semantic EMEVD export is not implemented yet; inspect returns the audit envelope first."),
-        "export-map" => BridgeResult<object>.Unsupported(file, "map", "Semantic MSB export is not implemented yet; inspect returns the audit envelope first."),
-        "export-param" => BridgeResult<object>.Unsupported(file, "param", "Semantic PARAM export is not implemented yet; inspect returns the audit envelope first."),
-        "export-msg" => BridgeResult<object>.Unsupported(file, "msg", "Semantic FMG export is not implemented yet; inspect returns the audit envelope first."),
+        "export-event" => ExportSemanticCandidate(file, "event", "Semantic EMEVD export is not implemented yet; inspect returns the audit envelope first."),
+        "export-map" => ExportSemanticCandidate(file, "map", "Semantic MSB export is not implemented yet; inspect returns the audit envelope first."),
+        "export-param" => ExportSemanticCandidate(file, "param", "Semantic PARAM export is not implemented yet; inspect returns the audit envelope first."),
+        "export-msg" => MsgTextExport.Export(file),
         _ => BridgeResult<object>.Failed(file, resourceKind, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}")
     };
+}
+
+static BridgeResult<object> ExportSemanticCandidate(string file, string resourceKind, string unsupportedMessage)
+{
+    return SemanticCandidateExports.TryExport(file, resourceKind)
+        ?? BridgeResult<object>.Unsupported(file, resourceKind, unsupportedMessage);
 }
 
 static BridgeResult<object> InspectEnvelope(string file, bool includeReadableValidation)
