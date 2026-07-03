@@ -124,16 +124,35 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'lookup_text_id',
-    description: 'Look up one parsed text entry by numeric textId and optional category.',
+    description: 'Look up parsed text entries by numeric textId and optional category.',
     permission: 'read',
     run: (input, context) => {
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
       if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'lookup_text_id requires numeric textId.');
       const category = asOptionalString(value.category);
-      const found = context.workspaceIndex.lookupTextEntry(textId, category);
-      if (!found) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
-      return ok(found);
+      const matches = context.workspaceIndex.lookupTextEntries(textId, category);
+      if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
+      return ok({ textId, category, matches });
+    }
+  });
+
+  registry.register({
+    name: 'find_text_references',
+    description: 'Find events or other symbols that reference a parsed textId.',
+    permission: 'read',
+    run: (input, context) => {
+      const value = asRecord(input);
+      const textId = asNumber(value.textId, Number.NaN);
+      if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'find_text_references requires numeric textId.');
+      const category = asOptionalString(value.category);
+      const matches = context.workspaceIndex.lookupTextEntries(textId, category);
+      if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
+      const items = matches.map((entry) => {
+        const references = context.workspaceIndex.findReferences(entry.uri, 'to');
+        return { entry, references, referenceStats: summarizeReferences(references) };
+      });
+      return ok({ textId, category, matches: items, totalReferences: items.reduce((sum, item) => sum + item.references.length, 0) });
     }
   });
 
