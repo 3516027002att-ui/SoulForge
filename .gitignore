@@ -1,0 +1,26 @@
+node_modules/
+dist/
+out/
+build/
+coverage/
+.vite/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
+# Electron/app artifacts
+release/
+*.log
+
+# SoulForge local state
+.soulforge-local/
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
