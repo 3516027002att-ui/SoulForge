@@ -17,6 +17,7 @@ static class EnvelopeInspection
         var resourceKind = GuessKind(sourcePath);
         var pathHints = EnvelopeHintScanner.Scan(sample);
         var binderChildCandidates = BinderChildCandidateScanner.Scan(sample);
+        var nestedMagicCandidates = NestedFormatScanner.Scan(sample);
         var diagnostics = new List<Diagnostic>
         {
             new(
@@ -62,12 +63,22 @@ static class EnvelopeInspection
                 BridgeResult<object>.MakeSourceUri(sourcePath)));
         }
 
+        if (nestedMagicCandidates.Count > 0)
+        {
+            diagnostics.Add(new Diagnostic(
+                "info",
+                "NESTED_MAGIC_CANDIDATES_FOUND",
+                $"Found {nestedMagicCandidates.Count} low-confidence nested format magic candidate(s) in the bounded prefix.",
+                BridgeResult<object>.MakeSourceUri(sourcePath)));
+        }
+
         var evidence = new List<FormatEvidence>(magicEvidence)
         {
             new("extensionChain", 0, extensionChain, "medium")
         };
         evidence.AddRange(pathHints);
         evidence.AddRange(binderChildCandidates);
+        evidence.AddRange(nestedMagicCandidates);
 
         var layers = new List<FormatLayer>
         {
@@ -82,7 +93,8 @@ static class EnvelopeInspection
                     maxSampleBytes,
                     envelopeOnly = true,
                     pathHints = pathHints.Count,
-                    binderChildCandidates = binderChildCandidates.Count
+                    binderChildCandidates = binderChildCandidates.Count,
+                    nestedMagicCandidates = nestedMagicCandidates.Count
                 })
         };
 
@@ -145,11 +157,11 @@ static class EnvelopeInspection
             "Treat inspect results as envelope evidence only; do not assume semantic parsing succeeded."
         };
 
-        if (rootFormat == "DCX") steps.Add("Add a reviewed DCX payload boundary before decompression.");
+        if (rootFormat == "DCX") steps.Add("Use nestedMagicCandidate evidence only as hints until a reviewed DCX payload boundary and decompressor exist.");
         if (rootFormat is "BND3" or "BND4") steps.Add("Use binderChildCandidate evidence only as hints until a fixture-confirmed binder table parser exists.");
-        if (resourceKind == "event") steps.Add("Implement EMEVD event table export in export-event, not inspect.");
-        if (resourceKind == "map") steps.Add("Implement MSB entity and region export in export-map, not inspect.");
-        if (resourceKind == "param") steps.Add("Implement PARAM row export in export-param, not inspect.");
+        if (resourceKind == "event") steps.Add("Use EMEVD candidate exports as low-confidence IDs until instruction table parsing is fixture-confirmed.");
+        if (resourceKind == "map") steps.Add("Use MSB candidate exports as low-confidence names until entity tables are fixture-confirmed.");
+        if (resourceKind == "param") steps.Add("Use PARAM candidate exports as low-confidence row IDs until row layout is fixture-confirmed.");
         if (resourceKind == "msg") steps.Add("Implement fixture-confirmed FMG export in export-msg, not inspect.");
         if (rootFormat == "unknown") steps.Add("Keep semantic exports unsupported until a reviewed parser can produce structured symbols.");
 
