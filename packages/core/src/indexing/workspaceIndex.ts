@@ -146,14 +146,18 @@ export class WorkspaceIndex {
     return searchSymbols(this.msgExports.flatMap((item) => item.entries), query, limit, textEntrySearchText);
   }
 
-  lookupTextEntry(textId: number, category?: string): TextEntrySymbol | undefined {
+  lookupTextEntries(textId: number, category?: string): TextEntrySymbol[] {
     const normalizedCategory = category?.toLowerCase();
+    const matches: TextEntrySymbol[] = [];
     for (const exportItem of this.msgExports) {
       if (normalizedCategory && (exportItem.category ?? 'default').toLowerCase() !== normalizedCategory) continue;
-      const found = exportItem.entries.find((entry) => entry.textId === textId);
-      if (found) return found;
+      matches.push(...exportItem.entries.filter((entry) => entry.textId === textId));
     }
-    return undefined;
+    return matches;
+  }
+
+  lookupTextEntry(textId: number, category?: string): TextEntrySymbol | undefined {
+    return this.lookupTextEntries(textId, category)[0];
   }
 
   getFile(uri: string): IndexedFile | undefined {
