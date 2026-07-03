@@ -22,10 +22,23 @@ dotnet run --project bridge/SoulForge.Bridge -- validate <file>
 `validate` only checks that a file can be opened and reports basic metadata. It
 does not claim to parse FromSoftware binary formats.
 
-## Smoke check
+## Export confidence tiers
+
+`export-msg` has three deliberately separate paths:
+
+1. `MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED`: confirms SoulForge's reviewed synthetic FMG fixture layout and bridge plumbing. It does not claim native game-format authority.
+2. `MSG_FMG_TABLE_CANDIDATE`: guarded FMG-like table candidate. Stronger than raw string scan, but still candidate evidence.
+3. `MSG_TEXT_EXPORT_PARTIAL`: bounded readable-string fallback. File offsets are temporary text IDs.
+
+`export-event`, `export-param`, and `export-map` currently emit low-confidence bootstrap candidates only. They preserve enough structure for the evidence graph while avoiding fake authoritative parsing.
+
+Packed DCX/BND containers remain semantic export boundaries until decompression/unpacking exists.
+
+## Smoke checks
 
 ```powershell
 .\bridge\SoulForge.Bridge\scripts\verify-magic.ps1
+.\bridge\SoulForge.Bridge\scripts\verify-fmg-fixture.ps1
 ```
 
 ## Contract
