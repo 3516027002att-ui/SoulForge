@@ -1,117 +1,153 @@
-# Codex Next Actions Checkpoint
+# Codex 下一步行动检查点
 
-This is the current handoff checkpoint for Codex.
+这是 Codex 的当前交接文档。
 
-## Current state
+SoulForge 的对外目标是《只狼》和魂系 Mod 的 AI 超级编辑器：让 AI 像 Cursor 改代码一样，在证据、计划、补丁、验证和回滚保护下修改 Mod。
 
-SoulForge v0.3 is focused on fixture-confirmed parser plumbing for the core chain:
+## 当前状态
 
+v0.3 聚焦 fixture-confirmed parser plumbing。
+
+核心链路：
+
+```text
 event -> map -> param -> msg
+```
 
-Already present:
+同时 BND child inventory 是很多资源的容器入口。
 
-- FMG synthetic fixture path is wired through export-msg.
-- SyntheticFixtureExports.cs exists for event and PARAM synthetic fixtures.
-- SyntheticMapFixtureExports.cs exists for map synthetic fixtures.
-- CODEX_TASK_ROUTER_WIREUP.md exists with the narrow router task.
-- GitHub issue #1 exists for this router wire-up.
+已存在：
 
-Important caveat:
+- FMG synthetic fixture path 已通过 export-msg 接入；
+- `SyntheticFixtureExports.cs` 已包含 event 和 PARAM synthetic fixture helper；
+- `SyntheticMapFixtureExports.cs` 已包含 map synthetic fixture helper；
+- `SyntheticBinderFixtureExports.cs` 已包含 BND synthetic child inventory helper；
+- `CODEX_TASK_ROUTER_WIREUP.md` 记录 issue #1 的窄任务；
+- `CODEX_TASK_BND_FIXTURE_WIREUP.md` 记录 issue #2 的后续任务；
+- GitHub issue #1：event / param / map router wire-up；
+- GitHub issue #2：BND synthetic child inventory wire-up。
 
-- Event, PARAM, and map synthetic helpers are written but not yet routed through SemanticCandidateExports or Program.cs.
-- Do not claim these three are fully wired until the build and smoke scripts prove it.
+重要 caveat：
 
-## Codex task 1: router wire-up
+- Event、PARAM、map synthetic helpers 已写入，但还没接入 SemanticCandidateExports 或 Program.cs；
+- BND synthetic helper 已写入，但还没接入 inspect/export 路径；
+- 不要在 build 和 smoke script 证明前声称这些路径已完成。
 
-In SemanticCandidateExports.cs:
+## 当前优先级
 
-- TryExportEvent should keep packed-container boundary handling first.
-- Then it should call SyntheticFixtureExports.TryExport for event.
-- Then it should keep the existing low-confidence event ID candidate scan.
+### 第一优先级：issue #1
 
-In TryExportParam:
+先完成 event / PARAM / map synthetic fixture router wire-up。
 
-- Keep packed-container boundary handling first.
-- Then call SyntheticFixtureExports.TryExport for param.
-- Then keep the existing low-confidence PARAM row ID candidate scan.
+在 `SemanticCandidateExports.cs`：
 
-In TryExportMap:
+- TryExportEvent 保留 packed-container boundary handling first；
+- 然后调用 SyntheticFixtureExports.TryExport for event；
+- 然后保留现有 low-confidence event ID candidate scan；
+- TryExportParam 同理，先 boundary，再 synthetic PARAM，再低置信 row ID candidate；
+- TryExportMap 同理，先 boundary，再 SyntheticMapFixtureExports，再 visible-name fallback。
 
-- Keep packed-container boundary handling first.
-- Then call SyntheticMapFixtureExports.TryExport.
-- Then keep the existing low-confidence visible-name candidate scan.
+不要移除现有 fallback。
 
-Do not remove existing fallback behavior.
+### 第二优先级：PARAM 类型小修
 
-## Codex task 2: fix a possible PARAM typing issue
+检查 `SyntheticFixtureExports.cs`。
 
-Check SyntheticFixtureExports.cs.
+如果 synthetic PARAM field value 在一个条件表达式里混用 bool 和 int，就改成先赋给 object，再输出 value。
 
-If the synthetic PARAM field value mixes bool and int in one conditional expression, make it compile-safe by assigning the result to an object before exporting it.
+不要改变 JSON shape。
 
-Do not change the JSON shape.
+### 第三优先级：core synthetic smoke script
 
-## Codex task 3: add one smoke script
+添加或更新：
 
-Add:
-
+```text
 bridge/SoulForge.Bridge/scripts/verify-synthetic-core-fixtures.ps1
+```
 
-It should generate temporary synthetic fixtures and run export-msg, export-event, export-param, and export-map.
+覆盖：
 
-It should assert these diagnostic codes:
+- export-msg；
+- export-event；
+- export-param；
+- export-map。
 
-- MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED
-- EMEVD_SYNTHETIC_FIXTURE_CONFIRMED
-- PARAM_SYNTHETIC_FIXTURE_CONFIRMED
-- MSB_SYNTHETIC_FIXTURE_CONFIRMED
+必须断言：
 
-Do not commit binary fixture files.
+- MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED；
+- EMEVD_SYNTHETIC_FIXTURE_CONFIRMED；
+- PARAM_SYNTHETIC_FIXTURE_CONFIRMED；
+- MSB_SYNTHETIC_FIXTURE_CONFIRMED。
 
-## Codex task 4: run checks
+不要提交二进制 fixture。
 
-Run:
+### 第四优先级：build / typecheck
 
-- dotnet build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj
-- npm run typecheck
-- npm run build
+运行：
 
-If any command fails, fix only the smallest compile/type issue needed for this task.
+```bash
+dotnet build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj
+npm run typecheck
+npm run build
+```
 
-## Codex task 5: update status docs after success
+如果失败，只修当前任务所需的最小 compile/type 问题。
 
-After the router wire-up and smoke script pass, update:
+### 第五优先级：状态文档更新
 
-- docs/V0_3_FORMAT_PARSER_MILESTONE.md
-- docs/LOGIC_LAYER_REVIEW.md
+issue #1 完成后，更新：
 
-Remove caveats saying event, PARAM, and map synthetic helpers still need router wire-up.
+- `docs/V0_3_FORMAT_PARSER_MILESTONE.md`；
+- `docs/LOGIC_LAYER_REVIEW.md`。
 
-Add that synthetic routes for msg, event, param, and map are wired.
+移除 event / PARAM / map synthetic helpers 仍待 router wire-up 的 caveat。
 
-Do not claim native FMG, EMEVD, PARAM, MSB, or BND parsing is complete.
+不要声称 native FMG、EMEVD、PARAM、MSB、BND parser 已完成。
 
-## Hard boundaries
+## 后续任务：issue #2
 
-Codex must not:
+issue #1 完成后，再处理 BND synthetic fixture wire-up。
 
-- copy external parser implementations;
-- commit real game assets or user mod files;
-- claim native parser authority from synthetic fixtures;
-- remove low-confidence candidate fallbacks;
-- let renderer parse native binaries directly;
-- change UI scope;
-- touch Patch Engine;
-- implement native BND, EMEVD, PARAM, or MSB parsers in this task;
-- start Blender, MCP, local LLM, or vector database work.
+阅读：
 
-## Done definition
+- `docs/CODEX_TASK_BND_FIXTURE_WIREUP.md`；
+- `docs/V0_3_SYNTHETIC_BND_FIXTURE.md`。
 
-This checkpoint is complete when:
+BND 任务要谨慎决策接线路径：
 
-1. export-msg can return MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED for a generated synthetic FMG fixture.
-2. export-event can return EMEVD_SYNTHETIC_FIXTURE_CONFIRMED for a generated synthetic event fixture.
-3. export-param can return PARAM_SYNTHETIC_FIXTURE_CONFIRMED for a generated synthetic PARAM fixture.
-4. export-map can return MSB_SYNTHETIC_FIXTURE_CONFIRMED for a generated synthetic map fixture.
-5. Existing non-synthetic inputs still fall back to low-confidence candidates or structured unsupported results.
-6. Build and typecheck pass, or exact failures are documented honestly.
+- 可以接入 inspect confirmed branch；
+- 可以新增内部 helper path；
+- 只有非常清晰时才新增公开 export-binder / export-file command。
+
+必须保留 visible-string binderChildCandidate 作为 low-confidence fallback。
+
+## 硬边界
+
+Codex 不得：
+
+- 复制外部 parser 实现；
+- 提交真实游戏资源或用户 Mod 文件；
+- 从 synthetic fixture 推导并声称 native parser 权威完成；
+- 移除低置信 fallback；
+- 让 renderer 直接解析 native binary；
+- 改 UI scope；
+- 改 Patch Engine；
+- 在当前任务里实现 native BND、EMEVD、PARAM、MSB parser；
+- 开始 Blender、MCP、本地 LLM、vector database 工作。
+
+## issue #1 完成定义
+
+1. export-msg 能对 generated synthetic FMG fixture 返回 MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED；
+2. export-event 能对 generated synthetic event fixture 返回 EMEVD_SYNTHETIC_FIXTURE_CONFIRMED；
+3. export-param 能对 generated synthetic PARAM fixture 返回 PARAM_SYNTHETIC_FIXTURE_CONFIRMED；
+4. export-map 能对 generated synthetic map fixture 返回 MSB_SYNTHETIC_FIXTURE_CONFIRMED；
+5. 非 synthetic 输入仍回落到低置信 candidates 或 structured unsupported；
+6. build 和 typecheck 通过，或精确记录失败原因。
+
+## issue #2 完成定义
+
+1. synthetic BND fixture 能通过 Bridge 命令路径返回 confirmed child inventory；
+2. diagnostic code 包含 BND_SYNTHETIC_FIXTURE_CONFIRMED；
+3. children 包含 id、name、resourceKind、offset、packedSize、unpackedSize；
+4. visible-string binderChildCandidate fallback 仍保持 low confidence；
+5. build 和 typecheck 通过，或精确记录失败原因。
