@@ -3,6 +3,7 @@ using System.Text;
 static class FmgTableParser
 {
     private const int MaxEntries = 2000;
+    private static readonly byte[] SyntheticFixtureMarker = { (byte)'S', (byte)'F', (byte)'F', (byte)'X' };
     private static readonly int[] CountOffsets = { 8, 12, 16, 20, 24, 28, 32 };
     private static readonly int[] TableStarts = { 16, 20, 24, 28, 32, 40, 48, 64 };
     private static readonly int[] Strides = { 8, 12, 16 };
@@ -11,6 +12,90 @@ static class FmgTableParser
     {
         if (!StartsWith(sample, (byte)'F', (byte)'M', (byte)'G', 0)) return null;
 
+        var confirmedFixture = TryParseSyntheticFixture(sample, sourceUri, category);
+        if (confirmedFixture != null) return confirmedFixture;
+
+        return TryParseTableCandidate(sample, sourceUri, category);
+    }
+
+    private static FmgParseCandidate? TryParseSyntheticFixture(byte[] sample, string sourceUri, string category)
+    {
+        if (!MatchesMarker(sample, 4, SyntheticFixtureMarker)) return null;
+
+        var version = ReadInt32(sample, 8, littleEndian: true);
+        var count = ReadInt32(sample, 12, littleEndian: true);
+        var tableStart = ReadInt32(sample, 16, littleEndian: true);
+        var stringPoolStart = ReadInt32(sample, 20, littleEndian: true);
+        const int stride = 8;
+
+        if (version != 1) return null;
+        if (count is < 1 or > MaxEntries) return null;
+        if (!IsRangeInside(sample, tableStart, (long)count * stride)) return null;
+        if (stringPoolStart <= tableStart || stringPoolStart >= sample.Length) return null;
+
+        var entries = new List<object>();
+        var ids = new HashSet<int>();
+        var offsets = new HashSet<int>();
+
+        for (var index = 0; index < count; index += 1)
+        {
+            var row = tableStart + index * stride;
+            var id = ReadInt32(sample, row, littleEndian: true);
+            var relativeTextOffset = ReadInt32(sample, row + 4, littleEndian: true);
+            var textOffset = stringPoolStart + relativeTextOffset;
+
+            if (id < 0) return null;
+            if (!IsRangeInside(sample, textOffset, 2)) return null;
+
+            var text = ReadTextAt(sample, textOffset, littleEndian: true);
+            if (text == null) return null;
+
+            ids.Add(id);
+            offsets.Add(textOffset);
+            entries.Add(new
+            {
+                uri = $"msg://{category}/{id}",
+                sourceUri,
+                category,
+                textId = id,
+                text = text.Text,
+                raw = new
+                {
+                    table = "soulforge-synthetic-fmg-fixture",
+                    rowIndex = index,
+                    rowOffset = row,
+                    textOffset,
+                    encoding = text.Encoding,
+                    endian = "little",
+                    stride,
+                    confidence = "high"
+                }
+            });
+        }
+
+        return new FmgParseCandidate(
+            Entries: entries,
+            Score: entries.Count * 100 + ids.Count + offsets.Count,
+            Metadata: new
+            {
+                parser = "soulforge-synthetic-fmg-fixture-v1",
+                confidence = "confirmed-fixture",
+                nativeFormatAuthority = false,
+                version,
+                declaredCount = count,
+                tableStart,
+                stringPoolStart,
+                stride,
+                endian = "little",
+                validRows = entries.Count,
+                uniqueIds = ids.Count,
+                uniqueTextOffsets = offsets.Count
+            },
+            Confidence: "confirmed-fixture");
+    }
+
+    private static FmgParseCandidate? TryParseTableCandidate(byte[] sample, string sourceUri, string category)
+    {
         FmgParseCandidate? best = null;
         foreach (var littleEndian in new[] { true, false })
         {
@@ -45,7 +130,7 @@ static class FmgTableParser
         int stride)
     {
         var tableLength = (long)count * stride;
-        if (tableStart < 0 || tableStart + tableLength > sample.Length) return null;
+        if (!IsRangeInside(sample, tableStart, tableLength)) return null;
 
         var entries = new List<object>();
         var ids = new HashSet<int>();
@@ -97,6 +182,8 @@ static class FmgTableParser
             Metadata: new
             {
                 parser = "fmg-table-candidate",
+                confidence = "candidate",
+                nativeFormatAuthority = false,
                 countOffset,
                 declaredCount = count,
                 tableStart,
@@ -105,7 +192,8 @@ static class FmgTableParser
                 validRows,
                 uniqueIds = ids.Count,
                 uniqueTextOffsets = offsets.Count
-            });
+            },
+            Confidence: "candidate");
     }
 
     private static TextValue? ReadTextAt(byte[] sample, int offset, bool littleEndian)
@@ -137,6 +225,22 @@ static class FmgTableParser
         return sample.Length >= 4 && sample[0] == a && sample[1] == b && sample[2] == c && sample[3] == d;
     }
 
+    private static bool MatchesMarker(byte[] sample, int offset, byte[] marker)
+    {
+        if (offset < 0 || offset + marker.Length > sample.Length) return false;
+        for (var index = 0; index < marker.Length; index += 1)
+        {
+            if (sample[offset + index] != marker[index]) return false;
+        }
+        return true;
+    }
+
+    private static bool IsRangeInside(byte[] sample, int offset, long length)
+    {
+        if (offset < 0 || length < 0) return false;
+        return offset + length <= sample.Length;
+    }
+
     private static bool IsReadable(char ch)
     {
         return !char.IsControl(ch)
@@ -151,4 +255,4 @@ static class FmgTableParser
     private sealed record TextValue(string Text, string Encoding);
 }
 
-sealed record FmgParseCandidate(IReadOnlyList<object> Entries, int Score, object Metadata);
+sealed record FmgParseCandidate(IReadOnlyList<object> Entries, int Score, object Metadata, string Confidence);
