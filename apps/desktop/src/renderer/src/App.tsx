@@ -1,44 +1,70 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactElement } from 'react';
 import type { IndexedFile, ResourceKind, ResourcePreview, WorkspaceScanResult } from '@soulforge/shared';
+import type { AnalyzeWorkspaceSummary } from '../../main/ipc.js';
+import type { ToolDescriptor, ToolResult } from '@soulforge/core';
 
 const RESOURCE_KIND_ORDER: ResourceKind[] = ['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx', 'unknown'];
 
-export function App(): JSX.Element {
+export function App(): ReactElement {
   const [workspace, setWorkspace] = useState<WorkspaceScanResult | null>(null);
+  const [analysis, setAnalysis] = useState<AnalyzeWorkspaceSummary | null>(null);
+  const [tools, setTools] = useState<ToolDescriptor[]>([]);
   const [selectedFile, setSelectedFile] = useState<IndexedFile | null>(null);
   const [preview, setPreview] = useState<ResourcePreview | null>(null);
   const [query, setQuery] = useState('');
+  const [toolQuery, setToolQuery] = useState('');
+  const [eventUri, setEventUri] = useState('');
+  const [toolOutput, setToolOutput] = useState<ToolResult | null>(null);
   const [files, setFiles] = useState<IndexedFile[]>([]);
-  const [status, setStatus] = useState('Ready.');
+  const [status, setStatus] = useState('就绪');
 
   const counts = useMemo(() => workspace?.countsByKind ?? null, [workspace]);
+  const diagnostics = [...(workspace?.diagnostics ?? []), ...(analysis?.diagnostics ?? []), ...(preview?.diagnostics ?? [])];
 
   async function openWorkspace(): Promise<void> {
     const workspaceRoot = await window.soulforge.openWorkspaceDialog();
     if (!workspaceRoot) return;
 
-    setStatus('Scanning workspace...');
+    setStatus('正在扫描工作区...');
     const result = await window.soulforge.scanWorkspace(workspaceRoot);
     setWorkspace(result);
     setFiles(result.files.slice(0, 300));
     setSelectedFile(null);
     setPreview(null);
-    setStatus(`Indexed ${result.files.length} files.`);
+    setAnalysis(null);
+    setToolOutput(null);
+
+    setStatus('正在构建轻量证据索引...');
+    const nextAnalysis = await window.soulforge.analyzeWorkspace(workspaceRoot);
+    setAnalysis(nextAnalysis);
+    setTools(nextAnalysis.tools);
+    setEventUri(nextAnalysis.events[0]?.uri ?? '');
+    setStatus(`已索引 ${result.files.length} 个文件，解析 ${nextAnalysis.parsedFiles} 个文本/mock 资源`);
   }
 
   async function search(): Promise<void> {
     const result = await window.soulforge.searchResources(query);
     setFiles(result);
-    setStatus(`Search returned ${result.length} files.`);
+    setStatus(`搜索返回 ${result.length} 个文件`);
   }
 
   async function selectFile(file: IndexedFile): Promise<void> {
     setSelectedFile(file);
     setPreview(null);
-    setStatus(`Opening ${file.relativePath}...`);
+    setStatus(`正在打开 ${file.relativePath}...`);
     const nextPreview = await window.soulforge.openResourcePreview(file.sourceUri);
     setPreview(nextPreview);
-    setStatus(nextPreview ? `Opened ${file.relativePath}.` : 'Preview unavailable.');
+    setStatus(nextPreview ? `已打开 ${file.relativePath}` : '无法预览该资源');
+  }
+
+  async function runToolSearch(): Promise<void> {
+    const result = await window.soulforge.runAiTool('search_resources', { query: toolQuery, limit: 8 }, 'plan');
+    setToolOutput(result);
+  }
+
+  async function explainEvent(): Promise<void> {
+    const result = await window.soulforge.runAiTool('explain_event', { uri: eventUri }, 'plan');
+    setToolOutput(result);
   }
 
   return (
@@ -46,7 +72,7 @@ export function App(): JSX.Element {
       <header className="top-bar">
         <section>
           <h1>SoulForge</h1>
-          <p>Super Event Editor v0.1 · Stop modding in the dark.</p>
+          <p>Super Event Editor v0.1 | Stop modding in the dark.</p>
         </section>
         <button type="button" onClick={openWorkspace}>打开 Mod 工作区</button>
       </header>
@@ -91,7 +117,7 @@ export function App(): JSX.Element {
                 onClick={() => void selectFile(file)}
               >
                 <span>{file.relativePath}</span>
-                <small>{file.resourceKind} · {(file.size / 1024).toFixed(1)} KB</small>
+                <small>{file.resourceKind} | {(file.size / 1024).toFixed(1)} KB</small>
               </button>
             ))}
           </div>
@@ -99,7 +125,7 @@ export function App(): JSX.Element {
 
         <section className="viewer-pane">
           <h2>{selectedFile?.relativePath ?? '资源预览'}</h2>
-          {!selectedFile && <p className="muted">打开一个工作区，然后选择文件。v0.1 先做轻量扫描和安全预览。</p>}
+          {!selectedFile && <p className="muted">选择左侧资源后显示限量文本或十六进制预览。</p>}
           {preview?.previewKind === 'text' && <pre>{preview.text}</pre>}
           {preview?.previewKind === 'hex' && <pre>{preview.hex}</pre>}
           {preview?.previewKind === 'empty' && <p className="muted">空文件。</p>}
@@ -108,7 +134,7 @@ export function App(): JSX.Element {
         </section>
 
         <aside className="ai-pane">
-          <h2>AI Sidebar</h2>
+          <h2>AI 工具台</h2>
           <label>
             Provider
             <select defaultValue="mock">
@@ -134,17 +160,44 @@ export function App(): JSX.Element {
               <option value="fullPermission">full permission</option>
             </select>
           </label>
-          <p className="muted">v0.1 先保留 AI 原生界面和工具位置，不默认消耗模型/API 资源。</p>
+
           <div className="context-card">
             <strong>Current context</strong>
             <span>{selectedFile?.sourceUri ?? 'No resource selected'}</span>
           </div>
+
+          <div className="tool-panel">
+            <strong>Safe tools</strong>
+            <div className="tool-list">
+              {(tools.length > 0 ? tools : []).map((tool) => (
+                <span key={tool.name} title={tool.description}>{tool.name}</span>
+              ))}
+            </div>
+            <div className="tool-row">
+              <input value={toolQuery} onChange={(event) => setToolQuery(event.target.value)} placeholder="search_resources query" />
+              <button type="button" onClick={() => void runToolSearch()}>Run</button>
+            </div>
+            <div className="tool-row">
+              <input value={eventUri} onChange={(event) => setEventUri(event.target.value)} placeholder="event://..." />
+              <button type="button" onClick={() => void explainEvent()}>Explain</button>
+            </div>
+          </div>
+
+          {analysis && (
+            <div className="context-card">
+              <strong>Evidence index</strong>
+              <span>parsed: {analysis.parsedFiles}</span>
+              <span>refs: H{analysis.referenceStats.high} / M{analysis.referenceStats.medium} / L{analysis.referenceStats.low}</span>
+            </div>
+          )}
+
+          {toolOutput && <pre className="tool-output">{JSON.stringify(toolOutput, null, 2)}</pre>}
         </aside>
       </section>
 
       <footer className="status-bar">
         <span>{status}</span>
-        <span>{preview?.diagnostics.length ? `${preview.diagnostics.length} diagnostics` : 'No diagnostics'}</span>
+        <span>{diagnostics.length ? `${diagnostics.length} diagnostics` : 'No diagnostics'}</span>
       </footer>
     </main>
   );

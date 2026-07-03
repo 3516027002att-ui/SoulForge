@@ -70,6 +70,12 @@ CREATE TABLE IF NOT EXISTS event_symbols (
 
 CREATE INDEX IF NOT EXISTS idx_event_symbols_workspace_event_id ON event_symbols(workspace_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_event_symbols_workspace_map ON event_symbols(workspace_id, map_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS event_text_fts USING fts5(
+  uri UNINDEXED,
+  event_id UNINDEXED,
+  name,
+  instructions_text
+);
 
 CREATE TABLE IF NOT EXISTS event_instructions (
   uri TEXT PRIMARY KEY,
@@ -135,6 +141,25 @@ CREATE TABLE IF NOT EXISTS param_rows (
 );
 
 CREATE INDEX IF NOT EXISTS idx_param_rows_workspace_param_row ON param_rows(workspace_id, param_name, row_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS param_rows_fts USING fts5(
+  uri UNINDEXED,
+  param_name,
+  row_name,
+  fields_text
+);
+
+CREATE TABLE IF NOT EXISTS param_fields (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  row_uri TEXT NOT NULL,
+  field_name TEXT NOT NULL,
+  field_type TEXT,
+  value_json TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (row_uri) REFERENCES param_rows(uri) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_param_fields_row ON param_fields(row_uri);
 
 CREATE TABLE IF NOT EXISTS text_entries (
   uri TEXT PRIMARY KEY,

@@ -35,7 +35,7 @@ static BridgeResult<object> Run(string[] args)
             sourcePath: string.Empty,
             resourceKind: "unknown",
             code: "BRIDGE_USAGE_ERROR",
-            message: "Usage: soulforge-bridge <inspect|export-event|export-map|export-param|export-msg> <file>");
+            message: "Usage: soulforge-bridge <inspect|export-event|export-map|export-param|export-msg|validate> <file>");
     }
 
     var command = args[0];
@@ -46,6 +46,7 @@ static BridgeResult<object> Run(string[] args)
         "export-map" => "map",
         "export-param" => "param",
         "export-msg" => "msg",
+        "validate" => GuessKindFromPath(file),
         _ => GuessKindFromPath(file)
     };
 
@@ -70,6 +71,7 @@ static BridgeResult<object> Run(string[] args)
         "export-map" => BridgeResult<object>.Unsupported(file, "map", null),
         "export-param" => BridgeResult<object>.Unsupported(file, "param", null),
         "export-msg" => BridgeResult<object>.Unsupported(file, "msg", null),
+        "validate" => BridgeResult<object>.Validated(file, resourceKind),
         _ => BridgeResult<object>.Failed(
             sourcePath: file,
             resourceKind: resourceKind,
@@ -137,6 +139,31 @@ sealed record BridgeResult<T>(
                     Code: code,
                     Message: message,
                     Details: details)
+            });
+    }
+
+    public static BridgeResult<object> Validated(string sourcePath, string resourceKind)
+    {
+        using var stream = File.Open(sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        return new BridgeResult<object>(
+            SourceUri: $"file://{Uri.EscapeDataString(sourcePath)}",
+            SourcePath: sourcePath,
+            Game: "unknown",
+            ResourceKind: resourceKind,
+            ParseStatus: "partial",
+            Diagnostics: new[]
+            {
+                new Diagnostic(
+                    Severity: "info",
+                    Code: "VALIDATION_READABLE",
+                    Message: "File exists and can be opened for read validation. No binary format parsing was attempted.")
+            },
+            Data: new
+            {
+                fileName = Path.GetFileName(sourcePath),
+                size = stream.Length,
+                extension = Path.GetExtension(sourcePath),
+                readable = true
             });
     }
 }

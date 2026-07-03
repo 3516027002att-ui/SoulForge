@@ -16,5 +16,7 @@ export * from './ai/aiContextBuilder.js';
 export * from './parsers/eventTextParser.js';
 export * from './parsers/msgTextParser.js';
 export * from './pipeline/workspacePipeline.js';
+export * from './storage/sqliteSchema.js';
+export * from './storage/memoryEvidenceStore.js';
 export * from './testing/createMockWorkspace.js';
 export * from './testing/runMockEvidencePipeline.js';

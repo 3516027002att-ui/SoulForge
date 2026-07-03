@@ -8,6 +8,7 @@ import { buildReferenceGraph } from '../references/referenceBuilder.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 import { ingestBridgeResult } from '../indexing/ingestBridgeResult.js';
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { MemoryEvidenceStore } from '../storage/memoryEvidenceStore.js';
 import { createMockWorkspace, type MockWorkspace } from './createMockWorkspace.js';
 
 export interface MockEvidencePipelineResult {
@@ -35,7 +36,16 @@ export async function runMockEvidencePipeline(): Promise<MockEvidencePipelineRes
   const workspace = await createMockWorkspace();
   const scan = await scanWorkspace({ workspaceRoot: workspace.root });
   const index = new WorkspaceIndex(scan.workspaceId);
+  const store = new MemoryEvidenceStore();
   index.setFiles(scan.files);
+  store.upsertWorkspace({
+    workspaceId: scan.workspaceId,
+    rootPath: scan.workspaceRoot,
+    game: 'unknown',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  store.replaceFiles(scan.workspaceId, scan.files);
 
   const diagnostics: Diagnostic[] = [...scan.diagnostics];
 
@@ -69,6 +79,8 @@ export async function runMockEvidencePipeline(): Promise<MockEvidencePipelineRes
 
   const references = buildReferenceGraph(index.toSymbolBundle(), { enableNumericFallback: true });
   index.rebuildReferences({ enableNumericFallback: true });
+  store.replaceSymbols(scan.workspaceId, index.toSymbolBundle());
+  store.replaceReferences(scan.workspaceId, references.edges);
 
   const explanation = index.buildEventExplanationInput('event://m11_00_00_00/11002800');
   if (!explanation) throw new Error('Mock event explanation could not be built.');

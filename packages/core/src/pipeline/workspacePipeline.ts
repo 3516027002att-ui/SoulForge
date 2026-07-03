@@ -45,8 +45,14 @@ export async function analyzeWorkspace(options: AnalyzeWorkspaceOptions): Promis
   const diagnostics: Diagnostic[] = [];
   const scan = await scanWorkspace({
     workspaceRoot: options.workspaceRoot,
-    signal: options.signal,
-    onProgress: (progress) => options.onProgress?.({ phase: 'scan', current: progress.scannedFiles, message: progress.currentPath })
+    ...(options.signal ? { signal: options.signal } : {}),
+    onProgress: (progress) => {
+      options.onProgress?.({
+        phase: 'scan',
+        current: progress.scannedFiles,
+        ...(progress.currentPath ? { message: progress.currentPath } : {})
+      });
+    }
   });
 
   diagnostics.push(...scan.diagnostics);

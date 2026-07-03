@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import type { BridgeResult, Diagnostic, ResourceKind } from '@soulforge/shared';
 
-export type BridgeCommand = 'inspect' | 'export-event' | 'export-map' | 'export-param' | 'export-msg';
+export type BridgeCommand = 'inspect' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate';
 
 export interface RunBridgeOptions {
   bridgeProjectPath?: string;

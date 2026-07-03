@@ -10,10 +10,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@soulforge/core": "workspace:*",
-    "@soulforge/shared": "workspace:*",
+    "@soulforge/core": "0.0.0",
+    "@soulforge/shared": "0.0.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^34.0.2",
+    "electron": "^43.0.0",
     "electron-vite": "^3.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

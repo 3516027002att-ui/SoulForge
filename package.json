@@ -9,8 +9,8 @@
   ],
   "scripts": {
     "dev": "npm run dev -w @soulforge/desktop",
-    "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build -w @soulforge/shared && npm run build -w @soulforge/core && npm run build -w @soulforge/desktop",
+    "typecheck": "tsc -b packages/shared packages/core apps/desktop --pretty false",
     "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {
