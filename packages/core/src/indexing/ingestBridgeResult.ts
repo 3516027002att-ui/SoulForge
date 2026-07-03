@@ -5,6 +5,7 @@ import type {
   MapExport,
   MsgExport,
   ParamExport,
+  ParamFieldSymbol,
   ParseStatus
 } from '@soulforge/shared';
 import type { WorkspaceIndex } from './workspaceIndex.js';
@@ -25,11 +26,7 @@ export function ingestBridgeResult(index: WorkspaceIndex, result: BridgeResult<u
   const diagnostics = [...result.diagnostics];
 
   if (result.parseStatus === 'failed' || result.parseStatus === 'unsupported' || result.parseStatus === 'unparsed') {
-    return {
-      accepted: false,
-      parseStatus: result.parseStatus,
-      diagnostics
-    };
+    return { accepted: false, parseStatus: result.parseStatus, diagnostics };
   }
 
   if (!result.data || typeof result.data !== 'object') {
@@ -39,11 +36,7 @@ export function ingestBridgeResult(index: WorkspaceIndex, result: BridgeResult<u
       message: 'Bridge reported a parsed/partial result without structured data.',
       sourceUri: result.sourceUri
     });
-    return {
-      accepted: false,
-      parseStatus: 'partial',
-      diagnostics
-    };
+    return { accepted: false, parseStatus: 'partial', diagnostics };
   }
 
   if (result.resourceKind === 'event') {
@@ -94,9 +87,7 @@ function parseEventExport(value: unknown, sourceUri: string): ParsedValue<EventE
   const record = asRecord(value);
   const eventsRaw = record.events;
 
-  if (!Array.isArray(eventsRaw)) {
-    return { diagnostics: [missingField(sourceUri, 'events')] };
-  }
+  if (!Array.isArray(eventsRaw)) return { diagnostics: [missingField(sourceUri, 'events')] };
 
   const events = eventsRaw.flatMap((eventRaw, index) => {
     const event = asRecord(eventRaw);
@@ -195,31 +186,37 @@ function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExpor
 
 function parseMapEntity(value: unknown, sourceUri: string, mapId: string, index: number): MapExport['entities'][number] {
   const record = asRecord(value);
+  const entityId = asNumber(record.entityId);
+  const position = asVector3(record.position);
+  const rotation = asVector3(record.rotation);
   return {
-    uri: asString(record.uri) || `map://${mapId}/entity/${String(asNumber(record.entityId) ?? index)}`,
+    uri: asString(record.uri) || `map://${mapId}/entity/${String(entityId ?? index)}`,
     sourceUri: asString(record.sourceUri) || sourceUri,
     mapId,
-    ...(asNumber(record.entityId) === null ? {} : { entityId: asNumber(record.entityId) as number }),
+    ...(entityId === null ? {} : { entityId }),
     name: asString(record.name, `entity_${index}`),
     kind: isMapEntityKind(record.kind) ? record.kind : 'unknown',
     ...(asString(record.model) ? { model: asString(record.model) } : {}),
-    ...(asVector3(record.position) ? { position: asVector3(record.position) } : {}),
-    ...(asVector3(record.rotation) ? { rotation: asVector3(record.rotation) } : {}),
+    ...(position ? { position } : {}),
+    ...(rotation ? { rotation } : {}),
     ...(record.raw === undefined ? {} : { raw: record.raw })
   };
 }
 
 function parseMapRegion(value: unknown, sourceUri: string, mapId: string, index: number): MapExport['regions'][number] {
   const record = asRecord(value);
+  const entityId = asNumber(record.entityId);
+  const position = asVector3(record.position);
+  const rotation = asVector3(record.rotation);
   return {
-    uri: asString(record.uri) || `map://${mapId}/region/${String(asNumber(record.entityId) ?? index)}`,
+    uri: asString(record.uri) || `map://${mapId}/region/${String(entityId ?? index)}`,
     sourceUri: asString(record.sourceUri) || sourceUri,
     mapId,
-    ...(asNumber(record.entityId) === null ? {} : { entityId: asNumber(record.entityId) as number }),
+    ...(entityId === null ? {} : { entityId }),
     name: asString(record.name, `region_${index}`),
     ...(asString(record.shape) ? { shape: asString(record.shape) } : {}),
-    ...(asVector3(record.position) ? { position: asVector3(record.position) } : {}),
-    ...(asVector3(record.rotation) ? { rotation: asVector3(record.rotation) } : {}),
+    ...(position ? { position } : {}),
+    ...(rotation ? { rotation } : {}),
     ...(record.size === undefined ? {} : { size: record.size }),
     ...(record.raw === undefined ? {} : { raw: record.raw })
   };
@@ -241,7 +238,7 @@ function parseParamRow(value: unknown, sourceUri: string, paramName: string, ind
   }];
 }
 
-function parseParamField(value: unknown): ParamExport['rows'][number]['fields'][number] {
+function parseParamField(value: unknown): ParamFieldSymbol {
   const record = asRecord(value);
   return {
     name: asString(record.name, 'unknown'),
@@ -305,19 +302,9 @@ function isMapEntityKind(value: unknown): value is MapExport['entities'][number]
 }
 
 function missingField(sourceUri: string, field: string): Diagnostic {
-  return {
-    severity: 'error',
-    code: 'INGEST_MISSING_FIELD',
-    message: `Bridge result is missing required field: ${field}.`,
-    sourceUri
-  };
+  return { severity: 'error', code: 'INGEST_MISSING_FIELD', message: `Bridge result is missing required field: ${field}.`, sourceUri };
 }
 
 function invalidField(sourceUri: string, field: string): Diagnostic {
-  return {
-    severity: 'warning',
-    code: 'INGEST_INVALID_FIELD',
-    message: `Bridge result has invalid field: ${field}.`,
-    sourceUri
-  };
+  return { severity: 'warning', code: 'INGEST_INVALID_FIELD', message: `Bridge result has invalid field: ${field}.`, sourceUri };
 }
