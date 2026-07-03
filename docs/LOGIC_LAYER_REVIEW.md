@@ -7,6 +7,9 @@ This checkpoint is for reviewing the v0.1 logic layer before more UI work.
 - Bridge uses a bounded prefix reader for inspect and validate.
 - Bridge inspect returns partial envelope evidence rather than pretending semantic parsing succeeded.
 - Parser result types are separated from Program.cs.
+- Program.cs now routes export commands directly instead of relying on BridgeResult.Unsupported compatibility dispatch.
+- export-msg routes to conservative partial message export.
+- export-event, export-param, and export-map route to low-confidence native semantic candidate exports.
 - Envelope inspection recognizes common native resource envelopes by header magic.
 - Envelope inspection records visible path-like hints as low-confidence evidence.
 - Envelope inspection records low-confidence binderChildCandidate evidence for visible BND child names.
@@ -56,7 +59,7 @@ dotnet run --project bridge/SoulForge.Bridge -- inspect README.md
 dotnet run --project bridge/SoulForge.Bridge -- export-msg README.md
 ```
 
-Native candidate smoke checks, using real game files when available:
+Native candidate smoke checks, using local fixtures or user-provided files:
 
 ```bash
 dotnet run --project bridge/SoulForge.Bridge -- export-event path/to/file.emevd
@@ -77,6 +80,7 @@ Expected inspect shape:
 
 Expected export behavior:
 
+- Program.cs routes export commands directly, not through BridgeResult.Unsupported side effects;
 - for readable raw text, export-msg parseStatus may be partial and data.entries should exist;
 - for FMG-like payloads with a self-consistent table candidate, diagnostics should include MSG_FMG_TABLE_CANDIDATE;
 - for packed DCX/BND containers, semantic export parseStatus should remain unsupported with SEMANTIC_EXPORT_CONTAINER_BOUNDARY or equivalent container-boundary diagnostics;
@@ -98,4 +102,3 @@ Expected AI tool behavior:
 3. Replace EMEVD event ID candidates with fixture-confirmed event and instruction table export.
 4. Replace PARAM row ID candidates with fixture-confirmed row and field export.
 5. Replace MSB visible-name candidates with fixture-confirmed entity, region, transform, and model export.
-6. Replace temporary Program.cs Unsupported compatibility routes with direct command routes once GitHub write filtering stops blocking full Program.cs replacement.
