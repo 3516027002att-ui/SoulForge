@@ -48,8 +48,8 @@ export function collectEventEvidence(event: EventSymbol, edges: ReferenceEdge[])
       if (knownEvidenceValues.has(evidenceKey)) continue;
       unknownArguments.push({
         instructionUri: instruction.uri,
-        instructionName: instruction.name,
-        argName: arg.name,
+        ...(instruction.name ? { instructionName: instruction.name } : {}),
+        ...(arg.name ? { argName: arg.name } : {}),
         value: arg.value
       });
     }
@@ -58,7 +58,7 @@ export function collectEventEvidence(event: EventSymbol, edges: ReferenceEdge[])
   return {
     eventUri: event.uri,
     eventId: event.eventId,
-    name: event.name,
+    ...(event.name ? { name: event.name } : {}),
     confirmed,
     possible,
     unknownArguments,
