@@ -259,7 +259,12 @@ function asOptionalString(value: unknown): string | undefined {
 }
 
 function asNumber(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
 }
 
 function asResourceKinds(value: unknown): ResourceKind[] | undefined {
