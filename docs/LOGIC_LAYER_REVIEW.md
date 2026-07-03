@@ -15,7 +15,8 @@ This checkpoint is for reviewing the v0.1 logic layer before more UI work.
 - Workspace analysis now has a native inspection pass in addition to text and JSON semantic ingestion.
 - Workspace analysis can ingest partial native msg exports when the bridge returns a valid MsgExport shape.
 - WorkspaceIndex exposes stable stats and multi-match text lookup APIs.
-- AI-safe tools include workspace_stats, lookup_text_id, and find_text_references.
+- AI-safe tools include workspace_stats, lookup_text_id, find_text_references, and explain_text_entry.
+- AI context builder can produce evidence-first text explanation prompts.
 - Native inspection diagnostics are recorded as workspace diagnostics and are not ingested as semantic symbols.
 - Electron IPC now surfaces both parsedFiles and inspectedFiles from analysis.
 
@@ -28,7 +29,7 @@ This checkpoint is for reviewing the v0.1 logic layer before more UI work.
 - Raw string fallback uses file offsets as temporary text IDs.
 - Event, map, and param semantic exports remain unsupported until each format has fixtures and validation.
 - AI and UI must not directly parse native binary resources.
-- AI-safe read tools may query indexes but must not parse files or write files.
+- AI-safe read tools may query indexes and reference graphs but must not parse files or write files.
 - Writes must remain behind Patch Engine.
 
 ## Commands for reviewer
@@ -70,7 +71,8 @@ Expected AI tool behavior:
 - workspace_stats returns file, symbol, and reference counts from WorkspaceIndex;
 - lookup_text_id accepts numeric textId as a number or numeric string, may accept category, and returns all matching text entries;
 - find_text_references accepts numeric textId as a number or numeric string, may accept category, and returns matching text entries plus inbound references;
-- lookup_text_id and find_text_references should not scan files directly.
+- explain_text_entry returns structured text explanation contexts and prompts;
+- lookup_text_id, find_text_references, and explain_text_entry should not scan files directly.
 
 ## Next parser milestones
 
