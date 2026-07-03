@@ -63,6 +63,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
 
   registry.register({
+    name: 'workspace_stats',
+    description: 'Return indexed workspace counts for files, symbols, and references.',
+    permission: 'read',
+    run: (_input, context) => ok(context.workspaceIndex.getStats())
+  });
+
+  registry.register({
     name: 'search_resources',
     description: 'Search indexed workspace files by path, extension, or resource kind.',
     permission: 'read',
@@ -112,6 +119,21 @@ export function createDefaultToolRegistry(): ToolRegistry {
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchTextEntries(asString(value.query, ''), asNumber(value.limit, 50)));
+    }
+  });
+
+  registry.register({
+    name: 'lookup_text_id',
+    description: 'Look up one parsed text entry by numeric textId and optional category.',
+    permission: 'read',
+    run: (input, context) => {
+      const value = asRecord(input);
+      const textId = asNumber(value.textId, Number.NaN);
+      if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'lookup_text_id requires numeric textId.');
+      const category = asOptionalString(value.category);
+      const found = context.workspaceIndex.lookupTextEntry(textId, category);
+      if (!found) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
+      return ok(found);
     }
   });
 
@@ -230,6 +252,10 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function asString(value: unknown, fallback?: string): string {
   return typeof value === 'string' ? value : fallback ?? '';
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 function asNumber(value: unknown, fallback: number): number {
