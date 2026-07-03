@@ -20,6 +20,7 @@ static class SemanticCandidateExports
     private static BridgeResult<object>? TryExportEvent(string sourcePath)
     {
         var sample = ReadPrefix(sourcePath);
+        if (IsPackedContainer(sample)) return PackedUnsupported(sourcePath, "event");
         if (!StartsWith(sample, (byte)'E', (byte)'V', (byte)'D', 0)) return null;
 
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
@@ -63,6 +64,8 @@ static class SemanticCandidateExports
     private static BridgeResult<object>? TryExportParam(string sourcePath)
     {
         var sample = ReadPrefix(sourcePath);
+        if (IsPackedContainer(sample)) return PackedUnsupported(sourcePath, "param");
+
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
         var paramName = InferParamName(sourcePath);
         if (!LooksLikeParam(sourcePath, sample)) return null;
@@ -105,6 +108,8 @@ static class SemanticCandidateExports
     private static BridgeResult<object>? TryExportMap(string sourcePath)
     {
         var sample = ReadPrefix(sourcePath);
+        if (IsPackedContainer(sample)) return PackedUnsupported(sourcePath, "map");
+
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
         var mapId = InferMapId(sourcePath) ?? Path.GetFileNameWithoutExtension(sourcePath).ToLowerInvariant();
         if (!LooksLikeMap(sourcePath, sample)) return null;
@@ -143,6 +148,24 @@ static class SemanticCandidateExports
             new { mapId, entities, regions = Array.Empty<object>() });
     }
 
+    private static BridgeResult<object> PackedUnsupported(string sourcePath, string resourceKind)
+    {
+        return new BridgeResult<object>(
+            BridgeResult<object>.MakeSourceUri(sourcePath),
+            sourcePath,
+            "unknown",
+            resourceKind,
+            "unsupported",
+            new[]
+            {
+                new Diagnostic(
+                    "info",
+                    "SEMANTIC_EXPORT_CONTAINER_BOUNDARY",
+                    "Semantic candidate export stopped at a DCX/BND container boundary. Inspect evidence can be used until decompression/unpacking is implemented.",
+                    BridgeResult<object>.MakeSourceUri(sourcePath))
+            });
+    }
+
     private static bool LooksLikeParam(string sourcePath, byte[] sample)
     {
         var lower = sourcePath.ToLowerInvariant();
@@ -155,6 +178,13 @@ static class SemanticCandidateExports
         var lower = sourcePath.ToLowerInvariant();
         if (lower.Contains(".msb") || Regex.IsMatch(lower, @"m\d{2}_\d{2}_\d{2}_\d{2}")) return true;
         return StartsWith(sample, (byte)'M', (byte)'S', (byte)'B', 0);
+    }
+
+    private static bool IsPackedContainer(byte[] sample)
+    {
+        return StartsWith(sample, (byte)'D', (byte)'C', (byte)'X', 0)
+            || StartsWith(sample, (byte)'B', (byte)'N', (byte)'D', (byte)'3')
+            || StartsWith(sample, (byte)'B', (byte)'N', (byte)'D', (byte)'4');
     }
 
     private static IEnumerable<int> ScanInt32Candidates(byte[] sample)
