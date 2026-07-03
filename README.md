@@ -4,6 +4,20 @@ SoulForge is an AI-native mod workbench for FromSoftware games.
 
 The first milestone is **Super Event Editor v0.1**: a lightweight desktop application that opens a native ModEngine-style mod directory, reads packaged resources such as DCX/BND/EMEVD/MSB/PARAM/FMG, and builds an evidence-based event understanding workspace.
 
+## Project source
+
+SoulForge comes from a very concrete modding pain: editing FromSoftware mods used to mean unpacking resources, opening Lua or event files in crude text tools, guessing numeric IDs, repacking, launching the game, and hoping nothing silently broke.
+
+The project source and full super-editor vision are recorded in:
+
+- [`docs/PROJECT_SOURCE.md`](docs/PROJECT_SOURCE.md)
+
+Core slogan:
+
+```text
+Stop modding in the dark.
+```
+
 ## Product direction
 
 SoulForge is not a Smithbox clone. Existing tools are references for user experience and domain coverage, but SoulForge rewrites its own architecture around AI-native workflows:
