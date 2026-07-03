@@ -4,6 +4,10 @@ C# helper process for SoulForge.
 
 The bridge is responsible for FromSoftware resource inspection/export. v0.1 starts with a command shell that returns structured JSON and honest `unsupported` diagnostics until real parsers are implemented.
 
+`inspect` performs a bounded prefix read only. It reads at most 512 KiB with
+`FileShare.ReadWrite`, checks envelope magic at offset 0, and returns evidence
+plus next steps. It does not decompress, unpack, or semantically parse resources.
+
 ## Commands
 
 ```bash
@@ -17,6 +21,12 @@ dotnet run --project bridge/SoulForge.Bridge -- validate <file>
 
 `validate` only checks that a file can be opened and reports basic metadata. It
 does not claim to parse FromSoftware binary formats.
+
+## Smoke check
+
+```powershell
+.\bridge\SoulForge.Bridge\scripts\verify-magic.ps1
+```
 
 ## Contract
 

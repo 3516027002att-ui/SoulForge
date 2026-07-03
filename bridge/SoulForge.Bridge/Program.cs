@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+const int MaxPrefixBytes = 512 * 1024;
+
 var jsonOptions = new JsonSerializerOptions
 {
     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -16,9 +18,10 @@ try
 }
 catch (Exception ex)
 {
+    var sourcePath = args.Length > 1 ? args[1] : string.Empty;
     var failed = BridgeResult<object>.Failed(
-        sourcePath: args.Length > 1 ? args[1] : string.Empty,
-        resourceKind: "unknown",
+        sourcePath: sourcePath,
+        resourceKind: string.IsNullOrWhiteSpace(sourcePath) ? "unknown" : GuessKindFromPath(sourcePath),
         code: "BRIDGE_UNHANDLED_EXCEPTION",
         message: ex.Message,
         details: ex.ToString());
@@ -46,7 +49,6 @@ static BridgeResult<object> Run(string[] args)
         "export-map" => "map",
         "export-param" => "param",
         "export-msg" => "msg",
-        "validate" => GuessKindFromPath(file),
         _ => GuessKindFromPath(file)
     };
 
@@ -57,8 +59,7 @@ static BridgeResult<object> Run(string[] args)
 
     if (command == "inspect" || command == "validate")
     {
-        var inspection = EnvelopeInspection.Inspect(file, Array.Empty<byte>(), new FileInfo(file).Length);
-        return BridgeResult<object>.Partial(file, inspection.ResourceKind, inspection.Diagnostics, inspection);
+        return InspectEnvelope(file, command == "validate");
     }
 
     return command switch
@@ -69,6 +70,65 @@ static BridgeResult<object> Run(string[] args)
         "export-msg" => BridgeResult<object>.Unsupported(file, "msg", "Semantic FMG export is not implemented yet; inspect returns the audit envelope first."),
         _ => BridgeResult<object>.Failed(file, resourceKind, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}")
     };
+}
+
+static BridgeResult<object> InspectEnvelope(string file, bool includeReadableValidation)
+{
+    var fileInfo = new FileInfo(file);
+    var sample = ReadBoundedPrefix(file);
+    var inspection = EnvelopeInspection.Inspect(file, sample, fileInfo.Length, MaxPrefixBytes);
+    var diagnostics = includeReadableValidation
+        ? inspection.Diagnostics.Prepend(new Diagnostic(
+            "info",
+            "VALIDATION_READABLE",
+            "File exists and its bounded prefix can be opened for read validation. No unpacking, decompression, or semantic parsing was attempted.",
+            BridgeResult<object>.MakeSourceUri(file))).ToArray()
+        : inspection.Diagnostics;
+
+    return BridgeResult<object>.Partial(file, inspection.ResourceKind, diagnostics, inspection);
+}
+
+static byte[] ReadBoundedPrefix(string file, int maxBytes = MaxPrefixBytes)
+{
+    if (maxBytes < 0)
+    {
+        throw new ArgumentOutOfRangeException(nameof(maxBytes), "Maximum prefix size must be non-negative.");
+    }
+
+    var fileInfo = new FileInfo(file);
+    if (!fileInfo.Exists)
+    {
+        throw new FileNotFoundException("Input file does not exist.", file);
+    }
+
+    var bytesToRead = (int)Math.Min(fileInfo.Length, maxBytes);
+    if (bytesToRead == 0)
+    {
+        return Array.Empty<byte>();
+    }
+
+    var buffer = new byte[bytesToRead];
+    using var stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+
+    var totalRead = 0;
+    while (totalRead < buffer.Length)
+    {
+        var read = stream.Read(buffer, totalRead, buffer.Length - totalRead);
+        if (read == 0)
+        {
+            break;
+        }
+
+        totalRead += read;
+    }
+
+    if (totalRead == buffer.Length)
+    {
+        return buffer;
+    }
+
+    Array.Resize(ref buffer, totalRead);
+    return buffer;
 }
 
 static string GuessKindFromPath(string file)
@@ -85,29 +145,4 @@ static string GuessKindFromPath(string file)
     if (name.Contains("param")) return "param";
     if (name.Contains("msg") || name.EndsWith(".fmg")) return "msg";
     return "unknown";
-}
-
-sealed record Diagnostic(string Severity, string Code, string Message, string? SourceUri = null, object? Details = null);
-
-sealed record BridgeResult<T>(string SourceUri, string SourcePath, string Game, string ResourceKind, string ParseStatus, IReadOnlyList<Diagnostic> Diagnostics, T? Data = default)
-{
-    public static BridgeResult<T> Unsupported(string sourcePath, string resourceKind, string message)
-    {
-        return new BridgeResult<T>(MakeSourceUri(sourcePath), sourcePath, "unknown", resourceKind, "unsupported", new[] { new Diagnostic("info", "SEMANTIC_EXPORT_NOT_IMPLEMENTED", message, MakeSourceUri(sourcePath)) });
-    }
-
-    public static BridgeResult<T> Failed(string sourcePath, string resourceKind, string code, string message, object? details = null)
-    {
-        return new BridgeResult<T>(MakeSourceUri(sourcePath), sourcePath, "unknown", resourceKind, "failed", new[] { new Diagnostic("error", code, message, MakeSourceUri(sourcePath), details) });
-    }
-
-    public static BridgeResult<T> Partial(string sourcePath, string resourceKind, IEnumerable<Diagnostic> diagnostics, T? data)
-    {
-        return new BridgeResult<T>(MakeSourceUri(sourcePath), sourcePath, "unknown", resourceKind, "partial", diagnostics.ToArray(), data);
-    }
-
-    private static string MakeSourceUri(string sourcePath)
-    {
-        return string.IsNullOrWhiteSpace(sourcePath) ? "file://unknown" : $"file://{Uri.EscapeDataString(sourcePath)}";
-    }
 }
