@@ -1,27 +1,64 @@
-using System.Text;
-
 static class EnvelopeInspection
 {
-    public static InspectionResult Inspect(string sourcePath, byte[] sample, long length)
+    private static readonly MagicRule[] MagicRules =
     {
-        var magic = sample.Length >= 4 ? Encoding.ASCII.GetString(sample, 0, 4) : string.Empty;
-        var rootFormat = DetectRootFormat(sourcePath, magic);
+        new("DCX", new byte[] { (byte)'D', (byte)'C', (byte)'X', 0 }),
+        new("BND3", new byte[] { (byte)'B', (byte)'N', (byte)'D', (byte)'3' }),
+        new("BND4", new byte[] { (byte)'B', (byte)'N', (byte)'D', (byte)'4' }),
+        new("EMEVD", new byte[] { (byte)'E', (byte)'V', (byte)'D', 0 }),
+        new("FMG", new byte[] { (byte)'F', (byte)'M', (byte)'G', 0 })
+    };
+
+    public static InspectionResult Inspect(string sourcePath, byte[] sample, long length, int maxSampleBytes = 512 * 1024)
+    {
+        var extensionChain = BuildExtensionChain(sourcePath);
+        var magicEvidence = new List<FormatEvidence>();
+        var rootFormat = DetectRootFormat(sample, magicEvidence);
         var resourceKind = GuessKind(sourcePath);
-        var evidence = new List<FormatEvidence>
-        {
-            new("magic", 0, magic.Replace("\0", "\\0"), string.IsNullOrEmpty(magic) ? "low" : "high"),
-            new("extensionChain", 0, BuildExtensionChain(sourcePath), "medium")
-        };
-        var layers = new List<FormatLayer>
-        {
-            new(rootFormat, 0, length, rootFormat == "unknown" ? "low" : "medium", new { sampleBytes = sample.Length, inferredFromPath = string.IsNullOrEmpty(magic) })
-        };
         var diagnostics = new List<Diagnostic>
         {
-            new("info", "ENVELOPE_INSPECTED", "Read-only envelope inspection completed.", MakeSourceUri(sourcePath))
+            new(
+                "info",
+                "BOUNDED_PREFIX_READ",
+                $"Read {sample.Length} byte(s) from the file prefix, capped at {maxSampleBytes} byte(s).",
+                BridgeResult<object>.MakeSourceUri(sourcePath),
+                new { fileLength = length, sampleLength = sample.Length, maxSampleBytes })
         };
+
+        if (rootFormat == "unknown")
+        {
+            diagnostics.Add(new Diagnostic(
+                "warning",
+                "ENVELOPE_MAGIC_UNKNOWN",
+                "No supported DCX/BND/EMEVD/FMG magic was found at offset 0 in the bounded prefix.",
+                BridgeResult<object>.MakeSourceUri(sourcePath)));
+        }
+        else
+        {
+            diagnostics.Add(new Diagnostic(
+                "info",
+                "ENVELOPE_MAGIC_RECOGNIZED",
+                $"Recognized {rootFormat} envelope magic at offset 0. Semantic parsing was not attempted.",
+                BridgeResult<object>.MakeSourceUri(sourcePath)));
+        }
+
+        var evidence = new List<FormatEvidence>(magicEvidence)
+        {
+            new("extensionChain", 0, extensionChain, "medium")
+        };
+
+        var layers = new List<FormatLayer>
+        {
+            new(
+                rootFormat,
+                0,
+                length,
+                rootFormat == "unknown" ? "low" : "medium",
+                new { sampleBytes = sample.Length, maxSampleBytes, envelopeOnly = true })
+        };
+
         return new InspectionResult(
-            File: new FileSummary(Path.GetFileName(sourcePath), length, Path.GetExtension(sourcePath).ToLowerInvariant(), BuildExtensionChain(sourcePath)),
+            File: new FileSummary(Path.GetFileName(sourcePath), length, Path.GetExtension(sourcePath).ToLowerInvariant(), extensionChain),
             ResourceKind: resourceKind,
             RootFormat: rootFormat,
             ParseStatus: "partial",
@@ -31,21 +68,28 @@ static class EnvelopeInspection
             NextSteps: BuildNextSteps(rootFormat, resourceKind));
     }
 
-    private static string DetectRootFormat(string sourcePath, string magic)
+    private static string DetectRootFormat(byte[] sample, List<FormatEvidence> evidence)
     {
-        if (magic == "DCX\0") return "DCX";
-        if (magic == "BND3") return "BND3";
-        if (magic == "BND4") return "BND4";
-        if (magic == "EVD\0") return "EMEVD";
-        if (magic == "FMG\0") return "FMG";
+        foreach (var rule in MagicRules)
+        {
+            if (!StartsWith(sample, rule.Magic))
+            {
+                continue;
+            }
 
-        var name = Path.GetFileName(sourcePath).ToLowerInvariant();
-        if (name.EndsWith(".dcx")) return "DCX";
-        if (name.Contains(".bnd")) return "BND";
-        if (name.Contains("emevd")) return "EMEVD";
-        if (name.Contains("msb")) return "MSB";
-        if (name.Contains("param")) return "PARAM";
-        if (name.EndsWith(".fmg") || name.Contains("msg")) return "FMG";
+            evidence.Add(new FormatEvidence(
+                "magic",
+                0,
+                new { hex = ToHex(sample, rule.Magic.Length), ascii = ToAscii(sample, rule.Magic.Length) },
+                "high"));
+            return rule.RootFormat;
+        }
+
+        evidence.Add(new FormatEvidence(
+            "magic",
+            0,
+            new { hex = ToHex(sample, Math.Min(sample.Length, 16)), ascii = ToAscii(sample, Math.Min(sample.Length, 16)) },
+            sample.Length == 0 ? "low" : "medium"));
         return "unknown";
     }
 
@@ -67,18 +111,49 @@ static class EnvelopeInspection
 
     private static IReadOnlyList<string> BuildNextSteps(string rootFormat, string resourceKind)
     {
-        var steps = new List<string>();
-        if (rootFormat == "DCX") steps.Add("Add reviewed DCX payload reader boundary.");
-        if (rootFormat is "BND" or "BND3" or "BND4") steps.Add("Parse binder child file table with fixtures.");
-        if (resourceKind == "event") steps.Add("Parse EMEVD event, instruction, and argument tables.");
-        if (resourceKind == "map") steps.Add("Parse MSB entities and regions.");
-        if (resourceKind == "param") steps.Add("Parse PARAM rows and fields.");
-        if (resourceKind == "msg") steps.Add("Parse FMG ID table authoritatively.");
-        return steps.Count == 0 ? new[] { "Add a resource-specific parser after fixtures exist." } : steps;
+        var steps = new List<string>
+        {
+            "Treat inspect results as envelope evidence only; do not assume semantic parsing succeeded."
+        };
+
+        if (rootFormat == "DCX") steps.Add("Add a reviewed DCX payload boundary before decompression.");
+        if (rootFormat is "BND3" or "BND4") steps.Add("Parse binder child file tables only after fixtures exist.");
+        if (resourceKind == "event") steps.Add("Implement EMEVD event table export in export-event, not inspect.");
+        if (resourceKind == "map") steps.Add("Implement MSB entity and region export in export-map, not inspect.");
+        if (resourceKind == "param") steps.Add("Implement PARAM row export in export-param, not inspect.");
+        if (resourceKind == "msg") steps.Add("Implement FMG text entry export in export-msg, not inspect.");
+        if (rootFormat == "unknown") steps.Add("Keep semantic exports unsupported until a reviewed parser can produce structured symbols.");
+
+        return steps;
     }
 
-    private static string MakeSourceUri(string sourcePath)
+    private static bool StartsWith(byte[] sample, byte[] magic)
     {
-        return string.IsNullOrWhiteSpace(sourcePath) ? "file://unknown" : $"file://{Uri.EscapeDataString(sourcePath)}";
+        if (sample.Length < magic.Length)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < magic.Length; index += 1)
+        {
+            if (sample[index] != magic[index])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
+
+    private static string ToHex(byte[] sample, int count)
+    {
+        return string.Join(" ", sample.Take(count).Select(value => value.ToString("X2")));
+    }
+
+    private static string ToAscii(byte[] sample, int count)
+    {
+        return new string(sample.Take(count).Select(value => value >= 32 && value <= 126 ? (char)value : '.').ToArray());
+    }
+
+    private sealed record MagicRule(string RootFormat, byte[] Magic);
 }
