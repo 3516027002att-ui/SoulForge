@@ -43,6 +43,12 @@ export interface WorkspaceIndexStats {
   mapRegions: number;
   paramRows: number;
   textEntries: number;
+  textEntriesByConfidence: {
+    high: number;
+    medium: number;
+    low: number;
+    unknown: number;
+  };
   references: number;
 }
 
@@ -102,6 +108,8 @@ export class WorkspaceIndex {
     const filesByKind = emptyKindCounts();
     for (const file of this.filesByUri.values()) filesByKind[file.resourceKind] += 1;
 
+    const textEntries = this.msgExports.flatMap((item) => item.entries);
+
     return {
       files: this.filesByUri.size,
       filesByKind,
@@ -109,7 +117,13 @@ export class WorkspaceIndex {
       mapEntities: this.mapExports.reduce((sum, item) => sum + item.entities.length, 0),
       mapRegions: this.mapExports.reduce((sum, item) => sum + item.regions.length, 0),
       paramRows: this.paramExports.reduce((sum, item) => sum + item.rows.length, 0),
-      textEntries: this.msgExports.reduce((sum, item) => sum + item.entries.length, 0),
+      textEntries: textEntries.length,
+      textEntriesByConfidence: {
+        high: textEntries.filter((entry) => entry.confidence === 'high').length,
+        medium: textEntries.filter((entry) => entry.confidence === 'medium').length,
+        low: textEntries.filter((entry) => entry.confidence === 'low').length,
+        unknown: textEntries.filter((entry) => !entry.confidence).length
+      },
       references: this.references.length
     };
   }
@@ -240,7 +254,7 @@ function paramRowSearchText(row: ParamRowSymbol): string {
 }
 
 function textEntrySearchText(entry: TextEntrySymbol): string {
-  return [entry.uri, entry.category, entry.textId, entry.text].filter(Boolean).join(' ');
+  return [entry.uri, entry.category, entry.textId, entry.confidence, entry.text].filter(Boolean).join(' ');
 }
 
 function emptyKindCounts(): Record<ResourceKind, number> {
