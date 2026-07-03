@@ -11,6 +11,12 @@ static class MsgTextExport
         var sample = ReadPrefix(sourcePath, (int)Math.Min(info.Length, MaxReadBytes));
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
         var category = SafeCategory(Path.GetFileNameWithoutExtension(sourcePath));
+
+        if (IsPackedContainer(sample))
+        {
+            return Unsupported(sourcePath, "MSG_CONTAINER_BOUNDARY", "Message export stopped at a packed container boundary. Use inspect evidence until unpacking is implemented.");
+        }
+
         var entries = ExtractStrings(sample)
             .GroupBy(item => new { item.Offset, item.Text })
             .Select(group => group.First())
@@ -29,7 +35,7 @@ static class MsgTextExport
 
         if (entries.Length == 0)
         {
-            return BridgeResult<object>.Unsupported(sourcePath, "msg", "No readable message strings were found in the bounded scan window.");
+            return Unsupported(sourcePath, "MSG_NO_READABLE_STRINGS", "No readable message strings were found in the bounded scan window.");
         }
 
         return BridgeResult<object>.Partial(
@@ -45,6 +51,29 @@ static class MsgTextExport
                     new { entries = entries.Length, maxReadBytes = MaxReadBytes })
             },
             new { category, entries });
+    }
+
+    private static BridgeResult<object> Unsupported(string sourcePath, string code, string message)
+    {
+        return new BridgeResult<object>(
+            BridgeResult<object>.MakeSourceUri(sourcePath),
+            sourcePath,
+            "unknown",
+            "msg",
+            "unsupported",
+            new[] { new Diagnostic("info", code, message, BridgeResult<object>.MakeSourceUri(sourcePath)) });
+    }
+
+    private static bool IsPackedContainer(byte[] sample)
+    {
+        return StartsWith(sample, (byte)'D', (byte)'C', (byte)'X', 0)
+            || StartsWith(sample, (byte)'B', (byte)'N', (byte)'D', (byte)'3')
+            || StartsWith(sample, (byte)'B', (byte)'N', (byte)'D', (byte)'4');
+    }
+
+    private static bool StartsWith(byte[] sample, byte a, byte b, byte c, byte d)
+    {
+        return sample.Length >= 4 && sample[0] == a && sample[1] == b && sample[2] == c && sample[3] == d;
     }
 
     private static byte[] ReadPrefix(string sourcePath, int count)
