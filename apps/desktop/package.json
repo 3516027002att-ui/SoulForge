@@ -1,0 +1,26 @@
+{
+  "name": "@soulforge/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@soulforge/core": "workspace:*",
+    "@soulforge/shared": "workspace:*",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^34.0.2",
+    "electron-vite": "^3.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "vite": "^6.0.11"
+  }
+}
