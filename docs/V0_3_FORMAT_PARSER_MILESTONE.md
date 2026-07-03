@@ -14,18 +14,26 @@ event -> map -> param -> msg
 
 The goal is not to conquer every format at once. The goal is to upgrade the most important candidate outputs into stable, testable, evidence-backed exports that the Super Editor and AI tools can rely on.
 
+## Progress snapshot
+
+- FMG has a first fixture-confirmed plumbing path through the SoulForge synthetic FMG fixture layout.
+- The synthetic FMG fixture path proves Bridge routing, stable textId extraction, entry export shape, and diagnostic labeling without committing real game assets.
+- Native FMG table authority is still not claimed. Real FMG support still requires reviewed native fixtures or a documented layout implementation.
+- The guarded FMG table candidate and raw string fallback remain available and explicitly labeled.
+
 ## Required parser upgrades
 
 ### 1. FMG text table parser
 
 Current state:
 
-- FMG-like payloads may produce guarded table candidates.
-- Raw string fallback may use file offsets as temporary text IDs.
+- SoulForge synthetic FMG fixtures can produce confirmed fixture entries through `MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED`.
+- FMG-like payloads may produce guarded table candidates through `MSG_FMG_TABLE_CANDIDATE`.
+- Raw string fallback may use file offsets as temporary text IDs through `MSG_TEXT_EXPORT_PARTIAL`.
 
 v0.3 target:
 
-- fixture-confirmed FMG text ID table parsing;
+- fixture-confirmed native FMG text ID table parsing;
 - stable textId extraction;
 - category inference when available;
 - raw fallback still available but clearly separated from confirmed IDs;
@@ -164,11 +172,18 @@ dotnet run --project bridge/SoulForge.Bridge -- export-param path/to/synthetic.p
 dotnet run --project bridge/SoulForge.Bridge -- export-map path/to/synthetic.msb
 ```
 
+Repository smoke scripts:
+
+```powershell
+.\bridge\SoulForge.Bridge\scripts\verify-magic.ps1
+.\bridge\SoulForge.Bridge\scripts\verify-fmg-fixture.ps1
+```
+
 ## Hard boundaries
 
 - Do not copy external parser implementations.
 - Do not commit real game assets.
-- Do not claim authoritative parsing before fixtures prove it.
+- Do not claim authoritative native parsing before native fixtures prove it.
 - Do not bypass Bridge for native binary parsing.
 - Do not let renderer parse native binary resources directly.
 - Do not write into user mod workspaces directly.
