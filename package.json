@@ -11,10 +11,17 @@
     "dev": "npm run dev -w @soulforge/desktop",
     "build": "npm run build -w @soulforge/shared && npm run build -w @soulforge/core && npm run build -w @soulforge/desktop",
     "typecheck": "tsc -b packages/shared packages/core apps/desktop --pretty false",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "codexpro:doctor": "codexpro doctor --root .",
+    "codexpro:setup": "codexpro setup --root . --mode agent --write workspace --bash safe --bash-session soulforge --require-bash-session --tool-mode standard",
+    "codexpro:start": "codexpro start --root . --mode agent --write workspace --bash safe --bash-session soulforge --require-bash-session --tool-mode standard",
+    "codexpro:start:agent": "npm run codexpro:start",
+    "codexpro:start:handoff": "codexpro start --root . --mode handoff --no-bash --tool-mode standard",
+    "codexpro:pro-bundle": "codexpro pro-bundle --root ."
   },
   "devDependencies": {
     "@types/node": "^22.13.1",
+    "codexpro": "0.28.5",
     "typescript": "^5.7.3"
   }
 }
