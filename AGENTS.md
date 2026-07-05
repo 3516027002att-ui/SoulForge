@@ -109,6 +109,26 @@ Supported UX concepts:
 - Plan mode: AI proposes a plan and diff, but does not execute.
 - Full-permission mode: AI may run approved tools automatically, but still cannot bypass the Patch Engine.
 
+## CodexPro bridge
+
+CodexPro is available as a development-time bridge for connecting ChatGPT Developer Mode to this local repository. It is not part of the SoulForge Electron runtime and must not be treated as a production feature.
+
+Use it when another ChatGPT/Codex conversation needs to inspect or edit this repository through a local MCP bridge:
+
+```powershell
+cd D:\Repository\SoulForge
+npm run codexpro:start
+```
+
+Default behavior in this repository:
+
+- ChatGPT may read and edit SoulForge source files inside this workspace.
+- Bash is `safe` and requires the CodexPro bash session id `soulforge`.
+- Runtime Server URLs and tokens are temporary; do not commit them.
+- If a task should only create a plan and not edit files directly, use `npm run codexpro:start:handoff`.
+
+For copy-paste startup instructions, read `docs/CODEXPRO_QUICKSTART.md`.
+
 ## Testing rules
 
 Every core module must be testable with synthetic mock workspaces.

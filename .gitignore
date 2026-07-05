@@ -18,6 +18,17 @@ release/
 # SoulForge local state
 .soulforge-local/
 
+# CodexPro local/runtime state. Keep stable .ai-bridge docs tracked.
+.codexpro/
+.ai-bridge/current-plan.md
+.ai-bridge/agent-status.md
+.ai-bridge/implementation-diff.patch
+.ai-bridge/execution-log.jsonl
+.ai-bridge/session-log.jsonl
+.ai-bridge/pro-context.md
+.ai-bridge/handoff-run-state.json
+.ai-bridge/watch-handoff-state.json
+
 # .NET
 bin/
 obj/
