@@ -8,6 +8,24 @@ export type ResourceKind =
   | 'action'
   | 'ai'
   | 'sfx'
+  | 'chr'
+  | 'obj'
+  | 'other'
+  | 'unknown';
+
+export type ResourceFormatKind =
+  | 'text'
+  | 'dcx'
+  | 'bnd'
+  | 'emevd'
+  | 'msb'
+  | 'param'
+  | 'fmg'
+  | 'lua'
+  | 'hks'
+  | 'gfx'
+  | 'tpf'
+  | 'backup'
   | 'unknown';
 
 export type ParseStatus = 'unparsed' | 'parsed' | 'partial' | 'unsupported' | 'failed';
@@ -37,6 +55,9 @@ export interface IndexedFile extends ResourceMeta {
   absolutePath: string;
   relativePath: string;
   extension: string;
+  compoundExtension: string;
+  formatKind: ResourceFormatKind;
+  formatLabel: string;
   size: number;
   mtimeMs: number;
   sha256?: string;
@@ -100,12 +121,66 @@ export interface ValidationResult {
 
 export type PreviewKind = 'text' | 'hex' | 'empty' | 'failed';
 
+export type StructuredPreviewStatus = 'parsed' | 'partial' | 'unsupported' | 'failed';
+
+export interface ContainerReadHint {
+  kind: 'pathHint' | 'binderChildCandidate' | 'nestedMagicCandidate' | 'dcxPayloadBoundary' | 'dcxDecompressedPreview' | 'binderChildTable' | 'dcxNestedBinderChildTable';
+  label: string;
+  offset: number;
+  confidence: ReferenceConfidence;
+  resourceKind?: ResourceKind | string;
+  rootFormat?: string;
+  extensionChain?: string[];
+  source?: string;
+  raw?: unknown;
+}
+
+export interface ContainerReadSummary {
+  rootFormat?: string;
+  fileName?: string;
+  fileSize?: number;
+  extensionChain: string[];
+  hints: ContainerReadHint[];
+  pathHintCount: number;
+  binderChildCandidateCount: number;
+  nestedMagicCandidateCount: number;
+  dcxPayloadBoundaryCount?: number;
+  dcxDecompressedPreviewCount?: number;
+  binderChildTableCount?: number;
+  dcxNestedBinderChildTableCount?: number;
+}
+
+export interface ResourceStructuredPreview {
+  status: StructuredPreviewStatus;
+  kind: ResourceKind;
+  parser: string;
+  summary: string;
+  editable: boolean;
+  events?: import('./resourceSymbols.js').EventExport[];
+  maps?: import('./resourceSymbols.js').MapExport[];
+  params?: import('./resourceSymbols.js').ParamExport[];
+  msgs?: import('./resourceSymbols.js').MsgExport[];
+  container?: ContainerReadSummary;
+  bridgeResult?: BridgeResult<unknown>;
+  diagnostics: Diagnostic[];
+}
+
 export interface ResourcePreview {
   file: IndexedFile;
   previewKind: PreviewKind;
   text?: string;
   hex?: string;
+  nativeInspection?: BridgeResult<unknown>;
+  structuredPreview?: ResourceStructuredPreview;
   truncated: boolean;
+  diagnostics: Diagnostic[];
+}
+
+export interface SaveTextResourceResult {
+  ok: boolean;
+  opId?: string;
+  backupRoot?: string;
+  changedFiles: string[];
   diagnostics: Diagnostic[];
 }
 

@@ -1,6 +1,7 @@
 import type { PatchMode, PatchProposal, ReferenceEdge, ResourceKind } from '@soulforge/shared';
 import { createPatchProposal, dryRunPatchProposal } from '../patch/patchEngine.js';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
 import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
 
 export type ToolPermission = 'read' | 'plan' | 'write';
@@ -311,7 +312,7 @@ function asNumber(value: unknown, fallback: number): number {
 
 function asResourceKinds(value: unknown): ResourceKind[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const allowed = new Set<ResourceKind>(['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx', 'unknown']);
+  const allowed = new Set<ResourceKind>(ALL_RESOURCE_KINDS);
   const kinds = value.filter((item): item is ResourceKind => typeof item === 'string' && allowed.has(item as ResourceKind));
   return kinds.length > 0 ? kinds : undefined;
 }

@@ -1,15 +1,19 @@
 import { dialog, ipcMain } from 'electron';
 import {
   analyzeWorkspace,
+  buildAiSidebarDraft,
   createDefaultToolRegistry,
   openResourcePreview,
+  saveTextResource,
   scanWorkspace,
+  type AiSidebarDraft,
+  type AiSidebarDraftRequest,
   type ToolContext,
   type ToolDescriptor,
   type ToolResult,
   type WorkspaceIndex
 } from '@soulforge/core';
-import type { Diagnostic, IndexedFile, ResourcePreview } from '@soulforge/shared';
+import type { Diagnostic, IndexedFile, ResourcePreview, SaveTextResourceResult } from '@soulforge/shared';
 
 let indexedFiles: IndexedFile[] = [];
 let activeIndex: WorkspaceIndex | null = null;
@@ -72,7 +76,33 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('resource.preview', async (_event, sourceUri: string): Promise<ResourcePreview | null> => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) return null;
-    return openResourcePreview({ file });
+    return openResourcePreview({ file, inspectNative: true, parseStructured: true });
+  });
+
+  ipcMain.handle('resource.saveText', async (_event, sourceUri: string, newText: string): Promise<SaveTextResourceResult> => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [
+          {
+            severity: 'error',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Resource must be indexed before it can be saved.',
+            sourceUri
+          }
+        ]
+      };
+    }
+
+    const result = await saveTextResource({ file, newText });
+    if (result.ok) {
+      const refreshed = await openResourcePreview({ file, inspectNative: true, parseStructured: true });
+      const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
+      if (index >= 0) indexedFiles[index] = refreshed.file;
+    }
+    return result;
   });
 
   ipcMain.handle('resource.search', async (_event, query: string) => {
@@ -83,10 +113,17 @@ export function registerIpcHandlers(): void {
           return file.relativePath.toLowerCase().includes(normalized) || file.resourceKind.includes(normalized);
         });
 
-    return items.slice(0, 200);
+    return items;
   });
 
   ipcMain.handle('ai.tools', async () => toolRegistry.list());
+
+  ipcMain.handle('ai.sidebarDraft', async (_event, request: AiSidebarDraftRequest): Promise<AiSidebarDraft> => {
+    return buildAiSidebarDraft({
+      ...request,
+      availableTools: request.availableTools.length > 0 ? request.availableTools : toolRegistry.list()
+    });
+  });
 
   ipcMain.handle(
     'ai.runTool',

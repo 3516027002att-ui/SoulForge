@@ -8,7 +8,24 @@ static class SyntheticBinderFixtureExports
 
     public static BridgeResult<object>? TryExport(string sourcePath)
     {
+        var inventory = TryInspect(sourcePath);
+        if (inventory is null) return null;
+
+        return BridgeResult<object>.Partial(
+            sourcePath,
+            "file",
+            inventory.Diagnostics,
+            inventory.Data);
+    }
+
+    public static SyntheticBinderInventory? TryInspect(string sourcePath)
+    {
         var sample = ReadAll(sourcePath, maxBytes: 4 * 1024 * 1024);
+        return TryInspect(sourcePath, sample);
+    }
+
+    public static SyntheticBinderInventory? TryInspect(string sourcePath, byte[] sample)
+    {
         if (!StartsWith(sample, (byte)'B', (byte)'N', (byte)'D', (byte)'4') && !StartsWith(sample, (byte)'B', (byte)'N', (byte)'D', (byte)'3')) return null;
         if (!MatchesMarker(sample, 4, Marker)) return null;
 
@@ -59,19 +76,49 @@ static class SyntheticBinderFixtureExports
             });
         }
 
-        return BridgeResult<object>.Partial(
-            sourcePath,
-            "file",
-            new[]
+        var data = new
+        {
+            children,
+            raw = new
             {
-                new Diagnostic(
-                    "info",
-                    "BND_SYNTHETIC_FIXTURE_CONFIRMED",
-                    "Exported child inventory from the reviewed SoulForge synthetic BND fixture layout. This confirms parser plumbing and fixture behavior, not native game-format authority.",
-                    sourceUri,
-                    new { children = children.Count, version })
-            },
-            new { children });
+                parser = "soulforge-synthetic-binder-fixture-v1",
+                childCount = children.Count,
+                childTableStart,
+                stringPoolStart,
+                rowStride = ChildRowStride,
+                confidence = "high",
+                nativeFormatAuthority = false
+            }
+        };
+
+        var diagnostics = new[]
+        {
+            new Diagnostic(
+                "info",
+                "BND_SYNTHETIC_FIXTURE_CONFIRMED",
+                "Exported child inventory from the reviewed SoulForge synthetic BND fixture layout. This confirms parser plumbing and fixture behavior, not native game-format authority.",
+                sourceUri,
+                new { children = children.Count, version, childTableStart, stringPoolStart })
+        };
+
+        var evidence = new[]
+        {
+            new FormatEvidence(
+                "binderChildTable",
+                childTableStart,
+                new
+                {
+                    childCount = children.Count,
+                    children,
+                    stringPoolStart,
+                    rowStride = ChildRowStride,
+                    source = "soulforge-synthetic-binder-fixture-v1",
+                    authoritativeLayout = false
+                },
+                "high")
+        };
+
+        return new SyntheticBinderInventory(data, diagnostics, evidence);
     }
 
     private static string GuessResourceKind(string name)
@@ -173,3 +220,8 @@ static class SyntheticBinderFixtureExports
                 || ch is >= '\u3040' and <= '\u30FF');
     }
 }
+
+sealed record SyntheticBinderInventory(
+    object Data,
+    IReadOnlyList<Diagnostic> Diagnostics,
+    IReadOnlyList<FormatEvidence> Evidence);

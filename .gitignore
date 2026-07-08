@@ -18,6 +18,9 @@ release/
 # SoulForge local state
 .soulforge-local/
 
+# Local real mod samples. Never commit game/mod assets.
+mods/
+
 # CodexPro local/runtime state. Keep stable .ai-bridge docs tracked.
 .codexpro/
 .ai-bridge/current-plan.md
