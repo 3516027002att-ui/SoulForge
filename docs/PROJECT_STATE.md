@@ -1,160 +1,296 @@
 # SoulForge 项目状态快照（Checkpoint）
 
-生成时间：2026-07-04
+生成时间：2026-07-08
 
 ## 一、项目本质
 
-SoulForge 是一个“AI-native FromSoftware Mod 超级编辑器”，目标不是传统 Mod 工具，而是：
+SoulForge 是一个 AI-native FromSoftware Mod 超级编辑器。
 
-> 让 AI 能像 Cursor 一样理解、编辑、验证、回滚魂系 Mod 数据结构。
+主定位已经裁定为：
 
-核心不是 UI，而是 **语义桥（Bridge）+ 证据链解析器（Parser）+ Patch Engine**。
-
----
-
-## 二、核心数据链
-
-当前统一资源理解链：
-
-```
-event → map → param → msg
-           ↑
-         BND 容器入口
+```text
+魂游 Mod 的 Cursor
 ```
 
-关键原则：
+核心不是 UI 壳，也不是传统表格工具，而是：
 
-- 所有解析必须基于“证据”，不能直接假设语义
-- synthetic fixture 用于验证 pipeline，不代表真实 FromSoftware 格式
-- low-confidence candidate 永远保留 fallback
+```text
+语义 Bridge + 证据链 Parser + 引用图 + AI Agent + Patch Engine
+```
 
----
+目标是让用户和 AI 能在证据、计划、补丁、验证、备份、日志和回滚保护下编辑魂游 Mod。
 
-## 三、当前技术栈
+## 二、当前权威文档
 
-- Electron + React + TypeScript（前端超级编辑器 UI）
-- C# Bridge（SoulForge.Bridge，负责二进制/语义解析）
-- Node.js monorepo
-- PowerShell / dotnet CLI（本地验证）
+后续 agent 应优先阅读：
 
----
+```text
+docs/PRODUCT_VISION.md
+docs/DECISIONS.md
+docs/V0_5_MILESTONE.md
+docs/PROJECT_STATE.md
+```
 
-## 四、当前完成的关键能力
+其中：
+
+- `PRODUCT_VISION.md`：长期产品愿景；
+- `DECISIONS.md`：用户已经裁定的产品分歧；
+- `V0_5_MILESTONE.md`：v0.5 版本目标；
+- `PROJECT_STATE.md`：当前工程状态快照。
+
+## 三、核心资源范围
+
+早期 parser 链路仍从：
+
+```text
+event -> map -> param -> msg
+```
+
+起步，但 v0.5 产品目标已经扩展为所有主要资源并重。
+
+纳入目标的 ModEngine 风格目录：
+
+```text
+action
+chr
+event
+map
+menu
+msg
+obj
+other
+param
+script
+sfx
+```
+
+除图片 / 纹理类内容外，主要资源都应逐步做到可打开、可查看、可编辑。
+
+## 四、用户打开对象
+
+用户打开的是原生 ModEngine 覆盖目录。
+
+SoulForge 内部建立虚拟资源树 / 语义资源图。
+
+原版游戏目录可以作为只读 base，Mod 目录作为 overlay。所有写入目标必须是 Mod overlay。
+
+## 五、当前技术栈
+
+- Electron + React + TypeScript；
+- C# SoulForge.Bridge；
+- Node.js monorepo；
+- SQLite + FTS5；
+- 未来加入 reference graph、operation log、patch history；
+- OpenAI-compatible + Anthropic-compatible provider；
+- Patch Engine 作为唯一真实写入路径。
+
+## 六、UI 方向
+
+资源组织可以参考 Smithbox 的类型切换：工作区顶部提供 action / chr / event / map / menu / msg / obj / other / param / script / sfx 等入口。
+
+视觉气质不能像 Smithbox 那样老旧、拥挤、压抑。
+
+目标气质应接近 Codex / Cursor：
+
+- 简洁；
+- 优美；
+- 流畅；
+- 轻松；
+- 现代；
+- 低噪音。
+
+前端 agent 必须优先遵守这一点。
+
+## 七、AI 方向
+
+AI 侧边栏是核心功能，不是锦上添花。
+
+AI 行为参考 Codex / OpenCode 这类 coding agent：
+
+```text
+用户目标
+  -> 工具调用收集证据
+  -> 计划
+  -> patch proposal
+  -> 自检
+  -> diff / patch graph review
+  -> staging
+  -> validation
+  -> commit or rollback
+```
+
+思考强度应影响计划深度、工具预算、检索范围、自检强度和重试策略。
+
+Full-permission mode 可以在策略门控通过后自动 commit，但绝不能绕过 Patch Engine。
+
+## 八、Patch Engine 方向
+
+Patch Engine 必须成为真实核心系统。
+
+目标覆盖：
+
+- text / FMG；
+- param / paramdef / layout；
+- event / EMEVD；
+- map / MSB；
+- Files mode raw edit；
+- 后续扩展 action / chr / menu / obj / script / sfx。
+
+任何写入都必须进入：
+
+```text
+patch proposal
+  -> staging
+  -> validation
+  -> backup
+  -> atomic replace
+  -> re-index
+  -> operation log
+  -> rollback
+```
+
+Files mode 可以直接打开和编辑任意文件，但保存仍不能绕过 Patch Engine。
+
+## 九、诊断和置信度
+
+诊断不是普通日志，而是安全编辑模型的一部分。
+
+Diagnostics 同时驱动：
+
+- UI 警告；
+- AI prompt；
+- Patch Engine gate；
+- 用户审查；
+- patch graph；
+- operation log。
+
+高置信引用必须来自 parser、明确 instruction semantics、confirmed schema 或用户确认。
+
+候选引用可以进入 patch proposal，但必须由用户逐条确认或通过明确策略门控。
+
+## 十、当前工程状态（v0.3）
+
+当前仓库仍处在 v0.3 parser plumbing 阶段。
+
+v0.3 的真实目标是：
+
+```text
+low-confidence candidate parser
+  -> fixture-confirmed parser + evidence-first semantic bridge
+```
+
+这只是可信度地基，不代表 native FromSoftware parser / writer 已经完成。
+
+## 十一、当前完成能力
 
 ### 1. Bridge 语义分层
 
-- inspect：只输出 evidence，不输出“假语义结构”
-- export-msg / export-event / export-param / export-map
-- DCX / BND 容器边界识别
-- raw fallback + candidate scan + synthetic fixture 三层结构
+- inspect：只输出 evidence，不输出假语义；
+- export-msg / export-event / export-param / export-map；
+- DCX / BND 容器边界识别；
+- raw fallback + candidate scan + synthetic fixture 三层结构。
 
-### 2. Synthetic Fixture 系统（已接入）
+### 2. Synthetic fixture 系统
 
 已完成并接入 router：
 
-- MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED
-- EMEVD_SYNTHETIC_FIXTURE_CONFIRMED
-- PARAM_SYNTHETIC_FIXTURE_CONFIRMED
-- MSB_SYNTHETIC_FIXTURE_CONFIRMED
-
-### 3. Event / Param / Map 路由升级
-
-执行顺序统一为：
-
-```
-Container boundary → Synthetic fixture → Low-confidence fallback
+```text
+MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED
+EMEVD_SYNTHETIC_FIXTURE_CONFIRMED
+PARAM_SYNTHETIC_FIXTURE_CONFIRMED
+MSB_SYNTHETIC_FIXTURE_CONFIRMED
 ```
 
-### 4. BND（未完成接线）
+### 3. Event / Param / Map 路由顺序
 
-- SyntheticBinderFixtureExports 已存在
-- 但尚未接入 export / inspect 路由
-- binderChildCandidate 仍为 low-confidence evidence
+```text
+Container boundary -> Synthetic fixture -> Low-confidence fallback
+```
 
----
+### 4. BND 状态
 
-## 五、当前已知问题
+- `SyntheticBinderFixtureExports` 已存在；
+- BND synthetic child inventory 接线仍是后续任务；
+- binderChildCandidate 仍为 low-confidence evidence；
+- native BND parser / writer 尚未完成。
+
+## 十二、当前已知问题
 
 ### 1. Build 环境问题
 
-- npm run build 报 Rollup optional dependency 缺失（@rollup/rollup-linux-x64-gnu）
-- 属于 node_modules / optional deps 环境问题，不是代码逻辑问题
+曾出现 Rollup optional dependency 缺失：
+
+```text
+@rollup/rollup-linux-x64-gnu
+```
+
+这更像 node_modules / optional deps 环境问题，不应直接判断为核心代码逻辑错误。
 
 ### 2. CodexPro 执行限制
 
-- safe bash 不允许直接运行 dotnet / PowerShell
-- Bridge smoke 需要本地终端执行
+某些 safe bash 环境可能不允许直接运行 dotnet / PowerShell。
 
----
+Bridge smoke 可能需要本地终端执行。
 
-## 六、当前开发阶段（v0.3）
+## 十三、当前开发优先级
 
-### v0.3 目标
+### P0：维持 v0.3 任务边界
 
-从：
+Codex 当前只应做窄任务：
 
-> low-confidence candidate parser
+- synthetic fixture router wire-up；
+- 类型小修；
+- smoke script；
+- 必要 build 修复。
 
-升级为：
+不得自由扩展到：
 
-> fixture-confirmed parser + evidence-first semantic bridge
+- v0.5 UI；
+- Patch Engine 大改；
+- native parser；
+- writer；
+- Blender / 3D；
+- 本地 LLM；
+- vector DB。
 
-重点不是扩功能，而是“可信度升级”。
-
----
-
-## 七、下一步优先级
-
-### P0：本地验证（issue #1）
-
-运行：
-
-```powershell
-npm run bridge:build
-npm run bridge:verify:synthetic
-```
-
-目标：确认 4 大 synthetic fixture 全部通过。
-
----
-
-### P1：BND 子资源系统（issue #2）
+### P1：BND 子资源系统
 
 目标：
 
-- BND child inventory fixture confirmed
-- child table listing
-- offset / size / kind / name
+- BND child inventory fixture confirmed；
+- child table listing；
+- offset / size / kind / name；
+- 保留 visible-string fallback 为 low-confidence evidence。
 
----
+### P2：为 v0.5 建地基
 
-### P2：稳定性
+只在 v0.3 稳定后推进：
 
-- 修复 npm optional dependency
-- 稳定 CI / build pipeline
+- native DCX / BND；
+- writer contracts；
+- unified patch model；
+- SQLite reference graph；
+- operation log / patch history；
+- AI tool registry；
+- Patch Engine staging / validation / rollback。
 
----
+## 十四、v0.5 非目标
 
-## 八、核心设计哲学
+v0.5 不要求：
 
-### 1. 证据优先
+- 完整 3D parity；
+- Blender MCP 实装；
+- mesh modeling；
+- animation authoring；
+- 本地 LLM runtime；
+- vector database RAG；
+- 不安全自主二进制重写；
+- 对 unsupported 格式盲改。
 
-任何结构必须满足：
+这些方向可以预留接口，但不能挤占 v0.5 的核心安全编辑闭环。
 
-> 有证据 → 才能提升置信度
+## 十五、当前系统真实状态一句话
 
-### 2. 不伪造语义
-
-- 禁止从 binary 猜“这是敌人/区域/事件”
-- 只能输出 candidate + confidence
-
-### 3. fixture vs native
-
-- fixture = pipeline correctness proof
-- native = 未证明领域
-
----
-
-## 九、当前系统真实状态一句话总结
-
-> Bridge 已经能“看见结构”，但还不能“宣称理解结构”。
+```text
+SoulForge 已经有 evidence-first Bridge 地基和产品决策，但真实 native parser / writer / Patch Engine 完整闭环仍未完成。
+```
