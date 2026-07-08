@@ -19,7 +19,7 @@ export interface GameInferenceResult {
   reasons: string[];
 }
 
-const COMMON_RESOURCE_DIRS: ResourceKind[] = ['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx'];
+const COMMON_RESOURCE_DIRS: ResourceKind[] = ['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx', 'chr', 'obj', 'other'];
 
 export const GAME_PROFILES: readonly GameProfile[] = [
   {
@@ -110,10 +110,16 @@ export function extractMapIdFromPath(relativePath: string, profile: GameProfile 
 }
 
 export function resourceKindFromExtension(relativePath: string): ResourceKind {
-  const path = relativePath.toLowerCase();
+  const path = relativePath.toLowerCase().replaceAll('\\', '/');
   if (path.includes('.emevd')) return 'event';
   if (path.includes('.msb')) return 'map';
   if (path.includes('parambnd') || path.endsWith('.param') || path.includes('/param/')) return 'param';
   if (path.includes('msgbnd') || path.endsWith('.fmg') || path.includes('/msg/')) return 'msg';
+  if (path.includes('/chr/') || path.endsWith('.chrbnd.dcx') || path.endsWith('.anibnd.dcx')) return 'chr';
+  if (path.includes('/obj/') || path.endsWith('.objbnd.dcx')) return 'obj';
+  if (path.includes('/sfx/') || path.endsWith('.ffxbnd.dcx')) return 'sfx';
+  if (path.includes('/menu/') || path.endsWith('.gfx')) return 'menu';
+  if (path.includes('/script/') || path.endsWith('.luabnd.dcx') || path.endsWith('.lua')) return 'script';
+  if (path.includes('/other/')) return 'other';
   return 'unknown';
 }

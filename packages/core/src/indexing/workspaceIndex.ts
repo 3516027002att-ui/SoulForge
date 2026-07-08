@@ -15,6 +15,7 @@ import type {
 } from '@soulforge/shared';
 import { buildReferenceGraph, type ReferenceBuildOptions, type ReferenceBuildResult } from '../references/referenceBuilder.js';
 import { collectEventEvidence, renderEventEvidenceMarkdown, type EventEvidenceReport } from '../references/eventEvidence.js';
+import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
 
 export interface SearchResourcesOptions {
   query: string;
@@ -136,7 +137,14 @@ export class WorkspaceIndex {
 
     for (const file of this.filesByUri.values()) {
       if (kinds && !kinds.has(file.resourceKind)) continue;
-      const text = [file.relativePath, file.resourceKind, file.extension].join(' ');
+      const text = [
+        file.relativePath,
+        file.resourceKind,
+        file.extension,
+        file.compoundExtension,
+        file.formatKind,
+        file.formatLabel
+      ].join(' ');
       const score = scoreText(text, query);
       if (score > 0) results.push({ item: file, score, highlights: makeHighlights(text, query) });
     }
@@ -258,18 +266,7 @@ function textEntrySearchText(entry: TextEntrySymbol): string {
 }
 
 function emptyKindCounts(): Record<ResourceKind, number> {
-  return {
-    event: 0,
-    map: 0,
-    param: 0,
-    msg: 0,
-    menu: 0,
-    script: 0,
-    action: 0,
-    ai: 0,
-    sfx: 0,
-    unknown: 0
-  };
+  return Object.fromEntries(ALL_RESOURCE_KINDS.map((kind) => [kind, 0])) as Record<ResourceKind, number>;
 }
 
 function replaceByKey<T>(items: T[], key: string, selectKey: (item: T) => string, value: T): T[] {

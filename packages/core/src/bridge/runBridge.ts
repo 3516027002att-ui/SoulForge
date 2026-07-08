@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { BridgeResult, Diagnostic, ResourceKind } from '@soulforge/shared';
 
 export type BridgeCommand = 'inspect' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate';
@@ -13,9 +15,10 @@ export interface RunBridgeOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+const BRIDGE_PROJECT_RELATIVE_PATH = 'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj';
 
 export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise<BridgeResult<T>> {
-  const bridgeProjectPath = options.bridgeProjectPath ?? resolve(process.cwd(), 'bridge/SoulForge.Bridge/SoulForge.Bridge.csproj');
+  const bridgeProjectPath = resolveBridgeProjectPath(options.bridgeProjectPath, options.cwd);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return new Promise((resolveResult) => {
@@ -37,7 +40,7 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       if (settled) return;
       settled = true;
       child.kill('SIGKILL');
-      resolveResult(failedBridgeResult<T>(options, 'BRIDGE_TIMEOUT', `Bridge command timed out after ${timeoutMs}ms.`, { stderr }));
+      resolveResult(failedBridgeResult<T>(options, 'BRIDGE_TIMEOUT', `Bridge command timed out after ${timeoutMs}ms.`, { stderr, bridgeProjectPath }));
     }, timeoutMs);
 
     child.stdout.setEncoding('utf8');
@@ -55,7 +58,7 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      resolveResult(failedBridgeResult<T>(options, 'BRIDGE_SPAWN_FAILED', error.message, { stderr }));
+      resolveResult(failedBridgeResult<T>(options, 'BRIDGE_SPAWN_FAILED', error.message, { stderr, bridgeProjectPath }));
     });
 
     child.on('close', () => {
@@ -67,6 +70,33 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       resolveResult(parsed);
     });
   });
+}
+
+function resolveBridgeProjectPath(explicitPath?: string, cwd?: string): string {
+  if (explicitPath) return explicitPath;
+
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const startDirectories = [cwd, process.cwd(), moduleDir].filter((value): value is string => Boolean(value));
+
+  for (const startDirectory of startDirectories) {
+    const found = findBridgeProjectPathUp(startDirectory);
+    if (found) return found;
+  }
+
+  return resolve(process.cwd(), BRIDGE_PROJECT_RELATIVE_PATH);
+}
+
+function findBridgeProjectPathUp(startDirectory: string): string | null {
+  let current = resolve(startDirectory);
+
+  while (true) {
+    const candidate = resolve(current, BRIDGE_PROJECT_RELATIVE_PATH);
+    if (existsSync(candidate)) return candidate;
+
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
 }
 
 function parseBridgeJson<T>(stdout: string, options: RunBridgeOptions, stderr: string): BridgeResult<T> {

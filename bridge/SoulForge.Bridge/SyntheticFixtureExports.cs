@@ -49,6 +49,8 @@ static class SyntheticFixtureExports
             var typeCode = ReadInt32(sample, rowOffset + 12);
             if (rowId < 0 || !IsRangeInside(sample, rowNameOffset, 2)) return null;
 
+            object fieldValue = typeCode == 2 ? value != 0 : value;
+
             rows.Add(new
             {
                 uri = $"param://{paramName}/{rowId}",
@@ -62,7 +64,7 @@ static class SyntheticFixtureExports
                     {
                         name = "value",
                         type = typeCode == 2 ? "bool32" : "int32",
-                        value = typeCode == 2 ? value != 0 : value
+                        value = fieldValue
                     }
                 },
                 raw = new

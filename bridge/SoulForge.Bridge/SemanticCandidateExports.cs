@@ -21,6 +21,10 @@ static class SemanticCandidateExports
     {
         var sample = ReadPrefix(sourcePath);
         if (IsPackedContainer(sample)) return PackedUnsupported(sourcePath, "event");
+
+        var synthetic = SyntheticFixtureExports.TryExport(sourcePath, "event");
+        if (synthetic is not null) return synthetic;
+
         if (!StartsWith(sample, (byte)'E', (byte)'V', (byte)'D', 0)) return null;
 
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
@@ -66,6 +70,9 @@ static class SemanticCandidateExports
         var sample = ReadPrefix(sourcePath);
         if (IsPackedContainer(sample)) return PackedUnsupported(sourcePath, "param");
 
+        var synthetic = SyntheticFixtureExports.TryExport(sourcePath, "param");
+        if (synthetic is not null) return synthetic;
+
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
         var paramName = InferParamName(sourcePath);
         if (!LooksLikeParam(sourcePath, sample)) return null;
@@ -109,6 +116,9 @@ static class SemanticCandidateExports
     {
         var sample = ReadPrefix(sourcePath);
         if (IsPackedContainer(sample)) return PackedUnsupported(sourcePath, "map");
+
+        var synthetic = SyntheticMapFixtureExports.TryExport(sourcePath);
+        if (synthetic is not null) return synthetic;
 
         var sourceUri = BridgeResult<object>.MakeSourceUri(sourcePath);
         var mapId = InferMapId(sourcePath) ?? Path.GetFileNameWithoutExtension(sourcePath).ToLowerInvariant();

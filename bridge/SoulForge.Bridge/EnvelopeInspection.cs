@@ -15,9 +15,12 @@ static class EnvelopeInspection
         var magicEvidence = new List<FormatEvidence>();
         var rootFormat = DetectRootFormat(sample, magicEvidence);
         var resourceKind = GuessKind(sourcePath);
+        var headerEvidence = HeaderEvidenceScanner.Scan(sample, rootFormat);
         var pathHints = EnvelopeHintScanner.Scan(sample);
         var binderChildCandidates = BinderChildCandidateScanner.Scan(sample);
         var nestedMagicCandidates = NestedFormatScanner.Scan(sample);
+        var dcxPayloadProbe = DcxPayloadProbe.Probe(sourcePath, sample, length);
+        var syntheticBinderInventory = SyntheticBinderFixtureExports.TryInspect(sourcePath, sample);
         var diagnostics = new List<Diagnostic>
         {
             new(
@@ -27,6 +30,15 @@ static class EnvelopeInspection
                 BridgeResult<object>.MakeSourceUri(sourcePath),
                 new { fileLength = length, sampleLength = sample.Length, maxSampleBytes })
         };
+
+        if (headerEvidence.Count > 0)
+        {
+            diagnostics.Add(new Diagnostic(
+                "info",
+                "HEADER_EVIDENCE_FOUND",
+                "Captured bounded-prefix header evidence including prefix bytes, ASCII preview, and endian probes. This is not a confirmed native layout parser.",
+                BridgeResult<object>.MakeSourceUri(sourcePath)));
+        }
 
         if (rootFormat == "unknown")
         {
@@ -72,13 +84,26 @@ static class EnvelopeInspection
                 BridgeResult<object>.MakeSourceUri(sourcePath)));
         }
 
+        if (dcxPayloadProbe is not null)
+        {
+            diagnostics.AddRange(dcxPayloadProbe.Diagnostics);
+        }
+
+        if (syntheticBinderInventory is not null)
+        {
+            diagnostics.AddRange(syntheticBinderInventory.Diagnostics);
+        }
+
         var evidence = new List<FormatEvidence>(magicEvidence)
         {
             new("extensionChain", 0, extensionChain, "medium")
         };
+        evidence.AddRange(headerEvidence);
         evidence.AddRange(pathHints);
         evidence.AddRange(binderChildCandidates);
         evidence.AddRange(nestedMagicCandidates);
+        if (dcxPayloadProbe is not null) evidence.AddRange(dcxPayloadProbe.Evidence);
+        if (syntheticBinderInventory is not null) evidence.AddRange(syntheticBinderInventory.Evidence);
 
         var layers = new List<FormatLayer>
         {
@@ -92,9 +117,14 @@ static class EnvelopeInspection
                     sampleBytes = sample.Length,
                     maxSampleBytes,
                     envelopeOnly = true,
+                    headerEvidence = headerEvidence.Count,
                     pathHints = pathHints.Count,
                     binderChildCandidates = binderChildCandidates.Count,
-                    nestedMagicCandidates = nestedMagicCandidates.Count
+                    nestedMagicCandidates = nestedMagicCandidates.Count,
+                    dcxPayloadBoundary = dcxPayloadProbe?.BoundaryStatus,
+                    dcxCompressionFormat = dcxPayloadProbe?.CompressionFormat,
+                    dcxType = dcxPayloadProbe?.DcxType,
+                    bndChildTableEvidence = syntheticBinderInventory is not null
                 })
         };
 
@@ -157,8 +187,8 @@ static class EnvelopeInspection
             "Treat inspect results as envelope evidence only; do not assume semantic parsing succeeded."
         };
 
-        if (rootFormat == "DCX") steps.Add("Use nestedMagicCandidate evidence only as hints until a reviewed DCX payload boundary and decompressor exist.");
-        if (rootFormat is "BND3" or "BND4") steps.Add("Use binderChildCandidate evidence only as hints until a fixture-confirmed binder table parser exists.");
+        if (rootFormat == "DCX") steps.Add("Use dcxPayloadBoundary evidence for reviewed payload offsets; treat decompressed previews as format hints until semantic parsers consume the payload.");
+        if (rootFormat is "BND3" or "BND4") steps.Add("Prefer binderChildTable evidence when present; otherwise treat binderChildCandidate visible strings only as low-confidence hints.");
         if (resourceKind == "event") steps.Add("Use EMEVD candidate exports as low-confidence IDs until instruction table parsing is fixture-confirmed.");
         if (resourceKind == "map") steps.Add("Use MSB candidate exports as low-confidence names until entity tables are fixture-confirmed.");
         if (resourceKind == "param") steps.Add("Use PARAM candidate exports as low-confidence row IDs until row layout is fixture-confirmed.");

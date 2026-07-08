@@ -21,92 +21,50 @@ event -> map -> param -> msg
 - FMG synthetic fixture path 已通过 export-msg 接入；
 - `SyntheticFixtureExports.cs` 已包含 event 和 PARAM synthetic fixture helper；
 - `SyntheticMapFixtureExports.cs` 已包含 map synthetic fixture helper；
-- `SyntheticBinderFixtureExports.cs` 已包含 BND synthetic child inventory helper；
-- `CODEX_TASK_ROUTER_WIREUP.md` 记录 issue #1 的窄任务；
+- `SemanticCandidateExports.cs` 已把 event / PARAM / map synthetic helper 接入 export-event / export-param / export-map；
+- `SyntheticBinderFixtureExports.cs` 已包含 BND synthetic child inventory helper，并可供 export 与 inspect 复用；
+- `bridge/SoulForge.Bridge/scripts/verify-synthetic-core-fixtures.ps1` 已覆盖 export-msg / export-event / export-param / export-map，并追加 synthetic DCX DFLT inspect 断言；
+- `scripts/verify-synthetic-core-fixtures.mjs` 已新增为跨 Windows / WSL 的 Node smoke wrapper，生成同一批 synthetic fixtures；
+- `DcxPayloadProbe.cs` 已接入 inspect，能输出 DCX payload boundary evidence，对 DFLT/zlib payload 做 bounded decompressed preview，并在 synthetic BND preview 上追加 nested binder evidence；
+- KRAK / EDGE / ZSTD 当前只做边界识别和 unsupported decompression diagnostic，不尝试伪解压；
 - `CODEX_TASK_BND_FIXTURE_WIREUP.md` 记录 issue #2 的后续任务；
-- GitHub issue #1：event / param / map router wire-up；
+- param / map Bridge exports 现在已在结构化预览中可见；下一目标是 BND child row table 渲染和 writer contract 规划；
+- GitHub issue #1：event / param / map router wire-up，代码侧已完成，仍需本地 dotnet smoke 验证；
 - GitHub issue #2：BND synthetic child inventory wire-up。
 
 重要 caveat：
 
-- Event、PARAM、map synthetic helpers 已写入，但还没接入 SemanticCandidateExports 或 Program.cs；
-- BND synthetic helper 已写入，但还没接入 inspect/export 路径；
-- 不要在 build 和 smoke script 证明前声称这些路径已完成。
+- Event、PARAM、map synthetic helpers 已接入 router，但当前 CodexPro 运行壳无法稳定执行 Bridge dotnet smoke，所以 Bridge smoke 需要在本地终端或修复 .NET 环境后执行；
+- DCX payload boundary / DFLT preview 代码已接入，但不要在 `bridge:verify:synthetic` 通过前声称 DCX 验证完成；
+- BND synthetic helper 已接入 inspect/export 复用入口，但不要在 Bridge smoke 通过前声称 BND 验证完成；
+- 不要在 dotnet build 和 smoke script 证明前声称 issue #1 完全验证通过；
+- 不要在 BND smoke 通过前声称 v0.3 BND child inventory 已完成。
 
 ## 当前优先级
 
-### 第一优先级：issue #1
+### 第一优先级：本地验证 issue #1 + DCX inspect
 
-先完成 event / PARAM / map synthetic fixture router wire-up。
+在本地终端执行：
 
-在 `SemanticCandidateExports.cs`：
-
-- TryExportEvent 保留 packed-container boundary handling first；
-- 然后调用 SyntheticFixtureExports.TryExport for event；
-- 然后保留现有 low-confidence event ID candidate scan；
-- TryExportParam 同理，先 boundary，再 synthetic PARAM，再低置信 row ID candidate；
-- TryExportMap 同理，先 boundary，再 SyntheticMapFixtureExports，再 visible-name fallback。
-
-不要移除现有 fallback。
-
-### 第二优先级：PARAM 类型小修
-
-检查 `SyntheticFixtureExports.cs`。
-
-如果 synthetic PARAM field value 在一个条件表达式里混用 bool 和 int，就改成先赋给 object，再输出 value。
-
-不要改变 JSON shape。
-
-### 第三优先级：core synthetic smoke script
-
-添加或更新：
-
-```text
-bridge/SoulForge.Bridge/scripts/verify-synthetic-core-fixtures.ps1
+```powershell
+npm run bridge:build
+npm run bridge:verify:synthetic
 ```
 
-覆盖：
-
-- export-msg；
-- export-event；
-- export-param；
-- export-map。
+`bridge:verify:synthetic` 当前走 Node wrapper；保留 PowerShell fixture 脚本作为 Windows 手动诊断入口。
 
 必须断言：
 
 - MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED；
 - EMEVD_SYNTHETIC_FIXTURE_CONFIRMED；
 - PARAM_SYNTHETIC_FIXTURE_CONFIRMED；
-- MSB_SYNTHETIC_FIXTURE_CONFIRMED。
+- MSB_SYNTHETIC_FIXTURE_CONFIRMED；
+- DCX_PAYLOAD_BOUNDARY_CONFIRMED；
+- DCX_DFLT_DECOMPRESSED_PREVIEW_READY。
 
 不要提交二进制 fixture。
 
-### 第四优先级：build / typecheck
-
-运行：
-
-```bash
-dotnet build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj
-npm run typecheck
-npm run build
-```
-
-如果失败，只修当前任务所需的最小 compile/type 问题。
-
-### 第五优先级：状态文档更新
-
-issue #1 完成后，更新：
-
-- `docs/V0_3_FORMAT_PARSER_MILESTONE.md`；
-- `docs/LOGIC_LAYER_REVIEW.md`。
-
-移除 event / PARAM / map synthetic helpers 仍待 router wire-up 的 caveat。
-
-不要声称 native FMG、EMEVD、PARAM、MSB、BND parser 已完成。
-
-## 后续任务：issue #2
-
-issue #1 完成后，再处理 BND synthetic fixture wire-up。
+### 第二优先级：issue #2，BND synthetic fixture wire-up
 
 阅读：
 
@@ -120,6 +78,33 @@ BND 任务要谨慎决策接线路径：
 - 只有非常清晰时才新增公开 export-binder / export-file command。
 
 必须保留 visible-string binderChildCandidate 作为 low-confidence fallback。
+
+### 第三优先级：build / typecheck
+
+运行：
+
+```bash
+npm run typecheck
+npm run build
+```
+
+当前 CodexPro 记录：
+
+- `npm run typecheck` 已通过；
+- `npm run build` 失败于本地 Rollup optional dependency 缺失：`@rollup/rollup-linux-x64-gnu`，需要刷新 node_modules / npm install 状态后再跑。
+
+如果失败，只修当前任务所需的最小 compile/type 问题。
+
+### 第四优先级：状态文档更新
+
+issue #1 本地 dotnet smoke 通过后，继续更新：
+
+- `docs/V0_3_FORMAT_PARSER_MILESTONE.md`；
+- `docs/LOGIC_LAYER_REVIEW.md`。
+
+当前文档已记录 router wire-up 代码完成、smoke 脚本已添加、CodexPro safe bash 未能执行 dotnet / PowerShell 验证。
+
+不要声称 native FMG、EMEVD、PARAM、MSB、BND parser 已完成。
 
 ## 硬边界
 
