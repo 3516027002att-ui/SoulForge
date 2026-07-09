@@ -22,6 +22,7 @@ import {
 import { commitProposedFileWrite } from '../files/fileWorkbench.js';
 import type { OperationLogStore } from '../patch/operationLog.js';
 import { evaluateRawWriterGate } from '../patch/writerContract.js';
+import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 
 export type SaveRawResourceResult = SaveTextResourceResult & {
@@ -105,12 +106,32 @@ export async function saveRawReplace(options: SaveRawReplaceOptions): Promise<Sa
     };
   }
 
+  // Strict base64 before proposal so invalid payloads never reach staging.
+  try {
+    decodeStrictBase64(options.newContentBase64, { allowEmpty: options.allowEmpty === true });
+  } catch (error) {
+    const code = error instanceof StrictBase64Error ? error.code : 'RAW_REPLACE_PAYLOAD_INVALID';
+    return {
+      ok: false,
+      changedFiles: [],
+      diagnostics: [{
+        severity: 'error',
+        code,
+        message: error instanceof Error ? error.message : 'newContentBase64 is not valid strict base64.',
+        sourceUri: options.file.sourceUri
+      }],
+      kind: 'raw_file_replace'
+    };
+  }
+
   const proposal = await proposeWholeFileReplace({
     workspaceId: options.file.workspaceId,
     absolutePath: options.file.absolutePath,
     relativePath: options.file.relativePath,
     newContentBase64: options.newContentBase64,
     allowEmpty: options.allowEmpty === true,
+    // Pass caller hash unchanged — proposal must not recompute/overwrite (TOCTOU).
+    expectedHash: options.expectedHash,
     title: options.title ?? `Raw replace ${options.file.relativePath}`,
     ...(options.session ? { session: options.session } : {}),
     ...(options.confirmation ? { confirmation: options.confirmation } : {})
@@ -200,15 +221,16 @@ export async function saveRawByteRange(options: SaveRawByteRangeOptions): Promis
 
   let replacement: Buffer;
   try {
-    replacement = Buffer.from(options.replacementBase64, 'base64');
-  } catch {
+    replacement = decodeStrictBase64(options.replacementBase64, { allowEmpty: false });
+  } catch (error) {
+    const code = error instanceof StrictBase64Error ? error.code : 'RAW_PATCH_PAYLOAD_INVALID';
     return {
       ok: false,
       changedFiles: [],
       diagnostics: [{
         severity: 'error',
-        code: 'RAW_PATCH_PAYLOAD_INVALID',
-        message: 'replacementBase64 is not valid base64.',
+        code,
+        message: error instanceof Error ? error.message : 'replacementBase64 is not valid strict base64.',
         sourceUri: options.file.sourceUri
       }],
       kind: 'raw_byte_range'
@@ -222,6 +244,8 @@ export async function saveRawByteRange(options: SaveRawByteRangeOptions): Promis
     offset: options.offset,
     length: options.length,
     replacement,
+    // Pass caller hash unchanged — proposal must not recompute/overwrite (TOCTOU).
+    expectedHash: options.expectedHash,
     title: options.title ?? `Raw byte patch ${options.file.relativePath}`,
     ...(options.session ? { session: options.session } : {})
   });

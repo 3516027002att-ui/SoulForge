@@ -107,8 +107,12 @@ async function main(): Promise<void> {
     if (caps.nativeFormatAuthority !== false) {
       throw new Error(`${name}: nativeFormatAuthority must be false`);
     }
+    // Static matrix without probe: no semantic/native/container claim for mock packed bytes.
     if (caps.semanticWritable || caps.nativeRoundTripSafe || caps.containerWritable) {
-      throw new Error(`${name}: semantic/native/container write must be false`);
+      throw new Error(`${name}: semantic/native/container write must be false without fixture probe`);
+    }
+    if (caps.containerReadableLevel === undefined || caps.containerWritableLevel === undefined) {
+      throw new Error(`${name}: v0.6 container level fields required`);
     }
     if (!caps.rawWritable) throw new Error(`${name}: rawWritable must be true`);
   }

@@ -30,11 +30,31 @@ export class FileRiskValidator implements ValidatorContract {
         relativePath
       });
 
-      if (op.kind === 'resource_field_edit' || op.kind.startsWith('container_')) {
+      // v0.6: container_child_replace is handled by ContainerChildReplaceWriter +
+      // ContainerRoundTripValidator for synthetic SFBN / DCX DFLT nested only.
+      if (op.kind === 'container_child_replace') {
+        if (op.metadata?.requiresConfirmation !== true && op.riskLevel !== 'high') {
+          diagnostics.push(createDiagnostic({
+            severity: 'warning',
+            code: 'CONTAINER_REPLACE_CONFIRMATION_RECOMMENDED',
+            message: 'container_child_replace should be high risk with confirmation metadata.',
+            targetUri: op.targetUri
+          }));
+        }
+        continue;
+      }
+
+      if (
+        op.kind === 'resource_field_edit'
+        || op.kind === 'container_child_add'
+        || op.kind === 'container_child_delete'
+        || op.kind === 'container_child_rename'
+        || op.kind === 'container_child_move'
+      ) {
         diagnostics.push(createDiagnostic({
           severity: 'error',
           code: 'NATIVE_WRITER_REQUIRED',
-          message: 'Structured/container operations require a native writer (not implemented).',
+          message: 'Structured/container mutations (except container_child_replace) require a native writer (not implemented).',
           targetUri: op.targetUri,
           details: { kind: op.kind, nativeFormatAuthority: false }
         }));

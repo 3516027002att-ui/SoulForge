@@ -2,10 +2,12 @@ export * from './textHash.js';
 export * from './textFileValidator.js';
 export * from './rawFileValidator.js';
 export * from './fileRiskValidator.js';
+export * from './containerRoundTripValidator.js';
 
 import type { ValidatorContract } from '@soulforge/shared';
 import { TextFileValidator } from './textFileValidator.js';
 import { RawFileValidator } from './rawFileValidator.js';
+import { ContainerRoundTripValidator } from './containerRoundTripValidator.js';
 import {
   FileRiskValidator,
   WholeFileReplaceValidator,
@@ -18,6 +20,7 @@ export function createScaffoldValidators(): ValidatorContract[] {
     new RawFileValidator(),
     new WholeFileReplaceValidator(),
     new FileRiskValidator(),
-    new WorkspaceBoundaryValidator()
+    new WorkspaceBoundaryValidator(),
+    new ContainerRoundTripValidator()
   ];
 }

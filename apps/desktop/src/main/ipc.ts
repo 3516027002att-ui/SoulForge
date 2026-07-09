@@ -8,15 +8,22 @@ import {
   openFileOperationLogStore,
   openResourcePreview,
   openWorkspaceSession,
+  inspectContainerTree,
+  listContainerChildren,
+  probeContainerCapabilityOptions,
+  readContainerChild,
   readRawResourceMetadata,
   readRawResourceRange,
+  replaceContainerChild,
   resolveOperationLogStorePath,
   resolveResourceCapabilities,
   rollbackOperation,
+  roundTripContainer,
   saveRawByteRange,
   saveRawReplace,
   saveTextResource,
   scanWorkspace,
+  validateContainer,
   type AiSidebarDraft,
   type AiSidebarDraftRequest,
   type FileOperationLogStore,
@@ -342,6 +349,153 @@ export function registerIpcHandlers(): void {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) return null;
     return readRawResourceMetadata(file, { computeHash: file.size <= 32 * 1024 * 1024 });
+  });
+
+  ipcMain.handle('resource.inspectContainerTree', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message: 'Resource must be indexed before container inspect.',
+          sourceUri
+        }]
+      };
+    }
+    return inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
+  });
+
+  ipcMain.handle(
+    'resource.listContainerChildren',
+    async (_event, sourceUri: string, recursive?: boolean) => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          children: [],
+          diagnostics: [{
+            severity: 'error' as const,
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Resource must be indexed before listing container children.',
+            sourceUri
+          }]
+        };
+      }
+      return listContainerChildren(file.absolutePath, {
+        relativePath: file.relativePath,
+        recursive: recursive === true
+      });
+    }
+  );
+
+  ipcMain.handle(
+    'resource.readContainerChild',
+    async (_event, childUri: string) => {
+      const hash = childUri.indexOf('#');
+      const containerUri = hash >= 0 ? childUri.slice(0, hash) : childUri;
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file) {
+        return {
+          ok: false,
+          childUri,
+          diagnostics: [{
+            severity: 'error' as const,
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Parent container must be indexed before reading a child.',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      return readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
+    }
+  );
+
+  ipcMain.handle(
+    'resource.replaceContainerChild',
+    async (
+      _event,
+      childUri: string,
+      expectedContainerHash: string,
+      expectedChildHash: string,
+      newContentBase64: string,
+      confirmation?: ConfirmationReceipt
+    ): Promise<SaveTextResourceResult> => {
+      const hash = childUri.indexOf('#');
+      const containerUri = hash >= 0 ? childUri.slice(0, hash) : childUri;
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Parent container must be indexed before child replace.',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const operationLog = activeSession
+        ? ensureActiveOperationLog(activeSession.meta.workspaceId)
+        : undefined;
+      return replaceContainerChild({
+        file,
+        childUri,
+        expectedContainerHash,
+        expectedChildHash,
+        newContentBase64,
+        ...(confirmation ? { confirmation } : {}),
+        ...(activeSession ? { session: activeSession } : {}),
+        ...(operationLog ? { operationLog } : {})
+      });
+    }
+  );
+
+  ipcMain.handle('resource.roundTripContainer', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return {
+        ok: false,
+        byteIdentical: false,
+        payloadEquivalent: false,
+        originalHash: '',
+        rebuiltHash: '',
+        childHashMatches: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message: 'Resource must be indexed before container roundtrip.',
+          sourceUri
+        }]
+      };
+    }
+    return roundTripContainer(file.absolutePath);
+  });
+
+  ipcMain.handle('resource.validateContainer', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return {
+        ok: false,
+        format: 'unknown' as const,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message: 'Resource must be indexed before container validate.',
+          sourceUri
+        }]
+      };
+    }
+    return validateContainer(file.absolutePath);
+  });
+
+  ipcMain.handle('resource.probeContainerCapabilities', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) return null;
+    const probed = await probeContainerCapabilityOptions(file.absolutePath);
+    return resolveResourceCapabilities(file, probed);
   });
 
   ipcMain.handle('operation.list', async (): Promise<PatchHistoryEntry[]> => {

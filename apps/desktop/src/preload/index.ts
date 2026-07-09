@@ -77,6 +77,33 @@ const api = {
     sourceUri?: string
   ): Promise<ConfirmationReceipt> =>
     ipcRenderer.invoke('resource.createConfirmation', subjects, riskLevel, sourceUri),
+  inspectContainerTree: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.inspectContainerTree', sourceUri),
+  listContainerChildren: (sourceUri: string, recursive?: boolean): Promise<unknown> =>
+    ipcRenderer.invoke('resource.listContainerChildren', sourceUri, recursive),
+  readContainerChild: (childUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readContainerChild', childUri),
+  replaceContainerChild: (
+    childUri: string,
+    expectedContainerHash: string,
+    expectedChildHash: string,
+    newContentBase64: string,
+    confirmation?: ConfirmationReceipt
+  ): Promise<SaveTextResourceResult> =>
+    ipcRenderer.invoke(
+      'resource.replaceContainerChild',
+      childUri,
+      expectedContainerHash,
+      expectedChildHash,
+      newContentBase64,
+      confirmation
+    ),
+  roundTripContainer: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.roundTripContainer', sourceUri),
+  validateContainer: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.validateContainer', sourceUri),
+  probeContainerCapabilities: (sourceUri: string): Promise<ResourceCapabilityMatrix | null> =>
+    ipcRenderer.invoke('resource.probeContainerCapabilities', sourceUri),
   listOperations: (): Promise<PatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),

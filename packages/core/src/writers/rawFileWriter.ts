@@ -12,6 +12,7 @@ import type {
   WriterWrittenTarget
 } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
+import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 
 export class RawFileWriter implements WriterAdapterContract {
   readonly writerId = 'writer:raw-file';
@@ -98,7 +99,18 @@ export class RawFileWriter implements WriterAdapterContract {
           continue;
         }
 
-        const replacement = Buffer.from(op.replacementBase64, 'base64');
+        let replacement: Buffer;
+        try {
+          replacement = decodeStrictBase64(op.replacementBase64, { allowEmpty: false });
+        } catch (error) {
+          diagnostics.push(createDiagnostic({
+            severity: 'error',
+            code: error instanceof StrictBase64Error ? error.code : 'RAW_EDIT_PAYLOAD_INVALID',
+            message: error instanceof Error ? error.message : 'replacementBase64 is not valid strict base64.',
+            targetUri: op.targetUri
+          }));
+          continue;
+        }
         const next = Buffer.concat([
           original.subarray(0, op.offset),
           replacement,
@@ -114,10 +126,22 @@ export class RawFileWriter implements WriterAdapterContract {
           targetPath: op.targetPath,
           stagingPath
         });
-      } else if (op.kind === 'file_replace' && op.newContentBase64) {
+      } else if (op.kind === 'file_replace' && op.newContentBase64 !== undefined) {
+        let next: Buffer;
+        try {
+          next = decodeStrictBase64(op.newContentBase64, { allowEmpty: op.allowEmpty === true });
+        } catch (error) {
+          diagnostics.push(createDiagnostic({
+            severity: 'error',
+            code: error instanceof StrictBase64Error ? error.code : 'FILE_REPLACE_PAYLOAD_INVALID',
+            message: error instanceof Error ? error.message : 'newContentBase64 is not valid strict base64.',
+            targetUri: op.targetUri
+          }));
+          continue;
+        }
         const stagingPath = join(input.stagingRoot, stagingRelativeName(op));
         await mkdir(dirname(stagingPath), { recursive: true });
-        await writeFile(stagingPath, Buffer.from(op.newContentBase64, 'base64'));
+        await writeFile(stagingPath, next);
         writtenTargets.push({
           opId: op.id,
           targetUri: op.targetUri,

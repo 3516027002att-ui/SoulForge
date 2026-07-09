@@ -183,9 +183,10 @@ async function main(): Promise<void> {
     throw new Error('collectAffectedResources failed.');
   }
 
-  const unsafePatch = createPatchIr({
+  // Incomplete container_child_replace (missing hashes/payload) must fail validation.
+  const incompleteReplace = createPatchIr({
     workspaceId: 'ws-scaffold',
-    title: 'unsafe container',
+    title: 'incomplete container replace',
     author: 'ai',
     operations: [{
       id: 'bad-1',
@@ -198,8 +199,27 @@ async function main(): Promise<void> {
       riskLevel: 'high'
     }]
   });
+  const incompleteValidation = validatePatchIr(incompleteReplace);
+  if (incompleteValidation.ok) throw new Error('Incomplete container_child_replace must be rejected.');
+
+  // Unimplemented container mutations stay blocked.
+  const unsafePatch = createPatchIr({
+    workspaceId: 'ws-scaffold',
+    title: 'unsafe container add',
+    author: 'ai',
+    operations: [{
+      id: 'bad-2',
+      kind: 'container_child_add',
+      targetUri: 'soulforge://sekiro/overlay/event/event/common.emevd.dcx',
+      containerUri: 'soulforge://sekiro/overlay/event/event/common.emevd.dcx',
+      childPath: 'child.bin',
+      preconditions: [],
+      validatorRequirements: [],
+      riskLevel: 'high'
+    }]
+  });
   const unsafeValidation = validatePatchIr(unsafePatch);
-  if (unsafeValidation.ok) throw new Error('Unsafe container patch must be rejected.');
+  if (unsafeValidation.ok) throw new Error('Unsafe container_child_add patch must be rejected.');
   if (estimatePatchRisk(unsafePatch.operations) !== 'blocked') {
     throw new Error('Unsafe patch risk must be blocked.');
   }

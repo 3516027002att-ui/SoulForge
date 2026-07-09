@@ -116,9 +116,20 @@ export interface ContainerChildOp extends PatchIrBase {
     | 'container_child_rename'
     | 'container_child_move';
   containerUri: string;
+  /** Stable child path or fragment (name / id / nested path). */
   childPath: string;
+  /** Stable child URI fragment, e.g. file://pack.bnd#bnd/child/item.fmg */
+  childUri?: string;
   newChildPath?: string;
   childContentBase64?: string;
+  /** sha256 of the outer container file before edit. */
+  expectedContainerHash?: string;
+  /** sha256 of the target child bytes before edit. */
+  expectedChildHash?: string;
+  /** Container format metadata for the writer (dcx/bnd3/bnd4/nested). */
+  containerFormat?: string;
+  /** Nested path segments from outer container to child. */
+  nestedPath?: string[];
 }
 
 export interface SyntheticResourceEditOp extends PatchIrBase {
@@ -162,12 +173,16 @@ export const SCAFFOLD_SUPPORTED_PATCH_KINDS: readonly PatchIrOpKind[] = [
   'file_replace',
   'raw_byte_range_edit',
   'text_edit',
-  'synthetic_resource_edit'
+  'synthetic_resource_edit',
+  /** v0.6: synthetic SFBN BND + DCX DFLT nested child replace (authoritative for owned fixtures). */
+  'container_child_replace'
 ] as const;
 
-/** Operations that require native writers — always rejected by scaffold validators. */
+/**
+ * Container mutations still without writers — always rejected.
+ * container_child_replace is supported when hashes + content are present.
+ */
 export const NATIVE_WRITER_REQUIRED_KINDS: readonly PatchIrOpKind[] = [
-  'container_child_replace',
   'container_child_add',
   'container_child_delete',
   'container_child_rename',

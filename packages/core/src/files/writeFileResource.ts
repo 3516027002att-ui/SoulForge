@@ -55,6 +55,11 @@ export interface ProposeRawByteEditInput {
   offset: number;
   length: number;
   replacement: Buffer | Uint8Array;
+  /**
+   * Caller-owned content hash precondition. Must not be recomputed/overwritten
+   * when provided (TOCTOU protection for raw write path).
+   */
+  expectedHash: string;
   session?: WorkspaceSession;
   title?: string;
 }
@@ -67,6 +72,11 @@ export interface ProposeWholeFileReplaceInput {
   newContentBase64?: string;
   allowEmpty?: boolean;
   allowCreateNewFile?: boolean;
+  /**
+   * When set for an existing file, this hash is used as the PatchIR precondition
+   * and must not be recomputed from disk at proposal time.
+   */
+  expectedHash?: string;
   session?: WorkspaceSession;
   title?: string;
   confirmation?: ConfirmationReceipt;
@@ -209,16 +219,24 @@ export async function proposeRawByteEdit(
     }));
   }
 
-  let expectedHash: string;
+  // TOCTOU: never recompute/overwrite caller-provided expectedHash.
+  if (!input.expectedHash || typeof input.expectedHash !== 'string') {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'RAW_EDIT_HASH_REQUIRED',
+      message: 'proposeRawByteEdit requires caller expectedHash (must not be recomputed at proposal time).'
+    }));
+  }
+  const expectedHash = input.expectedHash ?? '';
+
   try {
-    expectedHash = await sha256Path(absolutePath);
+    await access(absolutePath, constants.F_OK);
   } catch {
     diagnostics.push(createDiagnostic({
       severity: 'error',
       code: 'FILE_NOT_FOUND',
       message: 'Raw edit target does not exist.'
     }));
-    expectedHash = '';
   }
 
   // All raw ops require confirmation; packed/native is high risk.
@@ -285,9 +303,14 @@ export async function proposeWholeFileReplace(
     exists = false;
   }
 
+  // TOCTOU: if caller provides expectedHash, use it as-is; never recompute over it.
   let expectedHash: string | undefined;
   if (exists) {
-    expectedHash = await sha256Path(absolutePath);
+    if (input.expectedHash) {
+      expectedHash = input.expectedHash;
+    } else {
+      expectedHash = await sha256Path(absolutePath);
+    }
   } else if (!input.allowCreateNewFile) {
     diagnostics.push(createDiagnostic({
       severity: 'error',

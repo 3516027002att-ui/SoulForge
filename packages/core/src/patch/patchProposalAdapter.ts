@@ -18,6 +18,7 @@ import type {
 } from '@soulforge/shared';
 import { createDiagnostic, toLegacyDiagnostic } from '@soulforge/shared';
 import { collectAffectedResources, estimatePatchRisk, validatePatchIr } from '../patch-engine/patchIr.js';
+import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 
 export interface CompilePatchProposalResult {
   ok: boolean;
@@ -243,6 +244,19 @@ function tryCompileRawStructuredEdit(change: PatchChange): {
       }));
       return { diagnostics };
     }
+    try {
+      decodeStrictBase64(replacementBase64, { allowEmpty: false });
+    } catch (error) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: error instanceof StrictBase64Error ? error.code : 'RAW_EDIT_PAYLOAD_INVALID',
+        message: error instanceof Error
+          ? error.message
+          : 'rawByteRangeEdit replacementBase64 failed strict base64 validation.',
+        targetUri: change.targetUri
+      }));
+      return { diagnostics };
+    }
     const risk: PatchRiskLevel = body.nativePacked === true || body.highRisk === true ? 'high' : 'caution';
     const op: Extract<PatchIrOperation, { kind: 'raw_byte_range_edit' }> = {
       id: randomUUID(),
@@ -289,6 +303,21 @@ function tryCompileRawStructuredEdit(change: PatchChange): {
         targetUri: change.targetUri
       }));
       return { diagnostics };
+    }
+    if (newContentBase64 || body.allowEmpty === true) {
+      try {
+        decodeStrictBase64(newContentBase64, { allowEmpty: body.allowEmpty === true });
+      } catch (error) {
+        diagnostics.push(createDiagnostic({
+          severity: 'error',
+          code: error instanceof StrictBase64Error ? error.code : 'FILE_REPLACE_PAYLOAD_INVALID',
+          message: error instanceof Error
+            ? error.message
+            : 'rawFileReplaceBase64 newContentBase64 failed strict base64 validation.',
+          targetUri: change.targetUri
+        }));
+        return { diagnostics };
+      }
     }
     const risk: PatchRiskLevel = body.nativePacked === true || body.highRisk === true ? 'high' : 'caution';
     const op: Extract<PatchIrOperation, { kind: 'file_replace' }> = {

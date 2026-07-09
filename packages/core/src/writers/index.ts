@@ -1,11 +1,13 @@
 export * from './textFileWriter.js';
 export * from './rawFileWriter.js';
+export * from './containerChildReplaceWriter.js';
 export * from './syntheticResourceWriter.js';
 export * from './unsupportedResourceWriter.js';
 
 import type { PatchIrOperation, WriterAdapterContract } from '@soulforge/shared';
 import { TextFileWriter } from './textFileWriter.js';
 import { RawFileWriter } from './rawFileWriter.js';
+import { ContainerChildReplaceWriter } from './containerChildReplaceWriter.js';
 import { SyntheticResourceWriter } from './syntheticResourceWriter.js';
 import { UnsupportedResourceWriter } from './unsupportedResourceWriter.js';
 
@@ -13,6 +15,7 @@ export function createScaffoldWriterAdapters(): WriterAdapterContract[] {
   return [
     new TextFileWriter(),
     new RawFileWriter(),
+    new ContainerChildReplaceWriter(),
     new SyntheticResourceWriter(),
     new UnsupportedResourceWriter()
   ];
