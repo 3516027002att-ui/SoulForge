@@ -27,6 +27,12 @@ export type VfsCapability =
   | 'container_edit'
   | 'none';
 
+/**
+ * Hash strategy for VFS open-time scan.
+ * Large / packed files must not pretend full hash was computed at open.
+ */
+export type VfsHashStatus = 'full' | 'partial' | 'deferred' | 'unavailable';
+
 export interface VfsNode {
   id: string;
   kind: VfsNodeKind;
@@ -44,6 +50,8 @@ export interface VfsNode {
   provenance?: ProvenanceChain;
   confidence?: ConfidenceAssessment;
   contentHash?: string;
+  /** How contentHash was obtained at scan time. */
+  hashStatus?: VfsHashStatus;
   size?: number;
   children?: VfsNode[];
   /** True when this is a synthetic fixture-backed resource. */

@@ -292,6 +292,18 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 - smoke：`npm run test:v05-architecture -w @soulforge/core` 覆盖 URI → graph → PatchIR → transaction → AI policy → VFS → bridge；
 - **未完成**：真实 native parser / writer、前端 UI、图/审计的 SQLite driver 产品化。
 
+### 8. v0.5 write-path consolidation（2026-07-09）
+
+- **唯一 production commit 主干**：PatchIR + WorkspaceTransaction；
+- `saveTextResource` 已改走 compile → transaction → operation log，不再独立 `createStagingArea` + 直接 overlay 提交；
+- text edit 生产路径强制 `beforeHash` / `expectedHash`；commit 前 stale 检查（`ORIGINAL_CHANGED_DURING_STAGING` / `TEXT_EDIT_HASH_MISMATCH`）；
+- `WriterApplyResult.writtenTargets` 显式 opId→stagingPath；transaction 禁止 URI includes 猜测；
+- VFS 打开扫描改为 bounded prefix + `hashStatus`（大文件 deferred，不全量 hash）；
+- 默认 `npm test` 不再依赖 `../../mods`（真实 mod smoke 移至 `test:real-mod`）；
+- `commitValidatedStagingArea` 仅为 legacy wrapper；
+- smoke：`npm run test:v05-write-path -w @soulforge/core`（A–E 全覆盖）；
+- 详见 `docs/V0_5_WRITE_PATH_CONSOLIDATION_STATUS.md`。
+
 ## 十三、当前已知问题
 
 ### 1. Build 环境问题
@@ -319,9 +331,15 @@ Bridge smoke 可能需要本地终端执行。
 - 打开工作区可选 base 游戏目录（只读；`WRITE_TO_BASE_FORBIDDEN`）；
 - 落盘 operation log：`FileOperationLogStore`（JSON；SQLite schema 仍可后续接 driver）。
 
+### P0b：write-path consolidation — 已完成（2026-07-09）
+
+- text save 主干收口到 PatchIR + WorkspaceTransaction；
+- legacy patchEngine commit 仅兼容 wrapper；
+- consolidation smoke 双跑 + foundation/P1/architecture 保持绿。
+
 ### P1：安全编辑闭环加厚
 
-- writer contract 接口（text 已走 Patch Engine；structured/binary 仍禁止裸写）；
+- writer contract 接口（text 已走 PatchIR+transaction；structured/binary 仍禁止裸写）；
 - patch graph 在 AI 侧边栏 / 主区摘要展示；
 - diagnostics 表与 Patch gate 联动；
 - Files mode 风险确认（unsupported 格式）；
@@ -351,5 +369,5 @@ v0.5 不要求：
 ## 十六、当前系统真实状态一句话
 
 ```text
-SoulForge 已有 v0.3 fixture Bridge 地基，v0.5 foundation P0 已巩固，并新增 v0.5 architecture scaffold（ResourceURI/VFS/ResourceGraph/PatchIR/WorkspaceTransaction/audit/AI policy/Bridge protocol，text-raw-synthetic 可跑闭环）；完整 native parser / writer / 超级编辑器闭环仍在建设中。
+SoulForge 已有 v0.3 fixture Bridge 地基、v0.5 foundation、architecture scaffold，且 write-path consolidation 已把 production text save 收口到 PatchIR + WorkspaceTransaction（legacy patchEngine 仅兼容 wrapper）；完整 native parser / writer / 超级编辑器闭环仍在建设中。
 ```

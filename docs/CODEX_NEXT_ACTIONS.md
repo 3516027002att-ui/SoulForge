@@ -10,6 +10,7 @@ SoulForge 定位：**魂游 Mod 的 Cursor**。
 v0.3 fixture-confirmed Bridge  ✓ 已验证
 v0.5 foundation                 ✓ 2026-07-09 起步切片已落地
 v0.5 architecture scaffold      ✓ 2026-07-09 text/raw/synthetic 闭环
+v0.5 write-path consolidation   ✓ 2026-07-09 PatchIR+Tx 唯一 commit 主干
 v0.5 完整超级编辑器闭环         → 进行中
 ```
 
@@ -30,6 +31,11 @@ v0.5 完整超级编辑器闭环         → 进行中
 | Foundation smoke | `runV05FoundationSmoke.ts` + `runV05PersistSmoke.ts` | memory + disk reopen |
 | Architecture scaffold | `packages/shared` + `packages/core` new modules | URI/VFS/Graph/PatchIR/Tx/AI/Bridge |
 | Architecture smoke | `runV05ArchitectureScaffoldSmoke.ts` | text/raw/synthetic vertical slice |
+| Write-path consolidation | `saveTextResource` + `legacyPatchEngineAdapter` | production commit → WorkspaceTransaction only |
+| Text hash precondition | `textHash.ts` + saveTextResource beforeHash | stale original blocked at stage/commit |
+| Writer staging map | `WriterApplyResult.writtenTargets` | explicit opId→stagingPath |
+| VFS bounded probe | `boundedFileProbe.ts` | prefix sniff; large hash deferred |
+| Write-path smoke | `runV05WritePathConsolidationSmoke.ts` | A–E + staging bytes ignored |
 
 ## 验证命令
 
@@ -45,6 +51,9 @@ npm run build
 ```powershell
 npm run test:v05-foundation -w @soulforge/core
 npm run test:v05-architecture -w @soulforge/core
+npm run test:v05-write-path -w @soulforge/core
+# opt-in local real mod open (requires ../../mods):
+npm run test:real-mod -w @soulforge/core
 ```
 
 ## 下一优先级（仍守硬边界）

@@ -54,10 +54,16 @@ export function createPatchIr(input: {
   return patch;
 }
 
+/**
+ * Create a text_edit operation.
+ * Production paths (saveTextResource) MUST pass expectedHash.
+ * Low-level tests may omit expectedHash.
+ */
 export function createTextEditOperation(input: {
   targetUri: string;
   targetPath: string;
   newText: string;
+  /** sha256 of original file; required for production saves. */
   expectedHash?: string;
   resourceKind?: PatchIrOperation['resourceKind'];
   allowEmpty?: boolean;

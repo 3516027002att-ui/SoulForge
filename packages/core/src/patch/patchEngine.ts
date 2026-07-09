@@ -1,10 +1,19 @@
-import { copyFile, mkdir, mkdtemp, readFile, rename, stat, writeFile } from 'node:fs/promises';
+/**
+ * Legacy Patch Engine surface.
+ *
+ * Production commits no longer apply staging files independently.
+ * They compile PatchProposal → PatchIR and execute WorkspaceTransaction
+ * (see legacyPatchEngineAdapter.ts).
+ *
+ * createStagingArea remains for dry-run prep / graph attachment compatibility only.
+ */
+
+import { copyFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import type {
   Diagnostic,
-  FileOperationRecord,
   OperationLogRecord,
   PatchChange,
   PatchMode,
@@ -12,12 +21,13 @@ import type {
   ValidationResult
 } from '@soulforge/shared';
 import { attachGraphToProposal, buildGraphPatchFromProposal } from './graphPatch.js';
-import {
-  createCommittedOperationRecord,
-  getDefaultOperationLogStore,
-  type OperationLogStore
-} from './operationLog.js';
+import type { OperationLogStore } from './operationLog.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
+import {
+  executePatchProposalThroughTransaction,
+  stageAndValidateProposalThroughTransaction,
+  toExecuteOptions
+} from './legacyPatchEngineAdapter.js';
 
 export interface CreatePatchProposalInput {
   workspaceId: string;
@@ -46,6 +56,8 @@ export interface CommitPatchOptions {
   backupRoot?: string;
   operationLog?: OperationLogStore;
   session?: WorkspaceSession;
+  /** Explicit sandbox / overlay root for WorkspaceTransaction. */
+  workspaceRoot?: string;
 }
 
 export interface CommitPatchResult {
@@ -75,6 +87,11 @@ export function createPatchProposal(input: CreatePatchProposalInput): PatchPropo
   return attachGraphToProposal(proposal);
 }
 
+/**
+ * Compatibility staging helper.
+ * Does NOT authorize production commit by itself — commitValidatedStagingArea
+ * always re-executes through WorkspaceTransaction.
+ */
 export async function createStagingArea(proposal: PatchProposal): Promise<StagingArea> {
   const root = await mkdtemp(join(tmpdir(), `soulforge-${proposal.opId}-`));
   const stagedFiles: StagedPatchFile[] = [];
@@ -113,71 +130,17 @@ export async function createStagingArea(proposal: PatchProposal): Promise<Stagin
   return { opId: proposal.opId, root, files: stagedFiles, proposal: withHashes };
 }
 
+/**
+ * @deprecated Prefer stageAndValidateProposalThroughTransaction.
+ * Kept for API compatibility; validates via WorkspaceTransaction when possible.
+ */
 export async function validateStagingArea(
   staging: StagingArea,
   session?: WorkspaceSession
 ): Promise<ValidationResult> {
-  const diagnostics: Diagnostic[] = [];
-
-  if (staging.files.length === 0) {
-    diagnostics.push({
-      severity: 'error',
-      code: 'PATCH_HAS_NO_FILES',
-      message: 'Patch proposal did not stage any files.'
-    });
-  }
-
-  for (const file of staging.files) {
-    if (session) {
-      const writable = session.resolveWritablePath(file.change.targetPath, file.change.layer ?? 'overlay');
-      if (!writable.ok) diagnostics.push(...writable.diagnostics);
-    }
-
-    const stagedStat = await safeStat(file.stagingPath);
-    if (!stagedStat) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'STAGED_FILE_MISSING',
-        message: 'A staged file is missing after patch application.',
-        details: { targetPath: file.change.targetPath, stagingPath: file.stagingPath }
-      });
-      continue;
-    }
-
-    if (stagedStat.size === 0 && !allowsEmptyOutput(file.change)) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'STAGED_FILE_EMPTY',
-        message: 'A staged output file is empty. Refusing to save unless explicitly allowed.',
-        details: { targetPath: file.change.targetPath, stagingPath: file.stagingPath }
-      });
-    }
-
-    const currentOriginalHash = await sha256File(file.change.targetPath);
-    if (currentOriginalHash !== file.beforeHash) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'ORIGINAL_CHANGED_DURING_STAGING',
-        message: 'Original file changed after staging started. Refusing to overwrite newer data.',
-        details: { targetPath: file.change.targetPath }
-      });
-    }
-
-    if (file.beforeHash === file.afterHash) {
-      diagnostics.push({
-        severity: 'warning',
-        code: 'PATCH_NO_OP',
-        message: 'Patch produced no file content change.',
-        details: { targetPath: file.change.targetPath }
-      });
-    }
-  }
-
-  return {
-    ok: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
-    diagnostics,
-    retryable: diagnostics.some((diagnostic) => diagnostic.code !== 'ORIGINAL_CHANGED_DURING_STAGING')
-  };
+  return stageAndValidateProposalThroughTransaction(staging.proposal, {
+    ...(session ? { session } : {})
+  });
 }
 
 export async function dryRunPatchProposal(
@@ -185,8 +148,9 @@ export async function dryRunPatchProposal(
   session?: WorkspaceSession
 ): Promise<ValidationResult> {
   try {
-    const staging = await createStagingArea(proposal);
-    return await validateStagingArea(staging, session);
+    return await stageAndValidateProposalThroughTransaction(proposal, {
+      ...(session ? { session } : {})
+    });
   } catch (error) {
     return {
       ok: false,
@@ -203,84 +167,30 @@ export async function dryRunPatchProposal(
   }
 }
 
+/**
+ * Production commit entry for legacy StagingArea callers.
+ *
+ * Does NOT apply staging.files to the overlay directly.
+ * Recompiles staging.proposal into PatchIR and commits via WorkspaceTransaction.
+ */
 export async function commitValidatedStagingArea(
   staging: StagingArea,
   options: CommitPatchOptions = {}
 ): Promise<CommitPatchResult> {
-  const validation = await validateStagingArea(staging, options.session);
-  if (!validation.ok) {
-    return {
-      opId: staging.opId,
-      backupRoot: options.backupRoot ?? '',
-      changedFiles: [],
-      diagnostics: validation.diagnostics
-    };
-  }
+  return executePatchProposalThroughTransaction(
+    staging.proposal,
+    toExecuteOptions(options)
+  );
+}
 
-  const backupRoot = options.backupRoot ?? join(tmpdir(), `soulforge-backup-${staging.opId}`);
-  const changedFiles: string[] = [];
-  const diagnostics: Diagnostic[] = [...validation.diagnostics];
-  const fileRecords: FileOperationRecord[] = [];
-
-  for (const file of staging.files) {
-    const backupPath = makeBackupPath(backupRoot, file);
-    await mkdir(dirname(backupPath), { recursive: true });
-    await copyFile(file.change.targetPath, backupPath);
-
-    // Keep the final replacement as close to atomic as possible: write a sibling temp file, then rename.
-    const siblingTemp = join(dirname(file.change.targetPath), `.soulforge-${staging.opId}-${basename(file.change.targetPath)}.tmp`);
-    await copyFile(file.stagingPath, siblingTemp);
-    await rename(siblingTemp, file.change.targetPath);
-    changedFiles.push(file.change.targetPath);
-
-    fileRecords.push({
-      targetUri: file.change.targetUri,
-      targetPath: file.change.targetPath,
-      beforeHash: file.beforeHash,
-      afterHash: file.afterHash,
-      backupPath,
-      kind: file.change.kind,
-      ...(file.change.resourceKind ? { resourceKind: file.change.resourceKind } : {})
-    });
-  }
-
-  const operation = createCommittedOperationRecord({
-    proposal: staging.proposal,
-    backupRoot,
-    files: fileRecords,
-    diagnostics,
-    ...(staging.proposal.graph ? { graph: staging.proposal.graph } : {})
-  });
-
-  const store = options.operationLog ?? getDefaultOperationLogStore();
-  try {
-    store.record(operation);
-  } catch (error) {
-    // Overlay files are already committed; do not throw past the write.
-    // Callers still receive opId/backupRoot/operation for recovery.
-    const logDiagnostic = {
-      severity: 'error' as const,
-      code: 'OPERATION_LOG_RECORD_FAILED',
-      message: error instanceof Error
-        ? `Patch files were written but operation log record failed: ${error.message}`
-        : 'Patch files were written but operation log record failed.',
-      details: {
-        opId: staging.opId,
-        backupRoot,
-        storeError: error instanceof Error ? error.message : String(error)
-      }
-    };
-    diagnostics.push(logDiagnostic);
-    operation.diagnostics = [...operation.diagnostics, logDiagnostic];
-  }
-
-  return {
-    opId: staging.opId,
-    backupRoot,
-    changedFiles,
-    diagnostics,
-    operation
-  };
+/**
+ * Preferred production entry when the caller already has a PatchProposal.
+ */
+export async function commitPatchProposal(
+  proposal: PatchProposal,
+  options: CommitPatchOptions = {}
+): Promise<CommitPatchResult> {
+  return executePatchProposalThroughTransaction(proposal, toExecuteOptions(options));
 }
 
 async function applyChangeToStagingFile(change: PatchChange, stagingPath: string): Promise<void> {
@@ -291,7 +201,6 @@ async function applyChangeToStagingFile(change: PatchChange, stagingPath: string
   if (change.kind === 'text') {
     const edit = parseTextContentEdit(change.structuredEdit);
     if (!edit) {
-      // No edit body means this is a dry staging/copy operation.
       return;
     }
     await writeFile(stagingPath, edit.newText, 'utf8');
@@ -310,28 +219,9 @@ function parseTextContentEdit(value: unknown): TextContentEdit | null {
   return { newText: candidate.newText };
 }
 
-function allowsEmptyOutput(change: PatchChange): boolean {
-  if (!change.structuredEdit || typeof change.structuredEdit !== 'object') return false;
-  const candidate = change.structuredEdit as Record<string, unknown>;
-  return candidate.allowEmpty === true;
-}
-
 function makeStagingPath(root: string, change: PatchChange): string {
   const safeTarget = change.targetUri.replace(/[^a-zA-Z0-9._-]/g, '_');
   return join(root, safeTarget, basename(change.targetPath));
-}
-
-function makeBackupPath(backupRoot: string, file: StagedPatchFile): string {
-  const safeTarget = file.change.targetUri.replace(/[^a-zA-Z0-9._-]/g, '_');
-  return join(backupRoot, safeTarget, basename(file.change.targetPath));
-}
-
-async function safeStat(path: string): Promise<{ size: number } | null> {
-  try {
-    return await stat(path);
-  } catch {
-    return null;
-  }
 }
 
 async function sha256File(path: string): Promise<string> {

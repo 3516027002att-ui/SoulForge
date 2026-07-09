@@ -1,9 +1,9 @@
 /**
  * Build a VFS tree from a sandbox test workspace.
+ * Open-time scan uses bounded prefix probes — no full-file reads for large/packed assets.
  */
 
-import { createHash } from 'node:crypto';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { basename, extname, join, relative } from 'node:path';
 import type {
   BuildVfsOptions,
@@ -13,6 +13,7 @@ import type {
   ResourceURI,
   StructuredDiagnostic,
   VfsCapability,
+  VfsHashStatus,
   VfsNode,
   VfsNodeKind,
   VfsTree
@@ -24,6 +25,7 @@ import {
   formatResourceUri,
   syntheticFixtureConfidence
 } from '@soulforge/shared';
+import { probeFile } from './boundedFileProbe.js';
 
 const TEXT_EXTENSIONS = new Set([
   '.txt', '.md', '.json', '.xml', '.yml', '.yaml', '.lua', '.hks',
@@ -51,7 +53,6 @@ export async function buildVfsFromWorkspace(options: BuildVfsOptions): Promise<V
     nodesByUri
   });
 
-  // Attach synthetic event/param-like resources when marker files exist.
   const syntheticChildren = await attachSyntheticResources({
     workspaceRoot: options.workspaceRoot,
     game,
@@ -73,7 +74,8 @@ export async function buildVfsFromWorkspace(options: BuildVfsOptions): Promise<V
     capabilities: ['read', 'list'],
     diagnostics: [],
     children: [...children, ...syntheticChildren],
-    nativeFormatAuthority: false
+    nativeFormatAuthority: false,
+    hashStatus: 'unavailable'
   };
 
   nodesByUri[root.resourceUriString] = root;
@@ -126,7 +128,8 @@ async function walkDir(
         capabilities: ['read', 'list'],
         diagnostics: [],
         children: childNodes,
-        nativeFormatAuthority: false
+        nativeFormatAuthority: false,
+        hashStatus: 'unavailable'
       };
       ctx.nodesByUri[node.resourceUriString] = node;
       nodes.push(node);
@@ -151,38 +154,55 @@ async function buildFileNode(
     nodesByUri: Record<string, VfsNode>;
   }
 ): Promise<VfsNode> {
-  const fileStat = await stat(absolutePath);
-  const bytes = await readFile(absolutePath);
-  const hash = createHash('sha256').update(bytes).digest('hex');
   const extension = extname(absolutePath).toLowerCase();
   const compound = compoundExtension(relativePath);
   const resourceKind = kindFromPath(relativePath);
   const formatKind = formatFromExtension(extension, compound);
   const isText = TEXT_EXTENSIONS.has(extension) || TEXT_EXTENSIONS.has(compound);
   const isJson = extension === '.json';
-  const looksBinary = !isText && hasBinaryContent(bytes);
+  const packed = isUnsupportedPacked(compound, formatKind);
+
+  // Packed / likely-large binary: defer full hash and only sniff prefix.
+  const probe = await probeFile(absolutePath, {
+    deferHash: packed
+  });
+
+  const looksBinary = packed || (!isText && probe.looksBinary);
 
   let kind: VfsNodeKind = 'physical_file';
   let capabilities: VfsCapability[] = ['read'];
-  const diagnostics = [];
+  const diagnostics: StructuredDiagnostic[] = [];
   let synthetic = false;
   let provenance;
   let confidence;
 
-  if (looksBinary || isUnsupportedPacked(compound, formatKind)) {
+  let hashStatus: VfsHashStatus = probe.hashStatus;
+  let contentHash = probe.contentHash;
+
+  if (looksBinary || packed) {
     kind = 'unsupported';
     capabilities = ['read', 'none'];
+    if (probe.size > 256 * 1024 || packed) {
+      hashStatus = 'deferred';
+      contentHash = undefined;
+    }
     diagnostics.push(createDiagnostic({
       severity: 'warning',
       code: 'UNSUPPORTED_FORMAT',
-      message: 'Binary/packed resource is indexed as unsupported in VFS scaffold.',
-      details: { relativePath, formatKind, nativeFormatAuthority: false }
+      message: 'Binary/packed resource is indexed as unsupported in VFS scaffold (bounded probe only).',
+      details: {
+        relativePath,
+        formatKind,
+        nativeFormatAuthority: false,
+        hashStatus,
+        bytesProbed: probe.bytesRead,
+        size: probe.size
+      }
     }));
   } else if (isText || isJson) {
     capabilities = ['read', 'text_edit', 'stage', 'raw_edit'];
   }
 
-  // Synthetic markers: *.synthetic.json or path under synthetic/
   if (relativePath.includes('synthetic/') || relativePath.endsWith('.synthetic.json')) {
     kind = 'synthetic_resource';
     synthetic = true;
@@ -196,11 +216,12 @@ async function buildFileNode(
     overlay: ctx.overlay,
     physicalPath: relativePath,
     resourceKind,
-    contentHash: hash,
-    version: `h:${hash.slice(0, 12)}`
+    ...(contentHash && hashStatus === 'full' ? { contentHash } : {}),
+    ...(contentHash && hashStatus === 'full'
+      ? { version: `h:${contentHash.slice(0, 12)}` }
+      : { version: `s:${probe.size}` })
   });
 
-  // Fix diagnostic target after URI exists.
   for (const diagnostic of diagnostics) {
     diagnostic.targetUri = formatResourceUri(resourceUri);
     diagnostic.sourceUri = formatResourceUri(resourceUri);
@@ -219,12 +240,17 @@ async function buildFileNode(
     overlay: ctx.overlay,
     capabilities,
     diagnostics,
-    contentHash: hash,
-    size: fileStat.size,
+    hashStatus,
+    size: probe.size,
     synthetic,
     nativeFormatAuthority: false,
-    metadata: { workspaceRoot }
+    metadata: {
+      workspaceRoot,
+      bytesProbed: probe.bytesRead,
+      probeLooksBinary: probe.looksBinary
+    }
   };
+  if (contentHash !== undefined) node.contentHash = contentHash;
   if (provenance) node.provenance = provenance;
   if (confidence) node.confidence = confidence;
 
@@ -249,7 +275,6 @@ async function attachSyntheticResources(input: {
     try {
       await stat(absolutePath);
     } catch {
-      // Create virtual synthetic node even without file — generated view.
       const resourceUri = createResourceUri({
         game: input.game,
         overlay: 'synthetic',
@@ -279,7 +304,8 @@ async function attachSyntheticResources(input: {
         provenance: { sources: [createSyntheticFixtureProvenance(spec.name)] },
         confidence: syntheticFixtureConfidence(),
         synthetic: true,
-        nativeFormatAuthority: false
+        nativeFormatAuthority: false,
+        hashStatus: 'unavailable'
       };
       input.nodesByUri[node.resourceUriString] = node;
       nodes.push(node);
@@ -332,12 +358,6 @@ function compoundExtension(relativePath: string): string {
 function isUnsupportedPacked(compound: string, formatKind: ResourceFormatKind): boolean {
   if (['dcx', 'bnd', 'emevd', 'msb', 'param', 'fmg', 'tpf', 'gfx'].includes(formatKind)) return true;
   return compound.includes('.dcx') || compound.includes('.bnd');
-}
-
-function hasBinaryContent(bytes: Buffer): boolean {
-  if (bytes.length === 0) return false;
-  const sample = bytes.subarray(0, Math.min(bytes.length, 64));
-  return sample.includes(0);
 }
 
 function toPosix(pathValue: string): string {

@@ -14,6 +14,8 @@ export * from './patch/operationLogPath.js';
 export * from './patch/rollback.js';
 export * from './patch/writerContract.js';
 export * from './patch/diagnosticsGate.js';
+export * from './patch/patchProposalAdapter.js';
+export * from './patch/legacyPatchEngineAdapter.js';
 
 
 export * from './references/referenceBuilder.js';
