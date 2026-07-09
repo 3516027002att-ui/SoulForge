@@ -69,6 +69,10 @@ export interface FileReplaceOp extends PatchIrBase {
   kind: 'file_replace';
   newContentBase64?: string;
   newText?: string;
+  allowCreateNewFile?: boolean;
+  allowEmpty?: boolean;
+  /** When true, policy/confirmation must cover high risk (packed/native/unsupported). */
+  requiresConfirmation?: boolean;
 }
 
 export interface RawByteRangeEditOp extends PatchIrBase {

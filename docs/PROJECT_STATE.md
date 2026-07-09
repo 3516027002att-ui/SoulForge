@@ -292,6 +292,17 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 - smoke：`npm run test:v05-architecture -w @soulforge/core` 覆盖 URI → graph → PatchIR → transaction → AI policy → VFS → bridge；
 - **未完成**：真实 native parser / writer、前端 UI、图/审计的 SQLite driver 产品化。
 
+### 9. v0.5 Full File Workbench + Semantic Spine（2026-07-09）
+
+- Files Mode：`openFileResource` / bounded preview / capabilities；text/raw/whole-file replace 经 PatchIR + WorkspaceTransaction；
+- packed/native 结构化编辑仍 blocked；raw/replace 默认 high risk + confirmation；
+- durable op log：pending → commit → committed；失败则 rollback 或 `recovery_required` 元数据；
+- Semantic：VFS→ResourceGraph 摄入、snapshot 落盘/重载、changed-path reindex；
+- Evidence Pack + Patch Impact Graph（core only，无 UI）；
+- smoke：`npm run test:v05-full-file-workbench -w @soulforge/core`；
+- **未完成**：真实 native parser/writer、前端 Files Mode UI。
+- 详见 `docs/V0_5_FULL_FILE_WORKBENCH_STATUS.md`。
+
 ### 8. v0.5 write-path consolidation（2026-07-09）
 
 - **唯一 production commit 主干**：PatchIR + WorkspaceTransaction；
@@ -369,5 +380,5 @@ v0.5 不要求：
 ## 十六、当前系统真实状态一句话
 
 ```text
-SoulForge 已有 v0.3 fixture Bridge 地基、v0.5 foundation、architecture scaffold，且 write-path consolidation 已把 production text save 收口到 PatchIR + WorkspaceTransaction（legacy patchEngine 仅兼容 wrapper）；完整 native parser / writer / 超级编辑器闭环仍在建设中。
+SoulForge 已有 v0.5 write-path consolidation + Full File Workbench（overlay 全文件 open/bounded read + Files Mode text/raw/replace 安全写入）与 Semantic Spine（VFS→graph/snapshot/EvidencePack/Impact）；真实 native parser/writer 与前端工作台 UI 仍未完成。
 ```
