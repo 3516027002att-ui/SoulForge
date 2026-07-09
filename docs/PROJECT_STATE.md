@@ -194,7 +194,7 @@ Diagnostics 同时驱动：
 
 候选引用可以进入 patch proposal，但必须由用户逐条确认或通过明确策略门控。
 
-## 十一、当前工程状态（v0.3 完成地基 → v0.5 起步）
+## 十一、当前工程状态（v0.3 完成地基 → v0.5 起步 → architecture scaffold）
 
 v0.3 fixture-confirmed Bridge plumbing 已本地验证。
 
@@ -209,7 +209,26 @@ overlay + readonly base
   -> SQLite schema v2
 ```
 
-这仍不代表 native FromSoftware parser / writer 已经完成。
+同日继续落地 **v0.5 architecture scaffold**（核心架构闭环，非 UI、非 native parser/writer）：
+
+```text
+ResourceURI / FieldURI
+  -> VFS
+  -> ResourceGraph
+  -> provenance / confidence / diagnostics
+  -> PatchIR
+  -> WorkspaceTransaction
+  -> staging / validation / commit / audit / rollback
+  -> AI tool policy gate
+  -> Bridge protocol scaffold
+```
+
+可跑 vertical slice 仅限 **text / raw / synthetic** adapter。
+
+这仍不代表 native FromSoftware parser / writer 已经完成。详见：
+
+- `docs/CODEX_TASK_V0_5_ARCHITECTURE_SCAFFOLD.md`
+- `docs/V0_5_ARCHITECTURE_SCAFFOLD_STATUS.md`
 
 ## 十二、当前完成能力
 
@@ -265,6 +284,13 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 - SQLite migration id=2：workspace_layers / diagnostics / patch_history / file_operations / agent_runs；
 - Desktop：资源模式切换条（Files + 各 resource kind + AI），按 kind 过滤文件树；
 - Desktop P0 巩固：`operation.list` / `operation.rollback` IPC、操作历史面板一键回滚、可选 base 目录对话框；保存走 session 写门 + 落盘 operation log（userData，不写用户 mod 树）。
+
+### 7. v0.5 architecture scaffold（2026-07-09）
+
+- shared：ResourceURI/FieldURI、Provenance、Confidence、StructuredDiagnostic、ResourceGraph types、PatchIR、WriterAdapterContract、ValidatorContract、AuditLog、AI tool policy types、VFS types、Bridge protocol envelope/capability matrix；
+- core：MemoryResourceGraph、PatchIR validators、text/raw/synthetic/unsupported writers、text/raw validators、content-addressed staging、restore points、WorkspaceTransaction、ScaffoldToolRegistry + PolicyGate、VFS builder、Bridge protocol scaffold helpers；
+- smoke：`npm run test:v05-architecture -w @soulforge/core` 覆盖 URI → graph → PatchIR → transaction → AI policy → VFS → bridge；
+- **未完成**：真实 native parser / writer、前端 UI、图/审计的 SQLite driver 产品化。
 
 ## 十三、当前已知问题
 
@@ -325,5 +351,5 @@ v0.5 不要求：
 ## 十六、当前系统真实状态一句话
 
 ```text
-SoulForge 已有 v0.3 fixture Bridge 地基，v0.5 foundation P0 已巩固（overlay/base、graph patch、落盘 operation log、desktop 历史/回滚 IPC、可选 base 打开、AI 权限阶梯、资源模式 UI）；完整 native parser / writer / 超级编辑器闭环仍在建设中。
+SoulForge 已有 v0.3 fixture Bridge 地基，v0.5 foundation P0 已巩固，并新增 v0.5 architecture scaffold（ResourceURI/VFS/ResourceGraph/PatchIR/WorkspaceTransaction/audit/AI policy/Bridge protocol，text-raw-synthetic 可跑闭环）；完整 native parser / writer / 超级编辑器闭环仍在建设中。
 ```

@@ -12,6 +12,8 @@ export * from './patch/operationLog.js';
 export * from './patch/fileOperationLogStore.js';
 export * from './patch/operationLogPath.js';
 export * from './patch/rollback.js';
+export * from './patch/writerContract.js';
+export * from './patch/diagnosticsGate.js';
 
 
 export * from './references/referenceBuilder.js';
@@ -29,5 +31,16 @@ export * from './parsers/msgTextParser.js';
 export * from './pipeline/workspacePipeline.js';
 export * from './storage/sqliteSchema.js';
 export * from './storage/memoryEvidenceStore.js';
+export * from './resource-graph/index.js';
+export * from './patch-engine/patchIr.js';
+export * from './writers/index.js';
+export * from './validators/index.js';
+export * from './staging/index.js';
+export * from './backup/index.js';
+export * from './audit-log/index.js';
+export * from './transactions/index.js';
+export * from './vfs/index.js';
+export * from './ai-tools/index.js';
+export * from './bridge/bridgeProtocolScaffold.js';
 export * from './testing/createMockWorkspace.js';
 export * from './testing/runMockEvidencePipeline.js';

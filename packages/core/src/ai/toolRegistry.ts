@@ -1,8 +1,16 @@
-import type { AiToolPermissionLevel, PatchMode, PatchProposal, ReferenceEdge, ResourceKind } from '@soulforge/shared';
+import type {
+  AiToolPermissionLevel,
+  IndexedFile,
+  PatchMode,
+  PatchProposal,
+  ReferenceEdge,
+  ResourceKind
+} from '@soulforge/shared';
 import { createPatchProposal, dryRunPatchProposal } from '../patch/patchEngine.js';
 import { getDefaultOperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
-import { buildGraphPatchFromProposal } from '../patch/graphPatch.js';
+import { buildGraphPatchFromProposal, summarizeGraphPatch } from '../patch/graphPatch.js';
+import { assessEditRisk, evaluateWriterGate, resolveWriterContract } from '../patch/writerContract.js';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
 import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
@@ -292,7 +300,35 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
         return fail('INVALID_INPUT', 'build_patch_graph requires a PatchProposal object.');
       }
-      return ok(buildGraphPatchFromProposal(proposal));
+      const graph = buildGraphPatchFromProposal(proposal);
+      return ok({ graph, summaryText: summarizeGraphPatch(graph) });
+    }
+  });
+
+  registry.register({
+    name: 'assess_edit_risk',
+    description: 'Assess Files-mode edit risk and resolve writer contract for an indexed file snapshot.',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
+    run: (input) => {
+      const value = asRecord(input);
+      const file = value.file as IndexedFile | undefined;
+      if (!file || typeof file !== 'object' || typeof file.sourceUri !== 'string') {
+        return fail('INVALID_INPUT', 'assess_edit_risk requires an IndexedFile in { file }.');
+      }
+      const riskOptions = {
+        ...(value.truncated === true ? { truncated: true as const } : {}),
+        ...(typeof value.structuredEditable === 'boolean' ? { structuredEditable: value.structuredEditable } : {}),
+        ...(typeof value.parseStatus === 'string' ? { parseStatus: value.parseStatus } : {})
+      };
+      const risk = assessEditRisk(file, riskOptions);
+      const contract = resolveWriterContract(file);
+      const gate = evaluateWriterGate({
+        file,
+        changeKind: value.changeKind === 'structured' || value.changeKind === 'binary' ? value.changeKind : 'text',
+        riskOptions
+      });
+      return ok({ risk, contract, gate });
     }
   });
 

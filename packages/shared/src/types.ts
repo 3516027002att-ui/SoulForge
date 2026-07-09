@@ -251,6 +251,8 @@ export interface PatchHistoryEntry {
   rolledBackAt?: string;
   fileCount: number;
   changedPaths: string[];
+  /** Compact patch-graph summary for AI sidebar / history UI. */
+  graphSummary?: GraphPatch['summary'] & { title: string };
 }
 
 export type PreviewKind = 'text' | 'hex' | 'empty' | 'failed';
@@ -316,6 +318,62 @@ export interface SaveTextResourceResult {
   backupRoot?: string;
   changedFiles: string[];
   diagnostics: Diagnostic[];
+  /** Graph IR attached after successful commit (or after proposal build for review). */
+  graph?: GraphPatch;
+  /** Present when save was blocked because the user has not confirmed residual risk. */
+  risk?: EditRiskAssessment;
+  /** True when the write requires an explicit confirmation receipt before commit. */
+  requiresConfirmation?: boolean;
+}
+
+/**
+ * Architecture fork #108 — writer contract surface.
+ * Concrete binary/structured writers plug into this gate; absence is not a free pass to write.
+ */
+export type WriterCapability = 'none' | 'text' | 'structured' | 'container' | 'binary';
+
+export type EditRiskLevel = 'safe' | 'caution' | 'high' | 'blocked';
+
+export interface WriterContract {
+  id: string;
+  resourceKind: ResourceKind;
+  formatKind: ResourceFormatKind;
+  capability: WriterCapability;
+  /** Stable schema id for structuredEdit payloads (empty when capability is none). */
+  inputSchemaId: string;
+  supportsStaging: boolean;
+  supportsRollback: boolean;
+  requiresConfirmation: boolean;
+  preconditions: string[];
+  validators: string[];
+  notes?: string;
+}
+
+export interface EditRiskAssessment {
+  level: EditRiskLevel;
+  /** Machine-readable reasons, e.g. UNSUPPORTED_FORMAT, TRUNCATED_PREVIEW. */
+  reasons: string[];
+  /** Human-readable summary for UI / AI prompts. */
+  summary: string;
+  /** Whether Patch Engine may proceed after an explicit confirmation receipt. */
+  allowWithConfirmation: boolean;
+  contract: WriterContract;
+  diagnostics: Diagnostic[];
+}
+
+/**
+ * Architecture fork #133 — confirmation receipt for risky or gated writes.
+ */
+export interface ConfirmationReceipt {
+  id: string;
+  confirmedAt: string;
+  /** What the user confirmed (risk codes, proposal opId, etc.). */
+  subjects: string[];
+  riskLevel: EditRiskLevel;
+  sourceUri?: string;
+  note?: string;
+  /** Optional policy gate tags that were satisfied. */
+  policyTags?: string[];
 }
 
 export interface ScanProgress {
