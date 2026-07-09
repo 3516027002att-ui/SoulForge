@@ -1,6 +1,7 @@
 /**
  * Unified resource capability matrix for Files Mode honesty.
  * Raw-level support is universal; semantic/native is never claimed without real writers.
+ * v0.6: container-level fields for DCX/BND synthetic + DFLT.
  */
 
 import type {
@@ -22,6 +23,23 @@ export type CapabilityAvailability =
   | 'available_with_confirmation'
   | 'none';
 
+export type ContainerReadableLevel = 'none' | 'candidate' | 'partial' | 'authoritative';
+export type ContainerWritableLevel =
+  | 'none'
+  | 'raw-replace'
+  | 'child-replace'
+  | 'authoritative-repack';
+
+export type DecompressionStatus = 'none' | 'supported' | 'unsupported' | 'failed';
+export type CompressionStatus = 'none' | 'supported' | 'unsupported' | 'failed';
+
+export type SemanticAuthority =
+  | 'none'
+  | 'candidate'
+  | 'partial'
+  | 'fixture-confirmed'
+  | 'authoritative';
+
 export interface ResourceCapabilityMatrix {
   sourceUri: string;
   absolutePath: string;
@@ -41,8 +59,24 @@ export interface ResourceCapabilityMatrix {
   binaryPatchWritable: boolean;
   semanticWritable: boolean;
   nativeRoundTripSafe: boolean;
+  /** @deprecated prefer containerReadableLevel */
   containerReadable: boolean;
+  /** @deprecated prefer containerWritableLevel */
   containerWritable: boolean;
+
+  // v0.6 container-level
+  containerReadableLevel: ContainerReadableLevel;
+  containerWritableLevel: ContainerWritableLevel;
+  containerRoundTripSafe: boolean;
+  canListChildren: boolean;
+  canReadChild: boolean;
+  canReplaceChild: boolean;
+  canRepackContainer: boolean;
+  decompressionStatus: DecompressionStatus;
+  compressionStatus: CompressionStatus;
+  childEditWritable: boolean;
+  childEditRequiresConfirmation: boolean;
+  semanticAuthorityByFormat?: Record<string, SemanticAuthority>;
 
   textCapability: CapabilityAvailability;
   rawCapability: CapabilityAvailability;
@@ -69,13 +103,11 @@ const NATIVE_PACKED = new Set<ResourceFormatKind>([
 
 export function isTextLikeIndexedFile(file: IndexedFile): boolean {
   if (TEXT_FORMATS.has(file.formatKind)) return true;
-  // SoulForge text backups are still text-path editable (with confirmation).
   if (file.formatKind === 'backup') return true;
   const ext = file.extension.toLowerCase();
   const compound = file.compoundExtension.toLowerCase();
   if (ext === '.bak' || compound.endsWith('.bak')) return true;
   if (TEXT_EXTENSIONS.has(ext) || TEXT_EXTENSIONS.has(compound)) return true;
-  // event dumps
   if (ext === '.js' && file.resourceKind === 'event') return true;
   return false;
 }
@@ -86,55 +118,122 @@ export function isPackedOrNativeIndexedFile(file: IndexedFile): boolean {
   return compound.includes('.dcx') || compound.includes('.bnd');
 }
 
+export interface ResolveCapabilitiesOptions {
+  semanticReadTier?: SemanticReadTier;
+  containerReadable?: boolean;
+  /** When true, file is known synthetic SFBN BND (fixture-confirmed). */
+  syntheticBnd?: boolean;
+  /** When true, file is known DCX DFLT with full decompress. */
+  dcxDfltSupported?: boolean;
+  /** When true, nested DCX+BND synthetic roundtrip is safe. */
+  nestedContainerRoundTripSafe?: boolean;
+  /** FMG synthetic fixture confirmed. */
+  syntheticFmg?: boolean;
+}
+
 /**
  * Compute honest capabilities for an indexed file.
- * Does not touch the filesystem; openable assumes the file was already scanned.
+ * Does not touch the filesystem unless caller passes probed options.
  */
 export function resolveResourceCapabilities(
   file: IndexedFile,
-  options?: {
-    semanticReadTier?: SemanticReadTier;
-    containerReadable?: boolean;
-  }
+  options?: ResolveCapabilitiesOptions
 ): ResourceCapabilityMatrix {
   const textLike = isTextLikeIndexedFile(file);
   const packed = isPackedOrNativeIndexedFile(file);
   const reasonCodes: string[] = [];
   const diagnostics: Diagnostic[] = [];
+  const compound = file.compoundExtension.toLowerCase();
+  const looksDcx = file.formatKind === 'dcx' || compound.includes('.dcx');
+  const looksBnd = file.formatKind === 'bnd' || compound.includes('.bnd');
 
   let semanticReadTier: SemanticReadTier = options?.semanticReadTier ?? 'none';
   if (semanticReadTier === 'none' && file.parseStatus === 'partial') {
     semanticReadTier = 'partial';
   }
   if (semanticReadTier === 'none' && file.parseStatus === 'parsed') {
-    // Scanned text parsers may set parsed, but that is still not native authority.
     semanticReadTier = textLike ? 'partial' : 'candidate';
   }
 
-  // Universal raw-level open/read.
-  const openable = true;
-  const rawReadable = true;
-  const fullRawReadable = true;
-  const previewReadable = true;
-
-  // Semantic read never authoritative for packed without real parsers.
   if (packed && (semanticReadTier === 'authoritative' || semanticReadTier === 'fixture-confirmed')) {
     // Caller may pass fixture-confirmed for synthetic fixtures only.
   } else if (packed) {
-    semanticReadTier = semanticReadTier === 'none' ? 'none' : semanticReadTier;
     if (semanticReadTier === 'authoritative') {
       semanticReadTier = 'candidate';
       reasonCodes.push('PACKED_NOT_AUTHORITATIVE');
     }
   }
 
+  const openable = true;
+  const rawReadable = true;
+  const fullRawReadable = true;
+  const previewReadable = true;
   const semanticReadable = semanticReadTier !== 'none';
-  const containerReadable = options?.containerReadable ?? (
-    packed && (file.formatKind === 'dcx' || file.formatKind === 'bnd' || file.compoundExtension.includes('.bnd'))
-  );
-  if (containerReadable && packed) {
-    reasonCodes.push('CONTAINER_READ_CANDIDATE_OR_PARTIAL');
+
+  // --- Container levels (static defaults; probes can upgrade via options) ---
+  let containerReadableLevel: ContainerReadableLevel = 'none';
+  let containerWritableLevel: ContainerWritableLevel = 'none';
+  let containerRoundTripSafe = false;
+  let canListChildren = false;
+  let canReadChild = false;
+  let canReplaceChild = false;
+  let canRepackContainer = false;
+  let decompressionStatus: DecompressionStatus = 'none';
+  let compressionStatus: CompressionStatus = 'none';
+  let childEditWritable = false;
+  let childEditRequiresConfirmation = true;
+
+  if (looksDcx) {
+    if (options?.dcxDfltSupported) {
+      containerReadableLevel = options.nestedContainerRoundTripSafe ? 'authoritative' : 'partial';
+      decompressionStatus = 'supported';
+      compressionStatus = 'supported';
+      if (options.nestedContainerRoundTripSafe || options.syntheticBnd) {
+        canListChildren = true;
+        canReadChild = true;
+        canReplaceChild = true;
+        canRepackContainer = true;
+        containerWritableLevel = 'authoritative-repack';
+        containerRoundTripSafe = true;
+        childEditWritable = true;
+        reasonCodes.push('CONTAINER_DCX_DFLT_BND_SYNTHETIC_REPACK');
+      } else {
+        containerWritableLevel = 'raw-replace';
+        reasonCodes.push('CONTAINER_DCX_DFLT_PAYLOAD_ONLY');
+      }
+    } else {
+      containerReadableLevel = 'candidate';
+      containerWritableLevel = 'raw-replace';
+      decompressionStatus = 'unsupported';
+      compressionStatus = 'unsupported';
+      reasonCodes.push('CONTAINER_DCX_VARIANT_UNKNOWN');
+    }
+  } else if (looksBnd || options?.syntheticBnd) {
+    if (options?.syntheticBnd) {
+      containerReadableLevel = 'authoritative';
+      containerWritableLevel = 'authoritative-repack';
+      containerRoundTripSafe = true;
+      canListChildren = true;
+      canReadChild = true;
+      canReplaceChild = true;
+      canRepackContainer = true;
+      childEditWritable = true;
+      reasonCodes.push('CONTAINER_BND_SYNTHETIC_SFBN');
+    } else {
+      containerReadableLevel = 'candidate';
+      containerWritableLevel = 'raw-replace';
+      reasonCodes.push('CONTAINER_BND_NATIVE_CANDIDATE');
+    }
+  } else if (packed) {
+    containerReadableLevel = 'none';
+    containerWritableLevel = 'raw-replace';
+    reasonCodes.push('CONTAINER_NONE_RAW_ONLY');
   }
+
+  const containerReadable = containerReadableLevel !== 'none';
+  // child-replace and authoritative-repack both count as container-writable.
+  const containerWritable = containerWritableLevel !== 'none'
+    && containerWritableLevel !== 'raw-replace';
 
   // Writes
   let textWritable = false;
@@ -143,6 +242,23 @@ export function resolveResourceCapabilities(
   let semanticCapability: CapabilityAvailability = 'none';
   let riskLevel: EditRiskLevel = 'high';
   let requiredConfirmation = true;
+  let semanticWritable = false;
+  let nativeRoundTripSafe = false;
+
+  const semanticAuthorityByFormat: Record<string, SemanticAuthority> = {
+    fmg: options?.syntheticFmg ? 'fixture-confirmed' : 'none',
+    param: 'none',
+    emevd: 'none',
+    msb: 'none'
+  };
+
+  if (options?.syntheticFmg) {
+    semanticReadTier = 'fixture-confirmed';
+    semanticWritable = true;
+    semanticCapability = 'available_with_confirmation';
+    nativeRoundTripSafe = true;
+    reasonCodes.push('FMG_SYNTHETIC_FIXTURE_CONFIRMED');
+  }
 
   if (textLike && !packed) {
     const backup = file.formatKind === 'backup'
@@ -158,20 +274,24 @@ export function resolveResourceCapabilities(
     textWritable = false;
     textCapability = 'none';
     rawCapability = 'available_with_confirmation';
-    semanticCapability = 'none';
+    if (!semanticWritable) semanticCapability = 'none';
     riskLevel = 'high';
     requiredConfirmation = true;
     reasonCodes.push('RAW_REPLACE_NATIVE_PACKED');
-    reasonCodes.push('SEMANTIC_WRITER_ABSENT');
+    if (!semanticWritable) reasonCodes.push('SEMANTIC_WRITER_ABSENT');
     diagnostics.push({
       severity: 'warning',
       code: 'RAW_REPLACE_NATIVE_PACKED',
-      message: 'Native/packed format allows high-risk raw-level write only. Semantic/native roundtrip is not safe.',
+      message: 'Native/packed format allows high-risk raw-level write only unless container/semantic fixture path applies.',
       sourceUri: file.sourceUri,
-      details: { formatKind: file.formatKind, nativeRoundTripSafe: false }
+      details: {
+        formatKind: file.formatKind,
+        nativeRoundTripSafe,
+        containerWritableLevel,
+        containerRoundTripSafe
+      }
     });
   } else {
-    // unknown binary
     textWritable = false;
     textCapability = 'none';
     rawCapability = 'available_with_confirmation';
@@ -180,21 +300,12 @@ export function resolveResourceCapabilities(
     reasonCodes.push('UNKNOWN_BINARY_RAW_ONLY');
   }
 
-  const rawWritable = true; // rawCapability is always available_with_confirmation in this matrix
+  const rawWritable = true;
   const binaryPatchWritable = rawWritable;
-  const semanticWritable = false; // never claim without real structured writer
-  const nativeRoundTripSafe = false;
-  const containerWritable = false;
 
-  if (!semanticWritable) {
-    reasonCodes.push('SEMANTIC_WRITABLE_FALSE');
-  }
-  if (!nativeRoundTripSafe) {
-    reasonCodes.push('NATIVE_ROUNDTRIP_NOT_SAFE');
-  }
-  if (!containerWritable) {
-    reasonCodes.push('CONTAINER_WRITABLE_FALSE');
-  }
+  if (!semanticWritable) reasonCodes.push('SEMANTIC_WRITABLE_FALSE');
+  if (!nativeRoundTripSafe) reasonCodes.push('NATIVE_ROUNDTRIP_NOT_SAFE');
+  if (!containerWritable) reasonCodes.push('CONTAINER_WRITABLE_FALSE');
 
   return {
     sourceUri: file.sourceUri,
@@ -215,6 +326,18 @@ export function resolveResourceCapabilities(
     nativeRoundTripSafe,
     containerReadable,
     containerWritable,
+    containerReadableLevel,
+    containerWritableLevel,
+    containerRoundTripSafe,
+    canListChildren,
+    canReadChild,
+    canReplaceChild,
+    canRepackContainer,
+    decompressionStatus,
+    compressionStatus,
+    childEditWritable,
+    childEditRequiresConfirmation,
+    semanticAuthorityByFormat,
     textCapability,
     rawCapability,
     semanticCapability,
@@ -226,4 +349,40 @@ export function resolveResourceCapabilities(
     isPackedOrNative: packed,
     nativeFormatAuthority: false
   };
+}
+
+/**
+ * Probe file bytes and return capability options for resolveResourceCapabilities.
+ */
+export async function probeContainerCapabilityOptions(
+  absolutePath: string
+): Promise<ResolveCapabilitiesOptions> {
+  const { readFile } = await import('node:fs/promises');
+  const { isSyntheticBnd } = await import('../containers/bndSynthetic.js');
+  const { decompressDcx } = await import('../containers/dcx.js');
+  const { isSyntheticFmg } = await import('../containers/fmgSynthetic.js');
+
+  const options: ResolveCapabilitiesOptions = {};
+  try {
+    const bytes = await readFile(absolutePath);
+    if (isSyntheticFmg(bytes)) {
+      options.syntheticFmg = true;
+    }
+    if (isSyntheticBnd(bytes)) {
+      options.syntheticBnd = true;
+    }
+    if (bytes.subarray(0, 4).equals(Buffer.from('DCX\0', 'ascii'))) {
+      const decomp = decompressDcx(bytes);
+      if (decomp.ok && decomp.payload) {
+        options.dcxDfltSupported = true;
+        if (isSyntheticBnd(decomp.payload)) {
+          options.syntheticBnd = true;
+          options.nestedContainerRoundTripSafe = true;
+        }
+      }
+    }
+  } catch {
+    // leave defaults
+  }
+  return options;
 }

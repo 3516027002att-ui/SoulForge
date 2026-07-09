@@ -181,6 +181,7 @@ async function main(): Promise<void> {
     `opId=${textCommit.opId}`
   );
 
+  const binHash = createHash('sha256').update(await readFile(ws.paths.bin)).digest('hex');
   const rawProp = await proposeRawByteEdit({
     workspaceId: session.meta.workspaceId,
     absolutePath: ws.paths.bin,
@@ -188,6 +189,7 @@ async function main(): Promise<void> {
     offset: 1,
     length: 1,
     replacement: Buffer.from([0xaa]),
+    expectedHash: binHash,
     session
   });
   const rawCommit = await commitProposedFileWrite({
@@ -236,6 +238,7 @@ async function main(): Promise<void> {
 
   // Packed param raw edit WITHOUT confirmation must also fail.
   const paramBefore = await readFile(ws.paths.param);
+  const paramHash = createHash('sha256').update(paramBefore).digest('hex');
   const denyRawProp = await proposeRawByteEdit({
     workspaceId: session.meta.workspaceId,
     absolutePath: ws.paths.param,
@@ -243,6 +246,7 @@ async function main(): Promise<void> {
     offset: 0,
     length: 1,
     replacement: Buffer.from([0x99]),
+    expectedHash: paramHash,
     session
   });
   const denyRawCommit = await commitProposedFileWrite({

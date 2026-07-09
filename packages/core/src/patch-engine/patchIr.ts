@@ -215,8 +215,17 @@ export function estimatePatchRisk(operations: readonly PatchIrOperation[]): Patc
     }
     if (op.kind === 'raw_byte_range_edit') risk = maxRisk(risk, 'caution');
     if (op.kind === 'synthetic_resource_edit') risk = maxRisk(risk, 'low');
+    if (op.kind === 'container_child_replace') risk = maxRisk(risk, 'high');
     if (op.riskLevel) risk = maxRisk(risk, op.riskLevel);
-    if (op.kind.startsWith('container_')) risk = maxRisk(risk, 'blocked');
+    // Unimplemented container mutations stay blocked.
+    if (
+      op.kind === 'container_child_add'
+      || op.kind === 'container_child_delete'
+      || op.kind === 'container_child_rename'
+      || op.kind === 'container_child_move'
+    ) {
+      risk = maxRisk(risk, 'blocked');
+    }
   }
   return risk;
 }
@@ -301,6 +310,41 @@ function validateOperation(op: PatchIrOperation): StructuredDiagnostic[] {
         severity: 'error',
         code: 'FILE_REPLACE_EMPTY',
         message: 'file_replace requires newText or newContentBase64.',
+        targetUri: op.targetUri
+      }));
+    }
+  }
+
+  if (op.kind === 'container_child_replace') {
+    if (!op.expectedContainerHash && !op.expectedHash) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'CONTAINER_HASH_REQUIRED',
+        message: 'container_child_replace requires expectedContainerHash (or expectedHash).',
+        targetUri: op.targetUri
+      }));
+    }
+    if (!op.expectedChildHash) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'CONTAINER_CHILD_HASH_REQUIRED',
+        message: 'container_child_replace requires expectedChildHash.',
+        targetUri: op.targetUri
+      }));
+    }
+    if (!op.childContentBase64) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'CONTAINER_CHILD_PAYLOAD_REQUIRED',
+        message: 'container_child_replace requires childContentBase64.',
+        targetUri: op.targetUri
+      }));
+    }
+    if (!op.childPath && !op.childUri) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'CONTAINER_CHILD_PATH_REQUIRED',
+        message: 'container_child_replace requires childPath or childUri.',
         targetUri: op.targetUri
       }));
     }

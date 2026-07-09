@@ -292,6 +292,18 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 - smoke：`npm run test:v05-architecture -w @soulforge/core` 覆盖 URI → graph → PatchIR → transaction → AI policy → VFS → bridge；
 - **未完成**：真实 native parser / writer、前端 UI、图/审计的 SQLite driver 产品化。
 
+### 11. v0.6 Native Container Workbench（2026-07-09）
+
+- **安全修复**：expectedHash TOCTOU（proposal 不得覆盖调用方 hash）；`decodeStrictBase64` 严格校验；
+- **Capability**：containerReadableLevel / containerWritableLevel / canListChildren / canReplaceChild / decompressionStatus 等；
+- **Container**：DCX DFLT 全量解压/重压；synthetic SFBN BND3/BND4 list/extract/replace/repack；DCX(BND) 嵌套；
+- **PatchIR**：`container_child_replace` + `ContainerChildReplaceWriter` + `ContainerRoundTripValidator`；
+- **Semantic**：synthetic FMG SFFX fixture-confirmed；PARAM/EMEVD/MSB 仍 none；
+- **非声明**：原生游戏 BND 布局、非 DFLT DCX、全格式 semantic writer **未**支持；
+- IPC：inspect/list/read/replace/roundTrip/validate container（无大改 UI）；
+- smoke：`npm run test:v06-native-container-workbench -w @soulforge/core`；
+- 详见 `docs/V0_6_NATIVE_CONTAINER_WORKBENCH_STATUS.md`。
+
 ### 10. v0.5 Raw File Capability Matrix（2026-07-09）
 
 - 统一 `resolveResourceCapabilities`：openable/rawReadable/rawWritable 对所有已索引文件成立；semanticWritable/nativeRoundTripSafe 恒 false（无真实 writer 时）；
@@ -366,10 +378,16 @@ Bridge smoke 可能需要本地终端执行。
 - Files mode 风险确认（unsupported 格式）；
 - 可选 SQLite driver 替换 JSON operation log adapter。
 
+### P0c：v0.6 Native Container Workbench — 已完成（fixture 范围，2026-07-09）
+
+- DCX DFLT + SFBN BND + 嵌套 child replace 经 PatchIR；
+- FMG synthetic fixture-confirmed；
+- 原生 BND / 非 DFLT DCX / PARAM/EMEVD/MSB semantic 仍后续。
+
 ### P2：按资源逐步加深（仍禁伪 native 完成声明）
 
-- DCX / BND 容器路径继续 evidence-first；
-- event / param / map / msg 结构化编辑与 writer；
+- 原生 BND4 权威 roundtrip fixture；
+- PARAMDEF-aware PARAM read；EMEVD text dump；MSB name candidate；
 - 不实现 3D / Blender / 本地 LLM / vector DB。
 
 ## 十五、v0.5 非目标
@@ -390,5 +408,5 @@ v0.5 不要求：
 ## 十六、当前系统真实状态一句话
 
 ```text
-SoulForge 已有 v0.5 write-path consolidation + Full File Workbench（overlay 全文件 open/bounded read + Files Mode text/raw/replace 安全写入）与 Semantic Spine（VFS→graph/snapshot/EvidencePack/Impact）；真实 native parser/writer 与前端工作台 UI 仍未完成。
+SoulForge 已有 raw-level 全文件可读写 + v0.6 container-level（DCX DFLT + synthetic SFBN BND 嵌套 child replace）与 synthetic FMG fixture-confirmed；原生游戏 BND/非 DFLT DCX/PARAM/EMEVD/MSB semantic writer 与前端工作台 UI 仍未完成。
 ```
