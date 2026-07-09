@@ -27,7 +27,9 @@ export class TextFileWriter implements WriterAdapterContract {
   ] as const;
 
   canHandle(operation: PatchIrOperation): boolean {
-    return operation.kind === 'text_edit' || operation.kind === 'file_replace';
+    if (operation.kind === 'text_edit') return true;
+    // Prefer text payload; binary base64 replace is handled by RawFileWriter.
+    return operation.kind === 'file_replace' && typeof operation.newText === 'string';
   }
 
   writePlan(patch: PatchIR, operations: PatchIrOperation[]): WriterWritePlan {
@@ -82,9 +84,26 @@ export class TextFileWriter implements WriterAdapterContract {
         await writeFile(stagingPath, op.newText, 'utf8');
       } else if (op.kind === 'file_replace') {
         if (typeof op.newText === 'string') {
+          if (op.newText.length === 0 && !op.allowEmpty) {
+            diagnostics.push(createDiagnostic({
+              severity: 'error',
+              code: 'FILE_REPLACE_EMPTY_OUTPUT',
+              message: 'Empty file replace blocked unless allowEmpty=true.',
+              targetUri: op.targetUri
+            }));
+            continue;
+          }
           await writeFile(stagingPath, op.newText, 'utf8');
         } else if (op.newContentBase64) {
           await writeFile(stagingPath, Buffer.from(op.newContentBase64, 'base64'));
+        } else {
+          diagnostics.push(createDiagnostic({
+            severity: 'error',
+            code: 'FILE_REPLACE_EMPTY',
+            message: 'file_replace requires newText or newContentBase64.',
+            targetUri: op.targetUri
+          }));
+          continue;
         }
       }
 

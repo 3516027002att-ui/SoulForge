@@ -206,11 +206,13 @@ export interface GraphPatch {
 
 export type OperationStatus =
   | 'planned'
+  | 'pending'
   | 'staged'
   | 'validated'
   | 'committed'
   | 'rolled_back'
-  | 'failed';
+  | 'failed'
+  | 'recovery_required';
 
 export interface FileOperationRecord {
   targetUri: string;
@@ -237,6 +239,11 @@ export interface OperationLogRecord {
   files: FileOperationRecord[];
   diagnostics: Diagnostic[];
   graph?: GraphPatch;
+  /** WorkspaceTransaction id when commit went through the new trunk. */
+  transactionId?: string;
+  /** Durable recovery path when post-commit log mark fails. */
+  recoveryPath?: string;
+  recoveryReason?: string;
 }
 
 export interface PatchHistoryEntry {

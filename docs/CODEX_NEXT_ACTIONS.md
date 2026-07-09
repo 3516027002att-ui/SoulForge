@@ -11,6 +11,7 @@ v0.3 fixture-confirmed Bridge  ✓ 已验证
 v0.5 foundation                 ✓ 2026-07-09 起步切片已落地
 v0.5 architecture scaffold      ✓ 2026-07-09 text/raw/synthetic 闭环
 v0.5 write-path consolidation   ✓ 2026-07-09 PatchIR+Tx 唯一 commit 主干
+v0.5 full file workbench        ✓ 2026-07-09 Files Mode + Semantic Spine
 v0.5 完整超级编辑器闭环         → 进行中
 ```
 
@@ -52,6 +53,7 @@ npm run build
 npm run test:v05-foundation -w @soulforge/core
 npm run test:v05-architecture -w @soulforge/core
 npm run test:v05-write-path -w @soulforge/core
+npm run test:v05-full-file-workbench -w @soulforge/core
 # opt-in local real mod open (requires ../../mods):
 npm run test:real-mod -w @soulforge/core
 ```

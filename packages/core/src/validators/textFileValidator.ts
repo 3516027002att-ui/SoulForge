@@ -64,6 +64,20 @@ export class TextFileValidator implements ValidatorContract {
       diagnostics.push(...await checkOriginalContentHash(op, 'staged_output'));
     }
 
+    const textOps = input.operations.filter(
+      (op) => op.kind === 'text_edit'
+        || (op.kind === 'file_replace' && typeof op.newText === 'string')
+    );
+    // Only enforce text NUL guard for text payloads (not binary base64 replaces).
+    if (textOps.length === 0) {
+      return {
+        ok: diagnostics.every((item) => item.severity !== 'error'),
+        diagnostics,
+        scope: 'staged_output',
+        validatorId: this.validatorId
+      };
+    }
+
     for (const path of input.stagedPaths) {
       try {
         const content = await readFile(path);

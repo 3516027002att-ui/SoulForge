@@ -16,6 +16,11 @@ export * from './patch/writerContract.js';
 export * from './patch/diagnosticsGate.js';
 export * from './patch/patchProposalAdapter.js';
 export * from './patch/legacyPatchEngineAdapter.js';
+export * from './patch/durablePatchCommit.js';
+export * from './patch/patchImpactGraph.js';
+export * from './files/index.js';
+export * from './workspace/semanticWorkspaceIndex.js';
+export * from './ai/evidencePackBuilder.js';
 
 
 export * from './references/referenceBuilder.js';
