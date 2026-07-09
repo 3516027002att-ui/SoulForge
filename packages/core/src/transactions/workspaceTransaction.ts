@@ -28,6 +28,7 @@ import {
   type ContentAddressedStaging
 } from '../staging/contentAddressedStaging.js';
 import { createScaffoldValidators } from '../validators/index.js';
+import { checkOriginalContentHash } from '../validators/textHash.js';
 import { createScaffoldWriterAdapters, resolveWriterForOperation } from '../writers/index.js';
 
 export type TransactionStatus =
@@ -224,13 +225,40 @@ export class WorkspaceTransaction {
         workspaceRoot: this.workspaceRoot
       });
       applyDiagnostics.push(...result.diagnostics);
-      for (const path of result.writtenPaths) {
-        stagedPaths.push(path);
-        const op = operations.find((item) => path.includes(item.targetUri.replace(/[^a-zA-Z0-9._-]/g, '_')))
-          ?? operations[0];
-        if (op) stagedOpTargets.push({ op, stagingPath: path });
+
+      // Prefer explicit writtenTargets; never guess via string includes.
+      const targets = result.writtenTargets ?? [];
+      const byOpId = new Map(targets.map((item) => [item.opId, item]));
+
+      for (const op of operations) {
+        const mapped = byOpId.get(op.id);
+        if (!mapped) {
+          if (result.ok) {
+            applyDiagnostics.push(createDiagnostic({
+              severity: 'error',
+              code: 'WRITER_TARGET_MAPPING_MISSING',
+              message: `Writer ${writer.writerId} did not return an explicit staging mapping for op ${op.id}.`,
+              targetUri: op.targetUri,
+              details: { writerId: writer.writerId, opId: op.id }
+            }));
+          }
+          continue;
+        }
+        if (!mapped.stagingPath) {
+          applyDiagnostics.push(createDiagnostic({
+            severity: 'error',
+            code: 'WRITER_STAGING_OUTPUT_MISSING',
+            message: `Writer ${writer.writerId} returned empty stagingPath for op ${op.id}.`,
+            targetUri: op.targetUri,
+            details: { writerId: writer.writerId, opId: op.id }
+          }));
+          continue;
+        }
+        stagedPaths.push(mapped.stagingPath);
+        stagedOpTargets.push({ op, stagingPath: mapped.stagingPath });
       }
-      if (!result.ok) {
+
+      if (!result.ok || applyDiagnostics.some((item) => item.severity === 'error')) {
         this.status = 'failed';
         this.failureRecovery = { phase: 'applyToStaging', writerId: writer.writerId };
         this.diagnostics.push(...applyDiagnostics);
@@ -238,13 +266,22 @@ export class WorkspaceTransaction {
       }
     }
 
-    // Ensure each op maps to a staging path (fallback scan).
-    if (stagedOpTargets.length < ops.length) {
-      for (const op of ops) {
-        if (stagedOpTargets.some((item) => item.op.id === op.id)) continue;
-        const match = stagedPaths.find((path) => path.includes(op.id) || path.includes(safeUri(op.targetUri)));
-        if (match) stagedOpTargets.push({ op, stagingPath: match });
-      }
+    // Every successful op must have an explicit staging target.
+    for (const op of ops) {
+      if (stagedOpTargets.some((item) => item.op.id === op.id)) continue;
+      applyDiagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'WRITER_TARGET_MAPPING_MISSING',
+        message: `No explicit staging mapping for operation ${op.id}.`,
+        targetUri: op.targetUri,
+        details: { opId: op.id, kind: op.kind }
+      }));
+    }
+    if (applyDiagnostics.some((item) => item.severity === 'error')) {
+      this.status = 'failed';
+      this.failureRecovery = { phase: 'applyToStaging', reason: 'missing_mapping' };
+      this.diagnostics.push(...applyDiagnostics);
+      return { ok: false, diagnostics: applyDiagnostics };
     }
 
     this.stagedPaths = stagedPaths;
@@ -344,6 +381,25 @@ export class WorkspaceTransaction {
           diagnostics: [diagnostic]
         };
       }
+    }
+
+    // Final stale-original guard immediately before backup/replace.
+    const preCommitHashDiagnostics: StructuredDiagnostic[] = [];
+    for (const target of targets) {
+      preCommitHashDiagnostics.push(
+        ...await checkOriginalContentHash(target.op, 'before_commit')
+      );
+    }
+    if (preCommitHashDiagnostics.some((item) => item.severity === 'error')) {
+      this.status = 'failed';
+      this.diagnostics.push(...preCommitHashDiagnostics);
+      this.failureRecovery = { phase: 'before_commit_hash_check' };
+      return {
+        ok: false,
+        transactionId: this.transactionId,
+        committedPaths: [],
+        diagnostics: preCommitHashDiagnostics
+      };
     }
 
     const restorePoint = await createRestorePoint({
@@ -613,6 +669,3 @@ export function createWorkspaceTransaction(options: WorkspaceTransactionOptions)
   return new WorkspaceTransaction(options);
 }
 
-function safeUri(uri: string): string {
-  return uri.replace(/[^a-zA-Z0-9._-]/g, '_');
-}

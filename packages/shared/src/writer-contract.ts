@@ -35,8 +35,25 @@ export interface WriterWritePlan {
   notes?: string;
 }
 
+/**
+ * Explicit op → staging path mapping.
+ * WorkspaceTransaction must use this; never guess via string includes.
+ */
+export interface WriterWrittenTarget {
+  opId: string;
+  targetUri: string;
+  targetPath?: string;
+  stagingPath: string;
+}
+
 export interface WriterApplyResult {
   ok: boolean;
+  /**
+   * Explicit mapping from operation id to staging path.
+   * Required for multi-op commits with same basename / similar URIs.
+   */
+  writtenTargets: WriterWrittenTarget[];
+  /** @deprecated Prefer writtenTargets. Kept for older callers. */
   writtenPaths: string[];
   diagnostics: StructuredDiagnostic[];
   rollback: WriterRollbackMetadata;

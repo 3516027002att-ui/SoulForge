@@ -1,13 +1,19 @@
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import type {
   ConfirmationReceipt,
   Diagnostic,
   IndexedFile,
   SaveTextResourceResult
 } from '@soulforge/shared';
-import { commitValidatedStagingArea, createPatchProposal, createStagingArea } from '../patch/patchEngine.js';
+import { createPatchProposal, commitPatchProposal } from '../patch/patchEngine.js';
 import { getDefaultOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
 import { evaluateWriterGate } from '../patch/writerContract.js';
 import { evaluateDiagnosticsGate, mergeValidationResults } from '../patch/diagnosticsGate.js';
+import { compilePatchProposalToPatchIr } from '../patch/patchProposalAdapter.js';
+import {
+  resolveWorkspaceRootFromAbsoluteAndRelative
+} from '../patch/legacyPatchEngineAdapter.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 
 export interface SaveTextResourceOptions {
@@ -25,11 +31,14 @@ export interface SaveTextResourceOptions {
 }
 
 /**
- * Saves a directly editable text resource through the Patch Engine.
+ * Saves a directly editable text resource through PatchIR + WorkspaceTransaction.
  *
- * This intentionally refuses DCX/BND/TPF/GFX/native binary formats. Native writers must
- * be resource-specific so we do not corrupt packed mod files while the parser layer is
- * still maturing. Risky text paths require an explicit confirmation receipt.
+ * Production path:
+ *   writer gate → PatchProposal → PatchIR → WorkspaceTransaction
+ *     (addPatch → stage → validate → commit) → operation log
+ *
+ * Does not write the target file outside WorkspaceTransaction.commit.
+ * Native packed formats remain blocked by the writer gate.
  */
 export async function saveTextResource(options: SaveTextResourceOptions): Promise<SaveTextResourceResult> {
   const gate = evaluateWriterGate({
@@ -71,6 +80,17 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
   }
 
   try {
+    // Capture content hash at proposal time so WorkspaceTransaction can reject
+    // concurrent original changes (HASH_MISMATCH / ORIGINAL_CHANGED_DURING_STAGING).
+    let beforeHash: string | undefined;
+    try {
+      const currentBytes = await readFile(options.file.absolutePath);
+      beforeHash = createHash('sha256').update(currentBytes).digest('hex');
+    } catch {
+      // New file path: no hash precondition.
+      beforeHash = undefined;
+    }
+
     const proposal = createPatchProposal({
       workspaceId: options.file.workspaceId,
       title: `Edit ${options.file.relativePath}`,
@@ -83,6 +103,7 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
           kind: 'text',
           layer: 'overlay',
           resourceKind: options.file.resourceKind,
+          ...(beforeHash ? { beforeHash } : {}),
           structuredEdit: {
             newText: options.newText,
             allowEmpty: options.allowEmpty === true
@@ -91,10 +112,28 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
       ]
     });
 
-    const staging = await createStagingArea(proposal);
-    const committed = await commitValidatedStagingArea(staging, {
+    // Fail fast if the proposal cannot become PatchIR (binary/structured, etc.).
+    const compiled = compilePatchProposalToPatchIr(proposal);
+    if (!compiled.ok) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: compiled.legacyDiagnostics,
+        risk: gate.risk,
+        ...(proposal.graph ? { graph: proposal.graph } : {})
+      };
+    }
+
+    const workspaceRoot = options.session?.layers.overlayRoot
+      ?? resolveWorkspaceRootFromAbsoluteAndRelative(
+        options.file.absolutePath,
+        options.file.relativePath
+      );
+
+    const committed = await commitPatchProposal(proposal, {
       ...(options.session ? { session: options.session } : {}),
-      operationLog: options.operationLog ?? getDefaultOperationLogStore()
+      operationLog: options.operationLog ?? getDefaultOperationLogStore(),
+      workspaceRoot
     });
 
     const postGate = evaluateDiagnosticsGate(committed.diagnostics);
@@ -106,7 +145,11 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
       backupRoot: committed.backupRoot,
       changedFiles: committed.changedFiles,
       diagnostics: committed.diagnostics,
-      ...(staging.proposal.graph ? { graph: staging.proposal.graph } : committed.operation?.graph ? { graph: committed.operation.graph } : {}),
+      ...(proposal.graph
+        ? { graph: proposal.graph }
+        : committed.operation?.graph
+          ? { graph: committed.operation.graph }
+          : {}),
       risk: gate.risk
     };
   } catch (error) {

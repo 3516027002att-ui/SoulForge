@@ -3,12 +3,15 @@ import { dirname, join } from 'node:path';
 import type {
   PatchIR,
   PatchIrOperation,
+  StructuredDiagnostic,
   WriterAdapterContract,
   WriterApplyResult,
   WriterRollbackMetadata,
-  WriterWritePlan
+  WriterWritePlan,
+  WriterWrittenTarget
 } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
+import { checkOriginalContentHash } from '../validators/textHash.js';
 
 export class TextFileWriter implements WriterAdapterContract {
   readonly writerId = 'writer:text-file';
@@ -44,8 +47,8 @@ export class TextFileWriter implements WriterAdapterContract {
     operations: PatchIrOperation[];
     workspaceRoot?: string;
   }): Promise<WriterApplyResult> {
-    const writtenPaths: string[] = [];
-    const diagnostics = [];
+    const writtenTargets: WriterWrittenTarget[] = [];
+    const diagnostics: StructuredDiagnostic[] = [];
 
     for (const op of input.operations) {
       if (!this.canHandle(op)) continue;
@@ -59,18 +62,20 @@ export class TextFileWriter implements WriterAdapterContract {
         continue;
       }
 
+      const hashDiagnostics = await checkOriginalContentHash(op, 'apply_to_staging');
+      if (hashDiagnostics.length > 0) {
+        diagnostics.push(...hashDiagnostics);
+        continue;
+      }
+
       const stagingPath = join(input.stagingRoot, stagingRelativeName(op));
       await mkdir(dirname(stagingPath), { recursive: true });
 
-      // Seed staging from original when present.
-      if (input.workspaceRoot || op.targetPath) {
-        try {
-          const original = await readFile(op.targetPath);
-          await writeFile(stagingPath, original);
-        } catch {
-          // New file create path — empty seed.
-          await writeFile(stagingPath, Buffer.alloc(0));
-        }
+      try {
+        const original = await readFile(op.targetPath);
+        await writeFile(stagingPath, original);
+      } catch {
+        await writeFile(stagingPath, Buffer.alloc(0));
       }
 
       if (op.kind === 'text_edit') {
@@ -83,12 +88,18 @@ export class TextFileWriter implements WriterAdapterContract {
         }
       }
 
-      writtenPaths.push(stagingPath);
+      writtenTargets.push({
+        opId: op.id,
+        targetUri: op.targetUri,
+        targetPath: op.targetPath,
+        stagingPath
+      });
     }
 
     return {
       ok: diagnostics.every((item) => item.severity !== 'error'),
-      writtenPaths,
+      writtenTargets,
+      writtenPaths: writtenTargets.map((item) => item.stagingPath),
       diagnostics,
       rollback: this.produceRollbackMetadata({ operations: input.operations, backupPaths: [] })
     };
@@ -110,5 +121,5 @@ export class TextFileWriter implements WriterAdapterContract {
 function stagingRelativeName(op: PatchIrOperation): string {
   const safe = op.targetUri.replace(/[^a-zA-Z0-9._-]/g, '_');
   const base = op.targetPath?.split(/[/\\]/).pop() ?? 'file.txt';
-  return join(safe, base);
+  return join(safe, op.id.slice(0, 8), base);
 }

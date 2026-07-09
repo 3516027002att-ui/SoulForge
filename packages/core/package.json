@@ -8,12 +8,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -b ../shared . && node dist/testing/runSyntheticConfirmedReferenceSmoke.js && node dist/testing/runV05FoundationSmoke.js && node dist/testing/runV05PersistSmoke.js && node dist/testing/runV05P1Smoke.js && node dist/testing/runV05ArchitectureScaffoldSmoke.js && node dist/testing/runRealModOpenSmoke.js ../../mods",
+    "test": "tsc -b ../shared . && node dist/testing/runSyntheticConfirmedReferenceSmoke.js && node dist/testing/runV05FoundationSmoke.js && node dist/testing/runV05PersistSmoke.js && node dist/testing/runV05P1Smoke.js && node dist/testing/runV05ArchitectureScaffoldSmoke.js && node dist/testing/runV05WritePathConsolidationSmoke.js",
+    "test:real-mod": "tsc -b ../shared . && node dist/testing/runRealModOpenSmoke.js ../../mods",
     "test:native-preview": "tsc -b ../shared . && node dist/testing/runNativeInspectSmoke.js ../../mods",
     "test:reference-confidence": "tsc -b ../shared . && node dist/testing/runSyntheticConfirmedReferenceSmoke.js",
     "test:v05-foundation": "tsc -b ../shared . && node dist/testing/runV05FoundationSmoke.js && node dist/testing/runV05PersistSmoke.js",
     "test:v05-p1": "tsc -b ../shared . && node dist/testing/runV05P1Smoke.js",
     "test:v05-architecture": "tsc -b ../shared . && node dist/testing/runV05ArchitectureScaffoldSmoke.js",
+    "test:v05-write-path": "tsc -b ../shared . && node dist/testing/runV05WritePathConsolidationSmoke.js",
 
     "mock-pipeline": "npm run build && node dist/testing/runMockPipelineCli.js"
   },

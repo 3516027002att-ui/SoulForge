@@ -4,10 +4,12 @@ import { dirname, join } from 'node:path';
 import type {
   PatchIR,
   PatchIrOperation,
+  StructuredDiagnostic,
   WriterAdapterContract,
   WriterApplyResult,
   WriterRollbackMetadata,
-  WriterWritePlan
+  WriterWritePlan,
+  WriterWrittenTarget
 } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
 
@@ -44,8 +46,8 @@ export class RawFileWriter implements WriterAdapterContract {
     operations: PatchIrOperation[];
     workspaceRoot?: string;
   }): Promise<WriterApplyResult> {
-    const writtenPaths: string[] = [];
-    const diagnostics = [];
+    const writtenTargets: WriterWrittenTarget[] = [];
+    const diagnostics: StructuredDiagnostic[] = [];
 
     for (const op of input.operations) {
       if (!this.canHandle(op)) continue;
@@ -106,18 +108,29 @@ export class RawFileWriter implements WriterAdapterContract {
         const stagingPath = join(input.stagingRoot, stagingRelativeName(op));
         await mkdir(dirname(stagingPath), { recursive: true });
         await writeFile(stagingPath, next);
-        writtenPaths.push(stagingPath);
+        writtenTargets.push({
+          opId: op.id,
+          targetUri: op.targetUri,
+          targetPath: op.targetPath,
+          stagingPath
+        });
       } else if (op.kind === 'file_replace' && op.newContentBase64) {
         const stagingPath = join(input.stagingRoot, stagingRelativeName(op));
         await mkdir(dirname(stagingPath), { recursive: true });
         await writeFile(stagingPath, Buffer.from(op.newContentBase64, 'base64'));
-        writtenPaths.push(stagingPath);
+        writtenTargets.push({
+          opId: op.id,
+          targetUri: op.targetUri,
+          targetPath: op.targetPath,
+          stagingPath
+        });
       }
     }
 
     return {
       ok: diagnostics.every((item) => item.severity !== 'error'),
-      writtenPaths,
+      writtenTargets,
+      writtenPaths: writtenTargets.map((item) => item.stagingPath),
       diagnostics,
       rollback: this.produceRollbackMetadata({ operations: input.operations, backupPaths: [] })
     };
@@ -143,5 +156,5 @@ function sha256(buf: Buffer): string {
 function stagingRelativeName(op: PatchIrOperation): string {
   const safe = op.targetUri.replace(/[^a-zA-Z0-9._-]/g, '_');
   const base = op.targetPath?.split(/[/\\]/).pop() ?? 'file.bin';
-  return join(safe, base);
+  return join(safe, op.id.slice(0, 8), base);
 }

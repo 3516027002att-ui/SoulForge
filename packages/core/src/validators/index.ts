@@ -1,3 +1,4 @@
+export * from './textHash.js';
 export * from './textFileValidator.js';
 export * from './rawFileValidator.js';
 

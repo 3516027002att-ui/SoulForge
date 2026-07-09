@@ -3,10 +3,12 @@ import { join } from 'node:path';
 import type {
   PatchIR,
   PatchIrOperation,
+  StructuredDiagnostic,
   WriterAdapterContract,
   WriterApplyResult,
   WriterRollbackMetadata,
-  WriterWritePlan
+  WriterWritePlan,
+  WriterWrittenTarget
 } from '@soulforge/shared';
 import { createDiagnostic, createSyntheticFixtureProvenance } from '@soulforge/shared';
 
@@ -46,8 +48,8 @@ export class SyntheticResourceWriter implements WriterAdapterContract {
     operations: PatchIrOperation[];
     workspaceRoot?: string;
   }): Promise<WriterApplyResult> {
-    const writtenPaths: string[] = [];
-    const diagnostics = [];
+    const writtenTargets: WriterWrittenTarget[] = [];
+    const diagnostics: StructuredDiagnostic[] = [];
     const provenance = createSyntheticFixtureProvenance('synthetic-resource-writer');
 
     for (const op of input.operations) {
@@ -66,7 +68,12 @@ export class SyntheticResourceWriter implements WriterAdapterContract {
       const stagingPath = join(input.stagingRoot, `${safeName(op)}.json`);
       await mkdir(input.stagingRoot, { recursive: true });
       await writeFile(stagingPath, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
-      writtenPaths.push(stagingPath);
+      writtenTargets.push({
+        opId: op.id,
+        targetUri: op.targetUri,
+        ...(op.targetPath ? { targetPath: op.targetPath } : {}),
+        stagingPath
+      });
 
       diagnostics.push(createDiagnostic({
         severity: 'info',
@@ -79,7 +86,8 @@ export class SyntheticResourceWriter implements WriterAdapterContract {
 
     return {
       ok: true,
-      writtenPaths,
+      writtenTargets,
+      writtenPaths: writtenTargets.map((item) => item.stagingPath),
       diagnostics,
       rollback: this.produceRollbackMetadata({ operations: input.operations, backupPaths: [] })
     };
@@ -99,5 +107,5 @@ export class SyntheticResourceWriter implements WriterAdapterContract {
 }
 
 function safeName(op: PatchIrOperation): string {
-  return op.targetUri.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `${op.targetUri.replace(/[^a-zA-Z0-9._-]/g, '_')}_${op.id.slice(0, 8)}`;
 }

@@ -25,7 +25,6 @@ export class UnsupportedResourceWriter implements WriterAdapterContract {
   ] as const;
 
   canHandle(_operation: PatchIrOperation): boolean {
-    // Catch-all rejector — explicitly selected when no other writer matches.
     return true;
   }
 
@@ -59,6 +58,7 @@ export class UnsupportedResourceWriter implements WriterAdapterContract {
 
     return {
       ok: false,
+      writtenTargets: [],
       writtenPaths: [],
       diagnostics,
       rollback: this.produceRollbackMetadata({ operations: input.operations, backupPaths: [] })
@@ -77,4 +77,3 @@ export class UnsupportedResourceWriter implements WriterAdapterContract {
     };
   }
 }
-
