@@ -1,6 +1,13 @@
-import type { Diagnostic, IndexedFile, SaveTextResourceResult } from '@soulforge/shared';
+import type {
+  ConfirmationReceipt,
+  Diagnostic,
+  IndexedFile,
+  SaveTextResourceResult
+} from '@soulforge/shared';
 import { commitValidatedStagingArea, createPatchProposal, createStagingArea } from '../patch/patchEngine.js';
 import { getDefaultOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
+import { evaluateWriterGate } from '../patch/writerContract.js';
+import { evaluateDiagnosticsGate, mergeValidationResults } from '../patch/diagnosticsGate.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 
 export interface SaveTextResourceOptions {
@@ -9,44 +16,57 @@ export interface SaveTextResourceOptions {
   allowEmpty?: boolean;
   session?: WorkspaceSession;
   operationLog?: OperationLogStore;
+  /** Required when writer contract / risk assessment demands confirmation. */
+  confirmation?: ConfirmationReceipt;
+  /** Preview-derived risk signals from desktop / tools. */
+  truncated?: boolean;
+  structuredEditable?: boolean;
+  parseStatus?: string;
 }
-
-const EDITABLE_FORMATS = new Set(['text', 'hks']);
-const EDITABLE_EXTENSIONS = new Set([
-  '.txt',
-  '.md',
-  '.json',
-  '.xml',
-  '.yml',
-  '.yaml',
-  '.lua',
-  '.hks',
-  '.js',
-  '.ts',
-  '.csv',
-  '.ini',
-  '.cfg',
-  '.toml',
-  '.log'
-]);
 
 /**
  * Saves a directly editable text resource through the Patch Engine.
  *
  * This intentionally refuses DCX/BND/TPF/GFX/native binary formats. Native writers must
  * be resource-specific so we do not corrupt packed mod files while the parser layer is
- * still maturing.
+ * still maturing. Risky text paths require an explicit confirmation receipt.
  */
 export async function saveTextResource(options: SaveTextResourceOptions): Promise<SaveTextResourceResult> {
-  const eligibility = validateEditableTextResource(options.file, options.newText, options.allowEmpty ?? false);
+  const gate = evaluateWriterGate({
+    file: options.file,
+    changeKind: 'text',
+    ...(options.confirmation ? { confirmation: options.confirmation } : {}),
+    riskOptions: {
+      ...(options.truncated !== undefined ? { truncated: options.truncated } : {}),
+      ...(options.structuredEditable !== undefined ? { structuredEditable: options.structuredEditable } : {}),
+      ...(options.parseStatus !== undefined ? { parseStatus: options.parseStatus } : {})
+    }
+  });
+
+  const eligibility: Diagnostic[] = [...gate.diagnostics];
+
+  if (options.newText.length === 0 && !options.allowEmpty) {
+    eligibility.push({
+      severity: 'error',
+      code: 'TEXT_EDIT_EMPTY_OUTPUT_BLOCKED',
+      message: 'Refusing to save an empty text resource unless allowEmpty is explicitly set.',
+      sourceUri: options.file.sourceUri
+    });
+  }
+
   if (options.session) {
     eligibility.push(...options.session.resolveWritablePath(options.file.absolutePath).diagnostics);
   }
-  if (eligibility.length > 0) {
+
+  const preGate = evaluateDiagnosticsGate(eligibility);
+  if (!preGate.ok) {
+    const needsConfirm = eligibility.some((item) => item.code === 'EDIT_CONFIRMATION_REQUIRED');
     return {
       ok: false,
       changedFiles: [],
-      diagnostics: eligibility
+      diagnostics: eligibility,
+      risk: gate.risk,
+      requiresConfirmation: needsConfirm || gate.risk.allowWithConfirmation
     };
   }
 
@@ -77,12 +97,17 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
       operationLog: options.operationLog ?? getDefaultOperationLogStore()
     });
 
+    const postGate = evaluateDiagnosticsGate(committed.diagnostics);
+    const merged = mergeValidationResults(preGate, postGate);
+
     return {
-      ok: committed.diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
+      ok: merged.ok && committed.diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
       opId: committed.opId,
       backupRoot: committed.backupRoot,
       changedFiles: committed.changedFiles,
-      diagnostics: committed.diagnostics
+      diagnostics: committed.diagnostics,
+      ...(staging.proposal.graph ? { graph: staging.proposal.graph } : committed.operation?.graph ? { graph: committed.operation.graph } : {}),
+      risk: gate.risk
     };
   } catch (error) {
     return {
@@ -96,41 +121,8 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
           sourceUri: options.file.sourceUri,
           details: { targetPath: options.file.absolutePath }
         }
-      ]
+      ],
+      risk: gate.risk
     };
   }
-}
-
-function validateEditableTextResource(file: IndexedFile, newText: string, allowEmpty: boolean): Diagnostic[] {
-  const diagnostics: Diagnostic[] = [];
-
-  if (!isEditableTextResource(file)) {
-    diagnostics.push({
-      severity: 'error',
-      code: 'RESOURCE_NOT_TEXT_EDITABLE',
-      message: 'This resource is not directly text-editable. Native packed formats require a resource-specific writer first.',
-      sourceUri: file.sourceUri,
-      details: {
-        relativePath: file.relativePath,
-        formatKind: file.formatKind,
-        compoundExtension: file.compoundExtension
-      }
-    });
-  }
-
-  if (newText.length === 0 && !allowEmpty) {
-    diagnostics.push({
-      severity: 'error',
-      code: 'TEXT_EDIT_EMPTY_OUTPUT_BLOCKED',
-      message: 'Refusing to save an empty text resource unless allowEmpty is explicitly set.',
-      sourceUri: file.sourceUri
-    });
-  }
-
-  return diagnostics;
-}
-
-function isEditableTextResource(file: IndexedFile): boolean {
-  if (EDITABLE_FORMATS.has(file.formatKind)) return true;
-  return EDITABLE_EXTENSIONS.has(file.extension.toLowerCase()) || EDITABLE_EXTENSIONS.has(file.compoundExtension.toLowerCase());
 }

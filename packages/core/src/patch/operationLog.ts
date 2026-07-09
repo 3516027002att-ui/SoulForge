@@ -67,19 +67,7 @@ export class MemoryOperationLogStore implements OperationLogStore {
   }
 
   history(workspaceId?: string): PatchHistoryEntry[] {
-    return this.list(workspaceId).map((entry) => ({
-      opId: entry.opId,
-      workspaceId: entry.workspaceId,
-      title: entry.title,
-      author: entry.author,
-      mode: entry.mode,
-      status: entry.status,
-      createdAt: entry.createdAt,
-      ...(entry.committedAt ? { committedAt: entry.committedAt } : {}),
-      ...(entry.rolledBackAt ? { rolledBackAt: entry.rolledBackAt } : {}),
-      fileCount: entry.files.length,
-      changedPaths: entry.files.map((file) => file.targetPath)
-    }));
+    return this.list(workspaceId).map(toHistoryEntry);
   }
 }
 
@@ -87,6 +75,32 @@ const defaultStore = new MemoryOperationLogStore();
 
 export function getDefaultOperationLogStore(): MemoryOperationLogStore {
   return defaultStore;
+}
+
+export function toHistoryEntry(entry: OperationLogRecord): PatchHistoryEntry {
+  return {
+    opId: entry.opId,
+    workspaceId: entry.workspaceId,
+    title: entry.title,
+    author: entry.author,
+    mode: entry.mode,
+    status: entry.status,
+    createdAt: entry.createdAt,
+    ...(entry.committedAt ? { committedAt: entry.committedAt } : {}),
+    ...(entry.rolledBackAt ? { rolledBackAt: entry.rolledBackAt } : {}),
+    fileCount: entry.files.length,
+    changedPaths: entry.files.map((file) => file.targetPath),
+    ...(entry.graph
+      ? {
+          graphSummary: {
+            title: entry.graph.title,
+            fileCount: entry.graph.summary.fileCount,
+            resourceCount: entry.graph.summary.resourceCount,
+            edgeCount: entry.graph.summary.edgeCount
+          }
+        }
+      : {})
+  };
 }
 
 export function createCommittedOperationRecord(input: RecordCommittedOperationInput): OperationLogRecord {

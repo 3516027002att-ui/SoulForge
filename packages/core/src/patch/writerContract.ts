@@ -1,0 +1,373 @@
+import { randomUUID } from 'node:crypto';
+import type {
+  ConfirmationReceipt,
+  Diagnostic,
+  EditRiskAssessment,
+  EditRiskLevel,
+  IndexedFile,
+  ResourceFormatKind,
+  ResourceKind,
+  WriterCapability,
+  WriterContract
+} from '@soulforge/shared';
+
+const TEXT_FORMATS = new Set<ResourceFormatKind>(['text', 'hks']);
+const TEXT_EXTENSIONS = new Set([
+  '.txt',
+  '.md',
+  '.json',
+  '.xml',
+  '.yml',
+  '.yaml',
+  '.lua',
+  '.hks',
+  '.js',
+  '.ts',
+  '.csv',
+  '.ini',
+  '.cfg',
+  '.toml',
+  '.log'
+]);
+
+const NATIVE_PACKED_FORMATS = new Set<ResourceFormatKind>([
+  'dcx',
+  'bnd',
+  'emevd',
+  'msb',
+  'param',
+  'fmg',
+  'tpf',
+  'gfx'
+]);
+
+/**
+ * Resolve the declared writer contract for a resource.
+ * Structured / container / binary writers are intentionally absent until
+ * fixture-confirmed implementations exist — the contract returns capability none
+ * or text-only, never a fake native writer.
+ */
+export function resolveWriterContract(file: IndexedFile): WriterContract {
+  if (isDirectTextEditable(file) || isTextLikeBackup(file)) {
+    const caution = isCautionText(file) || isTextLikeBackup(file);
+    return {
+      id: `writer:text:${file.formatKind}`,
+      resourceKind: file.resourceKind,
+      formatKind: file.formatKind,
+      capability: 'text',
+      inputSchemaId: 'soulforge.textContentEdit.v1',
+      supportsStaging: true,
+      supportsRollback: true,
+      requiresConfirmation: caution,
+      preconditions: [
+        'target is overlay layer',
+        'file is UTF-8 text',
+        'Patch Engine staging + validation'
+      ],
+      validators: ['non_empty_unless_allowEmpty', 'session_writable', 'hash_conflict'],
+      notes: caution
+        ? 'Text path is available, but format confidence is reduced (backup / unknown / script edge).'
+        : 'Direct text writer via Patch Engine.'
+    };
+  }
+
+  if (NATIVE_PACKED_FORMATS.has(file.formatKind) || file.compoundExtension.includes('.dcx') || file.compoundExtension.includes('.bnd')) {
+    return {
+      id: `writer:blocked:native:${file.formatKind}`,
+      resourceKind: file.resourceKind,
+      formatKind: file.formatKind,
+      capability: 'none',
+      inputSchemaId: '',
+      supportsStaging: false,
+      supportsRollback: false,
+      requiresConfirmation: false,
+      preconditions: ['resource-specific structured writer', 'native fixture confirmation'],
+      validators: [],
+      notes: 'Native packed format. No writer contract is enabled; unsupported blind rewrite is forbidden.'
+    };
+  }
+
+  return {
+    id: `writer:blocked:unknown:${file.formatKind}`,
+    resourceKind: file.resourceKind,
+    formatKind: file.formatKind,
+    capability: 'none',
+    inputSchemaId: '',
+    supportsStaging: false,
+    supportsRollback: false,
+    requiresConfirmation: false,
+    preconditions: ['declared writer for format'],
+    validators: [],
+    notes: 'Unknown or non-text format without a registered writer contract.'
+  };
+}
+
+export interface AssessEditRiskOptions {
+  /** Preview was truncated (partial read). */
+  truncated?: boolean;
+  /** Structured preview reported editable=false or unsupported. */
+  structuredEditable?: boolean;
+  parseStatus?: string;
+}
+
+/**
+ * Files-mode risk assessment. Drives UI warnings and confirmation receipts.
+ * Does not grant write permission by itself — Patch Engine + contract still apply.
+ */
+export function assessEditRisk(file: IndexedFile, options: AssessEditRiskOptions = {}): EditRiskAssessment {
+  const contract = resolveWriterContract(file);
+  const reasons: string[] = [];
+  const diagnostics: Diagnostic[] = [];
+
+  if (contract.capability === 'none') {
+    reasons.push('UNSUPPORTED_WRITER');
+    if (NATIVE_PACKED_FORMATS.has(file.formatKind)) {
+      reasons.push('NATIVE_PACKED_FORMAT');
+    }
+    diagnostics.push({
+      severity: 'error',
+      code: 'WRITER_CONTRACT_ABSENT',
+      message: contract.notes ?? 'No writer contract is available for this resource.',
+      sourceUri: file.sourceUri,
+      details: { contractId: contract.id, formatKind: file.formatKind, resourceKind: file.resourceKind }
+    });
+    return buildAssessment('blocked', reasons, contract, diagnostics, false);
+  }
+
+  if (options.truncated) {
+    reasons.push('TRUNCATED_PREVIEW');
+    diagnostics.push({
+      severity: 'warning',
+      code: 'EDIT_RISK_TRUNCATED_PREVIEW',
+      message: 'Preview is truncated. Saving full-file text may be unsafe without reloading complete content.',
+      sourceUri: file.sourceUri
+    });
+  }
+
+  if (options.structuredEditable === false) {
+    reasons.push('STRUCTURED_NOT_EDITABLE');
+    diagnostics.push({
+      severity: 'warning',
+      code: 'EDIT_RISK_STRUCTURED_READONLY',
+      message: 'Structured preview marks this resource non-editable.',
+      sourceUri: file.sourceUri
+    });
+  }
+
+  if (options.parseStatus === 'unsupported' || options.parseStatus === 'failed') {
+    reasons.push(`PARSE_${(options.parseStatus ?? 'unknown').toUpperCase()}`);
+    diagnostics.push({
+      severity: 'warning',
+      code: 'EDIT_RISK_PARSE_STATUS',
+      message: `Parse status is ${options.parseStatus}; treat edits with elevated caution.`,
+      sourceUri: file.sourceUri
+    });
+  }
+
+  if (file.formatKind === 'backup' || file.extension.toLowerCase() === '.bak') {
+    reasons.push('BACKUP_FILE');
+    diagnostics.push({
+      severity: 'warning',
+      code: 'EDIT_RISK_BACKUP_FILE',
+      message: 'Editing a backup file is unusual and requires explicit confirmation.',
+      sourceUri: file.sourceUri
+    });
+  }
+
+  if (contract.requiresConfirmation) {
+    reasons.push('CONTRACT_REQUIRES_CONFIRMATION');
+  }
+
+  if (reasons.includes('TRUNCATED_PREVIEW')) {
+    return buildAssessment(
+      'blocked',
+      reasons,
+      contract,
+      diagnostics,
+      false,
+      'Truncated preview cannot be safely written back as a full-file replace.'
+    );
+  }
+
+  if (reasons.length > 0) {
+    const level: EditRiskLevel = reasons.includes('BACKUP_FILE') ? 'high' : 'caution';
+    return buildAssessment(
+      level,
+      reasons,
+      { ...contract, requiresConfirmation: true },
+      diagnostics,
+      true
+    );
+  }
+
+  return buildAssessment('safe', [], contract, [], false, 'Direct text edit via Patch Engine is allowed.');
+}
+
+export interface WriterGateInput {
+  file: IndexedFile;
+  changeKind: 'text' | 'structured' | 'binary';
+  confirmation?: ConfirmationReceipt;
+  riskOptions?: AssessEditRiskOptions;
+}
+
+export interface WriterGateResult {
+  ok: boolean;
+  risk: EditRiskAssessment;
+  diagnostics: Diagnostic[];
+}
+
+/**
+ * Gate a proposed write against the writer contract and optional confirmation receipt.
+ * Structured / binary always fail until a real resource writer is registered.
+ */
+export function evaluateWriterGate(input: WriterGateInput): WriterGateResult {
+  const risk = assessEditRisk(input.file, input.riskOptions ?? {});
+  const diagnostics: Diagnostic[] = [...risk.diagnostics];
+
+  if (input.changeKind === 'binary') {
+    diagnostics.push({
+      severity: 'error',
+      code: 'BINARY_WRITER_DISABLED',
+      message: 'Binary patch application is not enabled. Use a resource-specific writer contract.',
+      sourceUri: input.file.sourceUri
+    });
+    return { ok: false, risk, diagnostics };
+  }
+
+  if (input.changeKind === 'structured') {
+    diagnostics.push({
+      severity: 'error',
+      code: 'STRUCTURED_WRITER_NOT_IMPLEMENTED',
+      message: 'Structured writer contract is declared as a gate only; no resource-specific writer is registered yet.',
+      sourceUri: input.file.sourceUri,
+      details: { contractId: risk.contract.id, capability: risk.contract.capability }
+    });
+    return { ok: false, risk, diagnostics };
+  }
+
+  if (risk.level === 'blocked' || risk.contract.capability !== 'text') {
+    if (!diagnostics.some((item) => item.code === 'WRITER_CONTRACT_ABSENT')) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'WRITER_GATE_BLOCKED',
+        message: risk.summary,
+        sourceUri: input.file.sourceUri
+      });
+    }
+    return { ok: false, risk, diagnostics };
+  }
+
+  if (risk.contract.requiresConfirmation || risk.level === 'caution' || risk.level === 'high') {
+    const receiptOk = isValidConfirmation(input.confirmation, risk, input.file.sourceUri);
+    if (!receiptOk) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'EDIT_CONFIRMATION_REQUIRED',
+        message: 'This edit requires an explicit risk confirmation receipt before Patch Engine commit.',
+        sourceUri: input.file.sourceUri,
+        details: { riskLevel: risk.level, reasons: risk.reasons }
+      });
+      return { ok: false, risk: { ...risk, allowWithConfirmation: true }, diagnostics };
+    }
+  }
+
+  return { ok: true, risk, diagnostics };
+}
+
+export function createConfirmationReceipt(input: {
+  subjects: string[];
+  riskLevel: EditRiskLevel;
+  sourceUri?: string;
+  note?: string;
+  policyTags?: string[];
+}): ConfirmationReceipt {
+  return {
+    id: randomUUID(),
+    confirmedAt: new Date().toISOString(),
+    subjects: [...input.subjects],
+    riskLevel: input.riskLevel,
+    ...(input.sourceUri ? { sourceUri: input.sourceUri } : {}),
+    ...(input.note ? { note: input.note } : {}),
+    ...(input.policyTags ? { policyTags: [...input.policyTags] } : {})
+  };
+}
+
+export function isDirectTextEditable(file: IndexedFile): boolean {
+  if (TEXT_FORMATS.has(file.formatKind)) return true;
+  const ext = file.extension.toLowerCase();
+  const compound = file.compoundExtension.toLowerCase();
+  return TEXT_EXTENSIONS.has(ext) || TEXT_EXTENSIONS.has(compound);
+}
+
+/** SoulForge / editor backups of text resources — editable only with confirmation. */
+function isTextLikeBackup(file: IndexedFile): boolean {
+  if (file.formatKind === 'backup') return true;
+  return file.extension.toLowerCase() === '.bak' || file.compoundExtension.toLowerCase().endsWith('.bak');
+}
+
+function isCautionText(file: IndexedFile): boolean {
+  if (isTextLikeBackup(file)) return true;
+  // .js event dumps and scripts are text-editable but higher residual risk.
+  if (file.extension.toLowerCase() === '.js' && file.resourceKind === 'event') return true;
+  return false;
+}
+
+function buildAssessment(
+  level: EditRiskLevel,
+  reasons: string[],
+  contract: WriterContract,
+  diagnostics: Diagnostic[],
+  allowWithConfirmation: boolean,
+  summaryOverride?: string
+): EditRiskAssessment {
+  const summary = summaryOverride ?? defaultSummary(level, reasons, contract);
+  return {
+    level,
+    reasons,
+    summary,
+    allowWithConfirmation,
+    contract,
+    diagnostics
+  };
+}
+
+function defaultSummary(level: EditRiskLevel, reasons: string[], contract: WriterContract): string {
+  if (level === 'safe') return 'Direct text edit via Patch Engine is allowed.';
+  if (level === 'blocked') {
+    return contract.notes ?? `Write blocked (${reasons.join(', ') || 'no writer'}).`;
+  }
+  return `Edit risk ${level}: ${reasons.join(', ') || 'confirmation required'}. ${contract.notes ?? ''}`.trim();
+}
+
+function isValidConfirmation(
+  receipt: ConfirmationReceipt | null | undefined,
+  risk: EditRiskAssessment,
+  sourceUri: string
+): boolean {
+  if (!receipt) return false;
+  if (!receipt.id || !receipt.confirmedAt || !Array.isArray(receipt.subjects) || receipt.subjects.length === 0) {
+    return false;
+  }
+  if (receipt.riskLevel !== risk.level && !(receipt.riskLevel === 'high' && risk.level === 'caution')) {
+    // Allow a higher-severity receipt to cover a lower residual risk.
+    const order: EditRiskLevel[] = ['safe', 'caution', 'high', 'blocked'];
+    if (order.indexOf(receipt.riskLevel) < order.indexOf(risk.level)) return false;
+  }
+  if (receipt.sourceUri && receipt.sourceUri !== sourceUri) return false;
+  const subjectSet = new Set(receipt.subjects);
+  // Receipt must acknowledge the resource and at least one risk reason (or a blanket ACK).
+  const acknowledgesResource = subjectSet.has(sourceUri) || subjectSet.has('resource');
+  const acknowledgesRisk = risk.reasons.some((reason) => subjectSet.has(reason))
+    || subjectSet.has('ALL_RISKS')
+    || subjectSet.has(risk.level);
+  return acknowledgesResource && acknowledgesRisk;
+}
+
+/** Placeholder structured writer registry — empty until real implementations land. */
+export function listStructuredWriterKinds(): ResourceKind[] {
+  return [];
+}
+
+export function hasStructuredWriter(_kind: ResourceKind): boolean {
+  return false;
+}
