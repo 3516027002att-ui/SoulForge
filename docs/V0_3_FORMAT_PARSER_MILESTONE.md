@@ -24,12 +24,13 @@ event -> map -> param -> msg
 - Event 和 PARAM synthetic fixture helper 已存在于 `SyntheticFixtureExports.cs`，并已通过 `SemanticCandidateExports.cs` 接入 export-event / export-param 路由。
 - Map synthetic fixture helper 已存在于 `SyntheticMapFixtureExports.cs`，并已通过 `SemanticCandidateExports.cs` 接入 export-map 路由。
 - Event / PARAM / map 语义导出顺序是：先守住 DCX/BND 容器边界，再尝试 synthetic fixture confirmed path，最后才回落到低置信 native candidate scan。
-- BND synthetic fixture helper 已存在于 `SyntheticBinderFixtureExports.cs`，但仍需要后续单独设计 inspect/export 接线。
+- BND synthetic fixture helper 已接入 inspect confirmed 分支，并产出 `BND_SYNTHETIC_FIXTURE_CONFIRMED` + `binderChildTable`。
+- DCX DFLT inspect 已覆盖 payload boundary、decompressed preview、nested BND child table。
 - Synthetic fixture 用来验证 Bridge result shape、稳定 ID、typed fields、instruction argument roles、child inventory 和 diagnostic labeling。
 - 这些 fixture 都不代表 FromSoftware 原生格式权威。
 - Native FMG、BND、EMEVD、PARAM、MSB 仍需要真实 fixture 或明确格式规则证明。
 - Guarded native candidates 和 raw fallback 仍然保留，并且必须显式标注低置信度。
-- 当前 caveat：BND helper 仍需要后续单独设计 inspect/export 接线；Bridge dotnet smoke 需要在允许直接运行 dotnet / PowerShell 的本地终端执行。
+- 本地 `npm run bridge:verify:synthetic` 已验证 MSG / EMEVD / PARAM / MSB / BND / DCX 路径（2026-07-07 与 2026-07-09 复验）。
 
 ## 必要 parser 升级
 
@@ -60,8 +61,10 @@ v0.3 目标：
 当前状态：
 
 - Inspect 能暴露低置信 visible-string `binderChildCandidate` evidence；
-- `SyntheticBinderFixtureExports.cs` 已定义 synthetic BND child inventory helper；
-- 还没有公开 Bridge route 接入该 helper。
+- `SyntheticBinderFixtureExports.cs` 已接入 inspect confirmed 分支；
+- synthetic BND fixture 返回 `BND_SYNTHETIC_FIXTURE_CONFIRMED` 与 `binderChildTable`；
+- 未新增公开 `export-binder` 命令（inspect 路径已足够验证）；
+- native BND parser / writer 仍未完成。
 
 v0.3 目标：
 
@@ -72,7 +75,7 @@ v0.3 目标：
 
 验收：
 
-- BND fixture 能产生 child inventory；
+- BND fixture 能产生 child inventory（已通过 Bridge smoke）；
 - visible-string fallback 仍标注低置信；
 - offsets 和 sizes 在使用前必须 bounded validation。
 
@@ -199,15 +202,20 @@ dotnet run --project bridge/SoulForge.Bridge -- export-map path/to/synthetic.msb
 .\bridge\SoulForge.Bridge\scripts\verify-synthetic-core-fixtures.ps1
 ```
 
-`verify-synthetic-core-fixtures.ps1` 覆盖 FMG、event、PARAM、map，不提交二进制 fixture。BND synthetic smoke 仍留给 issue #2。
+`verify-synthetic-core-fixtures.ps1` / `scripts/verify-synthetic-core-fixtures.mjs` 覆盖 FMG、event、PARAM、map、BND、DCX，不提交二进制 fixture。
 
-## CodexPro 验证记录
+## 验证记录
 
-2026-07-04：
+2026-07-07 / 2026-07-09（Windows PowerShell）：
 
 - `npm run typecheck`：通过。
-- `npm run build`：失败于本地依赖状态，Rollup 找不到 Linux optional dependency `@rollup/rollup-linux-x64-gnu`；这是 node_modules / npm optional dependency 安装问题，不是本次 TypeScript 或 Bridge 路由改动的编译错误。
-- `dotnet build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj` 与 `bridge/SoulForge.Bridge/scripts/verify-synthetic-core-fixtures.ps1`：CodexPro safe bash allowlist 不允许直接运行 dotnet / PowerShell；需要在本地终端或 full bash 模式下执行。
+- `npm run bridge:build`：通过。
+- `npm run bridge:verify:synthetic`：通过（`synthetic core fixtures: ok`）。
+- `npm run test`：通过（含 reference confidence smoke 与 real mod open smoke）。
+
+2026-07-04 历史记录：
+
+- CodexPro safe bash 当时无法稳定执行 dotnet / PowerShell；Windows 本地终端已补齐验证。
 
 ## 硬边界
 

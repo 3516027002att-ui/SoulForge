@@ -124,8 +124,24 @@ npm run bridge:verify:synthetic
 - 本地 Bridge smoke 覆盖 BND synthetic inspect 并退出码为 0。
 - 文档可把 BND synthetic child inventory wire-up 标为已验证。
 
+## 2026-07-09 追加验证
+
+```powershell
+npm run typecheck
+npm run test --workspace @soulforge/core
+npm run bridge:verify:synthetic
+```
+
+结果：
+
+- typecheck 退出码 0。
+- core test 退出码 0；新增 `runSyntheticConfirmedReferenceSmoke` 输出 `synthetic confirmed reference smoke: ok`（high=4 / low=1）。
+- real mod open smoke：237 files，`failedPreviews=[]`。
+- Bridge synthetic smoke：`synthetic core fixtures: ok`。
+
 ## 当前可继续推进项
 
-- BND synthetic child inventory wire-up：本地 Bridge smoke 已通过；后续可继续 parser plumbing，但仍不能把真实 native BND parser 标成已完成。
+- 引用图升级：confirmed role / confirmed symbols → high confidence；bare numeric 保持 low/medium。
+- BND synthetic child inventory：本地 Bridge smoke 已通过；后续可继续 parser plumbing，但仍不能把真实 native BND parser 标成已完成。
 - DCX KRAK / EDGE / ZSTD：只允许继续做边界识别和 unsupported diagnostic，不能伪解压。
 - PARAM/FMG native 深度读取：必须等待 container boundary、BND child table、fixture-confirmed parser 继续稳住后再推进。

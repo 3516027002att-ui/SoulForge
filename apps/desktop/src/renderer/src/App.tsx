@@ -1,5 +1,20 @@
 import { useMemo, useState, type ReactElement } from 'react';
-import type { BridgeResult, ContainerReadHint, ContainerReadSummary, Diagnostic, IndexedFile, MapExport, ParamExport, ResourceKind, ResourcePreview, ResourceStructuredPreview, TextEntrySymbol, WorkspaceScanResult } from '@soulforge/shared';
+import type {
+  BridgeResult,
+  ContainerReadHint,
+  ContainerReadSummary,
+  Diagnostic,
+  IndexedFile,
+  MapExport,
+  ParamExport,
+  PatchHistoryEntry,
+  ResourceKind,
+  ResourcePreview,
+  ResourceStructuredPreview,
+  TextEntrySymbol,
+  WorkspaceScanResult,
+  WorkspaceSessionMeta
+} from '@soulforge/shared';
 import type { AnalyzeWorkspaceSummary } from '../../main/ipc.js';
 import type {
   AiPermissionMode,
@@ -13,6 +28,25 @@ import type {
 
 const RESOURCE_KIND_ORDER: ResourceKind[] = ['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx', 'chr', 'obj', 'other', 'unknown'];
 
+type WorkspaceMode = ResourceKind | 'files' | 'ai' | 'settings';
+
+const WORKSPACE_MODES: Array<{ id: WorkspaceMode; label: string }> = [
+  { id: 'files', label: 'Files' },
+  { id: 'event', label: 'Event' },
+  { id: 'map', label: 'Map' },
+  { id: 'param', label: 'Param' },
+  { id: 'msg', label: 'Msg' },
+  { id: 'menu', label: 'Menu' },
+  { id: 'script', label: 'Script' },
+  { id: 'action', label: 'Action' },
+  { id: 'chr', label: 'Chr' },
+  { id: 'obj', label: 'Obj' },
+  { id: 'sfx', label: 'Sfx' },
+  { id: 'other', label: 'Other' },
+  { id: 'ai', label: 'AI' },
+  { id: 'settings', label: 'Settings' }
+];
+
 interface EditableMsgRow {
   textId: string;
   text: string;
@@ -21,6 +55,9 @@ interface EditableMsgRow {
 
 export function App(): ReactElement {
   const [workspace, setWorkspace] = useState<WorkspaceScanResult | null>(null);
+  const [sessionMeta, setSessionMeta] = useState<WorkspaceSessionMeta | null>(null);
+  const [baseRootChoice, setBaseRootChoice] = useState<string | null>(null);
+  const [operationHistory, setOperationHistory] = useState<PatchHistoryEntry[]>([]);
   const [analysis, setAnalysis] = useState<AnalyzeWorkspaceSummary | null>(null);
   const [tools, setTools] = useState<ToolDescriptor[]>([]);
   const [selectedFile, setSelectedFile] = useState<IndexedFile | null>(null);
@@ -34,6 +71,8 @@ export function App(): ReactElement {
   const [eventUri, setEventUri] = useState('');
   const [toolOutput, setToolOutput] = useState<ToolResult | null>(null);
   const [files, setFiles] = useState<IndexedFile[]>([]);
+  const [allFiles, setAllFiles] = useState<IndexedFile[]>([]);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('files');
   const [status, setStatus] = useState('就绪');
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
@@ -48,15 +87,42 @@ export function App(): ReactElement {
   const canEditText = preview?.previewKind === 'text' && preview.structuredPreview?.editable === true && !preview.truncated;
   const hasMsgTable = canEditText && msgRows.length > 0;
   const editDirty = editText !== lastSavedText;
+  const visibleFiles = useMemo(
+    () => filterFilesForMode(allFiles.length > 0 ? allFiles : files, workspaceMode, query),
+    [allFiles, files, workspaceMode, query]
+  );
+
+  async function refreshOperationHistory(): Promise<void> {
+    const history = await window.soulforge.listOperations();
+    setOperationHistory(history);
+  }
+
+  async function chooseBaseDirectory(): Promise<void> {
+    const baseRoot = await window.soulforge.openBaseDialog();
+    if (!baseRoot) return;
+    setBaseRootChoice(baseRoot);
+    setStatus(`已选择只读 Base：${baseRoot}（下次打开 Mod 工作区时生效）`);
+  }
+
+  function clearBaseDirectory(): void {
+    setBaseRootChoice(null);
+    setStatus('已清除 Base 目录选择');
+  }
 
   async function openWorkspace(): Promise<void> {
     const workspaceRoot = await window.soulforge.openWorkspaceDialog();
     if (!workspaceRoot) return;
 
     setStatus('正在扫描工作区...');
-    const result = await window.soulforge.scanWorkspace(workspaceRoot);
+    const result = await window.soulforge.scanWorkspace({
+      workspaceRoot,
+      ...(baseRootChoice ? { baseRoot: baseRootChoice } : {})
+    });
     setWorkspace(result);
+    setSessionMeta(result.session ?? null);
+    setAllFiles(result.files);
     setFiles(result.files);
+    setWorkspaceMode('files');
     setSelectedFile(null);
     setPreview(null);
     setEditText('');
@@ -66,19 +132,41 @@ export function App(): ReactElement {
     setAnalysis(null);
     setToolOutput(null);
     setAiDraft(null);
+    setOperationHistory([]);
 
     setStatus('正在构建轻量证据索引...');
     const nextAnalysis = await window.soulforge.analyzeWorkspace(workspaceRoot);
     setAnalysis(nextAnalysis);
     setTools(nextAnalysis.tools);
     setEventUri(nextAnalysis.events[0]?.uri ?? '');
-    setStatus(`已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis.parsedFiles} 个文本/mock 资源`);
+    await refreshOperationHistory();
+    const baseLabel = result.session?.layers.baseRoot
+      ? ` · base 只读已挂载`
+      : ' · 未挂载 base';
+    setStatus(`已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis.parsedFiles} 个文本/mock 资源${baseLabel}`);
   }
 
   async function search(): Promise<void> {
     const result = await window.soulforge.searchResources(query);
+    setAllFiles(result);
     setFiles(result);
     setStatus(`搜索返回 ${result.length} 个文件`);
+  }
+
+  function switchMode(mode: WorkspaceMode): void {
+    setWorkspaceMode(mode);
+    if (mode === 'ai') {
+      setStatus('AI 侧边栏已聚焦：计划优先，写入必须经过 Patch Engine');
+      return;
+    }
+    if (mode === 'settings') {
+      setStatus('设置：Provider / 思考强度 / 权限模式见右侧 AI 面板');
+      return;
+    }
+    const filtered = filterFilesForMode(allFiles, mode, query);
+    setStatus(mode === 'files'
+      ? `Files mode：${filtered.length} 个文件`
+      : `${mode} mode：${filtered.length} 个资源`);
   }
 
   async function selectFile(file: IndexedFile): Promise<void> {
@@ -116,7 +204,27 @@ export function App(): ReactElement {
     setEditText(text);
     setLastSavedText(text);
     setMsgRows(extractMsgRows(refreshed));
+    await refreshOperationHistory();
     setStatus(`已保存 ${selectedFile.relativePath}，备份目录：${result.backupRoot ?? 'unknown'}`);
+  }
+
+  async function rollbackOp(opId: string): Promise<void> {
+    setStatus(`正在回滚操作 ${opId.slice(0, 8)}...`);
+    const result = await window.soulforge.rollbackOperation(opId);
+    await refreshOperationHistory();
+    if (!result.ok) {
+      setStatus(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`);
+      return;
+    }
+    if (selectedFile) {
+      const refreshed = await window.soulforge.openResourcePreview(selectedFile.sourceUri);
+      setPreview(refreshed);
+      const text = refreshed?.text ?? '';
+      setEditText(text);
+      setLastSavedText(text);
+      setMsgRows(extractMsgRows(refreshed));
+    }
+    setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
   }
 
   function updateMsgRow(index: number, patch: Partial<EditableMsgRow>): void {
@@ -185,27 +293,62 @@ export function App(): ReactElement {
       <header className="top-bar">
         <section>
           <h1>SoulForge</h1>
-          <p>Super Event Editor v0.1 | Stop modding in the dark.</p>
+          <p>魂游 Mod 的 Cursor · v0.5 foundation | Overlay 可写 · Base 只读 · Patch Engine 唯一写入</p>
         </section>
-        <button type="button" onClick={openWorkspace}>打开 Mod 工作区</button>
+        <div className="top-bar-actions">
+          <button type="button" className="secondary-action" onClick={() => void chooseBaseDirectory()}>
+            {baseRootChoice ? '更换 Base 目录' : '选择 Base（可选）'}
+          </button>
+          {baseRootChoice && (
+            <button type="button" className="ghost-action" onClick={clearBaseDirectory}>清除 Base</button>
+          )}
+          <button type="button" onClick={() => void openWorkspace()}>打开 Mod 工作区</button>
+        </div>
       </header>
 
       <nav className="mode-tabs" aria-label="editor modes">
-        <span className="active">Events</span>
-        <span>Params</span>
-        <span>Text</span>
-        <span>Maps</span>
-        <span>Files</span>
-        <span className="ai-tab">AI</span>
-        <span>Settings</span>
+        {WORKSPACE_MODES.map((mode) => (
+          <button
+            key={mode.id}
+            type="button"
+            className={workspaceMode === mode.id ? (mode.id === 'ai' ? 'active ai-tab' : 'active') : mode.id === 'ai' ? 'ai-tab' : undefined}
+            onClick={() => switchMode(mode.id)}
+          >
+            {mode.label}
+            {counts && isResourceKindMode(mode.id) ? ` ${counts[mode.id] ?? 0}` : ''}
+          </button>
+        ))}
       </nav>
 
       <section className="workspace-summary">
-        <strong>Workspace:</strong> {workspace?.workspaceRoot ?? '未打开'}
+        <div className="workspace-summary-lines">
+          <div>
+            <strong>Workspace (overlay):</strong> {workspace?.workspaceRoot ?? '未打开'}
+            <span className="mode-badge">{workspaceMode === 'files' ? 'Files mode' : `${workspaceMode} mode`}</span>
+          </div>
+          <div>
+            <strong>Base (readonly):</strong>{' '}
+            {sessionMeta?.layers.baseRoot
+              ?? baseRootChoice
+              ?? (sessionMeta ? '未挂载' : '打开工作区前可先选')}
+            {sessionMeta && (
+              <span className={sessionMeta.baseMissing ? 'base-pill missing' : 'base-pill ready'}>
+                {sessionMeta.baseMissing ? 'base missing' : 'base mounted'}
+              </span>
+            )}
+          </div>
+        </div>
         {counts && (
           <div className="counts">
             {RESOURCE_KIND_ORDER.map((kind) => (
-              <span key={kind}>{kind}: {counts[kind]}</span>
+              <button
+                key={kind}
+                type="button"
+                className={workspaceMode === kind ? 'count-chip active' : 'count-chip'}
+                onClick={() => switchMode(kind)}
+              >
+                {kind}: {counts[kind]}
+              </button>
             ))}
           </div>
         )}
@@ -222,7 +365,7 @@ export function App(): ReactElement {
             <button type="button" onClick={search}>搜索</button>
           </div>
           <div className="file-list">
-            {files.map((file) => (
+            {visibleFiles.map((file) => (
               <button
                 type="button"
                 key={file.sourceUri}
@@ -233,6 +376,9 @@ export function App(): ReactElement {
                 <small>{file.resourceKind} | {file.formatLabel} | {(file.size / 1024).toFixed(1)} KB</small>
               </button>
             ))}
+            {visibleFiles.length === 0 && (
+              <p className="muted pane-empty">当前模式没有匹配资源。可切换到 Files 或调整搜索。</p>
+            )}
           </div>
         </aside>
 
@@ -367,15 +513,21 @@ export function App(): ReactElement {
           <div className="tool-panel">
             <strong>Safe tools</strong>
             <div className="tool-group">
-              <small>read</small>
+              <small>read / analyze</small>
               <div className="tool-list">
                 {groupedTools.read.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
               </div>
             </div>
             <div className="tool-group">
-              <small>plan</small>
+              <small>propose / validate</small>
               <div className="tool-list">
                 {groupedTools.plan.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
+              </div>
+            </div>
+            <div className="tool-group">
+              <small>commit / rollback</small>
+              <div className="tool-list">
+                {groupedTools.write.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
               </div>
             </div>
             <div className="tool-row">
@@ -396,6 +548,43 @@ export function App(): ReactElement {
               <span>refs: H{analysis.referenceStats.high} / M{analysis.referenceStats.medium} / L{analysis.referenceStats.low}</span>
             </div>
           )}
+
+          <section className="operation-history-panel">
+            <div className="operation-history-header">
+              <strong>操作历史</strong>
+              <button type="button" className="ghost-action" disabled={!workspace} onClick={() => void refreshOperationHistory()}>
+                刷新
+              </button>
+            </div>
+            {!workspace && <p className="muted">打开工作区并完成至少一次 Patch 提交后可在此回滚。</p>}
+            {workspace && operationHistory.length === 0 && (
+              <p className="muted">尚无已记录操作。保存文本资源后会写入落盘 operation log。</p>
+            )}
+            <div className="operation-history-list">
+              {operationHistory.map((entry) => (
+                <div key={entry.opId} className="operation-history-item">
+                  <div className="operation-history-meta">
+                    <strong title={entry.opId}>{entry.title}</strong>
+                    <span className={`op-status op-status-${entry.status}`}>{entry.status}</span>
+                    <small>
+                      {entry.fileCount} file(s) · {entry.committedAt ?? entry.createdAt}
+                    </small>
+                    <small className="muted" title={entry.changedPaths.join('\n')}>
+                      {entry.changedPaths[0] ? shortenPath(entry.changedPaths[0]) : '—'}
+                      {entry.changedPaths.length > 1 ? ` +${entry.changedPaths.length - 1}` : ''}
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={entry.status !== 'committed'}
+                    onClick={() => void rollbackOp(entry.opId)}
+                  >
+                    回滚
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
 
           {toolOutput && <pre className="tool-output">{JSON.stringify(toolOutput, null, 2)}</pre>}
         </aside>
@@ -859,9 +1048,41 @@ function summarizeEvidenceValue(value: unknown): string {
 }
 
 function groupToolsByPermission(tools: ToolDescriptor[]): Record<'read' | 'plan' | 'write', ToolDescriptor[]> {
+  const levelOf = (tool: ToolDescriptor): string => tool.permissionLevel ?? tool.permission;
   return {
-    read: tools.filter((tool) => tool.permission === 'read'),
-    plan: tools.filter((tool) => tool.permission === 'plan'),
-    write: tools.filter((tool) => tool.permission === 'write')
+    read: tools.filter((tool) => {
+      const level = levelOf(tool);
+      return level === 'read' || level === 'analyze';
+    }),
+    plan: tools.filter((tool) => {
+      const level = levelOf(tool);
+      return level === 'propose' || level === 'stage' || level === 'validate' || level === 'plan';
+    }),
+    write: tools.filter((tool) => {
+      const level = levelOf(tool);
+      return level === 'commit' || level === 'rollback' || level === 'write';
+    })
   };
+}
+
+function isResourceKindMode(mode: WorkspaceMode): mode is ResourceKind {
+  return mode !== 'files' && mode !== 'ai' && mode !== 'settings';
+}
+
+function filterFilesForMode(files: IndexedFile[], mode: WorkspaceMode, query: string): IndexedFile[] {
+  const normalized = query.trim().toLowerCase();
+  return files.filter((file) => {
+    if (isResourceKindMode(mode) && file.resourceKind !== mode) return false;
+    if (!normalized) return true;
+    return file.relativePath.toLowerCase().includes(normalized)
+      || file.resourceKind.toLowerCase().includes(normalized)
+      || file.formatLabel.toLowerCase().includes(normalized);
+  });
+}
+
+function shortenPath(path: string): string {
+  const normalized = path.replaceAll('\\', '/');
+  const parts = normalized.split('/');
+  if (parts.length <= 3) return normalized;
+  return `…/${parts.slice(-3).join('/')}`;
 }

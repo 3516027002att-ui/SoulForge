@@ -1,6 +1,6 @@
 # SoulForge 项目状态快照（Checkpoint）
 
-生成时间：2026-07-08
+生成时间：2026-07-09
 
 ## 一、项目本质
 
@@ -194,18 +194,22 @@ Diagnostics 同时驱动：
 
 候选引用可以进入 patch proposal，但必须由用户逐条确认或通过明确策略门控。
 
-## 十一、当前工程状态（v0.3）
+## 十一、当前工程状态（v0.3 完成地基 → v0.5 起步）
 
-当前仓库仍处在 v0.3 parser plumbing 阶段。
+v0.3 fixture-confirmed Bridge plumbing 已本地验证。
 
-v0.3 的真实目标是：
+2026-07-09 起进入 **v0.5 foundation** 切片：
 
 ```text
-low-confidence candidate parser
-  -> fixture-confirmed parser + evidence-first semantic bridge
+overlay + readonly base
+  -> graph patch IR
+  -> operation log / file rollback
+  -> AI tool permission ladder
+  -> resource mode UI
+  -> SQLite schema v2
 ```
 
-这只是可信度地基，不代表 native FromSoftware parser / writer 已经完成。
+这仍不代表 native FromSoftware parser / writer 已经完成。
 
 ## 十二、当前完成能力
 
@@ -218,13 +222,17 @@ low-confidence candidate parser
 
 ### 2. Synthetic fixture 系统
 
-已完成并接入 router：
+已完成并接入 router / inspect，且本地 Bridge smoke 已验证：
 
 ```text
 MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED
 EMEVD_SYNTHETIC_FIXTURE_CONFIRMED
 PARAM_SYNTHETIC_FIXTURE_CONFIRMED
 MSB_SYNTHETIC_FIXTURE_CONFIRMED
+BND_SYNTHETIC_FIXTURE_CONFIRMED
+DCX_PAYLOAD_BOUNDARY_CONFIRMED
+DCX_DFLT_DECOMPRESSED_PREVIEW_READY
+DCX_DFLT_NESTED_BND_CHILD_TABLE_FOUND
 ```
 
 ### 3. Event / Param / Map 路由顺序
@@ -235,10 +243,28 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 
 ### 4. BND 状态
 
-- `SyntheticBinderFixtureExports` 已存在；
-- BND synthetic child inventory 接线仍是后续任务；
-- binderChildCandidate 仍为 low-confidence evidence；
-- native BND parser / writer 尚未完成。
+- `SyntheticBinderFixtureExports` 已接入 inspect confirmed 分支；
+- child inventory 含 id / name / resourceKind / offset / packedSize / unpackedSize；
+- binderChildCandidate 仍保留为 low-confidence visible-string fallback；
+- native BND parser / writer 尚未完成，不得标为 native 完成。
+
+### 5. 引用图
+
+- `referenceBuilder` 已能区分 high / medium / low；
+- 2026-07-09 新增 core smoke：fixture-confirmed instruction role 可生成 high-confidence edges，bare numeric 保持 low。
+
+### 6. v0.5 foundation（2026-07-09）
+
+- `WorkspaceSession`：overlay 可写、base 只读，拒绝写 base；
+- `GraphPatch` IR：`buildGraphPatchFromProposal`；
+- `MemoryOperationLogStore` + `rollbackOperation`：operation / file 级回滚；
+- `FileOperationLogStore`：同 contract 的 JSON 落盘 store，commit/list/rollback 可跨进程 reopen；
+- Patch Engine commit 自动写 operation log 与 graph；
+- AI tool 权限阶梯：`read|analyze|propose|stage|validate|commit|rollback`；
+- 新工具：`build_patch_graph`、`list_operations`、`rollback_operation`；
+- SQLite migration id=2：workspace_layers / diagnostics / patch_history / file_operations / agent_runs；
+- Desktop：资源模式切换条（Files + 各 resource kind + AI），按 kind 过滤文件树；
+- Desktop P0 巩固：`operation.list` / `operation.rollback` IPC、操作历史面板一键回滚、可选 base 目录对话框；保存走 session 写门 + 落盘 operation log（userData，不写用户 mod 树）。
 
 ## 十三、当前已知问题
 
@@ -250,7 +276,7 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 @rollup/rollup-linux-x64-gnu
 ```
 
-这更像 node_modules / optional deps 环境问题，不应直接判断为核心代码逻辑错误。
+Windows PowerShell 本地环境 2026-07-07 / 2026-07-09 未复现；这更像跨平台 node_modules / optional deps 环境问题。
 
 ### 2. CodexPro 执行限制
 
@@ -260,45 +286,26 @@ Bridge smoke 可能需要本地终端执行。
 
 ## 十四、当前开发优先级
 
-### P0：维持 v0.3 任务边界
+### P0：巩固 v0.5 foundation — 已完成（2026-07-09）
 
-Codex 当前只应做窄任务：
+- smoke 绿色：`npm run test`、`test:v05-foundation`（含 persist）、`bridge:verify:synthetic`、`typecheck`、`build`；
+- Desktop 可见操作历史 + 一键 rollback（main IPC，renderer 不写盘）；
+- 打开工作区可选 base 游戏目录（只读；`WRITE_TO_BASE_FORBIDDEN`）；
+- 落盘 operation log：`FileOperationLogStore`（JSON；SQLite schema 仍可后续接 driver）。
 
-- synthetic fixture router wire-up；
-- 类型小修；
-- smoke script；
-- 必要 build 修复。
+### P1：安全编辑闭环加厚
 
-不得自由扩展到：
+- writer contract 接口（text 已走 Patch Engine；structured/binary 仍禁止裸写）；
+- patch graph 在 AI 侧边栏 / 主区摘要展示；
+- diagnostics 表与 Patch gate 联动；
+- Files mode 风险确认（unsupported 格式）；
+- 可选 SQLite driver 替换 JSON operation log adapter。
 
-- v0.5 UI；
-- Patch Engine 大改；
-- native parser；
-- writer；
-- Blender / 3D；
-- 本地 LLM；
-- vector DB。
+### P2：按资源逐步加深（仍禁伪 native 完成声明）
 
-### P1：BND 子资源系统
-
-目标：
-
-- BND child inventory fixture confirmed；
-- child table listing；
-- offset / size / kind / name；
-- 保留 visible-string fallback 为 low-confidence evidence。
-
-### P2：为 v0.5 建地基
-
-只在 v0.3 稳定后推进：
-
-- native DCX / BND；
-- writer contracts；
-- unified patch model；
-- SQLite reference graph；
-- operation log / patch history；
-- AI tool registry；
-- Patch Engine staging / validation / rollback。
+- DCX / BND 容器路径继续 evidence-first；
+- event / param / map / msg 结构化编辑与 writer；
+- 不实现 3D / Blender / 本地 LLM / vector DB。
 
 ## 十五、v0.5 非目标
 
@@ -318,5 +325,5 @@ v0.5 不要求：
 ## 十六、当前系统真实状态一句话
 
 ```text
-SoulForge 已经有 evidence-first Bridge 地基、产品决策和 v0.5 架构裁定，但真实 native parser / writer / Patch Engine 完整闭环仍未完成。
+SoulForge 已有 v0.3 fixture Bridge 地基，v0.5 foundation P0 已巩固（overlay/base、graph patch、落盘 operation log、desktop 历史/回滚 IPC、可选 base 打开、AI 权限阶梯、资源模式 UI）；完整 native parser / writer / 超级编辑器闭环仍在建设中。
 ```

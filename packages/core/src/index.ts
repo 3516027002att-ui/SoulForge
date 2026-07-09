@@ -2,10 +2,18 @@ export * from './workspace/resourceKinds.js';
 export * from './workspace/resourceUri.js';
 export * from './workspace/scanWorkspace.js';
 export * from './workspace/gameProfiles.js';
+export * from './workspace/workspaceSession.js';
 export * from './preview/openResourcePreview.js';
 export * from './editing/saveTextResource.js';
 export * from './patch/patchEngine.js';
 export * from './patch/textDiff.js';
+export * from './patch/graphPatch.js';
+export * from './patch/operationLog.js';
+export * from './patch/fileOperationLogStore.js';
+export * from './patch/operationLogPath.js';
+export * from './patch/rollback.js';
+
+
 export * from './references/referenceBuilder.js';
 export * from './references/eventEvidence.js';
 export * from './bridge/runBridge.js';
@@ -13,6 +21,7 @@ export * from './indexing/workspaceIndex.js';
 export * from './indexing/ingestBridgeResult.js';
 export * from './jobs/taskQueue.js';
 export * from './ai/toolRegistry.js';
+export * from './ai/toolPermissions.js';
 export * from './ai/aiContextBuilder.js';
 export * from './ai/assistantSession.js';
 export * from './parsers/eventTextParser.js';

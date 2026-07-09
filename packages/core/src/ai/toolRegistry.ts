@@ -1,10 +1,15 @@
-import type { PatchMode, PatchProposal, ReferenceEdge, ResourceKind } from '@soulforge/shared';
+import type { AiToolPermissionLevel, PatchMode, PatchProposal, ReferenceEdge, ResourceKind } from '@soulforge/shared';
 import { createPatchProposal, dryRunPatchProposal } from '../patch/patchEngine.js';
+import { getDefaultOperationLogStore } from '../patch/operationLog.js';
+import { rollbackOperation } from '../patch/rollback.js';
+import { buildGraphPatchFromProposal } from '../patch/graphPatch.js';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
 import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
+import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
 
-export type ToolPermission = 'read' | 'plan' | 'write';
+/** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
+export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex;
@@ -15,6 +20,7 @@ export interface ToolDescriptor {
   name: string;
   description: string;
   permission: ToolPermission;
+  permissionLevel?: AiToolPermissionLevel;
 }
 
 export interface ToolResult<T = unknown> {
@@ -38,19 +44,26 @@ export class ToolRegistry {
 
   register(tool: RegisteredTool): void {
     if (this.tools.has(tool.name)) throw new Error(`Tool already registered: ${tool.name}`);
-    this.tools.set(tool.name, tool);
+    const permissionLevel = tool.permissionLevel ?? normalizePermissionLevel(tool.permission);
+    this.tools.set(tool.name, { ...tool, permissionLevel, permission: permissionLevel });
   }
 
   list(): ToolDescriptor[] {
-    return [...this.tools.values()].map(({ name, description, permission }) => ({ name, description, permission }));
+    return [...this.tools.values()].map(({ name, description, permission, permissionLevel }) => ({
+      name,
+      description,
+      permission,
+      permissionLevel: permissionLevel ?? normalizePermissionLevel(permission)
+    }));
   }
 
   async run(name: string, input: unknown, context: ToolContext): Promise<ToolResult> {
     const tool = this.tools.get(name);
     if (!tool) return fail('TOOL_NOT_FOUND', `Unknown tool: ${name}`);
 
-    if (!isToolAllowed(tool.permission, context.mode)) {
-      return fail('TOOL_PERMISSION_DENIED', `Tool '${name}' requires ${tool.permission} permission in ${context.mode} mode.`);
+    const level = tool.permissionLevel ?? normalizePermissionLevel(tool.permission);
+    if (!isAiToolPermissionAllowed(level, context.mode)) {
+      return fail('TOOL_PERMISSION_DENIED', `Tool '${name}' requires ${level} permission in ${context.mode} mode.`);
     }
 
     try {
@@ -68,6 +81,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'workspace_stats',
     description: 'Return indexed workspace counts for files, symbols, and references.',
     permission: 'read',
+    permissionLevel: 'read',
     run: (_input, context) => ok(context.workspaceIndex.getStats())
   });
 
@@ -75,6 +89,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'search_resources',
     description: 'Search indexed workspace files by path, extension, or resource kind.',
     permission: 'read',
+    permissionLevel: 'read',
     run: (input, context) => {
       const value = asRecord(input);
       const query = asString(value.query, '');
@@ -88,6 +103,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'search_events',
     description: 'Search parsed event symbols.',
     permission: 'read',
+    permissionLevel: 'read',
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchEvents(asString(value.query, ''), asNumber(value.limit, 50)));
@@ -98,6 +114,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'search_map_entities',
     description: 'Search parsed map entities and regions.',
     permission: 'read',
+    permissionLevel: 'read',
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchMapEntities(asString(value.query, ''), asNumber(value.limit, 50)));
@@ -108,6 +125,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'search_param_rows',
     description: 'Search parsed param rows.',
     permission: 'read',
+    permissionLevel: 'read',
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchParamRows(asString(value.query, ''), asNumber(value.limit, 50)));
@@ -118,6 +136,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'search_text_entries',
     description: 'Search parsed text entries.',
     permission: 'read',
+    permissionLevel: 'read',
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchTextEntries(asString(value.query, ''), asNumber(value.limit, 50)));
@@ -128,6 +147,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     name: 'lookup_text_id',
     description: 'Look up parsed text entries by numeric textId and optional category.',
     permission: 'read',
+    permissionLevel: 'read',
     run: (input, context) => {
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
@@ -142,7 +162,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'find_text_references',
     description: 'Find events or other symbols that reference a parsed textId.',
-    permission: 'read',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
     run: (input, context) => {
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
@@ -161,7 +182,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'explain_text_entry',
     description: 'Build evidence-first AI explanation contexts for a parsed textId.',
-    permission: 'read',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
     run: (input, context) => {
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
@@ -183,7 +205,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'find_references',
     description: 'Find evidence graph references connected to a URI.',
-    permission: 'read',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
     run: (input, context) => {
       const value = asRecord(input);
       const uri = asString(value.uri);
@@ -196,7 +219,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'explain_event',
     description: 'Build an evidence-first explanation input for one event URI.',
-    permission: 'read',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
     run: (input, context) => {
       const value = asRecord(input);
       const uri = asString(value.uri);
@@ -210,7 +234,8 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'propose_text_patch',
     description: 'Create a text-only patch proposal. It does not save files.',
-    permission: 'plan',
+    permission: 'propose',
+    permissionLevel: 'propose',
     run: (input, context) => {
       const value = asRecord(input);
       const workspaceId = context.workspaceIndex.workspaceId;
@@ -246,13 +271,58 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'validate_patch',
     description: 'Run Patch Engine validation in staging. It does not save files.',
-    permission: 'plan',
+    permission: 'validate',
+    permissionLevel: 'validate',
     run: async (input) => {
       const proposal = input as PatchProposal;
       if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
         return fail('INVALID_INPUT', 'validate_patch requires a PatchProposal object.');
       }
       return ok(await dryRunPatchProposal(proposal));
+    }
+  });
+
+  registry.register({
+    name: 'build_patch_graph',
+    description: 'Project a patch proposal into the v0.5 graph patch IR for review.',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
+    run: (input) => {
+      const proposal = input as PatchProposal;
+      if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
+        return fail('INVALID_INPUT', 'build_patch_graph requires a PatchProposal object.');
+      }
+      return ok(buildGraphPatchFromProposal(proposal));
+    }
+  });
+
+  registry.register({
+    name: 'list_operations',
+    description: 'List Patch Engine operation log / patch history entries for the active workspace.',
+    permission: 'analyze',
+    permissionLevel: 'analyze',
+    run: (_input, context) => {
+      const store = getDefaultOperationLogStore();
+      return ok({
+        operations: store.list(context.workspaceIndex.workspaceId),
+        history: store.history(context.workspaceIndex.workspaceId)
+      });
+    }
+  });
+
+  registry.register({
+    name: 'rollback_operation',
+    description: 'Rollback a committed operation from its backup. Requires full-permission mode.',
+    permission: 'rollback',
+    permissionLevel: 'rollback',
+    run: async (input) => {
+      const value = asRecord(input);
+      const opId = asString(value.opId);
+      if (!opId) return fail('INVALID_INPUT', 'rollback_operation requires opId.');
+      return ok(await rollbackOperation({
+        opId,
+        store: getDefaultOperationLogStore()
+      }));
     }
   });
 
@@ -268,10 +338,22 @@ export function summarizeReferences(edges: ReferenceEdge[]): { high: number; med
   };
 }
 
-function isToolAllowed(permission: ToolPermission, mode: ToolContext['mode']): boolean {
-  if (permission === 'read') return true;
-  if (permission === 'plan') return mode === 'plan' || mode === 'normal' || mode === 'fullPermission';
-  return mode === 'fullPermission';
+function normalizePermissionLevel(permission: ToolPermission): AiToolPermissionLevel {
+  if (
+    permission === 'read'
+    || permission === 'analyze'
+    || permission === 'propose'
+    || permission === 'stage'
+    || permission === 'validate'
+    || permission === 'commit'
+    || permission === 'rollback'
+  ) {
+    return permission;
+  }
+  if (permission === 'plan' || permission === 'write') {
+    return legacyPermissionToLevel(permission);
+  }
+  return 'read';
 }
 
 function ok<T>(data: T): ToolResult<T> {

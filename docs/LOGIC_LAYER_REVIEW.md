@@ -33,7 +33,9 @@
 - `bridge/SoulForge.Bridge/scripts/verify-synthetic-core-fixtures.ps1` 已覆盖 FMG、event、PARAM、map synthetic fixture smoke，并追加 synthetic DCX DFLT inspect smoke。
 - `DcxPayloadProbe.cs` 已接入 inspect，可输出 DCX payload boundary evidence，并对 DFLT/zlib payload 生成 bounded decompressed preview。
 - KRAK / EDGE / ZSTD 当前只输出边界与 unsupported decompression diagnostic，不伪装成已解压。
-- `scripts/verify-synthetic-core-fixtures.mjs` 已作为 Node smoke wrapper 接入 `npm run bridge:verify:synthetic`，但当前 CodexPro 运行壳未完成 Bridge dotnet smoke。
+- `scripts/verify-synthetic-core-fixtures.mjs` 已作为 Node smoke wrapper 接入 `npm run bridge:verify:synthetic`；Windows 本地已验证通过。
+- BND synthetic child inventory 已接入 inspect confirmed 分支，并保留 binderChildCandidate low-confidence fallback。
+- core 侧 `runSyntheticConfirmedReferenceSmoke` 验证 fixture-confirmed instruction role 可生成 high-confidence 引用边，bare numeric 保持 low。
 
 ## 硬边界
 
@@ -116,25 +118,29 @@ Synthetic core smoke check：
 
 ## 下一批 parser 里程碑
 
-1. 用 fixture-confirmed FMG text ID table parsing 替换 FMG table candidate 逻辑。
-2. 用 fixture-confirmed BND child table listing 替换 binderChildCandidate visible-string evidence。
+1. 继续引用图升级：confirmed role / confirmed symbols 稳定喂给 reference builder。
+2. 可选：把 confirmed binderChildTable 以 evidence 形式写入 index/container summary（仍不实现 native BND parser）。
 3. 继续从 synthetic EMEVD event / instruction export 迭代到 native fixture-confirmed parser。
 4. 继续从 synthetic PARAM row / field export 迭代到 native fixture-confirmed parser。
 5. 继续从 synthetic MSB entity / region / transform / model export 迭代到 native fixture-confirmed parser。
+6. FMG / BND 的 native 权威解析仍需独立 fixture 或明确格式规则证明。
 
 ## Codex 当前入口
 
 Codex 当前应优先阅读：
 
 - docs/CODEX_NEXT_ACTIONS.md
-- docs/CODEX_TASK_BND_FIXTURE_WIREUP.md
+- docs/PRODUCT_VISION.md
+- docs/DECISIONS.md
+- docs/V0_5_MILESTONE.md
+- docs/PROJECT_STATE.md
 
-Codex 当前已完成 issue #1 的 router wire-up、PARAM 类型小修和 core synthetic smoke script。下一步应优先处理 issue #2 的 BND synthetic fixture wire-up；不要在这个任务中扩展到真实 native parser、UI 重构或 Patch Engine 改造。
+issue #1 / #2 代码与本地 Bridge smoke 已完成。下一步优先引用图 confidence 升级与 v0.3 可信度维护；不要扩展到真实 native parser、UI 重构或 Patch Engine 改造。
 
-## CodexPro 验证记录
+## 验证记录
 
-2026-07-04：
+2026-07-09：
 
 - `npm run typecheck`：通过。
-- `npm run build`：失败于本地 node_modules / npm optional dependency 状态，Rollup 找不到 `@rollup/rollup-linux-x64-gnu`。
-- `dotnet build bridge/SoulForge.Bridge/SoulForge.Bridge.csproj` 与 `bridge/SoulForge.Bridge/scripts/verify-synthetic-core-fixtures.ps1`：CodexPro safe bash allowlist 不允许直接运行，需要在本地终端或 full bash 模式下执行。
+- `npm run bridge:build` / `npm run bridge:verify:synthetic`：通过。
+- core reference confidence smoke 已加入 `npm test`。

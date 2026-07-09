@@ -2,7 +2,22 @@ import { copyFile, mkdir, mkdtemp, readFile, rename, stat, writeFile } from 'nod
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Diagnostic, PatchChange, PatchMode, PatchProposal, ValidationResult } from '@soulforge/shared';
+import type {
+  Diagnostic,
+  FileOperationRecord,
+  OperationLogRecord,
+  PatchChange,
+  PatchMode,
+  PatchProposal,
+  ValidationResult
+} from '@soulforge/shared';
+import { attachGraphToProposal, buildGraphPatchFromProposal } from './graphPatch.js';
+import {
+  createCommittedOperationRecord,
+  getDefaultOperationLogStore,
+  type OperationLogStore
+} from './operationLog.js';
+import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 
 export interface CreatePatchProposalInput {
   workspaceId: string;
@@ -10,6 +25,7 @@ export interface CreatePatchProposalInput {
   author: 'user' | 'ai';
   mode: PatchMode;
   changes: PatchChange[];
+  attachGraph?: boolean;
 }
 
 export interface StagedPatchFile {
@@ -23,10 +39,13 @@ export interface StagingArea {
   opId: string;
   root: string;
   files: StagedPatchFile[];
+  proposal: PatchProposal;
 }
 
 export interface CommitPatchOptions {
   backupRoot?: string;
+  operationLog?: OperationLogStore;
+  session?: WorkspaceSession;
 }
 
 export interface CommitPatchResult {
@@ -34,6 +53,7 @@ export interface CommitPatchResult {
   backupRoot: string;
   changedFiles: string[];
   diagnostics: Diagnostic[];
+  operation?: OperationLogRecord;
 }
 
 interface TextContentEdit {
@@ -41,7 +61,7 @@ interface TextContentEdit {
 }
 
 export function createPatchProposal(input: CreatePatchProposalInput): PatchProposal {
-  return {
+  const proposal: PatchProposal = {
     opId: randomUUID(),
     workspaceId: input.workspaceId,
     title: input.title,
@@ -50,6 +70,9 @@ export function createPatchProposal(input: CreatePatchProposalInput): PatchPropo
     changes: input.changes,
     createdAt: new Date().toISOString()
   };
+
+  if (input.attachGraph === false) return proposal;
+  return attachGraphToProposal(proposal);
 }
 
 export async function createStagingArea(proposal: PatchProposal): Promise<StagingArea> {
@@ -66,17 +89,34 @@ export async function createStagingArea(proposal: PatchProposal): Promise<Stagin
     const afterHash = await sha256File(stagingPath);
 
     stagedFiles.push({
-      change,
+      change: {
+        ...change,
+        beforeHash,
+        afterHash,
+        layer: change.layer ?? 'overlay'
+      },
       stagingPath,
       beforeHash,
       afterHash
     });
   }
 
-  return { opId: proposal.opId, root, files: stagedFiles };
+  const withHashes: PatchProposal = {
+    ...proposal,
+    changes: stagedFiles.map((file) => file.change),
+    graph: buildGraphPatchFromProposal({
+      ...proposal,
+      changes: stagedFiles.map((file) => file.change)
+    })
+  };
+
+  return { opId: proposal.opId, root, files: stagedFiles, proposal: withHashes };
 }
 
-export async function validateStagingArea(staging: StagingArea): Promise<ValidationResult> {
+export async function validateStagingArea(
+  staging: StagingArea,
+  session?: WorkspaceSession
+): Promise<ValidationResult> {
   const diagnostics: Diagnostic[] = [];
 
   if (staging.files.length === 0) {
@@ -88,6 +128,11 @@ export async function validateStagingArea(staging: StagingArea): Promise<Validat
   }
 
   for (const file of staging.files) {
+    if (session) {
+      const writable = session.resolveWritablePath(file.change.targetPath, file.change.layer ?? 'overlay');
+      if (!writable.ok) diagnostics.push(...writable.diagnostics);
+    }
+
     const stagedStat = await safeStat(file.stagingPath);
     if (!stagedStat) {
       diagnostics.push({
@@ -135,10 +180,13 @@ export async function validateStagingArea(staging: StagingArea): Promise<Validat
   };
 }
 
-export async function dryRunPatchProposal(proposal: PatchProposal): Promise<ValidationResult> {
+export async function dryRunPatchProposal(
+  proposal: PatchProposal,
+  session?: WorkspaceSession
+): Promise<ValidationResult> {
   try {
     const staging = await createStagingArea(proposal);
-    return await validateStagingArea(staging);
+    return await validateStagingArea(staging, session);
   } catch (error) {
     return {
       ok: false,
@@ -155,8 +203,11 @@ export async function dryRunPatchProposal(proposal: PatchProposal): Promise<Vali
   }
 }
 
-export async function commitValidatedStagingArea(staging: StagingArea, options: CommitPatchOptions = {}): Promise<CommitPatchResult> {
-  const validation = await validateStagingArea(staging);
+export async function commitValidatedStagingArea(
+  staging: StagingArea,
+  options: CommitPatchOptions = {}
+): Promise<CommitPatchResult> {
+  const validation = await validateStagingArea(staging, options.session);
   if (!validation.ok) {
     return {
       opId: staging.opId,
@@ -169,6 +220,7 @@ export async function commitValidatedStagingArea(staging: StagingArea, options: 
   const backupRoot = options.backupRoot ?? join(tmpdir(), `soulforge-backup-${staging.opId}`);
   const changedFiles: string[] = [];
   const diagnostics: Diagnostic[] = [...validation.diagnostics];
+  const fileRecords: FileOperationRecord[] = [];
 
   for (const file of staging.files) {
     const backupPath = makeBackupPath(backupRoot, file);
@@ -180,13 +232,54 @@ export async function commitValidatedStagingArea(staging: StagingArea, options: 
     await copyFile(file.stagingPath, siblingTemp);
     await rename(siblingTemp, file.change.targetPath);
     changedFiles.push(file.change.targetPath);
+
+    fileRecords.push({
+      targetUri: file.change.targetUri,
+      targetPath: file.change.targetPath,
+      beforeHash: file.beforeHash,
+      afterHash: file.afterHash,
+      backupPath,
+      kind: file.change.kind,
+      ...(file.change.resourceKind ? { resourceKind: file.change.resourceKind } : {})
+    });
+  }
+
+  const operation = createCommittedOperationRecord({
+    proposal: staging.proposal,
+    backupRoot,
+    files: fileRecords,
+    diagnostics,
+    ...(staging.proposal.graph ? { graph: staging.proposal.graph } : {})
+  });
+
+  const store = options.operationLog ?? getDefaultOperationLogStore();
+  try {
+    store.record(operation);
+  } catch (error) {
+    // Overlay files are already committed; do not throw past the write.
+    // Callers still receive opId/backupRoot/operation for recovery.
+    const logDiagnostic = {
+      severity: 'error' as const,
+      code: 'OPERATION_LOG_RECORD_FAILED',
+      message: error instanceof Error
+        ? `Patch files were written but operation log record failed: ${error.message}`
+        : 'Patch files were written but operation log record failed.',
+      details: {
+        opId: staging.opId,
+        backupRoot,
+        storeError: error instanceof Error ? error.message : String(error)
+      }
+    };
+    diagnostics.push(logDiagnostic);
+    operation.diagnostics = [...operation.diagnostics, logDiagnostic];
   }
 
   return {
     opId: staging.opId,
     backupRoot,
     changedFiles,
-    diagnostics
+    diagnostics,
+    operation
   };
 }
 
