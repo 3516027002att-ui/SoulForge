@@ -113,12 +113,13 @@ function requireConfirmationForRisk(
   risk: PatchIrOperation['riskLevel'],
   confirmation?: ConfirmationReceipt
 ): StructuredDiagnostic[] {
-  if (risk !== 'high' && risk !== 'blocked') return [];
+  // Raw/caution/high Files Mode writes always need an explicit receipt.
+  if (risk === 'safe') return [];
   if (confirmation?.id && confirmation.subjects.length > 0) return [];
   return [createDiagnostic({
     severity: 'error',
     code: 'EDIT_CONFIRMATION_REQUIRED',
-    message: 'High-risk Files Mode write requires an explicit confirmation receipt.',
+    message: 'Files Mode raw/high-risk write requires an explicit confirmation receipt.',
     details: { riskLevel: risk }
   })];
 }
@@ -220,6 +221,7 @@ export async function proposeRawByteEdit(
     expectedHash = '';
   }
 
+  // All raw ops require confirmation; packed/native is high risk.
   const risk: PatchIrOperation['riskLevel'] = caps.isPackedOrNative ? 'high' : 'caution';
   const op = createRawByteRangeOperation({
     targetUri: targetUri(relativePath),
@@ -231,7 +233,7 @@ export async function proposeRawByteEdit(
     resourceKind: caps.resourceKind
   });
   op.riskLevel = risk;
-  op.metadata = { requiresConfirmation: risk === 'high', filesMode: true };
+  op.metadata = { requiresConfirmation: true, filesMode: true, nativePacked: caps.isPackedOrNative };
 
   const patch = createPatchIr({
     workspaceId: input.workspaceId,
@@ -245,7 +247,7 @@ export async function proposeRawByteEdit(
     patch,
     capabilities: caps,
     riskLevel: risk,
-    requiresConfirmation: risk === 'high',
+    requiresConfirmation: true,
     diagnostics
   };
 }
@@ -294,11 +296,13 @@ export async function proposeWholeFileReplace(
     }));
   }
 
+  // Whole-file binary replace is never "safe"; text full replace can be safe only via text path.
+  // This Files Mode replace API always requires confirmation for non-text payloads.
   const risk: PatchIrOperation['riskLevel'] = caps.isPackedOrNative
     ? 'high'
-    : caps.isTextLike
-      ? 'safe'
-      : 'caution';
+    : caps.isTextLike && input.newText !== undefined
+      ? 'caution'
+      : 'high';
 
   diagnostics.push(...requireConfirmationForRisk(risk, input.confirmation));
 
@@ -354,7 +358,7 @@ export async function proposeWholeFileReplace(
     patch,
     capabilities: caps,
     riskLevel: risk,
-    requiresConfirmation: risk === 'high',
+    requiresConfirmation: true,
     diagnostics
   };
 }
@@ -367,13 +371,23 @@ export async function commitFilePatch(input: {
   confirmation?: ConfirmationReceipt;
   recoveryDir?: string;
 }): Promise<TransactionCommitCompatResult & { diagnostics: Diagnostic[] }> {
-  const highRisk = input.patch.operations.some(
-    (op) => op.riskLevel === 'high' || op.riskLevel === 'blocked'
+  const needsConfirm = input.patch.operations.some(
+    (op) =>
+      op.riskLevel === 'high'
+      || op.riskLevel === 'blocked'
+      || op.riskLevel === 'caution'
+      || op.metadata?.requiresConfirmation === true
+      || (op.kind === 'file_replace' && op.requiresConfirmation === true)
+      || op.kind === 'raw_byte_range_edit'
   );
-  const confirmDiagnostics = requireConfirmationForRisk(
-    highRisk ? 'high' : 'safe',
-    input.confirmation
-  );
+  const confirmDiagnostics = needsConfirm
+    ? requireConfirmationForRisk(
+      input.patch.operations.some((op) => op.riskLevel === 'high' || op.riskLevel === 'blocked')
+        ? 'high'
+        : 'caution',
+      input.confirmation
+    )
+    : [];
   if (confirmDiagnostics.some((d) => d.severity === 'error')) {
     return {
       opId: input.patch.patchId,

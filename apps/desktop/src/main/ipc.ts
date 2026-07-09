@@ -4,16 +4,23 @@ import {
   analyzeWorkspace,
   buildAiSidebarDraft,
   createDefaultToolRegistry,
+  createConfirmationReceipt,
   openFileOperationLogStore,
   openResourcePreview,
   openWorkspaceSession,
+  readRawResourceMetadata,
+  readRawResourceRange,
   resolveOperationLogStorePath,
+  resolveResourceCapabilities,
   rollbackOperation,
+  saveRawByteRange,
+  saveRawReplace,
   saveTextResource,
   scanWorkspace,
   type AiSidebarDraft,
   type AiSidebarDraftRequest,
   type FileOperationLogStore,
+  type ResourceCapabilityMatrix,
   type ToolContext,
   type ToolDescriptor,
   type ToolResult,
@@ -21,6 +28,7 @@ import {
   type WorkspaceSession
 } from '@soulforge/core';
 import type {
+  ConfirmationReceipt,
   Diagnostic,
   IndexedFile,
   PatchHistoryEntry,
@@ -205,6 +213,135 @@ export function registerIpcHandlers(): void {
         });
 
     return items;
+  });
+
+  ipcMain.handle('resource.capabilities', async (_event, sourceUri: string): Promise<ResourceCapabilityMatrix | null> => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) return null;
+    return resolveResourceCapabilities(file);
+  });
+
+  ipcMain.handle(
+    'resource.readRawRange',
+    async (_event, sourceUri: string, offset: number, length: number) => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          sourceUri,
+          offset,
+          length,
+          fileSize: 0,
+          diagnostics: [{
+            severity: 'error' as const,
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Resource must be indexed before raw range read.',
+            sourceUri
+          }]
+        };
+      }
+      return readRawResourceRange(file, offset, length);
+    }
+  );
+
+  ipcMain.handle(
+    'resource.saveRawReplace',
+    async (
+      _event,
+      sourceUri: string,
+      expectedHash: string,
+      newContentBase64: string,
+      confirmation?: ConfirmationReceipt
+    ): Promise<SaveTextResourceResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Resource must be indexed before raw replace.',
+            sourceUri
+          }]
+        };
+      }
+      const operationLog = activeSession
+        ? ensureActiveOperationLog(activeSession.meta.workspaceId)
+        : undefined;
+      return saveRawReplace({
+        file,
+        expectedHash,
+        newContentBase64,
+        ...(confirmation ? { confirmation } : {}),
+        ...(activeSession ? { session: activeSession } : {}),
+        ...(operationLog ? { operationLog } : {})
+      });
+    }
+  );
+
+  ipcMain.handle(
+    'resource.saveRawByteRange',
+    async (
+      _event,
+      sourceUri: string,
+      expectedHash: string,
+      offset: number,
+      length: number,
+      replacementBase64: string,
+      confirmation?: ConfirmationReceipt
+    ): Promise<SaveTextResourceResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Resource must be indexed before raw byte-range patch.',
+            sourceUri
+          }]
+        };
+      }
+      const operationLog = activeSession
+        ? ensureActiveOperationLog(activeSession.meta.workspaceId)
+        : undefined;
+      return saveRawByteRange({
+        file,
+        expectedHash,
+        offset,
+        length,
+        replacementBase64,
+        ...(confirmation ? { confirmation } : {}),
+        ...(activeSession ? { session: activeSession } : {}),
+        ...(operationLog ? { operationLog } : {})
+      });
+    }
+  );
+
+  /** Helper for renderer/dev tools: build a confirmation receipt without exposing secrets. */
+  ipcMain.handle(
+    'resource.createConfirmation',
+    async (
+      _event,
+      subjects: string[],
+      riskLevel: 'safe' | 'caution' | 'high' | 'blocked',
+      sourceUri?: string
+    ): Promise<ConfirmationReceipt> => {
+      return createConfirmationReceipt({
+        subjects,
+        riskLevel,
+        ...(sourceUri ? { sourceUri } : {}),
+        note: 'IPC confirmation receipt for high-risk raw write'
+      });
+    }
+  );
+
+  ipcMain.handle('resource.readRawMetadata', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) return null;
+    return readRawResourceMetadata(file, { computeHash: file.size <= 32 * 1024 * 1024 });
   });
 
   ipcMain.handle('operation.list', async (): Promise<PatchHistoryEntry[]> => {
