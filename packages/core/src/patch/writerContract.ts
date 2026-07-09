@@ -10,6 +10,10 @@ import type {
   WriterCapability,
   WriterContract
 } from '@soulforge/shared';
+import {
+  resolveResourceCapabilities,
+  type ResourceCapabilityMatrix
+} from '../capabilities/resourceCapabilities.js';
 
 const TEXT_FORMATS = new Set<ResourceFormatKind>(['text', 'hks']);
 const TEXT_EXTENSIONS = new Set([
@@ -42,14 +46,17 @@ const NATIVE_PACKED_FORMATS = new Set<ResourceFormatKind>([
 ]);
 
 /**
- * Resolve the declared writer contract for a resource.
- * Structured / container / binary writers are intentionally absent until
- * fixture-confirmed implementations exist — the contract returns capability none
- * or text-only, never a fake native writer.
+ * Resolve the primary (legacy) writer contract for text gate compatibility.
+ * Semantic/native packed still has capability none for *text* path.
+ * Raw path uses evaluateRawWriterGate / resolveWriterCapabilities instead.
  */
 export function resolveWriterContract(file: IndexedFile): WriterContract {
-  if (isDirectTextEditable(file) || isTextLikeBackup(file)) {
-    const caution = isCautionText(file) || isTextLikeBackup(file);
+  const matrix = resolveResourceCapabilities(file);
+
+  if (matrix.textCapability === 'available' || matrix.textCapability === 'available_with_confirmation') {
+    const caution = matrix.textCapability === 'available_with_confirmation'
+      || isCautionText(file)
+      || isTextLikeBackup(file);
     return {
       id: `writer:text:${file.formatKind}`,
       resourceKind: file.resourceKind,
@@ -71,24 +78,72 @@ export function resolveWriterContract(file: IndexedFile): WriterContract {
     };
   }
 
-  if (NATIVE_PACKED_FORMATS.has(file.formatKind) || file.compoundExtension.includes('.dcx') || file.compoundExtension.includes('.bnd')) {
+  if (matrix.isPackedOrNative) {
     return {
-      id: `writer:blocked:native:${file.formatKind}`,
+      id: `writer:text-blocked-raw-available:${file.formatKind}`,
       resourceKind: file.resourceKind,
       formatKind: file.formatKind,
       capability: 'none',
       inputSchemaId: '',
-      supportsStaging: false,
-      supportsRollback: false,
-      requiresConfirmation: false,
-      preconditions: ['resource-specific structured writer', 'native fixture confirmation'],
-      validators: [],
-      notes: 'Native packed format. No writer contract is enabled; unsupported blind rewrite is forbidden.'
+      supportsStaging: true,
+      supportsRollback: true,
+      requiresConfirmation: true,
+      preconditions: ['raw path only with confirmation', 'hash precondition', 'Patch Engine'],
+      validators: ['hash_conflict'],
+      notes: 'Native packed format: text/semantic writers absent. High-risk raw replace/patch available with confirmation (not native roundtrip).'
     };
   }
 
   return {
-    id: `writer:blocked:unknown:${file.formatKind}`,
+    id: `writer:text-blocked-raw-available:unknown:${file.formatKind}`,
+    resourceKind: file.resourceKind,
+    formatKind: file.formatKind,
+    capability: 'none',
+    inputSchemaId: '',
+    supportsStaging: true,
+    supportsRollback: true,
+    requiresConfirmation: true,
+    preconditions: ['raw path only with confirmation'],
+    validators: ['hash_conflict'],
+    notes: 'Unknown/binary format: no text/semantic writer. Raw replace/patch available with confirmation.'
+  };
+}
+
+export interface ResolvedWriterCapabilities {
+  text: WriterContract;
+  raw: WriterContract;
+  semantic: WriterContract;
+  matrix: ResourceCapabilityMatrix;
+}
+
+/** Split text / raw / semantic contracts — raw is never claimed as semantic/native. */
+export function resolveWriterCapabilities(file: IndexedFile): ResolvedWriterCapabilities {
+  const matrix = resolveResourceCapabilities(file);
+  const text = resolveWriterContract(file);
+
+  const raw: WriterContract = {
+    id: `writer:raw:${file.formatKind}`,
+    resourceKind: file.resourceKind,
+    formatKind: file.formatKind,
+    capability: matrix.rawCapability === 'none' ? 'none' : 'binary',
+    inputSchemaId: 'soulforge.rawByteOrFileReplace.v1',
+    supportsStaging: true,
+    supportsRollback: true,
+    requiresConfirmation: matrix.requiredConfirmation || matrix.rawCapability === 'available_with_confirmation',
+    preconditions: [
+      'expectedHash',
+      'overlay writable',
+      'Patch Engine staging + validation',
+      ...(matrix.isPackedOrNative ? ['RAW_REPLACE_NATIVE_PACKED confirmation'] : [])
+    ],
+    validators: ['hash_conflict', 'range_bounds'],
+    notes: matrix.isPackedOrNative
+      ? 'High-risk raw-level write for native/packed file. Not a semantic/native writer.'
+      : 'Raw-level whole-file replace or byte-range patch via Patch Engine.'
+  };
+
+  const semantic: WriterContract = {
+    id: `writer:semantic-none:${file.formatKind}`,
     resourceKind: file.resourceKind,
     formatKind: file.formatKind,
     capability: 'none',
@@ -96,10 +151,71 @@ export function resolveWriterContract(file: IndexedFile): WriterContract {
     supportsStaging: false,
     supportsRollback: false,
     requiresConfirmation: false,
-    preconditions: ['declared writer for format'],
+    preconditions: ['fixture-confirmed native writer'],
     validators: [],
-    notes: 'Unknown or non-text format without a registered writer contract.'
+    notes: 'Semantic/native structured writer is not implemented for this format.'
   };
+
+  return { text, raw, semantic, matrix };
+}
+
+/**
+ * Gate raw writes (replace / byte range). Requires confirmation for caution/high.
+ */
+export function evaluateRawWriterGate(input: {
+  file: IndexedFile;
+  capabilities?: ResourceCapabilityMatrix;
+  confirmation?: ConfirmationReceipt;
+  operation: 'replace' | 'byte_range';
+}): WriterGateResult {
+  const caps = input.capabilities ?? resolveResourceCapabilities(input.file);
+  const { raw } = resolveWriterCapabilities(input.file);
+  const reasons: string[] = [...caps.reasonCodes];
+  const diagnostics: Diagnostic[] = [...caps.diagnostics];
+
+  if (!caps.rawWritable || raw.capability === 'none') {
+    diagnostics.push({
+      severity: 'error',
+      code: 'RAW_WRITER_UNAVAILABLE',
+      message: 'Raw writer is not available for this resource.',
+      sourceUri: input.file.sourceUri
+    });
+    return {
+      ok: false,
+      risk: buildAssessment('blocked', reasons, raw, diagnostics, false),
+      diagnostics
+    };
+  }
+
+  const level: EditRiskLevel = caps.riskLevel;
+  const risk = buildAssessment(
+    level,
+    reasons,
+    { ...raw, requiresConfirmation: true },
+    diagnostics,
+    true,
+    caps.isPackedOrNative
+      ? 'High-risk raw write of native/packed format. Requires confirmation. Not native roundtrip safe.'
+      : 'Raw write requires confirmation and hash precondition.'
+  );
+
+  const receiptOk = isValidConfirmation(input.confirmation, risk, input.file.sourceUri);
+  if (!receiptOk) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'EDIT_CONFIRMATION_REQUIRED',
+      message: 'Raw write requires an explicit risk confirmation receipt before Patch Engine commit.',
+      sourceUri: input.file.sourceUri,
+      details: {
+        riskLevel: level,
+        operation: input.operation,
+        reasons
+      }
+    });
+    return { ok: false, risk: { ...risk, allowWithConfirmation: true }, diagnostics };
+  }
+
+  return { ok: true, risk, diagnostics };
 }
 
 export interface AssessEditRiskOptions {

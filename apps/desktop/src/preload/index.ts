@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  ConfirmationReceipt,
   IndexedFile,
   PatchHistoryEntry,
   ResourcePreview,
@@ -11,7 +12,14 @@ import type {
   OpenWorkspaceScanOptions,
   RollbackOperationIpcResult
 } from '../main/ipc.js';
-import type { AiSidebarDraft, AiSidebarDraftRequest, ToolContext, ToolDescriptor, ToolResult } from '@soulforge/core';
+import type {
+  AiSidebarDraft,
+  AiSidebarDraftRequest,
+  ResourceCapabilityMatrix,
+  ToolContext,
+  ToolDescriptor,
+  ToolResult
+} from '@soulforge/core';
 
 const api = {
   openWorkspaceDialog: (): Promise<string | null> => ipcRenderer.invoke('workspace.openDialog'),
@@ -32,6 +40,43 @@ const api = {
     ipcRenderer.invoke('resource.preview', sourceUri),
   saveTextResource: (sourceUri: string, newText: string): Promise<SaveTextResourceResult> =>
     ipcRenderer.invoke('resource.saveText', sourceUri, newText),
+  /** Honest capability matrix for any indexed file. */
+  getResourceCapabilities: (sourceUri: string): Promise<ResourceCapabilityMatrix | null> =>
+    ipcRenderer.invoke('resource.capabilities', sourceUri),
+  readRawMetadata: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readRawMetadata', sourceUri),
+  readRawRange: (sourceUri: string, offset: number, length: number): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readRawRange', sourceUri, offset, length),
+  saveRawReplace: (
+    sourceUri: string,
+    expectedHash: string,
+    newContentBase64: string,
+    confirmation?: ConfirmationReceipt
+  ): Promise<SaveTextResourceResult> =>
+    ipcRenderer.invoke('resource.saveRawReplace', sourceUri, expectedHash, newContentBase64, confirmation),
+  saveRawByteRange: (
+    sourceUri: string,
+    expectedHash: string,
+    offset: number,
+    length: number,
+    replacementBase64: string,
+    confirmation?: ConfirmationReceipt
+  ): Promise<SaveTextResourceResult> =>
+    ipcRenderer.invoke(
+      'resource.saveRawByteRange',
+      sourceUri,
+      expectedHash,
+      offset,
+      length,
+      replacementBase64,
+      confirmation
+    ),
+  createConfirmation: (
+    subjects: string[],
+    riskLevel: 'safe' | 'caution' | 'high' | 'blocked',
+    sourceUri?: string
+  ): Promise<ConfirmationReceipt> =>
+    ipcRenderer.invoke('resource.createConfirmation', subjects, riskLevel, sourceUri),
   listOperations: (): Promise<PatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),

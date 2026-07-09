@@ -111,18 +111,12 @@ export function compilePatchChangeToOperation(change: PatchChange): {
     return { diagnostics };
   }
 
-  if (change.kind === 'binary') {
-    diagnostics.push(createDiagnostic({
-      severity: 'error',
-      code: 'NATIVE_WRITER_REQUIRED',
-      message: 'Binary PatchChange cannot be compiled to a scaffold writer. Native binary writers are not enabled.',
-      targetUri: change.targetUri,
-      details: { changeKind: change.kind, nativeFormatAuthority: false }
-    }));
-    return { diagnostics };
-  }
-
   if (change.kind === 'structured') {
+    // Allow explicit raw schemas under structuredEdit.schemaId; otherwise block.
+    const rawOp = tryCompileRawStructuredEdit(change);
+    if (rawOp.operation || rawOp.diagnostics.length > 0) {
+      return rawOp;
+    }
     diagnostics.push(createDiagnostic({
       severity: 'error',
       code: 'NATIVE_WRITER_REQUIRED',
@@ -133,6 +127,21 @@ export function compilePatchChangeToOperation(change: PatchChange): {
         resourceKind: change.resourceKind,
         nativeFormatAuthority: false
       }
+    }));
+    return { diagnostics };
+  }
+
+  if (change.kind === 'binary') {
+    const rawOp = tryCompileRawStructuredEdit(change);
+    if (rawOp.operation || rawOp.diagnostics.some((d) => d.severity === 'error')) {
+      return rawOp;
+    }
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'BINARY_SCHEMA_REQUIRED',
+      message: 'Binary PatchChange requires explicit structuredEdit schema (rawByteRangeEdit or rawFileReplaceBase64), expectedHash, and confirmation path.',
+      targetUri: change.targetUri,
+      details: { changeKind: change.kind, nativeFormatAuthority: false }
     }));
     return { diagnostics };
   }
@@ -191,6 +200,127 @@ function parseTextEditBody(value: unknown): TextEditBody | null {
   const body: TextEditBody = { newText: candidate.newText };
   if (candidate.allowEmpty === true) body.allowEmpty = true;
   return body;
+}
+
+/**
+ * Compile explicit raw schemas:
+ * - rawByteRangeEdit
+ * - rawFileReplaceBase64
+ */
+function tryCompileRawStructuredEdit(change: PatchChange): {
+  operation?: PatchIrOperation;
+  diagnostics: StructuredDiagnostic[];
+} {
+  const diagnostics: StructuredDiagnostic[] = [];
+  if (!change.structuredEdit || typeof change.structuredEdit !== 'object') {
+    return { diagnostics };
+  }
+  const body = change.structuredEdit as Record<string, unknown>;
+  const schemaId = typeof body.schemaId === 'string' ? body.schemaId : '';
+  const expectedHash = typeof body.expectedHash === 'string'
+    ? body.expectedHash
+    : change.beforeHash;
+
+  if (schemaId === 'rawByteRangeEdit' || schemaId === 'soulforge.rawByteRangeEdit.v1') {
+    if (!expectedHash) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'RAW_EDIT_HASH_REQUIRED',
+        message: 'rawByteRangeEdit requires expectedHash.',
+        targetUri: change.targetUri
+      }));
+      return { diagnostics };
+    }
+    const offset = Number(body.offset);
+    const length = Number(body.length);
+    const replacementBase64 = typeof body.replacementBase64 === 'string' ? body.replacementBase64 : '';
+    if (!Number.isFinite(offset) || offset < 0 || !Number.isFinite(length) || length < 0 || !replacementBase64) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'RAW_EDIT_INVALID',
+        message: 'rawByteRangeEdit requires offset, length, and replacementBase64.',
+        targetUri: change.targetUri
+      }));
+      return { diagnostics };
+    }
+    const risk: PatchRiskLevel = body.nativePacked === true || body.highRisk === true ? 'high' : 'caution';
+    const op: Extract<PatchIrOperation, { kind: 'raw_byte_range_edit' }> = {
+      id: randomUUID(),
+      kind: 'raw_byte_range_edit',
+      targetUri: change.targetUri,
+      targetPath: change.targetPath,
+      offset,
+      length,
+      replacementBase64,
+      expectedHash,
+      preconditions: [{
+        type: 'content_hash',
+        description: 'Expected content hash before raw byte edit',
+        expectedHash,
+        targetUri: change.targetUri
+      }],
+      validatorRequirements: [
+        { validatorId: 'raw_file', scope: 'before_staging', required: true },
+        { validatorId: 'raw_file', scope: 'staged_output', required: true }
+      ],
+      riskLevel: risk,
+      metadata: { requiresConfirmation: true, filesMode: true, schemaId },
+      ...(change.resourceKind ? { resourceKind: change.resourceKind } : {})
+    };
+    return { operation: op, diagnostics };
+  }
+
+  if (schemaId === 'rawFileReplaceBase64' || schemaId === 'soulforge.rawFileReplaceBase64.v1') {
+    if (!expectedHash && body.allowCreateNewFile !== true) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'RAW_REPLACE_HASH_REQUIRED',
+        message: 'rawFileReplaceBase64 requires expectedHash for existing files.',
+        targetUri: change.targetUri
+      }));
+      return { diagnostics };
+    }
+    const newContentBase64 = typeof body.newContentBase64 === 'string' ? body.newContentBase64 : '';
+    if (!newContentBase64 && body.allowEmpty !== true) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'FILE_REPLACE_EMPTY',
+        message: 'rawFileReplaceBase64 requires newContentBase64.',
+        targetUri: change.targetUri
+      }));
+      return { diagnostics };
+    }
+    const risk: PatchRiskLevel = body.nativePacked === true || body.highRisk === true ? 'high' : 'caution';
+    const op: Extract<PatchIrOperation, { kind: 'file_replace' }> = {
+      id: randomUUID(),
+      kind: 'file_replace',
+      targetUri: change.targetUri,
+      targetPath: change.targetPath,
+      newContentBase64,
+      preconditions: expectedHash
+        ? [{
+            type: 'content_hash',
+            description: 'Expected content hash before raw replace',
+            expectedHash,
+            targetUri: change.targetUri
+          }]
+        : [],
+      validatorRequirements: [
+        { validatorId: 'whole_file_replace', scope: 'before_staging', required: true },
+        { validatorId: 'file_risk', scope: 'before_staging', required: true }
+      ],
+      riskLevel: risk,
+      requiresConfirmation: true,
+      metadata: { requiresConfirmation: true, filesMode: true, schemaId },
+      ...(expectedHash ? { expectedHash } : {}),
+      ...(body.allowEmpty === true ? { allowEmpty: true } : {}),
+      ...(body.allowCreateNewFile === true ? { allowCreateNewFile: true } : {}),
+      ...(change.resourceKind ? { resourceKind: change.resourceKind } : {})
+    };
+    return { operation: op, diagnostics };
+  }
+
+  return { diagnostics };
 }
 
 function fail(

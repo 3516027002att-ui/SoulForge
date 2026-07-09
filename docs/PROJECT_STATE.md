@@ -292,6 +292,16 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 - smoke：`npm run test:v05-architecture -w @soulforge/core` 覆盖 URI → graph → PatchIR → transaction → AI policy → VFS → bridge；
 - **未完成**：真实 native parser / writer、前端 UI、图/审计的 SQLite driver 产品化。
 
+### 10. v0.5 Raw File Capability Matrix（2026-07-09）
+
+- 统一 `resolveResourceCapabilities`：openable/rawReadable/rawWritable 对所有已索引文件成立；semanticWritable/nativeRoundTripSafe 恒 false（无真实 writer 时）；
+- `readRawResourceRange` / `readTextResourceFull` / `readRawResourceMetadata`：任意文件 range 读、文本完整读（UTF-8 校验）、元数据；
+- `saveRawReplace` / `saveRawByteRange`：经 PatchIR + WorkspaceTransaction，必须 expectedHash + confirmation；packed 标记 `RAW_REPLACE_NATIVE_PACKED`；
+- writer gate 拆分 text / raw / semantic；`saveTextResource` 对 packed 仍失败；
+- IPC：`resource.capabilities` / `readRawRange` / `saveRawReplace` / `saveRawByteRange`（preload 同步，无大改 UI）；
+- smoke：`npm run test:v05-raw-file-workbench -w @soulforge/core`；
+- 详见 `docs/V0_5_RAW_FILE_CAPABILITY_STATUS.md`。
+
 ### 9. v0.5 Full File Workbench + Semantic Spine（2026-07-09）
 
 - Files Mode：`openFileResource` / bounded preview / capabilities；text/raw/whole-file replace 经 PatchIR + WorkspaceTransaction；

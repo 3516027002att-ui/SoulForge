@@ -5,6 +5,8 @@ export * from './workspace/gameProfiles.js';
 export * from './workspace/workspaceSession.js';
 export * from './preview/openResourcePreview.js';
 export * from './editing/saveTextResource.js';
+export * from './editing/saveRawResource.js';
+export * from './capabilities/resourceCapabilities.js';
 export * from './patch/patchEngine.js';
 export * from './patch/textDiff.js';
 export * from './patch/graphPatch.js';
