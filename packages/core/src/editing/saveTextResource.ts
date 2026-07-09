@@ -1,10 +1,14 @@
 import type { Diagnostic, IndexedFile, SaveTextResourceResult } from '@soulforge/shared';
 import { commitValidatedStagingArea, createPatchProposal, createStagingArea } from '../patch/patchEngine.js';
+import { getDefaultOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
+import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 
 export interface SaveTextResourceOptions {
   file: IndexedFile;
   newText: string;
   allowEmpty?: boolean;
+  session?: WorkspaceSession;
+  operationLog?: OperationLogStore;
 }
 
 const EDITABLE_FORMATS = new Set(['text', 'hks']);
@@ -35,6 +39,9 @@ const EDITABLE_EXTENSIONS = new Set([
  */
 export async function saveTextResource(options: SaveTextResourceOptions): Promise<SaveTextResourceResult> {
   const eligibility = validateEditableTextResource(options.file, options.newText, options.allowEmpty ?? false);
+  if (options.session) {
+    eligibility.push(...options.session.resolveWritablePath(options.file.absolutePath).diagnostics);
+  }
   if (eligibility.length > 0) {
     return {
       ok: false,
@@ -54,6 +61,8 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
           targetUri: options.file.sourceUri,
           targetPath: options.file.absolutePath,
           kind: 'text',
+          layer: 'overlay',
+          resourceKind: options.file.resourceKind,
           structuredEdit: {
             newText: options.newText,
             allowEmpty: options.allowEmpty === true
@@ -63,7 +72,10 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
     });
 
     const staging = await createStagingArea(proposal);
-    const committed = await commitValidatedStagingArea(staging);
+    const committed = await commitValidatedStagingArea(staging, {
+      ...(options.session ? { session: options.session } : {}),
+      operationLog: options.operationLog ?? getDefaultOperationLogStore()
+    });
 
     return {
       ok: committed.diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),

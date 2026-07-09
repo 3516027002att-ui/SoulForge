@@ -93,6 +93,39 @@ export interface ReferenceEdge {
 
 export type PatchMode = 'plan' | 'normal' | 'fullPermission';
 
+/**
+ * v0.5 AI tool permission ladder.
+ * Higher levels always include lower-level capabilities after policy checks.
+ */
+export type AiToolPermissionLevel =
+  | 'read'
+  | 'analyze'
+  | 'propose'
+  | 'stage'
+  | 'validate'
+  | 'commit'
+  | 'rollback';
+
+export type OverlayLayer = 'base' | 'overlay' | 'staging' | 'generated';
+
+export interface WorkspaceLayers {
+  /** Writable ModEngine-style overlay directory opened by the user. */
+  overlayRoot: string;
+  /** Optional read-only game install / base directory. */
+  baseRoot?: string;
+  /** Content-addressed or temp staging root for Patch Engine. */
+  stagingRoot?: string;
+}
+
+export interface WorkspaceSessionMeta {
+  workspaceId: string;
+  layers: WorkspaceLayers;
+  game: string;
+  openedAt: string;
+  /** True when no base root is configured; capabilities may degrade. */
+  baseMissing: boolean;
+}
+
 export interface PatchProposal {
   opId: string;
   workspaceId: string;
@@ -101,6 +134,11 @@ export interface PatchProposal {
   mode: PatchMode;
   changes: PatchChange[];
   createdAt: string;
+  /**
+   * Optional graph-oriented view of the same proposal.
+   * Built by Patch Engine helpers; not required for text-only saves.
+   */
+  graph?: GraphPatch;
 }
 
 export interface PatchChange {
@@ -111,12 +149,108 @@ export interface PatchChange {
   afterHash?: string;
   diff?: string;
   structuredEdit?: unknown;
+  /** Overlay layer this write targets. Defaults to overlay. */
+  layer?: OverlayLayer;
+  resourceKind?: ResourceKind;
 }
 
 export interface ValidationResult {
   ok: boolean;
   diagnostics: Diagnostic[];
   retryable: boolean;
+}
+
+export type GraphPatchNodeKind =
+  | 'file'
+  | 'resource'
+  | 'field'
+  | 'reference'
+  | 'containerChild'
+  | 'rawRange'
+  | 'operation';
+
+export interface GraphPatchNode {
+  id: string;
+  kind: GraphPatchNodeKind;
+  uri: string;
+  label: string;
+  resourceKind?: ResourceKind;
+  layer?: OverlayLayer;
+  meta?: Record<string, unknown>;
+}
+
+export interface GraphPatchEdge {
+  id: string;
+  fromId: string;
+  toId: string;
+  kind: 'affects' | 'depends_on' | 'rewrites' | 'validates' | 'references' | 'contains';
+  confidence?: ReferenceConfidence;
+  reason?: string;
+}
+
+/**
+ * Unified graph patch IR (architecture fork #110).
+ * Text, structured, and future container child edits all project into this graph.
+ */
+export interface GraphPatch {
+  opId: string;
+  title: string;
+  nodes: GraphPatchNode[];
+  edges: GraphPatchEdge[];
+  summary: {
+    fileCount: number;
+    resourceCount: number;
+    edgeCount: number;
+  };
+}
+
+export type OperationStatus =
+  | 'planned'
+  | 'staged'
+  | 'validated'
+  | 'committed'
+  | 'rolled_back'
+  | 'failed';
+
+export interface FileOperationRecord {
+  targetUri: string;
+  targetPath: string;
+  relativePath?: string;
+  beforeHash: string;
+  afterHash: string;
+  backupPath: string;
+  kind: PatchChange['kind'];
+  resourceKind?: ResourceKind;
+}
+
+export interface OperationLogRecord {
+  opId: string;
+  workspaceId: string;
+  title: string;
+  author: 'user' | 'ai';
+  mode: PatchMode;
+  status: OperationStatus;
+  createdAt: string;
+  committedAt?: string;
+  rolledBackAt?: string;
+  backupRoot?: string;
+  files: FileOperationRecord[];
+  diagnostics: Diagnostic[];
+  graph?: GraphPatch;
+}
+
+export interface PatchHistoryEntry {
+  opId: string;
+  workspaceId: string;
+  title: string;
+  author: 'user' | 'ai';
+  mode: PatchMode;
+  status: OperationStatus;
+  createdAt: string;
+  committedAt?: string;
+  rolledBackAt?: string;
+  fileCount: number;
+  changedPaths: string[];
 }
 
 export type PreviewKind = 'text' | 'hex' | 'empty' | 'failed';

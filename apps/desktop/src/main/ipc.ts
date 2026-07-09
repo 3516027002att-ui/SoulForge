@@ -1,22 +1,38 @@
-import { dialog, ipcMain } from 'electron';
+import { app, dialog, ipcMain } from 'electron';
+import { join } from 'node:path';
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
   createDefaultToolRegistry,
+  openFileOperationLogStore,
   openResourcePreview,
+  openWorkspaceSession,
+  resolveOperationLogStorePath,
+  rollbackOperation,
   saveTextResource,
   scanWorkspace,
   type AiSidebarDraft,
   type AiSidebarDraftRequest,
+  type FileOperationLogStore,
   type ToolContext,
   type ToolDescriptor,
   type ToolResult,
-  type WorkspaceIndex
+  type WorkspaceIndex,
+  type WorkspaceSession
 } from '@soulforge/core';
-import type { Diagnostic, IndexedFile, ResourcePreview, SaveTextResourceResult } from '@soulforge/shared';
+import type {
+  Diagnostic,
+  IndexedFile,
+  PatchHistoryEntry,
+  ResourcePreview,
+  SaveTextResourceResult,
+  WorkspaceSessionMeta
+} from '@soulforge/shared';
 
 let indexedFiles: IndexedFile[] = [];
 let activeIndex: WorkspaceIndex | null = null;
+let activeSession: WorkspaceSession | null = null;
+let activeOperationLog: FileOperationLogStore | null = null;
 let handlersRegistered = false;
 
 const toolRegistry = createDefaultToolRegistry();
@@ -35,25 +51,91 @@ export interface AnalyzeWorkspaceSummary {
   tools: ToolDescriptor[];
 }
 
+export interface WorkspaceScanWithSession {
+  workspaceRoot: string;
+  files: IndexedFile[];
+  countsByKind: Record<string, number>;
+  diagnostics: Diagnostic[];
+  session: WorkspaceSessionMeta;
+}
+
+export interface RollbackOperationIpcResult {
+  ok: boolean;
+  opId: string;
+  restoredFiles: string[];
+  diagnostics: Diagnostic[];
+}
+
+export interface OpenWorkspaceScanOptions {
+  workspaceRoot: string;
+  baseRoot?: string;
+}
+
+function operationLogPathForWorkspace(workspaceId: string): string {
+  // workspaceId is a file:// URL from makeWorkspaceId; never join it raw into a Windows path.
+  return resolveOperationLogStorePath(join(app.getPath('userData'), 'operation-logs'), workspaceId);
+}
+
+function ensureActiveOperationLog(workspaceId: string): FileOperationLogStore {
+  const storePath = operationLogPathForWorkspace(workspaceId);
+  if (activeOperationLog?.storePath === storePath) {
+    return activeOperationLog;
+  }
+  activeOperationLog = openFileOperationLogStore(storePath);
+  return activeOperationLog;
+}
+
 export function registerIpcHandlers(): void {
   if (handlersRegistered) return;
   handlersRegistered = true;
 
   ipcMain.handle('workspace.openDialog', async () => {
     const result = await dialog.showOpenDialog({
-      title: 'Open Mod Workspace',
+      title: 'Open Mod Workspace (overlay)',
       properties: ['openDirectory']
     });
 
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
 
-  ipcMain.handle('workspace.scan', async (_event, workspaceRoot: string) => {
-    const result = await scanWorkspace({ workspaceRoot });
-    indexedFiles = result.files;
-    activeIndex = null;
-    return result;
+  ipcMain.handle('workspace.openBaseDialog', async () => {
+    const result = await dialog.showOpenDialog({
+      title: 'Open Base Game Directory (read-only, optional)',
+      properties: ['openDirectory']
+    });
+
+    return result.canceled ? null : result.filePaths[0] ?? null;
   });
+
+  ipcMain.handle(
+    'workspace.scan',
+    async (
+      _event,
+      workspaceRootOrOptions: string | OpenWorkspaceScanOptions,
+      maybeBaseRoot?: string
+    ) => {
+      const workspaceRoot = typeof workspaceRootOrOptions === 'string'
+        ? workspaceRootOrOptions
+        : workspaceRootOrOptions.workspaceRoot;
+      const baseRoot = typeof workspaceRootOrOptions === 'string'
+        ? maybeBaseRoot
+        : workspaceRootOrOptions.baseRoot;
+
+      activeSession = await openWorkspaceSession({
+        overlayRoot: workspaceRoot,
+        ...(baseRoot ? { baseRoot } : {})
+      });
+      ensureActiveOperationLog(activeSession.meta.workspaceId);
+
+      const result = await scanWorkspace({ workspaceRoot });
+      indexedFiles = result.files;
+      activeIndex = null;
+      return {
+        ...result,
+        session: activeSession.meta as WorkspaceSessionMeta
+      };
+    }
+  );
 
   ipcMain.handle('workspace.analyze', async (_event, workspaceRoot: string): Promise<AnalyzeWorkspaceSummary> => {
     const result = await analyzeWorkspace({ workspaceRoot });
@@ -96,7 +178,16 @@ export function registerIpcHandlers(): void {
       };
     }
 
-    const result = await saveTextResource({ file, newText });
+    const operationLog = activeSession
+      ? ensureActiveOperationLog(activeSession.meta.workspaceId)
+      : undefined;
+
+    const result = await saveTextResource({
+      file,
+      newText,
+      ...(activeSession ? { session: activeSession } : {}),
+      ...(operationLog ? { operationLog } : {})
+    });
     if (result.ok) {
       const refreshed = await openResourcePreview({ file, inspectNative: true, parseStructured: true });
       const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
@@ -114,6 +205,39 @@ export function registerIpcHandlers(): void {
         });
 
     return items;
+  });
+
+  ipcMain.handle('operation.list', async (): Promise<PatchHistoryEntry[]> => {
+    if (!activeSession || !activeOperationLog) return [];
+    return activeOperationLog.history(activeSession.meta.workspaceId);
+  });
+
+  ipcMain.handle('operation.rollback', async (_event, opId: string): Promise<RollbackOperationIpcResult> => {
+    if (!activeSession || !activeOperationLog) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'WORKSPACE_NOT_OPEN',
+          message: 'Open a workspace before rolling back an operation.'
+        }]
+      };
+    }
+
+    const result = await rollbackOperation({
+      opId,
+      store: activeOperationLog,
+      session: activeSession
+    });
+
+    return {
+      ok: result.ok,
+      opId: result.opId,
+      restoredFiles: result.restoredFiles,
+      diagnostics: result.diagnostics
+    };
   });
 
   ipcMain.handle('ai.tools', async () => toolRegistry.list());

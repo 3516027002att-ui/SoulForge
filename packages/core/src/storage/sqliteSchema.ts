@@ -201,6 +201,102 @@ CREATE TABLE IF NOT EXISTS operation_logs (
   FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
 );
 `
+  },
+  {
+    id: 2,
+    name: 'v0_5_patch_history_and_diagnostics',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS workspace_layers (
+  workspace_id TEXT PRIMARY KEY,
+  overlay_root TEXT NOT NULL,
+  base_root TEXT,
+  staging_root TEXT,
+  base_missing INTEGER NOT NULL DEFAULT 1,
+  opened_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS diagnostics (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  source_uri TEXT,
+  severity TEXT NOT NULL,
+  code TEXT NOT NULL,
+  message TEXT NOT NULL,
+  details_json TEXT,
+  created_at TEXT NOT NULL,
+  suppressed INTEGER NOT NULL DEFAULT 0,
+  resolved_by_op_id TEXT,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_diagnostics_workspace_code ON diagnostics(workspace_id, code);
+CREATE INDEX IF NOT EXISTS idx_diagnostics_workspace_source ON diagnostics(workspace_id, source_uri);
+
+CREATE TABLE IF NOT EXISTS patch_history (
+  op_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  author TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  committed_at TEXT,
+  rolled_back_at TEXT,
+  backup_root TEXT,
+  file_count INTEGER NOT NULL DEFAULT 0,
+  graph_json TEXT,
+  diagnostics_json TEXT NOT NULL DEFAULT '[]',
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_patch_history_workspace_created ON patch_history(workspace_id, created_at);
+
+CREATE TABLE IF NOT EXISTS file_operations (
+  id TEXT PRIMARY KEY,
+  op_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  target_uri TEXT NOT NULL,
+  target_path TEXT NOT NULL,
+  relative_path TEXT,
+  before_hash TEXT NOT NULL,
+  after_hash TEXT NOT NULL,
+  backup_path TEXT NOT NULL,
+  change_kind TEXT NOT NULL,
+  resource_kind TEXT,
+  FOREIGN KEY (op_id) REFERENCES patch_history(op_id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_operations_op ON file_operations(op_id);
+CREATE INDEX IF NOT EXISTS idx_file_operations_target ON file_operations(workspace_id, target_uri);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+  run_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  thinking TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  prompt TEXT,
+  plan_json TEXT,
+  tool_calls_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  diagnostics_json TEXT NOT NULL DEFAULT '[]',
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_workspace_created ON agent_runs(workspace_id, created_at);
+
+-- Extend operation_logs for v0.5 commit/rollback timestamps when present.
+ALTER TABLE operation_logs ADD COLUMN committed_at TEXT;
+ALTER TABLE operation_logs ADD COLUMN rolled_back_at TEXT;
+ALTER TABLE operation_logs ADD COLUMN backup_root TEXT;
+ALTER TABLE operation_logs ADD COLUMN graph_json TEXT;
+`
   }
 ];
 

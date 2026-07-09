@@ -24,9 +24,80 @@
 
 ## 当前未提交批次
 
+### 2026-07-09：v0.5 foundation P0 巩固（history / rollback / base / 落盘 log）
+
+状态：未提交。
+
+范围：core、desktop、docs。
+
+做了什么：
+
+1. **落盘 operation log**
+   - 新增 `FileOperationLogStore`（同 `OperationLogStore` contract，JSON 原子写）；
+   - Desktop main 将 log 放在 `userData/operation-logs/{workspaceId}.json`（不写用户 mod 树）；
+   - `runV05PersistSmoke`：record → reopen → list/history 一致；commit + rollback 恢复 overlay。
+
+2. **可选 baseRoot**
+   - `workspace.openBaseDialog` + `workspace.scan` 透传 `baseRoot`；
+   - session 仍拒绝写 base（`WRITE_TO_BASE_FORBIDDEN`）。
+
+3. **Desktop 操作历史 / 回滚**
+   - IPC：`operation.list`、`operation.rollback`；
+   - preload 类型 API；renderer 历史面板一键回滚；renderer 无 `node:fs` 写。
+
+已验证：
+
+```powershell
+npm run typecheck
+npm run test --workspace @soulforge/core
+npm run test:v05-foundation -w @soulforge/core
+npm run bridge:verify:synthetic
+npm run build
+```
+
+结果：
+
+- typecheck / build 通过；
+- foundation smoke ok；
+- persist + baseRoot smoke ok；
+- real mod open smoke：237 files，0 failed；
+- bridge synthetic fixtures ok。
+
+后续（P1）：
+
+- patch graph 侧边摘要；
+- Files mode unsupported 风险确认；
+- structured writer contract；
+- 可选 SQLite driver 替换 JSON store；
+- 勿声称 native parser 完成。
+
+### 2026-07-09：v0.5 foundation 切片 + 引用图 smoke
+
+状态：已并入本批次继续开发（foundation 起步代码仍在工作区）。
+
+范围：shared、core、desktop、docs。
+
+做了什么：
+
+1. **v0.3 收尾**
+   - 同步 origin 最新 v0.5 文档；
+   - reference confidence smoke；
+   - issue #1 / #2 本地验证并关闭。
+
+2. **v0.5 foundation**
+   - Overlay + readonly base `WorkspaceSession`；
+   - Graph patch IR、operation log、file-level rollback；
+   - Patch Engine commit 写 log + graph；
+   - AI 权限阶梯 + `build_patch_graph` / `list_operations` / `rollback_operation`；
+   - SQLite schema v2；
+   - Desktop 资源模式切换（Files + 各 kind 过滤）；
+   - main 打开工作区时建立 session，保存文本时走 session 写保护。
+
+已验证：typecheck / core test / bridge synthetic / build 通过。
+
 ### 2026-07-04：DCX/BND 容器证据链与本地验证队列
 
-状态：未提交，TypeScript / core smoke / native preview smoke / Bridge synthetic smoke / production build 均已在 Windows PowerShell 验证通过。
+状态：已并入历史提交 `4b99009`（feat: expand resource preview workflow）。TypeScript / core smoke / native preview smoke / Bridge synthetic smoke / production build 均已在 Windows PowerShell 验证通过。
 
 范围：bridge、core、desktop、docs、scripts、CodexPro 接入。
 
