@@ -28,6 +28,8 @@ SoulForge 是一个 AI-native FromSoftware Mod 超级编辑器。
 docs/PRODUCT_VISION.md
 docs/DECISIONS.md
 docs/V0_5_MILESTONE.md
+docs/V0_5_IMPLEMENTATION_FORKS.md
+docs/V0_5_ARCHITECTURE_FORKS.md
 docs/PROJECT_STATE.md
 ```
 
@@ -36,6 +38,8 @@ docs/PROJECT_STATE.md
 - `PRODUCT_VISION.md`：长期产品愿景；
 - `DECISIONS.md`：用户已经裁定的产品分歧；
 - `V0_5_MILESTONE.md`：v0.5 版本目标；
+- `V0_5_IMPLEMENTATION_FORKS.md`：v0.5 实现路线分叉裁定；
+- `V0_5_ARCHITECTURE_FORKS.md`：v0.5 架构级分叉裁定；
 - `PROJECT_STATE.md`：当前工程状态快照。
 
 ## 三、核心资源范围
@@ -151,7 +155,29 @@ patch proposal
 
 Files mode 可以直接打开和编辑任意文件，但保存仍不能绕过 Patch Engine。
 
-## 九、诊断和置信度
+## 九、架构裁定摘要
+
+v0.5 架构级目标已经裁定为 D 级为主：
+
+- temporal property resource graph；
+- stable resource / field URI；
+- field / reference / diagnostic / patch provenance chain；
+- multi-evidence confidence scoring；
+- full parser pipeline：inspect、decompress、container、semantic、schema bind、reference、diagnostics、provenance；
+- writer contract：input schema、precondition、write plan、staged output、post-validate、rollback metadata；
+- graph patch IR；
+- workspace transaction；
+- versioned Bridge protocol；
+- Bridge daemon + streaming + cancellation；
+- AI tool permission levels；
+- normalized evidence pack；
+- full VFS；
+- plugin sandbox target；
+- schema-driven editor + patch binding。
+
+详细见 `docs/V0_5_ARCHITECTURE_FORKS.md`。
+
+## 十、诊断和置信度
 
 诊断不是普通日志，而是安全编辑模型的一部分。
 
@@ -168,7 +194,7 @@ Diagnostics 同时驱动：
 
 候选引用可以进入 patch proposal，但必须由用户逐条确认或通过明确策略门控。
 
-## 十、当前工程状态（v0.3）
+## 十一、当前工程状态（v0.3）
 
 当前仓库仍处在 v0.3 parser plumbing 阶段。
 
@@ -181,7 +207,7 @@ low-confidence candidate parser
 
 这只是可信度地基，不代表 native FromSoftware parser / writer 已经完成。
 
-## 十一、当前完成能力
+## 十二、当前完成能力
 
 ### 1. Bridge 语义分层
 
@@ -214,7 +240,7 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 - binderChildCandidate 仍为 low-confidence evidence；
 - native BND parser / writer 尚未完成。
 
-## 十二、当前已知问题
+## 十三、当前已知问题
 
 ### 1. Build 环境问题
 
@@ -232,7 +258,7 @@ Container boundary -> Synthetic fixture -> Low-confidence fallback
 
 Bridge smoke 可能需要本地终端执行。
 
-## 十三、当前开发优先级
+## 十四、当前开发优先级
 
 ### P0：维持 v0.3 任务边界
 
@@ -274,7 +300,7 @@ Codex 当前只应做窄任务：
 - AI tool registry；
 - Patch Engine staging / validation / rollback。
 
-## 十四、v0.5 非目标
+## 十五、v0.5 非目标
 
 v0.5 不要求：
 
@@ -289,8 +315,8 @@ v0.5 不要求：
 
 这些方向可以预留接口，但不能挤占 v0.5 的核心安全编辑闭环。
 
-## 十五、当前系统真实状态一句话
+## 十六、当前系统真实状态一句话
 
 ```text
-SoulForge 已经有 evidence-first Bridge 地基和产品决策，但真实 native parser / writer / Patch Engine 完整闭环仍未完成。
+SoulForge 已经有 evidence-first Bridge 地基、产品决策和 v0.5 架构裁定，但真实 native parser / writer / Patch Engine 完整闭环仍未完成。
 ```
