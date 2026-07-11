@@ -1,4 +1,5 @@
 import { open } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import type {
   BridgeResult,
   ContainerReadHint,
@@ -25,6 +26,8 @@ export interface OpenResourcePreviewOptions {
   parseStructured?: boolean;
   bridgeProjectPath?: string;
   bridgeTimeoutMs?: number;
+  /** Main-owned Sekiro installation root; never sourced from renderer input. */
+  oodleRuntimeRoot?: string;
 }
 
 const DEFAULT_MAX_BYTES = 64 * 1024;
@@ -143,6 +146,9 @@ async function inspectNativeEnvelope(options: OpenResourcePreviewOptions): Promi
   return runBridge({
     command: 'inspect',
     filePath: options.file.absolutePath,
+    resourceUri: options.file.sourceUri,
+    allowedRoots: [workspaceRootForFile(options.file)],
+    ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
     ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
     ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
   });
@@ -179,11 +185,24 @@ async function buildStructuredPreview(
   const exported = await runBridge({
     command,
     filePath: options.file.absolutePath,
+    resourceUri: options.file.sourceUri,
+    allowedRoots: [workspaceRootForFile(options.file)],
+    ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
     ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
     ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
   });
 
   return bridgeExportToStructuredPreview(options.file, command, exported);
+}
+
+function workspaceRootForFile(file: IndexedFile): string {
+  try {
+    if (file.workspaceId.startsWith('file:')) return fileURLToPath(file.workspaceId);
+  } catch {
+    // Fall through to the path/relative-path derivation for legacy indexes.
+  }
+  const suffixLength = file.relativePath.replaceAll('/', '\\').length;
+  return file.absolutePath.slice(0, Math.max(0, file.absolutePath.length - suffixLength)).replace(/[\\/]+$/, '');
 }
 
 function parseStructuredText(file: IndexedFile, text: string): ResourceStructuredPreview | undefined {

@@ -202,11 +202,12 @@ export function estimatePatchRisk(operations: readonly PatchIrOperation[]): Patc
   if (operations.length === 0) return 'safe';
   let risk: PatchRiskLevel = 'safe';
   for (const op of operations) {
-    if ((NATIVE_WRITER_REQUIRED_KINDS as readonly string[]).includes(op.kind)) {
+    if ((NATIVE_WRITER_REQUIRED_KINDS as readonly string[]).includes(op.kind) && !hasNativeBnd4Authority(op)) {
       risk = maxRisk(risk, 'blocked');
       continue;
     }
     if (!(SCAFFOLD_SUPPORTED_PATCH_KINDS as readonly string[]).includes(op.kind)
+      && !hasNativeBnd4Authority(op)
       && op.kind !== 'resource_field_edit'
       && !op.kind.startsWith('resource_node')
       && !op.kind.startsWith('resource_edge')) {
@@ -218,12 +219,12 @@ export function estimatePatchRisk(operations: readonly PatchIrOperation[]): Patc
     if (op.kind === 'container_child_replace') risk = maxRisk(risk, 'high');
     if (op.riskLevel) risk = maxRisk(risk, op.riskLevel);
     // Unimplemented container mutations stay blocked.
-    if (
+    if (!hasNativeBnd4Authority(op) && (
       op.kind === 'container_child_add'
       || op.kind === 'container_child_delete'
       || op.kind === 'container_child_rename'
       || op.kind === 'container_child_move'
-    ) {
+    )) {
       risk = maxRisk(risk, 'blocked');
     }
   }
@@ -248,7 +249,7 @@ function validateOperation(op: PatchIrOperation): StructuredDiagnostic[] {
     }));
   }
 
-  if ((NATIVE_WRITER_REQUIRED_KINDS as readonly string[]).includes(op.kind)) {
+  if ((NATIVE_WRITER_REQUIRED_KINDS as readonly string[]).includes(op.kind) && !hasNativeBnd4Authority(op)) {
     diagnostics.push(createDiagnostic({
       severity: 'error',
       code: 'NATIVE_WRITER_REQUIRED',
@@ -360,6 +361,13 @@ function validateOperation(op: PatchIrOperation): StructuredDiagnostic[] {
   }
 
   return diagnostics;
+}
+
+function hasNativeBnd4Authority(op: PatchIrOperation): boolean {
+  return op.kind.startsWith('container_child_')
+    && 'containerFormat' in op
+    && op.containerFormat === 'BND4_DFLT'
+    && op.metadata?.nativeFormatAuthority === true;
 }
 
 function maxRisk(a: PatchRiskLevel, b: PatchRiskLevel): PatchRiskLevel {

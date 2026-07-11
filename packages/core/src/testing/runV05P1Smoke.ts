@@ -169,7 +169,7 @@ async function main(): Promise<void> {
     operationLog: store
   });
   if (!saved.ok || !saved.graph) throw new Error('Safe text save should succeed with graph.');
-  const history = store.history(session.meta.workspaceId);
+  const history = await store.history(session.meta.workspaceId);
   if (!history.some((entry) => entry.graphSummary && entry.graphSummary.fileCount >= 1)) {
     throw new Error('History entries should include graphSummary.');
   }

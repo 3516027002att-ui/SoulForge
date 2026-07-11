@@ -58,6 +58,7 @@ export interface CommitPatchOptions {
   session?: WorkspaceSession;
   /** Explicit sandbox / overlay root for WorkspaceTransaction. */
   workspaceRoot?: string;
+  recoveryDir?: string;
 }
 
 export interface CommitPatchResult {

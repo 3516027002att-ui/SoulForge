@@ -6,7 +6,11 @@
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "predev": "npm run prepare:database-native",
+    "prebuild": "npm run prepare:database-native",
     "build": "npm run typecheck && electron-vite build",
+    "prepare:database-native": "node ../../scripts/prepare-electron-sqlite-binding.mjs",
+    "test:database-utility": "node ../../scripts/run-database-utility-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -16,11 +20,14 @@
     "electron": "^43.0.0",
     "electron-vite": "^3.0.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "three": "^0.172.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
+    "@types/three": "^0.172.0",
     "vite": "^6.0.11"
   }
 }

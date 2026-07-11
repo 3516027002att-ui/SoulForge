@@ -24,6 +24,7 @@ import {
 import { compilePatchProposalToPatchIr } from '../patch/patchProposalAdapter.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
+import { createConfirmationReceipt } from '../patch/writerContract.js';
 import {
   createPatchIr,
   createRawByteRangeOperation,
@@ -111,11 +112,16 @@ async function sectionA_saveTextResource(): Promise<{ opId: string }> {
   if ((await readFile(notePath, 'utf8')) !== 'a-v2\n') throw new Error('A: overlay not updated');
   if ((await readFile(basePath, 'utf8')) !== 'base-readonly\n') throw new Error('A: base mutated');
   if (saved.diagnostics.some((d) => d.severity === 'error')) throw new Error('A: error diagnostics');
-  if (!store.get(saved.opId) || store.get(saved.opId)?.status !== 'committed') {
+  if ((await store.get(saved.opId))?.status !== 'committed') {
     throw new Error('A: operation log missing committed entry');
   }
 
-  const rolled = await rollbackOperation({ opId: saved.opId, store, session });
+  const rolled = await rollbackOperation({
+    opId: saved.opId,
+    store,
+    session,
+    confirmation: rollbackConfirmation(saved.opId)
+  });
   if (!rolled.ok) throw new Error(`A: rollback failed: ${JSON.stringify(rolled.diagnostics)}`);
   if ((await readFile(notePath, 'utf8')) !== 'a-v1\n') throw new Error('A: rollback restore failed');
 
@@ -411,6 +417,14 @@ async function main(): Promise<void> {
       'legacy commitValidatedStagingArea ignores staging.files bytes'
     ]
   }, null, 2));
+}
+
+function rollbackConfirmation(opId: string) {
+  return createConfirmationReceipt({
+    subjects: [`ROLLBACK_OPERATION:${opId}`],
+    riskLevel: 'high',
+    note: 'write path smoke'
+  });
 }
 
 main().catch((error) => {

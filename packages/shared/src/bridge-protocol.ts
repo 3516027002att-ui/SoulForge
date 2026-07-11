@@ -1,6 +1,7 @@
 /**
- * Bridge protocol scaffold (architecture forks #119–#122).
- * Protocol/schema only — no native parser/writer implementation.
+ * SoulForge Bridge 1.0 NDJSON daemon protocol.
+ * Binary authority still depends on each capability cell; protocol support is
+ * never evidence that a native parser/writer exists.
  */
 
 import type { ConfidenceAssessment } from './confidence.js';
@@ -8,8 +9,71 @@ import type { StructuredDiagnostic } from './diagnostics.js';
 import type { ProvenanceSource } from './provenance.js';
 import type { ResourceKind } from './types.js';
 
-export const BRIDGE_SCHEMA_VERSION = '0.5.0-scaffold';
-export const BRIDGE_PROTOCOL_VERSION = '0.5.0';
+export const BRIDGE_SCHEMA_VERSION = '1.0.0';
+export const BRIDGE_PROTOCOL_VERSION = '1.0.0';
+
+export type BridgeAuthorityLevel =
+  | 'unsupported'
+  | 'candidate'
+  | 'fixture-confirmed'
+  | 'native-verified';
+
+export type BridgeDaemonFrameKind =
+  | 'handshake'
+  | 'request'
+  | 'request/accepted'
+  | 'progress'
+  | 'result'
+  | 'failed'
+  | 'cancelled'
+  | 'cancel'
+  | 'health'
+  | 'capabilities';
+
+export interface BridgeDaemonFrame<TPayload = unknown> {
+  protocolVersion: typeof BRIDGE_PROTOCOL_VERSION | string;
+  kind: BridgeDaemonFrameKind;
+  requestId?: string;
+  workspaceSessionId?: string;
+  deadlineUtc?: string;
+  resourceUri?: string;
+  timestampUtc?: string;
+  payload: TPayload;
+}
+
+export interface BridgeHandshakePayload {
+  /** Main-process-owned absolute roots; never supplied by the renderer. */
+  allowedRoots: string[];
+  /** Main-process-owned staging roots for Bridge writer output. */
+  writableRoots?: string[];
+  /** Main-process-owned Sekiro installation root used only for local Oodle loading. */
+  oodleRuntimeRoot?: string;
+  maxFrameBytes?: number;
+  maxConcurrency?: number;
+}
+
+export interface BridgeRequestPayload {
+  command: BridgeCommandName;
+  /** Main-process-resolved path checked against handshake allowedRoots. */
+  filePath: string;
+  options?: Record<string, unknown>;
+}
+
+export interface BridgeCancelPayload {
+  targetRequestId: string;
+}
+
+export interface BridgeDaemonResultPayload<T = unknown> {
+  authority: BridgeAuthorityLevel;
+  nativeFormatAuthority: boolean;
+  result: T;
+}
+
+export interface BridgeDaemonFailurePayload {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
 
 export type BridgeFailureKind =
   | 'unsupported'
@@ -27,6 +91,18 @@ export type BridgeCommandName =
   | 'export-param'
   | 'export-msg'
   | 'validate'
+  | 'probe-oodle'
+  | 'read-dcx-document'
+  | 'write-bnd4'
+  | 'snapshot-bnd4-child'
+  | 'read-fmg-document'
+  | 'write-fmg'
+  | 'read-param-document'
+  | 'write-param'
+  | 'read-emevd-document'
+  | 'write-emevd'
+  | 'read-msb-document'
+  | 'write-msb'
   | 'capabilities'
   | 'health';
 

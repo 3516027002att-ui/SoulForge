@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import type {
   PatchIR,
   PatchIrOperation,
+  ContainerChildOp,
   StructuredDiagnostic,
   WriterAdapterContract,
   WriterApplyResult,
@@ -19,11 +20,12 @@ import { createDiagnostic } from '@soulforge/shared';
 import { replaceContainerChildInMemory } from '../containers/containerService.js';
 import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 import { checkOriginalContentHash, resolveExpectedHash } from '../validators/textHash.js';
+import { runBridge } from '../bridge/runBridge.js';
 
 export class ContainerChildReplaceWriter implements WriterAdapterContract {
   readonly writerId = 'writer:container-child-replace';
   readonly supportedResourceKinds = ['msg', 'param', 'event', 'map', 'other', 'unknown'] as const;
-  readonly supportedOperations = ['container_child_replace'] as const;
+  readonly supportedOperations = ['container_child_replace', 'container_child_add', 'container_child_delete', 'container_child_rename', 'container_child_move'] as const;
   readonly inputSchemaVersion = 'soulforge.containerChildReplace.v1';
   readonly preconditions = [
     'expectedContainerHash',
@@ -34,6 +36,8 @@ export class ContainerChildReplaceWriter implements WriterAdapterContract {
   ] as const;
 
   canHandle(operation: PatchIrOperation): boolean {
+    if (!isContainerChildOperation(operation)) return false;
+    if (isNativeBnd4Operation(operation)) return true;
     return operation.kind === 'container_child_replace'
       && Boolean(operation.childContentBase64)
       && Boolean(operation.expectedChildHash)
@@ -61,7 +65,7 @@ export class ContainerChildReplaceWriter implements WriterAdapterContract {
     const diagnostics: StructuredDiagnostic[] = [];
 
     for (const op of input.operations) {
-      if (!this.canHandle(op) || op.kind !== 'container_child_replace') continue;
+      if (!this.canHandle(op) || !isContainerChildOperation(op)) continue;
       if (!op.targetPath) {
         diagnostics.push(createDiagnostic({
           severity: 'error',
@@ -75,6 +79,35 @@ export class ContainerChildReplaceWriter implements WriterAdapterContract {
       const hashCheck = await checkOriginalContentHash(op, 'apply_to_staging');
       diagnostics.push(...hashCheck);
       if (hashCheck.some((d) => d.severity === 'error')) continue;
+
+      if (isNativeBnd4Operation(op)) {
+        const stagingPath = join(input.stagingRoot, stagingRelativeName(op));
+        await mkdir(dirname(stagingPath), { recursive: true });
+        const bridgeResult = await runBridge<Record<string, unknown>>({
+          command: 'write-bnd4',
+          filePath: op.targetPath,
+          resourceUri: op.targetUri,
+          allowedRoots: [input.workspaceRoot ?? dirname(op.targetPath), input.stagingRoot],
+          writableRoots: [input.stagingRoot],
+          workspaceSessionId: `writer-${op.id}`,
+          timeoutMs: 120_000,
+          commandOptions: nativeBnd4Options(op, stagingPath)
+        });
+        diagnostics.push(...bridgeResult.diagnostics.map((diagnostic) => createDiagnostic({
+          severity: diagnostic.severity,
+          code: diagnostic.code,
+          message: diagnostic.message,
+          targetUri: op.targetUri,
+          ...(diagnostic.details === undefined ? {} : { details: diagnostic.details })
+        })));
+        if (bridgeResult.parseStatus === 'failed'
+          || !bridgeResult.diagnostics.some((diagnostic) => diagnostic.code === 'BND4_STAGING_WRITE_VERIFIED')) {
+          continue;
+        }
+        writtenTargets.push({ opId: op.id, targetUri: op.targetUri, targetPath: op.targetPath, stagingPath });
+        continue;
+      }
+      if (op.kind !== 'container_child_replace') continue;
 
       let original: Buffer;
       try {
@@ -149,6 +182,42 @@ export class ContainerChildReplaceWriter implements WriterAdapterContract {
       notes: `Container child replace rollback for ${input.operations.length} op(s)`
     };
   }
+}
+
+function isContainerChildOperation(operation: PatchIrOperation): operation is ContainerChildOp {
+  return operation.kind.startsWith('container_child_');
+}
+
+function isNativeBnd4Operation(operation: ContainerChildOp): boolean {
+  return operation.kind.startsWith('container_child_')
+    && operation.containerFormat === 'BND4_DFLT'
+    && operation.metadata?.nativeFormatAuthority === true
+    && Boolean(operation.targetPath)
+    && Boolean(operation.expectedContainerHash ?? operation.expectedHash);
+}
+
+function nativeBnd4Options(op: ContainerChildOp, outputPath: string): Record<string, unknown> {
+  const mutation = op.kind.slice('container_child_'.length);
+  const common: Record<string, unknown> = {
+    outputPath,
+    mutation,
+    expectedContainerHash: op.expectedContainerHash ?? op.expectedHash,
+    ...(op.expectedChildHash ? { expectedChildHash: op.expectedChildHash } : {}),
+    ...(typeof op.metadata?.nativeEntryIndex === 'number' ? { entryIndex: op.metadata.nativeEntryIndex } : {}),
+    ...(op.childPath ? { childPath: op.childPath } : {})
+  };
+  if (mutation === 'replace' || mutation === 'add') {
+    common.contentBase64 = op.childContentBase64;
+  }
+  if (mutation === 'add') {
+    common.name = op.newChildPath ?? op.childPath;
+    common.id = op.metadata?.nativeEntryId;
+    if (typeof op.metadata?.nativeEntryFlags === 'number') common.flags = op.metadata.nativeEntryFlags;
+    if (typeof op.metadata?.nativeEntryUnknown === 'number') common.unknown = op.metadata.nativeEntryUnknown;
+  }
+  if (mutation === 'rename') common.newName = op.newChildPath;
+  if (mutation === 'move') common.toIndex = op.metadata?.toIndex;
+  return common;
 }
 
 function decodeChildName(childUri: string): string {

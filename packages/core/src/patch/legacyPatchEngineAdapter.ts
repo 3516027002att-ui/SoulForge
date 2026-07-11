@@ -213,11 +213,13 @@ export function toExecuteOptions(options: {
   session?: WorkspaceSession;
   operationLog?: OperationLogStore;
   backupRoot?: string;
+  recoveryDir?: string;
 }): ExecutePatchProposalOptions {
   return {
     ...(options.workspaceRoot !== undefined ? { workspaceRoot: options.workspaceRoot } : {}),
     ...(options.session ? { session: options.session } : {}),
     ...(options.operationLog ? { operationLog: options.operationLog } : {}),
-    ...(options.backupRoot !== undefined ? { backupBaseDir: options.backupRoot } : {})
+    ...(options.backupRoot !== undefined ? { backupBaseDir: options.backupRoot } : {}),
+    ...(options.recoveryDir !== undefined ? { recoveryDir: options.recoveryDir } : {})
   };
 }

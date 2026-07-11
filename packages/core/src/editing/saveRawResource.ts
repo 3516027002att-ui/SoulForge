@@ -37,6 +37,8 @@ export interface SaveRawReplaceOptions {
   confirmation?: ConfirmationReceipt;
   session?: WorkspaceSession;
   operationLog?: OperationLogStore;
+  backupBaseDir?: string;
+  recoveryDir?: string;
   title?: string;
 }
 
@@ -49,6 +51,8 @@ export interface SaveRawByteRangeOptions {
   confirmation?: ConfirmationReceipt;
   session?: WorkspaceSession;
   operationLog?: OperationLogStore;
+  backupBaseDir?: string;
+  recoveryDir?: string;
   title?: string;
 }
 
@@ -154,7 +158,9 @@ export async function saveRawReplace(options: SaveRawReplaceOptions): Promise<Sa
       ? { workspaceRoot: options.session.layers.overlayRoot }
       : {}),
     ...(options.operationLog ? { operationLog: options.operationLog } : {}),
-    ...(options.confirmation ? { confirmation: options.confirmation } : {})
+    ...(options.confirmation ? { confirmation: options.confirmation } : {}),
+    ...(options.backupBaseDir ? { backupBaseDir: options.backupBaseDir } : {}),
+    ...(options.recoveryDir ? { recoveryDir: options.recoveryDir } : {})
   });
 
   return {
@@ -267,7 +273,9 @@ export async function saveRawByteRange(options: SaveRawByteRangeOptions): Promis
       ? { workspaceRoot: options.session.layers.overlayRoot }
       : {}),
     ...(options.operationLog ? { operationLog: options.operationLog } : {}),
-    ...(options.confirmation ? { confirmation: options.confirmation } : {})
+    ...(options.confirmation ? { confirmation: options.confirmation } : {}),
+    ...(options.backupBaseDir ? { backupBaseDir: options.backupBaseDir } : {}),
+    ...(options.recoveryDir ? { recoveryDir: options.recoveryDir } : {})
   });
 
   return {

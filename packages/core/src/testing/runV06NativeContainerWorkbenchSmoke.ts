@@ -46,7 +46,7 @@ import {
 } from '../files/writeFileResource.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
-import { rollbackOperation } from '../patch/rollback.js';
+import { rollbackOperation, rollbackResourceEntry } from '../patch/rollback.js';
 import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 
@@ -402,20 +402,31 @@ async function main(): Promise<void> {
   });
   assert(success.ok, `container replace must succeed: ${success.diagnostics.map((d) => d.code).join(',')}`);
   assert(success.opId, 'opId required');
-  assert(store.get(success.opId!), 'operation log entry');
+  assert(await store.get(success.opId!), 'operation log entry');
   const afterBytes = await readFile(nestedPath);
   const afterTree = await inspectContainerTree(nestedPath, { relativePath: 'msg/item.msgbnd.dcx' });
   const afterNote = afterTree.tree!.root.children.find((c) => c.name === 'note.txt')!;
   assert(afterNote.hash === sha256(newNestedChild), 'committed child hash');
 
   // Rollback
-  const rb = await rollbackOperation({
+  const recordedEntryChanges = await store.listResourceEntryChanges(success.opId!);
+  assert(recordedEntryChanges.length === 1, 'resource entry inverse must be recorded');
+  assert(recordedEntryChanges[0]!.entryUri === childUri, 'resource entry inverse uri');
+  const rb = await rollbackResourceEntry({
     opId: success.opId!,
+    entryUri: childUri,
     store,
-    session
+    session,
+    confirmation: createConfirmationReceipt({
+      subjects: [`ROLLBACK_RESOURCE_ENTRY:${success.opId!}:${childUri}`],
+      riskLevel: 'high',
+      note: 'native container smoke'
+    })
   });
   assert(rb.ok, `rollback must work: ${rb.diagnostics.map((d) => d.code).join(',')}`);
   assert((await readFile(nestedPath)).equals(nestedDcx.bytes!), 'rollback restores container bytes');
+  assert(rb.record?.rollbackScope === 'resource_entry', 'resource entry rollback scope');
+  assert(rb.record?.rollbackTargetUri === childUri, 'resource entry rollback target');
   results.push('PatchEngine container_child_replace ok');
 
   // ---------- 7) FMG semantic fixture ----------

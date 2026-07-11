@@ -244,6 +244,11 @@ export interface OperationLogRecord {
   /** Durable recovery path when post-commit log mark fails. */
   recoveryPath?: string;
   recoveryReason?: string;
+  /** Operation whose committed result this inverse transaction reverses. */
+  inverseOfOpId?: string;
+  rollbackScope?: 'operation' | 'file' | 'resource_entry';
+  /** Exact file or resource-entry URI reversed by a fine-grained rollback. */
+  rollbackTargetUri?: string;
 }
 
 export interface PatchHistoryEntry {
@@ -258,6 +263,9 @@ export interface PatchHistoryEntry {
   rolledBackAt?: string;
   fileCount: number;
   changedPaths: string[];
+  inverseOfOpId?: string;
+  rollbackScope?: OperationLogRecord['rollbackScope'];
+  rollbackTargetUri?: string;
   /** Compact patch-graph summary for AI sidebar / history UI. */
   graphSummary?: GraphPatch['summary'] & { title: string };
 }

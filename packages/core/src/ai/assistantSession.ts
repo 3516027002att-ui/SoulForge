@@ -18,7 +18,7 @@ export interface AiSelectedResourceContext {
 }
 
 export interface AiWorkspaceContextSnapshot {
-  workspaceRoot?: string;
+  workspaceSessionId?: string;
   selectedResource?: AiSelectedResourceContext;
   previewKind?: string;
   diagnosticsCount?: number;
@@ -69,7 +69,7 @@ export function buildAiSidebarDraft(request: AiSidebarDraftRequest): AiSidebarDr
 
   const target = selected
     ? `${selected.resourceKind}:${selected.relativePath}`
-    : request.context.workspaceRoot
+    : request.context.workspaceSessionId
       ? '当前工作区'
       : '未打开工作区';
 
@@ -90,35 +90,35 @@ export function buildAiSidebarDraft(request: AiSidebarDraftRequest): AiSidebarDr
 
 function buildSummary(prompt: string, target: string, status: AiSidebarDraft['status']): string {
   if (status === 'notConfigured') {
-    return 'Provider 选择已经记录，但真实 API 通道尚未接入；当前只生成本地计划草稿，不会联网调用模型。';
+    return '模型服务选择已经记录，但真实 API 通道尚未接入；当前只生成本地计划草稿，不会联网调用模型。';
   }
 
   if (prompt.length === 0) {
     return `已准备基于 ${target} 生成证据优先的 Mod 修改计划。`;
   }
 
-  return `将围绕「${prompt}」分析 ${target}，优先使用只读工具收集证据，再进入 Patch Engine 计划。`;
+  return `将围绕「${prompt}」分析 ${target}，优先使用只读工具收集证据，再进入补丁引擎计划。`;
 }
 
 function buildContextFacts(context: AiWorkspaceContextSnapshot): string[] {
   const facts: string[] = [];
 
-  facts.push(context.workspaceRoot ? `workspace: ${context.workspaceRoot}` : 'workspace: 未打开');
+  facts.push(context.workspaceSessionId ? '工作区：已打开' : '工作区：未打开');
 
   if (context.selectedResource) {
-    facts.push(`selected: ${context.selectedResource.relativePath}`);
-    facts.push(`resourceKind: ${context.selectedResource.resourceKind}`);
-    facts.push(`sourceUri: ${context.selectedResource.sourceUri}`);
+    facts.push(`已选择：${context.selectedResource.relativePath}`);
+    facts.push(`资源类型：${context.selectedResource.resourceKind}`);
+    facts.push(`资源 URI：${context.selectedResource.sourceUri}`);
   } else {
-    facts.push('selected: 无');
+    facts.push('已选择：无');
   }
 
-  if (context.previewKind) facts.push(`preview: ${context.previewKind}`);
-  if (context.currentEventUri) facts.push(`eventUri: ${context.currentEventUri}`);
-  if (typeof context.diagnosticsCount === 'number') facts.push(`diagnostics: ${context.diagnosticsCount}`);
+  if (context.previewKind) facts.push(`预览类型：${context.previewKind}`);
+  if (context.currentEventUri) facts.push(`事件 URI：${context.currentEventUri}`);
+  if (typeof context.diagnosticsCount === 'number') facts.push(`诊断数量：${context.diagnosticsCount}`);
 
   if (context.referenceStats) {
-    facts.push(`references: H${context.referenceStats.high} / M${context.referenceStats.medium} / L${context.referenceStats.low}`);
+    facts.push(`引用：高 ${context.referenceStats.high} / 中 ${context.referenceStats.medium} / 低 ${context.referenceStats.low}`);
   }
 
   return facts;
@@ -180,15 +180,15 @@ function reasonForTool(name: string): string {
     workspace_stats: '先看索引规模，避免在空工作区里误判。',
     search_resources: '定位相关资源文件，建立最小上下文。',
     search_events: '查找候选事件入口。',
-    explain_event: '生成 evidence-first 事件解释输入。',
+    explain_event: '生成证据优先的事件解释输入。',
     search_map_entities: '查找地图实体、区域和可见命名候选。',
-    search_param_rows: '查找参数行候选或 confirmed rows。',
+    search_param_rows: '查找参数行候选或已确认行。',
     search_text_entries: '查找文本条目。',
     lookup_text_id: '按 textId 精确定位文本。',
     find_text_references: '找出文本被哪些事件或符号引用。',
     find_references: '查看证据图里的入边和出边。',
     propose_text_patch: '只生成补丁计划，不直接保存文件。',
-    validate_patch: '在 staging 中验证补丁计划。'
+    validate_patch: '在暂存区中验证补丁计划。'
   };
 
   return reasons[name] ?? '作为 AI 安全工具参与证据链。';
@@ -196,21 +196,21 @@ function reasonForTool(name: string): string {
 
 function buildSafetyRails(settings: AiSidebarSettings): string[] {
   const rails = [
-    '所有写入必须先生成 PatchProposal，不能直接改用户 Mod 工作区。',
-    'synthetic fixture 只能证明 pipeline，不代表原生格式权威。',
-    '低置信候选必须保留 confidence，不允许伪装成 confirmed parser output。'
+    '所有写入必须先生成补丁提案，不能直接改用户 Mod 工作区。',
+    'synthetic 测试样本只能证明处理链路，不代表原生格式权威。',
+    '低置信候选必须保留置信等级，不允许伪装成已确认的解析输出。'
   ];
 
   if (settings.mode === 'plan') {
-    rails.unshift('当前是 plan 模式：只允许读证据和生成计划。');
+    rails.unshift('当前是计划模式：只允许读证据和生成计划。');
   } else if (settings.mode === 'normal') {
-    rails.unshift('当前是 normal 模式：可以生成和验证 patch，但仍不允许越过 Patch Engine。');
+    rails.unshift('当前是普通模式：可以生成和验证补丁，但仍不允许越过补丁引擎。');
   } else {
-    rails.unshift('当前是 full permission 模式：高风险操作也必须经过备份、验证和回滚保护。');
+    rails.unshift('当前是完全权限模式：高风险操作也必须经过备份、验证和回滚保护。');
   }
 
   if (settings.provider !== 'mock') {
-    rails.push('真实模型 Provider 需要后续安全配置 API Key、请求日志和权限边界。');
+    rails.push('真实模型服务需要后续安全配置 API key、请求日志和权限边界。');
   }
 
   return rails;
@@ -225,7 +225,7 @@ function buildNextActions(
   const actions: string[] = [];
 
   if (status === 'notConfigured') {
-    actions.push('先完成 Provider 配置层：API Key 来源、模型名、请求边界、日志脱敏。');
+    actions.push('先完成模型服务配置层：API key 来源、模型名、请求边界、日志脱敏。');
   }
 
   if (prompt.trim().length === 0) {
@@ -239,7 +239,7 @@ function buildNextActions(
   }
 
   if (settings.mode !== 'plan') {
-    actions.push('进入 patch 阶段前，必须先展示 diff、validation 和 rollback plan。');
+    actions.push('进入补丁阶段前，必须先展示差异、验证结果和回滚计划。');
   }
 
   return actions;
@@ -252,24 +252,24 @@ function renderPromptPreview(
   safetyRails: string[]
 ): string {
   const lines = [
-    '# SoulForge AI Sidebar Draft',
+    '# SoulForge AI 侧边栏草稿',
     '',
-    `provider: ${request.settings.provider}`,
-    `thinking: ${request.settings.thinking}`,
-    `mode: ${request.settings.mode}`,
+    `模型服务：${request.settings.provider}`,
+    `思考强度：${request.settings.thinking}`,
+    `权限模式：${request.settings.mode}`,
     '',
-    '## User goal',
-    request.userPrompt.trim() || '(no goal yet)',
+    '## 用户目标',
+    request.userPrompt.trim() || '（尚未输入目标）',
     '',
-    '## Context facts',
+    '## 上下文事实',
     ...contextFacts.map((fact) => `- ${fact}`),
     '',
-    '## Recommended tools',
+    '## 建议工具',
     ...(recommendedTools.length > 0
       ? recommendedTools.map((tool) => `- ${tool.toolName} (${tool.permission}): ${tool.reason}`)
-      : ['- no tool recommendation yet']),
+      : ['- 暂无工具建议']),
     '',
-    '## Safety rails',
+    '## 安全边界',
     ...safetyRails.map((rail) => `- ${rail}`)
   ];
 

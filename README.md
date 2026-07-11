@@ -1,140 +1,117 @@
-# SoulForge 只狼 Mod 超级编辑器
+# SoulForge
 
-SoulForge 的目标是做一个面向《只狼》和魂系游戏 Mod 的 AI 超级编辑器。
+SoulForge 是面向 Sekiro 和 FromSoftware Mod 的 AI 原生、安全、可审查、可回滚工作台。
 
-它的最终目标是：让 AI 像 Cursor 修改代码一样理解和修改 Mod。用户可以直接提出需求，例如“把这个敌人的奖励改成某个道具”“把这一段剧情事件关联到另一张地图”“检查这些文本 ID 有没有被事件引用”“批量调整一组效果参数”，SoulForge 负责把这些自然语言需求拆成证据、计划、补丁、验证和可回滚的修改。
+产品定位：
 
-传统魂系 Mod 工作流非常痛苦：
+~~~text
+魂游 Mod 的 Cursor
+~~~
 
-- 文件类型多：DCX、BND、EMEVD、MSB、PARAM、FMG 等格式混在一起；
-- 资源关系复杂：事件、地图、参数、文本之间大量靠数字 ID 串联；
-- 工具分散：经常要在多个工具之间来回切换；
-- 修改风险高：改错一个 ID 或打包错误，就可能让游戏静默出问题；
-- AI 很难直接帮忙：如果 AI 看不到可靠证据，它只能猜。
+用户提出修改目标后，SoulForge 应从真实资源证据出发，建立引用关系，生成补丁，在暂存区验证，通过 Patch Engine 安全提交，并能可靠回滚。
 
-SoulForge 要解决的核心问题不是“再做一个表格编辑器”，而是建立一套 AI 能理解、能追踪、能安全修改的 Mod 工作台。
+## 当前里程碑
 
-SoulForge 最终应该像一个 Mod 领域的 Cursor：
+当前里程碑：**SoulForge V0.5**。
 
-- 打开原生 ModEngine 风格的 Mod 目录；
-- 自动识别事件、地图、参数、文本和其他资源；
-- 把看不懂的数字 ID 转成可追踪的符号和引用关系；
-- 在 AI 解释或修改之前展示证据链；
-- 让 AI 根据用户目标生成修改计划；
-- 修改前给出影响范围和补丁预览；
-- 修改时进入暂存区，不直接破坏原文件；
-- 修改后做验证、备份、日志记录和回滚。
+唯一完整实施规范：
 
-目标不是让 AI 莽撞地直接改文件，而是让 AI 在证据和 Patch Engine 的约束下，像高级 Mod 助手一样完成跨资源修改。
+- [V0.5 实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)
 
+接手实现的 Agent 必须先阅读根目录 [AGENTS.md](AGENTS.md)，再完整阅读交接书。旧版里程碑、分叉、任务和状态文档已经删除，避免多套口径互相冲突。
 
-## AI 怎么改 Mod
+## V0.5 发布目标
 
-目标工作流是：
+- Windows 10/11 x64。
+- Sekiro 为唯一 native 权威验收基线。
+- DFLT、KRAK、BND4 原生容器闭环。
+- EMEVD、MSB、PARAM、FMG 无损语义 CRUD、重排、类型转换、验证和回滚。
+- 安全 Hex、EMEVD 四视图、PARAM、FMG 本地化、MSB 完整 3D 场景。
+- glTF/GLB、PNG/TGA/DDS 自动转换与资产替换。
+- OpenAI-compatible、Anthropic-compatible 双模型服务 Agent。
+- SQLite 权威索引、诊断、补丁、历史、审计和恢复。
 
-```text
-用户提出修改需求
-  -> AI 查询索引和证据图
-  -> AI 解释它找到的事件、地图、参数、文本关系
-  -> AI 生成修改计划
-  -> SoulForge 做影响分析
-  -> 生成补丁预览
-  -> 用户确认
-  -> 写入暂存区
-  -> 验证
-  -> 备份原文件
-  -> 原子替换
-  -> 重新索引
-  -> 记录操作日志
-  -> 必要时回滚
-```
+## 当前真实能力
 
-这就是“像 Cursor 一样改 Mod”的含义：AI 不是只聊天，也不是直接胡乱改二进制，而是基于项目上下文、证据链和补丁系统执行可审查的修改。
+已经具备：
 
-## 当前工程状态
+- Electron/React/TypeScript 桌面壳。
+- C# Bridge envelope inspection。
+- Mod 覆盖层与原版只读层。
+- PatchIR + WorkspaceTransaction 写入主干。
+- 文本、原始字节区间和整文件安全补丁。
+- 暂存、hash 前置条件、备份、原子替换、operation/file 回滚。
+- bounded preview、VFS、资源关系图、证据包和补丁影响图骨架。
+- synthetic DFLT/BND/FMG 与容器 child replace 测试链。
 
-项目仍处在早期地基阶段，重点是把资源识别、证据、索引、AI 工具和安全写入路径搭起来。
+尚未完成：
 
-已经具备或正在推进的方向：
+- 真实 BND4/KRAK authority。
+- 真实 EMEVD/MSB/PARAM/FMG parser/writer。
+- SQLite runtime authority。
+- Bridge daemon。
+- resource entry 回滚。
+- 专业编辑器、完整 3D 和资产转换。
+- 真实模型服务 Agent。
+- Windows 正式发行链。
 
-- Electron + React + TypeScript 桌面壳；
-- C# Bridge 负责读取和识别底层资源；
-- 工作区扫描和资源分类；
-- 文件证据、诊断和低置信候选输出；
-- AI 安全读工具；
-- event / map / param / msg 的符号和引用图；
-- synthetic fixture 用于验证解析管线；
-- Patch Engine 作为唯一写入路径的设计。
+测试名中的 `v0.5` / `v0.6` 只代表内部切片，不能当作产品版本完成证明。
 
-当前 v0.3 的重点是 fixture-confirmed parser plumbing：先用小型 synthetic fixture 确认导出形状、ID 稳定性、置信度标记和 AI 可用上下文，再逐步替换为真实格式解析器。
+## 安全写入
 
-## 解析策略
+所有修改必须经过：
 
-SoulForge 必须诚实地区分三类数据：
-
-- 已确认解析：由 fixture 或明确格式规则验证过，可以给较高置信度；
-- 候选解析：通过扫描、启发式或可疑结构找到，只能作为线索；
-- 不支持资源：返回结构化诊断，不假装解析成功。
-
-这是项目的底线。AI 宁愿说“不确定”，也不能把猜测包装成事实。
-
-## 安全写入策略
-
-所有真实修改都必须经过 Patch Engine：
-
-```text
+~~~text
 修改请求
-  -> 补丁计划
-  -> 暂存副本
+  -> PatchIR
+  -> 暂存区
   -> 验证
   -> 备份
-  -> 原子保存
-  -> 重新索引
-  -> 日志
+  -> 原子替换
+  -> 重读/重解析
+  -> 增量索引
+  -> 审计
   -> 回滚
-```
+~~~
 
-直接写入 Mod 文件是禁止的。AI 的完整权限也不能绕过这个流程。
+renderer、转换器、AI 完全权限和外部工具都不能绕过这条主干。
 
-## 技术方向
+## 开发命令
 
-- 桌面端：Electron + React + TypeScript；
-- Bridge / parser：C# helper process；
-- 索引：SQLite + FTS5；
-- AI：OpenAI-compatible、Anthropic-compatible、mock/tool-console provider；
-- 写入：Patch Engine；
-- 外部工具：只做参考，不复制 Smithbox、DSMapStudio、DarkScript、WitchyBND、SoulsFormats 的实现代码。
+~~~powershell
+npm install
+npm run typecheck
+npm test
+npm run bridge:verify:synthetic
+npm run build
+npm run dev
+~~~
 
-## 近期优先级
+本机真实 Mod 验证：
 
-1. 打通 event / map / param / msg 的 synthetic fixture 导出路径；
-2. 让 AI 和 UI 能区分 confirmed / candidate / unsupported；
-3. 完成 FMG、BND、EMEVD、PARAM、MSB 的 fixture-confirmed parser 里程碑；
-4. 建立安全 writer 和 Patch Engine 验证链；
-5. 让 AI 从只读解释升级到可审查、可回滚的 Mod 修改。
+~~~powershell
+npm run test:native-preview
+npm run test:real-mod -w @soulforge/core
+~~~
 
-## 给 Codex 的当前交接
+## 保留文档
 
-当前给 Codex 的明确任务记录在：
+实施与约束：
 
-- [`docs/CODEX_NEXT_ACTIONS.md`](docs/CODEX_NEXT_ACTIONS.md)
-- [`docs/CODEX_TASK_ROUTER_WIREUP.md`](docs/CODEX_TASK_ROUTER_WIREUP.md)
+- [V0.5 实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)
+- [产品愿景](docs/PRODUCT_VISION.md)
+- [Parser 研究边界](docs/PARSER_RESEARCH.md)
 
-Codex 当前只应做路由接线、类型小修和 smoke script，不应该扩展到真实 native parser、UI 重构或 Patch Engine 改造。
+Synthetic 技术规格：
 
-## 相关文档
+- [FMG 测试样本](docs/V0_3_FMG_SYNTHETIC_FIXTURE.md)
+- [Event/PARAM 测试样本](docs/V0_3_SYNTHETIC_EVENT_PARAM_FIXTURES.md)
+- [MSB 测试样本](docs/V0_3_SYNTHETIC_MAP_FIXTURE.md)
+- [BND 测试样本](docs/V0_3_SYNTHETIC_BND_FIXTURE.md)
 
-产品与决策：
+开发桥：
 
-- [`docs/PRODUCT_VISION.md`](docs/PRODUCT_VISION.md)
-- [`docs/DECISIONS.md`](docs/DECISIONS.md)
-- [`docs/V0_5_MILESTONE.md`](docs/V0_5_MILESTONE.md)
-- [`docs/PROJECT_STATE.md`](docs/PROJECT_STATE.md)
-- [`docs/PROJECT_SOURCE.md`](docs/PROJECT_SOURCE.md)
+- [CodexPro 快速启动](docs/CODEXPRO_QUICKSTART.md)
+- [CodexPro 接入说明](docs/CODEXPRO_INTEGRATION.md)
 
-当前工程里程碑：
-
-- [`docs/V0_3_FORMAT_PARSER_MILESTONE.md`](docs/V0_3_FORMAT_PARSER_MILESTONE.md)
-- [`docs/V0_3_FMG_SYNTHETIC_FIXTURE.md`](docs/V0_3_FMG_SYNTHETIC_FIXTURE.md)
-- [`docs/V0_3_SYNTHETIC_EVENT_PARAM_FIXTURES.md`](docs/V0_3_SYNTHETIC_EVENT_PARAM_FIXTURES.md)
-- [`docs/V0_3_SYNTHETIC_MAP_FIXTURE.md`](docs/V0_3_SYNTHETIC_MAP_FIXTURE.md)
+真实游戏资产、用户 Mod、私有测试语料、Oodle DLL 和任何明文凭据都不得提交。

@@ -41,29 +41,32 @@ function sha256(data: string | Buffer): string {
 }
 
 class FailingPendingLogStore implements OperationLogStore {
-  record(): void {
+  async record(): Promise<void> {
     throw new Error('pending log boom');
   }
-  get(): undefined { return undefined; }
-  list(): [] { return []; }
-  updateStatus(): undefined { return undefined; }
-  history(): [] { return []; }
+  async get(): Promise<undefined> { return undefined; }
+  async list(): Promise<[]> { return []; }
+  async updateStatus(): Promise<undefined> { return undefined; }
+  async history(): Promise<[]> { return []; }
 }
 
 class FailOnCommittedLogStore implements OperationLogStore {
   private readonly mem = new MemoryOperationLogStore();
   private writes = 0;
-  record(entry: OperationLogRecord): void {
+  async record(entry: OperationLogRecord): Promise<void> {
     this.writes += 1;
     if (entry.status === 'committed' || this.writes >= 2) {
       throw new Error('committed log boom');
     }
-    this.mem.record(entry);
+    await this.mem.record(entry);
   }
   get(opId: string) { return this.mem.get(opId); }
   list(ws?: string) { return this.mem.list(ws); }
   updateStatus(opId: string, status: OperationStatus, patch?: Partial<OperationLogRecord>) {
-    return this.mem.updateStatus(opId, status, patch);
+    void opId;
+    void status;
+    void patch;
+    return Promise.reject(new Error('status log boom'));
   }
   history(ws?: string) { return this.mem.history(ws); }
 }
@@ -177,7 +180,7 @@ async function main(): Promise<void> {
     'Text file edit through PatchIR + WorkspaceTransaction',
     textCommit.changedFiles.length === 1
       && (await readFile(ws.paths.txt, 'utf8')) === 'item-v2\n'
-      && Boolean(store.get(textCommit.opId)),
+      && Boolean(await store.get(textCommit.opId)),
     `opId=${textCommit.opId}`
   );
 
@@ -446,13 +449,14 @@ async function main(): Promise<void> {
   );
   const afterCommitLog = await readFile(ws.paths.txt, 'utf8');
   const recovered = commitFail.diagnostics.some((d) =>
-    d.code === 'OPERATION_LOG_RECORD_FAILED' || d.code === 'TRANSACTION_RECOVERY_REQUIRED'
+    d.code === 'OPERATION_LOG_RECONCILIATION_REQUIRED'
   );
   mark(
     'Operation log failure recovery',
     recovered
       && commitFail.changedFiles.length === 0
-      && (afterCommitLog === beforeCommitLog || Boolean(commitFail.recoveryPath)),
+      && afterCommitLog === beforeCommitLog
+      && Boolean(commitFail.recoveryPath),
     `codes=${commitFail.diagnostics.map((d) => d.code).join(',')} recovery=${commitFail.recoveryPath ?? 'rollback'}`
   );
 
@@ -511,7 +515,7 @@ async function main(): Promise<void> {
 
   // G. evidence pack — assert required fields after logged writes + graph edges
   const resourceUri = fileNode?.uri ?? largeOpen.resourceUri;
-  const pack = buildEvidencePack({
+  const pack = await buildEvidencePack({
     workspaceId: session.meta.workspaceId,
     resourceUri,
     index,
@@ -540,7 +544,7 @@ async function main(): Promise<void> {
 
   // Packed/unsupported must not be auto-commit eligible for structured paths.
   const packedUri = packedNode?.uri ?? largeOpen.resourceUri;
-  const packedPack = buildEvidencePack({
+  const packedPack = await buildEvidencePack({
     workspaceId: session.meta.workspaceId,
     resourceUri: packedUri,
     index,
@@ -580,7 +584,12 @@ async function main(): Promise<void> {
   if (textAfterWrite !== 'item-v2\n') {
     throw new Error(`expected text still at v2 before rollback, got ${JSON.stringify(textAfterWrite)}`);
   }
-  const rolledText = await rollbackOperation({ opId: textCommit.opId, store, session });
+  const rolledText = await rollbackOperation({
+    opId: textCommit.opId,
+    store,
+    session,
+    confirmation: rollbackConfirmation(textCommit.opId)
+  });
   mark(
     'Text file edit through PatchIR + WorkspaceTransaction',
     rolledText.ok && (await readFile(ws.paths.txt, 'utf8')) === 'item-v1\n',
@@ -589,7 +598,12 @@ async function main(): Promise<void> {
 
   const binAfterWrite = await readFile(ws.paths.bin);
   if (binAfterWrite[1] !== 0xaa) throw new Error('raw write missing before rollback assert');
-  const rolledRaw = await rollbackOperation({ opId: rawCommit.opId, store, session });
+  const rolledRaw = await rollbackOperation({
+    opId: rawCommit.opId,
+    store,
+    session,
+    confirmation: rollbackConfirmation(rawCommit.opId)
+  });
   mark(
     'Binary raw edit through PatchIR + WorkspaceTransaction',
     rolledRaw.ok && (await readFile(ws.paths.bin))[1] === 0x20,
@@ -598,7 +612,12 @@ async function main(): Promise<void> {
 
   const emevdAfterWrite = await readFile(ws.paths.emevd);
   if (emevdAfterWrite[4] !== 0xff) throw new Error('replace write missing before rollback assert');
-  const rolledReplace = await rollbackOperation({ opId: replaceCommit.opId, store, session });
+  const rolledReplace = await rollbackOperation({
+    opId: replaceCommit.opId,
+    store,
+    session,
+    confirmation: rollbackConfirmation(replaceCommit.opId)
+  });
   mark(
     'Native/packed whole-file replace high-risk confirmation',
     rolledReplace.ok && (await readFile(ws.paths.emevd)).equals(emevdBefore),
@@ -650,6 +669,14 @@ async function main(): Promise<void> {
       impactPatchId: impactText.patchId
     }
   }, null, 2));
+}
+
+function rollbackConfirmation(opId: string) {
+  return createConfirmationReceipt({
+    subjects: [`ROLLBACK_OPERATION:${opId}`],
+    riskLevel: 'high',
+    note: 'full file workbench smoke'
+  });
 }
 
 main().catch((error) => {

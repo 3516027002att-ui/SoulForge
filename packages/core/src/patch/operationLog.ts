@@ -7,6 +7,13 @@ import type {
   PatchMode,
   PatchProposal
 } from '@soulforge/shared';
+import type {
+  AuditEventRecord,
+  RecoveryPointRecord,
+  ResourceEntryChangeRecord,
+  TransactionJournalPhase,
+  TransactionJournalRecord
+} from '../storage/durableWorkspaceRepository.js';
 import type { GraphPatch } from '@soulforge/shared';
 
 export interface RecordCommittedOperationInput {
@@ -18,11 +25,41 @@ export interface RecordCommittedOperationInput {
 }
 
 export interface OperationLogStore {
-  record(entry: OperationLogRecord): void;
-  get(opId: string): OperationLogRecord | undefined;
-  list(workspaceId?: string): OperationLogRecord[];
-  updateStatus(opId: string, status: OperationStatus, patch?: Partial<OperationLogRecord>): OperationLogRecord | undefined;
-  history(workspaceId?: string): PatchHistoryEntry[];
+  record(entry: OperationLogRecord): Promise<void>;
+  get(opId: string): Promise<OperationLogRecord | undefined>;
+  list(workspaceId?: string): Promise<OperationLogRecord[]>;
+  updateStatus(
+    opId: string,
+    status: OperationStatus,
+    patch?: Partial<OperationLogRecord>
+  ): Promise<OperationLogRecord | undefined>;
+  history(workspaceId?: string): Promise<PatchHistoryEntry[]>;
+  /** Optional durable journal capabilities supplied by the desktop database utility. */
+  createTransaction?(record: Omit<TransactionJournalRecord, 'workspaceId'>): Promise<unknown>;
+  transitionTransaction?(options: {
+    transactionId: string;
+    expectedPhase: TransactionJournalPhase | TransactionJournalPhase[];
+    nextPhase: TransactionJournalPhase;
+    state: unknown;
+    updatedAt?: string;
+  }): Promise<TransactionJournalRecord>;
+  recordRecoveryPoint?(
+    record: Omit<RecoveryPointRecord, 'workspaceId' | 'recoveryId'> & { recoveryId?: string }
+  ): Promise<RecoveryPointRecord>;
+  appendAuditEvent?(
+    event: Omit<AuditEventRecord, 'workspaceId' | 'eventId'> & { eventId?: string }
+  ): Promise<AuditEventRecord>;
+  recordResourceEntryChange?(record: Omit<ResourceEntryChangeRecord, 'workspaceId'>): Promise<unknown>;
+  listResourceEntryChanges?(opId: string): Promise<ResourceEntryChangeRecord[]>;
+  finalizeCommit?(bundle: {
+    operation: OperationLogRecord;
+    resourceEntryChanges: Array<Omit<ResourceEntryChangeRecord, 'workspaceId'>>;
+    recoveryPoint: Omit<RecoveryPointRecord, 'workspaceId'>;
+    auditEvent: Omit<AuditEventRecord, 'workspaceId'>;
+    transactionId: string;
+    expectedPhase: TransactionJournalPhase;
+    finalState: unknown;
+  }): Promise<void>;
 }
 
 /**
@@ -31,28 +68,29 @@ export interface OperationLogStore {
  */
 export class MemoryOperationLogStore implements OperationLogStore {
   private readonly byId = new Map<string, OperationLogRecord>();
+  private readonly resourceEntryChanges = new Map<string, ResourceEntryChangeRecord[]>();
 
-  record(entry: OperationLogRecord): void {
+  async record(entry: OperationLogRecord): Promise<void> {
     this.byId.set(entry.opId, cloneRecord(entry));
   }
 
-  get(opId: string): OperationLogRecord | undefined {
+  async get(opId: string): Promise<OperationLogRecord | undefined> {
     const entry = this.byId.get(opId);
     return entry ? cloneRecord(entry) : undefined;
   }
 
-  list(workspaceId?: string): OperationLogRecord[] {
+  async list(workspaceId?: string): Promise<OperationLogRecord[]> {
     const rows = [...this.byId.values()]
       .filter((entry) => !workspaceId || entry.workspaceId === workspaceId)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     return rows.map(cloneRecord);
   }
 
-  updateStatus(
+  async updateStatus(
     opId: string,
     status: OperationStatus,
     patch: Partial<OperationLogRecord> = {}
-  ): OperationLogRecord | undefined {
+  ): Promise<OperationLogRecord | undefined> {
     const existing = this.byId.get(opId);
     if (!existing) return undefined;
     const next: OperationLogRecord = {
@@ -66,8 +104,21 @@ export class MemoryOperationLogStore implements OperationLogStore {
     return cloneRecord(next);
   }
 
-  history(workspaceId?: string): PatchHistoryEntry[] {
-    return this.list(workspaceId).map(toHistoryEntry);
+  async recordResourceEntryChange(record: Omit<ResourceEntryChangeRecord, 'workspaceId'>): Promise<void> {
+    const operation = this.byId.get(record.opId);
+    if (!operation) throw new Error(`Operation not found for resource entry change: ${record.opId}.`);
+    const existing = this.resourceEntryChanges.get(record.opId) ?? [];
+    if (existing.some((item) => item.id === record.id)) throw new Error(`Duplicate resource entry change: ${record.id}.`);
+    existing.push(structuredClone({ ...record, workspaceId: operation.workspaceId }));
+    this.resourceEntryChanges.set(record.opId, existing);
+  }
+
+  async listResourceEntryChanges(opId: string): Promise<ResourceEntryChangeRecord[]> {
+    return structuredClone(this.resourceEntryChanges.get(opId) ?? []);
+  }
+
+  async history(workspaceId?: string): Promise<PatchHistoryEntry[]> {
+    return (await this.list(workspaceId)).map(toHistoryEntry);
   }
 }
 
@@ -90,6 +141,9 @@ export function toHistoryEntry(entry: OperationLogRecord): PatchHistoryEntry {
     ...(entry.rolledBackAt ? { rolledBackAt: entry.rolledBackAt } : {}),
     fileCount: entry.files.length,
     changedPaths: entry.files.map((file) => file.targetPath),
+    ...(entry.inverseOfOpId ? { inverseOfOpId: entry.inverseOfOpId } : {}),
+    ...(entry.rollbackScope ? { rollbackScope: entry.rollbackScope } : {}),
+    ...(entry.rollbackTargetUri ? { rollbackTargetUri: entry.rollbackTargetUri } : {}),
     ...(entry.graph
       ? {
           graphSummary: {

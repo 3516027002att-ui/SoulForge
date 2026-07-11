@@ -6,6 +6,7 @@ import { buildGraphPatchFromProposal } from '../patch/graphPatch.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { openFileOperationLogStore } from '../patch/fileOperationLogStore.js';
 import { rollbackOperation } from '../patch/rollback.js';
+import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { getLatestSchemaVersion, SQLITE_MIGRATIONS } from '../storage/sqliteSchema.js';
 import { createDefaultToolRegistry } from '../ai/toolRegistry.js';
@@ -43,7 +44,7 @@ async function main(): Promise<void> {
   // Keep memory store for foundation path; disk reopen is covered by runV05PersistSmoke.
   const store = new MemoryOperationLogStore();
   const fileStoreProbe = openFileOperationLogStore(join(root, 'probe-operation-log.json'));
-  if (fileStoreProbe.list().length !== 0) {
+  if ((await fileStoreProbe.list()).length !== 0) {
     throw new Error('Empty file operation log should start with zero entries.');
   }
 
@@ -83,18 +84,28 @@ async function main(): Promise<void> {
     throw new Error('Base file was mutated; overlay isolation failed.');
   }
 
-  const history = store.history(session.meta.workspaceId);
+  const history = await store.history(session.meta.workspaceId);
   if (history.length !== 1 || history[0]?.fileCount !== 1) {
     throw new Error('Patch history entry missing after commit.');
   }
 
-  const rolled = await rollbackOperation({ opId: committed.opId, store, session });
+  const rolled = await rollbackOperation({
+    opId: committed.opId,
+    store,
+    session,
+    confirmation: rollbackConfirmation(committed.opId)
+  });
   if (!rolled.ok) throw new Error(`Rollback failed: ${rolled.diagnostics.map((d) => d.message).join('; ')}`);
   if ((await readFile(overlayFile, 'utf8')) !== 'overlay-v1\n') {
     throw new Error('Rollback did not restore overlay file content.');
   }
-  if (store.get(committed.opId)?.status !== 'rolled_back') {
-    throw new Error('Operation log status was not updated to rolled_back.');
+  if ((await store.get(committed.opId))?.status !== 'committed') {
+    throw new Error('Inverse rollback must not mutate the original operation status.');
+  }
+  if (!(await store.list(session.meta.workspaceId)).some((item) => {
+    return item.inverseOfOpId === committed.opId && item.status === 'committed';
+  })) {
+    throw new Error('Committed inverse rollback operation was not recorded.');
   }
 
   if (getLatestSchemaVersion() < 2) {
@@ -144,12 +155,20 @@ async function main(): Promise<void> {
     graphNodes: graph.nodes.length,
     graphEdges: graph.edges.length,
     tools: registry.list().length,
-    history: store.history(session.meta.workspaceId).map((entry) => ({
+    history: (await store.history(session.meta.workspaceId)).map((entry) => ({
       opId: entry.opId,
       status: entry.status,
       fileCount: entry.fileCount
     }))
   }, null, 2));
+}
+
+function rollbackConfirmation(opId: string) {
+  return createConfirmationReceipt({
+    subjects: [`ROLLBACK_OPERATION:${opId}`],
+    riskLevel: 'high',
+    note: 'foundation smoke'
+  });
 }
 
 main().catch((error) => {

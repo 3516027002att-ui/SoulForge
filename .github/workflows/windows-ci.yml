@@ -1,0 +1,98 @@
+# SoulForge V0.5 Windows CI — automated gates only (no private game assets).
+name: windows-ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit / integration smokes
+        run: npm test
+
+      - name: Bridge synthetic fixtures
+        run: npm run bridge:verify:synthetic
+
+      - name: Bridge daemon
+        run: npm run bridge:verify:daemon
+
+      - name: OpenAI Responses adapter
+        run: npm run test:openai-responses
+
+      - name: Workbench projections
+        run: npm run test:workbench-projections
+
+      - name: EMEVD four-view
+        run: npm run test:emevd-four-view
+
+      - name: DDS convert writeback
+        run: npm run test:dds-convert-writeback
+
+      - name: Vault encrypt contract
+        run: npm run test:vault-encrypt-contract
+
+      - name: Scene asset inventory
+        run: npm run test:scene-asset-inventory
+
+      - name: Performance baseline
+        run: npm run test:performance-baseline
+
+      - name: Paramdef layout
+        run: npm run test:paramdef-layout
+
+      - name: EMEVD / FMG / MSB / PARAM IPC contracts
+        run: |
+          npm run test:emevd-ipc-contract
+          npm run test:fmg-msb-ipc-contract
+          npm run test:param-msb-write-ipc-contract
+          npm run test:desktop-live-editor-contract
+          npm run test:emedf-schema
+          npm run test:emevd-envelope-map
+          npm run test:flver-candidate
+          npm run test:vault-encrypt-contract
+
+      - name: Portable packaging config gate
+        run: npm run test:portable-packaging-gate
+
+      - name: Private native / section-28 honest skip
+        run: |
+          npm run test:private-native-gate
+          npm run test:section28-sekiro-gate
+
+      - name: Release content scan
+        run: npm run test:release-content
+
+      - name: Build
+        run: npm run build
+
+      # Intentionally NOT run in public CI:
+      # - test:native-preview / test:real-mod (private mods)
+      # - bridge:verify:oodle / native emevd/msb/fmg/param against local mods (private corpus)
+      # - signed installer / real Sekiro launch (P7 private gate)
+      # - SOULFORGE_PORTABLE_PACK=1 unsigned pack (optional local only)

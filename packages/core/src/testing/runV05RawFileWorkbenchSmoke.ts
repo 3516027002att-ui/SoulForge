@@ -192,7 +192,12 @@ async function main(): Promise<void> {
   if (!(await readFile(binPath)).equals(Buffer.from([0xde, 0xad, 0xbe, 0xef]))) {
     throw new Error('raw replace content wrong');
   }
-  const rolled = await rollbackOperation({ opId: replaced.opId, store, session });
+  const rolled = await rollbackOperation({
+    opId: replaced.opId,
+    store,
+    session,
+    confirmation: rollbackConfirmation(replaced.opId)
+  });
   if (!rolled.ok) throw new Error(`rollback replace failed: ${JSON.stringify(rolled.diagnostics)}`);
   if (!(await readFile(binPath)).equals(binBytes)) throw new Error('rollback replace did not restore');
 
@@ -232,7 +237,12 @@ async function main(): Promise<void> {
   });
   if (!patched.ok || !patched.opId) throw new Error(`byte patch failed: ${JSON.stringify(patched.diagnostics)}`);
   if ((await readFile(binPath))[1] !== 0xff) throw new Error('byte patch not applied');
-  const rolledPatch = await rollbackOperation({ opId: patched.opId, store, session });
+  const rolledPatch = await rollbackOperation({
+    opId: patched.opId,
+    store,
+    session,
+    confirmation: rollbackConfirmation(patched.opId)
+  });
   if (!rolledPatch.ok || !(await readFile(binPath)).equals(binBytes)) {
     throw new Error('byte patch rollback failed');
   }
@@ -292,7 +302,12 @@ async function main(): Promise<void> {
     throw new Error(`dcx raw replace failed: ${JSON.stringify(dcxOk.diagnostics)}`);
   }
   if ((await readFile(dcxPath))[4] !== 0x99) throw new Error('dcx raw replace content wrong');
-  await rollbackOperation({ opId: dcxOk.opId, store, session });
+  await rollbackOperation({
+    opId: dcxOk.opId,
+    store,
+    session,
+    confirmation: rollbackConfirmation(dcxOk.opId)
+  });
   if (!(await readFile(dcxPath)).equals(dcxBytes)) throw new Error('dcx rollback failed');
 
   // 7) Adapter compiles explicit raw schemas
@@ -359,6 +374,14 @@ async function main(): Promise<void> {
       'adapter compiles raw schemas; bare binary blocked'
     ]
   }, null, 2));
+}
+
+function rollbackConfirmation(opId: string) {
+  return createConfirmationReceipt({
+    subjects: [`ROLLBACK_OPERATION:${opId}`],
+    riskLevel: 'high',
+    note: 'raw file workbench smoke'
+  });
 }
 
 main().catch((error) => {

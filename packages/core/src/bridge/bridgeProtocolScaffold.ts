@@ -1,6 +1,7 @@
 /**
- * Bridge protocol scaffold helpers — capability matrix + envelope builders.
- * No native parser/writer implementation.
+ * TEST-ONLY synthetic protocol helpers used by architecture smoke tests.
+ * This module is intentionally not exported from @soulforge/core; production
+ * Bridge traffic must use BridgeDaemonClient and the C# daemon.
  */
 
 import type {
@@ -93,7 +94,7 @@ export const SCAFFOLD_BRIDGE_COMMANDS: BridgeCommandDescriptor[] = [
   }
 ];
 
-export function buildScaffoldCapabilityMatrix(bridgeId = 'SoulForge.Bridge.scaffold'): BridgeCapabilityMatrix {
+export function buildScaffoldCapabilityMatrix(bridgeId = 'SoulForge.Bridge.test-helper'): BridgeCapabilityMatrix {
   const cells = SCAFFOLD_BRIDGE_COMMANDS.flatMap((command) => {
     const kinds = command.resourceKinds[0] === '*'
       ? (['event', 'map', 'param', 'msg', 'other'] as const)

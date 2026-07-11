@@ -9,7 +9,12 @@ static class EnvelopeInspection
         new("FMG", new byte[] { (byte)'F', (byte)'M', (byte)'G', 0 })
     };
 
-    public static InspectionResult Inspect(string sourcePath, byte[] sample, long length, int maxSampleBytes = 512 * 1024)
+    public static InspectionResult Inspect(
+        string sourcePath,
+        byte[] sample,
+        long length,
+        int maxSampleBytes = 512 * 1024,
+        string? oodleRuntimeRoot = null)
     {
         var extensionChain = BuildExtensionChain(sourcePath);
         var magicEvidence = new List<FormatEvidence>();
@@ -19,7 +24,7 @@ static class EnvelopeInspection
         var pathHints = EnvelopeHintScanner.Scan(sample);
         var binderChildCandidates = BinderChildCandidateScanner.Scan(sample);
         var nestedMagicCandidates = NestedFormatScanner.Scan(sample);
-        var dcxPayloadProbe = DcxPayloadProbe.Probe(sourcePath, sample, length);
+        var dcxPayloadProbe = DcxPayloadProbe.Probe(sourcePath, sample, length, oodleRuntimeRoot);
         var syntheticBinderInventory = SyntheticBinderFixtureExports.TryInspect(sourcePath, sample);
         var diagnostics = new List<Diagnostic>
         {

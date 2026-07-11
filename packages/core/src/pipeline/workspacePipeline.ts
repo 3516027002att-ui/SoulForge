@@ -19,6 +19,8 @@ export interface AnalyzeWorkspaceOptions {
   maxFilesToInspect?: number;
   bridgeProjectPath?: string;
   bridgeTimeoutMs?: number;
+  /** Main-owned Sekiro installation root used for local Oodle capability. */
+  oodleRuntimeRoot?: string;
   signal?: AbortSignal;
   onProgress?: (progress: AnalyzeWorkspaceProgress) => void;
 }
@@ -141,6 +143,10 @@ async function inspectNativeResource(
   const result = await runBridge({
     command: 'inspect',
     filePath: file.absolutePath,
+    resourceUri: file.sourceUri,
+    allowedRoots: [options.workspaceRoot],
+    ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
     ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
     ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
   });
@@ -173,6 +179,10 @@ async function parseKnownResource(
       const result = await runBridge({
         command,
         filePath: file.absolutePath,
+        resourceUri: file.sourceUri,
+        allowedRoots: [options.workspaceRoot],
+        ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
         ...(options.bridgeProjectPath ? { bridgeProjectPath: options.bridgeProjectPath } : {}),
         ...(options.bridgeTimeoutMs ? { timeoutMs: options.bridgeTimeoutMs } : {})
       });

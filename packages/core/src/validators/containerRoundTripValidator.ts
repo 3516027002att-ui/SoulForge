@@ -7,6 +7,7 @@ import { readFile } from 'node:fs/promises';
 import type {
   PatchIR,
   PatchIrOperation,
+  ContainerChildOp,
   StructuredDiagnostic,
   ValidatorContract,
   ValidatorResult
@@ -16,6 +17,7 @@ import { decompressDcx } from '../containers/dcx.js';
 import { readSyntheticBnd } from '../containers/bndSynthetic.js';
 import { decodeStrictBase64 } from '../util/base64.js';
 import { checkOriginalContentHash } from './textHash.js';
+import { runBridge } from '../bridge/runBridge.js';
 
 function sha256(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
@@ -45,6 +47,15 @@ export class ContainerRoundTripValidator implements ValidatorContract {
   }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
     for (const op of input.operations) {
+      if (isNativeBnd4(op)) {
+        const nativeOp = op as ContainerChildOp;
+        if (!nativeOp.expectedContainerHash && !nativeOp.expectedHash) diagnostics.push(nativeError(nativeOp, 'CONTAINER_HASH_REQUIRED', '原生 BND4 操作需要容器 expectedHash。'));
+        if (nativeOp.kind !== 'container_child_add' && !nativeOp.expectedChildHash) diagnostics.push(nativeError(nativeOp, 'CONTAINER_CHILD_HASH_REQUIRED', '原生 BND4 目标操作需要 expectedChildHash。'));
+        if ((nativeOp.kind === 'container_child_replace' || nativeOp.kind === 'container_child_add') && !nativeOp.childContentBase64) diagnostics.push(nativeError(nativeOp, 'CONTAINER_CHILD_PAYLOAD_REQUIRED', '原生 BND4 replace/add 需要子项内容。'));
+        const expected = nativeOp.expectedHash ?? nativeOp.expectedContainerHash;
+        if (nativeOp.targetPath && expected) diagnostics.push(...await checkOriginalContentHash({ ...nativeOp, expectedHash: expected }, 'before_staging'));
+        continue;
+      }
       if (op.kind !== 'container_child_replace') continue;
 
       if (!op.expectedContainerHash && !op.expectedHash) {
@@ -108,6 +119,13 @@ export class ContainerRoundTripValidator implements ValidatorContract {
   }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
     for (const op of input.operations) {
+      if (isNativeBnd4(op)) {
+        const nativeOp = op as ContainerChildOp;
+        const staged = findStagedPath(nativeOp, input.stagedPaths);
+        if (!staged) diagnostics.push(nativeError(nativeOp, 'CONTAINER_STAGED_PATH_MISSING', '找不到原生 BND4 暂存输出。'));
+        else diagnostics.push(...await validateNativeMutation(nativeOp, staged, nativeOp.targetPath));
+        continue;
+      }
       if (op.kind !== 'container_child_replace') continue;
       if (!op.targetPath) continue;
 
@@ -238,6 +256,11 @@ export class ContainerRoundTripValidator implements ValidatorContract {
   }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
     for (const op of input.operations) {
+      if (isNativeBnd4(op)) {
+        const nativeOp = op as ContainerChildOp;
+        if (nativeOp.targetPath) diagnostics.push(...await validateNativeMutation(nativeOp, nativeOp.targetPath));
+        continue;
+      }
       if (op.kind !== 'container_child_replace') continue;
       const path = op.targetPath;
       if (!path) continue;
@@ -283,6 +306,62 @@ export class ContainerRoundTripValidator implements ValidatorContract {
   }
 }
 
+interface NativeBndEnvelope {
+  nested?: { entryCount: number; entries: Array<{ id: number; name: string; contentHash: string }> };
+}
+
+function isNativeBnd4(op: PatchIrOperation): boolean {
+  return op.kind.startsWith('container_child_')
+    && 'containerFormat' in op
+    && op.containerFormat === 'BND4_DFLT'
+    && op.metadata?.nativeFormatAuthority === true;
+}
+
+function findStagedPath(op: ContainerChildOp, stagedPaths: string[]): string | undefined {
+  const baseName = op.targetPath?.split(/[/\\]/).pop() ?? '';
+  return stagedPaths.find((path) => path.includes(op.id.slice(0, 8)) || (baseName && path.endsWith(baseName)));
+}
+
+async function validateNativeMutation(op: ContainerChildOp, candidatePath: string, originalPath?: string): Promise<StructuredDiagnostic[]> {
+  const candidate = await runBridge<NativeBndEnvelope>({
+    command: 'read-dcx-document', filePath: candidatePath,
+    allowedRoots: [candidatePath.split(/[/\\]/).slice(0, -1).join('/') || '.'], timeoutMs: 120_000
+  });
+  if (candidate.parseStatus === 'failed' || !candidate.data?.nested) {
+    return [nativeError(op, 'BND4_NATIVE_REREAD_FAILED', '原生 BND4 输出无法由 Bridge 重读。')];
+  }
+  const entries = candidate.data.nested.entries;
+  const index = typeof op.metadata?.nativeEntryIndex === 'number' ? op.metadata.nativeEntryIndex : -1;
+  let ok = true;
+  if (op.kind === 'container_child_replace') {
+    const expected = sha256(decodeStrictBase64(op.childContentBase64 ?? '', { allowEmpty: false }));
+    ok = index >= 0 && entries[index]?.contentHash === expected;
+  } else if (op.kind === 'container_child_add') {
+    ok = entries.some((entry) => entry.id === op.metadata?.nativeEntryId && entry.name === (op.newChildPath ?? op.childPath));
+  } else if (op.kind === 'container_child_rename') {
+    ok = index >= 0 && entries[index]?.name === op.newChildPath;
+  } else if (op.kind === 'container_child_move') {
+    const toIndex = Number(op.metadata?.toIndex);
+    ok = Number.isInteger(toIndex) && entries[toIndex]?.id === op.metadata?.nativeEntryId;
+    if (op.metadata?.nativeEntryId === undefined && originalPath) {
+      const original = await runBridge<NativeBndEnvelope>({ command: 'read-dcx-document', filePath: originalPath, allowedRoots: [originalPath.split(/[/\\]/).slice(0, -1).join('/') || '.'], timeoutMs: 120_000 });
+      ok = Number.isInteger(toIndex) && original.data?.nested?.entries[index]?.id === entries[toIndex]?.id;
+    }
+  } else if (op.kind === 'container_child_delete') {
+    if (originalPath) {
+      const original = await runBridge<NativeBndEnvelope>({ command: 'read-dcx-document', filePath: originalPath, allowedRoots: [originalPath.split(/[/\\]/).slice(0, -1).join('/') || '.'], timeoutMs: 120_000 });
+      ok = candidate.data.nested.entryCount === (original.data?.nested?.entryCount ?? -1) - 1;
+    } else ok = op.metadata?.nativeEntryId !== undefined
+      ? entries.every((entry) => entry.id !== op.metadata?.nativeEntryId)
+      : entries.every((entry) => entry.contentHash !== op.expectedChildHash);
+  }
+  return ok ? [] : [nativeError(op, 'BND4_NATIVE_MUTATION_MISMATCH', `原生 BND4 ${op.kind} 重读结果与请求不一致。`)];
+}
+
+function nativeError(op: PatchIrOperation, code: string, message: string): StructuredDiagnostic {
+  return createDiagnostic({ severity: 'error', code, message, targetUri: op.targetUri });
+}
+
 async function listChildHashes(bytes: Buffer): Promise<{
   ok: boolean;
   children: Array<{ id: number; name: string; hash: string }>;
@@ -306,4 +385,3 @@ async function listChildHashes(bytes: Buffer): Promise<{
     diagnostics: read.diagnostics
   };
 }
-
