@@ -13,6 +13,7 @@ import {
 
 export interface ScanWorkspaceOptions {
   workspaceRoot: string;
+  game?: string;
   includeKinds?: readonly ResourceKind[];
   signal?: AbortSignal;
   onProgress?: (progress: ScanProgress) => void;
@@ -127,7 +128,7 @@ async function addIndexedFile(
     sourcePath: absolutePath,
     absolutePath,
     relativePath,
-    game: 'unknown',
+    game: options.game ?? 'unknown',
     resourceKind,
     extension: fileType.extension,
     compoundExtension: fileType.compoundExtension,

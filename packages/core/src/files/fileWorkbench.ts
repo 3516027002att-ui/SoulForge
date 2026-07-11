@@ -158,6 +158,7 @@ export async function rollbackFileOperation(input: {
   opId: string;
   store: OperationLogStore;
   session?: WorkspaceSession;
+  confirmation?: ConfirmationReceipt;
 }): Promise<{
   ok: boolean;
   opId: string;
@@ -167,7 +168,8 @@ export async function rollbackFileOperation(input: {
   return rollbackOperation({
     opId: input.opId,
     store: input.store,
-    ...(input.session ? { session: input.session } : {})
+    ...(input.session ? { session: input.session } : {}),
+    ...(input.confirmation ? { confirmation: input.confirmation } : {})
   });
 }
 
@@ -184,6 +186,7 @@ export async function commitProposedFileWrite(input: {
   workspaceRoot?: string;
   operationLog?: OperationLogStore;
   confirmation?: ConfirmationReceipt;
+  backupBaseDir?: string;
   recoveryDir?: string;
 }): Promise<TransactionCommitCompatResult> {
   if (input.proposal.diagnostics.some((d) => d.severity === 'error')) {
@@ -209,6 +212,7 @@ export async function commitProposedFileWrite(input: {
     ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
     ...(input.operationLog ? { operationLog: input.operationLog } : {}),
     ...(input.confirmation ? { confirmation: input.confirmation } : {}),
+    ...(input.backupBaseDir ? { backupBaseDir: input.backupBaseDir } : {}),
     ...(input.recoveryDir ? { recoveryDir: input.recoveryDir } : {})
   });
 }

@@ -8,6 +8,7 @@ static class DcxPayloadProbe
     private const int DcaSearchLimit = 0x100;
     private const int MaxCompressedReadBytes = 64 * 1024 * 1024;
     private const int MaxDecompressedPreviewBytes = 512 * 1024;
+    private const int MaxKrakenDecompressedBytes = 256 * 1024 * 1024;
 
     private static readonly MagicRule[] NestedMagicRules =
     {
@@ -20,7 +21,11 @@ static class DcxPayloadProbe
         new("MSB", new byte[] { (byte)'M', (byte)'S', (byte)'B', 0 })
     };
 
-    public static DcxPayloadProbeResult? Probe(string sourcePath, byte[] sample, long fileLength)
+    public static DcxPayloadProbeResult? Probe(
+        string sourcePath,
+        byte[] sample,
+        long fileLength,
+        string? oodleRuntimeRoot = null)
     {
         if (!StartsWith(sample, "DCX\0")) return null;
 
@@ -119,7 +124,17 @@ static class DcxPayloadProbe
             sourceUri,
             new { compressionFormat, dcxType, payloadOffset, compressedSize, uncompressedSize, fileLength, header }));
 
-        var decompression = TryBuildDecompressedPreview(sourcePath, compressionFormat, payloadOffset, compressedSize, payloadRangeValid, sourceUri, evidence, diagnostics);
+        var decompression = TryBuildDecompressedPreview(
+            sourcePath,
+            compressionFormat,
+            payloadOffset,
+            compressedSize,
+            uncompressedSize,
+            payloadRangeValid,
+            sourceUri,
+            oodleRuntimeRoot,
+            evidence,
+            diagnostics);
 
         return new DcxPayloadProbeResult(
             BoundaryStatus: boundaryStatus,
@@ -137,14 +152,29 @@ static class DcxPayloadProbe
         string compressionFormat,
         long payloadOffset,
         uint compressedSize,
+        uint uncompressedSize,
         bool payloadRangeValid,
         string sourceUri,
+        string? oodleRuntimeRoot,
         List<FormatEvidence> evidence,
         List<Diagnostic> diagnostics)
     {
         if (!payloadRangeValid)
         {
             return new { status = "not-attempted", reason = "invalid-payload-range" };
+        }
+
+        if (compressionFormat == "KRAK")
+        {
+            return TryBuildKrakenPreview(
+                sourcePath,
+                payloadOffset,
+                compressedSize,
+                uncompressedSize,
+                sourceUri,
+                oodleRuntimeRoot,
+                evidence,
+                diagnostics);
         }
 
         if (compressionFormat != "DFLT")
@@ -161,7 +191,7 @@ static class DcxPayloadProbe
             return new
             {
                 status = "unsupported",
-                reason = compressionFormat is "KRAK" ? "oodle-kraken-required" : "compression-format-not-implemented",
+                reason = "compression-format-not-implemented",
                 compressionFormat
             };
         }
@@ -247,6 +277,121 @@ static class DcxPayloadProbe
                 new { exception = ex.GetType().Name, ex.Message }));
 
             return new { status = "failed", reason = ex.Message, exception = ex.GetType().Name };
+        }
+    }
+
+    private static object TryBuildKrakenPreview(
+        string sourcePath,
+        long payloadOffset,
+        uint compressedSize,
+        uint uncompressedSize,
+        string sourceUri,
+        string? oodleRuntimeRoot,
+        List<FormatEvidence> evidence,
+        List<Diagnostic> diagnostics)
+    {
+        if (compressedSize > MaxCompressedReadBytes)
+        {
+            diagnostics.Add(new Diagnostic(
+                "warning",
+                "DCX_COMPRESSED_PAYLOAD_TOO_LARGE",
+                $"KRAK 压缩数据大小 {compressedSize} 超过安全读取上限 {MaxCompressedReadBytes}，已停止解压。",
+                sourceUri,
+                new { compressedSize, maxCompressedReadBytes = MaxCompressedReadBytes }));
+            return new { status = "blocked", reason = "compressed-payload-too-large", compressedSize };
+        }
+        if (uncompressedSize == 0 || uncompressedSize > MaxKrakenDecompressedBytes || uncompressedSize > int.MaxValue)
+        {
+            diagnostics.Add(new Diagnostic(
+                "warning",
+                "DCX_KRAK_UNCOMPRESSED_SIZE_UNSAFE",
+                "KRAK 解压后大小为 0 或超过当前安全内存上限，已停止解压。",
+                sourceUri,
+                new { uncompressedSize, maxKrakenDecompressedBytes = MaxKrakenDecompressedBytes }));
+            return new { status = "blocked", reason = "uncompressed-size-unsafe", uncompressedSize };
+        }
+
+        using var opened = OodleRuntimeLocator.Open(oodleRuntimeRoot, sourceUri);
+        diagnostics.AddRange(opened.Diagnostics);
+        if (opened.Session is null)
+        {
+            return new
+            {
+                status = "blocked",
+                reason = "oodle-runtime-unavailable",
+                compressionFormat = "KRAK",
+                runtime = opened.Info
+            };
+        }
+
+        try
+        {
+            var compressed = ReadRange(sourcePath, payloadOffset, checked((int)compressedSize));
+            if (compressed.Length != compressedSize)
+            {
+                throw new EndOfStreamException($"Expected {compressedSize} KRAK byte(s), read {compressed.Length}.");
+            }
+            var decompressed = opened.Session.Decompress(compressed, checked((int)uncompressedSize));
+            var previewBytes = decompressed.AsSpan(0, Math.Min(decompressed.Length, MaxDecompressedPreviewBytes)).ToArray();
+            var nestedRootFormat = DetectNestedRootFormat(previewBytes);
+            var status = decompressed.Length > previewBytes.Length ? "preview-truncated" : "preview-complete";
+            var result = new
+            {
+                status,
+                compressionFormat = "KRAK",
+                decompressedBytes = decompressed.Length,
+                previewBytes = previewBytes.Length,
+                maxPreviewBytes = MaxDecompressedPreviewBytes,
+                nestedRootFormat,
+                prefixHex = ToHex(previewBytes, 0, Math.Min(previewBytes.Length, 32)),
+                prefixAscii = ToAscii(previewBytes, 0, Math.Min(previewBytes.Length, 32)),
+                runtime = opened.Info
+            };
+            evidence.Add(new FormatEvidence(
+                "dcxDecompressedPreview",
+                0,
+                new
+                {
+                    result.status,
+                    result.compressionFormat,
+                    result.decompressedBytes,
+                    result.previewBytes,
+                    result.maxPreviewBytes,
+                    result.nestedRootFormat,
+                    result.prefixHex,
+                    result.prefixAscii,
+                    runtime = opened.Info,
+                    source = "oodle-kraken-runtime",
+                    authoritativeLayout = false
+                },
+                nestedRootFormat == "unknown" ? "medium" : "high"));
+            diagnostics.Add(new Diagnostic(
+                "info",
+                "DCX_KRAK_DECOMPRESSED_PREVIEW_READY",
+                nestedRootFormat == "unknown"
+                    ? $"已通过用户 Sekiro 安装目录中的 Oodle 解压 {decompressed.Length} 个 KRAK 字节，内部格式尚未识别。"
+                    : $"已通过用户 Sekiro 安装目录中的 Oodle 解压 {decompressed.Length} 个 KRAK 字节，内部格式看起来是 {nestedRootFormat}。",
+                sourceUri,
+                result));
+            AddNestedPreviewEvidence(sourcePath, previewBytes, nestedRootFormat, sourceUri, evidence, diagnostics);
+            return result;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or NotSupportedException or OverflowException)
+        {
+            diagnostics.Add(new Diagnostic(
+                "warning",
+                "DCX_KRAK_DECOMPRESSION_PREVIEW_FAILED",
+                "Oodle 运行库已加载，但 KRAK 解压失败；文件未被修改。",
+                sourceUri,
+                new { exception = ex.GetType().Name, ex.Message, runtime = opened.Info }));
+            return new
+            {
+                status = "failed",
+                reason = ex.Message,
+                exception = ex.GetType().Name,
+                compressionFormat = "KRAK",
+                runtime = opened.Info
+            };
         }
     }
 

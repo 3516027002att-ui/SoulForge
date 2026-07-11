@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import type { ResourceFormatKind, ResourceKind } from '@soulforge/shared';
+import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { openResourcePreview } from '../preview/openResourcePreview.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
@@ -92,7 +93,7 @@ function sortedKindCounts(counts: Record<ResourceKind, number>): Record<Resource
   return Object.fromEntries(ALL_RESOURCE_KINDS.map((kind) => [kind, counts[kind] ?? 0])) as Record<ResourceKind, number>;
 }
 
-main().catch((error) => {
+main().finally(() => disposeBridgeDaemonPool()).catch((error) => {
   console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   process.exitCode = 1;
 });

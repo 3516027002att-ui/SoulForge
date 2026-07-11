@@ -17,7 +17,11 @@ export type WriterOperationKind =
   | 'synthetic_resource_edit'
   | 'structured_edit'
   | 'container_child_edit'
-  | 'container_child_replace';
+  | 'container_child_replace'
+  | 'container_child_add'
+  | 'container_child_delete'
+  | 'container_child_rename'
+  | 'container_child_move';
 
 export interface WriterRollbackMetadata {
   writerId: string;

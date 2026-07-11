@@ -337,11 +337,11 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'List Patch Engine operation log / patch history entries for the active workspace.',
     permission: 'analyze',
     permissionLevel: 'analyze',
-    run: (_input, context) => {
+    run: async (_input, context) => {
       const store = getDefaultOperationLogStore();
       return ok({
-        operations: store.list(context.workspaceIndex.workspaceId),
-        history: store.history(context.workspaceIndex.workspaceId)
+        operations: await store.list(context.workspaceIndex.workspaceId),
+        history: await store.history(context.workspaceIndex.workspaceId)
       });
     }
   });

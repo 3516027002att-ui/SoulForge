@@ -22,6 +22,8 @@ export interface SaveTextResourceOptions {
   allowEmpty?: boolean;
   session?: WorkspaceSession;
   operationLog?: OperationLogStore;
+  backupBaseDir?: string;
+  recoveryDir?: string;
   /** Required when writer contract / risk assessment demands confirmation. */
   confirmation?: ConfirmationReceipt;
   /** Preview-derived risk signals from desktop / tools. */
@@ -133,7 +135,9 @@ export async function saveTextResource(options: SaveTextResourceOptions): Promis
     const committed = await commitPatchProposal(proposal, {
       ...(options.session ? { session: options.session } : {}),
       operationLog: options.operationLog ?? getDefaultOperationLogStore(),
-      workspaceRoot
+      workspaceRoot,
+      ...(options.backupBaseDir ? { backupRoot: options.backupBaseDir } : {}),
+      ...(options.recoveryDir ? { recoveryDir: options.recoveryDir } : {})
     });
 
     const postGate = evaluateDiagnosticsGate(committed.diagnostics);

@@ -1,21 +1,26 @@
-import { useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type {
-  BridgeResult,
   ContainerReadHint,
   ContainerReadSummary,
   Diagnostic,
-  IndexedFile,
   MapExport,
   ParamExport,
-  PatchHistoryEntry,
   ResourceKind,
-  ResourcePreview,
   ResourceStructuredPreview,
-  TextEntrySymbol,
-  WorkspaceScanResult,
-  WorkspaceSessionMeta
+  TextEntrySymbol
 } from '@soulforge/shared';
-import type { AnalyzeWorkspaceSummary } from '../../main/ipc.js';
+import type {
+  AnalyzeWorkspaceSummary,
+  DirectorySelection,
+  RendererWorkspaceScanResult,
+  RendererWorkspaceSession
+} from '../../main/ipc.js';
+import type {
+  RendererBridgeResult,
+  RendererIndexedFile,
+  RendererPatchHistoryEntry,
+  RendererResourcePreview
+} from '../../main/rendererDto.js';
 import type {
   AiPermissionMode,
   AiProvider,
@@ -25,26 +30,116 @@ import type {
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
+import { HexEditorPanel } from './editors/HexEditorPanel.js';
+import { MsbScenePanel } from './editors/MsbScenePanel.js';
+import { ModelServiceSettingsPanel } from './editors/ModelServiceSettingsPanel.js';
+import { EmevdFourViewPanel } from './editors/EmevdFourViewPanel.js';
+import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
+import { ParamTablePanel } from './editors/ParamTablePanel.js';
+import { WorkbenchOpsPanel } from './editors/WorkbenchOpsPanel.js';
+import { ParamDefPanel } from './editors/ParamDefPanel.js';
+import type { EmevdEditorDocument } from '@soulforge/shared';
+import {
+  mapEmevdEnvelopeToDocument,
+  type BridgeEmevdEnvelopeLike
+} from './emevd/mapEmevdEnvelope.js';
 
 const RESOURCE_KIND_ORDER: ResourceKind[] = ['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx', 'chr', 'obj', 'other', 'unknown'];
 
-type WorkspaceMode = ResourceKind | 'files' | 'ai' | 'settings';
+type WorkspaceMode = ResourceKind | 'files' | 'ai' | 'settings' | 'ops';
 
 const WORKSPACE_MODES: Array<{ id: WorkspaceMode; label: string }> = [
-  { id: 'files', label: 'Files' },
-  { id: 'event', label: 'Event' },
-  { id: 'map', label: 'Map' },
-  { id: 'param', label: 'Param' },
-  { id: 'msg', label: 'Msg' },
-  { id: 'menu', label: 'Menu' },
-  { id: 'script', label: 'Script' },
-  { id: 'action', label: 'Action' },
-  { id: 'chr', label: 'Chr' },
-  { id: 'obj', label: 'Obj' },
-  { id: 'sfx', label: 'Sfx' },
-  { id: 'other', label: 'Other' },
+  { id: 'files', label: '文件' },
+  { id: 'event', label: 'EMEVD 事件' },
+  { id: 'map', label: 'MSB 地图' },
+  { id: 'param', label: 'PARAM 参数' },
+  { id: 'msg', label: 'FMG 文本' },
+  { id: 'menu', label: '菜单' },
+  { id: 'script', label: '脚本' },
+  { id: 'action', label: '动作' },
+  { id: 'chr', label: '角色资源' },
+  { id: 'obj', label: '物件资源' },
+  { id: 'sfx', label: 'SFX 特效' },
+  { id: 'other', label: '其他' },
+  { id: 'ops', label: '任务与历史' },
   { id: 'ai', label: 'AI' },
-  { id: 'settings', label: 'Settings' }
+  { id: 'settings', label: '设置' }
+];
+
+/** Demo parts for map-mode proxy scene until Bridge MSB IPC is wired to the renderer. */
+const DEMO_MSB_PARTS = [
+  { name: 'm000010_1077', posX: -18.2, posY: -22.0, posZ: 34.0, rotX: -18, scaleX: 1.2, scaleY: 1.2, scaleZ: 1.2 },
+  { name: 'm000010_1143', posX: -44.5, posY: 45.0, posZ: -61.1, rotX: -48, scaleX: 1, scaleY: 1, scaleZ: 1 },
+  { name: 'm000010_1144', posX: -43.6, posY: 9.3, posZ: -38.3, rotX: -55, scaleX: 1, scaleY: 1, scaleZ: 1 },
+  { name: 'gate_proxy_a', posX: 12, posY: 0, posZ: 8, rotX: 0, scaleX: 2, scaleY: 4, scaleZ: 1 },
+  { name: 'gate_proxy_b', posX: -8, posY: 0, posZ: -14, rotX: 90, scaleX: 1.5, scaleY: 1.5, scaleZ: 1.5 }
+];
+
+function hexTextToBase64(hexText: string): string {
+  const cleaned = hexText.replace(/[^0-9a-fA-F]/g, '');
+  if (cleaned.length < 2) return btoa('');
+  const bytes = new Uint8Array(Math.floor(cleaned.length / 2));
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = Number.parseInt(cleaned.slice(i * 2, i * 2 + 2), 16);
+  }
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]!);
+  return btoa(binary);
+}
+
+const DEMO_EMEVD_DOCUMENT: EmevdEditorDocument = {
+  schemaVersion: 1,
+  resourceUri: 'file://event/common.emevd',
+  revision: 0,
+  bytesBase64: btoa('EVD\0demo-bytes-for-readonly-view'),
+  events: [
+    {
+      eventUri: 'file://event/common.emevd#event/50',
+      eventId: 50,
+      restBehavior: 0,
+      layer: -1,
+      instructions: [
+        {
+          instructionUri: 'file://event/common.emevd#event/50/instr/0',
+          bank: 1,
+          id: 10,
+          argsBase64: '',
+          unknown: true
+        },
+        {
+          instructionUri: 'file://event/common.emevd#event/50/instr/1',
+          bank: 1,
+          id: 20,
+          argsBase64: '',
+          unknown: true
+        }
+      ]
+    },
+    {
+      eventUri: 'file://event/common.emevd#event/100',
+      eventId: 100,
+      restBehavior: 1,
+      layer: -1,
+      instructions: []
+    }
+  ],
+  diagnostics: [{
+    severity: 'info',
+    code: 'EMEVD_UNKNOWN_INSTRUCTIONS_PRESERVED',
+    message: '未知 instruction 已保留；无 schema 时不可结构化改 args。'
+  }]
+};
+
+const DEMO_FMG_ENTRIES = [
+  { id: 5200, text: '旋风斩' },
+  { id: 5201, text: '寄鹰斩' },
+  { id: 5300, text: '义手忍具' }
+];
+
+const DEMO_PARAM_ROWS = [
+  { id: 0, name: 'row_0', dataHexPreview: 'ffffffff00000000' },
+  { id: 1, name: 'row_1', dataHexPreview: '0100000002000000' },
+  { id: 2, dataHexPreview: '0000000000000000' }
 ];
 
 interface EditableMsgRow {
@@ -54,14 +149,14 @@ interface EditableMsgRow {
 }
 
 export function App(): ReactElement {
-  const [workspace, setWorkspace] = useState<WorkspaceScanResult | null>(null);
-  const [sessionMeta, setSessionMeta] = useState<WorkspaceSessionMeta | null>(null);
-  const [baseRootChoice, setBaseRootChoice] = useState<string | null>(null);
-  const [operationHistory, setOperationHistory] = useState<PatchHistoryEntry[]>([]);
+  const [workspace, setWorkspace] = useState<RendererWorkspaceScanResult | null>(null);
+  const [sessionMeta, setSessionMeta] = useState<RendererWorkspaceSession | null>(null);
+  const [baseRootChoice, setBaseRootChoice] = useState<DirectorySelection | null>(null);
+  const [operationHistory, setOperationHistory] = useState<RendererPatchHistoryEntry[]>([]);
   const [analysis, setAnalysis] = useState<AnalyzeWorkspaceSummary | null>(null);
   const [tools, setTools] = useState<ToolDescriptor[]>([]);
-  const [selectedFile, setSelectedFile] = useState<IndexedFile | null>(null);
-  const [preview, setPreview] = useState<ResourcePreview | null>(null);
+  const [selectedFile, setSelectedFile] = useState<RendererIndexedFile | null>(null);
+  const [preview, setPreview] = useState<RendererResourcePreview | null>(null);
   const [editText, setEditText] = useState('');
   const [lastSavedText, setLastSavedText] = useState('');
   const [msgRows, setMsgRows] = useState<EditableMsgRow[]>([]);
@@ -70,14 +165,35 @@ export function App(): ReactElement {
   const [toolQuery, setToolQuery] = useState('');
   const [eventUri, setEventUri] = useState('');
   const [toolOutput, setToolOutput] = useState<ToolResult | null>(null);
-  const [files, setFiles] = useState<IndexedFile[]>([]);
-  const [allFiles, setAllFiles] = useState<IndexedFile[]>([]);
+  const [files, setFiles] = useState<RendererIndexedFile[]>([]);
+  const [allFiles, setAllFiles] = useState<RendererIndexedFile[]>([]);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('files');
   const [status, setStatus] = useState('就绪');
+  const [emevdDocument, setEmevdDocument] = useState<EmevdEditorDocument>(DEMO_EMEVD_DOCUMENT);
+  const [emevdSourceHash, setEmevdSourceHash] = useState<string | null>(null);
+  const [emevdLive, setEmevdLive] = useState(false);
+  const [fmgEntries, setFmgEntries] = useState(DEMO_FMG_ENTRIES);
+  const [fmgSourceHash, setFmgSourceHash] = useState<string | null>(null);
+  const [fmgLive, setFmgLive] = useState(false);
+  const [msbParts, setMsbParts] = useState(DEMO_MSB_PARTS);
+  const [msbRegions, setMsbRegions] = useState<Array<{
+    name: string;
+    typeId: number;
+    posX: number;
+    posY: number;
+    posZ: number;
+  }>>([]);
+  const [msbLive, setMsbLive] = useState(false);
+  const [msbSourceHash, setMsbSourceHash] = useState<string | null>(null);
+  const [paramTypeName, setParamTypeName] = useState('ACTION_GUIDE_PARAM_ST');
+  const [paramRows, setParamRows] = useState(DEMO_PARAM_ROWS);
+  const [paramSourceHash, setParamSourceHash] = useState<string | null>(null);
+  const [paramLive, setParamLive] = useState(false);
+  const [paramRowPayloads, setParamRowPayloads] = useState<Map<number, string>>(new Map());
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
   const [aiThinking, setAiThinking] = useState<AiThinkingLevel>('normal');
-  const [aiMode, setAiMode] = useState<AiPermissionMode>('plan');
+  const [aiMode] = useState<AiPermissionMode>('plan');
   const [aiPrompt, setAiPrompt] = useState('解释当前资源的证据链，并给出下一步安全修改计划。');
   const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);
 
@@ -92,31 +208,373 @@ export function App(): ReactElement {
     [allFiles, files, workspaceMode, query]
   );
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadParam(): Promise<void> {
+      if (workspaceMode !== 'param') return;
+      const target = selectedFile
+        ?? visibleFiles.find((file) => file.resourceKind === 'param')
+        ?? null;
+      if (!target || typeof window.soulforge.readParamDocument !== 'function') {
+        setParamRows(DEMO_PARAM_ROWS);
+        setParamTypeName('ACTION_GUIDE_PARAM_ST');
+        setParamSourceHash(null);
+        setParamLive(false);
+        setParamRowPayloads(new Map());
+        return;
+      }
+      setStatus(`正在读取 PARAM：${target.relativePath}`);
+      try {
+        const result = await window.soulforge.readParamDocument(target.sourceUri) as {
+          ok?: boolean;
+          data?: {
+            sourceHash?: string;
+            typeName?: string;
+            rows?: Array<{
+              id: number;
+              dataBase64?: string;
+              dataHexPreview?: string;
+              name?: string;
+            }>;
+            rowCount?: number;
+            authority?: string;
+          } | null;
+        };
+        if (cancelled) return;
+        if (!result?.ok || !result.data?.rows?.length) {
+          setParamRows(DEMO_PARAM_ROWS);
+          setParamLive(false);
+          setParamSourceHash(null);
+          setParamRowPayloads(new Map());
+          setStatus('PARAM 实时读取失败，已回退演示行。');
+          return;
+        }
+        const payloads = new Map<number, string>();
+        setParamRows(result.data.rows.map((r) => {
+          if (r.dataBase64) payloads.set(r.id, r.dataBase64);
+          return {
+            id: r.id,
+            dataHexPreview: r.dataHexPreview ?? '',
+            ...(r.name ? { name: r.name } : {})
+          };
+        }));
+        setParamRowPayloads(payloads);
+        setParamTypeName(result.data.typeName ?? target.relativePath);
+        setParamSourceHash(result.data.sourceHash ?? null);
+        setParamLive(true);
+        setStatus(
+          `已加载 PARAM：${result.data.rowCount ?? result.data.rows.length} 行`
+          + (result.data.authority ? ` · ${result.data.authority}` : '')
+        );
+      } catch (error) {
+        if (cancelled) return;
+        setParamLive(false);
+        setStatus(error instanceof Error ? error.message : 'PARAM 读取异常');
+      }
+    }
+    void loadParam();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceMode, selectedFile, visibleFiles]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadFmg(): Promise<void> {
+      if (workspaceMode !== 'msg') return;
+      const target = selectedFile
+        ?? visibleFiles.find((file) => file.resourceKind === 'msg')
+        ?? null;
+      if (!target || typeof window.soulforge.readFmgDocument !== 'function') {
+        setFmgEntries(DEMO_FMG_ENTRIES);
+        setFmgSourceHash(null);
+        setFmgLive(false);
+        return;
+      }
+      setStatus(`正在读取 FMG：${target.relativePath}`);
+      try {
+        const result = await window.soulforge.readFmgDocument(target.sourceUri) as {
+          ok?: boolean;
+          data?: {
+            sourceHash?: string;
+            entries?: Array<{ id: number; text: string }>;
+            entryCount?: number;
+            authority?: string;
+          } | null;
+        };
+        if (cancelled) return;
+        if (!result?.ok || !result.data?.entries?.length) {
+          setFmgEntries(DEMO_FMG_ENTRIES);
+          setFmgSourceHash(null);
+          setFmgLive(false);
+          setStatus('FMG 实时读取失败，已回退演示条目。');
+          return;
+        }
+        setFmgEntries(result.data.entries.map((e) => ({ id: e.id, text: e.text })));
+        setFmgSourceHash(result.data.sourceHash ?? null);
+        setFmgLive(true);
+        setStatus(
+          `已加载 FMG：${result.data.entryCount ?? result.data.entries.length} 条`
+          + (result.data.authority ? ` · authority=${result.data.authority}` : '')
+        );
+      } catch (error) {
+        if (cancelled) return;
+        setFmgLive(false);
+        setStatus(error instanceof Error ? error.message : 'FMG 读取异常');
+      }
+    }
+    void loadFmg();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceMode, selectedFile, visibleFiles]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadMsb(): Promise<void> {
+      if (workspaceMode !== 'map') return;
+      const target = selectedFile
+        ?? visibleFiles.find((file) => file.resourceKind === 'map')
+        ?? null;
+      if (!target || typeof window.soulforge.readMsbDocument !== 'function') {
+        setMsbParts(DEMO_MSB_PARTS);
+        setMsbRegions([]);
+        setMsbLive(false);
+        return;
+      }
+      setStatus(`正在读取 MSB：${target.relativePath}`);
+      try {
+        const result = await window.soulforge.readMsbDocument(target.sourceUri) as {
+          ok?: boolean;
+          data?: {
+            sourceHash?: string;
+            parts?: Array<{
+              name: string;
+              posX: number;
+              posY: number;
+              posZ: number;
+              rotX?: number;
+              scaleX?: number;
+              scaleY?: number;
+              scaleZ?: number;
+            }>;
+            regions?: Array<{
+              name: string;
+              typeId: number;
+              posX: number;
+              posY: number;
+              posZ: number;
+            }>;
+            partCount?: number;
+            regionCount?: number;
+            authority?: string;
+          } | null;
+        };
+        if (cancelled) return;
+        if (!result?.ok || !result.data?.parts?.length) {
+          setMsbParts(DEMO_MSB_PARTS);
+          setMsbRegions([]);
+          setMsbLive(false);
+          setStatus('MSB 实时读取失败，已回退演示 parts。');
+          return;
+        }
+        setMsbParts(result.data.parts.map((p) => ({
+          name: p.name,
+          posX: p.posX,
+          posY: p.posY,
+          posZ: p.posZ,
+          rotX: p.rotX ?? 0,
+          scaleX: p.scaleX ?? 1,
+          scaleY: p.scaleY ?? 1,
+          scaleZ: p.scaleZ ?? 1
+        })));
+        setMsbRegions((result.data.regions ?? []).map((r) => ({
+          name: r.name,
+          typeId: r.typeId,
+          posX: r.posX,
+          posY: r.posY,
+          posZ: r.posZ
+        })));
+        setMsbSourceHash(result.data.sourceHash ?? null);
+        setMsbLive(true);
+        setStatus(
+          `已加载 MSB：${result.data.partCount ?? result.data.parts.length} parts`
+          + (result.data.regionCount !== undefined ? ` / ${result.data.regionCount} regions` : '')
+          + (result.data.authority ? ` · ${result.data.authority}` : '')
+        );
+      } catch (error) {
+        if (cancelled) return;
+        setMsbLive(false);
+        setStatus(error instanceof Error ? error.message : 'MSB 读取异常');
+      }
+    }
+    void loadMsb();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceMode, selectedFile, visibleFiles]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadEmevd(): Promise<void> {
+      if (workspaceMode !== 'event') return;
+      const target = selectedFile
+        ?? visibleFiles.find((file) => file.resourceKind === 'event')
+        ?? null;
+      if (!target || typeof window.soulforge.readEmevdDocument !== 'function') {
+        setEmevdDocument(DEMO_EMEVD_DOCUMENT);
+        setEmevdSourceHash(null);
+        setEmevdLive(false);
+        return;
+      }
+      setStatus(`正在读取 EMEVD：${target.relativePath}`);
+      try {
+        const result = await window.soulforge.readEmevdDocument(target.sourceUri) as {
+          ok?: boolean;
+          data?: BridgeEmevdEnvelopeLike | null;
+          diagnostics?: Array<{ message?: string }>;
+        };
+        if (cancelled) return;
+        if (!result?.ok || !result.data) {
+          setEmevdDocument({
+            ...DEMO_EMEVD_DOCUMENT,
+            resourceUri: target.sourceUri,
+            diagnostics: [{
+              severity: 'warning',
+              code: 'EMEVD_LIVE_READ_FAILED',
+              message: result?.diagnostics?.[0]?.message
+                ?? '未能从 Bridge 读取 EMEVD；显示演示文档。'
+            }]
+          });
+          setEmevdSourceHash(null);
+          setEmevdLive(false);
+          setStatus('EMEVD 实时读取失败，已回退演示文档。');
+          return;
+        }
+        const doc = mapEmevdEnvelopeToDocument(target.sourceUri, result.data, { maxEvents: 128 });
+        setEmevdDocument(doc);
+        setEmevdSourceHash(result.data.sourceHash ?? null);
+        setEmevdLive(true);
+        setStatus(
+          `已加载 EMEVD：${result.data.eventCount ?? doc.events.length} 事件 / `
+          + `${result.data.instructionCount ?? 0} 指令（authority=${result.data.authority ?? 'unknown'}）`
+        );
+      } catch (error) {
+        if (cancelled) return;
+        setEmevdLive(false);
+        setEmevdSourceHash(null);
+        setStatus(error instanceof Error ? error.message : 'EMEVD 读取异常');
+      }
+    }
+    void loadEmevd();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceMode, selectedFile, visibleFiles]);
+
   async function refreshOperationHistory(): Promise<void> {
     const history = await window.soulforge.listOperations();
     setOperationHistory(history);
   }
 
+  async function commitMsbPosition(
+    input: { partName: string; posX: number; posY: number; posZ: number },
+    kind: 'set_part_position' | 'set_region_position'
+  ): Promise<void> {
+    if (!msbLive || !msbSourceHash || !selectedFile) {
+      setStatus('MSB 位置提交仅在实时模式可用。');
+      return;
+    }
+    if (typeof window.soulforge.applyMsbMutation !== 'function') {
+      setStatus('当前预加载未暴露 applyMsbMutation。');
+      return;
+    }
+    const label = kind === 'set_region_position' ? 'region' : 'part';
+    setStatus(`正在提交 MSB ${label} 位置：${input.partName}`);
+    const result = await window.soulforge.applyMsbMutation(
+      selectedFile.sourceUri,
+      msbSourceHash,
+      {
+        kind,
+        partName: input.partName,
+        posX: input.posX,
+        posY: input.posY,
+        posZ: input.posZ
+      }
+    );
+    if (!result.ok) {
+      setStatus(result.diagnostics?.[0]?.message ?? `MSB ${label} 位置提交失败`);
+      return;
+    }
+    const reload = await window.soulforge.readMsbDocument(selectedFile.sourceUri) as {
+      ok?: boolean;
+      data?: {
+        sourceHash?: string;
+        parts?: Array<{
+          name: string;
+          posX: number;
+          posY: number;
+          posZ: number;
+          rotX?: number;
+          scaleX?: number;
+          scaleY?: number;
+          scaleZ?: number;
+        }>;
+        regions?: Array<{
+          name: string;
+          typeId: number;
+          posX: number;
+          posY: number;
+          posZ: number;
+        }>;
+      } | null;
+    };
+    if (reload?.ok && reload.data?.parts?.length) {
+      setMsbParts(reload.data.parts.map((p) => ({
+        name: p.name,
+        posX: p.posX,
+        posY: p.posY,
+        posZ: p.posZ,
+        rotX: p.rotX ?? 0,
+        scaleX: p.scaleX ?? 1,
+        scaleY: p.scaleY ?? 1,
+        scaleZ: p.scaleZ ?? 1
+      })));
+      setMsbRegions((reload.data.regions ?? []).map((r) => ({
+        name: r.name,
+        typeId: r.typeId,
+        posX: r.posX,
+        posY: r.posY,
+        posZ: r.posZ
+      })));
+      setMsbSourceHash(reload.data.sourceHash ?? null);
+      setStatus(`MSB ${label} ${input.partName} 位置已提交并重读。`);
+    } else {
+      setStatus('MSB 已提交，但重读失败。');
+    }
+    await refreshOperationHistory();
+  }
+
   async function chooseBaseDirectory(): Promise<void> {
-    const baseRoot = await window.soulforge.openBaseDialog();
-    if (!baseRoot) return;
-    setBaseRootChoice(baseRoot);
-    setStatus(`已选择只读 Base：${baseRoot}（下次打开 Mod 工作区时生效）`);
+    const selection = await window.soulforge.openBaseDialog();
+    if (!selection) return;
+    setBaseRootChoice(selection);
+    setStatus(`已选择只读原版游戏目录：${selection.label}（下次打开 Mod 工作区时生效）`);
   }
 
   function clearBaseDirectory(): void {
     setBaseRootChoice(null);
-    setStatus('已清除 Base 目录选择');
+    setStatus('已清除原版游戏目录选择');
   }
 
   async function openWorkspace(): Promise<void> {
-    const workspaceRoot = await window.soulforge.openWorkspaceDialog();
-    if (!workspaceRoot) return;
+    const workspaceSelection = await window.soulforge.openWorkspaceDialog();
+    if (!workspaceSelection) return;
 
     setStatus('正在扫描工作区...');
     const result = await window.soulforge.scanWorkspace({
-      workspaceRoot,
-      ...(baseRootChoice ? { baseRoot: baseRootChoice } : {})
+      overlaySelectionId: workspaceSelection.selectionId,
+      ...(baseRootChoice ? { baseSelectionId: baseRootChoice.selectionId } : {})
     });
     setWorkspace(result);
     setSessionMeta(result.session ?? null);
@@ -135,14 +593,15 @@ export function App(): ReactElement {
     setOperationHistory([]);
 
     setStatus('正在构建轻量证据索引...');
-    const nextAnalysis = await window.soulforge.analyzeWorkspace(workspaceRoot);
+    const nextAnalysis = await window.soulforge.analyzeWorkspace();
     setAnalysis(nextAnalysis);
     setTools(nextAnalysis.tools);
     setEventUri(nextAnalysis.events[0]?.uri ?? '');
     await refreshOperationHistory();
-    const baseLabel = result.session?.layers.baseRoot
-      ? ` · base 只读已挂载`
-      : ' · 未挂载 base';
+    const baseLabel = result.session.baseMounted
+      ? ' · 已挂载只读原版游戏目录'
+      : ' · 未挂载原版游戏目录';
+    setBaseRootChoice(null);
     setStatus(`已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis.parsedFiles} 个文本/mock 资源${baseLabel}`);
   }
 
@@ -160,16 +619,16 @@ export function App(): ReactElement {
       return;
     }
     if (mode === 'settings') {
-      setStatus('设置：Provider / 思考强度 / 权限模式见右侧 AI 面板');
+    setStatus('设置：模型服务、思考强度和权限模式见右侧 AI 面板');
       return;
     }
     const filtered = filterFilesForMode(allFiles, mode, query);
     setStatus(mode === 'files'
-      ? `Files mode：${filtered.length} 个文件`
-      : `${mode} mode：${filtered.length} 个资源`);
+      ? `文件模式：${filtered.length} 个文件`
+      : `${workspaceModeLabel(mode)}：${filtered.length} 个资源`);
   }
 
-  async function selectFile(file: IndexedFile): Promise<void> {
+  async function selectFile(file: RendererIndexedFile): Promise<void> {
     setSelectedFile(file);
     setPreview(null);
     setEditText('');
@@ -205,7 +664,7 @@ export function App(): ReactElement {
     setLastSavedText(text);
     setMsgRows(extractMsgRows(refreshed));
     await refreshOperationHistory();
-    setStatus(`已保存 ${selectedFile.relativePath}，备份目录：${result.backupRoot ?? 'unknown'}`);
+    setStatus(`已保存 ${selectedFile.relativePath}，已建立可回滚备份`);
   }
 
   async function rollbackOp(opId: string): Promise<void> {
@@ -254,7 +713,7 @@ export function App(): ReactElement {
       },
       userPrompt: aiPrompt,
       context: {
-        ...(workspace?.workspaceRoot ? { workspaceRoot: workspace.workspaceRoot } : {}),
+        ...(workspace?.workspaceSessionId ? { workspaceSessionId: workspace.workspaceSessionId } : {}),
         ...(selectedFile
           ? {
               selectedResource: {
@@ -275,16 +734,16 @@ export function App(): ReactElement {
     setStatus('正在生成 AI 计划草稿...');
     const draft = await window.soulforge.buildAiSidebarDraft(request);
     setAiDraft(draft);
-    setStatus(draft.status === 'ready' ? 'AI 计划草稿已生成' : 'AI Provider 尚未配置，已生成本地计划草稿');
+    setStatus(draft.status === 'ready' ? 'AI 计划草稿已生成' : 'AI 模型服务尚未配置，已生成本地计划草稿');
   }
 
   async function runToolSearch(): Promise<void> {
-    const result = await window.soulforge.runAiTool('search_resources', { query: toolQuery, limit: 8 }, aiMode);
+    const result = await window.soulforge.runAiTool('search_resources', { query: toolQuery, limit: 8 });
     setToolOutput(result);
   }
 
   async function explainEvent(): Promise<void> {
-    const result = await window.soulforge.runAiTool('explain_event', { uri: eventUri }, aiMode);
+    const result = await window.soulforge.runAiTool('explain_event', { uri: eventUri });
     setToolOutput(result);
   }
 
@@ -293,20 +752,20 @@ export function App(): ReactElement {
       <header className="top-bar">
         <section>
           <h1>SoulForge</h1>
-          <p>魂游 Mod 的 Cursor · v0.5 foundation | Overlay 可写 · Base 只读 · Patch Engine 唯一写入</p>
+          <p>魂游 Mod 专业工作台 · V0.5 安全底座 | Mod 覆盖层可写 · 原版游戏目录只读 · 补丁引擎唯一写入</p>
         </section>
         <div className="top-bar-actions">
           <button type="button" className="secondary-action" onClick={() => void chooseBaseDirectory()}>
-            {baseRootChoice ? '更换 Base 目录' : '选择 Base（可选）'}
+            {baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录（可选）'}
           </button>
           {baseRootChoice && (
-            <button type="button" className="ghost-action" onClick={clearBaseDirectory}>清除 Base</button>
+            <button type="button" className="ghost-action" onClick={clearBaseDirectory}>清除原版游戏目录</button>
           )}
           <button type="button" onClick={() => void openWorkspace()}>打开 Mod 工作区</button>
         </div>
       </header>
 
-      <nav className="mode-tabs" aria-label="editor modes">
+      <nav className="mode-tabs" aria-label="编辑器模式">
         {WORKSPACE_MODES.map((mode) => (
           <button
             key={mode.id}
@@ -323,17 +782,17 @@ export function App(): ReactElement {
       <section className="workspace-summary">
         <div className="workspace-summary-lines">
           <div>
-            <strong>Workspace (overlay):</strong> {workspace?.workspaceRoot ?? '未打开'}
-            <span className="mode-badge">{workspaceMode === 'files' ? 'Files mode' : `${workspaceMode} mode`}</span>
+            <strong>工作区（Mod 覆盖层）：</strong> {workspace?.workspaceLabel ?? '未打开'}
+            <span className="mode-badge">{workspaceModeLabel(workspaceMode)}</span>
           </div>
           <div>
-            <strong>Base (readonly):</strong>{' '}
-            {sessionMeta?.layers.baseRoot
-              ?? baseRootChoice
-              ?? (sessionMeta ? '未挂载' : '打开工作区前可先选')}
+            <strong>原版游戏目录（只读）：</strong>{' '}
+            {sessionMeta?.baseLabel
+              ?? baseRootChoice?.label
+              ?? (sessionMeta ? '未挂载' : '打开工作区前可先选择')}
             {sessionMeta && (
-              <span className={sessionMeta.baseMissing ? 'base-pill missing' : 'base-pill ready'}>
-                {sessionMeta.baseMissing ? 'base missing' : 'base mounted'}
+              <span className={!sessionMeta.baseMounted ? 'base-pill missing' : 'base-pill ready'}>
+                {sessionMeta.baseMounted ? '已挂载' : '未挂载'}
               </span>
             )}
           </div>
@@ -377,7 +836,7 @@ export function App(): ReactElement {
               </button>
             ))}
             {visibleFiles.length === 0 && (
-              <p className="muted pane-empty">当前模式没有匹配资源。可切换到 Files 或调整搜索。</p>
+              <p className="muted pane-empty">当前模式没有匹配资源。可切换到文件模式或调整搜索。</p>
             )}
           </div>
         </aside>
@@ -390,7 +849,7 @@ export function App(): ReactElement {
           {preview?.previewKind === 'text' && (
             <section className="text-editor-panel">
               <div className="text-editor-toolbar">
-                <strong>{canEditText ? 'Text editor' : 'Text preview'}</strong>
+                <strong>{canEditText ? '文本编辑器' : '文本预览'}</strong>
                 <div>
                   <button type="button" disabled={!canEditText || !editDirty} onClick={() => void saveCurrentText()}>保存</button>
                   <button type="button" disabled={!editDirty} onClick={() => setEditText(lastSavedText)}>还原</button>
@@ -418,7 +877,302 @@ export function App(): ReactElement {
               )}
             </section>
           )}
-          {preview?.previewKind === 'hex' && <pre>{preview.hex}</pre>}
+          {preview?.previewKind === 'hex' && preview.hex && (
+            <HexEditorPanel
+              title={selectedFile?.relativePath ?? '二进制资源'}
+              initialBytesBase64={typeof preview.hex === 'string' && !preview.hex.includes(' ')
+                ? preview.hex
+                : hexTextToBase64(preview.hex)}
+              onPatch={() => setStatus('Hex mutation 已在渲染进程演示；提交须经主进程补丁引擎。')}
+            />
+          )}
+          {preview?.previewKind === 'hex' && !preview.hex && <pre className="muted">无 Hex 预览数据。</pre>}
+          {workspaceMode === 'map' && (
+            <>
+              <p className="muted">
+                {msbLive ? '实时 Bridge MSB parts' : '演示 parts（未选中可解析 MSB 或读取失败）'}
+              </p>
+              <MsbScenePanel
+                key={`${selectedFile?.sourceUri ?? 'demo'}:${msbLive ? 'live' : 'demo'}:${msbParts.length}:${msbRegions.length}`}
+                mapResourceUri={selectedFile?.sourceUri ?? 'file://map/preview.msb'}
+                parts={msbParts}
+                regions={msbRegions}
+                maxNodes={64}
+                writeEnabled={msbLive && Boolean(msbSourceHash) && Boolean(selectedFile)}
+                onPartPositionCommit={(input) => {
+                  void commitMsbPosition(input, 'set_part_position');
+                }}
+                onRegionPositionCommit={(input) => {
+                  void commitMsbPosition(input, 'set_region_position');
+                }}
+              />
+            </>
+          )}
+          {workspaceMode === 'event' && (
+            <>
+              <p className="muted">
+                {emevdLive
+                  ? `实时 Bridge 文档${emevdSourceHash ? ` · hash ${emevdSourceHash.slice(0, 12)}…` : ''}`
+                  : '演示文档（未选中可解析的 EMEVD 或读取失败）'}
+              </p>
+              <EmevdFourViewPanel
+                key={`${emevdDocument.resourceUri}:${emevdDocument.revision}:${emevdLive ? 'live' : 'demo'}`}
+                initialDocument={emevdDocument}
+                onStructuredMutation={(mutation) => {
+                  void (async () => {
+                    if (!emevdLive || !emevdSourceHash || !selectedFile) {
+                      setStatus('EMEVD mutation 仅在演示模式产生 UI 状态；提交须经实时文档 + 补丁引擎。');
+                      return;
+                    }
+                    if (typeof window.soulforge.applyEmevdMutation !== 'function') {
+                      setStatus('当前预加载未暴露 applyEmevdMutation。');
+                      return;
+                    }
+                    setStatus('正在经 Bridge/补丁引擎提交 EMEVD mutation…');
+                    const eventIdMatch = /#event\/(-?\d+)/.exec(mutation.eventUri);
+                    const eventId = eventIdMatch ? Number(eventIdMatch[1]) : undefined;
+                    const bridgeMutation =
+                      mutation.kind === 'emevd_set_rest_behavior'
+                        ? {
+                            kind: 'set_rest_behavior',
+                            eventId,
+                            restBehavior: mutation.restBehavior
+                          }
+                        : {
+                            kind: 'update_id',
+                            eventId,
+                            newEventId: mutation.newEventId
+                          };
+                    const result = await window.soulforge.applyEmevdMutation(
+                      selectedFile.sourceUri,
+                      emevdSourceHash,
+                      bridgeMutation
+                    );
+                    if (!result.ok) {
+                      setStatus(result.diagnostics?.[0]?.message ?? 'EMEVD 提交失败');
+                      return;
+                    }
+                    setStatus('EMEVD mutation 已提交；正在重读…');
+                    const reload = await window.soulforge.readEmevdDocument(selectedFile.sourceUri) as {
+                      ok?: boolean;
+                      data?: BridgeEmevdEnvelopeLike | null;
+                    };
+                    if (reload?.ok && reload.data) {
+                      setEmevdDocument(mapEmevdEnvelopeToDocument(selectedFile.sourceUri, reload.data, {
+                        maxEvents: 128
+                      }));
+                      setEmevdSourceHash(reload.data.sourceHash ?? null);
+                      setStatus('EMEVD 已提交并重读。');
+                    } else {
+                      setStatus('EMEVD 已提交，但重读失败。');
+                    }
+                    await refreshOperationHistory();
+                  })();
+                }}
+              />
+            </>
+          )}
+          {workspaceMode === 'msg' && (
+            <>
+              <p className="muted">
+                {fmgLive
+                  ? `实时 Bridge FMG${fmgSourceHash ? ` · hash ${fmgSourceHash.slice(0, 12)}…` : ''}`
+                  : '演示条目（未选中可解析 FMG 或读取失败）'}
+              </p>
+              <FmgWorkbenchPanel
+                key={`${selectedFile?.sourceUri ?? 'demo'}:${fmgLive ? 'live' : 'demo'}`}
+                resourceUri={selectedFile?.sourceUri ?? 'file://msg/demo.fmg'}
+                entries={fmgEntries}
+                onMutation={(mutation) => {
+                  void (async () => {
+                    if (!fmgLive || !fmgSourceHash || !selectedFile) {
+                      setStatus('FMG mutation 仅在演示模式产生 UI 状态；提交须经实时文档 + 补丁引擎。');
+                      return;
+                    }
+                    if (typeof window.soulforge.applyFmgMutation !== 'function') {
+                      setStatus('当前预加载未暴露 applyFmgMutation。');
+                      return;
+                    }
+                    setStatus('正在经 Bridge/补丁引擎提交 FMG mutation…');
+                    const result = await window.soulforge.applyFmgMutation(
+                      selectedFile.sourceUri,
+                      fmgSourceHash,
+                      {
+                        kind: mutation.kind === 'fmg_entry_delete' ? 'delete' : 'upsert',
+                        id: mutation.id,
+                        ...(mutation.text !== undefined ? { text: mutation.text } : {})
+                      }
+                    );
+                    if (!result.ok) {
+                      setStatus(result.diagnostics?.[0]?.message ?? 'FMG 提交失败');
+                      return;
+                    }
+                    const reload = await window.soulforge.readFmgDocument(selectedFile.sourceUri) as {
+                      ok?: boolean;
+                      data?: {
+                        sourceHash?: string;
+                        entries?: Array<{ id: number; text: string }>;
+                      } | null;
+                    };
+                    if (reload?.ok && reload.data?.entries) {
+                      setFmgEntries(reload.data.entries.map((e) => ({ id: e.id, text: e.text })));
+                      setFmgSourceHash(reload.data.sourceHash ?? null);
+                      setStatus('FMG 已提交并重读。');
+                    } else {
+                      setStatus('FMG 已提交，但重读失败。');
+                    }
+                    await refreshOperationHistory();
+                  })();
+                }}
+              />
+            </>
+          )}
+          {workspaceMode === 'param' && (
+            <>
+              <p className="muted">
+                {paramLive
+                  ? `实时 Bridge PARAM${paramSourceHash ? ` · hash ${paramSourceHash.slice(0, 12)}…` : ''}`
+                  : '演示行（未选中可解析 PARAM 或读取失败）'}
+              </p>
+              <ParamTablePanel
+                key={`${selectedFile?.sourceUri ?? 'demo'}:${paramLive ? 'live' : 'demo'}`}
+                typeName={paramTypeName}
+                resourceUri={selectedFile?.sourceUri ?? 'file://param/demo.param'}
+                rows={paramRows}
+                onMutation={(mutation) => {
+                  void (async () => {
+                    if (!paramLive || !paramSourceHash || !selectedFile) {
+                      setStatus('PARAM mutation 仅在演示模式产生 UI 状态；提交须经实时文档 + 补丁引擎。');
+                      return;
+                    }
+                    if (typeof window.soulforge.applyParamMutation !== 'function') {
+                      setStatus('当前预加载未暴露 applyParamMutation。');
+                      return;
+                    }
+                    if (mutation.kind === 'param_row_delete') {
+                      setStatus('正在删除 PARAM 行…');
+                      const result = await window.soulforge.applyParamMutation(
+                        selectedFile.sourceUri,
+                        paramSourceHash,
+                        { kind: 'delete', id: mutation.id }
+                      );
+                      if (!result.ok) {
+                        setStatus(result.diagnostics?.[0]?.message ?? 'PARAM 删除失败');
+                        return;
+                      }
+                    } else {
+                      // Duplicate uses sourceId payload; plain upsert uses mutation.id payload.
+                      const payload =
+                        paramRowPayloads.get(mutation.id)
+                        ?? (mutation.sourceId !== undefined
+                          ? paramRowPayloads.get(mutation.sourceId)
+                          : undefined);
+                      if (!payload) {
+                        setStatus('缺少 row dataBase64，无法 upsert（演示/截断行）。');
+                        return;
+                      }
+                      setStatus(
+                        mutation.sourceId !== undefined
+                          ? `正在复制 PARAM 行 ${mutation.sourceId} → ${mutation.id}…`
+                          : '正在提交 PARAM 行 upsert…'
+                      );
+                      const result = await window.soulforge.applyParamMutation(
+                        selectedFile.sourceUri,
+                        paramSourceHash,
+                        { kind: 'upsert', id: mutation.id, dataBase64: payload }
+                      );
+                      if (!result.ok) {
+                        setStatus(result.diagnostics?.[0]?.message ?? 'PARAM upsert 失败');
+                        return;
+                      }
+                    }
+                    const reload = await window.soulforge.readParamDocument(selectedFile.sourceUri) as {
+                      ok?: boolean;
+                      data?: {
+                        sourceHash?: string;
+                        typeName?: string;
+                        rows?: Array<{
+                          id: number;
+                          dataBase64?: string;
+                          dataHexPreview?: string;
+                          name?: string;
+                        }>;
+                      } | null;
+                    };
+                    if (reload?.ok && reload.data?.rows) {
+                      const payloads = new Map<number, string>();
+                      setParamRows(reload.data.rows.map((r) => {
+                        if (r.dataBase64) payloads.set(r.id, r.dataBase64);
+                        return {
+                          id: r.id,
+                          dataHexPreview: r.dataHexPreview ?? '',
+                          ...(r.name ? { name: r.name } : {})
+                        };
+                      }));
+                      setParamRowPayloads(payloads);
+                      setParamSourceHash(reload.data.sourceHash ?? null);
+                      if (reload.data.typeName) setParamTypeName(reload.data.typeName);
+                      setStatus('PARAM 已提交并重读。');
+                    } else {
+                      setStatus('PARAM 已提交，但重读失败。');
+                    }
+                    await refreshOperationHistory();
+                  })();
+                }}
+              />
+              <ParamDefPanel
+                typeName={paramLive ? `${paramTypeName}（用户派生 def 待绑定）` : 'DEMO_PARAM_ST'}
+                rowDataSize={16}
+                origin="fixture"
+                fields={[
+                  { id: 'f_id', name: 'idHint', type: 's32', offset: 0, size: 4, valuePreview: '42' },
+                  { id: 'f_hp', name: 'hp', type: 'u16', offset: 4, size: 2, valuePreview: '100' },
+                  { id: 'f_flag', name: 'enabled', type: 'bool', offset: 6, size: 1, valuePreview: 'true' },
+                  { id: 'f_rate', name: 'rate', type: 'f32', offset: 8, size: 4, valuePreview: '1.5' }
+                ]}
+                onFieldChange={() => setStatus('paramdef 字段 mutation 已产生；提交须经补丁引擎，不得写官方适配包。')}
+              />
+            </>
+          )}
+          {workspaceMode === 'settings' && <ModelServiceSettingsPanel />}
+          {workspaceMode === 'ops' && (
+            <WorkbenchOpsPanel
+              jobs={[
+                {
+                  id: 'demo-job-1',
+                  title: '索引工作区',
+                  status: operationHistory.length > 0 ? 'completed' : 'queued',
+                  progressCurrent: operationHistory.length > 0 ? 1 : 0,
+                  progressTotal: 1,
+                  progressMessage: '等待主进程任务队列接线'
+                }
+              ]}
+              history={operationHistory.map((entry) => ({
+                opId: entry.opId,
+                status: entry.status,
+                mode: entry.mode,
+                summary: entry.title,
+                createdAt: entry.createdAt,
+                fileCount: entry.fileCount,
+                canRollback: entry.status === 'committed'
+              }))}
+              diagnostics={(preview?.diagnostics ?? []).map((d) => ({
+                severity: d.severity,
+                code: d.code,
+                message: d.message,
+                ...(d.sourceUri ? { resourceUri: d.sourceUri } : {})
+              }))}
+              patchImpact={null}
+              onCancelJob={() => setStatus('任务取消请求已记录；待 TaskQueue IPC。')}
+              onRollback={(opId) => {
+                void window.soulforge.rollbackOperation(opId).then(() => {
+                  setStatus(`已请求回滚 ${opId}`);
+                }).catch((error: unknown) => {
+                  setStatus(error instanceof Error ? error.message : '回滚失败');
+                });
+              }}
+            />
+          )}
           {preview?.previewKind === 'empty' && <p className="muted">空文件。</p>}
           {preview?.previewKind === 'failed' && <p className="danger">预览失败。</p>}
           {preview?.truncated && <p className="muted">预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开。</p>}
@@ -431,47 +1185,45 @@ export function App(): ReactElement {
               <p>计划优先，证据优先，写入必须经过 Patch Engine。</p>
             </div>
             <span className={aiProvider === 'mock' ? 'provider-pill ready' : 'provider-pill'}>
-              {aiProvider === 'mock' ? 'local draft' : 'needs config'}
+              {aiProvider === 'mock' ? '本地草稿' : '需要配置'}
             </span>
           </div>
 
           <div className="ai-control-grid">
             <label>
-              Provider
+              模型服务
               <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)}>
-                <option value="mock">Mock / Local Planner</option>
+                <option value="mock">本地计划草稿</option>
                 <option value="openai">OpenAI</option>
                 <option value="anthropic">Anthropic</option>
               </select>
             </label>
             <label>
-              Thinking
+              思考强度
               <select value={aiThinking} onChange={(event) => setAiThinking(event.target.value as AiThinkingLevel)}>
-                <option value="fast">fast</option>
-                <option value="normal">normal</option>
-                <option value="deep">deep</option>
-                <option value="extreme">extreme</option>
+                <option value="fast">快速</option>
+                <option value="normal">普通</option>
+                <option value="deep">深入</option>
+                <option value="extreme">极致</option>
               </select>
             </label>
             <label>
-              Mode
-              <select value={aiMode} onChange={(event) => setAiMode(event.target.value as AiPermissionMode)}>
-                <option value="plan">plan</option>
-                <option value="normal">normal</option>
-                <option value="fullPermission">full permission</option>
+              权限模式
+              <select value={aiMode} disabled title="P0 安全收口期间由主进程锁定为计划模式">
+                <option value="plan">计划模式</option>
               </select>
             </label>
           </div>
 
           <div className="context-card ai-context-card">
-            <strong>Current context</strong>
-            <span>{selectedFile?.sourceUri ?? 'No resource selected'}</span>
-            {analysis && <span>refs: H{analysis.referenceStats.high} / M{analysis.referenceStats.medium} / L{analysis.referenceStats.low}</span>}
-            <span>{diagnostics.length ? `${diagnostics.length} diagnostics in scope` : 'No diagnostics in scope'}</span>
+            <strong>当前上下文</strong>
+            <span>{selectedFile?.sourceUri ?? '未选择资源'}</span>
+            {analysis && <span>引用：高 {analysis.referenceStats.high} / 中 {analysis.referenceStats.medium} / 低 {analysis.referenceStats.low}</span>}
+            <span>{diagnostics.length ? `范围内有 ${diagnostics.length} 条诊断` : '范围内没有诊断'}</span>
           </div>
 
           <label className="ai-prompt-box">
-            Goal
+            目标
             <textarea
               value={aiPrompt}
               onChange={(event) => setAiPrompt(event.target.value)}
@@ -484,7 +1236,7 @@ export function App(): ReactElement {
             <section className="ai-draft-card">
               <div className="ai-draft-title">
                 <strong>{aiDraft.title}</strong>
-                <span>{aiDraft.provider} / {aiDraft.thinking} / {aiDraft.mode}</span>
+                <span>{modelServiceLabel(aiDraft.provider)} / {thinkingLabel(aiDraft.thinking)} / {permissionModeLabel(aiDraft.mode)}</span>
               </div>
               <p>{aiDraft.summary}</p>
 
@@ -504,48 +1256,48 @@ export function App(): ReactElement {
               </div>
 
               <details>
-                <summary>Prompt preview</summary>
+                <summary>提示词预览</summary>
                 <pre className="tool-output">{aiDraft.promptPreview}</pre>
               </details>
             </section>
           )}
 
           <div className="tool-panel">
-            <strong>Safe tools</strong>
+            <strong>安全工具</strong>
             <div className="tool-group">
-              <small>read / analyze</small>
+              <small>读取 / 分析</small>
               <div className="tool-list">
                 {groupedTools.read.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
               </div>
             </div>
             <div className="tool-group">
-              <small>propose / validate</small>
+              <small>提案 / 验证</small>
               <div className="tool-list">
                 {groupedTools.plan.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
               </div>
             </div>
             <div className="tool-group">
-              <small>commit / rollback</small>
+              <small>提交 / 回滚</small>
               <div className="tool-list">
                 {groupedTools.write.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
               </div>
             </div>
             <div className="tool-row">
-              <input value={toolQuery} onChange={(event) => setToolQuery(event.target.value)} placeholder="search_resources query" />
-              <button type="button" onClick={() => void runToolSearch()}>Run</button>
+              <input value={toolQuery} onChange={(event) => setToolQuery(event.target.value)} placeholder="输入资源搜索条件" />
+              <button type="button" onClick={() => void runToolSearch()}>运行</button>
             </div>
             <div className="tool-row">
               <input value={eventUri} onChange={(event) => setEventUri(event.target.value)} placeholder="event://..." />
-              <button type="button" onClick={() => void explainEvent()}>Explain</button>
+              <button type="button" onClick={() => void explainEvent()}>解释事件</button>
             </div>
           </div>
 
           {analysis && (
             <div className="context-card">
-              <strong>Evidence index</strong>
-              <span>parsed: {analysis.parsedFiles}</span>
-              <span>inspected: {analysis.inspectedFiles}</span>
-              <span>refs: H{analysis.referenceStats.high} / M{analysis.referenceStats.medium} / L{analysis.referenceStats.low}</span>
+              <strong>证据索引</strong>
+              <span>已解析：{analysis.parsedFiles}</span>
+              <span>已检查：{analysis.inspectedFiles}</span>
+              <span>引用：高 {analysis.referenceStats.high} / 中 {analysis.referenceStats.medium} / 低 {analysis.referenceStats.low}</span>
             </div>
           )}
 
@@ -556,18 +1308,18 @@ export function App(): ReactElement {
                 刷新
               </button>
             </div>
-            {!workspace && <p className="muted">打开工作区并完成至少一次 Patch 提交后可在此回滚。</p>}
+            {!workspace && <p className="muted">打开工作区并完成至少一次补丁提交后可在此回滚。</p>}
             {workspace && operationHistory.length === 0 && (
-              <p className="muted">尚无已记录操作。保存文本资源后会写入落盘 operation log。</p>
+              <p className="muted">尚无已记录操作。保存文本资源后会写入持久操作日志。</p>
             )}
             <div className="operation-history-list">
               {operationHistory.map((entry) => (
                 <div key={entry.opId} className="operation-history-item">
                   <div className="operation-history-meta">
                     <strong title={entry.opId}>{entry.title}</strong>
-                    <span className={`op-status op-status-${entry.status}`}>{entry.status}</span>
+                    <span className={`op-status op-status-${entry.status}`}>{operationStatusLabel(entry.status)}</span>
                     <small>
-                      {entry.fileCount} file(s) · {entry.committedAt ?? entry.createdAt}
+                      {entry.fileCount} 个文件 · {entry.committedAt ?? entry.createdAt}
                     </small>
                     <small className="muted" title={entry.changedPaths.join('\n')}>
                       {entry.changedPaths[0] ? shortenPath(entry.changedPaths[0]) : '—'}
@@ -592,7 +1344,7 @@ export function App(): ReactElement {
 
       <footer className="status-bar">
         <span>{status}</span>
-        <span>{diagnostics.length ? `${diagnostics.length} diagnostics` : 'No diagnostics'}</span>
+        <span>{diagnostics.length ? `${diagnostics.length} 条诊断` : '没有诊断'}</span>
       </footer>
     </main>
   );
@@ -612,7 +1364,7 @@ function MsgTableEditor({
   return (
     <section className="msg-table-editor">
       <div className="msg-table-toolbar">
-        <strong>MSG table</strong>
+        <strong>FMG 文本表</strong>
         <button type="button" onClick={onAdd}>新增文本</button>
       </div>
       <div className="msg-table-grid msg-table-header">
@@ -903,7 +1655,7 @@ function ContainerHintList({ title, hints }: { title: string; hints: ContainerRe
   );
 }
 
-function extractMsgRows(preview: ResourcePreview | null | undefined): EditableMsgRow[] {
+function extractMsgRows(preview: RendererResourcePreview | null | undefined): EditableMsgRow[] {
   return preview?.structuredPreview?.msgs
     ?.flatMap((msgExport) => msgExport.entries.map((entry) => msgEntryToEditableRow(entry, msgExport.category)))
     ?? [];
@@ -969,7 +1721,7 @@ interface NativeInspectionEvidence {
   confidence?: string;
 }
 
-function NativeInspectionCard({ inspection }: { inspection: BridgeResult<unknown> }): ReactElement {
+function NativeInspectionCard({ inspection }: { inspection: RendererBridgeResult<unknown> }): ReactElement {
   const data = asNativeInspectionData(inspection.data);
   const layers = data?.layers ?? [];
   const evidence = data?.evidence ?? [];
@@ -978,33 +1730,33 @@ function NativeInspectionCard({ inspection }: { inspection: BridgeResult<unknown
   return (
     <section className="native-inspection-card">
       <div className="native-inspection-title">
-        <strong>Native inspect</strong>
+        <strong>原生格式检查</strong>
         <span>{inspection.parseStatus}</span>
       </div>
       <div className="native-inspection-grid">
-        <span>kind: {data?.resourceKind ?? inspection.resourceKind}</span>
-        <span>root: {data?.rootFormat ?? 'unknown'}</span>
-        <span>layers: {layers.length}</span>
-        <span>evidence: {evidence.length}</span>
+        <span>资源类型：{data?.resourceKind ?? inspection.resourceKind}</span>
+        <span>根格式：{data?.rootFormat ?? '未知'}</span>
+        <span>容器层级：{layers.length}</span>
+        <span>证据：{evidence.length}</span>
       </div>
       {layers.length > 0 && (
         <div className="native-chip-row">
           {layers.slice(0, 6).map((layer, index) => (
             <span key={`${layer.format ?? 'layer'}-${index}`} title={describeLayer(layer)}>
-              {layer.format ?? 'unknown'} · {layer.confidence ?? 'unknown'}
+              {layer.format ?? '未知'} · {layer.confidence ?? '未知'}
             </span>
           ))}
         </div>
       )}
       {evidence.length > 0 && (
         <details>
-          <summary>Evidence clues</summary>
+          <summary>证据线索</summary>
           <ul className="native-evidence-list">
             {evidence.slice(0, 12).map((item, index) => (
               <li key={`${item.kind ?? 'evidence'}-${index}`}>
-                <strong>{item.kind ?? 'unknown'}</strong>
+                <strong>{item.kind ?? '未知'}</strong>
                 <span>offset={item.offset ?? 0}</span>
-                <span>confidence={item.confidence ?? 'unknown'}</span>
+                <span>置信等级={item.confidence ?? '未知'}</span>
                 <code>{summarizeEvidenceValue(item.value)}</code>
               </li>
             ))}
@@ -1066,10 +1818,44 @@ function groupToolsByPermission(tools: ToolDescriptor[]): Record<'read' | 'plan'
 }
 
 function isResourceKindMode(mode: WorkspaceMode): mode is ResourceKind {
-  return mode !== 'files' && mode !== 'ai' && mode !== 'settings';
+  return mode !== 'files' && mode !== 'ai' && mode !== 'settings' && mode !== 'ops';
 }
 
-function filterFilesForMode(files: IndexedFile[], mode: WorkspaceMode, query: string): IndexedFile[] {
+function workspaceModeLabel(mode: WorkspaceMode): string {
+  return WORKSPACE_MODES.find((item) => item.id === mode)?.label ?? mode;
+}
+
+function modelServiceLabel(provider: AiProvider): string {
+  if (provider === 'mock') return '本地计划草稿';
+  return provider === 'openai' ? 'OpenAI 模型服务' : 'Anthropic 模型服务';
+}
+
+function thinkingLabel(level: AiThinkingLevel): string {
+  return ({ fast: '快速', normal: '普通', deep: '深入', extreme: '极致' } as const)[level];
+}
+
+function permissionModeLabel(mode: AiPermissionMode): string {
+  return ({ plan: '计划模式', normal: '普通模式', fullPermission: '完全权限' } as const)[mode];
+}
+
+function operationStatusLabel(status: string): string {
+  return ({
+    planned: '已计划',
+    pending: '待处理',
+    staged: '已暂存',
+    validated: '已验证',
+    committed: '已提交',
+    rolled_back: '已回滚',
+    failed: '失败',
+    recovery_required: '需要恢复'
+  } as Record<string, string>)[status] ?? status;
+}
+
+function filterFilesForMode(
+  files: RendererIndexedFile[],
+  mode: WorkspaceMode,
+  query: string
+): RendererIndexedFile[] {
   const normalized = query.trim().toLowerCase();
   return files.filter((file) => {
     if (isResourceKindMode(mode) && file.resourceKind !== mode) return false;

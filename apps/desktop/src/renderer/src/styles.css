@@ -33,6 +33,58 @@ button {
   height: 100vh;
 }
 
+.scene-host {
+  border: 1px solid #2c3340;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.hex-view {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #0d1016;
+  border: 1px solid #2c3340;
+  border-radius: 8px;
+  padding: 12px;
+  overflow: auto;
+  min-height: 72px;
+}
+
+.editor-hex .row.gap,
+.stack.gap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.stack.gap {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #2c3340;
+  border-radius: 10px;
+  background: #161a22;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.panel-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+
 .top-bar {
   display: flex;
   align-items: center;

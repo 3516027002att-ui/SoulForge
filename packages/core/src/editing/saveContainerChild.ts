@@ -36,6 +36,8 @@ export interface ReplaceContainerChildOptions {
   confirmation?: ConfirmationReceipt;
   session?: WorkspaceSession;
   operationLog?: OperationLogStore;
+  backupBaseDir?: string;
+  recoveryDir?: string;
   title?: string;
 }
 
@@ -163,6 +165,23 @@ export async function replaceContainerChild(
   }
 
   const childPath = childPathFromUri(options.childUri);
+  const originalChild = await readContainerChild(options.file.absolutePath, options.childUri, {
+    relativePath: options.file.relativePath
+  });
+  if (!originalChild.ok || !originalChild.bytes || sha256(originalChild.bytes) !== options.expectedChildHash) {
+    return {
+      ok: false,
+      changedFiles: [],
+      diagnostics: [{
+        severity: 'error',
+        code: 'CONTAINER_CHILD_INVERSE_CAPTURE_FAILED',
+        message: '无法在提交前取得与 expectedChildHash 一致的条目原始字节，已阻止写入。',
+        sourceUri: options.childUri
+      }],
+      kind: 'container_child_replace',
+      childUri: options.childUri
+    };
+  }
   const opId = randomUUID();
   const patch: PatchIR = createPatchIr({
     workspaceId: options.file.workspaceId,
@@ -216,7 +235,45 @@ export async function replaceContainerChild(
     ...(options.session?.layers.overlayRoot
       ? { workspaceRoot: options.session.layers.overlayRoot }
       : {}),
-    ...(options.operationLog ? { operationLog: options.operationLog } : {})
+    ...(options.operationLog ? { operationLog: options.operationLog } : {}),
+    ...(options.backupBaseDir ? { backupBaseDir: options.backupBaseDir } : {}),
+    ...(options.recoveryDir ? { recoveryDir: options.recoveryDir } : {}),
+    resourceEntryChanges: [{
+      id: randomUUID(),
+      resourceUri: options.file.sourceUri,
+      entryUri: options.childUri,
+      changeKind: 'replace',
+      beforeHash: options.expectedChildHash,
+      afterHash: sha256(newBytes),
+      inverse: {
+        id: randomUUID(),
+        kind: 'container_child_replace',
+        targetUri: options.file.sourceUri,
+        targetPath: options.file.absolutePath,
+        containerUri: options.file.sourceUri,
+        childPath,
+        childUri: options.childUri,
+        childContentBase64: originalChild.bytes.toString('base64'),
+        expectedContainerHash: options.expectedContainerHash,
+        expectedChildHash: sha256(newBytes),
+        expectedHash: options.expectedContainerHash,
+        containerFormat: tree.tree.root.format,
+        preconditions: [{
+          type: 'content_hash',
+          description: '回滚前容器必须仍等于原操作 afterHash',
+          expectedHash: options.expectedContainerHash,
+          targetUri: options.file.sourceUri
+        }],
+        validatorRequirements: [
+          { validatorId: 'container_roundtrip', scope: 'before_staging', required: true },
+          { validatorId: 'container_roundtrip', scope: 'staged_output', required: true },
+          { validatorId: 'container_roundtrip', scope: 'after_commit', required: true }
+        ],
+        rollbackHint: { strategy: 'inverse_patch', notes: `资源条目 ${options.childUri} 的逆操作` },
+        riskLevel: 'high',
+        metadata: { inverseResourceEntry: true, entryUri: options.childUri }
+      }
+    }]
   });
 
   return {

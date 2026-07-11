@@ -7,12 +7,16 @@ import { access, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createPatchProposal, createStagingArea, commitValidatedStagingArea } from '../patch/patchEngine.js';
-import { openFileOperationLogStore } from '../patch/fileOperationLogStore.js';
+import {
+  FileOperationLogCorruptError,
+  openFileOperationLogStore
+} from '../patch/fileOperationLogStore.js';
 import {
   operationLogFileNameForWorkspace,
   resolveOperationLogStorePath
 } from '../patch/operationLogPath.js';
 import { rollbackOperation } from '../patch/rollback.js';
+import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { makeWorkspaceId } from '../workspace/resourceUri.js';
 
@@ -116,22 +120,22 @@ async function main(): Promise<void> {
   await access(storePath);
 
   const opId = committed.opId;
-  const listedBeforeReopen = store.list(session.meta.workspaceId);
+  const listedBeforeReopen = await store.list(session.meta.workspaceId);
   if (listedBeforeReopen.length !== 1 || listedBeforeReopen[0]?.opId !== opId) {
     throw new Error('Store list missing committed op before reopen.');
   }
-  const historyBefore = store.history(session.meta.workspaceId);
+  const historyBefore = await store.history(session.meta.workspaceId);
   if (historyBefore[0]?.fileCount !== 1 || historyBefore[0]?.changedPaths.length !== 1) {
     throw new Error('History file metadata missing before reopen.');
   }
 
   // --- reopen same path: contract must return same opId + file metadata ---
   const reopened = openFileOperationLogStore(storePath);
-  const listedAfter = reopened.list(session.meta.workspaceId);
+  const listedAfter = await reopened.list(session.meta.workspaceId);
   if (listedAfter.length !== 1 || listedAfter[0]?.opId !== opId) {
     throw new Error('Reopened store did not return the same opId.');
   }
-  const reopenedRecord = reopened.get(opId);
+  const reopenedRecord = await reopened.get(opId);
   if (!reopenedRecord || reopenedRecord.status !== 'committed') {
     throw new Error('Reopened store missing committed record.');
   }
@@ -144,30 +148,57 @@ async function main(): Promise<void> {
   if (!reopenedRecord.files[0]?.backupPath) {
     throw new Error('Reopened store missing backupPath.');
   }
-  const historyAfter = reopened.history(session.meta.workspaceId);
+  const historyAfter = await reopened.history(session.meta.workspaceId);
   if (historyAfter[0]?.opId !== opId || historyAfter[0]?.fileCount !== 1) {
     throw new Error('Reopened history metadata mismatch.');
   }
 
   // --- rollback via reopened store ---
-  const rolled = await rollbackOperation({ opId, store: reopened, session });
+  const rolled = await rollbackOperation({
+    opId,
+    store: reopened,
+    session,
+    confirmation: createConfirmationReceipt({
+      subjects: [`ROLLBACK_OPERATION:${opId}`],
+      riskLevel: 'high',
+      note: 'persist smoke'
+    })
+  });
   if (!rolled.ok) {
     throw new Error(`Rollback failed: ${rolled.diagnostics.map((d) => d.message).join('; ')}`);
   }
   if ((await readFile(overlayFile, 'utf8')) !== 'overlay-v1\n') {
     throw new Error('Rollback did not restore overlay file content.');
   }
-  if (reopened.get(opId)?.status !== 'rolled_back') {
-    throw new Error('Operation log status was not updated to rolled_back after rollback.');
+  if ((await reopened.get(opId))?.status !== 'committed') {
+    throw new Error('Inverse rollback mutated the original operation status.');
   }
   if ((await readFile(baseFile, 'utf8')) !== 'base-readonly\n') {
     throw new Error('Base file was mutated during rollback.');
   }
 
-  // Third open confirms rolled_back status persists
+  // Third open confirms inverse relation persists without mutating history.
   const third = openFileOperationLogStore(storePath);
-  if (third.get(opId)?.status !== 'rolled_back') {
-    throw new Error('Rolled-back status did not survive third reopen.');
+  if ((await third.get(opId))?.status !== 'committed') {
+    throw new Error('Original operation status changed after reopen.');
+  }
+  if (!(await third.list(session.meta.workspaceId)).some((item) => {
+    return item.inverseOfOpId === opId && item.status === 'committed';
+  })) {
+    throw new Error('Inverse rollback relation did not survive third reopen.');
+  }
+
+  const corruptPath = join(logsDirectory, 'corrupt.json');
+  const corruptBytes = '{ definitely-not-json';
+  await writeFile(corruptPath, corruptBytes, 'utf8');
+  let corruptRejected = false;
+  try {
+    openFileOperationLogStore(corruptPath);
+  } catch (error) {
+    corruptRejected = error instanceof FileOperationLogCorruptError;
+  }
+  if (!corruptRejected || (await readFile(corruptPath, 'utf8')) !== corruptBytes) {
+    throw new Error('Corrupt legacy JSON must fail closed without modifying the source.');
   }
 
   console.log(JSON.stringify({
@@ -179,7 +210,7 @@ async function main(): Promise<void> {
     workspaceIdIsFileUrl: session.meta.workspaceId.startsWith('file:'),
     opId,
     baseMissing: session.meta.baseMissing,
-    history: third.history(session.meta.workspaceId).map((entry) => ({
+    history: (await third.history(session.meta.workspaceId)).map((entry) => ({
       opId: entry.opId,
       status: entry.status,
       fileCount: entry.fileCount

@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { openResourcePreview } from '../preview/openResourcePreview.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
 
@@ -102,7 +103,7 @@ function hasHeaderSummary(data: unknown): boolean {
   return evidence.some((item) => item && typeof item === 'object' && (item as { kind?: unknown }).kind === 'headerSummary');
 }
 
-main().catch((error) => {
+main().finally(() => disposeBridgeDaemonPool()).catch((error) => {
   console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   process.exitCode = 1;
 });

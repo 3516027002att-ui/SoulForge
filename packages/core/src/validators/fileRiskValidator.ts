@@ -51,6 +51,22 @@ export class FileRiskValidator implements ValidatorContract {
         || op.kind === 'container_child_rename'
         || op.kind === 'container_child_move'
       ) {
+        const nativeBnd4 = op.kind.startsWith('container_child_')
+          && 'containerFormat' in op
+          && op.containerFormat === 'BND4_DFLT'
+          && op.metadata?.nativeFormatAuthority === true;
+        if (nativeBnd4) {
+          if (op.riskLevel !== 'high' || op.metadata?.requiresConfirmation !== true
+            || typeof op.metadata.confirmationReceiptId !== 'string') {
+            diagnostics.push(createDiagnostic({
+              severity: 'error',
+              code: 'NATIVE_BND4_CONFIRMATION_REQUIRED',
+              message: '原生 BND4 修改必须为高风险并绑定可信确认凭据。',
+              targetUri: op.targetUri
+            }));
+          }
+          continue;
+        }
         diagnostics.push(createDiagnostic({
           severity: 'error',
           code: 'NATIVE_WRITER_REQUIRED',

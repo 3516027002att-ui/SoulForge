@@ -7,7 +7,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import type {
   AuditActor,
@@ -30,6 +30,7 @@ import {
 import { createScaffoldValidators } from '../validators/index.js';
 import { checkOriginalContentHash } from '../validators/textHash.js';
 import { createScaffoldWriterAdapters, resolveWriterForOperation } from '../writers/index.js';
+import { verifyPathInsideRoot } from '../workspace/pathBoundary.js';
 
 export type TransactionStatus =
   | 'open'
@@ -57,6 +58,8 @@ export interface TransactionCommitResult {
   committedPaths: string[];
   diagnostics: StructuredDiagnostic[];
   restorePoint?: RestorePoint;
+  /** True when one or more target files may still contain committed bytes. */
+  recoveryRequired?: boolean;
 }
 
 export interface TransactionRollbackResult {
@@ -364,21 +367,22 @@ export class WorkspaceTransaction {
 
     const targets = this.collectCommitTargets();
     for (const target of targets) {
-      if (!this.isInsideWorkspace(target.targetPath)) {
-        const diagnostic = createDiagnostic({
-          severity: 'error',
-          code: 'COMMIT_BLOCKED',
-          message: 'Commit target is outside the sandbox workspace root.',
+      const boundary = await verifyPathInsideRoot(this.workspaceRoot, target.targetPath);
+      if (!boundary.ok) {
+        const boundaryDiagnostics = boundary.diagnostics.map((item) => createDiagnostic({
+          severity: item.severity,
+          code: item.code,
+          message: item.message,
           targetUri: target.op.targetUri,
-          details: { targetPath: target.targetPath, workspaceRoot: this.workspaceRoot }
-        });
-        this.diagnostics.push(diagnostic);
+          details: item.details
+        }));
+        this.diagnostics.push(...boundaryDiagnostics);
         this.status = 'failed';
         return {
           ok: false,
           transactionId: this.transactionId,
           committedPaths: [],
-          diagnostics: [diagnostic]
+          diagnostics: boundaryDiagnostics
         };
       }
     }
@@ -414,31 +418,54 @@ export class WorkspaceTransaction {
 
     try {
       for (const target of targets) {
+        const boundary = await verifyPathInsideRoot(this.workspaceRoot, target.targetPath);
+        if (!boundary.ok) {
+          throw new CommitBoundaryError(boundary.diagnostics);
+        }
         await mkdir(dirname(target.targetPath), { recursive: true });
+        const boundaryAfterMkdir = await verifyPathInsideRoot(this.workspaceRoot, target.targetPath);
+        if (!boundaryAfterMkdir.ok) {
+          throw new CommitBoundaryError(boundaryAfterMkdir.diagnostics);
+        }
         const siblingTemp = join(
           dirname(target.targetPath),
           `.soulforge-${this.transactionId}-${basename(target.targetPath)}.tmp`
         );
-        await copyFile(target.stagingPath, siblingTemp);
-        await rename(siblingTemp, target.targetPath);
+        try {
+          await copyFile(target.stagingPath, siblingTemp);
+          await rename(siblingTemp, target.targetPath);
+        } finally {
+          await rm(siblingTemp, { force: true }).catch(() => undefined);
+        }
         committedPaths.push(target.targetPath);
       }
     } catch (error) {
       // Attempt restore on partial failure.
-      await restoreFromPoint(restorePoint);
-      const diagnostic = createDiagnostic({
-        severity: 'error',
-        code: 'TRANSACTION_FAILED',
-        message: error instanceof Error ? error.message : 'Commit failed.',
-        details: { transactionId: this.transactionId }
-      });
-      diagnostics.push(diagnostic);
-      this.diagnostics.push(diagnostic);
+      const restored = await restoreFromPoint(restorePoint);
+      const failureDiagnostics = error instanceof CommitBoundaryError
+        ? error.diagnostics
+        : [createDiagnostic({
+            severity: 'error',
+            code: 'TRANSACTION_FAILED',
+            message: error instanceof Error ? error.message : 'Commit failed.',
+            details: { transactionId: this.transactionId }
+          })];
+      diagnostics.push(...failureDiagnostics);
+      if (!restored.ok) {
+        diagnostics.push(createDiagnostic({
+          severity: 'error',
+          code: 'TRANSACTION_RECOVERY_REQUIRED',
+          message: '提交中途失败，且自动恢复未能还原所有文件。',
+          details: { errors: restored.errors, partialCommitted: committedPaths }
+        }));
+      }
+      this.diagnostics.push(...diagnostics);
       this.status = 'failed';
       this.failureRecovery = {
         phase: 'commit',
         restorePointId: restorePoint.restorePointId,
-        partialCommitted: committedPaths
+        partialCommitted: committedPaths,
+        restoreErrors: restored.errors
       };
       this.auditLog.append(createAuditEntry({
         transactionId: this.transactionId,
@@ -450,9 +477,10 @@ export class WorkspaceTransaction {
       return {
         ok: false,
         transactionId: this.transactionId,
-        committedPaths: [],
+        committedPaths: restored.ok ? [] : committedPaths,
         diagnostics,
-        restorePoint
+        restorePoint,
+        ...(restored.ok ? {} : { recoveryRequired: true })
       };
     }
 
@@ -467,6 +495,47 @@ export class WorkspaceTransaction {
         });
         diagnostics.push(...result.diagnostics);
       }
+    }
+
+    if (diagnostics.some((item) => item.severity === 'error')) {
+      this.committedPaths = committedPaths;
+      this.status = 'committed';
+      const rolledBack = await this.rollback();
+      const failureDiagnostics = [
+        ...diagnostics,
+        ...rolledBack.diagnostics,
+        createDiagnostic({
+          severity: 'error',
+          code: rolledBack.ok
+            ? 'AFTER_COMMIT_VALIDATION_FAILED_ROLLED_BACK'
+            : 'TRANSACTION_RECOVERY_REQUIRED',
+          message: rolledBack.ok
+            ? '提交后验证失败，已自动还原提交前内容。'
+            : '提交后验证失败，且自动还原失败，需要恢复处理。',
+          details: {
+            transactionId: this.transactionId,
+            committedPaths,
+            restoredPaths: rolledBack.restoredPaths
+          }
+        })
+      ];
+      this.diagnostics.push(...failureDiagnostics);
+      this.status = 'failed';
+      this.failureRecovery = {
+        phase: 'after_commit_validation',
+        restorePointId: restorePoint.restorePointId,
+        committedPaths,
+        rollbackOk: rolledBack.ok,
+        restoredPaths: rolledBack.restoredPaths
+      };
+      return {
+        ok: false,
+        transactionId: this.transactionId,
+        committedPaths: rolledBack.ok ? [] : committedPaths,
+        diagnostics: failureDiagnostics,
+        restorePoint,
+        ...(rolledBack.ok ? {} : { recoveryRequired: true })
+      };
     }
 
     this.committedPaths = committedPaths;
@@ -486,7 +555,7 @@ export class WorkspaceTransaction {
     }));
 
     return {
-      ok: diagnostics.every((item) => item.severity !== 'error'),
+      ok: true,
       transactionId: this.transactionId,
       committedPaths,
       diagnostics,
@@ -636,18 +705,6 @@ export class WorkspaceTransaction {
     return targets;
   }
 
-  private isInsideWorkspace(targetPath: string): boolean {
-    const resolved = resolve(targetPath);
-    const root = this.workspaceRoot.endsWith('\\') || this.workspaceRoot.endsWith('/')
-      ? this.workspaceRoot
-      : `${this.workspaceRoot}`;
-    const normalizedRoot = resolve(root).toLowerCase();
-    const normalizedTarget = resolved.toLowerCase();
-    return normalizedTarget === normalizedRoot
-      || normalizedTarget.startsWith(`${normalizedRoot}\\`)
-      || normalizedTarget.startsWith(`${normalizedRoot}/`);
-  }
-
   private auditValidation(ok: boolean, diagnostics: StructuredDiagnostic[]): void {
     this.auditLog.append(createAuditEntry({
       transactionId: this.transactionId,
@@ -665,7 +722,12 @@ export class WorkspaceTransaction {
   }
 }
 
+class CommitBoundaryError extends Error {
+  constructor(readonly diagnostics: StructuredDiagnostic[]) {
+    super('Commit target escaped the workspace boundary.');
+  }
+}
+
 export function createWorkspaceTransaction(options: WorkspaceTransactionOptions): WorkspaceTransaction {
   return new WorkspaceTransaction(options);
 }
-

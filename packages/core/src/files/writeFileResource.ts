@@ -392,6 +392,7 @@ export async function commitFilePatch(input: {
   workspaceRoot?: string;
   operationLog?: ExecutePatchIrOptions['operationLog'];
   confirmation?: ConfirmationReceipt;
+  backupBaseDir?: string;
   recoveryDir?: string;
 }): Promise<TransactionCommitCompatResult & { diagnostics: Diagnostic[] }> {
   const needsConfirm = input.patch.operations.some(
@@ -424,6 +425,7 @@ export async function commitFilePatch(input: {
     ...(input.session ? { session: input.session } : {}),
     ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
     ...(input.operationLog ? { operationLog: input.operationLog } : {}),
+    ...(input.backupBaseDir ? { backupBaseDir: input.backupBaseDir } : {}),
     ...(input.recoveryDir ? { recoveryDir: input.recoveryDir } : {})
   });
 }

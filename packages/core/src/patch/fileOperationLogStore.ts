@@ -15,7 +15,8 @@ interface FileOperationLogDocument {
 /**
  * On-disk operation log implementing the same contract as MemoryOperationLogStore.
  * Persists to a single JSON file so commit / history / rollback survive process reopen.
- * Uses atomic temp+rename writes; no SQLite driver dependency (schema remains available for later).
+ * Legacy compatibility store only. Production desktop opens this data through
+ * the strict JSON -> workspace.db importer and never writes it again.
  */
 export class FileOperationLogStore implements OperationLogStore {
   private readonly byId = new Map<string, OperationLogRecord>();
@@ -24,52 +25,63 @@ export class FileOperationLogStore implements OperationLogStore {
     this.reload();
   }
 
-  /** Re-read the store file from disk (or start empty if missing/corrupt). */
+  /** Re-read the store file. Missing starts empty; corrupt input fails closed. */
   reload(): void {
-    this.byId.clear();
-    if (!existsSync(this.storePath)) return;
+    if (!existsSync(this.storePath)) {
+      this.byId.clear();
+      return;
+    }
 
     try {
       const raw = readFileSync(this.storePath, 'utf8');
       const parsed = JSON.parse(raw) as FileOperationLogDocument | OperationLogRecord[];
       const entries = Array.isArray(parsed)
         ? parsed
-        : Array.isArray(parsed?.entries)
+        : parsed?.version === 1 && Array.isArray(parsed.entries)
           ? parsed.entries
-          : [];
+          : null;
+      if (!entries) throw new Error('Expected an array or a version=1 entries document.');
+      const next = new Map<string, OperationLogRecord>();
       for (const entry of entries) {
-        if (entry && typeof entry.opId === 'string') {
-          this.byId.set(entry.opId, cloneRecord(entry));
+        if (!entry || typeof entry.opId !== 'string' || !Array.isArray(entry.files)
+          || !Array.isArray(entry.diagnostics)) {
+          throw new Error('Operation log contains an invalid entry.');
         }
+        next.set(entry.opId, cloneRecord(entry));
       }
-    } catch {
-      // Corrupt store: keep empty map so callers can re-record; do not throw on open.
       this.byId.clear();
+      for (const [opId, entry] of next) this.byId.set(opId, entry);
+    } catch (error) {
+      this.byId.clear();
+      throw new FileOperationLogCorruptError(
+        this.storePath,
+        error instanceof Error ? error.message : String(error)
+      );
     }
   }
 
-  record(entry: OperationLogRecord): void {
+  async record(entry: OperationLogRecord): Promise<void> {
     this.byId.set(entry.opId, cloneRecord(entry));
     this.persist();
   }
 
-  get(opId: string): OperationLogRecord | undefined {
+  async get(opId: string): Promise<OperationLogRecord | undefined> {
     const entry = this.byId.get(opId);
     return entry ? cloneRecord(entry) : undefined;
   }
 
-  list(workspaceId?: string): OperationLogRecord[] {
+  async list(workspaceId?: string): Promise<OperationLogRecord[]> {
     const rows = [...this.byId.values()]
       .filter((entry) => !workspaceId || entry.workspaceId === workspaceId)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     return rows.map(cloneRecord);
   }
 
-  updateStatus(
+  async updateStatus(
     opId: string,
     status: OperationStatus,
     patch: Partial<OperationLogRecord> = {}
-  ): OperationLogRecord | undefined {
+  ): Promise<OperationLogRecord | undefined> {
     const existing = this.byId.get(opId);
     if (!existing) return undefined;
     const next: OperationLogRecord = {
@@ -84,8 +96,8 @@ export class FileOperationLogStore implements OperationLogStore {
     return cloneRecord(next);
   }
 
-  history(workspaceId?: string): PatchHistoryEntry[] {
-    return this.list(workspaceId).map(toHistoryEntry);
+  async history(workspaceId?: string): Promise<PatchHistoryEntry[]> {
+    return (await this.list(workspaceId)).map(toHistoryEntry);
   }
 
   private persist(): void {
@@ -100,6 +112,14 @@ export class FileOperationLogStore implements OperationLogStore {
     const tempPath = `${this.storePath}.${process.pid}.${Date.now()}.tmp`;
     writeFileSync(tempPath, payload, 'utf8');
     renameSync(tempPath, this.storePath);
+  }
+}
+
+export class FileOperationLogCorruptError extends Error {
+  readonly code = 'LEGACY_OPERATION_LOG_CORRUPT';
+
+  constructor(readonly storePath: string, reason: string) {
+    super(`旧操作日志已损坏，拒绝将其当作空历史继续写入：${reason}`);
   }
 }
 

@@ -72,7 +72,10 @@ function quotePowerShell(value) {
 }
 
 function runDotnet(args, windowsArgs, windowsCommandLine, windowsPowerShellCommand) {
+  const localDotnet = process.env.SOULFORGE_DOTNET
+    ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'SoulForge', 'dotnet', 'dotnet.exe') : null);
   const candidates = [
+    ...(localDotnet ? [{ command: localDotnet, args }] : []),
     { command: 'dotnet', args },
     { command: 'dotnet.exe', args: windowsArgs },
     { command: '/mnt/c/Program Files/dotnet/dotnet.exe', args: windowsArgs },

@@ -1,0 +1,59 @@
+# SoulForge desktop packaging scaffold (P7).
+# Signing, auto-update publish, and private native gates are NOT enabled here.
+# Run: npx electron-builder --config electron-builder.yml --win dir
+# Do not ship until release-content scan + private gate pass.
+
+appId: com.soulforge.app
+productName: SoulForge
+copyright: Copyright © SoulForge contributors
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+  - '!src/**/*'
+  - '!.native/**/*'
+  - '!../../mods/**/*'
+  - '!**/oo2core*.dll'
+  - '!**/*secret*'
+  - '!**/*api*key*'
+
+# Better-sqlite3 Electron ABI binding is prepared under .native during build
+# and must be re-copied by a packaging script before signed release.
+extraResources:
+  - from: .native
+    to: native
+    filter:
+      - '**/*'
+
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+    - target: nsis
+      arch:
+        - x64
+  # Code signing intentionally unset — unsigned local artifacts only.
+  # sign: null
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: SoulForge
+
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}
+
+# electron-updater publish channel reserved; no tokens in repo.
+# publish: null
+
+asar: true
+compression: normal

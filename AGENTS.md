@@ -1,150 +1,147 @@
-# SoulForge AGENTS.md
+# SoulForge Agent 强制规则
 
-These rules are mandatory for Codex and all AI coding agents working in this repository.
+本文件对所有在本仓库工作的 AI Agent 和工程师生效。一切回答使用中文。
 
-## Project identity
+## 唯一实施规范
 
-SoulForge is an AI-native mod workbench for FromSoftware games.
+当前产品里程碑是 **SoulForge V0.5**。
 
-Current milestone: **Super Event Editor v0.1**.
+唯一完整实施规范：
 
-The v0.1 goal is to open a native ModEngine-style mod directory, inspect event-related packaged resources, build a lightweight searchable index, and provide an AI-ready evidence chain for event understanding.
+- `docs/V0_5_IMPLEMENTATION_HANDOFF.md`
 
-## Hard constraints
+开始工作前必须完整阅读该文档。不要再创建新的愿景、分叉、里程碑、任务或状态文档；范围、接口、阶段、测试与完成定义均在交接书中维护。
 
-1. v0.1 must be lightweight. Do not eagerly parse all resources on startup.
-2. The renderer process must not access the filesystem directly. Filesystem access belongs to the Electron main process and bridge processes.
-3. Do not write into user mod workspaces directly. All writes must go through the Patch Engine.
-4. Direct `fs.writeFile` to mod resources is forbidden outside the Patch Engine.
-5. Do not claim a binary format is parsed unless a real parser implementation exists.
-6. Unsupported formats must return structured diagnostics with `parseStatus = "unsupported"`.
-7. Failed parses must return structured diagnostics with `parseStatus = "failed"`.
-8. All resource outputs must include `sourceUri`, `sourcePath`, `game`, `resourceKind`, and `diagnostics`.
-9. AI explanations must be evidence-based. If the index has no evidence, return `insufficient_evidence` instead of guessing.
-10. External FromSoftware modding tools may be studied as references only. Do not copy their source code into this repository.
-11. No real game assets, unpacked copyrighted data, or user mod files should be committed.
-12. Keep mock data tiny and synthetic.
+`docs/PRODUCT_VISION.md` 仅描述长期产品愿景，不是版本验收标准。synthetic fixture 文档仅定义测试格式，不是 native 完成声明。
 
-## Performance rules
+## 最高优先级
 
-SoulForge should feel closer to a lightweight workspace tool than a heavy 3D editor.
+1. 不新增技术债。
+2. 正确性与可验证性。
+3. 安全、凭据和用户资产合规。
+4. 与既定架构和写入边界一致。
+5. 交付速度与改动体量。
 
-- Do not load full maps, params, or text databases into the renderer at startup.
-- Use lazy parsing and incremental indexing.
-- Long tasks must run asynchronously and report progress.
-- Long tasks must be cancelable where practical.
-- Bridge processes must have timeouts.
-- Use virtualized lists for large tables.
-- Do not add Blender, 3D map rendering, embedding/vector search, or local LLM runtimes in v0.1.
-- AI sidebar must be optional and idle by default.
+## 当前 V0.5 范围
 
-## v0.1 resource priority
+- 正式平台：Windows 10/11 x64。
+- 权威游戏基线：Sekiro。
+- 原生容器：DFLT、KRAK、BND4。
+- 核心语义资源：EMEVD、MSB、PARAM、FMG。
+- 专业桌面：安全 Hex、EMEVD 四视图、PARAM/参数结构定义、FMG 本地化、MSB 完整 3D 场景。
+- 资产导入：glTF/GLB、PNG、TGA、DDS，并安全转换为 Sekiro 原生资产。
+- AI：OpenAI-compatible 与 Anthropic-compatible 两类真实模型服务。
+- 所有写入：PatchIR → 暂存区 → 验证 → 备份 → 原子替换 → 重读 → 索引 → 审计 → 回滚。
 
-Deep parsing targets:
+完整 3D 场景和资产替换已经明确纳入 V0.5；不要引用旧的“不做 3D”约束。内置 mesh 建模、贴图绘制、材质创作和动画制作仍不在 V0.5。
 
-1. `event` — EMEVD/event resources.
-2. `map` — MSB map entity and region symbols.
-3. `param` — PARAM rows and fields.
-4. `msg` — FMG text entries.
+## 硬约束
 
-File-level indexing only for v0.1:
+1. renderer 不得直接访问文件系统，也不得获得真实绝对路径。
+2. 原版游戏目录永远只读。
+3. 不得在 Mod 工作区写入 SoulForge 数据库、缓存、日志、恢复元数据或其他旁路文件。
+4. 所有 Mod 资源写入必须经过 Patch Engine；writer 和 converter 只能写暂存区。
+5. 禁止在 Patch Engine 外直接使用 `fs.writeFile` 修改 Mod 资源。
+6. 未有真实 parser 时不得声称格式已解析。
+7. unsupported、candidate、fixture-confirmed、native-verified 必须严格区分。
+8. unsupported/failed/partial 必须返回结构化诊断，不能吞异常。
+9. 所有资源输出必须包含 `sourceUri`、`sourcePath`、`game`、`resourceKind` 和 `diagnostics`。
+10. AI 没有充分证据时必须返回 `insufficient_evidence`。
+11. 完全权限不能绕过证据、Patch Engine、验证、备份、审计和回滚。
+12. 外部 FromSoftware Mod 工具只能用于行为对照，不复制源码，不作为核心 parser/writer 运行依赖。
+13. 不提交真实游戏资产、用户 Mod、私有测试语料、Oodle DLL、API key 或签名私钥。
+14. synthetic 测试数据必须微小、合法构造且明确标记。
+15. 长任务必须异步、可报告进度、可取消并有超时。
+16. 大文件、大表格和 3D 场景必须懒加载、分页、虚拟化或分块。
 
-- `menu`
-- `script`
-- `action`
-- `ai`
-- `sfx`
-- other unknown resources
+## 实施顺序
 
-## Architecture rules
+严格按交接书 P0 → P7 推进。优先解决高风险根因：
 
-Preferred monorepo layout:
+1. 文档口径和 Electron/路径/权限/恢复安全。
+2. SQLite 权威存储、工作区会话和 Bridge daemon。
+3. DFLT/KRAK/BND4 原生容器。
+4. FMG、PARAM、EMEVD、MSB 无损语义闭环。
+5. 3D 与资产转换。
+6. 专业桌面。
+7. 双模型服务 Agent。
+8. 发行和真实游戏门禁。
 
-```text
-apps/desktop/              Electron + React + TypeScript app
-packages/shared/           shared TypeScript types and schemas
-packages/core/             workspace, index, references, patch logic
-bridge/SoulForge.Bridge/   C# helper for FromSoftware resource inspection/export
-mcp/                       future MCP server adapter, not required for v0.1
-docs/                      design notes and Codex tasks
-```
+一个阶段的 required tests、真实验证或恢复路径未通过时，不得标记完成或跳到依赖它的写能力。
 
-The Electron app should call the C# bridge as a helper process. TypeScript should not directly reimplement all FromSoftware binary parsing.
+## 编码与接口
 
-## Patch Engine rules
+- 内部代码标识保持英文。
+- 面向用户的非 Mod 圈术语必须汉化；`Profile` 显示为“游戏适配包”，`Provider` 显示为“模型服务”。
+- 优先小而明确的模块、typed schema 和结构化诊断。
+- 索引投影与无损可写文档必须分离。
+- C# Bridge 是 FromSoftware 原生二进制格式的唯一 production authority。
+- TypeScript 负责工作区、索引、资源关系、PatchIR、事务、AI 和 UI 编排，不维护第二套 native parser。
+- 非必要不引入依赖；交接书已经裁定的依赖按其用途使用，并完成许可证/维护审查。
 
-Saving must follow this pipeline:
+## 辅助代码生成
 
-```text
-change request
-  -> patch proposal
-  -> apply patch to staging copy
-  -> validate staged files
-  -> backup original files
-  -> atomic replace
-  -> re-read/re-parse saved files
-  -> update index
-  -> write operation log
-```
+本项目只允许把 Grok 作为快速代码助手；不要调用 Claude Code。Grok 也只限简单、机械、低风险、边界清晰的子任务，例如：
 
-If validation fails:
+- 重复 DTO/测试样板；
+- 机械重命名；
+- 明确 schema 的序列化代码；
+- 无安全决策的 UI 样板。
 
-- Normal mode: stop and return diagnostics to the user.
-- Plan mode: stop before execution and show the plan/diff only.
-- Full-permission mode: AI may retry against staging copies only, up to a small configured retry limit. It must not damage original files.
+以下任务不得交给辅助模型决策：
 
-## AI rules
+- 架构设计；
+- 安全敏感代码；
+- 复杂 bug 定位；
+- 大规模跨文件重构；
+- 数据库迁移；
+- native parser/writer；
+- Patch Engine、回滚和恢复；
+- 影响核心业务正确性的逻辑。
 
-The AI sidebar is part of the product shell, but model integration may start as a placeholder/tool-console mode.
+辅助模型输出必须由主 Agent 审查、集成并运行真实验证。
 
-Provider abstraction should allow:
+## 文档纪律
 
-- OpenAI-compatible provider.
-- Anthropic-compatible provider.
-- Mock/local tool-console provider.
+- `docs/V0_5_IMPLEMENTATION_HANDOFF.md` 是唯一可执行规划和进度来源。
+- 不新建平行的 milestone、fork、next-actions、project-state 或 task 文档。
+- 新的稳定格式规格可以单独建技术文档，但必须由交接书引用，并且不能改变产品范围。
+- 每个阶段的已完成/已验证/未验证/非声明直接更新交接书的“实施进度记录”。
+- 不编造未运行、未读取、未验证的结果。
 
-Supported UX concepts:
+## 验证
 
-- Thinking intensity: `fast`, `normal`, `deep`, `extreme`.
-- Plan mode: AI proposes a plan and diff, but does not execute.
-- Full-permission mode: AI may run approved tools automatically, but still cannot bypass the Patch Engine.
+最低回归：
 
-## CodexPro bridge
+~~~powershell
+npm run typecheck
+npm test
+npm run bridge:verify:synthetic
+npm run build
+~~~
 
-CodexPro is available as a development-time bridge for connecting ChatGPT Developer Mode to this local repository. It is not part of the SoulForge Electron runtime and must not be treated as a production feature.
+涉及本机真实 Mod：
 
-Use it when another ChatGPT/Codex conversation needs to inspect or edit this repository through a local MCP bridge:
+~~~powershell
+npm run test:native-preview
+npm run test:real-mod -w @soulforge/core
+~~~
 
-```powershell
+真实 Mod smoke 通过只证明对应断言，不代表全部 native semantic writer 完成。
+
+## CodexPro
+
+CodexPro 仅是开发期本地桥，不属于 SoulForge 产品运行时：
+
+~~~powershell
 cd D:\Repository\SoulForge
 npm run codexpro:start
-```
+~~~
 
-Default behavior in this repository:
+运行时 URL 和 token 是临时凭据，不得提交。只规划不编辑时使用：
 
-- ChatGPT may read and edit SoulForge source files inside this workspace.
-- Bash is `safe` and requires the CodexPro bash session id `soulforge`.
-- Runtime Server URLs and tokens are temporary; do not commit them.
-- If a task should only create a plan and not edit files directly, use `npm run codexpro:start:handoff`.
+~~~powershell
+npm run codexpro:start:handoff
+~~~
 
-For copy-paste startup instructions, read `docs/CODEXPRO_QUICKSTART.md`.
-
-## Testing rules
-
-Every core module must be testable with synthetic mock workspaces.
-
-Minimum tests for v0.1:
-
-- Workspace scanning does not write into the workspace.
-- Unsupported binary files return diagnostics instead of crashing.
-- Search returns paths and source URIs.
-- Reference builder distinguishes high-confidence and lower-confidence references.
-- Patch Engine validation failure does not alter original files.
-
-## Coding style
-
-- Prefer small, explicit modules.
-- Prefer typed schemas over ad-hoc objects.
-- Prefer structured diagnostics over thrown opaque errors.
-- Keep user-facing strings ready for Chinese UI, but keep internal code identifiers in English.
-- Avoid premature plugin systems, 3D rendering, embeddings, or real AI execution before the core event-resource pipeline works.
+详细启动方式见 `docs/CODEXPRO_QUICKSTART.md`。

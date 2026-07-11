@@ -1,7 +1,8 @@
-import { access, constants, stat } from 'node:fs/promises';
-import { isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
+import { access, constants, realpath, stat } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import type { Diagnostic, OverlayLayer, WorkspaceLayers, WorkspaceSessionMeta } from '@soulforge/shared';
 import { makeWorkspaceId } from './resourceUri.js';
+import { isPathInside, pathsEqual, verifyPathInsideRoot } from './pathBoundary.js';
 
 export interface OpenWorkspaceSessionOptions {
   overlayRoot: string;
@@ -29,6 +30,12 @@ export interface WorkspaceSession {
    * Base paths are always rejected; only overlay (or explicit staging) is writable.
    */
   resolveWritablePath(absolutePath: string, layer?: OverlayLayer): ResolveWritablePathResult;
+  /**
+   * Authoritative write check that resolves existing junctions/symbolic links.
+   * Call this immediately before filesystem mutation; the synchronous method is
+   * only a lexical precheck for UI and proposal construction.
+   */
+  resolveWritablePathSecure(absolutePath: string, layer?: OverlayLayer): Promise<ResolveWritablePathResult>;
   /** Map a relative path to the overlay absolute path. */
   toOverlayPath(relativePath: string): string;
   /** Map a relative path to the base absolute path when base exists. */
@@ -40,13 +47,15 @@ export interface WorkspaceSession {
  * install is read-only base. All Patch Engine writes must target overlay.
  */
 export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions): Promise<WorkspaceSession> {
-  const overlayRoot = resolve(options.overlayRoot);
-  await assertDirectory(overlayRoot, 'overlayRoot');
+  const requestedOverlayRoot = resolve(options.overlayRoot);
+  await assertDirectory(requestedOverlayRoot, 'overlayRoot');
+  const overlayRoot = await realpath(requestedOverlayRoot);
 
   let baseRoot: string | undefined;
   if (options.baseRoot) {
-    baseRoot = resolve(options.baseRoot);
-    await assertDirectory(baseRoot, 'baseRoot');
+    const requestedBaseRoot = resolve(options.baseRoot);
+    await assertDirectory(requestedBaseRoot, 'baseRoot');
+    baseRoot = await realpath(requestedBaseRoot);
     if (pathsEqual(overlayRoot, baseRoot)) {
       throw new Error('baseRoot must not be the same directory as overlayRoot.');
     }
@@ -69,7 +78,7 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
     baseMissing: !baseRoot
   };
 
-  return {
+  const session: WorkspaceSession = {
     meta,
     layers,
     isOverlayPath(absolutePath: string): boolean {
@@ -96,8 +105,15 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
         if (stagingRoot && isPathInside(stagingRoot, resolved)) {
           return { ok: true, absolutePath: resolved, layer, diagnostics };
         }
-        // Temp staging from Patch Engine may live outside the session staging root.
-        return { ok: true, absolutePath: resolved, layer, diagnostics };
+        diagnostics.push({
+          severity: 'error',
+          code: stagingRoot ? 'WRITE_OUTSIDE_STAGING' : 'STAGING_ROOT_NOT_CONFIGURED',
+          message: stagingRoot
+            ? '暂存写入必须位于当前会话的暂存根目录内。'
+            : '当前工作区会话没有配置暂存根目录。',
+          details: { absolutePath: resolved, stagingRoot }
+        });
+        return { ok: false, layer, diagnostics };
       }
 
       if (baseRoot && isPathInside(baseRoot, resolved)) {
@@ -122,6 +138,24 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
 
       return { ok: true, absolutePath: resolved, layer: 'overlay', diagnostics };
     },
+    async resolveWritablePathSecure(
+      absolutePath: string,
+      layer: OverlayLayer = 'overlay'
+    ): Promise<ResolveWritablePathResult> {
+      const lexical = session.resolveWritablePath(absolutePath, layer);
+      if (!lexical.ok || !lexical.absolutePath) return lexical;
+
+      const allowedRoot = layer === 'staging' ? stagingRoot : overlayRoot;
+      if (!allowedRoot) return lexical;
+      const verified = await verifyPathInsideRoot(allowedRoot, lexical.absolutePath);
+      return verified.ok
+        ? lexical
+        : {
+            ok: false,
+            layer,
+            diagnostics: [...lexical.diagnostics, ...verified.diagnostics]
+          };
+    },
     toOverlayPath(relativePath: string): string {
       return join(overlayRoot, normalizeRelative(relativePath));
     },
@@ -130,6 +164,7 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
       return join(baseRoot, normalizeRelative(relativePath));
     }
   };
+  return session;
 }
 
 export function assertWritableThroughSession(
@@ -140,24 +175,21 @@ export function assertWritableThroughSession(
   return session.resolveWritablePath(absolutePath).diagnostics;
 }
 
+export async function assertWritableThroughSessionSecure(
+  session: WorkspaceSession | undefined,
+  absolutePath: string
+): Promise<Diagnostic[]> {
+  if (!session) return [];
+  return (await session.resolveWritablePathSecure(absolutePath)).diagnostics;
+}
+
 function normalizeRelative(relativePath: string): string {
   const normalized = relativePath.replaceAll('\\', '/').replace(/^\/+/, '');
-  if (normalized.includes('..')) {
+  const segments = normalized.split('/');
+  if (segments.some((segment) => segment === '..') || normalized.length === 0) {
     throw new Error(`Relative path escapes workspace: ${relativePath}`);
   }
   return normalized;
-}
-
-function isPathInside(root: string, candidate: string): boolean {
-  const resolvedRoot = resolve(root);
-  const resolvedCandidate = resolve(candidate);
-  if (pathsEqual(resolvedRoot, resolvedCandidate)) return true;
-  const rel = relative(resolvedRoot, resolvedCandidate);
-  return rel !== '' && !rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel);
-}
-
-function pathsEqual(left: string, right: string): boolean {
-  return normalize(resolve(left)).toLowerCase() === normalize(resolve(right)).toLowerCase();
 }
 
 async function assertDirectory(path: string, label: string): Promise<void> {

@@ -291,17 +291,292 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 
 CREATE INDEX IF NOT EXISTS idx_agent_runs_workspace_created ON agent_runs(workspace_id, created_at);
 
--- Extend operation_logs for v0.5 commit/rollback timestamps when present.
-ALTER TABLE operation_logs ADD COLUMN committed_at TEXT;
-ALTER TABLE operation_logs ADD COLUMN rolled_back_at TEXT;
-ALTER TABLE operation_logs ADD COLUMN backup_root TEXT;
-ALTER TABLE operation_logs ADD COLUMN graph_json TEXT;
+`
+  },
+  {
+    id: 3,
+    name: 'v0_5_durable_transactions_and_inverse_history',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+ALTER TABLE patch_history ADD COLUMN transaction_id TEXT;
+ALTER TABLE patch_history ADD COLUMN recovery_path TEXT;
+ALTER TABLE patch_history ADD COLUMN recovery_reason TEXT;
+ALTER TABLE patch_history ADD COLUMN inverse_of_op_id TEXT;
+ALTER TABLE patch_history ADD COLUMN rollback_scope TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_patch_history_inverse
+  ON patch_history(workspace_id, inverse_of_op_id);
+
+CREATE TABLE IF NOT EXISTS transaction_journal (
+  transaction_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  op_id TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  state_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_transaction_journal_workspace_phase
+  ON transaction_journal(workspace_id, phase);
+
+CREATE TABLE IF NOT EXISTS resource_entry_changes (
+  id TEXT PRIMARY KEY,
+  op_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  resource_uri TEXT NOT NULL,
+  entry_uri TEXT NOT NULL,
+  change_kind TEXT NOT NULL,
+  before_hash TEXT,
+  after_hash TEXT,
+  inverse_json TEXT NOT NULL,
+  FOREIGN KEY (op_id) REFERENCES patch_history(op_id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_entry_changes_op
+  ON resource_entry_changes(op_id);
+
+CREATE TABLE IF NOT EXISTS recovery_points (
+  recovery_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  op_id TEXT,
+  root_path TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  metadata_json TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_points_workspace_created
+  ON recovery_points(workspace_id, created_at);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  event_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  event_kind TEXT NOT NULL,
+  op_id TEXT,
+  transaction_id TEXT,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_workspace_created
+  ON audit_events(workspace_id, created_at);
+
+CREATE TABLE IF NOT EXISTS legacy_imports (
+  source_kind TEXT NOT NULL,
+  source_path_hash TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  record_count INTEGER NOT NULL,
+  backup_path TEXT NOT NULL,
+  PRIMARY KEY (source_kind, source_path_hash, content_hash)
+);
+`
+  },
+  {
+    id: 4,
+    name: 'v0_5_resource_graph_authority',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS resource_graph_snapshots (
+  workspace_id TEXT PRIMARY KEY,
+  graph_version TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  node_count INTEGER NOT NULL,
+  edge_count INTEGER NOT NULL,
+  metadata_json TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS resource_nodes (
+  node_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  uri TEXT NOT NULL,
+  resource_kind TEXT,
+  overlay TEXT,
+  label TEXT NOT NULL,
+  properties_json TEXT NOT NULL,
+  confidence_json TEXT,
+  provenance_json TEXT,
+  diagnostics_json TEXT NOT NULL,
+  content_hash TEXT,
+  version TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_nodes_workspace_uri
+  ON resource_nodes(workspace_id, uri);
+CREATE INDEX IF NOT EXISTS idx_resource_nodes_workspace_kind
+  ON resource_nodes(workspace_id, resource_kind, kind);
+
+CREATE TABLE IF NOT EXISTS resource_edges (
+  edge_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  from_id TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  uri TEXT,
+  label TEXT,
+  properties_json TEXT NOT NULL,
+  confidence_json TEXT,
+  provenance_json TEXT,
+  diagnostics_json TEXT NOT NULL,
+  version TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (from_id) REFERENCES resource_nodes(node_id) ON DELETE CASCADE,
+  FOREIGN KEY (to_id) REFERENCES resource_nodes(node_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_edges_from ON resource_edges(workspace_id, from_id);
+CREATE INDEX IF NOT EXISTS idx_resource_edges_to ON resource_edges(workspace_id, to_id);
+`
+  },
+  {
+    id: 5,
+    name: 'v0_5_fine_grained_rollback_target',
+    sql: `
+ALTER TABLE patch_history ADD COLUMN rollback_target_uri TEXT;
+CREATE INDEX IF NOT EXISTS idx_patch_history_rollback_target
+  ON patch_history(workspace_id, inverse_of_op_id, rollback_scope, rollback_target_uri);
+`
+  },
+  {
+    id: 6,
+    name: 'v0_5_file_diagnostic_and_job_repositories',
+    sql: `
+ALTER TABLE files ADD COLUMN compound_extension TEXT NOT NULL DEFAULT '';
+ALTER TABLE files ADD COLUMN format_kind TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE files ADD COLUMN format_label TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS background_jobs (
+  job_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  job_kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress_current INTEGER NOT NULL DEFAULT 0,
+  progress_total INTEGER,
+  progress_message TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT,
+  error_json TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_jobs_workspace_status
+  ON background_jobs(workspace_id, status, created_at);
+`
+  }
+];
+
+export const APP_DB_MIGRATIONS: readonly SqlMigration[] = [
+  {
+    id: 1,
+    name: 'v0_5_app_authority',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS model_services (
+  service_id TEXT PRIMARY KEY,
+  service_kind TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  api_mode TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  credential_ciphertext BLOB,
+  credential_key_ref TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS permission_grants (
+  grant_id TEXT PRIMARY KEY,
+  service_id TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  permission_mode TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  granted_at TEXT NOT NULL,
+  revoked_at TEXT,
+  FOREIGN KEY (service_id) REFERENCES model_services(service_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_permission_grants_service
+  ON permission_grants(service_id, revoked_at);
+
+CREATE TABLE IF NOT EXISTS ai_conversations (
+  conversation_id TEXT PRIMARY KEY,
+  workspace_key TEXT,
+  service_id TEXT,
+  retention_mode TEXT NOT NULL DEFAULT 'thirty_days',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  expires_at TEXT,
+  FOREIGN KEY (service_id) REFERENCES model_services(service_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_messages (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  body_text TEXT NOT NULL,
+  tool_json TEXT,
+  usage_json TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (conversation_id) REFERENCES ai_conversations(conversation_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_messages_conversation_created
+  ON ai_messages(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS adaptation_packages (
+  package_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  manifest_json TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL,
+  signer_key_id TEXT NOT NULL,
+  signature BLOB NOT NULL,
+  trust_state TEXT NOT NULL,
+  installed_at TEXT NOT NULL,
+  enabled_at TEXT,
+  PRIMARY KEY (package_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS trusted_signers (
+  key_id TEXT PRIMARY KEY,
+  public_key BLOB NOT NULL,
+  trust_source TEXT NOT NULL,
+  trusted_at TEXT NOT NULL,
+  revoked_at TEXT
+);
 `
   }
 ];
 
 export function getLatestSchemaVersion(): number {
   return SQLITE_MIGRATIONS[SQLITE_MIGRATIONS.length - 1]?.id ?? 0;
+}
+
+export function getLatestAppSchemaVersion(): number {
+  return APP_DB_MIGRATIONS[APP_DB_MIGRATIONS.length - 1]?.id ?? 0;
 }
 
 export function splitSqlStatements(sql: string): string[] {

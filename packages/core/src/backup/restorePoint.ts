@@ -11,6 +11,7 @@ export interface BackupFileEntry {
   sourcePath: string;
   backupPath: string;
   beforeHash: string;
+  sizeBytes: number;
 }
 
 export interface RestorePoint {
@@ -18,6 +19,7 @@ export interface RestorePoint {
   root: string;
   createdAt: string;
   files: BackupFileEntry[];
+  sizeBytes: number;
   metadataPath: string;
 }
 
@@ -26,7 +28,9 @@ export async function createRestorePoint(input: {
   baseDir?: string;
   label?: string;
 }): Promise<RestorePoint> {
-  const root = await mkdtemp(join(input.baseDir ?? tmpdir(), 'soulforge-backup-'));
+  const baseDir = input.baseDir ?? tmpdir();
+  await mkdir(baseDir, { recursive: true });
+  const root = await mkdtemp(join(baseDir, 'soulforge-backup-'));
   const files: BackupFileEntry[] = [];
 
   for (const sourcePath of input.sourcePaths) {
@@ -35,7 +39,7 @@ export async function createRestorePoint(input: {
     const backupPath = join(root, 'files', safeName(sourcePath), basename(sourcePath));
     await mkdir(dirname(backupPath), { recursive: true });
     await copyFile(sourcePath, backupPath);
-    files.push({ sourcePath, backupPath, beforeHash });
+    files.push({ sourcePath, backupPath, beforeHash, sizeBytes: bytes.byteLength });
   }
 
   const restorePoint: RestorePoint = {
@@ -43,6 +47,7 @@ export async function createRestorePoint(input: {
     root,
     createdAt: new Date().toISOString(),
     files,
+    sizeBytes: files.reduce((total, file) => total + file.sizeBytes, 0),
     metadataPath: join(root, 'restore-point.json')
   };
 
@@ -52,6 +57,7 @@ export async function createRestorePoint(input: {
       restorePointId: restorePoint.restorePointId,
       createdAt: restorePoint.createdAt,
       label: input.label ?? null,
+      sizeBytes: restorePoint.sizeBytes,
       files: restorePoint.files
     }, null, 2)}\n`,
     'utf8'

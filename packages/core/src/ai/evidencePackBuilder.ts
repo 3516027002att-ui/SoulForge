@@ -38,7 +38,7 @@ export interface BuiltEvidencePack extends EvidencePack {
   autoCommitAllowed: boolean;
 }
 
-export function buildEvidencePack(input: {
+export async function buildEvidencePack(input: {
   workspaceId: string;
   resourceUri: string;
   index: SemanticWorkspaceIndex;
@@ -46,7 +46,7 @@ export function buildEvidencePack(input: {
   scope?: EvidencePackScope[];
   absolutePath?: string;
   relativePath?: string;
-}): BuiltEvidencePack {
+}): Promise<BuiltEvidencePack> {
   const scope = input.scope ?? [
     'current_resource',
     'direct_references',
@@ -137,7 +137,7 @@ export function buildEvidencePack(input: {
 
   const patchHistoryOpIds: string[] = [];
   if (scope.includes('patch_history') && input.operationLog) {
-    for (const entry of input.operationLog.history(input.workspaceId)) {
+    for (const entry of await input.operationLog.history(input.workspaceId)) {
       if (entry.changedPaths.some((p) => p.replaceAll('\\', '/').endsWith(relativePath))) {
         patchHistoryOpIds.push(entry.opId);
       }
