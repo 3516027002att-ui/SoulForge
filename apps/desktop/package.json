@@ -2,6 +2,8 @@
   "name": "@soulforge/desktop",
   "version": "0.0.0",
   "private": true,
+  "description": "SoulForge desktop workbench for FromSoftware Mod editing",
+  "author": "SoulForge contributors",
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
@@ -11,13 +13,13 @@
     "build": "npm run typecheck && electron-vite build",
     "prepare:database-native": "node ../../scripts/prepare-electron-sqlite-binding.mjs",
     "test:database-utility": "node ../../scripts/run-database-utility-smoke.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pack:dir": "electron-builder --config electron-builder.yml --win dir --x64"
   },
   "dependencies": {
     "@soulforge/core": "0.0.0",
     "@soulforge/shared": "0.0.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^43.0.0",
     "electron-vite": "^3.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -28,6 +30,8 @@
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "@types/three": "^0.172.0",
+    "electron": "43.0.0",
+    "electron-builder": "^25.1.8",
     "vite": "^6.0.11"
   }
 }

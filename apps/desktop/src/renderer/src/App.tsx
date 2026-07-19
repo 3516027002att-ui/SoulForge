@@ -131,9 +131,9 @@ const DEMO_EMEVD_DOCUMENT: EmevdEditorDocument = {
 };
 
 const DEMO_FMG_ENTRIES = [
-  { id: 5200, text: '旋风斩' },
-  { id: 5201, text: '寄鹰斩' },
-  { id: 5300, text: '义手忍具' }
+  { id: 5200, text: '旋风斩', stringIndex: 0 },
+  { id: 5201, text: '寄鹰斩', stringIndex: 1 },
+  { id: 5300, text: '义手忍具', stringIndex: 2 }
 ];
 
 const DEMO_PARAM_ROWS = [
@@ -242,11 +242,11 @@ export function App(): ReactElement {
         };
         if (cancelled) return;
         if (!result?.ok || !result.data?.rows?.length) {
-          setParamRows(DEMO_PARAM_ROWS);
+          setParamRows([]);
           setParamLive(false);
           setParamSourceHash(null);
           setParamRowPayloads(new Map());
-          setStatus('PARAM 实时读取失败，已回退演示行。');
+          setStatus('PARAM 实时读取失败：未加载可编辑演示数据。请选择可解析的 PARAM 资源。');
           return;
         }
         const payloads = new Map<number, string>();
@@ -286,9 +286,10 @@ export function App(): ReactElement {
         ?? visibleFiles.find((file) => file.resourceKind === 'msg')
         ?? null;
       if (!target || typeof window.soulforge.readFmgDocument !== 'function') {
-        setFmgEntries(DEMO_FMG_ENTRIES);
+        setFmgEntries([]);
         setFmgSourceHash(null);
         setFmgLive(false);
+        setStatus('未选择可解析 FMG，或预加载未暴露 readFmgDocument。');
         return;
       }
       setStatus(`正在读取 FMG：${target.relativePath}`);
@@ -297,20 +298,24 @@ export function App(): ReactElement {
           ok?: boolean;
           data?: {
             sourceHash?: string;
-            entries?: Array<{ id: number; text: string }>;
+            entries?: Array<{ id: number; text: string; stringIndex: number }>;
             entryCount?: number;
             authority?: string;
           } | null;
         };
         if (cancelled) return;
         if (!result?.ok || !result.data?.entries?.length) {
-          setFmgEntries(DEMO_FMG_ENTRIES);
+          setFmgEntries([]);
           setFmgSourceHash(null);
           setFmgLive(false);
-          setStatus('FMG 实时读取失败，已回退演示条目。');
+          setStatus('FMG 实时读取失败：未加载可编辑演示数据。请选择可解析的 FMG 资源。');
           return;
         }
-        setFmgEntries(result.data.entries.map((e) => ({ id: e.id, text: e.text })));
+        setFmgEntries(result.data.entries.map((e) => ({
+          id: e.id,
+          text: e.text,
+          stringIndex: e.stringIndex
+        })));
         setFmgSourceHash(result.data.sourceHash ?? null);
         setFmgLive(true);
         setStatus(
@@ -337,9 +342,10 @@ export function App(): ReactElement {
         ?? visibleFiles.find((file) => file.resourceKind === 'map')
         ?? null;
       if (!target || typeof window.soulforge.readMsbDocument !== 'function') {
-        setMsbParts(DEMO_MSB_PARTS);
+        setMsbParts([]);
         setMsbRegions([]);
         setMsbLive(false);
+        setStatus('未选择可解析 MSB，或预加载未暴露 readMsbDocument。');
         return;
       }
       setStatus(`正在读取 MSB：${target.relativePath}`);
@@ -372,10 +378,10 @@ export function App(): ReactElement {
         };
         if (cancelled) return;
         if (!result?.ok || !result.data?.parts?.length) {
-          setMsbParts(DEMO_MSB_PARTS);
+          setMsbParts([]);
           setMsbRegions([]);
           setMsbLive(false);
-          setStatus('MSB 实时读取失败，已回退演示 parts。');
+          setStatus('MSB 实时读取失败：未加载可编辑演示 parts。请选择可解析的 MSB 资源。');
           return;
         }
         setMsbParts(result.data.parts.map((p) => ({
@@ -422,9 +428,19 @@ export function App(): ReactElement {
         ?? visibleFiles.find((file) => file.resourceKind === 'event')
         ?? null;
       if (!target || typeof window.soulforge.readEmevdDocument !== 'function') {
-        setEmevdDocument(DEMO_EMEVD_DOCUMENT);
+        setEmevdDocument({
+          ...DEMO_EMEVD_DOCUMENT,
+          resourceUri: 'file://event/unavailable.emevd',
+          events: [],
+          diagnostics: [{
+            severity: 'warning',
+            code: 'EMEVD_LIVE_UNAVAILABLE',
+            message: '未选择可解析 EMEVD，或预加载未暴露 readEmevdDocument。'
+          }]
+        });
         setEmevdSourceHash(null);
         setEmevdLive(false);
+        setStatus('未选择可解析 EMEVD，或预加载未暴露 readEmevdDocument。');
         return;
       }
       setStatus(`正在读取 EMEVD：${target.relativePath}`);
@@ -439,16 +455,17 @@ export function App(): ReactElement {
           setEmevdDocument({
             ...DEMO_EMEVD_DOCUMENT,
             resourceUri: target.sourceUri,
+            events: [],
             diagnostics: [{
-              severity: 'warning',
+              severity: 'error',
               code: 'EMEVD_LIVE_READ_FAILED',
               message: result?.diagnostics?.[0]?.message
-                ?? '未能从 Bridge 读取 EMEVD；显示演示文档。'
+                ?? '未能从 Bridge 读取 EMEVD；未加载可编辑演示文档。'
             }]
           });
           setEmevdSourceHash(null);
           setEmevdLive(false);
-          setStatus('EMEVD 实时读取失败，已回退演示文档。');
+          setStatus('EMEVD 实时读取失败：未加载可编辑演示文档。');
           return;
         }
         const doc = mapEmevdEnvelopeToDocument(target.sourceUri, result.data, { maxEvents: 128 });
@@ -890,7 +907,7 @@ export function App(): ReactElement {
           {workspaceMode === 'map' && (
             <>
               <p className="muted">
-                {msbLive ? '实时 Bridge MSB parts' : '演示 parts（未选中可解析 MSB 或读取失败）'}
+                {msbLive ? '实时 Bridge MSB parts' : '无实时 MSB 数据（未选中可解析 MSB 或读取失败）'}
               </p>
               <MsbScenePanel
                 key={`${selectedFile?.sourceUri ?? 'demo'}:${msbLive ? 'live' : 'demo'}:${msbParts.length}:${msbRegions.length}`}
@@ -913,7 +930,7 @@ export function App(): ReactElement {
               <p className="muted">
                 {emevdLive
                   ? `实时 Bridge 文档${emevdSourceHash ? ` · hash ${emevdSourceHash.slice(0, 12)}…` : ''}`
-                  : '演示文档（未选中可解析的 EMEVD 或读取失败）'}
+                  : '无实时 EMEVD 数据（未选中可解析资源或读取失败）'}
               </p>
               <EmevdFourViewPanel
                 key={`${emevdDocument.resourceUri}:${emevdDocument.revision}:${emevdLive ? 'live' : 'demo'}`}
@@ -929,20 +946,37 @@ export function App(): ReactElement {
                       return;
                     }
                     setStatus('正在经 Bridge/补丁引擎提交 EMEVD mutation…');
-                    const eventIdMatch = /#event\/(-?\d+)/.exec(mutation.eventUri);
-                    const eventId = eventIdMatch ? Number(eventIdMatch[1]) : undefined;
-                    const bridgeMutation =
+                    const selectedEvent = emevdDocument.events.find((event) =>
+                      event.eventUri === mutation.eventUri);
+                    if (!selectedEvent || selectedEvent.eventIndex === undefined) {
+                      setStatus('EMEVD 事件身份已失效；请重读文档后再提交。');
+                      return;
+                    }
+                    const eventId = selectedEvent?.eventId;
+                    const eventIndex = selectedEvent?.eventIndex;
+                    const bridgeMutation: Record<string, unknown> =
                       mutation.kind === 'emevd_set_rest_behavior'
                         ? {
                             kind: 'set_rest_behavior',
                             eventId,
+                            eventIndex,
                             restBehavior: mutation.restBehavior
                           }
-                        : {
-                            kind: 'update_id',
-                            eventId,
-                            newEventId: mutation.newEventId
-                          };
+                        : mutation.kind === 'emevd_reorder_event'
+                          ? {
+                              kind: 'reorder_event',
+                              eventId,
+                              eventIndex,
+                              ...(mutation.beforeEventIndex === undefined
+                                ? {}
+                                : { beforeEventIndex: mutation.beforeEventIndex })
+                            }
+                          : {
+                              kind: 'update_id',
+                              eventId,
+                              eventIndex,
+                              newEventId: mutation.newEventId
+                            };
                     const result = await window.soulforge.applyEmevdMutation(
                       selectedFile.sourceUri,
                       emevdSourceHash,
@@ -977,10 +1011,10 @@ export function App(): ReactElement {
               <p className="muted">
                 {fmgLive
                   ? `实时 Bridge FMG${fmgSourceHash ? ` · hash ${fmgSourceHash.slice(0, 12)}…` : ''}`
-                  : '演示条目（未选中可解析 FMG 或读取失败）'}
+                  : '无实时 FMG 数据（未选中可解析资源或读取失败）'}
               </p>
               <FmgWorkbenchPanel
-                key={`${selectedFile?.sourceUri ?? 'demo'}:${fmgLive ? 'live' : 'demo'}`}
+                key={`${selectedFile?.sourceUri ?? 'demo'}:${fmgLive ? 'live' : 'demo'}:${fmgSourceHash ?? 'nohash'}`}
                 resourceUri={selectedFile?.sourceUri ?? 'file://msg/demo.fmg'}
                 entries={fmgEntries}
                 onMutation={(mutation) => {
@@ -994,13 +1028,25 @@ export function App(): ReactElement {
                       return;
                     }
                     setStatus('正在经 Bridge/补丁引擎提交 FMG mutation…');
+                    const kind =
+                      mutation.kind === 'fmg_entry_delete'
+                        ? 'delete'
+                        : mutation.kind === 'fmg_entry_insert'
+                          ? 'insert'
+                          : mutation.kind === 'fmg_entry_reorder'
+                            ? 'reorder'
+                            : 'upsert';
                     const result = await window.soulforge.applyFmgMutation(
                       selectedFile.sourceUri,
                       fmgSourceHash,
                       {
-                        kind: mutation.kind === 'fmg_entry_delete' ? 'delete' : 'upsert',
+                        kind,
                         id: mutation.id,
-                        ...(mutation.text !== undefined ? { text: mutation.text } : {})
+                        ...(mutation.text !== undefined ? { text: mutation.text } : {}),
+                        ...(mutation.stringIndex !== undefined ? { stringIndex: mutation.stringIndex } : {}),
+                        ...(mutation.beforeStringIndex !== undefined
+                          ? { beforeStringIndex: mutation.beforeStringIndex }
+                          : {})
                       }
                     );
                     if (!result.ok) {
@@ -1011,11 +1057,15 @@ export function App(): ReactElement {
                       ok?: boolean;
                       data?: {
                         sourceHash?: string;
-                        entries?: Array<{ id: number; text: string }>;
+                        entries?: Array<{ id: number; text: string; stringIndex: number }>;
                       } | null;
                     };
                     if (reload?.ok && reload.data?.entries) {
-                      setFmgEntries(reload.data.entries.map((e) => ({ id: e.id, text: e.text })));
+                      setFmgEntries(reload.data.entries.map((e) => ({
+                        id: e.id,
+                        text: e.text,
+                        stringIndex: e.stringIndex
+                      })));
                       setFmgSourceHash(reload.data.sourceHash ?? null);
                       setStatus('FMG 已提交并重读。');
                     } else {
@@ -1032,7 +1082,7 @@ export function App(): ReactElement {
               <p className="muted">
                 {paramLive
                   ? `实时 Bridge PARAM${paramSourceHash ? ` · hash ${paramSourceHash.slice(0, 12)}…` : ''}`
-                  : '演示行（未选中可解析 PARAM 或读取失败）'}
+                  : '无实时 PARAM 数据（未选中可解析资源或读取失败）'}
               </p>
               <ParamTablePanel
                 key={`${selectedFile?.sourceUri ?? 'demo'}:${paramLive ? 'live' : 'demo'}`}

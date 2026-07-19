@@ -13,6 +13,7 @@ import {
   SqliteMigrationError
 } from '../storage/sqliteDatabase.js';
 import { APP_DB_MIGRATIONS, SQLITE_MIGRATIONS, type SqlMigration } from '../storage/sqliteSchema.js';
+import { AppDataRepository } from '../storage/appDataRepository.js';
 import { DurableWorkspaceRepository } from '../storage/durableWorkspaceRepository.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
 import {
@@ -29,7 +30,12 @@ async function main(): Promise<void> {
   const appDb = openAppDatabase(appDbPath);
   assert(tableExists(appDb, 'model_services'), 'app.db model_services table');
   assert(tableExists(appDb, 'adaptation_packages'), 'app.db adaptation_packages table');
+  assert(tableExists(appDb, 'app_agent_runs'), 'app.db agent runs table');
+  assert(tableExists(appDb, 'outbound_context_items'), 'app.db outbound context table');
   assert(appDb.pragma('journal_mode', { simple: true }) === 'wal', 'app.db WAL');
+  assert(Number(appDb.pragma('synchronous', { simple: true })) === 2, 'app.db synchronous FULL');
+  assert(Number(appDb.pragma('secure_delete', { simple: true })) === 1, 'app.db secure delete');
+  verifyAppDataRepository(appDb);
   appDb.close();
 
   const store = openSqliteOperationLogStore({
@@ -141,6 +147,133 @@ async function main(): Promise<void> {
     workspaceMigrationCount: SQLITE_MIGRATIONS.length,
     appMigrationCount: APP_DB_MIGRATIONS.length
   }, null, 2));
+}
+
+function verifyAppDataRepository(database: BetterSqlite3.Database): void {
+  const repository = new AppDataRepository(database);
+  const service = repository.upsertModelService({
+    id: 'service-app-smoke',
+    displayName: 'App DB smoke service',
+    protocol: 'openai-compatible',
+    baseUrl: 'https://model.invalid',
+    model: 'smoke-model',
+    hasCredential: true,
+    credentialCiphertext: Buffer.from('ciphertext-only').toString('base64'),
+    createdAt: '2026-07-15T00:00:00.000Z',
+    updatedAt: '2026-07-15T00:00:00.000Z'
+  });
+  assert(service.hasCredential && !JSON.stringify(service).includes('plaintext-api-key'), 'app model config ciphertext only');
+  const grant = repository.replacePermissionGrant({
+    grantId: 'grant-plan-v1',
+    serviceId: service.id,
+    policyVersion: '1',
+    permissionMode: 'plan',
+    scope: { tools: ['read', 'analyze', 'propose'] },
+    grantedAt: '2026-07-15T00:00:00.000Z'
+  });
+  assert(repository.getActivePermissionGrant(service.id, 'plan', '1')?.grantId === grant.grantId, 'app grant active');
+  assert(repository.getActivePermissionGrant(service.id, 'plan', '2') === undefined, 'app grant policy version fails closed');
+  const run = repository.recordAgentRun({
+    runId: 'run-app-smoke',
+    conversationId: 'conversation-app-smoke',
+    workspaceKey: 'workspace-app-smoke',
+    serviceId: service.id,
+    createdAt: '2026-06-01T00:00:00.000Z',
+    completedAt: '2026-06-01T00:00:01.000Z',
+    messages: [
+      { role: 'user', content: 'redacted user context' },
+      { role: 'assistant', content: 'redacted result' }
+    ],
+    result: {
+      messages: [],
+      steps: 1,
+      finishReason: 'stop',
+      diagnostics: [],
+      audit: {
+        configId: service.id,
+        protocol: 'openai-compatible',
+        permissionMode: 'plan',
+        toolCalls: [{ name: 'workspace_stats', ok: true }],
+        redacted: true
+      }
+    },
+    outboundContextItems: [{
+      resourceUri: 'file://event/test.emevd.dcx',
+      contextKind: 'resource-summary',
+      contentHash: 'a'.repeat(64),
+      redactionSummary: { redacted: true },
+      payload: { sourceUri: 'file://event/test.emevd.dcx' }
+    }]
+  });
+  assert(run.runId === 'run-app-smoke', 'app run persisted');
+  const counts = database.prepare(`
+SELECT (SELECT COUNT(*) FROM app_agent_runs) AS runs,
+       (SELECT COUNT(*) FROM agent_steps) AS steps,
+       (SELECT COUNT(*) FROM tool_calls) AS tools,
+       (SELECT COUNT(*) FROM outbound_context_items) AS contexts
+`).get() as { runs: number; steps: number; tools: number; contexts: number };
+  assert(counts.runs === 1 && counts.steps === 1 && counts.tools === 1 && counts.contexts === 1, 'app run atomic graph persisted');
+
+  const listed = repository.listAgentRuns({ workspaceKey: 'workspace-app-smoke', limit: 10 });
+  assert(listed.length === 1 && listed[0]?.runId === 'run-app-smoke', 'listAgentRuns returns recorded run');
+  assert(listed[0]?.messageCount === 2, 'listAgentRuns messageCount');
+  assert(listed[0]?.toolCallCount === 1, 'listAgentRuns toolCallCount');
+  assert(listed[0]?.outboundItemCount === 1, 'listAgentRuns outboundItemCount');
+
+  const detail = repository.getAgentRun('run-app-smoke');
+  assert(detail !== undefined, 'getAgentRun returns detail');
+  assert(detail!.messages.length === 2, 'getAgentRun messages');
+  assert(detail!.toolCalls.length === 1 && detail!.toolCalls[0]?.toolName === 'workspace_stats', 'getAgentRun toolCalls');
+  assert(detail!.outboundContextItems.length === 1 && detail!.outboundContextItems[0]?.contextKind === 'resource-summary', 'getAgentRun outbound');
+  assert(detail!.audit.redacted === true, 'getAgentRun audit remains redacted flag');
+  assert(!JSON.stringify(detail).includes('sk-'), 'getAgentRun payload has no sk- secret marker');
+
+  assert(repository.getAiHistoryRetentionMode() === 'thirty_days', 'default AI history retention is thirty_days');
+  assert(repository.setAiHistoryRetentionMode('session') === 'session', 'set AI history retention to session');
+  assert(repository.getAiHistoryRetentionMode() === 'session', 'get AI history retention after set');
+
+  // Original thirty_days run (created 2026-06-01) remains eligible for cleanup at 2026-07-15.
+  // Session run uses expires_at=createdAt and should also be deleted by the same cleanup clock.
+  const sessionRun = repository.recordAgentRun({
+    runId: 'run-session-smoke',
+    conversationId: 'conversation-session-smoke',
+    workspaceKey: 'workspace-app-smoke',
+    serviceId: service.id,
+    retentionMode: 'session',
+    createdAt: '2026-07-14T00:00:00.000Z',
+    completedAt: '2026-07-14T00:00:01.000Z',
+    messages: [{ role: 'user', content: 'session-only' }],
+    result: {
+      messages: [{ role: 'assistant', content: 'session-result' }],
+      steps: 0,
+      finishReason: 'stop',
+      diagnostics: [],
+      audit: {
+        configId: service.id,
+        protocol: 'openai-compatible',
+        permissionMode: 'plan',
+        toolCalls: [],
+        redacted: true
+      }
+    }
+  });
+  assert(sessionRun.runId === 'run-session-smoke', 'session run persisted');
+  const sessionExpires = database.prepare(
+    "SELECT expires_at AS expiresAt FROM ai_messages WHERE conversation_id = ? LIMIT 1"
+  ).get('conversation-session-smoke') as { expiresAt: string | null };
+  assert(sessionExpires.expiresAt === '2026-07-14T00:00:00.000Z', 'session retention expires_at equals createdAt');
+
+  assert(repository.setAiHistoryRetentionMode('forever') === 'forever', 'set AI history retention to forever');
+  assert(repository.getAiHistoryRetentionMode() === 'forever', 'get AI history retention forever');
+
+  const cleanup = repository.cleanupExpiredHistory('2026-07-15T00:00:00.000Z');
+  assert(cleanup.deletedConversations === 2 && cleanup.deletedMessages === 3 && cleanup.checkpointed, 'app retention cleanup');
+  const after = database.prepare('SELECT COUNT(*) AS count FROM app_agent_runs').get() as { count: number };
+  assert(after.count === 0, 'app retention cascades run graph');
+  repository.revokePermissionGrant(grant.grantId, '2026-07-15T00:00:00.000Z');
+  assert(repository.getActivePermissionGrant(service.id, 'plan', '1') === undefined, 'app grant revoked');
+  repository.softDeleteModelService(service.id, '2026-07-15T00:00:00.000Z');
+  assert(repository.listModelServices().length === 0, 'app model service soft deleted');
 }
 
 function verifyWorkspaceDataRepositories(

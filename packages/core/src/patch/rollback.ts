@@ -10,7 +10,7 @@ import { createPatchIr } from '../patch-engine/patchIr.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import { executePatchIrThroughTransaction } from './durablePatchCommit.js';
 import type { OperationLogStore } from './operationLog.js';
-import { isValidResourceEntryInverse } from './containerChildInverse.js';
+import { isValidResourceEntryInverse } from './resourceEntryInverse.js';
 
 export interface RollbackOperationOptions {
   opId: string;

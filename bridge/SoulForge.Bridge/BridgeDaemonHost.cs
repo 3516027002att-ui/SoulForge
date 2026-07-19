@@ -256,7 +256,8 @@ internal static class BridgeDaemonHost
         }
 
         string? outputPath = null;
-        if (payload.Command.Equals("write-bnd4", StringComparison.OrdinalIgnoreCase)
+        if (payload.Command.Equals("extract-bnd4-child", StringComparison.OrdinalIgnoreCase)
+            || payload.Command.Equals("write-bnd4", StringComparison.OrdinalIgnoreCase)
             || payload.Command.Equals("write-fmg", StringComparison.OrdinalIgnoreCase)
             || payload.Command.Equals("write-param", StringComparison.OrdinalIgnoreCase)
             || payload.Command.Equals("write-emevd", StringComparison.OrdinalIgnoreCase)
@@ -417,7 +418,7 @@ internal static class BridgeDaemonHost
     {
         authority = "candidate",
         nativeFormatAuthority = false,
-        commands = new[] { "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child", "write-bnd4", "read-fmg-document", "write-fmg", "read-param-document", "write-param", "read-emevd-document", "write-emevd", "read-msb-document", "write-msb", "export-event", "export-map", "export-param", "export-msg", "probe-oodle" },
+        commands = new[] { "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child", "extract-bnd4-child", "write-bnd4", "read-fmg-document", "write-fmg", "read-param-document", "write-param", "read-emevd-document", "write-emevd", "read-msb-document", "write-msb", "export-event", "export-map", "export-param", "export-msg", "probe-oodle" },
         envelopes = new[] { "DFLT-candidate", "KRAK-runtime-dependent", "BND4-unsupported" },
         oodleRuntime = OodleRuntimeLocator.Probe(oodleRuntimeRoot).Runtime,
         cancellation = true,

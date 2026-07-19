@@ -108,6 +108,12 @@
 - 新的稳定格式规格可以单独建技术文档，但必须由交接书引用，并且不能改变产品范围。
 - 每个阶段的已完成/已验证/未验证/非声明直接更新交接书的“实施进度记录”。
 - 不编造未运行、未读取、未验证的结果。
+- 进度检查表中的 `[x]` 只允许表示该条目按交接书定义完整通过；只要仍含 `partial`、`candidate`、`fixture-confirmed`、`blocked`、`skipped`、`unverified`、`unsupported`、未完或未验证内容，就必须保持 `[ ]`。
+- 测试命令退出码为 0 不自动等于发布条件通过；必须同时检查结构化结果中的 `status`、`authority`、`skipped`、`failed` 和 corpus 覆盖数。
+- 声明某项能力可用的门禁必须包含该能力的真实正向成功路径；失败关闭、缺失诊断和 synthetic 测试只能证明边界，不能替代正向证据。
+- 严格私有语料门禁必须同时设置 `SOULFORGE_NATIVE_FIXTURE_ROOT`、`SOULFORGE_NATIVE_FIXTURE_REGISTRY` 和 `SOULFORGE_SEKIRO_GAME_ROOT`；所有 native runner 必须从 registry 的 hash 绑定条目解析输入，不得扫描目录挑选文件或静默使用仓库固定 `mods/...` 路径。只有三项均未设置时，公开 CI 才可显式 `--allow-skip`。
+- README、Bridge README、模块地图和“当前执行位置”不得长期保留与当前代码相反的能力描述；每次更新实施进度时必须运行 `npm run test:progress-integrity`。
+- 公开 CI 可以显式使用 `--allow-skip` 记录私有环境缺失，但 release gate 默认必须在 `skipped` 或 `partial` 时失败。
 
 ## 验证
 
@@ -116,6 +122,7 @@
 ~~~powershell
 npm run typecheck
 npm test
+npm run test:progress-integrity
 npm run bridge:verify:synthetic
 npm run build
 ~~~

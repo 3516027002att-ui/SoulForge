@@ -16,7 +16,7 @@ import type {
   PatchRiskLevel,
   StructuredDiagnostic
 } from '@soulforge/shared';
-import { createDiagnostic, toLegacyDiagnostic } from '@soulforge/shared';
+import { PATCH_IR_SCHEMA_VERSION, createDiagnostic, toLegacyDiagnostic } from '@soulforge/shared';
 import { collectAffectedResources, estimatePatchRisk, validatePatchIr } from '../patch-engine/patchIr.js';
 import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 
@@ -67,6 +67,7 @@ export function compilePatchProposalToPatchIr(proposal: PatchProposal): CompileP
   );
 
   const patch: PatchIR = {
+    schemaVersion: PATCH_IR_SCHEMA_VERSION,
     patchId: proposal.opId || randomUUID(),
     workspaceId: proposal.workspaceId,
     title: proposal.title,

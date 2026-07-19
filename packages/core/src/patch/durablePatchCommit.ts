@@ -15,7 +15,8 @@ import type {
   PatchIR,
   PatchIrOperation,
   ContainerChildOp,
-  PatchMode
+  PatchMode,
+  WriterResourceEntryChange
 } from '@soulforge/shared';
 import { toLegacyDiagnostic } from '@soulforge/shared';
 import {
@@ -30,7 +31,7 @@ import {
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { captureNativeBnd4ResourceEntryChanges } from './containerChildInverse.js';
+import { captureWriterResourceEntryChanges } from '../writers/inverseCapture.js';
 
 export interface ExecutePatchIrOptions {
   workspaceRoot?: string;
@@ -45,15 +46,7 @@ export interface ExecutePatchIrOptions {
   inverseOfOpId?: string;
   rollbackScope?: OperationLogRecord['rollbackScope'];
   rollbackTargetUri?: string;
-  resourceEntryChanges?: Array<{
-    id: string;
-    resourceUri: string;
-    entryUri: string;
-    changeKind: string;
-    beforeHash?: string;
-    afterHash?: string;
-    inverse: PatchIrOperation;
-  }>;
+  resourceEntryChanges?: WriterResourceEntryChange[];
 }
 
 export interface TransactionCommitCompatResult {
@@ -131,24 +124,9 @@ export async function executePatchIrThroughTransaction(
     };
   }
 
-  // Capture precise resource-entry inverses for native BND4 mutations before any write.
-  // Caller-provided changes (e.g. synthetic replace) take precedence.
+  // Caller-provided changes (e.g. synthetic replace) take precedence. Native
+  // writer capture runs after staging, while the target is still untouched.
   let capturedResourceEntryChanges = options.resourceEntryChanges ?? [];
-  if (capturedResourceEntryChanges.length === 0) {
-    const inverseCapture = await captureNativeBnd4ResourceEntryChanges(patch.operations, workspaceRoot);
-    if (inverseCapture.diagnostics.some((item) => item.severity === 'error')) {
-      await tryUpdateStatus(store, opId, 'failed', {
-        diagnostics: inverseCapture.diagnostics
-      }, 'inverse_capture');
-      return {
-        opId,
-        backupRoot: '',
-        changedFiles: [],
-        diagnostics: inverseCapture.diagnostics
-      };
-    }
-    capturedResourceEntryChanges = inverseCapture.changes;
-  }
 
   const tx = createWorkspaceTransaction({
     workspaceId: patch.workspaceId,
@@ -222,6 +200,35 @@ export async function executePatchIrThroughTransaction(
       changedFiles: [],
       diagnostics: logDiagnostic ? [...phaseDiagnostics, logDiagnostic] : phaseDiagnostics
     };
+  }
+
+  if (capturedResourceEntryChanges.length === 0) {
+    const inverseCapture = await captureWriterResourceEntryChanges({
+      operations: patch.operations,
+      writers: tx.getWriterAdapters(),
+      stagedTargets: tx.getStagedOperationTargets().map(({ op, stagingPath }) => ({
+        opId: op.id,
+        targetUri: op.targetUri,
+        ...(op.targetPath ? { targetPath: op.targetPath } : {}),
+        stagingPath
+      })),
+      workspaceRoot
+    });
+    if (inverseCapture.diagnostics.some((item) => item.severity === 'error')) {
+      await tryUpdateStatus(store, opId, 'failed', {
+        diagnostics: inverseCapture.diagnostics
+      }, 'inverse_capture');
+      await transitionJournal(store, tx.transactionId, 'staging', 'failed', {
+        phase: 'inverse_capture', diagnostics: inverseCapture.diagnostics
+      });
+      return {
+        opId,
+        backupRoot: '',
+        changedFiles: [],
+        diagnostics: inverseCapture.diagnostics
+      };
+    }
+    capturedResourceEntryChanges = inverseCapture.changes;
   }
 
 
@@ -352,7 +359,7 @@ export async function executePatchIrThroughTransaction(
     if (markingError) throw new Error(markingError.message);
     const resourceEntryChanges = capturedResourceEntryChanges.map((change) => {
       const file = operation.files.find((item) => item.targetUri === change.resourceUri);
-      return { ...change, opId, inverse: withCommittedContainerHash(change.inverse, file?.afterHash) };
+      return { ...change, opId, inverse: bindInverseToCommittedFile(change.inverse, file?.afterHash) };
     });
     const recoveryPoint = {
       recoveryId: tx.transactionId,
@@ -604,20 +611,34 @@ function journalDiagnostic(
   };
 }
 
-function withCommittedContainerHash(
+function bindInverseToCommittedFile(
   operation: PatchIrOperation,
   afterHash: string | undefined
 ): PatchIrOperation {
-  if (!afterHash || !operation.kind.startsWith('container_child_')) return operation;
-  const containerOperation = operation as ContainerChildOp;
-  return {
-    ...containerOperation,
-    expectedHash: afterHash,
-    expectedContainerHash: afterHash,
-    preconditions: containerOperation.preconditions.map((precondition) => (
-      precondition.type === 'content_hash'
-        ? { ...precondition, expectedHash: afterHash }
-        : precondition
-    ))
-  };
+  if (!afterHash) return operation;
+  if (operation.kind.startsWith('container_child_')) {
+    const containerOperation = operation as ContainerChildOp;
+    return {
+      ...containerOperation,
+      expectedHash: afterHash,
+      expectedContainerHash: afterHash,
+      preconditions: containerOperation.preconditions.map((precondition) => (
+        precondition.type === 'content_hash'
+          ? { ...precondition, expectedHash: afterHash }
+          : precondition
+      ))
+    };
+  }
+  if (operation.kind === 'resource_field_edit') {
+    return {
+      ...operation,
+      expectedHash: afterHash,
+      preconditions: operation.preconditions.map((precondition) => (
+        precondition.type === 'content_hash'
+          ? { ...precondition, expectedHash: afterHash }
+          : precondition
+      ))
+    };
+  }
+  return operation;
 }

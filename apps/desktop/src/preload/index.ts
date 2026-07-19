@@ -15,6 +15,7 @@ import type {
 import type {
   AiSidebarDraft,
   AiSidebarDraftRequest,
+  AppPermissionGrant,
   ResourceCapabilityMatrix,
   ToolDescriptor,
   ToolResult
@@ -100,7 +101,13 @@ const api = {
   applyFmgMutation: (
     sourceUri: string,
     expectedHash: string,
-    mutation: { kind: 'upsert' | 'delete'; id: number; text?: string }
+    mutation: {
+      kind: 'upsert' | 'delete' | 'insert' | 'reorder';
+      id: number;
+      text?: string;
+      stringIndex?: number;
+      beforeStringIndex?: number;
+    }
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.applyFmgMutation', sourceUri, expectedHash, mutation),
   readMsbDocument: (sourceUri: string): Promise<unknown> =>
@@ -134,6 +141,8 @@ const api = {
     ipcRenderer.invoke('ai.sidebarDraft', request),
   runAiTool: (name: string, input: unknown): Promise<ToolResult> =>
     ipcRenderer.invoke('ai.runTool', name, input),
+  runModelService: (input: { configId: string; userPrompt: string }): Promise<import('@soulforge/core').AgentRunResult> =>
+    ipcRenderer.invoke('ai.runModel', input),
   /** Model service configs — hasCredential only; never plaintext secrets. */
   listModelServices: (): Promise<Array<{
     id: string;
@@ -165,7 +174,46 @@ const api = {
     updatedAt: string;
   }> => ipcRenderer.invoke('modelService.upsert', input),
   deleteModelService: (configId: string): Promise<{ ok: true }> =>
-    ipcRenderer.invoke('modelService.delete', configId)
+    ipcRenderer.invoke('modelService.delete', configId),
+  getActivePermissionGrant: (input: {
+    serviceId: string;
+    permissionMode: 'plan' | 'normal' | 'fullPermission';
+    policyVersion?: string;
+  }): Promise<{
+    grantId: string;
+    serviceId: string;
+    permissionMode: 'plan' | 'normal' | 'fullPermission';
+    policyVersion: string;
+    scope: unknown;
+    grantedAt: string;
+    revokedAt?: string;
+  } | undefined> => ipcRenderer.invoke('permissionGrant.getActive', input),
+  getResolvedPermissionMode: (input: {
+    serviceId: string;
+  }): Promise<{
+    serviceId: string;
+    permissionMode: 'plan' | 'normal' | 'fullPermission';
+    grantId: string;
+  }> => ipcRenderer.invoke('permissionGrant.getResolvedMode', input),
+  replacePermissionGrant: (input: {
+    serviceId: string;
+    permissionMode: 'plan' | 'normal' | 'fullPermission';
+    policyVersion?: string;
+    scope?: unknown;
+    grantId?: string;
+  }): Promise<{
+    grantId: string;
+    serviceId: string;
+    permissionMode: 'plan' | 'normal' | 'fullPermission';
+    policyVersion: string;
+    scope: unknown;
+    grantedAt: string;
+    revokedAt?: string;
+  }> => ipcRenderer.invoke('permissionGrant.replace', input),
+  revokePermissionGrant: (input: {
+    grantId: string;
+    revokedAt?: string;
+  }): Promise<{ ok: true }> => ipcRenderer.invoke('permissionGrant.revoke', input)
 };
 
 contextBridge.exposeInMainWorld('soulforge', api);

@@ -1,7 +1,13 @@
 import {
   applyEmevdEditorMutation,
+  applyEmevdEditorMutations,
   buildFourViewState,
   createEmevdEditorDocument,
+  findEmevdEvent,
+  findEmevdInstruction,
+  navigateEmevdSelection,
+  selectEmevdEvent,
+  selectEmevdInstruction,
   selectEmevdView,
   tryParseEmevdDsl
 } from '../editing/emevdFourViewController.js';
@@ -61,7 +67,7 @@ function main(): void {
   });
   if (!idChange.ok) throw new Error(JSON.stringify(idChange));
   if (idChange.document.events[0]!.eventId !== 51) throw new Error('id not updated');
-  if (!idChange.document.events[0]!.eventUri.endsWith('#event/51')) throw new Error('uri not updated');
+  if (!idChange.document.events[0]!.eventUri.endsWith('#event/51/index/0')) throw new Error('uri not updated');
 
   const dslParse = tryParseEmevdDsl('$Event(broken');
   if (dslParse.ok || dslParse.code !== 'EMEVD_DSL_NON_AUTHORITATIVE') {
@@ -111,12 +117,42 @@ function main(): void {
   }
   void sameLen;
 
+  // navigation helpers
+  const eventUris = after.document.events.map((event) => event.eventUri);
+  const firstEvent = findEmevdEvent(after.document, eventUris[0]!);
+  if (!firstEvent || firstEvent.instructions.length !== 2) throw new Error('findEmevdEvent failed');
+  const nextSel = navigateEmevdSelection(after.document, after.selection, 'next');
+  if (nextSel.eventUri !== eventUris[1]) throw new Error('navigate next event');
+  const prevSel = navigateEmevdSelection(after.document, nextSel, 'prev');
+  if (prevSel.eventUri !== eventUris[0]) throw new Error('navigate prev event');
+  const instrSel = selectEmevdInstruction(prevSel, eventUris[0]!, firstEvent.instructions[1]!.instructionUri);
+  if (instrSel.instructionUri !== firstEvent.instructions[1]!.instructionUri) throw new Error('select instruction');
+  const nextInstr = navigateEmevdSelection(after.document, instrSel, 'next');
+  if (nextInstr.eventUri !== eventUris[1]) throw new Error('navigate next from last instruction jumps event');
+
+  // batch mutations
+  const batch = applyEmevdEditorMutations(after.document, [
+    { kind: 'emevd_set_rest_behavior', eventUri: eventUris[1]!, restBehavior: 2, baseRevision: after.document.revision },
+    { kind: 'emevd_update_id', eventUri: eventUris[1]!, newEventId: 999, baseRevision: after.document.revision + 1 }
+  ]);
+  if (!batch.ok || batch.applied !== 2) throw new Error('batch apply failed: ' + JSON.stringify(batch));
+  if (batch.document.events[1]?.restBehavior !== 2 || batch.document.events[1]?.eventId !== 999) {
+    throw new Error('batch mutations not reflected');
+  }
+  const staleBatch = applyEmevdEditorMutations(batch.document, [
+    { kind: 'emevd_set_rest_behavior', eventUri: eventUris[1]!, restBehavior: 0, baseRevision: 0 }
+  ]);
+  if (staleBatch.ok || staleBatch.applied !== 0) throw new Error('stale batch must fail');
+
+
   console.log(JSON.stringify({
     ok: true,
     message: 'EMEVD 四视图 revision/selection/mutation 同步验证通过',
     revision: argsOk.document.revision,
     events: after.tableRows.length,
     instructionArgsMutation: true,
+    navigationHelpers: true,
+    batchMutation: true,
     dslNonAuthoritative: true,
     views: ['flow', 'table', 'dsl', 'bytes']
   }, null, 2));

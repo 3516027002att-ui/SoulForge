@@ -77,13 +77,18 @@ jobs:
           npm run test:flver-candidate
           npm run test:vault-encrypt-contract
 
-      - name: Portable packaging config gate
+      - name: Windows unpacked packaging gate
         run: npm run test:portable-packaging-gate
+        env:
+          SOULFORGE_PORTABLE_PACK: '1'
 
-      - name: Private native / section-28 honest skip
+      - name: Private native / section-28 public-CI skip report
         run: |
-          npm run test:private-native-gate
-          npm run test:section28-sekiro-gate
+          npm run test:private-native-gate:allow-skip
+          npm run test:section28-sekiro-gate:allow-skip
+
+      - name: Progress integrity
+        run: npm run test:progress-integrity
 
       - name: Release content scan
         run: npm run test:release-content
@@ -93,6 +98,6 @@ jobs:
 
       # Intentionally NOT run in public CI:
       # - test:native-preview / test:real-mod (private mods)
-      # - bridge:verify:oodle / native emevd/msb/fmg/param against local mods (private corpus)
-      # - signed installer / real Sekiro launch (P7 private gate)
-      # - SOULFORGE_PORTABLE_PACK=1 unsigned pack (optional local only)
+      # - bridge:verify:oodle:real / native emevd/msb/fmg/param against local mods (private corpus)
+      # - portable EXE / NSIS installer / signed installer / real Sekiro launch (P7 private gate)
+      # - strict private/section-28 gates; without --allow-skip they fail on skipped/partial

@@ -15,6 +15,16 @@ export type WriterOperationKind =
   | 'file_replace'
   | 'raw_byte_range_edit'
   | 'synthetic_resource_edit'
+  | 'resource_field_edit'
+  | 'resource_node_add'
+  | 'resource_node_delete'
+  | 'resource_node_update'
+  | 'resource_node_reorder'
+  | 'resource_node_convert'
+  | 'resource_edge_add'
+  | 'resource_edge_delete'
+  | 'resource_edge_update'
+  | 'asset_import_replace'
   | 'structured_edit'
   | 'container_child_edit'
   | 'container_child_replace'
@@ -51,6 +61,24 @@ export interface WriterWrittenTarget {
   stagingPath: string;
 }
 
+export interface WriterResourceEntryChange {
+  id: string;
+  resourceUri: string;
+  entryUri: string;
+  changeKind: string;
+  beforeHash?: string;
+  afterHash?: string;
+  inverse: PatchIrOperation;
+}
+
+export interface WriterInverseCaptureResult {
+  ok: boolean;
+  resourceEntryChanges: WriterResourceEntryChange[];
+  /** Forward operation ids for which a precise inverse was captured. */
+  capturedOperationIds: string[];
+  diagnostics: StructuredDiagnostic[];
+}
+
 export interface WriterApplyResult {
   ok: boolean;
   /**
@@ -66,6 +94,9 @@ export interface WriterApplyResult {
 
 export interface WriterPostValidateResult {
   ok: boolean;
+  writerId: string;
+  /** Forward operation ids actually checked against staged output. */
+  validatedOperationIds: string[];
   diagnostics: StructuredDiagnostic[];
 }
 
@@ -88,6 +119,16 @@ export interface WriterAdapterContract {
     operations: PatchIrOperation[];
     workspaceRoot?: string;
   }): Promise<WriterApplyResult>;
+  /**
+   * Capture precise semantic/container entry inverses after staging and before
+   * any target replacement. Native structured operations are rejected when
+   * this hook is missing or does not cover every forward operation.
+   */
+  captureInverse?(input: {
+    operations: PatchIrOperation[];
+    stagedTargets: WriterWrittenTarget[];
+    workspaceRoot: string;
+  }): Promise<WriterInverseCaptureResult> | WriterInverseCaptureResult;
   produceRollbackMetadata(input: {
     operations: PatchIrOperation[];
     backupPaths: string[];
@@ -95,6 +136,7 @@ export interface WriterAdapterContract {
   postValidate?(input: {
     stagingRoot: string;
     operations: PatchIrOperation[];
+    writtenTargets: WriterWrittenTarget[];
   }): Promise<WriterPostValidateResult> | WriterPostValidateResult;
 }
 

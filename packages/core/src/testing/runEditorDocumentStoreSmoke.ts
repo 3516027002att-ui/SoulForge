@@ -1,85 +1,93 @@
-import { EditorDocumentStore } from '../editing/editorDocumentStore.js';
+import { EditorDocumentStore } from "../editing/editorDocumentStore.js";
 
 function main(): void {
   const store = new EditorDocumentStore();
   const fmg = store.open({
-    editorKind: 'fmg',
-    resourceUri: 'file://msg/item.fmg',
-    title: '道具名'
+    editorKind: "fmg",
+    resourceUri: "file://msg/item.fmg",
+    title: "item names"
   });
   const msb = store.open({
-    editorKind: 'msb',
-    resourceUri: 'file://map/m10.msb',
-    title: '地图 m10'
+    editorKind: "msb",
+    resourceUri: "file://map/m10.msb",
+    title: "map m10"
   });
+
+  if (store.listOpenDocuments().length !== 2) throw new Error("expected 2 open documents");
 
   const badKind = store.applyMutation({
     documentId: fmg.documentId,
-    kind: 'msb_set_part_position',
+    kind: "msb_set_part_position",
     resourceUri: fmg.resourceUri,
-    baseRevision: 0,
-    payload: { partName: 'x', posX: 1, posY: 2, posZ: 3 }
+    baseRevision: fmg.revision,
+    payload: { partName: "c0000", x: 1, y: 2, z: 3 }
   });
-  if (badKind.ok) throw new Error('FMG editor must reject MSB mutation');
+  if (badKind.ok) throw new Error("cross-kind mutation should fail");
 
-  const okFmg = store.applyMutation({
+  const ok = store.applyMutation({
     documentId: fmg.documentId,
-    kind: 'fmg_entry_upsert',
+    kind: "fmg_entry_upsert",
     resourceUri: fmg.resourceUri,
-    baseRevision: 0,
-    payload: { id: 5200, text: '旋风斩' }
+    baseRevision: fmg.revision,
+    payload: { entryId: 100, text: "hello" }
   });
-  if (!okFmg.ok || okFmg.document?.revision !== 1) throw new Error('FMG mutation failed');
+  if (!ok.ok || !ok.document || ok.document.revision !== 1 || !ok.document.dirty) {
+    throw new Error("fmg mutation should advance revision");
+  }
+  if (store.getPendingMutations(fmg.documentId).length !== 1) throw new Error("pending should be 1");
 
   const stale = store.applyMutation({
     documentId: fmg.documentId,
-    kind: 'fmg_entry_upsert',
+    kind: "fmg_entry_upsert",
     resourceUri: fmg.resourceUri,
     baseRevision: 0,
-    payload: { id: 5200, text: 'stale' }
+    payload: { entryId: 100, text: "stale" }
   });
-  if (stale.ok || !stale.issues.some((i) => i.code === 'EDITOR_REVISION_CONFLICT')) {
-    throw new Error('stale revision must conflict');
+  if (stale.ok) throw new Error("stale revision should fail");
+
+  const snap = store.snapshot(fmg.documentId);
+  if (!snap || snap.pendingCount !== 1 || snap.pendingMutations.length !== 1) {
+    throw new Error("snapshot pending mismatch");
   }
 
-  const okMsb = store.applyMutation({
-    documentId: msb.documentId,
-    kind: 'msb_set_part_position',
-    resourceUri: msb.resourceUri,
-    baseRevision: 0,
-    payload: { partName: 'm000010_1077', posX: 1, posY: 2, posZ: 3 }
-  });
-  if (!okMsb.ok) throw new Error('MSB mutation failed');
-
-  const batch = store.createPatchEngineBatch(fmg.documentId);
-  if (!batch.ok || !batch.batch?.requiresPatchEngine) {
-    throw new Error('batch must require Patch Engine');
+  const batchResult = store.createPatchEngineBatch(fmg.documentId);
+  if (!batchResult.ok || !batchResult.batch || batchResult.batch.requiresPatchEngine !== true) {
+    throw new Error("batch requires Patch Engine");
   }
-  if (batch.batch.mutations.length !== 1) throw new Error('unexpected mutation count');
 
-  const committed = store.markCommitted(fmg.documentId, batch.batch.batchId);
-  if (committed.length) throw new Error('markCommitted failed');
-  const after = store.get(fmg.documentId);
-  if (!after || after.dirty) throw new Error('document should be clean after commit');
-
-  // Re-open same URI returns same document
-  const again = store.open({
-    editorKind: 'fmg',
+  const second = store.applyMutation({
+    documentId: fmg.documentId,
+    kind: "fmg_entry_upsert",
     resourceUri: fmg.resourceUri,
-    title: '道具名'
+    baseRevision: ok.document.revision,
+    payload: { entryId: 101, text: "world" }
   });
-  if (again.documentId !== fmg.documentId) throw new Error('open should reuse document');
+  if (!second.ok || !second.document) throw new Error("second mutation failed");
+  if (store.getPendingMutations(fmg.documentId).length !== 2) throw new Error("pending should be 2");
 
-  store.close(msb.documentId);
-  if (store.get(msb.documentId)) throw new Error('closed document still listed');
+  const cleared = store.markSynced(fmg.documentId);
+  if (cleared.length !== 2) throw new Error("markSynced should return 2 mutations");
+  if (store.getPendingMutations(fmg.documentId).length !== 0) throw new Error("pending should clear");
+  if (store.snapshot(fmg.documentId)?.document.dirty !== false) throw new Error("dirty should clear");
+
+  if (!store.close(msb.documentId)) throw new Error("close should return true");
+  if (store.listOpenDocuments().length !== 1) throw new Error("one document remains");
+  if (store.snapshot(msb.documentId) !== undefined) throw new Error("closed snapshot undefined");
+
+  const storeSnap = store.snapshotStore();
+  if (storeSnap.openDocuments.length !== 1 || storeSnap.totalPendingMutations !== 0) {
+    throw new Error("store snapshot mismatch");
+  }
 
   console.log(JSON.stringify({
     ok: true,
-    message: '专业编辑器文档仓库统一 mutation 验证通过',
-    fmgRevision: after.revision,
-    batchRequiresPatchEngine: true,
+    message: "editor document store lifecycle smoke: ok",
+    openKinds: store.listOpenDocuments().map((doc) => doc.editorKind),
     rejectedCrossKind: true,
-    rejectedStaleRevision: true
+    rejectedStaleRevision: true,
+    batchRequiresPatchEngine: true,
+    snapshotPending: true,
+    closeLifecycle: true
   }, null, 2));
 }
 

@@ -1,7 +1,14 @@
-import { resolve } from 'node:path';
+import { stat } from 'node:fs/promises';
+import type { IndexedFile } from '@soulforge/shared';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { openResourcePreview } from '../preview/openResourcePreview.js';
-import { scanWorkspace } from '../workspace/scanWorkspace.js';
+import { detectResourceFileType } from '../workspace/resourceFileTypes.js';
+import { classifyResourceKind } from '../workspace/resourceKinds.js';
+import { makeFileResourceUri, makeWorkspaceId } from '../workspace/resourceUri.js';
+import {
+  loadRegisteredNativeFixtureRegistry,
+  type RegisteredNativeFixture
+} from './nativeFixturePaths.js';
 
 interface NativeInspectSmokeSummary {
   workspaceRoot: string;
@@ -24,15 +31,17 @@ interface NativeInspectSmokeSummary {
 const MAX_SAMPLES = 24;
 
 async function main(): Promise<void> {
-  const workspaceRoot = resolve(process.argv[2] ?? '../../mods');
-  const result = await scanWorkspace({ workspaceRoot });
-  const nativeFiles = result.files
+  const registry = await loadRegisteredNativeFixtureRegistry();
+  const indexed = await Promise.all(registry.fixtures.map((fixture) =>
+    indexRegisteredFixture(registry.root, fixture)));
+  const fixtureByFileId = new Map(indexed.map(({ file, fixture }) => [file.id, fixture]));
+  const nativeFiles = indexed.map(({ file }) => file)
     .filter((file) => file.formatKind !== 'text' && file.formatKind !== 'unknown')
     .sort((left, right) => rankNativeFile(left.relativePath) - rankNativeFile(right.relativePath))
     .slice(0, MAX_SAMPLES);
 
   const summary: NativeInspectSmokeSummary = {
-    workspaceRoot,
+    workspaceRoot: 'registry-bound-private-fixtures',
     sampledFiles: nativeFiles.length,
     nativeInspections: 0,
     containerSummaries: 0,
@@ -43,6 +52,8 @@ async function main(): Promise<void> {
   };
 
   for (const file of nativeFiles) {
+    const fixture = fixtureByFileId.get(file.id);
+    if (!fixture) throw new Error('Registered fixture identity was lost before preview.');
     const preview = await openResourcePreview({ file, inspectNative: true, parseStructured: true, bridgeTimeoutMs: 30_000 });
     if (preview.nativeInspection) summary.nativeInspections += 1;
     if (preview.structuredPreview?.container) {
@@ -52,7 +63,7 @@ async function main(): Promise<void> {
     if (hasHeaderSummary(preview.nativeInspection?.data)) summary.headerSummaries += 1;
 
     summary.samples.push({
-      relativePath: file.relativePath,
+      relativePath: fixture.fixtureId,
       resourceKind: file.resourceKind,
       formatKind: file.formatKind,
       ...(preview.structuredPreview?.container?.rootFormat ? { rootFormat: preview.structuredPreview.container.rootFormat } : {}),
@@ -61,7 +72,7 @@ async function main(): Promise<void> {
     });
 
     if (preview.previewKind === 'failed' || preview.nativeInspection?.parseStatus === 'failed') {
-      summary.failures.push({ relativePath: file.relativePath, diagnostics: preview.diagnostics });
+      summary.failures.push({ relativePath: fixture.fixtureId, diagnostics: preview.diagnostics });
     }
   }
 
@@ -74,6 +85,37 @@ async function main(): Promise<void> {
   if (summary.containerSummaries === 0) throw new Error('Native inspect smoke test did not produce any container summaries.');
   if (summary.headerSummaries === 0) throw new Error('Native inspect smoke test did not produce any header summaries.');
   if (summary.failures.length > 0) throw new Error(`Native inspect smoke test failed on ${summary.failures.length} sampled file(s).`);
+}
+
+async function indexRegisteredFixture(
+  workspaceRoot: string,
+  fixture: RegisteredNativeFixture
+): Promise<{ file: IndexedFile; fixture: RegisteredNativeFixture }> {
+  const fileStat = await stat(fixture.absolutePath);
+  const fileType = detectResourceFileType(fixture.localPath);
+  const workspaceId = makeWorkspaceId(workspaceRoot);
+  const sourceUri = makeFileResourceUri(fixture.localPath);
+  return {
+    fixture,
+    file: {
+      id: `${workspaceId}:${fixture.fixtureId}`,
+      workspaceId,
+      sourceUri,
+      sourcePath: fixture.absolutePath,
+      absolutePath: fixture.absolutePath,
+      relativePath: fixture.localPath,
+      game: fixture.game,
+      resourceKind: classifyResourceKind(fixture.localPath),
+      extension: fileType.extension,
+      compoundExtension: fileType.compoundExtension,
+      formatKind: fileType.formatKind,
+      formatLabel: fileType.formatLabel,
+      size: fileStat.size,
+      mtimeMs: fileStat.mtimeMs,
+      parseStatus: 'unparsed',
+      diagnostics: []
+    }
+  };
 }
 
 function hasBridgeSpawnFailure(diagnostics: unknown[]): boolean {

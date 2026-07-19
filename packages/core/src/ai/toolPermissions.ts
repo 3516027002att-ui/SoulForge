@@ -29,7 +29,7 @@ const PERMISSION_RANK: Record<AiToolPermissionLevel, number> = {
  * Full-permission still cannot bypass Patch Engine; it only raises the tool ceiling.
  */
 export function maxPermissionForMode(mode: PatchMode | 'plan' | 'normal' | 'fullPermission'): AiToolPermissionLevel {
-  if (mode === 'plan') return 'validate';
+  if (mode === 'plan') return 'propose';
   if (mode === 'normal') return 'validate';
   return 'rollback';
 }

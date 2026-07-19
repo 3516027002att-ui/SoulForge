@@ -10,18 +10,41 @@ import { createPatchProposal, dryRunPatchProposal } from '../patch/patchEngine.j
 import { getDefaultOperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
 import { buildGraphPatchFromProposal, summarizeGraphPatch } from '../patch/graphPatch.js';
+import type { MemoryResourceGraph } from '../resource-graph/memoryResourceGraph.js';
 import { assessEditRisk, evaluateWriterGate, resolveWriterContract } from '../patch/writerContract.js';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
 import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
-import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
+import {
+  ensurePatchToolState,
+  runPatchCommit,
+  runPatchProposeTextEdit,
+  runPatchRollback,
+  runPatchStage,
+  runPatchValidate,
+  type PatchToolCoreResult
+} from './patchTools.js';
+import { legacyPermissionToLevel, maxPermissionForMode } from './toolPermissions.js';
+import { evaluatePolicyGate } from '../ai-tools/policyGate.js';
+import type { ToolPermission as SharedToolPermission } from '@soulforge/shared';
 
-/** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex;
   mode: 'plan' | 'normal' | 'fullPermission';
+  confirmationReceiptIds?: string[];
+  /**
+   * Optional workspace root for PatchIR transaction tools.
+   * Desktop production callers should pass the active overlay root.
+   */
+  workspaceRoot?: string;
+  /**
+   * Shared bag for chained tool calls (PatchIR propose → stage → validate → commit).
+   */
+  state?: Record<string, unknown>;
+  /** Optional in-memory resource graph for resource.graph.query compatibility. */
+  graph?: MemoryResourceGraph;
 }
 
 export interface ToolDescriptor {
@@ -65,13 +88,53 @@ export class ToolRegistry {
     }));
   }
 
+  getTool(name: string): ToolDescriptor | undefined {
+    const tool = this.tools.get(name);
+    if (!tool) return undefined;
+    return {
+      name: tool.name,
+      description: tool.description,
+      permission: tool.permission,
+      permissionLevel: tool.permissionLevel ?? normalizePermissionLevel(tool.permission)
+    };
+  }
+
+  hasTool(name: string): boolean {
+    return this.tools.has(name);
+  }
+
+  listToolNames(): string[] {
+    return [...this.tools.keys()];
+  }
+
+  /**
+   * Production policy-gated execution.
+   * Alias for the scaffold registry naming so call sites can converge on one surface.
+   */
+  async executeToolThroughPolicy(name: string, input: unknown, context: ToolContext): Promise<ToolResult> {
+    return this.run(name, input, context);
+  }
+
   async run(name: string, input: unknown, context: ToolContext): Promise<ToolResult> {
     const tool = this.tools.get(name);
     if (!tool) return fail('TOOL_NOT_FOUND', `Unknown tool: ${name}`);
 
     const level = tool.permissionLevel ?? normalizePermissionLevel(tool.permission);
-    if (!isAiToolPermissionAllowed(level, context.mode)) {
-      return fail('TOOL_PERMISSION_DENIED', `Tool '${name}' requires ${level} permission in ${context.mode} mode.`);
+    const requiredPermission = level as SharedToolPermission;
+    const decision = evaluatePolicyGate({
+      mode: context.mode,
+      toolName: name,
+      requiredPermission,
+      maxPermission: maxPermissionForMode(context.mode) as SharedToolPermission,
+      ...(context.confirmationReceiptIds !== undefined
+        ? { confirmationReceiptIds: context.confirmationReceiptIds }
+        : {})
+    });
+    if (decision.kind === 'deny' || decision.kind === 'require_confirmation') {
+      return fail(
+        decision.code ?? 'TOOL_PERMISSION_DENIED',
+        decision.reason || `Mode ${context.mode} cannot execute ${tool.name} (${level}).`
+      );
     }
 
     try {
@@ -91,6 +154,39 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permission: 'read',
     permissionLevel: 'read',
     run: (_input, context) => ok(context.workspaceIndex.getStats())
+  });
+
+  // Dotted alias used by architecture scaffold smoke / typed tool plans.
+  registry.register({
+    name: 'workspace.stats',
+    description: 'Alias of workspace_stats for dotted tool-plan naming.',
+    permission: 'read',
+    permissionLevel: 'read',
+    run: async (_input, context) => {
+      if (!context.workspaceRoot) {
+        return fail('WORKSPACE_ROOT_REQUIRED', 'workspace.stats requires workspaceRoot on ToolContext.');
+      }
+      const { readdir } = await import('node:fs/promises');
+      const entries = await readdir(context.workspaceRoot, { withFileTypes: true });
+      const fileCount = entries.filter((entry) => entry.isFile()).length;
+      return ok({ fileCount, root: context.workspaceRoot });
+    }
+  });
+
+  registry.register({
+    name: 'resource.graph.query',
+    description: 'Query the in-memory resource graph attached to ToolContext.',
+    permission: 'read',
+    permissionLevel: 'read',
+    run: (input, context) => {
+      if (!context.graph) {
+        return fail('GRAPH_REQUIRED', 'resource.graph.query requires graph on ToolContext.');
+      }
+      const value = asRecord(input);
+      const limit = asNumber(value.limit, 50);
+      const result = context.graph.query({ limit, includeDiagnostics: true, includeProvenance: true });
+      return ok(result);
+    }
   });
 
   registry.register({
@@ -120,7 +216,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'search_map_entities',
-    description: 'Search parsed map entities and regions.',
+    description: 'Search parsed map entities.',
     permission: 'read',
     permissionLevel: 'read',
     run: (input, context) => {
@@ -163,94 +259,106 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const category = asOptionalString(value.category);
       const matches = context.workspaceIndex.lookupTextEntries(textId, category);
       if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
-      return ok({ textId, category, matches });
-    }
-  });
-
-  registry.register({
-    name: 'find_text_references',
-    description: 'Find events or other symbols that reference a parsed textId.',
-    permission: 'analyze',
-    permissionLevel: 'analyze',
-    run: (input, context) => {
-      const value = asRecord(input);
-      const textId = asNumber(value.textId, Number.NaN);
-      if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'find_text_references requires numeric textId.');
-      const category = asOptionalString(value.category);
-      const matches = context.workspaceIndex.lookupTextEntries(textId, category);
-      if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
-      const items = matches.map((entry) => {
-        const references = context.workspaceIndex.findReferences(entry.uri, 'to');
-        return { entry, references, referenceStats: summarizeReferences(references) };
-      });
-      return ok({ textId, category, matches: items, totalReferences: items.reduce((sum, item) => sum + item.references.length, 0) });
-    }
-  });
-
-  registry.register({
-    name: 'explain_text_entry',
-    description: 'Build evidence-first AI explanation contexts for a parsed textId.',
-    permission: 'analyze',
-    permissionLevel: 'analyze',
-    run: (input, context) => {
-      const value = asRecord(input);
-      const textId = asNumber(value.textId, Number.NaN);
-      if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'explain_text_entry requires numeric textId.');
-      const category = asOptionalString(value.category);
-      const maxReferences = asNumber(value.maxReferences, 80);
-      const maxMarkdownChars = asNumber(value.maxMarkdownChars, 24_000);
-      const matches = context.workspaceIndex.lookupTextEntries(textId, category);
-      if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
-      const contexts = matches.map((entry) => {
-        const references = context.workspaceIndex.findReferences(entry.uri, 'to');
-        const aiContext = buildTextAiContext(entry, references, { maxReferences, maxMarkdownChars });
-        return { context: aiContext, prompt: renderTextAiPrompt(aiContext) };
-      });
-      return ok({ textId, category, contexts });
+      return ok({ textId, category: category ?? null, matches });
     }
   });
 
   registry.register({
     name: 'find_references',
-    description: 'Find evidence graph references connected to a URI.',
-    permission: 'analyze',
-    permissionLevel: 'analyze',
+    description: 'Find reference edges from/to a resource URI.',
+    permission: 'read',
+    permissionLevel: 'read',
     run: (input, context) => {
       const value = asRecord(input);
       const uri = asString(value.uri);
       if (!uri) return fail('INVALID_INPUT', 'find_references requires uri.');
       const direction = asReferenceDirection(value.direction);
-      return ok(context.workspaceIndex.findReferences(uri, direction));
+      const edges = context.workspaceIndex.findReferences(uri, direction);
+      return ok({ uri, direction, edges, summary: summarizeReferences(edges) });
     }
   });
 
   registry.register({
-    name: 'explain_event',
-    description: 'Build an evidence-first explanation input for one event URI.',
+    name: 'get_file_summary',
+    description: 'Return an indexed file record by URI or path.',
+    permission: 'read',
+    permissionLevel: 'read',
+    run: (input, context) => {
+      const value = asRecord(input);
+      const uri = asOptionalString(value.uri);
+      const path = asOptionalString(value.path);
+      let file: IndexedFile | undefined;
+      if (uri) file = context.workspaceIndex.getFile(uri);
+      if (!file && path) {
+        // WorkspaceIndex keys files by URI; fall back to relativePath scan when only path is given.
+        const files = context.workspaceIndex.searchResources({ query: path, limit: 50 });
+        file = files.find((item) => item.item.relativePath === path || item.item.sourceUri === path || item.item.sourceUri === path)?.item
+          ?? files.find((item) => item.item.relativePath.endsWith(path) || item.item.sourceUri.endsWith(path))?.item;
+      }
+      if (!file) return fail('FILE_NOT_FOUND', 'No indexed file matched the request.', { uri, path });
+      return ok(file);
+    }
+  });
+
+  registry.register({
+    name: 'build_text_ai_context',
+    description: 'Build a structured AI context pack for a text/msg resource.',
     permission: 'analyze',
     permissionLevel: 'analyze',
     run: (input, context) => {
       const value = asRecord(input);
       const uri = asString(value.uri);
-      if (!uri) return fail('INVALID_INPUT', 'explain_event requires uri.');
-      const explanation = context.workspaceIndex.buildEventExplanationInput(uri);
-      if (!explanation) return fail('EVENT_NOT_FOUND', `No event exists for URI: ${uri}`);
-      return ok(explanation);
+      if (!uri) return fail('INVALID_INPUT', 'build_text_ai_context requires uri.');
+
+      const category = asOptionalString(value.category);
+      let entry = asOptionalString(value.text) !== undefined
+        ? {
+            uri,
+            sourceUri: uri,
+            textId: typeof value.textId === 'number' ? value.textId : 0,
+            text: asString(value.text),
+            ...(category !== undefined ? { category } : {})
+          }
+        : undefined;
+
+      if (!entry) {
+        const textId = typeof value.textId === 'number' ? value.textId : Number.NaN;
+        if (Number.isFinite(textId)) {
+          entry = context.workspaceIndex.lookupTextEntry(textId, asOptionalString(value.category));
+        }
+      }
+      if (!entry) {
+        const matches = context.workspaceIndex.searchTextEntries(uri, 20);
+        entry = matches.find((item) => item.item.sourceUri === uri || item.item.sourceUri === uri)?.item
+          ?? matches[0]?.item;
+      }
+      if (!entry) {
+        return fail('TEXT_ENTRY_NOT_FOUND', 'No indexed text entry matched the request.', { uri });
+      }
+
+      const pack = buildTextAiContext(
+        entry,
+        context.workspaceIndex.findReferences(entry.uri, 'both')
+      );
+      return ok({
+        ...pack,
+        prompt: renderTextAiPrompt(pack)
+      });
     }
   });
 
   registry.register({
     name: 'propose_text_patch',
-    description: 'Create a text-only patch proposal. It does not save files.',
+    description: 'Create a PatchProposal for a text edit without writing files.',
     permission: 'propose',
     permissionLevel: 'propose',
     run: (input, context) => {
       const value = asRecord(input);
-      const workspaceId = context.workspaceIndex.workspaceId;
+      const workspaceId = asString(value.workspaceId, context.workspaceIndex.workspaceId);
+      const title = asString(value.title, 'AI text edit');
       const targetUri = asString(value.targetUri);
       const targetPath = asString(value.targetPath);
       const newText = asString(value.newText);
-      const title = asString(value.title, 'AI text patch proposal');
       const mode = asPatchMode(value.mode, context.mode);
 
       if (!targetUri || !targetPath || newText === undefined) {
@@ -284,51 +392,116 @@ export function createDefaultToolRegistry(): ToolRegistry {
     run: async (input) => {
       const proposal = input as PatchProposal;
       if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
-        return fail('INVALID_INPUT', 'validate_patch requires a PatchProposal object.');
+        return fail('INVALID_INPUT', 'validate_patch requires a PatchProposal.');
       }
       return ok(await dryRunPatchProposal(proposal));
     }
   });
 
   registry.register({
-    name: 'build_patch_graph',
-    description: 'Project a patch proposal into the v0.5 graph patch IR for review.',
+    name: 'assess_edit_risk',
+    description: 'Assess risk for a proposed write using the writer contract matrix.',
     permission: 'analyze',
     permissionLevel: 'analyze',
-    run: (input) => {
-      const proposal = input as PatchProposal;
-      if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
-        return fail('INVALID_INPUT', 'build_patch_graph requires a PatchProposal object.');
+    run: (input, context) => {
+      const value = asRecord(input);
+      const uri = asString(value.uri, asString(value.path, ''));
+      const path = asString(value.path, uri);
+      let file: IndexedFile | undefined = uri ? context.workspaceIndex.getFile(uri) : undefined;
+      if (!file && path) {
+        const matches = context.workspaceIndex.searchResources({ query: path, limit: 50 });
+        file = matches.find((item) =>
+          item.item.sourceUri === path
+          || item.item.relativePath === path
+          || item.item.relativePath.endsWith(path)
+          || item.item.sourceUri.endsWith(path)
+          || item.item.absolutePath === path
+          || item.item.absolutePath.endsWith(path)
+        )?.item;
       }
-      const graph = buildGraphPatchFromProposal(proposal);
-      return ok({ graph, summaryText: summarizeGraphPatch(graph) });
+      if (!file) {
+        // Honest fallback for callers that only pass kind/path without an index hit.
+        // Marked unparsed/unknown so risk scoring stays conservative.
+        file = {
+          id: path || uri || 'unknown',
+          workspaceId: context.workspaceIndex.workspaceId,
+          absolutePath: path || uri || 'unknown',
+          sourcePath: path || uri || 'unknown',
+          sourceUri: path || uri || 'unknown://resource',
+          relativePath: path || uri || 'unknown',
+          resourceKind: 'unknown',
+          formatKind: 'unknown',
+          formatLabel: 'unknown',
+          extension: '',
+          compoundExtension: '',
+          size: 0,
+          mtimeMs: 0,
+          game: 'unknown',
+          parseStatus: 'unparsed',
+          diagnostics: []
+        };
+      }
+      const resolvedFile: IndexedFile = file;
+      const riskOptions: {
+        truncated?: boolean;
+        structuredEditable?: boolean;
+        parseStatus?: string;
+      } = {
+        truncated: value.truncated === true
+      };
+      if (value.structuredEditable === false) riskOptions.structuredEditable = false;
+      const parseStatus = asOptionalString(value.parseStatus);
+      if (parseStatus !== undefined) riskOptions.parseStatus = parseStatus;
+
+      const risk = assessEditRisk(resolvedFile, riskOptions);
+      const contract = resolveWriterContract(resolvedFile);
+      const changeKind: 'text' | 'structured' | 'binary' =
+        asString(value.changeKind, 'text') === 'structured'
+          ? 'structured'
+          : asString(value.changeKind, 'text') === 'binary'
+            ? 'binary'
+            : 'text';
+      let confirmation = undefined as import('@soulforge/shared').ConfirmationReceipt | undefined;
+      if (Array.isArray(value.confirmationReceiptIds) && value.confirmationReceiptIds.length > 0) {
+        confirmation = {
+          id: String(value.confirmationReceiptIds[0]),
+          confirmedAt: new Date().toISOString(),
+          subjects: ['edit-risk'],
+          riskLevel: risk.level
+        };
+      }
+      const gate = evaluateWriterGate({
+        file: resolvedFile,
+        changeKind,
+        ...(Object.keys(riskOptions).length > 0 ? { riskOptions } : {}),
+        ...(confirmation ? { confirmation } : {})
+      });
+      return ok({ risk, contract, gate });
     }
   });
 
-  registry.register({
-    name: 'assess_edit_risk',
-    description: 'Assess Files-mode edit risk and resolve writer contract for an indexed file snapshot.',
+registry.register({
+    name: 'build_patch_graph',
+    description: 'Build a graph-level impact summary from a PatchProposal without writing files.',
     permission: 'analyze',
     permissionLevel: 'analyze',
-    run: (input) => {
-      const value = asRecord(input);
-      const file = value.file as IndexedFile | undefined;
-      if (!file || typeof file !== 'object' || typeof file.sourceUri !== 'string') {
-        return fail('INVALID_INPUT', 'assess_edit_risk requires an IndexedFile in { file }.');
+    run: (input, context) => {
+      const proposal = input as PatchProposal;
+      if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
+        return fail('INVALID_INPUT', 'build_patch_graph requires a PatchProposal.');
       }
-      const riskOptions = {
-        ...(value.truncated === true ? { truncated: true as const } : {}),
-        ...(typeof value.structuredEditable === 'boolean' ? { structuredEditable: value.structuredEditable } : {}),
-        ...(typeof value.parseStatus === 'string' ? { parseStatus: value.parseStatus } : {})
-      };
-      const risk = assessEditRisk(file, riskOptions);
-      const contract = resolveWriterContract(file);
-      const gate = evaluateWriterGate({
-        file,
-        changeKind: value.changeKind === 'structured' || value.changeKind === 'binary' ? value.changeKind : 'text',
-        riskOptions
+      const resourceKindByUri = new Map<string, ResourceKind>();
+      for (const change of proposal.changes) {
+        const indexed = context.workspaceIndex.getFile(change.targetUri);
+        if (indexed) resourceKindByUri.set(change.targetUri, indexed.resourceKind);
+      }
+      const graph = buildGraphPatchFromProposal(proposal, {
+        resourceKindByUri
       });
-      return ok({ risk, contract, gate });
+      return ok({
+        graph,
+        summary: summarizeGraphPatch(graph)
+      });
     }
   });
 
@@ -362,6 +535,64 @@ export function createDefaultToolRegistry(): ToolRegistry {
     }
   });
 
+  // Shared PatchIR tools — single implementation for production + scaffold registry.
+  registry.register({
+    name: 'patch.proposeTextEdit',
+    description: 'Propose a text edit PatchIR without writing files.',
+    permission: 'propose',
+    permissionLevel: 'propose',
+    run: (input, context) => toToolResult(runPatchProposeTextEdit(input, {
+      workspaceId: context.workspaceIndex.workspaceId,
+      state: ensurePatchToolState(context)
+    }))
+  });
+
+  registry.register({
+    name: 'patch.stage',
+    description: 'Stage the last proposed PatchIR via WorkspaceTransaction.',
+    permission: 'stage',
+    permissionLevel: 'stage',
+    run: async (input, context) => toToolResult(await runPatchStage(input, {
+      workspaceId: context.workspaceIndex.workspaceId,
+      ...(context.workspaceRoot !== undefined ? { workspaceRoot: context.workspaceRoot } : {}),
+      state: ensurePatchToolState(context),
+      actorId: 'patch.stage'
+    }))
+  });
+
+  registry.register({
+    name: 'patch.validate',
+    description: 'Validate staged PatchIR output through WorkspaceTransaction.',
+    permission: 'validate',
+    permissionLevel: 'validate',
+    run: async (input, context) => toToolResult(await runPatchValidate(input, {
+      workspaceId: context.workspaceIndex.workspaceId,
+      state: ensurePatchToolState(context)
+    }))
+  });
+
+  registry.register({
+    name: 'patch.commit',
+    description: 'Commit a validated PatchIR transaction through WorkspaceTransaction.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    run: async (input, context) => toToolResult(await runPatchCommit(input, {
+      workspaceId: context.workspaceIndex.workspaceId,
+      state: ensurePatchToolState(context)
+    }))
+  });
+
+  registry.register({
+    name: 'patch.rollback',
+    description: 'Rollback the last WorkspaceTransaction.',
+    permission: 'rollback',
+    permissionLevel: 'rollback',
+    run: async (input, context) => toToolResult(await runPatchRollback(input, {
+      workspaceId: context.workspaceIndex.workspaceId,
+      state: ensurePatchToolState(context)
+    }))
+  });
+
   return registry;
 }
 
@@ -372,6 +603,13 @@ export function summarizeReferences(edges: ReferenceEdge[]): { high: number; med
     low: edges.filter((edge) => edge.confidence === 'low').length,
     total: edges.length
   };
+}
+
+function toToolResult<T>(result: PatchToolCoreResult<T>): ToolResult<T> {
+  if (result.ok) {
+    return ok(result.data);
+  }
+  return fail(result.code, result.message, result.details ?? (result.diagnostics ? { diagnostics: result.diagnostics } : undefined));
 }
 
 function normalizePermissionLevel(permission: ToolPermission): AiToolPermissionLevel {
@@ -411,8 +649,8 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
-function asString(value: unknown, fallback?: string): string {
-  return typeof value === 'string' ? value : fallback ?? '';
+function asString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
 }
 
 function asOptionalString(value: unknown): string | undefined {
@@ -422,7 +660,7 @@ function asOptionalString(value: unknown): string | undefined {
 function asNumber(value: unknown, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim().length > 0) {
-    const parsed = Number(value.trim());
+    const parsed = Number(value);
     if (Number.isFinite(parsed)) return parsed;
   }
   return fallback;

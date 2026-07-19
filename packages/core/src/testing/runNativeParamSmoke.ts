@@ -2,25 +2,35 @@
  * Native PARAM smoke against real gameparam.parambnd.dcx children.
  * Verifies semantic roundtrip, row upsert/delete via write-param, and BND4 commit/rollback.
  */
+import type { ParamDefDocument } from '@soulforge/shared';
 import { createHash } from 'node:crypto';
 import { copyFile, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
+import { commitParamFieldMutationViaBridge } from '../editing/paramBridgeCommit.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
+import { resolveNativeFixturePath } from './nativeFixturePaths.js';
 
 interface ParamEnvelope {
   sourceHash: string;
   typeName: string;
+  layout?: string;
   rowCount: number;
   rowDataSize: number;
-  rows: Array<{ id: number; dataBase64: string; dataHash: string }>;
-  roundTrip?: { semanticIdentical: boolean; byteIdentical: boolean };
+  rows: Array<{ id: number; dataBase64?: string; dataHash: string }>;
+  roundTrip?: {
+    semanticIdentical: boolean;
+    byteIdentical: boolean;
+    firstDifferenceOffset?: number;
+    sourceSize?: number;
+    rebuiltSize?: number;
+  };
 }
 
 interface Bnd4ChildSnapshot {
@@ -32,7 +42,12 @@ interface Bnd4ChildSnapshot {
 }
 
 async function main(): Promise<void> {
-  const sourceBnd = resolve(process.argv[2] ?? '../../mods/param/gameparam/gameparam.parambnd.dcx');
+  const sourceBnd = await resolveNativeFixturePath(
+    'param/gameparam/gameparam.parambnd.dcx',
+    2,
+    'SOULFORGE_NATIVE_FIXTURE_PARAM'
+  );
+  const sourceRoot = dirname(sourceBnd);
   const root = await mkdtemp(join(tmpdir(), 'soulforge-native-param-'));
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');
@@ -63,29 +78,47 @@ async function main(): Promise<void> {
     throw new Error(`PARAM read/roundtrip failed: ${JSON.stringify(read.diagnostics)} ${JSON.stringify(read.data?.roundTrip)}`);
   }
   const first = read.data.rows[0];
-  if (!first) throw new Error('PARAM has no rows.');
+  if (!first?.dataBase64) throw new Error('PARAM has no bounded row payload.');
 
-  // Flip first byte of row data for upsert
+  // Use a deliberately fixture-scoped user definition. This proves the typed
+  // field pipeline without claiming that byte 0 has an official ParamDef name.
   const originalData = Buffer.from(first.dataBase64, 'base64');
-  const mutated = Buffer.from(originalData);
-  mutated[0] = (mutated[0]! ^ 0xff) & 0xff;
+  const fixtureValue = (originalData[0]! ^ 0xff) & 0xff;
+  const fixtureDefinition: ParamDefDocument = {
+    schemaVersion: 1,
+    typeName: read.data.typeName,
+    version: 1,
+    rowDataSize: read.data.rowDataSize,
+    origin: 'fixture',
+    fields: [{
+      id: 'fixture_byte_0',
+      name: 'fixtureByte0',
+      type: 'u8',
+      offset: 0,
+      size: 1,
+      min: 0,
+      max: 255,
+      description: 'Fixture-only field; not an official ParamDef semantic claim.'
+    }]
+  };
   const stagedParam = join(staging, 'ActionGuideParam.param');
-  const written = await runBridge({
-    command: 'write-param',
-    filePath: paramPath,
+  const fieldWritten = await commitParamFieldMutationViaBridge({
+    sourcePath: paramPath,
+    outputPath: stagedParam,
+    expectedDocumentHash: read.data.sourceHash,
+    rowId: first.id,
+    expectedRowHash: first.dataHash,
+    definition: fixtureDefinition,
+    fieldId: 'fixture_byte_0',
+    value: fixtureValue,
     allowedRoots: [overlay, staging],
     writableRoots: [staging],
-    timeoutMs: 60_000,
-    commandOptions: {
-      outputPath: stagedParam,
-      expectedDocumentHash: read.data.sourceHash,
-      mutation: 'upsert',
-      id: first.id,
-      dataBase64: mutated.toString('base64')
-    }
+    timeoutMs: 60_000
   });
-  if (!written.diagnostics.some((d) => d.code === 'PARAM_STAGING_WRITE_VERIFIED')) {
-    throw new Error(`PARAM write failed: ${JSON.stringify(written.diagnostics)}`);
+  if (!fieldWritten.ok
+    || fieldWritten.fieldMutation?.afterValue !== fixtureValue
+    || fieldWritten.fieldMutation.changedByteOffsets.some((offset) => offset !== 0)) {
+    throw new Error(`PARAM field write failed: ${JSON.stringify(fieldWritten)}`);
   }
   const stagedRead = await runBridge<ParamEnvelope>({
     command: 'read-param-document',
@@ -94,7 +127,9 @@ async function main(): Promise<void> {
     timeoutMs: 60_000
   });
   const stagedRow = stagedRead.data?.rows.find((r) => r.id === first.id);
-  if (!stagedRow || stagedRow.dataHash === first.dataHash) {
+  if (!stagedRow
+    || stagedRow.dataHash === first.dataHash
+    || stagedRow.dataHash !== fieldWritten.fieldMutation.outputRowHash) {
     throw new Error('PARAM staged upsert did not change row hash.');
   }
 
@@ -160,68 +195,162 @@ async function main(): Promise<void> {
     throw new Error(`PARAM container rollback failed: ${JSON.stringify(rolled.diagnostics)}`);
   }
 
-  // Corpus: sample first 20 PARAM children for semantic roundtrip
-  const container = await runBridge<{ nested?: { entryCount: number } }>({
+  // Corpus: every PARAM child in the selected gameparam binder.
+  const container = await runBridge<{
+    sourceHash: string;
+    nested?: { entryCount: number; entries: Array<{ contentHash: string }> };
+  }>({
     command: 'read-dcx-document',
     filePath: sourceBnd,
-    allowedRoots: [resolve('../../mods')],
+    allowedRoots: [sourceRoot],
     timeoutMs: 120_000
   });
   const count = container.data?.nested?.entryCount ?? 0;
   let verified = 0;
   let failed: Array<{ index: number; message: string }> = [];
-  const limit = Math.min(count, 40);
+  if (count <= 0 || count > 10_000) {
+    throw new Error(`PARAM corpus entry count out of bounds: ${count}`);
+  }
+  const limit = count;
   for (let i = 0; i < limit; i++) {
-    const snap = await runBridge<Bnd4ChildSnapshot>({
-      command: 'snapshot-bnd4-child',
-      filePath: sourceBnd,
-      allowedRoots: [resolve('../../mods')],
-      timeoutMs: 120_000,
-      commandOptions: { entryIndex: i }
-    });
-    if (!snap.data?.contentBase64) {
-      failed.push({
-        index: i,
-        message: snap.diagnostics[0]?.message ?? 'snapshot failed'
-      });
+    const entry = container.data?.nested?.entries[i];
+    if (!entry || !container.data?.sourceHash) {
+      failed.push({ index: i, message: 'container entry metadata missing' });
       continue;
     }
     const tmp = join(staging, `corpus-${i}.param`);
-    await writeFile(tmp, Buffer.from(snap.data.contentBase64, 'base64'));
+    const extracted = await runBridge({
+      command: 'extract-bnd4-child',
+      filePath: sourceBnd,
+      allowedRoots: [sourceRoot],
+      writableRoots: [staging],
+      timeoutMs: 120_000,
+      commandOptions: {
+        outputPath: tmp,
+        entryIndex: i,
+        expectedContainerHash: container.data.sourceHash,
+        expectedChildHash: entry.contentHash
+      }
+    });
+    if (!extracted.diagnostics.some((diagnostic) => diagnostic.code === 'BND4_CHILD_EXTRACTED_TO_STAGING')) {
+      failed.push({
+        index: i,
+        message: extracted.diagnostics[0]?.message ?? 'file-backed extraction failed'
+      });
+      continue;
+    }
     const doc = await runBridge<ParamEnvelope>({
       command: 'read-param-document',
       filePath: tmp,
       allowedRoots: [staging],
       timeoutMs: 60_000
     });
-    if (!doc.data?.roundTrip?.semanticIdentical) {
+    if (!doc.data?.roundTrip?.semanticIdentical || !doc.data.roundTrip.byteIdentical) {
       failed.push({
         index: i,
-        message: doc.diagnostics[0]?.message ?? 'semantic roundtrip failed'
+        message: JSON.stringify(doc.data?.roundTrip ?? doc.diagnostics[0]?.message ?? 'byte/semantic roundtrip failed')
       });
       continue;
     }
     verified += 1;
   }
 
+  // Explicitly exercise the 0x100 embedded-type-name layout through the
+  // production writer. Index 33 has 22 fixed-width rows, so payload previews
+  // remain bounded and can be used for a targeted upsert assertion.
+  const legacySnapshot = await runBridge<Bnd4ChildSnapshot>({
+    command: 'snapshot-bnd4-child',
+    filePath: sourceBnd,
+    allowedRoots: [sourceRoot],
+    timeoutMs: 60_000,
+    commandOptions: { entryIndex: 33 }
+  });
+  if (!legacySnapshot.data?.contentBase64) {
+    throw new Error(`legacy PARAM snapshot failed: ${JSON.stringify(legacySnapshot.diagnostics)}`);
+  }
+  const legacyPath = join(staging, 'legacy-embedded-type-name.param');
+  await writeFile(legacyPath, Buffer.from(legacySnapshot.data.contentBase64, 'base64'));
+  const legacyRead = await runBridge<ParamEnvelope>({
+    command: 'read-param-document',
+    filePath: legacyPath,
+    allowedRoots: [staging],
+    timeoutMs: 60_000
+  });
+  const legacyFirst = legacyRead.data?.rows[0];
+  if (legacyRead.data?.layout !== 'embedded-type-name-0x30-0x0c'
+    || legacyRead.data.roundTrip?.byteIdentical !== true
+    || legacyRead.data.roundTrip.semanticIdentical !== true
+    || !legacyFirst?.dataBase64) {
+    throw new Error(`legacy PARAM no-op roundtrip failed: ${JSON.stringify(legacyRead.data?.roundTrip)}`);
+  }
+  const legacyPayload = Buffer.from(legacyFirst.dataBase64, 'base64');
+  const legacyMutated = Buffer.from(legacyPayload);
+  legacyMutated[0] = (legacyMutated[0]! ^ 0x01) & 0xff;
+  const legacyOutput = join(staging, 'legacy-embedded-type-name-mutated.param');
+  const legacyWritten = await runBridge({
+    command: 'write-param',
+    filePath: legacyPath,
+    allowedRoots: [staging],
+    writableRoots: [staging],
+    timeoutMs: 60_000,
+    commandOptions: {
+      outputPath: legacyOutput,
+      expectedDocumentHash: legacyRead.data.sourceHash,
+      mutation: 'upsert',
+      id: legacyFirst.id,
+      dataBase64: legacyMutated.toString('base64')
+    }
+  });
+  if (!legacyWritten.diagnostics.some((diagnostic) => diagnostic.code === 'PARAM_STAGING_WRITE_VERIFIED')) {
+    throw new Error(`legacy PARAM write failed: ${JSON.stringify(legacyWritten.diagnostics)}`);
+  }
+  const legacyReread = await runBridge<ParamEnvelope>({
+    command: 'read-param-document',
+    filePath: legacyOutput,
+    allowedRoots: [staging],
+    timeoutMs: 60_000
+  });
+  const legacyRereadFirst = legacyReread.data?.rows.find((row) => row.id === legacyFirst.id);
+  if (legacyReread.data?.layout !== legacyRead.data.layout
+    || legacyReread.data.rowCount !== legacyRead.data.rowCount
+    || !legacyRereadFirst?.dataBase64
+    || !Buffer.from(legacyRereadFirst.dataBase64, 'base64').equals(legacyMutated)) {
+    throw new Error('legacy PARAM staged upsert did not survive reread.');
+  }
+
   if (verified === 0) {
     throw new Error(`No PARAM children verified: ${JSON.stringify(failed.slice(0, 5))}`);
   }
 
+  const corpusComplete = failed.length === 0 && verified === limit;
   console.log(JSON.stringify({
-    ok: true,
+    ok: corpusComplete,
+    status: corpusComplete ? 'passed' : 'partial',
     message: '原生 PARAM 读取/语义往返/写入/BND4 提交/回滚验证通过',
     typeName: read.data.typeName,
     rowCount: read.data.rowCount,
     rowDataSize: read.data.rowDataSize,
     byteIdenticalNoop: read.data.roundTrip?.byteIdentical ?? false,
     semanticIdenticalNoop: true,
+    fieldMutation: {
+      origin: fixtureDefinition.origin,
+      fieldId: fieldWritten.fieldMutation.fieldId,
+      beforeValue: fieldWritten.fieldMutation.beforeValue,
+      afterValue: fieldWritten.fieldMutation.afterValue,
+      changedByteOffsets: fieldWritten.fieldMutation.changedByteOffsets,
+      stagingRereadVerified: true,
+      nonClaim: 'fixture-only field; native .paramdef semantics remain unverified'
+    },
     corpusSampled: limit,
     corpusVerified: verified,
     corpusFailed: failed.length,
     failures: failed.slice(0, 5),
+    legacyLayout: legacyRead.data.layout,
+    legacyByteIdenticalNoop: legacyRead.data.roundTrip.byteIdentical,
+    legacyWriterRereadVerified: true,
     containerEntries: count
   }, null, 2));
+  if (!corpusComplete) process.exitCode = 2;
   await disposeBridgeDaemonPool();
 }
 

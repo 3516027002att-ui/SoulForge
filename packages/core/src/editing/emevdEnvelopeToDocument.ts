@@ -11,6 +11,7 @@ export interface BridgeEmevdEnvelopeLike {
   instructionCount?: number;
   events?: Array<{
     id: number;
+    eventIndex?: number;
     restBehavior?: number;
     instructionCount?: number;
     instructionStartIndex?: number;
@@ -35,8 +36,9 @@ export function emevdEnvelopeToEditorDocument(
   const sampleByIndex = new Map(
     (envelope.instructionsSample ?? []).map((item) => [item.index, item])
   );
-  const events: EmevdEventIr[] = (envelope.events ?? []).slice(0, maxEvents).map((event) => {
-    const eventUri = `${resourceUri}#event/${event.id}`;
+  const events: EmevdEventIr[] = (envelope.events ?? []).slice(0, maxEvents).map((event, index) => {
+    const eventIndex = event.eventIndex ?? index;
+    const eventUri = `${resourceUri}#event/${event.id}/index/${eventIndex}`;
     const start = event.instructionStartIndex ?? -1;
     const count = event.instructionCount ?? 0;
     const instructions: EmevdInstructionIr[] = [];
@@ -56,6 +58,7 @@ export function emevdEnvelopeToEditorDocument(
     return {
       eventUri,
       eventId: event.id,
+      eventIndex,
       restBehavior: event.restBehavior ?? 0,
       layer: event.layer ?? -1,
       instructions

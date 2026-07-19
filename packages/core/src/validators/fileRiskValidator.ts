@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import type {
   PatchIR,
   PatchIrOperation,
@@ -6,6 +7,10 @@ import type {
   ValidatorResult
 } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
+import { isEmevdSemanticOperation } from '../editing/emevdSemanticContract.js';
+import { isParamFieldSemanticOperation } from '../editing/paramSemanticContract.js';
+import { isMsbPositionFieldOperation } from '../editing/msbSemanticContract.js';
+import { isFmgSemanticOperation } from '../editing/fmgSemanticContract.js';
 import { getFileCapabilities } from '../files/fileCapabilities.js';
 
 /**
@@ -46,11 +51,35 @@ export class FileRiskValidator implements ValidatorContract {
 
       if (
         op.kind === 'resource_field_edit'
+        || op.kind === 'resource_node_add'
+        || op.kind === 'resource_node_delete'
+        || op.kind === 'resource_node_reorder'
         || op.kind === 'container_child_add'
         || op.kind === 'container_child_delete'
         || op.kind === 'container_child_rename'
         || op.kind === 'container_child_move'
       ) {
+        const registeredNativeSemantic = (
+          (op.kind === 'resource_field_edit'
+            && (isParamFieldSemanticOperation(op)
+              || isMsbPositionFieldOperation(op)))
+          || isEmevdSemanticOperation(op)
+          || isFmgSemanticOperation(op)
+        );
+        if (registeredNativeSemantic) {
+          if (op.riskLevel !== 'high'
+            || op.metadata?.requiresConfirmation !== true
+            || typeof op.metadata.confirmationReceiptId !== 'string'
+            || op.metadata.confirmationReceiptId.length === 0) {
+            diagnostics.push(createDiagnostic({
+              severity: 'error',
+              code: 'NATIVE_SEMANTIC_CONFIRMATION_REQUIRED',
+              message: '原生语义字段/节点修改必须为高风险并绑定可信确认凭据。',
+              targetUri: op.targetUri
+            }));
+          }
+          continue;
+        }
         const nativeBnd4 = op.kind.startsWith('container_child_')
           && 'containerFormat' in op
           && op.containerFormat === 'BND4_DFLT'
@@ -112,7 +141,8 @@ export class FileRiskValidator implements ValidatorContract {
       ok: diagnostics.every((d) => d.severity !== 'error'),
       diagnostics,
       scope: 'before_staging',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds: input.operations.map((op) => op.id)
     };
   }
 }
@@ -141,7 +171,8 @@ export class WorkspaceBoundaryValidator implements ValidatorContract {
       ok: diagnostics.every((d) => d.severity !== 'error'),
       diagnostics,
       scope: 'before_staging',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds: input.operations.map((op) => op.id)
     };
   }
 }
@@ -191,7 +222,66 @@ export class WholeFileReplaceValidator implements ValidatorContract {
       ok: diagnostics.every((d) => d.severity !== 'error'),
       diagnostics,
       scope: 'before_staging',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds: input.operations
+        .filter((op) => op.kind === 'file_replace')
+        .map((op) => op.id)
+    };
+  }
+
+  async validateStagedOutput(input: {
+    patch: PatchIR;
+    operations: PatchIrOperation[];
+    stagingRoot: string;
+    stagedPaths: string[];
+  }): Promise<ValidatorResult> {
+    const diagnostics: StructuredDiagnostic[] = [];
+    const operations = input.operations.filter((op) => op.kind === 'file_replace');
+    for (const operation of operations) {
+      const stagedPath = input.stagedPaths.find((path) =>
+        path.replaceAll('\\', '/').includes(`/${operation.id.slice(0, 8)}/`));
+      if (!stagedPath) {
+        diagnostics.push(createDiagnostic({
+          severity: 'error',
+          code: 'FILE_REPLACE_STAGED_PATH_MISSING',
+          message: 'file_replace 缺少可绑定到 operation 的暂存输出。',
+          targetUri: operation.targetUri,
+          details: { operationId: operation.id }
+        }));
+        continue;
+      }
+      try {
+        const actual = await readFile(stagedPath);
+        const expected = typeof operation.newText === 'string'
+          ? Buffer.from(operation.newText, 'utf8')
+          : operation.newContentBase64 !== undefined
+            ? Buffer.from(operation.newContentBase64, 'base64')
+            : undefined;
+        if (!expected || !actual.equals(expected)) {
+          diagnostics.push(createDiagnostic({
+            severity: 'error',
+            code: 'FILE_REPLACE_STAGED_CONTENT_MISMATCH',
+            message: 'file_replace 暂存输出与声明的替换内容不一致。',
+            targetUri: operation.targetUri,
+            details: { operationId: operation.id }
+          }));
+        }
+      } catch {
+        diagnostics.push(createDiagnostic({
+          severity: 'error',
+          code: 'FILE_REPLACE_STAGED_READ_FAILED',
+          message: 'file_replace 暂存输出无法读取。',
+          targetUri: operation.targetUri,
+          details: { operationId: operation.id }
+        }));
+      }
+    }
+    return {
+      ok: diagnostics.every((item) => item.severity !== 'error'),
+      diagnostics,
+      scope: 'staged_output',
+      validatorId: this.validatorId,
+      validatedOperationIds: operations.map((op) => op.id)
     };
   }
 }

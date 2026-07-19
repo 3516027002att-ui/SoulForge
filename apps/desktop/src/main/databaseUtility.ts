@@ -1,4 +1,5 @@
 import {
+  AppDataRepository,
   importLegacyOperationLog,
   importLegacySemanticSnapshot,
   DurableWorkspaceRepository,
@@ -17,6 +18,7 @@ import {
 
 let store: SqliteOperationLogStore | null = null;
 let appDatabase: SqliteDatabase | null = null;
+let appDataRepository: AppDataRepository | null = null;
 let workspaceId: string | null = null;
 let durableRepository: DurableWorkspaceRepository | null = null;
 let workspaceDataRepository: WorkspaceDataRepository | null = null;
@@ -68,6 +70,8 @@ async function handleRequest(value: unknown): Promise<void> {
 
 async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
   switch (request.method) {
+    case 'openApp':
+      return openApp(request.payload);
     case 'openWorkspace':
       return openWorkspace(request.payload);
     case 'health':
@@ -141,7 +145,64 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return null;
     case 'listJobs':
       return requireWorkspaceDataRepository().listJobs();
+    case 'listModelServices':
+      return requireAppDataRepository().listModelServices();
+    case 'getModelService':
+      return requireAppDataRepository().getModelService(
+        request.payload.serviceId,
+        request.payload.includeDeleted === true
+      );
+    case 'upsertModelService':
+      return requireAppDataRepository().upsertModelService(request.payload.record);
+    case 'importModelServices':
+      return { imported: requireAppDataRepository().importModelServices(request.payload.records) };
+    case 'softDeleteModelService':
+      requireAppDataRepository().softDeleteModelService(
+        request.payload.serviceId,
+        request.payload.deletedAt
+      );
+      return null;
+    case 'replacePermissionGrant':
+      return requireAppDataRepository().replacePermissionGrant(request.payload.grant);
+    case 'getActivePermissionGrant':
+      return requireAppDataRepository().getActivePermissionGrant(
+        request.payload.serviceId,
+        request.payload.permissionMode,
+        request.payload.policyVersion
+      );
+    case 'revokePermissionGrant':
+      requireAppDataRepository().revokePermissionGrant(
+        request.payload.grantId,
+        request.payload.revokedAt
+      );
+      return null;
+    case 'recordAgentRun':
+      return requireAppDataRepository().recordAgentRun(request.payload.input);
+    case 'getAgentRun': {
+      const detail = requireAppDataRepository().getAgentRun(request.payload.runId);
+      return detail ?? null;
+    }
+    case 'listAgentRuns':
+      return requireAppDataRepository().listAgentRuns(request.payload);
+    case 'getAiHistoryRetentionMode':
+      return { mode: requireAppDataRepository().getAiHistoryRetentionMode() };
+    case 'setAiHistoryRetentionMode':
+      return requireAppDataRepository().setAiHistoryRetentionMode(request.payload.mode);
+    case 'cleanupExpiredAiHistory':
+      return requireAppDataRepository().cleanupExpiredHistory(request.payload.now);
   }
+}
+
+async function openApp(payload: { appDatabasePath: string }) {
+  const nextAppDatabase = openAppDatabase(payload.appDatabasePath, {
+    ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
+      ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
+      : {})
+  });
+  appDatabase?.close();
+  appDatabase = nextAppDatabase;
+  appDataRepository = new AppDataRepository(nextAppDatabase);
+  return { appReady: true as const };
 }
 
 async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
@@ -178,6 +239,7 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     durableRepository = new DurableWorkspaceRepository(next.database, payload.workspaceId);
     workspaceDataRepository = new WorkspaceDataRepository(next.database, payload.workspaceId);
     appDatabase = nextAppDatabase;
+    appDataRepository = new AppDataRepository(nextAppDatabase);
     workspaceId = payload.workspaceId;
     return {
       workspaceId,
@@ -198,6 +260,11 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     nextAppDatabase?.close();
     throw error;
   }
+}
+
+function requireAppDataRepository(): AppDataRepository {
+  if (!appDataRepository) throw codedError('DATABASE_UTILITY_NOT_INITIALIZED', '应用数据库尚未初始化。');
+  return appDataRepository;
 }
 
 function requireStore(): SqliteOperationLogStore {
@@ -221,6 +288,7 @@ function closeStore(): void {
   store = null;
   durableRepository = null;
   workspaceDataRepository = null;
+  appDataRepository = null;
   appDatabase = null;
   workspaceId = null;
 }

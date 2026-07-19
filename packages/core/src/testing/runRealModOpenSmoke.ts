@@ -13,7 +13,15 @@ interface PreviewCounts {
 }
 
 async function main(): Promise<void> {
-  const workspaceRoot = resolve(process.argv[2] ?? '../../mods');
+  const configuredRoot = process.argv[2]?.trim()
+    || process.env.SOULFORGE_REAL_MOD_ROOT?.trim()
+    || '';
+  if (!configuredRoot) {
+    throw new Error(
+      'Real mod workspace smoke requires an explicit path or SOULFORGE_REAL_MOD_ROOT; no repository mods fallback is allowed.'
+    );
+  }
+  const workspaceRoot = resolve(configuredRoot);
   const result = await scanWorkspace({ workspaceRoot });
 
   const previewCounts: PreviewCounts = {

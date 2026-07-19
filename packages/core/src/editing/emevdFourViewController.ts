@@ -34,11 +34,12 @@ export function createEmevdEditorDocument(input: {
   }>;
   bytesBase64?: string;
 }): EmevdEditorDocument {
-  const events: EmevdEventIr[] = input.events.map((event) => {
-    const eventUri = `${input.resourceUri}#event/${event.eventId}`;
+  const events: EmevdEventIr[] = input.events.map((event, eventIndex) => {
+    const eventUri = `${input.resourceUri}#event/${event.eventId}/index/${eventIndex}`;
     return {
       eventUri,
       eventId: event.eventId,
+      eventIndex,
       restBehavior: event.restBehavior,
       layer: event.layer ?? -1,
       instructions: (event.instructions ?? []).map((instr, index) => ({
@@ -144,7 +145,7 @@ export function applyEmevdEditorMutation(
       return { ok: false, code: 'EMEVD_EVENT_ID_DUPLICATE', message: '新事件 ID 已存在。' };
     }
     const previous = events[index]!;
-    const eventUri = `${document.resourceUri}#event/${mutation.newEventId}`;
+    const eventUri = `${document.resourceUri}#event/${mutation.newEventId}/index/${previous.eventIndex ?? index}`;
     events[index] = {
       ...previous,
       eventId: mutation.newEventId,
@@ -209,6 +210,113 @@ export function applyEmevdEditorMutation(
       ]
     }
   };
+}
+
+
+export function findEmevdEvent(document: EmevdEditorDocument, eventUri: string): EmevdEventIr | undefined {
+  return document.events.find((event) => event.eventUri === eventUri);
+}
+
+export function findEmevdInstruction(
+  document: EmevdEditorDocument,
+  eventUri: string,
+  instructionUri: string
+): { event: EmevdEventIr; instructionIndex: number } | undefined {
+  const event = findEmevdEvent(document, eventUri);
+  if (!event) return undefined;
+  const instructionIndex = event.instructions.findIndex((item) => item.instructionUri === instructionUri);
+  if (instructionIndex < 0) return undefined;
+  return { event, instructionIndex };
+}
+
+export function selectEmevdEvent(selection: EmevdSelection, eventUri: string): EmevdSelection {
+  return selectEmevdView(selection, selection.view, eventUri, undefined);
+}
+
+export function selectEmevdInstruction(
+  selection: EmevdSelection,
+  eventUri: string,
+  instructionUri: string
+): EmevdSelection {
+  return selectEmevdView(selection, selection.view, eventUri, instructionUri);
+}
+
+export function navigateEmevdSelection(
+  document: EmevdEditorDocument,
+  selection: EmevdSelection,
+  direction: "next" | "prev"
+): EmevdSelection {
+  if (document.events.length === 0) return selection;
+  let eventIndex = selection.eventUri
+    ? document.events.findIndex((event) => event.eventUri === selection.eventUri)
+    : 0;
+  if (eventIndex < 0) eventIndex = 0;
+  const event = document.events[eventIndex]!;
+  if (selection.instructionUri) {
+    let instructionIndex = event.instructions.findIndex((item) => item.instructionUri === selection.instructionUri);
+    if (instructionIndex < 0) instructionIndex = 0;
+    if (direction === "next") {
+      if (instructionIndex + 1 < event.instructions.length) {
+        return selectEmevdInstruction(selection, event.eventUri, event.instructions[instructionIndex + 1]!.instructionUri);
+      }
+      if (eventIndex + 1 < document.events.length) {
+        const nextEvent = document.events[eventIndex + 1]!;
+        const first = nextEvent.instructions[0];
+        return first
+          ? selectEmevdInstruction(selection, nextEvent.eventUri, first.instructionUri)
+          : selectEmevdEvent(selection, nextEvent.eventUri);
+      }
+      return selection;
+    }
+    if (instructionIndex > 0) {
+      return selectEmevdInstruction(selection, event.eventUri, event.instructions[instructionIndex - 1]!.instructionUri);
+    }
+    if (eventIndex > 0) {
+      const prevEvent = document.events[eventIndex - 1]!;
+      const last = prevEvent.instructions[prevEvent.instructions.length - 1];
+      return last
+        ? selectEmevdInstruction(selection, prevEvent.eventUri, last.instructionUri)
+        : selectEmevdEvent(selection, prevEvent.eventUri);
+    }
+    return selection;
+  }
+  if (direction === "next") {
+    if (eventIndex + 1 < document.events.length) return selectEmevdEvent(selection, document.events[eventIndex + 1]!.eventUri);
+    return selection;
+  }
+  if (eventIndex > 0) return selectEmevdEvent(selection, document.events[eventIndex - 1]!.eventUri);
+  return selection;
+}
+
+
+
+export function applyEmevdEditorMutations(
+  document: EmevdEditorDocument,
+  mutations: readonly EmevdEditorMutation[]
+): {
+  ok: boolean;
+  document: EmevdEditorDocument;
+  applied: number;
+  failedCode?: string;
+  failedMessage?: string;
+} {
+  let current = document;
+  let applied = 0;
+  for (const mutation of mutations) {
+    const result = applyEmevdEditorMutation(current, mutation);
+    if (!result.ok) {
+      return {
+        ok: false,
+        document: current,
+        applied,
+        failedCode: result.code,
+        failedMessage: result.message
+      };
+    }
+    current = result.document;
+    applied += 1;
+  }
+  return { ok: true, document: current, applied };
 }
 
 /** Parse DSL is intentionally non-authoritative: errors never mutate the document. */

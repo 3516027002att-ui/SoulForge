@@ -55,5 +55,11 @@ portable:
 # electron-updater publish channel reserved; no tokens in repo.
 # publish: null
 
+# better-sqlite3 Electron ABI is prepared under .native by prepare:database-native;
+# skip electron-builder native rebuild which is redundant and fragile on Node 24.
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+
 asar: true
 compression: normal

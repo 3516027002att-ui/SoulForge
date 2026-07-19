@@ -3,6 +3,53 @@ using System.Text.Json;
 
 internal static class Bnd4NativeWriter
 {
+    public static async Task<object> ExtractChildAsync(
+        string sourcePath,
+        string outputPath,
+        JsonElement options,
+        CancellationToken cancellationToken,
+        string? oodleRuntimeRoot)
+    {
+        var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
+        if (dcx.CompressionFormat != "DFLT")
+            throw new NotSupportedException("BND4 file-backed extraction 当前只允许已验证的 DFLT 外层。");
+        RequireHash(options, "expectedContainerHash", dcx.SourceHash, "DCX source hash");
+        var binder = Bnd4NativeDocument.Read(dcx.Payload);
+        var index = ResolveEntryIndex(options, binder);
+        var entry = binder.Entries[index];
+        RequireHash(options, "expectedChildHash", entry.ContentHash, "BND4 child hash");
+        var bytes = binder.GetStoredBytes(index);
+        cancellationToken.ThrowIfCancellationRequested();
+        var directory = Path.GetDirectoryName(outputPath)
+            ?? throw new InvalidDataException("outputPath 没有父目录。");
+        Directory.CreateDirectory(directory);
+        var temporary = Path.Combine(directory, $".soulforge-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            await File.WriteAllBytesAsync(temporary, bytes, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporary, outputPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+        var reread = await File.ReadAllBytesAsync(outputPath, cancellationToken);
+        var outputHash = Hash(reread);
+        if (!outputHash.Equals(entry.ContentHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("BND4 子项提取后重读哈希不一致。");
+        return new
+        {
+            index = entry.Index,
+            id = entry.Id,
+            name = entry.Name,
+            contentHash = entry.ContentHash,
+            outputHash,
+            outputSize = reread.Length,
+            rereadVerified = true
+        };
+    }
+
     public static object SnapshotChild(string sourcePath, JsonElement options, string? oodleRuntimeRoot)
     {
         var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);

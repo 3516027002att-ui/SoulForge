@@ -38,7 +38,10 @@ export function openAppDatabase(
   databasePath: string,
   options: OpenSoulForgeDatabaseOptions = {}
 ): SqliteDatabase {
-  return openMigratedDatabase(databasePath, APP_DB_MIGRATIONS, options);
+  const database = openMigratedDatabase(databasePath, APP_DB_MIGRATIONS, options);
+  database.pragma('synchronous = FULL');
+  database.pragma('secure_delete = ON');
+  return database;
 }
 
 export function openMigratedDatabase(

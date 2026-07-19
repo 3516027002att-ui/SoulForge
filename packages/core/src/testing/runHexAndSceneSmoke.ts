@@ -22,6 +22,21 @@ function main(): void {
   });
   if (stale.ok || stale.code !== 'HEX_PATCH_STALE') throw new Error('stale patch must fail');
 
+  // search / jump / diff (backend only)
+  const jump = doc.jumpTo(20);
+  if (!jump.ok || jump.pageIndex !== 1) throw new Error('jumpTo page');
+  const badJump = doc.jumpTo(10_000);
+  if (badJump.ok) throw new Error('jump out of range must fail');
+  const hits = doc.findAscii('DOCUMENT', { maxHits: 4 });
+  if (hits.hits.length !== 1 || hits.hits[0]?.offset !== 14) throw new Error('findAscii hit');
+  const bytesHits = doc.findBytes(Buffer.from('TEST'));
+  if (bytesHits.hits.length !== 1 || bytesHits.hits[0]?.offset !== 0) throw new Error('findBytes hit');
+  const other = new HexDocument(Buffer.from('SoulForge-HEX-DOCUMENT-0123456789ABCDEF'), 16);
+  const diff = doc.diffAgainst(other.snapshot(), { maxSpans: 8 });
+  if (diff.equal || diff.spans.length === 0) throw new Error('diff should detect patch');
+  if (diff.spans[0]?.offset !== 0 || diff.spans[0]?.length !== 4) throw new Error('diff span');
+
+
   const manifest = buildMsbSceneManifest({
     mapResourceUri: 'file://map/m10_00_00_00.msb',
     parts: [
@@ -50,9 +65,11 @@ function main(): void {
 
   console.log(JSON.stringify({
     ok: true,
-    message: 'Hex 文档分页补丁与 MSB 场景清单验证通过',
+    message: 'Hex 文档分页/search/jump/diff 与 MSB 场景清单验证通过',
     hexPages: doc.pageCount(),
     hexHash: doc.contentHash,
+    hexSearchHits: hits.hits.length,
+    hexDiffSpans: diff.spans.length,
     sceneNodes: manifest.nodeCount,
     chunk0: chunk0[0]?.id
   }, null, 2));
