@@ -19,6 +19,12 @@ function leI32(value) {
   return buffer;
 }
 
+function leU16(value) {
+  const buffer = Buffer.alloc(2);
+  buffer.writeUInt16LE(value, 0);
+  return buffer;
+}
+
 function leF32(value) {
   const buffer = Buffer.alloc(4);
   buffer.writeFloatLE(value, 0);
@@ -295,6 +301,40 @@ function writeParamFixture(path) {
   ]));
 }
 
+function writeNativeEmbeddedParamFixture(path, formatFlags) {
+  const headerSize = 0x30;
+  const rowHeaderSize = 0x0c;
+  const rowCount = 2;
+  const rowDataSize = 4;
+  const dataGap = formatFlags === 0x100 ? Buffer.alloc(0x20) : Buffer.alloc(0);
+  const tableEnd = headerSize + rowCount * rowHeaderSize;
+  const firstDataOffset = tableEnd + dataGap.length;
+  const nameOffset = firstDataOffset + rowCount * rowDataSize;
+  const rowNameA = Buffer.from([0x82, 0xa0, 0x00]);
+  const rowNameB = Buffer.from('synthetic-row\0', 'ascii');
+  const output = Buffer.alloc(nameOffset + rowNameA.length + rowNameB.length);
+
+  leI32(nameOffset).copy(output, 0);
+  leU16(firstDataOffset).copy(output, 4);
+  leU16(1).copy(output, 6);
+  leU16(1).copy(output, 8);
+  leU16(rowCount).copy(output, 10);
+  Buffer.from('SYNTHETIC_PARAM_ST\0', 'ascii').copy(output, 0x0c);
+  leI32(formatFlags).copy(output, 0x2c);
+
+  leI32(10).copy(output, 0x30);
+  leI32(firstDataOffset).copy(output, 0x34);
+  leI32(nameOffset).copy(output, 0x38);
+  leI32(20).copy(output, 0x3c);
+  leI32(firstDataOffset + rowDataSize).copy(output, 0x40);
+  leI32(nameOffset + rowNameA.length).copy(output, 0x44);
+  dataGap.copy(output, tableEnd);
+  Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]).copy(output, firstDataOffset);
+  rowNameA.copy(output, nameOffset);
+  rowNameB.copy(output, nameOffset + rowNameA.length);
+  writeFileSync(path, output);
+}
+
 function writeMapFixture(path) {
   const entityA = utf16LeZ('c0000_0000_entity');
   const entityB = utf16LeZ('o0000_0000_object');
@@ -357,6 +397,8 @@ try {
   const mapPath = join(tempRoot, 'm10_00_00_00.synthetic.msb');
   const bndPath = join(tempRoot, 'synthetic.bnd');
   const dcxPath = join(tempRoot, 'synthetic.bnd.dcx');
+  const embeddedParam100Path = join(tempRoot, 'synthetic-embedded-100.param');
+  const embeddedParam200Path = join(tempRoot, 'synthetic-embedded-200.param');
 
   writeFmgFixture(fmgPath);
   writeEventFixture(eventPath);
@@ -364,6 +406,8 @@ try {
   writeMapFixture(mapPath);
   writeBndFixture(bndPath);
   writeDcxDfltFixture(dcxPath);
+  writeNativeEmbeddedParamFixture(embeddedParam100Path, 0x100);
+  writeNativeEmbeddedParamFixture(embeddedParam200Path, 0x200);
 
   const msg = invokeBridge('export-msg', fmgPath);
   assertPartial(msg, 'export-msg');
@@ -380,6 +424,17 @@ try {
   assertPartial(param, 'export-param');
   assertDiagnosticCode(param, 'PARAM_SYNTHETIC_FIXTURE_CONFIRMED');
   if (!param.data?.rows || param.data.rows.length !== 2) throw new Error('Expected two PARAM rows');
+
+  for (const nativeParamPath of [embeddedParam100Path, embeddedParam200Path]) {
+    const nativeParam = invokeBridge('read-param-document', nativeParamPath);
+    assertPartial(nativeParam, 'read-param-document');
+    assertDiagnosticCode(nativeParam, 'PARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED');
+    if (nativeParam.data?.layout !== 'embedded-type-name-0x30-0x0c'
+      || nativeParam.data?.roundTrip?.byteIdentical !== true
+      || nativeParam.data?.roundTrip?.semanticIdentical !== true) {
+      throw new Error(`Native embedded PARAM fixture roundtrip failed: ${nativeParamPath}`);
+    }
+  }
 
   const map = invokeBridge('export-map', mapPath);
   assertPartial(map, 'export-map');

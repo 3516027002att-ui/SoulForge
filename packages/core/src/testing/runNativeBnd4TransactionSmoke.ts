@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { copyFile, mkdtemp, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
@@ -9,6 +9,7 @@ import { rollbackOperation, rollbackResourceEntry } from '../patch/rollback.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
+import { resolveNativeFixturePath } from './nativeFixturePaths.js';
 
 interface Envelope {
   sourceHash: string;
@@ -19,7 +20,11 @@ interface Envelope {
 }
 
 async function main(): Promise<void> {
-  const source = resolve(process.argv[2] ?? '../../mods/chr/c0000.anibnd.dcx');
+  const source = await resolveNativeFixturePath(
+    'chr/c0000.anibnd.dcx',
+    2,
+    'SOULFORGE_NATIVE_FIXTURE_BND4'
+  );
   const root = await mkdtemp(join(tmpdir(), 'soulforge-native-bnd4-transaction-'));
   const overlay = join(root, 'mod');
   await mkdir(join(overlay, 'chr'), { recursive: true });

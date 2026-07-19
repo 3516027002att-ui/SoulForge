@@ -3,7 +3,7 @@
  *
  * Covers:
  * ResourceURI, ResourceGraph, PatchIR, Transaction (text/raw),
- * AI tool policy, VFS, Bridge protocol scaffold.
+ * AI tool policy (production ToolRegistry), VFS, Bridge protocol scaffold.
  *
  * No frontend UI. No native parser/writer claims.
  */
@@ -28,9 +28,9 @@ import {
 } from '@soulforge/shared';
 import { MemoryAuditLogStore } from '../audit-log/memoryAuditLog.js';
 import {
-  createScaffoldToolRegistry,
-  type ScaffoldToolContext
-} from '../ai-tools/scaffoldToolRegistry.js';
+  createDefaultToolRegistry
+} from '../ai/toolRegistry.js';
+import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import {
   buildScaffoldCapabilityMatrix,
   createSyntheticInspectEnvelope,
@@ -341,91 +341,111 @@ async function main(): Promise<void> {
   }
   results.push('Transaction raw commit/rollback ok');
 
-  // --- 5. AI tool policy ---
-  const registry = createScaffoldToolRegistry();
-  const toolNames = new Set(registry.listTools().map((tool) => tool.name));
+  // --- 5. AI tool policy (production ToolRegistry) ---
+  const registry = createDefaultToolRegistry();
+  const toolNames = new Set(registry.listToolNames());
   for (const required of [
-    'workspace.stats',
-    'resource.graph.query',
-    'patch.proposeTextEdit',
-    'patch.stage',
-    'patch.validate',
-    'patch.commit',
-    'patch.rollback'
+    "workspace.stats",
+    "resource.graph.query",
+    "patch.proposeTextEdit",
+    "patch.stage",
+    "patch.validate",
+    "patch.commit",
+    "patch.rollback"
   ]) {
-    if (!toolNames.has(required)) throw new Error(`Missing scaffold tool: ${required}`);
+    if (!toolNames.has(required)) throw new Error("Missing production tool: " + required);
   }
 
-  const planCtx: ScaffoldToolContext = {
-    workspaceId: 'ws-scaffold',
+  const workspaceIndex = new WorkspaceIndex("ws-scaffold");
+  const planCtx = {
+    workspaceIndex,
     workspaceRoot,
-    mode: 'plan',
+    mode: "plan" as const,
     graph,
-    auditLog: audit
+    state: {} as Record<string, unknown>
   };
 
-  const stats = await registry.executeToolThroughPolicy('workspace.stats', {}, planCtx);
-  if (!stats.ok || typeof stats.data !== 'object') throw new Error('workspace.stats failed.');
-  if (!Array.isArray(stats.diagnostics) || !stats.evidenceRefs) {
-    throw new Error('Tool result must be typed with diagnostics + evidenceRefs.');
+  const stats = await registry.executeToolThroughPolicy("workspace.stats", {}, planCtx);
+  if (!stats.ok || !stats.data || typeof stats.data !== "object") {
+    throw new Error("workspace.stats failed: " + JSON.stringify(stats.error));
+  }
+  const statsData = stats.data as { fileCount?: number };
+  if (typeof statsData.fileCount !== "number") throw new Error("workspace.stats missing fileCount");
+
+  // plan mode caps at propose: propose allowed, stage/commit denied.
+  const planPropose = await registry.executeToolThroughPolicy(
+    "patch.proposeTextEdit",
+    {
+      targetUri: noteUri,
+      targetPath: "msg/note.txt",
+      newText: "plan-ok" + String.fromCharCode(10),
+      title: "plan propose"
+    },
+    planCtx
+  );
+  if (!planPropose.ok) throw new Error("plan mode should allow propose: " + JSON.stringify(planPropose.error));
+
+  const stageDenied = await registry.executeToolThroughPolicy("patch.stage", {}, planCtx);
+  if (stageDenied.ok || !stageDenied.error || stageDenied.error.code !== "POLICY_DENIED") {
+    throw new Error("plan mode must deny stage with POLICY_DENIED");
   }
 
-  const propose = await registry.executeToolThroughPolicy('patch.proposeTextEdit', {
-    targetUri: noteUri,
-    targetPath: notePath,
-    newText: 'from-tool\n',
-    title: 'tool propose'
-  }, planCtx);
-  if (!propose.ok) throw new Error(`propose failed: ${JSON.stringify(propose.diagnostics)}`);
-
-  const commitDenied = await registry.executeToolThroughPolicy('patch.commit', {}, planCtx);
-  if (commitDenied.ok || commitDenied.policyDecision.kind === 'allow') {
-    throw new Error('commit must be denied in plan mode without confirmation.');
+  const commitDenied = await registry.executeToolThroughPolicy("patch.commit", {}, planCtx);
+  if (commitDenied.ok || !commitDenied.error || commitDenied.error.code !== "POLICY_DENIED") {
+    throw new Error("plan mode must deny commit with POLICY_DENIED");
   }
 
-  // Stage/validate allowed in plan; commit needs confirmation or fullPermission.
-  const stageOk = await registry.executeToolThroughPolicy('patch.stage', {}, planCtx);
-  if (!stageOk.ok) throw new Error(`stage tool failed: ${JSON.stringify(stageOk.diagnostics)}`);
-  const validateOk = await registry.executeToolThroughPolicy('patch.validate', {}, planCtx);
-  if (!validateOk.ok) throw new Error(`validate tool failed: ${JSON.stringify(validateOk.diagnostics)}`);
-
-  const fullCtx: ScaffoldToolContext = {
-    workspaceId: planCtx.workspaceId,
-    workspaceRoot: planCtx.workspaceRoot,
-    mode: 'fullPermission',
-    confirmationReceiptIds: ['mock-receipt-1'],
-    ...(planCtx.graph ? { graph: planCtx.graph } : {}),
-    ...(planCtx.auditLog ? { auditLog: planCtx.auditLog } : {}),
-    ...(planCtx.state ? { state: planCtx.state } : {})
+  const fullCtx = {
+    workspaceIndex,
+    workspaceRoot,
+    mode: "fullPermission" as const,
+    confirmationReceiptIds: ["mock-receipt-1"],
+    graph,
+    state: {} as Record<string, unknown>
   };
-  // New propose/stage chain under full permission for commit+rollback audit
-  const noteBefore = await readFile(notePath, 'utf8');
-  const propose2 = await registry.executeToolThroughPolicy('patch.proposeTextEdit', {
-    targetUri: noteUri,
-    targetPath: notePath,
-    newText: 'tool-committed\n',
-    title: 'full perm edit'
-  }, fullCtx);
-  if (!propose2.ok) throw new Error('full propose failed');
-  if (!(await registry.executeToolThroughPolicy('patch.stage', {}, fullCtx)).ok) {
-    throw new Error('full stage failed');
+
+  const propose = await registry.executeToolThroughPolicy(
+    "patch.proposeTextEdit",
+    {
+      targetUri: noteUri,
+      targetPath: "msg/note.txt",
+      newText: "hello scaffold" + String.fromCharCode(10),
+      title: "scaffold text edit"
+    },
+    fullCtx
+  );
+  if (!propose.ok) throw new Error("propose failed: " + JSON.stringify(propose.error));
+
+  const toolStaged = await registry.executeToolThroughPolicy("patch.stage", {}, fullCtx);
+  if (!toolStaged.ok) throw new Error("stage failed: " + JSON.stringify(toolStaged.error));
+
+  const toolValidated = await registry.executeToolThroughPolicy("patch.validate", {}, fullCtx);
+  if (!toolValidated.ok) throw new Error("validate failed: " + JSON.stringify(toolValidated.error));
+
+  const toolCommitted = await registry.executeToolThroughPolicy("patch.commit", {}, fullCtx);
+  if (!toolCommitted.ok) throw new Error("commit failed: " + JSON.stringify(toolCommitted.error));
+  const committedText = await readFile(notePath, "utf8");
+  if (committedText !== "hello scaffold" + String.fromCharCode(10)) {
+    throw new Error("Tool commit did not write file.");
   }
-  if (!(await registry.executeToolThroughPolicy('patch.validate', {}, fullCtx)).ok) {
-    throw new Error('full validate failed');
+
+  const rollbackOk = await registry.executeToolThroughPolicy("patch.rollback", {}, fullCtx);
+  if (!rollbackOk.ok) throw new Error("rollback failed: " + JSON.stringify(rollbackOk.error));
+  const restoredText = await readFile(notePath, "utf8");
+  if (restoredText !== "overlay-v1" + String.fromCharCode(10)) {
+    throw new Error("Tool rollback did not restore file.");
   }
-  const commitOk = await registry.executeToolThroughPolicy('patch.commit', {}, fullCtx);
-  if (!commitOk.ok) throw new Error(`full commit failed: ${JSON.stringify(commitOk.diagnostics)}`);
-  if ((await readFile(notePath, 'utf8')) !== 'tool-committed\n') {
-    throw new Error('Tool commit did not write file.');
+
+  const graphQuery = await registry.executeToolThroughPolicy("resource.graph.query", { limit: 10 }, fullCtx);
+  if (!graphQuery.ok || !graphQuery.data || typeof graphQuery.data !== "object") {
+    throw new Error("resource.graph.query failed: " + JSON.stringify(graphQuery.error));
   }
-  const rollbackOk = await registry.executeToolThroughPolicy('patch.rollback', {}, fullCtx);
-  if (!rollbackOk.ok) throw new Error(`rollback tool failed: ${JSON.stringify(rollbackOk.diagnostics)}`);
-  if ((await readFile(notePath, 'utf8')) !== noteBefore) {
-    throw new Error('Tool rollback did not restore file.');
+  const graphData = graphQuery.data as { nodes?: unknown[] };
+  if (!Array.isArray(graphData.nodes) || graphData.nodes.length < 2) {
+    throw new Error("resource.graph.query expected graph nodes from context.graph.");
   }
-  const toolAudits = audit.list().filter((entry) => entry.eventKind === 'tool_call' || entry.eventKind === 'policy_decision');
-  if (toolAudits.length < 2) throw new Error('Expected tool/policy audit entries.');
-  results.push('AI tool policy ok');
+  results.push("AI tool policy ok");
+
 
   // --- 6. VFS ---
   const vfs = await buildVfsFromWorkspace({

@@ -68,7 +68,7 @@ function textEdit(targetUri: string, targetPath: string, before: string, after: 
     newText: after,
     expectedHash: createHash('sha256').update(before).digest('hex'),
     preconditions: [{ type: 'content_hash' as const, description: '源文件哈希必须匹配' }],
-    validatorRequirements: [{ validatorId: 'text_non_empty', scope: 'staged_output' as const, required: true }],
+    validatorRequirements: [{ validatorId: 'text_file', scope: 'staged_output' as const, required: true }],
     riskLevel: 'low' as const
   };
 }

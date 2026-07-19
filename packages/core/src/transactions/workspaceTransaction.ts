@@ -8,15 +8,20 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type {
   AuditActor,
   AuditLogStore,
   PatchIR,
   PatchIrOperation,
   StructuredDiagnostic,
+  ValidationScope,
   ValidatorContract,
-  WriterAdapterContract
+  ValidatorResult,
+  WriterAdapterContract,
+  WriterApplyResult,
+  WriterPostValidateResult,
+  WriterWrittenTarget
 } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
 import { createAuditEntry, MemoryAuditLogStore } from '../audit-log/memoryAuditLog.js';
@@ -128,6 +133,19 @@ export class WorkspaceTransaction {
     return this.failureRecovery;
   }
 
+  /** Writer instances used by this transaction; needed for pre-commit inverse capture. */
+  getWriterAdapters(): readonly WriterAdapterContract[] {
+    return this.writers;
+  }
+
+  /** Explicit op → staging mappings produced by writers. */
+  getStagedOperationTargets(): readonly {
+    op: PatchIrOperation;
+    stagingPath: string;
+  }[] {
+    return this.stagedOpTargets;
+  }
+
   addPatch(patch: PatchIR): { ok: boolean; diagnostics: StructuredDiagnostic[] } {
     if (this.status !== 'open' && this.status !== 'staged' && this.status !== 'validated') {
       const diagnostic = createDiagnostic({
@@ -145,6 +163,17 @@ export class WorkspaceTransaction {
       this.status = 'failed';
       this.failureRecovery = { phase: 'addPatch', patchId: patch.patchId };
       return { ok: false, diagnostics: validation.diagnostics };
+    }
+
+    const validatorDiagnostics = validateRequiredValidatorRegistry(patch, this.validators);
+    this.diagnostics.push(...validatorDiagnostics);
+    if (validatorDiagnostics.some((item) => item.severity === 'error')) {
+      this.status = 'failed';
+      this.failureRecovery = { phase: 'addPatch', patchId: patch.patchId, reason: 'validator_registry' };
+      return {
+        ok: false,
+        diagnostics: [...validation.diagnostics, ...validatorDiagnostics]
+      };
     }
 
     this.patches.push(patch);
@@ -182,11 +211,15 @@ export class WorkspaceTransaction {
     for (const validator of this.validators) {
       if (!validator.validateBeforeStaging) continue;
       for (const patch of this.patches) {
-        const result = await validator.validateBeforeStaging({
+        beforeDiagnostics.push(...await invokeValidator({
+          validator,
           patch,
-          operations: patch.operations
-        });
-        beforeDiagnostics.push(...result.diagnostics);
+          scope: 'before_staging',
+          invoke: () => validator.validateBeforeStaging!({
+            patch,
+            operations: patch.operations
+          })
+        }));
       }
     }
 
@@ -196,6 +229,14 @@ export class WorkspaceTransaction {
       this.failureRecovery = { phase: 'validateBeforeStaging' };
       this.auditValidation(false, beforeDiagnostics);
       return { ok: false, diagnostics: beforeDiagnostics };
+    }
+
+    const writerContractDiagnostics = validateWriterPostValidationAvailability(ops, this.writers);
+    this.diagnostics.push(...writerContractDiagnostics);
+    if (writerContractDiagnostics.some((item) => item.severity === 'error')) {
+      this.status = 'failed';
+      this.failureRecovery = { phase: 'writerContract', reason: 'post_validate_unavailable' };
+      return { ok: false, diagnostics: writerContractDiagnostics };
     }
 
     const staging = await createContentAddressedStaging(this.stagingBaseDir);
@@ -222,11 +263,29 @@ export class WorkspaceTransaction {
     }
 
     for (const { writer, operations } of byWriter.values()) {
-      const result = await writer.applyToStaging({
-        stagingRoot: workRoot,
-        operations,
-        workspaceRoot: this.workspaceRoot
-      });
+      let result: WriterApplyResult;
+      try {
+        result = await writer.applyToStaging({
+          stagingRoot: workRoot,
+          operations,
+          workspaceRoot: this.workspaceRoot
+        });
+      } catch (error) {
+        const diagnostic = createDiagnostic({
+          severity: 'error',
+          code: 'WRITER_APPLY_EXECUTION_FAILED',
+          message: `writer ${writer.writerId} 执行 applyToStaging 失败。`,
+          details: {
+            writerId: writer.writerId,
+            errorType: error instanceof Error ? error.name : 'unknown'
+          }
+        });
+        applyDiagnostics.push(diagnostic);
+        this.status = 'failed';
+        this.failureRecovery = { phase: 'applyToStaging', writerId: writer.writerId };
+        this.diagnostics.push(...applyDiagnostics);
+        return { ok: false, diagnostics: applyDiagnostics };
+      }
       applyDiagnostics.push(...result.diagnostics);
 
       // Prefer explicit writtenTargets; never guess via string includes.
@@ -261,11 +320,37 @@ export class WorkspaceTransaction {
         stagedOpTargets.push({ op, stagingPath: mapped.stagingPath });
       }
 
+      if (!result.ok && !result.diagnostics.some((item) => item.severity === 'error')) {
+        applyDiagnostics.push(createDiagnostic({
+          severity: 'error',
+          code: 'WRITER_APPLY_REPORTED_FAILURE',
+          message: `writer ${writer.writerId} 报告 applyToStaging 失败但未提供错误诊断。`,
+          details: { writerId: writer.writerId }
+        }));
+      }
       if (!result.ok || applyDiagnostics.some((item) => item.severity === 'error')) {
         this.status = 'failed';
         this.failureRecovery = { phase: 'applyToStaging', writerId: writer.writerId };
         this.diagnostics.push(...applyDiagnostics);
         return { ok: false, diagnostics: applyDiagnostics };
+      }
+
+      const requiredPostValidateOperations = operations.filter(requiresWriterPostValidation);
+      if (requiredPostValidateOperations.length > 0) {
+        const postDiagnostics = await invokeWriterPostValidate({
+          writer,
+          operations,
+          requiredOperations: requiredPostValidateOperations,
+          stagingRoot: workRoot,
+          writtenTargets: targets
+        });
+        applyDiagnostics.push(...postDiagnostics);
+        if (postDiagnostics.some((item) => item.severity === 'error')) {
+          this.status = 'failed';
+          this.failureRecovery = { phase: 'writerPostValidate', writerId: writer.writerId };
+          this.diagnostics.push(...applyDiagnostics);
+          return { ok: false, diagnostics: applyDiagnostics };
+        }
       }
     }
 
@@ -319,13 +404,17 @@ export class WorkspaceTransaction {
     for (const validator of this.validators) {
       if (!validator.validateStagedOutput) continue;
       for (const patch of this.patches) {
-        const result = await validator.validateStagedOutput({
+        diagnostics.push(...await invokeValidator({
+          validator,
           patch,
-          operations: patch.operations,
-          stagingRoot: this.staging ? stagingWorkRoot(this.staging) : '',
-          stagedPaths: this.stagedPaths
-        });
-        diagnostics.push(...result.diagnostics);
+          scope: 'staged_output',
+          invoke: () => validator.validateStagedOutput!({
+            patch,
+            operations: patch.operations,
+            stagingRoot: this.staging ? stagingWorkRoot(this.staging) : '',
+            stagedPaths: this.stagedPaths
+          })
+        }));
       }
     }
 
@@ -488,12 +577,16 @@ export class WorkspaceTransaction {
     for (const validator of this.validators) {
       if (!validator.validateAfterCommit) continue;
       for (const patch of this.patches) {
-        const result = await validator.validateAfterCommit({
+        diagnostics.push(...await invokeValidator({
+          validator,
           patch,
-          operations: patch.operations,
-          committedPaths
-        });
-        diagnostics.push(...result.diagnostics);
+          scope: 'after_commit',
+          invoke: () => validator.validateAfterCommit!({
+            patch,
+            operations: patch.operations,
+            committedPaths
+          })
+        }));
       }
     }
 
@@ -696,9 +789,14 @@ export class WorkspaceTransaction {
     const targets: Array<{ op: PatchIrOperation; targetPath: string; stagingPath: string }> = [];
     for (const item of this.stagedOpTargets) {
       if (!item.op.targetPath) continue;
+      // Relative targetPath is workspace-relative (overlay root), not process-cwd.
+      // Absolute paths still pass through resolve() for normalization.
+      const absoluteTarget = isAbsolute(item.op.targetPath)
+        ? resolve(item.op.targetPath)
+        : resolve(this.workspaceRoot, item.op.targetPath);
       targets.push({
         op: item.op,
-        targetPath: resolve(item.op.targetPath),
+        targetPath: absoluteTarget,
         stagingPath: item.stagingPath
       });
     }
@@ -726,6 +824,383 @@ class CommitBoundaryError extends Error {
   constructor(readonly diagnostics: StructuredDiagnostic[]) {
     super('Commit target escaped the workspace boundary.');
   }
+}
+
+type TransactionValidationScope = Extract<
+  ValidationScope,
+  'before_staging' | 'staged_output' | 'after_commit'
+>;
+
+function validateWriterPostValidationAvailability(
+  operations: readonly PatchIrOperation[],
+  writers: readonly WriterAdapterContract[]
+): StructuredDiagnostic[] {
+  const diagnostics: StructuredDiagnostic[] = [];
+  for (const operation of operations.filter(requiresWriterPostValidation)) {
+    const writer = resolveWriterForOperation(operation, writers);
+    if (writer.writerId !== 'writer:unsupported' && typeof writer.postValidate === 'function') {
+      continue;
+    }
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'WRITER_POST_VALIDATE_REQUIRED',
+      message: '原生结构化 operation 的 writer 必须实现 staged postValidate。',
+      targetUri: operation.targetUri,
+      details: { operationId: operation.id, kind: operation.kind, writerId: writer.writerId }
+    }));
+  }
+  return diagnostics;
+}
+
+async function invokeWriterPostValidate(input: {
+  writer: WriterAdapterContract;
+  operations: PatchIrOperation[];
+  requiredOperations: PatchIrOperation[];
+  stagingRoot: string;
+  writtenTargets: WriterWrittenTarget[];
+}): Promise<StructuredDiagnostic[]> {
+  let rawResult: WriterPostValidateResult;
+  try {
+    rawResult = await input.writer.postValidate!({
+      stagingRoot: input.stagingRoot,
+      operations: input.operations,
+      writtenTargets: input.writtenTargets
+    });
+  } catch (error) {
+    return [createDiagnostic({
+      severity: 'error',
+      code: 'WRITER_POST_VALIDATE_EXECUTION_FAILED',
+      message: `writer ${input.writer.writerId} 执行 postValidate 失败。`,
+      details: {
+        writerId: input.writer.writerId,
+        errorType: error instanceof Error ? error.name : 'unknown'
+      }
+    })];
+  }
+
+  const result = rawResult as Partial<WriterPostValidateResult> | null | undefined;
+  if (!result || typeof result !== 'object') {
+    return [createDiagnostic({
+      severity: 'error',
+      code: 'WRITER_POST_VALIDATE_RESULT_INVALID',
+      message: `writer ${input.writer.writerId} 返回了无效 postValidate 结果。`,
+      details: { writerId: input.writer.writerId }
+    })];
+  }
+  const diagnosticsValid = Array.isArray(result.diagnostics)
+    && result.diagnostics.every(isStructuredDiagnostic);
+  const suppliedDiagnostics = diagnosticsValid ? result.diagnostics! : [];
+  const diagnostics: StructuredDiagnostic[] = [...suppliedDiagnostics];
+  if (!diagnosticsValid || typeof result.ok !== 'boolean') {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'WRITER_POST_VALIDATE_RESULT_INVALID',
+      message: `writer ${input.writer.writerId} 的 postValidate ok/diagnostics 结构无效。`,
+      details: { writerId: input.writer.writerId }
+    }));
+  }
+  if (result.writerId !== input.writer.writerId) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'WRITER_POST_VALIDATE_IDENTITY_INVALID',
+      message: `writer ${input.writer.writerId} 返回的 postValidate 身份与实际实例不一致。`,
+      details: {
+        expectedWriterId: input.writer.writerId,
+        actualWriterId: result.writerId ?? null
+      }
+    }));
+  }
+  if (result.ok === false && !suppliedDiagnostics.some((item) => item.severity === 'error')) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'WRITER_POST_VALIDATE_REPORTED_FAILURE',
+      message: `writer ${input.writer.writerId} 报告 postValidate 失败但未提供错误诊断。`,
+      details: { writerId: input.writer.writerId }
+    }));
+  }
+
+  const coverage = result.validatedOperationIds;
+  const coverageValid = Array.isArray(coverage)
+    && coverage.every((operationId) => typeof operationId === 'string' && operationId.length > 0);
+  if (!coverageValid) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'WRITER_POST_VALIDATE_COVERAGE_INVALID',
+      message: `writer ${input.writer.writerId} 未返回有效的 postValidate operation coverage。`,
+      details: { writerId: input.writer.writerId }
+    }));
+  } else {
+    const operationIds = new Set(input.operations.map((operation) => operation.id));
+    const duplicateIds = coverage.filter((operationId, index) => coverage.indexOf(operationId) !== index);
+    const unknownIds = coverage.filter((operationId) => !operationIds.has(operationId));
+    if (duplicateIds.length > 0 || unknownIds.length > 0) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'WRITER_POST_VALIDATE_COVERAGE_INVALID',
+        message: `writer ${input.writer.writerId} 返回了重复或未知的 postValidate operation ID。`,
+        details: {
+          writerId: input.writer.writerId,
+          duplicateOperationIds: [...new Set(duplicateIds)],
+          unknownOperationIds: [...new Set(unknownIds)]
+        }
+      }));
+    }
+  }
+  const covered = coverageValid ? new Set(coverage) : new Set<string>();
+  const missingOperationIds = input.requiredOperations
+    .map((operation) => operation.id)
+    .filter((operationId) => !covered.has(operationId));
+  if (missingOperationIds.length > 0) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'WRITER_POST_VALIDATE_COVERAGE_INCOMPLETE',
+      message: `writer ${input.writer.writerId} 未证明覆盖全部原生结构化 operation。`,
+      details: { writerId: input.writer.writerId, missingOperationIds }
+    }));
+  }
+  return diagnostics;
+}
+
+function requiresWriterPostValidation(operation: PatchIrOperation): boolean {
+  if (operation.kind.startsWith('resource_') || operation.kind === 'asset_import_replace') {
+    return true;
+  }
+  return operation.kind.startsWith('container_child_')
+    && 'containerFormat' in operation
+    && operation.containerFormat === 'BND4_DFLT'
+    && operation.metadata?.nativeFormatAuthority === true;
+}
+
+function validateRequiredValidatorRegistry(
+  patch: PatchIR,
+  validators: readonly ValidatorContract[]
+): StructuredDiagnostic[] {
+  const diagnostics: StructuredDiagnostic[] = [];
+  const registry = new Map<string, ValidatorContract[]>();
+  for (const validator of validators) {
+    const bucket = registry.get(validator.validatorId) ?? [];
+    bucket.push(validator);
+    registry.set(validator.validatorId, bucket);
+  }
+
+  for (const [validatorId, matches] of registry) {
+    if (matches.length <= 1) continue;
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'VALIDATOR_REGISTRY_ID_DUPLICATE',
+      message: `validatorId ${validatorId} 在事务注册表中不唯一。`,
+      details: { validatorId, registeredCount: matches.length }
+    }));
+  }
+
+  for (const operation of patch.operations) {
+    for (const requirement of operation.validatorRequirements) {
+      if (!requirement.required || requirement.scope === 'any') continue;
+      const scope = requirement.scope as TransactionValidationScope;
+      const matches = registry.get(requirement.validatorId) ?? [];
+      if (matches.length === 0) {
+        diagnostics.push(requiredValidatorDiagnostic(
+          operation,
+          requirement.validatorId,
+          scope,
+          'REQUIRED_VALIDATOR_NOT_REGISTERED',
+          `必需 validator ${requirement.validatorId} 未注册。`
+        ));
+        continue;
+      }
+      if (matches.length > 1) continue;
+      const validator = matches[0]!;
+      if (!validator.validationScope.includes(scope)
+        && !validator.validationScope.includes('any')) {
+        diagnostics.push(requiredValidatorDiagnostic(
+          operation,
+          requirement.validatorId,
+          scope,
+          'REQUIRED_VALIDATOR_SCOPE_UNSUPPORTED',
+          `必需 validator ${requirement.validatorId} 未声明支持阶段 ${scope}。`
+        ));
+      }
+      if (!hasValidatorMethod(validator, scope)) {
+        diagnostics.push(requiredValidatorDiagnostic(
+          operation,
+          requirement.validatorId,
+          scope,
+          'REQUIRED_VALIDATOR_METHOD_MISSING',
+          `必需 validator ${requirement.validatorId} 未实现阶段 ${scope} 的执行方法。`
+        ));
+      }
+    }
+  }
+  return diagnostics;
+}
+
+function hasValidatorMethod(
+  validator: ValidatorContract,
+  scope: TransactionValidationScope
+): boolean {
+  if (scope === 'before_staging') return typeof validator.validateBeforeStaging === 'function';
+  if (scope === 'staged_output') return typeof validator.validateStagedOutput === 'function';
+  return typeof validator.validateAfterCommit === 'function';
+}
+
+async function invokeValidator(input: {
+  validator: ValidatorContract;
+  patch: PatchIR;
+  scope: TransactionValidationScope;
+  invoke: () => Promise<ValidatorResult> | ValidatorResult;
+}): Promise<StructuredDiagnostic[]> {
+  let result: ValidatorResult;
+  try {
+    result = await input.invoke();
+  } catch (error) {
+    return [createDiagnostic({
+      severity: 'error',
+      code: 'VALIDATOR_EXECUTION_FAILED',
+      message: `validator ${input.validator.validatorId} 在阶段 ${input.scope} 执行失败。`,
+      details: {
+        validatorId: input.validator.validatorId,
+        scope: input.scope,
+        errorType: error instanceof Error ? error.name : 'unknown'
+      }
+    })];
+  }
+  return validateValidatorResult({
+    validator: input.validator,
+    patch: input.patch,
+    scope: input.scope,
+    result
+  });
+}
+
+function validateValidatorResult(input: {
+  validator: ValidatorContract;
+  patch: PatchIR;
+  scope: TransactionValidationScope;
+  result: ValidatorResult;
+}): StructuredDiagnostic[] {
+  const result = input.result as Partial<ValidatorResult> | null | undefined;
+  if (!result || typeof result !== 'object') {
+    return [createDiagnostic({
+      severity: 'error',
+      code: 'VALIDATOR_RESULT_INVALID',
+      message: `validator ${input.validator.validatorId} 返回了无效结果。`,
+      details: { validatorId: input.validator.validatorId, scope: input.scope }
+    })];
+  }
+
+  const diagnosticsValid = Array.isArray(result.diagnostics)
+    && result.diagnostics.every(isStructuredDiagnostic);
+  const suppliedDiagnostics = diagnosticsValid ? result.diagnostics! : [];
+  const diagnostics: StructuredDiagnostic[] = [...suppliedDiagnostics];
+  if (!diagnosticsValid || typeof result.ok !== 'boolean') {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'VALIDATOR_RESULT_INVALID',
+      message: `validator ${input.validator.validatorId} 的 ok/diagnostics 结果结构无效。`,
+      details: { validatorId: input.validator.validatorId, scope: input.scope }
+    }));
+  }
+  if (result.validatorId !== input.validator.validatorId || result.scope !== input.scope) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'VALIDATOR_RESULT_IDENTITY_INVALID',
+      message: `validator ${input.validator.validatorId} 返回的身份或阶段与实际调用不一致。`,
+      details: {
+        expectedValidatorId: input.validator.validatorId,
+        actualValidatorId: result.validatorId ?? null,
+        expectedScope: input.scope,
+        actualScope: result.scope ?? null
+      }
+    }));
+  }
+  if (result.ok === false
+    && !suppliedDiagnostics.some((item) => item.severity === 'error')) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'VALIDATOR_REPORTED_FAILURE',
+      message: `validator ${input.validator.validatorId} 报告失败但未提供错误诊断。`,
+      details: { validatorId: input.validator.validatorId, scope: input.scope }
+    }));
+  }
+
+  const requiredOperationIds = input.patch.operations
+    .filter((operation) => operation.validatorRequirements.some((requirement) =>
+      requirement.required
+      && requirement.validatorId === input.validator.validatorId
+      && requirement.scope === input.scope))
+    .map((operation) => operation.id);
+  const coverage = result.validatedOperationIds;
+  const coverageValid = coverage === undefined || (
+    Array.isArray(coverage)
+    && coverage.every((operationId) => typeof operationId === 'string' && operationId.length > 0)
+  );
+  if (!coverageValid) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'VALIDATOR_COVERAGE_INVALID',
+      message: `validator ${input.validator.validatorId} 返回的 operation 覆盖证据结构无效。`,
+      details: { validatorId: input.validator.validatorId, scope: input.scope }
+    }));
+  } else if (coverage !== undefined) {
+    const patchOperationIds = new Set(input.patch.operations.map((operation) => operation.id));
+    const duplicateIds = coverage.filter((operationId, index) => coverage.indexOf(operationId) !== index);
+    const unknownIds = coverage.filter((operationId) => !patchOperationIds.has(operationId));
+    if (duplicateIds.length > 0 || unknownIds.length > 0) {
+      diagnostics.push(createDiagnostic({
+        severity: 'error',
+        code: 'VALIDATOR_COVERAGE_INVALID',
+        message: `validator ${input.validator.validatorId} 返回了重复或不属于当前 PatchIR 的 operation ID。`,
+        details: {
+          validatorId: input.validator.validatorId,
+          scope: input.scope,
+          duplicateOperationIds: [...new Set(duplicateIds)],
+          unknownOperationIds: [...new Set(unknownIds)]
+        }
+      }));
+    }
+  }
+
+  const covered = coverageValid && coverage !== undefined ? new Set(coverage) : new Set<string>();
+  const missingOperationIds = requiredOperationIds.filter((operationId) => !covered.has(operationId));
+  if (missingOperationIds.length > 0) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'REQUIRED_VALIDATOR_COVERAGE_INCOMPLETE',
+      message: `必需 validator ${input.validator.validatorId} 未证明覆盖全部声明的 operation。`,
+      details: {
+        validatorId: input.validator.validatorId,
+        scope: input.scope,
+        missingOperationIds
+      }
+    }));
+  }
+  return diagnostics;
+}
+
+function isStructuredDiagnostic(value: unknown): value is StructuredDiagnostic {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<StructuredDiagnostic>;
+  return ['info', 'warning', 'error'].includes(String(candidate.severity))
+    && typeof candidate.code === 'string'
+    && candidate.code.length > 0
+    && typeof candidate.message === 'string'
+    && candidate.message.length > 0;
+}
+
+function requiredValidatorDiagnostic(
+  operation: PatchIrOperation,
+  validatorId: string,
+  scope: TransactionValidationScope,
+  code: string,
+  message: string
+): StructuredDiagnostic {
+  return createDiagnostic({
+    severity: 'error',
+    code,
+    message,
+    targetUri: operation.targetUri,
+    details: { operationId: operation.id, validatorId, scope }
+  });
 }
 
 export function createWorkspaceTransaction(options: WorkspaceTransactionOptions): WorkspaceTransaction {

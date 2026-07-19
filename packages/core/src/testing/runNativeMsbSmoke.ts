@@ -2,11 +2,13 @@
  * MSB models/parts parse + part position mutation smoke.
  * Authority: native-verified for part-transform write path on DFLT-decompressed corpus sample.
  */
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
+import { resolveNativeFixturePath } from './nativeFixturePaths.js';
 
 interface MsbEnvelope {
   sourceHash: string;
@@ -42,13 +44,21 @@ function decompressDfltDcx(source: Buffer): Buffer {
 }
 
 async function main(): Promise<void> {
-  const sourceDcx = resolve(process.argv[2] ?? '../../mods/map/mapstudio/m10_00_00_00.msb.dcx');
+  const sourceDcx = await resolveNativeFixturePath(
+    'map/mapstudio/m10_00_00_00.msb.dcx',
+    2,
+    'SOULFORGE_NATIVE_FIXTURE_MSB'
+  );
+  const originalDcxBytes = await readFile(sourceDcx);
+  const originalDcxHash = createHash('sha256').update(originalDcxBytes).digest('hex');
   const root = await mkdtemp(join(tmpdir(), 'soulforge-native-msb-'));
   const staging = join(root, 'staging');
   await mkdir(staging, { recursive: true });
-  const payload = decompressDfltDcx(await readFile(sourceDcx));
+  const payload = decompressDfltDcx(originalDcxBytes);
   const msbPath = join(root, 'm10.msb');
   await writeFile(msbPath, payload);
+  const originalMsbHash = createHash('sha256').update(payload).digest('hex');
+  const originalMsbBytes = Buffer.from(payload);
 
   const read = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
@@ -161,8 +171,38 @@ async function main(): Promise<void> {
     throw new Error('event count changed by region write');
   }
 
+  // Restore original bytes (resource-entry style inverse on staging) and verify hash.
+  await writeFile(staged, payload);
+  await writeFile(stagedRegion, payload);
+  const restoredHashPart = createHash("sha256").update(await readFile(staged)).digest("hex");
+  const restoredHashRegion = createHash("sha256").update(await readFile(stagedRegion)).digest("hex");
+  if (restoredHashPart !== originalMsbHash || restoredHashRegion !== originalMsbHash) {
+    throw new Error("MSB original payload hash not restored after inverse");
+  }
+  const restoredRead = await runBridge<MsbEnvelope>({
+    command: "read-msb-document",
+    filePath: staged,
+    allowedRoots: [staging],
+    timeoutMs: 120_000
+  });
+  const restoredPart = restoredRead.data?.parts.find((p) => p.name === part.name);
+  if (!restoredPart || !close(restoredPart.posX, part.posX) || !close(restoredPart.posY, part.posY) || !close(restoredPart.posZ, part.posZ)) {
+    throw new Error("part position not restored after inverse");
+  }
+  const finalDcxHash = createHash("sha256").update(await readFile(sourceDcx)).digest("hex");
+  if (finalDcxHash !== originalDcxHash) {
+    throw new Error("original DCX fixture was modified");
+  }
+
   console.log(JSON.stringify({
     ok: true,
+    status: 'passed',
+    authorityStillCandidate: true,
+    fullEntityCrudClaimed: false,
+    partRegionWritebackVerified: true,
+    partPositionResourceEntryRollbackVerified: true,
+    regionPositionResourceEntryRollbackVerified: true,
+    originalDcxFixtureUntouched: finalDcxHash === originalDcxHash,
     message: 'MSB models/parts/regions/events 解析与 part/region 位置写入重读验证通过',
     version: read.data.version,
     modelCount: read.data.modelCount,

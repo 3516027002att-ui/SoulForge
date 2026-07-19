@@ -5,7 +5,10 @@
 
 export type ModelServiceProtocol = 'openai-compatible' | 'anthropic-compatible';
 
-export type AgentPermissionMode = 'plan' | 'normal' | 'full';
+export type AgentPermissionMode = 'plan' | 'normal' | 'fullPermission';
+/** @deprecated Prefer fullPermission; kept for reading older app.db grants. */
+export type LegacyAgentPermissionMode = 'full';
+export type StoredAgentPermissionMode = AgentPermissionMode | LegacyAgentPermissionMode;
 
 export interface ModelServiceConfig {
   id: string;
@@ -43,6 +46,8 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parametersJsonSchema: Record<string, unknown>;
+  /** Required for production policy enforcement; absent definitions are denied in plan mode. */
+  permission?: 'read' | 'analyze' | 'propose' | 'stage' | 'validate' | 'commit' | 'rollback';
 }
 
 export type StreamEvent =

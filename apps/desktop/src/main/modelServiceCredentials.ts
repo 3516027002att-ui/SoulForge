@@ -1,12 +1,13 @@
 /**
  * Main-process model service credential vault using Electron safeStorage (DPAPI on Windows).
- * Renderer never receives plaintext keys — only config ids and hasCredential flags.
+ * app.db is the authority; the legacy JSON vault is imported once and archived.
  */
 
 import { safeStorage } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile, rename } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { AppModelServiceRecord } from '@soulforge/core';
 
 export interface StoredModelServiceConfig {
   id: string;
@@ -19,11 +20,18 @@ export interface StoredModelServiceConfig {
   updatedAt: string;
 }
 
-interface VaultFile {
+interface LegacyVaultFile {
   version: 1;
   configs: StoredModelServiceConfig[];
-  /** configId -> base64 ciphertext from safeStorage.encryptString */
   secrets: Record<string, string>;
+}
+
+export interface ModelServiceVaultRepository {
+  listModelServices(): Promise<AppModelServiceRecord[]>;
+  getModelService(serviceId: string, includeDeleted?: boolean): Promise<AppModelServiceRecord | undefined>;
+  upsertModelService(record: AppModelServiceRecord): Promise<AppModelServiceRecord>;
+  importModelServices(records: AppModelServiceRecord[]): Promise<{ imported: number }>;
+  softDeleteModelService(serviceId: string, deletedAt?: string): Promise<void>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -48,7 +56,7 @@ function isCanonicalBase64(value: string): boolean {
   return Buffer.from(value, 'base64').toString('base64') === value;
 }
 
-function parseVaultFile(raw: string): VaultFile {
+function parseLegacyVaultFile(raw: string): LegacyVaultFile {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -69,14 +77,8 @@ function parseVaultFile(raw: string): VaultFile {
     ids.add(config.id);
   }
   const secrets = value.secrets as Record<string, string>;
-  return {
-    version: 1,
-    configs: value.configs.map((config) => ({
-      ...config,
-      hasCredential: Boolean(secrets[config.id])
-    })),
-    secrets: { ...secrets }
-  };
+  if (Object.keys(secrets).some((id) => !ids.has(id))) throw new Error('MODEL_SERVICE_VAULT_CORRUPT');
+  return { version: 1, configs: structuredClone(value.configs), secrets: { ...secrets } };
 }
 
 function isMissingFile(error: unknown): boolean {
@@ -84,11 +86,14 @@ function isMissingFile(error: unknown): boolean {
 }
 
 export class ModelServiceCredentialVault {
-  private readonly vaultPath: string;
-  private cache: VaultFile | null = null;
+  private readonly legacyVaultPath: string;
+  private migration: Promise<void> | null = null;
 
-  constructor(appDataRoot: string) {
-    this.vaultPath = join(appDataRoot, 'model-services', 'vault.json');
+  constructor(
+    appDataRoot: string,
+    private readonly repository: ModelServiceVaultRepository
+  ) {
+    this.legacyVaultPath = join(appDataRoot, 'model-services', 'vault.json');
   }
 
   isEncryptionAvailable(): boolean {
@@ -96,8 +101,8 @@ export class ModelServiceCredentialVault {
   }
 
   async listConfigs(): Promise<StoredModelServiceConfig[]> {
-    const vault = await this.load();
-    return structuredClone(vault.configs);
+    await this.ensureLegacyMigrated();
+    return (await this.repository.listModelServices()).map(toDto);
   }
 
   async upsertConfig(input: {
@@ -108,94 +113,84 @@ export class ModelServiceCredentialVault {
     model: string;
     apiKey?: string;
   }): Promise<StoredModelServiceConfig> {
-    if (!this.isEncryptionAvailable()) {
-      throw new Error('MODEL_SERVICE_SAFE_STORAGE_UNAVAILABLE');
-    }
-    const vault = await this.load();
+    if (!this.isEncryptionAvailable()) throw new Error('MODEL_SERVICE_SAFE_STORAGE_UNAVAILABLE');
+    await this.ensureLegacyMigrated();
     const now = new Date().toISOString();
     const id = input.id ?? randomUUID();
-    const existing = vault.configs.find((c) => c.id === id);
-    const next: StoredModelServiceConfig = {
+    const existing = await this.repository.getModelService(id, true);
+    let credentialCiphertext = existing?.credentialCiphertext;
+    if (input.apiKey !== undefined) {
+      credentialCiphertext = input.apiKey
+        ? Buffer.from(safeStorage.encryptString(input.apiKey)).toString('base64')
+        : undefined;
+    }
+    const saved = await this.repository.upsertModelService({
       id,
       displayName: input.displayName,
       protocol: input.protocol,
       baseUrl: input.baseUrl.replace(/\/$/, ''),
       model: input.model,
-      hasCredential: existing?.hasCredential ?? false,
+      hasCredential: Boolean(credentialCiphertext),
+      ...(credentialCiphertext ? { credentialCiphertext } : {}),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now
-    };
-    if (input.apiKey !== undefined) {
-      if (!input.apiKey) {
-        delete vault.secrets[id];
-        next.hasCredential = false;
-      } else {
-        const encrypted = safeStorage.encryptString(input.apiKey);
-        vault.secrets[id] = Buffer.from(encrypted).toString('base64');
-        next.hasCredential = true;
-      }
-    }
-    vault.configs = [...vault.configs.filter((c) => c.id !== id), next];
-    await this.save(vault);
-    return structuredClone(next);
+    });
+    return toDto(saved);
   }
 
   async deleteConfig(configId: string): Promise<void> {
-    const vault = await this.load();
-    vault.configs = vault.configs.filter((c) => c.id !== configId);
-    delete vault.secrets[configId];
-    await this.save(vault);
+    await this.ensureLegacyMigrated();
+    await this.repository.softDeleteModelService(configId);
   }
 
-  /**
-   * Resolve plaintext key for main/core agent loop only. Never send to renderer.
-   */
+  /** Resolve plaintext key for main/core agent loop only. Never send to renderer. */
   async resolveApiKey(configId: string): Promise<string | null> {
     if (!this.isEncryptionAvailable()) return null;
-    const vault = await this.load();
-    const encoded = vault.secrets[configId];
-    if (!encoded) return null;
-    const buf = Buffer.from(encoded, 'base64');
-    return safeStorage.decryptString(buf);
+    await this.ensureLegacyMigrated();
+    const config = await this.repository.getModelService(configId);
+    if (!config?.credentialCiphertext) return null;
+    return safeStorage.decryptString(Buffer.from(config.credentialCiphertext, 'base64'));
   }
 
-  private async load(): Promise<VaultFile> {
-    if (this.cache) return this.cache;
+  private async ensureLegacyMigrated(): Promise<void> {
+    if (!this.migration) this.migration = this.migrateLegacyVault();
+    return this.migration;
+  }
+
+  private async migrateLegacyVault(): Promise<void> {
+    let legacy: LegacyVaultFile;
     try {
-      const raw = await readFile(this.vaultPath, 'utf8');
-      const parsed = parseVaultFile(raw);
-      this.cache = parsed;
-      return parsed;
+      legacy = parseLegacyVaultFile(await readFile(this.legacyVaultPath, 'utf8'));
     } catch (error) {
-      if (!isMissingFile(error)) {
-        if (error instanceof Error && error.message === 'MODEL_SERVICE_VAULT_CORRUPT') throw error;
-        throw new Error('MODEL_SERVICE_VAULT_LOAD_FAILED');
-      }
-      const empty: VaultFile = { version: 1, configs: [], secrets: {} };
-      this.cache = empty;
-      return empty;
+      if (isMissingFile(error)) return;
+      if (error instanceof Error && error.message === 'MODEL_SERVICE_VAULT_CORRUPT') throw error;
+      throw new Error('MODEL_SERVICE_VAULT_LOAD_FAILED');
     }
-  }
-
-  private async save(vault: VaultFile): Promise<void> {
-    await mkdir(dirname(this.vaultPath), { recursive: true });
-    // Never write plaintext keys.
-    const safe: VaultFile = {
-      version: 1,
-      configs: vault.configs.map((c) => ({ ...c, hasCredential: Boolean(vault.secrets[c.id]) })),
-      secrets: { ...vault.secrets }
-    };
-    const temporaryPath = `${this.vaultPath}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporaryPath, JSON.stringify(safe, null, 2), {
-        encoding: 'utf8',
-        flag: 'wx',
-        mode: 0o600
+    const existing = new Set((await this.repository.listModelServices()).map((config) => config.id));
+    const pending = legacy.configs
+      .filter((config) => !existing.has(config.id))
+      .map((config) => {
+        const credentialCiphertext = legacy.secrets[config.id];
+        return {
+          ...config,
+          hasCredential: Boolean(credentialCiphertext),
+          ...(credentialCiphertext ? { credentialCiphertext } : {})
+        };
       });
-      await rename(temporaryPath, this.vaultPath);
-      this.cache = safe;
-    } finally {
-      await rm(temporaryPath, { force: true }).catch(() => undefined);
-    }
+    await this.repository.importModelServices(pending);
+    await rename(this.legacyVaultPath, `${this.legacyVaultPath}.migrated-${Date.now()}.json`);
   }
+}
+
+function toDto(config: AppModelServiceRecord): StoredModelServiceConfig {
+  return {
+    id: config.id,
+    displayName: config.displayName,
+    protocol: config.protocol,
+    baseUrl: config.baseUrl,
+    model: config.model,
+    hasCredential: config.hasCredential,
+    createdAt: config.createdAt,
+    updatedAt: config.updatedAt
+  };
 }

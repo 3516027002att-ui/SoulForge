@@ -8,7 +8,7 @@ import {
   BridgeDaemonError
 } from './bridgeDaemonClient.js';
 
-export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle';
+export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle';
 
 export interface RunBridgeOptions {
   bridgeProjectPath?: string;
@@ -232,6 +232,7 @@ function commandToResourceKind(command: BridgeCommand): ResourceKind {
     case 'read-dcx-document': return 'unknown';
     case 'write-bnd4': return 'unknown';
     case 'snapshot-bnd4-child': return 'unknown';
+    case 'extract-bnd4-child': return 'unknown';
     case 'read-fmg-document': return 'msg';
     case 'write-fmg': return 'msg';
     case 'read-param-document': return 'param';

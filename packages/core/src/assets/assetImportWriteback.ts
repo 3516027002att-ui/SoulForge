@@ -5,16 +5,17 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import type { Diagnostic, PatchIR } from '@soulforge/shared';
 import { stageAssetImport, type AssetImportRequest } from './assetImport.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
-import { executePatchIrThroughTransaction, type ExecutePatchIrOptions } from '../patch/durablePatchCommit.js';
-import { readFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import {
+  executePatchIrThroughTransaction,
+  type ExecutePatchIrOptions
+} from '../patch/durablePatchCommit.js';
 
 export interface AssetImportWritebackRequest extends AssetImportRequest {
   workspaceId: string;
-  /** Absolute path of the overlay file to replace (must already be resolved by session). */
   targetAbsolutePath: string;
   expectedTargetHash: string;
   confirmationReceiptId: string;
@@ -23,8 +24,8 @@ export interface AssetImportWritebackRequest extends AssetImportRequest {
 
 export interface AssetImportWritebackResult {
   ok: boolean;
-  importId?: string;
-  stagingPath?: string;
+  importId: string;
+  stagingPath: string;
   contentHash?: string;
   opId?: string;
   changedFiles: string[];
@@ -32,8 +33,8 @@ export interface AssetImportWritebackResult {
 }
 
 /**
- * Production entry: stage open-format asset, then PatchIR file_replace into overlay.
- * Does not bypass Patch Engine, hash checks, or confirmation metadata.
+ * Stage open-format source, then replace the target overlay file via PatchIR.
+ * Does not invent native FLVER/MTD conversion — only file_replace of staged bytes.
  */
 export async function commitAssetImportThroughPatchIr(
   request: AssetImportWritebackRequest,
@@ -43,20 +44,21 @@ export async function commitAssetImportThroughPatchIr(
   if (!staged.ok) {
     return {
       ok: false,
+      importId: staged.plan.importId,
+      stagingPath: staged.stagingPath,
       changedFiles: [],
       diagnostics: staged.diagnostics.map((d) => ({
         severity: d.severity,
-        code: d.code,
+        code: String(d.code),
         message: d.message,
-        ...(d.targetUri ? { sourceUri: d.targetUri } : {}),
-        ...(d.details ? { details: d.details } : {})
+        ...(d.targetUri ? { sourceUri: d.targetUri } : {})
       }))
     };
   }
 
   const stagedBytes = await readFile(staged.stagingPath);
-  const stagedHash = createHash('sha256').update(stagedBytes).digest('hex');
-  if (stagedHash !== staged.contentHash) {
+  const hash = (await import('node:crypto')).createHash('sha256').update(stagedBytes).digest('hex');
+  if (hash !== staged.contentHash) {
     return {
       ok: false,
       importId: staged.plan.importId,
@@ -65,7 +67,7 @@ export async function commitAssetImportThroughPatchIr(
       diagnostics: [{
         severity: 'error',
         code: 'ASSET_STAGING_HASH_MISMATCH',
-        message: '暂存资产哈希与清单不一致，已阻止写回。'
+        message: 'staged asset hash mismatch before PatchIR writeback'
       }]
     };
   }
@@ -78,24 +80,27 @@ export async function commitAssetImportThroughPatchIr(
     operations: [{
       id: opId,
       kind: 'file_replace',
+      riskLevel: 'high',
       targetUri: request.targetAssetUri,
       targetPath: request.targetAbsolutePath,
       newContentBase64: stagedBytes.toString('base64'),
       expectedHash: request.expectedTargetHash,
       allowEmpty: stagedBytes.length === 0,
-      requiresConfirmation: true,
       preconditions: [{
         type: 'content_hash',
-        description: '写回前目标文件哈希必须匹配',
+        description: 'Target hash must match before asset import writeback',
         expectedHash: request.expectedTargetHash,
+        targetUri: request.targetAssetUri
+      }, {
+        type: 'overlay_writable',
+        description: 'Target must be on overlay / sandbox workspace',
         targetUri: request.targetAssetUri
       }],
       validatorRequirements: [
         { validatorId: 'whole_file_replace', scope: 'before_staging', required: true },
-        { validatorId: 'whole_file_replace', scope: 'staged_output', required: true },
         { validatorId: 'file_risk', scope: 'before_staging', required: true }
       ],
-      riskLevel: 'high',
+      requiresConfirmation: true,
       metadata: {
         requiresConfirmation: true,
         confirmationReceiptId: request.confirmationReceiptId,
@@ -121,7 +126,7 @@ export async function commitAssetImportThroughPatchIr(
     diagnostics: [
       ...staged.diagnostics.map((d) => ({
         severity: d.severity,
-        code: d.code,
+        code: String(d.code),
         message: d.message,
         ...(d.targetUri ? { sourceUri: d.targetUri } : {})
       })),

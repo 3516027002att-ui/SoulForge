@@ -35,6 +35,28 @@ const ALLOWED: Record<EditorKind, ReadonlySet<EditorMutationKind>> = {
   raw: new Set(['hex_byte_patch'])
 };
 
+export interface EditorMutationApplyResult {
+  ok: boolean;
+  documentId: string;
+  accepted: EditorMutation[];
+  rejected: EditorMutation[];
+  issues: EditorValidationIssue[];
+  revision: number;
+  dirty: boolean;
+  document?: EditorDocumentState;
+}
+
+export interface EditorDocumentSnapshot {
+  document: EditorDocumentState;
+  pendingMutations: EditorMutation[];
+  pendingCount: number;
+}
+
+export interface EditorStoreSnapshot {
+  openDocuments: EditorDocumentState[];
+  totalPendingMutations: number;
+}
+
 export class EditorDocumentStore {
   private readonly documents = new Map<string, EditorDocumentState>();
   private readonly pending = new Map<string, EditorMutation[]>();
@@ -81,39 +103,59 @@ export class EditorDocumentStore {
   applyMutation(mutation: Omit<EditorMutation, 'mutationId' | 'createdAt'> & {
     mutationId?: string;
     createdAt?: string;
-  }): { ok: boolean; document?: EditorDocumentState; issues: EditorValidationIssue[] } {
+  }): EditorMutationApplyResult {
     const doc = this.documents.get(mutation.documentId);
     if (!doc) {
       return {
         ok: false,
-        issues: [{ severity: 'error', code: 'EDITOR_DOCUMENT_NOT_FOUND', message: '编辑器文档不存在。' }]
+        documentId: mutation.documentId,
+        accepted: [],
+        rejected: [],
+        issues: [{ severity: 'error', code: 'EDITOR_DOCUMENT_NOT_FOUND', message: '编辑器文档不存在。' }],
+        revision: 0,
+        dirty: false
       };
     }
     if (mutation.resourceUri !== doc.resourceUri) {
       return {
         ok: false,
-        issues: [{ severity: 'error', code: 'EDITOR_RESOURCE_MISMATCH', message: 'mutation 资源 URI 与文档不一致。' }]
+        documentId: doc.documentId,
+        accepted: [],
+        rejected: [],
+        issues: [{ severity: 'error', code: 'EDITOR_RESOURCE_MISMATCH', message: 'mutation 资源 URI 与文档不一致。' }],
+        revision: doc.revision,
+        dirty: doc.dirty
       };
     }
     if (mutation.baseRevision !== doc.revision) {
       return {
         ok: false,
+        documentId: doc.documentId,
+        accepted: [],
+        rejected: [],
         issues: [{
           severity: 'error',
           code: 'EDITOR_REVISION_CONFLICT',
           message: `文档 revision 冲突：expected ${doc.revision}, got ${mutation.baseRevision}。`
-        }]
+        }],
+        revision: doc.revision,
+        dirty: doc.dirty
       };
     }
     const allowed = ALLOWED[doc.editorKind];
     if (!allowed.has(mutation.kind)) {
       return {
         ok: false,
+        documentId: doc.documentId,
+        accepted: [],
+        rejected: [],
         issues: [{
           severity: 'error',
           code: 'EDITOR_MUTATION_KIND_DENIED',
           message: `编辑器 ${doc.editorKind} 不接受 mutation ${mutation.kind}。`
-        }]
+        }],
+        revision: doc.revision,
+        dirty: doc.dirty
       };
     }
 
@@ -132,7 +174,7 @@ export class EditorDocumentStore {
     doc.revision += 1;
     doc.dirty = true;
     doc.lastMutationId = full.mutationId;
-    return { ok: true, document: structuredClone(doc), issues: [] };
+    return { ok: true, documentId: doc.documentId, accepted: [full], rejected: [], issues: [], revision: doc.revision, dirty: doc.dirty, document: structuredClone(doc) };
   }
 
   createPatchEngineBatch(documentId: string): {
@@ -151,7 +193,7 @@ export class EditorDocumentStore {
     if (mutations.length === 0) {
       return {
         ok: false,
-        issues: [{ severity: 'error', code: 'EDITOR_NO_PENDING_MUTATIONS', message: '没有待提交的编辑 mutation。' }]
+        issues: [{ severity: 'error', code: 'EDITOR_NO_PENDING_MUTATIONS', message: '没有可提交的编辑器 mutation。' }]
       };
     }
     const batch: EditorMutationBatch = {
@@ -163,20 +205,95 @@ export class EditorDocumentStore {
     return { ok: true, batch, issues: [] };
   }
 
-  markCommitted(documentId: string, batchId: string): EditorValidationIssue[] {
-    const doc = this.documents.get(documentId);
-    if (!doc) {
-      return [{ severity: 'error', code: 'EDITOR_DOCUMENT_NOT_FOUND', message: '编辑器文档不存在。' }];
-    }
-    // batchId retained for audit correlation by caller; store only clears pending.
-    void batchId;
-    this.pending.set(documentId, []);
-    doc.dirty = false;
-    return [];
+  listOpenDocuments(): EditorDocumentState[] {
+    return [...this.documents.values()].map((doc) => structuredClone(doc));
   }
 
-  close(documentId: string): void {
-    this.documents.delete(documentId);
+  getPendingMutations(documentId: string): EditorMutation[] {
+    return structuredClone(this.pending.get(documentId) ?? []);
+  }
+
+  snapshot(documentId: string): EditorDocumentSnapshot | undefined {
+    const doc = this.documents.get(documentId);
+    if (!doc) return undefined;
+    return {
+      document: structuredClone(doc),
+      pendingMutations: structuredClone(this.pending.get(documentId) ?? []),
+      pendingCount: (this.pending.get(documentId) ?? []).length
+    };
+  }
+
+  close(documentId: string): boolean {
+    const existed = this.documents.delete(documentId);
     this.pending.delete(documentId);
+    return existed;
+  }
+
+  applyBatch(batch: EditorMutationBatch): EditorMutationApplyResult {
+    if (batch.requiresPatchEngine !== true) {
+      return {
+        ok: false,
+        documentId: batch.documentId,
+        accepted: [],
+        rejected: [],
+        issues: [{
+          severity: 'error',
+          code: 'EDITOR_BATCH_REQUIRES_PATCH_ENGINE',
+          message: 'EditorMutationBatch.requiresPatchEngine must be true.'
+        }],
+        revision: this.documents.get(batch.documentId)?.revision ?? 0,
+        dirty: this.documents.get(batch.documentId)?.dirty ?? false
+      };
+    }
+
+    const accepted: EditorMutation[] = [];
+    const rejected: EditorMutation[] = [];
+    const issues: EditorValidationIssue[] = [];
+    let lastDoc = this.documents.get(batch.documentId);
+
+    for (const mutation of batch.mutations) {
+      const result = this.applyMutation({
+        ...mutation,
+        documentId: batch.documentId
+      });
+      issues.push(...result.issues);
+      if (result.ok && result.accepted[0]) {
+        accepted.push(result.accepted[0]);
+        lastDoc = this.documents.get(batch.documentId);
+      } else if (result.rejected[0]) {
+        rejected.push(result.rejected[0]);
+      }
+    }
+
+    return {
+      ok: rejected.length === 0 && issues.every((item) => item.severity !== 'error'),
+      documentId: batch.documentId,
+      accepted,
+      rejected,
+      issues,
+      revision: lastDoc?.revision ?? 0,
+      dirty: lastDoc?.dirty ?? false
+    };
+  }
+
+  clearPending(documentId: string): EditorMutation[] {
+    const doc = this.documents.get(documentId);
+    if (!doc) return [];
+    const drained = structuredClone(this.pending.get(documentId) ?? []);
+    this.pending.set(documentId, []);
+    doc.dirty = false;
+    return drained;
+  }
+
+  markSynced(documentId: string): EditorMutation[] {
+    return this.clearPending(documentId);
+  }
+
+  snapshotStore(): EditorStoreSnapshot {
+    const openDocuments = this.listOpenDocuments();
+    return {
+      openDocuments,
+      totalPendingMutations: [...this.pending.values()].reduce((sum, items) => sum + items.length, 0)
+    };
   }
 }

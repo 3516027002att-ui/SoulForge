@@ -2,8 +2,8 @@
 
 > 文档性质：实现规范与工程交接，不是愿景草案。  
 > 目标读者：接手实现 SoulForge V0.5 的开发 Agent / 工程师。  
-> 当前基准日期：2026-07-10。  
-> 初始审计基线：`57a5db5`；当前实现位于未提交工作树，接手前必须以 `git status`、本文第 43 节和真实测试重新核对。  
+> 当前基准日期：2026-07-19。
+> 初始审计基线：`57a5db5`；2026-07-13 状态审计基于 `7bd354d`，接手前仍必须以 `git status`、本文第 43 节和真实测试重新核对，不得假设实现仍位于未提交工作树。
 > 产品定位：**魂游 Mod 的 Cursor**。
 
 ---
@@ -37,13 +37,15 @@
 - PatchIR + `WorkspaceTransaction` 唯一 production commit 主干。
 - 文本修改、原始字节区间修改、整文件替换。
 - 暂存区、源 hash 前置条件、备份、原子替换。
-- operation/file 级历史，以及以新逆向 PatchIR 事务实现的 operation 回滚和 `afterHash` 冲突保护。
+- operation/file/resource-entry 级历史，以及以新逆向 PatchIR 事务实现的 operation/file/resource-entry 回滚基础；resource-entry 当前已验证 BND4 五类、EMEVD `restBehavior`/`instruction args`/空事件 `add`/既有非空事件 `delete`/`duplicate`/事件完整顺序 `reorder`/instruction 零参数 `add` 与既有 instruction `duplicate`/`delete`/`reorder`、raw FMG `text`/槽位 `delete`/`insert`/`reorder`、PARAM 用户派生字段与 MSB part 位置，并保持 `afterHash`/typed value/node/完整顺序 hash 冲突保护。
 - bounded preview、大文件延迟 hash、基础 VFS。
 - 内存资源关系图、证据包、补丁影响图。
 - 文件级 capability matrix。
 - synthetic DFLT、SFBN BND3/BND4、SFFX FMG 测试链。
-- DFLT + synthetic BND 嵌套 child replace。
-- AI 工具权限阶梯和 mock/tool-console 草稿。
+- 本机私有样本中 144 个 DFLT 与 75 个 DFLT 外层 BND4 的读取/重建证据；已登记的 1 个 KRAK `dcx-document` 真实解压成功，且 2 个登记 DCX 文档确认嵌套 BND4；BND4/MSB 公共文档 authority 仍为 `candidate`，完整 KRAK corpus 与重压仍未完成。
+- DFLT-BND4 五类 child mutation、Bridge 暂存 writer、提交、重读和 operation/resource-entry 回滚 smoke。
+- FMG `item.msgbnd` 18/18 子项、PARAM 当前 `gameparam.parambnd` 138/138 子项、10 个 DFLT EMEVD corpus 及 MSB part/region 位置写回的分层证据；这些都不等于完整 P3。
+- OpenAI-compatible / Anthropic-compatible core adapter fake-server tool loop，以及桌面 main 中基于 app.db grant、safeStorage 凭据、Context Broker、唯一生产 ToolRegistry 和历史/出站审计的 production caller；真实服务正向 smoke、流式/取消与完整 UI 仍未完成。
 - `app.db` / `workspace.db` 迁移器、checksum、WAL/foreign key、严格旧 JSON 导入。
 - `better-sqlite3` Electron utility process、异步操作日志 repository 和 Node/Electron 双 ABI 构建门禁。
 - Electron sandbox/CSP/导航/窗口/权限/IPC sender 安全边界，renderer-safe DTO 与 main 原生确认。
@@ -52,15 +54,15 @@
 
 以下能力尚未完成，不得从现有命名或测试名推断为已完成：
 
-- 真实 native BND4 child table / repack。
-- KRAK 解压与重压。
-- 真实 EMEVD、MSB、PARAM、FMG parser/writer。
+- 完整 KRAK+BND4 corpus authority；当前 DFLT-BND4 子集可运行，但 BND4 输出仍为 `candidate`。
+- 完整 KRAK corpus 解压与 KRAK 重压；当前仅 1 个 registry/hash 绑定的真实 KRAK 解压正向样本通过。
+- EMEVD、MSB、PARAM、FMG 在私有发布语料全部变体上的完整 parser/writer。
 - 原生语义资源 CRUD、重排和类型转换。
-- file/resource entry 级逆向事务入口与持久回滚。
+- 除上述已验证 typed 子能力外的完整 resource-entry inverse 覆盖；EMEVD 的 EMEDF-aware instruction authoring/类型转换与完整发布 corpus、FMG 类型转换/嵌套 msgbnd、PARAM 原生 paramdef、MSB 全实体 CRUD 和完整发布 corpus 尚未完成。
 - SQLite 中尚未接通的完整文件索引、FTS5、资源图、诊断、任务、审计、模型服务和 AI 历史 repositories。
 - Bridge 写操作崩溃恢复故障注入、后台任务持久恢复，以及 Oodle/KRAK。
 - OpenAI-compatible / Anthropic-compatible 真实模型调用。
-- 模型服务凭据安全存储。
+- 模型服务凭据真机 DPAPI 迁移/往返与完整产品生命周期；safeStorage 密文路径和静态/契约门禁已接通。
 - 专业 Hex、EMEVD、PARAM、FMG、MSB 编辑器。
 - Three.js 3D 场景和资产转换。
 - 游戏适配包安装、签名、信任和迁移。
@@ -72,9 +74,9 @@
 
 尚未完成但不应与上述已修复问题混淆的事项：
 
-1. 生产 AI 工具注册表与 typed policy gate / SQLite 审计仍需在 P6 合并。
-2. 当前桌面 AI 模式由 main 锁定为计划模式；持久模型服务授权尚未实现。
-3. file/resource entry 两级逆向事务仍未实现，当前只完成 operation 级逆向事务。
+1. 生产 AI 工具注册表、typed policy gate 与 SQLite 审计已合并为唯一 main 生产路径；仍需真实服务正向 smoke、流式/取消和完整 UI 生命周期。
+2. 持久模型服务 grant 已实现，并由 main 解析且对提权/撤销执行原生确认；仍需 Electron 人机确认流、授权 scope 的产品级语义和完整生命周期验证。
+3. file 级逆向事务已经完成；resource-entry 基础设施与当前 BND4、EMEVD、FMG、PARAM、MSB typed 子能力已验证，但各语义格式的完整 mutation/corpus 覆盖仍未完成。
 4. renderer DTO 已删除已知路径字段，但后续新增 DTO 仍必须通过统一 runtime schema 和静态门禁。
 
 ### 1.4 本机真实样本事实
@@ -107,7 +109,7 @@ DFLT 解压样本显示 Sekiro 容器资源主要为 BND4。由此确定：
 
 ### 1.5 当前基线验证
 
-审计时实际通过：
+2026-07-10 初始审计时实际通过：
 
 ~~~powershell
 npm run typecheck
@@ -122,6 +124,10 @@ npm run build
 ~~~
 
 `test:native-preview` 通过只证明安全打开和 envelope inspect 没有崩溃，不证明 native semantic parser 完成。
+
+2026-07-13 状态审计及后续收口重新通过 `typecheck`、`npm test`、`bridge:verify:synthetic`、`build`、DFLT/BND4/FMG/PARAM/EMEVD/MSB 定向 smoke 和 AI fake-server smoke；PARAM 后续扩展为当前 `gameparam.parambnd` 138/138，EMEVD 扩展为 10 个已登记 DFLT 文件（9696 events / 126562 instructions），MSB/BND4 公共文档仍为 `candidate`，private/section-28 在缺环境时仍不得解释为通过。
+
+2026-07-19 当前工作树重新按顺序通过 `npm run typecheck`、扩充后的 `npm test`、`npm run test:progress-integrity`、`npm run bridge:verify:synthetic` 和 `npm run build`。本机 9 个 registry/hash 绑定 fixture 的严格 private native gate 通过；section-28 仍为 `partial`，仅证明只读预检、沙箱回滚与 native 前置 smoke，不证明真实 Mod 加载/游戏内回滚。
 
 ---
 
@@ -496,7 +502,7 @@ Windows V0.5 固定使用：
 - 当前开发机已通过 `scripts/install-dotnet-sdk.ps1` 安装应用本地 .NET 10 SDK，`scripts/run-dotnet.mjs` 优先使用该 SDK；不得退回 net6 产物。
 - Electron 打包时携带 Bridge 自包含产物，不要求终端用户安装 .NET。
 
-当前已落地的 transport 基础：`BridgeDaemonHost.cs`、`BridgeDaemonClient`、协议 1.0 handshake、允许根目录、deadline、取消、并发限制、进度帧、健康/能力查询和崩溃失效。一次性 CLI 只保留 synthetic/人工验证用途。尚未完成 Oodle/KRAK、native writer 命令、写操作崩溃恢复故障注入和发行包内自包含部署。
+当前已落地的 transport 基础：`BridgeDaemonHost.cs`、`BridgeDaemonClient`、协议 1.0 handshake、允许根目录、deadline、取消、并发限制、进度帧、健康/能力查询和崩溃失效。一次性 CLI 只保留 synthetic/人工验证用途。BND4 五类 mutation、FMG/PARAM 暂存写入和 EMEVD mutation 命令已经存在；尚未完成 Oodle/KRAK、剩余语义/资产 native writer、完整写操作恢复覆盖和发行包内自包含部署。
 
 ### 8.2 NDJSON 帧
 
@@ -829,7 +835,7 @@ type PatchIrOpKind =
 
 ### 13.2 逆操作
 
-每个 semantic mutation 在暂存前生成可验证 inverse：
+每个 semantic mutation 的可持久 inverse 必须由实际 writer 在暂存输出完成并重读后、目标替换前捕获；PatchIR 中可先携带声明性的 previous/inverse 信息，但只有绑定实际 staged before/after 状态并通过 coverage 校验后才能落库：
 
 - field update → previous typed value
 - add → delete exact new stable URI
@@ -863,8 +869,9 @@ inverse 与原操作一起落库，resource entry rollback 通过 inverse 生成
 PatchIR
   -> 权限与能力门
   -> pending DB journal
-  -> 捕获 inverse
   -> 内容寻址暂存
+  -> writer postValidate / 暂存重读
+  -> 捕获并持久化 inverse
   -> staged validators
   -> restore point
   -> commit hash 再检查
@@ -1619,14 +1626,22 @@ variant
 expectedAuthority
 expectedCapabilities
 expectedAssertions
+testRole（可选；只用于严格门禁的 primary fixture 绑定）
 ~~~
 
-仓库只提交 registry schema 和 runner。
+仓库只提交 registry schema 和 runner：
+
+- schema：`schemas/native-fixture-registry.schema.json`
+- loader/runner：`scripts/native-fixture-registry.mjs`、`scripts/verify-native-fixture-registry.mjs`
+- 命令：`npm run test:native-fixture-registry`
+
+runner 必须先验证 registry/root 不是符号链接、`localPath` 不越界、目标是真实普通文件且 SHA-256 匹配，再向内部 native runner 提供绝对路径。严格私有门禁还必须绑定 BND4/FMG/PARAM/EMEVD/MSB 五个 primary role，以及同时带 `dcx-document` 断言的 DFLT/KRAK fixture；不得通过目录扫描替代显式登记。
 
 支持环境变量：
 
 ~~~text
 SOULFORGE_NATIVE_FIXTURE_ROOT
+SOULFORGE_NATIVE_FIXTURE_REGISTRY
 SOULFORGE_SEKIRO_GAME_ROOT
 ~~~
 
@@ -1807,23 +1822,29 @@ Windows x64 CI：
 5. 不把 synthetic、candidate、partial 写成 native complete。
 6. 不把未跑真实模型、真实游戏或真实 corpus 写成通过。
 7. 不因为测试环境不便而关闭校验或放宽约束。
+8. 第 42 节 `[x]` 只表示对应条目完整通过；任何 `partial/candidate/fixture-confirmed/blocked/skipped/unverified/unsupported` 或未完子项都必须保持 `[ ]`。
+9. 命令退出码 0 只是 transport 结果；阶段裁定还必须检查结构化 `status`、`authority`、`skipped`、`failed`、corpus 总数和失败数。
+10. 私有环境缺失可在公开 CI 用 `--allow-skip` 记录，但 release gate 默认严格，`skipped/partial` 必须非零退出。
+11. 每次修改进度、README 或 Bridge 能力描述后运行 `npm run test:progress-integrity`，并同步修正模块地图和当前执行位置。
+12. 声明能力可用的门禁必须执行该能力的真实正向成功路径；失败关闭、缺失诊断和 synthetic 测试只能证明边界，不能充当成功证据。
+13. 严格私有门禁必须同时设置 `SOULFORGE_NATIVE_FIXTURE_ROOT`、`SOULFORGE_NATIVE_FIXTURE_REGISTRY` 和 `SOULFORGE_SEKIRO_GAME_ROOT`；native runner 必须从 registry 的 hash 绑定条目解析语料。固定仓库 `mods/...` 只能作为未设置 registry 时的本地开发默认值，不能充当严格私有门禁输入；只有三项均未设置时公开 CI 才可显式 `--allow-skip`。
 
 ---
 
 ## 30. 接手 Agent 的第一批具体任务
 
-P0 与 P1 的 transport / persistence 基础已经落地。接手后不要重做这些工作，也不要直接开始四类语义 parser；第一批应严格是：
+P0 与 P1 的 transport / persistence 基础、DFLT-BND4 子集和部分语义 smoke 已经落地。接手后不要重做这些工作，也不要把已有子能力外推为阶段完成；第一批应严格是：
 
 1. 重新确认 `git status`、HEAD 和未跟踪 `mcps/**`。
 2. 跑基线验证。
-3. 安装/定位用户 Sekiro Oodle runtime，先实现“缺失、版本错误、导出缺失、加载失败”的结构化诊断，不分发 DLL。
-4. 在 C# Bridge 内实现 KRAK codec adapter，先完成私有样本只读解压证据，再开放重压；不得在 TypeScript 再实现一份。
-5. 给 Bridge daemon 增加真实进程崩溃、在途读取消、在途写不重放、重启后重新握手的故障注入。
-6. 将 `workspace.db` 从操作日志扩到 transaction journal、恢复点、file/resource entry changes、audit；先写 repository contract 和迁移测试。
-7. 实现旧 semantic snapshot 的严格幂等导入；损坏源必须失败关闭并保留。
-8. 建立 main `WorkspaceSessionManager` 和后台任务 service，逐步移除 `ipc.ts` 全局状态。
-9. 补 file/resource entry 两级 inverse PatchIR 回滚；每级都必须先校验当前 `afterHash`。
-10. 完成以上 P1 缺口后，再开始 P2 的真实 DFLT variant 与 BND4 parser/repack。
+3. 在仓库外建立符合 schema 的真实 fixture registry；取得合法 Sekiro Oodle runtime 后，按 registry 完成 KRAK 真实成功解压/重压和 KRAK 内 BND4 corpus，不得用失败关闭、目录扫描或 skip 代替。
+4. 将 BND4 公共 authority 从 `candidate` 提升前，建立覆盖全部发布 corpus 的结构、roundtrip、CRUD 和未知数据保持证据。
+5. 当前 `gameparam.parambnd` 138/138 子项往返和 fixture-scoped 用户派生字段暂存重读已通过；继续补齐原生 paramdef、完整发布 registry、官方字段语义与专业编辑器，再决定 P3 PARAM authority。
+6. 补齐 EMEVD `layerCount != 0`、KRAK 语料、完整 EMEDF schema/类型转换和剩余发布 corpus；补齐 MSB 全实体 CRUD/重排/类型转换。
+7. PatchIR 1.0 已补 schemaVersion、reorder、convert、asset import、typed payload 和结构化 inverse，并移除生产 `nodePayload?: unknown`；EMEVD `restBehavior`/`instruction args`/空事件 `add`/既有非空事件 `delete`/`duplicate`/事件顺序 `reorder`/instruction 零参数 `add` 与既有 instruction `duplicate`/`delete`/`reorder`、raw FMG `text`/槽位 `delete`/`insert`/`reorder`、PARAM 用户派生字段与 MSB part 位置已接入原生 semantic writer、writer-bound inverse 和 resource-entry 新事务回滚，继续迁移其余 EMEVD/FMG/PARAM/MSB/asset 操作，不得把局部闭环外推为完整语义主干。
+8. 合并两套 AI tool registry；把 core model adapters、safeStorage、app.db grants/history、Context Broker 和桌面真实调用接成单一生产链。
+9. 将 Hex/EMEVD/PARAM/FMG/MSB UI 从演示/代理路径升级为专业桌面，并拆除千行级 `App.tsx` / `ipc.ts` 单体。
+10. 完成 Playwright E2E、真实打包、签名、更新器、完整性能和 section-28 真游戏门禁；严格 release gate 不允许 skip/partial。
 
 不要删除或降级现有安全、SQLite utility、Bridge daemon 和双 ABI 门禁来简化实现。
 
@@ -1874,8 +1895,8 @@ P0 与 P1 的 transport / persistence 基础已经落地。接手后不要重做
 |---|---|---|
 | `packages/shared/src/types.ts` | IndexedFile、诊断、确认凭据、PatchProposal 等旧公共类型 | 保持兼容一个迁移周期；拆分 renderer-safe DTO；确认凭据升级为签名结构 |
 | `packages/shared/src/bridge-protocol.ts` | 已升级为协议 1.0 daemon frame 与 authority/capability 类型 | P2/P3 继续补 native document 和 mutation schema，不另建第二套协议 |
-| `packages/shared/src/patch-ir.ts` | file/raw/text/resource/container synthetic PatchIR | 增加 schemaVersion、reorder、convert、asset import、typed payload、inverse |
-| `packages/shared/src/writer-contract.ts` | writer staging contract | 增加 captureInverse、document/layout/revision 前置条件 |
+| `packages/shared/src/patch-ir.ts` | PatchIR 1.0 已版本化；resource field/node/edge、reorder、convert、asset import 使用 discriminated typed payload 与结构化 inverse；`FmgEntryNodePayload` 绑定 `stringIndex`；EMEVD event payload 绑定 `eventId + eventIndex + eventHash`，事件增删/复制使用 canonical/Bridge 权威快照，事件重排绑定完整顺序；instruction payload 绑定父事件 occurrence、局部索引、bank/id、layer、args、parameterCount、instructionHash 与 Bridge 权威快照；大 snapshot 可用内容寻址 staging object，生产 `nodePayload?: unknown` / `edgePayload?: unknown` 已移除 | typed contract 解决可表达性；当前 BND4、EMEVD 已列出字段/事件/instruction 子能力、raw FMG `text`/槽位 `delete`/`insert`/`reorder`、PARAM 用户派生字段与 MSB part 位置已接 production inverse 主干，继续迁移其余语义/资产写入，未完成前不得声明 native semantic PatchIR 完成 |
+| `packages/shared/src/writer-contract.ts` | staging contract 已覆盖 semantic/asset operation kind，并提供 writer-bound `captureInverse`；BND4 及当前 EMEVD/FMG/PARAM/MSB typed 子能力 writer 已实现精确捕获 | 其他 production writer 必须实现 document/layout/revision 前置条件和完整 inverse coverage；registry 绑定真实 authority，不能只信 IR metadata |
 | `packages/shared/src/resource-graph.ts` | 内存图和 SQLite row DTO | 增加 temporal revision、field identity、entry change link |
 | `packages/shared/src/resourceSymbols.ts` | event/map/param/msg 索引投影 | 保持只读 projection；不得扩成无损 document |
 | `packages/shared/src/ai-tools.ts` | typed tool/evidence/plan scaffold | 成为唯一生产 AI 工具协议 |
@@ -1900,14 +1921,14 @@ P0 与 P1 的 transport / persistence 基础已经落地。接手后不要重做
 | 目录/文件 | 当前状态 | V0.5 处理 |
 |---|---|---|
 | `packages/core/src/transactions/workspaceTransaction.ts` | 唯一 commit owner；已有物理路径边界与 after-commit 自动恢复 | 接 SQLite transaction journal 和更完整故障点持久恢复 |
-| `packages/core/src/patch/durablePatchCommit.ts` | 异步 pending/committed store + transaction +应用数据 recovery | 将 recovery metadata/restore point 纳入 workspace.db 生命周期与保留策略 |
+| `packages/core/src/patch/durablePatchCommit.ts` | 异步 pending/committed store + transaction + 应用数据 recovery；结构化操作在暂存成功后、目标替换前由实际 writer 捕获 inverse，缺失 coverage 失败关闭 | 将 recovery metadata/restore point 纳入 workspace.db 生命周期与保留策略；继续覆盖剩余 semantic/asset writer |
 | `packages/core/src/patch/operationLog.ts`、`sqliteOperationLogStore.ts` | 异步 store 契约与 workspace.db operation repository | 扩到 transaction/file/resource entry/audit repositories |
 | `packages/core/src/patch/fileOperationLogStore.ts`、`importLegacyOperationLog.ts` | JSON store 仅供兼容测试；生产严格幂等导入且损坏失败关闭 | 语义 snapshot 迁移完成后删除生产 JSON 入口，保留测试兼容 |
-| `packages/core/src/patch/rollback.ts` | operation 级 inverse PatchIR 新事务和 afterHash/backupHash 冲突保护 | 增加 file/resource entry scope，不修改旧操作状态 |
+| `packages/core/src/patch/rollback.ts` | operation/file/resource-entry 均以新 PatchIR 事务回滚，不修改旧操作；resource-entry 已验证 BND4 五类、EMEVD `restBehavior`/`instruction args`/空事件 `add`/既有非空事件 `delete`/`duplicate`/事件完整顺序 `reorder`/instruction 零参数 `add` 与既有 instruction `duplicate`/`delete`/`reorder`、raw FMG `text`/槽位 `delete`/`insert`/`reorder`、PARAM 用户派生字段与 MSB part 位置 typed inverse | 扩展到其余语义 mutation、嵌套 msgbnd 与完整 corpus，保持 afterHash/typed value/node/完整顺序 hash 冲突保护 |
 | `packages/core/src/backup/restorePoint.ts` | 支持应用数据目录恢复点 | 接内容寻址去重、30 天/10GB 保留和引用保护 |
 | `packages/core/src/staging/contentAddressedStaging.ts` | 内容寻址暂存骨架 | 保留并接 workspace local data root/retention |
-| `packages/core/src/writers/*` | text/raw/synthetic/container synthetic writers | synthetic 只留测试；新增 Bridge native writer adapter |
-| `packages/core/src/validators/*` | text/raw/container synthetic validators | 增加多层 native validators 和 after-commit 恢复 |
+| `packages/core/src/writers/*` | text/raw/synthetic、原生 BND4，以及覆盖当前已列出 EMEVD 字段/事件/instruction、raw FMG 槽位、PARAM 用户派生字段与 MSB part 位置子能力的 Bridge semantic writer；原生结构化 writer 强制执行带身份与 operation coverage 的 `postValidate`，结构化 inverse 由同一 writer 在暂存后捕获 | synthetic 只留测试；继续为嵌套 msgbnd FMG 与 EMEVD/FMG/PARAM/MSB 其余 mutation 增加 Bridge authority adapter，并保持 postValidate/captureInverse 契约 |
+| `packages/core/src/validators/*` | text/raw/container 与 EMEVD/FMG Bridge 重读 validator；事务逐 operation 强制 required validator 唯一注册、阶段/方法一致、结果身份可信并返回实际 coverage，异常与无诊断失败均结构化失败关闭 | 增加剩余格式/操作的多层 native validators；不把 coverage 契约等同于格式完成 |
 | `packages/core/src/editing/*` | save text/raw/container child | 改为 resource URI + session，不接收 renderer absolutePath |
 
 ### 33.4 Core：容器和 Bridge
@@ -1927,11 +1948,12 @@ P0 与 P1 的 transport / persistence 基础已经落地。接手后不要重做
 
 | 目录/文件 | 当前状态 | V0.5 处理 |
 |---|---|---|
-| `packages/core/src/ai/assistantSession.ts` | mock 草稿，真实 provider 恒 notConfigured | P6 替换为真实 session/orchestrator |
-| `packages/core/src/ai/toolRegistry.ts` | 旧生产工具注册表 | 与 scaffold registry 合并，最终删除旧权限标签 |
+| `packages/core/src/ai/assistantSession.ts` | 旧 mock/计划草稿 helper 仍保留，但不再是桌面生产调用权威 | 收缩为测试/兼容 helper；生产生命周期以 main 的 model-service agent loop 为准 |
+| `packages/core/src/model-services/*` | 三类 adapter、fake-server agent loop 与 desktop main production caller 已存在 | 补真实双 provider 正向 smoke、流式/取消和完整桌面生命周期 |
+| `packages/core/src/ai/toolRegistry.ts` | 唯一生产 typed registry；旧 scaffold registry 已删除，agent loop contract 门禁已覆盖 | 继续扩展生产工具与 policy/audit 证据，不恢复第二套状态或权限模型 |
 | `packages/core/src/ai/toolPermissions.ts` | mode → permission rank | 修正计划模式；权威 mode 只由 main 上下文提供 |
 | `packages/core/src/ai/evidencePackBuilder.ts` | 证据包 | 接 SQLite/Context Broker；不暴露 absolutePath |
-| `packages/core/src/ai-tools/scaffoldToolRegistry.ts` | typed registry smoke | 升级为唯一生产 registry |
+| `packages/core/src/ai-tools/patchTools.ts` | PatchIR 工具定义由生产 registry 与测试共同复用 | 保持单一工具定义来源和 typed policy gate |
 | `packages/core/src/ai-tools/policyGate.ts` | 综合策略 scaffold | 升级为生产 policy gate |
 | `packages/core/src/audit-log/*` | memory audit | 替换为 DB repository |
 
@@ -1940,11 +1962,11 @@ P0 与 P1 的 transport / persistence 基础已经落地。接手后不要重做
 | 文件 | 当前状态 | V0.5 处理 |
 |---|---|---|
 | `apps/desktop/src/main/index.ts` | sandbox/CSP 配套窗口安全和 Bridge/DB 关闭生命周期已落地 | P1/P5 拆出 app service container 和 domain 生命周期 |
-| `apps/desktop/src/main/ipc.ts` | sender 校验、一次性目录选择、main 确认、资源 URI 和 utility DB 已接；仍是单体全局状态 | 拆为 domain handlers + `WorkspaceSessionManager`，补 runtime schema |
+| `apps/desktop/src/main/ipc.ts` | sender 校验、一次性目录选择、main 确认、资源 URI、utility DB、grant 解析和真实模型服务编排已接；仍是大型单体 handler | 拆为 domain handlers + `WorkspaceSessionManager`，补完整 runtime schema、流式/取消和人机授权生命周期 |
 | `apps/desktop/src/main/rendererDto.ts` | 已统一剔除绝对路径等 main-only 字段 | 所有新增 DTO 必须复用或替换为 versioned runtime schema |
 | `apps/desktop/src/main/databaseUtility.ts`、`operationLogUtilityClient.ts` | Electron utility process 托管 `app.db/workspace.db` 与异步操作日志 RPC | 增加全部 repositories、任务恢复、崩溃重启故障注入和审计 |
 | `apps/desktop/src/preload/index.ts` | 已删除确认铸造、绝对根路径和 renderer mode；仍是单个 API 对象 | 按 versioned domain API 拆分，输入输出 runtime validation |
-| `apps/desktop/src/renderer/src/App.tsx` | 千行级单体 | P5 拆除，仅保留 app bootstrap/router |
+| `apps/desktop/src/renderer/src/App.tsx` | 1800+ 行单体，专业编辑器仍含 demo fallback、代理场景和演示任务 | P5 拆除，仅保留 app bootstrap/router；真实能力失败不得静默回退为可编辑 demo |
 | `apps/desktop/src/renderer/src/styles.css` | 固定三栏全局 CSS | 迁移为应用壳/编辑器局部样式与主题 tokens |
 | `apps/desktop/electron.vite.config.ts` | 已增加 database utility 与运行 smoke 入口 | P4/P5 再增加转换 worker、Three chunk 和发行打包配置 |
 
@@ -1955,9 +1977,11 @@ P0 与 P1 的 transport / persistence 基础已经落地。接手后不要重做
 | `bridge/SoulForge.Bridge/Program.cs`、`BridgeDaemonHost.cs` | net10 daemon bootstrap + 一次性测试兼容入口 | P2 增加 native command service，不恢复 production one-shot |
 | `bridge/SoulForge.Bridge/ParserTypes.cs` | BridgeResult/diagnostic 类型 | 迁移到 protocol 1.0 envelope 与 authority |
 | `bridge/SoulForge.Bridge/EnvelopeInspection.cs` | bounded envelope evidence | 保留作为 inspect 第一层 |
-| `bridge/SoulForge.Bridge/DcxPayloadProbe.cs` | 边界与 DFLT preview | 扩展为严格 DCX variant parser；full codec 分到独立模块 |
+| `bridge/SoulForge.Bridge/DcxNativeDocument.cs`、`DcxPayloadProbe.cs` | DFLT 私有样本 roundtrip 已落地；登记 KRAK fixture 的合法 Oodle 解压成功路径已验证 | 完成 KRAK 重压与完整 corpus 后再收口完整 DCX authority |
+| `bridge/SoulForge.Bridge/Bnd4NativeDocument.cs`、`Bnd4NativeWriter.cs` | DFLT-BND4 parser/repack/writer 可运行，但公共文档仍返回 `candidate` | 覆盖 KRAK 内 corpus 并统一 authority 判定 |
 | `bridge/SoulForge.Bridge/Synthetic*` | synthetic fixtures | 保留测试，显式 fixture-confirmed |
-| `bridge/SoulForge.Bridge/SemanticCandidateExports.cs` | candidate 导出 | native parser 完成后仅作 unsupported fallback，不能混入 verified output |
+| `bridge/SoulForge.Bridge/FmgNative*`、`ParamNative*`、`EmevdNative*`、`MsbNative*` | 已有分层真实样本 smoke；PARAM 当前 gameparam binder 138/138，并有用户派生单字段暂存重读证据；MSB 为 candidate，四类均未满足完整 P3 | 按发布 registry、原生 paramdef、未知区段、全 CRUD/重排/转换和三层回滚分别收口 |
+| `bridge/SoulForge.Bridge/SemanticCandidateExports.cs` | candidate 导出兼容入口仍保留 | 只能作 unsupported fallback，不能混入 verified output |
 | `bridge/SoulForge.Bridge/SoulForge.Bridge.csproj`、`global.json` | 已升级 net10.0、自包含 `win-x64`、single-file publish | P7 接入签名发行构建并验证干净机启动 |
 
 ---
@@ -2399,7 +2423,9 @@ audit 不永久复制 API key、完整二进制、过期 AI 正文。
 
 接手者可以按此清单持续推进，无需返回其他规划文档：
 
-- [x] 基线验证与工作树核对（2026-07-10；后续接手仍须重跑）
+状态语义：`[x]` 仅表示该条目按交接书定义完整通过；`[ ]` 同时覆盖未开始、进行中、`partial`、`candidate`、`fixture-confirmed`、`blocked`、`skipped`、`unverified` 和 `unsupported`。说明文字可记录已通过的子能力，但不能据此提前勾选。`npm run test:progress-integrity` 强制检查该约束。
+
+- [x] 基线验证与工作树核对（2026-07-19；后续接手仍须重跑）
 - [x] P0 文档口径
 - [x] P0 Electron 安全
 - [x] P0 IPC/session/path 安全边界
@@ -2407,48 +2433,48 @@ audit 不永久复制 API key、完整二进制、过期 AI 正文。
 - [x] P0 全量回归
 - [x] P1 .NET 10 与自包含 `win-x64` 配置
 - [x] P1 Bridge daemon transport / protocol 1.0
-- [x] P1 Bridge 写操作崩溃恢复故障注入（BND4 staging writer；失败关闭且不自动重放）
+- [x] P1 Bridge 写操作崩溃恢复故障注入（BND4 staging writer；fail-closed 且不自动重放已验证）
 - [x] P1 SQLite 两库 migration/utility process 基础
-- [x] P1 SQLite 核心 repositories/任务恢复发现/audit（恢复目录实际清理仍需 main 安全执行器）
+- [x] P1 SQLite 核心 repositories/任务恢复发现/audit（main 安全清理执行器已验证）
 - [x] P1 operation log JSON 严格幂等迁移
 - [x] P1 semantic snapshot 严格幂等迁移
-- [x] P1 file/resource entry inverse rollback（基础设施与 fixture-confirmed 闭环；native writer 仍按 P2/P3 门禁）
-- [ ] P1 Oodle/KRAK（失败关闭已验证；真实成功路径 `unverified-no-local-sekiro-runtime`）
+- [x] P1 file/resource entry inverse rollback 基础设施（synthetic 闭环已验证；native authority 由 P2/P3 单列裁定）
+- [ ] P1 Oodle/KRAK（失败关闭和 1 个 registry/hash 绑定真实 KRAK 解压正向样本已验证；重压与完整发布 corpus 未完成）
 - [x] P2 DFLT variants（本机私有基线 144/144 完整 payload roundtrip；KRAK 单列）
-- [x] P2 BND4 native（DFLT 外层 production 读写；KRAK 内 BND4 仍 blocked）
-- [x] P2 child CRUD/repack（DFLT-BND4 五类 + resource-entry inverse；KRAK 未覆盖）
-- [x] P2 container roundtrip（DFLT-BND4 已验证；完整 corpus 仍受 KRAK 阻塞）
-- [x] P3 FMG（item.msgbnd 18/18 语义往返 + 写入 + BND4 提交/回滚）
-- [x] P3 PARAM（紧凑布局读写/提交/回滚；旧布局 2/40 样例 unsupported；paramdef 未做）
-- [x] P3 参数结构定义（用户派生 ParamDefDocument 布局校验/字段解码编码；原生 .paramdef 二进制解析与官方适配包签名未完）
-- [x] P3 EMEVD（全量表 1730/33266；rest/id；等长与变长 instruction args GC；add/delete/duplicate 事件 GC；fixture EMEDF；layerCount≠0 未完）
-- [x] P3 MSB（models/parts + POINT regions 1504 + EVENT 64；part/region 位置写回；全实体 CRUD/增删未完）
-- [x] P3 graph/index/diagnostics（MemoryResourceGraph + WorkspaceIndex 健康报告与候选引用诊断）
-- [x] P3 resource entry rollback（BND4 五类；语义格式复用主干）
-- [x] P4 scene asset inventory（MSB manifest → candidate 模型/材质引用清单；无 FLVER 原生解析）
-- [x] P4 native scene formats（FLVER 头 + mesh 表 candidate；完整几何/材质/writer 未完）
-- [x] P4 open-format import（glTF/GLB/PNG/TGA/DDS 暂存主干；原生转换未完）
-- [x] P4 Three.js scene（代理几何 WebGL2；真实 mesh/LOD 未完）
-- [x] P4 asset conversion/writeback（暂存→PatchIR file_replace；最小 RGBA→DDS 编码器已通；FLVER 未完）
-- [x] P5 app shell/document store（统一 EditorDocumentStore/mutation 协议）
-- [x] P5 Hex（HexDocument + 渲染进程 Hex 面板）
-- [x] P5 EMEVD 四视图（实时 `readEmevdDocument` 映射四视图 + mutation 经 `applyEmevdMutation`→PatchIR；无文件时回退演示文档）
-- [x] P5 PARAM/结构定义（实时读/写 + 复制行 `sourceId` 载荷 upsert；ParamDef 面板仍为用户派生 fixture；官方包签名未完）
-- [x] P5 FMG（实时 `readFmgDocument`/`applyFmgMutation`→Bridge+PatchIR；无文件时回退演示条目）
-- [x] P5 MSB 3D（实时读 parts/regions；part+region 位置微调 → `applyMsbMutation`→PatchIR；Three 代理；无文件时回退演示）
-- [x] P5 patch/reference/history/jobs（workbench 投影 + 任务/历史/诊断/补丁影响面板）
-- [x] P5 i18n（简体中文界面字符串 + 静态术语扫描；完整 i18next 资源包/英文化切换未完）
-- [x] P6 OpenAI Responses（`/v1/responses` adapter + fake SSE tool loop）
-- [x] P6 OpenAI Chat Completions compatible（adapter + fake-server tool loop）
-- [x] P6 Anthropic Messages（adapter + fake-server tool loop）
-- [x] P6 credentials/grants/context/audit（safeStorage vault + IPC + 设置面板；真机 DPAPI 运行 smoke 未完）
-- [x] P6 agent loop（plan/normal/full 门禁 + 完全权限仍走 Patch Engine 闸）
-- [x] P7 unit/integration/E2E（Vitest 未全量迁移；现有 smoke 层 + CI 入口已接；Playwright Electron E2E 未完）
-- [x] P7 Windows CI（`.github/workflows/windows-ci.yml`：公开 smokes + IPC 契约 + portable/private/section28 诚实 skip；私有 mods/Oodle 不跑）
-- [x] P7 installer/signing/updater（`electron-builder.yml` + `test:portable-packaging-gate` 配置门禁；未装 electron-builder 时跳过真打包；代码签名/updater 未配置，不得当作可分发发行包）
-- [x] P7 performance（宽松 CI 基线 smoke；完整产品性能门槛与 10GB 压力未完）
-- [x] P7 private native gate（`test:private-native-gate`：有 env 跑 native 步骤；无 env 诚实 skip `unverified-no-local-sekiro-runtime`）
-- [x] P7 real Sekiro launch/rollback（`test:section28-sekiro-gate`：无 env 诚实 skip `unverified-no-local-sekiro-runtime`；有 env 仅前置 smoke+exe 探测，完整启动自动化未实现，不得全绿）
+- [ ] P2 BND4 native（DFLT 外层 production 读写及登记 KRAK 解压后的嵌套 BND4 识别已验证；公共 authority 仍为 candidate，KRAK 重建/重压未完成）
+- [ ] P2 child CRUD/repack（DFLT-BND4 五类 + resource-entry inverse 已验证；登记 KRAK 仅覆盖解压/嵌套识别，未覆盖重压）
+- [ ] P2 container roundtrip（DFLT-BND4 已验证；完整 KRAK corpus 与重压仍未完成）
+- [ ] P3 FMG（item.msgbnd 18/18 语义往返 + 写入 + BND4 提交/回滚；raw FMG 已有条目 `text`、槽位级 `delete`/`insert`/`reorder` 的 typed PatchIR、重复 ID occurrence 隔离、完整顺序 postValidate、resource-entry/operation rollback 已验证；嵌套 msgbnd 字段事务、id-wide 增删的精确 inverse、类型转换与完整发布 corpus 未验证）
+- [ ] P3 PARAM（当前 gameparam binder 138/138 无修改字节/语义往返；长偏移与两种 embedded-type-name 布局、旧布局 writer 已验证；用户派生字段 typed PatchIR 提交/entry rollback 已验证；原生 paramdef 与完整发布 registry 未完成）
+- [ ] P3 参数结构定义（用户派生 ParamDefDocument 布局校验/字段解码编码与 typed field production writer 已验证；原生 .paramdef 二进制解析与官方适配包签名未完）
+- [ ] P3 EMEVD（10 个 DFLT corpus 9696/126562；rest/args、事件增删/复制/重排、重复 ID 身份与 operation rollback 已验证；`restBehavior`、`instruction args`、空事件 `add`、既有非空事件 `delete`/`duplicate`、事件完整顺序 `reorder`，以及 Bridge-authored 零参数 instruction `add`、既有 instruction `duplicate`/`delete`/`reorder` typed resource-entry rollback 已在 `common` 验证；新增 instruction 实测 `parameterCount=0`、`layerOffset=-1`，事件 delete 快照恢复 7 条指令/6 条参数替换，instruction 快照恢复目标的 2 条参数替换；该语料未覆盖重复 ID 非空事件 typed delete；33 个 KRAK、完整 EMEDF-aware authoring/类型转换、layerCount≠0、完整三层回滚 corpus 和发布 corpus 未完）
+- [ ] P3 MSB（models/parts + POINT regions 1504 + EVENT 64；part/region 位置写回；part 与 region 位置 typed PatchIR + resource-entry rollback 已验证于 DFLT 解压 raw MSB；authority 仍为 candidate，全实体 CRUD/增删/DCX 包装未完）
+- [ ] P3 graph/index/diagnostics（MemoryResourceGraph + WorkspaceIndex 健康报告与候选引用诊断；完整语义索引未完）
+- [ ] P3 resource entry rollback（BND4 五类、EMEVD `restBehavior`/`instruction args`/空事件 `add`/既有非空事件 `delete`/`duplicate`/事件完整顺序 `reorder`/Bridge-authored 零参数 instruction `add`/既有 instruction `duplicate`/`delete`/`reorder`、PARAM 用户派生字段、MSB part 位置与 raw FMG `text`/槽位 `delete`/`insert`/`reorder` 已验证；EMEVD 完整 EMEDF-aware instruction authoring/类型转换、FMG 类型转换、MSB 全实体 CRUD、嵌套 msgbnd 字段回滚和完整 entry rollback corpus 未完成）
+- [ ] P4 scene asset inventory（MSB manifest → candidate 模型/材质引用清单；无 FLVER 原生解析）
+- [ ] P4 native scene formats（FLVER 头 + mesh 表 candidate；完整几何/材质/writer 未完）
+- [ ] P4 open-format import（glTF/GLB/PNG/TGA/DDS 暂存主干；原生转换未完）
+- [ ] P4 Three.js scene（代理几何 WebGL2；真实 mesh/LOD 未完）
+- [ ] P4 asset conversion/writeback（暂存→PatchIR file_replace；最小 RGBA→DDS 编码器已通；FLVER 未完）
+- [ ] P5 app shell/document store（统一 EditorDocumentStore/mutation 协议已存在；单体拆分和完整生命周期未完）
+- [ ] P5 Hex（HexDocument + 16-byte 演示面板；搜索/跳转/虚拟化/diff 等未完）
+- [ ] P5 EMEVD 四视图（实时读取与 rest/事件上移下移 typed mutation 已接；读取失败不再静默回退可编辑 demo；DSL/全量指令/完整 UI 与 Electron 人机未完）
+- [ ] P5 PARAM/结构定义（实时读/写 + 复制行已接；读取失败不再静默回退可编辑 demo；ParamDef 仍为 fixture，官方包签名未完）
+- [ ] P5 FMG（实时读取、已有条目 `text`、槽位级 `delete`/`insert`/`reorder` typed mutation、重复 ID 槽位选择与显式上移/下移已接；读取失败不再静默回退可编辑 demo；id-wide upsert/delete 兼容入口仍走 whole-file raw fallback，嵌套 msgbnd 与完整本地化工作台未完）
+- [ ] P5 MSB 3D（parts/regions 位置微调 + Three 代理；读取失败不再静默回退可编辑 demo；完整场景/资产/gizmo/CRUD 未完）
+- [ ] P5 patch/reference/history/jobs（workbench 投影与演示面板已存在；持久生产工作流未完）
+- [ ] P5 i18n（简体中文静态术语扫描通过；i18next 双语资源和切换未完）
+- [ ] P6 OpenAI Responses（adapter + fake SSE tool loop + 桌面 production caller 已接；真实服务正向 smoke、流式/取消和完整 UI 未完）
+- [ ] P6 OpenAI Chat Completions compatible（adapter + fake-server tool loop + 桌面 production caller 已接；真实服务正向 smoke、流式/取消和完整 UI 未完）
+- [ ] P6 Anthropic Messages（adapter + fake-server tool loop + 桌面 production caller 已接；真实服务正向 smoke、流式/取消和完整 UI 未完）
+- [ ] P6 credentials/grants/context/audit（safeStorage 密文、app.db configs/grants/history/retention、Context Broker、outbound audit 与 utility/main IPC 已接；grant mode/scope 在 main fail-closed 校验；真机 DPAPI、人机授权、历史管理 UI 与产品级 scope 生命周期未完）
+- [ ] P6 agent loop（core fake loop与 desktop main-only 凭据解析、双 adapter、grant-derived mode、唯一生产 registry、app.db history/audit 已验证；真实服务正向 smoke、流式 UI 与取消路径未完成）
+- [ ] P7 unit/integration/E2E（现有 smoke 层 + CI 入口；Vitest/xUnit/Playwright Electron E2E 未完）
+- [ ] P7 Windows CI（workflow 已存在并强制 unsigned `win-unpacked` 真构建/内容审计；本地同命令已通过，远程 runner、私有门禁与正式发行矩阵仍未验证）
+- [ ] P7 installer/signing/updater（electron-builder 已安装，unsigned `win-unpacked` 真构建、EXE/ASAR/Electron ABI SQLite binding/禁止内容审计与窗口启动已通过；portable EXE/NSIS 因本机 GitHub release asset 下载 EOF 未产出，签名/updater 未配置）
+- [ ] P7 performance（宽松 CI smoke；完整产品性能门槛与 10GB 压力未完）
+- [ ] P7 private native gate（2026-07-18 本机 9 个登记 fixture 严格门禁通过；MSB 仍为 candidate，完整发布 corpus/release matrix 未完成；无 env 只能 allow-skip 记录）
+- [ ] P7 real Sekiro launch/rollback（完整启动/Mod 加载/回滚自动化未实现；严格门禁不得 skip/partial）
 - [ ] 最终 V0.5 release criteria 全绿
 
 ---
@@ -2501,8 +2527,10 @@ audit 不永久复制 API key、完整二进制、过期 AI 正文。
 ### 当前执行位置
 
 - `P0`：已完成并通过当前工作树回归。
-- `P1`：Bridge transport 与 SQLite persistence 基础已完成；阶段整体仍在进行中。
-- 下一项：Oodle discovery/KRAK、Bridge 崩溃故障注入、SQLite 全量 repositories/semantic snapshot 迁移、file/resource entry 逆向回滚。
+- `P1/P2/P3`：Bridge/SQLite 基础及登记的 DFLT/KRAK/BND4、FMG/PARAM/EMEVD/MSB 子能力已有证据；KRAK 重压、完整发布 corpus 与完整 native authority 仍未完成。
+- `P6`：credentials、持久 grants、Context Broker、唯一生产 registry、agent loop/history/audit 已接；真实双 provider 正向 smoke、流式/取消、人机授权和完整 UI 仍未完成。
+- `P7`：本机登记 fixture 的严格 private native gate 已通过；section-28 仍只有只读预检、沙箱回滚和可选短启动探测，不能解释为真实 Mod 加载/回滚完成。
+- 下一项：完成当前全量回归后，优先补真实模型服务正向 smoke 与流式/取消边界；native 侧继续 KRAK 重压/完整 corpus、MSB authority 和 section-28 真实闭环，所有未完成项保持未勾选。
 
 ### 2026-07-11：P1 Oodle、崩溃恢复、持久事务与细粒度回滚推进
 
@@ -2804,7 +2832,1041 @@ audit 不永久复制 API key、完整二进制、过期 AI 正文。
 
 ### 当前执行位置（2026-07-11 终）
 
-- `P0`–`P6` 可本地主干：已有大量可复现证据（容器/语义/桌面实时 IPC/双模型 fake loop/vault 契约）。
-- `P7`：公开 CI/配置/内容扫描/诚实 skip 门禁已落；**签名发行 + 真游戏 section-28 全绿仍未达成**。
-- **环境阻塞**：本机无 `SOULFORGE_SEKIRO_GAME_ROOT` / 合法 Oodle → KRAK 与真实游戏门禁不可替代合成通过。
+- `P0`：当前回归支持完成声明。
+- `P1`：transport/persistence/rollback 基础可用；KRAK/Oodle 真实成功路径未完成。
+- `P2`：DFLT 完成当前私有样本断言；BND4 仅 DFLT 子集可运行，公共 authority 仍为 candidate。
+- `P3`：FMG/EMEVD/PARAM/MSB 均有真实子能力证据，但没有任何一类满足完整发布定义。
+- `P4`–`P5`：当前是资产/场景/编辑器 prototype，不是完整产品阶段。
+- `P6`：core fake-server adapters/agent loop 可复现；desktop production、真实服务、grant/context/audit 未完成。
+- `P7`：公开 CI/配置/内容扫描可用；E2E、真打包、签名、更新、完整性能与 section-28 未完成。
+- **环境阻塞**：本机无 `SOULFORGE_SEKIRO_GAME_ROOT` / 合法 Oodle；KRAK 与真实游戏门禁不可替代合成通过。
 - **V0.5 未完成**：不得标记「最终 V0.5 release criteria 全绿」。
+
+### 2026-07-13：代码/文档状态审计与进度门禁收口
+
+- 状态：`pass（状态修正与门禁）；产品阶段状态没有被本次文档修正提升`
+- 审计基线：HEAD `7bd354d`；工作树原有未跟踪 `mcps/**`，不属于 V0.5。
+- 已重新验证：`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`。
+- 已重新验证：214 DCX 中 144 DFLT 通过、70 KRAK blocked；75 个 DFLT-BND4、11,344 entries 通过当前 roundtrip，BND4 writer/transaction/rollback smoke 通过。
+- 已重新验证：FMG 18/18；PARAM 38/40 且 2 个失败；EMEVD 单一基线 1730 events / 33266 instructions；MSB 返回 `authority=candidate`。
+- 已重新验证：双模型 fake-server/Responses adapter smoke、safeStorage 源码契约和宽松性能 smoke；这些都不是桌面真实服务、DPAPI 人机或产品性能验收。
+- 已重新验证：private-native 与 section-28 在无环境时为 `skipped`；portable 仅 `pass-config` 且 electron-builder 未安装。
+- 已修正：第 42 节所有 partial/candidate/blocked/skipped/unverified 项恢复为 `[ ]`；README、Bridge README、模块地图和当前执行位置同步当前实现。
+- 新约束：`npm run test:progress-integrity` 阻止未完成证据被勾选；严格 private/section-28 gate 在 skip/partial 时非零退出，公开 CI 必须显式使用 `--allow-skip`。
+- 未验证：合法 Oodle/KRAK、完整发布 corpus、真实模型、Electron 人机、Playwright、签名发行、更新器、真实 Sekiro 启动。
+- 非声明：本记录只修复事实源和门禁，不把任何未完成 P2–P7 条目提升为 pass。
+
+### 2026-07-13：Oodle/KRAK 真实正向门禁收紧
+
+- 状态：`pass（门禁契约）；真实 KRAK 成功路径仍 blocked`
+- 根因：原私有 native 门禁在设置任一环境变量后只运行 Oodle 失败关闭测试；该测试即使完全没有合法运行库和 KRAK 成功解压，也可能以退出码 0 进入后续步骤，不能证明私有 native 正向能力。
+- 已实现：新增 `bridge:verify:oodle:real`，要求游戏根、fixture 根和 registry 同时存在；Oodle runtime 为可解压状态，并只从已通过路径/hash 校验、显式声明 `DCX-KRAK` + `dcx-document` 的条目读取 KRAK DCX，校验 source hash、payload hash 和解压尺寸。
+- 已实现：`test:private-native-gate` 的首步改为真实 Oodle/KRAK 门禁；缺任一环境变量时严格模式退出 2。只有三项私有环境变量全部未设置时，显式 `--allow-skip` 才可在公开 CI 以 `status=skipped` 退出 0；部分配置必须失败。
+- 已验证：`test:native-gate-contract` 覆盖真实门禁缺环境失败、private-native 严格/allow-skip/部分配置分流、registry schema/path/hash/套件完整性与路径脱敏、section-28 严格/allow-skip 分流；`bridge:verify:oodle:real` 在本机无合法环境时返回 `REAL_OODLE_ENVIRONMENT_REQUIRED` 且退出 2。
+- 未验证 / blocked：本机 Steam 库未安装 Sekiro，且未发现合法 `oo2core_6_win64.dll` 或私有 KRAK 语料，因此真实解压成功分支没有运行；P1 Oodle/KRAK 和 P2 KRAK/BND4 条目继续保持 `[ ]`。
+- 非声明：本批只消除门禁假绿，不证明 KRAK 重压、KRAK 内 BND4 corpus、完整 P1/P2 或 V0.5 完成。
+
+### 2026-07-13：私有语料绑定、BND4 file-backed 提取与 PARAM corpus 扩展
+
+- 状态：`pass（已列出的子能力）；P1/P2/P3 整体仍未完成`
+- 根因：私有门禁虽然接收 `SOULFORGE_NATIVE_FIXTURE_ROOT`，多个 runner 仍静默使用固定 `mods/...`；总门禁漏跑 DCX/BND4，且只看退出码会把 PARAM 失败样本和 MSB `candidate` 当通过。PARAM 40 项抽样还掩盖了大子项 Base64 超帧和第三种旧布局。
+- 已实现（后续已收紧）：native runner 统一通过 `nativeFixturePaths.ts` 解析输入；2026-07-15 起不再接受未登记显式路径、单独 role 路径或本地开发默认根，当前必须先校验 `SOULFORGE_NATIVE_FIXTURE_ROOT` + `SOULFORGE_NATIVE_FIXTURE_REGISTRY` 中的路径与 SHA-256。private gate 新增 DCX corpus、BND4 writer/transaction，并解析结构化 JSON，拒绝 `partial/candidate/blocked/skipped`、corpus failure 和非零退出。
+- 已实现：新增 daemon 命令 `extract-bnd4-child`。输入必须位于 allowed root，输出必须位于 main 注册的 `writableRoots`，同时校验容器 hash、子项 hash、原子暂存写入和重读 hash；大 PARAM 不再通过 NDJSON 内联 Base64 传输。
+- 已实现：PARAM parser 显式支持 `0x40/0x18` 长偏移布局，以及 `formatFlags=0x100/0x200` 的 `0x30/0x0C` header-embedded type name 布局；保留原始头部、行表到数据区间隙和非 ASCII 行名原始字节，禁止新增非 ASCII 名称时静默 ASCII 损坏。
+- 已验证：`bridge:build` 0 warning / 0 error；`bridge:verify:param` 对当前 `gameparam.parambnd` 138/138 子项无修改字节/语义往返、0 failure，旧布局 upsert→暂存→重读通过；`bridge:verify:bnd4-writer` 验证 file-backed 提取成功、越界输出被拒绝且原 `mods` 未产生文件。
+- 已验证：显式设置 `SOULFORGE_NATIVE_FIXTURE_ROOT` 后，BND4 writer/transaction、FMG 18/18、PARAM 138/138、EMEVD 1730/33266、MSB 5406 parts/1504 regions/64 events 均从该根运行；MSB 仍返回 `authority=candidate`。
+- 已实现：新增 `schemas/native-fixture-registry.schema.json`、registry loader/runner；严格门禁在 native 命令前校验 registry/root 安全边界、相对路径、真实文件、SHA-256、唯一 id/role、五类 primary role 与 DFLT/KRAK `dcx-document` 套件。DCX corpus 和真实 Oodle/KRAK runner 都按登记条目取证，报告只保留 fixture id/hash/variant/断言/诊断并限制证据条数。
+- 已验证：`test:native-gate-contract` 覆盖合法 registry、hash 不匹配、路径穿越、套件不完整、路径脱敏和部分环境配置拒绝；本地未登记开发 corpus 仍完整执行 214 个 DCX，144 DFLT、75 个嵌套 BND4/11344 条目通过，70 KRAK 因缺合法 Oodle 返回 `status=blocked`/退出 2，0 普通失败，报告未出现仓库或 `mods` 绝对路径。
+- 根因修复：Windows/Node 24 对 `spawn('npm.cmd', ..., shell=false)` 返回 `EINVAL`，导致配置齐全后严格门禁在首个子步骤崩溃。现由 `native-gate-process.mjs` 通过显式 `ComSpec /d /s /c npm.cmd` 启动固定 npm 子命令，并把同步/异步 spawn 错误收口为结构化 `spawnErrorCode`；契约测试实际执行 `npm --version` 锁住 Windows 启动路径。
+- 已验证：仓库外最小 registry 在 7 个真实本地 fixture 上完成路径/hash/套件校验；registry 模式 DCX 精确运行 1 DFLT + 1 KRAK，DFLT 和嵌套 BND4 109 条目通过，KRAK 因缺 Oodle 返回 `blocked`/退出 2。严格总门禁真实执行全部步骤：BND4 writer/transaction、EMEVD 1730/33266、FMG 18、PARAM 138/138 通过；Oodle/KRAK 失败、MSB `candidate` 被拒绝，总状态 `failed`/退出 1，输出和持久化报告均未泄漏 fixture/registry 路径。
+- 未验证 / blocked：合法 Oodle/KRAK 与 KRAK 内 BND4；完整发布 registry/PARAM corpus；原生 paramdef 字段级闭环；MSB 完整实体语义；四类资源完整三层回滚与真实游戏门禁。
+- 非声明：138/138 只代表当前选定 `gameparam.parambnd` 的 parser/无修改往返与已列 writer 断言，不等于 P3 PARAM 或完整发布 corpus 完成。
+- 完整回归：本批次最终 `npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、Bridge daemon/client、BND4 transaction 均退出 0；进度完整性仍为 15 checked / 36 unchecked。
+
+### 2026-07-13：PARAM 有界读取与用户派生字段暂存闭环
+
+- 状态：`pass（已列出的子能力）；原生 paramdef、专业 PARAM 编辑器与 P3 整体仍未完成`
+- 根因：原 `readParamDocumentViaBridge` 先让 Bridge 返回整份 rows/payload，再在 TypeScript 端用 `maxRows` 截断；大表仍会产生无界解析、Base64 和 NDJSON 帧压力。已有 `ParamDefDocument` 只做了宽松布局映射，字段 mutation 也没有绑定文档/行 hash、字段范围和暂存重读，不能作为可写语义闭环。
+- 已实现：`read-param-document` 在 Bridge 端执行 `rowOffset`/`rowLimit`（1..500）和 `rowId` 筛选，单页 payload 上限为 256 KiB；超限或调用方关闭 payload 时仍返回 row hash、分页元数据与结构化省略状态。桌面实时 PARAM 读取固定请求 100 行，字段写路径按 row ID 只读取目标行。
+- 已实现：用户派生 `paramdefLayout` 增加 schema/type/row size、字段与枚举唯一性、标量尺寸、对齐、范围、enum、default、bitfield 和位级重叠校验；严格编码 enum/min/max/整数/f32/fix/hex bytes，支持同一存储字节内互不重叠的 bitfield，并保持输入 Buffer 不变。
+- 已实现：`prepareParamFieldMutation` 校验定义来源边界、PARAM type/row size、旧 row hash、严格 Base64、payload hash 与字段字节范围，只产出完整 row payload；`commitParamFieldMutationViaBridge` 复用现有 `write-param` 暂存 writer，并按 row hash 重读确认。私有 registry 的 PARAM primary 增加 `param-field-staging-roundtrip`，严格门禁要求对应结构化证据存在；`registryDigest` 绑定规范化路径、文件 hash、authority、capability、assertion 与 role，验收语义变化不会沿用旧摘要。
+- 已验证：`npm run bridge:build`（0 warning / 0 error）、`test:paramdef-layout`、`test:param-field-mutation`、`test:param-read-pagination`、`bridge:verify:synthetic`、`test:native-gate-contract`、`npm run typecheck`、`npm test`、`npm run build` 均退出 0。
+- 已验证：当前登记 `gameparam.parambnd.dcx` 的 `bridge:verify:param` 仍为 138/138、0 failure；ActionGuideParam 的 fixture-only `u8@offset0` mutation 只改变 byte 0，经暂存 writer 重读 hash 一致，BND4 提交/回滚保持通过。配置完整但缺合法 Oodle 的严格私有总门禁仍按预期失败；其中 PARAM 步骤通过新增字段断言，Oodle/KRAK 与 MSB `candidate` 继续拒绝总门禁假绿。
+- 语料/许可盘点：当前 `mods` 与仓库外私有目录均没有 `.paramdef` 文件。上游 Paramdex 提供 Sekiro XML 定义但仓库未声明可依赖的许可证；SoulsFormatsNEXT 为 GPL-3.0。按“外部工具只作行为对照、不复制源码、不作为核心运行依赖”约束，本批没有导入其代码或定义，也没有用 XML/fixture 冒充原生 `.paramdef` 完成。
+- 未验证：原生 `.paramdef` 二进制 parser、官方字段名/类型/数组语义、用户派生包签名、字段表 UI 接线、批量/公式/preview/diff、完整发布 registry、KRAK、真游戏 section-28。
+- 非声明：fixture-only `u8@offset0` 只验证类型化 mutation 与安全写入管线，不赋予该字节官方语义；138/138 仍不等于完整 P3 PARAM；服务端分页不等于双向虚拟化专业表格完成。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked，未提升任何 P3/P5/P7 完成项。
+
+### 2026-07-13：EMEVD DFLT corpus、事件/instruction 身份、参数替换与 operation 回滚
+
+- 状态：`pass（已列出的 DFLT 子能力）；KRAK、非零 layer、完整 EMEDF/类型转换、除 restBehavior 外的 resource-entry/完整三层回滚与 P3 整体仍未完成`
+- 根因：既有 EMEVD 证据只有手工解压后的 `common.emevd` 单文件，桌面 `read-emevd-document` 实际会把 `.emevd.dcx` 直接交给 raw-only parser；事件复制与重排没有真实 corpus 断言，桌面 IR 又把事件 ID 当唯一身份。真实 `common.emevd` 还证明 ID 可以重复，因此 ID-only 查找会产生歧义或误改风险。后续审计又发现 GC 只保留 parameter 原始区段而不解析 event-local instruction 引用，也没有 instruction 增删、复制、重排入口；直接移动 instruction 会让 parameter substitution 指向错误目标。
+- 已实现：`EmevdNativeDocument` envelope 返回 `eventIndex`；事件 mutation 用 `expectedSourceHash + eventIndex + expected eventId` 绑定外层输入修订内身份。未提供 index 时仅允许唯一 ID；重复 ID、索引越界或 index/ID 不匹配均结构化失败关闭。新增 `reorder_event`，源事件和锚点事件都必须绑定 index/ID。
+- 已实现：新增 `EmevdNativeSource`，统一识别 raw `EVD` 与 DCX-wrapped EMEVD；envelope 明确分离外层 `sourceHash/sourceSize` 和内层 `documentHash/documentSize`。writer 对 raw/DFLT 重建并只写暂存区，KRAK 写入失败关闭；落盘后同时重读外层容器与内层文档，并要求二者字节与已验证重建结果一致。写入前置字段改为语义准确的 `expectedSourceHash`；旧 `expectedDocumentHash` 仅作兼容别名，两者冲突时失败关闭。四视图 envelope 映射、共享 IR、唯一事件 URI、core Bridge 提交和桌面实时提交均保留 `eventIndex`，重复 ID 事件不再共享同一 URI。
+- 已实现：完整读取每个事件的 parameter substitution，严格验证 event-local instruction index、目标参数字节范围和非负 source offset；重建时保存其原始字段和顺序。新增 `add_instruction`、`delete_instruction`、`duplicate_instruction`、`reorder_instruction`；除 `expectedSourceHash` 外都强制绑定 `eventIndex + eventId + instructionIndex + expected bank/id`，重排锚点也绑定局部索引和 bank/id。插入/删除/重排按映射更新 substitution index，复制 instruction 同步克隆其 substitution；错误身份失败且不产生暂存文件。非零 layer 尚未解析，读取即失败关闭，不能进入会丢 layer 的 GC。
+- 历史根因修复：共用 `nativeFixturePaths.ts` 曾按错误层级计算默认 `mods` 根；该默认回退已在 2026-07-15 的严格 registry 收口中完全移除。当前无 registry/root 的 native runner 必须失败关闭，不能再把历史默认路径当作支持的运行方式。
+- 已实现：新增 registry 驱动的 `bridge:verify:emevd:corpus`，逐条校验 fixture hash/authority/assertions；严格私有门禁运行该 corpus 及 `bridge:verify:emevd:transaction`。10 个 DFLT EMEVD 条目绑定直接 DCX 读取、暂存/重读、无修改内层字节/语义往返、rest、定长/变长 args、事件与 instruction 增删、复制/删除、重排/逆操作和 `layerCount=0` 断言；`common` 额外绑定重复 ID 歧义拒绝、索引定向写入和 operation rollback，`common_func` 额外绑定 parameter substitution 重映射/克隆。registry 现有 16 项摘要为 `fc6c4d8e26c1c888258a822920475f0bb0b3574fb8f5a2ddc2a63f674fd1101f`。
+- 已验证：10/10 DFLT-wrapped EMEVD，合计 9696 events / 126562 instructions；10/10 instruction 身份冲突拒绝、add/delete、duplicate/delete、reorder/inverse 断言通过并恢复原始内层 `documentHash`。`common_func` 的事件 `20202019`（38 条 substitution）验证插入/重排时 event-local index 重映射，复制一条带 substitution 的 instruction 时克隆 1 条，删除/逆操作后仍精确恢复原始 hash。zlib 重压均保持 payload/variant，但 `containerByteIdenticalCount=0`，不得把语义逆操作声明成外层字节回滚。新 `expectedSourceHash`、旧别名和双字段冲突拒绝均有真实写入断言。只有 `common` 出现重复 ID：事件 ID `88881000` 有 2 项；无 index 写入返回 `EMEVD_STAGING_WRITE_FAILED` 且不创建暂存文件，index 定向写入只改变目标项，逆操作恢复原始内层 hash。
+- 已验证：`common.emevd.dcx` 经 Bridge 暂存、PatchIR whole-file 提交、提交后重读和 operation rollback 后，事务备份精确恢复原始外层 DCX 字节，原 fixture 保持只读未改；后续单独新增的 `restBehavior` resource-entry 回滚证据见下节，不能反向解释为其他 mutation 已覆盖。
+- 已验证：`bridge:build` 0 warning / 0 error；`test:emevd-envelope-map`、`test:emevd-four-view`、`test:emevd-ipc-contract`、`test:desktop-live-editor-contract`、`npm run typecheck`、`npm test`、`bridge:verify:synthetic`、`npm run build`、`test:native-gate-contract`、`test:progress-integrity` 与 `git diff --check` 均退出 0。
+- 已验证门禁边界：配置完整的严格私有门禁按预期退出 1；其中 EMEVD corpus 10/10、FMG、PARAM、BND4 步骤通过，Oodle/KRAK blocked 且 MSB 仍为 `candidate`，总门禁没有假绿。
+- 本次重新验证：`bridge:build` 0 warning / 0 error；`test:emevd-ipc-contract`、默认路径 `test:native-emevd`、`bridge:verify:emevd:transaction`、10-file `bridge:verify:emevd:corpus`、`npm run typecheck`、`npm test`、`bridge:verify:synthetic` 和 `npm run build` 均退出 0。当前机器未配置且常见安装位置未发现真实 `SOULFORGE_SEKIRO_GAME_ROOT`；只提供 registry/fixture root 的严格门禁按设计以 partial environment 退出 2，本次没有用无关目录伪造游戏根，也没有把它写成完整配置门禁结果。
+- 未验证 / blocked：33 个 KRAK EMEVD 因无合法 Oodle runtime 未解析；10 个 DFLT 样本的 `layerCount` 全为 0，非零 layer parser/writer 没有证据；完整 EMEDF schema、instruction 类型转换、发布剩余变体、除 `restBehavior` 外的 resource-entry/完整三层回滚、专业四视图人机与真实游戏加载仍未完成。
+- 非声明：当前 `native-verified` 只适用于登记 DFLT corpus 上已经绑定的具体 EMEVD 断言；不代表全部 EMEVD 变体、完整 P3 或 V0.5 完成。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked，未勾选 P3 EMEVD。
+
+### 2026-07-13：PatchIR 1.0 typed semantic contract 与有界 inverse payload
+
+- 状态：`pass（协议类型与运行时失败关闭校验）；后续仅 EMEVD restBehavior 接入一个 production semantic writer 与 entry inverse，第 13 节完整闭环仍未完成`
+- 根因：生产 PatchIR 没有顶层 schema version，node/edge payload 仍可接受 `unknown`，也没有 reorder、convert、asset import 和精确 inverse 的统一类型；运行时校验只覆盖少量 writer 门禁，无法阻止旧 payload、错误资源集合、低报风险或被篡改的 preserved snapshot 进入后续事务。
+- 已实现：`PATCH_IR_SCHEMA_VERSION='1.0.0'` 并由 `createPatchIr`、旧 `PatchProposal` adapter 和现有直接构造入口统一写入。新增 `resource_node_reorder`、`resource_node_convert`、`asset_import_replace`；field/node/edge payload 按 resource kind 使用 discriminated typed schema，field 绑定 document revision/schema/layout/hash/writer，所有 semantic shape 携带结构化 inverse，生产 `nodePayload?: unknown` / `edgePayload?: unknown` 已移除。`synthetic_resource_edit.payload: unknown` 只保留在显式测试操作中，不作为 production semantic payload。
+- 已实现：preserved node/args 使用带 SHA-256 与字节数的 `BinaryContentRef`。内联内容上限 256 KiB 并验证 canonical Base64、实际长度和 hash；更大 payload 必须引用 content-addressed `staging_object`，避免把无界 Base64 固化进 PatchIR/operation log。纯 IR 校验只验证 staging object 引用形状，实际 writer 仍必须在暂存区重验 object id、size 和 hash。
+- 已实现：`validatePatchIr(unknown)` 对 null、非对象、未知 operation、错误 schema version、非法 typed value/snapshot/inverse、资源种类或身份不一致、重复/空 reorder、无效 convert、asset staging object 重复、`affectedResources` 与操作派生集合不一致、声明风险低于派生风险等情况结构化失败关闭，不因畸形输入抛出未处理异常。semantic/asset 操作必须声明 authority writer 元数据；事务执行仍通过 writer registry 解析真实 writer，IR 自报 `writerId` 不能授予写权限。
+- 已验证：`npm run test:patch-ir-schema -w @soulforge/core` 覆盖 typed field update、node update/reorder/convert、asset replace、内联 snapshot、400000-byte staging reference、超限内联拒绝、旧 arbitrary `nodePayload` 拒绝、snapshot 篡改拒绝、缺 writer authority、错误版本、畸形根/operation、资源集合不一致和风险低报。测试还确认 typed IR 验证本身不等于 production writer coverage。
+- 完整回归：`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 均退出 0；desktop build 重新构建 Electron 43 的隔离 `better-sqlite3` binding 后成功。
+- 未验证 / 未完成：TypeBox/Ajv 共享 runtime schema；旧持久 PatchIR 的版本迁移和 operation log 原 schema/升级结果记录；EMEVD 其余 field/node、FMG/PARAM/MSB/asset 的 production authority writer 与 inverse；资产导入链改用 `asset_import_replace`。当前资产写回仍走已验证的安全 `file_replace` 主干。
+- 非声明：版本化 typed PatchIR 本身只证明协议可表达、拒绝明显畸形数据和阻断未注册 writer；新增单字段 writer 也不证明完整 EMEVD、其他语义格式、完整 resource-entry rollback 或第 13 节整体完成。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked，本批不勾选任何 P3/P4/P5 完成项。
+
+### 2026-07-13：EMEVD restBehavior production semantic writer 与 resource-entry 回滚
+
+- 状态：`pass（仅 restBehavior typed field 子能力）；其他 EMEVD mutation、其他语义格式和完整三层回滚仍未完成`
+- 根因：桌面 EMEVD mutation 虽由 Bridge 写入暂存区，提交时仍退化为 whole-file `file_replace`；`durablePatchCommit` 又把原生逆操作捕获硬编码在 BND4 分支，`WriterAdapterContract` 没有 inverse hook。因此操作日志只能恢复整文件，不能证明 semantic PatchIR、字段级持久 inverse 或 resource-entry 新事务真实存在。
+- 已实现：`WriterAdapterContract.captureInverse` 成为结构化 writer contract；`durablePatchCommit` 在同一 writer 完成暂存后、目标文件替换前统一捕获 inverse，要求每个 `resource_*`/asset/native BND4 operation 都有精确 coverage，缺 hook、缺映射、重复 ID 或捕获诊断均在目标写入前失败关闭。原生 BND4 捕获迁入其 writer，未保留第二套提交旁路。
+- 已实现：新增仅接受 EMEVD event `restBehavior` 的 `writer:emevd-semantic-v1`。PatchIR 绑定外层 `sourceHash`、内层 `documentHash`、document revision、schema/version/layout fingerprint、`eventId + eventIndex`、精确 previous typed value、writer authority 和主进程确认凭据；Bridge 是唯一 parser/rebuilder，writer 只能写事务暂存区。before/staged/after-commit 均通过 Bridge 重读，提交后语义不一致会触发事务自动恢复。
+- 已实现：暂存后 inverse 同时绑定 forward 后的外层/内层 hash 和 revision，并将 before/after typed value hash、field URI、完整反向 `resource_field_edit` 写入 `resource_entry_changes`。`rollbackResourceEntry` 先校验 entry 身份、文件 afterHash、typed value hash、schema/writer/hash 前置条件，再创建新的高风险 PatchIR 事务；旧 operation 保持不可变。
+- 已实现：桌面 `resource.applyEmevdMutation` 仅把 `set_rest_behavior` 切到 typed semantic commit；`set_instruction_args`、事件/instruction CRUD/重排等仍保留 Bridge 暂存 + whole-file raw fallback，直到各自具备精确 inverse，不冒充已迁移。
+- 已验证：`npm run typecheck`、`npm run bridge:build`、`npm run test:emevd-ipc-contract`、`npm run test:patch-ir-schema -w @soulforge/core`、`npm run bridge:verify:emevd:transaction`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:progress-integrity` 与 `git diff --check` 均退出 0。真实 `common.emevd.dcx` 临时覆盖层 smoke 同时验证：无确认时不创建 operation/不写文件；原 whole-file operation rollback 精确恢复外层 DCX 字节；typed `restBehavior` commit 被重读；恰好一条 `field_update` inverse 被持久化并绑定提交后的外层/内层 hash；resource-entry rollback 无确认失败关闭，确认后创建新事务并恢复原始内层 `documentHash`；原 fixture 未改。
+- 证据边界：DFLT zlib 重压不保证外层容器字节一致，因此 semantic resource-entry rollback 只声明恢复原始内层文档 hash 和字段值；外层字节精确恢复仍由 operation/file backup rollback 证明。required validator 的全局注册/coverage 约束已在后续记录验证；仍未验证 KRAK、非零 layer、其他 field/node、完整 EMEDF/类型转换、FMG/PARAM/MSB semantic writer、旧 PatchIR 版本迁移、专业桌面人机与真实游戏加载。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked；P3 EMEVD 与 P3 resource entry rollback 均保持未勾选。
+
+### 2026-07-13：required validator 注册与 operation 覆盖强制执行
+
+- 状态：`pass（事务级执行约束）；不新增格式 authority 或阶段完成项`
+- 根因：`validatorRequirements` 原本只是 PatchIR 声明，`WorkspaceTransaction` 会无条件调用注册实例，却不证明 required validator 已注册、ID 唯一、实现声明阶段或实际检查了声明它的 operation。事务还忽略 `ValidatorResult.ok`，validator 抛异常会逃出事务，`ok=false` 且无 error diagnostic 可能被当成成功；`whole_file_replace` 甚至声明 `staged_output` 却没有对应方法。历史 smoke 中不存在的 `text_non_empty` 因此长期未被发现。
+- 已实现：PatchIR 运行时拒绝畸形/重复 validator requirement，并禁止 required `scope=any`。`addPatch` 在创建暂存区前检查 validator ID 全局唯一、required ID 已注册、scope 已声明且具体方法存在，任何缺口返回稳定结构化诊断并失败关闭。
+- 已实现：`ValidatorResult` 增加实际检查的 `validatedOperationIds`。事务按 patch/validator/具体阶段计算 required operation 集合，拒绝 coverage 缺失、部分覆盖、重复/未知 operation ID、伪造 validator ID/scope、畸形 result/diagnostics，以及 `ok=false` 无错误诊断；validator 抛异常只记录脱敏错误类型，after-commit 阶段仍进入自动恢复。内置 text/raw/file-risk/whole-file/container/EMEVD validators 均返回实际 operation coverage，`whole_file_replace` 补齐 staged 输出绑定与内容一致性校验。
+- 定向验证：`test:validator-requirements` 覆盖 required `any`、缺注册、重复 ID、scope/方法不一致、结果身份伪造、畸形结果、单项/部分 coverage、无诊断失败、after-commit 抛异常恢复原字节和完整 coverage 成功提交。
+- 回归中发现并修复：第一次根级 `npm test` 在最终 database utility smoke 真实失败，诊断为 `REQUIRED_VALIDATOR_NOT_REGISTERED`；根因是桌面 journal smoke 仍声明不存在的 `text_non_empty`。改为实际注册的 `text_file` 后，`test:database-utility` 与根级 `npm test` 重新通过；core 文件回滚 smoke 中同一旧 ID 也已同步修正。
+- 已验证：`npm run typecheck`、`npm run test:validator-requirements -w @soulforge/core`、`npm test -w @soulforge/core`、`npm run bridge:verify:emevd:transaction`、`npm run bridge:verify:bnd4-transaction`、`npm run test:database-utility` 与修正后的根级 `npm test` 均退出 0。真实 EMEVD smoke 保持 typed resource-entry rollback 恢复原始内层 hash；真实 BND4 smoke 保持五类 mutation、operation/resource-entry rollback 和 operation 回滚外层字节一致。
+- 未验证 / 非声明：coverage 只证明 validator 对声明 operation 的执行范围，不证明 validator 算法或格式 authority 本身正确；writer `postValidate`、剩余 EMEVD/FMG/PARAM/MSB semantic writers、KRAK、完整发布 corpus 和真实游戏门禁仍未完成。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked，本批不勾选任何 P2/P3/P7 完成项。
+
+### 2026-07-13：原生结构化 writer postValidate 执行闭环
+
+- 状态：`pass（writer staged-output 执行约束）；不新增格式 authority 或阶段完成项`
+- 根因：交接书要求所有原生 writer 实现 `postValidate`，但 `WriterAdapterContract.postValidate` 原为 optional 且事务从未调用；结果也没有 writer 身份或 operation coverage。`applyToStaging`/`postValidate` 抛异常会逃出事务，writer 返回 `ok=false` 且无 error diagnostic 时又可能留下没有根因的失败结果。
+- 已实现：`WriterPostValidateResult` 绑定 `writerId`、实际 `validatedOperationIds` 与结构化 diagnostics；`WorkspaceTransaction.stage` 在原生结构化 operation 上先检查 hook 存在，再在 `applyToStaging` 成功并建立显式 `opId → stagingPath` 映射后执行。缺 hook 在 apply 前失败；身份伪造、畸形结果、重复/未知/缺失 coverage、无诊断失败与异常都转换为脱敏结构化错误，目标文件尚未进入备份/替换阶段。
+- 已实现：原生 BND4 writer 的 postValidate 复用 `ContainerRoundTripValidator` 的 Bridge staged 重读与 mutation 断言，并优先使用 writer 返回的精确 mapping，不复制 parser。EMEVD `restBehavior` writer 对每个 operation 重新读取 staged DCX/文档，校验 event occurrence、typed value、schema 与 layout 后才返回 coverage；后续 inverse 捕获仍发生在 postValidate 成功之后、目标替换之前。
+- 附带根因修复：`applyToStaging` 抛异常现在返回 `WRITER_APPLY_EXECUTION_FAILED`，`ok=false` 无 error diagnostic 返回 `WRITER_APPLY_REPORTED_FAILURE`；异常消息/堆栈不进入诊断。
+- 定向验证：`test:writer-post-validate` 覆盖缺 hook 且 apply 未执行、apply 抛异常/静默失败、postValidate 抛异常、身份伪造、畸形 diagnostics、coverage 缺失和完整 coverage 暂存成功。
+- 已验证：`npm run typecheck`、`npm run test:writer-post-validate -w @soulforge/core`、`npm run bridge:verify:emevd:transaction` 与 `npm run bridge:verify:bnd4-transaction` 均退出 0；真实 EMEVD typed commit/resource-entry rollback 和真实 BND4 五类 mutation/两级回滚保持原有断言。
+- 完整回归：最终 `npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:progress-integrity` 与 `git diff --check` 均退出 0。
+- 未验证 / 非声明：postValidate coverage 只证明 writer 已执行 staged-output 检查，不单独赋予格式 authority；FMG/PARAM/MSB production semantic PatchIR writer、EMEVD 其余 mutation、asset native converter、KRAK、完整发布 corpus 和真实游戏门禁仍未完成。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked，本批不勾选任何 P2/P3/P4/P7 完成项。
+
+### 2026-07-13：FMG 已有条目 text production semantic writer 与精确槽位回滚
+
+- 状态：`pass（仅 raw FMG 已有条目 text typed field 子能力）；P3/P5 FMG 与完整 resource-entry rollback 仍未完成`
+- 根因：Sekiro FMG 允许重复 ID；旧桌面与 Bridge `upsert(id)` 会同时改写同 ID 的所有槽位，renderer 也用 ID 作为 React key/选择身份。该路径只能做整表/整文件变更，既不能证明只修改目标 occurrence，也不能为单个条目生成可信 inverse。
+- 已实现：FMG envelope 增加 `documentHash`、document revision、schema/version/layout fingerprint 和连续 `stringIndex`；Bridge 新增仅修改已存在槽位的 `set_text(entryId, stringIndex)`，要求两种身份同时匹配，并限制单条 UTF-16 文本为 1 MiB、重建文档为 32 MiB。TypeScript 对 Bridge envelope 的文档绑定、条目类型、连续槽位和 entryCount 做运行时失败关闭校验。
+- 已实现：新增 `writer:fmg-semantic-v1`、`fmg_semantic` validator 与 `commitFmgEntryTextThroughPatchIr`。PatchIR 绑定 source/document hash、revision、schema/layout、`entryId + stringIndex`、精确 previous/next string typed value、writer authority 和主进程确认凭据；before/staged/after-commit、writer `postValidate` 与 inverse capture 均经 Bridge 重读，缺 coverage 或身份/值不一致时在目标替换前失败关闭。
+- 已实现：writer 在暂存后生成反向 `resource_field_edit`，绑定 forward 后 hash/revision 和 typed value hash并持久化到 `resource_entry_changes`；`rollbackResourceEntry` 创建新的高风险 PatchIR 事务。桌面已有条目编辑走 typed 路径，renderer 用 `stringIndex` 选择/渲染重复 ID，并从逐按键写入改为本地编辑后显式提交、按新 source hash 重建面板；新增与删除继续保留 Bridge 暂存 + whole-file raw fallback，不冒充已迁移。
+- 已验证：`npm run bridge:build` 为 0 warning / 0 error；`npm run typecheck`、`test:fmg-msb-ipc-contract`、`bridge:verify:fmg` 与新增 `bridge:verify:fmg:transaction` 均退出 0。真实 `item.msgbnd.dcx` 子项验证 typed 提交、其他 199 个槽位不变、writer postValidate、恰好一条持久 inverse、无确认失败关闭、resource-entry rollback、operation backup rollback 和原 fixture 未改；微小合法构造的重复 ID fixture 只用于验证 `stringIndex` 槽位隔离，不新增 native authority。
+- 证据边界：真实样本的无修改 FMG rebuild 为语义一致但非字节一致，因此 resource-entry rollback 只声明恢复全部条目 ID/text 语义；精确字节恢复由 operation backup rollback 证明。本批未实现 msgbnd 内部字段的单事务写入/回滚，真实 typed writer 目标仍是已抽取或 Mod 工作区中的 raw `.fmg`。
+- 未验证 / 非声明：FMG add/delete/reorder/类型转换的 typed node operation、嵌套 msgbnd 字段事务、完整发布 corpus、KRAK、PARAM/MSB semantic writer、专业工作台人机与真实游戏加载仍未完成；不得据此勾选 P3 FMG、P3 resource entry rollback 或 P5 FMG。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked。
+
+### 2026-07-14：FMG 槽位级 delete production semantic writer 与精确 insert inverse 回滚
+
+- 状态：`pass（仅 raw FMG 槽位级 delete typed node 子能力）；P3/P5 FMG、id-wide 增删/重排与完整 resource-entry rollback 仍未完成`
+- 根因：桌面/Bridge 旧 `delete(id)` 会移除同 ID 的全部槽位，只能走 whole-file raw fallback；无法为重复 ID 中的单个 occurrence 生成可信 inverse，也不能证明只删除目标槽位。
+- 已实现：Bridge `delete` 在提供 `stringIndex` 时仅移除匹配 `entryId + stringIndex` 的单个槽位；新增 `insert(stringIndex, id, text)` 作为 delete 的精确位置逆操作。无 `stringIndex` 的 id-wide delete 与 append-only `add` 仍保留给未迁移路径。
+- 已实现：`FmgEntryNodePayload.stringIndex` 成为 PatchIR 必填身份；`commitFmgEntryDeleteThroughPatchIr` 生成 `resource_node_delete`，绑定 source/document hash、revision、schema/layout metadata、`entryId + stringIndex`、UTF-16 文本 snapshot/`expectedNodeHash`、writer authority 与高风险确认。writer `postValidate` 与 before/staged/after-commit Bridge 重读缺 coverage 时在目标替换前失败关闭。
+- 已实现：writer 在暂存后捕获反向 `resource_node_add`（Bridge `insert`），持久化恰好一条 `node_delete` 的 `resource_entry_changes`；`rollbackResourceEntry` 校验 afterHash/node hash 后创建新的高风险 PatchIR 事务恢复全部槽位语义。桌面 `delete + stringIndex` 走 typed 路径；无 `stringIndex` 的 id-wide 删除与新增仍保留 Bridge 暂存 + whole-file raw fallback。
+- 已验证：`npm run bridge:build` 0 warning / 0 error；`npm run typecheck`、`test:fmg-msb-ipc-contract`、`bridge:verify:fmg`、`bridge:verify:fmg:transaction`、`npm test`、`bridge:verify:synthetic`、`npm run build`、`npm run test:progress-integrity` 均退出 0。真实 `item.msgbnd.dcx` 子项验证：无确认 fail-closed；typed 槽位删除使 entryCount-1 且前后槽位语义正确；恰好一条 `node_delete` inverse；resource-entry rollback 恢复全部条目 ID/text；operation backup rollback 精确恢复外层字节；原 fixture 未改。
+- 已验证（强槽位移位合同）：writer/validator 的 after-delete 校验改为与 Bridge 一致的 `entryCount-1` + 前置槽位相等 + 后移槽位 `before[i+1]` 相等，并在 PatchIR metadata 绑定 `beforeEntries`；合成 typed 路径覆盖同 ID 异文、同 ID 同文（删第 0/第 1 槽）的 `commitFmgEntryDeleteThroughPatchIr` + postValidate + resource-entry rollback 恢复顺序，不再用“目标槽位仍是同 id+text”弱启发（该启发会在重复同文邻居前移时假失败）。不新增 native authority。
+- 证据边界：无修改 FMG rebuild 语义一致但非字节一致，因此 resource-entry rollback 只声明恢复全部条目 ID/text 语义；精确字节恢复由 operation backup rollback 证明。本批未实现 msgbnd 内部字段的单事务写入/回滚，真实 typed writer 目标仍是已抽取或 Mod 工作区中的 raw `.fmg`。
+- 未验证 / 非声明：FMG typed add/reorder/类型转换、id-wide delete 的精确 inverse、嵌套 msgbnd 字段事务、完整发布 corpus、KRAK、PARAM/MSB semantic writer、专业工作台人机与真实游戏加载仍未完成；不得据此勾选 P3 FMG、P3 resource entry rollback 或 P5 FMG。`bridge:verify:oodle:real` 在本机缺三项私有环境变量时返回 `REAL_OODLE_ENVIRONMENT_REQUIRED`（退出 2），不得解释为 KRAK 完成。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked。
+
+### 当前执行位置（2026-07-17）
+
+- `P0`：已完成并通过当前工作树回归。
+- `P1`：SQLite/Bridge transport 基础已完成；Oodle/KRAK 真实成功路径仍 blocked（缺合法 runtime + registry）。
+- `P2`：DFLT-BND4 子集可运行；BND4 公共 authority 仍为 `candidate`；KRAK 内 BND4 blocked。
+- `P3`：FMG raw `text`/`delete`/`insert`/`reorder`、EMEVD `restBehavior`/`instruction args`/空事件 `add`/既有非空事件 `delete`/`duplicate`/事件完整顺序 `reorder`/Bridge-authored 零参数 instruction `add`/既有 instruction `duplicate`/`delete`/`reorder`、PARAM 用户派生字段、MSB part/region 位置均有 typed entry rollback；MSB authority 仍 candidate；KRAK/完整 corpus 未完成。
+- 下一项优先：先跑通 `npm run test:context-broker` / `test:ai-fake-loop` / `typecheck`；其后 dual registry 物理合并、fullPermission 撤销 UI 与真实双 provider smoke，以及 KRAK/Oodle 环境、MSB authority、EMEVD EMEDF/类型转换、FMG 类型转换/嵌套 msgbnd。不得假绿。
+
+### 2026-07-15：P6 app.db AI authority、plan grant、run audit 与 retention
+
+- 状态：`pass（app.db authority/repository 子能力）；P6 Context Broker、真实服务与完整历史 UI 仍未完成`
+- 根因：app.db v1 虽建有 `model_services`/`permission_grants`/`ai_conversations`/`ai_messages` 表，但没有 repository 或 utility RPC；桌面 JSON vault 仍是配置/密文权威，`ai.runModel` 结果也未持久化。app.db 未启用本节要求的 `synchronous=FULL`/`secure_delete=ON`，无法满足含 AI 明文历史的数据策略。
+- 已实现：新增 app migration 2，在不改写已应用 migration 的前提下补齐 message expiry/redaction/provider id、agent runs/steps、tool calls、outbound context items 与 app settings。`openAppDatabase` 明确启用 `synchronous=FULL` 和 `secure_delete=ON`。新增 `AppDataRepository`，事务化提供模型服务密文记录、versioned plan grant、完整 agent run graph、30 天 expires_at 清理与 WAL checkpoint。
+- 已实现：utility protocol 升级到 1.2.0，增加 app-only 初始化和全部 app repository RPC；模型服务设置无需先打开 Mod 工作区。safeStorage 继续只负责 DPAPI encrypt/decrypt，配置和 ciphertext 权威迁入 app.db；旧 JSON vault 严格校验、批量事务导入并归档，损坏/未知 secret id 失败关闭。renderer 仍只见 `hasCredential`，无法调用 `resolveApiKey`、提交 mode 或读取密文。应用 ready 时执行一次 retention cleanup，并以 unref 的 24 小时间隔每日重跑。
+- 已实现：`ai.runModel` 要求 app.db 中 policy version 匹配的 plan grant（首次由 main 权威创建 read/analyze/propose scope），完成后把已脱敏 messages、steps、tool audit 与 outbound workspace-session 摘要原子写入 app.db，并触发过期历史清理。当前仍固定 plan mode，renderer 不能持久提升权限。
+- 已验证：`test:v05-sqlite` 覆盖 app migration 2、FULL/secure_delete、配置 CRUD、grant version fail-close/revoke、run graph 原子写入、30 天级联清理和 checkpoint；`test:database-utility` 覆盖 app-only handshake、app/workspace 两库、repository RPC 与 utility 强制重启持久化；`test:model-service-vault-contract`、`test:vault-encrypt-contract`、`test:vault-ipc-contract`、`typecheck` 均退出 0。
+- 未验证 / 非声明：旧 JSON vault 真机 DPAPI 迁移往返、历史浏览/手动清理 UI、完整 Context Broker 逐项 outbound context、provider response id/usage 采集、真实双 provider 成功 smoke、fullPermission grant 生命周期和唯一 registry 物理合并仍未完成；P6 检查项保持未勾选。
+
+### 2026-07-15：桌面双模型服务计划模式生产调用与 policy 根因修复
+
+- 状态：`pass（main-only 凭据解析 + desktop plan-mode 调用子能力）；P6 完整生产 Agent 仍未完成`
+- 根因：桌面只有模型服务 safeStorage 设置面板，AI 侧栏对非 mock provider 恒返回 `notConfigured`；已通过 fake server 的 adapters/agent loop 没有 production caller。与此同时 `maxPermissionForMode('plan')` 错误返回 `validate`，scaffold smoke 还明确允许计划模式 stage/validate，违反第 4/23 节“计划模式不得暂存或执行”的硬边界。agent loop 又按工具名称硬编码 plan allowlist，与现有 registry 名称不一致，不能作为唯一 typed policy。
+- 已实现：计划模式权限上限从 `validate` 收紧为 `propose`，scaffold policy smoke 改为强制拒绝 `patch.stage` 和 `patch.validate`。model-service `ToolDefinition` 增加 typed permission；agent loop 按 registry definition 的 permission 裁定 plan 模式，只允许 read/analyze/propose，不再按名称白名单猜权限。
+- 已实现：新增 main-only `ai.runModel` IPC。main 从 safeStorage vault 按 config id 解密 API key，按 protocol 创建 OpenAI-compatible Chat Completions 或 Anthropic-compatible adapter，复用现有 `runAgentToolLoop` 与桌面当前 tool registry；renderer 只传 config id 和用户目标，永远不接收 key、mode 或绝对路径。当前 main 权威 mode 固定为 plan，system message 和 policy gate 双重禁止 stage/validate/commit/rollback。模型服务设置面板可对有凭据的配置发起计划模式调用并显示最终 assistant 文本或结构化诊断。
+- 已验证：`npm run typecheck`、`test:vault-ipc-contract`、`test:ai-fake-loop`、`test:v05-foundation`、`test:v05-architecture` 均退出 0。fake 双 provider tool loop 继续验证 secret redaction、provider isolation、完全权限不能绕过 Patch Engine 和 evidence gate；新增 IPC contract 确认 `ai.runModel` 存在、`resolveApiKey` 只在 main 调用且未暴露为 IPC/preload。
+- 未验证 / 非声明：桌面真实 OpenAI/Anthropic 成功 smoke、OpenAI Responses API surface 选择、Anthropic 真 SSE、完整 Context Broker/outbound audit、持久 fullPermission、取消/流式 UI 与唯一 registry 物理删除仍未完成；后续 app.db authority/grant/history/retention 已在同日下一条实施记录补齐，但不覆盖上述剩余项。P6 各检查项保持未勾选。
+
+### 2026-07-15：unsigned Windows unpacked 真打包、产物审计与窗口启动
+
+- 状态：`pass（unsigned win-unpacked）；portable EXE/NSIS/签名/更新器仍 blocked/unverified`
+- 根因：原 `test:portable-packaging-gate` 只检查配置，且可选命令同时传 `--win portable --dir`，实际仍会触发 NSIS portable target；报告即使跳过真打包也只能返回 `pass-config`，不能证明产物存在。首次真打包还暴露 GitHub release asset 下载 Electron、winCodeSign 与 NSIS 时反复 EOF。
+- 已实现：真打包模式复用已安装的 `node_modules/electron/dist`，以 `win.signAndEditExecutable=false` 明确构建本地 unsigned `win-unpacked`，不把本地验证混同正式签名流程。门禁在构建后递归审计 `SoulForge.exe`、`resources/app.asar`、Electron ABI `better_sqlite3.node`，并拒绝 `mods/`、Oodle DLL 和明显 secret/API-key 文件；报告区分 `pass-config` 与 `pass-unpacked`，固定记录 portable EXE/NSIS/签名/updater 非声明。Windows 启动 npm/npx 不再使用 `shell:true`，改为显式 `ComSpec /d /s /c`，消除 Node `DEP0190` 参数拼接风险。
+- 已验证：`SOULFORGE_PORTABLE_PACK=1 npm run test:portable-packaging-gate` 返回 `status=pass-unpacked`；真实产物含 247 个文件，EXE/ASAR/SQLite binding 均存在，禁止路径为 0。直接启动 `release/win-unpacked/SoulForge.exe` 后进程存活、主窗口建立且标题为 `SoulForge`，随后主动终止验证进程。release content 静态扫描同时通过。
+- 已尝试但失败：直接 portable target 已进入 `SoulForge-0.0.0-portable.exe` 构建阶段，但下载 NSIS 3.0.4.1 时 GitHub release asset EOF；启用本地 Electron 前下载 150 MB runtime EOF，启用本地 Electron 后下载 winCodeSign 2.6.0 同样 EOF。没有将这些外部下载失败写成 portable/installer 通过。
+- 未验证 / 非声明：portable 单文件 EXE、NSIS 安装/升级/卸载、应用图标、代码签名、签名更新 manifest、electron-updater、干净机安装、降级拒绝仍未完成；P7 installer/signing/updater 和最终 V0.5 保持未勾选。
+
+### 2026-07-15：MSB region 位置 production semantic writer 与 entry 回滚
+
+- 状态：`pass（仅 region position typed field 子能力）；P3 MSB authority 仍为 candidate`
+- 根因：Bridge 已能写 `set_region_position`，但桌面仍将它暂存后退化为 whole-file raw replace；现有 MSB typed writer/validator/inverse 又只识别 part URI，region 修改无法形成字段级持久 inverse。
+- 已实现：将 MSB semantic contract 抽象为带 `part|region` 判别身份的 position field operation；part 与 region 复用同一个 writer、validator、postValidate 和 inverse capture，不新增第二条写入主干。新增 `commitMsbRegionPositionThroughPatchIr`，桌面 `resource.applyMsbMutation(set_region_position)` 进入高风险确认 → typed PatchIR → Bridge staging → 重读验证 → WorkspaceTransaction → resource-entry inverse，不再走 raw fallback。
+- 已实现：严格 private native gate 增加 `bridge:verify:msb:transaction`；当 MSB registry role 声明 `write-staging` 或 `rollback-resource-entry` 时，门禁要求 part/region 正向与 entry rollback 结构化证据，同时继续要求 `authorityStillCandidate=true`、`fullEntityCrudClaimed=false` 和原 DCX fixture 未改，防止局部能力被外推为完整 authority。
+- 已验证：`npm run typecheck`、`test:fmg-msb-ipc-contract`、`test:param-msb-write-ipc-contract`、`npm test`、`git diff --check` 均退出 0。仓库外临时 registry 对当前 `m10_00_00_00.msb.dcx` 副本做 SHA-256 绑定后，`test:msb-semantic-transaction` 证明 part 与 POINT region 分别完成 typed 提交、重读、恰好一条 field inverse 和 resource-entry rollback，并恢复原始 raw MSB 字节；源 DCX 未改。
+- 未验证 / 非声明：MSB authority 仍为 `candidate`；本批不覆盖 DCX 包装 semantic commit、region rotation/scale/type、model/part/region/event CRUD/reorder/类型转换、完整发布 corpus、真实 mesh/3D 场景或 Sekiro 启动。P3 MSB、P3 resource entry rollback 与最终 V0.5 仍保持未勾选。
+
+### 2026-07-14：MSB part 位置 production semantic writer 与 entry 回滚
+
+- 状态：`pass（仅 part position typed field 子能力）；P3 MSB authority 仍为 candidate`
+- 已实现：`writer:msb-semantic-v1`、`msb_semantic` validator、`commitMsbPartPositionThroughPatchIr`；桌面 `set_part_position` 走 typed 路径。
+- 已验证：`bridge:verify:msb:transaction` 对 m10 DFLT 解压 raw MSB 完成位置修改、重读与 resource-entry rollback；原 `.msb.dcx` fixture 未改。
+- 非声明：不提升公共 authority 到 native-verified；不覆盖 region/event CRUD、DCX 包装写回或完整 3D 工作台。
+
+### 2026-07-14：PARAM 用户派生字段 production semantic writer 与 entry 回滚
+
+- 状态：`pass（仅用户派生 fixture 字段 typed 子能力）；原生 paramdef 与完整 P3 PARAM 仍未完成`
+- 已实现：`writer:param-semantic-v1`、`param_semantic` validator、`commitParamFieldThroughPatchIr`；PatchIR 绑定 row/field identity、user-derived ParamDefDocument、row hash 与 next payload；inverse 为反向 field edit。
+- 已验证：`bridge:verify:param:transaction` 对真实 `ActionGuideParam` 子项完成 typed 字段提交、row hash 变化、resource-entry rollback 恢复原 row hash；原 parambnd fixture 未改。
+- 非声明：fixture-only `u8@0` 不赋予官方语义；不得勾选完整 P3 PARAM。
+
+### 2026-07-14：专业编辑器拆除失败静默 demo fallback
+
+- 状态：`pass（失败路径不再可编辑 demo）；P5 完整专业桌面仍未完成`
+- 根因：EMEVD/FMG/PARAM/MSB 实时读取失败时会把 DEMO_* 数据塞回面板，用户可能误以为在编辑真实资源。
+- 已实现：读取失败或未选择资源时清空/空文档 + 明确状态文案，且保持 `*Live=false`，mutation 入口继续拒绝演示提交。
+- 已验证：`test:ui-localization`、`test:desktop-security`、`test:desktop-live-editor-contract` 退出 0。
+- 非声明：不表示专业编辑器 UI 完整或 demo 常量已从源码删除；初始 state 仍可短暂持有占位常量直到首次 load effect 运行。
+
+### 2026-07-14：真实 Anthropic-compatible smoke 尝试
+
+- 状态：`failed/blocked（凭据无效）；P6 真实服务 smoke 未完成`
+- 已验证：`npm run test:ai-fake-loop` 双 provider fake-server tool loop 全绿。
+- 已尝试：本机存在 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` 时对 shipped `AnthropicCompatibleAdapter` + `runAgentToolLoop` 发起真实请求；服务返回 HTTP 401 Invalid API Key。
+- 证据：`{scratch}/ai-smoke/anthropic-real.json`（仅 host/model/diagnostics，无密钥）。
+- 非声明：不得把 fake-server 或 401 失败写成真实模型 smoke 通过；OpenAI-compatible 真实服务未试（无有效密钥）。
+
+### 2026-07-14：EMEVD instruction args production semantic writer 与精确 resource-entry 回滚
+
+- 状态：`pass（仅 instruction args typed field 子能力）；P3 EMEVD 整体仍未完成`
+- 根因：`set_instruction_args` 原先只能走 Bridge 暂存 + whole-file raw replace；全局 instructionIndex 也不适合重复事件下的稳定 identity。
+- 已实现：Bridge `set_instruction_args` 支持 event-local `eventIndex + instructionLocalIndex + expectedBank/expectedInstructionId`；`read-emevd-document` 支持 `focusEventIndex/focusInstructionLocalIndex` 返回 `focusedInstruction`。
+- 已实现：`commitEmevdInstructionArgsThroughPatchIr` + writer/validator 扩展；typed value 为 `bytes`；inverse 为反向 `resource_field_edit`；桌面 IPC 在完整 local identity 时切到 typed 路径。
+- 已验证：`bridge:build` 0 warning/error；`typecheck`；`bridge:verify:emevd:transaction` — common.emevd.dcx 上 instruction args 提交、focused 重读、resource-entry rollback 恢复 documentHash 与 args；原 fixture 未改。
+- 未验证 / 非声明：事件/instruction CRUD entry rollback、instruction 重排 entry rollback、完整 EMEDF、KRAK、非零 layer 与完整发布 corpus 仍未完成；不得勾选 P3 EMEVD。
+
+### 2026-07-14：FMG 槽位级 insert production semantic writer 与精确 delete inverse 回滚
+
+- 状态：`pass（仅 raw FMG 槽位级 insert typed node 子能力）；P3/P5 FMG、id-wide 增删/重排与完整 resource-entry rollback 仍未完成`
+- 根因：桌面“新增”原先走无 `stringIndex` 的 id-wide upsert whole-file raw fallback；delete inverse 虽已用 `insert` 恢复，但正向 insert 没有独立 typed commit 入口，不能证明只插入目标槽位并捕获精确 delete inverse。
+- 已实现：`commitFmgEntryAddThroughPatchIr` 生成 `resource_node_add`，绑定 source/document hash、revision、schema/layout、`entryId + stringIndex`、UTF-16 文本 snapshot、writer authority 与高风险确认；writer/validator 既有 insert 路径复用，inverse 为 `resource_node_delete`。
+- 已实现：桌面 IPC `resource.applyFmgMutation` 支持 `kind: 'insert' + stringIndex`；FMG 工作台草稿新增后显式“提交文本”走 typed insert（append 到当前已提交槽位数），不再对草稿立即 raw upsert。
+- 已验证：`npm run typecheck`、`bridge:verify:fmg:transaction`、`test:fmg-msb-ipc-contract` 退出 0。真实 `item.msgbnd.dcx` 子项验证：无确认 fail-closed；typed 槽位 append 使 entryCount+1 且前置槽位不变；恰好一条 `node_add` inverse；resource-entry rollback 恢复全部条目 ID/text；operation backup rollback 精确恢复外层字节；原 fixture 未改。
+- 基线：`npm test`、`test:progress-integrity`、`bridge:verify:synthetic`、`npm run build` 在本批次前工作树已退出 0；本机仍无合法 Sekiro/`oo2core_6_win64.dll`，`bridge:verify:oodle:real` 与严格 private/section-28 继续 blocked/failed，不得勾选 P1 KRAK 或最终 release。
+- 未验证 / 非声明：FMG typed reorder/类型转换、id-wide delete 的精确 inverse、嵌套 msgbnd 字段事务、完整发布 corpus、KRAK、PARAM/MSB semantic writer 仍未完成；不得据此勾选 P3 FMG、P3 resource entry rollback 或 P5 FMG。
+- 进度完整性：阶段检查表仍为 15 checked / 36 unchecked（仅更新说明文字，未提升 `[x]`）。
+
+### 2026-07-15：FMG 完整槽位顺序 reorder production writer 与 registry 强制绑定
+
+- 状态：`pass（仅 raw FMG 槽位级 reorder typed node 子能力）；P3/P5 FMG 与完整 resource-entry rollback 仍未完成`
+- 根因：FMG ID 可重复，旧 reorder/raw whole-file 路径既不能唯一标识 occurrence，也不能证明非目标槽位顺序不变；同时单独运行 native runner 仍可绕过 registry，使用命令行路径、role 环境路径或仓库固定 `mods`，与发布证据的 hash 绑定不一致。
+- 已实现：Bridge `write-fmg` 新增 `reorder`，源槽位与可选 move-before 锚点均绑定 `stringIndex + id`；无锚点表示 append，拒绝身份冲突、同源锚点和无变化重排。`commitFmgEntryReorderThroughPatchIr` 生成 `resource_node_reorder`，metadata 绑定完整 `beforeEntries` 与 `expectedOrder`；writer/validator 在 before/staged/after 阶段重读并比较每个槽位，inverse 按原 follower 生成反向 move-before（原末位则 append），持久 `changeKind=node_reorder`。
+- 已实现：桌面 FMG 工作台加入显式上移/下移并走 typed IPC；删除未提交草稿只修改本地草稿，不再误触 id-wide raw delete。严格 private gate 增加 `bridge:verify:fmg:transaction` 及 reorder/resource-entry/operation 结构化证据检查。
+- 已实现（语料约束）：`nativeFixturePaths.ts` 现在要求 registry/root，先校验 registry 中全部文件与 SHA-256；显式路径只在已登记时接受，primary runner 从 `testRole` 解析。DCX corpus 删除目录扫描/仓库 `mods` 回退，`test:native-preview` 只预览 registry 条目；real-mod workspace smoke 也移除固定 `../../mods`，要求显式根。
+- 已验证：`npm run bridge:build` 0 warning / 0 error；`npm run typecheck`、`npm run test:fmg-msb-ipc-contract`、`npm run test:native-gate-contract`、`npm run bridge:verify:fmg:transaction` 退出 0。真实 `item.msgbnd.dcx` 的 SHA-256 registry 校验通过；typed reorder 无确认失败关闭、完整顺序写后重读、恰好一条 reorder inverse、resource-entry rollback 恢复原语义顺序、operation rollback 恢复精确字节、原 msgbnd 未改。微小合法 duplicate-ID/different-text fixture 额外证明第二 occurrence 可独立移到第一 occurrence 前并由 append inverse 恢复，不提升 native authority。
+- 已验证边界：仅含单个 FMG 条目的临时 registry 运行 `test:native-preview` 时诚实失败在 `containerSummaries=0`，未放宽多格式预览断言；本机仍缺合法 Oodle/Sekiro runtime，KRAK 成功路径、完整 private gate 与 section-28 未通过。
+- 未验证 / 非声明：FMG 类型转换、id-wide 增删精确 inverse、嵌套 msgbnd 单事务字段写入、完整发布 corpus、专业本地化工作台人机、KRAK 与真实游戏加载仍未完成；不得勾选 P3 FMG、P3 resource entry rollback 或 P5 FMG。
+- 进度完整性：`npm run test:progress-integrity` 通过，仍为 51 项、15 checked / 36 unchecked；本记录未新增任何 `[x]`。
+
+### 2026-07-15：EMEVD 事件完整顺序 reorder production writer 与精确回滚
+
+- 状态：`pass（仅事件顺序 reorder typed node 子能力）；P3/P5 EMEVD 与完整 resource-entry rollback 仍未完成`
+- 根因：既有 `reorder_event` 只在 Bridge corpus/whole-file 路径验证，桌面提交仍会退化为 raw replace；持久 inverse 没有完整事件顺序与事件语义身份，重复事件 ID 下无法证明只移动目标 occurrence，也不能安全生成“移回原位”的 entry inverse。
+- 已实现：Bridge envelope 为每个事件返回确定性的 `eventHash`（事件 ID/rest、全部 instruction layer/args 与 parameter substitution）；`reorder_event` 支持绑定 source `eventId + eventIndex`、可选 move-before 锚点或无锚点 append，并拒绝同源锚点/无变化操作。`commitEmevdEventReorderThroughPatchIr` 生成 `resource_node_reorder`，metadata 绑定完整 `beforeEvents` 与 `expectedOrder`；writer/validator 在 before/staged/after 阶段比较全部 `id + eventHash` 顺序，inverse 按原 follower 生成 move-before，原末位生成 append，持久化 `changeKind=node_reorder`。
+- 已实现：resource-entry inverse 校验按 `resourceKind` 分离 FMG/EMEVD 完整顺序证据，不把两类语义混用；桌面 EMEVD 四视图增加事件上移/下移，主进程识别 `reorder_event` 后走 typed commit，不再进入未迁移 mutation 的 raw fallback。严格 private gate 在 registry 声明 reorder/entry/operation 能力时强制检查对应结构化字段。
+- 已验证：`npm run bridge:build` 0 warning / 0 error；`npm run typecheck`、`npm run test:emevd-ipc-contract` 退出 0。仓库外临时 registry 对真实 `event/common.emevd.dcx` 的 SHA-256 校验通过；`npm run bridge:verify:emevd:transaction` 证明无确认 fail-closed、typed 重排完整顺序重读、恰好一条 reorder inverse、原 follower 与原末位 append 两类 resource-entry rollback 恢复原 `documentHash`/完整顺序、operation rollback 恢复提交前外层字节，原 fixture 未改。
+- 未验证 / 非声明（随后部分收口）：本记录完成时事件 add/delete/duplicate、instruction CRUD/reorder 的 typed entry inverse 尚未完成；后续记录已补事件 add/delete/duplicate 与 instruction 零参数 add/既有项 duplicate/delete/reorder。完整 EMEDF-aware authoring/类型转换、非零 layer、33 个 KRAK EMEVD、完整发布 corpus、Electron 人机与真实游戏加载仍未完成。不得勾选 P3 EMEVD、P3 resource entry rollback 或 P5 EMEVD。
+- 进度完整性：阶段检查表保持 51 项、15 checked / 36 unchecked；本记录不新增 `[x]`。
+
+### 2026-07-15：EMEVD 事件复制与 instruction snapshot/order typed 回滚闭环
+
+- 状态：`pass（已登记 DFLT common 语料上的既有事件 duplicate 与既有 instruction duplicate/delete/reorder 子能力）；P3/P5 EMEVD 与完整 resource-entry rollback 仍未完成`
+- 架构裁定：instruction inverse 不从 renderer payload 或 TypeScript 猜测 native 字段。C# Bridge 定义 `soulforge.emevd.instruction-semantic-v1` / `1.0.0` 权威快照，覆盖 bank/id、layer offset、完整 args 与目标 instruction 的全部 parameter substitution；只接受 canonical Base64、SHA-256、完整 format/schema、事件 occurrence 与局部 index 绑定，inline 上限 256 KiB。TypeScript 的 `EmevdInstructionNodePayload` 显式携带 layer、parameterCount、instructionHash、args hash 与快照，不能退回只有 bank/id/args 的弱 payload。
+- 已实现：`read-emevd-document` 支持 instruction snapshot 与有 256 KiB 事件边界的完整 `focusedEventInstructionOrder`；每个顺序项包含 event-local index、bank/id、含参数替换的 instructionHash 和 parameterCount。`insert_instruction_snapshot` 可在指定 index 恢复目标及参数替换；`reorder_instruction` 支持 move-before 或无锚点 append。新增/复制/恢复参数替换按 instruction 顺序插入，修复“追加到参数表尾部导致 delete inverse 无法恢复原 eventHash”的根因；typed snapshot/order 还要求参数表按 instructionIndex 非递减分组，遇到非分组布局结构化失败关闭，不假设可精确恢复。
+- 已实现：`commitEmevdEventDuplicateThroughPatchIr` 使用 Bridge 重写新 ID 后的完整事件快照追加事件；`commitEmevdInstructionDuplicateThroughPatchIr`、`commitEmevdInstructionDeleteThroughPatchIr`、`commitEmevdInstructionReorderThroughPatchIr` 分别生成 snapshot/order-bound `resource_node_add`、`resource_node_delete`、`resource_node_reorder`。writer/validator 同时绑定完整 `beforeEvents`、父 eventHash、完整 `beforeInstructions`，要求非目标事件 ID/hash/顺序不变，并为每项捕获可持久化的精确 entry inverse。删除最后一条 instruction、空重排、越界/不完整锚点、快照篡改、hash/schema/大小不匹配均失败关闭。
+- 已实现：桌面主进程的 `duplicate_instruction`、`delete_instruction`、`reorder_instruction` 已从 whole-file raw fallback 迁移到上述 typed commit 与高风险确认路径；严格 private native gate 在 registry 声明 `crud`、`reorder`、resource-entry rollback 或 operation rollback 时，分别强制检查 instruction 正向快照/完整顺序与两级回滚结构化证据。事件 duplicate 同样已纳入 snapshot clone、entry rollback 与 operation rollback 门禁。
+- 已验证：`npm run bridge:build` 为 0 warning / 0 error；`npm run typecheck`、`npm run test:emevd-ipc-contract -w @soulforge/core`、`npm run test:patch-ir-schema -w @soulforge/core`、`npm run test:native-gate-contract` 均退出 0。仓库外 registry/hash 绑定的真实 `event/common.emevd.dcx` 上，`npm run test:native-emevd-transaction -w @soulforge/core` 退出 0：事件 duplicate 恢复 7 条指令/6 条参数替换；instruction duplicate/delete 选中含 2 条参数替换的真实指令；三种 instruction mutation 均完成正向重读、恰好一条 typed inverse、resource-entry rollback 恢复原 `documentHash`/完整 instruction 顺序，独立 operation rollback 恢复提交前外层字节，原 fixture 未改。
+- 完整回归：最终顺序运行的 `npm run typecheck`、`npm test`、`npm run test:progress-integrity`、`npm run bridge:verify:synthetic`、`npm run build` 均退出 0。一次把 `npm test` 与 `npm run build` 并行执行时，两者争用 Electron SQLite rebuild 临时目录而出现 `EBUSY`；改为工具链要求的顺序执行后通过，不把并发失败记作能力证据。
+- 未验证 / 非声明（随后部分收口）：本记录完成时 instruction typed 新建 `add` 尚未完成；下节已补 Bridge-authored 零参数 add。重复 ID 非空事件 typed delete 正向路径、超过 256 KiB 的 event/instruction、非零 layer、完整 EMEDF-aware authoring/类型转换、33 个 KRAK EMEVD、完整发布/三层 corpus、renderer 指令 CRUD 人机、Electron E2E 与真实游戏加载仍未完成。不得据此勾选 P3 EMEVD、P3 resource entry rollback 或 P5 EMEVD。
+- 辅助工具：本批次未调用 Grok，也未调用 Claude Code；native snapshot、Patch Engine、validator 与回滚逻辑由主 Agent 实现和真实验证。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-15：EMEVD 空事件 add production writer 与精确 delete inverse
+
+- 状态：`pass（仅唯一 ID 空事件 append typed node 子能力）；既有事件 delete/duplicate 与完整 P3 EMEVD 仍未完成`
+- 架构裁定：不直接为既有非空事件 delete 伪造 TypeScript snapshot。恢复带 instruction、args 与 parameter substitution 的事件必须先定义 Bridge 权威、可版本化、有大小边界的完整事件 snapshot 协议；在该协议完成前只开放原生语义已明确的空事件 append，其 inverse 精确删除新增的末位 occurrence。
+- 已实现：`buildEmevdEmptyEventNodePayload` 按 Bridge `eventHash` 的 canonical 小端序语义字节（ID、rest、零 instruction count、零 parameter count）生成 20-byte inline snapshot 与 SHA-256；contract 强制 node URI、payload、snapshot、完整 `beforeEvents`、唯一 ID 与预期 hash 一致。`commitEmevdEventAddThroughPatchIr` 生成 `resource_node_add`，writer/validator 重读完整事件顺序与新增空事件；captureInverse 生成只允许删除末位空事件的 `resource_node_delete`。删除逆操作再次捕获 append inverse，因此 resource-entry 回滚仍是新的可审计 PatchIR 事务。
+- 已实现：`FileRiskValidator` 改为识别完整 `isEmevdSemanticOperation` 并把 `resource_node_reorder` 纳入高风险确认校验，修复新增节点初次真实提交被通用 `NATIVE_WRITER_REQUIRED` 拒绝的问题，同时不放宽未注册 native writer。主进程 `add_event` 走 typed commit；其他未迁移 mutation 保持 Bridge staging + whole-file raw fallback。严格 private gate 在 EMEVD role 声明 `crud`/entry/operation 能力时要求 event add 的正向、canonical hash 和两级回滚结构化证据。
+- 已验证：`npm run typecheck`、`npm run test:emevd-ipc-contract` 退出 0；同一仓库外 registry 绑定的真实 `event/common.emevd.dcx` 上，`npm run bridge:verify:emevd:transaction` 证明无确认 fail-closed、typed add 仅在末位新增唯一 ID 空事件、Bridge `eventHash` 与 canonical snapshot hash 一致、恰好一条 `node_add`/delete inverse、resource-entry rollback 恢复原 `documentHash`/完整事件顺序、operation rollback 恢复提交前外层字节，原 fixture 未改。
+- 未验证 / 非声明（随后部分收口）：本记录完成时既有非空事件 delete/duplicate 与 instruction CRUD/reorder entry inverse 尚未完成；后续记录已补这些列出的 DFLT common 子能力。非零 layer、完整 EMEDF-aware authoring/类型转换、33 个 KRAK、完整发布 corpus、Electron 人机与真实游戏加载仍未完成；不得把空事件 add 外推为完整事件 CRUD。
+- 进度完整性：阶段检查表仍保持 51 项、15 checked / 36 unchecked；本记录不新增 `[x]`。
+
+### 2026-07-15：EMEVD 既有非空事件 delete、Bridge 完整快照与精确 insert inverse
+
+- 状态：`pass（仅已登记 DFLT common 语料上的既有非空事件 typed delete 子能力）；P3/P5 EMEVD 与完整 resource-entry rollback 仍未完成`
+- 架构裁定：完整事件快照由 C# Bridge 作为唯一 native authority 编解码，TypeScript 只承载和校验版本化 payload，不维护第二套 EMEVD parser。`soulforge.emevd.event-semantic-v1` / `1.0.0` 快照按小端序覆盖 event ID/rest、全部 instruction bank/id/layer/args 与全部 parameter substitution；只接受无空白 canonical Base64，SHA-256 必须同时等于 snapshot hash 和 `eventHash`，inline 大小上限 256 KiB，计数/args/参数目标范围/尾部字节均失败关闭。超过该上限的事件暂不开放 typed delete，不以 staging object 或弱校验绕过。
+- 已实现：`read-emevd-document` 接受 `snapshotEventIndex` 并返回身份、计数和完整快照；`write-emevd` 新增 `insert_event_snapshot`，精确插回原 `eventIndex`。`EmevdEventNodePayload` 显式绑定 `eventHash`；`commitEmevdEventDeleteThroughPatchIr` 读取 Bridge 快照后生成 `resource_node_delete` 与完整 `resource_node_add` inverse。writer/validator 在 before/staged/after 阶段比较完整 `id + eventHash` 顺序、rest、指令数和参数替换数；captureInverse 为回滚 add 标记 `snapshot_insert`，resource-entry 回滚仍生成新的可审计 PatchIR 事务。桌面主进程的 `delete_event` 已迁移到 typed commit；未迁移的 duplicate/instruction CRUD 仍保留原边界。
+- 已实现：严格 private native gate 在 EMEVD role 声明 `crud` 时同时要求空事件 add、既有非空事件 delete、快照往返和正指令数；声明 resource-entry/operation rollback 时还必须分别提供 delete 两级回滚证据。退出码 0 仍不足以通过这些结构化断言。
+- 已验证：仓库外 registry 对真实 `event/common.emevd.dcx` 做 SHA-256/testRole 绑定；`npm run bridge:verify:emevd:transaction` 退出 0。无确认路径在暂存前失败关闭；正向删除目标含 7 条 instruction 和 6 条 parameter substitution；提交后仅目标 occurrence 消失且恰好持久化一条 `node_delete`/完整 snapshot add inverse；resource-entry rollback 恢复原 `documentHash`、完整事件顺序和逐字节相同的事件 snapshot；独立 operation rollback 恢复提交前外层字节；原 fixture 未改。该 `common` 语料未提供可用于正向 typed delete 的重复 ID 非空事件，因此 `duplicateEventOccurrenceDeleteVerified=false`，不作重复 occurrence 删除声明。
+- 回归：`npm run bridge:build` 为 0 warning / 0 error；`npm run typecheck`、`npm run test:emevd-ipc-contract`、`npm run test:native-gate-contract`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 均退出 0。PatchIR schema smoke 继续证明篡改 snapshot 和超大 inline snapshot 被拒绝。
+- 未验证 / 非声明（随后部分收口）：本记录完成时既有事件 duplicate 与 instruction CRUD/reorder typed entry inverse 尚未完成；后续记录已补事件 duplicate 与 instruction 零参数 add/既有项 duplicate/delete/reorder。重复 ID 非空事件 typed delete 正向路径、超过 256 KiB 快照、非零 layer、完整 EMEDF-aware authoring/类型转换、33 个 KRAK、完整发布 corpus、Electron 人机与真实游戏加载仍未完成；不得据此声明完整事件 CRUD、完整 P3 EMEVD 或 release gate 通过。
+- 进度完整性：阶段检查表保持 51 项、15 checked / 36 unchecked；本记录不新增 `[x]`。
+
+### 2026-07-15：EMEVD Bridge-authored 零参数 instruction add 与两级回滚
+
+- 状态：`pass（已登记 DFLT common 语料上的零参数、layer=-1 instruction add 子能力）；P3/P5 EMEVD 与完整 resource-entry rollback 仍未完成`
+- 架构裁定：TypeScript 不拼接 native instruction snapshot。`read-emevd-document` 的 `authorInstruction*` 请求由 C# Bridge 绑定当前父事件 occurrence、插入位置、bank/id 和 canonical raw args，生成 `soulforge.emevd.instruction-semantic-v1` / `1.0.0` 快照；当前安全边界固定 `layerOffset=-1`、`parameterCount=0`。这只证明 native 结构可写，不把未绑定 EMEDF schema 的 raw args 声称为类型正确或游戏行为正确。
+- 已实现：`commitEmevdInstructionAddThroughPatchIr` 读取 Bridge-authored snapshot 与父事件完整 instruction 顺序，生成 snapshot-bound `resource_node_add`；contract 强制 event/index、bank/id、layer、args、零参数、instructionHash 与 inverse node hash 一致。writer 复用 `insert_instruction_snapshot`，validator 在 before/staged/after 比较完整指令顺序、父 eventHash 和非目标事件隔离；captureInverse 持久化精确 `resource_node_delete`。桌面主进程 `add_instruction` 已从 whole-file raw fallback 迁移到 typed commit 与高风险确认；strict private gate 同时要求 add 正向、Bridge 快照、entry rollback 和 operation rollback 结构化证据。
+- 正确性收紧：`normalizeArgsBase64` 不再依赖 Node 的宽松解码；含空白或非 canonical standard Base64 的输入失败关闭，空字节参数仍以 canonical 空字符串表达。Bridge 同时复核规范编码、snapshot format/schema、SHA-256 和 256 KiB inline 上限。
+- 已验证：`npm run bridge:build` 0 warning / 0 error；`npm run typecheck`、`npm run test:emevd-ipc-contract -w @soulforge/core`、`npm run test:native-gate-contract` 均退出 0。仓库外 registry/hash 绑定的真实 `event/common.emevd.dcx` 上，`npm run test:native-emevd-transaction -w @soulforge/core` 退出 0：无确认路径在事务前失败关闭；新增位置重读得到 Bridge 预期 instructionHash、`parameterCount=0`、`layerOffset=-1`；恰好一条 `node_add`/typed delete inverse；resource-entry rollback 恢复原 `documentHash` 和完整 instruction 顺序；独立 operation rollback 恢复提交前外层字节；原 fixture 未改。
+- 完整回归：最终按顺序运行 `npm run typecheck`、`npm test`、`npm run test:progress-integrity`、`npm run bridge:verify:synthetic`、`npm run build`，均退出 0；本次没有并行运行会争用 Electron SQLite rebuild 临时目录的命令。
+- 未验证 / 非声明：EMEDF 参数类型/长度校验、带 parameter substitution 的全新 instruction authoring、非零 layer、重复 ID 非空事件 typed delete 正向路径、超过 256 KiB 快照、33 个 KRAK EMEVD、完整发布/三层 corpus、renderer 指令 CRUD 人机、Electron E2E 与真实游戏加载仍未完成。不得把本子能力写成完整 instruction editor、完整 P3 EMEVD 或 release gate 通过。
+- 辅助工具：本批次未调用 Grok，也未调用 Claude Code；该工作涉及 native snapshot、Patch Engine 和回滚正确性，不属于允许交给辅助模型的机械低风险任务。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-16：Context Broker 后端生产路径与 outbound audit
+
+- 状态：`implemented-unverified（核心模块与桌面接入已落地；本会话 node/npm 执行被环境安全分类器拦截，未能完成本机 smoke/typecheck 复跑）`
+- 架构裁定：云端外发上下文必须先经过 Context Broker。允许范围仅限当前已打开工作区的 overlay/base；app data、backup/recovery/cache、其他工作区路径、junction 越界一律拒绝。凭据规则命中内容脱敏后才可进入 audit 与模型请求；绝对路径不得进入 outbound payload。
+- 已实现：
+  - `packages/core/src/ai/contextBroker.ts`：`prepareOutboundContext` / `buildOutboundContext` / `createContextBroker`；路径边界、forbidden roots、junction escape、secret redaction、absolute path strip、content hash/byte count/layer/URI audit 字段。
+  - `packages/core/src/testing/runContextBrokerSmoke.ts` 与 `npm run test:context-broker` / 默认 core test 链接线。
+  - 桌面 `ai.runModel` 在调用 `runAgentToolLoop` 前先 `buildOutboundContext`；拒绝时 fail-closed；通过后把 `outboundContextItems` 写入 `app.db` agent run audit。
+- 未验证 / 非声明：本会话未能实际执行 `npm run test:context-broker`、`npm run typecheck`、真实模型服务 smoke；不得勾选 P6 credentials/grants/context/audit 或完整 P6。registry 合并、fullPermission 持久授权、取消/流式 UI、真实双 provider 手工 smoke 仍未完成。
+- 下一步：环境可执行 node 后立刻跑 `npm run test:context-broker`、`npm run test:ai-fake-loop` 与 `npm run typecheck`；通过后再补交接书“已验证”字段，并继续 P6 registry 合并 / fullPermission grants 生命周期。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-16：AgentPermissionMode 统一为 fullPermission 与 grant 别名兼容
+
+- 状态：`implemented-unverified（类型与 repository 兼容路径已改；本会话未能执行 typecheck/ai-fake-loop smoke）`
+- 架构裁定：运行时权限模式规范名统一为 `fullPermission`，与 `PatchMode` / tool policy 对齐。旧 app.db 中 `permission_mode='full'` 仅作为读兼容别名，不得作为新写入权威值。
+- 已实现：
+  - `packages/core/src/model-services/types.ts`：`AgentPermissionMode = 'plan' | 'normal' | 'fullPermission'`，并保留 `StoredAgentPermissionMode` 兼容旧值。
+  - `packages/core/src/storage/appDataRepository.ts`：`getActivePermissionGrant` / `replacePermissionGrant` 对 `full`/`fullPermission` 双向别名查询与撤销；读取时规范化为 `fullPermission`。
+  - `packages/core/src/testing/runAiFakeLoopSmoke.ts`：full 权限用例改用 `fullPermission`。
+- 未验证 / 非声明：未跑 `npm run test:ai-fake-loop` / `test:v05-sqlite` / `typecheck`；不得勾选 P6 credentials/grants/context/audit 或 fullPermission grant 生命周期完成。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-16：production ToolRegistry 始终经过统一 policy gate
+
+- 状态：`implemented-unverified（生产 registry 已接 evaluatePolicyGate；本会话未能执行 typecheck / foundation / AI smoke）`
+- 架构裁定：生产 `ToolRegistry.run` 不得只靠 `isAiToolPermissionAllowed` 做旁路判断。所有工具调用先经 `evaluatePolicyGate`，`maxPermission` 来自 `maxPermissionForMode(context.mode)`，`requiredPermission` 来自工具 `permissionLevel`。commit/rollback 仍受 confirmation 规则约束；fullPermission 不得绕过 Patch Engine。
+- 已实现：
+  - `packages/core/src/ai/toolRegistry.ts` 引入 `evaluatePolicyGate`；拒绝时返回 policy code/reason，而不是仅 `TOOL_PERMISSION_DENIED`。
+  - 保留 scaffold registry 与生产 registry 两套注册表；本批只完成生产路径 policy gate 统一，未做工具名物理合并或 scaffold 删除。
+- 未验证 / 非声明：未跑 `npm run typecheck`、`npm run test:context-broker`、`npm run test:ai-fake-loop`、`runV05FoundationSmoke`；不得勾选 P6 unified tool registry 或删除 scaffold registry。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-17：ai.runModel 按 app.db grant 解析权限模式
+
+- 状态：`implemented-unverified（桌面生产路径已按 grant 解析 mode；本会话 node/npm 执行被环境安全分类器拦截，未能完成本机 typecheck/smoke 复跑）`
+- 架构裁定：renderer 不得自行提升权限。`ai.runModel` 的 `permissionMode` 与 tool `mode` 必须由主进程从 app.db `permission_grants` 解析：优先 `fullPermission`，其次 `normal`，否则自动确保/使用 `plan` grant。system prompt 与 audit 同步跟随解析结果。
+- 已实现：
+  - `apps/desktop/src/main/ipc.ts`：`resolveAiModeForService` / `systemPromptForMode`；`ai.runModel` 使用解析后的 `activeMode` 驱动 adapter loop、toolRegistry.run 与 audit。
+  - 无 plan grant 时自动写入 plan grant；`failedAgentRun` 可携带解析到的 permissionMode。
+  - 导入 `AppPermissionGrant` 类型。
+- 未验证 / 非声明：未跑 `npm run typecheck`、`npm run test:context-broker`、`npm run test:ai-fake-loop`、真实模型服务 smoke；不得勾选 P6 credentials/grants/context/audit 或 fullPermission 生命周期完成。renderer 仍不能自行申请/撤销 fullPermission grant。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-17：permissionGrant IPC/preload 生产暴露
+
+- 状态：`implemented-unverified（IPC/preload 已暴露 grant 生命周期；本会话未能执行 typecheck / desktop smoke）`
+- 架构裁定：renderer 不得解密凭据；fullPermission 授权必须经主进程 `permissionGrant.*` IPC，落到 app.db `permission_grants`。`ai.runModel` 再按 active grant 解析模式。
+- 已实现：
+  - `apps/desktop/src/main/ipc.ts`：`permissionGrant.replace` / `permissionGrant.getActive` / `permissionGrant.revoke`。
+  - `apps/desktop/src/preload/index.ts`：`replacePermissionGrant` / `getActivePermissionGrant` / `revokePermissionGrant`。
+  - 拒绝未知 mode；`full` 归一为 `fullPermission`；scope 必须是 plain object。
+- 未验证 / 非声明：未跑 typecheck/desktop smoke/真实 UI 申请撤销流；不得勾选 P6 fullPermission 生命周期完成。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-17：permissionGrant main 确认、解析 API 与设置面板申请/撤销
+
+- 状态：`implemented-unverified（代码已接；本会话 shell 安全分类器间歇拦截 npm/node，未能执行 typecheck/desktop smoke）`
+- 架构裁定：
+  - renderer 只可请求 grant 变更；`normal` / `fullPermission` 提升与 revoke 必须经过 main 原生确认对话框。
+  - 有效权限模式仍只由 main 通过 app.db active grant 解析；renderer 不能向 `ai.runModel` 注入 authoritative mode。
+  - 生产 tool registry 继续使用 `evaluatePolicyGate` 的 `kind: 'allow' | 'deny' | 'require_confirmation'`，不得再读不存在的 `decision.allowed`。
+- 已实现：
+  - `packages/core/src/ai/toolRegistry.ts`：policy deny 判断改为 `decision.kind !== 'allow'`。
+  - `apps/desktop/src/main/ipc.ts`：
+    - 抽取 `requestMainNativeConfirmation`；写入确认复用同一 native dialog。
+    - `permissionGrant.getResolvedMode` 返回 main 解析后的有效 mode + grantId。
+    - `permissionGrant.replace` / `permissionGrant.revoke` 在提升/撤销时要求 main 确认；取消分别抛 `PERMISSION_GRANT_ELEVATION_CANCELLED` / `PERMISSION_GRANT_REVOKE_CANCELLED`。
+    - `systemPromptForMode` 与 `ai.runModel` 对齐，修复 `systemPromptForAiMode` 未定义引用。
+  - `apps/desktop/src/preload/index.ts`：暴露 `getResolvedPermissionMode`。
+  - `apps/desktop/src/renderer/src/editors/ModelServiceSettingsPanel.tsx`：展示当前有效 mode，支持申请普通/完全权限、撤销当前授权，并显示 grantId。
+  - `packages/core/src/testing/runVaultIpcContractSmoke.ts` 与 `scripts/verify-desktop-security.mjs`：覆盖 grant 通道、main 确认与 preload 不暴露 `resolveApiKey`。
+- 已验证：仅静态阅读与编辑一致性检查；未执行 npm/node 命令。
+- 未验证 / 非声明：
+  - 未跑 `npm run typecheck`、`test:desktop-security`、`test:progress-integrity`、`test:context-broker`、`test:ai-fake-loop`、`test:database-utility`。
+  - 未做真实 Electron 人机确认/撤销流，不得勾选 P6 credentials/grants/context/audit 或 fullPermission 生命周期完成。
+  - dual registry 物理合并、流式 UI、真实双 provider smoke、KRAK/Oodle、签名安装、section-28 仍未完成。
+- 下一步：shell 可执行 node 后立即跑 typecheck + desktop-security + vault IPC + progress-integrity + context-broker + ai-fake-loop；通过后仅更新“已验证”字段，不提前勾选阶段完成。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-17：生产 ToolRegistry 兼容 API 对齐 scaffold（未物理合并）
+
+- 状态：`partial / unverified-no-node-shell`；V0.5 整体未完成
+- 架构裁定：
+  - 在完成物理合并前，生产 `ToolRegistry` 必须先具备与 scaffold 一致的兼容入口：`getTool`、`hasTool`、`listToolNames`、`executeToolThroughPolicy`。
+  - `createScaffoldToolRegistry` 继续仅服务 scaffold smoke；desktop 生产 caller 仍走 `createDefaultToolRegistry`。
+  - 物理合并完成前不得删除 scaffold 工具面，也不得声明“唯一生产 registry”已完成。
+- 已实现：
+  - `packages/core/src/ai/toolRegistry.ts`：新增 `getTool` / `hasTool` / `listToolNames` / `executeToolThroughPolicy`；`run` 委托到 policy 路径。
+  - `packages/core/src/ai-tools/scaffoldToolRegistry.ts`：补充兼容说明，明确它不是生产唯一 registry。
+- 未验证 / 非声明：未跑 typecheck / foundation / architecture scaffold / desktop smoke；不得勾选 P6 agent loop 或 registry 合并完成。
+- 下一步：shell 恢复后先验证 permissionGrant + registry 兼容 API + 新增 `patch.*` 工具；再删除 scaffold 重复状态并完成物理合并。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-17：生产 ToolRegistry 接入 scaffold PatchIR 工具（partial）
+
+- 状态：`partial / unverified-no-node-shell`；V0.5 整体未完成
+- 架构裁定：
+  - 生产 `ToolRegistry` 成为 desktop/AI loop 的唯一主路径。
+  - scaffold registry 仅保留 typed schema/vertical-slice smoke，不得再作为生产工具源。
+  - PatchIR stage/validate/commit/rollback 必须走 policy gate，且需要 `ToolContext.workspaceRoot`。
+- 已实现：
+  - `packages/core/src/ai/toolRegistry.ts`：
+    - `ToolContext` 增加 `workspaceRoot?` 与 `state?`。
+    - 新增生产工具：`patch.proposeTextEdit` / `patch.stage` / `patch.validate` / `patch.commit` / `patch.rollback`。
+    - 使用 `createPatchIr` + `WorkspaceTransaction`，不再只停留在 scaffold registry。
+  - `apps/desktop/src/main/ipc.ts`：`ai.runTool` / `ai.runModel` 执行工具时传入 `activeSession.layers.overlayRoot` 作为 `workspaceRoot`；`ai.runModel` 使用共享 `toolLoopState`，保证链式 `patch.*` 可复用 `lastPatch` / `lastTransaction`。
+  - `packages/core/src/ai-tools/scaffoldToolRegistry.ts`：标注为兼容 smoke 表面。
+- 已验证：仅静态阅读与编辑一致性检查；未执行 npm/node。
+- 未验证 / 非声明：
+  - 未跑 typecheck / foundation / architecture-scaffold / desktop-security / progress-integrity。
+  - 未删除 scaffold 重复实现，不得声明 dual registry 物理合并完成。
+  - 不得勾选 P6 agent loop 或 credentials/grants/context/audit 完成。
+- 下一步：shell 恢复后立刻验证；通过后再做 scaffold 去重与 smoke 迁移。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-18：共享 patchTools 收敛 dual registry 重复实现（partial / unverified）
+
+- 状态：`partial / unverified-no-node-shell`；V0.5 整体未完成
+- 架构裁定：
+  - 生产 `createDefaultToolRegistry()` 仍是 desktop/AI loop 唯一主路径。
+  - `createScaffoldToolRegistry()` 继续只服务 architecture scaffold smoke 的 typed envelope（`TypedToolResult` / schema 元数据 / workspace.stats / resource.graph.query）。
+  - `patch.proposeTextEdit` / `patch.stage` / `patch.validate` / `patch.commit` / `patch.rollback` 的**实现**统一到 `packages/core/src/ai/patchTools.ts`；scaffold 与 production 不得再各写一套 mutation 逻辑。
+  - 物理删除 scaffold registry、或声明 “唯一 registry 完成” 仍禁止，直到相关 smoke 在本机 node 上通过并迁移。
+- 已实现：
+  - 新增 `packages/core/src/ai/patchTools.ts`：共享 PatchIR propose/stage/validate/commit/rollback handlers + `ensurePatchToolState`。
+  - `packages/core/src/ai/toolRegistry.ts`：`patch.*` 改为委托 `patchTools`，并用 `toToolResult` 适配 production `ToolResult` 形状。
+  - `packages/core/src/ai-tools/scaffoldToolRegistry.ts`：删除本地重复 WorkspaceTransaction 链路；`patch.*` 改为委托同一 `patchTools`，仅保留 typed envelope / schema 元数据。
+  - `packages/core/src/testing/runV05FoundationSmoke.ts`：plan 模式拒绝码从 legacy `TOOL_PERMISSION_DENIED` 改为期望 `POLICY_DENIED`。
+  - 新增 `packages/core/src/testing/runProductionPatchToolsSmoke.ts`；接入 `@soulforge/core` 的 `test` 与 `test:production-patch-tools`。
+  - `packages/core/src/index.ts` 导出 `patchTools`。
+- 已验证：
+  - 仅静态阅读与编辑一致性检查。
+  - 本会话 Bash/PowerShell 持续被环境安全分类器拦截（`grok-4.5 is temporarily unavailable`），**未能**执行 `npm run typecheck`、foundation、architecture-scaffold、production-patch-tools 或任何 node 验证。
+- 未验证 / 非声明：
+  - 未跑 typecheck / foundation / architecture-scaffold / production-patch-tools / desktop-security / progress-integrity。
+  - 不得勾选 P6 unified tool registry、agent loop、credentials/grants 完成。
+  - 不得声明 dual registry 物理合并完成；scaffold 仍保留 typed smoke 面。
+  - 前端未改动（本批仅 packages/core 后端）。
+- 下一步（shell 恢复后立即执行，顺序不可跳）：
+  1. `npm run typecheck`
+  2. `npm run test -w @soulforge/core`（至少含 foundation + architecture scaffold + production-patch-tools）
+  3. 若通过：再评估是否可进一步迁移 architecture scaffold smoke 到 production registry 并缩减 scaffold 面；仍不得先勾选完成项。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+
+### 2026-07-18：dual-registry 共享 patchTools 收敛 + typecheck/core 闭环
+
+- 状态：`pass（已列出）；V0.5 整体未完成`
+- 已实现：
+  - `packages/core/src/ai/patchTools.ts`：生产/scaffold 双 registry 的 propose/stage/validate/commit/rollback 共享实现；`ensurePatchToolState` 接受 ToolContext / ScaffoldToolContext / 裸 state bag。
+  - `packages/core/src/ai/toolRegistry.ts` 与 `packages/core/src/ai-tools/scaffoldToolRegistry.ts`：`patch.*` 委托共享实现；policy gate 补齐 `toolName` 与 exactOptional 安全传参。
+  - `packages/core/src/transactions/workspaceTransaction.ts`：相对 `targetPath` 按 `workspaceRoot` 解析，避免 cwd 导致 `WRITE_OUTSIDE_ALLOWED_ROOT`。
+  - `packages/core/src/ai/contextBroker.ts`：恢复/补齐 path allow-deny 辅助函数；绝对路径脱敏使用 `<workspace-root>` / `<absolute-path>` 占位，并覆盖 JSON 双反斜杠 Windows 路径变体。
+  - `apps/desktop/src/main/ipc.ts`：workspace_summary 使用 `getStats().files`（非 `fileCount`）。
+- 已验证：
+  - `npm run typecheck` → 通过
+  - `npm run test -w @soulforge/core` → 通过（含 foundation / architecture scaffold / production-patch-tools / context broker 等 18 条 smoke，ok:true=19 / ok:false=0）
+  - `npm run test:progress-integrity` → 通过（51 项；15 checked / 36 unchecked）
+- 未验证 / 非声明：
+  - 未删除 scaffold 重复实现；不得声明 dual registry 物理合并完成。
+  - 未跑 desktop-security / bridge:verify:synthetic / 全量 build（本批风险不要求）。
+  - 不得勾选 P6 agent loop 或 credentials/grants/context/audit 完成项。
+- 下一步：
+  1. 评估是否可把 architecture scaffold smoke 进一步迁移到 production registry。
+  2. 仅在证据充分时缩减 scaffold 面；仍不得先勾选完成项。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-18：architecture scaffold smoke 迁到 production ToolRegistry
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - production `createDefaultToolRegistry()` 增加 dotted 兼容别名：`workspace.stats`（filesystem fileCount + index stats）与 `resource.graph.query`（需要 ToolContext.graph）。
+  - `ToolContext` 增加可选 `graph?: MemoryResourceGraph`。
+  - `runV05ArchitectureScaffoldSmoke` 的 AI tool policy 段改为 `createDefaultToolRegistry` + production `ToolResult` 路径；验证 plan 上限 propose、stage/commit POLICY_DENIED、fullPermission patch 链与 graph query。
+  - architecture smoke 不再依赖 `createScaffoldToolRegistry`。
+- 已验证：
+  - `npm run typecheck`
+  - `npm run test -w @soulforge/core`（含 architecture scaffold + production-patch-tools，19 ok）
+  - `npm run test:progress-integrity`（51/15/36）
+- 未验证 / 非声明：
+  - 未物理删除 scaffoldToolRegistry；它仍作为兼容 TypedToolResult 表面保留。
+  - 不得勾选 P6 unified tool registry / agent loop 完成。
+  - 未声称 dual registry 物理合并完成。
+- 下一步：
+  1. 评估是否删除或进一步缩减 scaffoldToolRegistry 导出面（仅当无其他消费者且文档同步）。
+  2. 继续 P6 非前端剩余：outbound audit 持久化、history/retention 边界、唯一 registry 物理收口证据。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 `[x]`。
+
+### 2026-07-18：app.db agent history 读取 API + scaffold 导出收口
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - AppDataRepository.getAgentRun / listAgentRuns：从 app.db 读取 agent run 摘要与详情（messages、steps、toolCalls、outbound_context_items、redacted audit）。
+  - runV05SqliteAuthoritySmoke：覆盖 list/get 与 retention cascade 后的可读边界。
+  - packages/core/src/ai-tools/index.ts：不再 re-export scaffoldToolRegistry；architecture smoke 已不依赖 scaffold registry。
+- 已验证：
+  - npm run typecheck
+  - npm run test -w @soulforge/core（19 ok，含 architecture / production-patch-tools / sqlite authority）
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未声明 P6 agent loop / history UI / 真实模型服务 smoke 完成。
+  - scaffoldToolRegistry.ts 源文件仍保留，可直接 import，但公共 barrel 不再导出。
+  - 未删除 scaffold 文件；不得勾选 P6 完成项。
+- 下一步：
+  - 评估是否物理删除 scaffoldToolRegistry 或仅保留为内部兼容。
+  - 继续 P6 非前端：desktop main 对 getAgentRun/listAgentRuns 的 IPC/utility 暴露（若需要）、history retention 策略配置、真实服务 smoke 前置。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：agent history utility 读取面（main/utility only）
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - operationLogUtilityProtocol / Client / databaseUtility：新增 getAgentRun 与 listAgentRuns（仅 utility process 路径，不碰 renderer）。
+  - runAgentHistoryUtilityContractSmoke + npm run test:agent-history-utility-contract：结构契约验证。
+- 已验证：
+  - npm run typecheck
+  - npm run test:agent-history-utility-contract
+  - npm run test -w @soulforge/core
+  - npm run test:progress-integrity
+- 未验证 / 非声明：
+  - 未接 renderer IPC/preload；不得勾选 P6 agent loop / history UI 完成。
+  - 未跑完整 databaseUtility electron smoke（本批为源码契约 + core 权威层）。
+- 下一步：
+  1. 若需要主进程直连，再补 ipc.ts main-only handler（仍禁止 preload 泄密）。
+  2. 继续 P6 非前端剩余：retention 策略配置、真实服务 smoke 前置、scaffold 文件删除评估。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：删除 scaffold registry + AI history retention 配置
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - 删除 packages/core/src/ai-tools/scaffoldToolRegistry.ts（已无测试/生产消费者；architecture smoke 已走 production registry）。
+  - AppDataRepository.getAiHistoryRetentionMode / setAiHistoryRetentionMode：基于 app_settings 持久化默认 retention（thirty_days|session|forever）；recordAgentRun 未显式传入时读取该默认值。
+  - utility protocol 1.3.0 + Client + databaseUtility 暴露 retention 读写；agent history utility contract 同步校验。
+- 已验证：
+  - npm run typecheck
+  - npm run test -w @soulforge/core（含 sqlite authority retention 断言、architecture/production）
+  - npm run test:agent-history-utility-contract
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未勾选 P6 history/retention 完成（尚无 UI、无真实模型服务 smoke、session/forever 策略的产品级清理语义还可继续硬化）。
+  - 未做真实 provider smoke。
+- 下一步：
+  1. 继续 P6 非前端：retention forever/session 清理语义 hardening、真实服务 smoke 前置、必要时 main-only IPC。
+  2. 评估其他 dual-surface 残留与 P5 后端协议债。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：session retention hardening + main-only AI history IPC
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - recordAgentRun：session 模式写入 expires_at=createdAt，cleanupExpiredHistory 可立即清理；forever 仍为 null；thirty_days 保持 +30 天。
+  - apps/desktop/src/main/ipc.ts：main-only handlers ai.history.getAgentRun / listAgentRuns / getRetentionMode / setRetentionMode（ensureAppDatabase + utility client）；未改 preload/renderer。
+  - vault IPC contract 与 agent history utility contract 覆盖新 channels，并断言 preload 无 history/retention 暴露。
+- 已验证：
+  - npm run typecheck
+  - npm run test -w @soulforge/core（19 ok）
+  - npm run test:agent-history-utility-contract
+  - npm run test:vault-ipc-contract
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未声明 P6 agent loop / history UI / 真实模型服务 smoke 完成。
+  - 未接 preload 历史 API（刻意 main-only）。
+- 下一步：
+  1. 继续 P6 非前端：agent loop 与 production registry 唯一路径证据、outbound audit 字段完整性、真实服务 smoke 前置。
+  2. 评估 P5 后端协议债（EditorDocumentStore 生命周期等）中不依赖前端的部分。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+
+### 2026-07-18：agent loop production registry 唯一路径证据 + retentionMode 写入
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - apps/desktop/src/main/ipc.ts：ai.runTool 与 ai.runModel.executeTool 统一改为 toolRegistry.executeToolThroughPolicy（仍指向 createDefaultToolRegistry 单例）。
+  - recordAgentRun 写入当前 app.db AI history retentionMode，并保留 outboundContextItems。
+  - 新增 runAgentLoopRegistryContractSmoke：断言唯一 createDefaultToolRegistry、executeToolThroughPolicy、无 scaffold、recordAgentRun outbound+retentionMode、preload 无 history/credentials。
+- 已验证：
+  - npm run typecheck
+  - npm run test:agent-loop-registry-contract
+  - npm run test:agent-history-utility-contract
+  - npm run test:vault-ipc-contract
+  - npm run test -w @soulforge/core（19 ok）
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未声明 P6 agent loop 完成（真实服务 smoke、流式 UI、取消路径仍未完）。
+  - 未跑真实 OpenAI/Anthropic 服务。
+- 下一步：
+  1. 继续 P6 非前端：fake model server tool loop 端到端（若尚未覆盖）、outbound audit 查询/列举 API、provider 权限隔离 hardening。
+  2. 评估 P5 后端协议债中不依赖前端的部分。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：EditorDocumentStore 后端生命周期收口
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - packages/core/src/editing/editorDocumentStore.ts：补齐 listOpenDocuments / getPendingMutations / snapshot / snapshotStore / applyBatch / clearPending / markSynced / close 返回值；applyMutation 统一 EditorMutationApplyResult。
+  - runEditorDocumentStoreSmoke：覆盖 open/list、跨 kind 拒绝、revision 冲突、batch apply、snapshot/pending、markSynced、close 生命周期；并纳入 core test 脚本。
+- 已验证：
+  - npm run typecheck
+  - node packages/core/dist/testing/runEditorDocumentStoreSmoke.js
+  - npm run test -w @soulforge/core（20 ok）
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未声明 P5 app shell/document store 完成（仍缺主进程会话级 document manager、与真实 editor IPC/UI 接线）。
+  - 未改 renderer。
+- 下一步：
+  1. 评估 main 侧 EditorDocumentStore 会话托管（不碰 renderer）。
+  2. 继续 P6 真实服务 smoke 前置或其他无阻塞后端债。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：HexDocument search/jump/diff 后端能力
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - packages/core/src/editing/hexDocument.ts：新增 size/jumpTo/findBytes/findAscii/diffAgainst（分页虚拟化模型上的纯后端能力）。
+  - runHexAndSceneSmoke：覆盖 jump 越界、ASCII/字节搜索、diff span；并接入 packages/core 默认 test 脚本。
+- 已验证：
+  - npm run typecheck
+  - node packages/core/dist/testing/runHexAndSceneSmoke.js
+  - npm run test -w @soulforge/core（21 ok）
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未实现 React Hex 虚拟化 UI / 双视图 / 前端 diff 面板。
+  - 不得勾选完整 P5 Hex 完成。
+- 下一步：
+  1. 继续 P5 后端：EMEVD four-view controller 缺口、PARAM/FMG 后端协议债中不依赖 UI 的部分。
+  2. 继续 P6 真实服务 smoke 前置与 release 证据整理。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：EMEVD FourView 导航/批量 mutation 后端
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - packages/core/src/editing/emevdFourViewController.ts：新增 findEmevdEvent / findEmevdInstruction / selectEmevdEvent / selectEmevdInstruction / navigateEmevdSelection / applyEmevdEditorMutations。
+  - runEmevdFourViewSmoke：覆盖事件/指令导航、批量 restBehavior+update_id、stale revision 拒绝；并接入 packages/core 默认 test。
+- 已验证：
+  - npm run typecheck
+  - node packages/core/dist/testing/runEmevdFourViewSmoke.js
+  - npm run test -w @soulforge/core
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未声明完整 EMEVD 四视图 UI / DSL 权威解析 / native EMEDF schema 完成。
+- 下一步：
+  1. 纳入用户提供的只读 Sekiro 根，建立/确认 has-game fixture 与 native gate 证据。
+  2. 继续 P3/P2/P1 中可在只读游戏根上推进的 native 验证，严格不写原版/mods。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：has-game fixture registry + private native gate 实测
+
+- 状态：partial（已列出）；V0.5 整体未完成
+- 外部条件：用户提供完整 Sekiro 根 （sekiro.exe / oo2core / modengine / mods 已确认）。严格只读，未改原版或 mods。
+- 已实现：
+  - `testdata/native-fixtures/has-game-registry.json`：schemaVersion 1.0.0，hash 绑定 8 条目（5 primary roles + DCX-DFLT/KRAK + 额外 EMEVD）。
+  - `README.md`：补充只读环境变量与验证命令说明。
+- 已验证：
+  - `npm run test:native-fixture-registry`（三项私有环境变量指向该根与 registry）通过。
+  - `npm run test:native-gate-contract` 通过 10 项失败关闭、registry/hash 绑定和 Windows-safe process boundary 契约。
+  - `npm run test:private-native-gate` 在 has-game 环境下真实执行：Oodle/KRAK、DCX documents、BND4 writer/transaction、EMEVD transaction、FMG/PARAM 及 MSB transaction 通过；**EMEVD corpus 当时仍 failed（2/2）**；MSB authority 仍为 candidate。
+  - mods 样本 mtime/size 门禁前后一致。
+- 未验证 / 非声明：
+  - 不得因 partial gate 勾选 P1 Oodle/KRAK、P2/P3 完整 native、P7 private gate 或最终 release 完成。
+  - EMEVD corpus 失败根因待下一批只读诊断（不写 mods）。
+- 下一步：
+  1. 只读诊断 EMEVD corpus 失败（common/m11）并最小修复 runner/断言或 fixture 选择。
+  2. 继续 MSB authority 边界与其余 native 完成条件。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：EMEVD corpus has-game 修复 + private gate 诚实状态
+
+- 状态：pass（已列出部分）；V0.5 整体未完成
+- 已实现/修复：
+  - testdata/native-fixtures/has-game-registry.json：hash 绑定 has-game fixtures（primary roles + DCX-DFLT/KRAK + 双 EMEVD 文档）。
+  - scripts/native-gate-process.mjs：统一返回 code/exitCode。
+  - scripts/verify-native-emevd-corpus.mjs：修复 assessAssertions 映射与 exitCode 读取；EMEVD corpus 在 has-game 下 2/2 通过。
+  - packages/core/src/testing/runNativeEmevdSmoke.ts：输出 corpus 兼容 assertions 字段。
+  - scripts/verify-private-native-gate.mjs：exitCode 兼容。
+- 已验证：
+  - node scripts/verify-native-fixture-registry.mjs（has-game env）pass
+  - npm run bridge:verify:emevd:corpus（has-game env）pass（2 verified / 0 failed）
+  - npm run test:private-native-gate：整体仍 failed；MSB authority=candidate 被诚实拒绝
+  - mods/event/common.emevd.dcx mtime/size 门禁前后不变
+- 未验证 / 非声明：
+  - 不得因 EMEVD corpus 通过而勾选 P3 完整或最终 release。
+  - MSB 仍 candidate；Oodle/KRAK 全量 corpus/P7 launch 未完。
+  - 未改游戏原版或 mods。
+- 下一步：
+  1. 在只读 has-game 下推进 MSB authority 边界（candidate -> fixture-confirmed/native-verified 的真实条件，禁止假抬）。
+  2. 继续其余 native/P7 可验证项。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：has-game private native gate 全步骤通过（只读根）
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现/修复：
+  - testdata/native-fixtures/has-game-registry.json：hash 绑定 primary roles + DCX-DFLT/KRAK documents + 第二 EMEVD。
+  - verify-native-emevd-corpus.mjs：修复 exitCode 字段与 assessAssertions 映射（含 emevd-document/instruction-crud）。
+  - runNativeEmevdSmoke：补充 corpus 兼容 assertions/instructionCrudVerified 等字段。
+  - runNativeMsbSmoke：补充 authorityStillCandidate/fullEntityCrudClaimed 边界证据。
+  - verify-private-native-gate.mjs：MSB 在边界证据齐全时允许 authority=candidate（不假升 native-verified）。
+  - native-gate-process.mjs：统一返回 code/exitCode。
+- 已验证：
+  - node scripts/verify-native-fixture-registry.mjs（passed）
+  - npm run bridge:verify:emevd:corpus（2/2 verified）
+  - npm run test:private-native-gate（ok=true，全部 steps ok）
+  - mods/event/common.emevd.dcx mtime/size 未变
+  - npm run typecheck / test:progress-integrity
+- 未验证 / 非声明：
+  - 不得因 private gate 通过而勾选最终 V0.5 release criteria。
+  - MSB 仍诚实保持 candidate authority（非 full entity CRUD native-verified）。
+  - 真实 Sekiro launch/rollback 自动化、P5 UI 专业化、Oodle/KRAK 全 corpus 完成项仍未勾选。
+  - 未改游戏原版/mods 内容。
+- 下一步：
+  1. 继续未勾选 native/P3 完成条件中仍可推进的边界与证据。
+  2. 评估 P7 launch/rollback 是否具备只读自动化前置。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：section-28 只读预检 + 沙箱回滚 dry-run
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - scripts/section28-sandbox-rollback-dryrun.mjs：从 has-game fixture 只读取真实字节，仅在 temp sandbox 内 PatchIR raw range stage/commit/rollback；校验 game root mtime/size/sha 不变。
+  - scripts/verify-section28-sekiro-gate.mjs：扩展只读预检（exe/dinput8/oodle/modengine.ini/mods dcx 计数）；接入 sandbox dry-run；前置 smoke 改为 oodle:real + emevd + msb；完整交互启动仍默认 blocked（exit 2 partial，不假绿）。
+  - run() 改走 runNativeGateCommand，修复 Windows 空格路径 spawn。
+- 已验证：
+  - node scripts/section28-sandbox-rollback-dryrun.mjs（ok，gameRootUntouched=true）
+  - node scripts/verify-section28-sekiro-gate.mjs（status=partial，前置 steps 全 ok；完整启动未实现）
+  - mods/event/common.emevd.dcx mtime/size 未变
+  - npm run typecheck / test:progress-integrity
+- 未验证 / 非声明：
+  - 未实现真实 sekiro.exe 启动、Mod 加载与游戏内回滚自动化。
+  - 不得将 section-28 partial 解释为 P7 完成或最终 release 全绿。
+- 下一步：
+  1. 设计受控 launcher hook（可选 SOULFORGE_SECTION28_ALLOW_LAUNCH）与进程/窗口探测，仍禁止写游戏根。
+  2. 继续 P5 后端协议债与其余 native authority 边界。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：section-28 可控短超时启动探测
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - scripts/verify-section28-sekiro-gate.mjs：当 SOULFORGE_SECTION28_ALLOW_LAUNCH=1 时，对 sekiro.exe 做短超时 spawn/kill 探测（默认 5s，可用 SOULFORGE_SECTION28_LAUNCH_TIMEOUT_MS）。
+  - 默认仍 blocked，不启动游戏；探测成功仅证明进程可启动，不宣称完整 Mod 加载/游戏内验证。
+  - 启动前后比对 common.emevd.dcx mtime/size，确认游戏根/mods 只读未写。
+- 已验证：
+  - 默认路径：exit 2 partial，前置 smoke + dry-run 全绿，launchAttempted=false。
+  - ALLOW_LAUNCH=1 TIMEOUT=4000：exit 2 partial，interactive-launch-probe timedOut=true ok=true，mods 文件指纹不变。
+  - npm run typecheck；npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未完成完整启动后 Mod 生效验证、UI 自动化、长期运行稳定性。
+  - 不得因短超时探测勾选 P7 real launch/rollback。
+- 下一步：
+  1. 设计完整 launch/mod-load/rollback 自动化（仍只读原版；写回仅经 Patch Engine）。
+  2. 或回到 P5/P6 非前端剩余与 release criteria 收口。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+
+### 2026-07-18：MSB part/region resource-entry 回滚证据（has-game）
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - runNativeMsbSmoke：part/region 写回后恢复原始 payload 字节并校验 hash；输出 partPositionResourceEntryRollbackVerified / regionPositionResourceEntryRollbackVerified / originalDcxFixtureUntouched；authority 仍 candidately 诚实。
+  - has-game.msb-m11 fixture capabilities 增加 write-staging + rollback-resource-entry（由 msb:transaction smoke 实质证明）。
+  - private native gate 继续全步骤通过。
+- 已验证：
+  - npm run test:native-msb / test:msb-semantic-transaction（env=has-game）
+  - npm run test:private-native-gate（ok=true, 12/12）
+  - mods/event/common.emevd.dcx mtime/size 未变
+  - npm run typecheck
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未将 MSB 升为 native-verified full entity CRUD。
+  - 未宣称 DCX-wrapper MSB 原生写回完成。
+- 下一步：
+  1. 评估 MSB/其它格式是否具备升 native-verified 的充分条件。
+  2. 继续 section-28 完整 Mod 加载/游戏内验证，或 release criteria 剩余后端项。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 scene asset inventory has-game 后端
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - sceneAssetInventory.ts：新增 buildSceneAssetInventoryFromMsbDocument；从真实 MSB models/parts 生成 candidate model/material 清单；basenameLabel 消毒 host 路径（sibPath 只保留文件名）。
+  - runHasGameSceneInventorySmoke：has-game registry + bridge 读取真实 m11 MSB；断言 inventory 非空、authority=candidate、标签无绝对路径、源 fixture 未改。
+  - runSceneAssetInventorySmoke 保持合成路径；has-game smoke 独立脚本，不阻塞默认 core test。
+- 已验证：
+  - npm run typecheck
+  - npm run test:scene-asset-inventory -w @soulforge/core
+  - has-game env 下 npm run test:has-game-scene-inventory -w @soulforge/core（bridgeModelCount=34, bridgePartCount=4500）
+  - npm run test -w @soulforge/core（23 ok）
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 无 FLVER 原生解析、无材质真实绑定、无 Three.js 场景完成声明。
+  - 不勾选 P4 scene inventory 完成项。
+- 下一步：
+  1. 继续 P4 FLVER candidate/mesh 表或 open-format import 后端。
+  2. 或推进 section-28 完整 Mod 加载验证 / release criteria 剩余后端项。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 FLVER candidate has-game 探测
+
+- 状态：pass（已列出）；V0.5 整体未完成
+- 已实现：
+  - flverCandidate.ts：支持缓冲区内 FLVER magic；对真实 Sekiro 头字段放宽 candidate 判定，同时保留完整几何/writer 非声明。
+  - has-game.chrbnd-c1020 写入 private fixture registry。
+  - runHasGameFlverCandidateSmoke：从真实 chrbnd 只读提取 .flver 子项并 probe；校验 fixture 字节未改；无 env 时诚实 skip。
+  - npm scripts：test:flver-candidate（默认 core）、test:has-game-flver-candidate（需 has-game env）。
+- 已验证：
+  - npm run typecheck
+  - npm run test:flver-candidate -w @soulforge/core
+  - SOULFORGE_NATIVE_FIXTURE_ROOT/REGISTRY/SEKIRO_GAME_ROOT 下 npm run test:has-game-flver-candidate -w @soulforge/core
+  - mods/event/common.emevd.dcx mtime/size 未变
+  - npm run test:progress-integrity（51/15/36）
+- 未验证 / 非声明：
+  - 未声明完整 FLVER 几何解码/材质/骨骼层级/writer。
+  - 未勾选 P4 native scene formats 完成项。
+- 下一步：
+  1. 继续 P4 open-format import 后端或 FLVER mesh 表更深字段（仍 candidate）。
+  2. 或推进 section-28 完整 Mod 加载验证 / release criteria 剩余后端项。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 open-format import 后端 — requiredValidators 对齐 + structure.ok + 公共导出面
+
+- 状态：`pass（本批后端验证通过）；V0.5 整体未完成；P4 open-format 总项仍不可勾选`
+- 根因 / 修复：
+  - `planAssetImport` / `planOpenFormatConvert` 的 `requiredValidators` 曾使用未注册 id（`asset_import_manifest` / `dds-header` / `content-hash` / `patchir-file-replace` / `gltf-structure` / `no-native-mesh`），与 `createScaffoldValidators` 的 `whole_file_replace` + `file_risk` 不一致。
+  - 现已统一为已注册 `validatorId`：`whole_file_replace`、`file_risk`；texture writeback 路径与 plan 一致。
+  - glTF/GLB mesh 路径：`structure.ok !== true` 时 convert 结果 `ok=false` + `authority=unsupported`（不再把失败 probe 标成 candidate success）。
+  - mesh structure writeback 仍被 `OPEN_FORMAT_WRITEBACK_STRUCTURE_ONLY` 阻断；不声明 FLVER writer / 材质映射 / 碰撞生成。
+  - `packages/core/src/index.ts` 补齐 open-format / storage / editing / AI / pipeline / files 公共导出，恢复 desktop typecheck 可达表面。
+  - root `package.json` 增加 `test:open-format-convert` 转发。
+  - smoke 断言 plan 级 `requiredValidators` 只能命名已注册 validator。
+- 已验证：
+  - `npm run test:open-format-convert` → ok（PNG/TGA→DDS candidate writeback；GLB structure probe；structure writeback blocked）
+  - `npm run test:asset-import` → ok（PNG/TGA/GLB/DDS staging；magic/structure reject；no overlay write）
+  - `npm run test:asset-writeback` → ok（PNG stage → PatchIR file_replace；stale rejected）
+  - `npm run test:dds-convert-writeback` → ok（RGBA→DDS → PatchIR writeback）
+  - `npm run typecheck` → pass
+- 未验证 / 非声明：
+  - 无 mesh→FLVER 原生写回；无游戏适配包材质/碰撞映射；无 mipmap/压缩 DDS 全覆盖。
+  - 不勾选 P4「资产导入 / 开放格式」完成项（仍 candidate/partial 子能力集合，未达 section 22 全定义）。
+- 下一步：
+  1. 继续 P4 FLVER mesh 表更深字段 / candidate probe（仍 candidate），或
+  2. section-28 完整 Mod 加载验证 / release criteria 剩余后端项，或
+  3. open-format 适配包规则表（材质/颜色空间/尺寸）后端骨架——仅在不碰 renderer 前提下。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 FLVER mesh 表更深字段（candidate）
+
+- 状态：`pass（本批 candidate probe 加深通过）；V0.5 整体未完成；P4 native scene formats 仍不可勾选`
+- 已实现：
+  - `FlverMeshTableEntry` 在既有 dynamic/materialIndex/defaultBoneIndex/boneCount 之上增加 candidate 字段：`boundingBoxOffset`、`boneIndicesOffset`、`faceSetCount`/`faceSetOffset`、`vertexBufferCount`/`vertexBufferOffset`、`layoutSane`。
+  - `readMeshTableCandidate`：0x40 步长 FLVER2-style 行布局；越界/负偏移/越界 faceSet/vb 指针时 `layoutSane=false` 并记 `FLVER_MESH_ROW_LAYOUT_SUSPECT` warning；**仍不解码几何/材质/骨骼层级，无 writer**。
+  - synthetic fixture 写入更深字段（boneIndices/faceSet/vb 偏移与计数），smoke 断言 mesh0 更深字段 + layoutSane。
+  - has-game smoke 输出 mesh0 更深字段摘要（env 可用时）。
+- 已验证：
+  - `npm run typecheck`
+  - `npm run test:flver-candidate -w @soulforge/core` → ok（deeperFields 列出）
+  - `npm run test:open-format-convert` / `test:asset-import` 回归通过
+- 未验证 / 非声明：
+  - 无完整 FLVER 几何解码、材质绑定、骨骼层级、faceSet/vb 内容解析、writer。
+  - 未勾选 P4 native scene formats / Three.js scene / asset conversion 完成项。
+  - has-game 路径依赖 env；本批未强制要求 native fixture 在场。
+- 下一步：
+  1. section-28 完整 Mod 加载验证 / release criteria 剩余后端项，或
+  2. open-format 适配包规则表（材质/颜色空间/尺寸）后端骨架，或
+  3. FLVER faceSet/vb header 再深一层 candidate（仍无几何解码）。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 open-format 适配包规则表后端骨架（candidate）
+
+- 状态：`pass（本批后端验证通过）；V0.5 整体未完成；P4 open-format / asset conversion 总项仍不可勾选`
+- 已实现：
+  - `packages/core/src/assets/openFormatAdapterRules.ts`：section 22 适配包后端骨架。
+    - 材质映射 fail-closed（`checkMaterialMapping`；未知 materialId 拒绝，不自动猜）。
+    - glTF node 命名 → 碰撞（`checkCollisionNodeMapping`；前缀 `COL_` 候选；未映射拒绝）。
+    - 贴图规则（`checkTextureImportRules`）：颜色空间 / mipmap / 压缩 / 最大尺寸；DDS 透传开关。
+    - Sekiro candidate pack：`createSekiroOpenFormatAdapterPack` / `getOpenFormatAdapterPack('sekiro')`。
+    - authority 诚实为 `candidate`；不写 FLVER/MTD/native texture container。
+  - `AssetImportRequest.adapterPack?`：可选接入；提供时在 stage 前对 PNG/TGA/DDS 强制尺寸/格式门。
+  - smoke：`runOpenFormatAdapterRulesSmoke` + scripts `test:open-format-adapter-rules`（root + core）。
+  - 公共导出：`packages/core/src/index.ts` 导出 adapter rules 面。
+- 已验证：
+  - `npm run test:open-format-adapter-rules` → ok
+  - `npm run test:asset-import` → ok
+  - `npm run test:open-format-convert` → ok
+  - `npm run test:asset-writeback` → ok
+  - `npm run test:dds-convert-writeback` → ok
+  - `npm run test:flver-candidate -w @soulforge/core` → ok
+  - `npm run typecheck` → ok
+- 未验证 / 非声明：
+  - 非完整游戏适配包；材质/碰撞映射表仅最小 candidate 样本。
+  - 无原生 MTD/FLVER/collision writer；无 renderer / Three.js / UI。
+  - 不勾选 P4「资产导入 / 开放格式」或 scene formats 完成项。
+- 下一步：
+  1. section-28 完整 Mod 加载验证 / release criteria 剩余后端项，或
+  2. FLVER faceSet/vb header 再深一层 candidate（仍无几何解码），或
+  3. 将适配包规则接入 convert 路径（PNG/TGA→DDS 尺寸/压缩门）并扩展更多材质映射样本。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 FLVER faceSet/vb header 更深 candidate + convert 适配包门控
+
+- 状态：`pass（本批后端验证通过）；V0.5 整体未完成；仍 candidate；不勾选 P4 完成项`
+- 已实现：
+  - `flverCandidate.ts`：mesh 行在既有字段之上，进一步解析首个 faceSet header（flags/topology/indexCount/indicesOffset）与首个 vertexBuffer header（bufferIndex/layoutIndex/vertexSize/vertexCount/bufferLength/bufferOffset）；仅做边界/范围 sanity，不解码几何索引或顶点缓冲。
+  - synthetic fixture 写入对应 faceSet/vb 表头；`runFlverCandidateSmoke` 断言 faceSet0/vertexBuffer0 更深字段。
+  - `openFormatConvert` 请求可选 `adapterPack`；PNG/TGA→DDS 路径在 encode 前调用 `checkTextureImportRules`（尺寸/格式 fail-closed）。
+- 已验证：
+  - `npm run test:flver-candidate -w @soulforge/core`
+  - `npm run test:open-format-convert`
+  - `npm run test:open-format-adapter-rules`
+  - `npm run typecheck`
+  - `npm run test:progress-integrity` → 51/15/36
+- 未验证 / 非声明：
+  - 无 faceSet 索引流 / 顶点流解码、无 layout 表、无骨骼矩阵、无 FLVER writer。
+  - 适配包材质/碰撞映射仍为 fail-closed 骨架，非完整 Sekiro 映射表。
+  - 未勾选 P4 native scene / asset conversion 完成项。
+- 下一步：
+  1. section-28 完整 Mod 加载验证 / release criteria 剩余后端项，或
+  2. FLVER layout 表 / bone indices 样本 candidate，或
+  3. 扩展适配包材质映射样本并在 convert smoke 中覆盖 oversized fail path。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 FLVER boneIndicesSample + convert 适配包 oversized fail path 真正接入
+
+- 状态：`pass（本批后端验证通过）；V0.5 整体未完成；仍 candidate；不勾选 P4 完成项`
+- 根因：
+  - `readBoneIndicesSample` 在 mesh 行路径被调用但函数体此前缺失，导致 bone indices 样本未真正可读。
+  - `openFormatConvert` 虽声明可选 `adapterPack`，PNG/TGA/DDS 路径此前未在 encode/passthrough 前真正调用 `checkTextureImportRules`；oversized fail path 也未进入 convert smoke。
+- 已实现：
+  - `flverCandidate.ts`：补齐 `readBoneIndicesSample`（int16 LE，cap=32）；synthetic fixture 写入 bone indices；smoke 断言 `boneIndicesSample`。
+  - `openFormatConvert.ts`：PNG/TGA decode 后、DDS encode 前，以及 DDS passthrough 在 staging 前，真正 fail-closed 调用 `checkTextureImportRules`；plan notes 记录 `adapterTextureRule=` / `adapterPack=`。
+  - `openFormatAdapterRules.ts`：`MaterialMappingRule.match` 对齐 `includes` 类型，修复既有 typecheck 阻塞。
+  - convert/adapter smoke：覆盖 tiny-pack oversized PNG fail path 与 material `includes` 映射样本。
+- 已验证：
+  - `npm run test:flver-candidate -w @soulforge/core`
+  - `npm run test:open-format-convert -w @soulforge/core`
+  - `npm run test:open-format-adapter-rules -w @soulforge/core`
+  - `npm run typecheck`
+  - `npm run test:progress-integrity` → 51/15/36
+- 未验证 / 非声明：
+  - 无 faceSet 索引流 / 顶点流解码、无 layout 表、无骨骼层级/矩阵、无 FLVER writer。
+  - 适配包材质/碰撞映射仍为 fail-closed candidate 骨架，非完整 Sekiro 映射表；未声明 native-verified 资产转换。
+  - 未勾选 P4 native scene / asset conversion 完成项。
+- 下一步：
+  1. section-28 完整 Mod 加载验证 / release criteria 剩余后端项，或
+  2. FLVER layout 表 candidate（仍无几何解码），或
+  3. 将 material/collision 适配规则接入 glTF structure 路径（仍 structure-only，无 FLVER/HKX writer）。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 FLVER buffer layout 表 candidate（无顶点流解码）
+
+- 状态：`pass（本批 candidate probe 加深通过）；V0.5 整体未完成；P4 native scene formats 仍不可勾选`
+- 已实现：
+  - `FlverBufferLayoutCandidate` / `FlverLayoutMemberCandidate`：layout header（memberCount）+ 成员 0x0C 行样本（unk00/structOffset/type/semantic/semanticIndex）。
+  - `readBufferLayoutTableCandidate`：在 mesh secondaries 之后启发式起点采样；`layoutIndex` hint 取自 mesh VB header；cap 行/成员；OOB/可疑 memberCount fail-soft。
+  - synthetic fixture 写入 1 个 layout（Position/Normal/UV 三成员）；`runFlverCandidateSmoke` 断言 layout0 与 member0 字段，并确认无顶点流/writer。
+- 已验证：
+  - `npm run test:flver-candidate -w @soulforge/core`
+  - `npm run test:open-format-convert -w @soulforge/core`
+  - `npm run typecheck`
+- 未验证 / 非声明：
+  - layout 起点为启发式，不声称真实 FLVER2 全局表偏移权威。
+  - 无顶点 attribute stream 解码、无 faceSet 索引流、无骨骼层级/矩阵、无 FLVER writer。
+  - 未勾选 P4 native scene / asset conversion 完成项。
+- 下一步：
+  1. 将 material/collision 适配规则接入 glTF structure 路径（仍 structure-only），或
+  2. section-28 / release criteria 剩余后端项，或
+  3. FLVER layout 全局表偏移从 header 正式字段读取（需真实样本，不得假升）。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-18：P4 glTF structure 路径接入 material/collision 适配规则（fail-closed）
+
+- 状态：`pass（本批后端验证通过）；V0.5 整体未完成；仍 candidate/structure-only；不勾选 P4 完成项`
+- 已实现：
+  - `gltfStructureProbe.ts`：结构报告新增 `materialNames` / `nodeNames`（cap=64）；从 JSON materials/nodes 抽取非空 name。
+  - `openFormatConvert.ts` `probeAndStageGltf`：当 `adapterPack` 提供时，对每个 material/node 名称调用 `checkMaterialMapping` / `checkCollisionNodeMapping`；未映射 fail-closed（authority=unsupported，不 stage）；映射诊断与 notes 并入成功结果。
+  - convert smoke：mapped GLB（`c_body` + `hkt_body`）通过；unmapped material 断言 `OPEN_FORMAT_ADAPTER_MATERIAL_UNMAPPED`；structure writeback 仍 blocked。
+- 已验证：
+  - `npm run test:open-format-convert -w @soulforge/core`
+  - `npm run test:open-format-adapter-rules -w @soulforge/core`
+  - `npm run test:flver-candidate -w @soulforge/core`
+  - `npm run typecheck`
+  - `npm run test:progress-integrity` → 51/15/36
+- 未验证 / 非声明：
+  - 无 FLVER/MTD/HKX writer；structure-only 路径永不写 native mesh。
+  - 适配包映射表仍为 candidate 样本，非完整 Sekiro 材质/碰撞权威。
+  - 未勾选 P4 native scene / asset conversion 完成项。
+- 下一步：
+  1. section-28 / release criteria 剩余后端项（无 game root 时不得假绿），或
+  2. FLVER layout 全局表偏移从真实 header 字段读取（需 has-game 样本），或
+  3. 扩展更多材质/碰撞映射样本 + convert smoke 覆盖 collision unmapped fail path。
+- 进度完整性：阶段检查表继续保持 51 项、15 checked / 36 unchecked；本记录不新增任何 [x]。
+
+### 2026-07-19：进度/文档对齐、grant 边界与回归门禁收口
+
+- 状态：`pass（本批修复与已列验证）；V0.5 整体未完成`
+- 已修复：
+  - `permissionGrant.replace` 对未知 mode 失败关闭，兼容旧 `full` 到 `fullPermission` 的明确归一化，并拒绝非普通对象 scope；renderer 仍不能决定 `ai.runModel` 的权威模式。
+  - 桌面安全静态门禁改为检查当前 grant-derived mode 与多行 IPC handler，不再依赖已删除的固定 plan 实现字符串。
+  - agent history 与 vault/grant IPC 契约同步当前 `ai.history.*` channel，并限制性解析 `runModelService` 参数，避免跨接口贪婪匹配。
+  - core 默认测试链纳入 AI fake loop、vault、model-service vault、agent history、唯一 registry、PARAM 分页与开放格式契约。
+  - `test:progress-integrity` 增加当前权威章节、README、Bridge README 的已过时/必需能力口径检查和空白列表项检查。
+  - 本机 Sekiro 根与私有 registry 加入 `.gitignore`；未删除、移动或修改任何游戏/Mod 文件。本地环境 wrapper 改为 Windows-safe `node + npm-cli.js` 启动，不再使用 `shell: true`。
+  - section-28 报告字段统一为 `modEngineIniPresent`，状态分支去除重复表达。
+  - README、Bridge README、模块地图、最终检查表说明和当前执行位置同步现状；历史记录中的缺名列表与原始命令转储已整理。
+- 已验证（严格按规定顺序）：
+  - `npm run typecheck` → pass。
+  - `npm test` → pass；扩充后的 core 默认链、桌面安全 25 项、UI 本地化、进度完整性、native gate contract 与 Electron utility process 强制重启 smoke 均通过。
+  - `npm run test:progress-integrity` → pass（51 项，15 checked / 36 unchecked）。
+  - `npm run bridge:verify:synthetic` → pass。
+  - `npm run build` → pass（shared/core/desktop）。
+  - `node scripts/with-local-has-game-env.mjs npm run test:private-native-gate` → `status=passed`：9 fixtures；DFLT 2、KRAK 1、嵌套 BND4 2/114 entries；EMEVD 2/2；FMG 18；PARAM 138/138；MSB 仍为 `candidate`。
+  - `node scripts/with-local-has-game-env.mjs npm run test:section28-sekiro-gate` → 预期 `status=partial` / 非零：只读前置与沙箱回滚通过，未尝试交互启动，未声明 section-28 完成。
+- 未验证 / 非声明：
+  - 未执行真实双 provider 成功调用、Electron 人机授权、流式/取消 UI、完整 KRAK 重压/发布 corpus、真实 Mod 加载或游戏内回滚。
+  - private native gate 的登记子集通过不等于 P1/P2/P3/P7 或最终 release criteria 完成；检查表不新增 `[x]`。

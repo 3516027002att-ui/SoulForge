@@ -2,7 +2,7 @@ import { app, BrowserWindow } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
-import { disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
+import { disposeOperationLogUtility, initializeAppData, registerIpcHandlers } from './ipc.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
@@ -71,8 +71,16 @@ function resolveDevelopmentRendererUrl(): string | null {
   return url.href;
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await initializeAppData();
   createWindow();
+
+  const retentionTimer = setInterval(() => {
+    void initializeAppData().catch((error: unknown) => {
+      process.stderr.write(`[SoulForge AI retention] ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+  }, 24 * 60 * 60 * 1_000);
+  retentionTimer.unref();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

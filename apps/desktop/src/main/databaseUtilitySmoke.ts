@@ -33,6 +33,11 @@ app.whenReady().then(async () => {
     resolve(here, '../../.native/better_sqlite3.node')
   );
   try {
+    await client.openApp(join(root, 'app.db'));
+    const appOnlyHealth = await client.health();
+    if (!appOnlyHealth.appReady || appOnlyHealth.ready || appOnlyHealth.workspaceId) {
+      throw new Error('Database utility app-only handshake failed.');
+    }
     await client.openWorkspace({
       appDatabasePath: join(root, 'app.db'),
       databasePath: join(root, 'workspace.db'),
@@ -53,6 +58,22 @@ app.whenReady().then(async () => {
     if (!health.ready || !health.appReady || health.workspaceId !== workspaceId) {
       throw new Error('Database utility health handshake failed.');
     }
+    const appService = await client.upsertModelService({
+      id: 'utility-model-service', displayName: 'Utility model service',
+      protocol: 'openai-compatible', baseUrl: 'https://model.invalid', model: 'utility-model',
+      hasCredential: true, credentialCiphertext: Buffer.from('ciphertext').toString('base64'),
+      createdAt: nowForUtility(), updatedAt: nowForUtility()
+    });
+    const planGrant = await client.replacePermissionGrant({
+      grantId: 'utility-plan-grant', serviceId: appService.id, policyVersion: '1',
+      permissionMode: 'plan', scope: { tools: ['read', 'analyze', 'propose'] },
+      grantedAt: nowForUtility()
+    });
+    if ((await client.listModelServices()).length !== 1
+      || (await client.getActivePermissionGrant(appService.id, 'plan', '1'))?.grantId !== planGrant.grantId
+      || await client.getActivePermissionGrant(appService.id, 'plan', 'future')) {
+      throw new Error('Database utility app repository round trip failed.');
+    }
     if (records.length !== 2 || !records.some((entry) => entry.opId === legacyRecord.opId)) {
       throw new Error('Database utility did not import and persist both operations.');
     }
@@ -69,7 +90,7 @@ app.whenReady().then(async () => {
       operations: [{
         id: 'utility-journal-edit', kind: 'text_edit', targetUri: 'file://journaled.txt',
         targetPath, newText: 'after\n', preconditions: [],
-        validatorRequirements: [{ validatorId: 'text_non_empty', scope: 'staged_output', required: true }],
+        validatorRequirements: [{ validatorId: 'text_file', scope: 'staged_output', required: true }],
         riskLevel: 'low'
       }]
     }), { session, operationLog: client });
@@ -165,7 +186,9 @@ app.whenReady().then(async () => {
     if (!restartedHealth.ready
       || !(await client.listAuditEvents()).some((item) => item.transactionId === committed.operation?.transactionId)
       || (await client.searchFiles('test')).length !== 1
-      || (await client.listJobs()).length !== 1) {
+      || (await client.listJobs()).length !== 1
+      || (await client.listModelServices())[0]?.id !== appService.id
+      || (await client.getActivePermissionGrant(appService.id, 'plan', '1'))?.grantId !== planGrant.grantId) {
       throw new Error('Database utility restart did not reopen durable state.');
     }
     process.stdout.write(`${JSON.stringify({
@@ -175,6 +198,7 @@ app.whenReady().then(async () => {
       health,
       durableRepositories: true,
       indexRepositories: true,
+      appRepositories: true,
       forcedRestart: true
     }, null, 2)}\n`);
     await client.dispose();
@@ -188,6 +212,10 @@ app.whenReady().then(async () => {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   app.exit(1);
 });
+
+function nowForUtility(): string {
+  return '2026-07-15T00:00:00.000Z';
+}
 
 function makeRecord(workspaceId: string, opId: string): OperationLogRecord {
   const now = new Date().toISOString();

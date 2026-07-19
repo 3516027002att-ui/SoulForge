@@ -18,8 +18,10 @@ export class RawFileValidator implements ValidatorContract {
     operations: PatchIrOperation[];
   }): Promise<ValidatorResult> {
     const diagnostics = [];
+    const validatedOperationIds: string[] = [];
     for (const op of input.operations) {
       if (op.kind !== 'raw_byte_range_edit') continue;
+      validatedOperationIds.push(op.id);
       if (!op.expectedHash) {
         diagnostics.push(createDiagnostic({
           severity: 'error',
@@ -63,7 +65,8 @@ export class RawFileValidator implements ValidatorContract {
       ok: diagnostics.every((item) => item.severity !== 'error'),
       diagnostics,
       scope: 'before_staging',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds
     };
   }
 
@@ -74,6 +77,9 @@ export class RawFileValidator implements ValidatorContract {
     stagedPaths: string[];
   }): Promise<ValidatorResult> {
     const diagnostics = [];
+    const validatedOperationIds = input.operations
+      .filter((op) => op.kind === 'raw_byte_range_edit')
+      .map((op) => op.id);
     for (const path of input.stagedPaths) {
       try {
         const bytes = await readFile(path);
@@ -98,7 +104,8 @@ export class RawFileValidator implements ValidatorContract {
       ok: diagnostics.every((item) => item.severity !== 'error'),
       diagnostics,
       scope: 'staged_output',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds
     };
   }
 }

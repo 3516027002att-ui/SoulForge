@@ -10,6 +10,7 @@ import {
   projectJobs,
   projectPatchImpact
 } from '../editing/workbenchProjections.js';
+import { PATCH_IR_SCHEMA_VERSION } from '@soulforge/shared';
 import type { PatchHistoryEntry, PatchIR, StructuredDiagnostic } from '@soulforge/shared';
 
 async function main(): Promise<void> {
@@ -68,6 +69,7 @@ async function main(): Promise<void> {
   });
 
   const patch: PatchIR = {
+    schemaVersion: PATCH_IR_SCHEMA_VERSION,
     patchId: 'patch-1',
     workspaceId: 'ws-demo',
     title: 'demo',

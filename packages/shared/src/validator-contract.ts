@@ -18,6 +18,12 @@ export interface ValidatorResult {
   diagnostics: StructuredDiagnostic[];
   scope: ValidationScope;
   validatorId: string;
+  /**
+   * Operation ids actually inspected by this validator invocation.
+   * WorkspaceTransaction requires this evidence whenever an operation declares
+   * the validator as required for the current concrete phase.
+   */
+  validatedOperationIds?: string[];
 }
 
 export interface ValidatorContract {

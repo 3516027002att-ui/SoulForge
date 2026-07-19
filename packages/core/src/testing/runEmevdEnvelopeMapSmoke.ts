@@ -37,7 +37,10 @@ function main(): void {
   if (doc.events[0]!.instructions.length !== 2) throw new Error('instr count');
   if (doc.events[0]!.instructions[0]!.bank !== 2000) throw new Error('bank');
   if (doc.events[0]!.instructions[0]!.unknown !== false) throw new Error('known sample');
-  if (!doc.events[0]!.eventUri.endsWith('#event/50')) throw new Error('uri');
+  if (!doc.events[0]!.eventUri.endsWith('#event/50/index/0')) throw new Error('uri');
+  if (doc.events[0]!.eventIndex !== 0 || doc.events[1]!.eventIndex !== 1) {
+    throw new Error('event index mapping');
+  }
   if (!doc.diagnostics.some((d) => d.code === 'EMEVD_AUTHORITY')) {
     throw new Error('authority diagnostic');
   }
@@ -49,6 +52,19 @@ function main(): void {
   if (truncated.events.length !== 5) throw new Error('maxEvents');
   if (!truncated.diagnostics.some((d) => d.code === 'EMEVD_EDITOR_EVENTS_TRUNCATED')) {
     throw new Error('truncation diagnostic');
+  }
+
+  const duplicateIds = emevdEnvelopeToEditorDocument('file://duplicates', {
+    eventCount: 2,
+    events: [
+      { id: 88881000, eventIndex: 3, restBehavior: 0, instructionCount: 0 },
+      { id: 88881000, eventIndex: 9, restBehavior: 1, instructionCount: 0 }
+    ]
+  });
+  if (duplicateIds.events[0]!.eventUri === duplicateIds.events[1]!.eventUri
+    || duplicateIds.events[0]!.eventIndex !== 3
+    || duplicateIds.events[1]!.eventIndex !== 9) {
+    throw new Error('duplicate event IDs must retain distinct index-bound identities');
   }
 
   console.log(JSON.stringify({

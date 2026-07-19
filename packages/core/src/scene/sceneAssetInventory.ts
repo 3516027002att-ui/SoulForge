@@ -109,11 +109,11 @@ function inferModelLabel(node: SceneNode): string {
 }
 
 function sanitizeLabel(value: string): string {
-  return value
-    .replace(/\\/g, '/')
-    .replace(/^[a-zA-Z]:/, '')
-    .replace(/^\/+/, '')
-    .slice(0, 200);
+  let out = String(value ?? "");
+  // Normalize separators then keep only the last path segment to avoid host path leakage.
+  out = out.split(String.fromCharCode(92)).join("/").split("/").filter(Boolean).pop() ?? out;
+  out = out.replace(/^[a-zA-Z]:/, "");
+  return out.slice(0, 200);
 }
 
 function upsert(
@@ -144,4 +144,106 @@ function upsert(
   if (existing.partNames.length < 32) {
     existing.partNames.push(input.partName);
   }
+}
+
+
+export interface MsbInventoryModelLike {
+  name: string;
+  sibPath?: string;
+}
+
+export interface MsbInventoryPartLike {
+  name: string;
+  modelName?: string;
+}
+
+function basenameLabel(value: string | undefined): string {
+  if (!value) return "";
+  let out = String(value);
+  out = out.split(String.fromCharCode(92)).join("/");
+  const parts = out.split("/").filter(Boolean);
+  out = parts.length > 0 ? parts[parts.length - 1]! : out;
+  if (/^[a-zA-Z]:/.test(out)) out = out.slice(2);
+  return out.slice(0, 200);
+}
+
+/** Build candidate inventory from real MSB models/parts (no FLVER parse). */
+export function buildSceneAssetInventoryFromMsbDocument(input: {
+  mapResourceUri: string;
+  models?: readonly MsbInventoryModelLike[];
+  parts: readonly MsbInventoryPartLike[];
+}): SceneAssetInventory {
+  const map = new Map<string, SceneAssetRef>();
+  const diagnostics: StructuredDiagnostic[] = [];
+  const models = input.models ?? [];
+  for (const model of models) {
+    const modelName = basenameLabel(model.name);
+    if (!modelName) continue;
+    upsert(map, {
+      assetId: "model:" + modelName,
+      kind: "model",
+      label: modelName,
+      resourceLabel: modelName,
+      partName: "(model-table)",
+      authority: "candidate"
+    });
+    const sib = basenameLabel(model.sibPath);
+    if (sib) {
+      upsert(map, {
+        assetId: "material-sib:" + sib,
+        kind: "material",
+        label: sib,
+        resourceLabel: sib,
+        partName: "(model-table)",
+        authority: "candidate"
+      });
+    }
+  }
+  for (const part of input.parts) {
+    const partName = basenameLabel(part.name) || "part";
+    const linked = basenameLabel(part.modelName);
+    if (linked) {
+      upsert(map, {
+        assetId: "model:" + linked,
+        kind: "model",
+        label: linked,
+        resourceLabel: linked,
+        partName,
+        authority: "candidate"
+      });
+      upsert(map, {
+        assetId: "material-candidate:" + linked,
+        kind: "material",
+        label: linked + " material-slot",
+        resourceLabel: "material-candidate/" + linked,
+        partName,
+        authority: "candidate"
+      });
+    } else {
+      const token = partName.includes("_") ? partName.split("_")[0]! : partName;
+      upsert(map, {
+        assetId: "model-candidate:" + token,
+        kind: "model",
+        label: token,
+        resourceLabel: "model-candidate/" + token,
+        partName,
+        authority: "candidate"
+      });
+    }
+  }
+  if (map.size === 0) {
+    diagnostics.push(createDiagnostic({
+      severity: "warning",
+      code: "SCENE_INVENTORY_EMPTY",
+      message: "MSB document produced no candidate assets."
+    }));
+  }
+  const assets = [...map.values()].sort((a, b) => a.assetId.localeCompare(b.assetId));
+  return {
+    mapResourceUri: input.mapResourceUri,
+    partCount: input.parts.length,
+    modelCount: assets.filter((a) => a.kind === "model").length,
+    assets,
+    diagnostics
+  };
 }

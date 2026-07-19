@@ -80,6 +80,29 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "extract-bnd4-child")
+        {
+            if (string.IsNullOrWhiteSpace(outputPath))
+                return BridgeResult<object>.Failed(file, resourceKind, "BRIDGE_OUTPUT_PATH_REQUIRED", "BND4 extraction requires a validated staging output path.");
+            try
+            {
+                var extracted = await Bnd4NativeWriter.ExtractChildAsync(
+                    file,
+                    outputPath,
+                    options,
+                    cancellationToken,
+                    oodleRuntimeRoot);
+                return BridgeResult<object>.Partial(file, resourceKind, new[]
+                {
+                    new Diagnostic("info", "BND4_CHILD_EXTRACTED_TO_STAGING", "BND4 子项已提取到受控暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), extracted)
+                }, extracted);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, resourceKind, "BND4_CHILD_EXTRACTION_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-fmg-document")
         {
             try
@@ -131,6 +154,10 @@ internal sealed class BridgeCommandService
             {
                 var document = ParamNativeDocument.ReadFile(file);
                 var roundTrip = document.VerifyRoundTrip();
+                var rowOffset = OptionalInt(options, "rowOffset", 0);
+                var rowLimit = OptionalInt(options, "rowLimit", 32);
+                var rowId = OptionalNullableInt(options, "rowId");
+                var includePayloads = OptionalBool(options, "includePayloads", true);
                 var diagnostics = new[]
                 {
                     new Diagnostic(
@@ -144,14 +171,19 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
-                // Detect legacy header-embedded type-name layout and fail closed with a clear code.
-                return BridgeResult<object>.Partial(file, "param", diagnostics, document.ToEnvelope(roundTrip));
+                return BridgeResult<object>.Partial(
+                    file,
+                    "param",
+                    diagnostics,
+                    document.ToEnvelope(roundTrip, rowOffset, rowLimit, rowId, includePayloads));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
-                var code = ex.Message.Contains("首行数据偏移", StringComparison.Ordinal)
-                    ? "PARAM_LAYOUT_UNSUPPORTED"
-                    : "PARAM_DOCUMENT_READ_FAILED";
+                var code = ex.Message.StartsWith("PARAM read options:", StringComparison.Ordinal)
+                    ? "PARAM_READ_OPTIONS_INVALID"
+                    : ex.Message.Contains("首行数据偏移", StringComparison.Ordinal)
+                        ? "PARAM_LAYOUT_UNSUPPORTED"
+                        : "PARAM_DOCUMENT_READ_FAILED";
                 return BridgeResult<object>.Failed(file, "param", code, ex.Message);
             }
         }
@@ -178,9 +210,83 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                // Accept raw EMEVD or DFLT-wrapped DCX payload path: caller must pass decompressed EVD bytes file.
-                var document = EmevdNativeDocument.ReadFile(file);
+                var source = EmevdNativeSource.Read(file, oodleRuntimeRoot);
+                var document = source.Document;
                 var roundTrip = document.VerifyRoundTrip();
+                int? focusEventIndex = null;
+                int? focusInstructionLocalIndex = null;
+                int? snapshotEventIndex = null;
+                long? snapshotEventIdOverride = null;
+                int? snapshotInstructionEventIndex = null;
+                int? snapshotInstructionLocalIndex = null;
+                int? instructionOrderEventIndex = null;
+                EmevdInstructionAuthoringRequest? instructionAuthoringRequest = null;
+                if (options.ValueKind == JsonValueKind.Object)
+                {
+                    if (options.TryGetProperty("focusEventIndex", out var fei)
+                        && fei.ValueKind == JsonValueKind.Number)
+                        focusEventIndex = fei.GetInt32();
+                    if (options.TryGetProperty("focusInstructionLocalIndex", out var fii)
+                        && fii.ValueKind == JsonValueKind.Number)
+                        focusInstructionLocalIndex = fii.GetInt32();
+                    if (options.TryGetProperty("snapshotEventIndex", out var sei)
+                        && sei.ValueKind == JsonValueKind.Number)
+                        snapshotEventIndex = sei.GetInt32();
+                    if (options.TryGetProperty("snapshotEventIdOverride", out var seio)
+                        && seio.ValueKind == JsonValueKind.Number)
+                        snapshotEventIdOverride = seio.GetInt64();
+                    if (options.TryGetProperty("snapshotInstructionEventIndex", out var siei)
+                        && siei.ValueKind == JsonValueKind.Number)
+                        snapshotInstructionEventIndex = siei.GetInt32();
+                    if (options.TryGetProperty("snapshotInstructionLocalIndex", out var sili)
+                        && sili.ValueKind == JsonValueKind.Number)
+                        snapshotInstructionLocalIndex = sili.GetInt32();
+                    if (options.TryGetProperty("instructionOrderEventIndex", out var ioei)
+                        && ioei.ValueKind == JsonValueKind.Number)
+                        instructionOrderEventIndex = ioei.GetInt32();
+
+                    var hasAuthorEventIndex = options.TryGetProperty(
+                        "authorInstructionEventIndex",
+                        out var authorEventIndex);
+                    var hasAuthorInstructionIndex = options.TryGetProperty(
+                        "authorInstructionIndex",
+                        out var authorInstructionIndex);
+                    var hasAuthorBank = options.TryGetProperty(
+                        "authorInstructionBank",
+                        out var authorBank);
+                    var hasAuthorInstructionId = options.TryGetProperty(
+                        "authorInstructionId",
+                        out var authorInstructionId);
+                    var hasAuthorArgsBase64 = options.TryGetProperty(
+                        "authorInstructionArgsBase64",
+                        out var authorArgsBase64);
+                    if (hasAuthorEventIndex
+                        || hasAuthorInstructionIndex
+                        || hasAuthorBank
+                        || hasAuthorInstructionId
+                        || hasAuthorArgsBase64)
+                    {
+                        if (!hasAuthorEventIndex
+                            || !authorEventIndex.TryGetInt32(out var parsedAuthorEventIndex)
+                            || !hasAuthorInstructionIndex
+                            || !authorInstructionIndex.TryGetInt32(out var parsedAuthorInstructionIndex)
+                            || !hasAuthorBank
+                            || !authorBank.TryGetInt32(out var parsedAuthorBank)
+                            || !hasAuthorInstructionId
+                            || !authorInstructionId.TryGetInt32(out var parsedAuthorInstructionId)
+                            || !hasAuthorArgsBase64
+                            || authorArgsBase64.ValueKind != JsonValueKind.String
+                            || authorArgsBase64.GetString() is not string parsedAuthorArgsBase64)
+                            throw new InvalidDataException(
+                                "EMEVD instruction authoring 字段必须完整提供且类型正确。");
+                        instructionAuthoringRequest = new EmevdInstructionAuthoringRequest(
+                            parsedAuthorEventIndex,
+                            parsedAuthorInstructionIndex,
+                            parsedAuthorBank,
+                            parsedAuthorInstructionId,
+                            parsedAuthorArgsBase64);
+                    }
+                }
                 var diagnostics = new[]
                 {
                     new Diagnostic(
@@ -194,9 +300,23 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
-                return BridgeResult<object>.Partial(file, "event", diagnostics, document.ToEnvelope(roundTrip));
+                return BridgeResult<object>.Partial(
+                    file,
+                    "event",
+                    diagnostics,
+                    document.ToEnvelope(
+                        roundTrip,
+                        source.Describe(),
+                        focusEventIndex,
+                        focusInstructionLocalIndex,
+                        snapshotEventIndex,
+                        snapshotEventIdOverride,
+                        snapshotInstructionEventIndex,
+                        snapshotInstructionLocalIndex,
+                        instructionOrderEventIndex,
+                        instructionAuthoringRequest));
             }
-            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or InvalidOperationException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "event", "EMEVD_DOCUMENT_READ_FAILED", ex.Message);
             }
@@ -208,13 +328,13 @@ internal sealed class BridgeCommandService
                 return BridgeResult<object>.Failed(file, "event", "BRIDGE_OUTPUT_PATH_REQUIRED", "EMEVD writer requires a validated staging output path.");
             try
             {
-                var written = await EmevdNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                var written = await EmevdNativeWriter.WriteAsync(file, outputPath, options, cancellationToken, oodleRuntimeRoot);
                 return BridgeResult<object>.Partial(file, "event", new[]
                 {
                     new Diagnostic("info", "EMEVD_STAGING_WRITE_VERIFIED", "EMEVD 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
                 }, written);
             }
-            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or InvalidOperationException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "event", "EMEVD_STAGING_WRITE_FAILED", ex.Message);
             }
@@ -290,6 +410,33 @@ internal sealed class BridgeCommandService
             "export-msg" => MsgTextExport.Export(file),
             _ => BridgeResult<object>.Failed(file, resourceKind, "UNKNOWN_COMMAND", $"Unknown bridge command: {command}")
         };
+    }
+
+    private static int OptionalInt(JsonElement options, string field, int defaultValue)
+    {
+        if (options.ValueKind != JsonValueKind.Object || !options.TryGetProperty(field, out var value))
+            return defaultValue;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var parsed))
+            throw new InvalidDataException($"PARAM read options: {field} 必须是整数。");
+        return parsed;
+    }
+
+    private static int? OptionalNullableInt(JsonElement options, string field)
+    {
+        if (options.ValueKind != JsonValueKind.Object || !options.TryGetProperty(field, out var value))
+            return null;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var parsed))
+            throw new InvalidDataException($"PARAM read options: {field} 必须是整数。");
+        return parsed;
+    }
+
+    private static bool OptionalBool(JsonElement options, string field, bool defaultValue)
+    {
+        if (options.ValueKind != JsonValueKind.Object || !options.TryGetProperty(field, out var value))
+            return defaultValue;
+        if (value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw new InvalidDataException($"PARAM read options: {field} 必须是布尔值。");
+        return value.GetBoolean();
     }
 
     public static string GuessKindFromPath(string file)

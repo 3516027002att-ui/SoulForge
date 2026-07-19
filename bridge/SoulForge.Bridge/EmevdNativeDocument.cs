@@ -4,7 +4,8 @@ using System.Security.Cryptography;
 /// <summary>
 /// Sekiro EMEVD (EVD\0, format flags 00 FF 01 FF, version 0xCD) native document.
 /// Layout matches SoulsFormats Game.Sekiro (64-bit varints).
-/// Supports in-place event field edits, equal-length arg writes, and full GC rebuild for event add/delete.
+/// Supports event/instruction edits and full GC rebuild while preserving linked files,
+/// strings, parameter substitutions, and opaque instruction arguments.
 /// </summary>
 internal sealed class EmevdNativeDocument
 {
@@ -14,8 +15,23 @@ internal sealed class EmevdNativeDocument
     private const int ParameterSize = 0x20;
     private const int MaxEvents = 200_000;
     private const int MaxInstructions = 2_000_000;
+    private const int MaxParameterSubstitutions = MaxEvents * 64;
     private const int MaxSourceBytes = 64 * 1024 * 1024;
     private const int MaxArgsBytes = 1 * 1024 * 1024;
+    private const int MaxEventSnapshotBytes = 256 * 1024;
+    private const int MaxEventSnapshotItems = 100_000;
+    private const int MaxInstructionSnapshotBytes = 256 * 1024;
+    private const int MaxInstructionSnapshotParameters = 10_000;
+    private const string SchemaId = "soulforge.emevd.sekiro";
+    private const string SchemaVersion = "1.0.0";
+    internal const string EventSnapshotFormatId = "soulforge.emevd.event-semantic-v1";
+    internal const string EventSnapshotSchemaVersion = "1.0.0";
+    internal const string InstructionSnapshotFormatId = "soulforge.emevd.instruction-semantic-v1";
+    internal const string InstructionSnapshotSchemaVersion = "1.0.0";
+    private static readonly string LayoutFingerprint = Convert.ToHexString(SHA256.HashData(
+        System.Text.Encoding.UTF8.GetBytes(
+            "EMEVD|Sekiro|0xCD|00FF01FF|little|event:0x30|instruction:0x20|parameter:0x20")))
+        .ToLowerInvariant();
 
     private EmevdNativeDocument(
         byte[] sourceBytes,
@@ -24,11 +40,13 @@ internal sealed class EmevdNativeDocument
         long argumentsOffset,
         long argumentsLength,
         long parametersOffset,
+        long layerCount,
         long linkedFilesOffset,
         long stringsOffset,
         long stringsLength,
         IReadOnlyList<EmevdEvent> events,
-        IReadOnlyList<EmevdInstruction> instructions)
+        IReadOnlyList<EmevdInstruction> instructions,
+        IReadOnlyList<IReadOnlyList<EmevdParameter>> eventParameters)
     {
         SourceBytes = sourceBytes;
         EventsOffset = eventsOffset;
@@ -36,11 +54,13 @@ internal sealed class EmevdNativeDocument
         ArgumentsOffset = argumentsOffset;
         ArgumentsLength = argumentsLength;
         ParametersOffset = parametersOffset;
+        LayerCount = layerCount;
         LinkedFilesOffset = linkedFilesOffset;
         StringsOffset = stringsOffset;
         StringsLength = stringsLength;
         Events = events;
         Instructions = instructions;
+        EventParameters = eventParameters;
     }
 
     public byte[] SourceBytes { get; }
@@ -49,11 +69,13 @@ internal sealed class EmevdNativeDocument
     public long ArgumentsOffset { get; }
     public long ArgumentsLength { get; }
     public long ParametersOffset { get; }
+    public long LayerCount { get; }
     public long LinkedFilesOffset { get; }
     public long StringsOffset { get; }
     public long StringsLength { get; }
     public IReadOnlyList<EmevdEvent> Events { get; }
     public IReadOnlyList<EmevdInstruction> Instructions { get; }
+    public IReadOnlyList<IReadOnlyList<EmevdParameter>> EventParameters { get; }
     public string SourceHash => Hash(SourceBytes);
 
     public static EmevdNativeDocument Read(byte[] source)
@@ -93,14 +115,15 @@ internal sealed class EmevdNativeDocument
         if (unkStructCount != 0)
             throw new NotSupportedException($"EMEVD 未知结构计数 {unkStructCount} 非 0，当前未支持。");
         if (layerCount != 0)
-            throw new NotSupportedException("EMEVD 含 layer 表时的 GC 重建尚未启用；就地 mutation 仍可用。");
-        if (eventsOffset < HeaderSize || eventsOffset + eventCount * EventSize > source.Length)
+            throw new NotSupportedException("EMEVD layer 表尚未解析，当前拒绝读取，不能声明或执行安全写入。");
+        if (eventsOffset < HeaderSize || eventsOffset > source.Length
+            || eventCount * EventSize > source.Length - eventsOffset)
             throw new InvalidDataException("EMEVD 事件表越界。");
-        if (instructionsOffset < eventsOffset
-            || instructionsOffset + instructionCount * InstructionSize > source.Length)
+        if (instructionsOffset < eventsOffset || instructionsOffset > source.Length
+            || instructionCount * InstructionSize > source.Length - instructionsOffset)
             throw new InvalidDataException("EMEVD 指令表越界。");
-        if (argumentsOffset < 0 || argumentsLength < 0
-            || argumentsOffset + argumentsLength > source.Length)
+        if (argumentsOffset < 0 || argumentsOffset > source.Length || argumentsLength < 0
+            || argumentsLength > source.Length - argumentsOffset)
             throw new InvalidDataException("EMEVD 参数银行越界。");
         if (argumentsLength > MaxArgsBytes)
             throw new InvalidDataException($"EMEVD 参数银行过大：{argumentsLength}。");
@@ -108,9 +131,10 @@ internal sealed class EmevdNativeDocument
             throw new InvalidDataException("EMEVD parametersOffset 越界。");
         if (linkedFilesOffset < 0 || linkedFilesOffset > source.Length)
             throw new InvalidDataException("EMEVD linkedFilesOffset 越界。");
-        if (stringsOffset < 0 || stringsLength < 0 || stringsOffset + stringsLength > source.Length)
+        if (stringsOffset < 0 || stringsOffset > source.Length || stringsLength < 0
+            || stringsLength > source.Length - stringsOffset)
             throw new InvalidDataException("EMEVD 字符串段越界。");
-        if (paramCountHeader < 0 || paramCountHeader > MaxEvents * 64)
+        if (paramCountHeader < 0 || paramCountHeader > MaxParameterSubstitutions)
             throw new InvalidDataException($"EMEVD 参数条目数 {paramCountHeader} 越界。");
         if (linkedCount < 0 || linkedCount > 1024)
             throw new InvalidDataException($"EMEVD linked 文件数 {linkedCount} 越界。");
@@ -139,12 +163,14 @@ internal sealed class EmevdNativeDocument
                         > instructionCount * InstructionSize)
                     throw new InvalidDataException($"EMEVD 事件 {id} 指令偏移越界。");
             }
-            if (parameterCount < 0)
+            if (parameterCount < 0 || parameterCount > MaxParameterSubstitutions)
                 throw new InvalidDataException($"EMEVD 事件 {id} parameterCount 越界。");
             if (parameterCount > 0)
             {
                 if (eventParamsOffset < 0
-                    || parametersOffset + eventParamsOffset + parameterCount * ParameterSize > source.Length)
+                    || eventParamsOffset > source.Length - parametersOffset
+                    || parameterCount * ParameterSize
+                        > source.Length - parametersOffset - eventParamsOffset)
                     throw new InvalidDataException($"EMEVD 事件 {id} 参数偏移越界。");
             }
             instrSum += instrCount;
@@ -177,7 +203,8 @@ internal sealed class EmevdNativeDocument
             }
             else
             {
-                if (argsOffset < 0 || argsOffset + argsLength > argumentsLength)
+                if (argsOffset < 0 || argsOffset > argumentsLength
+                    || argsLength > argumentsLength - argsOffset)
                     throw new InvalidDataException($"EMEVD 指令[{i}] argsOffset 越界。");
                 var abs = checked((int)(argumentsOffset + argsOffset));
                 args = source.AsSpan(abs, (int)argsLength).ToArray();
@@ -185,10 +212,41 @@ internal sealed class EmevdNativeDocument
             instructions.Add(new EmevdInstruction(bank, id, argsLength, argsOffset, layerOffset, args));
         }
 
+        var eventParameters = new List<IReadOnlyList<EmevdParameter>>(events.Count);
+        for (var eventIndex = 0; eventIndex < events.Count; eventIndex++)
+        {
+            var ev = events[eventIndex];
+            var parameters = new List<EmevdParameter>(checked((int)ev.ParameterCount));
+            if (ev.ParameterCount > 0)
+            {
+                var baseOffset = checked((int)(parametersOffset + ev.ParametersOffset));
+                var instructionStart = checked((int)(ev.InstructionsOffset / InstructionSize));
+                for (var parameterIndex = 0; parameterIndex < ev.ParameterCount; parameterIndex++)
+                {
+                    var o = checked(baseOffset + (int)parameterIndex * ParameterSize);
+                    var parameter = new EmevdParameter(
+                        ReadInt64(source, o),
+                        ReadInt64(source, o + 8),
+                        ReadInt64(source, o + 16),
+                        ReadInt32(source, o + 24),
+                        ReadInt32(source, o + 28));
+                    ValidateParameterTarget(
+                        parameter,
+                        ev,
+                        instructions,
+                        instructionStart,
+                        eventIndex,
+                        checked((int)parameterIndex));
+                    parameters.Add(parameter);
+                }
+            }
+            eventParameters.Add(parameters);
+        }
+
         return new EmevdNativeDocument(
             source, eventsOffset, instructionsOffset, argumentsOffset, argumentsLength,
-            parametersOffset, linkedFilesOffset, stringsOffset, stringsLength,
-            events, instructions);
+            parametersOffset, layerCount, linkedFilesOffset, stringsOffset, stringsLength,
+            events, instructions, eventParameters);
     }
 
     public static EmevdNativeDocument ReadFile(string path)
@@ -214,9 +272,13 @@ internal sealed class EmevdNativeDocument
                 pair.First.Bank == pair.Second.Bank
                 && pair.First.Id == pair.Second.Id
                 && pair.First.Args.AsSpan().SequenceEqual(pair.Second.Args));
+        var parametersEqual = reparsed.EventParameters.Count == EventParameters.Count
+            && reparsed.EventParameters.Zip(EventParameters).All(pair =>
+                pair.First.Count == pair.Second.Count
+                && pair.First.Zip(pair.Second).All(parameter => parameter.First == parameter.Second));
         return new EmevdRoundTripReport(
             SourceBytes.SequenceEqual(rebuilt),
-            eventsEqual && instrEqual,
+            eventsEqual && instrEqual && parametersEqual,
             SourceHash,
             Hash(rebuilt),
             Events.Count,
@@ -262,8 +324,9 @@ internal sealed class EmevdNativeDocument
     public List<EmevdEventBuild> CaptureEventBuilds()
     {
         var builds = new List<EmevdEventBuild>(Events.Count);
-        foreach (var ev in Events)
+        for (var eventIndex = 0; eventIndex < Events.Count; eventIndex++)
         {
+            var ev = Events[eventIndex];
             var instrs = new List<EmevdInstructionBuild>();
             if (ev.InstructionCount > 0)
             {
@@ -274,25 +337,208 @@ internal sealed class EmevdNativeDocument
                     instrs.Add(new EmevdInstructionBuild(instr.Bank, instr.Id, instr.LayerOffset, instr.Args.ToArray()));
                 }
             }
-            var parameters = new List<EmevdParameter>();
-            if (ev.ParameterCount > 0)
-            {
-                var baseOff = checked((int)(ParametersOffset + ev.ParametersOffset));
-                for (var i = 0; i < ev.ParameterCount; i++)
-                {
-                    var o = baseOff + i * ParameterSize;
-                    parameters.Add(new EmevdParameter(
-                        ReadInt64(SourceBytes, o),
-                        ReadInt64(SourceBytes, o + 8),
-                        ReadInt64(SourceBytes, o + 16),
-                        ReadInt32(SourceBytes, o + 24),
-                        ReadInt32(SourceBytes, o + 28)));
-                }
-            }
+            var parameters = EventParameters[eventIndex].ToList();
             builds.Add(new EmevdEventBuild(ev.Id, ev.RestBehavior, instrs, parameters));
         }
         return builds;
     }
+
+    internal static byte[] EncodeEventSnapshot(EmevdEventBuild build)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write(build.Id);
+            writer.Write(build.RestBehavior);
+            writer.Write(build.Instructions.Count);
+            foreach (var instruction in build.Instructions)
+            {
+                writer.Write(instruction.Bank);
+                writer.Write(instruction.Id);
+                writer.Write(instruction.LayerOffset);
+                writer.Write(instruction.Args.Length);
+                writer.Write(instruction.Args);
+            }
+            writer.Write(build.Parameters.Count);
+            foreach (var parameter in build.Parameters)
+            {
+                writer.Write(parameter.InstructionIndex);
+                writer.Write(parameter.TargetStartByte);
+                writer.Write(parameter.SourceStartByte);
+                writer.Write(parameter.ByteCount);
+                writer.Write(parameter.UnkId);
+            }
+        }
+        var bytes = stream.ToArray();
+        if (bytes.Length > MaxEventSnapshotBytes)
+            throw new InvalidDataException("EMEVD 单事件 snapshot 超过安全上限。");
+        return bytes;
+    }
+
+    internal static EmevdEventBuild DecodeEventSnapshot(
+        string snapshotBase64,
+        string snapshotSha256,
+        string expectedEventHash,
+        string formatId,
+        string snapshotSchemaVersion)
+    {
+        if (!formatId.Equals(EventSnapshotFormatId, StringComparison.Ordinal)
+            || !snapshotSchemaVersion.Equals(EventSnapshotSchemaVersion, StringComparison.Ordinal))
+            throw new InvalidDataException("EMEVD event snapshot format/schema 不受支持。");
+        if (snapshotBase64.Any(char.IsWhiteSpace))
+            throw new InvalidDataException("EMEVD event snapshot 必须使用无空白规范 Base64。");
+        byte[] bytes;
+        try { bytes = Convert.FromBase64String(snapshotBase64); }
+        catch (FormatException ex) { throw new InvalidDataException("EMEVD event snapshot Base64 非法。", ex); }
+        if (!Convert.ToBase64String(bytes).Equals(snapshotBase64, StringComparison.Ordinal))
+            throw new InvalidDataException("EMEVD event snapshot 必须使用规范标准 Base64 编码。");
+        if (bytes.Length < 20 || bytes.Length > MaxEventSnapshotBytes)
+            throw new InvalidDataException("EMEVD event snapshot 大小超出安全边界。");
+        var actualHash = Hash(bytes);
+        if (!actualHash.Equals(snapshotSha256, StringComparison.OrdinalIgnoreCase)
+            || !actualHash.Equals(expectedEventHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("EMEVD event snapshot hash/eventHash 不匹配。");
+
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var reader = new BinaryReader(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        var id = reader.ReadInt64();
+        var restBehavior = reader.ReadUInt32();
+        var instructionCount = reader.ReadInt32();
+        if (instructionCount < 0 || instructionCount > MaxEventSnapshotItems)
+            throw new InvalidDataException("EMEVD event snapshot instructionCount 超出安全上限。");
+        var instructions = new List<EmevdInstructionBuild>(instructionCount);
+        for (var index = 0; index < instructionCount; index++)
+        {
+            var bank = reader.ReadInt32();
+            var instructionId = reader.ReadInt32();
+            var layerOffset = reader.ReadInt64();
+            var argsLength = reader.ReadInt32();
+            if (argsLength < 0
+                || argsLength > MaxArgsBytes
+                || argsLength > stream.Length - stream.Position)
+                throw new InvalidDataException("EMEVD event snapshot instruction args 长度无效。");
+            instructions.Add(new EmevdInstructionBuild(
+                bank,
+                instructionId,
+                layerOffset,
+                reader.ReadBytes(argsLength)));
+        }
+        var parameterCount = reader.ReadInt32();
+        if (parameterCount < 0 || parameterCount > MaxEventSnapshotItems)
+            throw new InvalidDataException("EMEVD event snapshot parameterCount 超出安全上限。");
+        var parameters = new List<EmevdParameter>(parameterCount);
+        for (var index = 0; index < parameterCount; index++)
+        {
+            parameters.Add(new EmevdParameter(
+                reader.ReadInt64(),
+                reader.ReadInt64(),
+                reader.ReadInt64(),
+                reader.ReadInt32(),
+                reader.ReadInt32()));
+        }
+        if (stream.Position != stream.Length)
+            throw new InvalidDataException("EMEVD event snapshot 含未声明尾部字节。");
+        var build = new EmevdEventBuild(id, restBehavior, instructions, parameters);
+        ValidateEventBuilds(new[] { build });
+        if (!HashEventBuild(build).Equals(expectedEventHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("EMEVD event snapshot 解码后的语义 hash 不匹配。");
+        return build;
+    }
+
+    internal static byte[] EncodeInstructionSnapshot(
+        EmevdInstructionBuild instruction,
+        IReadOnlyList<EmevdParameter> parameters)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write(instruction.Bank);
+            writer.Write(instruction.Id);
+            writer.Write(instruction.LayerOffset);
+            writer.Write(instruction.Args.Length);
+            writer.Write(instruction.Args);
+            writer.Write(parameters.Count);
+            foreach (var parameter in parameters)
+            {
+                writer.Write(parameter.TargetStartByte);
+                writer.Write(parameter.SourceStartByte);
+                writer.Write(parameter.ByteCount);
+                writer.Write(parameter.UnkId);
+            }
+        }
+        var bytes = stream.ToArray();
+        if (bytes.Length > MaxInstructionSnapshotBytes)
+            throw new InvalidDataException("EMEVD instruction snapshot 超过 256 KiB inline 安全上限。");
+        return bytes;
+    }
+
+    internal static EmevdInstructionSnapshotBuild DecodeInstructionSnapshot(
+        string snapshotBase64,
+        string snapshotSha256,
+        string expectedInstructionHash,
+        string formatId,
+        string snapshotSchemaVersion)
+    {
+        if (!formatId.Equals(InstructionSnapshotFormatId, StringComparison.Ordinal)
+            || !snapshotSchemaVersion.Equals(InstructionSnapshotSchemaVersion, StringComparison.Ordinal))
+            throw new InvalidDataException("EMEVD instruction snapshot format/schema 不受支持。");
+        if (snapshotBase64.Any(char.IsWhiteSpace))
+            throw new InvalidDataException("EMEVD instruction snapshot 必须使用无空白规范 Base64。");
+        byte[] bytes;
+        try { bytes = Convert.FromBase64String(snapshotBase64); }
+        catch (FormatException ex) { throw new InvalidDataException("EMEVD instruction snapshot Base64 非法。", ex); }
+        if (!Convert.ToBase64String(bytes).Equals(snapshotBase64, StringComparison.Ordinal))
+            throw new InvalidDataException("EMEVD instruction snapshot 必须使用规范标准 Base64 编码。");
+        if (bytes.Length < 24 || bytes.Length > MaxInstructionSnapshotBytes)
+            throw new InvalidDataException("EMEVD instruction snapshot 大小超出安全边界。");
+        var actualHash = Hash(bytes);
+        if (!actualHash.Equals(snapshotSha256, StringComparison.OrdinalIgnoreCase)
+            || !actualHash.Equals(expectedInstructionHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("EMEVD instruction snapshot hash/instructionHash 不匹配。");
+
+        using var stream = new MemoryStream(bytes, writable: false);
+        using var reader = new BinaryReader(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        var bank = reader.ReadInt32();
+        var instructionId = reader.ReadInt32();
+        var layerOffset = reader.ReadInt64();
+        var argsLength = reader.ReadInt32();
+        if (argsLength < 0
+            || argsLength > MaxArgsBytes
+            || argsLength > stream.Length - stream.Position)
+            throw new InvalidDataException("EMEVD instruction snapshot args 长度无效。");
+        var instruction = new EmevdInstructionBuild(
+            bank,
+            instructionId,
+            layerOffset,
+            reader.ReadBytes(argsLength));
+        var parameterCount = reader.ReadInt32();
+        if (parameterCount < 0 || parameterCount > MaxInstructionSnapshotParameters)
+            throw new InvalidDataException("EMEVD instruction snapshot parameterCount 超出安全上限。");
+        var parameters = new List<EmevdParameter>(parameterCount);
+        for (var parameterIndex = 0; parameterIndex < parameterCount; parameterIndex++)
+        {
+            var parameter = new EmevdParameter(
+                0,
+                reader.ReadInt64(),
+                reader.ReadInt64(),
+                reader.ReadInt32(),
+                reader.ReadInt32());
+            ValidateParameterByteRange(parameter, instruction.Args.Length, 0, parameterIndex);
+            parameters.Add(parameter);
+        }
+        if (stream.Position != stream.Length)
+            throw new InvalidDataException("EMEVD instruction snapshot 含未声明尾部字节。");
+        var snapshot = new EmevdInstructionSnapshotBuild(instruction, parameters);
+        if (!Hash(EncodeInstructionSnapshot(snapshot.Instruction, snapshot.Parameters))
+            .Equals(expectedInstructionHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("EMEVD instruction snapshot 解码后的语义 hash 不匹配。");
+        return snapshot;
+    }
+
+    private static string HashInstructionBuild(
+        EmevdInstructionBuild instruction,
+        IReadOnlyList<EmevdParameter> parameters) =>
+        Hash(EncodeInstructionSnapshot(instruction, parameters));
 
     /// <summary>
     /// Full document GC rebuild: events + instructions + args + parameters; preserves linked/strings.
@@ -306,6 +552,18 @@ internal sealed class EmevdNativeDocument
         if (totalInstr > MaxInstructions)
             throw new InvalidDataException($"指令数 {totalInstr} 超过上限。");
         var totalParams = builds.Sum(b => b.Parameters.Count);
+        if (totalParams > MaxParameterSubstitutions)
+            throw new InvalidDataException($"参数替换数 {totalParams} 超过上限。");
+        long paddedArgsLength = 0;
+        foreach (var instruction in builds.SelectMany(build => build.Instructions))
+        {
+            if (instruction.Args.Length > MaxArgsBytes)
+                throw new InvalidDataException("单条 EMEVD 指令参数超过安全上限。");
+            paddedArgsLength = checked(paddedArgsLength + ((instruction.Args.Length + 3L) / 4L) * 4L);
+        }
+        if (paddedArgsLength > MaxArgsBytes)
+            throw new InvalidDataException($"EMEVD 参数银行重建大小 {paddedArgsLength} 超过上限。");
+        ValidateEventBuilds(builds);
 
         // Linked files + strings from original
         var linkedCount = ReadInt64(SourceBytes, 0x60);
@@ -487,8 +745,7 @@ internal sealed class EmevdNativeDocument
             {
                 case "set_rest_behavior":
                 {
-                    var idx = builds.FindIndex(e => e.Id == patch.EventId);
-                    if (idx < 0) throw new InvalidDataException($"EMEVD 事件 ID {patch.EventId} 不存在。");
+                    var idx = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
                     if (patch.RestBehavior is null)
                         throw new InvalidDataException("set_rest_behavior 需要 restBehavior。");
                     var cur = builds[idx];
@@ -497,8 +754,7 @@ internal sealed class EmevdNativeDocument
                 }
                 case "update_id":
                 {
-                    var idx = builds.FindIndex(e => e.Id == patch.EventId);
-                    if (idx < 0) throw new InvalidDataException($"EMEVD 事件 ID {patch.EventId} 不存在。");
+                    var idx = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
                     if (patch.NewEventId is null) throw new InvalidDataException("update_id 需要 newEventId。");
                     if (builds.Any(e => e.Id == patch.NewEventId.Value))
                         throw new InvalidDataException($"EMEVD 新事件 ID {patch.NewEventId} 已存在。");
@@ -508,23 +764,170 @@ internal sealed class EmevdNativeDocument
                 }
                 case "set_instruction_args":
                 {
-                    if (patch.InstructionIndex is null)
-                        throw new InvalidDataException("set_instruction_args 需要 instructionIndex。");
                     if (patch.ArgsBase64 is null)
                         throw new InvalidDataException("set_instruction_args 需要 argsBase64。");
-                    byte[] args;
-                    try { args = Convert.FromBase64String(patch.ArgsBase64); }
-                    catch (FormatException ex) { throw new InvalidDataException("argsBase64 非法。", ex); }
+                    var args = DecodeArgsBase64(patch.ArgsBase64);
 
-                    // Map global instruction index → event/instr
-                    var global = checked((int)patch.InstructionIndex.Value);
-                    var mapped = MapGlobalInstruction(builds, global);
-                    var list = builds[mapped.eventIndex].Instructions;
-                    var prev = list[mapped.instrIndex];
-                    list[mapped.instrIndex] = prev with { Args = args };
+                    int eventIndex;
+                    int instrIndex;
+                    // Prefer event-local identity binding when provided.
+                    if (patch.EventIndex is not null && patch.InstructionLocalIndex is not null)
+                    {
+                        eventIndex = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
+                        instrIndex = ResolveInstructionIndex(
+                            builds[eventIndex],
+                            patch.InstructionLocalIndex,
+                            patch.ExpectedBank,
+                            patch.ExpectedInstructionId,
+                            "instruction");
+                    }
+                    else
+                    {
+                        if (patch.InstructionIndex is null)
+                            throw new InvalidDataException(
+                                "set_instruction_args 需要 instructionIndex，或 eventIndex+instructionLocalIndex。");
+                        // Map global instruction index → event/instr
+                        var global = checked((int)patch.InstructionIndex.Value);
+                        var mapped = MapGlobalInstruction(builds, global);
+                        eventIndex = mapped.eventIndex;
+                        instrIndex = mapped.instrIndex;
+                        if (patch.ExpectedBank is not null || patch.ExpectedInstructionId is not null)
+                        {
+                            var check = builds[eventIndex].Instructions[instrIndex];
+                            if (patch.ExpectedBank is not null && check.Bank != patch.ExpectedBank.Value)
+                                throw new InvalidDataException("set_instruction_args expectedBank 不匹配。");
+                            if (patch.ExpectedInstructionId is not null
+                                && check.Id != patch.ExpectedInstructionId.Value)
+                                throw new InvalidDataException("set_instruction_args expectedInstructionId 不匹配。");
+                        }
+                    }
+
+                    var list = builds[eventIndex].Instructions;
+                    var prev = list[instrIndex];
+                    list[instrIndex] = prev with { Args = args };
                     // Length change requires full GC rebuild of instruction/arg banks.
                     if (args.Length != prev.Args.Length)
                         needsGc = true;
+                    break;
+                }
+                case "add_instruction":
+                {
+                    var eventIndex = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
+                    if (patch.InstructionLocalIndex is null || patch.NewBank is null
+                        || patch.NewInstructionId is null || patch.ArgsBase64 is null)
+                        throw new InvalidDataException(
+                            "add_instruction 需要 instructionIndex、bank、id 和 argsBase64。");
+                    var ev = builds[eventIndex];
+                    var insertionIndex = patch.InstructionLocalIndex.Value;
+                    if (insertionIndex < 0 || insertionIndex > ev.Instructions.Count)
+                        throw new InvalidDataException($"EMEVD instructionIndex {insertionIndex} 越界。");
+                    var args = DecodeArgsBase64(patch.ArgsBase64);
+                    ShiftParametersForInsert(ev, insertionIndex);
+                    ev.Instructions.Insert(insertionIndex, new EmevdInstructionBuild(
+                        patch.NewBank.Value,
+                        patch.NewInstructionId.Value,
+                        -1,
+                        args));
+                    needsGc = true;
+                    break;
+                }
+                case "insert_instruction_snapshot":
+                {
+                    var eventIndex = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
+                    if (patch.InstructionLocalIndex is null
+                        || patch.InstructionSnapshotBase64 is null
+                        || patch.InstructionSnapshotSha256 is null
+                        || patch.ExpectedInstructionHash is null
+                        || patch.InstructionSnapshotFormatId is null
+                        || patch.InstructionSnapshotSchemaVersion is null)
+                        throw new InvalidDataException(
+                            "insert_instruction_snapshot 缺少完整 snapshot 字段。");
+                    var ev = builds[eventIndex];
+                    var insertionIndex = patch.InstructionLocalIndex.Value;
+                    if (insertionIndex < 0 || insertionIndex > ev.Instructions.Count)
+                        throw new InvalidDataException("insert_instruction_snapshot 的插入索引越界。");
+                    var restored = DecodeInstructionSnapshot(
+                        patch.InstructionSnapshotBase64,
+                        patch.InstructionSnapshotSha256,
+                        patch.ExpectedInstructionHash,
+                        patch.InstructionSnapshotFormatId,
+                        patch.InstructionSnapshotSchemaVersion);
+                    ShiftParametersForInsert(ev, insertionIndex);
+                    ev.Instructions.Insert(insertionIndex, restored.Instruction);
+                    InsertInstructionParameters(
+                        ev,
+                        insertionIndex,
+                        restored.Parameters);
+                    needsGc = true;
+                    break;
+                }
+                case "delete_instruction":
+                {
+                    var eventIndex = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
+                    var ev = builds[eventIndex];
+                    var instructionIndex = ResolveInstructionIndex(
+                        ev,
+                        patch.InstructionLocalIndex,
+                        patch.ExpectedBank,
+                        patch.ExpectedInstructionId,
+                        "instruction");
+                    if (ev.Instructions.Count <= 1)
+                        throw new InvalidDataException("不能删除事件中的最后一条指令。");
+                    RemoveInstruction(ev, instructionIndex);
+                    needsGc = true;
+                    break;
+                }
+                case "duplicate_instruction":
+                {
+                    var eventIndex = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
+                    var ev = builds[eventIndex];
+                    var instructionIndex = ResolveInstructionIndex(
+                        ev,
+                        patch.InstructionLocalIndex,
+                        patch.ExpectedBank,
+                        patch.ExpectedInstructionId,
+                        "instruction");
+                    var insertionIndex = instructionIndex + 1;
+                    var source = ev.Instructions[instructionIndex];
+                    var clonedParameters = ev.Parameters
+                        .Where(parameter => parameter.InstructionIndex == instructionIndex)
+                        .Select(parameter => parameter with { InstructionIndex = insertionIndex })
+                        .ToList();
+                    ShiftParametersForInsert(ev, insertionIndex);
+                    ev.Instructions.Insert(insertionIndex, source with { Args = source.Args.ToArray() });
+                    InsertInstructionParameters(ev, insertionIndex, clonedParameters);
+                    needsGc = true;
+                    break;
+                }
+                case "reorder_instruction":
+                {
+                    var eventIndex = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
+                    var ev = builds[eventIndex];
+                    var instructionIndex = ResolveInstructionIndex(
+                        ev,
+                        patch.InstructionLocalIndex,
+                        patch.ExpectedBank,
+                        patch.ExpectedInstructionId,
+                        "instruction");
+                    int? beforeIndex = null;
+                    if (patch.BeforeInstructionIndex is not null
+                        || patch.BeforeExpectedBank is not null
+                        || patch.BeforeExpectedInstructionId is not null)
+                    {
+                        if (patch.BeforeInstructionIndex is null
+                            || patch.BeforeExpectedBank is null
+                            || patch.BeforeExpectedInstructionId is null)
+                            throw new InvalidDataException(
+                                "reorder_instruction 的 beforeInstruction identity 必须完整提供或全部省略。");
+                        beforeIndex = ResolveInstructionIndex(
+                            ev,
+                            patch.BeforeInstructionIndex,
+                            patch.BeforeExpectedBank,
+                            patch.BeforeExpectedInstructionId,
+                            "beforeInstruction");
+                    }
+                    MoveInstructionBefore(ev, instructionIndex, beforeIndex);
+                    needsGc = true;
                     break;
                 }
                 case "add_event":
@@ -542,10 +945,32 @@ internal sealed class EmevdNativeDocument
                     needsGc = true;
                     break;
                 }
+                case "insert_event_snapshot":
+                {
+                    if (patch.InsertEventIndex is null
+                        || patch.EventSnapshotBase64 is null
+                        || patch.EventSnapshotSha256 is null
+                        || patch.ExpectedEventHash is null
+                        || patch.EventSnapshotFormatId is null
+                        || patch.EventSnapshotSchemaVersion is null)
+                        throw new InvalidDataException("insert_event_snapshot 缺少完整 snapshot 字段。");
+                    if (patch.InsertEventIndex.Value < 0 || patch.InsertEventIndex.Value > builds.Count)
+                        throw new InvalidDataException("insert_event_snapshot 的插入索引越界。");
+                    var restored = DecodeEventSnapshot(
+                        patch.EventSnapshotBase64,
+                        patch.EventSnapshotSha256,
+                        patch.ExpectedEventHash,
+                        patch.EventSnapshotFormatId,
+                        patch.EventSnapshotSchemaVersion);
+                    if (restored.Id != patch.EventId)
+                        throw new InvalidDataException("insert_event_snapshot 的 eventId 与 snapshot 不一致。");
+                    builds.Insert(patch.InsertEventIndex.Value, restored);
+                    needsGc = true;
+                    break;
+                }
                 case "delete_event":
                 {
-                    var idx = builds.FindIndex(e => e.Id == patch.EventId);
-                    if (idx < 0) throw new InvalidDataException($"EMEVD 事件 ID {patch.EventId} 不存在。");
+                    var idx = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
                     if (builds.Count <= 1)
                         throw new InvalidDataException("不能删除最后一个事件。");
                     builds.RemoveAt(idx);
@@ -554,8 +979,7 @@ internal sealed class EmevdNativeDocument
                 }
                 case "duplicate_event":
                 {
-                    var idx = builds.FindIndex(e => e.Id == patch.EventId);
-                    if (idx < 0) throw new InvalidDataException($"EMEVD 事件 ID {patch.EventId} 不存在。");
+                    var idx = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
                     if (patch.NewEventId is null)
                         throw new InvalidDataException("duplicate_event 需要 newEventId。");
                     if (builds.Any(e => e.Id == patch.NewEventId.Value))
@@ -566,6 +990,37 @@ internal sealed class EmevdNativeDocument
                         .ToList();
                     var copyParams = src.Parameters.ToList();
                     builds.Add(new EmevdEventBuild(patch.NewEventId.Value, src.RestBehavior, copyInstr, copyParams));
+                    needsGc = true;
+                    break;
+                }
+                case "reorder_event":
+                {
+                    var idx = ResolveEventIndex(builds, patch.EventId, patch.EventIndex, "event");
+                    if ((patch.BeforeEventId is null) != (patch.BeforeEventIndex is null))
+                        throw new InvalidDataException(
+                            "reorder_event 的 beforeEventId 与 beforeEventIndex 必须同时提供或同时省略。");
+                    int insertionIndex;
+                    if (patch.BeforeEventId is long beforeEventId
+                        && patch.BeforeEventIndex is int beforeEventIndex)
+                    {
+                        var beforeIndex = ResolveEventIndex(
+                            builds,
+                            beforeEventId,
+                            beforeEventIndex,
+                            "beforeEvent");
+                        if (idx == beforeIndex)
+                            throw new InvalidDataException("reorder_event 的 event 与 beforeEvent 不能是同一项。");
+                        insertionIndex = idx < beforeIndex ? beforeIndex - 1 : beforeIndex;
+                    }
+                    else
+                    {
+                        insertionIndex = builds.Count - 1;
+                    }
+                    if (insertionIndex == idx)
+                        throw new InvalidDataException("reorder_event 不允许不改变顺序的空操作。");
+                    var moved = builds[idx];
+                    builds.RemoveAt(idx);
+                    builds.Insert(insertionIndex, moved);
                     needsGc = true;
                     break;
                 }
@@ -623,10 +1078,214 @@ internal sealed class EmevdNativeDocument
         throw new InvalidDataException($"EMEVD 指令索引 {globalIndex} 越界。");
     }
 
-    public object ToEnvelope(EmevdRoundTripReport? report = null)
+    private static int ResolveEventIndex(
+        IReadOnlyList<EmevdEventBuild> builds,
+        long eventId,
+        int? eventIndex,
+        string label)
+    {
+        if (eventIndex is not null)
+        {
+            if (eventIndex.Value < 0 || eventIndex.Value >= builds.Count)
+                throw new InvalidDataException($"EMEVD {label}Index {eventIndex} 越界。");
+            if (builds[eventIndex.Value].Id != eventId)
+                throw new InvalidDataException($"EMEVD {label}Index 与 expected {label}Id 不匹配。");
+            return eventIndex.Value;
+        }
+
+        var matches = builds
+            .Select((build, index) => (build.Id, index))
+            .Where(item => item.Id == eventId)
+            .Select(item => item.index)
+            .Take(2)
+            .ToArray();
+        if (matches.Length == 0)
+            throw new InvalidDataException($"EMEVD {label} ID {eventId} 不存在。");
+        if (matches.Length > 1)
+            throw new InvalidDataException($"EMEVD {label} ID {eventId} 重复，mutation 必须提供 {label}Index。");
+        return matches[0];
+    }
+
+    private static int ResolveInstructionIndex(
+        EmevdEventBuild ev,
+        int? instructionIndex,
+        int? expectedBank,
+        int? expectedInstructionId,
+        string label)
+    {
+        if (instructionIndex is null || expectedBank is null || expectedInstructionId is null)
+            throw new InvalidDataException(
+                $"EMEVD {label} 需要 instructionIndex、expectedBank 和 expectedInstructionId。");
+        if (instructionIndex.Value < 0 || instructionIndex.Value >= ev.Instructions.Count)
+            throw new InvalidDataException($"EMEVD {label}Index {instructionIndex} 越界。");
+        var instruction = ev.Instructions[instructionIndex.Value];
+        if (instruction.Bank != expectedBank.Value || instruction.Id != expectedInstructionId.Value)
+            throw new InvalidDataException(
+                $"EMEVD {label}Index 与 expected bank/id 不匹配。");
+        return instructionIndex.Value;
+    }
+
+    private static void ShiftParametersForInsert(EmevdEventBuild ev, int insertionIndex)
+    {
+        for (var i = 0; i < ev.Parameters.Count; i++)
+        {
+            var parameter = ev.Parameters[i];
+            if (parameter.InstructionIndex >= insertionIndex)
+                ev.Parameters[i] = parameter with { InstructionIndex = parameter.InstructionIndex + 1 };
+        }
+    }
+
+    private static void RemoveInstruction(EmevdEventBuild ev, int instructionIndex)
+    {
+        ev.Instructions.RemoveAt(instructionIndex);
+        for (var i = ev.Parameters.Count - 1; i >= 0; i--)
+        {
+            var parameter = ev.Parameters[i];
+            if (parameter.InstructionIndex == instructionIndex)
+            {
+                ev.Parameters.RemoveAt(i);
+            }
+            else if (parameter.InstructionIndex > instructionIndex)
+            {
+                ev.Parameters[i] = parameter with { InstructionIndex = parameter.InstructionIndex - 1 };
+            }
+        }
+    }
+
+    private static void MoveInstructionBefore(
+        EmevdEventBuild ev,
+        int instructionIndex,
+        int? beforeInstructionIndex)
+    {
+        if (instructionIndex == beforeInstructionIndex)
+            throw new InvalidDataException(
+                "reorder_instruction 的 instruction 与 beforeInstruction 不能是同一项。");
+        var oldOrder = Enumerable.Range(0, ev.Instructions.Count).ToList();
+        var movedInstruction = ev.Instructions[instructionIndex];
+        var movedOldIndex = oldOrder[instructionIndex];
+        ev.Instructions.RemoveAt(instructionIndex);
+        oldOrder.RemoveAt(instructionIndex);
+        var insertionIndex = beforeInstructionIndex is null
+            ? ev.Instructions.Count
+            : instructionIndex < beforeInstructionIndex.Value
+                ? beforeInstructionIndex.Value - 1
+                : beforeInstructionIndex.Value;
+        if (insertionIndex == instructionIndex)
+            throw new InvalidDataException("reorder_instruction 不允许不改变顺序的空操作。");
+        ev.Instructions.Insert(insertionIndex, movedInstruction);
+        oldOrder.Insert(insertionIndex, movedOldIndex);
+
+        var oldToNew = new int[oldOrder.Count];
+        for (var newIndex = 0; newIndex < oldOrder.Count; newIndex++)
+            oldToNew[oldOrder[newIndex]] = newIndex;
+        for (var i = 0; i < ev.Parameters.Count; i++)
+        {
+            var parameter = ev.Parameters[i];
+            ev.Parameters[i] = parameter with
+            {
+                InstructionIndex = oldToNew[checked((int)parameter.InstructionIndex)]
+            };
+        }
+    }
+
+    private static void InsertInstructionParameters(
+        EmevdEventBuild ev,
+        int instructionIndex,
+        IReadOnlyList<EmevdParameter> parameters)
+    {
+        if (parameters.Count == 0) return;
+        var restored = parameters.Select(parameter =>
+            parameter with { InstructionIndex = instructionIndex }).ToList();
+        var parameterInsertionIndex = ev.Parameters.FindIndex(parameter =>
+            parameter.InstructionIndex > instructionIndex);
+        if (parameterInsertionIndex < 0) parameterInsertionIndex = ev.Parameters.Count;
+        ev.Parameters.InsertRange(parameterInsertionIndex, restored);
+    }
+
+    private static byte[] DecodeArgsBase64(string value)
+    {
+        if (value.Any(char.IsWhiteSpace))
+            throw new InvalidDataException("argsBase64 必须是无空白的标准 Base64。");
+        byte[] args;
+        try { args = Convert.FromBase64String(value); }
+        catch (FormatException ex) { throw new InvalidDataException("argsBase64 非法。", ex); }
+        if (!Convert.ToBase64String(args).Equals(value, StringComparison.Ordinal))
+            throw new InvalidDataException("argsBase64 必须使用规范标准 Base64 编码。");
+        if (args.Length > MaxArgsBytes)
+            throw new InvalidDataException("单条 EMEVD 指令参数超过安全上限。");
+        return args;
+    }
+
+    private static void ValidateEventBuilds(IReadOnlyList<EmevdEventBuild> builds)
+    {
+        for (var eventIndex = 0; eventIndex < builds.Count; eventIndex++)
+        {
+            var ev = builds[eventIndex];
+            for (var parameterIndex = 0; parameterIndex < ev.Parameters.Count; parameterIndex++)
+            {
+                var parameter = ev.Parameters[parameterIndex];
+                if (parameter.InstructionIndex < 0
+                    || parameter.InstructionIndex >= ev.Instructions.Count)
+                    throw new InvalidDataException(
+                        $"EMEVD 事件[{eventIndex}] parameter[{parameterIndex}] 指令索引越界。");
+                ValidateParameterByteRange(
+                    parameter,
+                    ev.Instructions[checked((int)parameter.InstructionIndex)].Args.Length,
+                    eventIndex,
+                    parameterIndex);
+            }
+        }
+    }
+
+    private static void ValidateParameterTarget(
+        EmevdParameter parameter,
+        EmevdEvent ev,
+        IReadOnlyList<EmevdInstruction> instructions,
+        int instructionStart,
+        int eventIndex,
+        int parameterIndex)
+    {
+        if (parameter.InstructionIndex < 0 || parameter.InstructionIndex >= ev.InstructionCount)
+            throw new InvalidDataException(
+                $"EMEVD 事件[{eventIndex}] parameter[{parameterIndex}] 指令索引越界。");
+        var instruction = instructions[checked(instructionStart + (int)parameter.InstructionIndex)];
+        ValidateParameterByteRange(
+            parameter,
+            instruction.Args.Length,
+            eventIndex,
+            parameterIndex);
+    }
+
+    private static void ValidateParameterByteRange(
+        EmevdParameter parameter,
+        int argsLength,
+        int eventIndex,
+        int parameterIndex)
+    {
+        if (parameter.TargetStartByte < 0 || parameter.SourceStartByte < 0
+            || parameter.ByteCount <= 0
+            || parameter.TargetStartByte > argsLength
+            || parameter.ByteCount > argsLength - parameter.TargetStartByte)
+            throw new InvalidDataException(
+                $"EMEVD 事件[{eventIndex}] parameter[{parameterIndex}] 字节范围无效。");
+    }
+
+    public object ToEnvelope(
+        EmevdRoundTripReport? report = null,
+        EmevdSourceInfo? source = null,
+        int? focusEventIndex = null,
+        int? focusInstructionLocalIndex = null,
+        int? snapshotEventIndex = null,
+        long? snapshotEventIdOverride = null,
+        int? snapshotInstructionEventIndex = null,
+        int? snapshotInstructionLocalIndex = null,
+        int? instructionOrderEventIndex = null,
+        EmevdInstructionAuthoringRequest? instructionAuthoringRequest = null)
     {
         report ??= VerifyRoundTrip();
         const int sampleLimit = 256;
+        const int parameterSampleLimit = 256;
+        var eventBuilds = CaptureEventBuilds();
         var sample = Instructions.Take(sampleLimit).Select((instr, index) => new
         {
             index,
@@ -636,13 +1295,219 @@ internal sealed class EmevdNativeDocument
             argsBase64 = Convert.ToBase64String(instr.Args),
             layerOffset = instr.LayerOffset
         }).ToArray();
+        object? focusedInstruction = null;
+        if (focusEventIndex is not null && focusInstructionLocalIndex is not null)
+        {
+            if (focusEventIndex.Value < 0 || focusEventIndex.Value >= Events.Count)
+                throw new InvalidDataException($"EMEVD focusEventIndex {focusEventIndex} 越界。");
+            var focusEvent = Events[focusEventIndex.Value];
+            if (focusInstructionLocalIndex.Value < 0
+                || focusInstructionLocalIndex.Value >= focusEvent.InstructionCount)
+                throw new InvalidDataException(
+                    $"EMEVD focusInstructionLocalIndex {focusInstructionLocalIndex} 越界。");
+            var globalStart = checked((int)(focusEvent.InstructionsOffset / InstructionSize));
+            var globalIndex = globalStart + focusInstructionLocalIndex.Value;
+            var instr = Instructions[globalIndex];
+            var instructionBuild = eventBuilds[focusEventIndex.Value]
+                .Instructions[focusInstructionLocalIndex.Value];
+            var instructionParameters = eventBuilds[focusEventIndex.Value].Parameters
+                .Where(parameter => parameter.InstructionIndex == focusInstructionLocalIndex.Value)
+                .ToList();
+            focusedInstruction = new
+            {
+                eventId = focusEvent.Id,
+                eventIndex = focusEventIndex.Value,
+                instructionIndex = focusInstructionLocalIndex.Value,
+                globalInstructionIndex = globalIndex,
+                bank = instr.Bank,
+                id = instr.Id,
+                argsLength = instr.Args.Length,
+                argsBase64 = Convert.ToBase64String(instr.Args),
+                layerOffset = instr.LayerOffset,
+                parameterCount = instructionParameters.Count,
+                instructionHash = HashInstructionBuild(instructionBuild, instructionParameters)
+            };
+        }
+        var parameterSubstitutionCount = EventParameters.Sum(parameters => parameters.Count);
+        var parameterSubstitutionSample = EventParameters
+            .SelectMany((parameters, eventIndex) => parameters.Select((parameter, parameterIndex) => new
+            {
+                eventIndex,
+                parameterIndex,
+                instructionIndex = parameter.InstructionIndex,
+                targetStartByte = parameter.TargetStartByte,
+                sourceStartByte = parameter.SourceStartByte,
+                byteCount = parameter.ByteCount,
+                unkId = parameter.UnkId
+            }))
+            .Take(parameterSampleLimit)
+            .ToArray();
 
-        var events = Events.Select(e =>
+        object? focusedEventSnapshot = null;
+        if (snapshotEventIndex is not null)
+        {
+            if (snapshotEventIndex.Value < 0 || snapshotEventIndex.Value >= eventBuilds.Count)
+                throw new InvalidDataException($"EMEVD snapshotEventIndex {snapshotEventIndex} 越界。");
+            var sourceBuild = eventBuilds[snapshotEventIndex.Value];
+            if (snapshotEventIdOverride is not null
+                && eventBuilds.Any(candidate => candidate.Id == snapshotEventIdOverride.Value))
+                throw new InvalidDataException("EMEVD snapshotEventIdOverride 必须是当前文档中不存在的新事件 ID。");
+            var build = snapshotEventIdOverride is null
+                ? sourceBuild
+                : sourceBuild with { Id = snapshotEventIdOverride.Value };
+            var snapshotBytes = EncodeEventSnapshot(build);
+            var snapshotHash = Hash(snapshotBytes);
+            focusedEventSnapshot = new
+            {
+                eventId = build.Id,
+                eventIndex = snapshotEventIdOverride is null
+                    ? snapshotEventIndex.Value
+                    : eventBuilds.Count,
+                eventHash = snapshotHash,
+                restBehavior = build.RestBehavior,
+                instructionCount = build.Instructions.Count,
+                parameterCount = build.Parameters.Count,
+                sourceEventId = sourceBuild.Id,
+                sourceEventIndex = snapshotEventIndex.Value,
+                sourceEventHash = HashEventBuild(sourceBuild),
+                snapshotFormatId = EventSnapshotFormatId,
+                snapshotSchemaVersion = EventSnapshotSchemaVersion,
+                snapshotBase64 = Convert.ToBase64String(snapshotBytes),
+                snapshotSha256 = snapshotHash,
+                snapshotSize = snapshotBytes.Length
+            };
+        }
+        object? focusedInstructionSnapshot = null;
+        if ((snapshotInstructionEventIndex is null) != (snapshotInstructionLocalIndex is null))
+            throw new InvalidDataException(
+                "EMEVD instruction snapshot 的 event/local index 必须同时提供。");
+        if (snapshotInstructionEventIndex is not null
+            && snapshotInstructionLocalIndex is not null)
+        {
+            if (snapshotInstructionEventIndex.Value < 0
+                || snapshotInstructionEventIndex.Value >= eventBuilds.Count)
+                throw new InvalidDataException(
+                    $"EMEVD snapshotInstructionEventIndex {snapshotInstructionEventIndex} 越界。");
+            var eventBuild = eventBuilds[snapshotInstructionEventIndex.Value];
+            ValidateInstructionSnapshotParameterOrder(eventBuild);
+            if (snapshotInstructionLocalIndex.Value < 0
+                || snapshotInstructionLocalIndex.Value >= eventBuild.Instructions.Count)
+                throw new InvalidDataException(
+                    $"EMEVD snapshotInstructionLocalIndex {snapshotInstructionLocalIndex} 越界。");
+            var instruction = eventBuild.Instructions[snapshotInstructionLocalIndex.Value];
+            var parameters = eventBuild.Parameters
+                .Where(parameter => parameter.InstructionIndex == snapshotInstructionLocalIndex.Value)
+                .ToList();
+            var snapshotBytes = EncodeInstructionSnapshot(instruction, parameters);
+            var snapshotHash = Hash(snapshotBytes);
+            focusedInstructionSnapshot = new
+            {
+                eventId = eventBuild.Id,
+                eventIndex = snapshotInstructionEventIndex.Value,
+                eventHash = HashEventBuild(eventBuild),
+                instructionIndex = snapshotInstructionLocalIndex.Value,
+                bank = instruction.Bank,
+                id = instruction.Id,
+                layerOffset = instruction.LayerOffset,
+                argsLength = instruction.Args.Length,
+                argsBase64 = Convert.ToBase64String(instruction.Args),
+                parameterCount = parameters.Count,
+                instructionHash = snapshotHash,
+                snapshotFormatId = InstructionSnapshotFormatId,
+                snapshotSchemaVersion = InstructionSnapshotSchemaVersion,
+                snapshotBase64 = Convert.ToBase64String(snapshotBytes),
+                snapshotSha256 = snapshotHash,
+                snapshotSize = snapshotBytes.Length
+            };
+        }
+        object? focusedEventInstructionOrder = null;
+        if (instructionOrderEventIndex is not null)
+        {
+            if (instructionOrderEventIndex.Value < 0
+                || instructionOrderEventIndex.Value >= eventBuilds.Count)
+                throw new InvalidDataException(
+                    $"EMEVD instructionOrderEventIndex {instructionOrderEventIndex} 越界。");
+            var eventBuild = eventBuilds[instructionOrderEventIndex.Value];
+            ValidateInstructionSnapshotParameterOrder(eventBuild);
+            // The order projection is an all-or-nothing semantic guard. Reuse the
+            // bounded event snapshot encoder so a very large event fails closed
+            // instead of returning an unbounded eager payload.
+            _ = EncodeEventSnapshot(eventBuild);
+            var instructions = eventBuild.Instructions.Select((instruction, instructionIndex) =>
+            {
+                var parameters = eventBuild.Parameters
+                    .Where(parameter => parameter.InstructionIndex == instructionIndex)
+                    .ToList();
+                return new
+                {
+                    instructionIndex,
+                    bank = instruction.Bank,
+                    id = instruction.Id,
+                    instructionHash = HashInstructionBuild(instruction, parameters),
+                    parameterCount = parameters.Count
+                };
+            }).ToArray();
+            focusedEventInstructionOrder = new
+            {
+                eventId = eventBuild.Id,
+                eventIndex = instructionOrderEventIndex.Value,
+                eventHash = HashEventBuild(eventBuild),
+                instructionCount = eventBuild.Instructions.Count,
+                parameterCount = eventBuild.Parameters.Count,
+                instructions
+            };
+        }
+        object? authoredInstructionSnapshot = null;
+        if (instructionAuthoringRequest is not null)
+        {
+            var request = instructionAuthoringRequest;
+            if (request.EventIndex < 0 || request.EventIndex >= eventBuilds.Count)
+                throw new InvalidDataException(
+                    $"EMEVD authorInstructionEventIndex {request.EventIndex} 越界。");
+            var eventBuild = eventBuilds[request.EventIndex];
+            ValidateInstructionSnapshotParameterOrder(eventBuild);
+            if (request.InstructionIndex < 0
+                || request.InstructionIndex > eventBuild.Instructions.Count)
+                throw new InvalidDataException(
+                    $"EMEVD authorInstructionIndex {request.InstructionIndex} 越界。");
+            var args = DecodeArgsBase64(request.ArgsBase64);
+            var instruction = new EmevdInstructionBuild(
+                request.Bank,
+                request.InstructionId,
+                -1,
+                args);
+            var snapshotBytes = EncodeInstructionSnapshot(
+                instruction,
+                Array.Empty<EmevdParameter>());
+            var snapshotHash = Hash(snapshotBytes);
+            authoredInstructionSnapshot = new
+            {
+                eventId = eventBuild.Id,
+                eventIndex = request.EventIndex,
+                eventHash = HashEventBuild(eventBuild),
+                instructionIndex = request.InstructionIndex,
+                bank = instruction.Bank,
+                id = instruction.Id,
+                layerOffset = instruction.LayerOffset,
+                argsLength = instruction.Args.Length,
+                argsBase64 = Convert.ToBase64String(instruction.Args),
+                parameterCount = 0,
+                instructionHash = snapshotHash,
+                snapshotFormatId = InstructionSnapshotFormatId,
+                snapshotSchemaVersion = InstructionSnapshotSchemaVersion,
+                snapshotBase64 = Convert.ToBase64String(snapshotBytes),
+                snapshotSha256 = snapshotHash,
+                snapshotSize = snapshotBytes.Length
+            };
+        }
+        var events = Events.Select((e, index) =>
         {
             var start = e.InstructionCount > 0 ? e.InstructionsOffset / InstructionSize : -1L;
             return new
             {
                 id = e.Id,
+                eventIndex = index,
+                eventHash = HashEventBuild(eventBuilds[index]),
                 instructionCount = e.InstructionCount,
                 instructionsOffset = e.InstructionsOffset,
                 instructionStartIndex = start,
@@ -657,23 +1522,44 @@ internal sealed class EmevdNativeDocument
             format = "EMEVD",
             version = "0xCD",
             versionBytes = "00FF01FF",
-            sourceSize = SourceBytes.Length,
-            sourceHash = SourceHash,
+            sourceSize = source?.SourceSize ?? SourceBytes.Length,
+            sourceHash = source?.SourceHash ?? SourceHash,
+            documentSize = SourceBytes.Length,
+            documentHash = SourceHash,
+            documentRevision = source?.SourceHash ?? SourceHash,
+            schemaId = SchemaId,
+            schemaVersion = SchemaVersion,
+            layoutFingerprint = LayoutFingerprint,
+            containerKind = source?.ContainerKind ?? "raw",
+            compressionFormat = source?.CompressionFormat,
+            containerRoundTrip = source?.ContainerRoundTrip,
+            writeSupported = source?.WriteSupported ?? true,
             eventCount = Events.Count,
             instructionCount = Instructions.Count,
+            parameterSubstitutionCount,
             eventsOffset = EventsOffset,
             instructionsOffset = InstructionsOffset,
             argumentsOffset = ArgumentsOffset,
             argumentsLength = ArgumentsLength,
+            layerCount = LayerCount,
             events,
             instructionsSample = sample,
             instructionsSampleTruncated = Instructions.Count > sampleLimit,
+            focusedInstruction,
+            focusedEventSnapshot,
+            focusedInstructionSnapshot,
+            focusedEventInstructionOrder,
+            authoredInstructionSnapshot,
+            parameterSubstitutionSample,
+            parameterSubstitutionSampleTruncated = parameterSubstitutionCount > parameterSampleLimit,
             roundTrip = report,
             authority = report is { SemanticIdentical: true, ByteIdentical: true }
                 ? "native-verified"
                 : "candidate",
             instructionDecode = "raw-args-base64; typed EMEDF optional in TypeScript",
-            supportsEventGc = true
+            parameterTargetValidation = "event-local-instruction-and-argument-range-verified",
+            supportsEventGc = true,
+            supportsInstructionGc = true
         };
     }
 
@@ -698,6 +1584,20 @@ internal sealed class EmevdNativeDocument
         BinaryPrimitives.WriteInt64LittleEndian(target.AsSpan(offset, 8), value);
     private static string Hash(byte[] bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    private static string HashEventBuild(EmevdEventBuild build)
+        => Hash(EncodeEventSnapshot(build));
+
+    private static void ValidateInstructionSnapshotParameterOrder(EmevdEventBuild build)
+    {
+        for (var index = 1; index < build.Parameters.Count; index++)
+        {
+            if (build.Parameters[index - 1].InstructionIndex
+                > build.Parameters[index].InstructionIndex)
+                throw new InvalidDataException(
+                    "EMEVD parameter substitution 表未按 instructionIndex 分组；instruction typed snapshot/order 暂不支持该布局。");
+        }
+    }
 }
 
 internal sealed record EmevdEvent(
@@ -735,13 +1635,46 @@ internal sealed record EmevdEventBuild(
     List<EmevdInstructionBuild> Instructions,
     List<EmevdParameter> Parameters);
 
+internal sealed record EmevdInstructionSnapshotBuild(
+    EmevdInstructionBuild Instruction,
+    List<EmevdParameter> Parameters);
+
+internal sealed record EmevdInstructionAuthoringRequest(
+    int EventIndex,
+    int InstructionIndex,
+    int Bank,
+    int InstructionId,
+    string ArgsBase64);
+
 internal sealed record EmevdPatch(
     string Kind,
     long EventId,
     long? RestBehavior,
     long? NewEventId,
     long? InstructionIndex = null,
-    string? ArgsBase64 = null);
+    string? ArgsBase64 = null,
+    long? BeforeEventId = null,
+    int? EventIndex = null,
+    int? BeforeEventIndex = null,
+    int? InstructionLocalIndex = null,
+    int? ExpectedBank = null,
+    int? ExpectedInstructionId = null,
+    int? BeforeInstructionIndex = null,
+    int? BeforeExpectedBank = null,
+    int? BeforeExpectedInstructionId = null,
+    int? NewBank = null,
+    int? NewInstructionId = null,
+    int? InsertEventIndex = null,
+    string? EventSnapshotBase64 = null,
+    string? EventSnapshotSha256 = null,
+    string? ExpectedEventHash = null,
+    string? EventSnapshotFormatId = null,
+    string? EventSnapshotSchemaVersion = null,
+    string? InstructionSnapshotBase64 = null,
+    string? InstructionSnapshotSha256 = null,
+    string? ExpectedInstructionHash = null,
+    string? InstructionSnapshotFormatId = null,
+    string? InstructionSnapshotSchemaVersion = null);
 
 internal sealed record EmevdRoundTripReport(
     bool ByteIdentical,

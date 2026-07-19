@@ -13,10 +13,22 @@ import type {
   PersistedDiagnostic,
   TransactionJournalPhase,
   TransactionJournalRecord,
-  OperationLogStore
+  OperationLogStore,
+  AppModelServiceRecord,
+  AppPermissionGrant,
+  RecordAgentRunInput,
+  RetentionCleanupResult,
+  AiHistoryRetentionMode,
+  StoredAgentPermissionMode,
+  StoredAgentRunDetail,
+  StoredAgentRunSummary
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.1.0' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.3.0' as const;
+
+export interface OpenAppDatabasePayload {
+  appDatabasePath: string;
+}
 
 export interface OpenWorkspaceDatabasePayload {
   appDatabasePath: string;
@@ -31,6 +43,7 @@ export interface OpenWorkspaceDatabasePayload {
 }
 
 export interface OperationLogUtilityPayloadMap {
+  openApp: OpenAppDatabasePayload;
   openWorkspace: OpenWorkspaceDatabasePayload;
   record: { entry: OperationLogRecord };
   get: { opId: string };
@@ -65,6 +78,24 @@ export interface OperationLogUtilityPayloadMap {
   listDiagnostics: Record<string, never>;
   upsertJob: { job: Omit<BackgroundJobRecord, 'workspaceId'> };
   listJobs: Record<string, never>;
+  listModelServices: Record<string, never>;
+  getModelService: { serviceId: string; includeDeleted?: boolean };
+  upsertModelService: { record: AppModelServiceRecord };
+  importModelServices: { records: AppModelServiceRecord[] };
+  softDeleteModelService: { serviceId: string; deletedAt?: string };
+  replacePermissionGrant: { grant: AppPermissionGrant };
+  getActivePermissionGrant: {
+    serviceId: string;
+    permissionMode: AppPermissionGrant['permissionMode'] | StoredAgentPermissionMode;
+    policyVersion: string;
+  };
+  revokePermissionGrant: { grantId: string; revokedAt?: string };
+  recordAgentRun: { input: RecordAgentRunInput };
+  getAgentRun: { runId: string };
+  listAgentRuns: { workspaceKey?: string; serviceId?: string; limit?: number };
+  cleanupExpiredAiHistory: { now?: string };
+  getAiHistoryRetentionMode: Record<string, never>;
+  setAiHistoryRetentionMode: { mode: AiHistoryRetentionMode };
   health: Record<string, never>;
   close: Record<string, never>;
 }
@@ -89,6 +120,7 @@ export interface OperationLogUtilityResponse {
 }
 
 export interface OperationLogUtilityResultMap {
+  openApp: { appReady: true };
   openWorkspace: {
     workspaceId: string;
     legacyImport: {
@@ -126,6 +158,20 @@ export interface OperationLogUtilityResultMap {
   listDiagnostics: PersistedDiagnostic[];
   upsertJob: null;
   listJobs: BackgroundJobRecord[];
+  listModelServices: AppModelServiceRecord[];
+  getModelService: AppModelServiceRecord | undefined;
+  upsertModelService: AppModelServiceRecord;
+  importModelServices: { imported: number };
+  softDeleteModelService: null;
+  replacePermissionGrant: AppPermissionGrant;
+  getActivePermissionGrant: AppPermissionGrant | undefined;
+  revokePermissionGrant: null;
+  recordAgentRun: { runId: string; conversationId: string };
+  getAgentRun: StoredAgentRunDetail | null;
+  listAgentRuns: StoredAgentRunSummary[];
+  cleanupExpiredAiHistory: RetentionCleanupResult;
+  getAiHistoryRetentionMode: { mode: AiHistoryRetentionMode };
+  setAiHistoryRetentionMode: { mode: AiHistoryRetentionMode; updatedAt: string };
   health: { ready: boolean; appReady: boolean; workspaceId?: string };
   close: null;
 }

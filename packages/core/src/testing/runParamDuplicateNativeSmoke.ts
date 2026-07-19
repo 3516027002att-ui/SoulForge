@@ -4,8 +4,9 @@
  */
 import { copyFile, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
+import { resolveNativeFixturePath } from './nativeFixturePaths.js';
 
 interface ParamEnvelope {
   sourceHash: string;
@@ -19,7 +20,11 @@ interface Bnd4ChildSnapshot {
 }
 
 async function main(): Promise<void> {
-  const sourceBnd = resolve(process.argv[2] ?? '../../mods/param/gameparam/gameparam.parambnd.dcx');
+  const sourceBnd = await resolveNativeFixturePath(
+    'param/gameparam/gameparam.parambnd.dcx',
+    2,
+    'SOULFORGE_NATIVE_FIXTURE_PARAM'
+  );
   const root = await mkdtemp(join(tmpdir(), 'soulforge-param-dup-'));
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');

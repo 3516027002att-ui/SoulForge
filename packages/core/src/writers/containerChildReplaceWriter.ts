@@ -12,6 +12,8 @@ import type {
   StructuredDiagnostic,
   WriterAdapterContract,
   WriterApplyResult,
+  WriterInverseCaptureResult,
+  WriterPostValidateResult,
   WriterRollbackMetadata,
   WriterWritePlan,
   WriterWrittenTarget
@@ -21,6 +23,8 @@ import { replaceContainerChildInMemory } from '../containers/containerService.js
 import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 import { checkOriginalContentHash, resolveExpectedHash } from '../validators/textHash.js';
 import { runBridge } from '../bridge/runBridge.js';
+import { captureNativeBnd4ResourceEntryChanges } from '../patch/containerChildInverse.js';
+import { ContainerRoundTripValidator } from '../validators/containerRoundTripValidator.js';
 
 export class ContainerChildReplaceWriter implements WriterAdapterContract {
   readonly writerId = 'writer:container-child-replace';
@@ -168,6 +172,51 @@ export class ContainerChildReplaceWriter implements WriterAdapterContract {
       writtenPaths: writtenTargets.map((item) => item.stagingPath),
       diagnostics,
       rollback: this.produceRollbackMetadata({ operations: input.operations, backupPaths: [] })
+    };
+  }
+
+  async captureInverse(input: {
+    operations: PatchIrOperation[];
+    stagedTargets: WriterWrittenTarget[];
+    workspaceRoot: string;
+  }): Promise<WriterInverseCaptureResult> {
+    const nativeOperations = input.operations.filter((operation) => (
+      isContainerChildOperation(operation) && isNativeBnd4Operation(operation)
+    ));
+    const captured = await captureNativeBnd4ResourceEntryChanges(
+      nativeOperations,
+      input.workspaceRoot
+    );
+    const capturedOperationIds = captured.diagnostics.some((item) => item.severity === 'error')
+      ? []
+      : nativeOperations.map((operation) => operation.id);
+    return {
+      ok: captured.diagnostics.every((item) => item.severity !== 'error')
+        && captured.changes.length === nativeOperations.length,
+      resourceEntryChanges: captured.changes,
+      capturedOperationIds,
+      diagnostics: captured.diagnostics
+    };
+  }
+
+  async postValidate(input: {
+    stagingRoot: string;
+    operations: PatchIrOperation[];
+    writtenTargets: WriterWrittenTarget[];
+  }): Promise<WriterPostValidateResult> {
+    const operations = input.operations.filter((operation): operation is ContainerChildOp =>
+      isContainerChildOperation(operation) && isNativeBnd4Operation(operation));
+    const result = await new ContainerRoundTripValidator().validateStagedOperations({
+      operations,
+      stagingRoot: input.stagingRoot,
+      stagedPaths: input.writtenTargets.map((target) => target.stagingPath),
+      writtenTargets: input.writtenTargets
+    });
+    return {
+      ok: result.ok,
+      writerId: this.writerId,
+      validatedOperationIds: result.validatedOperationIds ?? [],
+      diagnostics: result.diagnostics
     };
   }
 

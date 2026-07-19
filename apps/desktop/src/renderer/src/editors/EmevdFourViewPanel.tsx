@@ -5,10 +5,11 @@ export interface EmevdFourViewPanelProps {
   /** Pre-built structural document from main/Bridge (no Node in renderer). */
   initialDocument: EmevdEditorDocument;
   onStructuredMutation?: (mutation: {
-    kind: 'emevd_set_rest_behavior' | 'emevd_update_id';
+    kind: 'emevd_set_rest_behavior' | 'emevd_update_id' | 'emevd_reorder_event';
     eventUri: string;
     restBehavior?: number;
     newEventId?: number;
+    beforeEventIndex?: number;
     baseRevision: number;
   }) => void;
 }
@@ -78,6 +79,32 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
       baseRevision: document.revision
     });
     setStatus(`已请求 restBehavior=${next}（revision→${document.revision + 1}）`);
+  }
+
+  function moveSelectedEvent(direction: 'up' | 'down'): void {
+    if (!selectedEvent) return;
+    const eventIndex = document.events.findIndex((event) => event.eventUri === selectedEvent.eventUri);
+    if (eventIndex < 0) return;
+    if (direction === 'up' && eventIndex === 0) {
+      setStatus('选中事件已经位于首位。');
+      return;
+    }
+    if (direction === 'down' && eventIndex === document.events.length - 1) {
+      setStatus('选中事件已经位于末位。');
+      return;
+    }
+    const beforeEventIndex = direction === 'up'
+      ? eventIndex - 1
+      : eventIndex + 2 < document.events.length
+        ? eventIndex + 2
+        : undefined;
+    props.onStructuredMutation?.({
+      kind: 'emevd_reorder_event',
+      eventUri: selectedEvent.eventUri,
+      ...(beforeEventIndex === undefined ? {} : { beforeEventIndex }),
+      baseRevision: document.revision
+    });
+    setStatus(direction === 'up' ? '已请求事件上移。' : '已请求事件下移。');
   }
 
   function noteDslEdit(): void {
@@ -160,6 +187,12 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
       <div className="row gap">
         <button type="button" disabled={!selectedEvent} onClick={flipRestBehavior}>
           切换选中事件 restBehavior
+        </button>
+        <button type="button" disabled={!selectedEvent} onClick={() => moveSelectedEvent('up')}>
+          上移事件
+        </button>
+        <button type="button" disabled={!selectedEvent} onClick={() => moveSelectedEvent('down')}>
+          下移事件
         </button>
         <span className="muted">
           选中：{selectedEvent ? `event ${selectedEvent.eventId}` : '无'}

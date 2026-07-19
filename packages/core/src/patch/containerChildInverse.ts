@@ -330,7 +330,7 @@ export async function captureNativeBnd4ResourceEntryChanges(
   return { changes, diagnostics };
 }
 
-export function isValidResourceEntryInverse(
+export function isValidContainerResourceEntryInverse(
   change: { changeKind: string; beforeHash?: string; afterHash?: string; inverse: PatchIrOperation },
   containerAfterHash: string | undefined
 ): { ok: true } | { ok: false; code: string; message: string } {

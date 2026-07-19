@@ -568,6 +568,88 @@ CREATE TABLE IF NOT EXISTS trusted_signers (
   revoked_at TEXT
 );
 `
+  },
+  {
+    id: 2,
+    name: 'v0_5_app_ai_authority_and_retention',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+ALTER TABLE ai_messages ADD COLUMN expires_at TEXT;
+ALTER TABLE ai_messages ADD COLUMN redaction_summary TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE ai_messages ADD COLUMN provider_response_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_ai_messages_expires
+  ON ai_messages(expires_at);
+
+CREATE TABLE IF NOT EXISTS app_agent_runs (
+  run_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  service_id TEXT NOT NULL,
+  workspace_key TEXT,
+  permission_mode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  finish_reason TEXT,
+  diagnostics_json TEXT NOT NULL DEFAULT '[]',
+  audit_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  FOREIGN KEY (conversation_id) REFERENCES ai_conversations(conversation_id) ON DELETE CASCADE,
+  FOREIGN KEY (service_id) REFERENCES model_services(service_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_agent_runs_conversation_created
+  ON app_agent_runs(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS agent_steps (
+  step_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step_index INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  summary TEXT,
+  diagnostics_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES app_agent_runs(run_id) ON DELETE CASCADE,
+  UNIQUE (run_id, step_index)
+);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  tool_call_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step_index INTEGER,
+  tool_name TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  code TEXT,
+  arguments_json TEXT,
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES app_agent_runs(run_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_run_created
+  ON tool_calls(run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS outbound_context_items (
+  context_item_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  item_index INTEGER NOT NULL,
+  resource_uri TEXT,
+  context_kind TEXT NOT NULL,
+  content_hash TEXT,
+  redaction_summary TEXT NOT NULL DEFAULT '{}',
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES app_agent_runs(run_id) ON DELETE CASCADE,
+  UNIQUE (run_id, item_index)
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  setting_key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`
   }
 ];
 

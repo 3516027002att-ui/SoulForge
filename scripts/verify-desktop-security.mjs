@@ -13,6 +13,10 @@ const files = {
   )
 };
 
+const runModelServiceContract = files.preload.match(
+  /runModelService:\s*\(input:\s*\{([^}]*)\}\)\s*:[^\r\n]+=>/
+)?.[1] ?? '';
+
 const checks = [
   ['Electron 沙箱已开启', files.main.includes('sandbox: true')],
   ['上下文隔离已开启', files.main.includes('contextIsolation: true')],
@@ -33,8 +37,10 @@ const checks = [
   ['渲染进程不能创建确认凭据', !files.preload.includes('createConfirmation')],
   ['渲染进程不能传入确认凭据', !files.preload.includes('ConfirmationReceipt')],
   ['渲染进程不能传入工作区绝对路径', !files.preload.includes('workspaceRoot')],
-  ['渲染进程不能决定 AI 权限模式', !files.preload.includes("ToolContext['mode']")
-    && files.ipc.includes("const activeAiMode: ToolContext['mode'] = 'plan'")],
+  ['渲染进程不能决定 AI 权限模式', runModelServiceContract.length > 0
+    && !runModelServiceContract.includes('permissionMode')
+    && files.ipc.includes('resolveAiModeForService')
+    && files.ipc.includes('mode: activeMode')],
   ['渲染 DTO 删除绝对路径', files.rendererDto.includes("'absolutePath'")],
   ['渲染 DTO 删除源路径', files.rendererDto.includes("'sourcePath'")],
   ['渲染 DTO 脱敏字符串中的绝对路径', files.rendererDto.includes('sanitizeRendererString(item.message)')
@@ -46,7 +52,14 @@ const checks = [
   ['生产操作日志不再打开 JSON store', !files.ipc.includes('openFileOperationLogStore')],
   ['SQLite 运行在 Electron utility process', files.operationLogUtilityClient.includes('utilityProcess.fork')],
   ['app.db 与 workspace.db 由后台进程打开', files.databaseUtility.includes('openAppDatabase')
-    && files.databaseUtility.includes('openSqliteOperationLogStore')]
+    && files.databaseUtility.includes('openSqliteOperationLogStore')],
+  ['AI 权限模式由 main 从 grant 解析', files.ipc.includes('resolveAiModeForService')
+    && /handle\(\s*['"]permissionGrant\.replace['"]/.test(files.ipc)
+    && files.ipc.includes('requestMainNativeConfirmation')],
+  ['preload 暴露 grant 生命周期但不暴露 resolveApiKey', files.preload.includes('replacePermissionGrant')
+    && files.preload.includes('getResolvedPermissionMode')
+    && files.preload.includes('revokePermissionGrant')
+    && !files.preload.includes('resolveApiKey')]
 ];
 
 const failed = checks.filter(([, ok]) => !ok);

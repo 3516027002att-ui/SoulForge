@@ -167,6 +167,7 @@ async function main(): Promise<void> {
   const tools: ToolDefinition[] = [{
     name: 'search_workspace',
     description: 'Search workspace index',
+    permission: 'read',
     parametersJsonSchema: {
       type: 'object',
       properties: { query: { type: 'string' } },
@@ -175,6 +176,7 @@ async function main(): Promise<void> {
   }, {
     name: 'apply_patch',
     description: 'Would write via Patch Engine',
+    permission: 'commit',
     parametersJsonSchema: { type: 'object', properties: {} }
   }];
 
@@ -253,7 +255,7 @@ async function main(): Promise<void> {
     });
 
     // Policy deny in plan mode for write tool
-    const denied = isToolAllowedInMode('apply_patch', 'plan', new Set(tools.map((t) => t.name)));
+    const denied = isToolAllowedInMode('apply_patch', 'plan', new Set(tools.map((t) => t.name)), 'commit');
     if (denied.ok) throw new Error('plan mode should deny apply_patch');
 
     // Full permission still goes through executeTool — simulate Patch Engine gate denial
@@ -264,9 +266,10 @@ async function main(): Promise<void> {
       tools: [{
         name: 'apply_patch',
         description: 'write',
+        permission: 'commit',
         parametersJsonSchema: { type: 'object', properties: { patch: { type: 'string' } } }
       }],
-      permissionMode: 'full',
+      permissionMode: 'fullPermission',
       executeTool: async () => ({
         ok: false,
         code: 'PATCH_ENGINE_REQUIRED',
@@ -287,9 +290,10 @@ async function main(): Promise<void> {
       tools: [{
         name: 'empty_args_test',
         description: 'must be rejected without evidence',
+        permission: 'commit',
         parametersJsonSchema: { type: 'object', properties: {} }
       }],
-      permissionMode: 'full',
+      permissionMode: 'fullPermission',
       executeTool: async () => {
         fullEmptyArgsExecuted = true;
         return { ok: true, content: '不应执行' };
@@ -302,7 +306,7 @@ async function main(): Promise<void> {
     }
 
     // insufficient evidence path
-    const emptyArgsDeny = isToolAllowedInMode('search_workspace', 'normal', new Set(['search_workspace']));
+    const emptyArgsDeny = isToolAllowedInMode('search_workspace', 'normal', new Set(['search_workspace']), 'read');
     if (!emptyArgsDeny.ok) throw new Error('search should be allowed in normal');
 
     const redacted = redactSecrets(`token ${OPENAI_KEY} and ${ANTHROPIC_KEY}`);

@@ -115,8 +115,8 @@ async function main(): Promise<void> {
     throw new Error('Missing v0.5 SQLite migration.');
   }
 
-  if (maxPermissionForMode('plan') !== 'validate') {
-    throw new Error('Plan mode should cap at validate.');
+  if (maxPermissionForMode('plan') !== 'propose') {
+    throw new Error('Plan mode should cap at propose.');
   }
   if (!isAiToolPermissionAllowed('propose', 'plan')) {
     throw new Error('Plan mode should allow propose.');
@@ -143,8 +143,9 @@ async function main(): Promise<void> {
     { opId: committed.opId },
     { workspaceIndex: index, mode: 'plan' }
   );
-  if (rollbackDenied.ok || rollbackDenied.error?.code !== 'TOOL_PERMISSION_DENIED') {
-    throw new Error('rollback_operation must be denied in plan mode.');
+  // Policy gate returns POLICY_DENIED (not the legacy TOOL_PERMISSION_DENIED).
+  if (rollbackDenied.ok || rollbackDenied.error?.code !== 'POLICY_DENIED') {
+    throw new Error(`rollback_operation must be denied in plan mode with POLICY_DENIED (got ${rollbackDenied.error?.code ?? 'ok'}).`);
   }
 
   console.log(JSON.stringify({

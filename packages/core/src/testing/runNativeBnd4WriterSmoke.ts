@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import type { BridgeResult } from '@soulforge/shared';
 import { BridgeDaemonClient, BridgeDaemonError } from '../bridge/bridgeDaemonClient.js';
 import { disposeBridgeDaemonPool, runBridge } from '../bridge/runBridge.js';
+import { resolveNativeFixturePath } from './nativeFixturePaths.js';
 
 interface DcxEnvelope {
   sourceHash: string;
@@ -13,7 +14,11 @@ interface DcxEnvelope {
 
 async function main(): Promise<void> {
   const executable = resolve(process.argv[2] ?? '../../bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe');
-  const source = resolve(process.argv[3] ?? '../../mods/chr/c0000.anibnd.dcx');
+  const source = await resolveNativeFixturePath(
+    'chr/c0000.anibnd.dcx',
+    3,
+    'SOULFORGE_NATIVE_FIXTURE_BND4'
+  );
   const writableRoot = await mkdtemp(join(tmpdir(), 'soulforge-native-bnd4-writer-'));
   const sourceRoot = resolve(source, '..');
   const sourceHashBefore = sha256(await readFile(source));
@@ -25,6 +30,68 @@ async function main(): Promise<void> {
     });
     const envelope = inspected.data;
     if (!envelope?.nested || envelope.nested.entryCount < 1) throw new Error('Real BND4 envelope unavailable.');
+    const first = envelope.nested.entries[0];
+    if (!first) throw new Error('Real BND4 first entry unavailable.');
+
+    const extractedPath = join(writableRoot, 'first-child.bin');
+    const extracted = await runBridge({
+      bridgeExecutablePath: executable,
+      command: 'extract-bnd4-child',
+      filePath: source,
+      allowedRoots: [sourceRoot, writableRoot],
+      writableRoots: [writableRoot],
+      workspaceSessionId: 'native-bnd4-extract-smoke',
+      timeoutMs: 60_000,
+      commandOptions: {
+        outputPath: extractedPath,
+        entryIndex: 0,
+        expectedContainerHash: envelope.sourceHash,
+        expectedChildHash: first.contentHash
+      }
+    });
+    if (!extracted.diagnostics.some((item) => item.code === 'BND4_CHILD_EXTRACTED_TO_STAGING')
+      || sha256(await readFile(extractedPath)) !== first.contentHash) {
+      throw new Error(`BND4 file-backed extraction failed: ${JSON.stringify(extracted.diagnostics)}`);
+    }
+    const deniedExtraction = await runBridge({
+      bridgeExecutablePath: executable,
+      command: 'extract-bnd4-child',
+      filePath: source,
+      allowedRoots: [sourceRoot, writableRoot],
+      writableRoots: [writableRoot],
+      workspaceSessionId: 'native-bnd4-extract-denied',
+      timeoutMs: 60_000,
+      commandOptions: {
+        outputPath: join(sourceRoot, 'must-not-extract.bin'),
+        entryIndex: 0,
+        expectedContainerHash: envelope.sourceHash,
+        expectedChildHash: first.contentHash
+      }
+    });
+    if (!deniedExtraction.diagnostics.some((item) => item.code === 'BRIDGE_OUTPUT_OUTSIDE_WRITABLE_ROOTS')) {
+      throw new Error(`Bridge did not reject extraction outside writable roots: ${JSON.stringify(deniedExtraction.diagnostics)}`);
+    }
+    const wrongHashOutput = join(writableRoot, 'wrong-hash-child.bin');
+    const wrongHashExtraction = await runBridge({
+      bridgeExecutablePath: executable,
+      command: 'extract-bnd4-child',
+      filePath: source,
+      allowedRoots: [sourceRoot, writableRoot],
+      writableRoots: [writableRoot],
+      workspaceSessionId: 'native-bnd4-extract-wrong-hash',
+      timeoutMs: 60_000,
+      commandOptions: {
+        outputPath: wrongHashOutput,
+        entryIndex: 0,
+        expectedContainerHash: envelope.sourceHash,
+        expectedChildHash: '0'.repeat(64)
+      }
+    });
+    const wrongHashOutputExists = await readFile(wrongHashOutput).then(() => true).catch(() => false);
+    if (!wrongHashExtraction.diagnostics.some((item) => item.code === 'BND4_CHILD_EXTRACTION_FAILED')
+      || wrongHashOutputExists) {
+      throw new Error(`Bridge did not fail closed on child hash mismatch: ${JSON.stringify(wrongHashExtraction.diagnostics)}`);
+    }
 
     const forbiddenOutput = join(sourceRoot, 'must-not-write.anibnd.dcx');
     const denied = await writeAdd(executable, source, sourceRoot, writableRoot, forbiddenOutput, envelope.sourceHash, 'native-bnd4-writer-denied');
@@ -73,6 +140,9 @@ async function main(): Promise<void> {
       outputEntries: reread.data.nested.entryCount,
       sourceUnchanged: true,
       outsideWritableRootRejected: true,
+      fileBackedExtractionVerified: true,
+      extractionOutsideWritableRootRejected: true,
+      extractionChildHashMismatchRejected: true,
       crashError: (crashError as BridgeDaemonError).code,
       autoReplay: false
     }, null, 2));

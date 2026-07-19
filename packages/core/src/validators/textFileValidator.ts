@@ -22,8 +22,10 @@ export class TextFileValidator implements ValidatorContract {
     operations: PatchIrOperation[];
   }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
+    const validatedOperationIds: string[] = [];
     for (const op of input.operations) {
       if (op.kind !== 'text_edit' && op.kind !== 'file_replace') continue;
+      validatedOperationIds.push(op.id);
       if (op.kind === 'text_edit' && typeof op.newText !== 'string') {
         diagnostics.push(createDiagnostic({
           severity: 'error',
@@ -46,7 +48,8 @@ export class TextFileValidator implements ValidatorContract {
       ok: diagnostics.every((item) => item.severity !== 'error'),
       diagnostics,
       scope: 'before_staging',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds
     };
   }
 
@@ -57,6 +60,9 @@ export class TextFileValidator implements ValidatorContract {
     stagedPaths: string[];
   }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
+    const validatedOperationIds = input.operations
+      .filter((op) => op.kind === 'text_edit' || op.kind === 'file_replace')
+      .map((op) => op.id);
 
     // Concurrent edit protection: original must still match expectedHash.
     for (const op of input.operations) {
@@ -74,7 +80,8 @@ export class TextFileValidator implements ValidatorContract {
         ok: diagnostics.every((item) => item.severity !== 'error'),
         diagnostics,
         scope: 'staged_output',
-        validatorId: this.validatorId
+        validatorId: this.validatorId,
+        validatedOperationIds
       };
     }
 
@@ -103,7 +110,8 @@ export class TextFileValidator implements ValidatorContract {
       ok: diagnostics.every((item) => item.severity !== 'error'),
       diagnostics,
       scope: 'staged_output',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds
     };
   }
 
@@ -113,6 +121,9 @@ export class TextFileValidator implements ValidatorContract {
     committedPaths: string[];
   }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
+    const validatedOperationIds = input.operations
+      .filter((op) => op.kind === 'text_edit' || op.kind === 'file_replace')
+      .map((op) => op.id);
     for (const path of input.committedPaths) {
       try {
         await readFile(path);
@@ -129,7 +140,8 @@ export class TextFileValidator implements ValidatorContract {
       ok: diagnostics.every((item) => item.severity !== 'error'),
       diagnostics,
       scope: 'after_commit',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds
     };
   }
 }

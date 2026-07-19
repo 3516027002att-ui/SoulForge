@@ -8,7 +8,8 @@ import type {
   AgentRunRequest,
   AgentRunResult,
   ChatMessage,
-  ToolCall
+  ToolCall,
+  ToolDefinition
 } from './types.js';
 
 const SECRET_PATTERNS = [
@@ -43,7 +44,8 @@ export function assertNoSecretLeak(payload: unknown, apiKey: string): void {
 export function isToolAllowedInMode(
   toolName: string,
   mode: AgentRunRequest['permissionMode'],
-  registeredTools: Set<string>
+  registeredTools: Set<string>,
+  permission?: ToolDefinition['permission']
 ): { ok: true } | { ok: false; code: string; message: string } {
   if (!registeredTools.has(toolName)) {
     return {
@@ -53,14 +55,7 @@ export function isToolAllowedInMode(
     };
   }
   if (mode === 'plan') {
-    const planAllow = new Set([
-      'read_resource',
-      'search_workspace',
-      'build_patch_graph',
-      'assess_edit_risk',
-      'list_diagnostics'
-    ]);
-    if (!planAllow.has(toolName)) {
+    if (permission !== 'read' && permission !== 'analyze' && permission !== 'propose') {
       return {
         ok: false,
         code: 'AGENT_TOOL_DENIED_PLAN_MODE',
@@ -79,7 +74,7 @@ export async function runAgentToolLoop(
   const messages: ChatMessage[] = [...request.messages];
   const diagnostics: AgentRunResult['diagnostics'] = [];
   const toolAudit: AgentRunResult['audit']['toolCalls'] = [];
-  const registered = new Set(request.tools.map((tool) => tool.name));
+  const registered = new Map(request.tools.map((tool) => [tool.name, tool]));
   let steps = 0;
   let finishReason = 'stop';
 
@@ -111,7 +106,13 @@ export async function runAgentToolLoop(
       break;
     }
     for (const call of toolCalls) {
-      const allowed = isToolAllowedInMode(call.name, request.permissionMode, registered);
+      const definition = registered.get(call.name);
+      const allowed = isToolAllowedInMode(
+        call.name,
+        request.permissionMode,
+        new Set(registered.keys()),
+        definition?.permission
+      );
       if (!allowed.ok) {
         toolAudit.push({ name: call.name, ok: false, code: allowed.code });
         messages.push({

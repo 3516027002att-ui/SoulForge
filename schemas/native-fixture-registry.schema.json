@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://soulforge.local/schemas/native-fixture-registry.schema.json",
+  "title": "SoulForge private native fixture registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "fixtures"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20000,
+      "items": { "$ref": "#/$defs/fixture" }
+    }
+  },
+  "$defs": {
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixtureId",
+        "localPath",
+        "sha256",
+        "game",
+        "format",
+        "variant",
+        "expectedAuthority",
+        "expectedCapabilities",
+        "expectedAssertions"
+      ],
+      "properties": {
+        "fixtureId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+        },
+        "localPath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)(?!.*:)(?!.*\\u0000)[^/]+(?:/[^/]+)*$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "game": { "const": "sekiro" },
+        "format": {
+          "enum": [
+            "DCX-DFLT",
+            "DCX-KRAK",
+            "BND4",
+            "FMG",
+            "PARAM",
+            "PARAMDEF",
+            "EMEVD",
+            "MSB",
+            "FLVER",
+            "TPF",
+            "DDS",
+            "GLTF",
+            "GLB",
+            "PNG",
+            "TGA"
+          ]
+        },
+        "variant": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\r\\n]+$"
+        },
+        "expectedAuthority": {
+          "enum": ["candidate", "fixture-confirmed", "native-verified"]
+        },
+        "expectedCapabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "inspect",
+              "parse",
+              "read",
+              "roundtrip-byte",
+              "roundtrip-semantic",
+              "write-staging",
+              "crud",
+              "reorder",
+              "convert",
+              "rollback-operation",
+              "rollback-resource-entry",
+              "game-smoke"
+            ]
+          }
+        },
+        "expectedAssertions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+          }
+        },
+        "testRole": {
+          "enum": [
+            "bnd4-primary",
+            "fmg-primary",
+            "param-primary",
+            "emevd-primary",
+            "msb-primary",
+            "chrbnd-primary"
+          ]
+        }
+      }
+    }
+  }
+}

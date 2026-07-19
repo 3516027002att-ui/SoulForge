@@ -17,6 +17,8 @@ export interface EmevdInstructionIr {
 export interface EmevdEventIr {
   eventUri: string;
   eventId: number;
+  /** Stable within the document revision; disambiguates duplicate native event IDs. */
+  eventIndex?: number;
   restBehavior: number;
   layer: number;
   instructions: EmevdInstructionIr[];

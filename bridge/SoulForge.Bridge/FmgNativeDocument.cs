@@ -12,6 +12,13 @@ internal sealed class FmgNativeDocument
     private const int GroupSize = 0x10;
     private const int MaxEntries = 200_000;
     private const int MaxSourceBytes = 32 * 1024 * 1024;
+    private const int MaxStringBytes = 1 * 1024 * 1024;
+    private const string SchemaId = "soulforge.fmg.sekiro-v2";
+    private const string SchemaVersion = "1.0.0";
+    private static readonly string LayoutFingerprint = Convert.ToHexString(SHA256.HashData(
+        Encoding.UTF8.GetBytes(
+            "FMG|Sekiro|v2|little|header:0x28|group:0x10|string-offset:0x04|utf16le")))
+        .ToLowerInvariant();
 
     private FmgNativeDocument(
         byte[] sourceBytes,
@@ -206,9 +213,13 @@ internal sealed class FmgNativeDocument
                 continue;
             }
             var encoded = Encoding.Unicode.GetBytes(text + "\0");
+            if (encoded.Length > MaxStringBytes)
+                throw new InvalidDataException("FMG 单条文本超出 1 MiB 安全上限。");
             offsets[i] = cursor;
             stringBytes.Add(encoded);
             cursor = checked(cursor + encoded.Length);
+            if (cursor > MaxSourceBytes)
+                throw new InvalidDataException("FMG 重建结果超出 32 MiB 安全上限。");
         }
 
         var fileSize = cursor;
@@ -252,6 +263,18 @@ internal sealed class FmgNativeDocument
         {
             switch (patch.Kind)
             {
+                case "set_text":
+                {
+                    if (patch.StringIndex is not int stringIndex
+                        || stringIndex < 0
+                        || stringIndex >= slots.Count)
+                        throw new InvalidDataException("FMG set_text 需要有效的 stringIndex。");
+                    if (slots[stringIndex].Id != patch.Id)
+                        throw new InvalidDataException(
+                            $"FMG stringIndex {stringIndex} 的 ID 与预期 {patch.Id} 不一致。");
+                    slots[stringIndex] = new FmgMutationEntry(patch.Id, patch.Text ?? string.Empty);
+                    break;
+                }
                 case "upsert":
                 {
                     var updated = false;
@@ -266,10 +289,66 @@ internal sealed class FmgNativeDocument
                 }
                 case "delete":
                 {
-                    var before = slots.Count;
-                    slots = slots.Where(s => s.Id != patch.Id).ToList();
-                    if (slots.Count == before)
-                        throw new InvalidDataException($"FMG 删除目标 ID {patch.Id} 不存在。");
+                    if (patch.StringIndex is int deleteIndex)
+                    {
+                        if (deleteIndex < 0 || deleteIndex >= slots.Count)
+                            throw new InvalidDataException("FMG delete 需要有效的 stringIndex。");
+                        if (slots[deleteIndex].Id != patch.Id)
+                            throw new InvalidDataException(
+                                $"FMG stringIndex {deleteIndex} 的 ID 与预期 {patch.Id} 不一致。");
+                        slots.RemoveAt(deleteIndex);
+                    }
+                    else
+                    {
+                        var before = slots.Count;
+                        slots = slots.Where(s => s.Id != patch.Id).ToList();
+                        if (slots.Count == before)
+                            throw new InvalidDataException($"FMG 删除目标 ID {patch.Id} 不存在。");
+                    }
+                    break;
+                }
+                case "insert":
+                {
+                    if (patch.StringIndex is not int insertIndex
+                        || insertIndex < 0
+                        || insertIndex > slots.Count)
+                        throw new InvalidDataException("FMG insert 需要有效的 stringIndex（0..entryCount）。");
+                    slots.Insert(insertIndex, new FmgMutationEntry(patch.Id, patch.Text ?? string.Empty));
+                    break;
+                }
+                case "reorder":
+                {
+                    if (patch.StringIndex is not int sourceIndex
+                        || sourceIndex < 0
+                        || sourceIndex >= slots.Count)
+                        throw new InvalidDataException("FMG reorder 需要有效的源 stringIndex。");
+                    if (slots[sourceIndex].Id != patch.Id)
+                        throw new InvalidDataException(
+                            $"FMG 源 stringIndex {sourceIndex} 的 ID 与预期 {patch.Id} 不一致。");
+                    if ((patch.BeforeStringIndex is null) != (patch.BeforeId is null))
+                        throw new InvalidDataException("FMG reorder 锚点 stringIndex 与 ID 必须同时提供或同时省略。");
+
+                    int insertionIndex;
+                    if (patch.BeforeStringIndex is int beforeIndex
+                        && patch.BeforeId is int beforeId)
+                    {
+                        if (beforeIndex < 0 || beforeIndex >= slots.Count || beforeIndex == sourceIndex)
+                            throw new InvalidDataException("FMG reorder 锚点 stringIndex 无效。");
+                        if (slots[beforeIndex].Id != beforeId)
+                            throw new InvalidDataException(
+                                $"FMG 锚点 stringIndex {beforeIndex} 的 ID 与预期 {beforeId} 不一致。");
+                        insertionIndex = beforeIndex - (sourceIndex < beforeIndex ? 1 : 0);
+                    }
+                    else
+                    {
+                        insertionIndex = slots.Count - 1;
+                    }
+
+                    if (insertionIndex == sourceIndex)
+                        throw new InvalidDataException("FMG reorder 不允许不改变顺序的空操作。");
+                    var moved = slots[sourceIndex];
+                    slots.RemoveAt(sourceIndex);
+                    slots.Insert(insertionIndex, moved);
                     break;
                 }
                 case "add":
@@ -291,6 +370,11 @@ internal sealed class FmgNativeDocument
         version = 2,
         sourceSize = SourceBytes.Length,
         sourceHash = SourceHash,
+        documentHash = SourceHash,
+        documentRevision = SourceHash,
+        schemaId = SchemaId,
+        schemaVersion = SchemaVersion,
+        layoutFingerprint = LayoutFingerprint,
         groupCount = Groups.Count,
         entryCount = Entries.Count,
         unk1 = Unk1,
@@ -307,7 +391,7 @@ internal sealed class FmgNativeDocument
         while (end + 1 < source.Length && !(source[end] == 0 && source[end + 1] == 0))
         {
             end += 2;
-            if (end - offset > 1024 * 1024) throw new InvalidDataException("FMG 字符串未终止或过长。");
+            if (end - offset > MaxStringBytes) throw new InvalidDataException("FMG 字符串未终止或过长。");
         }
         if (end + 1 >= source.Length) throw new InvalidDataException("FMG 字符串未以 UTF-16 空终止。");
         return Encoding.Unicode.GetString(source, offset, end - offset);
@@ -321,7 +405,13 @@ internal sealed class FmgNativeDocument
 internal sealed record FmgGroup(int OffsetIndex, int FirstId, int LastId, int Unk);
 internal sealed record FmgEntry(int Id, string Text, int StringIndex, int SourceOffset);
 internal sealed record FmgMutationEntry(int Id, string Text);
-internal sealed record FmgPatch(string Kind, int Id, string? Text);
+internal sealed record FmgPatch(
+    string Kind,
+    int Id,
+    string? Text,
+    int? StringIndex = null,
+    int? BeforeStringIndex = null,
+    int? BeforeId = null);
 internal sealed record FmgRoundTripReport(
     bool ByteIdentical,
     bool SemanticIdentical,

@@ -1,7 +1,10 @@
 /**
- * Real path: stage PNG → PatchIR file_replace into temp Mod overlay → reread hash.
+ * Real path: stage valid PNG → PatchIR file_replace into temp Mod overlay → reread hash.
+ * Staging still preserves source open-format bytes; native conversion is covered by
+ * open-format convert / dds-convert smokes.
  */
 import { createHash } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +12,46 @@ import { commitAssetImportThroughPatchIr } from '../assets/assetImportWriteback.
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
+
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function crc32(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    c ^= buf[i]!;
+    for (let k = 0; k < 8; k++) {
+      c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+    }
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function chunk(type: string, data: Buffer): Buffer {
+  const typeBuf = Buffer.from(type, 'ascii');
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const crcBuf = Buffer.alloc(4);
+  crcBuf.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([len, typeBuf, data, crcBuf]);
+}
+
+function validPng1x1(): Buffer {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0);
+  ihdr.writeUInt32BE(1, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const raw = Buffer.from([0x00, 0xff, 0x00, 0x80]);
+  return Buffer.concat([
+    sig,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0))
+  ]);
+}
 
 async function main(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'soulforge-asset-writeback-'));
@@ -24,10 +67,7 @@ async function main(): Promise<void> {
   await writeFile(targetPath, original);
   const expectedHash = sha256(original);
 
-  const png = Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    Buffer.from('SoulForge-import-png-payload')
-  ]);
+  const png = validPng1x1();
   const pngPath = join(sourceDir, 'pixel.png');
   await writeFile(pngPath, png);
 
@@ -42,38 +82,52 @@ async function main(): Promise<void> {
   const result = await commitAssetImportThroughPatchIr({
     sourcePath: pngPath,
     targetAssetUri: 'file://parts/tex/pixel.dds',
-    conversionRuleId: 'sekiro.dds.from-png',
+    conversionRuleId: 'open-format.png.stage',
     stagingRoot: staging,
     workspaceId: session.meta.workspaceId,
     targetAbsolutePath: targetPath,
     expectedTargetHash: expectedHash,
     confirmationReceiptId: confirmation.id,
-    title: 'PNG 导入写回 smoke'
-  }, { session, operationLog: store });
+    title: 'asset import writeback smoke'
+  }, {
+    session,
+    workspaceRoot: overlay,
+    operationLog: store,
+    actorId: 'asset-writeback-smoke'
+  });
 
   if (!result.ok) {
     throw new Error(`writeback failed: ${JSON.stringify(result.diagnostics)}`);
   }
   const after = await readFile(targetPath);
-  if (!after.equals(png)) {
-    throw new Error('target file was not replaced with staged import bytes');
-  }
   if (sha256(after) !== result.contentHash) {
-    throw new Error('committed content hash mismatch');
+    throw new Error('overlay hash mismatch after asset import writeback');
+  }
+  if (!Buffer.compare(after, png) === false && Buffer.compare(after, png) !== 0) {
+    // explicit compare
+  }
+  if (Buffer.compare(after, png) !== 0) {
+    throw new Error('overlay should contain staged open-format PNG bytes for stage-path writeback');
   }
 
-  // Hash gate: stale expected hash must fail
   const stale = await commitAssetImportThroughPatchIr({
     sourcePath: pngPath,
     targetAssetUri: 'file://parts/tex/pixel.dds',
-    conversionRuleId: 'sekiro.dds.from-png',
+    conversionRuleId: 'open-format.png.stage',
     stagingRoot: staging,
     workspaceId: session.meta.workspaceId,
     targetAbsolutePath: targetPath,
-    expectedTargetHash: expectedHash, // original hash, file already changed
+    expectedTargetHash: expectedHash,
     confirmationReceiptId: confirmation.id
-  }, { session, operationLog: store });
-  if (stale.ok) throw new Error('stale hash writeback must fail');
+  }, {
+    session,
+    workspaceRoot: overlay,
+    operationLog: store,
+    actorId: 'asset-writeback-smoke-stale'
+  });
+  if (stale.ok) {
+    throw new Error('stale hash writeback must fail');
+  }
 
   console.log(JSON.stringify({
     ok: true,
@@ -84,10 +138,6 @@ async function main(): Promise<void> {
     changedFiles: result.changedFiles.length,
     staleRejected: true
   }, null, 2));
-}
-
-function sha256(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex');
 }
 
 main().catch((error) => {

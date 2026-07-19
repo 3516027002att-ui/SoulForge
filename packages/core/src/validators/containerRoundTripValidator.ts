@@ -10,7 +10,8 @@ import type {
   ContainerChildOp,
   StructuredDiagnostic,
   ValidatorContract,
-  ValidatorResult
+  ValidatorResult,
+  WriterWrittenTarget
 } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
 import { decompressDcx } from '../containers/dcx.js';
@@ -46,6 +47,7 @@ export class ContainerRoundTripValidator implements ValidatorContract {
     operations: PatchIrOperation[];
   }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
+    const validatedOperationIds = containerOperationIds(input.operations);
     for (const op of input.operations) {
       if (isNativeBnd4(op)) {
         const nativeOp = op as ContainerChildOp;
@@ -107,7 +109,8 @@ export class ContainerRoundTripValidator implements ValidatorContract {
       ok: diagnostics.every((d) => d.severity !== 'error'),
       diagnostics,
       scope: 'before_staging',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds
     };
   }
 
@@ -117,11 +120,22 @@ export class ContainerRoundTripValidator implements ValidatorContract {
     stagedPaths: string[];
     stagingRoot: string;
   }): Promise<ValidatorResult> {
+    return this.validateStagedOperations(input);
+  }
+
+  async validateStagedOperations(input: {
+    operations: PatchIrOperation[];
+    stagedPaths: string[];
+    stagingRoot: string;
+    writtenTargets?: WriterWrittenTarget[];
+  }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
+    const validatedOperationIds = containerOperationIds(input.operations);
     for (const op of input.operations) {
       if (isNativeBnd4(op)) {
         const nativeOp = op as ContainerChildOp;
-        const staged = findStagedPath(nativeOp, input.stagedPaths);
+        const staged = input.writtenTargets?.find((target) => target.opId === nativeOp.id)?.stagingPath
+          ?? findStagedPath(nativeOp, input.stagedPaths);
         if (!staged) diagnostics.push(nativeError(nativeOp, 'CONTAINER_STAGED_PATH_MISSING', '找不到原生 BND4 暂存输出。'));
         else diagnostics.push(...await validateNativeMutation(nativeOp, staged, nativeOp.targetPath));
         continue;
@@ -130,9 +144,10 @@ export class ContainerRoundTripValidator implements ValidatorContract {
       if (!op.targetPath) continue;
 
       const baseName = op.targetPath.split(/[/\\]/).pop() ?? '';
-      const staged = input.stagedPaths.find((p) =>
-        p.includes(op.id.slice(0, 8)) || (baseName.length > 0 && p.endsWith(baseName))
-      );
+      const staged = input.writtenTargets?.find((target) => target.opId === op.id)?.stagingPath
+        ?? input.stagedPaths.find((p) =>
+          p.includes(op.id.slice(0, 8)) || (baseName.length > 0 && p.endsWith(baseName))
+        );
       if (!staged) {
         diagnostics.push(createDiagnostic({
           severity: 'error',
@@ -245,7 +260,8 @@ export class ContainerRoundTripValidator implements ValidatorContract {
       ok: diagnostics.every((d) => d.severity !== 'error'),
       diagnostics,
       scope: 'staged_output',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds
     };
   }
 
@@ -255,6 +271,7 @@ export class ContainerRoundTripValidator implements ValidatorContract {
     committedPaths: string[];
   }): Promise<ValidatorResult> {
     const diagnostics: StructuredDiagnostic[] = [];
+    const validatedOperationIds = containerOperationIds(input.operations);
     for (const op of input.operations) {
       if (isNativeBnd4(op)) {
         const nativeOp = op as ContainerChildOp;
@@ -301,7 +318,8 @@ export class ContainerRoundTripValidator implements ValidatorContract {
       ok: diagnostics.every((d) => d.severity !== 'error'),
       diagnostics,
       scope: 'after_commit',
-      validatorId: this.validatorId
+      validatorId: this.validatorId,
+      validatedOperationIds
     };
   }
 }
@@ -315,6 +333,12 @@ function isNativeBnd4(op: PatchIrOperation): boolean {
     && 'containerFormat' in op
     && op.containerFormat === 'BND4_DFLT'
     && op.metadata?.nativeFormatAuthority === true;
+}
+
+function containerOperationIds(operations: PatchIrOperation[]): string[] {
+  return operations
+    .filter((operation) => isNativeBnd4(operation) || operation.kind === 'container_child_replace')
+    .map((operation) => operation.id);
 }
 
 function findStagedPath(op: ContainerChildOp, stagedPaths: string[]): string | undefined {

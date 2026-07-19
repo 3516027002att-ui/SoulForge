@@ -19,8 +19,15 @@ apps/desktop/.native/
 # SoulForge local state
 .soulforge-local/
 
+# Graphify local knowledge graph and Cursor rule (tooling; never commit)
+graphify-out/
+.cursor/
+
 # Local real mod samples. Never commit game/mod assets.
 mods/
+Sekiro Shadows Die Twice/
+testdata/native-fixtures/has-game-registry.json
+testdata/native-fixtures/_last-*.out
 
 # CodexPro local/runtime state. Keep stable .ai-bridge docs tracked.
 .codexpro/
