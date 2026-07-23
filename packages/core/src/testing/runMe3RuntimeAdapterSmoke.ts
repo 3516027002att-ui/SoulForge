@@ -57,6 +57,7 @@ class FakeProcessHost implements RuntimeProcessHost {
   command = '';
   args: readonly string[] = [];
   cwd = '';
+  environment: NodeJS.ProcessEnv = {};
 
   spawn(command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv }): RuntimeProcessHandle {
     const handle = new FakeProcessHandle();
@@ -64,6 +65,7 @@ class FakeProcessHost implements RuntimeProcessHost {
     this.command = command;
     this.args = args;
     this.cwd = options.cwd;
+    this.environment = options.env;
     return handle;
   }
 }
@@ -111,6 +113,10 @@ async function main(): Promise<void> {
     assert.equal(processHost.command, executablePath);
     assert.deepEqual(processHost.args, ['launch', '-p', profile.profilePath, '--auto-detect']);
     assert.equal(processHost.cwd, join(applicationDataRoot, 'runtime', 'me3', 'profiles'));
+    assert.equal(
+      Object.keys(processHost.environment).some((key) => key.toLowerCase() === 'path'),
+      false
+    );
 
     const firstHandle = processHost.handles[0];
     assert.ok(firstHandle);
@@ -152,6 +158,7 @@ async function main(): Promise<void> {
       profile: profile.profileId,
       launchState: snapshot.state,
       terminatedState: terminated.state,
+      pathDiscovery: 'disabled-at-public-boundary',
       unsafeBoundary: 'rejected-before-runtime-directory'
     }, null, 2));
   } finally {
