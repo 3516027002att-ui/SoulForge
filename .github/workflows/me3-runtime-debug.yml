@@ -1,0 +1,22 @@
+name: me3-runtime-debug
+
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  verify-me3-runtime:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run me3 runtime smoke
+        run: npm run test:me3-runtime-adapter
