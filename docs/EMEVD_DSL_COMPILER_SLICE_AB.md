@@ -37,7 +37,8 @@ interface EmevdNodeAnchor {
 约束：
 
 - `documentInstanceId` 区分一次打开文档的生命周期；
-- `localNodeId` 不从可变 event ID 或当前 ordinal 单独派生；
+- `localNodeId` 不从可变 event ID 或当前 ordinal 单独派生，当前使用 96-bit deterministic ID；
+- event 与 instruction 的 local ID 在同一 document instance 内必须唯一，冲突时失败关闭；
 - event ID mutation 必须保留 event 和 child instruction 的 anchor；
 - compiler request 的 document instance 或 revision 不匹配时失败关闭；
 - anchor 只是 editor-local identity，不替代 native offset、resource URI 或持久资源引用。
@@ -48,10 +49,10 @@ interface EmevdNodeAnchor {
 resource "file://event/common.emevd"
 base revision 0 schema "sha256:..."
 
-event @e:0123456789ab {
+event @e:0123456789abcdef01234567 {
   set id = 51
   set rest = 1
-  instruction @i:abcdef012345 {
+  instruction @i:abcdef0123456789abcdef01 {
     set arg conditionGroup = -2
   }
 }
@@ -64,6 +65,12 @@ event @e:0123456789ab {
 - `set arg <name>`。
 
 不支持 insert、delete、layer、parameter bank、macro、include、表达式执行、裸 bytes 或 argsBase64 写入。
+
+同一 event 字段或同一 instruction argument 在整个 source 中只能写一次：
+
+- event 字段冲突返回 `EMEVD_DSL_DUPLICATE_WRITE`；
+- instruction argument 冲突返回 `EMEVD_DSL_DUPLICATE_ARGUMENT`；
+- 任何重复写都会阻止 plan 生成，不依赖未来 apply 阶段决定先后覆盖。
 
 ## Patch template roundtrip
 
@@ -86,6 +93,7 @@ render -> parse -> bind -> deterministic empty plan
 - 所有 diagnostics 带 source span；
 - schema 缺失或 fingerprint 变化时不产出 plan；
 - unknown instruction 保持只读；
+- 重复 target write 失败关闭；
 - integer 严格执行 u8/s8/u16/s16/u32/s32 范围；
 - bool 不与 number 自动转换；
 - f32 必须 finite；
@@ -97,11 +105,11 @@ render -> parse -> bind -> deterministic empty plan
 
 公开 Windows CI 已覆盖：
 
-- stable anchor 在 event ID mutation 后保持；
+- 96-bit stable anchor 在 event ID mutation 后保持；
 - patch template render / parse / bind 为空计划；
 - 同输入 plan fingerprint 确定；
 - whitespace/source span 不影响语义 fingerprint；
-- stale revision、schema 缺失/变化、unknown instruction、数值越界、event ID 冲突与语法错误失败关闭；
+- stale revision、schema 缺失/变化、unknown instruction、重复字段/参数、数值越界、event ID 冲突与语法错误失败关闭；
 - 编译过程不修改 authority document。
 
 验证仅使用构造 EMEVD document 与最小 fixture EMEDF，不产生 native authority 声明。

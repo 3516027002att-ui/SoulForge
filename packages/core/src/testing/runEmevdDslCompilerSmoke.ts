@@ -189,6 +189,17 @@ event ${eventAnchor} {
   );
   assertDiagnostic(duplicateWrite, 'EMEVD_DSL_DUPLICATE_WRITE');
 
+  const duplicateArgumentSource = source.replace(
+    'set arg conditionGroup = -2',
+    'set arg conditionGroup = -2\n    set arg conditionGroup = -3'
+  );
+  const duplicateArgument = compileEmevdPatchDsl(
+    { ...request, sourceText: duplicateArgumentSource },
+    document,
+    registry
+  );
+  assertDiagnostic(duplicateArgument, 'EMEVD_DSL_DUPLICATE_ARGUMENT');
+
   const syntax = compileEmevdPatchDsl(
     { ...request, sourceText: `resource "${document.resourceUri}" base revision broken` },
     document,
@@ -227,6 +238,7 @@ event ${eventAnchor} {
       'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY',
       'EMEVD_DSL_EVENT_ID_DUPLICATE',
       'EMEVD_DSL_DUPLICATE_WRITE',
+      'EMEVD_DSL_DUPLICATE_ARGUMENT',
       'EMEVD_DSL_SYNTAX_ERROR'
     ]
   }, null, 2));

@@ -250,6 +250,7 @@ function validateDuplicateWrites(ast: EmevdDslDocument): EmevdDslDiagnostic[] {
 
   const register = (
     key: string,
+    code: 'EMEVD_DSL_DUPLICATE_WRITE' | 'EMEVD_DSL_DUPLICATE_ARGUMENT',
     label: string,
     span: EmevdDslSourceSpan,
     targetAnchor: string
@@ -257,7 +258,7 @@ function validateDuplicateWrites(ast: EmevdDslDocument): EmevdDslDiagnostic[] {
     const first = firstWriteByTarget.get(key);
     if (first) {
       diagnostics.push(createEmevdDslDiagnostic(
-        'EMEVD_DSL_DUPLICATE_WRITE',
+        code,
         `Duplicate write to ${label}; first write is at line ${first.start.line}, column ${first.start.column}.`,
         span,
         { resourceUri: ast.resourceUri, targetAnchor }
@@ -271,6 +272,7 @@ function validateDuplicateWrites(ast: EmevdDslDocument): EmevdDslDiagnostic[] {
     for (const operation of event.operations) {
       register(
         `event:${event.anchor}:${operation.field}`,
+        'EMEVD_DSL_DUPLICATE_WRITE',
         `${event.anchor}.${operation.field}`,
         operation.span,
         event.anchor
@@ -280,6 +282,7 @@ function validateDuplicateWrites(ast: EmevdDslDocument): EmevdDslDiagnostic[] {
       for (const operation of instruction.operations) {
         register(
           `instruction:${instruction.anchor}:arg:${operation.argument}`,
+          'EMEVD_DSL_DUPLICATE_ARGUMENT',
           `${instruction.anchor}.arg.${operation.argument}`,
           operation.span,
           instruction.anchor
