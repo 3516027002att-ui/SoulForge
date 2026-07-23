@@ -1,3 +1,4 @@
+import type { RuntimeCapability, RuntimeLaunchRecord } from '@soulforge/core';
 import type {
   BridgeResult,
   Diagnostic,
@@ -38,6 +39,30 @@ export type RendererPatchHistoryEntry = Omit<
   changedPaths: string[];
 };
 
+export interface RendererRuntimeCapability {
+  adapterId: string;
+  status: RuntimeCapability['status'];
+  configured: boolean;
+  version?: string;
+  diagnostics: Diagnostic[];
+}
+
+export type RendererRuntimeLaunchRecord = Omit<
+  RuntimeLaunchRecord,
+  'workspaceId' | 'profilePath' | 'diagnostics'
+> & {
+  diagnostics: Diagnostic[];
+};
+
+export interface RendererRuntimeActionResult {
+  ok: boolean;
+  capability?: RendererRuntimeCapability;
+  record?: RendererRuntimeLaunchRecord;
+  records?: RendererRuntimeLaunchRecord[];
+  removed?: boolean;
+  diagnostics: Diagnostic[];
+}
+
 const SENSITIVE_PATH_KEYS = new Set([
   'absolutePath',
   'sourcePath',
@@ -51,6 +76,8 @@ const SENSITIVE_PATH_KEYS = new Set([
   'recoveryPath',
   'metadataPath',
   'storePath',
+  'profilePath',
+  'executablePath',
   // Model-service secrets must never reach renderer DTOs.
   'apiKey',
   'secret',
@@ -131,6 +158,43 @@ export function toRendererHistoryEntry(
     ...(entry.inverseOfOpId ? { inverseOfOpId: entry.inverseOfOpId } : {}),
     ...(entry.rollbackScope ? { rollbackScope: entry.rollbackScope } : {}),
     ...(entry.graphSummary ? { graphSummary: entry.graphSummary } : {})
+  };
+}
+
+export function toRendererRuntimeCapability(
+  capability: RuntimeCapability,
+  configured: boolean
+): RendererRuntimeCapability {
+  return {
+    adapterId: capability.adapterId,
+    status: capability.status,
+    configured,
+    ...(capability.version ? { version: capability.version } : {}),
+    diagnostics: sanitizeDiagnostics(capability.diagnostics)
+  };
+}
+
+export function toRendererRuntimeLaunchRecord(
+  record: RuntimeLaunchRecord
+): RendererRuntimeLaunchRecord {
+  return {
+    sessionId: record.sessionId,
+    adapterId: record.adapterId,
+    profileId: record.profileId,
+    ...(record.operationId ? { operationId: record.operationId } : {}),
+    ...(record.relatedOperationId ? { relatedOperationId: record.relatedOperationId } : {}),
+    verificationKind: record.verificationKind,
+    state: record.state,
+    ...(record.pid === undefined ? {} : { pid: record.pid }),
+    startedAt: record.startedAt,
+    ...(record.exitedAt ? { exitedAt: record.exitedAt } : {}),
+    ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode }),
+    ...(record.signal ? { signal: record.signal } : {}),
+    stdout: sanitizeRendererString(record.stdout),
+    stderr: sanitizeRendererString(record.stderr),
+    outputTruncated: record.outputTruncated,
+    diagnostics: sanitizeDiagnostics(record.diagnostics),
+    updatedAt: record.updatedAt
   };
 }
 
