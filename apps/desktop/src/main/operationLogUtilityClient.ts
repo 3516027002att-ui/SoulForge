@@ -14,12 +14,16 @@ import type {
   RecoveryPointRecord,
   RecoveryCleanupPlan,
   ResourceEntryChangeRecord,
+  RuntimeAdapterSetting,
+  RuntimeLaunchRecord,
+  RuntimeLaunchSessionStore,
   TransactionJournalPhase,
   TransactionJournalRecord
 } from '@soulforge/core';
 import {
   OPERATION_LOG_UTILITY_PROTOCOL,
   isOperationLogUtilityResponse,
+  type OpenAppDatabasePayload,
   type OpenWorkspaceDatabasePayload,
   type OperationLogUtilityMethod,
   type OperationLogUtilityPayloadMap,
@@ -33,10 +37,11 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
-export class OperationLogUtilityClient implements OperationLogStore {
+export class OperationLogUtilityClient implements OperationLogStore, RuntimeLaunchSessionStore {
   private process: UtilityProcess | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private activeWorkspace: OpenWorkspaceDatabasePayload | null = null;
+  private activeAppDatabasePath: string | null = null;
   private opening: Promise<void> | null = null;
 
   constructor(
@@ -44,6 +49,17 @@ export class OperationLogUtilityClient implements OperationLogStore {
     private readonly requestTimeoutMs = 15_000,
     private readonly nativeBindingPath?: string
   ) {}
+
+  async openApp(payload: OpenAppDatabasePayload): Promise<void> {
+    if (this.opening) await this.opening;
+    if (this.process && this.activeAppDatabasePath === payload.appDatabasePath) return;
+    this.opening = this.openAppInternal(payload);
+    try {
+      await this.opening;
+    } finally {
+      this.opening = null;
+    }
+  }
 
   async openWorkspace(payload: OpenWorkspaceDatabasePayload): Promise<void> {
     if (this.opening) await this.opening;
@@ -164,27 +180,60 @@ export class OperationLogUtilityClient implements OperationLogStore {
     return this.request('listJobs', {});
   }
 
+  getRuntimeAdapterSetting(adapterId: string): Promise<RuntimeAdapterSetting | undefined> {
+    return this.request('getRuntimeAdapterSetting', { adapterId });
+  }
+
+  upsertRuntimeAdapterSetting(setting: RuntimeAdapterSetting): Promise<void> {
+    return this.request('upsertRuntimeAdapterSetting', { setting }).then(() => undefined);
+  }
+
+  deleteRuntimeAdapterSetting(adapterId: string): Promise<boolean> {
+    return this.request('deleteRuntimeAdapterSetting', { adapterId });
+  }
+
+  upsertRuntimeSession(record: RuntimeLaunchRecord): Promise<void> {
+    return this.request('upsertRuntimeSession', { record }).then(() => undefined);
+  }
+
+  getRuntimeSession(sessionId: string): Promise<RuntimeLaunchRecord | undefined> {
+    return this.request('getRuntimeSession', { sessionId });
+  }
+
+  listRuntimeSessions(workspaceId: string): Promise<RuntimeLaunchRecord[]> {
+    return this.request('listRuntimeSessions', { workspaceId });
+  }
+
   async health(): Promise<{ ready: boolean; appReady: boolean; workspaceId?: string }> {
     return this.request('health', {});
   }
 
-  /** Force a fresh utility process and reopen the same workspace; pending RPCs are never replayed. */
+  /** Force a fresh utility process and reopen the same durable authorities; pending RPCs are never replayed. */
   async restart(): Promise<void> {
-    const payload = this.activeWorkspace;
+    const workspacePayload = this.activeWorkspace;
+    const appDatabasePath = this.activeAppDatabasePath;
     const child = this.process;
-    if (!payload || !child) throw new Error('数据库后台进程没有可恢复的活动工作区。');
+    if ((!workspacePayload && !appDatabasePath) || !child) {
+      throw new Error('数据库后台进程没有可恢复的活动 authority。');
+    }
     this.process = null;
     this.activeWorkspace = null;
+    this.activeAppDatabasePath = null;
     this.rejectAll(new Error('数据库后台进程正在重启；未完成请求不会自动重放。'));
     const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
     child.kill();
     await exited;
-    await this.openWorkspace(payload);
+    if (workspacePayload) {
+      await this.openWorkspace(workspacePayload);
+    } else if (appDatabasePath) {
+      await this.openApp({ appDatabasePath });
+    }
   }
 
   async dispose(): Promise<void> {
     const child = this.process;
     this.activeWorkspace = null;
+    this.activeAppDatabasePath = null;
     if (!child) return;
     try {
       await this.requestOn(child, 'close', {});
@@ -196,15 +245,31 @@ export class OperationLogUtilityClient implements OperationLogStore {
     this.rejectAll(new Error('数据库后台进程已关闭。'));
   }
 
+  private async openAppInternal(payload: OpenAppDatabasePayload): Promise<void> {
+    if (!this.process) this.spawn();
+    try {
+      await this.request('openApp', payload);
+      this.activeAppDatabasePath = payload.appDatabasePath;
+    } catch (error) {
+      this.process?.kill();
+      this.process = null;
+      this.activeWorkspace = null;
+      this.activeAppDatabasePath = null;
+      throw error;
+    }
+  }
+
   private async openWorkspaceInternal(payload: OpenWorkspaceDatabasePayload): Promise<void> {
     if (!this.process) this.spawn();
     try {
       await this.request('openWorkspace', payload);
       this.activeWorkspace = { ...payload };
+      this.activeAppDatabasePath = payload.appDatabasePath;
     } catch (error) {
       this.process?.kill();
       this.process = null;
       this.activeWorkspace = null;
+      this.activeAppDatabasePath = null;
       throw error;
     }
   }
@@ -227,6 +292,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
       if (this.process !== child) return;
       this.process = null;
       this.activeWorkspace = null;
+      this.activeAppDatabasePath = null;
       this.rejectAll(new Error(`数据库后台进程意外退出（代码 ${code}）。`));
     });
     child.on('error', (_type, location) => {
