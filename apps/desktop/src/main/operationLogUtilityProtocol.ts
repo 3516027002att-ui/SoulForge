@@ -13,10 +13,16 @@ import type {
   PersistedDiagnostic,
   TransactionJournalPhase,
   TransactionJournalRecord,
-  OperationLogStore
+  OperationLogStore,
+  RuntimeAdapterSetting,
+  RuntimeLaunchRecord
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.1.0' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.2.0' as const;
+
+export interface OpenAppDatabasePayload {
+  appDatabasePath: string;
+}
 
 export interface OpenWorkspaceDatabasePayload {
   appDatabasePath: string;
@@ -31,6 +37,7 @@ export interface OpenWorkspaceDatabasePayload {
 }
 
 export interface OperationLogUtilityPayloadMap {
+  openApp: OpenAppDatabasePayload;
   openWorkspace: OpenWorkspaceDatabasePayload;
   record: { entry: OperationLogRecord };
   get: { opId: string };
@@ -65,6 +72,12 @@ export interface OperationLogUtilityPayloadMap {
   listDiagnostics: Record<string, never>;
   upsertJob: { job: Omit<BackgroundJobRecord, 'workspaceId'> };
   listJobs: Record<string, never>;
+  getRuntimeAdapterSetting: { adapterId: string };
+  upsertRuntimeAdapterSetting: { setting: RuntimeAdapterSetting };
+  deleteRuntimeAdapterSetting: { adapterId: string };
+  upsertRuntimeSession: { record: RuntimeLaunchRecord };
+  getRuntimeSession: { sessionId: string };
+  listRuntimeSessions: { workspaceId: string };
   health: Record<string, never>;
   close: Record<string, never>;
 }
@@ -89,6 +102,7 @@ export interface OperationLogUtilityResponse {
 }
 
 export interface OperationLogUtilityResultMap {
+  openApp: { appReady: true };
   openWorkspace: {
     workspaceId: string;
     legacyImport: {
@@ -126,6 +140,12 @@ export interface OperationLogUtilityResultMap {
   listDiagnostics: PersistedDiagnostic[];
   upsertJob: null;
   listJobs: BackgroundJobRecord[];
+  getRuntimeAdapterSetting: RuntimeAdapterSetting | undefined;
+  upsertRuntimeAdapterSetting: null;
+  deleteRuntimeAdapterSetting: boolean;
+  upsertRuntimeSession: null;
+  getRuntimeSession: RuntimeLaunchRecord | undefined;
+  listRuntimeSessions: RuntimeLaunchRecord[];
   health: { ready: boolean; appReady: boolean; workspaceId?: string };
   close: null;
 }
