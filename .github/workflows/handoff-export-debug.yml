@@ -4,16 +4,30 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: write
+
 jobs:
-  export-handoff:
+  update-handoff:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout
+      - name: Checkout PR branch
         uses: actions/checkout@v4
-      - name: Upload handoff
-        uses: actions/upload-artifact@v4
         with:
-          name: handoff-source
-          path: docs/V0_5_IMPLEMENTATION_HANDOFF.md
-          if-no-files-found: error
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: Apply roadmap migration
+        run: python scripts/update-handoff-runtime-foundation.py
+      - name: Remove one-shot migration files
+        run: |
+          rm scripts/update-handoff-runtime-foundation.py
+          rm .github/workflows/handoff-export-debug.yml
+      - name: Commit roadmap update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: record me3 runtime foundation"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
