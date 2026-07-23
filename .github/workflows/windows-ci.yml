@@ -33,6 +33,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Keep newly introduced high-risk compiler logic isolated so a failure
+      # identifies the root slice before the aggregate workspace test step.
+      - name: EMEVD DSL compiler
+        run: npm run test:emevd-dsl-compiler
+
       - name: Unit / integration smokes
         run: npm test
 
