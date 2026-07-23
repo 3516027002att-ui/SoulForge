@@ -18,8 +18,36 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Core tests
-        run: npm run test -w @soulforge/core
+      - name: Build shared
+        run: npm run build -w @soulforge/shared
+      - name: Build core
+        run: npm run build -w @soulforge/core
+      - name: Confirmed reference smoke
+        run: node packages/core/dist/testing/runSyntheticConfirmedReferenceSmoke.js
+      - name: V0.5 foundation smoke
+        run: node packages/core/dist/testing/runV05FoundationSmoke.js
+      - name: File rollback smoke
+        run: node packages/core/dist/testing/runV05FileRollbackSmoke.js
+      - name: Security boundary smoke
+        run: node packages/core/dist/testing/runV05SecurityBoundarySmoke.js
+      - name: SQLite authority smoke
+        run: node packages/core/dist/testing/runV05SqliteAuthoritySmoke.js
+      - name: Persist smoke
+        run: node packages/core/dist/testing/runV05PersistSmoke.js
+      - name: P1 smoke
+        run: node packages/core/dist/testing/runV05P1Smoke.js
+      - name: Architecture scaffold smoke
+        run: node packages/core/dist/testing/runV05ArchitectureScaffoldSmoke.js
+      - name: Write path consolidation smoke
+        run: node packages/core/dist/testing/runV05WritePathConsolidationSmoke.js
+      - name: Full file workbench smoke
+        run: node packages/core/dist/testing/runV05FullFileWorkbenchSmoke.js
+      - name: Raw file workbench smoke
+        run: node packages/core/dist/testing/runV05RawFileWorkbenchSmoke.js
+      - name: Native container workbench smoke
+        run: node packages/core/dist/testing/runV06NativeContainerWorkbenchSmoke.js
+      - name: me3 runtime smoke
+        run: node packages/core/dist/testing/runMe3RuntimeAdapterSmoke.js
       - name: Desktop tests
         run: npm run test -w @soulforge/desktop
       - name: Desktop security
