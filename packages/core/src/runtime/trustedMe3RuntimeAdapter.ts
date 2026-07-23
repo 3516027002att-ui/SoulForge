@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { isPathInside } from '../workspace/pathBoundary.js';
@@ -14,6 +15,7 @@ import type {
 import {
   Me3RuntimeAdapter,
   type Me3RuntimeAdapterOptions,
+  type RuntimeProcessHandle,
   type RuntimeProcessHost
 } from './me3RuntimeAdapter.js';
 
@@ -34,9 +36,9 @@ export interface TrustedMe3RuntimeAdapterOptions {
 /**
  * Public me3 adapter boundary.
  *
- * It intentionally requires a main-owned executable path and removes only PATH
- * from the lower-level discovery environment. Other variables such as
- * SystemRoot and TEMP remain available to the launched process.
+ * It intentionally requires a main-owned executable path. PATH is removed only
+ * from executable discovery; the already-confirmed process receives the normal
+ * launch environment so Windows, Steam and me3 keep their expected variables.
  *
  * Runtime metadata roots are physically checked before the lower-level adapter
  * may create a profile directory, so a rejected configuration cannot leave
@@ -49,13 +51,14 @@ export class TrustedMe3RuntimeAdapter implements GameRuntimeAdapter {
 
   constructor(options: TrustedMe3RuntimeAdapterOptions) {
     this.applicationDataRoot = resolve(options.applicationDataRoot);
+    const launchEnvironment = { ...process.env };
     const delegateOptions: Me3RuntimeAdapterOptions = {
       applicationDataRoot: this.applicationDataRoot,
       executablePath: options.executablePath,
-      environment: environmentWithoutPath(process.env),
+      environment: environmentWithoutPath(launchEnvironment),
+      processHost: createLaunchEnvironmentProcessHost(options.processHost, launchEnvironment),
       ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
       ...(options.terminateGraceMs === undefined ? {} : { terminateGraceMs: options.terminateGraceMs }),
-      ...(options.processHost === undefined ? {} : { processHost: options.processHost }),
       ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.idFactory === undefined ? {} : { idFactory: options.idFactory })
     };
@@ -116,4 +119,50 @@ function environmentWithoutPath(environment: NodeJS.ProcessEnv): NodeJS.ProcessE
     if (key.toLowerCase() === 'path') delete result[key];
   }
   return result;
+}
+
+function createLaunchEnvironmentProcessHost(
+  injectedHost: RuntimeProcessHost | undefined,
+  launchEnvironment: NodeJS.ProcessEnv
+): RuntimeProcessHost {
+  if (injectedHost) {
+    return {
+      spawn(command, args, options): RuntimeProcessHandle {
+        return injectedHost.spawn(command, args, {
+          cwd: options.cwd,
+          env: launchEnvironment
+        });
+      }
+    };
+  }
+
+  return {
+    spawn(command, args, options): RuntimeProcessHandle {
+      const child = spawn(command, [...args], {
+        cwd: options.cwd,
+        env: launchEnvironment,
+        windowsHide: true,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      return {
+        ...(child.pid === undefined ? {} : { pid: child.pid }),
+        onStdout(listener) {
+          child.stdout?.on('data', listener);
+        },
+        onStderr(listener) {
+          child.stderr?.on('data', listener);
+        },
+        onError(listener) {
+          child.once('error', listener);
+        },
+        onExit(listener) {
+          child.once('exit', listener);
+        },
+        kill(signal) {
+          return child.kill(signal);
+        }
+      };
+    }
+  };
 }
