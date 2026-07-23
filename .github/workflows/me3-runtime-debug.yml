@@ -5,9 +5,9 @@ on:
     branches: [main, master]
 
 jobs:
-  verify-me3-runtime:
+  locate-test-failure:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,5 +18,13 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Run me3 runtime smoke
-        run: npm run test:me3-runtime-adapter
+      - name: Core tests
+        run: npm run test -w @soulforge/core
+      - name: Desktop tests
+        run: npm run test -w @soulforge/desktop
+      - name: Desktop security
+        run: npm run test:desktop-security
+      - name: UI localization
+        run: npm run test:ui-localization
+      - name: Database utility
+        run: npm run test:database-utility
