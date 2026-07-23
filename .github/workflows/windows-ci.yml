@@ -91,13 +91,21 @@ jobs:
         working-directory: packages/core
         run: node dist/testing/runEmevdDslCompilerSmoke.js
 
+      - name: Core — me3 adapter
+        working-directory: packages/core
+        run: node dist/testing/runMe3RuntimeAdapterSmoke.js
+
+      - name: Core — runtime session manager
+        working-directory: packages/core
+        run: node dist/testing/runRuntimeSessionManagerSmoke.js
+
       - name: Desktop security gate
         run: npm run test:desktop-security
 
       - name: UI localization gate
         run: npm run test:ui-localization
 
-      - name: Database utility smoke
+      - name: Database utility and runtime authority smoke
         run: npm run test:database-utility
 
       - name: Bridge synthetic fixtures
@@ -158,5 +166,5 @@ jobs:
       # Intentionally NOT run in public CI:
       # - test:native-preview / test:real-mod (private mods)
       # - bridge:verify:oodle / native emevd/msb/fmg/param against local mods (private corpus)
-      # - signed installer / real Sekiro launch (P7 private gate)
+      # - signed installer / real me3 + Sekiro launch (private runtime gate)
       # - SOULFORGE_PORTABLE_PACK=1 unsigned pack (optional local only)
