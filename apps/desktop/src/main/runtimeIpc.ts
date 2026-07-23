@@ -1,4 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  type IpcMainInvokeEvent,
+  type OpenDialogOptions,
+  type WebContents
+} from 'electron';
 import { dirname, join } from 'node:path';
 import { openWorkspaceSession, type RuntimeLaunchRecord } from '@soulforge/core';
 import type { Diagnostic } from '@soulforge/shared';
@@ -52,9 +60,9 @@ export function registerRuntimeIpcHandlers(
 
   handle('runtime.chooseMe3Executable', async (event): Promise<RendererRuntimeActionResult> => {
     const parent = BrowserWindow.fromWebContents(event.sender);
-    const options = {
+    const options: OpenDialogOptions = {
       title: '选择可信 me3 可执行文件',
-      properties: ['openFile'] as const,
+      properties: ['openFile'],
       ...(process.platform === 'win32'
         ? { filters: [{ name: 'me3 executable', extensions: ['exe'] }] }
         : {})
