@@ -5,9 +5,9 @@ on:
     branches: [main, master]
 
 jobs:
-  verify-runtime-foundation:
+  locate-core-failure:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,7 +22,29 @@ jobs:
         run: npm run build -w @soulforge/shared
       - name: Build core
         run: npm run build -w @soulforge/core
-      - name: Run V0.5 foundation smoke
+      - name: Confirmed reference smoke
+        run: node packages/core/dist/testing/runSyntheticConfirmedReferenceSmoke.js
+      - name: V0.5 foundation smoke
         run: node packages/core/dist/testing/runV05FoundationSmoke.js
-      - name: Run me3 runtime smoke
+      - name: File rollback smoke
+        run: node packages/core/dist/testing/runV05FileRollbackSmoke.js
+      - name: Security boundary smoke
+        run: node packages/core/dist/testing/runV05SecurityBoundarySmoke.js
+      - name: SQLite authority smoke
+        run: node packages/core/dist/testing/runV05SqliteAuthoritySmoke.js
+      - name: Persist smoke
+        run: node packages/core/dist/testing/runV05PersistSmoke.js
+      - name: P1 smoke
+        run: node packages/core/dist/testing/runV05P1Smoke.js
+      - name: Architecture scaffold smoke
+        run: node packages/core/dist/testing/runV05ArchitectureScaffoldSmoke.js
+      - name: Write path consolidation smoke
+        run: node packages/core/dist/testing/runV05WritePathConsolidationSmoke.js
+      - name: Full file workbench smoke
+        run: node packages/core/dist/testing/runV05FullFileWorkbenchSmoke.js
+      - name: Raw file workbench smoke
+        run: node packages/core/dist/testing/runV05RawFileWorkbenchSmoke.js
+      - name: Native container workbench smoke
+        run: node packages/core/dist/testing/runV06NativeContainerWorkbenchSmoke.js
+      - name: me3 runtime smoke
         run: node packages/core/dist/testing/runMe3RuntimeAdapterSmoke.js
