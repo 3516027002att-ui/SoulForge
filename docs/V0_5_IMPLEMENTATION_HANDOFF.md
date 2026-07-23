@@ -3,7 +3,7 @@
 > 文档性质：唯一实施规范、技术线路图与工程交接。  
 > 目标读者：接手 SoulForge 的开发 Agent / 工程师。  
 > 当前基准日期：2026-07-24。  
-> 当前仓库基线：runtime / EMEVD 并行整合候选；任何接手者都必须以真实 `HEAD`、工作树和测试结果重新核对。  
+> 当前仓库基线：PR #8 implementation candidate `698ef78`；任何接手者都必须以真实 `HEAD`、工作树和测试结果重新核对。  
 > 产品定位：**魂游 Mod 的 Cursor**。
 
 ---
@@ -603,7 +603,7 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 
 仍缺：
 
-- 持续远程 CI 与真实发布产物的稳定绿证据；
+- 跨更多提交与真实发布产物的持续稳定绿证据；
 - 真正的安装包、升级和干净机验证；
 - 代码签名和更新器；
 - 安装包内 Bridge、自包含 .NET 和 native binding 验证；
@@ -969,7 +969,7 @@ npm run test:desktop-security
 - 已实现：可信 me3 adapter、稳定 profile、无 shell 启动、限长日志、结构化进程状态、受控终止和 operation 关联。
 - 已实现：`RuntimeSessionManager`、orphan recovery、workspace-switch 终止门、app.db runtime setting、workspace.db runtime session、utility restart recovery。
 - 已实现：独立 main runtime IPC、原生 me3 文件选择、sender/document 校验、path-free preload DTO、manual/post_commit/post_rollback API 和 inverse relation 校验。
-- 已验证：fake process adapter/session smoke、数据库 utility restart smoke、desktop security contract；最终合并候选仍须以公开 Windows CI 结果更新本记录。
+- 已验证：Windows CI run 50 在 implementation candidate `698ef78` 全绿；覆盖 typecheck、全部拆分 core smokes、EMEVD DSL、me3 adapter、runtime session manager、desktop security、UI localization、Electron utility process SQLite 重启、Bridge、编辑器/IPC contracts、发行扫描和 build。
 - 样本范围：临时 workspace、fake me3 executable、注入式 fake process 和临时 SQLite；未使用真实游戏资产、用户 Mod、私有 corpus 或 Oodle runtime。
 - 未验证：真实 me3、真实 Sekiro、游戏内 Mod 加载、真实提交后启动、回滚后重启、崩溃转储和安装包运行门。
 - 非声明：profile 生成、fake process、SQLite 持久化、IPC 可调用或退出码 0 均不构成真实 Sekiro runtime authority。
