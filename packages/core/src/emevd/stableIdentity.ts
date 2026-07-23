@@ -18,7 +18,8 @@ function stableJson(value: unknown): string {
 }
 
 function localId(kind: 'event' | 'instruction', seed: unknown): string {
-  return createHash('sha256').update(`${kind}:${stableJson(seed)}`).digest('hex').slice(0, 12);
+  // 96 bits keeps editor-local collision risk negligible even on large corpora.
+  return createHash('sha256').update(`${kind}:${stableJson(seed)}`).digest('hex').slice(0, 24);
 }
 
 export function computeEmevdInstructionFingerprint(instruction: EmevdInstructionIr): string {
@@ -54,6 +55,23 @@ export function attachEmevdStableIdentity(
   options?: { documentInstanceId?: string }
 ): EmevdEditorDocument {
   const documentInstanceId = document.documentInstanceId ?? options?.documentInstanceId ?? randomUUID();
+  const eventLocalIds = new Set<string>();
+  const instructionLocalIds = new Set<string>();
+
+  const assertAnchor = (
+    kind: 'event' | 'instruction',
+    anchor: EmevdNodeAnchor,
+    seen: Set<string>
+  ): void => {
+    if (anchor.documentInstanceId !== documentInstanceId) {
+      throw new Error(`EMEVD_${kind.toUpperCase()}_ANCHOR_DOCUMENT_INSTANCE_MISMATCH`);
+    }
+    if (seen.has(anchor.localNodeId)) {
+      throw new Error(`EMEVD_${kind.toUpperCase()}_ANCHOR_COLLISION`);
+    }
+    seen.add(anchor.localNodeId);
+  };
+
   const events = document.events.map((event, eventIndex) => {
     const eventSourceFingerprint = event.anchor?.sourceFingerprint ?? sha256(stableJson({
       eventId: event.eventId,
@@ -75,6 +93,8 @@ export function attachEmevdStableIdentity(
       }),
       sourceFingerprint: eventSourceFingerprint
     };
+    assertAnchor('event', eventAnchor, eventLocalIds);
+
     const instructions = event.instructions.map((instruction, instructionIndex) => {
       const sourceFingerprint = instruction.anchor?.sourceFingerprint
         ?? computeEmevdInstructionFingerprint(instruction);
@@ -87,6 +107,7 @@ export function attachEmevdStableIdentity(
         }),
         sourceFingerprint
       };
+      assertAnchor('instruction', anchor, instructionLocalIds);
       return { ...instruction, anchor };
     });
     return { ...event, anchor: eventAnchor, instructions };

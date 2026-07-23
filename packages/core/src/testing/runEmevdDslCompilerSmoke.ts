@@ -57,6 +57,13 @@ function main(): void {
   if (!document.documentInstanceId || !event.anchor || !typedInstruction.anchor || !unknownInstruction.anchor) {
     throw new Error('stable identity missing');
   }
+  if (
+    event.anchor.localNodeId.length < 24
+    || typedInstruction.anchor.localNodeId.length < 24
+    || unknownInstruction.anchor.localNodeId.length < 24
+  ) {
+    throw new Error('stable anchor entropy is below the 96-bit contract');
+  }
   const eventAnchor = formatEmevdAnchor('event', event.anchor);
   const typedAnchor = formatEmevdAnchor('instruction', typedInstruction.anchor);
   const unknownAnchor = formatEmevdAnchor('instruction', unknownInstruction.anchor);
@@ -174,6 +181,14 @@ event ${eventAnchor} {
   const duplicate = compileEmevdPatchDsl({ ...request, sourceText: duplicateSource }, document, registry);
   assertDiagnostic(duplicate, 'EMEVD_DSL_EVENT_ID_DUPLICATE');
 
+  const duplicateWriteSource = source.replace('set rest = 1', 'set rest = 1\n  set rest = 2');
+  const duplicateWrite = compileEmevdPatchDsl(
+    { ...request, sourceText: duplicateWriteSource },
+    document,
+    registry
+  );
+  assertDiagnostic(duplicateWrite, 'EMEVD_DSL_DUPLICATE_WRITE');
+
   const syntax = compileEmevdPatchDsl(
     { ...request, sourceText: `resource "${document.resourceUri}" base revision broken` },
     document,
@@ -211,6 +226,7 @@ event ${eventAnchor} {
       'EMEVD_DSL_INTEGER_OUT_OF_RANGE',
       'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY',
       'EMEVD_DSL_EVENT_ID_DUPLICATE',
+      'EMEVD_DSL_DUPLICATE_WRITE',
       'EMEVD_DSL_SYNTAX_ERROR'
     ]
   }, null, 2));

@@ -232,10 +232,60 @@ export function parseEmevdPatchDsl(source: string): {
   if (tokenized.tokens.length === 0) return { diagnostics: tokenized.diagnostics };
   const parser = new Parser(tokenized.tokens);
   const ast = parser.parse();
-  const diagnostics = [...tokenized.diagnostics, ...parser.diagnostics]
-    .sort(compareEmevdDslDiagnostics);
+  const duplicateWriteDiagnostics = ast ? validateDuplicateWrites(ast) : [];
+  const diagnostics = [
+    ...tokenized.diagnostics,
+    ...parser.diagnostics,
+    ...duplicateWriteDiagnostics
+  ].sort(compareEmevdDslDiagnostics);
   return {
     ...(ast !== undefined ? { ast } : {}),
     diagnostics
   };
+}
+
+function validateDuplicateWrites(ast: EmevdDslDocument): EmevdDslDiagnostic[] {
+  const diagnostics: EmevdDslDiagnostic[] = [];
+  const firstWriteByTarget = new Map<string, EmevdDslSourceSpan>();
+
+  const register = (
+    key: string,
+    label: string,
+    span: EmevdDslSourceSpan,
+    targetAnchor: string
+  ): void => {
+    const first = firstWriteByTarget.get(key);
+    if (first) {
+      diagnostics.push(createEmevdDslDiagnostic(
+        'EMEVD_DSL_DUPLICATE_WRITE',
+        `Duplicate write to ${label}; first write is at line ${first.start.line}, column ${first.start.column}.`,
+        span,
+        { resourceUri: ast.resourceUri, targetAnchor }
+      ));
+      return;
+    }
+    firstWriteByTarget.set(key, span);
+  };
+
+  for (const event of ast.events) {
+    for (const operation of event.operations) {
+      register(
+        `event:${event.anchor}:${operation.field}`,
+        `${event.anchor}.${operation.field}`,
+        operation.span,
+        event.anchor
+      );
+    }
+    for (const instruction of event.instructions) {
+      for (const operation of instruction.operations) {
+        register(
+          `instruction:${instruction.anchor}:arg:${operation.argument}`,
+          `${instruction.anchor}.arg.${operation.argument}`,
+          operation.span,
+          instruction.anchor
+        );
+      }
+    }
+  }
+  return diagnostics;
 }
