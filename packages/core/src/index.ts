@@ -66,6 +66,7 @@ export * from './emevd/stableIdentity.js';
 export * from './emevd/dslTokenizer.js';
 export * from './emevd/dslParser.js';
 export * from './emevd/dslCompiler.js';
+export * from './emevd/dslRenderer.js';
 export * from './ai/toolRegistry.js';
 export * from './ai/toolPermissions.js';
 export * from './ai/aiContextBuilder.js';

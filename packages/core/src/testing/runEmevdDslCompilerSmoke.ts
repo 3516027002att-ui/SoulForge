@@ -8,6 +8,7 @@ import {
   compileEmevdPatchDsl,
   fingerprintEmedfRegistry
 } from '../emevd/dslCompiler.js';
+import { renderEmevdPatchDsl } from '../emevd/dslRenderer.js';
 import { formatEmevdAnchor } from '../emevd/stableIdentity.js';
 import {
   createSekiroFixtureEmedf,
@@ -80,6 +81,25 @@ function main(): void {
     sourceText: source,
     mode: 'patch'
   };
+
+  const renderedPatch = renderEmevdPatchDsl(document, registry);
+  const renderedRoundtrip = compileEmevdPatchDsl(
+    { ...request, sourceText: renderedPatch },
+    document,
+    registry
+  );
+  if (!renderedRoundtrip.ok) throw new Error(JSON.stringify(renderedRoundtrip.diagnostics));
+  if (renderedRoundtrip.plan.operations.length !== 0) {
+    throw new Error('untouched rendered patch template must compile to an empty plan');
+  }
+  const renderedEvent = renderedRoundtrip.ast.events.find((item) => item.anchor === eventAnchor);
+  if (!renderedEvent) throw new Error('rendered patch did not bind the event anchor');
+  if (!renderedEvent.instructions.some((item) => item.anchor === typedAnchor)) {
+    throw new Error('rendered patch did not bind the typed instruction anchor');
+  }
+  if (!renderedPatch.includes(unknownAnchor) || !renderedPatch.includes('read-only')) {
+    throw new Error('unknown instruction must remain visible as a read-only comment');
+  }
 
   const compiled = compileEmevdPatchDsl(request, document, registry);
   if (!compiled.ok) throw new Error(JSON.stringify(compiled.diagnostics));
@@ -182,6 +202,7 @@ event ${eventAnchor} {
     ok: true,
     message: 'EMEVD DSL Slice A+B stable identity/parser/deterministic plan smoke passed',
     planFingerprint: compiled.plan.planFingerprint,
+    renderedRoundtripFingerprint: renderedRoundtrip.plan.planFingerprint,
     operations: compiled.plan.operations.map((operation) => operation.kind),
     diagnosticsCovered: [
       'EMEVD_DSL_STALE_REVISION',
