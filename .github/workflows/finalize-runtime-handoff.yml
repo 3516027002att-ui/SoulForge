@@ -1,0 +1,61 @@
+name: finalize-runtime-handoff
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - .github/workflows/finalize-runtime-handoff.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-runtime-handoff
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout runtime branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/me3-runtime-foundation
+          fetch-depth: 0
+      - name: Record final CI evidence
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
+          let text = fs.readFileSync(path, 'utf8');
+          const replacements = [
+            [
+              '> 当前仓库基线：runtime / EMEVD 并行整合候选；任何接手者都必须以真实 `HEAD`、工作树和测试结果重新核对。  ',
+              '> 当前仓库基线：PR #8 implementation candidate `698ef78`；任何接手者都必须以真实 `HEAD`、工作树和测试结果重新核对。  '
+            ],
+            [
+              '- 持续远程 CI 与真实发布产物的稳定绿证据；',
+              '- 跨更多提交与真实发布产物的持续稳定绿证据；'
+            ],
+            [
+              '- 已验证：fake process adapter/session smoke、数据库 utility restart smoke、desktop security contract；最终合并候选仍须以公开 Windows CI 结果更新本记录。',
+              '- 已验证：Windows CI run 50 在 implementation candidate `698ef78` 全绿；覆盖 typecheck、全部拆分 core smokes、EMEVD DSL、me3 adapter、runtime session manager、desktop security、UI localization、Electron utility process SQLite 重启、Bridge、编辑器/IPC contracts、发行扫描和 build。'
+            ]
+          ];
+          for (const [from, to] of replacements) {
+            const count = text.split(from).length - 1;
+            if (count !== 1) throw new Error(`Expected one handoff anchor, found ${count}: ${from}`);
+            text = text.replace(from, to);
+          }
+          fs.writeFileSync(path, text, 'utf8');
+          NODE
+          rm .github/workflows/finalize-runtime-handoff.yml
+      - name: Commit final handoff evidence
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: record runtime integration CI evidence"
+          git push origin HEAD:agent/me3-runtime-foundation
