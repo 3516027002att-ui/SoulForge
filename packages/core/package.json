@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -b ../shared . && node dist/testing/runSyntheticConfirmedReferenceSmoke.js && node dist/testing/runV05FoundationSmoke.js && node dist/testing/runV05FileRollbackSmoke.js && node dist/testing/runV05SecurityBoundarySmoke.js && node dist/testing/runV05SqliteAuthoritySmoke.js && node dist/testing/runV05PersistSmoke.js && node dist/testing/runV05P1Smoke.js && node dist/testing/runV05ArchitectureScaffoldSmoke.js && node dist/testing/runV05WritePathConsolidationSmoke.js && node dist/testing/runV05FullFileWorkbenchSmoke.js && node dist/testing/runV05RawFileWorkbenchSmoke.js && node dist/testing/runV06NativeContainerWorkbenchSmoke.js",
+    "test": "tsc -b ../shared . && node dist/testing/runSyntheticConfirmedReferenceSmoke.js && node dist/testing/runV05FoundationSmoke.js && node dist/testing/runV05FileRollbackSmoke.js && node dist/testing/runV05SecurityBoundarySmoke.js && node dist/testing/runV05SqliteAuthoritySmoke.js && node dist/testing/runV05PersistSmoke.js && node dist/testing/runV05P1Smoke.js && node dist/testing/runV05ArchitectureScaffoldSmoke.js && node dist/testing/runV05WritePathConsolidationSmoke.js && node dist/testing/runV05FullFileWorkbenchSmoke.js && node dist/testing/runV05RawFileWorkbenchSmoke.js && node dist/testing/runV06NativeContainerWorkbenchSmoke.js && node dist/testing/runEmevdDslCompilerSmoke.js",
     "test:real-mod": "tsc -b ../shared . && node dist/testing/runRealModOpenSmoke.js ../../mods",
     "test:native-preview": "tsc -b ../shared . && node dist/testing/runNativeInspectSmoke.js ../../mods",
     "test:bridge-daemon-client": "tsc -b ../shared . && node dist/testing/runBridgeDaemonClientSmoke.js",
@@ -30,6 +30,7 @@
     "test:vault-ipc-contract": "tsc -b ../shared . && node dist/testing/runVaultIpcContractSmoke.js",
     "test:three-scene-module": "tsc -b ../shared . && node dist/testing/runThreeSceneModuleSmoke.js",
     "test:emevd-four-view": "tsc -b ../shared . && node dist/testing/runEmevdFourViewSmoke.js",
+    "test:emevd-dsl-compiler": "tsc -b ../shared . && node dist/testing/runEmevdDslCompilerSmoke.js",
     "test:dds-convert-writeback": "tsc -b ../shared . && node dist/testing/runDdsConvertWritebackSmoke.js",
     "test:vault-encrypt-contract": "tsc -b ../shared . && node dist/testing/runVaultEncryptContractSmoke.js",
     "test:openai-responses": "tsc -b ../shared . && node dist/testing/runOpenAiResponsesSmoke.js",

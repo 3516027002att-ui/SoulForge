@@ -3,7 +3,7 @@
  * baseRoot open + WRITE_TO_BASE_FORBIDDEN leave base bytes unchanged.
  * Also exercises the desktop path builder against a real file:// workspaceId on Windows.
  */
-import { access, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createPatchProposal, createStagingArea, commitValidatedStagingArea } from '../patch/patchEngine.js';
@@ -45,11 +45,12 @@ async function main(): Promise<void> {
     throw new Error('Expected session.layers.baseRoot to be set.');
   }
 
-  // Workspace ids are file:// URLs — the same shape desktop main receives.
+  // Workspace identity is based on the physical root so Windows 8.3 aliases
+  // and long paths map to one durable operation-log namespace.
   const workspaceIdFromSession = session.meta.workspaceId;
-  const workspaceIdFromPath = makeWorkspaceId(overlayRoot);
+  const workspaceIdFromPath = makeWorkspaceId(await realpath(overlayRoot));
   if (workspaceIdFromSession !== workspaceIdFromPath) {
-    throw new Error('Session workspaceId must match makeWorkspaceId(overlayRoot).');
+    throw new Error('Session workspaceId must match makeWorkspaceId(realpath(overlayRoot)).');
   }
   if (!workspaceIdFromSession.startsWith('file:')) {
     throw new Error(`Expected file:// workspaceId, got: ${workspaceIdFromSession}`);

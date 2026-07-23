@@ -5,6 +5,13 @@
 
 export type EmevdViewId = 'flow' | 'table' | 'dsl' | 'bytes';
 
+/** Stable only for one opened editor-document instance; never derived from mutable URI alone. */
+export interface EmevdNodeAnchor {
+  documentInstanceId: string;
+  localNodeId: string;
+  sourceFingerprint: string;
+}
+
 export interface EmevdInstructionIr {
   instructionUri: string;
   bank: number;
@@ -12,6 +19,8 @@ export interface EmevdInstructionIr {
   /** Opaque payload base64 until typed schema exists. */
   argsBase64: string;
   unknown: boolean;
+  /** Optional during migration; DSL compilation requires it. */
+  anchor?: EmevdNodeAnchor;
 }
 
 export interface EmevdEventIr {
@@ -20,6 +29,8 @@ export interface EmevdEventIr {
   restBehavior: number;
   layer: number;
   instructions: EmevdInstructionIr[];
+  /** Optional during migration; DSL compilation requires it. */
+  anchor?: EmevdNodeAnchor;
 }
 
 export interface EmevdEditorDocument {
@@ -30,6 +41,8 @@ export interface EmevdEditorDocument {
   /** Full file bytes for read-only hex view (base64). */
   bytesBase64: string;
   diagnostics: Array<{ severity: 'info' | 'warning' | 'error'; code: string; message: string }>;
+  /** Distinguishes separate open-document lifetimes for stale-plan rejection. */
+  documentInstanceId?: string;
 }
 
 export interface EmevdSelection {
