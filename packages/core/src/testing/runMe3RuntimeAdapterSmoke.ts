@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import {
-  Me3RuntimeAdapter,
   type RuntimeProcessHandle,
   type RuntimeProcessHost
 } from '../runtime/me3RuntimeAdapter.js';
+import { TrustedMe3RuntimeAdapter } from '../runtime/trustedMe3RuntimeAdapter.js';
 
 class FakeProcessHandle implements RuntimeProcessHandle {
   readonly pid = 4242;
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
 
     const workspace = await openWorkspaceSession({ overlayRoot, game: 'sekiro' });
     const processHost = new FakeProcessHost();
-    const adapter = new Me3RuntimeAdapter({
+    const adapter = new TrustedMe3RuntimeAdapter({
       applicationDataRoot,
       executablePath,
       processHost,
@@ -134,11 +134,25 @@ async function main(): Promise<void> {
     assert.equal(terminated.state, 'terminated');
     assert.deepEqual(secondHandle.killedSignals, ['SIGTERM']);
 
+    const unsafeApplicationDataRoot = join(overlayRoot, 'unsafe-app-data');
+    await mkdir(unsafeApplicationDataRoot, { recursive: true });
+    const unsafeAdapter = new TrustedMe3RuntimeAdapter({
+      applicationDataRoot: unsafeApplicationDataRoot,
+      executablePath,
+      processHost: new FakeProcessHost()
+    });
+    await assert.rejects(
+      unsafeAdapter.prepareProfile(workspace),
+      /Runtime metadata root must not be inside the Mod overlay/
+    );
+    await assert.rejects(access(join(unsafeApplicationDataRoot, 'runtime')), { code: 'ENOENT' });
+
     console.log(JSON.stringify({
       capability: capability.status,
       profile: profile.profileId,
       launchState: snapshot.state,
-      terminatedState: terminated.state
+      terminatedState: terminated.state,
+      unsafeBoundary: 'rejected-before-runtime-directory'
     }, null, 2));
   } finally {
     await rm(root, { recursive: true, force: true });
