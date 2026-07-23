@@ -36,6 +36,7 @@
     "test:vault-ipc-contract": "npm run test:vault-ipc-contract -w @soulforge/core",
     "test:three-scene-module": "npm run test:three-scene-module -w @soulforge/core",
     "test:emevd-four-view": "npm run test:emevd-four-view -w @soulforge/core",
+    "test:emevd-dsl-compiler": "npm run test:emevd-dsl-compiler -w @soulforge/core",
     "test:dds-convert-writeback": "npm run test:dds-convert-writeback -w @soulforge/core",
     "test:vault-encrypt-contract": "npm run test:vault-encrypt-contract -w @soulforge/core",
     "test:openai-responses": "npm run test:openai-responses -w @soulforge/core",
