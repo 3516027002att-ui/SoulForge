@@ -74,6 +74,7 @@ export * from './storage/sqliteSchema.js';
 export * from './storage/sqliteDatabase.js';
 export * from './storage/durableWorkspaceRepository.js';
 export * from './storage/workspaceDataRepository.js';
+export * from './storage/runtimeRepositories.js';
 export * from './storage/memoryEvidenceStore.js';
 export * from './resource-graph/index.js';
 export * from './patch-engine/patchIr.js';
