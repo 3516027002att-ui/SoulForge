@@ -2,6 +2,8 @@ import {
   importLegacyOperationLog,
   importLegacySemanticSnapshot,
   DurableWorkspaceRepository,
+  RuntimeAdapterSettingsRepository,
+  RuntimeLaunchSessionRepository,
   WorkspaceDataRepository,
   openAppDatabase,
   openSqliteOperationLogStore,
@@ -10,6 +12,7 @@ import {
 } from '@soulforge/core';
 import {
   OPERATION_LOG_UTILITY_PROTOCOL,
+  type OpenAppDatabasePayload,
   type OpenWorkspaceDatabasePayload,
   type OperationLogUtilityRequest,
   type OperationLogUtilityResponse
@@ -17,9 +20,12 @@ import {
 
 let store: SqliteOperationLogStore | null = null;
 let appDatabase: SqliteDatabase | null = null;
+let appDatabasePath: string | null = null;
 let workspaceId: string | null = null;
 let durableRepository: DurableWorkspaceRepository | null = null;
 let workspaceDataRepository: WorkspaceDataRepository | null = null;
+let runtimeSettingsRepository: RuntimeAdapterSettingsRepository | null = null;
+let runtimeSessionRepository: RuntimeLaunchSessionRepository | null = null;
 let queue: Promise<void> = Promise.resolve();
 
 const utilityParentPort = process.parentPort;
@@ -68,6 +74,8 @@ async function handleRequest(value: unknown): Promise<void> {
 
 async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
   switch (request.method) {
+    case 'openApp':
+      return openApp(request.payload);
     case 'openWorkspace':
       return openWorkspace(request.payload);
     case 'health':
@@ -77,7 +85,7 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
         ...(workspaceId ? { workspaceId } : {})
       };
     case 'close':
-      closeStore();
+      closeAll();
       return null;
     case 'record':
       await requireStore().record(request.payload.entry);
@@ -141,19 +149,33 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return null;
     case 'listJobs':
       return requireWorkspaceDataRepository().listJobs();
+    case 'getRuntimeAdapterSetting':
+      return requireRuntimeSettingsRepository().get(request.payload.adapterId);
+    case 'upsertRuntimeAdapterSetting':
+      requireRuntimeSettingsRepository().upsert(request.payload.setting);
+      return null;
+    case 'deleteRuntimeAdapterSetting':
+      return requireRuntimeSettingsRepository().delete(request.payload.adapterId);
+    case 'upsertRuntimeSession':
+      requireRuntimeSessionRepository().upsertRuntimeSession(request.payload.record);
+      return null;
+    case 'getRuntimeSession':
+      return requireRuntimeSessionRepository().getRuntimeSession(request.payload.sessionId);
+    case 'listRuntimeSessions':
+      return requireRuntimeSessionRepository().listRuntimeSessions(request.payload.workspaceId);
   }
 }
 
+function openApp(payload: OpenAppDatabasePayload): { appReady: true } {
+  ensureAppDatabase(payload.appDatabasePath);
+  return { appReady: true };
+}
+
 async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
-  closeStore();
-  let nextAppDatabase: SqliteDatabase | null = null;
+  closeWorkspaceStore();
+  ensureAppDatabase(payload.appDatabasePath);
   let next: SqliteOperationLogStore | null = null;
   try {
-    nextAppDatabase = openAppDatabase(payload.appDatabasePath, {
-      ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
-        ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
-        : {})
-    });
     next = openSqliteOperationLogStore({
       databasePath: payload.databasePath,
       workspaceId: payload.workspaceId,
@@ -177,7 +199,7 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     store = next;
     durableRepository = new DurableWorkspaceRepository(next.database, payload.workspaceId);
     workspaceDataRepository = new WorkspaceDataRepository(next.database, payload.workspaceId);
-    appDatabase = nextAppDatabase;
+    runtimeSessionRepository = new RuntimeLaunchSessionRepository(next.database, payload.workspaceId);
     workspaceId = payload.workspaceId;
     return {
       workspaceId,
@@ -195,9 +217,27 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     };
   } catch (error) {
     next?.close();
-    nextAppDatabase?.close();
+    closeWorkspaceStore();
     throw error;
   }
+}
+
+function ensureAppDatabase(path: string): void {
+  if (appDatabase && appDatabasePath === path) return;
+  if (store) {
+    throw codedError(
+      'APP_DATABASE_SWITCH_WITH_OPEN_WORKSPACE',
+      '活动工作区存在时拒绝切换 app.db authority。'
+    );
+  }
+  appDatabase?.close();
+  appDatabase = openAppDatabase(path, {
+    ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
+      ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
+      : {})
+  });
+  appDatabasePath = path;
+  runtimeSettingsRepository = new RuntimeAdapterSettingsRepository(appDatabase);
 }
 
 function requireStore(): SqliteOperationLogStore {
@@ -215,14 +255,35 @@ function requireWorkspaceDataRepository(): WorkspaceDataRepository {
   return workspaceDataRepository;
 }
 
-function closeStore(): void {
+function requireRuntimeSettingsRepository(): RuntimeAdapterSettingsRepository {
+  if (!runtimeSettingsRepository) {
+    throw codedError('APP_DATABASE_NOT_INITIALIZED', 'app.db runtime settings authority 尚未初始化。');
+  }
+  return runtimeSettingsRepository;
+}
+
+function requireRuntimeSessionRepository(): RuntimeLaunchSessionRepository {
+  if (!runtimeSessionRepository) {
+    throw codedError('DATABASE_UTILITY_NOT_INITIALIZED', 'workspace runtime session authority 尚未初始化。');
+  }
+  return runtimeSessionRepository;
+}
+
+function closeWorkspaceStore(): void {
   store?.close();
-  appDatabase?.close();
   store = null;
   durableRepository = null;
   workspaceDataRepository = null;
-  appDatabase = null;
+  runtimeSessionRepository = null;
   workspaceId = null;
+}
+
+function closeAll(): void {
+  closeWorkspaceStore();
+  appDatabase?.close();
+  appDatabase = null;
+  appDatabasePath = null;
+  runtimeSettingsRepository = null;
 }
 
 function post(response: OperationLogUtilityResponse): void {
@@ -259,4 +320,4 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-process.once('exit', closeStore);
+process.once('exit', closeAll);
