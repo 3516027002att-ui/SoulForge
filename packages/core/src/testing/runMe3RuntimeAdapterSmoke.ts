@@ -114,10 +114,7 @@ async function main(): Promise<void> {
     assert.equal(processHost.command, canonicalExecutablePath);
     assert.deepEqual(processHost.args, ['launch', '-p', profile.profilePath, '--auto-detect']);
     assert.equal(processHost.cwd, join(applicationDataRoot, 'runtime', 'me3', 'profiles'));
-    assert.equal(
-      Object.keys(processHost.environment).some((key) => key.toLowerCase() === 'path'),
-      false
-    );
+    assert.equal(readPathValue(processHost.environment), readPathValue(process.env));
 
     const firstHandle = processHost.handles[0];
     assert.ok(firstHandle);
@@ -160,11 +157,19 @@ async function main(): Promise<void> {
       launchState: snapshot.state,
       terminatedState: terminated.state,
       pathDiscovery: 'disabled-at-public-boundary',
+      launchEnvironment: 'path-preserved',
       unsafeBoundary: 'rejected-before-runtime-directory'
     }, null, 2));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+function readPathValue(environment: NodeJS.ProcessEnv): string | undefined {
+  for (const key of Object.keys(environment)) {
+    if (key.toLowerCase() === 'path') return environment[key];
+  }
+  return undefined;
 }
 
 void main().catch((error) => {
