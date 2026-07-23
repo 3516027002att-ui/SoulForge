@@ -5,7 +5,7 @@ on:
     branches: [main, master]
 
 jobs:
-  isolate-v05-foundation:
+  verify-runtime-foundation:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -23,16 +23,6 @@ jobs:
       - name: Build core
         run: npm run build -w @soulforge/core
       - name: Run V0.5 foundation smoke
-        shell: pwsh
-        run: |
-          node packages/core/dist/testing/runV05FoundationSmoke.js *> v05-foundation.log
-          $exitCode = $LASTEXITCODE
-          Get-Content v05-foundation.log
-          exit $exitCode
-      - name: Upload foundation smoke log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: v05-foundation-log
-          path: v05-foundation.log
-          if-no-files-found: error
+        run: node packages/core/dist/testing/runV05FoundationSmoke.js
+      - name: Run me3 runtime smoke
+        run: node packages/core/dist/testing/runMe3RuntimeAdapterSmoke.js
