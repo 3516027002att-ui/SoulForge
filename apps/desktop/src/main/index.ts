@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
 import { disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
+import { disposeRuntimeIpc, registerRuntimeIpcHandlers } from './runtimeIpc.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
@@ -41,6 +42,7 @@ function createWindow(): void {
   });
 
   registerIpcHandlers(mainWindow.webContents, rendererDocumentUrl);
+  registerRuntimeIpcHandlers(mainWindow.webContents, rendererDocumentUrl);
 
   if (developmentRendererUrl) {
     void mainWindow.loadURL(developmentRendererUrl);
@@ -87,8 +89,13 @@ app.on('before-quit', (event) => {
   if (bridgeShutdownStarted) return;
   event.preventDefault();
   bridgeShutdownStarted = true;
-  void Promise.allSettled([
-    disposeBridgeDaemonPool(),
-    disposeOperationLogUtility()
-  ]).finally(() => app.quit());
+  void disposeRuntimeIpc()
+    .catch((error) => {
+      process.stderr.write(`[SoulForge runtime shutdown] ${String(error)}\n`);
+    })
+    .then(() => Promise.allSettled([
+      disposeBridgeDaemonPool(),
+      disposeOperationLogUtility()
+    ]))
+    .finally(() => app.quit());
 });
