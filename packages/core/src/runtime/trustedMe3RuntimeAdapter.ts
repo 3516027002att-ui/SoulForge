@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { realpath, stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
-import { isPathInside } from '../workspace/pathBoundary.js';
+import { mkdir, realpath, stat } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { isPathInside, verifyPathInsideRoot } from '../workspace/pathBoundary.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import type {
   GameRuntimeAdapter,
@@ -40,9 +41,9 @@ export interface TrustedMe3RuntimeAdapterOptions {
  * from executable discovery; the already-confirmed process receives the normal
  * launch environment so Windows, Steam and me3 keep their expected variables.
  *
- * Runtime metadata roots are physically checked before the lower-level adapter
- * may create a profile directory, so a rejected configuration cannot leave
- * files or directories inside the Mod overlay or read-only base directory.
+ * Runtime metadata roots and every profile-directory prefix are physically
+ * checked before the lower-level adapter may write a profile. This prevents a
+ * junction/symlink inside application data from redirecting profile creation.
  */
 export class TrustedMe3RuntimeAdapter implements GameRuntimeAdapter {
   readonly id = 'me3';
@@ -74,7 +75,12 @@ export class TrustedMe3RuntimeAdapter implements GameRuntimeAdapter {
     options?: PrepareRuntimeProfileOptions
   ): Promise<RuntimeProfile> {
     await assertRuntimeMetadataRootOutsideWorkspace(this.applicationDataRoot, workspace);
-    return this.delegate.prepareProfile(workspace, options);
+    await ensureTrustedProfileDirectory(this.applicationDataRoot);
+    const effectiveOptions: PrepareRuntimeProfileOptions = {
+      ...(options ?? {}),
+      profileName: options?.profileName ?? makeWorkspaceProfileName(workspace.meta.workspaceId)
+    };
+    return this.delegate.prepareProfile(workspace, effectiveOptions);
   }
 
   launch(profile: RuntimeProfile, options?: LaunchRuntimeOptions): Promise<LaunchSession> {
@@ -111,6 +117,45 @@ async function assertRuntimeMetadataRootOutsideWorkspace(
       throw new Error('Runtime metadata root must not be inside the read-only base game directory.');
     }
   }
+}
+
+async function ensureTrustedProfileDirectory(applicationDataRoot: string): Promise<void> {
+  let current = applicationDataRoot;
+  for (const segment of ['runtime', 'me3', 'profiles']) {
+    const candidate = join(current, segment);
+    await assertInsideApplicationData(applicationDataRoot, candidate);
+    try {
+      await mkdir(candidate);
+    } catch (error) {
+      if (!isAlreadyExistsError(error)) throw error;
+    }
+    const info = await stat(candidate);
+    if (!info.isDirectory()) {
+      throw new Error(`me3 profile path component is not a directory: ${candidate}`);
+    }
+    await assertInsideApplicationData(applicationDataRoot, candidate);
+    current = candidate;
+  }
+}
+
+async function assertInsideApplicationData(root: string, candidate: string): Promise<void> {
+  const boundary = await verifyPathInsideRoot(root, candidate);
+  if (!boundary.ok) {
+    const reason = boundary.diagnostics.map((item) => `${item.code}: ${item.message}`).join('; ');
+    throw new Error(`Refusing unsafe me3 profile directory: ${reason}`);
+  }
+}
+
+function makeWorkspaceProfileName(workspaceId: string): string {
+  const workspaceKey = createHash('sha256').update(workspaceId).digest('hex').slice(0, 16);
+  return `soulforge-${workspaceKey}`;
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && (error as { code?: unknown }).code === 'EEXIST';
 }
 
 function environmentWithoutPath(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
