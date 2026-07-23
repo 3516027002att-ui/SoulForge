@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
@@ -80,6 +80,7 @@ async function main(): Promise<void> {
     await mkdir(applicationDataRoot, { recursive: true });
     await writeFile(executablePath, 'fixture-only', 'utf8');
     if (process.platform !== 'win32') await chmod(executablePath, 0o755);
+    const canonicalExecutablePath = await realpath(executablePath);
 
     const workspace = await openWorkspaceSession({ overlayRoot, game: 'sekiro' });
     const processHost = new FakeProcessHost();
@@ -94,7 +95,7 @@ async function main(): Promise<void> {
 
     const capability = await adapter.detect();
     assert.equal(capability.status, 'available');
-    assert.equal(capability.executablePath, executablePath);
+    assert.equal(capability.executablePath, canonicalExecutablePath);
 
     const profile = await adapter.prepareProfile(workspace, {
       operationId: 'op-123',
@@ -110,7 +111,7 @@ async function main(): Promise<void> {
     assert.equal(profile.profilePath.startsWith(overlayRoot), false);
 
     const session = await adapter.launch(profile, { extraArgs: ['--auto-detect'] });
-    assert.equal(processHost.command, executablePath);
+    assert.equal(processHost.command, canonicalExecutablePath);
     assert.deepEqual(processHost.args, ['launch', '-p', profile.profilePath, '--auto-detect']);
     assert.equal(processHost.cwd, join(applicationDataRoot, 'runtime', 'me3', 'profiles'));
     assert.equal(
