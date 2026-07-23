@@ -33,13 +33,46 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: EMEVD DSL compiler
-        run: npm run test:emevd-dsl-compiler
+      # Core smoke processes are intentionally separate. This preserves the
+      # earliest root cause as a named check instead of one opaque npm chain.
+      - name: Core — reference confidence
+        run: node packages/core/dist/testing/runSyntheticConfirmedReferenceSmoke.js
 
-      # Keep independent failure domains separate. A red step must identify the
-      # first root cause without requiring another diagnostic workflow push.
-      - name: Core unit / integration smokes
-        run: npm run test -w @soulforge/core
+      - name: Core — V0.5 foundation
+        run: node packages/core/dist/testing/runV05FoundationSmoke.js
+
+      - name: Core — file rollback
+        run: node packages/core/dist/testing/runV05FileRollbackSmoke.js
+
+      - name: Core — security boundary
+        run: node packages/core/dist/testing/runV05SecurityBoundarySmoke.js
+
+      - name: Core — SQLite authority
+        run: node packages/core/dist/testing/runV05SqliteAuthoritySmoke.js
+
+      - name: Core — persistence
+        run: node packages/core/dist/testing/runV05PersistSmoke.js
+
+      - name: Core — P1 integration
+        run: node packages/core/dist/testing/runV05P1Smoke.js
+
+      - name: Core — architecture scaffold
+        run: node packages/core/dist/testing/runV05ArchitectureScaffoldSmoke.js
+
+      - name: Core — write-path consolidation
+        run: node packages/core/dist/testing/runV05WritePathConsolidationSmoke.js
+
+      - name: Core — full-file workbench
+        run: node packages/core/dist/testing/runV05FullFileWorkbenchSmoke.js
+
+      - name: Core — raw-file workbench
+        run: node packages/core/dist/testing/runV05RawFileWorkbenchSmoke.js
+
+      - name: Core — native container workbench
+        run: node packages/core/dist/testing/runV06NativeContainerWorkbenchSmoke.js
+
+      - name: Core — EMEVD DSL compiler
+        run: node packages/core/dist/testing/runEmevdDslCompilerSmoke.js
 
       - name: Desktop security gate
         run: npm run test:desktop-security
