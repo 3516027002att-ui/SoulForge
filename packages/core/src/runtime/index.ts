@@ -1,2 +1,2 @@
 export * from './gameRuntimeAdapter.js';
-export * from './me3RuntimeAdapter.js';
+export * from './trustedMe3RuntimeAdapter.js';
