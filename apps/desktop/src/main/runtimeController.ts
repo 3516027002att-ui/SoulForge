@@ -4,7 +4,6 @@ import {
   RuntimeSessionManager,
   RuntimeSessionManagerError,
   TrustedMe3RuntimeAdapter,
-  type OperationLogStore,
   type RuntimeAdapterSetting,
   type RuntimeCapability,
   type RuntimeLaunchRecord,
@@ -48,17 +47,29 @@ export class DesktopRuntimeController {
     await this.authority.openApp({ appDatabasePath: this.appDatabasePath });
   }
 
-  async prepareForWorkspaceChange(): Promise<void> {
-    if (this.manager?.hasActiveSessions()) {
-      throw new DesktopRuntimeControllerError(
-        'RUNTIME_WORKSPACE_SWITCH_ACTIVE_SESSION',
-        '运行会话仍在活动中；请先终止或等待退出，再切换工作区。'
-      );
+  async terminateActiveForWorkspaceChange(): Promise<number> {
+    const manager = this.manager;
+    if (!manager) {
+      this.workspace = null;
+      return 0;
     }
+    const activeSessionIds = manager.activeSessionIds();
+    for (const sessionId of activeSessionIds) {
+      await manager.terminate(sessionId);
+    }
+    await manager.dispose();
+    this.manager = null;
+    this.workspace = null;
+    return activeSessionIds.length;
   }
 
   async attachWorkspace(workspace: WorkspaceSession): Promise<number> {
-    await this.prepareForWorkspaceChange();
+    if (this.manager?.hasActiveSessions()) {
+      throw new DesktopRuntimeControllerError(
+        'RUNTIME_WORKSPACE_ATTACH_ACTIVE_SESSION',
+        '附加新工作区前仍存在活动运行会话。'
+      );
+    }
     if (this.manager) await this.manager.dispose();
     this.workspace = workspace;
     this.manager = null;
@@ -122,7 +133,7 @@ export class DesktopRuntimeController {
   }
 
   async launchManual(): Promise<RuntimeLaunchRecord> {
-    return (await this.requireManager().launch()).record;
+    return (await (await this.requireManager()).launch()).record;
   }
 
   async launchAfterCommit(operationId: string): Promise<RuntimeLaunchRecord> {
@@ -133,7 +144,7 @@ export class DesktopRuntimeController {
         '提交后验证要求正向操作；该操作是回滚 inverse。'
       );
     }
-    return (await this.requireManager().launch({
+    return (await (await this.requireManager()).launch({
       operationId,
       verificationKind: 'post_commit'
     })).record;
@@ -151,7 +162,7 @@ export class DesktopRuntimeController {
         { inverseOperationId, originalOperationId, actualInverseOf: inverse.inverseOfOpId }
       );
     }
-    return (await this.requireManager().launch({
+    return (await (await this.requireManager()).launch({
       operationId: inverseOperationId,
       relatedOperationId: originalOperationId,
       verificationKind: 'post_rollback'
@@ -159,11 +170,11 @@ export class DesktopRuntimeController {
   }
 
   async terminate(sessionId: string): Promise<RuntimeLaunchRecord> {
-    return this.requireManager().terminate(sessionId);
+    return (await this.requireManager()).terminate(sessionId);
   }
 
   async waitForExit(sessionId: string): Promise<RuntimeLaunchRecord> {
-    return this.requireManager().waitForExit(sessionId);
+    return (await this.requireManager()).waitForExit(sessionId);
   }
 
   async getSession(sessionId: string): Promise<RuntimeLaunchRecord | undefined> {
@@ -205,11 +216,12 @@ export class DesktopRuntimeController {
     return this.manager;
   }
 
-  private requireManager(): Promise<RuntimeSessionManager> {
-    return this.getManager(true).then((manager) => {
-      if (!manager) throw new DesktopRuntimeControllerError('ME3_NOT_CONFIGURED', 'me3 runtime manager unavailable.');
-      return manager;
-    });
+  private async requireManager(): Promise<RuntimeSessionManager> {
+    const manager = await this.getManager(true);
+    if (!manager) {
+      throw new DesktopRuntimeControllerError('ME3_NOT_CONFIGURED', 'me3 runtime manager unavailable.');
+    }
+    return manager;
   }
 
   private requireWorkspace(): WorkspaceSession {
