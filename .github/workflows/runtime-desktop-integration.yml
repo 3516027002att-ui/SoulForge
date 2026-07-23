@@ -6,6 +6,11 @@ on:
     paths:
       - scripts/apply-runtime-desktop-integration.mjs
       - .github/workflows/runtime-desktop-integration.yml
+  pull_request:
+    branches: [main, master]
+    paths:
+      - scripts/apply-runtime-desktop-integration.mjs
+      - .github/workflows/runtime-desktop-integration.yml
 
 permissions:
   contents: write
