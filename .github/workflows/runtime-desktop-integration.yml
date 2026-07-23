@@ -1,5 +1,6 @@
 name: runtime-desktop-integration
 
+# One-shot migration; the job deletes this workflow after applying the patch set.
 on:
   push:
     branches: [agent/me3-runtime-foundation]
