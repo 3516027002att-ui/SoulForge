@@ -10,6 +10,7 @@ import type {
   RendererIndexedFile,
   RendererPatchHistoryEntry,
   RendererResourcePreview,
+  RendererRuntimeActionResult,
   RendererSaveResult
 } from '../main/rendererDto.js';
 import type {
@@ -84,6 +85,29 @@ const api = {
     ipcRenderer.invoke('resource.validateContainer', sourceUri),
   probeContainerCapabilities: (sourceUri: string): Promise<ResourceCapabilityMatrix | null> =>
     ipcRenderer.invoke('resource.probeContainerCapabilities', sourceUri),
+  chooseMe3Executable: (): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.chooseMe3Executable'),
+  clearMe3Executable: (): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.clearMe3Executable'),
+  getRuntimeCapability: (): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.capability'),
+  launchRuntime: (): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.launchManual'),
+  launchRuntimeAfterCommit: (operationId: string): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.launchAfterCommit', operationId),
+  launchRuntimeAfterRollback: (
+    inverseOperationId: string,
+    originalOperationId: string
+  ): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.launchAfterRollback', inverseOperationId, originalOperationId),
+  listRuntimeSessions: (): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.listSessions'),
+  getRuntimeSession: (sessionId: string): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.getSession', sessionId),
+  terminateRuntimeSession: (sessionId: string): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.terminate', sessionId),
+  waitForRuntimeExit: (sessionId: string): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.waitForExit', sessionId),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),
