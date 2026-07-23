@@ -33,13 +33,22 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # Keep newly introduced high-risk compiler logic isolated so a failure
-      # identifies the root slice before the aggregate workspace test step.
       - name: EMEVD DSL compiler
         run: npm run test:emevd-dsl-compiler
 
-      - name: Unit / integration smokes
-        run: npm test
+      # Keep independent failure domains separate. A red step must identify the
+      # first root cause without requiring another diagnostic workflow push.
+      - name: Core unit / integration smokes
+        run: npm run test -w @soulforge/core
+
+      - name: Desktop security gate
+        run: npm run test:desktop-security
+
+      - name: UI localization gate
+        run: npm run test:ui-localization
+
+      - name: Database utility smoke
+        run: npm run test:database-utility
 
       - name: Bridge synthetic fixtures
         run: npm run bridge:verify:synthetic
