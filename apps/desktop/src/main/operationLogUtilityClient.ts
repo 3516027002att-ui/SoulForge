@@ -37,6 +37,8 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+let latestOperationLogUtilityClient: OperationLogUtilityClient | null = null;
+
 export class OperationLogUtilityClient implements OperationLogStore, RuntimeLaunchSessionStore {
   private process: UtilityProcess | null = null;
   private readonly pending = new Map<string, PendingRequest>();
@@ -48,7 +50,17 @@ export class OperationLogUtilityClient implements OperationLogStore, RuntimeLaun
     private readonly modulePath: string,
     private readonly requestTimeoutMs = 15_000,
     private readonly nativeBindingPath?: string
-  ) {}
+  ) {
+    latestOperationLogUtilityClient = this;
+  }
+
+  activeWorkspacePayload(): OpenWorkspaceDatabasePayload | null {
+    return this.activeWorkspace ? { ...this.activeWorkspace } : null;
+  }
+
+  activeAppDatabasePathSnapshot(): string | null {
+    return this.activeAppDatabasePath;
+  }
 
   async openApp(payload: OpenAppDatabasePayload): Promise<void> {
     if (this.opening) await this.opening;
@@ -234,6 +246,7 @@ export class OperationLogUtilityClient implements OperationLogStore, RuntimeLaun
     const child = this.process;
     this.activeWorkspace = null;
     this.activeAppDatabasePath = null;
+    if (latestOperationLogUtilityClient === this) latestOperationLogUtilityClient = null;
     if (!child) return;
     try {
       await this.requestOn(child, 'close', {});
@@ -370,6 +383,13 @@ export class OperationLogUtilityClient implements OperationLogStore, RuntimeLaun
     }
     this.pending.clear();
   }
+}
+
+export function getLatestOperationLogUtilityClient(): OperationLogUtilityClient {
+  if (!latestOperationLogUtilityClient) {
+    throw new Error('OperationLogUtilityClient 尚未由 desktop main 初始化。');
+  }
+  return latestOperationLogUtilityClient;
 }
 
 function sameWorkspace(
