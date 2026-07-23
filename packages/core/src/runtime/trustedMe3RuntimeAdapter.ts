@@ -34,9 +34,9 @@ export interface TrustedMe3RuntimeAdapterOptions {
 /**
  * Public me3 adapter boundary.
  *
- * It intentionally requires a main-owned executable path and passes an empty
- * environment to the lower-level adapter's discovery logic, preventing an
- * untrusted PATH entry from becoming an executable launch authority.
+ * It intentionally requires a main-owned executable path and removes only PATH
+ * from the lower-level discovery environment. Other variables such as
+ * SystemRoot and TEMP remain available to the launched process.
  *
  * Runtime metadata roots are physically checked before the lower-level adapter
  * may create a profile directory, so a rejected configuration cannot leave
@@ -52,7 +52,7 @@ export class TrustedMe3RuntimeAdapter implements GameRuntimeAdapter {
     const delegateOptions: Me3RuntimeAdapterOptions = {
       applicationDataRoot: this.applicationDataRoot,
       executablePath: options.executablePath,
-      environment: {},
+      environment: environmentWithoutPath(process.env),
       ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
       ...(options.terminateGraceMs === undefined ? {} : { terminateGraceMs: options.terminateGraceMs }),
       ...(options.processHost === undefined ? {} : { processHost: options.processHost }),
@@ -108,4 +108,12 @@ async function assertRuntimeMetadataRootOutsideWorkspace(
       throw new Error('Runtime metadata root must not be inside the read-only base game directory.');
     }
   }
+}
+
+function environmentWithoutPath(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result = { ...environment };
+  for (const key of Object.keys(result)) {
+    if (key.toLowerCase() === 'path') delete result[key];
+  }
+  return result;
 }
