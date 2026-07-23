@@ -33,46 +33,59 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      # Core smoke processes are intentionally separate. This preserves the
-      # earliest root cause as a named check instead of one opaque npm chain.
+      # Core smoke processes are intentionally separate. Each command preserves
+      # the original npm-workspace cwd so the diagnostic split cannot change behavior.
       - name: Core — reference confidence
-        run: node packages/core/dist/testing/runSyntheticConfirmedReferenceSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runSyntheticConfirmedReferenceSmoke.js
 
       - name: Core — V0.5 foundation
-        run: node packages/core/dist/testing/runV05FoundationSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05FoundationSmoke.js
 
       - name: Core — file rollback
-        run: node packages/core/dist/testing/runV05FileRollbackSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05FileRollbackSmoke.js
 
       - name: Core — security boundary
-        run: node packages/core/dist/testing/runV05SecurityBoundarySmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05SecurityBoundarySmoke.js
 
       - name: Core — SQLite authority
-        run: node packages/core/dist/testing/runV05SqliteAuthoritySmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05SqliteAuthoritySmoke.js
 
       - name: Core — persistence
-        run: node packages/core/dist/testing/runV05PersistSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05PersistSmoke.js
 
       - name: Core — P1 integration
-        run: node packages/core/dist/testing/runV05P1Smoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05P1Smoke.js
 
       - name: Core — architecture scaffold
-        run: node packages/core/dist/testing/runV05ArchitectureScaffoldSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05ArchitectureScaffoldSmoke.js
 
       - name: Core — write-path consolidation
-        run: node packages/core/dist/testing/runV05WritePathConsolidationSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05WritePathConsolidationSmoke.js
 
       - name: Core — full-file workbench
-        run: node packages/core/dist/testing/runV05FullFileWorkbenchSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05FullFileWorkbenchSmoke.js
 
       - name: Core — raw-file workbench
-        run: node packages/core/dist/testing/runV05RawFileWorkbenchSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV05RawFileWorkbenchSmoke.js
 
       - name: Core — native container workbench
-        run: node packages/core/dist/testing/runV06NativeContainerWorkbenchSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runV06NativeContainerWorkbenchSmoke.js
 
       - name: Core — EMEVD DSL compiler
-        run: node packages/core/dist/testing/runEmevdDslCompilerSmoke.js
+        working-directory: packages/core
+        run: node dist/testing/runEmevdDslCompilerSmoke.js
 
       - name: Desktop security gate
         run: npm run test:desktop-security
