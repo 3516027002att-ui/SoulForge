@@ -1,0 +1,19 @@
+name: handoff-export-debug
+
+on:
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  export-handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Upload handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: handoff-source
+          path: docs/V0_5_IMPLEMENTATION_HANDOFF.md
+          if-no-files-found: error
