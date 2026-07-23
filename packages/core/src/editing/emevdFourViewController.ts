@@ -11,6 +11,7 @@ import type {
   EmevdSelection,
   EmevdViewId
 } from '@soulforge/shared';
+import { attachEmevdStableIdentity, formatEmevdAnchor } from '../emevd/stableIdentity.js';
 
 export interface EmevdFourViewState {
   document: EmevdEditorDocument;
@@ -33,6 +34,7 @@ export function createEmevdEditorDocument(input: {
     instructions?: Array<{ bank: number; id: number; argsBase64?: string; unknown?: boolean }>;
   }>;
   bytesBase64?: string;
+  documentInstanceId?: string;
 }): EmevdEditorDocument {
   const events: EmevdEventIr[] = input.events.map((event) => {
     const eventUri = `${input.resourceUri}#event/${event.eventId}`;
@@ -50,7 +52,7 @@ export function createEmevdEditorDocument(input: {
       }))
     };
   });
-  return {
+  return attachEmevdStableIdentity({
     schemaVersion: 1,
     resourceUri: input.resourceUri,
     revision: 0,
@@ -63,16 +65,22 @@ export function createEmevdEditorDocument(input: {
           message: '未知 instruction 已保留为不透明 payload，禁止无 schema 的结构化修改。'
         }]
       : []
-  };
+  }, input.documentInstanceId !== undefined
+    ? { documentInstanceId: input.documentInstanceId }
+    : undefined);
 }
 
 export function renderEmevdDsl(document: EmevdEditorDocument): string {
   const lines = ['// EMEVD structural DSL (read/write limited to supported mutations)', `$Resource ${document.resourceUri}`];
   for (const event of document.events) {
-    lines.push(`$Event(${event.eventId}, Rest=${event.restBehavior}, Layer=${event.layer}) {`);
+    const eventAnchor = event.anchor ? ` // ${formatEmevdAnchor('event', event.anchor)}` : '';
+    lines.push(`$Event(${event.eventId}, Rest=${event.restBehavior}, Layer=${event.layer}) {${eventAnchor}`);
     for (const instr of event.instructions) {
       const tag = instr.unknown ? 'unknown' : 'typed';
-      lines.push(`  ${tag} bank=${instr.bank} id=${instr.id} args=${instr.argsBase64 || '""'};`);
+      const instructionAnchor = instr.anchor
+        ? ` // ${formatEmevdAnchor('instruction', instr.anchor)}`
+        : '';
+      lines.push(`  ${tag} bank=${instr.bank} id=${instr.id} args=${instr.argsBase64 || '""'};${instructionAnchor}`);
     }
     lines.push('}');
   }
