@@ -71,6 +71,7 @@ export * from './parsers/eventTextParser.js';
 export * from './parsers/msgTextParser.js';
 export * from './pipeline/workspacePipeline.js';
 export * from './storage/sqliteSchema.js';
+export * from './storage/runtimeSqliteMigrations.js';
 export * from './storage/sqliteDatabase.js';
 export * from './storage/durableWorkspaceRepository.js';
 export * from './storage/workspaceDataRepository.js';
