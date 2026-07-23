@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
@@ -110,6 +110,12 @@ async function main(): Promise<void> {
     assert.equal(profile.profilePath.startsWith(applicationDataRoot), true);
     assert.equal(profile.profilePath.startsWith(overlayRoot), false);
 
+    const defaultProfileOne = await adapter.prepareProfile(workspace, { operationId: 'op-default-one' });
+    const defaultProfileTwo = await adapter.prepareProfile(workspace, { operationId: 'op-default-two' });
+    assert.equal(defaultProfileOne.profileId, defaultProfileTwo.profileId);
+    assert.equal(defaultProfileOne.profilePath, defaultProfileTwo.profilePath);
+    assert.equal(defaultProfileTwo.operationId, 'op-default-two');
+
     const session = await adapter.launch(profile, { extraArgs: ['--auto-detect'] });
     assert.equal(processHost.command, canonicalExecutablePath);
     assert.deepEqual(processHost.args, ['launch', '-p', profile.profilePath, '--auto-detect']);
@@ -151,14 +157,36 @@ async function main(): Promise<void> {
     );
     await assert.rejects(access(join(unsafeApplicationDataRoot, 'runtime')), { code: 'ENOENT' });
 
+    const redirectedApplicationDataRoot = join(root, 'redirected-app-data');
+    const redirectedRuntimeTarget = join(root, 'redirected-runtime-target');
+    await mkdir(redirectedApplicationDataRoot, { recursive: true });
+    await mkdir(redirectedRuntimeTarget, { recursive: true });
+    await symlink(
+      redirectedRuntimeTarget,
+      join(redirectedApplicationDataRoot, 'runtime'),
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+    const redirectedAdapter = new TrustedMe3RuntimeAdapter({
+      applicationDataRoot: redirectedApplicationDataRoot,
+      executablePath,
+      processHost: new FakeProcessHost()
+    });
+    await assert.rejects(
+      redirectedAdapter.prepareProfile(workspace),
+      /Refusing unsafe me3 profile directory/
+    );
+    await assert.rejects(access(join(redirectedRuntimeTarget, 'me3')), { code: 'ENOENT' });
+
     console.log(JSON.stringify({
       capability: capability.status,
       profile: profile.profileId,
+      deterministicProfile: defaultProfileOne.profileId,
       launchState: snapshot.state,
       terminatedState: terminated.state,
       pathDiscovery: 'disabled-at-public-boundary',
       launchEnvironment: 'path-preserved',
-      unsafeBoundary: 'rejected-before-runtime-directory'
+      unsafeBoundary: 'rejected-before-runtime-directory',
+      redirectedRuntime: 'rejected-before-outside-directory'
     }, null, 2));
   } finally {
     await rm(root, { recursive: true, force: true });
