@@ -2,8 +2,8 @@
 
 > 文档性质：唯一实施规范、技术线路图与工程交接。  
 > 目标读者：接手 SoulForge 的开发 Agent / 工程师。  
-> 当前基准日期：2026-07-20。  
-> 当前仓库基线：`7bd354d`；任何接手者都必须以真实 `HEAD`、工作树和测试结果重新核对。  
+> 当前基准日期：2026-07-23。  
+> 当前仓库基线：`1f8ccfe`；任何接手者都必须以真实 `HEAD`、工作树和测试结果重新核对。  
 > 产品定位：**魂游 Mod 的 Cursor**。
 
 ---
@@ -214,8 +214,8 @@ SoulForge V0.5
    ├─ renderer-independent semantic scene
    ├─ render projection / binary chunks / cache
    ├─ Three.js WebGPU primary backend
-   ├─ WebGL2 compatibility fallback
-   └─ future native backend if real benchmarks require it
+   ├─ Three.js WebGL2 fallback
+   └─ future native backend if benchmarks require it
 ~~~
 
 这些路线存在依赖，但不构成强制的单线程实施顺序。接手者可以在不破坏前置 authority 和写入边界的前提下并行推进。
@@ -236,6 +236,7 @@ SoulForge V0.5
 - main 持有目录选择和高风险确认；
 - Mod 覆盖层可写、原版目录只读；
 - canonical / realpath / junction 越界防护；
+- Windows selected-path 与 physical-path 双命名空间校验，workspace identity 绑定物理根且不放宽 reparse 安全门；
 - PatchIR + `WorkspaceTransaction` production commit 主干；
 - text、raw range、whole-file 和 container child 修改路径；
 - 暂存、hash 前置条件、备份、原子替换、提交后重读；
@@ -358,7 +359,7 @@ SoulForge V0.5
 
 ### EMEVD
 
-状态：`partial，结构与主要 mutation 已有真实证据`
+状态：`partial；native 结构与主要 mutation 有真实证据，DSL Slice A+B 为 fixture-confirmed`
 
 已有：
 
@@ -370,20 +371,25 @@ SoulForge V0.5
 - add、delete、duplicate event 与 GC；
 - 桌面实时 IPC 和四视图投影；
 - typed EMEDF fixture；
-- Patch Engine 提交和重读路径。
+- Patch Engine 提交和重读路径；
+- editor-local `documentInstanceId` 与 event / instruction stable anchor，event ID mutation 后 anchor 保持；
+- 受限 patch DSL tokenizer、parser、AST、source span 和资源 / revision / schema 绑定；
+- `set id`、`set rest`、typed `set arg` 的确定性 mutation plan，unknown instruction 失败关闭；
+- patch template render -> parse -> bind -> empty plan 的公开 fixture roundtrip；
+- whitespace 与 source span 不进入 plan fingerprint，编译不修改 authority document。
 
 仍缺：
 
 - `layerCount != 0` 等未覆盖变体；
-- 完整 Sekiro EMEDF schema 与类型覆盖；
+- 完整 Sekiro EMEDF schema、domain type 与 control-flow validation；
 - 全 corpus mutation matrix；
 - KRAK 包装样本；
-- 可写 DSL compiler；
+- DSL insert/delete/layer/parameter bank、原子 semantic apply、Bridge native document、PatchIR、暂存写、重读和回滚接线；
 - 真实游戏加载验证。
 
 #### EMEVD DSL 终局
 
-DSL 先只读是安全阶段，但不能永久停留在展示层。长期链路：
+DSL 已从纯展示阶段进入 `fixture-confirmed` 的安全编译基础，但仍未成为 native 可写能力。长期链路：
 
 ~~~text
 DSL source
@@ -405,7 +411,7 @@ Native EMEVD
   -> structure / instruction / graph / DSL projections
 ~~~
 
-DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native document 保留。
+DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native document 保留。当前 Slice A+B 只生成确定性计划，不调用 Bridge、PatchIR 或文件写入。
 
 ### MSB
 
@@ -491,6 +497,7 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 - 统一 `EditorDocumentStore` 与 revision/mutation 协议；
 - Safe Hex 文档模型和桌面面板；
 - EMEVD 四视图；
+- EMEVD patch DSL 的 stable anchor、受限 parser、source diagnostics、compile preview 与 deterministic plan core；
 - PARAM / ParamDef 面板；
 - FMG 工作台；
 - MSB 3D 代理场景和位置微调；
@@ -505,7 +512,7 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 - 大表格和大场景虚拟化、分页或分块；
 - undo/redo 与 PatchIR/history 边界清晰；
 - demo fallback 不得被当作真实文件能力；
-- EMEVD DSL 最终可编译为 typed mutation；
+- EMEVD DSL 完成 atomic semantic apply、Bridge/PatchIR 接线、影响预览、提交与回滚；
 - 行为、动画和资产编辑器逐渐接入同一工作台。
 
 ---
@@ -579,7 +586,7 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 
 仍缺：
 
-- 远程 CI 全部真实绿证据；
+- 持续远程 CI 与真实发布产物的稳定绿证据；
 - 真正的安装包、升级和干净机验证；
 - 代码签名和更新器；
 - 安装包内 Bridge、自包含 .NET 和 native binding 验证；
@@ -704,11 +711,11 @@ interface RendererBackend {
 | B KRAK | `blocked` | 缺合法 Sekiro Oodle runtime 成功路径 |
 | C FMG | `native-verified / partial` | 多语言、多 msgbnd、引用与游戏加载 |
 | C PARAM | `partial` | 旧布局、Paramdex-compatible metadata、字段 writer |
-| C EMEVD | `partial` | layer 变体、完整 EMEDF、DSL compiler、全 corpus |
+| C EMEVD | `partial；DSL A+B fixture-confirmed` | 完整 EMEDF/domain type、atomic semantic apply、Bridge/PatchIR、layer/parameter bank、全 corpus |
 | C MSB | `partial` | 全实体 CRUD、引用修复、完整 scene projection |
 | D 行为与动画 | `not-started` | Sekiro corpus 和格式地图 |
 | E 场景与资产 | `partial / candidate` | FLVER/TPF/MTD native authority 和转换 |
-| F 专业编辑器 | `partial` | 真数据完整接线、规模化交互、行为/动画编辑器 |
+| F 专业编辑器 | `partial` | EMEVD DSL staging/commit 接线、真数据完整接线、规模化交互、行为/动画编辑器 |
 | G AI Agent | `partial / unverified` | 真实模型服务、Context Broker、生产工具循环 |
 | H me3 运行 | `not-started` | runtime adapter、日志、operation-linked smoke |
 | H 发行 | `partial / unverified` | 签名、安装、更新、真实 Sekiro gate |
@@ -734,6 +741,8 @@ interface RendererBackend {
 | `packages/shared/src/writer-contract.ts` | writer staging contract |
 | `packages/shared/src/resource-graph.ts` | 资源图 DTO |
 | `packages/shared/src/resourceSymbols.ts` | event/map/param/msg 索引投影，不是无损文档 |
+| `packages/shared/src/emevd-editor-ir.ts` | renderer-safe EMEVD document、document instance 与 stable node anchor |
+| `packages/shared/src/emevd-dsl.ts` | patch DSL AST、source span、diagnostics、compile request 与 deterministic plan DTO |
 | `packages/shared/src/ai-tools.ts` | typed AI 工具协议 |
 | `packages/shared/src/audit-log.ts` | 审计 schema |
 | `packages/shared/src/vfs.ts` | VFS；renderer-safe DTO 不得泄漏绝对路径 |
@@ -748,6 +757,7 @@ interface RendererBackend {
 | bridge client | daemon 生命周期、取消、超时和崩溃处理 |
 | native adapters | Bridge native document / writer 调用 |
 | resource graph | 索引、引用、诊断和 evidence projection |
+| EMEVD DSL | stable identity、bounded tokenizer/parser、EMEDF scalar binding、deterministic plan、patch template renderer |
 | assets / scene | 资产导入、semantic scene、render projection |
 | model-services | provider adapters、agent loop、permissions |
 
@@ -807,6 +817,14 @@ npm run bridge:verify:param
 npm run bridge:verify:emevd
 npm run bridge:verify:msb
 npm run test:native-preview
+~~~
+
+EMEVD 编辑器与 DSL：
+
+~~~powershell
+npm run test:emevd-four-view
+npm run test:emedf-schema
+npm run test:emevd-dsl-compiler
 ~~~
 
 编辑器、AI、资产与发行的具体 smoke 以根 `package.json` 为准。
@@ -902,6 +920,20 @@ npm run test:native-preview
 - 已保留：Patch Engine、native authority、路径安全、SQLite、三层回滚和诚实诊断等硬约束。
 - 非声明：文档重构不改变任何代码能力，也不把现有 partial / candidate / skipped 提升为完成。
 
+### 2026-07-23：EMEVD DSL Slice A+B 安全编译基础
+
+- 起始：`2002076`
+- 结束：`1f8ccfe`（功能实现；本记录所在文档提交不改变能力）
+- 路线：A / C-EMEVD / F
+- 状态变化：EMEVD native authority 保持 `partial`；DSL 从只读投影推进为 `fixture-confirmed` 的 Slice A+B compiler foundation。
+- 已实现：增加 document instance 与稳定节点 anchor；受限 patch DSL tokenizer/parser/AST/source span；EMEDF schema fingerprint、revision、document instance 与 anchor 绑定；严格 scalar type/range 校验；`set id`、`set rest`、typed `set arg` 的确定性 mutation plan；unknown instruction 只读；patch template render -> parse -> bind -> empty plan。
+- 已实现：修复 Windows runner 上 selected path 与 `realpath()` physical path 命名空间不一致导致合法 overlay 被拒绝的问题；workspace identity 仍绑定物理根，secure write gate 仍执行 physical / junction 校验。
+- 已验证：Windows CI run `30025585294` 全部命名步骤通过，包括 typecheck、全部 core smoke、EMEVD DSL compiler、desktop security、localization、SQLite、Bridge synthetic/daemon、编辑器/资产/IPC/发行门禁和 build；后续 patch renderer roundtrip 由同一 `test:emevd-dsl-compiler` 回归覆盖。
+- 样本范围：公开构造 EMEVD editor document 与最小 Sekiro fixture EMEDF；未使用私有游戏资产。
+- 未验证：完整 Sekiro EMEDF、domain type/control-flow、insert/delete、layer、parameter bank、atomic semantic apply、Bridge/PatchIR/staging、native reread/rollback、KRAK corpus 和真实游戏加载。
+- 非声明：没有把 DSL 写入 native EMEVD；没有提升 EMEVD native authority；没有以 fixture、CI 名称或失败关闭冒充完整支持。
+- 阻塞：native 后续仍依赖完整 schema、真实 corpus；KRAK 包装仍受合法 Oodle runtime 环境阻塞。
+
 ---
 
 ## 18. V0.5 完成定义
@@ -935,6 +967,10 @@ npm run test:native-preview
 
 - `docs/PRODUCT_VISION.md`
 - `docs/PARSER_RESEARCH.md`
+
+稳定技术规格：
+
+- `docs/EMEVD_DSL_COMPILER_SLICE_AB.md`
 
 Synthetic 技术规格：
 

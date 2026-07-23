@@ -1,6 +1,6 @@
 # EMEVD DSL 编译器 Slice A+B 稳定技术规格
 
-> 状态：`fixture-confirmed candidate`，等待 PR CI 与后续 native 接线验证。  
+> 状态：`fixture-confirmed`；公开 Windows CI 已验证，native 接线仍未完成。  
 > 对应：Issue #6。  
 > 本文只描述稳定编译契约，不另立里程碑或项目进度口径。
 
@@ -11,7 +11,8 @@
 合法链路：
 
 ```text
-DSL source
+native / semantic document
+  -> patch template renderer
   -> bounded tokenizer
   -> parser + AST + source spans
   -> document/revision/schema binding
@@ -64,6 +65,18 @@ event @e:0123456789ab {
 
 不支持 insert、delete、layer、parameter bank、macro、include、表达式执行、裸 bytes 或 argsBase64 写入。
 
+## Patch template roundtrip
+
+`renderEmevdPatchDsl()` 会渲染当前 event ID、rest behavior 和已绑定 EMEDF 的 typed args。未知 instruction 仅作为带 anchor 的只读注释出现。
+
+未经修改的模板必须满足：
+
+```text
+render -> parse -> bind -> deterministic empty plan
+```
+
+模板不会把省略解释为删除，也不会用普通 DSL 语法暴露 raw argsBase64 或未知 payload 写入。
+
 ## 安全边界
 
 - source 最大 256 KiB；
@@ -79,6 +92,19 @@ event @e:0123456789ab {
 - event ID 冲突失败；
 - 编译只生成计划，不修改 authority document；
 - 同一 semantic AST、base document、revision 与 schema 生成相同 plan fingerprint；空白和 source span 不进入语义 fingerprint。
+
+## 已验证
+
+公开 Windows CI 已覆盖：
+
+- stable anchor 在 event ID mutation 后保持；
+- patch template render / parse / bind 为空计划；
+- 同输入 plan fingerprint 确定；
+- whitespace/source span 不影响语义 fingerprint；
+- stale revision、schema 缺失/变化、unknown instruction、数值越界、event ID 冲突与语法错误失败关闭；
+- 编译过程不修改 authority document。
+
+验证仅使用构造 EMEVD document 与最小 fixture EMEDF，不产生 native authority 声明。
 
 ## 非声明
 
