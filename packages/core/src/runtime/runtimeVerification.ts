@@ -46,7 +46,8 @@ export type RuntimeVerificationConclusion =
   | 'operator_confirmed_expected_state'
   | 'operator_reported_expected_state_missing'
   | 'operator_reported_game_failed'
-  | 'operator_inconclusive';
+  | 'operator_inconclusive'
+  | 'conflicting_operator_attestation';
 
 export type RuntimeVerificationAuthority = 'process_only' | 'operator_attested';
 
@@ -74,12 +75,14 @@ export type RuntimeOperationVerificationState =
   | 'forward_confirmed'
   | 'forward_failed'
   | 'forward_inconclusive'
+  | 'forward_evidence_conflict'
   | 'rollback_active'
   | 'rollback_process_failed'
   | 'rollback_unverified'
   | 'rollback_confirmed_restored'
   | 'rollback_failed'
-  | 'rollback_inconclusive';
+  | 'rollback_inconclusive'
+  | 'rollback_evidence_conflict';
 
 export interface RuntimeOperationVerificationSummary {
   workspaceId: string;
@@ -144,6 +147,7 @@ export function summarizeRuntimeVerification(
     .map(cloneEvidence)
     .sort(compareEvidence);
   const latestEvidence = relevant.at(-1);
+  const processOutcome = deriveRuntimeProcessEvidence(record);
   return {
     sessionId: record.sessionId,
     workspaceId: record.workspaceId,
@@ -151,9 +155,11 @@ export function summarizeRuntimeVerification(
     expectation: expectationForVerificationKind(record.verificationKind),
     ...(record.operationId ? { operationId: record.operationId } : {}),
     ...(record.relatedOperationId ? { relatedOperationId: record.relatedOperationId } : {}),
-    processOutcome: deriveRuntimeProcessEvidence(record),
+    processOutcome,
     authority: latestEvidence ? 'operator_attested' : 'process_only',
-    conclusion: latestEvidence ? conclusionFromVerdict(latestEvidence.verdict) : 'unverified',
+    conclusion: latestEvidence
+      ? conclusionFromEvidence(latestEvidence, processOutcome)
+      : 'unverified',
     evidenceCount: relevant.length,
     ...(latestEvidence ? { latestEvidence } : {}),
     gameLoadAutomaticallyVerified: false
@@ -161,15 +167,20 @@ export function summarizeRuntimeVerification(
 }
 
 export function summarizeOperationRuntimeVerification(
+  workspaceId: string,
   operationId: string,
   sessions: readonly RuntimeLaunchRecord[],
   evidenceBySession: ReadonlyMap<string, readonly RuntimeVerificationEvidence[]>
 ): RuntimeOperationVerificationSummary {
+  if (!workspaceId.trim()) throw new Error('Runtime operation summary workspaceId must not be empty.');
   const forwardRecords = sessions
-    .filter((record) => record.verificationKind === 'post_commit' && record.operationId === operationId)
+    .filter((record) => record.workspaceId === workspaceId
+      && record.verificationKind === 'post_commit'
+      && record.operationId === operationId)
     .sort(compareSessions);
   const rollbackRecords = sessions
-    .filter((record) => record.verificationKind === 'post_rollback'
+    .filter((record) => record.workspaceId === workspaceId
+      && record.verificationKind === 'post_rollback'
       && record.relatedOperationId === operationId)
     .sort(compareSessions);
   const forwardSessions = forwardRecords.map((record) => summarizeRuntimeVerification(
@@ -182,10 +193,6 @@ export function summarizeOperationRuntimeVerification(
   ));
   const latestForward = forwardSessions.at(-1);
   const latestRollback = rollbackSessions.at(-1);
-  const workspaceId = latestRollback?.workspaceId
-    ?? latestForward?.workspaceId
-    ?? sessions.find((record) => record.operationId === operationId)?.workspaceId
-    ?? '';
   return {
     workspaceId,
     operationId,
@@ -270,8 +277,14 @@ export function normalizeRuntimeVerificationNote(value: string | undefined): str
   return normalized;
 }
 
-function conclusionFromVerdict(verdict: RuntimeOperatorVerdict): RuntimeVerificationConclusion {
-  switch (verdict) {
+function conclusionFromEvidence(
+  evidence: RuntimeVerificationEvidence,
+  processOutcome: RuntimeProcessEvidenceOutcome
+): RuntimeVerificationConclusion {
+  if (processOutcome === 'launch_failed' && evidence.verdict === 'expected_state_observed') {
+    return 'conflicting_operator_attestation';
+  }
+  switch (evidence.verdict) {
     case 'expected_state_observed':
       return 'operator_confirmed_expected_state';
     case 'expected_state_not_observed':
@@ -310,6 +323,8 @@ function stateForSummary(
       return phase === 'forward' ? 'forward_failed' : 'rollback_failed';
     case 'operator_inconclusive':
       return phase === 'forward' ? 'forward_inconclusive' : 'rollback_inconclusive';
+    case 'conflicting_operator_attestation':
+      return phase === 'forward' ? 'forward_evidence_conflict' : 'rollback_evidence_conflict';
     case 'unverified':
       return phase === 'forward' ? 'forward_unverified' : 'rollback_unverified';
   }
