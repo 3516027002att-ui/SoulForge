@@ -33,8 +33,21 @@ app.whenReady().then(async () => {
     resolve(here, '../../.native/better_sqlite3.node')
   );
   try {
+    const appDatabasePath = join(root, 'app.db');
+    const runtimeSettingTime = '2026-07-24T00:00:00.000Z';
+    await client.openApp({ appDatabasePath });
+    await client.upsertRuntimeAdapterSetting({
+      adapterId: 'me3',
+      executablePath: resolve(process.execPath),
+      confirmedAt: runtimeSettingTime,
+      updatedAt: runtimeSettingTime
+    });
+    if ((await client.getRuntimeAdapterSetting('me3'))?.executablePath !== resolve(process.execPath)) {
+      throw new Error('App database runtime setting authority round trip failed.');
+    }
+
     await client.openWorkspace({
-      appDatabasePath: join(root, 'app.db'),
+      appDatabasePath,
       databasePath: join(root, 'workspace.db'),
       workspaceId,
       rootPath: overlayRoot,
@@ -45,7 +58,7 @@ app.whenReady().then(async () => {
       legacySemanticBackupDirectory: join(root, 'semantic-backups')
     });
     const health = await client.health();
-    await access(join(root, 'app.db'));
+    await access(appDatabasePath);
     const direct = makeRecord(workspaceId, 'direct-op');
     await client.record(direct);
     const records = await client.list(workspaceId);
@@ -160,12 +173,60 @@ app.whenReady().then(async () => {
       || (await client.listJobs())[0]?.status !== 'completed') {
       throw new Error('Database utility file/diagnostic/job repository round trip failed.');
     }
+
+    await client.upsertRuntimeSession({
+      sessionId: 'utility-runtime-session',
+      workspaceId,
+      adapterId: 'me3',
+      profileId: 'utility-profile',
+      profilePath: join(root, 'runtime', 'utility.me3'),
+      operationId: direct.opId,
+      verificationKind: 'post_commit',
+      state: 'exited',
+      pid: 123,
+      startedAt: runtimeSettingTime,
+      exitedAt: '2026-07-24T00:00:01.000Z',
+      exitCode: 0,
+      stdout: 'fixture runtime output',
+      stderr: '',
+      outputTruncated: false,
+      diagnostics: [{
+        severity: 'info',
+        code: 'RUNTIME_FIXTURE_ONLY',
+        message: 'No real game was launched.'
+      }],
+      updatedAt: '2026-07-24T00:00:01.000Z'
+    });
+    if ((await client.getRuntimeSession('utility-runtime-session'))?.exitCode !== 0
+      || (await client.listRuntimeSessions(workspaceId)).length !== 1) {
+      throw new Error('Workspace runtime session authority round trip failed.');
+    }
+
+    await client.appendRuntimeVerificationEvidence({
+      evidenceId: 'utility-runtime-evidence',
+      workspaceId,
+      sessionId: 'utility-runtime-session',
+      evidenceKind: 'operator_attestation',
+      verdict: 'inconclusive',
+      note: 'Fixture evidence only; no game was launched.',
+      createdAt: '2026-07-24T00:00:02.000Z'
+    });
+    const runtimeEvidence = await client.listRuntimeVerificationEvidence('utility-runtime-session');
+    if (runtimeEvidence.length !== 1
+      || runtimeEvidence[0]?.verdict !== 'inconclusive') {
+      throw new Error('Runtime verification evidence authority round trip failed.');
+    }
+
     await client.restart();
     const restartedHealth = await client.health();
     if (!restartedHealth.ready
       || !(await client.listAuditEvents()).some((item) => item.transactionId === committed.operation?.transactionId)
       || (await client.searchFiles('test')).length !== 1
-      || (await client.listJobs()).length !== 1) {
+      || (await client.listJobs()).length !== 1
+      || (await client.getRuntimeAdapterSetting('me3'))?.adapterId !== 'me3'
+      || (await client.getRuntimeSession('utility-runtime-session'))?.state !== 'exited'
+      || (await client.listRuntimeVerificationEvidence('utility-runtime-session'))[0]?.evidenceId
+        !== 'utility-runtime-evidence') {
       throw new Error('Database utility restart did not reopen durable state.');
     }
     process.stdout.write(`${JSON.stringify({
@@ -175,6 +236,8 @@ app.whenReady().then(async () => {
       health,
       durableRepositories: true,
       indexRepositories: true,
+      runtimeAuthorities: true,
+      runtimeVerificationEvidence: true,
       forcedRestart: true
     }, null, 2)}\n`);
     await client.dispose();

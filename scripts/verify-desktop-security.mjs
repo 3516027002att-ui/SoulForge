@@ -3,6 +3,19 @@ import { readFile } from 'node:fs/promises';
 const files = {
   main: await readFile(new URL('../apps/desktop/src/main/index.ts', import.meta.url), 'utf8'),
   ipc: await readFile(new URL('../apps/desktop/src/main/ipc.ts', import.meta.url), 'utf8'),
+  runtimeIpc: await readFile(new URL('../apps/desktop/src/main/runtimeIpc.ts', import.meta.url), 'utf8'),
+  runtimeController: await readFile(
+    new URL('../apps/desktop/src/main/runtimeController.ts', import.meta.url),
+    'utf8'
+  ),
+  runtimeVerification: await readFile(
+    new URL('../packages/core/src/runtime/runtimeVerification.ts', import.meta.url),
+    'utf8'
+  ),
+  runtimeRepositories: await readFile(
+    new URL('../packages/core/src/storage/runtimeRepositories.ts', import.meta.url),
+    'utf8'
+  ),
   preload: await readFile(new URL('../apps/desktop/src/preload/index.ts', import.meta.url), 'utf8'),
   rendererHtml: await readFile(new URL('../apps/desktop/src/renderer/index.html', import.meta.url), 'utf8'),
   rendererDto: await readFile(new URL('../apps/desktop/src/main/rendererDto.ts', import.meta.url), 'utf8'),
@@ -12,6 +25,10 @@ const files = {
     'utf8'
   )
 };
+
+const verificationInsert = files.runtimeRepositories.match(
+  /INSERT INTO runtime_verification_evidence[\s\S]{0,500}/
+)?.[0] ?? '';
 
 const checks = [
   ['Electron 沙箱已开启', files.main.includes('sandbox: true')],
@@ -29,10 +46,43 @@ const checks = [
   ['IPC 统一校验发送方', files.ipc.includes('assertTrustedSender(event, channel)')],
   ['IPC 校验主文档地址', files.ipc.includes('trustedRendererDocuments')
     && files.ipc.includes('actualDocument !== expectedDocument')],
+  ['Runtime IPC 独立校验发送方', files.runtimeIpc.includes('assertTrustedSender(event, channel)')
+    && files.runtimeIpc.includes('actualDocument !== expectedDocument')],
   ['目录选择使用一次性凭据', files.ipc.includes('consumeDirectorySelection')],
   ['渲染进程不能创建确认凭据', !files.preload.includes('createConfirmation')],
   ['渲染进程不能传入确认凭据', !files.preload.includes('ConfirmationReceipt')],
   ['渲染进程不能传入工作区绝对路径', !files.preload.includes('workspaceRoot')],
+  ['me3 路径只能由 main 原生选择器取得', files.runtimeIpc.includes('dialog.showOpenDialog')
+    && files.runtimeIpc.includes("'runtime.chooseMe3Executable'")
+    && !files.preload.includes('executablePath')],
+  ['渲染进程不能传入 runtime profile 路径', !files.preload.includes('profilePath')],
+  ['Runtime DTO 删除 executable path', files.rendererDto.includes("'executablePath'")],
+  ['Runtime DTO 删除 profile path', files.rendererDto.includes("'profilePath'")],
+  ['Runtime 工作区切换先终止活动会话', files.runtimeIpc.includes('terminateActiveForWorkspaceChange')
+    && files.runtimeController.includes('activeSessionIds()')],
+  ['Runtime 提交验证绑定持久 operation', files.runtimeController.includes('requireCommittedOperation')
+    && files.runtimeController.includes("verificationKind: 'post_commit'")],
+  ['Runtime 回滚验证校验 inverse relation', files.runtimeController.includes('inverse.inverseOfOpId !== originalOperationId')
+    && files.runtimeController.includes("verificationKind: 'post_rollback'")],
+  ['Runtime 人工证据 verdict 在 main 校验', files.runtimeIpc.includes('assertRuntimeVerdict(verdict)')
+    && files.runtimeIpc.includes('isRuntimeOperatorVerdict')],
+  ['Runtime 证据 id 与时间由 main 生成', files.runtimeController.includes('evidenceIdFactory()')
+    && files.runtimeController.includes('createdAt: this.now().toISOString()')
+    && !files.preload.includes('evidenceId')],
+  ['Runtime 人工证据追加写而非覆盖', verificationInsert.includes('VALUES (?, ?, ?, ?, ?, ?, ?)')
+    && !verificationInsert.includes('ON CONFLICT')],
+  ['Runtime 进程成功不会自动宣称游戏加载', files.runtimeVerification.includes('gameLoadAutomaticallyVerified: false')
+    && files.rendererDto.includes('gameLoadAutomaticallyVerified: false')],
+  ['Runtime operation 汇总绑定正向与回滚会话', files.runtimeController.includes('getOperationVerificationSummary')
+    && files.runtimeController.includes("record.verificationKind === 'post_rollback'")
+    && files.runtimeIpc.includes("'runtime.getOperationVerificationSummary'")],
+  ['Runtime operation 汇总保留 main workspace identity', files.runtimeController.includes('operation.workspaceId,')
+    && files.runtimeVerification.includes('Runtime operation summary workspaceId must not be empty')],
+  ['Runtime verdict 使用上下文无关的预期状态语义', files.runtimeVerification.includes("'expected_state_observed'")
+    && files.runtimeVerification.includes("'original_state_restored'")
+    && !files.runtimeVerification.includes("'mod_loaded'")],
+  ['Runtime 机器事实与人工证据冲突会显式标记', files.runtimeVerification.includes("'conflicting_operator_attestation'")
+    && files.runtimeVerification.includes("'forward_evidence_conflict'")],
   ['渲染进程不能决定 AI 权限模式', !files.preload.includes("ToolContext['mode']")
     && files.ipc.includes("const activeAiMode: ToolContext['mode'] = 'plan'")],
   ['渲染 DTO 删除绝对路径', files.rendererDto.includes("'absolutePath'")],
@@ -46,7 +96,13 @@ const checks = [
   ['生产操作日志不再打开 JSON store', !files.ipc.includes('openFileOperationLogStore')],
   ['SQLite 运行在 Electron utility process', files.operationLogUtilityClient.includes('utilityProcess.fork')],
   ['app.db 与 workspace.db 由后台进程打开', files.databaseUtility.includes('openAppDatabase')
-    && files.databaseUtility.includes('openSqliteOperationLogStore')]
+    && files.databaseUtility.includes('openSqliteOperationLogStore')],
+  ['Runtime settings/session 由数据库后台进程持有', files.databaseUtility.includes('RuntimeAdapterSettingsRepository')
+    && files.databaseUtility.includes('RuntimeLaunchSessionRepository')],
+  ['Runtime verification evidence 由数据库后台进程持有', files.databaseUtility.includes('RuntimeVerificationEvidenceRepository')
+    && files.databaseUtility.includes('appendRuntimeVerificationEvidence')],
+  ['Runtime 在数据库 utility 关闭前释放', files.main.indexOf('disposeRuntimeIpc()')
+    < files.main.indexOf('disposeOperationLogUtility()')]
 ];
 
 const failed = checks.filter(([, ok]) => !ok);

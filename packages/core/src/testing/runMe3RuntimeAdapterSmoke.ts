@@ -1,0 +1,233 @@
+import assert from 'node:assert/strict';
+import { access, chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openWorkspaceSession } from '../workspace/workspaceSession.js';
+import {
+  type RuntimeProcessHandle,
+  type RuntimeProcessHost
+} from '../runtime/me3RuntimeAdapter.js';
+import { TrustedMe3RuntimeAdapter } from '../runtime/trustedMe3RuntimeAdapter.js';
+
+class FakeProcessHandle implements RuntimeProcessHandle {
+  readonly pid = 4242;
+  readonly killedSignals: NodeJS.Signals[] = [];
+  private stdoutListener: ((chunk: Uint8Array | string) => void) | undefined;
+  private stderrListener: ((chunk: Uint8Array | string) => void) | undefined;
+  private errorListener: ((error: Error) => void) | undefined;
+  private exitListener: ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined;
+
+  onStdout(listener: (chunk: Uint8Array | string) => void): void {
+    this.stdoutListener = listener;
+  }
+
+  onStderr(listener: (chunk: Uint8Array | string) => void): void {
+    this.stderrListener = listener;
+  }
+
+  onError(listener: (error: Error) => void): void {
+    this.errorListener = listener;
+  }
+
+  onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void {
+    this.exitListener = listener;
+  }
+
+  kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
+    this.killedSignals.push(signal);
+    queueMicrotask(() => this.exitListener?.(null, signal));
+    return true;
+  }
+
+  emitStdout(value: string): void {
+    this.stdoutListener?.(value);
+  }
+
+  emitStderr(value: string): void {
+    this.stderrListener?.(value);
+  }
+
+  exit(code: number): void {
+    this.exitListener?.(code, null);
+  }
+}
+
+class FakeProcessHost implements RuntimeProcessHost {
+  readonly handles: FakeProcessHandle[] = [];
+  command = '';
+  args: readonly string[] = [];
+  cwd = '';
+  environment: NodeJS.ProcessEnv = {};
+  identityOutput = 'me3 0.11.0';
+  identityExitCode = 0;
+
+  spawn(command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv }): RuntimeProcessHandle {
+    const handle = new FakeProcessHandle();
+    this.handles.push(handle);
+    this.command = command;
+    this.args = args;
+    this.cwd = options.cwd;
+    this.environment = options.env;
+    if (args.length === 1 && args[0] === 'info') {
+      queueMicrotask(() => {
+        handle.emitStdout(this.identityOutput);
+        handle.exit(this.identityExitCode);
+      });
+    }
+    return handle;
+  }
+}
+
+async function main(): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), 'soulforge-me3-smoke-'));
+  try {
+    const overlayRoot = join(root, 'mod');
+    const applicationDataRoot = join(root, 'app-data');
+    const executablePath = join(root, process.platform === 'win32' ? 'me3.exe' : 'me3');
+    await mkdir(overlayRoot, { recursive: true });
+    await mkdir(applicationDataRoot, { recursive: true });
+    await writeFile(executablePath, 'fixture-only', 'utf8');
+    if (process.platform !== 'win32') await chmod(executablePath, 0o755);
+    const canonicalExecutablePath = await realpath(executablePath);
+
+    const workspace = await openWorkspaceSession({ overlayRoot, game: 'sekiro' });
+    const processHost = new FakeProcessHost();
+    const adapter = new TrustedMe3RuntimeAdapter({
+      applicationDataRoot,
+      executablePath,
+      processHost,
+      now: () => new Date('2026-07-23T00:00:00.000Z'),
+      idFactory: () => 'fixed-id',
+      maxOutputBytes: 64
+    });
+
+    const capability = await adapter.detect();
+    assert.equal(capability.status, 'available');
+    assert.equal(capability.executablePath, canonicalExecutablePath);
+    assert.equal(capability.version, '0.11.0');
+    assert.deepEqual(processHost.args, ['info']);
+
+    const profile = await adapter.prepareProfile(workspace, {
+      operationId: 'op-123',
+      profileName: 'SoulForge Sekiro Smoke'
+    });
+    const profileText = await readFile(profile.profilePath, 'utf8');
+    assert.match(profileText, /profileVersion = "v1"/);
+    assert.match(profileText, /game = "sekiro"/);
+    assert.match(profileText, /\[\[packages\]\]/);
+    assert.match(profileText, /source = /);
+    assert.doesNotMatch(profileText, /^path = /m);
+    assert.equal(profile.operationId, 'op-123');
+    assert.equal(profile.profilePath.startsWith(applicationDataRoot), true);
+    assert.equal(profile.profilePath.startsWith(overlayRoot), false);
+
+    const defaultProfileOne = await adapter.prepareProfile(workspace, { operationId: 'op-default-one' });
+    const defaultProfileTwo = await adapter.prepareProfile(workspace, { operationId: 'op-default-two' });
+    assert.equal(defaultProfileOne.profileId, defaultProfileTwo.profileId);
+    assert.equal(defaultProfileOne.profilePath, defaultProfileTwo.profilePath);
+    assert.equal(defaultProfileTwo.operationId, 'op-default-two');
+
+    const session = await adapter.launch(profile, { extraArgs: ['--auto-detect'] });
+    assert.equal(processHost.command, canonicalExecutablePath);
+    assert.deepEqual(processHost.args, ['launch', '-p', profile.profilePath, '--auto-detect']);
+    assert.equal(processHost.cwd, join(applicationDataRoot, 'runtime', 'me3', 'profiles'));
+    assert.equal(readPathValue(processHost.environment), readPathValue(process.env));
+
+    const firstHandle = processHost.handles[1];
+    assert.ok(firstHandle);
+    firstHandle.emitStdout('launching sekiro\n');
+    firstHandle.emitStderr('fixture warning\n');
+    firstHandle.exit(0);
+    const snapshot = await session.waitForExit();
+    assert.equal(snapshot.state, 'exited');
+    assert.equal(snapshot.exitCode, 0);
+    assert.match(snapshot.stdout, /launching sekiro/);
+
+    const diagnostics = await adapter.collectDiagnostics(session);
+    assert.equal(diagnostics.operationId, 'op-123');
+    assert.equal(diagnostics.diagnostics.some((item) => item.code === 'ME3_PROCESS_EXITED_ZERO'), true);
+
+    const secondSession = await adapter.launch(profile);
+    const secondHandle = processHost.handles[2];
+    assert.ok(secondHandle);
+    await adapter.terminate(secondSession);
+    const terminated = await secondSession.waitForExit();
+    assert.equal(terminated.state, 'terminated');
+    assert.deepEqual(secondHandle.killedSignals, ['SIGTERM']);
+
+    const wrongIdentityHost = new FakeProcessHost();
+    wrongIdentityHost.identityOutput = 'unrelated executable 1.0.0';
+    const wrongIdentityAdapter = new TrustedMe3RuntimeAdapter({
+      applicationDataRoot,
+      executablePath,
+      processHost: wrongIdentityHost
+    });
+    const wrongIdentityCapability = await wrongIdentityAdapter.detect();
+    assert.equal(wrongIdentityCapability.status, 'unavailable');
+    assert.equal(
+      wrongIdentityCapability.diagnostics.some((item) => item.code === 'ME3_EXECUTABLE_NOT_FOUND'),
+      true
+    );
+
+    const unsafeApplicationDataRoot = join(overlayRoot, 'unsafe-app-data');
+    await mkdir(unsafeApplicationDataRoot, { recursive: true });
+    const unsafeAdapter = new TrustedMe3RuntimeAdapter({
+      applicationDataRoot: unsafeApplicationDataRoot,
+      executablePath,
+      processHost: new FakeProcessHost()
+    });
+    await assert.rejects(
+      unsafeAdapter.prepareProfile(workspace),
+      /Runtime metadata root must not be inside the Mod overlay/
+    );
+    await assert.rejects(access(join(unsafeApplicationDataRoot, 'runtime')), { code: 'ENOENT' });
+
+    const redirectedApplicationDataRoot = join(root, 'redirected-app-data');
+    const redirectedRuntimeTarget = join(root, 'redirected-runtime-target');
+    await mkdir(redirectedApplicationDataRoot, { recursive: true });
+    await mkdir(redirectedRuntimeTarget, { recursive: true });
+    await symlink(
+      redirectedRuntimeTarget,
+      join(redirectedApplicationDataRoot, 'runtime'),
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+    const redirectedAdapter = new TrustedMe3RuntimeAdapter({
+      applicationDataRoot: redirectedApplicationDataRoot,
+      executablePath,
+      processHost: new FakeProcessHost()
+    });
+    await assert.rejects(
+      redirectedAdapter.prepareProfile(workspace),
+      /Refusing unsafe me3 profile directory/
+    );
+    await assert.rejects(access(join(redirectedRuntimeTarget, 'me3')), { code: 'ENOENT' });
+
+    console.log(JSON.stringify({
+      capability: capability.status,
+      profile: profile.profileId,
+      deterministicProfile: defaultProfileOne.profileId,
+      launchState: snapshot.state,
+      terminatedState: terminated.state,
+      pathDiscovery: 'disabled-at-public-boundary',
+      executableIdentity: 'me3-info-confirmed',
+      profilePackageField: 'source',
+      launchEnvironment: 'path-preserved',
+      unsafeBoundary: 'rejected-before-runtime-directory',
+      redirectedRuntime: 'rejected-before-outside-directory'
+    }, null, 2));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+function readPathValue(environment: NodeJS.ProcessEnv): string | undefined {
+  for (const key of Object.keys(environment)) {
+    if (key.toLowerCase() === 'path') return environment[key];
+  }
+  return undefined;
+}
+
+void main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

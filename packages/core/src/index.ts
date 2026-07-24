@@ -49,6 +49,7 @@ export * from './workspace/semanticWorkspaceIndex.js';
 export * from './workspace/importLegacySemanticSnapshot.js';
 export * from './ai/evidencePackBuilder.js';
 export * from './model-services/index.js';
+export * from './runtime/index.js';
 export * from './assets/assetImport.js';
 
 
@@ -75,9 +76,11 @@ export * from './parsers/eventTextParser.js';
 export * from './parsers/msgTextParser.js';
 export * from './pipeline/workspacePipeline.js';
 export * from './storage/sqliteSchema.js';
+export * from './storage/runtimeSqliteMigrations.js';
 export * from './storage/sqliteDatabase.js';
 export * from './storage/durableWorkspaceRepository.js';
 export * from './storage/workspaceDataRepository.js';
+export * from './storage/runtimeRepositories.js';
 export * from './storage/memoryEvidenceStore.js';
 export * from './resource-graph/index.js';
 export * from './patch-engine/patchIr.js';

@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
 import type { SqlMigration } from './sqliteSchema.js';
 import { APP_DB_MIGRATIONS, SQLITE_MIGRATIONS } from './sqliteSchema.js';
+import './runtimeSqliteMigrations.js';
 
 export type SqliteDatabase = BetterSqlite3.Database;
 

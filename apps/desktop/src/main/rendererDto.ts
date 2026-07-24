@@ -1,4 +1,11 @@
 import type {
+  RuntimeCapability,
+  RuntimeLaunchRecord,
+  RuntimeOperationVerificationSummary,
+  RuntimeVerificationEvidence,
+  RuntimeVerificationSummary
+} from '@soulforge/core';
+import type {
   BridgeResult,
   Diagnostic,
   IndexedFile,
@@ -38,6 +45,56 @@ export type RendererPatchHistoryEntry = Omit<
   changedPaths: string[];
 };
 
+export interface RendererRuntimeCapability {
+  adapterId: string;
+  status: RuntimeCapability['status'];
+  configured: boolean;
+  version?: string;
+  diagnostics: Diagnostic[];
+}
+
+export type RendererRuntimeLaunchRecord = Omit<
+  RuntimeLaunchRecord,
+  'workspaceId' | 'profilePath' | 'diagnostics'
+> & {
+  diagnostics: Diagnostic[];
+};
+
+export type RendererRuntimeVerificationEvidence = Omit<
+  RuntimeVerificationEvidence,
+  'workspaceId'
+>;
+
+export type RendererRuntimeVerificationSummary = Omit<
+  RuntimeVerificationSummary,
+  'workspaceId' | 'latestEvidence'
+> & {
+  latestEvidence?: RendererRuntimeVerificationEvidence;
+};
+
+export type RendererRuntimeOperationVerificationSummary = Omit<
+  RuntimeOperationVerificationSummary,
+  'workspaceId' | 'forwardSessions' | 'rollbackSessions' | 'latestForward' | 'latestRollback'
+> & {
+  forwardSessions: RendererRuntimeVerificationSummary[];
+  rollbackSessions: RendererRuntimeVerificationSummary[];
+  latestForward?: RendererRuntimeVerificationSummary;
+  latestRollback?: RendererRuntimeVerificationSummary;
+};
+
+export interface RendererRuntimeActionResult {
+  ok: boolean;
+  capability?: RendererRuntimeCapability;
+  record?: RendererRuntimeLaunchRecord;
+  records?: RendererRuntimeLaunchRecord[];
+  evidence?: RendererRuntimeVerificationEvidence;
+  evidenceList?: RendererRuntimeVerificationEvidence[];
+  verification?: RendererRuntimeVerificationSummary;
+  operationVerification?: RendererRuntimeOperationVerificationSummary;
+  removed?: boolean;
+  diagnostics: Diagnostic[];
+}
+
 const SENSITIVE_PATH_KEYS = new Set([
   'absolutePath',
   'sourcePath',
@@ -51,6 +108,8 @@ const SENSITIVE_PATH_KEYS = new Set([
   'recoveryPath',
   'metadataPath',
   'storePath',
+  'profilePath',
+  'executablePath',
   // Model-service secrets must never reach renderer DTOs.
   'apiKey',
   'secret',
@@ -131,6 +190,96 @@ export function toRendererHistoryEntry(
     ...(entry.inverseOfOpId ? { inverseOfOpId: entry.inverseOfOpId } : {}),
     ...(entry.rollbackScope ? { rollbackScope: entry.rollbackScope } : {}),
     ...(entry.graphSummary ? { graphSummary: entry.graphSummary } : {})
+  };
+}
+
+export function toRendererRuntimeCapability(
+  capability: RuntimeCapability,
+  configured: boolean
+): RendererRuntimeCapability {
+  return {
+    adapterId: capability.adapterId,
+    status: capability.status,
+    configured,
+    ...(capability.version ? { version: capability.version } : {}),
+    diagnostics: sanitizeDiagnostics(capability.diagnostics)
+  };
+}
+
+export function toRendererRuntimeLaunchRecord(
+  record: RuntimeLaunchRecord
+): RendererRuntimeLaunchRecord {
+  return {
+    sessionId: record.sessionId,
+    adapterId: record.adapterId,
+    profileId: record.profileId,
+    ...(record.operationId ? { operationId: record.operationId } : {}),
+    ...(record.relatedOperationId ? { relatedOperationId: record.relatedOperationId } : {}),
+    verificationKind: record.verificationKind,
+    state: record.state,
+    ...(record.pid === undefined ? {} : { pid: record.pid }),
+    startedAt: record.startedAt,
+    ...(record.exitedAt ? { exitedAt: record.exitedAt } : {}),
+    ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode }),
+    ...(record.signal ? { signal: record.signal } : {}),
+    stdout: sanitizeRendererString(record.stdout),
+    stderr: sanitizeRendererString(record.stderr),
+    outputTruncated: record.outputTruncated,
+    diagnostics: sanitizeDiagnostics(record.diagnostics),
+    updatedAt: record.updatedAt
+  };
+}
+
+export function toRendererRuntimeVerificationEvidence(
+  evidence: RuntimeVerificationEvidence
+): RendererRuntimeVerificationEvidence {
+  return {
+    evidenceId: evidence.evidenceId,
+    sessionId: evidence.sessionId,
+    evidenceKind: evidence.evidenceKind,
+    verdict: evidence.verdict,
+    ...(evidence.note ? { note: sanitizeRendererString(evidence.note) } : {}),
+    createdAt: evidence.createdAt
+  };
+}
+
+export function toRendererRuntimeVerificationSummary(
+  summary: RuntimeVerificationSummary
+): RendererRuntimeVerificationSummary {
+  return {
+    sessionId: summary.sessionId,
+    verificationKind: summary.verificationKind,
+    expectation: summary.expectation,
+    ...(summary.operationId ? { operationId: summary.operationId } : {}),
+    ...(summary.relatedOperationId ? { relatedOperationId: summary.relatedOperationId } : {}),
+    processOutcome: summary.processOutcome,
+    authority: summary.authority,
+    conclusion: summary.conclusion,
+    evidenceCount: summary.evidenceCount,
+    ...(summary.latestEvidence
+      ? { latestEvidence: toRendererRuntimeVerificationEvidence(summary.latestEvidence) }
+      : {}),
+    gameLoadAutomaticallyVerified: false
+  };
+}
+
+export function toRendererRuntimeOperationVerificationSummary(
+  summary: RuntimeOperationVerificationSummary
+): RendererRuntimeOperationVerificationSummary {
+  const forwardSessions = summary.forwardSessions.map(toRendererRuntimeVerificationSummary);
+  const rollbackSessions = summary.rollbackSessions.map(toRendererRuntimeVerificationSummary);
+  return {
+    operationId: summary.operationId,
+    state: summary.state,
+    forwardSessions,
+    rollbackSessions,
+    ...(summary.latestForward
+      ? { latestForward: toRendererRuntimeVerificationSummary(summary.latestForward) }
+      : {}),
+    ...(summary.latestRollback
+      ? { latestRollback: toRendererRuntimeVerificationSummary(summary.latestRollback) }
+      : {}),
+    gameLoadAutomaticallyVerified: false
   };
 }
 
