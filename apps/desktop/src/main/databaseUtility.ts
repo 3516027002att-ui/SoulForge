@@ -4,6 +4,7 @@ import {
   DurableWorkspaceRepository,
   RuntimeAdapterSettingsRepository,
   RuntimeLaunchSessionRepository,
+  RuntimeVerificationEvidenceRepository,
   WorkspaceDataRepository,
   openAppDatabase,
   openSqliteOperationLogStore,
@@ -26,6 +27,7 @@ let durableRepository: DurableWorkspaceRepository | null = null;
 let workspaceDataRepository: WorkspaceDataRepository | null = null;
 let runtimeSettingsRepository: RuntimeAdapterSettingsRepository | null = null;
 let runtimeSessionRepository: RuntimeLaunchSessionRepository | null = null;
+let runtimeVerificationRepository: RuntimeVerificationEvidenceRepository | null = null;
 let queue: Promise<void> = Promise.resolve();
 
 const utilityParentPort = process.parentPort;
@@ -163,6 +165,15 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return requireRuntimeSessionRepository().getRuntimeSession(request.payload.sessionId);
     case 'listRuntimeSessions':
       return requireRuntimeSessionRepository().listRuntimeSessions(request.payload.workspaceId);
+    case 'appendRuntimeVerificationEvidence':
+      requireRuntimeVerificationRepository().appendRuntimeVerificationEvidence(
+        request.payload.evidence
+      );
+      return null;
+    case 'listRuntimeVerificationEvidence':
+      return requireRuntimeVerificationRepository().listRuntimeVerificationEvidence(
+        request.payload.sessionId
+      );
   }
 }
 
@@ -200,6 +211,10 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     durableRepository = new DurableWorkspaceRepository(next.database, payload.workspaceId);
     workspaceDataRepository = new WorkspaceDataRepository(next.database, payload.workspaceId);
     runtimeSessionRepository = new RuntimeLaunchSessionRepository(next.database, payload.workspaceId);
+    runtimeVerificationRepository = new RuntimeVerificationEvidenceRepository(
+      next.database,
+      payload.workspaceId
+    );
     workspaceId = payload.workspaceId;
     return {
       workspaceId,
@@ -269,12 +284,23 @@ function requireRuntimeSessionRepository(): RuntimeLaunchSessionRepository {
   return runtimeSessionRepository;
 }
 
+function requireRuntimeVerificationRepository(): RuntimeVerificationEvidenceRepository {
+  if (!runtimeVerificationRepository) {
+    throw codedError(
+      'DATABASE_UTILITY_NOT_INITIALIZED',
+      'workspace runtime verification evidence authority 尚未初始化。'
+    );
+  }
+  return runtimeVerificationRepository;
+}
+
 function closeWorkspaceStore(): void {
   store?.close();
   store = null;
   durableRepository = null;
   workspaceDataRepository = null;
   runtimeSessionRepository = null;
+  runtimeVerificationRepository = null;
   workspaceId = null;
 }
 
