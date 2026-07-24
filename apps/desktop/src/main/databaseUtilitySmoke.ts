@@ -202,6 +202,21 @@ app.whenReady().then(async () => {
       throw new Error('Workspace runtime session authority round trip failed.');
     }
 
+    await client.appendRuntimeVerificationEvidence({
+      evidenceId: 'utility-runtime-evidence',
+      workspaceId,
+      sessionId: 'utility-runtime-session',
+      evidenceKind: 'operator_attestation',
+      verdict: 'inconclusive',
+      note: 'Fixture evidence only; no game was launched.',
+      createdAt: '2026-07-24T00:00:02.000Z'
+    });
+    const runtimeEvidence = await client.listRuntimeVerificationEvidence('utility-runtime-session');
+    if (runtimeEvidence.length !== 1
+      || runtimeEvidence[0]?.verdict !== 'inconclusive') {
+      throw new Error('Runtime verification evidence authority round trip failed.');
+    }
+
     await client.restart();
     const restartedHealth = await client.health();
     if (!restartedHealth.ready
@@ -209,7 +224,9 @@ app.whenReady().then(async () => {
       || (await client.searchFiles('test')).length !== 1
       || (await client.listJobs()).length !== 1
       || (await client.getRuntimeAdapterSetting('me3'))?.adapterId !== 'me3'
-      || (await client.getRuntimeSession('utility-runtime-session'))?.state !== 'exited') {
+      || (await client.getRuntimeSession('utility-runtime-session'))?.state !== 'exited'
+      || (await client.listRuntimeVerificationEvidence('utility-runtime-session'))[0]?.evidenceId
+        !== 'utility-runtime-evidence') {
       throw new Error('Database utility restart did not reopen durable state.');
     }
     process.stdout.write(`${JSON.stringify({
@@ -220,6 +237,7 @@ app.whenReady().then(async () => {
       durableRepositories: true,
       indexRepositories: true,
       runtimeAuthorities: true,
+      runtimeVerificationEvidence: true,
       forcedRestart: true
     }, null, 2)}\n`);
     await client.dispose();
