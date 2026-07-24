@@ -25,7 +25,17 @@ jobs:
           ref: agent/me3-runtime-foundation
           fetch-depth: 0
       - name: Apply me3 authority hardening
-        run: node scripts/apply-me3-authority-hardening.mjs
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/apply-me3-authority-hardening.mjs 2>&1 | tee me3-authority-migration.log
+      - name: Upload migration diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: me3-authority-migration-diagnostics
+          path: me3-authority-migration.log
+          if-no-files-found: error
       - name: Remove one-shot migration
         run: |
           rm scripts/apply-me3-authority-hardening.mjs
