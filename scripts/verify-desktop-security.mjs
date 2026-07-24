@@ -76,9 +76,13 @@ const checks = [
   ['Runtime operation 汇总绑定正向与回滚会话', files.runtimeController.includes('getOperationVerificationSummary')
     && files.runtimeController.includes("record.verificationKind === 'post_rollback'")
     && files.runtimeIpc.includes("'runtime.getOperationVerificationSummary'")],
+  ['Runtime operation 汇总保留 main workspace identity', files.runtimeController.includes('operation.workspaceId,')
+    && files.runtimeVerification.includes('Runtime operation summary workspaceId must not be empty')],
   ['Runtime verdict 使用上下文无关的预期状态语义', files.runtimeVerification.includes("'expected_state_observed'")
     && files.runtimeVerification.includes("'original_state_restored'")
     && !files.runtimeVerification.includes("'mod_loaded'")],
+  ['Runtime 机器事实与人工证据冲突会显式标记', files.runtimeVerification.includes("'conflicting_operator_attestation'")
+    && files.runtimeVerification.includes("'forward_evidence_conflict'")],
   ['渲染进程不能决定 AI 权限模式', !files.preload.includes("ToolContext['mode']")
     && files.ipc.includes("const activeAiMode: ToolContext['mode'] = 'plan'")],
   ['渲染 DTO 删除绝对路径', files.rendererDto.includes("'absolutePath'")],
