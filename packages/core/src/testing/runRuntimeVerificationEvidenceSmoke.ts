@@ -96,10 +96,12 @@ async function main(): Promise<void> {
     })]]
   ]);
   const operationSummary = summarizeOperationRuntimeVerification(
+    record.workspaceId,
     'operation-1',
     [record, forwardFailed, rollback],
     evidenceBySession
   );
+  assert.equal(operationSummary.workspaceId, record.workspaceId);
   assert.equal(operationSummary.forwardSessions.length, 2);
   assert.equal(operationSummary.rollbackSessions.length, 1);
   assert.equal(operationSummary.latestRollback?.expectation, 'original_state_restored');
@@ -113,12 +115,43 @@ async function main(): Promise<void> {
   });
   assert.equal(
     summarizeOperationRuntimeVerification(
+      launchFailure.workspaceId,
       'operation-1',
       [launchFailure],
       new Map()
     ).state,
     'forward_process_failed'
   );
+
+  const impossibleAttestation = createRuntimeVerificationEvidence({
+    evidenceId: 'impossible-observation',
+    workspaceId: launchFailure.workspaceId,
+    sessionId: launchFailure.sessionId,
+    verdict: 'expected_state_observed',
+    createdAt: '2026-07-24T08:04:30.000Z'
+  });
+  assert.equal(
+    summarizeRuntimeVerification(launchFailure, [impossibleAttestation]).conclusion,
+    'conflicting_operator_attestation'
+  );
+  assert.equal(
+    summarizeOperationRuntimeVerification(
+      launchFailure.workspaceId,
+      'operation-1',
+      [launchFailure],
+      new Map([[launchFailure.sessionId, [impossibleAttestation]]])
+    ).state,
+    'forward_evidence_conflict'
+  );
+
+  const emptySummary = summarizeOperationRuntimeVerification(
+    record.workspaceId,
+    'operation-without-sessions',
+    [],
+    new Map()
+  );
+  assert.equal(emptySummary.workspaceId, record.workspaceId);
+  assert.equal(emptySummary.state, 'untested');
 
   assert.equal(
     deriveRuntimeProcessEvidence(makeRecord({ state: 'exited', exitCode: 5 })),
@@ -148,6 +181,7 @@ async function main(): Promise<void> {
     conclusion: summary.conclusion,
     evidenceCount: summary.evidenceCount,
     operationState: operationSummary.state,
+    conflictState: 'forward_evidence_conflict',
     automaticGameVerification: summary.gameLoadAutomaticallyVerified
   }, null, 2)}\n`);
 }
