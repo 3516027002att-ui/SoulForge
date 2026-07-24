@@ -15,10 +15,11 @@ import type {
   TransactionJournalRecord,
   OperationLogStore,
   RuntimeAdapterSetting,
-  RuntimeLaunchRecord
+  RuntimeLaunchRecord,
+  RuntimeVerificationEvidence
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.2.0' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.3.0' as const;
 
 export interface OpenAppDatabasePayload {
   appDatabasePath: string;
@@ -78,6 +79,8 @@ export interface OperationLogUtilityPayloadMap {
   upsertRuntimeSession: { record: RuntimeLaunchRecord };
   getRuntimeSession: { sessionId: string };
   listRuntimeSessions: { workspaceId: string };
+  appendRuntimeVerificationEvidence: { evidence: RuntimeVerificationEvidence };
+  listRuntimeVerificationEvidence: { sessionId: string };
   health: Record<string, never>;
   close: Record<string, never>;
 }
@@ -146,6 +149,8 @@ export interface OperationLogUtilityResultMap {
   upsertRuntimeSession: null;
   getRuntimeSession: RuntimeLaunchRecord | undefined;
   listRuntimeSessions: RuntimeLaunchRecord[];
+  appendRuntimeVerificationEvidence: null;
+  listRuntimeVerificationEvidence: RuntimeVerificationEvidence[];
   health: { ready: boolean; appReady: boolean; workspaceId?: string };
   close: null;
 }
