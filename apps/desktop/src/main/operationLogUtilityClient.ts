@@ -17,6 +17,8 @@ import type {
   RuntimeAdapterSetting,
   RuntimeLaunchRecord,
   RuntimeLaunchSessionStore,
+  RuntimeVerificationEvidence,
+  RuntimeVerificationEvidenceStore,
   TransactionJournalPhase,
   TransactionJournalRecord
 } from '@soulforge/core';
@@ -39,7 +41,8 @@ interface PendingRequest {
 
 let latestOperationLogUtilityClient: OperationLogUtilityClient | null = null;
 
-export class OperationLogUtilityClient implements OperationLogStore, RuntimeLaunchSessionStore {
+export class OperationLogUtilityClient
+implements OperationLogStore, RuntimeLaunchSessionStore, RuntimeVerificationEvidenceStore {
   private process: UtilityProcess | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private activeWorkspace: OpenWorkspaceDatabasePayload | null = null;
@@ -214,6 +217,14 @@ export class OperationLogUtilityClient implements OperationLogStore, RuntimeLaun
 
   listRuntimeSessions(workspaceId: string): Promise<RuntimeLaunchRecord[]> {
     return this.request('listRuntimeSessions', { workspaceId });
+  }
+
+  appendRuntimeVerificationEvidence(evidence: RuntimeVerificationEvidence): Promise<void> {
+    return this.request('appendRuntimeVerificationEvidence', { evidence }).then(() => undefined);
+  }
+
+  listRuntimeVerificationEvidence(sessionId: string): Promise<RuntimeVerificationEvidence[]> {
+    return this.request('listRuntimeVerificationEvidence', { sessionId });
   }
 
   async health(): Promise<{ ready: boolean; appReady: boolean; workspaceId?: string }> {
