@@ -567,8 +567,8 @@ interface GameRuntimeAdapter {
 
 当前已具备：
 
-- 公开 `TrustedMe3RuntimeAdapter`，强制由 Electron main 提供用户原生确认过的 me3 可执行路径，PATH 不参与启动 authority；
-- `.me3` profile 只写应用数据目录，按 workspace 稳定命名并支持重复更新；
+- 公开 `TrustedMe3RuntimeAdapter`，强制由 Electron main 提供用户原生确认过的 me3 可执行路径，PATH 不参与启动 authority；所选文件还必须通过限时 `me3 info` 身份探测，普通 exe 不再能冒充 me3；
+- `.me3` profile 只写应用数据目录，按 workspace 稳定命名并支持重复更新；package override 使用 me3 v1 schema 的 `source` 字段，不再误用 native DLL 的 `path` 字段；
 - profile 目录逐级执行 physical path 与 junction / symlink 防逃逸检查；
 - 使用参数数组和 `shell: false` 执行 `me3 launch -p <profile>`，调用方不能覆盖保留参数；
 - 限长 stdout/stderr、退出码、信号、启动失败、主动终止和 SIGTERM -> SIGKILL 终止链；
@@ -582,7 +582,7 @@ interface GameRuntimeAdapter {
 
 仍缺：
 
-- 真实 me3 可执行文件与真实 Sekiro 启动证据；
+- 真实 me3 可执行文件与真实 Sekiro 启动证据；仓库已提供显式 opt-in 的 `test:private-me3-sekiro-gate`，但当前环境未执行；
 - 游戏内 Mod 加载成功判定、崩溃转储和真实故障诊断；
 - 用户可见的运行控制与会话历史界面（preload contract 已存在，本轮不做前端）；
 - 提交/回滚完成后的产品级自动提示或策略编排；当前提供显式 operation-linked launch API；
@@ -854,6 +854,8 @@ npm run test:me3-runtime-adapter
 npm run test:runtime-session-manager
 npm run test:database-utility
 npm run test:desktop-security
+# 仅在合法本地 me3 + Sekiro 环境显式运行：
+# $env:SOULFORGE_PRIVATE_RUNTIME_GATE="1"; npm run test:private-me3-sekiro-gate
 ~~~
 
 编辑器、AI、资产与发行的具体 smoke 以根 `package.json` 为准。
@@ -960,6 +962,15 @@ npm run test:desktop-security
 - 样本范围：公开构造 EMEVD editor document 与最小 Sekiro fixture EMEDF；未使用私有游戏资产。
 - 未验证：完整 Sekiro EMEDF、domain type/control-flow、insert/delete、layer、parameter bank、atomic semantic apply、Bridge/PatchIR/staging、native reread/rollback、KRAK corpus 和真实游戏加载。
 - 非声明：没有把 DSL 写入 native EMEVD；没有提升 EMEVD native authority。
+
+### 2026-07-24：me3 profile / executable authority 加固与私有真实运行门
+
+- 路线：H-me3 / H-发行
+- 状态变化：维持 `partial / runtime unverified`；修复会阻断真实加载的 profile schema 错误，并收紧 executable authority。
+- 已实现：me3 v1 Sekiro profile 使用 `[[packages]].source`；新增独立 profile contract；所选 executable 必须通过限时 `me3 info` 身份探测并提取版本；新增显式 opt-in 私有 Sekiro runtime gate，观察后受控终止并只输出 process evidence。
+- 已验证：公开 fake process smoke 覆盖 me3 0.11.0 identity、错误 executable 拒绝、profile source 字段、启动/终止和路径边界；最终 Windows CI 结果待本次候选更新。
+- 未验证：本地仍无真实 me3 / Sekiro，因此私有 gate 未运行，游戏内资源 override 与崩溃证据仍为空。
+- 非声明：`me3 info` 成功只证明 CLI identity；私有 gate 的零退出或运行态只属于 process evidence，不能自动证明 Mod 加载。
 
 ### 2026-07-24：me3 desktop runtime、持久会话与 operation-linked 编排
 

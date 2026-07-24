@@ -55,6 +55,7 @@
     "test:performance-baseline": "npm run test:performance-baseline -w @soulforge/core",
     "test:me3-runtime-adapter": "npm run test:me3-runtime-adapter -w @soulforge/core",
     "test:runtime-session-manager": "npm run test:runtime-session-manager -w @soulforge/core",
+    "test:private-me3-sekiro-gate": "npm run test:private-me3-sekiro-gate -w @soulforge/core",
     "test:release-content": "node scripts/verify-release-package-content.mjs",
     "test:private-native-gate": "node scripts/verify-private-native-gate.mjs",
     "test:section28-sekiro-gate": "node scripts/verify-section28-sekiro-gate.mjs",

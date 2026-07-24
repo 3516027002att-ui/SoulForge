@@ -5,6 +5,8 @@ import { spawn } from 'node:child_process';
 import type { Diagnostic } from '@soulforge/shared';
 import { isPathInside, verifyPathInsideRoot } from '../workspace/pathBoundary.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
+import { probeMe3Executable } from './me3ExecutableProbe.js';
+import { renderSekiroMe3Profile } from './me3Profile.js';
 import type {
   GameRuntimeAdapter,
   LaunchRuntimeOptions,
@@ -36,6 +38,7 @@ export interface Me3RuntimeAdapterOptions {
   environment?: NodeJS.ProcessEnv;
   maxOutputBytes?: number;
   terminateGraceMs?: number;
+  executableProbeTimeoutMs?: number;
   processHost?: RuntimeProcessHost;
   now?: () => Date;
   idFactory?: () => string;
@@ -44,6 +47,7 @@ export interface Me3RuntimeAdapterOptions {
 const ADAPTER_ID = 'me3';
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_TERMINATE_GRACE_MS = 5_000;
+const DEFAULT_EXECUTABLE_PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * Main-process/core adapter for launching a SoulForge workspace through me3.
@@ -60,6 +64,7 @@ export class Me3RuntimeAdapter implements GameRuntimeAdapter {
   private readonly environment: NodeJS.ProcessEnv;
   private readonly maxOutputBytes: number;
   private readonly terminateGraceMs: number;
+  private readonly executableProbeTimeoutMs: number;
   private readonly processHost: RuntimeProcessHost;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
@@ -73,6 +78,7 @@ export class Me3RuntimeAdapter implements GameRuntimeAdapter {
     this.environment = options.environment ?? process.env;
     this.maxOutputBytes = Math.max(4_096, options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
     this.terminateGraceMs = Math.max(100, options.terminateGraceMs ?? DEFAULT_TERMINATE_GRACE_MS);
+    this.executableProbeTimeoutMs = Math.max(250, options.executableProbeTimeoutMs ?? DEFAULT_EXECUTABLE_PROBE_TIMEOUT_MS);
     this.processHost = options.processHost ?? createNodeRuntimeProcessHost();
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? makeRuntimeId;
@@ -91,16 +97,32 @@ export class Me3RuntimeAdapter implements GameRuntimeAdapter {
         }
         await access(candidate, process.platform === 'win32' ? constants.F_OK : constants.X_OK);
         const canonicalPath = await realpath(candidate);
+        const probe = await probeMe3Executable({
+          processHost: this.processHost,
+          command: canonicalPath,
+          cwd: dirname(canonicalPath),
+          env: this.environment,
+          timeoutMs: this.executableProbeTimeoutMs,
+          maxOutputBytes: Math.min(this.maxOutputBytes, 64 * 1024)
+        });
+        if (!probe.ok) {
+          failures.push({ candidate, reason: probe.reason ?? 'me3 executable probe failed' });
+          continue;
+        }
         this.detectedExecutablePath = canonicalPath;
         return {
           adapterId: ADAPTER_ID,
           status: 'available',
           executablePath: canonicalPath,
+          ...(probe.version ? { version: probe.version } : {}),
           diagnostics: [{
             severity: 'info',
-            code: 'ME3_EXECUTABLE_FOUND_UNVERIFIED',
-            message: '已发现 me3 可执行文件；尚未执行真实 Sekiro 启动验证。',
-            details: { executablePath: canonicalPath }
+            code: 'ME3_EXECUTABLE_IDENTITY_CONFIRMED',
+            message: '已通过 me3 info 确认所选文件是可工作的 me3 CLI；尚未执行真实 Sekiro Mod 加载验证。',
+            details: {
+              executablePath: canonicalPath,
+              ...(probe.version ? { version: probe.version } : {})
+            }
           }]
         };
       } catch (error) {
@@ -144,7 +166,10 @@ export class Me3RuntimeAdapter implements GameRuntimeAdapter {
     }
 
     const createdAt = this.now().toISOString();
-    const content = renderSekiroProfile(workspace.layers.overlayRoot, workspace.meta.workspaceId);
+    const content = renderSekiroMe3Profile({
+      overlayRoot: workspace.layers.overlayRoot,
+      packageId: `soulforge-${workspace.meta.workspaceId}`
+    });
     await writeFileAtomic(profilePath, content);
 
     return {
@@ -452,21 +477,6 @@ function createNodeRuntimeProcessHost(): RuntimeProcessHost {
       };
     }
   };
-}
-
-function renderSekiroProfile(overlayRoot: string, workspaceId: string): string {
-  const portableOverlayPath = resolve(overlayRoot).replaceAll('\\', '/');
-  return [
-    'profileVersion = "v1"',
-    '',
-    '[[supports]]',
-    'game = "sekiro"',
-    '',
-    '[[packages]]',
-    `id = ${JSON.stringify(`soulforge-${workspaceId}`)}`,
-    `path = ${JSON.stringify(portableOverlayPath)}`,
-    ''
-  ].join('\n');
 }
 
 async function assertProfileRootOutsideWorkspace(profileRoot: string, workspace: WorkspaceSession): Promise<void> {

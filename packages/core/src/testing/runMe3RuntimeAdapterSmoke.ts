@@ -58,6 +58,8 @@ class FakeProcessHost implements RuntimeProcessHost {
   args: readonly string[] = [];
   cwd = '';
   environment: NodeJS.ProcessEnv = {};
+  identityOutput = 'me3 0.11.0';
+  identityExitCode = 0;
 
   spawn(command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv }): RuntimeProcessHandle {
     const handle = new FakeProcessHandle();
@@ -66,6 +68,12 @@ class FakeProcessHost implements RuntimeProcessHost {
     this.args = args;
     this.cwd = options.cwd;
     this.environment = options.env;
+    if (args.length === 1 && args[0] === 'info') {
+      queueMicrotask(() => {
+        handle.emitStdout(this.identityOutput);
+        handle.exit(this.identityExitCode);
+      });
+    }
     return handle;
   }
 }
@@ -96,6 +104,8 @@ async function main(): Promise<void> {
     const capability = await adapter.detect();
     assert.equal(capability.status, 'available');
     assert.equal(capability.executablePath, canonicalExecutablePath);
+    assert.equal(capability.version, '0.11.0');
+    assert.deepEqual(processHost.args, ['info']);
 
     const profile = await adapter.prepareProfile(workspace, {
       operationId: 'op-123',
@@ -105,7 +115,8 @@ async function main(): Promise<void> {
     assert.match(profileText, /profileVersion = "v1"/);
     assert.match(profileText, /game = "sekiro"/);
     assert.match(profileText, /\[\[packages\]\]/);
-    assert.match(profileText, /path = /);
+    assert.match(profileText, /source = /);
+    assert.doesNotMatch(profileText, /^path = /m);
     assert.equal(profile.operationId, 'op-123');
     assert.equal(profile.profilePath.startsWith(applicationDataRoot), true);
     assert.equal(profile.profilePath.startsWith(overlayRoot), false);
@@ -122,7 +133,7 @@ async function main(): Promise<void> {
     assert.equal(processHost.cwd, join(applicationDataRoot, 'runtime', 'me3', 'profiles'));
     assert.equal(readPathValue(processHost.environment), readPathValue(process.env));
 
-    const firstHandle = processHost.handles[0];
+    const firstHandle = processHost.handles[1];
     assert.ok(firstHandle);
     firstHandle.emitStdout('launching sekiro\n');
     firstHandle.emitStderr('fixture warning\n');
@@ -137,12 +148,26 @@ async function main(): Promise<void> {
     assert.equal(diagnostics.diagnostics.some((item) => item.code === 'ME3_PROCESS_EXITED_ZERO'), true);
 
     const secondSession = await adapter.launch(profile);
-    const secondHandle = processHost.handles[1];
+    const secondHandle = processHost.handles[2];
     assert.ok(secondHandle);
     await adapter.terminate(secondSession);
     const terminated = await secondSession.waitForExit();
     assert.equal(terminated.state, 'terminated');
     assert.deepEqual(secondHandle.killedSignals, ['SIGTERM']);
+
+    const wrongIdentityHost = new FakeProcessHost();
+    wrongIdentityHost.identityOutput = 'unrelated executable 1.0.0';
+    const wrongIdentityAdapter = new TrustedMe3RuntimeAdapter({
+      applicationDataRoot,
+      executablePath,
+      processHost: wrongIdentityHost
+    });
+    const wrongIdentityCapability = await wrongIdentityAdapter.detect();
+    assert.equal(wrongIdentityCapability.status, 'unavailable');
+    assert.equal(
+      wrongIdentityCapability.diagnostics.some((item) => item.code === 'ME3_EXECUTABLE_NOT_FOUND'),
+      true
+    );
 
     const unsafeApplicationDataRoot = join(overlayRoot, 'unsafe-app-data');
     await mkdir(unsafeApplicationDataRoot, { recursive: true });
@@ -184,6 +209,8 @@ async function main(): Promise<void> {
       launchState: snapshot.state,
       terminatedState: terminated.state,
       pathDiscovery: 'disabled-at-public-boundary',
+      executableIdentity: 'me3-info-confirmed',
+      profilePackageField: 'source',
       launchEnvironment: 'path-preserved',
       unsafeBoundary: 'rejected-before-runtime-directory',
       redirectedRuntime: 'rejected-before-outside-directory'
