@@ -1,0 +1,39 @@
+name: me3-authority-hardening
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - scripts/apply-me3-authority-hardening.mjs
+      - .github/workflows/me3-authority-hardening.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: me3-authority-hardening
+  cancel-in-progress: true
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout runtime branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/me3-runtime-foundation
+          fetch-depth: 0
+      - name: Apply me3 authority hardening
+        run: node scripts/apply-me3-authority-hardening.mjs
+      - name: Remove one-shot migration
+        run: |
+          rm scripts/apply-me3-authority-hardening.mjs
+          rm .github/workflows/me3-authority-hardening.yml
+      - name: Commit authority hardening
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(runtime): harden me3 profile and executable authority"
+          git push origin HEAD:agent/me3-runtime-foundation
