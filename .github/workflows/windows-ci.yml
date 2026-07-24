@@ -35,18 +35,7 @@ jobs:
         run: npm ci
 
       - name: Typecheck
-        shell: pwsh
-        run: |
-          npm run typecheck *>&1 | Tee-Object -FilePath typecheck.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Upload typecheck diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: runtime-evidence-typecheck-diagnostics
-          path: typecheck.log
-          if-no-files-found: error
+        run: npm run typecheck
 
       # Core smoke processes are intentionally separate. Each command preserves
       # the original npm-workspace cwd so the diagnostic split cannot change behavior.
