@@ -38,6 +38,27 @@ CREATE INDEX IF NOT EXISTS idx_runtime_launch_sessions_workspace_operation
 `
 };
 
+const WORKSPACE_RUNTIME_VERIFICATION_MIGRATION: SqlMigration = {
+  id: 8,
+  name: 'v0_5_runtime_verification_evidence_authority',
+  sql: `
+CREATE TABLE IF NOT EXISTS runtime_verification_evidence (
+  evidence_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  evidence_kind TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (session_id) REFERENCES runtime_launch_sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_verification_evidence_session_created
+  ON runtime_verification_evidence(workspace_id, session_id, created_at, evidence_id);
+`
+};
+
 const APP_RUNTIME_MIGRATION: SqlMigration = {
   id: 2,
   name: 'v0_5_runtime_adapter_settings_authority',
@@ -52,6 +73,11 @@ CREATE TABLE IF NOT EXISTS runtime_adapter_settings (
 };
 
 registerMigration(SQLITE_MIGRATIONS, WORKSPACE_RUNTIME_MIGRATION, 'workspace.db');
+registerMigration(
+  SQLITE_MIGRATIONS,
+  WORKSPACE_RUNTIME_VERIFICATION_MIGRATION,
+  'workspace.db'
+);
 registerMigration(APP_DB_MIGRATIONS, APP_RUNTIME_MIGRATION, 'app.db');
 
 function registerMigration(
