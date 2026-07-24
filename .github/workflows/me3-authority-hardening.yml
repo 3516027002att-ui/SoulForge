@@ -31,11 +31,22 @@ jobs:
           from pathlib import Path
           path = Path('scripts/apply-me3-authority-hardening.mjs')
           text = path.read_text(encoding='utf-8')
-          old = "message: '已通过 `me3 info` 确认所选文件是可工作的 me3 CLI；尚未执行真实 Sekiro Mod 加载验证。'"
-          new = "message: '已通过 me3 info 确认所选文件是可工作的 me3 CLI；尚未执行真实 Sekiro Mod 加载验证。'"
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one syntax repair anchor, found {text.count(old)}')
-          path.write_text(text.replace(old, new), encoding='utf-8')
+          repairs = [
+              (
+                  "message: '已通过 `me3 info` 确认所选文件是可工作的 me3 CLI；尚未执行真实 Sekiro Mod 加载验证。'",
+                  "message: '已通过 me3 info 确认所选文件是可工作的 me3 CLI；尚未执行真实 Sekiro Mod 加载验证。'"
+              ),
+              (
+                  "    'npm run test:runtime-session-manager\\n',\n    'npm run test:runtime-session-manager\\n# 仅在合法本地 me3 + Sekiro 环境显式运行：\\n# $env:SOULFORGE_PRIVATE_RUNTIME_GATE=\"1\"; npm run test:private-me3-sekiro-gate\\n',",
+                  "    '~~~powershell\\nnpm run test:me3-runtime-adapter\\nnpm run test:runtime-session-manager\\nnpm run test:database-utility\\nnpm run test:desktop-security\\n~~~',\n    '~~~powershell\\nnpm run test:me3-runtime-adapter\\nnpm run test:runtime-session-manager\\nnpm run test:database-utility\\nnpm run test:desktop-security\\n# 仅在合法本地 me3 + Sekiro 环境显式运行：\\n# $env:SOULFORGE_PRIVATE_RUNTIME_GATE=\"1\"; npm run test:private-me3-sekiro-gate\\n~~~',"
+              )
+          ]
+          for old, new in repairs:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one migration repair anchor, found {count}: {old[:80]}')
+              text = text.replace(old, new)
+          path.write_text(text, encoding='utf-8')
           PY
       - name: Apply me3 authority hardening
         shell: bash
