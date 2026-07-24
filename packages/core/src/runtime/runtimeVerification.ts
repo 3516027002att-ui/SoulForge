@@ -2,10 +2,15 @@ import type { RuntimeLaunchRecord } from './runtimeSessionStore.js';
 
 export type RuntimeVerificationEvidenceKind = 'operator_attestation';
 export type RuntimeOperatorVerdict =
-  | 'mod_loaded'
-  | 'mod_not_loaded'
+  | 'expected_state_observed'
+  | 'expected_state_not_observed'
   | 'game_failed'
   | 'inconclusive';
+
+export type RuntimeVerificationExpectation =
+  | 'workspace_mod_active'
+  | 'committed_change_present'
+  | 'original_state_restored';
 
 export interface RuntimeVerificationEvidence {
   evidenceId: string;
@@ -38,8 +43,8 @@ export type RuntimeProcessEvidenceOutcome =
 
 export type RuntimeVerificationConclusion =
   | 'unverified'
-  | 'operator_confirmed_mod_loaded'
-  | 'operator_reported_mod_not_loaded'
+  | 'operator_confirmed_expected_state'
+  | 'operator_reported_expected_state_missing'
   | 'operator_reported_game_failed'
   | 'operator_inconclusive';
 
@@ -49,6 +54,7 @@ export interface RuntimeVerificationSummary {
   sessionId: string;
   workspaceId: string;
   verificationKind: RuntimeLaunchRecord['verificationKind'];
+  expectation: RuntimeVerificationExpectation;
   operationId?: string;
   relatedOperationId?: string;
   processOutcome: RuntimeProcessEvidenceOutcome;
@@ -57,6 +63,33 @@ export interface RuntimeVerificationSummary {
   evidenceCount: number;
   latestEvidence?: RuntimeVerificationEvidence;
   /** Always false until an independent game-aware probe earns stronger authority. */
+  gameLoadAutomaticallyVerified: false;
+}
+
+export type RuntimeOperationVerificationState =
+  | 'untested'
+  | 'forward_active'
+  | 'forward_process_failed'
+  | 'forward_unverified'
+  | 'forward_confirmed'
+  | 'forward_failed'
+  | 'forward_inconclusive'
+  | 'rollback_active'
+  | 'rollback_process_failed'
+  | 'rollback_unverified'
+  | 'rollback_confirmed_restored'
+  | 'rollback_failed'
+  | 'rollback_inconclusive';
+
+export interface RuntimeOperationVerificationSummary {
+  workspaceId: string;
+  operationId: string;
+  state: RuntimeOperationVerificationState;
+  forwardSessions: RuntimeVerificationSummary[];
+  rollbackSessions: RuntimeVerificationSummary[];
+  latestForward?: RuntimeVerificationSummary;
+  latestRollback?: RuntimeVerificationSummary;
+  /** Operator evidence remains an attestation, not automatic native/game authority. */
   gameLoadAutomaticallyVerified: false;
 }
 
@@ -115,6 +148,7 @@ export function summarizeRuntimeVerification(
     sessionId: record.sessionId,
     workspaceId: record.workspaceId,
     verificationKind: record.verificationKind,
+    expectation: expectationForVerificationKind(record.verificationKind),
     ...(record.operationId ? { operationId: record.operationId } : {}),
     ...(record.relatedOperationId ? { relatedOperationId: record.relatedOperationId } : {}),
     processOutcome: deriveRuntimeProcessEvidence(record),
@@ -122,6 +156,44 @@ export function summarizeRuntimeVerification(
     conclusion: latestEvidence ? conclusionFromVerdict(latestEvidence.verdict) : 'unverified',
     evidenceCount: relevant.length,
     ...(latestEvidence ? { latestEvidence } : {}),
+    gameLoadAutomaticallyVerified: false
+  };
+}
+
+export function summarizeOperationRuntimeVerification(
+  operationId: string,
+  sessions: readonly RuntimeLaunchRecord[],
+  evidenceBySession: ReadonlyMap<string, readonly RuntimeVerificationEvidence[]>
+): RuntimeOperationVerificationSummary {
+  const forwardRecords = sessions
+    .filter((record) => record.verificationKind === 'post_commit' && record.operationId === operationId)
+    .sort(compareSessions);
+  const rollbackRecords = sessions
+    .filter((record) => record.verificationKind === 'post_rollback'
+      && record.relatedOperationId === operationId)
+    .sort(compareSessions);
+  const forwardSessions = forwardRecords.map((record) => summarizeRuntimeVerification(
+    record,
+    evidenceBySession.get(record.sessionId) ?? []
+  ));
+  const rollbackSessions = rollbackRecords.map((record) => summarizeRuntimeVerification(
+    record,
+    evidenceBySession.get(record.sessionId) ?? []
+  ));
+  const latestForward = forwardSessions.at(-1);
+  const latestRollback = rollbackSessions.at(-1);
+  const workspaceId = latestRollback?.workspaceId
+    ?? latestForward?.workspaceId
+    ?? sessions.find((record) => record.operationId === operationId)?.workspaceId
+    ?? '';
+  return {
+    workspaceId,
+    operationId,
+    state: deriveOperationVerificationState(latestForward, latestRollback),
+    forwardSessions,
+    rollbackSessions,
+    ...(latestForward ? { latestForward } : {}),
+    ...(latestRollback ? { latestRollback } : {}),
     gameLoadAutomaticallyVerified: false
   };
 }
@@ -147,6 +219,19 @@ export function deriveRuntimeProcessEvidence(
   }
 }
 
+export function expectationForVerificationKind(
+  kind: RuntimeLaunchRecord['verificationKind']
+): RuntimeVerificationExpectation {
+  switch (kind) {
+    case 'manual':
+      return 'workspace_mod_active';
+    case 'post_commit':
+      return 'committed_change_present';
+    case 'post_rollback':
+      return 'original_state_restored';
+  }
+}
+
 export function assertRuntimeVerificationEvidence(
   evidence: RuntimeVerificationEvidence
 ): void {
@@ -168,8 +253,8 @@ export function assertRuntimeVerificationEvidence(
 }
 
 export function isRuntimeOperatorVerdict(value: unknown): value is RuntimeOperatorVerdict {
-  return value === 'mod_loaded'
-    || value === 'mod_not_loaded'
+  return value === 'expected_state_observed'
+    || value === 'expected_state_not_observed'
     || value === 'game_failed'
     || value === 'inconclusive';
 }
@@ -187,15 +272,53 @@ export function normalizeRuntimeVerificationNote(value: string | undefined): str
 
 function conclusionFromVerdict(verdict: RuntimeOperatorVerdict): RuntimeVerificationConclusion {
   switch (verdict) {
-    case 'mod_loaded':
-      return 'operator_confirmed_mod_loaded';
-    case 'mod_not_loaded':
-      return 'operator_reported_mod_not_loaded';
+    case 'expected_state_observed':
+      return 'operator_confirmed_expected_state';
+    case 'expected_state_not_observed':
+      return 'operator_reported_expected_state_missing';
     case 'game_failed':
       return 'operator_reported_game_failed';
     case 'inconclusive':
       return 'operator_inconclusive';
   }
+}
+
+function deriveOperationVerificationState(
+  latestForward: RuntimeVerificationSummary | undefined,
+  latestRollback: RuntimeVerificationSummary | undefined
+): RuntimeOperationVerificationState {
+  if (latestRollback) return stateForSummary(latestRollback, 'rollback');
+  if (latestForward) return stateForSummary(latestForward, 'forward');
+  return 'untested';
+}
+
+function stateForSummary(
+  summary: RuntimeVerificationSummary,
+  phase: 'forward' | 'rollback'
+): RuntimeOperationVerificationState {
+  if (summary.processOutcome === 'active') {
+    return phase === 'forward' ? 'forward_active' : 'rollback_active';
+  }
+  if (isProcessFailure(summary.processOutcome) && summary.conclusion === 'unverified') {
+    return phase === 'forward' ? 'forward_process_failed' : 'rollback_process_failed';
+  }
+  switch (summary.conclusion) {
+    case 'operator_confirmed_expected_state':
+      return phase === 'forward' ? 'forward_confirmed' : 'rollback_confirmed_restored';
+    case 'operator_reported_expected_state_missing':
+    case 'operator_reported_game_failed':
+      return phase === 'forward' ? 'forward_failed' : 'rollback_failed';
+    case 'operator_inconclusive':
+      return phase === 'forward' ? 'forward_inconclusive' : 'rollback_inconclusive';
+    case 'unverified':
+      return phase === 'forward' ? 'forward_unverified' : 'rollback_unverified';
+  }
+}
+
+function isProcessFailure(outcome: RuntimeProcessEvidenceOutcome): boolean {
+  return outcome === 'launch_failed'
+    || outcome === 'exited_nonzero'
+    || outcome === 'exited_by_signal';
 }
 
 function compareEvidence(
@@ -204,6 +327,11 @@ function compareEvidence(
 ): number {
   return left.createdAt.localeCompare(right.createdAt)
     || left.evidenceId.localeCompare(right.evidenceId);
+}
+
+function compareSessions(left: RuntimeLaunchRecord, right: RuntimeLaunchRecord): number {
+  return left.startedAt.localeCompare(right.startedAt)
+    || left.sessionId.localeCompare(right.sessionId);
 }
 
 function cloneEvidence(evidence: RuntimeVerificationEvidence): RuntimeVerificationEvidence {
