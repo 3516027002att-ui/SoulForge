@@ -17,6 +17,7 @@ import type {
   AiSidebarDraft,
   AiSidebarDraftRequest,
   ResourceCapabilityMatrix,
+  RuntimeOperatorVerdict,
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
@@ -108,6 +109,16 @@ const api = {
     ipcRenderer.invoke('runtime.terminate', sessionId),
   waitForRuntimeExit: (sessionId: string): Promise<RendererRuntimeActionResult> =>
     ipcRenderer.invoke('runtime.waitForExit', sessionId),
+  recordRuntimeVerification: (
+    sessionId: string,
+    verdict: RuntimeOperatorVerdict,
+    note?: string
+  ): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.recordOperatorVerification', sessionId, verdict, note),
+  listRuntimeVerificationEvidence: (sessionId: string): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.listVerificationEvidence', sessionId),
+  getRuntimeVerificationSummary: (sessionId: string): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.getVerificationSummary', sessionId),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),
