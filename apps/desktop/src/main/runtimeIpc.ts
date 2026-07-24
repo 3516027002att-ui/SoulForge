@@ -8,13 +8,20 @@ import {
   type WebContents
 } from 'electron';
 import { dirname, join } from 'node:path';
-import { openWorkspaceSession, type RuntimeLaunchRecord } from '@soulforge/core';
+import {
+  isRuntimeOperatorVerdict,
+  openWorkspaceSession,
+  type RuntimeLaunchRecord,
+  type RuntimeOperatorVerdict
+} from '@soulforge/core';
 import type { Diagnostic } from '@soulforge/shared';
 import {
   sanitizeDiagnostics,
   sanitizeRendererValue,
   toRendererRuntimeCapability,
   toRendererRuntimeLaunchRecord,
+  toRendererRuntimeVerificationEvidence,
+  toRendererRuntimeVerificationSummary,
   type RendererRuntimeActionResult
 } from './rendererDto.js';
 import {
@@ -203,6 +210,75 @@ export function registerRuntimeIpcHandlers(
       return runtimeRecordAction(() => requireController().waitForExit(assertIdentifier(sessionId)));
     }
   );
+
+  handle(
+    'runtime.recordOperatorVerification',
+    async (
+      _event,
+      sessionId: string,
+      verdict: unknown,
+      note?: unknown
+    ): Promise<RendererRuntimeActionResult> => {
+      try {
+        await synchronizeCurrentWorkspace();
+        const normalizedVerdict = assertRuntimeVerdict(verdict);
+        const normalizedNote = assertOptionalNote(note);
+        const verification = await requireController().recordOperatorVerification(
+          assertIdentifier(sessionId),
+          normalizedVerdict,
+          normalizedNote
+        );
+        return {
+          ok: true,
+          verification: toRendererRuntimeVerificationSummary(verification),
+          ...(verification.latestEvidence
+            ? { evidence: toRendererRuntimeVerificationEvidence(verification.latestEvidence) }
+            : {}),
+          diagnostics: []
+        };
+      } catch (error) {
+        return runtimeFailure(error);
+      }
+    }
+  );
+
+  handle(
+    'runtime.listVerificationEvidence',
+    async (_event, sessionId: string): Promise<RendererRuntimeActionResult> => {
+      try {
+        await synchronizeCurrentWorkspace();
+        const evidence = await requireController().listVerificationEvidence(
+          assertIdentifier(sessionId)
+        );
+        return {
+          ok: true,
+          evidenceList: evidence.map(toRendererRuntimeVerificationEvidence),
+          diagnostics: []
+        };
+      } catch (error) {
+        return runtimeFailure(error);
+      }
+    }
+  );
+
+  handle(
+    'runtime.getVerificationSummary',
+    async (_event, sessionId: string): Promise<RendererRuntimeActionResult> => {
+      try {
+        await synchronizeCurrentWorkspace();
+        const verification = await requireController().getVerificationSummary(
+          assertIdentifier(sessionId)
+        );
+        return {
+          ok: true,
+          verification: toRendererRuntimeVerificationSummary(verification),
+          diagnostics: []
+        };
+      } catch (error) {
+        return runtimeFailure(error);
+      }
+    }
+  );
 }
 
 export async function disposeRuntimeIpc(): Promise<void> {
@@ -325,6 +401,19 @@ function assertIdentifier(value: string): string {
     throw new Error('Invalid runtime identifier.');
   }
   return normalized;
+}
+
+function assertRuntimeVerdict(value: unknown): RuntimeOperatorVerdict {
+  if (!isRuntimeOperatorVerdict(value)) {
+    throw new Error('Invalid runtime operator verdict.');
+  }
+  return value;
+}
+
+function assertOptionalNote(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error('Runtime verification note must be a string.');
+  return value;
 }
 
 function localApplicationDataRoot(): string {
