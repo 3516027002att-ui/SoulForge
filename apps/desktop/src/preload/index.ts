@@ -119,6 +119,10 @@ const api = {
     ipcRenderer.invoke('runtime.listVerificationEvidence', sessionId),
   getRuntimeVerificationSummary: (sessionId: string): Promise<RendererRuntimeActionResult> =>
     ipcRenderer.invoke('runtime.getVerificationSummary', sessionId),
+  getOperationRuntimeVerificationSummary: (
+    operationId: string
+  ): Promise<RendererRuntimeActionResult> =>
+    ipcRenderer.invoke('runtime.getOperationVerificationSummary', operationId),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),

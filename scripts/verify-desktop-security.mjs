@@ -73,6 +73,12 @@ const checks = [
     && !verificationInsert.includes('ON CONFLICT')],
   ['Runtime 进程成功不会自动宣称游戏加载', files.runtimeVerification.includes('gameLoadAutomaticallyVerified: false')
     && files.rendererDto.includes('gameLoadAutomaticallyVerified: false')],
+  ['Runtime operation 汇总绑定正向与回滚会话', files.runtimeController.includes('getOperationVerificationSummary')
+    && files.runtimeController.includes("record.verificationKind === 'post_rollback'")
+    && files.runtimeIpc.includes("'runtime.getOperationVerificationSummary'")],
+  ['Runtime verdict 使用上下文无关的预期状态语义', files.runtimeVerification.includes("'expected_state_observed'")
+    && files.runtimeVerification.includes("'original_state_restored'")
+    && !files.runtimeVerification.includes("'mod_loaded'")],
   ['渲染进程不能决定 AI 权限模式', !files.preload.includes("ToolContext['mode']")
     && files.ipc.includes("const activeAiMode: ToolContext['mode'] = 'plan'")],
   ['渲染 DTO 删除绝对路径', files.rendererDto.includes("'absolutePath'")],

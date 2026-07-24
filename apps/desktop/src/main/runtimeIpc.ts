@@ -20,6 +20,7 @@ import {
   sanitizeRendererValue,
   toRendererRuntimeCapability,
   toRendererRuntimeLaunchRecord,
+  toRendererRuntimeOperationVerificationSummary,
   toRendererRuntimeVerificationEvidence,
   toRendererRuntimeVerificationSummary,
   type RendererRuntimeActionResult
@@ -272,6 +273,27 @@ export function registerRuntimeIpcHandlers(
         return {
           ok: true,
           verification: toRendererRuntimeVerificationSummary(verification),
+          diagnostics: []
+        };
+      } catch (error) {
+        return runtimeFailure(error);
+      }
+    }
+  );
+
+  handle(
+    'runtime.getOperationVerificationSummary',
+    async (_event, operationId: string): Promise<RendererRuntimeActionResult> => {
+      try {
+        await synchronizeCurrentWorkspace();
+        const operationVerification = await requireController().getOperationVerificationSummary(
+          assertIdentifier(operationId)
+        );
+        return {
+          ok: true,
+          operationVerification: toRendererRuntimeOperationVerificationSummary(
+            operationVerification
+          ),
           diagnostics: []
         };
       } catch (error) {
