@@ -1,0 +1,39 @@
+name: runtime-operation-verification
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - scripts/apply-runtime-operation-verification.mjs
+      - .github/workflows/runtime-operation-verification.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: runtime-operation-verification
+  cancel-in-progress: true
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout runtime branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/me3-runtime-foundation
+          fetch-depth: 0
+      - name: Apply operation verification wiring
+        run: node scripts/apply-runtime-operation-verification.mjs
+      - name: Remove one-shot migration
+        run: |
+          rm scripts/apply-runtime-operation-verification.mjs
+          rm .github/workflows/runtime-operation-verification.yml
+      - name: Commit operation verification wiring
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat(runtime): expose operation verification summaries"
+          git push origin HEAD:agent/me3-runtime-foundation
