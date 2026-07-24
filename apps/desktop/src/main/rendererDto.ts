@@ -1,4 +1,9 @@
-import type { RuntimeCapability, RuntimeLaunchRecord } from '@soulforge/core';
+import type {
+  RuntimeCapability,
+  RuntimeLaunchRecord,
+  RuntimeVerificationEvidence,
+  RuntimeVerificationSummary
+} from '@soulforge/core';
 import type {
   BridgeResult,
   Diagnostic,
@@ -54,11 +59,26 @@ export type RendererRuntimeLaunchRecord = Omit<
   diagnostics: Diagnostic[];
 };
 
+export type RendererRuntimeVerificationEvidence = Omit<
+  RuntimeVerificationEvidence,
+  'workspaceId'
+>;
+
+export type RendererRuntimeVerificationSummary = Omit<
+  RuntimeVerificationSummary,
+  'workspaceId' | 'latestEvidence'
+> & {
+  latestEvidence?: RendererRuntimeVerificationEvidence;
+};
+
 export interface RendererRuntimeActionResult {
   ok: boolean;
   capability?: RendererRuntimeCapability;
   record?: RendererRuntimeLaunchRecord;
   records?: RendererRuntimeLaunchRecord[];
+  evidence?: RendererRuntimeVerificationEvidence;
+  evidenceList?: RendererRuntimeVerificationEvidence[];
+  verification?: RendererRuntimeVerificationSummary;
   removed?: boolean;
   diagnostics: Diagnostic[];
 }
@@ -195,6 +215,38 @@ export function toRendererRuntimeLaunchRecord(
     outputTruncated: record.outputTruncated,
     diagnostics: sanitizeDiagnostics(record.diagnostics),
     updatedAt: record.updatedAt
+  };
+}
+
+export function toRendererRuntimeVerificationEvidence(
+  evidence: RuntimeVerificationEvidence
+): RendererRuntimeVerificationEvidence {
+  return {
+    evidenceId: evidence.evidenceId,
+    sessionId: evidence.sessionId,
+    evidenceKind: evidence.evidenceKind,
+    verdict: evidence.verdict,
+    ...(evidence.note ? { note: sanitizeRendererString(evidence.note) } : {}),
+    createdAt: evidence.createdAt
+  };
+}
+
+export function toRendererRuntimeVerificationSummary(
+  summary: RuntimeVerificationSummary
+): RendererRuntimeVerificationSummary {
+  return {
+    sessionId: summary.sessionId,
+    verificationKind: summary.verificationKind,
+    ...(summary.operationId ? { operationId: summary.operationId } : {}),
+    ...(summary.relatedOperationId ? { relatedOperationId: summary.relatedOperationId } : {}),
+    processOutcome: summary.processOutcome,
+    authority: summary.authority,
+    conclusion: summary.conclusion,
+    evidenceCount: summary.evidenceCount,
+    ...(summary.latestEvidence
+      ? { latestEvidence: toRendererRuntimeVerificationEvidence(summary.latestEvidence) }
+      : {}),
+    gameLoadAutomaticallyVerified: false
   };
 }
 
