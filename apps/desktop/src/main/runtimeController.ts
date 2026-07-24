@@ -252,6 +252,7 @@ export class DesktopRuntimeController {
       await this.authority.listRuntimeVerificationEvidence(record.sessionId)
     ] as const));
     return summarizeOperationRuntimeVerification(
+      operation.workspaceId,
       operationId,
       sessions,
       new Map(evidenceEntries)
