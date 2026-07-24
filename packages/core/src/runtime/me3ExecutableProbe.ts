@@ -38,10 +38,11 @@ export async function probeMe3Executable(
 
   return new Promise((resolve) => {
     let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     const finish = (result: Me3ExecutableProbeResult): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve(result);
     };
 
@@ -88,7 +89,8 @@ export async function probeMe3Executable(
       });
     });
 
-    const timer = setTimeout(() => {
+    if (settled) return;
+    timer = setTimeout(() => {
       handle.kill('SIGTERM');
       finish({
         ok: false,
