@@ -6,6 +6,13 @@ import {
   type RuntimeLaunchSessionStore,
   type RuntimeVerificationKind
 } from '../runtime/runtimeSessionStore.js';
+import {
+  assertRuntimeVerificationEvidence,
+  type RuntimeVerificationEvidence,
+  type RuntimeVerificationEvidenceKind,
+  type RuntimeVerificationEvidenceStore,
+  type RuntimeOperatorVerdict
+} from '../runtime/runtimeVerification.js';
 import type { SqliteDatabase } from './sqliteDatabase.js';
 
 export interface RuntimeAdapterSetting {
@@ -136,6 +143,63 @@ ORDER BY started_at DESC, session_id DESC
   }
 }
 
+export class RuntimeVerificationEvidenceRepository
+implements RuntimeVerificationEvidenceStore {
+  constructor(private readonly database: SqliteDatabase, readonly workspaceId: string) {}
+
+  appendRuntimeVerificationEvidence(evidence: RuntimeVerificationEvidence): void {
+    this.assertWorkspace(evidence.workspaceId);
+    assertRuntimeVerificationEvidence(evidence);
+    const session = this.database.prepare<[string, string], { found: number }>(`
+SELECT 1 AS found
+FROM runtime_launch_sessions
+WHERE session_id = ? AND workspace_id = ?
+`).get(evidence.sessionId, this.workspaceId);
+    if (!session) {
+      throw new Error(`Runtime session not found for verification evidence: ${evidence.sessionId}.`);
+    }
+    const duplicate = this.database.prepare<[string], { found: number }>(`
+SELECT 1 AS found
+FROM runtime_verification_evidence
+WHERE evidence_id = ?
+`).get(evidence.evidenceId);
+    if (duplicate) {
+      throw new Error(`Runtime verification evidence already exists: ${evidence.evidenceId}.`);
+    }
+    this.database.prepare(`
+INSERT INTO runtime_verification_evidence (
+  evidence_id, workspace_id, session_id, evidence_kind, verdict, note, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+`).run(
+      evidence.evidenceId,
+      this.workspaceId,
+      evidence.sessionId,
+      evidence.evidenceKind,
+      evidence.verdict,
+      evidence.note ?? null,
+      evidence.createdAt
+    );
+  }
+
+  listRuntimeVerificationEvidence(sessionId: string): RuntimeVerificationEvidence[] {
+    const rows = this.database.prepare<[string, string], Record<string, unknown>>(`
+SELECT evidence_id AS evidenceId, workspace_id AS workspaceId,
+  session_id AS sessionId, evidence_kind AS evidenceKind, verdict,
+  note, created_at AS createdAt
+FROM runtime_verification_evidence
+WHERE session_id = ? AND workspace_id = ?
+ORDER BY created_at, evidence_id
+`).all(sessionId, this.workspaceId);
+    return rows.map(hydrateRuntimeVerificationEvidence);
+  }
+
+  private assertWorkspace(workspaceId: string): void {
+    if (workspaceId !== this.workspaceId) {
+      throw new Error(`Runtime verification evidence workspace mismatch: ${workspaceId}.`);
+    }
+  }
+}
+
 function runtimeSessionSelect(): string {
   return `SELECT session_id AS sessionId, workspace_id AS workspaceId,
   adapter_id AS adapterId, profile_id AS profileId, profile_path AS profilePath,
@@ -185,6 +249,22 @@ function hydrateRuntimeLaunchRecord(row: Record<string, unknown>): RuntimeLaunch
   };
   assertRuntimeLaunchRecord(record);
   return record;
+}
+
+function hydrateRuntimeVerificationEvidence(
+  row: Record<string, unknown>
+): RuntimeVerificationEvidence {
+  const evidence: RuntimeVerificationEvidence = {
+    evidenceId: String(row.evidenceId),
+    workspaceId: String(row.workspaceId),
+    sessionId: String(row.sessionId),
+    evidenceKind: String(row.evidenceKind) as RuntimeVerificationEvidenceKind,
+    verdict: String(row.verdict) as RuntimeOperatorVerdict,
+    ...(row.note === null ? {} : { note: String(row.note) }),
+    createdAt: String(row.createdAt)
+  };
+  assertRuntimeVerificationEvidence(evidence);
+  return evidence;
 }
 
 function assertRuntimeAdapterSetting(setting: RuntimeAdapterSetting): void {
