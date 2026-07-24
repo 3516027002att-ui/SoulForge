@@ -1,18 +1,26 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import {
   RuntimeSessionManager,
   RuntimeSessionManagerError,
   TrustedMe3RuntimeAdapter,
+  createRuntimeVerificationEvidence,
+  summarizeRuntimeVerification,
   type RuntimeAdapterSetting,
   type RuntimeCapability,
   type RuntimeLaunchRecord,
   type RuntimeLaunchSessionStore,
+  type RuntimeOperatorVerdict,
+  type RuntimeVerificationEvidence,
+  type RuntimeVerificationEvidenceStore,
+  type RuntimeVerificationSummary,
   type WorkspaceSession
 } from '@soulforge/core';
 import type { OperationLogRecord } from '@soulforge/shared';
 
-export interface RuntimeAuthorityClient extends RuntimeLaunchSessionStore {
+export interface RuntimeAuthorityClient
+extends RuntimeLaunchSessionStore, RuntimeVerificationEvidenceStore {
   openApp(payload: { appDatabasePath: string }): Promise<void>;
   getRuntimeAdapterSetting(adapterId: string): Promise<RuntimeAdapterSetting | undefined>;
   upsertRuntimeAdapterSetting(setting: RuntimeAdapterSetting): Promise<void>;
@@ -25,6 +33,7 @@ export interface DesktopRuntimeControllerOptions {
   appDatabasePath: string;
   authority: RuntimeAuthorityClient;
   now?: () => Date;
+  evidenceIdFactory?: () => string;
 }
 
 export class DesktopRuntimeController {
@@ -32,6 +41,7 @@ export class DesktopRuntimeController {
   private readonly appDatabasePath: string;
   private readonly authority: RuntimeAuthorityClient;
   private readonly now: () => Date;
+  private readonly evidenceIdFactory: () => string;
   private workspace: WorkspaceSession | null = null;
   private manager: RuntimeSessionManager | null = null;
 
@@ -40,6 +50,7 @@ export class DesktopRuntimeController {
     this.appDatabasePath = options.appDatabasePath;
     this.authority = options.authority;
     this.now = options.now ?? (() => new Date());
+    this.evidenceIdFactory = options.evidenceIdFactory ?? randomUUID;
   }
 
   async initializeAppAuthority(): Promise<void> {
@@ -188,6 +199,37 @@ export class DesktopRuntimeController {
     return this.authority.listRuntimeSessions(workspace.meta.workspaceId);
   }
 
+  async recordOperatorVerification(
+    sessionId: string,
+    verdict: RuntimeOperatorVerdict,
+    note?: string
+  ): Promise<RuntimeVerificationSummary> {
+    const record = await this.requireSession(sessionId);
+    const evidence = createRuntimeVerificationEvidence({
+      evidenceId: this.evidenceIdFactory(),
+      workspaceId: record.workspaceId,
+      sessionId: record.sessionId,
+      verdict,
+      ...(note === undefined ? {} : { note }),
+      createdAt: this.now().toISOString()
+    });
+    await this.authority.appendRuntimeVerificationEvidence(evidence);
+    const allEvidence = await this.authority.listRuntimeVerificationEvidence(record.sessionId);
+    return summarizeRuntimeVerification(record, allEvidence);
+  }
+
+  async listVerificationEvidence(sessionId: string): Promise<RuntimeVerificationEvidence[]> {
+    const record = await this.requireSession(sessionId);
+    return (await this.authority.listRuntimeVerificationEvidence(record.sessionId))
+      .filter((item) => item.workspaceId === record.workspaceId);
+  }
+
+  async getVerificationSummary(sessionId: string): Promise<RuntimeVerificationSummary> {
+    const record = await this.requireSession(sessionId);
+    const evidence = await this.authority.listRuntimeVerificationEvidence(record.sessionId);
+    return summarizeRuntimeVerification(record, evidence);
+  }
+
   async dispose(): Promise<void> {
     if (this.manager) await this.manager.dispose();
     this.manager = null;
@@ -232,6 +274,18 @@ export class DesktopRuntimeController {
       );
     }
     return this.workspace;
+  }
+
+  private async requireSession(sessionId: string): Promise<RuntimeLaunchRecord> {
+    const workspace = this.requireWorkspace();
+    const record = await this.getSession(sessionId);
+    if (!record || record.workspaceId !== workspace.meta.workspaceId) {
+      throw new DesktopRuntimeControllerError(
+        'RUNTIME_SESSION_NOT_FOUND',
+        '找不到当前工作区中的运行会话。'
+      );
+    }
+    return record;
   }
 
   private async requireCommittedOperation(operationId: string): Promise<OperationLogRecord> {
