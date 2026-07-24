@@ -5,7 +5,16 @@ import {
   deriveRuntimeProcessEvidence,
   summarizeRuntimeVerification
 } from '../runtime/runtimeVerification.js';
-import type { RuntimeLaunchRecord } from '../runtime/runtimeSessionStore.js';
+import type {
+  PersistedRuntimeLaunchState,
+  RuntimeLaunchRecord
+} from '../runtime/runtimeSessionStore.js';
+
+interface RuntimeRecordPatch {
+  state: PersistedRuntimeLaunchState;
+  exitCode?: number;
+  signal?: NodeJS.Signals;
+}
 
 async function main(): Promise<void> {
   const store = new MemoryRuntimeVerificationEvidenceStore();
@@ -77,9 +86,7 @@ async function main(): Promise<void> {
   }, null, 2)}\n`);
 }
 
-function makeRecord(
-  patch: Pick<RuntimeLaunchRecord, 'state'> & Partial<RuntimeLaunchRecord>
-): RuntimeLaunchRecord {
+function makeRecord(patch: RuntimeRecordPatch): RuntimeLaunchRecord {
   return {
     sessionId: 'runtime-session-1',
     workspaceId: 'workspace-1',
@@ -91,13 +98,14 @@ function makeRecord(
     operationId: 'operation-1',
     verificationKind: 'post_commit',
     state: patch.state,
+    ...(patch.exitCode === undefined ? {} : { exitCode: patch.exitCode }),
+    ...(patch.signal === undefined ? {} : { signal: patch.signal }),
     startedAt: '2026-07-24T07:59:00.000Z',
     stdout: '',
     stderr: '',
     outputTruncated: false,
     diagnostics: [],
-    updatedAt: '2026-07-24T08:00:00.000Z',
-    ...patch
+    updatedAt: '2026-07-24T08:00:00.000Z'
   };
 }
 
