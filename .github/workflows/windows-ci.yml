@@ -99,6 +99,10 @@ jobs:
         working-directory: packages/core
         run: node dist/testing/runRuntimeSessionManagerSmoke.js
 
+      - name: Core — runtime verification evidence
+        working-directory: packages/core
+        run: node dist/testing/runRuntimeVerificationEvidenceSmoke.js
+
       - name: Desktop security gate
         run: npm run test:desktop-security
 
