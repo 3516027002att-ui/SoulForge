@@ -6,11 +6,13 @@ import {
   RuntimeSessionManagerError,
   TrustedMe3RuntimeAdapter,
   createRuntimeVerificationEvidence,
+  summarizeOperationRuntimeVerification,
   summarizeRuntimeVerification,
   type RuntimeAdapterSetting,
   type RuntimeCapability,
   type RuntimeLaunchRecord,
   type RuntimeLaunchSessionStore,
+  type RuntimeOperationVerificationSummary,
   type RuntimeOperatorVerdict,
   type RuntimeVerificationEvidence,
   type RuntimeVerificationEvidenceStore,
@@ -230,6 +232,32 @@ export class DesktopRuntimeController {
     return summarizeRuntimeVerification(record, evidence);
   }
 
+  async getOperationVerificationSummary(
+    operationId: string
+  ): Promise<RuntimeOperationVerificationSummary> {
+    const operation = await this.requireOperation(operationId);
+    if (operation.inverseOfOpId) {
+      throw new DesktopRuntimeControllerError(
+        'RUNTIME_OPERATION_EXPECTED_FORWARD',
+        'operation 级运行验证汇总必须使用原始正向 operation。'
+      );
+    }
+    const sessions = (await this.listSessions()).filter((record) =>
+      (record.verificationKind === 'post_commit' && record.operationId === operationId)
+      || (record.verificationKind === 'post_rollback'
+        && record.relatedOperationId === operationId)
+    );
+    const evidenceEntries = await Promise.all(sessions.map(async (record) => [
+      record.sessionId,
+      await this.authority.listRuntimeVerificationEvidence(record.sessionId)
+    ] as const));
+    return summarizeOperationRuntimeVerification(
+      operationId,
+      sessions,
+      new Map(evidenceEntries)
+    );
+  }
+
   async dispose(): Promise<void> {
     if (this.manager) await this.manager.dispose();
     this.manager = null;
@@ -288,7 +316,7 @@ export class DesktopRuntimeController {
     return record;
   }
 
-  private async requireCommittedOperation(operationId: string): Promise<OperationLogRecord> {
+  private async requireOperation(operationId: string): Promise<OperationLogRecord> {
     const workspace = this.requireWorkspace();
     const operation = await this.authority.get(operationId);
     if (!operation || operation.workspaceId !== workspace.meta.workspaceId) {
@@ -297,6 +325,11 @@ export class DesktopRuntimeController {
         '找不到当前工作区中的目标 Patch operation。'
       );
     }
+    return operation;
+  }
+
+  private async requireCommittedOperation(operationId: string): Promise<OperationLogRecord> {
+    const operation = await this.requireOperation(operationId);
     if (operation.status !== 'committed') {
       throw new DesktopRuntimeControllerError(
         'RUNTIME_OPERATION_NOT_COMMITTED',
