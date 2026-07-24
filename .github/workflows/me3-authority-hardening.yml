@@ -24,6 +24,19 @@ jobs:
         with:
           ref: agent/me3-runtime-foundation
           fetch-depth: 0
+      - name: Repair migration source
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/apply-me3-authority-hardening.mjs')
+          text = path.read_text(encoding='utf-8')
+          old = "message: '已通过 `me3 info` 确认所选文件是可工作的 me3 CLI；尚未执行真实 Sekiro Mod 加载验证。'"
+          new = "message: '已通过 me3 info 确认所选文件是可工作的 me3 CLI；尚未执行真实 Sekiro Mod 加载验证。'"
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one syntax repair anchor, found {text.count(old)}')
+          path.write_text(text.replace(old, new), encoding='utf-8')
+          PY
       - name: Apply me3 authority hardening
         shell: bash
         run: |
@@ -40,6 +53,7 @@ jobs:
         run: |
           rm scripts/apply-me3-authority-hardening.mjs
           rm .github/workflows/me3-authority-hardening.yml
+          rm -f me3-authority-migration.log
       - name: Commit authority hardening
         run: |
           git config user.name "github-actions[bot]"
