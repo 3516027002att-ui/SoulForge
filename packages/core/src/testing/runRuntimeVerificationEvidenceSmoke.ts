@@ -3,17 +3,24 @@ import {
   MemoryRuntimeVerificationEvidenceStore,
   createRuntimeVerificationEvidence,
   deriveRuntimeProcessEvidence,
+  summarizeOperationRuntimeVerification,
   summarizeRuntimeVerification
 } from '../runtime/runtimeVerification.js';
 import type {
   PersistedRuntimeLaunchState,
-  RuntimeLaunchRecord
+  RuntimeLaunchRecord,
+  RuntimeVerificationKind
 } from '../runtime/runtimeSessionStore.js';
 
 interface RuntimeRecordPatch {
+  sessionId?: string;
+  verificationKind?: RuntimeVerificationKind;
+  operationId?: string;
+  relatedOperationId?: string;
   state: PersistedRuntimeLaunchState;
   exitCode?: number;
   signal?: NodeJS.Signals;
+  startedAt?: string;
 }
 
 async function main(): Promise<void> {
@@ -23,6 +30,7 @@ async function main(): Promise<void> {
   assert.equal(deriveRuntimeProcessEvidence(record), 'exited_zero');
   const processOnly = summarizeRuntimeVerification(record, []);
   assert.equal(processOnly.authority, 'process_only');
+  assert.equal(processOnly.expectation, 'committed_change_present');
   assert.equal(processOnly.conclusion, 'unverified');
   assert.equal(processOnly.gameLoadAutomaticallyVerified, false);
 
@@ -41,7 +49,7 @@ async function main(): Promise<void> {
     evidenceId: 'evidence-2',
     workspaceId: record.workspaceId,
     sessionId: record.sessionId,
-    verdict: 'mod_loaded',
+    verdict: 'expected_state_observed',
     note: 'Changed FMG text was visible in the expected menu.',
     createdAt: '2026-07-24T08:01:00.000Z'
   });
@@ -50,10 +58,67 @@ async function main(): Promise<void> {
   const evidence = store.listRuntimeVerificationEvidence(record.sessionId);
   const summary = summarizeRuntimeVerification(record, evidence);
   assert.equal(summary.authority, 'operator_attested');
-  assert.equal(summary.conclusion, 'operator_confirmed_mod_loaded');
+  assert.equal(summary.conclusion, 'operator_confirmed_expected_state');
   assert.equal(summary.evidenceCount, 2);
   assert.equal(summary.latestEvidence?.evidenceId, 'evidence-2');
   assert.equal(summary.gameLoadAutomaticallyVerified, false);
+
+  const forwardFailed = makeRecord({
+    sessionId: 'forward-failed',
+    state: 'exited',
+    exitCode: 0,
+    startedAt: '2026-07-24T08:02:00.000Z'
+  });
+  const rollback = makeRecord({
+    sessionId: 'rollback-1',
+    verificationKind: 'post_rollback',
+    operationId: 'inverse-operation-1',
+    relatedOperationId: 'operation-1',
+    state: 'exited',
+    exitCode: 0,
+    startedAt: '2026-07-24T08:03:00.000Z'
+  });
+  const evidenceBySession = new Map([
+    [forwardFailed.sessionId, [createRuntimeVerificationEvidence({
+      evidenceId: 'forward-missing',
+      workspaceId: forwardFailed.workspaceId,
+      sessionId: forwardFailed.sessionId,
+      verdict: 'expected_state_not_observed',
+      createdAt: '2026-07-24T08:02:30.000Z'
+    })]],
+    [rollback.sessionId, [createRuntimeVerificationEvidence({
+      evidenceId: 'rollback-restored',
+      workspaceId: rollback.workspaceId,
+      sessionId: rollback.sessionId,
+      verdict: 'expected_state_observed',
+      note: 'Original text was visible again.',
+      createdAt: '2026-07-24T08:03:30.000Z'
+    })]]
+  ]);
+  const operationSummary = summarizeOperationRuntimeVerification(
+    'operation-1',
+    [record, forwardFailed, rollback],
+    evidenceBySession
+  );
+  assert.equal(operationSummary.forwardSessions.length, 2);
+  assert.equal(operationSummary.rollbackSessions.length, 1);
+  assert.equal(operationSummary.latestRollback?.expectation, 'original_state_restored');
+  assert.equal(operationSummary.state, 'rollback_confirmed_restored');
+  assert.equal(operationSummary.gameLoadAutomaticallyVerified, false);
+
+  const launchFailure = makeRecord({
+    sessionId: 'forward-launch-failed',
+    state: 'failed',
+    startedAt: '2026-07-24T08:04:00.000Z'
+  });
+  assert.equal(
+    summarizeOperationRuntimeVerification(
+      'operation-1',
+      [launchFailure],
+      new Map()
+    ).state,
+    'forward_process_failed'
+  );
 
   assert.equal(
     deriveRuntimeProcessEvidence(makeRecord({ state: 'exited', exitCode: 5 })),
@@ -71,9 +136,9 @@ async function main(): Promise<void> {
     evidenceId: 'bad-evidence',
     workspaceId: record.workspaceId,
     sessionId: record.sessionId,
-    verdict: 'mod_loaded',
+    verdict: 'expected_state_observed',
     note: 'x'.repeat(2_001),
-    createdAt: '2026-07-24T08:02:00.000Z'
+    createdAt: '2026-07-24T08:05:00.000Z'
   }), /2000 characters/);
   assert.throws(() => store.appendRuntimeVerificationEvidence(confirmed), /already exists/);
 
@@ -82,30 +147,37 @@ async function main(): Promise<void> {
     processOutcome: summary.processOutcome,
     conclusion: summary.conclusion,
     evidenceCount: summary.evidenceCount,
+    operationState: operationSummary.state,
     automaticGameVerification: summary.gameLoadAutomaticallyVerified
   }, null, 2)}\n`);
 }
 
 function makeRecord(patch: RuntimeRecordPatch): RuntimeLaunchRecord {
+  const verificationKind = patch.verificationKind ?? 'post_commit';
   return {
-    sessionId: 'runtime-session-1',
+    sessionId: patch.sessionId ?? 'runtime-session-1',
     workspaceId: 'workspace-1',
     adapterId: 'me3',
     profileId: 'profile-1',
     profilePath: process.platform === 'win32'
       ? 'C:\\SoulForge\\runtime\\profile.me3'
       : '/tmp/SoulForge/runtime/profile.me3',
-    operationId: 'operation-1',
-    verificationKind: 'post_commit',
+    ...(verificationKind === 'manual'
+      ? {}
+      : { operationId: patch.operationId ?? 'operation-1' }),
+    ...(verificationKind === 'post_rollback'
+      ? { relatedOperationId: patch.relatedOperationId ?? 'operation-1' }
+      : {}),
+    verificationKind,
     state: patch.state,
     ...(patch.exitCode === undefined ? {} : { exitCode: patch.exitCode }),
     ...(patch.signal === undefined ? {} : { signal: patch.signal }),
-    startedAt: '2026-07-24T07:59:00.000Z',
+    startedAt: patch.startedAt ?? '2026-07-24T07:59:00.000Z',
     stdout: '',
     stderr: '',
     outputTruncated: false,
     diagnostics: [],
-    updatedAt: '2026-07-24T08:00:00.000Z'
+    updatedAt: patch.startedAt ?? '2026-07-24T08:00:00.000Z'
   };
 }
 
