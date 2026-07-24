@@ -1,6 +1,7 @@
 import type {
   RuntimeCapability,
   RuntimeLaunchRecord,
+  RuntimeOperationVerificationSummary,
   RuntimeVerificationEvidence,
   RuntimeVerificationSummary
 } from '@soulforge/core';
@@ -71,6 +72,16 @@ export type RendererRuntimeVerificationSummary = Omit<
   latestEvidence?: RendererRuntimeVerificationEvidence;
 };
 
+export type RendererRuntimeOperationVerificationSummary = Omit<
+  RuntimeOperationVerificationSummary,
+  'workspaceId' | 'forwardSessions' | 'rollbackSessions' | 'latestForward' | 'latestRollback'
+> & {
+  forwardSessions: RendererRuntimeVerificationSummary[];
+  rollbackSessions: RendererRuntimeVerificationSummary[];
+  latestForward?: RendererRuntimeVerificationSummary;
+  latestRollback?: RendererRuntimeVerificationSummary;
+};
+
 export interface RendererRuntimeActionResult {
   ok: boolean;
   capability?: RendererRuntimeCapability;
@@ -79,6 +90,7 @@ export interface RendererRuntimeActionResult {
   evidence?: RendererRuntimeVerificationEvidence;
   evidenceList?: RendererRuntimeVerificationEvidence[];
   verification?: RendererRuntimeVerificationSummary;
+  operationVerification?: RendererRuntimeOperationVerificationSummary;
   removed?: boolean;
   diagnostics: Diagnostic[];
 }
@@ -237,6 +249,7 @@ export function toRendererRuntimeVerificationSummary(
   return {
     sessionId: summary.sessionId,
     verificationKind: summary.verificationKind,
+    expectation: summary.expectation,
     ...(summary.operationId ? { operationId: summary.operationId } : {}),
     ...(summary.relatedOperationId ? { relatedOperationId: summary.relatedOperationId } : {}),
     processOutcome: summary.processOutcome,
@@ -245,6 +258,26 @@ export function toRendererRuntimeVerificationSummary(
     evidenceCount: summary.evidenceCount,
     ...(summary.latestEvidence
       ? { latestEvidence: toRendererRuntimeVerificationEvidence(summary.latestEvidence) }
+      : {}),
+    gameLoadAutomaticallyVerified: false
+  };
+}
+
+export function toRendererRuntimeOperationVerificationSummary(
+  summary: RuntimeOperationVerificationSummary
+): RendererRuntimeOperationVerificationSummary {
+  const forwardSessions = summary.forwardSessions.map(toRendererRuntimeVerificationSummary);
+  const rollbackSessions = summary.rollbackSessions.map(toRendererRuntimeVerificationSummary);
+  return {
+    operationId: summary.operationId,
+    state: summary.state,
+    forwardSessions,
+    rollbackSessions,
+    ...(summary.latestForward
+      ? { latestForward: toRendererRuntimeVerificationSummary(summary.latestForward) }
+      : {}),
+    ...(summary.latestRollback
+      ? { latestRollback: toRendererRuntimeVerificationSummary(summary.latestRollback) }
       : {}),
     gameLoadAutomaticallyVerified: false
   };
