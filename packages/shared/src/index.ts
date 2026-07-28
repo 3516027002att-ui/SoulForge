@@ -15,3 +15,4 @@ export * from './bridge-protocol.js';
 export * from './editor-protocol.js';
 export * from './emevd-editor-ir.js';
 export * from './paramdef.js';
+export * from './scene-ir.js';

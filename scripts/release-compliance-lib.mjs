@@ -1,0 +1,622 @@
+import { createHash } from 'node:crypto';
+import {
+  createReadStream,
+  existsSync,
+  globSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync
+} from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+
+export const RELEASE_MANIFEST_RELATIVE_PATH = 'apps/desktop/out/release-compliance.json';
+export const RELEASE_POLICY_RELATIVE_PATH = 'scripts/release-compliance-policy.json';
+
+const SECRET_PATTERNS = [
+  { code: 'PRIVATE_KEY_CONTENT', pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
+  { code: 'AWS_ACCESS_KEY_CONTENT', pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { code: 'GITHUB_TOKEN_CONTENT', pattern: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/ },
+  { code: 'OPENAI_KEY_CONTENT', pattern: /\bsk-[A-Za-z0-9_-]{32,}\b/ }
+];
+
+const SUPPORTED_LOCKFILE_VERSIONS = new Set([2, 3]);
+const SECRET_SCAN_OVERLAP_BYTES = 512;
+
+export function loadReleasePolicy(root) {
+  const policyPath = resolve(root, RELEASE_POLICY_RELATIVE_PATH);
+  const policy = JSON.parse(readFileSync(policyPath, 'utf8'));
+  const findings = [];
+  if (policy.schemaVersion !== 1) {
+    findings.push(error('RELEASE_POLICY_SCHEMA_UNSUPPORTED', RELEASE_POLICY_RELATIVE_PATH, 'release policy schemaVersion 必须为 1。'));
+  }
+  if (!Array.isArray(policy.allowedLicenseExpressions) || policy.allowedLicenseExpressions.length === 0) {
+    findings.push(error('RELEASE_LICENSE_ALLOWLIST_EMPTY', RELEASE_POLICY_RELATIVE_PATH, '许可证 allowlist 不能为空。'));
+  }
+  if (!Array.isArray(policy.artifactInputs) || policy.artifactInputs.length === 0) {
+    findings.push(error('RELEASE_ARTIFACT_INPUTS_EMPTY', RELEASE_POLICY_RELATIVE_PATH, 'artifactInputs 不能为空。'));
+  }
+  return { policy, findings };
+}
+
+export async function createReleaseComplianceManifest(root, policy) {
+  const findings = [];
+  const lockPath = resolve(root, 'package-lock.json');
+  const rootPackagePath = resolve(root, 'package.json');
+  const lockText = await readFile(lockPath, 'utf8');
+  const lock = JSON.parse(lockText);
+  const rootPackage = JSON.parse(await readFile(rootPackagePath, 'utf8'));
+  validatePackageLock(lock, findings);
+  const licenses = collectProductionLicenses(root, rootPackage, lock, policy, findings);
+  const artifacts = await collectArtifactSnapshot(root, policy, findings);
+  const policyHash = sha256Text(canonicalJson(policy));
+  const lockfileSha256 = sha256Text(lockText);
+
+  return {
+    schemaVersion: 1,
+    authority: 'partial',
+    scope: 'unsigned-win-x64-build-inputs',
+    product: {
+      name: rootPackage.name,
+      version: rootPackage.version,
+      target: policy.target
+    },
+    policy: {
+      path: RELEASE_POLICY_RELATIVE_PATH,
+      sha256: policyHash
+    },
+    lockfile: {
+      path: 'package-lock.json',
+      sha256: lockfileSha256,
+      lockfileVersion: isRecord(lock) ? (lock.lockfileVersion ?? null) : null
+    },
+    licenses,
+    artifacts,
+    reproducibility: {
+      algorithm: 'sha256-content-manifest-v1',
+      aggregateSha256: artifacts.aggregateSha256,
+      ignoredMetadata: ['absolute-path', 'directory-enumeration-order', 'mtime', 'ctime']
+    },
+    diagnostics: findings.map(({ severity, code, path, message }) => ({ severity, code, path, message }))
+  };
+}
+
+export async function auditReleaseCompliance(input) {
+  const { root, policy, trackedPaths = [] } = input;
+  const expected = await createReleaseComplianceManifest(root, policy);
+  const findings = [...expected.diagnostics];
+  const manifestPath = resolve(root, RELEASE_MANIFEST_RELATIVE_PATH);
+  let actual = null;
+  let actualText = '';
+  let actualParsed = false;
+  if (!existsSync(manifestPath)) {
+    findings.push(error(
+      'RELEASE_MANIFEST_MISSING',
+      RELEASE_MANIFEST_RELATIVE_PATH,
+      '缺少 release compliance manifest；先运行 npm run build。'
+    ));
+  } else {
+    try {
+      actualText = readFileSync(manifestPath, 'utf8');
+      actual = JSON.parse(actualText);
+      actualParsed = true;
+    } catch {
+      findings.push(error('RELEASE_MANIFEST_INVALID', RELEASE_MANIFEST_RELATIVE_PATH, 'release compliance manifest 不是合法 JSON。'));
+    }
+  }
+
+  const expectedText = `${JSON.stringify(expected, null, 2)}\n`;
+  if (actualParsed && actualText !== expectedText) {
+    findings.push(error(
+      'RELEASE_MANIFEST_STALE',
+      RELEASE_MANIFEST_RELATIVE_PATH,
+      'release compliance manifest 与当前 lockfile/构建产物不一致。'
+    ));
+  }
+  findings.push(...await auditPaths(root, trackedPaths, 'tracked'));
+  findings.push(...await auditPaths(root, expected.artifacts.files.map((item) => item.sourcePath), 'artifact'));
+  findings.push(...auditTargetPaths(expected.artifacts.files.map((item) => item.path), 'artifact-target'));
+
+  const errors = deduplicateFindings(findings).filter((item) => item.severity === 'error');
+  return {
+    ok: errors.length === 0,
+    status: errors.length === 0 ? 'passed' : 'failed',
+    expected,
+    actual,
+    manifestSha256: actualText ? sha256Text(actualText) : null,
+    findings: deduplicateFindings(findings)
+  };
+}
+
+export function serializeReleaseManifest(manifest) {
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
+function validatePackageLock(lock, findings) {
+  if (!isRecord(lock)) {
+    findings.push(error('PACKAGE_LOCK_INVALID', 'package-lock.json', 'package-lock.json root must be an object.'));
+    return;
+  }
+  if (!SUPPORTED_LOCKFILE_VERSIONS.has(lock.lockfileVersion)) {
+    findings.push(error(
+      'PACKAGE_LOCK_VERSION_UNSUPPORTED',
+      'package-lock.json',
+      `package-lock.json lockfileVersion must be one of ${[...SUPPORTED_LOCKFILE_VERSIONS].join(', ')}.`
+    ));
+  }
+  if (!isRecord(lock.packages)) {
+    findings.push(error(
+      'PACKAGE_LOCK_PACKAGES_MISSING',
+      'package-lock.json',
+      'package-lock.json packages must be a non-array object.'
+    ));
+  }
+}
+
+function collectProductionLicenses(root, rootPackage, lock, policy, findings) {
+  const allowed = new Set(policy.allowedLicenseExpressions);
+  const packages = [];
+  const lockPackages = isRecord(lock) && isRecord(lock.packages) ? lock.packages : {};
+  const workspacePaths = declaredWorkspacePaths(root, rootPackage, findings);
+  for (const [lockPath, metadata] of Object.entries(lockPackages)) {
+    if (!isRecord(metadata)) continue;
+    if (!lockPath.includes('node_modules/') || metadata.dev === true) continue;
+    if (metadata.link === true) {
+      const resolved = typeof metadata.resolved === 'string' ? normalize(metadata.resolved) : '';
+      if (resolved && workspacePaths.has(foldWindowsPath(resolved))) continue;
+      findings.push(error(
+        'DEPENDENCY_LINK_OUTSIDE_WORKSPACE',
+        lockPath,
+        'Production link dependencies must resolve to a repository workspace declared by the root package.json.'
+      ));
+      continue;
+    }
+    const name = packageNameFromLockPath(lockPath);
+    const license = typeof metadata.license === 'string' ? metadata.license.trim() : '';
+    if (!metadata.version) {
+      findings.push(error('DEPENDENCY_VERSION_MISSING', lockPath, `依赖 ${name} 缺少锁定版本。`));
+    }
+    if (!license) {
+      findings.push(error('DEPENDENCY_LICENSE_MISSING', lockPath, `依赖 ${name} 缺少 license metadata。`));
+    } else if (!allowed.has(license)) {
+      findings.push(error('DEPENDENCY_LICENSE_NOT_ALLOWED', lockPath, `依赖 ${name} 的许可证 ${license} 未经策略允许。`));
+    }
+    const packageDirectory = resolve(root, lockPath);
+    const licenseFiles = directLicenseFiles(root, packageDirectory);
+    packages.push({
+      name,
+      version: metadata.version ?? null,
+      license: license || null,
+      lockPath: normalize(lockPath),
+      integrity: metadata.integrity ?? null,
+      optional: metadata.optional === true,
+      installed: existsSync(packageDirectory),
+      licenseFiles,
+      licenseTextStatus: licenseFiles.length > 0 ? 'present' : 'metadata-only'
+    });
+  }
+  packages.sort((left, right) => compareText(
+    `${left.name}\0${left.version}\0${left.lockPath}`,
+    `${right.name}\0${right.version}\0${right.lockPath}`
+  ));
+  if (packages.length === 0) {
+    findings.push(error(
+      'PRODUCTION_DEPENDENCY_INVENTORY_EMPTY',
+      'package-lock.json',
+      'package-lock.json did not produce any non-development dependency inventory entries.'
+    ));
+  }
+  const expressions = {};
+  for (const item of packages) {
+    const key = item.license ?? '<missing>';
+    expressions[key] = (expressions[key] ?? 0) + 1;
+  }
+  const metadataOnly = packages.filter((item) => item.licenseTextStatus === 'metadata-only').length;
+  if (metadataOnly > 0) {
+    findings.push(warning(
+      'LICENSE_TEXT_COVERAGE_PARTIAL',
+      'package-lock.json',
+      `${metadataOnly} 个锁定依赖只有 license metadata，尚未形成完整 third-party notice 文本。`
+    ));
+  }
+  return {
+    inventoryKind: 'production-lockfile-metadata',
+    packageCount: packages.length,
+    licenseExpressions: sortRecord(expressions),
+    textCoverage: {
+      present: packages.length - metadataOnly,
+      metadataOnly,
+      complete: metadataOnly === 0
+    },
+    inventorySha256: sha256Text(canonicalJson(packages)),
+    packages
+  };
+}
+
+function declaredWorkspacePaths(root, rootPackage, findings) {
+  const declaration = rootPackage?.workspaces;
+  const patterns = Array.isArray(declaration)
+    ? declaration
+    : isRecord(declaration) && Array.isArray(declaration.packages)
+      ? declaration.packages
+      : [];
+  const paths = new Set();
+  let physicalRoot;
+  try {
+    physicalRoot = realpathSync(root);
+  } catch {
+    findings.push(error(
+      'WORKSPACE_ROOT_RESOLUTION_FAILED',
+      'package.json',
+      'Repository root could not be resolved while validating workspace links.'
+    ));
+    return paths;
+  }
+  for (const pattern of patterns) {
+    if (typeof pattern !== 'string'
+      || pattern.length === 0
+      || pattern.includes('\0')
+      || isAbsolute(pattern)
+      || normalize(pattern).split('/').includes('..')) {
+      findings.push(error(
+        'WORKSPACE_DECLARATION_INVALID',
+        'package.json',
+        'Root workspace declarations must be non-empty repository-relative glob patterns.'
+      ));
+      continue;
+    }
+    let matches;
+    try {
+      matches = globSync(pattern, { cwd: root, withFileTypes: false });
+    } catch {
+      findings.push(error(
+        'WORKSPACE_DECLARATION_INVALID',
+        'package.json',
+        'Root workspace declaration could not be evaluated.'
+      ));
+      continue;
+    }
+    for (const match of matches) {
+      const normalized = normalize(match).replace(/\/$/u, '');
+      const absolute = resolveWithinRoot(root, normalized);
+      if (!absolute || !existsSync(resolve(absolute, 'package.json'))) continue;
+      let physicalWorkspace;
+      try {
+        physicalWorkspace = realpathSync(absolute);
+      } catch {
+        findings.push(error(
+          'WORKSPACE_PATH_RESOLUTION_FAILED',
+          normalized,
+          'Declared workspace path could not be resolved.'
+        ));
+        continue;
+      }
+      if (!isWithinPath(physicalRoot, physicalWorkspace)) {
+        findings.push(error(
+          'WORKSPACE_PATH_OUTSIDE_REPOSITORY',
+          normalized,
+          'Declared workspace must resolve inside the repository root.'
+        ));
+        continue;
+      }
+      paths.add(foldWindowsPath(normalized));
+    }
+  }
+  return paths;
+}
+
+async function collectArtifactSnapshot(root, policy, findings) {
+  const files = [];
+  const targets = new Map();
+  const artifactInputs = Array.isArray(policy.artifactInputs) ? policy.artifactInputs : [];
+  for (const input of artifactInputs) {
+    if (!isRecord(input)) {
+      findings.push(error('RELEASE_ARTIFACT_INPUT_INVALID', RELEASE_POLICY_RELATIVE_PATH, 'artifact input must be an object.'));
+      continue;
+    }
+    const sourcePathFinding = unsafeRelativePathFinding(input.source, 'RELEASE_ARTIFACT_SOURCE_PATH_INVALID');
+    const targetPathFinding = unsafeRelativePathFinding(input.target, 'RELEASE_ARTIFACT_TARGET_PATH_INVALID');
+    if (sourcePathFinding) findings.push(sourcePathFinding);
+    if (targetPathFinding) findings.push(targetPathFinding);
+    if (sourcePathFinding || targetPathFinding) continue;
+    const source = resolveWithinRoot(root, input.source);
+    if (!source || !existsSync(source)) {
+      findings.push(error('RELEASE_ARTIFACT_INPUT_MISSING', input.source, `缺少发行输入 ${input.source}。`));
+      continue;
+    }
+    if (input.kind === 'file') {
+      const stat = lstatSync(source);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        findings.push(error('RELEASE_ARTIFACT_INPUT_INVALID', input.source, '发行输入必须是普通文件。'));
+        continue;
+      }
+      await addArtifactEntry(files, targets, findings, root, source, normalize(input.target));
+      continue;
+    }
+    if (input.kind !== 'directory') {
+      findings.push(error('RELEASE_ARTIFACT_KIND_INVALID', input.source, `未知 artifact kind ${input.kind}。`));
+      continue;
+    }
+    const sourceStat = lstatSync(source);
+    if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) {
+      findings.push(error('RELEASE_ARTIFACT_INPUT_INVALID', input.source, 'directory artifact input must be a regular directory.'));
+      continue;
+    }
+    const excludes = new Set();
+    const excludedPaths = Array.isArray(input.exclude) ? input.exclude : [];
+    for (const excludedPath of excludedPaths) {
+      const excludeFinding = unsafeRelativePathFinding(excludedPath, 'RELEASE_ARTIFACT_EXCLUDE_PATH_INVALID');
+      if (excludeFinding) findings.push(excludeFinding);
+      else excludes.add(normalize(excludedPath));
+    }
+    const walked = walkRegularFiles(root, source, findings);
+    for (const file of walked) {
+      const local = normalize(relative(source, file));
+      if (excludes.has(local)) continue;
+      await addArtifactEntry(files, targets, findings, root, file, normalize(join(input.target, local)));
+    }
+  }
+  files.sort((left, right) => compareText(left.path, right.path));
+  if (files.length === 0) {
+    findings.push(error('RELEASE_ARTIFACT_SET_EMPTY', 'apps/desktop/out', '发行内容集合为空。'));
+  }
+  const aggregateSha256 = sha256Text(files.map((item) => `${item.path}\0${item.size}\0${item.sha256}`).join('\n'));
+  return {
+    fileCount: files.length,
+    byteCount: files.reduce((total, item) => total + item.size, 0),
+    aggregateSha256,
+    files
+  };
+}
+
+async function addArtifactEntry(files, targets, findings, root, source, target) {
+  const forbiddenTarget = forbiddenPathFinding(target, 'artifact-target');
+  if (forbiddenTarget) {
+    findings.push(forbiddenTarget);
+    return;
+  }
+  const foldedTarget = target.toLowerCase();
+  const existing = targets.get(foldedTarget);
+  if (existing) {
+    findings.push(error(
+      'RELEASE_ARTIFACT_TARGET_CONFLICT',
+      target,
+      `artifact target conflicts on Windows with ${existing}.`
+    ));
+    return;
+  }
+  targets.set(foldedTarget, target);
+  files.push(await artifactEntry(root, source, target));
+}
+
+async function artifactEntry(root, source, target) {
+  const stat = lstatSync(source);
+  return {
+    path: target,
+    sourcePath: normalize(relative(root, source)),
+    size: stat.size,
+    sha256: await sha256File(source)
+  };
+}
+
+function walkRegularFiles(root, directory, findings) {
+  const result = [];
+  const entries = readdirSync(directory, { withFileTypes: true })
+    .sort((left, right) => compareText(left.name, right.name));
+  for (const entry of entries) {
+    const path = join(directory, entry.name);
+    const rel = normalize(relative(root, path));
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      findings.push(error('RELEASE_SYMLINK_FORBIDDEN', rel, '发行输入不得包含 symlink/junction。'));
+      continue;
+    }
+    if (stat.isDirectory()) result.push(...walkRegularFiles(root, path, findings));
+    else if (stat.isFile()) result.push(path);
+  }
+  return result;
+}
+
+async function auditPaths(root, paths, scope) {
+  const findings = [];
+  for (const relativePath of [...new Set(paths.map(normalize))].sort(compareText)) {
+    const pathFinding = forbiddenPathFinding(relativePath, scope);
+    if (pathFinding) findings.push(pathFinding);
+    const absolute = resolveWithinRoot(root, relativePath);
+    if (!absolute || !existsSync(absolute)) continue;
+    const stat = lstatSync(absolute);
+    if (!stat.isFile()) continue;
+    try {
+      const codes = await scanSecretCodes(absolute);
+      for (const code of codes) {
+        findings.push(error(code, relativePath, `在 ${scope} 文件中发现高置信凭据模式。`));
+      }
+    } catch {
+      findings.push(error(
+        'RELEASE_CONTENT_SCAN_FAILED',
+        relativePath,
+        `无法扫描 ${scope} 文件内容。`
+      ));
+    }
+  }
+  return findings;
+}
+
+function auditTargetPaths(paths, scope) {
+  const findings = [];
+  for (const path of [...new Set(paths.map(normalize))].sort(compareText)) {
+    const pathFinding = forbiddenPathFinding(path, scope);
+    if (pathFinding) findings.push(pathFinding);
+  }
+  return findings;
+}
+
+async function scanSecretCodes(path) {
+  const found = new Set();
+  let carry = Buffer.alloc(0);
+  for await (const chunk of createReadStream(path)) {
+    const bytes = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
+    scanDecodedText(bytes.toString('utf8'), found);
+    scanDecodedText(bytes.toString('utf16le'), found);
+    scanDecodedText(bytes.subarray(1).toString('utf16le'), found);
+    scanDecodedText(decodeUtf16Be(bytes), found);
+    scanDecodedText(decodeUtf16Be(bytes.subarray(1)), found);
+    carry = bytes.subarray(Math.max(0, bytes.length - SECRET_SCAN_OVERLAP_BYTES));
+  }
+  return [...found].sort(compareText);
+}
+
+function scanDecodedText(text, found) {
+  for (const item of SECRET_PATTERNS) {
+    if (!found.has(item.code) && item.pattern.test(text)) found.add(item.code);
+  }
+}
+
+function decodeUtf16Be(bytes) {
+  const evenLength = bytes.length - (bytes.length % 2);
+  const swapped = Buffer.allocUnsafe(evenLength);
+  for (let index = 0; index < evenLength; index += 2) {
+    swapped[index] = bytes[index + 1];
+    swapped[index + 1] = bytes[index];
+  }
+  return swapped.toString('utf16le');
+}
+
+function forbiddenPathFinding(path, scope) {
+  const normalized = normalize(path);
+  const lower = normalized.toLowerCase();
+  const segments = lower.split('/');
+  if (segments.includes('mods')
+    || lower.includes('testdata/native-fixtures/')
+    || lower.includes('sekiro shadows die twice/')) {
+    return error('PRIVATE_ASSET_PATH_FORBIDDEN', normalized, `${scope} 内容不得包含真实游戏/Mod/private corpus 路径。`);
+  }
+  const fileName = basename(lower);
+  if (/^oo2core_.*\.dll$/.test(fileName)) {
+    return error('OODLE_RUNTIME_FORBIDDEN', normalized, `${scope} 内容不得包含 Oodle runtime。`);
+  }
+  if (/^(?:\.env(?:\..*)?|id_rsa)$/.test(fileName)
+    || /\.(?:pem|p12|pfx|key)$/.test(fileName)) {
+    return error('CREDENTIAL_FILE_FORBIDDEN', normalized, `${scope} 内容不得包含凭据/私钥文件。`);
+  }
+  return null;
+}
+
+function directLicenseFiles(root, packageDirectory) {
+  if (!existsSync(packageDirectory)) return [];
+  try {
+    return readdirSync(packageDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^(licen[cs]e|copying|notice)(\.|$)/i.test(entry.name))
+      .map((entry) => normalize(relative(root, join(packageDirectory, entry.name))))
+      .sort(compareText);
+  } catch {
+    return [];
+  }
+}
+
+function packageNameFromLockPath(lockPath) {
+  const marker = 'node_modules/';
+  const tail = normalize(lockPath).slice(normalize(lockPath).lastIndexOf(marker) + marker.length);
+  const parts = tail.split('/');
+  return parts[0].startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+}
+
+function resolveWithinRoot(root, relativePath) {
+  const absoluteRoot = resolve(root);
+  const target = resolve(absoluteRoot, relativePath);
+  const prefix = absoluteRoot.endsWith(sep) ? absoluteRoot : `${absoluteRoot}${sep}`;
+  if (target !== absoluteRoot && !target.startsWith(prefix)) return null;
+  return target;
+}
+
+function isWithinPath(root, target) {
+  const foldedRoot = process.platform === 'win32' ? resolve(root).toLowerCase() : resolve(root);
+  const foldedTarget = process.platform === 'win32' ? resolve(target).toLowerCase() : resolve(target);
+  const prefix = foldedRoot.endsWith(sep) ? foldedRoot : `${foldedRoot}${sep}`;
+  return foldedTarget === foldedRoot || foldedTarget.startsWith(prefix);
+}
+
+function unsafeRelativePathFinding(path, code) {
+  if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) {
+    return error(code, RELEASE_POLICY_RELATIVE_PATH, 'artifact path must be a non-empty relative path.');
+  }
+  const slashed = path.replaceAll('\\', '/');
+  const segments = slashed.split('/');
+  const invalid = isAbsolute(path)
+    || slashed.startsWith('/')
+    || /^[A-Za-z]:/.test(slashed)
+    || segments.some((segment) => segment.length === 0
+      || segment === '.'
+      || segment === '..'
+      || /[<>:"|?*]/.test(segment)
+      || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment)
+      || /[ .]$/.test(segment));
+  if (!invalid) return null;
+  return error(code, path, 'artifact path must be a safe relative path without traversal segments.');
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort(compareText).map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sortRecord(record) {
+  return Object.fromEntries(Object.entries(record).sort(([left], [right]) => compareText(left, right)));
+}
+
+function normalize(path) {
+  return String(path).replaceAll('\\', '/').replace(/^\.\//, '');
+}
+
+function foldWindowsPath(path) {
+  return normalize(path).toLowerCase();
+}
+
+function compareText(left, right) {
+  return String(left).localeCompare(String(right), 'en');
+}
+
+function sha256Text(text) {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function sha256File(path) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(path);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', rejectPromise);
+    stream.on('end', () => resolvePromise(hash.digest('hex')));
+  });
+}
+
+function error(code, path, message) {
+  return { severity: 'error', code, path: normalize(path), message };
+}
+
+function warning(code, path, message) {
+  return { severity: 'warning', code, path: normalize(path), message };
+}
+
+function deduplicateFindings(findings) {
+  const seen = new Set();
+  const result = [];
+  for (const item of findings) {
+    const key = `${item.severity}\0${item.code}\0${item.path}\0${item.message}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result.sort((left, right) => compareText(
+    `${left.severity}\0${left.code}\0${left.path}`,
+    `${right.severity}\0${right.code}\0${right.path}`
+  ));
+}

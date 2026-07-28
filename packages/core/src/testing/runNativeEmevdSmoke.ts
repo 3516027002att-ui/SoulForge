@@ -3,9 +3,9 @@
  * DFLT-decompress common.emevd.dcx → correct Sekiro header parse →
  * no-op roundtrip → set_rest_behavior → set_instruction_args → reread.
  */
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import {
@@ -13,6 +13,7 @@ import {
   decodeInstructionArgs,
   mutateInstructionArg
 } from '../emevd/emedfSchema.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 interface EmevdEnvelope {
   sourceHash: string;
@@ -55,7 +56,11 @@ function decompressDfltDcx(source: Buffer): Buffer {
 }
 
 async function main(): Promise<void> {
-  const sourceDcx = resolve(process.argv[2] ?? '../../mods/event/common.emevd.dcx');
+  const sourceDcx = await resolveNativeFixture(
+    process.argv[2],
+    'emevd-primary',
+    '../../mods/event/common.emevd.dcx'
+  );
   const root = await mkdtemp(join(tmpdir(), 'soulforge-native-emevd-'));
   const staging = join(root, 'staging');
   await mkdir(staging, { recursive: true });
@@ -119,6 +124,24 @@ async function main(): Promise<void> {
     const updated = afterRest.data?.events.find((e) => e.id === target.id);
     if (!updated || updated.restBehavior !== nextRest) {
       throw new Error(`restBehavior not updated: ${JSON.stringify(updated)}`);
+    }
+    const rejectedRest = await runBridge({
+      command: 'write-emevd',
+      filePath: emevdPath,
+      allowedRoots: [staging],
+      writableRoots: [staging],
+      timeoutMs: 60_000,
+      commandOptions: {
+        outputPath: join(staging, 'common.invalid-rest.emevd'),
+        expectedDocumentHash: read.data.sourceHash,
+        mutation: 'set_rest_behavior',
+        eventId: target.id,
+        restBehavior: -1
+      }
+    });
+    if (!rejectedRest.diagnostics.some((d) => d.code === 'EMEVD_STAGING_WRITE_FAILED')
+      || rejectedRest.diagnostics.some((d) => d.code === 'EMEVD_STAGING_WRITE_VERIFIED')) {
+      throw new Error(`negative restBehavior was not rejected: ${JSON.stringify(rejectedRest.diagnostics)}`);
     }
 
     // 2) set_instruction_args (equal-length) + EMEDF optional decode
@@ -298,6 +321,7 @@ async function main(): Promise<void> {
       authority: read.data.authority,
       restEventId: target.id,
       restBehavior: nextRest,
+      restRangeRejected: true,
       instructionIndex: sample.index,
       instructionBank: sample.bank,
       instructionId: sample.id,
@@ -309,6 +333,7 @@ async function main(): Promise<void> {
     }, null, 2));
   } finally {
     await disposeBridgeDaemonPool();
+    await rm(root, { recursive: true, force: true });
   }
 }
 

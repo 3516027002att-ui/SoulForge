@@ -11,6 +11,12 @@ import type {
   EmevdSelection,
   EmevdViewId
 } from '@soulforge/shared';
+import {
+  compileEmevdDslMutationProposal,
+  parseEmevdDsl,
+  renderTypedEmevdDsl
+} from '../emevd/emevdDsl.js';
+import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 
 export interface EmevdFourViewState {
   document: EmevdEditorDocument;
@@ -66,27 +72,22 @@ export function createEmevdEditorDocument(input: {
   };
 }
 
-export function renderEmevdDsl(document: EmevdEditorDocument): string {
-  const lines = ['// EMEVD structural DSL (read/write limited to supported mutations)', `$Resource ${document.resourceUri}`];
-  for (const event of document.events) {
-    lines.push(`$Event(${event.eventId}, Rest=${event.restBehavior}, Layer=${event.layer}) {`);
-    for (const instr of event.instructions) {
-      const tag = instr.unknown ? 'unknown' : 'typed';
-      lines.push(`  ${tag} bank=${instr.bank} id=${instr.id} args=${instr.argsBase64 || '""'};`);
-    }
-    lines.push('}');
-  }
-  return lines.join('\n');
+export function renderEmevdDsl(
+  document: EmevdEditorDocument,
+  registry?: EmedfRegistry
+): string {
+  return renderTypedEmevdDsl(document, registry);
 }
 
 export function buildFourViewState(
   document: EmevdEditorDocument,
-  selection: EmevdSelection
+  selection: EmevdSelection,
+  registry?: EmedfRegistry
 ): EmevdFourViewState {
   return {
     document,
     selection,
-    dslText: renderEmevdDsl(document),
+    dslText: renderEmevdDsl(document, registry),
     tableRows: document.events.map((event) => ({
       eventId: event.eventId,
       restBehavior: event.restBehavior,
@@ -130,12 +131,28 @@ export function applyEmevdEditorMutation(
   }
   const events = document.events.map((event) => ({ ...event, instructions: [...event.instructions] }));
   if (mutation.kind === 'emevd_set_rest_behavior') {
+    if (!Number.isInteger(mutation.restBehavior)
+      || mutation.restBehavior < 0
+      || mutation.restBehavior > 0xffff_ffff) {
+      return {
+        ok: false,
+        code: 'EMEVD_REST_BEHAVIOR_OUT_OF_RANGE',
+        message: 'restBehavior 必须是 uint32 范围内的整数。'
+      };
+    }
     const index = events.findIndex((event) => event.eventUri === mutation.eventUri);
     if (index < 0) {
       return { ok: false, code: 'EMEVD_EVENT_NOT_FOUND', message: '找不到目标事件。' };
     }
     events[index] = { ...events[index]!, restBehavior: mutation.restBehavior };
   } else if (mutation.kind === 'emevd_update_id') {
+    if (!Number.isSafeInteger(mutation.newEventId)) {
+      return {
+        ok: false,
+        code: 'EMEVD_EVENT_ID_INVALID',
+        message: '事件 ID 必须是安全整数。'
+      };
+    }
     const index = events.findIndex((event) => event.eventUri === mutation.eventUri);
     if (index < 0) {
       return { ok: false, code: 'EMEVD_EVENT_NOT_FOUND', message: '找不到目标事件。' };
@@ -211,15 +228,15 @@ export function applyEmevdEditorMutation(
   };
 }
 
-/** Parse DSL is intentionally non-authoritative: errors never mutate the document. */
-export function tryParseEmevdDsl(_text: string): {
-  ok: false;
-  code: 'EMEVD_DSL_NON_AUTHORITATIVE';
-  message: string;
-} {
-  return {
-    ok: false,
-    code: 'EMEVD_DSL_NON_AUTHORITATIVE',
-    message: 'DSL 文本仅供显示；结构化 mutation 必须走事件表/属性面板，解析错误不会污染文档。'
-  };
+/** Parsing is read-only; only compileEmevdDslMutationProposal may produce typed proposals. */
+export function tryParseEmevdDsl(text: string): ReturnType<typeof parseEmevdDsl> {
+  return parseEmevdDsl(text);
+}
+
+export function compileEmevdEditorDsl(input: {
+  text: string;
+  document: EmevdEditorDocument;
+  registry: EmedfRegistry;
+}): ReturnType<typeof compileEmevdDslMutationProposal> {
+  return compileEmevdDslMutationProposal(input);
 }

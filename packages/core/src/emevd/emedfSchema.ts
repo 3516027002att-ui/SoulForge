@@ -49,6 +49,12 @@ export type EncodeResult =
   | { ok: true; args: Buffer }
   | { ok: false; code: string; message: string };
 
+export type EmedfArgsValidationResult =
+  | { ok: true }
+  | { ok: false; code: string; message: string };
+
+export type EmedfRegistryValidationResult = EmedfArgsValidationResult;
+
 /** Small built-in fixture covering common bank 2000 / 1000 patterns for smoke. */
 export function createSekiroFixtureEmedf(): EmedfRegistry {
   return {
@@ -96,7 +102,8 @@ export function findInstructionDef(
   bank: number,
   id: number
 ): EmedfInstructionDef | undefined {
-  return registry.instructions.find((item) => item.bank === bank && item.id === id);
+  const matches = registry.instructions.filter((item) => item.bank === bank && item.id === id);
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 /**
@@ -109,6 +116,8 @@ export function decodeInstructionArgs(
   id: number,
   args: Buffer
 ): DecodeResult {
+  const registryValidation = validateEmedfRegistry(registry);
+  if (!registryValidation.ok) return registryValidation;
   const def = findInstructionDef(registry, bank, id);
   if (!def) {
     return {
@@ -117,6 +126,13 @@ export function decodeInstructionArgs(
       message: `无 schema：bank=${bank} id=${id}`
     };
   }
+  return decodeEmedfArgs(def, args);
+}
+
+export function decodeEmedfArgs(
+  def: EmedfInstructionDef,
+  args: Buffer
+): DecodeResult {
   try {
     let offset = 0;
     const decoded: DecodedArg[] = [];
@@ -142,6 +158,8 @@ export function encodeInstructionArgs(
   id: number,
   values: Record<string, number | boolean>
 ): EncodeResult {
+  const registryValidation = validateEmedfRegistry(registry);
+  if (!registryValidation.ok) return registryValidation;
   const def = findInstructionDef(registry, bank, id);
   if (!def) {
     return {
@@ -150,24 +168,23 @@ export function encodeInstructionArgs(
       message: `无 schema：bank=${bank} id=${id}`
     };
   }
+  return encodeEmedfArgs(def, values);
+}
+
+export function encodeEmedfArgs(
+  def: EmedfInstructionDef,
+  values: Record<string, number | boolean>
+): EncodeResult {
+  const validation = validateEmedfArgs(def, values);
+  if (!validation.ok) return validation;
   try {
-    // Worst-case size bound
-    const buf = Buffer.alloc(256);
+    const buf = Buffer.alloc(encodedSize(def.args));
     let offset = 0;
     for (const arg of def.args) {
       offset = align(offset, arg.type);
-      if (!(arg.name in values)) {
-        return {
-          ok: false,
-          code: 'EMEDF_MISSING_ARG',
-          message: `缺少参数 ${arg.name}`
-        };
-      }
       offset = writeArg(buf, offset, arg.type, values[arg.name]!);
     }
-    // Pad to 4 like SoulsFormats PackArgs
-    const padded = Math.ceil(offset / 4) * 4;
-    return { ok: true, args: Buffer.from(buf.subarray(0, padded)) };
+    return { ok: true, args: buf };
   } catch (error) {
     return {
       ok: false,
@@ -190,6 +207,13 @@ export function mutateInstructionArg(
 ): EncodeResult {
   const decoded = decodeInstructionArgs(registry, bank, id, args);
   if (!decoded.ok) return decoded;
+  if (!decoded.args.some((arg) => arg.name === argName)) {
+    return {
+      ok: false,
+      code: 'EMEDF_ARG_NOT_FOUND',
+      message: `schema 中不存在参数 ${argName}`
+    };
+  }
   const map: Record<string, number | boolean> = {};
   for (const arg of decoded.args) map[arg.name] = arg.value;
   map[argName] = value;
@@ -203,6 +227,124 @@ export function mutateInstructionArg(
     };
   }
   return encoded;
+}
+
+export function validateEmedfArgs(
+  def: EmedfInstructionDef,
+  values: Record<string, number | boolean>
+): EmedfArgsValidationResult {
+  const expected = new Set(def.args.map((arg) => arg.name));
+  for (const name of Object.keys(values)) {
+    if (!expected.has(name)) {
+      return {
+        ok: false,
+        code: 'EMEDF_EXTRA_ARG',
+        message: `schema 中不存在参数 ${name}`
+      };
+    }
+  }
+  for (const arg of def.args) {
+    if (!(arg.name in values)) {
+      return {
+        ok: false,
+        code: 'EMEDF_MISSING_ARG',
+        message: `缺少参数 ${arg.name}`
+      };
+    }
+    const value = values[arg.name]!;
+    if (arg.type === 'bool') {
+      if (typeof value !== 'boolean') {
+        return {
+          ok: false,
+          code: 'EMEDF_ARG_TYPE_MISMATCH',
+          message: `参数 ${arg.name} 必须是 bool。`
+        };
+      }
+      continue;
+    }
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return {
+        ok: false,
+        code: 'EMEDF_ARG_TYPE_MISMATCH',
+        message: `参数 ${arg.name} 必须是有限数值。`
+      };
+    }
+    if (arg.type !== 'f32' && !Number.isInteger(value)) {
+      return {
+        ok: false,
+        code: 'EMEDF_ARG_TYPE_MISMATCH',
+        message: `参数 ${arg.name} 必须是整数。`
+      };
+    }
+    const [min, max] = numericRange(arg.type);
+    if (value < min || value > max) {
+      return {
+        ok: false,
+        code: 'EMEDF_ARG_OUT_OF_RANGE',
+        message: `参数 ${arg.name} 超出 ${arg.type} 范围。`
+      };
+    }
+  }
+  return { ok: true };
+}
+
+export function validateEmedfRegistry(
+  registry: EmedfRegistry
+): EmedfRegistryValidationResult {
+  if (!registry || registry.schemaVersion !== 1 || registry.game !== 'sekiro'
+    || !['fixture', 'user-derived', 'imported'].includes(registry.origin)
+    || !Array.isArray(registry.instructions)) {
+    return {
+      ok: false,
+      code: 'EMEDF_REGISTRY_INVALID',
+      message: 'EMEDF registry schemaVersion/game/instructions 无效。'
+    };
+  }
+  const instructionKeys = new Set<string>();
+  const validTypes = new Set<EmedfArgType>([
+    'u8', 's8', 'u16', 's16', 'u32', 's32', 'f32', 'bool'
+  ]);
+  for (const instruction of registry.instructions) {
+    if (!instruction || !Number.isSafeInteger(instruction.bank) || instruction.bank < 0
+      || !Number.isSafeInteger(instruction.id) || instruction.id < 0
+      || typeof instruction.name !== 'string' || !instruction.name.trim()
+      || !Array.isArray(instruction.args)) {
+      return {
+        ok: false,
+        code: 'EMEDF_INSTRUCTION_DEF_INVALID',
+        message: 'EMEDF instruction definition 无效。'
+      };
+    }
+    const key = `${instruction.bank}:${instruction.id}`;
+    if (instructionKeys.has(key)) {
+      return {
+        ok: false,
+        code: 'EMEDF_DUPLICATE_INSTRUCTION',
+        message: `EMEDF instruction 重复：bank=${instruction.bank} id=${instruction.id}`
+      };
+    }
+    instructionKeys.add(key);
+    const argNames = new Set<string>();
+    for (const arg of instruction.args) {
+      if (!arg || typeof arg.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(arg.name)
+        || !validTypes.has(arg.type)) {
+        return {
+          ok: false,
+          code: 'EMEDF_ARG_DEF_INVALID',
+          message: `EMEDF 参数定义无效：bank=${instruction.bank} id=${instruction.id}`
+        };
+      }
+      if (argNames.has(arg.name)) {
+        return {
+          ok: false,
+          code: 'EMEDF_DUPLICATE_ARG',
+          message: `EMEDF 参数名重复：${arg.name}`
+        };
+      }
+      argNames.add(arg.name);
+    }
+  }
+  return { ok: true };
 }
 
 function align(offset: number, type: EmedfArgType): number {
@@ -221,6 +363,40 @@ function alignmentOf(type: EmedfArgType): number {
       return 2;
     default:
       return 4;
+  }
+}
+
+function encodedSize(args: EmedfArgDef[]): number {
+  let offset = 0;
+  for (const arg of args) {
+    offset = align(offset, arg.type) + byteLengthOf(arg.type);
+  }
+  return Math.ceil(offset / 4) * 4;
+}
+
+function byteLengthOf(type: EmedfArgType): number {
+  switch (type) {
+    case 'u8':
+    case 's8':
+    case 'bool':
+      return 1;
+    case 'u16':
+    case 's16':
+      return 2;
+    default:
+      return 4;
+  }
+}
+
+function numericRange(type: Exclude<EmedfArgType, 'bool'>): [number, number] {
+  switch (type) {
+    case 'u8': return [0, 0xff];
+    case 's8': return [-0x80, 0x7f];
+    case 'u16': return [0, 0xffff];
+    case 's16': return [-0x8000, 0x7fff];
+    case 'u32': return [0, 0xffff_ffff];
+    case 's32': return [-0x8000_0000, 0x7fff_ffff];
+    case 'f32': return [-3.4028234663852886e38, 3.4028234663852886e38];
   }
 }
 

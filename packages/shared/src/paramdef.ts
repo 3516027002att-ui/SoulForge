@@ -47,6 +47,7 @@ export interface ParamDefDocument {
   schemaVersion: 1;
   /** Matches PARAM type name (e.g. ACTION_GUIDE_PARAM_ST). */
   typeName: string;
+  /** Native PARAM data version. Package matching treats this as dataVersion. */
   version: number;
   rowDataSize: number;
   fields: ParamFieldDef[];
@@ -63,4 +64,87 @@ export interface ParamFieldValue {
   value: number | string | boolean | null;
   rawHex?: string;
   diagnostic?: string;
+}
+
+/** Lowercase SHA-256 digest with an explicit algorithm prefix. */
+export type ParamMetadataDigest = `sha256:${string}`;
+
+export interface ParamMetadataDefinitionKey {
+  game: string;
+  gameBuild: string;
+  typeName: string;
+  dataVersion: number;
+  rowDataSize: number;
+}
+
+export interface ParamMetadataSource {
+  /** Describes compatibility only; it does not grant authority or redistribution rights. */
+  kind: 'paramdex-compatible' | 'user-supplied' | 'synthetic-fixture';
+  /** Stable repository URL or user-controlled source identifier. */
+  identity: string;
+  /** Immutable `git:<commit>` or `sha256:<digest>` revision. */
+  revision: string;
+  /** Digest of the exact external source payload used to build this package. */
+  contentDigest: ParamMetadataDigest;
+}
+
+export interface ParamMetadataLicense {
+  spdxExpression: string;
+  /** Digest of the exact license text reviewed by the user. */
+  textDigest: ParamMetadataDigest;
+  redistribution: 'external-only' | 'permitted';
+}
+
+export interface ParamMetadataDefinition {
+  key: ParamMetadataDefinitionKey;
+  definitionDigest: ParamMetadataDigest;
+  document: ParamDefDocument;
+}
+
+export interface ParamMetadataPackage {
+  schemaVersion: 1;
+  packageId: string;
+  packageVersion: string;
+  packageDigest: ParamMetadataDigest;
+  source: ParamMetadataSource;
+  license: ParamMetadataLicense;
+  definitions: ParamMetadataDefinition[];
+}
+
+/**
+ * User-owned allowlist. Trust is exact and content-addressed; package metadata
+ * alone never makes an external source trusted.
+ */
+export interface ParamMetadataTrustPolicy {
+  schemaVersion: 1;
+  policyId: string;
+  trustedPackages: Array<{
+    packageId: string;
+    packageVersion: string;
+    packageDigest: ParamMetadataDigest;
+    sourceIdentity: string;
+    sourceRevision: string;
+    sourceContentDigest: ParamMetadataDigest;
+    licenseSpdxExpression: string;
+    licenseTextDigest: ParamMetadataDigest;
+  }>;
+}
+
+export type ParamMetadataOverlayOperation =
+  | { kind: 'set-definition-notes'; value: string }
+  | { kind: 'set-field-display-name'; fieldId: string; value: string }
+  | { kind: 'set-field-description'; fieldId: string; value: string }
+  | { kind: 'set-enum-display-name'; enumId: string; value: string }
+  | { kind: 'set-enum-value-label'; enumId: string; valueId: number; label: string };
+
+/** User overlay operations may change display metadata only. */
+export interface ParamMetadataOverlay {
+  schemaVersion: 1;
+  overlayId: string;
+  overlayVersion: string;
+  origin: 'user';
+  basePackageDigest: ParamMetadataDigest;
+  target: ParamMetadataDefinitionKey;
+  expectedBaseDefinitionDigest: ParamMetadataDigest;
+  operations: ParamMetadataOverlayOperation[];
 }

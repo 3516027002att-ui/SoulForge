@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 import { copyFile, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
@@ -14,6 +14,7 @@ import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 interface FmgEnvelope {
   sourceHash: string;
@@ -32,7 +33,11 @@ interface Bnd4ChildSnapshot {
 }
 
 async function main(): Promise<void> {
-  const sourceMsgbnd = resolve(process.argv[2] ?? '../../mods/msg/zhocn/item.msgbnd.dcx');
+  const sourceMsgbnd = await resolveNativeFixture(
+    process.argv[2],
+    'fmg-primary',
+    '../../mods/msg/zhocn/item.msgbnd.dcx'
+  );
   const root = await mkdtemp(join(tmpdir(), 'soulforge-native-fmg-'));
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');
@@ -189,7 +194,7 @@ async function main(): Promise<void> {
   const container = await runBridge<{ nested?: { entryCount: number } }>({
     command: 'read-dcx-document',
     filePath: sourceMsgbnd,
-    allowedRoots: [resolve('../../mods')],
+    allowedRoots: [dirname(sourceMsgbnd)],
     timeoutMs: 60_000
   });
   const count = container.data?.nested?.entryCount ?? 0;
@@ -198,7 +203,7 @@ async function main(): Promise<void> {
     const snap = await runBridge<Bnd4ChildSnapshot>({
       command: 'snapshot-bnd4-child',
       filePath: sourceMsgbnd,
-      allowedRoots: [resolve('../../mods')],
+      allowedRoots: [dirname(sourceMsgbnd)],
       timeoutMs: 60_000,
       commandOptions: { entryIndex: i }
     });

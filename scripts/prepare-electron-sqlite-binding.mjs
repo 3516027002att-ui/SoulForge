@@ -1,7 +1,11 @@
-import { spawnSync } from 'node:child_process';
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createProcessCancellation,
+  readTimeoutMs,
+  runProcess
+} from './subprocess-control.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const electronVersion = JSON.parse(
@@ -11,6 +15,9 @@ const nativeRoot = join(root, 'apps', 'desktop', '.native');
 const buildRoot = join(nativeRoot, 'electron-rebuild');
 const isolatedModules = join(buildRoot, 'node_modules');
 const sourceModule = join(root, 'node_modules', 'better-sqlite3');
+const betterSqlite3Package = JSON.parse(
+  await readFile(join(sourceModule, 'package.json'), 'utf8')
+);
 const isolatedModule = join(isolatedModules, 'better-sqlite3');
 const isolatedBinding = join(isolatedModule, 'build', 'Release', 'better_sqlite3.node');
 const targetBinding = join(nativeRoot, 'better_sqlite3.node');
@@ -23,9 +30,7 @@ await writeFile(join(buildRoot, 'package.json'), `${JSON.stringify({
   name: 'soulforge-electron-native-build',
   private: true,
   dependencies: {
-    'better-sqlite3': JSON.parse(
-      await readFile(join(sourceModule, 'package.json'), 'utf8')
-    ).version
+    'better-sqlite3': betterSqlite3Package.version
   }
 }, null, 2)}\n`, 'utf8');
 // Keep electron-rebuild's dependency walk inside the isolated copy instead of
@@ -42,14 +47,35 @@ const args = [
   '--which-module', 'better-sqlite3',
   '--sequential'
 ];
-const rebuilt = spawnSync(command, args, {
+const buildEnv = {
+  ...process.env,
+  CL: appendFlag(process.env.CL, '/Brepro'),
+  LINK: appendFlag(process.env.LINK, '/Brepro')
+};
+const rebuildTimeoutMs = readTimeoutMs(
+  'SOULFORGE_SQLITE_REBUILD_TIMEOUT_MS',
+  15 * 60 * 1000
+);
+const cancellation = createProcessCancellation();
+const rebuilt = await runProcess({
+  command,
+  args,
   cwd: buildRoot,
-  stdio: 'inherit',
-  env: process.env
+  env: buildEnv,
+  timeoutMs: rebuildTimeoutMs,
+  signal: cancellation.signal,
+  onStdout: (chunk) => process.stdout.write(chunk),
+  onStderr: (chunk) => process.stderr.write(chunk)
 });
-if (rebuilt.error) throw rebuilt.error;
-if (rebuilt.status !== 0) {
-  throw new Error(`Electron better-sqlite3 rebuild exited with ${rebuilt.status}.`);
+cancellation.dispose();
+if (rebuilt.timedOut) {
+  throw new Error(`Electron better-sqlite3 rebuild timed out after ${rebuilt.timeoutMs}ms; child process tree terminated.`);
+}
+if (rebuilt.cancelled) {
+  throw new Error('Electron better-sqlite3 rebuild cancelled; child process tree terminated.');
+}
+if (rebuilt.code !== 0) {
+  throw new Error(`Electron better-sqlite3 rebuild exited with ${rebuilt.code}.`);
 }
 
 const electronBinding = await readFile(isolatedBinding);
@@ -59,7 +85,7 @@ await writeFile(metadataPath, `${JSON.stringify({
   electronVersion,
   platform: process.platform,
   arch: process.arch,
-  generatedAt: new Date().toISOString()
+  betterSqlite3Version: betterSqlite3Package.version
 }, null, 2)}\n`, 'utf8');
 
 process.stdout.write(`${JSON.stringify({
@@ -74,4 +100,10 @@ function assertInside(parent, child) {
   if (!childRelative || childRelative.startsWith('..') || isAbsolute(childRelative)) {
     throw new Error(`Refusing to clean native build path outside ${parent}.`);
   }
+}
+
+function appendFlag(value, flag) {
+  const current = value?.trim() ?? '';
+  const present = current.split(/\s+/).some((item) => item.toLowerCase() === flag.toLowerCase());
+  return present ? current : `${current}${current ? ' ' : ''}${flag}`;
 }

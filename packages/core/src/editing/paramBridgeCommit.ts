@@ -71,6 +71,8 @@ export async function readParamDocumentViaBridge(input: {
   data?: {
     sourceHash: string;
     typeName: string;
+    /** Native PARAM data version, when supplied by the Bridge envelope. */
+    dataVersion?: number;
     rowCount: number;
     rowDataSize: number;
     rows: Array<{ id: number; dataBase64: string; dataHash: string; name?: string }>;
@@ -81,6 +83,7 @@ export async function readParamDocumentViaBridge(input: {
   const result = await runBridge<{
     sourceHash?: string;
     typeName?: string;
+    dataVersion?: number;
     rowCount?: number;
     rowDataSize?: number;
     rows?: Array<{ id: number; dataBase64: string; dataHash: string; name?: string }>;
@@ -113,6 +116,9 @@ export async function readParamDocumentViaBridge(input: {
     data: {
       sourceHash: result.data.sourceHash,
       typeName: result.data.typeName ?? 'UNKNOWN_PARAM',
+      ...(result.data.dataVersion !== undefined
+        ? { dataVersion: result.data.dataVersion }
+        : {}),
       rowCount: result.data.rowCount ?? rows.length,
       rowDataSize: result.data.rowDataSize ?? 0,
       rows,

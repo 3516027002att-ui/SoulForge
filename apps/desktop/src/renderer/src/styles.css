@@ -981,3 +981,99 @@ pre {
   background: #3a1f1f;
   color: #ff8f8f;
 }
+
+@media (max-width: 900px) {
+  body {
+    min-width: 0;
+    min-height: 100vh;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .top-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .top-bar h1 {
+    font-size: 22px;
+  }
+
+  .top-bar-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .mode-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-inline: 10px;
+  }
+
+  .mode-tabs button {
+    flex: 0 0 auto;
+  }
+
+  .content-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .resource-pane,
+  .viewer-pane,
+  .ai-pane {
+    min-width: 0;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid #282a33;
+  }
+
+  .resource-pane {
+    max-height: 240px;
+    overflow: auto;
+  }
+
+  .viewer-pane,
+  .ai-pane {
+    padding: 12px;
+  }
+
+  .panel-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .editor-msb-scene .row.gap {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .editor-msb-scene .row.gap label,
+  .editor-msb-scene .row.gap input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .editor-msb-scene .row.gap button {
+    grid-column: span 3;
+  }
+
+  .structured-preview-grid,
+  .container-read-grid,
+  .native-inspection-grid,
+  .ai-control-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .status-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+}

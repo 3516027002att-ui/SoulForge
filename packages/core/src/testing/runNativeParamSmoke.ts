@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { copyFile, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
@@ -13,6 +13,7 @@ import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 interface ParamEnvelope {
   sourceHash: string;
@@ -32,7 +33,11 @@ interface Bnd4ChildSnapshot {
 }
 
 async function main(): Promise<void> {
-  const sourceBnd = resolve(process.argv[2] ?? '../../mods/param/gameparam/gameparam.parambnd.dcx');
+  const sourceBnd = await resolveNativeFixture(
+    process.argv[2],
+    'param-primary',
+    '../../mods/param/gameparam/gameparam.parambnd.dcx'
+  );
   const root = await mkdtemp(join(tmpdir(), 'soulforge-native-param-'));
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');
@@ -164,7 +169,7 @@ async function main(): Promise<void> {
   const container = await runBridge<{ nested?: { entryCount: number } }>({
     command: 'read-dcx-document',
     filePath: sourceBnd,
-    allowedRoots: [resolve('../../mods')],
+    allowedRoots: [dirname(sourceBnd)],
     timeoutMs: 120_000
   });
   const count = container.data?.nested?.entryCount ?? 0;
@@ -175,7 +180,7 @@ async function main(): Promise<void> {
     const snap = await runBridge<Bnd4ChildSnapshot>({
       command: 'snapshot-bnd4-child',
       filePath: sourceBnd,
-      allowedRoots: [resolve('../../mods')],
+      allowedRoots: [dirname(sourceBnd)],
       timeoutMs: 120_000,
       commandOptions: { entryIndex: i }
     });

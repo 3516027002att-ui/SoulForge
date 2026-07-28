@@ -42,6 +42,11 @@ jobs:
       - name: Bridge daemon
         run: npm run bridge:verify:daemon
 
+      - name: Bridge recovery harness
+        run: |
+          npm run test:subprocess-control
+          npm run test:bridge-recovery-harness
+
       - name: OpenAI Responses adapter
         run: npm run test:openai-responses
 
@@ -63,8 +68,11 @@ jobs:
       - name: Performance baseline
         run: npm run test:performance-baseline
 
-      - name: Paramdef layout
-        run: npm run test:paramdef-layout
+      - name: PARAM metadata / me3 runtime contracts
+        run: |
+          npm run test:paramdef-layout
+          npm run test:param-metadata-mismatch
+          npm run test:me3-runtime-adapter
 
       - name: EMEVD / FMG / MSB / PARAM IPC contracts
         run: |
@@ -77,22 +85,42 @@ jobs:
           npm run test:flver-candidate
           npm run test:vault-encrypt-contract
 
-      - name: Portable packaging config gate
-        run: npm run test:portable-packaging-gate
-
       - name: Private native / section-28 honest skip
         run: |
           npm run test:private-native-gate
           npm run test:section28-sekiro-gate
 
-      - name: Release content scan
-        run: npm run test:release-content
-
       - name: Build
         run: npm run build
+
+      - name: Release compliance negative fixtures
+        run: |
+          npm run test:release-compliance-fixtures
+          npm run test:portable-packaging-config-fixtures
+
+      - name: Release content / license manifest
+        run: npm run test:release-content
+
+      - name: Reproducible build fingerprint
+        run: npm run test:release-reproducible
+
+      - name: Portable packaging config gate
+        run: npm run test:portable-packaging-gate
+
+      - name: Release corpus registry / editor acceptance harnesses
+        run: |
+          npm run test:release-corpus-registry
+          npm run test:release-editor-acceptance
+
+      - name: Release scope proposal / handoff governance
+        run: |
+          npm run test:release-scope-fixtures
+          npm run test:release-scope-proposal
+          npm run test:handoff-integrity
 
       # Intentionally NOT run in public CI:
       # - test:native-preview / test:real-mod (private mods)
       # - bridge:verify:oodle / native emevd/msb/fmg/param against local mods (private corpus)
       # - signed installer / real Sekiro launch (P7 private gate)
       # - SOULFORGE_PORTABLE_PACK=1 unsigned pack (optional local only)
+      # - test:release-scope strict freeze gate (blocked until explicit user ruling)

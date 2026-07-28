@@ -6,7 +6,7 @@ import { OpenAiResponsesAdapter } from '../model-services/openaiResponsesAdapter
 import { runAgentToolLoop } from '../model-services/agentLoop.js';
 import type { ModelServiceConfig, ToolDefinition } from '../model-services/types.js';
 
-const API_KEY = 'sk-test-responses-fake-key-not-real';
+const API_KEY = 'sk-fake-responses-001';
 
 function startResponsesFake(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
   return new Promise((resolve, reject) => {
