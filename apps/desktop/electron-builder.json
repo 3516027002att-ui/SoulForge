@@ -1,0 +1,56 @@
+{
+  "appId": "com.soulforge.app",
+  "productName": "SoulForge",
+  "copyright": "Copyright (c) SoulForge contributors",
+  "directories": {
+    "output": "release",
+    "buildResources": "build"
+  },
+  "files": [
+    "out/**/*",
+    "!out/release-compliance.json",
+    "package.json",
+    "!**/*.map",
+    "!src/**/*",
+    "!.native/**/*",
+    "!mods/**/*",
+    "!**/oo2core*.dll",
+    "!**/*secret*",
+    "!**/*api*key*"
+  ],
+  "extraResources": [
+    {
+      "from": ".native",
+      "to": "native",
+      "filter": [
+        "better_sqlite3.node",
+        "better_sqlite3.json"
+      ]
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      },
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "SoulForge"
+  },
+  "portable": {
+    "artifactName": "${productName}-${version}-portable.${ext}"
+  },
+  "asar": true,
+  "compression": "normal"
+}

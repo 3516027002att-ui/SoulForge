@@ -85,7 +85,9 @@ export async function mountThreeProxyScene(input: {
   const setDrawList = (list: SceneDrawList): void => {
     // Guard path leakage at render boundary.
     const serialized = JSON.stringify(list);
-    if (/[A-Za-z]:\\/.test(serialized) || serialized.includes('/Users/')) {
+    if (/(?:^|["'\s])(?:[A-Za-z]:[\\/]|\\\\)/.test(serialized)
+      || /file:\/\/{1,3}[A-Za-z]:/i.test(serialized)
+      || /\/(?:Users|home)\//i.test(serialized)) {
       throw new Error('SCENE_ABSOLUTE_PATH_LEAK');
     }
     clearMeshes();

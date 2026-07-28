@@ -4,9 +4,12 @@
  */
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
+import { readMsbDocumentViaBridge } from '../editing/msbBridgeRead.js';
+import { buildMsbSceneManifest } from '../scene/msbSceneManifest.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 interface MsbEnvelope {
   sourceHash: string;
@@ -17,11 +20,66 @@ interface MsbEnvelope {
   eventCount?: number;
   authority: string;
   entityEdit: string;
-  models: Array<{ name: string; sibPath?: string }>;
-  parts: Array<{ name: string; posX: number; posY: number; posZ: number }>;
-  regions?: Array<{ name: string; typeId: number; posX: number; posY: number; posZ: number }>;
-  events?: Array<{ name: string; typeId: number }>;
+  models: Array<{ name: string; offset: number; sibPath?: string; typeId: number }>;
+  parts: Array<{
+    name: string;
+    offset: number;
+    posX: number;
+    posY: number;
+    posZ: number;
+    rotX?: number;
+    scaleX?: number;
+    scaleY?: number;
+    scaleZ?: number;
+  }>;
+  regions?: Array<{ name: string; offset: number; typeId: number; posX: number; posY: number; posZ: number }>;
+  events?: Array<{ name: string; offset: number; typeId: number }>;
   roundTrip?: { semanticIdentical: boolean; byteIdentical: boolean };
+}
+
+function projectNativeScene(envelope: MsbEnvelope) {
+  return buildMsbSceneManifest({
+    sourceUri: 'file://map/m10.msb',
+    sourcePath: 'map/mapstudio/m10.msb',
+    game: 'sekiro',
+    resourceKind: 'map',
+    revision: envelope.sourceHash,
+    models: envelope.models.map((model) => ({
+      name: model.name,
+      nativeOffset: model.offset,
+      typeId: model.typeId
+    })),
+    parts: envelope.parts.map((part) => ({
+      name: part.name,
+      nativeOffset: part.offset,
+      posX: part.posX,
+      posY: part.posY,
+      posZ: part.posZ,
+      ...(part.rotX === undefined ? {} : { rotX: part.rotX }),
+      ...(part.scaleX === undefined ? {} : { scaleX: part.scaleX }),
+      ...(part.scaleY === undefined ? {} : { scaleY: part.scaleY }),
+      ...(part.scaleZ === undefined ? {} : { scaleZ: part.scaleZ })
+    })),
+    regions: (envelope.regions ?? []).map((region) => ({
+      name: region.name,
+      nativeOffset: region.offset,
+      typeId: region.typeId,
+      posX: region.posX,
+      posY: region.posY,
+      posZ: region.posZ
+    })),
+    events: (envelope.events ?? []).map((event) => ({
+      name: event.name,
+      nativeOffset: event.offset,
+      typeId: event.typeId
+    })),
+    sourceCounts: {
+      models: envelope.modelCount,
+      parts: envelope.partCount,
+      regions: envelope.regionCount ?? 0,
+      events: envelope.eventCount ?? 0
+    }
+  });
 }
 
 function decompressDfltDcx(source: Buffer): Buffer {
@@ -42,7 +100,11 @@ function decompressDfltDcx(source: Buffer): Buffer {
 }
 
 async function main(): Promise<void> {
-  const sourceDcx = resolve(process.argv[2] ?? '../../mods/map/mapstudio/m10_00_00_00.msb.dcx');
+  const sourceDcx = await resolveNativeFixture(
+    process.argv[2],
+    'msb-primary',
+    '../../mods/map/mapstudio/m10_00_00_00.msb.dcx'
+  );
   const root = await mkdtemp(join(tmpdir(), 'soulforge-native-msb-'));
   const staging = join(root, 'staging');
   await mkdir(staging, { recursive: true });
@@ -67,6 +129,34 @@ async function main(): Promise<void> {
   }
   if (!read.data.entityEdit.includes('part-transform')) {
     throw new Error(`unexpected entityEdit: ${read.data.entityEdit}`);
+  }
+  const rendererRead = await readMsbDocumentViaBridge({
+    sourcePath: msbPath,
+    allowedRoots: [root],
+    timeoutMs: 120_000,
+    maxModels: 64,
+    maxParts: 64,
+    maxRegions: 64,
+    maxEvents: 64
+  });
+  if (!rendererRead.ok || !rendererRead.data
+    || rendererRead.data.models.length === 0
+    || rendererRead.data.events.length === 0
+    || rendererRead.data.parts.some((item) => item.nativeOffset === undefined)
+    || rendererRead.data.regions.some((item) => item.nativeOffset === undefined)) {
+    throw new Error(`renderer-safe MSB DTO lost entity kinds or native identity: ${JSON.stringify(rendererRead)}`);
+  }
+  const sceneBefore = projectNativeScene(read.data);
+  if (!sceneBefore.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL')) {
+    throw new Error('native MSB preview projection must stay partial while Bridge truncates entity tables');
+  }
+  if (sceneBefore.diagnostics.some((item) => item.code === 'SCENE_IDENTITY_FALLBACK')) {
+    throw new Error('native MSB entities must retain offset-backed identity');
+  }
+  if (!sceneBefore.entities.some((entity) => entity.kind === 'msb-model')
+    || !sceneBefore.entities.some((entity) => entity.kind === 'msb-event')
+    || !sceneBefore.nodes.some((node) => node.kind === 'msb-region')) {
+    throw new Error('native scene projection must include model/part/region/event entities');
   }
 
   const part = read.data.parts[0];
@@ -113,6 +203,13 @@ async function main(): Promise<void> {
   }
   if (after.data?.partCount !== read.data.partCount) {
     throw new Error('part count changed unexpectedly');
+  }
+  if (!after.data) throw new Error('mutated MSB envelope missing');
+  const sceneAfter = projectNativeScene(after.data);
+  const beforePartId = sceneBefore.nodes.find((node) => node.nativeOffset === part.offset)?.id;
+  const afterPartId = sceneAfter.nodes.find((node) => node.nativeOffset === part.offset)?.id;
+  if (!beforePartId || beforePartId !== afterPartId) {
+    throw new Error('part scene identity changed after transform-only mutation');
   }
 
   if ((read.data.regionCount ?? 0) < 1) {
@@ -178,7 +275,16 @@ async function main(): Promise<void> {
       after: { x: updated.posX, y: updated.posY, z: updated.posZ }
     },
     authority: after.data?.authority,
-    entityEdit: read.data.entityEdit
+    entityEdit: read.data.entityEdit,
+    sceneProjection: {
+      authority: sceneBefore.authority,
+      schemaVersion: sceneBefore.schemaVersion,
+      projectedEntities: sceneBefore.entityCount,
+      projectedNodes: sceneBefore.nodeCount,
+      sourceCounts: sceneBefore.sourceCounts,
+      stableIdentityAfterMutation: true,
+      diagnostics: sceneBefore.diagnostics.map((item) => item.code)
+    }
   }, null, 2));
   await disposeBridgeDaemonPool();
 }

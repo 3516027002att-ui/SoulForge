@@ -129,7 +129,7 @@ export class WorkspaceTransaction {
   }
 
   addPatch(patch: PatchIR): { ok: boolean; diagnostics: StructuredDiagnostic[] } {
-    if (this.status !== 'open' && this.status !== 'staged' && this.status !== 'validated') {
+    if (this.status !== 'open') {
       const diagnostic = createDiagnostic({
         severity: 'error',
         code: 'TRANSACTION_FAILED',
@@ -156,11 +156,6 @@ export class WorkspaceTransaction {
       affectedResources: patch.affectedResources,
       diagnostics: validation.diagnostics
     }));
-    // Adding a new patch invalidates prior staging.
-    this.status = 'open';
-    this.staging = undefined;
-    this.stagedPaths = [];
-    this.stagedOpTargets = [];
     return { ok: true, diagnostics: validation.diagnostics };
   }
 
@@ -182,11 +177,20 @@ export class WorkspaceTransaction {
     for (const validator of this.validators) {
       if (!validator.validateBeforeStaging) continue;
       for (const patch of this.patches) {
-        const result = await validator.validateBeforeStaging({
-          patch,
-          operations: patch.operations
-        });
-        beforeDiagnostics.push(...result.diagnostics);
+        try {
+          const result = await validator.validateBeforeStaging({
+            patch,
+            operations: patch.operations
+          });
+          beforeDiagnostics.push(...result.diagnostics);
+        } catch (error) {
+          beforeDiagnostics.push(phaseFailureDiagnostic(
+            'VALIDATOR_BEFORE_STAGING_FAILED',
+            'before_staging',
+            error,
+            { validatorId: validator.validatorId, patchId: patch.patchId }
+          ));
+        }
       }
     }
 
@@ -198,7 +202,22 @@ export class WorkspaceTransaction {
       return { ok: false, diagnostics: beforeDiagnostics };
     }
 
-    const staging = await createContentAddressedStaging(this.stagingBaseDir);
+    let staging: ContentAddressedStaging;
+    try {
+      staging = await createContentAddressedStaging(this.stagingBaseDir);
+    } catch (error) {
+      const diagnostic = phaseFailureDiagnostic(
+        'STAGING_CREATE_FAILED',
+        'stage',
+        error,
+        { transactionId: this.transactionId }
+      );
+      this.status = 'failed';
+      this.failureRecovery = { phase: 'createStaging' };
+      this.diagnostics.push(diagnostic);
+      this.auditFailure([diagnostic]);
+      return { ok: false, diagnostics: [diagnostic] };
+    }
     this.staging = staging;
     const workRoot = stagingWorkRoot(staging);
     const stagedPaths: string[] = [];
@@ -222,11 +241,27 @@ export class WorkspaceTransaction {
     }
 
     for (const { writer, operations } of byWriter.values()) {
-      const result = await writer.applyToStaging({
-        stagingRoot: workRoot,
-        operations,
-        workspaceRoot: this.workspaceRoot
-      });
+      let result;
+      try {
+        result = await writer.applyToStaging({
+          stagingRoot: workRoot,
+          operations,
+          workspaceRoot: this.workspaceRoot
+        });
+      } catch (error) {
+        applyDiagnostics.push(phaseFailureDiagnostic(
+          'WRITER_STAGING_FAILED',
+          'stage',
+          error,
+          { writerId: writer.writerId, operationIds: operations.map((op) => op.id) }
+        ));
+        this.status = 'failed';
+        this.failureRecovery = { phase: 'applyToStaging', writerId: writer.writerId };
+        applyDiagnostics.push(...await this.discardStaging());
+        this.diagnostics.push(...applyDiagnostics);
+        this.auditFailure(applyDiagnostics);
+        return { ok: false, diagnostics: applyDiagnostics };
+      }
       applyDiagnostics.push(...result.diagnostics);
 
       // Prefer explicit writtenTargets; never guess via string includes.
@@ -264,7 +299,9 @@ export class WorkspaceTransaction {
       if (!result.ok || applyDiagnostics.some((item) => item.severity === 'error')) {
         this.status = 'failed';
         this.failureRecovery = { phase: 'applyToStaging', writerId: writer.writerId };
+        applyDiagnostics.push(...await this.discardStaging());
         this.diagnostics.push(...applyDiagnostics);
+        this.auditFailure(applyDiagnostics);
         return { ok: false, diagnostics: applyDiagnostics };
       }
     }
@@ -283,7 +320,9 @@ export class WorkspaceTransaction {
     if (applyDiagnostics.some((item) => item.severity === 'error')) {
       this.status = 'failed';
       this.failureRecovery = { phase: 'applyToStaging', reason: 'missing_mapping' };
+      applyDiagnostics.push(...await this.discardStaging());
       this.diagnostics.push(...applyDiagnostics);
+      this.auditFailure(applyDiagnostics);
       return { ok: false, diagnostics: applyDiagnostics };
     }
 
@@ -319,21 +358,34 @@ export class WorkspaceTransaction {
     for (const validator of this.validators) {
       if (!validator.validateStagedOutput) continue;
       for (const patch of this.patches) {
-        const result = await validator.validateStagedOutput({
-          patch,
-          operations: patch.operations,
-          stagingRoot: this.staging ? stagingWorkRoot(this.staging) : '',
-          stagedPaths: this.stagedPaths
-        });
-        diagnostics.push(...result.diagnostics);
+        try {
+          const result = await validator.validateStagedOutput({
+            patch,
+            operations: patch.operations,
+            stagingRoot: this.staging ? stagingWorkRoot(this.staging) : '',
+            stagedPaths: this.stagedPaths
+          });
+          diagnostics.push(...result.diagnostics);
+        } catch (error) {
+          diagnostics.push(phaseFailureDiagnostic(
+            'VALIDATOR_STAGED_OUTPUT_FAILED',
+            'validate',
+            error,
+            { validatorId: validator.validatorId, patchId: patch.patchId }
+          ));
+        }
       }
     }
 
-    this.diagnostics.push(...diagnostics);
     const ok = diagnostics.every((item) => item.severity !== 'error');
     this.status = ok ? 'validated' : 'failed';
-    if (!ok) this.failureRecovery = { phase: 'validateStagedOutput', stagedPaths: this.stagedPaths };
+    if (!ok) {
+      this.failureRecovery = { phase: 'validateStagedOutput', stagedPaths: this.stagedPaths };
+      diagnostics.push(...await this.discardStaging());
+    }
+    this.diagnostics.push(...diagnostics);
     this.auditValidation(ok, diagnostics);
+    if (!ok) this.auditFailure(diagnostics);
     return { ok, diagnostics };
   }
 
@@ -376,8 +428,11 @@ export class WorkspaceTransaction {
           targetUri: target.op.targetUri,
           details: item.details
         }));
-        this.diagnostics.push(...boundaryDiagnostics);
         this.status = 'failed';
+        this.failureRecovery = { phase: 'commitBoundary' };
+        boundaryDiagnostics.push(...await this.discardStaging());
+        this.diagnostics.push(...boundaryDiagnostics);
+        this.auditFailure(boundaryDiagnostics);
         return {
           ok: false,
           transactionId: this.transactionId,
@@ -396,8 +451,10 @@ export class WorkspaceTransaction {
     }
     if (preCommitHashDiagnostics.some((item) => item.severity === 'error')) {
       this.status = 'failed';
-      this.diagnostics.push(...preCommitHashDiagnostics);
       this.failureRecovery = { phase: 'before_commit_hash_check' };
+      preCommitHashDiagnostics.push(...await this.discardStaging());
+      this.diagnostics.push(...preCommitHashDiagnostics);
+      this.auditFailure(preCommitHashDiagnostics);
       return {
         ok: false,
         transactionId: this.transactionId,
@@ -406,11 +463,32 @@ export class WorkspaceTransaction {
       };
     }
 
-    const restorePoint = await createRestorePoint({
-      sourcePaths: targets.map((item) => item.targetPath),
-      ...(this.backupBaseDir !== undefined ? { baseDir: this.backupBaseDir } : {}),
-      label: `tx-${this.transactionId}`
-    });
+    let restorePoint: RestorePoint;
+    try {
+      restorePoint = await createRestorePoint({
+        sourcePaths: targets.map((item) => item.targetPath),
+        ...(this.backupBaseDir !== undefined ? { baseDir: this.backupBaseDir } : {}),
+        label: `tx-${this.transactionId}`
+      });
+    } catch (error) {
+      const diagnostic = phaseFailureDiagnostic(
+        'BACKUP_CREATE_FAILED',
+        'commit',
+        error,
+        { transactionId: this.transactionId }
+      );
+      this.status = 'failed';
+      this.failureRecovery = { phase: 'backup' };
+      const failureDiagnostics = [diagnostic, ...await this.discardStaging()];
+      this.diagnostics.push(...failureDiagnostics);
+      this.auditFailure(failureDiagnostics);
+      return {
+        ok: false,
+        transactionId: this.transactionId,
+        committedPaths: [],
+        diagnostics: failureDiagnostics
+      };
+    }
     this.restorePoint = restorePoint;
 
     const committedPaths: string[] = [];
@@ -459,7 +537,6 @@ export class WorkspaceTransaction {
           details: { errors: restored.errors, partialCommitted: committedPaths }
         }));
       }
-      this.diagnostics.push(...diagnostics);
       this.status = 'failed';
       this.failureRecovery = {
         phase: 'commit',
@@ -467,6 +544,8 @@ export class WorkspaceTransaction {
         partialCommitted: committedPaths,
         restoreErrors: restored.errors
       };
+      diagnostics.push(...await this.discardStaging());
+      this.diagnostics.push(...diagnostics);
       this.auditLog.append(createAuditEntry({
         transactionId: this.transactionId,
         actor: this.actor,
@@ -484,16 +563,25 @@ export class WorkspaceTransaction {
       };
     }
 
-    // After-commit validators
+    // After-commit validators are the required re-read/re-parse boundary.
     for (const validator of this.validators) {
       if (!validator.validateAfterCommit) continue;
       for (const patch of this.patches) {
-        const result = await validator.validateAfterCommit({
-          patch,
-          operations: patch.operations,
-          committedPaths
-        });
-        diagnostics.push(...result.diagnostics);
+        try {
+          const result = await validator.validateAfterCommit({
+            patch,
+            operations: patch.operations,
+            committedPaths
+          });
+          diagnostics.push(...result.diagnostics);
+        } catch (error) {
+          diagnostics.push(phaseFailureDiagnostic(
+            'VALIDATOR_AFTER_COMMIT_FAILED',
+            're-read',
+            error,
+            { validatorId: validator.validatorId, patchId: patch.patchId }
+          ));
+        }
       }
     }
 
@@ -519,7 +607,6 @@ export class WorkspaceTransaction {
           }
         })
       ];
-      this.diagnostics.push(...failureDiagnostics);
       this.status = 'failed';
       this.failureRecovery = {
         phase: 'after_commit_validation',
@@ -528,6 +615,9 @@ export class WorkspaceTransaction {
         rollbackOk: rolledBack.ok,
         restoredPaths: rolledBack.restoredPaths
       };
+      failureDiagnostics.push(...await this.discardStaging());
+      this.diagnostics.push(...failureDiagnostics);
+      this.auditFailure(failureDiagnostics);
       return {
         ok: false,
         transactionId: this.transactionId,
@@ -540,6 +630,7 @@ export class WorkspaceTransaction {
 
     this.committedPaths = committedPaths;
     this.status = 'committed';
+    diagnostics.push(...await this.discardStaging());
     this.diagnostics.push(...diagnostics);
 
     this.auditLog.append(createAuditEntry({
@@ -561,6 +652,27 @@ export class WorkspaceTransaction {
       diagnostics,
       restorePoint
     };
+  }
+
+  async discardStaging(): Promise<StructuredDiagnostic[]> {
+    if (!this.staging) return [];
+    try {
+      await rm(this.staging.root, { recursive: true, force: true });
+      this.staging = undefined;
+      this.stagedPaths = [];
+      this.stagedOpTargets = [];
+      return [];
+    } catch (error) {
+      return [createDiagnostic({
+        severity: 'warning',
+        code: 'STAGING_CLEANUP_FAILED',
+        message: '暂存目录清理失败。',
+        details: {
+          transactionId: this.transactionId,
+          ...safeErrorDetails(error)
+        }
+      })];
+    }
   }
 
   async rollback(): Promise<TransactionRollbackResult> {
@@ -720,6 +832,42 @@ export class WorkspaceTransaction {
       diagnostics
     }));
   }
+
+  private auditFailure(diagnostics: StructuredDiagnostic[]): void {
+    this.auditLog.append(createAuditEntry({
+      transactionId: this.transactionId,
+      actor: this.actor,
+      eventKind: 'failure_recovery',
+      affectedResources: this.patches.flatMap((patch) => patch.affectedResources),
+      diagnostics,
+      ...(this.failureRecovery ? { details: this.failureRecovery } : {})
+    }));
+  }
+}
+
+function phaseFailureDiagnostic(
+  code: string,
+  phase: string,
+  error: unknown,
+  details: Record<string, unknown> = {}
+): StructuredDiagnostic {
+  return createDiagnostic({
+    severity: 'error',
+    code,
+    message: `${phase} 阶段失败。`,
+    details: { phase, ...details, ...safeErrorDetails(error) }
+  });
+}
+
+function safeErrorDetails(error: unknown): Record<string, unknown> {
+  if (!(error instanceof Error)) return { errorType: typeof error };
+  const systemCode = 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined;
+  return {
+    errorName: error.name,
+    ...(systemCode ? { systemCode } : {})
+  };
 }
 
 class CommitBoundaryError extends Error {

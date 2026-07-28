@@ -4,20 +4,63 @@
  * With env: records presence and runs available native smokes only —
  * does not claim full launch unless an explicit launcher hook exists.
  */
-import { access } from 'node:fs/promises';
+import { access, mkdir, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { spawn } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createProcessCancellation,
+  processSucceeded,
+  readTimeoutMs,
+  runProcess
+} from './subprocess-control.mjs';
+import {
+  resolveSafeScratchRoot,
+  scratchBoundaryFailure
+} from './scratch-boundary.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const scratch =
+const configuredScratch =
   process.env.SOULFORGE_SCRATCH
   ?? resolve(process.env.TEMP ?? '/tmp', 'soulforge-section28-gate');
 const sekiro = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || '';
+const npmCli = process.env.npm_execpath?.trim()
+  || resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+let stepTimeoutMs;
+try {
+  stepTimeoutMs = readTimeoutMs('SOULFORGE_SECTION28_STEP_TIMEOUT_MS', 15 * 60 * 1000);
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    status: 'failed',
+    gate: 'section-28-sekiro-launch-rollback',
+    code: 'SECTION28_TIMEOUT_INVALID',
+    message: error instanceof Error ? error.message : String(error)
+  }, null, 2));
+  process.exit(1);
+}
 
-await mkdir(scratch, { recursive: true });
+let scratch;
+try {
+  scratch = await resolveSafeScratchRoot({
+    scratch: configuredScratch,
+    repositoryRoot: root,
+    protectedRoots: [
+      { label: 'sekiro-game-root', path: sekiro },
+      { label: 'native-fixture-root', path: process.env.SOULFORGE_NATIVE_FIXTURE_ROOT ?? '' },
+      { label: 'mod-workspace-root', path: resolve(root, 'mods') }
+    ]
+  });
+  await mkdir(scratch, { recursive: true });
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    status: 'failed',
+    gate: 'section-28-sekiro-launch-rollback',
+    ...scratchBoundaryFailure(error)
+  }, null, 2));
+  process.exit(1);
+}
 
 const report = {
   ok: true,
@@ -30,19 +73,13 @@ const report = {
   steps: /** @type {Array<Record<string, unknown>>} */ ([])
 };
 
-function run(command, args) {
-  return new Promise((resolvePromise) => {
-    const child = spawn(command, args, {
-      cwd: root,
-      env: process.env,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (c) => { stdout += c.toString(); });
-    child.stderr.on('data', (c) => { stderr += c.toString(); });
-    child.on('close', (code) => resolvePromise({ code: code ?? 1, stdout, stderr }));
+function runNpm(args, signal) {
+  return runProcess({
+    command: process.execPath,
+    args: [npmCli, ...args],
+    cwd: root,
+    timeoutMs: stepTimeoutMs,
+    signal
   });
 }
 
@@ -97,16 +134,28 @@ const smokes = [
   { name: 'bridge:verify:msb', args: ['run', 'bridge:verify:msb'] }
 ];
 let failed = false;
-for (const step of smokes) {
-  const result = await run('npm', step.args);
-  const ok = result.code === 0;
-  if (!ok) failed = true;
-  report.steps.push({
-    name: step.name,
-    ok,
-    code: result.code,
-    stdoutTail: result.stdout.slice(-800)
-  });
+const cancellation = createProcessCancellation();
+try {
+  for (const step of smokes) {
+    const result = await runNpm(step.args, cancellation.signal);
+    const ok = processSucceeded(result);
+    if (!ok) failed = true;
+    report.steps.push({
+      name: step.name,
+      ok,
+      code: result.code,
+      timedOut: result.timedOut,
+      cancelled: result.cancelled,
+      timeoutMs: result.timeoutMs,
+      stdoutTruncated: result.stdoutTruncated,
+      stderrTruncated: result.stderrTruncated,
+      stdoutTail: result.stdout.slice(-800),
+      stderrTail: result.stderr.slice(-800)
+    });
+    if (result.cancelled) break;
+  }
+} finally {
+  cancellation.dispose();
 }
 
 report.status = failed ? 'failed' : 'partial';

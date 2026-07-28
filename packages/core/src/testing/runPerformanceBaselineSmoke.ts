@@ -67,7 +67,11 @@ async function main(): Promise<void> {
     }));
     const t0 = performance.now();
     const manifest = buildMsbSceneManifest({
-      mapResourceUri: 'file://map/perf.msb',
+      sourceUri: 'file://map/perf.msb',
+      sourcePath: 'map/perf.msb',
+      game: 'sekiro',
+      resourceKind: 'map',
+      revision: 'perf-1',
       parts
     });
     const ms = performance.now() - t0;

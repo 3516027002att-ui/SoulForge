@@ -209,7 +209,25 @@ export async function executePatchIrThroughTransaction(
     return { opId, backupRoot: '', changedFiles: [], diagnostics: [stagingJournalError] };
   }
 
-  const staged = await tx.stage();
+  let staged: Awaited<ReturnType<typeof tx.stage>>;
+  try {
+    staged = await tx.stage();
+  } catch (error) {
+    const phaseDiagnostics = [
+      transactionPhaseDiagnostic('TRANSACTION_STAGE_FAILED', 'stage', error),
+      ...(await tx.discardStaging()).map(toLegacyDiagnostic)
+    ];
+    const logDiagnostic = await tryUpdateStatus(store, opId, 'failed', {
+      diagnostics: phaseDiagnostics
+    }, 'stage_exception');
+    await transitionJournal(store, tx.transactionId, 'staging', 'failed', { phase: 'stage', diagnostics: phaseDiagnostics });
+    return {
+      opId,
+      backupRoot: '',
+      changedFiles: [],
+      diagnostics: logDiagnostic ? [...phaseDiagnostics, logDiagnostic] : phaseDiagnostics
+    };
+  }
   if (!staged.ok) {
     const phaseDiagnostics = staged.diagnostics.map(toLegacyDiagnostic);
     const logDiagnostic = await tryUpdateStatus(store, opId, 'failed', {
@@ -229,11 +247,33 @@ export async function executePatchIrThroughTransaction(
     store, tx.transactionId, 'staging', 'validating', { staged: true }
   );
   if (validatingJournalError) {
-    await tryUpdateStatus(store, opId, 'failed', { diagnostics: [validatingJournalError] }, 'journal_validating');
-    return { opId, backupRoot: '', changedFiles: [], diagnostics: [validatingJournalError] };
+    const diagnostics = [
+      validatingJournalError,
+      ...(await tx.discardStaging()).map(toLegacyDiagnostic)
+    ];
+    await tryUpdateStatus(store, opId, 'failed', { diagnostics }, 'journal_validating');
+    return { opId, backupRoot: '', changedFiles: [], diagnostics };
   }
 
-  const validated = await tx.validate();
+  let validated: Awaited<ReturnType<typeof tx.validate>>;
+  try {
+    validated = await tx.validate();
+  } catch (error) {
+    const phaseDiagnostics = [
+      transactionPhaseDiagnostic('TRANSACTION_VALIDATE_FAILED', 'validate', error),
+      ...(await tx.discardStaging()).map(toLegacyDiagnostic)
+    ];
+    const logDiagnostic = await tryUpdateStatus(store, opId, 'failed', {
+      diagnostics: phaseDiagnostics
+    }, 'validate_exception');
+    await transitionJournal(store, tx.transactionId, 'validating', 'failed', { phase: 'validate', diagnostics: phaseDiagnostics });
+    return {
+      opId,
+      backupRoot: '',
+      changedFiles: [],
+      diagnostics: logDiagnostic ? [...phaseDiagnostics, logDiagnostic] : phaseDiagnostics
+    };
+  }
   if (!validated.ok) {
     const phaseDiagnostics = validated.diagnostics.map(toLegacyDiagnostic);
     const logDiagnostic = await tryUpdateStatus(store, opId, 'failed', {
@@ -253,11 +293,33 @@ export async function executePatchIrThroughTransaction(
     store, tx.transactionId, 'validating', 'replacing', { validated: true }
   );
   if (replacingJournalError) {
-    await tryUpdateStatus(store, opId, 'failed', { diagnostics: [replacingJournalError] }, 'journal_replacing');
-    return { opId, backupRoot: '', changedFiles: [], diagnostics: [replacingJournalError] };
+    const diagnostics = [
+      replacingJournalError,
+      ...(await tx.discardStaging()).map(toLegacyDiagnostic)
+    ];
+    await tryUpdateStatus(store, opId, 'failed', { diagnostics }, 'journal_replacing');
+    return { opId, backupRoot: '', changedFiles: [], diagnostics };
   }
 
-  const committed = await tx.commit();
+  let committed: Awaited<ReturnType<typeof tx.commit>>;
+  try {
+    committed = await tx.commit();
+  } catch (error) {
+    const diagnostics = [
+      transactionPhaseDiagnostic('TRANSACTION_COMMIT_FAILED', 'commit', error),
+      ...(await tx.discardStaging()).map(toLegacyDiagnostic)
+    ];
+    await transitionJournal(store, tx.transactionId, 'replacing', 'failed', { phase: 'commit', diagnostics });
+    const logDiagnostic = await tryUpdateStatus(store, opId, 'failed', {
+      diagnostics
+    }, 'commit_exception');
+    return {
+      opId,
+      backupRoot: '',
+      changedFiles: [],
+      diagnostics: logDiagnostic ? [...diagnostics, logDiagnostic] : diagnostics
+    };
+  }
   const diagnostics: Diagnostic[] = committed.diagnostics.map(toLegacyDiagnostic);
 
   if (!committed.ok && committed.recoveryRequired && committed.restorePoint) {
@@ -588,6 +650,25 @@ async function transitionJournal(
       nextPhase
     });
   }
+}
+
+function transactionPhaseDiagnostic(
+  code: string,
+  phase: string,
+  error: unknown
+): Diagnostic {
+  return {
+    severity: 'error',
+    code,
+    message: `${phase} 阶段失败。`,
+    details: {
+      phase,
+      errorName: error instanceof Error ? error.name : typeof error,
+      ...('code' in Object(error) && typeof Object(error).code === 'string'
+        ? { systemCode: Object(error).code }
+        : {})
+    }
+  };
 }
 
 function journalDiagnostic(

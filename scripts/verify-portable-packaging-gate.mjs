@@ -5,21 +5,72 @@
  */
 import { access, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { spawn } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createProcessCancellation,
+  processSucceeded,
+  readTimeoutMs,
+  runProcess
+} from './subprocess-control.mjs';
+import { validatePortableBuilderConfig } from './portable-packaging-config.mjs';
+import {
+  resolveSafeScratchRoot,
+  scratchBoundaryFailure
+} from './scratch-boundary.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const scratch =
+const configuredScratch =
   process.env.SOULFORGE_SCRATCH
   ?? resolve(process.env.TEMP ?? '/tmp', 'soulforge-portable-gate');
-const ymlPath = join(root, 'apps/desktop/electron-builder.yml');
+const builderConfigPath = join(root, 'apps/desktop/electron-builder.json');
+const releasePolicyPath = join(root, 'scripts/release-compliance-policy.json');
 const desktopPkg = join(root, 'apps/desktop/package.json');
-
-await mkdir(scratch, { recursive: true });
+const npmCli = process.env.npm_execpath?.trim()
+  || resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+let packTimeoutMs;
+let scanTimeoutMs;
+try {
+  packTimeoutMs = readTimeoutMs('SOULFORGE_PORTABLE_PACK_TIMEOUT_MS', 15 * 60 * 1000);
+  scanTimeoutMs = readTimeoutMs('SOULFORGE_RELEASE_SCAN_TIMEOUT_MS', 5 * 60 * 1000);
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    status: 'failed',
+    code: 'PORTABLE_TIMEOUT_INVALID',
+    message: error instanceof Error ? error.message : String(error)
+  }, null, 2));
+  process.exit(1);
+}
+let scratch;
+try {
+  scratch = await resolveSafeScratchRoot({
+    scratch: configuredScratch,
+    repositoryRoot: root,
+    protectedRoots: [
+      { label: 'sekiro-game-root', path: process.env.SOULFORGE_SEKIRO_GAME_ROOT ?? '' },
+      { label: 'native-fixture-root', path: process.env.SOULFORGE_NATIVE_FIXTURE_ROOT ?? '' },
+      { label: 'mod-workspace-root', path: resolve(root, 'mods') }
+    ]
+  });
+  await mkdir(scratch, { recursive: true });
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    status: 'failed',
+    gate: 'portable-packaging',
+    ...scratchBoundaryFailure(error)
+  }, null, 2));
+  process.exit(1);
+}
+const cancellation = createProcessCancellation();
 
 const report = {
   ok: true,
+  validationOk: true,
+  completed: false,
+  authority: 'unverified',
+  dryPackStatus: 'not-evaluated',
   gate: 'portable-packaging',
   timestamp: new Date().toISOString(),
   status: 'unknown',
@@ -27,42 +78,41 @@ const report = {
   steps: /** @type {Array<Record<string, unknown>>} */ ([])
 };
 
-function run(command, args, cwd = root) {
-  return new Promise((resolvePromise) => {
-    const child = spawn(command, args, {
-      cwd,
-      env: process.env,
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe']
+function runNpm(args, cwd = root, timeoutMs = scanTimeoutMs) {
+  if (!npmCli) {
+    return Promise.resolve({
+      code: 1,
+      stdout: '',
+      stderr: 'npm_execpath is unavailable; invoke this gate through npm run'
     });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (c) => { stdout += c.toString(); });
-    child.stderr.on('data', (c) => { stderr += c.toString(); });
-    child.on('close', (code) => resolvePromise({ code: code ?? 1, stdout, stderr }));
+  }
+  return runProcess({
+    command: process.execPath,
+    args: [npmCli, ...args],
+    cwd,
+    timeoutMs,
+    signal: cancellation.signal
   });
 }
 
-// 1) Config presence + safety rules
+// 1) Parse the exact config consumed by electron-builder and validate semantics.
 try {
-  await access(ymlPath, constants.F_OK);
-  const yml = await readFile(ymlPath, 'utf8');
-  const checks = [
-    { name: 'has-appId', ok: /appId:\s*\S+/.test(yml) },
-    { name: 'has-portable-or-nsis', ok: /portable|nsis/i.test(yml) },
-    { name: 'excludes-mods', ok: /mods/.test(yml) },
-    { name: 'excludes-oodle', ok: /oo2core|oodle/i.test(yml) },
-    { name: 'no-publish-token', ok: !/GH_TOKEN|GITHUB_TOKEN|API_KEY/i.test(yml) },
-    { name: 'unsigned-comment-or-no-sign', ok: /sign|unsigned|签名/i.test(yml) || !/certificateFile/i.test(yml) }
-  ];
+  await access(builderConfigPath, constants.F_OK);
+  const config = JSON.parse(await readFile(builderConfigPath, 'utf8'));
+  const releasePolicy = JSON.parse(await readFile(releasePolicyPath, 'utf8'));
+  const checks = validatePortableBuilderConfig(config, releasePolicy);
   for (const c of checks) {
     report.steps.push({ name: `config:${c.name}`, ok: c.ok });
     if (!c.ok) report.ok = false;
   }
-  report.steps.push({ name: 'electron-builder-yml', ok: true, path: 'apps/desktop/electron-builder.yml' });
-} catch {
+  report.steps.push({ name: 'electron-builder-config', ok: true, path: 'apps/desktop/electron-builder.json' });
+} catch (error) {
   report.ok = false;
-  report.steps.push({ name: 'electron-builder-yml', ok: false, message: 'missing yml' });
+  report.steps.push({
+    name: 'electron-builder-config',
+    ok: false,
+    message: error instanceof Error ? error.message : String(error)
+  });
 }
 
 // 2) package.json does not force signed publish
@@ -82,32 +132,76 @@ try {
 
   // Optional dry pack only when explicitly requested and builder available
   const wantPack = process.env.SOULFORGE_PORTABLE_PACK === '1';
-  if (wantPack && hasBuilderDep) {
-    const result = await run(
-      'npx',
-      ['electron-builder', '--config', 'electron-builder.yml', '--win', 'portable', '--dir', '--publish', 'never'],
-      join(root, 'apps/desktop')
-    );
+  if (wantPack && !hasBuilderDep) {
+    report.ok = false;
+    report.dryPackStatus = 'failed';
     report.steps.push({
       name: 'portable-dir-pack',
-      ok: result.code === 0,
-      code: result.code,
-      stdoutTail: result.stdout.slice(-1200),
-      stderrTail: result.stderr.slice(-800)
+      ok: false,
+      status: 'failed',
+      reason: 'SOULFORGE_PORTABLE_PACK=1 but electron-builder is unavailable'
     });
-    if (result.code !== 0) report.ok = false;
+  } else if (wantPack) {
+    let builderCli;
+    try {
+      const builderPackage = await import.meta.resolve('electron-builder/package.json');
+      builderCli = join(dirname(fileURLToPath(builderPackage)), 'cli.js');
+      await access(builderCli, constants.F_OK);
+    } catch (error) {
+      report.ok = false;
+      report.dryPackStatus = 'failed';
+      report.steps.push({
+        name: 'portable-dir-pack',
+        ok: false,
+        status: 'failed',
+        reason: 'declared electron-builder CLI cannot be resolved locally',
+        diagnostic: error instanceof Error ? error.message : String(error)
+      });
+    }
+    if (!builderCli) {
+      // The structured failure above is sufficient; never fall back to a network install.
+    } else {
+      const result = await runProcess({
+        command: process.execPath,
+        args: [
+          builderCli,
+          '--config', 'electron-builder.json',
+          '--win', 'portable',
+          '--dir',
+          '--publish', 'never'
+        ],
+        cwd: join(root, 'apps/desktop'),
+        timeoutMs: packTimeoutMs,
+        signal: cancellation.signal
+      });
+      const packPassed = processSucceeded(result);
+      report.dryPackStatus = packPassed ? 'passed' : 'failed';
+      report.steps.push({
+        name: 'portable-dir-pack',
+        ok: packPassed,
+        status: packPassed ? 'passed' : 'failed',
+        code: result.code,
+        timedOut: result.timedOut,
+        cancelled: result.cancelled,
+        timeoutMs: result.timeoutMs,
+        stdoutTail: result.stdout.slice(-1200),
+        stderrTail: result.stderr.slice(-800)
+      });
+      if (!packPassed) report.ok = false;
+    }
   } else {
+    report.dryPackStatus = 'skipped';
     report.steps.push({
       name: 'portable-dir-pack',
-      ok: true,
+      ok: null,
+      status: 'skipped',
       skipped: true,
-      reason: wantPack
-        ? 'electron-builder not available in desktop package'
-        : 'set SOULFORGE_PORTABLE_PACK=1 to run unsigned --dir pack'
+      reason: 'set SOULFORGE_PORTABLE_PACK=1 to run unsigned --dir pack'
     });
   }
 } catch (error) {
   report.ok = false;
+  report.dryPackStatus = 'failed';
   report.steps.push({
     name: 'desktop-package-json',
     ok: false,
@@ -116,21 +210,46 @@ try {
 }
 
 // 3) Release content scan still clean
-const releaseScan = await run('npm', ['run', 'test:release-content']);
+const releaseScan = await runNpm(['run', 'test:release-content']);
 report.steps.push({
   name: 'release-content-scan',
-  ok: releaseScan.code === 0,
+  ok: processSucceeded(releaseScan),
   code: releaseScan.code,
-  stdoutTail: releaseScan.stdout.slice(-600)
+  timedOut: releaseScan.timedOut,
+  cancelled: releaseScan.cancelled,
+  timeoutMs: releaseScan.timeoutMs,
+  stdoutTail: releaseScan.stdout.slice(-600),
+  stderrTail: releaseScan.stderr.slice(-600)
 });
-if (releaseScan.code !== 0) report.ok = false;
+if (!processSucceeded(releaseScan)) report.ok = false;
+if (cancellation.signal.aborted) report.ok = false;
 
 report.status = report.ok ? 'pass-config' : 'failed';
 report.message = report.ok
   ? 'portable 打包配置门禁通过（未签名；未声明可分发发行包）。'
   : 'portable 打包门禁失败。';
+const validationOk = report.ok;
+report.validationOk = validationOk;
+if (!validationOk) {
+  report.ok = false;
+  report.status = 'failed';
+  report.authority = 'unverified';
+  report.message = 'portable packaging gate failed';
+} else if (report.dryPackStatus === 'passed') {
+  report.ok = true;
+  report.status = 'partial';
+  report.authority = 'candidate';
+  report.message = 'configuration, release scan, and unsigned --dir build passed';
+} else {
+  report.ok = null;
+  report.status = 'partial';
+  report.authority = 'partial';
+  report.message = 'configuration and release scan passed; unsigned --dir build was not requested';
+}
+report.nonClaim = 'Unsigned --dir evidence does not prove installer, signing, upgrade, clean-machine, or distribution readiness.';
 
 const outPath = join(scratch, 'portable-packaging-gate.json');
 await writeFile(outPath, JSON.stringify(report, null, 2), 'utf8');
+cancellation.dispose();
 console.log(JSON.stringify({ ...report, reportPath: outPath }, null, 2));
-process.exitCode = report.ok ? 0 : 1;
+process.exitCode = validationOk ? 0 : 1;

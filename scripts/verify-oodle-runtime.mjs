@@ -1,6 +1,8 @@
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const executable = resolve(
@@ -72,14 +74,77 @@ try {
   }
   checks.push('KRAK remains blocked when runtime exports are incompatible');
 
+  let realRuntimeSuccessPath = 'unverified-no-local-sekiro-runtime';
+  const configuredGameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  if (configuredGameRoot) {
+    const probe = invoke('probe-oodle', configuredGameRoot, {
+      SOULFORGE_SEKIRO_GAME_ROOT: configuredGameRoot
+    });
+    requireDiagnostic(probe, 'OODLE_RUNTIME_READY');
+    checks.push('configured Sekiro runtime exposes compatible compress/decompress exports');
+    realRuntimeSuccessPath = 'runtime-ready';
+
+    const configuredKrak = await resolveConfiguredKrakFixture();
+    if (configuredKrak) {
+      const preview = invoke('inspect', configuredKrak, {
+        SOULFORGE_SEKIRO_GAME_ROOT: configuredGameRoot
+      });
+      requireDiagnostic(preview, 'DCX_KRAK_DECOMPRESSED_PREVIEW_READY');
+      checks.push('registered KRAK fixture decompresses with configured Sekiro runtime');
+      realRuntimeSuccessPath = 'krak-decompress-preview-verified';
+    }
+  }
+
   console.log(JSON.stringify({
     ok: true,
-    message: 'Oodle/KRAK 运行库失败关闭验证通过',
+    message: 'Oodle/KRAK 运行库失败关闭与可用成功路径验证通过',
     checks,
-    realRuntimeSuccessPath: 'unverified-no-local-sekiro-runtime'
+    realRuntimeSuccessPath
   }, null, 2));
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+async function resolveConfiguredKrakFixture() {
+  const registryPath = process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim();
+  const fixtureRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim();
+  if (!registryPath || !fixtureRoot) return undefined;
+  const registry = JSON.parse(await readFile(registryPath, 'utf8'));
+  if (registry.schemaVersion !== '1.0.0' || !Array.isArray(registry.fixtures)) {
+    throw new Error('NATIVE_FIXTURE_REGISTRY_INVALID: schemaVersion/fixtures 不符合 1.0.0 契约。');
+  }
+  const matches = registry.fixtures.filter((item) => item.format === 'DCX-KRAK');
+  if (matches.length === 0) return undefined;
+  if (matches.length > 1) {
+    throw new Error('NATIVE_FIXTURE_KRAK_AMBIGUOUS: registry 中 DCX-KRAK fixture 不唯一。');
+  }
+  const fixture = matches[0];
+  if (fixture.game !== 'sekiro'
+    || typeof fixture.fixtureId !== 'string' || !fixture.fixtureId.trim()
+    || typeof fixture.localPath !== 'string' || !fixture.localPath.trim()
+    || !/^[a-f0-9]{64}$/i.test(fixture.sha256 ?? '')) {
+    throw new Error('NATIVE_FIXTURE_KRAK_INVALID: KRAK fixture 元数据不完整。');
+  }
+
+  const root = await realpath(resolve(fixtureRoot));
+  const candidate = isAbsolute(fixture.localPath)
+    ? resolve(fixture.localPath)
+    : resolve(root, fixture.localPath);
+  const path = await realpath(candidate);
+  const relativePath = relative(root, path);
+  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw new Error('NATIVE_FIXTURE_OUTSIDE_ROOT: KRAK fixture 越出 fixture root。');
+  }
+  if (await sha256File(path) !== fixture.sha256.toLowerCase()) {
+    throw new Error('NATIVE_FIXTURE_HASH_MISMATCH: KRAK fixture 注册哈希与文件不一致。');
+  }
+  return path;
+}
+
+async function sha256File(path) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest('hex');
 }
 
 async function gameDirectory(name, includeExecutable = true) {
@@ -90,10 +155,14 @@ async function gameDirectory(name, includeExecutable = true) {
 }
 
 function invoke(command, targetPath, extraEnv = {}) {
+  const env = { ...process.env, ...extraEnv };
+  if (!Object.hasOwn(extraEnv, 'SOULFORGE_SEKIRO_GAME_ROOT')) {
+    delete env.SOULFORGE_SEKIRO_GAME_ROOT;
+  }
   const result = spawnSync(executable, [command, targetPath], {
     encoding: 'utf8',
     windowsHide: true,
-    env: { ...process.env, ...extraEnv }
+    env
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
