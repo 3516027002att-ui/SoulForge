@@ -2,20 +2,64 @@
  * P7 private native gate — runs real native checks when env roots exist,
  * otherwise records an honest skip without claiming V0.5 complete.
  */
-import { spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createProcessCancellation,
+  processSucceeded,
+  readTimeoutMs,
+  runProcess
+} from './subprocess-control.mjs';
+import {
+  resolveSafeScratchRoot,
+  scratchBoundaryFailure
+} from './scratch-boundary.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const scratch =
+const configuredScratch =
   process.env.SOULFORGE_SCRATCH
   ?? resolve(process.env.TEMP ?? '/tmp', 'soulforge-private-native-gate');
 
 const sekiro = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() || '';
 const nativeFixture = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim() || '';
+const npmCli = process.env.npm_execpath?.trim()
+  || resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
+let stepTimeoutMs;
+try {
+  stepTimeoutMs = readTimeoutMs('SOULFORGE_PRIVATE_NATIVE_STEP_TIMEOUT_MS', 15 * 60 * 1000);
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    status: 'failed',
+    gate: 'private-native',
+    code: 'PRIVATE_NATIVE_TIMEOUT_INVALID',
+    message: error instanceof Error ? error.message : String(error)
+  }, null, 2));
+  process.exit(1);
+}
 
-await mkdir(scratch, { recursive: true });
+let scratch;
+try {
+  scratch = await resolveSafeScratchRoot({
+    scratch: configuredScratch,
+    repositoryRoot: root,
+    protectedRoots: [
+      { label: 'sekiro-game-root', path: sekiro },
+      { label: 'native-fixture-root', path: nativeFixture },
+      { label: 'mod-workspace-root', path: resolve(root, 'mods') }
+    ]
+  });
+  await mkdir(scratch, { recursive: true });
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    status: 'failed',
+    gate: 'private-native',
+    ...scratchBoundaryFailure(error)
+  }, null, 2));
+  process.exit(1);
+}
 
 const report = {
   ok: true,
@@ -28,22 +72,16 @@ const report = {
   message: ''
 };
 
-function run(command, args, env = {}) {
-  return new Promise((resolvePromise) => {
-    const child = spawn(command, args, {
-      cwd: root,
-      env: { ...process.env, ...env },
-      shell: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (c) => { stdout += c.toString(); });
-    child.stderr.on('data', (c) => { stderr += c.toString(); });
-    child.on('close', (code) => {
-      resolvePromise({ code: code ?? 1, stdout, stderr });
-    });
+async function runNpm(args, env, signal) {
+  const result = await runProcess({
+    command: process.execPath,
+    args: [npmCli, ...args],
+    cwd: root,
+    env: { ...process.env, ...env },
+    timeoutMs: stepTimeoutMs,
+    signal
   });
+  return { ...result, result: extractLastJsonObject(result.stdout) };
 }
 
 if (!sekiro && !nativeFixture) {
@@ -65,37 +103,92 @@ if (!sekiro && !nativeFixture) {
 
 // When env present: run oodle probe + native preview sample (mods path optional)
 const steps = [
-  { name: 'bridge:verify:oodle', cmd: 'npm', args: ['run', 'bridge:verify:oodle'] },
-  { name: 'bridge:verify:emevd', cmd: 'npm', args: ['run', 'bridge:verify:emevd'] },
-  { name: 'bridge:verify:fmg', cmd: 'npm', args: ['run', 'bridge:verify:fmg'] },
-  { name: 'bridge:verify:param', cmd: 'npm', args: ['run', 'bridge:verify:param'] },
-  { name: 'bridge:verify:msb', cmd: 'npm', args: ['run', 'bridge:verify:msb'] }
+  { name: 'bridge:verify:oodle', args: ['run', 'bridge:verify:oodle'] },
+  { name: 'test:native-writer-failure-matrix', args: ['run', 'test:native-writer-failure-matrix'] },
+  { name: 'bridge:verify:emevd', args: ['run', 'bridge:verify:emevd'] },
+  { name: 'bridge:verify:fmg', args: ['run', 'bridge:verify:fmg'] },
+  { name: 'bridge:verify:param', args: ['run', 'bridge:verify:param'] },
+  { name: 'bridge:verify:msb', args: ['run', 'bridge:verify:msb'] }
 ];
 
 let failed = false;
-for (const step of steps) {
-  const result = await run(step.cmd, step.args, {
-    SOULFORGE_SEKIRO_GAME_ROOT: sekiro,
-    SOULFORGE_NATIVE_FIXTURE_ROOT: nativeFixture
-  });
-  const ok = result.code === 0;
-  if (!ok) failed = true;
-  report.steps.push({
-    name: step.name,
-    ok,
-    code: result.code,
-    stdoutTail: result.stdout.slice(-1500),
-    stderrTail: result.stderr.slice(-800)
-  });
+let partial = false;
+const cancellation = createProcessCancellation();
+try {
+  for (const step of steps) {
+    const result = await runNpm(step.args, {
+      SOULFORGE_SEKIRO_GAME_ROOT: sekiro,
+      SOULFORGE_NATIVE_FIXTURE_ROOT: nativeFixture
+    }, cancellation.signal);
+    const assessed = assessStep(step.name, result);
+    if (!assessed.ok) failed = true;
+    if (assessed.partial) partial = true;
+    report.steps.push({
+      name: step.name,
+      ok: assessed.ok,
+      partial: assessed.partial,
+      code: result.code,
+      timedOut: result.timedOut,
+      cancelled: result.cancelled,
+      timeoutMs: result.timeoutMs,
+      stdoutTruncated: result.stdoutTruncated,
+      stderrTruncated: result.stderrTruncated,
+      semanticStatus: assessed.status,
+      reason: assessed.reason,
+      stdoutTail: result.stdout.slice(-1500),
+      stderrTail: result.stderr.slice(-800)
+    });
+    if (result.cancelled) break;
+  }
+} finally {
+  cancellation.dispose();
 }
 
-report.status = failed ? 'failed' : 'passed';
+report.status = failed ? 'failed' : partial ? 'partial' : 'passed';
 report.ok = !failed;
 report.message = failed
   ? '私有 native 门禁有失败步骤；不得声明 V0.5 全绿。'
-  : '私有 native 门禁步骤通过（仍不等于 section-28 真游戏启动）。';
+  : partial
+    ? '私有 native 门禁可执行步骤完成，但仍含 partial/candidate 覆盖；不得声明 V0.5 全绿。'
+    : '私有 native 门禁步骤通过（仍不等于 section-28 真游戏启动）。';
 
 const outPath = resolve(scratch, 'private-native-gate.json');
 await writeFile(outPath, JSON.stringify(report, null, 2), 'utf8');
 console.log(JSON.stringify({ ...report, reportPath: outPath }, null, 2));
 process.exitCode = failed ? 1 : 0;
+
+function assessStep(name, result) {
+  if (!processSucceeded(result) || !result.result || result.result.ok !== true) {
+    const reason = result.timedOut
+      ? '命令超时并已终止子进程树。'
+      : result.cancelled
+        ? '命令已取消并终止子进程树。'
+        : '命令失败或未返回 ok=true 的结构化结果。';
+    return { ok: false, partial: false, status: 'failed', reason };
+  }
+  if (name === 'bridge:verify:oodle') {
+    const success = result.result.realRuntimeSuccessPath === 'krak-decompress-preview-verified';
+    return success
+      ? { ok: true, partial: false, status: 'passed', reason: '合法 runtime 与注册 KRAK fixture 成功解压。' }
+      : { ok: true, partial: true, status: 'partial', reason: '仅验证失败关闭或 runtime 导出，未验证注册 KRAK 成功解压。' };
+  }
+  if (name === 'bridge:verify:param' && Number(result.result.corpusFailed ?? 0) > 0) {
+    return { ok: true, partial: true, status: 'partial', reason: `PARAM corpus 仍有 ${result.result.corpusFailed} 个 unsupported/failed 样本。` };
+  }
+  const authority = typeof result.result.authority === 'string' ? result.result.authority : '';
+  if (authority === 'candidate' || authority === 'fixture-confirmed' || authority === 'partial') {
+    return { ok: true, partial: true, status: authority, reason: `返回 authority=${authority}，不能算完整 native pass。` };
+  }
+  return { ok: true, partial: false, status: 'passed', reason: '结构化断言通过。' };
+}
+
+function extractLastJsonObject(stdout) {
+  for (let start = stdout.lastIndexOf('{'); start >= 0; start = stdout.lastIndexOf('{', start - 1)) {
+    try {
+      return JSON.parse(stdout.slice(start));
+    } catch {
+      // npm may print non-JSON prefixes; keep searching earlier object starts.
+    }
+  }
+  return undefined;
+}

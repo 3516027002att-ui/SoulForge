@@ -4,6 +4,11 @@ import type {
   ContainerReadSummary,
   Diagnostic,
   MapExport,
+  MsbMapEventLike,
+  MsbModelLike,
+  MsbPartTransformLike,
+  MsbRegionLike,
+  MsbSceneSourceCounts,
   ParamExport,
   ResourceKind,
   ResourceStructuredPreview,
@@ -68,11 +73,11 @@ const WORKSPACE_MODES: Array<{ id: WorkspaceMode; label: string }> = [
 
 /** Demo parts for map-mode proxy scene until Bridge MSB IPC is wired to the renderer. */
 const DEMO_MSB_PARTS = [
-  { name: 'm000010_1077', posX: -18.2, posY: -22.0, posZ: 34.0, rotX: -18, scaleX: 1.2, scaleY: 1.2, scaleZ: 1.2 },
-  { name: 'm000010_1143', posX: -44.5, posY: 45.0, posZ: -61.1, rotX: -48, scaleX: 1, scaleY: 1, scaleZ: 1 },
-  { name: 'm000010_1144', posX: -43.6, posY: 9.3, posZ: -38.3, rotX: -55, scaleX: 1, scaleY: 1, scaleZ: 1 },
-  { name: 'gate_proxy_a', posX: 12, posY: 0, posZ: 8, rotX: 0, scaleX: 2, scaleY: 4, scaleZ: 1 },
-  { name: 'gate_proxy_b', posX: -8, posY: 0, posZ: -14, rotX: 90, scaleX: 1.5, scaleY: 1.5, scaleZ: 1.5 }
+  { name: 'm000010_1077', nativeOffset: 0x1000, posX: -18.2, posY: -22.0, posZ: 34.0, rotX: -18, scaleX: 1.2, scaleY: 1.2, scaleZ: 1.2 },
+  { name: 'm000010_1143', nativeOffset: 0x1348, posX: -44.5, posY: 45.0, posZ: -61.1, rotX: -48, scaleX: 1, scaleY: 1, scaleZ: 1 },
+  { name: 'm000010_1144', nativeOffset: 0x1690, posX: -43.6, posY: 9.3, posZ: -38.3, rotX: -55, scaleX: 1, scaleY: 1, scaleZ: 1 },
+  { name: 'gate_proxy_a', nativeOffset: 0x19d8, posX: 12, posY: 0, posZ: 8, rotX: 0, scaleX: 2, scaleY: 4, scaleZ: 1 },
+  { name: 'gate_proxy_b', nativeOffset: 0x1d20, posX: -8, posY: 0, posZ: -14, rotX: 90, scaleX: 1.5, scaleY: 1.5, scaleZ: 1.5 }
 ];
 
 function hexTextToBase64(hexText: string): string {
@@ -175,14 +180,16 @@ export function App(): ReactElement {
   const [fmgEntries, setFmgEntries] = useState(DEMO_FMG_ENTRIES);
   const [fmgSourceHash, setFmgSourceHash] = useState<string | null>(null);
   const [fmgLive, setFmgLive] = useState(false);
-  const [msbParts, setMsbParts] = useState(DEMO_MSB_PARTS);
-  const [msbRegions, setMsbRegions] = useState<Array<{
-    name: string;
-    typeId: number;
-    posX: number;
-    posY: number;
-    posZ: number;
-  }>>([]);
+  const [msbParts, setMsbParts] = useState<MsbPartTransformLike[]>(DEMO_MSB_PARTS);
+  const [msbModels, setMsbModels] = useState<MsbModelLike[]>([]);
+  const [msbRegions, setMsbRegions] = useState<MsbRegionLike[]>([]);
+  const [msbEvents, setMsbEvents] = useState<MsbMapEventLike[]>([]);
+  const [msbSourceCounts, setMsbSourceCounts] = useState<MsbSceneSourceCounts>({
+    models: 0,
+    parts: DEMO_MSB_PARTS.length,
+    regions: 0,
+    events: 0
+  });
   const [msbLive, setMsbLive] = useState(false);
   const [msbSourceHash, setMsbSourceHash] = useState<string | null>(null);
   const [paramTypeName, setParamTypeName] = useState('ACTION_GUIDE_PARAM_ST');
@@ -338,7 +345,10 @@ export function App(): ReactElement {
         ?? null;
       if (!target || typeof window.soulforge.readMsbDocument !== 'function') {
         setMsbParts(DEMO_MSB_PARTS);
+        setMsbModels([]);
         setMsbRegions([]);
+        setMsbEvents([]);
+        setMsbSourceCounts({ models: 0, parts: DEMO_MSB_PARTS.length, regions: 0, events: 0 });
         setMsbLive(false);
         return;
       }
@@ -348,8 +358,10 @@ export function App(): ReactElement {
           ok?: boolean;
           data?: {
             sourceHash?: string;
+            models?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
             parts?: Array<{
               name: string;
+              nativeOffset?: number;
               posX: number;
               posY: number;
               posZ: number;
@@ -360,26 +372,34 @@ export function App(): ReactElement {
             }>;
             regions?: Array<{
               name: string;
+              nativeOffset?: number;
               typeId: number;
               posX: number;
               posY: number;
               posZ: number;
             }>;
+            events?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
+            modelCount?: number;
             partCount?: number;
             regionCount?: number;
+            eventCount?: number;
             authority?: string;
           } | null;
         };
         if (cancelled) return;
         if (!result?.ok || !result.data?.parts?.length) {
           setMsbParts(DEMO_MSB_PARTS);
+          setMsbModels([]);
           setMsbRegions([]);
+          setMsbEvents([]);
+          setMsbSourceCounts({ models: 0, parts: DEMO_MSB_PARTS.length, regions: 0, events: 0 });
           setMsbLive(false);
           setStatus('MSB 实时读取失败，已回退演示 parts。');
           return;
         }
         setMsbParts(result.data.parts.map((p) => ({
           name: p.name,
+          ...(p.nativeOffset === undefined ? {} : { nativeOffset: p.nativeOffset }),
           posX: p.posX,
           posY: p.posY,
           posZ: p.posZ,
@@ -388,13 +408,30 @@ export function App(): ReactElement {
           scaleY: p.scaleY ?? 1,
           scaleZ: p.scaleZ ?? 1
         })));
+        setMsbModels((result.data.models ?? []).map((model) => ({
+          name: model.name,
+          ...(model.nativeOffset === undefined ? {} : { nativeOffset: model.nativeOffset }),
+          typeId: model.typeId
+        })));
         setMsbRegions((result.data.regions ?? []).map((r) => ({
           name: r.name,
+          ...(r.nativeOffset === undefined ? {} : { nativeOffset: r.nativeOffset }),
           typeId: r.typeId,
           posX: r.posX,
           posY: r.posY,
           posZ: r.posZ
         })));
+        setMsbEvents((result.data.events ?? []).map((event) => ({
+          name: event.name,
+          ...(event.nativeOffset === undefined ? {} : { nativeOffset: event.nativeOffset }),
+          typeId: event.typeId
+        })));
+        setMsbSourceCounts({
+          models: result.data.modelCount ?? result.data.models?.length ?? 0,
+          parts: result.data.partCount ?? result.data.parts.length,
+          regions: result.data.regionCount ?? result.data.regions?.length ?? 0,
+          events: result.data.eventCount ?? result.data.events?.length ?? 0
+        });
         setMsbSourceHash(result.data.sourceHash ?? null);
         setMsbLive(true);
         setStatus(
@@ -404,6 +441,8 @@ export function App(): ReactElement {
         );
       } catch (error) {
         if (cancelled) return;
+        setMsbModels([]);
+        setMsbEvents([]);
         setMsbLive(false);
         setStatus(error instanceof Error ? error.message : 'MSB 读取异常');
       }
@@ -512,6 +551,7 @@ export function App(): ReactElement {
         sourceHash?: string;
         parts?: Array<{
           name: string;
+          nativeOffset?: number;
           posX: number;
           posY: number;
           posZ: number;
@@ -522,16 +562,24 @@ export function App(): ReactElement {
         }>;
         regions?: Array<{
           name: string;
+          nativeOffset?: number;
           typeId: number;
           posX: number;
           posY: number;
           posZ: number;
         }>;
+        models?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
+        events?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
+        modelCount?: number;
+        partCount?: number;
+        regionCount?: number;
+        eventCount?: number;
       } | null;
     };
     if (reload?.ok && reload.data?.parts?.length) {
       setMsbParts(reload.data.parts.map((p) => ({
         name: p.name,
+        ...(p.nativeOffset === undefined ? {} : { nativeOffset: p.nativeOffset }),
         posX: p.posX,
         posY: p.posY,
         posZ: p.posZ,
@@ -542,11 +590,28 @@ export function App(): ReactElement {
       })));
       setMsbRegions((reload.data.regions ?? []).map((r) => ({
         name: r.name,
+        ...(r.nativeOffset === undefined ? {} : { nativeOffset: r.nativeOffset }),
         typeId: r.typeId,
         posX: r.posX,
         posY: r.posY,
         posZ: r.posZ
       })));
+      setMsbModels((reload.data.models ?? []).map((model) => ({
+        name: model.name,
+        ...(model.nativeOffset === undefined ? {} : { nativeOffset: model.nativeOffset }),
+        typeId: model.typeId
+      })));
+      setMsbEvents((reload.data.events ?? []).map((event) => ({
+        name: event.name,
+        ...(event.nativeOffset === undefined ? {} : { nativeOffset: event.nativeOffset }),
+        typeId: event.typeId
+      })));
+      setMsbSourceCounts({
+        models: reload.data.modelCount ?? reload.data.models?.length ?? 0,
+        parts: reload.data.partCount ?? reload.data.parts.length,
+        regions: reload.data.regionCount ?? reload.data.regions?.length ?? 0,
+        events: reload.data.eventCount ?? reload.data.events?.length ?? 0
+      });
       setMsbSourceHash(reload.data.sourceHash ?? null);
       setStatus(`MSB ${label} ${input.partName} 位置已提交并重读。`);
     } else {
@@ -893,11 +958,17 @@ export function App(): ReactElement {
                 {msbLive ? '实时 Bridge MSB parts' : '演示 parts（未选中可解析 MSB 或读取失败）'}
               </p>
               <MsbScenePanel
-                key={`${selectedFile?.sourceUri ?? 'demo'}:${msbLive ? 'live' : 'demo'}:${msbParts.length}:${msbRegions.length}`}
+                key={`${selectedFile?.sourceUri ?? 'demo'}:${msbSourceHash ?? 'demo'}:${msbParts.length}:${msbRegions.length}`}
                 mapResourceUri={selectedFile?.sourceUri ?? 'file://map/preview.msb'}
+                sourcePath={selectedFile?.relativePath ?? 'map/preview.msb'}
+                game="sekiro"
+                revision={msbSourceHash ?? 'demo-v1'}
+                models={msbModels}
                 parts={msbParts}
                 regions={msbRegions}
-                maxNodes={64}
+                events={msbEvents}
+                sourceCounts={msbSourceCounts}
+                maxNodes={2000}
                 writeEnabled={msbLive && Boolean(msbSourceHash) && Boolean(selectedFile)}
                 onPartPositionCommit={(input) => {
                   void commitMsbPosition(input, 'set_part_position');

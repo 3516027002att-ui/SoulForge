@@ -11,6 +11,23 @@ coverage/
 .DS_Store
 Thumbs.db
 
+# Local agent/tool metadata and generated knowledge graphs. Tracked legacy files
+# remain tracked; these rules only prevent new local state from entering commits.
+AGENTS.md
+CLAUDE.md
+.claude/
+.cursor/
+.gitattributes
+graphify-out/
+mcps/
+.playwright-cli/
+output/playwright/
+
+# One-off local generation scratch files.
+scripts/_tmp_*
+scripts/_gen_*.py
+packages/core/src/scene/_inventory_ext.ts.txt
+
 # Electron/app artifacts
 release/
 *.log
@@ -19,8 +36,10 @@ apps/desktop/.native/
 # SoulForge local state
 .soulforge-local/
 
-# Local real mod samples. Never commit game/mod assets.
+# Local real game/mod samples and private fixture evidence. Never commit them.
 mods/
+Sekiro Shadows Die Twice/
+testdata/native-fixtures/
 
 # CodexPro local/runtime state. Keep stable .ai-bridge docs tracked.
 .codexpro/

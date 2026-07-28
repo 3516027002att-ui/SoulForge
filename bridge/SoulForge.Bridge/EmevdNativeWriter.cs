@@ -100,9 +100,7 @@ internal static class EmevdNativeWriter
         if (kind is "add_event")
         {
             var newId = RequiredLong(item, "newEventId");
-            long? rest = null;
-            if (item.TryGetProperty("restBehavior", out var restEl) && restEl.ValueKind == JsonValueKind.Number)
-                rest = restEl.GetInt64();
+            var rest = OptionalUInt32(item, "restBehavior");
             return new EmevdPatch(kind, 0, rest, newId);
         }
 
@@ -120,9 +118,7 @@ internal static class EmevdNativeWriter
         }
 
         var eventIdRequired = RequiredLong(item, "eventId");
-        long? restBehavior = null;
-        if (item.TryGetProperty("restBehavior", out var rb) && rb.ValueKind == JsonValueKind.Number)
-            restBehavior = rb.GetInt64();
+        var restBehavior = OptionalUInt32(item, "restBehavior");
         long? newEventId = null;
         if (item.TryGetProperty("newEventId", out var newEl) && newEl.ValueKind == JsonValueKind.Number)
             newEventId = newEl.GetInt64();
@@ -145,4 +141,13 @@ internal static class EmevdNativeWriter
         => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number
             ? value.GetInt64()
             : throw new InvalidDataException($"options.{field} 是必填整数。");
+
+    private static long? OptionalUInt32(JsonElement options, string field)
+    {
+        if (!options.TryGetProperty(field, out var value)) return null;
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var parsed)
+            || parsed < uint.MinValue || parsed > uint.MaxValue)
+            throw new InvalidDataException($"options.{field} 必须是 uint32 范围内的整数。");
+        return parsed;
+    }
 }

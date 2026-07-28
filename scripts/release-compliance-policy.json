@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "target": "win-x64",
+  "allowedLicenseExpressions": [
+    "MIT",
+    "ISC",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BlueOak-1.0.0",
+    "CC-BY-4.0",
+    "(MIT OR WTFPL)",
+    "(BSD-2-Clause OR MIT OR Apache-2.0)"
+  ],
+  "artifactInputs": [
+    {
+      "kind": "directory",
+      "source": "apps/desktop/out",
+      "target": "out",
+      "exclude": [
+        "release-compliance.json"
+      ]
+    },
+    {
+      "kind": "file",
+      "source": "apps/desktop/package.json",
+      "target": "package.json"
+    },
+    {
+      "kind": "file",
+      "source": "apps/desktop/.native/better_sqlite3.node",
+      "target": "native/better_sqlite3.node"
+    },
+    {
+      "kind": "file",
+      "source": "apps/desktop/.native/better_sqlite3.json",
+      "target": "native/better_sqlite3.json"
+    }
+  ]
+}

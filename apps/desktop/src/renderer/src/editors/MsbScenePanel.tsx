@@ -2,22 +2,24 @@ import { useEffect, useRef, useState, type ReactElement } from 'react';
 import {
   buildMsbSceneManifest,
   buildSceneDrawList,
+  type MsbMapEventLike,
+  type MsbModelLike,
+  type MsbRegionLike,
+  type MsbSceneSourceCounts,
   type PartLike
 } from '../scene/sceneManifestBrowser.js';
 import { mountThreeProxyScene, type ThreeSceneHandle } from '../scene/threeSceneController.js';
 
-export interface MsbRegionLike {
-  name: string;
-  typeId: number;
-  posX: number;
-  posY: number;
-  posZ: number;
-}
-
 export interface MsbScenePanelProps {
   mapResourceUri: string;
+  sourcePath: string;
+  game: string;
+  revision: string;
+  models?: MsbModelLike[];
   parts: PartLike[];
   regions?: MsbRegionLike[];
+  events?: MsbMapEventLike[];
+  sourceCounts?: MsbSceneSourceCounts;
   maxNodes?: number;
   /** When set, enables structured part position nudge commits via parent (Patch Engine path). */
   onPartPositionCommit?: (input: {
@@ -42,7 +44,11 @@ export interface MsbScenePanelProps {
 export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<ThreeSceneHandle | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<{
+    id: string;
+    label: string;
+    kind: 'msb-part' | 'msb-region';
+  } | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<string | null>(null);
   const [status, setStatus] = useState('正在初始化 3D 场景…');
   const [nodeCount, setNodeCount] = useState(0);
@@ -55,8 +61,16 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     if (!host) return;
 
     const manifest = buildMsbSceneManifest({
-      mapResourceUri: props.mapResourceUri,
+      sourceUri: props.mapResourceUri,
+      sourcePath: props.sourcePath,
+      game: props.game,
+      resourceKind: 'map',
+      revision: props.revision,
+      ...(props.models ? { models: props.models } : {}),
       parts: props.parts,
+      regions,
+      ...(props.events ? { events: props.events } : {}),
+      ...(props.sourceCounts ? { sourceCounts: props.sourceCounts } : {}),
       maxNodes: props.maxNodes ?? 2000,
       chunkSize: 512
     });
@@ -66,14 +80,22 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     void mountThreeProxyScene({
       container: host,
       drawList,
-      onSelect: (id) => setSelected(id)
+      onSelect: (id) => {
+        const node = manifest.nodes.find((candidate) => candidate.id === id) ?? null;
+        setSelected(node ? { id: node.id, label: node.label, kind: node.kind } : null);
+        if (node?.kind === 'msb-region') setSelectedRegion(node.label);
+      }
     }).then((handle) => {
       if (cancelled) {
         handle.dispose();
         return;
       }
       handleRef.current = handle;
-      setStatus(`3D 代理场景已加载（${drawList.itemCount} 节点）`);
+      const partial = manifest.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL');
+      setStatus(
+        `3D 代理场景已加载（${drawList.itemCount} 节点 / ${manifest.entityCount} 实体）`
+        + (partial ? ' · Bridge 实体预览为 partial' : '')
+      );
     }).catch((error: unknown) => {
       setStatus(error instanceof Error ? error.message : '3D 场景初始化失败');
     });
@@ -83,15 +105,22 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       handleRef.current?.dispose();
       handleRef.current = null;
     };
-  }, [props.mapResourceUri, props.parts, props.maxNodes]);
+  }, [
+    props.mapResourceUri,
+    props.sourcePath,
+    props.game,
+    props.revision,
+    props.models,
+    props.parts,
+    props.regions,
+    props.events,
+    props.sourceCounts,
+    props.maxNodes
+  ]);
 
   function resolveSelectedPart(): PartLike | null {
-    if (!selected) return null;
-    // Draw ids look like part:index:name — prefer exact name match first.
-    const byName = props.parts.find((p) => p.name === selected);
-    if (byName) return byName;
-    const suffix = selected.includes(':') ? selected.slice(selected.lastIndexOf(':') + 1) : selected;
-    return props.parts.find((p) => p.name === suffix) ?? null;
+    if (selected?.kind !== 'msb-part') return null;
+    return props.parts.find((part) => part.name === selected.label) ?? null;
   }
 
   function commitNudge(): void {
@@ -143,7 +172,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       </header>
       <div ref={hostRef} className="scene-host" style={{ minHeight: 280, background: '#1a1d23' }} />
       <p className="muted">{status}</p>
-      {selected ? <p>已选择 part：{selected}</p> : null}
+      {selected ? <p>已选择 {selected.kind === 'msb-region' ? 'region' : 'part'}：{selected.label}</p> : null}
       <div className="row gap" aria-label="part 位置微调">
         <label>
           ΔX
@@ -174,7 +203,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         </label>
         <button
           type="button"
-          disabled={!selected}
+          disabled={selected?.kind !== 'msb-part'}
           onClick={commitNudge}
         >
           提交 part 位置

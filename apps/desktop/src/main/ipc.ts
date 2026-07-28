@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +34,7 @@ import {
   saveRawReplace,
   saveTextResource,
   scanWorkspace,
+  stageBridgeOutput,
   validateContainer,
   type AiSidebarDraft,
   type AiSidebarDraftRequest,
@@ -75,10 +76,13 @@ let handlersRegistered = false;
 const trustedRendererDocuments = new Map<number, string>();
 const directorySelections = new Map<string, DirectorySelectionRecord>();
 const here = dirname(fileURLToPath(import.meta.url));
+const sqliteNativeBindingPath = app.isPackaged
+  ? join(process.resourcesPath, 'native', 'better_sqlite3.node')
+  : resolve(here, '../../.native/better_sqlite3.node');
 const operationLogUtility = new OperationLogUtilityClient(
   join(here, 'databaseUtility.js'),
   15_000,
-  resolve(here, '../../.native/better_sqlite3.node')
+  sqliteNativeBindingPath
 );
 const modelServiceVault = new ModelServiceCredentialVault(app.getPath('userData'));
 
@@ -213,33 +217,6 @@ function bridgeAllowedRoots(session: WorkspaceSession, stagingRoot?: string): st
     ...(session.layers.baseRoot ? [session.layers.baseRoot] : []),
     ...(stagingRoot ? [stagingRoot] : [])
   ];
-}
-
-async function stageBridgeOutput<T extends { ok: boolean }>(input: {
-  session: WorkspaceSession;
-  storage: ReturnType<typeof durableStoragePaths>;
-  prefix: string;
-  fileName: string;
-  write: (context: {
-    outputPath: string;
-    allowedRoots: string[];
-    writableRoots: string[];
-  }) => Promise<T>;
-}): Promise<{ result: T; bytes?: Buffer }> {
-  await mkdir(input.storage.stagingRoot, { recursive: true });
-  const stagingDirectory = await mkdtemp(join(input.storage.stagingRoot, `${input.prefix}-`));
-  const outputPath = join(stagingDirectory, input.fileName);
-  try {
-    const result = await input.write({
-      outputPath,
-      allowedRoots: bridgeAllowedRoots(input.session, input.storage.stagingRoot),
-      writableRoots: [input.storage.stagingRoot]
-    });
-    if (!result.ok) return { result };
-    return { result, bytes: await readFile(outputPath) };
-  } finally {
-    await rm(stagingDirectory, { recursive: true, force: true });
-  }
 }
 
 function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null {
@@ -850,8 +827,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         ...mutation
       } as Parameters<typeof commitEmevdMutationViaBridge>[0]['mutation'];
       const stagedOutput = await stageBridgeOutput({
-        session: activeSession,
-        storage,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
         prefix: 'emevd',
         fileName: `${basename(file.relativePath)}.mut.emevd`,
         write: (context) => commitEmevdMutationViaBridge({
@@ -867,12 +844,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           timeoutMs: 120_000
         })
       });
-      const staged = stagedOutput.result;
-      if (!staged.ok) {
+      if (!stagedOutput.ok) {
+        const diagnostics = stagedOutput.diagnostics.length > 0
+          ? stagedOutput.diagnostics
+          : stagedOutput.result && 'diagnostics' in stagedOutput.result
+            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
+            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
         return {
           ok: false,
           changedFiles: [],
-          diagnostics: staged.diagnostics.map((d) => ({
+          diagnostics: diagnostics.map((d) => ({
             severity: d.severity as Diagnostic['severity'],
             code: d.code,
             message: d.message,
@@ -880,7 +861,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }))
         };
       }
-      const bytes = stagedOutput.bytes!;
+      const bytes = stagedOutput.bytes;
       const newContentBase64 = bytes.toString('base64');
       const operationLog = await ensureActiveOperationLog(activeSession);
       let result = await saveRawReplace({
@@ -995,8 +976,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           ? { kind: 'delete' as const, id: mutation.id }
           : { kind: 'upsert' as const, id: mutation.id, text: mutation.text ?? '' };
       const stagedOutput = await stageBridgeOutput({
-        session: activeSession,
-        storage,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
         prefix: 'fmg',
         fileName: `${basename(file.relativePath)}.mut.fmg`,
         write: (context) => commitFmgMutationViaBridge({
@@ -1008,12 +989,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           mutation: bridgeMutation
         })
       });
-      const staged = stagedOutput.result;
-      if (!staged.ok) {
+      if (!stagedOutput.ok) {
+        const diagnostics = stagedOutput.diagnostics.length > 0
+          ? stagedOutput.diagnostics
+          : stagedOutput.result && 'diagnostics' in stagedOutput.result
+            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
+            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
         return {
           ok: false,
           changedFiles: [],
-          diagnostics: staged.diagnostics.map((d) => ({
+          diagnostics: diagnostics.map((d) => ({
             severity: d.severity as Diagnostic['severity'],
             code: d.code,
             message: d.message,
@@ -1021,7 +1006,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }))
         };
       }
-      const bytes = stagedOutput.bytes!;
+      const bytes = stagedOutput.bytes;
       const operationLog = await ensureActiveOperationLog(activeSession);
       let result = await saveRawReplace({
         file,
@@ -1075,7 +1060,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         ? bridgeAllowedRoots(activeSession)
         : [dirname(file.absolutePath)],
       maxParts: 256,
-      maxRegions: 128
+      maxRegions: 128,
+      maxModels: 128,
+      maxEvents: 128
     });
     return sanitizeRendererValue({
       ok: result.ok,
@@ -1089,8 +1076,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             partCount: result.data.partCount,
             regionCount: result.data.regionCount,
             eventCount: result.data.eventCount,
+            models: result.data.models,
             parts: result.data.parts,
             regions: result.data.regions,
+            events: result.data.events,
             authority: result.data.authority,
             entityEdit: result.data.entityEdit
           }
@@ -1134,8 +1123,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       if (gameBlocked) return gameBlocked;
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       const stagedOutput = await stageBridgeOutput({
-        session: activeSession,
-        storage,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
         prefix: 'msb',
         fileName: `${basename(file.relativePath)}.mut.msb`,
         write: (context) => commitMsbMutationViaBridge({
@@ -1147,12 +1136,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           mutation
         })
       });
-      const staged = stagedOutput.result;
-      if (!staged.ok) {
+      if (!stagedOutput.ok) {
+        const diagnostics = stagedOutput.diagnostics.length > 0
+          ? stagedOutput.diagnostics
+          : stagedOutput.result && 'diagnostics' in stagedOutput.result
+            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
+            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
         return {
           ok: false,
           changedFiles: [],
-          diagnostics: staged.diagnostics.map((d) => ({
+          diagnostics: diagnostics.map((d) => ({
             severity: d.severity as Diagnostic['severity'],
             code: d.code,
             message: d.message,
@@ -1160,7 +1153,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }))
         };
       }
-      const bytes = stagedOutput.bytes!;
+      const bytes = stagedOutput.bytes;
       const operationLog = await ensureActiveOperationLog(activeSession);
       let result = await saveRawReplace({
         file,
@@ -1283,8 +1276,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           ? { kind: 'delete' as const, id: mutation.id }
           : { kind: 'upsert' as const, id: mutation.id, dataBase64: mutation.dataBase64! };
       const stagedOutput = await stageBridgeOutput({
-        session: activeSession,
-        storage,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
         prefix: 'param',
         fileName: `${basename(file.relativePath)}.mut.param`,
         write: (context) => commitParamMutationViaBridge({
@@ -1296,12 +1289,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           mutation: bridgeMutation
         })
       });
-      const staged = stagedOutput.result;
-      if (!staged.ok) {
+      if (!stagedOutput.ok) {
+        const diagnostics = stagedOutput.diagnostics.length > 0
+          ? stagedOutput.diagnostics
+          : stagedOutput.result && 'diagnostics' in stagedOutput.result
+            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
+            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
         return {
           ok: false,
           changedFiles: [],
-          diagnostics: staged.diagnostics.map((d) => ({
+          diagnostics: diagnostics.map((d) => ({
             severity: d.severity as Diagnostic['severity'],
             code: d.code,
             message: d.message,
@@ -1309,7 +1306,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }))
         };
       }
-      const bytes = stagedOutput.bytes!;
+      const bytes = stagedOutput.bytes;
       const operationLog = await ensureActiveOperationLog(activeSession);
       let result = await saveRawReplace({
         file,

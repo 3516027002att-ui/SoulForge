@@ -18,6 +18,10 @@ function main(): void {
   );
   const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
   const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8');
+  const bridgeStaging = readFileSync(
+    resolve(root, 'packages/core/src/editing/bridgeStaging.ts'),
+    'utf8'
+  );
 
   if (!msbPanel.includes('onPartPositionCommit') || !msbPanel.includes('提交 part 位置')) {
     throw new Error('MsbScenePanel missing part position commit UI');
@@ -45,10 +49,12 @@ function main(): void {
     throw new Error('native semantic writes must fail closed outside the Sekiro adaptation');
   }
   if (!ipc.includes('stageBridgeOutput')
-    || !ipc.includes('writableRoots: [input.storage.stagingRoot]')
-    || !ipc.includes('rm(stagingDirectory, { recursive: true, force: true })')
-    || ipc.includes('mkdtemp(join(tmpdir()')) {
-    throw new Error('desktop native writers must reuse stable app-data staging roots and clean request directories');
+    || !ipc.includes('stagingRoot: storage.stagingRoot')
+    || !bridgeStaging.includes('writableRoots: [input.stagingRoot]')
+    || !bridgeStaging.includes('rm(stagingDirectory, { recursive: true, force: true })')
+    || ipc.includes('mkdtemp(join(tmpdir()')
+    || bridgeStaging.includes('mkdtemp(join(tmpdir()')) {
+    throw new Error('desktop native writers must reuse core staging with stable app-data roots and cleanup');
   }
   if (!ipc.includes("join(dirname(app.getPath('appData')), 'Local', 'SoulForge')")) {
     throw new Error('workspace databases and recovery data must use LOCALAPPDATA on Windows');

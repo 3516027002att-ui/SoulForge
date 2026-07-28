@@ -21,6 +21,10 @@ export interface SceneAssetRef {
 }
 
 export interface SceneAssetInventory {
+  sourceUri: string;
+  sourcePath: string;
+  game: string;
+  resourceKind: 'map';
   mapResourceUri: string;
   assets: SceneAssetRef[];
   partCount: number;
@@ -37,7 +41,8 @@ export function buildSceneAssetInventory(
   options?: { maxPartsSampled?: number }
 ): SceneAssetInventory {
   const maxParts = options?.maxPartsSampled ?? 10_000;
-  const nodes = manifest.nodes.slice(0, maxParts);
+  const partNodes = manifest.nodes.filter((node) => node.kind === 'msb-part');
+  const nodes = partNodes.slice(0, maxParts);
   const byKey = new Map<string, SceneAssetRef>();
   const diagnostics: StructuredDiagnostic[] = [];
 
@@ -79,17 +84,21 @@ export function buildSceneAssetInventory(
     }));
   }
 
-  if (manifest.nodes.length > maxParts) {
+  if (partNodes.length > maxParts) {
     diagnostics.push(createDiagnostic({
       severity: 'warning',
       code: 'SCENE_ASSET_INVENTORY_TRUNCATED',
-      message: `仅采样前 ${maxParts} 个 part（共 ${manifest.nodes.length}）。`,
+      message: `仅采样前 ${maxParts} 个 part（共 ${partNodes.length}）。`,
       targetUri: manifest.mapResourceUri
     }));
   }
 
   const assets = [...byKey.values()].sort((a, b) => a.assetId.localeCompare(b.assetId));
   return {
+    sourceUri: manifest.sourceUri,
+    sourcePath: manifest.sourcePath,
+    game: manifest.game,
+    resourceKind: manifest.resourceKind,
     mapResourceUri: manifest.mapResourceUri,
     assets,
     partCount: nodes.length,

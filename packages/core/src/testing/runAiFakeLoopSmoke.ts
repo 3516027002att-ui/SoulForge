@@ -14,8 +14,8 @@ import {
 } from '../model-services/agentLoop.js';
 import type { ModelServiceConfig, ToolDefinition } from '../model-services/types.js';
 
-const OPENAI_KEY = 'sk-test-openai-secret-key-do-not-leak-001';
-const ANTHROPIC_KEY = 'sk-ant-test-secret-key-do-not-leak-002';
+const OPENAI_KEY = 'sk-fake-openai-001';
+const ANTHROPIC_KEY = 'sk-ant-fake-002';
 
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -29,7 +29,7 @@ function startOpenAiFake(): Promise<{ baseUrl: string; close: () => Promise<void
     const body = await readBody(req);
     // Credential must arrive via header, never be echoed.
     const auth = req.headers.authorization ?? '';
-    if (!auth.includes('Bearer sk-test-openai')) {
+    if (auth !== `Bearer ${OPENAI_KEY}`) {
       res.writeHead(401).end('unauthorized');
       return;
     }

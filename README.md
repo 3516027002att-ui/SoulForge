@@ -20,7 +20,7 @@ SoulForge 是面向 Sekiro 和 FromSoftware Mod 的 AI 原生、安全、可审�
 
 - [V0.5 实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)
 
-接手实现的 Agent 必须先阅读根目录 [AGENTS.md](AGENTS.md)，再阅读交接书的全局地图、当前技术前沿和相关区域。
+接手实现的 Agent 必须直接阅读交接书的全局地图、当前技术前沿、执行面板和相关区域；需要机械化选点与沉淀流程时，再配合执行手册使用。
 
 ## 长期技术主线
 
@@ -67,7 +67,7 @@ SoulForge 是面向 Sekiro 和 FromSoftware Mod 的 AI 原生、安全、可审�
 
 ## 安全写入
 
-所有修改必须经过：
+所有用户 Mod 资源写入必须经过：
 
 ~~~text
 修改意图
@@ -102,15 +102,20 @@ Bridge 与本机 native smoke 见根 `package.json`。真实游戏或私有 corp
 实施与边界：
 
 - [V0.5 实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)
+- [Agent 执行手册](docs/AGENT_EXECUTION_PLAYBOOK.md)
 - [产品愿景](docs/PRODUCT_VISION.md)
 - [Parser 研究边界](docs/PARSER_RESEARCH.md)
 
 Synthetic 技术规格：
 
-- [FMG 测试样本](docs/V0_3_FMG_SYNTHETIC_FIXTURE.md)
-- [Event/PARAM 测试样本](docs/V0_3_SYNTHETIC_EVENT_PARAM_FIXTURES.md)
-- [MSB 测试样本](docs/V0_3_SYNTHETIC_MAP_FIXTURE.md)
-- [BND 测试样本](docs/V0_3_SYNTHETIC_BND_FIXTURE.md)
+以下 synthetic 规格文档在文档同步基线 `2002076` 中受 Git 跟踪，但在当前工作树中处于删除状态，删除意图尚未确认并形成提交（见交接书第 19 节）：
+
+- `docs/V0_3_FMG_SYNTHETIC_FIXTURE.md`
+- `docs/V0_3_SYNTHETIC_EVENT_PARAM_FIXTURES.md`
+- `docs/V0_3_SYNTHETIC_MAP_FIXTURE.md`
+- `docs/V0_3_SYNTHETIC_BND_FIXTURE.md`
+
+在删除意图被裁定前，不恢复、不覆盖这些路径，也不将其描述为当前可读文档。synthetic authority 以实际 fixture 生成器、Bridge 代码和 `npm run bridge:verify:synthetic` 断言为准，而非上述文档。
 
 开发桥：
 

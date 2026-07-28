@@ -47,13 +47,30 @@ function main(): void {
   if (unknown.ok || unknown.code !== 'EMEDF_UNKNOWN_INSTRUCTION') {
     throw new Error('expected unknown instruction');
   }
+  const unknownArg = mutateInstructionArg(registry, 2000, 0, raw, 'doesNotExist', 1);
+  if (unknownArg.ok || unknownArg.code !== 'EMEDF_ARG_NOT_FOUND') {
+    throw new Error('unknown arg mutation must fail');
+  }
+  const extraArg = encodeInstructionArgs(registry, 2003, 1, { extra: 1 });
+  if (extraArg.ok || extraArg.code !== 'EMEDF_EXTRA_ARG') {
+    throw new Error('extra arg must fail');
+  }
+  const duplicateRegistry = {
+    ...registry,
+    instructions: [...registry.instructions, { ...registry.instructions[0]! }]
+  };
+  const duplicate = decodeInstructionArgs(duplicateRegistry, 2000, 0, raw);
+  if (duplicate.ok || duplicate.code !== 'EMEDF_DUPLICATE_INSTRUCTION') {
+    throw new Error('duplicate instruction registry must fail');
+  }
 
   console.log(JSON.stringify({
     ok: true,
     message: 'EMEDF fixture schema 解码/编码/等长 mutation 验证通过',
     instruction: decoded.def.name,
     argCount: decoded.args.length,
-    mutatedFirst: mutated.args.readInt8(0)
+    mutatedFirst: mutated.args.readInt8(0),
+    strictSchemaValidation: true
   }, null, 2));
 }
 

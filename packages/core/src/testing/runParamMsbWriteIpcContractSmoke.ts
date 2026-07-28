@@ -33,7 +33,7 @@ function main(): void {
     throw new Error('paramBridgeCommit incomplete');
   }
   if (!msb.includes('write-msb')) throw new Error('msbBridgeCommit must use write-msb');
-  if (!portable.includes('electron-builder.yml') || !portable.includes('test:release-content')) {
+  if (!portable.includes('electron-builder.json') || !portable.includes('test:release-content')) {
     throw new Error('portable gate incomplete');
   }
 

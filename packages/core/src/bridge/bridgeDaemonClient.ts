@@ -28,7 +28,7 @@ export interface BridgeDaemonRequestOptions<T = unknown> {
   payload: BridgeRequestPayload;
   resourceUri: string;
   timeoutMs: number;
-  onProgress?: (payload: T) => void;
+  onProgress?: (payload: T) => void | Promise<void>;
   signal?: AbortSignal;
 }
 
@@ -36,7 +36,9 @@ interface PendingRequest {
   terminalKinds: Set<string>;
   resolve: (frame: BridgeDaemonFrame<unknown>) => void;
   reject: (error: Error) => void;
-  onProgress?: (payload: unknown) => void;
+  onProgress?: (payload: unknown) => void | Promise<void>;
+  progressChain: Promise<void>;
+  terminalFrame?: BridgeDaemonFrame<unknown>;
   timer?: ReturnType<typeof setTimeout>;
   abortCleanup?: () => void;
 }
@@ -72,6 +74,11 @@ export class BridgeDaemonClient {
     this.child.stderr.on('data', (chunk: string) => {
       this.stderrTail = `${this.stderrTail}${chunk}`.slice(-16 * 1024);
     });
+    this.child.stdin.on('error', (error) => this.failAll(new BridgeDaemonError(
+      'BRIDGE_STDIN_FAILED',
+      error.message,
+      true
+    )));
     this.child.once('error', (error) => this.failAll(new BridgeDaemonError(
       'BRIDGE_SPAWN_FAILED',
       error.message,
@@ -125,7 +132,7 @@ export class BridgeDaemonClient {
       new Set(['result', 'failed', 'cancelled']),
       options.timeoutMs,
       options.resourceUri,
-      options.onProgress as ((payload: unknown) => void) | undefined,
+      options.onProgress as ((payload: unknown) => void | Promise<void>) | undefined,
       options.signal
     );
     if (frame.kind === 'failed') throw failureFromFrame(frame);
@@ -171,7 +178,7 @@ export class BridgeDaemonClient {
     terminalKinds: Set<string>,
     timeoutMs: number,
     resourceUri?: string,
-    onProgress?: (payload: unknown) => void,
+    onProgress?: (payload: unknown) => void | Promise<void>,
     signal?: AbortSignal
   ): Promise<BridgeDaemonFrame<unknown>> {
     if (this.closed) throw new BridgeDaemonError('BRIDGE_CLIENT_CLOSED', 'Bridge client is closed.');
@@ -180,16 +187,21 @@ export class BridgeDaemonClient {
     }
     const requestId = randomUUID();
     const deadlineUtc = new Date(Date.now() + timeoutMs).toISOString();
+    const writeController = new AbortController();
+    let registeredPending: PendingRequest | undefined;
     const result = new Promise<BridgeDaemonFrame<unknown>>((resolve, reject) => {
       const pending: PendingRequest = {
         terminalKinds,
         resolve,
         reject,
+        progressChain: Promise.resolve(),
         ...(onProgress ? { onProgress } : {})
       };
+      registeredPending = pending;
       pending.timer = setTimeout(() => {
         this.pending.delete(requestId);
         pending.abortCleanup?.();
+        writeController.abort('timeout');
         void this.sendCancel(requestId);
         reject(new BridgeDaemonError(
           'BRIDGE_TIMEOUT',
@@ -201,6 +213,7 @@ export class BridgeDaemonClient {
         const onAbort = () => {
           this.pending.delete(requestId);
           if (pending.timer) clearTimeout(pending.timer);
+          writeController.abort('cancelled');
           void this.sendCancel(requestId);
           reject(new BridgeDaemonError('BRIDGE_REQUEST_CANCELLED', 'Bridge request was cancelled.', true));
         };
@@ -212,16 +225,35 @@ export class BridgeDaemonClient {
       }
       if (!signal?.aborted) this.pending.set(requestId, pending);
     });
+    // A backpressured write can outlive the request timer; keep the inner rejection observed.
+    void result.catch(() => undefined);
 
-    await this.writeFrame({
-      protocolVersion: BRIDGE_PROTOCOL_VERSION,
-      kind,
-      requestId,
-      workspaceSessionId: this.options.workspaceSessionId,
-      deadlineUtc,
-      ...(resourceUri ? { resourceUri } : {}),
-      payload
-    });
+    if (registeredPending === undefined
+      || this.pending.get(requestId) !== registeredPending) return result;
+
+    try {
+      await this.writeFrame({
+        protocolVersion: BRIDGE_PROTOCOL_VERSION,
+        kind,
+        requestId,
+        workspaceSessionId: this.options.workspaceSessionId,
+        deadlineUtc,
+        ...(resourceUri ? { resourceUri } : {}),
+        payload
+      }, writeController.signal);
+    } catch (error) {
+      const pending = this.pending.get(requestId);
+      if (pending !== undefined && pending === registeredPending) {
+        this.pending.delete(requestId);
+        if (pending.timer) clearTimeout(pending.timer);
+        pending.abortCleanup?.();
+        pending.reject(error instanceof Error ? error : new BridgeDaemonError(
+          'BRIDGE_WRITE_FAILED',
+          'Bridge request frame could not be written.',
+          true
+        ));
+      }
+    }
     return result;
   }
 
@@ -237,12 +269,54 @@ export class BridgeDaemonClient {
     }).catch(() => undefined);
   }
 
-  private async writeFrame(frame: BridgeDaemonFrame): Promise<void> {
+  private async writeFrame(frame: BridgeDaemonFrame, signal?: AbortSignal): Promise<void> {
     const line = `${JSON.stringify(frame)}\n`;
     if (Buffer.byteLength(line, 'utf8') > this.negotiatedMaxFrameBytes) {
       throw new BridgeDaemonError('BRIDGE_FRAME_TOO_LARGE', 'Outbound Bridge frame exceeds the negotiated limit.');
     }
-    if (!this.child.stdin.write(line, 'utf8')) await once(this.child.stdin, 'drain');
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        this.child.stdin.off('error', onStdinError);
+        this.child.stdin.off('close', onStdinClose);
+        this.child.off('close', onProcessClose);
+        if (error) reject(error);
+        else resolve();
+      };
+      const writeFailure = (message: string): BridgeDaemonError => new BridgeDaemonError(
+        'BRIDGE_WRITE_FAILED',
+        message,
+        true
+      );
+      const onAbort = (): void => finish(writeFailure('Bridge frame write was cancelled.'));
+      const onStdinError = (error: Error): void => finish(writeFailure(error.message));
+      const onStdinClose = (): void => finish(writeFailure('Bridge stdin closed before the frame was written.'));
+      const onProcessClose = (): void => finish(writeFailure('Bridge process exited before the frame was written.'));
+
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      if (this.closed || !this.child.stdin.writable) {
+        onStdinClose();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.child.stdin.once('error', onStdinError);
+      this.child.stdin.once('close', onStdinClose);
+      this.child.once('close', onProcessClose);
+      try {
+        this.child.stdin.write(line, 'utf8', (error?: Error | null) => {
+          if (error) onStdinError(error);
+          else finish();
+        });
+      } catch (error) {
+        onStdinError(error instanceof Error ? error : writeFailure('Bridge frame write failed.'));
+      }
+    });
   }
 
   private consumeStdout(chunk: string): void {
@@ -292,14 +366,45 @@ export class BridgeDaemonClient {
     const pending = this.pending.get(frame.requestId);
     if (!pending) return;
     if (frame.kind === 'progress') {
-      pending.onProgress?.(frame.payload);
+      if (pending.terminalFrame !== undefined || pending.onProgress === undefined) return;
+      const onProgress = pending.onProgress;
+      pending.progressChain = pending.progressChain.then(() => onProgress(frame.payload));
+      void pending.progressChain.catch(() => {
+        this.failProgressHandler(frame.requestId!, pending);
+      });
       return;
     }
     if (!pending.terminalKinds.has(frame.kind)) return;
-    this.pending.delete(frame.requestId);
+    if (pending.terminalFrame !== undefined) return;
+    pending.terminalFrame = frame;
+    void pending.progressChain.then(
+      () => this.resolvePending(frame.requestId!, pending, frame),
+      () => this.failProgressHandler(frame.requestId!, pending)
+    );
+  }
+
+  private resolvePending(
+    requestId: string,
+    pending: PendingRequest,
+    frame: BridgeDaemonFrame<unknown>
+  ): void {
+    if (this.pending.get(requestId) !== pending) return;
+    this.pending.delete(requestId);
     if (pending.timer) clearTimeout(pending.timer);
     pending.abortCleanup?.();
     pending.resolve(frame);
+  }
+
+  private failProgressHandler(requestId: string, pending: PendingRequest): void {
+    if (this.pending.get(requestId) !== pending) return;
+    this.pending.delete(requestId);
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.abortCleanup?.();
+    if (pending.terminalFrame === undefined) void this.sendCancel(requestId);
+    pending.reject(new BridgeDaemonError(
+      'BRIDGE_PROGRESS_HANDLER_FAILED',
+      'The Bridge progress handler failed while processing a progress frame.'
+    ));
   }
 
   private failAll(error: Error): void {

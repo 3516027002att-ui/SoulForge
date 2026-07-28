@@ -9,9 +9,9 @@ import type {
   EditorKind,
   EditorMutation,
   EditorMutationBatch,
-  EditorMutationKind,
   EditorValidationIssue
 } from '@soulforge/shared';
+import { editorAllowsMutation } from './editorCapabilityContract.js';
 
 export interface OpenEditorDocumentInput {
   editorKind: EditorKind;
@@ -24,16 +24,6 @@ export interface EditorDocumentState extends EditorDocumentRef {
   dirty: boolean;
   lastMutationId?: string;
 }
-
-const ALLOWED: Record<EditorKind, ReadonlySet<EditorMutationKind>> = {
-  hex: new Set(['hex_byte_patch']),
-  fmg: new Set(['fmg_entry_upsert', 'fmg_entry_delete']),
-  param: new Set(['param_row_upsert', 'param_row_delete']),
-  emevd: new Set(['emevd_set_rest_behavior', 'emevd_update_id']),
-  msb: new Set(['msb_set_part_position', 'msb_set_part_transform']),
-  text: new Set(),
-  raw: new Set(['hex_byte_patch'])
-};
 
 export class EditorDocumentStore {
   private readonly documents = new Map<string, EditorDocumentState>();
@@ -105,8 +95,7 @@ export class EditorDocumentStore {
         }]
       };
     }
-    const allowed = ALLOWED[doc.editorKind];
-    if (!allowed.has(mutation.kind)) {
+    if (!editorAllowsMutation(doc.editorKind, mutation.kind)) {
       return {
         ok: false,
         issues: [{

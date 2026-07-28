@@ -1,7 +1,7 @@
 # EMEVD DSL 编译器 Slice A+B 稳定技术规格
 
-> 状态：`fixture-confirmed`；公开 Windows CI 已验证，native 接线仍未完成。  
-> 对应：Issue #6。  
+> 状态：`fixture-confirmed`；公开 Windows CI 已验证，native 接线仍未完成。
+> 对应：Issue #6。
 > 本文只描述稳定编译契约，不另立里程碑或项目进度口径。
 
 ## 目标

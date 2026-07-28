@@ -6,7 +6,11 @@ import { buildSceneAssetInventory } from '../scene/sceneAssetInventory.js';
 
 function main(): void {
   const manifest = buildMsbSceneManifest({
-    mapResourceUri: 'file://map/m10_00_00_00.msb',
+    sourceUri: 'file://map/m10_00_00_00.msb',
+    sourcePath: 'map/m10_00_00_00.msb',
+    game: 'sekiro',
+    resourceKind: 'map',
+    revision: 'fixture-1',
     parts: [
       { name: 'm000010_1077', posX: 1, posY: 2, posZ: 3 },
       { name: 'm000010_1143', posX: 4, posY: 5, posZ: 6 },
@@ -18,7 +22,11 @@ function main(): void {
   // Absolute path leakage guard
   try {
     buildMsbSceneManifest({
-      mapResourceUri: 'file://map/x.msb',
+      sourceUri: 'file://map/x.msb',
+      sourcePath: 'map/x.msb',
+      game: 'sekiro',
+      resourceKind: 'map',
+      revision: 'fixture-1',
       parts: [{ name: 'C:\\Users\\secret\\evil', posX: 0, posY: 0, posZ: 0 }]
     });
     throw new Error('expected absolute path rejection');

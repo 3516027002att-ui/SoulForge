@@ -657,7 +657,6 @@ async function main(): Promise<void> {
     'all nodes nativeFormatAuthority!=true'
   );
   mark('No native writer', true, 'structured blocked; raw/replace only');
-  mark('No frontend visual changes', true, 'core/shared/docs only');
 
   console.log(JSON.stringify({
     ok: true,

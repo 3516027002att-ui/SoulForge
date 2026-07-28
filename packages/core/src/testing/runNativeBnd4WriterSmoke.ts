@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import type { BridgeResult } from '@soulforge/shared';
 import { BridgeDaemonClient, BridgeDaemonError } from '../bridge/bridgeDaemonClient.js';
 import { disposeBridgeDaemonPool, runBridge } from '../bridge/runBridge.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 interface DcxEnvelope {
   sourceHash: string;
@@ -13,7 +14,11 @@ interface DcxEnvelope {
 
 async function main(): Promise<void> {
   const executable = resolve(process.argv[2] ?? '../../bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe');
-  const source = resolve(process.argv[3] ?? '../../mods/chr/c0000.anibnd.dcx');
+  const source = await resolveNativeFixture(
+    process.argv[3],
+    'chrbnd-primary',
+    '../../mods/chr/c0000.anibnd.dcx'
+  );
   const writableRoot = await mkdtemp(join(tmpdir(), 'soulforge-native-bnd4-writer-'));
   const sourceRoot = resolve(source, '..');
   const sourceHashBefore = sha256(await readFile(source));

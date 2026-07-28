@@ -14,11 +14,15 @@ export interface EmevdFourViewPanelProps {
 }
 
 function renderDsl(document: EmevdEditorDocument): string {
-  const lines = [`$Resource ${document.resourceUri}`];
+  const lines = [`$Resource(Uri=${JSON.stringify(document.resourceUri)});`];
   for (const event of document.events) {
-    lines.push(`$Event(${event.eventId}, Rest=${event.restBehavior}, Layer=${event.layer}) {`);
+    lines.push(
+      `$Event(Id=${event.eventId}, Uri=${JSON.stringify(event.eventUri)}, Rest=${event.restBehavior}, Layer=${event.layer}) {`
+    );
     for (const instr of event.instructions) {
-      lines.push(`  ${instr.unknown ? 'unknown' : 'typed'} bank=${instr.bank} id=${instr.id};`);
+      lines.push(
+        `  unknown(Uri=${JSON.stringify(instr.instructionUri)}, Bank=${instr.bank}, Id=${instr.id}, ArgsBase64=${JSON.stringify(instr.argsBase64)});`
+      );
     }
     lines.push('}');
   }
