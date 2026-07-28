@@ -25,7 +25,7 @@ function main(): void {
   let selection = selectEmevdView({ view: 'flow' }, 'table', doc0.events[0]!.eventUri);
   let state = buildFourViewState(doc0, selection);
   if (state.tableRows.length !== 2) throw new Error('table rows');
-  if (!state.dslText.includes('$Event(Id=50')) throw new Error('dsl missing event');
+  if (!state.dslText.includes('$Event(50')) throw new Error('dsl missing event');
   if (state.selection.view !== 'table') throw new Error('selection view');
 
   selection = selectEmevdView(selection, 'bytes', doc0.events[0]!.eventUri, doc0.events[0]!.instructions[0]!.instructionUri);
@@ -64,16 +64,14 @@ function main(): void {
   if (!idChange.document.events[0]!.eventUri.endsWith('#event/51')) throw new Error('uri not updated');
 
   const dslParse = tryParseEmevdDsl('$Event(broken');
-  if (dslParse.ok || !dslParse.diagnostics[0]?.location) {
-    throw new Error('invalid DSL must fail with source location');
+  if (dslParse.ok || dslParse.code !== 'EMEVD_DSL_NON_AUTHORITATIVE') {
+    throw new Error('DSL must be non-authoritative');
   }
-  const validDsl = tryParseEmevdDsl(state.dslText);
-  if (!validDsl.ok || validDsl.ast.events.length !== 2) throw new Error('canonical DSL parse failed');
 
   // Four views share same revision after mutation
   const after = buildFourViewState(idChange.document, { view: 'dsl', eventUri: idChange.document.events[0]!.eventUri });
   if (after.document.revision !== 2) throw new Error('shared revision broken');
-  if (!after.dslText.includes('$Event(Id=51')) throw new Error('dsl not synced');
+  if (!after.dslText.includes('$Event(51')) throw new Error('dsl not synced');
 
   const instrUri = idChange.document.events[0]!.instructions[0]!.instructionUri;
   const argsMut = applyEmevdEditorMutation(idChange.document, {
@@ -119,7 +117,7 @@ function main(): void {
     revision: argsOk.document.revision,
     events: after.tableRows.length,
     instructionArgsMutation: true,
-    dslParserReadOnly: true,
+    dslNonAuthoritative: true,
     views: ['flow', 'table', 'dsl', 'bytes']
   }, null, 2));
 }

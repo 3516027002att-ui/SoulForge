@@ -45,18 +45,25 @@ export interface WorkspaceSession {
 /**
  * v0.5 workspace session: native ModEngine overlay is writable, optional game
  * install is read-only base. All Patch Engine writes must target overlay.
+ *
+ * The paths exposed through `layers` stay in the namespace selected by the
+ * caller. This matters on Windows, where `realpath()` may expand an 8.3 alias
+ * such as RUNNER~1 into a long path and make a valid caller-built child path
+ * appear lexically unrelated. Physical paths are retained separately for
+ * identity, alias detection and the authoritative reparse-point write gate.
  */
 export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions): Promise<WorkspaceSession> {
-  const requestedOverlayRoot = resolve(options.overlayRoot);
-  await assertDirectory(requestedOverlayRoot, 'overlayRoot');
-  const overlayRoot = await realpath(requestedOverlayRoot);
+  const overlayRoot = resolve(options.overlayRoot);
+  await assertDirectory(overlayRoot, 'overlayRoot');
+  const physicalOverlayRoot = await realpath(overlayRoot);
 
   let baseRoot: string | undefined;
+  let physicalBaseRoot: string | undefined;
   if (options.baseRoot) {
-    const requestedBaseRoot = resolve(options.baseRoot);
-    await assertDirectory(requestedBaseRoot, 'baseRoot');
-    baseRoot = await realpath(requestedBaseRoot);
-    if (pathsEqual(overlayRoot, baseRoot)) {
+    baseRoot = resolve(options.baseRoot);
+    await assertDirectory(baseRoot, 'baseRoot');
+    physicalBaseRoot = await realpath(baseRoot);
+    if (pathsEqual(physicalOverlayRoot, physicalBaseRoot)) {
       throw new Error('baseRoot must not be the same directory as overlayRoot.');
     }
   }
@@ -71,7 +78,8 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
   };
 
   const meta: WorkspaceSessionMeta = {
-    workspaceId: makeWorkspaceId(overlayRoot),
+    // Preserve one identity for aliases that resolve to the same physical root.
+    workspaceId: makeWorkspaceId(physicalOverlayRoot),
     layers,
     game: options.game ?? 'unknown',
     openedAt: new Date().toISOString(),
@@ -82,10 +90,12 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
     meta,
     layers,
     isOverlayPath(absolutePath: string): boolean {
-      return isPathInside(overlayRoot, absolutePath);
+      return isInsideSelectedOrPhysicalRoot(overlayRoot, physicalOverlayRoot, absolutePath);
     },
     isBasePath(absolutePath: string): boolean {
-      return baseRoot ? isPathInside(baseRoot, absolutePath) : false;
+      return baseRoot && physicalBaseRoot
+        ? isInsideSelectedOrPhysicalRoot(baseRoot, physicalBaseRoot, absolutePath)
+        : false;
     },
     resolveWritablePath(absolutePath: string, layer: OverlayLayer = 'overlay'): ResolveWritablePathResult {
       const diagnostics: Diagnostic[] = [];
@@ -116,7 +126,9 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
         return { ok: false, layer, diagnostics };
       }
 
-      if (baseRoot && isPathInside(baseRoot, resolved)) {
+      if (baseRoot
+        && physicalBaseRoot
+        && isInsideSelectedOrPhysicalRoot(baseRoot, physicalBaseRoot, resolved)) {
         diagnostics.push({
           severity: 'error',
           code: 'WRITE_TO_BASE_FORBIDDEN',
@@ -126,7 +138,7 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
         return { ok: false, layer: 'overlay', diagnostics };
       }
 
-      if (!isPathInside(overlayRoot, resolved)) {
+      if (!isInsideSelectedOrPhysicalRoot(overlayRoot, physicalOverlayRoot, resolved)) {
         diagnostics.push({
           severity: 'error',
           code: 'WRITE_OUTSIDE_OVERLAY',
@@ -145,7 +157,13 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
       const lexical = session.resolveWritablePath(absolutePath, layer);
       if (!lexical.ok || !lexical.absolutePath) return lexical;
 
-      const allowedRoot = layer === 'staging' ? stagingRoot : overlayRoot;
+      const allowedRoot = layer === 'staging'
+        ? stagingRoot
+        : selectMatchingRootNamespace(
+            overlayRoot,
+            physicalOverlayRoot,
+            lexical.absolutePath
+          );
       if (!allowedRoot) return lexical;
       const verified = await verifyPathInsideRoot(allowedRoot, lexical.absolutePath);
       return verified.ok
@@ -181,6 +199,23 @@ export async function assertWritableThroughSessionSecure(
 ): Promise<Diagnostic[]> {
   if (!session) return [];
   return (await session.resolveWritablePathSecure(absolutePath)).diagnostics;
+}
+
+function isInsideSelectedOrPhysicalRoot(
+  selectedRoot: string,
+  physicalRoot: string,
+  candidatePath: string
+): boolean {
+  return isPathInside(selectedRoot, candidatePath)
+    || isPathInside(physicalRoot, candidatePath);
+}
+
+function selectMatchingRootNamespace(
+  selectedRoot: string,
+  physicalRoot: string,
+  candidatePath: string
+): string {
+  return isPathInside(selectedRoot, candidatePath) ? selectedRoot : physicalRoot;
 }
 
 function normalizeRelative(relativePath: string): string {

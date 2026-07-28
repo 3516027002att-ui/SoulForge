@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -b ../shared . && node dist/testing/runSyntheticConfirmedReferenceSmoke.js && node dist/testing/runV05FoundationSmoke.js && node dist/testing/runV05FileRollbackSmoke.js && node dist/testing/runV05SecurityBoundarySmoke.js && node dist/testing/runV05SqliteAuthoritySmoke.js && node dist/testing/runV05PersistSmoke.js && node dist/testing/runV05P1Smoke.js && node dist/testing/runV05ArchitectureScaffoldSmoke.js && node dist/testing/runV05WritePathConsolidationSmoke.js && node dist/testing/runV05FullFileWorkbenchSmoke.js && node dist/testing/runV05RawFileWorkbenchSmoke.js && node dist/testing/runV06NativeContainerWorkbenchSmoke.js && node dist/testing/runWriterFailureMatrixSmoke.js && node dist/testing/runBridgeStagingSmoke.js && node dist/testing/runBridgeRecoveryHarnessSmoke.js && node dist/testing/runParamMetadataMismatchSmoke.js && node dist/testing/runMe3RuntimeAdapterSmoke.js && node dist/testing/runEmevdDslSmoke.js && node dist/testing/runReleaseCorpusRegistrySmoke.js && node dist/testing/runReleaseEditorAcceptanceSmoke.js",
+    "test": "tsc -b ../shared . && node dist/testing/runSyntheticConfirmedReferenceSmoke.js && node dist/testing/runV05FoundationSmoke.js && node dist/testing/runV05FileRollbackSmoke.js && node dist/testing/runV05SecurityBoundarySmoke.js && node dist/testing/runV05SqliteAuthoritySmoke.js && node dist/testing/runV05PersistSmoke.js && node dist/testing/runV05P1Smoke.js && node dist/testing/runV05ArchitectureScaffoldSmoke.js && node dist/testing/runV05WritePathConsolidationSmoke.js && node dist/testing/runV05FullFileWorkbenchSmoke.js && node dist/testing/runV05RawFileWorkbenchSmoke.js && node dist/testing/runV06NativeContainerWorkbenchSmoke.js && node dist/testing/runWriterFailureMatrixSmoke.js && node dist/testing/runBridgeStagingSmoke.js && node dist/testing/runBridgeRecoveryHarnessSmoke.js && node dist/testing/runParamMetadataMismatchSmoke.js && node dist/testing/runMe3RuntimeAdapterSmoke.js && node dist/testing/runEmevdDslCompilerSmoke.js && node dist/testing/runReleaseCorpusRegistrySmoke.js && node dist/testing/runReleaseEditorAcceptanceSmoke.js",
     "test:real-mod": "tsc -b ../shared . && node dist/testing/runRealModOpenSmoke.js ../../mods",
     "test:native-preview": "tsc -b ../shared . && node dist/testing/runNativeInspectSmoke.js ../../mods",
     "test:bridge-daemon-client": "tsc -b ../shared . && node dist/testing/runBridgeDaemonClientSmoke.js",
@@ -17,7 +17,6 @@
     "test:writer-failure-matrix": "tsc -b ../shared . && node dist/testing/runWriterFailureMatrixSmoke.js",
     "test:bridge-staging": "tsc -b ../shared . && node dist/testing/runBridgeStagingSmoke.js",
     "test:bridge-recovery-harness": "tsc -b ../shared . && node dist/testing/runBridgeRecoveryHarnessSmoke.js",
-    "test:emevd-dsl": "tsc -b ../shared . && node dist/testing/runEmevdDslSmoke.js",
     "test:release-corpus-registry": "tsc -b ../shared . && node dist/testing/runReleaseCorpusRegistrySmoke.js",
     "test:native-writer-failure-matrix": "tsc -b ../shared . && node dist/testing/runNativeWriterFailureMatrixSmoke.js",
     "test:native-bnd4-writer": "tsc -b ../shared . && node dist/testing/runNativeBnd4WriterSmoke.js",

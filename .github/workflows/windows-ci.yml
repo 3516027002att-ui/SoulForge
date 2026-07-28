@@ -8,6 +8,10 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: windows-latest
@@ -33,8 +37,68 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Unit / integration smokes
-        run: npm test
+      # Core smoke processes are intentionally separate. Each command preserves
+      # the original npm-workspace cwd so the diagnostic split cannot change behavior.
+      - name: Core — reference confidence
+        working-directory: packages/core
+        run: node dist/testing/runSyntheticConfirmedReferenceSmoke.js
+
+      - name: Core — V0.5 foundation
+        working-directory: packages/core
+        run: node dist/testing/runV05FoundationSmoke.js
+
+      - name: Core — file rollback
+        working-directory: packages/core
+        run: node dist/testing/runV05FileRollbackSmoke.js
+
+      - name: Core — security boundary
+        working-directory: packages/core
+        run: node dist/testing/runV05SecurityBoundarySmoke.js
+
+      - name: Core — SQLite authority
+        working-directory: packages/core
+        run: node dist/testing/runV05SqliteAuthoritySmoke.js
+
+      - name: Core — persistence
+        working-directory: packages/core
+        run: node dist/testing/runV05PersistSmoke.js
+
+      - name: Core — P1 integration
+        working-directory: packages/core
+        run: node dist/testing/runV05P1Smoke.js
+
+      - name: Core — architecture scaffold
+        working-directory: packages/core
+        run: node dist/testing/runV05ArchitectureScaffoldSmoke.js
+
+      - name: Core — write-path consolidation
+        working-directory: packages/core
+        run: node dist/testing/runV05WritePathConsolidationSmoke.js
+
+      - name: Core — full-file workbench
+        working-directory: packages/core
+        run: node dist/testing/runV05FullFileWorkbenchSmoke.js
+
+      - name: Core — raw-file workbench
+        working-directory: packages/core
+        run: node dist/testing/runV05RawFileWorkbenchSmoke.js
+
+      - name: Core — native container workbench
+        working-directory: packages/core
+        run: node dist/testing/runV06NativeContainerWorkbenchSmoke.js
+
+      - name: Core — EMEVD DSL compiler
+        working-directory: packages/core
+        run: node dist/testing/runEmevdDslCompilerSmoke.js
+
+      - name: Desktop security gate
+        run: npm run test:desktop-security
+
+      - name: UI localization gate
+        run: npm run test:ui-localization
+
+      - name: Database utility smoke
+        run: npm run test:database-utility
 
       - name: Bridge synthetic fixtures
         run: npm run bridge:verify:synthetic

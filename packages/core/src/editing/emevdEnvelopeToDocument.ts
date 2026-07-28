@@ -4,6 +4,7 @@
  */
 
 import type { EmevdEditorDocument, EmevdEventIr, EmevdInstructionIr } from '@soulforge/shared';
+import { attachEmevdStableIdentity } from '../emevd/stableIdentity.js';
 
 export interface BridgeEmevdEnvelopeLike {
   sourceHash?: string;
@@ -29,7 +30,7 @@ export interface BridgeEmevdEnvelopeLike {
 export function emevdEnvelopeToEditorDocument(
   resourceUri: string,
   envelope: BridgeEmevdEnvelopeLike,
-  options?: { maxEvents?: number; bytesBase64?: string }
+  options?: { maxEvents?: number; bytesBase64?: string; documentInstanceId?: string }
 ): EmevdEditorDocument {
   const maxEvents = options?.maxEvents ?? 256;
   const sampleByIndex = new Map(
@@ -78,12 +79,14 @@ export function emevdEnvelopeToEditorDocument(
     });
   }
 
-  return {
+  return attachEmevdStableIdentity({
     schemaVersion: 1,
     resourceUri,
     revision: 0,
     events,
     bytesBase64: options?.bytesBase64 ?? '',
     diagnostics
-  };
+  }, options?.documentInstanceId !== undefined
+    ? { documentInstanceId: options.documentInstanceId }
+    : undefined);
 }
