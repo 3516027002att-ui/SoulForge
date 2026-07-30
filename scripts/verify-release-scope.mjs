@@ -203,7 +203,7 @@ if (beginCount === 1 && endCount === 1) {
 }
 
 const capabilitySection = sliceBetween(handoff, '### 3.1 路线依赖与解锁关系', '### 3.2 Authority 解锁规则');
-const gateSection = sliceBetween(handoff, '### 18.1 可判定的发布门槛', '### 18.2 发布前必须裁定但当前尚未裁定的量化项');
+const gateSection = sliceBetween(handoff, '### 18.1 可判定的发布门槛', '### 18.2 V0.5 不设置的量化预算与门槛');
 const evidenceSection = sliceBetween(handoff, '### 17.1 当前证据索引', '---\n\n## 18. V0.5 完成定义');
 const gateMatrixSection = sliceBetween(handoff, '### 18.3 Gate 覆盖矩阵与后继切片', '### 18.4 结构化 blocker 注册表');
 const blockerSection = sliceBetween(handoff, '### 18.4 结构化 blocker 注册表', '---\n\n## 19. 保留文档');
@@ -228,8 +228,8 @@ for (const gateId of gateIds) {
 }
 
 if (proposal !== null) {
-  if (proposal.schemaVersion !== '1.3.0') {
-    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.3.0。');
+  if (proposal.schemaVersion !== '1.4.0') {
+    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.4.0。');
   }
   if (!/^V0\.5-SCOPE-[0-9]{8}$/.test(proposal.proposalId ?? '')) {
     add('PROPOSAL_ID_INVALID', 'proposal.proposalId', 'proposalId 必须匹配 V0.5-SCOPE-YYYYMMDD。');
@@ -503,10 +503,17 @@ if (proposal !== null) {
       requireFrozenValue(proposal, 'renderingAcceptancePolicy.functionalOwnerMachineSmokeRequired', true);
       requireFrozenValue(proposal, 'renderingAcceptancePolicy.representativeHardwareTiersRequired', false);
       requireFrozenValue(proposal, 'renderingAcceptancePolicy.performanceBudgetsRequired', false);
+      requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.status', 'user-approved');
+      requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.editorCapacityOrLatencyThresholdsRequired', false);
+      requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.installerSizeOrTimeBudgetsRequired', false);
+      requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.boundedEditorAccessRequired', true);
+      requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.installerLifecycleIntegrityRequired', true);
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-structured-ui');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-canonical-dsl');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'show-readonly-hex-evidence');
+      requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'access-complete-document-through-bounded-mode');
       requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'raw-hex-edit');
+      requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'quantitative-capacity-or-latency-threshold-as-v05-gate');
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'recompress');
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'write');
       requireFrozenOperation(itemById, 'SCOPE-PARAM', 'import-user-local-pinned-smithbox-metadata');
@@ -529,6 +536,7 @@ if (proposal !== null) {
       forbidFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'unsigned-local-artifact-as-release');
       requireFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'portable-release');
       requireFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'automatic-update');
+      requireFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'installer-size-or-time-budget-as-v05-gate');
       requireFrozenOperation(itemById, 'SCOPE-COMPLIANCE', 'verify-owner-controlled-target');
       requireFrozenOperation(itemById, 'SCOPE-COMPLIANCE', 'verify-installer-artifact-hash');
       forbidFrozenOperation(itemById, 'SCOPE-COMPLIANCE', 'verify-signed-installer-provenance');

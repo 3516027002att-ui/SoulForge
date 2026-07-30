@@ -122,6 +122,36 @@ try {
     proposal.renderingAcceptancePolicy.representativeHardwareTiersRequired = true;
   }, 'FROZEN_POLICY_VALUE_INVALID');
 
+  await expectRejected('editor-quantitative-threshold-reintroduced', (proposal) => {
+    proposal.quantitativeAcceptancePolicy.editorCapacityOrLatencyThresholdsRequired = true;
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('installer-quantitative-budget-reintroduced', (proposal) => {
+    proposal.quantitativeAcceptancePolicy.installerSizeOrTimeBudgetsRequired = true;
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('bounded-editor-access-removed', (proposal) => {
+    proposal.quantitativeAcceptancePolicy.boundedEditorAccessRequired = false;
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('installer-lifecycle-integrity-removed', (proposal) => {
+    proposal.quantitativeAcceptancePolicy.installerLifecycleIntegrityRequired = false;
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('editor-no-threshold-boundary-removed', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.unsupportedOperations = editors.unsupportedOperations.filter(
+      (operation) => operation !== 'quantitative-capacity-or-latency-threshold-as-v05-gate'
+    );
+  }, 'FROZEN_UNSUPPORTED_BOUNDARY_MISSING');
+
+  await expectRejected('installer-no-budget-boundary-removed', (proposal) => {
+    const release = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RELEASE');
+    release.unsupportedOperations = release.unsupportedOperations.filter(
+      (operation) => operation !== 'installer-size-or-time-budget-as-v05-gate'
+    );
+  }, 'FROZEN_UNSUPPORTED_BOUNDARY_MISSING');
+
   await expectRejected('render-benchmark-gate-reintroduced', (proposal) => {
     const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
     rendering.operations.push('benchmark-both-backends');
