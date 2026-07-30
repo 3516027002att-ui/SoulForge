@@ -53,7 +53,8 @@ const ALLOWED_PROPOSAL_STATUS = new Set(['awaiting-user-ruling', 'user-approved'
 const ALLOWED_ITEM_DECISION = new Set(['awaiting-user-ruling', 'user-approved']);
 const ALLOWED_RULING_STATUS = new Set(['pending-user-ruling', 'user-approved']);
 const ALLOWED_SUPPORT = new Set(['supported', 'unsupported']);
-const ALLOWED_GATE_STATE = new Set(['open', 'blocked']);
+const ALLOWED_GATE_STATE = new Set(['open', 'blocked', 'passed']);
+const ALLOWED_BUILD_MATCH_POLICY = new Set(['file-product-version-major-minor']);
 const ALLOWED_AUTHORITY = new Set([
   'unsupported',
   'candidate',
@@ -227,8 +228,8 @@ for (const gateId of gateIds) {
 }
 
 if (proposal !== null) {
-  if (proposal.schemaVersion !== '1.0.0') {
-    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.0.0。');
+  if (proposal.schemaVersion !== '1.1.0') {
+    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.1.0。');
   }
   if (!/^V0\.5-SCOPE-[0-9]{8}$/.test(proposal.proposalId ?? '')) {
     add('PROPOSAL_ID_INVALID', 'proposal.proposalId', 'proposalId 必须匹配 V0.5-SCOPE-YYYYMMDD。');
@@ -249,15 +250,29 @@ if (proposal !== null) {
     if (!ALLOWED_RULING_STATUS.has(buildRange.status)) {
       add('GAME_BUILD_STATUS_INVALID', 'proposal.gameBuildRange.status', 'game build status 枚举非法。');
     }
-    if (!Array.isArray(buildRange.builds)) {
-      add('GAME_BUILDS_INVALID', 'proposal.gameBuildRange.builds', 'builds 必须为数组。');
-    } else if (buildRange.status === 'pending-user-ruling' && buildRange.builds.length !== 0) {
-      add('PENDING_GAME_BUILDS_MUST_BE_EMPTY', 'proposal.gameBuildRange.builds', '待裁定时不得预填 build。');
+    if (!ALLOWED_BUILD_MATCH_POLICY.has(buildRange.matchPolicy)) {
+      add('GAME_BUILD_MATCH_POLICY_INVALID', 'proposal.gameBuildRange.matchPolicy', '只允许按 file/product version 的 major.minor 版本族匹配。');
+    }
+    if (!Array.isArray(buildRange.versionFamilies)) {
+      add('GAME_VERSION_FAMILIES_INVALID', 'proposal.gameBuildRange.versionFamilies', 'versionFamilies 必须为数组。');
+    }
+    if (!Array.isArray(buildRange.exactBuilds)) {
+      add('GAME_EXACT_BUILDS_INVALID', 'proposal.gameBuildRange.exactBuilds', 'exactBuilds 必须为数组。');
+    }
+    if (buildRange.unknownBuildPolicy !== 'fail-closed') {
+      add('GAME_UNKNOWN_BUILD_POLICY_INVALID', 'proposal.gameBuildRange.unknownBuildPolicy', '版本族外 build 必须失败关闭。');
+    }
+    if (buildRange.status === 'pending-user-ruling') {
+      if (buildRange.versionFamilies?.length !== 0 || buildRange.exactBuilds?.length !== 0) {
+        add('PENDING_GAME_BUILDS_MUST_BE_EMPTY', 'proposal.gameBuildRange', '待裁定时不得预填版本族或精确 build。');
+      }
     } else if (buildRange.status === 'user-approved') {
-      const broadBuild = /^(?:any|current|latest|unknown|tbd|pending|\*)$/i;
-      if (!isStringArray(buildRange.builds, { nonEmpty: true })
-        || buildRange.builds.some((build) => broadBuild.test(build) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(build))) {
-        add('APPROVED_GAME_BUILDS_NOT_EXACT', 'proposal.gameBuildRange.builds', '批准后必须列出非通配、非占位的精确 build identity。');
+      if (!isStringArray(buildRange.versionFamilies, { nonEmpty: true })
+        || buildRange.versionFamilies.some((family) => !/^\d+\.\d+$/.test(family))) {
+        add('APPROVED_GAME_VERSION_FAMILY_INVALID', 'proposal.gameBuildRange.versionFamilies', '批准后必须列出 major.minor 形式的明确版本族。');
+      }
+      if (!isStringArray(buildRange.exactBuilds)) {
+        add('APPROVED_GAME_EXACT_BUILDS_INVALID', 'proposal.gameBuildRange.exactBuilds', 'exactBuilds 必须为字符串数组。');
       }
     }
   }
@@ -463,6 +478,21 @@ if (proposal !== null) {
       if (!coveredGates.has(gateId)) add('PROPOSAL_GATE_NOT_COVERED', 'proposal.scopeItems', `提案未覆盖 Gate：${gateId}`);
     }
 
+    if (proposal.proposalStatus === 'user-approved') {
+      requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-structured-ui');
+      requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-canonical-dsl');
+      requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'show-readonly-hex-evidence');
+      requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'raw-hex-edit');
+      requireFrozenOperation(itemById, 'SCOPE-KRAK', 'recompress');
+      requireFrozenOperation(itemById, 'SCOPE-KRAK', 'write');
+      requireFrozenOperation(itemById, 'SCOPE-RELEASE', 'package-signed-nsis-x64');
+      requireFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'portable-release');
+      requireFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'automatic-update');
+      requireFrozenOperation(itemById, 'SCOPE-COMPLIANCE', 'verify-owner-controlled-target');
+      requireFrozenUnsupported(itemById, 'SCOPE-COMPLIANCE', 'external-distribution');
+      requireFrozenUnsupported(itemById, 'SCOPE-ASSET-OPEN-CONVERSION', 'open-format-to-native-import');
+    }
+
     if (!Array.isArray(proposal.gateCoverage)) {
       add('GATE_COVERAGE_INVALID', 'proposal.gateCoverage', 'gateCoverage 必须为数组。');
     } else {
@@ -483,7 +513,7 @@ if (proposal !== null) {
           coverageByGate.set(coverage.gateId, coverage);
         }
         if (!ALLOWED_GATE_STATE.has(coverage.currentState)) {
-          add('GATE_COVERAGE_STATE_INVALID', `${where}.currentState`, '提案 currentState 只允许 open 或 blocked，不得冒充完成态。');
+          add('GATE_COVERAGE_STATE_INVALID', `${where}.currentState`, '提案 currentState 只允许 open、blocked 或 passed。');
         } else if (gateMatrixStates.get(coverage.gateId) !== coverage.currentState) {
           add('GATE_COVERAGE_STATE_DRIFT', `${where}.currentState`, `必须与 §18.3 当前状态一致：${gateMatrixStates.get(coverage.gateId) ?? '(missing)'}`);
         }
@@ -517,6 +547,9 @@ if (proposal !== null) {
           }
           if (coverage.currentState === 'open' && coverage.blockerRefs.length !== 0) {
             add('OPEN_GATE_WITH_BLOCKER', `${where}.blockerRefs`, 'open Gate 不得携带 blockerRefs。');
+          }
+          if (coverage.currentState === 'passed' && coverage.blockerRefs.length !== 0) {
+            add('PASSED_GATE_WITH_BLOCKER', `${where}.blockerRefs`, 'passed Gate 不得携带 blockerRefs。');
           }
         }
         if (!isStringArray(coverage.openRulings, { nonEmpty: true })) {
@@ -558,7 +591,10 @@ const scopeItems = Array.isArray(proposal?.scopeItems) ? proposal.scopeItems : [
 const frozen = structuralErrors === 0
   && proposal?.proposalStatus === 'user-approved'
   && proposal?.gameBuildRange?.status === 'user-approved'
-  && isStringArray(proposal?.gameBuildRange?.builds, { nonEmpty: true })
+  && proposal?.gameBuildRange?.matchPolicy === 'file-product-version-major-minor'
+  && isStringArray(proposal?.gameBuildRange?.versionFamilies, { nonEmpty: true })
+  && isStringArray(proposal?.gameBuildRange?.exactBuilds)
+  && proposal?.gameBuildRange?.unknownBuildPolicy === 'fail-closed'
   && proposal?.ruling?.status === 'user-approved'
   && typeof proposal?.ruling?.approvedBy === 'string'
   && proposal.ruling.approvedBy.trim().length > 0
@@ -577,7 +613,9 @@ if (proposalMode) {
         scopeItemCount: scopeItems.length,
         gateCount: EXPECTED_GATES.length,
         findings: [],
-        note: '提案结构有效；这不是用户范围裁定，也不构成 V0.5 发布声明。'
+        note: frozen
+          ? '用户批准范围结构有效；--proposal 本身不替代 sealed Evidence，也不构成功能或 V0.5 完成声明。'
+          : '提案结构有效；这不是用户范围裁定，也不构成 V0.5 发布声明。'
       }
     : {
         ok: false,
@@ -613,4 +651,18 @@ if (proposalMode) {
     findings: []
   }, null, 2));
   process.exitCode = 0;
+}
+
+function requireFrozenOperation(itemById, scopeItemId, operation) {
+  const item = itemById.get(scopeItemId);
+  if (!item?.operations?.includes(operation)) {
+    add('FROZEN_OPERATION_MISSING', scopeItemId, `冻结范围必须包含 operation=${operation}。`);
+  }
+}
+
+function requireFrozenUnsupported(itemById, scopeItemId, operation) {
+  const item = itemById.get(scopeItemId);
+  if (!item?.unsupportedOperations?.includes(operation)) {
+    add('FROZEN_UNSUPPORTED_BOUNDARY_MISSING', scopeItemId, `冻结范围必须明确 unsupported=${operation}。`);
+  }
 }

@@ -10,7 +10,30 @@ const cases = [];
 
 try {
   await expectResult('canonical-proposal', source, 0, 'proposal-valid');
-  await expectResult('strict-mode-fails-before-ruling', source, 1, 'RELEASE_SCOPE_NOT_FROZEN', false);
+  await expectResult('canonical-strict-frozen', source, 0, 'scope-approved', false);
+
+  const pendingProposal = extractProposal(source);
+  pendingProposal.proposalStatus = 'awaiting-user-ruling';
+  pendingProposal.gameBuildRange.status = 'pending-user-ruling';
+  pendingProposal.gameBuildRange.versionFamilies = [];
+  pendingProposal.gameBuildRange.exactBuilds = [];
+  pendingProposal.ruling = {
+    status: 'pending-user-ruling',
+    approvedBy: null,
+    approvedAt: null,
+    decisionRef: null
+  };
+  for (const item of pendingProposal.scopeItems) {
+    item.decisionStatus = 'awaiting-user-ruling';
+    item.openRulings = ['fixture pending user ruling'];
+  }
+  await expectResult(
+    'strict-mode-fails-before-ruling',
+    replaceProposal(source, pendingProposal),
+    1,
+    'RELEASE_SCOPE_NOT_FROZEN',
+    false
+  );
 
   await expectRejected('duplicate-scope-item', (proposal) => {
     proposal.scopeItems.push(structuredClone(proposal.scopeItems[0]));
@@ -33,14 +56,37 @@ try {
   }, 'ABSOLUTE_PATH_FORBIDDEN');
 
   await expectRejected('status-only-fake-approval', (proposal) => {
-    proposal.proposalStatus = 'user-approved';
-    proposal.gameBuildRange.status = 'user-approved';
-    proposal.ruling.status = 'user-approved';
+    proposal.ruling.approvedBy = '';
   }, 'RULING_APPROVER_MISSING');
 
+  await expectRejected('broad-version-family', (proposal) => {
+    proposal.gameBuildRange.versionFamilies = ['1.6.x'];
+  }, 'APPROVED_GAME_VERSION_FAMILY_INVALID');
+
+  await expectRejected('unknown-build-not-fail-closed', (proposal) => {
+    proposal.gameBuildRange.unknownBuildPolicy = 'warn-and-continue';
+  }, 'GAME_UNKNOWN_BUILD_POLICY_INVALID');
+
+  await expectRejected('semantic-dsl-removed', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.operations = editors.operations.filter((operation) => operation !== 'project-canonical-dsl');
+  }, 'FROZEN_OPERATION_MISSING');
+
+  await expectRejected('raw-hex-boundary-removed', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.unsupportedOperations = editors.unsupportedOperations.filter((operation) => operation !== 'raw-hex-edit');
+  }, 'FROZEN_UNSUPPORTED_BOUNDARY_MISSING');
+
+  await expectRejected('external-distribution-boundary-removed', (proposal) => {
+    const compliance = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-COMPLIANCE');
+    compliance.unsupportedOperations = compliance.unsupportedOperations.filter((operation) => operation !== 'external-distribution');
+  }, 'FROZEN_UNSUPPORTED_BOUNDARY_MISSING');
+
   await expectRejected('gate-pass-masquerade', (proposal) => {
-    proposal.gateCoverage[0].currentState = 'passed';
-  }, 'GATE_COVERAGE_STATE_INVALID');
+    const relA = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-A');
+    relA.currentState = 'passed';
+    relA.blockerRefs = [];
+  }, 'GATE_COVERAGE_STATE_DRIFT');
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
 }

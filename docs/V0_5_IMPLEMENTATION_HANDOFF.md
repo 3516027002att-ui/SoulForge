@@ -402,6 +402,8 @@ SoulForge V0.5
 - 不分发、复制或提交 Oodle DLL；
 - KRAK 只读路径在运行库满足条件时调用 Oodle。
 
+V0.5 冻结目标要求在相同合法 runtime 边界内完成登记 KRAK 布局的重压、写回、重读和恢复；不得捆绑、复制或分发 Oodle，也不得把版本族批准当成压缩 writer 证据。
+
 当前仍缺：
 
 - 发布 corpus 的 KRAK 100% 分类与全量解压；
@@ -558,7 +560,7 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 
 状态：`not-started / corpus research required`
 
-该路线正式纳入 SoulForge 长期地图，不能被场景资产线遮蔽。
+该路线正式纳入 SoulForge V0.5 冻结范围，不能被场景资产线遮蔽。
 
 目标能力包括：
 
@@ -569,7 +571,7 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 - Lua、HKS 或其他 Sekiro 脚本资源的真实格式确认；
 - 与 EMEVD、MSB、PARAM 和资产的跨资源 patch graph。
 
-具体 Sekiro 格式范围必须从私有 corpus、公开格式知识和可验证行为中确认。不得仅凭其他 FromSoftware 游戏的格式列表宣称 Sekiro 支持。
+冻结目标要求全部 Sekiro TAE、全部 ESD 以及真实 corpus 中发现的源码/编译脚本具备完整语义读写；当前 authority 仍为 `unverified`，具体格式必须从合法 corpus、公开格式知识和可验证行为中确认。不得仅凭其他 FromSoftware 游戏的格式列表宣称 Sekiro 支持，也不得执行不受信脚本。
 
 该路线可以与场景资产线并行研究，但任何 writer 都要复用 A 线的 PatchIR 和回滚主干。
 
@@ -595,13 +597,12 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 
 - 真实 FLVER vertex/index/layout/skeleton/material authority；
 - TPF、MTD 和纹理解析链；
-- native model/material/texture writer；
 - collision、navigation 和地图资源关联；
-- 开放格式到 Sekiro 原生格式的完整转换；
+- FLVER -> glTF/GLB、TPF -> PNG/TGA/DDS、MTD -> 可读描述清单的只读导出；
 - 大型真实场景性能和显存管理；
 - 真实游戏加载验证。
 
-资产导入路线保留，不因项目周期长而缩减。与此同时，行为与动画路线必须作为同等级主线推进。
+V0.5 明确排除开放格式到 FLVER/TPF/MTD 的 native 导入与所有五类资产 writer；现有 asset import/file_replace candidate 不得作为发布能力。未来若要恢复 native 导入，必须重新打开范围裁定。行为与动画路线继续作为同等级主线推进。
 
 ---
 
@@ -614,7 +615,7 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 已经具备或已有骨架：
 
 - 统一 `EditorDocumentStore` 与 revision/mutation 协议；
-- Safe Hex 文档模型和桌面面板；
+- Safe Hex 候选文档模型和演示面板（只作为当前实现事实，不属于冻结后的可写编辑器）；
 - EMEVD 四视图；
 - PARAM / ParamDef 面板；
 - FMG 工作台；
@@ -632,6 +633,8 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 - demo fallback 不得被当作真实文件能力；
 - EMEVD DSL 最终可编译为 typed mutation；
 - 行为、动画和资产编辑器逐渐接入同一工作台。
+
+V0.5 冻结交付清单为 BND4、FMG、PARAM、EMEVD、MSB、TAE、ESD、脚本八个语义编辑器。每个编辑器必须同时提供结构化界面和规范 DSL，并共享同一 Bridge native document、revision、selection 与 typed mutation；没有完整 parser/schema/typecheck/native writer 的资源不得编辑。Hex 只允许作为只读偏移与原始字节证据视图，不能形成 raw write 或绕过 native authority。
 
 ---
 
@@ -694,6 +697,8 @@ interface GameRuntimeAdapter {
 - 即使 fixture 版本匹配且 exit 0，仍保持 `exit-zero-unverified`、`canPrepareProfile=false`、`canLaunch=false`；
 - `prepareProfile`、`launch`、`collectDiagnostics`、`terminate` 当前均返回结构化 `unsupported`。
 
+当前精确版本 allowlist 只是 contract-only 实现事实，不是 V0.5 的最终兼容策略。冻结目标改为受限 capability probe：只有协议/schema、所需命令、超时/取消和真实 smoke 全部明确成功时才允许 profile/launch；不得只凭版本字符串或 exit 0 推断兼容。
+
 后续应逐步支持：
 
 - 由 main-owned gateway 发现并探测 me3；
@@ -715,7 +720,7 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 - Windows CI 配置；
 - release content、许可证 inventory、凭据/私有资产路径扫描和同机可复现构建指纹；
 - electron-builder 配置使用严格 JSON 闭集解析，拒绝未知键、workspace link 和 falsy manifest 漂移；scratch root、子进程树终止、超时/取消和 stdout/stderr 上限有公开负向 fixture；
-- electron-builder portable / NSIS 配置只复制最终 `better_sqlite3.node` 与确定性 metadata，packaged main 从 `process.resourcesPath/native` 解析 binding；
+- electron-builder portable / NSIS 候选配置只复制最终 `better_sqlite3.node` 与确定性 metadata，packaged main 从 `process.resourcesPath/native` 解析 binding；冻结发布目标只保留签名 NSIS；
 - private native gate 与 section-28 诚实 skip；
 - 基础性能 smoke。
 
@@ -725,7 +730,7 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 - 54 个只有 lockfile metadata、尚未归档许可证正文的生产依赖及完整 third-party notices；
 - 实际 unsigned `--dir` 产物扫描；
 - 真正的安装包、升级和干净机验证；
-- 代码签名和更新器；
+- 代码签名；
 - 安装包内 Bridge、自包含 .NET 和 native binding 验证；
 - me3 启动链；
 - 真实 Sekiro Mod 加载、回滚和再次启动；
@@ -733,6 +738,8 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 - 完整性能门槛。
 
 `skipped` 和 `unverified-no-local-sekiro-runtime` 不能算通过。
+
+V0.5 发行边界冻结为 Windows 10/11 x64 的签名 NSIS，仅限项目所有者控制的内部测试机器；不发布 portable，不内置自动更新，不得在 notices/再分发权利未闭环时向外部测试者或公众分发。
 
 ---
 
@@ -898,7 +905,7 @@ interface RendererBackend {
 | `W-ME3-MAIN-DETECT-02` | `ready` | `unverified` | — | `H-RUNTIME` | 在 desktop main 实现固定来源、固定 `--version` 行为的 privileged me3 detection gateway，并把脱敏结果接入 core adapter | `W-ME3-ADAPTER-01` 已完成；main 独占真实路径与进程权限；不创建 profile、不启动游戏 | `apps/desktop/src/main/ipc.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、未来 main-owned gateway module | `npm run test:desktop-security`、`npm run test:me3-runtime-adapter`；`validation-unfrozen`：main gateway discovery/version-probe smoke | cap=`fixture-confirmed`；只证明受限 production detection gateway，不证明 runtime 可用 |
 | `W-RENDER-BENCH-01` | `blocked` | `unverified` | `BLK-RENDER-HARDWARE` | `I-RENDER` | 在代表性 Sekiro 大地图集合上采集 WebGPU/WebGL2 加载、帧时间、picking、内存、显存和泄漏基线 | 完整只读 scene projection；真实硬件记录；采集不以前置阈值裁定为条件 | `packages/core/src/scene`、`apps/desktop/src/renderer/src/scene` | `npm run test:performance-baseline` 加真实 benchmark report | cap=`partial`；只产生基线，不自行设定发布阈值 |
 | `W-REL-SCOPE-01` | `completed` | `unverified` | — | `REL-SCOPE` | 已产出唯一、可 JSON 解析且覆盖 11 个 Gate 的 V0.5 支持范围提案；artifact validation 为 `proposal-valid`，用户裁定仍开放 | 只综合现有证据；私有 fixture registry 不得冒充 release corpus；不擅自裁定范围值 | 本文 §4~§12 与 §18.1~§18.2.1；`scripts/verify-release-scope.mjs` | `npm run test:release-scope-proposal` exit 0；严格模式必须因待用户裁定 exit 1 | cap=`unverified`；提案合法不等于范围获批或 Gate 完成 |
-| `W-REL-SCOPE-RULING-01` | `blocked` | `unverified` | `BLK-SCOPE-RULING` | `REL-SCOPE` | 在用户逐项裁定 §18.2.1 后固化支持/排除矩阵，运行严格范围门禁并生成 sealed Evidence | `W-REL-SCOPE-01` 已完成；用户明确批准全部范围项；不得由 Agent 推断批准 | 本文 §18.2.1、`scripts/verify-release-scope.mjs`、§17 Evidence | `npm run test:release-scope`、`npm run test:handoff-integrity` exit 0；裁定内容与 sealed Evidence 一致 | cap=`unverified`；仅完成范围 Gate，不提升功能 authority |
+| `W-REL-SCOPE-RULING-01` | `completed` | `unverified` | — | `REL-SCOPE` | 用户已逐项批准 §18.2.1 的 27 项支持矩阵、Sekiro 1.6 版本族、八个语义编辑器、只读 Hex、内部签名测试构建与 unsupported 边界；严格范围门禁和 sealed Evidence 已完成 | `W-REL-SCOPE-01` 已完成；批准记录使用脱敏 decisionRef；技术缺口继续由后继 Gate/blocker 失败关闭 | 本文 §18.2.1、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只完成范围 Gate，不提升任何功能 authority |
 | `W-REL-B-REGISTRY-01` | `completed` | `fixture-confirmed` | — | `REL-B` | 已建立不含私有样本内容的 corpus registry schema、分类枚举、metadata-only classification harness，以及格式/变体/重复/数量/路径/伪装等负向诊断 | 不装载或提交私有 corpus；synthetic manifest 不得冒充 release corpus | `packages/core/src/bridge/releaseCorpusRegistry.ts`、`packages/core/src/testing/runReleaseCorpusRegistrySmoke.ts` | `npm run test:release-corpus-registry`、`npm test` | cap=`fixture-confirmed`；不声明真实发布 corpus 闭环 |
 | `W-REL-B-CORPUS-01` | `blocked` | `unverified` | `BLK-REL-B-CORPUS` | `REL-B` | 使用仓库外注册 corpus 完成 DFLT/BND4/KRAK 100% 分类、声明布局闭环和未知字段保持验证 | registry/harness 已完成；合法私有 corpus；工程 wrapper 已可解析兼容 .NET 10 SDK | 仓库外 corpus registry、`scripts/verify-native-dcx-documents.mjs` | `npm run bridge:verify:dcx-documents` 与冻结后的 100% 分类检查 | cap=`native-verified`；只覆盖注册 corpus |
 | `W-REL-F-ACCEPT-01` | `completed` | `candidate` | — | `REL-F` | 已建立候选发布编辑器 inventory、authority/revision/scale contract 与提前 pass 失败关闭 harness | 不运行真实 Electron 人机规模验收；不自行批准清单或阈值 | `packages/core/src/editing/releaseEditorAcceptance.ts`、`packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract` | cap=`candidate`；harness 不等于编辑器发布通过 |
@@ -1342,6 +1349,7 @@ entries[]:
 | `EV-PRIVATE-20260724` | `unsealed-record` | 私有 native 汇总门禁 | `2002076` + 当前工作树 | 本机环境注入后 `npm run test:private-native-gate` exit 0，结构化状态 `partial` | EMEVD 1,730/33,266；FMG 18/18；PARAM 38/40；MSB 34 models / 4,500 parts / 1,089 regions / 46 events | 保留 EMEVD/FMG 通过、PARAM 2 个未覆盖布局和 MSB candidate 观察；因基线未封存，不支持新的 authority 或 Gate 终态；门禁不得汇总为全绿 |
 | `EV-REL-COMPLIANCE-20260725` | `unsealed-record` | production 依赖许可证 inventory、发行输入内容安全与同机可复现构建 | `2002076` + 当前工作树 | `npm run test:release-compliance-fixtures`、`npm run build`、`npm run test:release-content`、`npm run test:release-reproducible`、`npm run test:portable-packaging-gate` 均 exit 0 | 170 个 production lockfile 依赖、9 种 allowlist expression；116 个依赖有已安装许可证正文、54 个 metadata-only；11 个实际 desktop out/package/native runtime 输入；6 类正/负 fixture | 保留同机 fingerprint 一致和内容扫描观察；因基线未封存，不支持新的 authority 或 Gate 终态；portable 仍为 `ok=null/status=partial/dryPackStatus=skipped`，不证明 notices、installer、签名或发布渠道 |
 | `EV-REL-SCOPE-20260725` | `unsealed-record` | V0.5 支持范围提案结构与未裁定失败关闭语义 | `2002076` + 当前工作树 | `node scripts/verify-release-scope.mjs --proposal` exit 0；默认 `node scripts/verify-release-scope.mjs` 按预期 exit 1 | 27 个 scope items；显式 `gateCoverage` 覆盖 §18.1 全部 11 Gate；行为拆分 TAE/ESD/Lua-HKS，资产拆分 FLVER/TPF/MTD/collision/navigation/open conversion；§3.1 capability、§17.1 Evidence 与脱敏 registry 逻辑引用 | `--proposal` 输出 `ok=null/status=proposal-valid/frozen=false`；默认模式命中 `RELEASE_SCOPE_NOT_FROZEN`。build/ruling metadata 保持 pending/null；该证据只完成提案 artifact，不是用户裁定、sealed Evidence、REL-SCOPE 完成或任何功能 authority 提升 |
+| `EV-REL-SCOPE-20260730` | `sealed-current-run` | `scope-ruling:user-approved`；V0.5 的 27 项目标范围、版本族、语义编辑边界与项目所有者内部测试发行边界 | `HEAD=e32e8144225ee904e38e87102470cf84bd428075; trackedDiffSha256=c8a23dc5c209a71661a65ce34beb9fff975ce994e44191fb40b8fa202fac4d7e; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=8b521e3f1dce1a3bbf13a679e5fcf58594ba371c2d20eb98c1eb46d394c0ffe8; fingerprintSha256=9b907bbda822080f879c3aadf89171837edc0defb0f049382ee83fea1d743cba` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 均 exit 0；连续两次 `npm run handoff:fingerprint` 输出一致；计划中的 progress-integrity 项因仓库未定义对应 script 而未执行 | 27/27 项 `user-approved`；§18.1 全部 11 Gate；`file/product version major.minor=1.6` 且其他版本失败关闭；BND4/FMG/PARAM/EMEVD/MSB/TAE/ESD/script 八个语义编辑器；Hex 只读；仅项目所有者控制机器上的内部测试构建 | 仅支持 `REL-SCOPE passed`、`W-REL-SCOPE-RULING-01 completed` 和其他 Gate `in-scope`；不提升任何 parser、writer、corpus、运行、渲染或发行 authority，不关闭技术、语料、Oodle、metadata、模型凭据、me3、签名、硬件或许可证 blocker，不声明 V0.5 完成或允许外部分发；`test:progress-integrity` 仍为工程缺口 |
 | `EV-HANDOFF-LIVENESS-20260725` | `sealed-current-run` | 交接推进活性治理、公开回归、REL-B registry/harness fixture 与 REL-F acceptance harness candidate | `HEAD=20020766506ea71d66d3b9b9ea867aa534aaa3a9; trackedDiffSha256=4621e9898de5250b8d72d309af2396e2de00351fcefb760855cbeedd42440d5f; untrackedManifestSha256=f499f192e40be3b4f91cb01336478251435ad1789ef168aacfcdbd452f9c7c35; handoffSha256BeforeEvidenceAppend=313dbde91970b6d9a3bccb0bb244de3ce0f2a6ce44122560eebf6af625a562b2; fingerprintSha256=3067512cc0068ad13cf50011889a19c3104dc3a0d6b9b3cd7c76788ebe3e43c9` | `npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:release-corpus-registry`、`npm run test:release-editor-acceptance`、`npm run test:handoff-integrity`、`git diff --check` 均 exit 0；`npm run bridge:build` exit 0；连续两次 `npm run handoff:fingerprint` 输出一致 | 38 个 handoff 正/负 fixture；公开 synthetic/core/Electron 回归；metadata-only corpus registry fixture；候选编辑器 inventory/contract harness；项目 wrapper 解析到 .NET SDK 10.0.301 | 只封存本轮治理机制和已列公开/harness 观察，并支持 `W-REL-B-REGISTRY-01` 的 `fixture-confirmed` 与 `W-REL-F-ACCEPT-01` 的 `candidate` 上限；不包含用户范围批准标记，不支持任何 Gate `passed`/`scope-excluded`，也不提升私有 native、真游戏、真实模型服务或发布 authority；`manualReviewStillRequired` 三项仍保留 |
 | `EV-PUBLIC-CONTRACTS-20260725` | `sealed-current-run` | Bridge recovery/staging、PARAM metadata、me3 adapter、REL-B registry、REL-F acceptance 与发行失败关闭 contract | `HEAD=20020766506ea71d66d3b9b9ea867aa534aaa3a9; trackedDiffSha256=4caed8aa7f2647304d9f22a19fbd10e3f07c914f6334a6970ecf4885de1d8fad; untrackedManifestSha256=32b6faf6d0e1e92ed25a93903a0154c7803f0f49c4d64875f7f27baa61093b64; handoffSha256BeforeEvidenceAppend=f67684684b8e703f433c3495051cab381b4045de43af157a1b005cc07c77d9d6; fingerprintSha256=a450562260693252e75d6d81226aff97b9a43f3eeb39ebf7fce573c78b210839` | 最低公开回归四命令均 exit 0；`bridge:verify:client`、`test:bridge-recovery-harness`、`test:bridge-staging`、`test:param-metadata-mismatch`、`test:paramdef-layout`、`test:me3-runtime-adapter`、`test:release-corpus-registry`、`test:release-editor-acceptance` 均 exit 0；发行六命令、portable/private/section-28 gate 均 exit 0；连续两次 `handoff:fingerprint` 一致 | recovery 四阶段/背压/竞态/重启与 11 个 staging 负例；PARAM 9 个 snapshot failure、64 MiB 总预算、256 diagnostics、3 个 immutable result；me3 22 类；REL-B 26 个负例；5 个候选编辑器；170 dependencies、116/54 license text、11 artifacts | 支持 A/PARAM/me3 contract 与 REL-B registry 的 `fixture-confirmed`、REL-F acceptance 的 `candidate`、发行合规的 `partial`；artifact=`6f22d28bfae009057d57e5bcb64936721e17357cadd6ee4be562081d1b348f0a`、manifest=`48d8eda021e041d10464cd3f8e641ae23db1333ad760e4ca2708c57e5e2ff0af`；portable=`partial/skipped` 且 builder 依赖缺失，private/section-28=`skipped`；不支持任何 Gate 终态、native corpus、真实 me3/Sekiro、人机验收、installer、签名、升级或更新声明 |
 | `EV-B-DFLT-7BD` | `historical-record` | DFLT 已记录真实 corpus 往返 | `7bd354d` | 旧第 43 节“P1 安全清理执行器与 P2 真实 DFLT/BND4 文档推进”；`bridge:verify:dcx-documents` | 144 个 DFLT、两个实际变体 | 本轮未重跑私有 corpus；不得外推到新变体或发布全集 |
@@ -1587,6 +1595,20 @@ Gate 的当前完成态不能永久继承旧工作树。每个 `passed` Gate 必
 - 非声明：`fixture-confirmed` 不提升 production native writer/PARAM/runtime authority；`candidate` 不等于编辑器验收；`partial/skipped` 不等于发行通过；本 Evidence 不含用户范围批准声明，不支持任何 Gate `passed`/`scope-excluded` 或 V0.5 完成。
 - 阻塞：`BLK-NATIVE-FIXTURE-CORPUS`、`BLK-PARAM-METADATA-SOURCE`、`BLK-SCOPE-RULING` 及 §18.4 其余外部 blocker 保持有效；REL-C/REL-F/REL-H/REL-COMPLIANCE 只由各自 ready 后继继续推进。
 
+### 2026-07-30：V0.5 范围逐项批准、语义编辑边界与内部测试发行冻结
+
+- 起始：`HEAD=e32e8144225ee904e38e87102470cf84bd428075`
+- 结束：未提交工作树；HEAD=`e32e8144225ee904e38e87102470cf84bd428075` + `{docs/V0_5_IMPLEMENTATION_HANDOFF.md, scripts/verify-release-scope.mjs, scripts/verify-release-scope-fixtures.mjs}`；提交后补 SHA
+- 路线：REL-SCOPE（`W-REL-SCOPE-RULING-01`）；只修改范围治理，不实现任何新增 parser、writer、编辑器、AI、runtime、renderer 或 installer
+- lifecycle 变化：`W-REL-SCOPE-RULING-01 blocked -> completed`；`REL-SCOPE blocked -> passed`；`REL-B/C/D/E/F/G/I pending-scope -> in-scope`；`BLK-SCOPE-RULING` 无活动引用，仅保留历史审计与范围变更复查触发器
+- authority 变化：无；27 项 `currentAuthority` 原值保持不变，`unverified`、`candidate`、`fixture-confirmed`、`partial`、`native-verified` 不因用户批准升级
+- 已冻结：Sekiro 文件/产品版本 `major.minor=1.6`，族外失败关闭；单 Mod 叠加层；全部 writer 恢复门禁；DFLT/KRAK/BND4、全语言 FMG、全部 ParamType/EMEVD、登记 MSB 实体、全部 TAE/ESD/脚本的声明操作；五类 native 资产只读与 native-to-open 导出；双 provider 语义 typed mutation；me3 capability probe；WebGPU 主路径/WebGL2 回退；Windows 10/11 x64 签名 NSIS 的所有者内部测试边界
+- 已冻结编辑不变量：交付 BND4/FMG/PARAM/EMEVD/MSB/TAE/ESD/脚本八个结构化 UI + DSL 语义编辑器；两种投影共享 Bridge native document、revision、selection 和 typed mutation；未知字段只读 opaque；Hex 只读且不能形成 raw write
+- 已实现：release-scope schema `1.1.0` 显式区分 `versionFamilies` 与 `exactBuilds`，固定 `file-product-version-major-minor` 和 `fail-closed`；冻结矩阵负向检查覆盖 DSL、只读 Hex、KRAK 重压/写入、签名 NSIS、portable/自动更新排除、所有者控制目标、禁止外部分发与反向 native 导入
+- 已验证：`npm run test:release-scope-fixtures` exit 0，15 个正/负 case；`npm run test:release-scope-proposal` exit 0、`frozen=true`；`npm run test:release-scope` exit 0、`status=scope-approved`；顺序运行 `npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 均 exit 0
+- 未验证：当前 `package.json` 不存在 `test:progress-integrity`，实际调用按预期 exit 1/Missing script，未用其他门禁冒充；真实 corpus、完整 metadata 权利、KRAK 压缩、全部语义 parser/writer、八编辑器人机验收、真实 provider/me3/硬件、签名 NSIS 和干净机仍由后继 Gate/blocker 约束
+- 非声明：范围批准、strict scope pass 和 sealed Evidence 只支持 `REL-SCOPE`；不支持任一功能 Gate 通过，不证明 V0.5 完成，也不授权外部分发内部测试构建
+
 ---
 
 ## 18. V0.5 完成定义
@@ -1612,13 +1634,13 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 | `REL-A` | 所有 production writer 与事务阶段 | 每个 writer 完成 stage/validate/commit/re-read/audit，以及 operation/file/resource-entry 适用回滚和故障矩阵 | 任一 writer 绕过 Patch Engine；after-commit 不可恢复 |
 | `REL-B` | 注册的 DFLT/KRAK/BND4 发布 corpus | 100% 样本被分类；声明支持的布局完成 no-op、mutation/repack、重读和未知字段保持；unsupported 有结构化诊断 | 只验证抽样却声明全集；缺 Oodle 成功路径仍声明 KRAK 完成 |
 | `REL-C` | FMG/PARAM/EMEVD/MSB 支持矩阵 | 每个支持操作在每个注册布局上通过 read/no-op/mutate/write/re-read/reference/rollback；游戏加载按声明范围通过 | fixture、candidate、单一 happy path 或未知字段重写 |
-| `REL-D` | 明确列出的 Sekiro 行为/动画格式和只读/可写范围 | corpus 范围已由真实 Sekiro 证据冻结；每个声明格式达到其操作级完成矩阵 | 当前 `not-started`、借用其他游戏格式结论、范围未冻结 |
-| `REL-E` | FLVER/TPF/MTD/collision/navigation 与开放格式转换矩阵 | 每个声明转换列出输入约束、native 输出、validator、重读、场景引用和游戏加载结果 | raw replace、代理几何、最小 DDS 被外推成完整资产管线 |
-| `REL-F` | 声明发布的编辑器列表与规模等级 | 全部读取真实 document；mutation typed；revision 冲突失败；大表/大场景达到已批准容量；无 demo fallback | UI 存在但底层 authority 缺失；只通过静态测试 |
+| `REL-D` | 全部 Sekiro TAE、全部 ESD、源码与编译脚本完整读写 | corpus 范围由真实 Sekiro 证据确认；结构化界面/DSL 共用 native document，全部 typed mutation、writer、重读、回滚和游戏加载矩阵通过 | 当前 `not-started`、借用其他游戏格式结论、执行不受信脚本或以 Hex 代替语义 parser |
+| `REL-E` | FLVER/TPF/MTD/collision/navigation 全量语义只读与 native-to-open 导出矩阵 | 五类 native 文档、引用、可视化和批准导出通过真实 corpus；无 native writer 或反向导入 | raw replace、代理几何、最小 DDS 被外推成 native authority 或开放格式被写回 native |
+| `REL-F` | 八个语义编辑器、结构化界面 + DSL、共享只读 Hex 证据视图 | 全部读取真实 native document；mutation typed；revision 冲突失败；大表/大场景达到批准容量；无 demo fallback 或 raw Hex 写入 | UI 存在但底层 authority 缺失；Safe Hex 演示或静态测试被当作发布编辑器 |
 | `REL-G` | 两类真实模型服务、允许工具集和权限模式 | 两类 provider 各完成真实只读与受控写循环、取消、超时、限额、审计、凭据脱敏；写工具复用 native validator/Patch Engine | 仅 fake server；模型可绕过证据或写入主干 |
-| `REL-H` | Windows 支持版本、安装/升级/卸载、me3 版本范围 | 干净机安装、升级 migration、签名、更新、Bridge/.NET/native binding、提交后启动、日志关联、回滚后复启全部通过 | unsigned 本地产物、配置存在、skip 或只启动一次 |
+| `REL-H` | Windows 10/11 x64 签名 NSIS 与 me3 capability-probe 运行范围 | 干净机安装、覆盖升级、卸载、签名、Bridge/.NET/native binding、能力探测、提交后启动、日志关联、回滚后复启全部通过 | portable/自动更新被冒充范围内能力，unsigned 本地产物、配置存在、skip、版本字符串或只启动一次 |
 | `REL-I` | 代表性地图集合、硬件档位、WebGPU/WebGL2 支持策略 | 所有已批准性能预算通过，资源泄漏受控；后端决策由 benchmark 支持 | synthetic baseline、代理场景、未记录硬件/地图或无阈值 |
-| `REL-COMPLIANCE` | 发布树与产物 | release content scan、许可证清单、凭据/私有资产扫描和可复现构建通过 | 真实资产、用户 Mod、私有 corpus、Oodle DLL、key 或签名私钥进入提交/产物 |
+| `REL-COMPLIANCE` | 项目所有者内部签名测试构建及禁止外部分发边界 | package tree、许可证 inventory、凭据/私有资产扫描、所有者控制目标和签名来源通过；缺 notices 被显式追踪并阻止外部分发 | 真实资产、用户 Mod、私有 corpus、Oodle、key/私钥进入提交/产物，或未补 notices/权利即对外分发 |
 
 ### 18.2 发布前必须裁定但当前尚未裁定的量化项
 
@@ -1637,28 +1659,33 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 
 项目周期长不降低这些标准，也不要求为了尽快发布而牺牲路线完整性。
 
-#### 18.2.1 V0.5 支持范围提案（待用户裁定）
+#### 18.2.1 V0.5 支持范围（用户已批准）
 
-本块是 `W-REL-SCOPE-01` 的唯一机器可读产物。`--proposal` 只验证结构、引用和非声明完整性；默认严格模式在用户完成裁定前必须失败关闭。开发期私有 fixture registry 仅用于复现当前证据，不是 release corpus，也不能替代发布范围裁定。
+本块是 `W-REL-SCOPE-RULING-01` 的唯一机器可读冻结产物。`--proposal` 验证结构、引用和非声明完整性；默认严格模式还要求完整用户批准元数据、版本族策略、全部条目裁定和空 openRulings。开发期私有 fixture registry 仅用于复现当前证据，不是 release corpus，也不能替代后继发布 Gate 的真实验证。
 
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->
 ```json
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "proposalId": "V0.5-SCOPE-20260725",
   "release": "V0.5",
   "game": "Sekiro",
   "gameBuildRange": {
-    "status": "pending-user-ruling",
-    "builds": []
+    "status": "user-approved",
+    "matchPolicy": "file-product-version-major-minor",
+    "versionFamilies": [
+      "1.6"
+    ],
+    "exactBuilds": [],
+    "unknownBuildPolicy": "fail-closed"
   },
   "ruling": {
-    "status": "pending-user-ruling",
-    "approvedBy": null,
-    "approvedAt": null,
-    "decisionRef": null
+    "status": "user-approved",
+    "approvedBy": "repository-owner",
+    "approvedAt": "2026-07-30T02:48:15.597Z",
+    "decisionRef": "codex-thread:019fa924-bb20-7d23-aab9-3863957c5e10"
   },
-  "proposalStatus": "awaiting-user-ruling",
+  "proposalStatus": "user-approved",
   "unlistedPolicy": "unsupported",
   "corpusPolicy": {
     "privateFixtureRegistryIsReleaseCorpus": false,
@@ -1696,534 +1723,1151 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "SCOPE-RENDERING",
         "SCOPE-COMPLIANCE"
       ],
-      "currentState": "blocked",
-      "blockerRefs": ["BLK-SCOPE-RULING"],
-      "openRulings": ["用户尚未逐项批准或修改完整支持/排除矩阵与 Sekiro build 范围。"]
+      "currentState": "passed",
+      "blockerRefs": [],
+      "openRulings": [
+        "用户逐项裁定已冻结；scope target 不提升 current authority，技术缺口由后继 Gate 与 blocker 继续失败关闭。"
+      ]
     },
     {
       "gateId": "REL-A",
-      "scopeItemIds": ["SCOPE-A-WORKSPACE", "SCOPE-A-RECOVERY"],
+      "scopeItemIds": [
+        "SCOPE-A-WORKSPACE",
+        "SCOPE-A-RECOVERY"
+      ],
       "currentState": "blocked",
-      "blockerRefs": ["BLK-NATIVE-FIXTURE-CORPUS"],
-      "openRulings": ["公开 Bridge recovery/staging harness 已完成；全部 production native writer 的真实故障矩阵仍缺合法仓库外 corpus。"]
+      "blockerRefs": [
+        "BLK-NATIVE-FIXTURE-CORPUS"
+      ],
+      "openRulings": [
+        "全部发布 writer 必须逐项完成真实 stage/validate/commit/re-read/rollback/crash 故障矩阵。"
+      ]
     },
     {
       "gateId": "REL-B",
-      "scopeItemIds": ["SCOPE-DFLT", "SCOPE-KRAK", "SCOPE-BND4"],
+      "scopeItemIds": [
+        "SCOPE-DFLT",
+        "SCOPE-KRAK",
+        "SCOPE-BND4"
+      ],
       "currentState": "blocked",
-      "blockerRefs": ["BLK-REL-B-CORPUS"],
-      "openRulings": ["发布 corpus、KRAK 重压和未知布局策略仍未闭环。"]
+      "blockerRefs": [
+        "BLK-REL-B-CORPUS"
+      ],
+      "openRulings": [
+        "需建立 1.6.x release corpus，并完成 DFLT/KRAK/BND4 全量分类、KRAK 压缩写回与组合闭环。"
+      ]
     },
     {
       "gateId": "REL-C",
-      "scopeItemIds": ["SCOPE-FMG", "SCOPE-PARAM", "SCOPE-EMEVD", "SCOPE-MSB"],
+      "scopeItemIds": [
+        "SCOPE-FMG",
+        "SCOPE-PARAM",
+        "SCOPE-EMEVD",
+        "SCOPE-MSB"
+      ],
       "currentState": "open",
       "blockerRefs": [],
-      "openRulings": ["PARAM metadata contract 已完成但合法来源、native 一致性仍开放；当前可推进 EMEVD typed proposal -> Bridge/PatchIR 接线，四类资源的完整发布 operation/game-load 矩阵仍待裁定。"]
+      "openRulings": [
+        "需完成全官方语言 FMG、全部 ParamType/EMEVD 及登记 MSB 实体的 release corpus、writer、引用和游戏加载矩阵。"
+      ]
     },
     {
       "gateId": "REL-D",
-      "scopeItemIds": ["SCOPE-BEHAVIOR-ANIMATION", "SCOPE-BEHAVIOR-TAE", "SCOPE-BEHAVIOR-ESD", "SCOPE-BEHAVIOR-SCRIPT"],
+      "scopeItemIds": [
+        "SCOPE-BEHAVIOR-ANIMATION",
+        "SCOPE-BEHAVIOR-TAE",
+        "SCOPE-BEHAVIOR-ESD",
+        "SCOPE-BEHAVIOR-SCRIPT"
+      ],
       "currentState": "blocked",
-      "blockerRefs": ["BLK-BEHAVIOR-CORPUS"],
-      "openRulings": ["TAE、ESD、Lua/HKS 的真实 Sekiro 格式与只读/可写边界缺合法 corpus 裁定。"]
+      "blockerRefs": [
+        "BLK-BEHAVIOR-CORPUS"
+      ],
+      "openRulings": [
+        "需建立真实 Sekiro TAE/ESD/脚本 corpus、完整 schema/parser/writer/DSL 与游戏加载矩阵。"
+      ]
     },
     {
       "gateId": "REL-E",
-      "scopeItemIds": ["SCOPE-ASSETS", "SCOPE-ASSET-FLVER", "SCOPE-ASSET-TPF", "SCOPE-ASSET-MTD", "SCOPE-ASSET-COLLISION", "SCOPE-ASSET-NAVIGATION", "SCOPE-ASSET-OPEN-CONVERSION"],
+      "scopeItemIds": [
+        "SCOPE-ASSETS",
+        "SCOPE-ASSET-FLVER",
+        "SCOPE-ASSET-TPF",
+        "SCOPE-ASSET-MTD",
+        "SCOPE-ASSET-COLLISION",
+        "SCOPE-ASSET-NAVIGATION",
+        "SCOPE-ASSET-OPEN-CONVERSION"
+      ],
       "currentState": "blocked",
-      "blockerRefs": ["BLK-ASSET-CORPUS"],
-      "openRulings": ["各 native 资产格式、开放格式转换与性能边界缺 corpus 和用户裁定。"]
+      "blockerRefs": [
+        "BLK-ASSET-CORPUS"
+      ],
+      "openRulings": [
+        "需完成五类 native 资产的全量只读语义 authority、引用与 native-to-open 导出矩阵。"
+      ]
     },
     {
       "gateId": "REL-F",
-      "scopeItemIds": ["SCOPE-EDITORS"],
+      "scopeItemIds": [
+        "SCOPE-EDITORS"
+      ],
       "currentState": "open",
       "blockerRefs": [],
-      "openRulings": ["发布编辑器清单、真实文档规模与人机验收阈值仍待裁定。"]
+      "openRulings": [
+        "需交付八个语义编辑器、共享只读 Hex 证据视图、规模 instrumentation 与完整 Electron 人机验收。"
+      ]
     },
     {
       "gateId": "REL-G",
-      "scopeItemIds": ["SCOPE-AI"],
+      "scopeItemIds": [
+        "SCOPE-AI"
+      ],
       "currentState": "blocked",
-      "blockerRefs": ["BLK-MODEL-CREDENTIALS"],
-      "openRulings": ["两类真实 provider、工具集、权限与限额仍缺凭据验证和用户裁定。"]
+      "blockerRefs": [
+        "BLK-MODEL-CREDENTIALS"
+      ],
+      "openRulings": [
+        "需对两类真实 provider 完成语义 typed tool、权限、限额、取消、审计和多步写任务验证。"
+      ]
     },
     {
       "gateId": "REL-H",
-      "scopeItemIds": ["SCOPE-SEKIRO-BUILD", "SCOPE-RUNTIME", "SCOPE-RELEASE"],
+      "scopeItemIds": [
+        "SCOPE-SEKIRO-BUILD",
+        "SCOPE-RUNTIME",
+        "SCOPE-RELEASE"
+      ],
       "currentState": "open",
       "blockerRefs": [],
-      "openRulings": ["me3 adapter/detect contract 已完成；production main detection gateway、Sekiro build、me3 版本、Windows 支持与签名/更新策略仍待裁定。"]
+      "openRulings": [
+        "需完成 me3 能力探测运行闭环及 Windows 10/11 x64 签名 NSIS 的安装、升级、卸载和干净机验证。"
+      ]
     },
     {
       "gateId": "REL-I",
-      "scopeItemIds": ["SCOPE-RENDERING"],
+      "scopeItemIds": [
+        "SCOPE-RENDERING"
+      ],
       "currentState": "blocked",
-      "blockerRefs": ["BLK-RENDER-HARDWARE"],
-      "openRulings": ["代表性地图、硬件档位、后端策略和性能阈值尚未批准。"]
+      "blockerRefs": [
+        "BLK-RENDER-HARDWARE"
+      ],
+      "openRulings": [
+        "需在代表性硬件和真实大场景完成 WebGPU 主路径、WebGL2 回退及性能/泄漏验收。"
+      ]
     },
     {
       "gateId": "REL-COMPLIANCE",
-      "scopeItemIds": ["SCOPE-COMPLIANCE"],
+      "scopeItemIds": [
+        "SCOPE-COMPLIANCE"
+      ],
       "currentState": "open",
       "blockerRefs": [],
-      "openRulings": ["完整 notices、实际 package tree 和跨工具链复现仍未闭环。"]
+      "openRulings": [
+        "仅允许项目所有者内部测试；外部分发仍由 notices、再分发权利与完整发行合规失败关闭。"
+      ]
     }
   ],
   "scopeItems": [
     {
       "scopeItemId": "SCOPE-SEKIRO-BUILD",
       "capabilityId": "H-RUNTIME",
-      "gateIds": ["REL-SCOPE", "REL-H"],
+      "gateIds": [
+        "REL-SCOPE",
+        "REL-H"
+      ],
       "subjectKind": "game-build",
-      "scope": "Sekiro 游戏版本与 build identity",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "Sekiro 1.6.x 文件/产品版本族与 build identity",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["detect-build", "validate-supported-build", "fail-closed-on-unknown-build"],
-      "unsupportedOperations": ["support-unlisted-game", "assume-unknown-build-compatible"],
+      "operations": [
+        "detect-file-product-version",
+        "match-major-minor-1.6",
+        "record-exact-build-identity",
+        "fail-closed-on-non-1.6-build"
+      ],
+      "unsupportedOperations": [
+        "support-unlisted-game",
+        "assume-non-1.6-build-compatible",
+        "treat-version-family-as-native-evidence"
+      ],
       "currentAuthority": "unverified",
-      "evidenceRefs": ["EV-PRIVATE-20260724"],
+      "evidenceRefs": [
+        "EV-PRIVATE-20260724"
+      ],
       "registryRefs": [],
-      "openRulings": ["批准的 Sekiro build/patch 版本列表及兼容策略仍待用户裁定。"],
-      "nonClaims": ["私有 fixture 可读取不证明已识别或批准具体游戏 build，也不证明真实游戏启动。"]
+      "openRulings": [],
+      "nonClaims": [
+        "用户批准 1.6.x 版本族只冻结目标兼容范围；当前 authority 仍为 unverified，每个实际 build 仍须进入 release corpus 并通过真实验证。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-A-WORKSPACE",
       "capabilityId": "A-WORKSPACE",
-      "gateIds": ["REL-A"],
+      "gateIds": [
+        "REL-A"
+      ],
       "subjectKind": "workspace",
-      "scope": "工作区路径隔离、原版只读和 Mod 资源写入主干",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "单一可写 Mod 叠加层、可选只读原版层与应用数据外置",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["open-workspace", "index-readonly-game", "stage-mod-resource-via-patch-engine"],
-      "unsupportedOperations": ["write-original-game", "write-mod-resource-outside-patch-engine", "store-sidecar-in-mod-workspace"],
+      "operations": [
+        "open-single-mod-overlay",
+        "attach-optional-readonly-game-base",
+        "index-readonly-game",
+        "stage-mod-resource-via-patch-engine",
+        "store-metadata-in-app-data"
+      ],
+      "unsupportedOperations": [
+        "write-original-game",
+        "write-mod-resource-outside-patch-engine",
+        "store-sidecar-in-mod-workspace",
+        "open-multiple-writable-overlays"
+      ],
       "currentAuthority": "partial",
-      "evidenceRefs": ["EV-A-SAFETY-20260720"],
+      "evidenceRefs": [
+        "EV-A-SAFETY-20260720"
+      ],
       "registryRefs": [],
-      "openRulings": ["发布版允许的工作区类型与外部路径策略仍待用户确认。"],
-      "nonClaims": ["公开安全回归不证明所有生产 writer 都已接入同一写入主干。"]
+      "openRulings": [],
+      "nonClaims": [
+        "范围批准不证明全部 production writer 已接入单一写入主干，也不证明真实外部路径与重解析边界已完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-A-RECOVERY",
       "capabilityId": "A-RECOVERY",
-      "gateIds": ["REL-A"],
+      "gateIds": [
+        "REL-A"
+      ],
       "subjectKind": "recovery",
       "scope": "operation、file、resource-entry 三层审计、回滚与崩溃恢复",
-      "decisionStatus": "awaiting-user-ruling",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["stage", "validate", "commit-with-backup", "re-read", "audit", "rollback", "recover-after-commit"],
-      "unsupportedOperations": ["overwrite-revision-conflict", "swallow-recovery-failure", "bypass-backup"],
+      "operations": [
+        "stage",
+        "validate",
+        "commit-with-backup",
+        "re-read",
+        "audit",
+        "rollback",
+        "recover-after-commit",
+        "gate-every-release-writer"
+      ],
+      "unsupportedOperations": [
+        "publish-writer-without-failure-matrix",
+        "overwrite-revision-conflict",
+        "swallow-recovery-failure",
+        "bypass-backup"
+      ],
       "currentAuthority": "partial",
-      "evidenceRefs": ["EV-A-RECOVERY-20260724", "EV-PUBLIC-CONTRACTS-20260725"],
+      "evidenceRefs": [
+        "EV-A-RECOVERY-20260724",
+        "EV-PUBLIC-CONTRACTS-20260725"
+      ],
       "registryRefs": [],
-      "openRulings": ["全部 production writer 清单与每类 writer 所需故障矩阵仍待最终范围裁定。"],
-      "nonClaims": ["现有 native 20 个故障用例与公开 fake-daemon harness 不证明全部 production writer、真实 Bridge writer 崩溃或断电场景已闭环。"]
+      "openRulings": [],
+      "nonClaims": [
+        "所有发布 writer 均被纳入恢复门禁；现有 harness 不证明尚未实现或缺少 corpus 的 writer 已通过真实崩溃、断电与资源项恢复矩阵。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-DFLT",
       "capabilityId": "B-DFLT",
-      "gateIds": ["REL-B"],
+      "gateIds": [
+        "REL-B"
+      ],
       "subjectKind": "container",
       "scope": "注册 Sekiro DFLT 布局的解压、无修改往返、重压与重读",
-      "decisionStatus": "awaiting-user-ruling",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["classify", "decompress", "no-op-roundtrip", "recompress", "re-read"],
-      "unsupportedOperations": ["accept-unregistered-layout", "rewrite-unknown-fields"],
-      "currentAuthority": "native-verified",
-      "evidenceRefs": ["EV-B-DFLT-7BD"],
-      "registryRefs": [
-        {"registryRef": "historical-corpus:EV-B-DFLT-7BD", "kind": "historical-private-corpus", "releaseCorpus": false}
+      "operations": [
+        "classify",
+        "decompress",
+        "no-op-roundtrip",
+        "recompress",
+        "re-read"
       ],
-      "openRulings": ["历史私有 corpus 尚未迁移为带版本和全量分类的 release corpus。"],
-      "nonClaims": ["历史 144 个样本与两个变体不构成当前发布全集或新布局 authority。"]
+      "unsupportedOperations": [
+        "accept-unregistered-layout",
+        "rewrite-unknown-fields"
+      ],
+      "currentAuthority": "native-verified",
+      "evidenceRefs": [
+        "EV-B-DFLT-7BD"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "historical-corpus:EV-B-DFLT-7BD",
+          "kind": "historical-private-corpus",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "登记 DFLT 布局的完整读写是目标范围；历史 144 个样本与两个变体仍不构成当前 1.6.x release corpus 或未知布局 authority。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-KRAK",
       "capabilityId": "B-KRAK",
-      "gateIds": ["REL-B"],
-      "subjectKind": "container",
-      "scope": "注册 Sekiro KRAK 布局与用户合法 Oodle runtime 的受控解压链",
-      "decisionStatus": "awaiting-user-ruling",
-      "proposedSupport": "supported",
-      "operations": ["validate-runtime", "classify", "decompress", "re-read"],
-      "unsupportedOperations": ["distribute-oodle", "krak-recompress", "krak-write"],
-      "currentAuthority": "partial",
-      "evidenceRefs": ["EV-B-KRAK-20260724"],
-      "registryRefs": [
-        {"registryRef": "fixture:krak-preview", "kind": "private-fixture", "releaseCorpus": false}
+      "gateIds": [
+        "REL-B"
       ],
-      "openRulings": ["KRAK 发布布局、合法 corpus、重压和 writer 是否纳入 V0.5 仍待用户裁定。"],
-      "nonClaims": ["单个私有 preview 解压不证明 KRAK 发布 corpus、重压或 writer 闭环。"]
+      "subjectKind": "container",
+      "scope": "登记 Sekiro KRAK 布局与用户合法 Oodle runtime 的解压、重压、写回、重读与恢复闭环",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "validate-user-oodle-runtime",
+        "classify",
+        "decompress",
+        "recompress",
+        "write",
+        "re-read",
+        "rollback"
+      ],
+      "unsupportedOperations": [
+        "distribute-oodle",
+        "accept-unregistered-layout",
+        "bypass-oodle-license-or-runtime-validation"
+      ],
+      "currentAuthority": "partial",
+      "evidenceRefs": [
+        "EV-B-KRAK-20260724"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:krak-preview",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "完整 KRAK 读写已纳入目标范围，但当前 authority 仍为 partial；单个私有解压 preview 不证明压缩、写回、恢复或 release corpus 已完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-BND4",
       "capabilityId": "B-BND4",
-      "gateIds": ["REL-B"],
+      "gateIds": [
+        "REL-B"
+      ],
       "subjectKind": "container",
       "scope": "注册 Sekiro BND4 布局的 browse、entry mutation、repack、重读与回滚",
-      "decisionStatus": "awaiting-user-ruling",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["classify", "browse", "add-entry", "replace-entry", "delete-entry", "rename-entry", "move-entry", "repack", "re-read", "rollback"],
-      "unsupportedOperations": ["accept-unregistered-flags", "rewrite-unknown-layout", "claim-krak-inner-coverage"],
-      "currentAuthority": "native-verified",
-      "evidenceRefs": ["EV-B-BND4-7BD", "EV-A-RECOVERY-20260724"],
-      "registryRefs": [
-        {"registryRef": "historical-corpus:EV-B-BND4-7BD", "kind": "historical-private-corpus", "releaseCorpus": false}
+      "operations": [
+        "classify",
+        "browse",
+        "add-entry",
+        "replace-entry",
+        "delete-entry",
+        "rename-entry",
+        "move-entry",
+        "repack",
+        "validate-dflt-krak-inner-chain",
+        "re-read",
+        "rollback"
       ],
-      "openRulings": ["历史 DFLT-BND4 corpus 尚未升级为覆盖 KRAK 和未知 flags 的 release corpus。"],
-      "nonClaims": ["历史 DFLT-BND4 证据不覆盖 KRAK 内层、未来 flags 或发布全集。"]
+      "unsupportedOperations": [
+        "accept-unregistered-flags",
+        "rewrite-unknown-layout",
+        "claim-unregistered-inner-coverage"
+      ],
+      "currentAuthority": "native-verified",
+      "evidenceRefs": [
+        "EV-B-BND4-7BD",
+        "EV-A-RECOVERY-20260724"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "historical-corpus:EV-B-BND4-7BD",
+          "kind": "historical-private-corpus",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "登记 BND4 布局及 DFLT/KRAK 内层组合是目标范围；历史 DFLT-BND4 证据不覆盖 KRAK、未来 flags 或当前 release corpus。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-FMG",
       "capabilityId": "C-FMG",
-      "gateIds": ["REL-C"],
-      "subjectKind": "resource",
-      "scope": "注册 Sekiro FMG v2 布局的读取、文本 mutation、写入、重读与回滚",
-      "decisionStatus": "awaiting-user-ruling",
-      "proposedSupport": "supported",
-      "operations": ["read", "no-op-roundtrip", "upsert", "add", "delete", "write", "re-read", "rollback"],
-      "unsupportedOperations": ["unregistered-language-layout", "implicit-id-merge", "claim-complete-reference-validation"],
-      "currentAuthority": "native-verified",
-      "evidenceRefs": ["EV-C-FMG-7BD", "EV-PRIVATE-20260724"],
-      "registryRefs": [
-        {"registryRef": "fixture:testRole=fmg-primary", "kind": "private-fixture", "releaseCorpus": false}
+      "gateIds": [
+        "REL-C"
       ],
-      "openRulings": ["发布语言、msgbnd 集合、引用验证和游戏加载样本仍待用户裁定。"],
-      "nonClaims": ["开发期 18/18 私有 fixture 不等于多语言 release corpus 或真实游戏加载。"]
+      "subjectKind": "resource",
+      "scope": "Sekiro 全部官方语言与登记 msgbnd/FMG v2 布局的完整文本读写",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "read-all-official-languages",
+        "no-op-roundtrip",
+        "upsert",
+        "add",
+        "delete",
+        "write",
+        "re-read",
+        "reference-validate",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "unregistered-language-layout",
+        "implicit-id-merge",
+        "claim-reference-or-game-load-before-validation"
+      ],
+      "currentAuthority": "native-verified",
+      "evidenceRefs": [
+        "EV-C-FMG-7BD",
+        "EV-PRIVATE-20260724"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:testRole=fmg-primary",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "全部官方语言已纳入目标范围；开发期 18/18 私有 fixture 不等于多语言 release corpus、完整引用验证或真实游戏加载。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-PARAM",
       "capabilityId": "C-PARAM",
-      "gateIds": ["REL-C"],
-      "subjectKind": "resource",
-      "scope": "严格 metadata 匹配下的注册 Sekiro PARAM 读取、typed field/row mutation、写入、重读与回滚",
-      "decisionStatus": "awaiting-user-ruling",
-      "proposedSupport": "supported",
-      "operations": ["read", "no-op-roundtrip", "typed-field-mutation", "row-crud", "write", "re-read", "reference-validate", "rollback"],
-      "unsupportedOperations": ["metadata-mismatch-write", "unregistered-layout", "unknown-field-rewrite"],
-      "currentAuthority": "partial",
-      "evidenceRefs": ["EV-C-PARAM-7BD", "EV-PRIVATE-20260724", "EV-PUBLIC-CONTRACTS-20260725"],
-      "registryRefs": [
-        {"registryRef": "fixture:testRole=param-primary", "kind": "private-fixture", "releaseCorpus": false}
+      "gateIds": [
+        "REL-C"
       ],
-      "openRulings": ["合法可再分发的 Paramdex-compatible metadata 来源/版本/许可证、两个未覆盖布局、metadata/native 一致性和发布 ParamType 集合仍待裁定。"],
-      "nonClaims": ["38/40 私有抽样、用户派生 metadata 与公开 synthetic metadata contract 不证明真实 metadata source、完整 PARAM release authority 或 native writer 扩围。"]
+      "subjectKind": "resource",
+      "scope": "合法 metadata 严格匹配下的 Sekiro 全部 ParamType、布局、字段与行完整读写",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "read-all-param-types",
+        "no-op-roundtrip",
+        "typed-field-mutation",
+        "row-crud",
+        "write",
+        "re-read",
+        "reference-validate",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "metadata-mismatch-write",
+        "unknown-field-rewrite",
+        "write-before-all-sekiro-param-types-are-authoritative"
+      ],
+      "currentAuthority": "partial",
+      "evidenceRefs": [
+        "EV-C-PARAM-7BD",
+        "EV-PRIVATE-20260724",
+        "EV-PUBLIC-CONTRACTS-20260725"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:testRole=param-primary",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "全部 ParamType 已纳入目标范围，但当前 authority 仍为 partial；38/40 私有抽样与 synthetic metadata contract 不证明合法 metadata 来源、全部布局或真实游戏验证完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-EMEVD",
       "capabilityId": "C-EMEVD",
-      "gateIds": ["REL-C"],
-      "subjectKind": "resource",
-      "scope": "注册 Sekiro EMEVD 布局的无损读取、typed event/instruction mutation、写入、重读与回滚",
-      "decisionStatus": "awaiting-user-ruling",
-      "proposedSupport": "supported",
-      "operations": ["read", "no-op-roundtrip", "typed-mutation", "event-add-delete-duplicate", "write", "re-read", "rollback", "dsl-to-mutation-proposal"],
-      "unsupportedOperations": ["direct-dsl-binary-write", "unverified-layer-write", "unknown-instruction-reencode"],
-      "currentAuthority": "partial",
-      "evidenceRefs": ["EV-C-EMEVD-7BD", "EV-C-EMEVD-DSL-20260724", "EV-PRIVATE-20260724"],
-      "registryRefs": [
-        {"registryRef": "fixture:testRole=emevd-primary", "kind": "private-fixture", "releaseCorpus": false}
+      "gateIds": [
+        "REL-C"
       ],
-      "openRulings": ["完整 EMEDF、layer 变体、KRAK 包装、DSL 生产接线和发布 event corpus 仍待裁定。"],
-      "nonClaims": ["typed DSL fixture 与单一私有 EMEVD 不证明完整 EMEDF、layer 或游戏加载。"]
+      "subjectKind": "resource",
+      "scope": "Sekiro 全部 EMEVD 事件、指令、控制流、参数与 layer 变体的完整无损读写",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "read-all-events-instructions-layers",
+        "no-op-roundtrip",
+        "typed-mutation",
+        "event-instruction-crud",
+        "control-flow-validate",
+        "dsl-parse-typecheck-to-mutation",
+        "write",
+        "re-read",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "direct-dsl-binary-write",
+        "bypass-emedf-typecheck",
+        "unknown-instruction-reencode"
+      ],
+      "currentAuthority": "partial",
+      "evidenceRefs": [
+        "EV-C-EMEVD-7BD",
+        "EV-C-EMEVD-DSL-20260724",
+        "EV-PRIVATE-20260724"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:testRole=emevd-primary",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "全部 EMEVD 已纳入目标范围，但当前 authority 仍为 partial；完整 EMEDF、layer/KRAK 变体、生产 DSL 接线、release corpus 与游戏加载尚未完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-MSB",
       "capabilityId": "C-MSB",
-      "gateIds": ["REL-C"],
-      "subjectKind": "resource",
-      "scope": "注册 Sekiro MSB 布局的语义读取、实体投影、typed transform mutation、写入、重读与回滚",
-      "decisionStatus": "awaiting-user-ruling",
-      "proposedSupport": "supported",
-      "operations": ["read", "no-op-roundtrip", "project-model-part-region-event", "typed-transform-mutation", "write", "re-read", "rollback"],
-      "unsupportedOperations": ["claim-untruncated-scene", "all-entity-crud", "unknown-entity-rewrite", "claim-game-load"],
-      "currentAuthority": "partial",
-      "evidenceRefs": ["EV-C-MSB-SCENE-20260724", "EV-C-MSB-7BD"],
-      "registryRefs": [
-        {"registryRef": "fixture:testRole=msb-primary", "kind": "private-fixture", "releaseCorpus": false}
+      "gateIds": [
+        "REL-C"
       ],
-      "openRulings": ["完整实体类型、引用修复、分页/流式投影、KRAK corpus 与游戏加载范围仍待裁定。"],
-      "nonClaims": ["脱敏的 m11 私有 fixture 和截断 preview 不是 MSB release corpus 或完整 scene authority。"]
+      "subjectKind": "resource",
+      "scope": "登记 Sekiro MSB 实体类型的完整语义读取、CRUD、引用修复、写入、重读与回滚",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "read",
+        "no-op-roundtrip",
+        "project-complete-registered-entities",
+        "registered-entity-crud",
+        "typed-transform-and-field-mutation",
+        "reference-validate-and-repair",
+        "write",
+        "re-read",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "edit-unregistered-entity",
+        "unknown-entity-rewrite",
+        "claim-untruncated-scene-before-validation"
+      ],
+      "currentAuthority": "partial",
+      "evidenceRefs": [
+        "EV-C-MSB-SCENE-20260724",
+        "EV-C-MSB-7BD"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:testRole=msb-primary",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "登记实体完整读写已纳入目标范围；脱敏 m11 私有 fixture 与截断 preview 不证明 release corpus、完整场景、KRAK 组合或游戏加载完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-BEHAVIOR-ANIMATION",
       "capabilityId": "D-BEHAVIOR",
-      "gateIds": ["REL-D"],
+      "gateIds": [
+        "REL-D"
+      ],
       "subjectKind": "behavior-animation",
-      "scope": "经 Sekiro corpus 确认的行为、动画与脚本格式只读 inventory",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "真实 Sekiro corpus 中行为、动画与脚本格式的深度语义解析与引用清单",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["inventory", "identify-magic-and-container", "read-reference-candidates", "fail-closed-on-unknown-format"],
-      "unsupportedOperations": ["borrow-other-game-format-claims", "behavior-write", "animation-write", "script-write"],
+      "operations": [
+        "inventory",
+        "identify-magic-container-version",
+        "parse-semantic-document",
+        "resolve-cross-resource-references",
+        "classify-unknown-format",
+        "fail-closed-on-unknown-format"
+      ],
+      "unsupportedOperations": [
+        "borrow-other-game-format-claims",
+        "raw-hex-as-semantic-authority",
+        "execute-untrusted-script"
+      ],
       "currentAuthority": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
-      "openRulings": ["Sekiro 实际格式清单、只读/可写边界、发布 corpus 与完成矩阵均待用户基于真实证据裁定。"],
-      "nonClaims": ["当前没有 Sekiro 行为/动画 native authority；格式名称候选不构成支持声明。"]
+      "openRulings": [],
+      "nonClaims": [
+        "深度解析已纳入目标范围，但当前 authority 仍为 unverified；格式候选、文件名或其他游戏知识不构成 Sekiro native authority。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-BEHAVIOR-TAE",
       "capabilityId": "D-BEHAVIOR",
-      "gateIds": ["REL-D"],
+      "gateIds": [
+        "REL-D"
+      ],
       "subjectKind": "behavior-animation",
-      "scope": "Sekiro TAE animation event 文档、时间轴与跨资源引用",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "Sekiro 全部 TAE 布局、事件类型、时间轴、参数与动画引用的完整读写",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["identify-sekiro-tae", "read-event-timeline", "read-event-parameters", "resolve-reference-candidates", "fail-closed-on-unknown-layout"],
-      "unsupportedOperations": ["tae-write", "event-time-mutation", "borrow-other-game-tae-layout"],
+      "operations": [
+        "identify-and-parse-all-sekiro-tae",
+        "read-event-timeline-and-parameters",
+        "typed-event-crud",
+        "edit-start-end-frame",
+        "validate-animation-references",
+        "write",
+        "re-read",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "borrow-other-game-tae-layout",
+        "raw-hex-write",
+        "unknown-event-reencode"
+      ],
       "currentAuthority": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
-      "openRulings": ["真实 Sekiro TAE 容器链、布局版本、事件类型、只读/可写边界和 release corpus 均待裁定。"],
-      "nonClaims": ["TAE 名称与目标时间轴不证明仓库已有 Sekiro TAE parser、writer 或事件 schema。"]
+      "openRulings": [],
+      "nonClaims": [
+        "全部 TAE 完整读写已纳入目标范围，但当前 authority 仍为 unverified；仓库尚无生产 TAE parser、event schema、writer 或真实游戏证据。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-BEHAVIOR-ESD",
       "capabilityId": "D-BEHAVIOR",
-      "gateIds": ["REL-D"],
+      "gateIds": [
+        "REL-D"
+      ],
       "subjectKind": "behavior-animation",
-      "scope": "Sekiro ESD state machine 文档、条件与图投影",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "Sekiro 全部 ESD 状态机、条件表达式、命令与跳转关系的完整读写",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["identify-sekiro-esd", "read-state-machine", "read-transition-condition", "project-state-graph", "fail-closed-on-unknown-layout"],
-      "unsupportedOperations": ["esd-write", "state-transition-mutation", "borrow-other-game-esd-layout"],
+      "operations": [
+        "identify-and-parse-all-sekiro-esd",
+        "read-state-machine-and-conditions",
+        "project-state-graph",
+        "typed-state-condition-command-crud",
+        "repair-and-validate-references",
+        "write",
+        "re-read",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "borrow-other-game-esd-layout",
+        "raw-hex-write",
+        "unknown-expression-or-command-reencode"
+      ],
       "currentAuthority": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
-      "openRulings": ["真实 Sekiro ESD 是否存在、容器位置、布局、条件语义、写入范围和 release corpus 均待裁定。"],
-      "nonClaims": ["产品愿景中的 ESD state machine 不构成 Sekiro ESD 格式存在性或 native authority 证据。"]
+      "openRulings": [],
+      "nonClaims": [
+        "全部 ESD 完整读写已纳入目标范围，但当前 authority 仍为 unverified；格式存在性、生产 parser、表达式 schema、writer 与真实游戏证据尚未建立。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-BEHAVIOR-SCRIPT",
       "capabilityId": "D-BEHAVIOR",
-      "gateIds": ["REL-D"],
+      "gateIds": [
+        "REL-D"
+      ],
       "subjectKind": "behavior-animation",
-      "scope": "经真实 Sekiro corpus 确认的 Lua、HKS 或其他脚本资源",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "真实 Sekiro corpus 中源码与编译 Lua/HKS/其他脚本的完整静态解析、编辑与重新生成",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["inventory-lua-hks-candidates", "identify-script-magic", "read-script-bytes", "resolve-reference-candidates", "fail-closed-on-unknown-script"],
-      "unsupportedOperations": ["assume-lua-or-hks-present", "decompile-script", "script-write", "execute-untrusted-script"],
+      "operations": [
+        "inventory-and-identify-script-vm",
+        "parse-or-decompile",
+        "project-readable-semantic-document",
+        "typed-or-source-mutation",
+        "compile-or-reassemble",
+        "write",
+        "re-read",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "execute-untrusted-script",
+        "raw-bytes-as-script-authority",
+        "borrow-unverified-vm-or-bytecode-claims"
+      ],
       "currentAuthority": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
-      "openRulings": ["Lua/HKS 是否实际属于 Sekiro V0.5 corpus、其容器/版本、可读语义和任何写入能力均待裁定。"],
-      "nonClaims": ["明确列出 Lua/HKS 只表示待验证候选，不声明 Sekiro 使用它们或 SoulForge 已支持脚本。"]
+      "openRulings": [],
+      "nonClaims": [
+        "源码与编译脚本完整读写已纳入目标范围，但当前 authority 仍为 unverified；脚本种类、VM/字节码、合法工具链、writer 与真实游戏证据均待建立。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-ASSETS",
       "capabilityId": "E-ASSET",
-      "gateIds": ["REL-E"],
+      "gateIds": [
+        "REL-E"
+      ],
       "subjectKind": "asset",
-      "scope": "FLVER/TPF/MTD/collision/navigation 只读 authority 与明确批准的开放格式转换矩阵",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "固定 FLVER/TPF/MTD/collision/navigation 五类 native 资产只读 authority 与 native-to-open 导出矩阵",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["detect-open-format", "stage-import", "read-native-inventory", "validate-conversion-output", "re-read", "reference-validate"],
-      "unsupportedOperations": ["raw-replace-as-native-conversion", "proxy-geometry-as-flver-authority", "unvalidated-native-writer"],
+      "operations": [
+        "read-native-semantic-document",
+        "project-structured-view",
+        "resolve-native-references",
+        "export-native-to-approved-open-format",
+        "validate-export"
+      ],
+      "unsupportedOperations": [
+        "open-format-to-native-import",
+        "raw-replace-as-native-conversion",
+        "proxy-data-as-native-authority",
+        "unvalidated-native-writer"
+      ],
       "currentAuthority": "candidate",
-      "evidenceRefs": ["EV-E-ASSET-7BD"],
+      "evidenceRefs": [
+        "EV-E-ASSET-7BD"
+      ],
       "registryRefs": [],
-      "openRulings": ["各 native 格式布局、允许的输入格式、可写转换、validator、场景引用和游戏加载矩阵仍待裁定。"],
-      "nonClaims": ["header/mesh candidate、代理几何和最小 DDS 不证明完整 native 资产管线。"]
+      "openRulings": [],
+      "nonClaims": [
+        "固定六类资产范围已批准，但 current authority 仍为 candidate；候选解析、代理几何和最小 DDS 不证明五类 native 语义读取或导出管线完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-ASSET-FLVER",
       "capabilityId": "E-ASSET",
-      "gateIds": ["REL-E"],
+      "gateIds": [
+        "REL-E"
+      ],
       "subjectKind": "asset",
-      "scope": "注册 Sekiro FLVER 布局的 geometry、skeleton、material 引用与 native document",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "Sekiro 全部 FLVER 布局的 geometry、skeleton、weights、material 引用与只读 native document",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["classify-layout", "read-vertex-index", "read-skeleton", "read-material-reference", "no-op-roundtrip", "validate-write", "re-read", "game-load"],
-      "unsupportedOperations": ["proxy-geometry-as-flver", "raw-replace-as-native-writer", "write-unknown-layout"],
+      "operations": [
+        "classify-all-sekiro-layouts",
+        "read-vertex-index",
+        "read-skeleton-and-weights",
+        "read-material-reference",
+        "project-renderable-scene",
+        "export-gltf-glb",
+        "validate-export"
+      ],
+      "unsupportedOperations": [
+        "flver-write",
+        "open-format-to-flver",
+        "proxy-geometry-as-flver",
+        "raw-replace-as-native-writer"
+      ],
       "currentAuthority": "candidate",
-      "evidenceRefs": ["EV-E-ASSET-7BD"],
+      "evidenceRefs": [
+        "EV-E-ASSET-7BD"
+      ],
       "registryRefs": [],
-      "openRulings": ["FLVER 发布布局、vertex/index/skeleton/material 范围、writer、validator、场景引用和游戏加载 corpus 待裁定。"],
-      "nonClaims": ["现有 header/mesh table candidate 不证明 vertex/index/material 无损读取或 FLVER writer。"]
+      "openRulings": [],
+      "nonClaims": [
+        "全部 FLVER 语义只读已纳入目标范围；现有 header/mesh candidate 不证明完整 vertex/index/skeleton/material authority 或真实渲染完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-ASSET-TPF",
       "capabilityId": "E-ASSET",
-      "gateIds": ["REL-E"],
+      "gateIds": [
+        "REL-E"
+      ],
       "subjectKind": "asset",
-      "scope": "注册 Sekiro TPF 布局的纹理容器、metadata 与 native texture 引用",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "Sekiro 全部 TPF 布局、纹理格式、metadata 与 native texture 引用的只读文档",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["classify-layout", "read-texture-entries", "read-texture-metadata", "no-op-roundtrip", "validate-write", "re-read", "game-load"],
-      "unsupportedOperations": ["minimal-dds-as-tpf-authority", "write-unknown-tpf-layout", "infer-texture-metadata"],
+      "operations": [
+        "classify-all-sekiro-layouts",
+        "read-texture-entries",
+        "read-texture-metadata",
+        "resolve-material-references",
+        "preview",
+        "export-png-tga-dds",
+        "validate-export"
+      ],
+      "unsupportedOperations": [
+        "tpf-write",
+        "open-format-to-tpf",
+        "minimal-dds-as-tpf-authority",
+        "infer-texture-metadata"
+      ],
       "currentAuthority": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
-      "openRulings": ["TPF 版本、纹理格式/metadata、writer、validator、material 引用与 release corpus 待裁定。"],
-      "nonClaims": ["开放图像检测和最小 DDS 编码不证明 TPF parser、writer 或游戏纹理兼容性。"]
+      "openRulings": [],
+      "nonClaims": [
+        "全部 TPF 语义只读已纳入目标范围，但当前 authority 仍为 unverified；容器 hint、开放图像检测和最小 DDS 编码不证明 TPF parser 或纹理兼容性。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-ASSET-MTD",
       "capabilityId": "E-ASSET",
-      "gateIds": ["REL-E"],
+      "gateIds": [
+        "REL-E"
+      ],
       "subjectKind": "asset",
-      "scope": "注册 Sekiro MTD 布局的 material definition、参数与 texture slot 引用",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "Sekiro 全部 MTD 布局、材质参数、texture slot 与着色引用的只读文档",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["classify-layout", "read-material-definition", "read-parameter-schema", "read-texture-slots", "no-op-roundtrip", "validate-write", "re-read"],
-      "unsupportedOperations": ["infer-mtd-schema", "write-unknown-mtd-layout", "proxy-material-as-native"],
+      "operations": [
+        "classify-all-sekiro-layouts",
+        "read-material-definition",
+        "read-parameter-schema",
+        "read-texture-slots",
+        "resolve-flver-tpf-references",
+        "export-readable-manifest"
+      ],
+      "unsupportedOperations": [
+        "mtd-write",
+        "open-format-to-mtd",
+        "infer-mtd-schema",
+        "proxy-material-as-native"
+      ],
       "currentAuthority": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
-      "openRulings": ["MTD 版本、参数类型、FLVER/TPF 引用、writer、validator 与 release corpus 待裁定。"],
-      "nonClaims": ["candidate material inventory 不证明 MTD native document、参数 schema 或 writer。"]
+      "openRulings": [],
+      "nonClaims": [
+        "全部 MTD 语义只读已纳入目标范围，但当前 authority 仍为 unverified；candidate inventory 不证明 native document、参数 schema 或引用闭环。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-ASSET-COLLISION",
       "capabilityId": "E-ASSET",
-      "gateIds": ["REL-E"],
+      "gateIds": [
+        "REL-E"
+      ],
       "subjectKind": "asset",
-      "scope": "经 Sekiro corpus 确认的 collision 格式、地图引用与只读/可写边界",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "真实 Sekiro 中全部碰撞格式、层级与地图关联的只读语义文档",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["inventory-collision-resources", "identify-format-and-container", "read-collision-document", "resolve-map-reference", "fail-closed-on-unknown-layout"],
-      "unsupportedOperations": ["assume-collision-format", "proxy-mesh-as-collision", "collision-write"],
+      "operations": [
+        "inventory-collision-resources",
+        "identify-all-formats-and-containers",
+        "read-collision-semantic-document",
+        "resolve-map-reference",
+        "visualize",
+        "diagnose",
+        "fail-closed-on-unknown-layout"
+      ],
+      "unsupportedOperations": [
+        "collision-write",
+        "assume-collision-format",
+        "proxy-mesh-as-collision"
+      ],
       "currentAuthority": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
-      "openRulings": ["Sekiro collision 实际格式、容器、布局、只读/可写范围、validator 与 release corpus 待裁定。"],
-      "nonClaims": ["场景 proxy 或 FLVER candidate 不证明任何 collision native authority。"]
+      "openRulings": [],
+      "nonClaims": [
+        "全部碰撞语义只读已纳入目标范围，但当前 authority 仍为 unverified；场景 proxy 或 FLVER candidate 不证明碰撞格式、层级或地图引用。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-ASSET-NAVIGATION",
       "capabilityId": "E-ASSET",
-      "gateIds": ["REL-E"],
+      "gateIds": [
+        "REL-E"
+      ],
       "subjectKind": "asset",
-      "scope": "经 Sekiro corpus 确认的 navigation 格式、地图引用与只读/可写边界",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "真实 Sekiro 中全部导航格式、连接关系与地图引用的只读语义文档",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["inventory-navigation-resources", "identify-format-and-container", "read-navigation-document", "resolve-map-reference", "fail-closed-on-unknown-layout"],
-      "unsupportedOperations": ["assume-navigation-format", "proxy-graph-as-navigation", "navigation-write"],
+      "operations": [
+        "inventory-navigation-resources",
+        "identify-all-formats-and-containers",
+        "read-navigation-semantic-document",
+        "resolve-map-reference",
+        "visualize",
+        "diagnose",
+        "fail-closed-on-unknown-layout"
+      ],
+      "unsupportedOperations": [
+        "navigation-write",
+        "assume-navigation-format",
+        "proxy-graph-as-navigation"
+      ],
       "currentAuthority": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
-      "openRulings": ["Sekiro navigation 实际格式、容器、布局、只读/可写范围、validator 与 release corpus 待裁定。"],
-      "nonClaims": ["资源图或场景 bounds 不证明任何 navigation parser、语义或 writer。"]
+      "openRulings": [],
+      "nonClaims": [
+        "全部导航语义只读已纳入目标范围，但当前 authority 仍为 unverified；资源图、bounds 或代理图不证明导航 parser、连接语义或地图引用。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-ASSET-OPEN-CONVERSION",
       "capabilityId": "E-ASSET",
-      "gateIds": ["REL-E"],
+      "gateIds": [
+        "REL-E"
+      ],
       "subjectKind": "asset",
-      "scope": "明确列出的 glTF/GLB/PNG/TGA/DDS 输入到批准 Sekiro native 输出的转换矩阵",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "FLVER/TPF/MTD native 资源到 glTF/GLB/PNG/TGA/DDS/描述清单的只读导出矩阵",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["detect-input", "validate-input-constraints", "stage-conversion", "emit-native-output", "native-validate", "re-read", "resolve-scene-reference", "game-load"],
-      "unsupportedOperations": ["raw-file-replace-as-conversion", "minimal-dds-as-complete-texture-pipeline", "emit-without-native-validator"],
+      "operations": [
+        "read-native-semantic-document",
+        "validate-native-source",
+        "export-gltf-glb",
+        "export-png-tga-dds",
+        "export-material-manifest",
+        "validate-open-output"
+      ],
+      "unsupportedOperations": [
+        "open-format-to-native-import",
+        "emit-or-replace-native-output",
+        "raw-file-replace-as-conversion"
+      ],
       "currentAuthority": "candidate",
-      "evidenceRefs": ["EV-E-ASSET-7BD"],
+      "evidenceRefs": [
+        "EV-E-ASSET-7BD"
+      ],
       "registryRefs": [],
-      "openRulings": ["每个输入格式的约束、目标 FLVER/TPF/MTD 布局、损失策略、validator、引用和游戏加载矩阵待裁定。"],
-      "nonClaims": ["现有开放格式检测、staging 和 file_replace 不证明任何开放格式到 Sekiro native 的完整转换。"]
+      "openRulings": [],
+      "nonClaims": [
+        "仅 native-to-open 导出已纳入目标范围；现有开放格式检测、staging 与 file_replace 不证明任何已批准导出器完成，更不支持反向 native 写入。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-EDITORS",
       "capabilityId": "F-EDITORS",
-      "gateIds": ["REL-F"],
+      "gateIds": [
+        "REL-F"
+      ],
       "subjectKind": "editor",
-      "scope": "Safe Hex、FMG、PARAM、EMEVD 与 MSB 编辑器的真实 document/revision/typed mutation 工作流",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "BND4、FMG、PARAM、EMEVD、MSB、TAE、ESD、脚本八个语义编辑器及共享只读 Hex 证据视图",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["open-real-document", "paginate-or-virtualize", "typed-mutation", "reject-revision-conflict", "undo-redo-via-history"],
-      "unsupportedOperations": ["demo-fallback-as-authority", "renderer-state-as-document", "editor-without-native-authority"],
+      "operations": [
+        "open-bridge-native-document",
+        "project-structured-ui",
+        "project-canonical-dsl",
+        "synchronize-ui-dsl-selection-revision",
+        "paginate-virtualize-stream",
+        "typed-mutation",
+        "schema-typecheck",
+        "reject-revision-conflict",
+        "undo-redo-via-history",
+        "show-readonly-hex-evidence"
+      ],
+      "unsupportedOperations": [
+        "raw-hex-edit",
+        "demo-fallback-as-authority",
+        "renderer-state-as-document",
+        "editor-without-native-authority"
+      ],
       "currentAuthority": "partial",
-      "evidenceRefs": ["EV-F-EDITORS-7BD", "EV-HANDOFF-LIVENESS-20260725", "EV-PUBLIC-CONTRACTS-20260725"],
+      "evidenceRefs": [
+        "EV-F-EDITORS-7BD",
+        "EV-HANDOFF-LIVENESS-20260725",
+        "EV-PUBLIC-CONTRACTS-20260725"
+      ],
       "registryRefs": [],
-      "openRulings": ["最终编辑器清单、文档规模档位、延迟/容量阈值和完整 Electron 人机验收标准仍待裁定。"],
-      "nonClaims": ["静态契约与现有面板不证明全部编辑器已使用完整真实 document 或达到规模验收。"]
+      "openRulings": [],
+      "nonClaims": [
+        "八个语义编辑器已纳入目标范围，但 current authority 仍为 partial；现有五个候选面板、Safe Hex 演示和静态契约不证明真实文档、DSL、规模或人机验收完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-AI",
       "capabilityId": "G-AGENT",
-      "gateIds": ["REL-G"],
+      "gateIds": [
+        "REL-G"
+      ],
       "subjectKind": "ai",
-      "scope": "OpenAI-compatible 与 Anthropic-compatible 服务的证据化只读及受控 typed tool 循环",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "OpenAI-compatible 与 Anthropic-compatible 服务对语义文档的证据化读取与受控 typed mutation 循环",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["read-only-tool-loop", "controlled-typed-write", "cancel", "timeout", "limit", "audit", "redact-credentials"],
-      "unsupportedOperations": ["write-without-evidence", "bypass-native-validator", "bypass-patch-engine", "expose-credential-to-renderer"],
+      "operations": [
+        "openai-compatible-loop",
+        "anthropic-compatible-loop",
+        "read-semantic-document",
+        "propose-controlled-typed-write",
+        "cancel",
+        "timeout",
+        "limit",
+        "permission-confirm",
+        "audit",
+        "redact-credentials"
+      ],
+      "unsupportedOperations": [
+        "raw-hex-write",
+        "write-without-evidence",
+        "bypass-native-validator",
+        "bypass-patch-engine",
+        "expose-credential-to-renderer"
+      ],
       "currentAuthority": "unverified",
-      "evidenceRefs": ["EV-G-FAKE-7BD"],
+      "evidenceRefs": [
+        "EV-G-FAKE-7BD"
+      ],
       "registryRefs": [],
-      "openRulings": ["两类真实 provider、允许工具集、权限模式、限额和真实多步写任务仍待用户裁定。"],
-      "nonClaims": ["fake HTTP/SSE 循环和凭据契约不证明真实模型服务或生产写 Agent。"]
+      "openRulings": [],
+      "nonClaims": [
+        "双协议受控读写已纳入目标范围，但 current authority 仍为 unverified；fake HTTP/SSE、凭据契约和单 provider adapter 不证明真实服务或生产多步写任务完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-RUNTIME",
       "capabilityId": "H-RUNTIME",
-      "gateIds": ["REL-H"],
+      "gateIds": [
+        "REL-H"
+      ],
       "subjectKind": "runtime",
-      "scope": "可替换 me3 GameRuntimeAdapter 的检测、profile、启动、日志关联、回滚后复启",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "通过能力探测兼容的可替换 me3 GameRuntimeAdapter 检测、profile、启动、日志、终止与回滚后复启",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["detect-me3", "prepare-profile", "launch", "collect-diagnostics", "link-patch-operation", "rollback-and-relaunch", "terminate"],
-      "unsupportedOperations": ["implement-mod-loader", "write-original-game", "launch-with-unsupported-runtime"],
+      "operations": [
+        "detect-me3",
+        "probe-protocol-schema-and-capabilities",
+        "prepare-profile",
+        "launch",
+        "collect-diagnostics",
+        "link-patch-operation",
+        "rollback-and-relaunch",
+        "terminate"
+      ],
+      "unsupportedOperations": [
+        "implement-mod-loader",
+        "write-original-game",
+        "assume-compatible-from-version-or-exit-code",
+        "launch-with-missing-or-ambiguous-capability"
+      ],
       "currentAuthority": "fixture-confirmed",
-      "evidenceRefs": ["EV-PUBLIC-CONTRACTS-20260725", "EV-H-GATES-7BD"],
+      "evidenceRefs": [
+        "EV-PUBLIC-CONTRACTS-20260725",
+        "EV-H-GATES-7BD"
+      ],
       "registryRefs": [],
-      "openRulings": ["production main detection gateway、支持的 me3 版本、Sekiro build、启动成功判据、profile/日志保留和终止策略仍待裁定。"],
-      "nonClaims": ["fixture-confirmed adapter/detect contract 不证明真实 me3 已发现；profile、launch、diagnostics、terminate 仍 unsupported，未启动真实 Sekiro。"]
+      "openRulings": [],
+      "nonClaims": [
+        "能力探测兼容策略已纳入目标范围，但 current authority 仍为 fixture-confirmed；production gateway、真实 me3 profile/launch/diagnostics/terminate 与 Sekiro 启动尚未验证。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-RELEASE",
       "capabilityId": "H-RUNTIME",
-      "gateIds": ["REL-H"],
+      "gateIds": [
+        "REL-H"
+      ],
       "subjectKind": "release",
-      "scope": "Windows x64 安装、升级、卸载、签名、更新及打包 runtime 完整性",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "Windows 10/11 x64 签名 NSIS 的打包、干净机安装、覆盖升级、卸载与 runtime 完整性",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["package", "install-clean-machine", "upgrade-migration", "uninstall", "sign", "update", "verify-packaged-bridge-dotnet-native-binding"],
-      "unsupportedOperations": ["unsigned-local-artifact-as-release", "skipped-pack-as-evidence", "single-launch-as-install-validation"],
+      "operations": [
+        "package-signed-nsis-x64",
+        "install-clean-machine",
+        "upgrade-migration",
+        "uninstall",
+        "sign",
+        "verify-packaged-bridge-dotnet-native-binding",
+        "launch-installed-build"
+      ],
+      "unsupportedOperations": [
+        "portable-release",
+        "automatic-update",
+        "unsigned-local-artifact-as-release",
+        "skipped-pack-as-evidence",
+        "single-launch-as-install-validation"
+      ],
       "currentAuthority": "partial",
-      "evidenceRefs": ["EV-REL-COMPLIANCE-20260725", "EV-PUBLIC-CONTRACTS-20260725", "EV-H-GATES-7BD"],
+      "evidenceRefs": [
+        "EV-REL-COMPLIANCE-20260725",
+        "EV-PUBLIC-CONTRACTS-20260725",
+        "EV-H-GATES-7BD"
+      ],
       "registryRefs": [],
-      "openRulings": ["Windows 支持版本、安装包类型、签名主体、更新渠道、体积/时间预算和迁移兼容范围仍待裁定。"],
-      "nonClaims": ["同机构建和 portable 配置不证明实际 installer、签名、升级、更新或干净机可用。"]
+      "openRulings": [],
+      "nonClaims": [
+        "仅签名 NSIS 内部测试构建已纳入目标范围；现有 builder 配置与同机构建不证明实际签名、安装、升级、卸载、干净机或 packaged runtime 完成。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-RENDERING",
       "capabilityId": "I-RENDER",
-      "gateIds": ["REL-I"],
+      "gateIds": [
+        "REL-I"
+      ],
       "subjectKind": "rendering",
-      "scope": "renderer-independent scene projection、Three.js WebGPU 主后端与 WebGL2 fallback",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "renderer-independent semantic scene、Three.js WebGPU 主后端与 WebGL2 自动回退",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["stream-render-chunks", "pick", "update-transforms", "dispose-resources", "benchmark-webgpu-webgl2"],
-      "unsupportedOperations": ["renderer-object-as-authority", "synthetic-budget-as-release-threshold", "proxy-scene-as-native-asset-proof"],
+      "operations": [
+        "probe-webgpu-and-fallback-webgl2",
+        "stream-render-chunks",
+        "render-flver-msb-collision-navigation",
+        "pick",
+        "update-transforms",
+        "dispose-resources",
+        "benchmark-both-backends"
+      ],
+      "unsupportedOperations": [
+        "renderer-object-as-authority",
+        "synthetic-budget-as-release-threshold",
+        "proxy-scene-as-native-asset-proof"
+      ],
       "currentAuthority": "partial",
-      "evidenceRefs": ["EV-C-MSB-SCENE-20260724", "EV-I-RENDER-7BD"],
+      "evidenceRefs": [
+        "EV-C-MSB-SCENE-20260724",
+        "EV-I-RENDER-7BD"
+      ],
       "registryRefs": [],
-      "openRulings": ["代表性地图集、硬件档位、WebGPU/WebGL2 支持策略及全部性能/泄漏阈值仍待裁定。"],
-      "nonClaims": ["代理场景、production WebGL canvas 和 synthetic baseline 不证明真实大地图发布性能。"]
+      "openRulings": [],
+      "nonClaims": [
+        "WebGPU 主用与 WebGL2 回退已纳入目标范围；代理场景、production WebGL canvas 和 synthetic baseline 不证明真实资产、大地图或双后端发布性能。"
+      ]
     },
     {
       "scopeItemId": "SCOPE-COMPLIANCE",
       "capabilityId": "H-RUNTIME",
-      "gateIds": ["REL-COMPLIANCE"],
+      "gateIds": [
+        "REL-COMPLIANCE"
+      ],
       "subjectKind": "compliance",
-      "scope": "发布树内容、第三方许可证、凭据/私有资产扫描与可复现构建",
-      "decisionStatus": "awaiting-user-ruling",
+      "scope": "项目所有者控制机器上的内部签名测试构建、内容安全、许可证 inventory 与禁止外部分发边界",
+      "decisionStatus": "user-approved",
       "proposedSupport": "supported",
-      "operations": ["scan-release-content", "inventory-production-licenses", "assemble-notices", "scan-secrets-private-assets", "verify-reproducible-build", "scan-package-tree"],
-      "unsupportedOperations": ["ship-private-corpus", "ship-oodle-runtime", "ship-credentials", "claim-metadata-only-license-complete"],
+      "operations": [
+        "scan-internal-package-tree",
+        "inventory-production-licenses",
+        "track-incomplete-notices",
+        "scan-secrets-private-assets",
+        "verify-owner-controlled-target",
+        "verify-signed-installer-provenance"
+      ],
+      "unsupportedOperations": [
+        "external-distribution",
+        "public-release",
+        "claim-incomplete-notices-distributable",
+        "ship-private-corpus",
+        "ship-oodle-runtime",
+        "ship-credentials"
+      ],
       "currentAuthority": "partial",
-      "evidenceRefs": ["EV-REL-COMPLIANCE-20260725", "EV-PUBLIC-CONTRACTS-20260725"],
+      "evidenceRefs": [
+        "EV-REL-COMPLIANCE-20260725",
+        "EV-PUBLIC-CONTRACTS-20260725"
+      ],
       "registryRefs": [],
-      "openRulings": ["54 项许可证正文/notices、远程 clean build、实际 package tree 和跨工具链复现的发布裁定仍开放。"],
-      "nonClaims": ["license metadata inventory 和同机 fingerprint 不证明 notices 完整、跨工具链复现或发行产物合规闭环。"]
+      "openRulings": [],
+      "nonClaims": [
+        "内部测试合规边界已获批准，但 current authority 仍为 partial；未补齐适用 notices 或再分发权利前不得向任何外部测试者或公众分发，也不构成公开发行完成。"
+      ]
     }
   ]
 }
 ```
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->
 
-当前提案只把可审查结构推进到 `proposal-valid`。用户逐项批准、修改或排除之前，`REL-SCOPE` 不得进入完成态，其他 Gate 也不得引用本块扩大既有 authority。
+本范围已由用户逐项批准并以 `EV-REL-SCOPE-20260730` 封存。批准只固定目标与 unsupported 边界，不提升任何 `currentAuthority`，也不把缺 corpus、parser、writer、许可证、凭据、签名或真实环境的项目变成完成。
+
+统一语义编辑不变量：所有可编辑 native 资源必须先由 Bridge 形成完整、可读、可追溯的 native semantic document；结构化界面和规范 DSL 只能产生 typed mutation。未知字段可以作为只读 opaque 数据展示，但在没有 schema 和无损保持证据时不得编辑。Hex 永远是只读证据视图。
 
 ### 18.3 Gate 覆盖矩阵与后继切片
 
@@ -2237,21 +2881,21 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 
 `applicability` 只允许 `pending-scope | in-scope | scope-excluded`。`REL-SCOPE`、`REL-A`、`REL-H`、`REL-COMPLIANCE` 永远为 `in-scope`，不得排除。`REL-B/C/D/E/F/G/I` 在 `REL-SCOPE` 尚未 `passed` 时保持 `pending-scope`；只有 `REL-SCOPE` 已以 sealed Evidence 通过、且同一或后继 sealed Evidence 明确记录用户批准的排除边界时，才可改为 `scope-excluded`。`scope-excluded` 行的 `gateState` 必须同时为 `passed`，不得保留为 `open` 或 `blocked`。
 
-`passed` 与 `scope-excluded` 都只能引用 `sealed-current-run`；其中 `REL-SCOPE` 与范围排除还必须使用 §17.1 的用户批准声明标记，并满足 §17.2 当前工作树 freshness。`unsealed-record` 和 `historical-record` 可以保留既有事实或 blocker 边界，但不能完成 Gate。当前没有 Gate 被写成 `passed` 或 `scope-excluded`，本轮不擅自冻结 V0.5 范围。
+`passed` 与 `scope-excluded` 都只能引用 `sealed-current-run`；其中 `REL-SCOPE` 与范围排除还必须使用 §17.1 的用户批准声明标记，并满足 §17.2 当前工作树 freshness。`unsealed-record` 和 `historical-record` 可以保留既有事实或 blocker 边界，但不能完成 Gate。当前仅 `REL-SCOPE` 以用户批准 sealed Evidence 进入 `passed`；没有功能 Gate 因范围批准而提升 authority 或完成。
 
 | Gate ID | capability | 当前切片 | gateState | applicability | Evidence/blockerRefs | 后继要求 |
 |---|---|---|---|---|---|---|
-| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-01` | `blocked` | `in-scope` | `BLK-SCOPE-RULING` | 冻结提案已完成；用户逐项裁定并生成 sealed Evidence 后才能通过 |
+| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-01` | `passed` | `in-scope` | `EV-REL-SCOPE-20260730` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex 与内部测试发行边界已冻结；后续修改必须重新取得用户批准并生成 fresh sealed Evidence |
 | `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-NATIVE-02` | `blocked` | `in-scope` | `BLK-NATIVE-FIXTURE-CORPUS` | 公开进程故障 harness 已完成；需合法仓库外 corpus 对其余 production native writer 做真实故障矩阵 |
-| `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-01` | `blocked` | `pending-scope` | `BLK-REL-B-CORPUS` | registry/harness 已完成；需合法发布 corpus 做 100% 分类、no-op/mutation/repack 与 KRAK 闭环 |
-| `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-PATCHIR-02` | `open` | `pending-scope` | — | 当前推进 typed proposal -> Bridge/PatchIR；后续仍需 FMG 多语言、PARAM 来源/native 一致性、PARAM/MSB 全字段全实体 mutation、引用验证、回滚与游戏加载切片 |
-| `REL-D` | 行为动画范围 | `W-BEHAVIOR-MAP-01` | `blocked` | `pending-scope` | `BLK-BEHAVIOR-CORPUS` | corpus 到位后冻结格式范围并达操作级完成矩阵 |
-| `REL-E` | 资产转换矩阵 | `W-FLVER-READ-01` | `blocked` | `pending-scope` | `BLK-ASSET-CORPUS` | FLVER/TPF/MTD native authority、开放格式转换与后继性能边界闭环 |
-| `REL-F` | 编辑器验收 | `W-REL-F-SCALE-02` | `open` | `pending-scope` | — | 候选 inventory/contract harness 已完成；先关闭规模 contract 缺口，再按批准阈值做真实人机验收 |
-| `REL-G` | 双模型服务 | `W-AI-REAL-01` | `blocked` | `pending-scope` | `BLK-MODEL-CREDENTIALS` | 凭据到位后做双 provider 受控写循环 |
-| `REL-H` | 安装与运行 | `W-ME3-MAIN-DETECT-02` | `open` | `in-scope` | — | 先实现 production main detection gateway，再补 profile/launch/diagnostics/terminate、安装/升级/签名/更新与真实 Sekiro 启动切片 |
-| `REL-I` | 渲染基准 | `W-RENDER-BENCH-01` | `blocked` | `pending-scope` | `BLK-RENDER-HARDWARE` | 先取得真实硬件基线，再建立用户阈值裁定与后端验收后继切片 |
-| `REL-COMPLIANCE` | 发布合规 | `W-REL-COMPLIANCE-01` | `open` | `in-scope` | — | 补齐 54 项许可证正文/third-party notices，验证远程 clean build 与实际 package tree 内容 |
+| `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-01` | `blocked` | `in-scope` | `BLK-REL-B-CORPUS` | registry/harness 已完成；需合法发布 corpus 做 100% 分类、DFLT/KRAK/BND4 读写与组合闭环 |
+| `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-PATCHIR-02` | `open` | `in-scope` | — | 当前推进 typed proposal -> Bridge/PatchIR；后续仍需 FMG 全语言、全部 ParamType/EMEVD、登记 MSB 实体、引用、回滚与游戏加载切片 |
+| `REL-D` | 行为动画范围 | `W-BEHAVIOR-MAP-01` | `blocked` | `in-scope` | `BLK-BEHAVIOR-CORPUS` | corpus 到位后完成全部 TAE/ESD/脚本 parser、语义编辑器、writer 与游戏加载矩阵 |
+| `REL-E` | 资产只读与导出矩阵 | `W-FLVER-READ-01` | `blocked` | `in-scope` | `BLK-ASSET-CORPUS` | 五类 native 资产全量语义只读、引用与 native-to-open 导出闭环；不开放 native writer |
+| `REL-F` | 编辑器验收 | `W-REL-F-SCALE-02` | `open` | `in-scope` | — | 从五个候选扩展为八个语义编辑器，关闭结构化 UI/DSL/只读 Hex/规模缺口并完成真实人机验收 |
+| `REL-G` | 双模型服务 | `W-AI-REAL-01` | `blocked` | `in-scope` | `BLK-MODEL-CREDENTIALS` | 凭据到位后做双 provider 语义 typed mutation 受控写循环 |
+| `REL-H` | 安装与运行 | `W-ME3-MAIN-DETECT-02` | `open` | `in-scope` | — | 实现 production capability-probe gateway，再补 profile/launch/diagnostics/terminate、签名 NSIS 安装/升级/卸载与真实 Sekiro 启动切片 |
+| `REL-I` | 渲染基准 | `W-RENDER-BENCH-01` | `blocked` | `in-scope` | `BLK-RENDER-HARDWARE` | 取得真实硬件基线，完成 WebGPU 主路径、WebGL2 回退和后端验收后继切片 |
+| `REL-COMPLIANCE` | 内部测试构建合规 | `W-REL-COMPLIANCE-01` | `open` | `in-scope` | — | 验证签名 NSIS 实际 package tree、所有者控制目标与内容扫描；持续跟踪 notices 并禁止任何外部分发 |
 
 后继要求列不是第二套进度口径；它只提示同一 Gate 在既有切片完成后仍需的下游切片。补货规则见 `docs/AGENT_EXECUTION_PLAYBOOK.md` §8，全阻塞终局见其 §9。
 
@@ -2269,7 +2913,7 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 | `BLK-REL-B-CORPUS` | `private-corpus` | `REL-B`、`W-REL-B-CORPUS-01` | 用户 / corpus 保管方 | 合法、仓库外、覆盖声明 DFLT/BND4/KRAK 布局的发布 corpus registry | 100% 分类、no-op、声明 mutation/repack、重读与未知字段保持矩阵通过 | 私有发布 corpus registry 可用、内容版本变化或新增合格布局 | `EV-B-DFLT-7BD`、`EV-B-BND4-7BD`、`EV-B-KRAK-20260724` |
 | `BLK-MODEL-CREDENTIALS` | `credential` | `REL-G`、`W-AI-REAL-01` | 用户 / 凭据保管方 | 两类真实 provider endpoint 与凭据，只经 main/safeStorage 注入 | 两类 provider 分别完成真实只读与受控写循环、取消、超时、限额、审计和脱敏 | safeStorage 中两类 provider 配置可用或发生轮换 | `EV-G-FAKE-7BD` |
 | `BLK-RENDER-HARDWARE` | `hardware` | `REL-I`、`W-RENDER-BENCH-01` | 用户 / benchmark 执行者 | 代表性硬件档位、Sekiro 地图集合和可复现驱动/系统信息 | WebGPU/WebGL2 加载、帧时间、picking、内存、显存和泄漏报告完整生成 | 硬件档位与地图 registry 获批并可执行 | `EV-I-RENDER-7BD` |
-| `BLK-SCOPE-RULING` | `user-ruling` | `REL-SCOPE`、`W-REL-SCOPE-RULING-01` | 用户 | 对 V0.5 支持/排除矩阵逐项作明确批准或修改 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 行引用覆盖完整冻结矩阵与用户裁定的 sealed Evidence | 用户新增或修改明确范围裁定，或审批记录发生变化 | — |
+| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵逐项批准 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定 | `EV-REL-SCOPE-20260730` |
 
 ---
 
