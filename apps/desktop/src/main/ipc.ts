@@ -1183,6 +1183,48 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     });
   });
 
+  handle('resource.readTaeDocument', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 TAE。', sourceUri }] };
+    }
+    const result = await runBridge<Record<string, unknown>>({
+      command: 'read-tae-document',
+      filePath: file.absolutePath,
+      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      timeoutMs: 120_000
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
+  handle('resource.readEsdDocument', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 ESD。', sourceUri }] };
+    }
+    const result = await runBridge<Record<string, unknown>>({
+      command: 'read-esd-document',
+      filePath: file.absolutePath,
+      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      timeoutMs: 120_000
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
+  handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER。', sourceUri }] };
+    }
+    const result = await runBridge<Record<string, unknown>>({
+      command: 'read-flver-document',
+      filePath: file.absolutePath,
+      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      timeoutMs: 120_000
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
   handle(
     'resource.applyMsbMutation',
     async (

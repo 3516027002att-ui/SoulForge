@@ -113,6 +113,12 @@ const api = {
     ipcRenderer.invoke('resource.applyFmgMutation', sourceUri, expectedHash, mutation),
   readMsbDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMsbDocument', sourceUri),
+  readTaeDocument: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeDocument', sourceUri),
+  readEsdDocument: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
+  readFlverDocument: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readFlverDocument', sourceUri),
   applyMsbMutation: (
     sourceUri: string,
     expectedHash: string,
