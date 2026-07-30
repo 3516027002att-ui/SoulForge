@@ -104,6 +104,8 @@ export type BridgeCommandName =
   | 'write-emevd'
   | 'read-msb-document'
   | 'write-msb'
+  | 'read-tae-document'
+  | 'read-tpf-document'
   | 'capabilities'
   | 'health';
 

@@ -29,6 +29,8 @@
     "test:model-service-configuration": "npm run test:model-service-configuration -w @soulforge/core",
     "bridge:verify:emevd": "npm run test:native-emevd -w @soulforge/core",
     "bridge:verify:msb": "npm run test:native-msb -w @soulforge/core",
+    "bridge:verify:tae": "npm run test:native-tae -w @soulforge/core",
+    "bridge:verify:tpf": "npm run test:native-tpf -w @soulforge/core",
     "test:asset-import": "npm run test:asset-import -w @soulforge/core",
     "test:editor-document-store": "npm run test:editor-document-store -w @soulforge/core",
     "test:model-service-vault-contract": "npm run test:model-service-vault-contract -w @soulforge/core",

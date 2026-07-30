@@ -417,7 +417,7 @@ internal static class BridgeDaemonHost
     {
         authority = "candidate",
         nativeFormatAuthority = false,
-        commands = new[] { "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child", "extract-bnd4-child", "write-bnd4", "read-fmg-document", "write-fmg", "read-param-document", "write-param", "read-emevd-document", "write-emevd", "read-msb-document", "write-msb", "export-event", "export-map", "export-param", "export-msg", "probe-oodle" },
+        commands = new[] { "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child", "extract-bnd4-child", "write-bnd4", "read-fmg-document", "write-fmg", "read-param-document", "write-param", "read-emevd-document", "write-emevd", "read-msb-document", "write-msb", "read-tpf-document", "export-event", "export-map", "export-param", "export-msg", "probe-oodle" },
         envelopes = new[] { "DFLT-candidate", "KRAK-runtime-dependent", "BND4-unsupported" },
         oodleRuntime = OodleRuntimeLocator.Probe(oodleRuntimeRoot).Runtime,
         cancellation = true,
