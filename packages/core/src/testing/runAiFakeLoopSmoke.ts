@@ -4,8 +4,7 @@
  * fake HTTP servers — no live cloud keys required.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { OpenAiCompatibleAdapter } from '../model-services/openaiCompatibleAdapter.js';
-import { AnthropicCompatibleAdapter } from '../model-services/anthropicCompatibleAdapter.js';
+import { createConfiguredModelServiceAdapter } from '../model-services/configuredAdapter.js';
 import {
   assertNoSecretLeak,
   isToolAllowedInMode,
@@ -202,16 +201,19 @@ async function main(): Promise<void> {
       updatedAt: new Date().toISOString()
     };
 
-    const openaiAdapter = new OpenAiCompatibleAdapter({
-      baseUrl: openaiServer.baseUrl,
-      apiKey: OPENAI_KEY,
-      model: 'fake-gpt'
+    const openaiResolution = createConfiguredModelServiceAdapter({
+      config: openaiConfig,
+      apiKey: OPENAI_KEY
     });
-    const anthropicAdapter = new AnthropicCompatibleAdapter({
-      baseUrl: anthropicServer.baseUrl,
-      apiKey: ANTHROPIC_KEY,
-      model: 'fake-claude'
+    const anthropicResolution = createConfiguredModelServiceAdapter({
+      config: anthropicConfig,
+      apiKey: ANTHROPIC_KEY
     });
+    if (!openaiResolution.ok || !anthropicResolution.ok) {
+      throw new Error('configured provider factory rejected a valid local contract server');
+    }
+    const openaiAdapter = openaiResolution.adapter;
+    const anthropicAdapter = anthropicResolution.adapter;
 
     // Stream + cancel path for OpenAI
     const abort = new AbortController();

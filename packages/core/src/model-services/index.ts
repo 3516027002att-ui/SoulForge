@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './configuredAdapter.js';
 export * from './openaiCompatibleAdapter.js';
 export * from './openaiResponsesAdapter.js';
 export * from './anthropicCompatibleAdapter.js';

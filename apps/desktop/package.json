@@ -11,6 +11,7 @@
     "build": "npm run typecheck && electron-vite build",
     "prepare:database-native": "node ../../scripts/prepare-electron-sqlite-binding.mjs",
     "test:database-utility": "node ../../scripts/run-database-utility-smoke.mjs",
+    "test:me3-runtime-gateway": "node ../../scripts/run-me3-runtime-gateway-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

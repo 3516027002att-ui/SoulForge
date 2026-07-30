@@ -25,6 +25,8 @@ const api = {
   openBaseDialog: (): Promise<DirectorySelection | null> => ipcRenderer.invoke('workspace.openBaseDialog'),
   scanWorkspace: (options: OpenWorkspaceScanOptions): Promise<RendererWorkspaceScanResult> =>
     ipcRenderer.invoke('workspace.scan', options),
+  detectMe3: (): Promise<import('@soulforge/core').RuntimeCapability> =>
+    ipcRenderer.invoke('runtime.detectMe3'),
   analyzeWorkspace: (): Promise<AnalyzeWorkspaceSummary> => ipcRenderer.invoke('workspace.analyze'),
   searchResources: (query: string): Promise<RendererIndexedFile[]> => ipcRenderer.invoke('resource.search', query),
   openResourcePreview: (sourceUri: string): Promise<RendererResourcePreview | null> =>
