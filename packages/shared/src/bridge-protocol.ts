@@ -95,6 +95,7 @@ export type BridgeCommandName =
   | 'read-dcx-document'
   | 'write-bnd4'
   | 'snapshot-bnd4-child'
+  | 'extract-bnd4-child'
   | 'read-fmg-document'
   | 'write-fmg'
   | 'read-param-document'
