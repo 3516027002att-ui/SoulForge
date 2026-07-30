@@ -17,6 +17,8 @@ interface MeshData {
   indicesBase64: string;
   uvsBase64?: string | undefined;
   normalsBase64?: string | undefined;
+  boneWeightsBase64?: string | undefined;
+  boneIndicesBase64?: string | undefined;
   vertexCount: number;
 }
 
@@ -40,7 +42,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await window.soulforge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
-          data?: { positionsBase64?: string; indicesBase64?: string; uvsBase64?: string; normalsBase64?: string; vertexCount?: number };
+          data?: { positionsBase64?: string; indicesBase64?: string; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
@@ -49,6 +51,8 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             indicesBase64: result.data.indicesBase64 ?? '',
             uvsBase64: result.data.uvsBase64 ?? undefined,
             normalsBase64: result.data.normalsBase64 ?? undefined,
+            boneWeightsBase64: result.data.boneWeightsBase64 ?? undefined,
+            boneIndicesBase64: result.data.boneIndicesBase64 ?? undefined,
             vertexCount: result.data.vertexCount ?? 0
           });
         } else {
@@ -207,9 +211,9 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           // Add bone weight visualization if available.
           // Bone weights are stored as 4 bytes per vertex (4 bone influences).
           // Visualize as vertex colors: red = high weight, blue = low weight.
-          if (props.boneWeightsBase64) {
+          if (meshData.boneWeightsBase64) {
             try {
-              const weightBytes = Uint8Array.from(atob(props.boneWeightsBase64), (c) => c.charCodeAt(0));
+              const weightBytes = Uint8Array.from(atob(meshData.boneWeightsBase64), (c) => c.charCodeAt(0));
               const vertexCount = positions.length / 3;
               const colors = new Float32Array(vertexCount * 3);
               for (let v = 0; v < vertexCount; v++) {
@@ -235,9 +239,9 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           // Add bone index visualization if available.
           // Bone indices are stored as 4 bytes per vertex (4 bone influences).
           // Visualize as vertex colors: different colors for different bone indices.
-          if (props.boneIndicesBase64 && !props.boneWeightsBase64) {
+          if (meshData.boneIndicesBase64 && !meshData.boneWeightsBase64) {
             try {
-              const indexBytes = Uint8Array.from(atob(props.boneIndicesBase64), (c) => c.charCodeAt(0));
+              const indexBytes = Uint8Array.from(atob(meshData.boneIndicesBase64), (c) => c.charCodeAt(0));
               const vertexCount = positions.length / 3;
               const colors = new Float32Array(vertexCount * 3);
               // Color palette for bone indices (up to 256 bones).
