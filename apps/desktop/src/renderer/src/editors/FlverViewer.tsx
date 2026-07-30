@@ -11,6 +11,7 @@ export interface FlverViewerProps {
 interface MeshData {
   positionsBase64: string;
   indicesBase64: string;
+  uvsBase64?: string | undefined;
   vertexCount: number;
 }
 
@@ -34,13 +35,14 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await window.soulforge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
-          data?: { positionsBase64?: string; indicesBase64?: string; vertexCount?: number };
+          data?: { positionsBase64?: string; indicesBase64?: string; uvsBase64?: string; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
           setMeshData({
             positionsBase64: result.data.positionsBase64,
             indicesBase64: result.data.indicesBase64 ?? '',
+            uvsBase64: result.data.uvsBase64 ?? undefined,
             vertexCount: result.data.vertexCount ?? 0
           });
         } else {
@@ -112,6 +114,13 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           const positions = new Float32Array(posBytes.buffer);
           const geometry = new three.BufferGeometry();
           geometry.setAttribute('position', new three.BufferAttribute(positions, 3));
+
+          // Add UV coordinates if available.
+          if (meshData.uvsBase64) {
+            const uvBytes = Uint8Array.from(atob(meshData.uvsBase64), (c) => c.charCodeAt(0));
+            const uvs = new Float32Array(uvBytes.buffer);
+            geometry.setAttribute('uv', new three.BufferAttribute(uvs, 2));
+          }
 
           if (meshData.indicesBase64) {
             const idxBytes = Uint8Array.from(atob(meshData.indicesBase64), (c) => c.charCodeAt(0));
