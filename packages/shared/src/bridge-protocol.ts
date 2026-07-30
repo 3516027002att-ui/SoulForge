@@ -108,6 +108,7 @@ export type BridgeCommandName =
   | 'read-tpf-document'
   | 'read-flver-document'
   | 'read-flver-mesh'
+  | 'read-flver-skeleton'
   | 'read-esd-document'
   | 'capabilities'
   | 'health';

@@ -376,6 +376,36 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-flver-skeleton")
+        {
+            try
+            {
+                var document = FlverNativeDocument.ReadFile(file);
+                var bones = document.Bones.Select(b => new
+                {
+                    index = b.Index,
+                    name = b.Name,
+                    parentIndex = b.ParentIndex,
+                    animBoneIndex = b.AnimBoneIndex,
+                    translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ }
+                }).ToArray();
+                return BridgeResult<object>.Partial(file, "chr", new[]
+                {
+                    new Diagnostic("info", "FLVER_SKELETON_EXTRACTED",
+                        $"FLVER 骨骼层级已提取；boneCount={document.BoneCount}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    boneCount = document.BoneCount,
+                    bones
+                });
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "chr", "FLVER_SKELETON_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-esd-document")
         {
             try
