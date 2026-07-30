@@ -27,6 +27,8 @@ internal sealed class EmevdNativeDocument
         long linkedFilesOffset,
         long stringsOffset,
         long stringsLength,
+        long layerCount,
+        long layersOffset,
         IReadOnlyList<EmevdEvent> events,
         IReadOnlyList<EmevdInstruction> instructions)
     {
@@ -39,6 +41,8 @@ internal sealed class EmevdNativeDocument
         LinkedFilesOffset = linkedFilesOffset;
         StringsOffset = stringsOffset;
         StringsLength = stringsLength;
+        LayerCount = layerCount;
+        LayersOffset = layersOffset;
         Events = events;
         Instructions = instructions;
     }
@@ -52,6 +56,8 @@ internal sealed class EmevdNativeDocument
     public long LinkedFilesOffset { get; }
     public long StringsOffset { get; }
     public long StringsLength { get; }
+    public long LayerCount { get; }
+    public long LayersOffset { get; }
     public IReadOnlyList<EmevdEvent> Events { get; }
     public IReadOnlyList<EmevdInstruction> Instructions { get; }
     public string SourceHash => Hash(SourceBytes);
@@ -77,6 +83,7 @@ internal sealed class EmevdNativeDocument
         var instructionsOffset = ReadInt64(source, 0x28);
         var unkStructCount = ReadInt64(source, 0x30);
         var layerCount = ReadInt64(source, 0x40);
+        var layersOffset = ReadInt64(source, 0x48);
         var paramCountHeader = ReadInt64(source, 0x50);
         var parametersOffset = ReadInt64(source, 0x58);
         var linkedCount = ReadInt64(source, 0x60);
@@ -92,8 +99,10 @@ internal sealed class EmevdNativeDocument
             throw new InvalidDataException($"EMEVD 指令数 {instructionCount} 越界。");
         if (unkStructCount != 0)
             throw new NotSupportedException($"EMEVD 未知结构计数 {unkStructCount} 非 0，当前未支持。");
-        if (layerCount != 0)
-            throw new NotSupportedException("EMEVD 含 layer 表时的 GC 重建尚未启用；就地 mutation 仍可用。");
+        if (layerCount < 0 || layerCount > 100_000)
+            throw new InvalidDataException($"EMEVD layer 计数 {layerCount} 越界。");
+        if (layersOffset < 0 || layersOffset > source.Length)
+            throw new InvalidDataException("EMEVD layersOffset 越界。");
         if (eventsOffset < HeaderSize || eventsOffset + eventCount * EventSize > source.Length)
             throw new InvalidDataException("EMEVD 事件表越界。");
         if (instructionsOffset < eventsOffset
@@ -188,6 +197,7 @@ internal sealed class EmevdNativeDocument
         return new EmevdNativeDocument(
             source, eventsOffset, instructionsOffset, argumentsOffset, argumentsLength,
             parametersOffset, linkedFilesOffset, stringsOffset, stringsLength,
+            layerCount, layersOffset,
             events, instructions);
     }
 
@@ -300,6 +310,8 @@ internal sealed class EmevdNativeDocument
     /// </summary>
     public byte[] RebuildWithEventBuilds(IReadOnlyList<EmevdEventBuild> builds)
     {
+        if (LayerCount != 0)
+            throw new NotSupportedException("EMEVD GC 重建不支持含 layer 表的文档；就地 mutation 仍可用。");
         if (builds.Count > MaxEvents)
             throw new InvalidDataException($"事件数 {builds.Count} 超过上限。");
         var totalInstr = builds.Sum(b => b.Instructions.Count);
@@ -661,6 +673,7 @@ internal sealed class EmevdNativeDocument
             sourceHash = SourceHash,
             eventCount = Events.Count,
             instructionCount = Instructions.Count,
+            layerCount = LayerCount,
             eventsOffset = EventsOffset,
             instructionsOffset = InstructionsOffset,
             argumentsOffset = ArgumentsOffset,
