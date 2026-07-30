@@ -10,6 +10,10 @@ const files = {
   operationLogUtilityClient: await readFile(
     new URL('../apps/desktop/src/main/operationLogUtilityClient.ts', import.meta.url),
     'utf8'
+  ),
+  me3RuntimeGateway: await readFile(
+    new URL('../apps/desktop/src/main/me3RuntimeGateway.ts', import.meta.url),
+    'utf8'
   )
 };
 
@@ -46,7 +50,14 @@ const checks = [
   ['生产操作日志不再打开 JSON store', !files.ipc.includes('openFileOperationLogStore')],
   ['SQLite 运行在 Electron utility process', files.operationLogUtilityClient.includes('utilityProcess.fork')],
   ['app.db 与 workspace.db 由后台进程打开', files.databaseUtility.includes('openAppDatabase')
-    && files.databaseUtility.includes('openSqliteOperationLogStore')]
+    && files.databaseUtility.includes('openSqliteOperationLogStore')],
+  ['me3 gateway uses only the fixed main-process probe',
+    files.me3RuntimeGateway.includes("['--version']")
+      && files.me3RuntimeGateway.includes('shell: false')
+      && !files.preload.includes('me3Path')],
+  ['me3 capability does not expose privileged process paths',
+    files.me3RuntimeGateway.includes('never returns a path-bearing')
+      && !files.preload.includes('executablePath')]
 ];
 
 const failed = checks.filter(([, ok]) => !ok);

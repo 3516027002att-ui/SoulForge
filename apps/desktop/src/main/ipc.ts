@@ -20,6 +20,7 @@ import {
   openWorkspaceSession,
   inspectContainerTree,
   listContainerChildren,
+  Me3RuntimeAdapter,
   probeContainerCapabilityOptions,
   readContainerChild,
   readRawResourceMetadata,
@@ -66,6 +67,7 @@ import {
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
+import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
 
 let indexedFiles: IndexedFile[] = [];
 let activeIndex: WorkspaceIndex | null = null;
@@ -373,6 +375,17 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
   if (handlersRegistered) return;
   handlersRegistered = true;
+
+  handle('runtime.detectMe3', async () => {
+    const adapter = new Me3RuntimeAdapter({
+      gateway: new MainMe3RuntimeGateway({ localDataRoot: localApplicationDataRoot() }),
+      versionPolicy: {
+        policyId: 'soulforge.me3-v0_12_1',
+        supportedVersions: ['0.12.1']
+      }
+    });
+    return await adapter.detect({ timeoutMs: 5_000 });
+  });
 
   handle('workspace.openDialog', async (event): Promise<DirectorySelection | null> => {
     const result = await dialog.showOpenDialog({

@@ -8,12 +8,14 @@ const expectedObservedVariants = {
   DFLT: [
     'DCX_DFLT_10000_24_9',
     'DCX_DFLT_10000_44_9',
+    'DCX_DFLT_10000_44_9_0',
     'DCX_DFLT_11000_44_8',
     'DCX_DFLT_11000_44_9',
+    'DCX_DFLT_11000_44_9_0',
     'DCX_DFLT_11000_44_9_15'
   ],
   BND4: ['BND4_40_24'],
-  KRAK: ['DCX_KRAK_6', 'DCX_KRAK_9']
+  KRAK: ['DCX_KRAK_6', 'DCX_KRAK_9', 'DCX_KRAK_11000_44_6_0']
 } as const;
 
 if (JSON.stringify(RELEASE_CORPUS_OBSERVED_VARIANTS_BY_FORMAT)
@@ -227,7 +229,7 @@ function buildValidManifest(): Record<string, unknown> {
   return {
     registryId: 'relb-registry-20260725',
     game: 'sekiro',
-    gameBuild: '1.06',
+    gameBuild: '1.6',
     schemaVersion: '1.0.0',
     createdAt: '2026-07-25T00:00:00Z',
     entryCount: 3,
@@ -239,7 +241,7 @@ function buildValidManifest(): Record<string, unknown> {
         containerChain: ['opaque-dcx-a'],
         resourceKind: 'event',
         format: 'DFLT',
-        observedVariant: 'DCX_DFLT_11000_44_9',
+        observedVariant: 'DCX_DFLT_11000_44_9_0',
         permittedOperations: [
           'classify',
           'read',
@@ -278,7 +280,7 @@ function buildValidManifest(): Record<string, unknown> {
         containerChain: ['opaque-dcx-b'],
         resourceKind: 'map',
         format: 'KRAK',
-        observedVariant: 'DCX_KRAK_9',
+        observedVariant: 'DCX_KRAK_11000_44_6_0',
         permittedOperations: ['classify', 'read', 'reread', 'preserve-unknown-fields'],
         expectedAuthority: 'unverified',
         privacyClass: 'private-game-asset'
