@@ -221,24 +221,19 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           scene.add(mesh);
 
           // Add bone weight visualization if available.
-          // Bone weights are stored as 4 bytes per vertex (4 bone influences).
-          // Visualize as vertex colors: red = high weight, blue = low weight.
+          // Bone weights are stored as 4 bytes per vertex (4 bone influences, each 0-255 ≈ 0.0-1.0).
+          // The 4 influences sum to ~255, so visualize the PRIMARY (first) bone weight:
+          // red = vertex tightly bound to one bone, blue = weight spread across bones.
           if (meshData.boneWeightsBase64) {
             try {
               const weightBytes = Uint8Array.from(atob(meshData.boneWeightsBase64), (c) => c.charCodeAt(0));
               const vertexCount = positions.length / 3;
               const colors = new Float32Array(vertexCount * 3);
               for (let v = 0; v < vertexCount; v++) {
-                // Sum the 4 bone weights for this vertex.
-                const w0 = weightBytes[v * 4] ?? 0;
-                const w1 = weightBytes[v * 4 + 1] ?? 0;
-                const w2 = weightBytes[v * 4 + 2] ?? 0;
-                const w3 = weightBytes[v * 4 + 3] ?? 0;
-                const totalWeight = (w0 + w1 + w2 + w3) / 255;
-                // Color: red (high weight) to blue (low weight).
-                colors[v * 3] = totalWeight; // R
+                const primaryWeight = (weightBytes[v * 4] ?? 0) / 255;
+                colors[v * 3] = primaryWeight; // R
                 colors[v * 3 + 1] = 0.2; // G
-                colors[v * 3 + 2] = 1 - totalWeight; // B
+                colors[v * 3 + 2] = 1 - primaryWeight; // B
               }
               geometry.setAttribute('color', new three.BufferAttribute(colors, 3));
               material.vertexColors = true;
