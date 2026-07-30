@@ -180,6 +180,9 @@ export function App(): ReactElement {
   const [emevdDocument, setEmevdDocument] = useState<EmevdEditorDocument>(DEMO_EMEVD_DOCUMENT);
   const [emevdSourceHash, setEmevdSourceHash] = useState<string | null>(null);
   const [emevdLive, setEmevdLive] = useState(false);
+  const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
+  const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
+  const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
   const [fmgEntries, setFmgEntries] = useState(DEMO_FMG_ENTRIES);
   const [fmgSourceHash, setFmgSourceHash] = useState<string | null>(null);
   const [fmgLive, setFmgLive] = useState(false);
@@ -704,6 +707,9 @@ export function App(): ReactElement {
     setMsgRows([]);
     setSaveDiagnostics([]);
     setAiDraft(null);
+    setTaeData(null);
+    setEsdData(null);
+    setFlverData(null);
     setStatus(`正在打开 ${file.relativePath}...`);
     const nextPreview = await window.soulforge.openResourcePreview(file.sourceUri);
     setPreview(nextPreview);
@@ -711,6 +717,19 @@ export function App(): ReactElement {
     setEditText(text);
     setLastSavedText(text);
     setMsgRows(extractMsgRows(nextPreview));
+    // Load TAE/ESD/FLVER document data via IPC.
+    if (file.relativePath.endsWith('.tae') && typeof window.soulforge.readTaeDocument === 'function') {
+      const result = await window.soulforge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+      if (result.ok && result.data) setTaeData(result.data);
+    }
+    if (file.relativePath.endsWith('.esd') && typeof window.soulforge.readEsdDocument === 'function') {
+      const result = await window.soulforge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+      if (result.ok && result.data) setEsdData(result.data);
+    }
+    if ((file.relativePath.endsWith('.flver') || file.relativePath.endsWith('.tpf')) && typeof window.soulforge.readFlverDocument === 'function') {
+      const result = await window.soulforge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+      if (result.ok && result.data) setFlverData(result.data);
+    }
     setStatus(nextPreview ? `已打开 ${file.relativePath}` : '无法预览该资源');
   }
 
@@ -1250,13 +1269,13 @@ export function App(): ReactElement {
           {preview?.previewKind === 'empty' && <p className="muted">空文件。</p>}
           {preview?.previewKind === 'failed' && <p className="danger">预览失败。</p>}
           {selectedFile?.relativePath?.endsWith('.tae') && (
-            <TaeWorkbenchPanel resourceUri={selectedFile.sourceUri} data={null} />
+            <TaeWorkbenchPanel resourceUri={selectedFile.sourceUri} data={taeData as never} />
           )}
           {selectedFile?.relativePath?.endsWith('.esd') && (
-            <EsdWorkbenchPanel resourceUri={selectedFile.sourceUri} data={null} />
+            <EsdWorkbenchPanel resourceUri={selectedFile.sourceUri} data={esdData as never} />
           )}
           {(selectedFile?.relativePath?.endsWith('.flver') || selectedFile?.relativePath?.endsWith('.tpf')) && (
-            <FlverWorkbenchPanel resourceUri={selectedFile.sourceUri} data={null} />
+            <FlverWorkbenchPanel resourceUri={selectedFile.sourceUri} data={flverData as never} />
           )}
           {preview?.truncated && <p className="muted">预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开。</p>}
         </section>
