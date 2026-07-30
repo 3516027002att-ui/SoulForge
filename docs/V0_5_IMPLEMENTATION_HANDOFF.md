@@ -870,7 +870,7 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 | G AI Agent | `partial / production unverified` | `EV-G-FAKE-7BD`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | **6 种错误分类 + 超时/取消/限额 10 case conformance 已完成**；仍缺 Context Broker 与真实工作区多步任务；真实 provider 凭据不属于 V0.5 验收 |
 | H me3 运行 | `fixture-confirmed / partial` | `EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | **profile/launch/diagnostics/terminate adapter 已完成**（25 case smoke）；仍缺真实 Sekiro 会话和 NSIS 安装/升级/卸载验证 |
 | H 发行 | `partial / unverified` | `EV-REL-COMPLIANCE-20260725`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-H-GATES-7BD` historical | **许可证文本覆盖 complete（123 present / 0 metadata-only）**；**NSIS 安装包构建成功（117.7 MB）**；仍缺安装/升级/卸载 lifecycle 验证和真实 Sekiro gate |
-| I 渲染 | `partial` | `EV-C-MSB-SCENE-20260724`、`EV-I-RENDER-7BD` historical | shared render packet 与 production bundle WebGL proxy 已验证；**WebGPU 检测已实现**；**WebGPU-first 渲染器已集成**（three/webgpu 按需加载 + WebGL2 回退）；仍缺真实 FLVER 渲染和完整功能回退验证 |
+| I 渲染 | `partial` | `EV-C-MSB-SCENE-20260724`、`EV-I-RENDER-7BD` historical | shared render packet 与 production bundle WebGL proxy 已验证；**WebGPU 检测已实现**；**WebGPU-first 渲染器已集成**（three/webgpu 按需加载 + WebGL2 回退）；**FLVER 3D 查看器已完成**（包围盒 + 网格渲染 + OrbitControls + 多网格选择 + 材质颜色）；仍缺纹理映射、骨骼动画和完整功能回退验证 |
 
 可以并行推进的典型方向：
 
