@@ -60,6 +60,7 @@ export class ContainerChildReplaceWriter implements WriterAdapterContract {
     stagingRoot: string;
     operations: PatchIrOperation[];
     workspaceRoot?: string;
+    oodleRuntimeRoot?: string;
   }): Promise<WriterApplyResult> {
     const writtenTargets: WriterWrittenTarget[] = [];
     const diagnostics: StructuredDiagnostic[] = [];
@@ -91,7 +92,8 @@ export class ContainerChildReplaceWriter implements WriterAdapterContract {
           writableRoots: [input.stagingRoot],
           workspaceSessionId: `writer-${op.id}`,
           timeoutMs: 120_000,
-          commandOptions: nativeBnd4Options(op, stagingPath)
+          commandOptions: nativeBnd4Options(op, stagingPath),
+          ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {})
         });
         diagnostics.push(...bridgeResult.diagnostics.map((diagnostic) => createDiagnostic({
           severity: diagnostic.severity,
@@ -190,7 +192,7 @@ function isContainerChildOperation(operation: PatchIrOperation): operation is Co
 
 function isNativeBnd4Operation(operation: ContainerChildOp): boolean {
   return operation.kind.startsWith('container_child_')
-    && operation.containerFormat === 'BND4_DFLT'
+    && (operation.containerFormat === 'BND4_DFLT' || operation.containerFormat === 'BND4_KRAK')
     && operation.metadata?.nativeFormatAuthority === true
     && Boolean(operation.targetPath)
     && Boolean(operation.expectedContainerHash ?? operation.expectedHash);
