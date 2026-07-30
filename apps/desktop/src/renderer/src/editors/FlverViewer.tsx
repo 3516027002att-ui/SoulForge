@@ -6,6 +6,7 @@ export interface FlverViewerProps {
   boundingBox?: { min: number[]; max: number[] } | undefined;
   boneCount?: number;
   meshCount?: number;
+  bones?: Array<{ name: string; position: [number, number, number]; parentIndex: number }> | undefined;
 }
 
 interface MeshData {
@@ -165,6 +166,36 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         } catch {
           // Mesh data decode failed; show bounding box only.
         }
+      }
+
+      // Draw bone hierarchy if available.
+      if (props.bones && props.bones.length > 0) {
+        const boneGroup = new three.Group();
+        const boneMaterial = new three.LineBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.6 });
+        const jointMaterial = new three.MeshBasicMaterial({ color: 0xffcc66 });
+        const jointGeometry = new three.SphereGeometry(0.15, 8, 8);
+
+        for (const bone of props.bones) {
+          // Draw joint sphere.
+          const joint = new three.Mesh(jointGeometry, jointMaterial);
+          joint.position.set(bone.position[0], bone.position[1], bone.position[2]);
+          boneGroup.add(joint);
+
+          // Draw line to parent bone.
+          if (bone.parentIndex >= 0 && bone.parentIndex < props.bones.length) {
+            const parent = props.bones[bone.parentIndex];
+            if (parent) {
+              const points = [
+                new three.Vector3(bone.position[0], bone.position[1], bone.position[2]),
+                new three.Vector3(parent.position[0], parent.position[1], parent.position[2])
+              ];
+              const lineGeometry = new three.BufferGeometry().setFromPoints(points);
+              const line = new three.Line(lineGeometry, boneMaterial);
+              boneGroup.add(line);
+            }
+          }
+        }
+        scene.add(boneGroup);
       }
 
       const setSize = (): void => {
