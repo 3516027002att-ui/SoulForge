@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   EDITOR_CAPABILITY_CONTRACTS,
-  buildPendingEditorScaleSamplingSchemas,
   buildProposedReleaseEditorInventory,
+  buildReleaseEditorFunctionalScaleSchemas,
   evaluateReleaseEditorAcceptance,
   type EditorScaleSample,
   type ProposedReleaseEditorId,
@@ -13,10 +13,10 @@ import {
 
 function main(): void {
   const inventory = buildProposedReleaseEditorInventory();
-  const schemas = buildPendingEditorScaleSamplingSchemas();
+  const schemas = buildReleaseEditorFunctionalScaleSchemas();
   assertInventoryDerivedFromCapabilities(inventory);
   assertScaleContractsMatchCurrentSources();
-  assertAllThresholdsPending(schemas);
+  assertFunctionalSchemasHaveNoQuantitativeThresholds(schemas);
 
   const demoFallback = evaluateReleaseEditorAcceptance({
     sample: { ...buildContractFixture('safe-hex'), sourceMode: 'demo-fallback' }
@@ -64,8 +64,7 @@ function main(): void {
     claimedReleaseDecision: 'pass'
   });
   assertRejectedWith(prematurePass, 'EDITOR_RELEASE_PASS_FORBIDDEN');
-  assertDiagnostic(prematurePass, 'EDITOR_THRESHOLDS_PENDING');
-  assertDiagnostic(prematurePass, 'EDITOR_HUMAN_ACCEPTANCE_PENDING');
+  assertDiagnostic(prematurePass, 'EDITOR_FUNCTIONAL_ACCEPTANCE_PENDING');
   assertPendingDecision(prematurePass);
 
   const currentScaleContractGaps = inventory.flatMap((item) => {
@@ -100,10 +99,10 @@ function main(): void {
     evidenceKind: 'candidate',
     releaseGateDecision: 'pending',
     releasePassed: false,
-    realAcceptanceRun: false,
-    humanAcceptanceStatus: 'pending',
-    scopeRulingStatus: 'pending',
-    thresholdRulingStatus: 'pending',
+    realFunctionalAcceptanceRun: false,
+    functionalAcceptanceStatus: 'pending',
+    scopeRulingStatus: 'user-approved',
+    quantitativeThresholdsRequired: false,
     proposedInventory: inventory.map((item) => ({
       releaseEditorId: item.releaseEditorId,
       releaseIncluded: item.releaseIncluded,
@@ -118,11 +117,11 @@ function main(): void {
       'missing-revision',
       'stale-revision-accepted',
       'missing-pagination-or-virtualization',
-      'pass-claim-with-pending-thresholds'
+      'pass-claim-without-real-functional-evidence'
     ],
     nonClaims: [
-      '未运行真实 Electron 人机规模验收。',
-      '未裁定发布编辑器清单、规模档位、容量或延迟阈值。',
+      '未运行真实 Electron 真实文档功能验收。',
+      'V0.5 不要求编辑器容量、延迟、规模档位或 benchmark 阈值。',
       'contract fixture 只验证 harness，不能提升 editor/native authority 或 REL-F。'
     ]
   }, null, 2));
@@ -135,9 +134,9 @@ function assertInventoryDerivedFromCapabilities(
   if (JSON.stringify(inventory.map((item) => item.releaseEditorId)) !== JSON.stringify(expectedIds)) {
     throw new Error('release editor inventory/order drifted');
   }
-  if (inventory.some((item) => item.scopeRulingStatus !== 'pending'
-    || item.releaseIncluded !== null)) {
-    throw new Error('unruled release inventory must remain null/pending');
+  if (inventory.some((item) => item.scopeRulingStatus !== 'user-approved'
+    || item.releaseIncluded !== true)) {
+    throw new Error('approved release inventory must remain included/user-approved');
   }
   for (const item of inventory) {
     const contract = EDITOR_CAPABILITY_CONTRACTS[item.editorKind];
@@ -193,28 +192,19 @@ function assertScaleContractsMatchCurrentSources(): void {
   }
 }
 
-function assertAllThresholdsPending(
-  schemas: ReturnType<typeof buildPendingEditorScaleSamplingSchemas>
+function assertFunctionalSchemasHaveNoQuantitativeThresholds(
+  schemas: ReturnType<typeof buildReleaseEditorFunctionalScaleSchemas>
 ): void {
-  if (schemas.length !== 5) throw new Error('expected one sampling schema per proposed editor');
+  if (schemas.length !== 5) throw new Error('expected one functional schema per current editor');
   for (const schema of schemas) {
-    if (schema.scopeRulingStatus !== 'pending' || schema.tierRulingStatus !== 'pending') {
-      throw new Error(`${schema.releaseEditorId} sampling rulings must remain pending`);
+    if (schema.scopeRulingStatus !== 'user-approved'
+      || schema.quantitativeThresholdsRequired !== false
+      || schema.acceptedAccessModes.length !== 4) {
+      throw new Error(`${schema.releaseEditorId} functional scale policy drifted`);
     }
-    for (const tier of schema.tiers) {
-      if (tier.rulingStatus !== 'pending') throw new Error(`${tier.tierId} must remain pending`);
-      for (const capacity of tier.capacity) {
-        if (capacity.minimum.rulingStatus !== 'pending' || capacity.minimum.value !== null
-          || capacity.maximum.rulingStatus !== 'pending' || capacity.maximum.value !== null) {
-          throw new Error(`${schema.releaseEditorId}/${tier.tierId} capacity threshold is not null/pending`);
-        }
-      }
-      for (const latency of tier.latency) {
-        if (latency.maximumMs.rulingStatus !== 'pending' || latency.maximumMs.value !== null) {
-          throw new Error(`${schema.releaseEditorId}/${tier.tierId} latency threshold is not null/pending`);
-        }
-      }
-    }
+  }
+  if (/capacity|latency|maximumMs|minimum|maximum|tierId/u.test(JSON.stringify(schemas))) {
+    throw new Error('functional scale schema reintroduced a quantitative acceptance field');
   }
 }
 
@@ -222,17 +212,8 @@ function buildContractFixture(releaseEditorId: ProposedReleaseEditorId): EditorS
   const inventory = buildProposedReleaseEditorInventory();
   const editor = inventory.find((item) => item.releaseEditorId === releaseEditorId);
   if (!editor) throw new Error(`unknown editor fixture ${releaseEditorId}`);
-  const latencyMs: EditorScaleSample['latencyMs'] = {
-    'first-interactive': 1,
-    'background-complete': 2,
-    'single-mutation-p95': 1
-  };
-  if (releaseEditorId === 'msb') {
-    latencyMs['picking-p95'] = 1;
-    latencyMs['box-selection-p95'] = 1;
-  }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     releaseEditorId,
     sourceMode: 'synthetic',
     documentAuthority: editor.documentAuthorityRequirement,
@@ -242,10 +223,7 @@ function buildContractFixture(releaseEditorId: ProposedReleaseEditorId): EditorS
     revision: 'contract-fixture-revision',
     rejectsStaleRevision: true,
     observedMutationKinds: [...editor.mutationKinds],
-    scaleAccess: editor.currentScaleAccess,
-    tierId: null,
-    capacity: Object.fromEntries(editor.scaleDimensions.map((dimension) => [dimension, 1])),
-    latencyMs
+    scaleAccess: editor.currentScaleAccess
   };
 }
 
@@ -267,11 +245,11 @@ function assertPendingDecision(result: ReleaseEditorAcceptanceResult): void {
   if (result.ok !== null
     || result.releaseGateDecision !== 'pending'
     || result.releasePassed
-    || result.scopeRulingStatus !== 'pending'
-    || result.thresholdRulingStatus !== 'pending'
-    || result.humanAcceptanceStatus !== 'pending'
-    || result.realHumanAcceptanceRun) {
-    throw new Error(`${result.releaseEditorId} must remain null/pending without ruled thresholds and human evidence`);
+    || result.scopeRulingStatus !== 'user-approved'
+    || result.quantitativeThresholdsRequired !== false
+    || result.functionalAcceptanceStatus !== 'pending'
+    || result.realFunctionalAcceptanceRun) {
+    throw new Error(`${result.releaseEditorId} must remain pending until real functional evidence exists`);
   }
 }
 

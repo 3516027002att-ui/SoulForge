@@ -6,10 +6,8 @@ import {
   type ProposedReleaseEditorId
 } from './editorCapabilityContract.js';
 
-export type ReleaseEditorEvidenceKind = 'candidate' | 'benchmark';
+export type ReleaseEditorEvidenceKind = 'candidate' | 'functional-observation';
 export type ReleaseEditorAcceptanceStatus = 'candidate' | 'rejected';
-export type ThresholdRulingStatus = 'pending' | 'approved';
-export type EditorScaleTierId = 'tier-1' | 'tier-2' | 'tier-3';
 export type ReleaseEditorAcceptanceDiagnosticArea =
   | 'inventory'
   | 'source'
@@ -17,17 +15,14 @@ export type ReleaseEditorAcceptanceDiagnosticArea =
   | 'revision'
   | 'typed-mutation'
   | 'scale-access'
-  | 'capacity'
-  | 'latency'
   | 'release-ruling'
-  | 'threshold-ruling'
-  | 'human-acceptance';
+  | 'functional-acceptance';
 
 export interface ReleaseEditorInventoryItem {
   releaseEditorId: ProposedReleaseEditorId;
   editorKind: 'hex' | 'fmg' | 'param' | 'emevd' | 'msb';
-  scopeRulingStatus: 'pending';
-  releaseIncluded: null;
+  scopeRulingStatus: 'user-approved';
+  releaseIncluded: true;
   documentAuthorityRequirement: EditorDocumentAuthorityContract;
   mutationKinds: EditorMutationKind[];
   revisionContract: 'monotonic-reject-stale';
@@ -37,38 +32,13 @@ export interface ReleaseEditorInventoryItem {
   contractSources: string[];
 }
 
-export interface PendingNumericThreshold {
-  rulingStatus: 'pending';
-  value: null;
-}
-
-export interface EditorScaleTierDefinition {
-  tierId: EditorScaleTierId;
-  rulingStatus: 'pending';
-  capacity: Array<{
-    dimension: string;
-    minimum: PendingNumericThreshold;
-    maximum: PendingNumericThreshold;
-  }>;
-  latency: Array<{
-    metric: EditorLatencyMetric;
-    maximumMs: PendingNumericThreshold;
-  }>;
-}
-
-export type EditorLatencyMetric =
-  | 'first-interactive'
-  | 'background-complete'
-  | 'single-mutation-p95'
-  | 'picking-p95'
-  | 'box-selection-p95';
-
-export interface EditorScaleSamplingSchema {
-  schemaVersion: 1;
+export interface EditorFunctionalScaleSchema {
+  schemaVersion: 2;
   releaseEditorId: ProposedReleaseEditorId;
-  scopeRulingStatus: 'pending';
-  tierRulingStatus: 'pending';
-  tiers: EditorScaleTierDefinition[];
+  scopeRulingStatus: 'user-approved';
+  quantitativeThresholdsRequired: false;
+  acceptedAccessModes: Array<'pagination' | 'virtualization' | 'chunking' | 'streaming'>;
+  scaleDimensions: string[];
 }
 
 export type EditorDocumentAuthorityLevel =
@@ -81,7 +51,7 @@ export type EditorDocumentAuthorityLevel =
   | 'raw-byte-authority';
 
 export interface EditorScaleSample {
-  schemaVersion: 1;
+  schemaVersion: 2;
   releaseEditorId: ProposedReleaseEditorId;
   sourceMode: 'real-document' | 'demo-fallback' | 'synthetic';
   documentAuthority: 'none' | EditorDocumentAuthorityContract;
@@ -90,9 +60,6 @@ export interface EditorScaleSample {
   rejectsStaleRevision: boolean;
   observedMutationKinds: EditorMutationKind[];
   scaleAccess: EditorScaleAccess;
-  tierId: EditorScaleTierId | null;
-  capacity: Record<string, number>;
-  latencyMs: Partial<Record<EditorLatencyMetric, number | null>>;
 }
 
 export interface ReleaseEditorAcceptanceDiagnostic {
@@ -103,7 +70,7 @@ export interface ReleaseEditorAcceptanceDiagnostic {
 }
 
 export interface ReleaseEditorAcceptanceResult {
-  schemaVersion: 1;
+  schemaVersion: 2;
   ok: null;
   releaseEditorId: ProposedReleaseEditorId;
   acceptanceStatus: ReleaseEditorAcceptanceStatus;
@@ -111,10 +78,10 @@ export interface ReleaseEditorAcceptanceResult {
   evidenceAuthority: 'candidate';
   releaseGateDecision: 'pending';
   releasePassed: false;
-  scopeRulingStatus: 'pending';
-  thresholdRulingStatus: 'pending';
-  humanAcceptanceStatus: 'pending';
-  realHumanAcceptanceRun: false;
+  scopeRulingStatus: 'user-approved';
+  quantitativeThresholdsRequired: false;
+  functionalAcceptanceStatus: 'pending';
+  realFunctionalAcceptanceRun: false;
   diagnostics: ReleaseEditorAcceptanceDiagnostic[];
 }
 
@@ -130,19 +97,12 @@ const RELEASE_SAFE_SCALE_ACCESS = new Set<EditorScaleAccess>([
   'streaming'
 ]);
 
-const BASE_LATENCY_METRICS: readonly EditorLatencyMetric[] = [
-  'first-interactive',
-  'background-complete',
-  'single-mutation-p95'
+const ACCEPTED_ACCESS_MODES: EditorFunctionalScaleSchema['acceptedAccessModes'] = [
+  'pagination',
+  'virtualization',
+  'chunking',
+  'streaming'
 ];
-
-const SCENE_LATENCY_METRICS: readonly EditorLatencyMetric[] = [
-  ...BASE_LATENCY_METRICS,
-  'picking-p95',
-  'box-selection-p95'
-];
-
-const TIER_IDS: readonly EditorScaleTierId[] = ['tier-1', 'tier-2', 'tier-3'];
 
 export function buildProposedReleaseEditorInventory(): ReleaseEditorInventoryItem[] {
   return Object.values(EDITOR_CAPABILITY_CONTRACTS)
@@ -152,8 +112,8 @@ export function buildProposedReleaseEditorInventory(): ReleaseEditorInventoryIte
     .map((contract) => ({
       releaseEditorId: contract.proposedReleaseEditorId as ProposedReleaseEditorId,
       editorKind: contract.editorKind as ReleaseEditorInventoryItem['editorKind'],
-      scopeRulingStatus: 'pending',
-      releaseIncluded: null,
+      scopeRulingStatus: 'user-approved',
+      releaseIncluded: true,
       documentAuthorityRequirement: contract.documentAuthority,
       mutationKinds: [...contract.mutationKinds],
       revisionContract: contract.revisionContract,
@@ -164,37 +124,28 @@ export function buildProposedReleaseEditorInventory(): ReleaseEditorInventoryIte
     }));
 }
 
-export function buildPendingEditorScaleSamplingSchemas(): EditorScaleSamplingSchema[] {
-  return buildProposedReleaseEditorInventory().map((editor) => {
-    const latencyMetrics = editor.releaseEditorId === 'msb'
-      ? SCENE_LATENCY_METRICS
-      : BASE_LATENCY_METRICS;
-    return {
-      schemaVersion: 1,
-      releaseEditorId: editor.releaseEditorId,
-      scopeRulingStatus: 'pending',
-      tierRulingStatus: 'pending',
-      tiers: TIER_IDS.map((tierId) => ({
-        tierId,
-        rulingStatus: 'pending',
-        capacity: editor.scaleDimensions.map((dimension) => ({
-          dimension,
-          minimum: pendingThreshold(),
-          maximum: pendingThreshold()
-        })),
-        latency: latencyMetrics.map((metric) => ({
-          metric,
-          maximumMs: pendingThreshold()
-        }))
-      }))
-    };
-  });
+/**
+ * Defines the non-quantitative V0.5 scale contract. Numeric capacity, latency,
+ * package-size, and elapsed-time thresholds are explicitly outside acceptance;
+ * every editor must instead expose complete content through a bounded access
+ * mode and retain the normal authority/revision/mutation gates.
+ */
+export function buildReleaseEditorFunctionalScaleSchemas(): EditorFunctionalScaleSchema[] {
+  return buildProposedReleaseEditorInventory().map((editor) => ({
+    schemaVersion: 2,
+    releaseEditorId: editor.releaseEditorId,
+    scopeRulingStatus: 'user-approved',
+    quantitativeThresholdsRequired: false,
+    acceptedAccessModes: [...ACCEPTED_ACCESS_MODES],
+    scaleDimensions: [...editor.scaleDimensions]
+  }));
 }
 
 /**
- * Evaluates one instrumented observation. This harness intentionally cannot
- * emit a release pass; approved thresholds and sealed human acceptance belong
- * to a later gate evaluator.
+ * Evaluates one functional observation. This contract harness cannot emit a
+ * release pass: the later production gate must still run the complete Electron
+ * workflow against real native documents. No numeric threshold ruling is
+ * required.
  */
 export function evaluateReleaseEditorAcceptance(
   input: EvaluateReleaseEditorAcceptanceInput
@@ -207,7 +158,7 @@ export function evaluateReleaseEditorAcceptance(
     diagnostics.push(error(
       'inventory',
       'EDITOR_NOT_IN_RELEASE_INVENTORY',
-      '编辑器不在待裁定的发布清单中。'
+      '编辑器不在已批准的发布清单中。'
     ));
     return rejectedResult(input.sample.releaseEditorId, diagnostics);
   }
@@ -256,82 +207,41 @@ export function evaluateReleaseEditorAcceptance(
   appendScaleAccessDiagnostic(diagnostics, editor.currentScaleAccess, 'current-contract');
   appendScaleAccessDiagnostic(diagnostics, input.sample.scaleAccess, 'observed-sample');
 
-  for (const dimension of editor.scaleDimensions) {
-    const value = input.sample.capacity[dimension];
-    if (value === undefined || !Number.isFinite(value) || value < 0) {
-      diagnostics.push(error(
-        'capacity',
-        'EDITOR_CAPACITY_MEASUREMENT_REQUIRED',
-        `缺少有效容量采样：${dimension}。`
-      ));
-    }
-  }
-
-  const requiredLatencyMetrics = editor.releaseEditorId === 'msb'
-    ? SCENE_LATENCY_METRICS
-    : BASE_LATENCY_METRICS;
-  for (const metric of requiredLatencyMetrics) {
-    const value = input.sample.latencyMs[metric];
-    if (value === undefined || value === null || !Number.isFinite(value) || value < 0) {
-      diagnostics.push(error(
-        'latency',
-        'EDITOR_LATENCY_MEASUREMENT_REQUIRED',
-        `缺少有效延迟采样：${metric}。`
-      ));
-    }
-  }
-
   if (input.claimedReleaseDecision === 'pass') {
     diagnostics.push(error(
       'release-ruling',
       'EDITOR_RELEASE_PASS_FORBIDDEN',
-      'candidate/benchmark harness 不得输出 release pass。'
+      'candidate functional harness 不得输出 release pass。'
     ));
     diagnostics.push(error(
-      'threshold-ruling',
-      'EDITOR_THRESHOLDS_PENDING',
-      '容量与延迟阈值仍为 null/pending，不能声明通过。'
-    ));
-    diagnostics.push(error(
-      'human-acceptance',
-      'EDITOR_HUMAN_ACCEPTANCE_PENDING',
-      '尚无完整 Electron 人机规模验收证据，不能声明通过。'
+      'functional-acceptance',
+      'EDITOR_FUNCTIONAL_ACCEPTANCE_PENDING',
+      '尚无完整 Electron 真实文档功能验收证据，不能声明通过。'
     ));
   } else {
     diagnostics.push(warning(
-      'threshold-ruling',
-      'EDITOR_THRESHOLDS_PENDING',
-      '容量与延迟阈值尚未由用户裁定；本结果仅为 candidate/benchmark evidence。'
-    ));
-    diagnostics.push(warning(
-      'human-acceptance',
-      'EDITOR_HUMAN_ACCEPTANCE_PENDING',
-      '尚未运行完整 Electron 人机规模验收；本 harness 只记录候选观测。'
+      'functional-acceptance',
+      'EDITOR_FUNCTIONAL_ACCEPTANCE_PENDING',
+      '尚未运行完整 Electron 真实文档功能验收；本 harness 只记录候选观测。'
     ));
   }
 
   const hasErrors = diagnostics.some((diagnostic) => diagnostic.severity === 'error');
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ok: null,
     releaseEditorId: editor.releaseEditorId,
     acceptanceStatus: hasErrors ? 'rejected' : 'candidate',
-    evidenceKind: !hasErrors && hasCompleteMeasurements(editor, input.sample)
-      ? 'benchmark'
-      : 'candidate',
+    evidenceKind: hasErrors ? 'candidate' : 'functional-observation',
     evidenceAuthority: 'candidate',
     releaseGateDecision: 'pending',
     releasePassed: false,
-    scopeRulingStatus: 'pending',
-    thresholdRulingStatus: 'pending',
-    humanAcceptanceStatus: 'pending',
-    realHumanAcceptanceRun: false,
+    scopeRulingStatus: 'user-approved',
+    quantitativeThresholdsRequired: false,
+    functionalAcceptanceStatus: 'pending',
+    realFunctionalAcceptanceRun: false,
     diagnostics
   };
-}
-
-function pendingThreshold(): PendingNumericThreshold {
-  return { rulingStatus: 'pending', value: null };
 }
 
 function appendScaleAccessDiagnostic(
@@ -380,30 +290,12 @@ function hasRequiredDocumentAuthority(
   return sample.authorityLevel !== 'unsupported' && sample.authorityLevel !== 'unverified';
 }
 
-function hasCompleteMeasurements(
-  editor: ReleaseEditorInventoryItem,
-  sample: EditorScaleSample
-): boolean {
-  const capacitiesComplete = editor.scaleDimensions.every((dimension) => {
-    const value = sample.capacity[dimension];
-    return value !== undefined && Number.isFinite(value) && value >= 0;
-  });
-  const latencyMetrics = editor.releaseEditorId === 'msb'
-    ? SCENE_LATENCY_METRICS
-    : BASE_LATENCY_METRICS;
-  const latenciesComplete = latencyMetrics.every((metric) => {
-    const value = sample.latencyMs[metric];
-    return value !== undefined && value !== null && Number.isFinite(value) && value >= 0;
-  });
-  return capacitiesComplete && latenciesComplete;
-}
-
 function rejectedResult(
   releaseEditorId: ProposedReleaseEditorId,
   diagnostics: ReleaseEditorAcceptanceDiagnostic[]
 ): ReleaseEditorAcceptanceResult {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ok: null,
     releaseEditorId,
     acceptanceStatus: 'rejected',
@@ -411,10 +303,10 @@ function rejectedResult(
     evidenceAuthority: 'candidate',
     releaseGateDecision: 'pending',
     releasePassed: false,
-    scopeRulingStatus: 'pending',
-    thresholdRulingStatus: 'pending',
-    humanAcceptanceStatus: 'pending',
-    realHumanAcceptanceRun: false,
+    scopeRulingStatus: 'user-approved',
+    quantitativeThresholdsRequired: false,
+    functionalAcceptanceStatus: 'pending',
+    realFunctionalAcceptanceRun: false,
     diagnostics
   };
 }
