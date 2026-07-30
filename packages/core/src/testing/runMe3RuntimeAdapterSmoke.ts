@@ -369,7 +369,7 @@ async function main(): Promise<void> {
     nonClaims: [
       'No real me3 executable or Sekiro process was discovered or started.',
       'A matching version fixture and exit code zero do not establish launch readiness.',
-      'Profile generation, launch, diagnostics collection, termination, signing, and native runtime authority remain unimplemented.'
+      'Profile generation, launch, diagnostics collection, termination, and native runtime authority remain unimplemented.'
     ]
   }, null, 2));
 }

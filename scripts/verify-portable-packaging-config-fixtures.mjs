@@ -196,7 +196,7 @@ console.log(JSON.stringify({
   cases: [
     'canonical-config-valid',
     'descriptive-text-cannot-satisfy-structure',
-    'missing-exclusion-and-signing-hook-rejected',
+    'missing-exclusion-and-executable-hook-rejected',
     'unscanned-extra-resource-rejected',
     'extra-files-and-file-set-input-rejected',
     'unapproved-root-outside-and-double-negation-patterns-rejected',

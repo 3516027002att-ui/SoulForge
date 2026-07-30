@@ -41,7 +41,7 @@ const result = {
   artifactFingerprint: audit.expected.artifacts.aggregateSha256,
   manifestSha256: audit.manifestSha256,
   findings,
-  nonClaim: '本门禁不证明 third-party notice 文本完整、安装包签名、发布渠道或真实游戏验收。'
+  nonClaim: '本门禁不证明 third-party notice 文本完整、NSIS 安装/升级/卸载、外部分发或真实游戏验收。'
 };
 console.log(JSON.stringify(result, null, 2));
 process.exitCode = result.ok ? 0 : 1;

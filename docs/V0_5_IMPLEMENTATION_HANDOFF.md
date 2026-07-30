@@ -720,7 +720,7 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 - Windows CI 配置；
 - release content、许可证 inventory、凭据/私有资产路径扫描和同机可复现构建指纹；
 - electron-builder 配置使用严格 JSON 闭集解析，拒绝未知键、workspace link 和 falsy manifest 漂移；scratch root、子进程树终止、超时/取消和 stdout/stderr 上限有公开负向 fixture；
-- electron-builder portable / NSIS 候选配置只复制最终 `better_sqlite3.node` 与确定性 metadata，packaged main 从 `process.resourcesPath/native` 解析 binding；冻结发布目标只保留签名 NSIS；
+- electron-builder portable / NSIS 候选配置只复制最终 `better_sqlite3.node` 与确定性 metadata，packaged main 从 `process.resourcesPath/native` 解析 binding；冻结发布目标只保留 NSIS；
 - private native gate 与 section-28 诚实 skip；
 - 基础性能 smoke。
 
@@ -730,7 +730,6 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 - 54 个只有 lockfile metadata、尚未归档许可证正文的生产依赖及完整 third-party notices；
 - 实际 unsigned `--dir` 产物扫描；
 - 真正的安装包、升级和干净机验证；
-- 代码签名；
 - 安装包内 Bridge、自包含 .NET 和 native binding 验证；
 - me3 启动链；
 - 真实 Sekiro Mod 加载、回滚和再次启动；
@@ -739,7 +738,7 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 
 `skipped` 和 `unverified-no-local-sekiro-runtime` 不能算通过。
 
-V0.5 发行边界冻结为 Windows 10/11 x64 的签名 NSIS，仅限项目所有者控制的内部测试机器；不发布 portable，不内置自动更新，不得在 notices/再分发权利未闭环时向外部测试者或公众分发。
+V0.5 发行边界冻结为 Windows 10/11 x64 的 NSIS，仅限项目所有者控制的内部测试机器；代码签名不再是范围或验收项。不发布 portable，不内置自动更新，不得在 notices/再分发权利未闭环时向外部测试者或公众分发。未签名安装包仍必须通过确定性 manifest/hash、内容扫描、干净机安装、升级、卸载和 runtime 完整性验证，但不声明发布者身份或 SmartScreen 信誉。
 
 ---
 
@@ -906,6 +905,7 @@ interface RendererBackend {
 | `W-RENDER-BENCH-01` | `blocked` | `unverified` | `BLK-RENDER-HARDWARE` | `I-RENDER` | 在代表性 Sekiro 大地图集合上采集 WebGPU/WebGL2 加载、帧时间、picking、内存、显存和泄漏基线 | 完整只读 scene projection；真实硬件记录；采集不以前置阈值裁定为条件 | `packages/core/src/scene`、`apps/desktop/src/renderer/src/scene` | `npm run test:performance-baseline` 加真实 benchmark report | cap=`partial`；只产生基线，不自行设定发布阈值 |
 | `W-REL-SCOPE-01` | `completed` | `unverified` | — | `REL-SCOPE` | 已产出唯一、可 JSON 解析且覆盖 11 个 Gate 的 V0.5 支持范围提案；artifact validation 为 `proposal-valid`，用户裁定仍开放 | 只综合现有证据；私有 fixture registry 不得冒充 release corpus；不擅自裁定范围值 | 本文 §4~§12 与 §18.1~§18.2.1；`scripts/verify-release-scope.mjs` | `npm run test:release-scope-proposal` exit 0；严格模式必须因待用户裁定 exit 1 | cap=`unverified`；提案合法不等于范围获批或 Gate 完成 |
 | `W-REL-SCOPE-RULING-01` | `completed` | `unverified` | — | `REL-SCOPE` | 用户已逐项批准 §18.2.1 的 27 项支持矩阵、Sekiro 1.6 版本族、八个语义编辑器、只读 Hex、内部签名测试构建与 unsupported 边界；严格范围门禁和 sealed Evidence 已完成 | `W-REL-SCOPE-01` 已完成；批准记录使用脱敏 decisionRef；技术缺口继续由后继 Gate/blocker 失败关闭 | 本文 §18.2.1、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只完成范围 Gate，不提升任何功能 authority |
+| `W-REL-SCOPE-RULING-02` | `completed` | `unverified` | — | `REL-SCOPE` | 用户撤销代码签名验收项；V0.5 当前发行目标为 Windows 10/11 x64 NSIS，仅限项目所有者控制的内部测试机器，允许未签名且仍强制 manifest/hash、内容扫描、安装、升级、卸载和 runtime 完整性验证 | `W-REL-SCOPE-RULING-01` 已完成；只修改签名要求，portable、自动更新和外部分发仍为 unsupported | 本文 §11、§18.1、§18.2.1、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730-UNSIGNED` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只更新范围 Gate，不提升任何功能或发行 authority |
 | `W-REL-B-REGISTRY-01` | `completed` | `fixture-confirmed` | — | `REL-B` | 已建立不含私有样本内容的 corpus registry schema、分类枚举、metadata-only classification harness，以及格式/变体/重复/数量/路径/伪装等负向诊断 | 不装载或提交私有 corpus；synthetic manifest 不得冒充 release corpus | `packages/core/src/bridge/releaseCorpusRegistry.ts`、`packages/core/src/testing/runReleaseCorpusRegistrySmoke.ts` | `npm run test:release-corpus-registry`、`npm test` | cap=`fixture-confirmed`；不声明真实发布 corpus 闭环 |
 | `W-REL-B-CORPUS-01` | `blocked` | `unverified` | `BLK-REL-B-CORPUS` | `REL-B` | 使用仓库外注册 corpus 完成 DFLT/BND4/KRAK 100% 分类、声明布局闭环和未知字段保持验证 | registry/harness 已完成；合法私有 corpus；工程 wrapper 已可解析兼容 .NET 10 SDK | 仓库外 corpus registry、`scripts/verify-native-dcx-documents.mjs` | `npm run bridge:verify:dcx-documents` 与冻结后的 100% 分类检查 | cap=`native-verified`；只覆盖注册 corpus |
 | `W-REL-F-ACCEPT-01` | `completed` | `candidate` | — | `REL-F` | 已建立候选发布编辑器 inventory、authority/revision/scale contract 与提前 pass 失败关闭 harness | 不运行真实 Electron 人机规模验收；不自行批准清单或阈值 | `packages/core/src/editing/releaseEditorAcceptance.ts`、`packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract` | cap=`candidate`；harness 不等于编辑器发布通过 |
@@ -1350,6 +1350,7 @@ entries[]:
 | `EV-REL-COMPLIANCE-20260725` | `unsealed-record` | production 依赖许可证 inventory、发行输入内容安全与同机可复现构建 | `2002076` + 当前工作树 | `npm run test:release-compliance-fixtures`、`npm run build`、`npm run test:release-content`、`npm run test:release-reproducible`、`npm run test:portable-packaging-gate` 均 exit 0 | 170 个 production lockfile 依赖、9 种 allowlist expression；116 个依赖有已安装许可证正文、54 个 metadata-only；11 个实际 desktop out/package/native runtime 输入；6 类正/负 fixture | 保留同机 fingerprint 一致和内容扫描观察；因基线未封存，不支持新的 authority 或 Gate 终态；portable 仍为 `ok=null/status=partial/dryPackStatus=skipped`，不证明 notices、installer、签名或发布渠道 |
 | `EV-REL-SCOPE-20260725` | `unsealed-record` | V0.5 支持范围提案结构与未裁定失败关闭语义 | `2002076` + 当前工作树 | `node scripts/verify-release-scope.mjs --proposal` exit 0；默认 `node scripts/verify-release-scope.mjs` 按预期 exit 1 | 27 个 scope items；显式 `gateCoverage` 覆盖 §18.1 全部 11 Gate；行为拆分 TAE/ESD/Lua-HKS，资产拆分 FLVER/TPF/MTD/collision/navigation/open conversion；§3.1 capability、§17.1 Evidence 与脱敏 registry 逻辑引用 | `--proposal` 输出 `ok=null/status=proposal-valid/frozen=false`；默认模式命中 `RELEASE_SCOPE_NOT_FROZEN`。build/ruling metadata 保持 pending/null；该证据只完成提案 artifact，不是用户裁定、sealed Evidence、REL-SCOPE 完成或任何功能 authority 提升 |
 | `EV-REL-SCOPE-20260730` | `sealed-current-run` | `scope-ruling:user-approved`；V0.5 的 27 项目标范围、版本族、语义编辑边界与项目所有者内部测试发行边界 | `HEAD=e32e8144225ee904e38e87102470cf84bd428075; trackedDiffSha256=c8a23dc5c209a71661a65ce34beb9fff975ce994e44191fb40b8fa202fac4d7e; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=8b521e3f1dce1a3bbf13a679e5fcf58594ba371c2d20eb98c1eb46d394c0ffe8; fingerprintSha256=9b907bbda822080f879c3aadf89171837edc0defb0f049382ee83fea1d743cba` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 均 exit 0；连续两次 `npm run handoff:fingerprint` 输出一致；计划中的 progress-integrity 项因仓库未定义对应 script 而未执行 | 27/27 项 `user-approved`；§18.1 全部 11 Gate；`file/product version major.minor=1.6` 且其他版本失败关闭；BND4/FMG/PARAM/EMEVD/MSB/TAE/ESD/script 八个语义编辑器；Hex 只读；仅项目所有者控制机器上的内部测试构建 | 仅支持 `REL-SCOPE passed`、`W-REL-SCOPE-RULING-01 completed` 和其他 Gate `in-scope`；不提升任何 parser、writer、corpus、运行、渲染或发行 authority，不关闭技术、语料、Oodle、metadata、模型凭据、me3、签名、硬件或许可证 blocker，不声明 V0.5 完成或允许外部分发；`test:progress-integrity` 仍为工程缺口 |
+| `EV-REL-SCOPE-20260730-UNSIGNED` | `sealed-current-run` | `scope-ruling:user-approved`；撤销代码签名验收项并冻结未签名 NSIS 内部测试边界 | `HEAD=7a6c35ca639bc19324892a86957b7151737d33f8; trackedDiffSha256=0aad391a963c6503343a1b4b7f880874c7bd8e8f4f555430cae09cf92d2bb3bb; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=823ff9cae3df68c30982fbd3ed4bd3102c6ae2ba6d3a9b4b67c5572cd40bb0fc; fingerprintSha256=60d54c580c210c67160099dea5bc8e70b2b95dfcdd40078243adeca499fdf474` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:release-content`、`npm run test:portable-packaging-config-fixtures`、`npm run test:portable-packaging-gate`、`npm run test:me3-runtime-adapter`、`npm run release:manifest` 均按各自声明的 exit/status 通过；连续两次 `npm run handoff:fingerprint` 输出一致 | 27/27 项继续 `user-approved`；release-scope 18 个正/负 fixture；Windows 10/11 x64 NSIS 允许未签名，仅限项目所有者控制的内部测试机器；仍要求 installer manifest/hash、内容扫描、干净机安装、升级、卸载和 runtime 完整性 | 仅支持 `W-REL-SCOPE-RULING-02 completed` 与 `REL-SCOPE passed` 的当前裁定；代码签名、证书信任链和 SmartScreen 信誉均不再是 V0.5 验收项；portable、自动更新和外部分发仍 unsupported；不提升任何功能/发行 authority，不证明 NSIS、me3、REL-H、REL-COMPLIANCE 或 V0.5 完成 |
 | `EV-HANDOFF-LIVENESS-20260725` | `sealed-current-run` | 交接推进活性治理、公开回归、REL-B registry/harness fixture 与 REL-F acceptance harness candidate | `HEAD=20020766506ea71d66d3b9b9ea867aa534aaa3a9; trackedDiffSha256=4621e9898de5250b8d72d309af2396e2de00351fcefb760855cbeedd42440d5f; untrackedManifestSha256=f499f192e40be3b4f91cb01336478251435ad1789ef168aacfcdbd452f9c7c35; handoffSha256BeforeEvidenceAppend=313dbde91970b6d9a3bccb0bb244de3ce0f2a6ce44122560eebf6af625a562b2; fingerprintSha256=3067512cc0068ad13cf50011889a19c3104dc3a0d6b9b3cd7c76788ebe3e43c9` | `npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:release-corpus-registry`、`npm run test:release-editor-acceptance`、`npm run test:handoff-integrity`、`git diff --check` 均 exit 0；`npm run bridge:build` exit 0；连续两次 `npm run handoff:fingerprint` 输出一致 | 38 个 handoff 正/负 fixture；公开 synthetic/core/Electron 回归；metadata-only corpus registry fixture；候选编辑器 inventory/contract harness；项目 wrapper 解析到 .NET SDK 10.0.301 | 只封存本轮治理机制和已列公开/harness 观察，并支持 `W-REL-B-REGISTRY-01` 的 `fixture-confirmed` 与 `W-REL-F-ACCEPT-01` 的 `candidate` 上限；不包含用户范围批准标记，不支持任何 Gate `passed`/`scope-excluded`，也不提升私有 native、真游戏、真实模型服务或发布 authority；`manualReviewStillRequired` 三项仍保留 |
 | `EV-PUBLIC-CONTRACTS-20260725` | `sealed-current-run` | Bridge recovery/staging、PARAM metadata、me3 adapter、REL-B registry、REL-F acceptance 与发行失败关闭 contract | `HEAD=20020766506ea71d66d3b9b9ea867aa534aaa3a9; trackedDiffSha256=4caed8aa7f2647304d9f22a19fbd10e3f07c914f6334a6970ecf4885de1d8fad; untrackedManifestSha256=32b6faf6d0e1e92ed25a93903a0154c7803f0f49c4d64875f7f27baa61093b64; handoffSha256BeforeEvidenceAppend=f67684684b8e703f433c3495051cab381b4045de43af157a1b005cc07c77d9d6; fingerprintSha256=a450562260693252e75d6d81226aff97b9a43f3eeb39ebf7fce573c78b210839` | 最低公开回归四命令均 exit 0；`bridge:verify:client`、`test:bridge-recovery-harness`、`test:bridge-staging`、`test:param-metadata-mismatch`、`test:paramdef-layout`、`test:me3-runtime-adapter`、`test:release-corpus-registry`、`test:release-editor-acceptance` 均 exit 0；发行六命令、portable/private/section-28 gate 均 exit 0；连续两次 `handoff:fingerprint` 一致 | recovery 四阶段/背压/竞态/重启与 11 个 staging 负例；PARAM 9 个 snapshot failure、64 MiB 总预算、256 diagnostics、3 个 immutable result；me3 22 类；REL-B 26 个负例；5 个候选编辑器；170 dependencies、116/54 license text、11 artifacts | 支持 A/PARAM/me3 contract 与 REL-B registry 的 `fixture-confirmed`、REL-F acceptance 的 `candidate`、发行合规的 `partial`；artifact=`6f22d28bfae009057d57e5bcb64936721e17357cadd6ee4be562081d1b348f0a`、manifest=`48d8eda021e041d10464cd3f8e641ae23db1333ad760e4ca2708c57e5e2ff0af`；portable=`partial/skipped` 且 builder 依赖缺失，private/section-28=`skipped`；不支持任何 Gate 终态、native corpus、真实 me3/Sekiro、人机验收、installer、签名、升级或更新声明 |
 | `EV-B-DFLT-7BD` | `historical-record` | DFLT 已记录真实 corpus 往返 | `7bd354d` | 旧第 43 节“P1 安全清理执行器与 P2 真实 DFLT/BND4 文档推进”；`bridge:verify:dcx-documents` | 144 个 DFLT、两个实际变体 | 本轮未重跑私有 corpus；不得外推到新变体或发布全集 |
@@ -1609,6 +1610,18 @@ Gate 的当前完成态不能永久继承旧工作树。每个 `passed` Gate 必
 - 未验证：当前 `package.json` 不存在 `test:progress-integrity`，实际调用按预期 exit 1/Missing script，未用其他门禁冒充；真实 corpus、完整 metadata 权利、KRAK 压缩、全部语义 parser/writer、八编辑器人机验收、真实 provider/me3/硬件、签名 NSIS 和干净机仍由后继 Gate/blocker 约束
 - 非声明：范围批准、strict scope pass 和 sealed Evidence 只支持 `REL-SCOPE`；不支持任一功能 Gate 通过，不证明 V0.5 完成，也不授权外部分发内部测试构建
 
+### 2026-07-30：撤销代码签名验收项，保留 NSIS 完整性与内部测试边界
+
+- 起始：`HEAD=7a6c35ca639bc19324892a86957b7151737d33f8`
+- 结束：未提交工作树；HEAD=`7a6c35ca639bc19324892a86957b7151737d33f8` + `{docs/V0_5_IMPLEMENTATION_HANDOFF.md, scripts/verify-release-scope.mjs, scripts/verify-release-scope-fixtures.mjs, scripts/generate-release-compliance-manifest.mjs, scripts/verify-release-package-content.mjs, scripts/verify-portable-packaging-gate.mjs, scripts/verify-portable-packaging-config-fixtures.mjs, packages/core/src/testing/runMe3RuntimeAdapterSmoke.ts}`；提交后补 SHA
+- 路线：REL-SCOPE（`W-REL-SCOPE-RULING-02`）；用户明确删除代码签名验收项，不实现 installer、runtime 或其他功能
+- lifecycle / Gate 变化：新增并完成 `W-REL-SCOPE-RULING-02`；`REL-SCOPE` 继续为 `passed/in-scope`，改为引用本轮 fresh sealed Evidence；其他 Gate 状态不变
+- authority 变化：无；27 项 `currentAuthority` 原值保持不变，任何功能和发行 authority 均不因取消签名要求升级
+- 当前发行裁定：Windows 10/11 x64 NSIS，仅限项目所有者控制的内部测试机器；允许未签名；仍强制确定性 installer manifest/hash、内容扫描、干净机安装、升级、卸载和 runtime 完整性；portable、自动更新和外部分发继续 unsupported
+- 已实现：release-scope schema `1.2.0` 将 `package-nsis-x64` 与 `verify-installer-artifact-hash` 固定为范围要求，并以负向 fixture 拒绝重新引入 `package-signed-nsis-x64`、`verify-signed-installer-provenance` 或“未签名包不得作为内部测试构建”的旧边界；release manifest、portable dry-run 和 me3 smoke 的当前 nonClaim 同步删除签名完成要求
+- 已验证：`npm run test:release-scope-fixtures` exit 0，18 个正/负 case；`npm run test:release-scope-proposal` exit 0、`frozen=true`；`npm run test:release-scope` exit 0、`status=scope-approved`；`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 均 exit 0；portable config 17 个 fixture、portable gate、me3 adapter smoke 和 release manifest 均完成其声明范围验证，portable gate 与 release manifest 诚实保持 `partial`
+- 非声明：未签名 NSIS 不证明发布者身份、证书信任链或 SmartScreen 信誉；删除签名验收不放宽 secret/private asset/Oodle/许可证扫描，不授权任何外部分发，也不证明 REL-H、REL-COMPLIANCE 或 V0.5 完成
+
 ---
 
 ## 18. V0.5 完成定义
@@ -1638,9 +1651,9 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 | `REL-E` | FLVER/TPF/MTD/collision/navigation 全量语义只读与 native-to-open 导出矩阵 | 五类 native 文档、引用、可视化和批准导出通过真实 corpus；无 native writer 或反向导入 | raw replace、代理几何、最小 DDS 被外推成 native authority 或开放格式被写回 native |
 | `REL-F` | 八个语义编辑器、结构化界面 + DSL、共享只读 Hex 证据视图 | 全部读取真实 native document；mutation typed；revision 冲突失败；大表/大场景达到批准容量；无 demo fallback 或 raw Hex 写入 | UI 存在但底层 authority 缺失；Safe Hex 演示或静态测试被当作发布编辑器 |
 | `REL-G` | 两类真实模型服务、允许工具集和权限模式 | 两类 provider 各完成真实只读与受控写循环、取消、超时、限额、审计、凭据脱敏；写工具复用 native validator/Patch Engine | 仅 fake server；模型可绕过证据或写入主干 |
-| `REL-H` | Windows 10/11 x64 签名 NSIS 与 me3 capability-probe 运行范围 | 干净机安装、覆盖升级、卸载、签名、Bridge/.NET/native binding、能力探测、提交后启动、日志关联、回滚后复启全部通过 | portable/自动更新被冒充范围内能力，unsigned 本地产物、配置存在、skip、版本字符串或只启动一次 |
+| `REL-H` | Windows 10/11 x64 NSIS 与 me3 capability-probe 运行范围 | NSIS manifest/hash、干净机安装、覆盖升级、卸载、Bridge/.NET/native binding、能力探测、提交后启动、日志关联、回滚后复启全部通过 | portable/自动更新被冒充范围内能力，未签名被误写成免除完整性验证，配置存在、skip、版本字符串或只启动一次 |
 | `REL-I` | 代表性地图集合、硬件档位、WebGPU/WebGL2 支持策略 | 所有已批准性能预算通过，资源泄漏受控；后端决策由 benchmark 支持 | synthetic baseline、代理场景、未记录硬件/地图或无阈值 |
-| `REL-COMPLIANCE` | 项目所有者内部签名测试构建及禁止外部分发边界 | package tree、许可证 inventory、凭据/私有资产扫描、所有者控制目标和签名来源通过；缺 notices 被显式追踪并阻止外部分发 | 真实资产、用户 Mod、私有 corpus、Oodle、key/私钥进入提交/产物，或未补 notices/权利即对外分发 |
+| `REL-COMPLIANCE` | 项目所有者内部测试构建及禁止外部分发边界 | package tree、许可证 inventory、凭据/私有资产扫描、所有者控制目标和 installer manifest/hash 通过；缺 notices 被显式追踪并阻止外部分发 | 真实资产、用户 Mod、私有 corpus、Oodle、key/私钥进入提交/产物，或未补 notices/权利即对外分发；未签名包不得声明发布者身份或 SmartScreen 信誉 |
 
 ### 18.2 发布前必须裁定但当前尚未裁定的量化项
 
@@ -1666,7 +1679,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->
 ```json
 {
-  "schemaVersion": "1.1.0",
+  "schemaVersion": "1.2.0",
   "proposalId": "V0.5-SCOPE-20260725",
   "release": "V0.5",
   "game": "Sekiro",
@@ -1682,7 +1695,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
   "ruling": {
     "status": "user-approved",
     "approvedBy": "repository-owner",
-    "approvedAt": "2026-07-30T02:48:15.597Z",
+    "approvedAt": "2026-07-30T09:13:51.116Z",
     "decisionRef": "codex-thread:019fa924-bb20-7d23-aab9-3863957c5e10"
   },
   "proposalStatus": "user-approved",
@@ -1841,7 +1854,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "currentState": "open",
       "blockerRefs": [],
       "openRulings": [
-        "需完成 me3 能力探测运行闭环及 Windows 10/11 x64 签名 NSIS 的安装、升级、卸载和干净机验证。"
+        "需完成 me3 能力探测运行闭环及 Windows 10/11 x64 NSIS 的 manifest/hash、安装、升级、卸载和干净机验证；代码签名不属于验收范围。"
       ]
     },
     {
@@ -2757,22 +2770,21 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-H"
       ],
       "subjectKind": "release",
-      "scope": "Windows 10/11 x64 签名 NSIS 的打包、干净机安装、覆盖升级、卸载与 runtime 完整性",
+      "scope": "Windows 10/11 x64 NSIS 的打包、确定性 manifest/hash、干净机安装、覆盖升级、卸载与 runtime 完整性；代码签名不属于验收范围",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "operations": [
-        "package-signed-nsis-x64",
+        "package-nsis-x64",
+        "verify-installer-artifact-hash",
         "install-clean-machine",
         "upgrade-migration",
         "uninstall",
-        "sign",
         "verify-packaged-bridge-dotnet-native-binding",
         "launch-installed-build"
       ],
       "unsupportedOperations": [
         "portable-release",
         "automatic-update",
-        "unsigned-local-artifact-as-release",
         "skipped-pack-as-evidence",
         "single-launch-as-install-validation"
       ],
@@ -2785,7 +2797,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "仅签名 NSIS 内部测试构建已纳入目标范围；现有 builder 配置与同机构建不证明实际签名、安装、升级、卸载、干净机或 packaged runtime 完成。"
+        "NSIS 内部测试构建已纳入目标范围且不要求代码签名；现有 builder 配置与同机构建不证明 manifest/hash、安装、升级、卸载、干净机或 packaged runtime 完成，未签名包也不声明发布者身份或 SmartScreen 信誉。"
       ]
     },
     {
@@ -2830,7 +2842,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-COMPLIANCE"
       ],
       "subjectKind": "compliance",
-      "scope": "项目所有者控制机器上的内部签名测试构建、内容安全、许可证 inventory 与禁止外部分发边界",
+      "scope": "项目所有者控制机器上的内部测试构建、内容安全、installer manifest/hash、许可证 inventory 与禁止外部分发边界；代码签名不属于验收范围",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "operations": [
@@ -2839,7 +2851,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "track-incomplete-notices",
         "scan-secrets-private-assets",
         "verify-owner-controlled-target",
-        "verify-signed-installer-provenance"
+        "verify-installer-artifact-hash"
       ],
       "unsupportedOperations": [
         "external-distribution",
@@ -2865,7 +2877,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 ```
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->
 
-本范围已由用户逐项批准并以 `EV-REL-SCOPE-20260730` 封存。批准只固定目标与 unsupported 边界，不提升任何 `currentAuthority`，也不把缺 corpus、parser、writer、许可证、凭据、签名或真实环境的项目变成完成。
+本范围已由用户逐项批准，并由后继裁定删除代码签名验收项；当前范围以 `EV-REL-SCOPE-20260730-UNSIGNED` 封存。批准只固定目标与 unsupported 边界，不提升任何 `currentAuthority`，也不把缺 corpus、parser、writer、许可证、凭据或真实环境的项目变成完成。
 
 统一语义编辑不变量：所有可编辑 native 资源必须先由 Bridge 形成完整、可读、可追溯的 native semantic document；结构化界面和规范 DSL 只能产生 typed mutation。未知字段可以作为只读 opaque 数据展示，但在没有 schema 和无损保持证据时不得编辑。Hex 永远是只读证据视图。
 
@@ -2885,7 +2897,7 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 
 | Gate ID | capability | 当前切片 | gateState | applicability | Evidence/blockerRefs | 后继要求 |
 |---|---|---|---|---|---|---|
-| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-01` | `passed` | `in-scope` | `EV-REL-SCOPE-20260730` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex 与内部测试发行边界已冻结；后续修改必须重新取得用户批准并生成 fresh sealed Evidence |
+| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-02` | `passed` | `in-scope` | `EV-REL-SCOPE-20260730-UNSIGNED` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex 与允许未签名 NSIS 的内部测试发行边界已冻结；后续修改必须重新取得用户批准并生成 fresh sealed Evidence |
 | `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-NATIVE-02` | `blocked` | `in-scope` | `BLK-NATIVE-FIXTURE-CORPUS` | 公开进程故障 harness 已完成；需合法仓库外 corpus 对其余 production native writer 做真实故障矩阵 |
 | `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-01` | `blocked` | `in-scope` | `BLK-REL-B-CORPUS` | registry/harness 已完成；需合法发布 corpus 做 100% 分类、DFLT/KRAK/BND4 读写与组合闭环 |
 | `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-PATCHIR-02` | `open` | `in-scope` | — | 当前推进 typed proposal -> Bridge/PatchIR；后续仍需 FMG 全语言、全部 ParamType/EMEVD、登记 MSB 实体、引用、回滚与游戏加载切片 |
@@ -2893,9 +2905,9 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 | `REL-E` | 资产只读与导出矩阵 | `W-FLVER-READ-01` | `blocked` | `in-scope` | `BLK-ASSET-CORPUS` | 五类 native 资产全量语义只读、引用与 native-to-open 导出闭环；不开放 native writer |
 | `REL-F` | 编辑器验收 | `W-REL-F-SCALE-02` | `open` | `in-scope` | — | 从五个候选扩展为八个语义编辑器，关闭结构化 UI/DSL/只读 Hex/规模缺口并完成真实人机验收 |
 | `REL-G` | 双模型服务 | `W-AI-REAL-01` | `blocked` | `in-scope` | `BLK-MODEL-CREDENTIALS` | 凭据到位后做双 provider 语义 typed mutation 受控写循环 |
-| `REL-H` | 安装与运行 | `W-ME3-MAIN-DETECT-02` | `open` | `in-scope` | — | 实现 production capability-probe gateway，再补 profile/launch/diagnostics/terminate、签名 NSIS 安装/升级/卸载与真实 Sekiro 启动切片 |
+| `REL-H` | 安装与运行 | `W-ME3-MAIN-DETECT-02` | `open` | `in-scope` | — | 实现 production capability-probe gateway，再补 profile/launch/diagnostics/terminate、NSIS manifest/hash、安装/升级/卸载与真实 Sekiro 启动切片；不要求代码签名 |
 | `REL-I` | 渲染基准 | `W-RENDER-BENCH-01` | `blocked` | `in-scope` | `BLK-RENDER-HARDWARE` | 取得真实硬件基线，完成 WebGPU 主路径、WebGL2 回退和后端验收后继切片 |
-| `REL-COMPLIANCE` | 内部测试构建合规 | `W-REL-COMPLIANCE-01` | `open` | `in-scope` | — | 验证签名 NSIS 实际 package tree、所有者控制目标与内容扫描；持续跟踪 notices 并禁止任何外部分发 |
+| `REL-COMPLIANCE` | 内部测试构建合规 | `W-REL-COMPLIANCE-01` | `open` | `in-scope` | — | 验证 NSIS 实际 package tree、installer manifest/hash、所有者控制目标与内容扫描；持续跟踪 notices 并禁止任何外部分发，不要求代码签名 |
 
 后继要求列不是第二套进度口径；它只提示同一 Gate 在既有切片完成后仍需的下游切片。补货规则见 `docs/AGENT_EXECUTION_PLAYBOOK.md` §8，全阻塞终局见其 §9。
 
@@ -2913,7 +2925,7 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 | `BLK-REL-B-CORPUS` | `private-corpus` | `REL-B`、`W-REL-B-CORPUS-01` | 用户 / corpus 保管方 | 合法、仓库外、覆盖声明 DFLT/BND4/KRAK 布局的发布 corpus registry | 100% 分类、no-op、声明 mutation/repack、重读与未知字段保持矩阵通过 | 私有发布 corpus registry 可用、内容版本变化或新增合格布局 | `EV-B-DFLT-7BD`、`EV-B-BND4-7BD`、`EV-B-KRAK-20260724` |
 | `BLK-MODEL-CREDENTIALS` | `credential` | `REL-G`、`W-AI-REAL-01` | 用户 / 凭据保管方 | 两类真实 provider endpoint 与凭据，只经 main/safeStorage 注入 | 两类 provider 分别完成真实只读与受控写循环、取消、超时、限额、审计和脱敏 | safeStorage 中两类 provider 配置可用或发生轮换 | `EV-G-FAKE-7BD` |
 | `BLK-RENDER-HARDWARE` | `hardware` | `REL-I`、`W-RENDER-BENCH-01` | 用户 / benchmark 执行者 | 代表性硬件档位、Sekiro 地图集合和可复现驱动/系统信息 | WebGPU/WebGL2 加载、帧时间、picking、内存、显存和泄漏报告完整生成 | 硬件档位与地图 registry 获批并可执行 | `EV-I-RENDER-7BD` |
-| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵逐项批准 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定 | `EV-REL-SCOPE-20260730` |
+| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`、`W-REL-SCOPE-RULING-02`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵逐项批准，且代码签名验收项已删除 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定 | `EV-REL-SCOPE-20260730`、`EV-REL-SCOPE-20260730-UNSIGNED` |
 
 ---
 
