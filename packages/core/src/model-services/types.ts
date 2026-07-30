@@ -58,6 +58,8 @@ export interface ModelCompleteRequest {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** Per-request timeout in milliseconds. When elapsed, the request is aborted. */
+  timeoutMs?: number;
 }
 
 export interface ModelCompleteResult {
@@ -84,6 +86,10 @@ export interface AgentRunRequest {
   executeTool: (call: ToolCall) => Promise<{ ok: boolean; content: string; code?: string }>;
   maxSteps?: number;
   signal?: AbortSignal;
+  /** Per-LLM-call timeout in milliseconds. */
+  timeoutMs?: number;
+  /** Maximum total output tokens across all steps. When exceeded, the loop stops. */
+  maxTotalOutputTokens?: number;
 }
 
 export interface AgentRunResult {

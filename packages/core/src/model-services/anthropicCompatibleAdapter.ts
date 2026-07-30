@@ -10,6 +10,14 @@ import type {
   StreamEvent,
   ToolDefinition
 } from './types.js';
+import {
+  classifyFetchError,
+  classifyHttpError,
+  classifyParseError,
+  createRequestSignal,
+  errorResult,
+  errorStreamEvent
+} from './errorClassification.js';
 
 export interface AnthropicCompatibleAdapterOptions {
   baseUrl: string;
@@ -37,33 +45,43 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
 
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
     const body = buildMessagesBody(this.model, request, false);
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': this.apiVersion
-      },
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {})
-    });
+    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': this.apiVersion
+        },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {})
+      });
+    } catch (error) {
+      cleanup();
+      return errorResult(classifyFetchError(error, 'Anthropic-compatible', signal));
+    }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      return {
-        message: { role: 'assistant', content: '' },
-        finishReason: 'error',
-        diagnostics: [{
-          severity: 'error',
-          code: 'MODEL_SERVICE_HTTP_ERROR',
-          message: `Anthropic-compatible 请求失败：HTTP ${response.status} ${text.slice(0, 200)}`
-        }]
-      };
+      cleanup();
+      return errorResult(classifyHttpError(
+        response.status, text, 'Anthropic-compatible',
+        response.headers.get('retry-after')
+      ));
     }
-    const json = await response.json() as {
+    let json: {
       content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
       stop_reason?: string;
       usage?: { input_tokens?: number; output_tokens?: number };
     };
+    try {
+      json = await response.json() as typeof json;
+    } catch (error) {
+      cleanup();
+      return errorResult(classifyParseError(error, 'Anthropic-compatible'));
+    }
+    cleanup();
     const texts: string[] = [];
     const toolCalls = [];
     for (const block of json.content ?? []) {
@@ -102,11 +120,12 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
     try {
       const result = await this.complete(request);
       if (result.finishReason === 'error') {
-        yield {
-          type: 'error',
-          code: result.diagnostics[0]?.code ?? 'MODEL_SERVICE_HTTP_ERROR',
-          message: result.diagnostics[0]?.message ?? 'Anthropic 请求失败。'
-        };
+        const diag = result.diagnostics[0];
+        yield errorStreamEvent({
+          severity: 'error',
+          code: diag?.code ?? 'MODEL_SERVICE_HTTP_ERROR',
+          message: diag?.message ?? 'Anthropic-compatible 请求失败。'
+        });
         return;
       }
       if (result.message.content) {
@@ -121,11 +140,7 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
         yield { type: 'message-stop', finishReason: 'cancelled' };
         return;
       }
-      yield {
-        type: 'error',
-        code: 'MODEL_SERVICE_STREAM_FAILED',
-        message: error instanceof Error ? error.message : 'Anthropic 流式失败。'
-      };
+      yield errorStreamEvent(classifyFetchError(error, 'Anthropic-compatible', request.signal));
     }
   }
 }

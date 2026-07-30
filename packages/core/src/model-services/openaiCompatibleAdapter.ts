@@ -12,6 +12,14 @@ import type {
   ToolCall,
   ToolDefinition
 } from './types.js';
+import {
+  classifyFetchError,
+  classifyHttpError,
+  classifyParseError,
+  createRequestSignal,
+  errorResult,
+  errorStreamEvent
+} from './errorClassification.js';
 
 export interface OpenAiCompatibleAdapterOptions {
   baseUrl: string;
@@ -36,28 +44,31 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
 
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
     const body = buildChatBody(this.model, request, false);
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {})
-    });
+    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {})
+      });
+    } catch (error) {
+      cleanup();
+      return errorResult(classifyFetchError(error, 'OpenAI-compatible', signal));
+    }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      return {
-        message: { role: 'assistant', content: '' },
-        finishReason: 'error',
-        diagnostics: [{
-          severity: 'error',
-          code: 'MODEL_SERVICE_HTTP_ERROR',
-          message: `OpenAI-compatible 请求失败：HTTP ${response.status} ${text.slice(0, 200)}`
-        }]
-      };
+      cleanup();
+      return errorResult(classifyHttpError(
+        response.status, text, 'OpenAI-compatible',
+        response.headers.get('retry-after')
+      ));
     }
-    const json = await response.json() as {
+    let json: {
       choices?: Array<{
         message?: {
           role?: string;
@@ -68,6 +79,13 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
       }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
+    try {
+      json = await response.json() as typeof json;
+    } catch (error) {
+      cleanup();
+      return errorResult(classifyParseError(error, 'OpenAI-compatible'));
+    }
+    cleanup();
     const choice = json.choices?.[0];
     const toolCalls = (choice?.message?.tool_calls ?? []).map((call) => ({
       id: call.id,
@@ -92,21 +110,29 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
 
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
     const body = buildChatBody(this.model, request, true);
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {})
-    });
+    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {})
+      });
+    } catch (error) {
+      cleanup();
+      yield errorStreamEvent(classifyFetchError(error, 'OpenAI-compatible', signal));
+      return;
+    }
     if (!response.ok || !response.body) {
-      yield {
-        type: 'error',
-        code: 'MODEL_SERVICE_HTTP_ERROR',
-        message: `OpenAI-compatible 流式请求失败：HTTP ${response.status}`
-      };
+      cleanup();
+      yield errorStreamEvent(classifyHttpError(
+        response.status, '', 'OpenAI-compatible',
+        response.headers.get('retry-after')
+      ));
       return;
     }
     const reader = response.body.getReader();
@@ -125,6 +151,7 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
           if (!trimmed.startsWith('data:')) continue;
           const data = trimmed.slice(5).trim();
           if (data === '[DONE]') {
+            cleanup();
             for (const tool of toolAcc.values()) {
               yield {
                 type: 'tool-call',
@@ -159,6 +186,7 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
               toolAcc.set(index, current);
             }
             if (json.choices?.[0]?.finish_reason) {
+              cleanup();
               for (const tool of toolAcc.values()) {
                 yield {
                   type: 'tool-call',
@@ -178,17 +206,15 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
           }
         }
       }
+      cleanup();
       yield { type: 'message-stop', finishReason: 'stop' };
     } catch (error) {
+      cleanup();
       if (request.signal?.aborted) {
         yield { type: 'message-stop', finishReason: 'cancelled' };
         return;
       }
-      yield {
-        type: 'error',
-        code: 'MODEL_SERVICE_STREAM_FAILED',
-        message: error instanceof Error ? error.message : '流式读取失败。'
-      };
+      yield errorStreamEvent(classifyFetchError(error, 'OpenAI-compatible', signal));
     }
   }
 }

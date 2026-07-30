@@ -13,6 +13,14 @@ import type {
   ToolCall,
   ToolDefinition
 } from './types.js';
+import {
+  classifyFetchError,
+  classifyHttpError,
+  classifyParseError,
+  createRequestSignal,
+  errorResult,
+  errorStreamEvent
+} from './errorClassification.js';
 
 export interface OpenAiResponsesAdapterOptions {
   baseUrl: string;
@@ -39,48 +47,66 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
 
   async complete(request: ModelCompleteRequest): Promise<ModelCompleteResult> {
     const body = buildResponsesBody(this.model, request, false);
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/responses`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {})
-    });
+    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/responses`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {})
+      });
+    } catch (error) {
+      cleanup();
+      return errorResult(classifyFetchError(error, 'OpenAI Responses', signal));
+    }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      return {
-        message: { role: 'assistant', content: '' },
-        finishReason: 'error',
-        diagnostics: [{
-          severity: 'error',
-          code: 'MODEL_SERVICE_HTTP_ERROR',
-          message: `OpenAI Responses 请求失败：HTTP ${response.status} ${text.slice(0, 200)}`
-        }]
-      };
+      cleanup();
+      return errorResult(classifyHttpError(
+        response.status, text, 'OpenAI Responses',
+        response.headers.get('retry-after')
+      ));
     }
-    const json = await response.json() as ResponsesPayload;
+    let json: ResponsesPayload;
+    try {
+      json = await response.json() as ResponsesPayload;
+    } catch (error) {
+      cleanup();
+      return errorResult(classifyParseError(error, 'OpenAI Responses'));
+    }
+    cleanup();
     return parseResponsesPayload(json);
   }
 
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
     const body = buildResponsesBody(this.model, request, true);
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/responses`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {})
-    });
+    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/responses`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${this.apiKey}`
+        },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {})
+      });
+    } catch (error) {
+      cleanup();
+      yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal));
+      return;
+    }
     if (!response.ok || !response.body) {
-      yield {
-        type: 'error',
-        code: 'MODEL_SERVICE_HTTP_ERROR',
-        message: `OpenAI Responses 流式请求失败：HTTP ${response.status}`
-      };
+      cleanup();
+      yield errorStreamEvent(classifyHttpError(
+        response.status, '', 'OpenAI Responses',
+        response.headers.get('retry-after')
+      ));
       return;
     }
 
@@ -193,15 +219,12 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
       }
       yield { type: 'message-stop', finishReason: sawTool ? 'tool_use' : 'stop' };
     } catch (error) {
+      cleanup();
       if (request.signal?.aborted) {
         yield { type: 'message-stop', finishReason: 'cancelled' };
         return;
       }
-      yield {
-        type: 'error',
-        code: 'MODEL_SERVICE_STREAM_FAILED',
-        message: error instanceof Error ? error.message : 'Responses 流式读取失败。'
-      };
+      yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal));
     }
   }
 }
