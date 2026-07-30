@@ -82,6 +82,7 @@ export async function runAgentToolLoop(
   const registered = new Set(request.tools.map((tool) => tool.name));
   let steps = 0;
   let finishReason = 'stop';
+  let totalOutputTokens = 0;
 
   while (steps < maxSteps) {
     if (request.signal?.aborted) {
@@ -97,9 +98,22 @@ export async function runAgentToolLoop(
     const completion = await adapter.complete({
       messages,
       tools: request.tools,
-      ...(request.signal ? { signal: request.signal } : {})
+      ...(request.signal ? { signal: request.signal } : {}),
+      ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
     });
     diagnostics.push(...completion.diagnostics);
+    if (completion.usage?.outputTokens) {
+      totalOutputTokens += completion.usage.outputTokens;
+    }
+    if (request.maxTotalOutputTokens != null && totalOutputTokens > request.maxTotalOutputTokens) {
+      finishReason = 'length';
+      diagnostics.push({
+        severity: 'warning',
+        code: 'MODEL_SERVICE_OUTPUT_BUDGET_EXCEEDED',
+        message: `累计输出 token ${totalOutputTokens} 超过预算 ${request.maxTotalOutputTokens}。`
+      });
+      break;
+    }
     if (completion.finishReason === 'error') {
       finishReason = 'error';
       break;
@@ -150,6 +164,18 @@ export async function runAgentToolLoop(
         toolCallId: call.id,
         content: redactSecrets(result.content)
       });
+      if (request.signal?.aborted) {
+        finishReason = 'cancelled';
+        diagnostics.push({
+          severity: 'warning',
+          code: 'AGENT_CANCELLED',
+          message: 'Agent 循环在工具执行后取消。'
+        });
+        break;
+      }
+    }
+    if (finishReason === 'cancelled') {
+      break;
     }
     finishReason = 'tool_use';
   }

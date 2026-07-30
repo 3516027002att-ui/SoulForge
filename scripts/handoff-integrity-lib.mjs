@@ -664,11 +664,124 @@ function evidenceHasClaim(evidence, id, marker) {
 }
 
 function evidenceMatchesCurrentFingerprint(evidence, id, currentFingerprint) {
-  if (!currentFingerprint || !evidenceIsSealed(evidence, id)) return currentFingerprint === undefined;
-  const fields = evidence.get(id).seal.fields;
-  return fields.head === currentFingerprint.head.toLowerCase() &&
-    fields.trackedDiffSha256 === currentFingerprint.trackedDiffSha256.toLowerCase() &&
-    fields.untrackedManifestSha256 === currentFingerprint.untrackedManifestSha256.toLowerCase();
+  const record = evidence.get(id);
+  if (!evidenceIsSealed(evidence, id) || !record.seal?.fields || !currentFingerprint) return false;
+  const fields = record.seal.fields;
+  return fields.head === currentFingerprint.head
+    && fields.trackedDiffSha256 === currentFingerprint.trackedDiffSha256
+    && fields.untrackedManifestSha256 === currentFingerprint.untrackedManifestSha256;
+}
+
+/**
+ * Gate 主题域注册表。
+ *
+ * passed Gate 的 freshness 只取决于“与该 Gate 声明相关的主题域自 Evidence
+ * 锚点提交以来是否变更”，与全工作树字节、未提交改动或未跟踪文件无关。
+ * Gate 有效性是提交图的性质，不是工作树的性质：运行时自动改写的文件、
+ * 无关路线的代码改动、交接书其他章节的沉淀都不应使已通过的 Gate 失效；
+ * 偷改主题域（如范围冻结块或范围校验脚本）则必须立即失败关闭。
+ *
+ * 尚未定义主题域的 Gate 尝试 passed 会失败关闭（GATE_SUBJECT_SET_UNDEFINED），
+ * 强制未来通过者显式枚举主题域。scope-excluded 的裁定主题就是范围裁定本身，
+ * 因此复用 REL-SCOPE 的主题域。
+ */
+const SCOPE_SUBJECT_SET = Object.freeze({
+  files: Object.freeze([
+    'scripts/verify-release-scope.mjs',
+    'scripts/verify-release-scope-fixtures.mjs'
+  ]),
+  handoffSections: Object.freeze(['18.2.1'])
+});
+const GATE_SUBJECT_SETS = new Map([
+  ['REL-SCOPE', SCOPE_SUBJECT_SET]
+]);
+
+export function handoffSectionSubjectRef(sectionId) {
+  return `handoff-section:${sectionId}`;
+}
+
+function subjectRefsFor(subjectSet) {
+  return [
+    ...subjectSet.files,
+    ...subjectSet.handoffSections.map(handoffSectionSubjectRef)
+  ];
+}
+
+export function gateSubjectRegistry() {
+  const gates = [...GATE_SUBJECT_SETS].map(([gateId, set]) => ({
+    gateId,
+    files: [...set.files],
+    handoffSections: [...set.handoffSections]
+  }));
+  return Object.freeze({
+    gates,
+    scopeExclusion: { files: [...SCOPE_SUBJECT_SET.files], handoffSections: [...SCOPE_SUBJECT_SET.handoffSections] },
+    allFiles: [...new Set(gates.flatMap((entry) => entry.files))],
+    allHandoffSections: [...new Set(gates.flatMap((entry) => entry.handoffSections))]
+  });
+}
+
+/**
+ * 扫描 §17.1，返回全部格式合法 sealed Evidence 的锚点提交（写入时 HEAD）。
+ * 供 freshness 上下文生成器按锚点计算祖先关系与主题域差异。
+ */
+export function collectSealAnchors(markdown) {
+  const scanFindings = [];
+  const evidence = parseEvidence(markdown, 'seal-anchor-scan', scanFindings);
+  const anchors = new Set();
+  for (const record of evidence.values()) {
+    if (record.type === 'sealed-current-run' && record.seal?.formatValid === true) {
+      anchors.add(record.seal.fields.head);
+    }
+  }
+  return [...anchors];
+}
+
+/**
+ * 评估单条 Evidence 对一组主题域引用的新鲜度。
+ *
+ * @returns {'fresh'|'stale'|'unverifiable'|'not-sealed'|'static-mode'}
+ * - static-mode：未提供 freshnessContext（纯静态子集模式，跳过运行期判定）；
+ * - fresh：锚点是当前 HEAD 祖先且主题域自锚点以来未变更；
+ * - stale：锚点不是祖先（历史被改写）或主题域已变更；
+ * - unverifiable：上下文缺少该锚点的祖先/差异信息，失败关闭。
+ */
+function evaluateEvidenceFreshness(evidence, id, subjectRefs, freshnessContext) {
+  if (freshnessContext === undefined) return 'static-mode';
+  if (!evidenceIsSealed(evidence, id)) return 'not-sealed';
+  const anchor = evidence.get(id).seal.fields.head;
+  const anchorState = freshnessContext.anchors?.[anchor];
+  if (!anchorState || anchorState.subjectScanAvailable === false) return 'unverifiable';
+  if (anchorState.isAncestor !== true) return 'stale';
+  const changed = new Set(anchorState.changedSubjects ?? []);
+  return subjectRefs.some((ref) => changed.has(ref)) ? 'stale' : 'fresh';
+}
+
+function checkEvidenceFreshness(
+  where,
+  evidenceIds,
+  evidence,
+  subjectRefs,
+  freshnessContext,
+  staleCode,
+  staleMessage
+) {
+  if (freshnessContext === undefined) return null;
+  if (evidenceIds.length === 0) return null;
+  let sawUnverifiable = false;
+  for (const id of evidenceIds) {
+    const status = evaluateEvidenceFreshness(evidence, id, subjectRefs, freshnessContext);
+    if (status === 'fresh' || status === 'static-mode') return null;
+    if (status === 'unverifiable') sawUnverifiable = true;
+  }
+  if (sawUnverifiable) {
+    return makeFinding(
+      'GATE_FRESHNESS_UNVERIFIABLE',
+      where,
+      'passed Gate 的 sealed Evidence 锚点祖先关系或主题域差异无法验证，失败关闭。'
+    );
+  }
+  return makeFinding(staleCode, where, staleMessage);
 }
 
 function parseAndValidateGateMatrix(
