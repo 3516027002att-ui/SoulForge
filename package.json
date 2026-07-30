@@ -56,6 +56,7 @@
     "test:fmg-msb-ipc-contract": "npm run test:fmg-msb-ipc-contract -w @soulforge/core",
     "test:param-msb-write-ipc-contract": "npm run test:param-msb-write-ipc-contract -w @soulforge/core",
     "test:desktop-live-editor-contract": "npm run test:desktop-live-editor-contract -w @soulforge/core",
+    "test:param-metadata-native": "npm run test:param-metadata-native -w @soulforge/core",
     "test:param-duplicate-native": "npm run test:param-duplicate-native -w @soulforge/core",
     "test:scene-asset-inventory": "npm run test:scene-asset-inventory -w @soulforge/core",
     "test:flver-candidate": "npm run test:flver-candidate -w @soulforge/core",
