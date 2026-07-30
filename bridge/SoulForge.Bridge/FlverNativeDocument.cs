@@ -465,6 +465,88 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(weights);
     }
 
+    /// <summary>
+    /// Extract bone indices (4 bytes per vertex, 4 bone influences) for a specific mesh as base64.
+    /// Bone indices are stored at offset 0x20 within the 40-byte vertex stride.
+    /// Returns null if mesh index is out of range or vertex data is unavailable.
+    /// </summary>
+    public string? GetMeshBoneIndicesBase64(int meshIndex, int maxVertices = 10_000)
+    {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        var mesh = Meshes[meshIndex];
+        var vertexCount = Math.Min(mesh.VertexCount, maxVertices);
+        if (vertexCount <= 0) return null;
+
+        // Reuse the vertex data offset from GetMeshPositionsBase64.
+        var positionsBase64 = GetMeshPositionsBase64(meshIndex, maxVertices);
+        if (positionsBase64 == null) return null;
+
+        // Find the vertex data offset using the same scan logic.
+        float margin = 1.0f;
+        float minX = BoundingBoxMinX - margin, maxX = BoundingBoxMaxX + margin;
+        float minY = BoundingBoxMinY - margin, maxY = BoundingBoxMaxY + margin;
+        float minZ = BoundingBoxMinZ - margin, maxZ = BoundingBoxMaxZ + margin;
+        int vertexDataOffset = -1;
+        int scanEnd = Math.Min(DataStart + DataLength, SourceBytes.Length - VertexStride);
+        for (int offset = DataStart; offset < scanEnd; offset += 4)
+        {
+            float x = ReadFloat32(SourceBytes, offset);
+            float y = ReadFloat32(SourceBytes, offset + 4);
+            float z = ReadFloat32(SourceBytes, offset + 8);
+            if (float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z)
+                && x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ
+                && (Math.Abs(x) > 0.001f || Math.Abs(y) > 0.001f || Math.Abs(z) > 0.001f))
+            {
+                bool valid = true;
+                int nonZeroCount = 1;
+                for (int v = 1; v < Math.Min(5, vertexCount); v++)
+                {
+                    int nextOff = offset + v * VertexStride;
+                    if (nextOff + 12 > SourceBytes.Length) { valid = false; break; }
+                    float nx = ReadFloat32(SourceBytes, nextOff);
+                    float ny = ReadFloat32(SourceBytes, nextOff + 4);
+                    float nz = ReadFloat32(SourceBytes, nextOff + 8);
+                    if (!float.IsFinite(nx) || !float.IsFinite(ny) || !float.IsFinite(nz)
+                        || nx < minX || nx > maxX || ny < minY || ny > maxY || nz < minZ || nz > maxZ)
+                    { valid = false; break; }
+                    if (nx != 0 || ny != 0 || nz != 0) nonZeroCount++;
+                }
+                if (valid && nonZeroCount >= 2)
+                {
+                    int aligned = offset - (offset % VertexStride);
+                    float ax = ReadFloat32(SourceBytes, aligned);
+                    float ay = ReadFloat32(SourceBytes, aligned + 4);
+                    float az = ReadFloat32(SourceBytes, aligned + 8);
+                    vertexDataOffset = (float.IsFinite(ax) && float.IsFinite(ay) && float.IsFinite(az)
+                        && (Math.Abs(ax) > 0.001f || Math.Abs(ay) > 0.001f || Math.Abs(az) > 0.001f))
+                        ? aligned : aligned + VertexStride;
+                    break;
+                }
+            }
+        }
+        if (vertexDataOffset < 0) return null;
+
+        // Calculate offset for this mesh's vertex data.
+        int meshVertexOffset = 0;
+        for (int i = 0; i < meshIndex; i++)
+            meshVertexOffset += Meshes[i].VertexCount * VertexStride;
+        var thisMeshOffset = vertexDataOffset + meshVertexOffset;
+        if (thisMeshOffset + vertexCount * VertexStride > SourceBytes.Length) return null;
+
+        // Extract bone indices (4 bytes per vertex at offset 0x20).
+        var indices = new byte[vertexCount * 4];
+        for (int v = 0; v < vertexCount; v++)
+        {
+            var baseOffset = thisMeshOffset + v * VertexStride + 0x20;
+            indices[v * 4] = SourceBytes[baseOffset];
+            indices[v * 4 + 1] = SourceBytes[baseOffset + 1];
+            indices[v * 4 + 2] = SourceBytes[baseOffset + 2];
+            indices[v * 4 + 3] = SourceBytes[baseOffset + 3];
+        }
+
+        return Convert.ToBase64String(indices);
+    }
+
     public static FlverNativeDocument Read(byte[] source)
     {
         if (source.Length < HeaderSize || source.Length > MaxSourceBytes)
