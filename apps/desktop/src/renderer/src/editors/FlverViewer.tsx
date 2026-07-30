@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactElement } from 'react';
 
 export interface FlverViewerProps {
   sourceUri?: string;
+  meshIndex?: number;
   boundingBox?: { min: number[]; max: number[] } | undefined;
   boneCount?: number;
   meshCount?: number;
@@ -23,14 +24,15 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   const [meshData, setMeshData] = useState<MeshData | null>(null);
   const [meshError, setMeshError] = useState<string | null>(null);
 
-  // Load first mesh data via IPC when sourceUri is available.
+  // Load mesh data via IPC when sourceUri or meshIndex changes.
   useEffect(() => {
     if (!props.sourceUri || typeof window.soulforge.readFlverMesh !== 'function') return;
     setMeshData(null);
     setMeshError(null);
+    const idx = props.meshIndex ?? 0;
     void (async () => {
       try {
-        const result = await window.soulforge.readFlverMesh(props.sourceUri!, 0) as {
+        const result = await window.soulforge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
           data?: { positionsBase64?: string; indicesBase64?: string; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
@@ -48,7 +50,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         setMeshError(error instanceof Error ? error.message : '网格加载失败');
       }
     })();
-  }, [props.sourceUri]);
+  }, [props.sourceUri, props.meshIndex]);
 
   useEffect(() => {
     const container = containerRef.current;

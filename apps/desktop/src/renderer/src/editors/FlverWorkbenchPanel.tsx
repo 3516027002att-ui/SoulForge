@@ -46,6 +46,7 @@ export interface FlverWorkbenchPanelProps {
 export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactElement {
   const [tab, setTab] = useState<'materials' | 'bones' | 'meshes'>('materials');
   const [query, setQuery] = useState('');
+  const [selectedMeshIndex, setSelectedMeshIndex] = useState(0);
   const data = props.data;
 
   const filteredMaterials = useMemo(() => {
@@ -143,7 +144,12 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                 </thead>
                 <tbody>
                   {(data.meshes ?? []).slice(0, 100).map((m, i) => (
-                    <tr key={i}>
+                    <tr
+                      key={i}
+                      className={i === selectedMeshIndex ? 'selected' : ''}
+                      onClick={() => setSelectedMeshIndex(i)}
+                      style={{ cursor: 'pointer' }}
+                    >
                       <td>{i}</td>
                       <td>{m.vertexCount}</td>
                       <td>{m.materialIndex}</td>
@@ -157,6 +163,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
           <div style={{ marginTop: 12 }}>
             <FlverViewer
               sourceUri={props.resourceUri}
+              meshIndex={selectedMeshIndex}
               boundingBox={data.boundingBox as { min: number[]; max: number[] } | undefined}
               boneCount={data.boneCount}
               meshCount={data.meshCount}
