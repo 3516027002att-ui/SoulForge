@@ -228,8 +228,8 @@ for (const gateId of gateIds) {
 }
 
 if (proposal !== null) {
-  if (proposal.schemaVersion !== '1.2.0') {
-    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.2.0。');
+  if (proposal.schemaVersion !== '1.3.0') {
+    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.3.0。');
   }
   if (!/^V0\.5-SCOPE-[0-9]{8}$/.test(proposal.proposalId ?? '')) {
     add('PROPOSAL_ID_INVALID', 'proposal.proposalId', 'proposalId 必须匹配 V0.5-SCOPE-YYYYMMDD。');
@@ -479,12 +479,49 @@ if (proposal !== null) {
     }
 
     if (proposal.proposalStatus === 'user-approved') {
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.status', 'user-approved');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceProject', 'vawser/Smithbox');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceRelease', '2.2.4');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceCommit', '1b46d2c9f82d1c3635ff7c12c526e05a8ba4208f');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourceArtifactSha256', '14a7fd735a9577249fa93655f63d1e9ac025a3b00d7c5bed8badc8a3a7fd489d');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.sourcePath', 'Smithbox.Release/Output/Assets/PARAM/SDT');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.acquisition', 'user-local-pinned-release-import');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.redistribution', 'forbidden');
+      requireFrozenValue(proposal, 'paramMetadataSourcePolicy.mismatchPolicy', 'fail-closed');
+      requireFrozenValue(proposal, 'providerCredentialPolicy.status', 'user-approved');
+      requireFrozenValue(proposal, 'providerCredentialPolicy.defaultConfiguration', 'empty');
+      requireFrozenValue(proposal, 'providerCredentialPolicy.realProviderCredentialsRequiredForV05Acceptance', false);
+      requireFrozenValue(proposal, 'providerCredentialPolicy.unconfiguredBehavior', 'diagnose-without-network-call');
+      requireFrozenValue(proposal, 'runtimeToolPolicy.status', 'user-approved');
+      requireFrozenValue(proposal, 'runtimeToolPolicy.adapter', 'me3');
+      requireFrozenValue(proposal, 'runtimeToolPolicy.sourceProject', 'garyttierney/me3');
+      requireFrozenValue(proposal, 'runtimeToolPolicy.sourceRelease', 'v0.12.1');
+      requireFrozenValue(proposal, 'runtimeToolPolicy.sourceArtifactSha256', 'b1c11659b0cfde73062b2fa134a8ac499f3e713fe82d9014401289677ace7323');
+      requireFrozenValue(proposal, 'runtimeToolPolicy.provisioningResponsibility', 'project-engineering');
+      requireFrozenValue(proposal, 'runtimeToolPolicy.compatibilityPolicy', 'capability-probe-fail-closed');
+      requireFrozenValue(proposal, 'renderingAcceptancePolicy.status', 'user-approved');
+      requireFrozenValue(proposal, 'renderingAcceptancePolicy.functionalOwnerMachineSmokeRequired', true);
+      requireFrozenValue(proposal, 'renderingAcceptancePolicy.representativeHardwareTiersRequired', false);
+      requireFrozenValue(proposal, 'renderingAcceptancePolicy.performanceBudgetsRequired', false);
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-structured-ui');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-canonical-dsl');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'show-readonly-hex-evidence');
       requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'raw-hex-edit');
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'recompress');
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'write');
+      requireFrozenOperation(itemById, 'SCOPE-PARAM', 'import-user-local-pinned-smithbox-metadata');
+      requireFrozenOperation(itemById, 'SCOPE-PARAM', 'verify-source-release-and-content-digest');
+      requireFrozenOperation(itemById, 'SCOPE-PARAM', 'record-source-license-and-provenance');
+      requireFrozenUnsupported(itemById, 'SCOPE-PARAM', 'redistribute-imported-smithbox-param-metadata');
+      requireFrozenUnsupported(itemById, 'SCOPE-PARAM', 'accept-unpinned-or-mismatched-metadata-source');
+      requireFrozenOperation(itemById, 'SCOPE-AI', 'offline-protocol-conformance');
+      requireFrozenOperation(itemById, 'SCOPE-AI', 'diagnose-empty-provider-configuration-without-network-call');
+      requireFrozenUnsupported(itemById, 'SCOPE-AI', 'bundle-provider-credentials');
+      requireFrozenUnsupported(itemById, 'SCOPE-AI', 'require-live-provider-account-for-v05-acceptance');
+      requireFrozenOperation(itemById, 'SCOPE-RENDERING', 'functional-backend-smoke-on-owner-machine');
+      requireFrozenUnsupported(itemById, 'SCOPE-RENDERING', 'representative-hardware-tier-acceptance');
+      requireFrozenUnsupported(itemById, 'SCOPE-RENDERING', 'performance-budget-as-v05-gate');
+      forbidFrozenOperation(itemById, 'SCOPE-RENDERING', 'benchmark-both-backends');
       requireFrozenOperation(itemById, 'SCOPE-RELEASE', 'package-nsis-x64');
       requireFrozenOperation(itemById, 'SCOPE-RELEASE', 'verify-installer-artifact-hash');
       forbidFrozenOperation(itemById, 'SCOPE-RELEASE', 'package-signed-nsis-x64');
@@ -684,5 +721,12 @@ function forbidFrozenUnsupported(itemById, scopeItemId, operation) {
   const item = itemById.get(scopeItemId);
   if (item?.unsupportedOperations?.includes(operation)) {
     add('FROZEN_UNSUPPORTED_BOUNDARY_FORBIDDEN', scopeItemId, `冻结范围不得包含 unsupported=${operation}。`);
+  }
+}
+
+function requireFrozenValue(root, path, expected) {
+  const actual = path.split('.').reduce((value, key) => value?.[key], root);
+  if (actual !== expected) {
+    add('FROZEN_POLICY_VALUE_INVALID', `proposal.${path}`, `冻结范围要求 ${path}=${JSON.stringify(expected)}。`);
   }
 }

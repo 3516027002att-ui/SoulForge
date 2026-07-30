@@ -97,6 +97,36 @@ try {
     release.operations.push('sign');
   }, 'FROZEN_OPERATION_FORBIDDEN');
 
+  await expectRejected('smithbox-source-revision-drift', (proposal) => {
+    proposal.paramMetadataSourcePolicy.sourceCommit = '0000000000000000000000000000000000000000';
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('smithbox-redistribution-reintroduced', (proposal) => {
+    proposal.paramMetadataSourcePolicy.redistribution = 'bundled';
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('real-provider-credentials-required', (proposal) => {
+    proposal.providerCredentialPolicy.realProviderCredentialsRequiredForV05Acceptance = true;
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('offline-provider-conformance-removed', (proposal) => {
+    const ai = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-AI');
+    ai.operations = ai.operations.filter((operation) => operation !== 'offline-protocol-conformance');
+  }, 'FROZEN_OPERATION_MISSING');
+
+  await expectRejected('me3-provisioning-shifted-to-user', (proposal) => {
+    proposal.runtimeToolPolicy.provisioningResponsibility = 'repository-owner';
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('representative-render-hardware-reintroduced', (proposal) => {
+    proposal.renderingAcceptancePolicy.representativeHardwareTiersRequired = true;
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
+  await expectRejected('render-benchmark-gate-reintroduced', (proposal) => {
+    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
+    rendering.operations.push('benchmark-both-backends');
+  }, 'FROZEN_OPERATION_FORBIDDEN');
+
   await expectRejected('gate-pass-masquerade', (proposal) => {
     const relA = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-A');
     relA.currentState = 'passed';
