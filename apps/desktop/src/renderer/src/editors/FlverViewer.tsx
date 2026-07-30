@@ -1,18 +1,54 @@
-import { useEffect, useRef, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
 
 export interface FlverViewerProps {
+  sourceUri?: string;
   boundingBox?: { min: number[]; max: number[] } | undefined;
   boneCount?: number;
   meshCount?: number;
 }
 
+interface MeshData {
+  positionsBase64: string;
+  indicesBase64: string;
+  vertexCount: number;
+}
+
 /**
- * FLVER 3D 预览器：显示包围盒和坐标轴。
+ * FLVER 3D 预览器：显示包围盒、坐标轴和第一个网格的线框。
  * 使用 Three.js WebGL2 渲染（WebGPU 回退由 threeSceneController 处理）。
  */
 export function FlverViewer(props: FlverViewerProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<{ dispose: () => void } | null>(null);
+  const [meshData, setMeshData] = useState<MeshData | null>(null);
+  const [meshError, setMeshError] = useState<string | null>(null);
+
+  // Load first mesh data via IPC when sourceUri is available.
+  useEffect(() => {
+    if (!props.sourceUri || typeof window.soulforge.readFlverMesh !== 'function') return;
+    setMeshData(null);
+    setMeshError(null);
+    void (async () => {
+      try {
+        const result = await window.soulforge.readFlverMesh(props.sourceUri!, 0) as {
+          ok: boolean;
+          data?: { positionsBase64?: string; indicesBase64?: string; vertexCount?: number };
+          diagnostics?: Array<{ message: string }>;
+        };
+        if (result.ok && result.data?.positionsBase64) {
+          setMeshData({
+            positionsBase64: result.data.positionsBase64,
+            indicesBase64: result.data.indicesBase64 ?? '',
+            vertexCount: result.data.vertexCount ?? 0
+          });
+        } else {
+          setMeshError(result.diagnostics?.[0]?.message ?? '网格数据不可用');
+        }
+      } catch (error) {
+        setMeshError(error instanceof Error ? error.message : '网格加载失败');
+      }
+    })();
+  }, [props.sourceUri]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -62,6 +98,44 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         camera.lookAt(0, 0, 0);
       }
 
+      // Render mesh geometry if available.
+      if (meshData) {
+        try {
+          const posBytes = Uint8Array.from(atob(meshData.positionsBase64), (c) => c.charCodeAt(0));
+          const positions = new Float32Array(posBytes.buffer);
+          const geometry = new three.BufferGeometry();
+          geometry.setAttribute('position', new three.BufferAttribute(positions, 3));
+
+          if (meshData.indicesBase64) {
+            const idxBytes = Uint8Array.from(atob(meshData.indicesBase64), (c) => c.charCodeAt(0));
+            const indices = new Uint16Array(idxBytes.buffer);
+            geometry.setIndex(new three.BufferAttribute(indices, 1));
+          }
+
+          geometry.computeVertexNormals();
+          const material = new three.MeshStandardMaterial({
+            color: 0x6699cc,
+            wireframe: false,
+            side: three.DoubleSide,
+            flatShading: true
+          });
+          const mesh = new three.Mesh(geometry, material);
+          scene.add(mesh);
+
+          // Also add wireframe overlay.
+          const wireMaterial = new three.MeshBasicMaterial({
+            color: 0x88bbee,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.15
+          });
+          const wireMesh = new three.Mesh(geometry, wireMaterial);
+          scene.add(wireMesh);
+        } catch {
+          // Mesh data decode failed; show bounding box only.
+        }
+      }
+
       const setSize = (): void => {
         const width = Math.max(container.clientWidth, 1);
         const height = Math.max(container.clientHeight, 1);
@@ -95,7 +169,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       handleRef.current?.dispose();
       handleRef.current = null;
     };
-  }, [props.boundingBox, props.boneCount, props.meshCount]);
+  }, [props.boundingBox, props.boneCount, props.meshCount, meshData]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: 300, background: '#1a1d23', borderRadius: 4 }}>
@@ -105,6 +179,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
       }}>
         FLVER 3D 预览 · {props.boneCount ?? 0} bones · {props.meshCount ?? 0} meshes
+        {meshData ? ` · mesh[0] ${meshData.vertexCount} verts` : meshError ? ` · ${meshError}` : ''}
       </div>
     </div>
   );
