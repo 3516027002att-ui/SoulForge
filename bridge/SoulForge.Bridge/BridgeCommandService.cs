@@ -336,6 +336,38 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-flver-mesh")
+        {
+            try
+            {
+                var document = FlverNativeDocument.ReadFile(file);
+                var meshIndex = options.TryGetProperty("meshIndex", out var mi) && mi.TryGetInt32(out var idx) ? idx : 0;
+                var positions = document.GetMeshPositionsBase64(meshIndex);
+                var indices = document.GetMeshIndicesBase64(meshIndex);
+                if (positions == null)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
+                var mesh = document.Meshes[meshIndex];
+                return BridgeResult<object>.Partial(file, "chr", new[]
+                {
+                    new Diagnostic("info", "FLVER_MESH_DATA_EXTRACTED",
+                        $"FLVER 网格 {meshIndex} 顶点/索引数据已提取；vertexCount={mesh.VertexCount}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    meshIndex,
+                    vertexCount = mesh.VertexCount,
+                    materialIndex = mesh.MaterialIndex,
+                    indexFormat = mesh.IndexFormat,
+                    positionsBase64 = positions,
+                    indicesBase64 = indices
+                });
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-esd-document")
         {
             try
