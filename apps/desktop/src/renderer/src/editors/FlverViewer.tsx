@@ -12,6 +12,7 @@ interface MeshData {
   positionsBase64: string;
   indicesBase64: string;
   uvsBase64?: string | undefined;
+  normalsBase64?: string | undefined;
   vertexCount: number;
 }
 
@@ -35,7 +36,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       try {
         const result = await window.soulforge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
-          data?: { positionsBase64?: string; indicesBase64?: string; uvsBase64?: string; vertexCount?: number };
+          data?: { positionsBase64?: string; indicesBase64?: string; uvsBase64?: string; normalsBase64?: string; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
@@ -43,6 +44,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             positionsBase64: result.data.positionsBase64,
             indicesBase64: result.data.indicesBase64 ?? '',
             uvsBase64: result.data.uvsBase64 ?? undefined,
+            normalsBase64: result.data.normalsBase64 ?? undefined,
             vertexCount: result.data.vertexCount ?? 0
           });
         } else {
@@ -120,6 +122,15 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
             const uvBytes = Uint8Array.from(atob(meshData.uvsBase64), (c) => c.charCodeAt(0));
             const uvs = new Float32Array(uvBytes.buffer);
             geometry.setAttribute('uv', new three.BufferAttribute(uvs, 2));
+          }
+
+          // Add normals: use FLVER normals if available, otherwise compute from positions.
+          if (meshData.normalsBase64) {
+            const normBytes = Uint8Array.from(atob(meshData.normalsBase64), (c) => c.charCodeAt(0));
+            const normals = new Float32Array(normBytes.buffer);
+            geometry.setAttribute('normal', new three.BufferAttribute(normals, 3));
+          } else {
+            geometry.computeVertexNormals();
           }
 
           if (meshData.indicesBase64) {
