@@ -10,6 +10,7 @@ export interface ThreeSceneHandle {
   dispose: () => void;
   setDrawList: (list: SceneDrawList) => void;
   selectedId: string | null;
+  rendererBackend: 'webgpu' | 'webgl2';
 }
 
 import type {
@@ -25,7 +26,7 @@ import type {
 type ThreeModule = typeof import('three');
 
 /**
- * Mount a WebGL2 proxy scene. Throws if WebGL2 unavailable.
+ * Mount a WebGPU-first proxy scene with WebGL2 fallback.
  * Selection callback receives draw-item id (part URI fragment), never paths.
  */
 export async function mountThreeProxyScene(input: {
@@ -40,7 +41,27 @@ export async function mountThreeProxyScene(input: {
   canvas.style.display = 'block';
   input.container.replaceChildren(canvas);
 
-  const renderer: WebGLRenderer = new three.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  // Try WebGPU first, fall back to WebGL2.
+  let renderer: WebGLRenderer;
+  let rendererBackend: 'webgpu' | 'webgl2' = 'webgl2';
+  try {
+    const { detectWebGpu } = await import('./webgpuDetect.js');
+    const gpuCapability = await detectWebGpu();
+    if (gpuCapability.available) {
+      const threeWebGpu = await import('three/webgpu') as unknown as {
+        default: new (opts: { canvas: HTMLCanvasElement; antialias: boolean; alpha: boolean }) => WebGLRenderer & { init: () => Promise<void> };
+      };
+      const WebGPURenderer = threeWebGpu.default;
+      const gpuRenderer = new WebGPURenderer({ canvas, antialias: true, alpha: false });
+      await gpuRenderer.init();
+      renderer = gpuRenderer;
+      rendererBackend = 'webgpu';
+    } else {
+      renderer = new three.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    }
+  } catch {
+    renderer = new three.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   const scene = new three.Scene();
   scene.background = new three.Color(0x1a1d23);
@@ -138,6 +159,7 @@ export async function mountThreeProxyScene(input: {
 
   return {
     canvas,
+    rendererBackend,
     get selectedId() {
       return selectedId;
     },
