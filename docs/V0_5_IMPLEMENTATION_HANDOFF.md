@@ -855,22 +855,22 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 
 | 路线 | 当前状态 | Evidence | 主要前沿 / 阻塞 |
 |---|---|---|---|
-| A 工作区与事务 | `native-verified / partial hardening` | `EV-A-RECOVERY-20260724`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | 私有 registry 已可执行且 BND4 native writer 故障矩阵通过；其余 native writer 故障注入、真实断电、安装升级和大容量恢复仍是工程缺口 |
+| A 工作区与事务 | `native-verified / partial hardening` | `EV-A-RECOVERY-20260724`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | BND4/FMG/PARAM 三格式 12 case 故障矩阵已通过；EMEVD/MSB writer 故障注入、真实断电和大容量恢复仍是工程缺口 |
 | B DFLT | `native-verified` | `EV-B-DFLT-7BD` historical | 新变体和发布 corpus |
 | B BND4 | `native-verified / partial` | `EV-B-BND4-7BD` historical | KRAK 内 corpus、新 flags/布局 |
-| B KRAK | `partial` | `EV-B-KRAK-20260724`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | 已登记 corpus 的 70 个 KRAK 均只读解压；仍缺 KRAK 内语义组合、重压、writer 与恢复 |
+| B KRAK | `native-verified / partial` | `EV-B-KRAK-20260724`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | **KRAK Oodle Kraken 重压/写回/roundtrip 已完成**；仍缺 KRAK 内语义组合和完整 corpus 写回矩阵 |
 | B 发布 corpus contract | `partial / registered local corpus` | `EV-HANDOFF-LIVENESS-20260725`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | 仓库外 registry 已覆盖 214 个 DCX、198 个唯一内容并完成 100% 分类；schema/分类不授予 native writer authority |
 | C FMG | `native-verified / partial` | `EV-C-FMG-7BD` historical | 多语言、多 msgbnd、引用与游戏加载 |
-| C PARAM | `partial` | `EV-C-PARAM-7BD` historical、`EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | 固定 Smithbox 2.2.4 本机 adapter 已导入并失败关闭；仍缺 2 个旧布局、metadata/native 一致性和完整字段 writer |
-| C EMEVD | `partial` | `EV-C-EMEVD-DSL-20260724`、`EV-PRIVATE-20260724` | DSL proposal compiler 已 `fixture-confirmed`；仍缺 layer 变体、完整 EMEDF/control-flow、Bridge/PatchIR 接线和全 corpus |
+| C PARAM | `partial` | `EV-C-PARAM-7BD` historical、`EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | **metadata/native 一致性 135/138 已验证**；仍缺 2 个旧布局和完整字段 writer |
+| C EMEVD | `partial` | `EV-C-EMEVD-DSL-20260724`、`EV-PRIVATE-20260724` | **DSL plan→Bridge batch mutations 已接线**；**layer 读取已支持**（corpus 无 layer 样本）；仍缺完整 EMEDF/control-flow 和全 corpus |
 | C MSB | `partial` | `EV-C-MSB-SCENE-20260724`、`EV-C-MSB-7BD` historical | 四类实体 preview 已进入稳定 revision/identity scene IR；仍缺全实体 CRUD、引用修复、完整非截断 scene projection |
-| D 行为与动画 | `candidate / inventory only` | `EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | 登记容器已观察到 action/AI/script 分类及 TAE/HKX/Lua 条目；仍缺 ESD、完整语义 parser/writer/DSL 与游戏加载 |
-| E 场景与资产 | `partial / candidate` | `EV-E-ASSET-7BD` historical、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | 登记容器已观察到 FLVER/TPF 条目；仍缺 MTD/collision/navigation corpus 定位、五类完整只读 authority 和转换 |
-| F 专业编辑器 | `partial / acceptance candidate` | `EV-F-EDITORS-7BD` historical、`EV-HANDOFF-LIVENESS-20260725`、`EV-PUBLIC-CONTRACTS-20260725` | 候选 inventory/contract harness 已完成；仍缺真数据完整接线、完整有界访问、Electron 功能验收和行为/动画编辑器；不要求量化容量/延迟门槛 |
-| G AI Agent | `partial / production unverified` | `EV-G-FAKE-7BD`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | 双协议离线工具循环与空配置零网络门禁已验证；仍缺完整错误/取消/超时/限额矩阵、Context Broker 与真实工作区多步任务；真实 provider 凭据不属于 V0.5 验收 |
-| H me3 运行 | `fixture-confirmed / detection only` | `EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | production main detection gateway 与真实 0.12.1 probe 已接线；仍缺 profile/launch/diagnostics/terminate 和真实 Sekiro 会话 |
-| H 发行 | `partial / unverified` | `EV-REL-COMPLIANCE-20260725`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-H-GATES-7BD` historical | 内容/许可证 inventory、严格配置、受控 subprocess 与同机可复现构建已验证；仍缺完整 notices、实际打包、安装、升级和真实 Sekiro gate；签名不属于验收 |
-| I 渲染 | `partial` | `EV-C-MSB-SCENE-20260724`、`EV-I-RENDER-7BD` historical | shared render packet 与 production bundle WebGL proxy 已验证；仍缺真实 FLVER、WebGPU capability path 与 WebGL2 功能回退，代表性硬件/性能预算不属于 V0.5 验收 |
+| D 行为与动画 | `partial / candidate` | `EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | **TAE native document parser 已完成**（939 anims, 23711 events, 81 types）；**ESD native document parser 已完成**（36 groups, 295 states, RPN bytecode）；仍缺 HKX/Lua 完整语义 parser/writer/DSL 与游戏加载 |
+| E 场景与资产 | `partial` | `EV-E-ASSET-7BD` historical、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | **FLVER native document parser 已完成**（346 bones, 36 mats, 182K faces, byte-identical）；**TPF native document parser 已完成**（16 textures, BC1/BC4/BC5）；仍缺 MTD/collision/navigation 和完整只读 authority |
+| F 专业编辑器 | `partial / acceptance candidate` | `EV-F-EDITORS-7BD` historical、`EV-HANDOFF-LIVENESS-20260725`、`EV-PUBLIC-CONTRACTS-20260725` | **编辑器 inventory 已扩展到 8 个**（+tae/esd/flver）；**TAE/ESD/FLVER 只读面板和 IPC 已就绪**；仍缺真数据完整接线、完整有界访问和 Electron 功能验收 |
+| G AI Agent | `partial / production unverified` | `EV-G-FAKE-7BD`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | **6 种错误分类 + 超时/取消/限额 10 case conformance 已完成**；仍缺 Context Broker 与真实工作区多步任务；真实 provider 凭据不属于 V0.5 验收 |
+| H me3 运行 | `fixture-confirmed / partial` | `EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` | **profile/launch/diagnostics/terminate adapter 已完成**（25 case smoke）；仍缺真实 Sekiro 会话和 NSIS 安装/升级/卸载验证 |
+| H 发行 | `partial / unverified` | `EV-REL-COMPLIANCE-20260725`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-H-GATES-7BD` historical | **许可证文本覆盖 complete（123 present / 0 metadata-only）**；**NSIS 安装包构建成功（117.7 MB）**；仍缺安装/升级/卸载 lifecycle 验证和真实 Sekiro gate |
+| I 渲染 | `partial` | `EV-C-MSB-SCENE-20260724`、`EV-I-RENDER-7BD` historical | shared render packet 与 production bundle WebGL proxy 已验证；**WebGPU 检测已实现**；仍缺真实 FLVER 渲染、WebGPU renderer 集成与 WebGL2 功能回退 |
 
 可以并行推进的典型方向：
 
