@@ -91,6 +91,59 @@ internal sealed class FlverNativeDocument
     public IReadOnlyList<FlverMeshEntry> Meshes { get; }
     public string SourceHash => Hash(SourceBytes);
 
+    /// <summary>
+    /// Extract vertex positions (float[3] per vertex) for a specific mesh as base64.
+    /// Assumes fixed 40-byte vertex stride with position at offset 0.
+    /// Returns null if mesh index is out of range or data is unavailable.
+    /// </summary>
+    public string? GetMeshPositionsBase64(int meshIndex, int maxVertices = 10_000)
+    {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        var mesh = Meshes[meshIndex];
+        var vertexCount = Math.Min(mesh.VertexCount, maxVertices);
+        if (vertexCount <= 0) return null;
+
+        // Vertex data starts after index data in the data section.
+        // For Sekiro FLVER, vertex data is at a fixed offset from DataStart.
+        // We compute it from the mesh's vertex buffer layout.
+        var vertexDataOffset = DataStart + DataLength - (Meshes.Count - meshIndex) * mesh.VertexCount * VertexStride;
+        if (vertexDataOffset < 0 || vertexDataOffset + vertexCount * VertexStride > SourceBytes.Length)
+            return null;
+
+        var positions = new float[vertexCount * 3];
+        for (int v = 0; v < vertexCount; v++)
+        {
+            var baseOffset = vertexDataOffset + v * VertexStride;
+            positions[v * 3] = ReadFloat32(SourceBytes, baseOffset);
+            positions[v * 3 + 1] = ReadFloat32(SourceBytes, baseOffset + 4);
+            positions[v * 3 + 2] = ReadFloat32(SourceBytes, baseOffset + 8);
+        }
+
+        var bytes = new byte[positions.Length * 4];
+        Buffer.BlockCopy(positions, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
+    /// <summary>
+    /// Extract triangle indices (uint16) for a specific mesh as base64.
+    /// Returns null if mesh index is out of range or data is unavailable.
+    /// </summary>
+    public string? GetMeshIndicesBase64(int meshIndex, int maxIndices = 30_000)
+    {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        var mesh = Meshes[meshIndex];
+        if (mesh.IndexFormat != 6) return null; // Only uint16 indices supported
+
+        var indexOffset = DataStart + mesh.IndexByteOffset;
+        var faceCount = Math.Min(mesh.VertexCount * 3, maxIndices); // Approximate
+        if (indexOffset < 0 || indexOffset + faceCount * 2 > SourceBytes.Length)
+            return null;
+
+        var indices = new byte[faceCount * 2];
+        Buffer.BlockCopy(SourceBytes, indexOffset, indices, 0, indices.Length);
+        return Convert.ToBase64String(indices);
+    }
+
     public static FlverNativeDocument Read(byte[] source)
     {
         if (source.Length < HeaderSize || source.Length > MaxSourceBytes)
