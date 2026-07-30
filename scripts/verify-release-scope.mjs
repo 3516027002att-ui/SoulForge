@@ -228,8 +228,8 @@ for (const gateId of gateIds) {
 }
 
 if (proposal !== null) {
-  if (proposal.schemaVersion !== '1.1.0') {
-    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.1.0。');
+  if (proposal.schemaVersion !== '1.2.0') {
+    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.2.0。');
   }
   if (!/^V0\.5-SCOPE-[0-9]{8}$/.test(proposal.proposalId ?? '')) {
     add('PROPOSAL_ID_INVALID', 'proposal.proposalId', 'proposalId 必须匹配 V0.5-SCOPE-YYYYMMDD。');
@@ -485,10 +485,16 @@ if (proposal !== null) {
       requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'raw-hex-edit');
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'recompress');
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'write');
-      requireFrozenOperation(itemById, 'SCOPE-RELEASE', 'package-signed-nsis-x64');
+      requireFrozenOperation(itemById, 'SCOPE-RELEASE', 'package-nsis-x64');
+      requireFrozenOperation(itemById, 'SCOPE-RELEASE', 'verify-installer-artifact-hash');
+      forbidFrozenOperation(itemById, 'SCOPE-RELEASE', 'package-signed-nsis-x64');
+      forbidFrozenOperation(itemById, 'SCOPE-RELEASE', 'sign');
+      forbidFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'unsigned-local-artifact-as-release');
       requireFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'portable-release');
       requireFrozenUnsupported(itemById, 'SCOPE-RELEASE', 'automatic-update');
       requireFrozenOperation(itemById, 'SCOPE-COMPLIANCE', 'verify-owner-controlled-target');
+      requireFrozenOperation(itemById, 'SCOPE-COMPLIANCE', 'verify-installer-artifact-hash');
+      forbidFrozenOperation(itemById, 'SCOPE-COMPLIANCE', 'verify-signed-installer-provenance');
       requireFrozenUnsupported(itemById, 'SCOPE-COMPLIANCE', 'external-distribution');
       requireFrozenUnsupported(itemById, 'SCOPE-ASSET-OPEN-CONVERSION', 'open-format-to-native-import');
     }
@@ -664,5 +670,19 @@ function requireFrozenUnsupported(itemById, scopeItemId, operation) {
   const item = itemById.get(scopeItemId);
   if (!item?.unsupportedOperations?.includes(operation)) {
     add('FROZEN_UNSUPPORTED_BOUNDARY_MISSING', scopeItemId, `冻结范围必须明确 unsupported=${operation}。`);
+  }
+}
+
+function forbidFrozenOperation(itemById, scopeItemId, operation) {
+  const item = itemById.get(scopeItemId);
+  if (item?.operations?.includes(operation)) {
+    add('FROZEN_OPERATION_FORBIDDEN', scopeItemId, `冻结范围不得包含 operation=${operation}。`);
+  }
+}
+
+function forbidFrozenUnsupported(itemById, scopeItemId, operation) {
+  const item = itemById.get(scopeItemId);
+  if (item?.unsupportedOperations?.includes(operation)) {
+    add('FROZEN_UNSUPPORTED_BOUNDARY_FORBIDDEN', scopeItemId, `冻结范围不得包含 unsupported=${operation}。`);
   }
 }

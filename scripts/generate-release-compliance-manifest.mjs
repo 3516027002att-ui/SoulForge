@@ -33,6 +33,6 @@ if (errors.length > 0) {
     artifactCount: manifest.artifacts.fileCount,
     artifactFingerprint: manifest.artifacts.aggregateSha256,
     authority: manifest.authority,
-    nonClaim: '许可证 metadata inventory 与 unsigned build fingerprint 不等于签名发行通过。'
+    nonClaim: '许可证 metadata inventory 与 unsigned build fingerprint 不证明 NSIS 安装、升级、卸载、干净机或外部分发完成。'
   }, null, 2));
 }

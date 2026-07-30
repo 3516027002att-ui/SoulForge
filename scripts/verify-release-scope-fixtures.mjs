@@ -82,6 +82,21 @@ try {
     compliance.unsupportedOperations = compliance.unsupportedOperations.filter((operation) => operation !== 'external-distribution');
   }, 'FROZEN_UNSUPPORTED_BOUNDARY_MISSING');
 
+  await expectRejected('unsigned-nsis-hash-removed', (proposal) => {
+    const release = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RELEASE');
+    release.operations = release.operations.filter((operation) => operation !== 'verify-installer-artifact-hash');
+  }, 'FROZEN_OPERATION_MISSING');
+
+  await expectRejected('code-signing-reintroduced', (proposal) => {
+    const release = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RELEASE');
+    release.operations.push('package-signed-nsis-x64');
+  }, 'FROZEN_OPERATION_FORBIDDEN');
+
+  await expectRejected('legacy-sign-operation-reintroduced', (proposal) => {
+    const release = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RELEASE');
+    release.operations.push('sign');
+  }, 'FROZEN_OPERATION_FORBIDDEN');
+
   await expectRejected('gate-pass-masquerade', (proposal) => {
     const relA = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-A');
     relA.currentState = 'passed';

@@ -1,7 +1,7 @@
 /**
  * P7 portable packaging gate — validates electron-builder config and optionally
  * runs an unsigned dry packaging step when electron-builder is available.
- * Never claims signed release readiness.
+ * Never claims NSIS installer or distribution readiness.
  */
 import { access, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -246,7 +246,7 @@ if (!validationOk) {
   report.authority = 'partial';
   report.message = 'configuration and release scan passed; unsigned --dir build was not requested';
 }
-report.nonClaim = 'Unsigned --dir evidence does not prove installer, signing, upgrade, clean-machine, or distribution readiness.';
+report.nonClaim = 'Unsigned --dir evidence does not prove NSIS installer, installer hash, upgrade, clean-machine, or distribution readiness.';
 
 const outPath = join(scratch, 'portable-packaging-gate.json');
 await writeFile(outPath, JSON.stringify(report, null, 2), 'utf8');
