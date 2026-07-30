@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactElement } from 'react';
+import { FlverViewer } from './FlverViewer.js';
 
 export interface FlverMaterialSummary {
   name: string;
@@ -152,6 +153,13 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                 </tbody>
               </table>
             )}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <FlverViewer
+              boundingBox={data.boundingBox as { min: number[]; max: number[] } | undefined}
+              boneCount={data.boneCount}
+              meshCount={data.meshCount}
+            />
           </div>
         </>
       )}
