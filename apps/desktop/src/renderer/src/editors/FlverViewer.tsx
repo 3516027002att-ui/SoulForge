@@ -7,6 +7,7 @@ export interface FlverViewerProps {
   boneCount?: number;
   meshCount?: number;
   bones?: Array<{ name: string; position: [number, number, number]; parentIndex: number }> | undefined;
+  textureBase64?: string | undefined;
 }
 
 interface MeshData {
@@ -145,11 +146,34 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           // Assign color based on mesh index for visual distinction.
           const hue = ((props.meshIndex ?? 0) * 137.508) % 360; // Golden angle for distinct colors
           const color = new three.Color().setHSL(hue / 360, 0.5, 0.55);
+
+          // Try to load texture if available.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let texture: any;
+          if (props.textureBase64) {
+            try {
+              const texBytes = Uint8Array.from(atob(props.textureBase64), (c) => c.charCodeAt(0));
+              // DDS textures start with "DDS " magic (0x20534444).
+              // For now, create a DataTexture from the raw bytes as a placeholder.
+              // Full DDS decoding would require a DDSLoader.
+              const size = Math.min(256, Math.floor(Math.sqrt(texBytes.length / 4)));
+              if (size > 0) {
+                const data = new Uint8Array(size * size * 4);
+                data.set(texBytes.subarray(0, Math.min(texBytes.length, data.length)));
+                texture = new three.DataTexture(data, size, size, three.RGBAFormat);
+                texture.needsUpdate = true;
+              }
+            } catch {
+              // Texture decode failed; use solid color.
+            }
+          }
+
           const material = new three.MeshStandardMaterial({
-            color,
+            color: texture ? 0xffffff : color,
+            ...(texture ? { map: texture } : {}),
             wireframe: false,
             side: three.DoubleSide,
-            flatShading: true
+            flatShading: !texture
           });
           const mesh = new three.Mesh(geometry, material);
           scene.add(mesh);
