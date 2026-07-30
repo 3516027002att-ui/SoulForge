@@ -127,4 +127,31 @@ internal static class Bnd4NativeWriter
         catch (FormatException) { throw new InvalidDataException($"options.{field} 不是有效 Base64。"); }
     }
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    /// <summary>
+    /// Extract a BND4 child entry directly to a file on disk.
+    /// Returns metadata only (no content in response frame), safe for large assets.
+    /// </summary>
+    public static object ExtractChild(string sourcePath, JsonElement options, string? oodleRuntimeRoot)
+    {
+        var outputPath = RequiredString(options, "outputPath");
+        var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
+        var binder = Bnd4NativeDocument.Read(dcx.Payload);
+        var index = ResolveEntryIndex(options, binder);
+        var entry = binder.Entries[index];
+        var bytes = binder.GetStoredBytes(index);
+        var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
+        Directory.CreateDirectory(directory);
+        File.WriteAllBytes(outputPath, bytes);
+        return new
+        {
+            sourceHash = dcx.SourceHash,
+            index = entry.Index,
+            id = entry.Id,
+            name = entry.Name,
+            contentHash = entry.ContentHash,
+            contentSize = bytes.Length,
+            outputPath
+        };
+    }
 }

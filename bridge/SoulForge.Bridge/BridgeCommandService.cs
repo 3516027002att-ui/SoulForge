@@ -80,6 +80,22 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "extract-bnd4-child")
+        {
+            try
+            {
+                var result = Bnd4NativeWriter.ExtractChild(file, options, oodleRuntimeRoot);
+                return BridgeResult<object>.Partial(file, resourceKind, new[]
+                {
+                    new Diagnostic("info", "BND4_CHILD_EXTRACTED", "BND4 子项已提取到文件。", BridgeResult<object>.MakeSourceUri(file), result)
+                }, result);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or ArgumentOutOfRangeException)
+            {
+                return BridgeResult<object>.Failed(file, resourceKind, "BND4_CHILD_EXTRACT_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-fmg-document")
         {
             try
