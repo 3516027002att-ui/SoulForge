@@ -336,6 +336,31 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-esd-document")
+        {
+            try
+            {
+                var document = EsdNativeDocument.ReadFile(file);
+                var roundTrip = document.VerifyRoundTrip();
+                var diagnostics = new[]
+                {
+                    new Diagnostic(
+                        roundTrip.SemanticIdentical ? "info" : "error",
+                        roundTrip.SemanticIdentical ? "ESD_DOCUMENT_ROUNDTRIP_VERIFIED" : "ESD_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.SemanticIdentical
+                            ? $"ESD 只读往返验证通过；stateGroups={document.StateGroups.Count}, states={document.ParsedStateCount}, conditions={document.ParsedConditionCount}。"
+                            : "ESD 只读往返语义不一致。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        roundTrip)
+                };
+                return BridgeResult<object>.Partial(file, "script", diagnostics, document.ToEnvelope(roundTrip));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "script", "ESD_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "write-msb")
         {
             if (string.IsNullOrWhiteSpace(outputPath))
@@ -398,6 +423,7 @@ internal sealed class BridgeCommandService
         if (name.Contains("msg") || name.EndsWith(".fmg")) return "msg";
         if (name.EndsWith(".tae")) return "action";
         if (name.EndsWith(".flver")) return "chr";
+        if (name.EndsWith(".esd")) return "script";
         return "unknown";
     }
 
