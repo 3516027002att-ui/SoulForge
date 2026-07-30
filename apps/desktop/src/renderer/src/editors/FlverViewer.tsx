@@ -9,6 +9,7 @@ export interface FlverViewerProps {
   bones?: Array<{ name: string; position: [number, number, number]; parentIndex: number }> | undefined;
   textureBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
+  boneIndicesBase64?: string | undefined;
 }
 
 interface MeshData {
@@ -228,6 +229,36 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
               material.needsUpdate = true;
             } catch {
               // Bone weight decode failed; skip visualization.
+            }
+          }
+
+          // Add bone index visualization if available.
+          // Bone indices are stored as 4 bytes per vertex (4 bone influences).
+          // Visualize as vertex colors: different colors for different bone indices.
+          if (props.boneIndicesBase64 && !props.boneWeightsBase64) {
+            try {
+              const indexBytes = Uint8Array.from(atob(props.boneIndicesBase64), (c) => c.charCodeAt(0));
+              const vertexCount = positions.length / 3;
+              const colors = new Float32Array(vertexCount * 3);
+              // Color palette for bone indices (up to 256 bones).
+              const boneColors = [
+                [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0],
+                [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 0.5, 0.0], [0.5, 0.0, 1.0],
+                [0.0, 1.0, 0.5], [0.5, 1.0, 0.0], [1.0, 0.0, 0.5], [0.0, 0.5, 1.0]
+              ];
+              for (let v = 0; v < vertexCount; v++) {
+                // Use the first bone index for coloring.
+                const boneIdx = (indexBytes[v * 4] ?? 0) % boneColors.length;
+                const color = boneColors[boneIdx] ?? [1.0, 1.0, 1.0];
+                colors[v * 3] = color[0] ?? 1.0;
+                colors[v * 3 + 1] = color[1] ?? 1.0;
+                colors[v * 3 + 2] = color[2] ?? 1.0;
+              }
+              geometry.setAttribute('color', new three.BufferAttribute(colors, 3));
+              material.vertexColors = true;
+              material.needsUpdate = true;
+            } catch {
+              // Bone index decode failed; skip visualization.
             }
           }
 
