@@ -107,6 +107,7 @@ export type BridgeCommandName =
   | 'read-tae-document'
   | 'read-tpf-document'
   | 'read-flver-document'
+  | 'read-flver-mesh'
   | 'read-esd-document'
   | 'capabilities'
   | 'health';
