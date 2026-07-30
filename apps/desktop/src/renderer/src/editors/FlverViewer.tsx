@@ -120,8 +120,12 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           }
 
           geometry.computeVertexNormals();
+
+          // Assign color based on mesh index for visual distinction.
+          const hue = ((props.meshIndex ?? 0) * 137.508) % 360; // Golden angle for distinct colors
+          const color = new three.Color().setHSL(hue / 360, 0.5, 0.55);
           const material = new three.MeshStandardMaterial({
-            color: 0x6699cc,
+            color,
             wireframe: false,
             side: three.DoubleSide,
             flatShading: true
