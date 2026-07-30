@@ -6,7 +6,8 @@ internal static class Bnd4NativeWriter
     public static object SnapshotChild(string sourcePath, JsonElement options, string? oodleRuntimeRoot)
     {
         var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
-        if (dcx.CompressionFormat != "DFLT") throw new NotSupportedException("BND4 snapshot 当前只允许已验证的 DFLT 外层。");
+        if (dcx.CompressionFormat is not ("DFLT" or "KRAK"))
+            throw new NotSupportedException($"BND4 snapshot 不支持 {dcx.CompressionFormat} 外层压缩。");
         var binder = Bnd4NativeDocument.Read(dcx.Payload);
         var index = ResolveEntryIndex(options, binder);
         var entry = binder.Entries[index];
@@ -38,7 +39,8 @@ internal static class Bnd4NativeWriter
     public static async Task<object> WriteAsync(string sourcePath, string outputPath, JsonElement options, CancellationToken cancellationToken, string? oodleRuntimeRoot)
     {
         var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
-        if (dcx.CompressionFormat != "DFLT") throw new NotSupportedException("BND4 writer 当前只允许已验证的 DFLT 外层。");
+        if (dcx.CompressionFormat is not ("DFLT" or "KRAK"))
+            throw new NotSupportedException($"BND4 writer 不支持 {dcx.CompressionFormat} 外层压缩。");
         RequireHash(options, "expectedContainerHash", dcx.SourceHash, "DCX source hash");
         var binder = Bnd4NativeDocument.Read(dcx.Payload);
         var entries = binder.ToRepackEntries().ToList();
@@ -80,7 +82,19 @@ internal static class Bnd4NativeWriter
         }
         cancellationToken.ThrowIfCancellationRequested();
         var rebuiltBinder = binder.Repack(entries);
-        var rebuiltDcx = dcx.RebuildDflt(rebuiltBinder);
+        byte[] rebuiltDcx;
+        if (dcx.CompressionFormat == "KRAK")
+        {
+            var oodle = OodleRuntimeLocator.Open(oodleRuntimeRoot);
+            if (oodle.Session == null || !oodle.Session.CanCompress)
+                throw new NotSupportedException("KRAK 写回需要支持压缩的 Oodle 运行库。");
+            using var session = oodle.Session;
+            rebuiltDcx = dcx.RebuildKrak(rebuiltBinder, session);
+        }
+        else
+        {
+            rebuiltDcx = dcx.RebuildDflt(rebuiltBinder);
+        }
         var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
         Directory.CreateDirectory(directory);
         var temporary = Path.Combine(directory, $".soulforge-{Guid.NewGuid():N}.tmp");
