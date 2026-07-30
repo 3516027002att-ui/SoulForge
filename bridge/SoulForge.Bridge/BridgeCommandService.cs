@@ -261,6 +261,56 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-tpf-document")
+        {
+            try
+            {
+                var document = TpfNativeDocument.ReadFile(file);
+                var roundTrip = document.VerifyRoundTrip();
+                var diagnostics = new[]
+                {
+                    new Diagnostic(
+                        roundTrip.ByteIdentical ? "info" : "error",
+                        roundTrip.ByteIdentical ? "TPF_DOCUMENT_ROUNDTRIP_BYTE_VERIFIED" : "TPF_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.ByteIdentical
+                            ? "TPF 无修改往返字节级一致。"
+                            : "TPF 无修改往返字节不一致。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        roundTrip)
+                };
+                return BridgeResult<object>.Partial(file, "texture", diagnostics, document.ToEnvelope(roundTrip));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "texture", "TPF_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-tae-document")
+        {
+            try
+            {
+                var document = TaeNativeDocument.ReadFile(file);
+                var roundTrip = document.VerifyRoundTrip();
+                var diagnostics = new[]
+                {
+                    new Diagnostic(
+                        roundTrip.SemanticIdentical ? "info" : "error",
+                        roundTrip.SemanticIdentical ? "TAE_DOCUMENT_ROUNDTRIP_VERIFIED" : "TAE_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.SemanticIdentical
+                            ? $"TAE 只读往返验证通过；animations={document.Animations.Count}, events={document.TotalEventCount}, groups={document.TotalGroupCount}。"
+                            : "TAE 只读往返语义不一致。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        roundTrip)
+                };
+                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "write-msb")
         {
             if (string.IsNullOrWhiteSpace(outputPath))

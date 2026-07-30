@@ -27,6 +27,8 @@
     "test:ai-conformance": "tsc -b ../shared . && node dist/testing/runAiConformanceSmoke.js",
     "test:model-service-configuration": "tsc -b ../shared . && node dist/testing/runModelServiceConfigurationSmoke.js",
     "test:native-emevd": "tsc -b ../shared . && node dist/testing/runNativeEmevdSmoke.js",
+    "test:native-tae": "tsc -b ../shared . && node dist/testing/runNativeTaeSmoke.js",
+    "test:native-tpf": "tsc -b ../shared . && node dist/testing/runNativeTpfSmoke.js",
     "test:native-msb": "tsc -b ../shared . && node dist/testing/runNativeMsbSmoke.js",
     "test:asset-import": "tsc -b ../shared . && node dist/testing/runAssetImportSmoke.js",
     "test:editor-document-store": "tsc -b ../shared . && node dist/testing/runEditorDocumentStoreSmoke.js",
