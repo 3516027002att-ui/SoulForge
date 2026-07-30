@@ -21,6 +21,7 @@
     "bridge:verify:oodle": "node scripts/verify-oodle-runtime.mjs",
     "bridge:verify:dcx-documents": "node scripts/verify-native-dcx-documents.mjs",
     "bridge:verify:bnd4-writer": "npm run test:native-bnd4-writer -w @soulforge/core",
+    "test:standalone-writer-failure-matrix": "npm run test:standalone-writer-failure-matrix -w @soulforge/core",
     "bridge:verify:bnd4-transaction": "npm run test:native-bnd4-transaction -w @soulforge/core",
     "bridge:verify:fmg": "npm run test:native-fmg -w @soulforge/core",
     "bridge:verify:param": "npm run test:native-param -w @soulforge/core",
