@@ -184,6 +184,8 @@ function collectProductionLicenses(root, rootPackage, lock, policy, findings) {
     }
     const packageDirectory = resolve(root, lockPath);
     const licenseFiles = directLicenseFiles(root, packageDirectory);
+    const isInstalled = existsSync(packageDirectory);
+    const isOptionalNotInstalled = metadata.optional === true && !isInstalled;
     packages.push({
       name,
       version: metadata.version ?? null,
@@ -191,9 +193,11 @@ function collectProductionLicenses(root, rootPackage, lock, policy, findings) {
       lockPath: normalize(lockPath),
       integrity: metadata.integrity ?? null,
       optional: metadata.optional === true,
-      installed: existsSync(packageDirectory),
+      installed: isInstalled,
       licenseFiles,
-      licenseTextStatus: licenseFiles.length > 0 ? 'present' : 'metadata-only'
+      licenseTextStatus: isOptionalNotInstalled
+        ? 'not-installed'
+        : licenseFiles.length > 0 ? 'present' : 'metadata-only'
     });
   }
   packages.sort((left, right) => compareText(
@@ -213,6 +217,7 @@ function collectProductionLicenses(root, rootPackage, lock, policy, findings) {
     expressions[key] = (expressions[key] ?? 0) + 1;
   }
   const metadataOnly = packages.filter((item) => item.licenseTextStatus === 'metadata-only').length;
+  const notInstalled = packages.filter((item) => item.licenseTextStatus === 'not-installed').length;
   if (metadataOnly > 0) {
     findings.push(warning(
       'LICENSE_TEXT_COVERAGE_PARTIAL',
@@ -225,8 +230,9 @@ function collectProductionLicenses(root, rootPackage, lock, policy, findings) {
     packageCount: packages.length,
     licenseExpressions: sortRecord(expressions),
     textCoverage: {
-      present: packages.length - metadataOnly,
+      present: packages.length - metadataOnly - notInstalled,
       metadataOnly,
+      notInstalled,
       complete: metadataOnly === 0
     },
     inventorySha256: sha256Text(canonicalJson(packages)),
@@ -507,7 +513,7 @@ function directLicenseFiles(root, packageDirectory) {
   if (!existsSync(packageDirectory)) return [];
   try {
     return readdirSync(packageDirectory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && /^(licen[cs]e|copying|notice)(\.|$)/i.test(entry.name))
+      .filter((entry) => entry.isFile() && /^(licen[cs]e|copying|notice)([.-]|$)/i.test(entry.name))
       .map((entry) => normalize(relative(root, join(packageDirectory, entry.name))))
       .sort(compareText);
   } catch {
