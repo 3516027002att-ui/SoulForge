@@ -637,12 +637,17 @@ internal sealed class FlverNativeDocument
         for (int i = 0; i < boneCount; i++)
         {
             int entryOffset = boneTableOffset + i * BoneEntrySize;
+            float translationX = ReadFloat32(source, entryOffset + 0x00);
+            float translationY = ReadFloat32(source, entryOffset + 0x04);
+            float translationZ = ReadFloat32(source, entryOffset + 0x08);
             int nameOffset = ReadInt32(source, entryOffset + 0x0C);
+            short parentIndex = ReadInt16(source, entryOffset + 0x1C);
             short animBoneIndex = ReadInt16(source, entryOffset + 0x2C);
 
             string name = ReadUtf16AtAbsoluteOffset(source, nameOffset);
 
-            bones.Add(new FlverBoneEntry(i, name, animBoneIndex));
+            bones.Add(new FlverBoneEntry(i, name, animBoneIndex, parentIndex,
+                translationX, translationY, translationZ));
         }
 
         // --- Mesh Table (after bones, with 16-byte table header) ---
@@ -803,7 +808,8 @@ internal sealed record FlverMaterialEntry(
     int Index, string Name, string MtdPath, int TextureCount, int FirstTextureIndex);
 
 internal sealed record FlverBoneEntry(
-    int Index, string Name, short AnimBoneIndex);
+    int Index, string Name, short AnimBoneIndex, short ParentIndex,
+    float TranslationX, float TranslationY, float TranslationZ);
 
 internal sealed record FlverMeshEntry(
     int Index, int VertexCount, int IndexByteOffset, int IndexFormat, int VertexBufferLayoutIndex, int MaterialIndex);

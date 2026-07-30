@@ -82,18 +82,60 @@ async function main(): Promise<void> {
     }
   }
 
+  // Extract and verify the skeleton hierarchy (parent index + translation).
+  const skeleton = await runBridge<Record<string, unknown>>({
+    command: 'read-flver-skeleton',
+    filePath: out,
+    allowedRoots: [tmp],
+    timeoutMs: 120_000
+  });
+  if (skeleton.parseStatus === 'failed' || !skeleton.data) {
+    throw new Error(`FLVER skeleton read failed: ${JSON.stringify(skeleton.diagnostics)}`);
+  }
+  const skBones = (skeleton.data.bones as Array<{
+    index: number; name: string; parentIndex: number; translation: number[];
+  }>) ?? [];
+  const skBoneCount = (skeleton.data.boneCount as number) ?? 0;
+  if (skBoneCount <= 0 || skBones.length !== skBoneCount) {
+    throw new Error(`FLVER skeleton bone count mismatch: boneCount=${skBoneCount}, bones=${skBones.length}`);
+  }
+  // Every bone must have a finite translation and a parent in [-1, boneCount).
+  for (const b of skBones) {
+    if (!Array.isArray(b.translation) || b.translation.length !== 3
+      || !b.translation.every(Number.isFinite)) {
+      throw new Error(`Bone[${b.index}] has invalid translation: ${JSON.stringify(b.translation)}`);
+    }
+    if (b.parentIndex < -1 || b.parentIndex >= skBoneCount) {
+      throw new Error(`Bone[${b.index}] has out-of-range parentIndex: ${b.parentIndex}`);
+    }
+  }
+  // The hierarchy must be acyclic (following parent chains terminates).
+  for (let i = 0; i < skBones.length; i++) {
+    const seen = new Set<number>();
+    let cur = i;
+    while (cur !== -1) {
+      if (seen.has(cur)) throw new Error(`Bone hierarchy cycle detected at bone ${cur}`);
+      seen.add(cur);
+      cur = skBones[cur]?.parentIndex ?? -1;
+    }
+  }
+
   console.log(JSON.stringify({
     ok: true,
-    message: `FLVER native mesh 提取验证通过（mesh[0]: ${vertexCount} vertices, ${posBytes.length} bytes positions）`,
+    message: `FLVER native mesh 提取验证通过（mesh[0]: ${vertexCount} vertices, ${posBytes.length} bytes positions; skeleton: ${skBoneCount} bones）`,
     meshCount,
     vertexCount,
     positionBytes: posBytes.length,
     hasIndices: Boolean(indicesBase64),
     indexBytes: indicesBase64 ? Buffer.from(indicesBase64, 'base64').length : 0,
     samplePositions: Array.from(positions.slice(0, 9)),
+    skeletonBoneCount: skBoneCount,
+    skeletonRoots: skBones.filter((b) => b.parentIndex === -1).length,
     authority: 'candidate',
     roundTrip: doc.diagnostics?.map((d: { code: string }) => d.code)
   }, null, 2));
+
+  await disposeBridgeDaemonPool();
 }
 
 main().catch(async (error) => {
