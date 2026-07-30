@@ -14,7 +14,7 @@ export type EditorScaleAccess =
   | 'eager'
   | 'none';
 
-export type ProposedReleaseEditorId = 'safe-hex' | 'fmg' | 'param' | 'emevd' | 'msb';
+export type ProposedReleaseEditorId = 'safe-hex' | 'fmg' | 'param' | 'emevd' | 'msb' | 'tae' | 'esd' | 'flver';
 
 export interface EditorCapabilityContract {
   editorKind: EditorKind;
@@ -112,6 +112,49 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
       'packages/core/src/editing/msbBridgeCommit.ts',
       'packages/shared/src/scene-ir.ts',
       'apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx'
+    ]
+  },
+  tae: {
+    editorKind: 'tae',
+    proposedReleaseEditorId: 'tae',
+    proposalOrder: 5,
+    documentAuthority: 'bridge-native-document',
+    mutationKinds: [],
+    revisionContract: 'monotonic-reject-stale',
+    scalePrimitives: ['bounded-window'],
+    scaleAccess: 'bounded-window',
+    scaleDimensions: ['animations', 'events', 'event-groups'],
+    contractSources: [
+      'bridge/SoulForge.Bridge/TaeNativeDocument.cs'
+    ]
+  },
+  esd: {
+    editorKind: 'esd',
+    proposedReleaseEditorId: 'esd',
+    proposalOrder: 6,
+    documentAuthority: 'bridge-native-document',
+    mutationKinds: [],
+    revisionContract: 'monotonic-reject-stale',
+    scalePrimitives: ['bounded-window'],
+    scaleAccess: 'bounded-window',
+    scaleDimensions: ['state-groups', 'states', 'conditions'],
+    contractSources: [
+      'bridge/SoulForge.Bridge/EsdNativeDocument.cs'
+    ]
+  },
+  flver: {
+    editorKind: 'flver',
+    proposedReleaseEditorId: 'flver',
+    proposalOrder: 7,
+    documentAuthority: 'bridge-native-document',
+    mutationKinds: [],
+    revisionContract: 'monotonic-reject-stale',
+    scalePrimitives: ['chunking', 'bounded-window'],
+    scaleAccess: 'bounded-window',
+    scaleDimensions: ['bones', 'materials', 'meshes', 'vertices'],
+    contractSources: [
+      'bridge/SoulForge.Bridge/FlverNativeDocument.cs',
+      'bridge/SoulForge.Bridge/TpfNativeDocument.cs'
     ]
   },
   text: {
