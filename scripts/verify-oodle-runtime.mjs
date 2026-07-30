@@ -154,12 +154,16 @@ async function gameDirectory(name, includeExecutable = true) {
   return directory;
 }
 
-function invoke(command, targetPath, extraEnv = {}) {
+function invoke(command, targetPath, extraEnv = {}, commandOptions = undefined) {
   const env = { ...process.env, ...extraEnv };
   if (!Object.hasOwn(extraEnv, 'SOULFORGE_SEKIRO_GAME_ROOT')) {
     delete env.SOULFORGE_SEKIRO_GAME_ROOT;
   }
-  const result = spawnSync(executable, [command, targetPath], {
+  const args = [command, targetPath];
+  if (commandOptions !== undefined) {
+    args.push(JSON.stringify(commandOptions));
+  }
+  const result = spawnSync(executable, args, {
     encoding: 'utf8',
     windowsHide: true,
     env
