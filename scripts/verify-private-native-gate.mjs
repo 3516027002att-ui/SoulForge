@@ -108,7 +108,11 @@ const steps = [
   { name: 'bridge:verify:emevd', args: ['run', 'bridge:verify:emevd'] },
   { name: 'bridge:verify:fmg', args: ['run', 'bridge:verify:fmg'] },
   { name: 'bridge:verify:param', args: ['run', 'bridge:verify:param'] },
-  { name: 'bridge:verify:msb', args: ['run', 'bridge:verify:msb'] }
+  { name: 'bridge:verify:msb', args: ['run', 'bridge:verify:msb'] },
+  { name: 'bridge:verify:tae', args: ['run', 'bridge:verify:tae'] },
+  { name: 'bridge:verify:tpf', args: ['run', 'bridge:verify:tpf'] },
+  { name: 'bridge:verify:flver', args: ['run', 'bridge:verify:flver'] },
+  { name: 'bridge:verify:esd', args: ['run', 'bridge:verify:esd'] }
 ];
 
 let failed = false;
