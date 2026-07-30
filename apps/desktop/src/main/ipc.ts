@@ -387,6 +387,88 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return await adapter.detect({ timeoutMs: 5_000 });
   });
 
+  // Shared runtime adapter instance for profile/launch/terminate lifecycle
+  let runtimeAdapter: Me3RuntimeAdapter | null = null;
+  let runtimeGateway: MainMe3RuntimeGateway | null = null;
+  function ensureRuntimeAdapter(): Me3RuntimeAdapter {
+    if (!runtimeAdapter) {
+      runtimeGateway = new MainMe3RuntimeGateway({ localDataRoot: localApplicationDataRoot() });
+      runtimeAdapter = new Me3RuntimeAdapter({
+        gateway: runtimeGateway,
+        versionPolicy: {
+          policyId: 'soulforge.me3-v0_12_1',
+          supportedVersions: ['0.12.1']
+        }
+      });
+    }
+    return runtimeAdapter;
+  }
+
+  handle('runtime.prepareMe3Profile', async () => {
+    if (!activeSession || !activeWorkspaceSessionId) {
+      return {
+        ok: false,
+        status: 'failed' as const,
+        authority: 'unverified' as const,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RUNTIME_NO_WORKSPACE',
+          message: '需要已打开的工作区才能准备 me3 配置文件。'
+        }]
+      };
+    }
+    const adapter = ensureRuntimeAdapter();
+    const result = await adapter.prepareProfile(
+      { workspaceSessionId: activeWorkspaceSessionId, game: 'sekiro' },
+      { timeoutMs: 30_000 }
+    );
+    return sanitizeRendererValue(result);
+  });
+
+  handle('runtime.launchMe3', async (_event, profileId: string) => {
+    if (!activeWorkspaceSessionId) {
+      return {
+        ok: false,
+        status: 'failed' as const,
+        authority: 'unverified' as const,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RUNTIME_NO_WORKSPACE',
+          message: '需要已打开的工作区才能启动 me3。'
+        }]
+      };
+    }
+    const adapter = ensureRuntimeAdapter();
+    const result = await adapter.launch(
+      {
+        profile: {
+          profileId,
+          workspaceSessionId: activeWorkspaceSessionId,
+          game: 'sekiro',
+          profileVersion: 'v1',
+          contentSha256: ''
+        }
+      },
+      { timeoutMs: 15_000 }
+    );
+    return sanitizeRendererValue(result);
+  });
+
+  handle('runtime.terminateMe3', async (_event, sessionId: string) => {
+    const adapter = ensureRuntimeAdapter();
+    const result = await adapter.terminate(
+      {
+        sessionId,
+        game: 'sekiro',
+        state: 'running',
+        startedAt: new Date().toISOString(),
+        diagnostics: []
+      },
+      { timeoutMs: 10_000 }
+    );
+    return sanitizeRendererValue(result);
+  });
+
   handle('workspace.openDialog', async (event): Promise<DirectorySelection | null> => {
     const result = await dialog.showOpenDialog({
       title: '打开 Mod 工作区',

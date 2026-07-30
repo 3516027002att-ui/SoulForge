@@ -1,10 +1,16 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { stat, realpath } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type {
   Me3DetectionGatewayResult,
+  Me3LaunchRequest,
+  Me3LaunchResult,
+  Me3ProfileCreateRequest,
+  Me3ProfileCreateResult,
   Me3RuntimeGateway,
   Me3SpawnFailure,
+  Me3TerminateRequest,
+  Me3TerminateResult,
   Me3VersionProbeProcessResult,
   Me3VersionProbeRequest
 } from '@soulforge/core';
@@ -27,6 +33,8 @@ export interface MainMe3RuntimeGatewayOptions {
  */
 export class MainMe3RuntimeGateway implements Me3RuntimeGateway {
   private readonly localDataRoot: string;
+  private launchedProcess: ChildProcess | null = null;
+  private launchedPid: number | null = null;
 
   constructor(options: MainMe3RuntimeGatewayOptions) {
     if (!isAbsolute(options.localDataRoot)) throw new Error('ME3_LOCAL_DATA_ROOT_NOT_ABSOLUTE');
@@ -52,6 +60,102 @@ export class MainMe3RuntimeGateway implements Me3RuntimeGateway {
       discoverySource: 'well-known',
       process: await runVersionProbe(candidate.executablePath, request)
     };
+  }
+
+  async createProfile(request: Me3ProfileCreateRequest): Promise<Me3ProfileCreateResult> {
+    if (request.operation !== 'profile-create') throw new Error('ME3_OPERATION_UNSUPPORTED');
+    const candidate = await this.resolvePinnedCandidate();
+    if (candidate.status === 'not-found') {
+      return { exitCode: 1, stdout: '', stderr: 'me3 not found', timedOut: false, cancelled: false, spawnFailure: 'process-unavailable' };
+    }
+    if (candidate.status === 'not-executable') {
+      return { exitCode: 1, stdout: '', stderr: 'me3 not executable', timedOut: false, cancelled: false, spawnFailure: candidate.reason };
+    }
+    return runProfileCreate(candidate.executablePath, request);
+  }
+
+  async launchGame(request: Me3LaunchRequest): Promise<Me3LaunchResult> {
+    if (request.operation !== 'launch') throw new Error('ME3_OPERATION_UNSUPPORTED');
+    const candidate = await this.resolvePinnedCandidate();
+    if (candidate.status === 'not-found') {
+      return { exitCode: null, stdout: '', stderr: 'me3 not found', timedOut: false, cancelled: false, spawnFailure: 'process-unavailable' };
+    }
+    if (candidate.status === 'not-executable') {
+      return { exitCode: null, stdout: '', stderr: 'me3 not executable', timedOut: false, cancelled: false, spawnFailure: candidate.reason };
+    }
+    return this.runLaunch(candidate.executablePath, request);
+  }
+
+  async terminateProcess(request: Me3TerminateRequest): Promise<Me3TerminateResult> {
+    if (request.operation !== 'terminate') throw new Error('ME3_OPERATION_UNSUPPORTED');
+    if (!this.launchedProcess || this.launchedPid !== request.pid) {
+      return { terminated: false };
+    }
+    try {
+      // Kill the process tree on Windows
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', String(request.pid), '/T', '/F'], {
+          shell: false,
+          windowsHide: true,
+          stdio: 'ignore'
+        });
+      } else {
+        this.launchedProcess.kill('SIGTERM');
+      }
+      this.launchedProcess = null;
+      this.launchedPid = null;
+      return { terminated: true };
+    } catch {
+      return { terminated: false };
+    }
+  }
+
+  private runLaunch(executablePath: string, request: Me3LaunchRequest): Me3LaunchResult {
+    if (request.signal?.aborted) {
+      return { exitCode: null, stdout: '', stderr: '', timedOut: false, cancelled: true, spawnFailure: null };
+    }
+
+    const args = ['launch', '-g', request.game, '-p', request.profileName];
+    if (request.diagnostics) args.push('-d');
+
+    let child: ChildProcess;
+    try {
+      child = spawn(executablePath, args, {
+        cwd: dirname(executablePath),
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: minimalRuntimeEnvironment()
+      });
+    } catch (error) {
+      return { exitCode: null, stdout: '', stderr: '', timedOut: false, cancelled: false, spawnFailure: classifySpawnFailure(error) };
+    }
+
+    const pid = child.pid ?? null;
+    this.launchedProcess = child;
+    this.launchedPid = pid;
+
+    // Capture initial output but don't wait for exit — this is a long-running process
+    let stdout = '';
+    let stderr = '';
+    const OUTPUT_LIMIT = 4096;
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+      if (stdout.length < OUTPUT_LIMIT) stdout = (stdout + text).slice(0, OUTPUT_LIMIT);
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+      if (stderr.length < OUTPUT_LIMIT) stderr = (stderr + text).slice(0, OUTPUT_LIMIT);
+    });
+    child.once('close', () => {
+      if (this.launchedProcess === child) {
+        this.launchedProcess = null;
+        this.launchedPid = null;
+      }
+    });
+
+    // Return immediately with the PID — don't wait for the game to exit
+    return { exitCode: null, stdout, stderr, timedOut: false, cancelled: false, spawnFailure: null, ...(pid !== null ? { pid } : {}) };
   }
 
   private async resolvePinnedCandidate(): Promise<
@@ -206,4 +310,86 @@ function classifySpawnFailure(error: unknown): Me3SpawnFailure {
 function errorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
   return typeof error.code === 'string' ? error.code : undefined;
+}
+
+const PROFILE_OUTPUT_LIMIT_BYTES = 4096;
+
+async function runProfileCreate(
+  executablePath: string,
+  request: Me3ProfileCreateRequest
+): Promise<Me3ProfileCreateResult> {
+  if (request.signal?.aborted) {
+    return { exitCode: 1, stdout: '', stderr: '', timedOut: false, cancelled: true, spawnFailure: null };
+  }
+
+  const args = ['profile', 'create', request.profileName, '-g', request.game, '--overwrite'];
+  for (const packagePath of request.packagePaths) {
+    args.push('--package', packagePath);
+  }
+
+  return await new Promise((resolveResult) => {
+    let settled = false;
+    let stdout = Buffer.alloc(0);
+    let stderr = Buffer.alloc(0);
+    let child: ReturnType<typeof spawn> | undefined;
+
+    const settle = (result: Me3ProfileCreateResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      request.signal?.removeEventListener('abort', onAbort);
+      resolveResult(result);
+    };
+    const current = (
+      exitCode: number,
+      flags: Pick<Me3ProfileCreateResult, 'timedOut' | 'cancelled' | 'spawnFailure'>
+    ): Me3ProfileCreateResult => ({
+      exitCode,
+      stdout: stdout.toString('utf8'),
+      stderr: stderr.toString('utf8'),
+      ...flags
+    });
+    const stop = (): void => {
+      try { child?.kill(); } catch { /* best effort */ }
+    };
+    const onAbort = (): void => {
+      stop();
+      settle(current(1, { timedOut: false, cancelled: true, spawnFailure: null }));
+    };
+    const timer = setTimeout(() => {
+      stop();
+      settle(current(1, { timedOut: true, cancelled: false, spawnFailure: null }));
+    }, request.timeoutMs);
+
+    try {
+      child = spawn(executablePath, args, {
+        cwd: dirname(executablePath),
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: minimalRuntimeEnvironment()
+      });
+    } catch (error) {
+      settle({ exitCode: 1, stdout: '', stderr: '', timedOut: false, cancelled: false, spawnFailure: classifySpawnFailure(error) });
+      return;
+    }
+
+    request.signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = PROFILE_OUTPUT_LIMIT_BYTES - stdout.length;
+      if (remaining > 0) stdout = Buffer.concat([stdout, bytes.subarray(0, remaining)]);
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = PROFILE_OUTPUT_LIMIT_BYTES - stderr.length;
+      if (remaining > 0) stderr = Buffer.concat([stderr, bytes.subarray(0, remaining)]);
+    });
+    child.once('error', (error) => {
+      settle({ exitCode: 1, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), timedOut: false, cancelled: false, spawnFailure: classifySpawnFailure(error) });
+    });
+    child.once('close', (code) => {
+      settle(current(code ?? 1, { timedOut: false, cancelled: false, spawnFailure: null }));
+    });
+  });
 }

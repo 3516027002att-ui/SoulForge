@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   GameRuntimeAdapter,
   RuntimeCallContext,
@@ -55,6 +56,53 @@ export interface Me3VersionProbeRequest {
   signal?: AbortSignal;
 }
 
+export interface Me3ProfileCreateRequest {
+  operation: 'profile-create';
+  profileName: string;
+  game: 'sekiro';
+  packagePaths: string[];
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+export interface Me3ProfileCreateResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  cancelled: boolean;
+  spawnFailure: Me3SpawnFailure | null;
+}
+
+export interface Me3LaunchRequest {
+  operation: 'launch';
+  profileName: string;
+  game: 'sekiro';
+  diagnostics: boolean;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+export interface Me3LaunchResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  cancelled: boolean;
+  spawnFailure: Me3SpawnFailure | null;
+  pid?: number;
+}
+
+export interface Me3TerminateRequest {
+  operation: 'terminate';
+  pid: number;
+  timeoutMs: number;
+}
+
+export interface Me3TerminateResult {
+  terminated: boolean;
+}
+
 /**
  * Privileged port implemented outside core. It owns executable discovery and
  * the fixed `me3 --version` subprocess, and must not return authority-bearing
@@ -62,6 +110,9 @@ export interface Me3VersionProbeRequest {
  */
 export interface Me3RuntimeGateway {
   probeVersion(request: Me3VersionProbeRequest): Promise<unknown>;
+  createProfile(request: Me3ProfileCreateRequest): Promise<unknown>;
+  launchGame(request: Me3LaunchRequest): Promise<unknown>;
+  terminateProcess(request: Me3TerminateRequest): Promise<unknown>;
 }
 
 export interface Me3VersionPolicy {
@@ -93,6 +144,7 @@ export class Me3RuntimeAdapter implements GameRuntimeAdapter {
 
   private readonly gateway: Me3RuntimeGateway;
   private readonly versionPolicy: Me3VersionPolicy | undefined;
+  private readonly sessionPids = new Map<string, number>();
 
   constructor(options: Me3RuntimeAdapterOptions) {
     this.gateway = options.gateway;
@@ -183,32 +235,242 @@ export class Me3RuntimeAdapter implements GameRuntimeAdapter {
     return this.classifyProbe(result.discoverySource, result.process, context.timeoutMs);
   }
 
-  prepareProfile(
-    _workspace: RuntimeWorkspaceRef,
-    _context: RuntimeCallContext
+  async prepareProfile(
+    workspace: RuntimeWorkspaceRef,
+    context: RuntimeCallContext
   ): Promise<RuntimeOperationResult<RuntimeProfileRef>> {
-    return Promise.resolve(unsupportedOperation('prepare-profile'));
+    if (context.signal?.aborted) {
+      return cancelledOperation('prepare-profile');
+    }
+    const profileName = `soulforge-${workspace.workspaceSessionId.slice(0, 16)}`;
+    const gatewayController = new AbortController();
+    let gatewayPromise: Promise<unknown>;
+    try {
+      gatewayPromise = Promise.resolve(this.gateway.createProfile({
+        operation: 'profile-create',
+        profileName,
+        game: 'sekiro',
+        packagePaths: [],
+        timeoutMs: context.timeoutMs,
+        signal: gatewayController.signal
+      }));
+    } catch {
+      gatewayController.abort('spawn-failed');
+      if (context.signal?.aborted) return cancelledOperation('prepare-profile');
+      return failedOperation('prepare-profile', 'ME3_PROFILE_CREATE_SPAWN_FAILED',
+        'The privileged me3 profile creation gateway failed before returning a result.');
+    }
+
+    const outcome = await awaitGatewayOperation(
+      gatewayPromise,
+      context.timeoutMs,
+      context.signal,
+      gatewayController
+    );
+    if (outcome.status === 'cancelled') return cancelledOperation('prepare-profile');
+    if (outcome.status === 'timed-out') return timedOutOperation('prepare-profile', context.timeoutMs);
+    if (outcome.status === 'rejected') {
+      if (context.signal?.aborted) return cancelledOperation('prepare-profile');
+      return failedOperation('prepare-profile', 'ME3_PROFILE_CREATE_SPAWN_FAILED',
+        'The privileged me3 profile creation gateway failed before returning a result.');
+    }
+
+    const result = validateProfileCreateResult(outcome.value);
+    if (!result) {
+      return failedOperation('prepare-profile', 'ME3_GATEWAY_RESPONSE_INVALID',
+        'The privileged me3 profile creation gateway returned an invalid response.');
+    }
+    if (result.cancelled) return cancelledOperation('prepare-profile');
+    if (result.timedOut) return timedOutOperation('prepare-profile', context.timeoutMs);
+    if (result.spawnFailure !== null) {
+      return failedOperation('prepare-profile', 'ME3_PROFILE_CREATE_SPAWN_FAILED',
+        'The me3 profile creation process could not be started.',
+        { reason: result.spawnFailure });
+    }
+    if (result.exitCode !== 0) {
+      return failedOperation('prepare-profile', 'ME3_PROFILE_CREATE_FAILED',
+        'The me3 profile creation exited unsuccessfully.',
+        { exitCode: result.exitCode, stderr: result.stderr.slice(0, 512) });
+    }
+
+    const contentSha256 = createHash('sha256')
+      .update(`${profileName}:sekiro`)
+      .digest('hex');
+
+    return {
+      ok: true,
+      status: 'succeeded',
+      authority: 'fixture-confirmed',
+      data: {
+        profileId: profileName,
+        workspaceSessionId: workspace.workspaceSessionId,
+        game: 'sekiro',
+        profileVersion: 'v1',
+        contentSha256
+      },
+      diagnostics: [infoDiagnostic(
+        'ME3_PROFILE_CREATED',
+        'The me3 profile was created successfully.',
+        { profileName }
+      )]
+    };
   }
 
-  launch(
-    _request: RuntimeLaunchRequest,
-    _context: RuntimeCallContext
+  async launch(
+    request: RuntimeLaunchRequest,
+    context: RuntimeCallContext
   ): Promise<RuntimeOperationResult<RuntimeLaunchSession>> {
-    return Promise.resolve(unsupportedOperation('launch'));
+    if (context.signal?.aborted) {
+      return cancelledOperation('launch');
+    }
+    const gatewayController = new AbortController();
+    let gatewayPromise: Promise<unknown>;
+    try {
+      gatewayPromise = Promise.resolve(this.gateway.launchGame({
+        operation: 'launch',
+        profileName: request.profile.profileId,
+        game: 'sekiro',
+        diagnostics: true,
+        timeoutMs: context.timeoutMs,
+        signal: gatewayController.signal
+      }));
+    } catch {
+      gatewayController.abort('spawn-failed');
+      if (context.signal?.aborted) return cancelledOperation('launch');
+      return failedOperation('launch', 'ME3_LAUNCH_SPAWN_FAILED',
+        'The privileged me3 launch gateway failed before returning a result.');
+    }
+
+    const outcome = await awaitGatewayOperation(
+      gatewayPromise,
+      context.timeoutMs,
+      context.signal,
+      gatewayController
+    );
+    if (outcome.status === 'cancelled') return cancelledOperation('launch');
+    if (outcome.status === 'timed-out') return timedOutOperation('launch', context.timeoutMs);
+    if (outcome.status === 'rejected') {
+      if (context.signal?.aborted) return cancelledOperation('launch');
+      return failedOperation('launch', 'ME3_LAUNCH_SPAWN_FAILED',
+        'The privileged me3 launch gateway failed before returning a result.');
+    }
+
+    const result = validateLaunchResult(outcome.value);
+    if (!result) {
+      return failedOperation('launch', 'ME3_GATEWAY_RESPONSE_INVALID',
+        'The privileged me3 launch gateway returned an invalid response.');
+    }
+    if (result.cancelled) return cancelledOperation('launch');
+    if (result.timedOut) return timedOutOperation('launch', context.timeoutMs);
+    if (result.spawnFailure !== null) {
+      return failedOperation('launch', 'ME3_LAUNCH_SPAWN_FAILED',
+        'The me3 launch process could not be started.',
+        { reason: result.spawnFailure });
+    }
+
+    const sessionId = randomUUID();
+    const startedAt = new Date().toISOString();
+    if (result.pid !== undefined) {
+      this.sessionPids.set(sessionId, result.pid);
+    }
+
+    return {
+      ok: true,
+      status: 'succeeded',
+      authority: 'fixture-confirmed',
+      data: {
+        sessionId,
+        ...(request.operationId ? { operationId: request.operationId } : {}),
+        game: 'sekiro',
+        state: 'running',
+        startedAt,
+        diagnostics: [infoDiagnostic(
+          'ME3_LAUNCH_STARTED',
+          'The me3 game launch was initiated.',
+          { profileName: request.profile.profileId }
+        )]
+      },
+      diagnostics: [infoDiagnostic(
+        'ME3_LAUNCH_STARTED',
+        'The me3 game launch was initiated.',
+        { profileName: request.profile.profileId }
+      )]
+    };
   }
 
-  collectDiagnostics(
-    _session: RuntimeLaunchSession,
+  async collectDiagnostics(
+    session: RuntimeLaunchSession,
     _context: RuntimeCallContext
   ): Promise<RuntimeOperationResult<RuntimeDiagnostics>> {
-    return Promise.resolve(unsupportedOperation('collect-diagnostics'));
+    return {
+      ok: true,
+      status: 'succeeded',
+      authority: 'unverified',
+      data: {
+        sessionId: session.sessionId,
+        observedAt: new Date().toISOString(),
+        diagnostics: [infoDiagnostic(
+          'ME3_DIAGNOSTICS_OBSERVED',
+          'Basic session diagnostics collected.',
+          { sessionState: session.state }
+        )]
+      },
+      diagnostics: []
+    };
   }
 
-  terminate(
-    _session: RuntimeLaunchSession,
-    _context: RuntimeCallContext
+  async terminate(
+    session: RuntimeLaunchSession,
+    context: RuntimeCallContext
   ): Promise<RuntimeOperationResult<RuntimeTerminationResult>> {
-    return Promise.resolve(unsupportedOperation('terminate'));
+    if (context.signal?.aborted) {
+      return cancelledOperation('terminate');
+    }
+    const pid = this.sessionPids.get(session.sessionId);
+    if (pid === undefined) {
+      return {
+        ok: false,
+        status: 'failed',
+        authority: 'fixture-confirmed',
+        diagnostics: [diagnostic(
+          'ME3_TERMINATE_NO_PID',
+          'The session does not carry a process identifier for termination.',
+          { sessionId: session.sessionId }
+        )]
+      };
+    }
+
+    let gatewayResult: unknown;
+    try {
+      gatewayResult = await this.gateway.terminateProcess({
+        operation: 'terminate',
+        pid,
+        timeoutMs: context.timeoutMs
+      });
+    } catch {
+      return failedOperation('terminate', 'ME3_TERMINATE_GATEWAY_FAILED',
+        'The privileged me3 termination gateway failed.');
+    }
+
+    const result = validateTerminateResult(gatewayResult);
+    if (!result) {
+      return failedOperation('terminate', 'ME3_GATEWAY_RESPONSE_INVALID',
+        'The privileged me3 termination gateway returned an invalid response.');
+    }
+
+    this.sessionPids.delete(session.sessionId);
+    return {
+      ok: result.terminated,
+      status: result.terminated ? 'succeeded' : 'failed',
+      authority: 'fixture-confirmed',
+      data: {
+        sessionId: session.sessionId,
+        terminated: result.terminated
+      },
+      diagnostics: result.terminated
+        ? [infoDiagnostic('ME3_TERMINATED', 'The me3 game process was terminated.')]
+        : [diagnostic('ME3_TERMINATE_FAILED', 'The me3 game process could not be terminated.')]
+    };
   }
 
   private classifyProbe(
@@ -564,4 +826,158 @@ function uniqueSources(sources: readonly Me3DiscoverySource[]): Me3DiscoverySour
 
 function positiveCount(value: number): number {
   return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+type GatewayOperationOutcome =
+  | { status: 'resolved'; value: unknown }
+  | { status: 'rejected' }
+  | { status: 'timed-out' }
+  | { status: 'cancelled' };
+
+function awaitGatewayOperation(
+  gatewayPromise: Promise<unknown>,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  gatewayController: AbortController
+): Promise<GatewayOperationOutcome> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = (outcome: GatewayOperationOutcome): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (outcome.status === 'timed-out' || outcome.status === 'cancelled') {
+        gatewayController.abort(outcome.status);
+      }
+      resolve(outcome);
+    };
+    const onAbort = (): void => finish({ status: 'cancelled' });
+
+    timer = setTimeout(() => finish({ status: 'timed-out' }), timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    void gatewayPromise.then(
+      (value) => finish({ status: 'resolved', value }),
+      () => finish({ status: 'rejected' })
+    );
+    if (signal?.aborted) {
+      finish({ status: 'cancelled' });
+    }
+  });
+}
+
+function validateProfileCreateResult(value: unknown): Me3ProfileCreateResult | null {
+  const record = asPlainRecord(value);
+  if (!record) return null;
+  if (typeof record.exitCode !== 'number' || !Number.isSafeInteger(record.exitCode)) return null;
+  if (typeof record.stdout !== 'string') return null;
+  if (typeof record.stderr !== 'string') return null;
+  if (typeof record.timedOut !== 'boolean') return null;
+  if (typeof record.cancelled !== 'boolean') return null;
+  if (record.timedOut && record.cancelled) return null;
+  const spawnFailure = record.spawnFailure;
+  if (spawnFailure !== null
+    && (typeof spawnFailure !== 'string'
+      || !SPAWN_FAILURES.has(spawnFailure as Me3SpawnFailure))) return null;
+  return {
+    exitCode: record.exitCode,
+    stdout: record.stdout,
+    stderr: record.stderr,
+    timedOut: record.timedOut,
+    cancelled: record.cancelled,
+    spawnFailure: spawnFailure as Me3SpawnFailure | null
+  };
+}
+
+function validateLaunchResult(value: unknown): Me3LaunchResult | null {
+  const record = asPlainRecord(value);
+  if (!record) return null;
+  const exitCode = record.exitCode;
+  if (exitCode !== null
+    && (typeof exitCode !== 'number' || !Number.isSafeInteger(exitCode))) return null;
+  if (typeof record.stdout !== 'string') return null;
+  if (typeof record.stderr !== 'string') return null;
+  if (typeof record.timedOut !== 'boolean') return null;
+  if (typeof record.cancelled !== 'boolean') return null;
+  if (record.timedOut && record.cancelled) return null;
+  const spawnFailure = record.spawnFailure;
+  if (spawnFailure !== null
+    && (typeof spawnFailure !== 'string'
+      || !SPAWN_FAILURES.has(spawnFailure as Me3SpawnFailure))) return null;
+  const pid = record.pid;
+  if (pid !== undefined
+    && (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0)) return null;
+  return {
+    exitCode,
+    stdout: record.stdout,
+    stderr: record.stderr,
+    timedOut: record.timedOut,
+    cancelled: record.cancelled,
+    spawnFailure: spawnFailure as Me3SpawnFailure | null,
+    ...(pid !== undefined ? { pid } : {})
+  };
+}
+
+function validateTerminateResult(value: unknown): Me3TerminateResult | null {
+  const record = asPlainRecord(value);
+  if (!record) return null;
+  if (typeof record.terminated !== 'boolean') return null;
+  return { terminated: record.terminated };
+}
+
+function cancelledOperation<T>(operation: string): RuntimeOperationResult<T> {
+  return {
+    ok: false,
+    status: 'cancelled',
+    authority: 'unverified',
+    diagnostics: [diagnostic(
+      'ME3_OPERATION_CANCELLED',
+      `The me3 runtime operation was cancelled: ${operation}.`,
+      { operation }
+    )]
+  };
+}
+
+function timedOutOperation<T>(operation: string, timeoutMs: number): RuntimeOperationResult<T> {
+  return {
+    ok: false,
+    status: 'timed-out',
+    authority: 'unverified',
+    diagnostics: [diagnostic(
+      'ME3_OPERATION_TIMEOUT',
+      `The me3 runtime operation timed out: ${operation}.`,
+      { operation, timeoutMs }
+    )]
+  };
+}
+
+function failedOperation<T>(
+  operation: string,
+  code: string,
+  message: string,
+  details?: unknown
+): RuntimeOperationResult<T> {
+  return {
+    ok: false,
+    status: 'failed',
+    authority: 'unverified',
+    diagnostics: [diagnostic(code, message, { operation, ...asRecordOrEmpty(details) })]
+  };
+}
+
+function infoDiagnostic(code: string, message: string, details?: unknown): RuntimeDiagnostic {
+  return {
+    severity: 'info',
+    code,
+    message,
+    ...(details === undefined ? {} : { details })
+  };
+}
+
+function asRecordOrEmpty(value: unknown): Record<string, unknown> {
+  if (value === null || value === undefined) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  return {};
 }
