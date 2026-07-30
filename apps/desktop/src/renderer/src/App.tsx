@@ -43,6 +43,9 @@ import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
 import { ParamTablePanel } from './editors/ParamTablePanel.js';
 import { WorkbenchOpsPanel } from './editors/WorkbenchOpsPanel.js';
 import { ParamDefPanel } from './editors/ParamDefPanel.js';
+import { TaeWorkbenchPanel } from './editors/TaeWorkbenchPanel.js';
+import { EsdWorkbenchPanel } from './editors/EsdWorkbenchPanel.js';
+import { FlverWorkbenchPanel } from './editors/FlverWorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
 import {
   mapEmevdEnvelopeToDocument,
@@ -1246,6 +1249,15 @@ export function App(): ReactElement {
           )}
           {preview?.previewKind === 'empty' && <p className="muted">空文件。</p>}
           {preview?.previewKind === 'failed' && <p className="danger">预览失败。</p>}
+          {selectedFile?.relativePath?.endsWith('.tae') && (
+            <TaeWorkbenchPanel resourceUri={selectedFile.sourceUri} data={null} />
+          )}
+          {selectedFile?.relativePath?.endsWith('.esd') && (
+            <EsdWorkbenchPanel resourceUri={selectedFile.sourceUri} data={null} />
+          )}
+          {(selectedFile?.relativePath?.endsWith('.flver') || selectedFile?.relativePath?.endsWith('.tpf')) && (
+            <FlverWorkbenchPanel resourceUri={selectedFile.sourceUri} data={null} />
+          )}
           {preview?.truncated && <p className="muted">预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开。</p>}
         </section>
 
