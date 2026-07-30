@@ -31,6 +31,53 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   const handleRef = useRef<{ dispose: () => void } | null>(null);
   const [meshData, setMeshData] = useState<MeshData | null>(null);
   const [meshError, setMeshError] = useState<string | null>(null);
+  const [skeletonBones, setSkeletonBones] = useState<
+    Array<{ name: string; position: [number, number, number]; parentIndex: number }> | null
+  >(null);
+
+  // Load skeleton hierarchy via IPC when sourceUri changes.
+  // Bone translations are parent-relative; approximate world positions by
+  // accumulating translations up the parent chain (rotation ignored — adequate
+  // for a read-only structural preview).
+  useEffect(() => {
+    if (!props.sourceUri || typeof window.soulforge.readFlverSkeleton !== 'function') return;
+    setSkeletonBones(null);
+    void (async () => {
+      try {
+        const result = await window.soulforge.readFlverSkeleton(props.sourceUri!) as {
+          ok: boolean;
+          data?: { bones?: Array<{ name: string; parentIndex: number; translation: number[] }> };
+        };
+        const raw = result.ok ? result.data?.bones ?? [] : [];
+        if (raw.length === 0) return;
+        const worldPositions = new Array<[number, number, number]>(raw.length);
+        const resolve = (i: number, depth: number): [number, number, number] => {
+          const cached = worldPositions[i];
+          if (cached) return cached;
+          const bone = raw[i];
+          const t = bone?.translation ?? [0, 0, 0];
+          const parent = bone?.parentIndex ?? -1;
+          let pos: [number, number, number] = [t[0] ?? 0, t[1] ?? 0, t[2] ?? 0];
+          if (parent >= 0 && parent < raw.length && parent !== i && depth < raw.length) {
+            const pp = resolve(parent, depth + 1);
+            pos = [pos[0] + pp[0], pos[1] + pp[1], pos[2] + pp[2]];
+          }
+          worldPositions[i] = pos;
+          return pos;
+        };
+        for (let i = 0; i < raw.length; i++) resolve(i, 0);
+        setSkeletonBones(
+          raw.map((b, i) => ({
+            name: b.name,
+            position: worldPositions[i] ?? [0, 0, 0],
+            parentIndex: b.parentIndex
+          }))
+        );
+      } catch {
+        // Skeleton load failed; leave hierarchy hidden.
+      }
+    })();
+  }, [props.sourceUri]);
 
   // Load mesh data via IPC when sourceUri or meshIndex changes.
   useEffect(() => {
@@ -287,22 +334,23 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         }
       }
 
-      // Draw bone hierarchy if available.
-      if (props.bones && props.bones.length > 0) {
+      // Draw bone hierarchy if available (skeleton loaded via IPC, or passed via props).
+      const bones = skeletonBones ?? props.bones;
+      if (bones && bones.length > 0) {
         const boneGroup = new three.Group();
         const boneMaterial = new three.LineBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.6 });
         const jointMaterial = new three.MeshBasicMaterial({ color: 0xffcc66 });
         const jointGeometry = new three.SphereGeometry(0.15, 8, 8);
 
-        for (const bone of props.bones) {
+        for (const bone of bones) {
           // Draw joint sphere.
           const joint = new three.Mesh(jointGeometry, jointMaterial);
           joint.position.set(bone.position[0], bone.position[1], bone.position[2]);
           boneGroup.add(joint);
 
           // Draw line to parent bone.
-          if (bone.parentIndex >= 0 && bone.parentIndex < props.bones.length) {
-            const parent = props.bones[bone.parentIndex];
+          if (bone.parentIndex >= 0 && bone.parentIndex < bones.length) {
+            const parent = bones[bone.parentIndex];
             if (parent) {
               const points = [
                 new three.Vector3(bone.position[0], bone.position[1], bone.position[2]),
@@ -357,7 +405,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       handleRef.current?.dispose();
       handleRef.current = null;
     };
-  }, [props.boundingBox, props.boneCount, props.meshCount, meshData]);
+  }, [props.boundingBox, props.boneCount, props.meshCount, meshData, skeletonBones]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: 300, background: '#1a1d23', borderRadius: 4 }}>

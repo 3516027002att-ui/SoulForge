@@ -1240,6 +1240,20 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
 
+  handle('resource.readFlverSkeleton', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 骨骼层级。', sourceUri }] };
+    }
+    const result = await runBridge<Record<string, unknown>>({
+      command: 'read-flver-skeleton',
+      filePath: file.absolutePath,
+      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      timeoutMs: 120_000
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
   handle(
     'resource.applyMsbMutation',
     async (
