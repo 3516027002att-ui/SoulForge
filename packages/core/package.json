@@ -54,6 +54,7 @@
     "test:param-msb-write-ipc-contract": "tsc -b ../shared . && node dist/testing/runParamMsbWriteIpcContractSmoke.js",
     "test:desktop-live-editor-contract": "tsc -b ../shared . && node dist/testing/runDesktopLiveEditorContractSmoke.js",
     "test:release-editor-acceptance": "tsc -b ../shared . && node dist/testing/runReleaseEditorAcceptanceSmoke.js",
+    "test:param-metadata-native": "tsc -b ../shared . && node dist/testing/runParamMetadataNativeSmoke.js",
     "test:param-duplicate-native": "tsc -b ../shared . && node dist/testing/runParamDuplicateNativeSmoke.js",
     "test:scene-asset-inventory": "tsc -b ../shared . && node dist/testing/runSceneAssetInventorySmoke.js",
     "test:flver-candidate": "tsc -b ../shared . && node dist/testing/runFlverCandidateSmoke.js",
