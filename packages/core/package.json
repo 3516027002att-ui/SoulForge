@@ -15,6 +15,7 @@
     "test:bridge-daemon-crash": "tsc -b ../shared . && node dist/testing/runBridgeDaemonCrashSmoke.js",
     "test:sqlite-crash-recovery": "tsc -b ../shared . && node dist/testing/runSqliteCrashRecoverySmoke.js",
     "test:writer-failure-matrix": "tsc -b ../shared . && node dist/testing/runWriterFailureMatrixSmoke.js",
+    "test:standalone-writer-failure-matrix": "tsc -b ../shared . && node dist/testing/runStandaloneWriterFailureMatrixSmoke.js",
     "test:bridge-staging": "tsc -b ../shared . && node dist/testing/runBridgeStagingSmoke.js",
     "test:bridge-recovery-harness": "tsc -b ../shared . && node dist/testing/runBridgeRecoveryHarnessSmoke.js",
     "test:release-corpus-registry": "tsc -b ../shared . && node dist/testing/runReleaseCorpusRegistrySmoke.js",
