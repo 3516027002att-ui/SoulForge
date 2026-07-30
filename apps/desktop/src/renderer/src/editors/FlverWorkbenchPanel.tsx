@@ -156,6 +156,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
           </div>
           <div style={{ marginTop: 12 }}>
             <FlverViewer
+              sourceUri={props.resourceUri}
               boundingBox={data.boundingBox as { min: number[]; max: number[] } | undefined}
               boneCount={data.boneCount}
               meshCount={data.meshCount}
