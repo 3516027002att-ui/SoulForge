@@ -919,6 +919,12 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 | `W-REL-F-ACCEPT-01` | `completed` | `candidate` | — | `REL-F` | 已建立已批准编辑器 inventory、authority/revision/typed mutation、完整有界访问与提前 pass 失败关闭 harness | 不运行真实 Electron 真实文档功能验收；不以 synthetic/demo 或固定窗口冒充完整访问；不要求量化容量/延迟门槛 | `packages/core/src/editing/releaseEditorAcceptance.ts`、`packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract` | cap=`candidate`；harness 不等于编辑器发布通过 |
 | `W-REL-F-SCALE-02` | `ready` | `candidate` | — | `REL-F` | 逐项关闭当前五个编辑器的 bounded-window/eager 访问缺口，扩展到八个语义编辑器并完成真实 Electron 文档功能闭环 | 当前 `candidate` 只继承 acceptance harness 对缺口的分类；无需用户裁定容量、延迟、规模档位或 benchmark 阈值 | `packages/core/src/editing/editorCapabilityContract.ts`、各编辑器 controller/projection、`releaseEditorAcceptance.ts` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract`；`validation-unfrozen`：真实文档完整有界访问与 Electron functional smoke | cap=`partial`；只提升实际完成的编辑器功能，不以取消量化门槛代替真实验收 |
 | `W-REL-COMPLIANCE-01` | `completed` | `partial` | — | `REL-COMPLIANCE` | 许可证文本覆盖完成：123 present / 0 metadata-only / 49 not-installed（可选平台包）；补充许可证目录 licenses/；NSIS 安装包构建成功（SoulForge-0.0.0-x64.exe, 117.7 MB）；electron-builder 配置修复 | 不提交真实资产、用户 Mod、私有 corpus 或凭据 | `scripts/release-compliance-lib.mjs`、`licenses/`、`apps/desktop/electron-builder.json`、`apps/desktop/package.json` | `npm run test:release-compliance-fixtures`、`npm run test:release-content`、`npm run build` | cap=`partial`；不声明 notices、安装包或签名发布通过 |
+| `W-A-RECOVERY-NATIVE-03` | `ready` | `partial` | — | `A-RECOVERY` | 继续对 EMEVD/MSB writer 做真实故障矩阵（stage/validate/commit/re-read），扩展 BND4/FMG/PARAM 已覆盖的 12 case | `W-A-RECOVERY-NATIVE-02` 已完成；未覆盖 writer 继续失败关闭 | `runNativeWriterFailureMatrixSmoke.ts`、Bridge EMEVD/MSB writer | `npm run test:native-writer-failure-matrix` | cap=`partial`；仅提升实际覆盖 writer |
+| `W-REL-B-CORPUS-02` | `ready` | `partial` | — | `REL-B` | 继续 KRAK 内 BND4 组合 mutation/repack 矩阵、未知字段保持和完整 corpus 写回验证 | `W-REL-B-CORPUS-01` 已完成 KRAK 重压/写回；registry 继续失败关闭 | `scripts/verify-native-dcx-documents.mjs`、Bridge writer | `npm run bridge:verify:dcx-documents` | cap=`native-verified`；只覆盖实际执行的 corpus 操作 |
+| `W-EMEVD-FMG-PARAM-03` | `ready` | `partial` | — | `C-EMEVD` / `C-PARAM` | 继续 FMG 全语言 mutation、全部 ParamType 写入、登记 MSB 实体编辑、引用完整性和回滚验证 | `W-EMEVD-PATCHIR-02` 已完成；未知字段/layer 继续失败关闭 | Bridge FMG/PARAM/MSB writer、Patch Engine | `npm run bridge:verify:fmg`、`npm run bridge:verify:param`、`npm run bridge:verify:msb` | cap=`partial`；只覆盖实际完成的 mutation 路径 |
+| `W-AI-CONFORMANCE-03` | `ready` | `partial` | — | `G-AGENT` | 继续真实工作区 production typed mutation 多步矩阵（propose→stage→validate→commit→rollback）通过 agent loop | `W-AI-CONFORMANCE-02` 已完成错误/取消/超时/限额；不要求真实 provider 凭据 | `packages/core/src/model-services`、`packages/core/src/ai-tools/scaffoldToolRegistry.ts` | `npm run test:ai-conformance`、`npm run test:ai-fake-loop` | cap=`partial`；离线 conformance 不证明第三方服务可用性 |
+| `W-ME3-INSTALL-04` | `ready` | `partial` | — | `H-RUNTIME` | 继续 NSIS 安装/升级/卸载验证、真实 Sekiro 会话 launch/terminate 和回滚后重启 | `W-ME3-PROFILE-03` 已完成 profile/launch/terminate adapter；不要求代码签名 | `apps/desktop/electron-builder.json`、`apps/desktop/src/main/me3RuntimeGateway.ts` | `npm run test:me3-runtime-adapter`、NSIS installer lifecycle | cap=`partial`；只提升实际验证的运行操作 |
+| `W-REL-COMPLIANCE-02` | `ready` | `partial` | — | `REL-COMPLIANCE` | 继续 NSIS installer lifecycle 验证（安装/升级/卸载/干净目标）、package tree 内容扫描和 manifest/hash 完整性 | `W-REL-COMPLIANCE-01` 已完成许可证文本和 NSIS 构建；不要求代码签名 | `apps/desktop/electron-builder.json`、`scripts/release-compliance-lib.mjs` | `npm run test:release-compliance-fixtures`、`npm run test:release-content` | cap=`partial`；不声明外部分发或签名发布通过 |
 
 ### 13.1.1 Active claim 注册表
 
@@ -3023,16 +3029,16 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 | Gate ID | capability | 当前切片 | gateState | applicability | Evidence/blockerRefs | 后继要求 |
 |---|---|---|---|---|---|---|
 | `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-04` | `passed` | `in-scope` | `EV-REL-SCOPE-20260730-NO-QUANT-BUDGETS` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、功能性渲染验收、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界继续冻结 |
-| `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-NATIVE-02` | `open` | `in-scope` | — | 合法仓库外 registry 与部分 native matrix 已可执行；继续对尚未覆盖的 production writer 做真实故障矩阵，不再等待用户提供 corpus |
-| `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-01` | `open` | `in-scope` | — | 当前登记 corpus 已 100% 分类并完成 DFLT/BND4 no-op/CRUD 与 KRAK read；继续 KRAK 内组合、重压、写回、重读、恢复和未知字段保持 |
-| `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-PATCHIR-02` | `open` | `in-scope` | — | 当前推进 typed proposal -> Bridge/PatchIR；后续仍需 FMG 全语言、全部 ParamType/EMEVD、登记 MSB 实体、引用、回滚与游戏加载切片 |
+| `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-NATIVE-03` | `open` | `in-scope` | — | BND4/FMG/PARAM 12 case 已通过；继续 EMEVD/MSB writer 故障矩阵 |
+| `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-02` | `open` | `in-scope` | — | KRAK 重压/写回/roundtrip 已完成；继续组合 mutation/repack 和完整 corpus 验证 |
+| `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-FMG-PARAM-03` | `open` | `in-scope` | — | EMEVD DSL plan→Bridge 已完成；继续 FMG 全语言、全部 ParamType、MSB 实体和回滚 |
 | `REL-D` | 行为动画范围 | `W-BEHAVIOR-MAP-01` | `open` | `in-scope` | — | 本机 corpus 已提供 TAE/HKX/Lua 容器级 inventory；由工程方继续定位 ESD 并完成完整 parser、语义编辑器、writer 与游戏加载矩阵 |
 | `REL-E` | 资产只读与导出矩阵 | `W-FLVER-READ-01` | `open` | `in-scope` | — | 本机 corpus 已提供 FLVER/TPF 容器级 inventory；由工程方继续定位 MTD/collision/navigation并完成五类 native 只读、引用与 native-to-open 导出闭环 |
 | `REL-F` | 编辑器验收 | `W-REL-F-SCALE-02` | `open` | `in-scope` | — | 从五个候选扩展为八个语义编辑器，关闭结构化 UI/DSL/只读 Hex/完整有界访问缺口并完成 Electron 真实文档功能验收；不要求量化容量/延迟门槛 |
-| `REL-G` | 双协议 AI | `W-AI-CONFORMANCE-02` | `open` | `in-scope` | — | 完成确定性本地双协议 conformance、空配置诊断、typed mutation 权限/限额/取消/审计与真实工作区多步任务；不要求真实 provider 凭据 |
-| `REL-H` | 安装与运行 | `W-ME3-PROFILE-03` | `open` | `in-scope` | — | production detection gateway 已完成；继续 profile/launch/log/diagnostics/terminate/rollback-restart、NSIS manifest/hash、安装/升级/卸载与真实 Sekiro 会话；不要求代码签名 |
+| `REL-G` | 双协议 AI | `W-AI-CONFORMANCE-03` | `open` | `in-scope` | — | 错误/取消/超时/限额 10 case 已完成；继续真实工作区多步 typed mutation 矩阵 |
+| `REL-H` | 安装与运行 | `W-ME3-INSTALL-04` | `open` | `in-scope` | — | profile/launch/terminate adapter 已完成；继续 NSIS 安装/升级/卸载和真实 Sekiro 会话 |
 | `REL-I` | 渲染功能闭环 | `W-RENDER-FUNCTIONAL-02` | `open` | `in-scope` | — | 在项目所有者当前机器完成真实 semantic scene 的 WebGPU capability 主路径、WebGL2 功能回退、picking、transform 更新与资源释放；不要求硬件档位或性能预算 |
-| `REL-COMPLIANCE` | 内部测试构建合规 | `W-REL-COMPLIANCE-01` | `open` | `in-scope` | — | 验证 NSIS 实际 package tree、installer manifest/hash、所有者控制目标与内容扫描；持续跟踪 notices 并禁止任何外部分发，不要求代码签名 |
+| `REL-COMPLIANCE` | 内部测试构建合规 | `W-REL-COMPLIANCE-02` | `open` | `in-scope` | — | 许可证文本 complete + NSIS 构建已完成；继续 installer lifecycle 验证和 package tree 扫描 |
 
 后继要求列不是第二套进度口径；它只提示同一 Gate 在既有切片完成后仍需的下游切片。补货规则见 `docs/AGENT_EXECUTION_PLAYBOOK.md` §8，全阻塞终局见其 §9。
 
