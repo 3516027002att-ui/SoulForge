@@ -8,6 +8,7 @@ export interface FlverViewerProps {
   meshCount?: number;
   bones?: Array<{ name: string; position: [number, number, number]; parentIndex: number }> | undefined;
   textureBase64?: string | undefined;
+  boneWeightsBase64?: string | undefined;
 }
 
 interface MeshData {
@@ -177,6 +178,34 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           });
           const mesh = new three.Mesh(geometry, material);
           scene.add(mesh);
+
+          // Add bone weight visualization if available.
+          // Bone weights are stored as 4 bytes per vertex (4 bone influences).
+          // Visualize as vertex colors: red = high weight, blue = low weight.
+          if (props.boneWeightsBase64) {
+            try {
+              const weightBytes = Uint8Array.from(atob(props.boneWeightsBase64), (c) => c.charCodeAt(0));
+              const vertexCount = positions.length / 3;
+              const colors = new Float32Array(vertexCount * 3);
+              for (let v = 0; v < vertexCount; v++) {
+                // Sum the 4 bone weights for this vertex.
+                const w0 = weightBytes[v * 4] ?? 0;
+                const w1 = weightBytes[v * 4 + 1] ?? 0;
+                const w2 = weightBytes[v * 4 + 2] ?? 0;
+                const w3 = weightBytes[v * 4 + 3] ?? 0;
+                const totalWeight = (w0 + w1 + w2 + w3) / 255;
+                // Color: red (high weight) to blue (low weight).
+                colors[v * 3] = totalWeight; // R
+                colors[v * 3 + 1] = 0.2; // G
+                colors[v * 3 + 2] = 1 - totalWeight; // B
+              }
+              geometry.setAttribute('color', new three.BufferAttribute(colors, 3));
+              material.vertexColors = true;
+              material.needsUpdate = true;
+            } catch {
+              // Bone weight decode failed; skip visualization.
+            }
+          }
 
           // Also add wireframe overlay.
           const wireMaterial = new three.MeshBasicMaterial({
