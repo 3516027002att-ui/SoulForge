@@ -460,10 +460,12 @@ V0.5 冻结目标要求在相同合法 runtime 边界内完成登记 KRAK 布局
 - 游戏适配包内 metadata 版本；
 - 用户 overlay 与冲突诊断。
 
+V0.5 的批准来源冻结为 Smithbox `2.2.4` 中随官方发行包提供的 Sekiro `SDT` PARAM 资产：Git tag/commit `1b46d2c9f82d1c3635ff7c12c526e05a8ba4208f`，发行包 SHA-256 `14a7fd735a9577249fa93655f63d1e9ac025a3b00d7c5bed8badc8a3a7fd489d`，路径 `Smithbox.Release/Output/Assets/PARAM/SDT`。SoulForge 只从用户本机取得的该固定发行包导入并内容寻址，不把导入数据提交或打进 SoulForge 安装包。Smithbox 仓库与发行包带有 MIT 正文，但其提交历史显示部分数据来自未单独声明 LICENSE 的 Paramdex；因此本裁定不把 Smithbox 根许可证外推成对全部上游数据的再分发保证。源不存在、版本或 digest 不匹配时 PARAM 语义 metadata 失败关闭。
+
 仍缺：
 
 - 旧 header-embedded type name 变体；
-- 合法、可再分发且版本固定的 Paramdex-compatible metadata 来源与许可证正文；
+- 上述固定 Smithbox 本机导入 adapter、source/license manifest、升级/撤回与不匹配失败关闭 smoke；
 - 公开 metadata contract 与注册 native PARAM row document 的一致性验证；
 - 完整字段级 writer 与引用验证；
 - 全 corpus 与真实游戏验证。
@@ -642,7 +644,7 @@ V0.5 冻结交付清单为 BND4、FMG、PARAM、EMEVD、MSB、TAE、ESD、脚本
 
 状态：`partial / production unverified`
 
-证据：`EV-G-FAKE-7BD`；只有 fake/contract 证据，没有真实模型服务 authority。
+证据：`EV-G-FAKE-7BD`；当前只有 fake/contract 证据。V0.5 不要求真实模型账号或凭据，配置默认允许留空。
 
 已有：
 
@@ -656,14 +658,15 @@ V0.5 冻结交付清单为 BND4、FMG、PARAM、EMEVD、MSB、TAE、ESD、脚本
 
 仍缺：
 
-- 真实 OpenAI-compatible 与 Anthropic-compatible 手工 smoke；
+- OpenAI-compatible 与 Anthropic-compatible 两套离线协议一致性、错误、取消、限额与审计矩阵；
+- 凭据留空时的明确 `unconfigured` 诊断和禁止网络调用验证；
 - 完整 Context Broker / evidence bundle；
 - production typed tool registry；
 - outbound context 审计和内容最小化；
 - 真实工作区多步 Agent 任务；
 - 错误恢复、取消、限额和模型服务迁移。
 
-AI 无充分证据时必须返回 `insufficient_evidence`。任何模型服务都不能绕过 Patch Engine、native validator、备份、审计和回滚。
+AI 无充分证据时必须返回 `insufficient_evidence`。任何模型服务都不能绕过 Patch Engine、native validator、备份、审计和回滚。真实 provider endpoint/key 可由所有者日后选择配置，但不是 V0.5 验收输入；仓库、安装包和默认配置均保持空值且不得内置凭据。
 
 ---
 
@@ -733,8 +736,8 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 - 安装包内 Bridge、自包含 .NET 和 native binding 验证；
 - me3 启动链；
 - 真实 Sekiro Mod 加载、回滚和再次启动；
-- 真实模型服务循环；
-- 完整性能门槛。
+- 双协议离线 conformance、空配置诊断与真实工作区 typed mutation 循环；
+- WebGPU/WebGL2 功能回退闭环。
 
 `skipped` 和 `unverified-no-local-sekiro-runtime` 不能算通过。
 
@@ -809,7 +812,7 @@ interface RendererBackend {
 }
 ~~~
 
-### 性能路线
+### 性能工程路线（不属于 V0.5 验收）
 
 需要逐步具备：
 
@@ -826,7 +829,7 @@ interface RendererBackend {
 
 ### 是否需要原生 Vulkan / D3D 后端
 
-不提前拍脑袋决定。先用真实 Sekiro 大地图测量：
+V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端决策。后续若项目所有者主动扩展性能范围，可以测量：
 
 - 首次打开与后台加载时间；
 - 稳态内存与显存；
@@ -836,13 +839,13 @@ interface RendererBackend {
 - 多次打开关闭后的资源泄漏；
 - WebGPU 与 WebGL2 差异。
 
-只有真实证据表明：
+只有后续独立范围中的真实证据表明：
 
 - WebGPU 下仍无法达到可接受交互性能；
 - JS/GC 成为无法规避的主要瓶颈；
 - 原生纹理、上传、picking 或显存控制受到硬限制；
 
-才增加独立 `NativeRenderHost`。即使增加原生后端，也必须复用 semantic scene、render packet、资源缓存协议和 typed mutation，不能推翻上层架构。
+才考虑增加独立 `NativeRenderHost`。即使未来增加原生后端，也必须复用 semantic scene、render packet、资源缓存协议和 typed mutation，不能推翻上层架构。V0.5 的渲染验收仅要求在项目所有者当前机器上完成 WebGPU 能力探测、可用时的主路径，以及不可用/初始化失败时的 WebGL2 功能回退；不设 FPS、帧时间、RAM、显存或泄漏量化门槛。
 
 ---
 
@@ -858,16 +861,16 @@ interface RendererBackend {
 | B KRAK | `partial` | `EV-B-KRAK-20260724` | 已有单注册样本解压 preview；缺发布 corpus、重压与 writer |
 | B 发布 corpus contract | `fixture-confirmed` | `EV-HANDOFF-LIVENESS-20260725`、`EV-PUBLIC-CONTRACTS-20260725` | metadata-only registry/classification harness 已完成；不包含真实 corpus 或 native authority |
 | C FMG | `native-verified / partial` | `EV-C-FMG-7BD` historical | 多语言、多 msgbnd、引用与游戏加载 |
-| C PARAM | `partial` | `EV-C-PARAM-7BD` historical、`EV-PUBLIC-CONTRACTS-20260725` | metadata package/match/overlay contract 已 `fixture-confirmed`；仍缺合法可分发来源、旧布局、native 一致性和完整字段 writer |
+| C PARAM | `partial` | `EV-C-PARAM-7BD` historical、`EV-PUBLIC-CONTRACTS-20260725` | metadata package/match/overlay contract 已 `fixture-confirmed`；Smithbox 2.2.4 本机导入来源已裁定，仍缺 adapter、旧布局、native 一致性和完整字段 writer |
 | C EMEVD | `partial` | `EV-C-EMEVD-DSL-20260724`、`EV-PRIVATE-20260724` | DSL proposal compiler 已 `fixture-confirmed`；仍缺 layer 变体、完整 EMEDF/control-flow、Bridge/PatchIR 接线和全 corpus |
 | C MSB | `partial` | `EV-C-MSB-SCENE-20260724`、`EV-C-MSB-7BD` historical | 四类实体 preview 已进入稳定 revision/identity scene IR；仍缺全实体 CRUD、引用修复、完整非截断 scene projection |
 | D 行为与动画 | `not-started` | 无实现证据 | Sekiro corpus 和格式地图 |
 | E 场景与资产 | `partial / candidate` | `EV-E-ASSET-7BD` historical | FLVER/TPF/MTD native authority 和转换 |
 | F 专业编辑器 | `partial / acceptance candidate` | `EV-F-EDITORS-7BD` historical、`EV-HANDOFF-LIVENESS-20260725`、`EV-PUBLIC-CONTRACTS-20260725` | 候选 inventory/contract harness 已完成；仍缺真数据完整接线、规模 instrumentation、人机验收和行为/动画编辑器 |
-| G AI Agent | `partial / production unverified` | `EV-G-FAKE-7BD` | 真实模型服务、Context Broker、生产工具循环 |
-| H me3 运行 | `fixture-confirmed / contract-only` | `EV-PUBLIC-CONTRACTS-20260725` | adapter/detect contract 已验证；仍缺 production main gateway、profile/launch/diagnostics/terminate 和真实 me3/Sekiro |
-| H 发行 | `partial / unverified` | `EV-REL-COMPLIANCE-20260725`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-H-GATES-7BD` historical | 内容/许可证 inventory、严格配置、受控 subprocess 与同机可复现构建已验证；仍缺完整 notices、实际打包、签名、安装、更新和真实 Sekiro gate |
-| I 渲染 | `partial / high-risk validation` | `EV-C-MSB-SCENE-20260724`、`EV-I-RENDER-7BD` historical | shared render packet 与 production bundle WebGL proxy 已验证；仍缺真实 FLVER、大地图 WebGPU 基准、后端抽象 |
+| G AI Agent | `partial / production unverified` | `EV-G-FAKE-7BD` | 离线双协议一致性、Context Broker、生产工具循环；真实 provider 凭据不属于 V0.5 验收 |
+| H me3 运行 | `fixture-confirmed / contract-only` | `EV-PUBLIC-CONTRACTS-20260725` | adapter/detect contract 已验证；官方 me3 0.12.1 本机 CLI 已校验，仍缺 production main gateway、profile/launch/diagnostics/terminate 和真实 Sekiro 会话 |
+| H 发行 | `partial / unverified` | `EV-REL-COMPLIANCE-20260725`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-H-GATES-7BD` historical | 内容/许可证 inventory、严格配置、受控 subprocess 与同机可复现构建已验证；仍缺完整 notices、实际打包、安装、升级和真实 Sekiro gate；签名不属于验收 |
+| I 渲染 | `partial` | `EV-C-MSB-SCENE-20260724`、`EV-I-RENDER-7BD` historical | shared render packet 与 production bundle WebGL proxy 已验证；仍缺真实 FLVER、WebGPU capability path 与 WebGL2 功能回退，代表性硬件/性能预算不属于 V0.5 验收 |
 
 可以并行推进的典型方向：
 
@@ -891,21 +894,24 @@ interface RendererBackend {
 | `W-A-RECOVERY-HARNESS-02` | `completed` | `fixture-confirmed` | — | `A-RECOVERY` | 已建立不加载 native 资产的 deterministic Bridge recovery/staging harness，覆盖四阶段故障、出站失败、注册期取消、超时、取消、同步/异步 progress、终态竞态、背压、进程退出、显式重启和 11 个代表性不安全 staging path segment case | 复用受控 subprocess 与系统临时目录；fake child 不得写成 native writer 通过 | `packages/core/src/bridge/bridgeDaemonClient.ts`、`packages/core/src/editing/bridgeStaging.ts`、`packages/core/src/testing/bridgeRecoveryHarnessProtocol.ts`、`packages/core/src/testing/bridgeRecoveryFixtureDaemon.ts`、`packages/core/src/testing/runBridgeRecoveryHarnessSmoke.ts` | `npm run test:bridge-recovery-harness`、`npm run test:bridge-staging`、`npm run bridge:verify:client` | cap=`fixture-confirmed`；只证明公开故障编排与 client/staging 失败关闭 |
 | `W-A-RECOVERY-NATIVE-02` | `blocked` | `unverified` | `BLK-NATIVE-FIXTURE-CORPUS` | `A-RECOVERY` | 将已冻结 harness 应用于其余 production native writer 的真实 stage/validate/commit/re-read/crash 矩阵 | 合法仓库外 native fixture registry；`W-A-RECOVERY-HARNESS-02` 已完成 | 对应 Bridge writer、`runNativeWriterFailureMatrixSmoke.ts`、Patch Engine | `npm run test:native-writer-failure-matrix` 与对应 native transaction smoke | cap=`partial`；仅提升实际覆盖 writer |
 | `W-PARAM-META-01` | `completed` | `fixture-confirmed` | — | `C-PARAM` | 已冻结 Paramdex-compatible metadata package、许可证 manifest、不可变来源、digest、五键匹配、精确 trust policy、display-only overlay、隔离快照、容量上限与冲突诊断契约 | 不捆绑或再分发 Paramdex 数据；不把 metadata 当 native row document；本切片不要求私有 PARAM | `packages/shared/src/paramdef.ts`、`packages/core/src/param/paramMetadata.ts`、`packages/core/src/param/paramdefLayout.ts`、`packages/core/src/testing/runParamMetadataMismatchSmoke.ts` | `npm run test:param-metadata-mismatch`、`npm run test:paramdef-layout` | cap=`partial`；metadata contract，不提升 PARAM writer |
-| `W-PARAM-META-SOURCE-02` | `blocked` | `unverified` | `BLK-PARAM-METADATA-SOURCE` | `C-PARAM` | 选择并接入合法、可再分发、版本与内容寻址固定的 Paramdex-compatible metadata 来源，建立更新和撤回策略 | `W-PARAM-META-01` 已完成；来源许可证正文、再分发权限、immutable revision 和维护状态均须可审计 | `packages/core/src/param/paramMetadata.ts`、未来游戏适配 metadata package/ingestion | `validation-unfrozen`：source ingestion、license manifest、升级/撤回 smoke | cap=`partial`；只提升获批 metadata 来源，不提升 native PARAM authority |
-| `W-PARAM-META-NATIVE-01` | `blocked` | `unverified` | `BLK-NATIVE-FIXTURE-CORPUS`、`BLK-PARAM-METADATA-SOURCE` | `C-PARAM` | 在合法注册 PARAM corpus 上验证 metadata 严格匹配、拒绝规则和 native row document 一致性 | `W-PARAM-META-01` 与获批 metadata source 完成；合法仓库外 PARAM fixture registry | `bridge/SoulForge.Bridge/ParamNativeDocument.cs`、native fixture registry | `npm run bridge:verify:param` 加 registry hash/assertion | cap=`partial`；只覆盖注册 PARAM 布局 |
+| `W-PARAM-META-SOURCE-02` | `ready` | `unverified` | — | `C-PARAM` | 接入固定 Smithbox 2.2.4 本机发行包中的 `SDT` PARAM metadata，校验 commit/release digest、隔离导入、license/provenance manifest、升级与撤回；不随 SoulForge 再分发导入数据 | `W-PARAM-META-01` 已完成；来源、revision、发行包 digest、目录边界与非再分发政策均已由用户裁定 | `packages/core/src/param/paramMetadata.ts`、未来 Smithbox local-source adapter/ingestion | `validation-unfrozen`：source ingestion、digest/license manifest、缺失/错版/升级/撤回 smoke | cap=`partial`；只提升固定本机来源 adapter，不提升 native PARAM authority或上游再分发权利 |
+| `W-PARAM-META-NATIVE-01` | `blocked` | `unverified` | `BLK-NATIVE-FIXTURE-CORPUS` | `C-PARAM` | 在合法注册 PARAM corpus 上验证 metadata 严格匹配、拒绝规则和 native row document 一致性 | `W-PARAM-META-01` 与固定 Smithbox 本机来源 adapter 完成；合法仓库外 PARAM fixture registry | `bridge/SoulForge.Bridge/ParamNativeDocument.cs`、native fixture registry | `npm run bridge:verify:param` 加 registry hash/assertion | cap=`partial`；只覆盖注册 PARAM 布局 |
 | `W-EMEVD-DSL-01` | `completed` | `fixture-confirmed` | — | `C-EMEVD` | 已建立稳定 anchor、DSL tokenizer/parser/AST、规范 patch render、EMEDF typecheck 与确定性 typed mutation plan；本切片验收边界已完成 | 复用 `emevd-editor-ir` 与独立 `emevd-dsl` DTO；未知指令和不可无损重编码 payload 失败关闭/保持 opaque | `packages/shared/src/emevd-dsl.ts`、`packages/core/src/emevd/dslTokenizer.ts`、`packages/core/src/emevd/dslParser.ts`、`packages/core/src/emevd/dslCompiler.ts`、`packages/core/src/emevd/dslRenderer.ts`、`packages/core/src/emevd/stableIdentity.ts` | `npm run test:emevd-dsl-compiler`、`npm run test:emedf-schema`、`npm run test:emevd-four-view` | cap=`fixture-confirmed`；Bridge/PatchIR 与完整控制流进入后继切片 |
 | `W-EMEVD-PATCHIR-02` | `ready` | `unverified` | — | `C-EMEVD` | 将已 typecheck 的 DSL typed mutation proposal 接入 Bridge-authored native document 与 PatchIR 事务，覆盖重读、审计和回滚，不直接覆盖二进制 | `W-EMEVD-DSL-01` 已完成；未知指令、opaque 尾部和 layer 变体不得被重编码；所有写入继续经过 Patch Engine | `packages/shared/src/emevd-editor-ir.ts`、`packages/core/src/editing/emevdFourViewController.ts`、`packages/core/src/editing/emevdBridgeCommit.ts`、`bridge/SoulForge.Bridge/EmevdNativeWriter.cs` | `npm run test:emevd-four-view`、`npm run test:emevd-ipc-contract`；`validation-unfrozen`：proposal -> Bridge/PatchIR transaction re-read/rollback smoke | cap=`partial`；仅覆盖实际接线 mutation，不外推完整 EMEDF/layer/game-load |
 | `W-EMEVD-LAYER-01` | `blocked` | `unverified` | `BLK-EMEVD-LAYER-CORPUS` | `C-EMEVD` | 对 `layerCount != 0` 样本建立只读布局证据和 no-op roundtrip；冲突即停止 writer | 合法私有 corpus；工程 wrapper 已可解析兼容 .NET 10 SDK | `bridge/SoulForge.Bridge/EmevdNativeDocument.cs`、`bridge/SoulForge.Bridge/EmevdNativeWriter.cs` | `npm run bridge:verify:emevd` 加带哈希的 corpus case | cap=`partial`；仅声明覆盖到的 layer 变体 |
 | `W-MSB-SCENE-01` | `completed` | `partial` | — | `C-MSB` / `I-RENDER` | 已建立 shared schema v2 semantic scene/render packet、四类 Bridge preview、稳定 identity/revision、chunk、路径防线和 production canvas/picking；本切片验收边界已完成 | entity identity 与 revision 稳定；renderer 无绝对路径 | `packages/shared/src/scene-ir.ts`、`packages/core/src/editing/msbBridgeRead.ts`、`apps/desktop/src/renderer/src/scene/threeSceneController.ts` | `npm run bridge:verify:msb`、`npm run test:scene-draw-list`、`npm run test:three-scene-module` | cap=`partial`；完整实体流式投影、writer、FLVER 或游戏加载进入后继切片 |
 | `W-BEHAVIOR-MAP-01` | `blocked` | `unverified` | `BLK-BEHAVIOR-CORPUS` | `D-BEHAVIOR` | 建立 Sekiro 行为/动画资源清单、magic、容器位置和跨资源候选引用；只读且区分 candidate | 合法 Sekiro corpus；不得套用其他游戏结论 | Bridge inspection、resource graph、未来独立 native document | `validation-unfrozen`：只读 inventory smoke；不得复用 synthetic 冒充 | cap=`candidate`；仅覆盖注册样本 |
 | `W-FLVER-READ-01` | `blocked` | `candidate` | `BLK-ASSET-CORPUS` | `E-ASSET` | 从 header/mesh table candidate 推进到一个明确布局的 vertex/index/material 只读 document 和边界诊断 | 合法 FLVER corpus；布局冲突失败关闭 | `packages/core/src/scene/flverCandidate.ts`、未来 Bridge native document | `npm run test:flver-candidate` 加真实 corpus case、no-op evidence | cap=`partial`；无 writer |
-| `W-AI-REAL-01` | `blocked` | `unverified` | `BLK-MODEL-CREDENTIALS` | `G-AGENT` | 分别完成一个 OpenAI-compatible 和 Anthropic-compatible 的只读工具循环、取消、错误和审计 smoke | 凭据只经 main/safeStorage；固定无写工具 | `packages/core/src/model-services`、`packages/core/src/ai/toolRegistry.ts`、`apps/desktop/src/main/modelServiceCredentials.ts` | `npm run test:ai-fake-loop`、`npm run test:openai-responses`、`validation-unfrozen`：人工真实服务 smoke | cap=`partial`；不证明生产写 Agent |
+| `W-AI-REAL-01` | `superseded` | `unverified` | — | `G-AGENT` | 历史切片原要求两类真实 provider 凭据和人工 live smoke；用户已裁定真实账号/凭据不属于 V0.5 验收，默认配置留空 | 由 `W-AI-CONFORMANCE-02` 取代；不得把取消 live smoke 写成 provider adapter 已完成 | `packages/core/src/model-services`、`apps/desktop/src/main/modelServiceCredentials.ts` | 历史验收不再执行 | cap=`unverified`；不产生功能 authority |
+| `W-AI-CONFORMANCE-02` | `ready` | `unverified` | — | `G-AGENT` | 使用确定性本地 contract servers 验证 OpenAI-compatible 与 Anthropic-compatible 的语义读取、受控 typed mutation、错误、取消、超时、限额、审计和脱敏；空配置返回 `unconfigured` 且不发起网络请求 | 不内置 endpoint/key；写工具仍需 native validator/Patch Engine；真实服务账号不属于 V0.5 验收 | `packages/core/src/model-services`、`packages/core/src/ai/toolRegistry.ts`、`apps/desktop/src/main/modelServiceCredentials.ts` | `npm run test:ai-fake-loop`、`npm run test:openai-responses`；`validation-unfrozen`：Anthropic conformance、空配置与 production typed tool smoke | cap=`partial`；协议 conformance 不证明任何第三方服务可用性 |
 | `W-ME3-ADAPTER-01` | `completed` | `fixture-confirmed` | — | `H-RUNTIME` | 已定义 renderer-independent `GameRuntimeAdapter`、contract-only me3 detect、精确版本 policy、闭集 gateway DTO、超时/取消/竞态、输出上限、异常脱敏和未实现操作失败关闭 | 不实现 Mod loader；不发现或启动真实 me3/Sekiro；匹配 fixture 仍不得启用 profile/launch | `packages/core/src/runtime/gameRuntimeAdapter.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、`packages/core/src/testing/runMe3RuntimeAdapterSmoke.ts` | `npm run test:me3-runtime-adapter` | cap=`fixture-confirmed`；adapter contract only，native runtime authority=false |
-| `W-ME3-MAIN-DETECT-02` | `ready` | `unverified` | — | `H-RUNTIME` | 在 desktop main 实现固定来源、固定 `--version` 行为的 privileged me3 detection gateway，并把脱敏结果接入 core adapter | `W-ME3-ADAPTER-01` 已完成；main 独占真实路径与进程权限；不创建 profile、不启动游戏 | `apps/desktop/src/main/ipc.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、未来 main-owned gateway module | `npm run test:desktop-security`、`npm run test:me3-runtime-adapter`；`validation-unfrozen`：main gateway discovery/version-probe smoke | cap=`fixture-confirmed`；只证明受限 production detection gateway，不证明 runtime 可用 |
-| `W-RENDER-BENCH-01` | `blocked` | `unverified` | `BLK-RENDER-HARDWARE` | `I-RENDER` | 在代表性 Sekiro 大地图集合上采集 WebGPU/WebGL2 加载、帧时间、picking、内存、显存和泄漏基线 | 完整只读 scene projection；真实硬件记录；采集不以前置阈值裁定为条件 | `packages/core/src/scene`、`apps/desktop/src/renderer/src/scene` | `npm run test:performance-baseline` 加真实 benchmark report | cap=`partial`；只产生基线，不自行设定发布阈值 |
+| `W-ME3-MAIN-DETECT-02` | `ready` | `unverified` | — | `H-RUNTIME` | 在 desktop main 实现固定来源、固定 `--version` 行为的 privileged me3 detection gateway，并把脱敏结果接入 core adapter | `W-ME3-ADAPTER-01` 已完成；官方 me3 0.12.1 Windows 便携包已按发布 SHA-256 在本机验证；main 独占真实路径与进程权限；本切片不启动游戏 | `apps/desktop/src/main/ipc.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、未来 main-owned gateway module | `npm run test:desktop-security`、`npm run test:me3-runtime-adapter`；`validation-unfrozen`：main gateway discovery/version-probe smoke | cap=`fixture-confirmed`；只证明受限 production detection gateway，不证明 runtime 会话可用 |
+| `W-RENDER-BENCH-01` | `superseded` | `unverified` | — | `I-RENDER` | 历史切片原要求代表性硬件/地图与量化性能基线；用户已裁定其不属于 V0.5 验收 | 由 `W-RENDER-FUNCTIONAL-02` 取代；性能优化可独立推进但不得恢复为隐含 Gate | `packages/core/src/scene`、`apps/desktop/src/renderer/src/scene` | 历史验收不再执行 | cap=`unverified`；不产生渲染 authority |
+| `W-RENDER-FUNCTIONAL-02` | `ready` | `partial` | — | `I-RENDER` | 在项目所有者当前机器上完成 renderer-independent scene、WebGPU capability 主路径、WebGL2 初始化失败回退、picking、transform 更新与资源释放的功能闭环 | 真实 native semantic scene/FLVER projection；不要求代表性硬件档位、地图集合、性能预算或 benchmark threshold | `packages/core/src/scene`、`apps/desktop/src/renderer/src/scene` | `npm run test:scene-draw-list`、`npm run test:three-scene-module`；`validation-unfrozen`：WebGPU/WebGL2 functional fallback smoke | cap=`partial`；只证明当前所有者机器功能闭环，不外推性能或硬件兼容矩阵 |
 | `W-REL-SCOPE-01` | `completed` | `unverified` | — | `REL-SCOPE` | 已产出唯一、可 JSON 解析且覆盖 11 个 Gate 的 V0.5 支持范围提案；artifact validation 为 `proposal-valid`，用户裁定仍开放 | 只综合现有证据；私有 fixture registry 不得冒充 release corpus；不擅自裁定范围值 | 本文 §4~§12 与 §18.1~§18.2.1；`scripts/verify-release-scope.mjs` | `npm run test:release-scope-proposal` exit 0；严格模式必须因待用户裁定 exit 1 | cap=`unverified`；提案合法不等于范围获批或 Gate 完成 |
 | `W-REL-SCOPE-RULING-01` | `completed` | `unverified` | — | `REL-SCOPE` | 用户已逐项批准 §18.2.1 的 27 项支持矩阵、Sekiro 1.6 版本族、八个语义编辑器、只读 Hex、内部签名测试构建与 unsupported 边界；严格范围门禁和 sealed Evidence 已完成 | `W-REL-SCOPE-01` 已完成；批准记录使用脱敏 decisionRef；技术缺口继续由后继 Gate/blocker 失败关闭 | 本文 §18.2.1、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只完成范围 Gate，不提升任何功能 authority |
 | `W-REL-SCOPE-RULING-02` | `completed` | `unverified` | — | `REL-SCOPE` | 用户撤销代码签名验收项；V0.5 当前发行目标为 Windows 10/11 x64 NSIS，仅限项目所有者控制的内部测试机器，允许未签名且仍强制 manifest/hash、内容扫描、安装、升级、卸载和 runtime 完整性验证 | `W-REL-SCOPE-RULING-01` 已完成；只修改签名要求，portable、自动更新和外部分发仍为 unsupported | 本文 §11、§18.1、§18.2.1、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730-UNSIGNED` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只更新范围 Gate，不提升任何功能或发行 authority |
+| `W-REL-SCOPE-RULING-03` | `completed` | `unverified` | — | `REL-SCOPE` | 用户批准固定 Smithbox 2.2.4 本机 PARAM metadata 导入，并明确真实模型凭据留空、代表性渲染硬件/性能预算不属于 V0.5 验收；me3 环境由工程方处理 | `W-REL-SCOPE-RULING-02` 已完成；保持双协议 AI、WebGPU/WebGL2 功能与 me3 运行目标，不把取消外部输入写成能力完成 | 本文 §6、§10~§12、§18.1~§18.4、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只更新范围与责任边界，不提升 PARAM/AI/runtime/render authority |
 | `W-REL-B-REGISTRY-01` | `completed` | `fixture-confirmed` | — | `REL-B` | 已建立不含私有样本内容的 corpus registry schema、分类枚举、metadata-only classification harness，以及格式/变体/重复/数量/路径/伪装等负向诊断 | 不装载或提交私有 corpus；synthetic manifest 不得冒充 release corpus | `packages/core/src/bridge/releaseCorpusRegistry.ts`、`packages/core/src/testing/runReleaseCorpusRegistrySmoke.ts` | `npm run test:release-corpus-registry`、`npm test` | cap=`fixture-confirmed`；不声明真实发布 corpus 闭环 |
 | `W-REL-B-CORPUS-01` | `blocked` | `unverified` | `BLK-REL-B-CORPUS` | `REL-B` | 使用仓库外注册 corpus 完成 DFLT/BND4/KRAK 100% 分类、声明布局闭环和未知字段保持验证 | registry/harness 已完成；合法私有 corpus；工程 wrapper 已可解析兼容 .NET 10 SDK | 仓库外 corpus registry、`scripts/verify-native-dcx-documents.mjs` | `npm run bridge:verify:dcx-documents` 与冻结后的 100% 分类检查 | cap=`native-verified`；只覆盖注册 corpus |
 | `W-REL-F-ACCEPT-01` | `completed` | `candidate` | — | `REL-F` | 已建立候选发布编辑器 inventory、authority/revision/scale contract 与提前 pass 失败关闭 harness | 不运行真实 Electron 人机规模验收；不自行批准清单或阈值 | `packages/core/src/editing/releaseEditorAcceptance.ts`、`packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract` | cap=`candidate`；harness 不等于编辑器发布通过 |
@@ -988,15 +994,16 @@ assertion     # 关键断言与样本范围
 exitSemantics # pass=exit 0 且断言执行；skip/unfrozen 语义明确
 ~~~
 
-面板中尚未冻结的条目（如"source ingestion smoke""新增 inventory smoke""人工真实服务 smoke""main gateway smoke"）必须显式标注 `validation-unfrozen`，不得被当作已可运行验证。它们只有在写成上述四元组、且 script 进入 package.json 后，才算冻结。
+面板中尚未冻结的条目（如"source ingestion smoke""新增 inventory smoke""双协议 conformance smoke""main gateway smoke"）必须显式标注 `validation-unfrozen`，不得被当作已可运行验证。它们只有在写成上述四元组、且 script 进入 package.json 后，才算冻结。
 
 当前显式为 `validation-unfrozen`（需后续冻结）：
 
 - `W-PARAM-META-SOURCE-02`：source ingestion、license manifest、升级/撤回 smoke；
 - `W-EMEVD-PATCHIR-02`：proposal -> Bridge/PatchIR transaction re-read/rollback smoke；
 - `W-BEHAVIOR-MAP-01`：只读 inventory smoke；
-- `W-AI-REAL-01`：人工真实服务 smoke；
+- `W-AI-CONFORMANCE-02`：Anthropic conformance、空配置与 production typed tool smoke；
 - `W-ME3-MAIN-DETECT-02`：main gateway discovery/version-probe smoke；
+- `W-RENDER-FUNCTIONAL-02`：WebGPU/WebGL2 functional fallback smoke；
 - `W-REL-F-SCALE-02`：真实规模 instrumentation report；
 
 `W-A-RECOVERY-HARNESS-02` 的验证已冻结为：
@@ -1208,14 +1215,14 @@ npm run test:native-preview
 | B DFLT/BND4 | `bridge:verify:dcx-documents`、`bridge:verify:bnd4-writer`、`bridge:verify:bnd4-transaction` | 命令实际覆盖的容器布局、mutation 和回滚 | KRAK 内 BND4、新 flags/布局、发布全集 |
 | B KRAK/Oodle | `bridge:verify:oodle` 加合法本机成功路径 | runtime 发现、兼容性和执行到的 KRAK case | 缺 runtime 时的 exit 0 或失败关闭不证明成功路径 |
 | C FMG | `bridge:verify:fmg` | 实际 msgbnd/child/corpus 的读取、mutation、重读和事务 | 其他语言/msgbnd、游戏加载 |
-| C PARAM | `bridge:verify:param`、`test:paramdef-layout`、`test:param-metadata-mismatch`、`test:param-duplicate-native` | 已覆盖 native 布局/raw row，以及不捆绑数据的 metadata package/match/trust/overlay 快照契约 | 合法 Paramdex-compatible 来源与许可证、旧布局、完整字段引用、metadata/native 全 corpus 一致性 |
+| C PARAM | `bridge:verify:param`、`test:paramdef-layout`、`test:param-metadata-mismatch`、`test:param-duplicate-native` | 已覆盖 native 布局/raw row，以及不捆绑数据的 metadata package/match/trust/overlay 快照契约 | 固定 Smithbox 本机来源 adapter、旧布局、完整字段引用、metadata/native 全 corpus 一致性；不证明上游数据可随 SoulForge 再分发 |
 | C EMEVD | `bridge:verify:emevd`、`test:emevd-dsl-compiler`、`test:emedf-schema`、`test:emevd-four-view`、`test:emevd-ipc-contract` | 已覆盖 header/event/instruction/args/mutation、稳定 anchor、DSL parse/typecheck/plan 和 UI 协议 | layer 变体、完整 EMEDF/control-flow、DSL plan 的 Bridge/PatchIR 接线、游戏加载 |
 | C MSB | `bridge:verify:msb`、`test:fmg-msb-ipc-contract`、`test:param-msb-write-ipc-contract` | 已覆盖 model/part/region/event 和 transform mutation | 全实体 CRUD、引用修复、完整场景 |
 | E/I 资产渲染 | `test:asset-import`、`test:asset-writeback`、`test:dds-convert-writeback`、`test:flver-candidate`、`test:performance-baseline` | 开放格式检测、staging、最小 DDS、candidate inventory、synthetic 性能 | FLVER/TPF/MTD authority、真实大地图性能、游戏加载 |
 | F 专业编辑器 | `test:editor-document-store`、`test:hex-scene`、`test:desktop-live-editor-contract`、`test:release-editor-acceptance`、`test:ui-localization` | document/revision/IPC/静态本地化契约；candidate inventory、pending 阈值 schema 与规模访问失败关闭 | 获批发布清单/阈值、真实规模 benchmark、完整 Electron 人机验收或 REL-F |
-| G AI | `test:ai-fake-loop`、`test:openai-responses`、`test:model-service-vault-contract`、`test:vault-encrypt-contract` | fake provider、工具循环、权限和凭据契约 | 真实服务、真实计费/限额、生产多步写任务 |
+| G AI | `test:ai-fake-loop`、`test:openai-responses`、`test:model-service-vault-contract`、`test:vault-encrypt-contract` | fake provider、工具循环、权限和凭据契约 | 尚未冻结的 Anthropic/空配置 conformance 与生产多步写任务；真实服务账号/计费不是 V0.5 验收 |
 | H me3 contract | `test:me3-runtime-adapter` | renderer-safe adapter/detect contract、精确版本 policy、timeout/cancel/竞态和 unsupported 操作失败关闭 | production main gateway、真实 me3 发现、profile/launch/diagnostics/terminate、真实 Sekiro |
-| H 发行/运行 | `test:release-compliance-fixtures`、`test:portable-packaging-config-fixtures`、`test:subprocess-control`、`test:release-content`、`test:release-reproducible`、`test:portable-packaging-gate`、`test:private-native-gate`、`test:section28-sekiro-gate` | 内容/许可证 inventory、严格配置、scratch/subprocess 控制、同机指纹、环境门禁和诚实 partial/skipped | 完整 notices、实际签名安装/升级/更新、跨机复现、真实启动成功；skip 不是 pass |
+| H 发行/运行 | `test:release-compliance-fixtures`、`test:portable-packaging-config-fixtures`、`test:subprocess-control`、`test:release-content`、`test:release-reproducible`、`test:portable-packaging-gate`、`test:private-native-gate`、`test:section28-sekiro-gate` | 内容/许可证 inventory、严格配置、scratch/subprocess 控制、同机指纹、环境门禁和诚实 partial/skipped | 完整 notices、实际 NSIS 安装/升级、跨机复现、真实启动成功；skip 不是 pass，代码签名不属于验收 |
 
 根 `package.json` 是命令入口 authority；本文是命令用途和证据语义 authority。新增或删除相关 script 时必须同步更新本矩阵。
 
@@ -1228,7 +1235,7 @@ npm run test:native-preview
 | `SOULFORGE_NATIVE_FIXTURE_ROOT` | private native gate | 指向私有 fixture 根；不得位于 Git 提交范围，不得记录真实绝对路径 |
 | `SOULFORGE_SCRATCH` | private/packaging/section-28 gate | 可选临时输出根；必须在 Mod 与原版目录之外，可安全清理 |
 | `SOULFORGE_PORTABLE_PACK=1` | portable packaging gate | 显式允许生成 unsigned `--dir` 产物；不等于安装、签名或发布通过 |
-| 模型服务 endpoint/key | desktop main + safeStorage | key 只能由 main 解析；证据记录只写 provider 类型、endpoint 类别和脱敏结果 |
+| 模型服务 endpoint/key | desktop main + safeStorage | V0.5 默认留空且验收不要求真实凭据；如所有者日后自愿配置，key 只能由 main 解析，证据记录只写 provider 类型、endpoint 类别和脱敏结果 |
 
 私有 corpus 必须在仓库外维护注册信息；本文只记录脱敏后的 `registryId`、版本和计数。注册表至少包含：
 
@@ -1351,6 +1358,7 @@ entries[]:
 | `EV-REL-SCOPE-20260725` | `unsealed-record` | V0.5 支持范围提案结构与未裁定失败关闭语义 | `2002076` + 当前工作树 | `node scripts/verify-release-scope.mjs --proposal` exit 0；默认 `node scripts/verify-release-scope.mjs` 按预期 exit 1 | 27 个 scope items；显式 `gateCoverage` 覆盖 §18.1 全部 11 Gate；行为拆分 TAE/ESD/Lua-HKS，资产拆分 FLVER/TPF/MTD/collision/navigation/open conversion；§3.1 capability、§17.1 Evidence 与脱敏 registry 逻辑引用 | `--proposal` 输出 `ok=null/status=proposal-valid/frozen=false`；默认模式命中 `RELEASE_SCOPE_NOT_FROZEN`。build/ruling metadata 保持 pending/null；该证据只完成提案 artifact，不是用户裁定、sealed Evidence、REL-SCOPE 完成或任何功能 authority 提升 |
 | `EV-REL-SCOPE-20260730` | `sealed-current-run` | `scope-ruling:user-approved`；V0.5 的 27 项目标范围、版本族、语义编辑边界与项目所有者内部测试发行边界 | `HEAD=e32e8144225ee904e38e87102470cf84bd428075; trackedDiffSha256=c8a23dc5c209a71661a65ce34beb9fff975ce994e44191fb40b8fa202fac4d7e; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=8b521e3f1dce1a3bbf13a679e5fcf58594ba371c2d20eb98c1eb46d394c0ffe8; fingerprintSha256=9b907bbda822080f879c3aadf89171837edc0defb0f049382ee83fea1d743cba` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 均 exit 0；连续两次 `npm run handoff:fingerprint` 输出一致；计划中的 progress-integrity 项因仓库未定义对应 script 而未执行 | 27/27 项 `user-approved`；§18.1 全部 11 Gate；`file/product version major.minor=1.6` 且其他版本失败关闭；BND4/FMG/PARAM/EMEVD/MSB/TAE/ESD/script 八个语义编辑器；Hex 只读；仅项目所有者控制机器上的内部测试构建 | 仅支持 `REL-SCOPE passed`、`W-REL-SCOPE-RULING-01 completed` 和其他 Gate `in-scope`；不提升任何 parser、writer、corpus、运行、渲染或发行 authority，不关闭技术、语料、Oodle、metadata、模型凭据、me3、签名、硬件或许可证 blocker，不声明 V0.5 完成或允许外部分发；`test:progress-integrity` 仍为工程缺口 |
 | `EV-REL-SCOPE-20260730-UNSIGNED` | `sealed-current-run` | `scope-ruling:user-approved`；撤销代码签名验收项并冻结未签名 NSIS 内部测试边界 | `HEAD=7a6c35ca639bc19324892a86957b7151737d33f8; trackedDiffSha256=0aad391a963c6503343a1b4b7f880874c7bd8e8f4f555430cae09cf92d2bb3bb; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=823ff9cae3df68c30982fbd3ed4bd3102c6ae2ba6d3a9b4b67c5572cd40bb0fc; fingerprintSha256=60d54c580c210c67160099dea5bc8e70b2b95dfcdd40078243adeca499fdf474` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:release-content`、`npm run test:portable-packaging-config-fixtures`、`npm run test:portable-packaging-gate`、`npm run test:me3-runtime-adapter`、`npm run release:manifest` 均按各自声明的 exit/status 通过；连续两次 `npm run handoff:fingerprint` 输出一致 | 27/27 项继续 `user-approved`；release-scope 18 个正/负 fixture；Windows 10/11 x64 NSIS 允许未签名，仅限项目所有者控制的内部测试机器；仍要求 installer manifest/hash、内容扫描、干净机安装、升级、卸载和 runtime 完整性 | 仅支持 `W-REL-SCOPE-RULING-02 completed` 与 `REL-SCOPE passed` 的当前裁定；代码签名、证书信任链和 SmartScreen 信誉均不再是 V0.5 验收项；portable、自动更新和外部分发仍 unsupported；不提升任何功能/发行 authority，不证明 NSIS、me3、REL-H、REL-COMPLIANCE 或 V0.5 完成 |
+| `EV-REL-SCOPE-20260730-OWNER-INPUTS` | `sealed-current-run` | `scope-ruling:user-approved`；固定 Smithbox 本机 PARAM metadata 来源、空模型凭据、工程方 me3 provisioning 与功能性渲染验收边界 | `HEAD=3af0da8b5d061199e8d71e591d2b05ebc94a54c5; trackedDiffSha256=331119d8ff4bba2da036c78ce2699c04f885dd22576ddb487e4594181bd163c3; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=a87629a5ea6ff6fecfe1fd133a3841ed37478d45722eaf28c170bac0e7d8c276; fingerprintSha256=96a01f57833a2c58e3b76a0d084854b0ac9327e94cf5f047d262ae0abe1618d5` | `npm run test:release-scope-fixtures`（25 cases）、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:param-metadata-mismatch`、`npm run test:paramdef-layout`、`npm run test:ai-fake-loop`、`npm run test:openai-responses`、`npm run test:me3-runtime-adapter`、`npm run test:scene-draw-list`、`npm run test:three-scene-module` 与 `git diff --check` 均 exit 0；官方 me3 0.12.1 Windows 便携包 SHA-256 匹配发布值，真实 CLI `--version` 与 `profile --help` exit 0；连续两次 `npm run handoff:fingerprint` 输出一致 | 27/27 项继续 `user-approved`；Smithbox 2.2.4 `SDT` PARAM 路径、commit/artifact digest 与仅本机导入/禁止随 SoulForge 再分发边界；provider 默认空配置且 live credential 非验收；me3 provisioning 归工程方；REL-I 只要求所有者当前机器功能闭环 | 只支持 `W-REL-SCOPE-RULING-03 completed` 与 `REL-SCOPE passed` 的当前裁定；未导入或提交 Smithbox metadata，未实现来源 adapter，未使用真实 provider，未把真实 me3 接入 SoulForge gateway，也未启动 Sekiro 或执行渲染硬件 benchmark；不提升 PARAM/AI/runtime/render/发行 authority，不声明 V0.5 完成或允许外部分发 |
 | `EV-HANDOFF-LIVENESS-20260725` | `sealed-current-run` | 交接推进活性治理、公开回归、REL-B registry/harness fixture 与 REL-F acceptance harness candidate | `HEAD=20020766506ea71d66d3b9b9ea867aa534aaa3a9; trackedDiffSha256=4621e9898de5250b8d72d309af2396e2de00351fcefb760855cbeedd42440d5f; untrackedManifestSha256=f499f192e40be3b4f91cb01336478251435ad1789ef168aacfcdbd452f9c7c35; handoffSha256BeforeEvidenceAppend=313dbde91970b6d9a3bccb0bb244de3ce0f2a6ce44122560eebf6af625a562b2; fingerprintSha256=3067512cc0068ad13cf50011889a19c3104dc3a0d6b9b3cd7c76788ebe3e43c9` | `npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:release-corpus-registry`、`npm run test:release-editor-acceptance`、`npm run test:handoff-integrity`、`git diff --check` 均 exit 0；`npm run bridge:build` exit 0；连续两次 `npm run handoff:fingerprint` 输出一致 | 38 个 handoff 正/负 fixture；公开 synthetic/core/Electron 回归；metadata-only corpus registry fixture；候选编辑器 inventory/contract harness；项目 wrapper 解析到 .NET SDK 10.0.301 | 只封存本轮治理机制和已列公开/harness 观察，并支持 `W-REL-B-REGISTRY-01` 的 `fixture-confirmed` 与 `W-REL-F-ACCEPT-01` 的 `candidate` 上限；不包含用户范围批准标记，不支持任何 Gate `passed`/`scope-excluded`，也不提升私有 native、真游戏、真实模型服务或发布 authority；`manualReviewStillRequired` 三项仍保留 |
 | `EV-PUBLIC-CONTRACTS-20260725` | `sealed-current-run` | Bridge recovery/staging、PARAM metadata、me3 adapter、REL-B registry、REL-F acceptance 与发行失败关闭 contract | `HEAD=20020766506ea71d66d3b9b9ea867aa534aaa3a9; trackedDiffSha256=4caed8aa7f2647304d9f22a19fbd10e3f07c914f6334a6970ecf4885de1d8fad; untrackedManifestSha256=32b6faf6d0e1e92ed25a93903a0154c7803f0f49c4d64875f7f27baa61093b64; handoffSha256BeforeEvidenceAppend=f67684684b8e703f433c3495051cab381b4045de43af157a1b005cc07c77d9d6; fingerprintSha256=a450562260693252e75d6d81226aff97b9a43f3eeb39ebf7fce573c78b210839` | 最低公开回归四命令均 exit 0；`bridge:verify:client`、`test:bridge-recovery-harness`、`test:bridge-staging`、`test:param-metadata-mismatch`、`test:paramdef-layout`、`test:me3-runtime-adapter`、`test:release-corpus-registry`、`test:release-editor-acceptance` 均 exit 0；发行六命令、portable/private/section-28 gate 均 exit 0；连续两次 `handoff:fingerprint` 一致 | recovery 四阶段/背压/竞态/重启与 11 个 staging 负例；PARAM 9 个 snapshot failure、64 MiB 总预算、256 diagnostics、3 个 immutable result；me3 22 类；REL-B 26 个负例；5 个候选编辑器；170 dependencies、116/54 license text、11 artifacts | 支持 A/PARAM/me3 contract 与 REL-B registry 的 `fixture-confirmed`、REL-F acceptance 的 `candidate`、发行合规的 `partial`；artifact=`6f22d28bfae009057d57e5bcb64936721e17357cadd6ee4be562081d1b348f0a`、manifest=`48d8eda021e041d10464cd3f8e641ae23db1333ad760e4ca2708c57e5e2ff0af`；portable=`partial/skipped` 且 builder 依赖缺失，private/section-28=`skipped`；不支持任何 Gate 终态、native corpus、真实 me3/Sekiro、人机验收、installer、签名、升级或更新声明 |
 | `EV-B-DFLT-7BD` | `historical-record` | DFLT 已记录真实 corpus 往返 | `7bd354d` | 旧第 43 节“P1 安全清理执行器与 P2 真实 DFLT/BND4 文档推进”；`bridge:verify:dcx-documents` | 144 个 DFLT、两个实际变体 | 本轮未重跑私有 corpus；不得外推到新变体或发布全集 |
@@ -1622,6 +1630,20 @@ Gate 的当前完成态不能永久继承旧工作树。每个 `passed` Gate 必
 - 已验证：`npm run test:release-scope-fixtures` exit 0，18 个正/负 case；`npm run test:release-scope-proposal` exit 0、`frozen=true`；`npm run test:release-scope` exit 0、`status=scope-approved`；`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 均 exit 0；portable config 17 个 fixture、portable gate、me3 adapter smoke 和 release manifest 均完成其声明范围验证，portable gate 与 release manifest 诚实保持 `partial`
 - 非声明：未签名 NSIS 不证明发布者身份、证书信任链或 SmartScreen 信誉；删除签名验收不放宽 secret/private asset/Oodle/许可证扫描，不授权任何外部分发，也不证明 REL-H、REL-COMPLIANCE 或 V0.5 完成
 
+### 2026-07-30：固定所有者输入边界，解除 metadata/凭据/硬件用户阻塞
+
+- 证据类型：`sealed-current-run`（`EV-REL-SCOPE-20260730-OWNER-INPUTS`）
+- 起始：`HEAD=3af0da8b5d061199e8d71e591d2b05ebc94a54c5`
+- 结束：未提交工作树；HEAD=`3af0da8b5d061199e8d71e591d2b05ebc94a54c5` + `{docs/V0_5_IMPLEMENTATION_HANDOFF.md, scripts/verify-release-scope.mjs, scripts/verify-release-scope-fixtures.mjs}`；提交后补 SHA
+- 路线：REL-SCOPE（`W-REL-SCOPE-RULING-03`）；只修改范围/责任边界并准备外部 me3 工具，不实现 PARAM source adapter、AI production loop、runtime gateway 或 renderer backend
+- lifecycle / Gate 变化：`W-PARAM-META-SOURCE-02 blocked -> ready`；`W-AI-REAL-01` 与 `W-RENDER-BENCH-01` 改为 `superseded`，新增 `ready` 的 `W-AI-CONFORMANCE-02`、`W-RENDER-FUNCTIONAL-02`；`REL-G`、`REL-I` 由 `blocked -> open`；`REL-SCOPE` 继续为 `passed/in-scope` 并引用本轮 fresh sealed Evidence
+- blockerRefs 变化：`BLK-PARAM-METADATA-SOURCE`、`BLK-MODEL-CREDENTIALS`、`BLK-RENDER-HARDWARE` 均无当前活动引用，只保留历史审计与未来范围变更触发器；`W-PARAM-META-NATIVE-01` 仍由 `BLK-NATIVE-FIXTURE-CORPUS` 阻塞
+- 已冻结：PARAM metadata 只从用户本机固定 Smithbox 2.2.4 发行包导入，校验 commit/artifact digest，禁止随 SoulForge 再分发；OpenAI-compatible/Anthropic-compatible 配置默认留空，live endpoint/key 不作为验收；me3 provisioning 归工程方；渲染只要求项目所有者当前机器的 WebGPU/WebGL2 功能闭环，不要求代表性硬件档位或性能预算
+- 已验证：Smithbox 官方仓库支持 Sekiro 且 2.2.4 `SDT` PARAM 路径存在；其根/发行包带 MIT 正文，但提交历史显示部分数据源自无独立 LICENSE 的 Paramdex，因此采用本机导入而非捆绑再分发；官方 me3 v0.12.1 发行包 digest 与本机下载一致，真实 CLI 返回 `me3 0.12.1` 且 profile 命令列出 Sekiro，不启动游戏
+- 已验证：范围 25 个正/负 fixture、proposal/strict scope、最低公开回归、PARAM metadata/layout、AI fake/Responses、me3 adapter、scene/Three contract 与 `git diff --check` 均 exit 0；连续两次 handoff fingerprint 五字段一致
+- authority 变化：无；外部来源/工具发现和用户裁定不提升任何 parser、writer、provider、native runtime、renderer 或 release authority
+- 非声明：未导入 Smithbox metadata、未实现 source adapter、未使用真实模型服务、未把 me3 接入 production main gateway、未启动 Sekiro、未运行 WebGPU/WebGL2 真实功能闭环或硬件 benchmark；V0.5 仍未完成
+
 ---
 
 ## 18. V0.5 完成定义
@@ -1650,25 +1672,19 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 | `REL-D` | 全部 Sekiro TAE、全部 ESD、源码与编译脚本完整读写 | corpus 范围由真实 Sekiro 证据确认；结构化界面/DSL 共用 native document，全部 typed mutation、writer、重读、回滚和游戏加载矩阵通过 | 当前 `not-started`、借用其他游戏格式结论、执行不受信脚本或以 Hex 代替语义 parser |
 | `REL-E` | FLVER/TPF/MTD/collision/navigation 全量语义只读与 native-to-open 导出矩阵 | 五类 native 文档、引用、可视化和批准导出通过真实 corpus；无 native writer 或反向导入 | raw replace、代理几何、最小 DDS 被外推成 native authority 或开放格式被写回 native |
 | `REL-F` | 八个语义编辑器、结构化界面 + DSL、共享只读 Hex 证据视图 | 全部读取真实 native document；mutation typed；revision 冲突失败；大表/大场景达到批准容量；无 demo fallback 或 raw Hex 写入 | UI 存在但底层 authority 缺失；Safe Hex 演示或静态测试被当作发布编辑器 |
-| `REL-G` | 两类真实模型服务、允许工具集和权限模式 | 两类 provider 各完成真实只读与受控写循环、取消、超时、限额、审计、凭据脱敏；写工具复用 native validator/Patch Engine | 仅 fake server；模型可绕过证据或写入主干 |
+| `REL-G` | OpenAI-compatible / Anthropic-compatible 双协议、允许工具集、权限模式与空配置行为 | 两类协议分别通过确定性本地 contract server 的只读/受控写、取消、超时、限额、审计和脱敏矩阵；空配置不发起网络请求并返回明确诊断；写工具复用 native validator/Patch Engine | 只覆盖单协议、空配置仍联网、模型可绕过证据或写入主干；真实 provider 账号不是通过条件 |
 | `REL-H` | Windows 10/11 x64 NSIS 与 me3 capability-probe 运行范围 | NSIS manifest/hash、干净机安装、覆盖升级、卸载、Bridge/.NET/native binding、能力探测、提交后启动、日志关联、回滚后复启全部通过 | portable/自动更新被冒充范围内能力，未签名被误写成免除完整性验证，配置存在、skip、版本字符串或只启动一次 |
-| `REL-I` | 代表性地图集合、硬件档位、WebGPU/WebGL2 支持策略 | 所有已批准性能预算通过，资源泄漏受控；后端决策由 benchmark 支持 | synthetic baseline、代理场景、未记录硬件/地图或无阈值 |
+| `REL-I` | renderer-independent semantic scene、WebGPU 主路径与 WebGL2 功能回退 | 在项目所有者当前机器上以真实 semantic/native projection 完成 capability probe、加载、picking、transform 更新、回退与资源释放功能闭环 | 代理场景或 synthetic baseline 被当成真实资产；WebGPU 失败时没有 WebGL2 功能回退；代表性硬件档位和性能预算不是通过条件 |
 | `REL-COMPLIANCE` | 项目所有者内部测试构建及禁止外部分发边界 | package tree、许可证 inventory、凭据/私有资产扫描、所有者控制目标和 installer manifest/hash 通过；缺 notices 被显式追踪并阻止外部分发 | 真实资产、用户 Mod、私有 corpus、Oodle、key/私钥进入提交/产物，或未补 notices/权利即对外分发；未签名包不得声明发布者身份或 SmartScreen 信誉 |
 
 ### 18.2 发布前必须裁定但当前尚未裁定的量化项
 
-以下项目必须在取得代表性真实基线后由用户裁定并写回本文；在此之前 `REL-F`、`REL-I` 和相关 `REL-E` 不能进入 `passed`。不依赖阈值的 registry、instrumentation 和 benchmark harness 仍可作为 `ready` / `active` 切片推进；只有当前不存在可推进切片时，Gate 才记为 `blocked`。
+以下项目仍需在取得真实基线后由用户裁定并写回本文；在此之前 `REL-F` 及相关编辑器容量验收不能进入 `passed`。用户已明确代表性渲染硬件档位、地图性能基准、FPS/帧时间、RAM/显存和泄漏量化预算不属于 V0.5 验收；这些数据可以作为后续优化 evidence，但不能恢复成隐含 Gate。
 
-- 代表性 Sekiro 地图集合和场景实体/几何/纹理规模；
-- 首次可交互时间、后台完成时间；
-- camera frame-time 的 p50/p95/p99；
-- picking、box selection 和单实体 mutation 的 p95 延迟；
-- 稳态 RAM、峰值 RAM、显存预算和关闭场景后的资源回收窗口；
-- 连续打开/关闭、切换地图和长时间编辑的泄漏阈值；
 - 大 PARAM、FMG、EMEVD 文档的分页/虚拟化容量门槛；
 - 安装包体积、首次启动、升级 migration 和回滚时间预算。
 
-性能测试脚本可以先采集数据，但在阈值获批前只能产生 benchmark evidence，不能自行把观测值定义为发布标准。
+性能测试脚本可以按工程需要采集数据，但这些观测不能自行成为 V0.5 发布标准。
 
 项目周期长不降低这些标准，也不要求为了尽快发布而牺牲路线完整性。
 
@@ -1679,7 +1695,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->
 ```json
 {
-  "schemaVersion": "1.2.0",
+  "schemaVersion": "1.3.0",
   "proposalId": "V0.5-SCOPE-20260725",
   "release": "V0.5",
   "game": "Sekiro",
@@ -1695,7 +1711,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
   "ruling": {
     "status": "user-approved",
     "approvedBy": "repository-owner",
-    "approvedAt": "2026-07-30T09:13:51.116Z",
+    "approvedAt": "2026-07-30T09:37:03.836Z",
     "decisionRef": "codex-thread:019fa924-bb20-7d23-aab9-3863957c5e10"
   },
   "proposalStatus": "user-approved",
@@ -1703,6 +1719,38 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
   "corpusPolicy": {
     "privateFixtureRegistryIsReleaseCorpus": false,
     "supportedWithoutReleaseCorpus": "requires-open-ruling"
+  },
+  "paramMetadataSourcePolicy": {
+    "status": "user-approved",
+    "sourceProject": "vawser/Smithbox",
+    "sourceRelease": "2.2.4",
+    "sourceCommit": "1b46d2c9f82d1c3635ff7c12c526e05a8ba4208f",
+    "sourceArtifactSha256": "14a7fd735a9577249fa93655f63d1e9ac025a3b00d7c5bed8badc8a3a7fd489d",
+    "sourcePath": "Smithbox.Release/Output/Assets/PARAM/SDT",
+    "acquisition": "user-local-pinned-release-import",
+    "redistribution": "forbidden",
+    "mismatchPolicy": "fail-closed"
+  },
+  "providerCredentialPolicy": {
+    "status": "user-approved",
+    "defaultConfiguration": "empty",
+    "realProviderCredentialsRequiredForV05Acceptance": false,
+    "unconfiguredBehavior": "diagnose-without-network-call"
+  },
+  "runtimeToolPolicy": {
+    "status": "user-approved",
+    "adapter": "me3",
+    "sourceProject": "garyttierney/me3",
+    "sourceRelease": "v0.12.1",
+    "sourceArtifactSha256": "b1c11659b0cfde73062b2fa134a8ac499f3e713fe82d9014401289677ace7323",
+    "provisioningResponsibility": "project-engineering",
+    "compatibilityPolicy": "capability-probe-fail-closed"
+  },
+  "renderingAcceptancePolicy": {
+    "status": "user-approved",
+    "functionalOwnerMachineSmokeRequired": true,
+    "representativeHardwareTiersRequired": false,
+    "performanceBudgetsRequired": false
   },
   "gateCoverage": [
     {
@@ -1836,12 +1884,10 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "scopeItemIds": [
         "SCOPE-AI"
       ],
-      "currentState": "blocked",
-      "blockerRefs": [
-        "BLK-MODEL-CREDENTIALS"
-      ],
+      "currentState": "open",
+      "blockerRefs": [],
       "openRulings": [
-        "需对两类真实 provider 完成语义 typed tool、权限、限额、取消、审计和多步写任务验证。"
+        "需以确定性本地 contract servers 完成双协议语义 typed tool、权限、限额、取消、审计、空配置诊断和多步写任务验证；不要求真实 provider 凭据。"
       ]
     },
     {
@@ -1862,12 +1908,10 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "scopeItemIds": [
         "SCOPE-RENDERING"
       ],
-      "currentState": "blocked",
-      "blockerRefs": [
-        "BLK-RENDER-HARDWARE"
-      ],
+      "currentState": "open",
+      "blockerRefs": [],
       "openRulings": [
-        "需在代表性硬件和真实大场景完成 WebGPU 主路径、WebGL2 回退及性能/泄漏验收。"
+        "需在项目所有者当前机器完成真实 semantic scene 的 WebGPU capability 主路径、WebGL2 功能回退、picking、transform 更新与资源释放；不要求代表性硬件档位或性能预算。"
       ]
     },
     {
@@ -2158,11 +2202,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-C"
       ],
       "subjectKind": "resource",
-      "scope": "合法 metadata 严格匹配下的 Sekiro 全部 ParamType、布局、字段与行完整读写",
+      "scope": "固定 Smithbox 2.2.4 本机 metadata 严格匹配下的 Sekiro 全部 ParamType、布局、字段与行完整读写",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "operations": [
         "read-all-param-types",
+        "import-user-local-pinned-smithbox-metadata",
+        "verify-source-release-and-content-digest",
+        "record-source-license-and-provenance",
         "no-op-roundtrip",
         "typed-field-mutation",
         "row-crud",
@@ -2173,6 +2220,8 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "game-load"
       ],
       "unsupportedOperations": [
+        "redistribute-imported-smithbox-param-metadata",
+        "accept-unpinned-or-mismatched-metadata-source",
         "metadata-mismatch-write",
         "unknown-field-rewrite",
         "write-before-all-sekiro-param-types-are-authoritative"
@@ -2192,7 +2241,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       ],
       "openRulings": [],
       "nonClaims": [
-        "全部 ParamType 已纳入目标范围，但当前 authority 仍为 partial；38/40 私有抽样与 synthetic metadata contract 不证明合法 metadata 来源、全部布局或真实游戏验证完成。"
+        "全部 ParamType 与固定 Smithbox 本机来源已纳入目标范围，但 current authority 仍为 partial；来源裁定不证明导入 adapter、全部布局、上游再分发权利或真实游戏验证完成。"
       ]
     },
     {
@@ -2707,14 +2756,18 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "limit",
         "permission-confirm",
         "audit",
-        "redact-credentials"
+        "redact-credentials",
+        "offline-protocol-conformance",
+        "diagnose-empty-provider-configuration-without-network-call"
       ],
       "unsupportedOperations": [
         "raw-hex-write",
         "write-without-evidence",
         "bypass-native-validator",
         "bypass-patch-engine",
-        "expose-credential-to-renderer"
+        "expose-credential-to-renderer",
+        "bundle-provider-credentials",
+        "require-live-provider-account-for-v05-acceptance"
       ],
       "currentAuthority": "unverified",
       "evidenceRefs": [
@@ -2723,7 +2776,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "双协议受控读写已纳入目标范围，但 current authority 仍为 unverified；fake HTTP/SSE、凭据契约和单 provider adapter 不证明真实服务或生产多步写任务完成。"
+        "双协议受控读写与空凭据默认配置已纳入目标范围，但 current authority 仍为 unverified；离线 conformance 不证明任何第三方真实服务可用，真实账号也不属于 V0.5 验收。"
       ]
     },
     {
@@ -2817,12 +2870,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "pick",
         "update-transforms",
         "dispose-resources",
-        "benchmark-both-backends"
+        "functional-backend-smoke-on-owner-machine"
       ],
       "unsupportedOperations": [
         "renderer-object-as-authority",
         "synthetic-budget-as-release-threshold",
-        "proxy-scene-as-native-asset-proof"
+        "proxy-scene-as-native-asset-proof",
+        "representative-hardware-tier-acceptance",
+        "performance-budget-as-v05-gate"
       ],
       "currentAuthority": "partial",
       "evidenceRefs": [
@@ -2832,7 +2887,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "WebGPU 主用与 WebGL2 回退已纳入目标范围；代理场景、production WebGL canvas 和 synthetic baseline 不证明真实资产、大地图或双后端发布性能。"
+        "WebGPU 主用与 WebGL2 功能回退已纳入目标范围；current authority 仍为 partial，当前机器功能 smoke 不证明代表性硬件兼容或性能水平，二者也不属于 V0.5 验收。"
       ]
     },
     {
@@ -2877,7 +2932,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 ```
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->
 
-本范围已由用户逐项批准，并由后继裁定删除代码签名验收项；当前范围以 `EV-REL-SCOPE-20260730-UNSIGNED` 封存。批准只固定目标与 unsupported 边界，不提升任何 `currentAuthority`，也不把缺 corpus、parser、writer、许可证、凭据或真实环境的项目变成完成。
+本范围已由用户逐项批准，并由后继裁定删除代码签名、真实模型凭据和代表性渲染硬件/性能预算验收项，同时固定 Smithbox 2.2.4 本机 PARAM metadata 来源；当前范围以 `EV-REL-SCOPE-20260730-OWNER-INPUTS` 封存。批准只固定目标与 unsupported 边界，不提升任何 `currentAuthority`，也不把缺 corpus、parser、writer、adapter 或真实功能验证的项目变成完成。
 
 统一语义编辑不变量：所有可编辑 native 资源必须先由 Bridge 形成完整、可读、可追溯的 native semantic document；结构化界面和规范 DSL 只能产生 typed mutation。未知字段可以作为只读 opaque 数据展示，但在没有 schema 和无损保持证据时不得编辑。Hex 永远是只读证据视图。
 
@@ -2897,16 +2952,16 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 
 | Gate ID | capability | 当前切片 | gateState | applicability | Evidence/blockerRefs | 后继要求 |
 |---|---|---|---|---|---|---|
-| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-02` | `passed` | `in-scope` | `EV-REL-SCOPE-20260730-UNSIGNED` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex 与允许未签名 NSIS 的内部测试发行边界已冻结；后续修改必须重新取得用户批准并生成 fresh sealed Evidence |
+| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-03` | `passed` | `in-scope` | `EV-REL-SCOPE-20260730-OWNER-INPUTS` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、功能性渲染验收与允许未签名 NSIS 的内部测试边界已冻结；后续修改必须重新取得用户批准并生成 fresh sealed Evidence |
 | `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-NATIVE-02` | `blocked` | `in-scope` | `BLK-NATIVE-FIXTURE-CORPUS` | 公开进程故障 harness 已完成；需合法仓库外 corpus 对其余 production native writer 做真实故障矩阵 |
 | `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-01` | `blocked` | `in-scope` | `BLK-REL-B-CORPUS` | registry/harness 已完成；需合法发布 corpus 做 100% 分类、DFLT/KRAK/BND4 读写与组合闭环 |
 | `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-PATCHIR-02` | `open` | `in-scope` | — | 当前推进 typed proposal -> Bridge/PatchIR；后续仍需 FMG 全语言、全部 ParamType/EMEVD、登记 MSB 实体、引用、回滚与游戏加载切片 |
 | `REL-D` | 行为动画范围 | `W-BEHAVIOR-MAP-01` | `blocked` | `in-scope` | `BLK-BEHAVIOR-CORPUS` | corpus 到位后完成全部 TAE/ESD/脚本 parser、语义编辑器、writer 与游戏加载矩阵 |
 | `REL-E` | 资产只读与导出矩阵 | `W-FLVER-READ-01` | `blocked` | `in-scope` | `BLK-ASSET-CORPUS` | 五类 native 资产全量语义只读、引用与 native-to-open 导出闭环；不开放 native writer |
 | `REL-F` | 编辑器验收 | `W-REL-F-SCALE-02` | `open` | `in-scope` | — | 从五个候选扩展为八个语义编辑器，关闭结构化 UI/DSL/只读 Hex/规模缺口并完成真实人机验收 |
-| `REL-G` | 双模型服务 | `W-AI-REAL-01` | `blocked` | `in-scope` | `BLK-MODEL-CREDENTIALS` | 凭据到位后做双 provider 语义 typed mutation 受控写循环 |
+| `REL-G` | 双协议 AI | `W-AI-CONFORMANCE-02` | `open` | `in-scope` | — | 完成确定性本地双协议 conformance、空配置诊断、typed mutation 权限/限额/取消/审计与真实工作区多步任务；不要求真实 provider 凭据 |
 | `REL-H` | 安装与运行 | `W-ME3-MAIN-DETECT-02` | `open` | `in-scope` | — | 实现 production capability-probe gateway，再补 profile/launch/diagnostics/terminate、NSIS manifest/hash、安装/升级/卸载与真实 Sekiro 启动切片；不要求代码签名 |
-| `REL-I` | 渲染基准 | `W-RENDER-BENCH-01` | `blocked` | `in-scope` | `BLK-RENDER-HARDWARE` | 取得真实硬件基线，完成 WebGPU 主路径、WebGL2 回退和后端验收后继切片 |
+| `REL-I` | 渲染功能闭环 | `W-RENDER-FUNCTIONAL-02` | `open` | `in-scope` | — | 在项目所有者当前机器完成真实 semantic scene 的 WebGPU capability 主路径、WebGL2 功能回退、picking、transform 更新与资源释放；不要求硬件档位或性能预算 |
 | `REL-COMPLIANCE` | 内部测试构建合规 | `W-REL-COMPLIANCE-01` | `open` | `in-scope` | — | 验证 NSIS 实际 package tree、installer manifest/hash、所有者控制目标与内容扫描；持续跟踪 notices 并禁止任何外部分发，不要求代码签名 |
 
 后继要求列不是第二套进度口径；它只提示同一 Gate 在既有切片完成后仍需的下游切片。补货规则见 `docs/AGENT_EXECUTION_PLAYBOOK.md` §8，全阻塞终局见其 §9。
@@ -2915,17 +2970,19 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 
 blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruling | toolchain | license | upstream | prerequisite-authority`。每个 `blocked` 切片和 Gate 都必须通过 blockerRefs 引用本表中已定义 ID；解除 blocker 之前必须取得“所需输入”并通过“解锁验证”，不能只因时间经过或口头判断改回 `ready` / `open`。Evidence 可以是 sealed、unsealed 或 historical 记录，用于说明阻塞边界；只有 sealed Evidence 可以支持 Gate 终态。
 
+表中标注“历史、当前无活动引用”的行只保留审计与未来范围变更触发器，不属于当前 blocker，也不得出现在“需要用户处理”的报告中。当前阻塞状态只由 §13.1 / §18.3 的活动 `blockerRefs` 判定。
+
 | blockerId | reason | 影响 Gate/切片 | 责任方 | 所需输入 | 解锁验证 | 复查触发器 | Evidence |
 |---|---|---|---|---|---|---|---|
 | `BLK-NATIVE-FIXTURE-CORPUS` | `private-corpus` | `REL-A`、`W-A-RECOVERY-NATIVE-02`、`W-PARAM-META-NATIVE-01` | 用户 / corpus 保管方 | 合法、仓库外、带脱敏 registryId 与内容哈希的 native writer/PARAM fixture registry | 对应 native matrix 与 PARAM metadata/native 一致性 smoke 实际执行；缺样本时必须失败关闭 | fixture registry 新增合格样本或外部 registry 配置发生变化 | `EV-A-RECOVERY-20260724`、`EV-C-PARAM-7BD`、`EV-PUBLIC-CONTRACTS-20260725` |
-| `BLK-PARAM-METADATA-SOURCE` | `license` | `W-PARAM-META-SOURCE-02`、`W-PARAM-META-NATIVE-01` | 用户 / metadata 来源维护者 / 许可证审查者 | 明确获准再分发的 Paramdex-compatible metadata 来源、许可证正文、immutable revision/content digest、维护与撤回策略 | source ingestion、license manifest、版本升级/撤回和 trust-policy smoke 冻结并实际通过 | 来源许可或维护状态变化，或用户提供可审计的获批 metadata package | `EV-PUBLIC-CONTRACTS-20260725` |
+| `BLK-PARAM-METADATA-SOURCE` | `license` | 历史：`W-PARAM-META-SOURCE-02`；当前无活动引用 | 历史记录；当前由工程方实施 | 已解除输入裁定：固定 Smithbox 2.2.4 本机导入、commit/artifact digest 与不再分发边界 | 当前 `W-PARAM-META-SOURCE-02` 已转为 `ready`；adapter 仍须通过缺失/错版/digest/license/升级/撤回 smoke | 用户修改来源、版本或再分发边界时重新打开 | `EV-PUBLIC-CONTRACTS-20260725`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` |
 | `BLK-EMEVD-LAYER-CORPUS` | `private-corpus` | `W-EMEVD-LAYER-01`；`REL-C` 的 EMEVD layer 后继 | 用户 / corpus 保管方 | 合法、仓库外、带脱敏 registryId 与哈希的 `layerCount != 0` EMEVD 样本 | 带哈希 corpus case 的只读解析、no-op roundtrip 和冲突失败关闭断言通过 | corpus registry 新增合格 layer 样本 | `EV-C-EMEVD-DSL-20260724` |
 | `BLK-BEHAVIOR-CORPUS` | `private-corpus` | `REL-D`、`W-BEHAVIOR-MAP-01` | 用户 / corpus 保管方 | 合法 Sekiro 行为与动画容器样本及脱敏 registry | inventory smoke 识别 magic、容器位置和候选引用，并对未知变体结构化失败关闭 | behavior corpus registry 新增合格样本 | — |
 | `BLK-ASSET-CORPUS` | `private-corpus` | `REL-E`、`W-FLVER-READ-01` | 用户 / corpus 保管方 | 合法 FLVER/TPF/MTD 等声明资产样本及脱敏 registry | 指定布局真实只读 document、边界诊断和 no-op evidence 通过 | asset corpus registry 新增合格样本 | `EV-E-ASSET-7BD` |
 | `BLK-REL-B-CORPUS` | `private-corpus` | `REL-B`、`W-REL-B-CORPUS-01` | 用户 / corpus 保管方 | 合法、仓库外、覆盖声明 DFLT/BND4/KRAK 布局的发布 corpus registry | 100% 分类、no-op、声明 mutation/repack、重读与未知字段保持矩阵通过 | 私有发布 corpus registry 可用、内容版本变化或新增合格布局 | `EV-B-DFLT-7BD`、`EV-B-BND4-7BD`、`EV-B-KRAK-20260724` |
-| `BLK-MODEL-CREDENTIALS` | `credential` | `REL-G`、`W-AI-REAL-01` | 用户 / 凭据保管方 | 两类真实 provider endpoint 与凭据，只经 main/safeStorage 注入 | 两类 provider 分别完成真实只读与受控写循环、取消、超时、限额、审计和脱敏 | safeStorage 中两类 provider 配置可用或发生轮换 | `EV-G-FAKE-7BD` |
-| `BLK-RENDER-HARDWARE` | `hardware` | `REL-I`、`W-RENDER-BENCH-01` | 用户 / benchmark 执行者 | 代表性硬件档位、Sekiro 地图集合和可复现驱动/系统信息 | WebGPU/WebGL2 加载、帧时间、picking、内存、显存和泄漏报告完整生成 | 硬件档位与地图 registry 获批并可执行 | `EV-I-RENDER-7BD` |
-| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`、`W-REL-SCOPE-RULING-02`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵逐项批准，且代码签名验收项已删除 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定 | `EV-REL-SCOPE-20260730`、`EV-REL-SCOPE-20260730-UNSIGNED` |
+| `BLK-MODEL-CREDENTIALS` | `credential` | 历史：`W-AI-REAL-01`；当前无活动引用 | 历史记录；用户无需提供 | 已解除：默认配置留空，真实 provider endpoint/key 不属于 V0.5 验收 | `W-AI-REAL-01` 已被取代；`W-AI-CONFORMANCE-02` 只依赖本地 contract servers 并保持 `ready` | 用户日后主动把真实 provider live smoke 加回范围时重新打开 | `EV-G-FAKE-7BD`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` |
+| `BLK-RENDER-HARDWARE` | `hardware` | 历史：`W-RENDER-BENCH-01`；当前无活动引用 | 历史记录；用户无需提供 | 已解除：代表性硬件档位、地图性能基准和量化预算不属于 V0.5 验收 | `W-RENDER-BENCH-01` 已被取代；`W-RENDER-FUNCTIONAL-02` 只要求所有者当前机器的功能闭环并保持 `ready` | 用户日后主动把硬件/性能矩阵加回范围时重新打开 | `EV-I-RENDER-7BD`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` |
+| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`、`W-REL-SCOPE-RULING-02`、`W-REL-SCOPE-RULING-03`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵、未签名 NSIS、固定 Smithbox 本机 metadata、空 provider 凭据和功能性渲染边界均已批准 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定 | `EV-REL-SCOPE-20260730`、`EV-REL-SCOPE-20260730-UNSIGNED`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` |
 
 ---
 
