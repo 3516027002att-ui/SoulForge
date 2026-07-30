@@ -294,6 +294,95 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(bytes);
     }
 
+    /// <summary>
+    /// Extract vertex normals (float[3] per vertex) for a specific mesh as base64.
+    /// Normals are packed as byte[4] at offset 0x0C within the 40-byte vertex stride.
+    /// The packed format is assumed to be 10-10-10-2 (3×10-bit signed + 2-bit padding).
+    /// Returns null if mesh index is out of range or vertex data is unavailable.
+    /// </summary>
+    public string? GetMeshNormalsBase64(int meshIndex, int maxVertices = 10_000)
+    {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        var mesh = Meshes[meshIndex];
+        var vertexCount = Math.Min(mesh.VertexCount, maxVertices);
+        if (vertexCount <= 0) return null;
+
+        // Reuse the vertex data offset from GetMeshPositionsBase64.
+        var positionsBase64 = GetMeshPositionsBase64(meshIndex, maxVertices);
+        if (positionsBase64 == null) return null;
+
+        // Find the vertex data offset using the same scan logic.
+        float margin = 1.0f;
+        float minX = BoundingBoxMinX - margin, maxX = BoundingBoxMaxX + margin;
+        float minY = BoundingBoxMinY - margin, maxY = BoundingBoxMaxY + margin;
+        float minZ = BoundingBoxMinZ - margin, maxZ = BoundingBoxMaxZ + margin;
+        int vertexDataOffset = -1;
+        int scanEnd = Math.Min(DataStart + DataLength, SourceBytes.Length - VertexStride);
+        for (int offset = DataStart; offset < scanEnd; offset += 4)
+        {
+            float x = ReadFloat32(SourceBytes, offset);
+            float y = ReadFloat32(SourceBytes, offset + 4);
+            float z = ReadFloat32(SourceBytes, offset + 8);
+            if (float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z)
+                && x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ
+                && (Math.Abs(x) > 0.001f || Math.Abs(y) > 0.001f || Math.Abs(z) > 0.001f))
+            {
+                bool valid = true;
+                int nonZeroCount = 1;
+                for (int v = 1; v < Math.Min(5, vertexCount); v++)
+                {
+                    int nextOff = offset + v * VertexStride;
+                    if (nextOff + 12 > SourceBytes.Length) { valid = false; break; }
+                    float nx = ReadFloat32(SourceBytes, nextOff);
+                    float ny = ReadFloat32(SourceBytes, nextOff + 4);
+                    float nz = ReadFloat32(SourceBytes, nextOff + 8);
+                    if (!float.IsFinite(nx) || !float.IsFinite(ny) || !float.IsFinite(nz)
+                        || nx < minX || nx > maxX || ny < minY || ny > maxY || nz < minZ || nz > maxZ)
+                    { valid = false; break; }
+                    if (nx != 0 || ny != 0 || nz != 0) nonZeroCount++;
+                }
+                if (valid && nonZeroCount >= 2)
+                {
+                    int aligned = offset - (offset % VertexStride);
+                    float ax = ReadFloat32(SourceBytes, aligned);
+                    float ay = ReadFloat32(SourceBytes, aligned + 4);
+                    float az = ReadFloat32(SourceBytes, aligned + 8);
+                    vertexDataOffset = (float.IsFinite(ax) && float.IsFinite(ay) && float.IsFinite(az)
+                        && (Math.Abs(ax) > 0.001f || Math.Abs(ay) > 0.001f || Math.Abs(az) > 0.001f))
+                        ? aligned : aligned + VertexStride;
+                    break;
+                }
+            }
+        }
+        if (vertexDataOffset < 0) return null;
+
+        int meshVertexOffset = 0;
+        for (int i = 0; i < meshIndex; i++)
+            meshVertexOffset += Meshes[i].VertexCount * VertexStride;
+        var thisMeshOffset = vertexDataOffset + meshVertexOffset;
+        if (thisMeshOffset + vertexCount * VertexStride > SourceBytes.Length) return null;
+
+        // Extract normals from packed byte[4] at offset 0x0C.
+        // Assume 10-10-10-2 format: 3×10-bit signed integers normalized to [-1, 1].
+        var normals = new float[vertexCount * 3];
+        for (int v = 0; v < vertexCount; v++)
+        {
+            var baseOffset = thisMeshOffset + v * VertexStride + 0x0C;
+            uint packed = ReadUInt32(SourceBytes, baseOffset);
+            // Decode 10-10-10-2: bits [0:9] = X, [10:19] = Y, [20:29] = Z, [30:31] = W
+            int nx10 = (int)(packed & 0x3FF); if (nx10 > 511) nx10 -= 1024;
+            int ny10 = (int)((packed >> 10) & 0x3FF); if (ny10 > 511) ny10 -= 1024;
+            int nz10 = (int)((packed >> 20) & 0x3FF); if (nz10 > 511) nz10 -= 1024;
+            normals[v * 3] = nx10 / 511.0f;
+            normals[v * 3 + 1] = ny10 / 511.0f;
+            normals[v * 3 + 2] = nz10 / 511.0f;
+        }
+
+        var normBytes = new byte[normals.Length * 4];
+        Buffer.BlockCopy(normals, 0, normBytes, 0, normBytes.Length);
+        return Convert.ToBase64String(normBytes);
+    }
+
     public static FlverNativeDocument Read(byte[] source)
     {
         if (source.Length < HeaderSize || source.Length > MaxSourceBytes)
@@ -502,6 +591,9 @@ internal sealed class FlverNativeDocument
 
     private static int ReadInt32(byte[] source, int offset) =>
         BinaryPrimitives.ReadInt32LittleEndian(source.AsSpan(offset, 4));
+
+    private static uint ReadUInt32(byte[] source, int offset) =>
+        BinaryPrimitives.ReadUInt32LittleEndian(source.AsSpan(offset, 4));
 
     private static short ReadInt16(byte[] source, int offset) =>
         BinaryPrimitives.ReadInt16LittleEndian(source.AsSpan(offset, 2));
