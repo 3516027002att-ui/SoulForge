@@ -77,6 +77,9 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           enableDamping: boolean; dampingFactor: number; update: () => void; dispose: () => void;
         };
       };
+      const ddsLoaderModule = await import('three/examples/jsm/loaders/DDSLoader.js');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const DDSLoader = (ddsLoaderModule as any).DDSLoader as { parse(buffer: ArrayBuffer, loadMipmaps: boolean): { mipmaps: Array<{ data: Uint8Array; width: number; height: number }>; width: number; height: number; format: number; mipmapCount: number } };
       const canvas = document.createElement('canvas');
       canvas.style.width = '100%';
       canvas.style.height = '100%';
@@ -162,27 +165,36 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
               // Check for DDS magic "DDS " (0x20534444).
               const isDds = texBytes.length > 4 && texBytes[0] === 0x44 && texBytes[1] === 0x44 && texBytes[2] === 0x53 && texBytes[3] === 0x20;
               if (isDds && texBytes.length > 128) {
-                // Parse DDS header to get dimensions and format.
-                const dv = new DataView(texBytes.buffer);
-                const height = dv.getUint32(12, true) ?? 256;
-                const width = dv.getUint32(16, true) ?? 256;
-                const mipCount = dv.getUint32(28, true) ?? 1;
-                const fourCC = String.fromCharCode(texBytes[84] ?? 0, texBytes[85] ?? 0, texBytes[86] ?? 0, texBytes[87] ?? 0);
-                // For DXT1/DXT5 compressed textures, create a placeholder DataTexture.
-                // Full decompression would require a DDS decompressor.
-                const size = Math.min(256, Math.max(1, Math.min(width, height)));
-                const data = new Uint8Array(size * size * 4);
-                // Fill with a gradient based on texture format.
-                for (let i = 0; i < data.length; i += 4) {
-                  const x = (i / 4) % size;
-                  const y = Math.floor((i / 4) / size);
-                  data[i] = Math.floor((x / size) * 255); // R
-                  data[i + 1] = Math.floor((y / size) * 255); // G
-                  data[i + 2] = fourCC === 'DXT1' ? 128 : 200; // B
-                  data[i + 3] = 255; // A
+                // Decode DDS (DXT1/DXT5/BC4/BC5) via three.js DDSLoader into a CompressedTexture.
+                try {
+                  const dds = DDSLoader.parse(texBytes.buffer.slice(texBytes.byteOffset, texBytes.byteOffset + texBytes.byteLength), true);
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const compressedTexture = new three.CompressedTexture(dds.mipmaps as any, dds.width, dds.height, dds.format as any, three.UnsignedByteType);
+                  compressedTexture.minFilter = dds.mipmapCount > 1 ? three.LinearMipmapLinearFilter : three.LinearFilter;
+                  compressedTexture.magFilter = three.LinearFilter;
+                  compressedTexture.generateMipmaps = false;
+                  compressedTexture.flipY = false;
+                  compressedTexture.needsUpdate = true;
+                  texture = compressedTexture;
+                } catch {
+                  // DDS decode failed (unsupported fourCC); fall back to gradient placeholder.
+                  const dv = new DataView(texBytes.buffer);
+                  const height = dv.getUint32(12, true) ?? 256;
+                  const width = dv.getUint32(16, true) ?? 256;
+                  const fourCC = String.fromCharCode(texBytes[84] ?? 0, texBytes[85] ?? 0, texBytes[86] ?? 0, texBytes[87] ?? 0);
+                  const size = Math.min(256, Math.max(1, Math.min(width, height)));
+                  const data = new Uint8Array(size * size * 4);
+                  for (let i = 0; i < data.length; i += 4) {
+                    const x = (i / 4) % size;
+                    const y = Math.floor((i / 4) / size);
+                    data[i] = Math.floor((x / size) * 255);
+                    data[i + 1] = Math.floor((y / size) * 255);
+                    data[i + 2] = fourCC === 'DXT1' ? 128 : 200;
+                    data[i + 3] = 255;
+                  }
+                  texture = new three.DataTexture(data, size, size, three.RGBAFormat);
+                  texture.needsUpdate = true;
                 }
-                texture = new three.DataTexture(data, size, size, three.RGBAFormat);
-                texture.needsUpdate = true;
               } else {
                 // Non-DDS or too small: create a simple DataTexture.
                 const size = Math.min(256, Math.floor(Math.sqrt(texBytes.length / 4)));
