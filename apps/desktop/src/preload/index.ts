@@ -27,6 +27,12 @@ const api = {
     ipcRenderer.invoke('workspace.scan', options),
   detectMe3: (): Promise<import('@soulforge/core').RuntimeCapability> =>
     ipcRenderer.invoke('runtime.detectMe3'),
+  prepareMe3Profile: (): Promise<import('@soulforge/core').RuntimeOperationResult<import('@soulforge/core').RuntimeProfileRef>> =>
+    ipcRenderer.invoke('runtime.prepareMe3Profile'),
+  launchMe3: (profileId: string): Promise<import('@soulforge/core').RuntimeOperationResult<import('@soulforge/core').RuntimeLaunchSession>> =>
+    ipcRenderer.invoke('runtime.launchMe3', profileId),
+  terminateMe3: (sessionId: string): Promise<import('@soulforge/core').RuntimeOperationResult<import('@soulforge/core').RuntimeTerminationResult>> =>
+    ipcRenderer.invoke('runtime.terminateMe3', sessionId),
   analyzeWorkspace: (): Promise<AnalyzeWorkspaceSummary> => ipcRenderer.invoke('workspace.analyze'),
   searchResources: (query: string): Promise<RendererIndexedFile[]> => ipcRenderer.invoke('resource.search', query),
   openResourcePreview: (sourceUri: string): Promise<RendererResourcePreview | null> =>

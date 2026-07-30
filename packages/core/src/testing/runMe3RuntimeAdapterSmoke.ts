@@ -1,3 +1,4 @@
+import assert from 'node:assert';
 import type {
   RuntimeCapability,
   RuntimeDiagnostic,
@@ -8,7 +9,10 @@ import type {
 import {
   Me3RuntimeAdapter,
   type Me3DetectionGatewayResult,
+  type Me3LaunchRequest,
+  type Me3ProfileCreateRequest,
   type Me3RuntimeGateway,
+  type Me3TerminateRequest,
   type Me3VersionPolicy,
   type Me3VersionProbeProcessResult,
   type Me3VersionProbeRequest
@@ -31,6 +35,18 @@ class FakeMe3RuntimeGateway implements Me3RuntimeGateway {
   async probeVersion(request: Me3VersionProbeRequest): Promise<unknown> {
     this.requests.push(request);
     return this.handler(request);
+  }
+
+  async createProfile(_request: Me3ProfileCreateRequest): Promise<unknown> {
+    return { exitCode: 0, stdout: '', stderr: '', timedOut: false, cancelled: false, spawnFailure: null };
+  }
+
+  async launchGame(_request: Me3LaunchRequest): Promise<unknown> {
+    return { exitCode: null, stdout: '', stderr: '', timedOut: false, cancelled: false, spawnFailure: null, pid: 12345 };
+  }
+
+  async terminateProcess(_request: Me3TerminateRequest): Promise<unknown> {
+    return { terminated: true };
   }
 }
 
@@ -299,9 +315,9 @@ async function main(): Promise<void> {
   expectCapability(cancelledReject, 'cancelled', 'ME3_DETECTION_CANCELLED');
   observed.push(cancelledReject);
 
-  const unsupportedGateway = fixedGateway(probed(successfulProbe()));
+  const runtimeGateway = fixedGateway(probed(successfulProbe()));
   const adapter = new Me3RuntimeAdapter({
-    gateway: unsupportedGateway,
+    gateway: runtimeGateway,
     versionPolicy: FIXTURE_POLICY
   });
   const profile: RuntimeProfileRef = {
@@ -318,20 +334,41 @@ async function main(): Promise<void> {
     startedAt: '2026-07-25T00:00:00.000Z',
     diagnostics: []
   };
-  const unsupportedOperations = await Promise.all([
-    adapter.prepareProfile(
-      { workspaceSessionId: 'fixture-workspace', game: 'sekiro' },
-      { timeoutMs: 500 }
-    ),
-    adapter.launch({ profile, operationId: 'fixture-operation' }, { timeoutMs: 500 }),
-    adapter.collectDiagnostics(session, { timeoutMs: 500 }),
-    adapter.terminate(session, { timeoutMs: 500 })
-  ]);
-  for (const result of unsupportedOperations) {
-    expectUnsupported(result);
-    observed.push(result);
-  }
-  expectRequestCount(unsupportedGateway, 0, 'unsupported operations');
+
+  // Verify prepareProfile returns a successful result
+  const profileResult = await adapter.prepareProfile(
+    { workspaceSessionId: 'fixture-workspace', game: 'sekiro' },
+    { timeoutMs: 500 }
+  );
+  assert(profileResult.ok === true, 'prepareProfile should succeed');
+  assert(profileResult.status === 'succeeded', 'prepareProfile status should be succeeded');
+  assert(profileResult.authority === 'fixture-confirmed', 'prepareProfile authority');
+  assert(profileResult.data?.profileId === 'soulforge-fixture-workspac', 'prepareProfile profileId');
+  observed.push(profileResult);
+
+  // Verify launch returns a successful result
+  const launchResult = await adapter.launch(
+    { profile, operationId: 'fixture-operation' },
+    { timeoutMs: 500 }
+  );
+  assert(launchResult.ok === true, 'launch should succeed');
+  assert(launchResult.status === 'succeeded', 'launch status should be succeeded');
+  assert(launchResult.authority === 'fixture-confirmed', 'launch authority');
+  assert(launchResult.data?.state === 'running', 'launch state should be running');
+  observed.push(launchResult);
+
+  // Verify collectDiagnostics returns a successful result
+  const diagnosticsResult = await adapter.collectDiagnostics(session, { timeoutMs: 500 });
+  assert(diagnosticsResult.ok === true, 'collectDiagnostics should succeed');
+  assert(diagnosticsResult.status === 'succeeded', 'collectDiagnostics status');
+  assert(diagnosticsResult.authority === 'unverified', 'collectDiagnostics authority');
+  observed.push(diagnosticsResult);
+
+  // Verify terminate fails gracefully when no PID is stored for the session
+  const terminateResult = await adapter.terminate(session, { timeoutMs: 500 });
+  assert(terminateResult.ok === false, 'terminate should fail without PID');
+  assert(terminateResult.status === 'failed', 'terminate status should be failed');
+  observed.push(terminateResult);
 
   for (const value of observed) assertNoAuthorityLeak(value);
 
@@ -364,12 +401,15 @@ async function main(): Promise<void> {
       'cancel-exit-zero-race',
       'abort-signal-close-race',
       'abort-signal-reject-race',
-      'unsupported-runtime-operations'
+      'profile-create-succeeded',
+      'launch-succeeded',
+      'collect-diagnostics-succeeded',
+      'terminate-no-pid-failed'
     ],
     nonClaims: [
       'No real me3 executable or Sekiro process was discovered or started.',
       'A matching version fixture and exit code zero do not establish launch readiness.',
-      'Profile generation, launch, diagnostics collection, termination, and native runtime authority remain unimplemented.'
+      'Native runtime authority remains unimplemented; profile and launch are fixture-confirmed only.'
     ]
   }, null, 2));
 }
@@ -428,13 +468,6 @@ function expectCapability(
     throw new Error(`unexpected ${state} capability: ${JSON.stringify(capability)}`);
   }
   expectDiagnostic(capability.diagnostics, diagnosticCode);
-}
-
-function expectUnsupported(result: RuntimeOperationResult<unknown>): void {
-  if (result.ok || result.status !== 'unsupported' || result.authority !== 'unverified') {
-    throw new Error(`expected unsupported runtime operation: ${JSON.stringify(result)}`);
-  }
-  expectDiagnostic(result.diagnostics, 'ME3_RUNTIME_OPERATION_NOT_IMPLEMENTED');
 }
 
 function expectDiagnostic(diagnostics: readonly RuntimeDiagnostic[], code: string): void {
