@@ -345,13 +345,14 @@ internal sealed class BridgeCommandService
                 var positions = document.GetMeshPositionsBase64(meshIndex);
                 var indices = document.GetMeshIndicesBase64(meshIndex);
                 var uvs = document.GetMeshUVsBase64(meshIndex);
+                var normals = document.GetMeshNormalsBase64(meshIndex);
                 if (positions == null)
                     return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
                 var mesh = document.Meshes[meshIndex];
                 return BridgeResult<object>.Partial(file, "chr", new[]
                 {
                     new Diagnostic("info", "FLVER_MESH_DATA_EXTRACTED",
-                        $"FLVER 网格 {meshIndex} 顶点/索引/UV 数据已提取；vertexCount={mesh.VertexCount}。",
+                        $"FLVER 网格 {meshIndex} 顶点/索引/UV/法线数据已提取；vertexCount={mesh.VertexCount}。",
                         BridgeResult<object>.MakeSourceUri(file))
                 }, new
                 {
@@ -361,7 +362,8 @@ internal sealed class BridgeCommandService
                     indexFormat = mesh.IndexFormat,
                     positionsBase64 = positions,
                     indicesBase64 = indices,
-                    uvsBase64 = uvs
+                    uvsBase64 = uvs,
+                    normalsBase64 = normals
                 });
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
