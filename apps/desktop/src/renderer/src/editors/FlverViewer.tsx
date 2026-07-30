@@ -154,15 +154,39 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           if (props.textureBase64) {
             try {
               const texBytes = Uint8Array.from(atob(props.textureBase64), (c) => c.charCodeAt(0));
-              // DDS textures start with "DDS " magic (0x20534444).
-              // For now, create a DataTexture from the raw bytes as a placeholder.
-              // Full DDS decoding would require a DDSLoader.
-              const size = Math.min(256, Math.floor(Math.sqrt(texBytes.length / 4)));
-              if (size > 0) {
+              // Check for DDS magic "DDS " (0x20534444).
+              const isDds = texBytes.length > 4 && texBytes[0] === 0x44 && texBytes[1] === 0x44 && texBytes[2] === 0x53 && texBytes[3] === 0x20;
+              if (isDds && texBytes.length > 128) {
+                // Parse DDS header to get dimensions and format.
+                const dv = new DataView(texBytes.buffer);
+                const height = dv.getUint32(12, true) ?? 256;
+                const width = dv.getUint32(16, true) ?? 256;
+                const mipCount = dv.getUint32(28, true) ?? 1;
+                const fourCC = String.fromCharCode(texBytes[84] ?? 0, texBytes[85] ?? 0, texBytes[86] ?? 0, texBytes[87] ?? 0);
+                // For DXT1/DXT5 compressed textures, create a placeholder DataTexture.
+                // Full decompression would require a DDS decompressor.
+                const size = Math.min(256, Math.max(1, Math.min(width, height)));
                 const data = new Uint8Array(size * size * 4);
-                data.set(texBytes.subarray(0, Math.min(texBytes.length, data.length)));
+                // Fill with a gradient based on texture format.
+                for (let i = 0; i < data.length; i += 4) {
+                  const x = (i / 4) % size;
+                  const y = Math.floor((i / 4) / size);
+                  data[i] = Math.floor((x / size) * 255); // R
+                  data[i + 1] = Math.floor((y / size) * 255); // G
+                  data[i + 2] = fourCC === 'DXT1' ? 128 : 200; // B
+                  data[i + 3] = 255; // A
+                }
                 texture = new three.DataTexture(data, size, size, three.RGBAFormat);
                 texture.needsUpdate = true;
+              } else {
+                // Non-DDS or too small: create a simple DataTexture.
+                const size = Math.min(256, Math.floor(Math.sqrt(texBytes.length / 4)));
+                if (size > 0) {
+                  const data = new Uint8Array(size * size * 4);
+                  data.set(texBytes.subarray(0, Math.min(texBytes.length, data.length)));
+                  texture = new three.DataTexture(data, size, size, three.RGBAFormat);
+                  texture.needsUpdate = true;
+                }
               }
             } catch {
               // Texture decode failed; use solid color.
