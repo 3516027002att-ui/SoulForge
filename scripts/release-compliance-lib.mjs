@@ -183,7 +183,7 @@ function collectProductionLicenses(root, rootPackage, lock, policy, findings) {
       findings.push(error('DEPENDENCY_LICENSE_NOT_ALLOWED', lockPath, `依赖 ${name} 的许可证 ${license} 未经策略允许。`));
     }
     const packageDirectory = resolve(root, lockPath);
-    const licenseFiles = directLicenseFiles(root, packageDirectory);
+    const licenseFiles = directLicenseFiles(root, packageDirectory, name);
     const isInstalled = existsSync(packageDirectory);
     const isOptionalNotInstalled = metadata.optional === true && !isInstalled;
     packages.push({
@@ -509,16 +509,25 @@ function forbiddenPathFinding(path, scope) {
   return null;
 }
 
-function directLicenseFiles(root, packageDirectory) {
-  if (!existsSync(packageDirectory)) return [];
-  try {
-    return readdirSync(packageDirectory, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && /^(licen[cs]e|copying|notice)([.-]|$)/i.test(entry.name))
-      .map((entry) => normalize(relative(root, join(packageDirectory, entry.name))))
-      .sort(compareText);
-  } catch {
-    return [];
+function directLicenseFiles(root, packageDirectory, packageName) {
+  const files = [];
+  if (existsSync(packageDirectory)) {
+    try {
+      for (const entry of readdirSync(packageDirectory, { withFileTypes: true })) {
+        if (entry.isFile() && /^(licen[cs]e|copying|notice)([.-]|$)/i.test(entry.name)) {
+          files.push(normalize(relative(root, join(packageDirectory, entry.name))));
+        }
+      }
+    } catch { /* ignore */ }
   }
+  // Supplemental license texts from project-level licenses/ directory.
+  if (files.length === 0 && packageName) {
+    const supplemental = join(root, 'licenses', `${packageName.replace(/\//g, '+')}.txt`);
+    if (existsSync(supplemental)) {
+      files.push(normalize(relative(root, supplemental)));
+    }
+  }
+  return files.sort(compareText);
 }
 
 function packageNameFromLockPath(lockPath) {
