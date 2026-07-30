@@ -94,6 +94,8 @@ internal sealed class FlverNativeDocument
     /// <summary>
     /// Extract vertex positions (float[3] per vertex) for a specific mesh as base64.
     /// Assumes fixed 40-byte vertex stride with position at offset 0.
+    /// Vertex data offset is found by scanning the data section for valid positions
+    /// within the bounding box range.
     /// Returns null if mesh index is out of range or data is unavailable.
     /// </summary>
     public string? GetMeshPositionsBase64(int meshIndex, int maxVertices = 10_000)
@@ -103,17 +105,81 @@ internal sealed class FlverNativeDocument
         var vertexCount = Math.Min(mesh.VertexCount, maxVertices);
         if (vertexCount <= 0) return null;
 
-        // Vertex data starts after index data in the data section.
-        // For Sekiro FLVER, vertex data is at a fixed offset from DataStart.
-        // We compute it from the mesh's vertex buffer layout.
-        var vertexDataOffset = DataStart + DataLength - (Meshes.Count - meshIndex) * mesh.VertexCount * VertexStride;
-        if (vertexDataOffset < 0 || vertexDataOffset + vertexCount * VertexStride > SourceBytes.Length)
+        // Find vertex data offset by scanning for valid positions within the actual bounding box.
+        // Use the bounding box with a small margin to filter out non-vertex data.
+        float margin = 1.0f;
+        float minX = BoundingBoxMinX - margin, maxX = BoundingBoxMaxX + margin;
+        float minY = BoundingBoxMinY - margin, maxY = BoundingBoxMaxY + margin;
+        float minZ = BoundingBoxMinZ - margin, maxZ = BoundingBoxMaxZ + margin;
+        int vertexDataOffset = -1;
+        int scanEnd = Math.Min(DataStart + DataLength, SourceBytes.Length - VertexStride);
+        for (int offset = DataStart; offset < scanEnd; offset += 4)
+        {
+            float x = ReadFloat32(SourceBytes, offset);
+            float y = ReadFloat32(SourceBytes, offset + 4);
+            float z = ReadFloat32(SourceBytes, offset + 8);
+            if (float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z)
+                && x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ
+                && (Math.Abs(x) > 0.001f || Math.Abs(y) > 0.001f || Math.Abs(z) > 0.001f))
+            {
+                // Found a valid position. Check if the next few vertices are also valid.
+                bool valid = true;
+                int nonZeroCount = 1;
+                for (int v = 1; v < Math.Min(5, vertexCount); v++)
+                {
+                    int nextOff = offset + v * VertexStride;
+                    if (nextOff + 12 > SourceBytes.Length) { valid = false; break; }
+                    float nx = ReadFloat32(SourceBytes, nextOff);
+                    float ny = ReadFloat32(SourceBytes, nextOff + 4);
+                    float nz = ReadFloat32(SourceBytes, nextOff + 8);
+                    if (!float.IsFinite(nx) || !float.IsFinite(ny) || !float.IsFinite(nz)
+                        || nx < minX || nx > maxX || ny < minY || ny > maxY || nz < minZ || nz > maxZ)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    if (nx != 0 || ny != 0 || nz != 0) nonZeroCount++;
+                }
+                // Require at least 2 non-zero vertices to avoid zero-padding blocks.
+                if (valid && nonZeroCount >= 2)
+                {
+                    // Align to vertex stride and verify the first vertex is valid.
+                    int aligned = offset - (offset % VertexStride);
+                    float ax = ReadFloat32(SourceBytes, aligned);
+                    float ay = ReadFloat32(SourceBytes, aligned + 4);
+                    float az = ReadFloat32(SourceBytes, aligned + 8);
+                    if (float.IsFinite(ax) && float.IsFinite(ay) && float.IsFinite(az)
+                        && (Math.Abs(ax) > 0.001f || Math.Abs(ay) > 0.001f || Math.Abs(az) > 0.001f))
+                    {
+                        vertexDataOffset = aligned;
+                    }
+                    else
+                    {
+                        // First vertex at aligned offset is invalid; try next vertex boundary.
+                        vertexDataOffset = aligned + VertexStride;
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (vertexDataOffset < 0) return null;
+
+        // Calculate offset for this specific mesh's vertex data.
+        int meshVertexOffset = 0;
+        for (int i = 0; i < meshIndex; i++)
+        {
+            meshVertexOffset += Meshes[i].VertexCount * VertexStride;
+        }
+        var thisMeshOffset = vertexDataOffset + meshVertexOffset;
+
+        if (thisMeshOffset < 0 || thisMeshOffset + vertexCount * VertexStride > SourceBytes.Length)
             return null;
 
         var positions = new float[vertexCount * 3];
         for (int v = 0; v < vertexCount; v++)
         {
-            var baseOffset = vertexDataOffset + v * VertexStride;
+            var baseOffset = thisMeshOffset + v * VertexStride;
             positions[v * 3] = ReadFloat32(SourceBytes, baseOffset);
             positions[v * 3 + 1] = ReadFloat32(SourceBytes, baseOffset + 4);
             positions[v * 3 + 2] = ReadFloat32(SourceBytes, baseOffset + 8);
@@ -242,8 +308,8 @@ internal sealed class FlverNativeDocument
             bones.Add(new FlverBoneEntry(i, name, animBoneIndex));
         }
 
-        // --- Mesh Table (after bones) ---
-        int meshTableOffset = (int)boneTableEnd;
+        // --- Mesh Table (after bones, with 16-byte table header) ---
+        int meshTableOffset = (int)boneTableEnd + 16;
         long meshTableEnd = (long)meshTableOffset + (long)meshCount * MeshEntrySize;
         if (meshTableEnd > source.Length)
             throw new InvalidDataException(
