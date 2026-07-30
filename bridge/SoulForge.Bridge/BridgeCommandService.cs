@@ -311,6 +311,31 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-flver-document")
+        {
+            try
+            {
+                var document = FlverNativeDocument.ReadFile(file);
+                var roundTrip = document.VerifyRoundTrip();
+                var diagnostics = new[]
+                {
+                    new Diagnostic(
+                        roundTrip.ByteIdentical ? "info" : "error",
+                        roundTrip.ByteIdentical ? "FLVER_DOCUMENT_ROUNDTRIP_BYTE_VERIFIED" : "FLVER_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.ByteIdentical
+                            ? $"FLVER 只读往返字节级一致；materials={document.MaterialCount}, bones={document.BoneCount}, meshes={document.MeshCount}。"
+                            : "FLVER 只读往返字节不一致。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        roundTrip)
+                };
+                return BridgeResult<object>.Partial(file, "chr", diagnostics, document.ToEnvelope(roundTrip));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "chr", "FLVER_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "write-msb")
         {
             if (string.IsNullOrWhiteSpace(outputPath))
@@ -372,6 +397,7 @@ internal sealed class BridgeCommandService
         if (name.Contains("param")) return "param";
         if (name.Contains("msg") || name.EndsWith(".fmg")) return "msg";
         if (name.EndsWith(".tae")) return "action";
+        if (name.EndsWith(".flver")) return "chr";
         return "unknown";
     }
 
