@@ -121,6 +121,8 @@ const api = {
     ipcRenderer.invoke('resource.readFlverDocument', sourceUri),
   readFlverMesh: (sourceUri: string, meshIndex: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverMesh', sourceUri, meshIndex),
+  readFlverSkeleton: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readFlverSkeleton', sourceUri),
   applyMsbMutation: (
     sourceUri: string,
     expectedHash: string,
