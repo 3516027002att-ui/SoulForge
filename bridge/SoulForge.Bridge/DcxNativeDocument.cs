@@ -101,12 +101,31 @@ internal sealed class DcxNativeDocument
                 zlib.Write(nextPayload);
             compressed = output.ToArray();
         }
+        return RebuildWithCompressedPayload(nextPayload.Length, compressed);
+    }
+
+    /// <summary>
+    /// Rebuild a KRAK-compressed DCX with a new payload using the Oodle Kraken compressor.
+    /// Requires a valid OodleRuntimeSession with compress capability.
+    /// </summary>
+    public byte[] RebuildKrak(byte[] nextPayload, OodleRuntimeSession session)
+    {
+        if (CompressionFormat != "KRAK") throw new NotSupportedException("只有 KRAK 文档可用 RebuildKrak。");
+        if (!session.CanCompress) throw new NotSupportedException("Oodle 运行库不支持压缩；无法重建 KRAK 文档。");
+        if (nextPayload.Length <= 0 || nextPayload.Length > MaxPayloadBytes)
+            throw new InvalidDataException("重建 payload 大小超出安全范围。");
+        var compressed = session.Compress(nextPayload);
+        return RebuildWithCompressedPayload(nextPayload.Length, compressed);
+    }
+
+    private byte[] RebuildWithCompressedPayload(int uncompressedSize, byte[] compressed)
+    {
         var suffixOffset = checked(PayloadOffset + CompressedSize);
         var rebuilt = new byte[checked(PayloadOffset + compressed.Length + (SourceBytes.Length - suffixOffset))];
         Buffer.BlockCopy(SourceBytes, 0, rebuilt, 0, PayloadOffset);
         Buffer.BlockCopy(compressed, 0, rebuilt, PayloadOffset, compressed.Length);
         Buffer.BlockCopy(SourceBytes, suffixOffset, rebuilt, PayloadOffset + compressed.Length, SourceBytes.Length - suffixOffset);
-        WriteUInt32Be(rebuilt, 0x1C, checked((uint)nextPayload.Length));
+        WriteUInt32Be(rebuilt, 0x1C, checked((uint)uncompressedSize));
         WriteUInt32Be(rebuilt, 0x20, checked((uint)compressed.Length));
         return rebuilt;
     }

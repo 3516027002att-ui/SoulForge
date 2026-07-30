@@ -134,6 +134,7 @@ internal static class OodleRuntimeLocator
             }
 
             NativeLibrary.TryGetExport(libraryHandle, "OodleLZ_Decompress", out var decompressExport);
+            NativeLibrary.TryGetExport(libraryHandle, "OodleLZ_Compress", out var compressExport);
             var capability = available.Contains("OodleLZ_Compress", StringComparer.Ordinal)
                 ? "compress-decompress"
                 : "decompress-only";
@@ -163,7 +164,7 @@ internal static class OodleRuntimeLocator
             return new OodleRuntimeOpenResult(
                 info,
                 new[] { diagnostic },
-                new OodleRuntimeSession(libraryHandle, decompressExport));
+                new OodleRuntimeSession(libraryHandle, decompressExport, compressExport));
         }
         catch
         {
@@ -275,13 +276,19 @@ internal sealed class OodleRuntimeSession : IDisposable
 {
     private readonly nint _libraryHandle;
     private readonly OodleLzDecompress _decompress;
+    private readonly OodleLzCompress? _compress;
     private bool _disposed;
 
-    public OodleRuntimeSession(nint libraryHandle, nint decompressExport)
+    public OodleRuntimeSession(nint libraryHandle, nint decompressExport, nint compressExport = 0)
     {
         _libraryHandle = libraryHandle;
         _decompress = Marshal.GetDelegateForFunctionPointer<OodleLzDecompress>(decompressExport);
+        _compress = compressExport != 0
+            ? Marshal.GetDelegateForFunctionPointer<OodleLzCompress>(compressExport)
+            : null;
     }
+
+    public bool CanCompress => _compress != null;
 
     public byte[] Decompress(ReadOnlySpan<byte> compressed, int uncompressedSize)
     {
@@ -332,6 +339,49 @@ internal sealed class OodleRuntimeSession : IDisposable
         NativeLibrary.Free(_libraryHandle);
     }
 
+    /// <summary>
+    /// Compress raw bytes using OodleLZ Kraken (compressor=8, level=6/Normal).
+    /// Returns the compressed byte array. Requires OodleLZ_Compress export.
+    /// </summary>
+    public byte[] Compress(ReadOnlySpan<byte> raw)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_compress == null)
+            throw new NotSupportedException("OodleLZ_Compress 导出不可用；当前运行库仅支持解压。");
+        if (raw.IsEmpty) throw new InvalidDataException("KRAK raw payload is empty.");
+
+        var rawBytes = raw.ToArray();
+        var rawPtr = Marshal.AllocHGlobal(rawBytes.Length);
+        // OodleLZ_Compress needs a worst-case output buffer: rawLen + 274 * ((rawLen + 0x3FFFF) / 0x40000)
+        var maxCompSize = rawBytes.Length + 274 * ((rawBytes.Length + 0x3FFFF) / 0x40000);
+        var compPtr = Marshal.AllocHGlobal(maxCompSize);
+        try
+        {
+            Marshal.Copy(rawBytes, 0, rawPtr, rawBytes.Length);
+            var written = _compress(
+                compressor: 8, // OodleLZ_Compressor_Kraken
+                rawPtr,
+                (nuint)rawBytes.Length,
+                compPtr,
+                level: 6, // OodleLZ_Level_Normal
+                pOptions: nint.Zero,
+                dictionaryBase: nint.Zero,
+                lrm: nint.Zero,
+                scratchMem: nint.Zero,
+                scratchSize: 0);
+            if (written <= 0)
+                throw new InvalidDataException($"OodleLZ_Compress returned {written}; compression failed.");
+            var output = new byte[(int)written];
+            Marshal.Copy(compPtr, output, 0, output.Length);
+            return output;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(compPtr);
+            Marshal.FreeHGlobal(rawPtr);
+        }
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate nint OodleLzDecompress(
         nint compressedBuffer,
@@ -348,6 +398,19 @@ internal sealed class OodleRuntimeSession : IDisposable
         nint decoderMemory,
         nuint decoderMemorySize,
         int threadPhase);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate nint OodleLzCompress(
+        int compressor,
+        nint rawBuffer,
+        nuint rawSize,
+        nint compBuffer,
+        int level,
+        nint pOptions,
+        nint dictionaryBase,
+        nint lrm,
+        nint scratchMem,
+        nuint scratchSize);
 }
 
 internal sealed record OodleRuntimePublicInfo(
