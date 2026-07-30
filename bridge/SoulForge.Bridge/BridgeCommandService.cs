@@ -387,7 +387,8 @@ internal sealed class BridgeCommandService
                     name = b.Name,
                     parentIndex = b.ParentIndex,
                     animBoneIndex = b.AnimBoneIndex,
-                    translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ }
+                    translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
+                    rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
                 }).ToArray();
                 return BridgeResult<object>.Partial(file, "chr", new[]
                 {
