@@ -60,6 +60,11 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
 
     void (async () => {
       const three = await import('three');
+      const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js') as {
+        OrbitControls: new (camera: unknown, domElement: HTMLElement) => {
+          enableDamping: boolean; dampingFactor: number; update: () => void; dispose: () => void;
+        };
+      };
       const canvas = document.createElement('canvas');
       canvas.style.width = '100%';
       canvas.style.height = '100%';
@@ -148,9 +153,15 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       setSize();
       window.addEventListener('resize', setSize);
 
+      // Orbit controls for rotate/zoom/pan.
+      const controls = new OrbitControls(camera, canvas);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+
       let raf = 0;
       const tick = (): void => {
         if (disposed) return;
+        controls.update();
         renderer.render(scene, camera);
         raf = requestAnimationFrame(tick);
       };
@@ -161,6 +172,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           disposed = true;
           cancelAnimationFrame(raf);
           window.removeEventListener('resize', setSize);
+          controls.dispose();
           renderer.dispose();
           canvas.remove();
         }
