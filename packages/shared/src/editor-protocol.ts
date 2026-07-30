@@ -3,7 +3,7 @@
  * Editors emit only these mutations; main/core maps them to PatchIR.
  */
 
-export type EditorKind = 'hex' | 'fmg' | 'param' | 'emevd' | 'msb' | 'text' | 'raw';
+export type EditorKind = 'hex' | 'fmg' | 'param' | 'emevd' | 'msb' | 'tae' | 'esd' | 'flver' | 'text' | 'raw';
 
 export type EditorMutationKind =
   | 'hex_byte_patch'

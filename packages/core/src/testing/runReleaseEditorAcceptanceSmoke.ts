@@ -130,7 +130,7 @@ function main(): void {
 function assertInventoryDerivedFromCapabilities(
   inventory: ReleaseEditorInventoryItem[]
 ): void {
-  const expectedIds: ProposedReleaseEditorId[] = ['safe-hex', 'fmg', 'param', 'emevd', 'msb'];
+  const expectedIds: ProposedReleaseEditorId[] = ['safe-hex', 'fmg', 'param', 'emevd', 'msb', 'tae', 'esd', 'flver'];
   if (JSON.stringify(inventory.map((item) => item.releaseEditorId)) !== JSON.stringify(expectedIds)) {
     throw new Error('release editor inventory/order drifted');
   }
@@ -195,7 +195,7 @@ function assertScaleContractsMatchCurrentSources(): void {
 function assertFunctionalSchemasHaveNoQuantitativeThresholds(
   schemas: ReturnType<typeof buildReleaseEditorFunctionalScaleSchemas>
 ): void {
-  if (schemas.length !== 5) throw new Error('expected one functional schema per current editor');
+  if (schemas.length !== 8) throw new Error('expected one functional schema per current editor');
   for (const schema of schemas) {
     if (schema.scopeRulingStatus !== 'user-approved'
       || schema.quantitativeThresholdsRequired !== false
