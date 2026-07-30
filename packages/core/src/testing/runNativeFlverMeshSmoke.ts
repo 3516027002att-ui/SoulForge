@@ -93,17 +93,21 @@ async function main(): Promise<void> {
     throw new Error(`FLVER skeleton read failed: ${JSON.stringify(skeleton.diagnostics)}`);
   }
   const skBones = (skeleton.data.bones as Array<{
-    index: number; name: string; parentIndex: number; translation: number[];
+    index: number; name: string; parentIndex: number; translation: number[]; rotation: number[];
   }>) ?? [];
   const skBoneCount = (skeleton.data.boneCount as number) ?? 0;
   if (skBoneCount <= 0 || skBones.length !== skBoneCount) {
     throw new Error(`FLVER skeleton bone count mismatch: boneCount=${skBoneCount}, bones=${skBones.length}`);
   }
-  // Every bone must have a finite translation and a parent in [-1, boneCount).
+  // Every bone must have a finite translation/rotation and a parent in [-1, boneCount).
   for (const b of skBones) {
     if (!Array.isArray(b.translation) || b.translation.length !== 3
       || !b.translation.every(Number.isFinite)) {
       throw new Error(`Bone[${b.index}] has invalid translation: ${JSON.stringify(b.translation)}`);
+    }
+    if (!Array.isArray(b.rotation) || b.rotation.length !== 3
+      || !b.rotation.every(Number.isFinite)) {
+      throw new Error(`Bone[${b.index}] has invalid rotation: ${JSON.stringify(b.rotation)}`);
     }
     if (b.parentIndex < -1 || b.parentIndex >= skBoneCount) {
       throw new Error(`Bone[${b.index}] has out-of-range parentIndex: ${b.parentIndex}`);
