@@ -46,6 +46,7 @@ import { ParamDefPanel } from './editors/ParamDefPanel.js';
 import { TaeWorkbenchPanel } from './editors/TaeWorkbenchPanel.js';
 import { EsdWorkbenchPanel } from './editors/EsdWorkbenchPanel.js';
 import { FlverWorkbenchPanel } from './editors/FlverWorkbenchPanel.js';
+import { TpfWorkbenchPanel } from './editors/TpfWorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
 import {
   mapEmevdEnvelopeToDocument,
@@ -183,6 +184,7 @@ export function App(): ReactElement {
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
+  const [tpfData, setTpfData] = useState<Record<string, unknown> | null>(null);
   const [fmgEntries, setFmgEntries] = useState(DEMO_FMG_ENTRIES);
   const [fmgSourceHash, setFmgSourceHash] = useState<string | null>(null);
   const [fmgLive, setFmgLive] = useState(false);
@@ -710,6 +712,7 @@ export function App(): ReactElement {
     setTaeData(null);
     setEsdData(null);
     setFlverData(null);
+    setTpfData(null);
     setStatus(`正在打开 ${file.relativePath}...`);
     const nextPreview = await window.soulforge.openResourcePreview(file.sourceUri);
     setPreview(nextPreview);
@@ -726,9 +729,13 @@ export function App(): ReactElement {
       const result = await window.soulforge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setEsdData(result.data);
     }
-    if ((file.relativePath.endsWith('.flver') || file.relativePath.endsWith('.tpf')) && typeof window.soulforge.readFlverDocument === 'function') {
+    if (file.relativePath.endsWith('.flver') && typeof window.soulforge.readFlverDocument === 'function') {
       const result = await window.soulforge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setFlverData(result.data);
+    }
+    if (file.relativePath.endsWith('.tpf') && typeof window.soulforge.readTpfDocument === 'function') {
+      const result = await window.soulforge.readTpfDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+      if (result.ok && result.data) setTpfData(result.data);
     }
     setStatus(nextPreview ? `已打开 ${file.relativePath}` : '无法预览该资源');
   }
@@ -1274,8 +1281,11 @@ export function App(): ReactElement {
           {selectedFile?.relativePath?.endsWith('.esd') && (
             <EsdWorkbenchPanel resourceUri={selectedFile.sourceUri} data={esdData as never} />
           )}
-          {(selectedFile?.relativePath?.endsWith('.flver') || selectedFile?.relativePath?.endsWith('.tpf')) && (
+          {selectedFile?.relativePath?.endsWith('.flver') && (
             <FlverWorkbenchPanel resourceUri={selectedFile.sourceUri} data={flverData as never} />
+          )}
+          {selectedFile?.relativePath?.endsWith('.tpf') && (
+            <TpfWorkbenchPanel resourceUri={selectedFile.sourceUri} data={tpfData as never} />
           )}
           {preview?.truncated && <p className="muted">预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开。</p>}
         </section>
