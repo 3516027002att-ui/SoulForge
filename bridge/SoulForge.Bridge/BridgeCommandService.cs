@@ -371,6 +371,7 @@ internal sealed class BridgeCommandService
         if (name.Contains("msb")) return "map";
         if (name.Contains("param")) return "param";
         if (name.Contains("msg") || name.EndsWith(".fmg")) return "msg";
+        if (name.EndsWith(".tae")) return "action";
         return "unknown";
     }
 

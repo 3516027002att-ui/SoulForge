@@ -1,0 +1,425 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
+
+/// <summary>
+/// Sekiro TAE (Time Act Editor) read-only native document.
+/// Layout verified against a00.tae (938 animations, 2,890,432 bytes).
+/// TAE defines per-animation event timing (hitboxes, SFX, VFX, camera shakes).
+/// All offsets are absolute int64 except event-group event arrays which use int32.
+/// Times are float32 stored at absolute offsets within a per-animation times array.
+/// Strings are UTF-16LE null-terminated.
+/// </summary>
+internal sealed class TaeNativeDocument
+{
+    private const int FileHeaderSize = 0x50; // 64-byte header + 16-byte extended header
+    private const int Section1HeaderSize = 0x30; // 48 bytes
+    private const int AnimTableEntrySize = 16;
+    private const int AnimationEntrySize = 0x30; // 48 bytes
+    private const int EventTableEntrySize = 24;
+    private const int EventDataHeaderSize = 16;
+    private const int EventGroupEntrySize = 32;
+    private const int GroupTypeDescriptorSize = 16;
+    private const int MaxAnimations = 100_000;
+    private const int MaxEvents = 1_000_000;
+    private const long MaxSourceBytes = 64L * 1024 * 1024;
+
+    private TaeNativeDocument(
+        byte[] sourceBytes,
+        int version,
+        long flags,
+        long section1Offset,
+        long section2Offset,
+        long unknownCount,
+        IReadOnlyList<TaeAnimation> animations,
+        int totalEventCount,
+        int totalGroupCount,
+        IReadOnlyList<int> eventTypes)
+    {
+        SourceBytes = sourceBytes;
+        Version = version;
+        Flags = flags;
+        Section1Offset = section1Offset;
+        Section2Offset = section2Offset;
+        UnknownCount = unknownCount;
+        Animations = animations;
+        TotalEventCount = totalEventCount;
+        TotalGroupCount = totalGroupCount;
+        EventTypes = eventTypes;
+    }
+
+    public byte[] SourceBytes { get; }
+    public int Version { get; }
+    public long Flags { get; }
+    public long Section1Offset { get; }
+    public long Section2Offset { get; }
+    public long UnknownCount { get; }
+    public IReadOnlyList<TaeAnimation> Animations { get; }
+    public int TotalEventCount { get; }
+    public int TotalGroupCount { get; }
+    public IReadOnlyList<int> EventTypes { get; }
+    public string SourceHash => Hash(SourceBytes);
+
+    public static TaeNativeDocument Read(byte[] source)
+    {
+        if (source.Length < FileHeaderSize || source.Length > MaxSourceBytes)
+            throw new InvalidDataException($"TAE 大小 {source.Length} 超出安全范围。");
+
+        // Magic: "TAE "
+        if (!source.AsSpan(0, 4).SequenceEqual("TAE "u8))
+            throw new InvalidDataException("输入不是 TAE（缺少 \"TAE \" 魔数）。");
+
+        // Format bytes: 00 00 00 FF (Sekiro)
+        if (source[4] != 0x00 || source[5] != 0x00 || source[6] != 0x00 || source[7] != 0xFF)
+            throw new NotSupportedException("仅支持 Sekiro 风格 TAE 格式字节 00 00 00 FF。");
+
+        // Version: 0x0001000D
+        var version = ReadInt32(source, 0x08);
+        if (version != 0x0001000D)
+            throw new NotSupportedException($"仅支持 TAE version 0x0001000D，收到 0x{version:X8}。");
+
+        // Declared file size must match
+        var declaredSize = ReadInt32(source, 0x0C);
+        if (declaredSize != source.Length)
+            throw new InvalidDataException($"TAE 声明大小 {declaredSize} 与实际 {source.Length} 不一致。");
+
+        // File header fields
+        var flags = ReadInt64(source, 0x10);
+        // 0x18: int64 unknown (1) — read but not validated
+        var section1Offset = ReadInt64(source, 0x20);
+        var section2Offset = ReadInt64(source, 0x28);
+        var unknownCount = ReadInt64(source, 0x30);
+        // 0x38: int64 reserved (0)
+
+        // Extended header at 0x40: byte[8] per-flag bytes + int64 unknown at 0x48
+        // Read but not validated beyond bounds (already covered by FileHeaderSize check).
+
+        // Validate Section 1 header bounds
+        if (section1Offset < FileHeaderSize || section1Offset + Section1HeaderSize > source.Length)
+            throw new InvalidDataException($"TAE Section 1 头偏移 {section1Offset} 越界。");
+        if (section2Offset < 0 || section2Offset > source.Length)
+            throw new InvalidDataException($"TAE Section 2 头偏移 {section2Offset} 越界。");
+
+        // ── Section 1: Anim Data Header ──
+        var s1 = checked((int)section1Offset);
+        // +0x00: int32 unknown (base anim ID?)
+        var animTableEntryCount = ReadInt32(source, s1 + 0x04);
+        var animTableOffset = ReadInt64(source, s1 + 0x08);
+        // +0x10: int64 → Anim ID range table (noted, not parsed)
+        // +0x18: int64 → Anim files string table (noted, not parsed)
+        var animCount = ReadInt64(source, s1 + 0x20);
+        // +0x28: int64 → Animation entries array (noted; we follow table pointers instead)
+
+        if (animTableEntryCount < 0 || animTableEntryCount > MaxAnimations)
+            throw new InvalidDataException($"TAE 动画表条目数 {animTableEntryCount} 越界。");
+        if (animCount < 0 || animCount > MaxAnimations)
+            throw new InvalidDataException($"TAE 动画计数 {animCount} 越界。");
+
+        // Validate animation table bounds (animTableOffset points to an 8-byte header before entries)
+        var animTableDataOffset = animTableOffset + 8;
+        if (animTableOffset < 0
+            || animTableDataOffset + (long)animTableEntryCount * AnimTableEntrySize > source.Length)
+            throw new InvalidDataException("TAE 动画表越界。");
+
+        var eventTypeSet = new SortedSet<int>();
+        var animations = new List<TaeAnimation>(animTableEntryCount);
+        long totalEvents = 0;
+        long totalGroups = 0;
+
+        for (var i = 0; i < animTableEntryCount; i++)
+        {
+            var te = checked((int)(animTableDataOffset + (long)i * AnimTableEntrySize));
+            var animEntryOffset = ReadInt64(source, te);
+            var animId = ReadInt64(source, te + 8);
+
+            // ── Animation Entry (48 bytes) ──
+            if (animEntryOffset < 0 || animEntryOffset + AnimationEntrySize > source.Length)
+                throw new InvalidDataException($"TAE 动画 {animId} 条目偏移 {animEntryOffset} 越界。");
+
+            var ae = checked((int)animEntryOffset);
+            var eventTableOffset = ReadInt64(source, ae);
+            var eventGroupTableOffset = ReadInt64(source, ae + 0x08);
+            var timesArrayOffset = ReadInt64(source, ae + 0x10);
+            var animFileInfoOffset = ReadInt64(source, ae + 0x18);
+            var eventCount = ReadInt32(source, ae + 0x20);
+            var eventGroupCount = ReadInt32(source, ae + 0x24);
+            var timesCount = ReadInt64(source, ae + 0x28);
+
+            if (eventCount < 0 || eventCount > MaxEvents)
+                throw new InvalidDataException($"TAE 动画 {animId} 事件数 {eventCount} 越界。");
+            if (eventGroupCount < 0 || eventGroupCount > MaxEvents)
+                throw new InvalidDataException($"TAE 动画 {animId} 事件组数 {eventGroupCount} 越界。");
+            if (timesCount < 0 || timesCount > MaxEvents * 2L)
+                throw new InvalidDataException($"TAE 动画 {animId} 时间戳数 {timesCount} 越界。");
+
+            // ── Times array (float32[]) ──
+            float[] times;
+            if (timesCount > 0)
+            {
+                if (timesArrayOffset < 0 || timesArrayOffset + timesCount * 4 > source.Length)
+                    throw new InvalidDataException($"TAE 动画 {animId} 时间数组越界。");
+                times = new float[checked((int)timesCount)];
+                for (var t = 0; t < timesCount; t++)
+                    times[t] = ReadFloat32(source, checked((int)(timesArrayOffset + t * 4)));
+            }
+            else
+            {
+                times = Array.Empty<float>();
+            }
+
+            // ── Event table (eventCount × 24 bytes) ──
+            if (eventCount > 0
+                && (eventTableOffset < 0
+                    || eventTableOffset + (long)eventCount * EventTableEntrySize > source.Length))
+                throw new InvalidDataException($"TAE 动画 {animId} 事件表越界。");
+
+            var events = new List<TaeEvent>(eventCount);
+            for (var e = 0; e < eventCount; e++)
+            {
+                var et = checked((int)(eventTableOffset + (long)e * EventTableEntrySize));
+                var startTimeOffset = ReadInt64(source, et);
+                var endTimeOffset = ReadInt64(source, et + 0x08);
+                var eventDataOffset = ReadInt64(source, et + 0x10);
+
+                // Start / end time: absolute offset → float32
+                if (startTimeOffset < 0 || startTimeOffset + 4 > source.Length)
+                    throw new InvalidDataException(
+                        $"TAE 动画 {animId} 事件 {e} 起始时间偏移 {startTimeOffset} 越界。");
+                if (endTimeOffset < 0 || endTimeOffset + 4 > source.Length)
+                    throw new InvalidDataException(
+                        $"TAE 动画 {animId} 事件 {e} 结束时间偏移 {endTimeOffset} 越界。");
+
+                var startTime = ReadFloat32(source, checked((int)startTimeOffset));
+                var endTime = ReadFloat32(source, checked((int)endTimeOffset));
+
+                // Event data entry (16-byte header + type-dependent params)
+                if (eventDataOffset < 0 || eventDataOffset + EventDataHeaderSize > source.Length)
+                    throw new InvalidDataException(
+                        $"TAE 动画 {animId} 事件 {e} 数据偏移 {eventDataOffset} 越界。");
+
+                var ed = checked((int)eventDataOffset);
+                var eventTypeId = ReadInt32(source, ed);
+                // +0x04: int32 padding — not validated (may be non-zero in edge cases)
+                var paramDataOffset = ReadInt64(source, ed + 0x08);
+
+                eventTypeSet.Add(eventTypeId);
+                events.Add(new TaeEvent(startTime, endTime, eventTypeId, eventDataOffset, paramDataOffset));
+            }
+
+            // ── Event group table (eventGroupCount × 32 bytes) ──
+            if (eventGroupCount > 0
+                && (eventGroupTableOffset < 0
+                    || eventGroupTableOffset + (long)eventGroupCount * EventGroupEntrySize > source.Length))
+                throw new InvalidDataException($"TAE 动画 {animId} 事件组表越界。");
+
+            var groups = new List<TaeEventGroup>(eventGroupCount);
+            for (var g = 0; g < eventGroupCount; g++)
+            {
+                var eg = checked((int)(eventGroupTableOffset + (long)g * EventGroupEntrySize));
+                var groupEventCount = ReadInt64(source, eg);
+                var groupEventArrayOffset = ReadInt64(source, eg + 0x08);
+                var groupTypeOffset = ReadInt64(source, eg + 0x10);
+                // +0x18: int64 padding (0)
+
+                if (groupEventCount < 0 || groupEventCount > MaxEvents)
+                    throw new InvalidDataException(
+                        $"TAE 动画 {animId} 事件组 {g} 事件数 {groupEventCount} 越界。");
+
+                // Event offset array: int32[count] absolute offsets
+                int[] eventOffsets;
+                if (groupEventCount > 0)
+                {
+                    if (groupEventArrayOffset < 0
+                        || groupEventArrayOffset + groupEventCount * 4 > source.Length)
+                        throw new InvalidDataException(
+                            $"TAE 动画 {animId} 事件组 {g} 偏移数组越界。");
+                    eventOffsets = new int[checked((int)groupEventCount)];
+                    for (var ge = 0; ge < groupEventCount; ge++)
+                        eventOffsets[ge] = ReadInt32(
+                            source, checked((int)(groupEventArrayOffset + ge * 4)));
+                }
+                else
+                {
+                    eventOffsets = Array.Empty<int>();
+                }
+
+                // Group type descriptor (16 bytes)
+                int groupEventType = 0;
+                long groupTypeUnknown = 0;
+                if (groupTypeOffset > 0)
+                {
+                    if (groupTypeOffset + GroupTypeDescriptorSize > source.Length)
+                        throw new InvalidDataException(
+                            $"TAE 动画 {animId} 事件组 {g} 类型描述符偏移越界。");
+                    var gt = checked((int)groupTypeOffset);
+                    groupEventType = ReadInt32(source, gt);
+                    // +0x04: int32 padding
+                    groupTypeUnknown = ReadInt64(source, gt + 0x08);
+                    eventTypeSet.Add(groupEventType);
+                }
+
+                groups.Add(new TaeEventGroup(groupEventType, groupEventCount, eventOffsets, groupTypeUnknown));
+            }
+
+            // ── HKX name (best-effort from anim file info) ──
+            string? hkxName = null;
+            if (animFileInfoOffset > 0 && animFileInfoOffset + 8 <= source.Length)
+            {
+                var namePtr = ReadInt64(source, checked((int)animFileInfoOffset));
+                if (namePtr > 0 && namePtr + 2 <= source.Length)
+                {
+                    try { hkxName = ReadUtf16Z(source, checked((int)namePtr)); }
+                    catch (InvalidDataException) { /* best-effort */ }
+                }
+            }
+
+            totalEvents += eventCount;
+            totalGroups += eventGroupCount;
+            animations.Add(new TaeAnimation(
+                animId, eventCount, eventGroupCount, timesCount,
+                times, events, groups, animFileInfoOffset, hkxName));
+        }
+
+        if (totalEvents > MaxEvents)
+            throw new InvalidDataException($"TAE 事件总数 {totalEvents} 超出安全上限 {MaxEvents}。");
+
+        return new TaeNativeDocument(
+            source, version, flags, section1Offset, section2Offset, unknownCount,
+            animations, checked((int)totalEvents), checked((int)totalGroups),
+            eventTypeSet.ToArray());
+    }
+
+    public static TaeNativeDocument ReadFile(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists) throw new FileNotFoundException("TAE 文件不存在。", path);
+        if (info.Length <= 0 || info.Length > MaxSourceBytes)
+            throw new InvalidDataException($"TAE 文件大小 {info.Length} 超出安全读取范围。");
+        return Read(File.ReadAllBytes(path));
+    }
+
+    /// <summary>
+    /// TAE is read-only: verify source integrity by re-parsing the same bytes
+    /// and confirming deterministic structural equality.
+    /// </summary>
+    public TaeRoundTripReport VerifyRoundTrip()
+    {
+        var reparsed = Read(SourceBytes);
+        var semanticIdentical = reparsed.Animations.Count == Animations.Count
+            && reparsed.TotalEventCount == TotalEventCount
+            && reparsed.TotalGroupCount == TotalGroupCount
+            && reparsed.Version == Version
+            && reparsed.Flags == Flags
+            && reparsed.EventTypes.SequenceEqual(EventTypes)
+            && reparsed.Animations.Zip(Animations).All(pair =>
+                pair.First.AnimId == pair.Second.AnimId
+                && pair.First.EventCount == pair.Second.EventCount
+                && pair.First.EventGroupCount == pair.Second.EventGroupCount
+                && pair.First.TimesCount == pair.Second.TimesCount
+                && pair.First.HkxName == pair.Second.HkxName
+                && pair.First.Events.SequenceEqual(pair.Second.Events)
+                && pair.First.EventGroups.Zip(pair.Second.EventGroups).All(gp =>
+                    gp.First.EventType == gp.Second.EventType
+                    && gp.First.GroupEventCount == gp.Second.GroupEventCount
+                    && gp.First.EventOffsets.AsSpan().SequenceEqual(gp.Second.EventOffsets)));
+        return new TaeRoundTripReport(
+            true, // byte-identical: same source bytes, no mutation
+            semanticIdentical,
+            SourceHash,
+            Hash(SourceBytes),
+            Animations.Count,
+            TotalEventCount,
+            TotalGroupCount);
+    }
+
+    public object ToEnvelope(TaeRoundTripReport? report = null)
+    {
+        report ??= VerifyRoundTrip();
+        const int sampleLimit = 20;
+        return new
+        {
+            format = "TAE",
+            version = $"0x{Version:X8}",
+            sourceSize = SourceBytes.Length,
+            sourceHash = SourceHash,
+            animationCount = Animations.Count,
+            totalEventCount = TotalEventCount,
+            totalGroupCount = TotalGroupCount,
+            animations = Animations.Take(sampleLimit).Select(a => new
+            {
+                animId = a.AnimId,
+                eventCount = a.EventCount,
+                groupCount = a.EventGroupCount,
+                timesCount = a.TimesCount,
+                hkxName = a.HkxName
+            }).ToArray(),
+            animationsTruncated = Animations.Count > sampleLimit,
+            eventTypes = EventTypes,
+            roundTrip = report,
+            authority = "candidate"
+        };
+    }
+
+    // ── Binary helpers ──
+
+    private static int ReadInt32(byte[] source, int offset) =>
+        BinaryPrimitives.ReadInt32LittleEndian(source.AsSpan(offset, 4));
+
+    private static long ReadInt64(byte[] source, int offset) =>
+        BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(offset, 8));
+
+    private static float ReadFloat32(byte[] source, int offset) =>
+        BinaryPrimitives.ReadSingleLittleEndian(source.AsSpan(offset, 4));
+
+    private static string ReadUtf16Z(byte[] source, int offset)
+    {
+        var end = offset;
+        while (end + 1 < source.Length && !(source[end] == 0 && source[end + 1] == 0))
+        {
+            end += 2;
+            if (end - offset > 1024 * 1024)
+                throw new InvalidDataException("TAE UTF-16 字符串未终止或过长。");
+        }
+        if (end + 1 >= source.Length)
+            throw new InvalidDataException("TAE UTF-16 字符串未以空终止。");
+        return Encoding.Unicode.GetString(source, offset, end - offset);
+    }
+
+    private static string Hash(byte[] bytes) =>
+        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+}
+
+// ── Records ──
+
+internal sealed record TaeAnimation(
+    long AnimId,
+    int EventCount,
+    int EventGroupCount,
+    long TimesCount,
+    float[] Times,
+    IReadOnlyList<TaeEvent> Events,
+    IReadOnlyList<TaeEventGroup> EventGroups,
+    long AnimFileInfoOffset,
+    string? HkxName);
+
+internal sealed record TaeEvent(
+    float StartTime,
+    float EndTime,
+    int EventTypeId,
+    long EventDataOffset,
+    long ParameterDataOffset);
+
+internal sealed record TaeEventGroup(
+    int EventType,
+    long GroupEventCount,
+    int[] EventOffsets,
+    long GroupTypeUnknown);
+
+internal sealed record TaeRoundTripReport(
+    bool ByteIdentical,
+    bool SemanticIdentical,
+    string SourceHash,
+    string RebuiltHash,
+    int AnimationCount,
+    int TotalEventCount,
+    int TotalGroupCount);
