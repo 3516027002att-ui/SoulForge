@@ -5,13 +5,26 @@
 
 import { randomUUID } from 'node:crypto';
 import type {
+  EmevdDslCompileRequest,
+  EmevdDslCompileResult,
   EmevdEditorDocument,
   EmevdEditorMutation,
   EmevdEventIr,
+  EmevdMutationPlan,
   EmevdSelection,
   EmevdViewId
 } from '@soulforge/shared';
+import type { OperationLogStore } from '../patch/operationLog.js';
+import type { WorkspaceSession } from '../workspace/workspaceSession.js';
+import type { EmedfRegistry } from '../emevd/emedfSchema.js';
+import { mutateInstructionArg } from '../emevd/emedfSchema.js';
+import { compileEmevdPatchDsl } from '../emevd/dslCompiler.js';
 import { attachEmevdStableIdentity, formatEmevdAnchor } from '../emevd/stableIdentity.js';
+import { decodeStrictBase64 } from '../util/base64.js';
+import {
+  commitEmevdPlanViaPatchEngine,
+  type EmevdPlanCommitResult
+} from './emevdPlanCommit.js';
 
 export interface EmevdFourViewState {
   document: EmevdEditorDocument;
@@ -229,5 +242,212 @@ export function tryParseEmevdDsl(_text: string): {
     ok: false,
     code: 'EMEVD_DSL_NON_AUTHORITATIVE',
     message: 'DSL 文本仅供显示；结构化 mutation 必须走事件表/属性面板，解析错误不会污染文档。'
+  };
+}
+
+/**
+ * Apply a compiled DSL plan to the editor document (revision +1).
+ * Used after a successful commit so the four-view layer stays in sync.
+ * An empty plan returns the document unchanged (nothing consumed).
+ */
+export function applyEmevdPlanToDocument(
+  document: EmevdEditorDocument,
+  plan: EmevdMutationPlan,
+  registry: EmedfRegistry
+): { ok: true; document: EmevdEditorDocument } | { ok: false; code: string; message: string } {
+  if (plan.documentInstanceId !== document.documentInstanceId) {
+    return {
+      ok: false,
+      code: 'EMEVD_PLAN_INSTANCE_MISMATCH',
+      message: '计划属于另一个文档实例，拒绝应用。'
+    };
+  }
+  if (plan.baseRevision !== document.revision) {
+    return {
+      ok: false,
+      code: 'EMEVD_PLAN_STALE_REVISION',
+      message: `计划基于 revision ${plan.baseRevision}，当前为 ${document.revision}。`
+    };
+  }
+  if (plan.operations.length === 0) {
+    return { ok: true, document };
+  }
+
+  const events = document.events.map((event) => ({ ...event, instructions: [...event.instructions] }));
+  for (const operation of plan.operations) {
+    if (operation.kind === 'set_event_id') {
+      const index = events.findIndex(
+        (event) => event.anchor && formatEmevdAnchor('event', event.anchor) === operation.eventAnchor
+      );
+      if (index < 0) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的事件锚不存在。' };
+      }
+      if (events.some((event) => event.eventId === operation.after)) {
+        return { ok: false, code: 'EMEVD_EVENT_ID_DUPLICATE', message: '计划产生重复事件 ID。' };
+      }
+      const previous = events[index]!;
+      const eventUri = `${document.resourceUri}#event/${operation.after}`;
+      events[index] = {
+        ...previous,
+        eventId: operation.after,
+        eventUri,
+        instructions: previous.instructions.map((instr, instrIndex) => ({
+          ...instr,
+          instructionUri: `${eventUri}/instr/${instrIndex}`
+        }))
+      };
+    } else if (operation.kind === 'set_event_rest_behavior') {
+      const index = events.findIndex(
+        (event) => event.anchor && formatEmevdAnchor('event', event.anchor) === operation.eventAnchor
+      );
+      if (index < 0) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的事件锚不存在。' };
+      }
+      events[index] = { ...events[index]!, restBehavior: operation.after };
+    } else if (operation.kind === 'set_instruction_arg') {
+      const eventIndex = events.findIndex(
+        (event) => event.anchor && formatEmevdAnchor('event', event.anchor) === operation.eventAnchor
+      );
+      const event = eventIndex >= 0 ? events[eventIndex] : undefined;
+      const instrIndex = event?.instructions.findIndex(
+        (instr) => instr.anchor
+          && formatEmevdAnchor('instruction', instr.anchor) === operation.instructionAnchor
+      );
+      if (event === undefined || instrIndex === undefined || instrIndex < 0) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的指令锚不存在。' };
+      }
+      const previous = event.instructions[instrIndex]!;
+      let currentArgs: Buffer;
+      try {
+        currentArgs = decodeStrictBase64(previous.argsBase64, { allowEmpty: true });
+      } catch {
+        return { ok: false, code: 'EMEVD_PLAN_ARGS_DECODE_FAILED', message: '指令 argsBase64 无效。' };
+      }
+      const mutated = mutateInstructionArg(
+        registry, previous.bank, previous.id, currentArgs, operation.argument, operation.after
+      );
+      if (!mutated.ok) {
+        return { ok: false, code: mutated.code, message: mutated.message };
+      }
+      const instructions = [...event.instructions];
+      instructions[instrIndex] = {
+        ...previous,
+        argsBase64: mutated.args.toString('base64')
+      };
+      events[eventIndex] = { ...event, instructions };
+    }
+  }
+
+  return {
+    ok: true,
+    document: {
+      ...document,
+      revision: document.revision + 1,
+      events,
+      diagnostics: [
+        ...document.diagnostics,
+        {
+          severity: 'info',
+          code: 'EMEVD_PLAN_APPLIED',
+          message: `已应用 DSL 计划（${plan.operations.length} 个操作）。`
+        }
+      ]
+    }
+  };
+}
+
+export interface EmevdDslPlanSubmitRequest {
+  compileRequest: EmevdDslCompileRequest;
+  document: EmevdEditorDocument;
+  registry: EmedfRegistry;
+  /** Absolute path of the EMEVD file on the writable overlay. */
+  sourcePath: string;
+  /** SHA-256 of the source file bytes (commit precondition). */
+  expectedDocumentHash: string;
+  allowedRoots: string[];
+  workspaceId: string;
+  /** Overlay root; the commit target must stay inside it. */
+  workspaceRoot: string;
+  /** Root where Bridge staging temp dirs are created. */
+  stagingRoot: string;
+  targetUri?: string;
+  title?: string;
+  session?: WorkspaceSession;
+  operationLog?: OperationLogStore;
+  backupBaseDir?: string;
+  recoveryDir?: string;
+  timeoutMs?: number;
+}
+
+export interface EmevdDslPlanSubmitResult {
+  ok: boolean;
+  plan?: EmevdMutationPlan;
+  nextDocument?: EmevdEditorDocument;
+  commit?: EmevdPlanCommitResult;
+  diagnostics: Array<{ severity: string; code: string; message: string }>;
+}
+
+/**
+ * Production DSL submit entry for the four-view editing layer:
+ * compile → typed plan → Bridge batch staging → file_replace PatchIR →
+ * WorkspaceTransaction (stage/validate/commit/backup/re-read/rollback).
+ * Returns the next editor document (revision +1) on success.
+ */
+export async function submitEmevdDslPlanViaFourView(
+  input: EmevdDslPlanSubmitRequest
+): Promise<EmevdDslPlanSubmitResult> {
+  const compiled: EmevdDslCompileResult = compileEmevdPatchDsl(
+    input.compileRequest,
+    input.document,
+    input.registry
+  );
+  if (!compiled.ok || !compiled.plan) {
+    return {
+      ok: false,
+      diagnostics: compiled.diagnostics.map((d) => ({
+        severity: d.severity,
+        code: d.code,
+        message: d.message
+      }))
+    };
+  }
+
+  const commit = await commitEmevdPlanViaPatchEngine({
+    plan: compiled.plan,
+    document: input.document,
+    registry: input.registry,
+    sourcePath: input.sourcePath,
+    expectedDocumentHash: input.expectedDocumentHash,
+    allowedRoots: input.allowedRoots,
+    workspaceId: input.workspaceId,
+    workspaceRoot: input.workspaceRoot,
+    stagingRoot: input.stagingRoot,
+    ...(input.targetUri !== undefined ? { targetUri: input.targetUri } : {}),
+    ...(input.title !== undefined ? { title: input.title } : {}),
+    ...(input.session !== undefined ? { session: input.session } : {}),
+    ...(input.operationLog !== undefined ? { operationLog: input.operationLog } : {}),
+    ...(input.backupBaseDir !== undefined ? { backupBaseDir: input.backupBaseDir } : {}),
+    ...(input.recoveryDir !== undefined ? { recoveryDir: input.recoveryDir } : {}),
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {})
+  });
+  if (!commit.ok) {
+    return { ok: false, plan: compiled.plan, commit, diagnostics: commit.diagnostics };
+  }
+
+  const applied = applyEmevdPlanToDocument(input.document, compiled.plan, input.registry);
+  if (!applied.ok) {
+    return {
+      ok: false,
+      plan: compiled.plan,
+      commit,
+      diagnostics: [{ severity: 'error', code: applied.code, message: applied.message }]
+    };
+  }
+  return {
+    ok: true,
+    plan: compiled.plan,
+    nextDocument: applied.document,
+    commit,
+    diagnostics: commit.diagnostics
   };
 }

@@ -40,11 +40,26 @@ internal static class EmevdNativeWriter
         }
 
         var reread = EmevdNativeDocument.ReadFile(outputPath);
+
+        // Build the id rename map (original -> final) so verification can locate
+        // events renamed by update_id even when a later patch references the old id.
+        var renameMap = new Dictionary<long, long>();
+        foreach (var patch in patches)
+        {
+            if (patch.Kind != "update_id" || patch.EventId == patch.NewEventId) continue;
+            var sourceId = patch.EventId;
+            var guard = 0;
+            while (renameMap.TryGetValue(sourceId, out var mapped) && mapped != patch.NewEventId!.Value && guard++ < 64)
+                sourceId = mapped;
+            renameMap[sourceId] = patch.NewEventId.Value;
+        }
+
         foreach (var patch in patches)
         {
             if (patch.Kind is "set_rest_behavior" or "update_id")
             {
-                var targetId = patch.Kind == "update_id" ? patch.NewEventId : patch.EventId;
+                var rawTarget = patch.Kind == "update_id" ? patch.NewEventId!.Value : patch.EventId;
+                var targetId = ResolveFinalId(rawTarget, renameMap);
                 var ev = reread.Events.FirstOrDefault(e => e.Id == targetId);
                 if (ev is null) throw new InvalidDataException("EMEVD mutation 后找不到事件。");
                 if (patch.Kind == "set_rest_behavior" && patch.RestBehavior is not null
@@ -81,6 +96,16 @@ internal static class EmevdNativeWriter
             outputSize = reread.SourceBytes.Length,
             rereadVerified = true
         };
+    }
+
+    /// <summary>Follow the rename chain to the final event id after update_id patches.</summary>
+    private static long ResolveFinalId(long id, IReadOnlyDictionary<long, long> renameMap)
+    {
+        var current = id;
+        var guard = 0;
+        while (renameMap.TryGetValue(current, out var next) && guard++ < 64)
+            current = next;
+        return current;
     }
 
     private static EmevdPatch ParsePatch(JsonElement item)

@@ -101,7 +101,9 @@
     "codexpro:start": "codexpro start --root . --mode agent --write workspace --bash safe --bash-session soulforge --require-bash-session --tool-mode standard",
     "codexpro:start:agent": "npm run codexpro:start",
     "codexpro:start:handoff": "codexpro start --root . --mode handoff --no-bash --tool-mode standard",
-    "codexpro:pro-bundle": "codexpro pro-bundle --root ."
+    "codexpro:pro-bundle": "codexpro pro-bundle --root .",
+    "test:emevd-plan-production": "npm run test:emevd-plan-production -w @soulforge/core",
+    "probe:behavior-headers": "npm run probe:behavior-headers -w @soulforge/core"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

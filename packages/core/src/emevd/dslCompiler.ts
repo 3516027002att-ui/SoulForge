@@ -283,10 +283,22 @@ export function compileEmevdPatchDsl(
     }
   }
 
+  // Collision check: only reject ids explicitly assigned by this plan when they
+  // collide with any other event's final id. Pre-existing duplicate ids in the
+  // source document (observed in real Sekiro corpora) are tolerated as long as
+  // the plan does not modify those events.
+  const explicitlySetIds = new Set<string>();
+  for (const eventPatch of ast.events) {
+    for (const operation of eventPatch.operations) {
+      if (operation.field === 'id') explicitlySetIds.add(eventPatch.anchor);
+    }
+  }
   const ids = new Map<number, string>();
   for (const [anchor, id] of nextEventIds) {
     const previous = ids.get(id);
-    if (previous !== undefined && previous !== anchor) {
+    const touched = explicitlySetIds.has(anchor)
+      || (previous !== undefined && explicitlySetIds.has(previous));
+    if (previous !== undefined && previous !== anchor && touched) {
       add(diagnostic('EMEVD_DSL_EVENT_ID_DUPLICATE', `Event ID ${id} would be duplicated.`, ast.span, {
         resourceUri: request.resourceUri,
         targetAnchor: anchor

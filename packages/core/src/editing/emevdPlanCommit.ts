@@ -7,33 +7,60 @@
  * (the DSL compiler already rejects them as read-only).
  */
 
+import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import type {
   EmevdEditorDocument,
-  EmevdEditorMutation,
   EmevdMutationPlan,
-  EmevdPlannedMutation
+  PatchIR,
+  PatchIrOperation
 } from '@soulforge/shared';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 import { mutateInstructionArg } from '../emevd/emedfSchema.js';
 import { decodeStrictBase64 } from '../util/base64.js';
 import { formatEmevdAnchor } from '../emevd/stableIdentity.js';
-import {
-  commitEmevdMutationViaBridge,
-  type EmevdBridgeCommitResult,
-  type EmevdBridgeNativeMutation
-} from './emevdBridgeCommit.js';
+import type { OperationLogStore } from '../patch/operationLog.js';
+import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import { runBridge } from '../bridge/runBridge.js';
+import { stageBridgeOutput } from './bridgeStaging.js';
+import type { EmevdBridgeCommitResult, EmevdBridgeNativeMutation } from './emevdBridgeCommit.js';
+import { commitEmevdBatchViaBridge } from './emevdBridgeCommit.js';
+import { createPatchIr } from '../patch-engine/patchIr.js';
+import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
 
 export interface EmevdPlanCommitRequest {
   plan: EmevdMutationPlan;
   document: EmevdEditorDocument;
   registry: EmedfRegistry;
   sourcePath: string;
-  outputPath: string;
   expectedDocumentHash: string;
   allowedRoots: string[];
-  writableRoots: string[];
   timeoutMs?: number;
+}
+
+/** Production extensions: Patch Engine workspace + transaction wiring. */
+export interface EmevdPlanPatchEngineCommitRequest extends EmevdPlanCommitRequest {
+  workspaceId: string;
+  /** Overlay root; the commit target must stay inside it. */
+  workspaceRoot: string;
+  /** Root where Bridge staging temp dirs are created (outside Mod/game dirs). */
+  stagingRoot: string;
+  targetUri?: string;
+  title?: string;
+  session?: WorkspaceSession;
+  operationLog?: OperationLogStore;
+  backupBaseDir?: string;
+  recoveryDir?: string;
+}
+
+export interface EmevdReReadReport {
+  ok: boolean;
+  outputHash: string;
+  eventCount: number;
+  instructionCount: number;
+  semanticIdentical: boolean;
+  /** Committed file hash equals the Bridge-staged output hash. */
+  byteConsistent: boolean;
 }
 
 export interface EmevdPlanCommitResult {
@@ -42,6 +69,9 @@ export interface EmevdPlanCommitResult {
   eventCount?: number;
   instructionCount?: number;
   mutationCount: number;
+  opId?: string;
+  committedPath?: string;
+  reRead?: EmevdReReadReport;
   diagnostics: Array<{ severity: string; code: string; message: string }>;
 }
 
@@ -203,13 +233,22 @@ export function planToBridgeMutations(
   return { ok: true, mutations: all };
 }
 
+export interface EmevdPlanStageResult {
+  ok: boolean;
+  bytes?: Buffer;
+  result?: EmevdBridgeCommitResult;
+  mutationCount: number;
+  diagnostics: Array<{ severity: string; code: string; message: string }>;
+}
+
 /**
- * Stage an EmevdMutationPlan via Bridge as a single batch write.
- * The Bridge C# writer supports a `mutations` array for atomic batch application.
+ * Stage an EmevdMutationPlan via Bridge as a single atomic batch write
+ * (the C# writer applies the `mutations` array and re-reads the output).
+ * Staging only: bytes are returned for the caller to commit via Patch Engine.
  */
-export async function commitEmevdPlanViaBridge(
-  request: EmevdPlanCommitRequest
-): Promise<EmevdPlanCommitResult> {
+export async function stageEmevdPlanViaBridge(
+  request: EmevdPlanCommitRequest & { stagingRoot: string }
+): Promise<EmevdPlanStageResult> {
   const converted = planToBridgeMutations(request.plan, request.document, request.registry);
   if (!converted.ok) {
     return {
@@ -230,64 +269,232 @@ export async function commitEmevdPlanViaBridge(
     };
   }
 
-  const commandOptions: Record<string, unknown> = {
-    outputPath: request.outputPath,
-    expectedDocumentHash: request.expectedDocumentHash,
-    mutations: converted.mutations.map((m) => {
-      if (m.kind === 'set_instruction_args') {
-        return {
-          kind: 'set_instruction_args',
-          instructionIndex: m.instructionIndex,
-          argsBase64: m.argsBase64,
-          ...(m.eventId !== undefined ? { eventId: m.eventId } : {})
-        };
-      }
-      if (m.kind === 'set_rest_behavior') {
-        return { kind: 'set_rest_behavior', eventId: m.eventId, restBehavior: m.restBehavior };
-      }
-      if (m.kind === 'update_id') {
-        return { kind: 'update_id', eventId: m.eventId, newEventId: m.newEventId };
-      }
-      if (m.kind === 'add_event') {
-        return { kind: 'add_event', newEventId: m.newEventId, ...(m.restBehavior !== undefined ? { restBehavior: m.restBehavior } : {}) };
-      }
-      if (m.kind === 'delete_event') {
-        return { kind: 'delete_event', eventId: m.eventId };
-      }
-      if (m.kind === 'duplicate_event') {
-        return { kind: 'duplicate_event', eventId: m.eventId, newEventId: m.newEventId };
-      }
-      return m;
+  const staged = await stageBridgeOutput<EmevdBridgeCommitResult>({
+    stagingRoot: request.stagingRoot,
+    prefix: 'emevd-plan',
+    fileName: 'plan-mutated.emevd',
+    allowedRoots: (stagingRoot) => uniqueRoots([...request.allowedRoots, stagingRoot]),
+    write: (context) => commitEmevdBatchViaBridge({
+      sourcePath: request.sourcePath,
+      outputPath: context.outputPath,
+      expectedDocumentHash: request.expectedDocumentHash,
+      allowedRoots: context.allowedRoots,
+      writableRoots: context.writableRoots,
+      mutations: converted.mutations,
+      ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
     })
-  };
-
-  const result = await runBridge<{
-    outputHash?: string;
-    eventCount?: number;
-    instructionCount?: number;
-    mutationCount?: number;
-  }>({
-    command: 'write-emevd',
-    filePath: request.sourcePath,
-    allowedRoots: request.allowedRoots,
-    writableRoots: request.writableRoots,
-    timeoutMs: request.timeoutMs ?? 120_000,
-    commandOptions
   });
 
-  const ok = result.diagnostics.some((d) => d.code === 'EMEVD_STAGING_WRITE_VERIFIED');
+  if (!staged.ok) {
+    const bridgeDiagnostics = staged.result?.diagnostics ?? [];
+    const allDiagnostics: EmevdPlanStageResult['diagnostics'] = [
+      ...bridgeDiagnostics.map((d) => ({ severity: d.severity, code: d.code, message: d.message })),
+      ...staged.diagnostics.map((d) => ({ severity: d.severity, code: d.code, message: d.message }))
+    ];
+    if (allDiagnostics.length === 0) {
+      allDiagnostics.push({
+        severity: 'error',
+        code: 'BRIDGE_STAGING_FAILED',
+        message: 'EMEVD 计划经 Bridge 暂存失败，且未返回结构化诊断。'
+      });
+    }
+    return { ok: false, mutationCount: converted.mutations.length, diagnostics: allDiagnostics };
+  }
+
   return {
-    ok,
-    ...(result.data?.outputHash ? { outputHash: result.data.outputHash } : {}),
-    ...(result.data?.eventCount !== undefined ? { eventCount: result.data.eventCount } : {}),
-    ...(result.data?.instructionCount !== undefined ? { instructionCount: result.data.instructionCount } : {}),
+    ok: true,
+    bytes: staged.bytes,
+    result: staged.result,
     mutationCount: converted.mutations.length,
-    diagnostics: result.diagnostics.map((d) => ({
+    diagnostics: staged.result.diagnostics.map((d) => ({
       severity: d.severity,
       code: d.code,
       message: d.message
     }))
   };
+}
+
+/**
+ * Build the file_replace PatchIR for Bridge-staged EMEVD bytes.
+ * expectedHash precondition prevents committing over a stale source.
+ */
+export function buildEmevdFileReplacePatch(input: {
+  workspaceId: string;
+  title: string;
+  targetUri: string;
+  targetPath: string;
+  stagedBytes: Buffer;
+  expectedHash: string;
+}): PatchIR {
+  const op: Extract<PatchIrOperation, { kind: 'file_replace' }> = {
+    id: randomUUID(),
+    kind: 'file_replace',
+    targetUri: input.targetUri,
+    targetPath: input.targetPath,
+    resourceKind: 'event',
+    newContentBase64: input.stagedBytes.toString('base64'),
+    expectedHash: input.expectedHash,
+    preconditions: [
+      {
+        type: 'overlay_writable',
+        description: 'Target must be inside writable overlay',
+        targetUri: input.targetUri
+      },
+      {
+        type: 'content_hash',
+        description: 'Expected content hash before replace',
+        expectedHash: input.expectedHash,
+        targetUri: input.targetUri
+      }
+    ],
+    validatorRequirements: [
+      { validatorId: 'whole_file_replace', scope: 'before_staging', required: true },
+      { validatorId: 'file_risk', scope: 'before_staging', required: true },
+      { validatorId: 'binary_roundtrip', scope: 'staged_output', required: false },
+      { validatorId: 'binary_roundtrip', scope: 'after_commit', required: false }
+    ],
+    riskLevel: 'high',
+    requiresConfirmation: true,
+    metadata: {
+      nativeFormatAuthority: true,
+      requiresConfirmation: true,
+      emevdPlanBatch: true
+    }
+  };
+  return createPatchIr({
+    workspaceId: input.workspaceId,
+    title: input.title,
+    author: 'user',
+    operations: [op]
+  });
+}
+
+/**
+ * Production EMEVD DSL plan commit:
+ * Bridge batch staging → file_replace PatchIR → WorkspaceTransaction
+ * (stage/validate/commit/backup/re-read/rollback) → Bridge re-read of the
+ * committed file for byte-level consistency.
+ */
+export async function commitEmevdPlanViaPatchEngine(
+  request: EmevdPlanPatchEngineCommitRequest
+): Promise<EmevdPlanCommitResult> {
+  const staged = await stageEmevdPlanViaBridge(request);
+  if (!staged.ok) {
+    return { ok: false, mutationCount: staged.mutationCount, diagnostics: staged.diagnostics };
+  }
+  if (!staged.bytes || !staged.result) {
+    if (staged.mutationCount === 0) {
+      // No-op plan: nothing to stage or commit.
+      return { ok: true, mutationCount: 0, diagnostics: staged.diagnostics };
+    }
+    return {
+      ok: false,
+      mutationCount: staged.mutationCount,
+      diagnostics: [{
+        severity: 'error',
+        code: 'EMEVD_PLAN_STAGE_BYTES_MISSING',
+        message: 'Bridge 暂存成功但未返回输出字节，拒绝提交。'
+      }]
+    };
+  }
+
+  const patch = buildEmevdFileReplacePatch({
+    workspaceId: request.workspaceId,
+    title: request.title ?? `EMEVD DSL plan ${request.plan.planFingerprint.slice(0, 8)}`,
+    targetUri: request.targetUri ?? pathToFileURL(request.sourcePath).toString(),
+    targetPath: request.sourcePath,
+    stagedBytes: staged.bytes,
+    expectedHash: request.expectedDocumentHash
+  });
+
+  const committed = await executePatchIrThroughTransaction(patch, {
+    workspaceRoot: request.workspaceRoot,
+    ...(request.session !== undefined ? { session: request.session } : {}),
+    ...(request.operationLog !== undefined ? { operationLog: request.operationLog } : {}),
+    ...(request.backupBaseDir !== undefined ? { backupBaseDir: request.backupBaseDir } : {}),
+    ...(request.recoveryDir !== undefined ? { recoveryDir: request.recoveryDir } : {})
+  });
+  const commitDiagnostics: Array<{ severity: string; code: string; message: string }> =
+    committed.diagnostics.map((d) => ({ severity: d.severity, code: d.code, message: d.message }));
+
+  if (committed.changedFiles.length === 0) {
+    return {
+      ok: false,
+      mutationCount: staged.mutationCount,
+      opId: committed.opId,
+      diagnostics: commitDiagnostics
+    };
+  }
+
+  // Re-read the committed file via Bridge (production re-read boundary).
+  const reRead = await runBridge<EmevdReadEnvelope>({
+    command: 'read-emevd-document',
+    filePath: request.sourcePath,
+    allowedRoots: request.allowedRoots,
+    timeoutMs: request.timeoutMs ?? 120_000
+  });
+  const reReadHash = reRead.data?.sourceHash ?? '';
+  const byteConsistent = reRead.parseStatus !== 'failed'
+    && reReadHash.toLowerCase() === (staged.result.outputHash ?? '').toLowerCase();
+  const semanticIdentical = reRead.data?.roundTrip?.semanticIdentical === true;
+  const reReadOk = byteConsistent && semanticIdentical;
+
+  const diagnostics: EmevdPlanCommitResult['diagnostics'] = [
+    ...commitDiagnostics,
+    ...(reReadOk
+      ? [{
+          severity: 'info' as const,
+          code: 'EMEVD_REREAD_VERIFIED',
+          message: '提交后重读通过：字节一致且语义往返一致。'
+        }]
+      : [{
+          severity: 'error' as const,
+          code: 'EMEVD_REREAD_FAILED',
+          message: reRead.parseStatus === 'failed'
+            ? '提交后重读失败：Bridge 无法解析已提交文件。'
+            : `提交后重读不一致：字节或语义往返未通过（期望 ${staged.result.outputHash}，实际 ${reReadHash}）。`
+        }])
+  ];
+
+  return {
+    ok: reReadOk,
+    ...(staged.result.outputHash ? { outputHash: staged.result.outputHash } : {}),
+    ...(staged.result.eventCount !== undefined ? { eventCount: staged.result.eventCount } : {}),
+    ...(staged.result.instructionCount !== undefined
+      ? { instructionCount: staged.result.instructionCount }
+      : {}),
+    mutationCount: staged.mutationCount,
+    opId: committed.opId,
+    ...(committed.changedFiles[0] !== undefined ? { committedPath: committed.changedFiles[0] } : {}),
+    reRead: {
+      ok: reReadOk,
+      outputHash: reReadHash,
+      eventCount: reRead.data?.eventCount ?? 0,
+      instructionCount: reRead.data?.instructionCount ?? 0,
+      semanticIdentical,
+      byteConsistent
+    },
+    diagnostics
+  };
+}
+
+interface EmevdReadEnvelope {
+  sourceHash?: string;
+  eventCount?: number;
+  instructionCount?: number;
+  roundTrip?: { semanticIdentical?: boolean; byteIdentical?: boolean };
+}
+
+function uniqueRoots(roots: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const root of roots) {
+    const key = process.platform === 'win32' ? root.toLowerCase() : root;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(root);
+  }
+  return result;
 }
 
 function findInstructionByAnchor(
