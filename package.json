@@ -104,6 +104,7 @@
     "codexpro:pro-bundle": "codexpro pro-bundle --root .",
     "test:emevd-plan-production": "npm run test:emevd-plan-production -w @soulforge/core",
     "test:emevd-coverage": "npm run test:emevd-coverage -w @soulforge/core",
+    "test:emevd-full-document": "npm run test:emevd-full-document -w @soulforge/core",
     "probe:behavior-headers": "npm run probe:behavior-headers -w @soulforge/core"
   },
   "devDependencies": {

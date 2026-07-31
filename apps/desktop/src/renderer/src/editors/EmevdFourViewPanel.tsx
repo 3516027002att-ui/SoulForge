@@ -1,6 +1,12 @@
 import { useMemo, useState, type ReactElement } from 'react';
 import type { EmevdEditorDocument, EmevdSelection, EmevdViewId } from '@soulforge/shared';
 
+export interface EmevdDslSubmitResult {
+  ok: boolean;
+  diagnostics: Array<{ severity: string; code: string; message: string }>;
+  nextDslTemplate?: string;
+}
+
 export interface EmevdFourViewPanelProps {
   /** Pre-built structural document from main/Bridge (no Node in renderer). */
   initialDocument: EmevdEditorDocument;
@@ -11,6 +17,13 @@ export interface EmevdFourViewPanelProps {
     newEventId?: number;
     baseRevision: number;
   }) => void;
+  /**
+   * Patch-DSL template rendered from the authoritative full document held in
+   * main. When provided, the DSL view becomes editable and can be submitted
+   * through onDslSubmit; the renderer never holds the full document.
+   */
+  dslTemplate?: string;
+  onDslSubmit?: (sourceText: string) => Promise<EmevdDslSubmitResult>;
 }
 
 function renderDsl(document: EmevdEditorDocument): string {
@@ -40,8 +53,11 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
     return first ? { view: 'flow', eventUri: first } : { view: 'flow' };
   });
   const [status, setStatus] = useState('就绪');
+  const [dslEdit, setDslEdit] = useState<string | null>(null);
+  const [submittingDsl, setSubmittingDsl] = useState(false);
 
   const dslText = useMemo(() => renderDsl(document), [document]);
+  const dslDisplay = dslEdit ?? props.dslTemplate ?? dslText;
   const selectedEvent = document.events.find((event) => event.eventUri === selection.eventUri);
   const hexPreview = useMemo(() => {
     try {
@@ -86,6 +102,26 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
 
   function noteDslEdit(): void {
     setStatus('DSL 仅供显示；解析错误不会写入文档。请用事件表/属性面板产生 mutation。');
+  }
+
+  async function submitDsl(): Promise<void> {
+    if (!props.onDslSubmit || submittingDsl) return;
+    setSubmittingDsl(true);
+    setStatus('DSL 提交中（compile → plan → Bridge staging → PatchIR transaction）…');
+    try {
+      const result = await props.onDslSubmit(dslDisplay);
+      if (result.ok) {
+        setDslEdit(result.nextDslTemplate ?? dslDisplay);
+        setStatus(`DSL 已提交${result.nextDslTemplate ? '；模板已刷新' : ''}。`);
+      } else {
+        const first = result.diagnostics[0];
+        setStatus(first ? `${first.code}: ${first.message}` : 'DSL 提交被拒绝。');
+      }
+    } catch (error) {
+      setStatus(`DSL 提交异常：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSubmittingDsl(false);
+    }
   }
 
   return (
@@ -144,13 +180,44 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
       )}
 
       {selection.view === 'dsl' && (
-        <textarea
-          className="hex-view"
-          value={dslText}
-          onChange={noteDslEdit}
-          spellCheck={false}
-          aria-label="EMEVD DSL 只读权威外视图"
-        />
+        <div className="column gap">
+          <textarea
+            className="hex-view"
+            value={dslDisplay}
+            readOnly={props.dslTemplate === undefined}
+            onChange={(e) => {
+              setDslEdit(e.target.value);
+              noteDslEdit();
+            }}
+            spellCheck={false}
+            aria-label={props.dslTemplate === undefined
+              ? 'EMEVD DSL 只读权威外视图（未连接完整文档）'
+              : 'EMEVD patch DSL 编辑区'}
+          />
+          {props.dslTemplate !== undefined && (
+            <div className="row gap">
+              <button
+                type="button"
+                className="primary-action"
+                disabled={submittingDsl}
+                onClick={() => void submitDsl()}
+              >
+                {submittingDsl ? '提交中…' : '编译并提交 DSL'}
+              </button>
+              <button
+                type="button"
+                disabled={submittingDsl}
+                onClick={() => {
+                  setDslEdit(null);
+                  setStatus('已放弃编辑，恢复模板。');
+                }}
+              >
+                放弃编辑
+              </button>
+              <span className="muted">编辑会经主进程完整文档编译；渲染进程不持有完整文档。</span>
+            </div>
+          )}
+        </div>
       )}
 
       {selection.view === 'bytes' && (

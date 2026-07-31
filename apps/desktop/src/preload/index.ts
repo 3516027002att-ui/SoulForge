@@ -79,6 +79,21 @@ const api = {
     mutation: Record<string, unknown>
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.applyEmevdMutation', sourceUri, expectedHash, mutation),
+  readEmevdFullDocument: (
+    sourceUri: string,
+    documentInstanceId: string
+  ): Promise<{
+    ok?: boolean;
+    documentInstanceId?: string;
+    revision?: number;
+    eventCount?: number;
+    instructionCount?: number;
+    dslTemplate?: string;
+    sourceHash?: string | null;
+    diagnostics?: Array<{ severity: string; code: string; message: string }>;
+  }> => ipcRenderer.invoke('resource.readEmevdFullDocument', sourceUri, documentInstanceId),
+  submitEmevdDslPlan: (sourceUri: string, sourceText: string): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
   readFmgDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFmgDocument', sourceUri),
   applyFmgMutation: (

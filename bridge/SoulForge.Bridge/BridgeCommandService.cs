@@ -203,6 +203,17 @@ internal sealed class BridgeCommandService
                 // Accept raw EMEVD or DFLT-wrapped DCX payload path: caller must pass decompressed EVD bytes file.
                 var document = EmevdNativeDocument.ReadFile(file);
                 var roundTrip = document.VerifyRoundTrip();
+                var optionsObject = options.ValueKind == JsonValueKind.Object;
+                var page = optionsObject && options.TryGetProperty("instructionPage", out var pageEl)
+                    && pageEl.ValueKind == JsonValueKind.Number && pageEl.TryGetInt32(out var parsedPage)
+                    && parsedPage >= 0
+                    ? parsedPage
+                    : 0;
+                var pageSize = optionsObject && options.TryGetProperty("instructionPageSize", out var sizeEl)
+                    && sizeEl.ValueKind == JsonValueKind.Number && sizeEl.TryGetInt32(out var parsedSize)
+                    && parsedSize >= 1 && parsedSize <= 4096
+                    ? parsedSize
+                    : 256;
                 var diagnostics = new[]
                 {
                     new Diagnostic(
@@ -216,7 +227,7 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
-                return BridgeResult<object>.Partial(file, "event", diagnostics, document.ToEnvelope(roundTrip));
+                return BridgeResult<object>.Partial(file, "event", diagnostics, document.ToEnvelope(roundTrip, page, pageSize));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {

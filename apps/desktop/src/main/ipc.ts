@@ -10,6 +10,11 @@ import {
   createConfirmationReceipt,
   disposeBridgeDaemonPool,
   commitEmevdMutationViaBridge,
+  createSekiroFixtureEmedf,
+  fingerprintEmedfRegistry,
+  readFullEmevdDocumentViaBridge,
+  renderEmevdPatchDsl,
+  submitEmevdDslPlanViaFourView,
   commitFmgMutationViaBridge,
   commitParamMutationViaBridge,
   commitMsbMutationViaBridge,
@@ -48,6 +53,7 @@ import {
 import type {
   ConfirmationReceipt,
   Diagnostic,
+  EmevdEditorDocument,
   IndexedFile,
   ResourceKind
 } from '@soulforge/shared';
@@ -73,6 +79,12 @@ let activeIndex: WorkspaceIndex | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
+/**
+ * Authoritative full EMEVD editor documents keyed by sourceUri. Assembled in
+ * main via paginated Bridge reads; the renderer only ever edits DSL text and
+ * never holds these documents (hard constraint 18).
+ */
+const emevdFullDocuments = new Map<string, EmevdEditorDocument>();
 let handlersRegistered = false;
 const trustedRendererDocuments = new Map<number, string>();
 const directorySelections = new Map<string, DirectorySelectionRecord>();
@@ -892,6 +904,230 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         if (index >= 0) indexedFiles[index] = refreshed.file;
       }
       return toRendererSaveResult(result, indexedFiles);
+    }
+  );
+
+  /**
+   * Assemble the authoritative full EMEVD editor document in main via
+   * paginated Bridge reads (DCX unwrapped on demand). The renderer only ever
+   * receives a DSL template string and a documentInstanceId, never the full
+   * document. The prepared decompressed path is cached for later writes.
+   */
+  handle(
+    'resource.readEmevdFullDocument',
+    async (_event, sourceUri: string, documentInstanceId: string) => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          diagnostics: [{
+            severity: 'error' as const,
+            code: 'RESOURCE_NOT_INDEXED',
+            message: '资源未索引，无法组装完整 EMEVD 文档。',
+            sourceUri
+          }]
+        };
+      }
+      if (!activeSession) {
+        return {
+          ok: false,
+          diagnostics: [{
+            severity: 'error' as const,
+            code: 'EMEVD_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能组装完整 EMEVD 文档。',
+            sourceUri
+          }]
+        };
+      }
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const full = await readFullEmevdDocumentViaBridge({
+        filePath: file.absolutePath,
+        allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+        tempDir: storage.stagingRoot,
+        resourceUri: sourceUri,
+        registry: createSekiroFixtureEmedf(),
+        ...(documentInstanceId ? { documentInstanceId } : {}),
+        pageSize: 512,
+        timeoutMs: 120_000
+      });
+      if (!full.ok || !full.document) {
+        return {
+          ok: false,
+          sourceUri,
+          diagnostics: full.diagnostics.map((d) => ({
+            severity: d.severity as Diagnostic['severity'],
+            code: d.code,
+            message: d.message,
+            sourceUri
+          }))
+        };
+      }
+      emevdFullDocuments.set(sourceUri, full.document);
+      const dslTemplate = renderEmevdPatchDsl(full.document, createSekiroFixtureEmedf());
+      return {
+        ok: true,
+        sourceUri,
+        documentInstanceId,
+        revision: full.document.revision,
+        eventCount: full.document.events.length,
+        instructionCount: full.instructionTotal,
+        dslTemplate,
+        sourceHash: full.sourceHash ?? null,
+        preparedSourcePath: full.preparedSourcePath ?? null,
+        diagnostics: full.diagnostics.map((d) => ({
+          severity: d.severity as Diagnostic['severity'],
+          code: d.code,
+          message: d.message,
+          sourceUri
+        }))
+      };
+    }
+  );
+
+  /**
+   * Submit a DSL patch authored in the renderer's four-view panel. The full
+   * document is held in main (loaded by readEmevdFullDocument); compile →
+   * typed plan → Bridge batch staging → file_replace PatchIR →
+   * WorkspaceTransaction. On success the authoritative document cache and the
+   * resource preview are refreshed.
+   */
+  handle(
+    'resource.submitEmevdDslPlan',
+    async (event, sourceUri: string, sourceText: string): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'EMEVD_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能提交 EMEVD DSL。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+      const document = emevdFullDocuments.get(sourceUri);
+      if (!document) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'EMEVD_FULL_DOCUMENT_MISSING',
+            message: '请先加载完整 EMEVD 文档（readEmevdFullDocument）再提交 DSL。',
+            sourceUri
+          }]
+        };
+      }
+      // Re-resolve the decompressed staging source (DCX inputs were unwrapped
+      // during load and cached as a temp file; raw .emevd uses the indexed path).
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const registry = createSekiroFixtureEmedf();
+      const full = await readFullEmevdDocumentViaBridge({
+        filePath: file.absolutePath,
+        allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+        tempDir: storage.stagingRoot,
+        resourceUri: sourceUri,
+        registry,
+        ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
+        pageSize: 512,
+        timeoutMs: 120_000
+      });
+      if (!full.ok || !full.document) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: full.diagnostics.map((d) => ({
+            severity: d.severity as Diagnostic['severity'],
+            code: d.code,
+            message: d.message,
+            sourceUri
+          }))
+        };
+      }
+      const fresh = full.document;
+      const preparedPath = full.preparedSourcePath ?? file.absolutePath;
+      const schemaFingerprint = fingerprintEmedfRegistry(registry);
+      const result = await submitEmevdDslPlanViaFourView({
+        compileRequest: {
+          schemaVersion: 1,
+          resourceUri: sourceUri,
+          documentInstanceId: fresh.documentInstanceId ?? '',
+          baseRevision: fresh.revision,
+          emedfSchemaFingerprint: schemaFingerprint,
+          sourceText,
+          mode: 'patch'
+        },
+        document: fresh,
+        registry,
+        sourcePath: preparedPath,
+        expectedDocumentHash: full.sourceHash ?? '',
+        allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+        workspaceId: activeSession.meta.workspaceId,
+        workspaceRoot: activeSession.layers.overlayRoot,
+        stagingRoot: storage.stagingRoot,
+        ...(activeSession ? { session: activeSession } : {}),
+        operationLog,
+        backupBaseDir: storage.backupBaseDir,
+        recoveryDir: storage.recoveryDir,
+        timeoutMs: 120_000
+      });
+      if (!result.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: result.diagnostics.map((d) => ({
+            severity: d.severity as Diagnostic['severity'],
+            code: d.code,
+            message: d.message,
+            sourceUri
+          }))
+        };
+      }
+      // Refresh authoritative cache + indexed preview from the committed file.
+      const refreshed = await readFullEmevdDocumentViaBridge({
+        filePath: file.absolutePath,
+        allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+        tempDir: storage.stagingRoot,
+        resourceUri: sourceUri,
+        registry,
+        ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
+        pageSize: 512,
+        timeoutMs: 120_000
+      });
+      if (refreshed.ok && refreshed.document) {
+        emevdFullDocuments.set(sourceUri, refreshed.document);
+      }
+      const preview = await openResourcePreview({
+        file,
+        inspectNative: true,
+        parseStructured: true,
+        ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+      });
+      const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
+      if (index >= 0) indexedFiles[index] = preview.file;
+      return {
+        ok: true,
+        changedFiles: [sourceUri],
+        diagnostics: [
+          ...result.diagnostics.map((d) => ({
+            severity: d.severity as Diagnostic['severity'],
+            code: d.code,
+            message: d.message,
+            sourceUri
+          })),
+          {
+            severity: 'info',
+            code: 'EMEVD_DSL_PLAN_COMMITTED',
+            message: `DSL 计划已提交（revision ${fresh.revision} → ${refreshed.document?.revision ?? fresh.revision + 1}）。`,
+            sourceUri
+          }
+        ]
+      };
     }
   );
 
