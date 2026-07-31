@@ -147,9 +147,30 @@ async function main(): Promise<void> {
     throw new Error('FLVER texture table has no shader slot types (offset calculation likely wrong)');
   }
 
+  // Extract and verify the dummy (attachment point) table.
+  const dummiesResult = await runBridge<Record<string, unknown>>({
+    command: 'read-flver-dummies',
+    filePath: out,
+    allowedRoots: [tmp],
+    timeoutMs: 120_000
+  });
+  if (dummiesResult.parseStatus === 'failed' || !dummiesResult.data) {
+    throw new Error(`FLVER dummies read failed: ${JSON.stringify(dummiesResult.diagnostics)}`);
+  }
+  const dummies = (dummiesResult.data.dummies as Array<{
+    index: number; position: number[]; referenceId: number; parentBoneIndex: number; attachBoneIndex: number;
+  }>) ?? [];
+  const dummyCount = (dummiesResult.data.dummyCount as number) ?? 0;
+  if (dummyCount <= 0 || dummies.length !== dummyCount) {
+    throw new Error(`FLVER dummy count mismatch: dummyCount=${dummyCount}, dummies=${dummies.length}`);
+  }
+  if (!dummies.every((d) => Array.isArray(d.position) && d.position.length === 3 && d.position.every(Number.isFinite))) {
+    throw new Error('FLVER dummy has invalid position');
+  }
+
   console.log(JSON.stringify({
     ok: true,
-    message: `FLVER native mesh 提取验证通过（mesh[0]: ${vertexCount} vertices, ${posBytes.length} bytes positions; skeleton: ${skBoneCount} bones; texture slots: ${slotCount}）`,
+    message: `FLVER native mesh 提取验证通过（mesh[0]: ${vertexCount} vertices, ${posBytes.length} bytes positions; skeleton: ${skBoneCount} bones; texture slots: ${slotCount}; dummies: ${dummyCount}）`,
     meshCount,
     vertexCount,
     positionBytes: posBytes.length,
@@ -160,6 +181,7 @@ async function main(): Promise<void> {
     skeletonRoots: skBones.filter((b) => b.parentIndex === -1).length,
     textureSlotCount: slotCount,
     textureSlotsTyped: typedSlots,
+    dummyCount,
     authority: 'candidate',
     roundTrip: doc.diagnostics?.map((d: { code: string }) => d.code)
   }, null, 2));

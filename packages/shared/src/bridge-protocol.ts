@@ -110,6 +110,7 @@ export type BridgeCommandName =
   | 'read-flver-mesh'
   | 'read-flver-skeleton'
   | 'read-flver-texture-slots'
+  | 'read-flver-dummies'
   | 'read-esd-document'
   | 'capabilities'
   | 'health';

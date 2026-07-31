@@ -604,6 +604,35 @@ internal sealed class FlverNativeDocument
         return textures;
     }
 
+    /// <summary>
+    /// 提取 FLVER2 Dummy 表（挂点/虚机：武器插座、特效原点等）。
+    /// 权威布局（SoulsFormats Dummy.cs，64 字节/条）：Position@0x00、Color@0x0C、
+    /// Forward@0x10、ReferenceID@0x1C、ParentBoneIndex@0x1E、Upward@0x20、AttachBoneIndex@0x2C。
+    /// Dummy 表是 0x80 头之后的第一个结构表。
+    /// </summary>
+    public IReadOnlyList<FlverDummyEntry> GetDummies()
+    {
+        int dummyCount = ReadInt32(SourceBytes, 0x14);
+        const int DummySize = 64;
+        const int DummyTableOffset = HeaderSize;
+        if (dummyCount <= 0 || DummyTableOffset + (long)dummyCount * DummySize > SourceBytes.Length)
+            return Array.Empty<FlverDummyEntry>();
+
+        var dummies = new List<FlverDummyEntry>(dummyCount);
+        for (int i = 0; i < dummyCount; i++)
+        {
+            int e = DummyTableOffset + i * DummySize;
+            float posX = ReadFloat32(SourceBytes, e + 0x00);
+            float posY = ReadFloat32(SourceBytes, e + 0x04);
+            float posZ = ReadFloat32(SourceBytes, e + 0x08);
+            short referenceId = ReadInt16(SourceBytes, e + 0x1C);
+            short parentBoneIndex = ReadInt16(SourceBytes, e + 0x1E);
+            short attachBoneIndex = ReadInt16(SourceBytes, e + 0x2C);
+            dummies.Add(new FlverDummyEntry(i, posX, posY, posZ, referenceId, parentBoneIndex, attachBoneIndex));
+        }
+        return dummies;
+    }
+
     public static FlverNativeDocument Read(byte[] source)
     {
         if (source.Length < HeaderSize || source.Length > MaxSourceBytes)
@@ -879,6 +908,10 @@ internal sealed record FlverMeshEntry(
 
 internal sealed record FlverTextureSlotEntry(
     int Index, string Type, string Path, int MaterialIndex);
+
+internal sealed record FlverDummyEntry(
+    int Index, float PositionX, float PositionY, float PositionZ,
+    short ReferenceId, short ParentBoneIndex, short AttachBoneIndex);
 
 internal sealed record FlverRoundTripReport(
     bool ByteIdentical, bool SemanticIdentical,
