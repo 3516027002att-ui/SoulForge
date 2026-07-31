@@ -8,7 +8,7 @@ import {
   compileEmevdPatchDsl,
   fingerprintEmedfRegistry
 } from '../emevd/dslCompiler.js';
-import { renderEmevdPatchDsl } from '../emevd/dslRenderer.js';
+import { renderEmevdPatchDsl, renderEmevdPatchDslBounded } from '../emevd/dslRenderer.js';
 import { formatEmevdAnchor } from '../emevd/stableIdentity.js';
 import {
   createSekiroFixtureEmedf,
@@ -106,6 +106,30 @@ function main(): void {
   }
   if (!renderedPatch.includes(unknownAnchor) || !renderedPatch.includes('read-only')) {
     throw new Error('unknown instruction must remain visible as a read-only comment');
+  }
+
+  // Bounded template (hard constraint 17): the cap must truncate at an
+  // event-block boundary with a comment marker, and compiling the truncated
+  // template must stay a deterministic no-op.
+  const bounded = renderEmevdPatchDslBounded(document, registry, 8);
+  if (!bounded.truncated) throw new Error('bounded template must be truncated under the cap');
+  if (!bounded.text.includes('\n}\n\n// EMEVD_DSL_TEMPLATE_TRUNCATED')) {
+    throw new Error('truncation must end at an event-block boundary with the marker comment');
+  }
+  const boundedRoundtrip = compileEmevdPatchDsl(
+    { ...request, sourceText: bounded.text },
+    document,
+    registry
+  );
+  if (!boundedRoundtrip.ok) {
+    throw new Error(`truncated template must parse: ${JSON.stringify(boundedRoundtrip.diagnostics)}`);
+  }
+  if (boundedRoundtrip.plan.operations.length !== 0) {
+    throw new Error('truncated template must still compile to an empty plan');
+  }
+  const boundedFull = renderEmevdPatchDslBounded(document, registry, 1_000_000);
+  if (boundedFull.truncated || boundedFull.totalLines !== boundedFull.shownLines) {
+    throw new Error('unbounded-cap template must not truncate');
   }
 
   const compiled = compileEmevdPatchDsl(request, document, registry);

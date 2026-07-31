@@ -81,7 +81,8 @@ const api = {
     ipcRenderer.invoke('resource.applyEmevdMutation', sourceUri, expectedHash, mutation),
   readEmevdFullDocument: (
     sourceUri: string,
-    documentInstanceId: string
+    documentInstanceId: string,
+    loadFullDslTemplate?: boolean
   ): Promise<{
     ok?: boolean;
     documentInstanceId?: string;
@@ -89,9 +90,16 @@ const api = {
     eventCount?: number;
     instructionCount?: number;
     dslTemplate?: string;
+    dslTemplateTruncated?: boolean;
+    dslTemplateTotalLines?: number;
     sourceHash?: string | null;
     diagnostics?: Array<{ severity: string; code: string; message: string }>;
-  }> => ipcRenderer.invoke('resource.readEmevdFullDocument', sourceUri, documentInstanceId),
+  }> => ipcRenderer.invoke(
+    'resource.readEmevdFullDocument',
+    sourceUri,
+    documentInstanceId,
+    loadFullDslTemplate === true ? true : undefined
+  ),
   submitEmevdDslPlan: (sourceUri: string, sourceText: string): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
   readFmgDocument: (sourceUri: string): Promise<unknown> =>

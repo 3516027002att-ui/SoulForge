@@ -17,6 +17,30 @@ export function renderEmevdPatchDsl(
   document: EmevdEditorDocument,
   registry: EmedfRegistry
 ): string {
+  return renderEmevdPatchDslBounded(document, registry, undefined).text;
+}
+
+export interface BoundedEmevdPatchDsl {
+  text: string;
+  truncated: boolean;
+  totalLines: number;
+  shownLines: number;
+}
+
+/**
+ * Bounded template renderer (hard constraint 17): caps the line count so a
+ * real corpus document (1,730 events / 33,266 instructions ≈ 70K+ lines) is
+ * never transferred or materialized in one payload. Truncation happens only at
+ * an event-block boundary so the visible text stays parseable; the trailing
+ * marker is a comment, so compiling the truncated template is still a
+ * deterministic no-op for anything the user did not edit (patch semantics only
+ * express changes).
+ */
+export function renderEmevdPatchDslBounded(
+  document: EmevdEditorDocument,
+  registry: EmedfRegistry,
+  templateLineLimit: number | undefined
+): BoundedEmevdPatchDsl {
   if (!document.documentInstanceId) {
     throw new Error('EMEVD_DSL_DOCUMENT_INSTANCE_REQUIRED');
   }
@@ -72,7 +96,33 @@ export function renderEmevdPatchDsl(
     lines.push('}', '');
   }
 
-  return lines.join('\n').trimEnd();
+  const totalLines = lines.length;
+  if (templateLineLimit === undefined || totalLines <= templateLineLimit) {
+    return { text: lines.join('\n').trimEnd(), truncated: false, totalLines, shownLines: totalLines };
+  }
+  // Back up to the last completed event block at or below the limit so the
+  // visible text never ends mid-block; if the cap lands inside the first event
+  // block, extend forward to its closing brace instead.
+  let safeBreak = -1;
+  for (let i = 0; i < templateLineLimit; i += 1) {
+    if (lines[i] === '}') safeBreak = i + 1;
+  }
+  if (safeBreak <= 0) {
+    for (let i = templateLineLimit; i < lines.length; i += 1) {
+      if (lines[i] === '}') {
+        safeBreak = i + 1;
+        break;
+      }
+    }
+  }
+  const shownLines = safeBreak > 0 ? safeBreak : lines.length;
+  const shown = lines.slice(0, shownLines);
+  shown.push(
+    '',
+    `// EMEVD_DSL_TEMPLATE_TRUNCATED: 完整模板共 ${totalLines} 行，已显示 ${shownLines} 行。`,
+    '// 模板仅作为编辑起点；截断不影响编译（注释行），提交时只应用实际修改的增量 patch。'
+  );
+  return { text: shown.join('\n'), truncated: true, totalLines, shownLines };
 }
 
 function formatLiteral(value: number | boolean): string {

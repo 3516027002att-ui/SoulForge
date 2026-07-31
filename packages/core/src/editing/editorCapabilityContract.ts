@@ -112,12 +112,15 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     documentAuthority: 'bridge-native-document',
     mutationKinds: ['emevd_set_rest_behavior', 'emevd_update_id'],
     revisionContract: 'monotonic-reject-stale',
-    scalePrimitives: ['eager'],
-    scaleAccess: 'eager',
+    scalePrimitives: ['pagination'],
+    scaleAccess: 'pagination',
     scaleDimensions: ['events', 'instructions'],
     contractSources: [
       'packages/core/src/editing/emevdFourViewController.ts',
       'packages/core/src/editing/emevdBridgeCommit.ts',
+      'packages/core/src/editing/emevdFullDocument.ts',
+      'packages/core/src/emevd/dslRenderer.ts',
+      'apps/desktop/src/main/ipc.ts',
       'apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx'
     ]
   },

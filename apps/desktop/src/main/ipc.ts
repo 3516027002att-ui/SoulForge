@@ -13,7 +13,7 @@ import {
   createSekiroFixtureEmedf,
   fingerprintEmedfRegistry,
   readFullEmevdDocumentViaBridge,
-  renderEmevdPatchDsl,
+  renderEmevdPatchDslBounded,
   submitEmevdDslPlanViaFourView,
   commitFmgMutationViaBridge,
   commitParamMutationViaBridge,
@@ -915,7 +915,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    */
   handle(
     'resource.readEmevdFullDocument',
-    async (_event, sourceUri: string, documentInstanceId: string) => {
+    async (_event, sourceUri: string, documentInstanceId: string, loadFullDslTemplate?: boolean) => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file) {
         return {
@@ -963,7 +963,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       emevdFullDocuments.set(sourceUri, full.document);
-      const dslTemplate = renderEmevdPatchDsl(full.document, createSekiroFixtureEmedf());
+      // Hard constraint 17: the template is bounded so a real corpus document
+      // (~70K+ DSL lines) is never transferred in one IPC payload. The renderer
+      // can request the full template explicitly via loadFullDslTemplate.
+      const bounded = renderEmevdPatchDslBounded(
+        full.document,
+        createSekiroFixtureEmedf(),
+        loadFullDslTemplate ? undefined : 2000
+      );
       return {
         ok: true,
         sourceUri,
@@ -971,7 +978,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         revision: full.document.revision,
         eventCount: full.document.events.length,
         instructionCount: full.instructionTotal,
-        dslTemplate,
+        dslTemplate: bounded.text,
+        dslTemplateTruncated: bounded.truncated,
+        dslTemplateTotalLines: bounded.totalLines,
         sourceHash: full.sourceHash ?? null,
         preparedSourcePath: full.preparedSourcePath ?? null,
         diagnostics: full.diagnostics.map((d) => ({
