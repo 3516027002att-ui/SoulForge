@@ -41,6 +41,7 @@ import {
   scanWorkspace,
   stageBridgeOutput,
   validateContainer,
+  isDeferredPreviewEditor,
   type AiSidebarDraft,
   type AiSidebarDraftRequest,
   type ResourceCapabilityMatrix,
@@ -53,6 +54,7 @@ import {
 import type {
   ConfirmationReceipt,
   Diagnostic,
+  EditorKind,
   EmevdEditorDocument,
   IndexedFile,
   ResourceKind
@@ -241,6 +243,28 @@ function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): Rend
       severity: 'error',
       code: 'NATIVE_WRITE_GAME_UNSUPPORTED',
       message: '当前工作区不是 Sekiro 游戏适配包，已阻断原生语义写入。',
+      sourceUri
+    }]
+  };
+}
+
+/**
+ * 阻断已延期至 V0.6、仅保留标记只读预览的编辑器写入。
+ * 门禁点放在 IPC 主进程而非 renderer：即使 UI 仍持有旧的提交入口，
+ * 写路径也在进入 Patch Engine 之前失败关闭，并返回结构化诊断。
+ */
+function rejectDeferredPreviewEditorWrite(
+  editorKind: EditorKind,
+  sourceUri: string
+): RendererSaveResult | null {
+  if (!isDeferredPreviewEditor(editorKind)) return null;
+  return {
+    ok: false,
+    changedFiles: [],
+    diagnostics: [{
+      severity: 'error',
+      code: 'EDITOR_DEFERRED_TO_V06_READONLY',
+      message: `${editorKind} 编辑器已延期至 V0.6，本版仅提供标记只读预览，写入已阻断。`,
       sourceUri
     }]
   };
@@ -1439,6 +1463,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
+      const deferredBlocked = rejectDeferredPreviewEditorWrite('msb', sourceUri);
+      if (deferredBlocked) return deferredBlocked;
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       const stagedOutput = await stageBridgeOutput({
         stagingRoot: storage.stagingRoot,

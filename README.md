@@ -34,6 +34,17 @@ SoulForge 是面向 Sekiro 和 FromSoftware Mod 的 AI 原生、安全、可审�
 - me3 runtime adapter、真实 Sekiro 启动、日志、回滚后再次验证。
 - renderer-independent semantic scene；Three.js WebGPU 首选、WebGL2 fallback，必要时增加 native renderer backend。
 
+以上是长期主线，不等于当前里程碑范围。
+
+## 当前里程碑范围（V0.5 文本优先）
+
+V0.5 已收窄为文本优先的五个编辑器：
+
+- `BND4`、`FMG`、`PARAM`（仅 gameparam）、`EMEVD` 四项为 typed mutation。
+- `script`（luabnd / action `*.hks`）为只读 + 整内层文件替换：内层是 `\x1bLuaQ` 编译字节码，本版不反编译、不重编译。
+
+MSB、TAE、ESD、FLVER/资产线与 3D 渲染线已延期 V0.6。既有面板保留为**标记只读预览**，不计入本版发布编辑器，写入路径在 capability contract、shared 清单和主进程 IPC 三层失败关闭。延期不等于完成，也不清偿任何技术缺口；范围与 Gate 口径以交接书 §18.3 为准。
+
 ## 当前真实能力
 
 已经具备的主要底座：
@@ -46,22 +57,23 @@ SoulForge 是面向 Sekiro 和 FromSoftware Mod 的 AI 原生、安全、可审�
 - SQLite 两库、migration、journal、文件索引、FTS、诊断、任务、恢复点和审计基础。
 - DFLT 真实 corpus 往返；BND4 读取、五类 mutation、repack、提交和回滚；合法 Oodle 下一个登记 KRAK writer roundtrip。
 - FMG 真实语义闭环；PARAM、EMEVD、MSB 的部分 native 文档与 mutation；固定 Smithbox metadata 与 135/138 登记 PARAM 严格匹配。
-- EMEVD 四视图、PARAM/FMG/MSB 实时桌面接线；TAE/ESD 登记样本 native document 与只读工作台。
-- FLVER/TPF 登记样本只读 native document、FLVER 查看/GLB 导出和 TPF 开放格式导出；Three.js WebGPU-first / WebGL2 fallback 骨架。
+- EMEVD 四视图、PARAM/FMG 实时桌面接线；MSB/TAE/ESD 登记样本 native document 与只读工作台（V0.6 延期预览）。
+- FLVER/TPF 登记样本只读 native document、FLVER 查看/GLB 导出和 TPF 开放格式导出；Three.js WebGPU-first / WebGL2 fallback 骨架（均为 V0.6 延期预览）。
 - OpenAI Responses / Chat Completions compatible 与 Anthropic Messages fake-server tool loop。
 - 双协议错误、取消、超时和限额离线 conformance。
 - safeStorage 凭据库和权限门控基础。
 - Windows CI、内容扫描、NSIS 配置和诚实 private gate；代码签名不属于 V0.5 验收。
 
-当前主要前沿：
+当前主要前沿（V0.5 文本优先范围内）：
 
 - KRAK 需要组合 mutation/repack、未知字段保持、恢复与完整 corpus 写回矩阵。
-- PARAM 需要 3 个旧布局、完整字段级 writer、引用和全 corpus 验证。
-- EMEVD 需要 layer 真实变体、完整 EMEDF、全 corpus，以及 DSL plan 到 production Bridge/PatchIR transaction 的真实接线。
-- MSB 需要全实体 CRUD、引用修复和完整 scene projection。
-- TAE/ESD 需要完整语义、writer、HKX/脚本引用与真实游戏加载。
-- MTD、collision、navigation 与完整资产引用/导出仍处于 partial/candidate。
-- WebGPU/WebGL2 需要所有者机器功能闭环；场景架构必须保持后端可替换。
+- PARAM 需要 3 个旧布局、完整字段级 writer、引用和全 gameparam corpus 验证。
+- EMEVD 需要 layer 真实变体、完整 EMEDF 与 control-flow validation、全 corpus。
+- script 需要容器 magic/reference inventory，以及整内层文件替换的真实写/重读/回滚与游戏加载。
+- 五个编辑器需要真实文档完整有界访问与 Electron 真实文档功能验收。
+- NSIS 安装/升级/卸载 lifecycle 与真实 Sekiro 会话仍待验证。
+
+已延期 V0.6（本版不判定，不作为前沿）：MSB 全实体 CRUD 与 scene projection、TAE/ESD 完整语义与 writer、MTD/collision/navigation 与完整资产引用/导出、WebGPU/WebGL2 功能闭环。场景架构仍须保持后端可替换。
 - AI 真实工作区 typed mutation、NSIS lifecycle、me3 capability probe 和真实 Sekiro 启动尚未完成。
 
 测试名中的 `v0.5`、`v0.6`、`native` 或 `section28` 不能单独作为产品完成证明。

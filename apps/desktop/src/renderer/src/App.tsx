@@ -1,4 +1,8 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import {
+  DEFERRED_PREVIEW_TARGET_RELEASE,
+  isDeferredPreviewEditorKind
+} from '@soulforge/shared';
 import type {
   ContainerReadHint,
   ContainerReadSummary,
@@ -155,6 +159,13 @@ interface EditableMsgRow {
   textId: string;
   text: string;
   category?: string;
+}
+
+interface MsbPositionCommitInput {
+  partName: string;
+  posX: number;
+  posY: number;
+  posZ: number;
 }
 
 export function App(): ReactElement {
@@ -547,8 +558,12 @@ export function App(): ReactElement {
     setOperationHistory(history);
   }
 
+  /**
+   * MSB 写路径在 V0.5 已延期为只读预览，因此本函数当前不会被面板接线。
+   * 保留实现与 IPC 通道，V0.6 恢复时只需把 msb 的 deferredPreview 置为 null。
+   */
   async function commitMsbPosition(
-    input: { partName: string; posX: number; posY: number; posZ: number },
+    input: MsbPositionCommitInput,
     kind: 'set_part_position' | 'set_region_position'
   ): Promise<void> {
     if (!msbLive || !msbSourceHash || !selectedFile) {
@@ -1020,13 +1035,20 @@ export function App(): ReactElement {
                 events={msbEvents}
                 sourceCounts={msbSourceCounts}
                 maxNodes={2000}
-                writeEnabled={msbLive && Boolean(msbSourceHash) && Boolean(selectedFile)}
-                onPartPositionCommit={(input) => {
-                  void commitMsbPosition(input, 'set_part_position');
-                }}
-                onRegionPositionCommit={(input) => {
-                  void commitMsbPosition(input, 'set_region_position');
-                }}
+                writeEnabled={!isDeferredPreviewEditorKind('msb')
+                  && msbLive
+                  && Boolean(msbSourceHash)
+                  && Boolean(selectedFile)}
+                {...(isDeferredPreviewEditorKind('msb')
+                  ? { deferredPreviewRelease: DEFERRED_PREVIEW_TARGET_RELEASE }
+                  : {
+                      onPartPositionCommit: (input: MsbPositionCommitInput) => {
+                        void commitMsbPosition(input, 'set_part_position');
+                      },
+                      onRegionPositionCommit: (input: MsbPositionCommitInput) => {
+                        void commitMsbPosition(input, 'set_region_position');
+                      }
+                    })}
               />
             </>
           )}

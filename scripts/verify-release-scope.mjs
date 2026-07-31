@@ -23,11 +23,16 @@ const EXPECTED_RELEASE_EDITOR_IDS = [
   'fmg',
   'param',
   'emevd',
-  'msb',
-  'tae',
-  'esd',
   'script'
 ];
+const EXPECTED_EDITOR_MUTATION_MODES = {
+  bnd4: 'typed-mutation',
+  fmg: 'typed-mutation',
+  param: 'typed-mutation',
+  emevd: 'typed-mutation',
+  script: 'whole-inner-file-replacement'
+};
+const EXPECTED_DEFERRED_PREVIEW_EDITOR_IDS = ['msb', 'tae', 'esd', 'flver'];
 
 const REQUIRED_SCOPE_ITEMS = new Map([
   ['SCOPE-SEKIRO-BUILD', { capabilityId: 'H-RUNTIME', gateId: 'REL-SCOPE' }],
@@ -62,8 +67,16 @@ const REQUIRED_SCOPE_ITEMS = new Map([
 const ALLOWED_PROPOSAL_STATUS = new Set(['awaiting-user-ruling', 'user-approved']);
 const ALLOWED_ITEM_DECISION = new Set(['awaiting-user-ruling', 'user-approved']);
 const ALLOWED_RULING_STATUS = new Set(['pending-user-ruling', 'user-approved']);
-const ALLOWED_SUPPORT = new Set(['supported', 'unsupported']);
-const ALLOWED_GATE_STATE = new Set(['open', 'blocked', 'passed']);
+/**
+ * `deferred` 与 `unsupported` 严格区分：
+ * - `unsupported` = 已裁定不支持，unlistedPolicy 同级；
+ * - `deferred` = 已裁定移出 V0.5，仍将在 `deferredToRelease` 里程碑交付。
+ * `deferred` 条目必须声明 `deferredToRelease`，且不得声明 supported operations。
+ */
+const ALLOWED_SUPPORT = new Set(['supported', 'unsupported', 'deferred']);
+const ALLOWED_GATE_STATE = new Set(['open', 'blocked', 'passed', 'deferred']);
+const DEFERRED_TARGET_RELEASE = 'V0.6';
+const ALLOWED_DEFERRED_RELEASE = new Set([DEFERRED_TARGET_RELEASE]);
 const ALLOWED_BUILD_MATCH_POLICY = new Set(['file-product-version-major-minor']);
 const ALLOWED_AUTHORITY = new Set([
   'unsupported',
@@ -134,7 +147,7 @@ function parseFirstColumnIds(section, prefixPattern) {
 function parseGateStates(section) {
   const states = new Map();
   if (section === null) return states;
-  const row = /^\|\s*`(REL-[A-Z0-9-]+)`\s*\|[^|\n]*\|[^|\n]*\|\s*`(open|blocked|passed)`\s*\|/gm;
+  const row = /^\|\s*`(REL-[A-Z0-9-]+)`\s*\|[^|\n]*\|[^|\n]*\|\s*`(open|blocked|passed|deferred)`\s*\|/gm;
   let match;
   while ((match = row.exec(section)) !== null) states.set(match[1], match[2]);
   return states;
@@ -238,8 +251,8 @@ for (const gateId of gateIds) {
 }
 
 if (proposal !== null) {
-  if (proposal.schemaVersion !== '1.5.0') {
-    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.5.0。');
+  if (proposal.schemaVersion !== '1.6.0') {
+    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.6.0。');
   }
   if (!/^V0\.5-SCOPE-[0-9]{8}$/.test(proposal.proposalId ?? '')) {
     add('PROPOSAL_ID_INVALID', 'proposal.proposalId', 'proposalId 必须匹配 V0.5-SCOPE-YYYYMMDD。');
@@ -403,6 +416,29 @@ if (proposal !== null) {
       if (!isStringArray(item.operations, { nonEmpty: item.proposedSupport === 'supported' })) {
         add('OPERATIONS_INVALID', `${where}.operations`, 'supported 项必须列出至少一个 operation。');
       }
+      // deferred 条目必须声明目标里程碑，且不得同时声明本版可用 operation。
+      if (item.proposedSupport === 'deferred') {
+        if (!ALLOWED_DEFERRED_RELEASE.has(item.deferredToRelease ?? '')) {
+          add(
+            'DEFERRED_RELEASE_INVALID',
+            `${where}.deferredToRelease`,
+            `deferred 条目必须声明 deferredToRelease，允许值：${[...ALLOWED_DEFERRED_RELEASE].join('、')}。`
+          );
+        }
+        if (Array.isArray(item.operations) && item.operations.length > 0) {
+          add(
+            'DEFERRED_OPERATIONS_FORBIDDEN',
+            `${where}.operations`,
+            'deferred 条目不得声明本版可用 operation；本版能力应写入 unsupportedOperations 或改为 supported。'
+          );
+        }
+      } else if (item.deferredToRelease !== undefined) {
+        add(
+          'DEFERRED_RELEASE_UNEXPECTED',
+          `${where}.deferredToRelease`,
+          '只有 proposedSupport=deferred 的条目才能声明 deferredToRelease。'
+        );
+      }
       if (!isStringArray(item.unsupportedOperations, { nonEmpty: true })) {
         add('UNSUPPORTED_OPERATIONS_INVALID', `${where}.unsupportedOperations`, '必须明确列出非范围 operation。');
       }
@@ -533,6 +569,12 @@ if (proposal !== null) {
       requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.installerSizeOrTimeBudgetsRequired', false);
       requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.boundedEditorAccessRequired', true);
       requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.installerLifecycleIntegrityRequired', true);
+      requireFrozenValue(proposal, 'scopeDeferralPolicy.status', 'user-approved');
+      requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredToRelease', 'V0.6');
+      requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredIsNotCompleted', true);
+      requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredIsNotPermanentlyExcluded', true);
+      requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredCodeMayRemainAsMarkedPreview', true);
+      requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredPreviewMustBeReadOnly', true);
       requireFrozenValue(proposal, 'authoritySnapshotPolicy.field', 'authorityAtRuling');
       requireFrozenValue(proposal, 'authoritySnapshotPolicy.asOfEvidenceRef', 'EV-REL-SCOPE-20260730');
       requireFrozenValue(proposal, 'authoritySnapshotPolicy.liveAuthoritySource', 'section-13.1');
@@ -594,7 +636,7 @@ if (proposal !== null) {
           coverageByGate.set(coverage.gateId, coverage);
         }
         if (!ALLOWED_GATE_STATE.has(coverage.currentState)) {
-          add('GATE_COVERAGE_STATE_INVALID', `${where}.currentState`, '提案 currentState 只允许 open、blocked 或 passed。');
+          add('GATE_COVERAGE_STATE_INVALID', `${where}.currentState`, '提案 currentState 只允许 open、blocked、passed 或 deferred。');
         } else if (gateMatrixStates.get(coverage.gateId) !== coverage.currentState) {
           add('GATE_COVERAGE_STATE_DRIFT', `${where}.currentState`, `必须与 §18.3 当前状态一致：${gateMatrixStates.get(coverage.gateId) ?? '(missing)'}`);
         }
@@ -632,9 +674,46 @@ if (proposal !== null) {
           if (coverage.currentState === 'passed' && coverage.blockerRefs.length !== 0) {
             add('PASSED_GATE_WITH_BLOCKER', `${where}.blockerRefs`, 'passed Gate 不得携带 blockerRefs。');
           }
+          if (coverage.currentState === 'deferred' && coverage.blockerRefs.length !== 0) {
+            add(
+              'DEFERRED_GATE_WITH_BLOCKER',
+              `${where}.blockerRefs`,
+              'deferred Gate 不得携带 blockerRefs；延期是范围裁定，不是阻塞。'
+            );
+          }
         }
         if (!isStringArray(coverage.openRulings, { nonEmpty: true })) {
           add('GATE_COVERAGE_RULINGS_INVALID', `${where}.openRulings`, '当前提案的每个 Gate 必须列出开放裁定或收敛条件。');
+        }
+        // Gate 延期状态必须与其覆盖的 scope item 支持状态一致，否则会出现
+        // "整条范围已延期但 Gate 写成 passed"或"Gate 写成 deferred 却仍有
+        // 本版 supported 能力"两种伪造完成的写法。
+        if (Array.isArray(coverage.scopeItemIds) && coverage.scopeItemIds.length > 0) {
+          const covered = coverage.scopeItemIds
+            .map((scopeItemId) => itemById.get(scopeItemId))
+            .filter(Boolean);
+          if (covered.length === coverage.scopeItemIds.length) {
+            const supportedItems = covered.filter((item) => item.proposedSupport === 'supported');
+            const deferredItems = covered.filter((item) => item.proposedSupport === 'deferred');
+            if (coverage.currentState === 'deferred' && supportedItems.length > 0) {
+              add(
+                'DEFERRED_GATE_WITH_SUPPORTED_SCOPE',
+                `${where}.currentState`,
+                'deferred Gate 覆盖的 scope item 不得仍为 supported：'
+                  + `${supportedItems.map((item) => item.scopeItemId).join('、')}。`
+              );
+            }
+            if (coverage.currentState !== 'deferred'
+              && deferredItems.length === covered.length
+              && coverage.gateId !== 'REL-SCOPE') {
+              add(
+                'FULLY_DEFERRED_GATE_STATE_INVALID',
+                `${where}.currentState`,
+                '全部 scope item 均已延期的 Gate 必须写成 currentState=deferred，'
+                  + '不得写成 open、blocked 或 passed。'
+              );
+            }
+          }
         }
       });
 
@@ -736,6 +815,12 @@ if (proposalMode) {
 
 function requireFrozenOperation(itemById, scopeItemId, operation) {
   const item = itemById.get(scopeItemId);
+  // deferred 条目必须 operations=[]（由 DEFERRED_OPERATIONS_FORBIDDEN 单独强制），
+  // 该约束严格强于"必须包含某个 operation"，因此此处跳过而非放宽：
+  // 一旦条目从 deferred 恢复为 supported，本检查自动重新生效。
+  if (item?.proposedSupport === 'deferred') {
+    return;
+  }
   if (!item?.operations?.includes(operation)) {
     add('FROZEN_OPERATION_MISSING', scopeItemId, `冻结范围必须包含 operation=${operation}。`);
   }
@@ -785,5 +870,48 @@ function requireFrozenEditorMatrix(itemById) {
       'SCOPE-EDITORS.hexEvidenceView',
       'Hex 必须作为 included=true、writable=false 的只读证据视图。'
     );
+  }
+
+  // 每个冻结编辑器必须显式声明写入模式，避免把 script 的整文件替换
+  // 与 typed mutation 混为一谈。
+  const modes = editors?.editorMutationModes;
+  if (JSON.stringify(modes) !== JSON.stringify(EXPECTED_EDITOR_MUTATION_MODES)) {
+    add(
+      'FROZEN_EDITOR_MUTATION_MODE_INVALID',
+      'SCOPE-EDITORS.editorMutationModes',
+      '冻结编辑器写入模式必须精确为 '
+        + `${JSON.stringify(EXPECTED_EDITOR_MUTATION_MODES)}。`
+    );
+  }
+
+  // 延期编辑器面板允许保留，但必须是标记过的 V0.6 只读预览，
+  // 且不得计入 V0.5 冻结清单。
+  const preview = editors?.deferredPreviewEditors;
+  if (JSON.stringify(preview?.editorIds) !== JSON.stringify(EXPECTED_DEFERRED_PREVIEW_EDITOR_IDS)) {
+    add(
+      'DEFERRED_PREVIEW_EDITOR_SET_INVALID',
+      'SCOPE-EDITORS.deferredPreviewEditors.editorIds',
+      `延期只读预览编辑器必须精确为 ${EXPECTED_DEFERRED_PREVIEW_EDITOR_IDS.join(', ')}。`
+    );
+  }
+  if (preview?.deferredToRelease !== DEFERRED_TARGET_RELEASE
+    || preview?.readOnly !== true
+    || preview?.markedAsPreview !== true
+    || preview?.countedAsReleaseEditor !== false) {
+    add(
+      'DEFERRED_PREVIEW_EDITOR_POLICY_INVALID',
+      'SCOPE-EDITORS.deferredPreviewEditors',
+      `延期预览编辑器必须声明 deferredToRelease=${DEFERRED_TARGET_RELEASE}、readOnly=true、`
+        + 'markedAsPreview=true、countedAsReleaseEditor=false。'
+    );
+  }
+  for (const editorId of preview?.editorIds ?? []) {
+    if (EXPECTED_RELEASE_EDITOR_IDS.includes(editorId)) {
+      add(
+        'DEFERRED_PREVIEW_EDITOR_OVERLAP',
+        `SCOPE-EDITORS.deferredPreviewEditors.editorIds[${editorId}]`,
+        '延期只读预览编辑器不得同时出现在 V0.5 冻结编辑器清单中。'
+      );
+    }
   }
 }

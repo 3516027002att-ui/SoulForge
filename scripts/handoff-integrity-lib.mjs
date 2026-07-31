@@ -5,8 +5,15 @@ const ALLOWED_SLICE_LIFECYCLES = new Set([
   'active',
   'completed',
   'blocked',
-  'superseded'
+  'superseded',
+  // `deferred` = 已裁定移出本里程碑、在后续里程碑交付。
+  // 对 V0.5 是终态（不可认领、不得留在 validation-unfrozen），
+  // 但与 `completed` 严格区分：不表示达到验收边界。
+  'deferred'
 ]);
+
+/** 对 V0.5 而言不可继续认领的切片 lifecycle。 */
+const TERMINAL_SLICE_LIFECYCLES = new Set(['completed', 'superseded', 'deferred']);
 
 const ALLOWED_AUTHORITIES = new Set([
   'unsupported',
@@ -17,8 +24,22 @@ const ALLOWED_AUTHORITIES = new Set([
   'unverified'
 ]);
 
-const ALLOWED_GATE_STATES = new Set(['open', 'blocked', 'passed']);
-const ALLOWED_APPLICABILITY = new Set(['pending-scope', 'in-scope', 'scope-excluded']);
+const ALLOWED_GATE_STATES = new Set(['open', 'blocked', 'passed', 'deferred']);
+const ALLOWED_APPLICABILITY = new Set([
+  'pending-scope',
+  'in-scope',
+  'scope-excluded',
+  'deferred-v0.6'
+]);
+/**
+ * `deferred` 与 `scope-excluded` 必须严格区分：
+ * - `scope-excluded` = 已裁定永久不属于本产品范围，强制 gateState=passed；
+ * - `deferred` = 已裁定移出 V0.5、仍将在后续里程碑交付，禁止写成 passed。
+ * 两者都需要 sealed + 用户批准 Evidence，都不得用于基础 Gate。
+ * `deferred` 不计入 V0.5 完成，也不阻止 V0.5 完成。
+ */
+const DEFERRED_APPLICABILITY = 'deferred-v0.6';
+const DEFERRED_TARGET_RELEASE = 'V0.6';
 const ALLOWED_BLOCKER_REASONS = new Set([
   'private-corpus',
   'credential',
@@ -442,8 +463,11 @@ function parseSlices(markdown, where, findings, blockers) {
       plain(cells[9])
     );
     const authorityCap = capMatch?.[1] ?? null;
+    // required validation 列自带 `validation-unfrozen` 标注的切片，必须同时出现在
+    // §13.4 的显式清单里；否则未冻结验证会只存在于行内散文，绕过该清单的收敛检查。
+    const declaresUnfrozenValidation = plain(cells[8]).includes('validation-unfrozen');
     if (!slices.has(id)) {
-      slices.set(id, { id, lifecycle, authority, blockerIds, authorityCap });
+      slices.set(id, { id, lifecycle, authority, blockerIds, authorityCap, declaresUnfrozenValidation });
     }
 
     if (cells.length !== SLICE_HEADERS.length) {
@@ -575,12 +599,14 @@ function parseAndValidateUnfrozenValidations(markdown, where, findings, slices) 
   }
 
   const lines = section.slice(markerIndex + marker.length).split(/\r?\n/);
+  const listedSliceIds = new Set();
   let listStarted = false;
   for (const line of lines) {
     const match = /^-\s+`(W-[A-Z0-9-]+)`\s*[：:]/.exec(line.trim());
     if (match) {
       listStarted = true;
       const sliceId = match[1];
+      listedSliceIds.add(sliceId);
       const slice = slices.get(sliceId);
       if (!slice) {
         findings.push(makeFinding(
@@ -588,7 +614,7 @@ function parseAndValidateUnfrozenValidations(markdown, where, findings, slices) 
           `${where} §13.4 ${sliceId}`,
           `validation-unfrozen 引用了 §13.1 未定义的切片：${sliceId}`
         ));
-      } else if (slice.lifecycle === 'completed' || slice.lifecycle === 'superseded') {
+      } else if (TERMINAL_SLICE_LIFECYCLES.has(slice.lifecycle)) {
         findings.push(makeFinding(
           'VALIDATION_UNFROZEN_TERMINAL_SLICE',
           `${where} §13.4 ${sliceId}`,
@@ -598,6 +624,20 @@ function parseAndValidateUnfrozenValidations(markdown, where, findings, slices) 
       continue;
     }
     if (listStarted && line.trim() !== '') break;
+  }
+
+  // 反向收敛：§13.4 声称是未冻结验证的完整清单，因此任何在 §13.1 的
+  // required validation 列标注 `validation-unfrozen` 的非终态切片都必须在此列出。
+  // 缺少该检查时，未冻结验证可以只写在行内而绕过清单，逐步把"待冻结"当成已冻结。
+  for (const slice of slices.values()) {
+    if (!slice.declaresUnfrozenValidation) continue;
+    if (TERMINAL_SLICE_LIFECYCLES.has(slice.lifecycle)) continue;
+    if (listedSliceIds.has(slice.id)) continue;
+    findings.push(makeFinding(
+      'VALIDATION_UNFROZEN_SLICE_UNLISTED',
+      `${where} §13.1 ${slice.id}`,
+      `切片在 required validation 中标注 validation-unfrozen，但未出现在 §13.4 清单中：${slice.id}`
+    ));
   }
 }
 
@@ -1006,7 +1046,7 @@ function parseAndValidateGateMatrix(
       findings.push(makeFinding(
         'GATE_SCOPE_RESOLVED_PENDING',
         location,
-        'REL-SCOPE 已通过后，功能 Gate 必须明确为 in-scope 或 scope-excluded，不能继续 pending-scope。'
+        'REL-SCOPE 已通过后，功能 Gate 必须明确为 in-scope、scope-excluded 或 deferred-v0.6，不能继续 pending-scope。'
       ));
     }
 
@@ -1028,9 +1068,16 @@ function parseAndValidateGateMatrix(
           'open Gate 不能标记为 scope-excluded。'
         ));
       }
+      if (applicability === DEFERRED_APPLICABILITY) {
+        findings.push(makeFinding(
+          'GATE_OPEN_DEFERRED',
+          location,
+          `open Gate 不能标记为 ${DEFERRED_APPLICABILITY}；延期 Gate 必须使用 gateState=deferred。`
+        ));
+      }
       const knownSlices = sliceIds.map((id) => slices.get(id)).filter(Boolean);
       const terminalSlices = knownSlices.filter(
-        (slice) => slice.lifecycle === 'completed' || slice.lifecycle === 'superseded'
+        (slice) => TERMINAL_SLICE_LIFECYCLES.has(slice.lifecycle)
       );
       for (const slice of terminalSlices) {
         findings.push(makeFinding(
@@ -1151,6 +1198,96 @@ function parseAndValidateGateMatrix(
         location,
         'pending-scope Gate 不能进入 passed。'
       ));
+    }
+
+    // gateState=deferred 与 applicability=deferred-v0.6 必须双向成对，
+    // 防止用「延期」掩盖未完成，或用 passed 冒充延期。
+    if (gateState === 'deferred' && applicability !== DEFERRED_APPLICABILITY) {
+      findings.push(makeFinding(
+        'GATE_DEFERRED_APPLICABILITY_INVALID',
+        location,
+        `gateState=deferred 必须搭配 applicability=${DEFERRED_APPLICABILITY}。`
+      ));
+    }
+
+    if (applicability === DEFERRED_APPLICABILITY) {
+      if (NON_EXCLUDABLE_GATES.has(gateId)) {
+        findings.push(makeFinding(
+          'GATE_BASE_DEFERRAL_FORBIDDEN',
+          location,
+          `${gateId} 是不可排除的基础 Gate，不得延期。`
+        ));
+      }
+      if (gateState !== 'deferred') {
+        findings.push(makeFinding(
+          'GATE_DEFERRED_STATE_INVALID',
+          location,
+          `${DEFERRED_APPLICABILITY} Gate 必须使用 gateState=deferred，不得写成 passed、open 或 blocked。`
+        ));
+      }
+      if (evidenceIds.length === 0) {
+        findings.push(makeFinding(
+          'GATE_DEFERRED_EVIDENCE_REQUIRED',
+          location,
+          `${DEFERRED_APPLICABILITY} Gate 必须引用 sealed-current-run 范围裁定 Evidence。`
+        ));
+      }
+      for (const evidenceId of evidenceIds) {
+        if (!evidence.has(evidenceId)) {
+          findings.push(makeFinding(
+            'GATE_EVIDENCE_UNDEFINED',
+            location,
+            `deferred Gate 引用了未定义 Evidence：${evidenceId}`
+          ));
+        } else if (!evidenceIsSealed(evidence, evidenceId)) {
+          findings.push(makeFinding(
+            'GATE_EVIDENCE_UNSEALED',
+            location,
+            `deferred Gate 的 Evidence 未形成有效 sealed-current-run 指纹：${evidenceId}`
+          ));
+        }
+      }
+      if (!scopePassedAndSealed) {
+        findings.push(makeFinding(
+          'GATE_SCOPE_PREREQUISITE_NOT_PASSED',
+          location,
+          '延期功能 Gate 前，REL-SCOPE 必须先 passed 并引用有效 sealed-current-run Evidence。'
+        ));
+      }
+      // 延期 Gate 不得掩盖仍在推进或已声称完成的切片：
+      // 前者会让 V0.5 出现无 Gate 覆盖的活动工作，
+      // 后者会把延期范围内的工作误记为 V0.5 完成。
+      const deferredGateSlices = sliceIds.map((id) => slices.get(id)).filter(Boolean);
+      for (const slice of deferredGateSlices.filter((item) => item.lifecycle !== 'deferred')) {
+        findings.push(makeFinding(
+          'GATE_DEFERRED_NONDEFERRED_SLICE',
+          location,
+          `deferred Gate 不能保留仍为 ${slice.lifecycle} 的切片：${slice.id}；`
+            + '该切片必须一并写成 lifecycle=deferred。'
+        ));
+      }
+      const deferralMarker = `scope-deferral:${gateId}:${DEFERRED_TARGET_RELEASE}:user-approved`;
+      const approvedDeferralIds = evidenceIds.filter(
+        (id) => evidenceHasClaim(evidence, id, deferralMarker)
+      );
+      if (approvedDeferralIds.length === 0) {
+        findings.push(makeFinding(
+          'GATE_DEFERRAL_APPROVAL_REQUIRED',
+          location,
+          `${DEFERRED_APPLICABILITY} Gate 必须引用声明 ${deferralMarker} 的 sealed Evidence。`
+        ));
+      } else {
+        const freshnessFinding = checkEvidenceFreshness(
+          location,
+          approvedDeferralIds,
+          evidence,
+          subjectRefsFor(SCOPE_SUBJECT_SET),
+          freshnessContext,
+          'GATE_DEFERRAL_EVIDENCE_STALE',
+          '范围延期 Evidence 锚点之后，冻结范围主题域发生变化；工程侧必须核对语义并重跑验证，实际范围变化仍需新的用户裁定。'
+        );
+        if (freshnessFinding) findings.push(freshnessFinding);
+      }
     }
 
     if (applicability === 'scope-excluded') {

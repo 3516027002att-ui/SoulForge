@@ -1,10 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  DEFERRED_PREVIEW_EDITOR_KINDS,
+  isDeferredPreviewEditorKind,
+  type EditorKind
+} from '@soulforge/shared';
+import {
   EDITOR_CAPABILITY_CONTRACTS,
   buildProposedReleaseEditorInventory,
   buildReleaseEditorFunctionalScaleSchemas,
+  editorAllowsMutation,
   evaluateReleaseEditorAcceptance,
+  listDeferredPreviewEditors,
   type EditorScaleSample,
   type ProposedReleaseEditorId,
   type ReleaseEditorAcceptanceResult,
@@ -16,6 +23,7 @@ function main(): void {
   const schemas = buildReleaseEditorFunctionalScaleSchemas();
   assertInventoryDerivedFromCapabilities(inventory);
   assertFrozenScopeInventory(inventory);
+  assertDeferredPreviewEditorsAreReadOnly();
   assertReadOnlyHexAndAssetExclusions();
   assertScaleContractsMatchCurrentSources();
   assertFunctionalSchemasHaveNoQuantitativeThresholds(schemas);
@@ -132,14 +140,13 @@ function main(): void {
 function assertInventoryDerivedFromCapabilities(
   inventory: ReleaseEditorInventoryItem[]
 ): void {
+  // V0.5 冻结清单收窄为五个；msb/tae/esd/flver 已延期至 V0.6，
+  // 只保留标记只读预览，不得回到本清单。
   const expectedIds: ProposedReleaseEditorId[] = [
     'bnd4',
     'fmg',
     'param',
     'emevd',
-    'msb',
-    'tae',
-    'esd',
     'script'
   ];
   if (JSON.stringify(inventory.map((item) => item.releaseEditorId)) !== JSON.stringify(expectedIds)) {
@@ -191,6 +198,67 @@ function assertFrozenScopeInventory(inventory: ReleaseEditorInventoryItem[]): vo
   }
 }
 
+/**
+ * 已延期至 V0.6 的编辑器允许保留面板，但必须同时满足：
+ * 不在 V0.5 冻结清单内、写路径关闭、带 V0.6 只读预览标记。
+ * MSB 已有经真实文档验证的 typed mutation 写链，因此这里逐项断言
+ * `releaseWriteEnabled=false` 与 `editorAllowsMutation` 实际拒绝，
+ * 避免冻结清单外仍存在可写编辑器。
+ */
+function assertDeferredPreviewEditorsAreReadOnly(): void {
+  const expectedDeferred: EditorKind[] = ['msb', 'tae', 'esd', 'flver'];
+  const actualDeferred = [...listDeferredPreviewEditors()];
+  if (JSON.stringify(actualDeferred) !== JSON.stringify(expectedDeferred)) {
+    throw new Error(
+      `deferred preview editor set drifted: ${JSON.stringify(actualDeferred)} != ${JSON.stringify(expectedDeferred)}`
+    );
+  }
+  // core 能力契约（写入放行权威）与 shared 投影（renderer 打标来源）
+  // 必须逐项一致，否则会出现 UI 显示只读但写路径仍开放的反向漂移。
+  const sharedProjection = [...DEFERRED_PREVIEW_EDITOR_KINDS];
+  if (JSON.stringify(actualDeferred) !== JSON.stringify(sharedProjection)) {
+    throw new Error(
+      `core capability contract and shared deferred projection disagree: ${JSON.stringify(actualDeferred)} != ${JSON.stringify(sharedProjection)}`
+    );
+  }
+  for (const editorKind of actualDeferred) {
+    if (!isDeferredPreviewEditorKind(editorKind)) {
+      throw new Error(`shared projection does not mark ${editorKind} as a deferred preview editor`);
+    }
+  }
+  for (const editorKind of expectedDeferred) {
+    const contract = EDITOR_CAPABILITY_CONTRACTS[editorKind];
+    if (contract.proposedReleaseEditorId !== null || contract.proposalOrder !== null) {
+      throw new Error(`${editorKind} is deferred to V0.6 and must not claim a V0.5 release editor slot`);
+    }
+    if (contract.releaseWriteEnabled !== false) {
+      throw new Error(`${editorKind} is deferred to V0.6 and must keep its write path closed`);
+    }
+    if (contract.deferredPreview?.deferredToRelease !== 'V0.6'
+      || contract.deferredPreview.readOnly !== true
+      || contract.deferredPreview.markedAsPreview !== true
+      || contract.deferredPreview.countedAsReleaseEditor !== false) {
+      throw new Error(`${editorKind} must declare a marked V0.6 read-only preview contract`);
+    }
+    for (const mutationKind of contract.mutationKinds) {
+      if (editorAllowsMutation(editorKind, mutationKind)) {
+        throw new Error(
+          `${editorKind} still accepts ${mutationKind} while deferred to V0.6 as a read-only preview`
+        );
+      }
+    }
+  }
+
+  // script 在 V0.5 只做只读证据投影 + 整个内层文件替换，不得声称 typed mutation。
+  const script = EDITOR_CAPABILITY_CONTRACTS.script;
+  if (script.proposedReleaseEditorId !== 'script'
+    || script.releaseWriteEnabled !== true
+    || script.deferredPreview !== null
+    || script.mutationKinds.length !== 0) {
+    throw new Error('script editor must stay in V0.5 as whole-inner-file replacement without typed mutation');
+  }
+}
+
 function assertReadOnlyHexAndAssetExclusions(): void {
   const hex = EDITOR_CAPABILITY_CONTRACTS.hex;
   const raw = EDITOR_CAPABILITY_CONTRACTS.raw;
@@ -201,7 +269,7 @@ function assertReadOnlyHexAndAssetExclusions(): void {
     throw new Error('Hex/raw evidence views must not expose release editor mutations');
   }
   if (flver.proposedReleaseEditorId !== null) {
-    throw new Error('FLVER is a read-only asset view, not one of the eight frozen semantic editors');
+    throw new Error('FLVER is a read-only asset view, not one of the frozen V0.5 semantic editors');
   }
 
   const root = resolve('../..');
@@ -288,7 +356,7 @@ function assertScaleContractsMatchCurrentSources(): void {
 function assertFunctionalSchemasHaveNoQuantitativeThresholds(
   schemas: ReturnType<typeof buildReleaseEditorFunctionalScaleSchemas>
 ): void {
-  if (schemas.length !== 8) throw new Error('expected one functional schema per current editor');
+  if (schemas.length !== 5) throw new Error('expected one functional schema per V0.5 release editor');
   for (const schema of schemas) {
     if (schema.scopeRulingStatus !== 'user-approved'
       || schema.quantitativeThresholdsRequired !== false
