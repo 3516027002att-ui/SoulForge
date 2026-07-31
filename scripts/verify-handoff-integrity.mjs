@@ -7,7 +7,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
-import { validateHandoffGovernance } from './handoff-integrity-lib.mjs';
+import {
+  collectSealAnchors,
+  extractHandoffSectionSubject,
+  gateSubjectRegistry,
+  handoffSectionSubjectRef,
+  validateHandoffGovernance
+} from './handoff-integrity-lib.mjs';
 
 const root = process.cwd();
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
@@ -66,36 +72,93 @@ checkLinks(README, readme);
 checkLinks(HANDOFF, handoff);
 checkLinks(PLAYBOOK, playbook);
 
-let currentFingerprint;
-const fingerprintResult = spawnSync(
-  process.execPath,
-  [join(root, 'scripts', 'generate-handoff-fingerprint.mjs')],
-  { cwd: root, encoding: 'utf8', windowsHide: true }
-);
-if (fingerprintResult.status !== 0) {
-  add(
-    'error',
-    'WORKTREE_FINGERPRINT_FAILED',
-    'scripts/generate-handoff-fingerprint.mjs',
-    `无法生成当前工作树指纹：${(fingerprintResult.stderr || '').trim() || `exit ${fingerprintResult.status}`}`
-  );
-} else {
-  try {
-    currentFingerprint = JSON.parse(fingerprintResult.stdout);
-  } catch (error) {
-    add(
-      'error',
-      'WORKTREE_FINGERPRINT_PARSE_FAILED',
-      'scripts/generate-handoff-fingerprint.mjs',
-      `当前工作树指纹不是合法 JSON：${error.message}`
-    );
+function runGit(args) {
+  return spawnSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+    windowsHide: true
+  });
+}
+
+function normalizeSubjectText(value) {
+  return value?.replaceAll('\r\n', '\n') ?? null;
+}
+
+function buildFreshnessContext(markdown) {
+  const registry = gateSubjectRegistry();
+  const anchors = {};
+  const currentSections = new Map(registry.allHandoffSections.map((sectionId) => [
+    sectionId,
+    normalizeSubjectText(extractHandoffSectionSubject(markdown, sectionId))
+  ]));
+
+  for (const anchor of collectSealAnchors(markdown)) {
+    const ancestor = runGit(['merge-base', '--is-ancestor', anchor, 'HEAD']);
+    if (ancestor.status === 1) {
+      anchors[anchor] = { isAncestor: false, subjectScanAvailable: true, changedSubjects: [] };
+      continue;
+    }
+    if (ancestor.status !== 0) {
+      anchors[anchor] = { isAncestor: false, subjectScanAvailable: false, changedSubjects: [] };
+      continue;
+    }
+
+    const changedSubjects = new Set();
+    let subjectScanAvailable = true;
+    if (registry.allFiles.length > 0) {
+      const diff = runGit([
+        'diff',
+        '--name-only',
+        '--no-ext-diff',
+        '--no-textconv',
+        '--no-renames',
+        anchor,
+        '--',
+        ...registry.allFiles
+      ]);
+      if (diff.status !== 0) {
+        subjectScanAvailable = false;
+      } else {
+        for (const path of diff.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+          changedSubjects.add(path.replaceAll('\\', '/'));
+        }
+      }
+    }
+
+    if (registry.allHandoffSections.length > 0) {
+      const historical = runGit(['show', `${anchor}:${HANDOFF}`]);
+      if (historical.status !== 0) {
+        subjectScanAvailable = false;
+      } else {
+        for (const sectionId of registry.allHandoffSections) {
+          const historicalSection = normalizeSubjectText(
+            extractHandoffSectionSubject(historical.stdout, sectionId)
+          );
+          const currentSection = currentSections.get(sectionId);
+          if (historicalSection === null || currentSection === null) {
+            subjectScanAvailable = false;
+          } else if (historicalSection !== currentSection) {
+            changedSubjects.add(handoffSectionSubjectRef(sectionId));
+          }
+        }
+      }
+    }
+
+    anchors[anchor] = {
+      isAncestor: true,
+      subjectScanAvailable,
+      changedSubjects: [...changedSubjects].sort()
+    };
   }
+  return { anchors };
 }
 
 if (handoff !== null) {
+  const freshnessContext = buildFreshnessContext(handoff);
   findings.push(...validateHandoffGovernance(handoff, {
     source: HANDOFF,
-    ...(currentFingerprint ? { currentFingerprint } : {})
+    freshnessContext
   }).findings);
 }
 
@@ -154,11 +217,12 @@ for (const [relativePath, content] of [[HANDOFF, handoff], [PLAYBOOK, playbook]]
 const checkedRules = [
   'README、交接书和执行手册的本地 Markdown 链接必须存在',
   'README 必须直链唯一 handoff，且不依赖本机代理规则文件',
-  '§17.1 Evidence ID 唯一；sealed-current-run 指纹可重算；passed Gate Evidence 与当前工作树一致',
+  '§17.1 Evidence ID 唯一且 sealed-current-run 指纹可重算；passed Gate freshness 只跟踪显式主题域',
   '§13.1 切片完整 schema、lifecycle、authority、authority cap 与 blockerRefs 闭合',
   '§13.4 validation-unfrozen 只能引用 §13.1 中尚未终止的切片',
   '§18.1、§18.3 固定 11 个 Gate，状态、适用性、切片、范围裁定 Evidence 与 blocker 引用满足收敛约束',
   '§18.4 blocker 八字段完整，影响对象与活动 blockerRefs 双向闭合',
+  '无活动 blockerRefs 的 ready/active 切片和非 blocked Gate 不得要求用户介入',
   '交接书和执行手册引用的 npm run script 必须存在于 package.json',
   '交接书和执行手册不得包含 Oodle DLL 文件名、用户主目录路径、高置信 token 或私钥内容'
 ];

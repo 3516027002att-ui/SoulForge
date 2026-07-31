@@ -1,5 +1,6 @@
 import {
   computeHandoffFingerprintSha256,
+  extractHandoffSectionSubject,
   governanceEnums,
   validateHandoffGovernance
 } from './handoff-integrity-lib.mjs';
@@ -20,6 +21,26 @@ const VALID_SEAL = [
   `handoffSha256BeforeEvidenceAppend=${SEAL_FIELDS.handoffSha256BeforeEvidenceAppend}`,
   `fingerprintSha256=${computeHandoffFingerprintSha256(SEAL_FIELDS)}`
 ].join('; ');
+const SECOND_SEAL_FIELDS = {
+  ...SEAL_FIELDS,
+  head: '2'.repeat(40)
+};
+const SECOND_VALID_SEAL = [
+  `HEAD=${SECOND_SEAL_FIELDS.head}`,
+  `trackedDiffSha256=${SECOND_SEAL_FIELDS.trackedDiffSha256}`,
+  `untrackedManifestSha256=${SECOND_SEAL_FIELDS.untrackedManifestSha256}`,
+  `handoffSha256BeforeEvidenceAppend=${SECOND_SEAL_FIELDS.handoffSha256BeforeEvidenceAppend}`,
+  `fingerprintSha256=${computeHandoffFingerprintSha256(SECOND_SEAL_FIELDS)}`
+].join('; ');
+const FRESH_SCOPE_CONTEXT = {
+  anchors: {
+    [SEAL_FIELDS.head]: {
+      isAncestor: true,
+      subjectScanAvailable: true,
+      changedSubjects: []
+    }
+  }
+};
 
 const sliceIdByGate = new Map(governanceEnums.requiredGateIds.map((gateId) => [
   gateId,
@@ -78,7 +99,7 @@ function buildDocument(options = {}) {
   const validationUnfrozen = options.validationUnfrozen ?? ['W-A-01'];
 
   const sliceRows = slices.map((slice) =>
-    `| \`${slice.id}\` | \`${slice.lifecycle}\` | \`${slice.authority}\` | ${slice.blockers} | 目标 | 可验收切片 | 前置 | 入口 | 验证 | cap=${slice.cap ?? 'partial'} |`
+    `| \`${slice.id}\` | \`${slice.lifecycle}\` | \`${slice.authority}\` | ${slice.blockers} | ${slice.target ?? '目标'} | 可验收切片 | ${slice.hardPrerequisite ?? '前置'} | 入口 | 验证 | cap=${slice.cap ?? 'partial'} |`
   );
   const evidenceRows = evidence.map((record) =>
     `| \`${record.id}\` | \`${record.type}\` | ${record.claim ?? '声明'} | ${record.baseline} | 命令 | 范围 | 边界 |`
@@ -87,7 +108,7 @@ function buildDocument(options = {}) {
     `| \`${id}\` | 范围 | 通过条件 | 阻止条件 |`
   );
   const gateRows = gates.map((gate) =>
-    `| \`${gate.id}\` | capability | ${gate.slices} | \`${gate.state}\` | \`${gate.applicability}\` | ${gate.refs} | 后继 |`
+    `| \`${gate.id}\` | capability | ${gate.slices} | \`${gate.state}\` | \`${gate.applicability}\` | ${gate.refs} | ${gate.successor ?? '后继'} |`
   );
   const blockerRows = blockers.map((blocker) =>
     `| \`${blocker.id}\` | \`${blocker.reason}\` | ${blocker.impacts ?? '`REL-B`、`W-B-01`'} | ${blocker.owner ?? 'owner'} | ${blocker.input ?? 'input'} | ${blocker.validation ?? 'validation'} | ${blocker.trigger ?? 'trigger'} | ${blocker.evidence} |`
@@ -149,6 +170,21 @@ function buildDocument(options = {}) {
 }
 
 const executedCases = [];
+
+const nestedSection = extractHandoffSectionSubject([
+  '# fixture',
+  '#### 18.2.1 Scope',
+  '',
+  '{"proposalStatus":"user-approved"}',
+  '',
+  '#### 18.2.2 Other',
+  '',
+  'unrelated'
+].join('\n'), '18.2.1');
+if (nestedSection?.trim() !== '{"proposalStatus":"user-approved"}') {
+  throw new Error(`nested-handoff-section-subject 提取错误：${JSON.stringify(nestedSection)}`);
+}
+executedCases.push({ name: 'nested-handoff-section-subject', expected: 'pass' });
 
 function assertPass(name, document, options = {}) {
   const result = validateHandoffGovernance(document, { source: `fixture:${name}`, ...options });
@@ -491,17 +527,103 @@ assertCodes('scope-pass-requires-user-ruling-evidence', buildDocument({
   evidence: [{ id: 'EV-SEALED-01', type: 'sealed-current-run', claim: '普通公开验证', baseline: VALID_SEAL }]
 }), ['GATE_SCOPE_RULING_EVIDENCE_REQUIRED']);
 
-assertCodes(
-  'passed-gate-evidence-invalidated-by-worktree-drift',
+assertPass(
+  'passed-scope-ignores-unrelated-worktree-drift',
   buildDocument({ slices: passedScopeSlices, gates: passedScopeGates }),
-  ['GATE_EVIDENCE_STALE'],
   {
-    currentFingerprint: {
-      head: SEAL_FIELDS.head,
-      trackedDiffSha256: HASH_C,
-      untrackedManifestSha256: SEAL_FIELDS.untrackedManifestSha256
+    freshnessContext: {
+      anchors: {
+        [SEAL_FIELDS.head]: {
+          isAncestor: true,
+          subjectScanAvailable: true,
+          changedSubjects: ['packages/core/src/emevd/emedfCoverage.ts']
+        }
+      }
     }
   }
 );
+
+assertCodes(
+  'passed-scope-invalidated-by-subject-drift',
+  buildDocument({ slices: passedScopeSlices, gates: passedScopeGates }),
+  ['GATE_EVIDENCE_STALE'],
+  {
+    freshnessContext: {
+      anchors: {
+        [SEAL_FIELDS.head]: {
+          isAncestor: true,
+          subjectScanAvailable: true,
+          changedSubjects: ['scripts/verify-release-scope.mjs']
+        }
+      }
+    }
+  }
+);
+
+assertCodes(
+  'fresh-unrelated-evidence-cannot-mask-stale-scope-ruling',
+  buildDocument({
+    slices: passedScopeSlices,
+    gates: passedScopeGates.map((gate) => gate.id === 'REL-SCOPE'
+      ? { ...gate, refs: '`EV-SEALED-01`、`EV-SEALED-02`' }
+      : gate),
+    evidence: [
+      ...baseEvidence,
+      {
+        id: 'EV-SEALED-02',
+        type: 'sealed-current-run',
+        claim: '普通工程验证',
+        baseline: SECOND_VALID_SEAL
+      }
+    ]
+  }),
+  ['GATE_EVIDENCE_STALE'],
+  {
+    freshnessContext: {
+      anchors: {
+        [SEAL_FIELDS.head]: {
+          isAncestor: true,
+          subjectScanAvailable: true,
+          changedSubjects: ['scripts/verify-release-scope.mjs']
+        },
+        [SECOND_SEAL_FIELDS.head]: {
+          isAncestor: true,
+          subjectScanAvailable: true,
+          changedSubjects: []
+        }
+      }
+    }
+  }
+);
+
+assertCodes(
+  'passed-scope-freshness-unverifiable-fails-closed',
+  buildDocument({ slices: passedScopeSlices, gates: passedScopeGates }),
+  ['GATE_FRESHNESS_UNVERIFIABLE'],
+  {
+    freshnessContext: {
+      anchors: {
+        [SEAL_FIELDS.head]: {
+          isAncestor: true,
+          subjectScanAvailable: false,
+          changedSubjects: []
+        }
+      }
+    }
+  }
+);
+
+assertCodes('ready-slice-cannot-request-user-action-without-blocker', buildDocument({
+  slices: cloneRows(baseSlices).map((slice) => slice.id === 'W-A-01'
+    ? { ...slice, hardPrerequisite: '需用户提供 EMEDF 类型源并授权许可证' }
+    : slice)
+}), ['USER_ACTION_WITHOUT_ACTIVE_BLOCKER']);
+
+assertCodes('passed-gate-cannot-request-user-reseal-without-blocker', buildDocument({
+  slices: passedScopeSlices,
+  gates: passedScopeGates.map((gate) => gate.id === 'REL-SCOPE'
+    ? { ...gate, successor: 'GATE_EVIDENCE_STALE：需用户授权重新封存' }
+    : gate)
+}), ['USER_ACTION_WITHOUT_ACTIVE_BLOCKER'], { freshnessContext: FRESH_SCOPE_CONTEXT });
 
 console.log(JSON.stringify({ ok: true, caseCount: executedCases.length, cases: executedCases }, null, 2));

@@ -106,7 +106,7 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 
 ### K1 只读勘察 / candidate inventory
 
-1. 确认合法输入样本来源（无则把 lifecycle 改为 `blocked`，引用交接书 §18.4 blocker，回 §3 重选）。
+1. 确认合法输入样本来源；先穷尽公开来源调查、已有本机 registry、external-only adapter 与可独立验证的失败关闭路径。只有这些工程替代均不可行且 §18.4 已定义真实外部输入时，才把 lifecycle 改为 `blocked`；不能把来源研究本身交给用户。
 2. 在 core 只读探测层写最小 parser：只提取可确认字段 + `diagnostics`。
 3. 对可确认字段写断言；不确定的标 `candidate`，不猜。
 4. 冲突 / 未知变体 → 结构化记 `unsupported` 并留证据，停在只读。
@@ -163,7 +163,7 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 1. 前置：凭据只经 main + safeStorage；无合法环境则该切片 `blocked`，回 §3。
 2. 固定无写 / 受控写工具集，写工具仍复用 native validator + Patch Engine。
 3. 跑真实只读循环 + 取消 / 超时 / 错误 / 审计 / 凭据脱敏。
-4. 采集真实数据，但**不得自行把观测值定义为发布标准**（阈值由用户裁定）。
+4. 采集真实数据，但**不得自行把观测值定义为发布标准**；V0.5 只使用交接书已冻结的功能正确性标准，不恢复已删除的量化阈值。
 5. L6 记脱敏结果为 provider loop `partial`；不提升生产写 Agent。
 
 **套不上模板？** 回 §3 按交接书 §3 缩小范围，或把切片拆到能套上为止。宁可缩小，不要硬闯。
@@ -234,14 +234,16 @@ S1 打开交接书 §18.3 矩阵，从上到下检查：
    - gateState=`blocked` → 先枚举不依赖当前 blocker 的 protocol/validator/registry/
      instrumentation/失败关闭/harness；存在任一合法内部工作就补货并改回 open，
      否则只按 §18.4 复查触发器检查是否解锁；
-   - gateState=`passed` → 先由 handoff 门禁校验 sealed Evidence freshness；有效才不再补货，
-     漂移则重开或标阻塞并生成后继验证切片。
+   - gateState=`passed` → 先由 handoff 门禁校验 sealed Evidence 的显式主题域 freshness；无关代码、日志、未跟踪文件或其他交接章节变化不影响 Gate；主题域漂移但冻结语义未变时由工程方重跑验证并重封存，只有实际范围变化才请求新的用户裁定。
    全部 Gate 都 `passed`，或剩余 Gate 均有 active/blocked 且没有可解锁输入 → 去 §9。
 
 S2 枚举该 Gate 的全部合法最小下一步，判断是否全部被外部阻塞
    （private-corpus / credential / hardware / user-ruling / toolchain / license / upstream / prerequisite-authority）：
    全部阻塞 → 不造假切片；在 §18.4 定义或复用 blocker，把 Gate 记为 `blocked`，去 §9 汇总。
    仍有任一不依赖外部输入的下一步 → 选择最小者，S3。
+
+   “需要用户处理”只能来自当前 blocked Gate/切片的活动 blockerRefs；没有活动引用时，
+   license/upstream 调查、工具链安装、测试环境编排和 Evidence 维护均为工程工作。
 
 S3 用 §4 模板把该 Gate 的后继要求拆成一个最小可验收切片：
    - 单一主 capability；
@@ -278,7 +280,7 @@ T1 分开聚合未完成 Gate：
      credential / hardware / user-ruling / toolchain / license / upstream / prerequisite-authority；
    - gateState=`open` 且只有 active → 引用 §13.1.1 claimId/owner/heartbeatAt，标明“由其他 Agent 推进”，
      不伪造 blocker；先按 recoveryTrigger 排除 orphan claim。
-T2 对 user-ruling 类，指向交接书 §18.2 待裁定量化项；不要自行定义阈值或范围。
+T2 只有活动 blockerRefs 明确引用 `reason=user-ruling` 时才报告用户裁定；Evidence freshness 维护、来源调查和已删除的量化阈值都不能冒充 user-ruling。
 T3 若 blocker 发生变化，按 §6 触发器写入 §17，并同步 §18.4；不新建平行文档：
    - 已推进到的边界；
    - 每个 Gate 的 blockerId、所需输入、责任方、解锁验证和复查触发器；
