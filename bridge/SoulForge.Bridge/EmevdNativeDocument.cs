@@ -649,6 +649,38 @@ internal sealed class EmevdNativeDocument
             layerOffset = instr.LayerOffset
         }).ToArray();
 
+        // Full instruction distribution (bank/id -> count and args-length histogram).
+        // Aggregate-only: never exposes payload content; bounded to protect envelope size.
+        const int distributionLimit = 2000;
+        var distribution = new Dictionary<(long Bank, long Id), (int Count, Dictionary<int, int> Lengths)>();
+        foreach (var instr in Instructions)
+        {
+            if (!distribution.TryGetValue((instr.Bank, instr.Id), out var entry))
+            {
+                entry = (0, new Dictionary<int, int>());
+                distribution[(instr.Bank, instr.Id)] = entry;
+            }
+            entry.Count++;
+            distribution[(instr.Bank, instr.Id)] = entry; // struct tuple value: write back
+            entry.Lengths.TryGetValue(instr.Args.Length, out var freq);
+            entry.Lengths[instr.Args.Length] = freq + 1;
+        }
+        var instructionDistribution = distribution
+            .OrderByDescending(pair => pair.Value.Count)
+            .ThenBy(pair => pair.Key.Bank)
+            .ThenBy(pair => pair.Key.Id)
+            .Take(distributionLimit)
+            .Select(pair => new
+            {
+                bank = pair.Key.Bank,
+                id = pair.Key.Id,
+                count = pair.Value.Count,
+                argsLengths = pair.Value.Lengths
+                    .OrderBy(kv => kv.Key)
+                    .ToDictionary(kv => kv.Key.ToString(System.Globalization.CultureInfo.InvariantCulture), kv => kv.Value)
+            })
+            .ToArray();
+
         var events = Events.Select(e =>
         {
             var start = e.InstructionCount > 0 ? e.InstructionsOffset / InstructionSize : -1L;
@@ -681,6 +713,8 @@ internal sealed class EmevdNativeDocument
             events,
             instructionsSample = sample,
             instructionsSampleTruncated = Instructions.Count > sampleLimit,
+            instructionDistribution,
+            instructionDistributionTruncated = distribution.Count > distributionLimit,
             roundTrip = report,
             authority = report is { SemanticIdentical: true, ByteIdentical: true }
                 ? "native-verified"
