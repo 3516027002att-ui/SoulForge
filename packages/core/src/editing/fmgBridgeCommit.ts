@@ -6,7 +6,8 @@ import { runBridge } from '../bridge/runBridge.js';
 
 export type FmgBridgeMutation =
   | { kind: 'upsert'; id: number; text: string }
-  | { kind: 'delete'; id: number };
+  | { kind: 'delete'; id: number }
+  | { kind: 'add'; id: number; text: string };
 
 export interface FmgBridgeCommitRequest {
   sourcePath: string;
@@ -34,7 +35,7 @@ export async function commitFmgMutationViaBridge(
     mutation: request.mutation.kind,
     id: request.mutation.id
   };
-  if (request.mutation.kind === 'upsert') {
+  if (request.mutation.kind === 'upsert' || request.mutation.kind === 'add') {
     commandOptions.text = request.mutation.text;
   }
   const result = await runBridge<{

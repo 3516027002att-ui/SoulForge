@@ -71,6 +71,14 @@ internal static class MsbNativeWriter
                 throw new InvalidDataException("MSB posY 未按预期更新。");
             if (patch.PosZ is not null && Math.Abs(part.PosZ - patch.PosZ.Value) > 0.0001f)
                 throw new InvalidDataException("MSB posZ 未按预期更新。");
+            if (patch.RotX is not null && Math.Abs(part.RotX - patch.RotX.Value) > 0.0001f)
+                throw new InvalidDataException("MSB rotX 未按预期更新。");
+            if (patch.ScaleX is not null && Math.Abs(part.ScaleX - patch.ScaleX.Value) > 0.0001f)
+                throw new InvalidDataException("MSB scaleX 未按预期更新。");
+            if (patch.ScaleY is not null && Math.Abs(part.ScaleY - patch.ScaleY.Value) > 0.0001f)
+                throw new InvalidDataException("MSB scaleY 未按预期更新。");
+            if (patch.ScaleZ is not null && Math.Abs(part.ScaleZ - patch.ScaleZ.Value) > 0.0001f)
+                throw new InvalidDataException("MSB scaleZ 未按预期更新。");
         }
 
         return new

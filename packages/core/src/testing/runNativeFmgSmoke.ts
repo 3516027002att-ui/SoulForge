@@ -4,7 +4,7 @@
  * Also exercises BND4 child replace of rebuilt FMG bytes through PatchIR.
  */
 import { createHash } from 'node:crypto';
-import { copyFile, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -106,6 +106,50 @@ async function main(): Promise<void> {
   if (stagedEntry?.text !== newText) {
     throw new Error(`Staged FMG text mismatch: ${JSON.stringify(stagedEntry)}`);
   }
+
+  // 3b) add mutation: staged write of a brand-new entry (id 999999999) + independent reread + cleanup
+  const ADD_ID = 999999999;
+  const ADD_TEXT = 'SoulForge·新增条目验证';
+  const stagedAddPath = join(staging, 'weapon_names_add.fmg');
+  const added = await runBridge<{ outputHash: string }>({
+    command: 'write-fmg',
+    filePath: fmgPath,
+    allowedRoots: [overlay, staging],
+    writableRoots: [staging],
+    timeoutMs: 60_000,
+    commandOptions: {
+      outputPath: stagedAddPath,
+      expectedDocumentHash: read.data.sourceHash,
+      mutation: 'add',
+      id: ADD_ID,
+      text: ADD_TEXT
+    }
+  });
+  if (!added.diagnostics.some((d) => d.code === 'FMG_STAGING_WRITE_VERIFIED')) {
+    throw new Error(`FMG add staged write failed: ${JSON.stringify(added.diagnostics)}`);
+  }
+  const addedRead = await runBridge<FmgEnvelope>({
+    command: 'read-fmg-document',
+    filePath: stagedAddPath,
+    allowedRoots: [staging],
+    timeoutMs: 60_000
+  });
+  const addedEntry = addedRead.data?.entries.find((e) => e.id === ADD_ID);
+  if (addedEntry?.text !== ADD_TEXT) {
+    throw new Error(`FMG add staged reread mismatch: ${JSON.stringify(addedEntry)}`);
+  }
+  // Cleanup: staged write never rewrites the source — reread original to confirm the
+  // new entry did not leak, then remove the staging file.
+  const originalRecheck = await runBridge<FmgEnvelope>({
+    command: 'read-fmg-document',
+    filePath: fmgPath,
+    allowedRoots: [overlay],
+    timeoutMs: 60_000
+  });
+  if (originalRecheck.data?.entries.some((e) => e.id === ADD_ID)) {
+    throw new Error('FMG add mutation leaked into source file.');
+  }
+  await unlink(stagedAddPath);
 
   // 4) Commit rebuilt FMG back into msgbnd via native BND4 replace + resource-entry inverse
   const session = await openWorkspaceSession({ overlayRoot: overlay, game: 'sekiro' });
@@ -224,6 +268,46 @@ async function main(): Promise<void> {
     fmgVerified += 1;
   }
 
+  // 8) menu.msgbnd (registry bnd4-primary, capabilities inspect/parse/read): FMG read chain
+  //    on the second msgbnd — all FMG children semantic roundtrip, read-only.
+  const menuMsgbnd = await resolveNativeFixture(
+    process.argv[3],
+    'bnd4-primary',
+    '../../mods/msg/zhocn/menu.msgbnd.dcx'
+  );
+  const menuContainer = await runBridge<{ nested?: { entryCount: number } }>({
+    command: 'read-dcx-document',
+    filePath: menuMsgbnd,
+    allowedRoots: [dirname(menuMsgbnd)],
+    timeoutMs: 60_000
+  });
+  const menuCount = menuContainer.data?.nested?.entryCount ?? 0;
+  let menuFmgVerified = 0;
+  for (let i = 0; i < menuCount; i++) {
+    const snap = await runBridge<Bnd4ChildSnapshot>({
+      command: 'snapshot-bnd4-child',
+      filePath: menuMsgbnd,
+      allowedRoots: [dirname(menuMsgbnd)],
+      timeoutMs: 60_000,
+      commandOptions: { entryIndex: i }
+    });
+    const bytes = Buffer.from(snap.data!.contentBase64, 'base64');
+    // FMG v2 marker
+    if (bytes.length < 0x28 || bytes.readUInt32LE(0) !== 0x00020000) continue;
+    const tmp = join(staging, `menu-corpus-${i}.fmg`);
+    await writeFile(tmp, bytes);
+    const doc = await runBridge<FmgEnvelope>({
+      command: 'read-fmg-document',
+      filePath: tmp,
+      allowedRoots: [staging],
+      timeoutMs: 60_000
+    });
+    if (!doc.data?.roundTrip?.semanticIdentical) {
+      throw new Error(`Menu FMG ${i} semantic roundtrip failed: ${JSON.stringify(doc.diagnostics)}`);
+    }
+    menuFmgVerified += 1;
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: '原生 FMG 读取/语义往返/写入/BND4 提交/回滚验证通过',
@@ -233,7 +317,17 @@ async function main(): Promise<void> {
     byteIdenticalNoop: read.data.roundTrip?.byteIdentical ?? false,
     semanticIdenticalNoop: true,
     corpusFmgVerified: fmgVerified,
-    containerEntries: count
+    containerEntries: count,
+    addCase: {
+      id: ADD_ID,
+      text: ADD_TEXT,
+      stagedRereadVerified: true,
+      originalUntouched: true
+    },
+    menuMsgbnd: {
+      containerEntries: menuCount,
+      fmgVerified: menuFmgVerified
+    }
   }, null, 2));
   await disposeBridgeDaemonPool();
 }
