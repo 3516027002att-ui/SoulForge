@@ -547,6 +547,63 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(indices);
     }
 
+    /// <summary>
+    /// 提取 FLVER2 纹理槽位表（type/path 及所属材质）。
+    /// 权威布局（经 SoulsFormats 对照 + 真实只狼 c1020.flver 验证）：所有结构表在 0x80
+    /// 头之后连续排列，纹理表位于 Dummies→Materials→Bones→Meshes→FaceSets→
+    /// VertexBuffers→BufferLayouts 之后。Sekiro FLVER2 的纹理 Path 通常为空，真实纹理
+    /// 文件绑定在材质 GXList/MTD 中；Type 为着色器槽位名（AlbedoMap/NormalMap 等）。
+    /// </summary>
+    public IReadOnlyList<FlverTextureSlotEntry> GetTextureSlots()
+    {
+        int dummyCount = ReadInt32(SourceBytes, 0x14);
+        int materialCount = ReadInt32(SourceBytes, 0x18);
+        int boneCount = ReadInt32(SourceBytes, 0x1C);
+        int meshCount = ReadInt32(SourceBytes, 0x20);
+        int vertexBufferCount = ReadInt32(SourceBytes, 0x24);
+        int faceSetCount = ReadInt32(SourceBytes, 0x50);
+        int bufferLayoutCount = ReadInt32(SourceBytes, 0x54);
+        int textureCount = ReadInt32(SourceBytes, 0x58);
+
+        const int DummySize = 64, MaterialSize = 32, BoneSize = 128, MeshSize = 48;
+        const int FaceSetSize = 32, VertexBufferSize = 32, BufferLayoutHeaderSize = 16, TextureSize = 32;
+
+        long off = HeaderSize;
+        off += (long)dummyCount * DummySize;
+        int materialTableOffset = (int)off;
+        off += (long)materialCount * MaterialSize;
+        off += (long)boneCount * BoneSize;
+        off += (long)meshCount * MeshSize;
+        off += (long)faceSetCount * FaceSetSize;
+        off += (long)vertexBufferCount * VertexBufferSize;
+        off += (long)bufferLayoutCount * BufferLayoutHeaderSize;
+        int textureTableOffset = (int)off;
+
+        if (textureCount <= 0 || textureTableOffset + (long)textureCount * TextureSize > SourceBytes.Length)
+            return Array.Empty<FlverTextureSlotEntry>();
+
+        var textures = new List<FlverTextureSlotEntry>(textureCount);
+        for (int i = 0; i < textureCount; i++)
+        {
+            int e = textureTableOffset + i * TextureSize;
+            int pathOffset = ReadInt32(SourceBytes, e + 0x00);
+            int typeOffset = ReadInt32(SourceBytes, e + 0x04);
+            string path = pathOffset > HeaderSize ? ReadUtf16AtAbsoluteOffset(SourceBytes, pathOffset) : string.Empty;
+            string type = typeOffset > HeaderSize ? ReadUtf16AtAbsoluteOffset(SourceBytes, typeOffset) : string.Empty;
+
+            int materialIndex = -1;
+            for (int m = 0; m < materialCount; m++)
+            {
+                int me = materialTableOffset + m * MaterialSize;
+                int first = ReadInt32(SourceBytes, me + 0x0C);
+                int count = ReadInt32(SourceBytes, me + 0x08);
+                if (i >= first && i < first + count) { materialIndex = m; break; }
+            }
+            textures.Add(new FlverTextureSlotEntry(i, type, path, materialIndex));
+        }
+        return textures;
+    }
+
     public static FlverNativeDocument Read(byte[] source)
     {
         if (source.Length < HeaderSize || source.Length > MaxSourceBytes)
@@ -819,6 +876,9 @@ internal sealed record FlverBoneEntry(
 
 internal sealed record FlverMeshEntry(
     int Index, int VertexCount, int IndexByteOffset, int IndexFormat, int VertexBufferLayoutIndex, int MaterialIndex);
+
+internal sealed record FlverTextureSlotEntry(
+    int Index, string Type, string Path, int MaterialIndex);
 
 internal sealed record FlverRoundTripReport(
     bool ByteIdentical, bool SemanticIdentical,
