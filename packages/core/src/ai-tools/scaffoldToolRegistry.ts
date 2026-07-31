@@ -27,6 +27,8 @@ import {
   createWorkspaceTransaction,
   type WorkspaceTransaction
 } from '../transactions/workspaceTransaction.js';
+import { sha256File } from '../validators/textHash.js';
+import { verifyPathInsideRoot } from '../workspace/pathBoundary.js';
 import { evaluatePolicyGate, maxPermissionFromMode } from './policyGate.js';
 
 export interface ScaffoldToolContext {
@@ -243,6 +245,51 @@ export function createScaffoldToolRegistry(): ScaffoldToolRegistry {
   });
 
   registry.registerTool({
+    name: 'workspace.readFile',
+    description: 'Read a file inside the workspace root (re-read after commit).',
+    permission: 'read',
+    inputSchema: {
+      schemaId: 'workspace.readFile.input',
+      schemaVersion: '1',
+      shape: { path: 'string' }
+    },
+    resultSchema: {
+      schemaId: 'workspace.readFile.result',
+      schemaVersion: '1',
+      shape: { path: 'string', content: 'string', sha256: 'string', sizeBytes: 'number' }
+    },
+    run: async (input, context) => {
+      const value = asRecord(input);
+      const path = asString(value.path, '');
+      if (!path) {
+        return failTyped('workspace.readFile', 'INVALID_INPUT', 'path is required.');
+      }
+      const boundary = await verifyPathInsideRoot(context.workspaceRoot, path);
+      if (!boundary.ok) {
+        const diagnostic = boundary.diagnostics[0];
+        return failTyped(
+          'workspace.readFile',
+          diagnostic?.code ?? 'PATH_ESCAPE_WORKSPACE',
+          diagnostic?.message ?? '读取目标不在工作区根目录内。'
+        );
+      }
+      try {
+        const content = await readFile(path, 'utf8');
+        return okResult('workspace.readFile', {
+          path,
+          content,
+          sha256: createHash('sha256').update(content).digest('hex'),
+          sizeBytes: Buffer.byteLength(content, 'utf8')
+        }, [], [{ uri: `file://${path}`, kind: 'file' }]);
+      } catch (error) {
+        return failTyped('workspace.readFile', 'READ_FAILED', error instanceof Error
+          ? error.message
+          : '读取文件失败。');
+      }
+    }
+  });
+
+  registry.registerTool({
     name: 'patch.proposeTextEdit',
     description: 'Propose a text edit PatchIR without writing files.',
     permission: 'propose',
@@ -261,7 +308,7 @@ export function createScaffoldToolRegistry(): ScaffoldToolRegistry {
       schemaVersion: '1',
       shape: { patch: 'PatchIR' }
     },
-    run: (input, context) => {
+    run: async (input, context) => {
       const value = asRecord(input);
       const targetUri = asString(value.targetUri, '');
       const targetPath = asString(value.targetPath, '');
@@ -270,7 +317,22 @@ export function createScaffoldToolRegistry(): ScaffoldToolRegistry {
       if (!targetUri || !targetPath) {
         return failTyped('patch.proposeTextEdit', 'INVALID_INPUT', 'targetUri and targetPath are required.');
       }
-      const op = createTextEditOperation({ targetUri, targetPath, newText, resourceKind: 'msg' });
+      // Capture the content hash at proposal time so WorkspaceTransaction can
+      // reject concurrent original changes (HASH_MISMATCH / ORIGINAL_CHANGED_DURING_STAGING).
+      let expectedHash: string | undefined;
+      try {
+        expectedHash = await sha256File(targetPath);
+      } catch {
+        // New file path: no hash precondition.
+        expectedHash = undefined;
+      }
+      const op = createTextEditOperation({
+        targetUri,
+        targetPath,
+        newText,
+        resourceKind: 'msg',
+        ...(expectedHash ? { expectedHash } : {})
+      });
       const patch = createPatchIr({
         workspaceId: context.workspaceId,
         title,

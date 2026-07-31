@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 internal sealed class BridgeCommandService
 {
@@ -26,6 +27,11 @@ internal sealed class BridgeCommandService
         {
             var probe = OodleRuntimeLocator.Probe(file, BridgeResult<object>.MakeSourceUri(file));
             return BridgeResult<object>.Partial(file, "unknown", probe.Diagnostics, probe);
+        }
+
+        if (command == "inventory-asset-resources")
+        {
+            return InventoryAssetResources(file, options, oodleRuntimeRoot, cancellationToken);
         }
 
         if (!File.Exists(file))
@@ -527,6 +533,32 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-mtd-document")
+        {
+            try
+            {
+                var document = MtdNativeDocument.ReadFile(file);
+                var verification = document.VerifyStructure();
+                var diagnostics = document.Diagnostics.Append(new Diagnostic(
+                    verification.Consistent ? "info" : "error",
+                    verification.Consistent ? "MTD_DOCUMENT_STRUCTURE_VERIFIED" : "MTD_DOCUMENT_STRUCTURE_INCONSISTENT",
+                    verification.Consistent
+                        ? $"MTD 结构投影一致；root={document.RootElement}, params={document.Params.Count}, textureRefs={document.Textures.Count}。"
+                        : (verification.Note ?? "MTD 重复解析的结构投影不一致。"),
+                    BridgeResult<object>.MakeSourceUri(file),
+                    verification)).ToArray();
+                return BridgeResult<object>.Partial(file, "mtd", diagnostics, document.ToEnvelope(verification));
+            }
+            catch (NotSupportedException ex)
+            {
+                return BridgeResult<object>.Unsupported(file, "mtd", ex.Message);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "mtd", "MTD_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-esd-document")
         {
             try
@@ -625,6 +657,145 @@ internal sealed class BridgeCommandService
     {
         return SemanticCandidateExports.TryExport(file, resourceKind)
             ?? BridgeResult<object>.Unsupported(file, resourceKind, unsupportedMessage);
+    }
+
+    /// <summary>
+    /// Container-level asset inventory (candidate): unpack outer DCX, enumerate BND4
+    /// entries and classify by extension/magic without decoding child semantics.
+    /// Output is limited to logical entry names, counts and category aggregates —
+    /// never host paths, payload content or full child dumps.
+    /// </summary>
+    private static BridgeResult<object> InventoryAssetResources(
+        string file,
+        JsonElement options,
+        string? oodleRuntimeRoot,
+        CancellationToken cancellationToken)
+    {
+        const int maxEntries = 1_000_000;
+        const int sampleLimit = 64;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var source = File.ReadAllBytes(file);
+            byte[] payload = source;
+            string? outerCompression = null;
+            if (source.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+            {
+                var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+                payload = dcx.Payload;
+                outerCompression = dcx.CompressionFormat;
+            }
+
+            if (payload.AsSpan(0, 4).SequenceEqual("BND3"u8))
+                throw new NotSupportedException("BND3 容器尚不支持 inventory 枚举。");
+
+            if (!payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+            {
+                // Non-container resource: classify the payload itself as a single entry.
+                var kind = ClassifyAssetKind(payload);
+                var envelope = new
+                {
+                    format = outerCompression is null ? "raw" : $"DCX-{outerCompression}",
+                    containerType = "none",
+                    entryCount = 1,
+                    resourceKinds = new Dictionary<string, int> { [kind] = 1 },
+                    extensions = new Dictionary<string, int> { [GuessExtension(payload)] = 1 },
+                    sampleEntries = new[] { new { name = Path.GetFileName(file), id = 0 } },
+                    authority = "candidate"
+                };
+                return BridgeResult<object>.Partial(file, GuessKindFromPath(file), new[]
+                {
+                    new Diagnostic("info", "ASSET_INVENTORY_SINGLE_RESOURCE",
+                        "输入不是容器；按单资源分类。", BridgeResult<object>.MakeSourceUri(file), envelope)
+                }, envelope);
+            }
+
+            var binder = Bnd4NativeDocument.Read(payload);
+            if (binder.Entries.Count > maxEntries)
+                throw new InvalidDataException($"BND4 条目数 {binder.Entries.Count} 超出安全上限。");
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var kindCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            var extCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var samples = new List<object>(sampleLimit);
+            for (var index = 0; index < binder.Entries.Count; index++)
+            {
+                var entry = binder.Entries[index];
+                var ext = GetExtension(entry.Name);
+                extCounts[ext] = extCounts.GetValueOrDefault(ext) + 1;
+                var kind = ClassifyAssetKind(entry.Name);
+                kindCounts[kind] = kindCounts.GetValueOrDefault(kind) + 1;
+                if (samples.Count < sampleLimit)
+                {
+                    samples.Add(new { name = entry.Name, id = entry.Id });
+                }
+            }
+
+            var bnd4Envelope = new
+            {
+                format = outerCompression is null ? "BND4" : $"DCX-{outerCompression}->BND4",
+                containerType = "bnd4",
+                entryCount = binder.Entries.Count,
+                resourceKinds = kindCounts.OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => pair.Value),
+                extensions = extCounts.OrderByDescending(pair => pair.Value).ToDictionary(pair => pair.Key, pair => pair.Value),
+                sampleEntries = samples,
+                authority = "candidate"
+            };
+            return BridgeResult<object>.Partial(file, GuessKindFromPath(file), new[]
+            {
+                new Diagnostic("info", "ASSET_INVENTORY_ENUMERATED",
+                    $"BND4 容器条目已枚举：{binder.Entries.Count} 条，类别分布见 details。",
+                    BridgeResult<object>.MakeSourceUri(file), bnd4Envelope)
+            }, bnd4Envelope);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or ArgumentOutOfRangeException)
+        {
+            return BridgeResult<object>.Failed(file, GuessKindFromPath(file), "ASSET_INVENTORY_FAILED", ex.Message);
+        }
+    }
+
+    private static string ClassifyAssetKind(string name)
+    {
+        var lower = name.ToLowerInvariant();
+        if (lower.Contains("event") || lower.EndsWith(".emevd")) return "event";
+        if (lower.EndsWith(".msb")) return "map";
+        if (lower.Contains("param") || lower.EndsWith(".param")) return "param";
+        if (lower.Contains("msg") || lower.EndsWith(".fmg") || lower.EndsWith(".msgbnd")) return "msg";
+        if (lower.EndsWith(".luagnl") || lower.EndsWith(".luainfo") || lower.EndsWith(".lua")
+            || lower.EndsWith(".esd") || lower.EndsWith(".talkesdbnd")) return "script";
+        if (lower.EndsWith(".tae") || lower.EndsWith(".hkx") || lower.EndsWith(".hks")
+            || lower.EndsWith(".hkt") || lower.EndsWith(".anibnd") || lower.EndsWith(".behbnd")) return "action";
+        if (lower.EndsWith(".flver") || lower.EndsWith(".tpf") || lower.EndsWith(".dds")
+            || lower.EndsWith(".mtd") || lower.EndsWith(".matbin") || lower.EndsWith(".texbnd")
+            || lower.EndsWith(".objbnd") || lower.EndsWith(".partsbnd") || lower.EndsWith(".mapbnd")
+            || lower.EndsWith(".chrbnd")) return "chr";
+        return "other";
+    }
+
+    private static string ClassifyAssetKind(byte[] sample)
+    {
+        if (sample.AsSpan(0, 4).SequenceEqual("EVD\0"u8)) return "event";
+        if (sample.AsSpan(0, 4).SequenceEqual("FMG\0"u8)) return "msg";
+        if (sample.AsSpan(0, 4).SequenceEqual("PARA"u8)) return "param";
+        if (sample.AsSpan(0, 4).SequenceEqual("MSB\0"u8)) return "map";
+        if (sample.AsSpan(0, 4).SequenceEqual("FLVE"u8)) return "chr";
+        return "other";
+    }
+
+    private static string GuessExtension(byte[] sample)
+    {
+        if (sample.AsSpan(0, 4).SequenceEqual("EVD\0"u8)) return ".emevd";
+        if (sample.AsSpan(0, 4).SequenceEqual("FMG\0"u8)) return ".fmg";
+        if (sample.AsSpan(0, 4).SequenceEqual("PARA"u8)) return ".param";
+        if (sample.AsSpan(0, 4).SequenceEqual("MSB\0"u8)) return ".msb";
+        return "(unknown)";
+    }
+
+    private static string GetExtension(string name)
+    {
+        var fileName = name.Replace('\\', '/').Split('/').LastOrDefault() ?? name;
+        var dot = fileName.LastIndexOf('.');
+        return dot >= 0 && dot < fileName.Length - 1 ? fileName[dot..].ToLowerInvariant() : "(none)";
     }
 
     private static async Task<BridgeResult<object>> InspectEnvelopeAsync(

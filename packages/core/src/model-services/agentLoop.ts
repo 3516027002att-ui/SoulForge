@@ -58,7 +58,11 @@ export function isToolAllowedInMode(
       'search_workspace',
       'build_patch_graph',
       'assess_edit_risk',
-      'list_diagnostics'
+      'list_diagnostics',
+      // Scaffold typed registry read tools — plan mode stays strictly read-only.
+      'workspace.stats',
+      'resource.graph.query',
+      'workspace.readFile'
     ]);
     if (!planAllow.has(toolName)) {
       return {
