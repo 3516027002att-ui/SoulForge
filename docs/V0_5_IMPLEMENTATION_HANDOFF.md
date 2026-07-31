@@ -1450,6 +1450,7 @@ entries[]:
 
 | Evidence ID | 类型 | 能力/声明 | 基线 | 命令或记录 | 样本/范围 | 本轮结论与边界 |
 |---|---|---|---|---|---|---|
+| `EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER` | `sealed-current-run` | `scope-ruling:user-approved`；`revalidates=EV-AUTONOMOUS-GOVERNANCE-20260731`；将未自动覆盖的语义复核显式归属工程方 | `HEAD=481da6d2352802a5d18485ada2bb0d9b684695fe; trackedDiffSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=6a23687b3dd25baf53e5ef270692faff05b78fa6c9b318c15975ee5781647ef4; fingerprintSha256=95439805b18406ce8bd56a977a3c9271c66f1001658794a0582e69a592f71c5b` | `node --check scripts/verify-handoff-integrity.mjs`、`node scripts/verify-handoff-integrity-fixtures.mjs`（47 cases）与 `git diff --check` 均 exit 0；追加本记录后 `npm run test:release-scope`、`npm run test:handoff-integrity` 均 exit 0；连续两次 `npm run handoff:fingerprint` 输出一致 | handoff 输出字段为 `engineeringReviewStillRequired`、`reviewOwner=engineering-agent`、`userActionRequired=false`；旧字段只保留在历史 Evidence 叙述中，不再由当前门禁输出 | 只澄清工程复核责任并重验证未变化的冻结范围；不删除诚实性复核，不改变范围、authority、Gate 功能状态或 V0.5 完成状态 |
 | `EV-AUTONOMOUS-GOVERNANCE-20260731` | `sealed-current-run` | `scope-ruling:user-approved`；`revalidates=EV-GOVERNANCE-RECONCILIATION-20260731`；在冻结范围 JSON 不变时，将 Evidence freshness、公开来源与许可证调查固定为工程自持 | `HEAD=c103e414ab92cb1dbe643572374aff90cc2b1373; trackedDiffSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=ceb5fec39c891acb5b8192b2f5c3be661f42780adaea51ae446d01f2759353f7; fingerprintSha256=cbae6d0ba431401459606441a2c54c171912f4dfb25cf9af00fc90024f584b3d` | `npm run test:release-scope-fixtures`（35 cases）、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`node scripts/verify-handoff-integrity-fixtures.mjs`（47 cases）、`npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build` 与 `git diff --check` 均 exit 0；追加本记录后 `npm run test:handoff-integrity` exit 0；连续两次 `npm run handoff:fingerprint` 输出一致 | REL-SCOPE freshness 主题域只含唯一 BEGIN/END 范围 JSON、release-scope verifier/fixtures、handoff freshness verifier/fixtures 与指纹生成器；覆盖无关改动不失效、范围块或校验器改动失败关闭、不可验证历史失败关闭、无活动 blocker 禁止请求用户、非范围 Evidence 不得掩盖 stale scope ruling | 只支持治理规则和未变化范围的工程重验证；不改变 27 项支持/排除边界，不提升任何 parser/writer/runtime/render/release authority；未完成完整 EMEDF 类型 adapter，找不到合法来源时仍保持 opaque 与 `partial/unsupported`；不关闭任何功能 Gate，不声明 V0.5 完成或允许外部分发 |
 | `EV-PUBLIC-20260720` | `unsealed-record` | 公开回归 | `2002076` + 当前工作树 | `typecheck`、`test`、`bridge:verify:synthetic`、`build` 均 exit 0 | 公开 synthetic、core smoke、Electron 43 utility build/smoke | 证明 2026-07-20 公开构建和测试观察；因基线未封存，不支持新的 authority 或 Gate 终态；不提升任何私有 native、真游戏或真模型服务 authority |
 | `EV-A-SAFETY-20260720` | `unsealed-record` | A 路线公开安全/事务底座 | 同上 | `npm test` | junction/symlink 越界、after-commit 恢复、rollback hash 冲突、SQLite migration/journal/jobs、utility restart | 保留 A 路线公开验证观察；因基线未封存，不支持新的 authority 或 Gate 终态；真实断电、磁盘错误、全部 native writer 故障矩阵仍未验证 |
@@ -1830,6 +1831,14 @@ handoffSha256BeforeEvidenceAppend=<handoffSha256BeforeEvidenceAppend>
 - 已验证：release-scope 35 个正/负 fixture、handoff 47 个正/负 fixture、proposal/strict scope、最低公开回归、`git diff --check` 与追加后的完整 handoff 门禁均通过
 - authority 变化：无；只继承用户已经批准且未改变的 `scope-ruling:user-approved`，不产生新范围裁定
 - 当前用户 blocker：0；只有未来实际修改唯一范围 JSON 的支持/排除边界时才重新请求用户裁定
+
+### 2026-07-31：工程语义复核责任显式化
+
+- 证据类型：`sealed-current-run`（`EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER`，`revalidates=EV-AUTONOMOUS-GOVERNANCE-20260731`）
+- 已实现：handoff 结果不再输出容易被误读的 `manualReviewStillRequired`，改为 `engineeringReviewStillRequired`、`reviewOwner=engineering-agent` 与 `userActionRequired=false`
+- 已验证：47 个 handoff 正/负 fixture、严格 release-scope、追加后的完整 handoff 门禁与 `git diff --check` 均通过；冻结范围 JSON 未变化
+- 非声明：复核项目仍需工程方逐次执行；字段改名不把未自动验证的语义写成已验证，也不提升任何功能 authority
+- 当前用户 blocker：0；工程复核、公开来源调查、许可证审计、工具安装、测试编排与 Evidence 维护均不得转成用户输入
 
 ---
 
@@ -3140,7 +3149,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 ```
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->
 
-本范围已由用户逐项批准，并由后继裁定删除代码签名、真实模型凭据、代表性渲染硬件/性能预算、编辑器容量/延迟门槛和 installer 体积/耗时预算，同时固定 Smithbox 2.2.4 本机 PARAM metadata 来源；当前未变化范围以 `EV-AUTONOMOUS-GOVERNANCE-20260731` 完成工程重验证。`authorityAtRuling` 与每项 `nonClaims` 只记录 `EV-REL-SCOPE-20260730` 裁定时快照，实时 authority 唯一读取 §13.1；批准不提升 authority，也不把缺 corpus、parser、writer、adapter 或真实功能验证的项目变成完成。
+本范围已由用户逐项批准，并由后继裁定删除代码签名、真实模型凭据、代表性渲染硬件/性能预算、编辑器容量/延迟门槛和 installer 体积/耗时预算，同时固定 Smithbox 2.2.4 本机 PARAM metadata 来源；当前未变化范围以 `EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER` 完成工程重验证。`authorityAtRuling` 与每项 `nonClaims` 只记录 `EV-REL-SCOPE-20260730` 裁定时快照，实时 authority 唯一读取 §13.1；批准不提升 authority，也不把缺 corpus、parser、writer、adapter 或真实功能验证的项目变成完成。
 
 统一语义编辑不变量：所有可编辑 native 资源必须先由 Bridge 形成完整、可读、可追溯的 native semantic document；结构化界面和规范 DSL 只能产生 typed mutation。未知字段可以作为只读 opaque 数据展示，但在没有 schema 和无损保持证据时不得编辑。Hex 永远是只读证据视图。
 
@@ -3160,7 +3169,7 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 
 | Gate ID | capability | 当前切片 | gateState | applicability | Evidence/blockerRefs | 后继要求 |
 |---|---|---|---|---|---|---|
-| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-04` | `passed` | `in-scope` | `EV-AUTONOMOUS-GOVERNANCE-20260731` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、功能性渲染验收、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界继续冻结；普通工程提交不得触发用户重新授权 |
+| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-04` | `passed` | `in-scope` | `EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、功能性渲染验收、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界继续冻结；工程复核与普通工程提交不得触发用户重新授权 |
 | `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-INTEGRATION-04` | `open` | `in-scope` | — | BND4/FMG/PARAM 12 case + EMEVD/MSB 8 case 已通过；继续真实断电/大容量/安装升级恢复 |
 | `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-02` | `open` | `in-scope` | — | KRAK 重压/写回/roundtrip 已完成；继续组合 mutation/repack 和完整 corpus 验证 |
 | `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-FULL-01`、`W-EMEVD-FMG-PARAM-03` | `open` | `in-scope` | — | EMEVD DSL plan 的 production Bridge/PatchIR transaction 接线已完成；继续完整 EMEDF schema/control-flow、DSL 全局指令级 mutation、UI submit 接线；并行继续 FMG 全语言、全部 ParamType、MSB 实体和回滚 |
@@ -3190,7 +3199,7 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 | `BLK-REL-B-CORPUS` | `private-corpus` | 历史：`REL-B`、`W-REL-B-CORPUS-01`；当前无活动引用 | 历史记录；当前由工程方推进 | 已解除：仓库外 `sekiro-1-6-owner-corpus-v1` 已生成并覆盖当前 DFLT/BND4/KRAK 集合 | 214/214 分类与 read/no-op/CRUD 已执行，且一个登记 KRAK rename/repack/roundtrip 已独立验证；组合 mutation、未知字段保持、恢复和完整 corpus 写回继续失败关闭 | registry/内容版本变化、用户撤回访问或新增变体时重新打开 | `EV-B-DFLT-7BD`、`EV-B-BND4-7BD`、`EV-B-KRAK-20260724`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` |
 | `BLK-MODEL-CREDENTIALS` | `credential` | 历史：`W-AI-REAL-01`；当前无活动引用 | 历史记录；用户无需提供 | 已解除：默认配置留空，真实 provider endpoint/key 不属于 V0.5 验收 | `W-AI-REAL-01` 已被取代；`W-AI-CONFORMANCE-02` 已在本地 contract servers 上完成并保持 `partial`，不证明第三方服务 | 用户日后主动把真实 provider live smoke 加回范围时重新打开 | `EV-G-FAKE-7BD`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` |
 | `BLK-RENDER-HARDWARE` | `hardware` | 历史：`W-RENDER-BENCH-01`；当前无活动引用 | 历史记录；用户无需提供 | 已解除：代表性硬件档位、地图性能基准和量化预算不属于 V0.5 验收 | `W-RENDER-BENCH-01` 已被取代；`W-RENDER-FUNCTIONAL-02` 只要求所有者当前机器的功能闭环并保持 `ready` | 用户日后主动把硬件/性能矩阵加回范围时重新打开 | `EV-I-RENDER-7BD`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` |
-| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`、`W-REL-SCOPE-RULING-02`、`W-REL-SCOPE-RULING-03`、`W-REL-SCOPE-RULING-04`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵、未签名 NSIS、固定 Smithbox 本机 metadata、空 provider 凭据、功能性渲染边界及无编辑器/installer 量化预算均已批准 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定 | `EV-REL-SCOPE-20260730`、`EV-REL-SCOPE-20260730-UNSIGNED`、`EV-REL-SCOPE-20260730-OWNER-INPUTS`、`EV-REL-SCOPE-20260730-NO-QUANT-BUDGETS`、`EV-AUTONOMOUS-GOVERNANCE-20260731` |
+| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`、`W-REL-SCOPE-RULING-02`、`W-REL-SCOPE-RULING-03`、`W-REL-SCOPE-RULING-04`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵、未签名 NSIS、固定 Smithbox 本机 metadata、空 provider 凭据、功能性渲染边界及无编辑器/installer 量化预算均已批准 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定 | `EV-REL-SCOPE-20260730`、`EV-REL-SCOPE-20260730-UNSIGNED`、`EV-REL-SCOPE-20260730-OWNER-INPUTS`、`EV-REL-SCOPE-20260730-NO-QUANT-BUDGETS`、`EV-AUTONOMOUS-GOVERNANCE-20260731`、`EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER` |
 
 ---
 
