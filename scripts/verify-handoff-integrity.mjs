@@ -9,8 +9,10 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import {
   collectSealAnchors,
+  extractHandoffMarkedSubject,
   extractHandoffSectionSubject,
   gateSubjectRegistry,
+  handoffBlockSubjectRef,
   handoffSectionSubjectRef,
   validateHandoffGovernance
 } from './handoff-integrity-lib.mjs';
@@ -92,6 +94,10 @@ function buildFreshnessContext(markdown) {
     sectionId,
     normalizeSubjectText(extractHandoffSectionSubject(markdown, sectionId))
   ]));
+  const currentBlocks = new Map(registry.allHandoffBlocks.map((block) => [
+    block.id,
+    normalizeSubjectText(extractHandoffMarkedSubject(markdown, block.beginMarker, block.endMarker))
+  ]));
 
   for (const anchor of collectSealAnchors(markdown)) {
     const ancestor = runGit(['merge-base', '--is-ancestor', anchor, 'HEAD']);
@@ -140,6 +146,25 @@ function buildFreshnessContext(markdown) {
             subjectScanAvailable = false;
           } else if (historicalSection !== currentSection) {
             changedSubjects.add(handoffSectionSubjectRef(sectionId));
+          }
+        }
+      }
+    }
+
+    if (registry.allHandoffBlocks.length > 0) {
+      const historical = runGit(['show', `${anchor}:${HANDOFF}`]);
+      if (historical.status !== 0) {
+        subjectScanAvailable = false;
+      } else {
+        for (const block of registry.allHandoffBlocks) {
+          const historicalBlock = normalizeSubjectText(
+            extractHandoffMarkedSubject(historical.stdout, block.beginMarker, block.endMarker)
+          );
+          const currentBlock = currentBlocks.get(block.id);
+          if (historicalBlock === null || currentBlock === null) {
+            subjectScanAvailable = false;
+          } else if (historicalBlock !== currentBlock) {
+            changedSubjects.add(handoffBlockSubjectRef(block.id));
           }
         }
       }
