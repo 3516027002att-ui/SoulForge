@@ -1,4 +1,4 @@
-import type { EmevdDslCompileRequest } from '@soulforge/shared';
+import type { EmevdDslCompileRequest, EmevdPlannedMutation } from '@soulforge/shared';
 import {
   applyEmevdEditorMutation,
   createEmevdEditorDocument,
@@ -200,6 +200,71 @@ event ${eventAnchor} {
   );
   assertDiagnostic(duplicateArgument, 'EMEVD_DSL_DUPLICATE_ARGUMENT');
 
+  // Top-level instruction blocks: global instruction-level typed mutation
+  // without an enclosing event block.
+  const topLevelSource = `resource "${document.resourceUri}"
+base revision 0 schema "${schemaFingerprint}"
+instruction ${typedAnchor} { set arg conditionGroup = -2 }`;
+  const topLevel = compileEmevdPatchDsl({ ...request, sourceText: topLevelSource }, document, registry);
+  if (!topLevel.ok) throw new Error(JSON.stringify(topLevel.diagnostics));
+  if (topLevel.plan.operations.length !== 1) throw new Error('top-level instruction must produce one typed mutation');
+  if (topLevel.plan.operations[0]!.kind !== 'set_instruction_arg') {
+    throw new Error('top-level mutation must be a typed instruction arg write');
+  }
+  if (topLevel.ast.topLevelInstructions?.length !== 1) {
+    throw new Error('topLevelInstructions AST field missing');
+  }
+  // Semantic equivalence: the same write expressed inside the owning event
+  // block must compile to an identical plan fingerprint.
+  const eventScopedOnly = `resource "${document.resourceUri}"
+base revision 0 schema "${schemaFingerprint}"
+event ${eventAnchor} {
+  instruction ${typedAnchor} { set arg conditionGroup = -2 }
+}`;
+  const eventScoped = compileEmevdPatchDsl({ ...request, sourceText: eventScopedOnly }, document, registry);
+  if (!eventScoped.ok) throw new Error(JSON.stringify(eventScoped.diagnostics));
+  // Plan fingerprints are source-shape-bound (a top-level block is a different
+  // AST shape), so equivalence is asserted on the plan operations themselves.
+  const planOperationsKey = (plan: { operations: EmevdPlannedMutation[] }): string => JSON.stringify(
+    plan.operations.map((operation) => operation.kind === 'set_instruction_arg'
+      ? [operation.kind, operation.eventAnchor, operation.instructionAnchor, operation.bank, operation.id,
+        operation.argument, operation.before, operation.after]
+      : [operation.kind])
+  );
+  if (planOperationsKey(eventScoped.plan) !== planOperationsKey(topLevel.plan)) {
+    throw new Error('top-level and event-scoped writes must produce identical plan operations');
+  }
+
+  const topLevelMissing = compileEmevdPatchDsl(
+    { ...request, sourceText: `resource "${document.resourceUri}" base revision 0 schema "${schemaFingerprint}"
+instruction @i:111111111111111111111111 { set arg conditionGroup = -2 }` },
+    document,
+    registry
+  );
+  assertDiagnostic(topLevelMissing, 'EMEVD_DSL_ANCHOR_NOT_FOUND');
+
+  const topLevelUnknown = compileEmevdPatchDsl(
+    { ...request, sourceText: `resource "${document.resourceUri}" base revision 0 schema "${schemaFingerprint}"
+instruction ${unknownAnchor} { set arg value = 1 }` },
+    document,
+    registry
+  );
+  assertDiagnostic(topLevelUnknown, 'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY');
+
+  // A write repeated across top-level and event-scoped blocks must be caught
+  // by the shared anchor-keyed duplicate registry.
+  const crossScopeDuplicate = compileEmevdPatchDsl(
+    { ...request, sourceText: `resource "${document.resourceUri}"
+base revision 0 schema "${schemaFingerprint}"
+event ${eventAnchor} {
+  instruction ${typedAnchor} { set arg conditionGroup = -2 }
+}
+instruction ${typedAnchor} { set arg conditionGroup = -3 }` },
+    document,
+    registry
+  );
+  assertDiagnostic(crossScopeDuplicate, 'EMEVD_DSL_DUPLICATE_ARGUMENT');
+
   const syntax = compileEmevdPatchDsl(
     { ...request, sourceText: `resource "${document.resourceUri}" base revision broken` },
     document,
@@ -231,6 +296,7 @@ event ${eventAnchor} {
     renderedRoundtripFingerprint: renderedRoundtrip.plan.planFingerprint,
     operations: compiled.plan.operations.map((operation) => operation.kind),
     diagnosticsCovered: [
+      'EMEVD_DSL_ANCHOR_NOT_FOUND',
       'EMEVD_DSL_STALE_REVISION',
       'EMEVD_DSL_SCHEMA_REQUIRED',
       'EMEVD_DSL_SCHEMA_CHANGED',

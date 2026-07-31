@@ -32,15 +32,19 @@ class Parser {
     if (!this.keyword('schema')) return undefined;
     const schema = this.expect('string', 'Expected schema fingerprint string.');
     const events: EmevdDslEventPatch[] = [];
+    const topLevelInstructions: EmevdDslInstructionPatch[] = [];
 
     while (!this.at('eof')) {
-      if (!this.isKeyword('event')) {
-        this.error('Expected event block.', this.current().span);
+      if (this.isKeyword('event')) {
+        const event = this.parseEvent();
+        if (event) events.push(event);
+      } else if (this.isKeyword('instruction')) {
+        const instruction = this.parseInstruction();
+        if (instruction) topLevelInstructions.push(instruction);
+      } else {
+        this.error('Expected event or instruction block.', this.current().span);
         this.advance();
-        continue;
       }
-      const event = this.parseEvent();
-      if (event) events.push(event);
     }
     if (!resource || !revision || !schema) return undefined;
 
@@ -54,6 +58,7 @@ class Parser {
       baseRevision,
       emedfSchemaFingerprint: schema.value,
       events,
+      ...(topLevelInstructions.length > 0 ? { topLevelInstructions } : {}),
       span: { start, end: this.current().span.end }
     };
   }
@@ -278,16 +283,23 @@ function validateDuplicateWrites(ast: EmevdDslDocument): EmevdDslDiagnostic[] {
         event.anchor
       );
     }
-    for (const instruction of event.instructions) {
-      for (const operation of instruction.operations) {
-        register(
-          `instruction:${instruction.anchor}:arg:${operation.argument}`,
-          'EMEVD_DSL_DUPLICATE_ARGUMENT',
-          `${instruction.anchor}.arg.${operation.argument}`,
-          operation.span,
-          instruction.anchor
-        );
-      }
+  }
+  // Instruction writes share the anchor-keyed duplicate registry across
+  // event-nested and top-level blocks, so double writes to the same
+  // instruction argument are detected regardless of how they are expressed.
+  const instructionPatches = [
+    ...ast.events.flatMap((event) => event.instructions),
+    ...(ast.topLevelInstructions ?? [])
+  ];
+  for (const instruction of instructionPatches) {
+    for (const operation of instruction.operations) {
+      register(
+        `instruction:${instruction.anchor}:arg:${operation.argument}`,
+        'EMEVD_DSL_DUPLICATE_ARGUMENT',
+        `${instruction.anchor}.arg.${operation.argument}`,
+        operation.span,
+        instruction.anchor
+      );
     }
   }
   return diagnostics;

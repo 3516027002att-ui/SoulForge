@@ -57,6 +57,12 @@ export interface EmevdDslDocument {
   baseRevision: number;
   emedfSchemaFingerprint: string;
   events: EmevdDslEventPatch[];
+  /**
+   * Top-level instruction blocks: global instruction-level mutation without an
+   * enclosing event block. Anchors still resolve through the document's stable
+   * instruction identity; the owning event is looked up by the compiler.
+   */
+  topLevelInstructions?: EmevdDslInstructionPatch[];
   span: EmevdDslSourceSpan;
 }
 
