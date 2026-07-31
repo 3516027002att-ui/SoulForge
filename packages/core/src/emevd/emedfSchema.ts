@@ -288,6 +288,11 @@ export function validateEmedfArgs(
   return { ok: true };
 }
 
+/** Schema-claimed encoded length (with alignment and trailing padding) for a definition. */
+export function encodedEmedfArgsLength(def: EmedfInstructionDef): number {
+  return encodedSize(def.args);
+}
+
 export function validateEmedfRegistry(
   registry: EmedfRegistry
 ): EmedfRegistryValidationResult {
