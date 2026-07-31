@@ -2,7 +2,7 @@
 
 SoulForge 的 C# 原生格式辅助进程。
 
-当前产品里程碑是 V0.5，唯一实施标准见 [`docs/V0_5_IMPLEMENTATION_HANDOFF.md`](../../docs/V0_5_IMPLEMENTATION_HANDOFF.md)。Bridge 已切换到 .NET 10、自包含 `win-x64` 与 `1.0.0` NDJSON 常驻协议；现有格式能力仍只有受限检查、synthetic 样本验证和候选导出，尚未完成 KRAK/BND4 以及四类语义资源原生写回闭环。未达到 `native-verified` 的能力不得宣称为原生权威。
+当前产品里程碑是 V0.5，唯一实施标准见 [`docs/V0_5_IMPLEMENTATION_HANDOFF.md`](../../docs/V0_5_IMPLEMENTATION_HANDOFF.md)。Bridge 使用 .NET 10、自包含 `win-x64` 与 `1.0.0` NDJSON 常驻协议。当前已具备登记 DFLT/BND4/KRAK 容器路径、FMG/PARAM/EMEVD/MSB 的不同程度 native document/writer，以及 TAE/ESD/FLVER/TPF 的登记样本只读 native document；各格式 authority 仍必须以交接书 §13.1 和真实 smoke 为准，不能由命令存在、synthetic fixture 或 parser 名称外推。
 
 本机没有全局 .NET 10 SDK 时：
 
@@ -47,17 +47,17 @@ dotnet run --project bridge/SoulForge.Bridge -- validate <file>
 `validate` only checks that a file can be opened and reports basic metadata. It
 does not claim to parse FromSoftware binary formats.
 
-## 当前导出置信等级
+## 兼容一次性导出的置信等级
 
-`export-msg` has three deliberately separate paths:
+以下 `export-*` 是兼容诊断入口，不是 desktop production native authority。`export-msg` has three deliberately separate paths:
 
 1. `MSG_FMG_SYNTHETIC_FIXTURE_CONFIRMED`: confirms SoulForge's reviewed synthetic FMG fixture layout and bridge plumbing. It does not claim native game-format authority.
 2. `MSG_FMG_TABLE_CANDIDATE`: guarded FMG-like table candidate. Stronger than raw string scan, but still candidate evidence.
 3. `MSG_TEXT_EXPORT_PARTIAL`: bounded readable-string fallback. File offsets are temporary text IDs.
 
-`export-event`, `export-param`, and `export-map` currently emit low-confidence bootstrap candidates only. They preserve enough structure for the evidence graph while avoiding fake authoritative parsing.
+`export-event`, `export-param`, and `export-map` 的一次性兼容输出仍是低置信 bootstrap candidate。desktop production 路径使用 daemon 的受限 native document/mutation 命令，两者不得混为同一 authority。
 
-Packed DCX/BND containers remain semantic export boundaries until decompression/unpacking exists.
+Packed DCX/BND 不再是 production daemon 的绝对读取边界；登记 DFLT/BND4/KRAK 路径已有独立验证。但未登记变体、完整 corpus 与各 child resource writer 仍按格式失败关闭。
 
 ## 冒烟验证
 

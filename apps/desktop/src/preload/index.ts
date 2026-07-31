@@ -39,34 +39,10 @@ const api = {
     ipcRenderer.invoke('resource.preview', sourceUri),
   saveTextResource: (sourceUri: string, newText: string): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.saveText', sourceUri, newText),
-  /** Honest capability matrix for any indexed file. */
-  getResourceCapabilities: (sourceUri: string): Promise<ResourceCapabilityMatrix | null> =>
-    ipcRenderer.invoke('resource.capabilities', sourceUri),
   readRawMetadata: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readRawMetadata', sourceUri),
   readRawRange: (sourceUri: string, offset: number, length: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readRawRange', sourceUri, offset, length),
-  saveRawReplace: (
-    sourceUri: string,
-    expectedHash: string,
-    newContentBase64: string
-  ): Promise<RendererSaveResult> =>
-    ipcRenderer.invoke('resource.saveRawReplace', sourceUri, expectedHash, newContentBase64),
-  saveRawByteRange: (
-    sourceUri: string,
-    expectedHash: string,
-    offset: number,
-    length: number,
-    replacementBase64: string
-  ): Promise<RendererSaveResult> =>
-    ipcRenderer.invoke(
-      'resource.saveRawByteRange',
-      sourceUri,
-      expectedHash,
-      offset,
-      length,
-      replacementBase64
-    ),
   inspectContainerTree: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.inspectContainerTree', sourceUri),
   listContainerChildren: (sourceUri: string, recursive?: boolean): Promise<unknown> =>

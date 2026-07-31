@@ -29,7 +29,7 @@ SoulForge 是面向 Sekiro 和 FromSoftware Mod 的 AI 原生、安全、可审�
 - FMG、PARAM、EMEVD、MSB 核心语义资源。
 - TAE、ESD、动画与脚本等行为主线，具体 Sekiro 格式以真实 corpus 为准。
 - MSB 场景、FLVER、TPF、DDS、MTD、碰撞与开放格式资产转换。
-- Safe Hex、EMEVD 四视图与可编译 DSL、PARAM、FMG、本地化、3D 场景和运维面板。
+- 只读 Hex 证据视图、EMEVD 四视图与可编译 DSL、PARAM、FMG、本地化、3D 场景和运维面板。
 - OpenAI-compatible、Anthropic-compatible 双模型服务 Agent。
 - me3 runtime adapter、真实 Sekiro 启动、日志、回滚后再次验证。
 - renderer-independent semantic scene；Three.js WebGPU 首选、WebGL2 fallback，必要时增加 native renderer backend。
@@ -44,24 +44,25 @@ SoulForge 是面向 Sekiro 和 FromSoftware Mod 的 AI 原生、安全、可审�
 - PatchIR + `WorkspaceTransaction` 唯一 production commit 主干。
 - 暂存、hash 前置条件、备份、原子替换、重读和 operation/file/resource-entry 回滚基础。
 - SQLite 两库、migration、journal、文件索引、FTS、诊断、任务、恢复点和审计基础。
-- DFLT 真实 corpus 往返；DFLT 外层 BND4 读取、五类 mutation、repack、提交和回滚。
-- FMG 真实语义闭环；PARAM、EMEVD、MSB 的部分 native 文档与 mutation。
-- EMEVD 四视图、PARAM/FMG/MSB 实时桌面接线。
-- Three.js 代理场景、资产暂存、最小 RGBA8 -> DDS 写回。
+- DFLT 真实 corpus 往返；BND4 读取、五类 mutation、repack、提交和回滚；合法 Oodle 下一个登记 KRAK writer roundtrip。
+- FMG 真实语义闭环；PARAM、EMEVD、MSB 的部分 native 文档与 mutation；固定 Smithbox metadata 与 135/138 登记 PARAM 严格匹配。
+- EMEVD 四视图、PARAM/FMG/MSB 实时桌面接线；TAE/ESD 登记样本 native document 与只读工作台。
+- FLVER/TPF 登记样本只读 native document、FLVER 查看/GLB 导出和 TPF 开放格式导出；Three.js WebGPU-first / WebGL2 fallback 骨架。
 - OpenAI Responses / Chat Completions compatible 与 Anthropic Messages fake-server tool loop。
+- 双协议错误、取消、超时和限额离线 conformance。
 - safeStorage 凭据库和权限门控基础。
-- Windows CI、内容扫描、portable/NSIS 配置和诚实 private gate。
+- Windows CI、内容扫描、NSIS 配置和诚实 private gate；代码签名不属于 V0.5 验收。
 
 当前主要前沿：
 
-- KRAK 成功路径受合法 Sekiro Oodle runtime 环境阻塞。
-- PARAM 需要旧布局与 Paramdex-compatible metadata authority。
-- EMEVD 需要 layer 变体、完整 EMEDF、全 corpus 和可写 DSL compiler。
+- KRAK 需要组合 mutation/repack、未知字段保持、恢复与完整 corpus 写回矩阵。
+- PARAM 需要 3 个旧布局、完整字段级 writer、引用和全 corpus 验证。
+- EMEVD 需要 layer 真实变体、完整 EMEDF、全 corpus，以及 DSL plan 到 production Bridge/PatchIR transaction 的真实接线。
 - MSB 需要全实体 CRUD、引用修复和完整 scene projection。
-- 行为与动画主线尚待真实 Sekiro corpus 研究。
-- FLVER/TPF/MTD 与完整资产转换仍处于 partial/candidate。
-- Three.js 需要真实大地图 WebGPU 基准；场景架构必须保持后端可替换。
-- 真实模型服务、me3 运行适配器、签名发行和真实 Sekiro 启动门禁尚未完成。
+- TAE/ESD 需要完整语义、writer、HKX/脚本引用与真实游戏加载。
+- MTD、collision、navigation 与完整资产引用/导出仍处于 partial/candidate。
+- WebGPU/WebGL2 需要所有者机器功能闭环；场景架构必须保持后端可替换。
+- AI 真实工作区 typed mutation、NSIS lifecycle、me3 capability probe 和真实 Sekiro 启动尚未完成。
 
 测试名中的 `v0.5`、`v0.6`、`native` 或 `section28` 不能单独作为产品完成证明。
 

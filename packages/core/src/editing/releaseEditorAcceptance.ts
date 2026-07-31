@@ -1,4 +1,4 @@
-import type { EditorMutationKind } from '@soulforge/shared';
+import type { EditorKind, EditorMutationKind } from '@soulforge/shared';
 import {
   EDITOR_CAPABILITY_CONTRACTS,
   type EditorDocumentAuthorityContract,
@@ -20,7 +20,7 @@ export type ReleaseEditorAcceptanceDiagnosticArea =
 
 export interface ReleaseEditorInventoryItem {
   releaseEditorId: ProposedReleaseEditorId;
-  editorKind: 'hex' | 'fmg' | 'param' | 'emevd' | 'msb';
+  editorKind: Extract<EditorKind, ProposedReleaseEditorId>;
   scopeRulingStatus: 'user-approved';
   releaseIncluded: true;
   documentAuthorityRequirement: EditorDocumentAuthorityContract;
