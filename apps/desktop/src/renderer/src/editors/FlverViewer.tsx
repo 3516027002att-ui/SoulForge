@@ -34,6 +34,33 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   const [skeletonBones, setSkeletonBones] = useState<
     Array<{ name: string; parentIndex: number; translation: [number, number, number]; rotation: [number, number, number] }> | null
   >(null);
+  const [dummyPoints, setDummyPoints] = useState<
+    Array<{ referenceId: number; position: [number, number, number] }> | null
+  >(null);
+
+  // Load dummy attachment points via IPC when sourceUri changes.
+  useEffect(() => {
+    if (!props.sourceUri || typeof window.soulforge.readFlverDummies !== 'function') return;
+    setDummyPoints(null);
+    void (async () => {
+      try {
+        const result = await window.soulforge.readFlverDummies(props.sourceUri!) as {
+          ok: boolean;
+          data?: { dummies?: Array<{ referenceId: number; position: number[] }> };
+        };
+        const raw = result.ok ? result.data?.dummies ?? [] : [];
+        if (raw.length === 0) return;
+        setDummyPoints(
+          raw.map((d) => ({
+            referenceId: d.referenceId,
+            position: [d.position[0] ?? 0, d.position[1] ?? 0, d.position[2] ?? 0]
+          }))
+        );
+      } catch {
+        // Dummy load failed; leave markers hidden.
+      }
+    })();
+  }, [props.sourceUri]);
 
   // Load skeleton hierarchy via IPC when sourceUri changes.
   // Stores raw parent-relative transforms; world transforms are computed in the
@@ -395,6 +422,22 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         scene.add(boneGroup);
       }
 
+      // Draw dummy attachment points as octahedron markers colored by reference ID.
+      if (dummyPoints && dummyPoints.length > 0) {
+        const dummyGroup = new three.Group();
+        const dummyGeometry = new three.OctahedronGeometry(0.06, 0);
+        for (const dummy of dummyPoints) {
+          const hue = ((dummy.referenceId * 47) % 360) / 360;
+          const markerMaterial = new three.MeshBasicMaterial({
+            color: new three.Color().setHSL(hue, 0.85, 0.55)
+          });
+          const marker = new three.Mesh(dummyGeometry, markerMaterial);
+          marker.position.set(dummy.position[0], dummy.position[1], dummy.position[2]);
+          dummyGroup.add(marker);
+        }
+        scene.add(dummyGroup);
+      }
+
       const setSize = (): void => {
         const width = Math.max(container.clientWidth, 1);
         const height = Math.max(container.clientHeight, 1);
@@ -435,7 +478,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       handleRef.current?.dispose();
       handleRef.current = null;
     };
-  }, [props.boundingBox, props.boneCount, props.meshCount, meshData, skeletonBones]);
+  }, [props.boundingBox, props.boneCount, props.meshCount, meshData, skeletonBones, dummyPoints]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: 300, background: '#1a1d23', borderRadius: 4 }}>
