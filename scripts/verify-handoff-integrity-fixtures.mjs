@@ -1,7 +1,9 @@
 import {
   computeHandoffFingerprintSha256,
+  extractHandoffMarkedSubject,
   extractHandoffSectionSubject,
   governanceEnums,
+  handoffBlockSubjectRef,
   validateHandoffGovernance
 } from './handoff-integrity-lib.mjs';
 
@@ -185,6 +187,16 @@ if (nestedSection?.trim() !== '{"proposalStatus":"user-approved"}') {
   throw new Error(`nested-handoff-section-subject 提取错误：${JSON.stringify(nestedSection)}`);
 }
 executedCases.push({ name: 'nested-handoff-section-subject', expected: 'pass' });
+
+const markedSubject = extractHandoffMarkedSubject(
+  'before\n<!-- BEGIN -->\n{"scope":"frozen"}\n<!-- END -->\nafter',
+  '<!-- BEGIN -->',
+  '<!-- END -->'
+);
+if (markedSubject !== '<!-- BEGIN -->\n{"scope":"frozen"}\n<!-- END -->') {
+  throw new Error(`marked-handoff-subject 提取错误：${JSON.stringify(markedSubject)}`);
+}
+executedCases.push({ name: 'marked-handoff-subject', expected: 'pass' });
 
 function assertPass(name, document, options = {}) {
   const result = validateHandoffGovernance(document, { source: `fixture:${name}`, ...options });
@@ -537,6 +549,23 @@ assertPass(
           isAncestor: true,
           subjectScanAvailable: true,
           changedSubjects: ['packages/core/src/emevd/emedfCoverage.ts']
+        }
+      }
+    }
+  }
+);
+
+assertCodes(
+  'passed-scope-invalidated-by-proposal-block-drift',
+  buildDocument({ slices: passedScopeSlices, gates: passedScopeGates }),
+  ['GATE_EVIDENCE_STALE'],
+  {
+    freshnessContext: {
+      anchors: {
+        [SEAL_FIELDS.head]: {
+          isAncestor: true,
+          subjectScanAvailable: true,
+          changedSubjects: [handoffBlockSubjectRef('release-scope-proposal')]
         }
       }
     }

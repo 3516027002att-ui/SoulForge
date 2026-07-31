@@ -111,6 +111,17 @@ export function extractHandoffSectionSubject(markdown, sectionNumber) {
   return extractSection(markdown, sectionNumber);
 }
 
+export function extractHandoffMarkedSubject(markdown, beginMarker, endMarker) {
+  const begin = markdown.indexOf(beginMarker);
+  const end = begin === -1 ? -1 : markdown.indexOf(endMarker, begin + beginMarker.length);
+  if (begin === -1 || end === -1
+    || begin !== markdown.lastIndexOf(beginMarker)
+    || end !== markdown.lastIndexOf(endMarker)) {
+    return null;
+  }
+  return markdown.slice(begin, end + endMarker.length);
+}
+
 function splitTableLine(line) {
   const trimmed = line.trim();
   const withoutEdges = trimmed.slice(1, trimmed.endsWith('|') ? -1 : undefined);
@@ -743,6 +754,11 @@ function evidenceHasClaim(evidence, id, marker) {
  * 强制未来通过者显式枚举主题域。scope-excluded 的裁定主题就是范围裁定本身，
  * 因此复用 REL-SCOPE 的主题域。
  */
+const RELEASE_SCOPE_PROPOSAL_SUBJECT = Object.freeze({
+  id: 'release-scope-proposal',
+  beginMarker: '<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->',
+  endMarker: '<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->'
+});
 const SCOPE_SUBJECT_SET = Object.freeze({
   files: Object.freeze([
     'scripts/generate-handoff-fingerprint.mjs',
@@ -752,7 +768,8 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     'scripts/verify-release-scope.mjs',
     'scripts/verify-release-scope-fixtures.mjs'
   ]),
-  handoffSections: Object.freeze(['18.2.1'])
+  handoffSections: Object.freeze([]),
+  handoffBlocks: Object.freeze([RELEASE_SCOPE_PROPOSAL_SUBJECT])
 });
 const GATE_SUBJECT_SETS = new Map([
   ['REL-SCOPE', SCOPE_SUBJECT_SET]
@@ -762,10 +779,15 @@ export function handoffSectionSubjectRef(sectionId) {
   return `handoff-section:${sectionId}`;
 }
 
+export function handoffBlockSubjectRef(blockId) {
+  return `handoff-block:${blockId}`;
+}
+
 function subjectRefsFor(subjectSet) {
   return [
     ...subjectSet.files,
-    ...subjectSet.handoffSections.map(handoffSectionSubjectRef)
+    ...subjectSet.handoffSections.map(handoffSectionSubjectRef),
+    ...(subjectSet.handoffBlocks ?? []).map((block) => handoffBlockSubjectRef(block.id))
   ];
 }
 
@@ -773,13 +795,23 @@ export function gateSubjectRegistry() {
   const gates = [...GATE_SUBJECT_SETS].map(([gateId, set]) => ({
     gateId,
     files: [...set.files],
-    handoffSections: [...set.handoffSections]
+    handoffSections: [...set.handoffSections],
+    handoffBlocks: [...(set.handoffBlocks ?? [])]
   }));
+  const allHandoffBlocks = new Map();
+  for (const gate of gates) {
+    for (const block of gate.handoffBlocks) allHandoffBlocks.set(block.id, block);
+  }
   return Object.freeze({
     gates,
-    scopeExclusion: { files: [...SCOPE_SUBJECT_SET.files], handoffSections: [...SCOPE_SUBJECT_SET.handoffSections] },
+    scopeExclusion: {
+      files: [...SCOPE_SUBJECT_SET.files],
+      handoffSections: [...SCOPE_SUBJECT_SET.handoffSections],
+      handoffBlocks: [...SCOPE_SUBJECT_SET.handoffBlocks]
+    },
     allFiles: [...new Set(gates.flatMap((entry) => entry.files))],
-    allHandoffSections: [...new Set(gates.flatMap((entry) => entry.handoffSections))]
+    allHandoffSections: [...new Set(gates.flatMap((entry) => entry.handoffSections))],
+    allHandoffBlocks: [...allHandoffBlocks.values()]
   });
 }
 
