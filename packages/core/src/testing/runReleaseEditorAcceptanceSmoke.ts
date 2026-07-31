@@ -88,12 +88,12 @@ function main(): void {
     'bounded-window',
     'EDITOR_BOUNDED_WINDOW_NOT_RELEASE_SAFE'
   );
-  assertCurrentScaleGap(
-    currentScaleContractGaps,
-    'emevd',
-    'eager',
-    'EDITOR_EAGER_MATERIALIZATION_NOT_RELEASE_SAFE'
-  );
+  const emevdGap = currentScaleContractGaps.find((item) => item.releaseEditorId === 'emevd');
+  if (emevdGap) {
+    throw new Error(
+      `emevd scale gap must be closed (pagination assembly + bounded template + paged event list): ${JSON.stringify(emevdGap)}`
+    );
+  }
 
   console.log(JSON.stringify({
     ok: null,
@@ -259,7 +259,15 @@ function assertScaleContractsMatchCurrentSources(): void {
     ],
     [
       'apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx',
-      ['document.events.map']
+      ['pageEvents.map', 'EVENTS_PAGE_SIZE']
+    ],
+    [
+      'packages/core/src/emevd/dslRenderer.ts',
+      ['renderEmevdPatchDslBounded', 'EMEVD_DSL_TEMPLATE_TRUNCATED']
+    ],
+    [
+      'packages/core/src/editing/emevdFullDocument.ts',
+      ['instructionPageSize', 'readFullEmevdDocumentViaBridge']
     ],
     [
       'apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx',

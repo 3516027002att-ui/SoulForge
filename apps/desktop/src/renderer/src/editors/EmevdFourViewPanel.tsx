@@ -23,6 +23,10 @@ export interface EmevdFourViewPanelProps {
    * through onDslSubmit; the renderer never holds the full document.
    */
   dslTemplate?: string;
+  /** Template was line-bounded in main (hard constraint 17); full text available on demand. */
+  dslTemplateTruncated?: boolean;
+  dslTemplateTotalLines?: number;
+  onLoadFullDslTemplate?: () => void | Promise<void>;
   onDslSubmit?: (sourceText: string) => Promise<EmevdDslSubmitResult>;
 }
 
@@ -53,6 +57,15 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
     return first ? { view: 'flow', eventUri: first } : { view: 'flow' };
   });
   const [status, setStatus] = useState('就绪');
+  // Event list is paged (hard constraint 17: large tables must not be
+  // materialized in one render pass).
+  const EVENTS_PAGE_SIZE = 200;
+  const [eventsPage, setEventsPage] = useState(0);
+  const eventPageCount = Math.max(1, Math.ceil(document.events.length / EVENTS_PAGE_SIZE));
+  const pageEvents = document.events.slice(
+    eventsPage * EVENTS_PAGE_SIZE,
+    Math.min((eventsPage + 1) * EVENTS_PAGE_SIZE, document.events.length)
+  );
   const [dslEdit, setDslEdit] = useState<string | null>(null);
   const [submittingDsl, setSubmittingDsl] = useState(false);
 
@@ -75,6 +88,8 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
   }
 
   function selectEvent(eventUri: string): void {
+    const index = document.events.findIndex((event) => event.eventUri === eventUri);
+    if (index >= 0) setEventsPage(Math.floor(index / EVENTS_PAGE_SIZE));
     setSelection((prev) => ({ ...prev, eventUri, view: prev.view === 'bytes' ? 'bytes' : prev.view }));
   }
 
@@ -145,7 +160,7 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
 
       {selection.view === 'flow' && (
         <ul className="list">
-          {document.events.map((event) => (
+          {pageEvents.map((event) => (
             <li key={event.eventUri}>
               <button type="button" onClick={() => selectEvent(event.eventUri)}>
                 事件 {event.eventId} · rest={event.restBehavior} · {event.instructions.length} 指令
@@ -163,7 +178,7 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
             <span>Instructions</span>
             <span>URI</span>
           </div>
-          {document.events.map((event) => (
+          {pageEvents.map((event) => (
             <div
               key={event.eventUri}
               className="binder-child-row"
@@ -176,6 +191,30 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
               <span title={event.eventUri}>{event.eventUri.slice(-24)}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {(selection.view === 'flow' || selection.view === 'table') && document.events.length > EVENTS_PAGE_SIZE && (
+        <div className="row gap">
+          <button
+            type="button"
+            disabled={eventsPage <= 0}
+            onClick={() => setEventsPage((page) => Math.max(0, page - 1))}
+          >
+            上一页
+          </button>
+          <span className="muted">
+            事件 {eventsPage * EVENTS_PAGE_SIZE + 1}–
+            {Math.min((eventsPage + 1) * EVENTS_PAGE_SIZE, document.events.length)} / {document.events.length}
+            （每页 {EVENTS_PAGE_SIZE}）
+          </span>
+          <button
+            type="button"
+            disabled={eventsPage >= eventPageCount - 1}
+            onClick={() => setEventsPage((page) => Math.min(eventPageCount - 1, page + 1))}
+          >
+            下一页
+          </button>
         </div>
       )}
 
@@ -195,26 +234,45 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
               : 'EMEVD patch DSL 编辑区'}
           />
           {props.dslTemplate !== undefined && (
-            <div className="row gap">
-              <button
-                type="button"
-                className="primary-action"
-                disabled={submittingDsl}
-                onClick={() => void submitDsl()}
-              >
-                {submittingDsl ? '提交中…' : '编译并提交 DSL'}
-              </button>
-              <button
-                type="button"
-                disabled={submittingDsl}
-                onClick={() => {
-                  setDslEdit(null);
-                  setStatus('已放弃编辑，恢复模板。');
-                }}
-              >
-                放弃编辑
-              </button>
-              <span className="muted">编辑会经主进程完整文档编译；渲染进程不持有完整文档。</span>
+            <div className="column gap">
+              {props.dslTemplateTruncated && (
+                <p className="muted">
+                  模板已按行数截断（分页加载，硬约束 17；完整模板共 {props.dslTemplateTotalLines ?? 0} 行）；截断标记为注释，不影响编译，提交时仅应用实际修改的增量 patch。
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    disabled={submittingDsl}
+                    onClick={() => {
+                      setDslEdit(null);
+                      setStatus('正在加载完整模板…');
+                      void props.onLoadFullDslTemplate?.();
+                    }}
+                  >
+                    加载完整模板
+                  </button>
+                </p>
+              )}
+              <div className="row gap">
+                <button
+                  type="button"
+                  className="primary-action"
+                  disabled={submittingDsl}
+                  onClick={() => void submitDsl()}
+                >
+                  {submittingDsl ? '提交中…' : '编译并提交 DSL'}
+                </button>
+                <button
+                  type="button"
+                  disabled={submittingDsl}
+                  onClick={() => {
+                    setDslEdit(null);
+                    setStatus('已放弃编辑，恢复模板。');
+                  }}
+                >
+                  放弃编辑
+                </button>
+                <span className="muted">编辑会经主进程完整文档编译；渲染进程不持有完整文档。</span>
+              </div>
             </div>
           )}
         </div>

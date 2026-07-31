@@ -183,6 +183,8 @@ export function App(): ReactElement {
   const [emevdLive, setEmevdLive] = useState(false);
   /** Patch-DSL template from the authoritative full document (main-side). */
   const [emevdDslTemplate, setEmevdDslTemplate] = useState<string | null>(null);
+  const [emevdDslTemplateTruncated, setEmevdDslTemplateTruncated] = useState(false);
+  const [emevdDslTemplateTotalLines, setEmevdDslTemplateTotalLines] = useState(0);
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
@@ -518,8 +520,12 @@ export function App(): ReactElement {
           if (cancelled) return;
           if (full?.ok && full.dslTemplate) {
             setEmevdDslTemplate(full.dslTemplate);
+            setEmevdDslTemplateTruncated(full.dslTemplateTruncated ?? false);
+            setEmevdDslTemplateTotalLines(full.dslTemplateTotalLines ?? 0);
           } else {
             setEmevdDslTemplate(null);
+            setEmevdDslTemplateTruncated(false);
+            setEmevdDslTemplateTotalLines(0);
             setStatus(full?.diagnostics?.[0]?.message ?? '完整文档 DSL 模板加载失败；DSL 视图保持只读。');
           }
         }
@@ -1035,6 +1041,28 @@ export function App(): ReactElement {
                 key={`${emevdDocument.resourceUri}:${emevdDocument.revision}:${emevdLive ? 'live' : 'demo'}`}
                 initialDocument={emevdDocument}
                 {...(emevdDslTemplate !== null ? { dslTemplate: emevdDslTemplate } : {})}
+                {...(emevdDslTemplateTruncated
+                  ? {
+                      dslTemplateTruncated: true,
+                      dslTemplateTotalLines: emevdDslTemplateTotalLines,
+                      onLoadFullDslTemplate: async () => {
+                        if (!selectedFile) return;
+                        const full = await window.soulforge.readEmevdFullDocument(
+                          selectedFile.sourceUri,
+                          `renderer-${selectedFile.sourceUri}-${Date.now()}`,
+                          true
+                        );
+                        if (full?.ok && full.dslTemplate) {
+                          setEmevdDslTemplate(full.dslTemplate);
+                          setEmevdDslTemplateTruncated(false);
+                          setEmevdDslTemplateTotalLines(full.dslTemplateTotalLines ?? 0);
+                          setStatus(`完整 DSL 模板已加载（共 ${full.dslTemplateTotalLines ?? 0} 行）。`);
+                        } else {
+                          setStatus(full?.diagnostics?.[0]?.message ?? '完整模板加载失败。');
+                        }
+                      }
+                    }
+                  : {})}
                 onDslSubmit={async (sourceText) => {
                   if (!emevdLive || !selectedFile) {
                     return {
@@ -1056,6 +1084,8 @@ export function App(): ReactElement {
                     );
                     if (reload?.ok && reload.dslTemplate) {
                       setEmevdDslTemplate(reload.dslTemplate);
+                      setEmevdDslTemplateTruncated(reload.dslTemplateTruncated ?? false);
+                      setEmevdDslTemplateTotalLines(reload.dslTemplateTotalLines ?? 0);
                       if (reload.sourceHash) setEmevdSourceHash(reload.sourceHash);
                       const refreshed = await window.soulforge.readEmevdDocument(selectedFile.sourceUri) as {
                         ok?: boolean;

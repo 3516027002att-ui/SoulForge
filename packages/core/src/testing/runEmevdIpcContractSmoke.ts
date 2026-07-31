@@ -56,8 +56,14 @@ function main(): void {
   if (!ipc.includes('emevdFullDocuments')) {
     throw new Error('ipc must hold the authoritative full EMEVD document cache in main');
   }
-  if (!ipc.includes('renderEmevdPatchDsl')) {
-    throw new Error('ipc must render the DSL template from the full document');
+  if (!ipc.includes('renderEmevdPatchDslBounded')) {
+    throw new Error('ipc must render the DSL template bounded (hard constraint 17)');
+  }
+  if (!ipc.includes('dslTemplateTruncated') || !ipc.includes('dslTemplateTotalLines')) {
+    throw new Error('ipc must report template truncation state to the renderer');
+  }
+  if (!ipc.includes('loadFullDslTemplate')) {
+    throw new Error('ipc must support explicit full-template loading');
   }
 
   if (!preload.includes('readEmevdDocument') || !preload.includes('applyEmevdMutation')) {
