@@ -49,6 +49,7 @@ const REQUIRED_GATE_IDS = Object.freeze([
   'REL-COMPLIANCE'
 ]);
 const LEGACY_GATE_STATES = new Set(['covered-open', 'uncovered']);
+const USER_ACTION_WITHOUT_BLOCKER_PATTERN = /(?:需(?:要)?|等待|留给|交由)用户.{0,48}(?:裁定|授权|提供|介入|处理|输入)|用户(?:需(?:要)?|必须|应当).{0,48}(?:裁定|授权|提供|介入|处理|输入)/u;
 const AUTHORITY_RANK = new Map([
   ['unsupported', 0],
   ['unverified', 0],
@@ -93,17 +94,21 @@ function makeFinding(code, where, message) {
 }
 
 function extractSection(markdown, sectionNumber) {
-  const heading = new RegExp(`^###\\s+${sectionNumber.replaceAll('.', '\\.')}\\b.*$`, 'm');
+  const heading = new RegExp(`^(#{1,6})\\s+${sectionNumber.replaceAll('.', '\\.')}\\b.*$`, 'm');
   const match = heading.exec(markdown);
   if (!match) return null;
 
   const bodyStart = match.index + match[0].length;
   const tail = markdown.slice(bodyStart);
-  const nextHeading = /^#{1,3}\s+.+$/m.exec(tail);
+  const nextHeading = new RegExp(`^#{1,${match[1].length}}\\s+.+$`, 'm').exec(tail);
   const divider = /^---\s*$/m.exec(tail);
   const candidates = [nextHeading?.index, divider?.index].filter((value) => value !== undefined);
   const bodyEnd = candidates.length === 0 ? markdown.length : bodyStart + Math.min(...candidates);
   return markdown.slice(bodyStart, bodyEnd);
+}
+
+export function extractHandoffSectionSubject(markdown, sectionNumber) {
+  return extractSection(markdown, sectionNumber);
 }
 
 function splitTableLine(line) {
@@ -148,6 +153,10 @@ function headerToken(cell) {
 function hasMeaningfulValue(cell) {
   const value = plain(cell);
   return value !== '' && value !== '—' && value !== '-';
+}
+
+function asksForUserActionWithoutBlocker(value) {
+  return USER_ACTION_WITHOUT_BLOCKER_PATTERN.test(plain(value));
 }
 
 function extractIds(cell, prefix) {
@@ -494,6 +503,15 @@ function parseSlices(markdown, where, findings, blockers) {
         `${lifecycle || '(空)'} 切片不能保留活动 blockerRefs；有 blocker 时 lifecycle 必须为 blocked。`
       ));
     }
+    if ((lifecycle === 'ready' || lifecycle === 'active')
+      && blockerIds.length === 0
+      && asksForUserActionWithoutBlocker(cells.slice(4, 9).join(' '))) {
+      findings.push(makeFinding(
+        'USER_ACTION_WITHOUT_ACTIVE_BLOCKER',
+        `${where} §13.1 ${id}`,
+        'ready/active 切片没有活动 blockerRefs，不得把工程工作描述为需要用户裁定、授权、提供或介入。'
+      ));
+    }
     for (const blockerId of blockerIds) {
       if (!blockers.has(blockerId)) {
         findings.push(makeFinding(
@@ -712,15 +730,6 @@ function evidenceHasClaim(evidence, id, marker) {
   return evidenceIsSealed(evidence, id) && record.claim.includes(marker);
 }
 
-function evidenceMatchesCurrentFingerprint(evidence, id, currentFingerprint) {
-  const record = evidence.get(id);
-  if (!evidenceIsSealed(evidence, id) || !record.seal?.fields || !currentFingerprint) return false;
-  const fields = record.seal.fields;
-  return fields.head === currentFingerprint.head
-    && fields.trackedDiffSha256 === currentFingerprint.trackedDiffSha256
-    && fields.untrackedManifestSha256 === currentFingerprint.untrackedManifestSha256;
-}
-
 /**
  * Gate 主题域注册表。
  *
@@ -736,6 +745,10 @@ function evidenceMatchesCurrentFingerprint(evidence, id, currentFingerprint) {
  */
 const SCOPE_SUBJECT_SET = Object.freeze({
   files: Object.freeze([
+    'scripts/generate-handoff-fingerprint.mjs',
+    'scripts/handoff-integrity-lib.mjs',
+    'scripts/verify-handoff-integrity-fixtures.mjs',
+    'scripts/verify-handoff-integrity.mjs',
     'scripts/verify-release-scope.mjs',
     'scripts/verify-release-scope-fixtures.mjs'
   ]),
@@ -841,7 +854,7 @@ function parseAndValidateGateMatrix(
   slices,
   blockers,
   evidence,
-  currentFingerprint
+  freshnessContext
 ) {
   const table = parseFirstTable(extractSection(markdown, '18.3'));
   if (!table) {
@@ -913,6 +926,7 @@ function parseAndValidateGateMatrix(
     const sliceIds = extractIds(cells[2], 'W');
     const blockerIds = extractIds(cells[5], 'BLK');
     const evidenceIds = extractIds(cells[5], 'EV');
+    const successor = plain(cells[6]);
     const location = `${where} §18.3 ${gateId}`;
     if (!parsedGates.has(gateId)) {
       parsedGates.set(gateId, { id: gateId, gateState, applicability, sliceIds, blockerIds, evidenceIds });
@@ -937,6 +951,15 @@ function parseAndValidateGateMatrix(
         'GATE_APPLICABILITY_INVALID',
         location,
         `applicability 非法：${applicability || '(空)'}`
+      ));
+    }
+    if (gateState !== 'blocked'
+      && blockerIds.length === 0
+      && asksForUserActionWithoutBlocker(successor)) {
+      findings.push(makeFinding(
+        'USER_ACTION_WITHOUT_ACTIVE_BLOCKER',
+        location,
+        '非 blocked Gate 没有活动 blockerRefs，不得把后继工程工作或 Evidence 维护描述为需要用户介入。'
       ));
     }
 
@@ -1064,13 +1087,29 @@ function parseAndValidateGateMatrix(
           'REL-SCOPE passed 必须引用声明 scope-ruling:user-approved 的 sealed Evidence。'
         ));
       }
-      if (currentFingerprint !== undefined &&
-        !evidenceIds.some((id) => evidenceMatchesCurrentFingerprint(evidence, id, currentFingerprint))) {
-        findings.push(makeFinding(
-          'GATE_EVIDENCE_STALE',
-          location,
-          'passed Gate 没有引用与当前 HEAD、tracked diff 和 untracked manifest 一致的 sealed Evidence。'
-        ));
+      if (applicability !== 'scope-excluded') {
+        const subjectSet = GATE_SUBJECT_SETS.get(gateId);
+        if (!subjectSet) {
+          findings.push(makeFinding(
+            'GATE_SUBJECT_SET_UNDEFINED',
+            location,
+            `passed Gate ${gateId} 尚未登记 freshness 主题域，失败关闭。`
+          ));
+        } else {
+          const freshnessEvidenceIds = gateId === 'REL-SCOPE'
+            ? evidenceIds.filter((id) => evidenceHasClaim(evidence, id, 'scope-ruling:user-approved'))
+            : evidenceIds;
+          const freshnessFinding = checkEvidenceFreshness(
+            location,
+            freshnessEvidenceIds,
+            evidence,
+            subjectRefsFor(subjectSet),
+            freshnessContext,
+            'GATE_EVIDENCE_STALE',
+            'passed Gate 的 sealed Evidence 锚点之后，相关主题域发生变化。若冻结范围语义未变，由工程侧重跑验证并重封存；只有实际范围变化才需要新的用户裁定。'
+          );
+          if (freshnessFinding) findings.push(freshnessFinding);
+        }
       }
     }
 
@@ -1119,13 +1158,17 @@ function parseAndValidateGateMatrix(
           location,
           `scope-excluded Gate 必须引用声明 ${exclusionMarker} 的 sealed Evidence。`
         ));
-      } else if (currentFingerprint !== undefined &&
-        !approvedExclusionIds.some((id) => evidenceMatchesCurrentFingerprint(evidence, id, currentFingerprint))) {
-        findings.push(makeFinding(
-          'GATE_SCOPE_EXCLUSION_EVIDENCE_STALE',
+      } else {
+        const freshnessFinding = checkEvidenceFreshness(
           location,
-          '用户批准的范围排除 Evidence 与当前工作树不一致，必须重新封存。'
-        ));
+          approvedExclusionIds,
+          evidence,
+          subjectRefsFor(SCOPE_SUBJECT_SET),
+          freshnessContext,
+          'GATE_SCOPE_EXCLUSION_EVIDENCE_STALE',
+          '范围排除 Evidence 锚点之后，冻结范围主题域发生变化；工程侧必须核对语义并重跑验证，实际范围变化仍需新的用户裁定。'
+        );
+        if (freshnessFinding) findings.push(freshnessFinding);
       }
     }
   }
@@ -1198,7 +1241,7 @@ export function validateHandoffGovernance(markdown, options = {}) {
     slices,
     blockers,
     evidence,
-    options.currentFingerprint
+    options.freshnessContext
   );
   validateBlockerImpactClosure(where, findings, blockers, slices, gates);
   return { ok: findings.length === 0, findings };
