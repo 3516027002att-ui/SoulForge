@@ -75,6 +75,7 @@ function buildDocument(options = {}) {
   const evidence = options.evidence ?? cloneRows(baseEvidence);
   const blockers = options.blockers ?? cloneRows(baseBlockers);
   const claims = options.claims ?? [];
+  const validationUnfrozen = options.validationUnfrozen ?? ['W-A-01'];
 
   const sliceRows = slices.map((slice) =>
     `| \`${slice.id}\` | \`${slice.lifecycle}\` | \`${slice.authority}\` | ${slice.blockers} | 目标 | 可验收切片 | 前置 | 入口 | 验证 | cap=${slice.cap ?? 'partial'} |`
@@ -111,6 +112,14 @@ function buildDocument(options = {}) {
     '| sliceId | claimId | owner | claimedAt | heartbeatAt | recoveryTrigger |',
     '|---|---|---|---|---|---|',
     ...claimRows,
+    '',
+    '### 13.4 required validation 冻结约定',
+    '',
+    '当前显式为 `validation-unfrozen`（需后续冻结）：',
+    '',
+    ...validationUnfrozen.map((sliceId) => `- \`${sliceId}\`：fixture validation；`),
+    '',
+    '`W-SCOPE-01` 的验证已冻结为：',
     '',
     '### 17.1 当前证据索引',
     '',
@@ -448,6 +457,20 @@ assertCodes('authority-cannot-exceed-cap', buildDocument({
     ? { ...slice, authority: 'native-verified', cap: 'unsupported' }
     : slice)
 }), ['SLICE_AUTHORITY_EXCEEDS_CAP']);
+
+assertCodes('terminal-slice-cannot-remain-validation-unfrozen', buildDocument({
+  slices: [
+    ...cloneRows(baseSlices),
+    {
+      id: 'W-DONE-01',
+      lifecycle: 'completed',
+      authority: 'partial',
+      blockers: '—',
+      cap: 'partial'
+    }
+  ],
+  validationUnfrozen: ['W-A-01', 'W-DONE-01']
+}), ['VALIDATION_UNFROZEN_TERMINAL_SLICE']);
 
 assertCodes('active-slice-requires-claim', buildDocument({
   slices: cloneRows(baseSlices).map((slice) => slice.id === 'W-A-01'

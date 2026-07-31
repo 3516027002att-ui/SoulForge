@@ -18,6 +18,16 @@ const EXPECTED_GATES = [
   'REL-I',
   'REL-COMPLIANCE'
 ];
+const EXPECTED_RELEASE_EDITOR_IDS = [
+  'bnd4',
+  'fmg',
+  'param',
+  'emevd',
+  'msb',
+  'tae',
+  'esd',
+  'script'
+];
 
 const REQUIRED_SCOPE_ITEMS = new Map([
   ['SCOPE-SEKIRO-BUILD', { capabilityId: 'H-RUNTIME', gateId: 'REL-SCOPE' }],
@@ -228,8 +238,8 @@ for (const gateId of gateIds) {
 }
 
 if (proposal !== null) {
-  if (proposal.schemaVersion !== '1.4.0') {
-    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.4.0。');
+  if (proposal.schemaVersion !== '1.5.0') {
+    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.5.0。');
   }
   if (!/^V0\.5-SCOPE-[0-9]{8}$/.test(proposal.proposalId ?? '')) {
     add('PROPOSAL_ID_INVALID', 'proposal.proposalId', 'proposalId 必须匹配 V0.5-SCOPE-YYYYMMDD。');
@@ -365,8 +375,19 @@ if (proposal !== null) {
       if (!ALLOWED_SUPPORT.has(item.proposedSupport)) {
         add('PROPOSED_SUPPORT_INVALID', `${where}.proposedSupport`, 'proposedSupport 枚举非法。');
       }
-      if (!ALLOWED_AUTHORITY.has(item.currentAuthority)) {
-        add('CURRENT_AUTHORITY_INVALID', `${where}.currentAuthority`, 'currentAuthority 枚举非法。');
+      if (Object.hasOwn(item, 'currentAuthority')) {
+        add(
+          'LEGACY_CURRENT_AUTHORITY_FORBIDDEN',
+          `${where}.currentAuthority`,
+          '冻结范围只能记录 authorityAtRuling；实时 authority 必须由 §13.1 执行面板维护。'
+        );
+      }
+      if (!ALLOWED_AUTHORITY.has(item.authorityAtRuling)) {
+        add(
+          'AUTHORITY_AT_RULING_INVALID',
+          `${where}.authorityAtRuling`,
+          'authorityAtRuling 枚举非法。'
+        );
       }
       if (!isStringArray(item.gateIds, { nonEmpty: true })) {
         add('ITEM_GATE_IDS_INVALID', `${where}.gateIds`, 'gateIds 必须为非空字符串数组。');
@@ -396,7 +417,7 @@ if (proposal !== null) {
             add('EVIDENCE_REF_UNKNOWN', `${where}.evidenceRefs`, `§17.1 未定义：${evidenceRef}`);
           }
         }
-        if (!['unverified', 'unsupported'].includes(item.currentAuthority) && item.evidenceRefs.length === 0) {
+        if (!['unverified', 'unsupported'].includes(item.authorityAtRuling) && item.evidenceRefs.length === 0) {
           add('EVIDENCE_REF_REQUIRED', `${where}.evidenceRefs`, '非 unverified authority 必须引用 Evidence。');
         }
       }
@@ -445,8 +466,12 @@ if (proposal !== null) {
           if (!isStringArray(item.openRulings, { nonEmpty: true })) {
             add('SUPPORTED_WITHOUT_RELEASE_CORPUS_RULING_MISSING', `${where}.openRulings`, '缺少 release corpus 的 supported 项必须保留 open ruling。');
           }
-          if (!ALLOWED_AUTHORITY.has(item.currentAuthority)) {
-            add('SUPPORTED_WITHOUT_RELEASE_CORPUS_AUTHORITY_MISSING', `${where}.currentAuthority`, '必须保留 current authority。');
+          if (!ALLOWED_AUTHORITY.has(item.authorityAtRuling)) {
+            add(
+              'SUPPORTED_WITHOUT_RELEASE_CORPUS_AUTHORITY_MISSING',
+              `${where}.authorityAtRuling`,
+              '必须保留裁定时 authority 快照。'
+            );
           }
         }
       }
@@ -508,12 +533,17 @@ if (proposal !== null) {
       requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.installerSizeOrTimeBudgetsRequired', false);
       requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.boundedEditorAccessRequired', true);
       requireFrozenValue(proposal, 'quantitativeAcceptancePolicy.installerLifecycleIntegrityRequired', true);
+      requireFrozenValue(proposal, 'authoritySnapshotPolicy.field', 'authorityAtRuling');
+      requireFrozenValue(proposal, 'authoritySnapshotPolicy.asOfEvidenceRef', 'EV-REL-SCOPE-20260730');
+      requireFrozenValue(proposal, 'authoritySnapshotPolicy.liveAuthoritySource', 'section-13.1');
+      requireFrozenValue(proposal, 'authoritySnapshotPolicy.nonClaimsAreRulingTimeSnapshot', true);
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-structured-ui');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-canonical-dsl');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'show-readonly-hex-evidence');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'access-complete-document-through-bounded-mode');
       requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'raw-hex-edit');
       requireFrozenUnsupported(itemById, 'SCOPE-EDITORS', 'quantitative-capacity-or-latency-threshold-as-v05-gate');
+      requireFrozenEditorMatrix(itemById);
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'recompress');
       requireFrozenOperation(itemById, 'SCOPE-KRAK', 'write');
       requireFrozenOperation(itemById, 'SCOPE-PARAM', 'import-user-local-pinned-smithbox-metadata');
@@ -736,5 +766,24 @@ function requireFrozenValue(root, path, expected) {
   const actual = path.split('.').reduce((value, key) => value?.[key], root);
   if (actual !== expected) {
     add('FROZEN_POLICY_VALUE_INVALID', `proposal.${path}`, `冻结范围要求 ${path}=${JSON.stringify(expected)}。`);
+  }
+}
+
+function requireFrozenEditorMatrix(itemById) {
+  const editors = itemById.get('SCOPE-EDITORS');
+  if (JSON.stringify(editors?.editorIds) !== JSON.stringify(EXPECTED_RELEASE_EDITOR_IDS)) {
+    add(
+      'FROZEN_EDITOR_MATRIX_INVALID',
+      'SCOPE-EDITORS.editorIds',
+      `冻结编辑器必须精确为 ${EXPECTED_RELEASE_EDITOR_IDS.join(', ')}。`
+    );
+  }
+  if (editors?.hexEvidenceView?.included !== true
+    || editors?.hexEvidenceView?.writable !== false) {
+    add(
+      'FROZEN_HEX_EVIDENCE_POLICY_INVALID',
+      'SCOPE-EDITORS.hexEvidenceView',
+      'Hex 必须作为 included=true、writable=false 的只读证据视图。'
+    );
   }
 }

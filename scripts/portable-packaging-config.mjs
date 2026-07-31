@@ -38,7 +38,6 @@ const EXPECTED_PRODUCT_NAME = 'SoulForge';
 const EXPECTED_COPYRIGHT = 'Copyright (c) SoulForge contributors';
 const EXPECTED_COMPRESSION = 'normal';
 const EXPECTED_WIN_ARTIFACT_NAME = '${productName}-${version}-${arch}.${ext}';
-const EXPECTED_PORTABLE_ARTIFACT_NAME = '${productName}-${version}-portable.${ext}';
 const EXPECTED_NSIS = {
   oneClick: false,
   allowToChangeInstallationDirectory: true,
@@ -56,7 +55,6 @@ const EXPECTED_TOP_LEVEL_CONFIG_FIELDS = [
   'extraResources',
   'win',
   'nsis',
-  'portable',
   'asar',
   'compression'
 ];
@@ -101,8 +99,8 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
         && config?.copyright === EXPECTED_COPYRIGHT
     },
     {
-      name: 'win-x64-portable-and-nsis-only',
-      ok: sameStringSet(targets, ['portable', 'nsis'])
+      name: 'win-x64-nsis-only',
+      ok: sameStringSet(targets, ['nsis'])
         && targetArchitectures.every((arch) => sameStringSet(arch ?? [], ['x64']))
         && releasePolicy?.target === 'win-x64'
     },
@@ -124,10 +122,6 @@ export function validatePortableBuilderConfig(config, releasePolicy) {
     {
       name: 'win-artifact-name-approved',
       ok: config?.win?.artifactName === EXPECTED_WIN_ARTIFACT_NAME
-    },
-    {
-      name: 'portable-artifact-name-approved',
-      ok: config?.portable?.artifactName === EXPECTED_PORTABLE_ARTIFACT_NAME
     },
     {
       name: 'nsis-values-approved',
@@ -226,8 +220,7 @@ function isPortableConfigSchemaClosed(config) {
       'createDesktopShortcut',
       'createStartMenuShortcut',
       'shortcutName'
-    ])
-    && hasExactKeys(config.portable, ['artifactName']);
+    ]);
 }
 
 function hasExactKeys(value, expectedKeys) {

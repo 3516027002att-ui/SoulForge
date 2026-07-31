@@ -156,6 +156,7 @@ const checkedRules = [
   'README 必须直链唯一 handoff，且不依赖本机代理规则文件',
   '§17.1 Evidence ID 唯一；sealed-current-run 指纹可重算；passed Gate Evidence 与当前工作树一致',
   '§13.1 切片完整 schema、lifecycle、authority、authority cap 与 blockerRefs 闭合',
+  '§13.4 validation-unfrozen 只能引用 §13.1 中尚未终止的切片',
   '§18.1、§18.3 固定 11 个 Gate，状态、适用性、切片、范围裁定 Evidence 与 blocker 引用满足收敛约束',
   '§18.4 blocker 八字段完整，影响对象与活动 blockerRefs 双向闭合',
   '交接书和执行手册引用的 npm run script 必须存在于 package.json',

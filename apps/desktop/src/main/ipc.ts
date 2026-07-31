@@ -31,7 +31,6 @@ import {
   rollbackOperation,
   roundTripContainer,
   runBridge,
-  saveRawByteRange,
   saveRawReplace,
   saveTextResource,
   scanWorkspace,
@@ -692,12 +691,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return items.map(toRendererIndexedFile);
   });
 
-  handle('resource.capabilities', async (_event, sourceUri: string): Promise<ResourceCapabilityMatrix | null> => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
-    if (!file) return null;
-    return resolveResourceCapabilities(file);
-  });
-
   handle(
     'resource.readRawRange',
     async (_event, sourceUri: string, offset: number, length: number) => {
@@ -718,106 +711,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       return readRawResourceRange(file, offset, length);
-    }
-  );
-
-  handle(
-    'resource.saveRawReplace',
-    async (
-      event,
-      sourceUri: string,
-      expectedHash: string,
-      newContentBase64: string
-    ): Promise<RendererSaveResult> => {
-      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file) {
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: [{
-            severity: 'error',
-            code: 'RESOURCE_NOT_INDEXED',
-            message: 'Resource must be indexed before raw replace.',
-            sourceUri
-          }]
-        };
-      }
-      const operationLog = activeSession
-        ? await ensureActiveOperationLog(activeSession)
-        : undefined;
-      const storage = activeSession ? durableStoragePaths(activeSession.meta.workspaceId) : undefined;
-      const confirmation = await requestWriteConfirmation({
-        event,
-        resourceLabel: file.relativePath,
-        sourceUri,
-        actionLabel: '替换原始字节',
-        payloadHash: createHash('sha256')
-          .update(`${expectedHash}\n${newContentBase64}`)
-          .digest('hex')
-      });
-      if (!confirmation) return cancelledWrite(sourceUri);
-      const result = await saveRawReplace({
-        file,
-        expectedHash,
-        newContentBase64,
-        confirmation,
-        ...(activeSession ? { session: activeSession } : {}),
-        ...(operationLog ? { operationLog } : {}),
-        ...(storage ?? {})
-      });
-      return toRendererSaveResult(result, indexedFiles);
-    }
-  );
-
-  handle(
-    'resource.saveRawByteRange',
-    async (
-      event,
-      sourceUri: string,
-      expectedHash: string,
-      offset: number,
-      length: number,
-      replacementBase64: string
-    ): Promise<RendererSaveResult> => {
-      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file) {
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: [{
-            severity: 'error',
-            code: 'RESOURCE_NOT_INDEXED',
-            message: 'Resource must be indexed before raw byte-range patch.',
-            sourceUri
-          }]
-        };
-      }
-      const operationLog = activeSession
-        ? await ensureActiveOperationLog(activeSession)
-        : undefined;
-      const storage = activeSession ? durableStoragePaths(activeSession.meta.workspaceId) : undefined;
-      const confirmation = await requestWriteConfirmation({
-        event,
-        resourceLabel: file.relativePath,
-        sourceUri,
-        actionLabel: '修改原始字节范围',
-        payloadHash: createHash('sha256')
-          .update(`${expectedHash}\n${offset}\n${length}\n${replacementBase64}`)
-          .digest('hex')
-      });
-      if (!confirmation) return cancelledWrite(sourceUri);
-      const result = await saveRawByteRange({
-        file,
-        expectedHash,
-        offset,
-        length,
-        replacementBase64,
-        confirmation,
-        ...(activeSession ? { session: activeSession } : {}),
-        ...(operationLog ? { operationLog } : {}),
-        ...(storage ?? {})
-      });
-      return toRendererSaveResult(result, indexedFiles);
     }
   );
 

@@ -77,6 +77,25 @@ try {
     editors.unsupportedOperations = editors.unsupportedOperations.filter((operation) => operation !== 'raw-hex-edit');
   }, 'FROZEN_UNSUPPORTED_BOUNDARY_MISSING');
 
+  await expectRejected('frozen-editor-membership-drift', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.editorIds[0] = 'safe-hex';
+  }, 'FROZEN_EDITOR_MATRIX_INVALID');
+
+  await expectRejected('writable-hex-reintroduced', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.hexEvidenceView.writable = true;
+  }, 'FROZEN_HEX_EVIDENCE_POLICY_INVALID');
+
+  await expectRejected('live-authority-field-reintroduced', (proposal) => {
+    proposal.scopeItems[0].currentAuthority = proposal.scopeItems[0].authorityAtRuling;
+    delete proposal.scopeItems[0].authorityAtRuling;
+  }, 'LEGACY_CURRENT_AUTHORITY_FORBIDDEN');
+
+  await expectRejected('authority-snapshot-source-drift', (proposal) => {
+    proposal.authoritySnapshotPolicy.liveAuthoritySource = 'scope-items';
+  }, 'FROZEN_POLICY_VALUE_INVALID');
+
   await expectRejected('external-distribution-boundary-removed', (proposal) => {
     const compliance = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-COMPLIANCE');
     compliance.unsupportedOperations = compliance.unsupportedOperations.filter((operation) => operation !== 'external-distribution');

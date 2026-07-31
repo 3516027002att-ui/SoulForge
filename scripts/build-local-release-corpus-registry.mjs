@@ -143,12 +143,12 @@ console.log(JSON.stringify({
   nativeObservations: {
     ...observations,
     uniqueContentEntries: entries.length,
-    krakRepackAuthority: false
+    krakRepackObservedByThisCommand: false
   },
   output: 'local-app-data/corpus-registries/v0.5/sekiro-1.6.release-corpus.json',
   nonClaims: [
     'Registry schema validity does not grant native format authority.',
-    'KRAK repack/write remains unverified.',
+    'This registry-generation command does not execute KRAK repack/write; writer authority is established by separate native mutation evidence.',
     'The source assets and local locator registry remain outside Git.'
   ]
 }, null, 2));

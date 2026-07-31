@@ -15,16 +15,18 @@ function main(): void {
   const inventory = buildProposedReleaseEditorInventory();
   const schemas = buildReleaseEditorFunctionalScaleSchemas();
   assertInventoryDerivedFromCapabilities(inventory);
+  assertFrozenScopeInventory(inventory);
+  assertReadOnlyHexAndAssetExclusions();
   assertScaleContractsMatchCurrentSources();
   assertFunctionalSchemasHaveNoQuantitativeThresholds(schemas);
 
   const demoFallback = evaluateReleaseEditorAcceptance({
-    sample: { ...buildContractFixture('safe-hex'), sourceMode: 'demo-fallback' }
+    sample: { ...buildContractFixture('bnd4'), sourceMode: 'demo-fallback' }
   });
   assertRejectedWith(demoFallback, 'EDITOR_DEMO_FALLBACK_REJECTED');
 
   const syntheticSource = evaluateReleaseEditorAcceptance({
-    sample: buildContractFixture('safe-hex')
+    sample: buildContractFixture('bnd4')
   });
   assertRejectedWith(syntheticSource, 'EDITOR_SYNTHETIC_SOURCE_REJECTED');
   if (syntheticSource.evidenceKind !== 'candidate'
@@ -42,17 +44,17 @@ function main(): void {
   assertRejectedWith(missingNativeAuthority, 'EDITOR_NATIVE_AUTHORITY_REQUIRED');
 
   const missingRevision = evaluateReleaseEditorAcceptance({
-    sample: { ...buildContractFixture('safe-hex'), revision: null }
+    sample: { ...buildContractFixture('bnd4'), revision: null }
   });
   assertRejectedWith(missingRevision, 'EDITOR_REVISION_REQUIRED');
 
   const staleRevisionAccepted = evaluateReleaseEditorAcceptance({
-    sample: { ...buildContractFixture('safe-hex'), rejectsStaleRevision: false }
+    sample: { ...buildContractFixture('bnd4'), rejectsStaleRevision: false }
   });
   assertRejectedWith(staleRevisionAccepted, 'EDITOR_REVISION_CONFLICT_NOT_REJECTED');
 
   const missingVirtualization = evaluateReleaseEditorAcceptance({
-    sample: { ...buildContractFixture('safe-hex'), scaleAccess: 'none' }
+    sample: { ...buildContractFixture('bnd4'), scaleAccess: 'none' }
   });
   assertRejectedWith(
     missingVirtualization,
@@ -60,7 +62,7 @@ function main(): void {
   );
 
   const prematurePass = evaluateReleaseEditorAcceptance({
-    sample: buildContractFixture('safe-hex'),
+    sample: buildContractFixture('bnd4'),
     claimedReleaseDecision: 'pass'
   });
   assertRejectedWith(prematurePass, 'EDITOR_RELEASE_PASS_FORBIDDEN');
@@ -130,7 +132,16 @@ function main(): void {
 function assertInventoryDerivedFromCapabilities(
   inventory: ReleaseEditorInventoryItem[]
 ): void {
-  const expectedIds: ProposedReleaseEditorId[] = ['safe-hex', 'fmg', 'param', 'emevd', 'msb', 'tae', 'esd', 'flver'];
+  const expectedIds: ProposedReleaseEditorId[] = [
+    'bnd4',
+    'fmg',
+    'param',
+    'emevd',
+    'msb',
+    'tae',
+    'esd',
+    'script'
+  ];
   if (JSON.stringify(inventory.map((item) => item.releaseEditorId)) !== JSON.stringify(expectedIds)) {
     throw new Error('release editor inventory/order drifted');
   }
@@ -145,6 +156,80 @@ function assertInventoryDerivedFromCapabilities(
       || JSON.stringify(item.scalePrimitives) !== JSON.stringify(contract.scalePrimitives)
       || item.currentScaleAccess !== contract.scaleAccess) {
       throw new Error(`release inventory is not derived from ${item.editorKind} capability contract`);
+    }
+  }
+}
+
+function assertFrozenScopeInventory(inventory: ReleaseEditorInventoryItem[]): void {
+  const root = resolve('../..');
+  const handoff = readFileSync(resolve(root, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8');
+  const match = handoff.match(
+    /<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->\s*```json\s*([\s\S]*?)\s*```\s*<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->/
+  );
+  const proposalJson = match?.[1];
+  if (!proposalJson) throw new Error('frozen release-scope proposal is missing');
+  const proposal = JSON.parse(proposalJson) as {
+    scopeItems?: Array<{
+      scopeItemId?: string;
+      editorIds?: unknown;
+      hexEvidenceView?: { included?: unknown; writable?: unknown };
+    }>;
+  };
+  const editorScope = proposal.scopeItems?.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+  if (!editorScope || !Array.isArray(editorScope.editorIds)) {
+    throw new Error('SCOPE-EDITORS must expose the exact frozen editorIds');
+  }
+  const actualIds = inventory.map((item) => item.releaseEditorId);
+  if (JSON.stringify(actualIds) !== JSON.stringify(editorScope.editorIds)) {
+    throw new Error(
+      `runtime editor inventory drifted from frozen scope: ${JSON.stringify(actualIds)} != ${JSON.stringify(editorScope.editorIds)}`
+    );
+  }
+  if (editorScope.hexEvidenceView?.included !== true
+    || editorScope.hexEvidenceView.writable !== false) {
+    throw new Error('SCOPE-EDITORS must keep Hex included as a read-only evidence view');
+  }
+}
+
+function assertReadOnlyHexAndAssetExclusions(): void {
+  const hex = EDITOR_CAPABILITY_CONTRACTS.hex;
+  const raw = EDITOR_CAPABILITY_CONTRACTS.raw;
+  const flver = EDITOR_CAPABILITY_CONTRACTS.flver;
+  if (hex.proposedReleaseEditorId !== null
+    || hex.mutationKinds.length !== 0
+    || raw.mutationKinds.length !== 0) {
+    throw new Error('Hex/raw evidence views must not expose release editor mutations');
+  }
+  if (flver.proposedReleaseEditorId !== null) {
+    throw new Error('FLVER is a read-only asset view, not one of the eight frozen semantic editors');
+  }
+
+  const root = resolve('../..');
+  const panel = readFileSync(
+    resolve(root, 'apps/desktop/src/renderer/src/editors/HexEditorPanel.tsx'),
+    'utf8'
+  );
+  const app = readFileSync(resolve(root, 'apps/desktop/src/renderer/src/App.tsx'), 'utf8');
+  const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
+  const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8');
+  for (const forbidden of ['onPatch', 'patchFirstByte', 'hex_byte_patch', '翻转本页首字节']) {
+    if (panel.includes(forbidden)) {
+      throw new Error(`read-only Hex panel still exposes ${forbidden}`);
+    }
+  }
+  if (/<HexEditorPanel[\s\S]{0,500}\bonPatch=/u.test(app)) {
+    throw new Error('App still wires a Hex mutation callback');
+  }
+  for (const forbiddenRendererChannel of [
+    'resource.capabilities',
+    'resource.saveRawReplace',
+    'resource.saveRawByteRange'
+  ]) {
+    if (preload.includes(forbiddenRendererChannel)
+      || ipc.includes(`'${forbiddenRendererChannel}'`)) {
+      throw new Error(
+        `renderer raw capability/write IPC must not be exposed: ${forbiddenRendererChannel}`
+      );
     }
   }
 }
@@ -217,9 +302,7 @@ function buildContractFixture(releaseEditorId: ProposedReleaseEditorId): EditorS
     releaseEditorId,
     sourceMode: 'synthetic',
     documentAuthority: editor.documentAuthorityRequirement,
-    authorityLevel: editor.documentAuthorityRequirement === 'raw-byte-document'
-      ? 'raw-byte-authority'
-      : 'partial',
+    authorityLevel: 'partial',
     revision: 'contract-fixture-revision',
     rejectsStaleRevision: true,
     observedMutationKinds: [...editor.mutationKinds],

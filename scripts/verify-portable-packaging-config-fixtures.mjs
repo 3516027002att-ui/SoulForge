@@ -19,10 +19,10 @@ assert.deepEqual(valid.filter((item) => !item.ok), []);
 
 const commentOnly = {
   appId: 'fixture.invalid',
-  note: 'portable nsis mods oo2core better_sqlite3.node unsigned asar'
+  note: 'nsis mods oo2core better_sqlite3.node unsigned asar'
 };
 const commentFindings = validatePortableBuilderConfig(commentOnly, policy).filter((item) => !item.ok);
-assert.ok(commentFindings.some((item) => item.name === 'win-x64-portable-and-nsis-only'));
+assert.ok(commentFindings.some((item) => item.name === 'win-x64-nsis-only'));
 assert.ok(commentFindings.some((item) => item.name === 'excludes-mods'));
 assert.ok(commentFindings.some((item) => item.name === 'includes-only-final-sqlite-binding'));
 
@@ -121,10 +121,7 @@ for (const mutation of [
   { check: 'build-resources-directory-approved', apply: (value) => { value.directories.buildResources = 'resources-drift'; } },
   { check: 'win-artifact-name-approved', apply: (value) => { value.win.artifactName = '../../mods/payload.${ext}'; } },
   { check: 'win-artifact-name-approved', apply: (value) => { value.win.artifactName = 'C:\\outside\\payload.${ext}'; } },
-  { check: 'win-artifact-name-approved', apply: (value) => { value.win.artifactName = 'SoulForge-drift.${ext}'; } },
-  { check: 'portable-artifact-name-approved', apply: (value) => { value.portable.artifactName = '../../mods/payload.${ext}'; } },
-  { check: 'portable-artifact-name-approved', apply: (value) => { value.portable.artifactName = 'C:\\outside\\payload.${ext}'; } },
-  { check: 'portable-artifact-name-approved', apply: (value) => { value.portable.artifactName = 'SoulForge-portable-drift.${ext}'; } }
+  { check: 'win-artifact-name-approved', apply: (value) => { value.win.artifactName = 'SoulForge-drift.${ext}'; } }
 ]) {
   const drifted = structuredClone(config);
   mutation.apply(drifted);
@@ -135,6 +132,13 @@ for (const mutation of [
     `${mutation.check} must reject traversal, absolute, and approved-value drift`
   );
 }
+
+const portableTarget = structuredClone(config);
+portableTarget.win.target.push({ target: 'portable', arch: ['x64'] });
+portableTarget.portable = { artifactName: '${productName}-${version}-portable.${ext}' };
+const portableFindings = validatePortableBuilderConfig(portableTarget, policy).filter((item) => !item.ok);
+assert.ok(portableFindings.some((item) => item.name === 'win-x64-nsis-only'));
+assert.ok(portableFindings.some((item) => item.name === 'config-schema-closed'));
 
 assert.deepEqual(EXECUTABLE_BUILDER_HOOK_FIELDS, [
   'beforePack',
@@ -206,7 +210,8 @@ console.log(JSON.stringify({
     'all-executable-builder-hooks-rejected',
     'builder-policy-drift-rejected',
     'policy-input-unknown-field-rejected',
-    'portable-pack-timeout-and-cancel-rejected-even-with-zero-exit',
+    'unpacked-pack-timeout-and-cancel-rejected-even-with-zero-exit',
+    'portable-target-and-config-rejected',
     'scratch-boundary-safe-sibling-accepted',
     'scratch-boundary-relative-root-and-protected-overlaps-rejected',
     'scratch-boundary-nearest-physical-ancestor-symlink-rejected',

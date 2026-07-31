@@ -1,6 +1,6 @@
 /**
- * P7 portable packaging gate — validates electron-builder config and optionally
- * runs an unsigned dry packaging step when electron-builder is available.
+ * Legacy-named packaging gate — validates the NSIS-only electron-builder config
+ * and optionally builds an unsigned unpacked directory for content inspection.
  * Never claims NSIS installer or distribution readiness.
  */
 import { access, readFile, mkdir, writeFile } from 'node:fs/promises';
@@ -22,7 +22,7 @@ import {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const configuredScratch =
   process.env.SOULFORGE_SCRATCH
-  ?? resolve(process.env.TEMP ?? '/tmp', 'soulforge-portable-gate');
+  ?? resolve(process.env.TEMP ?? '/tmp', 'soulforge-unpacked-package-gate');
 const builderConfigPath = join(root, 'apps/desktop/electron-builder.json');
 const releasePolicyPath = join(root, 'scripts/release-compliance-policy.json');
 const desktopPkg = join(root, 'apps/desktop/package.json');
@@ -31,13 +31,13 @@ const npmCli = process.env.npm_execpath?.trim()
 let packTimeoutMs;
 let scanTimeoutMs;
 try {
-  packTimeoutMs = readTimeoutMs('SOULFORGE_PORTABLE_PACK_TIMEOUT_MS', 15 * 60 * 1000);
+  packTimeoutMs = readTimeoutMs('SOULFORGE_UNPACKED_PACK_TIMEOUT_MS', 15 * 60 * 1000);
   scanTimeoutMs = readTimeoutMs('SOULFORGE_RELEASE_SCAN_TIMEOUT_MS', 5 * 60 * 1000);
 } catch (error) {
   console.error(JSON.stringify({
     ok: false,
     status: 'failed',
-    code: 'PORTABLE_TIMEOUT_INVALID',
+    code: 'UNPACKED_PACK_TIMEOUT_INVALID',
     message: error instanceof Error ? error.message : String(error)
   }, null, 2));
   process.exit(1);
@@ -58,7 +58,7 @@ try {
   console.error(JSON.stringify({
     ok: false,
     status: 'failed',
-    gate: 'portable-packaging',
+    gate: 'unpacked-package-inspection',
     ...scratchBoundaryFailure(error)
   }, null, 2));
   process.exit(1);
@@ -71,7 +71,7 @@ const report = {
   completed: false,
   authority: 'unverified',
   dryPackStatus: 'not-evaluated',
-  gate: 'portable-packaging',
+  gate: 'unpacked-package-inspection',
   timestamp: new Date().toISOString(),
   status: 'unknown',
   message: '',
@@ -131,15 +131,15 @@ try {
   });
 
   // Optional dry pack only when explicitly requested and builder available
-  const wantPack = process.env.SOULFORGE_PORTABLE_PACK === '1';
+  const wantPack = process.env.SOULFORGE_UNPACKED_PACK === '1';
   if (wantPack && !hasBuilderDep) {
     report.ok = false;
     report.dryPackStatus = 'failed';
     report.steps.push({
-      name: 'portable-dir-pack',
+      name: 'unpacked-dir-pack',
       ok: false,
       status: 'failed',
-      reason: 'SOULFORGE_PORTABLE_PACK=1 but electron-builder is unavailable'
+      reason: 'SOULFORGE_UNPACKED_PACK=1 but electron-builder is unavailable'
     });
   } else if (wantPack) {
     let builderCli;
@@ -151,7 +151,7 @@ try {
       report.ok = false;
       report.dryPackStatus = 'failed';
       report.steps.push({
-        name: 'portable-dir-pack',
+        name: 'unpacked-dir-pack',
         ok: false,
         status: 'failed',
         reason: 'declared electron-builder CLI cannot be resolved locally',
@@ -166,7 +166,8 @@ try {
         args: [
           builderCli,
           '--config', 'electron-builder.json',
-          '--win', 'portable',
+          '--win',
+          '--x64',
           '--dir',
           '--publish', 'never'
         ],
@@ -177,7 +178,7 @@ try {
       const packPassed = processSucceeded(result);
       report.dryPackStatus = packPassed ? 'passed' : 'failed';
       report.steps.push({
-        name: 'portable-dir-pack',
+        name: 'unpacked-dir-pack',
         ok: packPassed,
         status: packPassed ? 'passed' : 'failed',
         code: result.code,
@@ -192,11 +193,11 @@ try {
   } else {
     report.dryPackStatus = 'skipped';
     report.steps.push({
-      name: 'portable-dir-pack',
+      name: 'unpacked-dir-pack',
       ok: null,
       status: 'skipped',
       skipped: true,
-      reason: 'set SOULFORGE_PORTABLE_PACK=1 to run unsigned --dir pack'
+      reason: 'set SOULFORGE_UNPACKED_PACK=1 to run unsigned --dir content-inspection pack'
     });
   }
 } catch (error) {
@@ -226,15 +227,15 @@ if (cancellation.signal.aborted) report.ok = false;
 
 report.status = report.ok ? 'pass-config' : 'failed';
 report.message = report.ok
-  ? 'portable 打包配置门禁通过（未签名；未声明可分发发行包）。'
-  : 'portable 打包门禁失败。';
+  ? 'NSIS-only 配置门禁通过（可选 unpacked 中间产物不构成发行包）。'
+  : 'NSIS-only 打包配置门禁失败。';
 const validationOk = report.ok;
 report.validationOk = validationOk;
 if (!validationOk) {
   report.ok = false;
   report.status = 'failed';
   report.authority = 'unverified';
-  report.message = 'portable packaging gate failed';
+  report.message = 'NSIS-only packaging gate failed';
 } else if (report.dryPackStatus === 'passed') {
   report.ok = true;
   report.status = 'partial';
@@ -246,9 +247,9 @@ if (!validationOk) {
   report.authority = 'partial';
   report.message = 'configuration and release scan passed; unsigned --dir build was not requested';
 }
-report.nonClaim = 'Unsigned --dir evidence does not prove NSIS installer, installer hash, upgrade, clean-machine, or distribution readiness.';
+report.nonClaim = 'Unsigned unpacked --dir evidence is not a portable release and does not prove NSIS installer, installer hash, upgrade, clean-machine, or distribution readiness.';
 
-const outPath = join(scratch, 'portable-packaging-gate.json');
+const outPath = join(scratch, 'unpacked-package-inspection-gate.json');
 await writeFile(outPath, JSON.stringify(report, null, 2), 'utf8');
 cancellation.dispose();
 console.log(JSON.stringify({ ...report, reportPath: outPath }, null, 2));

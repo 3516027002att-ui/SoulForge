@@ -977,7 +977,6 @@ export function App(): ReactElement {
               initialBytesBase64={typeof preview.hex === 'string' && !preview.hex.includes(' ')
                 ? preview.hex
                 : hexTextToBase64(preview.hex)}
-              onPatch={() => setStatus('Hex mutation 已在渲染进程演示；提交须经主进程补丁引擎。')}
             />
           )}
           {preview?.previewKind === 'hex' && !preview.hex && <pre className="muted">无 Hex 预览数据。</pre>}

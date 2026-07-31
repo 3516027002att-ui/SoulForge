@@ -299,23 +299,44 @@ internal sealed class BridgeCommandService
             {
                 textureIndex = indexElement.GetInt32();
             }
+            string format = "dds";
+            if (options.ValueKind == JsonValueKind.Object
+                && options.TryGetProperty("format", out var formatElement)
+                && formatElement.ValueKind == JsonValueKind.String)
+            {
+                format = formatElement.GetString() ?? "dds";
+            }
             try
             {
                 var document = TpfNativeDocument.ReadFile(file);
                 var dds = document.GetTextureData(textureIndex);
-                await File.WriteAllBytesAsync(outputPath, dds, cancellationToken);
+                byte[] outputBytes;
+                string code;
+                if (format.Equals("png", StringComparison.OrdinalIgnoreCase))
+                {
+                    var (width, height, rgba) = DdsCodec.DecodeDds(dds);
+                    outputBytes = DdsCodec.EncodePng(width, height, rgba);
+                    code = $"PNG {width}x{height}";
+                }
+                else
+                {
+                    outputBytes = dds;
+                    code = "DDS";
+                }
+                await File.WriteAllBytesAsync(outputPath, outputBytes, cancellationToken);
                 var entry = document.Textures[textureIndex];
                 return BridgeResult<object>.Partial(file, "texture", new[]
                 {
                     new Diagnostic("info", "TPF_TEXTURE_EXPORTED",
-                        $"TPF 纹理 {textureIndex} 已导出为 DDS（{dds.Length} 字节）。",
+                        $"TPF 纹理 {textureIndex} 已导出为 {code}（{outputBytes.Length} 字节）。",
                         BridgeResult<object>.MakeSourceUri(file))
                 }, new
                 {
                     textureIndex,
                     name = entry.Name,
+                    format,
                     outputPath,
-                    byteLength = dds.Length
+                    byteLength = outputBytes.Length
                 });
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or ArgumentOutOfRangeException)

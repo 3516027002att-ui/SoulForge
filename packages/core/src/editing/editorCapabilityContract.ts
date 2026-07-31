@@ -14,7 +14,15 @@ export type EditorScaleAccess =
   | 'eager'
   | 'none';
 
-export type ProposedReleaseEditorId = 'safe-hex' | 'fmg' | 'param' | 'emevd' | 'msb' | 'tae' | 'esd' | 'flver';
+export type ProposedReleaseEditorId =
+  | 'bnd4'
+  | 'fmg'
+  | 'param'
+  | 'emevd'
+  | 'msb'
+  | 'tae'
+  | 'esd'
+  | 'script';
 
 export interface EditorCapabilityContract {
   editorKind: EditorKind;
@@ -37,10 +45,10 @@ export interface EditorCapabilityContract {
 export const EDITOR_CAPABILITY_CONTRACTS = {
   hex: {
     editorKind: 'hex',
-    proposedReleaseEditorId: 'safe-hex',
-    proposalOrder: 0,
+    proposedReleaseEditorId: null,
+    proposalOrder: null,
     documentAuthority: 'raw-byte-document',
-    mutationKinds: ['hex_byte_patch'],
+    mutationKinds: [],
     revisionContract: 'monotonic-reject-stale',
     scalePrimitives: ['pagination', 'bounded-window'],
     scaleAccess: 'bounded-window',
@@ -49,6 +57,22 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
       'packages/core/src/editing/hexDocument.ts',
       'packages/core/src/preview/openResourcePreview.ts',
       'apps/desktop/src/renderer/src/editors/HexEditorPanel.tsx'
+    ]
+  },
+  bnd4: {
+    editorKind: 'bnd4',
+    proposedReleaseEditorId: 'bnd4',
+    proposalOrder: 0,
+    documentAuthority: 'bridge-native-document',
+    mutationKinds: [],
+    revisionContract: 'monotonic-reject-stale',
+    scalePrimitives: ['none'],
+    scaleAccess: 'none',
+    scaleDimensions: ['entries', 'nested-containers'],
+    contractSources: [
+      'bridge/SoulForge.Bridge/Bnd4NativeDocument.cs',
+      'bridge/SoulForge.Bridge/Bnd4NativeWriter.cs',
+      'packages/core/src/editing/saveContainerChild.ts'
     ]
   },
   fmg: {
@@ -142,10 +166,25 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
       'bridge/SoulForge.Bridge/EsdNativeDocument.cs'
     ]
   },
+  script: {
+    editorKind: 'script',
+    proposedReleaseEditorId: 'script',
+    proposalOrder: 7,
+    documentAuthority: 'bridge-native-document',
+    mutationKinds: [],
+    revisionContract: 'monotonic-reject-stale',
+    scalePrimitives: ['none'],
+    scaleAccess: 'none',
+    scaleDimensions: ['source-lines', 'compiled-instructions'],
+    contractSources: [
+      'packages/core/src/editing/editorDocumentStore.ts',
+      'packages/core/src/writers/textFileWriter.ts'
+    ]
+  },
   flver: {
     editorKind: 'flver',
-    proposedReleaseEditorId: 'flver',
-    proposalOrder: 7,
+    proposedReleaseEditorId: null,
+    proposalOrder: null,
     documentAuthority: 'bridge-native-document',
     mutationKinds: [],
     revisionContract: 'monotonic-reject-stale',
@@ -174,7 +213,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     proposedReleaseEditorId: null,
     proposalOrder: null,
     documentAuthority: 'raw-byte-document',
-    mutationKinds: ['hex_byte_patch'],
+    mutationKinds: [],
     revisionContract: 'monotonic-reject-stale',
     scalePrimitives: ['none'],
     scaleAccess: 'none',

@@ -3,10 +3,21 @@
  * Editors emit only these mutations; main/core maps them to PatchIR.
  */
 
-export type EditorKind = 'hex' | 'fmg' | 'param' | 'emevd' | 'msb' | 'tae' | 'esd' | 'flver' | 'text' | 'raw';
+export type EditorKind =
+  | 'hex'
+  | 'bnd4'
+  | 'fmg'
+  | 'param'
+  | 'emevd'
+  | 'msb'
+  | 'tae'
+  | 'esd'
+  | 'script'
+  | 'flver'
+  | 'text'
+  | 'raw';
 
 export type EditorMutationKind =
-  | 'hex_byte_patch'
   | 'fmg_entry_upsert'
   | 'fmg_entry_delete'
   | 'param_row_upsert'

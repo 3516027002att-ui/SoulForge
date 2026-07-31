@@ -523,6 +523,55 @@ function parseSlices(markdown, where, findings, blockers) {
   return slices;
 }
 
+function parseAndValidateUnfrozenValidations(markdown, where, findings, slices) {
+  const section = extractSection(markdown, '13.4');
+  if (section === null) {
+    findings.push(makeFinding(
+      'VALIDATION_SECTION_MISSING',
+      where,
+      '未找到 §13.4 required validation 冻结约定。'
+    ));
+    return;
+  }
+
+  const marker = '当前显式为 `validation-unfrozen`（需后续冻结）：';
+  const markerIndex = section.indexOf(marker);
+  if (markerIndex === -1) {
+    findings.push(makeFinding(
+      'VALIDATION_UNFROZEN_LIST_MISSING',
+      `${where} §13.4`,
+      '§13.4 必须显式列出 validation-unfrozen 切片。'
+    ));
+    return;
+  }
+
+  const lines = section.slice(markerIndex + marker.length).split(/\r?\n/);
+  let listStarted = false;
+  for (const line of lines) {
+    const match = /^-\s+`(W-[A-Z0-9-]+)`\s*[：:]/.exec(line.trim());
+    if (match) {
+      listStarted = true;
+      const sliceId = match[1];
+      const slice = slices.get(sliceId);
+      if (!slice) {
+        findings.push(makeFinding(
+          'VALIDATION_UNFROZEN_SLICE_UNKNOWN',
+          `${where} §13.4 ${sliceId}`,
+          `validation-unfrozen 引用了 §13.1 未定义的切片：${sliceId}`
+        ));
+      } else if (slice.lifecycle === 'completed' || slice.lifecycle === 'superseded') {
+        findings.push(makeFinding(
+          'VALIDATION_UNFROZEN_TERMINAL_SLICE',
+          `${where} §13.4 ${sliceId}`,
+          `${slice.lifecycle} 切片不能继续保留在 validation-unfrozen 列表中。`
+        ));
+      }
+      continue;
+    }
+    if (listStarted && line.trim() !== '') break;
+  }
+}
+
 function parseAndValidateActiveClaims(markdown, where, findings, slices) {
   const table = parseFirstTable(extractSection(markdown, '13.1.1'));
   if (!table) {
@@ -1139,6 +1188,7 @@ export function validateHandoffGovernance(markdown, options = {}) {
   const blockers = parseBlockers(markdown, where, findings, evidence);
   const slices = parseSlices(markdown, where, findings, blockers);
   parseAndValidateActiveClaims(markdown, where, findings, slices);
+  parseAndValidateUnfrozenValidations(markdown, where, findings, slices);
   const releaseGateIds = parseReleaseGateIds(markdown, where, findings);
   const gates = parseAndValidateGateMatrix(
     markdown,
