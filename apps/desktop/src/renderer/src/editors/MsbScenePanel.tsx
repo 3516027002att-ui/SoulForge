@@ -35,6 +35,11 @@ export interface MsbScenePanelProps {
     posZ: number;
   }) => void;
   writeEnabled?: boolean;
+  /**
+   * 非空表示该编辑器已延期至指定里程碑，本版仅作标记只读预览：
+   * 面板隐藏全部提交入口并显式标注延期状态。
+   */
+  deferredPreviewRelease?: 'V0.6';
 }
 
 /**
@@ -162,17 +167,28 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     setStatus(`正在提交 region 位置：${region.name}`);
   }
 
+  const deferredRelease = props.deferredPreviewRelease;
+
   return (
     <section className="panel editor-msb-scene" aria-label="MSB 三维场景">
       <header className="panel-header">
-        <h3>MSB 三维场景（代理几何）</h3>
+        <h3>
+          MSB 三维场景（代理几何）
+          {deferredRelease ? `· ${deferredRelease} 只读预览` : null}
+        </h3>
         <span className="muted">
           节点 {nodeCount} · region {regions.length} · 无绝对路径
         </span>
       </header>
+      {deferredRelease ? (
+        <p className="muted" role="note">
+          MSB 编辑已延期至 {deferredRelease}：本版仅提供只读预览，不提供位置提交入口。
+        </p>
+      ) : null}
       <div ref={hostRef} className="scene-host" style={{ minHeight: 280, background: '#1a1d23' }} />
       <p className="muted">{status}</p>
       {selected ? <p>已选择 {selected.kind === 'msb-region' ? 'region' : 'part'}：{selected.label}</p> : null}
+      {deferredRelease ? null : (
       <div className="row gap" aria-label="part 位置微调">
         <label>
           ΔX
@@ -216,6 +232,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           提交 region 位置
         </button>
       </div>
+      )}
       {regions.length > 0 && (
         <div className="binder-child-table" role="table" aria-label="MSB regions">
           <div className="binder-child-row binder-child-header" role="row">
@@ -244,9 +261,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         </div>
       )}
       <p className="muted">
-        {props.writeEnabled
-          ? '实时模式：part/region 位置微调经 Bridge write-msb → Patch Engine 提交。'
-          : '演示模式：微调仅本地提示，不会写入。'}
+        {deferredRelease
+          ? `${deferredRelease} 只读预览：既有 write-msb typed mutation 写链已在本版关闭，主进程会拒绝写入请求。`
+          : props.writeEnabled
+            ? '实时模式：part/region 位置微调经 Bridge write-msb → Patch Engine 提交。'
+            : '演示模式：微调仅本地提示，不会写入。'}
       </p>
     </section>
   );

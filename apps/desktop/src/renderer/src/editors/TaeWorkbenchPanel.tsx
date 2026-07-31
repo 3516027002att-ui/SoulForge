@@ -48,11 +48,14 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   return (
     <section className="panel" aria-label="TAE 动画事件面板">
       <header className="panel-header">
-        <h3>TAE 动画事件</h3>
+        <h3>TAE 动画事件 · V0.6 只读预览</h3>
         <span className="muted">
           {data ? `${data.animationCount} anims · ${data.totalEventCount} events · ${data.authority}` : '未加载'}
         </span>
       </header>
+      <p className="muted" role="note">
+        TAE 编辑已延期至 V0.6：本面板为只读预览，不属于 V0.5 发布编辑器清单。
+      </p>
       {!data && <p className="muted">选择 .tae 文件以查看动画事件数据。</p>}
       {data && (
         <>

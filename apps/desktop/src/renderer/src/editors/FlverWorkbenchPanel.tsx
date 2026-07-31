@@ -71,13 +71,16 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
   return (
     <section className="panel" aria-label="FLVER 3D 模型面板">
       <header className="panel-header">
-        <h3>FLVER 3D 模型</h3>
+        <h3>FLVER 3D 模型 · V0.6 只读预览</h3>
         <span className="muted">
           {data
             ? `${data.boneCount} bones · ${data.materialCount} mats · ${data.meshCount} meshes · ${data.faceCount.toLocaleString()} faces · ${data.authority}`
             : '未加载'}
         </span>
       </header>
+      <p className="muted" role="note">
+        资产只读与导出线已延期至 V0.6：本面板为只读预览，不属于 V0.5 发布编辑器清单。
+      </p>
       {!data && <p className="muted">选择 .flver 文件以查看 3D 模型数据。</p>}
       {data && (
         <>

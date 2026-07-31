@@ -69,7 +69,8 @@ const baseEvidence = [
   {
     id: 'EV-SEALED-01',
     type: 'sealed-current-run',
-    claim: 'scope-ruling:user-approved scope-exclusion:REL-B:user-approved',
+    claim: 'scope-ruling:user-approved scope-exclusion:REL-B:user-approved '
+      + 'scope-deferral:REL-B:V0.6:user-approved',
     baseline: VALID_SEAL
   },
   { id: 'EV-UNSEALED-01', type: 'unsealed-record', claim: '旧记录', baseline: '旧工作树，未封存' }
@@ -101,7 +102,7 @@ function buildDocument(options = {}) {
   const validationUnfrozen = options.validationUnfrozen ?? ['W-A-01'];
 
   const sliceRows = slices.map((slice) =>
-    `| \`${slice.id}\` | \`${slice.lifecycle}\` | \`${slice.authority}\` | ${slice.blockers} | ${slice.target ?? '目标'} | 可验收切片 | ${slice.hardPrerequisite ?? '前置'} | 入口 | 验证 | cap=${slice.cap ?? 'partial'} |`
+    `| \`${slice.id}\` | \`${slice.lifecycle}\` | \`${slice.authority}\` | ${slice.blockers} | ${slice.target ?? '目标'} | 可验收切片 | ${slice.hardPrerequisite ?? '前置'} | 入口 | ${slice.validation ?? '验证'} | cap=${slice.cap ?? 'partial'} |`
   );
   const evidenceRows = evidence.map((record) =>
     `| \`${record.id}\` | \`${record.type}\` | ${record.claim ?? '声明'} | ${record.baseline} | 命令 | 范围 | 边界 |`
@@ -263,6 +264,120 @@ assertPass('scoped-exclusion-after-scope-pass', buildDocument({
     return { ...gate, applicability: 'in-scope' };
   })
 }));
+
+// deferred-v0.6：已裁定移出 V0.5、仍将在 V0.6 交付。
+// 与 scope-excluded 同等严格，但禁止写成 passed。
+assertPass('deferral-after-scope-pass', buildDocument({
+  slices: cloneRows(baseSlices).map((slice) => {
+    if (slice.id === 'W-SCOPE-01') return { ...slice, lifecycle: 'completed' };
+    // deferred Gate 的切片必须一并写成 deferred：Gate 与切片同步是该状态的定义之一。
+    if (slice.id === 'W-B-01') return { ...slice, lifecycle: 'deferred' };
+    return slice;
+  }),
+  gates: cloneRows(baseGates).map((gate) => {
+    if (gate.id === 'REL-SCOPE') {
+      return { ...gate, state: 'passed', applicability: 'in-scope', refs: '`EV-SEALED-01`' };
+    }
+    if (gate.id === 'REL-B') {
+      return { ...gate, state: 'deferred', applicability: 'deferred-v0.6', refs: '`EV-SEALED-01`' };
+    }
+    return { ...gate, applicability: 'in-scope' };
+  })
+}));
+
+// deferred 切片是 V0.5 的终态：不得留在 validation-unfrozen 清单里，
+// 否则延期项会继续占用"待冻结验证"名额，掩盖本版真实缺口。
+assertCodes('deferred-slice-cannot-stay-validation-unfrozen', buildDocument({
+  slices: cloneRows(baseSlices).map((slice) => {
+    if (slice.id === 'W-SCOPE-01') return { ...slice, lifecycle: 'completed' };
+    if (slice.id === 'W-A-01') return { ...slice, lifecycle: 'deferred' };
+    return slice;
+  }),
+  gates: cloneRows(baseGates).map((gate) => {
+    if (gate.id === 'REL-SCOPE') {
+      return { ...gate, state: 'passed', applicability: 'in-scope', refs: '`EV-SEALED-01`' };
+    }
+    if (gate.id === 'REL-A') {
+      return { ...gate, state: 'deferred', applicability: 'deferred-v0.6', refs: '`EV-SEALED-01`' };
+    }
+    return { ...gate, applicability: 'in-scope' };
+  }),
+  validationUnfrozen: ['W-A-01']
+}), ['VALIDATION_UNFROZEN_TERMINAL_SLICE']);
+
+// 反向收敛：§13.4 必须是未冻结验证的完整清单。行内标注但未列出，
+// 等于让"待冻结"验证脱离清单检查，逐步被当成已冻结。
+assertCodes('inline-unfrozen-validation-must-be-listed', buildDocument({
+  slices: cloneRows(baseSlices).map((slice) => (
+    slice.id === 'W-B-01'
+      ? { ...slice, validation: '`validation-unfrozen`：真实容器写回 smoke' }
+      : slice
+  )),
+  validationUnfrozen: ['W-A-01']
+}), ['VALIDATION_UNFROZEN_SLICE_UNLISTED']);
+
+// 已列出的行内标注不得再报缺失：反向检查只针对真正未列出的切片。
+assertPass('inline-unfrozen-validation-listed-passes', buildDocument({
+  slices: cloneRows(baseSlices).map((slice) => (
+    slice.id === 'W-B-01'
+      ? { ...slice, validation: '`validation-unfrozen`：真实容器写回 smoke' }
+      : slice
+  )),
+  validationUnfrozen: ['W-A-01', 'W-B-01']
+}));
+
+assertCodes('deferred-gate-cannot-be-written-as-passed', buildDocument({
+  slices: cloneRows(baseSlices).map((slice) => (
+    slice.id === 'W-SCOPE-01' || slice.id === 'W-B-01'
+      ? { ...slice, lifecycle: 'completed' }
+      : slice
+  )),
+  gates: cloneRows(baseGates).map((gate) => {
+    if (gate.id === 'REL-SCOPE') {
+      return { ...gate, state: 'passed', applicability: 'in-scope', refs: '`EV-SEALED-01`' };
+    }
+    if (gate.id === 'REL-B') {
+      return { ...gate, state: 'passed', applicability: 'deferred-v0.6', refs: '`EV-SEALED-01`' };
+    }
+    return { ...gate, applicability: 'in-scope' };
+  })
+}), ['GATE_DEFERRED_STATE_INVALID']);
+
+assertCodes('deferred-state-requires-deferred-applicability', buildDocument({
+  slices: cloneRows(baseSlices).map((slice) => (
+    slice.id === 'W-SCOPE-01' || slice.id === 'W-B-01'
+      ? { ...slice, lifecycle: 'completed' }
+      : slice
+  )),
+  gates: cloneRows(baseGates).map((gate) => {
+    if (gate.id === 'REL-SCOPE') {
+      return { ...gate, state: 'passed', applicability: 'in-scope', refs: '`EV-SEALED-01`' };
+    }
+    if (gate.id === 'REL-B') {
+      return { ...gate, state: 'deferred', applicability: 'in-scope', refs: '`EV-SEALED-01`' };
+    }
+    return { ...gate, applicability: 'in-scope' };
+  })
+}), ['GATE_DEFERRED_APPLICABILITY_INVALID']);
+
+assertCodes('base-gate-cannot-be-deferred', buildDocument({
+  slices: cloneRows(baseSlices).map((slice) => (
+    slice.id === 'W-SCOPE-01' || slice.id === 'W-A-01'
+      ? { ...slice, lifecycle: 'completed' }
+      : slice
+  )),
+  gates: [
+    { id: 'REL-SCOPE', slices: '`W-SCOPE-01`', state: 'passed', applicability: 'in-scope', refs: '`EV-SEALED-01`' },
+    { id: 'REL-A', slices: '`W-A-01`', state: 'deferred', applicability: 'deferred-v0.6', refs: '`EV-SEALED-01`' }
+  ]
+}), ['GATE_BASE_DEFERRAL_FORBIDDEN']);
+
+assertCodes('open-gate-cannot-be-deferred-v06', buildDocument({
+  gates: [
+    cloneRows(baseGates)[0],
+    { id: 'REL-A', slices: '`W-A-01`', state: 'open', applicability: 'deferred-v0.6', refs: '`EV-SEALED-01`' }
+  ]
+}), ['GATE_OPEN_DEFERRED', 'GATE_DEFERRED_STATE_INVALID']);
 
 assertCodes('invalid-lifecycle', buildDocument({
   slices: [

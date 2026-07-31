@@ -35,8 +35,15 @@ function main(): void {
   if (!app.includes('onRegionPositionCommit') || !app.includes('set_region_position')) {
     throw new Error('App must wire region position commit to set_region_position');
   }
-  if (!app.includes('writeEnabled={msbLive')) {
+  // writeEnabled 必须同时受"live 模式"和"非 V0.6 延期预览"两个条件约束。
+  // 这里断言语义而非某一种换行格式：只要 writeEnabled 表达式里同时出现
+  // msbLive 与延期判定，重排格式不会误报，去掉任一条件则立即失败关闭。
+  const writeEnabledExpression = /writeEnabled=\{([\s\S]*?)\}\s*\n/.exec(app)?.[1] ?? '';
+  if (!writeEnabledExpression.includes('msbLive')) {
     throw new Error('MSB write must only enable in live mode');
+  }
+  if (!writeEnabledExpression.includes("isDeferredPreviewEditorKind('msb')")) {
+    throw new Error('MSB write must fail closed while msb is a V0.6 deferred read-only preview');
   }
   if (!paramPanel.includes('sourceId') || !app.includes('mutation.sourceId')) {
     throw new Error('PARAM duplicate must carry sourceId for full payload upsert');

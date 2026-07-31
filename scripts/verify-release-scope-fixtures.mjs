@@ -181,6 +181,68 @@ try {
     relA.currentState = 'passed';
     relA.blockerRefs = [];
   }, 'GATE_COVERAGE_STATE_DRIFT');
+
+  await expectRejected('deferred-item-without-target-release', (proposal) => {
+    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
+    delete rendering.deferredToRelease;
+  }, 'DEFERRED_RELEASE_INVALID');
+
+  await expectRejected('deferred-item-claims-v05-operation', (proposal) => {
+    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
+    rendering.operations.push('render-flver-msb-collision-navigation');
+  }, 'DEFERRED_OPERATIONS_FORBIDDEN');
+
+  await expectRejected('supported-item-claims-deferred-release', (proposal) => {
+    const fmg = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-FMG');
+    fmg.deferredToRelease = 'V0.6';
+  }, 'DEFERRED_RELEASE_UNEXPECTED');
+
+  await expectRejected('deferred-item-targets-unapproved-release', (proposal) => {
+    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
+    rendering.deferredToRelease = 'V0.7';
+  }, 'DEFERRED_RELEASE_INVALID');
+
+  await expectRejected('deferred-gate-carries-blocker', (proposal) => {
+    const relI = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-I');
+    relI.blockerRefs = ['BLK-RENDER-HARDWARE'];
+  }, 'DEFERRED_GATE_WITH_BLOCKER');
+
+  await expectRejected('deferred-gate-still-has-supported-scope', (proposal) => {
+    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
+    rendering.proposedSupport = 'supported';
+    delete rendering.deferredToRelease;
+    rendering.operations = ['functional-backend-smoke-on-owner-machine'];
+  }, 'DEFERRED_GATE_WITH_SUPPORTED_SCOPE');
+
+  await expectRejected('fully-deferred-gate-written-as-open', (proposal) => {
+    const relI = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-I');
+    relI.currentState = 'open';
+  }, 'FULLY_DEFERRED_GATE_STATE_INVALID');
+
+  await expectRejected('deferred-preview-editor-counted-as-release', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.deferredPreviewEditors.countedAsReleaseEditor = true;
+  }, 'DEFERRED_PREVIEW_EDITOR_POLICY_INVALID');
+
+  await expectRejected('deferred-preview-editor-made-writable', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.deferredPreviewEditors.readOnly = false;
+  }, 'DEFERRED_PREVIEW_EDITOR_POLICY_INVALID');
+
+  await expectRejected('deferred-preview-editor-promoted-into-release-set', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.deferredPreviewEditors.editorIds = ['msb', 'tae', 'esd', 'flver', 'param'];
+  }, 'DEFERRED_PREVIEW_EDITOR_SET_INVALID');
+
+  await expectRejected('script-editor-claimed-as-typed-mutation', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.editorMutationModes.script = 'typed-mutation';
+  }, 'FROZEN_EDITOR_MUTATION_MODE_INVALID');
+
+  await expectRejected('deferred-editor-reintroduced-into-frozen-set', (proposal) => {
+    const editors = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+    editors.editorIds.push('msb');
+  }, 'FROZEN_EDITOR_MATRIX_INVALID');
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
