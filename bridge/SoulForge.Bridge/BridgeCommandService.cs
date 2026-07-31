@@ -286,6 +286,44 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "export-tpf-texture")
+        {
+            if (string.IsNullOrWhiteSpace(outputPath))
+            {
+                return BridgeResult<object>.Failed(file, "texture", "TPF_EXPORT_OUTPUT_REQUIRED", "export-tpf-texture 需要 options.outputPath。");
+            }
+            int textureIndex = 0;
+            if (options.ValueKind == JsonValueKind.Object
+                && options.TryGetProperty("textureIndex", out var indexElement)
+                && indexElement.ValueKind == JsonValueKind.Number)
+            {
+                textureIndex = indexElement.GetInt32();
+            }
+            try
+            {
+                var document = TpfNativeDocument.ReadFile(file);
+                var dds = document.GetTextureData(textureIndex);
+                await File.WriteAllBytesAsync(outputPath, dds, cancellationToken);
+                var entry = document.Textures[textureIndex];
+                return BridgeResult<object>.Partial(file, "texture", new[]
+                {
+                    new Diagnostic("info", "TPF_TEXTURE_EXPORTED",
+                        $"TPF 纹理 {textureIndex} 已导出为 DDS（{dds.Length} 字节）。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    textureIndex,
+                    name = entry.Name,
+                    outputPath,
+                    byteLength = dds.Length
+                });
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or ArgumentOutOfRangeException)
+            {
+                return BridgeResult<object>.Failed(file, "texture", "TPF_TEXTURE_EXPORT_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-tae-document")
         {
             try

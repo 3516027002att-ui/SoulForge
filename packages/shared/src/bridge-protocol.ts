@@ -106,6 +106,7 @@ export type BridgeCommandName =
   | 'write-msb'
   | 'read-tae-document'
   | 'read-tpf-document'
+  | 'export-tpf-texture'
   | 'read-flver-document'
   | 'read-flver-mesh'
   | 'read-flver-skeleton'

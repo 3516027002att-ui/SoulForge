@@ -260,7 +260,8 @@ internal static class BridgeDaemonHost
             || payload.Command.Equals("write-fmg", StringComparison.OrdinalIgnoreCase)
             || payload.Command.Equals("write-param", StringComparison.OrdinalIgnoreCase)
             || payload.Command.Equals("write-emevd", StringComparison.OrdinalIgnoreCase)
-            || payload.Command.Equals("write-msb", StringComparison.OrdinalIgnoreCase))
+            || payload.Command.Equals("write-msb", StringComparison.OrdinalIgnoreCase)
+            || payload.Command.Equals("export-tpf-texture", StringComparison.OrdinalIgnoreCase))
         {
             if (payload.Options is not { ValueKind: JsonValueKind.Object }
                 || !payload.Options.Value.TryGetProperty("outputPath", out var outputElement)
