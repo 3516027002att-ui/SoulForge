@@ -4,6 +4,7 @@ import type {
   EmevdDslCompileResult,
   EmevdDslDiagnostic,
   EmevdDslDocument,
+  EmevdDslInstructionPatch,
   EmevdDslLiteral,
   EmevdEditorDocument,
   EmevdMutationPlan,
@@ -198,89 +199,51 @@ export function compileEmevdPatchDsl(
         }));
         continue;
       }
-      const instruction = bound.instruction;
-      if (instruction.unknown) {
-        add(diagnostic(
-          'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY',
-          'Unknown instruction is read-only.',
-          instructionPatch.span,
-          { resourceUri: request.resourceUri, targetAnchor: instructionPatch.anchor }
-        ));
-        continue;
-      }
-      const definition = findInstructionDef(registry, instruction.bank, instruction.id);
-      if (!definition) {
-        add(diagnostic(
-          'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY',
-          'Instruction has no EMEDF schema and is read-only.',
-          instructionPatch.span,
-          { resourceUri: request.resourceUri, targetAnchor: instructionPatch.anchor }
-        ));
-        continue;
-      }
-      let rawArgs: Buffer;
-      try {
-        rawArgs = decodeStrictBase64(instruction.argsBase64, { allowEmpty: true });
-      } catch {
-        add(diagnostic('EMEVD_DSL_ANCHOR_PRECONDITION_FAILED', 'Instruction payload is not valid base64.', instructionPatch.span, {
-          resourceUri: request.resourceUri,
-          targetAnchor: instructionPatch.anchor
-        }));
-        continue;
-      }
-      const decoded = decodeInstructionArgs(registry, instruction.bank, instruction.id, rawArgs);
-      if (!decoded.ok) {
-        add(diagnostic('EMEVD_DSL_ANCHOR_PRECONDITION_FAILED', decoded.message, instructionPatch.span, {
-          resourceUri: request.resourceUri,
-          targetAnchor: instructionPatch.anchor
-        }));
-        continue;
-      }
-      const decodedByName = new Map(decoded.args.map((arg) => [arg.name, arg]));
-      const seenArgs = new Set<string>();
-      for (const operation of instructionPatch.operations) {
-        if (seenArgs.has(operation.argument)) {
-          add(diagnostic('EMEVD_DSL_DUPLICATE_ARGUMENT', `Duplicate argument ${operation.argument}.`, operation.span, {
-            resourceUri: request.resourceUri,
-            targetAnchor: instructionPatch.anchor
-          }));
-          continue;
-        }
-        seenArgs.add(operation.argument);
-        const argDef = definition.args.find((arg) => arg.name === operation.argument);
-        const before = decodedByName.get(operation.argument);
-        if (!argDef || !before) {
-          add(diagnostic('EMEVD_DSL_UNKNOWN_ARGUMENT', `Unknown argument ${operation.argument}.`, operation.span, {
-            resourceUri: request.resourceUri,
-            targetAnchor: instructionPatch.anchor
-          }));
-          continue;
-        }
-        const valueError = validateTypedLiteral(argDef.type, operation.value);
-        if (valueError) {
-          add(diagnostic(valueError.code, valueError.message, operation.span, {
-            resourceUri: request.resourceUri,
-            targetAnchor: instructionPatch.anchor
-          }));
-          continue;
-        }
-        if (!Object.is(before.value, operation.value)) {
-          operations.push({
-            kind: 'set_instruction_arg',
-            eventAnchor: eventPatch.anchor,
-            instructionAnchor: instructionPatch.anchor,
-            target: instructionAnchor,
-            targetPreconditionHash: computeEmevdInstructionFingerprint(instruction),
-            sourceSpan: operation.span,
-            bank: instruction.bank,
-            id: instruction.id,
-            argument: operation.argument,
-            before: before.value,
-            after: operation.value
-          });
-        }
-      }
+      compileInstructionArgMutations(
+        instructionPatch,
+        bound.instruction,
+        eventPatch.anchor,
+        registry,
+        operations,
+        diagnostics,
+        request.resourceUri
+      );
     }
+  }
+
+  // Top-level instruction blocks: global instruction-level typed mutation
+  // without an enclosing event block. The owning event is resolved from the
+  // document's stable instruction identity, so the generated plan is
+  // identical to expressing the same write inside that event block.
+  for (const instructionPatch of ast.topLevelInstructions ?? []) {
+    const bound = instructionByAnchor.get(instructionPatch.anchor);
+    const instructionAnchor = bound?.instruction.anchor;
+    if (!bound || !instructionAnchor) {
+      add(diagnostic('EMEVD_DSL_ANCHOR_NOT_FOUND', 'Instruction anchor not found.', instructionPatch.span, {
+        resourceUri: request.resourceUri,
+        targetAnchor: instructionPatch.anchor
+      }));
+      continue;
+    }
+    const eventAnchor = bound.event.anchor;
+    if (!eventAnchor) {
+      add(diagnostic(
+        'EMEVD_DSL_ANCHOR_PRECONDITION_FAILED',
+        'Owning event has no anchor; top-level instruction writes require a stable event identity.',
+        instructionPatch.span,
+        { resourceUri: request.resourceUri, targetAnchor: instructionPatch.anchor }
+      ));
+      continue;
+    }
+    compileInstructionArgMutations(
+      instructionPatch,
+      bound.instruction,
+      formatEmevdAnchor('event', eventAnchor),
+      registry,
+      operations,
+      diagnostics,
+      request.resourceUri
+    );
   }
 
   // Collision check: only reject ids explicitly assigned by this plan when they
@@ -340,6 +303,106 @@ export function compileEmevdPatchDsl(
   return { ok: true, ast, plan, diagnostics: diagnostics.sort(compareDiagnostics) };
 }
 
+/**
+ * Compile one instruction block (event-nested or top-level) into typed
+ * set_instruction_arg mutations. Shared by both block forms so global and
+ * event-scoped writes go through identical schema/type/range validation.
+ * Precondition (enforced by both callers): the instruction was resolved
+ * through instructionByAnchor, so `instruction.anchor` is defined.
+ */
+function compileInstructionArgMutations(
+  instructionPatch: EmevdDslInstructionPatch,
+  instruction: EmevdEditorDocument['events'][number]['instructions'][number],
+  eventAnchor: string,
+  registry: EmedfRegistry,
+  operations: EmevdPlannedMutation[],
+  diagnostics: EmevdDslDiagnostic[],
+  resourceUri: string
+): void {
+  const add = (item: EmevdDslDiagnostic): void => { diagnostics.push(item); };
+  if (instruction.unknown) {
+    add(diagnostic(
+      'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY',
+      'Unknown instruction is read-only.',
+      instructionPatch.span,
+      { resourceUri, targetAnchor: instructionPatch.anchor }
+    ));
+    return;
+  }
+  const definition = findInstructionDef(registry, instruction.bank, instruction.id);
+  if (!definition) {
+    add(diagnostic(
+      'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY',
+      'Instruction has no EMEDF schema and is read-only.',
+      instructionPatch.span,
+      { resourceUri, targetAnchor: instructionPatch.anchor }
+    ));
+    return;
+  }
+  let rawArgs: Buffer;
+  try {
+    rawArgs = decodeStrictBase64(instruction.argsBase64, { allowEmpty: true });
+  } catch {
+    add(diagnostic('EMEVD_DSL_ANCHOR_PRECONDITION_FAILED', 'Instruction payload is not valid base64.', instructionPatch.span, {
+      resourceUri,
+      targetAnchor: instructionPatch.anchor
+    }));
+    return;
+  }
+  const decoded = decodeInstructionArgs(registry, instruction.bank, instruction.id, rawArgs);
+  if (!decoded.ok) {
+    add(diagnostic('EMEVD_DSL_ANCHOR_PRECONDITION_FAILED', decoded.message, instructionPatch.span, {
+      resourceUri,
+      targetAnchor: instructionPatch.anchor
+    }));
+    return;
+  }
+  const decodedByName = new Map(decoded.args.map((arg) => [arg.name, arg]));
+  const seenArgs = new Set<string>();
+  for (const operation of instructionPatch.operations) {
+    if (seenArgs.has(operation.argument)) {
+      add(diagnostic('EMEVD_DSL_DUPLICATE_ARGUMENT', `Duplicate argument ${operation.argument}.`, operation.span, {
+        resourceUri,
+        targetAnchor: instructionPatch.anchor
+      }));
+      continue;
+    }
+    seenArgs.add(operation.argument);
+    const argDef = definition.args.find((arg) => arg.name === operation.argument);
+    const before = decodedByName.get(operation.argument);
+    if (!argDef || !before) {
+      add(diagnostic('EMEVD_DSL_UNKNOWN_ARGUMENT', `Unknown argument ${operation.argument}.`, operation.span, {
+        resourceUri,
+        targetAnchor: instructionPatch.anchor
+      }));
+      continue;
+    }
+    const valueError = validateTypedLiteral(argDef.type, operation.value);
+    if (valueError) {
+      add(diagnostic(valueError.code, valueError.message, operation.span, {
+        resourceUri,
+        targetAnchor: instructionPatch.anchor
+      }));
+      continue;
+    }
+    if (!Object.is(before.value, operation.value)) {
+      operations.push({
+        kind: 'set_instruction_arg',
+        eventAnchor,
+        instructionAnchor: instructionPatch.anchor,
+        target: instruction.anchor!,
+        targetPreconditionHash: computeEmevdInstructionFingerprint(instruction),
+        sourceSpan: operation.span,
+        bank: instruction.bank,
+        id: instruction.id,
+        argument: operation.argument,
+        before: before.value,
+        after: operation.value
+      });
+    }
+  }
+}
+
 function normalizeAstForFingerprint(ast: EmevdDslDocument): unknown {
   return {
     schemaVersion: ast.schemaVersion,
@@ -360,6 +423,14 @@ function normalizeAstForFingerprint(ast: EmevdDslDocument): unknown {
           argument: operation.argument,
           value: operation.value
         }))
+      }))
+    })),
+    topLevelInstructions: (ast.topLevelInstructions ?? []).map((instruction) => ({
+      anchor: instruction.anchor,
+      operations: instruction.operations.map((operation) => ({
+        kind: operation.kind,
+        argument: operation.argument,
+        value: operation.value
       }))
     }))
   };
