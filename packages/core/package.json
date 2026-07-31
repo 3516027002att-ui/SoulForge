@@ -29,6 +29,7 @@
     "test:emevd-plan-commit": "tsc -b ../shared . && node dist/testing/runEmevdPlanCommitSmoke.js",
     "test:emevd-plan-production": "tsc -b ../shared . && node dist/testing/runEmevdPlanCommitProductionSmoke.js",
     "test:emevd-coverage": "tsc -b ../shared . && node dist/testing/runEmevdCoverageSmoke.js",
+    "test:emevd-full-document": "tsc -b ../shared . && node dist/testing/runEmevdFullDocumentSmoke.js",
     "test:flver-candidate": "tsc -b ../shared . && node dist/testing/runFlverCandidateSmoke.js",
     "test:fmg-msb-ipc-contract": "tsc -b ../shared . && node dist/testing/runFmgMsbIpcContractSmoke.js",
     "test:hex-scene": "tsc -b ../shared . && node dist/testing/runHexAndSceneSmoke.js",

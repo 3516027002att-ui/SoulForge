@@ -15,6 +15,7 @@ export * from './editing/hexDocument.js';
 export * from './editing/emevdFourViewController.js';
 export * from './editing/emevdBridgeCommit.js';
 export * from './editing/emevdEnvelopeToDocument.js';
+export * from './editing/emevdFullDocument.js';
 export * from './editing/fmgBridgeCommit.js';
 export * from './editing/paramBridgeCommit.js';
 export * from './editing/msbBridgeRead.js';

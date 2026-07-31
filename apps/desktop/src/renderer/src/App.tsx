@@ -181,6 +181,8 @@ export function App(): ReactElement {
   const [emevdDocument, setEmevdDocument] = useState<EmevdEditorDocument>(DEMO_EMEVD_DOCUMENT);
   const [emevdSourceHash, setEmevdSourceHash] = useState<string | null>(null);
   const [emevdLive, setEmevdLive] = useState(false);
+  /** Patch-DSL template from the authoritative full document (main-side). */
+  const [emevdDslTemplate, setEmevdDslTemplate] = useState<string | null>(null);
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
@@ -506,6 +508,21 @@ export function App(): ReactElement {
           `已加载 EMEVD：${result.data.eventCount ?? doc.events.length} 事件 / `
           + `${result.data.instructionCount ?? 0} 指令（authority=${result.data.authority ?? 'unknown'}）`
         );
+        // Load the authoritative full-document DSL template in the background;
+        // renderer never receives the full document itself.
+        if (typeof window.soulforge.readEmevdFullDocument === 'function') {
+          const full = await window.soulforge.readEmevdFullDocument(
+            target.sourceUri,
+            `renderer-${target.sourceUri}-${Date.now()}`
+          );
+          if (cancelled) return;
+          if (full?.ok && full.dslTemplate) {
+            setEmevdDslTemplate(full.dslTemplate);
+          } else {
+            setEmevdDslTemplate(null);
+            setStatus(full?.diagnostics?.[0]?.message ?? '完整文档 DSL 模板加载失败；DSL 视图保持只读。');
+          }
+        }
       } catch (error) {
         if (cancelled) return;
         setEmevdLive(false);
@@ -1017,6 +1034,52 @@ export function App(): ReactElement {
               <EmevdFourViewPanel
                 key={`${emevdDocument.resourceUri}:${emevdDocument.revision}:${emevdLive ? 'live' : 'demo'}`}
                 initialDocument={emevdDocument}
+                {...(emevdDslTemplate !== null ? { dslTemplate: emevdDslTemplate } : {})}
+                onDslSubmit={async (sourceText) => {
+                  if (!emevdLive || !selectedFile) {
+                    return {
+                      ok: false,
+                      diagnostics: [{ severity: 'error', code: 'EMEVD_DSL_NO_LIVE_DOCUMENT', message: '需要实时 EMEVD 文档才能提交 DSL。' }]
+                    };
+                  }
+                  if (typeof window.soulforge.submitEmevdDslPlan !== 'function') {
+                    return {
+                      ok: false,
+                      diagnostics: [{ severity: 'error', code: 'PRELOAD_MISSING', message: '当前预加载未暴露 submitEmevdDslPlan。' }]
+                    };
+                  }
+                  const result = await window.soulforge.submitEmevdDslPlan(selectedFile.sourceUri, sourceText);
+                  if (result.ok) {
+                    const reload = await window.soulforge.readEmevdFullDocument(
+                      selectedFile.sourceUri,
+                      `renderer-${selectedFile.sourceUri}-${Date.now()}`
+                    );
+                    if (reload?.ok && reload.dslTemplate) {
+                      setEmevdDslTemplate(reload.dslTemplate);
+                      if (reload.sourceHash) setEmevdSourceHash(reload.sourceHash);
+                      const refreshed = await window.soulforge.readEmevdDocument(selectedFile.sourceUri) as {
+                        ok?: boolean;
+                        data?: BridgeEmevdEnvelopeLike | null;
+                      };
+                      if (refreshed?.ok && refreshed.data) {
+                        setEmevdDocument(mapEmevdEnvelopeToDocument(selectedFile.sourceUri, refreshed.data, { maxEvents: 128 }));
+                      }
+                      return {
+                        ok: true,
+                        diagnostics: result.diagnostics ?? [],
+                        nextDslTemplate: reload.dslTemplate
+                      };
+                    }
+                  }
+                  return {
+                    ok: result.ok,
+                    diagnostics: result.diagnostics ?? [{
+                      severity: 'error',
+                      code: 'EMEVD_DSL_SUBMIT_FAILED',
+                      message: 'DSL 提交失败。'
+                    }]
+                  };
+                }}
                 onStructuredMutation={(mutation) => {
                   void (async () => {
                     if (!emevdLive || !emevdSourceHash || !selectedFile) {

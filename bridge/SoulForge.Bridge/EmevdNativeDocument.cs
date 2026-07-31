@@ -635,13 +635,19 @@ internal sealed class EmevdNativeDocument
         throw new InvalidDataException($"EMEVD 指令索引 {globalIndex} 越界。");
     }
 
-    public object ToEnvelope(EmevdRoundTripReport? report = null)
+    public object ToEnvelope(EmevdRoundTripReport? report = null, int page = 0, int pageSize = 256)
     {
         report ??= VerifyRoundTrip();
-        const int sampleLimit = 256;
-        var sample = Instructions.Take(sampleLimit).Select((instr, index) => new
+        if (page < 0 || pageSize < 1) throw new InvalidDataException("EMEVD instruction 分页参数无效。");
+        var instructionTotal = Instructions.Count;
+        var instructionPageCount = instructionTotal == 0 ? 1 : (instructionTotal + pageSize - 1) / pageSize;
+        var pageOffset = checked(page * pageSize);
+        var pageItems = pageOffset < instructionTotal
+            ? Instructions.Skip(pageOffset).Take(pageSize)
+            : Array.Empty<EmevdInstruction>();
+        var sample = pageItems.Select((instr, index) => new
         {
-            index,
+            index = pageOffset + index,
             instr.Bank,
             instr.Id,
             argsLength = instr.Args.Length,
@@ -712,7 +718,11 @@ internal sealed class EmevdNativeDocument
             argumentsLength = ArgumentsLength,
             events,
             instructionsSample = sample,
-            instructionsSampleTruncated = Instructions.Count > sampleLimit,
+            instructionsSampleTruncated = pageOffset + sample.Length < instructionTotal,
+            instructionTotal,
+            instructionPage = page,
+            instructionPageSize = pageSize,
+            instructionPageCount,
             instructionDistribution,
             instructionDistributionTruncated = distribution.Count > distributionLimit,
             roundTrip = report,
