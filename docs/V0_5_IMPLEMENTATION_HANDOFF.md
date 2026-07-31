@@ -219,8 +219,10 @@ SoulForge 可以研究 Smithbox、DSMapStudio、DarkScript3、SoulsFormatsNEXT�
 
 ## 3. 全局技术线路图
 
+V0.5 已按用户裁定收窄为“文本优先”范围：`gameparam` PARAM、FMG/msg、EMEVD 四视图 DSL，加上脚本容器的只读证据视图与整个内层文件替换。MSB、TAE、ESD、资产只读与导出、3D 渲染整体延期至 V0.6。延期不等于完成，也不等于永久排除；已实现的面板保留为标记 V0.6 只读预览，写路径在本版关闭。裁定与延期口径以 §18.2.1 冻结 JSON 为准。
+
 ~~~text
-SoulForge V0.5
+SoulForge V0.5（文本优先）
 │
 ├─ A. 工作区、安全写入与恢复主干
 │  ├─ WorkspaceSession / VFS
@@ -235,32 +237,33 @@ SoulForge V0.5
 │
 ├─ C. 核心语义资源主干
 │  ├─ FMG
-│  ├─ PARAM + Paramdex-compatible metadata
+│  ├─ PARAM（gameparam）+ Paramdex-compatible metadata
 │  ├─ EMEVD + EMEDF
-│  └─ MSB
+│  └─ MSB → 延期 V0.6（只读预览，写路径关闭）
 │
 ├─ D. 行为与动画主干
-│  ├─ TAE / animation events
-│  ├─ ESD / state machines
-│  ├─ animation / behavior references
-│  ├─ Lua / HKS 等脚本资源（以 Sekiro corpus 为准）
-│  └─ PARAM / EMEVD / MSB / action 的跨资源链
+│  ├─ luabnd / action *.hks 脚本容器：条目枚举 + 只读字节码证据 + 整文件替换
+│  ├─ TAE / animation events → 延期 V0.6（只读预览）
+│  ├─ ESD / state machines → 延期 V0.6（只读预览）
+│  ├─ animation / behavior references → 延期 V0.6
+│  └─ 脚本反编译 / 重编译 / typed script mutation → 延期 V0.6
 │
-├─ E. 场景与资产主干
-│  ├─ MSB semantic scene
+├─ E. 场景与资产主干 → 整条延期 V0.6
 │  ├─ FLVER geometry / skeleton / materials
 │  ├─ TPF / DDS textures
 │  ├─ MTD / material resolution
 │  ├─ collision / navigation resources
-│  └─ glTF / GLB / PNG / TGA / DDS 导入与原生转换
+│  └─ glTF / GLB / PNG / TGA / DDS 导出矩阵
 │
-├─ F. 专业编辑器主干
-│  ├─ read-only Hex evidence
-│  ├─ EMEVD 四视图 + 可编译 DSL
-│  ├─ PARAM / metadata workbench
+├─ F. 专业编辑器主干（V0.5 冻结五个）
+│  ├─ read-only Hex evidence（共享只读证据视图）
+│  ├─ BND4 容器
 │  ├─ FMG localization
-│  ├─ MSB 3D editor
-│  └─ patch / reference / history / diagnostics / jobs
+│  ├─ PARAM / metadata workbench
+│  ├─ EMEVD 四视图 + 可编译 DSL
+│  ├─ script 只读证据 + 整个内层文件替换
+│  ├─ patch / reference / history / diagnostics / jobs
+│  └─ msb / tae / esd / flver → 标记 V0.6 只读预览，不计入冻结清单
 │
 ├─ G. AI Agent 主干
 │  ├─ evidence / context broker
@@ -274,9 +277,9 @@ SoulForge V0.5
 │  ├─ game launch / logs / crash diagnostics
 │  ├─ patch-operation linked smoke
 │  ├─ rollback then relaunch
-│  └─ CI / installer / signing / updater
+│  └─ CI / installer / updater（不含代码签名）
 │
-└─ I. 渲染架构主干
+└─ I. 渲染架构主干 → 整条延期 V0.6
    ├─ renderer-independent semantic scene
    ├─ render projection / binary chunks / cache
    ├─ Three.js WebGPU primary backend
@@ -284,7 +287,7 @@ SoulForge V0.5
    └─ future native backend if real benchmarks require it
 ~~~
 
-这些路线存在依赖，但不构成强制的单线程实施顺序。接手者可以在不破坏前置 authority 和写入边界的前提下并行推进。
+这些路线存在依赖，但不构成强制的单线程实施顺序。接手者可以在不破坏前置 authority 和写入边界的前提下并行推进。标注“延期 V0.6”的路线不属于 V0.5 完成条件，也不阻塞 V0.5 完成；继续在这些路线上投入不违规，但不得据此声称 V0.5 范围扩大或 Gate 通过。
 
 ### 3.1 路线依赖与解锁关系
 
@@ -298,13 +301,13 @@ SoulForge V0.5
 | `C-FMG` | FMG | BND4 child access、`A-RECOVERY` | 本地化编辑、文本引用、AI 证据 | 多语言映射可并行 |
 | `C-PARAM` | PARAM | metadata authority、BND4、`A-RECOVERY` | 字段编辑、跨资源引用、行为分析 | metadata 研究可先于 writer |
 | `C-EMEVD` | EMEVD | BND4、EMEDF、`A-RECOVERY` | 四视图写入、DSL、行为链、AI 工具 | DSL parser 可与 layer corpus 研究并行 |
-| `C-MSB` | MSB | native document、`A-RECOVERY` | 完整场景、运行验证、地图引用 | semantic scene 投影可先于完整 writer |
-| `D-BEHAVIOR` | 行为与动画 | Sekiro corpus 范围裁定、A/B 底座 | 招式链、状态机、跨资源行为编辑 | 只读格式地图可与 C/E 并行 |
-| `E-ASSET` | 场景与资产 | BND4、FLVER/TPF/MTD authority | 原生场景只读投影与 native-to-open 导出 | candidate inventory 不解锁 native writer |
-| `F-EDITORS` | 专业编辑器 | 对应 C/D/E semantic/native document | 可用工作台 | 通用交互骨架可并行，不能替代 authority |
+| `C-MSB` | MSB（延期 V0.6） | native document、`A-RECOVERY` | 完整场景、运行验证、地图引用 | V0.5 只保留只读预览，`set_part_transform` 写路径已关闭 |
+| `D-BEHAVIOR` | 行为与动画 | Sekiro corpus 范围裁定、A/B 底座 | 招式链、状态机、跨资源行为编辑 | V0.5 仅脚本容器只读证据 + 整文件替换；TAE/ESD/animation 延期 V0.6 |
+| `E-ASSET` | 场景与资产（延期 V0.6） | BND4、FLVER/TPF/MTD authority | 原生场景只读投影与 native-to-open 导出 | candidate inventory 不解锁 native writer；整条不属于 V0.5 完成条件 |
+| `F-EDITORS` | 专业编辑器 | 对应 C/D semantic/native document | 可用工作台 | V0.5 冻结五个；msb/tae/esd/flver 为标记 V0.6 只读预览 |
 | `G-AGENT` | AI Agent | evidence、typed tools、权限、A 写入主干 | 多步自动任务 | provider adapter 可并行，真实写循环依赖 native validator |
 | `H-RUNTIME` | me3 与发行 | `A-RECOVERY`、可运行 Mod、合法本机环境 | 提交后启动、回滚后复验、发布门禁 | adapter contract 可先做，真实启动需环境 |
-| `I-RENDER` | 渲染 | semantic scene、render projection | 大场景专业编辑 | 后端优化不改变 semantic/native authority |
+| `I-RENDER` | 渲染（延期 V0.6） | semantic scene、render projection | 大场景专业编辑 | 后端优化不改变 semantic/native authority；整条不属于 V0.5 完成条件 |
 
 ### 3.2 Authority 解锁规则
 
@@ -313,6 +316,7 @@ SoulForge V0.5
 - `partial` 只有在作用范围、未知变体和 corpus 覆盖均明确时，才可作为同一范围内下游工作的前置。
 - `native-verified` 只能解锁其声明范围内的生产能力；新布局、新游戏或新容器包装必须重新验证。
 - `blocked` 不阻止无写入的协议、validator、corpus registry 和失败关闭工作，但阻止对应成功路径与发布声明。
+- `deferred`（切片与 Gate 生命周期，非 authority）表示该范围已被用户裁定移出 V0.5、在 V0.6 交付：既不计入 V0.5 完成，也不阻塞 V0.5 完成。`deferred` 不得写成 `passed`，不得用于基础 Gate，不得与 `blockerRefs` 共存，也不得与 `scope-excluded`（永久排除）混用。延期路线上已有的 authority 结论保持原级别不变，不因延期降级，也不因延期升级。
 
 ---
 
@@ -443,7 +447,9 @@ V0.5 冻结目标要求在相同合法 runtime 边界内完成登记 KRAK 布局
 
 状态：`partial`
 
-证据：`EV-C-PARAM-7BD`（historical-record，本轮未重跑私有 corpus）、`EV-PUBLIC-CONTRACTS-20260725`。
+证据：`EV-C-PARAM-7BD`（historical-record，本轮未重跑私有 corpus）、`EV-PUBLIC-CONTRACTS-20260725`、`EV-REL-SCOPE-20260731-TEXT-FIRST`（容器范围收窄裁定）。
+
+V0.5 容器范围已收窄为 `gameparam`；`drawparam` 与 `gparam` 延期至 V0.6，本版不得写入，也不得作为发布能力对外声明。
 
 已有：
 
@@ -470,7 +476,8 @@ V0.5 的批准来源冻结为 Smithbox `2.2.4` 中随官方发行包提供的 Se
 
 - 旧 header-embedded type name 变体；
 - 完整字段级 writer 与引用验证；
-- 全 corpus 与真实游戏验证。
+- `gameparam` 全 corpus 与真实游戏验证；
+- `drawparam` / `gparam`（已延期至 V0.6，不属于 V0.5 缺口口径）。
 
 ### EMEVD
 
@@ -532,9 +539,11 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 
 ### MSB
 
-状态：`partial`
+状态：`partial`（authority 不变）· V0.5 生命周期：`deferred → V0.6`
 
-证据：`EV-C-MSB-SCENE-20260724`（unsealed-record）、`EV-C-MSB-7BD`（historical-record）。
+证据：`EV-C-MSB-SCENE-20260724`（unsealed-record）、`EV-C-MSB-7BD`（historical-record）、`EV-REL-SCOPE-20260731-TEXT-FIRST`（延期裁定）。
+
+MSB 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有能力保留为标记 V0.6 只读预览：`MsbScenePanel` 显示延期标记并隐藏提交入口；`msb` 的能力契约 `releaseWriteEnabled=false`，`editorAllowsMutation` 对 `msb_set_part_position` / `msb_set_part_transform` 一律拒绝；主进程 `resource.applyMsbMutation` 在进入 Patch Engine 之前返回 `EDITOR_DEFERRED_TO_V06_READONLY`。写链实现与 IPC 通道均未删除，V0.6 恢复时只需把 `deferredPreview` 置为 `null`。已达到的 `partial` authority 不因延期降级。
 
 已有：
 
@@ -567,30 +576,38 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 
 状态：`candidate / partial parser coverage`
 
-该路线正式纳入 SoulForge V0.5 冻结范围，不能被场景资产线遮蔽。
+V0.5 范围已收窄为脚本容器一项；TAE、ESD 与 animation/behavior 引用整体延期至 V0.6。
 
-目标能力包括：
+V0.5 仍在范围内（`SCOPE-BEHAVIOR-SCRIPT`）：
 
-- TAE / animation event 文档与时间轴；
-- ESD state machine 查看、编辑和图投影；
-- animation、behavior、event、param、map entity 之间的引用；
-- 角色招式链和动作逻辑；
-- Lua、HKS 或其他 Sekiro 脚本资源的真实格式确认；
-- 与 EMEVD、MSB、PARAM 和资产的跨资源 patch graph。
+- `luabnd` 与 `action/script/*.hks` 容器的条目枚举；
+- 只读字节码/常量池证据投影；
+- 经 Patch Engine 的整个内层文件替换、重读与回滚。
 
-当前已建立登记样本上的 TAE native document parser（939 animations、23,711 events、81 event types）和 ESD native document parser（36 groups、295 states、315 conditions及 RPN bytecode），并有只读工作台投影；这些结果仍是注册样本上的 `candidate`，不证明完整事件语义、全部布局或 writer。
+已延期至 V0.6：
 
-冻结目标要求全部 Sekiro TAE、全部 ESD 以及真实 corpus 中发现的源码/编译脚本具备完整语义读写；当前仍缺 HKX/Lua/编译脚本定位、完整引用图、schema/typecheck、typed mutation、native writer 和真实游戏加载。具体格式必须从合法 corpus、公开格式知识和可验证行为中确认，不得仅凭其他 FromSoftware 游戏的格式列表宣称 Sekiro 支持，也不得执行不受信脚本。
+- TAE / animation event 文档与时间轴（`SCOPE-BEHAVIOR-TAE`）；
+- ESD state machine 查看、编辑和图投影（`SCOPE-BEHAVIOR-ESD`）；
+- animation、behavior、event、param、map entity 之间的引用与角色招式链（`SCOPE-BEHAVIOR-ANIMATION`）；
+- 脚本反编译、重编译与 typed script mutation。
 
-该路线可以与场景资产线并行研究，但任何 writer 都要复用 A 线的 PatchIR 和回滚主干。
+脚本格式实测结论（延期依据，非完成声明）：`action/script/c0000.hks` 与 `aicommon.luabnd.dcx` 内层 `.lua` 均以 `\x1bLuaQ` 开头，属 Havok Script（Lua 5.1 家族）编译字节码，不是可直接编辑的文本；容器内并存 `.luagnl`（全局名表）与 `.luainfo`（函数参数元数据）反编译辅助文件。因此“脚本是易编辑文本”的前提不成立，V0.5 只做只读证据 + 整文件替换。测量方法与原始字节证据见 `EV-REL-SCOPE-20260731-TEXT-FIRST`。
+
+当前已建立登记样本上的 TAE native document parser（939 animations、23,711 events、81 event types）和 ESD native document parser（36 groups、295 states、315 conditions及 RPN bytecode），并有只读工作台投影；这些结果仍是注册样本上的 `candidate`，不证明完整事件语义、全部布局或 writer。两者保留为标记 V0.6 只读预览，authority 级别不因延期变动。
+
+脚本线仍缺：容器条目枚举的生产实现、只读证据投影 UI、整文件替换的 writer/validator 闭环与真实游戏加载。具体格式必须从合法 corpus、公开格式知识和可验证行为中确认，不得仅凭其他 FromSoftware 游戏的格式列表宣称 Sekiro 支持，也不得执行不受信脚本。
+
+任何 writer 都要复用 A 线的 PatchIR 和回滚主干。
 
 ---
 
 ## 8. E 线：场景与资产
 
-状态：`partial / candidate`
+状态：`partial / candidate`（authority 不变）· V0.5 生命周期：`deferred → V0.6`（整条）
 
-证据：`EV-E-ASSET-7BD`（historical-record）及 §13.1 当前 native smoke 记录。
+证据：`EV-E-ASSET-7BD`（historical-record）、§13.1 当前 native smoke 记录、`EV-REL-SCOPE-20260731-TEXT-FIRST`（延期裁定）。
+
+整条资产只读与导出线（`SCOPE-ASSETS`、`SCOPE-ASSET-FLVER`、`SCOPE-ASSET-TPF`、`SCOPE-ASSET-MTD`、`SCOPE-ASSET-COLLISION`、`SCOPE-ASSET-NAVIGATION`、`SCOPE-ASSET-OPEN-CONVERSION`）已延期至 V0.6，对应 Gate `REL-E` 状态为 `deferred`：不计入 V0.5 完成，也不阻塞 V0.5 完成。已有的 FLVER/TPF 只读面板保留为标记 V0.6 只读预览，authority 级别不因延期变动。
 
 已有：
 
@@ -613,7 +630,7 @@ DSL 不得直接生成或覆盖二进制；未知字段仍由 lossless native do
 - 大型真实场景性能和显存管理；
 - 真实游戏加载验证。
 
-V0.5 明确排除开放格式到 FLVER/TPF/MTD 的 native 导入与所有五类资产 writer；现有 asset import/file_replace candidate 不得作为发布能力。未来若要恢复 native 导入，必须重新打开范围裁定。行为与动画路线继续作为同等级主线推进。
+开放格式到 FLVER/TPF/MTD 的 native 导入与所有五类资产 writer 仍是永久排除项（不是延期项）：现有 asset import/file_replace candidate 不得作为发布能力，未来若要恢复 native 导入，必须重新打开范围裁定。与之不同，本条资产只读与导出线属于 `deferred`，V0.6 仍会交付，两者不可混用。
 
 ---
 
@@ -630,11 +647,9 @@ V0.5 明确排除开放格式到 FLVER/TPF/MTD 的 native 导入与所有五类�
 - EMEVD 四视图；
 - PARAM / ParamDef 面板；
 - FMG 工作台；
-- MSB 3D 代理场景和位置微调；
-- TAE / ESD 只读 native document 工作台；
-- FLVER 只读资产查看器（属于资产线，不计入冻结的八个语义编辑器）；
 - jobs、history、patch impact、diagnostics 投影；
-- 简体中文界面和术语扫描。
+- 简体中文界面和术语扫描；
+- 标记 V0.6 只读预览：MSB 3D 代理场景（位置微调入口已在本版关闭）、TAE / ESD 只读 native document 工作台、FLVER 只读资产查看器。以上四项不计入 V0.5 冻结清单。
 
 长期要求：
 
@@ -647,9 +662,11 @@ V0.5 明确排除开放格式到 FLVER/TPF/MTD 的 native 导入与所有五类�
 - EMEVD DSL 最终可编译为 typed mutation；
 - 行为、动画和资产编辑器逐渐接入同一工作台。
 
-V0.5 冻结交付清单为 BND4、FMG、PARAM、EMEVD、MSB、TAE、ESD、脚本八个语义编辑器。每个编辑器必须同时提供结构化界面和规范 DSL，并共享同一 Bridge native document、revision、selection 与 typed mutation；没有完整 parser/schema/typecheck/native writer 的资源不得编辑。Hex 只允许作为只读偏移与原始字节证据视图，不能形成 raw write 或绕过 native authority。
+V0.5 冻结交付清单已收窄为 BND4、FMG、PARAM、EMEVD、script 五个编辑器。前四个为 typed mutation 编辑器，必须同时提供结构化界面和规范 DSL，并共享同一 Bridge native document、revision、selection 与 typed mutation；没有完整 parser/schema/typecheck/native writer 的资源不得编辑。script 编辑器只提供只读证据视图与整个内层文件替换，不属于 typed mutation，不得对外表述为脚本源码编辑。Hex 只允许作为只读偏移与原始字节证据视图，不能形成 raw write 或绕过 native authority。
 
-当前 inventory contract 已精确登记这八项，但 BND4 与脚本编辑器尚无对应工作台；TAE/ESD 只有只读投影，尚无 schema/typecheck、typed mutation 和 writer；其余编辑器也只能按各自当前 native authority 开放实际已验证操作。inventory 登记不等于八个编辑器完成。
+msb、tae、esd、flver 已延期至 V0.6，保留为标记只读预览：不计入冻结清单、不得暴露写路径。该边界由三处同源约束共同保证——`EDITOR_CAPABILITY_CONTRACTS` 的 `releaseWriteEnabled=false`、`@soulforge/shared` 的 `DEFERRED_PREVIEW_EDITOR_KINDS`（renderer 打标来源）、以及 `runReleaseEditorAcceptanceSmoke` 中断言两者一致并逐项拒绝 mutation 的负向检查。
+
+当前 inventory contract 已精确登记这五项，但 BND4 与 script 编辑器尚无对应工作台；其余编辑器只能按各自当前 native authority 开放实际已验证操作。inventory 登记不等于五个编辑器完成。规模访问缺口仍在：`bnd4` 与 `script` 为 `none`，`fmg` 与 `param` 为 `bounded-window`，只有 `emevd` 已达 `pagination`。
 
 ---
 
@@ -761,9 +778,13 @@ V0.5 发行边界冻结为 Windows 10/11 x64 的 NSIS，仅限项目所有者控
 
 ## 12. I 线：渲染架构
 
-状态：`partial / functional validation open`。
+状态：`partial / functional validation open`（authority 不变）· V0.5 生命周期：`deferred → V0.6`（整条）
 
-证据：`EV-I-RENDER-7BD`（historical-record）及 §13.1 当前 renderer smoke。shared semantic scene/render packet、WebGPU capability detection、`three/webgpu` 按需主路径、WebGL2 fallback 构造和 FLVER 只读 3D 查看器已经进入 production bundle；当前仍以登记 FLVER/代理场景和 contract smoke 为主，没有所有者机器完整 fallback/resource-lifecycle 功能证据，也不要求真实大地图性能 authority。
+证据：`EV-I-RENDER-7BD`（historical-record）、§13.1 当前 renderer smoke、`EV-REL-SCOPE-20260731-TEXT-FIRST`（延期裁定）。
+
+整条 3D 渲染线（`SCOPE-RENDERING`）已延期至 V0.6，对应 Gate `REL-I` 状态为 `deferred`：不计入 V0.5 完成，也不阻塞 V0.5 完成。shared semantic scene/render packet、WebGPU capability detection、`three/webgpu` 按需主路径、WebGL2 fallback 构造和 FLVER 只读 3D 查看器已经进入 production bundle，保留为标记 V0.6 只读预览；当前仍以登记 FLVER/代理场景和 contract smoke 为主，没有所有者机器完整 fallback/resource-lifecycle 功能证据，也不要求真实大地图性能 authority。已达到的 `partial` authority 不因延期降级。
+
+下述目标架构与接口是 V0.6 的技术路线记录，保留在此以免 V0.6 重新设计；它们不构成 V0.5 的交付项或验收项。
 
 ### 裁定
 
@@ -914,25 +935,27 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 | `W-EMEVD-PATCHIR-02` | `completed` | `partial` | — | `C-EMEVD` | production 接线完成：`submitEmevdDslPlanViaFourView` / `commitEmevdPlanViaPatchEngine` 把 DSL typed plan 经 `stageEmevdPlanViaBridge`（Bridge batch staging）→ `buildEmevdFileReplacePatch`（file_replace PatchIR + hash 前置条件）→ `executePatchIrThroughTransaction` 提交，并做 Bridge 独立重读；合成 3 case（成功链/回滚链/失败链）与真实 common.emevd 事件级 mutation 1 case 均通过 | `W-EMEVD-DSL-01` 已完成；未知指令、opaque 尾部和 layer 变体不得被重编码；真实文档既有重复事件 id 容忍但不修改 | `packages/core/src/editing/emevdPlanCommit.ts`、`packages/core/src/editing/emevdFourViewController.ts`、`packages/core/src/editing/emevdBridgeCommit.ts`、`packages/core/src/testing/runEmevdPlanCommitProductionSmoke.ts`、`bridge/SoulForge.Bridge/EmevdNativeWriter.cs` | `npm run test:emevd-plan-commit`、`npm run test:emevd-plan-production`、`npm run bridge:verify:emevd`（四元组见 §13.4） | cap=`partial`；production smoke 不证明完整 EMEDF/layer/游戏加载 |
 | `W-EMEVD-FULL-01` | `ready` | `partial` | — | `C-EMEVD` | 已建立真实 corpus 指令分布提取与 EMEDF 覆盖分析基线（`read-emevd-document` 聚合分布 + `analyzeEmedfCoverage` 长度一致性校验，真实 142 种/33,266 条，fixture 覆盖 1 种）；**DSL 顶层 `instruction` 块已实现**（全局指令级 typed mutation：不依赖事件包裹，经稳定指令身份解析到所属事件，与事件内写法产生相同计划操作；跨作用域重复写被共享注册表拦截）；**完整文档分页组装与四视图 DSL 提交 UI 接线已完成**（Bridge 分页 envelope → `readFullEmevdDocumentViaBridge` 连续性/总数/事件切片校验 + DCX 直读解压产物复用为 staging 源；desktop main 持有权威完整文档缓存 `emevdFullDocuments`、renderer 仅编辑 DSL 文本；`resource.submitEmevdDslPlan` 提交前重读 fresh 文档保证 revision 一致，经 `submitEmevdDslPlanViaFourView` production 写链提交并刷新缓存）；继续完整 Sekiro EMEDF schema 与类型覆盖（分布只有长度签名；成熟公开项目调查、许可证审计和 external-only adapter 由工程方完成）、DSL control-flow validation 与全 corpus mutation 矩阵 | `W-EMEVD-PATCHIR-02` 已完成 production 接线；未知指令、opaque 尾部和 layer 变体不得被重编码；真实文档既有重复事件 id 容忍但不修改；同 bank:id 多长度变体必须按长度签名区分，不得编造参数类型；无合法类型源时保持 opaque/partial 并继续其他工程切片，不能转成用户介入项 | `packages/core/src/emevd/emedfSchema.ts`、`packages/core/src/emevd/emedfCoverage.ts`、`packages/core/src/emevd/dslCompiler.ts`、`packages/core/src/editing/emevdFourViewController.ts`、`packages/core/src/editing/emevdFullDocument.ts`、`packages/core/src/util/dcxDflt.ts`、`apps/desktop/src/main/ipc.ts`、`apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx`、`bridge/SoulForge.Bridge/EmevdNativeDocument.cs` | `npm run test:emevd-dsl-compiler`、`npm run test:emedf-schema`、`npm run test:emevd-plan-production`、`npm run test:emevd-coverage`、`npm run test:emevd-full-document`、`npm run test:emevd-ipc-contract`；`validation-unfrozen`：完整 EMEDF schema 覆盖与 control-flow smoke | cap=`partial`；只提升实际完成并验证的 schema/类型/接线 |
 | `W-EMEVD-LAYER-01` | `completed` | `partial` | — | `C-EMEVD` | Bridge 已支持 layerCount != 0 的 EMEVD 只读解析（移除 throw，暴露 layerCount/layersOffset）；GC 重建保持拒绝；corpus 43/43 文件无 layer 样本（fail-closed） | 仓库外 corpus root/registry 已可用；工程方负责继续发现和登记目标样本 | `bridge/SoulForge.Bridge/EmevdNativeDocument.cs` | `npm run bridge:verify:emevd` | cap=`partial`；仅声明实际覆盖到的 layer 变体 |
-| `W-MSB-SCENE-01` | `completed` | `partial` | — | `C-MSB` / `I-RENDER` | 已建立 shared schema v2 semantic scene/render packet、四类 Bridge preview、稳定 identity/revision、chunk、路径防线和 production canvas/picking；本切片验收边界已完成 | entity identity 与 revision 稳定；renderer 无绝对路径 | `packages/shared/src/scene-ir.ts`、`packages/core/src/editing/msbBridgeRead.ts`、`apps/desktop/src/renderer/src/scene/threeSceneController.ts` | `npm run bridge:verify:msb`、`npm run test:scene-draw-list`、`npm run test:three-scene-module` | cap=`partial`；完整实体流式投影、writer、FLVER 或游戏加载进入后继切片 |
-| `W-BEHAVIOR-MAP-01` | `ready` | `candidate` | — | `D-BEHAVIOR` | 已构建 TAE native document parser（939 anims, 23711 events, 81 event types）和 ESD native document parser（36 groups, 295 states, 315 conditions, RPN bytecode）；新增 `probe:behavior-headers` 本机研究工具（anibnd/behbnd/luabnd/talkesdbnd 容器扩展名分布与 HKX/Lua/ESD 头部观察，环境缺失失败关闭）；继续 HKX/Lua 完整语义定位 | 合法 Sekiro corpus root/registry 已可用；不得套用其他游戏结论或把扩展名计数当 parser；探针输出不提交、不提升 authority | `bridge/SoulForge.Bridge/TaeNativeDocument.cs`、`bridge/SoulForge.Bridge/EsdNativeDocument.cs`、`packages/core/src/testing/probeBehaviorHeaders.ts`、Bridge inspection | `npm run bridge:verify:tae`、`npm run bridge:verify:esd`；`validation-unfrozen`：magic/reference inventory smoke | cap=`candidate`；仅覆盖注册样本的 native document 结构与容器级 inventory，不证明完整事件语义或 writer |
-| `W-FLVER-READ-01` | `ready` | `partial` | — | `E-ASSET` | 已构建 FLVER native document parser（346 bones, 36 materials, 44 meshes, 182K faces, byte-identical roundtrip）和 TPF native document parser（16 textures, BC1/BC4/BC5）；新增 MTD 只读 XML 结构投影 `MtdNativeDocument`（candidate，DTD/外部实体拒绝、大小/元素上限、重复解析一致性验证）与 `read-mtd-document` / `inventory-asset-resources`（容器级资产类别 inventory，脱敏）Bridge 命令；继续 collision/navigation 定位 | 合法 corpus root/registry 已可用；布局冲突失败关闭；内层扩展名计数不构成 native document；MTD 语义读取不构成 native authority | `bridge/SoulForge.Bridge/FlverNativeDocument.cs`、`bridge/SoulForge.Bridge/TpfNativeDocument.cs`、`bridge/SoulForge.Bridge/MtdNativeDocument.cs`、`bridge/SoulForge.Bridge/BridgeCommandService.cs` | `npm run bridge:verify:flver`、`npm run bridge:verify:tpf`、`npm run bridge:build` | cap=`partial`；当前只读覆盖为 partial（MTD 为 candidate），不开放 native writer |
+| `W-MSB-SCENE-01` | `deferred` | `partial` | — | `C-MSB` / `I-RENDER` | 已建立 shared schema v2 semantic scene/render packet、四类 Bridge preview、稳定 identity/revision、chunk、路径防线和 production canvas/picking，且 `msb_set_part_transform` typed mutation 曾经真实 MSB 验证通过；文本优先裁定后 MSB 与渲染线延期 V0.6，本切片成果保留为标记只读预览，`releaseWriteEnabled=false` 关闭写路径 | entity identity 与 revision 稳定；renderer 无绝对路径；延期期间不得开放任何 MSB 写入（contract / shared 清单 / 主进程 IPC 三层失败关闭）；已验证的 `mutationKinds` 记录不删除，V0.6 恢复只需翻回标记 | `packages/shared/src/scene-ir.ts`、`packages/core/src/editing/msbBridgeRead.ts`、`apps/desktop/src/renderer/src/scene/threeSceneController.ts` | `npm run bridge:verify:msb`、`npm run test:scene-draw-list`、`npm run test:three-scene-module` | cap=`partial`；完整实体流式投影、writer、FLVER 或游戏加载进入后继切片 |
+| `W-BEHAVIOR-MAP-01` | `ready` | `candidate` | — | `D-BEHAVIOR` | 文本优先裁定后本切片范围收窄为 script 容器（luabnd / action `*.hks`）的 magic/reference inventory：`probe:behavior-headers` 本机研究工具已观察容器扩展名分布与 HKX/Lua/ESD 头部，并确证 `.hks`/`.lua` 内层为 `\x1bLuaQ` 编译字节码（非文本源码），故 V0.5 只做只读证据视图；TAE/ESD native document parser（939 anims / 23711 events / 81 event types；36 groups / 295 states / 315 conditions / RPN bytecode）已存在但随 TAE/ESD 一并延期 V0.6 | 合法 Sekiro corpus root/registry 已可用；不得套用其他游戏结论或把扩展名计数当 parser；探针输出不提交、不提升 authority；不得把字节码反汇编呈现为可编辑源码 | `packages/core/src/testing/probeBehaviorHeaders.ts`、`bridge/SoulForge.Bridge/TaeNativeDocument.cs`（延期）、`bridge/SoulForge.Bridge/EsdNativeDocument.cs`（延期）、Bridge inspection | `npm run bridge:verify:tae`、`npm run bridge:verify:esd`；`validation-unfrozen`：script 容器 magic/reference inventory smoke | cap=`candidate`；仅覆盖注册样本的容器级 inventory 与字节码格式识别，不证明脚本语义、反编译、重编译或 writer |
+| `W-FLVER-READ-01` | `deferred` | `partial` | — | `E-ASSET` | 已构建 FLVER native document parser（346 bones, 36 materials, 44 meshes, 182K faces, byte-identical roundtrip）和 TPF native document parser（16 textures, BC1/BC4/BC5）；新增 MTD 只读 XML 结构投影 `MtdNativeDocument`（candidate，DTD/外部实体拒绝、大小/元素上限、重复解析一致性验证）与 `read-mtd-document` / `inventory-asset-resources`（容器级资产类别 inventory，脱敏）Bridge 命令；继续 collision/navigation 定位 | 合法 corpus root/registry 已可用；布局冲突失败关闭；内层扩展名计数不构成 native document；MTD 语义读取不构成 native authority | `bridge/SoulForge.Bridge/FlverNativeDocument.cs`、`bridge/SoulForge.Bridge/TpfNativeDocument.cs`、`bridge/SoulForge.Bridge/MtdNativeDocument.cs`、`bridge/SoulForge.Bridge/BridgeCommandService.cs` | `npm run bridge:verify:flver`、`npm run bridge:verify:tpf`、`npm run bridge:build` | cap=`partial`；当前只读覆盖为 partial（MTD 为 candidate），不开放 native writer |
 | `W-AI-REAL-01` | `superseded` | `unverified` | — | `G-AGENT` | 历史切片原要求两类真实 provider 凭据和人工 live smoke；用户已裁定真实账号/凭据不属于 V0.5 验收，默认配置留空 | 由 `W-AI-CONFORMANCE-02` 取代；不得把取消 live smoke 写成 provider adapter 已完成 | `packages/core/src/model-services`、`apps/desktop/src/main/modelServiceCredentials.ts` | 历史验收不再执行 | cap=`unverified`；不产生功能 authority |
 | `W-AI-CONFORMANCE-02` | `completed` | `partial` | — | `G-AGENT` | 已完成双协议错误分类（6 种错误码：TIMEOUT/NETWORK/RATE_LIMITED/SERVER/AUTH/PARSE）、AbortSignal 超时、agent loop 取消/限额、10 case conformance smoke | 不内置 endpoint/key；写工具仍需 native validator/Patch Engine；真实服务账号不属于 V0.5 验收 | `packages/core/src/model-services/errorClassification.ts`、`packages/core/src/model-services`、`packages/core/src/testing/runAiConformanceSmoke.ts` | `npm run test:ai-conformance`、`npm run test:ai-fake-loop`、`npm run test:openai-responses`、`npm run test:model-service-configuration` | cap=`partial`；离线 conformance 不证明第三方服务可用性或 native mutation authority |
 | `W-ME3-ADAPTER-01` | `completed` | `fixture-confirmed` | — | `H-RUNTIME` | 已定义 renderer-independent `GameRuntimeAdapter`、contract-only me3 detect、精确版本 policy、闭集 gateway DTO、超时/取消/竞态、输出上限、异常脱敏和未实现操作失败关闭 | 不实现 Mod loader；不发现或启动真实 me3/Sekiro；匹配 fixture 仍不得启用 profile/launch | `packages/core/src/runtime/gameRuntimeAdapter.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、`packages/core/src/testing/runMe3RuntimeAdapterSmoke.ts` | `npm run test:me3-runtime-adapter` | cap=`fixture-confirmed`；adapter contract only，native runtime authority=false |
 | `W-ME3-MAIN-DETECT-02` | `completed` | `fixture-confirmed` | — | `H-RUNTIME` | desktop main 已实现固定工具槽、固定 `--version` 的 privileged detection gateway，并把脱敏结果接入 core adapter/IPC/preload；真实 0.12.1 probe 保持 `exit-zero-unverified` | `W-ME3-ADAPTER-01` 已完成；main 独占真实路径与进程权限；本切片不启动游戏 | `apps/desktop/src/main/me3RuntimeGateway.ts`、`apps/desktop/src/main/ipc.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts` | `npm run test:me3-runtime-gateway`、`npm run test:desktop-security`、`npm run test:me3-runtime-adapter` | cap=`fixture-confirmed`；只证明受限 production detection gateway，不证明 runtime 会话可用 |
 | `W-ME3-PROFILE-03` | `completed` | `fixture-confirmed` | — | `H-RUNTIME` | 已实现 profile 创建（me3 profile create -g sekiro）、launch（me3 launch -d）、diagnostics、terminate（taskkill /T /F）；gateway 扩展 createProfile/launchGame/terminateProcess；IPC 四通道；25 case smoke 通过 | `W-ME3-MAIN-DETECT-02` 已完成；不得只凭版本字符串或 exit 0 启用；所有路径/PID/argv 继续 main-only | `apps/desktop/src/main/me3RuntimeGateway.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、`apps/desktop/src/main/ipc.ts` | `npm run test:me3-runtime-adapter`、`npm run test:me3-runtime-gateway` | cap=`partial`；只提升实际完成且重读/回滚验证的运行操作 |
 | `W-RENDER-BENCH-01` | `superseded` | `unverified` | — | `I-RENDER` | 历史切片原要求代表性硬件/地图与量化性能基线；用户已裁定其不属于 V0.5 验收 | 由 `W-RENDER-FUNCTIONAL-02` 取代；性能优化可独立推进但不得恢复为隐含 Gate | `packages/core/src/scene`、`apps/desktop/src/renderer/src/scene` | 历史验收不再执行 | cap=`unverified`；不产生渲染 authority |
-| `W-RENDER-FUNCTIONAL-02` | `ready` | `partial` | — | `I-RENDER` | WebGPU 检测已实现（adapter info + capability report）；WebGPU-first 渲染器已集成到 threeSceneController（three/webgpu 按需加载 + WebGL2 回退 + rendererBackend 报告）；继续真实 FLVER 渲染、picking、transform 更新与资源释放功能闭环 | 真实 native semantic scene/FLVER projection；不要求代表性硬件档位、地图集合、性能预算或 benchmark threshold | `packages/core/src/scene`、`apps/desktop/src/renderer/src/scene/threeSceneController.ts`、`webgpuDetect.ts` | `npm run test:scene-draw-list`、`npm run test:three-scene-module`；`validation-unfrozen`：WebGPU/WebGL2 functional fallback smoke | cap=`partial`；只证明已覆盖的 renderer contract，不外推所有者机器功能闭环、性能或硬件兼容矩阵 |
+| `W-RENDER-FUNCTIONAL-02` | `deferred` | `partial` | — | `I-RENDER` | WebGPU 检测已实现（adapter info + capability report）；WebGPU-first 渲染器已集成到 threeSceneController（three/webgpu 按需加载 + WebGL2 回退 + rendererBackend 报告）；继续真实 FLVER 渲染、picking、transform 更新与资源释放功能闭环 | 真实 native semantic scene/FLVER projection；不要求代表性硬件档位、地图集合、性能预算或 benchmark threshold | `packages/core/src/scene`、`apps/desktop/src/renderer/src/scene/threeSceneController.ts`、`webgpuDetect.ts` | `npm run test:scene-draw-list`、`npm run test:three-scene-module`；`validation-unfrozen`：WebGPU/WebGL2 functional fallback smoke | cap=`partial`；只证明已覆盖的 renderer contract，不外推所有者机器功能闭环、性能或硬件兼容矩阵 |
 | `W-REL-SCOPE-01` | `completed` | `unverified` | — | `REL-SCOPE` | 已产出唯一、可 JSON 解析且覆盖 11 个 Gate 的 V0.5 支持范围提案；artifact validation 为 `proposal-valid`，用户裁定仍开放 | 只综合现有证据；私有 fixture registry 不得冒充 release corpus；不擅自裁定范围值 | 本文 §4~§12 与 §18.1~§18.2.1；`scripts/verify-release-scope.mjs` | `npm run test:release-scope-proposal` exit 0；严格模式必须因待用户裁定 exit 1 | cap=`unverified`；提案合法不等于范围获批或 Gate 完成 |
 | `W-REL-SCOPE-RULING-01` | `completed` | `unverified` | — | `REL-SCOPE` | 用户已逐项批准 §18.2.1 的 27 项支持矩阵、Sekiro 1.6 版本族、八个语义编辑器、只读 Hex、所有者内部测试构建与 unsupported 边界；严格范围门禁和 sealed Evidence 已完成 | `W-REL-SCOPE-01` 已完成；批准记录使用脱敏 decisionRef；技术缺口继续由后继 Gate/blocker 失败关闭 | 本文 §18.2.1、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只完成范围 Gate，不提升任何功能 authority |
 | `W-REL-SCOPE-RULING-02` | `completed` | `unverified` | — | `REL-SCOPE` | 用户撤销代码签名验收项；V0.5 当前发行目标为 Windows 10/11 x64 NSIS，仅限项目所有者控制的内部测试机器，允许未签名且仍强制 manifest/hash、内容扫描、安装、升级、卸载和 runtime 完整性验证 | `W-REL-SCOPE-RULING-01` 已完成；只修改签名要求，portable、自动更新和外部分发仍为 unsupported | 本文 §11、§18.1、§18.2.1、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730-UNSIGNED` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只更新范围 Gate，不提升任何功能或发行 authority |
 | `W-REL-SCOPE-RULING-03` | `completed` | `unverified` | — | `REL-SCOPE` | 用户批准固定 Smithbox 2.2.4 本机 PARAM metadata 导入，并明确真实模型凭据留空、代表性渲染硬件/性能预算不属于 V0.5 验收；me3 环境由工程方处理 | `W-REL-SCOPE-RULING-02` 已完成；保持双协议 AI、WebGPU/WebGL2 功能与 me3 运行目标，不把取消外部输入写成能力完成 | 本文 §6、§10~§12、§18.1~§18.4、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只更新范围与责任边界，不提升 PARAM/AI/runtime/render authority |
 | `W-REL-SCOPE-RULING-04` | `completed` | `unverified` | — | `REL-SCOPE` | 用户明确删除编辑器容量/延迟门槛和 installer 体积/耗时预算；V0.5 只验收完整有界访问与安装/升级/卸载正确性 | `W-REL-SCOPE-RULING-03` 已完成；不得借取消量化预算删除分页/虚拟化/分块/流式访问、manifest/hash 或 installer lifecycle 完整性 | 本文 §13.1、§18.1~§18.4、`releaseEditorAcceptance.ts`、`scripts/verify-release-scope.mjs`、`EV-REL-SCOPE-20260730-NO-QUANT-BUDGETS` | `npm run test:release-editor-acceptance`、`npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:handoff-integrity` | cap=`unverified`；只删除两个量化验收条件，不提升编辑器、installer 或其他功能 authority |
+| `W-REL-SCOPE-RULING-05` | `completed` | `unverified` | — | `REL-SCOPE` | 用户裁定 V0.5 收窄为文本优先并提前发布：保留 BND4/FMG/PARAM(gameparam)/EMEVD/script 五个编辑器；MSB、TAE、ESD、FLVER/资产线与 3D 渲染线延期 V0.6 并保留为标记只读预览；script/action 因内层为 `\x1bLuaQ` 编译字节码而降为只读 + 整内层文件替换；drawparam/gparam 延期 V0.6。新增 `deferred`/`deferred-v0.6` 一等状态与配套门禁不变量，使延期与 `scope-excluded`（会强制 `passed`）严格区分 | `W-REL-SCOPE-RULING-04` 已完成；延期不得写成 `passed`、`scope-excluded` 或 `completed`；延期预览编辑器不计入发布编辑器数且必须只读；已实现且已验证的 MSB typed mutation 记录不删除，只关闭 `releaseWriteEnabled` | 本文 §3、§6~§9、§12、§13.1、§13.4、§18.1~§18.4、`scripts/verify-release-scope.mjs`、`scripts/handoff-integrity-lib.mjs`、`packages/core/src/editing/editorCapabilityContract.ts`、`packages/shared/src/editor-protocol.ts`、`apps/desktop/src/main/ipc.ts`、`EV-REL-SCOPE-20260731-TEXT-FIRST` | `npm run test:release-scope-fixtures`、`npm run test:release-scope-proposal`、`npm run test:release-scope`、`npm run test:release-editor-acceptance`、`npm run test:handoff-integrity`、`npm run typecheck`、`npm test`、`npm run build` | cap=`unverified`；只完成范围裁定与延期机制，不提升任何功能 authority，也不因延期声明任何 Gate 完成 |
+| `W-SCRIPT-READONLY-01` | `ready` | `candidate` | — | `D-BEHAVIOR` / `F-EDITORS` | script 编辑器按只读 + 整内层文件替换接线：容器条目枚举、`\x1bLuaQ` 字节码只读证据视图、`.luagnl` 全局名表与 `.luainfo` 函数参数元数据识别；写入只经 Patch Engine 的整内层文件替换（`whole-inner-file-replacement`），不做反编译/重编译/typed mutation | `W-BEHAVIOR-MAP-01` 的容器 inventory 为前置；不得反编译或重编译字节码，不得把反汇编呈现为可编辑源码；替换字节必须由用户提供，SoulForge 不生成字节码；写入仍须走 stage/validate/commit/backup/re-read 与失败回滚 | `packages/core/src/editing/editorCapabilityContract.ts`、`packages/core/src/testing/probeBehaviorHeaders.ts`、`packages/core/src/writers/containerChildReplaceWriter.ts` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract`；`validation-unfrozen`：script 整内层文件替换的真实容器写/重读/回滚 smoke | cap=`candidate`；只覆盖容器级枚举与只读投影，整文件替换闭环与游戏加载未验证前不得提升 |
 | `W-REL-B-REGISTRY-01` | `completed` | `fixture-confirmed` | — | `REL-B` | 已建立不含私有样本内容的 corpus registry schema、分类枚举、metadata-only classification harness，以及格式/变体/重复/数量/路径/伪装等负向诊断 | 不装载或提交私有 corpus；synthetic manifest 不得冒充 release corpus | `packages/core/src/bridge/releaseCorpusRegistry.ts`、`packages/core/src/testing/runReleaseCorpusRegistrySmoke.ts` | `npm run test:release-corpus-registry`、`npm test` | cap=`fixture-confirmed`；不声明真实发布 corpus 闭环 |
 | `W-REL-B-CORPUS-01` | `completed` | `native-verified` | — | `REL-B` | 已完成 KRAK Oodle Kraken 重压/写回/roundtrip：OodleRuntimeSession.Compress() P/Invoke、DcxNativeDocument.RebuildKrak()、Bnd4NativeWriter 接受 KRAK、TypeScript writer pipeline 接线；真实 talkesdbnd KRAK 容器 rename mutation 验证通过 | 合法 corpus root/locator registry 与 Oodle 已可用；registry schema validity 不授予 native authority | `bridge/SoulForge.Bridge/OodleRuntime.cs`、`bridge/SoulForge.Bridge/DcxNativeDocument.cs`、`bridge/SoulForge.Bridge/Bnd4NativeWriter.cs`、`packages/core/src/writers/containerChildReplaceWriter.ts` | `npm run bridge:verify:oodle`、`npm run test:native-writer-failure-matrix` | cap=`native-verified`；只提升已执行的登记 KRAK writer case，不外推完整 corpus 或 REL-B |
-| `W-REL-F-ACCEPT-01` | `completed` | `candidate` | — | `REL-F` | 已建立冻结八编辑器 inventory、authority/revision/typed mutation、只读 Hex、完整有界访问与提前 pass 失败关闭 harness | 不运行真实 Electron 真实文档功能验收；不以 synthetic/demo、FLVER 资产查看器或固定窗口冒充冻结编辑器完成；不要求量化容量/延迟门槛 | `packages/core/src/editing/releaseEditorAcceptance.ts`、`packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract` | cap=`candidate`；harness 不等于八个编辑器发布通过 |
-| `W-REL-F-SCALE-02` | `ready` | `candidate` | — | `REL-F` | inventory 已精确冻结为 BND4/FMG/PARAM/EMEVD/MSB/TAE/ESD/script；**EMEVD 编辑器规模访问已从 `eager` 提升为 `pagination`**（完整文档分页组装 `readFullEmevdDocumentViaBridge` + DSL 模板行数截断 `renderEmevdPatchDslBounded`（事件块边界截断 + 注释标记，patch no-op 语义安全）+ 事件列表分页每页 200 + `loadFullDslTemplate` 显式完整加载；`currentScaleContractGaps` 不再含 EMEVD，其余 7 个编辑器缺口如实保留）；继续补 BND4 与 script 工作台、TAE/ESD 语义写链、各编辑器 DSL/完整有界访问和 Electron 功能验收 | FLVER 只读查看器属于资产线；Hex 永久只读；当前 `candidate` 只继承 acceptance harness 对缺口的分类；EMEVD `pagination` 只证明规模访问契约（分页组装/模板截断/列表分页），不证明完整语义编辑或真实验收 | `packages/core/src/editing/editorCapabilityContract.ts`、`packages/core/src/editing/emevdFullDocument.ts`、`packages/core/src/emevd/dslRenderer.ts`、`apps/desktop/src/main/ipc.ts`、`apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx`、`apps/desktop/src/renderer/src/App.tsx` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract`、`npm run test:emevd-full-document`、`npm run test:emevd-dsl-compiler`；`validation-unfrozen`：真实文档完整有界访问与 Electron functional smoke | cap=`partial`；只提升实际完成的编辑器功能，不以 inventory 或取消量化门槛代替真实验收 |
+| `W-REL-F-ACCEPT-01` | `completed` | `candidate` | — | `REL-F` | 已建立冻结五编辑器 inventory（BND4/FMG/PARAM/EMEVD/script）、authority/revision/typed mutation、只读 Hex、完整有界访问与提前 pass 失败关闭 harness；harness 同时断言 msb/tae/esd/flver 四个 V0.6 延期预览编辑器在 core 与 shared 两侧一致且写入被拒 | 不运行真实 Electron 真实文档功能验收；不以 synthetic/demo、FLVER 资产查看器或固定窗口冒充冻结编辑器完成；不要求量化容量/延迟门槛；延期预览编辑器不计入发布编辑器数 | `packages/core/src/editing/releaseEditorAcceptance.ts`、`packages/core/src/editing/editorCapabilityContract.ts`、`packages/shared/src/editor-protocol.ts`、`packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract` | cap=`candidate`；harness 不等于五个编辑器发布通过 |
+| `W-REL-F-SCALE-02` | `ready` | `candidate` | — | `REL-F` | inventory 已精确冻结为 BND4/FMG/PARAM/EMEVD/script 五项（文本优先裁定；MSB/TAE/ESD/FLVER 延期 V0.6 只读预览，不计入本版）；**EMEVD 编辑器规模访问已从 `eager` 提升为 `pagination`**（完整文档分页组装 `readFullEmevdDocumentViaBridge` + DSL 模板行数截断 `renderEmevdPatchDslBounded`（事件块边界截断 + 注释标记，patch no-op 语义安全）+ 事件列表分页每页 200 + `loadFullDslTemplate` 显式完整加载；`currentScaleContractGaps` 不再含 EMEVD）；继续补 BND4 与 script 工作台、各编辑器 DSL/完整有界访问和 Electron 功能验收 | FLVER 只读查看器属于已延期的资产线；Hex 永久只读；当前 `candidate` 只继承 acceptance harness 对缺口的分类；EMEVD `pagination` 只证明规模访问契约（分页组装/模板截断/列表分页），不证明完整语义编辑或真实验收；延期预览编辑器的规模缺口按 V0.6 记账，不得据此声称本版缺口减少 | `packages/core/src/editing/editorCapabilityContract.ts`、`packages/core/src/editing/emevdFullDocument.ts`、`packages/core/src/emevd/dslRenderer.ts`、`apps/desktop/src/main/ipc.ts`、`apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx`、`apps/desktop/src/renderer/src/App.tsx` | `npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract`、`npm run test:emevd-full-document`、`npm run test:emevd-dsl-compiler`；`validation-unfrozen`：真实文档完整有界访问与 Electron functional smoke | cap=`partial`；只提升实际完成的编辑器功能，不以 inventory 或取消量化门槛代替真实验收 |
 | `W-REL-COMPLIANCE-01` | `completed` | `partial` | — | `REL-COMPLIANCE` | 许可证文本覆盖完成：123 present / 0 metadata-only / 49 not-installed（可选平台包）；补充许可证目录 licenses/；NSIS 安装包构建成功（SoulForge-0.0.0-x64.exe, 117.7 MB）；electron-builder 已收敛为 NSIS-only | 不提交真实资产、用户 Mod、私有 corpus 或凭据；不得产生 portable release | `scripts/release-compliance-lib.mjs`、`licenses/`、`apps/desktop/electron-builder.json`、`apps/desktop/package.json` | `npm run test:release-compliance-fixtures`、`npm run test:portable-packaging-config-fixtures`、`npm run test:release-content`、`npm run build` | cap=`partial`；不声明 notices、installer lifecycle 或外部分发通过 |
 | `W-A-RECOVERY-NATIVE-03` | `completed` | `partial` | — | `A-RECOVERY` | 已完成 EMEVD/MSB 独立文件写入故障矩阵（file_replace pipeline + Bridge staging）；4 阶段 × 2 格式 = 8 cases | `W-A-RECOVERY-NATIVE-02` 已完成；未覆盖 writer 继续失败关闭 | `runStandaloneWriterFailureMatrixSmoke.ts`、Bridge EMEVD/MSB writer | `npm run test:standalone-writer-failure-matrix` | cap=`partial`；仅提升实际覆盖 writer |
 | `W-A-RECOVERY-INTEGRATION-04` | `ready` | `partial` | — | `A-RECOVERY` | 继续真实断电恢复、大容量事务恢复、安装/升级后恢复和跨会话 journal 一致性验证 | `W-A-RECOVERY-NATIVE-03` 已完成；需要真实环境测试 | `packages/core/src/transactions/workspaceTransaction.ts`、journal、backup | `npm run test:writer-failure-matrix`、真实断电/大容量 smoke | cap=`partial`；仅提升实际验证的恢复路径 |
@@ -998,6 +1021,9 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 - §18.1 与 §18.3 必须精确保留固定 11 个 Gate；状态、适用性和切片满足 open/blocked/passed 收敛不变量；
 - `blocked` Gate 只能引用 blocked 当前切片与 §18.4 blocker；blocker 八字段完整，影响对象与活动引用闭合；
 - `passed` / `scope-excluded` 必须引用 sealed Evidence；基础 Gate 不得排除，范围裁定/排除必须带用户批准用途标记；
+- `deferred` Gate 必须配 `deferred-v0.6`、引用带 `scope-deferral:<GateId>:V0.6:user-approved` 的 sealed Evidence、不得带 blocker、覆盖范围条目必须全部 `deferred`，且其切片必须一并为 `deferred`；范围完全延期的 Gate 不得写成 open/blocked/passed；
+- `deferred` 切片不得留在 §13.4 未冻结清单；反向地，§13.1 标注 `validation-unfrozen` 的非终态切片必须出现在 §13.4 清单中；
+- §18.5 V0.6 延期承接索引必须与 §18.2.1 范围矩阵、§18.3 Gate 状态、§13.1 切片 lifecycle 和 shared `DEFERRED_PREVIEW_EDITOR_KINDS` 逐项双向一致（`test:v06-deferral-index`），并保留派生声明、非声明与恢复须重跑验证的边界；
 - 无活动 blockerRefs 的 `ready` / `active` 切片和非 `blocked` Gate 不得要求用户裁定、授权、提供或介入；
 - 本文代码块内 `npm run <script>` 必须存在于 `package.json`；
 - 本文不得出现 Oodle DLL 文件名、用户主目录绝对路径、API key 或私钥内容。
@@ -1021,14 +1047,17 @@ assertion     # 关键断言与样本范围
 exitSemantics # pass=exit 0 且断言执行；skip/unfrozen 语义明确
 ~~~
 
-面板中尚未冻结的条目（如"新增 inventory smoke""真实 Sekiro / installer lifecycle smoke""WebGPU/WebGL2 functional smoke"）必须显式标注 `validation-unfrozen`，不得被当作已可运行验证。它们只有在写成上述四元组、且 script 进入 package.json 后，才算冻结。
+面板中尚未冻结的条目（如"新增 inventory smoke""真实 Sekiro / installer lifecycle smoke""真实文档有界访问 functional smoke"）必须显式标注 `validation-unfrozen`，不得被当作已可运行验证。它们只有在写成上述四元组、且 script 进入 package.json 后，才算冻结。
+
+`deferred` 切片不出现在本列表：延期到 V0.6 的验证不需要在本版冻结，但也不得因此被记为已冻结或已通过。它们的 validation 会随切片一起在 V0.6 恢复时重新进入未冻结状态。
 
 当前显式为 `validation-unfrozen`（需后续冻结）：
 
-- `W-BEHAVIOR-MAP-01`：magic/reference inventory smoke；
+- `W-BEHAVIOR-MAP-01`：script 容器 magic/reference inventory smoke；
+- `W-EMEVD-FULL-01`：完整 EMEDF schema 覆盖与 control-flow smoke；
 - `W-ME3-INSTALL-04`：NSIS installer lifecycle、真实 Sekiro launch/terminate 与 rollback-restart smoke；
-- `W-RENDER-FUNCTIONAL-02`：WebGPU/WebGL2 functional fallback smoke；
 - `W-REL-F-SCALE-02`：真实文档完整有界访问与 Electron functional smoke；
+- `W-SCRIPT-READONLY-01`：script 整内层文件替换的真实容器写/重读/回滚 smoke；
 
 `W-EMEVD-PATCHIR-02` 的验证已冻结为：
 
@@ -1473,6 +1502,7 @@ entries[]:
 | `EV-EMEVD-FULLDOC-20260731` | `sealed-current-run` | C-EMEVD EMEVD 完整文档分页组装与四视图 DSL 提交 UI 接线 | `HEAD=f5d5674f85eb5eb9444c7edb76b0ea0ae704f0eb; trackedDiffSha256=2a99af27dba46014c8a1a8bc876d2d07bead50b1038c69e16b0d5ece7587c719; untrackedManifestSha256=698e4a159c901e0cc98f6de359662380335b8c8ef736b9d4a053dbeaa3780344; handoffSha256BeforeEvidenceAppend=07bb6593247cca74f7991a3d9679db4c90e821cd8e0974c5e13e674fe7936e6b; fingerprintSha256=c083a06af5d26f28e7e7fa35a11966d51f4f23987cd18fe2285b5f8ccf85eed4` | `npm run typecheck`、`npm test`、`npm run bridge:build`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:emevd-full-document`（合成 + 本机环境注入真实 DCX 直读）、`npm run test:emevd-ipc-contract` 均 exit 0；追加本记录后 `npm run test:handoff-integrity` findings 为空 | 完整文档分页组装：合成（pageSize 2 → 2 页、事件切片、unknown 分类）与真实 `emevd-primary` common.emevd DCX 直读（1,730 events / 33,266 指令 / 34 页、preparedSourcePath 复用 staging 源、事件切片总数一致）；Bridge envelope 分页字段（instructionPage/instructionPageSize/instructionTotal/instructionPageCount/instructionsSampleTruncated）；desktop IPC 契约（resource.readEmevdFullDocument / resource.submitEmevdDslPlan / preload 两方法 / main `emevdFullDocuments` 权威缓存 / renderEmevdPatchDsl 模板） | 只支持 `W-EMEVD-FULL-01` 的完整文档分页组装与四视图 DSL 提交 UI 接线子推进（切片继续 `ready/partial`）；renderer 只编辑 DSL 文本，不持有完整文档；DSL 提交经 `submitEmevdDslPlanViaFourView` production 写链且提交前重读 fresh 文档；不含 `scope-ruling:user-approved` 标记，不支持任何 Gate 终态；control-flow validation 与完整 EMEDF 类型布局仍属工程缺口 |
 | `EV-EMEVD-SCALE-20260731` | `sealed-current-run` | EMEVD 编辑器规模访问 eager → pagination（硬约束 17 合规） | `HEAD=3de45a08e861118b0c3b6cd13e147c3d8783080c; trackedDiffSha256=09a127f9f82d26947ebbd107dfa6aef449ef2beef9bd0773660ace2e766afcde; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=70e617acf5a1a47c68f328232c714d7672f9165ee281c6c6cfb95acb2e13447f; fingerprintSha256=4d5bab1ac13fbb9885e38b44589e58436a963d6a8509ff350a525633ebe30d91` | `npm run typecheck`、`npm test`、`npm run test:release-editor-acceptance`、`npm run test:emevd-dsl-compiler`（含 bounded 截断断言）、`npm run test:emevd-ipc-contract`、`npm run test:emevd-four-view`、本机环境注入后 `npm run test:emevd-full-document`（1730 events / 33,266 指令 / 34 页）均 exit 0；追加本记录后 `npm run test:handoff-integrity` findings 为空 | DSL 模板行数截断（`renderEmevdPatchDslBounded`：事件块边界截断 + 注释标记，截断模板编译为 no-op 空计划；无上限时完整渲染）；IPC `loadFullDslTemplate` 显式完整加载 + `dslTemplateTruncated/dslTemplateTotalLines` 报告；事件列表分页每页 200（flow/table 视图）；`editorCapabilityContract` emevd `scaleAccess=pagination`；`currentScaleContractGaps` 不再含 EMEVD（其余 7 个编辑器缺口如实保留） | 只支持 `W-REL-F-SCALE-02` 的 EMEVD 规模访问子推进（切片继续 `ready/candidate`）与 `W-EMEVD-FULL-01` 的分页接线延伸；`pagination` 只证明规模访问契约，不证明完整语义编辑、真实验收或任何 native authority 提升；不含 `scope-ruling:user-approved` 标记，不支持任何 Gate 终态；`validation-unfrozen` 的真实文档完整有界访问与 Electron functional smoke 仍属工程项 |
 | `EV-FMGMSB-WRITE-20260731` | `sealed-current-run` | FMG add mutation 与 menu.msgbnd 第二语料读验证、MSB set_part_transform 重读验证、EMEVD writer 警告修复 | `HEAD=a90cfa711514e854e922c03534a749eabad04fa8; trackedDiffSha256=eb6724598607c60c9a645df8da55f19b379eba90cbbe7e62df577aac5626b794; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=bd5432e62a4196bb3a9db5b4648a09cab0c6fa791da71803ae86cf19ce81bdb2; fingerprintSha256=be59a89476cc60be1f22dc4280a8061427ef6ddce927dbac171deec917ad8065` | `npm run typecheck`、`npm test`、`npm run bridge:build`（0 警告 0 错误）均 exit 0；本机环境注入后 `npm run bridge:verify:fmg`（add case + menu 15 子项 roundtrip）与 `npm run bridge:verify:msb`（transform case）exit 0；追加本记录后 `npm run test:handoff-integrity` findings 为空 | FMG `add` mutation：TS helper 补 `add` kind，真实 item.msgbnd 对不存在的 id 999999999 staged 写入 → Bridge 独立重读文本存在 → 原文件未受影响；menu.msgbnd（bnd4-primary）15 子项全部 FMG v2 semantic roundtrip（只读）；MSB `set_part_transform`：Bridge writer 补 rotX/scaleX/scaleY/scaleZ 重读核对，真实 m11 transform case（rotX=82.37612、scale [1.05, 1.1, 0.95]、part 数不变）；EmevdNativeWriter CS8629 警告修复（`patch.NewEventId!.Value`） | 只支持 `W-EMEVD-FMG-PARAM-03` 的 FMG add/menu 读与 MSB transform 验证子推进（切片继续 `ready/partial`）；FMG 全语言仍受本机 corpus 语言覆盖限制；capability contract 的 fmg mutationKinds 未声明 `fmg_entry_add`（无 UI 调用方，`editorAllowsMutation` 继续保守拒绝）；不含 `scope-ruling:user-approved` 标记，不支持任何 Gate 终态；PARAM 布局 32/33/81 与 MSB 全实体 CRUD 仍属工程缺口 |
+| `EV-REL-SCOPE-20260731-TEXT-FIRST` | `sealed-current-run` | `scope-ruling:user-approved`；`scope-deferral:REL-E:V0.6:user-approved`；`scope-deferral:REL-I:V0.6:user-approved`；V0.5 收窄为文本优先五编辑器，MSB/行为动画/资产线/渲染线共 12 项范围条目延期 V0.6 并保留为标记只读预览 | `HEAD=9ba03c349b8a40b313848ed6d48b78a56728e373; trackedDiffSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; untrackedManifestSha256=0aaa30ea4a0b19f1b9cccbc46bff94783f4645f073be0c826f415c8615d57048; handoffSha256BeforeEvidenceAppend=8d4ce2bed9731d5eb2f20c9a27cd7dbed3f96c0bcf61d76196d96dd871fa4ab5; fingerprintSha256=1c4003cc3a2c72585715ee4c1485d98e124804f832aef99ff8de435cb1735361` | `npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:release-scope`、`npm run test:release-scope-fixtures`（47 cases）、`npm run test:release-editor-acceptance`、`npm run test:desktop-live-editor-contract`、`npm run test:handoff-integrity:fixtures`（55 cases）、`npm run test:v06-deferral-index` 与 `git diff --check` 均 exit 0；`npm run test:release-scope-proposal` 按既有约定输出 `ok=null/status=proposal-valid` 且 findings 为空、exit 0；`test:v06-deferral-index` 的 5 条负向路径（索引缺条目、目标版本不符、裁定 authority 被抬高、非声明句被删、权威侧新增预览编辑器未同步）经临时篡改逐一确认失败关闭，篡改后已按备份精确还原并复验；连续两次 `npm run handoff:fingerprint` 输出一致，且 `trackedDiffSha256` 为空树 hash（除本文外工作区无未提交跟踪改动）。本轮修改的 5 个范围治理主题文件（`verify-release-scope.mjs`、`verify-release-scope-fixtures.mjs`、`handoff-integrity-lib.mjs`、`verify-handoff-integrity.mjs`、`verify-handoff-integrity-fixtures.mjs`）与新增的 `verify-v06-deferral-index.mjs` 均已进入 `head` 锚点提交 `9ba03c3`，因此 freshness 成立；追加本记录后 `npm run test:handoff-integrity` findings 为空 | 27 项范围矩阵保持，其中 12 项裁定 `proposedSupport=deferred` + `deferredToRelease=V0.6` 且 `operations=[]`（`SCOPE-MSB`、`SCOPE-BEHAVIOR-ANIMATION/TAE/ESD`、`SCOPE-ASSETS`/`FLVER`/`TPF`/`MTD`/`COLLISION`/`NAVIGATION`/`OPEN-CONVERSION`、`SCOPE-RENDERING`）；发布编辑器 inventory 精确收窄为 BND4/FMG/PARAM/EMEVD/script，`script` 为 `whole-inner-file-replacement`（内层 `\x1bLuaQ` 编译字节码，V0.5 不反编译/不重编译），其余四项为 `typed-mutation`；`SCOPE-PARAM` 收窄为 gameparam，drawparam/gparam 延期；msb/tae/esd/flver 为延期只读预览且 `countedAsReleaseEditor=false`，写路径在 `editorCapabilityContract.releaseWriteEnabled`、`@soulforge/shared` 的 `DEFERRED_PREVIEW_EDITOR_KINDS` 与主进程 `EDITOR_DEFERRED_TO_V06_READONLY` 三层失败关闭；新增 `deferred`/`deferred-v0.6` Gate 状态与 `deferred` 切片 lifecycle 及配套不变量（`DEFERRED_GATE_WITH_SUPPORTED_SCOPE`、`FULLY_DEFERRED_GATE_STATE_INVALID`、`GATE_DEFERRED_NONDEFERRED_SLICE`、`VALIDATION_UNFROZEN_SLICE_UNLISTED`）；新增 §18.5 V0.6 延期承接索引（12 条目 + 2 Gate + 3 切片 + 4 预览编辑器）并由 `scripts/verify-v06-deferral-index.mjs` 对 4 个权威来源逐项双向校验、接入 `test:handoff-integrity` 链，索引不构成独立范围口径 | 只支持 `W-REL-SCOPE-RULING-05 completed`、`REL-SCOPE passed` 的当前范围裁定，以及 `REL-E`/`REL-I` 的 `deferred/deferred-v0.6`；延期不等于完成，不关闭任何技术缺口，也不把 `deferred` 当作 `passed`、`scope-excluded` 或 `completed`；不提升任何 parser、writer、editor、AI、runtime、render 或发行 authority；未运行真实 Electron 人机功能验收、NSIS lifecycle、真实 Sekiro 会话、私有 native corpus 与 Oodle 回归、渲染硬件基准；MSB 既有 `msb_set_part_transform` 真实验证记录保留但本版写入关闭，V0.6 恢复须重新验证后才可翻回；不声明 V0.5 完成或允许外部分发 |
 | `EV-HANDOFF-LIVENESS-20260725` | `sealed-current-run` | 交接推进活性治理、公开回归、REL-B registry/harness fixture 与 REL-F acceptance harness candidate | `HEAD=20020766506ea71d66d3b9b9ea867aa534aaa3a9; trackedDiffSha256=4621e9898de5250b8d72d309af2396e2de00351fcefb760855cbeedd42440d5f; untrackedManifestSha256=f499f192e40be3b4f91cb01336478251435ad1789ef168aacfcdbd452f9c7c35; handoffSha256BeforeEvidenceAppend=313dbde91970b6d9a3bccb0bb244de3ce0f2a6ce44122560eebf6af625a562b2; fingerprintSha256=3067512cc0068ad13cf50011889a19c3104dc3a0d6b9b3cd7c76788ebe3e43c9` | `npm run typecheck`、`npm test`、`npm run bridge:verify:synthetic`、`npm run build`、`npm run test:release-corpus-registry`、`npm run test:release-editor-acceptance`、`npm run test:handoff-integrity`、`git diff --check` 均 exit 0；`npm run bridge:build` exit 0；连续两次 `npm run handoff:fingerprint` 输出一致 | 38 个 handoff 正/负 fixture；公开 synthetic/core/Electron 回归；metadata-only corpus registry fixture；候选编辑器 inventory/contract harness；项目 wrapper 解析到 .NET SDK 10.0.301 | 只封存本轮治理机制和已列公开/harness 观察，并支持 `W-REL-B-REGISTRY-01` 的 `fixture-confirmed` 与 `W-REL-F-ACCEPT-01` 的 `candidate` 上限；不包含用户范围批准标记，不支持任何 Gate `passed`/`scope-excluded`，也不提升私有 native、真游戏、真实模型服务或发布 authority；`manualReviewStillRequired` 三项仍保留 |
 | `EV-PUBLIC-CONTRACTS-20260725` | `sealed-current-run` | Bridge recovery/staging、PARAM metadata、me3 adapter、REL-B registry、REL-F acceptance 与发行失败关闭 contract | `HEAD=20020766506ea71d66d3b9b9ea867aa534aaa3a9; trackedDiffSha256=4caed8aa7f2647304d9f22a19fbd10e3f07c914f6334a6970ecf4885de1d8fad; untrackedManifestSha256=32b6faf6d0e1e92ed25a93903a0154c7803f0f49c4d64875f7f27baa61093b64; handoffSha256BeforeEvidenceAppend=f67684684b8e703f433c3495051cab381b4045de43af157a1b005cc07c77d9d6; fingerprintSha256=a450562260693252e75d6d81226aff97b9a43f3eeb39ebf7fce573c78b210839` | 最低公开回归四命令均 exit 0；`bridge:verify:client`、`test:bridge-recovery-harness`、`test:bridge-staging`、`test:param-metadata-mismatch`、`test:paramdef-layout`、`test:me3-runtime-adapter`、`test:release-corpus-registry`、`test:release-editor-acceptance` 均 exit 0；发行六命令、portable/private/section-28 gate 均 exit 0；连续两次 `handoff:fingerprint` 一致 | recovery 四阶段/背压/竞态/重启与 11 个 staging 负例；PARAM 9 个 snapshot failure、64 MiB 总预算、256 diagnostics、3 个 immutable result；me3 22 类；REL-B 26 个负例；5 个候选编辑器；170 dependencies、116/54 license text、11 artifacts | 支持 A/PARAM/me3 contract 与 REL-B registry 的 `fixture-confirmed`、REL-F acceptance 的 `candidate`、发行合规的 `partial`；artifact=`6f22d28bfae009057d57e5bcb64936721e17357cadd6ee4be562081d1b348f0a`、manifest=`48d8eda021e041d10464cd3f8e641ae23db1333ad760e4ca2708c57e5e2ff0af`；portable=`partial/skipped` 且 builder 依赖缺失，private/section-28=`skipped`；不支持任何 Gate 终态、native corpus、真实 me3/Sekiro、人机验收、installer、签名、升级或更新声明 |
 | `EV-B-DFLT-7BD` | `historical-record` | DFLT 已记录真实 corpus 往返 | `7bd354d` | 旧第 43 节“P1 安全清理执行器与 P2 真实 DFLT/BND4 文档推进”；`bridge:verify:dcx-documents` | 144 个 DFLT、两个实际变体 | 本轮未重跑私有 corpus；不得外推到新变体或发布全集 |
@@ -1911,7 +1941,8 @@ handoffSha256BeforeEvidenceAppend=<handoffSha256BeforeEvidenceAppend>
 - 文档只有一个当前实施口径；
 - `REL-SCOPE` 以 `sealed-current-run` Evidence 通过，并明确冻结游戏版本、能力、操作、corpus 和 unsupported 边界；
 - `REL-A`、`REL-H`、`REL-COMPLIANCE` 均保持 `in-scope` 并通过，不得以缩小功能范围排除；
-- `REL-B/C/D/E/F/G/I` 各自要么在冻结范围内通过，要么按 §18.3 规则得到用户批准并以 sealed Evidence 明确排除；
+- `REL-B/C/D/E/F/G/I` 各自要么在冻结范围内通过，要么按 §18.3 规则得到用户批准并以 sealed Evidence 明确排除或延期；
+- 延期（`gateState=deferred` + `applicability=deferred-v0.6`）既不是完成也不是阻塞：它表示该能力已由用户裁定移出 V0.5、在 V0.6 交付。延期 Gate 不参与 V0.5 完成判定，也不得反过来阻止 V0.5 完成；但延期不清偿任何技术缺口，不得写成 `passed`、`scope-excluded` 或 `completed`，其覆盖的范围条目必须全部为 `deferred` 且 `operations=[]`；
 - 所有冻结为 in-scope 的 native、编辑器、AI、runtime 和渲染能力达到 §18.1 对应完成条件，不用 fixture、candidate、代理场景或 skipped 代替；
 - Patch Engine 是所有用户 Mod 资源写入的唯一主干，operation、file、resource-entry 三层持久回滚在声明范围内可用；
 - 没有提交真实资产、用户 Mod、Oodle DLL 或明文凭据；
@@ -1927,12 +1958,12 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 | `REL-A` | 所有 production writer 与事务阶段 | 每个 writer 完成 stage/validate/commit/re-read/audit，以及 operation/file/resource-entry 适用回滚和故障矩阵 | 任一 writer 绕过 Patch Engine；after-commit 不可恢复 |
 | `REL-B` | 注册的 DFLT/KRAK/BND4 发布 corpus | 100% 样本被分类；声明支持的布局完成 no-op、mutation/repack、重读和未知字段保持；unsupported 有结构化诊断 | 只验证抽样却声明全集；缺 Oodle 成功路径仍声明 KRAK 完成 |
 | `REL-C` | FMG/PARAM/EMEVD/MSB 支持矩阵 | 每个支持操作在每个注册布局上通过 read/no-op/mutate/write/re-read/reference/rollback；游戏加载按声明范围通过 | fixture、candidate、单一 happy path 或未知字段重写 |
-| `REL-D` | 全部 Sekiro TAE、全部 ESD、源码与编译脚本完整读写 | corpus 范围由真实 Sekiro 证据确认；结构化界面/DSL 共用 native document，全部 typed mutation、writer、重读、回滚和游戏加载矩阵通过 | 只停留在 candidate parser/inventory、借用其他游戏格式结论、执行不受信脚本或以 Hex 代替语义 parser |
-| `REL-E` | FLVER/TPF/MTD/collision/navigation 全量语义只读与 native-to-open 导出矩阵 | 五类 native 文档、引用、可视化和批准导出通过真实 corpus；无 native writer 或反向导入 | raw replace、代理几何、最小 DDS 被外推成 native authority 或开放格式被写回 native |
-| `REL-F` | 八个语义编辑器、结构化界面 + DSL、共享只读 Hex 证据视图 | 全部读取真实 native document；mutation typed；revision 冲突失败；完整内容可通过分页/虚拟化/分块/流式访问；无 demo fallback 或 raw Hex 写入 | UI 存在但底层 authority 缺失；固定窗口截断、eager 全量物化、历史可写 Safe Hex 演示或静态测试被当作发布编辑器；容量/延迟数值不是通过条件 |
+| `REL-D` | script 容器（luabnd / action `*.hks`）的枚举、只读字节码证据视图与整内层文件替换读写 | corpus 范围由真实 Sekiro 证据确认；容器条目枚举与 `\x1bLuaQ` 字节码识别通过真实样本；整内层文件替换完成 stage/validate/commit/re-read/回滚与游戏加载 | 只停留在 candidate parser/inventory、借用其他游戏格式结论、执行不受信脚本、以 Hex 代替语义 parser，或把字节码反汇编呈现为可编辑源码。TAE/ESD 全量语义已延期 V0.6，不在本 Gate 通过条件内，也不得据此声称本版行为语义能力 |
+| `REL-E` | 已延期 V0.6：FLVER/TPF/MTD/collision/navigation 全量语义只读与 native-to-open 导出矩阵 | 本版不判定。V0.6 恢复后仍要求五类 native 文档、引用、可视化和批准导出通过真实 corpus；无 native writer 或反向导入 | 把延期写成通过或排除；延期期间开放任何资产 writer 或反向导入；把既有 FLVER/TPF 只读预览外推成 native authority |
+| `REL-F` | 五个语义编辑器（BND4/FMG/PARAM/EMEVD/script）、结构化界面 + DSL、共享只读 Hex 证据视图 | 全部读取真实 native document；BND4/FMG/PARAM/EMEVD 的 mutation typed，script 为整内层文件替换；revision 冲突失败；完整内容可通过分页/虚拟化/分块/流式访问；无 demo fallback 或 raw Hex 写入 | UI 存在但底层 authority 缺失；固定窗口截断、eager 全量物化、历史可写 Safe Hex 演示或静态测试被当作发布编辑器；容量/延迟数值不是通过条件；把 msb/tae/esd/flver 延期只读预览计入发布编辑器或开放其写入 |
 | `REL-G` | OpenAI-compatible / Anthropic-compatible 双协议、允许工具集、权限模式与空配置行为 | 两类协议分别通过确定性本地 contract server 的只读/受控写、取消、超时、限额、审计和脱敏矩阵；空配置不发起网络请求并返回明确诊断；写工具复用 native validator/Patch Engine | 只覆盖单协议、空配置仍联网、模型可绕过证据或写入主干；真实 provider 账号不是通过条件 |
 | `REL-H` | Windows 10/11 x64 NSIS 与 me3 capability-probe 运行范围 | NSIS manifest/hash、干净机安装、覆盖升级、卸载、Bridge/.NET/native binding、能力探测、提交后启动、日志关联、回滚后复启全部通过 | portable/自动更新被冒充范围内能力，未签名被误写成免除完整性验证，配置存在、skip、版本字符串或只启动一次 |
-| `REL-I` | renderer-independent semantic scene、WebGPU 主路径与 WebGL2 功能回退 | 在项目所有者当前机器上以真实 semantic/native projection 完成 capability probe、加载、picking、transform 更新、回退与资源释放功能闭环 | 代理场景或 synthetic baseline 被当成真实资产；WebGPU 失败时没有 WebGL2 功能回退；代表性硬件档位和性能预算不是通过条件 |
+| `REL-I` | 已延期 V0.6：renderer-independent semantic scene、WebGPU 主路径与 WebGL2 功能回退 | 本版不判定。V0.6 恢复后仍要求在项目所有者当前机器上以真实 semantic/native projection 完成 capability probe、加载、picking、transform 更新、回退与资源释放功能闭环 | 把延期写成通过或排除；延期期间把 3D 面板当作本版发布能力；代理场景或 synthetic baseline 被当成真实资产；代表性硬件档位和性能预算不是通过条件 |
 | `REL-COMPLIANCE` | 项目所有者内部测试构建及禁止外部分发边界 | package tree、许可证 inventory、凭据/私有资产扫描、所有者控制目标和 installer manifest/hash 通过；缺 notices 被显式追踪并阻止外部分发 | 真实资产、用户 Mod、私有 corpus、Oodle、key/私钥进入提交/产物，或未补 notices/权利即对外分发；未签名包不得声明发布者身份或 SmartScreen 信誉 |
 
 ### 18.2 V0.5 不设置的量化预算与门槛
@@ -1952,7 +1983,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->
 ```json
 {
-  "schemaVersion": "1.5.0",
+  "schemaVersion": "1.6.0",
   "proposalId": "V0.5-SCOPE-20260725",
   "release": "V0.5",
   "game": "Sekiro",
@@ -1976,6 +2007,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
   "corpusPolicy": {
     "privateFixtureRegistryIsReleaseCorpus": false,
     "supportedWithoutReleaseCorpus": "requires-open-ruling"
+  },
+  "scopeDeferralPolicy": {
+    "status": "user-approved",
+    "deferredToRelease": "V0.6",
+    "deferredIsNotCompleted": true,
+    "deferredIsNotPermanentlyExcluded": true,
+    "deferredCodeMayRemainAsMarkedPreview": true,
+    "deferredPreviewMustBeReadOnly": true
   },
   "authoritySnapshotPolicy": {
     "field": "authorityAtRuling",
@@ -2096,7 +2135,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "currentState": "open",
       "blockerRefs": [],
       "openRulings": [
-        "需完成全官方语言 FMG、全部 ParamType/EMEVD 及登记 MSB 实体的 release corpus、writer、引用和游戏加载矩阵。"
+        "V0.5 收窄为 FMG / PARAM(gameparam) / EMEVD 三类文本与逻辑资源：需完成全官方语言 FMG、全部 ParamType 与 EMEVD 的 release corpus、writer、引用和游戏加载矩阵。SCOPE-MSB 已延期至 V0.6，其既有 transform 写路径必须在 V0.5 关闭。"
       ]
     },
     {
@@ -2110,7 +2149,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "currentState": "open",
       "blockerRefs": [],
       "openRulings": [
-        "需建立真实 Sekiro TAE/ESD/脚本 corpus、完整 schema/parser/writer/DSL 与游戏加载矩阵。"
+        "V0.5 收窄为 SCOPE-BEHAVIOR-SCRIPT 的只读证据视图与整个内层文件替换：HKS/Lua 经实测为 Havok Script 编译字节码（\\\\x1bLuaQ），反编译与重编译已延期至 V0.6。需完成容器条目枚举、只读字节码/常量池证据投影，以及经 Patch Engine 的整文件替换、重读与回滚。SCOPE-BEHAVIOR-ANIMATION / TAE / ESD 已延期至 V0.6。"
       ]
     },
     {
@@ -2124,10 +2163,10 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "SCOPE-ASSET-NAVIGATION",
         "SCOPE-ASSET-OPEN-CONVERSION"
       ],
-      "currentState": "open",
+      "currentState": "deferred",
       "blockerRefs": [],
       "openRulings": [
-        "需完成五类 native 资产的全量只读语义 authority、引用与 native-to-open 导出矩阵。"
+        "整条资产线已裁定移出 V0.5、延期至 V0.6：五类 native 资产的全量只读语义 authority、引用与 native-to-open 导出矩阵均不属于 V0.5 验收。既有 FLVER/TPF/MTD 只读实现保留为标记 V0.6 预览且必须只读。"
       ]
     },
     {
@@ -2170,10 +2209,10 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "scopeItemIds": [
         "SCOPE-RENDERING"
       ],
-      "currentState": "open",
+      "currentState": "deferred",
       "blockerRefs": [],
       "openRulings": [
-        "需在项目所有者当前机器完成真实 semantic scene 的 WebGPU capability 主路径、WebGL2 功能回退、picking、transform 更新与资源释放；不要求代表性硬件档位或性能预算。"
+        "3D 渲染已裁定移出 V0.5、延期至 V0.6：MSB 场景与资产线同时延期后，V0.5 不再有 in-scope 的 3D 编辑目标，WebGPU 主路径/WebGL2 功能回退闭环不属于 V0.5 验收。既有 renderer-independent semantic scene 架构与 Three.js 骨架保留，不得推翻。"
       ]
     },
     {
@@ -2464,11 +2503,20 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-C"
       ],
       "subjectKind": "resource",
-      "scope": "固定 Smithbox 2.2.4 本机 metadata 严格匹配下的 Sekiro 全部 ParamType、布局、字段与行完整读写",
+      "scope": "固定 Smithbox 2.2.4 本机 metadata 严格匹配下的 Sekiro gameparam 全部 ParamType、布局、字段与行完整读写；drawparam / gparam 延期至 V0.6",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
+      "paramContainerScope": {
+        "included": [
+          "gameparam"
+        ],
+        "deferredToRelease": {
+          "drawparam": "V0.6",
+          "gparam": "V0.6"
+        }
+      },
       "operations": [
-        "read-all-param-types",
+        "read-all-gameparam-param-types",
         "import-user-local-pinned-smithbox-metadata",
         "verify-source-release-and-content-digest",
         "record-source-license-and-provenance",
@@ -2486,7 +2534,10 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "accept-unpinned-or-mismatched-metadata-source",
         "metadata-mismatch-write",
         "unknown-field-rewrite",
-        "write-before-all-sekiro-param-types-are-authoritative"
+        "write-before-all-sekiro-gameparam-param-types-are-authoritative",
+        "drawparam-write-in-v05",
+        "gparam-write-in-v05",
+        "claim-drawparam-or-gparam-as-v05-release-capability"
       ],
       "authorityAtRuling": "partial",
       "evidenceRefs": [
@@ -2503,7 +2554,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       ],
       "openRulings": [],
       "nonClaims": [
-        "全部 ParamType 与固定 Smithbox 本机来源已纳入目标范围，但裁定时 authorityAtRuling 为 partial；来源裁定不证明导入 adapter、全部布局、上游再分发权利或真实游戏验证完成。"
+        "V0.5 收窄为 gameparam 容器内全部 ParamType 的完整读写；drawparam 与 gparam 延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 partial；固定 Smithbox 本机来源裁定不证明导入 adapter、全部布局、上游再分发权利或真实游戏验证完成。"
       ]
     },
     {
@@ -2558,25 +2609,18 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-C"
       ],
       "subjectKind": "resource",
-      "scope": "登记 Sekiro MSB 实体类型的完整语义读取、CRUD、引用修复、写入、重读与回滚",
+      "scope": "登记 Sekiro MSB 实体类型的完整语义读取、CRUD、引用修复、写入、重读与回滚（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "read",
-        "no-op-roundtrip",
-        "project-complete-registered-entities",
-        "registered-entity-crud",
-        "typed-transform-and-field-mutation",
-        "reference-validate-and-repair",
-        "write",
-        "re-read",
-        "rollback",
-        "game-load"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "edit-unregistered-entity",
         "unknown-entity-rewrite",
-        "claim-untruncated-scene-before-validation"
+        "claim-untruncated-scene-before-validation",
+        "any-msb-write-in-v05",
+        "expose-set-part-transform-in-v05",
+        "present-msb-panel-as-v05-release-editor"
       ],
       "authorityAtRuling": "partial",
       "evidenceRefs": [
@@ -2592,7 +2636,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       ],
       "openRulings": [],
       "nonClaims": [
-        "登记实体完整读写已纳入目标范围；脱敏 m11 私有 fixture 与截断 preview 不证明 release corpus、完整场景、KRAK 组合或游戏加载完成。"
+        "MSB 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 semantic scene 投影、四类实体 preview 与已验证的 set_part_transform 写路径保留在代码中，但 V0.5 必须关闭该写路径并把面板标记为 V0.6 只读预览；脱敏 m11 私有 fixture 与截断 preview 不证明 release corpus、完整场景、KRAK 组合或游戏加载完成。"
       ]
     },
     {
@@ -2602,28 +2646,24 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "真实 Sekiro corpus 中行为、动画与脚本格式的深度语义解析与引用清单",
+      "scope": "真实 Sekiro corpus 中行为、动画与跨资源引用清单的深度语义解析（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "inventory",
-        "identify-magic-container-version",
-        "parse-semantic-document",
-        "resolve-cross-resource-references",
-        "classify-unknown-format",
-        "fail-closed-on-unknown-format"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "borrow-other-game-format-claims",
         "raw-hex-as-semantic-authority",
-        "execute-untrusted-script"
+        "execute-untrusted-script",
+        "any-animation-or-behavior-graph-edit-in-v05",
+        "claim-hkx-semantic-authority-in-v05"
       ],
       "authorityAtRuling": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "深度解析已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；格式候选、文件名或其他游戏知识不构成 Sekiro native authority。"
+        "行为与动画深度解析已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件；HKX 与跨资源行为引用图在 V0.5 保持未实现，格式候选、文件名或其他游戏知识不构成 Sekiro native authority。"
       ]
     },
     {
@@ -2633,31 +2673,26 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "Sekiro 全部 TAE 布局、事件类型、时间轴、参数与动画引用的完整读写",
+      "scope": "Sekiro 全部 TAE 布局、事件类型、时间轴、参数与动画引用的完整读写（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "identify-and-parse-all-sekiro-tae",
-        "read-event-timeline-and-parameters",
-        "typed-event-crud",
-        "edit-start-end-frame",
-        "validate-animation-references",
-        "write",
-        "re-read",
-        "rollback",
-        "game-load"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "borrow-other-game-tae-layout",
         "raw-hex-write",
-        "unknown-event-reencode"
+        "unknown-event-reencode",
+        "any-tae-write-in-v05",
+        "present-tae-panel-as-v05-release-editor"
       ],
-      "authorityAtRuling": "unverified",
-      "evidenceRefs": [],
+      "authorityAtRuling": "candidate",
+      "evidenceRefs": [
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730"
+      ],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "全部 TAE 完整读写已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；裁定时仓库尚无生产 TAE parser、event schema、writer 或真实游戏证据。"
+        "TAE 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有注册样本 native document parser（939 animations / 23,711 events / 81 event types）与只读工作台保留为标记 V0.6 只读预览，仍为 candidate，不证明完整事件语义、全部布局、writer 或真实游戏加载。"
       ]
     },
     {
@@ -2667,31 +2702,26 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "Sekiro 全部 ESD 状态机、条件表达式、命令与跳转关系的完整读写",
+      "scope": "Sekiro 全部 ESD 状态机、条件表达式、命令与跳转关系的完整读写（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "identify-and-parse-all-sekiro-esd",
-        "read-state-machine-and-conditions",
-        "project-state-graph",
-        "typed-state-condition-command-crud",
-        "repair-and-validate-references",
-        "write",
-        "re-read",
-        "rollback",
-        "game-load"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "borrow-other-game-esd-layout",
         "raw-hex-write",
-        "unknown-expression-or-command-reencode"
+        "unknown-expression-or-command-reencode",
+        "any-esd-write-in-v05",
+        "present-esd-panel-as-v05-release-editor"
       ],
-      "authorityAtRuling": "unverified",
-      "evidenceRefs": [],
+      "authorityAtRuling": "candidate",
+      "evidenceRefs": [
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730"
+      ],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "全部 ESD 完整读写已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；裁定时格式存在性、生产 parser、表达式 schema、writer 与真实游戏证据尚未建立。"
+        "ESD 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有注册样本 native document parser（36 groups / 295 states / 315 conditions 及 RPN bytecode）与只读工作台保留为标记 V0.6 只读预览，仍为 candidate，不证明表达式 schema、writer 或真实游戏加载；ESD 为二进制状态机与 RPN 字节码，不属于本轮裁定的文本类格式。"
       ]
     },
     {
@@ -2701,15 +2731,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "真实 Sekiro corpus 中源码与编译 Lua/HKS/其他脚本的完整静态解析、编辑与重新生成",
+      "scope": "真实 Sekiro corpus 中 luabnd / action *.hks 脚本容器的条目枚举、只读字节码证据投影，以及经 Patch Engine 的整个内层文件替换、重读与回滚",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "operations": [
         "inventory-and-identify-script-vm",
-        "parse-or-decompile",
-        "project-readable-semantic-document",
-        "typed-or-source-mutation",
-        "compile-or-reassemble",
+        "enumerate-script-container-entries",
+        "project-readonly-bytecode-evidence-view",
+        "replace-whole-inner-file",
         "write",
         "re-read",
         "rollback",
@@ -2718,14 +2747,18 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "unsupportedOperations": [
         "execute-untrusted-script",
         "raw-bytes-as-script-authority",
-        "borrow-unverified-vm-or-bytecode-claims"
+        "borrow-unverified-vm-or-bytecode-claims",
+        "decompile-bytecode-to-source-in-v05",
+        "recompile-source-to-bytecode-in-v05",
+        "typed-or-source-level-script-mutation-in-v05",
+        "present-bytecode-disassembly-as-editable-source"
       ],
       "authorityAtRuling": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "源码与编译脚本完整读写已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；脚本种类、VM/字节码、合法工具链、writer 与真实游戏证据均待建立。"
+        "V0.5 只承诺脚本容器条目枚举、只读字节码证据投影与整个内层文件替换。经实测，`action/script/*.hks` 与 luabnd 内层 `.lua` 均以 `\\\\x1bLuaQ` 开头，属 Havok Script（Lua 5.1 家族）编译字节码，不是可直接编辑的文本；`.luagnl` / `.luainfo` 为反编译辅助元数据。反编译、重编译与 typed script mutation 已延期至 V0.6。裁定时 authorityAtRuling 为 unverified；容器条目枚举、只读证据投影、writer 与真实游戏证据均待建立。"
       ]
     },
     {
@@ -2735,21 +2768,18 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "固定 FLVER/TPF/MTD/collision/navigation 五类 native 资产只读 authority 与 native-to-open 导出矩阵",
+      "scope": "固定 FLVER/TPF/MTD/collision/navigation 五类 native 资产只读 authority 与 native-to-open 导出矩阵（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "read-native-semantic-document",
-        "project-structured-view",
-        "resolve-native-references",
-        "export-native-to-approved-open-format",
-        "validate-export"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "open-format-to-native-import",
         "raw-replace-as-native-conversion",
         "proxy-data-as-native-authority",
-        "unvalidated-native-writer"
+        "unvalidated-native-writer",
+        "any-asset-export-as-v05-release-capability",
+        "present-asset-panel-as-v05-release-editor"
       ],
       "authorityAtRuling": "candidate",
       "evidenceRefs": [
@@ -2758,7 +2788,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "固定六类资产范围已批准，但裁定时 authorityAtRuling 为 candidate；候选解析、代理几何和最小 DDS 不证明五类 native 语义读取或导出管线完成。"
+        "整条资产只读与导出线已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 candidate 解析与只读面板保留为标记 V0.6 只读预览；候选解析、代理几何和最小 DDS 既不证明五类 native 语义读取，也不证明导出管线完成。资产为二进制几何与纹理格式，不属于本轮裁定的文本类格式。"
       ]
     },
     {
@@ -2768,23 +2798,18 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "Sekiro 全部 FLVER 布局的 geometry、skeleton、weights、material 引用与只读 native document",
+      "scope": "Sekiro 全部 FLVER 布局的 geometry、skeleton、weights、material 引用与只读 native document（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "classify-all-sekiro-layouts",
-        "read-vertex-index",
-        "read-skeleton-and-weights",
-        "read-material-reference",
-        "project-renderable-scene",
-        "export-gltf-glb",
-        "validate-export"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "flver-write",
         "open-format-to-flver",
         "proxy-geometry-as-flver",
-        "raw-replace-as-native-writer"
+        "raw-replace-as-native-writer",
+        "any-flver-export-as-v05-release-capability",
+        "present-flver-panel-as-v05-release-editor"
       ],
       "authorityAtRuling": "candidate",
       "evidenceRefs": [
@@ -2793,7 +2818,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "全部 FLVER 语义只读已纳入目标范围；现有 header/mesh candidate 不证明完整 vertex/index/skeleton/material authority 或真实渲染完成。"
+        "FLVER 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 header/mesh candidate parser 与只读面板保留为标记 V0.6 只读预览，仍为 candidate，不证明完整 vertex/index/skeleton/material authority 或真实渲染完成。"
       ]
     },
     {
@@ -2803,30 +2828,25 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "Sekiro 全部 TPF 布局、纹理格式、metadata 与 native texture 引用的只读文档",
+      "scope": "Sekiro 全部 TPF 布局、纹理格式、metadata 与 native texture 引用的只读文档（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "classify-all-sekiro-layouts",
-        "read-texture-entries",
-        "read-texture-metadata",
-        "resolve-material-references",
-        "preview",
-        "export-png-tga-dds",
-        "validate-export"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "tpf-write",
         "open-format-to-tpf",
         "minimal-dds-as-tpf-authority",
-        "infer-texture-metadata"
+        "infer-texture-metadata",
+        "any-tpf-export-as-v05-release-capability",
+        "present-tpf-panel-as-v05-release-editor"
       ],
       "authorityAtRuling": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "全部 TPF 语义只读已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；容器 hint、开放图像检测和最小 DDS 编码不证明 TPF parser 或纹理兼容性。"
+        "TPF 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；容器 hint、开放图像检测和最小 DDS 编码不证明 TPF parser 或纹理兼容性。"
       ]
     },
     {
@@ -2836,29 +2856,25 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "Sekiro 全部 MTD 布局、材质参数、texture slot 与着色引用的只读文档",
+      "scope": "Sekiro 全部 MTD 布局、材质参数、texture slot 与着色引用的只读文档（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "classify-all-sekiro-layouts",
-        "read-material-definition",
-        "read-parameter-schema",
-        "read-texture-slots",
-        "resolve-flver-tpf-references",
-        "export-readable-manifest"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "mtd-write",
         "open-format-to-mtd",
         "infer-mtd-schema",
-        "proxy-material-as-native"
+        "proxy-material-as-native",
+        "any-mtd-export-as-v05-release-capability",
+        "present-mtd-panel-as-v05-release-editor"
       ],
       "authorityAtRuling": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "全部 MTD 语义只读已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；candidate inventory 不证明 native document、参数 schema 或引用闭环。"
+        "MTD 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；candidate inventory 不证明 native document、参数 schema 或引用闭环。"
       ]
     },
     {
@@ -2868,29 +2884,24 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "真实 Sekiro 中全部碰撞格式、层级与地图关联的只读语义文档",
+      "scope": "真实 Sekiro 中全部碰撞格式、层级与地图关联的只读语义文档（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "inventory-collision-resources",
-        "identify-all-formats-and-containers",
-        "read-collision-semantic-document",
-        "resolve-map-reference",
-        "visualize",
-        "diagnose",
-        "fail-closed-on-unknown-layout"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "collision-write",
         "assume-collision-format",
-        "proxy-mesh-as-collision"
+        "proxy-mesh-as-collision",
+        "any-collision-read-as-v05-release-capability",
+        "present-collision-view-as-v05-release-editor"
       ],
       "authorityAtRuling": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "全部碰撞语义只读已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；场景 proxy 或 FLVER candidate 不证明碰撞格式、层级或地图引用。"
+        "碰撞已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；场景 proxy 或 FLVER candidate 不证明碰撞格式、层级或地图引用。"
       ]
     },
     {
@@ -2900,29 +2911,24 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "真实 Sekiro 中全部导航格式、连接关系与地图引用的只读语义文档",
+      "scope": "真实 Sekiro 中全部导航格式、连接关系与地图引用的只读语义文档（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "inventory-navigation-resources",
-        "identify-all-formats-and-containers",
-        "read-navigation-semantic-document",
-        "resolve-map-reference",
-        "visualize",
-        "diagnose",
-        "fail-closed-on-unknown-layout"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "navigation-write",
         "assume-navigation-format",
-        "proxy-graph-as-navigation"
+        "proxy-graph-as-navigation",
+        "any-navigation-read-as-v05-release-capability",
+        "present-navigation-view-as-v05-release-editor"
       ],
       "authorityAtRuling": "unverified",
       "evidenceRefs": [],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "全部导航语义只读已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；资源图、bounds 或代理图不证明导航 parser、连接语义或地图引用。"
+        "导航已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；资源图、bounds 或代理图不证明导航 parser、连接语义或地图引用。"
       ]
     },
     {
@@ -2932,21 +2938,16 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "FLVER/TPF/MTD native 资源到 glTF/GLB/PNG/TGA/DDS/描述清单的只读导出矩阵",
+      "scope": "FLVER/TPF/MTD native 资源到 glTF/GLB/PNG/TGA/DDS/描述清单的只读导出矩阵（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "read-native-semantic-document",
-        "validate-native-source",
-        "export-gltf-glb",
-        "export-png-tga-dds",
-        "export-material-manifest",
-        "validate-open-output"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "open-format-to-native-import",
         "emit-or-replace-native-output",
-        "raw-file-replace-as-conversion"
+        "raw-file-replace-as-conversion",
+        "any-open-conversion-as-v05-release-capability"
       ],
       "authorityAtRuling": "candidate",
       "evidenceRefs": [
@@ -2955,7 +2956,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "仅 native-to-open 导出已纳入目标范围；现有开放格式检测、staging 与 file_replace 不证明任何已批准导出器完成，更不支持反向 native 写入。"
+        "native-to-open 导出矩阵已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。现有开放格式检测、staging 与 file_replace 不证明任何已批准导出器完成，更不支持反向 native 写入。"
       ]
     },
     {
@@ -2965,7 +2966,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-F"
       ],
       "subjectKind": "editor",
-      "scope": "BND4、FMG、PARAM、EMEVD、MSB、TAE、ESD、脚本八个语义编辑器及共享只读 Hex 证据视图",
+      "scope": "BND4、FMG、PARAM、EMEVD 四个 typed mutation 语义编辑器，script 只读证据视图加整个内层文件替换，以及共享只读 Hex 证据视图",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "editorIds": [
@@ -2973,11 +2974,27 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "fmg",
         "param",
         "emevd",
-        "msb",
-        "tae",
-        "esd",
         "script"
       ],
+      "editorMutationModes": {
+        "bnd4": "typed-mutation",
+        "fmg": "typed-mutation",
+        "param": "typed-mutation",
+        "emevd": "typed-mutation",
+        "script": "whole-inner-file-replacement"
+      },
+      "deferredPreviewEditors": {
+        "editorIds": [
+          "msb",
+          "tae",
+          "esd",
+          "flver"
+        ],
+        "deferredToRelease": "V0.6",
+        "readOnly": true,
+        "markedAsPreview": true,
+        "countedAsReleaseEditor": false
+      },
       "hexEvidenceView": {
         "included": true,
         "writable": false
@@ -2993,14 +3010,18 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "schema-typecheck",
         "reject-revision-conflict",
         "undo-redo-via-history",
-        "show-readonly-hex-evidence"
+        "show-readonly-hex-evidence",
+        "mark-deferred-editor-as-v06-readonly-preview"
       ],
       "unsupportedOperations": [
         "raw-hex-edit",
         "demo-fallback-as-authority",
         "renderer-state-as-document",
         "editor-without-native-authority",
-        "quantitative-capacity-or-latency-threshold-as-v05-gate"
+        "quantitative-capacity-or-latency-threshold-as-v05-gate",
+        "count-deferred-preview-editor-as-v05-release-editor",
+        "expose-write-path-in-deferred-preview-editor",
+        "claim-script-editor-as-typed-mutation"
       ],
       "authorityAtRuling": "partial",
       "evidenceRefs": [
@@ -3011,7 +3032,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "八个语义编辑器已纳入目标范围，但裁定时 authorityAtRuling 为 partial；裁定时的候选面板、Safe Hex 演示和静态契约不证明真实文档、DSL、完整有界访问或 Electron 功能验收完成；容量与延迟数值不属于 V0.5 验收。"
+        "V0.5 冻结编辑器收窄为 bnd4、fmg、param、emevd、script 五个；其中 script 只提供只读证据视图与整个内层文件替换，不属于 typed mutation。msb、tae、esd、flver 面板延期至 V0.6，保留为标记只读预览，不计入 V0.5 冻结清单，也不得暴露写路径（含 MSB `set_part_transform`）。裁定时 authorityAtRuling 为 partial；候选面板、Safe Hex 演示和静态契约不证明真实文档、DSL、完整有界访问或 Electron 功能验收完成；容量与延迟数值不属于 V0.5 验收。"
       ]
     },
     {
@@ -3139,24 +3160,19 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-I"
       ],
       "subjectKind": "rendering",
-      "scope": "renderer-independent semantic scene、Three.js WebGPU 主后端与 WebGL2 自动回退",
+      "scope": "renderer-independent semantic scene、Three.js WebGPU 主后端与 WebGL2 自动回退（延期至 V0.6）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "supported",
-      "operations": [
-        "probe-webgpu-and-fallback-webgl2",
-        "stream-render-chunks",
-        "render-flver-msb-collision-navigation",
-        "pick",
-        "update-transforms",
-        "dispose-resources",
-        "functional-backend-smoke-on-owner-machine"
-      ],
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
       "unsupportedOperations": [
         "renderer-object-as-authority",
         "synthetic-budget-as-release-threshold",
         "proxy-scene-as-native-asset-proof",
         "representative-hardware-tier-acceptance",
-        "performance-budget-as-v05-gate"
+        "performance-budget-as-v05-gate",
+        "any-3d-rendering-as-v05-release-capability",
+        "present-3d-viewport-as-v05-release-editor"
       ],
       "authorityAtRuling": "partial",
       "evidenceRefs": [
@@ -3166,7 +3182,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "WebGPU 主用与 WebGL2 功能回退已纳入目标范围；裁定时 authorityAtRuling 为 partial，当前机器功能 smoke 不证明代表性硬件兼容或性能水平，二者也不属于 V0.5 验收。"
+        "3D 渲染线已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 semantic scene、WebGPU/WebGL2 后端与视口保留为标记 V0.6 只读预览；裁定时 authorityAtRuling 为 partial，当前机器功能 smoke 不证明代表性硬件兼容或性能水平。"
       ]
     },
     {
@@ -3231,16 +3247,16 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 
 | Gate ID | capability | 当前切片 | gateState | applicability | Evidence/blockerRefs | 后继要求 |
 |---|---|---|---|---|---|---|
-| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-04` | `passed` | `in-scope` | `EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER` | 27 项、Sekiro 1.6 版本族、语义编辑/只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、功能性渲染验收、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界继续冻结；工程复核与普通工程提交不得触发用户重新授权 |
+| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-05` | `passed` | `in-scope` | `EV-REL-SCOPE-20260731-TEXT-FIRST` | 27 项范围矩阵继续冻结，其中 12 项已裁定延期 V0.6（`SCOPE-MSB`、animation/TAE/ESD 三项、资产线 7 项、`SCOPE-RENDERING`）；V0.5 收窄为 BND4/FMG/PARAM(gameparam)/EMEVD/script 五编辑器的文本优先边界，script 为只读 + 整内层文件替换；Sekiro 1.6 版本族、只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界不变；工程复核与普通工程提交不得触发用户重新授权 |
 | `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-INTEGRATION-04` | `open` | `in-scope` | — | BND4/FMG/PARAM 12 case + EMEVD/MSB 8 case 已通过；继续真实断电/大容量/安装升级恢复 |
 | `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-02` | `open` | `in-scope` | — | KRAK 重压/写回/roundtrip 已完成；继续组合 mutation/repack 和完整 corpus 验证 |
 | `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-FULL-01`、`W-EMEVD-FMG-PARAM-03` | `open` | `in-scope` | — | EMEVD DSL plan 的 production Bridge/PatchIR transaction 接线已完成；继续完整 EMEDF schema/control-flow、DSL 全局指令级 mutation、UI submit 接线；并行继续 FMG 全语言、全部 ParamType、MSB 实体和回滚 |
-| `REL-D` | 行为动画范围 | `W-BEHAVIOR-MAP-01` | `open` | `in-scope` | — | TAE/ESD 登记样本 native document 已存在；继续 HKX/脚本定位、完整语义/schema、八编辑器接线、writer 与游戏加载矩阵 |
-| `REL-E` | 资产只读与导出矩阵 | `W-FLVER-READ-01` | `open` | `in-scope` | — | FLVER/TPF 登记样本 native document 与部分 native-to-open 导出已存在；继续 MTD/collision/navigation、完整引用和五类只读/导出闭环 |
-| `REL-F` | 编辑器验收 | `W-REL-F-SCALE-02` | `open` | `in-scope` | — | inventory 已精确冻结为八项；继续 BND4/script 工作台、TAE/ESD 语义写链、各编辑器结构化 UI/DSL/完整有界访问和 Electron 真实文档功能验收 |
+| `REL-D` | 行为动画范围 | `W-BEHAVIOR-MAP-01` | `open` | `in-scope` | — | 本 Gate 的 4 个范围条目中 animation/TAE/ESD 三项已延期 V0.6，仅 `SCOPE-BEHAVIOR-SCRIPT` 留在 V0.5，因此 Gate 保持 `open` 而非 `deferred`；后继只要求 script 容器只读证据视图与整内层文件替换的写/重读/回滚/游戏加载闭环。TAE/ESD 登记样本 native document 与延期预览面板保留只读，不得据此声称本版行为语义能力 |
+| `REL-E` | 资产只读与导出矩阵 | `W-FLVER-READ-01` | `deferred` | `deferred-v0.6` | `EV-REL-SCOPE-20260731-TEXT-FIRST` | 整条资产线延期至 V0.6。既有 FLVER/TPF 登记样本 native document、MTD 只读投影与 GLB/PNG/TGA/DDS 导出保留为标记 V0.6 预览且必须只读；V0.6 恢复时继续 collision/navigation、完整引用和五类只读/导出闭环 |
+| `REL-F` | 编辑器验收 | `W-REL-F-SCALE-02` | `open` | `in-scope` | — | inventory 已精确冻结为 BND4/FMG/PARAM/EMEVD/script 五项（script 为只读 + 整内层文件替换）；继续 BND4/script 工作台、各编辑器结构化 UI/DSL/完整有界访问和 Electron 真实文档功能验收。msb/tae/esd/flver 为 V0.6 延期只读预览，不计入本 Gate 验收，其写入路径必须在 contract、shared 清单与主进程 IPC 三层失败关闭 |
 | `REL-G` | 双协议 AI | `W-AI-CONFORMANCE-03` | `open` | `in-scope` | — | 错误/取消/超时/限额 10 case 已完成；继续真实工作区多步 typed mutation 矩阵 |
 | `REL-H` | 安装与运行 | `W-ME3-INSTALL-04` | `open` | `in-scope` | — | profile/launch/terminate adapter 已完成；继续 NSIS 安装/升级/卸载和真实 Sekiro 会话 |
-| `REL-I` | 渲染功能闭环 | `W-RENDER-FUNCTIONAL-02` | `open` | `in-scope` | — | 在项目所有者当前机器完成真实 semantic scene 的 WebGPU capability 主路径、WebGL2 功能回退、picking、transform 更新与资源释放；不要求硬件档位或性能预算 |
+| `REL-I` | 渲染功能闭环 | `W-RENDER-FUNCTIONAL-02` | `deferred` | `deferred-v0.6` | `EV-REL-SCOPE-20260731-TEXT-FIRST` | 3D 渲染延期至 V0.6。MSB 与资产线同时延期后，V0.5 无 in-scope 3D 编辑目标。renderer-independent semantic scene、render packet 与 Three.js WebGPU/WebGL2 骨架保留不推翻；V0.6 恢复时继续真实 FLVER 渲染、picking、transform 更新与资源释放闭环 |
 | `REL-COMPLIANCE` | 内部测试构建合规 | `W-REL-COMPLIANCE-02` | `open` | `in-scope` | — | 许可证文本 complete + NSIS 构建已完成；继续 installer lifecycle 验证和 package tree 扫描 |
 
 后继要求列不是第二套进度口径；它只提示同一 Gate 在既有切片完成后仍需的下游切片。补货规则见 `docs/AGENT_EXECUTION_PLAYBOOK.md` §8，全阻塞终局见其 §9。
@@ -3256,12 +3272,50 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 | `BLK-NATIVE-FIXTURE-CORPUS` | `private-corpus` | 历史：`REL-A`、`W-A-RECOVERY-NATIVE-02`、`W-PARAM-META-NATIVE-01`；当前无活动引用 | 历史记录；当前由工程方消费既有本机 registry | 已解除：合法仓库外 locator registry、内容哈希和 native/PARAM 样本已可用 | private native gate 实际运行并保持 `partial`；未通过项转为工程切片，不能因 registry 存在而冒充完成 | 本机 registry/内容版本变化或用户撤回访问时重新打开 | `EV-A-RECOVERY-20260724`、`EV-C-PARAM-7BD`、`EV-PUBLIC-CONTRACTS-20260725`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` |
 | `BLK-PARAM-METADATA-SOURCE` | `license` | 历史：`W-PARAM-META-SOURCE-02`；当前无活动引用 | 历史记录；当前 adapter 已完成 | 已解除：固定 Smithbox 2.2.4 本机导入、commit/release/archive/tree/license digest 与不再分发边界 | `npm run test:smithbox-param-metadata-source` 覆盖真实导入及缺失/错版/篡改/升级/撤回；导入数据仍在仓库外 | 用户修改来源、版本或再分发边界时重新打开 | `EV-PUBLIC-CONTRACTS-20260725`、`EV-REL-SCOPE-20260730-OWNER-INPUTS`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` |
 | `BLK-EMEVD-LAYER-CORPUS` | `private-corpus` | 历史：`W-EMEVD-LAYER-01`；当前无活动引用 | 历史记录；当前由工程方在既有 corpus 内发现 | 已解除用户输入：合法仓库外 corpus root/registry 已可用；目标变体未命中时保持工程缺口 | 带哈希 `layerCount != 0` case 的只读解析、no-op roundtrip 和冲突失败关闭断言通过 | 本机 corpus 被撤回或后续确认目标变体确实不存在且需范围裁定时重新打开 | `EV-C-EMEVD-DSL-20260724`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` |
-| `BLK-BEHAVIOR-CORPUS` | `private-corpus` | 历史：`REL-D`、`W-BEHAVIOR-MAP-01`；当前无活动引用 | 历史记录；当前由工程方推进 | 已解除用户输入：本机 registry 已支持登记 TAE/ESD native document，并观察到 HKX/Lua 条目 | 当前 TAE/ESD 仍为注册样本 candidate；完整语义、HKX/脚本引用、schema/typecheck、writer 和游戏加载继续在 `W-BEHAVIOR-MAP-01` 失败关闭 | 本机 corpus 被撤回或新增声明变体时重新打开 | `EV-OWNER-INPUTS-IMPLEMENTATION-20260730` |
-| `BLK-ASSET-CORPUS` | `private-corpus` | 历史：`REL-E`、`W-FLVER-READ-01`；当前无活动引用 | 历史记录；当前由工程方推进 | 已解除用户输入：本机 registry 已支持登记 FLVER/TPF native document，其他声明资产由工程方继续定位 | 当前 FLVER/TPF 只读覆盖为 partial；MTD/collision/navigation、完整材质/引用、边界诊断和全 corpus no-op 继续失败关闭 | 本机 corpus 被撤回或新增声明变体时重新打开 | `EV-E-ASSET-7BD`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` |
+| `BLK-BEHAVIOR-CORPUS` | `private-corpus` | 历史：`REL-D`、`W-BEHAVIOR-MAP-01`；当前无活动引用 | 历史记录；当前由工程方推进 | 已解除用户输入：本机 registry 已支持登记 TAE/ESD native document，并观察到 HKX/Lua 条目 | TAE/ESD 已延期 V0.6，其完整语义不再是 V0.5 通过条件；V0.5 只在 `W-BEHAVIOR-MAP-01` / `W-SCRIPT-READONLY-01` 对 script 容器枚举、字节码识别与整内层文件替换失败关闭 | 本机 corpus 被撤回、新增声明变体，或 V0.6 恢复 TAE/ESD 时重新打开 | `EV-OWNER-INPUTS-IMPLEMENTATION-20260730`、`EV-REL-SCOPE-20260731-TEXT-FIRST` |
+| `BLK-ASSET-CORPUS` | `private-corpus` | 历史：`REL-E`、`W-FLVER-READ-01`；当前无活动引用 | 历史记录；整条资产线已延期 V0.6 | 已解除用户输入：本机 registry 已支持登记 FLVER/TPF native document，其他声明资产由工程方继续定位 | 资产线已延期，本版不判定；既有 FLVER/TPF 只读覆盖保持 partial 且必须只读。V0.6 恢复后 MTD/collision/navigation、完整材质/引用、边界诊断和全 corpus no-op 继续失败关闭 | 本机 corpus 被撤回、新增声明变体，或 V0.6 恢复资产线时重新打开 | `EV-E-ASSET-7BD`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730`、`EV-REL-SCOPE-20260731-TEXT-FIRST` |
 | `BLK-REL-B-CORPUS` | `private-corpus` | 历史：`REL-B`、`W-REL-B-CORPUS-01`；当前无活动引用 | 历史记录；当前由工程方推进 | 已解除：仓库外 `sekiro-1-6-owner-corpus-v1` 已生成并覆盖当前 DFLT/BND4/KRAK 集合 | 214/214 分类与 read/no-op/CRUD 已执行，且一个登记 KRAK rename/repack/roundtrip 已独立验证；组合 mutation、未知字段保持、恢复和完整 corpus 写回继续失败关闭 | registry/内容版本变化、用户撤回访问或新增变体时重新打开 | `EV-B-DFLT-7BD`、`EV-B-BND4-7BD`、`EV-B-KRAK-20260724`、`EV-OWNER-INPUTS-IMPLEMENTATION-20260730` |
 | `BLK-MODEL-CREDENTIALS` | `credential` | 历史：`W-AI-REAL-01`；当前无活动引用 | 历史记录；用户无需提供 | 已解除：默认配置留空，真实 provider endpoint/key 不属于 V0.5 验收 | `W-AI-REAL-01` 已被取代；`W-AI-CONFORMANCE-02` 已在本地 contract servers 上完成并保持 `partial`，不证明第三方服务 | 用户日后主动把真实 provider live smoke 加回范围时重新打开 | `EV-G-FAKE-7BD`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` |
-| `BLK-RENDER-HARDWARE` | `hardware` | 历史：`W-RENDER-BENCH-01`；当前无活动引用 | 历史记录；用户无需提供 | 已解除：代表性硬件档位、地图性能基准和量化预算不属于 V0.5 验收 | `W-RENDER-BENCH-01` 已被取代；`W-RENDER-FUNCTIONAL-02` 只要求所有者当前机器的功能闭环并保持 `ready` | 用户日后主动把硬件/性能矩阵加回范围时重新打开 | `EV-I-RENDER-7BD`、`EV-REL-SCOPE-20260730-OWNER-INPUTS` |
-| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`、`W-REL-SCOPE-RULING-02`、`W-REL-SCOPE-RULING-03`、`W-REL-SCOPE-RULING-04`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵、未签名 NSIS、固定 Smithbox 本机 metadata、空 provider 凭据、功能性渲染边界及无编辑器/installer 量化预算均已批准 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定 | `EV-REL-SCOPE-20260730`、`EV-REL-SCOPE-20260730-UNSIGNED`、`EV-REL-SCOPE-20260730-OWNER-INPUTS`、`EV-REL-SCOPE-20260730-NO-QUANT-BUDGETS`、`EV-AUTONOMOUS-GOVERNANCE-20260731`、`EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER` |
+| `BLK-RENDER-HARDWARE` | `hardware` | 历史：`W-RENDER-BENCH-01`；当前无活动引用 | 历史记录；用户无需提供 | 已解除：代表性硬件档位、地图性能基准和量化预算不属于 V0.5 验收 | `W-RENDER-BENCH-01` 已被取代；渲染线已延期 V0.6，`W-RENDER-FUNCTIONAL-02` 为 `deferred`，本版不判定渲染功能闭环 | 用户日后主动把硬件/性能矩阵加回范围，或 V0.6 恢复渲染线时重新打开 | `EV-I-RENDER-7BD`、`EV-REL-SCOPE-20260730-OWNER-INPUTS`、`EV-REL-SCOPE-20260731-TEXT-FIRST` |
+| `BLK-SCOPE-RULING` | `user-ruling` | 历史：`REL-SCOPE`、`W-REL-SCOPE-RULING-01`、`W-REL-SCOPE-RULING-02`、`W-REL-SCOPE-RULING-03`、`W-REL-SCOPE-RULING-04`、`W-REL-SCOPE-RULING-05`；当前无活动引用 | 用户 | 已完成：V0.5 支持/排除矩阵、未签名 NSIS、固定 Smithbox 本机 metadata、空 provider 凭据、功能性渲染边界、无编辑器/installer 量化预算，以及文本优先收窄与 12 项范围条目延期 V0.6 均已批准 | `npm run test:release-scope` exit 0，且 `REL-SCOPE` 引用带 `scope-ruling:user-approved` 的 fresh sealed Evidence；延期 Gate 引用带对应 `scope-deferral:<GateId>:V0.6:user-approved` 的 fresh sealed Evidence | 用户新增或修改任何冻结范围裁定，或要求把已延期能力提前拉回 V0.5 | `EV-REL-SCOPE-20260730`、`EV-REL-SCOPE-20260730-UNSIGNED`、`EV-REL-SCOPE-20260730-OWNER-INPUTS`、`EV-REL-SCOPE-20260730-NO-QUANT-BUDGETS`、`EV-AUTONOMOUS-GOVERNANCE-20260731`、`EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER`、`EV-REL-SCOPE-20260731-TEXT-FIRST` |
+
+### 18.5 V0.6 延期承接索引
+
+本节是**派生索引**，不是新的 milestone、范围口径或进度文档。唯一权威仍是 §18.2.1 范围矩阵的 `proposedSupport=deferred` + `deferredToRelease` 字段、§18.3 的 `gateState=deferred` 与 §13.1 的 `lifecycle=deferred`。本节只把这些已有记录汇总成可读清单，避免接手者从散落条目里反推 V0.6 范围。
+
+`npm run test:v06-deferral-index` 校验本节与上述权威记录逐项一致：条目缺失、多写、目标版本不符或权威侧状态变化后未同步，都会失败关闭。因此本节不能成为独立漂移的第二口径。
+
+延期到 V0.6 的 12 个范围条目（全部 `operations=[]`，`authorityAtRuling` 为裁定当时的真实上限，不是承诺）：
+
+| 范围条目 | 目标版本 | 裁定时 authority | 归属线 |
+|---|---|---|---|
+| `SCOPE-MSB` | V0.6 | `partial` | C-MSB |
+| `SCOPE-BEHAVIOR-ANIMATION` | V0.6 | `unverified` | D-BEHAVIOR |
+| `SCOPE-BEHAVIOR-TAE` | V0.6 | `candidate` | D-BEHAVIOR |
+| `SCOPE-BEHAVIOR-ESD` | V0.6 | `candidate` | D-BEHAVIOR |
+| `SCOPE-ASSETS` | V0.6 | `candidate` | E-ASSET |
+| `SCOPE-ASSET-FLVER` | V0.6 | `candidate` | E-ASSET |
+| `SCOPE-ASSET-TPF` | V0.6 | `unverified` | E-ASSET |
+| `SCOPE-ASSET-MTD` | V0.6 | `unverified` | E-ASSET |
+| `SCOPE-ASSET-COLLISION` | V0.6 | `unverified` | E-ASSET |
+| `SCOPE-ASSET-NAVIGATION` | V0.6 | `unverified` | E-ASSET |
+| `SCOPE-ASSET-OPEN-CONVERSION` | V0.6 | `candidate` | E-ASSET |
+| `SCOPE-RENDERING` | V0.6 | `partial` | I-RENDER |
+
+延期 Gate：`REL-E`（资产只读与导出矩阵）、`REL-I`（渲染功能闭环）。两者均为 `gateState=deferred` + `applicability=deferred-v0.6`，本版不判定，也不阻止 V0.5 完成。`REL-C` 与 `REL-D` 保持 `open`：它们各自仍有留在 V0.5 的支持条目（EMEVD/FMG/PARAM 与 `SCOPE-BEHAVIOR-SCRIPT`），因此不整体延期。
+
+延期切片：`W-MSB-SCENE-01`、`W-FLVER-READ-01`、`W-RENDER-FUNCTIONAL-02`（均 `lifecycle=deferred`）。
+
+延期只读预览编辑器：`msb`、`tae`、`esd`、`flver`。四者已实现的读取与投影保留并在 UI 标记为 V0.6 预览，`countedAsReleaseEditor=false`，写入在 `editorCapabilityContract.releaseWriteEnabled`、`@soulforge/shared` 的 `DEFERRED_PREVIEW_EDITOR_KINDS` 与主进程 `EDITOR_DEFERRED_TO_V06_READONLY` 三层失败关闭。
+
+V0.6 恢复任一条目时的强制顺序：
+
+1. 取得用户裁定，把范围条目从 `deferred` 改回 `supported` 并写回真实 `operations`；
+2. 同步 §18.3 Gate 与 §13.1 切片脱离 `deferred`，其 `required validation` 重新进入 §13.4 未冻结清单；
+3. 需要写能力时，先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 `releaseWriteEnabled`；
+4. 重新封存 Evidence。**已延期期间保留的"曾经验证过"记录（如 MSB `msb_set_part_transform`）不能直接当作恢复后的验证证据，必须重跑。**
+
+延期不清偿技术缺口，不降低 native authority、验证、回滚或生态集成标准。
 
 ---
 
