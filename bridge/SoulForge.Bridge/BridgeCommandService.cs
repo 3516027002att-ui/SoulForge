@@ -407,6 +407,36 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-flver-texture-slots")
+        {
+            try
+            {
+                var document = FlverNativeDocument.ReadFile(file);
+                var slots = document.GetTextureSlots();
+                var textures = slots.Select(t => new
+                {
+                    index = t.Index,
+                    type = t.Type,
+                    path = t.Path,
+                    materialIndex = t.MaterialIndex
+                }).ToArray();
+                return BridgeResult<object>.Partial(file, "chr", new[]
+                {
+                    new Diagnostic("info", "FLVER_TEXTURE_SLOTS_EXTRACTED",
+                        $"FLVER 纹理槽位已提取；textureCount={slots.Count}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    textureCount = slots.Count,
+                    textures
+                });
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "chr", "FLVER_TEXTURE_SLOTS_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-esd-document")
         {
             try

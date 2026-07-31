@@ -124,9 +124,32 @@ async function main(): Promise<void> {
     }
   }
 
+  // Extract and verify the texture slot table (FLVER2 layout).
+  const texSlots = await runBridge<Record<string, unknown>>({
+    command: 'read-flver-texture-slots',
+    filePath: out,
+    allowedRoots: [tmp],
+    timeoutMs: 120_000
+  });
+  if (texSlots.parseStatus === 'failed' || !texSlots.data) {
+    throw new Error(`FLVER texture slots read failed: ${JSON.stringify(texSlots.diagnostics)}`);
+  }
+  const slotTextures = (texSlots.data.textures as Array<{
+    index: number; type: string; path: string; materialIndex: number;
+  }>) ?? [];
+  const slotCount = (texSlots.data.textureCount as number) ?? 0;
+  if (slotCount <= 0 || slotTextures.length !== slotCount) {
+    throw new Error(`FLVER texture slot count mismatch: textureCount=${slotCount}, textures=${slotTextures.length}`);
+  }
+  // Every texture must carry a non-empty shader slot type and a valid material assignment.
+  const typedSlots = slotTextures.filter((t) => t.type && !t.type.startsWith('<')).length;
+  if (typedSlots === 0) {
+    throw new Error('FLVER texture table has no shader slot types (offset calculation likely wrong)');
+  }
+
   console.log(JSON.stringify({
     ok: true,
-    message: `FLVER native mesh 提取验证通过（mesh[0]: ${vertexCount} vertices, ${posBytes.length} bytes positions; skeleton: ${skBoneCount} bones）`,
+    message: `FLVER native mesh 提取验证通过（mesh[0]: ${vertexCount} vertices, ${posBytes.length} bytes positions; skeleton: ${skBoneCount} bones; texture slots: ${slotCount}）`,
     meshCount,
     vertexCount,
     positionBytes: posBytes.length,
@@ -135,6 +158,8 @@ async function main(): Promise<void> {
     samplePositions: Array.from(positions.slice(0, 9)),
     skeletonBoneCount: skBoneCount,
     skeletonRoots: skBones.filter((b) => b.parentIndex === -1).length,
+    textureSlotCount: slotCount,
+    textureSlotsTyped: typedSlots,
     authority: 'candidate',
     roundTrip: doc.diagnostics?.map((d: { code: string }) => d.code)
   }, null, 2));
