@@ -9,7 +9,8 @@ export interface FlverMaterialSummary {
 
 export interface FlverBoneSummary {
   name: string;
-  animBoneIndex: number;
+  parentIndex: number;
+  nextSiblingIndex: number;
 }
 
 export interface FlverMeshSummary {
@@ -125,13 +126,14 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
             {tab === 'bones' && (
               <table className="table">
                 <thead>
-                  <tr><th>名称</th><th>动画骨骼索引</th></tr>
+                  <tr><th>名称</th><th>父骨骼</th><th>下一兄弟</th></tr>
                 </thead>
                 <tbody>
                   {filteredBones.slice(0, 200).map((b, i) => (
                     <tr key={i}>
                       <td>{b.name}</td>
-                      <td>{b.animBoneIndex}</td>
+                      <td>{b.parentIndex}</td>
+                      <td>{b.nextSiblingIndex}</td>
                     </tr>
                   ))}
                 </tbody>

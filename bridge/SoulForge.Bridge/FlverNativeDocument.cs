@@ -645,11 +645,11 @@ internal sealed class FlverNativeDocument
             float rotationY = ReadFloat32(source, entryOffset + 0x14);
             float rotationZ = ReadFloat32(source, entryOffset + 0x18);
             short parentIndex = ReadInt16(source, entryOffset + 0x1C);
-            short animBoneIndex = ReadInt16(source, entryOffset + 0x2C);
+            short nextSiblingIndex = ReadInt16(source, entryOffset + 0x2C);
 
             string name = ReadUtf16AtAbsoluteOffset(source, nameOffset);
 
-            bones.Add(new FlverBoneEntry(i, name, animBoneIndex, parentIndex,
+            bones.Add(new FlverBoneEntry(i, name, nextSiblingIndex, parentIndex,
                 translationX, translationY, translationZ,
                 rotationX, rotationY, rotationZ));
         }
@@ -745,7 +745,8 @@ internal sealed class FlverNativeDocument
             bones = Bones.Take(SampleLimit).Select(b => new
             {
                 name = b.Name,
-                animBoneIndex = b.AnimBoneIndex
+                parentIndex = b.ParentIndex,
+                nextSiblingIndex = b.NextSiblingIndex
             }).ToArray(),
             bonesTruncated = Bones.Count > SampleLimit,
             meshes = Meshes.Take(SampleLimit).Select(m => new
@@ -812,7 +813,7 @@ internal sealed record FlverMaterialEntry(
     int Index, string Name, string MtdPath, int TextureCount, int FirstTextureIndex);
 
 internal sealed record FlverBoneEntry(
-    int Index, string Name, short AnimBoneIndex, short ParentIndex,
+    int Index, string Name, short NextSiblingIndex, short ParentIndex,
     float TranslationX, float TranslationY, float TranslationZ,
     float RotationX, float RotationY, float RotationZ);
 
