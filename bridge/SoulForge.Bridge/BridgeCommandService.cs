@@ -386,7 +386,7 @@ internal sealed class BridgeCommandService
                     index = b.Index,
                     name = b.Name,
                     parentIndex = b.ParentIndex,
-                    animBoneIndex = b.AnimBoneIndex,
+                    nextSiblingIndex = b.NextSiblingIndex,
                     translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
                     rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
                 }).ToArray();
