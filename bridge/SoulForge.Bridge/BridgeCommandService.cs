@@ -437,6 +437,37 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-flver-dummies")
+        {
+            try
+            {
+                var document = FlverNativeDocument.ReadFile(file);
+                var dummies = document.GetDummies();
+                var entries = dummies.Select(d => new
+                {
+                    index = d.Index,
+                    position = new[] { d.PositionX, d.PositionY, d.PositionZ },
+                    referenceId = d.ReferenceId,
+                    parentBoneIndex = d.ParentBoneIndex,
+                    attachBoneIndex = d.AttachBoneIndex
+                }).ToArray();
+                return BridgeResult<object>.Partial(file, "chr", new[]
+                {
+                    new Diagnostic("info", "FLVER_DUMMIES_EXTRACTED",
+                        $"FLVER Dummy 挂点已提取；dummyCount={dummies.Count}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    dummyCount = dummies.Count,
+                    dummies = entries
+                });
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "chr", "FLVER_DUMMIES_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-esd-document")
         {
             try
