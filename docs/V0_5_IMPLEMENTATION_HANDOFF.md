@@ -1002,7 +1002,7 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 - 本文代码块内 `npm run <script>` 必须存在于 `package.json`；
 - 本文不得出现 Oodle DLL 文件名、用户主目录绝对路径、API key 或私钥内容。
 
-以下项目仍需人工审查，门禁通过不代表本文全部一致（脚本输出的 `manualReviewStillRequired` 与此对齐）：
+以下项目仍需工程方语义复核，门禁通过不代表本文全部一致（脚本输出的 `engineeringReviewStillRequired`、`reviewOwner=engineering-agent` 与 `userActionRequired=false` 与此对齐）。它们不是用户验收项，也不得出现在“需要用户处理”报告中：
 
 - Evidence 的命令、样本、结论、Git 引用和用户范围批准是否真实，实施记录是否完整，而不只是结构合法；
 - 路线 capability、当前前沿、production 调用链和 authority 上限是否与当前实现语义一致；
@@ -1825,6 +1825,7 @@ handoffSha256BeforeEvidenceAppend=<handoffSha256BeforeEvidenceAppend>
 - 路线：REL-SCOPE 治理维护；BEGIN/END 标记内的 27 项冻结范围 JSON、authority 上限和 unsupported 边界均未变化
 - 已实现：passed Gate freshness 改为显式主题域比较；REL-SCOPE 只跟踪唯一范围 JSON、范围 verifier/fixtures、handoff freshness verifier/fixtures 与指纹生成器；普通功能提交、其他交接章节、运行时改写文件和未跟踪产物不再使范围 Gate stale
 - 已实现：`ready/active/open/passed` 且没有活动 `blockerRefs` 的切片或 Gate 一旦要求用户裁定、授权、提供或介入，`test:handoff-integrity` 以 `USER_ACTION_WITHOUT_ACTIVE_BLOCKER` 失败；EMEDF 类型源定位、许可证审计、external-only adapter 和 Evidence 重封存明确归工程方
+- 已实现：handoff 输出将未自动覆盖的语义复核显式归属 `engineering-agent`，并固定 `userActionRequired=false`；不得再把旧 `manualReviewStillRequired` 字段解释成需要项目所有者操作
 - 已修复：嵌套标题与标记块提取、Git 大文件历史读取 buffer、scope-ruling Evidence 与无关 Evidence 的 freshness 绑定、Evidence 自身引用造成的重封存循环，以及缺失的 §18 标题导致 release-scope Evidence 索引为空
 - 已验证：release-scope 35 个正/负 fixture、handoff 47 个正/负 fixture、proposal/strict scope、最低公开回归、`git diff --check` 与追加后的完整 handoff 门禁均通过
 - authority 变化：无；只继承用户已经批准且未改变的 `scope-ruling:user-approved`，不产生新范围裁定

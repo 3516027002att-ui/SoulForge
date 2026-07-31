@@ -252,7 +252,7 @@ const checkedRules = [
   '交接书和执行手册不得包含 Oodle DLL 文件名、用户主目录路径、高置信 token 或私钥内容'
 ];
 
-const manualReviewStillRequired = [
+const engineeringReviewStillRequired = [
   'Evidence 的命令、样本、结论、Git 引用和用户范围批准是否真实，实施记录是否完整，而不只是结构合法',
   '路线 capability、当前前沿、production 调用链和 authority 上限是否与当前实现语义一致',
   '是否引入了交接书禁止的平行 milestone、task、status 或 next-actions 文档'
@@ -266,8 +266,10 @@ const result = {
     : 'handoff 一致性门禁失败',
   checkedRules,
   findings,
-  manualReviewStillRequired,
-  note: '通过只表示列出的确定性检查成立；manualReviewStillRequired 仍需人工审查。'
+  engineeringReviewStillRequired,
+  reviewOwner: 'engineering-agent',
+  userActionRequired: false,
+  note: '通过只表示列出的确定性检查成立；剩余语义复核由工程方负责，不构成用户介入项。'
 };
 
 console.log(JSON.stringify(result, null, 2));

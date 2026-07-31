@@ -154,7 +154,7 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 1. 明确要守的**不变量**，只做零误报、可确定性判定的检查。
 2. 参照既有 `scripts/verify-*.mjs` 范式（ESM / node:fs / findings / JSON / exitCode）。
 3. **必做负向测试**：构造畸形样本，确认门禁 `exit 1` 且命中每类检查码。
-4. 未覆盖项诚实列入输出（如 `manualReviewStillRequired`），不假装全覆盖。
+4. 未覆盖项诚实列入 `engineeringReviewStillRequired`，同时输出 `reviewOwner=engineering-agent` 与 `userActionRequired=false`；工程语义复核不得转嫁给用户。
 5. 接入 `package.json` 与交接书 §15.1 矩阵。
 6. L6 记门禁诚实性证据。
 
