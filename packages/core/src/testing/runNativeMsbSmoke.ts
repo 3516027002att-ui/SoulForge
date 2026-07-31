@@ -258,6 +258,68 @@ async function main(): Promise<void> {
     throw new Error('event count changed by region write');
   }
 
+  // set_part_transform: rotation/scale fields must survive and be re-read
+  // verified by the writer (rotX/scaleX/scaleY/scaleZ).
+  if (part.rotX === undefined || part.scaleX === undefined
+    || part.scaleY === undefined || part.scaleZ === undefined) {
+    throw new Error('part envelope missing rot/scale fields');
+  }
+  const nextRotX = part.rotX + 0.5;
+  const nextScaleX = part.scaleX * 1.05;
+  const nextScaleY = part.scaleY * 1.1;
+  const nextScaleZ = part.scaleZ * 0.95;
+  const stagedTransform = join(staging, 'm10.transform.msb');
+  const writtenTransform = await runBridge({
+    command: 'write-msb',
+    filePath: msbPath,
+    allowedRoots: [root, staging],
+    writableRoots: [staging],
+    timeoutMs: 120_000,
+    commandOptions: {
+      outputPath: stagedTransform,
+      expectedDocumentHash: read.data.sourceHash,
+      mutation: 'set_part_transform',
+      partName: part.name,
+      posX: nextX,
+      posY: nextY,
+      posZ: nextZ,
+      rotX: nextRotX,
+      scaleX: nextScaleX,
+      scaleY: nextScaleY,
+      scaleZ: nextScaleZ
+    }
+  });
+  if (!writtenTransform.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
+    throw new Error(`MSB transform write failed: ${JSON.stringify(writtenTransform.diagnostics)}`);
+  }
+  const afterTransform = await runBridge<MsbEnvelope>({
+    command: 'read-msb-document',
+    filePath: stagedTransform,
+    allowedRoots: [staging],
+    timeoutMs: 120_000
+  });
+  const updatedTransform = afterTransform.data?.parts.find((p) => p.name === part.name);
+  if (!updatedTransform) throw new Error('transform-mutated part missing on reread');
+  if (!close(updatedTransform.posX, nextX) || !close(updatedTransform.posY, nextY)
+    || !close(updatedTransform.posZ, nextZ)) {
+    throw new Error(`transform position not updated: ${JSON.stringify(updatedTransform)}`);
+  }
+  if (updatedTransform.rotX === undefined || updatedTransform.scaleX === undefined
+    || updatedTransform.scaleY === undefined || updatedTransform.scaleZ === undefined) {
+    throw new Error('transform reread envelope missing rot/scale fields');
+  }
+  if (!close(updatedTransform.rotX, nextRotX)) {
+    throw new Error(`transform rotX not updated: ${JSON.stringify(updatedTransform)}`);
+  }
+  if (!close(updatedTransform.scaleX, nextScaleX)
+    || !close(updatedTransform.scaleY, nextScaleY)
+    || !close(updatedTransform.scaleZ, nextScaleZ)) {
+    throw new Error(`transform scale not updated: ${JSON.stringify(updatedTransform)}`);
+  }
+  if (afterTransform.data?.partCount !== read.data.partCount) {
+    throw new Error('part count changed by transform write');
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: 'MSB models/parts/regions/events 解析与 part/region 位置写入重读验证通过',
@@ -273,6 +335,11 @@ async function main(): Promise<void> {
     position: {
       before: { x: part.posX, y: part.posY, z: part.posZ },
       after: { x: updated.posX, y: updated.posY, z: updated.posZ }
+    },
+    transform: {
+      rotX: updatedTransform.rotX,
+      scale: [updatedTransform.scaleX, updatedTransform.scaleY, updatedTransform.scaleZ],
+      rereadVerified: true
     },
     authority: after.data?.authority,
     entityEdit: read.data.entityEdit,

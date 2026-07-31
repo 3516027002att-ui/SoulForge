@@ -51,7 +51,7 @@ internal static class EmevdNativeWriter
             var guard = 0;
             while (renameMap.TryGetValue(sourceId, out var mapped) && mapped != patch.NewEventId!.Value && guard++ < 64)
                 sourceId = mapped;
-            renameMap[sourceId] = patch.NewEventId.Value;
+            renameMap[sourceId] = patch.NewEventId!.Value;
         }
 
         foreach (var patch in patches)
