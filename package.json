@@ -71,6 +71,8 @@
     "test:flver-candidate": "npm run test:flver-candidate -w @soulforge/core",
     "test:performance-baseline": "npm run test:performance-baseline -w @soulforge/core",
     "release:manifest": "node scripts/generate-release-compliance-manifest.mjs",
+    "release:installer:manifest": "npm run release:installer:manifest -w @soulforge/desktop",
+    "test:installer-lifecycle": "npm run test:installer-lifecycle -w @soulforge/desktop",
     "test:release-content": "node scripts/verify-release-package-content.mjs",
     "test:release-compliance-fixtures": "node scripts/verify-release-compliance-fixtures.mjs",
     "test:portable-packaging-config-fixtures": "node scripts/verify-portable-packaging-config-fixtures.mjs",
