@@ -5,17 +5,12 @@
  * npm script 与敏感内容扫描，不维护第二份人工状态清单。
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import {
   collectSealAnchors,
-  extractHandoffMarkedSubject,
-  extractHandoffSectionSubject,
-  gateSubjectRegistry,
-  handoffBlockSubjectRef,
-  handoffSectionSubjectRef,
   validateHandoffGovernance
 } from './handoff-integrity-lib.mjs';
+import { buildFreshnessContext } from './governance/freshnessContext.mjs';
 
 const root = process.cwd();
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
@@ -74,113 +69,14 @@ checkLinks(README, readme);
 checkLinks(HANDOFF, handoff);
 checkLinks(PLAYBOOK, playbook);
 
-function runGit(args) {
-  return spawnSync('git', args, {
-    cwd: root,
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-    windowsHide: true
-  });
-}
-
-function normalizeSubjectText(value) {
-  return value?.replaceAll('\r\n', '\n') ?? null;
-}
-
-function buildFreshnessContext(markdown) {
-  const registry = gateSubjectRegistry();
-  const anchors = {};
-  const currentSections = new Map(registry.allHandoffSections.map((sectionId) => [
-    sectionId,
-    normalizeSubjectText(extractHandoffSectionSubject(markdown, sectionId))
-  ]));
-  const currentBlocks = new Map(registry.allHandoffBlocks.map((block) => [
-    block.id,
-    normalizeSubjectText(extractHandoffMarkedSubject(markdown, block.beginMarker, block.endMarker))
-  ]));
-
-  for (const anchor of collectSealAnchors(markdown)) {
-    const ancestor = runGit(['merge-base', '--is-ancestor', anchor, 'HEAD']);
-    if (ancestor.status === 1) {
-      anchors[anchor] = { isAncestor: false, subjectScanAvailable: true, changedSubjects: [] };
-      continue;
-    }
-    if (ancestor.status !== 0) {
-      anchors[anchor] = { isAncestor: false, subjectScanAvailable: false, changedSubjects: [] };
-      continue;
-    }
-
-    const changedSubjects = new Set();
-    let subjectScanAvailable = true;
-    if (registry.allFiles.length > 0) {
-      const diff = runGit([
-        'diff',
-        '--name-only',
-        '--no-ext-diff',
-        '--no-textconv',
-        '--no-renames',
-        anchor,
-        '--',
-        ...registry.allFiles
-      ]);
-      if (diff.status !== 0) {
-        subjectScanAvailable = false;
-      } else {
-        for (const path of diff.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
-          changedSubjects.add(path.replaceAll('\\', '/'));
-        }
-      }
-    }
-
-    if (registry.allHandoffSections.length > 0) {
-      const historical = runGit(['show', `${anchor}:${HANDOFF}`]);
-      if (historical.status !== 0) {
-        subjectScanAvailable = false;
-      } else {
-        for (const sectionId of registry.allHandoffSections) {
-          const historicalSection = normalizeSubjectText(
-            extractHandoffSectionSubject(historical.stdout, sectionId)
-          );
-          const currentSection = currentSections.get(sectionId);
-          if (historicalSection === null || currentSection === null) {
-            subjectScanAvailable = false;
-          } else if (historicalSection !== currentSection) {
-            changedSubjects.add(handoffSectionSubjectRef(sectionId));
-          }
-        }
-      }
-    }
-
-    if (registry.allHandoffBlocks.length > 0) {
-      const historical = runGit(['show', `${anchor}:${HANDOFF}`]);
-      if (historical.status !== 0) {
-        subjectScanAvailable = false;
-      } else {
-        for (const block of registry.allHandoffBlocks) {
-          const historicalBlock = normalizeSubjectText(
-            extractHandoffMarkedSubject(historical.stdout, block.beginMarker, block.endMarker)
-          );
-          const currentBlock = currentBlocks.get(block.id);
-          if (historicalBlock === null || currentBlock === null) {
-            subjectScanAvailable = false;
-          } else if (historicalBlock !== currentBlock) {
-            changedSubjects.add(handoffBlockSubjectRef(block.id));
-          }
-        }
-      }
-    }
-
-    anchors[anchor] = {
-      isAncestor: true,
-      subjectScanAvailable,
-      changedSubjects: [...changedSubjects].sort()
-    };
-  }
-  return { anchors };
-}
-
 if (handoff !== null) {
-  const freshnessContext = buildFreshnessContext(handoff);
+  // 上下文构建与 JSON 门禁共用同一实现；差异只在锚点来源：本门禁的证据表在
+  // markdown §17.1，JSON 门禁的在 evidence.jsonl。
+  const freshnessContext = buildFreshnessContext({
+    root,
+    handoffMarkdown: handoff,
+    anchors: collectSealAnchors(handoff)
+  });
   findings.push(...validateHandoffGovernance(handoff, {
     source: HANDOFF,
     freshnessContext

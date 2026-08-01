@@ -12,115 +12,29 @@
  * 与 markdown 门禁共用同一份上下文构建逻辑和同一份判定实现。
  */
 import { readFileSync, existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
-  collectSealAnchors,
-  extractHandoffMarkedSubject,
-  extractHandoffSectionSubject,
   gateSubjectRegistry,
   handoffBlockSubjectRef,
   handoffSectionSubjectRef,
   parseSealBaseline
 } from './handoff-integrity-lib.mjs';
-import { checkEvidenceFreshness } from './governance/governanceRules.mjs';
 import { validateGovernanceData } from './governance/validateGovernanceData.mjs';
 
 const root = process.cwd();
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
 
-function runGit(args) {
-  return spawnSync('git', args, {
-    cwd: root,
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-    windowsHide: true
-  });
-}
-
-const normalize = (value) => value?.replaceAll('\r\n', '\n') ?? null;
-
 /**
- * 构建 freshness 上下文。主题域由 gateSubjectRegistry 登记，其中既有仓库文件
- * 也有 handoff 的章节/标记块——后者仍需读 markdown，因为封存证据锚定的就是
- * 那些块的内容。这不是「门禁还在解析 markdown 判状态」：状态来自 JSON，
- * markdown 只作为被哈希的主题内容。
+ * 主题内容源。主题域由 gateSubjectRegistry 登记，其中既有仓库文件也有 handoff
+ * 的章节/标记块——后者需读 markdown，因为封存证据锚定的就是那些块的内容。
+ * 这不是「门禁还在解析 markdown 判状态」：状态与锚点都来自 JSON，markdown 只
+ * 作为被哈希的主题内容。
  */
-function buildFreshnessContext(markdown) {
-  const registry = gateSubjectRegistry();
-  const anchors = {};
-  const currentSections = new Map(registry.allHandoffSections.map((sectionId) => [
-    sectionId,
-    normalize(extractHandoffSectionSubject(markdown, sectionId))
-  ]));
-  const currentBlocks = new Map(registry.allHandoffBlocks.map((block) => [
-    block.id,
-    normalize(extractHandoffMarkedSubject(markdown, block.beginMarker, block.endMarker))
-  ]));
-
-  for (const anchor of collectSealAnchors(markdown)) {
-    const ancestor = runGit(['merge-base', '--is-ancestor', anchor, 'HEAD']);
-    if (ancestor.status === 1) {
-      anchors[anchor] = { isAncestor: false, subjectScanAvailable: true, changedSubjects: [] };
-      continue;
-    }
-    if (ancestor.status !== 0) {
-      anchors[anchor] = { isAncestor: false, subjectScanAvailable: false, changedSubjects: [] };
-      continue;
-    }
-
-    const changedSubjects = new Set();
-    let subjectScanAvailable = true;
-    if (registry.allFiles.length > 0) {
-      const diff = runGit([
-        'diff', '--name-only', '--no-ext-diff', '--no-textconv', '--no-renames',
-        anchor, '--', ...registry.allFiles
-      ]);
-      if (diff.status !== 0) {
-        subjectScanAvailable = false;
-      } else {
-        for (const path of diff.stdout.split(/\r?\n/).map((v) => v.trim()).filter(Boolean)) {
-          changedSubjects.add(path.replaceAll('\\', '/'));
-        }
-      }
-    }
-
-    if (registry.allHandoffSections.length > 0 || registry.allHandoffBlocks.length > 0) {
-      const historical = runGit(['show', `${anchor}:${HANDOFF}`]);
-      if (historical.status !== 0) {
-        subjectScanAvailable = false;
-      } else {
-        for (const sectionId of registry.allHandoffSections) {
-          const before = normalize(extractHandoffSectionSubject(historical.stdout, sectionId));
-          const after = currentSections.get(sectionId);
-          if (before === null || after === null) subjectScanAvailable = false;
-          else if (before !== after) changedSubjects.add(handoffSectionSubjectRef(sectionId));
-        }
-        for (const block of registry.allHandoffBlocks) {
-          const before = normalize(
-            extractHandoffMarkedSubject(historical.stdout, block.beginMarker, block.endMarker)
-          );
-          const after = currentBlocks.get(block.id);
-          if (before === null || after === null) subjectScanAvailable = false;
-          else if (before !== after) changedSubjects.add(handoffBlockSubjectRef(block.id));
-        }
-      }
-    }
-
-    anchors[anchor] = {
-      isAncestor: true,
-      subjectScanAvailable,
-      changedSubjects: [...changedSubjects].sort()
-    };
-  }
-  return { anchors };
-}
-
 const handoffPath = join(root, HANDOFF);
 const findings = [];
-let freshnessContext;
+let handoffMarkdown = null;
 if (existsSync(handoffPath)) {
-  freshnessContext = buildFreshnessContext(readFileSync(handoffPath, 'utf8'));
+  handoffMarkdown = readFileSync(handoffPath, 'utf8');
 } else {
   findings.push({
     severity: 'error',
@@ -143,16 +57,7 @@ const subjectRefsByGate = new Map(registry.gates.map((gate) => [
 const result = validateGovernanceData(root, {
   parseSealBaseline,
   subjectRefsOf: (gateId) => subjectRefsByGate.get(gateId) ?? null,
-  checkFreshness: (where, evidenceIds, evidence, subjectRefs, staleCode, staleMessage) =>
-    checkEvidenceFreshness(
-      where,
-      evidenceIds,
-      evidence,
-      subjectRefs,
-      freshnessContext,
-      staleCode,
-      staleMessage
-    ),
+  handoffMarkdown,
   freezeBaselineRef: 'HEAD'
 });
 

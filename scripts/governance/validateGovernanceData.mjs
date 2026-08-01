@@ -8,6 +8,7 @@
 import { loadGovernanceData } from './loadGovernance.mjs';
 import { projectGovernance } from './projectGovernance.mjs';
 import {
+  checkEvidenceFreshness,
   validateActiveClaims,
   validateBlockerImpactClosure,
   validateBlockers,
@@ -18,6 +19,7 @@ import {
   validateUnfrozenValidations
 } from './governanceRules.mjs';
 import { validateCrossVersionFreeze } from './freezeRules.mjs';
+import { buildFreshnessContext, collectSealAnchorsFromRecords } from './freshnessContext.mjs';
 
 /**
  * 收集治理数据内部所有 EV- 与 BLK- 引用，用于「引用了未定义 ID」检查。
@@ -71,8 +73,13 @@ function sliceFreeText(slicesData) {
 /**
  * @param {string} root 仓库根绝对路径。
  * @param {object} options
- * @param {(gateId: string) => string[]|null} [options.subjectRefsOf] freshness 主题域。
- * @param {Function} [options.checkFreshness] freshness 判定；缺省为纯静态模式。
+ * @param {Function} options.parseSealBaseline 封存指纹校验（唯一实现，必须注入）。
+ * @param {(gateId: string) => string[]|null} options.subjectRefsOf freshness 主题域。
+ * @param {string|null} [options.handoffMarkdown] 主题内容源。给出则启用 freshness
+ *   判定，锚点直接取自本次加载的 JSON 证据记录——不能由调用方另传锚点，否则
+ *   「锚点集合」与「被判定的证据集合」可能来自不同数据源，新封存证据会永远
+ *   落在上下文之外并被判成 unverifiable。缺省为纯静态子集模式（跳过 freshness）。
+ * @param {string|null} [options.freezeBaselineRef] 冻结基线 ref。
  * @returns {{ ok: boolean, findings: Array<object>, projection: object|null }}
  */
 export function validateGovernanceData(root, options = {}) {
@@ -107,7 +114,18 @@ export function validateGovernanceData(root, options = {}) {
   const subjectRefsOf = options.subjectRefsOf;
   // freshness 上下文可缺省（纯静态子集模式）；此时判定函数返回 null，
   // 与 markdown 门禁在 freshnessContext===undefined 下的行为一致。
-  const checkFreshness = options.checkFreshness ?? (() => null);
+  const handoffMarkdown = options.handoffMarkdown ?? null;
+  const freshnessContext = handoffMarkdown === null
+    ? undefined
+    : buildFreshnessContext({
+      root,
+      handoffMarkdown,
+      anchors: collectSealAnchorsFromRecords(projection.evidence)
+    });
+  const checkFreshness = (where, evidenceIds, evidence, subjectRefs, staleCode, staleMessage) =>
+    checkEvidenceFreshness(
+      where, evidenceIds, evidence, subjectRefs, freshnessContext, staleCode, staleMessage
+    );
 
   const evidenceWhere = 'docs/governance/evidence.jsonl';
   validateEvidence(
