@@ -12,11 +12,23 @@
 import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ResourceKind, ValidatorContract, ValidatorResult } from '@soulforge/shared';
+import type {
+  PatchIR,
+  PatchIrOperation,
+  ResourceKind,
+  ValidatorContract,
+  ValidatorResult,
+  WriterAdapterContract,
+  WriterApplyResult,
+  WriterRollbackMetadata,
+  WriterWritePlan
+} from '@soulforge/shared';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { createWorkspaceTransaction } from '../transactions/workspaceTransaction.js';
 import { createScaffoldValidators } from '../validators/index.js';
+import { createScaffoldWriterAdapters } from '../writers/index.js';
+import { decompressDfltDcx } from '../util/dcxDflt.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
@@ -36,13 +48,52 @@ function throwingValidator(scope: 'staged_output' | 'after_commit'): ValidatorCo
   };
 }
 
+/** Injects a deterministic writer failure after a successful staging write. */
+class ThrowAfterStageWriter implements WriterAdapterContract {
+  readonly writerId: string;
+  readonly supportedResourceKinds;
+  readonly supportedOperations;
+  readonly inputSchemaVersion: string;
+  readonly preconditions;
+
+  constructor(private readonly delegate: WriterAdapterContract) {
+    this.writerId = `failure-matrix:${delegate.writerId}`;
+    this.supportedResourceKinds = delegate.supportedResourceKinds;
+    this.supportedOperations = delegate.supportedOperations;
+    this.inputSchemaVersion = delegate.inputSchemaVersion;
+    this.preconditions = delegate.preconditions;
+  }
+
+  canHandle(operation: PatchIrOperation): boolean {
+    return this.delegate.canHandle(operation);
+  }
+  writePlan(patch: PatchIR, operations: PatchIrOperation[]): WriterWritePlan {
+    return this.delegate.writePlan(patch, operations);
+  }
+  async applyToStaging(input: Parameters<WriterAdapterContract['applyToStaging']>[0]): Promise<WriterApplyResult> {
+    const result = await this.delegate.applyToStaging(input);
+    if (!result.ok) return result;
+    throw new Error(`injected stage failure for ${this.delegate.writerId}`);
+  }
+  produceRollbackMetadata(input: { operations: PatchIrOperation[]; backupPaths: string[] }): WriterRollbackMetadata {
+    return this.delegate.produceRollbackMetadata(input);
+  }
+}
+
+function buildStageFailureWriters(operation: PatchIrOperation): WriterAdapterContract[] {
+  const writers = createScaffoldWriterAdapters();
+  const index = writers.findIndex((writer) => writer.canHandle(operation));
+  if (index < 0) throw new Error('No scaffold writer for standalone file_replace op.');
+  writers.unshift(new ThrowAfterStageWriter(writers[index]!));
+  return writers;
+}
+
 interface FormatSpec {
   testRole: string;
   legacyPath: string;
   bridgeCommand: string;
   resourceKind: ResourceKind;
   label: string;
-  mutationOptions: Record<string, unknown>;
 }
 
 const FORMATS: FormatSpec[] = [
@@ -51,24 +102,14 @@ const FORMATS: FormatSpec[] = [
     legacyPath: '../../mods/event/common.emevd.dcx',
     bridgeCommand: 'write-emevd',
     resourceKind: 'event',
-    label: 'EMEVD',
-    mutationOptions: {
-      mutation: 'set_rest_behavior',
-      eventId: 10,
-      restBehavior: 1
-    }
+    label: 'EMEVD'
   },
   {
     testRole: 'msb-primary',
     legacyPath: '../../mods/map/mapstudio/m10_00_00_00.msb.dcx',
     bridgeCommand: 'write-msb',
     resourceKind: 'map',
-    label: 'MSB',
-    mutationOptions: {
-      mutation: 'set_part_position',
-      partName: 'm10_00_00_00',
-      position: [0, 0, 0]
-    }
+    label: 'MSB'
   }
 ];
 
@@ -91,6 +132,12 @@ async function runFormatMatrix(
   const fileName = `failure-matrix.${spec.resourceKind}.dcx`;
   const target = join(overlayRoot, subDir, fileName);
   const original = await readFile(source);
+  // Bridge read/write commands operate on decompressed EVD/MSB bytes; the
+  // fixture is DFLT-wrapped DCX. The transaction replaces the decompressed raw
+  // file while the original .dcx fixture stays untouched.
+  const rawOriginal = decompressDfltDcx(original);
+  const rawName = `failure-matrix.${spec.resourceKind}.raw`;
+  const rawTarget = join(overlayRoot, subDir, rawName);
   const results: Array<{
     phase: FailurePhase;
     code: string;
@@ -101,27 +148,32 @@ async function runFormatMatrix(
 
   for (const phase of ['stage', 'validate', 'commit', 're-read'] as const) {
     await copyFile(source, target);
+    await writeFile(rawTarget, rawOriginal);
     const session = await openWorkspaceSession({ overlayRoot, game: 'sekiro' });
 
-    // Read the document to get the source hash.
+    // Read the decompressed document to get the source hash.
     const readCmd = spec.bridgeCommand === 'write-emevd' ? 'read-emevd-document' : 'read-msb-document';
     const before = await runBridge<Record<string, unknown>>({
       command: readCmd as 'read-emevd-document',
-      filePath: target,
+      filePath: rawTarget,
       allowedRoots: [overlayRoot],
       timeoutMs: 120_000
     });
-    const sourceHash = (before.data?.sourceHash as string) ?? '';
+    if (before.data?.sourceHash == null) {
+      throw new Error(`${spec.label} fixture cannot be read: ${JSON.stringify(before.diagnostics)}`);
+    }
+    const sourceHash = (before.data.sourceHash as string) ?? '';
 
-    // Stage the mutation via Bridge.
-    const stagedPath = join(stagingRoot, `${spec.label}-${phase}-staged.dcx`);
+    // Stage the mutation via Bridge using a real document target from the read envelope.
+    const stagedPath = join(stagingRoot, `${spec.label}-${phase}-staged.raw`);
+    const mutationOptions = buildMutationOptions(spec, before.data, sourceHash);
     await runBridge({
       command: spec.bridgeCommand as 'write-emevd',
-      filePath: target,
+      filePath: rawTarget,
       allowedRoots: [overlayRoot],
       writableRoots: [stagingRoot],
       timeoutMs: 120_000,
-      commandOptions: { ...spec.mutationOptions, outputPath: stagedPath }
+      commandOptions: { ...mutationOptions, outputPath: stagedPath }
     });
     const stagedContent = await readFile(stagedPath);
 
@@ -133,8 +185,8 @@ async function runFormatMatrix(
       operations: [{
         id: `${spec.testRole}-${phase}`,
         kind: 'file_replace',
-        targetUri: `file://${subDir}/${fileName}`,
-        targetPath: target,
+        targetUri: `file://${subDir}/${rawName}`,
+        targetPath: rawTarget,
         resourceKind: spec.resourceKind,
         newContentBase64: stagedContent.toString('base64'),
         expectedHash: sourceHash,
@@ -166,6 +218,7 @@ async function runFormatMatrix(
       workspaceRoot: overlayRoot,
       stagingBaseDir: stagingRoot,
       backupBaseDir: phase === 'commit' ? blockedBackupRoot : backupRoot,
+      ...(phase === 'stage' ? { writers: buildStageFailureWriters(patch.operations[0]!) } : {}),
       validators
     });
 
@@ -199,10 +252,11 @@ async function runFormatMatrix(
     if (transaction.getStatus() !== 'failed') {
       throw new Error(`${spec.label} ${phase} transaction status is ${transaction.getStatus()}, expected failed.`);
     }
-    const restored = (await readFile(target)).equals(original);
+    const restored = (await readFile(rawTarget)).equals(rawOriginal);
     if (!restored) throw new Error(`${spec.label} ${phase} failure did not preserve original bytes.`);
-    const stagingCleaned = (await readdir(stagingRoot)).length === 0;
-    if (!stagingCleaned) throw new Error(`${spec.label} ${phase} staging directory leaked.`);
+    const stagingCleaned = (await readdir(stagingRoot))
+      .filter((name) => name.startsWith('soulforge-staging-')).length === 0;
+    if (!stagingCleaned) throw new Error(`${spec.label} ${phase} transaction staging directory leaked.`);
     const failureAudited = transaction.getAuditLog().list({
       transactionId: transaction.transactionId
     }).some((entry) => entry.eventKind === 'failure_recovery'
@@ -247,3 +301,33 @@ main().catch(async (error) => {
   console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   process.exitCode = 1;
 });
+
+/** Build a real mutation target from the read envelope (event/part must exist). */
+function buildMutationOptions(
+  spec: FormatSpec,
+  readData: Record<string, unknown> | undefined,
+  sourceHash: string
+): Record<string, unknown> {
+  if (spec.bridgeCommand === 'write-emevd') {
+    const events = readData?.events as Array<{ id: number }> | undefined;
+    const target = events?.find((event) => event.id !== 0) ?? events?.[0];
+    if (!target) throw new Error(`${spec.label}: no event target in read envelope`);
+    return {
+      mutation: 'set_rest_behavior',
+      eventId: target.id,
+      restBehavior: 1,
+      expectedDocumentHash: sourceHash
+    };
+  }
+  const parts = readData?.parts as Array<{ name: string; posX: number; posY: number; posZ: number }> | undefined;
+  const part = parts?.[0];
+  if (!part) throw new Error(`${spec.label}: no part target in read envelope`);
+  return {
+    mutation: 'set_part_position',
+    partName: part.name,
+    posX: part.posX + 1,
+    posY: part.posY,
+    posZ: part.posZ,
+    expectedDocumentHash: sourceHash
+  };
+}
