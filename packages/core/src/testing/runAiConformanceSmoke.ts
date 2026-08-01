@@ -27,6 +27,20 @@
  *   PATCH_ENGINE_REQUIRED refusals instead of bypassing executeTool
  * - policy gate unit matrix (deny / require_confirmation / receipt / full)
  *
+ * Context Broker cases (21-28): evidence/context assembly layer + production
+ * multi-step loop closure:
+ * - four evidence kinds (readFile / resourceGraph / diagnostics / patchPlan)
+ *   assemble into bounded, redacted context with excerpt truncation
+ * - no evidence returns structured insufficient_evidence
+ * - a single oversized section fails closed with CONTEXT_LIMIT_EXCEEDED
+ * - cancellation / timeout interrupt pending async evidence reads
+ * - production multi-step propose→stage→validate→commit→re-read loop with the
+ *   broker injecting cross-step evidence before each model call
+ * - cancellation leaves no residue and no commit audit trail
+ * - full permission still cannot bypass Patch Engine; the refusal is assembled
+ *   into evidence context and surfaced in the audit
+ * - policy gate full matrix (every permission × plan/normal/full + receipt)
+ *
  * All cases use local fake HTTP servers or injected fetch failures.
  * No real provider credentials or network access required.
  *
@@ -45,7 +59,7 @@ import {
   createScaffoldToolRegistry,
   type ScaffoldToolContext
 } from '../ai-tools/scaffoldToolRegistry.js';
-import { evaluatePolicyGate } from '../ai-tools/policyGate.js';
+import { evaluatePolicyGate, maxPermissionFromMode } from '../ai-tools/policyGate.js';
 import { MemoryAuditLogStore } from '../audit-log/memoryAuditLog.js';
 import {
   OpenAiCompatibleAdapter
@@ -54,9 +68,11 @@ import {
   AnthropicCompatibleAdapter
 } from '../model-services/anthropicCompatibleAdapter.js';
 import { isToolAllowedInMode, runAgentToolLoop, assertNoSecretLeak } from '../model-services/agentLoop.js';
+import { createContextBroker } from '../model-services/contextBroker.js';
 import type {
   AgentPermissionMode,
   AgentRunResult,
+  ContextEvidenceSource,
   ModelServiceConfig,
   ToolCall,
   ModelServiceAdapter,
@@ -103,42 +119,56 @@ interface ScriptedToolCall {
 /**
  * Scripted OpenAI-compatible fake server. Each HTTP request pops the next
  * scripted tool call; when the script is exhausted it answers with stop.
+ * Records the full request message bodies so tests can assert that the
+ * Context Broker injected bounded evidence fragments across steps.
  * Local only — zero network egress.
  */
 function startScriptedServer(script: ScriptedToolCall[]): Promise<{
   baseUrl: string;
   close: () => Promise<void>;
   requestCount: () => number;
+  history: Array<{ messages: unknown[] }>;
 }> {
   let issued = 0;
   let requests = 0;
-  const server = createServer((_req, res) => {
+  const history: Array<{ messages: unknown[] }> = [];
+  const server = createServer((req, res) => {
     requests += 1;
-    if (issued < script.length) {
-      const call = script[issued++]!;
+    let body = '';
+    req.on('data', (chunk: Buffer) => { body += chunk.toString('utf8'); });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body) as { messages?: unknown[] };
+        history.push({ messages: parsed.messages ?? [] });
+      } catch {
+        history.push({ messages: [] });
+      }
+      if (issued < script.length) {
+        const call = script[issued++]!;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          choices: [{
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [{
+                id: `call_matrix_${issued}`,
+                type: 'function',
+                function: { name: call.name, arguments: call.argumentsJson }
+              }]
+            },
+            finish_reason: 'tool_calls'
+          }],
+          usage: { prompt_tokens: 10, completion_tokens: call.completionTokens ?? 7 }
+        }));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
-        choices: [{
-          message: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [{
-              id: `call_matrix_${issued}`,
-              type: 'function',
-              function: { name: call.name, arguments: call.argumentsJson }
-            }]
-          },
-          finish_reason: 'tool_calls'
-        }],
-        usage: { prompt_tokens: 10, completion_tokens: call.completionTokens ?? 7 }
+        choices: [{ message: { role: 'assistant', content: 'matrix done' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 3 }
       }));
-      return;
-    }
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      choices: [{ message: { role: 'assistant', content: 'matrix done' }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 10, completion_tokens: 3 }
-    }));
+    });
   });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
@@ -147,7 +177,8 @@ function startScriptedServer(script: ScriptedToolCall[]): Promise<{
       resolve({
         baseUrl: `http://127.0.0.1:${address.port}`,
         close: () => new Promise((r) => server.close(() => r())),
-        requestCount: () => requests
+        requestCount: () => requests,
+        history
       });
     });
   });
@@ -251,8 +282,10 @@ async function runScriptedMatrix(
     timeoutMs?: number;
     signal?: AbortSignal;
     maxTotalOutputTokens?: number;
+    contextBroker?: import('../model-services/types.js').ContextBroker;
+    contextBrokerOptions?: import('../model-services/types.js').ContextBrokerOptions;
   }
-): Promise<{ run: AgentRunResult; requestCount: number }> {
+): Promise<{ run: AgentRunResult; requestCount: number; history: Array<{ messages: unknown[] }> }> {
   const server = await startScriptedServer(script);
   try {
     const config: ModelServiceConfig = {
@@ -281,9 +314,11 @@ async function runScriptedMatrix(
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.maxTotalOutputTokens !== undefined
         ? { maxTotalOutputTokens: options.maxTotalOutputTokens }
-        : {})
+        : {}),
+      ...(options.contextBroker ? { contextBroker: options.contextBroker } : {}),
+      ...(options.contextBrokerOptions ? { contextBrokerOptions: options.contextBrokerOptions } : {})
     });
-    return { run, requestCount: server.requestCount() };
+    return { run, requestCount: server.requestCount(), history: server.history };
   } finally {
     await server.close();
   }
@@ -291,7 +326,7 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 20;
+  const total = 28;
 
   // --- Case 1: HTTP 429 rate limit ---
   {
@@ -1062,9 +1097,337 @@ async function main(): Promise<void> {
     passed++;
   }
 
+  // --- Case 21: Context Broker assembles four evidence kinds into bounded,
+  // --- redacted context, truncating oversized excerpts ---
+  {
+    const broker = createContextBroker();
+    const secret = 'sk-test-secret-abcdefghijklmno';
+    const sources: ContextEvidenceSource[] = [
+      {
+        kind: 'readFile',
+        uri: 'file:///ws/msg/note.txt',
+        text: `original\nconfidential ${secret} token\n${'x'.repeat(300)}\n`,
+        meta: { sha256: 'abc123', sizeBytes: 400 }
+      },
+      {
+        kind: 'resourceGraph',
+        uri: 'workspace://ws-ai-matrix',
+        payload: {
+          nodes: [{ uri: 'file:///ws/msg/note.txt', kind: 'file', diagnostics: [] }],
+          edges: []
+        }
+      },
+      {
+        kind: 'diagnostics',
+        uri: 'workspace://ws-ai-matrix',
+        payload: {
+          diagnostics: [{ severity: 'error', code: 'VALIDATOR_FAILED', message: 'NUL byte in staged output' }]
+        }
+      },
+      {
+        kind: 'patchPlan',
+        uri: 'file:///ws/msg/note.txt',
+        payload: { title: 'propose text edit', targetPath: 'msg/note.txt', expectedHash: 'abc123' }
+      }
+    ];
+    const result = await broker.assemble(sources, { maxBytes: 4000, excerptLength: 120 });
+    if (!result.ok) throw new Error(`Case 21: expected ok assembly, got ${JSON.stringify(result)}`);
+    if (result.sections.length !== 4) throw new Error(`Case 21: expected 4 sections, got ${result.sections.length}`);
+    for (const kind of ['readFile', 'resourceGraph', 'diagnostics', 'patchPlan']) {
+      if (!result.sections.some((section) => section.kind === kind)) {
+        throw new Error(`Case 21: missing section kind ${kind}`);
+      }
+      if (!result.context.includes(`evidence=${kind}`)) {
+        throw new Error(`Case 21: context missing ${kind} marker`);
+      }
+    }
+    if (result.context.includes(secret)) throw new Error('Case 21: secret leaked into assembled context.');
+    if (result.totalBytes > 4000) throw new Error(`Case 21: context exceeded budget ${result.totalBytes}`);
+    const readFileSection = result.sections.find((section) => section.kind === 'readFile')!;
+    if (!readFileSection.redacted) throw new Error('Case 21: readFile section must be marked redacted.');
+    if (!readFileSection.truncated) throw new Error('Case 21: long readFile excerpt must be truncated.');
+    if (readFileSection.excerptLength !== 120) throw new Error('Case 21: excerpt length cap not applied.');
+    if (!result.context.includes('VALIDATOR_FAILED')) throw new Error('Case 21: diagnostics must be preserved.');
+    if (!result.context.includes('patchPlan')) throw new Error('Case 21: patch-plan context must be injected.');
+    passed++;
+  }
+
+  // --- Case 22: no evidence -> structured insufficient_evidence ---
+  {
+    const broker = createContextBroker();
+    const empty = await broker.assemble([]);
+    if (empty.ok || empty.code !== 'insufficient_evidence') {
+      throw new Error('Case 22: empty sources must be insufficient_evidence.');
+    }
+    const blank = await broker.assemble([{ kind: 'readFile', text: '' }]);
+    if (blank.ok || blank.code !== 'insufficient_evidence') {
+      throw new Error('Case 22: blank text must be insufficient_evidence.');
+    }
+    if (!blank.diagnostics[0]!.message) throw new Error('Case 22: insufficient_evidence needs a diagnostic message.');
+    passed++;
+  }
+
+  // --- Case 23: single oversized section fails closed with CONTEXT_LIMIT_EXCEEDED ---
+  {
+    const broker = createContextBroker();
+    const big = await broker.assemble(
+      [{ kind: 'readFile', uri: 'file:///ws/huge.txt', text: 'y'.repeat(5000) }],
+      { maxBytes: 1000 }
+    );
+    if (big.ok || big.code !== 'CONTEXT_LIMIT_EXCEEDED') {
+      throw new Error('Case 23: oversized section must fail closed with CONTEXT_LIMIT_EXCEEDED.');
+    }
+    passed++;
+  }
+
+  // --- Case 24: cancellation / timeout interrupt pending evidence reads ---
+  {
+    const broker = createContextBroker();
+    const controller = new AbortController();
+    const pendingRead = new Promise<string>(() => {});
+    const cancelledPromise = broker.assemble(
+      [{ kind: 'readFile', uri: 'file:///ws/slow.txt', readText: () => pendingRead }],
+      { signal: controller.signal }
+    );
+    setTimeout(() => controller.abort(), 10);
+    const cancelled = await cancelledPromise;
+    if (cancelled.ok || cancelled.code !== 'CONTEXT_CANCELLED') {
+      throw new Error(`Case 24: expected CONTEXT_CANCELLED, got ${JSON.stringify(cancelled)}`);
+    }
+    const timedPromise = broker.assemble(
+      [{ kind: 'readFile', uri: 'file:///ws/slow.txt', readText: () => new Promise<string>(() => {}) }],
+      { timeoutMs: 50 }
+    );
+    const timed = await timedPromise;
+    if (timed.ok || timed.code !== 'CONTEXT_TIMEOUT') {
+      throw new Error(`Case 24: expected CONTEXT_TIMEOUT, got ${JSON.stringify(timed)}`);
+    }
+    passed++;
+  }
+
+  // --- Case 25: production multi-step loop with Context Broker — evidence is
+  // --- assembled across steps and injected before each model call ---
+  {
+    const broker = createContextBroker();
+    const registry = createScaffoldToolRegistry();
+    const { root, notePath } = await createMatrixWorkspace();
+    try {
+      const ctx = createMatrixContext(root, 'fullPermission');
+      const { executeTool, executed } = createMatrixExecutor(registry, ctx);
+      const script: ScriptedToolCall[] = [
+        readScript(notePath),
+        proposeScript(notePath, 'broker-committed\n'),
+        { name: 'patch.stage', argumentsJson: CHAIN_ARGS },
+        { name: 'patch.validate', argumentsJson: CHAIN_ARGS },
+        { name: 'patch.commit', argumentsJson: CHAIN_ARGS },
+        readScript(notePath)
+      ];
+      const { run, history } = await runScriptedMatrix(script, {
+        mode: 'full',
+        tools: listMatrixTools(registry),
+        executeTool,
+        contextBroker: broker,
+        contextBrokerOptions: { maxBytes: 8000, excerptLength: 300 }
+      });
+      if ((await readFile(notePath, 'utf8')) !== 'broker-committed\n') {
+        throw new Error('Case 25: broker-enabled commit did not write the file.');
+      }
+      if (executed.length !== 6 || executed.some((call) => !call.ok)) {
+        throw new Error(`Case 25: expected 6 ok calls, got ${JSON.stringify(executed)}`);
+      }
+      const systemContexts = history
+        .flatMap((entry) => entry.messages)
+        .filter((message) => typeof message === 'object' && message !== null
+          && (message as { role?: string }).role === 'system'
+          && typeof (message as { content?: unknown }).content === 'string')
+        .map((message) => (message as { content: string }).content);
+      if (!systemContexts.some((content) => content.includes('[evidence-context'))) {
+        throw new Error('Case 25: no evidence context was injected into model requests.');
+      }
+      // Cross-step state consistency: after the first tool executes, later
+      // requests carry tool-result evidence assembled from the prior step.
+      if (!systemContexts.some((content) => content.includes('evidence=toolResult'))) {
+        throw new Error('Case 25: cross-step tool evidence missing from later context.');
+      }
+      if (!run.audit.contextAssemblies?.some((assembly) => assembly.ok && assembly.sections >= 1)) {
+        throw new Error('Case 25: context assemblies missing from run audit.');
+      }
+      if (run.finishReason !== 'stop') throw new Error(`Case 25: expected stop, got ${run.finishReason}`);
+      assertNoSecretLeak({ messages: run.messages, audit: run.audit }, 'sk-test');
+      passed++;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // --- Case 26: cancellation with Context Broker leaves no residue ---
+  {
+    const controller = new AbortController();
+    const broker = createContextBroker();
+    const registry = createScaffoldToolRegistry();
+    const { root, notePath } = await createMatrixWorkspace();
+    try {
+      const ctx = createMatrixContext(root, 'fullPermission');
+      const { executeTool, executed } = createMatrixExecutor(registry, ctx, async (name, result) => {
+        if (name === 'patch.stage' && result.ok) controller.abort();
+      });
+      const script: ScriptedToolCall[] = [
+        proposeScript(notePath, 'cancelled-broker-write\n'),
+        { name: 'patch.stage', argumentsJson: CHAIN_ARGS }
+      ];
+      const { run } = await runScriptedMatrix(script, {
+        mode: 'full',
+        tools: listMatrixTools(registry),
+        executeTool,
+        signal: controller.signal,
+        contextBroker: broker
+      });
+      if (run.finishReason !== 'cancelled') throw new Error(`Case 26: expected cancelled, got ${run.finishReason}`);
+      if ((await readFile(notePath, 'utf8')) !== 'original\n') {
+        throw new Error('Case 26: cancelled broker run must not modify the file.');
+      }
+      if (executed.length !== 2) throw new Error(`Case 26: expected propose+stage, got ${JSON.stringify(executed)}`);
+      if (run.audit.toolCalls.some((call) => call.name === 'patch.commit')) {
+        throw new Error('Case 26: commit must not appear in the audit.');
+      }
+      if (!run.audit.contextAssemblies?.some((assembly) => assembly.ok)) {
+        throw new Error('Case 26: broker should have assembled pre-cancel evidence.');
+      }
+      assertNoSecretLeak({ messages: run.messages, audit: run.audit }, 'sk-test');
+      passed++;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // --- Case 27: full permission still cannot bypass Patch Engine — the refusal
+  // --- is assembled into evidence context and surfaced in the audit ---
+  {
+    const broker = createContextBroker();
+    const registry = createScaffoldToolRegistry();
+    const { root, notePath } = await createMatrixWorkspace();
+    try {
+      const ctx = createMatrixContext(root, 'fullPermission');
+      const { executeTool, executed } = createMatrixExecutor(registry, ctx);
+      const script: ScriptedToolCall[] = [
+        proposeScript(notePath, 'gated-write\n'),
+        { name: 'patch.stage', argumentsJson: CHAIN_ARGS },
+        { name: 'patch.validate', argumentsJson: CHAIN_ARGS },
+        { name: 'patch.commit', argumentsJson: CHAIN_ARGS }
+      ];
+      const engineGatedExecuteTool = async (call: ToolCall) => {
+        if (call.name === 'patch.commit') {
+          return {
+            ok: false,
+            code: 'PATCH_ENGINE_REQUIRED',
+            content: JSON.stringify({
+              ok: false,
+              code: 'PATCH_ENGINE_REQUIRED',
+              message: '完全权限也不能绕过 Patch Engine。'
+            })
+          };
+        }
+        return executeTool(call);
+      };
+      const { run, history } = await runScriptedMatrix(script, {
+        mode: 'full',
+        tools: listMatrixTools(registry),
+        executeTool: engineGatedExecuteTool,
+        contextBroker: broker
+      });
+      if ((await readFile(notePath, 'utf8')) !== 'original\n') {
+        throw new Error('Case 27: PATCH_ENGINE_REQUIRED must not modify the file.');
+      }
+      if (!run.audit.toolCalls.some((call) => call.code === 'PATCH_ENGINE_REQUIRED')) {
+        throw new Error('Case 27: refusal missing from loop audit.');
+      }
+      const systemContexts = history
+        .flatMap((entry) => entry.messages)
+        .filter((message) => typeof message === 'object' && message !== null
+          && (message as { role?: string }).role === 'system'
+          && typeof (message as { content?: unknown }).content === 'string')
+        .map((message) => (message as { content: string }).content);
+      if (!systemContexts.some((content) => content.includes('PATCH_ENGINE_REQUIRED'))) {
+        throw new Error('Case 27: refusal must be assembled into later evidence context.');
+      }
+      if (!run.audit.contextAssemblies?.some((assembly) => assembly.ok)) {
+        throw new Error('Case 27: broker assemblies missing from audit.');
+      }
+      passed++;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // --- Case 28: policy gate full matrix — every permission x every mode ---
+  {
+    const perms = ['read', 'analyze', 'propose', 'stage', 'validate', 'commit', 'rollback'] as const;
+    const modes = ['plan', 'normal', 'fullPermission'] as const;
+    const rank = new Map<string, number>([
+      ['read', 0], ['analyze', 1], ['propose', 2], ['stage', 3],
+      ['validate', 4], ['commit', 5], ['rollback', 6]
+    ]);
+    let checks = 0;
+    for (const mode of modes) {
+      const maxPerm = maxPermissionFromMode(mode);
+      for (const perm of perms) {
+        const decision = evaluatePolicyGate({
+          mode,
+          maxPermission: maxPerm,
+          toolName: `t.${perm}`,
+          requiredPermission: perm
+        });
+        if (rank.get(perm)! > rank.get(maxPerm)!) {
+          if (decision.kind !== 'deny' || decision.code !== 'POLICY_DENIED') {
+            throw new Error(`Case 28: ${mode}/${perm} must be rank-denied.`);
+          }
+        } else if (perm === 'commit' || perm === 'rollback') {
+          if (mode === 'fullPermission') {
+            if (decision.kind !== 'allow' || decision.code !== 'POLICY_ALLOW_FULL_PERMISSION') {
+              throw new Error(`Case 28: ${mode}/${perm} must be full-permission allow.`);
+            }
+          } else if (decision.kind !== 'require_confirmation' || decision.code !== 'POLICY_CONFIRMATION_REQUIRED') {
+            throw new Error(`Case 28: ${mode}/${perm} must require confirmation.`);
+          }
+        } else if (decision.kind !== 'allow') {
+          throw new Error(`Case 28: ${mode}/${perm} must be allowed.`);
+        }
+        checks += 1;
+      }
+    }
+    // A receipt upgrades a non-full-mode commit from require_confirmation to allow.
+    const receiptCommit = evaluatePolicyGate({
+      mode: 'normal',
+      maxPermission: 'commit',
+      toolName: 'patch.commit',
+      requiredPermission: 'commit',
+      confirmationReceiptIds: ['receipt-1']
+    });
+    if (receiptCommit.kind !== 'allow') throw new Error('Case 28: receipt must allow commit.');
+    // Under-granted maxPermission is denied even in fullPermission mode.
+    const underGranted = evaluatePolicyGate({
+      mode: 'fullPermission',
+      maxPermission: 'validate',
+      toolName: 'patch.commit',
+      requiredPermission: 'commit'
+    });
+    if (underGranted.kind !== 'deny') throw new Error('Case 28: under-granted full mode must deny commit.');
+    // Loop-level mode gating complements the policy gate.
+    const loopRegistered = new Set(['workspace.readFile', 'patch.commit']);
+    for (const writeTool of ['patch.proposeTextEdit', 'patch.stage', 'patch.validate', 'patch.commit', 'patch.rollback']) {
+      const deniedInPlan = isToolAllowedInMode(writeTool, 'plan', new Set([...loopRegistered, writeTool]));
+      if (deniedInPlan.ok) throw new Error(`Case 28: ${writeTool} must be denied in plan mode.`);
+    }
+    const readInPlan = isToolAllowedInMode('workspace.readFile', 'plan', loopRegistered);
+    if (!readInPlan.ok) throw new Error('Case 28: read tool must be allowed in plan mode.');
+    checks += 3;
+    if (checks !== 24) throw new Error(`Case 28: expected 24 matrix checks, got ${checks}`);
+    passed++;
+  }
+
   console.log(JSON.stringify({
     ok: true,
-    message: 'AI 双协议错误/取消/超时/限额 + 真实工作区多步 typed mutation 写矩阵 conformance 验证通过',
+    message: 'AI 双协议错误/取消/超时/限额 + Context Broker 证据装配 + 真实工作区多步 typed mutation 写矩阵 conformance 验证通过',
     passed,
     total,
     nonClaims: [
@@ -1072,6 +1435,7 @@ async function main(): Promise<void> {
       '写矩阵只覆盖实际接线的安全写路径（scaffold text_edit + WorkspaceTransaction），不提升 native writer authority 或 Patch Engine authority。',
       'plan 只读在 agent loop 层强制；policy gate 层按既有 architecture scaffold 契约保留 stage/validate 上限。',
       'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
+      'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不属于 V0.5 验收。',
       '真实 provider 凭据不属于 V0.5 验收。'
     ]
   }));

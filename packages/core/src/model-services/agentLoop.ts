@@ -8,6 +8,7 @@ import type {
   AgentRunRequest,
   AgentRunResult,
   ChatMessage,
+  ContextEvidenceSource,
   ToolCall
 } from './types.js';
 
@@ -84,6 +85,10 @@ export async function runAgentToolLoop(
   const diagnostics: AgentRunResult['diagnostics'] = [];
   const toolAudit: AgentRunResult['audit']['toolCalls'] = [];
   const registered = new Set(request.tools.map((tool) => tool.name));
+  const broker = request.contextBroker;
+  const brokerOptions = request.contextBrokerOptions;
+  const contextAssemblies: NonNullable<AgentRunResult['audit']['contextAssemblies']> = [];
+  const evidenceQueue: ContextEvidenceSource[] = [];
   let steps = 0;
   let finishReason = 'stop';
   let totalOutputTokens = 0;
@@ -99,6 +104,45 @@ export async function runAgentToolLoop(
       break;
     }
     steps += 1;
+
+    // Context Broker: assemble accumulated workspace evidence into a bounded,
+    // redacted fragment injected before the model call. No evidence is
+    // surfaced structurally as insufficient_evidence instead of failing silently.
+    if (broker) {
+      const assembled = await broker.assemble(evidenceQueue, brokerOptions);
+      if (assembled.ok) {
+        messages.push({ role: 'system', content: assembled.context });
+        diagnostics.push({
+          severity: 'info',
+          code: 'CONTEXT_BROKER_ASSEMBLED',
+          message: `已装配 ${assembled.sections.length} 段工作区证据（${assembled.totalBytes} bytes）。`
+        });
+        contextAssemblies.push({
+          ok: true,
+          sections: assembled.sections.length,
+          totalBytes: assembled.totalBytes
+        });
+      } else {
+        diagnostics.push(...assembled.diagnostics);
+        contextAssemblies.push({
+          ok: false,
+          sections: 0,
+          totalBytes: 0,
+          ...(assembled.code ? { code: assembled.code } : {})
+        });
+        if (assembled.code === 'insufficient_evidence') {
+          messages.push({
+            role: 'system',
+            content: JSON.stringify({
+              ok: false,
+              code: 'insufficient_evidence',
+              message: assembled.message
+            })
+          });
+        }
+      }
+    }
+
     const completion = await adapter.complete({
       messages,
       tools: request.tools,
@@ -163,11 +207,21 @@ export async function runAgentToolLoop(
         ok: result.ok,
         ...(result.code ? { code: result.code } : {})
       });
+      const redactedContent = redactSecrets(result.content);
       messages.push({
         role: 'tool',
         toolCallId: call.id,
-        content: redactSecrets(result.content)
+        content: redactedContent
       });
+      // Feed executed tool results into the broker evidence queue for the next
+      // model call. Only redacted text and the tool name metadata are retained.
+      if (broker) {
+        evidenceQueue.push({
+          kind: 'toolResult',
+          uri: call.name,
+          text: redactedContent
+        });
+      }
       if (request.signal?.aborted) {
         finishReason = 'cancelled';
         diagnostics.push({
@@ -189,7 +243,8 @@ export async function runAgentToolLoop(
     protocol: request.config.protocol,
     permissionMode: request.permissionMode,
     toolCalls: toolAudit,
-    redacted: true
+    redacted: true,
+    ...(contextAssemblies.length ? { contextAssemblies } : {})
   };
   assertNoSecretLeak({ messages, audit, diagnostics }, request.apiKey);
 

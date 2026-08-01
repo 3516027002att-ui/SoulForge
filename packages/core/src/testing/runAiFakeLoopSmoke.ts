@@ -11,6 +11,7 @@ import {
   redactSecrets,
   runAgentToolLoop
 } from '../model-services/agentLoop.js';
+import { createContextBroker } from '../model-services/contextBroker.js';
 import type { ModelServiceConfig, ToolDefinition } from '../model-services/types.js';
 
 const OPENAI_KEY = 'sk-fake-openai-001';
@@ -323,6 +324,42 @@ async function main(): Promise<void> {
       throw new Error('protocols should differ');
     }
 
+    // --- Context Broker offline evidence assembly (no provider credentials) ---
+    const broker = createContextBroker();
+    const assembled = await broker.assemble([
+      { kind: 'readFile', uri: 'file:///ws/msg/note.txt', text: `secret token ${OPENAI_KEY} payload` },
+      { kind: 'resourceGraph', uri: 'workspace://ws', payload: { nodes: [{ uri: 'file:///ws/msg/note.txt' }] } },
+      { kind: 'diagnostics', uri: 'workspace://ws', payload: { diagnostics: [{ severity: 'error', code: 'VALIDATOR_FAILED', message: 'boom' }] } }
+    ], { maxBytes: 4000, excerptLength: 100 });
+    if (!assembled.ok) throw new Error('context broker assembly failed');
+    if (assembled.context.includes(OPENAI_KEY)) throw new Error('context broker leaked secret');
+    if (!assembled.context.includes('VALIDATOR_FAILED')) throw new Error('context broker lost diagnostics');
+    if (assembled.totalBytes > 4000) throw new Error('context broker exceeded budget');
+
+    const noEvidence = await broker.assemble([]);
+    if (noEvidence.ok || noEvidence.code !== 'insufficient_evidence') {
+      throw new Error('broker must fail insufficient_evidence on no evidence');
+    }
+
+    // Broker-enabled agent loop against the same local fake server: evidence is
+    // assembled across steps and injected before model calls.
+    const brokerRun = await runAgentToolLoop(openaiAdapter, {
+      config: openaiConfig,
+      apiKey: OPENAI_KEY,
+      messages: [{ role: 'user', content: 'Find boss events' }],
+      tools,
+      permissionMode: 'normal',
+      executeTool: async (call) => ({ ok: true, content: JSON.stringify({ hits: 1, tool: call.name }) }),
+      maxSteps: 3,
+      contextBroker: broker,
+      contextBrokerOptions: { maxBytes: 4000, excerptLength: 200 }
+    });
+    if (brokerRun.finishReason === 'error') throw new Error('broker-enabled loop failed');
+    if (!brokerRun.audit.contextAssemblies?.some((assembly) => assembly.ok)) {
+      throw new Error('broker-enabled loop missing context assemblies in audit');
+    }
+    assertNoSecretLeak(brokerRun.audit, OPENAI_KEY);
+
     console.log(JSON.stringify({
       ok: true,
       message: '双模型服务 fake-server tool loop 验证通过',
@@ -340,7 +377,14 @@ async function main(): Promise<void> {
       planModeDeniedWrite: denied.code,
       fullPermissionStillGated: fullRun.audit.toolCalls,
       fullPermissionEvidenceGate: true,
-      secretsRedacted: true
+      secretsRedacted: true,
+      contextBroker: {
+        assembledSections: assembled.sections.length,
+        assembledBytes: assembled.totalBytes,
+        secretsRedacted: true,
+        insufficientEvidence: noEvidence.code,
+        loopAssemblies: brokerRun.audit.contextAssemblies
+      }
     }, null, 2));
   } finally {
     await openaiServer.close();
