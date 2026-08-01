@@ -10,11 +10,13 @@ import {
   createConfirmationReceipt,
   disposeBridgeDaemonPool,
   commitEmevdMutationViaBridge,
-  createSekiroFixtureEmedf,
   fingerprintEmedfRegistry,
   readFullEmevdDocumentViaBridge,
   renderEmevdPatchDslBounded,
   submitEmevdDslPlanViaFourView,
+  resolveEmevdRegistry,
+  buildScriptContainerEvidence,
+  applyParamFieldMutation,
   commitFmgMutationViaBridge,
   commitParamMutationViaBridge,
   commitMsbMutationViaBridge,
@@ -57,6 +59,7 @@ import type {
   EditorKind,
   EmevdEditorDocument,
   IndexedFile,
+  ParamDefDocument,
   ResourceKind
 } from '@soulforge/shared';
 import {
@@ -87,6 +90,19 @@ let activeWorkspaceSessionId: string | null = null;
  * never holds these documents (hard constraint 18).
  */
 const emevdFullDocuments = new Map<string, EmevdEditorDocument>();
+/**
+ * Cached EMEDF registry. Resolved once from the user-provided external
+ * DarkScript3 EMEDF JSON path (env SOULFORGE_EMEDF_PATH) or falls back
+ * to the built-in fixture. SoulForge does NOT bundle EMEDF data.
+ */
+let cachedEmevdRegistry: ReturnType<typeof resolveEmevdRegistry> | null = null;
+function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
+  if (!cachedEmevdRegistry) {
+    const externalPath = process.env.SOULFORGE_EMEDF_PATH || null;
+    cachedEmevdRegistry = resolveEmevdRegistry(externalPath);
+  }
+  return cachedEmevdRegistry;
+}
 let handlersRegistered = false;
 const trustedRendererDocuments = new Map<number, string>();
 const directorySelections = new Map<string, DirectorySelectionRecord>();
@@ -969,7 +985,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
         tempDir: storage.stagingRoot,
         resourceUri: sourceUri,
-        registry: createSekiroFixtureEmedf(),
+        registry: getEmevdRegistry().registry,
         ...(documentInstanceId ? { documentInstanceId } : {}),
         pageSize: 512,
         timeoutMs: 120_000
@@ -992,7 +1008,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // can request the full template explicitly via loadFullDslTemplate.
       const bounded = renderEmevdPatchDslBounded(
         full.document,
-        createSekiroFixtureEmedf(),
+        getEmevdRegistry().registry,
         loadFullDslTemplate ? undefined : 2000
       );
       return {
@@ -1059,7 +1075,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // during load and cached as a temp file; raw .emevd uses the indexed path).
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       const operationLog = await ensureActiveOperationLog(activeSession);
-      const registry = createSekiroFixtureEmedf();
+      const registry = getEmevdRegistry().registry;
       const full = await readFullEmevdDocumentViaBridge({
         filePath: file.absolutePath,
         allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
@@ -1685,6 +1701,124 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   );
 
+  handle(
+    'resource.applyParamFieldMutation',
+    async (
+      event,
+      sourceUri: string,
+      expectedHash: string,
+      mutation: {
+        rowId: number;
+        fieldId: string;
+        value: number | string | boolean;
+        rowDataBase64: string;
+        definition: unknown;
+      }
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入 PARAM。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+
+      // Apply field-level mutation to get the modified row bytes
+      const fieldResult = applyParamFieldMutation({
+        rowDataBase64: mutation.rowDataBase64,
+        definition: mutation.definition as ParamDefDocument,
+        fieldId: mutation.fieldId,
+        value: mutation.value
+      });
+      if (!fieldResult.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: fieldResult.code,
+            message: fieldResult.message,
+            sourceUri
+          }]
+        };
+      }
+
+      // Send the modified row as a whole-row upsert to the Bridge
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stagedOutput = await stageBridgeOutput({
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        prefix: 'param',
+        fileName: `${basename(file.relativePath)}.field.param`,
+        write: (context) => commitParamMutationViaBridge({
+          sourcePath: file.absolutePath,
+          outputPath: context.outputPath,
+          expectedDocumentHash: expectedHash,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          mutation: { kind: 'upsert' as const, id: mutation.rowId, dataBase64: fieldResult.nextDataBase64 }
+        })
+      });
+      if (!stagedOutput.ok) {
+        const diagnostics = stagedOutput.diagnostics.length > 0
+          ? stagedOutput.diagnostics
+          : stagedOutput.result && 'diagnostics' in stagedOutput.result
+            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
+            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: diagnostics.map((d) => ({
+            severity: d.severity as Diagnostic['severity'],
+            code: d.code,
+            message: d.message,
+            sourceUri
+          }))
+        };
+      }
+      const bytes = stagedOutput.bytes;
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      let result = await saveRawReplace({
+        file,
+        expectedHash,
+        newContentBase64: bytes.toString('base64'),
+        session: activeSession,
+        operationLog,
+        ...storage,
+        title: `PARAM field set ${mutation.fieldId} on row ${mutation.rowId}`
+      });
+      if (!result.ok && result.requiresConfirmation) {
+        const confirmation = await requestWriteConfirmation({
+          event,
+          resourceLabel: file.relativePath,
+          sourceUri,
+          actionLabel: '提交 PARAM 字段变更',
+          payloadHash: createHash('sha256').update(bytes).digest('hex')
+        });
+        if (!confirmation) return cancelledWrite(sourceUri);
+        result = await saveRawReplace({
+          file,
+          expectedHash,
+          newContentBase64: bytes.toString('base64'),
+          confirmation,
+          session: activeSession,
+          operationLog,
+          ...storage,
+          title: `PARAM field set ${mutation.fieldId} on row ${mutation.rowId}`
+        });
+      }
+      return toRendererSaveResult(result, indexedFiles);
+    }
+  );
+
   handle('resource.inspectContainerTree', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
@@ -1856,6 +1990,38 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!file) return null;
     const probed = await probeContainerCapabilityOptions(file.absolutePath);
     return resolveResourceCapabilities(file, probed);
+  });
+
+  handle('resource.scriptContainerEvidence', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message: 'Resource must be indexed before script evidence.',
+          sourceUri
+        }]
+      };
+    }
+    if (!activeSession) {
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'WORKSPACE_NOT_OPEN',
+          message: '需要已打开的工作区才能构建 script 容器证据。',
+          sourceUri
+        }]
+      };
+    }
+    const storage = durableStoragePaths(activeSession.meta.workspaceId);
+    return buildScriptContainerEvidence({
+      containerPath: file.absolutePath,
+      allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+      timeoutMs: 60_000
+    });
   });
 
   handle('operation.list', async (): Promise<RendererPatchHistoryEntry[]> => {

@@ -12,6 +12,8 @@
 import {
   encodedEmedfArgsLength,
   findInstructionDef,
+  hasVararg,
+  varargCount,
   type EmedfRegistry,
   type EmedfInstructionDef
 } from './emedfSchema.js';
@@ -29,6 +31,8 @@ export interface EmevdCoverageAnalysis {
   coveredKinds: number;
   /** Kinds whose observed lengths all match the schema-claimed encoded length. */
   cleanKinds: number;
+  /** Vararg kinds whose observed lengths are all valid vararg multiples. */
+  varargKinds: number;
   coveredInstances: number;
   totalInstances: number;
   kindCoverageRatio: number;
@@ -39,6 +43,8 @@ export interface EmevdCoverageAnalysis {
     count: number;
     schemaLength: number;
     observedLengths: number[];
+    /** True when the definition has a vararg tail but some observed lengths are invalid. */
+    vararg: boolean;
   }>;
   unknownKinds: Array<{ bank: number; id: number; count: number }>;
   registryOrigin: EmedfRegistry['origin'];
@@ -60,6 +66,7 @@ export function analyzeEmedfCoverage(
   let totalInstances = 0;
   let coveredKinds = 0;
   let cleanKinds = 0;
+  let varargKinds = 0;
   const lengthMismatches: EmevdCoverageAnalysis['lengthMismatches'] = [];
   const unknownKinds: EmevdCoverageAnalysis['unknownKinds'] = [];
 
@@ -76,17 +83,39 @@ export function analyzeEmedfCoverage(
     }
     coveredKinds += 1;
     coveredInstances += entry.count;
-    const schemaLength = encodedEmedfArgsLength(def);
-    const clean = observedLengths.length > 0 && observedLengths.every((length) => length === schemaLength);
-    if (clean) cleanKinds += 1;
-    if (!clean) {
-      lengthMismatches.push({
-        bank: entry.bank,
-        id: entry.id,
-        count: entry.count,
-        schemaLength,
-        observedLengths
-      });
+
+    const isVararg = hasVararg(def);
+    if (isVararg) {
+      // For vararg instructions, every observed length must be a valid vararg length
+      const allValid = observedLengths.length > 0
+        && observedLengths.every((length) => varargCount(def, length) >= 0);
+      if (allValid) {
+        varargKinds += 1;
+        cleanKinds += 1;
+      } else {
+        lengthMismatches.push({
+          bank: entry.bank,
+          id: entry.id,
+          count: entry.count,
+          schemaLength: encodedEmedfArgsLength(def),
+          observedLengths,
+          vararg: true
+        });
+      }
+    } else {
+      const schemaLength = encodedEmedfArgsLength(def);
+      const clean = observedLengths.length > 0 && observedLengths.every((length) => length === schemaLength);
+      if (clean) cleanKinds += 1;
+      if (!clean) {
+        lengthMismatches.push({
+          bank: entry.bank,
+          id: entry.id,
+          count: entry.count,
+          schemaLength,
+          observedLengths,
+          vararg: false
+        });
+      }
     }
   }
 
@@ -94,6 +123,7 @@ export function analyzeEmedfCoverage(
     totalKinds: distribution.length,
     coveredKinds,
     cleanKinds,
+    varargKinds,
     coveredInstances,
     totalInstances,
     kindCoverageRatio: distribution.length === 0 ? 0 : coveredKinds / distribution.length,

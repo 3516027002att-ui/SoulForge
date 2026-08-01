@@ -693,19 +693,16 @@ export function encodeFieldMutation(
   if (!field) {
     return { ok: false, code: 'PARAMDEF_FIELD_NOT_FOUND', message: `字段 ${fieldId} 不存在。` };
   }
-  if (field.bitfield !== undefined) {
-    return {
-      ok: false,
-      code: 'PARAMDEF_BITFIELD_WRITE_UNSUPPORTED',
-      message: 'Bitfield mutation is not enabled without a preserving bit writer.'
-    };
-  }
   if (field.offset + field.size > rowData.length) {
     return { ok: false, code: 'PARAMDEF_ROW_TOO_SHORT', message: '行字节不足以写入字段。' };
   }
   const next = Buffer.from(rowData);
   try {
-    writeField(next, field, value);
+    if (field.bitfield !== undefined) {
+      writeBitfield(next, field, value);
+    } else {
+      writeField(next, field, value);
+    }
   } catch (error) {
     return {
       ok: false,
@@ -818,6 +815,71 @@ function writeField(buf: Buffer, field: ParamFieldDef, value: number | string | 
     }
     default:
       throw new Error(`不支持的字段类型`);
+  }
+}
+
+/**
+ * Preserving bit writer: reads the existing integer at the field's offset,
+ * clears only the target bit range, sets the new value, and writes back.
+ * All other bits in the field's byte(s) are preserved.
+ */
+function writeBitfield(buf: Buffer, field: ParamFieldDef, value: number | string | boolean): void {
+  const bf = field.bitfield;
+  if (!bf) throw new Error('writeBitfield called without bitfield definition');
+  const { bitOffset, bitWidth } = bf;
+
+  // Read the existing integer value at the field's offset
+  let existing: number;
+  switch (field.type) {
+    case 'u8': existing = buf.readUInt8(field.offset); break;
+    case 's8': existing = buf.readUInt8(field.offset); break; // treat as unsigned for bit ops
+    case 'u16': existing = buf.readUInt16LE(field.offset); break;
+    case 's16': existing = buf.readUInt16LE(field.offset); break;
+    case 'u32': existing = buf.readUInt32LE(field.offset); break;
+    case 's32': existing = buf.readUInt32LE(field.offset); break;
+    case 'bool': existing = buf.readUInt8(field.offset); break;
+    default: throw new Error(`bitfield 不支持类型 ${field.type}`);
+  }
+
+  // Compute the new bit value
+  let newValue: number;
+  if (field.type === 'bool') {
+    newValue = value ? 1 : 0;
+  } else {
+    newValue = Number(value);
+    if (!Number.isSafeInteger(newValue)) {
+      throw new Error(`bitfield 值必须是整数，得到 ${value}`);
+    }
+  }
+
+  // Validate range: the value must fit in bitWidth bits
+  const maxValue = (1 << bitWidth) - 1;
+  if (newValue < 0 || newValue > maxValue) {
+    throw new Error(`bitfield 值 ${newValue} 超出 ${bitWidth} 位范围 [0, ${maxValue}]`);
+  }
+
+  // Create mask and apply: clear target bits, set new value
+  const mask = maxValue << bitOffset;
+  const cleared = existing & ~mask;
+  const result = (cleared | (newValue << bitOffset)) >>> 0; // unsigned
+
+  // Write back
+  switch (field.type) {
+    case 'u8':
+    case 's8':
+    case 'bool':
+      buf.writeUInt8(result & 0xFF, field.offset);
+      break;
+    case 'u16':
+    case 's16':
+      buf.writeUInt16LE(result & 0xFFFF, field.offset);
+      break;
+    case 'u32':
+    case 's32':
+      buf.writeUInt32LE(result, field.offset);
+      break;
+    default:
+      throw new Error(`bitfield 不支持类型 ${field.type}`);
   }
 }
 

@@ -22,6 +22,7 @@ export type EditorMutationKind =
   | 'fmg_entry_delete'
   | 'param_row_upsert'
   | 'param_row_delete'
+  | 'param_field_set'
   | 'emevd_set_rest_behavior'
   | 'emevd_update_id'
   | 'msb_set_part_position'
