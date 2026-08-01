@@ -224,11 +224,16 @@ function sanitizeArgName(raw: string): string {
     .filter(Boolean);
   if (words.length === 0) return 'unknown';
   return words
-    .map((word, i) =>
-      i === 0
+    .map((word, i) => {
+      // All-caps acronyms (e.g. "ID") become title-case ("Id") so the camelCase
+      // result is conventional ("eventId", "eventSlotId") and stable for DSL.
+      if (word === word.toUpperCase() && /[A-Z]/.test(word)) {
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      }
+      return i === 0
         ? word.charAt(0).toLowerCase() + word.slice(1)
-        : word.charAt(0).toUpperCase() + word.slice(1)
-    )
+        : word.charAt(0).toUpperCase() + word.slice(1);
+    })
     .join('');
 }
 

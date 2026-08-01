@@ -35,6 +35,12 @@ export interface EmevdCoverageAnalysis {
   varargKinds: number;
   coveredInstances: number;
   totalInstances: number;
+  /** Instances whose observed length matches the schema-claimed length (or is a valid vararg multiple). */
+  cleanInstances: number;
+  /** Instances whose observed length does not match the schema-claimed length. */
+  mismatchInstances: number;
+  /** Instances of kinds with no schema definition. */
+  unknownInstances: number;
   kindCoverageRatio: number;
   instanceCoverageRatio: number;
   lengthMismatches: Array<{
@@ -67,6 +73,9 @@ export function analyzeEmedfCoverage(
   let coveredKinds = 0;
   let cleanKinds = 0;
   let varargKinds = 0;
+  let cleanInstances = 0;
+  let mismatchInstances = 0;
+  let unknownInstances = 0;
   const lengthMismatches: EmevdCoverageAnalysis['lengthMismatches'] = [];
   const unknownKinds: EmevdCoverageAnalysis['unknownKinds'] = [];
 
@@ -79,43 +88,46 @@ export function analyzeEmedfCoverage(
     totalInstances += entry.count;
     if (!def) {
       unknownKinds.push({ bank: entry.bank, id: entry.id, count: entry.count });
+      unknownInstances += entry.count;
       continue;
     }
     coveredKinds += 1;
     coveredInstances += entry.count;
 
     const isVararg = hasVararg(def);
+    let kindClean: boolean;
     if (isVararg) {
-      // For vararg instructions, every observed length must be a valid vararg length
-      const allValid = observedLengths.length > 0
+      kindClean = observedLengths.length > 0
         && observedLengths.every((length) => varargCount(def, length) >= 0);
-      if (allValid) {
-        varargKinds += 1;
-        cleanKinds += 1;
-      } else {
-        lengthMismatches.push({
-          bank: entry.bank,
-          id: entry.id,
-          count: entry.count,
-          schemaLength: encodedEmedfArgsLength(def),
-          observedLengths,
-          vararg: true
-        });
-      }
+      if (kindClean) varargKinds += 1;
     } else {
       const schemaLength = encodedEmedfArgsLength(def);
-      const clean = observedLengths.length > 0 && observedLengths.every((length) => length === schemaLength);
-      if (clean) cleanKinds += 1;
-      if (!clean) {
-        lengthMismatches.push({
-          bank: entry.bank,
-          id: entry.id,
-          count: entry.count,
-          schemaLength,
-          observedLengths,
-          vararg: false
-        });
+      kindClean = observedLengths.length > 0
+        && observedLengths.every((length) => length === schemaLength);
+    }
+
+    if (kindClean) {
+      cleanKinds += 1;
+      cleanInstances += entry.count;
+    } else {
+      // Kind is not clean: split instances by length signature so a kind with a
+      // mix of matching and mismatching lengths reports both buckets exactly.
+      for (const [lengthText, frequency] of Object.entries(entry.argsLengths)) {
+        const length = Number(lengthText);
+        const matches = isVararg
+          ? varargCount(def, length) >= 0
+          : length === encodedEmedfArgsLength(def);
+        if (matches) cleanInstances += frequency;
+        else mismatchInstances += frequency;
       }
+      lengthMismatches.push({
+        bank: entry.bank,
+        id: entry.id,
+        count: entry.count,
+        schemaLength: encodedEmedfArgsLength(def),
+        observedLengths,
+        vararg: isVararg
+      });
     }
   }
 
@@ -126,6 +138,9 @@ export function analyzeEmedfCoverage(
     varargKinds,
     coveredInstances,
     totalInstances,
+    cleanInstances,
+    mismatchInstances,
+    unknownInstances,
     kindCoverageRatio: distribution.length === 0 ? 0 : coveredKinds / distribution.length,
     instanceCoverageRatio: totalInstances === 0 ? 0 : coveredInstances / totalInstances,
     lengthMismatches,
