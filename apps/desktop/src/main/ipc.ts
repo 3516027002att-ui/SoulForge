@@ -90,6 +90,66 @@ let activeWorkspaceSessionId: string | null = null;
  * never holds these documents (hard constraint 18).
  */
 const emevdFullDocuments = new Map<string, EmevdEditorDocument>();
+
+/* ------------------------------------------------------------------ */
+/*  Paginated editor access caches (hard constraint 17)                */
+/*  Main holds the complete document; the renderer only ever receives  */
+/*  bounded pages via resource.readFmgPage / resource.readParamPage /  */
+/*  resource.listContainerChildrenPage. Each cache is invalidated on   */
+/*  mutation commit so the next page fetch re-reads the fresh file.    */
+/* ------------------------------------------------------------------ */
+
+const FMG_PAGE_SIZE = 100;
+const PARAM_PAGE_SIZE = 20;
+const CONTAINER_PAGE_SIZE = 50;
+/** Upper bound for the paginated PARAM channel's complete-coverage read. */
+const MAX_PAGED_PARAM_ROWS = 100_000;
+
+interface CachedFmgDocument {
+  sourceHash: string;
+  maxId: number;
+  entries: Array<{ id: number; text: string }>;
+  authority?: string;
+}
+const fmgPageCache = new Map<string, CachedFmgDocument>();
+
+interface CachedParamDocument {
+  sourceHash: string;
+  typeName: string;
+  rowDataSize: number;
+  rowCount: number;
+  rows: Array<{ id: number; dataBase64: string; name?: string }>;
+  authority?: string;
+}
+const paramPageCache = new Map<string, CachedParamDocument>();
+
+type CachedContainerChildren = Awaited<
+  ReturnType<typeof listContainerChildren>
+>['children'];
+const containerChildrenCache = new Map<string, CachedContainerChildren>();
+
+function clearEditorPageCaches(): void {
+  fmgPageCache.clear();
+  paramPageCache.clear();
+  containerChildrenCache.clear();
+}
+
+/**
+ * Clamp a requested page into [0, pageCount) and return the served window.
+ * Shared by every paginated editor access channel so out-of-range navigation
+ * fails safely to the nearest valid page instead of returning empty pages.
+ */
+function normalizePageWindow(
+  total: number,
+  requestedPage: number,
+  pageSize: number
+): { page: number; pageCount: number; offset: number; size: number } {
+  const size = Math.max(1, Math.floor(pageSize));
+  const pageCount = Math.max(1, Math.ceil(total / size));
+  const page = Math.min(Math.max(0, Math.floor(requestedPage)), pageCount - 1);
+  return { page, pageCount, offset: page * size, size };
+}
+
 /**
  * Cached EMEDF registry. Resolved once from the user-provided external
  * DarkScript3 EMEDF JSON path (env SOULFORGE_EMEDF_PATH) or falls back
@@ -557,6 +617,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}),
         game: 'sekiro'
       });
+      clearEditorPageCaches();
       activeWorkspaceSessionId = randomUUID();
       const database = await ensureActiveOperationLog(activeSession);
       const scanJobId = randomUUID();
@@ -1220,6 +1281,101 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     });
   });
 
+  /**
+   * Paginated FMG entry access (hard constraint 17). Main assembles/caches the
+   * complete entry list once and serves bounded pages; the renderer never
+   * receives the full document. `query` filters the complete list in main, so
+   * search still covers every page.
+   */
+  handle(
+    'resource.readFmgPage',
+    async (
+      _event,
+      sourceUri: string,
+      requestedPage: number,
+      requestedPageSize: number,
+      query?: string
+    ) => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const failure = (message: string) => ({
+        ok: false,
+        sourceUri,
+        sourceHash: null,
+        entryCount: 0,
+        maxId: 0,
+        page: 0,
+        pageSize: 0,
+        pageCount: 0,
+        entries: [],
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message,
+          sourceUri
+        }]
+      });
+      if (!file) {
+        return failure('资源未索引，无法分页读取 FMG。');
+      }
+      let cached = fmgPageCache.get(sourceUri);
+      if (!cached) {
+        const result = await readFmgDocumentViaBridge({
+          sourcePath: file.absolutePath,
+          allowedRoots: activeSession
+            ? bridgeAllowedRoots(activeSession)
+            : [dirname(file.absolutePath)]
+        });
+        if (!result.ok || !result.data) {
+          return {
+            ok: false,
+            sourceUri,
+            sourceHash: null,
+            entryCount: 0,
+            maxId: 0,
+            page: 0,
+            pageSize: 0,
+            pageCount: 0,
+            entries: [],
+            diagnostics: result.diagnostics
+          };
+        }
+        cached = {
+          sourceHash: result.data.sourceHash,
+          maxId: result.data.entries.reduce((max, entry) => Math.max(max, entry.id), 0),
+          entries: result.data.entries,
+          ...(result.data.authority ? { authority: result.data.authority } : {})
+        };
+        fmgPageCache.set(sourceUri, cached);
+      }
+      const q = (query ?? '').trim().toLowerCase();
+      const filtered = q.length === 0
+        ? cached.entries
+        : cached.entries.filter((entry) =>
+            String(entry.id).includes(q) || entry.text.toLowerCase().includes(q)
+          );
+      const window = normalizePageWindow(
+        filtered.length,
+        requestedPage,
+        requestedPageSize || FMG_PAGE_SIZE
+      );
+      return {
+        ok: true,
+        sourceUri,
+        sourceHash: cached.sourceHash,
+        entryCount: filtered.length,
+        maxId: cached.maxId,
+        page: window.page,
+        pageSize: window.size,
+        pageCount: window.pageCount,
+        entries: filtered
+          .slice(window.offset, window.offset + window.size)
+          .map((entry) => ({ id: entry.id, text: entry.text })),
+        ...(cached.authority ? { authority: cached.authority } : {}),
+        diagnostics: []
+      };
+    }
+  );
+
   handle(
     'resource.applyFmgMutation',
     async (
@@ -1312,6 +1468,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           title: `FMG mutation ${mutation.kind} ${mutation.id}`
         });
       }
+      if (result.ok) fmgPageCache.delete(sourceUri);
       return toRendererSaveResult(result, indexedFiles);
     }
   );
@@ -1597,6 +1754,114 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     });
   });
 
+  /**
+   * Paginated PARAM row access (hard constraint 17). Main assembles/caches the
+   * complete row table once (up to MAX_PAGED_PARAM_ROWS) and serves bounded
+   * pages; the renderer never receives the whole document. `query` filters the
+   * complete table in main so search covers every page. Rows carry full bytes
+   * so the renderer can duplicate rows and edit fields without the full set.
+   */
+  handle(
+    'resource.readParamPage',
+    async (
+      _event,
+      sourceUri: string,
+      requestedPage: number,
+      requestedPageSize: number,
+      query?: string
+    ) => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const failure = (message: string) => ({
+        ok: false,
+        sourceUri,
+        sourceHash: null,
+        rowCount: 0,
+        page: 0,
+        pageSize: 0,
+        pageCount: 0,
+        rows: [],
+        rowsTruncated: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message,
+          sourceUri
+        }]
+      });
+      if (!file) {
+        return failure('资源未索引，无法分页读取 PARAM。');
+      }
+      let cached = paramPageCache.get(sourceUri);
+      if (!cached) {
+        const result = await readParamDocumentViaBridge({
+          sourcePath: file.absolutePath,
+          allowedRoots: activeSession
+            ? bridgeAllowedRoots(activeSession)
+            : [dirname(file.absolutePath)],
+          maxRows: MAX_PAGED_PARAM_ROWS
+        });
+        if (!result.ok || !result.data) {
+          return {
+            ok: false,
+            sourceUri,
+            sourceHash: null,
+            rowCount: 0,
+            page: 0,
+            pageSize: 0,
+            pageCount: 0,
+            rows: [],
+            rowsTruncated: false,
+            diagnostics: result.diagnostics
+          };
+        }
+        cached = {
+          sourceHash: result.data.sourceHash,
+          typeName: result.data.typeName,
+          rowDataSize: result.data.rowDataSize,
+          rowCount: result.data.rowCount,
+          rows: result.data.rows,
+          ...(result.data.authority ? { authority: result.data.authority } : {})
+        };
+        paramPageCache.set(sourceUri, cached);
+      }
+      const q = (query ?? '').trim().toLowerCase();
+      const filtered = q.length === 0
+        ? cached.rows
+        : cached.rows.filter((row) =>
+            String(row.id).includes(q) || (row.name ?? '').toLowerCase().includes(q)
+          );
+      const window = normalizePageWindow(
+        filtered.length,
+        requestedPage,
+        requestedPageSize || PARAM_PAGE_SIZE
+      );
+      return {
+        ok: true,
+        sourceUri,
+        sourceHash: cached.sourceHash,
+        typeName: cached.typeName,
+        rowDataSize: cached.rowDataSize,
+        rowCount: filtered.length,
+        page: window.page,
+        pageSize: window.size,
+        pageCount: window.pageCount,
+        rows: filtered
+          .slice(window.offset, window.offset + window.size)
+          .map((row) => ({
+            id: row.id,
+            dataBase64: row.dataBase64,
+            ...(row.name ? { name: row.name } : {}),
+            dataHexPreview: Buffer.from(row.dataBase64, 'base64')
+              .subarray(0, 16)
+              .toString('hex')
+          })),
+        rowsTruncated: cached.rowCount > cached.rows.length,
+        ...(cached.authority ? { authority: cached.authority } : {}),
+        diagnostics: []
+      };
+    }
+  );
+
   handle(
     'resource.applyParamMutation',
     async (
@@ -1699,6 +1964,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           title: `PARAM mutation ${mutation.kind} ${mutation.id}`
         });
       }
+      if (result.ok) paramPageCache.delete(sourceUri);
       return toRendererSaveResult(result, indexedFiles);
     }
   );
@@ -1817,6 +2083,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           title: `PARAM field set ${mutation.fieldId} on row ${mutation.rowId}`
         });
       }
+      if (result.ok) paramPageCache.delete(sourceUri);
       return toRendererSaveResult(result, indexedFiles);
     }
   );
@@ -1857,6 +2124,96 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         relativePath: file.relativePath,
         recursive: recursive === true
       });
+    }
+  );
+
+  /**
+   * Paginated container-child entry access (hard constraint 17). BND4/script
+   * containers may expose hundreds of entries; main materializes the entry
+   * table once and serves bounded pages so the renderer never holds the whole
+   * table. Children are projected to the renderer-safe DTO subset (no absolute
+   * paths / diagnostics cross the bridge).
+   */
+  handle(
+    'resource.listContainerChildrenPage',
+    async (
+      _event,
+      sourceUri: string,
+      requestedPage: number,
+      requestedPageSize: number,
+      recursive?: boolean
+    ) => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const failure = (message: string) => ({
+        ok: false,
+        totalCount: 0,
+        page: 0,
+        pageSize: 0,
+        pageCount: 0,
+        children: [],
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message,
+          sourceUri
+        }]
+      });
+      if (!file) {
+        return failure('资源未索引，无法分页枚举容器子项。');
+      }
+      const recursiveFlag = recursive === true;
+      const cacheKey = `${sourceUri}::${recursiveFlag ? 'recursive' : 'flat'}`;
+      let children = containerChildrenCache.get(cacheKey);
+      if (!children) {
+        const result = await listContainerChildren(file.absolutePath, {
+          relativePath: file.relativePath,
+          recursive: recursiveFlag
+        });
+        if (!result.ok) {
+          return {
+            ok: false,
+            totalCount: 0,
+            page: 0,
+            pageSize: 0,
+            pageCount: 0,
+            children: [],
+            diagnostics: result.diagnostics
+          };
+        }
+        children = result.children;
+        containerChildrenCache.set(cacheKey, children);
+      }
+      const window = normalizePageWindow(
+        children.length,
+        requestedPage,
+        requestedPageSize || CONTAINER_PAGE_SIZE
+      );
+      return {
+        ok: true,
+        totalCount: children.length,
+        page: window.page,
+        pageSize: window.size,
+        pageCount: window.pageCount,
+        children: children
+          .slice(window.offset, window.offset + window.size)
+          .map((child) => ({
+            childId: child.childId,
+            ...(child.name ? { name: child.name } : {}),
+            offset: child.offset,
+            size: child.size,
+            ...(child.compressedSize !== undefined
+              ? { compressedSize: child.compressedSize }
+              : {}),
+            hash: child.hash,
+            formatKind: child.formatKind,
+            sourceContainerUri: child.sourceContainerUri,
+            childUri: child.childUri,
+            rawBytesAvailable: child.rawBytesAvailable,
+            canReplace: child.canReplace,
+            ...(child.nestedFormat ? { nestedFormat: child.nestedFormat } : {})
+          })),
+        diagnostics: []
+      };
     }
   );
 
@@ -1945,6 +2302,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         ...(operationLog ? { operationLog } : {}),
         ...(storage ?? {})
       });
+      if (result.ok) containerChildrenCache.clear();
       return toRendererSaveResult(result, indexedFiles);
     }
   );

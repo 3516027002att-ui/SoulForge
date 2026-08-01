@@ -92,15 +92,19 @@ function main(): void {
   });
   assertCurrentScaleGap(
     currentScaleContractGaps,
-    'fmg',
-    'bounded-window',
-    'EDITOR_BOUNDED_WINDOW_NOT_RELEASE_SAFE'
+    'script',
+    'none',
+    'EDITOR_PAGINATION_OR_VIRTUALIZATION_REQUIRED'
   );
-  const emevdGap = currentScaleContractGaps.find((item) => item.releaseEditorId === 'emevd');
-  if (emevdGap) {
-    throw new Error(
-      `emevd scale gap must be closed (pagination assembly + bounded template + paged event list): ${JSON.stringify(emevdGap)}`
+  for (const releaseEditorId of ['bnd4', 'fmg', 'param', 'emevd'] as const) {
+    const leftover = currentScaleContractGaps.find(
+      (item) => item.releaseEditorId === releaseEditorId
     );
+    if (leftover) {
+      throw new Error(
+        `${releaseEditorId} scale gap must be closed (pagination wired): ${JSON.stringify(leftover)}`
+      );
+    }
   }
 
   console.log(JSON.stringify({
@@ -315,11 +319,19 @@ function assertScaleContractsMatchCurrentSources(): void {
     ],
     [
       'apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx',
-      ['filtered.slice(0, 200)']
+      ['readFmgPage', 'FMG_PAGE_SIZE', 'pageCount', 'pageEntries']
     ],
     [
       'apps/desktop/src/renderer/src/editors/ParamTablePanel.tsx',
-      ['const pageSize = 20', 'pageRows = filtered.slice']
+      ['readParamPage', 'PARAM_PAGE_SIZE', 'pageCount', 'pageRows']
+    ],
+    [
+      'apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx',
+      ['readParamPage', 'PAGE_SIZE', 'pageCount', 'pageRows']
+    ],
+    [
+      'apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx',
+      ['listContainerChildrenPage', 'pageCount', 'pageChildren']
     ],
     [
       'packages/core/src/editing/paramBridgeCommit.ts',

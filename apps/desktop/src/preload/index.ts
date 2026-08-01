@@ -20,8 +20,11 @@ import type {
   ToolResult
 } from '@soulforge/core';
 import type {
+  FmgEntryPage,
+  ParamRowPage,
   RendererContainerChildBytes,
   RendererContainerChildrenList,
+  RendererContainerChildrenPage,
   RendererContainerTreeSummary,
   ScriptContainerEvidence
 } from '@soulforge/shared';
@@ -92,6 +95,19 @@ const api = {
     ipcRenderer.invoke('resource.inspectContainerTree', sourceUri).then(stripPathFields),
   listContainerChildren: (sourceUri: string, recursive?: boolean): Promise<RendererContainerChildrenList> =>
     ipcRenderer.invoke('resource.listContainerChildren', sourceUri, recursive),
+  listContainerChildrenPage: (
+    sourceUri: string,
+    page: number,
+    pageSize: number,
+    recursive?: boolean
+  ): Promise<RendererContainerChildrenPage> =>
+    ipcRenderer.invoke(
+      'resource.listContainerChildrenPage',
+      sourceUri,
+      page,
+      pageSize,
+      recursive
+    ).then(stripPathFields),
   readContainerChild: (childUri: string): Promise<RendererContainerChildBytes> =>
     ipcRenderer.invoke('resource.readContainerChild', childUri),
   replaceContainerChild: (
@@ -151,6 +167,13 @@ const api = {
     ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
   readFmgDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFmgDocument', sourceUri),
+  readFmgPage: (
+    sourceUri: string,
+    page: number,
+    pageSize: number,
+    query?: string
+  ): Promise<FmgEntryPage> =>
+    ipcRenderer.invoke('resource.readFmgPage', sourceUri, page, pageSize, query),
   applyFmgMutation: (
     sourceUri: string,
     expectedHash: string,
@@ -189,6 +212,13 @@ const api = {
     ipcRenderer.invoke('resource.applyMsbMutation', sourceUri, expectedHash, mutation),
   readParamDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readParamDocument', sourceUri),
+  readParamPage: (
+    sourceUri: string,
+    page: number,
+    pageSize: number,
+    query?: string
+  ): Promise<ParamRowPage> =>
+    ipcRenderer.invoke('resource.readParamPage', sourceUri, page, pageSize, query),
   applyParamMutation: (
     sourceUri: string,
     expectedHash: string,

@@ -25,7 +25,12 @@ interface ReplaceResultView {
  */
 export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement {
   const [root, setRoot] = useState<RendererContainerTreeSummary | null>(null);
-  const [children, setChildren] = useState<RendererContainerChild[]>([]);
+  const [pageChildren, setPageChildren] = useState<RendererContainerChild[]>([]);
+  const [totalChildren, setTotalChildren] = useState(0);
+  const [page, setPage] = useState(0);
+  const [pageCount, setPageCount] = useState(1);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
   const [listDiagnostics, setListDiagnostics] = useState<Diagnostic[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -41,10 +46,16 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   const [replacing, setReplacing] = useState(false);
   const [replaceResult, setReplaceResult] = useState<ReplaceResultView | null>(null);
 
+  /** Fixed page size for the paginated container entry table (hard constraint 17). */
+  const CONTAINER_PAGE_SIZE = 50;
+
   const load = useCallback(async (): Promise<void> => {
     if (!props.resourceUri) {
       setRoot(null);
-      setChildren([]);
+      setPageChildren([]);
+      setTotalChildren(0);
+      setPage(0);
+      setPageCount(1);
       setListDiagnostics([]);
       setLoadError(null);
       return;
@@ -52,32 +63,77 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     setLoading(true);
     setLoadError(null);
     try {
-      const [tree, list] = await Promise.all([
-        window.soulforge.inspectContainerTree(props.resourceUri),
-        window.soulforge.listContainerChildren(props.resourceUri)
-      ]);
+      const treePromise = window.soulforge.inspectContainerTree(props.resourceUri);
+      const pagePromise = typeof window.soulforge.listContainerChildrenPage === 'function'
+        ? window.soulforge.listContainerChildrenPage(props.resourceUri, 0, CONTAINER_PAGE_SIZE, false)
+        : null;
+      const [tree, firstPage] = await Promise.all([treePromise, pagePromise]);
       setRoot(tree);
-      setChildren(list.children);
-      setListDiagnostics([...(tree.diagnostics ?? []), ...(list.diagnostics ?? [])]);
-      if (!tree.ok && list.children.length === 0) {
-        setLoadError(tree.diagnostics?.[0]?.message ?? '容器读取失败。');
+      if (firstPage && firstPage.ok) {
+        setPageChildren(firstPage.children);
+        setTotalChildren(firstPage.totalCount);
+        setPageCount(firstPage.pageCount);
+        setPage(firstPage.page);
+        setListDiagnostics([...(tree.diagnostics ?? []), ...(firstPage.diagnostics ?? [])]);
+        if (!tree.ok && firstPage.children.length === 0) {
+          setLoadError(tree.diagnostics?.[0]?.message ?? '容器读取失败。');
+        }
+      } else {
+        // Paginated channel unavailable or failed: fall back to the full list
+        // (bounded containers) so the workbench stays functional.
+        const list = await window.soulforge.listContainerChildren(props.resourceUri);
+        setPageChildren(list.children);
+        setTotalChildren(list.children.length);
+        setPageCount(Math.max(1, Math.ceil(list.children.length / CONTAINER_PAGE_SIZE)));
+        setPage(0);
+        setListDiagnostics([...(tree.diagnostics ?? []), ...(list.diagnostics ?? [])]);
+        if (!tree.ok && list.children.length === 0) {
+          setLoadError(tree.diagnostics?.[0]?.message ?? '容器读取失败。');
+        }
       }
     } catch (error) {
       setRoot(null);
-      setChildren([]);
+      setPageChildren([]);
+      setTotalChildren(0);
       setLoadError(error instanceof Error ? error.message : '容器读取异常。');
     } finally {
       setLoading(false);
     }
   }, [props.resourceUri]);
 
+  async function changePage(next: number): Promise<void> {
+    if (typeof window.soulforge.listContainerChildrenPage !== 'function') return;
+    setPageLoading(true);
+    setPageError(null);
+    try {
+      const result = await window.soulforge.listContainerChildrenPage(
+        props.resourceUri,
+        next,
+        CONTAINER_PAGE_SIZE,
+        false
+      );
+      if (result.ok) {
+        setPageChildren(result.children);
+        setTotalChildren(result.totalCount);
+        setPageCount(result.pageCount);
+        setPage(result.page);
+      } else {
+        setPageError(result.diagnostics?.[0]?.message ?? '容器子项分页读取失败。');
+      }
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : '容器子项分页读取异常。');
+    } finally {
+      setPageLoading(false);
+    }
+  }
+
   useEffect(() => {
     void load();
   }, [load]);
 
   const selectedChild = useMemo(
-    () => children.find((child) => child.childUri === selectedChildUri) ?? null,
-    [children, selectedChildUri]
+    () => pageChildren.find((child) => child.childUri === selectedChildUri) ?? null,
+    [pageChildren, selectedChildUri]
   );
 
   async function selectChild(child: RendererContainerChild): Promise<void> {
@@ -180,7 +236,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     <section className="panel" aria-label="BND4 容器工作台">
       <header className="panel-header">
         <h3>BND4 容器工作台</h3>
-        <span className="muted">{children.length} 个子项</span>
+        <span className="muted">{totalChildren} 个子项</span>
       </header>
 
       {loading && <p className="muted">正在读取容器…</p>}
@@ -207,6 +263,26 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
         </>
       )}
 
+      <div className="row gap pager">
+        <button
+          type="button"
+          disabled={page <= 0 || pageLoading}
+          onClick={() => void changePage(page - 1)}
+        >
+          上一页
+        </button>
+        <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
+        <button
+          type="button"
+          disabled={page >= pageCount - 1 || pageLoading}
+          onClick={() => void changePage(page + 1)}
+        >
+          下一页
+        </button>
+        {pageLoading && <span className="muted">加载中…</span>}
+      </div>
+      {pageError && <p className="danger">{pageError}</p>}
+
       <div className="binder-child-table script-entry-table" role="table">
         <div className="binder-child-row binder-child-header script-entry-row" role="row">
           <span>名称</span>
@@ -217,7 +293,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
           <span>嵌套</span>
           <span>替换</span>
         </div>
-        {children.map((child) => (
+        {pageChildren.map((child) => (
           <div
             key={child.childUri}
             className={child.childUri === selectedChildUri
@@ -237,7 +313,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
             <span>{child.canReplace ? '可' : '只读'}</span>
           </div>
         ))}
-        {children.length === 0 && !loading && <p className="muted">无子项列表。</p>}
+        {pageChildren.length === 0 && !loading && <p className="muted">无子项列表。</p>}
       </div>
 
       {listDiagnostics.length > 0 && (

@@ -91,3 +91,54 @@ export interface EditorMutationBatch {
   /** Only PatchIR-bound batches may be committed. */
   requiresPatchEngine: true;
 }
+
+/**
+ * One page of FMG entries served by the paginated editor access channel
+ * (`resource.readFmgPage`). The renderer only ever receives a bounded page
+ * plus navigation metadata; the complete document is assembled in main
+ * (hard constraint 17).
+ */
+export interface FmgEntryPage {
+  ok: boolean;
+  sourceUri: string;
+  sourceHash: string | null;
+  /** Total entry count across all pages (after the active query filter). */
+  entryCount: number;
+  /** Largest entry id observed in the whole document (safe id for add). */
+  maxId: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  entries: Array<{ id: number; text: string }>;
+  authority?: string;
+  diagnostics: Array<{ severity: string; code: string; message: string }>;
+}
+
+/**
+ * One page of PARAM rows served by the paginated editor access channel
+ * (`resource.readParamPage`). Rows carry the full row bytes (base64) so the
+ * renderer can duplicate rows and drive field-level editing without holding
+ * the whole document.
+ */
+export interface ParamRowPage {
+  ok: boolean;
+  sourceUri: string;
+  sourceHash: string | null;
+  typeName?: string;
+  rowDataSize?: number;
+  /** Total row count across all pages (after the active query filter). */
+  rowCount: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  rows: Array<{
+    id: number;
+    name?: string;
+    dataBase64?: string;
+    dataHexPreview?: string;
+  }>;
+  /** True when the native document exposes more rows than this channel covers. */
+  rowsTruncated: boolean;
+  authority?: string;
+  diagnostics: Array<{ severity: string; code: string; message: string }>;
+}
