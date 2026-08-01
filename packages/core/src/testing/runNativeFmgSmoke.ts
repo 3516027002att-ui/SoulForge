@@ -4,7 +4,7 @@
  * Also exercises BND4 child replace of rebuilt FMG bytes through PatchIR.
  */
 import { createHash } from 'node:crypto';
-import { copyFile, mkdtemp, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -150,6 +150,53 @@ async function main(): Promise<void> {
     throw new Error('FMG add mutation leaked into source file.');
   }
   await unlink(stagedAddPath);
+
+  // 3c) add 重复 id：Bridge 结构化拒绝（FMG_STAGING_WRITE_FAILED + 已存在诊断），
+  //     且暂存输出文件不产生（writer 在写盘前失败关闭）。
+  const dupPath = join(staging, 'weapon_names_dup.fmg');
+  const duplicateAdd = await runBridge<{ outputHash: string }>({
+    command: 'write-fmg',
+    filePath: fmgPath,
+    allowedRoots: [overlay, staging],
+    writableRoots: [staging],
+    timeoutMs: 60_000,
+    commandOptions: {
+      outputPath: dupPath,
+      expectedDocumentHash: read.data.sourceHash,
+      mutation: 'add',
+      id: editable.id,
+      text: 'SoulForge·重复ID拒绝'
+    }
+  });
+  if (duplicateAdd.parseStatus !== 'failed'
+    || !duplicateAdd.diagnostics.some((d) => d.code === 'FMG_STAGING_WRITE_FAILED')
+    || !duplicateAdd.diagnostics.some((d) => d.message.includes('已存在'))) {
+    throw new Error(`FMG duplicate add must fail closed: ${JSON.stringify(duplicateAdd.diagnostics)}`);
+  }
+  await expectNoFile(dupPath, 'duplicate add');
+
+  // 3d) add 非法 id（非整数被 JSON 序列化为 null → Bridge RequiredInt 拒绝），
+  //     暂存输出文件同样不产生。
+  const badIdPath = join(staging, 'weapon_names_badid.fmg');
+  const badIdAdd = await runBridge<{ outputHash: string }>({
+    command: 'write-fmg',
+    filePath: fmgPath,
+    allowedRoots: [overlay, staging],
+    writableRoots: [staging],
+    timeoutMs: 60_000,
+    commandOptions: {
+      outputPath: badIdPath,
+      expectedDocumentHash: read.data.sourceHash,
+      mutation: 'add',
+      id: Number.NaN,
+      text: 'SoulForge·非法ID'
+    }
+  });
+  if (badIdAdd.parseStatus !== 'failed'
+    || !badIdAdd.diagnostics.some((d) => d.code === 'FMG_STAGING_WRITE_FAILED')) {
+    throw new Error(`FMG non-integer add must fail closed: ${JSON.stringify(badIdAdd.diagnostics)}`);
+  }
+  await expectNoFile(badIdPath, 'invalid id add');
 
   // 4) Commit rebuilt FMG back into msgbnd via native BND4 replace + resource-entry inverse
   const session = await openWorkspaceSession({ overlayRoot: overlay, game: 'sekiro' });
@@ -308,6 +355,18 @@ async function main(): Promise<void> {
     menuFmgVerified += 1;
   }
 
+  // 9) 语言覆盖记录：只读扫描 mods/msg 下的语言目录，如实记录本机 corpus 的语言覆盖。
+  const msgRoot = join(dirname(dirname(sourceMsgbnd)));
+  let languageCorpus: string[] = [];
+  try {
+    languageCorpus = (await readdir(msgRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    languageCorpus = [];
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: '原生 FMG 读取/语义往返/写入/BND4 提交/回滚验证通过',
@@ -324,12 +383,30 @@ async function main(): Promise<void> {
       stagedRereadVerified: true,
       originalUntouched: true
     },
+    addFailureCases: {
+      duplicateId: 'FMG_STAGING_WRITE_FAILED + 已存在诊断，输出文件不产生',
+      nonIntegerId: 'FMG_STAGING_WRITE_FAILED，输出文件不产生'
+    },
     menuMsgbnd: {
       containerEntries: menuCount,
       fmgVerified: menuFmgVerified
+    },
+    languageCorpus: {
+      directories: languageCorpus,
+      note: 'FMG add/upsert mutation 仅在本机 zhocn 语料上验证；其他语言变体未覆盖。'
     }
   }, null, 2));
   await disposeBridgeDaemonPool();
+}
+
+/** Asserts a rejected mutation produced no staged output file. */
+async function expectNoFile(path: string, label: string): Promise<void> {
+  try {
+    await access(path);
+  } catch {
+    return; // ENOENT is the expected outcome.
+  }
+  throw new Error(`${label}: staged output must not exist after rejection`);
 }
 
 function sha256(bytes: Buffer): string {

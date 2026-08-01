@@ -45,7 +45,9 @@ async function main(): Promise<void> {
     command: 'read-param-document',
     filePath: paramPath,
     allowedRoots: [overlay],
-    timeoutMs: 60_000
+    timeoutMs: 60_000,
+    // 显式空 options：规避 Bridge default-options 缺陷（read-param-document 分页读取行无 ValueKind 防护）。
+    commandOptions: {}
   });
   if (!read.data?.rows?.length) {
     throw new Error(`PARAM read failed: ${JSON.stringify(read.diagnostics)}`);
@@ -77,7 +79,8 @@ async function main(): Promise<void> {
     command: 'read-param-document',
     filePath: staged,
     allowedRoots: [staging],
-    timeoutMs: 60_000
+    timeoutMs: 60_000,
+    commandOptions: {}
   });
   const dup = after.data?.rows.find((r) => r.id === nextId);
   const original = after.data?.rows.find((r) => r.id === source.id);

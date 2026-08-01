@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { copyFile, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { ParamDefDocument } from '@soulforge/shared';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
@@ -13,11 +14,13 @@ import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
+import { applyParamFieldMutation } from '../param/paramFieldMutation.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 interface ParamEnvelope {
   sourceHash: string;
   typeName: string;
+  dataVersion?: number;
   rowCount: number;
   rowDataSize: number;
   rows: Array<{ id: number; dataBase64: string; dataHash: string }>;
@@ -62,7 +65,10 @@ async function main(): Promise<void> {
     command: 'read-param-document',
     filePath: paramPath,
     allowedRoots: [overlay],
-    timeoutMs: 60_000
+    timeoutMs: 60_000,
+    // 显式空 options：规避 Bridge 对 default JsonElement 调用 TryGetProperty 抛
+    // InvalidOperationException 的缺陷（read-param-document 分页读取行无 ValueKind 防护）。
+    commandOptions: {}
   });
   if (!read.data?.roundTrip?.semanticIdentical) {
     throw new Error(`PARAM read/roundtrip failed: ${JSON.stringify(read.diagnostics)} ${JSON.stringify(read.data?.roundTrip)}`);
@@ -70,10 +76,36 @@ async function main(): Promise<void> {
   const first = read.data.rows[0];
   if (!first) throw new Error('PARAM has no rows.');
 
-  // Flip first byte of row data for upsert
+  // Field-level set: encode the mutation through the TS field codec, then hand
+  // the whole row to the Bridge as a staged upsert. The minimal user-derived
+  // definition maps the row's first byte to a u8 field so the staged result can
+  // be re-read and asserted byte-for-byte on the Bridge side.
   const originalData = Buffer.from(first.dataBase64, 'base64');
-  const mutated = Buffer.from(originalData);
-  mutated[0] = (mutated[0]! ^ 0xff) & 0xff;
+  const FIELD_SET_VALUE = originalData[0] === 0x5a ? 0xa5 : 0x5a;
+  const FIELD_DEF: ParamDefDocument = {
+    schemaVersion: 1,
+    typeName: read.data.typeName,
+    version: read.data.dataVersion ?? 0,
+    rowDataSize: read.data.rowDataSize,
+    origin: 'fixture',
+    fields: [
+      { id: 'f_first_byte', name: 'firstByte', type: 'u8', offset: 0, size: 1 }
+    ]
+  };
+  const fieldSet = applyParamFieldMutation({
+    rowDataBase64: first.dataBase64,
+    definition: FIELD_DEF,
+    fieldId: 'f_first_byte',
+    value: FIELD_SET_VALUE
+  });
+  if (!fieldSet.ok) throw new Error(`field-level set failed: ${fieldSet.message}`);
+  const mutated = Buffer.from(fieldSet.nextDataBase64, 'base64');
+  if (mutated.readUInt8(0) !== FIELD_SET_VALUE) {
+    throw new Error('field-level set did not land on the first byte');
+  }
+  if (!originalData.equals(Buffer.from(first.dataBase64, 'base64'))) {
+    throw new Error('TS field codec mutated the source row');
+  }
   const stagedParam = join(staging, 'ActionGuideParam.param');
   const written = await runBridge({
     command: 'write-param',
@@ -96,11 +128,17 @@ async function main(): Promise<void> {
     command: 'read-param-document',
     filePath: stagedParam,
     allowedRoots: [staging],
-    timeoutMs: 60_000
+    timeoutMs: 60_000,
+    commandOptions: {}
   });
   const stagedRow = stagedRead.data?.rows.find((r) => r.id === first.id);
   if (!stagedRow || stagedRow.dataHash === first.dataHash) {
     throw new Error('PARAM staged upsert did not change row hash.');
+  }
+  // Bridge 独立重读：staged 行首字节必须与字段级 set 的值逐字节一致。
+  const stagedRowBytes = Buffer.from(stagedRow.dataBase64, 'base64');
+  if (stagedRowBytes.readUInt8(0) !== FIELD_SET_VALUE) {
+    throw new Error(`Bridge staged row first byte mismatch: 0x${stagedRowBytes.readUInt8(0).toString(16)}`);
   }
 
   // Commit into parambnd via BND4 replace
@@ -197,7 +235,8 @@ async function main(): Promise<void> {
       command: 'read-param-document',
       filePath: tmp,
       allowedRoots: [staging],
-      timeoutMs: 60_000
+      timeoutMs: 60_000,
+      commandOptions: {}
     });
     if (!doc.data?.roundTrip?.semanticIdentical) {
       failed.push({
@@ -225,7 +264,14 @@ async function main(): Promise<void> {
     corpusVerified: verified,
     corpusFailed: failed.length,
     failures: failed.slice(0, 5),
-    containerEntries: count
+    containerEntries: count,
+    fieldLevelSet: {
+      fieldId: 'f_first_byte',
+      value: FIELD_SET_VALUE,
+      tsCodecLanded: true,
+      bridgeStagedRereadByteMatch: true,
+      sourceRowImmutable: true
+    }
   }, null, 2));
   await disposeBridgeDaemonPool();
 }
