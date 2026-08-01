@@ -31,6 +31,27 @@ interface DcxEnvelope {
   payloadPrefixHex?: string;
 }
 
+/** Identify the magic of a raw header prefix (readonly, never decompiles). */
+function magicLabelFor(bytes: Uint8Array): string {
+  if (bytes.length >= 5
+    && bytes[0] === 0x1b && bytes[1] === 0x4c && bytes[2] === 0x75 && bytes[3] === 0x61
+    && (bytes[4] === 0x50 || bytes[4] === 0x51)) {
+    return `\\x1bLua${String.fromCharCode(bytes[4])} (Havok Script compiled bytecode; Sekiro corpus \\x1bLuaP)`;
+  }
+  const ascii = [...bytes.subarray(0, 8)].map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '.')).join('');
+  if (bytes.length >= 8 && bytes[4] === 0x54 && bytes[5] === 0x41 && bytes[6] === 0x47 && bytes[7] === 0x30) {
+    return 'HKX tagfile (TAG0 at offset 4)';
+  }
+  if (ascii.startsWith('hkxs')) return 'HKX binary (hkxs)';
+  if (ascii.startsWith('Havok')) return 'HKX (Havok)';
+  if (ascii.startsWith('TAE')) return 'TAE (animation events)';
+  if (ascii.startsWith('fsSL')) return 'ESD (state machine bytecode)';
+  if (ascii.startsWith('ESD0')) return 'ESD (state machine bytecode)';
+  if (ascii.startsWith('BND4')) return 'BND4 container';
+  if (ascii.startsWith('LUAI')) return 'LUAINFO (function parameter metadata)';
+  return `unknown (${ascii})`;
+}
+
 interface ExtractEnvelope {
   contentSize?: number;
   outputPath?: string;
@@ -81,9 +102,11 @@ async function extractHeader(rel: string, childPath: string, outName: string, la
     return;
   }
   const bytes = readFileSync(r.data.outputPath);
-  const hex = [...bytes.subarray(0, 32)].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+  const header = bytes.subarray(0, 32);
+  const hex = [...header].map((b) => b.toString(16).padStart(2, '0')).join(' ');
   const ascii = [...bytes.subarray(0, 48)].map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '.')).join('');
   console.log(`\n=== ${label}: ${r.data.name ?? childPath} (${bytes.length} B, id=${r.data.id}) ===`);
+  console.log(`  magic: ${magicLabelFor(header)}`);
   console.log(`  hex:   ${hex}`);
   console.log(`  ascii: ${ascii}`);
 }

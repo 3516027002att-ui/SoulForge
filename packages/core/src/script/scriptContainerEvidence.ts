@@ -1,12 +1,39 @@
 /**
- * Production script container evidence projection.
+ * Production script container evidence projection (W-BEHAVIOR-MAP-01).
  *
- * Provides a readonly, structured view of script container entries
- * (luabnd, talkesdbnd, action/*.hks) for the script editor.
+ * Provides a readonly, structured container-level magic/reference inventory
+ * for script containers (luabnd, talkesdbnd, action/*.hks) backing the
+ * script editor:
+ *   - entry enumeration (BND4 reference table: name / index / size / id);
+ *   - extension distribution across the whole container;
+ *   - `\x1bLua` compiled-bytecode identification from real header bytes
+ *     (bounded magic sample);
+ *   - LUAGNL / LUAINFO / ESD / HKX classification;
+ *   - bounded hex evidence (first 32 bytes per sampled script entry).
  *
- * SoulForge does NOT decompile, recompile, or execute scripts.
- * Inner `.lua` / `.hks` files are Havok Script compiled bytecode
- * (`\x1bLuaQ` magic), not editable source text.
+ * Real-corpus finding (W-BEHAVIOR-MAP-01 probe, Sekiro luabnd): inner `.lua`
+ * entries are a MIX of Havok Script compiled bytecode with magic
+ * `\x1bLuaP` (0x1b 0x4c 0x75 0x61 0x50) and plain-text list files
+ * (e.g. goal_list.lua / logic_list.lua). The `\x1bLuaQ` magic is the vanilla
+ * Lua 5.1 variant; both are recognized as the `\x1bLua` family. Whether a
+ * specific entry's real bytes matched is reported via `magicVerified` and its
+ * bounded `headerHex` — extension-based classification alone never claims
+ * bytecode.
+ *
+ * Sekiro BND4 inner names are absolute paths from the original build machine
+ * (e.g. `N:\NTC\data\Target\INTERROOT_win64\script\ai\out\bin\goal_list.lua`);
+ * evidence entry names are therefore sanitized to their basename so no
+ * absolute path ever reaches the editor/renderer.
+ *
+ * SoulForge does NOT decompile, recompile, or execute scripts. Disassembly is
+ * never presented as editable source.
+ *
+ * Authority cap: `candidate`. This projection proves container-level
+ * enumeration, bytecode format identification and bounded header evidence
+ * only — never script semantics, decompilation, recompilation or writer
+ * capability. Evidence output is sanitized: entries carry sanitized inner
+ * names, bounded hex only, and no absolute paths beyond the documented
+ * main-process `containerPath`.
  */
 
 import { runBridge } from '../bridge/runBridge.js';
@@ -18,7 +45,7 @@ import { createDiagnostic } from '@soulforge/shared';
 /* ------------------------------------------------------------------ */
 
 export type ScriptEntryClassification =
-  | 'lua-bytecode'      // \x1bLuaQ compiled Havok Script
+  | 'lua-bytecode'      // \x1bLua family compiled Havok Script
   | 'luagnl'            // global name table (decompilation aid)
   | 'luainfo'           // function parameter metadata (decompilation aid)
   | 'esd-bytecode'      // ESD state machine bytecode
@@ -26,27 +53,31 @@ export type ScriptEntryClassification =
   | 'unknown';
 
 export interface ScriptContainerEntryEvidence {
-  /** Entry name (inner path within the container). */
+  /** Entry name sanitized to basename (Sekiro BND4 inner names are absolute
+   *  build-machine paths; never surfaced here). */
   name: string;
-  /** Entry index in the BND4 entry table. */
+  /** Entry index in the BND4 entry table (container reference slot). */
   index: number;
   /** Uncompressed size in bytes. */
   size: number;
   /** File extension (lowercase, without dot). */
   extension: string;
-  /** Classified entry type. */
+  /** Classified entry type (extension-based). */
   classification: ScriptEntryClassification;
   /** First N bytes as hex (readonly evidence, bounded). */
   headerHex?: string;
   /** Magic bytes identification string. */
   magicLabel?: string;
+  /** True when the real header bytes of this entry matched the `\x1bLua`
+   *  compiled-bytecode family via the bounded magic sample. */
+  magicVerified?: boolean;
 }
 
 export interface ScriptContainerEvidence {
   ok: boolean;
   /** Container file path (absolute, main-process only). */
   containerPath: string;
-  /** Container format: BND4_DFLT, BND4_KRAK, or unknown. */
+  /** Container format: BND4, DCX-DFLT->BND4, BND4_KRAK, or unknown. */
   containerFormat: string;
   /** Total entry count. */
   entryCount: number;
@@ -56,6 +87,16 @@ export interface ScriptContainerEvidence {
   truncated: boolean;
   /** Distribution of classifications. */
   classificationSummary: Record<ScriptEntryClassification, number>;
+  /** Extension distribution across the whole container (lowercase, no dot). */
+  extensionDistribution: Record<string, number>;
+  /** Count of script entries whose real bytes matched the `\x1bLua` magic. */
+  magicVerifiedCount: number;
+  /** Count of script-classified entries (lua/luagnl/luainfo/esd/hkx). */
+  scriptEntryCount: number;
+  /** Number of script entries actually sampled for magic verification. */
+  magicSampleCount: number;
+  /** Authority marker: container-level inventory only (cap=candidate). */
+  authority: 'candidate';
   diagnostics: StructuredDiagnostic[];
 }
 
@@ -65,15 +106,31 @@ export interface ScriptContainerEvidence {
 
 const MAX_EVIDENCE_ENTRIES = 256;
 const HEADER_PREVIEW_BYTES = 32;
+const MAGIC_SAMPLE_LIMIT = 12;
 
-/** Havok Script (Lua 5.1 family) compiled bytecode magic: \x1bLuaQ */
-const LUA_BYTECODE_MAGIC = [0x1b, 0x4c, 0x75, 0x61, 0x51];
+/** Havok Script / Lua 5.1 compiled bytecode signature: \x1bLua */
+const LUA_SIGNATURE = [0x1b, 0x4c, 0x75, 0x61];
+/** Version/magic byte: 0x50 (`\x1bLuaP`, observed Sekiro/Havok corpus),
+ *  0x51 (`\x1bLuaQ`, vanilla Lua 5.1). */
+const LUA_VERSION_BYTES = new Set([0x50, 0x51]);
 
 /* ------------------------------------------------------------------ */
 /*  Classification                                                    */
 /* ------------------------------------------------------------------ */
 
-export function classifyScriptEntry(name: string, headerBytes?: number[]): ScriptEntryClassification {
+/**
+ * True when `headerBytes` begins with the `\x1bLua` compiled-bytecode
+ * signature (family `\x1bLuaP` / `\x1bLuaQ`). Readonly identification —
+ * never decompiles or executes.
+ */
+export function isHavokScriptBytecode(headerBytes: number[] | Uint8Array): boolean {
+  if (headerBytes.length < LUA_SIGNATURE.length + 1) return false;
+  const familyMatch = LUA_SIGNATURE.every((byte, index) => headerBytes[index] === byte);
+  if (!familyMatch) return false;
+  return LUA_VERSION_BYTES.has(headerBytes[LUA_SIGNATURE.length]!);
+}
+
+export function classifyScriptEntry(name: string, headerBytes?: number[] | Uint8Array): ScriptEntryClassification {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
 
   if (ext === 'luagnl') return 'luagnl';
@@ -82,12 +139,14 @@ export function classifyScriptEntry(name: string, headerBytes?: number[]): Scrip
   if (ext === 'hkx') return 'hkx-bytecode';
 
   if (ext === 'lua' || ext === 'hks') {
-    if (headerBytes && headerBytes.length >= LUA_BYTECODE_MAGIC.length) {
-      const matches = LUA_BYTECODE_MAGIC.every((b, i) => headerBytes[i] === b);
+    if (headerBytes && headerBytes.length >= LUA_SIGNATURE.length + 1) {
+      const matches = isHavokScriptBytecode(headerBytes);
       if (matches) return 'lua-bytecode';
     }
-    // Even without header confirmation, .lua/.hks in script containers
-    // are compiled bytecode per W-BEHAVIOR-MAP-01 probe evidence.
+    // .lua/.hks in script containers belong to the compiled-bytecode family
+    // per W-BEHAVIOR-MAP-01 probe evidence, but whether the real bytes matched
+    // is reported separately via `magicVerified` on the evidence entry
+    // (plain-text list files such as goal_list.lua carry magicVerified=false).
     return 'lua-bytecode';
   }
 
@@ -96,13 +155,37 @@ export function classifyScriptEntry(name: string, headerBytes?: number[]): Scrip
 
 export function magicLabel(classification: ScriptEntryClassification): string {
   switch (classification) {
-    case 'lua-bytecode': return '\\x1bLuaQ (Havok Script compiled bytecode)';
+    case 'lua-bytecode': return '\\x1bLuaP/\\x1bLuaQ (Havok Script compiled bytecode)';
     case 'luagnl': return 'LUAGNL (global name table)';
     case 'luainfo': return 'LUAINFO (function parameter metadata)';
     case 'esd-bytecode': return 'ESD (state machine bytecode)';
     case 'hkx-bytecode': return 'HKX (behavior bytecode)';
     default: return 'unknown';
   }
+}
+
+function isScriptClassification(classification: ScriptEntryClassification): boolean {
+  return classification === 'lua-bytecode'
+    || classification === 'luagnl'
+    || classification === 'luainfo'
+    || classification === 'esd-bytecode'
+    || classification === 'hkx-bytecode';
+}
+
+/**
+ * Sanitize a BND4 entry name to its basename. Sekiro luabnd inner names are
+ * absolute paths from the original build machine (e.g.
+ * `N:\NTC\data\Target\INTERROOT_win64\script\ai\out\bin\goal_list.lua`);
+ * surfacing them would leak absolute paths into the editor. On basename
+ * collision the index is appended for uniqueness.
+ */
+export function sanitizeEntryName(rawName: string, index: number, seen: Set<string>): string {
+  const separator = rawName.includes('\\') ? '\\' : '/';
+  const base = rawName.split(separator).pop() ?? rawName;
+  const candidate = base.trim() || `entry_${index}`;
+  if (seen.has(candidate.toLowerCase())) return `${candidate}#${index}`;
+  seen.add(candidate.toLowerCase());
+  return candidate;
 }
 
 /* ------------------------------------------------------------------ */
@@ -131,16 +214,45 @@ interface Bnd4InventoryData {
   entryCount?: number;
   entries?: Bnd4InventoryEntry[];
   sampleEntries?: Bnd4InventoryEntry[];
-  extensionDistribution?: Record<string, number>;
-  resourceKindDistribution?: Record<string, number>;
+  extensions?: Record<string, number>;
+  resourceKinds?: Record<string, number>;
+}
+
+interface DcxReadEnvelope {
+  compressionFormat?: string;
+  nested?: {
+    entryCount?: number;
+    entries?: Bnd4InventoryEntry[];
+  };
+}
+
+interface Bnd4ChildSnapshotEnvelope {
+  contentBase64?: string;
+}
+
+function emptyClassificationSummary(): Record<ScriptEntryClassification, number> {
+  return {
+    'lua-bytecode': 0, 'luagnl': 0, 'luainfo': 0,
+    'esd-bytecode': 0, 'hkx-bytecode': 0, 'unknown': 0
+  };
+}
+
+function normalizeExtensionKey(key: string): string {
+  if (key === '(none)') return '(none)';
+  return key.toLowerCase().replace(/^\./, '');
 }
 
 /**
- * Build a readonly evidence projection for a script container.
- * Uses the Bridge `inventory-asset-resources` command for entry enumeration
- * and `snapshot-bnd4-child` for header bytes when needed.
+ * Build a readonly container-level magic/reference inventory for a script
+ * container. Uses the Bridge `inventory-asset-resources` command for the
+ * container anchor (format / entryCount / extension distribution), the
+ * `read-dcx-document` command for the full BND4 reference table when the
+ * container is DCX-wrapped, and `snapshot-bnd4-child` for a bounded magic
+ * sample over real `.lua`/`.hks` header bytes.
  *
- * Never modifies any file. Never executes or decompiles scripts.
+ * Never modifies any file. Never executes or decompiles scripts. Evidence
+ * retains only sanitized inner names, bounded hex (first 32 bytes per sampled
+ * script entry) and no absolute paths beyond the documented `containerPath`.
  */
 export async function buildScriptContainerEvidence(
   options: ScriptEvidenceOptions
@@ -148,7 +260,8 @@ export async function buildScriptContainerEvidence(
   const diagnostics: StructuredDiagnostic[] = [];
   const sourceUri = `file:///${options.containerPath.replace(/\\/g, '/')}`;
 
-  // Step 1: Enumerate container entries via Bridge inventory
+  // Step 1: Container anchor via Bridge inventory (format / entryCount /
+  // extension distribution / bounded samples). Sanitized, container-level.
   const inventory = await runBridge<Bnd4InventoryData>({
     command: 'inventory-asset-resources',
     filePath: options.containerPath,
@@ -172,57 +285,131 @@ export async function buildScriptContainerEvidence(
       entryCount: 0,
       entries: [],
       truncated: false,
-      classificationSummary: {
-        'lua-bytecode': 0, 'luagnl': 0, 'luainfo': 0,
-        'esd-bytecode': 0, 'hkx-bytecode': 0, 'unknown': 0
-      },
+      classificationSummary: emptyClassificationSummary(),
+      extensionDistribution: {},
+      magicVerifiedCount: 0,
+      scriptEntryCount: 0,
+      magicSampleCount: 0,
+      authority: 'candidate',
       diagnostics
     };
   }
 
   const data = inventory.data ?? {};
-  const rawEntries = data.entries ?? data.sampleEntries ?? [];
+  const extensionDistribution: Record<string, number> = {};
+  for (const [key, count] of Object.entries(data.extensions ?? {})) {
+    extensionDistribution[normalizeExtensionKey(key)] = count;
+  }
+
+  // Step 2: Full BND4 reference table (index / size / id per entry) via the
+  // DCX document reader when the container is DCX-wrapped; otherwise fall back
+  // to the inventory bounded sample set (name/id only).
+  let rawEntries: Bnd4InventoryEntry[] = data.sampleEntries ?? data.entries ?? [];
+  let containerFormat = data.format ?? 'BND4';
+  let enumerationSource: 'read-dcx-document' | 'inventory-sample' = 'inventory-sample';
+  const dcx = await runBridge<DcxReadEnvelope>({
+    command: 'read-dcx-document',
+    filePath: options.containerPath,
+    resourceUri: sourceUri,
+    allowedRoots: options.allowedRoots,
+    ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
+    timeoutMs: options.timeoutMs ?? 60_000
+  });
+  const dcxEntries = dcx.data?.nested?.entries;
+  if (dcx.parseStatus !== 'failed' && Array.isArray(dcxEntries) && dcxEntries.length > 0) {
+    rawEntries = dcxEntries;
+    if (dcx.data?.compressionFormat) {
+      containerFormat = `DCX-${dcx.data.compressionFormat}->BND4`;
+    }
+    enumerationSource = 'read-dcx-document';
+  }
+
   const truncated = rawEntries.length > MAX_EVIDENCE_ENTRIES;
   const boundedEntries = rawEntries.slice(0, MAX_EVIDENCE_ENTRIES);
 
-  // Step 2: Classify each entry
+  // Step 3: Per-entry classification with sanitized names (extension-based).
+  const seenNames = new Set<string>();
   const entries: ScriptContainerEntryEvidence[] = boundedEntries.map((entry) => {
-    const name = entry.name ?? `entry_${entry.index ?? 0}`;
-    const classification = classifyScriptEntry(name);
+    const rawName = entry.name ?? `entry_${entry.index ?? 0}`;
+    const name = sanitizeEntryName(rawName, entry.index ?? 0, seenNames);
+    const classification = classifyScriptEntry(rawName);
     return {
       name,
       index: entry.index ?? 0,
       size: entry.uncompressedSize ?? 0,
-      extension: name.split('.').pop()?.toLowerCase() ?? '',
+      extension: rawName.split('.').pop()?.toLowerCase() ?? '',
       classification,
       magicLabel: magicLabel(classification)
     };
   });
 
-  // Step 3: Build classification summary
-  const classificationSummary: Record<ScriptEntryClassification, number> = {
-    'lua-bytecode': 0, 'luagnl': 0, 'luainfo': 0,
-    'esd-bytecode': 0, 'hkx-bytecode': 0, 'unknown': 0
-  };
+  // Step 4: Bounded magic verification over real `.lua`/`.hks` header bytes.
+  // Only entries classified as `lua-bytecode` are sampled (LUAGNL/LUAINFO/ESD/
+  // HKX carry their own formats and are classified by extension). Each snapshot
+  // is decoded and only the first 32 bytes are retained as hex evidence — full
+  // content never leaves the daemon response into the evidence projection.
+  const luaBytecodeIndices: number[] = [];
+  entries.forEach((entry, index) => {
+    if (entry.classification === 'lua-bytecode') luaBytecodeIndices.push(index);
+  });
+  const magicSampleCount = Math.min(MAGIC_SAMPLE_LIMIT, luaBytecodeIndices.length);
+  let magicVerifiedCount = 0;
+  for (const entryIndex of luaBytecodeIndices.slice(0, MAGIC_SAMPLE_LIMIT)) {
+    const entry = entries[entryIndex]!;
+    const snapshot = await runBridge<Bnd4ChildSnapshotEnvelope>({
+      command: 'snapshot-bnd4-child',
+      filePath: options.containerPath,
+      resourceUri: sourceUri,
+      allowedRoots: options.allowedRoots,
+      ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: options.oodleRuntimeRoot } : {}),
+      timeoutMs: options.timeoutMs ?? 60_000,
+      commandOptions: { entryIndex: entry.index }
+    });
+    if (snapshot.parseStatus === 'failed' || !snapshot.data?.contentBase64) {
+      diagnostics.push(createDiagnostic({
+        severity: 'warning',
+        code: 'SCRIPT_EVIDENCE_MAGIC_SAMPLE_FAILED',
+        message: `条目 ${entry.name} 头部快照失败；保留扩展名分类（magicVerified=false）。`,
+        targetUri: sourceUri
+      }));
+      entry.magicVerified = false;
+      continue;
+    }
+    const bytes = Buffer.from(snapshot.data.contentBase64, 'base64');
+    const header = [...bytes.subarray(0, HEADER_PREVIEW_BYTES)];
+    const verified = isHavokScriptBytecode(header);
+    entry.headerHex = header.map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    entry.magicVerified = verified;
+    if (verified) magicVerifiedCount += 1;
+  }
+
+  // Step 5: Classification summary + script inventory counts.
+  const classificationSummary = emptyClassificationSummary();
   for (const entry of entries) {
     classificationSummary[entry.classification] += 1;
   }
+  const scriptEntryCount = entries.filter((entry) => isScriptClassification(entry.classification)).length;
 
   diagnostics.push(createDiagnostic({
     severity: 'info',
     code: 'SCRIPT_EVIDENCE_BUILT',
-    message: `Script container evidence: ${entries.length} entries (${classificationSummary['lua-bytecode']} Lua bytecode, ${classificationSummary['luagnl']} LUAGNL, ${classificationSummary['luainfo']} LUAINFO).`,
+    message: `Script container evidence: ${entries.length} entries (${classificationSummary['lua-bytecode']} Lua bytecode, ${classificationSummary['luagnl']} LUAGNL, ${classificationSummary['luainfo']} LUAINFO); magic verified ${magicVerifiedCount}/${magicSampleCount} sampled; enumeration via ${enumerationSource}.`,
     targetUri: sourceUri
   }));
 
   return {
     ok: true,
     containerPath: options.containerPath,
-    containerFormat: data.format ?? 'BND4',
+    containerFormat,
     entryCount: data.entryCount ?? rawEntries.length,
     entries,
     truncated,
     classificationSummary,
+    extensionDistribution,
+    magicVerifiedCount,
+    scriptEntryCount,
+    magicSampleCount,
+    authority: 'candidate',
     diagnostics
   };
 }
