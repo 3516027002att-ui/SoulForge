@@ -51,6 +51,19 @@ function main(): void {
   if (!preload.includes('applyMsbMutation') || !preload.includes('applyParamMutation')) {
     throw new Error('preload missing write APIs');
   }
+  // Paginated editor access (hard constraint 17): every release editor's
+  // bounded read must be reachable from the renderer through a page channel,
+  // and main must register it. This keeps the scale-access contract honest.
+  for (const channel of [
+    'resource.readFmgPage',
+    'resource.readParamPage',
+    'resource.listContainerChildrenPage'
+  ]) {
+    if (!ipc.includes(channel)) throw new Error(`ipc missing paginated channel ${channel}`);
+  }
+  for (const method of ['readFmgPage', 'readParamPage', 'listContainerChildrenPage']) {
+    if (!preload.includes(method)) throw new Error(`preload missing paginated method ${method}`);
+  }
   if (!ipc.includes("game: 'sekiro'")
     || !ipc.includes('rejectNonSekiroNativeWrite(sourceUri, file)')) {
     throw new Error('native semantic writes must fail closed outside the Sekiro adaptation');

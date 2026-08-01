@@ -1,11 +1,15 @@
-import { useMemo, useState, type ReactElement } from 'react';
-import type { ParamDefDocument, ParamFieldDef } from '@soulforge/shared';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import type { ParamDefDocument, ParamFieldDef, ParamRowPage } from '@soulforge/shared';
 import { base64ToUint8Array } from '../utils/binary.js';
 
 export interface ParamDefPanelProps {
   typeName: string;
   rowDataSize: number;
   origin: string;
+  /** 分页读取目标（live 模式下经 resource.readParamPage 按页取行）。 */
+  resourceUri: string;
+  /** True when the source is a live Bridge PARAM document (page-fetchable). */
+  live?: boolean;
   /**
    * 字段级结构定义。为 null 表示当前没有可用的 paramdef 定义（官方适配包
    * 只读；用户派生定义尚未接入），此时字段视图保持只读/不可用。
@@ -52,27 +56,89 @@ const PAGE_SIZE = 20;
 /**
  * PARAM 字段级查看/编辑面板。
  *
- * 接入真实 PARAM 行数据与 paramdef 定义（定义目前只有演示 fixture 时，
- * 字段提交保持关闭——fixture 布局绝不允许写真实游戏数据）。字段解码是
- * 只读展示投影，不是 native authority；写入只经 applyParamFieldMutation
- * 的 whole-row Bridge upsert + Patch Engine。
+ * Live 模式下行选择列表经 `resource.readParamPage` 按页读取（renderer 只
+ * 持有一页，导航可覆盖完整行表），字段解码的字节取自当前页行的 base64；
+ * 演示/回退路径继续使用 props.rows + getRowDataBase64。接入真实 PARAM 行
+ * 数据与 paramdef 定义（定义目前只有演示 fixture 时，字段提交保持关闭——
+ * fixture 布局绝不允许写真实游戏数据）。字段解码是只读展示投影，不是 native
+ * authority；写入只经 applyParamFieldMutation 的 whole-row Bridge upsert +
+ * Patch Engine。
  */
 export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
+  const liveMode = props.live === true
+    && typeof window.soulforge.readParamPage === 'function';
   const [page, setPage] = useState(0);
+  const [pageRows, setPageRows] = useState<Array<{
+    id: number;
+    name?: string;
+    dataHexPreview?: string;
+    dataBase64?: string;
+  }>>([]);
+  const [pageCount, setPageCount] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
   const [selectedRowId, setSelectedRowId] = useState<number | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [committing, setCommitting] = useState(false);
   const [commitResult, setCommitResult] = useState<CommitResultView | null>(null);
 
-  const pageCount = Math.max(1, Math.ceil(props.rows.length / PAGE_SIZE));
-  const pageRows = props.rows.slice(page * PAGE_SIZE, Math.min((page + 1) * PAGE_SIZE, props.rows.length));
+  // Live path: fetch one page from main (complete coverage via navigation).
+  useEffect(() => {
+    if (!liveMode || !props.resourceUri) return;
+    let cancelled = false;
+    setLoading(true);
+    setPageError(null);
+    window.soulforge.readParamPage(props.resourceUri, page, PAGE_SIZE, '')
+      .then((result: ParamRowPage) => {
+        if (cancelled) return;
+        if (!result.ok) {
+          setPageError(result.diagnostics?.[0]?.message ?? 'PARAM 分页读取失败。');
+          setPageRows([]);
+        } else {
+          setPageRows(result.rows);
+          setPageCount(result.pageCount);
+          setPage(result.page);
+          setPageError(null);
+        }
+        setLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setPageError(error instanceof Error ? error.message : 'PARAM 分页读取异常。');
+        setPageRows([]);
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [liveMode, props.resourceUri, page]);
+
+  // Demo/fallback path: client-side page window over props.rows.
+  useEffect(() => {
+    if (liveMode) return;
+    const demoPageCount = Math.max(1, Math.ceil(props.rows.length / PAGE_SIZE));
+    const clamped = Math.min(Math.max(0, page), demoPageCount - 1);
+    const slice = props.rows.slice(
+      clamped * PAGE_SIZE,
+      Math.min((clamped + 1) * PAGE_SIZE, props.rows.length)
+    );
+    setPageRows(slice);
+    setPageCount(demoPageCount);
+    if (clamped !== page) setPage(clamped);
+  }, [liveMode, props.rows, page]);
 
   const selectedRow = useMemo(
-    () => props.rows.find((row) => row.id === selectedRowId) ?? null,
-    [props.rows, selectedRowId]
+    () => pageRows.find((row) => row.id === selectedRowId) ?? null,
+    [pageRows, selectedRowId]
   );
 
-  const selectedRowDataBase64 = selectedRow ? props.getRowDataBase64(selectedRow.id) : undefined;
+  function rowDataBase64(rowId: number): string | undefined {
+    const pageRow = pageRows.find((row) => row.id === rowId);
+    if (pageRow?.dataBase64) return pageRow.dataBase64;
+    return props.getRowDataBase64(rowId);
+  }
+
+  const selectedRowDataBase64 = selectedRow ? rowDataBase64(selectedRow.id) : undefined;
   const selectedRowBytes = useMemo(() => {
     if (!selectedRowDataBase64) return null;
     try {
@@ -155,18 +221,20 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
         </p>
       )}
 
-      <div className="row gap">
+      <div className="row gap pager">
         <span className="muted">选择下方行后编辑字段。</span>
-        <button type="button" disabled={page <= 0} onClick={() => setPage((p) => p - 1)}>上一页</button>
-        <span className="muted">{page + 1}/{pageCount}</span>
+        <button type="button" disabled={page <= 0 || loading} onClick={() => setPage((p) => p - 1)}>上一页</button>
+        <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
         <button
           type="button"
-          disabled={page >= pageCount - 1}
+          disabled={page >= pageCount - 1 || loading}
           onClick={() => setPage((p) => p + 1)}
         >
           下一页
         </button>
+        {loading && <span className="muted">加载中…</span>}
       </div>
+      {pageError && <p className="danger">{pageError}</p>}
 
       <div className="binder-child-table" role="table">
         <div className="binder-child-row binder-child-header" role="row">
@@ -186,7 +254,7 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
             <span title={row.dataHexPreview}>{row.dataHexPreview?.slice(0, 24) ?? '—'}</span>
           </div>
         ))}
-        {props.rows.length === 0 && <p className="muted">无 PARAM 行数据。</p>}
+        {pageRows.length === 0 && !loading && <p className="muted">无 PARAM 行数据。</p>}
       </div>
 
       {selectedRow && !selectedRowDataBase64 && (

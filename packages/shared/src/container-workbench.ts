@@ -56,6 +56,23 @@ export interface RendererContainerChildrenList {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * One page of container children served by the paginated container access
+ * channel (`resource.listContainerChildrenPage`). The renderer only ever
+ * receives a bounded page plus navigation metadata; the full entry table is
+ * materialized in main (hard constraint 17).
+ */
+export interface RendererContainerChildrenPage {
+  ok: boolean;
+  /** Total child count across all pages (after recursive expansion). */
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  children: RendererContainerChild[];
+  diagnostics: Diagnostic[];
+}
+
 export interface RendererContainerChildBytes {
   ok: boolean;
   childUri: string;

@@ -1298,9 +1298,10 @@ export function App(): ReactElement {
                   : '演示条目（未选中可解析 FMG 或读取失败）'}
               </p>
               <FmgWorkbenchPanel
-                key={`${selectedFile?.sourceUri ?? 'demo'}:${fmgLive ? 'live' : 'demo'}`}
+                key={`${selectedFile?.sourceUri ?? 'demo'}:${fmgLive ? 'live' : 'demo'}:${fmgSourceHash ?? ''}`}
                 resourceUri={selectedFile?.sourceUri ?? 'file://msg/demo.fmg'}
                 entries={fmgEntries}
+                live={fmgLive}
                 onMutation={(mutation) => {
                   void (async () => {
                     if (!fmgLive || !fmgSourceHash || !selectedFile) {
@@ -1316,7 +1317,8 @@ export function App(): ReactElement {
                       selectedFile.sourceUri,
                       fmgSourceHash,
                       {
-                        kind: mutation.kind === 'fmg_entry_delete' ? 'delete' : 'upsert',
+                        kind: mutation.kind === 'fmg_entry_delete' ? 'delete'
+                          : mutation.kind === 'fmg_entry_add' ? 'add' : 'upsert',
                         id: mutation.id,
                         ...(mutation.text !== undefined ? { text: mutation.text } : {})
                       }
@@ -1353,10 +1355,11 @@ export function App(): ReactElement {
                   : '演示行（未选中可解析 PARAM 或读取失败）'}
               </p>
               <ParamTablePanel
-                key={`${selectedFile?.sourceUri ?? 'demo'}:${paramLive ? 'live' : 'demo'}`}
+                key={`${selectedFile?.sourceUri ?? 'demo'}:${paramLive ? 'live' : 'demo'}:${paramSourceHash ?? ''}`}
                 typeName={paramTypeName}
                 resourceUri={selectedFile?.sourceUri ?? 'file://param/demo.param'}
                 rows={paramRows}
+                live={paramLive}
                 onMutation={(mutation) => {
                   void (async () => {
                     if (!paramLive || !paramSourceHash || !selectedFile) {
@@ -1379,9 +1382,12 @@ export function App(): ReactElement {
                         return;
                       }
                     } else {
-                      // Duplicate uses sourceId payload; plain upsert uses mutation.id payload.
+                      // Duplicate/upsert payload: the paged table carries the
+                      // full row bytes (dataBase64); fall back to the App-side
+                      // payload map for rows outside the current page.
                       const payload =
-                        paramRowPayloads.get(mutation.id)
+                        mutation.dataBase64
+                        ?? paramRowPayloads.get(mutation.id)
                         ?? (mutation.sourceId !== undefined
                           ? paramRowPayloads.get(mutation.sourceId)
                           : undefined);
@@ -1439,9 +1445,12 @@ export function App(): ReactElement {
                 }}
               />
               <ParamDefPanel
+                key={`paramdef:${paramLive ? 'live' : 'demo'}:${paramSourceHash ?? ''}`}
                 typeName={paramLive ? paramTypeName : 'DEMO_PARAM_ST'}
                 rowDataSize={paramLive ? paramRowDataSize : 16}
                 origin={paramLive ? '待绑定' : 'fixture'}
+                resourceUri={selectedFile?.sourceUri ?? 'file://param/demo.param'}
+                live={paramLive}
                 definition={paramLive ? null : DEMO_PARAM_DEF}
                 rows={paramRows}
                 getRowDataBase64={(rowId) => paramRowPayloads.get(rowId)}

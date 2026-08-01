@@ -110,13 +110,18 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     releaseWriteEnabled: true,
     deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',
-    scalePrimitives: ['none'],
-    scaleAccess: 'none',
+    // 容器条目表经主进程分页通道 `resource.listContainerChildrenPage`
+    // 按页访问（renderer 只持有一页子项），bounded 导航可覆盖完整条目表。
+    scalePrimitives: ['pagination'],
+    scaleAccess: 'pagination',
     scaleDimensions: ['entries', 'nested-containers'],
     contractSources: [
       'bridge/SoulForge.Bridge/Bnd4NativeDocument.cs',
       'bridge/SoulForge.Bridge/Bnd4NativeWriter.cs',
-      'packages/core/src/editing/saveContainerChild.ts'
+      'packages/core/src/editing/saveContainerChild.ts',
+      'apps/desktop/src/main/ipc.ts',
+      'apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx',
+      'packages/shared/src/container-workbench.ts'
     ]
   },
   fmg: {
@@ -128,11 +133,14 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     releaseWriteEnabled: true,
     deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',
-    scalePrimitives: ['bounded-window'],
-    scaleAccess: 'bounded-window',
+    // 条目列表经主进程分页通道 `resource.readFmgPage` 按页访问，
+    // 查询在 main 端作用于完整条目表，导航可覆盖全部条目。
+    scalePrimitives: ['pagination'],
+    scaleAccess: 'pagination',
     scaleDimensions: ['entries'],
     contractSources: [
       'packages/core/src/editing/fmgBridgeCommit.ts',
+      'apps/desktop/src/main/ipc.ts',
       'apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx'
     ]
   },
@@ -145,12 +153,16 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     releaseWriteEnabled: true,
     deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',
-    scalePrimitives: ['pagination', 'bounded-window'],
-    scaleAccess: 'bounded-window',
+    // 行表经主进程分页通道 `resource.readParamPage` 按页访问，
+    // 查询在 main 端作用于完整行表，导航可覆盖全部行。
+    scalePrimitives: ['pagination'],
+    scaleAccess: 'pagination',
     scaleDimensions: ['rows'],
     contractSources: [
       'packages/core/src/editing/paramBridgeCommit.ts',
+      'apps/desktop/src/main/ipc.ts',
       'apps/desktop/src/renderer/src/editors/ParamTablePanel.tsx',
+      'apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx',
       'bridge/SoulForge.Bridge/ParamNativeDocument.cs'
     ]
   },

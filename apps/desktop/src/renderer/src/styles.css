@@ -63,6 +63,18 @@ button {
   align-items: stretch;
 }
 
+/* Paginated editor access controls (hard constraint 17). */
+.pager {
+  margin-top: 8px;
+}
+.pager button {
+  min-width: 72px;
+}
+.pager span.muted {
+  min-width: 3.5em;
+  text-align: center;
+}
+
 .panel {
   margin-top: 12px;
   padding: 12px;
