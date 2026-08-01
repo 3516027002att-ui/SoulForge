@@ -46,7 +46,8 @@
         "W-REL-SCOPE-RULING-05"
       ],
       "evidenceRefs": [
-        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+        "EV-REL-SCOPE-20260731-TEXT-FIRST",
+        "EV-REL-SCOPE-20260801-GOVERNANCE-JSON"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -179,7 +180,8 @@
         "W-FLVER-READ-01"
       ],
       "evidenceRefs": [
-        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+        "EV-REL-SCOPE-20260731-TEXT-FIRST",
+        "EV-REL-SCOPE-20260801-GOVERNANCE-JSON"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -265,7 +267,8 @@
         "W-RENDER-FUNCTIONAL-02"
       ],
       "evidenceRefs": [
-        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+        "EV-REL-SCOPE-20260731-TEXT-FIRST",
+        "EV-REL-SCOPE-20260801-GOVERNANCE-JSON"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
