@@ -635,3 +635,355 @@ function deduplicateFindings(findings) {
     `${right.severity}\0${right.code}\0${right.path}`
   ));
 }
+
+// --- Package tree (unpacked/NSIS payload) scanning ---
+
+export const INSTALLER_MANIFEST_RELATIVE_PATH = 'apps/desktop/release/release-installer-compliance.json';
+export const UNPACKED_DIRECTORY_RELATIVE_PATH = 'apps/desktop/release/win-unpacked';
+export const SOURCE_MANIFEST_RELATIVE_PATH = RELEASE_MANIFEST_RELATIVE_PATH;
+
+/** Files inside win-unpacked that must always be present (application payload). */
+const PACKAGE_TREE_STRICT_REQUIRED = [
+  'resources/app.asar',
+  'resources/native/better_sqlite3.node',
+  'resources/native/better_sqlite3.json'
+];
+
+/** Electron runtime files that must always be present in the unpacked tree. */
+const PACKAGE_TREE_RUNTIME_REQUIRED = [
+  'chrome_100_percent.pak',
+  'chrome_200_percent.pak',
+  'resources.pak',
+  'icudtl.dat',
+  'ffmpeg.dll',
+  'v8_context_snapshot.bin',
+  'snapshot_blob.bin',
+  'LICENSE.electron.txt',
+  'resources/elevate.exe'
+];
+
+/** Recommended but non-fatal runtime files (missing entries produce warnings). */
+const PACKAGE_TREE_RECOMMENDED = [
+  'locales/en-US.pak',
+  'libEGL.dll',
+  'libGLESv2.dll',
+  'd3dcompiler_47.dll',
+  'LICENSES.chromium.html'
+];
+
+const ASAR_HEADER_OFFSET = 16;
+
+/**
+ * Parse the Chromium pickle header of an app.asar and return the normalized
+ * list of file entries (directories excluded), sorted deterministically.
+ */
+export function listAsarEntries(asarPath) {
+  const buffer = readFileSync(asarPath);
+  if (buffer.length < ASAR_HEADER_OFFSET) {
+    throw new Error('ASAR_HEADER_TRUNCATED');
+  }
+  const jsonLength = buffer.readUInt32LE(12);
+  if (jsonLength <= 0 || jsonLength > buffer.length - ASAR_HEADER_OFFSET) {
+    throw new Error('ASAR_HEADER_INVALID');
+  }
+  let header;
+  try {
+    header = JSON.parse(buffer.subarray(ASAR_HEADER_OFFSET, ASAR_HEADER_OFFSET + jsonLength).toString('utf8'));
+  } catch {
+    throw new Error('ASAR_HEADER_JSON_INVALID');
+  }
+  const entries = [];
+  const walk = (node, prefix) => {
+    const files = isRecord(node) ? node.files : null;
+    if (!files) return;
+    for (const [name, child] of Object.entries(files)) {
+      const path = prefix ? `${prefix}/${name}` : name;
+      if (isRecord(child) && isRecord(child.files)) walk(child, path);
+      else entries.push(path);
+    }
+  };
+  walk(header, '');
+  return entries.sort(compareText);
+}
+
+/**
+ * Derive the NSIS installer artifact file name from the strict electron-builder
+ * config and the desktop package version, e.g. SoulForge-0.0.0-x64.exe.
+ */
+export function installerArtifactName(electronBuilderConfig, desktopPackage) {
+  const template = typeof electronBuilderConfig?.win?.artifactName === 'string'
+    ? electronBuilderConfig.win.artifactName
+    : '${productName}-${version}-${arch}.${ext}';
+  const target = Array.isArray(electronBuilderConfig?.win?.target) ? electronBuilderConfig.win.target[0] : null;
+  const arch = Array.isArray(target?.arch) && typeof target.arch[0] === 'string'
+    ? target.arch[0]
+    : 'x64';
+  return template
+    .replaceAll('${productName}', typeof electronBuilderConfig?.productName === 'string'
+      ? electronBuilderConfig.productName
+      : 'SoulForge')
+    .replaceAll('${version}', typeof desktopPackage?.version === 'string'
+      ? desktopPackage.version
+      : '0.0.0')
+    .replaceAll('${arch}', arch)
+    .replaceAll('${ext}', 'exe');
+}
+
+/**
+ * Scan the unpacked package tree (the exact payload NSIS packs) and assert that
+ * required files are present, forbidden paths never appear, and optional
+ * not-installed platform packages are honestly recorded as absent from asar.
+ */
+export function auditPackageTree({ root, unpackedDir, lock, executableName }) {
+  const diagnostics = [];
+  const absolute = resolveWithinRoot(root, unpackedDir);
+  if (!absolute || !existsSync(absolute)) {
+    return {
+      ok: null,
+      status: 'skipped',
+      unpackedDir,
+      fileCount: 0,
+      byteCount: 0,
+      asarEntryCount: null,
+      missingRequired: [],
+      missingRecommended: [],
+      forbiddenHits: [],
+      optionalNotInstalledPresent: [],
+      diagnostics: [warning('PACKAGE_TREE_NOT_BUILT', unpackedDir, '未找到 unpacked 构建产物；先构建 NSIS 安装包或 --dir 中间产物。')]
+    };
+  }
+  const walked = walkPackageTreeFiles(root, absolute, diagnostics);
+  const actual = new Set(walked.paths);
+  const required = [executableName, ...PACKAGE_TREE_STRICT_REQUIRED, ...PACKAGE_TREE_RUNTIME_REQUIRED]
+    .map(normalize);
+  const missingRequired = required.filter((path) => !actual.has(path));
+  const missingRecommended = PACKAGE_TREE_RECOMMENDED.map(normalize).filter((path) => !actual.has(path));
+  for (const path of missingRequired) {
+    diagnostics.push(error('PACKAGE_TREE_REQUIRED_MISSING', `${unpackedDir}/${path}`, 'unpacked 必装文件缺失。'));
+  }
+  for (const path of missingRecommended) {
+    diagnostics.push(warning('PACKAGE_TREE_RECOMMENDED_MISSING', `${unpackedDir}/${path}`, '推荐运行时文件缺失。'));
+  }
+
+  const forbiddenHits = [];
+  for (const path of walked.paths) {
+    const hit = forbiddenPathFinding(path, 'package-tree');
+    if (hit) {
+      forbiddenHits.push(hit.path);
+      diagnostics.push(error('PACKAGE_TREE_FORBIDDEN', `${unpackedDir}/${hit.path}`, hit.message));
+    }
+  }
+
+  const optionalNotInstalled = optionalNotInstalledPackageNames(root, lock, diagnostics);
+  const optionalNotInstalledPresent = [];
+  const asarRelative = 'resources/app.asar';
+  let asarEntryCount = null;
+  if (actual.has(asarRelative)) {
+    const asarAbsolute = resolveWithinRoot(root, join(unpackedDir, asarRelative));
+    try {
+      const entries = listAsarEntries(asarAbsolute);
+      asarEntryCount = entries.length;
+      for (const entry of entries) {
+        const normalizedEntry = normalize(entry);
+        const hit = forbiddenPathFinding(normalizedEntry, 'package-tree-asar');
+        if (hit) {
+          diagnostics.push(error('PACKAGE_TREE_ASAR_FORBIDDEN', `app.asar:${hit.path}`, hit.message));
+        }
+        for (const packageName of optionalNotInstalled) {
+          if (normalizedEntry === `node_modules/${packageName}`
+            || normalizedEntry.startsWith(`node_modules/${packageName}/`)) {
+            optionalNotInstalledPresent.push(packageName);
+          }
+        }
+      }
+      if (optionalNotInstalledPresent.length > 0) {
+        diagnostics.push(error(
+          'PACKAGE_TREE_OPTIONAL_PRESENT',
+          'app.asar',
+          `可选未安装平台包被误打包：${[...new Set(optionalNotInstalledPresent)].sort(compareText).join(', ')}。`
+        ));
+      }
+    } catch (asarError) {
+      diagnostics.push(error(
+        'PACKAGE_TREE_ASAR_UNREADABLE',
+        asarRelative,
+        `无法读取 app.asar 内容清单：${asarError instanceof Error ? asarError.message : String(asarError)}。`
+      ));
+    }
+  }
+
+  const errors = diagnostics.filter((item) => item.severity === 'error');
+  return {
+    ok: errors.length === 0,
+    status: errors.length === 0 ? 'passed' : 'failed',
+    unpackedDir,
+    fileCount: walked.paths.length,
+    byteCount: walked.byteCount,
+    asarEntryCount,
+    missingRequired,
+    missingRecommended,
+    forbiddenHits,
+    optionalNotInstalledPresent: [...new Set(optionalNotInstalledPresent)].sort(compareText),
+    diagnostics
+  };
+}
+
+/**
+ * Build the installer compliance record: NSIS artifact hash/size, the source
+ * build manifest fingerprint it was produced from, and the optional
+ * not-installed package count that the package tree scan must honestly record.
+ */
+export async function createInstallerComplianceManifest({
+  root,
+  installerRelativePath,
+  sourceManifestRelativePath = SOURCE_MANIFEST_RELATIVE_PATH
+}) {
+  const diagnostics = [];
+  let installer = null;
+  const installerAbsolute = resolveWithinRoot(root, installerRelativePath);
+  if (!installerAbsolute || !existsSync(installerAbsolute)) {
+    diagnostics.push(error('INSTALLER_MISSING', installerRelativePath, '缺少 NSIS 安装包；先构建 NSIS。'));
+  } else {
+    const stat = lstatSync(installerAbsolute);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      diagnostics.push(error('INSTALLER_NOT_REGULAR_FILE', installerRelativePath, 'NSIS 安装包必须是普通文件。'));
+    } else {
+      installer = {
+        fileName: basename(installerRelativePath),
+        size: stat.size,
+        sha256: await sha256File(installerAbsolute)
+      };
+    }
+  }
+
+  let sourceManifest = null;
+  const sourceManifestAbsolute = resolveWithinRoot(root, sourceManifestRelativePath);
+  if (!sourceManifestAbsolute || !existsSync(sourceManifestAbsolute)) {
+    diagnostics.push(error('INSTALLER_SOURCE_MANIFEST_MISSING', sourceManifestRelativePath, '缺少 source release manifest；先运行 npm run release:manifest。'));
+  } else {
+    let text;
+    try {
+      text = readFileSync(sourceManifestAbsolute, 'utf8');
+    } catch {
+      diagnostics.push(error('INSTALLER_SOURCE_MANIFEST_UNREADABLE', sourceManifestRelativePath, '无法读取 source release manifest。'));
+    }
+    if (text !== undefined) {
+      try {
+        const parsed = JSON.parse(text);
+        sourceManifest = {
+          path: sourceManifestRelativePath,
+          sha256: sha256Text(text),
+          artifactFingerprint: parsed?.artifacts?.aggregateSha256 ?? null
+        };
+      } catch {
+        diagnostics.push(error('INSTALLER_SOURCE_MANIFEST_INVALID', sourceManifestRelativePath, 'source release manifest 不是合法 JSON。'));
+      }
+    }
+  }
+
+  let lock = null;
+  try {
+    lock = JSON.parse(readFileSync(resolve(root, 'package-lock.json'), 'utf8'));
+  } catch {
+    diagnostics.push(error('PACKAGE_LOCK_INVALID', 'package-lock.json', '无法解析 package-lock.json。'));
+  }
+  const optionalNotInstalled = lock
+    ? optionalNotInstalledPackageNames(root, lock, diagnostics)
+    : [];
+
+  return {
+    schemaVersion: 1,
+    authority: 'partial',
+    scope: 'unsigned-win-x64-nsis-installer',
+    installer,
+    sourceManifest,
+    optionalNotInstalledCount: optionalNotInstalled.length,
+    diagnostics: diagnostics.map(({ severity, code, path, message }) => ({ severity, code, path, message }))
+  };
+}
+
+/**
+ * Verify the on-disk installer manifest (if any) still matches the current NSIS
+ * artifact and the current source build manifest. A missing installer manifest
+ * is only a structured warning so existing unpacked artifacts do not fail the
+ * regression; once recorded, the hash and fingerprint link is enforced.
+ */
+export async function auditInstallerCompliance({ root, installerRelativePath }) {
+  const expected = await createInstallerComplianceManifest({ root, installerRelativePath });
+  const diagnostics = [...expected.diagnostics];
+  const manifestPath = resolve(root, INSTALLER_MANIFEST_RELATIVE_PATH);
+  let actual = null;
+  let actualText = '';
+  if (!existsSync(manifestPath)) {
+    diagnostics.push(warning(
+      'INSTALLER_MANIFEST_MISSING',
+      INSTALLER_MANIFEST_RELATIVE_PATH,
+      '缺少 installer compliance manifest；运行 release:installer:manifest 记录 NSIS 安装包 hash。'
+    ));
+  } else {
+    try {
+      actualText = readFileSync(manifestPath, 'utf8');
+      actual = JSON.parse(actualText);
+    } catch {
+      diagnostics.push(error('INSTALLER_MANIFEST_INVALID', INSTALLER_MANIFEST_RELATIVE_PATH, 'installer compliance manifest 不是合法 JSON。'));
+    }
+    if (actual && expected.installer) {
+      const expectedText = `${JSON.stringify(expected, null, 2)}\n`;
+      if (actualText !== expectedText) {
+        diagnostics.push(error(
+          'INSTALLER_MANIFEST_STALE',
+          INSTALLER_MANIFEST_RELATIVE_PATH,
+          'installer compliance manifest 与当前 NSIS 安装包或 source build manifest 不一致。'
+        ));
+      }
+    }
+  }
+  const errors = diagnostics.filter((item) => item.severity === 'error');
+  return {
+    ok: errors.length === 0,
+    status: errors.length === 0 ? 'passed' : 'failed',
+    expected,
+    actual,
+    installerManifestSha256: actualText ? sha256Text(actualText) : null,
+    diagnostics
+  };
+}
+
+function walkPackageTreeFiles(root, absoluteDir, diagnostics) {
+  const paths = [];
+  let byteCount = 0;
+  const walk = (directory, prefix) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => compareText(left.name, right.name))) {
+      const absolute = join(directory, entry.name);
+      const relativePath = normalize(prefix ? `${prefix}/${entry.name}` : entry.name);
+      const relToRoot = normalize(relative(root, absolute));
+      const stat = lstatSync(absolute);
+      if (stat.isSymbolicLink()) {
+        diagnostics.push(error('PACKAGE_TREE_SYMLINK_FORBIDDEN', relToRoot, 'unpacked 产物不得包含 symlink/junction。'));
+        continue;
+      }
+      if (stat.isDirectory()) {
+        walk(absolute, relativePath);
+      } else if (stat.isFile()) {
+        paths.push(relativePath);
+        byteCount += stat.size;
+      }
+    }
+  };
+  walk(absoluteDir, '');
+  return { paths, byteCount };
+}
+
+function optionalNotInstalledPackageNames(root, lock, diagnostics) {
+  const names = [];
+  const packages = isRecord(lock) && isRecord(lock.packages) ? lock.packages : {};
+  for (const [lockPath, metadata] of Object.entries(packages)) {
+    if (!isRecord(metadata) || metadata.dev === true || metadata.link === true) continue;
+    if (!lockPath.includes('node_modules/')) continue;
+    const installed = existsSync(resolve(root, lockPath));
+    if (metadata.optional === true && !installed) {
+      names.push(packageNameFromLockPath(lockPath));
+    }
+  }
+  return [...new Set(names)].sort(compareText);
+}
