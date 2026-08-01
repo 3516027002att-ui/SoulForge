@@ -50,6 +50,13 @@ export interface WorkspaceTransactionOptions {
   validators?: ValidatorContract[];
   stagingBaseDir?: string;
   backupBaseDir?: string;
+  /**
+   * Invoked immediately after the restore point is created and before any target
+   * file is replaced. A durable caller (e.g. the SQLite journal driver) uses this
+   * to persist the backup location ahead of the replace loop so that a process
+   * termination mid-commit can still roll the transaction back on restart.
+   */
+  onRestorePointCreated?: (restorePoint: RestorePoint) => Promise<void> | void;
 }
 
 export interface TransactionCommitResult {
@@ -81,6 +88,7 @@ export class WorkspaceTransaction {
   private readonly validators: ValidatorContract[];
   private readonly stagingBaseDir?: string;
   private readonly backupBaseDir?: string;
+  private readonly onRestorePointCreated: ((restorePoint: RestorePoint) => Promise<void> | void) | undefined;
   private staging: ContentAddressedStaging | undefined;
   private stagedPaths: string[] = [];
   private stagedOpTargets: Array<{ op: PatchIrOperation; stagingPath: string }> = [];
@@ -99,6 +107,7 @@ export class WorkspaceTransaction {
     this.validators = options.validators ?? createScaffoldValidators();
     if (options.stagingBaseDir !== undefined) this.stagingBaseDir = options.stagingBaseDir;
     if (options.backupBaseDir !== undefined) this.backupBaseDir = options.backupBaseDir;
+    this.onRestorePointCreated = options.onRestorePointCreated;
 
     this.auditLog.append(createAuditEntry({
       transactionId: this.transactionId,
@@ -126,6 +135,15 @@ export class WorkspaceTransaction {
 
   getFailureRecoveryMetadata(): Record<string, unknown> | undefined {
     return this.failureRecovery;
+  }
+
+  /**
+   * The planned commit targets (operation, resolved target path, staging path).
+   * Exposed so a durable journal driver can persist per-target after-hashes
+   * before the replace loop begins.
+   */
+  getCommitTargets(): Array<{ op: PatchIrOperation; targetPath: string; stagingPath: string }> {
+    return this.collectCommitTargets();
   }
 
   addPatch(patch: PatchIR): { ok: boolean; diagnostics: StructuredDiagnostic[] } {
@@ -490,6 +508,55 @@ export class WorkspaceTransaction {
       };
     }
     this.restorePoint = restorePoint;
+
+    if (this.onRestorePointCreated) {
+      try {
+        await this.onRestorePointCreated(restorePoint);
+      } catch (error) {
+        // Nothing has been replaced yet. Restore to the pre-commit state so the
+        // workspace is exactly as it was, then fail closed with a durable record.
+        const restored = await restoreFromPoint(restorePoint);
+        const failureDiagnostics = [
+          phaseFailureDiagnostic(
+            'RESTORE_POINT_PERSIST_FAILED',
+            'commit',
+            error,
+            { restorePointId: restorePoint.restorePointId }
+          )
+        ];
+        if (!restored.ok) {
+          failureDiagnostics.push(createDiagnostic({
+            severity: 'error',
+            code: 'TRANSACTION_RECOVERY_REQUIRED',
+            message: '恢复点持久化失败，且自动还原未能完成。',
+            details: { errors: restored.errors }
+          }));
+        }
+        this.status = 'failed';
+        this.failureRecovery = {
+          phase: 'restorePointPersist',
+          restorePointId: restorePoint.restorePointId,
+          restoreErrors: restored.errors
+        };
+        failureDiagnostics.push(...await this.discardStaging());
+        this.diagnostics.push(...failureDiagnostics);
+        this.auditLog.append(createAuditEntry({
+          transactionId: this.transactionId,
+          actor: this.actor,
+          eventKind: 'failure_recovery',
+          diagnostics: failureDiagnostics,
+          details: this.failureRecovery
+        }));
+        return {
+          ok: false,
+          transactionId: this.transactionId,
+          committedPaths: [],
+          diagnostics: failureDiagnostics,
+          restorePoint,
+          ...(restored.ok ? {} : { recoveryRequired: true })
+        };
+      }
+    }
 
     const committedPaths: string[] = [];
     const diagnostics: StructuredDiagnostic[] = [];

@@ -157,7 +157,41 @@ export async function executePatchIrThroughTransaction(
       kind: author === 'ai' ? 'agent' : 'user',
       id: options.actorId ?? `files-mode:${author}`
     },
-    ...(options.backupBaseDir !== undefined ? { backupBaseDir: options.backupBaseDir } : {})
+    ...(options.backupBaseDir !== undefined ? { backupBaseDir: options.backupBaseDir } : {}),
+    // Persist the restore point into the durable journal before any target is
+    // replaced. A hard process termination mid-commit then leaves enough state
+    // in the journal (backup root + per-file before/after hashes) to roll back.
+    onRestorePointCreated: async (restorePoint) => {
+      const afterHashes: Record<string, string> = {};
+      for (const target of tx.getCommitTargets()) {
+        try {
+          afterHashes[target.targetPath] = createHash('sha256')
+            .update(await readFile(target.stagingPath))
+            .digest('hex');
+        } catch {
+          // After-hash unresolvable (staged file already gone); recovery then
+          // relies on the before-hash invariant alone for this target.
+        }
+      }
+      const journalError = await transitionJournal(
+        store,
+        tx.transactionId,
+        'backing_up',
+        'replacing',
+        {
+          backupRoot: restorePoint.root,
+          sizeBytes: restorePoint.sizeBytes,
+          restorePointFiles: restorePoint.files.map((file) => ({
+            sourcePath: file.sourcePath,
+            backupPath: file.backupPath,
+            beforeHash: file.beforeHash,
+            sizeBytes: file.sizeBytes
+          })),
+          afterHashes
+        }
+      );
+      if (journalError) throw new Error(journalError.message);
+    }
   });
 
   if (store.createTransaction && store.transitionTransaction) {
@@ -289,15 +323,15 @@ export async function executePatchIrThroughTransaction(
   }
 
 
-  const replacingJournalError = await transitionJournal(
-    store, tx.transactionId, 'validating', 'replacing', { validated: true }
+  const backingUpJournalError = await transitionJournal(
+    store, tx.transactionId, 'validating', 'backing_up', { validated: true }
   );
-  if (replacingJournalError) {
+  if (backingUpJournalError) {
     const diagnostics = [
-      replacingJournalError,
+      backingUpJournalError,
       ...(await tx.discardStaging()).map(toLegacyDiagnostic)
     ];
-    await tryUpdateStatus(store, opId, 'failed', { diagnostics }, 'journal_replacing');
+    await tryUpdateStatus(store, opId, 'failed', { diagnostics }, 'journal_backing_up');
     return { opId, backupRoot: '', changedFiles: [], diagnostics };
   }
 
@@ -309,7 +343,7 @@ export async function executePatchIrThroughTransaction(
       transactionPhaseDiagnostic('TRANSACTION_COMMIT_FAILED', 'commit', error),
       ...(await tx.discardStaging()).map(toLegacyDiagnostic)
     ];
-    await transitionJournal(store, tx.transactionId, 'replacing', 'failed', { phase: 'commit', diagnostics });
+    await transitionJournal(store, tx.transactionId, ['backing_up', 'replacing'], 'failed', { phase: 'commit', diagnostics });
     const logDiagnostic = await tryUpdateStatus(store, opId, 'failed', {
       diagnostics
     }, 'commit_exception');
@@ -323,7 +357,7 @@ export async function executePatchIrThroughTransaction(
   const diagnostics: Diagnostic[] = committed.diagnostics.map(toLegacyDiagnostic);
 
   if (!committed.ok && committed.recoveryRequired && committed.restorePoint) {
-    await transitionJournal(store, tx.transactionId, 'replacing', 'recovery_required', {
+    await transitionJournal(store, tx.transactionId, ['backing_up', 'replacing'], 'recovery_required', {
       committedPaths: committed.committedPaths,
       recoveryRequired: true
     });
@@ -361,7 +395,7 @@ export async function executePatchIrThroughTransaction(
   }
 
   if (!committed.ok || !committed.restorePoint) {
-    await transitionJournal(store, tx.transactionId, 'replacing', 'failed', { phase: 'commit', diagnostics });
+    await transitionJournal(store, tx.transactionId, ['backing_up', 'replacing'], 'failed', { phase: 'commit', diagnostics });
     const logDiagnostic = await tryUpdateStatus(
       store,
       opId,
