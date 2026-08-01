@@ -14,6 +14,8 @@
     "prepare:database-native": "node ../../scripts/prepare-electron-sqlite-binding.mjs",
     "test:database-utility": "node ../../scripts/run-database-utility-smoke.mjs",
     "test:me3-runtime-gateway": "node ../../scripts/run-me3-runtime-gateway-smoke.mjs",
+    "release:installer:manifest": "node ../../scripts/generate-release-installer-manifest.mjs",
+    "test:installer-lifecycle": "node ../../scripts/verify-installer-lifecycle.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
