@@ -392,6 +392,18 @@ function compileInstructionArgMutations(
       }));
       continue;
     }
+    if (argDef.vararg) {
+      // Vararg tails are opaque: their repetition count is determined by the
+      // observed payload length, not by a name. Only fixed arguments are
+      // writable; the tail is preserved byte-for-byte.
+      add(diagnostic(
+        'EMEVD_DSL_VARARG_ARG_READONLY',
+        `Vararg tail argument ${operation.argument} is read-only; only fixed arguments can be written.`,
+        operation.span,
+        { resourceUri, targetAnchor: instructionPatch.anchor }
+      ));
+      continue;
+    }
     const valueError = validateTypedLiteral(argDef.type, operation.value);
     if (valueError) {
       add(diagnostic(valueError.code, valueError.message, operation.span, {

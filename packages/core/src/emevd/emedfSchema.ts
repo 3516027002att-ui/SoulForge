@@ -135,11 +135,44 @@ export function decodeEmedfArgs(
   def: EmedfInstructionDef,
   args: Buffer
 ): DecodeResult {
+  // Length-signature gate: a payload whose byte length does not match the
+  // schema-claimed layout must stay opaque. Same bank:id multi-length variants
+  // (e.g. real corpus 2000:0 observed at 12/16/20/24/32) are distinguished by
+  // length signature and never conflated: decode fails structurally instead of
+  // fabricating arg values from a prefix. Mutation paths inherit this gate via
+  // mutateInstructionArg, so a mismatched-length payload can never be re-encoded.
+  if (hasVararg(def)) {
+    if (varargCount(def, args.length) < 0) {
+      return {
+        ok: false,
+        code: 'EMEDF_ARGS_LENGTH_MISMATCH',
+        message: `${def.name} (${def.bank}:${def.id}) args 长度 ${args.length} 不是合法 vararg 长度（base=${encodedSize(def.args)}，stride=${byteLengthOf(def.args[def.args.length - 1]!.type)}）。`
+      };
+    }
+  } else if (args.length !== encodedSize(def.args)) {
+    return {
+      ok: false,
+      code: 'EMEDF_ARGS_LENGTH_MISMATCH',
+      message: `${def.name} (${def.bank}:${def.id}) args 长度 ${args.length} ≠ schema 声明长度 ${encodedSize(def.args)}；同 bank:id 多长度变体按长度签名区分，不混同解码。`
+    };
+  }
   try {
     let offset = 0;
     const decoded: DecodedArg[] = [];
     for (const arg of def.args) {
       offset = align(offset, arg.type);
+      if (arg.vararg) {
+        // Only materialize a vararg element when the payload actually contains
+        // one. The value is display-only: encode always preserves the original
+        // tail bytes (see mutateInstructionArg), so nothing is fabricated here.
+        const count = varargCount(def, args.length);
+        decoded.push({
+          name: arg.name,
+          type: arg.type,
+          value: count > 0 ? readArg(args, offset, arg.type).value : 0
+        });
+        continue;
+      }
       const value = readArg(args, offset, arg.type);
       decoded.push({ name: arg.name, type: arg.type, value: value.value });
       offset = value.nextOffset;
@@ -274,6 +307,7 @@ export function encodeEmedfArgs(
     const buf = Buffer.alloc(encodedSize(def.args));
     let offset = 0;
     for (const arg of def.args) {
+      if (arg.vararg) continue; // vararg tail is preserved separately, never re-encoded here
       offset = align(offset, arg.type);
       offset = writeArg(buf, offset, arg.type, values[arg.name]!);
     }
@@ -289,6 +323,10 @@ export function encodeEmedfArgs(
 
 /**
  * Apply a single named arg mutation onto existing raw args, preserving length when possible.
+ *
+ * Vararg instructions: only fixed (non-vararg) arguments can be mutated. The
+ * original vararg tail bytes are preserved exactly (opaque-tail policy) and the
+ * combined payload must stay equal-length, so Bridge in-place writes stay valid.
  */
 export function mutateInstructionArg(
   registry: EmedfRegistry,
@@ -307,9 +345,41 @@ export function mutateInstructionArg(
       message: `schema 中不存在参数 ${argName}`
     };
   }
+  const def = findInstructionDef(registry, bank, id);
+  if (!def) {
+    return {
+      ok: false,
+      code: 'EMEDF_UNKNOWN_INSTRUCTION',
+      message: `无 schema：bank=${bank} id=${id}`
+    };
+  }
+  if (hasVararg(def) && def.args[def.args.length - 1]!.name === argName) {
+    return {
+      ok: false,
+      code: 'EMEDF_VARARG_TAIL_READONLY',
+      message: `vararg 尾部参数 ${argName} 的数量由观察长度决定，不支持按名称改写；固定参数可写，尾部原样保留。`
+    };
+  }
   const map: Record<string, number | boolean> = {};
   for (const arg of decoded.args) map[arg.name] = arg.value;
   map[argName] = value;
+  if (hasVararg(def)) {
+    // Preserve the original vararg tail byte-for-byte, then append it to the
+    // re-encoded fixed prefix. Total length must equal the original payload.
+    const baseSize = encodedSize(def.args);
+    const tail = args.subarray(baseSize);
+    const encoded = encodeInstructionArgs(registry, bank, id, map);
+    if (!encoded.ok) return encoded;
+    const combined = Buffer.concat([encoded.args, tail]);
+    if (combined.length !== args.length) {
+      return {
+        ok: false,
+        code: 'EMEDF_LENGTH_CHANGED',
+        message: `编码后长度 ${combined.length} ≠ 原 ${args.length}；等长替换才能走 Bridge 就地写。`
+      };
+    }
+    return { ok: true, args: combined };
+  }
   const encoded = encodeInstructionArgs(registry, bank, id, map);
   if (!encoded.ok) return encoded;
   if (encoded.args.length !== args.length) {

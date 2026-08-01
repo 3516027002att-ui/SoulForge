@@ -79,11 +79,23 @@ export function renderEmevdPatchDslBounded(
       try {
         rawArgs = decodeStrictBase64(instruction.argsBase64, { allowEmpty: true });
       } catch {
-        throw new Error(`EMEVD_DSL_RENDER_ARGS_BASE64_INVALID:${instructionAnchor}`);
+        // Corrupt/opaque payload: keep the instruction read-only instead of
+        // crashing the whole template (hard constraint: no fabricated args).
+        lines.push(
+          `  // read-only ${instructionAnchor} bank=${instruction.bank} id=${instruction.id} EMEDF_DSL_RENDER_ARGS_BASE64_INVALID`
+        );
+        continue;
       }
       const decoded = decodeInstructionArgs(registry, instruction.bank, instruction.id, rawArgs);
       if (!decoded.ok) {
-        throw new Error(`EMEVD_DSL_RENDER_DECODE_FAILED:${instructionAnchor}:${decoded.code}`);
+        // Schema-decode failure (including EMEDF_ARGS_LENGTH_MISMATCH from a
+        // same bank:id multi-length variant): stay opaque. The instruction is
+        // rendered as a read-only comment rather than fabricating arg values,
+        // and writes to it fail closed in the compiler.
+        lines.push(
+          `  // read-only ${instructionAnchor} bank=${instruction.bank} id=${instruction.id} ${decoded.code}`
+        );
+        continue;
       }
 
       lines.push(`  instruction ${instructionAnchor} {`);

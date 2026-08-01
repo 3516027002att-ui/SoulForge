@@ -12,6 +12,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { parseDs3EmedfJson } from '../emevd/emedfExternalAdapter.js';
+import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 
 export interface SyntheticEmevdInstructionSpec {
   bank: number;
@@ -153,6 +155,114 @@ export function mutatedWaitForArgs(): Buffer {
 /** Args bank of instruction 1 after the canonical plan-commit DSL patch (resultConditionGroup=5, desiredComparisonType=1). */
 export function mutatedIfCondArgs(): Buffer {
   return Buffer.from([0x05, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Synthetic DarkScript3-format EMEDF JSON (imported-registry smoke)  */
+/*                                                                     */
+/*  DarkScript3 EMEDF data is All Rights Reserved and is never bundled  */
+/*  or redistributed. This is a tiny, self-authored sample that only   */
+/*  mimics the JSON container shape; the instruction layouts are our   */
+/*  own and match the real Sekiro corpus by observed args length.      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Minimal DarkScript3-format EMEDF JSON constructed by us for smoke tests.
+ * Three instructions:
+ *   - 0:0   IfConditionGroup   {s8, u8, s8}  → 4-byte payload
+ *   - 2000:0 InitializeEvent    {s32, u32, u32 vararg} → 8-byte base + 4-byte stride
+ *   - 2003:1 EndEvent           {}            → 0-byte payload
+ * The claimed lengths match the real corpus distribution (0:0 → 4 bytes,
+ * 2000:0 → 12/16/20/24/32 all valid vararg multiples), so the imported
+ * registry can drive typed mutations against real documents.
+ */
+export function createSyntheticDs3EmedfJson(): string {
+  return JSON.stringify({
+    unknown: 0,
+    main_classes: [
+      {
+        name: 'Condition - System',
+        index: 0,
+        instrs: [
+          {
+            name: 'IF Condition Group',
+            index: 0,
+            args: [
+              { name: 'Result Condition Group', type: 3 },
+              { name: 'Desired Condition Group State', type: 0 },
+              { name: 'Target Condition Group', type: 3 }
+            ]
+          }
+        ]
+      },
+      {
+        name: 'System',
+        index: 2000,
+        instrs: [
+          {
+            name: 'Initialize Event',
+            index: 0,
+            args: [
+              { name: 'Event Slot ID', type: 5 },
+              { name: 'Event ID', type: 2 },
+              { name: 'Parameters', type: 2, vararg: true }
+            ]
+          }
+        ]
+      },
+      {
+        name: 'Entity',
+        index: 2003,
+        instrs: [
+          { name: 'End Event', index: 1, args: [] }
+        ]
+      }
+    ],
+    enums: [],
+    darkscript: {}
+  });
+}
+
+/** Import the synthetic DarkScript3-format JSON through the external adapter. */
+export function createSyntheticImportedEmedf(): EmedfRegistry {
+  const result = parseDs3EmedfJson(createSyntheticDs3EmedfJson());
+  if (!result.ok) throw new Error(`synthetic DS3 EMEDF import failed: ${result.message}`);
+  return result.registry;
+}
+
+/** Expected args bank of the 0:0 instruction after the imported-registry DSL patch. */
+export function mutatedIfCondArgsForImported(): Buffer {
+  // desiredConditionGroupState 0 → 1
+  return Buffer.from([0x01, 0x01, 0x02, 0x00]);
+}
+
+/** Expected args bank of the 2000:0 instruction after the imported-registry DSL patch. */
+export function mutatedInitEventArgsForImported(): Buffer {
+  // eventId 100 → 200; vararg tail byte (0x07) preserved exactly
+  return Buffer.from([0x0a, 0x00, 0x00, 0x00, 0xc8, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00]);
+}
+
+/** Synthetic EMEVD matching the imported synthetic DS3 schema (see above). */
+export function importedRegistrySyntheticEmevd(): Buffer {
+  return buildSyntheticEmevd([
+    {
+      id: 50,
+      restBehavior: 0,
+      instructions: [
+        // 0:0 IfConditionGroup: resultConditionGroup=1, desiredConditionGroupState=0, targetConditionGroup=2
+        { bank: 0, id: 0, args: Buffer.from([0x01, 0x00, 0x02, 0x00]) },
+        // 2000:0 InitializeEvent (vararg): eventSlotId=10, eventId=100, parameters=[7]
+        {
+          bank: 2000,
+          id: 0,
+          args: Buffer.from([0x0a, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00])
+        },
+        // unknown instruction: opaque, empty args, never re-encoded
+        { bank: 9999, id: 1, args: Buffer.alloc(0) }
+      ]
+    },
+    { id: 100, restBehavior: 0, instructions: [] }
+  ]);
 }
 
 export function sha256Hex(bytes: Buffer): string {

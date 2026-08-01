@@ -31,6 +31,8 @@
     "test:emevd-coverage": "tsc -b ../shared . && node dist/testing/runEmevdCoverageSmoke.js",
     "test:emevd-external-adapter": "tsc -b ../shared . && node dist/testing/runEmevdExternalAdapterSmoke.js",
     "test:emevd-full-document": "tsc -b ../shared . && node dist/testing/runEmevdFullDocumentSmoke.js",
+    "test:emevd-imported-production": "tsc -b ../shared . && node dist/testing/runEmevdImportedRegistryProductionSmoke.js",
+    "test:emevd-imported-coverage": "tsc -b ../shared . && node dist/testing/runEmevdImportedCoverageSmoke.js",
     "test:script-container-evidence": "tsc -b ../shared . && node dist/testing/runScriptContainerEvidenceSmoke.js",
     "test:script-container-replace": "tsc -b ../shared . && node dist/testing/runNativeScriptContainerReplaceSmoke.js",
     "test:flver-candidate": "tsc -b ../shared . && node dist/testing/runFlverCandidateSmoke.js",
