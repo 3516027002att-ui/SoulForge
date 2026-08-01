@@ -15,6 +15,8 @@ let krakBlocked = 0;
 let krakReadVerified = 0;
 let nestedBnd4Verified = 0;
 let nestedBnd4Entries = 0;
+let krakNestedBnd4Verified = 0;
+let krakNestedBnd4Entries = 0;
 for (const file of files) {
   try {
     const { stdout } = await execFileAsync(executable, ['read-dcx-document', file], {
@@ -41,6 +43,19 @@ for (const file of files) {
       && /^[a-f0-9]{64}$/u.test(data.payloadHash)) {
       krakReadVerified += 1;
       variants.set(data.variant, (variants.get(data.variant) ?? 0) + 1);
+      if (data.nested?.format === 'BND4') {
+        const fieldPreservation = data.nested.fieldPreservation;
+        if (data.nested?.crud?.allPassed !== true
+          || !fieldPreservation
+          || fieldPreservation.headerUnknownBytesPreserved !== true
+          || fieldPreservation.entryHeaderFieldsPreserved !== true
+          || fieldPreservation.storedBytesPreserved !== true) {
+          failures.push({ file: relative(file), code: 'KRAK_BND4_PRESERVATION_OR_CRUD_FAILED' });
+          continue;
+        }
+        krakNestedBnd4Verified += 1;
+        krakNestedBnd4Entries += data.nested.entryCount;
+      }
     } else failures.push({ sample: redact(file), code: result.diagnostics?.[0]?.code ?? 'UNEXPECTED_RESULT' });
   } catch (error) {
     const stdout = error && typeof error === 'object' && 'stdout' in error ? String(error.stdout) : '';
@@ -52,7 +67,7 @@ for (const file of files) {
   }
 }
 if (dfltVerified === 0 || failures.length > 0) {
-  console.error(JSON.stringify({ ok: false, files: files.length, dfltVerified, krakReadVerified, krakBlocked, variants: Object.fromEntries(variants), failures }, null, 2));
+  console.error(JSON.stringify({ ok: false, files: files.length, dfltVerified, krakReadVerified, krakBlocked, krakNestedBnd4Verified, krakNestedBnd4Entries, variants: Object.fromEntries(variants), failures }, null, 2));
   process.exitCode = 1;
 } else {
   console.log(JSON.stringify({
@@ -62,6 +77,8 @@ if (dfltVerified === 0 || failures.length > 0) {
     dfltVerified,
     krakReadVerified,
     krakBlocked,
+    krakNestedBnd4Verified,
+    krakNestedBnd4Entries,
     nestedBnd4Verified,
     nestedBnd4Entries,
     variants: Object.fromEntries([...variants].sort()),
