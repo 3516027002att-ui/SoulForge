@@ -6,12 +6,19 @@ import type {
   EmevdDslDocument,
   EmevdDslInstructionPatch,
   EmevdDslLiteral,
+  EmevdDslSourceSpan,
   EmevdEditorDocument,
   EmevdMutationPlan,
   EmevdPlannedMutation
 } from '@soulforge/shared';
 import type { EmedfArgType, EmedfRegistry } from './emedfSchema.js';
-import { decodeInstructionArgs, findInstructionDef } from './emedfSchema.js';
+import {
+  decodeInstructionArgs,
+  extractConditionGroupReferences,
+  extractConditionGroupResults,
+  extractEventIdReferences,
+  findInstructionDef
+} from './emedfSchema.js';
 import { decodeStrictBase64 } from '../util/base64.js';
 import { parseEmevdPatchDsl } from './dslParser.js';
 import { createEmevdDslDiagnostic as diagnostic } from './dslTokenizer.js';
@@ -276,10 +283,12 @@ export function compileEmevdPatchDsl(
   }
 
   // Control-flow validation: warn when event ID changes create dangling
-  // InitializeEvent references. This is a best-effort check — it decodes
-  // InitializeEvent (bank 2000, id 0) args when the EMEDF schema is available
-  // and warns if the old event ID appears as the eventId parameter.
+  // references. This is a best-effort, schema-driven check — it decodes the
+  // args of every schema-known instruction (e.g. InitializeEvent or a
+  // GotoEvent-style jump once its EMEDF is imported) and warns if the old
+  // event ID appears as an event ID reference.
   validateEventIdReferences(document, operations, registry, diagnostics, request.resourceUri);
+  validateConditionGroupReferences(document, registry, diagnostics, request.resourceUri);
 
   const touchedEvents = unique(operations.map((operation) => operation.eventAnchor));
   const touchedInstructions = unique(operations.flatMap((operation) =>
@@ -493,14 +502,44 @@ function unique(values: string[]): string[] {
 /*  Control-flow validation                                           */
 /* ------------------------------------------------------------------ */
 
-/** InitializeEvent: bank 2000, id 0. Args: eventSlotId (s32), eventId (u32), parameters (u32 vararg). */
-const INITIALIZE_EVENT_BANK = 2000;
-const INITIALIZE_EVENT_ID = 0;
+/**
+ * Zero source span for document-derived control-flow warnings: they point at
+ * an instruction anchor in the authority document, not a DSL source position.
+ */
+const CONTROL_FLOW_ZERO_SPAN: EmevdDslSourceSpan = {
+  start: { offset: 0, line: 0, column: 0 },
+  end: { offset: 0, line: 0, column: 0 }
+};
+
+/**
+ * Control-flow diagnostics are warning-only: they never block compilation.
+ * createEmevdDslDiagnostic defaults to 'error', so the severity is overridden.
+ */
+function controlFlowWarning(
+  code: string,
+  message: string,
+  resourceUri: string,
+  targetAnchor?: string
+): EmevdDslDiagnostic {
+  return {
+    ...diagnostic(code, message, CONTROL_FLOW_ZERO_SPAN, {
+      resourceUri,
+      ...(targetAnchor !== undefined ? { targetAnchor } : {})
+    }),
+    severity: 'warning'
+  };
+}
 
 /**
  * Best-effort control-flow validation: when event IDs are changed by the
- * plan, scan all InitializeEvent instructions in the document for references
+ * plan, scan every schema-known instruction in the document for references
  * to the old event ID and emit a warning for each dangling reference found.
+ *
+ * Schema-driven: any decoded arg that is an event ID reference (arg name
+ * contains "eventId", or the description mentions "event") is covered, so an
+ * imported GotoEvent-style instruction is checked automatically without
+ * hardcoding a bank/id. Instructions with no schema or marked unknown are
+ * skipped silently.
  *
  * This does NOT block compilation — it only emits warnings. The user may
  * intentionally update event IDs and fix references in a subsequent patch.
@@ -521,16 +560,12 @@ function validateEventIdReferences(
   }
   if (eventIdChanges.size === 0) return;
 
-  // Check if InitializeEvent is defined in the registry
-  const initDef = findInstructionDef(registry, INITIALIZE_EVENT_BANK, INITIALIZE_EVENT_ID);
-  if (!initDef) return; // Can't validate without schema
-
-  // Scan all instructions for InitializeEvent references to changed event IDs
   const changedOldIds = new Set(eventIdChanges.keys());
   for (const event of document.events) {
     for (const instruction of event.instructions) {
-      if (instruction.bank !== INITIALIZE_EVENT_BANK || instruction.id !== INITIALIZE_EVENT_ID) continue;
-      if (instruction.unknown) continue;
+      if (instruction.unknown) continue; // Unknown instructions stay opaque
+      const definition = findInstructionDef(registry, instruction.bank, instruction.id);
+      if (!definition) continue; // Can't validate without schema
 
       let rawArgs: Buffer;
       try {
@@ -539,24 +574,100 @@ function validateEventIdReferences(
         continue; // Can't decode, skip
       }
 
-      const decoded = decodeInstructionArgs(registry, INITIALIZE_EVENT_BANK, INITIALIZE_EVENT_ID, rawArgs);
+      const decoded = decodeInstructionArgs(registry, instruction.bank, instruction.id, rawArgs);
       if (!decoded.ok) continue;
 
-      // Find the eventId argument (second arg, u32)
-      const eventIdArg = decoded.args.find(a => a.name === 'eventId');
-      if (!eventIdArg || typeof eventIdArg.value !== 'number') continue;
+      const references = extractEventIdReferences(registry, instruction.bank, instruction.id, decoded.args);
+      if (!references) continue;
 
-      const referencedEventId = eventIdArg.value;
-      if (changedOldIds.has(referencedEventId)) {
-        const newId = eventIdChanges.get(referencedEventId);
-        const targetAnchor = instruction.anchor ? formatEmevdAnchor('instruction', instruction.anchor) : undefined;
-        diagnostics.push(diagnostic(
-          'EMEVD_DSL_EVENT_ID_REFERENCE_STALE',
-          `InitializeEvent in event ${event.eventId} references event ID ${referencedEventId} which is being changed to ${newId}. Update the reference or the target event ID will be dangling.`,
-          { start: { offset: 0, line: 0, column: 0 }, end: { offset: 0, line: 0, column: 0 } },
-          { resourceUri, ...(targetAnchor !== undefined ? { targetAnchor } : {}) }
-        ));
+      for (const referencedEventId of references) {
+        if (changedOldIds.has(referencedEventId)) {
+          const newId = eventIdChanges.get(referencedEventId);
+          const targetAnchor = instruction.anchor ? formatEmevdAnchor('instruction', instruction.anchor) : undefined;
+          diagnostics.push(controlFlowWarning(
+            'EMEVD_DSL_EVENT_ID_REFERENCE_STALE',
+            `Instruction ${definition.name} (${instruction.bank}:${instruction.id}) in event ${event.eventId} references event ID ${referencedEventId} which is being changed to ${newId}. Update the reference or the target event ID will be dangling.`,
+            resourceUri,
+            targetAnchor
+          ));
+        }
       }
+    }
+  }
+}
+
+/**
+ * Best-effort control-flow validation: warn on invalid or uninitialized
+ * condition group references. A condition group reference is any decoded arg
+ * whose name contains "conditionGroup" (or whose description mentions
+ * "condition group"). References with value 0 or negative are invalid;
+ * references to condition groups never produced by a resultConditionGroup-style
+ * arg are dangling. Schema-driven and warning-only: unknown instructions and
+ * instructions without schema are skipped silently, and warnings never block
+ * the plan.
+ */
+function validateConditionGroupReferences(
+  document: EmevdEditorDocument,
+  registry: EmedfRegistry,
+  diagnostics: EmevdDslDiagnostic[],
+  resourceUri: string
+): void {
+  // Condition groups "initialized" by an instruction result arg (e.g.
+  // IfConditionGroup.resultConditionGroup) may be referenced elsewhere.
+  const initialized = new Set<number>();
+  const references: Array<{
+    value: number;
+    event: EmevdEditorDocument['events'][number];
+    instruction: EmevdEditorDocument['events'][number]['instructions'][number];
+  }> = [];
+
+  for (const event of document.events) {
+    for (const instruction of event.instructions) {
+      if (instruction.unknown) continue; // Unknown instructions stay opaque
+      if (!findInstructionDef(registry, instruction.bank, instruction.id)) continue;
+
+      let rawArgs: Buffer;
+      try {
+        rawArgs = decodeStrictBase64(instruction.argsBase64, { allowEmpty: true });
+      } catch {
+        continue; // Can't decode, skip
+      }
+
+      const decoded = decodeInstructionArgs(registry, instruction.bank, instruction.id, rawArgs);
+      if (!decoded.ok) continue;
+
+      const groupReferences = extractConditionGroupReferences(
+        registry, instruction.bank, instruction.id, decoded.args
+      );
+      if (groupReferences) {
+        for (const value of groupReferences) references.push({ value, event, instruction });
+      }
+      const results = extractConditionGroupResults(
+        registry, instruction.bank, instruction.id, decoded.args
+      );
+      if (results) {
+        for (const value of results) initialized.add(value);
+      }
+    }
+  }
+
+  for (const reference of references) {
+    const { value, event, instruction } = reference;
+    const targetAnchor = instruction.anchor ? formatEmevdAnchor('instruction', instruction.anchor) : undefined;
+    if (value <= 0) {
+      diagnostics.push(controlFlowWarning(
+        'EMEVD_DSL_CONDITION_GROUP_INVALID_REFERENCE',
+        `Condition group reference ${value} in event ${event.eventId} is invalid; condition groups must be positive integers.`,
+        resourceUri,
+        targetAnchor
+      ));
+    } else if (!initialized.has(value)) {
+      diagnostics.push(controlFlowWarning(
+        'EMEVD_DSL_CONDITION_GROUP_UNINITIALIZED',
+        `Condition group ${value} referenced in event ${event.eventId} is never initialized.`,
+        resourceUri,
+        targetAnchor
+      ));
     }
   }
 }

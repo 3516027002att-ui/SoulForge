@@ -53,6 +53,7 @@
     "test:workbench-projections": "npm run test:workbench-projections -w @soulforge/core",
     "test:resource-index-diagnostics": "npm run test:resource-index-diagnostics -w @soulforge/core",
     "test:paramdef-layout": "npm run test:paramdef-layout -w @soulforge/core",
+    "test:param-field-mutation": "npm run test:param-field-mutation -w @soulforge/core",
     "test:param-metadata-mismatch": "npm run test:param-metadata-mismatch -w @soulforge/core",
     "test:smithbox-param-metadata-source": "npm run test:smithbox-param-metadata-source -w @soulforge/core",
     "test:me3-runtime-adapter": "npm run test:me3-runtime-adapter -w @soulforge/core",
@@ -108,6 +109,7 @@
     "test:emevd-external-adapter": "npm run test:emevd-external-adapter -w @soulforge/core",
     "test:emevd-full-document": "npm run test:emevd-full-document -w @soulforge/core",
     "test:script-container-evidence": "npm run test:script-container-evidence -w @soulforge/core",
+    "test:script-container-replace": "npm run test:script-container-replace -w @soulforge/core",
     "probe:behavior-headers": "npm run probe:behavior-headers -w @soulforge/core"
   },
   "devDependencies": {

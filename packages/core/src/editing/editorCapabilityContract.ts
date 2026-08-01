@@ -124,7 +124,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     proposedReleaseEditorId: 'fmg',
     proposalOrder: 1,
     documentAuthority: 'bridge-native-document',
-    mutationKinds: ['fmg_entry_upsert', 'fmg_entry_delete'],
+    mutationKinds: ['fmg_entry_upsert', 'fmg_entry_delete', 'fmg_entry_add'],
     releaseWriteEnabled: true,
     deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',

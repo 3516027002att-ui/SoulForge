@@ -130,6 +130,7 @@ interface Bnd4InventoryData {
   containerType?: string;
   entryCount?: number;
   entries?: Bnd4InventoryEntry[];
+  sampleEntries?: Bnd4InventoryEntry[];
   extensionDistribution?: Record<string, number>;
   resourceKindDistribution?: Record<string, number>;
 }
@@ -180,7 +181,7 @@ export async function buildScriptContainerEvidence(
   }
 
   const data = inventory.data ?? {};
-  const rawEntries = data.entries ?? [];
+  const rawEntries = data.entries ?? data.sampleEntries ?? [];
   const truncated = rawEntries.length > MAX_EVIDENCE_ENTRIES;
   const boundedEntries = rawEntries.slice(0, MAX_EVIDENCE_ENTRIES);
 
