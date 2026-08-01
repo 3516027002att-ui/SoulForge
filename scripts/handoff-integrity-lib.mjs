@@ -823,6 +823,12 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     'scripts/governance/projectGovernance.mjs',
     'scripts/governance/validateGovernanceData.mjs',
     'scripts/verify-governance-equivalence.mjs',
+    // 门禁入口与其负向 fixture 同属主题域：入口决定是否启用冻结基线比对
+    // （freezeBaselineRef）与 freshness 判定，fixture 决定这些拦截是否被证明会触发。
+    // 漏登记就能在不使 REL-SCOPE 失效的前提下把拦截关成 no-op。
+    'scripts/verify-governance.mjs',
+    'scripts/verify-governance-data-fixtures.mjs',
+    'scripts/governance/freshnessContext.mjs',
     'docs/governance/releases.json',
     'docs/governance/scope.json',
     'docs/governance/schema/releases.schema.json',
