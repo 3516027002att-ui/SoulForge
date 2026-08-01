@@ -18,17 +18,37 @@ const EXPECTED_POLICY_INPUTS = [
   }
 ];
 
+// Frozen electron-builder `files` list. `!src/**/*` only matches the app root,
+// so `!**/src/**/*` is what actually keeps workspace TypeScript sources out of
+// app.asar; `!**/dist/testing/**/*` and `!**/dist/_tmp/**/*` keep harness and
+// scratch output out. Any change here must be mirrored in
+// apps/desktop/electron-builder.json — the gate compares them exactly.
 const EXPECTED_FILE_PATTERNS = [
   'out/**/*',
   '!out/release-compliance.json',
   'package.json',
   '!**/*.map',
   '!src/**/*',
+  '!**/src/**/*',
+  '!**/dist/testing/**/*',
+  '!**/dist/_tmp/**/*',
+  '!**/*.tsbuildinfo',
+  '!**/tsconfig*.json',
   '!.native/**/*',
   '!mods/**/*',
   '!**/oo2core*.dll',
   '!**/*secret*',
   '!**/*api*key*'
+];
+
+// Development-only surfaces that must never appear inside app.asar. Each entry
+// is a shipped-artifact path predicate, checked by auditPackageTree so that the
+// exclusion above is proven by evidence rather than asserted by config text.
+export const FORBIDDEN_SHIPPED_DEV_SURFACES = [
+  { code: 'DEV_SURFACE_HARNESS', test: (path) => /(?:^|\/)dist\/testing\//.test(path) },
+  { code: 'DEV_SURFACE_SCRATCH', test: (path) => /(?:^|\/)dist\/_tmp\//.test(path) },
+  { code: 'DEV_SURFACE_WORKSPACE_SOURCE', test: (path) => /^node_modules\/@soulforge\/[^/]+\/src\//.test(path) },
+  { code: 'DEV_SURFACE_BUILD_INFO', test: (path) => /\.tsbuildinfo$/.test(path) }
 ];
 
 const EXPECTED_OUTPUT_DIRECTORY = 'release';
