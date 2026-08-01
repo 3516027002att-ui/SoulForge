@@ -15,6 +15,10 @@ import { rollbackOperation } from '../patch/rollback.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import {
+  analyzeFmgReferenceIntegrity,
+  type FmgReferenceDocument
+} from '../param/fmgReferenceIntegrity.js';
 
 interface FmgEnvelope {
   sourceHash: string;
@@ -198,6 +202,30 @@ async function main(): Promise<void> {
   }
   await expectNoFile(badIdPath, 'invalid id add');
 
+  // 3e) add 越界值（2^31 超出 int32 存储上限）：Bridge RequiredInt/GetInt32
+  //     拒绝（BRIDGE_REQUEST_FAILED / FMG_STAGING_WRITE_FAILED），
+  //     暂存输出文件不产生（fail-closed，不写盘）。
+  const overflowPath = join(staging, 'weapon_names_overflow.fmg');
+  const overflowAdd = await runBridge<{ outputHash: string }>({
+    command: 'write-fmg',
+    filePath: fmgPath,
+    allowedRoots: [overlay, staging],
+    writableRoots: [staging],
+    timeoutMs: 60_000,
+    commandOptions: {
+      outputPath: overflowPath,
+      expectedDocumentHash: read.data.sourceHash,
+      mutation: 'add',
+      id: 2_147_483_648,
+      text: 'SoulForge·越界ID'
+    }
+  });
+  if (overflowAdd.parseStatus !== 'failed'
+    || overflowAdd.diagnostics.some((d) => d.code === 'FMG_STAGING_WRITE_VERIFIED')) {
+    throw new Error(`FMG out-of-range add must fail closed: ${JSON.stringify(overflowAdd.diagnostics)}`);
+  }
+  await expectNoFile(overflowPath, 'out-of-range add');
+
   // 4) Commit rebuilt FMG back into msgbnd via native BND4 replace + resource-entry inverse
   const session = await openWorkspaceSession({ overlayRoot: overlay, game: 'sekiro' });
   const store = new MemoryOperationLogStore();
@@ -290,6 +318,7 @@ async function main(): Promise<void> {
   });
   const count = container.data?.nested?.entryCount ?? 0;
   let fmgVerified = 0;
+  const itemFmgDocuments: FmgReferenceDocument[] = [];
   for (let i = 0; i < count; i++) {
     const snap = await runBridge<Bnd4ChildSnapshot>({
       command: 'snapshot-bnd4-child',
@@ -313,6 +342,11 @@ async function main(): Promise<void> {
       throw new Error(`Corpus FMG ${i} semantic roundtrip failed: ${JSON.stringify(doc.diagnostics)}`);
     }
     fmgVerified += 1;
+    itemFmgDocuments.push({
+      index: i,
+      name: snap.data!.name,
+      entries: (doc.data.entries ?? []).map((e) => ({ id: e.id, text: e.text }))
+    });
   }
 
   // 8) menu.msgbnd (registry bnd4-primary, capabilities inspect/parse/read): FMG read chain
@@ -330,6 +364,7 @@ async function main(): Promise<void> {
   });
   const menuCount = menuContainer.data?.nested?.entryCount ?? 0;
   let menuFmgVerified = 0;
+  const menuFmgDocuments: FmgReferenceDocument[] = [];
   for (let i = 0; i < menuCount; i++) {
     const snap = await runBridge<Bnd4ChildSnapshot>({
       command: 'snapshot-bnd4-child',
@@ -353,9 +388,15 @@ async function main(): Promise<void> {
       throw new Error(`Menu FMG ${i} semantic roundtrip failed: ${JSON.stringify(doc.diagnostics)}`);
     }
     menuFmgVerified += 1;
+    menuFmgDocuments.push({
+      index: i,
+      name: snap.data!.name,
+      entries: (doc.data.entries ?? []).map((e) => ({ id: e.id, text: e.text }))
+    });
   }
 
-  // 9) 语言覆盖记录：只读扫描 mods/msg 下的语言目录，如实记录本机 corpus 的语言覆盖。
+  // 9) 语言覆盖矩阵：只读扫描 mods/msg 下的语言目录，如实记录本机 corpus 的语言覆盖。
+  //    引用完整性诊断是只读的（不开放写路径），与语义往返一并完成。
   const msgRoot = join(dirname(dirname(sourceMsgbnd)));
   let languageCorpus: string[] = [];
   try {
@@ -366,6 +407,18 @@ async function main(): Promise<void> {
   } catch {
     languageCorpus = [];
   }
+  const itemReference = analyzeFmgReferenceIntegrity({ documents: itemFmgDocuments });
+  const menuReference = analyzeFmgReferenceIntegrity({ documents: menuFmgDocuments });
+  const sampleOf = (
+    diagnostics: Array<{ severity: string; code: string; documentName: string; entryId: number; tag?: string; targetId?: number; message: string }>,
+    severity: 'error' | 'warning',
+    limit: number
+  ): Array<Record<string, unknown>> => diagnostics
+    .filter((d) => d.severity === severity)
+    .slice(0, limit)
+    .map((d) => severity === 'error'
+      ? { code: d.code, documentName: d.documentName, entryId: d.entryId, message: d.message }
+      : { code: d.code, documentName: d.documentName, entryId: d.entryId, tag: d.tag, targetId: d.targetId });
 
   console.log(JSON.stringify({
     ok: true,
@@ -385,15 +438,41 @@ async function main(): Promise<void> {
     },
     addFailureCases: {
       duplicateId: 'FMG_STAGING_WRITE_FAILED + 已存在诊断，输出文件不产生',
-      nonIntegerId: 'FMG_STAGING_WRITE_FAILED，输出文件不产生'
+      nonIntegerId: 'FMG_STAGING_WRITE_FAILED，输出文件不产生',
+      outOfRangeId: 'Bridge 拒绝 2^31 越界 id（BRIDGE_REQUEST_FAILED/FMG_STAGING_WRITE_FAILED），输出文件不产生'
     },
     menuMsgbnd: {
       containerEntries: menuCount,
       fmgVerified: menuFmgVerified
     },
-    languageCorpus: {
-      directories: languageCorpus,
-      note: 'FMG add/upsert mutation 仅在本机 zhocn 语料上验证；其他语言变体未覆盖。'
+    referenceIntegrity: {
+      itemMsgbnd: {
+        fmgCount: itemFmgDocuments.length,
+        ...itemReference.summary,
+        errorSample: sampleOf(itemReference.diagnostics, 'error', 10),
+        warningSample: sampleOf(itemReference.diagnostics, 'warning', 6)
+      },
+      menuMsgbnd: {
+        fmgCount: menuFmgDocuments.length,
+        ...menuReference.summary,
+        errorSample: sampleOf(menuReference.diagnostics, 'error', 10),
+        warningSample: sampleOf(menuReference.diagnostics, 'warning', 6)
+      },
+      note: '引用完整性为只读诊断；`<?tag@id?>` 目标不在容器条目集合时产 warning（kgiconKc/gdsparam 等 tag 可能引用外部资源，SoulForge 不声明其语义）；不在容器集合的悬空引用不开放任何写路径。'
+    },
+    languageMatrix: {
+      corpusRoot: msgRoot.replaceAll('\\', '/'),
+      availableLanguages: languageCorpus,
+      verified: {
+        zhocn: {
+          itemMsgbnd: true,
+          menuMsgbnd: true,
+          itemFmgVerified: fmgVerified,
+          menuFmgVerified
+        }
+      },
+      unverifiedLanguages: ['全部其他语言（本机 corpus 仅 zhocn，未覆盖）'],
+      note: 'FMG add/upsert mutation 与引用完整性诊断仅在本机 zhocn 语料上验证；其他语言变体未覆盖，不冒充多语言完成。'
     }
   }, null, 2));
   await disposeBridgeDaemonPool();

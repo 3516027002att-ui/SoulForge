@@ -50,6 +50,15 @@ interface TypeMatchResult {
   diagnostics: Array<{ code: string; message: string }>;
 }
 
+/** A structurally excluded legacy layout with its real Bridge rejection code. */
+interface ExpectedUnsupportedDetail {
+  index: number;
+  typeName: string;
+  code: string;
+  message: string;
+  extractedSize: number;
+}
+
 // ---------------------------------------------------------------------------
 // Known expected-unsupported indices from native PARAM smoke
 // ---------------------------------------------------------------------------
@@ -115,24 +124,12 @@ async function main(): Promise<void> {
     let mismatchedCount = 0;
     let expectedUnsupportedCount = 0;
     let readFailedCount = 0;
+    const expectedUnsupportedDetails: ExpectedUnsupportedDetail[] = [];
+    // Dynamic set of indices that actually remained structurally excluded.
+    const stillUnsupportedIndices = new Set<number>();
 
     for (let i = 0; i < entryCount; i++) {
-      // Known unsupported indices: document but do not fail.
-      if (EXPECTED_UNSUPPORTED_INDICES.has(i)) {
-        results.push({
-          index: i,
-          typeName: `(index ${i})`,
-          dataVersion: 0,
-          rowDataSize: 0,
-          status: 'expected-unsupported',
-          diagnostics: [{
-            code: 'EXPECTED_UNSUPPORTED',
-            message: `Index ${i} is a known failing layout from the native PARAM smoke (semantic roundtrip failure).`
-          }]
-        });
-        expectedUnsupportedCount += 1;
-        continue;
-      }
+      const isKnownUnsupported = EXPECTED_UNSUPPORTED_INDICES.has(i);
 
       // Extract the child to a file (safe for large PARAM types).
       const tmpParam = join(staging, `corpus-${i}.param`);
@@ -145,18 +142,30 @@ async function main(): Promise<void> {
         commandOptions: { entryIndex: i, outputPath: tmpParam }
       });
       if (extract.parseStatus === 'failed' || !extract.data?.contentSize) {
-        readFailedCount += 1;
+        if (!isKnownUnsupported) readFailedCount += 1;
+        const diagnostic = {
+          code: 'EXTRACT_FAILED',
+          message: extract.diagnostics[0]?.message ?? 'BND4 child extract failed.'
+        };
         results.push({
           index: i,
           typeName: `(index ${i})`,
           dataVersion: 0,
           rowDataSize: 0,
-          status: 'mismatched',
-          diagnostics: [{
-            code: 'EXTRACT_FAILED',
-            message: extract.diagnostics[0]?.message ?? 'BND4 child extract failed.'
-          }]
+          status: isKnownUnsupported ? 'expected-unsupported' : 'mismatched',
+          diagnostics: [diagnostic]
         });
+        if (isKnownUnsupported) {
+          expectedUnsupportedCount += 1;
+          stillUnsupportedIndices.add(i);
+          expectedUnsupportedDetails.push({
+            index: i,
+            typeName: `(index ${i})`,
+            code: diagnostic.code,
+            message: diagnostic.message,
+            extractedSize: 0
+          });
+        }
         continue;
       }
 
@@ -170,18 +179,30 @@ async function main(): Promise<void> {
         commandOptions: {}
       });
       if (!doc.data?.typeName) {
-        readFailedCount += 1;
+        if (!isKnownUnsupported) readFailedCount += 1;
+        const diagnostic = {
+          code: doc.diagnostics[0]?.code ?? 'READ_FAILED',
+          message: doc.diagnostics[0]?.message ?? 'read-param-document failed.'
+        };
         results.push({
           index: i,
           typeName: `(index ${i})`,
           dataVersion: 0,
           rowDataSize: 0,
-          status: 'mismatched',
-          diagnostics: [{
-            code: 'READ_FAILED',
-            message: doc.diagnostics[0]?.message ?? 'read-param-document failed.'
-          }]
+          status: isKnownUnsupported ? 'expected-unsupported' : 'mismatched',
+          diagnostics: [diagnostic]
         });
+        if (isKnownUnsupported) {
+          expectedUnsupportedCount += 1;
+          stillUnsupportedIndices.add(i);
+          expectedUnsupportedDetails.push({
+            index: i,
+            typeName: `(index ${i})`,
+            code: diagnostic.code,
+            message: diagnostic.message,
+            extractedSize: extract.data.contentSize
+          });
+        }
         continue;
       }
 
@@ -254,9 +275,7 @@ async function main(): Promise<void> {
 
     // 6. Report.
     const totalTypes = entryCount;
-    const failures = results.filter((r) =>
-      r.status === 'mismatched' && !EXPECTED_UNSUPPORTED_INDICES.has(r.index)
-    );
+    const failures = results.filter((r) => r.status === 'mismatched');
     if (matchedCount === 0 && mismatchedCount === 0 && unmatchedCount === 0) {
       throw new Error('No PARAM types could be read from the native corpus.');
     }
@@ -281,7 +300,8 @@ async function main(): Promise<void> {
         expectedUnsupported: expectedUnsupportedCount,
         readFailed: readFailedCount
       },
-      expectedUnsupportedIndices: [...EXPECTED_UNSUPPORTED_INDICES].sort((a, b) => a - b),
+      expectedUnsupportedIndices: [...stillUnsupportedIndices].sort((a, b) => a - b),
+      expectedUnsupportedDetails,
       failures: failures.slice(0, 10).map((f) => ({
         index: f.index,
         typeName: f.typeName,
