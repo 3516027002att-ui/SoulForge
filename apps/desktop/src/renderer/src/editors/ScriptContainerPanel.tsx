@@ -2,12 +2,16 @@ import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type React
 import type {
   Diagnostic,
   RendererContainerChild,
+  ScriptContainerEntryEvidence,
   ScriptContainerEvidence,
-  ScriptContainerEntryEvidence
+  ScriptEntryClassification
 } from '@soulforge/shared';
 import { SCRIPT_CLASSIFICATION_ORDER, scriptClassificationLabel } from '@soulforge/shared';
 import { HexEditorPanel } from './HexEditorPanel.js';
 import { isLikelyBase64, uint8ArrayToBase64 } from '../utils/binary.js';
+
+/** Fixed page size for the paginated script container entry table (hard constraint 17). */
+const SCRIPT_PAGE_SIZE = 50;
 
 export interface ScriptContainerPanelProps {
   /** Selected script container (e.g. a luabnd/bnd4 container). */
@@ -48,6 +52,15 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   const [replaceBytes, setReplaceBytes] = useState('');
   const [replacing, setReplacing] = useState(false);
   const [replaceResult, setReplaceResult] = useState<ReplaceResultView | null>(null);
+  /** Paginated entry table served by `resource.listScriptContainerEntriesPage`. */
+  const [pageEntries, setPageEntries] = useState<ScriptContainerEntryEvidence[]>([]);
+  const [page, setPage] = useState(0);
+  const [pageCount, setPageCount] = useState(1);
+  const [entryCount, setEntryCount] = useState(0);
+  const [pageSummary, setPageSummary] = useState<Record<ScriptEntryClassification, number> | null>(null);
+  const [entriesComplete, setEntriesComplete] = useState(true);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     if (!props.resourceUri) {
@@ -75,9 +88,64 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     void load();
   }, [load]);
 
+  /**
+   * Paginated entry enumeration (hard constraint 17): the complete classified
+   * entry table is materialized in main; the renderer only holds one page.
+   * When the channel is unavailable, the bounded evidence projection is shown
+   * as a degraded fallback.
+   */
+  const pageChannelAvailable = typeof window.soulforge.listScriptContainerEntriesPage === 'function';
+
+  const loadPage = useCallback(async (targetPage: number): Promise<void> => {
+    if (!props.resourceUri || !pageChannelAvailable) return;
+    setPageLoading(true);
+    setPageError(null);
+    try {
+      const result = await window.soulforge.listScriptContainerEntriesPage(
+        props.resourceUri,
+        targetPage,
+        SCRIPT_PAGE_SIZE
+      );
+      if (result.ok) {
+        setPageEntries(result.entries);
+        setPage(result.page);
+        setPageCount(result.pageCount);
+        setEntryCount(result.entryCount);
+        setPageSummary(result.classificationSummary);
+        setEntriesComplete(result.entriesComplete);
+        setPageError(null);
+      } else {
+        setPageEntries([]);
+        setPageError(result.diagnostics?.[0]?.message ?? '脚本容器条目分页读取失败。');
+      }
+    } catch (error) {
+      setPageEntries([]);
+      setPageError(error instanceof Error ? error.message : '脚本容器条目分页读取异常。');
+    } finally {
+      setPageLoading(false);
+    }
+  }, [props.resourceUri, pageChannelAvailable]);
+
+  useEffect(() => {
+    if (props.resourceUri) void loadPage(0);
+  }, [props.resourceUri, loadPage]);
+
+  async function changePage(next: number): Promise<void> {
+    setSelectedName(null);
+    setReplaceCtx(null);
+    setReplaceBytes('');
+    setReplaceResult(null);
+    await loadPage(next);
+  }
+
+  const tableEntries = pageChannelAvailable ? pageEntries : (evidence?.entries ?? []);
+  const displayEntryCount = pageChannelAvailable && entryCount > 0
+    ? entryCount
+    : (evidence?.entryCount ?? 0);
+
   const selected = useMemo(
-    () => evidence?.entries.find((entry) => entry.name === selectedName) ?? null,
-    [evidence, selectedName]
+    () => tableEntries.find((entry) => entry.name === selectedName) ?? null,
+    [tableEntries, selectedName]
   );
 
   function selectEntry(name: string): void {
@@ -183,6 +251,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         setReplaceCtx(null);
         setReplaceBytes('');
         await load();
+        await loadPage(0);
         await props.onMutationCommitted?.();
       }
     } catch (error) {
@@ -197,7 +266,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   }
 
   const summaryChips = useMemo(() => {
-    const summary = evidence?.classificationSummary;
+    const summary = pageSummary ?? evidence?.classificationSummary;
     if (!summary) return [];
     return SCRIPT_CLASSIFICATION_ORDER
       .filter((classification) => (summary[classification] ?? 0) > 0)
@@ -205,7 +274,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         classification,
         count: summary[classification] ?? 0
       }));
-  }, [evidence]);
+  }, [pageSummary, evidence]);
 
   return (
     <section className="panel" aria-label="脚本容器只读证据">
@@ -213,7 +282,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         <h3>脚本容器只读证据</h3>
         <span className="muted">
           {evidence
-            ? `${evidence.containerFormat} · ${evidence.entryCount} 条`
+            ? `${evidence.containerFormat} · ${displayEntryCount} 条`
             : '未加载'}
         </span>
       </header>
@@ -226,9 +295,11 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         <>
           <div className="structured-preview-grid">
             <span>容器格式：{evidence.containerFormat ?? 'unknown'}</span>
-            <span>条目总数：{evidence.entryCount}</span>
-            <span>已展示：{evidence.entries.length}</span>
-            <span>{evidence.truncated ? '条目已截断（最多展示 256 条）' : '条目完整'}</span>
+            <span>条目总数：{displayEntryCount}</span>
+            <span>{pageChannelAvailable
+              ? `分页枚举 · 每页 ${SCRIPT_PAGE_SIZE} 条`
+              : `证据投影 ${evidence.entries.length} 条`}</span>
+            <span>{entriesComplete ? '条目完整' : 'Bridge 仅返回采样条目，导航覆盖采样子集'}</span>
           </div>
 
           <div className="native-chip-row">
@@ -240,8 +311,31 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
             {summaryChips.length === 0 && <span>无分类统计</span>}
           </div>
 
-          {evidence.truncated && (
-            <p className="muted">条目数超过 256，后端已截断；列表只展示证据投影子集。</p>
+          {pageChannelAvailable && (
+            <>
+              <div className="row gap pager">
+                <button
+                  type="button"
+                  disabled={page <= 0 || pageLoading}
+                  onClick={() => void changePage(page - 1)}
+                >
+                  上一页
+                </button>
+                <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
+                <button
+                  type="button"
+                  disabled={page >= pageCount - 1 || pageLoading}
+                  onClick={() => void changePage(page + 1)}
+                >
+                  下一页
+                </button>
+                {pageLoading && <span className="muted">加载中…</span>}
+              </div>
+              {pageError && <p className="danger">{pageError}</p>}
+              {!pageLoading && !pageError && pageEntries.length === 0 && (
+                <p className="muted">当前页无条目。</p>
+              )}
+            </>
           )}
 
           <div className="binder-child-table script-entry-table" role="table">
@@ -252,7 +346,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
               <span>索引</span>
               <span>标识</span>
             </div>
-            {evidence.entries.map((entry) => (
+            {tableEntries.map((entry) => (
               <div
                 key={`${entry.index}-${entry.name}`}
                 className={entry.name === selectedName
@@ -270,7 +364,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
                 </span>
               </div>
             ))}
-            {evidence.entries.length === 0 && <p className="muted">无条目证据。</p>}
+            {tableEntries.length === 0 && !pageLoading && <p className="muted">无条目证据。</p>}
           </div>
 
           {selected && (

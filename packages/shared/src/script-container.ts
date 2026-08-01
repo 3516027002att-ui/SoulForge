@@ -55,6 +55,38 @@ export interface ScriptContainerEvidence {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * One page of classified script container entries served by the paginated
+ * access channel (`resource.listScriptContainerEntriesPage`). The complete
+ * entry table is materialized in main; the renderer only ever receives a
+ * bounded page plus navigation metadata (hard constraint 17). Unlike
+ * `ScriptContainerEvidence` (a bounded evidence snapshot), navigation can
+ * cover every entry the Bridge inventory reports.
+ */
+export interface ScriptContainerEntryPage {
+  ok: boolean;
+  /** Container format: BND4_DFLT, BND4_KRAK, or unknown. */
+  containerFormat: string;
+  /** Total entry count reported by the container inventory. */
+  entryCount: number;
+  page: number;
+  pageSize: number;
+  pageCount: number;
+  entries: ScriptContainerEntryEvidence[];
+  /**
+   * Classification distribution across ALL enumerated entries (not just the
+   * current page), assembled in main so the renderer never materializes the
+   * whole table.
+   */
+  classificationSummary: Record<ScriptEntryClassification, number>;
+  /**
+   * True when the complete entry table was enumerated (not a bounded sample),
+   * so page navigation reaches every entry the container reports.
+   */
+  entriesComplete: boolean;
+  diagnostics: Diagnostic[];
+}
+
 /** Fixed display order for classification chips. */
 export const SCRIPT_CLASSIFICATION_ORDER: readonly ScriptEntryClassification[] = [
   'lua-bytecode',

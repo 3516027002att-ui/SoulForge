@@ -16,6 +16,8 @@ import {
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
   buildScriptContainerEvidence,
+  classifyScriptEntry,
+  magicLabel,
   applyParamFieldMutation,
   commitFmgMutationViaBridge,
   commitParamMutationViaBridge,
@@ -51,7 +53,9 @@ import {
   type ToolDescriptor,
   type ToolResult,
   type WorkspaceIndex,
-  type WorkspaceSession
+  type WorkspaceSession,
+  type ScriptContainerEntryEvidence,
+  type ScriptEntryClassification
 } from '@soulforge/core';
 import type {
   ConfirmationReceipt,
@@ -60,7 +64,8 @@ import type {
   EmevdEditorDocument,
   IndexedFile,
   ParamDefDocument,
-  ResourceKind
+  ResourceKind,
+  StructuredDiagnostic
 } from '@soulforge/shared';
 import {
   sanitizeDiagnostics,
@@ -102,6 +107,7 @@ const emevdFullDocuments = new Map<string, EmevdEditorDocument>();
 const FMG_PAGE_SIZE = 100;
 const PARAM_PAGE_SIZE = 20;
 const CONTAINER_PAGE_SIZE = 50;
+const SCRIPT_PAGE_SIZE = 50;
 /** Upper bound for the paginated PARAM channel's complete-coverage read. */
 const MAX_PAGED_PARAM_ROWS = 100_000;
 
@@ -128,10 +134,91 @@ type CachedContainerChildren = Awaited<
 >['children'];
 const containerChildrenCache = new Map<string, CachedContainerChildren>();
 
+/**
+ * Classified script-container entry table keyed by sourceUri. Materialized
+ * once in main and served as bounded pages so the renderer never holds the
+ * full table. Enumeration uses the Bridge `read-dcx-document` command, which
+ * returns the COMPLETE inner BND4 entry table (e.g. 301 entries for the real
+ * luabnd) — `inventory-asset-resources` only samples entries, so it cannot
+ * back a full-coverage page channel.
+ */
+interface CachedScriptContainerEntries {
+  containerFormat: string;
+  entryCount: number;
+  entries: ScriptContainerEntryEvidence[];
+  classificationSummary: Record<ScriptEntryClassification, number>;
+  entriesComplete: boolean;
+  diagnostics: StructuredDiagnostic[];
+}
+const scriptContainerEntriesCache = new Map<string, CachedScriptContainerEntries>();
+
+function emptyScriptClassificationSummary(): Record<ScriptEntryClassification, number> {
+  return {
+    'lua-bytecode': 0,
+    'luagnl': 0,
+    'luainfo': 0,
+    'esd-bytecode': 0,
+    'hkx-bytecode': 0,
+    'unknown': 0
+  };
+}
+
+function summarizeScriptClassifications(
+  entries: readonly ScriptContainerEntryEvidence[]
+): Record<ScriptEntryClassification, number> {
+  const summary = emptyScriptClassificationSummary();
+  for (const entry of entries) {
+    summary[entry.classification] += 1;
+  }
+  return summary;
+}
+
+/** Inner BND4 entry row from the Bridge `read-dcx-document` command. */
+interface ScriptDcxEntryLike {
+  index?: number;
+  id?: number;
+  name?: string;
+  flags?: number;
+  compressedSize?: number;
+  uncompressedSize?: number;
+  contentHash?: string;
+}
+
+interface ScriptDcxDocumentLike {
+  format?: string;
+  nested?: {
+    format?: string;
+    entryCount?: number;
+    entries?: ScriptDcxEntryLike[];
+    authority?: string;
+  };
+}
+
+/** Bounded sample fallback from the Bridge `inventory-asset-resources` command. */
+interface ScriptInventoryEntryLike {
+  name?: string;
+  index?: number;
+  uncompressedSize?: number;
+  compressedSize?: number;
+  flags?: number;
+  id?: number;
+}
+
+interface ScriptInventoryDataLike {
+  format?: string;
+  containerType?: string;
+  entryCount?: number;
+  entries?: ScriptInventoryEntryLike[];
+  sampleEntries?: ScriptInventoryEntryLike[];
+  extensionDistribution?: Record<string, number>;
+  resourceKindDistribution?: Record<string, number>;
+}
+
 function clearEditorPageCaches(): void {
   fmgPageCache.clear();
   paramPageCache.clear();
   containerChildrenCache.clear();
+  scriptContainerEntriesCache.clear();
 }
 
 /**
@@ -2302,7 +2389,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         ...(operationLog ? { operationLog } : {}),
         ...(storage ?? {})
       });
-      if (result.ok) containerChildrenCache.clear();
+      if (result.ok) {
+        containerChildrenCache.clear();
+        scriptContainerEntriesCache.clear();
+      }
       return toRendererSaveResult(result, indexedFiles);
     }
   );
@@ -2383,6 +2473,141 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       timeoutMs: 60_000
     });
   });
+
+  /**
+   * Paginated script-container entry access (hard constraint 17). The complete
+   * classified entry table is materialized once in main and served as bounded
+   * pages; the renderer navigates every entry the container reports.
+   *
+   * Enumeration uses the Bridge `read-dcx-document` command (the same source as
+   * the native replace baseline) because it returns the complete inner BND4
+   * entry table — `inventory-asset-resources` only returns a bounded sample and
+   * cannot back full-coverage navigation. If the full read fails, a bounded
+   * inventory sample is served and `entriesComplete=false` keeps the report
+   * honest. Classification per entry stays on the main side.
+   */
+  handle(
+    'resource.listScriptContainerEntriesPage',
+    async (_event, sourceUri: string, requestedPage: number, requestedPageSize: number) => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const failure = (code: string, message: string, diagnostics?: StructuredDiagnostic[]) => ({
+        ok: false,
+        containerFormat: 'unknown',
+        entryCount: 0,
+        page: 0,
+        pageSize: 0,
+        pageCount: 0,
+        entries: [],
+        classificationSummary: emptyScriptClassificationSummary(),
+        entriesComplete: false,
+        diagnostics: diagnostics ?? [{
+          severity: 'error' as const,
+          code,
+          message,
+          sourceUri
+        }]
+      });
+      if (!file) {
+        return failure('RESOURCE_NOT_INDEXED', '资源未索引，无法分页枚举脚本容器条目。');
+      }
+      if (!activeSession) {
+        return failure('WORKSPACE_NOT_OPEN', '需要已打开的工作区才能分页读取脚本容器条目。');
+      }
+      let cached = scriptContainerEntriesCache.get(sourceUri);
+      if (!cached) {
+        const storage = durableStoragePaths(activeSession.meta.workspaceId);
+        const allowedRoots = bridgeAllowedRoots(activeSession, storage.stagingRoot);
+        const dcx = await runBridge<ScriptDcxDocumentLike>({
+          command: 'read-dcx-document',
+          filePath: file.absolutePath,
+          resourceUri: `file:///${file.absolutePath.replace(/\\/g, '/')}`,
+          allowedRoots,
+          timeoutMs: 60_000
+        });
+        const nested = dcx.parseStatus === 'failed' ? undefined : dcx.data?.nested;
+        if (!nested || !Array.isArray(nested.entries)) {
+          // Full read unavailable: fall back to the bounded inventory sample.
+          const inventory = await runBridge<ScriptInventoryDataLike>({
+            command: 'inventory-asset-resources',
+            filePath: file.absolutePath,
+            resourceUri: `file:///${file.absolutePath.replace(/\\/g, '/')}`,
+            allowedRoots,
+            timeoutMs: 60_000
+          });
+          if (inventory.parseStatus === 'failed') {
+            return failure(
+              'SCRIPT_PAGED_INVENTORY_FAILED',
+              '脚本容器完整读取与采样枚举均失败。',
+              inventory.diagnostics
+            );
+          }
+          const data = inventory.data ?? {};
+          const rawEntries = data.entries ?? data.sampleEntries ?? [];
+          const entries: ScriptContainerEntryEvidence[] = rawEntries.map((entry) => {
+            const name = entry.name ?? `entry_${entry.index ?? 0}`;
+            const classification = classifyScriptEntry(name);
+            return {
+              name,
+              index: entry.index ?? 0,
+              size: entry.uncompressedSize ?? 0,
+              extension: name.split('.').pop()?.toLowerCase() ?? '',
+              classification,
+              magicLabel: magicLabel(classification)
+            };
+          });
+          cached = {
+            containerFormat: data.format ?? 'BND4',
+            entryCount: data.entryCount ?? rawEntries.length,
+            entries,
+            classificationSummary: summarizeScriptClassifications(entries),
+            entriesComplete: false,
+            diagnostics: inventory.diagnostics
+          };
+        } else {
+          const entries: ScriptContainerEntryEvidence[] = nested.entries.map((entry) => {
+            const name = entry.name ?? `entry_${entry.index ?? 0}`;
+            const classification = classifyScriptEntry(name);
+            return {
+              name,
+              index: entry.index ?? 0,
+              size: entry.uncompressedSize ?? entry.compressedSize ?? 0,
+              extension: name.split('.').pop()?.toLowerCase() ?? '',
+              classification,
+              magicLabel: magicLabel(classification)
+            };
+          });
+          cached = {
+            containerFormat: dcx.data?.format
+              ? `${dcx.data.format}->${nested.format ?? 'BND4'}`
+              : (nested.format ?? 'BND4'),
+            entryCount: nested.entryCount ?? entries.length,
+            entries,
+            classificationSummary: summarizeScriptClassifications(entries),
+            entriesComplete: true,
+            diagnostics: dcx.diagnostics
+          };
+        }
+        scriptContainerEntriesCache.set(sourceUri, cached);
+      }
+      const window = normalizePageWindow(
+        cached.entries.length,
+        requestedPage,
+        requestedPageSize || SCRIPT_PAGE_SIZE
+      );
+      return {
+        ok: true,
+        containerFormat: cached.containerFormat,
+        entryCount: cached.entryCount,
+        page: window.page,
+        pageSize: window.size,
+        pageCount: window.pageCount,
+        entries: cached.entries.slice(window.offset, window.offset + window.size),
+        classificationSummary: cached.classificationSummary,
+        entriesComplete: cached.entriesComplete,
+        diagnostics: cached.diagnostics
+      };
+    }
+  );
 
   handle('operation.list', async (): Promise<RendererPatchHistoryEntry[]> => {
     if (!activeSession || !activeOperationLog) return [];

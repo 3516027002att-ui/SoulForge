@@ -57,11 +57,17 @@ function main(): void {
   for (const channel of [
     'resource.readFmgPage',
     'resource.readParamPage',
-    'resource.listContainerChildrenPage'
+    'resource.listContainerChildrenPage',
+    'resource.listScriptContainerEntriesPage'
   ]) {
     if (!ipc.includes(channel)) throw new Error(`ipc missing paginated channel ${channel}`);
   }
-  for (const method of ['readFmgPage', 'readParamPage', 'listContainerChildrenPage']) {
+  for (const method of [
+    'readFmgPage',
+    'readParamPage',
+    'listContainerChildrenPage',
+    'listScriptContainerEntriesPage'
+  ]) {
     if (!preload.includes(method)) throw new Error(`preload missing paginated method ${method}`);
   }
   if (!ipc.includes("game: 'sekiro'")
@@ -92,7 +98,8 @@ function main(): void {
       'MsbScenePanel.onRegionPositionCommit → applyMsbMutation(set_region_position)',
       'ParamTablePanel.duplicate sourceId → applyParamMutation upsert',
       'Sekiro-only native write gate',
-      'stable LOCALAPPDATA staging root with cleanup'
+      'stable LOCALAPPDATA staging root with cleanup',
+      'paginated channels: readFmgPage / readParamPage / listContainerChildrenPage / listScriptContainerEntriesPage'
     ]
   }, null, 2));
 }

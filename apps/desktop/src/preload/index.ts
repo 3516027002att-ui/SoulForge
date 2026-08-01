@@ -26,6 +26,7 @@ import type {
   RendererContainerChildrenList,
   RendererContainerChildrenPage,
   RendererContainerTreeSummary,
+  ScriptContainerEntryPage,
   ScriptContainerEvidence
 } from '@soulforge/shared';
 
@@ -131,6 +132,17 @@ const api = {
     ipcRenderer.invoke('resource.probeContainerCapabilities', sourceUri),
   scriptContainerEvidence: (sourceUri: string): Promise<ScriptContainerEvidence> =>
     ipcRenderer.invoke('resource.scriptContainerEvidence', sourceUri).then(stripPathFields),
+  listScriptContainerEntriesPage: (
+    sourceUri: string,
+    page: number,
+    pageSize: number
+  ): Promise<ScriptContainerEntryPage> =>
+    ipcRenderer.invoke(
+      'resource.listScriptContainerEntriesPage',
+      sourceUri,
+      page,
+      pageSize
+    ).then(stripPathFields),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),

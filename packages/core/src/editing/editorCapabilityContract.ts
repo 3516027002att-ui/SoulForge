@@ -253,12 +253,20 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     releaseWriteEnabled: true,
     deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',
-    scalePrimitives: ['none'],
-    scaleAccess: 'none',
+    // 条目表经主进程分页通道 `resource.listScriptContainerEntriesPage`
+    // 按页访问：main 一次性物化完整分类条目表并逐页投递，renderer 只持有一页，
+    // 导航可覆盖全部条目（如 301 条目的真实 luabnd），不再依赖 256 条证据截断。
+    scalePrimitives: ['pagination'],
+    scaleAccess: 'pagination',
     scaleDimensions: ['container-entries', 'compiled-instructions'],
     contractSources: [
       'packages/core/src/editing/editorDocumentStore.ts',
-      'packages/core/src/editing/saveContainerChild.ts'
+      'packages/core/src/editing/saveContainerChild.ts',
+      'packages/core/src/script/scriptContainerEvidence.ts',
+      'apps/desktop/src/main/ipc.ts',
+      'apps/desktop/src/preload/index.ts',
+      'apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx',
+      'packages/shared/src/script-container.ts'
     ]
   },
   flver: {

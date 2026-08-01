@@ -90,13 +90,10 @@ function main(): void {
       diagnosticCode
     }];
   });
-  assertCurrentScaleGap(
-    currentScaleContractGaps,
-    'script',
-    'none',
-    'EDITOR_PAGINATION_OR_VIRTUALIZATION_REQUIRED'
-  );
-  for (const releaseEditorId of ['bnd4', 'fmg', 'param', 'emevd'] as const) {
+  // Every frozen release editor must expose complete content through a bounded
+  // release-safe scale access mode; none may keep an eager/bounded-window/none
+  // gap. The fixture-driven gaps below would fail closed if any editor regressed.
+  for (const releaseEditorId of ['bnd4', 'fmg', 'param', 'emevd', 'script'] as const) {
     const leftover = currentScaleContractGaps.find(
       (item) => item.releaseEditorId === releaseEditorId
     );
@@ -334,6 +331,10 @@ function assertScaleContractsMatchCurrentSources(): void {
       ['listContainerChildrenPage', 'pageCount', 'pageChildren']
     ],
     [
+      'apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx',
+      ['listScriptContainerEntriesPage', 'SCRIPT_PAGE_SIZE', 'pageCount', 'pageEntries']
+    ],
+    [
       'packages/core/src/editing/paramBridgeCommit.ts',
       ['const maxRows = input.maxRows ?? 500', '.slice(0, maxRows)']
     ],
@@ -431,22 +432,6 @@ function expectedScaleGapDiagnostic(
   if (scaleAccess === 'eager') return 'EDITOR_EAGER_MATERIALIZATION_NOT_RELEASE_SAFE';
   if (scaleAccess === 'none') return 'EDITOR_PAGINATION_OR_VIRTUALIZATION_REQUIRED';
   return null;
-}
-
-function assertCurrentScaleGap(
-  gaps: Array<{
-    releaseEditorId: ProposedReleaseEditorId;
-    scaleAccess: ReleaseEditorInventoryItem['currentScaleAccess'];
-    diagnosticCode: string;
-  }>,
-  releaseEditorId: ProposedReleaseEditorId,
-  scaleAccess: ReleaseEditorInventoryItem['currentScaleAccess'],
-  diagnosticCode: string
-): void {
-  const gap = gaps.find((item) => item.releaseEditorId === releaseEditorId);
-  if (!gap || gap.scaleAccess !== scaleAccess || gap.diagnosticCode !== diagnosticCode) {
-    throw new Error(`${releaseEditorId} current scale gap was not preserved honestly`);
-  }
 }
 
 main();
