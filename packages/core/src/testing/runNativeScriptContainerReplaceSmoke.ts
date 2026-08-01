@@ -30,7 +30,21 @@ interface Envelope {
   nested?: {
     entryCount: number;
     entries: Array<{ id: number; name: string; contentHash: string; index: number }>;
+    fieldPreservation?: {
+      headerUnknownBytesPreserved: boolean;
+      entryHeaderFieldsPreserved: boolean;
+      storedBytesPreserved: boolean;
+      namesPreserved: boolean;
+    };
   };
+}
+
+function requireFieldPreservation(label: string, envelope: Envelope | undefined): void {
+  const fp = envelope?.nested?.fieldPreservation;
+  if (!fp || !fp.headerUnknownBytesPreserved || !fp.entryHeaderFieldsPreserved
+    || !fp.storedBytesPreserved || !fp.namesPreserved) {
+    throw new Error(`${label} BND4 未知字段保持失败：${JSON.stringify(fp)}`);
+  }
 }
 
 function sha256(bytes: Buffer): string {
@@ -60,6 +74,7 @@ async function main(): Promise<void> {
     allowedRoots: [overlay],
     timeoutMs: 60_000
   });
+  requireFieldPreservation('luabnd baseline', baseline.data);
   const first = baseline.data?.nested?.entries[0];
   if (!first || !baseline.data?.nested) throw new Error('luabnd baseline entry missing.');
   if (!first.name.toLowerCase().endsWith('.lua') && !first.name.toLowerCase().endsWith('.hks')) {
@@ -132,6 +147,7 @@ async function main(): Promise<void> {
     allowedRoots: [overlay],
     timeoutMs: 60_000
   });
+  requireFieldPreservation('luabnd after replace', after.data);
   const replacedEntry = after.data?.nested?.entries[0];
   if (!replacedEntry || replacedEntry.contentHash === first.contentHash) {
     throw new Error('luabnd inner replace did not survive reread.');
@@ -163,6 +179,7 @@ async function main(): Promise<void> {
     rereadVerified: true,
     entryCountUnchanged: true,
     rollbackByteIdentical: true,
+    unknownFieldsPreserved: true,
     replacementProvidedByUser: true,
     bytecodeNotGenerated: true
   }, null, 2));

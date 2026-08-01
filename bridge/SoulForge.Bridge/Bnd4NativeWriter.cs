@@ -44,42 +44,11 @@ internal static class Bnd4NativeWriter
         RequireHash(options, "expectedContainerHash", dcx.SourceHash, "DCX source hash");
         var binder = Bnd4NativeDocument.Read(dcx.Payload);
         var entries = binder.ToRepackEntries().ToList();
-        var mutation = RequiredString(options, "mutation").ToLowerInvariant();
-        var affectedIndex = -1;
-        switch (mutation)
-        {
-            case "replace":
-                affectedIndex = ResolveEntryIndex(options, binder);
-                RequireHash(options, "expectedChildHash", binder.Entries[affectedIndex].ContentHash, "BND4 child hash");
-                var replacement = RequiredBase64(options, "contentBase64");
-                entries[affectedIndex] = entries[affectedIndex] with { StoredBytes = replacement, UncompressedSize = replacement.Length };
-                break;
-            case "delete":
-                affectedIndex = ResolveEntryIndex(options, binder);
-                RequireHash(options, "expectedChildHash", binder.Entries[affectedIndex].ContentHash, "BND4 child hash");
-                entries.RemoveAt(affectedIndex);
-                break;
-            case "rename":
-                affectedIndex = ResolveEntryIndex(options, binder);
-                RequireHash(options, "expectedChildHash", binder.Entries[affectedIndex].ContentHash, "BND4 child hash");
-                entries[affectedIndex] = entries[affectedIndex] with { Name = RequiredString(options, "newName") };
-                break;
-            case "move":
-                affectedIndex = ResolveEntryIndex(options, binder);
-                var toIndex = RequiredInt(options, "toIndex");
-                if (toIndex < 0 || toIndex >= entries.Count) throw new InvalidDataException("BND4 move toIndex 越界。");
-                var moving = entries[affectedIndex]; entries.RemoveAt(affectedIndex); entries.Insert(toIndex, moving);
-                break;
-            case "add":
-                var content = RequiredBase64(options, "contentBase64");
-                entries.Add(new Bnd4RepackEntry(
-                    options.TryGetProperty("flags", out var flags) ? flags.GetInt32() : 0x40,
-                    options.TryGetProperty("unknown", out var unknown) ? unknown.GetInt32() : -1,
-                    RequiredInt(options, "id"), RequiredString(options, "name"), content, content.Length));
-                affectedIndex = entries.Count - 1;
-                break;
-            default: throw new InvalidDataException($"未知 BND4 mutation：{mutation}。");
-        }
+        var affectedIndexes = new List<int>();
+        var contentReplacedKeys = new HashSet<string>(StringComparer.Ordinal);
+        var plan = ReadMutationPlan(options);
+        foreach (var (mutation, step) in plan)
+            ApplyMutation(mutation, step, entries, affectedIndexes, contentReplacedKeys);
         cancellationToken.ThrowIfCancellationRequested();
         var rebuiltBinder = binder.Repack(entries);
         byte[] rebuiltDcx;
@@ -109,22 +78,113 @@ internal static class Bnd4NativeWriter
         var rereadBinder = Bnd4NativeDocument.Read(reread.Payload);
         if (reread.PayloadHash != Hash(rebuiltBinder) || rereadBinder.Entries.Count != entries.Count)
             throw new InvalidDataException("BND4 writer 输出重读验证失败。");
-        return new { mutation, affectedIndex, outputHash = reread.SourceHash, payloadHash = reread.PayloadHash, entryCount = rereadBinder.Entries.Count, outputSize = reread.SourceBytes.Length, rereadVerified = true };
+        var preservation = binder.ComparePreservation(rereadBinder, contentReplacedKeys);
+        return new
+        {
+            mutations = plan.Select(step => step.Mutation).ToArray(),
+            affectedIndex = affectedIndexes.Count == 1 ? (object)affectedIndexes[0] : null,
+            affectedIndexes = affectedIndexes.ToArray(),
+            outputHash = reread.SourceHash,
+            payloadHash = reread.PayloadHash,
+            entryCount = rereadBinder.Entries.Count,
+            outputSize = reread.SourceBytes.Length,
+            rereadVerified = true,
+            preservation,
+            fieldPreservation = rereadBinder.VerifyFieldPreservation()
+        };
+    }
+
+    private static IReadOnlyList<(string Mutation, JsonElement Options)> ReadMutationPlan(JsonElement options)
+    {
+        if (options.TryGetProperty("mutations", out var mutations) && mutations.ValueKind == JsonValueKind.Array)
+        {
+            var plan = new List<(string, JsonElement)>();
+            for (var i = 0; i < mutations.GetArrayLength(); i++)
+            {
+                var step = mutations[i];
+                if (step.ValueKind != JsonValueKind.Object) throw new InvalidDataException($"BND4 mutations[{i}] 必须是对象。");
+                plan.Add((RequiredString(step, "mutation").ToLowerInvariant(), step));
+            }
+            if (plan.Count == 0) throw new InvalidDataException("BND4 mutations 数组不能为空。");
+            return plan;
+        }
+        return new[] { (RequiredString(options, "mutation").ToLowerInvariant(), options) };
+    }
+
+    private static void ApplyMutation(string mutation, JsonElement options, List<Bnd4RepackEntry> entries, List<int> affectedIndexes, HashSet<string> contentReplacedKeys)
+    {
+        switch (mutation)
+        {
+            case "replace":
+            {
+                var index = ResolveEntryIndex(options, entries);
+                RequireHash(options, "expectedChildHash", Hash(entries[index].StoredBytes), "BND4 child hash");
+                var replacement = RequiredBase64(options, "contentBase64");
+                contentReplacedKeys.Add($"{entries[index].Id}:{entries[index].Name}");
+                entries[index] = entries[index] with { StoredBytes = replacement, UncompressedSize = replacement.Length };
+                affectedIndexes.Add(index);
+                break;
+            }
+            case "delete":
+            {
+                var index = ResolveEntryIndex(options, entries);
+                RequireHash(options, "expectedChildHash", Hash(entries[index].StoredBytes), "BND4 child hash");
+                entries.RemoveAt(index);
+                affectedIndexes.Add(index);
+                break;
+            }
+            case "rename":
+            {
+                var index = ResolveEntryIndex(options, entries);
+                RequireHash(options, "expectedChildHash", Hash(entries[index].StoredBytes), "BND4 child hash");
+                entries[index] = entries[index] with { Name = RequiredString(options, "newName") };
+                affectedIndexes.Add(index);
+                break;
+            }
+            case "move":
+            {
+                var index = ResolveEntryIndex(options, entries);
+                var toIndex = RequiredInt(options, "toIndex");
+                if (toIndex < 0 || toIndex >= entries.Count) throw new InvalidDataException("BND4 move toIndex 越界。");
+                var moving = entries[index]; entries.RemoveAt(index); entries.Insert(toIndex, moving);
+                affectedIndexes.Add(index);
+                break;
+            }
+            case "add":
+            {
+                var content = RequiredBase64(options, "contentBase64");
+                entries.Add(new Bnd4RepackEntry(
+                    options.TryGetProperty("flags", out var flags) ? flags.GetInt32() : 0x40,
+                    options.TryGetProperty("unknown", out var unknown) ? unknown.GetInt32() : -1,
+                    RequiredInt(options, "id"), RequiredString(options, "name"), content, content.Length));
+                affectedIndexes.Add(entries.Count - 1);
+                break;
+            }
+            default: throw new InvalidDataException($"未知 BND4 mutation：{mutation}。");
+        }
     }
 
     private static int ResolveEntryIndex(JsonElement options, Bnd4NativeDocument binder)
+        => ResolveEntryIndexCore(options, binder.Entries.Count, i => binder.Entries[i].Name);
+
+    private static int ResolveEntryIndex(JsonElement options, IReadOnlyList<Bnd4RepackEntry> entries)
+        => ResolveEntryIndexCore(options, entries.Count, i => entries[i].Name);
+
+    private static int ResolveEntryIndexCore(JsonElement options, int count, Func<int, string> nameAt)
     {
         if (options.TryGetProperty("entryIndex", out var explicitIndex) && explicitIndex.ValueKind == JsonValueKind.Number)
         {
             var index = explicitIndex.GetInt32();
-            if (index < 0 || index >= binder.Entries.Count) throw new InvalidDataException("BND4 entryIndex 越界。");
+            if (index < 0 || index >= count) throw new InvalidDataException("BND4 entryIndex 越界。");
             return index;
         }
         var selector = RequiredString(options, "childPath").Replace('\\', '/');
-        var matches = binder.Entries.Where(entry => entry.Name.Replace('\\', '/').Equals(selector, StringComparison.OrdinalIgnoreCase)
-            || entry.Name.Replace('\\', '/').EndsWith('/' + selector, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var matches = Enumerable.Range(0, count)
+            .Where(i => nameAt(i).Replace('\\', '/').Equals(selector, StringComparison.OrdinalIgnoreCase)
+                || nameAt(i).Replace('\\', '/').EndsWith('/' + selector, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
         if (matches.Length != 1) throw new InvalidDataException($"BND4 childPath 必须唯一匹配，实际 {matches.Length} 项。");
-        return matches[0].Index;
+        return matches[0];
     }
     private static void RequireHash(JsonElement options, string field, string actual, string label)
     {

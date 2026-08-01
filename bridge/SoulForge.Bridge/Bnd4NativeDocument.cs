@@ -136,6 +136,93 @@ internal sealed class Bnd4NativeDocument
     public IReadOnlyList<Bnd4RepackEntry> ToRepackEntries() => Entries.Select((entry, index) => new Bnd4RepackEntry(
         entry.Flags, entry.Unknown, entry.Id, entry.Name, EntryBytes[index].ToArray(), entry.UncompressedSize)).ToArray();
 
+    /// <summary>
+    /// No-op repack preservation: rebuild the container with every entry unchanged
+    /// and compare the unknown/header and entry-level fields byte-for-byte against
+    /// the source BND4 payload. For KRAK this is the honest per-byte boundary that
+    /// re-compression cannot guarantee at the outer DCX layer.
+    /// </summary>
+    public Bnd4FieldPreservationReport VerifyFieldPreservation()
+    {
+        var rebuilt = Repack(ToRepackEntries());
+        var noOpByteIdentical = rebuilt.Length == SourceBytes.Length
+            && rebuilt.AsSpan().SequenceEqual(SourceBytes);
+        var headerUnknownPreserved = SourceBytes.Length >= 0x40 && rebuilt.Length >= 0x40
+            && SourceBytes.AsSpan(0x18, 8).SequenceEqual(rebuilt.AsSpan(0x18, 8))
+            && SourceBytes.AsSpan(0x30, 0x10).SequenceEqual(rebuilt.AsSpan(0x30, 0x10));
+        Bnd4NativeDocument reparsed;
+        try { reparsed = Read(rebuilt); }
+        catch (InvalidDataException) { return new Bnd4FieldPreservationReport(false, headerUnknownPreserved, false, false, false, "repack-reread-failed"); }
+        if (reparsed.Entries.Count != Entries.Count)
+            return new Bnd4FieldPreservationReport(false, headerUnknownPreserved, false, false, false, "entry-count-mismatch");
+        var headerFieldsPreserved = true;
+        var storedPreserved = true;
+        var namesPreserved = true;
+        for (var i = 0; i < Entries.Count; i++)
+        {
+            var src = Entries[i];
+            var dst = reparsed.Entries[i];
+            if (src.Flags != dst.Flags || src.Unknown != dst.Unknown) headerFieldsPreserved = false;
+            if (src.Name != dst.Name) namesPreserved = false;
+            if (!SourceBytes.AsSpan(src.DataOffset, src.CompressedSize)
+                    .SequenceEqual(rebuilt.AsSpan(dst.DataOffset, dst.CompressedSize)))
+                storedPreserved = false;
+        }
+        var diffs = new List<int>();
+        var shorter = Math.Min(rebuilt.Length, SourceBytes.Length);
+        for (var i = 0; i < shorter && diffs.Count < 32; i++)
+            if (rebuilt[i] != SourceBytes[i]) diffs.Add(i);
+        if (diffs.Count < 32 && rebuilt.Length != SourceBytes.Length) diffs.Add(-(Math.Max(rebuilt.Length, SourceBytes.Length)));
+        return new Bnd4FieldPreservationReport(
+            noOpByteIdentical, headerUnknownPreserved, headerFieldsPreserved, storedPreserved, namesPreserved,
+            null, SourceBytes.Length, rebuilt.Length, diffs.ToArray());
+    }
+
+    /// <summary>
+    /// Compare a rebuilt container against this source for preserved entry-level
+    /// fields (flags/unknown) and stored payload bytes on entries that survive
+    /// with the same id+name key. Entries added by mutation are skipped. Entries
+    /// whose stored payload was replaced are excluded from the stored-bytes check
+    /// via <paramref name="contentReplacedKeys"/> (formatted "$id:$name").
+    /// </summary>
+    public Bnd4PreservationReport ComparePreservation(Bnd4NativeDocument rebuilt, IReadOnlyCollection<string>? contentReplacedKeys = null)
+    {
+        var sourceByKey = new Dictionary<(int Id, string Name), int>(Entries.Count);
+        var sourceById = new Dictionary<int, int>(Entries.Count);
+        for (var i = 0; i < Entries.Count; i++)
+        {
+            sourceByKey[(Entries[i].Id, Entries[i].Name)] = i;
+            if (!sourceById.ContainsKey(Entries[i].Id)) sourceById[Entries[i].Id] = i;
+        }
+        var contentReplaced = contentReplacedKeys ?? Array.Empty<string>();
+        var usedSourceIndexes = new HashSet<int>();
+        var matched = 0;
+        var headerFieldsPreserved = 0;
+        var storedChecked = 0;
+        var storedPreserved = 0;
+        foreach (var dst in rebuilt.Entries)
+        {
+            var srcIndex = sourceByKey.TryGetValue((dst.Id, dst.Name), out var keyed)
+                ? keyed
+                : sourceById.TryGetValue(dst.Id, out var byId) ? byId : -1;
+            if (srcIndex < 0 || !usedSourceIndexes.Add(srcIndex)) continue;
+            matched++;
+            var src = Entries[srcIndex];
+            if (src.Flags == dst.Flags && src.Unknown == dst.Unknown) headerFieldsPreserved++;
+            if (contentReplaced.Contains($"{dst.Id}:{dst.Name}")) continue;
+            storedChecked++;
+            if (src.CompressedSize == dst.CompressedSize
+                && EntryBytes[srcIndex].AsSpan().SequenceEqual(rebuilt.GetStoredBytes(dst.Index)))
+                storedPreserved++;
+        }
+        return new Bnd4PreservationReport(
+            matched,
+            headerFieldsPreserved,
+            storedChecked,
+            storedPreserved,
+            matched > 0 && headerFieldsPreserved == matched && storedPreserved == storedChecked);
+    }
+
     public byte[] GetStoredBytes(int index)
     {
         if (index < 0 || index >= EntryBytes.Count) throw new ArgumentOutOfRangeException(nameof(index));
@@ -198,6 +285,7 @@ internal sealed class Bnd4NativeDocument
         }).ToArray(),
         roundTrip = VerifyRoundTrip(),
         crud = VerifyCrud(),
+        fieldPreservation = VerifyFieldPreservation(),
         authority = "candidate"
     };
 
@@ -270,3 +358,21 @@ internal sealed record Bnd4CrudVerification(
 {
     public bool AllPassed => Rename && Move && Delete && Add && Replace;
 }
+
+internal sealed record Bnd4FieldPreservationReport(
+    bool NoOpPayloadByteIdentical,
+    bool HeaderUnknownBytesPreserved,
+    bool EntryHeaderFieldsPreserved,
+    bool StoredBytesPreserved,
+    bool NamesPreserved,
+    string? Note,
+    int SourcePayloadSize = 0,
+    int RebuiltPayloadSize = 0,
+    IReadOnlyList<int>? ByteDiffOffsets = null);
+
+internal sealed record Bnd4PreservationReport(
+    int MatchedEntryCount,
+    int HeaderFieldsPreservedCount,
+    int StoredBytesCheckedCount,
+    int StoredBytesPreservedCount,
+    bool AllPreserved);
