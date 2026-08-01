@@ -70,6 +70,24 @@ function main(): void {
   ]) {
     if (!preload.includes(method)) throw new Error(`preload missing paginated method ${method}`);
   }
+  // Bounded access must be one shared windowing authority (hard constraint 17):
+  // ipc must consume the shared normalizePageWindow from core and not keep a
+  // private copy that could drift from the acceptance smoke.
+  if (!ipc.includes('normalizePageWindow')) throw new Error('ipc missing shared normalizePageWindow');
+  if (ipc.includes('function normalizePageWindow')) {
+    throw new Error('ipc must not define a private normalizePageWindow');
+  }
+  // Real-corpus PARAM reads must pass an explicit empty commandOptions (the C#
+  // read-param-document handler throws InvalidOperationException on a missing
+  // options element) and must not throw on payload-less rows.
+  if (!ipc.includes('commandOptions: {}') || !ipc.includes('typeof row.dataBase64 === \'string\'')) {
+    throw new Error('readParamPage must send empty commandOptions and stay payload-null-safe');
+  }
+  // Real (non-SFBN) BND4 containers must fall back to native full entry-table
+  // enumeration so the bnd4 editor gets complete bounded access on real corpus.
+  for (const token of ['isRealNativeBndContainer', 'enumerateNativeContainerEntries', 'BND_NATIVE_ENUMERATION_COMPLETE']) {
+    if (!ipc.includes(token)) throw new Error(`ipc missing bnd4 native enumeration ${token}`);
+  }
   if (!ipc.includes("game: 'sekiro'")
     || !ipc.includes('rejectNonSekiroNativeWrite(sourceUri, file)')) {
     throw new Error('native semantic writes must fail closed outside the Sekiro adaptation');
@@ -99,7 +117,10 @@ function main(): void {
       'ParamTablePanel.duplicate sourceId → applyParamMutation upsert',
       'Sekiro-only native write gate',
       'stable LOCALAPPDATA staging root with cleanup',
-      'paginated channels: readFmgPage / readParamPage / listContainerChildrenPage / listScriptContainerEntriesPage'
+      'paginated channels: readFmgPage / readParamPage / listContainerChildrenPage / listScriptContainerEntriesPage',
+      'shared normalizePageWindow windowing authority (no private copy)',
+      'readParamPage: explicit empty commandOptions + payload-null-safe rows',
+      'listContainerChildrenPage: native BND4 full enumeration fallback for real containers'
     ]
   }, null, 2));
 }

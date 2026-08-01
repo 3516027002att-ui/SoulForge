@@ -12,7 +12,11 @@ import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { toHistoryEntry, type OperationLogStore } from './operationLog.js';
 import {
   DurableWorkspaceRepository,
-  type ResourceEntryChangeRecord
+  type AuditEventRecord,
+  type RecoveryPointRecord,
+  type ResourceEntryChangeRecord,
+  type TransactionJournalPhase,
+  type TransactionJournalRecord
 } from '../storage/durableWorkspaceRepository.js';
 
 export interface OpenSqliteOperationLogStoreOptions {
@@ -157,16 +161,16 @@ ORDER BY created_at DESC, op_id DESC
   }
 
   async recordResourceEntryChange(record: Omit<ResourceEntryChangeRecord, 'workspaceId'>): Promise<void> {
-    new DurableWorkspaceRepository(this.database, this.workspaceId).recordResourceEntryChange(record);
+    this.durableRepository().recordResourceEntryChange(record);
   }
 
   async listResourceEntryChanges(opId: string): Promise<ResourceEntryChangeRecord[]> {
-    return new DurableWorkspaceRepository(this.database, this.workspaceId).listResourceEntryChanges(opId);
+    return this.durableRepository().listResourceEntryChanges(opId);
   }
 
   async finalizeCommit(bundle: Parameters<NonNullable<OperationLogStore['finalizeCommit']>>[0]): Promise<void> {
     this.assertWorkspace(bundle.operation.workspaceId);
-    const repository = new DurableWorkspaceRepository(this.database, this.workspaceId);
+    const repository = this.durableRepository();
     this.database.transaction(() => {
       this.writeRecord(bundle.operation);
       for (const change of bundle.resourceEntryChanges) repository.recordResourceEntryChange(change);
@@ -179,6 +183,42 @@ ORDER BY created_at DESC, op_id DESC
         state: bundle.finalState
       });
     }).immediate();
+  }
+
+  /**
+   * Durable journal capabilities backed by the same workspace.db connection.
+   *
+   * Implementing these directly on the core store makes the full journal phase
+   * machine (pending -> staging -> validating -> backing_up -> replacing ->
+   * marking_committed -> committed / rolled_back / failed) runnable on the core
+   * path with a plain `SqliteOperationLogStore`, without requiring the desktop
+   * database utility client (W-A-RECOVERY-INTEGRATION-04 core wiring).
+   */
+  createTransaction(record: Omit<TransactionJournalRecord, 'workspaceId'>): Promise<null> {
+    this.durableRepository().createTransaction(record);
+    return Promise.resolve(null);
+  }
+
+  transitionTransaction(options: {
+    transactionId: string;
+    expectedPhase: TransactionJournalPhase | TransactionJournalPhase[];
+    nextPhase: TransactionJournalPhase;
+    state: unknown;
+    updatedAt?: string;
+  }): Promise<TransactionJournalRecord> {
+    return Promise.resolve(this.durableRepository().transitionTransaction(options));
+  }
+
+  recordRecoveryPoint(
+    record: Omit<RecoveryPointRecord, 'workspaceId' | 'recoveryId'> & { recoveryId?: string }
+  ): Promise<RecoveryPointRecord> {
+    return Promise.resolve(this.durableRepository().recordRecoveryPoint(record));
+  }
+
+  appendAuditEvent(
+    event: Omit<AuditEventRecord, 'workspaceId' | 'eventId'> & { eventId?: string }
+  ): Promise<AuditEventRecord> {
+    return Promise.resolve(this.durableRepository().appendAuditEvent(event));
   }
 
   hasLegacyImport(sourceKind: string, sourcePathHash: string, contentHash: string): boolean {
@@ -217,6 +257,10 @@ INSERT INTO legacy_imports (
 
   close(): void {
     if (this.ownsDatabase && this.database.open) this.database.close();
+  }
+
+  private durableRepository(): DurableWorkspaceRepository {
+    return new DurableWorkspaceRepository(this.database, this.workspaceId);
   }
 
   private writeRecord(entry: OperationLogRecord): void {
