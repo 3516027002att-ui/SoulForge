@@ -352,6 +352,45 @@ assert(
 );
 
 await write('apps/desktop/release/win-unpacked/resources/app.asar', cleanAsar);
+assert(
+  cleanTree.devSurfaceHitCount === 0 && cleanTree.devSurfaceCodes.length === 0,
+  'clean asar must report zero shipped dev surfaces'
+);
+
+// Each dev-surface class must fail closed independently: a shipped harness,
+// shipped scratch output, shipped workspace TypeScript source, and a shipped
+// tsbuildinfo. Config text saying they are excluded is not evidence; only the
+// asar entry list is.
+for (const [expectedCode, entryPath] of [
+  ['PACKAGE_TREE_DEV_SURFACE_HARNESS', 'node_modules/@soulforge/core/dist/testing/runSomeSmoke.js'],
+  ['PACKAGE_TREE_DEV_SURFACE_SCRATCH', 'node_modules/@soulforge/core/dist/_tmp/bridge/runBridge.js'],
+  ['PACKAGE_TREE_DEV_SURFACE_WORKSPACE_SOURCE', 'node_modules/@soulforge/core/src/index.ts'],
+  ['PACKAGE_TREE_DEV_SURFACE_BUILD_INFO', 'node_modules/@soulforge/core/tsconfig.tsbuildinfo']
+]) {
+  await write('apps/desktop/release/win-unpacked/resources/app.asar', buildSyntheticAsar({
+    files: {
+      'out/main/index.js': { size: 10, offset: '0' },
+      'package.json': { size: 5, offset: '0' },
+      [entryPath]: { size: 7, offset: '0' }
+    }
+  }));
+  const devSurfaceTree = auditPackageTree({
+    root,
+    unpackedDir: 'apps/desktop/release/win-unpacked',
+    lock: optionalPlatformLock,
+    executableName: 'SoulForge.exe'
+  });
+  assert(
+    devSurfaceTree.diagnostics.some((item) => item.code === expectedCode),
+    `shipped dev surface ${entryPath} must fail closed with ${expectedCode}, got ${JSON.stringify(devSurfaceTree.devSurfaceCodes)}`
+  );
+  assert(
+    devSurfaceTree.ok === false && devSurfaceTree.status === 'failed',
+    `shipped dev surface ${entryPath} must make the package tree fail`
+  );
+}
+
+await write('apps/desktop/release/win-unpacked/resources/app.asar', cleanAsar);
 await write('apps/desktop/release/win-unpacked/mods/evil.txt', 'forbidden');
 const forbiddenTree = auditPackageTree({
   root,
@@ -412,6 +451,11 @@ console.log(JSON.stringify({
     'Windows reserved device artifact target rejected',
     'asar header parsed into deterministic entries and non-asar input fails closed',
     'clean package tree accepted',
+    'clean asar reports zero shipped dev surfaces',
+    'shipped dist/testing harness in asar rejected',
+    'shipped dist/_tmp scratch output in asar rejected',
+    'shipped workspace TypeScript source in asar rejected',
+    'shipped tsbuildinfo in asar rejected',
     'optional not-installed platform package present in asar rejected',
     'forbidden packaged path in package tree rejected',
     'missing required native binding in package tree rejected',

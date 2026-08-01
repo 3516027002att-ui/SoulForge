@@ -75,7 +75,9 @@ const result = {
     missingRequired: packageTree.missingRequired,
     missingRecommended: packageTree.missingRecommended,
     forbiddenHits: packageTree.forbiddenHits,
-    optionalNotInstalledPresent: packageTree.optionalNotInstalledPresent
+    optionalNotInstalledPresent: packageTree.optionalNotInstalledPresent,
+    devSurfaceHitCount: packageTree.devSurfaceHitCount,
+    devSurfaceCodes: packageTree.devSurfaceCodes
   },
   installer: {
     relativePath: installerRelativePath,

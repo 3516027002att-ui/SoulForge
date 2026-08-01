@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { FORBIDDEN_SHIPPED_DEV_SURFACES } from './portable-packaging-config.mjs';
 
 export const RELEASE_MANIFEST_RELATIVE_PATH = 'apps/desktop/out/release-compliance.json';
 export const RELEASE_POLICY_RELATIVE_PATH = 'scripts/release-compliance-policy.json';
@@ -489,6 +490,26 @@ function decodeUtf16Be(bytes) {
   return swapped.toString('utf16le');
 }
 
+/**
+ * True when the packaged asar is older than either the electron-builder config
+ * or the frozen expected-pattern list that governs its exclusions, meaning the
+ * artifact could not have been built with the current rules. Used only to
+ * annotate a dev-surface finding; it never suppresses one. An unreadable mtime
+ * yields false so a missing stat can never invent an excuse for a real leak.
+ */
+function packageTreeStaleAgainstConfig(root, asarAbsolute) {
+  try {
+    const asarMtime = lstatSync(asarAbsolute).mtimeMs;
+    const governing = [
+      'apps/desktop/electron-builder.json',
+      'scripts/portable-packaging-config.mjs'
+    ].map((relativePath) => lstatSync(resolve(root, relativePath)).mtimeMs);
+    return governing.some((configMtime) => configMtime > asarMtime);
+  } catch {
+    return false;
+  }
+}
+
 function forbiddenPathFinding(path, scope) {
   const normalized = normalize(path);
   const lower = normalized.toLowerCase();
@@ -731,8 +752,19 @@ export function installerArtifactName(electronBuilderConfig, desktopPackage) {
 
 /**
  * Scan the unpacked package tree (the exact payload NSIS packs) and assert that
- * required files are present, forbidden paths never appear, and optional
- * not-installed platform packages are honestly recorded as absent from asar.
+ * required files are present, forbidden paths never appear, optional
+ * not-installed platform packages are honestly recorded as absent from asar, and
+ * no development-only surface (harness, scratch output, workspace TypeScript
+ * source, tsbuildinfo) was shipped.
+ *
+ * Dev-surface findings are evaluated against the artifact on disk, so an
+ * artifact built before the current electron-builder `files` list will fail
+ * here. That is intentional: the audit reports what the shipped bytes actually
+ * contain, and a stale artifact is never evidence that the current config is
+ * clean. When the artifact predates its governing config the audit says so
+ * explicitly, so an agent is told to rebuild rather than left to guess whether
+ * the leak is real. Either way the finding stays an error — attribution
+ * improves, the gate never weakens.
  */
 export function auditPackageTree({ root, unpackedDir, lock, executableName }) {
   const diagnostics = [];
@@ -749,6 +781,8 @@ export function auditPackageTree({ root, unpackedDir, lock, executableName }) {
       missingRecommended: [],
       forbiddenHits: [],
       optionalNotInstalledPresent: [],
+      devSurfaceHitCount: null,
+      devSurfaceCodes: [],
       diagnostics: [warning('PACKAGE_TREE_NOT_BUILT', unpackedDir, '未找到 unpacked 构建产物；先构建 NSIS 安装包或 --dir 中间产物。')]
     };
   }
@@ -776,6 +810,7 @@ export function auditPackageTree({ root, unpackedDir, lock, executableName }) {
 
   const optionalNotInstalled = optionalNotInstalledPackageNames(root, lock, diagnostics);
   const optionalNotInstalledPresent = [];
+  const devSurfaceHits = [];
   const asarRelative = 'resources/app.asar';
   let asarEntryCount = null;
   if (actual.has(asarRelative)) {
@@ -789,6 +824,11 @@ export function auditPackageTree({ root, unpackedDir, lock, executableName }) {
         if (hit) {
           diagnostics.push(error('PACKAGE_TREE_ASAR_FORBIDDEN', `app.asar:${hit.path}`, hit.message));
         }
+        for (const surface of FORBIDDEN_SHIPPED_DEV_SURFACES) {
+          if (surface.test(normalizedEntry)) {
+            devSurfaceHits.push({ code: surface.code, path: normalizedEntry });
+          }
+        }
         for (const packageName of optionalNotInstalled) {
           if (normalizedEntry === `node_modules/${packageName}`
             || normalizedEntry.startsWith(`node_modules/${packageName}/`)) {
@@ -801,6 +841,22 @@ export function auditPackageTree({ root, unpackedDir, lock, executableName }) {
           'PACKAGE_TREE_OPTIONAL_PRESENT',
           'app.asar',
           `可选未安装平台包被误打包：${[...new Set(optionalNotInstalledPresent)].sort(compareText).join(', ')}。`
+        ));
+      }
+      // One structured error per dev-surface class, with a sample path and the
+      // full hit count, so a regression names what leaked instead of only that
+      // something leaked. If the artifact predates the config that governs its
+      // exclusions, say so in the same finding: the remedy is a rebuild, not a
+      // config edit. Attribution only; the finding stays an error either way.
+      const staleHint = packageTreeStaleAgainstConfig(root, asarAbsolute)
+        ? ' 该 asar 早于当前 electron-builder files 配置，先重建安装包再复验。'
+        : '';
+      for (const code of [...new Set(devSurfaceHits.map((item) => item.code))].sort(compareText)) {
+        const hits = devSurfaceHits.filter((item) => item.code === code);
+        diagnostics.push(error(
+          `PACKAGE_TREE_${code}`,
+          `app.asar:${hits[0].path}`,
+          `开发期产物被误打包：${code} 命中 ${hits.length} 个条目，示例 ${hits[0].path}。${staleHint}`
         ));
       }
     } catch (asarError) {
@@ -824,6 +880,8 @@ export function auditPackageTree({ root, unpackedDir, lock, executableName }) {
     missingRecommended,
     forbiddenHits,
     optionalNotInstalledPresent: [...new Set(optionalNotInstalledPresent)].sort(compareText),
+    devSurfaceHitCount: devSurfaceHits.length,
+    devSurfaceCodes: [...new Set(devSurfaceHits.map((item) => item.code))].sort(compareText),
     diagnostics
   };
 }
