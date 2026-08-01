@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { decompressDfltDcx } from '../util/dcxDflt.js';
-import { createSekiroFixtureEmedf } from '../emevd/emedfSchema.js';
+import { createSekiroFixtureEmedf, type EmedfRegistry } from '../emevd/emedfSchema.js';
 import {
   analyzeEmedfCoverage,
   schemaLengthVsObserved,
@@ -62,6 +62,48 @@ function syntheticCoverageChecks(): void {
   // schemaLengthVsObserved roundtrip.
   const observed = schemaLengthVsObserved(registry.instructions[0]!, synthetic);
   assert(observed !== null && observed.schemaLength === 12 && observed.observedLengths.join(',') === '12', 'length vs observed');
+
+  // Vararg coverage: create a registry with a vararg instruction and verify
+  // that multi-length variants are correctly identified as clean vararg coverage.
+  const varargRegistry: EmedfRegistry = {
+    schemaVersion: 1,
+    game: 'sekiro',
+    origin: 'fixture',
+    instructions: [
+      {
+        bank: 2000, id: 0, name: 'InitializeEvent',
+        args: [
+          { name: 'eventSlotId', type: 's32' },
+          { name: 'eventId', type: 'u32' },
+          { name: 'parameters', type: 'u32', vararg: true }
+        ]
+      },
+      {
+        bank: 2003, id: 1, name: 'EndEvent',
+        args: []
+      }
+    ]
+  };
+  const varargDist: EmevdInstructionDistributionEntry[] = [
+    // InitializeEvent with 0, 1, 2, 3 vararg params → lengths 8, 12, 16, 20
+    { bank: 2000, id: 0, count: 10, argsLengths: { '8': 2, '12': 3, '16': 3, '20': 2 } },
+    // EndEvent with no args → length 0
+    { bank: 2003, id: 1, count: 5, argsLengths: { '0': 5 } }
+  ];
+  const varargAnalysis = analyzeEmedfCoverage(varargRegistry, varargDist);
+  assert(varargAnalysis.coveredKinds === 2, `vararg coveredKinds ${varargAnalysis.coveredKinds}`);
+  assert(varargAnalysis.cleanKinds === 2, `vararg cleanKinds ${varargAnalysis.cleanKinds}`);
+  assert(varargAnalysis.varargKinds === 1, `vararg varargKinds ${varargAnalysis.varargKinds}`);
+  assert(varargAnalysis.lengthMismatches.length === 0, 'vararg should have no mismatches');
+
+  // Vararg with invalid length must be reported as mismatch with vararg=true.
+  const badVarargDist: EmevdInstructionDistributionEntry[] = [
+    { bank: 2000, id: 0, count: 1, argsLengths: { '10': 1 } }  // 10 is not valid (base 8 + stride 4)
+  ];
+  const badVarargAnalysis = analyzeEmedfCoverage(varargRegistry, badVarargDist);
+  assert(badVarargAnalysis.cleanKinds === 0, 'invalid vararg length must not be clean');
+  assert(badVarargAnalysis.lengthMismatches.length === 1, 'invalid vararg length must be reported');
+  assert(badVarargAnalysis.lengthMismatches[0]!.vararg === true, 'mismatch must be marked as vararg');
 
   console.log(JSON.stringify({
     ok: true,

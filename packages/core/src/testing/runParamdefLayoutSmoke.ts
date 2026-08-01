@@ -137,9 +137,39 @@ function main(): void {
   if (row.readUInt16LE(4) !== 100) {
     throw new Error('encode mutated original buffer');
   }
-  const bitfieldMutation = encodeFieldMutation(Buffer.from([0]), bitfields, 'low', 3);
-  if (bitfieldMutation.ok || bitfieldMutation.code !== 'PARAMDEF_BITFIELD_WRITE_UNSUPPORTED') {
-    throw new Error('bitfield writes must remain disabled until a preserving writer exists');
+  // Bitfield preserving writer: verify that only target bits are modified.
+  // 'low' is bits 0-3 (bitWidth=4), 'high' is bits 4-7 (bitWidth=4)
+  const bfRow = Buffer.from([0b11111111]); // all bits set
+  const bfMutation = encodeFieldMutation(bfRow, bitfields, 'low', 3);
+  if (!bfMutation.ok) throw new Error(`bitfield write failed: ${bfMutation.message}`);
+  // Original: 0b11111111, clear bits 0-3: 0b11110000, set 0b0011: 0b11110011
+  if (bfMutation.next.readUInt8(0) !== 0b11110011) {
+    throw new Error(`bitfield write incorrect: expected 0b11110011, got 0b${bfMutation.next.readUInt8(0).toString(2)}`);
+  }
+  // Original buffer must be unchanged
+  if (bfRow.readUInt8(0) !== 0b11111111) {
+    throw new Error('bitfield write mutated original buffer');
+  }
+
+  // Write to 'high' bits 4-7: value 5 = 0b0101
+  const bfHigh = encodeFieldMutation(Buffer.from([0b00001111]), bitfields, 'high', 5);
+  if (!bfHigh.ok) throw new Error(`bitfield high write failed: ${bfHigh.message}`);
+  // Original: 0b00001111, clear bits 4-7: 0b00001111, set 0b0101 << 4: 0b01011111
+  if (bfHigh.next.readUInt8(0) !== 0b01011111) {
+    throw new Error(`bitfield high write incorrect: expected 0b01011111, got 0b${bfHigh.next.readUInt8(0).toString(2)}`);
+  }
+
+  // Bitfield range validation: value too large for bitWidth (4 bits max = 15)
+  const bfOutOfRange = encodeFieldMutation(Buffer.from([0]), bitfields, 'low', 16);
+  if (bfOutOfRange.ok || !bfOutOfRange.message.includes('超出')) {
+    throw new Error('bitfield out-of-range must fail');
+  }
+
+  // Bitfield with zero buffer: write value 5 to bits 0-3
+  const bfZero = encodeFieldMutation(Buffer.from([0]), bitfields, 'low', 5);
+  if (!bfZero.ok) throw new Error(`bitfield zero write failed: ${bfZero.message}`);
+  if (bfZero.next.readUInt8(0) !== 5) {
+    throw new Error(`bitfield zero write incorrect: expected 5, got ${bfZero.next.readUInt8(0)}`);
   }
 
   console.log(JSON.stringify({
@@ -151,7 +181,7 @@ function main(): void {
     encodedHp: mutated.next.readUInt16LE(4),
     overlapBlocked: true,
     malformedNestedInputBlocked: true,
-    bitfieldWriteAuthority: 'unsupported'
+    bitfieldWriteAuthority: 'preserving-bit-writer'
   }, null, 2));
 }
 

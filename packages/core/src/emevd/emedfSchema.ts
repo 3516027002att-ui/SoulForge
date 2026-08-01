@@ -19,6 +19,8 @@ export interface EmedfArgDef {
   type: EmedfArgType;
   /** Optional docs for UI. */
   description?: string;
+  /** True when this arg repeats zero or more times (vararg tail). */
+  vararg?: boolean;
 }
 
 export interface EmedfInstructionDef {
@@ -288,9 +290,28 @@ export function validateEmedfArgs(
   return { ok: true };
 }
 
-/** Schema-claimed encoded length (with alignment and trailing padding) for a definition. */
+/** Schema-claimed encoded length (with alignment and trailing padding) for a definition.
+ *  For vararg instructions this is the *minimum* length (zero vararg repetitions). */
 export function encodedEmedfArgsLength(def: EmedfInstructionDef): number {
   return encodedSize(def.args);
+}
+
+/** True when the instruction has a trailing vararg parameter. */
+export function hasVararg(def: EmedfInstructionDef): boolean {
+  return def.args.length > 0 && def.args[def.args.length - 1]!.vararg === true;
+}
+
+/** Number of vararg repetitions that fit in `totalLength` bytes, or -1 if the length
+ *  is invalid for this definition (too short or not a multiple of the vararg stride). */
+export function varargCount(def: EmedfInstructionDef, totalLength: number): number {
+  if (!hasVararg(def)) return totalLength === encodedSize(def.args) ? 0 : -1;
+  const baseArgs = def.args.slice(0, -1);
+  const varargType = def.args[def.args.length - 1]!.type;
+  const baseSize = encodedSize(baseArgs);
+  const stride = byteLengthOf(varargType);
+  const remaining = totalLength - baseSize;
+  if (remaining < 0 || remaining % stride !== 0) return -1;
+  return remaining / stride;
 }
 
 export function validateEmedfRegistry(
@@ -330,7 +351,8 @@ export function validateEmedfRegistry(
     }
     instructionKeys.add(key);
     const argNames = new Set<string>();
-    for (const arg of instruction.args) {
+    for (let argIndex = 0; argIndex < instruction.args.length; argIndex++) {
+      const arg = instruction.args[argIndex]!;
       if (!arg || typeof arg.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(arg.name)
         || !validTypes.has(arg.type)) {
         return {
@@ -347,6 +369,13 @@ export function validateEmedfRegistry(
         };
       }
       argNames.add(arg.name);
+      if (arg.vararg && argIndex !== instruction.args.length - 1) {
+        return {
+          ok: false,
+          code: 'EMEDF_VARARG_NOT_LAST',
+          message: `EMEDF vararg 参数必须是最后一个：${arg.name}`
+        };
+      }
     }
   }
   return { ok: true };
@@ -374,6 +403,7 @@ function alignmentOf(type: EmedfArgType): number {
 function encodedSize(args: EmedfArgDef[]): number {
   let offset = 0;
   for (const arg of args) {
+    if (arg.vararg) continue;
     offset = align(offset, arg.type) + byteLengthOf(arg.type);
   }
   return Math.ceil(offset / 4) * 4;

@@ -166,8 +166,11 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
+                // Pagination parameters from the request options.
+                var rowPage = options.TryGetProperty("rowPage", out var rp) && rp.TryGetInt32(out var rpv) ? rpv : 0;
+                var rowPageSize = options.TryGetProperty("rowPageSize", out var rps) && rps.TryGetInt32(out var rpsv) ? rpsv : 0;
                 // Detect legacy header-embedded type-name layout and fail closed with a clear code.
-                return BridgeResult<object>.Partial(file, "param", diagnostics, document.ToEnvelope(roundTrip));
+                return BridgeResult<object>.Partial(file, "param", diagnostics, document.ToEnvelope(roundTrip, rowPageSize: rowPageSize, rowPage: rowPage));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {

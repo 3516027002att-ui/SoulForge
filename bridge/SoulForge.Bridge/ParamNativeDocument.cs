@@ -246,29 +246,44 @@ internal sealed class ParamNativeDocument
         return Rebuild(rows);
     }
 
-    public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32)
+    public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0)
     {
         // Large params (multi-MB / wide rows) must not dump payloads into one NDJSON frame.
         var includePayload = RowDataSize > 0 && RowDataSize <= 256 && Rows.Count <= rowPreviewLimit;
+        var totalRows = Rows.Count;
+
+        // Pagination: when rowPageSize > 0, return only the requested page.
+        var effectivePageSize = rowPageSize > 0 ? rowPageSize : totalRows;
+        var pageCount = effectivePageSize > 0 ? (int)Math.Ceiling((double)totalRows / effectivePageSize) : 1;
+        var clampedPage = Math.Clamp(rowPage, 0, Math.Max(0, pageCount - 1));
+        var skip = clampedPage * effectivePageSize;
+        var pageRows = Rows.Skip(skip).Take(effectivePageSize).ToArray();
+        var pageIncludePayload = includePayload && pageRows.Length <= rowPreviewLimit;
+
         return new
         {
             format = "PARAM",
             typeName = TypeName,
             dataVersion = DataVersion,
-            rowCount = Rows.Count,
+            rowCount = totalRows,
             rowDataSize = RowDataSize,
             sourceSize = SourceBytes.Length,
             sourceHash = SourceHash,
-            rows = Rows.Take(Math.Max(0, rowPreviewLimit)).Select(r => new
+            rows = pageRows.Select(r => new
             {
                 r.Id,
                 r.Name,
-                dataBase64 = includePayload ? Convert.ToBase64String(r.Data) : null,
+                dataBase64 = pageIncludePayload ? Convert.ToBase64String(r.Data) : null,
                 dataHash = Hash(r.Data)
             }).ToArray(),
             rowPreviewLimit,
-            rowsTruncated = Rows.Count > rowPreviewLimit,
-            payloadsIncluded = includePayload,
+            rowsTruncated = rowPageSize <= 0 && totalRows > rowPreviewLimit,
+            payloadsIncluded = pageIncludePayload,
+            // Pagination metadata
+            rowPage = clampedPage,
+            rowPageSize = effectivePageSize,
+            rowTotal = totalRows,
+            rowPageCount = pageCount,
             roundTrip = report ?? VerifyRoundTrip(),
             authority = report is { SemanticIdentical: true } ? "native-verified" : "candidate",
             fieldLayout = "raw-row-bytes-without-paramdef"

@@ -141,7 +141,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     proposedReleaseEditorId: 'param',
     proposalOrder: 2,
     documentAuthority: 'bridge-native-document',
-    mutationKinds: ['param_row_upsert', 'param_row_delete'],
+    mutationKinds: ['param_row_upsert', 'param_row_delete', 'param_field_set'],
     releaseWriteEnabled: true,
     deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',
@@ -150,7 +150,8 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     scaleDimensions: ['rows'],
     contractSources: [
       'packages/core/src/editing/paramBridgeCommit.ts',
-      'apps/desktop/src/renderer/src/editors/ParamTablePanel.tsx'
+      'apps/desktop/src/renderer/src/editors/ParamTablePanel.tsx',
+      'bridge/SoulForge.Bridge/ParamNativeDocument.cs'
     ]
   },
   emevd: {

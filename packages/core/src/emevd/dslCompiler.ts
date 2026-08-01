@@ -275,6 +275,12 @@ export function compileEmevdPatchDsl(
     return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
   }
 
+  // Control-flow validation: warn when event ID changes create dangling
+  // InitializeEvent references. This is a best-effort check — it decodes
+  // InitializeEvent (bank 2000, id 0) args when the EMEDF schema is available
+  // and warns if the old event ID appears as the eventId parameter.
+  validateEventIdReferences(document, operations, registry, diagnostics, request.resourceUri);
+
   const touchedEvents = unique(operations.map((operation) => operation.eventAnchor));
   const touchedInstructions = unique(operations.flatMap((operation) =>
     operation.kind === 'set_instruction_arg' ? [operation.instructionAnchor] : []
@@ -481,6 +487,78 @@ function validateTypedLiteral(
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+/* ------------------------------------------------------------------ */
+/*  Control-flow validation                                           */
+/* ------------------------------------------------------------------ */
+
+/** InitializeEvent: bank 2000, id 0. Args: eventSlotId (s32), eventId (u32), parameters (u32 vararg). */
+const INITIALIZE_EVENT_BANK = 2000;
+const INITIALIZE_EVENT_ID = 0;
+
+/**
+ * Best-effort control-flow validation: when event IDs are changed by the
+ * plan, scan all InitializeEvent instructions in the document for references
+ * to the old event ID and emit a warning for each dangling reference found.
+ *
+ * This does NOT block compilation — it only emits warnings. The user may
+ * intentionally update event IDs and fix references in a subsequent patch.
+ */
+function validateEventIdReferences(
+  document: EmevdEditorDocument,
+  operations: EmevdPlannedMutation[],
+  registry: EmedfRegistry,
+  diagnostics: EmevdDslDiagnostic[],
+  resourceUri: string
+): void {
+  // Collect event ID changes: old ID → new ID
+  const eventIdChanges = new Map<number, number>();
+  for (const op of operations) {
+    if (op.kind === 'set_event_id') {
+      eventIdChanges.set(op.before, op.after);
+    }
+  }
+  if (eventIdChanges.size === 0) return;
+
+  // Check if InitializeEvent is defined in the registry
+  const initDef = findInstructionDef(registry, INITIALIZE_EVENT_BANK, INITIALIZE_EVENT_ID);
+  if (!initDef) return; // Can't validate without schema
+
+  // Scan all instructions for InitializeEvent references to changed event IDs
+  const changedOldIds = new Set(eventIdChanges.keys());
+  for (const event of document.events) {
+    for (const instruction of event.instructions) {
+      if (instruction.bank !== INITIALIZE_EVENT_BANK || instruction.id !== INITIALIZE_EVENT_ID) continue;
+      if (instruction.unknown) continue;
+
+      let rawArgs: Buffer;
+      try {
+        rawArgs = decodeStrictBase64(instruction.argsBase64, { allowEmpty: true });
+      } catch {
+        continue; // Can't decode, skip
+      }
+
+      const decoded = decodeInstructionArgs(registry, INITIALIZE_EVENT_BANK, INITIALIZE_EVENT_ID, rawArgs);
+      if (!decoded.ok) continue;
+
+      // Find the eventId argument (second arg, u32)
+      const eventIdArg = decoded.args.find(a => a.name === 'eventId');
+      if (!eventIdArg || typeof eventIdArg.value !== 'number') continue;
+
+      const referencedEventId = eventIdArg.value;
+      if (changedOldIds.has(referencedEventId)) {
+        const newId = eventIdChanges.get(referencedEventId);
+        const targetAnchor = instruction.anchor ? formatEmevdAnchor('instruction', instruction.anchor) : undefined;
+        diagnostics.push(diagnostic(
+          'EMEVD_DSL_EVENT_ID_REFERENCE_STALE',
+          `InitializeEvent in event ${event.eventId} references event ID ${referencedEventId} which is being changed to ${newId}. Update the reference or the target event ID will be dangling.`,
+          { start: { offset: 0, line: 0, column: 0 }, end: { offset: 0, line: 0, column: 0 } },
+          { resourceUri, ...(targetAnchor !== undefined ? { targetAnchor } : {}) }
+        ));
+      }
+    }
+  }
 }
 
 function compareDiagnostics(a: EmevdDslDiagnostic, b: EmevdDslDiagnostic): number {

@@ -68,6 +68,8 @@ const api = {
     ipcRenderer.invoke('resource.validateContainer', sourceUri),
   probeContainerCapabilities: (sourceUri: string): Promise<ResourceCapabilityMatrix | null> =>
     ipcRenderer.invoke('resource.probeContainerCapabilities', sourceUri),
+  scriptContainerEvidence: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.scriptContainerEvidence', sourceUri),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),
@@ -148,6 +150,18 @@ const api = {
     mutation: { kind: 'upsert' | 'delete'; id: number; dataBase64?: string }
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.applyParamMutation', sourceUri, expectedHash, mutation),
+  applyParamFieldMutation: (
+    sourceUri: string,
+    expectedHash: string,
+    mutation: {
+      rowId: number;
+      fieldId: string;
+      value: number | string | boolean;
+      rowDataBase64: string;
+      definition: unknown;
+    }
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.applyParamFieldMutation', sourceUri, expectedHash, mutation),
   listAiTools: (): Promise<ToolDescriptor[]> => ipcRenderer.invoke('ai.tools'),
   buildAiSidebarDraft: (request: AiSidebarDraftRequest): Promise<AiSidebarDraft> =>
     ipcRenderer.invoke('ai.sidebarDraft', request),
