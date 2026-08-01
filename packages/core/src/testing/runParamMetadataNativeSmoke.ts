@@ -12,14 +12,14 @@
  *
  * Authority: partial — metadata is Paramdex-compatible, not native format authority.
  */
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMetadataSource.js';
-import { validateParamDef } from '../param/paramdefLayout.js';
+import { decodeRowFields, validateParamDef } from '../param/paramdefLayout.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
-import type { ParamDefDocument, ParamMetadataDefinition } from '@soulforge/shared';
+import type { ParamDefDocument, ParamFieldDef, ParamMetadataDefinition } from '@soulforge/shared';
 
 // ---------------------------------------------------------------------------
 // Bridge response shapes
@@ -104,6 +104,12 @@ async function main(): Promise<void> {
     }
 
     const results: TypeMatchResult[] = [];
+    const matchedDocuments: Array<{
+      index: number;
+      typeName: string;
+      document: ParamDefDocument;
+      rows: Array<{ id: number; dataBase64: string | null; dataHash: string }>;
+    }> = [];
     let matchedCount = 0;
     let unmatchedCount = 0;
     let mismatchedCount = 0;
@@ -159,7 +165,9 @@ async function main(): Promise<void> {
         command: 'read-param-document',
         filePath: tmpParam,
         allowedRoots: [staging],
-        timeoutMs: 60_000
+        timeoutMs: 60_000,
+        // 显式空 options：规避 Bridge default-options 缺陷（read-param-document 分页读取行无 ValueKind 防护）。
+        commandOptions: {}
       });
       if (!doc.data?.typeName) {
         readFailedCount += 1;
@@ -235,6 +243,12 @@ async function main(): Promise<void> {
         fieldCount: definition.document.fields.length,
         layoutValid: true,
         diagnostics: []
+      });
+      matchedDocuments.push({
+        index: i,
+        typeName: nativeTypeName,
+        document: definition.document,
+        rows: doc.data?.rows ?? []
       });
     }
 

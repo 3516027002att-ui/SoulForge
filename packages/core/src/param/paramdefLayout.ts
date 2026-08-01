@@ -822,61 +822,77 @@ function writeField(buf: Buffer, field: ParamFieldDef, value: number | string | 
  * Preserving bit writer: reads the existing integer at the field's offset,
  * clears only the target bit range, sets the new value, and writes back.
  * All other bits in the field's byte(s) are preserved.
+ *
+ * Arithmetic uses BigInt so that bitWidth up to 32 (a full u32/s32 field)
+ * stays exact — the previous Number-based `1 << bitWidth` overflowed for
+ * bitWidth >= 31. Signed scalar storage is treated as its raw unsigned bits
+ * (bitfields operate on the bit pattern, not the signed interpretation).
  */
 function writeBitfield(buf: Buffer, field: ParamFieldDef, value: number | string | boolean): void {
   const bf = field.bitfield;
   if (!bf) throw new Error('writeBitfield called without bitfield definition');
   const { bitOffset, bitWidth } = bf;
 
-  // Read the existing integer value at the field's offset
-  let existing: number;
-  switch (field.type) {
-    case 'u8': existing = buf.readUInt8(field.offset); break;
-    case 's8': existing = buf.readUInt8(field.offset); break; // treat as unsigned for bit ops
-    case 'u16': existing = buf.readUInt16LE(field.offset); break;
-    case 's16': existing = buf.readUInt16LE(field.offset); break;
-    case 'u32': existing = buf.readUInt32LE(field.offset); break;
-    case 's32': existing = buf.readUInt32LE(field.offset); break;
-    case 'bool': existing = buf.readUInt8(field.offset); break;
-    default: throw new Error(`bitfield 不支持类型 ${field.type}`);
-  }
+  // Read the existing integer value at the field's offset as an unsigned BigInt.
+  const existing: bigint = readUnsignedFieldBits(buf, field);
 
-  // Compute the new bit value
-  let newValue: number;
+  // Compute the new bit value: bitfields hold non-negative integers.
+  let newValue: bigint;
   if (field.type === 'bool') {
-    newValue = value ? 1 : 0;
+    newValue = value ? 1n : 0n;
   } else {
-    newValue = Number(value);
-    if (!Number.isSafeInteger(newValue)) {
+    const numeric = Number(value);
+    if (!Number.isSafeInteger(numeric)) {
       throw new Error(`bitfield 值必须是整数，得到 ${value}`);
     }
+    newValue = BigInt(numeric);
   }
 
-  // Validate range: the value must fit in bitWidth bits
-  const maxValue = (1 << bitWidth) - 1;
-  if (newValue < 0 || newValue > maxValue) {
+  // Validate range: the value must fit in bitWidth bits.
+  const maxValue = (1n << BigInt(bitWidth)) - 1n;
+  if (newValue < 0n || newValue > maxValue) {
     throw new Error(`bitfield 值 ${newValue} 超出 ${bitWidth} 位范围 [0, ${maxValue}]`);
   }
 
-  // Create mask and apply: clear target bits, set new value
-  const mask = maxValue << bitOffset;
-  const cleared = existing & ~mask;
-  const result = (cleared | (newValue << bitOffset)) >>> 0; // unsigned
+  // Create mask and apply: clear target bits, set new value.
+  const mask = maxValue << BigInt(bitOffset);
+  const result = (existing & ~mask) | (newValue << BigInt(bitOffset));
+  writeUnsignedFieldBits(buf, field, result);
+}
 
-  // Write back
+/** Reads the storage bits at the field offset as an unsigned BigInt. */
+function readUnsignedFieldBits(buf: Buffer, field: ParamFieldDef): bigint {
   switch (field.type) {
     case 'u8':
     case 's8':
     case 'bool':
-      buf.writeUInt8(result & 0xFF, field.offset);
+      return BigInt(buf.readUInt8(field.offset));
+    case 'u16':
+    case 's16':
+      return BigInt(buf.readUInt16LE(field.offset));
+    case 'u32':
+    case 's32':
+      return BigInt(buf.readUInt32LE(field.offset));
+    default:
+      throw new Error(`bitfield 不支持类型 ${field.type}`);
+  }
+}
+
+/** Writes the result BigInt back into the field's storage, truncating to its width. */
+function writeUnsignedFieldBits(buf: Buffer, field: ParamFieldDef, result: bigint): void {
+  switch (field.type) {
+    case 'u8':
+    case 's8':
+    case 'bool':
+      buf.writeUInt8(Number(result & 0xffn), field.offset);
       break;
     case 'u16':
     case 's16':
-      buf.writeUInt16LE(result & 0xFFFF, field.offset);
+      buf.writeUInt16LE(Number(result & 0xffffn), field.offset);
       break;
     case 'u32':
     case 's32':
-      buf.writeUInt32LE(result, field.offset);
+      buf.writeUInt32LE(Number(result & 0xffffffffn), field.offset);
       break;
     default:
       throw new Error(`bitfield 不支持类型 ${field.type}`);
