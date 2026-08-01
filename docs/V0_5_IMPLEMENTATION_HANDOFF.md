@@ -1062,6 +1062,7 @@ exitSemantics # pass=exit 0 且断言执行；skip/unfrozen 语义明确
 - `W-EMEVD-FULL-01`：完整 EMEDF schema 覆盖与真实导入 EMEDF 交叉验证 smoke；
 - `W-ME3-INSTALL-04`：NSIS installer lifecycle、真实 Sekiro launch/terminate 与 rollback-restart smoke；
 - `W-REL-F-SCALE-02`：真实文档完整有界访问与 Electron functional smoke；
+- `W-BEHAVIOR-MAP-01`：script 容器 magic/reference inventory smoke（行内已标注 `validation-unfrozen`，此处补齐清单登记）；
 
 `W-SCRIPT-READONLY-01` 的 script 整内层文件替换真实容器验证已冻结为：
 
