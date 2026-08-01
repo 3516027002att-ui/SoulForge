@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "soulforge/governance/validation",
+  "title": "SoulForge required validation 冻结约定",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "frozenQuadrupleFields", "unfrozen", "frozen", "invariants"],
+  "properties": {
+    "schemaVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "note": { "type": "string", "minLength": 1 },
+    "frozenQuadrupleFields": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "enum": ["script", "fixture", "assertion", "exitSemantics"] }
+    },
+    "unfrozen": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sliceId", "targetRelease", "reason"],
+        "properties": {
+          "sliceId": { "type": "string", "pattern": "^W-[A-Z0-9-]+$" },
+          "targetRelease": { "type": "string", "pattern": "^V\\d+\\.\\d+$" },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "frozen": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sliceId", "targetRelease", "script", "fixture", "assertion", "exitSemantics"],
+        "properties": {
+          "sliceId": { "type": "string", "pattern": "^W-[A-Z0-9-]+$" },
+          "targetRelease": { "type": "string", "pattern": "^V\\d+\\.\\d+$" },
+          "script": { "type": "string", "minLength": 1 },
+          "fixture": { "type": "string", "minLength": 1 },
+          "assertion": { "type": "string", "minLength": 1 },
+          "exitSemantics": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "invariants": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  }
+}

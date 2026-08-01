@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0.0",
+  "note": "跨版本治理的版本注册表。每条治理记录都带 targetRelease；本文件决定哪些版本的记录已冻结。冻结后对该版本条目的任何裁定字段修改都会被门禁物理拦截，因此 V0.6 的推进不可能悄悄改写 V0.5 的已批准裁定。解冻只能由用户新裁定完成，并且必须留下 unfreezeRuling 记录。",
+  "currentRelease": "V0.5",
+  "releases": [
+    {
+      "release": "V0.5",
+      "state": "active",
+      "frozen": true,
+      "frozenScopeRulingRef": "W-REL-SCOPE-RULING-05",
+      "frozenEvidenceRef": "EV-REL-SCOPE-20260731-TEXT-FIRST",
+      "frozenFields": [
+        "scopeItems[].decisionStatus",
+        "scopeItems[].proposedSupport",
+        "scopeItems[].authorityAtRuling",
+        "scopeItems[].operations",
+        "scopeItems[].unsupportedOperations",
+        "gameBuildRange",
+        "unlistedPolicy",
+        "corpusPolicy",
+        "scopeDeferralPolicy",
+        "paramMetadataSourcePolicy",
+        "providerCredentialPolicy",
+        "runtimeToolPolicy",
+        "renderingAcceptancePolicy",
+        "quantitativeAcceptancePolicy"
+      ],
+      "frozenFieldsNote": "只冻结用户裁定字段。工程进度字段（gates[].gateState、slices[].lifecycle、slices[].authority、evidence 追加）不在冻结范围内——否则 V0.5 自身无法继续推进。",
+      "unfreezeRuling": null
+    },
+    {
+      "release": "V0.6",
+      "state": "planned",
+      "frozen": false,
+      "frozenScopeRulingRef": null,
+      "frozenEvidenceRef": null,
+      "frozenFields": [],
+      "frozenFieldsNote": "V0.6 范围尚未裁定。承接条目见 scope.json 中 deferredToRelease=V0.6 的条目及其 resumeRequires。",
+      "unfreezeRuling": null
+    }
+  ],
+  "invariants": [
+    "每个治理记录必须声明 targetRelease，且该版本必须存在于本文件。",
+    "对 frozen=true 版本的 frozenFields 做任何修改都必须失败关闭，除非同一提交提供该版本的 unfreezeRuling 用户批准记录。",
+    "V0.6 条目的新增与修改不得改变任何 targetRelease=V0.5 条目的裁定字段。",
+    "deferred 不等于 completed，也不等于 permanently-excluded；延期条目必须保留 resumeRequires。",
+    "冻结保护只约束裁定字段，不得用来阻止工程进度记录（gateState / lifecycle / authority / evidence 追加）。"
+  ]
+}

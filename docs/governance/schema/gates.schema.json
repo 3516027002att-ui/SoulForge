@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "soulforge/governance/gates",
+  "title": "SoulForge 发布 Gate 覆盖矩阵",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "requiredGateIds",
+    "foundationGateIds",
+    "enums",
+    "gates",
+    "invariants"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "note": { "type": "string", "minLength": 1 },
+    "requiredGateIds": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^REL-[A-Z-]+$" }
+    },
+    "foundationGateIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^REL-[A-Z-]+$" }
+    },
+    "foundationGateNote": { "type": "string" },
+    "enums": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateState", "applicability"],
+      "properties": {
+        "gateState": {
+          "type": "array",
+          "items": { "enum": ["open", "blocked", "passed", "deferred"] }
+        },
+        "applicability": {
+          "type": "array",
+          "items": { "enum": ["pending-scope", "in-scope", "scope-excluded", "deferred-v0.6"] }
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "gateId",
+          "targetRelease",
+          "capability",
+          "gateState",
+          "applicability",
+          "sliceRefs",
+          "evidenceRefs",
+          "blockerRefs",
+          "scopeItemIds",
+          "openRulings",
+          "successorRequirement"
+        ],
+        "properties": {
+          "gateId": { "type": "string", "pattern": "^REL-[A-Z-]+$" },
+          "targetRelease": { "type": "string", "pattern": "^V\\d+\\.\\d+$" },
+          "capability": { "type": "string", "minLength": 1 },
+          "gateState": { "enum": ["open", "blocked", "passed", "deferred"] },
+          "applicability": { "enum": ["pending-scope", "in-scope", "scope-excluded", "deferred-v0.6"] },
+          "sliceRefs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^W-[A-Z0-9-]+$" }
+          },
+          "evidenceRefs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^EV-[A-Z0-9-]+$" }
+          },
+          "blockerRefs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^BLK-[A-Z0-9-]+$" }
+          },
+          "scopeItemIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^SCOPE-[A-Z0-9-]+$" }
+          },
+          "openRulings": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "successorRequirement": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "invariants": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  }
+}

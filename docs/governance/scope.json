@@ -1,0 +1,1233 @@
+{
+  "schemaVersion": "2.0.0",
+  "note": "唯一机器可读范围权威。此前存放于交接书 §18.2.1 的 markdown JSON fence，现外置。scopeItems[].targetRelease 使本文件跨 V0.5/V0.6 通用：deferred 条目带 deferredToRelease 与 resumeRequires，V0.6 恢复时改这里，不新建文档。冻结保护见 releases.json。",
+  "proposalId": "V0.5-SCOPE-20260725",
+  "release": "V0.5",
+  "game": "Sekiro",
+  "gameBuildRange": {
+    "status": "user-approved",
+    "matchPolicy": "file-product-version-major-minor",
+    "versionFamilies": [
+      "1.6"
+    ],
+    "exactBuilds": [],
+    "unknownBuildPolicy": "fail-closed"
+  },
+  "ruling": {
+    "status": "user-approved",
+    "approvedBy": "repository-owner",
+    "approvedAt": "2026-07-30T09:37:03.836Z",
+    "decisionRef": "codex-thread:019fa924-bb20-7d23-aab9-3863957c5e10"
+  },
+  "proposalStatus": "user-approved",
+  "unlistedPolicy": "unsupported",
+  "corpusPolicy": {
+    "privateFixtureRegistryIsReleaseCorpus": false,
+    "supportedWithoutReleaseCorpus": "requires-open-ruling"
+  },
+  "scopeDeferralPolicy": {
+    "status": "user-approved",
+    "deferredToRelease": "V0.6",
+    "deferredIsNotCompleted": true,
+    "deferredIsNotPermanentlyExcluded": true,
+    "deferredCodeMayRemainAsMarkedPreview": true,
+    "deferredPreviewMustBeReadOnly": true
+  },
+  "authoritySnapshotPolicy": {
+    "field": "authorityAtRuling",
+    "asOfEvidenceRef": "EV-REL-SCOPE-20260730",
+    "liveAuthoritySource": "docs/governance/slices.json",
+    "nonClaimsAreRulingTimeSnapshot": true
+  },
+  "paramMetadataSourcePolicy": {
+    "status": "user-approved",
+    "sourceProject": "vawser/Smithbox",
+    "sourceRelease": "2.2.4",
+    "sourceCommit": "1b46d2c9f82d1c3635ff7c12c526e05a8ba4208f",
+    "sourceArtifactSha256": "14a7fd735a9577249fa93655f63d1e9ac025a3b00d7c5bed8badc8a3a7fd489d",
+    "sourcePath": "Smithbox.Release/Output/Assets/PARAM/SDT",
+    "acquisition": "user-local-pinned-release-import",
+    "redistribution": "forbidden",
+    "mismatchPolicy": "fail-closed"
+  },
+  "providerCredentialPolicy": {
+    "status": "user-approved",
+    "defaultConfiguration": "empty",
+    "realProviderCredentialsRequiredForV05Acceptance": false,
+    "unconfiguredBehavior": "diagnose-without-network-call"
+  },
+  "runtimeToolPolicy": {
+    "status": "user-approved",
+    "adapter": "me3",
+    "sourceProject": "garyttierney/me3",
+    "sourceRelease": "v0.12.1",
+    "sourceArtifactSha256": "b1c11659b0cfde73062b2fa134a8ac499f3e713fe82d9014401289677ace7323",
+    "provisioningResponsibility": "project-engineering",
+    "compatibilityPolicy": "capability-probe-fail-closed"
+  },
+  "renderingAcceptancePolicy": {
+    "status": "user-approved",
+    "functionalOwnerMachineSmokeRequired": true,
+    "representativeHardwareTiersRequired": false,
+    "performanceBudgetsRequired": false
+  },
+  "quantitativeAcceptancePolicy": {
+    "status": "user-approved",
+    "editorCapacityOrLatencyThresholdsRequired": false,
+    "installerSizeOrTimeBudgetsRequired": false,
+    "boundedEditorAccessRequired": true,
+    "installerLifecycleIntegrityRequired": true
+  },
+  "scopeItems": [
+    {
+      "scopeItemId": "SCOPE-SEKIRO-BUILD",
+      "capabilityId": "H-RUNTIME",
+      "gateIds": [
+        "REL-SCOPE",
+        "REL-H"
+      ],
+      "subjectKind": "game-build",
+      "scope": "Sekiro 1.6.x 文件/产品版本族与 build identity",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "detect-file-product-version",
+        "match-major-minor-1.6",
+        "record-exact-build-identity",
+        "fail-closed-on-non-1.6-build"
+      ],
+      "unsupportedOperations": [
+        "support-unlisted-game",
+        "assume-non-1.6-build-compatible",
+        "treat-version-family-as-native-evidence"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [
+        "EV-PRIVATE-20260724"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "用户批准 1.6.x 版本族只冻结目标兼容范围；裁定时 authorityAtRuling 为 unverified，每个实际 build 仍须进入 release corpus 并通过真实验证。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-A-WORKSPACE",
+      "capabilityId": "A-WORKSPACE",
+      "gateIds": [
+        "REL-A"
+      ],
+      "subjectKind": "workspace",
+      "scope": "单一可写 Mod 叠加层、可选只读原版层与应用数据外置",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "open-single-mod-overlay",
+        "attach-optional-readonly-game-base",
+        "index-readonly-game",
+        "stage-mod-resource-via-patch-engine",
+        "store-metadata-in-app-data"
+      ],
+      "unsupportedOperations": [
+        "write-original-game",
+        "write-mod-resource-outside-patch-engine",
+        "store-sidecar-in-mod-workspace",
+        "open-multiple-writable-overlays"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-A-SAFETY-20260720"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "范围批准不证明全部 production writer 已接入单一写入主干，也不证明真实外部路径与重解析边界已完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-A-RECOVERY",
+      "capabilityId": "A-RECOVERY",
+      "gateIds": [
+        "REL-A"
+      ],
+      "subjectKind": "recovery",
+      "scope": "operation、file、resource-entry 三层审计、回滚与崩溃恢复",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "stage",
+        "validate",
+        "commit-with-backup",
+        "re-read",
+        "audit",
+        "rollback",
+        "recover-after-commit",
+        "gate-every-release-writer"
+      ],
+      "unsupportedOperations": [
+        "publish-writer-without-failure-matrix",
+        "overwrite-revision-conflict",
+        "swallow-recovery-failure",
+        "bypass-backup"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-A-RECOVERY-20260724",
+        "EV-PUBLIC-CONTRACTS-20260725"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "所有发布 writer 均被纳入恢复门禁；现有 harness 不证明尚未实现或缺少 corpus 的 writer 已通过真实崩溃、断电与资源项恢复矩阵。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-DFLT",
+      "capabilityId": "B-DFLT",
+      "gateIds": [
+        "REL-B"
+      ],
+      "subjectKind": "container",
+      "scope": "注册 Sekiro DFLT 布局的解压、无修改往返、重压与重读",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "classify",
+        "decompress",
+        "no-op-roundtrip",
+        "recompress",
+        "re-read"
+      ],
+      "unsupportedOperations": [
+        "accept-unregistered-layout",
+        "rewrite-unknown-fields"
+      ],
+      "authorityAtRuling": "native-verified",
+      "evidenceRefs": [
+        "EV-B-DFLT-7BD"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "historical-corpus:EV-B-DFLT-7BD",
+          "kind": "historical-private-corpus",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "登记 DFLT 布局的完整读写是目标范围；历史 144 个样本与两个变体仍不构成当前 1.6.x release corpus 或未知布局 authority。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-KRAK",
+      "capabilityId": "B-KRAK",
+      "gateIds": [
+        "REL-B"
+      ],
+      "subjectKind": "container",
+      "scope": "登记 Sekiro KRAK 布局与用户合法 Oodle runtime 的解压、重压、写回、重读与恢复闭环",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "validate-user-oodle-runtime",
+        "classify",
+        "decompress",
+        "recompress",
+        "write",
+        "re-read",
+        "rollback"
+      ],
+      "unsupportedOperations": [
+        "distribute-oodle",
+        "accept-unregistered-layout",
+        "bypass-oodle-license-or-runtime-validation"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-B-KRAK-20260724"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:krak-preview",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "完整 KRAK 读写已纳入目标范围，但裁定时 authorityAtRuling 为 partial；单个私有解压 preview 不证明压缩、写回、恢复或 release corpus 已完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-BND4",
+      "capabilityId": "B-BND4",
+      "gateIds": [
+        "REL-B"
+      ],
+      "subjectKind": "container",
+      "scope": "注册 Sekiro BND4 布局的 browse、entry mutation、repack、重读与回滚",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "classify",
+        "browse",
+        "add-entry",
+        "replace-entry",
+        "delete-entry",
+        "rename-entry",
+        "move-entry",
+        "repack",
+        "validate-dflt-krak-inner-chain",
+        "re-read",
+        "rollback"
+      ],
+      "unsupportedOperations": [
+        "accept-unregistered-flags",
+        "rewrite-unknown-layout",
+        "claim-unregistered-inner-coverage"
+      ],
+      "authorityAtRuling": "native-verified",
+      "evidenceRefs": [
+        "EV-B-BND4-7BD",
+        "EV-A-RECOVERY-20260724"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "historical-corpus:EV-B-BND4-7BD",
+          "kind": "historical-private-corpus",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "登记 BND4 布局及 DFLT/KRAK 内层组合是目标范围；历史 DFLT-BND4 证据不覆盖 KRAK、未来 flags 或当前 release corpus。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-FMG",
+      "capabilityId": "C-FMG",
+      "gateIds": [
+        "REL-C"
+      ],
+      "subjectKind": "resource",
+      "scope": "Sekiro 全部官方语言与登记 msgbnd/FMG v2 布局的完整文本读写",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "read-all-official-languages",
+        "no-op-roundtrip",
+        "upsert",
+        "add",
+        "delete",
+        "write",
+        "re-read",
+        "reference-validate",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "unregistered-language-layout",
+        "implicit-id-merge",
+        "claim-reference-or-game-load-before-validation"
+      ],
+      "authorityAtRuling": "native-verified",
+      "evidenceRefs": [
+        "EV-C-FMG-7BD",
+        "EV-PRIVATE-20260724"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:testRole=fmg-primary",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "全部官方语言已纳入目标范围；开发期 18/18 私有 fixture 不等于多语言 release corpus、完整引用验证或真实游戏加载。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-PARAM",
+      "capabilityId": "C-PARAM",
+      "gateIds": [
+        "REL-C"
+      ],
+      "subjectKind": "resource",
+      "scope": "固定 Smithbox 2.2.4 本机 metadata 严格匹配下的 Sekiro gameparam 全部 ParamType、布局、字段与行完整读写；drawparam / gparam 延期至 V0.6",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "paramContainerScope": {
+        "included": [
+          "gameparam"
+        ],
+        "deferredToRelease": {
+          "drawparam": "V0.6",
+          "gparam": "V0.6"
+        }
+      },
+      "operations": [
+        "read-all-gameparam-param-types",
+        "import-user-local-pinned-smithbox-metadata",
+        "verify-source-release-and-content-digest",
+        "record-source-license-and-provenance",
+        "no-op-roundtrip",
+        "typed-field-mutation",
+        "row-crud",
+        "write",
+        "re-read",
+        "reference-validate",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "redistribute-imported-smithbox-param-metadata",
+        "accept-unpinned-or-mismatched-metadata-source",
+        "metadata-mismatch-write",
+        "unknown-field-rewrite",
+        "write-before-all-sekiro-gameparam-param-types-are-authoritative",
+        "drawparam-write-in-v05",
+        "gparam-write-in-v05",
+        "claim-drawparam-or-gparam-as-v05-release-capability"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-C-PARAM-7BD",
+        "EV-PRIVATE-20260724",
+        "EV-PUBLIC-CONTRACTS-20260725"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:testRole=param-primary",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "V0.5 收窄为 gameparam 容器内全部 ParamType 的完整读写；drawparam 与 gparam 延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 partial；固定 Smithbox 本机来源裁定不证明导入 adapter、全部布局、上游再分发权利或真实游戏验证完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-EMEVD",
+      "capabilityId": "C-EMEVD",
+      "gateIds": [
+        "REL-C"
+      ],
+      "subjectKind": "resource",
+      "scope": "Sekiro 全部 EMEVD 事件、指令、控制流、参数与 layer 变体的完整无损读写",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "read-all-events-instructions-layers",
+        "no-op-roundtrip",
+        "typed-mutation",
+        "event-instruction-crud",
+        "control-flow-validate",
+        "dsl-parse-typecheck-to-mutation",
+        "write",
+        "re-read",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "direct-dsl-binary-write",
+        "bypass-emedf-typecheck",
+        "unknown-instruction-reencode"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-C-EMEVD-7BD",
+        "EV-C-EMEVD-DSL-20260724",
+        "EV-PRIVATE-20260724"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:testRole=emevd-primary",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "全部 EMEVD 已纳入目标范围，但裁定时 authorityAtRuling 为 partial；完整 EMEDF、layer/KRAK 变体、生产 DSL 接线、release corpus 与游戏加载尚未完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-MSB",
+      "capabilityId": "C-MSB",
+      "gateIds": [
+        "REL-C"
+      ],
+      "subjectKind": "resource",
+      "scope": "登记 Sekiro MSB 实体类型的完整语义读取、CRUD、引用修复、写入、重读与回滚（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "edit-unregistered-entity",
+        "unknown-entity-rewrite",
+        "claim-untruncated-scene-before-validation",
+        "any-msb-write-in-v05",
+        "expose-set-part-transform-in-v05",
+        "present-msb-panel-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-C-MSB-SCENE-20260724",
+        "EV-C-MSB-7BD"
+      ],
+      "registryRefs": [
+        {
+          "registryRef": "fixture:testRole=msb-primary",
+          "kind": "private-fixture",
+          "releaseCorpus": false
+        }
+      ],
+      "openRulings": [],
+      "nonClaims": [
+        "MSB 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 semantic scene 投影、四类实体 preview 与已验证的 set_part_transform 写路径保留在代码中，但 V0.5 必须关闭该写路径并把面板标记为 V0.6 只读预览；脱敏 m11 私有 fixture 与截断 preview 不证明 release corpus、完整场景、KRAK 组合或游戏加载完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "C-MSB",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-BEHAVIOR-ANIMATION",
+      "capabilityId": "D-BEHAVIOR",
+      "gateIds": [
+        "REL-D"
+      ],
+      "subjectKind": "behavior-animation",
+      "scope": "真实 Sekiro corpus 中行为、动画与跨资源引用清单的深度语义解析（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "borrow-other-game-format-claims",
+        "raw-hex-as-semantic-authority",
+        "execute-untrusted-script",
+        "any-animation-or-behavior-graph-edit-in-v05",
+        "claim-hkx-semantic-authority-in-v05"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "行为与动画深度解析已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件；HKX 与跨资源行为引用图在 V0.5 保持未实现，格式候选、文件名或其他游戏知识不构成 Sekiro native authority。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "D-BEHAVIOR",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-BEHAVIOR-TAE",
+      "capabilityId": "D-BEHAVIOR",
+      "gateIds": [
+        "REL-D"
+      ],
+      "subjectKind": "behavior-animation",
+      "scope": "Sekiro 全部 TAE 布局、事件类型、时间轴、参数与动画引用的完整读写（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "borrow-other-game-tae-layout",
+        "raw-hex-write",
+        "unknown-event-reencode",
+        "any-tae-write-in-v05",
+        "present-tae-panel-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "candidate",
+      "evidenceRefs": [
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "TAE 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有注册样本 native document parser（939 animations / 23,711 events / 81 event types）与只读工作台保留为标记 V0.6 只读预览，仍为 candidate，不证明完整事件语义、全部布局、writer 或真实游戏加载。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "D-BEHAVIOR",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-BEHAVIOR-ESD",
+      "capabilityId": "D-BEHAVIOR",
+      "gateIds": [
+        "REL-D"
+      ],
+      "subjectKind": "behavior-animation",
+      "scope": "Sekiro 全部 ESD 状态机、条件表达式、命令与跳转关系的完整读写（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "borrow-other-game-esd-layout",
+        "raw-hex-write",
+        "unknown-expression-or-command-reencode",
+        "any-esd-write-in-v05",
+        "present-esd-panel-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "candidate",
+      "evidenceRefs": [
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "ESD 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有注册样本 native document parser（36 groups / 295 states / 315 conditions 及 RPN bytecode）与只读工作台保留为标记 V0.6 只读预览，仍为 candidate，不证明表达式 schema、writer 或真实游戏加载；ESD 为二进制状态机与 RPN 字节码，不属于本轮裁定的文本类格式。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "D-BEHAVIOR",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-BEHAVIOR-SCRIPT",
+      "capabilityId": "D-BEHAVIOR",
+      "gateIds": [
+        "REL-D"
+      ],
+      "subjectKind": "behavior-animation",
+      "scope": "真实 Sekiro corpus 中 luabnd / action *.hks 脚本容器的条目枚举、只读字节码证据投影，以及经 Patch Engine 的整个内层文件替换、重读与回滚",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "inventory-and-identify-script-vm",
+        "enumerate-script-container-entries",
+        "project-readonly-bytecode-evidence-view",
+        "replace-whole-inner-file",
+        "write",
+        "re-read",
+        "rollback",
+        "game-load"
+      ],
+      "unsupportedOperations": [
+        "execute-untrusted-script",
+        "raw-bytes-as-script-authority",
+        "borrow-unverified-vm-or-bytecode-claims",
+        "decompile-bytecode-to-source-in-v05",
+        "recompile-source-to-bytecode-in-v05",
+        "typed-or-source-level-script-mutation-in-v05",
+        "present-bytecode-disassembly-as-editable-source"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "V0.5 只承诺脚本容器条目枚举、只读字节码证据投影与整个内层文件替换。经实测，`action/script/*.hks` 与 luabnd 内层 `.lua` 均以 `\\\\x1bLuaQ` 开头，属 Havok Script（Lua 5.1 家族）编译字节码，不是可直接编辑的文本；`.luagnl` / `.luainfo` 为反编译辅助元数据。反编译、重编译与 typed script mutation 已延期至 V0.6。裁定时 authorityAtRuling 为 unverified；容器条目枚举、只读证据投影、writer 与真实游戏证据均待建立。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-ASSETS",
+      "capabilityId": "E-ASSET",
+      "gateIds": [
+        "REL-E"
+      ],
+      "subjectKind": "asset",
+      "scope": "固定 FLVER/TPF/MTD/collision/navigation 五类 native 资产只读 authority 与 native-to-open 导出矩阵（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "open-format-to-native-import",
+        "raw-replace-as-native-conversion",
+        "proxy-data-as-native-authority",
+        "unvalidated-native-writer",
+        "any-asset-export-as-v05-release-capability",
+        "present-asset-panel-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "candidate",
+      "evidenceRefs": [
+        "EV-E-ASSET-7BD"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "整条资产只读与导出线已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 candidate 解析与只读面板保留为标记 V0.6 只读预览；候选解析、代理几何和最小 DDS 既不证明五类 native 语义读取，也不证明导出管线完成。资产为二进制几何与纹理格式，不属于本轮裁定的文本类格式。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-ASSET-FLVER",
+      "capabilityId": "E-ASSET",
+      "gateIds": [
+        "REL-E"
+      ],
+      "subjectKind": "asset",
+      "scope": "Sekiro 全部 FLVER 布局的 geometry、skeleton、weights、material 引用与只读 native document（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "flver-write",
+        "open-format-to-flver",
+        "proxy-geometry-as-flver",
+        "raw-replace-as-native-writer",
+        "any-flver-export-as-v05-release-capability",
+        "present-flver-panel-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "candidate",
+      "evidenceRefs": [
+        "EV-E-ASSET-7BD"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "FLVER 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 header/mesh candidate parser 与只读面板保留为标记 V0.6 只读预览，仍为 candidate，不证明完整 vertex/index/skeleton/material authority 或真实渲染完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-ASSET-TPF",
+      "capabilityId": "E-ASSET",
+      "gateIds": [
+        "REL-E"
+      ],
+      "subjectKind": "asset",
+      "scope": "Sekiro 全部 TPF 布局、纹理格式、metadata 与 native texture 引用的只读文档（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "tpf-write",
+        "open-format-to-tpf",
+        "minimal-dds-as-tpf-authority",
+        "infer-texture-metadata",
+        "any-tpf-export-as-v05-release-capability",
+        "present-tpf-panel-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "TPF 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；容器 hint、开放图像检测和最小 DDS 编码不证明 TPF parser 或纹理兼容性。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-ASSET-MTD",
+      "capabilityId": "E-ASSET",
+      "gateIds": [
+        "REL-E"
+      ],
+      "subjectKind": "asset",
+      "scope": "Sekiro 全部 MTD 布局、材质参数、texture slot 与着色引用的只读文档（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "mtd-write",
+        "open-format-to-mtd",
+        "infer-mtd-schema",
+        "proxy-material-as-native",
+        "any-mtd-export-as-v05-release-capability",
+        "present-mtd-panel-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "MTD 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；candidate inventory 不证明 native document、参数 schema 或引用闭环。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-ASSET-COLLISION",
+      "capabilityId": "E-ASSET",
+      "gateIds": [
+        "REL-E"
+      ],
+      "subjectKind": "asset",
+      "scope": "真实 Sekiro 中全部碰撞格式、层级与地图关联的只读语义文档（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "collision-write",
+        "assume-collision-format",
+        "proxy-mesh-as-collision",
+        "any-collision-read-as-v05-release-capability",
+        "present-collision-view-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "碰撞已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；场景 proxy 或 FLVER candidate 不证明碰撞格式、层级或地图引用。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-ASSET-NAVIGATION",
+      "capabilityId": "E-ASSET",
+      "gateIds": [
+        "REL-E"
+      ],
+      "subjectKind": "asset",
+      "scope": "真实 Sekiro 中全部导航格式、连接关系与地图引用的只读语义文档（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "navigation-write",
+        "assume-navigation-format",
+        "proxy-graph-as-navigation",
+        "any-navigation-read-as-v05-release-capability",
+        "present-navigation-view-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "导航已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；资源图、bounds 或代理图不证明导航 parser、连接语义或地图引用。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-ASSET-OPEN-CONVERSION",
+      "capabilityId": "E-ASSET",
+      "gateIds": [
+        "REL-E"
+      ],
+      "subjectKind": "asset",
+      "scope": "FLVER/TPF/MTD native 资源到 glTF/GLB/PNG/TGA/DDS/描述清单的只读导出矩阵（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "open-format-to-native-import",
+        "emit-or-replace-native-output",
+        "raw-file-replace-as-conversion",
+        "any-open-conversion-as-v05-release-capability"
+      ],
+      "authorityAtRuling": "candidate",
+      "evidenceRefs": [
+        "EV-E-ASSET-7BD"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "native-to-open 导出矩阵已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。现有开放格式检测、staging 与 file_replace 不证明任何已批准导出器完成，更不支持反向 native 写入。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-EDITORS",
+      "capabilityId": "F-EDITORS",
+      "gateIds": [
+        "REL-F"
+      ],
+      "subjectKind": "editor",
+      "scope": "BND4、FMG、PARAM、EMEVD 四个 typed mutation 语义编辑器，script 只读证据视图加整个内层文件替换，以及共享只读 Hex 证据视图",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "editorIds": [
+        "bnd4",
+        "fmg",
+        "param",
+        "emevd",
+        "script"
+      ],
+      "editorMutationModes": {
+        "bnd4": "typed-mutation",
+        "fmg": "typed-mutation",
+        "param": "typed-mutation",
+        "emevd": "typed-mutation",
+        "script": "whole-inner-file-replacement"
+      },
+      "deferredPreviewEditors": {
+        "editorIds": [
+          "msb",
+          "tae",
+          "esd",
+          "flver"
+        ],
+        "deferredToRelease": "V0.6",
+        "readOnly": true,
+        "markedAsPreview": true,
+        "countedAsReleaseEditor": false
+      },
+      "hexEvidenceView": {
+        "included": true,
+        "writable": false
+      },
+      "operations": [
+        "open-bridge-native-document",
+        "project-structured-ui",
+        "project-canonical-dsl",
+        "synchronize-ui-dsl-selection-revision",
+        "paginate-virtualize-stream",
+        "access-complete-document-through-bounded-mode",
+        "typed-mutation",
+        "schema-typecheck",
+        "reject-revision-conflict",
+        "undo-redo-via-history",
+        "show-readonly-hex-evidence",
+        "mark-deferred-editor-as-v06-readonly-preview"
+      ],
+      "unsupportedOperations": [
+        "raw-hex-edit",
+        "demo-fallback-as-authority",
+        "renderer-state-as-document",
+        "editor-without-native-authority",
+        "quantitative-capacity-or-latency-threshold-as-v05-gate",
+        "count-deferred-preview-editor-as-v05-release-editor",
+        "expose-write-path-in-deferred-preview-editor",
+        "claim-script-editor-as-typed-mutation"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-F-EDITORS-7BD",
+        "EV-HANDOFF-LIVENESS-20260725",
+        "EV-PUBLIC-CONTRACTS-20260725"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "V0.5 冻结编辑器收窄为 bnd4、fmg、param、emevd、script 五个；其中 script 只提供只读证据视图与整个内层文件替换，不属于 typed mutation。msb、tae、esd、flver 面板延期至 V0.6，保留为标记只读预览，不计入 V0.5 冻结清单，也不得暴露写路径（含 MSB `set_part_transform`）。裁定时 authorityAtRuling 为 partial；候选面板、Safe Hex 演示和静态契约不证明真实文档、DSL、完整有界访问或 Electron 功能验收完成；容量与延迟数值不属于 V0.5 验收。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-AI",
+      "capabilityId": "G-AGENT",
+      "gateIds": [
+        "REL-G"
+      ],
+      "subjectKind": "ai",
+      "scope": "OpenAI-compatible 与 Anthropic-compatible 服务对语义文档的证据化读取与受控 typed mutation 循环",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "openai-compatible-loop",
+        "anthropic-compatible-loop",
+        "read-semantic-document",
+        "propose-controlled-typed-write",
+        "cancel",
+        "timeout",
+        "limit",
+        "permission-confirm",
+        "audit",
+        "redact-credentials",
+        "offline-protocol-conformance",
+        "diagnose-empty-provider-configuration-without-network-call"
+      ],
+      "unsupportedOperations": [
+        "raw-hex-write",
+        "write-without-evidence",
+        "bypass-native-validator",
+        "bypass-patch-engine",
+        "expose-credential-to-renderer",
+        "bundle-provider-credentials",
+        "require-live-provider-account-for-v05-acceptance"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [
+        "EV-G-FAKE-7BD"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "双协议受控读写与空凭据默认配置已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；离线 conformance 不证明任何第三方真实服务可用，真实账号也不属于 V0.5 验收。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-RUNTIME",
+      "capabilityId": "H-RUNTIME",
+      "gateIds": [
+        "REL-H"
+      ],
+      "subjectKind": "runtime",
+      "scope": "通过能力探测兼容的可替换 me3 GameRuntimeAdapter 检测、profile、启动、日志、终止与回滚后复启",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "detect-me3",
+        "probe-protocol-schema-and-capabilities",
+        "prepare-profile",
+        "launch",
+        "collect-diagnostics",
+        "link-patch-operation",
+        "rollback-and-relaunch",
+        "terminate"
+      ],
+      "unsupportedOperations": [
+        "implement-mod-loader",
+        "write-original-game",
+        "assume-compatible-from-version-or-exit-code",
+        "launch-with-missing-or-ambiguous-capability"
+      ],
+      "authorityAtRuling": "fixture-confirmed",
+      "evidenceRefs": [
+        "EV-PUBLIC-CONTRACTS-20260725",
+        "EV-H-GATES-7BD"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "能力探测兼容策略已纳入目标范围，但裁定时 authorityAtRuling 为 fixture-confirmed；裁定时 production gateway、真实 me3 profile/launch/diagnostics/terminate 与 Sekiro 启动尚未验证。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-RELEASE",
+      "capabilityId": "H-RUNTIME",
+      "gateIds": [
+        "REL-H"
+      ],
+      "subjectKind": "release",
+      "scope": "Windows 10/11 x64 NSIS 的打包、确定性 manifest/hash、干净机安装、覆盖升级、卸载与 runtime 完整性；代码签名不属于验收范围",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "package-nsis-x64",
+        "verify-installer-artifact-hash",
+        "install-clean-machine",
+        "upgrade-migration",
+        "uninstall",
+        "verify-packaged-bridge-dotnet-native-binding",
+        "launch-installed-build"
+      ],
+      "unsupportedOperations": [
+        "portable-release",
+        "automatic-update",
+        "skipped-pack-as-evidence",
+        "single-launch-as-install-validation",
+        "installer-size-or-time-budget-as-v05-gate"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-REL-COMPLIANCE-20260725",
+        "EV-PUBLIC-CONTRACTS-20260725",
+        "EV-H-GATES-7BD"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "NSIS 内部测试构建已纳入目标范围且不要求代码签名或体积/耗时预算；现有 builder 配置与同机构建不证明 manifest/hash、安装、升级、卸载、干净机或 packaged runtime 完成，未签名包也不声明发布者身份或 SmartScreen 信誉。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-RENDERING",
+      "capabilityId": "I-RENDER",
+      "gateIds": [
+        "REL-I"
+      ],
+      "subjectKind": "rendering",
+      "scope": "renderer-independent semantic scene、Three.js WebGPU 主后端与 WebGL2 自动回退（延期至 V0.6）",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "deferredToRelease": "V0.6",
+      "operations": [],
+      "unsupportedOperations": [
+        "renderer-object-as-authority",
+        "synthetic-budget-as-release-threshold",
+        "proxy-scene-as-native-asset-proof",
+        "representative-hardware-tier-acceptance",
+        "performance-budget-as-v05-gate",
+        "any-3d-rendering-as-v05-release-capability",
+        "present-3d-viewport-as-v05-release-editor"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-C-MSB-SCENE-20260724",
+        "EV-I-RENDER-7BD"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "3D 渲染线已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 semantic scene、WebGPU/WebGL2 后端与视口保留为标记 V0.6 只读预览；裁定时 authorityAtRuling 为 partial，当前机器功能 smoke 不证明代表性硬件兼容或性能水平。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "I-RENDER",
+      "resumeRequires": [
+        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
+        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
+        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
+        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+      ]
+    },
+    {
+      "scopeItemId": "SCOPE-COMPLIANCE",
+      "capabilityId": "H-RUNTIME",
+      "gateIds": [
+        "REL-COMPLIANCE"
+      ],
+      "subjectKind": "compliance",
+      "scope": "项目所有者控制机器上的内部测试构建、内容安全、installer manifest/hash、许可证 inventory 与禁止外部分发边界；代码签名不属于验收范围",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "supported",
+      "operations": [
+        "scan-internal-package-tree",
+        "inventory-production-licenses",
+        "track-incomplete-notices",
+        "scan-secrets-private-assets",
+        "verify-owner-controlled-target",
+        "verify-installer-artifact-hash"
+      ],
+      "unsupportedOperations": [
+        "external-distribution",
+        "public-release",
+        "claim-incomplete-notices-distributable",
+        "ship-private-corpus",
+        "ship-oodle-runtime",
+        "ship-credentials"
+      ],
+      "authorityAtRuling": "partial",
+      "evidenceRefs": [
+        "EV-REL-COMPLIANCE-20260725",
+        "EV-PUBLIC-CONTRACTS-20260725"
+      ],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "内部测试合规边界已获批准，但裁定时 authorityAtRuling 为 partial；未补齐适用 notices 或再分发权利前不得向任何外部测试者或公众分发，也不构成公开发行完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
+    }
+  ]
+}
