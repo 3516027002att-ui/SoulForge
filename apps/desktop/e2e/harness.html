@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>SoulForge 编辑器功能 smoke 页面（Electron 内）</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 1rem; color: #ddd; background: #111; }
+      h1 { font-size: 1.1rem; }
+      .channel { border: 1px solid #444; border-radius: 6px; padding: 0.5rem 0.75rem; margin: 0.5rem 0; }
+      .channel.ok { border-color: #2e7d32; }
+      .channel.fail { border-color: #c62828; }
+      .muted { color: #999; }
+      ul { margin: 0.25rem 0; padding-left: 1.25rem; font-size: 0.8rem; }
+    </style>
+  </head>
+  <body>
+    <h1>SoulForge 编辑器有界访问功能 smoke（真实 corpus 通过生产 preload）</h1>
+    <p class="muted" id="status">正在运行…</p>
+    <div id="channels"></div>
+
+    <script>
+      'use strict';
+      const URI = {
+        fmg: 'soulforge-test://fmg/weapon_names.fmg',
+        param: 'soulforge-test://param/ActionGuideParam.param',
+        bnd4: 'soulforge-test://bnd4/menu.msgbnd.dcx',
+        script: 'soulforge-test://script/aicommon.luabnd.dcx',
+        emevd: 'soulforge-test://emevd/common.emevd'
+      };
+
+      async function countEntries(channel, pageSize, rowsField, totalField) {
+        const first = await channel.fetch(0, pageSize);
+        const pageCount = first.pageCount;
+        const total = first[totalField];
+        const last = await channel.fetch(pageCount - 1, pageSize);
+        if (!last.ok) throw new Error(`${channel.name}: 末页请求失败`);
+        if (last.page !== pageCount - 1) throw new Error(`${channel.name}: 末页错位 page=${last.page}`);
+        if (last.pageCount !== pageCount) throw new Error(`${channel.name}: pageCount 不一致`);
+        const expectedTail = total % pageSize === 0 && total > 0
+          ? pageSize
+          : (total === 0 ? 0 : total - (pageCount - 1) * pageSize);
+        if (last[rowsField].length !== expectedTail) {
+          throw new Error(`${channel.name}: 末页渲染 ${last[rowsField].length} 条 ≠ 期望 ${expectedTail}`);
+        }
+        // Walk every page: count-level no-overlap / no-omission.
+        let sum = 0;
+        for (let p = 0; p < pageCount; p += 1) {
+          const page = await channel.fetch(p, pageSize);
+          sum += page[rowsField].length;
+        }
+        if (sum !== total) throw new Error(`${channel.name}: 全页计数 ${sum} ≠ 总 ${total}`);
+        return { pageCount, total, lastPageEntries: last[rowsField].length };
+      }
+
+      async function runChannels() {
+        const channels = [
+          {
+            name: 'script（luabnd 301 条目）',
+            fetch: (p, s) => window.soulforge.listScriptContainerEntriesPage(URI.script, p, s),
+            pageSize: 50,
+            rowsField: 'entries',
+            totalField: 'entryCount',
+            expectedTotal: 301
+          },
+          {
+            name: 'bnd4（menu.msgbnd 15 子项）',
+            fetch: (p, s) => window.soulforge.listContainerChildrenPage(URI.bnd4, p, s),
+            pageSize: 10,
+            rowsField: 'children',
+            totalField: 'totalCount',
+            expectedTotal: 15
+          },
+          {
+            name: 'fmg（weapon_names.fmg 条目）',
+            fetch: (p, s) => window.soulforge.readFmgPage(URI.fmg, p, s),
+            pageSize: 100,
+            rowsField: 'entries',
+            totalField: 'entryCount',
+            expectedTotal: null
+          },
+          {
+            name: 'param（ActionGuideParam 16 行）',
+            fetch: (p, s) => window.soulforge.readParamPage(URI.param, p, s),
+            pageSize: 20,
+            rowsField: 'rows',
+            totalField: 'rowCount',
+            expectedTotal: 16
+          }
+        ];
+        const results = {};
+        const container = document.getElementById('channels');
+        for (const channel of channels) {
+          const box = document.createElement('div');
+          box.className = 'channel';
+          box.innerHTML = `<strong>${channel.name}</strong>`;
+          container.appendChild(box);
+          try {
+            const summary = await countEntries(channel, channel.pageSize, channel.rowsField, channel.totalField);
+            if (channel.expectedTotal !== null && summary.total !== channel.expectedTotal) {
+              throw new Error(`${channel.name}: 总 ${summary.total} ≠ 期望 ${channel.expectedTotal}`);
+            }
+            box.classList.add('ok');
+            box.innerHTML += ` <span class="muted">✓ ${summary.total} 条 / ${summary.pageCount} 页 / 末页 ${summary.lastPageEntries} 条 / 全页计数一致</span>`;
+            results[channel.name] = { status: 'pass', total: summary.total, pageCount: summary.pageCount, lastPageEntries: summary.lastPageEntries };
+          } catch (error) {
+            box.classList.add('fail');
+            box.innerHTML += ` <span class="muted">✗ ${error.message}</span>`;
+            results[channel.name] = { status: 'fail', message: String(error.message) };
+          }
+        }
+        return results;
+      }
+
+      async function runEmevd() {
+        const box = document.createElement('div');
+        box.className = 'channel';
+        box.innerHTML = '<strong>emevd（common.emevd 1730 事件 / 33266 指令）</strong>';
+        document.getElementById('channels').appendChild(box);
+        try {
+          const bounded = await window.soulforge.readEmevdFullDocument(URI.emevd, 'fsmoke', false);
+          if (!bounded.ok || bounded.eventCount !== 1730 || bounded.instructionCount !== 33266) {
+            throw new Error(`emevd: 事件/指令计数不符 ${JSON.stringify({ eventCount: bounded.eventCount, instructionCount: bounded.instructionCount })}`);
+          }
+          if (bounded.dslTemplateTruncated !== true) {
+            throw new Error('emevd: bounded 模板应标记截断');
+          }
+          const full = await window.soulforge.readEmevdFullDocument(URI.emevd, 'fsmoke', true);
+          if (!full.ok || full.dslTemplateTruncated !== false) {
+            throw new Error('emevd: 显式完整加载应不截断');
+          }
+          if (full.dslTemplateTotalLines !== bounded.dslTemplateTotalLines) {
+            throw new Error('emevd: 完整/有界模板总行数不一致');
+          }
+          box.classList.add('ok');
+          box.innerHTML += ` <span class="muted">✓ ${full.eventCount} 事件 / ${full.instructionCount} 指令 / 模板 ${full.dslTemplateTotalLines} 行（bounded 截断 + 显式完整加载均验证）</span>`;
+          return { status: 'pass', eventCount: full.eventCount, instructionCount: full.instructionCount, templateLines: full.dslTemplateTotalLines };
+        } catch (error) {
+          box.classList.add('fail');
+          box.innerHTML += ` <span class="muted">✗ ${error.message}</span>`;
+          return { status: 'fail', message: String(error.message) };
+        }
+      }
+
+      (async () => {
+        const status = document.getElementById('status');
+        try {
+          await new Promise((resolveReady) => {
+            if (window.soulforge) { resolveReady(); return; }
+            let tries = 0;
+            const timer = setInterval(() => {
+              if (window.soulforge) { clearInterval(timer); resolveReady(); return; }
+              tries += 1;
+              if (tries > 200) { clearInterval(timer); resolveReady(); }
+            }, 100);
+          });
+          if (!window.soulforge) throw new Error('preload 未暴露 window.soulforge（生产 preload 加载失败）');
+          const channelResults = await runChannels();
+          const emevdResult = await runEmevd();
+          const allPass = Object.values(channelResults).every((r) => r.status === 'pass') && emevdResult.status === 'pass';
+          status.textContent = allPass ? '全部通过' : '存在失败';
+          window.__sfSmokeResult = {
+            ok: allPass ? null : false,
+            status: allPass ? 'pass' : 'fail',
+            message: allPass ? '五个 release 编辑器有界访问在真实 Electron 内验证通过' : '存在失败通道',
+            channels: { ...channelResults, emevd: emevdResult }
+          };
+        } catch (error) {
+          status.textContent = '失败';
+          window.__sfSmokeResult = {
+            ok: false,
+            status: 'fail',
+            message: error instanceof Error ? error.message : String(error),
+            channels: null
+          };
+        }
+      })();
+    </script>
+  </body>
+</html>

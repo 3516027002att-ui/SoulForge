@@ -21,6 +21,25 @@ export type EditorScaleAccess =
   | 'none';
 
 /**
+ * Clamp a requested page into [0, pageCount) and return the served window.
+ * Shared by every paginated editor access channel in the desktop main process
+ * (`apps/desktop/src/main/ipc.ts`) and by the bounded-access acceptance smoke
+ * (`runEditorBoundedAccessSmoke.ts`) so both sides always apply the same
+ * windowing semantics (hard constraint 17). Out-of-range navigation fails
+ * safely to the nearest valid page instead of returning empty pages.
+ */
+export function normalizePageWindow(
+  total: number,
+  requestedPage: number,
+  pageSize: number
+): { page: number; pageCount: number; offset: number; size: number } {
+  const size = Math.max(1, Math.floor(pageSize));
+  const pageCount = Math.max(1, Math.ceil(total / size));
+  const page = Math.min(Math.max(0, Math.floor(requestedPage)), pageCount - 1);
+  return { page, pageCount, offset: page * size, size };
+}
+
+/**
  * V0.5 冻结发布编辑器清单，与
  * `docs/V0_5_IMPLEMENTATION_HANDOFF.md` §18.2.1 `SCOPE-EDITORS.editorIds`
  * 逐项对应。msb/tae/esd/flver 已延期至 V0.6，只保留标记只读预览，

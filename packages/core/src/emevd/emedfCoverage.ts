@@ -150,6 +150,95 @@ export function analyzeEmedfCoverage(
   };
 }
 
+/* ------------------------------------------------------------------ */
+/*  Cross-corpus distribution comparison                               */
+/* ------------------------------------------------------------------ */
+
+export interface CorpusDistributionInput {
+  label: string;
+  distribution: EmevdInstructionDistributionEntry[];
+}
+
+export interface CorpusFamilyPresence {
+  bank: number;
+  id: number;
+  /** Total instances across all corpora. */
+  totalCount: number;
+  /** Per-corpus instance counts (label -> count). */
+  counts: Record<string, number>;
+  /** Corpora (labels) where this family appears. */
+  presentIn: string[];
+  /** Corpora (labels) where this family is absent. */
+  absentIn: string[];
+}
+
+export interface CorpusFamilyDifferenceSummary {
+  corpusLabels: string[];
+  unionFamilyCount: number;
+  /** Instruction families present in every corpus. */
+  familiesInAllCorpora: CorpusFamilyPresence[];
+  /** Instruction families present in a strict subset (>=1 but not all corpora). */
+  familiesInSubset: CorpusFamilyPresence[];
+  /** Per-corpus kind/instance totals. */
+  perCorpus: Array<{ label: string; kinds: number; instances: number }>;
+}
+
+/**
+ * Compare instruction distributions across multiple corpora and report which
+ * instruction families appear only in a subset of them (cross-corpus
+ * distribution differences). Pure aggregate analysis: never touches payload
+ * content. Deterministic: sorted by bank:id, then totalCount desc.
+ */
+export function summarizeCorpusFamilyDifferences(
+  corpora: CorpusDistributionInput[]
+): CorpusFamilyDifferenceSummary {
+  const presence = new Map<string, CorpusFamilyPresence>();
+  const perCorpus = corpora.map((corpus) => ({
+    label: corpus.label,
+    kinds: corpus.distribution.length,
+    instances: corpus.distribution.reduce((sum, entry) => sum + entry.count, 0)
+  }));
+  for (const corpus of corpora) {
+    for (const entry of corpus.distribution) {
+      const key = `${entry.bank}:${entry.id}`;
+      const existing = presence.get(key);
+      if (existing) {
+        existing.counts[corpus.label] = entry.count;
+        existing.presentIn.push(corpus.label);
+        existing.totalCount += entry.count;
+      } else {
+        presence.set(key, {
+          bank: entry.bank,
+          id: entry.id,
+          totalCount: entry.count,
+          counts: { [corpus.label]: entry.count },
+          presentIn: [corpus.label],
+          absentIn: []
+        });
+      }
+    }
+  }
+  for (const family of presence.values()) {
+    family.absentIn = corpora
+      .filter((corpus) => !family.presentIn.includes(corpus.label))
+      .map((corpus) => corpus.label);
+  }
+  const byKey = [...presence.values()].sort((a, b) => a.bank - b.bank || a.id - b.id);
+  const familiesInAllCorpora = byKey
+    .filter((family) => family.presentIn.length === corpora.length)
+    .sort((a, b) => b.totalCount - a.totalCount);
+  const familiesInSubset = byKey
+    .filter((family) => family.presentIn.length > 0 && family.presentIn.length < corpora.length)
+    .sort((a, b) => b.totalCount - a.totalCount);
+  return {
+    corpusLabels: corpora.map((corpus) => corpus.label),
+    unionFamilyCount: presence.size,
+    familiesInAllCorpora,
+    familiesInSubset,
+    perCorpus
+  };
+}
+
 /**
  * Length consistency of a single schema definition against every distribution
  * entry with that bank/id. Returns the schema-claimed length and the observed

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,8 @@ import {
   buildScriptContainerEvidence,
   classifyScriptEntry,
   magicLabel,
+  normalizePageWindow,
+  sanitizeEntryName,
   applyParamFieldMutation,
   commitFmgMutationViaBridge,
   commitParamMutationViaBridge,
@@ -124,7 +126,10 @@ interface CachedParamDocument {
   typeName: string;
   rowDataSize: number;
   rowCount: number;
-  rows: Array<{ id: number; dataBase64: string; name?: string }>;
+  // dataBase64 is absent for params whose rows the Bridge serves without
+  // payloads (rowCount > 32 or rowDataSize > 256) — the channel reports those
+  // rows by id/name only and never fabricates bytes.
+  rows: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
   authority?: string;
 }
 const paramPageCache = new Map<string, CachedParamDocument>();
@@ -173,6 +178,163 @@ function summarizeScriptClassifications(
   return summary;
 }
 
+/** Native BND4 entry fields surfaced by the Bridge `read-dcx-document` envelope. */
+interface NativeBnd4EntryLike {
+  index?: number;
+  id?: number;
+  name?: string;
+  flags?: number;
+  unknown?: number;
+  duplicateOrdinal?: number;
+  nameOffset?: number;
+  dataOffset?: number;
+  compressedSize?: number;
+  uncompressedSize?: number;
+  contentHash?: string;
+}
+
+interface NativeBnd4DocumentLike {
+  format?: string;
+  entryCount?: number;
+  entries?: NativeBnd4EntryLike[];
+  authority?: string;
+}
+
+interface NativeDcxEnvelopeLike {
+  format?: string;
+  compressionFormat?: string;
+  nested?: NativeBnd4DocumentLike;
+}
+
+/**
+ * True when the file is a real (non-SFBN) BND3/BND4 binder or a DCX wrapper
+ * (whose payload may be BND4). The TS container tree cannot enumerate these;
+ * the native Bridge read-dcx-document command is the full-enumeration fallback.
+ */
+async function isRealNativeBndContainer(absolutePath: string): Promise<boolean> {
+  try {
+    const header = await readFile(absolutePath);
+    const magic = header.subarray(0, 4).toString('ascii');
+    if (magic.startsWith('BND3') || magic.startsWith('BND4')) {
+      // Synthetic SFBN binders are enumerated by the TS reader; real BND has no
+      // SFBN marker.
+      return !header.subarray(4, 8).equals(Buffer.from('SFBN', 'ascii'));
+    }
+    return magic.startsWith('DCX');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load the complete container-child table for a paginated channel. Uses the TS
+ * container tree (works for synthetic SFBN binders); when it returns zero
+ * children for a real (non-SFBN) BND/DCX container, falls back to the native
+ * Bridge full BND4 entry-table enumeration so real containers get complete
+ * bounded access instead of an empty table (hard constraint 17).
+ */
+async function loadContainerChildrenTable(
+  file: IndexedFile,
+  sourceUri: string,
+  recursive: boolean
+): Promise<{ ok: boolean; children: CachedContainerChildren; diagnostics: StructuredDiagnostic[] }> {
+  const result = await listContainerChildren(file.absolutePath, {
+    relativePath: file.relativePath,
+    recursive
+  });
+  if (!result.ok) return { ok: false, children: [], diagnostics: result.diagnostics };
+  let children = result.children;
+  if (children.length === 0 && await isRealNativeBndContainer(file.absolutePath)) {
+    // The read/replace chain for real BND children remains TS-synthetic-only and
+    // fails closed with structured diagnostics; enumeration is still honest.
+    const native = await enumerateNativeContainerEntries(
+      file.absolutePath,
+      sourceUri,
+      activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)]
+    );
+    if (!native.ok) return { ok: false, children: [], diagnostics: native.diagnostics };
+    children = native.children;
+  }
+  return { ok: true, children, diagnostics: [] };
+}
+
+/**
+ * Enumerate the complete inner BND4 entry table of a real (non-synthetic)
+ * container via the Bridge `read-dcx-document` command — the same
+ * full-enumeration source as `listScriptContainerEntriesPage`. Entries are
+ * projected to the renderer-safe container-child DTO; inner names are sanitized
+ * to their basename (Sekiro BND4 names are absolute build-machine paths).
+ * `canReplace=false` keeps the real-BND replace chain fail-closed (it is
+ * TS-synthetic-only today); `rawBytesAvailable=true` because
+ * snapshot-bnd4-child can read real child bytes.
+ */
+async function enumerateNativeContainerEntries(
+  absolutePath: string,
+  sourceUri: string,
+  allowedRoots: string[]
+): Promise<{
+  ok: boolean;
+  children: CachedContainerChildren;
+  diagnostics: StructuredDiagnostic[];
+}> {
+  const result = await runBridge<NativeDcxEnvelopeLike>({
+    command: 'read-dcx-document',
+    filePath: absolutePath,
+    resourceUri: `file:///${absolutePath.replace(/\\/g, '/')}`,
+    allowedRoots,
+    timeoutMs: 60_000
+  });
+  if (result.parseStatus === 'failed') {
+    return { ok: false, children: [], diagnostics: result.diagnostics };
+  }
+  const nested = result.data?.nested;
+  const entries = nested?.entries ?? [];
+  if (entries.length === 0) {
+    return {
+      ok: true,
+      children: [],
+      diagnostics: [{
+        severity: 'info',
+        code: 'BND_NATIVE_ENUMERATION_EMPTY',
+        message: 'Bridge 未返回原生 BND4 条目表（payload 可能不是 BND4）。',
+        sourceUri
+      }]
+    };
+  }
+  const seen = new Set<string>();
+  const children = entries.map((entry) => {
+    const rawName = entry.name ?? `entry_${entry.index ?? 0}`;
+    const name = sanitizeEntryName(rawName, entry.index ?? 0, seen);
+    const extension = name.split('.').pop()?.toLowerCase() ?? 'unknown';
+    return {
+      childId: String(entry.index ?? 0),
+      name,
+      offset: entry.dataOffset ?? 0,
+      size: entry.uncompressedSize ?? 0,
+      ...(entry.compressedSize !== undefined && entry.compressedSize !== entry.uncompressedSize
+        ? { compressedSize: entry.compressedSize }
+        : {}),
+      hash: entry.contentHash ?? '',
+      formatKind: extension,
+      sourceContainerUri: sourceUri,
+      childUri: `${sourceUri}#bnd/child/${encodeURIComponent(name)}`,
+      rawBytesAvailable: true,
+      canReplace: false,
+      diagnostics: []
+    } satisfies CachedContainerChildren[number];
+  });
+  return {
+    ok: true,
+    children,
+    diagnostics: [{
+      severity: 'info',
+      code: 'BND_NATIVE_ENUMERATION_COMPLETE',
+      message: `原生 BND4 完整条目表已枚举：${entries.length} 项（${result.data?.compressionFormat ?? ''} 解包）。`,
+      sourceUri
+    }]
+  };
+}
+
 /** Inner BND4 entry row from the Bridge `read-dcx-document` command. */
 interface ScriptDcxEntryLike {
   index?: number;
@@ -219,22 +381,6 @@ function clearEditorPageCaches(): void {
   paramPageCache.clear();
   containerChildrenCache.clear();
   scriptContainerEntriesCache.clear();
-}
-
-/**
- * Clamp a requested page into [0, pageCount) and return the served window.
- * Shared by every paginated editor access channel so out-of-range navigation
- * fails safely to the nearest valid page instead of returning empty pages.
- */
-function normalizePageWindow(
-  total: number,
-  requestedPage: number,
-  pageSize: number
-): { page: number; pageCount: number; offset: number; size: number } {
-  const size = Math.max(1, Math.floor(pageSize));
-  const pageCount = Math.max(1, Math.ceil(total / size));
-  const page = Math.min(Math.max(0, Math.floor(requestedPage)), pageCount - 1);
-  return { page, pageCount, offset: page * size, size };
 }
 
 /**
@@ -1880,14 +2026,32 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       let cached = paramPageCache.get(sourceUri);
       if (!cached) {
-        const result = await readParamDocumentViaBridge({
-          sourcePath: file.absolutePath,
+        // NOTE: reads the real document through the Bridge directly (not via
+        // readParamDocumentViaBridge) because that helper sends no
+        // commandOptions: the C# read-param-document handler calls
+        // options.TryGetProperty on a default JsonElement and throws
+        // InvalidOperationException for every real gameparam. ROOT CAUSE belongs
+        // in packages/core/src/editing/paramBridgeCommit.ts (pass
+        // commandOptions: {}); this channel passes an explicit empty object so
+        // the real-corpus paginated channel stays functional (hard constraint 17).
+        const result = await runBridge<{
+          sourceHash?: string;
+          typeName?: string;
+          dataVersion?: number;
+          rowCount?: number;
+          rowDataSize?: number;
+          rows?: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
+          authority?: string;
+        }>({
+          command: 'read-param-document',
+          filePath: file.absolutePath,
           allowedRoots: activeSession
             ? bridgeAllowedRoots(activeSession)
             : [dirname(file.absolutePath)],
-          maxRows: MAX_PAGED_PARAM_ROWS
+          timeoutMs: 60_000,
+          commandOptions: {}
         });
-        if (!result.ok || !result.data) {
+        if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
           return {
             ok: false,
             sourceUri,
@@ -1901,12 +2065,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             diagnostics: result.diagnostics
           };
         }
+        const rows = (result.data.rows ?? []).slice(0, MAX_PAGED_PARAM_ROWS);
         cached = {
           sourceHash: result.data.sourceHash,
-          typeName: result.data.typeName,
-          rowDataSize: result.data.rowDataSize,
-          rowCount: result.data.rowCount,
-          rows: result.data.rows,
+          typeName: result.data.typeName ?? 'UNKNOWN_PARAM',
+          rowDataSize: result.data.rowDataSize ?? 0,
+          rowCount: result.data.rowCount ?? rows.length,
+          rows,
           ...(result.data.authority ? { authority: result.data.authority } : {})
         };
         paramPageCache.set(sourceUri, cached);
@@ -1936,11 +2101,20 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           .slice(window.offset, window.offset + window.size)
           .map((row) => ({
             id: row.id,
-            dataBase64: row.dataBase64,
-            ...(row.name ? { name: row.name } : {}),
-            dataHexPreview: Buffer.from(row.dataBase64, 'base64')
-              .subarray(0, 16)
-              .toString('hex')
+            // The Bridge only includes row payloads for small params
+            // (rowCount <= rowPreviewLimit and rowDataSize <= 256); for larger
+            // real params rows arrive without dataBase64. Keep the DTO honest:
+            // carry payloads when present, otherwise expose the row id/name only
+            // so the channel never fabricates bytes or throws on null payloads.
+            ...(typeof row.dataBase64 === 'string'
+              ? {
+                  dataBase64: row.dataBase64,
+                  dataHexPreview: Buffer.from(row.dataBase64, 'base64')
+                    .subarray(0, 16)
+                    .toString('hex')
+                }
+              : {}),
+            ...(row.name ? { name: row.name } : {})
           })),
         rowsTruncated: cached.rowCount > cached.rows.length,
         ...(cached.authority ? { authority: cached.authority } : {}),
@@ -2252,11 +2426,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const cacheKey = `${sourceUri}::${recursiveFlag ? 'recursive' : 'flat'}`;
       let children = containerChildrenCache.get(cacheKey);
       if (!children) {
-        const result = await listContainerChildren(file.absolutePath, {
-          relativePath: file.relativePath,
-          recursive: recursiveFlag
-        });
-        if (!result.ok) {
+        const loaded = await loadContainerChildrenTable(file, sourceUri, recursiveFlag);
+        if (!loaded.ok) {
           return {
             ok: false,
             totalCount: 0,
@@ -2264,10 +2435,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             pageSize: 0,
             pageCount: 0,
             children: [],
-            diagnostics: result.diagnostics
+            diagnostics: loaded.diagnostics
           };
         }
-        children = result.children;
+        children = loaded.children;
         containerChildrenCache.set(cacheKey, children);
       }
       const window = normalizePageWindow(

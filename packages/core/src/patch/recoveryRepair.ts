@@ -31,7 +31,7 @@ import type { Diagnostic } from '@soulforge/shared';
 import type { RestorePoint } from '../backup/restorePoint.js';
 import { restoreFromPoint } from '../backup/restorePoint.js';
 import type {
-  DurableWorkspaceRepository,
+  AuditEventRecord,
   TransactionJournalPhase,
   TransactionJournalRecord
 } from '../storage/durableWorkspaceRepository.js';
@@ -59,6 +59,28 @@ export interface RecoveryRepairResult {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * The minimal durable-journal surface `recoverIncompleteTransactions` needs.
+ *
+ * `DurableWorkspaceRepository` (synchronous, one workspace.db connection)
+ * satisfies it directly. The desktop main process's async database utility
+ * client also satisfies it, so the same recovery entry can be driven from the
+ * main process on restart without duplicating the repair logic.
+ */
+export interface RecoverableJournalRepository {
+  listIncompleteTransactions(): TransactionJournalRecord[] | Promise<TransactionJournalRecord[]>;
+  transitionTransaction(options: {
+    transactionId: string;
+    expectedPhase: TransactionJournalPhase | TransactionJournalPhase[];
+    nextPhase: TransactionJournalPhase;
+    state: unknown;
+    updatedAt?: string;
+  }): TransactionJournalRecord | Promise<TransactionJournalRecord>;
+  appendAuditEvent(
+    event: Omit<AuditEventRecord, 'workspaceId' | 'eventId'> & { eventId?: string }
+  ): AuditEventRecord | Promise<AuditEventRecord>;
+}
+
 interface JournalBackupFile {
   sourcePath: string;
   backupPath: string;
@@ -74,14 +96,33 @@ interface RepairOutcome {
 /**
  * Reconcile every non-terminal journal row for a workspace back to a terminal
  * state. Idempotent: a second call finds nothing to repair.
+ *
+ * A corrupt journal row (unparseable `state_json` / invalid phase) makes the
+ * whole non-terminal list unreadable; the pass then fails closed with a
+ * structured `RECOVERY_JOURNAL_READ_FAILED` diagnostic and repairs nothing, so
+ * the corruption is surfaced instead of being silently skipped.
  */
 export async function recoverIncompleteTransactions(options: {
   store: OperationLogStore;
-  repository: DurableWorkspaceRepository;
+  repository: RecoverableJournalRepository;
 }): Promise<RecoveryRepairResult> {
   const recovered: RecoveredTransaction[] = [];
   const diagnostics: Diagnostic[] = [];
-  const incomplete = options.repository.listIncompleteTransactions();
+  let incomplete: TransactionJournalRecord[];
+  try {
+    incomplete = await options.repository.listIncompleteTransactions();
+  } catch (error) {
+    diagnostics.push({
+      severity: 'error',
+      code: 'RECOVERY_JOURNAL_READ_FAILED',
+      message: '非终态 journal 列表读取失败（journal 行损坏）；已停止自动恢复并保持数据库不变。',
+      details: {
+        error: error instanceof Error ? error.message : String(error),
+        errorName: error instanceof Error ? error.name : typeof error
+      }
+    });
+    return { recovered, diagnostics };
+  }
   for (const journal of incomplete) {
     const outcome = await repairJournalTransaction(
       options.store,
@@ -96,7 +137,7 @@ export async function recoverIncompleteTransactions(options: {
 
 async function repairJournalTransaction(
   store: OperationLogStore,
-  repository: DurableWorkspaceRepository,
+  repository: RecoverableJournalRepository,
   journal: TransactionJournalRecord<unknown>
 ): Promise<RepairOutcome> {
   const state = asRecord(journal.state);
@@ -186,7 +227,18 @@ async function repairJournalTransaction(
   }
 
   // Clean up leftover sibling temp files from an interrupted replace loop.
-  const removedTempFiles = await removeLeftoverTempFiles(transactionId, backupFiles);
+  // A failed deletion is surfaced (the restored originals are verified, but the
+  // operator must know an orphaned temp file remains) instead of being silently
+  // treated as clean.
+  const tempCleanup = await removeLeftoverTempFiles(transactionId, backupFiles);
+  if (tempCleanup.failed.length > 0) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'RECOVERY_TEMP_CLEANUP_FAILED',
+      message: '恢复已还原原文件，但残留临时文件无法删除；已保留并上报供人工处置。',
+      details: { transactionId, failures: tempCleanup.failed }
+    });
+  }
 
   await markTerminal(store, repository, journal, 'rolled_back', [
     'recovered after process termination; originals restored from the journal backup.'
@@ -197,7 +249,7 @@ async function repairJournalTransaction(
       ...base,
       action: 'rolled_back',
       restoredFiles: restored.restoredPaths,
-      removedTempFiles
+      removedTempFiles: tempCleanup.removed
     },
     diagnostics
   };
@@ -205,7 +257,7 @@ async function repairJournalTransaction(
 
 async function markTerminal(
   store: OperationLogStore,
-  repository: DurableWorkspaceRepository,
+  repository: RecoverableJournalRepository,
   journal: TransactionJournalRecord<unknown>,
   nextPhase: TransactionJournalPhase,
   notes: string[],
@@ -213,7 +265,7 @@ async function markTerminal(
 ): Promise<void> {
   const now = new Date().toISOString();
   try {
-    repository.transitionTransaction({
+    await repository.transitionTransaction({
       transactionId: journal.transactionId,
       expectedPhase: journal.phase,
       nextPhase,
@@ -233,7 +285,7 @@ async function markTerminal(
     return;
   }
   try {
-    repository.appendAuditEvent({
+    await repository.appendAuditEvent({
       eventKind: 'recovery.repaired',
       opId: journal.opId,
       transactionId: journal.transactionId,
@@ -309,8 +361,9 @@ function isJournalBackupFile(value: unknown): value is JournalBackupFile {
 async function removeLeftoverTempFiles(
   transactionId: string,
   files: JournalBackupFile[]
-): Promise<string[]> {
+): Promise<{ removed: string[]; failed: Array<{ path: string; message: string }> }> {
   const removed: string[] = [];
+  const failed: Array<{ path: string; message: string }> = [];
   for (const file of files) {
     const siblingTemp = join(
       dirname(file.sourcePath),
@@ -319,11 +372,15 @@ async function removeLeftoverTempFiles(
     try {
       await rm(siblingTemp, { force: true });
       removed.push(siblingTemp);
-    } catch {
-      // Not present or not removable; treat as already clean.
+    } catch (error) {
+      // Surface the failure rather than silently reporting a clean sweep.
+      failed.push({
+        path: siblingTemp,
+        message: error instanceof Error ? error.message : String(error)
+      });
     }
   }
-  return removed;
+  return { removed, failed };
 }
 
 async function hashFile(path: string): Promise<string | undefined> {
