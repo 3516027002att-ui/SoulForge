@@ -1,0 +1,203 @@
+{
+  "schemaVersion": "1.0.0",
+  "note": "结构化 blocker 注册表，此前为交接书 §18.4。标注“历史、当前无活动引用”的条目只保留审计与未来范围变更触发器，不属于当前 blocker，也不得出现在“需要用户处理”的报告中。",
+  "enums": {
+    "reason": [
+      "private-corpus",
+      "credential",
+      "hardware",
+      "user-ruling",
+      "toolchain",
+      "license",
+      "upstream",
+      "prerequisite-authority"
+    ]
+  },
+  "blockers": [
+    {
+      "blockerId": "BLK-NATIVE-FIXTURE-CORPUS",
+      "reason": "private-corpus",
+      "impactRaw": "历史：REL-A、W-A-RECOVERY-NATIVE-02、W-PARAM-META-NATIVE-01；当前无活动引用",
+      "impactGateRefs": [
+        "REL-A"
+      ],
+      "impactSliceRefs": [
+        "W-A-RECOVERY-NATIVE-02",
+        "W-PARAM-META-NATIVE-01"
+      ],
+      "owner": "历史记录；当前由工程方消费既有本机 registry",
+      "requiredInput": "已解除：合法仓库外 locator registry、内容哈希和 native/PARAM 样本已可用",
+      "unlockValidation": "private native gate 实际运行并保持 partial；未通过项转为工程切片，不能因 registry 存在而冒充完成",
+      "recheckTrigger": "本机 registry/内容版本变化或用户撤回访问时重新打开",
+      "evidenceRefs": [
+        "EV-A-RECOVERY-20260724",
+        "EV-C-PARAM-7BD",
+        "EV-PUBLIC-CONTRACTS-20260725",
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730"
+      ]
+    },
+    {
+      "blockerId": "BLK-PARAM-METADATA-SOURCE",
+      "reason": "license",
+      "impactRaw": "历史：W-PARAM-META-SOURCE-02；当前无活动引用",
+      "impactGateRefs": [],
+      "impactSliceRefs": [
+        "W-PARAM-META-SOURCE-02"
+      ],
+      "owner": "历史记录；当前 adapter 已完成",
+      "requiredInput": "已解除：固定 Smithbox 2.2.4 本机导入、commit/release/archive/tree/license digest 与不再分发边界",
+      "unlockValidation": "npm run test:smithbox-param-metadata-source 覆盖真实导入及缺失/错版/篡改/升级/撤回；导入数据仍在仓库外",
+      "recheckTrigger": "用户修改来源、版本或再分发边界时重新打开",
+      "evidenceRefs": [
+        "EV-PUBLIC-CONTRACTS-20260725",
+        "EV-REL-SCOPE-20260730-OWNER-INPUTS",
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730"
+      ]
+    },
+    {
+      "blockerId": "BLK-EMEVD-LAYER-CORPUS",
+      "reason": "private-corpus",
+      "impactRaw": "历史：W-EMEVD-LAYER-01；当前无活动引用",
+      "impactGateRefs": [],
+      "impactSliceRefs": [
+        "W-EMEVD-LAYER-01"
+      ],
+      "owner": "历史记录；当前由工程方在既有 corpus 内发现",
+      "requiredInput": "已解除用户输入：合法仓库外 corpus root/registry 已可用；目标变体未命中时保持工程缺口",
+      "unlockValidation": "带哈希 layerCount != 0 case 的只读解析、no-op roundtrip 和冲突失败关闭断言通过",
+      "recheckTrigger": "本机 corpus 被撤回或后续确认目标变体确实不存在且需范围裁定时重新打开",
+      "evidenceRefs": [
+        "EV-C-EMEVD-DSL-20260724",
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730"
+      ]
+    },
+    {
+      "blockerId": "BLK-BEHAVIOR-CORPUS",
+      "reason": "private-corpus",
+      "impactRaw": "历史：REL-D、W-BEHAVIOR-MAP-01；当前无活动引用",
+      "impactGateRefs": [
+        "REL-D"
+      ],
+      "impactSliceRefs": [
+        "W-BEHAVIOR-MAP-01"
+      ],
+      "owner": "历史记录；当前由工程方推进",
+      "requiredInput": "已解除用户输入：本机 registry 已支持登记 TAE/ESD native document，并观察到 HKX/Lua 条目",
+      "unlockValidation": "TAE/ESD 已延期 V0.6，其完整语义不再是 V0.5 通过条件；V0.5 只在 W-BEHAVIOR-MAP-01 / W-SCRIPT-READONLY-01 对 script 容器枚举、字节码识别与整内层文件替换失败关闭",
+      "recheckTrigger": "本机 corpus 被撤回、新增声明变体，或 V0.6 恢复 TAE/ESD 时重新打开",
+      "evidenceRefs": [
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730",
+        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+      ]
+    },
+    {
+      "blockerId": "BLK-ASSET-CORPUS",
+      "reason": "private-corpus",
+      "impactRaw": "历史：REL-E、W-FLVER-READ-01；当前无活动引用",
+      "impactGateRefs": [
+        "REL-E"
+      ],
+      "impactSliceRefs": [
+        "W-FLVER-READ-01"
+      ],
+      "owner": "历史记录；整条资产线已延期 V0.6",
+      "requiredInput": "已解除用户输入：本机 registry 已支持登记 FLVER/TPF native document，其他声明资产由工程方继续定位",
+      "unlockValidation": "资产线已延期，本版不判定；既有 FLVER/TPF 只读覆盖保持 partial 且必须只读。V0.6 恢复后 MTD/collision/navigation、完整材质/引用、边界诊断和全 corpus no-op 继续失败关闭",
+      "recheckTrigger": "本机 corpus 被撤回、新增声明变体，或 V0.6 恢复资产线时重新打开",
+      "evidenceRefs": [
+        "EV-E-ASSET-7BD",
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730",
+        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+      ]
+    },
+    {
+      "blockerId": "BLK-REL-B-CORPUS",
+      "reason": "private-corpus",
+      "impactRaw": "历史：REL-B、W-REL-B-CORPUS-01；当前无活动引用",
+      "impactGateRefs": [
+        "REL-B"
+      ],
+      "impactSliceRefs": [
+        "W-REL-B-CORPUS-01"
+      ],
+      "owner": "历史记录；当前由工程方推进",
+      "requiredInput": "已解除：仓库外 sekiro-1-6-owner-corpus-v1 已生成并覆盖当前 DFLT/BND4/KRAK 集合",
+      "unlockValidation": "214/214 分类与 read/no-op/CRUD 已执行，且一个登记 KRAK rename/repack/roundtrip 已独立验证；组合 mutation、未知字段保持、恢复和完整 corpus 写回继续失败关闭",
+      "recheckTrigger": "registry/内容版本变化、用户撤回访问或新增变体时重新打开",
+      "evidenceRefs": [
+        "EV-B-DFLT-7BD",
+        "EV-B-BND4-7BD",
+        "EV-B-KRAK-20260724",
+        "EV-OWNER-INPUTS-IMPLEMENTATION-20260730"
+      ]
+    },
+    {
+      "blockerId": "BLK-MODEL-CREDENTIALS",
+      "reason": "credential",
+      "impactRaw": "历史：W-AI-REAL-01；当前无活动引用",
+      "impactGateRefs": [],
+      "impactSliceRefs": [
+        "W-AI-REAL-01"
+      ],
+      "owner": "历史记录；用户无需提供",
+      "requiredInput": "已解除：默认配置留空，真实 provider endpoint/key 不属于 V0.5 验收",
+      "unlockValidation": "W-AI-REAL-01 已被取代；W-AI-CONFORMANCE-02 已在本地 contract servers 上完成并保持 partial，不证明第三方服务",
+      "recheckTrigger": "用户日后主动把真实 provider live smoke 加回范围时重新打开",
+      "evidenceRefs": [
+        "EV-G-FAKE-7BD",
+        "EV-REL-SCOPE-20260730-OWNER-INPUTS"
+      ]
+    },
+    {
+      "blockerId": "BLK-RENDER-HARDWARE",
+      "reason": "hardware",
+      "impactRaw": "历史：W-RENDER-BENCH-01；当前无活动引用",
+      "impactGateRefs": [],
+      "impactSliceRefs": [
+        "W-RENDER-BENCH-01"
+      ],
+      "owner": "历史记录；用户无需提供",
+      "requiredInput": "已解除：代表性硬件档位、地图性能基准和量化预算不属于 V0.5 验收",
+      "unlockValidation": "W-RENDER-BENCH-01 已被取代；渲染线已延期 V0.6，W-RENDER-FUNCTIONAL-02 为 deferred，本版不判定渲染功能闭环",
+      "recheckTrigger": "用户日后主动把硬件/性能矩阵加回范围，或 V0.6 恢复渲染线时重新打开",
+      "evidenceRefs": [
+        "EV-I-RENDER-7BD",
+        "EV-REL-SCOPE-20260730-OWNER-INPUTS",
+        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+      ]
+    },
+    {
+      "blockerId": "BLK-SCOPE-RULING",
+      "reason": "user-ruling",
+      "impactRaw": "历史：REL-SCOPE、W-REL-SCOPE-RULING-01、W-REL-SCOPE-RULING-02、W-REL-SCOPE-RULING-03、W-REL-SCOPE-RULING-04、W-REL-SCOPE-RULING-05；当前无活动引用",
+      "impactGateRefs": [
+        "REL-SCOPE"
+      ],
+      "impactSliceRefs": [
+        "W-REL-SCOPE-RULING-01",
+        "W-REL-SCOPE-RULING-02",
+        "W-REL-SCOPE-RULING-03",
+        "W-REL-SCOPE-RULING-04",
+        "W-REL-SCOPE-RULING-05"
+      ],
+      "owner": "用户",
+      "requiredInput": "已完成：V0.5 支持/排除矩阵、未签名 NSIS、固定 Smithbox 本机 metadata、空 provider 凭据、功能性渲染边界、无编辑器/installer 量化预算，以及文本优先收窄与 12 项范围条目延期 V0.6 均已批准",
+      "unlockValidation": "npm run test:release-scope exit 0，且 REL-SCOPE 引用带 scope-ruling:user-approved 的 fresh sealed Evidence；延期 Gate 引用带对应 scope-deferral:<GateId>:V0.6:user-approved 的 fresh sealed Evidence",
+      "recheckTrigger": "用户新增或修改任何冻结范围裁定，或要求把已延期能力提前拉回 V0.5",
+      "evidenceRefs": [
+        "EV-REL-SCOPE-20260730",
+        "EV-REL-SCOPE-20260730-UNSIGNED",
+        "EV-REL-SCOPE-20260730-OWNER-INPUTS",
+        "EV-REL-SCOPE-20260730-NO-QUANT-BUDGETS",
+        "EV-AUTONOMOUS-GOVERNANCE-20260731",
+        "EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER",
+        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+      ]
+    }
+  ],
+  "invariants": [
+    "每个 blocked 切片与 Gate 都必须通过 blockerRefs 引用本表已定义 ID。",
+    "解除 blocker 前必须取得“所需输入”并通过“解锁验证”，不能只因时间经过或口头判断改回 ready/open。",
+    "只有 sealed Evidence 可以支持 Gate 终态；unsealed/historical 只能说明阻塞边界。"
+  ]
+}

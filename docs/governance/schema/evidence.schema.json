@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "soulforge/governance/evidence",
+  "title": "SoulForge Evidence 记录（evidence.jsonl 的单行 schema）",
+  "description": "JSONL 每行一条独立 Evidence。选 JSONL 而非 JSON 数组：追加是纯 append，多个并行 agent 同时封存证据不会产生同一处的合并冲突。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evidenceId",
+    "targetRelease",
+    "evidenceType",
+    "subject",
+    "fingerprint",
+    "commands",
+    "result",
+    "nonClaims"
+  ],
+  "properties": {
+    "evidenceId": { "type": "string", "pattern": "^EV-[A-Z0-9-]+$" },
+    "targetRelease": { "type": "string", "pattern": "^V\\d+\\.\\d+$" },
+    "evidenceType": { "enum": ["sealed-current-run", "unsealed-record", "historical-record"] },
+    "subject": { "type": "string", "minLength": 1 },
+    "fingerprint": { "type": "string", "minLength": 1 },
+    "commands": { "type": "string", "minLength": 1 },
+    "result": { "type": "string", "minLength": 1 },
+    "nonClaims": { "type": "string", "minLength": 1 }
+  }
+}

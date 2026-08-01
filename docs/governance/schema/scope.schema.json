@@ -1,0 +1,208 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "soulforge/governance/scope",
+  "title": "SoulForge 发布范围裁定（唯一机器可读范围权威）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "proposalId",
+    "release",
+    "game",
+    "gameBuildRange",
+    "ruling",
+    "proposalStatus",
+    "unlistedPolicy",
+    "corpusPolicy",
+    "scopeDeferralPolicy",
+    "authoritySnapshotPolicy",
+    "paramMetadataSourcePolicy",
+    "providerCredentialPolicy",
+    "runtimeToolPolicy",
+    "renderingAcceptancePolicy",
+    "quantitativeAcceptancePolicy",
+    "scopeItems"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "note": { "type": "string", "minLength": 1 },
+    "proposalId": { "type": "string", "minLength": 1 },
+    "release": { "type": "string", "pattern": "^V\\d+\\.\\d+$" },
+    "game": { "type": "string", "minLength": 1 },
+    "gameBuildRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "matchPolicy", "versionFamilies", "exactBuilds", "unknownBuildPolicy"],
+      "properties": {
+        "status": { "const": "user-approved" },
+        "matchPolicy": { "type": "string", "minLength": 1 },
+        "versionFamilies": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "exactBuilds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "unknownBuildPolicy": { "const": "fail-closed" }
+      }
+    },
+    "ruling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "approvedBy", "approvedAt", "decisionRef"],
+      "properties": {
+        "status": { "const": "user-approved" },
+        "approvedBy": { "type": "string", "minLength": 1 },
+        "approvedAt": { "type": "string", "minLength": 1 },
+        "decisionRef": { "type": "string", "minLength": 1 }
+      }
+    },
+    "proposalStatus": { "enum": ["draft", "proposed", "user-approved"] },
+    "unlistedPolicy": { "const": "unsupported" },
+    "corpusPolicy": { "type": "object" },
+    "scopeDeferralPolicy": { "type": "object" },
+    "authoritySnapshotPolicy": { "type": "object" },
+    "paramMetadataSourcePolicy": { "type": "object" },
+    "providerCredentialPolicy": { "type": "object" },
+    "runtimeToolPolicy": { "type": "object" },
+    "renderingAcceptancePolicy": { "type": "object" },
+    "quantitativeAcceptancePolicy": { "type": "object" },
+    "scopeItems": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scopeItemId",
+          "capabilityId",
+          "gateIds",
+          "subjectKind",
+          "scope",
+          "decisionStatus",
+          "proposedSupport",
+          "operations",
+          "unsupportedOperations",
+          "authorityAtRuling",
+          "evidenceRefs",
+          "registryRefs",
+          "openRulings",
+          "nonClaims",
+          "targetRelease",
+          "deferredToRelease",
+          "deferredTrack",
+          "resumeRequires"
+        ],
+        "properties": {
+          "scopeItemId": { "type": "string", "pattern": "^SCOPE-[A-Z0-9-]+$" },
+          "capabilityId": { "type": "string", "minLength": 1 },
+          "gateIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^REL-[A-Z-]+$" }
+          },
+          "subjectKind": { "type": "string", "minLength": 1 },
+          "scope": { "type": "string", "minLength": 1 },
+          "decisionStatus": { "enum": ["open", "proposed", "user-approved"] },
+          "proposedSupport": { "enum": ["supported", "unsupported", "deferred"] },
+          "operations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "unsupportedOperations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "authorityAtRuling": {
+            "enum": [
+              "unsupported",
+              "candidate",
+              "fixture-confirmed",
+              "partial",
+              "native-verified",
+              "unverified"
+            ]
+          },
+          "evidenceRefs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^EV-[A-Z0-9-]+$" }
+          },
+          "registryRefs": { "type": "array", "items": { "type": "object" } },
+          "openRulings": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "nonClaims": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "targetRelease": { "type": "string", "pattern": "^V\\d+\\.\\d+$" },
+          "deferredToRelease": { "type": ["string", "null"], "pattern": "^V\\d+\\.\\d+$" },
+          "deferredTrack": { "type": ["string", "null"], "minLength": 1 },
+          "resumeRequires": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+
+          "paramContainerScope": {
+            "description": "SCOPE-PARAM 专属：容器级裁定。included 之外的容器一律 unsupported。",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["included", "deferredToRelease"],
+            "properties": {
+              "included": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+              "deferredToRelease": {
+                "type": "object",
+                "additionalProperties": { "type": "string", "pattern": "^V\\d+\\.\\d+$" }
+              }
+            }
+          },
+          "editorIds": {
+            "description": "SCOPE-EDITORS 专属：本版计入发布的编辑器 id。",
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "editorMutationModes": {
+            "description": "SCOPE-EDITORS 专属：每个编辑器的写入模式裁定，键必须与 editorIds 一致。",
+            "type": "object",
+            "additionalProperties": { "enum": ["typed-mutation", "whole-inner-file-replacement"] }
+          },
+          "deferredPreviewEditors": {
+            "description": "SCOPE-EDITORS 专属：只读预览编辑器，不计入发布编辑器数量。",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["editorIds", "deferredToRelease", "readOnly", "markedAsPreview", "countedAsReleaseEditor"],
+            "properties": {
+              "editorIds": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+              "deferredToRelease": { "type": "string", "pattern": "^V\\d+\\.\\d+$" },
+              "readOnly": { "const": true },
+              "markedAsPreview": { "const": true },
+              "countedAsReleaseEditor": { "const": false }
+            }
+          },
+          "hexEvidenceView": {
+            "description": "SCOPE-EDITORS 专属：hex 证据视图永不可写。",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["included", "writable"],
+            "properties": {
+              "included": { "type": "boolean" },
+              "writable": { "const": false }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "description": "deferred 条目必须声明目标版本、归属线与恢复前置，且 operations 必须为空——否则等于宣称延期能力仍在本版可用。",
+            "if": { "properties": { "proposedSupport": { "const": "deferred" } } },
+            "then": {
+              "properties": {
+                "deferredToRelease": { "type": "string" },
+                "deferredTrack": { "type": "string" },
+                "operations": { "type": "array", "maxItems": 0 },
+                "resumeRequires": { "type": "array", "minItems": 1 }
+              }
+            }
+          },
+          {
+            "description": "非 deferred 条目不得携带延期字段或恢复前置。",
+            "if": {
+              "not": { "properties": { "proposedSupport": { "const": "deferred" } } }
+            },
+            "then": {
+              "properties": {
+                "deferredToRelease": { "type": "null" },
+                "deferredTrack": { "type": "null" },
+                "resumeRequires": { "type": "array", "maxItems": 0 }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

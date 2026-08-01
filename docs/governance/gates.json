@@ -1,0 +1,307 @@
+{
+  "schemaVersion": "1.0.0",
+  "note": "Gate 覆盖矩阵。此前为交接书 §18.1 + §18.3 两张 markdown 表，现合并外置。gateState/applicability 是工程进度字段，不受 releases.json 冻结保护约束；scope 覆盖来自 scope.json 的 gateCoverage。",
+  "requiredGateIds": [
+    "REL-SCOPE",
+    "REL-A",
+    "REL-B",
+    "REL-C",
+    "REL-D",
+    "REL-E",
+    "REL-F",
+    "REL-G",
+    "REL-H",
+    "REL-I",
+    "REL-COMPLIANCE"
+  ],
+  "foundationGateIds": [
+    "REL-SCOPE",
+    "REL-A",
+    "REL-H",
+    "REL-COMPLIANCE"
+  ],
+  "foundationGateNote": "基础 Gate 永远 in-scope，不得 scope-excluded，也不得 deferred。",
+  "enums": {
+    "gateState": [
+      "open",
+      "blocked",
+      "passed",
+      "deferred"
+    ],
+    "applicability": [
+      "pending-scope",
+      "in-scope",
+      "scope-excluded",
+      "deferred-v0.6"
+    ]
+  },
+  "gates": [
+    {
+      "gateId": "REL-SCOPE",
+      "targetRelease": "V0.5",
+      "capability": "V0.5 范围冻结",
+      "gateState": "passed",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-REL-SCOPE-RULING-05"
+      ],
+      "evidenceRefs": [
+        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+      ],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-SEKIRO-BUILD",
+        "SCOPE-A-WORKSPACE",
+        "SCOPE-A-RECOVERY",
+        "SCOPE-DFLT",
+        "SCOPE-KRAK",
+        "SCOPE-BND4",
+        "SCOPE-FMG",
+        "SCOPE-PARAM",
+        "SCOPE-EMEVD",
+        "SCOPE-MSB",
+        "SCOPE-BEHAVIOR-ANIMATION",
+        "SCOPE-BEHAVIOR-TAE",
+        "SCOPE-BEHAVIOR-ESD",
+        "SCOPE-BEHAVIOR-SCRIPT",
+        "SCOPE-ASSETS",
+        "SCOPE-ASSET-FLVER",
+        "SCOPE-ASSET-TPF",
+        "SCOPE-ASSET-MTD",
+        "SCOPE-ASSET-COLLISION",
+        "SCOPE-ASSET-NAVIGATION",
+        "SCOPE-ASSET-OPEN-CONVERSION",
+        "SCOPE-EDITORS",
+        "SCOPE-AI",
+        "SCOPE-RUNTIME",
+        "SCOPE-RELEASE",
+        "SCOPE-RENDERING",
+        "SCOPE-COMPLIANCE"
+      ],
+      "openRulings": [
+        "用户逐项裁定已冻结；scope target 不提升实时 authority，技术缺口由后继 Gate 与 blocker 继续失败关闭。"
+      ],
+      "successorRequirement": "27 项范围矩阵继续冻结，其中 12 项已裁定延期 V0.6（SCOPE-MSB、animation/TAE/ESD 三项、资产线 7 项、SCOPE-RENDERING）；V0.5 收窄为 BND4/FMG/PARAM(gameparam)/EMEVD/script 五编辑器的文本优先边界，script 为只读 + 整内层文件替换；Sekiro 1.6 版本族、只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界不变；工程复核与普通工程提交不得触发用户重新授权"
+    },
+    {
+      "gateId": "REL-A",
+      "targetRelease": "V0.5",
+      "capability": "全部 writer 与事务",
+      "gateState": "open",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-A-RECOVERY-INTEGRATION-04"
+      ],
+      "evidenceRefs": [],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-A-WORKSPACE",
+        "SCOPE-A-RECOVERY"
+      ],
+      "openRulings": [
+        "全部发布 writer 必须逐项完成真实 stage/validate/commit/re-read/rollback/crash 故障矩阵。"
+      ],
+      "successorRequirement": "BND4/FMG/PARAM 12 case + EMEVD/MSB 8 case 已通过；继续真实断电/大容量/安装升级恢复"
+    },
+    {
+      "gateId": "REL-B",
+      "targetRelease": "V0.5",
+      "capability": "容器发布 corpus",
+      "gateState": "open",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-REL-B-CORPUS-02"
+      ],
+      "evidenceRefs": [],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-DFLT",
+        "SCOPE-KRAK",
+        "SCOPE-BND4"
+      ],
+      "openRulings": [
+        "需建立 1.6.x release corpus，并完成 DFLT/KRAK/BND4 全量分类、KRAK 压缩写回与组合闭环。"
+      ],
+      "successorRequirement": "KRAK 重压/写回/roundtrip 已完成；继续组合 mutation/repack 和完整 corpus 验证"
+    },
+    {
+      "gateId": "REL-C",
+      "targetRelease": "V0.5",
+      "capability": "核心语义 mutation 矩阵",
+      "gateState": "open",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-EMEVD-FULL-01",
+        "W-EMEVD-FMG-PARAM-03"
+      ],
+      "evidenceRefs": [],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-FMG",
+        "SCOPE-PARAM",
+        "SCOPE-EMEVD",
+        "SCOPE-MSB"
+      ],
+      "openRulings": [
+        "V0.5 收窄为 FMG / PARAM(gameparam) / EMEVD 三类文本与逻辑资源：需完成全官方语言 FMG、全部 ParamType 与 EMEVD 的 release corpus、writer、引用和游戏加载矩阵。SCOPE-MSB 已延期至 V0.6，其既有 transform 写路径必须在 V0.5 关闭。"
+      ],
+      "successorRequirement": "EMEVD DSL plan 的 production Bridge/PatchIR transaction 接线已完成；继续完整 EMEDF schema/control-flow、DSL 全局指令级 mutation、UI submit 接线；并行继续 FMG 全语言、全部 ParamType、MSB 实体和回滚"
+    },
+    {
+      "gateId": "REL-D",
+      "targetRelease": "V0.5",
+      "capability": "行为动画范围",
+      "gateState": "open",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-BEHAVIOR-MAP-01"
+      ],
+      "evidenceRefs": [],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-BEHAVIOR-ANIMATION",
+        "SCOPE-BEHAVIOR-TAE",
+        "SCOPE-BEHAVIOR-ESD",
+        "SCOPE-BEHAVIOR-SCRIPT"
+      ],
+      "openRulings": [
+        "V0.5 收窄为 SCOPE-BEHAVIOR-SCRIPT 的只读证据视图与整个内层文件替换：HKS/Lua 经实测为 Havok Script 编译字节码（\\\\x1bLuaQ），反编译与重编译已延期至 V0.6。需完成容器条目枚举、只读字节码/常量池证据投影，以及经 Patch Engine 的整文件替换、重读与回滚。SCOPE-BEHAVIOR-ANIMATION / TAE / ESD 已延期至 V0.6。"
+      ],
+      "successorRequirement": "本 Gate 的 4 个范围条目中 animation/TAE/ESD 三项已延期 V0.6，仅 SCOPE-BEHAVIOR-SCRIPT 留在 V0.5，因此 Gate 保持 open 而非 deferred；后继只要求 script 容器只读证据视图与整内层文件替换的写/重读/回滚/游戏加载闭环。TAE/ESD 登记样本 native document 与延期预览面板保留只读，不得据此声称本版行为语义能力"
+    },
+    {
+      "gateId": "REL-E",
+      "targetRelease": "V0.6",
+      "capability": "资产只读与导出矩阵",
+      "gateState": "deferred",
+      "applicability": "deferred-v0.6",
+      "sliceRefs": [
+        "W-FLVER-READ-01"
+      ],
+      "evidenceRefs": [
+        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+      ],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-ASSETS",
+        "SCOPE-ASSET-FLVER",
+        "SCOPE-ASSET-TPF",
+        "SCOPE-ASSET-MTD",
+        "SCOPE-ASSET-COLLISION",
+        "SCOPE-ASSET-NAVIGATION",
+        "SCOPE-ASSET-OPEN-CONVERSION"
+      ],
+      "openRulings": [
+        "整条资产线已裁定移出 V0.5、延期至 V0.6：五类 native 资产的全量只读语义 authority、引用与 native-to-open 导出矩阵均不属于 V0.5 验收。既有 FLVER/TPF/MTD 只读实现保留为标记 V0.6 预览且必须只读。"
+      ],
+      "successorRequirement": "整条资产线延期至 V0.6。既有 FLVER/TPF 登记样本 native document、MTD 只读投影与 GLB/PNG/TGA/DDS 导出保留为标记 V0.6 预览且必须只读；V0.6 恢复时继续 collision/navigation、完整引用和五类只读/导出闭环"
+    },
+    {
+      "gateId": "REL-F",
+      "targetRelease": "V0.5",
+      "capability": "编辑器验收",
+      "gateState": "open",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-REL-F-SCALE-02"
+      ],
+      "evidenceRefs": [],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-EDITORS"
+      ],
+      "openRulings": [
+        "需交付八个语义编辑器、共享只读 Hex 证据视图、完整有界访问与 Electron 真实文档功能验收；不要求量化容量或延迟门槛。"
+      ],
+      "successorRequirement": "inventory 已精确冻结为 BND4/FMG/PARAM/EMEVD/script 五项（script 为只读 + 整内层文件替换）；继续 BND4/script 工作台、各编辑器结构化 UI/DSL/完整有界访问和 Electron 真实文档功能验收。msb/tae/esd/flver 为 V0.6 延期只读预览，不计入本 Gate 验收，其写入路径必须在 contract、shared 清单与主进程 IPC 三层失败关闭"
+    },
+    {
+      "gateId": "REL-G",
+      "targetRelease": "V0.5",
+      "capability": "双协议 AI",
+      "gateState": "open",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-AI-CONFORMANCE-03"
+      ],
+      "evidenceRefs": [],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-AI"
+      ],
+      "openRulings": [
+        "需以确定性本地 contract servers 完成双协议语义 typed tool、权限、限额、取消、审计、空配置诊断和多步写任务验证；不要求真实 provider 凭据。"
+      ],
+      "successorRequirement": "错误/取消/超时/限额 10 case 已完成；继续真实工作区多步 typed mutation 矩阵"
+    },
+    {
+      "gateId": "REL-H",
+      "targetRelease": "V0.5",
+      "capability": "安装与运行",
+      "gateState": "open",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-ME3-INSTALL-04"
+      ],
+      "evidenceRefs": [],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-SEKIRO-BUILD",
+        "SCOPE-RUNTIME",
+        "SCOPE-RELEASE"
+      ],
+      "openRulings": [
+        "需完成 me3 能力探测运行闭环及 Windows 10/11 x64 NSIS 的 manifest/hash、安装、升级、卸载和干净机验证；代码签名不属于验收范围。"
+      ],
+      "successorRequirement": "profile/launch/terminate adapter 已完成；继续 NSIS 安装/升级/卸载和真实 Sekiro 会话"
+    },
+    {
+      "gateId": "REL-I",
+      "targetRelease": "V0.6",
+      "capability": "渲染功能闭环",
+      "gateState": "deferred",
+      "applicability": "deferred-v0.6",
+      "sliceRefs": [
+        "W-RENDER-FUNCTIONAL-02"
+      ],
+      "evidenceRefs": [
+        "EV-REL-SCOPE-20260731-TEXT-FIRST"
+      ],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-RENDERING"
+      ],
+      "openRulings": [
+        "3D 渲染已裁定移出 V0.5、延期至 V0.6：MSB 场景与资产线同时延期后，V0.5 不再有 in-scope 的 3D 编辑目标，WebGPU 主路径/WebGL2 功能回退闭环不属于 V0.5 验收。既有 renderer-independent semantic scene 架构与 Three.js 骨架保留，不得推翻。"
+      ],
+      "successorRequirement": "3D 渲染延期至 V0.6。MSB 与资产线同时延期后，V0.5 无 in-scope 3D 编辑目标。renderer-independent semantic scene、render packet 与 Three.js WebGPU/WebGL2 骨架保留不推翻；V0.6 恢复时继续真实 FLVER 渲染、picking、transform 更新与资源释放闭环"
+    },
+    {
+      "gateId": "REL-COMPLIANCE",
+      "targetRelease": "V0.5",
+      "capability": "内部测试构建合规",
+      "gateState": "open",
+      "applicability": "in-scope",
+      "sliceRefs": [
+        "W-REL-COMPLIANCE-02"
+      ],
+      "evidenceRefs": [],
+      "blockerRefs": [],
+      "scopeItemIds": [
+        "SCOPE-COMPLIANCE"
+      ],
+      "openRulings": [
+        "仅允许项目所有者内部测试；外部分发仍由 notices、再分发权利与完整发行合规失败关闭。"
+      ],
+      "successorRequirement": "许可证文本 complete + NSIS 构建已完成；继续 installer lifecycle 验证和 package tree 扫描"
+    }
+  ],
+  "invariants": [
+    "requiredGateIds 固定为 11 个；gates 必须精确覆盖同一集合，不得通过同时删除两处绕过范围裁定。",
+    "open 必须至少引用一个 ready/active 切片；completed/superseded 切片不得覆盖 open Gate。",
+    "blocked 必须引用 blockers.json 中已定义 blocker，且其全部切片必须为 blocked。",
+    "passed 与 scope-excluded 只能引用 sealed-current-run Evidence；scope-excluded 必须同时 gateState=passed。",
+    "deferred 必须成对 applicability=deferred-v0.6，禁用于基础 Gate，且必须引用带 scope-deferral:<GateId>:<release>:user-approved 的 sealed Evidence。",
+    "只要仍能推进 protocol/validator/registry/instrumentation/失败关闭/synthetic harness，就必须补 ready/active 切片并保持 open，不得因下游 corpus 或阈值缺失提前记 blocked。"
+  ]
+}
