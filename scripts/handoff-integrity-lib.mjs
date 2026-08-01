@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { checkEvidenceFreshness } from './governance/governanceRules.mjs';
 
 const ALLOWED_SLICE_LIFECYCLES = new Set([
   'ready',
@@ -226,7 +227,13 @@ function extractUniqueHexField(baseline, field, lengths) {
   return matches.length === 1 ? matches[0][1].toLowerCase() : null;
 }
 
-function parseSealBaseline(baseline) {
+/**
+ * 解析 sealed-current-run 的五字段封存基线。
+ *
+ * 导出供治理 JSON 门禁复用：指纹校验必须只有一份实现，
+ * 否则两个数据源可能对同一条 Evidence 得出不同的封存有效性结论。
+ */
+export function parseSealBaseline(baseline) {
   const fields = {
     head: extractUniqueHexField(baseline, 'HEAD', [40, 64]),
     trackedDiffSha256: extractUniqueHexField(baseline, 'trackedDiffSha256', [64]),
@@ -806,7 +813,20 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     'scripts/verify-handoff-integrity-fixtures.mjs',
     'scripts/verify-handoff-integrity.mjs',
     'scripts/verify-release-scope.mjs',
-    'scripts/verify-release-scope-fixtures.mjs'
+    'scripts/verify-release-scope-fixtures.mjs',
+    // 治理数据与其门禁实现同属范围裁定主题域：
+    // 若不登记，就可以在不使 REL-SCOPE 失效的前提下改写已冻结裁定
+    // 或削弱冻结拦截规则本身。
+    'scripts/governance/governanceRules.mjs',
+    'scripts/governance/freezeRules.mjs',
+    'scripts/governance/loadGovernance.mjs',
+    'scripts/governance/projectGovernance.mjs',
+    'scripts/governance/validateGovernanceData.mjs',
+    'scripts/verify-governance-equivalence.mjs',
+    'docs/governance/releases.json',
+    'docs/governance/scope.json',
+    'docs/governance/schema/releases.schema.json',
+    'docs/governance/schema/scope.schema.json'
   ]),
   handoffSections: Object.freeze([]),
   handoffBlocks: Object.freeze([RELEASE_SCOPE_PROPOSAL_SUBJECT])
@@ -880,43 +900,9 @@ export function collectSealAnchors(markdown) {
  * - stale：锚点不是祖先（历史被改写）或主题域已变更；
  * - unverifiable：上下文缺少该锚点的祖先/差异信息，失败关闭。
  */
-function evaluateEvidenceFreshness(evidence, id, subjectRefs, freshnessContext) {
-  if (freshnessContext === undefined) return 'static-mode';
-  if (!evidenceIsSealed(evidence, id)) return 'not-sealed';
-  const anchor = evidence.get(id).seal.fields.head;
-  const anchorState = freshnessContext.anchors?.[anchor];
-  if (!anchorState || anchorState.subjectScanAvailable === false) return 'unverifiable';
-  if (anchorState.isAncestor !== true) return 'stale';
-  const changed = new Set(anchorState.changedSubjects ?? []);
-  return subjectRefs.some((ref) => changed.has(ref)) ? 'stale' : 'fresh';
-}
-
-function checkEvidenceFreshness(
-  where,
-  evidenceIds,
-  evidence,
-  subjectRefs,
-  freshnessContext,
-  staleCode,
-  staleMessage
-) {
-  if (freshnessContext === undefined) return null;
-  if (evidenceIds.length === 0) return null;
-  let sawUnverifiable = false;
-  for (const id of evidenceIds) {
-    const status = evaluateEvidenceFreshness(evidence, id, subjectRefs, freshnessContext);
-    if (status === 'fresh' || status === 'static-mode') return null;
-    if (status === 'unverifiable') sawUnverifiable = true;
-  }
-  if (sawUnverifiable) {
-    return makeFinding(
-      'GATE_FRESHNESS_UNVERIFIABLE',
-      where,
-      'passed Gate 的 sealed Evidence 锚点祖先关系或主题域差异无法验证，失败关闭。'
-    );
-  }
-  return makeFinding(staleCode, where, staleMessage);
-}
+// freshness 判定已上移到 scripts/governance/governanceRules.mjs，
+// 由 markdown 与 JSON 两个数据源共用。这里不再保留第二份实现：
+// 两份实现意味着某个数据源下 stale Evidence 可能被单侧放行。
 
 function parseAndValidateGateMatrix(
   markdown,
