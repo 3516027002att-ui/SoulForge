@@ -1226,7 +1226,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       event,
       sourceUri: string,
       expectedHash: string,
-      mutation: { kind: 'upsert' | 'delete'; id: number; text?: string }
+      mutation: { kind: 'upsert' | 'delete' | 'add'; id: number; text?: string }
     ): Promise<RendererSaveResult> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file || !activeSession) {
@@ -1247,7 +1247,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const bridgeMutation =
         mutation.kind === 'delete'
           ? { kind: 'delete' as const, id: mutation.id }
-          : { kind: 'upsert' as const, id: mutation.id, text: mutation.text ?? '' };
+          : mutation.kind === 'add'
+            ? { kind: 'add' as const, id: mutation.id, text: mutation.text ?? '' }
+            : { kind: 'upsert' as const, id: mutation.id, text: mutation.text ?? '' };
       const stagedOutput = await stageBridgeOutput({
         stagingRoot: storage.stagingRoot,
         allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),

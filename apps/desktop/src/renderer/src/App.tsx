@@ -13,6 +13,7 @@ import type {
   MsbPartTransformLike,
   MsbRegionLike,
   MsbSceneSourceCounts,
+  ParamDefDocument,
   ParamExport,
   ResourceKind,
   ResourceStructuredPreview,
@@ -51,6 +52,8 @@ import { TaeWorkbenchPanel } from './editors/TaeWorkbenchPanel.js';
 import { EsdWorkbenchPanel } from './editors/EsdWorkbenchPanel.js';
 import { FlverWorkbenchPanel } from './editors/FlverWorkbenchPanel.js';
 import { TpfWorkbenchPanel } from './editors/TpfWorkbenchPanel.js';
+import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
+import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
 import {
   mapEmevdEnvelopeToDocument,
@@ -59,7 +62,7 @@ import {
 
 const RESOURCE_KIND_ORDER: ResourceKind[] = ['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx', 'chr', 'obj', 'other', 'unknown'];
 
-type WorkspaceMode = ResourceKind | 'files' | 'ai' | 'settings' | 'ops';
+type WorkspaceMode = ResourceKind | 'files' | 'bnd4' | 'ai' | 'settings' | 'ops';
 
 const WORKSPACE_MODES: Array<{ id: WorkspaceMode; label: string }> = [
   { id: 'files', label: '文件' },
@@ -69,6 +72,7 @@ const WORKSPACE_MODES: Array<{ id: WorkspaceMode; label: string }> = [
   { id: 'msg', label: 'FMG 文本' },
   { id: 'menu', label: '菜单' },
   { id: 'script', label: '脚本' },
+  { id: 'bnd4', label: 'BND4 容器' },
   { id: 'action', label: '动作' },
   { id: 'chr', label: '角色资源' },
   { id: 'obj', label: '物件资源' },
@@ -155,6 +159,24 @@ const DEMO_PARAM_ROWS = [
   { id: 2, dataHexPreview: '0000000000000000' }
 ];
 
+/**
+ * 演示 fixture paramdef：仅与演示行（DEMO_PARAM_ROWS，rowDataSize=16）配套
+ * 使用，offset 布局不匹配任何真实 PARAM，因此 fixture 定义永不驱动真实写入。
+ */
+const DEMO_PARAM_DEF: ParamDefDocument = {
+  schemaVersion: 1,
+  typeName: 'DEMO_PARAM_ST',
+  version: 0,
+  rowDataSize: 16,
+  origin: 'fixture',
+  fields: [
+    { id: 'f_id', name: 'idHint', type: 's32', offset: 0, size: 4 },
+    { id: 'f_hp', name: 'hp', type: 'u16', offset: 4, size: 2 },
+    { id: 'f_flag', name: 'enabled', type: 'bool', offset: 6, size: 1 },
+    { id: 'f_rate', name: 'rate', type: 'f32', offset: 8, size: 4 }
+  ]
+};
+
 interface EditableMsgRow {
   textId: string;
   text: string;
@@ -220,6 +242,7 @@ export function App(): ReactElement {
   const [paramSourceHash, setParamSourceHash] = useState<string | null>(null);
   const [paramLive, setParamLive] = useState(false);
   const [paramRowPayloads, setParamRowPayloads] = useState<Map<number, string>>(new Map());
+  const [paramRowDataSize, setParamRowDataSize] = useState<number>(16);
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
   const [aiThinking, setAiThinking] = useState<AiThinkingLevel>('normal');
@@ -267,6 +290,7 @@ export function App(): ReactElement {
               name?: string;
             }>;
             rowCount?: number;
+            rowDataSize?: number;
             authority?: string;
           } | null;
         };
@@ -291,6 +315,7 @@ export function App(): ReactElement {
         setParamRowPayloads(payloads);
         setParamTypeName(result.data.typeName ?? target.relativePath);
         setParamSourceHash(result.data.sourceHash ?? null);
+        if (result.data.rowDataSize !== undefined) setParamRowDataSize(result.data.rowDataSize);
         setParamLive(true);
         setStatus(
           `已加载 PARAM：${result.data.rowCount ?? result.data.rows.length} 行`
@@ -556,6 +581,85 @@ export function App(): ReactElement {
   async function refreshOperationHistory(): Promise<void> {
     const history = await window.soulforge.listOperations();
     setOperationHistory(history);
+  }
+
+  async function reloadParamRowsFromSource(): Promise<void> {
+    if (!selectedFile) return;
+    const reload = await window.soulforge.readParamDocument(selectedFile.sourceUri) as {
+      ok?: boolean;
+      data?: {
+        sourceHash?: string;
+        typeName?: string;
+        rows?: Array<{
+          id: number;
+          dataBase64?: string;
+          dataHexPreview?: string;
+          name?: string;
+        }>;
+        rowDataSize?: number;
+      } | null;
+    };
+    if (reload?.ok && reload.data?.rows) {
+      const payloads = new Map<number, string>();
+      setParamRows(reload.data.rows.map((r) => {
+        if (r.dataBase64) payloads.set(r.id, r.dataBase64);
+        return {
+          id: r.id,
+          dataHexPreview: r.dataHexPreview ?? '',
+          ...(r.name ? { name: r.name } : {})
+        };
+      }));
+      setParamRowPayloads(payloads);
+      setParamSourceHash(reload.data.sourceHash ?? null);
+      if (reload.data.typeName) setParamTypeName(reload.data.typeName);
+      if (reload.data.rowDataSize !== undefined) setParamRowDataSize(reload.data.rowDataSize);
+    }
+  }
+
+  async function applyParamFieldMutationFromPanel(input: {
+    rowId: number;
+    fieldId: string;
+    value: number | string | boolean;
+    rowDataBase64: string;
+    definition: unknown;
+  }): Promise<{ ok: boolean; diagnostics?: Array<{ code: string; message: string }> }> {
+    if (!paramSourceHash || !selectedFile) {
+      return {
+        ok: false,
+        diagnostics: [{ code: 'PARAM_FIELD_NO_LIVE_DOCUMENT', message: '需要实时 PARAM 文档才能提交字段。' }]
+      };
+    }
+    if (typeof window.soulforge.applyParamFieldMutation !== 'function') {
+      return {
+        ok: false,
+        diagnostics: [{ code: 'PRELOAD_MISSING', message: '当前预加载未暴露 applyParamFieldMutation。' }]
+      };
+    }
+    setStatus('正在经 Bridge/补丁引擎提交 PARAM 字段…');
+    const result = await window.soulforge.applyParamFieldMutation(
+      selectedFile.sourceUri,
+      paramSourceHash,
+      {
+        rowId: input.rowId,
+        fieldId: input.fieldId,
+        value: input.value,
+        rowDataBase64: input.rowDataBase64,
+        definition: input.definition
+      }
+    );
+    if (result.ok) {
+      await reloadParamRowsFromSource();
+      await refreshOperationHistory();
+      setStatus(`PARAM 字段 ${input.fieldId} 已提交并重读。`);
+      return { ok: true, diagnostics: result.diagnostics ?? [] };
+    }
+    return {
+      ok: false,
+      diagnostics: (result.diagnostics ?? []).map((diagnostic: Diagnostic) => ({
+        code: diagnostic.code,
+        message: diagnostic.message
+      }))
+    };
   }
 
   /**
@@ -1335,21 +1439,47 @@ export function App(): ReactElement {
                 }}
               />
               <ParamDefPanel
-                typeName={paramLive ? `${paramTypeName}（用户派生 def 待绑定）` : 'DEMO_PARAM_ST'}
-                rowDataSize={16}
-                origin="fixture"
-                fields={[
-                  { id: 'f_id', name: 'idHint', type: 's32', offset: 0, size: 4, valuePreview: '42' },
-                  { id: 'f_hp', name: 'hp', type: 'u16', offset: 4, size: 2, valuePreview: '100' },
-                  { id: 'f_flag', name: 'enabled', type: 'bool', offset: 6, size: 1, valuePreview: 'true' },
-                  { id: 'f_rate', name: 'rate', type: 'f32', offset: 8, size: 4, valuePreview: '1.5' }
-                ]}
-                onFieldChange={() => setStatus('paramdef 字段 mutation 已产生；提交须经补丁引擎，不得写官方适配包。')}
+                typeName={paramLive ? paramTypeName : 'DEMO_PARAM_ST'}
+                rowDataSize={paramLive ? paramRowDataSize : 16}
+                origin={paramLive ? '待绑定' : 'fixture'}
+                definition={paramLive ? null : DEMO_PARAM_DEF}
+                rows={paramRows}
+                getRowDataBase64={(rowId) => paramRowPayloads.get(rowId)}
+                {...(paramLive
+                  ? { onApplyFieldMutation: applyParamFieldMutationFromPanel }
+                  : {})}
               />
             </>
           )}
-          {workspaceMode === 'settings' && <ModelServiceSettingsPanel />}
-          {workspaceMode === 'ops' && (
+          {workspaceMode === 'script' && (
+            <>
+              <p className="muted">
+                {selectedFile
+                  ? '实时脚本容器只读证据（字节码绝不显示为可编辑源码）'
+                  : '选择左侧脚本容器（如 luabnd）后显示只读证据'}
+              </p>
+              <ScriptContainerPanel
+                key={selectedFile?.sourceUri ?? 'none'}
+                resourceUri={selectedFile?.sourceUri ?? ''}
+                onMutationCommitted={() => void refreshOperationHistory()}
+              />
+            </>
+          )}
+          {workspaceMode === 'bnd4' && (
+            <>
+              <p className="muted">
+                {selectedFile
+                  ? 'BND4 容器工作台（只读条目树 + 用户提供字节的整个子项替换）'
+                  : '选择左侧容器资源后显示工作台'}
+              </p>
+              <Bnd4WorkbenchPanel
+                key={selectedFile?.sourceUri ?? 'none'}
+                resourceUri={selectedFile?.sourceUri ?? ''}
+                onMutationCommitted={() => void refreshOperationHistory()}
+              />
+            </>
+          )}
+          {workspaceMode === 'settings' && <ModelServiceSettingsPanel />}          {workspaceMode === 'ops' && (
             <WorkbenchOpsPanel
               jobs={[
                 {
@@ -2044,7 +2174,7 @@ function groupToolsByPermission(tools: ToolDescriptor[]): Record<'read' | 'plan'
 }
 
 function isResourceKindMode(mode: WorkspaceMode): mode is ResourceKind {
-  return mode !== 'files' && mode !== 'ai' && mode !== 'settings' && mode !== 'ops';
+  return mode !== 'files' && mode !== 'bnd4' && mode !== 'ai' && mode !== 'settings' && mode !== 'ops';
 }
 
 function workspaceModeLabel(mode: WorkspaceMode): string {
@@ -2084,7 +2214,14 @@ function filterFilesForMode(
 ): RendererIndexedFile[] {
   const normalized = query.trim().toLowerCase();
   return files.filter((file) => {
-    if (isResourceKindMode(mode) && file.resourceKind !== mode) return false;
+    if (mode === 'bnd4') {
+      const looksContainer = file.formatKind === 'bnd' || file.formatKind === 'dcx'
+        || file.compoundExtension.includes('.bnd')
+        || file.compoundExtension.includes('.dcx');
+      if (!looksContainer) return false;
+    } else if (isResourceKindMode(mode) && file.resourceKind !== mode) {
+      return false;
+    }
     if (!normalized) return true;
     return file.relativePath.toLowerCase().includes(normalized)
       || file.resourceKind.toLowerCase().includes(normalized)

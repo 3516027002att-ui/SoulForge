@@ -19,6 +19,51 @@ import type {
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
+import type {
+  RendererContainerChildBytes,
+  RendererContainerChildrenList,
+  RendererContainerTreeSummary,
+  ScriptContainerEvidence
+} from '@soulforge/shared';
+
+/** Path-bearing fields that must never cross the context bridge to the renderer. */
+const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
+  'containerPath',
+  'rootPath',
+  'absolutePath',
+  'sourcePath',
+  'targetPath',
+  'backupPath'
+]);
+
+/** Mask absolute filesystem paths that may appear inside diagnostic strings. */
+function maskAbsolutePathString(value: string): string {
+  const containsWindowsDrivePath = /(^|[\s('"=])(?:[A-Za-z]:[\\/])/.test(value);
+  const containsUncOrDevicePath = /(^|[\s('"=])\\\\(?:[?.]\\)?[^\\/\s]+[\\/]/.test(value);
+  const containsAbsoluteFileUri = /file:\/\/\/[A-Za-z]:\//i.test(value);
+  return containsWindowsDrivePath || containsUncOrDevicePath || containsAbsoluteFileUri
+    ? '[本机路径已隐藏]'
+    : value;
+}
+
+function stripPathFields<T>(value: T): T {
+  if (typeof value === 'string') {
+    return maskAbsolutePathString(value) as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => stripPathFields(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    if (value instanceof Uint8Array || value instanceof ArrayBuffer) return value;
+    const output: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (RENDERER_FORBIDDEN_PATH_KEYS.has(key)) continue;
+      output[key] = stripPathFields(child);
+    }
+    return output as unknown as T;
+  }
+  return value;
+}
 
 const api = {
   openWorkspaceDialog: (): Promise<DirectorySelection | null> => ipcRenderer.invoke('workspace.openDialog'),
@@ -43,11 +88,11 @@ const api = {
     ipcRenderer.invoke('resource.readRawMetadata', sourceUri),
   readRawRange: (sourceUri: string, offset: number, length: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readRawRange', sourceUri, offset, length),
-  inspectContainerTree: (sourceUri: string): Promise<unknown> =>
-    ipcRenderer.invoke('resource.inspectContainerTree', sourceUri),
-  listContainerChildren: (sourceUri: string, recursive?: boolean): Promise<unknown> =>
+  inspectContainerTree: (sourceUri: string): Promise<RendererContainerTreeSummary> =>
+    ipcRenderer.invoke('resource.inspectContainerTree', sourceUri).then(stripPathFields),
+  listContainerChildren: (sourceUri: string, recursive?: boolean): Promise<RendererContainerChildrenList> =>
     ipcRenderer.invoke('resource.listContainerChildren', sourceUri, recursive),
-  readContainerChild: (childUri: string): Promise<unknown> =>
+  readContainerChild: (childUri: string): Promise<RendererContainerChildBytes> =>
     ipcRenderer.invoke('resource.readContainerChild', childUri),
   replaceContainerChild: (
     childUri: string,
@@ -68,8 +113,8 @@ const api = {
     ipcRenderer.invoke('resource.validateContainer', sourceUri),
   probeContainerCapabilities: (sourceUri: string): Promise<ResourceCapabilityMatrix | null> =>
     ipcRenderer.invoke('resource.probeContainerCapabilities', sourceUri),
-  scriptContainerEvidence: (sourceUri: string): Promise<unknown> =>
-    ipcRenderer.invoke('resource.scriptContainerEvidence', sourceUri),
+  scriptContainerEvidence: (sourceUri: string): Promise<ScriptContainerEvidence> =>
+    ipcRenderer.invoke('resource.scriptContainerEvidence', sourceUri).then(stripPathFields),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),
@@ -109,7 +154,7 @@ const api = {
   applyFmgMutation: (
     sourceUri: string,
     expectedHash: string,
-    mutation: { kind: 'upsert' | 'delete'; id: number; text?: string }
+    mutation: { kind: 'upsert' | 'delete' | 'add'; id: number; text?: string }
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.applyFmgMutation', sourceUri, expectedHash, mutation),
   readMsbDocument: (sourceUri: string): Promise<unknown> =>

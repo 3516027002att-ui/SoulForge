@@ -439,6 +439,37 @@ pre {
   white-space: nowrap;
 }
 
+.binder-child-row.selected {
+  background: #243044;
+  border-color: #3a4a68;
+}
+
+.script-entry-row {
+  grid-template-columns: minmax(150px, 1.6fr) 118px 72px 56px minmax(160px, 1.2fr);
+  min-width: 720px;
+}
+
+.bnd4-child-row {
+  grid-template-columns: minmax(150px, 1.6fr) 72px 78px 92px 96px 72px 56px;
+  min-width: 760px;
+}
+
+.paramdef-field-row {
+  grid-template-columns: minmax(120px, 1.4fr) 64px 96px 88px minmax(120px, 1fr) 88px;
+  min-width: 720px;
+}
+
+.paramdef-field-row input {
+  width: 100%;
+  border: 1px solid #303442;
+  border-radius: 6px;
+  background: #0c0e14;
+  color: #eadfce;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  padding: 4px 6px;
+}
+
 .binder-child-header {
   color: #8f98b7;
   font-size: 11px;

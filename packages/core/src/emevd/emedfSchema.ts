@@ -154,6 +154,97 @@ export function decodeEmedfArgs(
   }
 }
 
+/**
+ * Collect decoded integer arg values that match a schema-driven predicate.
+ * Unknown instructions (no def) return undefined so callers can skip silently.
+ */
+function collectEmedfIntegerReferences(
+  registry: EmedfRegistry,
+  bank: number,
+  id: number,
+  decodedArgs: DecodedArg[],
+  matches: (name: string, description: string | undefined) => boolean
+): number[] | undefined {
+  const def = findInstructionDef(registry, bank, id);
+  if (!def) return undefined;
+  const argDefs = new Map(def.args.map((arg) => [arg.name, arg]));
+  const references: number[] = [];
+  for (const decoded of decodedArgs) {
+    if (typeof decoded.value !== 'number' || !Number.isInteger(decoded.value)) continue;
+    if (!matches(decoded.name, argDefs.get(decoded.name)?.description)) continue;
+    references.push(decoded.value);
+  }
+  return references;
+}
+
+/**
+ * Collect event ID references from decoded instruction args.
+ *
+ * An arg is treated as an event ID reference when its name contains "eventId"
+ * (DarkScript3-style naming, e.g. GotoEvent.eventId) or its description
+ * mentions "event", and its decoded value is an integer. Schema-driven: any
+ * imported EMEDF instruction with such an arg is covered automatically without
+ * hardcoding bank/id. Returns undefined when the instruction has no schema.
+ */
+export function extractEventIdReferences(
+  registry: EmedfRegistry,
+  bank: number,
+  id: number,
+  decodedArgs: DecodedArg[]
+): number[] | undefined {
+  return collectEmedfIntegerReferences(
+    registry,
+    bank,
+    id,
+    decodedArgs,
+    (name, description) => /eventid/i.test(name) || /event/i.test(description ?? '')
+  );
+}
+
+/**
+ * Collect condition group references from decoded instruction args.
+ *
+ * An arg is treated as a condition group reference when its name contains
+ * "conditionGroup" (e.g. conditionGroup, conditionGroupId,
+ * resultConditionGroup, targetConditionGroup) or its description mentions
+ * "condition group". Returns undefined when the instruction has no schema.
+ */
+export function extractConditionGroupReferences(
+  registry: EmedfRegistry,
+  bank: number,
+  id: number,
+  decodedArgs: DecodedArg[]
+): number[] | undefined {
+  return collectEmedfIntegerReferences(
+    registry,
+    bank,
+    id,
+    decodedArgs,
+    (name, description) => /conditiongroup/i.test(name) || /condition group/i.test(description ?? '')
+  );
+}
+
+/**
+ * Collect condition group *result* references — the condition groups that an
+ * instruction (e.g. IfConditionGroup's resultConditionGroup) defines for later
+ * instructions to consume. These values form the "initialized" set in
+ * control-flow validation. Returns undefined when the instruction has no schema.
+ */
+export function extractConditionGroupResults(
+  registry: EmedfRegistry,
+  bank: number,
+  id: number,
+  decodedArgs: DecodedArg[]
+): number[] | undefined {
+  return collectEmedfIntegerReferences(
+    registry,
+    bank,
+    id,
+    decodedArgs,
+    (name) => /resultconditiongroup/i.test(name)
+  );
+}
+
 export function encodeInstructionArgs(
   registry: EmedfRegistry,
   bank: number,

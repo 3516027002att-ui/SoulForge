@@ -12,7 +12,8 @@ import { renderEmevdPatchDsl, renderEmevdPatchDslBounded } from '../emevd/dslRen
 import { formatEmevdAnchor } from '../emevd/stableIdentity.js';
 import {
   createSekiroFixtureEmedf,
-  encodeInstructionArgs
+  encodeInstructionArgs,
+  type EmedfRegistry
 } from '../emevd/emedfSchema.js';
 
 function main(): void {
@@ -313,6 +314,230 @@ instruction ${typedAnchor} { set arg conditionGroup = -3 }` },
     throw new Error('instruction anchor drifted after event ID mutation');
   }
 
+  // ---- Schema-driven control-flow validation (warning-only) ----
+  // Event ID references are extracted from any schema-known instruction (arg
+  // name contains "eventId" / description mentions "event"), not hardcoded to
+  // InitializeEvent 2000:0, so a GotoEvent-style jump is covered once its
+  // EMEDF is imported.
+  const controlRegistry: EmedfRegistry = {
+    schemaVersion: 1,
+    game: 'sekiro',
+    origin: 'user-derived',
+    instructions: [
+      { bank: 2001, id: 5, name: 'GotoEvent', args: [{ name: 'eventId', type: 'u32' }] },
+      {
+        bank: 2000,
+        id: 0,
+        name: 'IfConditionGroup',
+        args: [
+          { name: 'resultConditionGroup', type: 's8' },
+          { name: 'desiredComparisonType', type: 'u8' },
+          { name: 'targetConditionGroup', type: 's8' },
+          { name: 'pad0', type: 'u8' },
+          { name: 'pad1', type: 'u32' },
+          { name: 'pad2', type: 'u32' }
+        ]
+      },
+      {
+        bank: 1000,
+        id: 0,
+        name: 'WaitFor',
+        args: [
+          { name: 'conditionGroup', type: 's8' },
+          { name: 'pad0', type: 'u8' },
+          { name: 'pad1', type: 'u16' },
+          { name: 'unknown', type: 'u32' }
+        ]
+      }
+    ]
+  };
+  const controlFingerprint = fingerprintEmedfRegistry(controlRegistry);
+
+  // GotoEvent-style instruction must be caught even though the registry has no
+  // InitializeEvent (2000:0): the check is schema-driven, not hardcoded.
+  const gotoEncoded = encodeInstructionArgs(controlRegistry, 2001, 5, { eventId: 60 });
+  if (!gotoEncoded.ok) throw new Error(JSON.stringify(gotoEncoded));
+  const gotoDocument = createEmevdEditorDocument({
+    resourceUri: 'file://event/goto.emevd',
+    documentInstanceId: 'emevd-dsl-control-goto',
+    events: [
+      {
+        eventId: 50,
+        restBehavior: 0,
+        instructions: [
+          { bank: 2001, id: 5, argsBase64: gotoEncoded.args.toString('base64'), unknown: false }
+        ]
+      },
+      { eventId: 60, restBehavior: 0, instructions: [] }
+    ]
+  });
+  if (!gotoDocument.documentInstanceId || !gotoDocument.events[1]!.anchor) {
+    throw new Error('goto document stable identity missing');
+  }
+  const gotoEventAnchor = formatEmevdAnchor('event', gotoDocument.events[1]!.anchor);
+  const gotoCompiled = compileEmevdPatchDsl(
+    {
+      schemaVersion: 1,
+      resourceUri: gotoDocument.resourceUri,
+      documentInstanceId: gotoDocument.documentInstanceId,
+      baseRevision: gotoDocument.revision,
+      emedfSchemaFingerprint: controlFingerprint,
+      sourceText: `resource "${gotoDocument.resourceUri}"
+base revision ${gotoDocument.revision} schema "${controlFingerprint}"
+event ${gotoEventAnchor} { set id = 61 }`,
+      mode: 'patch'
+    },
+    gotoDocument,
+    controlRegistry
+  );
+  assertWarning(gotoCompiled, 'EMEVD_DSL_EVENT_ID_REFERENCE_STALE');
+  if (gotoCompiled.plan.operations.some((op) => op.kind !== 'set_event_id')) {
+    throw new Error('goto case must only change the event ID');
+  }
+
+  // Condition group reference value 0 → invalid reference warning.
+  const zeroCgEncoded = encodeInstructionArgs(controlRegistry, 1000, 0, {
+    conditionGroup: 0, pad0: 0, pad1: 0, unknown: 0
+  });
+  if (!zeroCgEncoded.ok) throw new Error(JSON.stringify(zeroCgEncoded));
+  const zeroCgDocument = createEmevdEditorDocument({
+    resourceUri: 'file://event/zero-cg.emevd',
+    documentInstanceId: 'emevd-dsl-control-zero-cg',
+    events: [{ eventId: 50, restBehavior: 0, instructions: [
+      { bank: 1000, id: 0, argsBase64: zeroCgEncoded.args.toString('base64'), unknown: false }
+    ] }]
+  });
+  if (!zeroCgDocument.documentInstanceId) throw new Error('zero cg document identity missing');
+  const zeroCgCompiled = compileEmevdPatchDsl(
+    {
+      schemaVersion: 1,
+      resourceUri: zeroCgDocument.resourceUri,
+      documentInstanceId: zeroCgDocument.documentInstanceId,
+      baseRevision: zeroCgDocument.revision,
+      emedfSchemaFingerprint: controlFingerprint,
+      sourceText: renderEmevdPatchDsl(zeroCgDocument, controlRegistry),
+      mode: 'patch'
+    },
+    zeroCgDocument,
+    controlRegistry
+  );
+  if (!zeroCgCompiled.ok || zeroCgCompiled.plan.operations.length !== 0) {
+    throw new Error('zero cg rendered template must compile to an empty plan');
+  }
+  assertWarning(zeroCgCompiled, 'EMEVD_DSL_CONDITION_GROUP_INVALID_REFERENCE');
+
+  // Condition group reference to a never-initialized group → warning.
+  const uninitCgEncoded = encodeInstructionArgs(controlRegistry, 1000, 0, {
+    conditionGroup: 5, pad0: 0, pad1: 0, unknown: 0
+  });
+  if (!uninitCgEncoded.ok) throw new Error(JSON.stringify(uninitCgEncoded));
+  const uninitCgDocument = createEmevdEditorDocument({
+    resourceUri: 'file://event/uninit-cg.emevd',
+    documentInstanceId: 'emevd-dsl-control-uninit-cg',
+    events: [{ eventId: 50, restBehavior: 0, instructions: [
+      { bank: 1000, id: 0, argsBase64: uninitCgEncoded.args.toString('base64'), unknown: false }
+    ] }]
+  });
+  if (!uninitCgDocument.documentInstanceId) throw new Error('uninit cg document identity missing');
+  const uninitCgCompiled = compileEmevdPatchDsl(
+    {
+      schemaVersion: 1,
+      resourceUri: uninitCgDocument.resourceUri,
+      documentInstanceId: uninitCgDocument.documentInstanceId,
+      baseRevision: uninitCgDocument.revision,
+      emedfSchemaFingerprint: controlFingerprint,
+      sourceText: renderEmevdPatchDsl(uninitCgDocument, controlRegistry),
+      mode: 'patch'
+    },
+    uninitCgDocument,
+    controlRegistry
+  );
+  assertWarning(uninitCgCompiled, 'EMEVD_DSL_CONDITION_GROUP_UNINITIALIZED');
+
+  // A group produced by IfConditionGroup.resultConditionGroup is initialized:
+  // referencing it must not warn.
+  const initCgDefined = encodeInstructionArgs(controlRegistry, 2000, 0, {
+    resultConditionGroup: 7, desiredComparisonType: 1, targetConditionGroup: 7,
+    pad0: 0, pad1: 0, pad2: 0
+  });
+  if (!initCgDefined.ok) throw new Error(JSON.stringify(initCgDefined));
+  const initCgConsumed = encodeInstructionArgs(controlRegistry, 1000, 0, {
+    conditionGroup: 7, pad0: 0, pad1: 0, unknown: 0
+  });
+  if (!initCgConsumed.ok) throw new Error(JSON.stringify(initCgConsumed));
+  const initCgDocument = createEmevdEditorDocument({
+    resourceUri: 'file://event/init-cg.emevd',
+    documentInstanceId: 'emevd-dsl-control-init-cg',
+    events: [{ eventId: 50, restBehavior: 0, instructions: [
+      { bank: 2000, id: 0, argsBase64: initCgDefined.args.toString('base64'), unknown: false },
+      { bank: 1000, id: 0, argsBase64: initCgConsumed.args.toString('base64'), unknown: false }
+    ] }]
+  });
+  if (!initCgDocument.documentInstanceId) throw new Error('init cg document identity missing');
+  const initCgCompiled = compileEmevdPatchDsl(
+    {
+      schemaVersion: 1,
+      resourceUri: initCgDocument.resourceUri,
+      documentInstanceId: initCgDocument.documentInstanceId,
+      baseRevision: initCgDocument.revision,
+      emedfSchemaFingerprint: controlFingerprint,
+      sourceText: renderEmevdPatchDsl(initCgDocument, controlRegistry),
+      mode: 'patch'
+    },
+    initCgDocument,
+    controlRegistry
+  );
+  if (!initCgCompiled.ok) throw new Error(JSON.stringify(initCgCompiled.diagnostics));
+  if (initCgCompiled.diagnostics.some((d) => d.code === 'EMEVD_DSL_CONDITION_GROUP_INVALID_REFERENCE'
+    || d.code === 'EMEVD_DSL_CONDITION_GROUP_UNINITIALIZED')) {
+    throw new Error('initialized condition groups must not warn');
+  }
+
+  // Instructions without schema or marked unknown are skipped silently: no
+  // control-flow diagnostic may be produced even when an event ID changes.
+  const noSchemaDocument = createEmevdEditorDocument({
+    resourceUri: 'file://event/no-schema.emevd',
+    documentInstanceId: 'emevd-dsl-control-no-schema',
+    events: [
+      {
+        eventId: 50,
+        restBehavior: 0,
+        instructions: [
+          { bank: 9000, id: 0, argsBase64: Buffer.alloc(4).toString('base64'), unknown: false },
+          { bank: 9999, id: 1, argsBase64: '', unknown: true }
+        ]
+      },
+      { eventId: 60, restBehavior: 0, instructions: [] }
+    ]
+  });
+  if (!noSchemaDocument.documentInstanceId || !noSchemaDocument.events[1]!.anchor) {
+    throw new Error('no-schema document identity missing');
+  }
+  const noSchemaEventAnchor = formatEmevdAnchor('event', noSchemaDocument.events[1]!.anchor);
+  const noSchemaCompiled = compileEmevdPatchDsl(
+    {
+      schemaVersion: 1,
+      resourceUri: noSchemaDocument.resourceUri,
+      documentInstanceId: noSchemaDocument.documentInstanceId,
+      baseRevision: noSchemaDocument.revision,
+      emedfSchemaFingerprint: controlFingerprint,
+      sourceText: `resource "${noSchemaDocument.resourceUri}"
+base revision ${noSchemaDocument.revision} schema "${controlFingerprint}"
+event ${noSchemaEventAnchor} { set id = 61 }`,
+      mode: 'patch'
+    },
+    noSchemaDocument,
+    controlRegistry
+  );
+  if (!noSchemaCompiled.ok) throw new Error(JSON.stringify(noSchemaCompiled.diagnostics));
+  if (noSchemaCompiled.diagnostics.some((d) => [
+    'EMEVD_DSL_EVENT_ID_REFERENCE_STALE',
+    'EMEVD_DSL_CONDITION_GROUP_INVALID_REFERENCE',
+    'EMEVD_DSL_CONDITION_GROUP_UNINITIALIZED'
+  ].includes(d.code))) {
+    throw new Error('no-schema instructions must be skipped silently');
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: 'EMEVD DSL Slice A+B stable identity/parser/deterministic plan smoke passed',
@@ -329,7 +554,10 @@ instruction ${typedAnchor} { set arg conditionGroup = -3 }` },
       'EMEVD_DSL_EVENT_ID_DUPLICATE',
       'EMEVD_DSL_DUPLICATE_WRITE',
       'EMEVD_DSL_DUPLICATE_ARGUMENT',
-      'EMEVD_DSL_SYNTAX_ERROR'
+      'EMEVD_DSL_SYNTAX_ERROR',
+      'EMEVD_DSL_EVENT_ID_REFERENCE_STALE',
+      'EMEVD_DSL_CONDITION_GROUP_INVALID_REFERENCE',
+      'EMEVD_DSL_CONDITION_GROUP_UNINITIALIZED'
     ]
   }, null, 2));
 }
@@ -365,6 +593,27 @@ function assertDiagnostic(
   const item = result.diagnostics.find((diagnostic) => diagnostic.code === code)!;
   if (item.span.start.line < 1 || item.span.start.column < 1) {
     throw new Error(`diagnostic ${code} has invalid source span`);
+  }
+}
+
+/**
+ * Control-flow diagnostics are warning-only and carry a zero source span plus
+ * a targetAnchor on the authority instruction, so they cannot reuse the span
+ * checks of assertDiagnostic.
+ */
+function assertWarning(
+  result: ReturnType<typeof compileEmevdPatchDsl>,
+  code: string
+): asserts result is Extract<ReturnType<typeof compileEmevdPatchDsl>, { ok: true }> {
+  if (!result.ok || !result.diagnostics.some((item) => item.code === code)) {
+    throw new Error(`missing warning ${code}: ${JSON.stringify(result)}`);
+  }
+  const item = result.diagnostics.find((diagnostic) => diagnostic.code === code)!;
+  if (item.severity !== 'warning') {
+    throw new Error(`diagnostic ${code} must be a warning`);
+  }
+  if (item.targetAnchor === undefined) {
+    throw new Error(`warning ${code} must carry a targetAnchor`);
   }
 }
 

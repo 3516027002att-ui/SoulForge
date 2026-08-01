@@ -20,6 +20,7 @@ export type EditorKind =
 export type EditorMutationKind =
   | 'fmg_entry_upsert'
   | 'fmg_entry_delete'
+  | 'fmg_entry_add'
   | 'param_row_upsert'
   | 'param_row_delete'
   | 'param_field_set'

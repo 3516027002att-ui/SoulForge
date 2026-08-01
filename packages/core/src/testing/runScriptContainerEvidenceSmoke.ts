@@ -8,8 +8,13 @@
 import {
   classifyScriptEntry,
   magicLabel,
-  type ScriptEntryClassification
+  buildScriptContainerEvidence,
+  type ScriptEntryClassification,
+  type ScriptContainerEvidence
 } from '../script/scriptContainerEvidence.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
+import { dirname } from 'node:path';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -75,11 +80,35 @@ syntheticChecks();
 
 const realPath = process.argv[2];
 if (realPath) {
-  console.log(JSON.stringify({
-    ok: true,
-    message: 'real container evidence requires Bridge daemon; skipping in synthetic-only mode',
-    skipped: true
-  }));
+  // Real-container evidence projection: resolve the luabnd fixture and verify
+  // entry enumeration + bytecode classification against a real DCX-DFLT->BND4
+  // script container. SoulForge never decompiles/recompiles/executes scripts.
+  try {
+    const path = await resolveNativeFixture(realPath, 'luabnd-primary', realPath);
+    const evidence = await buildScriptContainerEvidence({
+      containerPath: path,
+      allowedRoots: [dirname(path)],
+      timeoutMs: 60_000
+    }) as ScriptContainerEvidence;
+    assert(evidence.ok === true, 'real luabnd evidence must build');
+    assert(evidence.containerFormat.includes('BND4'), `container format: ${evidence.containerFormat}`);
+    assert(evidence.entryCount > 0, `entryCount > 0 (${evidence.entryCount})`);
+    assert(evidence.entries.length > 0, 'entries must be enumerated from sampleEntries');
+    const luaCount = evidence.classificationSummary['lua-bytecode'];
+    assert(luaCount > 0, `lua-bytecode classification present (${luaCount})`);
+    const first = evidence.entries[0]!;
+    assert(first.classification === 'lua-bytecode', `first entry classified as lua-bytecode (${first.name})`);
+    console.log(JSON.stringify({
+      ok: true,
+      message: 'real script container evidence: ok',
+      containerFormat: evidence.containerFormat,
+      entryCount: evidence.entryCount,
+      entriesSampled: evidence.entries.length,
+      classificationSummary: evidence.classificationSummary
+    }));
+  } finally {
+    await disposeBridgeDaemonPool();
+  }
 } else {
   console.log(JSON.stringify({
     ok: true,
