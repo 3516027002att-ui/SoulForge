@@ -367,6 +367,20 @@ if (rollbackTarget) {
     duplicate.status === 1 && duplicate.payload?.code === 'SEAL_ID_DUPLICATE',
     `重复 EvidenceId 必须被拒（封存只追加不覆盖），实际 ${JSON.stringify(duplicate.payload)?.slice(0, 300)}`);
 
+  // 不存在的 Gate 必须失败关闭并连带回滚已追加的证据行。若只回滚 gates.json，
+  // evidence.jsonl 会留下一条没被任何 Gate 引用的孤立封存记录。
+  const gatesPath = join(cliRoot, 'docs/governance/gates.json');
+  const gatesBefore = readFileSync(gatesPath, 'utf8');
+  const badGate = runGov(['seal', '--id', 'EV-FIXTURE-BAD-GATE', '--subject', 's',
+    '--commands', 'c', '--result', 'r', '--non-claims', 'n',
+    '--gates', 'REL-DOES-NOT-EXIST'], cliRoot);
+  check('cli/seal-rejects-undefined-gate',
+    badGate.status === 1 && badGate.payload?.code === 'SEAL_GATE_UNDEFINED',
+    `未定义 Gate 必须被拒，实际 ${JSON.stringify(badGate.payload)?.slice(0, 300)}`);
+  check('cli/seal-bad-gate-rolls-back-gates',
+    readFileSync(gatesPath, 'utf8') === gatesBefore,
+    'Gate 挂载失败时 gates.json 必须保持原样。');
+
   check('cli/seal-failures-append-nothing',
     readFileSync(evidencePath, 'utf8').split('\n').length === linesBefore,
     '任何 seal 失败路径都不得留下半条记录。');
@@ -401,7 +415,29 @@ if (rollbackTarget) {
       !readFileSync(join(cliRoot, 'docs/governance/evidence.jsonl'), 'utf8')
         .includes('EV-FIXTURE-SEAL-OK'),
       '后置校验失败必须回滚，不得留下一条无效封存。');
+    // 回滚路径的 hint 必须指出 --gates 缺失这个可能。真实仓库上首次重封存正是
+    // 因为漏了 --gates 而 stale 未消除：freshness 只判定 Gate 引用的
+    // evidenceRefs，孤立的新证据根本不参与判定。hint 若不提这一点，
+    // 下一个 agent 会照着「主题域没提交」这个错误方向查。
+    check('cli/seal-rollback-hint-mentions-gates',
+      typeof sealed.payload?.hint === 'string' && sealed.payload.hint.includes('--gates'),
+      `未指定 --gates 时回滚 hint 必须提示该参数，实际 hint=${sealed.payload?.hint}`);
   }
+}
+
+// --gates 会把新证据挂到 Gate 的 evidenceRefs 上（只追加，不删历史引用——
+// 历史证据是审计链）。这里不依赖 seal 整体成功：临时仓库的 freshness 恒不可判定，
+// 所以直接断言「回滚后 gates.json 与原样逐字节相同」，证明挂载与回滚成对。
+{
+  const gatesPath = join(cliRoot, 'docs/governance/gates.json');
+  const before = readFileSync(gatesPath, 'utf8');
+  const gateId = JSON.parse(before).gates[0].gateId;
+  runGov(['seal', '--id', 'EV-FIXTURE-GATE-ATTACH', '--subject', 's',
+    '--commands', 'c', '--result', 'r', '--non-claims', 'n',
+    '--gates', gateId], cliRoot);
+  check('cli/seal-gate-attach-rolls-back-cleanly',
+    readFileSync(gatesPath, 'utf8') === before,
+    'seal 回滚后 gates.json 必须逐字节还原，否则会留下指向已回滚证据的悬空引用。');
 }
 
 rmSync(cliRoot, { recursive: true, force: true });
@@ -425,8 +461,9 @@ console.log(JSON.stringify({
     '重复 claim、非持有者释放被拒；complete 不提升 authority',
     '治理数据已违规时拒绝叠加改动且不写入',
     'gov/seal.mjs 与 generate-handoff-fingerprint.mjs 五字段指纹逐字段一致',
-    'seal 拒绝非法/重复 EvidenceId 与缺失必填字段，且失败路径不追加任何行',
-    'seal 成功时封存基线自洽；后置校验失败时回滚该条记录'
+    'seal 拒绝非法/重复 EvidenceId、未定义 Gate 与缺失必填字段，且失败路径不追加任何行',
+    'seal 成功时封存基线自洽；后置校验失败时同时回滚 evidence.jsonl 与 gates.json',
+    'seal 回滚 hint 指出 --gates 缺失（freshness 只判定 Gate 引用的证据）'
   ],
   findings
 }, null, 2));
