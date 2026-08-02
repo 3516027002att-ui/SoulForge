@@ -188,6 +188,34 @@ const claimable = next.payload?.claimable ?? [];
 check('cli/next-lists-ready', claimable.length > 0 && claimable.every((item) => item.alreadyClaimed === false),
   'gov next 应只列出未被 claim 的 ready 切片。');
 
+// 选点输出必须自带完整闭环：agent 光看它就能知道改哪些文件、跑哪条验证、
+// 做完怎么收尾。缺任一环就得回 3800 行交接书里翻，那是首次可行动延迟的主要来源。
+check('cli/next-item-self-sufficient',
+  claimable.every((item) =>
+    Array.isArray(item.entryPoints) && item.entryPoints.length > 0
+    && typeof item.requiredValidation === 'string' && item.requiredValidation.length > 0
+    && typeof item.hardPrerequisites === 'string' && item.hardPrerequisites.length > 0),
+  '每条可 claim 切片必须同时给出 entryPoints、requiredValidation 与 hardPrerequisites。');
+
+// workflow 是 claim 之后到封存之间的流程骨架。断了这一环，agent 做完改动会
+// 卡在「怎么收尾」上，而封存漏步骤会撞上指向错误原因的 GATE_EVIDENCE_STALE。
+{
+  const workflow = next.payload?.workflow;
+  check('cli/next-includes-workflow',
+    Array.isArray(workflow) && workflow.length >= 5,
+    `选点输出必须带 claim→验证→封存→complete 的流程骨架，实际 ${JSON.stringify(workflow)?.slice(0, 160)}`);
+  const workflowText = (workflow ?? []).join('\n');
+  for (const [label, needle] of [
+    ['claim', 'gov claim'],
+    ['validation', 'requiredValidation'],
+    ['seal', 'gov seal'],
+    ['complete', 'gov complete']
+  ]) {
+    check(`cli/next-workflow-mentions-${label}`, workflowText.includes(needle),
+      `流程骨架必须提到 ${needle}，否则闭环缺一环。`);
+  }
+}
+
 // --release 的默认值必须来自 releases.json 的 currentRelease，不能是字面量。
 // 治理要跨 V0.5 → V0.6：写死版本号会在 V0.5 冻结后把新证据继续挂到旧版本上，
 // 而 currentRelease 已经翻页——两份权威分叉且无门禁可见。
@@ -593,7 +621,8 @@ console.log(JSON.stringify({
     'seal 回滚 hint 指出 --gates 缺失（freshness 只判定 Gate 引用的证据）',
     'seal 成功即完成交接书投影；失败时连交接书一并回滚',
     '--release 默认取 releases.json 的 currentRelease；未登记或形状非法的版本硬失败',
-    'seal 在追加前预检 subject 是否带齐目标 Gate 的 user-approved 继承标记，缺失时逐个指名（否则会报成指向错误原因的 GATE_EVIDENCE_STALE）'
+    'seal 在追加前预检 subject 是否带齐目标 Gate 的 user-approved 继承标记，缺失时逐个指名（否则会报成指向错误原因的 GATE_EVIDENCE_STALE）',
+    'next 的输出自带完整闭环：每条切片有 entryPoints/requiredValidation/hardPrerequisites，另附 claim→验证→封存→complete 的流程骨架'
   ],
   findings
 }, null, 2));
