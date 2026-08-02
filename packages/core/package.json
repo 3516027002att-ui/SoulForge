@@ -94,7 +94,8 @@
     "test:large-transaction-recovery": "tsc -b ../shared . && node dist/testing/runLargeTransactionRecoverySmoke.js",
     "test:cross-session-journal": "tsc -b ../shared . && node dist/testing/runCrossSessionJournalSmoke.js",
     "test:upgrade-recovery": "tsc -b ../shared . && node dist/testing/runUpgradeRecoverySmoke.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:editor-mutation-service": "tsc -b ../shared . && node dist/testing/runEditorMutationServiceSmoke.js"
   },
   "dependencies": {
     "@soulforge/shared": "0.0.0",

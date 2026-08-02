@@ -46,8 +46,12 @@ import {
   saveTextResource,
   scanWorkspace,
   stageBridgeOutput,
+  applyNativeMutation,
   validateContainer,
   isDeferredPreviewEditor,
+  type NativeMutationOutcome,
+  type RawReplaceCommitPort,
+  type WriteConfirmationPort,
   type AiSidebarDraft,
   type AiSidebarDraftRequest,
   type ResourceCapabilityMatrix,
@@ -705,6 +709,60 @@ function cancelledWrite(sourceUri: string): RendererSaveResult {
   };
 }
 
+/**
+ * 把 Electron 原生确认对话框适配成 core 的 WriteConfirmationPort。
+ *
+ * core 不能依赖 electron（否则 core 单元测试要跑在 Electron 里），所以确认在
+ * core 侧是能力而非实现，这里是它唯一的生产实现。
+ */
+function electronConfirmationPort(event: IpcMainInvokeEvent): WriteConfirmationPort {
+  return {
+    requestConfirmation: (input) => requestWriteConfirmation({ event, ...input })
+  };
+}
+
+/**
+ * 把 Patch Engine 的 saveRawReplace 适配成 core 的 RawReplaceCommitPort，
+ * 绑定当前会话的持久化路径与操作日志。
+ *
+ * 会话与操作日志在这里绑定而不是由 core 传入，是因为它们是主进程生命周期
+ * 状态；core 只需要「提交这段字节」的能力。所有 Mod 资源写入仍然只经由
+ * saveRawReplace → PatchIR → WorkspaceTransaction，本适配器不绕过任何环节。
+ */
+function sessionCommitPort(
+  session: WorkspaceSession,
+  operationLog: OperationLogUtilityClient,
+  storage: { backupBaseDir: string; recoveryDir: string }
+): RawReplaceCommitPort {
+  return {
+    commit: (input) => saveRawReplace({
+      file: input.file,
+      expectedHash: input.expectedHash,
+      newContentBase64: input.newContentBase64,
+      title: input.title,
+      ...(input.confirmation ? { confirmation: input.confirmation } : {}),
+      session,
+      operationLog,
+      backupBaseDir: storage.backupBaseDir,
+      recoveryDir: storage.recoveryDir
+    })
+  };
+}
+
+/**
+ * 把 core 写链结果转成 renderer DTO。取消是正常结果，不能报成故障。
+ */
+function toSaveResultFromOutcome(
+  outcome: NativeMutationOutcome,
+  files: IndexedFile[]
+): RendererSaveResult {
+  if (outcome.status === 'cancelled') return cancelledWrite(outcome.sourceUri);
+  if (outcome.status === 'failed') {
+    return { ok: false, changedFiles: [], diagnostics: outcome.diagnostics };
+  }
+  return toRendererSaveResult(outcome.result, files);
+}
+
 export function registerIpcHandlers(webContents: WebContents, rendererDocumentUrl: string): void {
   const normalizedDocument = normalizeRendererDocumentUrl(rendererDocumentUrl);
   if (!normalizedDocument) {
@@ -1160,12 +1218,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         kind: String(mutation.kind ?? mutation.mutation ?? ''),
         ...mutation
       } as Parameters<typeof commitEmevdMutationViaBridge>[0]['mutation'];
-      const stagedOutput = await stageBridgeOutput({
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash,
         stagingRoot: storage.stagingRoot,
         allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
-        prefix: 'emevd',
-        fileName: `${basename(file.relativePath)}.mut.emevd`,
-        write: (context) => commitEmevdMutationViaBridge({
+        stagingPrefix: 'emevd',
+        stagingFileName: `${basename(file.relativePath)}.mut.emevd`,
+        stageWrite: (context) => commitEmevdMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
           expectedDocumentHash: expectedHash,
@@ -1176,58 +1238,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             ? { instructionIndex: mutation.instructionIndex }
             : {}),
           timeoutMs: 120_000
-        })
+        }),
+        title: `EMEVD mutation ${String(mutation.kind ?? 'edit')}`,
+        confirmActionLabel: '提交 EMEVD 变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
       });
-      if (!stagedOutput.ok) {
-        const diagnostics = stagedOutput.diagnostics.length > 0
-          ? stagedOutput.diagnostics
-          : stagedOutput.result && 'diagnostics' in stagedOutput.result
-            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
-            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: diagnostics.map((d) => ({
-            severity: d.severity as Diagnostic['severity'],
-            code: d.code,
-            message: d.message,
-            sourceUri
-          }))
-        };
-      }
-      const bytes = stagedOutput.bytes;
-      const newContentBase64 = bytes.toString('base64');
-      const operationLog = await ensureActiveOperationLog(activeSession);
-      let result = await saveRawReplace({
-        file,
-        expectedHash,
-        newContentBase64,
-        session: activeSession,
-        operationLog,
-        ...storage,
-        title: `EMEVD mutation ${String(mutation.kind ?? 'edit')}`
-      });
-      if (!result.ok && result.requiresConfirmation) {
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: file.relativePath,
-          sourceUri,
-          actionLabel: '提交 EMEVD 变更',
-          payloadHash: createHash('sha256').update(bytes).digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
-        result = await saveRawReplace({
-          file,
-          expectedHash,
-          newContentBase64,
-          confirmation,
-          session: activeSession,
-          operationLog,
-          ...storage,
-          title: `EMEVD mutation ${String(mutation.kind ?? 'edit')}`
-        });
-      }
-      if (result.ok) {
+      if (outcome.status === 'committed' && outcome.result.ok) {
         const refreshed = await openResourcePreview({
           file,
           inspectNative: true,
@@ -1237,7 +1255,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
         if (index >= 0) indexedFiles[index] = refreshed.file;
       }
-      return toRendererSaveResult(result, indexedFiles);
+      return toSaveResultFromOutcome(outcome, indexedFiles);
     }
   );
 
@@ -1639,70 +1657,31 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           : mutation.kind === 'add'
             ? { kind: 'add' as const, id: mutation.id, text: mutation.text ?? '' }
             : { kind: 'upsert' as const, id: mutation.id, text: mutation.text ?? '' };
-      const stagedOutput = await stageBridgeOutput({
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash,
         stagingRoot: storage.stagingRoot,
         allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
-        prefix: 'fmg',
-        fileName: `${basename(file.relativePath)}.mut.fmg`,
-        write: (context) => commitFmgMutationViaBridge({
+        stagingPrefix: 'fmg',
+        stagingFileName: `${basename(file.relativePath)}.mut.fmg`,
+        stageWrite: (context) => commitFmgMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
           expectedDocumentHash: expectedHash,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
           mutation: bridgeMutation
-        })
+        }),
+        title: `FMG mutation ${mutation.kind} ${mutation.id}`,
+        confirmActionLabel: '提交 FMG 变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
       });
-      if (!stagedOutput.ok) {
-        const diagnostics = stagedOutput.diagnostics.length > 0
-          ? stagedOutput.diagnostics
-          : stagedOutput.result && 'diagnostics' in stagedOutput.result
-            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
-            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: diagnostics.map((d) => ({
-            severity: d.severity as Diagnostic['severity'],
-            code: d.code,
-            message: d.message,
-            sourceUri
-          }))
-        };
-      }
-      const bytes = stagedOutput.bytes;
-      const operationLog = await ensureActiveOperationLog(activeSession);
-      let result = await saveRawReplace({
-        file,
-        expectedHash,
-        newContentBase64: bytes.toString('base64'),
-        session: activeSession,
-        operationLog,
-        ...storage,
-        title: `FMG mutation ${mutation.kind} ${mutation.id}`
-      });
-      if (!result.ok && result.requiresConfirmation) {
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: file.relativePath,
-          sourceUri,
-          actionLabel: '提交 FMG 变更',
-          payloadHash: createHash('sha256').update(bytes).digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
-        result = await saveRawReplace({
-          file,
-          expectedHash,
-          newContentBase64: bytes.toString('base64'),
-          confirmation,
-          session: activeSession,
-          operationLog,
-          ...storage,
-          title: `FMG mutation ${mutation.kind} ${mutation.id}`
-        });
-      }
-      if (result.ok) fmgPageCache.delete(sourceUri);
-      return toRendererSaveResult(result, indexedFiles);
+      if (outcome.status === 'committed' && outcome.result.ok) fmgPageCache.delete(sourceUri);
+      return toSaveResultFromOutcome(outcome, indexedFiles);
     }
   );
 
@@ -1874,69 +1853,30 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const deferredBlocked = rejectDeferredPreviewEditorWrite('msb', sourceUri);
       if (deferredBlocked) return deferredBlocked;
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
-      const stagedOutput = await stageBridgeOutput({
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash,
         stagingRoot: storage.stagingRoot,
         allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
-        prefix: 'msb',
-        fileName: `${basename(file.relativePath)}.mut.msb`,
-        write: (context) => commitMsbMutationViaBridge({
+        stagingPrefix: 'msb',
+        stagingFileName: `${basename(file.relativePath)}.mut.msb`,
+        stageWrite: (context) => commitMsbMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
           expectedDocumentHash: expectedHash,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
           mutation
-        })
+        }),
+        title: `MSB mutation ${mutation.kind} ${mutation.partName}`,
+        confirmActionLabel: '提交 MSB 变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
       });
-      if (!stagedOutput.ok) {
-        const diagnostics = stagedOutput.diagnostics.length > 0
-          ? stagedOutput.diagnostics
-          : stagedOutput.result && 'diagnostics' in stagedOutput.result
-            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
-            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: diagnostics.map((d) => ({
-            severity: d.severity as Diagnostic['severity'],
-            code: d.code,
-            message: d.message,
-            sourceUri
-          }))
-        };
-      }
-      const bytes = stagedOutput.bytes;
-      const operationLog = await ensureActiveOperationLog(activeSession);
-      let result = await saveRawReplace({
-        file,
-        expectedHash,
-        newContentBase64: bytes.toString('base64'),
-        session: activeSession,
-        operationLog,
-        ...storage,
-        title: `MSB mutation ${mutation.kind} ${mutation.partName}`
-      });
-      if (!result.ok && result.requiresConfirmation) {
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: file.relativePath,
-          sourceUri,
-          actionLabel: '提交 MSB 变更',
-          payloadHash: createHash('sha256').update(bytes).digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
-        result = await saveRawReplace({
-          file,
-          expectedHash,
-          newContentBase64: bytes.toString('base64'),
-          confirmation,
-          session: activeSession,
-          operationLog,
-          ...storage,
-          title: `MSB mutation ${mutation.kind} ${mutation.partName}`
-        });
-      }
-      return toRendererSaveResult(result, indexedFiles);
+      return toSaveResultFromOutcome(outcome, indexedFiles);
     }
   );
 
@@ -2163,70 +2103,31 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         mutation.kind === 'delete'
           ? { kind: 'delete' as const, id: mutation.id }
           : { kind: 'upsert' as const, id: mutation.id, dataBase64: mutation.dataBase64! };
-      const stagedOutput = await stageBridgeOutput({
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash,
         stagingRoot: storage.stagingRoot,
         allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
-        prefix: 'param',
-        fileName: `${basename(file.relativePath)}.mut.param`,
-        write: (context) => commitParamMutationViaBridge({
+        stagingPrefix: 'param',
+        stagingFileName: `${basename(file.relativePath)}.mut.param`,
+        stageWrite: (context) => commitParamMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
           expectedDocumentHash: expectedHash,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
           mutation: bridgeMutation
-        })
+        }),
+        title: `PARAM mutation ${mutation.kind} ${mutation.id}`,
+        confirmActionLabel: '提交 PARAM 变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
       });
-      if (!stagedOutput.ok) {
-        const diagnostics = stagedOutput.diagnostics.length > 0
-          ? stagedOutput.diagnostics
-          : stagedOutput.result && 'diagnostics' in stagedOutput.result
-            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
-            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: diagnostics.map((d) => ({
-            severity: d.severity as Diagnostic['severity'],
-            code: d.code,
-            message: d.message,
-            sourceUri
-          }))
-        };
-      }
-      const bytes = stagedOutput.bytes;
-      const operationLog = await ensureActiveOperationLog(activeSession);
-      let result = await saveRawReplace({
-        file,
-        expectedHash,
-        newContentBase64: bytes.toString('base64'),
-        session: activeSession,
-        operationLog,
-        ...storage,
-        title: `PARAM mutation ${mutation.kind} ${mutation.id}`
-      });
-      if (!result.ok && result.requiresConfirmation) {
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: file.relativePath,
-          sourceUri,
-          actionLabel: '提交 PARAM 变更',
-          payloadHash: createHash('sha256').update(bytes).digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
-        result = await saveRawReplace({
-          file,
-          expectedHash,
-          newContentBase64: bytes.toString('base64'),
-          confirmation,
-          session: activeSession,
-          operationLog,
-          ...storage,
-          title: `PARAM mutation ${mutation.kind} ${mutation.id}`
-        });
-      }
-      if (result.ok) paramPageCache.delete(sourceUri);
-      return toRendererSaveResult(result, indexedFiles);
+      if (outcome.status === 'committed' && outcome.result.ok) paramPageCache.delete(sourceUri);
+      return toSaveResultFromOutcome(outcome, indexedFiles);
     }
   );
 
@@ -2282,70 +2183,31 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
       // Send the modified row as a whole-row upsert to the Bridge
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
-      const stagedOutput = await stageBridgeOutput({
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash,
         stagingRoot: storage.stagingRoot,
         allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
-        prefix: 'param',
-        fileName: `${basename(file.relativePath)}.field.param`,
-        write: (context) => commitParamMutationViaBridge({
+        stagingPrefix: 'param',
+        stagingFileName: `${basename(file.relativePath)}.field.param`,
+        stageWrite: (context) => commitParamMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
           expectedDocumentHash: expectedHash,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
           mutation: { kind: 'upsert' as const, id: mutation.rowId, dataBase64: fieldResult.nextDataBase64 }
-        })
+        }),
+        title: `PARAM field set ${mutation.fieldId} on row ${mutation.rowId}`,
+        confirmActionLabel: '提交 PARAM 字段变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
       });
-      if (!stagedOutput.ok) {
-        const diagnostics = stagedOutput.diagnostics.length > 0
-          ? stagedOutput.diagnostics
-          : stagedOutput.result && 'diagnostics' in stagedOutput.result
-            ? stagedOutput.result.diagnostics as Array<{ severity: string; code: string; message: string }>
-            : [{ severity: 'error', code: 'BRIDGE_STAGING_FAILED', message: 'Bridge 暂存失败。' }];
-        return {
-          ok: false,
-          changedFiles: [],
-          diagnostics: diagnostics.map((d) => ({
-            severity: d.severity as Diagnostic['severity'],
-            code: d.code,
-            message: d.message,
-            sourceUri
-          }))
-        };
-      }
-      const bytes = stagedOutput.bytes;
-      const operationLog = await ensureActiveOperationLog(activeSession);
-      let result = await saveRawReplace({
-        file,
-        expectedHash,
-        newContentBase64: bytes.toString('base64'),
-        session: activeSession,
-        operationLog,
-        ...storage,
-        title: `PARAM field set ${mutation.fieldId} on row ${mutation.rowId}`
-      });
-      if (!result.ok && result.requiresConfirmation) {
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: file.relativePath,
-          sourceUri,
-          actionLabel: '提交 PARAM 字段变更',
-          payloadHash: createHash('sha256').update(bytes).digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
-        result = await saveRawReplace({
-          file,
-          expectedHash,
-          newContentBase64: bytes.toString('base64'),
-          confirmation,
-          session: activeSession,
-          operationLog,
-          ...storage,
-          title: `PARAM field set ${mutation.fieldId} on row ${mutation.rowId}`
-        });
-      }
-      if (result.ok) paramPageCache.delete(sourceUri);
-      return toRendererSaveResult(result, indexedFiles);
+      if (outcome.status === 'committed' && outcome.result.ok) paramPageCache.delete(sourceUri);
+      return toSaveResultFromOutcome(outcome, indexedFiles);
     }
   );
 
