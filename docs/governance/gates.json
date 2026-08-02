@@ -48,7 +48,8 @@
       "evidenceRefs": [
         "EV-REL-SCOPE-20260731-TEXT-FIRST",
         "EV-REL-SCOPE-20260801-GOVERNANCE-JSON",
-        "EV-REL-SCOPE-20260801-SEAL-CLI"
+        "EV-REL-SCOPE-20260801-SEAL-CLI",
+        "EV-REL-SCOPE-20260801-HANDOFF-PROJECTION"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -183,7 +184,8 @@
       "evidenceRefs": [
         "EV-REL-SCOPE-20260731-TEXT-FIRST",
         "EV-REL-SCOPE-20260801-GOVERNANCE-JSON",
-        "EV-REL-SCOPE-20260801-SEAL-CLI"
+        "EV-REL-SCOPE-20260801-SEAL-CLI",
+        "EV-REL-SCOPE-20260801-HANDOFF-PROJECTION"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -271,7 +273,8 @@
       "evidenceRefs": [
         "EV-REL-SCOPE-20260731-TEXT-FIRST",
         "EV-REL-SCOPE-20260801-GOVERNANCE-JSON",
-        "EV-REL-SCOPE-20260801-SEAL-CLI"
+        "EV-REL-SCOPE-20260801-SEAL-CLI",
+        "EV-REL-SCOPE-20260801-HANDOFF-PROJECTION"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
