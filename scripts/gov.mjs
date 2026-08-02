@@ -37,6 +37,7 @@ const SLICES = 'docs/governance/slices.json';
 const VALIDATION = 'docs/governance/validation.json';
 const GATES = 'docs/governance/gates.json';
 const RELEASES = 'docs/governance/releases.json';
+const SCOPE = 'docs/governance/scope.json';
 
 /**
  * 写外壳会快照并在失败时恢复的文件集合。
@@ -214,6 +215,44 @@ function withGovernanceWrite(owner, mutate) {
  * 也不是靠释放 claim 或解阻塞能变 ready 的——真正的出路是 scope.json 里那条
  * scopeItem 的 resumeRequires。给错出路比不给更糟：agent 会沿着错误方向反复尝试。
  */
+/**
+ * 投影一条 deferred 切片的承接条件。
+ *
+ * 关联键取 capabilityId：实测三条 deferred 切片按 capabilityId 全部有解，而按
+ * gates 的 sliceRefs 反查对 W-MSB-SCENE-01 为空（没有 Gate 引用它）。切片本身
+ * 也没有 scopeItemIds 字段，所以 capabilityId 是唯一稳定的关联。
+ *
+ * 只投影，不复述也不改写：承接条件的权威在 scope.json，CLI 里写第二份表述会与
+ * 事实源分叉，而分叉的表现是「按 CLI 做完了但门禁仍不放行」。
+ */
+function collectResumeRequires(slice) {
+  let scopeDoc;
+  try {
+    scopeDoc = JSON.parse(readFileSync(join(root, SCOPE), 'utf8'));
+  } catch {
+    // 读不到就明说读不到，不静默返回空数组——空数组会被读成「没有承接条件」。
+    return { available: false, reason: `无法读取 ${SCOPE}` };
+  }
+  const caps = new Set(slice.capabilityIds ?? []);
+  const items = (scopeDoc.scopeItems ?? []).filter((item) =>
+    caps.has(item.capabilityId) && item.deferredToRelease === slice.targetRelease);
+  if (items.length === 0) {
+    return {
+      available: false,
+      reason: `${SCOPE} 中没有 capabilityId ∈ ${[...caps].join('/')} 且 deferredToRelease=${slice.targetRelease} 的 scopeItem；`
+        + '切片标为 deferred 但缺对应范围条目，属于治理数据不一致'
+    };
+  }
+  return {
+    available: true,
+    fromScopeItems: items.map((item) => ({
+      scopeItemId: item.scopeItemId,
+      deferredTrack: item.deferredTrack ?? null,
+      resumeRequires: item.resumeRequires
+    }))
+  };
+}
+
 function emptyCandidateMessage(slicesInRelease, release) {
   const counts = new Map();
   for (const slice of slicesInRelease) {
@@ -276,6 +315,7 @@ function cmdNext(args) {
   const candidates = data.slices.filter((slice) => inRelease(slice) && slice.lifecycle === 'ready');
   const inFlight = data.slices.filter((slice) => inRelease(slice) && slice.lifecycle === 'active');
   const blocked = data.slices.filter((slice) => inRelease(slice) && slice.lifecycle === 'blocked');
+  const deferred = data.slices.filter((slice) => inRelease(slice) && slice.lifecycle === 'deferred');
 
   emit({
     mode: 'next',
@@ -304,6 +344,19 @@ function cmdNext(args) {
     blockedSlices: blocked.map((slice) => ({
       sliceId: slice.sliceId,
       blockerRefs: slice.blockerRefs
+    })),
+    // deferred 切片的承接条件直接投影出来，不让 agent 去手工翻 scope.json。
+    //
+    // message 已经指对了方向（去满足 resumeRequires 而不是解阻塞），但只说「去
+    // scope.json 找」仍然是把 agent 送去手工检索：V0.6 有 3 条 deferred 切片，
+    // 对应 12 个 scopeItem，靠 gateIds 反查是 agent 每次都要重做一遍的活。
+    // 这与本轮修的其他诊断问题同源——方向对但不到位，收敛还是慢。
+    deferredSlices: deferred.map((slice) => ({
+      sliceId: slice.sliceId,
+      targetRelease: slice.targetRelease,
+      goal: slice.goal,
+      // 承接条件的权威在 scope.json；这里只投影，不复述也不改写。
+      resumeRequires: collectResumeRequires(slice)
     })),
     message: candidates.length === 0
       ? emptyCandidateMessage(data.slices.filter(inRelease), release)
