@@ -197,7 +197,7 @@
     {
       "sliceId": "W-EMEVD-FULL-01",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只提升实际完成并验证的 schema/类型/接线",
@@ -206,7 +206,7 @@
       ],
       "blockerRefs": [],
       "goal": "在导入的真实 EMEDF 上做交叉验证，并把 typed mutation 覆盖扩到全 corpus （adapter 已建立但尚未在 production 写链中使用导入 EMEDF 驱动 typed mutation）",
-      "evidence": "导入 EMEDF 驱动 production 写链与真实 corpus 覆盖率交叉验证已完成（test:emevd-imported-production 3 合成 leg + 真实 common.emevd 事件级/2000:0 指令级 typed mutation，vararg 尾逐字节保留；test:emevd-imported-coverage 对真实 142 种/33,266 条分布跑覆盖分类；真实 DarkScript3 EMEDF 文件 SOULFORGE_EMEDF_PATH 缺失时 fail-closed 跳过）；全 corpus typed-mutation 矩阵已完成（test:emevd-corpus-matrix：真实 common.emevd 33,266 指令/142 种——每个 schema 覆盖指令族 typed mutation 重读校验、未覆盖 140 族 opaque 字节保持 30,081/30,081、未知指令双重 fail-closed（EMEDF_UNKNOWN_INSTRUCTION/EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY）、vararg 长度签名区分与非法长度拒绝；uncoveredKinds 输出为覆盖工程线索）；导入 EMEDF 驱动 production 写链已完成（test:emevd-imported-production：DarkScript3 格式 EMEDF JSON 经 external-only adapter 导入 → DSL typed plan → Bridge batch staging → file_replace PatchIR → WorkspaceTransaction 提交 → 重读；合成 3 leg（成功链/回滚链/失败链）+ 真实 common.emevd 33,266 指令事件级 id/rest + 2000:0 InitializeEvent eventId typed mutation，vararg 尾部逐字节保留、未知指令保持 opaque、vararg 尾参数写编译期拒绝为只读；test:emevd-imported-coverage：导入 registry 对真实 corpus 分布跑 analyzeEmedfCoverage，clean/长度不匹配/unknown 分类；真实 EMEDF 文件（SOULFORGE_EMEDF_PATH）存在时交叉验证、缺失时 fail-closed 跳过）；已建立真实 corpus 指令分布提取与 EMEDF 覆盖分析基线（read-emevd-document 聚合分布 + analyzeEmedfCoverage 长度一致性校验，真实 142 种/33,266 条，fixture 覆盖 1 种）；DSL 顶层 instruction 块已实现（全局指令级 typed mutation：不依赖事件包裹，经稳定指令身份解析到所属事件，与事件内写法产生相同计划操作；跨作用域重复写被共享注册表拦截）；完整文档分页组装与四视图 DSL 提交 UI 接线已完成（Bridge 分页 envelope → readFullEmevdDocumentViaBridge 连续性/总数/事件切片校验 + DCX 直读解压产物复用为 staging 源；desktop main 持有权威完整文档缓存 emevdFullDocuments、renderer 仅编辑 DSL 文本；resource.submitEmevdDslPlan 提交前重读 fresh 文档保证 revision 一致，经 submitEmevdDslPlanViaFourView production 写链提交并刷新缓存）；EMEDF schema vararg 支持与 external-only adapter 已完成（DarkScript3 公开项目调查与许可证审计完成：All Rights Reserved，不可捆绑/再分发；emedfExternalAdapter.ts 读取用户本机 DarkScript3 格式 EMEDF JSON，含注释/尾随逗号兼容、类型码映射、名称 sanitize/去重、vararg 参数支持；真实 sekiro-common.emedf.json 导入 405 条指令 / 27 bank / 2 vararg 通过；28 个合成 case 覆盖正/负/边界场景）；继续完整 EMEDF 类型覆盖与真实 corpus 交叉验证（adapter 已建立但尚未在 production 写链中使用导入 EMEDF 进行 typed mutation）、DSL control-flow validation 已扩展为 schema 驱动的通用检查（emedfSchema.ts 新增 extractEventIdReferences/extractConditionGroupReferences/extractConditionGroupResults 通用 helper；validateEventIdReferences 不再硬编码 2000:0，改为遍历所有含 eventId 参数指令；新增 validateConditionGroupReferences warning-only 检查：EMEVD_DSL_CONDITION_GROUP_INVALID_REFERENCE（引用值 ≤0）与 EMEVD_DSL_CONDITION_GROUP_UNINITIALIZED（引用未在 resultConditionGroup 初始化集合中）；schema 缺失/未知指令静默跳过，不阻断 plan），仍缺真实导入 EMEDF 上的交叉验证与全 corpus mutation 矩阵",
+      "evidence": "导入 EMEDF 驱动 production 写链与真实 corpus 覆盖率交叉验证已完成（test:emevd-imported-production 3 合成 leg + 真实 common.emevd 事件级/2000:0 指令级 typed mutation，vararg 尾逐字节保留；test:emevd-imported-coverage 对真实 142 种/33,266 条分布跑覆盖分类；真实 DarkScript3 EMEDF 文件 SOULFORGE_EMEDF_PATH 缺失时 fail-closed 跳过）；全 corpus typed-mutation 矩阵已完成（test:emevd-corpus-matrix：真实 common.emevd 33,266 指令/142 种——每个 schema 覆盖指令族 typed mutation 重读校验、未覆盖 140 族 opaque 字节保持 30,081/30,081、未知指令双重 fail-closed（EMEDF_UNKNOWN_INSTRUCTION/EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY）、vararg 长度签名区分与非法长度拒绝；uncoveredKinds 输出为覆盖工程线索）；导入 EMEDF 驱动 production 写链已完成（test:emevd-imported-production：DarkScript3 格式 EMEDF JSON 经 external-only adapter 导入 → DSL typed plan → Bridge batch staging → file_replace PatchIR → WorkspaceTransaction 提交 → 重读；合成 3 leg（成功链/回滚链/失败链）+ 真实 common.emevd 33,266 指令事件级 id/rest + 2000:0 InitializeEvent eventId typed mutation，vararg 尾部逐字节保留、未知指令保持 opaque、vararg 尾参数写编译期拒绝为只读；test:emevd-imported-coverage：导入 registry 对真实 corpus 分布跑 analyzeEmedfCoverage，clean/长度不匹配/unknown 分类；真实 EMEDF 文件（SOULFORGE_EMEDF_PATH）存在时交叉验证、缺失时 fail-closed 跳过）；已建立真实 corpus 指令分布提取与 EMEDF 覆盖分析基线（read-emevd-document 聚合分布 + analyzeEmedfCoverage 长度一致性校验，真实 142 种/33,266 条，fixture 覆盖 1 种）；DSL 顶层 instruction 块已实现（全局指令级 typed mutation：不依赖事件包裹，经稳定指令身份解析到所属事件，与事件内写法产生相同计划操作；跨作用域重复写被共享注册表拦截）；完整文档分页组装与四视图 DSL 提交 UI 接线已完成（Bridge 分页 envelope → readFullEmevdDocumentViaBridge 连续性/总数/事件切片校验 + DCX 直读解压产物复用为 staging 源；desktop main 持有权威完整文档缓存 emevdFullDocuments、renderer 仅编辑 DSL 文本；resource.submitEmevdDslPlan 提交前重读 fresh 文档保证 revision 一致，经 submitEmevdDslPlanViaFourView production 写链提交并刷新缓存）；EMEDF schema vararg 支持与 external-only adapter 已完成（DarkScript3 公开项目调查与许可证审计完成：All Rights Reserved，不可捆绑/再分发；emedfExternalAdapter.ts 读取用户本机 DarkScript3 格式 EMEDF JSON，含注释/尾随逗号兼容、类型码映射、名称 sanitize/去重、vararg 参数支持；真实 sekiro-common.emedf.json 导入 405 条指令 / 27 bank / 2 vararg 通过；28 个合成 case 覆盖正/负/边界场景）；导入 EMEDF 已接入 production 写链驱动 typed mutation（getEmevdRegistry→resolveEmevdRegistry(SOULFORGE_EMEDF_PATH) 注入 IPC 读/写两侧）、DSL control-flow validation 已扩展为 schema 驱动的通用检查（emedfSchema.ts 新增 extractEventIdReferences/extractConditionGroupReferences/extractConditionGroupResults 通用 helper；validateEventIdReferences 不再硬编码 2000:0，改为遍历所有含 eventId 参数指令；新增 validateConditionGroupReferences warning-only 检查：EMEVD_DSL_CONDITION_GROUP_INVALID_REFERENCE（引用值 ≤0）与 EMEVD_DSL_CONDITION_GROUP_UNINITIALIZED（引用未在 resultConditionGroup 初始化集合中）；schema 缺失/未知指令静默跳过，不阻断 plan）；真实导入 EMEDF 交叉验证与全 corpus mutation 矩阵已完成（实测：真实 DarkScript3 sekiro-common.emedf.json 405 指令/27 banks 经 SOULFORGE_EMEDF_PATH 或 searchRealEmedf 自动定位导入 → imported-production realEmedfLegs=1（真实 common.emevd 事件级 id/rest + 2000:0 typed mutation、vararg 尾逐字节保留、重读 byte-consistent）；imported-coverage 对真实 142 种/33,266 条 kindCoverageRatio=1、instanceCoverageRatio=1、clean 33,266、mismatch 0、unknown 0；searchRealEmedf 定位器从 multi-corpus-matrix 提取至 realEmedfLocator.ts 供 imported-production/imported-coverage/multi-corpus-matrix 复用，无显式 env 时默认脚本即触发真实交叉验证，缺失时 fail-closed skip）",
       "hardPrerequisites": "W-EMEVD-PATCHIR-02 已完成 production 接线；未知指令、opaque 尾部和 layer 变体不得被重编码；真实文档既有重复事件 id 容忍但不修改；同 bank:id 多长度变体必须按长度签名区分，不得编造参数类型；无合法类型源时保持 opaque/partial 并继续其他工程切片，不能转成用户介入项；DarkScript3 EMEDF 数据为 All Rights Reserved，不得提交或打包",
       "entryPoints": [
         "packages/core/src/emevd/emedfSchema.ts",
@@ -889,7 +889,16 @@
       "declaresUnfrozenValidation": false
     }
   ],
-  "activeClaims": [],
+  "activeClaims": [
+    {
+      "sliceId": "W-EMEVD-FULL-01",
+      "claimId": "claim-w-emevd-full-01-20260802",
+      "owner": "3516027002att-ui",
+      "claimedAt": "2026-08-02T17:04:37.516Z",
+      "heartbeatAt": "2026-08-02T17:04:37.516Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    }
+  ],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",

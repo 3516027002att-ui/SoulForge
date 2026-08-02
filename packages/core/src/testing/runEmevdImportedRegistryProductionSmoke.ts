@@ -66,6 +66,7 @@ import {
   mutatedInitEventArgsForImported,
   sha256Hex
 } from './syntheticEmevdBytes.js';
+import { searchRealEmedf } from './realEmedfLocator.js';
 
 interface EmevdEnvelope {
   sourceHash: string;
@@ -588,7 +589,7 @@ async function main(): Promise<void> {
   const nativeFixtureArg = process.argv[2]?.trim() || undefined;
   const emedfPathArg = process.env.SOULFORGE_EMEDF_PATH?.trim()
     || process.argv[3]?.trim()
-    || undefined;
+    || (await searchRealEmedf());
   const nativeEnvAvailable = Boolean(
     (process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim() && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim())
     || nativeFixtureArg

@@ -90,6 +90,7 @@ import {
   createSyntheticImportedEmedf,
   sha256Hex
 } from './syntheticEmevdBytes.js';
+import { searchRealEmedf } from './realEmedfLocator.js';
 
 /* ------------------------------------------------------------------ */
 /*  Corpus discovery                                                   */
@@ -953,52 +954,8 @@ async function krakCorpusLeg(
 /* ------------------------------------------------------------------ */
 /*  Real EMEDF search                                                  */
 /* ------------------------------------------------------------------ */
-
-const REAL_EMEDF_CANDIDATE_PATHS = [
-  'sekiro-common.emedf.json',
-  'Sekiro/sekiro-common.emedf.json',
-  'sekiro.emedf.json'
-];
-
-/**
- * Locate a real DarkScript3 EMEDF JSON:
- *  1. SOULFORGE_EMEDF_PATH env / argv[3];
- *  2. common DarkScript3 / Smithbox directory candidates;
- *  3. a bounded set of user-profile subdirectories for `sekiro-common.emedf.json`.
- * Returns undefined (fail-closed) when not found.
- */
-async function searchRealEmedf(): Promise<string | undefined> {
-  const explicit = process.env.SOULFORGE_EMEDF_PATH?.trim();
-  if (explicit) return resolve(explicit);
-
-  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
-  const roots = [
-    home ? join(home, 'AppData', 'Local', 'Temp') : '',
-    home ? join(home, 'AppData', 'Roaming') : '',
-    home ? join(home, 'Desktop') : '',
-    home ? join(home, 'Documents') : '',
-    home ? join(home, 'Downloads') : '',
-    'D:/Repository/DarkScript3',
-    'D:/Repository/Smithbox',
-    'D:/Smithbox',
-    'C:/Tools/Smithbox',
-    'C:/DarkScript3',
-    'D:/DarkScript3'
-  ].filter(Boolean);
-  for (const root of roots) {
-    for (const rel of REAL_EMEDF_CANDIDATE_PATHS) {
-      const candidate = join(root, rel);
-      try {
-        await access(candidate);
-        return candidate;
-      } catch {
-        // continue
-      }
-    }
-  }
-  return undefined;
-}
-
+// searchRealEmedf 与候选路径清单共享自 ./realEmedfLocator.js（W-EMEVD-FULL-01
+// 真实导入 EMEDF 交叉验证的可复现定位器），三个 imported 类 smoke 复用同一逻辑。
 /* ------------------------------------------------------------------ */
 /*  Main                                                               */
 /* ------------------------------------------------------------------ */
