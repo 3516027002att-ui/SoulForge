@@ -568,12 +568,35 @@ if (targetSlice) {
 
   // complete 的完整成功路径必须被证明，否则「拒绝」分支会掩盖它从未跑通。
   // 构造法：给同一 Gate 追加一个后继切片，使 stranding 前提消失。
-  const successRoot = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/slices.json'), 'utf8'));
+  //
+  // 这段的两处扰动（slices.json 加后继切片 + gates.json 把它挂进 Gate）此前
+  // 从不还原，且长期没被发现：真实数据的 claimable[0] 曾是 W-BEHAVIOR-MAP-01，
+  // 它所属的 REL-D 只引用它自己，于是 isSoleLiveSlice=true 恒走上面的「诚实拒绝」
+  // 分支，这段成功路径一次都没执行过。释放 5 条被遗弃 claim 后 claimable[0] 变成
+  // W-EMEVD-FULL-01（REL-C 另有 active 切片，stranding 前提不成立），成功路径首次
+  // 真正执行，两处未还原的扰动立刻显形：complete 把目标切片置 completed 后，
+  // REL-C 仍是 open 却引用了终态切片 → GATE_OPEN_TERMINAL_SLICE 恒成立 →
+  // 其后每条 seal 断言都跑在已违规数据上，seal 正向路径必然走回滚分支。
+  // 实测 3 条断言同时红：complete-success-path / complete-drops-claim-on-success /
+  // seal-success-path-reachable。故快照 → 断言 → 还原 → 锁定还原成功。
+  const slicesPathForSuccess = join(cliRoot, 'docs/governance/slices.json');
+  const gatesPathForSuccess = join(cliRoot, 'docs/governance/gates.json');
+  const successRoot = JSON.parse(readFileSync(slicesPathForSuccess, 'utf8'));
   const successTarget = successRoot.slices.find((slice) => slice.lifecycle === 'active');
   if (successTarget) {
-    const gateWith = gatesData.gates.find((gate) =>
+    // 必须重读 gates.json，不能复用上面第 538 行的 gatesData：那份是 complete
+    // 调用之前的快照。当上面走的是 else（complete 合法成功）分支时，CLI 已按治理
+    // 规则把 completed 切片从 open Gate 的 sliceRefs 摘除并落盘；拿陈旧内存副本
+    // 覆写磁盘会把已摘除的引用又写回去，制造 open Gate 引用终态切片的违规数据。
+    // 实测症状是本段自己的 complete 报 GOV_PRECHECK_FAILED / GATE_OPEN_TERMINAL_SLICE
+    // ——诊断指向 W-EMEVD-FULL-01 已 completed，而那是上一段的合法结果，不是本段的错。
+    const gatesForSuccess = JSON.parse(readFileSync(gatesPathForSuccess, 'utf8'));
+    const gateWith = gatesForSuccess.gates.find((gate) =>
       gate.gateState === 'open' && (gate.sliceRefs ?? []).includes(successTarget.sliceId));
     if (gateWith) {
+      const slicesSnapshot = readFileSync(slicesPathForSuccess, 'utf8');
+      const gatesSnapshot = readFileSync(gatesPathForSuccess, 'utf8');
+      const validationSnapshot = readFileSync(join(cliRoot, 'docs/governance/validation.json'), 'utf8');
       const successorId = `${successTarget.sliceId}-SUCCESSOR`;
       successRoot.slices.push({
         ...successTarget,
@@ -582,11 +605,9 @@ if (targetSlice) {
         declaresUnfrozenValidation: false,
         blockerRefs: []
       });
-      writeFileSync(join(cliRoot, 'docs/governance/slices.json'),
-        `${JSON.stringify(successRoot, null, 2)}\n`, 'utf8');
+      writeFileSync(slicesPathForSuccess, `${JSON.stringify(successRoot, null, 2)}\n`, 'utf8');
       gateWith.sliceRefs = [...gateWith.sliceRefs, successorId];
-      writeFileSync(join(cliRoot, 'docs/governance/gates.json'),
-        `${JSON.stringify(gatesData, null, 2)}\n`, 'utf8');
+      writeFileSync(gatesPathForSuccess, `${JSON.stringify(gatesForSuccess, null, 2)}\n`, 'utf8');
 
       const validationBefore = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/validation.json'), 'utf8'));
       const wasUnfrozen = validationBefore.unfrozen.some((entry) => entry.sliceId === successTarget.sliceId);
@@ -609,6 +630,27 @@ if (targetSlice) {
           !validationAfter.unfrozen.some((entry) => entry.sliceId === successTarget.sliceId),
           'completed 切片必须同时从 validation-unfrozen 清单移除，否则门禁必红。');
       }
+
+      // 还原三份被本段改动过的治理数据。gates.json 必须一并还原：complete 已把
+      // 目标切片置 completed，若 Gate 仍挂着后继切片而切片表被单独还原，或反之，
+      // 两份数据就会互相矛盾。validation.json 也可能被 complete 裁剪过。
+      writeFileSync(slicesPathForSuccess, slicesSnapshot, 'utf8');
+      writeFileSync(gatesPathForSuccess, gatesSnapshot, 'utf8');
+      writeFileSync(join(cliRoot, 'docs/governance/validation.json'), validationSnapshot, 'utf8');
+      // 锁定还原成功。只写回不断言等于把「还原是否真的生效」交给运气——本段
+      // 恰恰是因为缺这条断言才让 3 条下游断言在错误数据上跑了未知多久。
+      //
+      // 判据必须是逐字节比对，不能用 runGov(['next']) 的 ok。实测过一版用 next
+      // 判定的：注掉 gates.json 还原后该断言仍报 pass，因为 next 是只读命令、
+      // 不跑治理校验，数据违规它照样返回 ok=true——判据形态与被检对象错位，
+      // 是个假门禁。真正的失败在下游 seal 才显形，而那时诊断已指不回这里。
+      const slicesRestored = readFileSync(slicesPathForSuccess, 'utf8') === slicesSnapshot;
+      const gatesRestored = readFileSync(gatesPathForSuccess, 'utf8') === gatesSnapshot;
+      const validationRestored =
+        readFileSync(join(cliRoot, 'docs/governance/validation.json'), 'utf8') === validationSnapshot;
+      check('cli/complete-success-fixture-state-restored',
+        slicesRestored && gatesRestored && validationRestored,
+        `complete 成功路径的扰动必须逐字节还原，否则其后 seal 断言全部跑在 GATE_OPEN_TERMINAL_SLICE 已成立的数据上。实际 slices=${slicesRestored} gates=${gatesRestored} validation=${validationRestored}`);
     }
   }
 }
@@ -909,6 +951,7 @@ console.log(JSON.stringify({
     'seal 的正向与回滚路径各自显式构造、互不依赖环境：锚点改写到 fixture 基线使正向可达，扰动 scope.json 主题域使 stale 可达',
     '回滚场景断言失败原因确实是 freshness/stale 而非扰动导致的数据非法（否则断言为错误原因通过）',
     'fixture 对治理数据的每处扰动都在断言后还原，不污染后续断言',
+    'complete 成功路径的扰动覆盖 slices/gates/validation 三份并锁定还原成功（只还原切片表而漏 gates.json 会留下 open Gate 引用终态切片，使其后每条 seal 断言跑在 GATE_OPEN_TERMINAL_SLICE 已成立的数据上）',
     'deferred 切片的 resumeRequires 直接投影（不让 agent 手工按 capabilityId 反查 scope.json）；取不到时必须给 reason 而非空数组；无 deferred 时不投影以免膨胀默认首屏',
     'next 暴露在飞 claim 的心跳新鲜度：超 24 小时报 heartbeatStale 并给出「先核实、再 release 或 complete」的出路，且声明 CLI 不自动释放（否则被遗弃的 claim 与有主 claim 在输出里无从区分，接手者会全部避开）',
     '心跳新鲜时不得报陈旧也不塞 recoveryHint；心跳不可解析时判为未知而非陈旧（误报会诱导接手者 release 掉别人正在写的切片）'
