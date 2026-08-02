@@ -15,6 +15,9 @@ import { buildFreshnessContext } from './governance/freshnessContext.mjs';
 const root = process.cwd();
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
 const PLAYBOOK = 'docs/AGENT_EXECUTION_PLAYBOOK.md';
+// 约束规格。它列出各门禁码与命令，本身就必须受同样的引用真实性约束——
+// 否则「文档里形如可执行的东西必须真的可执行」这条规格自己可以违反自己。
+const PLAN = 'docs/plan.md';
 const README = 'README.md';
 const PKG = 'package.json';
 
@@ -28,11 +31,22 @@ function readOrNull(relativePath) {
 
 const handoff = readOrNull(HANDOFF);
 const playbook = readOrNull(PLAYBOOK);
+const plan = readOrNull(PLAN);
+
+// 受管文档集合。三处扫描（npm script、node/gov 引用、敏感内容）必须用同一份清单：
+// 各处各写一遍数组，加文档时漏改其中一处的后果是「以为扫了、其实没扫」——
+// 而这正是本仓库反复踩到的那类假门禁。
+const MANAGED_DOCS = [[HANDOFF, handoff], [PLAYBOOK, playbook], [PLAN, plan]];
 const readme = readOrNull(README);
 const packageJsonRaw = readOrNull(PKG);
 
 if (handoff === null) add('error', 'HANDOFF_MISSING', HANDOFF, '交接书缺失，无法作为治理事实源。');
 if (playbook === null) add('error', 'PLAYBOOK_MISSING', PLAYBOOK, '交接书引用的执行手册缺失。');
+if (plan === null) {
+  add('error', 'PLAN_MISSING', PLAN,
+    '约束规格缺失。它记录了各门禁「为什么存在」与实测失败场景；缺失后 agent 会把门禁当'
+    + '任意约束而倾向绕过，而不是理解它防的是哪个具体失败。');
+}
 if (readme === null) add('error', 'README_MISSING', README, 'README 缺失，无法提供唯一实施规范入口。');
 if (packageJsonRaw === null) add('error', 'PKG_MISSING', PKG, 'package.json 缺失，无法校验 npm script。');
 
@@ -94,7 +108,7 @@ if (packageJsonRaw !== null) {
 }
 
 if (scriptNames.size > 0) {
-  for (const [relativePath, content] of [[HANDOFF, handoff], [PLAYBOOK, playbook]]) {
+  for (const [relativePath, content] of MANAGED_DOCS) {
     if (content === null) continue;
     // 刻意保持宽松：只要文本里出现 "npm run X"，X 就必须是真脚本。
     //
@@ -153,7 +167,7 @@ if (scriptNames.size > 0) {
     }
   }
 
-  for (const [relativePath, content] of [[HANDOFF, handoff], [PLAYBOOK, playbook]]) {
+  for (const [relativePath, content] of MANAGED_DOCS) {
     if (content === null) continue;
 
     const nodeScriptPattern = /node (scripts\/[A-Za-z0-9./_-]+\.mjs)/g;
@@ -193,7 +207,7 @@ const sensitivePatterns = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, '私钥内容']
 ];
 
-for (const [relativePath, content] of [[HANDOFF, handoff], [PLAYBOOK, playbook]]) {
+for (const [relativePath, content] of MANAGED_DOCS) {
   if (content === null) continue;
   const lines = content.split(/\r?\n/);
   for (const [pattern, label] of sensitivePatterns) {
@@ -290,9 +304,9 @@ const checkedRules = [
   '§18.3 deferred-v0.6 Gate 必须成对使用 gateState=deferred、禁用于基础 Gate，并引用声明 scope-deferral 用户批准的 sealed Evidence',
   '§18.4 blocker 八字段完整，影响对象与活动 blockerRefs 双向闭合',
   '无活动 blockerRefs 的 ready/active 切片和非 blocked Gate 不得要求用户介入',
-  '交接书和执行手册引用的 npm run script 必须存在于 package.json',
-  '交接书和执行手册引用的 node scripts/*.mjs 路径必须存在，gov 子命令必须被 CLI 接受',
-  '交接书和执行手册不得包含 Oodle DLL 文件名、用户主目录路径、高置信 token 或私钥内容'
+  '受管文档（交接书、执行手册、约束规格）引用的 npm run script 必须存在于 package.json',
+  '受管文档引用的 node scripts/*.mjs 路径必须存在，gov 子命令必须被 CLI 接受',
+  '受管文档不得包含 Oodle DLL 文件名、用户主目录路径、高置信 token 或私钥内容'
 ];
 
 const engineeringReviewStillRequired = [
