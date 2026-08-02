@@ -47,6 +47,39 @@ if (plan === null) {
     '约束规格缺失。它记录了各门禁「为什么存在」与实测失败场景；缺失后 agent 会把门禁当'
     + '任意约束而倾向绕过，而不是理解它防的是哪个具体失败。');
 }
+// 约束规格里的「第 N 条」必须指向真实存在的条目。
+//
+// 这条门禁是按 plan.md 第 9.1 条「你查了两遍以上的东西该被机械化」加的：在 plan.md
+// 中间插入新条目会把后续编号全部顶掉，而正文里散着十几处「按第 4 条修根因」这样的
+// 交叉引用。实测插入第 9 条时我手工核了 8 处引用——那正是每次改动都要重做一遍的活，
+// 而漏核的后果是引用静默指向另一条约束：agent 照着"第 8 条"去看却读到别的内容，
+// 比没有引用更糟（第 4 条：指向错误原因的指引比没有指引更糟）。
+//
+// 只校验编号存在性，不校验语义是否贴切——语义得人读，而存在性是机械的。
+if (plan !== null) {
+  const sectionNumbers = new Set(
+    [...plan.matchAll(/^## (\d+)\./gm)].map((match) => match[1])
+  );
+  if (sectionNumbers.size === 0) {
+    add('error', 'PLAN_SECTIONS_UNPARSEABLE', PLAN,
+      '未能从 plan.md 解析出任何 `## N.` 形态的条目标题，「第 N 条」交叉引用无从校验。'
+      + '判据失效等于没有门禁，故失败关闭而不是跳过。');
+  } else {
+    const seen = new Set();
+    for (const match of plan.matchAll(/第\s*(\d+)\s*条/g)) {
+      const cited = match[1];
+      if (seen.has(cited)) continue;
+      seen.add(cited);
+      if (sectionNumbers.has(cited)) continue;
+      const line = plan.slice(0, match.index).split(/\r?\n/).length;
+      add('error', 'PLAN_SECTION_REF_DANGLING', `${PLAN}:${line}`,
+        `引用了不存在的「第 ${cited} 条」（现有条目：${[...sectionNumbers].sort((a, b) => a - b).join('、')}）。`
+        + '在中间插入条目会顶掉后续编号，正文里的交叉引用必须同步修正——'
+        + '否则引用会静默指向另一条约束，agent 照着看却读到别的内容。');
+    }
+  }
+}
+
 if (readme === null) add('error', 'README_MISSING', README, 'README 缺失，无法提供唯一实施规范入口。');
 if (packageJsonRaw === null) add('error', 'PKG_MISSING', PKG, 'package.json 缺失，无法校验 npm script。');
 
@@ -306,7 +339,8 @@ const checkedRules = [
   '无活动 blockerRefs 的 ready/active 切片和非 blocked Gate 不得要求用户介入',
   '受管文档（交接书、执行手册、约束规格）引用的 npm run script 必须存在于 package.json',
   '受管文档引用的 node scripts/*.mjs 路径必须存在，gov 子命令必须被 CLI 接受',
-  '受管文档不得包含 Oodle DLL 文件名、用户主目录路径、高置信 token 或私钥内容'
+  '受管文档不得包含 Oodle DLL 文件名、用户主目录路径、高置信 token 或私钥内容',
+  '约束规格里的「第 N 条」必须指向真实存在的条目（插入条目会顶掉后续编号）'
 ];
 
 const engineeringReviewStillRequired = [
