@@ -2178,9 +2178,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 本块是 `W-REL-SCOPE-RULING-01` 的唯一机器可读冻结产物。`--proposal` 验证结构、引用和非声明完整性；默认严格模式还要求完整用户批准元数据、版本族策略、全部条目裁定和空 openRulings。开发期私有 fixture registry 仅用于复现当前证据，不是 release corpus，也不能替代后继发布 Gate 的真实验证。
 
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->
+<!-- SOULFORGE_PROJECTION_BEGIN:scope-proposal -->
+
 ```json
 {
-  "schemaVersion": "1.6.0",
+  "schemaVersion": "2.0.0",
   "proposalId": "V0.5-SCOPE-20260725",
   "release": "V0.5",
   "game": "Sekiro",
@@ -2216,7 +2218,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
   "authoritySnapshotPolicy": {
     "field": "authorityAtRuling",
     "asOfEvidenceRef": "EV-REL-SCOPE-20260730",
-    "liveAuthoritySource": "section-13.1",
+    "liveAuthoritySource": "docs/governance/slices.json",
     "nonClaimsAreRulingTimeSnapshot": true
   },
   "paramMetadataSourcePolicy": {
@@ -2455,7 +2457,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "用户批准 1.6.x 版本族只冻结目标兼容范围；裁定时 authorityAtRuling 为 unverified，每个实际 build 仍须进入 release corpus 并通过真实验证。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-A-WORKSPACE",
@@ -2488,7 +2494,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "范围批准不证明全部 production writer 已接入单一写入主干，也不证明真实外部路径与重解析边界已完成。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-A-RECOVERY",
@@ -2525,7 +2535,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "所有发布 writer 均被纳入恢复门禁；现有 harness 不证明尚未实现或缺少 corpus 的 writer 已通过真实崩溃、断电与资源项恢复矩阵。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-DFLT",
@@ -2562,7 +2576,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "登记 DFLT 布局的完整读写是目标范围；历史 144 个样本与两个变体仍不构成当前 1.6.x release corpus 或未知布局 authority。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-KRAK",
@@ -2602,7 +2620,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "完整 KRAK 读写已纳入目标范围，但裁定时 authorityAtRuling 为 partial；单个私有解压 preview 不证明压缩、写回、恢复或 release corpus 已完成。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-BND4",
@@ -2647,7 +2669,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "登记 BND4 布局及 DFLT/KRAK 内层组合是目标范围；历史 DFLT-BND4 证据不覆盖 KRAK、未来 flags 或当前 release corpus。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-FMG",
@@ -2691,7 +2717,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "全部官方语言已纳入目标范围；开发期 18/18 私有 fixture 不等于多语言 release corpus、完整引用验证或真实游戏加载。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-PARAM",
@@ -2752,7 +2782,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "V0.5 收窄为 gameparam 容器内全部 ParamType 的完整读写；drawparam 与 gparam 延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 partial；固定 Smithbox 本机来源裁定不证明导入 adapter、全部布局、上游再分发权利或真实游戏验证完成。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-EMEVD",
@@ -2797,7 +2831,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "全部 EMEVD 已纳入目标范围，但裁定时 authorityAtRuling 为 partial；完整 EMEDF、layer/KRAK 变体、生产 DSL 接线、release corpus 与游戏加载尚未完成。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-MSB",
@@ -2834,6 +2872,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "MSB 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 semantic scene 投影、四类实体 preview 与已验证的 set_part_transform 写路径保留在代码中，但 V0.5 必须关闭该写路径并把面板标记为 V0.6 只读预览；脱敏 m11 私有 fixture 与截断 preview 不证明 release corpus、完整场景、KRAK 组合或游戏加载完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "C-MSB",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "实体类型注册表覆盖 Sekiro MSB 全部实体类型；未注册类型必须继续按 edit-unregistered-entity 拒绝，不得靠默认分支放行",
+        "场景截断必须先解除：当前 preview 是截断的，未经完整场景验证不得声称 CRUD 与引用修复可用",
+        "写路径依赖 KRAK in-BND4 组合与重读回放；set_part_transform 已验证过的写路径必须在完整实体覆盖下重跑"
       ]
     },
     {
@@ -2861,6 +2907,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "行为与动画深度解析已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件；HKX 与跨资源行为引用图在 V0.5 保持未实现，格式候选、文件名或其他游戏知识不构成 Sekiro native authority。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "D-BEHAVIOR",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "HKX 语义 authority 必须由真实 Sekiro corpus 建立，不得借用其他 FromSoftware 游戏的格式结论",
+        "跨资源引用清单要能双向解析（行为图 ↔ 动画 ↔ TAE ↔ ESD），单向命中不构成引用完整性",
+        "脚本执行面必须保持沙箱：execute-untrusted-script 是永久禁令，不随版本解除"
       ]
     },
     {
@@ -2890,6 +2944,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "TAE 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有注册样本 native document parser（939 animations / 23,711 events / 81 event types）与只读工作台保留为标记 V0.6 只读预览，仍为 candidate，不证明完整事件语义、全部布局、writer 或真实游戏加载。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "D-BEHAVIOR",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "TAE 布局、事件类型、时间轴与参数需逐字段建立 layout authority；未知事件不得重编码（unknown-event-reencode 永久禁令）",
+        "动画引用必须与 SCOPE-BEHAVIOR-ANIMATION 的引用清单对齐，否则 TAE 写入会产生悬空引用",
+        "TAE 写能力开放前需要事件参数与时间轴的未知字段无损往返证据；raw-hex-write 永久禁止"
       ]
     },
     {
@@ -2919,6 +2981,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "ESD 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有注册样本 native document parser（36 groups / 295 states / 315 conditions 及 RPN bytecode）与只读工作台保留为标记 V0.6 只读预览，仍为 candidate，不证明表达式 schema、writer 或真实游戏加载；ESD 为二进制状态机与 RPN 字节码，不属于本轮裁定的文本类格式。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "D-BEHAVIOR",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "ESD 状态机、条件表达式、命令与跳转关系需完整解析；未知表达式或命令不得重编码（永久禁令）",
+        "跳转关系要能构成闭合图并检出悬空目标，否则写入会破坏状态机可达性",
+        "ESD 写能力开放前需要条件表达式与命令块的未知字段无损往返证据；raw-hex-write 永久禁止"
       ]
     },
     {
@@ -2956,7 +3026,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "V0.5 只承诺脚本容器条目枚举、只读字节码证据投影与整个内层文件替换。经实测，`action/script/*.hks` 与 luabnd 内层 `.lua` 均以 `\\\\x1bLuaQ` 开头，属 Havok Script（Lua 5.1 家族）编译字节码，不是可直接编辑的文本；`.luagnl` / `.luainfo` 为反编译辅助元数据。反编译、重编译与 typed script mutation 已延期至 V0.6。裁定时 authorityAtRuling 为 unverified；容器条目枚举、只读证据投影、writer 与真实游戏证据均待建立。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-ASSETS",
@@ -2986,6 +3060,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "整条资产只读与导出线已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 candidate 解析与只读面板保留为标记 V0.6 只读预览；候选解析、代理几何和最小 DDS 既不证明五类 native 语义读取，也不证明导出管线完成。资产为二进制几何与纹理格式，不属于本轮裁定的文本类格式。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "五类资产（FLVER/TPF/MTD/collision/navigation）各自的只读 authority 必须分别成立；聚合条目不能靠其中一类的结论代表全部",
+        "native-to-open 导出矩阵只做单向导出；open-format-to-native-import 是永久禁令",
+        "任何 native writer 在缺少 validator 时不得开放（unvalidated-native-writer 永久禁令）"
       ]
     },
     {
@@ -3016,6 +3098,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "FLVER 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 header/mesh candidate parser 与只读面板保留为标记 V0.6 只读预览，仍为 candidate，不证明完整 vertex/index/skeleton/material authority 或真实渲染完成。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "geometry、skeleton、weights、material 引用需逐布局建立 authority，覆盖 Sekiro 实际出现的全部 FLVER 版本",
+        "只读 native document 必须能往返比对原字节；proxy geometry 不能充当 FLVER authority",
+        "flver-write 与 open-format-to-flver 是永久禁令，恢复的是只读能力而不是写能力"
       ]
     },
     {
@@ -3044,6 +3134,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "TPF 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；容器 hint、开放图像检测和最小 DDS 编码不证明 TPF parser 或纹理兼容性。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "纹理格式与 metadata 必须从 TPF 实际字节读出，禁止推断（infer-texture-metadata 永久禁令）",
+        "native texture 引用要能与 MTD 的 texture slot 对齐",
+        "最小 DDS 样本不构成 TPF authority；tpf-write 与 open-format-to-tpf 永久禁止"
       ]
     },
     {
@@ -3072,6 +3170,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "MTD 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；candidate inventory 不证明 native document、参数 schema 或引用闭环。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "MTD schema 必须从真实字节建立，禁止推断（infer-mtd-schema 永久禁令）",
+        "texture slot 需与 SCOPE-ASSET-TPF 的 native texture 引用双向对齐",
+        "mtd-write 与 open-format-to-mtd 永久禁止；proxy material 不能充当 native"
       ]
     },
     {
@@ -3099,6 +3205,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "碰撞已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；场景 proxy 或 FLVER candidate 不证明碰撞格式、层级或地图引用。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "碰撞格式必须先在真实 Sekiro corpus 中确认，禁止假定（assume-collision-format 永久禁令）",
+        "层级与地图关联需与 MSB 侧实体对齐，否则碰撞读取无法定位到场景",
+        "collision-write 永久禁止；proxy mesh 不能充当碰撞数据"
       ]
     },
     {
@@ -3126,6 +3240,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "导航已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；资源图、bounds 或代理图不证明导航 parser、连接语义或地图引用。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "导航格式必须先在真实 Sekiro corpus 中确认，禁止假定（assume-navigation-format 永久禁令）",
+        "连接关系需构成可校验图并与地图引用对齐",
+        "navigation-write 永久禁止；proxy graph 不能充当导航数据"
       ]
     },
     {
@@ -3154,6 +3276,14 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "native-to-open 导出矩阵已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。现有开放格式检测、staging 与 file_replace 不证明任何已批准导出器完成，更不支持反向 native 写入。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "E-ASSET",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "导出矩阵依赖 SCOPE-ASSET-FLVER / TPF / MTD 三条的只读 authority 先成立，否则导出的是未经证实的解读",
+        "导出必须只写开放格式（glTF/GLB/PNG/TGA/DDS/描述清单），不得回写或替换 native 输出（永久禁令）",
+        "raw-file-replace 不构成转换；open-format-to-native-import 永久禁止"
       ]
     },
     {
@@ -3230,7 +3360,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "V0.5 冻结编辑器收窄为 bnd4、fmg、param、emevd、script 五个；其中 script 只提供只读证据视图与整个内层文件替换，不属于 typed mutation。msb、tae、esd、flver 面板延期至 V0.6，保留为标记只读预览，不计入 V0.5 冻结清单，也不得暴露写路径（含 MSB `set_part_transform`）。裁定时 authorityAtRuling 为 partial；候选面板、Safe Hex 演示和静态契约不证明真实文档、DSL、完整有界访问或 Electron 功能验收完成；容量与延迟数值不属于 V0.5 验收。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-AI",
@@ -3273,7 +3407,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "双协议受控读写与空凭据默认配置已纳入目标范围，但裁定时 authorityAtRuling 为 unverified；离线 conformance 不证明任何第三方真实服务可用，真实账号也不属于 V0.5 验收。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-RUNTIME",
@@ -3310,7 +3448,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "能力探测兼容策略已纳入目标范围，但裁定时 authorityAtRuling 为 fixture-confirmed；裁定时 production gateway、真实 me3 profile/launch/diagnostics/terminate 与 Sekiro 启动尚未验证。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-RELEASE",
@@ -3348,7 +3490,11 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "NSIS 内部测试构建已纳入目标范围且不要求代码签名或体积/耗时预算；现有 builder 配置与同机构建不证明 manifest/hash、安装、升级、卸载、干净机或 packaged runtime 完成，未签名包也不声明发布者身份或 SmartScreen 信誉。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-RENDERING",
@@ -3380,6 +3526,15 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "3D 渲染线已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 semantic scene、WebGPU/WebGL2 后端与视口保留为标记 V0.6 只读预览；裁定时 authorityAtRuling 为 partial，当前机器功能 smoke 不证明代表性硬件兼容或性能水平。"
+      ],
+      "targetRelease": "V0.5",
+      "deferredTrack": "I-RENDER",
+      "resumeRequires": [
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "semantic scene 必须保持 renderer-independent：THREE.Object3D、其他 renderer object 与 React 状态永远不能成为权威场景文档（永久禁令）",
+        "WebGPU 主后端与 WebGL2 自动回退需在真实硬件上分别验证；representative-hardware-tier 验收不成立（永久禁令）",
+        "性能预算必须来自真实资源基准，synthetic 预算不能当 release 阈值；预算成立后才可作为 Gate 判据",
+        "场景数据依赖 SCOPE-MSB 的完整实体覆盖，截断场景不能证明渲染能力"
       ]
     },
     {
@@ -3417,11 +3572,17 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "openRulings": [],
       "nonClaims": [
         "内部测试合规边界已获批准，但裁定时 authorityAtRuling 为 partial；未补齐适用 notices 或再分发权利前不得向任何外部测试者或公众分发，也不构成公开发行完成。"
-      ]
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": null,
+      "deferredTrack": null,
+      "resumeRequires": []
     }
   ]
 }
 ```
+
+<!-- SOULFORGE_PROJECTION_END:scope-proposal -->
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->
 
 本范围已由用户逐项批准，并由后继裁定删除代码签名、真实模型凭据、代表性渲染硬件/性能预算、编辑器容量/延迟门槛和 installer 体积/耗时预算，同时固定 Smithbox 2.2.4 本机 PARAM metadata 来源；当前未变化范围以 `EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER` 完成工程重验证。`authorityAtRuling` 与每项 `nonClaims` 只记录 `EV-REL-SCOPE-20260730` 裁定时快照，实时 authority 唯一读取 §13.1；批准不提升 authority，也不把缺 corpus、parser、writer、adapter 或真实功能验证的项目变成完成。

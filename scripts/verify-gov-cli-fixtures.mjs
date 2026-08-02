@@ -188,6 +188,48 @@ const claimable = next.payload?.claimable ?? [];
 check('cli/next-lists-ready', claimable.length > 0 && claimable.every((item) => item.alreadyClaimed === false),
   'gov next 应只列出未被 claim 的 ready 切片。');
 
+// --release 的默认值必须来自 releases.json 的 currentRelease，不能是字面量。
+// 治理要跨 V0.5 → V0.6：写死版本号会在 V0.5 冻结后把新证据继续挂到旧版本上，
+// 而 currentRelease 已经翻页——两份权威分叉且无门禁可见。
+{
+  const releasesData = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/releases.json'), 'utf8'));
+  const knownReleases = releasesData.releases.map((entry) => entry.release);
+  check('cli/next-default-release-follows-current',
+    next.payload?.release === releasesData.currentRelease,
+    `gov next 默认版本应等于 currentRelease=${releasesData.currentRelease}，实际 ${JSON.stringify(next.payload?.release)}。`);
+  check('cli/next-default-release-filters',
+    claimable.every((item) => item.targetRelease === releasesData.currentRelease),
+    '默认过滤后不应出现其他版本的切片——V0.6 切片的硬前置尚未成立，混进选点会误导 agent。');
+
+  // 未登记版本必须硬失败。原先只校验 /^V\d+\.\d+$/ 形状，V9.9 能通过并封存出
+  // 一条挂在不存在版本上的证据；cmdNext 更是连形状都不校验，拼错静默返回空列表,
+  // agent 会把「参数拼错」读成「没有可推进切片」。
+  const unknownRelease = runGov(['next', '--release', 'V9.9'], cliRoot);
+  check('cli/next-unknown-release-rejected',
+    unknownRelease.status === 1 && unknownRelease.payload?.code === 'RELEASE_UNKNOWN'
+      && Array.isArray(unknownRelease.payload?.knownReleases),
+    `未登记版本必须拒绝并回报已知版本列表，实际 ${JSON.stringify(unknownRelease.payload)?.slice(0, 200)}`);
+  const badShape = runGov(['next', '--release', 'v05'], cliRoot);
+  check('cli/next-malformed-release-rejected',
+    badShape.status === 1 && badShape.payload?.code === 'RELEASE_SHAPE_INVALID',
+    `形状非法的版本必须拒绝，实际 ${JSON.stringify(badShape.payload)?.slice(0, 200)}`);
+
+  // 每个已登记版本都必须可查询。这条断言随 releases.json 增长而自动覆盖新版本,
+  // 不需要在 fixture 里追加 V0.6、V0.7 的硬编码用例。
+  for (const releaseId of knownReleases) {
+    const scoped = runGov(['next', '--release', releaseId], cliRoot);
+    check(`cli/next-release-${releaseId}-queryable`,
+      scoped.status === 0 && scoped.payload?.release === releaseId
+        && (scoped.payload?.claimable ?? []).every((item) => item.targetRelease === releaseId),
+      `${releaseId} 应可查询且只返回该版本切片，实际 ${JSON.stringify(scoped.payload)?.slice(0, 200)}`);
+  }
+
+  const allReleases = runGov(['next', '--all'], cliRoot);
+  check('cli/next-all-spans-releases',
+    allReleases.status === 0 && allReleases.payload?.release === null,
+    `--all 应跨版本查看（release=null），实际 ${JSON.stringify(allReleases.payload?.release)}。`);
+}
+
 const targetSlice = claimable[0]?.sliceId ?? null;
 if (targetSlice) {
   const claimed = runGov(['claim', '--slice', targetSlice, '--owner', 'fixture-A'], cliRoot);
@@ -477,7 +519,8 @@ console.log(JSON.stringify({
     'seal 拒绝非法/重复 EvidenceId、未定义 Gate 与缺失必填字段，且失败路径不追加任何行',
     'seal 成功时封存基线自洽；后置校验失败时同时回滚 evidence.jsonl 与 gates.json',
     'seal 回滚 hint 指出 --gates 缺失（freshness 只判定 Gate 引用的证据）',
-    'seal 成功即完成交接书投影；失败时连交接书一并回滚'
+    'seal 成功即完成交接书投影；失败时连交接书一并回滚',
+    '--release 默认取 releases.json 的 currentRelease；未登记或形状非法的版本硬失败'
   ],
   findings
 }, null, 2));

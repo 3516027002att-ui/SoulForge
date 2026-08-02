@@ -4,6 +4,18 @@ import { join, resolve } from 'node:path';
 import { runProcess } from './subprocess-control.mjs';
 
 const root = resolve(import.meta.dirname, '..');
+
+/**
+ * 提案块内侧包着一层投影标记（该块是 scope.json + gates.json 的投影）。
+ * 标记是可选的：fixture 会构造不含标记的变体，两种形态都必须能取出提案。
+ *
+ * 声明必须在顶层最先执行的语句之前——本文件用 top-level await 直接跑用例，
+ * const 放到函数定义旁边会撞上 TDZ（实测 ReferenceError: Cannot access before
+ * initialization），因为第一个用例在 const 求值之前就调用了 extractProposal。
+ */
+const PROPOSAL_BLOCK_PATTERN =
+  /(<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->\s*(?:<!--\s*SOULFORGE_PROJECTION_BEGIN:scope-proposal\s*-->\s*)?```json\s*)([\s\S]*?)(\s*```\s*(?:<!--\s*SOULFORGE_PROJECTION_END:scope-proposal\s*-->\s*)?<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->)/;
+
 const source = await readFile(resolve(root, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8');
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'soulforge-release-scope-'));
 const cases = [];
@@ -282,17 +294,12 @@ async function expectResult(name, document, expectedExit, expectedToken, proposa
 }
 
 function extractProposal(document) {
-  const match = document.match(
-    /<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->\s*```json\s*([\s\S]*?)\s*```\s*<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->/
-  );
+  const match = document.match(PROPOSAL_BLOCK_PATTERN);
   if (!match) throw new Error('canonical proposal block missing');
-  return JSON.parse(match[1]);
+  return JSON.parse(match[2]);
 }
 
 function replaceProposal(document, proposal) {
   const serialized = JSON.stringify(proposal, null, 2);
-  return document.replace(
-    /(<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->\s*```json\s*)[\s\S]*?(\s*```\s*<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->)/,
-    `$1${serialized}\n$2`
-  );
+  return document.replace(PROPOSAL_BLOCK_PATTERN, `$1${serialized}\n$3`);
 }

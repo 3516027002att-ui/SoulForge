@@ -31,6 +31,7 @@ const root = process.cwd();
 const SLICES = 'docs/governance/slices.json';
 const VALIDATION = 'docs/governance/validation.json';
 const GATES = 'docs/governance/gates.json';
+const RELEASES = 'docs/governance/releases.json';
 
 /**
  * 写外壳会快照并在失败时恢复的文件集合。
@@ -57,6 +58,46 @@ function readJson(relativePath) {
 
 function readSlices() {
   return readJson(SLICES);
+}
+
+/**
+ * 解析 --release。默认值取自 releases.json 的 currentRelease，不写字面量。
+ *
+ * 治理必须跨版本（V0.5 → V0.6 → …）。把 'V0.5' 写死在 CLI 里意味着 V0.5 收尾
+ * 那天，seal 会继续把证据挂到已冻结的版本上，而 releases.json 里 currentRelease
+ * 已经翻到 V0.6——两份权威直接分叉，且没有任何门禁能看见。
+ *
+ * 同时校验版本必须在 releases.json 里真实存在。原先只校验 /^V\d+\.\d+$/ 形状，
+ * 所以 `--release V9.9` 能通过，会封存出一条挂在不存在版本上的证据；而 cmdNext
+ * 的 --release 连形状都不校验，拼错只会静默返回空的 claimable 列表——agent 会把
+ * 「参数拼错」读成「没有可推进切片」。
+ *
+ * @param {unknown} raw 命令行传入的 --release 原值
+ * @returns {{ok: true, release: string, isDefault: boolean} | {ok: false, code: string, message: string, known: string[]}}
+ */
+function resolveRelease(raw) {
+  const data = readJson(RELEASES);
+  const known = data.releases.map((entry) => entry.release);
+  const provided = typeof raw === 'string' ? raw.trim() : '';
+  const release = provided.length > 0 ? provided : data.currentRelease;
+
+  if (typeof release !== 'string' || !/^V\d+\.\d+$/.test(release)) {
+    return {
+      ok: false,
+      code: 'RELEASE_SHAPE_INVALID',
+      message: `--release 必须形如 V0.5，收到 ${JSON.stringify(release)}。`,
+      known
+    };
+  }
+  if (!known.includes(release)) {
+    return {
+      ok: false,
+      code: 'RELEASE_UNKNOWN',
+      message: `${release} 不在 ${RELEASES} 的 releases 列表里；新版本要先在治理数据里登记。`,
+      known
+    };
+  }
+  return { ok: true, release, isDefault: provided.length === 0 };
 }
 
 /**
@@ -166,7 +207,19 @@ function withGovernanceWrite(owner, mutate) {
 function cmdNext(args) {
   const data = readSlices();
   const claimedIds = new Set(data.activeClaims.map((claim) => claim.sliceId));
-  const release = args.release ?? null;
+
+  // --all 明确表示跨版本查看；不传 --release 时按当前版本过滤而不是列出全部。
+  // 列出全部会把 V0.6 切片混进选点结果，而 V0.6 的硬前置尚未成立。
+  const wantsAll = args.all === true || args.release === 'all';
+  let release = null;
+  if (!wantsAll) {
+    const resolved = resolveRelease(args.release);
+    if (!resolved.ok) {
+      fail(resolved.code, resolved.message, { knownReleases: resolved.known });
+      return;
+    }
+    release = resolved.release;
+  }
 
   const candidates = data.slices.filter((slice) => {
     if (release && slice.targetRelease !== release) return false;
@@ -512,11 +565,12 @@ function cmdSeal(args) {
     }
     values[key] = value.trim();
   }
-  const targetRelease = typeof args.release === 'string' ? args.release.trim() : 'V0.5';
-  if (!/^V\d+\.\d+$/.test(targetRelease)) {
-    fail('SEAL_RELEASE_INVALID', '--release 必须形如 V0.5。');
+  const resolvedRelease = resolveRelease(args.release);
+  if (!resolvedRelease.ok) {
+    fail('SEAL_RELEASE_INVALID', resolvedRelease.message, { knownReleases: resolvedRelease.known });
     return;
   }
+  const targetRelease = resolvedRelease.release;
 
   // 挂到哪些 Gate 上。freshness 只判定 gates.json 里该 Gate 引用的 evidenceRefs：
   // 一条没被任何 Gate 引用的新证据根本不参与判定，追加它不会消除任何 stale。

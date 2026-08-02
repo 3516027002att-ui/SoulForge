@@ -135,6 +135,7 @@ export function loadProjectionSources(root) {
     slicesData: readJson('docs/governance/slices.json'),
     gatesData: readJson('docs/governance/gates.json'),
     blockersData: readJson('docs/governance/blockers.json'),
+    scopeData: readJson('docs/governance/scope.json'),
     evidenceRecords: readFileSync(join(root, 'docs/governance/evidence.jsonl'), 'utf8')
       .split('\n')
       .filter((line) => line.trim().length > 0)
@@ -149,7 +150,7 @@ export function loadProjectionSources(root) {
  * BLOCKER_HEADERS 逐 token 一致——那个解析器是迁移期回归网，列数或列序变了
  * 它会报 *_TABLE_SCHEMA_INVALID。列名不是自由文本，改名等于改门禁。
  */
-export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords }) => ({
+export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, scopeData }) => ({
   // 十列 schema 与 SLICE_HEADERS 对齐。注意列名与 JSON 字段并非同名：
   // 「目标能力」列装的是 capabilityIds（能力 ID 列表），「可独立验收切片」列
   // 才是 goal 文本。实测确认：capabilityIds/requiredValidation/authorityCapNote
@@ -240,7 +241,60 @@ export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords })
       cell(blocker.recheckTrigger),
       idList(blocker.evidenceRefs)
     ])
-  )
+  ),
+
+  /**
+   * §18.2.1 范围提案 JSON 块。
+   *
+   * 这是交接书里最大的一处重复：1242 行内嵌 JSON，占全文 3563 行的 35%，
+   * 而它与 scope.json 已经实测全面分叉——27 条 scopeItem 全部缺 targetRelease、
+   * deferredTrack、resumeRequires，deferredToRelease 缺 15 处。分叉能长期存在
+   * 是因为 verify-release-scope.mjs 只解析这个内嵌块，从不读 scope.json：
+   * 门禁看不到权威数据，自然判不出分叉。
+   *
+   * gateCoverage 同样是复制。实测 11 条相对 gates.json 的
+   * scopeItemIds/gateState/blockerRefs/openRulings 四字段零分叉——它本就是
+   * gates.json 的投影，只是字段改了个名（gateState → currentState）。
+   *
+   * 投影之后 verify-release-scope.mjs 无需改动就读到权威数据：它解析的
+   * markdown 块此刻由 JSON 生成。
+   */
+  'scope-proposal': () => {
+    // key 顺序必须与原内嵌块一致，否则 diff 会淹没在字段重排里，
+    // 而 --check 的判据是逐字相等。
+    // 缺失字段必须落成显式 null 而不是被 JSON.stringify 丢掉键。
+    // 省略键会让范围门禁报出指向错误原因的诊断——它按键集判定，看到的是
+    // 「策略值不符合冻结要求」，而真实原因是 scope.json 少了这个字段。
+    const field = (key) => (scopeData[key] === undefined ? null : scopeData[key]);
+    const proposal = {
+      schemaVersion: field('schemaVersion'),
+      proposalId: field('proposalId'),
+      release: field('release'),
+      game: field('game'),
+      gameBuildRange: field('gameBuildRange'),
+      ruling: field('ruling'),
+      proposalStatus: field('proposalStatus'),
+      unlistedPolicy: field('unlistedPolicy'),
+      corpusPolicy: field('corpusPolicy'),
+      scopeDeferralPolicy: field('scopeDeferralPolicy'),
+      authoritySnapshotPolicy: field('authoritySnapshotPolicy'),
+      paramMetadataSourcePolicy: field('paramMetadataSourcePolicy'),
+      providerCredentialPolicy: field('providerCredentialPolicy'),
+      runtimeToolPolicy: field('runtimeToolPolicy'),
+      renderingAcceptancePolicy: field('renderingAcceptancePolicy'),
+      quantitativeAcceptancePolicy: field('quantitativeAcceptancePolicy'),
+      // gates.json 的四字段投影。currentState 是历史字段名，保留以免动门禁解析。
+      gateCoverage: gatesData.gates.map((gate) => ({
+        gateId: gate.gateId,
+        scopeItemIds: gate.scopeItemIds,
+        currentState: gate.gateState,
+        blockerRefs: gate.blockerRefs,
+        openRulings: gate.openRulings
+      })),
+      scopeItems: scopeData.scopeItems
+    };
+    return ['```json', JSON.stringify(proposal, null, 2), '```'].join('\n');
+  }
 });
 
 export const beginMarker = (name) => `<!-- SOULFORGE_PROJECTION_BEGIN:${name} -->`;
