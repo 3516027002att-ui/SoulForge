@@ -694,7 +694,7 @@
     {
       "sliceId": "W-REL-F-SCALE-02",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "candidate",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只提升实际完成的编辑器功能，不以 inventory 或取消量化门槛代替真实验收",
@@ -703,7 +703,7 @@
       ],
       "blockerRefs": [],
       "goal": "关闭剩余编辑器的规模访问缺口：script 仍为 scaleAccess=none，需要有界访问",
-      "evidence": "script 编辑器规模访问已升级为 release-safe pagination（listScriptContainerEntriesPage 主进程分页通道 + ScriptContainerPanel 显式分页，currentScaleContractGaps=[]——bnd4/fmg/param/emevd/script 五编辑器全部 release-safe）；bnd4/fmg/param 规模访问已升级为 release-safe pagination（主进程分页通道 resource.listContainerChildrenPage/readFmgPage/readParamPage，FMG_PAGE_SIZE=100/PARAM_PAGE_SIZE=20，renderer 面板按页导航不再 eager 物化；editorCapabilityContract bnd4/fmg/param scaleAccess=pagination；currentScaleContractGaps 仅剩 script）；script 编辑器 scaleAccess=none 仍为真实缺口；inventory 已精确冻结为 BND4/FMG/PARAM/EMEVD/script 五项（文本优先裁定；MSB/TAE/ESD/FLVER 延期 V0.6 只读预览，不计入本版）；EMEVD 编辑器规模访问已从 eager 提升为 pagination（完整文档分页组装 readFullEmevdDocumentViaBridge + DSL 模板行数截断 renderEmevdPatchDslBounded（事件块边界截断 + 注释标记，patch no-op 语义安全）+ 事件列表分页每页 200 + loadFullDslTemplate 显式完整加载；currentScaleContractGaps 不再含 EMEVD）；前端工作台已补（ScriptContainerPanel.tsx script 只读证据 + 用户字节整内层替换；Bnd4WorkbenchPanel.tsx BND4 容器工作台；ParamDefPanel 接真实行数据 + 字段级编辑）；继续各编辑器结构化 UI/DSL/完整有界访问（bnd4/script scaleAccess=none、fmg/param bounded-window 仍为缺口）和 Electron 真实文档功能验收",
+      "evidence": "script 编辑器规模访问已升级为 release-safe pagination（listScriptContainerEntriesPage 主进程分页通道 + ScriptContainerPanel 显式分页，currentScaleContractGaps=[]——bnd4/fmg/param/emevd/script 五编辑器全部 release-safe）；bnd4/fmg/param 规模访问已升级为 release-safe pagination（主进程分页通道 resource.listContainerChildrenPage/readFmgPage/readParamPage，FMG_PAGE_SIZE=100/PARAM_PAGE_SIZE=20，renderer 面板按页导航不再 eager 物化；editorCapabilityContract bnd4/fmg/param scaleAccess=pagination；currentScaleContractGaps 仅剩 script）；script 编辑器 scaleAccess=none 缺口已关闭（提交 d4cc013 升级为 pagination）；inventory 已精确冻结为 BND4/FMG/PARAM/EMEVD/script 五项（文本优先裁定；MSB/TAE/ESD/FLVER 延期 V0.6 只读预览，不计入本版）；EMEVD 编辑器规模访问已从 eager 提升为 pagination（完整文档分页组装 readFullEmevdDocumentViaBridge + DSL 模板行数截断 renderEmevdPatchDslBounded（事件块边界截断 + 注释标记，patch no-op 语义安全）+ 事件列表分页每页 200 + loadFullDslTemplate 显式完整加载；currentScaleContractGaps 不再含 EMEVD）；前端工作台已补（ScriptContainerPanel.tsx script 只读证据 + 用户字节整内层替换；Bnd4WorkbenchPanel.tsx BND4 容器工作台；ParamDefPanel 接真实行数据 + 字段级编辑）；script 规模缺口已闭环（currentScaleContractGaps=[]，bnd4/fmg/param/emevd/script 五编辑器全部 release-safe pagination）；真实文档完整有界访问已通过（test:editor-bounded-access 真实腿：script luabnd-primary 301/301 全量枚举 entriesComplete=true、EMEVD 34 页/33,266 指令/1,730 事件全覆盖，页间不重叠/并集全覆盖/末页触尾，共享 normalizePageWindow 无私有副本；test:desktop-ipc-contract 51 断言真实执行观测：main 分页 channel 注册 + preload 分页方法接线 + 双向对账）；Electron 面板功能验收仍单独门控（opt-in，不在此声明）",
       "hardPrerequisites": "FLVER 只读查看器属于已延期的资产线；Hex 永久只读；当前 candidate 只继承 acceptance harness 对缺口的分类；EMEVD pagination 只证明规模访问契约（分页组装/模板截断/列表分页），不证明完整语义编辑或真实验收；延期预览编辑器的规模缺口按 V0.6 记账，不得据此声称本版缺口减少",
       "entryPoints": [
         "packages/core/src/editing/editorCapabilityContract.ts",
@@ -889,7 +889,16 @@
       "declaresUnfrozenValidation": false
     }
   ],
-  "activeClaims": [],
+  "activeClaims": [
+    {
+      "sliceId": "W-REL-F-SCALE-02",
+      "claimId": "claim-w-rel-f-scale-02-20260802",
+      "owner": "3516027002att-ui",
+      "claimedAt": "2026-08-02T17:42:50.483Z",
+      "heartbeatAt": "2026-08-02T17:42:50.483Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    }
+  ],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",
