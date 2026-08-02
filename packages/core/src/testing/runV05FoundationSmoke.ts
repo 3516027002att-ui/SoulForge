@@ -1,6 +1,6 @@
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { createPatchProposal, createStagingArea, commitValidatedStagingArea } from '../patch/patchEngine.js';
 import { buildGraphPatchFromProposal } from '../patch/graphPatch.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
@@ -14,7 +14,12 @@ import { isAiToolPermissionAllowed, maxPermissionForMode } from '../ai/toolPermi
 import { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 
 async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-v05-'));
+  // 经 harness 建临时工作区：无论成功还是抛错都保证删除。
+  // 改造前这里直接 mkdtemp 且从不清理，每次运行泄漏一个目录。
+  await withSmokeWorkspace('v05', (workspace) => runFoundationChecks(workspace.root));
+}
+
+async function runFoundationChecks(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   const baseRoot = join(root, 'game');
   await mkdir(overlayRoot, { recursive: true });
@@ -73,7 +78,14 @@ async function main(): Promise<void> {
   }
 
   const staging = await createStagingArea(proposal);
-  const committed = await commitValidatedStagingArea(staging, { session, operationLog: store });
+  // backupRoot 指向工作区内：不指定时 createRestorePoint 默认落系统临时目录，
+  // 备份是有意保留的（不该自动删），于是每次运行在 tmpdir 留下 soulforge-backup-*。
+  // 生产路径由调用方显式指定（桌面用 LOCALAPPDATA），smoke 同样必须显式指定。
+  const committed = await commitValidatedStagingArea(staging, {
+    session,
+    operationLog: store,
+    backupRoot: join(root, 'backups')
+  });
   if (!committed.operation || committed.operation.status !== 'committed') {
     throw new Error('Commit did not produce a committed operation log entry.');
   }
@@ -93,7 +105,9 @@ async function main(): Promise<void> {
     opId: committed.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(committed.opId)
+    confirmation: rollbackConfirmation(committed.opId),
+    // 回滚同样会建备份；不指定 backupBaseDir 时它落系统临时目录并有意保留。
+    backupBaseDir: join(root, 'backups')
   });
   if (!rolled.ok) throw new Error(`Rollback failed: ${rolled.diagnostics.map((d) => d.message).join('; ')}`);
   if ((await readFile(overlayFile, 'utf8')) !== 'overlay-v1\n') {

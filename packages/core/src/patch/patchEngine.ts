@@ -8,7 +8,7 @@
  * createStagingArea remains for dry-run prep / graph attachment compatibility only.
  */
 
-import { copyFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -50,6 +50,16 @@ export interface StagingArea {
   root: string;
   files: StagedPatchFile[];
   proposal: PatchProposal;
+  /**
+   * 释放 `root` 下的临时目录。必须由调用方在 finally 中调用。
+   *
+   * 在补上这个方法之前，createStagingArea 用 mkdtemp 在系统临时目录建
+   * `soulforge-<opId>-*`，但没有任何释放入口，于是每次调用泄漏一个目录。
+   * 实测：单次 runV05FoundationSmoke 泄漏 4 个；本机累计 25724 个残留目录。
+   *
+   * 幂等：重复调用与对已删除目录调用都不报错（force: true）。
+   */
+  dispose(): Promise<void>;
 }
 
 export interface CommitPatchOptions {
@@ -128,7 +138,13 @@ export async function createStagingArea(proposal: PatchProposal): Promise<Stagin
     })
   };
 
-  return { opId: proposal.opId, root, files: stagedFiles, proposal: withHashes };
+  return {
+    opId: proposal.opId,
+    root,
+    files: stagedFiles,
+    proposal: withHashes,
+    dispose: () => rm(root, { recursive: true, force: true })
+  };
 }
 
 /**
@@ -178,10 +194,18 @@ export async function commitValidatedStagingArea(
   staging: StagingArea,
   options: CommitPatchOptions = {}
 ): Promise<CommitPatchResult> {
-  return executePatchProposalThroughTransaction(
-    staging.proposal,
-    toExecuteOptions(options)
-  );
+  // 提交只消费 staging.proposal（已内联 before/after 哈希），不读 staging.root，
+  // 所以提交结束后该临时目录必然无用，在此释放而不是要求每个调用方记得。
+  // 失败路径也要释放：提交失败不代表临时目录还有用，权威状态在 PatchIR 与
+  // 事务日志里，不在这个 mkdtemp 目录里。
+  try {
+    return await executePatchProposalThroughTransaction(
+      staging.proposal,
+      toExecuteOptions(options)
+    );
+  } finally {
+    await staging.dispose();
+  }
 }
 
 /**

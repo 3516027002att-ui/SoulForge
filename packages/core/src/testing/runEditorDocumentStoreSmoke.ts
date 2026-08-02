@@ -42,14 +42,25 @@ function main(): void {
     throw new Error('stale revision must conflict');
   }
 
-  const okMsb = store.applyMutation({
+  // MSB 在 V0.5 被有意延期为只读预览：editorCapabilityContract.msb 的
+  // releaseWriteEnabled=false，store 层写路径必须失败关闭。
+  // 这里断言「被拒绝」而不是「成功」——本条断言原先写成 `if (!okMsb.ok) throw`，
+  // 在 MSB 转只读后就一直红着。修法是让 smoke 跟上产品决策，而不是把
+  // releaseWriteEnabled 翻回 true 来让测试变绿。
+  // V0.6 恢复 MSB 写能力时，这条断言需要翻回成功分支。
+  const deniedMsb = store.applyMutation({
     documentId: msb.documentId,
     kind: 'msb_set_part_position',
     resourceUri: msb.resourceUri,
     baseRevision: 0,
     payload: { partName: 'm000010_1077', posX: 1, posY: 2, posZ: 3 }
   });
-  if (!okMsb.ok) throw new Error('MSB mutation failed');
+  if (deniedMsb.ok) {
+    throw new Error('MSB 在 V0.5 为只读预览，写 mutation 必须失败关闭');
+  }
+  if (!deniedMsb.issues.some((i) => i.code === 'EDITOR_MUTATION_KIND_DENIED')) {
+    throw new Error(`MSB 拒绝必须给出结构化诊断：${JSON.stringify(deniedMsb.issues)}`);
+  }
 
   const batch = store.createPatchEngineBatch(fmg.documentId);
   if (!batch.ok || !batch.batch?.requiresPatchEngine) {
@@ -79,7 +90,8 @@ function main(): void {
     fmgRevision: after.revision,
     batchRequiresPatchEngine: true,
     rejectedCrossKind: true,
-    rejectedStaleRevision: true
+    rejectedStaleRevision: true,
+    rejectedMsbWriteDeferredToV06: true
   }, null, 2));
 }
 
