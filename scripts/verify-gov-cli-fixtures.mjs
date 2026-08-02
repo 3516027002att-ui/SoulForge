@@ -452,6 +452,39 @@ check('cli/next-item-self-sufficient',
 
       // 扰动必须还原，否则其后每条断言都跑在被改过的数据上（本 fixture 实测踩过）。
       // pristine 取自本段开头、即 claim 之前，所以这一次写回同时撤掉三次心跳改写
+      // 场景四：status 与 next 必须给出一致的陈旧判定。
+      //
+      // status 此前只报 heartbeatAt 原始值——同一份数据、两个命令、相反结论。
+      // status 是 CLAUDE.md 列的常用入口，从它入手的 agent 看到「5 条 activeClaims」
+      // 只会读成有人在推进，正是「状态相同结论相反」要消除的形态。判定必须复用
+      // 同一个 claimStaleHours，两处各写一份阈值必然漂移，所以断言两命令逐字段一致。
+      targetClaim.heartbeatAt = new Date(Date.now() - 72 * 3600000).toISOString();
+      writeFileSync(slicesPath, `${JSON.stringify(perturbed, null, 2)}\n`, 'utf8');
+      const statusStale = runGov(['status'], cliRoot);
+      const statusEntry = (statusStale.payload?.activeClaims ?? [])
+        .find((entry) => entry.sliceId === sliceId) ?? null;
+      const nextEntryAgain = ((runGov(['next', '--all'], cliRoot)).payload?.activeSlices ?? [])
+        .find((entry) => entry.sliceId === sliceId) ?? null;
+      check('cli/status-reports-stale-claim',
+        statusEntry?.heartbeatStale === true && typeof statusEntry?.staleFor === 'string',
+        `status 必须也报 heartbeatStale/staleFor，否则从 status 入手的 agent 把被遗弃 claim 读成有人在推进。实际 ${JSON.stringify(statusEntry)?.slice(0, 300)}`);
+      check('cli/status-agrees-with-next-on-staleness',
+        statusEntry?.heartbeatStale === nextEntryAgain?.heartbeatStale
+          && statusEntry?.staleFor === nextEntryAgain?.staleFor,
+        `status 与 next 的陈旧判定必须逐字段一致（同一份数据不得给出相反结论）。status=${JSON.stringify(statusEntry?.heartbeatStale)}/${JSON.stringify(statusEntry?.staleFor)} next=${JSON.stringify(nextEntryAgain?.heartbeatStale)}/${JSON.stringify(nextEntryAgain?.staleFor)}`);
+      check('cli/status-stale-hint-points-to-next',
+        typeof statusStale.payload?.staleClaimHint === 'string'
+          && statusStale.payload.staleClaimHint.includes('gov next')
+          && statusStale.payload.staleClaimHint.includes('不自动释放'),
+        `有陈旧 claim 时 status 必须指向 gov next 取出路并声明不自动释放，实际 ${JSON.stringify(statusStale.payload?.staleClaimHint)?.slice(0, 200)}`);
+
+      // 心跳新鲜时 status 不得塞 hint——与 next 的 recoveryHint 同一条理由。
+      targetClaim.heartbeatAt = new Date().toISOString();
+      writeFileSync(slicesPath, `${JSON.stringify(perturbed, null, 2)}\n`, 'utf8');
+      check('cli/status-fresh-claim-no-hint',
+        (runGov(['status'], cliRoot)).payload?.staleClaimHint === null,
+        'status 在没有陈旧 claim 时不得塞 staleClaimHint。');
+
       // 与上面为构造场景所做的 claim，无需单独 release。
       writeFileSync(slicesPath, pristine, 'utf8');
       check('cli/next-stale-claim-fixture-restored',
@@ -987,6 +1020,7 @@ console.log(JSON.stringify({
     'complete 成功路径的扰动覆盖 slices/gates/validation 三份并锁定还原成功（只还原切片表而漏 gates.json 会留下 open Gate 引用终态切片，使其后每条 seal 断言跑在 GATE_OPEN_TERMINAL_SLICE 已成立的数据上）',
     'deferred 切片的 resumeRequires 直接投影（不让 agent 手工按 capabilityId 反查 scope.json）；取不到时必须给 reason 而非空数组；无 deferred 时不投影以免膨胀默认首屏',
     'next 暴露在飞 claim 的心跳新鲜度：超 24 小时报 heartbeatStale 并给出「先核实、再 release 或 complete」的出路，且声明 CLI 不自动释放（否则被遗弃的 claim 与有主 claim 在输出里无从区分，接手者会全部避开）',
+    'status 与 next 的陈旧判定逐字段一致：status 也报 heartbeatStale/staleFor 并在有陈旧 claim 时指向 gov next（status 曾只报 heartbeatAt 原始值，同一份数据两个命令给出相反结论，而 status 是常用入口）',
     '心跳新鲜时不得报陈旧也不塞 recoveryHint；心跳不可解析时判为未知而非陈旧（误报会诱导接手者 release 掉别人正在写的切片）'
   ],
   findings
