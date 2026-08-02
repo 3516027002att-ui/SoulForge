@@ -24,18 +24,27 @@
 - 哪些被真实环境或格式证据阻塞；
 - 前人留下了哪些可复现证据。
 
+**不要从通读本文开始。** 先跑：
+
+~~~powershell
+node scripts/gov.mjs next      # 可 claim 的切片 + 每条的入口、前置、所需验证
+node scripts/gov.mjs help      # 全部命令与 seal 四步流程
+~~~
+
+`gov next` 输出自带工作流和每个切片的 `entryPoints`、`hardPrerequisites`、`requiredValidation`，足以开始工作。实测两条命令合计 8896 B，本文 431597 B，差 48.5 倍。本文用于需要地形背景时按区域检索，不是上手必读。
+
 接手者应当：
 
-1. 初次接手时全文阅读本文；连续开发至少重读全局线路图、当前技术前沿、执行面板和相关区域地图。
-2. 需要机械化选点、拆解和沉淀流程时，配合 `docs/AGENT_EXECUTION_PLAYBOOK.md` 使用；它不承载独立状态口径。
+1. 跑 `node scripts/gov.mjs next` 选点，`gov claim --slice <id> --owner <你>` 原子占用（避免并发撞车）。
+2. 只在需要背景时读本文的相关区域地图；连续开发另可重读全局线路图与当前技术前沿。
 3. 检查 `git status`、`HEAD`、本机环境和相关测试。
 4. 根据依赖关系、真实证据、风险和当前可用环境，自主选择合理推进路径。
-5. 修改完成后更新本文对应路线的状态与“实施证据记录”。
+5. 收尾走 CLI：先提交主题域改动 → `gov seal` 追加证据 → `gov complete` 收尾。**不要手写本文的执行面板、Gate 状态或实施证据记录**，那些区块是 `docs/governance/*.json` 的投影，手写会被投影门禁判为分叉（详见 §13.3）。
 6. 不新建平行的 milestone、fork、next-actions、project-state、task 或 status 文档。
 
-如果你写代码稳定、但不擅长自己排推进路径，可配合 `docs/AGENT_EXECUTION_PLAYBOOK.md` 执行手册使用。它把上面第 2～5 步和 §0.3 决策协议、§13.2 切片模板翻译成可机械执行的 L0～L6 循环、选点决策树和拆解模板。它只是方法手册，不承载任何状态、范围或 authority；本文仍是唯一事实源。
+需要机械化的选点决策树和拆解模板时，配合 `docs/AGENT_EXECUTION_PLAYBOOK.md` 使用。它只是方法手册，不承载任何状态、范围或 authority。
 
-第一次接手项目时应全文阅读。后续连续开发可以重点阅读：
+按区域检索本文时，通常需要的是：
 
 - 全局线路图；
 - 当前技术前沿；
@@ -1025,7 +1034,9 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 
 ### 13.3 治理门禁
 
-`W-HANDOFF-INTEGRITY-01`：`test:handoff-integrity`（`node scripts/verify-handoff-integrity.mjs`）已建立并接入根 `package.json`。它解析本文这一唯一事实源，不维护第二份手写状态清单。证据见第 17.1 节 `EV-HANDOFF-20260721`。
+`W-HANDOFF-INTEGRITY-01`：`test:handoff-integrity`（`node scripts/verify-handoff-integrity.mjs`）已建立并接入根 `package.json`。它解析本文的治理区块并做确定性校验，不维护第二份手写状态清单。
+
+治理事实源已外置为 `docs/governance/*.json`（`slices.json`、`gates.json`、`evidence.jsonl`、`scope.json`、`releases.json`）。本文 `SOULFORGE_PROJECTION_BEGIN/END` 标记内的区块是这些 JSON 的投影，由 `node scripts/generate-handoff-projection.mjs` 生成，`test:handoff-projection` 保证两侧不分叉。因此本文仍是人读的完整口径，但**不再是可手写的权威**：改治理状态要改 JSON 并重新生成，手改标记内的区块会被投影门禁判为分叉。标记外的散文（规则说明、决策依据、历史记录）仍由工程手写并复核。证据见第 17.1 节 `EV-HANDOFF-20260721`。
 
 门禁只自动覆盖零误报、可确定性判定的子集，当前应检查：
 
@@ -1748,6 +1759,7 @@ entries[]:
 | `EV-REL-SCOPE-20260801-CLI-CLOSURE` | `sealed-current-run` | `scope-ruling:user-approved`；scope-deferral:`REL-E`:V0.6:user-approved；scope-deferral:`REL-I`:V0.6:user-approved；revalidates=`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`；工程侧重封存：gov next 输出补 claim→验证→封存→complete 流程骨架、治理 CLI 四个文件登记进 `REL-SCOPE` 主题域。范围裁定语义未变，不构成新的范围裁定 | HEAD=`7b1114527c6a7113c5ccd9e7065b1a1759b24ad6`; trackedDiffSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=2d73ec656a939ab26bf4847b5aa1fe4dec6a940b26690f50e6e660349a8d0756; fingerprintSha256=93cae0056c50d6613cc0453285f3def1064294baa34e6cc90d29adc7ccc48d0f | `node scripts/verify.mjs` --tier governance,`npm run typecheck`,`npm test`,`npm run bridge:verify:synthetic`,`npm run build` | 治理 CLI 现已纳入 freshness 判定，改封存行为必须重封存。边界：主题域文件集是否还有同类缺口未普查；workflow 骨架只保证闭环存在，不保证每步措辞对所有切片都最优。 | 不证明 native 资产解析、真实游戏目录写入或安装分发；不声明主题域文件集已完备（本轮只补了治理 CLI 这一处缺口，未做系统性普查）；fixture 与治理数据校验不等于 native authority |
 | `EV-REL-SCOPE-20260801-RELEASE-SCOPING` | `sealed-current-run` | `scope-ruling:user-approved`；scope-deferral:`REL-E`:V0.6:user-approved；scope-deferral:`REL-I`:V0.6:user-approved；revalidates=`EV-REL-SCOPE-20260801-CLI-CLOSURE`；工程侧重封存：next 的 activeSlices/`blockedSlices` 补版本过滤，消除 V0.5 在飞 claim 漏进 V0.6 视图。范围裁定语义未变，不构成新的范围裁定 | HEAD=`5298548357e55144e906f286379f5b621b9e19f0`; trackedDiffSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=7eacef61a9f5466300f85f97b7beb9b0427f5cea3b14d94019749a1098491ad3; fingerprintSha256=a3329c8109651174119a1c8a2775932507bada92d44f8cbbc5dfe63596538b27 | `node scripts/verify.mjs` --tier governance,`npm run typecheck`,`npm test`,`npm run bridge:verify:synthetic`,`npm run build` | 跨版本治理路径已可用且无跨版本泄漏。边界：V0.6 当前无 ready 切片属预期（延期条目的 `resumeRequires` 尚未满足），本轮不改变任何延期裁定。 | 不证明 V0.6 切片本身可推进（其硬前置未成立）；不证明 native 资产解析或真实游戏目录写入；fixture 与治理数据校验不等于 native authority |
 | `EV-REL-SCOPE-20260801-EMPTY-GUIDANCE` | `sealed-current-run` | `scope-ruling:user-approved`；scope-deferral:`REL-E`:V0.6:user-approved；scope-deferral:`REL-I`:V0.6:user-approved；revalidates=`EV-REL-SCOPE-20260801-RELEASE-SCOPING`；工程侧重封存：无可 claim 切片时的出路按实际 lifecycle 分布给出，消除 V0.6 的 deferred 死路。范围裁定语义未变，不构成新的范围裁定 | HEAD=`23ad174b38d9aca4c699d93f45c3df03c60342f3`; trackedDiffSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=2e1321520fe7d55f85d82b0fd2e0e955203dd4ac7dd93450816c4882bf6ffc00; fingerprintSha256=efa5cce756c3db1979506eaa8bc258e473207e58b07d57bffa4984a52e39407d | `node scripts/verify.mjs` --tier governance,`npm run typecheck`,`npm test`,`npm run bridge:verify:synthetic`,`npm run build` | V0.6 选点不再是死路，出路指向正确权威。边界：只修了消息指向，未评估各 `scopeItem` 的 `resumeRequires` 本身是否可执行。 | 不改变任何延期裁定，也不声明 V0.6 的 `resumeRequires` 已满足；不证明 native 资产解析或真实游戏目录写入 |
+| `EV-REL-SCOPE-20260801-COMMAND-EXISTENCE` | `sealed-current-run` | `scope-ruling:user-approved`；scope-deferral:`REL-E`:V0.6:user-approved；scope-deferral:`REL-I`:V0.6:user-approved；revalidates=`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE`；工程侧重封存：执行手册改为指向治理 CLI，并补 node scripts/*.mjs 与 gov 子命令引用存在性门禁。范围裁定语义未变，不构成新的范围裁定 | HEAD=`a237dcef88648f7b671f3b1b50c87801dfef0ba2`; trackedDiffSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; untrackedManifestSha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855; handoffSha256BeforeEvidenceAppend=20a3af739bf62596f09a072f4b1777b32db2d1350a2b84c8a70f0aca30e71a5a; fingerprintSha256=2ae75b51b5fe85265ed2035e65b24497e98748ea5e4a86ec30edb20fe2653bb5 | `node scripts/verify-handoff-integrity.mjs`（负例注入后 exit=1，命中 NODE_SCRIPT_MISSING 与 GOV_SUBCOMMAND_MISSING 并指名对象；恢复后仅剩本轮预期 staleness）；`node scripts/verify.mjs` --tier governance（封存前 exit=1 仅因 `test:governance` 的三条 staleness） | 文档引用的脚本路径与 gov 子命令现在受门禁约束；判据取 CLI 实际接受的命令集而非 COMMANDS 键，避免把正确的 gov help 误报为不支持 | 本轮不提升任何切片 authority；未运行 native smoke；不校验命令参数（参数口径由 gov help 承担） |
 
 <!-- SOULFORGE_PROJECTION_END:evidence-index -->
 
@@ -3748,16 +3760,16 @@ Gate 只有在全部合法最小下一切片都受外部 blocker 阻塞时才能
 
 | Gate ID | capability | 当前切片 | gateState | applicability | Evidence/blockerRefs | 后继要求 |
 |---|---|---|---|---|---|---|
-| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-05` | `passed` | `in-scope` | `EV-REL-SCOPE-20260731-TEXT-FIRST`、`EV-REL-SCOPE-20260801-GOVERNANCE-JSON`、`EV-REL-SCOPE-20260801-SEAL-CLI`、`EV-REL-SCOPE-20260801-HANDOFF-PROJECTION`、`EV-REL-SCOPE-20260801-SCOPE-PROJECTION`、`EV-REL-SCOPE-20260801-COMMAND-INDEX`、`EV-REL-SCOPE-20260801-PARSER-REGISTRY`、`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`、`EV-REL-SCOPE-20260801-CLI-CLOSURE`、`EV-REL-SCOPE-20260801-RELEASE-SCOPING`、`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE` | 27 项范围矩阵继续冻结，其中 12 项已裁定延期 V0.6（`SCOPE-MSB`、animation/TAE/ESD 三项、资产线 7 项、`SCOPE-RENDERING`）；V0.5 收窄为 BND4/FMG/PARAM(gameparam)/EMEVD/script 五编辑器的文本优先边界，script 为只读 + 整内层文件替换；Sekiro 1.6 版本族、只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界不变；工程复核与普通工程提交不得触发用户重新授权 |
+| `REL-SCOPE` | V0.5 范围冻结 | `W-REL-SCOPE-RULING-05` | `passed` | `in-scope` | `EV-REL-SCOPE-20260731-TEXT-FIRST`、`EV-REL-SCOPE-20260801-GOVERNANCE-JSON`、`EV-REL-SCOPE-20260801-SEAL-CLI`、`EV-REL-SCOPE-20260801-HANDOFF-PROJECTION`、`EV-REL-SCOPE-20260801-SCOPE-PROJECTION`、`EV-REL-SCOPE-20260801-COMMAND-INDEX`、`EV-REL-SCOPE-20260801-PARSER-REGISTRY`、`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`、`EV-REL-SCOPE-20260801-CLI-CLOSURE`、`EV-REL-SCOPE-20260801-RELEASE-SCOPING`、`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE`、`EV-REL-SCOPE-20260801-COMMAND-EXISTENCE` | 27 项范围矩阵继续冻结，其中 12 项已裁定延期 V0.6（`SCOPE-MSB`、animation/TAE/ESD 三项、资产线 7 项、`SCOPE-RENDERING`）；V0.5 收窄为 BND4/FMG/PARAM(gameparam)/EMEVD/script 五编辑器的文本优先边界，script 为只读 + 整内层文件替换；Sekiro 1.6 版本族、只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界不变；工程复核与普通工程提交不得触发用户重新授权 |
 | `REL-A` | 全部 writer 与事务 | `W-A-RECOVERY-INTEGRATION-04` | `open` | `in-scope` | — | BND4/FMG/PARAM 12 case + EMEVD/MSB 8 case 已通过；继续真实断电/大容量/安装升级恢复 |
 | `REL-B` | 容器发布 corpus | `W-REL-B-CORPUS-02` | `open` | `in-scope` | — | KRAK 重压/写回/roundtrip 已完成；继续组合 mutation/repack 和完整 corpus 验证 |
 | `REL-C` | 核心语义 mutation 矩阵 | `W-EMEVD-FULL-01`、`W-EMEVD-FMG-PARAM-03` | `open` | `in-scope` | — | EMEVD DSL plan 的 production Bridge/PatchIR transaction 接线已完成；继续完整 EMEDF schema/control-flow、DSL 全局指令级 mutation、UI submit 接线；并行继续 FMG 全语言、全部 ParamType、MSB 实体和回滚 |
 | `REL-D` | 行为动画范围 | `W-BEHAVIOR-MAP-01` | `open` | `in-scope` | — | 本 Gate 的 4 个范围条目中 animation/TAE/ESD 三项已延期 V0.6，仅 `SCOPE-BEHAVIOR-SCRIPT` 留在 V0.5，因此 Gate 保持 open 而非 deferred；后继只要求 script 容器只读证据视图与整内层文件替换的写/重读/回滚/游戏加载闭环。TAE/ESD 登记样本 native document 与延期预览面板保留只读，不得据此声称本版行为语义能力 |
-| `REL-E` | 资产只读与导出矩阵 | `W-FLVER-READ-01` | `deferred` | `deferred-v0.6` | `EV-REL-SCOPE-20260731-TEXT-FIRST`、`EV-REL-SCOPE-20260801-GOVERNANCE-JSON`、`EV-REL-SCOPE-20260801-SEAL-CLI`、`EV-REL-SCOPE-20260801-HANDOFF-PROJECTION`、`EV-REL-SCOPE-20260801-SCOPE-PROJECTION`、`EV-REL-SCOPE-20260801-COMMAND-INDEX`、`EV-REL-SCOPE-20260801-PARSER-REGISTRY`、`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`、`EV-REL-SCOPE-20260801-CLI-CLOSURE`、`EV-REL-SCOPE-20260801-RELEASE-SCOPING`、`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE` | 整条资产线延期至 V0.6。既有 FLVER/TPF 登记样本 native document、MTD 只读投影与 GLB/PNG/TGA/DDS 导出保留为标记 V0.6 预览且必须只读；V0.6 恢复时继续 collision/navigation、完整引用和五类只读/导出闭环 |
+| `REL-E` | 资产只读与导出矩阵 | `W-FLVER-READ-01` | `deferred` | `deferred-v0.6` | `EV-REL-SCOPE-20260731-TEXT-FIRST`、`EV-REL-SCOPE-20260801-GOVERNANCE-JSON`、`EV-REL-SCOPE-20260801-SEAL-CLI`、`EV-REL-SCOPE-20260801-HANDOFF-PROJECTION`、`EV-REL-SCOPE-20260801-SCOPE-PROJECTION`、`EV-REL-SCOPE-20260801-COMMAND-INDEX`、`EV-REL-SCOPE-20260801-PARSER-REGISTRY`、`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`、`EV-REL-SCOPE-20260801-CLI-CLOSURE`、`EV-REL-SCOPE-20260801-RELEASE-SCOPING`、`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE`、`EV-REL-SCOPE-20260801-COMMAND-EXISTENCE` | 整条资产线延期至 V0.6。既有 FLVER/TPF 登记样本 native document、MTD 只读投影与 GLB/PNG/TGA/DDS 导出保留为标记 V0.6 预览且必须只读；V0.6 恢复时继续 collision/navigation、完整引用和五类只读/导出闭环 |
 | `REL-F` | 编辑器验收 | `W-REL-F-SCALE-02` | `open` | `in-scope` | — | inventory 已精确冻结为 BND4/FMG/PARAM/EMEVD/script 五项（script 为只读 + 整内层文件替换）；继续 BND4/script 工作台、各编辑器结构化 UI/DSL/完整有界访问和 Electron 真实文档功能验收。msb/tae/esd/flver 为 V0.6 延期只读预览，不计入本 Gate 验收，其写入路径必须在 contract、shared 清单与主进程 IPC 三层失败关闭 |
 | `REL-G` | 双协议 AI | `W-AI-CONFORMANCE-03` | `open` | `in-scope` | — | 错误/取消/超时/限额 10 case 已完成；继续真实工作区多步 typed mutation 矩阵 |
 | `REL-H` | 安装与运行 | `W-ME3-INSTALL-04` | `open` | `in-scope` | — | profile/launch/terminate adapter 已完成；继续 NSIS 安装/升级/卸载和真实 Sekiro 会话 |
-| `REL-I` | 渲染功能闭环 | `W-RENDER-FUNCTIONAL-02` | `deferred` | `deferred-v0.6` | `EV-REL-SCOPE-20260731-TEXT-FIRST`、`EV-REL-SCOPE-20260801-GOVERNANCE-JSON`、`EV-REL-SCOPE-20260801-SEAL-CLI`、`EV-REL-SCOPE-20260801-HANDOFF-PROJECTION`、`EV-REL-SCOPE-20260801-SCOPE-PROJECTION`、`EV-REL-SCOPE-20260801-COMMAND-INDEX`、`EV-REL-SCOPE-20260801-PARSER-REGISTRY`、`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`、`EV-REL-SCOPE-20260801-CLI-CLOSURE`、`EV-REL-SCOPE-20260801-RELEASE-SCOPING`、`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE` | 3D 渲染延期至 V0.6。MSB 与资产线同时延期后，V0.5 无 `in-scope` 3D 编辑目标。renderer-independent semantic scene、render packet 与 Three.js WebGPU/WebGL2 骨架保留不推翻；V0.6 恢复时继续真实 FLVER 渲染、picking、transform 更新与资源释放闭环 |
+| `REL-I` | 渲染功能闭环 | `W-RENDER-FUNCTIONAL-02` | `deferred` | `deferred-v0.6` | `EV-REL-SCOPE-20260731-TEXT-FIRST`、`EV-REL-SCOPE-20260801-GOVERNANCE-JSON`、`EV-REL-SCOPE-20260801-SEAL-CLI`、`EV-REL-SCOPE-20260801-HANDOFF-PROJECTION`、`EV-REL-SCOPE-20260801-SCOPE-PROJECTION`、`EV-REL-SCOPE-20260801-COMMAND-INDEX`、`EV-REL-SCOPE-20260801-PARSER-REGISTRY`、`EV-REL-SCOPE-20260801-DIAGNOSTIC-ROOTCAUSE`、`EV-REL-SCOPE-20260801-CLI-CLOSURE`、`EV-REL-SCOPE-20260801-RELEASE-SCOPING`、`EV-REL-SCOPE-20260801-EMPTY-GUIDANCE`、`EV-REL-SCOPE-20260801-COMMAND-EXISTENCE` | 3D 渲染延期至 V0.6。MSB 与资产线同时延期后，V0.5 无 `in-scope` 3D 编辑目标。renderer-independent semantic scene、render packet 与 Three.js WebGPU/WebGL2 骨架保留不推翻；V0.6 恢复时继续真实 FLVER 渲染、picking、transform 更新与资源释放闭环 |
 | `REL-COMPLIANCE` | 内部测试构建合规 | `W-REL-COMPLIANCE-02` | `open` | `in-scope` | — | 许可证文本 complete + NSIS 构建已完成；继续 installer lifecycle 验证和 package tree 扫描 |
 
 <!-- SOULFORGE_PROJECTION_END:gate-matrix -->
