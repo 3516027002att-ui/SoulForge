@@ -785,7 +785,7 @@
     {
       "sliceId": "W-REL-B-CORPUS-02",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "ready",
       "authority": "partial",
       "authorityCap": "native-verified",
       "authorityCapNote": "cap=native-verified；只覆盖实际执行的 corpus 操作",
@@ -806,7 +806,7 @@
     {
       "sliceId": "W-EMEVD-FMG-PARAM-03",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "ready",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只覆盖实际完成的 mutation 路径",
@@ -889,24 +889,7 @@
       "declaresUnfrozenValidation": false
     }
   ],
-  "activeClaims": [
-    {
-      "sliceId": "W-EMEVD-FMG-PARAM-03",
-      "claimId": "claim-param-fmg-wave2-20260801",
-      "owner": "coordinator-agent",
-      "claimedAt": "2026-08-01",
-      "heartbeatAt": "2026-08-01",
-      "recoveryTrigger": "检查任务进程状态与 param/fmg 工作树改动；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
-      "sliceId": "W-REL-B-CORPUS-02",
-      "claimId": "claim-krak-wave2-20260801",
-      "owner": "coordinator-agent",
-      "claimedAt": "2026-08-01",
-      "heartbeatAt": "2026-08-01",
-      "recoveryTrigger": "检查任务进程状态与 corpus/writer 工作树改动；无相关写进程则保存后审查再原子回退 ready"
-    }
-  ],
+  "activeClaims": [],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",
