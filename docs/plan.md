@@ -114,6 +114,7 @@ Write-Output ("CLI=$cli B  交接书=$doc B  倍数=" + [math]::Round($doc / $cl
 - **只读副本**:`verify-release-scope.mjs` 只解析交接书里的内嵌 JSON,从不读 `docs/governance/scope.json`,27 条 scopeItem 分叉数周而门禁全绿。
 - **判据形态与被检对象错位**:`entryPoints` 门禁用 `/\.(ts|cs)$/` 判形态,而坏数据 `.cs（延期）` 的扩展名不在串尾,行尾锚点不匹配,被当叙述性入口放过。同类:`gov` 子命令门禁读 `COMMANDS` 键,漏掉走 dispatch 显式分支的 `help`,把**正确**的引用报成错。
 - **fixture 扰动未还原**:见下条。
+- **拿执行面板状态当场景前提**:判据依赖 `lifecycle=active`、`activeClaims` 非空这类会被正常 `gov release` 清空的状态。面板一变,要么**误红**(前提消失被报成规则失效),要么**静默失覆盖**(整段被跳过,`checks` 总数只是变小,没有任何门禁转红)。后者更危险——它看起来一切正常。实测释放 5 条被遗弃 claim 后连锁暴露 4 处,全部潜伏已久:`complete` 成功路径段整段跳过(4 条断言含刚修好的还原断言一条不跑)、心跳陈旧段报「无法构造场景」、`active-slice-needs-exactly-one-claim` 靠清空 `activeClaims` 制造违规而没有 active 切片时清空本就合法、markdown 门禁无条件要求 §13.1.1 有表而投影器在空态时按设计输出散文(两条路径此前从未同时成立)。修法:场景前提自己构造,并把快照取在构造动作之前,让还原一次撤掉扰动与自造状态。
 
 推论:负例要用**仓库里实际存在的那条坏数据**,不能自己构造一条形态标准的。
 
@@ -194,12 +195,12 @@ npm run build
   `docs/AGENT_EXECUTION_PLAYBOOK.md` 与本文。
 - 临时目录泄漏台账尚有 18 项存量欠债(`npm run test:smoke-temp-cleanup` 守着,只允许缩小)。
 - 部分 native smoke 的资源释放不在 `finally` 中,异常路径可能泄漏 bridge 句柄。
-- **5 条 `owner=coordinator-agent` 的在飞 claim 已确认被中断**(心跳停在 2026-08-01;
-  其后的提交无一碰过它们的 `entryPoints`,同期证据全是 `EV-REL-SCOPE-*`):
-  `W-EMEVD-FULL-01`、`W-REL-F-SCALE-02`、`W-A-RECOVERY-INTEGRATION-04`、
-  `W-REL-B-CORPUS-02`、`W-EMEVD-FMG-PARAM-03`。`gov next` 现在会标出来。
-  接手时按各自 `recoveryTrigger` 核实工作树与写进程,再决定 release 还是续做——
-  **不要不核实就批量 release**,那五条的 `authority` 都在 partial 及以上,半成品可能已入库。
+- 5 条 `owner=coordinator-agent` 的在飞 claim **已按 `recoveryTrigger` 核实并全部 release**
+  (2026-08-02):无任何指向本仓库的 node/dotnet 写进程;工作树 0 改动、无 stash、单工作树;
+  对 5 条切片各自的 path-like `entryPoints` 跑 `git log --since=2026-08-02` 全部无提交。
+  `authority` 未被改动(release 不撤销也不追加验证结论),V0.5 可 claim 面从 5 条恢复到 10 条。
+  释放本身连锁暴露 4 处「拿面板状态当前提」的假门禁,已一并修好并各自用负例证明。
+  下次遇到 `heartbeatStale=true` 仍按同样顺序核实,**不要不核实就批量 release**。
 - 4 条分支未合并到 main,均为历史快照且各自领先 1~2 个提交:
   `backup/local-ahead-225c08d`、`codex/v05-current-project`、`codex/v05-worktree-publish`、
   `worktree-v05-open-format-import`。按用户裁定**保留不删、不推 origin**;
