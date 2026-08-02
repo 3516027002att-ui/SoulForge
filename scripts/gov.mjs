@@ -221,12 +221,15 @@ function cmdNext(args) {
     release = resolved.release;
   }
 
-  const candidates = data.slices.filter((slice) => {
-    if (release && slice.targetRelease !== release) return false;
-    return slice.lifecycle === 'ready';
-  });
-  const inFlight = data.slices.filter((slice) => slice.lifecycle === 'active');
-  const blocked = data.slices.filter((slice) => slice.lifecycle === 'blocked');
+  // 三个列表必须用同一个版本判据。实测漏过一次：只给 candidates 加了过滤，
+  // 于是 `next --release V0.6` 返回 claimable=0 但 activeSlices=5，而那 5 条
+  // targetRelease 全是 V0.5——agent 会读成「V0.6 有人在做了」，实际是 V0.5 的在飞
+  // claim 漏进了 V0.6 视图。
+  const inRelease = (slice) => !release || slice.targetRelease === release;
+
+  const candidates = data.slices.filter((slice) => inRelease(slice) && slice.lifecycle === 'ready');
+  const inFlight = data.slices.filter((slice) => inRelease(slice) && slice.lifecycle === 'active');
+  const blocked = data.slices.filter((slice) => inRelease(slice) && slice.lifecycle === 'blocked');
 
   emit({
     mode: 'next',

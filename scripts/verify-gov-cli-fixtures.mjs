@@ -244,12 +244,27 @@ check('cli/next-item-self-sufficient',
 
   // 每个已登记版本都必须可查询。这条断言随 releases.json 增长而自动覆盖新版本,
   // 不需要在 fixture 里追加 V0.6、V0.7 的硬编码用例。
+  const slicesData = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/slices.json'), 'utf8'));
+  const releaseOf = new Map(slicesData.slices.map((slice) => [slice.sliceId, slice.targetRelease]));
+
   for (const releaseId of knownReleases) {
     const scoped = runGov(['next', '--release', releaseId], cliRoot);
     check(`cli/next-release-${releaseId}-queryable`,
       scoped.status === 0 && scoped.payload?.release === releaseId
         && (scoped.payload?.claimable ?? []).every((item) => item.targetRelease === releaseId),
       `${releaseId} 应可查询且只返回该版本切片，实际 ${JSON.stringify(scoped.payload)?.slice(0, 200)}`);
+
+    // claimable/activeSlices/blockedSlices 必须用同一个版本判据。
+    // 实测漏过一次：只给 claimable 加了过滤，于是 next --release V0.6 返回
+    // claimable=0 但 activeSlices=5，而那 5 条 targetRelease 全是 V0.5——
+    // agent 会读成「V0.6 有人在做了」，实际是 V0.5 的在飞 claim 漏进了 V0.6 视图。
+    const leaked = [
+      ...(scoped.payload?.activeSlices ?? []),
+      ...(scoped.payload?.blockedSlices ?? [])
+    ].filter((entry) => releaseOf.get(entry.sliceId) !== releaseId);
+    check(`cli/next-release-${releaseId}-active-blocked-scoped`, leaked.length === 0,
+      `${releaseId} 的 activeSlices/blockedSlices 不得混入其他版本切片，实际混入 `
+      + JSON.stringify(leaked.map((entry) => `${entry.sliceId}@${releaseOf.get(entry.sliceId)}`)));
   }
 
   const allReleases = runGov(['next', '--all'], cliRoot);
