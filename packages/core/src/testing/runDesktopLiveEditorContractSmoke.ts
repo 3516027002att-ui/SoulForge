@@ -1,6 +1,12 @@
 /**
- * Structural contract: live editor write paths for MSB/PARAM UI are wired
- * through apply*Mutation IPC (not local-only demo commits).
+ * Renderer 侧实时编辑接线契约：UI 组件与 App.tsx 的写回路径。
+ *
+ * 分页 channel 是否注册、preload 是否暴露分页方法这两组断言已迁到真实执行
+ * 观测门禁 `npm run test:desktop-ipc-contract`（理由与实测证据见
+ * runFmgMsbIpcContractSmoke.ts 顶部注释）。
+ *
+ * 这里保留的都是 renderer 侧断言：React 组件的 props 接线与 UI 文案在
+ * 主进程运行时表面上不可观测，真实验证需要挂载渲染进程（Electron 内 e2e）。
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -48,28 +54,8 @@ function main(): void {
   if (!paramPanel.includes('sourceId') || !app.includes('mutation.sourceId')) {
     throw new Error('PARAM duplicate must carry sourceId for full payload upsert');
   }
-  if (!preload.includes('applyMsbMutation') || !preload.includes('applyParamMutation')) {
-    throw new Error('preload missing write APIs');
-  }
-  // Paginated editor access (hard constraint 17): every release editor's
-  // bounded read must be reachable from the renderer through a page channel,
-  // and main must register it. This keeps the scale-access contract honest.
-  for (const channel of [
-    'resource.readFmgPage',
-    'resource.readParamPage',
-    'resource.listContainerChildrenPage',
-    'resource.listScriptContainerEntriesPage'
-  ]) {
-    if (!ipc.includes(channel)) throw new Error(`ipc missing paginated channel ${channel}`);
-  }
-  for (const method of [
-    'readFmgPage',
-    'readParamPage',
-    'listContainerChildrenPage',
-    'listScriptContainerEntriesPage'
-  ]) {
-    if (!preload.includes(method)) throw new Error(`preload missing paginated method ${method}`);
-  }
+  // 分页 channel 注册与 preload 分页方法接线：见 test:desktop-ipc-contract
+  // （真实观测 main 注册表与 preload invoke 目标，含双向对账）。
   // Bounded access must be one shared windowing authority (hard constraint 17):
   // ipc must consume the shared normalizePageWindow from core and not keep a
   // private copy that could drift from the acceptance smoke.
@@ -110,18 +96,18 @@ function main(): void {
 
   console.log(JSON.stringify({
     ok: true,
-    message: '桌面实时编辑写回路径契约验证通过（MSB part/region 位置 + PARAM 复制 sourceId）',
+    message: 'Renderer 实时编辑接线契约验证通过（MSB part/region 位置 + PARAM 复制 sourceId）',
     paths: [
       'MsbScenePanel.onPartPositionCommit → applyMsbMutation(set_part_position)',
       'MsbScenePanel.onRegionPositionCommit → applyMsbMutation(set_region_position)',
       'ParamTablePanel.duplicate sourceId → applyParamMutation upsert',
       'Sekiro-only native write gate',
       'stable LOCALAPPDATA staging root with cleanup',
-      'paginated channels: readFmgPage / readParamPage / listContainerChildrenPage / listScriptContainerEntriesPage',
       'shared normalizePageWindow windowing authority (no private copy)',
       'readParamPage: explicit empty commandOptions + payload-null-safe rows',
       'listContainerChildrenPage: native BND4 full enumeration fallback for real containers'
-    ]
+    ],
+    delegatedTo: 'npm run test:desktop-ipc-contract（分页 channel 注册 / preload 分页方法接线 / 双向对账，真实执行观测）'
   }, null, 2));
 }
 
