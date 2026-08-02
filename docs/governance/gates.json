@@ -157,7 +157,6 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-EMEVD-FULL-01",
         "W-EMEVD-FMG-PARAM-03"
       ],
       "evidenceRefs": [],

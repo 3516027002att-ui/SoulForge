@@ -9,11 +9,6 @@
   ],
   "unfrozen": [
     {
-      "sliceId": "W-EMEVD-FULL-01",
-      "targetRelease": "V0.5",
-      "reason": "完整 EMEDF schema 覆盖与真实导入 EMEDF 交叉验证 smoke"
-    },
-    {
       "sliceId": "W-ME3-INSTALL-04",
       "targetRelease": "V0.5",
       "reason": "NSIS installer lifecycle、真实 Sekiro launch/terminate 与 rollback-restart smoke"
