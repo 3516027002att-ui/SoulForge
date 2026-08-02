@@ -13,7 +13,7 @@
  * *_HEADERS 逐 token 对齐、单元格不得含裸换行或裸竖线、空值必须是 —、
  * 生成幂等、标记缺失必须失败关闭。这些断言与 JSON 内容无关，改数据不会误伤。
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { BLOCKS, loadProjectionSources, projectHandoff, beginMarker, endMarker, HANDOFF } from './generate-handoff-projection.mjs';
 import { TIER_ORDER, TIER_BY_SCRIPT, EXCLUDED } from './verify/tiers.mjs';
@@ -180,9 +180,77 @@ const NON_TABLE_BLOCKS = new Set(['scope-proposal', 'command-index']);
   check('command-index/excluded-listed-with-reason',
     excludedEntries.every(([script, reason]) => body.includes(`\`${script}\`：${reason}`)),
     '每条排除项必须连同排除理由一起呈现。');
+
   check('command-index/counts-match-authority',
     body.includes(`全部 ${registered.length} 条`) && body.includes(`另有 ${excludedEntries.length} 条`),
     `计数必须与 tiers.mjs 一致（登记 ${registered.length} / 排除 ${excludedEntries.length}）。`);
+}
+
+{
+  /**
+   * §18.2.1 提案块的解析方登记表。
+   *
+   * 这个块被四处独立解析，各自写着自己的正则。本轮给它加投影标记时，前三处
+   * 都在治理门禁里、当场报错，第四处在 packages/core 的 TS smoke 里——
+   * 治理门禁全绿，只有 npm test 才炸，而那是本轮最后才跑的命令。
+   *
+   * 抽公共解析器要跨 scripts/（ESM .mjs）与 packages/core（TS 构建产物）两个
+   * 模块体系，代价大于收益；改为登记 + 静态门禁：新增第五个解析方必须登记，
+   * 否则这里失败关闭并指出漏改的风险。判据是「文件里出现 BEGIN marker 字面量」，
+   * 不是正则形状——形状可以各不相同，存在性不能漏。
+   */
+  const PROPOSAL_PARSERS = Object.freeze({
+    'scripts/verify-release-scope.mjs': '范围裁定门禁（提案语义与冻结值的权威判定）',
+    'scripts/verify-release-scope-fixtures.mjs': '范围门禁的负向 fixture（构造带/不带投影标记两种形态）',
+    'scripts/handoff-integrity-lib.mjs': 'REL-SCOPE 主题域锚点（只用 marker 定位，不解析块内 JSON）',
+    'packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts': '发布编辑器验收：核对 SCOPE-EDITORS 的冻结 editorIds'
+  });
+  const marker = '<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->';
+
+  // 必须真的扫仓库，不能只遍历登记表里的四条路径。
+  // 实测过一版只遍历登记表的写法：往第五个文件里加 marker，门禁照旧 2973 项
+  // 全绿——它压根没去找新增的解析方，那种「登记表」只是一份注释。
+  const scanRoots = ['scripts', 'packages', 'apps'];
+  const skipDirs = new Set(['node_modules', 'dist', '.git', 'bin', 'obj']);
+  const sourceFiles = [];
+  const walk = (relativeDir) => {
+    let entries = [];
+    try {
+      entries = readdirSync(join(root, relativeDir), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const childRelative = `${relativeDir}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (!skipDirs.has(entry.name)) walk(childRelative);
+      } else if (/\.(?:mjs|js|cjs|ts|tsx)$/.test(entry.name)) {
+        sourceFiles.push(childRelative);
+      }
+    }
+  };
+  for (const scanRoot of scanRoots) walk(scanRoot);
+
+  const selfPath = 'scripts/verify-handoff-projection-fixtures.mjs';
+  const actual = sourceFiles
+    .filter((relativePath) => relativePath !== selfPath)
+    .filter((relativePath) => readFileSync(join(root, relativePath), 'utf8').includes(marker))
+    .sort();
+  const registeredPaths = Object.keys(PROPOSAL_PARSERS).sort();
+
+  check('proposal-parsers/scan-found-files', sourceFiles.length > 100,
+    `扫描必须真的遍历到源文件，实际只有 ${sourceFiles.length} 个——扫描根或后缀过滤写错了。`);
+  check('proposal-parsers/registry-matches-repository',
+    JSON.stringify(actual) === JSON.stringify(registeredPaths),
+    `引用提案 marker 的文件集必须与登记表一致。`
+      + `未登记：${actual.filter((p) => !registeredPaths.includes(p)).join(', ') || '无'}；`
+      + `登记了但已不引用：${registeredPaths.filter((p) => !actual.includes(p)).join(', ') || '无'}。`
+      + '新增解析方必须在此登记并写明用途——本轮实测：加投影标记时前三处在治理门禁里'
+      + '当场报错，第四处（packages/core 的 TS smoke）只有 npm test 才炸。');
+  for (const [relativePath, purpose] of Object.entries(PROPOSAL_PARSERS)) {
+    check(`proposal-parsers/${relativePath}/purpose-documented`, purpose.length > 0,
+      '每个解析方必须写明用途，否则下一个人不知道改动会波及什么。');
+  }
 }
 
 {
