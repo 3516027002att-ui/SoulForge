@@ -193,8 +193,13 @@ npm run build
   全仓 checkout,需单独裁定。
 - 项目级 `CLAUDE.md` 被 gitignore(`.gitignore:17`),其指引不进新克隆;tracked 对应物是
   `docs/AGENT_EXECUTION_PLAYBOOK.md` 与本文。
-- 临时目录泄漏台账尚有 18 项存量欠债(`npm run test:smoke-temp-cleanup` 守着,只允许缩小)。
-- 部分 native smoke 的资源释放不在 `finally` 中,异常路径可能泄漏 bridge 句柄。
+- `git status` **不要带 `--` 路径过滤**就下"工作区干净"的结论。实测踩过:本轮多次用
+  `git status --porcelain -- <少数路径>` 确认干净,而工作区一直有 20 个上个会话遗留的
+  未提交改动(它们清偿了 18 项临时目录欠债,完整但未验证未提交)。过滤后的"干净"只对
+  被过滤的那部分成立,而输出看起来跟真干净一模一样——第 4 条意义上的误导。
+- `scripts/` 下的 `_probe*` / `_tmp*` 临时探针**没有门禁守着**。第 6 条写了"用完删",
+  但它们全部 gitignored 因而不进 `git status`,实测从 7-18 攒到 8-02 共 16 个才被发现。
+  纯约定不带门禁 = 迟早失效,这本身就是本文存在的理由。
 - 5 条 `owner=coordinator-agent` 的在飞 claim **已按 `recoveryTrigger` 核实并全部 release**
   (2026-08-02):无任何指向本仓库的 node/dotnet 写进程;工作树 0 改动、无 stash、单工作树;
   对 5 条切片各自的 path-like `entryPoints` 跑 `git log --since=2026-08-02` 全部无提交。
