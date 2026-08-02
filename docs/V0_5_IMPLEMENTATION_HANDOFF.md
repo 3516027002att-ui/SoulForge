@@ -1364,60 +1364,185 @@ npm run bridge:verify:synthetic
 npm run build
 ~~~
 
-Bridge 与持久化：
+<!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
+
+全部 122 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+
+一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
+
+**governance**（16 条）
+
+~~~powershell
+npm run handoff:fingerprint
+npm run test:gov-cli
+npm run test:governance
+npm run test:governance-data-fixtures
+npm run test:governance-equivalence
+npm run test:handoff-integrity
+npm run test:handoff-integrity:fixtures
+npm run test:handoff-projection
+npm run test:orphan-smoke-gate
+npm run test:release-scope
+npm run test:release-scope-fixtures
+npm run test:release-scope-proposal
+npm run test:smoke-temp-cleanup
+npm run test:v06-deferral-index
+npm run test:verify-entrypoint
+npm run verify:audit
+~~~
+
+**unit**（34 条）
+
+~~~powershell
+npm run test
+npm run test:ai-conformance
+npm run test:ai-fake-loop
+npm run test:core-journal-wiring
+npm run test:database-utility
+npm run test:desktop-security
+npm run test:editor-document-store
+npm run test:editor-mutation-service
+npm run test:emedf-schema
+npm run test:emevd-dsl-compiler
+npm run test:emevd-envelope-map
+npm run test:emevd-external-adapter
+npm run test:emevd-four-view
+npm run test:emevd-ipc-contract
+npm run test:emevd-plan-commit
+npm run test:fmg-msb-ipc-contract
+npm run test:hex-scene
+npm run test:me3-runtime-adapter
+npm run test:me3-runtime-gateway
+npm run test:model-service-configuration
+npm run test:model-service-vault-contract
+npm run test:openai-responses
+npm run test:param-msb-write-ipc-contract
+npm run test:performance-baseline
+npm run test:resource-index-diagnostics
+npm run test:scene-asset-inventory
+npm run test:scene-draw-list
+npm run test:subprocess-control
+npm run test:three-scene-module
+npm run test:ui-localization
+npm run test:vault-encrypt-contract
+npm run test:vault-ipc-contract
+npm run test:workbench-projections
+npm run typecheck
+~~~
+
+**synthetic**（31 条）
 
 ~~~powershell
 npm run bridge:build
-npm run bridge:verify:daemon
 npm run bridge:verify:client
 npm run bridge:verify:crash
+npm run bridge:verify:daemon
+npm run bridge:verify:synthetic
+npm run test:asset-import
+npm run test:asset-writeback
 npm run test:bridge-recovery-harness
 npm run test:bridge-staging
-npm run test:database-utility
-npm run test:sqlite-crash-recovery
-~~~
-
-公开 metadata、runtime 与发行 contract：
-
-~~~powershell
+npm run test:cross-session-journal
+npm run test:dds-convert-writeback
+npm run test:desktop-contract-mutations
+npm run test:desktop-ipc-contract
+npm run test:desktop-live-editor-contract
+npm run test:editor-bounded-access
+npm run test:emevd-coverage
+npm run test:emevd-full-document
+npm run test:emevd-plan-production
+npm run test:flver-candidate
+npm run test:large-transaction-recovery
+npm run test:param-field-mutation
 npm run test:param-metadata-mismatch
 npm run test:paramdef-layout
-npm run test:me3-runtime-adapter
+npm run test:power-loss-recovery
 npm run test:release-corpus-registry
 npm run test:release-editor-acceptance
-npm run test:release-compliance-fixtures
-npm run test:portable-packaging-config-fixtures
-npm run test:subprocess-control
+npm run test:smithbox-param-metadata-source
+npm run test:sqlite-crash-recovery
+npm run test:standalone-writer-failure-matrix
+npm run test:upgrade-recovery
+npm run test:writer-failure-matrix
 ~~~
 
-已有 native 路线命令：
+**native**（32 条）
 
 ~~~powershell
-npm run bridge:verify:oodle
-npm run bridge:verify:dcx-documents
-npm run bridge:verify:bnd4-writer
 npm run bridge:verify:bnd4-transaction
-npm run bridge:verify:fmg
-npm run bridge:verify:param
+npm run bridge:verify:bnd4-writer
+npm run bridge:verify:dcx-documents
 npm run bridge:verify:emevd
-npm run bridge:verify:msb
-npm run bridge:verify:tae
 npm run bridge:verify:esd
 npm run bridge:verify:flver
-npm run bridge:verify:flver-mesh
 npm run bridge:verify:flver-glb
+npm run bridge:verify:flver-mesh
+npm run bridge:verify:fmg
+npm run bridge:verify:msb
+npm run bridge:verify:oodle
+npm run bridge:verify:param
+npm run bridge:verify:tae
 npm run bridge:verify:tpf
+npm run probe:behavior-headers
+npm run test:bridge-exit-hygiene
+npm run test:emevd-corpus-matrix
+npm run test:emevd-imported-coverage
+npm run test:emevd-imported-production
+npm run test:emevd-multi-corpus-matrix
+npm run test:fmg-reference-integrity
+npm run test:krak-combination-mutation
+npm run test:native-corpus-writeback
 npm run test:native-preview
+npm run test:native-writer-failure-matrix
+npm run test:param-duplicate-native
+npm run test:param-field-write-matrix
+npm run test:param-metadata-native
+npm run test:private-native-gate
+npm run test:script-container-evidence
+npm run test:script-container-replace
+npm run test:section28-sekiro-gate
 ~~~
 
-EMEVD DSL 写链与行为研究：
+**release**（9 条）
 
 ~~~powershell
-npm run test:emevd-plan-commit
-npm run test:emevd-plan-production
-npm run test:emevd-coverage
-npm run probe:behavior-headers
+npm run build
+npm run release:installer:manifest
+npm run release:manifest
+npm run test:installer-lifecycle
+npm run test:portable-packaging-config-fixtures
+npm run test:portable-packaging-gate
+npm run test:release-compliance-fixtures
+npm run test:release-content
+npm run test:release-reproducible
 ~~~
+
+另有 22 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
+
+- `verify`：统一验证入口本身，自调度会无限递归
+- `verify:all`：同上（全层级别名）
+- `verify:list`：同上（只列计划，不是验证）
+- `dev`：交互式开发服务器，不是验证
+- `bridge:publish`：发布产物构建，由 release 链按需调用
+- `corpus:build-local-release`：生成本机 corpus registry，写 testdata，不是验证
+- `corpus:build-local-release:configured`：同上（被 wrapper 调用的内层）
+- `codexpro:doctor`：外部工具集成，与本仓库验证无关
+- `codexpro:setup`：外部工具集成
+- `codexpro:start`：外部工具集成
+- `codexpro:start:agent`：外部工具集成
+- `codexpro:start:handoff`：外部工具集成
+- `codexpro:pro-bundle`：外部工具集成
+- `gov`：治理写入 CLI，不是验证；正确性由 test:gov-cli 门禁
+- `gov:next`：同上（只读子命令，但仍属操作入口）
+- `gov:status`：同上
+- `gov:claim`：同上（会改 lifecycle 与 activeClaims）
+- `gov:heartbeat`：同上
+- `gov:release`：同上
+- `gov:complete`：同上
+- `gov:seal`：同上（追加 Evidence、挂 Gate 引用并重新投影交接书，三步原子写）
+- `handoff:project`：交接书投影写入命令，不是验证；只读校验由 test:handoff-projection 承担
+
+<!-- SOULFORGE_PROJECTION_END:command-index -->
 
 `probe:behavior-headers` 需要 `SOULFORGE_SEKIRO_GAME_ROOT`，缺失时结构化失败关闭；它是 W-BEHAVIOR-MAP-01 的本机研究工具，输出不提交、不提升 authority。
 
@@ -1674,6 +1799,15 @@ handoffSha256BeforeEvidenceAppend=<handoffSha256BeforeEvidenceAppend>
 真实命令日志和大型产物放在应用数据目录或系统临时目录，默认不提交仓库。记录中不得包含用户绝对路径、真实资产、API key 或 Oodle DLL。
 
 旧版 P0-P7 流水记录已由本线路图取代。历史细节仍可通过 Git history 和基线提交 `7bd354d` 追溯；不要恢复旧 milestone、fork、task、project-state 或 development-log 文档作为当前口径。
+
+#### 17.2.1 本节以下的日期条目是历史留痕，不是当前口径
+
+§17.2 以下按日期排列的条目产生于证据外化到 `docs/governance/evidence.jsonl` 之前，是当时唯一的留痕位置。它们保留在此供审计追溯，但**不是权威，也不被任何门禁读取**：
+
+- 当前唯一的证据权威是 `docs/governance/evidence.jsonl`，呈现在 §17.1（该表由 `npm run handoff:project` 从 JSONL 生成）。
+- 封存新证据只用 `node scripts/gov.mjs seal`。它会写 JSONL、挂 Gate 引用、重新投影 §17.1，三步原子完成，失败整体回滚。
+- **不要在本节追加新的日期条目。** 手写条目不参与 freshness 判定、不参与指纹计算、不被等价性门禁比对——追加它只会制造第二份无人校验的进度口径，而这正是硬约束「不得另立进度口径」要防的东西。
+- 历史条目与 JSONL 记录粒度不同（28 篇日志 vs 50 条 evidence），两者不构成一一对应，也不应尝试对齐。冲突时以 JSONL 为准。
 
 ### 2026-07-20：交接书重构为长期技术线路图
 

@@ -23,6 +23,7 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { TIER_ORDER, TIER_BY_SCRIPT, EXCLUDED } from './verify/tiers.mjs';
 
 export const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
 
@@ -294,6 +295,44 @@ export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, s
       scopeItems: scopeData.scopeItems
     };
     return ['```json', JSON.stringify(proposal, null, 2), '```'].join('\n');
+  },
+
+  /**
+   * §15 命令清单。
+   *
+   * 原先是手写的分组裸命令列表：实测列出 38 条，而 package.json 有 144 条——
+   * 106 条从未出现在交接书里。它是一份注定落后的部分复制，而落后不会被任何
+   * 门禁发现（§15 不参与指纹，也没有等价性比对）。
+   *
+   * 权威是 scripts/verify/tiers.mjs：每条 script 要么有层级，要么写明排除理由，
+   * 漏登记由 verify:audit 失败关闭。所以这里按层级投影，不再手写分组。
+   * 每条命令的「证明什么/不证明什么」仍是工程判断，留在 §15.1 手写矩阵里。
+   */
+  'command-index': () => {
+    const byTier = new Map(TIER_ORDER.map((tier) => [tier, []]));
+    for (const [script, tier] of Object.entries(TIER_BY_SCRIPT)) {
+      byTier.get(tier)?.push(script);
+    }
+    const lines = [
+      `全部 ${Object.keys(TIER_BY_SCRIPT).length} 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。`,
+      '',
+      '一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。',
+      ''
+    ];
+    for (const tier of TIER_ORDER) {
+      const scripts = byTier.get(tier) ?? [];
+      if (scripts.length === 0) continue;
+      lines.push(`**${tier}**（${scripts.length} 条）`, '');
+      lines.push('~~~powershell');
+      for (const script of [...scripts].sort()) {
+        lines.push(script.includes(' ') ? script : `npm run ${script}`);
+      }
+      lines.push('~~~', '');
+    }
+    const excluded = Object.entries(EXCLUDED);
+    lines.push(`另有 ${excluded.length} 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：`, '');
+    lines.push(...excluded.map(([script, reason]) => `- \`${script}\`：${reason}`));
+    return lines.join('\n');
   }
 });
 

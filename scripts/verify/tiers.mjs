@@ -28,6 +28,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:release-scope-proposal': 'governance',
   'test:v06-deferral-index': 'governance',
   'handoff:fingerprint': 'governance',
+  // 交接书投影退化门禁。--check 只答「markdown 是否等于当前 JSON 的投影」，
+  // 它抓手改表格，抓不住投影器自身退化——那类改动会让 --check 与生成同时
+  // 「一致」却把交接书写坏，门禁全绿。实测把空值渲染从 — 改成空串时，
+  // 仅靠真实数据的 2858 项断言全部通过，所以边界 fixture 本身承担门禁职责。
+  'test:handoff-projection': 'governance',
   // 验证入口自身的负向 fixture：跳过检测一旦失效，入口会把「什么都没跑」
   // 报成通过而退出码依旧是 0，退化后与正常表现完全一致，因此必须门禁化。
   'test:verify-entrypoint': 'governance',
@@ -213,5 +218,9 @@ export const EXCLUDED = Object.freeze({
   'gov:claim': '同上（会改 lifecycle 与 activeClaims）',
   'gov:heartbeat': '同上',
   'gov:release': '同上',
-  'gov:complete': '同上'
+  'gov:complete': '同上',
+  'gov:seal': '同上（追加 Evidence、挂 Gate 引用并重新投影交接书，三步原子写）',
+  // 投影写入命令。跑它会改交接书，不能作为验证调度；对应的只读校验是
+  // test:handoff-projection（内含 --check），已登记进 governance 层。
+  'handoff:project': '交接书投影写入命令，不是验证；只读校验由 test:handoff-projection 承担'
 });
