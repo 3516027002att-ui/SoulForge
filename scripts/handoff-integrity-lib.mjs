@@ -649,12 +649,27 @@ function parseAndValidateUnfrozenValidations(markdown, where, findings, slices) 
 }
 
 function parseAndValidateActiveClaims(markdown, where, findings, slices) {
-  const table = parseFirstTable(extractSection(markdown, '13.1.1'));
+  const section = extractSection(markdown, '13.1.1');
+  const table = parseFirstTable(section);
   if (!table) {
+    // 空 claim 是合法状态：activeClaims 为空时投影器按设计输出一句说明而非空表
+    // （generate-handoff-projection.mjs 的 active-claims 分支）。此前两条路径从未
+    // 同时成立过——真实数据里 activeClaims 一直非空——所以「投影输出散文」与
+    // 「门禁要求有表」的矛盾一直潜伏。实测把 5 条被遗弃 claim 全部释放后，
+    // markdown 门禁报 ACTIVE_CLAIM_TABLE_MISSING 而 JSON 门禁不报，被迁移等价性
+    // 门禁抓成两套结论不一致（markdown=1 json=0）。
+    //
+    // 放行条件收紧到「章节存在且确实是投影器的空态说明」。判据只看 markdown，
+    // 不读治理 JSON：本函数是纯 markdown 校验器，引入 JSON 依赖会让它与 JSON
+    // 门禁耦合，等价性比对就失去意义（而 slices 形参是 parseSlices 的 markdown
+    // 解析结果，本来就不含 activeClaims）。章节整体缺失或内容不是空态说明时，
+    // 仍报 ACTIVE_CLAIM_TABLE_MISSING——否则会把真缺失一起放过。
+    if (typeof section === 'string' && section.includes('当前没有 active claim')) return;
     findings.push(makeFinding(
       'ACTIVE_CLAIM_TABLE_MISSING',
       where,
-      '未找到 §13.1.1 active claim 注册表。'
+      '未找到 §13.1.1 active claim 注册表，且章节内容不是投影器的空态说明'
+      + '（activeClaims 为空时应投影「当前没有 active claim。」开头的说明段）。'
     ));
     return;
   }

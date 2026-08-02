@@ -209,8 +209,17 @@ expectCodes('blocked-slice-must-reference-blocker', ({ read, write }) => {
   write('slices.json', slices);
 }, ['SLICE_BLOCKER_REQUIRED']);
 
+// 扰动必须自己造出 active 切片，不能靠「真实数据碰巧有一条」再清空 activeClaims。
+// lifecycle=active 与 activeClaims 都是会被正常 release 清空的执行面板状态：实测把
+// 5 条被遗弃 claim 全部释放后，真实数据里 active 切片为 0，于是 activeClaims=[] 成了
+// 合法状态，这条 fixture 拦不到 ACTIVE_SLICE_CLAIM_REQUIRED 而报「未按预期拦截」——
+// 门禁红的是判据前提消失，不是规则退化。改为先把一条 ready 切片置 active 再清空
+// claim，使「active 切片缺 claim」这个被检形态必然成立。
 expectCodes('active-slice-needs-exactly-one-claim', ({ read, write }) => {
   const slices = read('slices.json');
+  const target = slices.slices.find((slice) => slice.lifecycle === 'active')
+    ?? slices.slices.find((slice) => slice.lifecycle === 'ready');
+  target.lifecycle = 'active';
   slices.activeClaims = [];
   write('slices.json', slices);
 }, ['ACTIVE_SLICE_CLAIM_REQUIRED']);
