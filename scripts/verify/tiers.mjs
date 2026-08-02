@@ -32,6 +32,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 报成通过而退出码依旧是 0，退化后与正常表现完全一致，因此必须门禁化。
   'test:verify-entrypoint': 'governance',
   'verify:audit': 'governance',
+  // 治理锁与 claim CLI 的负向 fixture：坏锁与好锁在顺序执行下表现一致，
+  // 只有并发与崩溃场景能区分，不门禁化就等于没有锁。
+  'test:gov-cli': 'governance',
 
   // ---- unit：编译 + 跨包单元与契约。代码改动必跑 ----
   typecheck: 'unit',
@@ -159,5 +162,14 @@ export const EXCLUDED = Object.freeze({
   'codexpro:start': '外部工具集成',
   'codexpro:start:agent': '外部工具集成',
   'codexpro:start:handoff': '外部工具集成',
-  'codexpro:pro-bundle': '外部工具集成'
+  'codexpro:pro-bundle': '外部工具集成',
+  // gov CLI 是治理数据的写入口，不是验证：跑它会改执行面板状态。
+  // 其正确性由已登记的 test:gov-cli 负向 fixture 保证。
+  gov: '治理写入 CLI，不是验证；正确性由 test:gov-cli 门禁',
+  'gov:next': '同上（只读子命令，但仍属操作入口）',
+  'gov:status': '同上',
+  'gov:claim': '同上（会改 lifecycle 与 activeClaims）',
+  'gov:heartbeat': '同上',
+  'gov:release': '同上',
+  'gov:complete': '同上'
 });
