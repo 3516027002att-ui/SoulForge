@@ -39,6 +39,14 @@ export interface ScaffoldToolContext {
   transaction?: WorkspaceTransaction;
   auditLog?: AuditLogStore;
   confirmationReceiptIds?: string[];
+  /**
+   * 还原点落盘的基目录。
+   *
+   * 不传时 createRestorePoint 会退到系统临时目录，而备份是有意保留的，没有任何
+   * 清理路径会删它——实测每次 patch.commit 残留一个 soulforge-backup-*。
+   * 调用方（含 smoke）应指向自己的工作区子目录，让工作区释放时一并删除。
+   */
+  backupBaseDir?: string;
   /** Mutable bag for propose/stage/commit chain in tests. */
   state?: ScaffoldToolState;
 }
@@ -380,7 +388,8 @@ export function createScaffoldToolRegistry(): ScaffoldToolRegistry {
         workspaceId: context.workspaceId,
         workspaceRoot: context.workspaceRoot,
         actor: { kind: 'agent', id: 'patch.stage' },
-        ...(context.auditLog ? { auditLog: context.auditLog } : {})
+        ...(context.auditLog ? { auditLog: context.auditLog } : {}),
+        ...(context.backupBaseDir ? { backupBaseDir: context.backupBaseDir } : {})
       });
       const added = tx.addPatch(patch);
       if (!added.ok) {

@@ -1,19 +1,17 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 
 const mode = process.argv[2];
 if (mode === '--crash-child') {
   crashInsideTransaction(process.argv[3]!);
 } else {
-  await runParent();
+  await withSmokeWorkspace('sqlite-crash', (workspace) => runParent(workspace.root));
 }
 
-async function runParent(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-sqlite-crash-'));
+async function runParent(root: string): Promise<void> {
   const databasePath = join(root, 'workspace.db');
   const workspaceId = 'sqlite-crash-smoke';
   const database = openWorkspaceDatabase(databasePath);

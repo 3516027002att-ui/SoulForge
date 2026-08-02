@@ -9,9 +9,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import {
   BRIDGE_PROTOCOL_VERSION,
   BRIDGE_SCHEMA_VERSION,
@@ -50,7 +50,11 @@ import { MemoryResourceGraph } from '../resource-graph/memoryResourceGraph.js';
 import { createWorkspaceTransaction } from '../transactions/workspaceTransaction.js';
 import { buildVfsFromWorkspace } from '../vfs/buildVfs.js';
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('v05-arch', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const results: string[] = [];
 
   // --- 1. ResourceURI ---
@@ -226,7 +230,6 @@ async function main(): Promise<void> {
   results.push('PatchIR ok');
 
   // --- 4. Transaction text vertical slice ---
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-v05-arch-'));
   const workspaceRoot = join(root, 'mod');
   await mkdir(join(workspaceRoot, 'msg'), { recursive: true });
   await mkdir(join(workspaceRoot, 'other'), { recursive: true });
@@ -254,7 +257,9 @@ async function main(): Promise<void> {
     workspaceId: 'ws-scaffold',
     workspaceRoot,
     actor: { kind: 'user', id: 'scaffold-smoke' },
-    auditLog: audit
+    auditLog: audit,
+    // 提交会建还原点；不指定时落系统临时目录且有意保留，无人清理。
+    backupBaseDir: join(root, 'backups')
   });
 
   const txPatch = createPatchIr({
@@ -308,7 +313,8 @@ async function main(): Promise<void> {
     workspaceId: 'ws-scaffold',
     workspaceRoot,
     actor: { kind: 'system', id: 'raw-smoke' },
-    auditLog: audit
+    auditLog: audit,
+    backupBaseDir: join(root, 'backups')
   });
   const rawTxPatch = createPatchIr({
     workspaceId: 'ws-scaffold',
@@ -361,7 +367,9 @@ async function main(): Promise<void> {
     workspaceRoot,
     mode: 'plan',
     graph,
-    auditLog: audit
+    auditLog: audit,
+    // patch.commit 经工具注册表建事务，同样会落还原点；不传时落系统临时目录。
+    backupBaseDir: join(root, 'backups')
   };
 
   const stats = await registry.executeToolThroughPolicy('workspace.stats', {}, planCtx);
@@ -396,6 +404,7 @@ async function main(): Promise<void> {
     confirmationReceiptIds: ['mock-receipt-1'],
     ...(planCtx.graph ? { graph: planCtx.graph } : {}),
     ...(planCtx.auditLog ? { auditLog: planCtx.auditLog } : {}),
+    ...(planCtx.backupBaseDir ? { backupBaseDir: planCtx.backupBaseDir } : {}),
     ...(planCtx.state ? { state: planCtx.state } : {})
   };
   // New propose/stage chain under full permission for commit+rollback audit

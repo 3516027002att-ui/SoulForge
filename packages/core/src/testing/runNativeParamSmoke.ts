@@ -3,8 +3,8 @@
  * Verifies semantic roundtrip, row upsert/delete via write-param, and BND4 commit/rollback.
  */
 import { createHash } from 'node:crypto';
-import { copyFile, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { dirname, join } from 'node:path';
 import type { ParamDefDocument } from '@soulforge/shared';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -35,13 +35,16 @@ interface Bnd4ChildSnapshot {
   index: number;
 }
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('native-param', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const sourceBnd = await resolveNativeFixture(
     process.argv[2],
     'param-primary',
     '../../mods/param/gameparam/gameparam.parambnd.dcx'
   );
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-native-param-'));
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');
   await mkdir(join(overlay, 'param', 'gameparam'), { recursive: true });
@@ -184,7 +187,9 @@ async function main(): Promise<void> {
       }
     }]
   });
-  const committed = await executePatchIrThroughTransaction(patch, { session, operationLog: store });
+  const committed = await executePatchIrThroughTransaction(patch, { session, operationLog: store,
+    backupBaseDir: join(root, 'backups')
+  });
   if (!committed.operation) {
     throw new Error(`PARAM BND4 commit failed: ${JSON.stringify(committed.diagnostics)}`);
   }
@@ -197,7 +202,9 @@ async function main(): Promise<void> {
       subjects: [`ROLLBACK_OPERATION:${committed.opId}`],
       riskLevel: 'high',
       note: 'param native smoke'
-    })
+    }),
+    // 回滚会建还原点；不指定时落系统临时目录且有意保留，无人清理。
+    backupBaseDir: join(root, 'backups')
   });
   if (!rolled.ok || !(await readFile(bndPath)).equals(await readFile(sourceBnd))) {
     throw new Error(`PARAM container rollback failed: ${JSON.stringify(rolled.diagnostics)}`);

@@ -1,13 +1,16 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { disposeBridgeDaemonPool, runBridge } from '../bridge/runBridge.js';
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('bridge-client', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const executable = resolve(
     process.argv[2] ?? '../../bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe'
   );
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-bridge-client-'));
   const eventDirectory = join(root, 'event');
   await mkdir(eventDirectory, { recursive: true });
   const filePath = join(eventDirectory, 'client-smoke.emevd');

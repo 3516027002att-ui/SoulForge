@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { join } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
 import type { OperationLogRecord } from '@soulforge/shared';
@@ -20,8 +20,11 @@ import {
   LegacySemanticSnapshotImportError
 } from '../workspace/importLegacySemanticSnapshot.js';
 
-async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-sqlite-'));
+function main(): Promise<void> {
+  return withSmokeWorkspace('sqlite', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const workspaceDbPath = join(root, 'workspace.db');
   const appDbPath = join(root, 'app.db');
   const workspaceId = 'workspace-sqlite-smoke';

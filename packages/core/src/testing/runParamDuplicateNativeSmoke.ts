@@ -2,8 +2,8 @@
  * Real path: PARAM row duplicate via Bridge upsert with a new id + full data payload.
  * Exercises shipped write-param path (not a reimplementation).
  */
-import { copyFile, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, mkdir, writeFile } from 'node:fs/promises';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { join, resolve } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 
@@ -18,9 +18,12 @@ interface Bnd4ChildSnapshot {
   contentBase64: string;
 }
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('param-dup', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const sourceBnd = resolve(process.argv[2] ?? '../../mods/param/gameparam/gameparam.parambnd.dcx');
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-param-dup-'));
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');
   await mkdir(join(overlay, 'param', 'gameparam'), { recursive: true });

@@ -2,8 +2,8 @@
  * MSB models/parts parse + part position mutation smoke.
  * Authority: native-verified for part-transform write path on DFLT-decompressed corpus sample.
  */
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -99,13 +99,16 @@ function decompressDfltDcx(source: Buffer): Buffer {
   return inflateSync(source.subarray(payloadOff, payloadOff + compressedSize));
 }
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('native-msb', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const sourceDcx = await resolveNativeFixture(
     process.argv[2],
     'msb-primary',
     '../../mods/map/mapstudio/m10_00_00_00.msb.dcx'
   );
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-native-msb-'));
   const staging = join(root, 'staging');
   await mkdir(staging, { recursive: true });
   const payload = decompressDfltDcx(await readFile(sourceDcx));
