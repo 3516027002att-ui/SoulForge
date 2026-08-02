@@ -17,7 +17,12 @@
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { acquireGovernanceLock } from './gov/lock.mjs';
-import { EVIDENCE, computeFingerprint, formatBaseline } from './gov/seal.mjs';
+import {
+  EVIDENCE,
+  collectUncommittedGovernanceFiles,
+  computeFingerprint,
+  formatBaseline
+} from './gov/seal.mjs';
 import { projectHandoff } from './generate-handoff-projection.mjs';
 import { validateGovernanceData } from './governance/validateGovernanceData.mjs';
 import {
@@ -833,6 +838,12 @@ function cmdSeal(args) {
       return;
     }
 
+    // 封存写了文件但没提交，而下一次封存的指纹锚点是 HEAD。不报出来的话，
+    // 事实源 JSON 会悬在工作区，而它的投影可能已随别的提交入库。
+    const touched = [EVIDENCE, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md',
+      ...(gateRefs.length > 0 ? [GATES] : [])];
+    const uncommitted = collectUncommittedGovernanceFiles(root, touched);
+
     emit({
       mode: 'seal',
       evidenceId,
@@ -842,6 +853,13 @@ function cmdSeal(args) {
       fingerprintSha256: fingerprint.fingerprintSha256,
       untrackedCount: fingerprint.untrackedCount,
       governanceGate: 'passed',
+      uncommittedAfterSeal: uncommitted ?? 'git-status-unavailable',
+      nextStep: uncommitted === null
+        ? 'git status 不可用，请自行确认本次封存写入的文件已提交。'
+        : uncommitted.length > 0
+          ? `本次封存写入的文件尚未提交：${uncommitted.join('、')}。请提交——下一次封存的指纹锚点是 HEAD，`
+            + '未提交的事实源会与已入库的投影错位。本命令不自动提交，以免把调用方尚未准备好的实现改动一起带进去。'
+          : '本次封存写入的文件均已入库，无需额外提交。',
       note: '本命令只搬运调用方陈述的运行事实与一个自洽指纹；它不验证命令真的跑过，也不提升任何 authority，也不改动 gateState。'
     });
   } finally {

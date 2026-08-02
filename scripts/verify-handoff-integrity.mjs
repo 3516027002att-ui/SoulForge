@@ -205,7 +205,36 @@ for (const [relativePath, content] of [[HANDOFF, handoff], [PLAYBOOK, playbook]]
   }
 }
 
+// 交接书开头必须先把 agent 送进 CLI，而不是送进 431 KB 的全文。
+//
+// 这条不是文风偏好，是实测的上手成本：`gov next` + `gov help` 合计 8896 B 就
+// 包含了选点、入口、前置和所需验证，而全文读完是 48.5 倍的代价，且读完仍然不
+// 知道哪条切片可以 claim（那是 slices.json 的 lifecycle 决定的）。
+//
+// 门禁化的理由是这段散文在 PROJECTION 标记之外，没有任何机械约束——改回
+// 「初次接手时全文阅读本文」不会让任何测试变红，而后果是每个新 agent 都多烧
+// 40 万字符的上下文。同时禁止「本文仍是唯一事实源」这类表述：治理权威已外置
+// 到 docs/governance/*.json，留着这句会让 agent 去手写投影区块。
+if (handoff !== null) {
+  const opening = handoff.split(/\r?\n/).slice(0, 60).join('\n');
+  if (!/gov\.mjs next/.test(opening)) {
+    add('error', 'HANDOFF_ENTRY_NOT_CLI', `${HANDOFF} §0`,
+      '交接书开头 60 行内必须给出 `node scripts/gov.mjs next` 作为首选入口。'
+      + '缺这条时 agent 会从通读全文开始（实测 431597 B vs CLI 8896 B，48.5 倍），'
+      + '且读完仍不知道哪条切片可 claim——那由 slices.json 的 lifecycle 决定。');
+  }
+  const staleAuthorityClaim = /本文(仍)?是唯一事实源/.exec(handoff);
+  if (staleAuthorityClaim !== null) {
+    const line = handoff.slice(0, staleAuthorityClaim.index).split(/\r?\n/).length;
+    add('error', 'HANDOFF_STALE_AUTHORITY_CLAIM', `${HANDOFF}:${line}`,
+      '治理权威已外置到 docs/governance/*.json，交接书的治理区块是其投影。'
+      + '声明「本文是唯一事实源」会让 agent 去手写投影区块，而手写必被 projection 门禁判为分叉。'
+      + '改为区分「人读的完整口径」与「可手写的权威」，参见 §13.3。');
+  }
+}
+
 const checkedRules = [
+  '交接书开头必须以 gov CLI 为首选入口，且不得声明自身为唯一事实源',
   'README、交接书和执行手册的本地 Markdown 链接必须存在',
   'README 必须直链唯一 handoff，且不依赖本机代理规则文件',
   '§17.1 Evidence ID 唯一且 sealed-current-run 指纹可重算；passed Gate freshness 只跟踪显式主题域',
