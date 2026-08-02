@@ -96,6 +96,17 @@ if (packageJsonRaw !== null) {
 if (scriptNames.size > 0) {
   for (const [relativePath, content] of [[HANDOFF, handoff], [PLAYBOOK, playbook]]) {
     if (content === null) continue;
+    // 刻意保持宽松：只要文本里出现 "npm run X"，X 就必须是真脚本。
+    //
+    // 踩过两次同一个歧义——`npm run` script 存在性（反引号闭合在 run 之后，
+    // 被引用的是词组本身）在治理数据归一化剥掉反引号后变成 npm run script，
+    // 撞出 NPM_SCRIPT_MISSING。试过用负向先行断言 /npm run(?!`) …/ 排除，
+    // 实测无效：触发时反引号已经不在那个位置了，先行断言对归一化后的文本和
+    // `npm run script` 整串包引号两种形式都不生效。
+    //
+    // 真正的结论是这不该在正则里修。文档写「npm run 脚本名存在性」而不是
+    // 「`npm run` script 存在性」就没有歧义，而放宽正则会让真实的脚本名笔误
+    // 溜过去——那是本检查唯一的价值。措辞是可控的，漏报不可控。
     const runPattern = /npm run ([a-z0-9:_-]+)/g;
     const seen = new Set();
     let match;

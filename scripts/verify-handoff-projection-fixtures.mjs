@@ -205,6 +205,51 @@ check(
   `投影区之外存在与投影表同构的表头（会成为第二份副本）：${JSON.stringify(strayTables.slice(0, 3))}`
 );
 
+// npm 脚本名提取契约。verify-handoff-integrity.mjs 用一条正则从交接书里找
+// npm run X 并要求 X 存在于 package.json，此前完全没有 fixture 覆盖。
+//
+// 锁定的是「宽松」这个选择本身，不是某种豁免。同一个歧义踩过两次：治理数据
+// 里写「`npm run` script 存在性」，归一化剥掉反引号后成为 npm run script，
+// 撞出 NPM_SCRIPT_MISSING。当时试过加负向先行断言 /npm run(?!`) …/ 排除，
+// 实测对触发时的真实文本形式都不生效（触发时反引号已经不在 run 之后了），
+// 已回退。
+//
+// 所以这里断言归一化后的歧义写法确实会被抓到——那是刻意的：措辞是可控的
+// （写「npm run 脚本名」就没歧义），而放宽正则会让真实的脚本名笔误漏报，
+// 那是本检查唯一的价值。
+//
+// 诚实边界：这几条断言锁的是当前五种输入下的行为，不能拦住任意放宽改动。
+// 试过构造一条能拦住先行断言的输入，实测不成立——`npm run` 后紧跟反引号时
+// run 与后词之间没有空格，正则本就不匹配，与先行断言无关。真要防住任意
+// 放宽，得改成正向枚举脚本名而不是模式匹配，那是更大的改动。
+{
+  const integritySource = readFileSync(join(root, 'scripts/verify-handoff-integrity.mjs'), 'utf8');
+  const declared = /const runPattern = (\/[^;]+\/g);/.exec(integritySource);
+  check('npm-script-pattern/declared', declared !== null, '未能在 verify-handoff-integrity.mjs 中定位 runPattern 声明；契约断言失效。');
+  if (declared !== null) {
+    const pattern = new RegExp(declared[1].slice(1, -2), 'g');
+    const extract = (text) => [...new Set([...text.matchAll(pattern)].map((m) => m[1]))];
+    const patternCases = [
+      ['quoted-full-command', '`npm run test:handoff-integrity` exit 0', ['test:handoff-integrity']],
+      ['bare-in-code-block', 'npm run bridge:build\nnpm run bridge:verify:daemon', ['bridge:build', 'bridge:verify:daemon']],
+      ['missing-script-still-extracted', '`npm run test:definitely-not-real`', ['test:definitely-not-real']],
+      // 归一化后的歧义文本必须仍被提取：宽松是选择，不是缺陷。
+      ['normalized-prose-is-caught', 'markdown 链接、npm run script 存在性', ['script']],
+      // 反引号闭合在 run 之后时本就不匹配（run 与后词之间是反引号不是空格）。
+      // 这条记录该形式的实际行为，避免下次又误以为先行断言在起作用。
+      ['backtick-closes-after-run', 'markdown 链接、`npm run` script 存在性', []]
+    ];
+    for (const [name, text, expected] of patternCases) {
+      const got = extract(text);
+      check(
+        `npm-script-pattern/${name}`,
+        JSON.stringify(got) === JSON.stringify(expected),
+        `提取结果应为 ${JSON.stringify(expected)}，实际 ${JSON.stringify(got)}`
+      );
+    }
+  }
+}
+
 const errors = findings.filter((finding) => finding.severity === 'error');
 console.log(JSON.stringify({
   ok: errors.length === 0,
@@ -218,7 +263,8 @@ console.log(JSON.stringify({
     '单元格不含裸竖线、裸换行或不成对反引号；空值一律写作 —',
     '每行列数与表头一致',
     '投影幂等；标记必须成对且各出现一次',
-    '投影区之外不得残留治理表格行'
+    '投影区之外不得残留与投影表同构的表头',
+    'npm 脚本名提取正则保持宽松：归一化后的叙述文本也会被抓到（措辞可控，漏报不可控）'
   ],
   findings
 }, null, 2));
