@@ -129,4 +129,29 @@ function formatBaseline(fields, fingerprintSha256) {
     + `fingerprintSha256=${fingerprintSha256}`;
 }
 
-export { computeFingerprint, formatBaseline, EVIDENCE };
+/**
+ * 列出封存刚刚改动、但仍未提交的治理文件。
+ *
+ * seal 会写 evidence.jsonl、按需写 gates.json、并把交接书重新投影，但它不提交
+ * ——提交必须由调用方决定（提交信息、是否与实现改动同批）。问题是下一次 seal 的
+ * 指纹锚点是 HEAD：这批改动留在工作区时，事实源 JSON 未入库而它的投影可能已经
+ * 随别的提交进去了，证据链就与 HEAD 错位。
+ *
+ * 实测过一次：a237dce 之后 seal 写了 evidence.jsonl 与 gates.json，随后的提交
+ * 只带了交接书散文，两个 JSON 一直悬在工作区。当时 seal 输出「governanceGate:
+ * passed」，看不出还有未落库的东西。所以这里把它显式报出来。
+ *
+ * 只报告，不自动提交：seal 自作主张 commit 会把调用方尚未准备好的实现改动一起
+ * 带进去，那比漏提交更难恢复。
+ */
+function collectUncommittedGovernanceFiles(root, candidatePaths) {
+  const status = git(root, ['status', '--porcelain', '--', ...candidatePaths]);
+  if (status.status !== 0) return null;
+  return text(status.stdout)
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    // porcelain v1 的前两列是状态码，第 3 位起是路径；路径本身可能带引号。
+    .map((line) => line.slice(3).replace(/^"|"$/g, ''));
+}
+
+export { computeFingerprint, formatBaseline, collectUncommittedGovernanceFiles, EVIDENCE, HANDOFF };

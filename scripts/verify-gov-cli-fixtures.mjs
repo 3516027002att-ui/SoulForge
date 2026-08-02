@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { acquireGovernanceLock, STALE_LOCK_MS } from './gov/lock.mjs';
 import { computeFingerprint } from './gov/seal.mjs';
-import { parseSealBaseline } from './handoff-integrity-lib.mjs';
+import { computeHandoffFingerprintSha256, parseSealBaseline } from './handoff-integrity-lib.mjs';
 
 const root = process.cwd();
 const findings = [];
@@ -179,6 +179,47 @@ if (!existsSync(join(cliRoot, 'node_modules'))) {
     where: 'fixture/setup',
     message: '无法为临时仓库准备 node_modules，CLI 测试无法运行；失败关闭而不是跳过。'
   });
+}
+
+// 把既有封存证据的锚点改写为本临时仓库的基线提交。
+//
+// 不改的后果实测过：真实仓库的 HEAD 不存在于临时仓库历史，
+// `merge-base --is-ancestor` 非 0 非 1 → subjectScanAvailable=false →
+// 每个 passed Gate 报 GATE_FRESHNESS_UNVERIFIABLE，于是 seal 的后置校验恒失败、
+// 恒走回滚分支。正向路径（指纹自洽、交接书投影、未提交提示）共 7 条断言一次都
+// 没执行过，而「失败不追加半条记录」这类负向断言是因为数据本来就红才通过的。
+//
+// 改写是合法的 fixture 构造而不是放宽判据：锚点语义是「这条证据封存时的 HEAD」，
+// 在临时仓库里那就该是基线提交。主题域集合不含 evidence.jsonl / gates.json /
+// slices.json（实测 gateSubjectRegistry().allFiles 无此三者），所以 seal 自身的
+// 写入不会让 freshness 转红——正向路径本就应当可达。
+{
+  const fixtureHead = runGit(['rev-parse', 'HEAD'], cliRoot);
+  const headSha = fixtureHead.status === 0 ? fixtureHead.stdout.trim() : null;
+  if (headSha !== null && /^[0-9a-f]{40}$/.test(headSha)) {
+    const evidencePath = join(cliRoot, 'docs/governance/evidence.jsonl');
+    const raw = readFileSync(evidencePath, 'utf8');
+    // 改 HEAD 必须连 fingerprintSha256 一起重算：指纹把 HEAD 算进去，
+    // 只改锚点会让每条历史证据报 EVIDENCE_FINGERPRINT_MISMATCH（实测 10 条）。
+    // 重算复用 computeHandoffFingerprintSha256 这一唯一实现，不在 fixture 里
+    // 另写一份 canonical 拼装——两份实现分叉时 fixture 会「测过但真实仓库红」。
+    const rewritten = raw.split('\n').map((line) => {
+      if (line.trim().length === 0) return line;
+      const parsed = parseSealBaseline(line.match(/"fingerprint"\s*:\s*"([^"]*)"/)?.[1] ?? '');
+      if (parsed?.formatValid !== true) return line;
+      const nextFields = { ...parsed.fields, head: headSha };
+      const nextSha = computeHandoffFingerprintSha256(nextFields);
+      return line
+        .replace(/HEAD=[0-9a-f]{40}/, `HEAD=${headSha}`)
+        .replace(/fingerprintSha256=[0-9a-f]{64}/, `fingerprintSha256=${nextSha}`);
+    }).join('\n');
+    if (rewritten !== raw) {
+      writeFileSync(evidencePath, rewritten, 'utf8');
+      runGit(['add', 'docs/governance/evidence.jsonl'], cliRoot);
+      runGit(['commit', '--quiet', '-m', 'fixture: rebase seal anchors onto fixture baseline'], cliRoot);
+      // 提交后锚点成了 HEAD 的父，仍是祖先，判定可用。
+    }
+  }
 }
 
 const next = runGov(['next'], cliRoot);
@@ -478,6 +519,18 @@ if (rollbackTarget) {
     `治理数据已违规时不得叠加改动，实际 ${JSON.stringify(blocked.payload)?.slice(0, 300)}`);
   check('cli/precheck-leaves-data-untouched', readFileSync(slicesPath, 'utf8') === before,
     '前置校验失败时不得写入任何内容。');
+
+  // 必须恢复：这段刻意把 authority 改成超 cap，而它此前一直不还原。
+  // 后果是后面每一条 seal 断言都跑在已违规的数据上——SEAL_POSTCHECK_FAILED
+  // 恒成立，正向分支（含指纹自洽、投影、未提交提示共 7 条断言）一次都没执行过，
+  // 而 seal-failures-append-nothing 之类的负向断言是因为「数据本来就红」才通过，
+  // 不是因为 seal 真的守住了契约。实测：还原前 fixture 恒走回滚分支。
+  slice.authority = 'candidate';
+  writeFileSync(slicesPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  const restored = runGov(['next'], cliRoot);
+  check('cli/rollback-fixture-state-restored',
+    restored.status === 0 && restored.payload?.ok === true,
+    `回滚场景的篡改必须还原，否则后续 seal 断言全部跑在已违规数据上。实际 ${JSON.stringify(restored.payload)?.slice(0, 300)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -590,27 +643,103 @@ if (rollbackTarget) {
       readFileSync(join(cliRoot, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8')
         .includes('EV-FIXTURE-SEAL-OK'),
       'seal 成功后交接书投影区必须已包含新证据行。');
+
+    // seal 写文件但不提交，而下一次封存的指纹锚点是 HEAD。真实仓库上漏过一次：
+    // seal 写了 evidence.jsonl 与 gates.json，随后的提交只带了交接书散文，两个
+    // JSON 悬在工作区——而当时的 seal 输出只有「governanceGate: passed」，
+    // 看不出还有未落库的事实源。这三条锁定「封存后必须报出未提交文件」。
+    const uncommitted = sealed.payload?.uncommittedAfterSeal;
+    check('cli/seal-reports-uncommitted-list', Array.isArray(uncommitted),
+      `seal 成功输出必须带 uncommittedAfterSeal 数组，实际 ${JSON.stringify(uncommitted)?.slice(0, 200)}`);
+    if (Array.isArray(uncommitted)) {
+      check('cli/seal-uncommitted-includes-evidence',
+        uncommitted.some((path) => path.includes('evidence.jsonl')),
+        `seal 刚写过 evidence.jsonl 且未提交，它必须出现在 uncommittedAfterSeal 中，实际 ${JSON.stringify(uncommitted)}`);
+      check('cli/seal-nextstep-demands-commit',
+        typeof sealed.payload?.nextStep === 'string'
+          && sealed.payload.nextStep.includes('提交')
+          && sealed.payload.nextStep.includes('HEAD'),
+        `有未提交文件时 nextStep 必须要求提交并说明锚点是 HEAD，实际 ${sealed.payload?.nextStep}`);
+    }
   } else {
+    check('cli/seal-success-path-reachable', false,
+      `正向封存必须可达（fixture 已把锚点改写到基线提交），实际 ${JSON.stringify(sealed.payload)?.slice(0, 500)}`);
+  }
+}
+
+// 后置校验失败必须整体回滚。
+//
+// 这段此前和正向断言共用一个 if/else：临时仓库恒走 else，正向 7 条断言从未执行；
+// 修好锚点后恒走 if，这 4 条负向断言反而成了死码。两个分支互斥，靠环境碰巧走哪边
+// 来「覆盖两种结局」是假覆盖。所以失败场景必须显式构造。
+//
+// 构造方式：先把交接书里一个 PROJECTION 标记块的主题域改掉并提交，让某个 passed
+// Gate 真的 stale，然后不带 --gates 封存——freshness 只判定 Gate 引用的
+// evidenceRefs，孤立新证据不参与判定，stale 必然消不掉。
+{
+  const handoffPath = join(cliRoot, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md');
+  const evidencePath = join(cliRoot, 'docs/governance/evidence.jsonl');
+  const scopePath = join(cliRoot, 'docs/governance/scope.json');
+  const scopeBefore = existsSync(scopePath) ? readFileSync(scopePath, 'utf8') : null;
+
+  if (scopeBefore !== null) {
+    // scope.json 是 release-scope-proposal 块的事实源，也在 Gate 主题域里。
+    // 改它并提交 → 该 Gate 的封存锚点之后主题域有变 → stale。
+    //
+    // 必须改 schema 允许的既有字段。第一版加了个 fixtureStalenessProbe 新字段，
+    // 结果 seal 确实失败了，但 errors 是 GOVERNANCE_SCHEMA_VIOLATION 而不是
+    // stale——断言为错误原因通过，正是本轮要消灭的那类假门禁。下面断言里额外
+    // 核对 errors 不含 SCHEMA_VIOLATION，锁住这一点。
+    const scopeDoc = JSON.parse(scopeBefore);
+    scopeDoc.note = `${scopeDoc.note} [fixture 扰动：制造主题域变化以触发 stale，不构成范围裁定]`;
+    writeFileSync(scopePath, `${JSON.stringify(scopeDoc, null, 2)}\n`, 'utf8');
+    runGit(['add', 'docs/governance/scope.json'], cliRoot);
+    runGit(['commit', '--quiet', '-m', 'fixture: perturb subject domain to force stale'], cliRoot);
+
+    const evidenceBefore = readFileSync(evidencePath, 'utf8');
+    const handoffBefore = readFileSync(handoffPath, 'utf8');
+    const failed = runGov(['seal', '--id', 'EV-FIXTURE-SEAL-STALE',
+      '--subject', 'fixture 封存：验证后置校验失败必须整体回滚',
+      '--commands', 'fixture 内不运行真实验证命令',
+      '--result', 'fixture 只检查回滚完整性',
+      '--non-claims', '不提升任何 authority'], cliRoot);
+
     check('cli/seal-postcheck-rolls-back',
-      sealed.payload?.code === 'SEAL_POSTCHECK_FAILED' || sealed.payload?.code === 'SEAL_PROJECTION_FAILED',
-      `seal 失败只允许是后置校验或投影失败，实际 ${JSON.stringify(sealed.payload)?.slice(0, 400)}`);
+      failed.status === 1
+        && (failed.payload?.code === 'SEAL_POSTCHECK_FAILED'
+          || failed.payload?.code === 'SEAL_PROJECTION_FAILED'),
+      `主题域变化且未指定 --gates 时封存必须失败，实际 ${JSON.stringify(failed.payload)?.slice(0, 400)}`);
+    // 失败必须因为 stale，而不是因为扰动本身把数据改成了非法。
+    // 后者会让上一条断言为错误原因通过——那是假门禁。
+    const failCodes = (failed.payload?.errors ?? []).map((entry) => entry.code);
+    check('cli/seal-postcheck-fails-for-staleness',
+      failCodes.length > 0
+        && failCodes.every((code) => code !== 'GOVERNANCE_SCHEMA_VIOLATION')
+        && failCodes.some((code) => code.includes('STALE') || code.includes('FRESHNESS')),
+      `失败原因必须是 freshness/stale，不能是扰动导致的数据非法，实际 ${JSON.stringify(failCodes)}`);
     check('cli/seal-rollback-removes-record',
-      !readFileSync(join(cliRoot, 'docs/governance/evidence.jsonl'), 'utf8')
-        .includes('EV-FIXTURE-SEAL-OK'),
-      '后置校验失败必须回滚，不得留下一条无效封存。');
+      readFileSync(evidencePath, 'utf8') === evidenceBefore,
+      '后置校验失败必须逐字节还原 evidence.jsonl，不得留下一条无效封存。');
     // 交接书也必须回滚。留下一份含该证据的投影而 JSONL 里没有，
     // 会让下次 --check 永久报漂移，且漂移方向指向一条不存在的记录。
     check('cli/seal-rollback-restores-handoff',
-      !readFileSync(join(cliRoot, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8')
-        .includes('EV-FIXTURE-SEAL-OK'),
-      '回滚必须同时还原交接书投影。');
-    // 回滚路径的 hint 必须指出 --gates 缺失这个可能。真实仓库上首次重封存正是
-    // 因为漏了 --gates 而 stale 未消除：freshness 只判定 Gate 引用的
-    // evidenceRefs，孤立的新证据根本不参与判定。hint 若不提这一点，
-    // 下一个 agent 会照着「主题域没提交」这个错误方向查。
+      readFileSync(handoffPath, 'utf8') === handoffBefore,
+      '回滚必须同时逐字节还原交接书投影。');
+    // hint 必须指出 --gates 缺失这个可能。真实仓库上首次重封存正是因为漏了
+    // --gates 而 stale 未消除：freshness 只判定 Gate 引用的 evidenceRefs，
+    // 孤立的新证据根本不参与判定。hint 若不提这一点，下一个 agent 会照着
+    // 「主题域没提交」这个错误方向查。
     check('cli/seal-rollback-hint-mentions-gates',
-      typeof sealed.payload?.hint === 'string' && sealed.payload.hint.includes('--gates'),
-      `未指定 --gates 时回滚 hint 必须提示该参数，实际 hint=${sealed.payload?.hint}`);
+      typeof failed.payload?.hint === 'string' && failed.payload.hint.includes('--gates'),
+      `未指定 --gates 时回滚 hint 必须提示该参数，实际 hint=${failed.payload?.hint}`);
+
+    // 还原扰动，避免污染后续断言（这正是上面 rollbackTarget 犯过的错）。
+    writeFileSync(scopePath, scopeBefore, 'utf8');
+    runGit(['add', 'docs/governance/scope.json'], cliRoot);
+    runGit(['commit', '--quiet', '-m', 'fixture: restore subject domain'], cliRoot);
+  } else {
+    check('cli/seal-stale-probe-scope-present', false,
+      'fixture 仓库缺少 docs/governance/scope.json，无法构造主题域变化场景。');
   }
 }
 
@@ -656,7 +785,11 @@ console.log(JSON.stringify({
     'seal 成功即完成交接书投影；失败时连交接书一并回滚',
     '--release 默认取 releases.json 的 currentRelease；未登记或形状非法的版本硬失败',
     'seal 在追加前预检 subject 是否带齐目标 Gate 的 user-approved 继承标记，缺失时逐个指名（否则会报成指向错误原因的 GATE_EVIDENCE_STALE）',
-    'next 的输出自带完整闭环：每条切片有 entryPoints/requiredValidation/hardPrerequisites，另附 claim→验证→封存→complete 的流程骨架'
+    'next 的输出自带完整闭环：每条切片有 entryPoints/requiredValidation/hardPrerequisites，另附 claim→验证→封存→complete 的流程骨架',
+    'seal 成功后报出自己写过但仍未提交的治理文件，并说明下次封存锚点是 HEAD（漏提交会让事实源与已入库的投影错位）',
+    'seal 的正向与回滚路径各自显式构造、互不依赖环境：锚点改写到 fixture 基线使正向可达，扰动 scope.json 主题域使 stale 可达',
+    '回滚场景断言失败原因确实是 freshness/stale 而非扰动导致的数据非法（否则断言为错误原因通过）',
+    'fixture 对治理数据的每处扰动都在断言后还原，不污染后续断言'
   ],
   findings
 }, null, 2));
