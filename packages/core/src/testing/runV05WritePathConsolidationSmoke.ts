@@ -9,10 +9,10 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import type { IndexedFile } from '@soulforge/shared';
 import { saveTextResource } from '../editing/saveTextResource.js';
 import {
@@ -65,8 +65,13 @@ function sha256(text: string | Buffer): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
-async function sectionA_saveTextResource(): Promise<{ opId: string }> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-wpc-a-'));
+// 六个 section 各自建独立工作区。改造前它们都直接 mkdtemp 且从不清理，
+// 单次运行泄漏 6 个目录；现在经 harness，成功与抛错都保证删除。
+function sectionA_saveTextResource(): Promise<{ opId: string }> {
+  return withSmokeWorkspace('wpc-a', (workspace) => sectionAInWorkspace(workspace.root));
+}
+
+async function sectionAInWorkspace(root: string): Promise<{ opId: string }> {
   const overlayRoot = join(root, 'mod');
   const baseRoot = join(root, 'game');
   await mkdir(join(overlayRoot, 'msg'), { recursive: true });
@@ -104,7 +109,9 @@ async function sectionA_saveTextResource(): Promise<{ opId: string }> {
     file,
     newText: 'a-v2\n',
     session,
-    operationLog: store
+    operationLog: store,
+    // 不指定时备份落系统临时目录且有意不删，每次运行残留 soulforge-backup-*。
+    backupBaseDir: join(root, 'backups')
   });
   if (!saved.ok || !saved.opId) {
     throw new Error(`A: save failed: ${JSON.stringify(saved.diagnostics)}`);
@@ -120,7 +127,9 @@ async function sectionA_saveTextResource(): Promise<{ opId: string }> {
     opId: saved.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(saved.opId)
+    confirmation: rollbackConfirmation(saved.opId),
+    // 回滚同样会建备份；不指定 backupBaseDir 时它落系统临时目录并有意保留。
+    backupBaseDir: join(root, 'backups')
   });
   if (!rolled.ok) throw new Error(`A: rollback failed: ${JSON.stringify(rolled.diagnostics)}`);
   if ((await readFile(notePath, 'utf8')) !== 'a-v1\n') throw new Error('A: rollback restore failed');
@@ -128,8 +137,11 @@ async function sectionA_saveTextResource(): Promise<{ opId: string }> {
   return { opId: saved.opId };
 }
 
-async function sectionB_staleOriginal(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-wpc-b-'));
+function sectionB_staleOriginal(): Promise<void> {
+  return withSmokeWorkspace('wpc-b', (workspace) => sectionBInWorkspace(workspace.root));
+}
+
+async function sectionBInWorkspace(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   await mkdir(join(overlayRoot, 'msg'), { recursive: true });
   const notePath = join(overlayRoot, 'msg', 'stale.txt');
@@ -153,7 +165,9 @@ async function sectionB_staleOriginal(): Promise<void> {
   const tx = createWorkspaceTransaction({
     workspaceId: 'ws-stale',
     workspaceRoot: overlayRoot,
-    actor: { kind: 'system', id: 'stale-test' }
+    actor: { kind: 'system', id: 'stale-test' },
+    // 本段预期 stage 失败、不建还原点；仍显式指定，避免将来改成提交成功时重新泄漏。
+    backupBaseDir: join(root, 'backups')
   });
   if (!tx.addPatch(patch).ok) throw new Error('B: addPatch failed');
   const staged = await tx.stage();
@@ -202,8 +216,11 @@ async function sectionB_staleOriginal(): Promise<void> {
   }
 }
 
-async function sectionC_explicitMapping(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-wpc-c-'));
+function sectionC_explicitMapping(): Promise<void> {
+  return withSmokeWorkspace('wpc-c', (workspace) => sectionCInWorkspace(workspace.root));
+}
+
+async function sectionCInWorkspace(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   await mkdir(join(overlayRoot, 'msg', 'a'), { recursive: true });
   await mkdir(join(overlayRoot, 'msg', 'b'), { recursive: true });
@@ -236,7 +253,9 @@ async function sectionC_explicitMapping(): Promise<void> {
   });
   const tx = createWorkspaceTransaction({
     workspaceId: 'ws-map',
-    workspaceRoot: overlayRoot
+    workspaceRoot: overlayRoot,
+    // 提交会建还原点；不指定时落系统临时目录且有意保留。
+    backupBaseDir: join(root, 'backups')
   });
   if (!tx.addPatch(patch).ok) throw new Error('C: addPatch failed');
   const staged = await tx.stage();
@@ -250,8 +269,11 @@ async function sectionC_explicitMapping(): Promise<void> {
   if ((await readFile(pathB, 'utf8')) !== 'B2\n') throw new Error('C: path B wrong content');
 }
 
-async function sectionD_rawEdit(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-wpc-d-'));
+function sectionD_rawEdit(): Promise<void> {
+  return withSmokeWorkspace('wpc-d', (workspace) => sectionDInWorkspace(workspace.root));
+}
+
+async function sectionDInWorkspace(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   await mkdir(join(overlayRoot, 'other'), { recursive: true });
   const binPath = join(overlayRoot, 'other', 'blob.bin');
@@ -274,7 +296,12 @@ async function sectionD_rawEdit(): Promise<void> {
     author: 'system',
     operations: [goodOp]
   });
-  const tx = createWorkspaceTransaction({ workspaceId: 'ws-raw', workspaceRoot: overlayRoot });
+  const tx = createWorkspaceTransaction({
+    workspaceId: 'ws-raw',
+    workspaceRoot: overlayRoot,
+    // 提交会建还原点；不指定时落系统临时目录且有意保留。
+    backupBaseDir: join(root, 'backups')
+  });
   if (!tx.addPatch(goodPatch).ok) throw new Error('D: addPatch failed');
   if (!(await tx.stage()).ok) throw new Error('D: stage failed');
   if (!(await tx.validate()).ok) throw new Error('D: validate failed');
@@ -310,8 +337,11 @@ async function sectionD_rawEdit(): Promise<void> {
   }
 }
 
-async function sectionE_vfsBounded(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-wpc-e-'));
+function sectionE_vfsBounded(): Promise<void> {
+  return withSmokeWorkspace('wpc-e', (workspace) => sectionEInWorkspace(workspace.root));
+}
+
+async function sectionEInWorkspace(root: string): Promise<void> {
   await mkdir(join(root, 'event'), { recursive: true });
   await mkdir(join(root, 'msg'), { recursive: true });
   await writeFile(join(root, 'msg', 'small.txt'), 'hello\n', 'utf8');
@@ -350,8 +380,11 @@ async function sectionE_vfsBounded(): Promise<void> {
   if (!small.capabilities.includes('text_edit')) throw new Error('E: text should be editable');
 }
 
-async function sectionLegacyWrapperIgnoresStagingBytes(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-wpc-legacy-'));
+function sectionLegacyWrapperIgnoresStagingBytes(): Promise<void> {
+  return withSmokeWorkspace('wpc-legacy', (workspace) => sectionLegacyInWorkspace(workspace.root));
+}
+
+async function sectionLegacyInWorkspace(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   await mkdir(join(overlayRoot, 'msg'), { recursive: true });
   const notePath = join(overlayRoot, 'msg', 'legacy.txt');
@@ -380,7 +413,8 @@ async function sectionLegacyWrapperIgnoresStagingBytes(): Promise<void> {
   const committed = await commitValidatedStagingArea(staging, {
     session,
     workspaceRoot: overlayRoot,
-    operationLog: new MemoryOperationLogStore()
+    operationLog: new MemoryOperationLogStore(),
+    backupRoot: join(root, 'backups')
   });
   if (committed.changedFiles.length === 0) {
     throw new Error(`legacy commit failed: ${JSON.stringify(committed.diagnostics)}`);

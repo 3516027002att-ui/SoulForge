@@ -24,12 +24,37 @@ interface NativeInspectSmokeSummary {
 const MAX_SAMPLES = 24;
 
 async function main(): Promise<void> {
-  const workspaceRoot = resolve(process.argv[2] ?? '../../mods');
+  // 默认值原先是 `../../mods`，从仓库根运行时 resolve 会跳出仓库落到 `D:\mods`
+  // ——一个既不存在也不属于本项目的路径。改为沿用 native 层统一的语料环境变量
+  // SOULFORGE_NATIVE_FIXTURE_ROOT（由 scripts/with-local-has-game-env.mjs 注入），
+  // 显式参数仍然优先。都没有时下面会走结构化 skip。
+  const workspaceRoot = resolve(
+    process.argv[2]
+    ?? process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+    ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
+    ?? '../../mods'
+  );
   const result = await scanWorkspace({ workspaceRoot });
   const nativeFiles = result.files
     .filter((file) => file.formatKind !== 'text' && file.formatKind !== 'unknown')
     .sort((left, right) => rankNativeFile(left.relativePath) - rankNativeFile(right.relativePath))
     .slice(0, MAX_SAMPLES);
+
+  // 无语料是「没有可验证对象」，不是「验证失败」。原先在全部采样跑完后才硬抛
+  // 'found no native files to sample'，于是在任何没有本机 mod 语料的机器上
+  // （默认 workspaceRoot 是不存在的 ../../mods）该 smoke 恒定 failed，把环境
+  // 缺失伪装成能力缺陷。按仓库约定改成显式 skipped：既不谎称通过，也不污染红灯。
+  if (nativeFiles.length === 0) {
+    console.log(JSON.stringify({
+      ok: true,
+      skipped: true,
+      reason: 'NATIVE_CORPUS_UNAVAILABLE',
+      workspaceRoot,
+      message: `工作区 ${workspaceRoot} 下没有可采样的原生文件，跳过原生 inspect 验证。`,
+      hint: '传入真实 mod 工作区路径作为第一个参数即可执行：node dist/testing/runNativeInspectSmoke.js <workspaceRoot>'
+    }, null, 2));
+    return;
+  }
 
   const summary: NativeInspectSmokeSummary = {
     workspaceRoot,
@@ -68,7 +93,6 @@ async function main(): Promise<void> {
   const bridgeUnavailable = summary.failures.length > 0 && summary.failures.every((failure) => hasBridgeSpawnFailure(failure.diagnostics));
   console.log(JSON.stringify({ ...summary, bridgeUnavailable }, null, 2));
 
-  if (nativeFiles.length === 0) throw new Error('Native inspect smoke test found no native files to sample.');
   if (bridgeUnavailable) return;
   if (summary.nativeInspections === 0) throw new Error('Native inspect smoke test did not attach any bridge inspection results.');
   if (summary.containerSummaries === 0) throw new Error('Native inspect smoke test did not produce any container summaries.');

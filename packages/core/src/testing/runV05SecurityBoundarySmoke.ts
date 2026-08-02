@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import type { ValidatorContract } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
 import { createWorkspaceTransaction } from '../transactions/workspaceTransaction.js';
@@ -14,7 +14,12 @@ import { rollbackOperation } from '../patch/rollback.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 
 async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-security-'));
+  // 经 harness 建临时工作区：无论成功还是抛错都保证删除。
+  // 改造前这里直接 mkdtemp 且从不清理，每次运行泄漏一个目录。
+  await withSmokeWorkspace('security', (workspace) => runSecurityBoundaryChecks(workspace.root));
+}
+
+async function runSecurityBoundaryChecks(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   const outsideRoot = join(root, 'outside');
   const backupRoot = join(root, 'backups');
@@ -25,7 +30,7 @@ async function main(): Promise<void> {
   const session = await openWorkspaceSession({ overlayRoot, game: 'unknown' });
   await verifyReparsePointEscape(session, overlayRoot, outsideRoot, backupRoot);
   await verifyAfterCommitValidationRollback(session, overlayRoot, backupRoot);
-  await verifyRollbackConflict(session, overlayRoot);
+  await verifyRollbackConflict(session, overlayRoot, backupRoot);
 
   console.log(JSON.stringify({
     ok: true,
@@ -119,7 +124,8 @@ async function verifyAfterCommitValidationRollback(
 
 async function verifyRollbackConflict(
   session: Awaited<ReturnType<typeof openWorkspaceSession>>,
-  overlayRoot: string
+  overlayRoot: string,
+  backupRoot: string
 ): Promise<void> {
   const target = join(overlayRoot, 'rollback-conflict.txt');
   await writeFile(target, 'v1\n', 'utf8');
@@ -137,7 +143,7 @@ async function verifyRollbackConflict(
   });
   const store = new MemoryOperationLogStore();
   const staged = await createStagingArea(proposal);
-  const committed = await commitValidatedStagingArea(staged, { session, operationLog: store });
+  const committed = await commitValidatedStagingArea(staged, { session, operationLog: store, backupRoot });
   if (!committed.operation) throw new Error('回滚冲突测试提交失败。');
 
   await writeFile(target, 'v3-user-change\n', 'utf8');
@@ -145,7 +151,9 @@ async function verifyRollbackConflict(
     opId: committed.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(committed.opId)
+    confirmation: rollbackConfirmation(committed.opId),
+    // 回滚同样会建备份；不指定 backupBaseDir 时它落系统临时目录并有意保留。
+    backupBaseDir: backupRoot
   });
   if (rolled.ok || !rolled.diagnostics.some((item) => item.code === 'ROLLBACK_TARGET_CHANGED')) {
     throw new Error(`回滚没有阻止 afterHash 冲突：${JSON.stringify(rolled.diagnostics)}`);

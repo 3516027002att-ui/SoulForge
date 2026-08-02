@@ -3,9 +3,9 @@
  * baseRoot open + WRITE_TO_BASE_FORBIDDEN leave base bytes unchanged.
  * Also exercises the desktop path builder against a real file:// workspaceId on Windows.
  */
-import { access, mkdtemp, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { createPatchProposal, createStagingArea, commitValidatedStagingArea } from '../patch/patchEngine.js';
 import {
   FileOperationLogCorruptError,
@@ -21,7 +21,12 @@ import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { makeWorkspaceId } from '../workspace/resourceUri.js';
 
 async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-v05-persist-'));
+  // 经 harness 建临时工作区：无论成功还是抛错都保证删除。
+  // 改造前这里直接 mkdtemp 且从不清理，每次运行泄漏一个目录。
+  await withSmokeWorkspace('v05-persist', (workspace) => runPersistChecks(workspace.root));
+}
+
+async function runPersistChecks(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   const baseRoot = join(root, 'game');
   const logsDirectory = join(root, 'operation-logs');
@@ -103,7 +108,13 @@ async function main(): Promise<void> {
   });
 
   const staging = await createStagingArea(proposal);
-  const committed = await commitValidatedStagingArea(staging, { session, operationLog: store });
+  // backupRoot 指向工作区内，理由同 runV05FoundationSmoke：不指定时备份落系统
+  // 临时目录且有意不删，每次运行残留一个 soulforge-backup-*。
+  const committed = await commitValidatedStagingArea(staging, {
+    session,
+    operationLog: store,
+    backupRoot: join(root, 'backups')
+  });
   if (committed.diagnostics.some((item) => item.code === 'OPERATION_LOG_RECORD_FAILED')) {
     throw new Error(`Operation log record failed at desktop-shaped path: ${storePath}`);
   }
@@ -163,7 +174,9 @@ async function main(): Promise<void> {
       subjects: [`ROLLBACK_OPERATION:${opId}`],
       riskLevel: 'high',
       note: 'persist smoke'
-    })
+    }),
+    // 回滚同样会建备份；不指定时落系统临时目录并有意保留。
+    backupBaseDir: join(root, 'backups')
   });
   if (!rolled.ok) {
     throw new Error(`Rollback failed: ${rolled.diagnostics.map((d) => d.message).join('; ')}`);

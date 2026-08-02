@@ -58,7 +58,7 @@
     "test:native-fmg": "tsc -b ../shared . && node dist/testing/runNativeFmgSmoke.js",
     "test:native-msb": "tsc -b ../shared . && node dist/testing/runNativeMsbSmoke.js",
     "test:native-param": "tsc -b ../shared . && node dist/testing/runNativeParamSmoke.js",
-    "test:native-preview": "tsc -b ../shared . && node dist/testing/runNativeInspectSmoke.js ../../mods",
+    "test:native-preview": "tsc -b ../shared . && node dist/testing/runNativeInspectSmoke.js",
     "test:native-tae": "tsc -b ../shared . && node dist/testing/runNativeTaeSmoke.js",
     "test:native-tpf": "tsc -b ../shared . && node dist/testing/runNativeTpfSmoke.js",
     "test:native-writer-failure-matrix": "tsc -b ../shared . && node dist/testing/runNativeWriterFailureMatrixSmoke.js",

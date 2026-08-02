@@ -39,6 +39,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 「有 smoke 文件但没有任何 script」——本轮实测到 5 个这样的文件共 3869 行，
   // 其中一个还被生产代码注释引用为覆盖依据。秒级，归 governance。
   'test:orphan-smoke-gate': 'governance',
+  // 临时目录泄漏门禁。smoke 用 mkdtemp 建工作区却不释放，本机实测累计 25809 个
+  // 残留目录、约 3.8 GB；泄漏不会让任何测试变红，只能靠静态门禁发现。存量走
+  // 只允许缩小的台账。纯文本扫描，秒级，归 governance。
+  'test:smoke-temp-cleanup': 'governance',
 
   // ---- unit：编译 + 跨包单元与契约。代码改动必跑 ----
   typecheck: 'unit',
@@ -119,13 +123,16 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:desktop-contract-mutations': 'synthetic',
   'test:smithbox-param-metadata-source': 'synthetic',
   'test:flver-candidate': 'synthetic',
-  'test:native-preview': 'synthetic',
   'test:asset-import': 'synthetic',
   'test:asset-writeback': 'synthetic',
   'test:dds-convert-writeback': 'synthetic',
   'test:release-corpus-registry': 'synthetic',
 
   // ---- native：真实本机 Sekiro 资源。缺环境时诚实跳过 ----
+  // 原先登记在 synthetic，但它扫真实 mod 工作区（默认 ../../mods）并要求采到
+  // 原生文件，本机无语料时恒定 failed —— 属于层级登记错误，不是能力缺陷。
+  // 已改为无语料时结构化 skipped，层级同步移到 native。
+  'test:native-preview': 'native',
   'bridge:verify:bnd4-transaction': 'native',
   'bridge:verify:bnd4-writer': 'native',
   'bridge:verify:dcx-documents': 'native',
