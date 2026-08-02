@@ -36,6 +36,7 @@
 - [ ] C# Bridge 是原生格式唯一 production authority；TypeScript 不另起第二套 production parser。
 - [ ] 不提交真实资产、用户 Mod、Oodle DLL、API key、签名私钥、私有 corpus。
 - [ ] AI 证据不足时返回 `insufficient_evidence`；完全权限也不绕过 Patch Engine / 验证 / 备份 / 审计 / 回滚。
+- [ ] 受管文档中的脚本名、治理子命令和可打开入口都已从当前仓库核实，不写占位引用。
 
 ---
 
@@ -158,7 +159,7 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 
 1. 明确要守的**不变量**，只做零误报、可确定性判定的检查。
 2. 参照既有 `scripts/verify-*.mjs` 范式（ESM / node:fs / findings / JSON / exitCode）。
-3. **必做负向测试**：构造畸形样本，确认门禁 `exit 1` 且命中每类检查码。
+3. **必做负向测试**：构造畸形样本，确认门禁 `exit 1`，且诊断指向该样本的真实原因；恢复样本后确认 `exit 0`。新增断言后还要核对检查总数按预期增长，不增长就是没有执行。
 4. 未覆盖项诚实列入 `engineeringReviewStillRequired`，同时输出 `reviewOwner=engineering-agent` 与 `userActionRequired=false`；工程语义复核不得转嫁给用户。
 5. 接入 `package.json` 与交接书 §15.1 矩阵。
 6. L6 记门禁诚实性证据。
@@ -185,6 +186,8 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 - [ ] 写能力（若涉及）跑通 staging → validator → commit → 重读 + 适用层级回滚。
 - [ ] 未超 authority 上限；未验证项已明确列出。
 
+没运行的命令、没读的文件、没验证的结论必须明说；`candidate`、`fixture-confirmed`、`partial`、`native-verified`、`blocked`、`unverified` 不得互相冒充。
+
 **切片级完成** = 该切片**所有**微步骤都通过上表 + 交接书 §13.2 条件，并将 lifecycle 改为 `completed`；authority 只按真实证据独立更新。单个微步骤完成只是本地验证结果，不等于切片完成，更不等于路线或 Gate 完成。
 
 ---
@@ -202,9 +205,10 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 命中触发器时：
 
 1. **先提交本轮改动**。封存指纹的锚点是 HEAD，未提交的改动会算进 `trackedDiffSha256` 但不进 HEAD，导致证据永远清不掉 stale。
-2. `node scripts/gov.mjs seal --id EV-… --subject … --commands … --result … --non-claims …`，改了 Gate 主题域文件时再加 `--gates`。它一步写 `docs/governance/evidence.jsonl`、挂 Gate 引用、重新投影交接书，失败整体回滚。参数细节与封存四步跑 `node scripts/gov.mjs help` 看 `sealWhenToUse` / `sealRequiredArgs`。
-3. 切片收尾用 `node scripts/gov.mjs complete --slice <id>`。它只改执行面板状态，不提升 authority——authority 提升必须另有真实运行的验证支撑。
-4. 跑 `node scripts/verify.mjs --tier governance` 确认全绿。
+2. `node scripts/gov.mjs seal --id EV-… --subject … --commands … --result … --non-claims …`，改了 Gate 主题域文件时再加 `--gates`。`--subject` 必须写明重验证链尾并原样继承目标 Gate 既有的 `user-approved` 标记；CLI 只报告缺失标记，绝不代替用户补写。参数细节与封存四步跑 `node scripts/gov.mjs help` 看 `sealWhenToUse` / `sealRequiredArgs`。
+3. seal 成功后检查 `uncommittedAfterSeal`，把列出的 Evidence、Gate 与交接书投影全部提交；漏交任一文件都会造成事实源分叉。
+4. 切片收尾用 `node scripts/gov.mjs complete --slice <id>`。它只改执行面板状态，不提升 authority——authority 提升必须另有真实运行的验证支撑。
+5. 跑 `node scripts/verify.mjs --tier governance` 确认全绿。
 
 **不要手写交接书里的证据条目或状态表。** §13.1、§13.1.1、§15、§17.1、§18.2.1、§18.3、§18.4 都是治理 JSON 的投影，手写的内容会被下一次 `handoff:project` 覆盖，或者变成第二份无人校验的进度口径——那正是硬约束「不得另立进度口径」要防的东西。§17.2 以下按日期排列的历史条目是外化前的留痕，保留供审计，但不是权威、不被任何门禁读取，也不要在那里追加新条目。
 
