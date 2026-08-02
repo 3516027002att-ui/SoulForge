@@ -15,6 +15,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { acquireGovernanceLock, STALE_LOCK_MS } from './gov/lock.mjs';
+import { computeFingerprint } from './gov/seal.mjs';
+import { parseSealBaseline } from './handoff-integrity-lib.mjs';
 
 const root = process.cwd();
 const findings = [];
@@ -302,6 +304,106 @@ if (rollbackTarget) {
     '前置校验失败时不得写入任何内容。');
 }
 
+// ---------------------------------------------------------------------------
+// gov seal
+// ---------------------------------------------------------------------------
+
+// 指纹实现一致性：gov/seal.mjs 复算五字段，generate-handoff-fingerprint.mjs 是
+// 既有权威。两处若在某类改动下分叉，表现是「封存当时通过、下次门禁判无效」——
+// 最难查的一类。这里在真实工作树上逐字段比对，任一侧漂移即失败关闭。
+{
+  const mine = computeFingerprint(root);
+  const theirs = spawnSync(
+    process.execPath,
+    [join(root, 'scripts', 'generate-handoff-fingerprint.mjs')],
+    { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 180_000 }
+  );
+  let parsed = null;
+  try {
+    parsed = JSON.parse(theirs.stdout);
+  } catch {
+    parsed = null;
+  }
+  check('seal/fingerprint-reference-runnable',
+    mine.ok === true && parsed !== null,
+    `两处指纹实现都必须可运行，实际 seal.ok=${mine.ok} generate.status=${theirs.status}`);
+  if (mine.ok === true && parsed !== null) {
+    for (const field of [
+      'head',
+      'trackedDiffSha256',
+      'untrackedManifestSha256',
+      'handoffSha256BeforeEvidenceAppend'
+    ]) {
+      check(`seal/fingerprint-matches-${field}`, mine.fields[field] === parsed[field],
+        `${field} 分叉：seal=${mine.fields[field]} generate=${parsed[field]}`);
+    }
+    check('seal/fingerprint-matches-digest', mine.fingerprintSha256 === parsed.fingerprintSha256,
+      `fingerprintSha256 分叉：seal=${mine.fingerprintSha256} generate=${parsed.fingerprintSha256}`);
+  }
+}
+
+// 负向：缺必填字段、ID 非法、ID 重复都必须失败关闭，且不追加任何行。
+{
+  const evidencePath = join(cliRoot, 'docs/governance/evidence.jsonl');
+  const linesBefore = readFileSync(evidencePath, 'utf8').split('\n').length;
+
+  const badId = runGov(['seal', '--id', 'not-an-ev-id', '--subject', 's',
+    '--commands', 'c', '--result', 'r', '--non-claims', 'n'], cliRoot);
+  check('cli/seal-rejects-bad-id',
+    badId.status === 1 && badId.payload?.code === 'SEAL_ID_INVALID',
+    `非法 EvidenceId 必须被拒，实际 ${JSON.stringify(badId.payload)?.slice(0, 300)}`);
+
+  const missing = runGov(['seal', '--id', 'EV-FIXTURE-MISSING', '--subject', 's',
+    '--commands', 'c', '--result', 'r'], cliRoot);
+  check('cli/seal-requires-non-claims',
+    missing.status === 1 && missing.payload?.code === 'SEAL_FIELD_REQUIRED',
+    `缺 --non-claims 必须被拒（不声明项不能靠默认值编造），实际 ${JSON.stringify(missing.payload)?.slice(0, 300)}`);
+
+  const existingId = JSON.parse(readFileSync(evidencePath, 'utf8').split('\n')
+    .filter((line) => line.trim().length > 0)[0]).evidenceId;
+  const duplicate = runGov(['seal', '--id', existingId, '--subject', 's',
+    '--commands', 'c', '--result', 'r', '--non-claims', 'n'], cliRoot);
+  check('cli/seal-rejects-duplicate-id',
+    duplicate.status === 1 && duplicate.payload?.code === 'SEAL_ID_DUPLICATE',
+    `重复 EvidenceId 必须被拒（封存只追加不覆盖），实际 ${JSON.stringify(duplicate.payload)?.slice(0, 300)}`);
+
+  check('cli/seal-failures-append-nothing',
+    readFileSync(evidencePath, 'utf8').split('\n').length === linesBefore,
+    '任何 seal 失败路径都不得留下半条记录。');
+}
+
+// 正向：追加成功后指纹必须自洽（parseSealBaseline 判 valid），且能被门禁解析。
+{
+  const sealed = runGov(['seal', '--id', 'EV-FIXTURE-SEAL-OK',
+    '--subject', 'fixture 封存：验证 gov seal 正向路径',
+    '--commands', 'fixture 内不运行真实验证命令',
+    '--result', 'fixture 只检查指纹自洽与门禁可解析',
+    '--non-claims', '不提升任何 authority，不构成真实验证证据'], cliRoot);
+  // 临时仓库的门禁状态可能因 freshness 而红（HEAD 只有一个 fixture 基线提交），
+  // 那种失败是环境性的、且必须回滚——两种结局都要断言，不能只看成功。
+  if (sealed.status === 0) {
+    const record = readFileSync(join(cliRoot, 'docs/governance/evidence.jsonl'), 'utf8')
+      .split('\n').filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line))
+      .find((entry) => entry.evidenceId === 'EV-FIXTURE-SEAL-OK');
+    check('cli/seal-appends-record', record !== undefined, 'seal 成功后必须能读回该记录。');
+    const parsedSeal = record ? parseSealBaseline(record.fingerprint) : null;
+    check('cli/seal-baseline-self-consistent',
+      parsedSeal?.formatValid === true && parsedSeal?.fingerprintValid === true,
+      `封存基线必须自洽（五字段齐全且 fingerprintSha256 匹配），实际 ${JSON.stringify(parsedSeal)?.slice(0, 400)}`);
+    check('cli/seal-type-is-sealed', record?.evidenceType === 'sealed-current-run',
+      'gov seal 只产出 sealed-current-run。');
+  } else {
+    check('cli/seal-postcheck-rolls-back',
+      sealed.payload?.code === 'SEAL_POSTCHECK_FAILED',
+      `seal 失败只允许是后置校验失败，实际 ${JSON.stringify(sealed.payload)?.slice(0, 400)}`);
+    check('cli/seal-rollback-removes-record',
+      !readFileSync(join(cliRoot, 'docs/governance/evidence.jsonl'), 'utf8')
+        .includes('EV-FIXTURE-SEAL-OK'),
+      '后置校验失败必须回滚，不得留下一条无效封存。');
+  }
+}
+
 rmSync(cliRoot, { recursive: true, force: true });
 for (const dir of [lockRoot, otherRoot, staleRoot, freshRoot, corruptRoot]) {
   rmSync(dir, { recursive: true, force: true });
@@ -321,7 +423,10 @@ console.log(JSON.stringify({
     '持有者进程消失且超过回收窗口才回收；窗口内不得抢锁',
     '锁文件不可解析时不得当作无锁闯入',
     '重复 claim、非持有者释放被拒；complete 不提升 authority',
-    '治理数据已违规时拒绝叠加改动且不写入'
+    '治理数据已违规时拒绝叠加改动且不写入',
+    'gov/seal.mjs 与 generate-handoff-fingerprint.mjs 五字段指纹逐字段一致',
+    'seal 拒绝非法/重复 EvidenceId 与缺失必填字段，且失败路径不追加任何行',
+    'seal 成功时封存基线自洽；后置校验失败时回滚该条记录'
   ],
   findings
 }, null, 2));

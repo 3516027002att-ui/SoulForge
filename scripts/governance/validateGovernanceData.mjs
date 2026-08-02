@@ -62,6 +62,11 @@ function sliceFreeText(slicesData) {
     if (!source) return '';
     return [
       source.goal,
+      // goal 原先同时承担「待做目标」和「已完成证据」两种用途，实测导致可推进
+      // 切片的 goal 平均 921 字、待做陈述被埋在末尾。历史证据已拆到 evidence，
+      // 这里必须一并纳入自由文本，否则 asksForUserActionWithoutBlocker 的判定
+      // 范围会随拆分静默缩小。
+      source.evidence,
       source.hardPrerequisites,
       (source.entryPoints ?? []).join(' '),
       source.requiredValidation,
