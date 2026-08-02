@@ -147,11 +147,19 @@ function formatBaseline(fields, fingerprintSha256) {
 function collectUncommittedGovernanceFiles(root, candidatePaths) {
   const status = git(root, ['status', '--porcelain', '--', ...candidatePaths]);
   if (status.status !== 0) return null;
-  return text(status.stdout)
-    .split('\n')
-    .filter((line) => line.trim().length > 0)
-    // porcelain v1 的前两列是状态码，第 3 位起是路径；路径本身可能带引号。
-    .map((line) => line.slice(3).replace(/^"|"$/g, ''));
+  // 不能用 text()：它会 trim，把首行前导空格吃掉（未暂存修改的状态码是 " M"），
+  // 于是按固定 3 字符切片会多切一位。实测输出过 "ocs/V0_5_..." 这种缺首字母的
+  // 路径——路径错了但看起来像对的，比不报更容易误导。
+  return status.stdout.toString('utf8')
+    .split(/\r?\n/)
+    .filter((line) => line.length > 3)
+    .map((line) => {
+      // porcelain v1：前两列状态码 + 一个空格 + 路径；路径含特殊字符时带引号，
+      // 重命名形如 `R  old -> new`（这里只取新路径）。
+      const path = line.slice(3);
+      const renamed = path.split(' -> ');
+      return (renamed.length === 2 ? renamed[1] : path).replace(/^"|"$/g, '');
+    });
 }
 
 export { computeFingerprint, formatBaseline, collectUncommittedGovernanceFiles, EVIDENCE, HANDOFF };
