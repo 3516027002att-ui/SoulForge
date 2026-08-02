@@ -841,6 +841,18 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     // 把一条 script 从层级表挪进 EXCLUDED 就能让它不再被调度，
     // 漏登记这个文件就能在 REL-SCOPE 仍显示 fresh 的前提下关掉一整条验证。
     'scripts/verify/tiers.mjs',
+    // 治理 CLI 与其组件、fixture。gov.mjs 是唯一能写 evidence.jsonl 与 gates.json
+    // 的命令：seal 决定一条证据长什么样、挂到哪个 Gate、指纹怎么算，claim/complete
+    // 决定执行面板状态。漏登记的后果是可以在 REL-SCOPE 仍显示 fresh 的前提下改变
+    // 封存行为本身——例如放宽 EvidenceId 校验、跳过继承标记预检、或让指纹少算一个
+    // 字段，而所有既有封存证据继续显示有效。
+    //
+    // gov/seal.mjs 单列：它与 generate-handoff-fingerprint.mjs 必须算出逐字段一致的
+    // 五字段指纹（test:gov-cli 有专项断言），两者任一单独改动都会让基线失去可比性。
+    'scripts/gov.mjs',
+    'scripts/gov/seal.mjs',
+    'scripts/gov/lock.mjs',
+    'scripts/verify-gov-cli-fixtures.mjs',
     'docs/governance/releases.json',
     'docs/governance/scope.json',
     // 七个 schema 全部登记，而不只是冻结裁定直接用到的 releases/scope 两个。

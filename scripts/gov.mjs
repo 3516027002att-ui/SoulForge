@@ -259,7 +259,23 @@ function cmdNext(args) {
     message: candidates.length === 0
       ? '没有 lifecycle=ready 的切片；先完成或释放在飞切片，或按 blockers.json 解阻塞。'
       : `${candidates.length} 条切片可 claim；claim 前请先读 entryPoints 与 requiredValidation。`,
-    note: 'claim 只是并发协调，不构成 Evidence，也不提升 authority。'
+    note: 'claim 只是并发协调，不构成 Evidence，也不提升 authority。',
+    // 选点输出必须自带完整闭环，否则 agent 拿到切片后仍要回交接书里找「做完之后
+    // 干什么」。实测 next 的输出对「改哪些文件、跑哪条验证」已经自足
+    // （entryPoints + requiredValidation），断点在最后一环：claim 之后到封存之间
+    // 没有任何指引，而封存漏一步就会撞上指向错误原因的 GATE_EVIDENCE_STALE。
+    //
+    // 这里只写与具体切片无关的流程骨架；每步的参数细节由 gov help 承担，
+    // 不在两处重复陈述同一套规则。
+    workflow: [
+      '1. gov claim --slice <sliceId> --owner <你> —— 原子占用，避免并发撞车',
+      '2. 读该切片的 entryPoints，按 hardPrerequisites 划定不可越界的范围',
+      '3. 实现改动；写能力必须经 Patch Engine，writer 只写暂存区',
+      '4. 跑该切片的 requiredValidation，外加 npm run typecheck / npm test',
+      '5. 改了治理主题域文件就先提交，再 gov seal（四步流程见 gov help 的 sealWhenToUse）',
+      '6. gov complete --slice <sliceId> —— 只改执行面板状态，不提升 authority',
+      'authority 提升必须另有真实运行的验证支撑，不能由 claim/complete 推导。'
+    ]
   });
 }
 
