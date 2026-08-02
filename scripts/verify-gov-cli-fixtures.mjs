@@ -960,10 +960,46 @@ if (rollbackTarget) {
       typeof failed.payload?.hint === 'string' && failed.payload.hint.includes('--gates'),
       `未指定 --gates 时回滚 hint 必须提示该参数，实际 hint=${failed.payload?.hint}`);
 
+    // 主题域已 stale 的这个窗口正好是检验 status 是否给假绿的现成场景，复用它。
+    //
+    // 实测踩过：cmdStatus 调用不带参数的 runGovernanceCheck()，withFreshness 默认
+    // false，于是完全跳过 GATE_EVIDENCE_STALE / GATE_DEFERRAL_EVIDENCE_STALE。
+    // 真实仓库上同一状态下 verify --tier governance 报 ok:false 三条 stale，而
+    // gov status 报 governanceGateOk:true、顶层 ok:true、退出码 0。CLAUDE.md 把
+    // status 列为「治理门禁是否通过」的常用入口，读到 true 的 agent 直接去提交，
+    // 红在之后某步才炸，那时它已经在找错方向了。
+    //
+    // 三个字段一起断言：只校验 governanceGateOk 会让假绿从一层挪到另一层——
+    // 管道里 `gov status && 下一步` 看的是退出码，只读 ok 的调用方看的是顶层 ok。
+    const staleStatus = runGov(['status'], cliRoot);
+    check('cli/status-reports-stale-gate',
+      staleStatus.payload?.governanceGateOk === false
+        && (staleStatus.payload?.governanceErrors ?? [])
+          .some((entry) => String(entry.code).includes('STALE')),
+      'stale 主题域下 status 必须报 governanceGateOk=false 且列出 STALE 错误码，'
+      + `否则它与 verify --tier governance 对同一状态给出相反结论。实际 ${JSON.stringify({
+        ok: staleStatus.payload?.governanceGateOk,
+        codes: (staleStatus.payload?.governanceErrors ?? []).map((entry) => entry.code)
+      }).slice(0, 300)}`);
+    check('cli/status-exit-tracks-gate',
+      staleStatus.payload?.ok === false && staleStatus.status === 1,
+      '门禁红时 status 的顶层 ok 与退出码必须一起转红：ok 是所有 gov 子命令表示成败的'
+      + `字段，退出码是管道里的判据，只改其一等于把假绿挪个位置。实际 ok=${JSON.stringify(staleStatus.payload?.ok)} exit=${staleStatus.status}`);
+
     // 还原扰动，避免污染后续断言（这正是上面 rollbackTarget 犯过的错）。
     writeFileSync(scopePath, scopeBefore, 'utf8');
     runGit(['add', 'docs/governance/scope.json'], cliRoot);
     runGit(['commit', '--quiet', '-m', 'fixture: restore subject domain'], cliRoot);
+
+    // 正向侧：还原后 status 不得再报 stale。缺这一条，上面两条断言可能是
+    // 「status 恒报红」造成的——恒红同样是坏门禁，且更难发现，因为它看起来在工作。
+    // 显式跑第二次而不是拿 if/else 分两支：两支互斥等于每次只覆盖一半。
+    const restoredStatus = runGov(['status'], cliRoot);
+    check('cli/status-clears-after-subject-restore',
+      !(restoredStatus.payload?.governanceErrors ?? [])
+        .some((entry) => String(entry.code).includes('STALE')),
+      '还原主题域后 status 不得再报 STALE，否则上面两条 stale 断言可能只是「恒报红」'
+      + `而非真的在判定。实际 ${JSON.stringify((restoredStatus.payload?.governanceErrors ?? []).map((entry) => entry.code)).slice(0, 300)}`);
   } else {
     check('cli/seal-stale-probe-scope-present', false,
       'fixture 仓库缺少 docs/governance/scope.json，无法构造主题域变化场景。');
@@ -1021,7 +1057,8 @@ console.log(JSON.stringify({
     'deferred 切片的 resumeRequires 直接投影（不让 agent 手工按 capabilityId 反查 scope.json）；取不到时必须给 reason 而非空数组；无 deferred 时不投影以免膨胀默认首屏',
     'next 暴露在飞 claim 的心跳新鲜度：超 24 小时报 heartbeatStale 并给出「先核实、再 release 或 complete」的出路，且声明 CLI 不自动释放（否则被遗弃的 claim 与有主 claim 在输出里无从区分，接手者会全部避开）',
     'status 与 next 的陈旧判定逐字段一致：status 也报 heartbeatStale/staleFor 并在有陈旧 claim 时指向 gov next（status 曾只报 heartbeatAt 原始值，同一份数据两个命令给出相反结论，而 status 是常用入口）',
-    '心跳新鲜时不得报陈旧也不塞 recoveryHint；心跳不可解析时判为未知而非陈旧（误报会诱导接手者 release 掉别人正在写的切片）'
+    '心跳新鲜时不得报陈旧也不塞 recoveryHint；心跳不可解析时判为未知而非陈旧（误报会诱导接手者 release 掉别人正在写的切片）',
+    'status 的治理门禁判定含 freshness，且顶层 ok 与退出码随之转红（曾漏传 withFreshness：同一状态下治理层报三条 stale 而 status 报 governanceGateOk:true、退出码 0，而 status 是 CLAUDE.md 列的常用入口）；还原主题域后必须转绿，以证明不是恒报红'
   ],
   findings
 }, null, 2));
