@@ -8,9 +8,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   collectSealAnchors,
+  parseSealBaseline,
   validateHandoffGovernance
 } from './handoff-integrity-lib.mjs';
 import { buildFreshnessContext } from './governance/freshnessContext.mjs';
+import { loadGovernanceData } from './governance/loadGovernance.mjs';
+import { projectEvidence } from './governance/projectGovernance.mjs';
 
 const root = process.cwd();
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
@@ -30,6 +33,14 @@ const PKG = 'package.json';
 
 const findings = [];
 const add = (severity, code, where, message) => findings.push({ severity, code, where, message });
+
+// §17.1 已压成 ID + subject 索引。seal/freshness 的完整判据继续复用
+// evidence.jsonl 权威记录，不从索引展示字段反推或复制第二套 Evidence 语义。
+const loadedGovernance = loadGovernanceData(root);
+const authoritativeEvidence = loadedGovernance.data === null
+  ? null
+  : projectEvidence(loadedGovernance.data.evidence, parseSealBaseline);
+if (loadedGovernance.data === null) findings.push(...loadedGovernance.findings);
 
 function readOrNull(relativePath) {
   const absolutePath = join(root, relativePath);
@@ -141,11 +152,12 @@ if (handoff !== null) {
   const freshnessContext = buildFreshnessContext({
     root,
     handoffMarkdown: handoff,
-    anchors: collectSealAnchors(handoff)
+    anchors: collectSealAnchors(handoff, authoritativeEvidence)
   });
   findings.push(...validateHandoffGovernance(handoff, {
     source: HANDOFF,
-    freshnessContext
+    freshnessContext,
+    authoritativeEvidence
   }).findings);
 }
 
@@ -348,7 +360,7 @@ const checkedRules = [
   '交接书开头必须以 gov CLI 为首选入口，且不得声明自身为唯一事实源',
   'README、交接书和执行手册的本地 Markdown 链接必须存在',
   'README 必须直链唯一 handoff，且不依赖本机代理规则文件',
-  '§17.1 Evidence ID 唯一且 sealed-current-run 指纹可重算；passed Gate freshness 只跟踪显式主题域',
+  '§17.1 Evidence ID 唯一；sealed-current-run 指纹与 passed Gate freshness 由 evidence.jsonl 权威记录判定',
   '§13.1 切片完整 schema、lifecycle、authority、authority cap 与 blockerRefs 闭合',
   '§13.4 validation-unfrozen 只能引用 §13.1 中尚未终止的切片，且该清单必须完整覆盖 §13.1 行内标注 validation-unfrozen 的非终态切片',
   '§18.3 deferred Gate 的覆盖切片必须一并为 lifecycle=deferred',

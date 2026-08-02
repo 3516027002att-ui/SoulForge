@@ -35,6 +35,7 @@ function check(name, condition, detail) {
 const EXPECTED_HEADER_TOKENS = {
   'slice-panel': ['切片id', 'lifecycle', 'authority', 'blockerrefs', '目标能力', '可独立验收切片', '硬前置', '主要入口', 'requiredvalidation', 'authority上限'],
   'active-claims': ['sliceid', 'claimid', 'owner', 'claimedat', 'heartbeatat', 'recoverytrigger'],
+  'evidence-index': ['evidenceid', '能力/声明'],
   'blocker-index': ['blockerid', 'reason', '影响gate/切片', '责任方', '所需输入', '解锁验证', '复查触发器', 'evidence']
 };
 
