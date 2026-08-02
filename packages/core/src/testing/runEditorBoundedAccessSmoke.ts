@@ -663,25 +663,15 @@ function assertIpcSharesWindowHelper(): void {
   // `node dist/testing/...` runs from the repo root).
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
   const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8');
-  const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
   // The desktop main must import the shared window helper (single authority) and
   // must not define a private copy that could drift from this smoke.
   if (!ipc.includes('normalizePageWindow')) throw new Error('ipc.ts 必须使用共享 normalizePageWindow。');
   if (ipc.includes('function normalizePageWindow')) {
     throw new Error('ipc.ts 不得再定义私有 normalizePageWindow（会与验收 smoke 漂移）。');
   }
-  for (const channel of [
-    'resource.readFmgPage',
-    'resource.readParamPage',
-    'resource.listContainerChildrenPage',
-    'resource.listScriptContainerEntriesPage',
-    'resource.readEmevdFullDocument'
-  ]) {
-    if (!ipc.includes(channel)) throw new Error(`ipc.ts 缺少分页通道 ${channel}。`);
-  }
-  for (const method of ['readFmgPage', 'readParamPage', 'listContainerChildrenPage', 'listScriptContainerEntriesPage', 'readEmevdFullDocument']) {
-    if (!preload.includes(method)) throw new Error(`preload 缺少分页方法 ${method}。`);
-  }
+  // 五个分页通道是否真的注册、preload 是否真的把对应方法接到它们上，改由
+  // npm run test:desktop-ipc-contract 真实执行观测（含双向对账）。此处再做
+  // 一遍子串匹配只会两处漂移：那边改名这边照过，实测已证明过一次。
   // param channel: real-corpus read must pass an explicit empty options object
   // (C# InvalidOperationException guard) and must not throw on payload-less rows.
   if (!ipc.includes('commandOptions: {}') || !ipc.includes('typeof row.dataBase64 === \'string\'')) {

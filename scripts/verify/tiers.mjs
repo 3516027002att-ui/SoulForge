@@ -35,6 +35,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 治理锁与 claim CLI 的负向 fixture：坏锁与好锁在顺序执行下表现一致，
   // 只有并发与崩溃场景能区分，不门禁化就等于没有锁。
   'test:gov-cli': 'governance',
+  // 孤儿 smoke 门禁。verify:audit 只能看见「已登记的 script 缺层级」，看不见
+  // 「有 smoke 文件但没有任何 script」——本轮实测到 5 个这样的文件共 3869 行，
+  // 其中一个还被生产代码注释引用为覆盖依据。秒级，归 governance。
+  'test:orphan-smoke-gate': 'governance',
 
   // ---- unit：编译 + 跨包单元与契约。代码改动必跑 ----
   typecheck: 'unit',
@@ -42,6 +46,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:ai-conformance': 'unit',
   'test:ai-fake-loop': 'unit',
   'test:desktop-security': 'unit',
+  // 本轮从孤儿状态接线：SqliteOperationLogStore 全阶段 journal 接线 + 磁盘
+  // 错误/ACL 失败关闭。不依赖真机 corpus，故归 unit。
+  'test:core-journal-wiring': 'unit',
   'test:editor-document-store': 'unit',
   // 统一原生 mutation 写链：取消/确认重试/staging 失败三条分支收敛到一处后，
   // 任一分支静默丢失都不影响正常路径通过，必须由负向断言门禁化。
@@ -96,6 +103,20 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:emevd-coverage': 'synthetic',
   'test:release-editor-acceptance': 'synthetic',
   'test:desktop-live-editor-contract': 'synthetic',
+  // 有界访问分页数据流（W-REL-F-SCALE-02）。本轮之前它有 775 行实现但没有任何
+  // npm script 引用，等于从未被执行过——而 verify:audit 只能发现「已登记的
+  // script 没有层级」，看不见「没有 script 的 smoke 文件」。补登记以关闭这个
+  // 盲区；缺真机 corpus 时它自身诚实跳过。
+  'test:editor-bounded-access': 'synthetic',
+  // 桌面 IPC 契约的真实执行观测：加载 apps/desktop/out 生产产物，观测 main
+  // 实际注册的 channel 与 preload 实际 invoke 的目标。依赖构建产物，故归
+  // synthetic 而非 unit；产物缺失时结构化跳过，不冒充通过。
+  'test:desktop-ipc-contract': 'synthetic',
+  // 上一条门禁自身的变异测试。必要性有实测证据：把 main 的
+  // resource.applyFmgMutation 改名为 ...V2（preload 仍 invoke 老名字，运行时
+  // 必然失败），旧 grep 式 smoke 退出 0 并打印「契约验证通过」。门禁不被变异
+  // 验证过，就无法区分「没有退化」和「门禁是盲的」。
+  'test:desktop-contract-mutations': 'synthetic',
   'test:smithbox-param-metadata-source': 'synthetic',
   'test:flver-candidate': 'synthetic',
   'test:native-preview': 'synthetic',
@@ -120,6 +141,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:tae': 'native',
   'bridge:verify:tpf': 'native',
   'test:emevd-corpus-matrix': 'native',
+  // 以下三条本轮从孤儿状态接线，均以 resolveNativeFixture 读真机 corpus，
+  // 缺环境时各自诚实跳过（实测已确认），故归 native。
+  'test:emevd-multi-corpus-matrix': 'native',
+  'test:native-corpus-writeback': 'native',
+  'test:param-field-write-matrix': 'native',
   'test:emevd-imported-coverage': 'native',
   'test:emevd-imported-production': 'native',
   'test:fmg-reference-integrity': 'native',
