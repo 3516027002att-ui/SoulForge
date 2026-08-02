@@ -1,7 +1,8 @@
 # SoulForge 执行手册
 
 > - 文档性质：**方法手册**，只讲"每次开工怎么做"，不记录任何进度、状态或范围。
-> - 唯一事实源仍是 `docs/V0_5_IMPLEMENTATION_HANDOFF.md`（下称"交接书"）。本文所有状态、切片、Evidence 一律以交接书 §13、§17 为准。
+> - 状态、切片、Evidence 的权威是 `docs/governance/*.json`；`docs/V0_5_IMPLEMENTATION_HANDOFF.md`（下称"交接书"）的对应章节是它们的投影，冲突时以 JSON 为准。读这些状态一律走 `node scripts/gov.mjs next` / `status`，不要手工读投影表格。
+> - 交接书仍是唯一完整实施规范与技术地图；需要背景、区域地图或格式细节时查它。
 > - 适用对象：**写代码稳定、但规划与自我编排较弱**的 Agent。
 > - 与交接书的关系：交接书是"地图 + 参考手册"，本文是"照着走的操作规程"。二者冲突时以交接书为准。
 > - 本文不新建 milestone / task / status / next-actions 口径；它把交接书 §0.3 的决策协议和 §13.2 的切片模板，翻译成可机械执行的流程。
@@ -44,8 +45,8 @@
 
 | 阶段 | 动作 | 产物 |
 |---|---|---|
-| **L0 定位** | 跑 `git status` + `git rev-parse --short HEAD`；跑 `npm run test:handoff-integrity`；读交接书 §13 当前前沿与 §13.1 执行面板 | 知道真实工作树与可选切片 |
-| **L1 选点** | 按 §3 决策树续做一个已认领的 `active` 切片，或选出恰好一个 `ready` 切片并原子认领为 `active` | 一个 lifecycle=`active` 的切片 ID |
+| **L0 定位** | 跑 `git status` + `git rev-parse --short HEAD`；跑 `node scripts/verify.mjs --tier governance`；跑 `node scripts/gov.mjs next` | 知道真实工作树与可 claim 切片 |
+| **L1 选点** | 按 §3 决策树选出恰好一个切片，用 `node scripts/gov.mjs claim --slice <id> --owner <你>` 原子认领 | 一个 lifecycle=`active` 的切片 ID |
 | **L2 立据** | 按交接书 §13.2 准入模板，在证据草稿写：切片 / capability / 依赖检查 / 允许改的入口 / 非目标 / required validation / authority 上限 / 停止条件 | 一份开工契约 |
 | **L3 拆解** | 按 §4 模板把切片拆成有序微步骤；只取**第一个未完成**微步骤作为本轮目标 | 一个微步骤 |
 | **L4 实现** | 严格在"允许改的入口"内实现该微步骤；命中压舱石红线即回 §1 | 代码改动 |
@@ -60,14 +61,18 @@
 
 严格按顺序回答，命中即停，输出唯一切片。不要在多个候选间反复权衡。
 
-~~~text
-Q1 交接书 §13.1.1 是否有一个由我持有有效 claim、lifecycle=`active` 的切片？
-   是 → 更新 heartbeatAt，只继续这个 active 切片。停。
-   否 → 核对其他 active claim 的任务/进程状态与工作树变化；仍可验证运行中的不复制，
-        已结束或无法验证且无相关写进程的按 recoveryTrigger 原子回退 ready/blocked，然后 Q2。
+**Q1 与 Q2 已由 CLI 机械完成**：`node scripts/gov.mjs next` 的 `claimable` 列表已排除他人认领、已完成、被阻塞与其他版本的切片，`activeSlices` 列出在飞 claim 及其持有者。直接从 `claimable` 进入 Q3，不要手工比对交接书表格——那些表格是 `docs/governance/slices.json` 的投影，手工读只是多一次转录机会。
 
-Q2 只保留交接书 §13.1 中 lifecycle=`ready` 的切片；排除 `active`（他人已认领）、`completed`、`blocked`、`superseded`。
-   没有 ready → 去 §8；有 ready → Q3。
+若 `claimable` 为空，`message` 会指出实际原因与对应出路（deferred 指向 `scope.json` 的 `resumeRequires`，active 指向 release/complete，blocked 指向 `blockers.json`）；按它走，必要时去 §8。
+
+~~~text
+Q1 gov next 的 activeSlices 里是否有一条由我持有？
+   是 → gov heartbeat --slice <id>，只继续这个切片。停。
+   否 → 核对其他 active claim 的任务/进程状态与工作树变化；仍可验证运行中的不复制，
+        已结束或无法验证且无相关写进程的用 gov release --slice <id> --force 原子回退，然后 Q2。
+
+Q2 取 gov next 的 claimable 列表（已按 lifecycle=ready 与当前版本过滤）。
+   为空 → 按 message 指出的出路处理，或去 §8；非空 → Q3。
 
 Q3 剩余切片里，是否有"能解锁多条下游路线的共同底座"(如 A-RECOVERY)？
    有 → 选它，去 Q6。
@@ -196,13 +201,16 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 
 命中触发器时：
 
-1. 交接书 §17 追加一条证据记录（§17.2 格式）：日期 / 证据类型 / 起始·结束 sha 或指纹 / 路线 / lifecycle 与 authority 变化 / 已实现 / 已验证(命令+exit+样本范围) / 未验证 / 非声明 / blockerRefs。
-2. 按实际影响同步 §13 当前前沿、§13.1 lifecycle/authority/blockerRefs、§18.3 Gate 与 §18.4 blocker；必要时再同步 §4~§12。
-3. 跑 `npm run test:handoff-integrity`，确认无断链、无失效引用、Evidence ID 和状态机一致。
+1. **先提交本轮改动**。封存指纹的锚点是 HEAD，未提交的改动会算进 `trackedDiffSha256` 但不进 HEAD，导致证据永远清不掉 stale。
+2. `node scripts/gov.mjs seal --id EV-… --subject … --commands … --result … --non-claims …`，改了 Gate 主题域文件时再加 `--gates`。它一步写 `docs/governance/evidence.jsonl`、挂 Gate 引用、重新投影交接书，失败整体回滚。参数细节与封存四步跑 `node scripts/gov.mjs help` 看 `sealWhenToUse` / `sealRequiredArgs`。
+3. 切片收尾用 `node scripts/gov.mjs complete --slice <id>`。它只改执行面板状态，不提升 authority——authority 提升必须另有真实运行的验证支撑。
+4. 跑 `node scripts/verify.mjs --tier governance` 确认全绿。
 
-未命中触发器时，不修改交接书、不追加 Evidence；保留本轮验证结果并继续同一 `active` 切片。无论是否写回，大日志 / 产物都放应用数据目录或系统临时目录，**不提交**，且不写绝对路径或凭据。
+**不要手写交接书里的证据条目或状态表。** §13.1、§13.1.1、§15、§17.1、§18.2.1、§18.3、§18.4 都是治理 JSON 的投影，手写的内容会被下一次 `handoff:project` 覆盖，或者变成第二份无人校验的进度口径——那正是硬约束「不得另立进度口径」要防的东西。§17.2 以下按日期排列的历史条目是外化前的留痕，保留供审计，但不是权威、不被任何门禁读取，也不要在那里追加新条目。
 
-这样下一个 Agent（或下一轮的你）在 L0 读交接书即可无缝续接——**交接书就是记忆，本文只是手法**。
+未命中触发器时，不追加 Evidence；保留本轮验证结果并继续同一 `active` 切片。无论是否写回，大日志 / 产物都放应用数据目录或系统临时目录，**不提交**，且不写绝对路径或凭据。
+
+这样下一个 Agent（或下一轮的你）在 L0 跑一次 `gov next` 即可无缝续接——**治理 JSON 就是记忆，交接书是它的可读投影，本文只是手法**。
 
 ---
 

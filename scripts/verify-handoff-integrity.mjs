@@ -126,6 +126,65 @@ if (scriptNames.size > 0) {
   }
 }
 
+// `node scripts/X.mjs` 与 `gov.mjs <子命令>` 同样必须真实存在。
+//
+// 治理 CLI 现在是 agent 的首选入口：执行手册的 L0/L1/L6 与选点决策树都直接给出
+// gov 子命令，交接书 §15 也列命令。这些引用此前不被任何门禁校验——脚本改名或
+// 子命令重命名后文档会静默指向不存在的东西，而首次上手的 agent 撞到的第一条命令
+// 就报 GOV_COMMAND_UNKNOWN，最坏情况下会以为整套治理流程不可用。
+//
+// 只校验存在性，不校验参数：参数由 gov help 承担，文档复述参数细节本身就是重复。
+{
+  // 判据是「CLI 真正会接受的命令」,不是「COMMANDS 对象的键」。
+  // 这个区别是被本门禁自己的首次运行证伪出来的:`help` 走 dispatch 里的显式分支
+  // (`command === 'help'`)而不在 COMMANDS 里,只读 COMMANDS 会把手册里正确的
+  // `gov help` 报成不支持——门禁指向错误原因,比没有门禁更糟。
+  const govCommands = new Set();
+  const govSource = readOrNull('scripts/gov.mjs');
+  if (govSource !== null) {
+    const commandsBlock = govSource.match(/const COMMANDS = Object\.freeze\(\{([\s\S]*?)^\}\)/m);
+    for (const name of commandsBlock?.[1].match(/^\s{2}(\w+):/gm) ?? []) {
+      govCommands.add(name.trim().replace(':', ''));
+    }
+    const branchPattern = /command === '-{0,2}([a-z]+)'/g;
+    let branchMatch;
+    while ((branchMatch = branchPattern.exec(govSource)) !== null) {
+      govCommands.add(branchMatch[1]);
+    }
+  }
+
+  for (const [relativePath, content] of [[HANDOFF, handoff], [PLAYBOOK, playbook]]) {
+    if (content === null) continue;
+
+    const nodeScriptPattern = /node (scripts\/[A-Za-z0-9./_-]+\.mjs)/g;
+    const seenScripts = new Set();
+    let scriptMatch;
+    while ((scriptMatch = nodeScriptPattern.exec(content)) !== null) {
+      const scriptPath = scriptMatch[1];
+      if (seenScripts.has(scriptPath)) continue;
+      seenScripts.add(scriptPath);
+      if (readOrNull(scriptPath) === null) {
+        add('error', 'NODE_SCRIPT_MISSING', relativePath,
+          `引用了不存在的脚本：${scriptPath}`);
+      }
+    }
+
+    if (govCommands.size === 0) continue;
+    const govPattern = /gov(?:\.mjs)? ([a-z]+)/g;
+    const seenCommands = new Set();
+    let govMatch;
+    while ((govMatch = govPattern.exec(content)) !== null) {
+      const subcommand = govMatch[1];
+      if (seenCommands.has(subcommand)) continue;
+      seenCommands.add(subcommand);
+      if (!govCommands.has(subcommand)) {
+        add('error', 'GOV_SUBCOMMAND_MISSING', relativePath,
+          `引用了 gov CLI 不支持的子命令：${subcommand}（支持：${[...govCommands].sort().join('、')}）`);
+      }
+    }
+  }
+}
+
 const sensitivePatterns = [
   [/oo2core_[a-z0-9_]*\.dll/i, 'Oodle DLL 文件名'],
   [/C:\\Users\\[^\s` )"']+/i, '用户主目录绝对路径'],
@@ -158,6 +217,7 @@ const checkedRules = [
   '§18.4 blocker 八字段完整，影响对象与活动 blockerRefs 双向闭合',
   '无活动 blockerRefs 的 ready/active 切片和非 blocked Gate 不得要求用户介入',
   '交接书和执行手册引用的 npm run script 必须存在于 package.json',
+  '交接书和执行手册引用的 node scripts/*.mjs 路径必须存在，gov 子命令必须被 CLI 接受',
   '交接书和执行手册不得包含 Oodle DLL 文件名、用户主目录路径、高置信 token 或私钥内容'
 ];
 
