@@ -48,6 +48,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 残留目录、约 3.8 GB；泄漏不会让任何测试变红，只能靠静态门禁发现。存量走
   // 只允许缩小的台账。纯文本扫描，秒级，归 governance。
   'test:smoke-temp-cleanup': 'governance',
+  // 探针/临时文件零容忍门禁。scripts/ 下的 `_probe*` / `_tmp*` 被 gitignore，
+  // git status 永远干净，实测一次清出 16 个、最早跨半个月无人发现。扫实际文件名
+  // 而非维护清单，拦残留不拦存在。纯文件系统扫描，秒级，归 governance。
+  'test:probe-residual-gate': 'governance',
 
   // ---- unit：编译 + 跨包单元与契约。代码改动必跑 ----
   typecheck: 'unit',
