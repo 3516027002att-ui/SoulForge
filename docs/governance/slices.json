@@ -197,7 +197,7 @@
     {
       "sliceId": "W-EMEVD-FULL-01",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "ready",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只提升实际完成并验证的 schema/类型/接线",
@@ -694,7 +694,7 @@
     {
       "sliceId": "W-REL-F-SCALE-02",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "ready",
       "authority": "candidate",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只提升实际完成的编辑器功能，不以 inventory 或取消量化门槛代替真实验收",
@@ -763,7 +763,7 @@
     {
       "sliceId": "W-A-RECOVERY-INTEGRATION-04",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "ready",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；仅提升实际验证的恢复路径",
@@ -891,36 +891,12 @@
   ],
   "activeClaims": [
     {
-      "sliceId": "W-EMEVD-FULL-01",
-      "claimId": "claim-emedf-wave2-20260801",
-      "owner": "coordinator-agent",
-      "claimedAt": "2026-08-01",
-      "heartbeatAt": "2026-08-01",
-      "recoveryTrigger": "检查任务进程状态与 emevd 工作树改动；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
       "sliceId": "W-EMEVD-FMG-PARAM-03",
       "claimId": "claim-param-fmg-wave2-20260801",
       "owner": "coordinator-agent",
       "claimedAt": "2026-08-01",
       "heartbeatAt": "2026-08-01",
       "recoveryTrigger": "检查任务进程状态与 param/fmg 工作树改动；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
-      "sliceId": "W-REL-F-SCALE-02",
-      "claimId": "claim-scale-wave2-20260801",
-      "owner": "coordinator-agent",
-      "claimedAt": "2026-08-01",
-      "heartbeatAt": "2026-08-01",
-      "recoveryTrigger": "检查任务进程状态与 editor 契约/前端工作树改动；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
-      "sliceId": "W-A-RECOVERY-INTEGRATION-04",
-      "claimId": "claim-recovery-wave2-20260801",
-      "owner": "coordinator-agent",
-      "claimedAt": "2026-08-01",
-      "heartbeatAt": "2026-08-01",
-      "recoveryTrigger": "检查任务进程状态与 transactions/patch 工作树改动；无相关写进程则保存后审查再原子回退 ready"
     },
     {
       "sliceId": "W-REL-B-CORPUS-02",
