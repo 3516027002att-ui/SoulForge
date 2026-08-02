@@ -435,7 +435,14 @@ function cmdStatus() {
   for (const slice of data.slices) {
     counts[slice.lifecycle] = (counts[slice.lifecycle] ?? 0) + 1;
   }
-  const check = runGovernanceCheck();
+  // status 必须带 freshness。它此前调用不带参数的 runGovernanceCheck(),于是跳过
+  // GATE_EVIDENCE_STALE / GATE_DEFERRAL_EVIDENCE_STALE 判定——实测状态:治理层
+  // (verify --tier governance) 因这三条红着,而 status 同时报 governanceGateOk: true。
+  //
+  // 这是本仓库最坏的一类假门禁:CLAUDE.md 把 status 列为「治理门禁是否通过」的常用
+  // 入口,读到 true 的 agent 会直接去提交,红是在之后某一步才炸出来,而那时它已经在
+  // 找错方向了。宁可让 status 慢一点(多读一个交接书)也不能给假绿。
+  const check = runGovernanceCheck({ withFreshness: true });
   emit({
     mode: 'status',
     lifecycleCounts: counts,
