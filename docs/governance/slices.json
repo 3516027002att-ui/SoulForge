@@ -281,8 +281,8 @@
       "hardPrerequisites": "合法 Sekiro corpus root/registry 已可用；不得套用其他游戏结论或把扩展名计数当 parser；探针输出不提交、不提升 authority；不得把字节码反汇编呈现为可编辑源码",
       "entryPoints": [
         "packages/core/src/testing/probeBehaviorHeaders.ts",
-        "bridge/SoulForge.Bridge/TaeNativeDocument.cs（延期）",
-        "bridge/SoulForge.Bridge/EsdNativeDocument.cs（延期）",
+        "bridge/SoulForge.Bridge/TaeNativeDocument.cs",
+        "bridge/SoulForge.Bridge/EsdNativeDocument.cs",
         "Bridge inspection"
       ],
       "requiredValidation": "npm run bridge:verify:tae、npm run bridge:verify:esd；validation-unfrozen：script 容器 magic/reference inventory smoke",
