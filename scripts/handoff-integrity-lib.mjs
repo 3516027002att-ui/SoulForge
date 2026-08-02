@@ -829,6 +829,13 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     'scripts/verify-governance.mjs',
     'scripts/verify-governance-data-fixtures.mjs',
     'scripts/governance/freshnessContext.mjs',
+    // 投影器与其 fixture：交接书 §13.1/§13.1.1/§17.1/§18.3/§18.4 已改为从治理
+    // JSON 生成。投影器决定 markdown 里呈现什么，fixture 决定投影退化会不会被
+    // 拦住（实测把空值渲染从 — 改成空串时，仅靠真实数据的 2858 项断言全部通过，
+    // 所以 fixture 的边界样本本身承担门禁职责）。漏登记就能改写 §17.1 的呈现
+    // 而 REL-SCOPE 仍显示 fresh。
+    'scripts/generate-handoff-projection.mjs',
+    'scripts/verify-handoff-projection-fixtures.mjs',
     'docs/governance/releases.json',
     'docs/governance/scope.json',
     // 七个 schema 全部登记，而不只是冻结裁定直接用到的 releases/scope 两个。
