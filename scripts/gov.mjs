@@ -14,6 +14,7 @@
  * Mod 工作区、不写游戏目录、不改 authority、不产出 Evidence 结论——claim
  * 只是并发协调，不构成任何验证声明。
  */
+import { spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { acquireGovernanceLock } from './gov/lock.mjs';
@@ -429,6 +430,36 @@ function cmdNext(args) {
   });
 }
 
+/**
+ * 统计工作区未提交改动数（无路径过滤）。
+ *
+ * T-M2：本仓库多次用 `git status --porcelain -- <少数路径>` 确认「干净」，而过滤后
+ * 的输出看起来跟真干净一模一样——工作区其实悬着上个会话遗留的未提交改动。seal 侧的
+ * collectUncommittedGovernanceFiles 只扫治理文件；status 这里补的是**全量无过滤**计数，
+ * 把真事实印在 CLAUDE.md 列的权威面板上：agent 即使另行跑了带 `--` 过滤的 git status，
+ * 也会在面板里被这个计数 contradict。
+ *
+ * 失败关闭：git 不可用返回 null 而非 0。0 是「干净」，是最乐观的断言；拿不确定冒充它，
+ * 正是本文件 cmdStatus 注释里那类「默认值比事实更乐观」的假绿。
+ */
+function countUncommitted(rootDir) {
+  const status = spawnSync('git', ['status', '--porcelain'], {
+    cwd: rootDir,
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+    windowsHide: true
+  });
+  if (status.status !== 0 || status.error) {
+    return {
+      uncommittedFiles: null,
+      unfiltered: true,
+      note: 'git status 不可用，无法确定工作区是否干净；失败关闭报 null，不报 0。'
+    };
+  }
+  const count = status.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0).length;
+  return { uncommittedFiles: count, unfiltered: true, note: null };
+}
+
 function cmdStatus() {
   const data = readSlices();
   const counts = {};
@@ -447,6 +478,9 @@ function cmdStatus() {
     // emit 恒发 ok: true;payload 在其后展开,故这里显式覆盖。见函数末尾 exitCode 注释。
     ok: check.ok,
     mode: 'status',
+    // 无过滤的工作区未提交计数。不参与 exitCode（有未提交改动本身不是治理失败），
+    // 只把真事实摆在面板上，防「带 -- 过滤的 git status 看着干净」那一类误判。
+    workingTree: countUncommitted(root),
     lifecycleCounts: counts,
     // status 也必须报心跳陈旧度。它此前只给 heartbeatAt 原始值,而 next 会算
     // heartbeatStale——同一份数据、两个命令、相反结论。status 是 CLAUDE.md 列的
