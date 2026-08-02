@@ -60,6 +60,12 @@ export class BridgeDaemonClient {
   private stderrTail = '';
   private closed = false;
   private negotiatedMaxFrameBytes: number;
+  /**
+   * 进行中的请求数。构造时子进程被 unref（见构造函数注释），所以有请求在飞时
+   * 必须临时 ref 回来，否则宿主可能在响应到达前就退出而把请求静默丢掉。
+   * 用计数而不是布尔：并发请求下先完成的那个不能把仍在等的请求的引用撤掉。
+   */
+  private inFlight = 0;
 
   private constructor(private readonly options: BridgeDaemonClientOptions) {
     this.negotiatedMaxFrameBytes = options.maxFrameBytes ?? 1024 * 1024;
@@ -68,6 +74,18 @@ export class BridgeDaemonClient {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
     });
+    // daemon 子进程与其 stdio 都是活跃句柄，会让宿主 node 进程无法退出。
+    // 实测后果：runNativeFlverSmoke 的成功路径漏调 disposeBridgeDaemonPool()，
+    // 于是进程挂死 4 小时（CPU 全程 0.1s 无增长）、锁住 bin 下的 SoulForge.Bridge.exe，
+    // 使后续 bridge:build 与整个 native 层失败。仓库里 37 个用 runBridge 的
+    // smoke/probe 全都没把 dispose 放进 finally，靠调用方记得关是不可靠的。
+    //
+    // unref 让「忘记 dispose」退化为「进程正常退出」而不是「挂死」。这不会产生
+    // 孤儿进程：BridgeDaemonHost 在 ReadLineAsync 返回 null（stdin 关闭）时会
+    // break 退出主循环，宿主退出即断管道即触发它自行终止。
+    // 显式 dispose() 仍是首选路径（它会等 close 并在 2s 后 kill），unref 只是兜底。
+    this.child.unref();
+    this.setStdioRef('unref');
     this.child.stdout.setEncoding('utf8');
     this.child.stderr.setEncoding('utf8');
     this.child.stdout.on('data', (chunk: string) => this.consumeStdout(chunk));
@@ -162,6 +180,9 @@ export class BridgeDaemonClient {
   async dispose(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    // 关闭期间同样要 ref：子进程处于 unref 状态时，'close' 事件不足以维持事件
+    // 循环，宿主可能在收到它之前就退出，使这个 await 永远拿不到结果。
+    this.retain();
     this.child.stdin.end();
     const close = once(this.child, 'close');
     const timeout = setTimeout(() => this.child.kill(), 2_000);
@@ -169,6 +190,7 @@ export class BridgeDaemonClient {
       await close;
     } finally {
       clearTimeout(timeout);
+      this.release();
     }
   }
 
@@ -185,6 +207,58 @@ export class BridgeDaemonClient {
     if (signal?.aborted) {
       throw new BridgeDaemonError('BRIDGE_REQUEST_CANCELLED', 'Bridge request was cancelled.', true);
     }
+    this.retain();
+    try {
+      return await this.sendAndWaitInner(
+        kind, payload, terminalKinds, timeoutMs, resourceUri, onProgress, signal
+      );
+    } finally {
+      this.release();
+    }
+  }
+
+  /** 请求期间把子进程 ref 回来；见 inFlight 字段说明。 */
+  private retain(): void {
+    this.inFlight += 1;
+    if (this.inFlight === 1) {
+      this.child.ref();
+      this.setStdioRef('ref');
+    }
+  }
+
+  private release(): void {
+    this.inFlight -= 1;
+    if (this.inFlight === 0) {
+      this.child.unref();
+      this.setStdioRef('unref');
+    }
+  }
+
+  /**
+   * child.unref() 只脱开进程句柄，三条 stdio 管道仍是活跃句柄。实测：只调
+   * child.unref() 时进程仍挂死，`process._getActiveHandles()` 显示 6 个 Socket
+   * （两个 daemon 客户端 × stdin/stdout/stderr）。
+   *
+   * Node 的类型声明把 stdio 标为 Readable/Writable，其上没有 ref/unref；但在
+   * 管道模式下它们的实际实现是 net.Socket，确实带这两个方法。这里按运行期能力
+   * 探测调用，而不是断言类型——某个平台上若真的不是 Socket，就安静跳过而不是崩。
+   */
+  private setStdioRef(mode: 'ref' | 'unref'): void {
+    for (const stream of [this.child.stdin, this.child.stdout, this.child.stderr]) {
+      const fn = (stream as unknown as Partial<Record<typeof mode, () => void>>)[mode];
+      if (typeof fn === 'function') fn.call(stream);
+    }
+  }
+
+  private async sendAndWaitInner(
+    kind: BridgeDaemonFrame['kind'],
+    payload: unknown,
+    terminalKinds: Set<string>,
+    timeoutMs: number,
+    resourceUri?: string,
+    onProgress?: (payload: unknown) => void | Promise<void>,
+    signal?: AbortSignal
+  ): Promise<BridgeDaemonFrame<unknown>> {
     const requestId = randomUUID();
     const deadlineUtc = new Date(Date.now() + timeoutMs).toISOString();
     const writeController = new AbortController();

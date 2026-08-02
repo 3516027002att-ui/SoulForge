@@ -133,6 +133,12 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 原生文件，本机无语料时恒定 failed —— 属于层级登记错误，不是能力缺陷。
   // 已改为无语料时结构化 skipped，层级同步移到 native。
   'test:native-preview': 'native',
+  // Bridge 宿主退出卫生：真跑三个代表性 bridge smoke，判它们是否自行退出。
+  // 抓的缺陷只有运行期可见——断言全过、退出码 0，但 daemon 句柄挂住宿主。
+  // 实测事故：runNativeFlverSmoke 挂死 4 小时并锁住 bridge 输出 exe，使之后
+  // 每次 bridge:build 与整个 native 层失败。静态扫描无法区分「调用了 dispose」
+  // 和「所有终止路径都调了 dispose」，所以必须运行期观测，归 native。
+  'test:bridge-exit-hygiene': 'native',
   'bridge:verify:bnd4-transaction': 'native',
   'bridge:verify:bnd4-writer': 'native',
   'bridge:verify:dcx-documents': 'native',
