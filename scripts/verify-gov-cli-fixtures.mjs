@@ -325,6 +325,37 @@ check('cli/next-item-self-sufficient',
         [...lifecycles].some((lifecycle) => message.includes(lifecycle)),
         `${releaseId} 无可 claim 时消息必须点明实际 lifecycle（${[...lifecycles].join('/')}），实际「${message}」`);
     }
+
+    // 指对方向还不够：只说「去 scope.json 找 resumeRequires」仍然是把 agent 送去
+    // 手工检索——V0.6 的 3 条 deferred 切片对应 12 个 scopeItem，靠 capabilityId
+    // 反查是每个 agent 都要重做一遍的活。承接条件必须直接投影出来。
+    const deferredIn = slicesData.slices
+      .filter((slice) => slice.targetRelease === releaseId && slice.lifecycle === 'deferred');
+    if (deferredIn.length > 0) {
+      const projected = scoped.payload?.deferredSlices ?? [];
+      check(`cli/next-release-${releaseId}-deferred-projected`,
+        projected.length === deferredIn.length,
+        `${releaseId} 的 ${deferredIn.length} 条 deferred 切片必须全部出现在 deferredSlices，实际 ${projected.length} 条`);
+      // available=false 也是合法结果（治理数据不一致时必须说出来而不是返回空数组），
+      // 但必须带 reason——空数组会被读成「没有承接条件」，那是错误结论。
+      check(`cli/next-release-${releaseId}-deferred-resume-explained`,
+        projected.length > 0 && projected.every((entry) =>
+          entry.resumeRequires?.available === true
+            ? Array.isArray(entry.resumeRequires.fromScopeItems)
+              && entry.resumeRequires.fromScopeItems.length > 0
+              && entry.resumeRequires.fromScopeItems.every((item) =>
+                typeof item.scopeItemId === 'string' && item.resumeRequires !== undefined)
+            : typeof entry.resumeRequires?.reason === 'string'
+              && entry.resumeRequires.reason.length > 0),
+        `每条 deferred 切片要么给出非空 fromScopeItems，要么给出 reason 说明为何取不到，`
+        + `不得返回空数组冒充「没有承接条件」。实际 ${JSON.stringify(projected.map((entry) => entry.resumeRequires))?.slice(0, 400)}`);
+    } else {
+      // 没有 deferred 切片时不投影，避免污染默认版本的首屏体积
+      // （实测 V0.5 首屏 6608 B，只比投影前多 24 B）。
+      check(`cli/next-release-${releaseId}-no-deferred-noise`,
+        (scoped.payload?.deferredSlices ?? []).length === 0,
+        `${releaseId} 没有 deferred 切片时不得投影 deferredSlices，实际 ${JSON.stringify(scoped.payload?.deferredSlices)?.slice(0, 200)}`);
+    }
   }
 
   const allReleases = runGov(['next', '--all'], cliRoot);
@@ -796,7 +827,8 @@ console.log(JSON.stringify({
     'seal 成功后报出自己写过但仍未提交的治理文件，并说明下次封存锚点是 HEAD（漏提交会让事实源与已入库的投影错位）',
     'seal 的正向与回滚路径各自显式构造、互不依赖环境：锚点改写到 fixture 基线使正向可达，扰动 scope.json 主题域使 stale 可达',
     '回滚场景断言失败原因确实是 freshness/stale 而非扰动导致的数据非法（否则断言为错误原因通过）',
-    'fixture 对治理数据的每处扰动都在断言后还原，不污染后续断言'
+    'fixture 对治理数据的每处扰动都在断言后还原，不污染后续断言',
+    'deferred 切片的 resumeRequires 直接投影（不让 agent 手工按 capabilityId 反查 scope.json）；取不到时必须给 reason 而非空数组；无 deferred 时不投影以免膨胀默认首屏'
   ],
   findings
 }, null, 2));
