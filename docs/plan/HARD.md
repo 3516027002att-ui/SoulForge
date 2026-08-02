@@ -66,6 +66,18 @@
 **用户已裁定:有真门禁守着的并入 `docs/AGENT_EXECUTION_PLAYBOOK.md`(长期文件),
 纯散文的随本目录一起弃掉。** 需要你判断的是**每条归哪一类**,以及并入时放在手册哪一节。
 
+### 先取回九条约束的原文
+
+它们的原文**不在工作树里**——拆分时随 `docs/plan.md` 一起删掉了,只存在于 Git 历史。
+下表只给条目名和门禁支撑,做裁定必须先读原文:
+
+~~~powershell
+git show "$(git log --format=%H --diff-filter=D -1 -- docs/plan.md)^:docs/plan.md"
+~~~
+
+不写死 commit SHA:这条命令自己找出删除该文件的那次提交、取它的父版本,
+之后再有历史重写也照样能用。实测输出 16382 B。
+
 ### 已核实的门禁支撑情况(2026-08-02 实测)
 
 | 原条目 | 门禁支撑 | 初判 |
@@ -102,7 +114,7 @@
 
 - `CLAUDE.md` **被 gitignore**,所以往它写东西进不了新克隆。tracked 的对应物是执行手册。
 - 手册当前 20865 B / 10 节,是 agent 必读件。**并入会让它变胖**——挑真正必要的,
-  不要把 plan.md 整段搬过去。
+  不要把取回的原文整段搬过去。
 - 手册是受管文档,受引用真实性门禁约束:里面写的 npm script 名、node 脚本路径、
   `gov` 子命令必须真实存在。**这两个任务清单也是受管文档**——实测:本条原先用
   `scripts/X.mjs` 当占位符举例,立刻被 `NODE_SCRIPT_MISSING` 拦下。门禁按形状匹配,
@@ -135,37 +147,50 @@ T-H1 做完后交接书约 364 KB。用户已明确**不做**三大投影全改(
 
 ## T-H4 `docs/plan/` 自身退场
 
-**这是最后一条,也是最容易漏的一条。** 本目录是用完即弃的,但我给它焊了硬依赖。
+**这是最后一条,也是最容易漏的一条。**
 
-### 已埋的依赖(必须一起拆掉)
+### 已经拆掉的部分(不要重做)
+
+单文件时期本目录被焊成硬依赖:`PLAN_MISSING` 会在文件缺失时报 error,于是
+**删掉用完即弃的文件反而让治理层转红**。实测确认过(移走 `docs/plan.md` 立刻
+报 `PLAN_MISSING` + `DEAD_LINK`),已于拆分时修掉:
+
+- `PLAN_MISSING` 已移除;
+- 两档清单改为 `MANAGED_DOCS` 的**可选成员**——存在就纳入扫描,删掉自动退出集合;
+- 条目交叉引用门禁从校验「第 N 条」改判任务 ID(`PLAN_SECTION_REF_DANGLING`
+  → `PLAN_TASK_REF_DANGLING`),因为失效方式变了:从「插入条目顶掉后续编号」
+  变成「做完删条目导致别处引用悬空」。
+
+所以现在删除 `docs/plan/` 只会得到 **2 条 `DEAD_LINK`**(README 那两行),
+不会有文件缺失类错误。这一点已实测。
+
+### 退场时仍需一起拆掉的引用
 
 | 位置 | 内容 | 不拆的后果 |
 |---|---|---|
-| `scripts/verify-handoff-integrity.mjs:20` | `const PLAN = 'docs/plan.md'` | — |
-| 同文件 `PLAN_MISSING` 检查 | 文件缺失即 error | **删文件 → 治理层转红** |
-| 同文件 `MANAGED_DOCS` 数组 | plan.md 在受管文档集合内 | 三处扫描报读不到 |
-| 同文件 `PLAN_SECTION_REF_DANGLING` / `PLAN_SECTIONS_UNPARSEABLE` | 校验「第 N 条」引用 | 判据对象消失 |
-| 同文件 `checkedRules` 末条 | 声明该规则被检查 | 声明与实现分叉 |
-| `README.md:119` | `- [Agent 驱动约束规格](docs/plan.md)` | 本地链接门禁转红 |
+| `scripts/verify-handoff-integrity.mjs:26-27` | `PLAN_HARD` / `PLAN_MECH` 常量 | 死代码,无门禁后果 |
+| 同文件 41-42、51-52、70-71 行 | 读取与两处可选成员展开 | 死代码 |
+| 同文件 `PLAN_TASK_IDS_UNPARSEABLE` / `PLAN_TASK_REF_DANGLING` | 任务 ID 引用校验 | 判据对象消失(空集时自动跳过,不转红) |
+| 同文件 `checkedRules` 末条 | 声明该规则被检查 | **声明与实现分叉** |
+| `README.md:122-128` | 「一次性任务清单」整节 | **`DEAD_LINK` ×2** |
 
-**注意路径:** 上表写的是 `docs/plan.md`(旧单文件路径)。本次拆分后实际文件是
-`docs/plan/HARD.md` 与 `docs/plan/MECH.md`,所以这些引用**在拆分时就已经需要同步**——
-若拆分那一步没改,治理层现在就是红的。先跑 `node scripts/verify.mjs --tier governance` 确认当前状态。
+行号是 2026-08-02 实测值,**动手前重新 grep 确认**——文件会变。
 
 ### 退场步骤
 
 1. 确认 HARD.md 与 MECH.md 里所有任务条目都已删除(即全部完成或明确判定不做);
 2. 删除 `docs/plan/` 整个目录;
-3. 从 `verify-handoff-integrity.mjs` 移除上表全部 6 处依赖(含 `checkedRules` 那条声明);
-4. 从 `README.md` 移除链接;
-5. 跑 `node scripts/verify.mjs --tier governance`,必须 16/16 全绿;
+3. 从 `verify-handoff-integrity.mjs` 移除上表前四行(含 `checkedRules` 那条声明);
+4. 从 `README.md` 移除「一次性任务清单」整节,包括那段解释 `DEAD_LINK` 的说明;
+5. 跑 `node scripts/verify.mjs --tier governance`,必须全绿;
 6. 走封存四步。
 
 ### 为什么这条归高难档
 
 移除门禁比添加门禁更容易出错:**留一处引用就转红,删多了则悄悄失去覆盖。**
 删完后要确认 `checkedRules` 里没有"声称检查了但已删掉判据"的残留——那正是
-"声明与实现分叉"型假门禁。
+"声明与实现分叉"型假门禁。第 3 步删掉的两个门禁码要顺手在仓库里全局搜一遍,
+确认没有别处(fixture、文档、注释)还在声称它们存在。
 
 ---
 
