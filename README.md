@@ -116,6 +116,7 @@ Bridge 与本机 native smoke 见根 `package.json`。真实游戏或私有 corp
 
 - [V0.5 实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)
 - [Agent 执行手册](docs/AGENT_EXECUTION_PLAYBOOK.md)
+- [Agent 驱动约束规格](docs/plan.md)
 - [产品愿景](docs/PRODUCT_VISION.md)
 - [Parser 研究边界](docs/PARSER_RESEARCH.md)
 
