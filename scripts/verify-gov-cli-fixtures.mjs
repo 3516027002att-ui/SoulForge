@@ -407,14 +407,27 @@ if (rollbackTarget) {
       `封存基线必须自洽（五字段齐全且 fingerprintSha256 匹配），实际 ${JSON.stringify(parsedSeal)?.slice(0, 400)}`);
     check('cli/seal-type-is-sealed', record?.evidenceType === 'sealed-current-run',
       'gov seal 只产出 sealed-current-run。');
+    // 交接书 §17.1 是治理 JSON 的投影。seal 必须顺带重新投影，否则 markdown
+    // 少一行、handoff 门禁判 stale——而消除 stale 正是封存的目的。
+    // 这条断言锁定「封存即完成投影」，不允许退回「记得手跑生成器」。
+    check('cli/seal-reprojects-handoff',
+      readFileSync(join(cliRoot, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8')
+        .includes('EV-FIXTURE-SEAL-OK'),
+      'seal 成功后交接书投影区必须已包含新证据行。');
   } else {
     check('cli/seal-postcheck-rolls-back',
-      sealed.payload?.code === 'SEAL_POSTCHECK_FAILED',
-      `seal 失败只允许是后置校验失败，实际 ${JSON.stringify(sealed.payload)?.slice(0, 400)}`);
+      sealed.payload?.code === 'SEAL_POSTCHECK_FAILED' || sealed.payload?.code === 'SEAL_PROJECTION_FAILED',
+      `seal 失败只允许是后置校验或投影失败，实际 ${JSON.stringify(sealed.payload)?.slice(0, 400)}`);
     check('cli/seal-rollback-removes-record',
       !readFileSync(join(cliRoot, 'docs/governance/evidence.jsonl'), 'utf8')
         .includes('EV-FIXTURE-SEAL-OK'),
       '后置校验失败必须回滚，不得留下一条无效封存。');
+    // 交接书也必须回滚。留下一份含该证据的投影而 JSONL 里没有，
+    // 会让下次 --check 永久报漂移，且漂移方向指向一条不存在的记录。
+    check('cli/seal-rollback-restores-handoff',
+      !readFileSync(join(cliRoot, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8')
+        .includes('EV-FIXTURE-SEAL-OK'),
+      '回滚必须同时还原交接书投影。');
     // 回滚路径的 hint 必须指出 --gates 缺失这个可能。真实仓库上首次重封存正是
     // 因为漏了 --gates 而 stale 未消除：freshness 只判定 Gate 引用的
     // evidenceRefs，孤立的新证据根本不参与判定。hint 若不提这一点，
@@ -463,7 +476,8 @@ console.log(JSON.stringify({
     'gov/seal.mjs 与 generate-handoff-fingerprint.mjs 五字段指纹逐字段一致',
     'seal 拒绝非法/重复 EvidenceId、未定义 Gate 与缺失必填字段，且失败路径不追加任何行',
     'seal 成功时封存基线自洽；后置校验失败时同时回滚 evidence.jsonl 与 gates.json',
-    'seal 回滚 hint 指出 --gates 缺失（freshness 只判定 Gate 引用的证据）'
+    'seal 回滚 hint 指出 --gates 缺失（freshness 只判定 Gate 引用的证据）',
+    'seal 成功即完成交接书投影；失败时连交接书一并回滚'
   ],
   findings
 }, null, 2));

@@ -129,7 +129,7 @@
     "test:krak-combination-mutation": "npm run test:krak-combination-mutation -w @soulforge/core",
     "handoff:fingerprint": "node scripts/generate-handoff-fingerprint.mjs",
     "test:handoff-integrity:fixtures": "node scripts/verify-handoff-integrity-fixtures.mjs",
-    "test:handoff-integrity": "npm run test:handoff-integrity:fixtures && node scripts/verify-handoff-integrity.mjs && node scripts/verify-v06-deferral-index.mjs",
+    "test:handoff-integrity": "npm run test:handoff-integrity:fixtures && npm run test:handoff-projection && node scripts/verify-handoff-integrity.mjs && node scripts/verify-v06-deferral-index.mjs",
     "test:governance-data-fixtures": "node scripts/verify-governance-data-fixtures.mjs",
     "test:governance-equivalence": "node scripts/verify-governance-equivalence.mjs",
     "test:governance": "npm run test:governance-data-fixtures && node scripts/verify-governance.mjs && npm run test:governance-equivalence",
@@ -148,7 +148,10 @@
     "test:emevd-corpus-matrix": "npm run test:emevd-corpus-matrix -w @soulforge/core",
     "test:script-container-evidence": "npm run test:script-container-evidence -w @soulforge/core",
     "test:script-container-replace": "npm run test:script-container-replace -w @soulforge/core",
-    "probe:behavior-headers": "npm run probe:behavior-headers -w @soulforge/core"
+    "probe:behavior-headers": "npm run probe:behavior-headers -w @soulforge/core",
+    "handoff:project": "node scripts/generate-handoff-projection.mjs",
+    "test:handoff-projection": "node scripts/verify-handoff-projection-fixtures.mjs && node scripts/generate-handoff-projection.mjs --check",
+    "gov:seal": "node scripts/gov.mjs seal"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

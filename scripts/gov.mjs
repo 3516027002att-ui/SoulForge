@@ -18,6 +18,7 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { acquireGovernanceLock } from './gov/lock.mjs';
 import { EVIDENCE, computeFingerprint, formatBaseline } from './gov/seal.mjs';
+import { projectHandoff } from './generate-handoff-projection.mjs';
 import { validateGovernanceData } from './governance/validateGovernanceData.mjs';
 import {
   gateSubjectRegistry,
@@ -589,14 +590,36 @@ function cmdSeal(args) {
       writeJson(GATES, gatesDoc);
     }
 
+    // 重新投影交接书。必须在后置校验之前：交接书 §17.1 证据表与 §18.3 引用列
+    // 是治理 JSON 的投影，新证据不落进去 handoff 门禁就会判 stale——而那正是
+    // 本次封存要消除的东西。
+    //
+    // 注意顺序不影响封存契约：handoffSha256BeforeEvidenceAppend 记录的是
+    // 「追加这条证据之前」的交接书哈希，已在上面算完并写进记录。此刻改交接书
+    // 不会让那个字段失真，反而是让它描述的「追加后状态」如实发生。
+    const handoffPath = join(root, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md');
+    const handoffBefore = readFileSync(handoffPath, 'utf8');
+    const projection = projectHandoff(root);
+    if (projection.findings.length > 0) {
+      writeFileSync(evidencePath, existing, 'utf8');
+      writeFileSync(gatesPath, gatesBefore, 'utf8');
+      fail('SEAL_PROJECTION_FAILED', '交接书投影失败，已回滚本条封存记录与 Gate 引用。', {
+        rolledBack: [EVIDENCE, ...(gateRefs.length > 0 ? [GATES] : [])],
+        findings: projection.findings
+      });
+      return;
+    }
+    if (projection.drifted) writeFileSync(handoffPath, projection.projected, 'utf8');
+
     // 追加后必须过完整门禁（含 freshness）。封存的目的就是让 stale 恢复 fresh；
     // 若追加后仍红，说明这次封存没有解决问题，留着它只会掩盖真实状态。
     const after = runGovernanceCheck({ withFreshness: true });
     if (!after.ok) {
       writeFileSync(evidencePath, existing, 'utf8');
       writeFileSync(gatesPath, gatesBefore, 'utf8');
-      fail('SEAL_POSTCHECK_FAILED', '追加后治理门禁仍失败，已回滚本条封存记录与 Gate 引用。', {
-        rolledBack: [EVIDENCE, ...(gateRefs.length > 0 ? [GATES] : [])],
+      writeFileSync(handoffPath, handoffBefore, 'utf8');
+      fail('SEAL_POSTCHECK_FAILED', '追加后治理门禁仍失败，已回滚本条封存记录、Gate 引用与交接书投影。', {
+        rolledBack: [EVIDENCE, ...(gateRefs.length > 0 ? [GATES] : []), 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'],
         errors: after.errors.slice(0, 10),
         hint: gateRefs.length === 0
           ? 'stale 未消除且未指定 --gates：freshness 只判定 gates.json 里该 Gate 引用的 evidenceRefs，没被引用的新证据不参与判定。用 --gates REL-SCOPE,REL-E 把本条挂上去。'
