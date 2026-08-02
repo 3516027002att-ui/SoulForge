@@ -104,8 +104,17 @@
 | `codex/v05-worktree-publish` | 1 | 历史快照 |
 | `worktree-v05-open-format-import` | 2 | 历史快照 |
 
-worktree 已只剩主工作树。`main` 领先 `origin/main` 150 个提交(2026-08-02 实测,此后每次
-提交都会增加,需要时自己重量:`git rev-list --count origin/main..main`)。
+worktree 已只剩主工作树(`git worktree list` 实测单行)。另有 6 条分支领先 0——
+它们已被 main 包含,`--ff-only` 合并无事可做,清理与否都不影响正确性。
+
+`main` 领先 `origin/main` **170** 个提交(2026-08-02 实测)。上表领先数同日实测。
+**这两个数都会随提交增长,别照抄:**
+
+~~~powershell
+git worktree list
+git rev-list --count origin/main..main
+git for-each-ref --format='%(refname:short)' refs/heads/
+~~~
 
 **当前用户裁定:保留 4 条分支不删、不推 origin。** 本条任务不是推翻它,而是:
 
