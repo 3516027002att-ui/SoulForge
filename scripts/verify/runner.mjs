@@ -13,8 +13,38 @@
  * passed / skipped / partial / failed 四态，并要求调用方对 skipped 与
  * partial 做出选择（--require-executed 时它们算失败）。
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
+
+/**
+ * 超时时杀掉整棵进程树，而不只是直接子进程。
+ *
+ * child.kill() 只终止我们 spawn 的那个 npm 壳。实测后果：runNativeFlverSmoke
+ * 挂死时，被杀的是 npm，而它下面的 node 与两个 SoulForge.Bridge 孙进程继续存活
+ * 四小时，锁住 bin 下的 SoulForge.Bridge.exe，使之后每一次 bridge:build 都失败。
+ * 超时清理不彻底，等于把一次超时变成后续所有套件的连环失败。
+ *
+ * Windows 用 taskkill /T（按树），POSIX 用负 PID 杀进程组。两者都尽力而为：
+ * 失败时退回直接 kill，不让清理本身抛错掩盖真正的超时结论。
+ */
+function killTree(child) {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  try {
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+    } else {
+      process.kill(-pid, 'SIGKILL');
+    }
+  } catch {
+    // 树杀失败时至少终止直接子进程。
+  }
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    // 已退出。
+  }
+}
 
 export const OUTCOME = Object.freeze({
   PASSED: 'passed',
@@ -122,7 +152,7 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true }) 
     const startedAt = Date.now();
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      killTree(child);
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
