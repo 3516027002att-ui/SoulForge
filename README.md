@@ -116,9 +116,16 @@ Bridge 与本机 native smoke 见根 `package.json`。真实游戏或私有 corp
 
 - [V0.5 实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)
 - [Agent 执行手册](docs/AGENT_EXECUTION_PLAYBOOK.md)
-- [Agent 驱动约束规格](docs/plan.md)
 - [产品愿景](docs/PRODUCT_VISION.md)
 - [Parser 研究边界](docs/PARSER_RESEARCH.md)
+
+一次性任务清单（用完即弃，不属于保留文档）：
+
+- [高难度档 HARD.md](docs/plan/HARD.md)：需要判断与权衡的任务
+- [机械档 MECH.md](docs/plan/MECH.md)：判据固定、不易出错的任务
+
+两档任务全部完成后删除 `docs/plan/` 整个目录，并同时移除本节——链接门禁会因目录消失而
+报 `DEAD_LINK`，这是预期行为，退场步骤见 `docs/plan/HARD.md` 的 T-H4。
 
 Synthetic 技术规格：
 

@@ -15,9 +15,16 @@ import { buildFreshnessContext } from './governance/freshnessContext.mjs';
 const root = process.cwd();
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
 const PLAYBOOK = 'docs/AGENT_EXECUTION_PLAYBOOK.md';
-// 约束规格。它列出各门禁码与命令，本身就必须受同样的引用真实性约束——
-// 否则「文档里形如可执行的东西必须真的可执行」这条规格自己可以违反自己。
-const PLAN = 'docs/plan.md';
+// 一次性任务清单，按难度分两档。它们列出各门禁码与命令，本身就必须受同样的引用
+// 真实性约束——否则「文档里形如可执行的东西必须真的可执行」这条规格自己可以违反自己。
+//
+// 这两个文件是**用完即弃**的：任务全部完成后连同 docs/plan/ 目录一起删除，
+// 届时必须同步移除本文件对它们的全部引用与 README 链接（退场步骤见 HARD.md 的 T-H4）。
+// 因此这里刻意**不**校验文件是否存在——焊上存在性检查会让「删掉它」变成治理层转红，
+// 把用完即弃的东西变成硬依赖。实测过：单文件时期的 PLAN_MISSING 正是这个错误，
+// 移走文件立刻报红。存在时才纳入扫描，不存在就跳过。
+const PLAN_HARD = 'docs/plan/HARD.md';
+const PLAN_MECH = 'docs/plan/MECH.md';
 const README = 'README.md';
 const PKG = 'package.json';
 
@@ -31,51 +38,63 @@ function readOrNull(relativePath) {
 
 const handoff = readOrNull(HANDOFF);
 const playbook = readOrNull(PLAYBOOK);
-const plan = readOrNull(PLAN);
+const planHard = readOrNull(PLAN_HARD);
+const planMech = readOrNull(PLAN_MECH);
 
 // 受管文档集合。三处扫描（npm script、node/gov 引用、敏感内容）必须用同一份清单：
 // 各处各写一遍数组，加文档时漏改其中一处的后果是「以为扫了、其实没扫」——
 // 而这正是本仓库反复踩到的那类假门禁。
-const MANAGED_DOCS = [[HANDOFF, handoff], [PLAYBOOK, playbook], [PLAN, plan]];
+// 任务清单是可选成员：存在就扫，删掉后自动退出集合而不是报缺失。
+const MANAGED_DOCS = [
+  [HANDOFF, handoff],
+  [PLAYBOOK, playbook],
+  ...(planHard === null ? [] : [[PLAN_HARD, planHard]]),
+  ...(planMech === null ? [] : [[PLAN_MECH, planMech]])
+];
 const readme = readOrNull(README);
 const packageJsonRaw = readOrNull(PKG);
 
 if (handoff === null) add('error', 'HANDOFF_MISSING', HANDOFF, '交接书缺失，无法作为治理事实源。');
 if (playbook === null) add('error', 'PLAYBOOK_MISSING', PLAYBOOK, '交接书引用的执行手册缺失。');
-if (plan === null) {
-  add('error', 'PLAN_MISSING', PLAN,
-    '约束规格缺失。它记录了各门禁「为什么存在」与实测失败场景；缺失后 agent 会把门禁当'
-    + '任意约束而倾向绕过，而不是理解它防的是哪个具体失败。');
-}
-// 约束规格里的「第 N 条」必须指向真实存在的条目。
+// 任务清单里引用的任务 ID（T-H1 / T-M2 …）必须真实存在于两档清单之一。
 //
-// 这条门禁是按 plan.md 第 9.1 条「你查了两遍以上的东西该被机械化」加的：在 plan.md
-// 中间插入新条目会把后续编号全部顶掉，而正文里散着十几处「按第 4 条修根因」这样的
-// 交叉引用。实测插入第 9 条时我手工核了 8 处引用——那正是每次改动都要重做一遍的活，
-// 而漏核的后果是引用静默指向另一条约束：agent 照着"第 8 条"去看却读到别的内容，
-// 比没有引用更糟（第 4 条：指向错误原因的指引比没有指引更糟）。
+// 判据形态是跟着被检对象改的：单文件时期条目是 `## N.`，交叉引用是「第 N 条」，
+// 插入条目会顶掉后续编号；拆成两档后条目变成 `## T-H1 标题`，跨档互相引用
+// （HARD.md 的 T-H4 被 MECH.md 引用、T-H1 的结论影响 T-H3），而任务做完就删除自己
+// 那一条——**删除同样会让别处的引用悬空**，且悬空后 agent 照着找不到的 ID 去查，
+// 长得跟「拼写错了」一模一样。
 //
-// 只校验编号存在性，不校验语义是否贴切——语义得人读，而存在性是机械的。
-if (plan !== null) {
-  const sectionNumbers = new Set(
-    [...plan.matchAll(/^## (\d+)\./gm)].map((match) => match[1])
-  );
-  if (sectionNumbers.size === 0) {
-    add('error', 'PLAN_SECTIONS_UNPARSEABLE', PLAN,
-      '未能从 plan.md 解析出任何 `## N.` 形态的条目标题，「第 N 条」交叉引用无从校验。'
-      + '判据失效等于没有门禁，故失败关闭而不是跳过。');
-  } else {
-    const seen = new Set();
-    for (const match of plan.matchAll(/第\s*(\d+)\s*条/g)) {
-      const cited = match[1];
-      if (seen.has(cited)) continue;
-      seen.add(cited);
-      if (sectionNumbers.has(cited)) continue;
-      const line = plan.slice(0, match.index).split(/\r?\n/).length;
-      add('error', 'PLAN_SECTION_REF_DANGLING', `${PLAN}:${line}`,
-        `引用了不存在的「第 ${cited} 条」（现有条目：${[...sectionNumbers].sort((a, b) => a - b).join('、')}）。`
-        + '在中间插入条目会顶掉后续编号，正文里的交叉引用必须同步修正——'
-        + '否则引用会静默指向另一条约束，agent 照着看却读到别的内容。');
+// 只校验 ID 存在性，不校验语义贴切——语义得人读，存在性是机械的。
+{
+  const planDocs = [
+    ...(planHard === null ? [] : [[PLAN_HARD, planHard]]),
+    ...(planMech === null ? [] : [[PLAN_MECH, planMech]])
+  ];
+  if (planDocs.length > 0) {
+    // 定义方是 `## T-XN 标题` 形态的标题行；引用方是正文里任何裸 T-XN。
+    const defined = new Set();
+    for (const [, content] of planDocs) {
+      for (const match of content.matchAll(/^## (T-[HM]\d+)\b/gm)) defined.add(match[1]);
+    }
+    if (defined.size === 0) {
+      add('error', 'PLAN_TASK_IDS_UNPARSEABLE', planDocs.map(([path]) => path).join('、'),
+        '未能从任务清单解析出任何 `## T-XN` 形态的任务标题，任务 ID 交叉引用无从校验。'
+        + '判据失效等于没有门禁，故失败关闭而不是跳过。');
+    } else {
+      for (const [relativePath, content] of planDocs) {
+        const seen = new Set();
+        for (const match of content.matchAll(/\bT-[HM]\d+\b/g)) {
+          const cited = match[0];
+          if (seen.has(cited)) continue;
+          seen.add(cited);
+          if (defined.has(cited)) continue;
+          const line = content.slice(0, match.index).split(/\r?\n/).length;
+          add('error', 'PLAN_TASK_REF_DANGLING', `${relativePath}:${line}`,
+            `引用了不存在的任务 ${cited}（现存：${[...defined].sort().join('、')}）。`
+            + '任务做完会删除自己那一条，删除时必须同步修正别处对它的引用——'
+            + '否则引用悬空，而悬空看起来跟拼写错误一模一样。');
+        }
+      }
     }
   }
 }
@@ -340,7 +359,7 @@ const checkedRules = [
   '受管文档（交接书、执行手册、约束规格）引用的 npm run script 必须存在于 package.json',
   '受管文档引用的 node scripts/*.mjs 路径必须存在，gov 子命令必须被 CLI 接受',
   '受管文档不得包含 Oodle DLL 文件名、用户主目录路径、高置信 token 或私钥内容',
-  '约束规格里的「第 N 条」必须指向真实存在的条目（插入条目会顶掉后续编号）'
+  '任务清单里的 T-XN 引用必须指向真实存在的任务（做完删条目会让别处引用悬空）'
 ];
 
 const engineeringReviewStillRequired = [
