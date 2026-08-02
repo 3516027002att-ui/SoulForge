@@ -14,11 +14,6 @@
       "reason": "NSIS installer lifecycle、真实 Sekiro launch/terminate 与 rollback-restart smoke"
     },
     {
-      "sliceId": "W-REL-F-SCALE-02",
-      "targetRelease": "V0.5",
-      "reason": "真实文档完整有界访问与 Electron functional smoke"
-    },
-    {
       "sliceId": "W-BEHAVIOR-MAP-01",
       "targetRelease": "V0.5",
       "reason": "script 容器 magic/reference inventory smoke（行内已标注 `validation-unfrozen`，此处补齐清单登记）"
