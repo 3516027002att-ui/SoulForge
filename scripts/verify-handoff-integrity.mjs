@@ -205,6 +205,50 @@ for (const [relativePath, content] of [[HANDOFF, handoff], [PLAYBOOK, playbook]]
   }
 }
 
+// entryPoints 里形如路径的条目必须能真正打开。
+//
+// entryPoints 刻意允许叙述性条目（「Bridge EMEVD/MSB writer」「本文 §4~§12」），
+// 那不是缺陷——投影时由 decorate() 区分渲染。真正的问题是**看起来像路径但打不开**：
+// 实测 W-BEHAVIOR-MAP-01 的 entryPoints 里有
+// `bridge/SoulForge.Bridge/TaeNativeDocument.cs（延期）`，文件确实存在，但字符串把
+// 状态标注拼进了路径。agent 拿 gov next 的 entryPoints 直接去打开就会失败，而失败
+// 原因（多了个后缀）跟「文件不存在」长得一模一样，只能靠人工比对才看得出来。
+//
+// 判据分两档：含 `/` 且带已知代码扩展名的，按路径严格校验；裸文件名（数据里有 4 条，
+// 如 `webgpuDetect.ts`）只要求能在仓库中唯一定位——那种写法是可搜索的，不构成阻塞。
+{
+  const slicesRaw = readOrNull('docs/governance/slices.json');
+  if (slicesRaw !== null) {
+    let slices = null;
+    try {
+      slices = JSON.parse(slicesRaw).slices ?? [];
+    } catch (error) {
+      add('error', 'SLICES_UNPARSEABLE', 'docs/governance/slices.json',
+        `无法解析切片数据：${error.message}`);
+    }
+    const codeExt = /\.(ts|tsx|mjs|js|cs|json|md|csproj)$/;
+    for (const slice of slices ?? []) {
+      for (const entry of slice.entryPoints ?? []) {
+        const value = String(entry);
+        if (existsSync(join(root, value))) continue;
+        // 形态判定必须在剥离尾部标注之后做。第一版只对原串测扩展名，而
+        // `...TaeNativeDocument.cs（延期）` 的扩展名不在串尾，正则的行尾锚点不匹配，
+        // 于是这条被当成叙述性入口放过——门禁写了却抓不到它本来要抓的那两条。
+        const stripped = value.replace(/[（(][^）)]*[）)]\s*$/, '').trim();
+        // 只对「含目录分隔符 + 代码扩展名」的形态严格判定；裸文件名与叙述性入口跳过。
+        if (!value.includes('/') || !(codeExt.test(value) || codeExt.test(stripped))) continue;
+        // 给出可执行的修法：若去掉尾部标注后存在，就点名该标注。
+        const hint = stripped !== value && existsSync(join(root, stripped))
+          ? `路径本体 ${stripped} 存在，是尾部标注被拼进了 entryPoints。状态标注应放在 goal 或 authorityCapNote，entryPoints 只放可直接打开的路径。`
+          : '该路径在仓库中不存在。若入口是叙述性的（如「Bridge EMEVD/MSB writer」），不要写成路径形态。';
+        add('error', 'SLICE_ENTRYPOINT_UNOPENABLE',
+          `docs/governance/slices.json ${slice.sliceId}`,
+          `entryPoints 条目形如路径但打不开：${value}。${hint}`);
+      }
+    }
+  }
+}
+
 // 交接书开头必须先把 agent 送进 CLI，而不是送进 431 KB 的全文。
 //
 // 这条不是文风偏好，是实测的上手成本：`gov next` + `gov help` 合计 8896 B 就
@@ -234,6 +278,7 @@ if (handoff !== null) {
 }
 
 const checkedRules = [
+  '切片 entryPoints 里形如路径的条目必须能真正打开（状态标注不得拼进路径）',
   '交接书开头必须以 gov CLI 为首选入口，且不得声明自身为唯一事实源',
   'README、交接书和执行手册的本地 Markdown 链接必须存在',
   'README 必须直链唯一 handoff，且不依赖本机代理规则文件',
