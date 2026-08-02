@@ -58,6 +58,13 @@
 **验收:** 若做成 `gov status` 字段,负例是造一个未提交改动后确认计数变化;
 若做成手册条目,验收是该条目被 `verify-handoff-integrity` 的受管文档扫描覆盖。
 
+**动手前先读 `cmdStatus` 已有的实现与注释。** 2026-08-02 在它身上修过一处假绿:
+调用不带参数的 `runGovernanceCheck()`,`withFreshness` 默认 false,于是跳过
+`GATE_EVIDENCE_STALE` 判定——同一状态下治理层报三条红而 status 报
+`governanceGateOk: true`、顶层 `ok: true`、退出码 0。修法与三条 fixture 断言都在
+`scripts/verify-gov-cli-fixtures.mjs` 里。往这个命令加字段时留意同一个坑的形状:
+**面板字段的默认值不能比它所报告的事实更乐观**。
+
 ---
 
 ## T-M3 `.gitattributes` 行尾策略
