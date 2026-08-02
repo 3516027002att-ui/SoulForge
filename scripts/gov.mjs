@@ -517,6 +517,19 @@ function cmdSeal(args) {
     return;
   }
 
+  // 挂到哪些 Gate 上。freshness 只判定 gates.json 里该 Gate 引用的 evidenceRefs：
+  // 一条没被任何 Gate 引用的新证据根本不参与判定，追加它不会消除任何 stale。
+  // 实测：不带本参数重封存 REL-SCOPE，三处 stale 全部原样保留。
+  const gateRefs = typeof args.gates === 'string'
+    ? args.gates.split(',').map((value) => value.trim()).filter(Boolean)
+    : [];
+  for (const gateId of gateRefs) {
+    if (!/^[A-Z0-9-]+$/.test(gateId)) {
+      fail('SEAL_GATE_ID_INVALID', `--gates 中的 ${gateId} 不是合法 Gate ID。`);
+      return;
+    }
+  }
+
   const lock = acquireGovernanceLock(root, typeof args.owner === 'string' ? args.owner : 'seal');
   if (!lock.ok) {
     fail(lock.code, lock.message, { holder: lock.holder });
@@ -555,15 +568,39 @@ function cmdSeal(args) {
     const appended = `${JSON.stringify(record)}\n`;
     appendFileSync(evidencePath, appended, 'utf8');
 
+    const gatesPath = join(root, GATES);
+    const gatesBefore = readFileSync(gatesPath, 'utf8');
+    const attachedTo = [];
+    if (gateRefs.length > 0) {
+      const gatesDoc = JSON.parse(gatesBefore);
+      for (const gateId of gateRefs) {
+        const gate = gatesDoc.gates.find((entry) => entry.gateId === gateId);
+        if (gate === undefined) {
+          writeFileSync(evidencePath, existing, 'utf8');
+          fail('SEAL_GATE_UNDEFINED', `gates.json 中没有 ${gateId}；已回滚本条封存记录。`);
+          return;
+        }
+        // 只追加引用，不删旧引用：历史证据是审计链，重封存不覆盖它。
+        if (!gate.evidenceRefs.includes(evidenceId)) {
+          gate.evidenceRefs.push(evidenceId);
+          attachedTo.push(gateId);
+        }
+      }
+      writeJson(GATES, gatesDoc);
+    }
+
     // 追加后必须过完整门禁（含 freshness）。封存的目的就是让 stale 恢复 fresh；
     // 若追加后仍红，说明这次封存没有解决问题，留着它只会掩盖真实状态。
     const after = runGovernanceCheck({ withFreshness: true });
     if (!after.ok) {
       writeFileSync(evidencePath, existing, 'utf8');
-      fail('SEAL_POSTCHECK_FAILED', '追加后治理门禁仍失败，已回滚本条封存记录。', {
-        rolledBack: EVIDENCE,
+      writeFileSync(gatesPath, gatesBefore, 'utf8');
+      fail('SEAL_POSTCHECK_FAILED', '追加后治理门禁仍失败，已回滚本条封存记录与 Gate 引用。', {
+        rolledBack: [EVIDENCE, ...(gateRefs.length > 0 ? [GATES] : [])],
         errors: after.errors.slice(0, 10),
-        hint: 'stale 未消除通常意味着：主题域改动尚未提交（指纹锚点是 HEAD，未提交改动会算进 trackedDiffSha256 但不进 HEAD），或本条 subject 缺少继承标记（如 revalidates=<既有EvidenceId>）。'
+        hint: gateRefs.length === 0
+          ? 'stale 未消除且未指定 --gates：freshness 只判定 gates.json 里该 Gate 引用的 evidenceRefs，没被引用的新证据不参与判定。用 --gates REL-SCOPE,REL-E 把本条挂上去。'
+          : '主题域改动是否已提交？指纹锚点是 HEAD，未提交的主题域改动会算进 trackedDiffSha256 但不进 HEAD，锚点之后仍显示有变化。'
       });
       return;
     }
@@ -572,11 +609,12 @@ function cmdSeal(args) {
       mode: 'seal',
       evidenceId,
       targetRelease,
+      attachedToGates: attachedTo,
       fingerprint: fingerprint.fields,
       fingerprintSha256: fingerprint.fingerprintSha256,
       untrackedCount: fingerprint.untrackedCount,
       governanceGate: 'passed',
-      note: '本命令只搬运调用方陈述的运行事实与一个自洽指纹；它不验证命令真的跑过，也不提升任何 authority。'
+      note: '本命令只搬运调用方陈述的运行事实与一个自洽指纹；它不验证命令真的跑过，也不提升任何 authority，也不改动 gateState。'
     });
   } finally {
     lock.release();
@@ -625,12 +663,13 @@ if (!command || command === '--help' || command === 'help') {
       'gov heartbeat --slice W-X [--owner me]': '刷新心跳，证明仍在推进',
       'gov release --slice W-X [--owner me] [--force]': '释放 claim 并退回 ready',
       'gov complete --slice W-X [--owner me] [--force]': '标为 completed（不提升 authority、不写 Evidence）',
-      'gov seal --id EV-X --subject 声明 --commands 命令与退出码 --result 结论 --non-claims 不声明项 [--release V0.5]':
-        '追加 sealed-current-run Evidence：自动算五字段指纹，追加后跑含 freshness 的完整门禁，失败即回滚'
+      'gov seal --id EV-X --subject 声明 --commands 命令与退出码 --result 结论 --non-claims 不声明项 [--gates REL-SCOPE,REL-E] [--release V0.5]':
+        '追加 sealed-current-run Evidence：自动算五字段指纹，按需挂到 Gate 的 evidenceRefs，追加后跑含 freshness 的完整门禁，失败即回滚'
     },
-    sealWhenToUse: '改了任何 Gate 主题域文件（治理校验器、范围 JSON、验证脚本）后该 Gate 的封存证据会变 stale；'
-      + '先把主题域改动提交（指纹锚点是 HEAD），再用 gov seal 重封存。'
-      + 'subject 里带 revalidates=<既有EvidenceId> 可继承既有用户批准标记，工程侧重验证不需要用户再授权。',
+    sealWhenToUse: '改了任何 Gate 主题域文件（治理校验器、治理 schema、范围 JSON、验证脚本）后该 Gate 的封存证据会变 stale。步骤：'
+      + '(1) 先把主题域改动提交——指纹锚点是 HEAD，未提交的改动会算进 trackedDiffSha256 但不进 HEAD；'
+      + '(2) gov seal 时用 --gates 指定要恢复的 Gate——freshness 只判定该 Gate 引用的 evidenceRefs，没被引用的新证据不参与判定；'
+      + '(3) subject 里带 revalidates=<既有EvidenceId> 继承既有用户批准标记，工程侧重验证不需要用户再授权。',
     concurrency: '所有写命令在系统临时目录的文件锁下串行执行；锁不写入仓库与 Mod 工作区。',
     note: 'claim/complete 只改执行面板状态。authority 与 Evidence 必须由真实运行的验证支撑。'
   });
