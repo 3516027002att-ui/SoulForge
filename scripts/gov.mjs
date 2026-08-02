@@ -533,6 +533,79 @@ function cmdComplete(args) {
 }
 
 /**
+ * 从目标 Gate 已引用的证据里算出必须继承的用户批准标记，报出 subject 里缺的那些。
+ *
+ * 判据是「目标 Gate 现有证据声明过的标记」而不是一份硬编码清单：标记形态由治理
+ * 规则决定（scope-ruling:user-approved、scope-deferral:<Gate>:<Release>:user-approved），
+ * 硬编码会在规则演进时静默失效，而这里只要 Gate 上还挂着旧证据就一直准确。
+ *
+ * 只报缺失、不自动补：标记的语义是「用户批准过」，CLI 替调用方声明它就等于
+ * 绕过裁定。补齐动作必须由调用方显式做出。
+ */
+function collectMissingInheritedMarkers(repoRoot, gateRefs, subject) {
+  if (gateRefs.length === 0) return { ok: true, missing: [] };
+
+  let gatesDoc;
+  let evidenceLines;
+  try {
+    gatesDoc = JSON.parse(readFileSync(join(repoRoot, GATES), 'utf8'));
+    evidenceLines = readFileSync(join(repoRoot, EVIDENCE), 'utf8').split('\n');
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'SEAL_MARKER_PRECHECK_FAILED',
+      message: `无法读取治理数据以核对继承标记：${error.message}`
+    };
+  }
+
+  const subjectById = new Map();
+  for (const line of evidenceLines) {
+    if (line.trim().length === 0) continue;
+    try {
+      const record = JSON.parse(line);
+      subjectById.set(record.evidenceId, String(record.subject ?? ''));
+    } catch {
+      // 单行损坏不在本检查的职责内：追加后的完整门禁会判它，这里跳过即可。
+      continue;
+    }
+  }
+
+  // 标记形态：冒号分段、以 user-approved 结尾。用它扫已有 subject 而不是枚举
+  // 具体标记名，新增标记种类无需改这里。
+  const markerPattern = /\b[a-z-]+(?::[A-Za-z0-9.-]+)*:user-approved\b/g;
+  const required = new Map();
+  for (const gateId of gateRefs) {
+    const gate = gatesDoc.gates.find((entry) => entry.gateId === gateId);
+    if (gate === undefined) continue; // 未定义 Gate 由后面的 SEAL_GATE_UNDEFINED 报。
+    for (const evidenceId of gate.evidenceRefs ?? []) {
+      const existing = subjectById.get(evidenceId);
+      if (existing === undefined) continue;
+      for (const marker of existing.match(markerPattern) ?? []) {
+        if (!required.has(marker)) required.set(marker, { marker, gateId, evidenceId });
+      }
+    }
+  }
+
+  const missing = [...required.values()].filter((entry) => !subject.includes(entry.marker));
+  if (missing.length === 0) return { ok: true, missing: [] };
+
+  return {
+    ok: false,
+    code: 'SEAL_INHERITED_MARKER_MISSING',
+    message: `--subject 缺少目标 Gate 已声明的用户批准标记：${missing.map((entry) => entry.marker).join('、')}。`
+      + ' 缺标记时 freshness 判定筛不出可继承证据，会报成 GATE_EVIDENCE_STALE（指向错误原因）。'
+      + ' 工程侧重验证请把这些标记原样写进 subject；若本轮确实改变了范围语义，需要新的用户裁定而不是继承。',
+    extra: {
+      missingMarkers: missing.map((entry) => ({
+        marker: entry.marker,
+        requiredByGate: entry.gateId,
+        seenInEvidence: entry.evidenceId
+      }))
+    }
+  };
+}
+
+/**
  * 追加一条 sealed-current-run Evidence，并证明追加后门禁通过。
  *
  * 存在的理由：改了任何 Gate 主题域文件（治理校验器、范围 JSON、验证脚本）之后，
@@ -583,6 +656,24 @@ function cmdSeal(args) {
       fail('SEAL_GATE_ID_INVALID', `--gates 中的 ${gateId} 不是合法 Gate ID。`);
       return;
     }
+  }
+
+  // subject 必须带齐目标 Gate 现有证据已声明的用户批准标记，否则 freshness
+  // 判定找不到可继承的证据。
+  //
+  // 这一步是本轮实测的产物：照 sealWhenToUse 写的三步做，重封存 REL-SCOPE/
+  // REL-E/REL-I 仍然失败，因为 subject 里少了 scope-ruling:user-approved 与两条
+  // scope-deferral:<Gate>:V0.6:user-approved——而门禁按标记筛选参与 freshness 的
+  // 证据（handoff-integrity-lib.mjs 的 evidenceHasClaim 分支），筛完为空就报
+  // GATE_EVIDENCE_STALE。那个诊断指向「主题域变了」，真实原因是「标记漏了」，
+  // agent 会照着错误方向反复重跑验证。
+  //
+  // 修法不是在 help 散文里补一句：散文会和门禁分叉，且分叉无人发现。这里从
+  // 目标 Gate 已引用的证据里把标记算出来，缺哪个报哪个。
+  const missingMarkers = collectMissingInheritedMarkers(root, gateRefs, values.subject);
+  if (missingMarkers.ok === false) {
+    fail(missingMarkers.code, missingMarkers.message, missingMarkers.extra ?? {});
+    return;
   }
 
   const lock = acquireGovernanceLock(root, typeof args.owner === 'string' ? args.owner : 'seal');
@@ -746,7 +837,9 @@ if (!command || command === '--help' || command === 'help') {
     sealWhenToUse: '改了任何 Gate 主题域文件（治理校验器、治理 schema、范围 JSON、验证脚本）后该 Gate 的封存证据会变 stale。步骤：'
       + '(1) 先把主题域改动提交——指纹锚点是 HEAD，未提交的改动会算进 trackedDiffSha256 但不进 HEAD；'
       + '(2) gov seal 时用 --gates 指定要恢复的 Gate——freshness 只判定该 Gate 引用的 evidenceRefs，没被引用的新证据不参与判定；'
-      + '(3) subject 里带 revalidates=<既有EvidenceId> 继承既有用户批准标记，工程侧重验证不需要用户再授权。',
+      + '(3) subject 里带 revalidates=<既有EvidenceId> 继承既有用户批准标记，工程侧重验证不需要用户再授权；'
+      + '(4) subject 还必须原样带齐目标 Gate 现有证据声明过的 user-approved 标记（如 scope-ruling:user-approved、scope-deferral:<Gate>:<Release>:user-approved）。漏标记时 freshness 筛不出可继承证据，报错会是 GATE_EVIDENCE_STALE（指向错误原因）；本命令已在追加前预检并指名缺哪个。',
+    sealRequiredArgs: '--id、--subject、--commands、--result、--non-claims 全部必填，缺任一项在追加前失败（SEAL_ID_INVALID / SEAL_FIELD_REQUIRED）。要恢复 Gate 还需 --gates。',
     concurrency: '所有写命令在系统临时目录的文件锁下串行执行；锁不写入仓库与 Mod 工作区。',
     note: 'claim/complete 只改执行面板状态。authority 与 Evidence 必须由真实运行的验证支撑。'
   });

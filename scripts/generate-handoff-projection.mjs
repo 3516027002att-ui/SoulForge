@@ -368,6 +368,15 @@ function replaceBlock(markdown, name, body) {
   };
 }
 
+/** 统计 CRLF 与裸 LF，用于判定文件的主导行尾。 */
+function countCrlf(text) {
+  return (text.match(/\r\n/g) ?? []).length;
+}
+
+function countBareLf(text) {
+  return (text.match(/(?<!\r)\n/g) ?? []).length;
+}
+
 /**
  * 纯函数：给定工作树根，算出投影后的交接书内容。不写文件。
  * 返回 findings 而不是抛异常——标记缺失是治理数据问题，要能进门禁报告。
@@ -375,7 +384,20 @@ function replaceBlock(markdown, name, body) {
 export function projectHandoff(root) {
   const sources = loadProjectionSources(root);
   const blocks = BLOCKS(sources);
-  const original = readFileSync(join(root, HANDOFF), 'utf8');
+  const rawOriginal = readFileSync(join(root, HANDOFF), 'utf8');
+
+  // 行尾必须归一化后再比对，且写回时沿用原文件的主导行尾。
+  //
+  // 实测的 agent 阻塞：本仓库 core.autocrlf=true，checkout 会把交接书整篇转成
+  // CRLF，而各区块是用 '\n'.join 生成的。于是 next !== original 恒成立，--check
+  // 每次 checkout 后必红，诊断说「运行重新生成」；但重新生成后 git diff 输出 0 行
+  // （autocrlf 在索引侧又归一化回去了）。agent 看到的是「门禁红 + diff 空」，
+  // 照诊断重跑生成也不解决，只能反复空转。
+  //
+  // 归一化只用于判定与生成；写回时按原文件的主导行尾还原，避免投影命令把
+  // 整篇文件的行尾改掉，制造一个 3860 行的伪 diff 淹没真实改动。
+  const dominantEol = countCrlf(rawOriginal) > countBareLf(rawOriginal) ? '\r\n' : '\n';
+  const original = rawOriginal.replaceAll('\r\n', '\n');
   let next = original;
   const findings = [];
 
@@ -390,7 +412,7 @@ export function projectHandoff(root) {
 
   return {
     original,
-    projected: next,
+    projected: dominantEol === '\r\n' ? next.replaceAll('\n', '\r\n') : next,
     drifted: next !== original,
     findings,
     blocks: Object.keys(blocks),
