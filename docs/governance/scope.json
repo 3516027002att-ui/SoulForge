@@ -528,10 +528,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "C-MSB",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "实体类型注册表覆盖 Sekiro MSB 全部实体类型；未注册类型必须继续按 edit-unregistered-entity 拒绝，不得靠默认分支放行",
+        "场景截断必须先解除：当前 preview 是截断的，未经完整场景验证不得声称 CRUD 与引用修复可用",
+        "写路径依赖 KRAK in-BND4 组合与重读回放；set_part_transform 已验证过的写路径必须在完整实体覆盖下重跑"
       ]
     },
     {
@@ -563,10 +563,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "D-BEHAVIOR",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "HKX 语义 authority 必须由真实 Sekiro corpus 建立，不得借用其他 FromSoftware 游戏的格式结论",
+        "跨资源引用清单要能双向解析（行为图 ↔ 动画 ↔ TAE ↔ ESD），单向命中不构成引用完整性",
+        "脚本执行面必须保持沙箱：execute-untrusted-script 是永久禁令，不随版本解除"
       ]
     },
     {
@@ -600,10 +600,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "D-BEHAVIOR",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "TAE 布局、事件类型、时间轴与参数需逐字段建立 layout authority；未知事件不得重编码（unknown-event-reencode 永久禁令）",
+        "动画引用必须与 SCOPE-BEHAVIOR-ANIMATION 的引用清单对齐，否则 TAE 写入会产生悬空引用",
+        "TAE 写能力开放前需要事件参数与时间轴的未知字段无损往返证据；raw-hex-write 永久禁止"
       ]
     },
     {
@@ -637,10 +637,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "D-BEHAVIOR",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "ESD 状态机、条件表达式、命令与跳转关系需完整解析；未知表达式或命令不得重编码（永久禁令）",
+        "跳转关系要能构成闭合图并检出悬空目标，否则写入会破坏状态机可达性",
+        "ESD 写能力开放前需要条件表达式与命令块的未知字段无损往返证据；raw-hex-write 永久禁止"
       ]
     },
     {
@@ -716,10 +716,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "E-ASSET",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "五类资产（FLVER/TPF/MTD/collision/navigation）各自的只读 authority 必须分别成立；聚合条目不能靠其中一类的结论代表全部",
+        "native-to-open 导出矩阵只做单向导出；open-format-to-native-import 是永久禁令",
+        "任何 native writer 在缺少 validator 时不得开放（unvalidated-native-writer 永久禁令）"
       ]
     },
     {
@@ -754,10 +754,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "E-ASSET",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "geometry、skeleton、weights、material 引用需逐布局建立 authority，覆盖 Sekiro 实际出现的全部 FLVER 版本",
+        "只读 native document 必须能往返比对原字节；proxy geometry 不能充当 FLVER authority",
+        "flver-write 与 open-format-to-flver 是永久禁令，恢复的是只读能力而不是写能力"
       ]
     },
     {
@@ -790,10 +790,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "E-ASSET",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "纹理格式与 metadata 必须从 TPF 实际字节读出，禁止推断（infer-texture-metadata 永久禁令）",
+        "native texture 引用要能与 MTD 的 texture slot 对齐",
+        "最小 DDS 样本不构成 TPF authority；tpf-write 与 open-format-to-tpf 永久禁止"
       ]
     },
     {
@@ -826,10 +826,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "E-ASSET",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "MTD schema 必须从真实字节建立，禁止推断（infer-mtd-schema 永久禁令）",
+        "texture slot 需与 SCOPE-ASSET-TPF 的 native texture 引用双向对齐",
+        "mtd-write 与 open-format-to-mtd 永久禁止；proxy material 不能充当 native"
       ]
     },
     {
@@ -861,10 +861,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "E-ASSET",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "碰撞格式必须先在真实 Sekiro corpus 中确认，禁止假定（assume-collision-format 永久禁令）",
+        "层级与地图关联需与 MSB 侧实体对齐，否则碰撞读取无法定位到场景",
+        "collision-write 永久禁止；proxy mesh 不能充当碰撞数据"
       ]
     },
     {
@@ -896,10 +896,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "E-ASSET",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "导航格式必须先在真实 Sekiro corpus 中确认，禁止假定（assume-navigation-format 永久禁令）",
+        "连接关系需构成可校验图并与地图引用对齐",
+        "navigation-write 永久禁止；proxy graph 不能充当导航数据"
       ]
     },
     {
@@ -932,10 +932,10 @@
       "targetRelease": "V0.5",
       "deferredTrack": "E-ASSET",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "导出矩阵依赖 SCOPE-ASSET-FLVER / TPF / MTD 三条的只读 authority 先成立，否则导出的是未经证实的解读",
+        "导出必须只写开放格式（glTF/GLB/PNG/TGA/DDS/描述清单），不得回写或替换 native 输出（永久禁令）",
+        "raw-file-replace 不构成转换；open-format-to-native-import 永久禁止"
       ]
     },
     {
@@ -1182,10 +1182,11 @@
       "targetRelease": "V0.5",
       "deferredTrack": "I-RENDER",
       "resumeRequires": [
-        "取得用户裁定，把 proposedSupport 从 deferred 改回 supported 并写回真实 operations",
-        "同步 gates.json 与 slices.json 脱离 deferred，其 required validation 重新进入未冻结清单",
-        "需要写能力时先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 releaseWriteEnabled",
-        "重新封存 Evidence：延期期间保留的“曾经验证过”记录不能直接当作恢复后的验证证据，必须重跑"
+        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
+        "semantic scene 必须保持 renderer-independent：THREE.Object3D、其他 renderer object 与 React 状态永远不能成为权威场景文档（永久禁令）",
+        "WebGPU 主后端与 WebGL2 自动回退需在真实硬件上分别验证；representative-hardware-tier 验收不成立（永久禁令）",
+        "性能预算必须来自真实资源基准，synthetic 预算不能当 release 阈值；预算成立后才可作为 Gate 判据",
+        "场景数据依赖 SCOPE-MSB 的完整实体覆盖，截断场景不能证明渲染能力"
       ]
     },
     {

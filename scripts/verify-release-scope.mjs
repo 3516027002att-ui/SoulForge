@@ -180,6 +180,60 @@ function checkPrivateRegistryFields(value, where = 'proposal') {
   }
 }
 
+/**
+ * deferred 条目的 resumeRequires 必须写本条专属的承接前置，不能是策略复制。
+ *
+ * 实测踩过：12 条 deferredToRelease=V0.6 的 resumeRequires 曾是逐字相同的四行
+ * 通用策略——而策略正文本就在 scopeDeferralPolicy 里且已冻结。那份复制不承载
+ * 任何条目专属信息，接手 V0.6 的 agent 从中读不到「这一条到底还差什么」，
+ * 而且没有任何门禁能看见它退化（当时 resumeRequires 未被任何脚本读取）。
+ *
+ * 判据是「与其他 deferred 条目逐字重合」而不是「长度」或「包含某些关键词」：
+ * 前者能精确抓住复制这一种退化，后者会把正当的共同前置也判成错。
+ * 第一条刻意允许重合——它就是对 scopeDeferralPolicy 的显式引用，让通用流程
+ * 只有一份权威；从第二条起必须条目独有。
+ */
+function checkResumeRequires(item, where, textsByEntry) {
+  const list = item.resumeRequires;
+  if (!isStringArray(list, { nonEmpty: true })) {
+    add(
+      'RESUME_REQUIRES_INVALID',
+      `${where}.resumeRequires`,
+      'deferred 条目必须声明 resumeRequires（非空字符串数组）：延期不等于放弃，承接前置必须留痕。'
+    );
+    return;
+  }
+  if (list.length < 2) {
+    add(
+      'RESUME_REQUIRES_POLICY_ONLY',
+      `${where}.resumeRequires`,
+      'resumeRequires 只有通用策略引用，缺少本条专属承接前置；'
+        + '通用流程在 scopeDeferralPolicy 里已有一份权威，这里要写的是「这一条还差什么」。'
+    );
+    return;
+  }
+  // 首条之后的每一条都必须条目独有。记录归属，末尾统一比对。
+  for (const text of list.slice(1)) {
+    const key = text.trim();
+    if (!textsByEntry.has(key)) textsByEntry.set(key, []);
+    textsByEntry.get(key).push({ id: item.scopeItemId, where });
+  }
+}
+
+/** resumeRequires 跨条目重复的统一裁定。必须在遍历完全部条目后调用。 */
+function reportResumeRequiresDuplicates(textsByEntry) {
+  for (const [text, owners] of textsByEntry) {
+    if (owners.length < 2) continue;
+    add(
+      'RESUME_REQUIRES_DUPLICATED',
+      `${owners[0].where}.resumeRequires`,
+      `承接前置在 ${owners.length} 个 deferred 条目间逐字重复：「${text.slice(0, 60)}」`
+        + `（${owners.map((owner) => owner.id).join('、')}）。`
+        + '共同流程只能通过首条策略引用表达；专属条目重复即说明它其实不专属。'
+    );
+  }
+}
+
 if (unknownArgs.length > 0) {
   add('UNKNOWN_ARGUMENT', 'argv', `未知参数：${unknownArgs.join(', ')}`);
 }
@@ -211,7 +265,13 @@ if (beginCount === 1 && endCount === 1) {
   if (block === null) {
     add('PROPOSAL_BLOCK_ORDER_INVALID', handoffWhere, 'scope proposal marker 顺序非法。');
   } else {
-    const fenced = block.match(/^\s*```json\s*\r?\n([\s\S]*?)\r?\n```\s*$/);
+    // 提案块内侧允许包一层投影标记。该块本身是 scope.json + gates.json 的投影
+    // （原先是 1242 行手写内嵌 JSON，与 scope.json 实测 27/27 条分叉，因为本门禁
+    // 只解析这里、从不读 scope.json）。标记只是生成边界，不参与提案语义，
+    // 所以在取 fenced block 之前剥掉；剥不掉时不静默继续，让 fence 检查照常失败。
+    const stripped = block
+      .replace(/<!--\s*SOULFORGE_PROJECTION_(?:BEGIN|END):scope-proposal\s*-->/g, '');
+    const fenced = stripped.match(/^\s*```json\s*\r?\n([\s\S]*?)\r?\n```\s*$/);
     if (!fenced) {
       add('PROPOSAL_JSON_FENCE_INVALID', handoffWhere, 'scope proposal block 必须只包含一个 json fenced block。');
     } else {
@@ -251,11 +311,31 @@ for (const gateId of gateIds) {
 }
 
 if (proposal !== null) {
-  if (proposal.schemaVersion !== '1.6.0') {
-    add('SCHEMA_VERSION_INVALID', 'proposal.schemaVersion', 'schemaVersion 必须为 1.6.0。');
+  // schemaVersion 与 proposalId 都以 scope.json 为准，不写字面量。
+  //
+  // 提案块此刻是 scope.json 的投影，两者天然同源；写死 '1.6.0' 只会在 JSON 侧
+  // 升版时把门禁变成阻碍——实测已经发生：scope.json 是 2.0.0，而内嵌复制停在
+  // 1.6.0，本门禁只读那份复制所以从未发现。
+  //
+  // proposalId 里的版本号同理取自 proposal.release，不硬编码 V0.5：治理必须能
+  // 跨到 V0.6，写死版本号意味着 V0.6 的范围提案永远过不了这道校验。
+  const scopeAuthority = JSON.parse(readFileSync(resolve(process.cwd(), 'docs/governance/scope.json'), 'utf8'));
+  if (proposal.schemaVersion !== scopeAuthority.schemaVersion) {
+    add(
+      'SCHEMA_VERSION_INVALID',
+      'proposal.schemaVersion',
+      `schemaVersion 必须与 docs/governance/scope.json 一致（${scopeAuthority.schemaVersion}），`
+        + `实际 ${JSON.stringify(proposal.schemaVersion)}；提案块是该文件的投影，运行 npm run handoff:project 重新生成。`
+    );
   }
-  if (!/^V0\.5-SCOPE-[0-9]{8}$/.test(proposal.proposalId ?? '')) {
-    add('PROPOSAL_ID_INVALID', 'proposal.proposalId', 'proposalId 必须匹配 V0.5-SCOPE-YYYYMMDD。');
+  const proposalIdPattern = new RegExp(`^${String(proposal.release ?? '').replace('.', '\\.')}-SCOPE-[0-9]{8}$`);
+  if (!/^V\d+\.\d+$/.test(proposal.release ?? '') || !proposalIdPattern.test(proposal.proposalId ?? '')) {
+    add(
+      'PROPOSAL_ID_INVALID',
+      'proposal.proposalId',
+      `proposalId 必须匹配 <release>-SCOPE-YYYYMMDD 且与 release 字段同版本，`
+        + `实际 release=${JSON.stringify(proposal.release)} proposalId=${JSON.stringify(proposal.proposalId)}。`
+    );
   }
   if (proposal.release !== 'V0.5') {
     add('RELEASE_INVALID', 'proposal.release', 'release 必须为 V0.5。');
@@ -356,6 +436,8 @@ if (proposal !== null) {
     const seenScopeIds = new Set();
     const coveredGates = new Set();
     const itemById = new Map();
+    // deferred 条目的专属承接前置 → 声明它的条目。跨条目重复在遍历后统一裁定。
+    const deferredResumeTexts = new Map();
 
     proposal.scopeItems.forEach((item, index) => {
       const where = `proposal.scopeItems[${index}]`;
@@ -432,11 +514,17 @@ if (proposal !== null) {
             'deferred 条目不得声明本版可用 operation；本版能力应写入 unsupportedOperations 或改为 supported。'
           );
         }
-      } else if (item.deferredToRelease !== undefined) {
+        checkResumeRequires(item, where, deferredResumeTexts);
+      } else if (item.deferredToRelease !== undefined && item.deferredToRelease !== null) {
+        // null 与「字段不存在」在这里语义相同，都表示未延期。
+        // scope.schema.json 把 deferredToRelease/deferredTrack/resumeRequires 列进
+        // required，非延期条目按 null / 空数组显式登记——原判据只排除 undefined，
+        // 会把 schema 要求的 null 误判成「非 deferred 条目声明了延期目标」。
+        // 这个分歧此前看不见：本门禁只读交接书内嵌块，而那份复制根本没有这些字段。
         add(
           'DEFERRED_RELEASE_UNEXPECTED',
           `${where}.deferredToRelease`,
-          '只有 proposedSupport=deferred 的条目才能声明 deferredToRelease。'
+          '只有 proposedSupport=deferred 的条目才能声明 deferredToRelease（未延期请写 null）。'
         );
       }
       if (!isStringArray(item.unsupportedOperations, { nonEmpty: true })) {
@@ -538,6 +626,7 @@ if (proposal !== null) {
     for (const gateId of EXPECTED_GATES) {
       if (!coveredGates.has(gateId)) add('PROPOSAL_GATE_NOT_COVERED', 'proposal.scopeItems', `提案未覆盖 Gate：${gateId}`);
     }
+    reportResumeRequiresDuplicates(deferredResumeTexts);
 
     if (proposal.proposalStatus === 'user-approved') {
       requireFrozenValue(proposal, 'paramMetadataSourcePolicy.status', 'user-approved');
@@ -577,7 +666,14 @@ if (proposal !== null) {
       requireFrozenValue(proposal, 'scopeDeferralPolicy.deferredPreviewMustBeReadOnly', true);
       requireFrozenValue(proposal, 'authoritySnapshotPolicy.field', 'authorityAtRuling');
       requireFrozenValue(proposal, 'authoritySnapshotPolicy.asOfEvidenceRef', 'EV-REL-SCOPE-20260730');
-      requireFrozenValue(proposal, 'authoritySnapshotPolicy.liveAuthoritySource', 'section-13.1');
+      // 实时 authority 的权威位置是 slices.json，不是 §13.1。§13.1 已改为
+      // slices.json 的投影，指向它等于指向渲染产物。冻结裁定要冻的是「实时
+      // authority 只有一个来源」这件事，而不是当时那个来源恰好叫什么名字。
+      //
+      // 该字段不在 releases.json 的 frozenFields 里，只被本门禁硬编码；
+      // scope.json 早已改成 slices.json 而门禁没跟上，分歧能长期存在是因为本门禁
+      // 只解析交接书内嵌块，那份复制还停在 section-13.1。
+      requireFrozenValue(proposal, 'authoritySnapshotPolicy.liveAuthoritySource', 'docs/governance/slices.json');
       requireFrozenValue(proposal, 'authoritySnapshotPolicy.nonClaimsAreRulingTimeSnapshot', true);
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-structured-ui');
       requireFrozenOperation(itemById, 'SCOPE-EDITORS', 'project-canonical-dsl');

@@ -88,7 +88,13 @@ const EDGE_SOURCES = {
   },
   gatesData: { gates: [], invariants: [] },
   blockersData: { blockers: [], invariants: [] },
-  evidenceRecords: []
+  evidenceRecords: [],
+  // scope-proposal 区块的边界源。少了它 BLOCKS(EDGE_SOURCES) 里该区块会直接
+  // TypeError（实测：Cannot read properties of undefined (reading 'schemaVersion')）
+  // ——边界循环当前只取表格区块，碰不到它，所以这一处曾是纯侥幸。
+  // 字段集刻意最小：缺字段时投影必须产出 null 而不是崩溃或悄悄省略键，
+  // 否则范围门禁读到的是一个键集不完整的提案。
+  scopeData: { schemaVersion: '0.0.0', scopeItems: [] }
 };
 
 {
@@ -111,9 +117,94 @@ const EDGE_SOURCES = {
   for (const [ci, text] of claimCells.entries()) {
     check(`edge/claim-col${ci}-not-blank`, text.length > 0, `claim 空字段应渲染为 —，实际第 ${ci} 列为空。`);
   }
+
+  // scope-proposal 在最小数据下必须仍产出结构完整、可解析的提案：
+  // 缺字段渲染成 null，而不是崩溃或悄悄省略键——范围门禁按键集判定，
+  // 少一个键它会报 FROZEN_POLICY_VALUE_INVALID 之类的错，指向的却是错的原因。
+  const edgeProposal = edgeBlocks['scope-proposal']();
+  const edgeLines = edgeProposal.split('\n');
+  check('edge/scope-proposal-fenced', edgeLines[0] === '```json' && edgeLines.at(-1) === '```',
+    '最小数据下仍必须是 json fenced block。');
+  let edgeParsed = null;
+  try {
+    edgeParsed = JSON.parse(edgeLines.slice(1, -1).join('\n'));
+  } catch (error) {
+    check('edge/scope-proposal-parses', false, `最小数据下块内 JSON 必须可解析：${error.message}`);
+  }
+  if (edgeParsed !== null) {
+    check('edge/scope-proposal-parses', true, '');
+    check('edge/scope-proposal-empty-items', JSON.stringify(edgeParsed.scopeItems) === '[]',
+      '空 scopeItems 应渲染为空数组而不是被省略。');
+    check('edge/scope-proposal-missing-becomes-null', edgeParsed.ruling === null && edgeParsed.gameBuildRange === null,
+      `缺失字段必须显式为 null，实际 ruling=${JSON.stringify(edgeParsed.ruling)} gameBuildRange=${JSON.stringify(edgeParsed.gameBuildRange)}`);
+    check('edge/scope-proposal-key-count', Object.keys(edgeParsed).length === 18,
+      `顶层键数必须恒为 18（缺数据也不省略键），实际 ${Object.keys(edgeParsed).length}`);
+  }
+}
+
+/**
+ * 非表格投影区。契约与表格完全不同，走独立断言而不是塞进表格循环。
+ * 混在一起会让「第二行必须是表格分隔行」这类断言对 JSON 块报假失败，
+ * 而放宽那条断言又会让真正的表格退化溜过去。
+ */
+const NON_TABLE_BLOCKS = new Set(['scope-proposal']);
+
+{
+  // §18.2.1 范围提案块。它是 scope.json + gates.json 的投影，
+  // 而 verify-release-scope.mjs 直接解析这段 markdown——渲染形状本身承担门禁职责：
+  // fence 少一层、字段顺序变了、JSON 不可解析，范围门禁就读不到权威数据。
+  const body = blocks['scope-proposal']();
+  const lines = body.split('\n');
+  check('scope-proposal/json-fence', lines[0] === '```json' && lines.at(-1) === '```',
+    `必须是单一 json fenced block，实际首行 ${JSON.stringify(lines[0])} 末行 ${JSON.stringify(lines.at(-1))}`);
+  check('scope-proposal/single-fence', body.split('```').length === 3,
+    '只能出现一对 fence——verify-release-scope.mjs 的 fence 正则要求块内唯一。');
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(lines.slice(1, -1).join('\n'));
+  } catch (error) {
+    check('scope-proposal/parses', false, `块内 JSON 必须可解析：${error.message}`);
+  }
+  if (parsed !== null) {
+    check('scope-proposal/parses', true, '');
+    // 与权威 JSON 逐条目比对。这是本轮引入投影的直接理由：改成投影之前
+    // 27 条 scopeItem 全部缺 targetRelease/deferredTrack/resumeRequires，
+    // deferredToRelease 缺 15 处，而范围门禁只读这份复制所以判不出分叉。
+    check('scope-proposal/schema-version-follows-authority',
+      parsed.schemaVersion === sources.scopeData.schemaVersion,
+      `schemaVersion 必须等于 scope.json 的 ${sources.scopeData.schemaVersion}，实际 ${JSON.stringify(parsed.schemaVersion)}`);
+    check('scope-proposal/items-verbatim',
+      JSON.stringify(parsed.scopeItems) === JSON.stringify(sources.scopeData.scopeItems),
+      'scopeItems 必须与 scope.json 逐字节相同——投影不得裁剪字段。');
+    check('scope-proposal/gate-coverage-count',
+      parsed.gateCoverage.length === sources.gatesData.gates.length,
+      `gateCoverage 条数必须等于 gates.json 的 ${sources.gatesData.gates.length}，实际 ${parsed.gateCoverage.length}`);
+    check('scope-proposal/gate-coverage-derived',
+      parsed.gateCoverage.every((entry, i) => {
+        const gate = sources.gatesData.gates[i];
+        return entry.gateId === gate.gateId
+          && entry.currentState === gate.gateState
+          && JSON.stringify(entry.scopeItemIds) === JSON.stringify(gate.scopeItemIds)
+          && JSON.stringify(entry.blockerRefs) === JSON.stringify(gate.blockerRefs)
+          && JSON.stringify(entry.openRulings) === JSON.stringify(gate.openRulings);
+      }),
+      'gateCoverage 必须是 gates.json 的逐字段投影（currentState ← gateState）。');
+    // 不得夹带非投影字段：多一个手写字段就是重新开一处第二权威。
+    const expectedKeys = [
+      'schemaVersion', 'proposalId', 'release', 'game', 'gameBuildRange', 'ruling', 'proposalStatus',
+      'unlistedPolicy', 'corpusPolicy', 'scopeDeferralPolicy', 'authoritySnapshotPolicy',
+      'paramMetadataSourcePolicy', 'providerCredentialPolicy', 'runtimeToolPolicy',
+      'renderingAcceptancePolicy', 'quantitativeAcceptancePolicy', 'gateCoverage', 'scopeItems'
+    ];
+    check('scope-proposal/key-set-locked',
+      JSON.stringify(Object.keys(parsed)) === JSON.stringify(expectedKeys),
+      `顶层字段集与顺序被锁定，实际 ${JSON.stringify(Object.keys(parsed))}`);
+  }
 }
 
 for (const [name, build] of Object.entries(blocks)) {
+  if (NON_TABLE_BLOCKS.has(name)) continue;
   const body = build();
   const lines = body.split('\n');
 
