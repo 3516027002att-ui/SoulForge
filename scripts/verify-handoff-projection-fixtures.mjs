@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BLOCKS, loadProjectionSources, projectHandoff, beginMarker, endMarker, HANDOFF } from './generate-handoff-projection.mjs';
+import { TIER_ORDER, TIER_BY_SCRIPT, EXCLUDED } from './verify/tiers.mjs';
 
 const root = process.cwd();
 const findings = [];
@@ -147,7 +148,42 @@ const EDGE_SOURCES = {
  * 混在一起会让「第二行必须是表格分隔行」这类断言对 JSON 块报假失败，
  * 而放宽那条断言又会让真正的表格退化溜过去。
  */
-const NON_TABLE_BLOCKS = new Set(['scope-proposal']);
+const NON_TABLE_BLOCKS = new Set(['scope-proposal', 'command-index']);
+
+{
+  // §15 命令清单。原为手写分组裸命令：实测列出 38 条而 package.json 有 144 条,
+  // 106 条从未出现在交接书里，且落后不被任何门禁发现（§15 不参与指纹）。
+  // 权威是 scripts/verify/tiers.mjs——漏登记由 verify:audit 失败关闭。
+  const body = blocks['command-index']();
+  // 只取代码块内的命令。散文里也会出现 npm run（例如指路 verify:all 这个入口
+  // 本身——它是 EXCLUDED 条目，出现在说明里是对的，出现在清单里才是错的）。
+  const fencedCommands = [...body.matchAll(/~~~powershell\n([\s\S]*?)~~~/g)]
+    .map((match) => match[1])
+    .join('\n');
+  const listed = [...fencedCommands.matchAll(/npm run ([a-z0-9:_-]+)/g)].map((match) => match[1]);
+  const registered = Object.keys(TIER_BY_SCRIPT);
+  check('command-index/covers-every-registered-script',
+    registered.every((script) => listed.includes(script)),
+    `已登记层级的 script 必须全部出现，缺 ${registered.filter((s) => !listed.includes(s)).join(', ')}`);
+  check('command-index/no-unregistered-script',
+    listed.every((script) => registered.includes(script)),
+    `不得出现未登记 script，多出 ${listed.filter((s) => !registered.includes(s)).join(', ')}`);
+  check('command-index/no-duplicate', new Set(listed).size === listed.length,
+    '同一命令不得重复列出——一条 script 只属一个层级。');
+  // 层级顺序即执行顺序，乱序会误导 agent 先跑慢层。
+  const tierHeadings = [...body.matchAll(/\*\*([a-z]+)\*\*（\d+ 条）/g)].map((match) => match[1]);
+  check('command-index/tier-order-preserved',
+    JSON.stringify(tierHeadings) === JSON.stringify(TIER_ORDER.filter((tier) => tierHeadings.includes(tier))),
+    `层级必须按 TIER_ORDER 排列，实际 ${JSON.stringify(tierHeadings)}`);
+  // 排除项必须逐条带理由。只列名字等于「无人解释为什么不跑」。
+  const excludedEntries = Object.entries(EXCLUDED);
+  check('command-index/excluded-listed-with-reason',
+    excludedEntries.every(([script, reason]) => body.includes(`\`${script}\`：${reason}`)),
+    '每条排除项必须连同排除理由一起呈现。');
+  check('command-index/counts-match-authority',
+    body.includes(`全部 ${registered.length} 条`) && body.includes(`另有 ${excludedEntries.length} 条`),
+    `计数必须与 tiers.mjs 一致（登记 ${registered.length} / 排除 ${excludedEntries.length}）。`);
+}
 
 {
   // §18.2.1 范围提案块。它是 scope.json + gates.json 的投影，

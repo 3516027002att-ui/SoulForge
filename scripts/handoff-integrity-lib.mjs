@@ -836,6 +836,11 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     // 而 REL-SCOPE 仍显示 fresh。
     'scripts/generate-handoff-projection.mjs',
     'scripts/verify-handoff-projection-fixtures.mjs',
+    // 层级归属表：§15 命令清单已改为从它投影（原手写清单实测只列 38 条，
+    // 而 package.json 有 144 条）。它同时是「哪条验证会被跑」的唯一权威——
+    // 把一条 script 从层级表挪进 EXCLUDED 就能让它不再被调度，
+    // 漏登记这个文件就能在 REL-SCOPE 仍显示 fresh 的前提下关掉一整条验证。
+    'scripts/verify/tiers.mjs',
     'docs/governance/releases.json',
     'docs/governance/scope.json',
     // 七个 schema 全部登记，而不只是冻结裁定直接用到的 releases/scope 两个。
