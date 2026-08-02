@@ -230,6 +230,78 @@ check('cli/next-lists-ready', claimable.length > 0 && claimable.every((item) => 
     `--all 应跨版本查看（release=null），实际 ${JSON.stringify(allReleases.payload?.release)}。`);
 }
 
+// seal 的继承标记预检。
+//
+// 本轮实测：照 gov help 的 sealWhenToUse 三步做，重封存 REL-SCOPE/REL-E/REL-I
+// 仍然失败——subject 里少了 scope-ruling:user-approved 与两条
+// scope-deferral:<Gate>:V0.6:user-approved，而门禁按标记筛选参与 freshness 的证据，
+// 筛完为空就报 GATE_EVIDENCE_STALE。那个诊断指向「主题域变了」，真实原因是
+// 「标记漏了」，agent 会照错误方向反复重跑验证。预检必须在追加之前拦下，
+// 且必须指名缺哪个标记——只报「失败」等于没修。
+{
+  const gatesDoc = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/gates.json'), 'utf8'));
+  const evidenceSubjects = new Map();
+  for (const line of readFileSync(join(cliRoot, 'docs/governance/evidence.jsonl'), 'utf8').split('\n')) {
+    if (line.trim().length === 0) continue;
+    const record = JSON.parse(line);
+    evidenceSubjects.set(record.evidenceId, String(record.subject ?? ''));
+  }
+
+  // 从真实数据里找一个「其证据带 user-approved 标记」的 Gate，而不是硬编码
+  // REL-SCOPE：标记归属会随治理演进变化，硬编码会在数据变动后测不到东西却仍全绿。
+  const markerPattern = /\b[a-z-]+(?::[A-Za-z0-9.-]+)*:user-approved\b/g;
+  let probeGate = null;
+  let expectedMarkers = [];
+  for (const gate of gatesDoc.gates) {
+    const markers = new Set();
+    for (const evidenceId of gate.evidenceRefs ?? []) {
+      for (const marker of (evidenceSubjects.get(evidenceId) ?? '').match(markerPattern) ?? []) {
+        markers.add(marker);
+      }
+    }
+    if (markers.size > 0) {
+      probeGate = gate.gateId;
+      expectedMarkers = [...markers];
+      break;
+    }
+  }
+
+  check('cli/seal-marker-probe-gate-found', probeGate !== null,
+    '治理数据里必须至少有一个 Gate 的证据带 user-approved 标记，否则本组断言测不到东西却会全绿。');
+
+  if (probeGate !== null) {
+    const withoutMarkers = runGov([
+      'seal', '--gates', probeGate, '--id', 'EV-FIXTURE-NO-MARKER',
+      '--subject', 'fixture：故意不带任何继承标记',
+      '--commands', 'fixture', '--result', 'fixture', '--non-claims', 'fixture'
+    ], cliRoot);
+    check('cli/seal-missing-inherited-marker-rejected',
+      withoutMarkers.status === 1
+        && withoutMarkers.payload?.code === 'SEAL_INHERITED_MARKER_MISSING',
+      `缺继承标记必须在追加前失败，实际 ${JSON.stringify(withoutMarkers.payload)?.slice(0, 240)}`);
+
+    // 诊断必须指名缺哪个标记、由哪个 Gate 要求、在哪条证据里见过。
+    // 只报「缺标记」不给名字，agent 仍然只能猜。
+    const reported = (withoutMarkers.payload?.missingMarkers ?? []).map((entry) => entry.marker);
+    check('cli/seal-missing-marker-names-each',
+      expectedMarkers.every((marker) => reported.includes(marker)),
+      `诊断必须逐个指名缺失标记，期望包含 ${JSON.stringify(expectedMarkers)}，实际 ${JSON.stringify(reported)}`);
+    check('cli/seal-missing-marker-cites-source',
+      (withoutMarkers.payload?.missingMarkers ?? []).every((entry) =>
+        typeof entry.requiredByGate === 'string' && typeof entry.seenInEvidence === 'string'),
+      '每个缺失标记必须给出要求它的 Gate 与见过它的证据 ID，否则 agent 无从复制原文。');
+
+    // 预检不能挡住合法调用：不带 --gates 时无 Gate 可继承，必须跳过。
+    const noGates = runGov([
+      'seal', '--id', 'EV-FIXTURE-NO-GATES', '--subject', 'fixture：不挂 Gate',
+      '--commands', 'fixture', '--result', 'fixture', '--non-claims', 'fixture'
+    ], cliRoot);
+    check('cli/seal-precheck-skipped-without-gates',
+      noGates.payload?.code !== 'SEAL_INHERITED_MARKER_MISSING',
+      `不带 --gates 时不应触发继承标记预检，实际 ${JSON.stringify(noGates.payload)?.slice(0, 200)}`);
+  }
+}
+
 const targetSlice = claimable[0]?.sliceId ?? null;
 if (targetSlice) {
   const claimed = runGov(['claim', '--slice', targetSlice, '--owner', 'fixture-A'], cliRoot);
@@ -520,7 +592,8 @@ console.log(JSON.stringify({
     'seal 成功时封存基线自洽；后置校验失败时同时回滚 evidence.jsonl 与 gates.json',
     'seal 回滚 hint 指出 --gates 缺失（freshness 只判定 Gate 引用的证据）',
     'seal 成功即完成交接书投影；失败时连交接书一并回滚',
-    '--release 默认取 releases.json 的 currentRelease；未登记或形状非法的版本硬失败'
+    '--release 默认取 releases.json 的 currentRelease；未登记或形状非法的版本硬失败',
+    'seal 在追加前预检 subject 是否带齐目标 Gate 的 user-approved 继承标记，缺失时逐个指名（否则会报成指向错误原因的 GATE_EVIDENCE_STALE）'
   ],
   findings
 }, null, 2));

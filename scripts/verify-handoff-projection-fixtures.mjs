@@ -13,7 +13,8 @@
  * *_HEADERS 逐 token 对齐、单元格不得含裸换行或裸竖线、空值必须是 —、
  * 生成幂等、标记缺失必须失败关闭。这些断言与 JSON 内容无关，改数据不会误伤。
  */
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, cpSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BLOCKS, loadProjectionSources, projectHandoff, beginMarker, endMarker, HANDOFF } from './generate-handoff-projection.mjs';
 import { TIER_ORDER, TIER_BY_SCRIPT, EXCLUDED } from './verify/tiers.mjs';
@@ -357,6 +358,60 @@ const first = projectHandoff(root);
 check('projection/no-marker-findings', first.findings.length === 0, `标记检查应无 finding，实际 ${JSON.stringify(first.findings)}`);
 check('projection/idempotent', !first.drifted, '当前交接书应已是最新投影；先运行 npm run handoff:project。');
 
+// 行尾无关性。
+//
+// 实测的 agent 阻塞：本仓库 core.autocrlf=true，checkout 把交接书整篇转成 CRLF，
+// 而区块是用 '\n'.join 生成的，于是 drifted 恒为 true——--check 每次 checkout 后
+// 必红，诊断说「运行重新生成」，但重新生成后 git diff 输出 0 行（autocrlf 在索引侧
+// 又归一化回去）。agent 看到「门禁红 + diff 空」，照诊断做也不解决，只能空转。
+//
+// 判定必须行尾无关，同时真实分叉仍要抓到——只放宽前者不验证后者，等于把门禁关掉。
+{
+  const eolRoot = mkdtempSync(join(tmpdir(), 'sf-handoff-eol-'));
+  try {
+    mkdirSync(join(eolRoot, 'docs/governance'), { recursive: true });
+    cpSync(join(root, 'docs/governance'), join(eolRoot, 'docs/governance'), { recursive: true });
+    const baseline = readFileSync(join(root, HANDOFF), 'utf8').replaceAll('\r\n', '\n');
+
+    const writeWithEol = (text) => writeFileSync(join(eolRoot, HANDOFF), text, 'utf8');
+
+    writeWithEol(baseline);
+    const asLf = projectHandoff(eolRoot);
+    check('projection/eol-lf-not-drifted', !asLf.drifted,
+      `全 LF 的交接书不应判为分叉，实际 drifted=${asLf.drifted}`);
+
+    writeWithEol(baseline.replaceAll('\n', '\r\n'));
+    const asCrlf = projectHandoff(eolRoot);
+    check('projection/eol-crlf-not-drifted', !asCrlf.drifted,
+      `全 CRLF 的交接书不应判为分叉（autocrlf=true 时 checkout 必然产生这种形态），实际 drifted=${asCrlf.drifted}`);
+
+    // 写回必须沿用原文件主导行尾，否则投影命令会把整篇 3860 行的行尾改掉，
+    // 制造一个伪 diff 把真实改动淹没。
+    check('projection/eol-crlf-preserved-on-write',
+      asCrlf.projected.includes('\r\n') && !/(?<!\r)\n/.test(asCrlf.projected),
+      'CRLF 原文件的投影结果必须仍是纯 CRLF。');
+    check('projection/eol-lf-preserved-on-write',
+      !asLf.projected.includes('\r\n'),
+      'LF 原文件的投影结果必须仍是纯 LF。');
+
+    // 放宽行尾不能顺带放过真实分叉。篡改一处投影区内容，两种行尾下都必须报红。
+    for (const [label, text] of [['lf', baseline], ['crlf', baseline.replaceAll('\n', '\r\n')]]) {
+      const tamperedSliceId = asLf.projected.includes('W-BEHAVIOR-MAP-01') ? 'W-BEHAVIOR-MAP-01' : null;
+      if (tamperedSliceId === null) {
+        check(`projection/eol-${label}-tamper-anchor-found`, false,
+          '找不到用于篡改的锚点切片 ID，本组负向断言会测不到东西却全绿。');
+        continue;
+      }
+      writeWithEol(text.replace(tamperedSliceId, 'W-FIXTURE-TAMPERED-01'));
+      const tampered = projectHandoff(eolRoot);
+      check(`projection/eol-${label}-tamper-still-detected`, tampered.drifted,
+        `${label} 行尾下篡改投影区内容仍必须判为分叉，实际 drifted=${tampered.drifted}`);
+    }
+  } finally {
+    rmSync(eolRoot, { recursive: true, force: true });
+  }
+}
+
 // 所有区块都必须真的落在交接书里。少一对标记就等于那张表脱离了投影，
 // 会退回手抄状态而门禁不报错。
 const handoffText = readFileSync(join(root, HANDOFF), 'utf8');
@@ -459,7 +514,9 @@ console.log(JSON.stringify({
     '每行列数与表头一致',
     '投影幂等；标记必须成对且各出现一次',
     '投影区之外不得残留与投影表同构的表头',
-    'npm 脚本名提取正则保持宽松：归一化后的叙述文本也会被抓到（措辞可控，漏报不可控）'
+    'npm 脚本名提取正则保持宽松：归一化后的叙述文本也会被抓到（措辞可控，漏报不可控）',
+    '分叉判定与行尾无关（autocrlf=true 的 checkout 会整篇转 CRLF），写回沿用原文件主导行尾；放宽行尾不放过真实分叉',
+    '引用提案 marker 的文件集由仓库扫描双向比对，不是只遍历登记表自身'
   ],
   findings
 }, null, 2));
