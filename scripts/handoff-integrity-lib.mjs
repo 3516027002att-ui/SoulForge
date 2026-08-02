@@ -258,7 +258,7 @@ export function parseSealBaseline(baseline) {
   };
 }
 
-function parseEvidence(markdown, where, findings) {
+function parseEvidence(markdown, where, findings, authoritativeEvidence = null) {
   const table = parseFirstTable(extractSection(markdown, '17.1'));
   const evidence = new Map();
   if (!table) {
@@ -266,8 +266,17 @@ function parseEvidence(markdown, where, findings) {
     return evidence;
   }
 
-  if (table.header.length < 2) {
-    findings.push(makeFinding('EVIDENCE_TABLE_SCHEMA_INVALID', where, '§17.1 Evidence 表至少需要 ID 与类型两列。'));
+  const compactIndex = table.header.length === 2
+    && headerToken(table.header[0]) === 'evidenceid'
+    && headerToken(table.header[1]) === '能力/声明';
+  if (compactIndex && !(authoritativeEvidence instanceof Map)) {
+    findings.push(makeFinding(
+      'EVIDENCE_TABLE_SCHEMA_INVALID',
+      where,
+      '§17.1 是两列 Evidence 索引，必须注入 evidence.jsonl 权威记录后才能判定封存与 Gate 语义。'
+    ));
+  } else if (!compactIndex && table.header.length < 4) {
+    findings.push(makeFinding('EVIDENCE_TABLE_SCHEMA_INVALID', where, '§17.1 Evidence 表必须是两列索引，或包含 ID、类型、声明与基线四列。'));
   }
 
   const definitions = [];
@@ -275,6 +284,13 @@ function parseEvidence(markdown, where, findings) {
     const id = firstId(cells[0], 'EV');
     if (!id) continue;
     definitions.push(id);
+    if (compactIndex) {
+      // 索引块的逐字等价由 handoff projection 门禁负责；完整 Evidence 语义仍从
+      // evidence.jsonl 进入原有规则，避免因压缩展示字段而抽掉 seal/freshness 判据。
+      const authoritative = authoritativeEvidence?.get(id);
+      if (authoritative !== undefined && !evidence.has(id)) evidence.set(id, authoritative);
+      continue;
+    }
     const type = plain(cells[1]);
     const claim = plain(cells[2]);
     const baseline = plain(cells[3]);
@@ -935,9 +951,9 @@ export function gateSubjectRegistry() {
  * 扫描 §17.1，返回全部格式合法 sealed Evidence 的锚点提交（写入时 HEAD）。
  * 供 freshness 上下文生成器按锚点计算祖先关系与主题域差异。
  */
-export function collectSealAnchors(markdown) {
+export function collectSealAnchors(markdown, authoritativeEvidence = null) {
   const scanFindings = [];
-  const evidence = parseEvidence(markdown, 'seal-anchor-scan', scanFindings);
+  const evidence = parseEvidence(markdown, 'seal-anchor-scan', scanFindings, authoritativeEvidence);
   const anchors = new Set();
   for (const record of evidence.values()) {
     if (record.type === 'sealed-current-run' && record.seal?.formatValid === true) {
@@ -1427,7 +1443,8 @@ function validateBlockerImpactClosure(where, findings, blockers, slices, gates) 
  * 对 handoff Markdown 做无副作用治理校验。
  *
  * @param {string} markdown 完整的 V0.5 handoff Markdown。
- * @param {{ source?: string }} options 输出 findings 使用的来源标识。
+ * @param {{ source?: string, authoritativeEvidence?: Map<string, object> }} options
+ *   输出 findings 使用的来源标识，以及 compact Evidence 索引对应的 JSON 权威记录。
  * @returns {{ ok: boolean, findings: Array<{severity: string, code: string, where: string, message: string}> }}
  */
 export function validateHandoffGovernance(markdown, options = {}) {
@@ -1438,7 +1455,7 @@ export function validateHandoffGovernance(markdown, options = {}) {
     return { ok: false, findings };
   }
 
-  const evidence = parseEvidence(markdown, where, findings);
+  const evidence = parseEvidence(markdown, where, findings, options.authoritativeEvidence ?? null);
   const blockers = parseBlockers(markdown, where, findings, evidence);
   const slices = parseSlices(markdown, where, findings, blockers);
   parseAndValidateActiveClaims(markdown, where, findings, slices);

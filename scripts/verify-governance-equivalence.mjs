@@ -101,10 +101,6 @@ for (const code of Object.keys(SCHEMA_SUPERSEDED).sort()) {
 }
 
 // ---- 方向 2：真实数据上的结论一致（动态） -------------------------------
-const markdownResult = validateHandoffGovernance(
-  readFileSync(resolve(root, HANDOFF), 'utf8'),
-  { source: HANDOFF }
-);
 // 冻结基线比对依赖 git 且与 markdown 门禁无对应物，比对时关闭以保证同口径。
 const registry = gateSubjectRegistry();
 const subjectRefsByGate = new Map(registry.gates.map((gate) => [
@@ -120,6 +116,15 @@ const jsonResult = validateGovernanceData(root, {
   subjectRefsOf: (gateId) => subjectRefsByGate.get(gateId) ?? null,
   freezeBaselineRef: null
 });
+// §17.1 只保留 Evidence ID + subject 索引；其余 seal 字段来自 evidence.jsonl。
+// 动态等价仍运行同一套 markdown 语义规则，只把被索引省略的字段从权威投影补齐。
+const markdownResult = validateHandoffGovernance(
+  readFileSync(resolve(root, HANDOFF), 'utf8'),
+  {
+    source: HANDOFF,
+    authoritativeEvidence: jsonResult.projection?.evidence ?? null
+  }
+);
 
 let dynamicComparable = true;
 if (jsonResult.projection === null) {

@@ -197,18 +197,15 @@ export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, s
       ])
     )),
 
-  // 七列。实测 47 行 × 6 个内容列与 evidence.jsonl 零分叉——它一直是纯投影，
-  // 只是靠手抄维持。gov seal 追加一条后本区块自动带出，不必再手工加表格行。
+  // Evidence 在交接书中只保留可检索索引：ID 是交叉引用锚，subject 是人读时定位
+  // 证据用途所需的最小描述。类型、封存指纹、命令、结果、非声明项与目标版本继续
+  // 由 evidence.jsonl 权威保存并由 JSON 治理门禁判定；Gate 反向引用在 gate-matrix。
+  // 把审计正文复制到人读交接书只会让每次 seal 持续放大同一份数据。
   'evidence-index': () => table(
-    ['Evidence ID', '类型', '能力/声明', '基线', '命令或记录', '样本/范围', '本轮结论与边界'],
+    ['Evidence ID', '能力/声明'],
     evidenceRecords.map((record) => [
       `\`${record.evidenceId}\``,
-      `\`${record.evidenceType}\``,
-      cell(record.subject),
-      cell(record.fingerprint),
-      cell(record.commands),
-      cell(record.result),
-      cell(record.nonClaims)
+      cell(record.subject)
     ])
   ),
 
