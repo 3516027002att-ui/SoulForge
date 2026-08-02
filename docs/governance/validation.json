@@ -22,6 +22,11 @@
       "sliceId": "W-BEHAVIOR-MAP-01",
       "targetRelease": "V0.5",
       "reason": "script 容器 magic/reference inventory smoke（行内已标注 `validation-unfrozen`，此处补齐清单登记）"
+    },
+    {
+      "sliceId": "W-REL-F-ACCEPT-02",
+      "targetRelease": "V0.5",
+      "reason": "Electron 真实文档功能验收（opt-in）与各编辑器结构化 UI/DSL 收尾"
     }
   ],
   "frozen": [

@@ -719,6 +719,30 @@
       "declaresUnfrozenValidation": true
     },
     {
+      "sliceId": "W-REL-F-ACCEPT-02",
+      "targetRelease": "V0.5",
+      "lifecycle": "ready",
+      "authority": "candidate",
+      "authorityCap": "candidate",
+      "authorityCapNote": "cap=candidate；Electron 真实文档功能验收完成前不提升 REL-F",
+      "capabilityIds": [
+        "REL-F"
+      ],
+      "blockerRefs": [],
+      "goal": "各编辑器结构化 UI/DSL 与完整有界访问收尾、Electron 真实文档功能验收（opt-in）与 BND4/script 工作台继续",
+      "hardPrerequisites": "W-REL-F-SCALE-02 已完成（script 规模缺口关闭，currentScaleContractGaps=[]）；Electron 真实文档功能验收为 opt-in 工程项，未跑不构成完成声明；延期预览编辑器（msb/tae/esd/flver）按 V0.6 记账，不得据此声称本版缺口减少",
+      "entryPoints": [
+        "packages/core/src/editing/editorCapabilityContract.ts",
+        "packages/core/src/editing/releaseEditorAcceptance.ts",
+        "apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx",
+        "apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx",
+        "apps/desktop/src/main/ipc.ts",
+        "apps/desktop/src/renderer/src/App.tsx"
+      ],
+      "requiredValidation": "npm run test:release-editor-acceptance、npm run test:desktop-live-editor-contract、npm run test:desktop-ipc-contract；validation-unfrozen：Electron 真实文档功能验收",
+      "declaresUnfrozenValidation": true
+    },
+    {
       "sliceId": "W-REL-COMPLIANCE-01",
       "targetRelease": "V0.5",
       "lifecycle": "completed",
