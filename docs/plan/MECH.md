@@ -60,41 +60,6 @@ T-H3 明确写了"不做也是允许的结论"。**这适用于全部任务。**
 
 ---
 
-## T-M4 分支与 origin 的最终处置
-
-**做什么:** 确认或执行 4 条未合并分支与 `origin` 的处置。
-
-**已核实的事实:**
-
-| 分支 | 领先 main | 性质 |
-|---|---|---|
-| `backup/local-ahead-225c08d` | 1 | 历史快照 |
-| `codex/v05-current-project` | 1 | 历史快照 |
-| `codex/v05-worktree-publish` | 1 | 历史快照 |
-| `worktree-v05-open-format-import` | 2 | 历史快照 |
-
-worktree 已只剩主工作树(`git worktree list` 实测单行)。另有 6 条分支领先 0——
-它们已被 main 包含,`--ff-only` 合并无事可做,清理与否都不影响正确性。
-
-`main` 领先 `origin/main` **170** 个提交(2026-08-02 实测)。上表领先数同日实测。
-**这两个数都会随提交增长,别照抄:**
-
-~~~powershell
-git worktree list
-git rev-list --count origin/main..main
-git for-each-ref --format='%(refname:short)' refs/heads/
-~~~
-
-**当前用户裁定:保留 4 条分支不删、不推 origin。** 本条任务不是推翻它,而是:
-
-1. 复量一次领先数并确认裁定仍适用;
-2. 若用户改变主意要推,**推之前必须确认无凭据、无真实游戏资产、无用户 Mod 入库**;
-3. 若维持现状,把结论写进本条后删除本条。
-
-**不要自行推 origin。** 推送是外向动作且难以撤回,必须有用户明确指示。
-
----
-
 ## T-M5 收尾:最低回归与封存
 
 **做什么:** 本档任务全部完成后跑一次完整回归并封存。
