@@ -171,8 +171,11 @@ function assertInventoryDerivedFromCapabilities(
 function assertFrozenScopeInventory(inventory: ReleaseEditorInventoryItem[]): void {
   const root = resolve('../..');
   const handoff = readFileSync(resolve(root, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8');
+  // 提案块内侧包着一层投影标记：该块是 docs/governance/scope.json 与 gates.json
+  // 的投影（原为 1242 行手写内嵌 JSON，与 scope.json 实测 27/27 条分叉）。
+  // 标记只是生成边界，不参与提案语义，所以按可选分组匹配。
   const match = handoff.match(
-    /<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->\s*```json\s*([\s\S]*?)\s*```\s*<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->/
+    /<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->\s*(?:<!--\s*SOULFORGE_PROJECTION_BEGIN:scope-proposal\s*-->\s*)?```json\s*([\s\S]*?)\s*```\s*(?:<!--\s*SOULFORGE_PROJECTION_END:scope-proposal\s*-->\s*)?<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->/
   );
   const proposalJson = match?.[1];
   if (!proposalJson) throw new Error('frozen release-scope proposal is missing');
