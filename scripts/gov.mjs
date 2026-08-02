@@ -439,12 +439,31 @@ function cmdStatus() {
   emit({
     mode: 'status',
     lifecycleCounts: counts,
-    activeClaims: data.activeClaims.map((claim) => ({
-      sliceId: claim.sliceId,
-      claimId: claim.claimId,
-      owner: claim.owner,
-      heartbeatAt: claim.heartbeatAt
-    })),
+    // status 也必须报心跳陈旧度。它此前只给 heartbeatAt 原始值,而 next 会算
+    // heartbeatStale——同一份数据、两个命令、相反结论。status 是 CLAUDE.md 列的
+    // 常用命令,从它入手的 agent 看到「5 条 activeClaims」只会读成有人在推进,
+    // 正是第 2 条推论二要消除的形态。判据复用 claimStaleHours,不另写一份阈值。
+    activeClaims: data.activeClaims.map((claim) => {
+      const staleHours = claimStaleHours(claim);
+      return {
+        sliceId: claim.sliceId,
+        claimId: claim.claimId,
+        owner: claim.owner,
+        heartbeatAt: claim.heartbeatAt,
+        heartbeatStale: staleHours !== null && staleHours >= STALE_CLAIM_HOURS,
+        staleFor: staleHours === null ? null : `${staleHours} 小时`
+      };
+    }),
+    // 有陈旧 claim 时给出出路,但不重复 next 里那段完整 recoveryHint——
+    // status 是汇总视图,细节归 next。两处各写一份长文本必然漂移。
+    staleClaimHint: data.activeClaims.some((claim) => {
+      const hours = claimStaleHours(claim);
+      return hours !== null && hours >= STALE_CLAIM_HOURS;
+    })
+      ? `有 claim 心跳超过 ${STALE_CLAIM_HOURS} 小时,可能已被遗弃。`
+        + '跑 gov next 看每条的 recoveryTrigger 与 release/complete 出路；'
+        + 'CLI 不自动释放,擅自释放可能撞上另一个真在跑的进程。'
+      : null,
     governanceGateOk: check.ok,
     governanceErrors: check.errors.slice(0, 10)
   });
@@ -1020,8 +1039,9 @@ if (!command || command === '--help' || command === 'help') {
       + '(4) subject 还必须原样带齐目标 Gate 现有证据声明过的 user-approved 标记（如 scope-ruling:user-approved、scope-deferral:<Gate>:<Release>:user-approved）。漏标记时 freshness 筛不出可继承证据，报错会是 GATE_EVIDENCE_STALE（指向错误原因）；本命令已在追加前预检并指名缺哪个。',
     sealRequiredArgs: '--id、--subject、--commands、--result、--non-claims 全部必填，缺任一项在追加前失败（SEAL_ID_INVALID / SEAL_FIELD_REQUIRED）。要恢复 Gate 还需 --gates。',
     concurrency: '所有写命令在系统临时目录的文件锁下串行执行；锁不写入仓库与 Mod 工作区。',
-    staleClaims: `next 的 activeSlices 会报 heartbeatStale：心跳超过 ${STALE_CLAIM_HOURS} 小时即视为可能被遗弃，`
-      + '并给出该 claim 的 recoveryTrigger 与 release/complete 两条出路。CLI 不自动释放——'
+    staleClaims: `next 的 activeSlices 与 status 的 activeClaims 都会报 heartbeatStale：`
+      + `心跳超过 ${STALE_CLAIM_HOURS} 小时即视为可能被遗弃，两命令判定逐字段一致。`
+      + 'next 另给该 claim 的 recoveryTrigger 与 release/complete 两条出路，status 只提示去看 next。CLI 不自动释放——'
       + '擅自释放可能撞上另一个真在跑的进程。看到 heartbeatStale=true 时先按 recoveryTrigger 核实是否真无人推进，'
       + '再决定 release（回到可 claim）还是走封存四步后 complete。推进期间用 gov heartbeat 刷新，避免被后来者误判。',
     note: 'claim/complete 只改执行面板状态。authority 与 Evidence 必须由真实运行的验证支撑。'
