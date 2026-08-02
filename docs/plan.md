@@ -16,9 +16,25 @@
 
 **agent 的第一条命令必须是 `node scripts/gov.mjs next`,不是通读交接书。**
 
-实测:`gov next` + `gov help` 合计 8896 B 就含齐选点、入口、硬前置、所需验证与流程骨架;
-交接书 431597 B,读完仍不知道哪条切片可 claim(那由 `slices.json` 的 lifecycle 决定)。
-差 48.5 倍。
+实测:`gov next` + `gov help` 合计不到 10 KB 就含齐选点、入口、硬前置、所需验证与流程骨架;
+交接书 400+ KB,读完仍不知道哪条切片可 claim(那由 `slices.json` 的 lifecycle 决定)。
+量级差 50 倍上下。
+
+**本文刻意不写死这几个字节数。** 交接书每次 seal 都追加证据因而持续变长(首版量到 48.5 倍,
+两次提交后同样的量法就成了 53.2 倍),写死的绝对值会静默腐烂,而"文档里的数字必须是实测值"
+正是第 8 条要求的。需要当前值时自己量:
+
+~~~powershell
+$enc = [System.Text.Encoding]::UTF8
+$cli = $enc.GetByteCount((node scripts/gov.mjs next | Out-String)) +
+       $enc.GetByteCount((node scripts/gov.mjs help | Out-String))
+$doc = (Get-Item docs/V0_5_IMPLEMENTATION_HANDOFF.md).Length
+Write-Output ("CLI=$cli B  交接书=$doc B  倍数=" + [math]::Round($doc / $cli, 1))
+~~~
+
+量法本身也有坑:`node -e` 里写模板字符串在 PowerShell 下会被反引号转义吃掉(实测报
+`SyntaxError: missing ) after argument list`),所以上面用 PowerShell 原生写法。
+`wc -c` 与 `GetByteCount` 差约 800 B,因为 `Out-String` 会补 CRLF——量级结论不受影响。
 
 门禁:`HANDOFF_ENTRY_NOT_CLI`(交接书开头 60 行内必须给出该命令)、
 `HANDOFF_STALE_AUTHORITY_CLAIM`(不得声明交接书为唯一事实源)。
