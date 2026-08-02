@@ -362,6 +362,87 @@ check('cli/next-item-self-sufficient',
   check('cli/next-all-spans-releases',
     allReleases.status === 0 && allReleases.payload?.release === null,
     `--all 应跨版本查看（release=null），实际 ${JSON.stringify(allReleases.payload?.release)}。`);
+
+  // 在飞 claim 的心跳新鲜度必须暴露，否则「有主」与「被遗弃」在输出里长得一样。
+  //
+  // 实测：5 条 owner=coordinator-agent 的 claim 心跳停在 2026-08-01，其后 24 个提交
+  // 全在治理层、没有一个碰过这些切片的 entryPoints，同期封存的 22 条证据也全是
+  // EV-REL-SCOPE-*。它们是被中断的半成品，而 next 当时只报 sliceId/owner，接手的
+  // agent 读成「有人在做」全部避开，V0.5 的可 claim 面被无声压到 4 条。
+  //
+  // 陈旧与新鲜两种结局各自显式构造，不共用 if/else——互斥分支靠「环境碰巧走哪边」
+  // 声称覆盖两种结局是假覆盖（本 fixture 曾因此让 7 条正向断言一次都没执行）。
+  {
+    const slicesPath = join(cliRoot, 'docs/governance/slices.json');
+    const pristine = readFileSync(slicesPath, 'utf8');
+    const perturbed = JSON.parse(pristine);
+    const targetClaim = perturbed.activeClaims?.[0] ?? null;
+
+    if (targetClaim === null) {
+      check('cli/next-stale-claim-scenario-constructible', false,
+        '治理数据里没有 activeClaims，无法构造心跳陈旧场景；判据未被执行等于没有门禁。');
+    } else {
+      const sliceId = targetClaim.sliceId;
+
+      // 场景一：心跳远早于现在 → 必须报陈旧并给出可执行出路。
+      targetClaim.heartbeatAt = new Date(Date.now() - 72 * 3600000).toISOString();
+      writeFileSync(slicesPath, `${JSON.stringify(perturbed, null, 2)}\n`, 'utf8');
+      const staleRun = runGov(['next', '--all'], cliRoot);
+      const staleEntry = (staleRun.payload?.activeSlices ?? [])
+        .find((entry) => entry.sliceId === sliceId) ?? null;
+
+      check('cli/next-stale-claim-flagged',
+        staleEntry?.heartbeatStale === true,
+        `心跳停 72 小时的 claim 必须报 heartbeatStale=true，实际 ${JSON.stringify(staleEntry)?.slice(0, 300)}`);
+      // 只报 true 不够：接手者需要知道停了多久才能判断是否值得接手。
+      check('cli/next-stale-claim-reports-duration',
+        typeof staleEntry?.staleFor === 'string' && /\d+\s*小时/.test(staleEntry.staleFor),
+        `陈旧 claim 必须给出停滞时长，实际 staleFor=${JSON.stringify(staleEntry?.staleFor)}`);
+      // 出路必须同时给出两条分支与核实前置，否则 agent 会直接 release 掉可能有人在跑的切片。
+      const hint = String(staleEntry?.recoveryHint ?? '');
+      check('cli/next-stale-claim-hint-actionable',
+        hint.includes(`gov release --slice ${sliceId}`)
+          && hint.includes('gov complete')
+          && hint.includes('核实')
+          && hint.includes('不自动释放'),
+        '陈旧提示必须给出「先按 recoveryTrigger 核实」+ release/complete 两条出路，'
+        + `并声明 CLI 不自动释放，实际「${hint.slice(0, 300)}」`);
+
+      // 场景二：心跳就在刚刚 → 必须不报陈旧，且不塞提示文本。
+      // 这条独立构造而非依赖上一场景的 else 分支：误报会诱导接手者 release 掉
+      // 别人正在写的切片，比漏报更危险，必须单独证明不会发生。
+      targetClaim.heartbeatAt = new Date().toISOString();
+      writeFileSync(slicesPath, `${JSON.stringify(perturbed, null, 2)}\n`, 'utf8');
+      const freshRun = runGov(['next', '--all'], cliRoot);
+      const freshEntry = (freshRun.payload?.activeSlices ?? [])
+        .find((entry) => entry.sliceId === sliceId) ?? null;
+
+      check('cli/next-fresh-claim-not-flagged',
+        freshEntry?.heartbeatStale === false,
+        `刚刷过心跳的 claim 不得报陈旧，实际 ${JSON.stringify(freshEntry)?.slice(0, 300)}`);
+      check('cli/next-fresh-claim-no-hint',
+        freshEntry?.recoveryHint === null,
+        `心跳新鲜时不得塞 recoveryHint，否则每条在飞切片都带一段无关文本，实际 ${JSON.stringify(freshEntry?.recoveryHint)?.slice(0, 200)}`);
+
+      // 场景三：心跳字段不可解析 → 判不出来就不下结论，不得伪装成陈旧。
+      // 让格式问题冒充协作问题会把 agent 送去 release 一条其实有人在跑的切片。
+      targetClaim.heartbeatAt = 'not-a-timestamp';
+      writeFileSync(slicesPath, `${JSON.stringify(perturbed, null, 2)}\n`, 'utf8');
+      const unparsableRun = runGov(['next', '--all'], cliRoot);
+      const unparsableEntry = (unparsableRun.payload?.activeSlices ?? [])
+        .find((entry) => entry.sliceId === sliceId) ?? null;
+      check('cli/next-unparsable-heartbeat-not-flagged',
+        unparsableEntry?.heartbeatStale === false && unparsableEntry?.staleFor === null,
+        '心跳不可解析时必须返回 heartbeatStale=false、staleFor=null，而不是伪装成陈旧，'
+        + `实际 ${JSON.stringify(unparsableEntry)?.slice(0, 300)}`);
+
+      // 扰动必须还原，否则其后每条断言都跑在被改过的数据上（本 fixture 实测踩过）。
+      writeFileSync(slicesPath, pristine, 'utf8');
+      check('cli/next-stale-claim-fixture-restored',
+        readFileSync(slicesPath, 'utf8') === pristine,
+        '心跳场景的扰动必须还原，否则后续 seal 与投影断言全部跑在被改过的 slices.json 上。');
+    }
+  }
 }
 
 // seal 的继承标记预检。
@@ -828,7 +909,9 @@ console.log(JSON.stringify({
     'seal 的正向与回滚路径各自显式构造、互不依赖环境：锚点改写到 fixture 基线使正向可达，扰动 scope.json 主题域使 stale 可达',
     '回滚场景断言失败原因确实是 freshness/stale 而非扰动导致的数据非法（否则断言为错误原因通过）',
     'fixture 对治理数据的每处扰动都在断言后还原，不污染后续断言',
-    'deferred 切片的 resumeRequires 直接投影（不让 agent 手工按 capabilityId 反查 scope.json）；取不到时必须给 reason 而非空数组；无 deferred 时不投影以免膨胀默认首屏'
+    'deferred 切片的 resumeRequires 直接投影（不让 agent 手工按 capabilityId 反查 scope.json）；取不到时必须给 reason 而非空数组；无 deferred 时不投影以免膨胀默认首屏',
+    'next 暴露在飞 claim 的心跳新鲜度：超 24 小时报 heartbeatStale 并给出「先核实、再 release 或 complete」的出路，且声明 CLI 不自动释放（否则被遗弃的 claim 与有主 claim 在输出里无从区分，接手者会全部避开）',
+    '心跳新鲜时不得报陈旧也不塞 recoveryHint；心跳不可解析时判为未知而非陈旧（误报会诱导接手者 release 掉别人正在写的切片）'
   ],
   findings
 }, null, 2));

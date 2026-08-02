@@ -286,6 +286,28 @@ function emptyCandidateMessage(slicesInRelease, release) {
 }
 
 /**
+ * claim 心跳被视为陈旧的小时数。
+ *
+ * 取 24 小时而不是更短：一条切片的实现加验证经常跨越多轮上下文，几小时不刷心跳
+ * 是正常的。取值偏大只会延后提示，取值偏小会把正在推进的 claim 误报成遗弃，
+ * 而误报会诱导接手者 release 掉别人正在写的切片。
+ */
+const STALE_CLAIM_HOURS = 24;
+
+/**
+ * 返回 claim 心跳距今的小时数；claim 缺失或心跳字段不可解析时返回 null。
+ *
+ * 不把不可解析当成「陈旧」：那会让一个格式问题伪装成协作问题，接手者照着提示去
+ * release 一条其实有人在跑的切片。判不出来就不下结论。
+ */
+function claimStaleHours(claim) {
+  if (!claim || typeof claim.heartbeatAt !== 'string') return null;
+  const beat = Date.parse(claim.heartbeatAt);
+  if (Number.isNaN(beat)) return null;
+  return Math.max(0, Math.floor((Date.now() - beat) / 3600000));
+}
+
+/**
  * 列出可推进的切片。判定依据只有治理数据，不含任何人工优先级——
  * 优先级一旦写进 CLI 就成了第二份权威，会与 slices.json 漂移。
  */
@@ -336,11 +358,37 @@ function cmdNext(args) {
       hasEvidenceRecord: typeof slice.evidence === 'string' && slice.evidence.length > 0,
       alreadyClaimed: claimedIds.has(slice.sliceId)
     })),
-    activeSlices: inFlight.map((slice) => ({
-      sliceId: slice.sliceId,
-      owner: data.activeClaims.find((claim) => claim.sliceId === slice.sliceId)?.owner ?? null,
-      claimId: data.activeClaims.find((claim) => claim.sliceId === slice.sliceId)?.claimId ?? null
-    })),
+    // 在飞切片必须暴露心跳新鲜度，否则「有主」和「被遗弃」长得一模一样。
+    //
+    // 实测：5 条 owner=coordinator-agent 的 claim 心跳停在 2026-08-01，此后 24 个
+    // 提交全在治理层、没有一个碰过这些切片的 entryPoints，8/1–8/2 封存的 22 条证据
+    // 也全是 EV-REL-SCOPE-*。它们是被中断的半成品，但 next 只报 sliceId/owner，
+    // 新接手的 agent 读成「有人在做」而全部避开——于是 V0.5 剩下的可 claim 面被
+    // 无声压到 4 条，谁都不知道那 5 条其实无人推进。
+    //
+    // 判据是心跳超过 STALE_CLAIM_HOURS 小时。不自动释放：claim 的语义是并发占用，
+    // CLI 擅自释放可能撞上另一个真在跑的进程，而那比空转更难恢复。只给出可执行的
+    // 下一步，由接手者按 recoveryTrigger 核实后决定 release 还是 complete。
+    activeSlices: inFlight.map((slice) => {
+      const claim = data.activeClaims.find((item) => item.sliceId === slice.sliceId) ?? null;
+      const staleHours = claimStaleHours(claim);
+      return {
+        sliceId: slice.sliceId,
+        owner: claim?.owner ?? null,
+        claimId: claim?.claimId ?? null,
+        heartbeatAt: claim?.heartbeatAt ?? null,
+        heartbeatStale: staleHours !== null && staleHours >= STALE_CLAIM_HOURS,
+        staleFor: staleHours === null ? null : `${staleHours} 小时`,
+        // 心跳新鲜时不塞提示，避免每条都带一段无关文本。
+        recoveryHint: staleHours !== null && staleHours >= STALE_CLAIM_HOURS
+          ? `心跳已停 ${staleHours} 小时（>= ${STALE_CLAIM_HOURS}），该 claim 可能已被遗弃。`
+            + `先按 recoveryTrigger 核实：${claim?.recoveryTrigger ?? '（未登记）'}。`
+            + `确认无人推进则 gov release --slice ${slice.sliceId} --owner ${claim?.owner ?? '<owner>'}`
+            + '，让它回到可 claim；确认已做完则走封存四步后 gov complete。'
+            + '本命令不自动释放——擅自释放可能撞上另一个真在跑的进程。'
+          : null
+      };
+    }),
     blockedSlices: blocked.map((slice) => ({
       sliceId: slice.sliceId,
       blockerRefs: slice.blockerRefs
@@ -956,7 +1004,7 @@ if (!command || command === '--help' || command === 'help') {
   emit({
     mode: 'help',
     commands: {
-      'gov next [--release V0.5]': '列出可 claim 的切片、在飞切片与被阻塞切片',
+      'gov next [--release V0.5]': '列出可 claim 的切片、在飞切片（带心跳新鲜度）与被阻塞切片',
       'gov status': '执行面板汇总 + 治理门禁当前是否通过',
       'gov claim --slice W-X --owner me [--claim-id id] [--recovery-trigger 文本]': '原子占用切片并置 active',
       'gov heartbeat --slice W-X [--owner me]': '刷新心跳，证明仍在推进',
@@ -972,6 +1020,10 @@ if (!command || command === '--help' || command === 'help') {
       + '(4) subject 还必须原样带齐目标 Gate 现有证据声明过的 user-approved 标记（如 scope-ruling:user-approved、scope-deferral:<Gate>:<Release>:user-approved）。漏标记时 freshness 筛不出可继承证据，报错会是 GATE_EVIDENCE_STALE（指向错误原因）；本命令已在追加前预检并指名缺哪个。',
     sealRequiredArgs: '--id、--subject、--commands、--result、--non-claims 全部必填，缺任一项在追加前失败（SEAL_ID_INVALID / SEAL_FIELD_REQUIRED）。要恢复 Gate 还需 --gates。',
     concurrency: '所有写命令在系统临时目录的文件锁下串行执行；锁不写入仓库与 Mod 工作区。',
+    staleClaims: `next 的 activeSlices 会报 heartbeatStale：心跳超过 ${STALE_CLAIM_HOURS} 小时即视为可能被遗弃，`
+      + '并给出该 claim 的 recoveryTrigger 与 release/complete 两条出路。CLI 不自动释放——'
+      + '擅自释放可能撞上另一个真在跑的进程。看到 heartbeatStale=true 时先按 recoveryTrigger 核实是否真无人推进，'
+      + '再决定 release（回到可 claim）还是走封存四步后 complete。推进期间用 gov heartbeat 刷新，避免被后来者误判。',
     note: 'claim/complete 只改执行面板状态。authority 与 Evidence 必须由真实运行的验证支撑。'
   });
 } else if (!(command in COMMANDS)) {
