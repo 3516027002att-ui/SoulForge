@@ -14,9 +14,10 @@
  * Mod 工作区、不写游戏目录、不改 authority、不产出 Evidence 结论——claim
  * 只是并发协调，不构成任何验证声明。
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { acquireGovernanceLock } from './gov/lock.mjs';
+import { EVIDENCE, computeFingerprint, formatBaseline } from './gov/seal.mjs';
 import { validateGovernanceData } from './governance/validateGovernanceData.mjs';
 import {
   gateSubjectRegistry,
@@ -69,7 +70,7 @@ function writeJson(relativePath, data) {
  * 跑一次完整治理校验。任何写操作前后都必须过这道校验：
  * 写前防止在已损坏的数据上叠加改动，写后防止本次改动引入不一致。
  */
-function runGovernanceCheck() {
+function runGovernanceCheck({ withFreshness = false } = {}) {
   const registry = gateSubjectRegistry();
   const subjectRefsByGate = new Map(registry.gates.map((gate) => [
     gate.gateId,
@@ -79,12 +80,18 @@ function runGovernanceCheck() {
       ...gate.handoffBlocks.map((block) => handoffBlockSubjectRef(block.id))
     ]
   ]));
-  // 这里刻意不传 handoffMarkdown：claim 只改执行面板，不触碰 Evidence，
-  // freshness 判定与 claim 无关。少读一个 3500 行文件也让 CLI 更快。
+  // claim/complete 默认不传 handoffMarkdown：它们只改执行面板、不触碰 Evidence，
+  // freshness 判定与之无关，少读一个 3500 行文件也让 CLI 更快。
+  //
+  // seal 必须传：封存的全部目的就是把 stale 证据恢复为 fresh，跳过 freshness
+  // 判定等于跳过唯一能证明本次封存有效的检查。
   const result = validateGovernanceData(root, {
     parseSealBaseline,
     subjectRefsOf: (gateId) => subjectRefsByGate.get(gateId) ?? null,
-    freezeBaselineRef: 'HEAD'
+    freezeBaselineRef: 'HEAD',
+    handoffMarkdown: withFreshness
+      ? readFileSync(join(root, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8')
+      : null
   });
   return {
     ok: result.ok,
@@ -180,6 +187,10 @@ function cmdNext(args) {
       hardPrerequisites: slice.hardPrerequisites,
       entryPoints: slice.entryPoints,
       requiredValidation: slice.requiredValidation,
+      // 已完成证据刻意不投影到选点输出：它是留痕，不是指令。原先 goal 里混着两
+      // 者，实测让可推进切片的 goal 平均膨胀到 921 字、待做陈述被埋在末尾。
+      // 需要读历史证据时直接查 slices.json 的 evidence 字段。
+      hasEvidenceRecord: typeof slice.evidence === 'string' && slice.evidence.length > 0,
       alreadyClaimed: claimedIds.has(slice.sliceId)
     })),
     activeSlices: inFlight.map((slice) => ({
@@ -467,6 +478,111 @@ function cmdComplete(args) {
   });
 }
 
+/**
+ * 追加一条 sealed-current-run Evidence，并证明追加后门禁通过。
+ *
+ * 存在的理由：改了任何 Gate 主题域文件（治理校验器、范围 JSON、验证脚本）之后，
+ * 该 Gate 的封存证据必然变 stale，门禁转红。规则说的修法是「工程侧重跑验证并
+ * 重封存」，但仓库里原先没有任何命令能做重封存——只能手抄五个 64 位十六进制串，
+ * 抄错一位就是 EVIDENCE_SEAL_INVALID 且不指出错在哪。这一步挡住了自主推进：
+ * agent 每次改门禁自身都会把仓库留在红灯状态。
+ *
+ * 本命令不生产事实。--commands / --result / --non-claims 必须由真正跑过命令的
+ * 调用方给出，本命令只负责把它们和一个自洽指纹一起原子落盘。
+ */
+function cmdSeal(args) {
+  const evidenceId = typeof args.id === 'string' ? args.id.trim() : '';
+  if (!/^EV-[A-Z0-9-]+$/.test(evidenceId)) {
+    fail('SEAL_ID_INVALID', '--id 必须形如 EV-XXX（大写、数字、连字符）。');
+    return;
+  }
+  const required = [
+    ['subject', '能力/声明：本条证据支持什么，含 scope-ruling / revalidates 等机器标记'],
+    ['commands', '实际运行过的命令与退出码'],
+    ['result', '本轮结论与边界'],
+    ['non-claims', '明确不声明什么']
+  ];
+  const values = {};
+  for (const [key, description] of required) {
+    const value = args[key];
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      fail('SEAL_FIELD_REQUIRED', `--${key} 不能为空：${description}。`);
+      return;
+    }
+    values[key] = value.trim();
+  }
+  const targetRelease = typeof args.release === 'string' ? args.release.trim() : 'V0.5';
+  if (!/^V\d+\.\d+$/.test(targetRelease)) {
+    fail('SEAL_RELEASE_INVALID', '--release 必须形如 V0.5。');
+    return;
+  }
+
+  const lock = acquireGovernanceLock(root, typeof args.owner === 'string' ? args.owner : 'seal');
+  if (!lock.ok) {
+    fail(lock.code, lock.message, { holder: lock.holder });
+    return;
+  }
+  try {
+    const evidencePath = join(root, EVIDENCE);
+    const existing = readFileSync(evidencePath, 'utf8');
+    for (const line of existing.split('\n')) {
+      if (line.trim().length === 0) continue;
+      if (JSON.parse(line).evidenceId === evidenceId) {
+        fail('SEAL_ID_DUPLICATE', `${evidenceId} 已存在；封存记录只追加，不覆盖。换一个 ID。`);
+        return;
+      }
+    }
+
+    // 指纹必须在追加之前算：handoffSha256BeforeEvidenceAppend 的语义就是
+    // 「追加这条证据之前的交接书哈希」。顺序颠倒会写出一条永远无法复原的基线。
+    const fingerprint = computeFingerprint(root);
+    if (fingerprint.ok === false) {
+      fail(fingerprint.code, fingerprint.message, fingerprint.extra ?? {});
+      return;
+    }
+
+    const record = {
+      evidenceId,
+      targetRelease,
+      evidenceType: 'sealed-current-run',
+      subject: values.subject,
+      fingerprint: formatBaseline(fingerprint.fields, fingerprint.fingerprintSha256),
+      commands: values.commands,
+      result: values.result,
+      nonClaims: values['non-claims']
+    };
+    // JSONL 是纯追加：并行 agent 各自封存不会在同一处产生合并冲突。
+    const appended = `${JSON.stringify(record)}\n`;
+    appendFileSync(evidencePath, appended, 'utf8');
+
+    // 追加后必须过完整门禁（含 freshness）。封存的目的就是让 stale 恢复 fresh；
+    // 若追加后仍红，说明这次封存没有解决问题，留着它只会掩盖真实状态。
+    const after = runGovernanceCheck({ withFreshness: true });
+    if (!after.ok) {
+      writeFileSync(evidencePath, existing, 'utf8');
+      fail('SEAL_POSTCHECK_FAILED', '追加后治理门禁仍失败，已回滚本条封存记录。', {
+        rolledBack: EVIDENCE,
+        errors: after.errors.slice(0, 10),
+        hint: 'stale 未消除通常意味着：主题域改动尚未提交（指纹锚点是 HEAD，未提交改动会算进 trackedDiffSha256 但不进 HEAD），或本条 subject 缺少继承标记（如 revalidates=<既有EvidenceId>）。'
+      });
+      return;
+    }
+
+    emit({
+      mode: 'seal',
+      evidenceId,
+      targetRelease,
+      fingerprint: fingerprint.fields,
+      fingerprintSha256: fingerprint.fingerprintSha256,
+      untrackedCount: fingerprint.untrackedCount,
+      governanceGate: 'passed',
+      note: '本命令只搬运调用方陈述的运行事实与一个自洽指纹；它不验证命令真的跑过，也不提升任何 authority。'
+    });
+  } finally {
+    lock.release();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 参数解析与分发
 // ---------------------------------------------------------------------------
@@ -494,7 +610,8 @@ const COMMANDS = Object.freeze({
   claim: cmdClaim,
   heartbeat: cmdHeartbeat,
   release: cmdRelease,
-  complete: cmdComplete
+  complete: cmdComplete,
+  seal: cmdSeal
 });
 
 const [command, ...rest] = process.argv.slice(2);
@@ -507,8 +624,13 @@ if (!command || command === '--help' || command === 'help') {
       'gov claim --slice W-X --owner me [--claim-id id] [--recovery-trigger 文本]': '原子占用切片并置 active',
       'gov heartbeat --slice W-X [--owner me]': '刷新心跳，证明仍在推进',
       'gov release --slice W-X [--owner me] [--force]': '释放 claim 并退回 ready',
-      'gov complete --slice W-X [--owner me] [--force]': '标为 completed（不提升 authority、不写 Evidence）'
+      'gov complete --slice W-X [--owner me] [--force]': '标为 completed（不提升 authority、不写 Evidence）',
+      'gov seal --id EV-X --subject 声明 --commands 命令与退出码 --result 结论 --non-claims 不声明项 [--release V0.5]':
+        '追加 sealed-current-run Evidence：自动算五字段指纹，追加后跑含 freshness 的完整门禁，失败即回滚'
     },
+    sealWhenToUse: '改了任何 Gate 主题域文件（治理校验器、范围 JSON、验证脚本）后该 Gate 的封存证据会变 stale；'
+      + '先把主题域改动提交（指纹锚点是 HEAD），再用 gov seal 重封存。'
+      + 'subject 里带 revalidates=<既有EvidenceId> 可继承既有用户批准标记，工程侧重验证不需要用户再授权。',
     concurrency: '所有写命令在系统临时目录的文件锁下串行执行；锁不写入仓库与 Mod 工作区。',
     note: 'claim/complete 只改执行面板状态。authority 与 Evidence 必须由真实运行的验证支撑。'
   });

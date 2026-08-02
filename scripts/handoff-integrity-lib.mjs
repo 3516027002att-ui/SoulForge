@@ -831,8 +831,19 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     'scripts/governance/freshnessContext.mjs',
     'docs/governance/releases.json',
     'docs/governance/scope.json',
+    // 七个 schema 全部登记，而不只是冻结裁定直接用到的 releases/scope 两个。
+    // 理由：loadGovernance 用 schema 的 required + additionalProperties:false 承担了
+    // 一部分门禁职责（等价性清单里 18 项 SCHEMA_SUPERSEDED 正是这么登记的）。
+    // 只登记两个的后果是：放宽 slices.schema.json 就能给切片加字段、去掉必填项，
+    // 从而绕过治理约束，而 REL-SCOPE 仍显示 fresh。schema 是门禁实现的一部分，
+    // 不是普通数据。
+    'docs/governance/schema/blockers.schema.json',
+    'docs/governance/schema/evidence.schema.json',
+    'docs/governance/schema/gates.schema.json',
     'docs/governance/schema/releases.schema.json',
-    'docs/governance/schema/scope.schema.json'
+    'docs/governance/schema/scope.schema.json',
+    'docs/governance/schema/slices.schema.json',
+    'docs/governance/schema/validation.schema.json'
   ]),
   handoffSections: Object.freeze([]),
   handoffBlocks: Object.freeze([RELEASE_SCOPE_PROPOSAL_SUBJECT])
