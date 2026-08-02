@@ -660,6 +660,13 @@ if (rollbackTarget) {
           && sealed.payload.nextStep.includes('提交')
           && sealed.payload.nextStep.includes('HEAD'),
         `有未提交文件时 nextStep 必须要求提交并说明锚点是 HEAD，实际 ${sealed.payload?.nextStep}`);
+      // 报出的路径必须真实存在。第一版用 text() 读 porcelain，trim 吃掉了
+      // 未暂存状态码 " M" 的前导空格，按固定 3 字符切片就多切一位，输出成
+      // "ocs/V0_5_IMPLEMENTATION_HANDOFF.md"——看起来像对的但文件不存在。
+      // 路径错了的诊断比不报更容易误导，故断言逐个可解析到真实文件。
+      check('cli/seal-uncommitted-paths-resolve',
+        uncommitted.length > 0 && uncommitted.every((path) => existsSync(join(cliRoot, path))),
+        `uncommittedAfterSeal 的每个路径都必须在仓库中真实存在，实际 ${JSON.stringify(uncommitted)}`);
     }
   } else {
     check('cli/seal-success-path-reachable', false,
