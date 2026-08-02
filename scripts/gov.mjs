@@ -444,6 +444,8 @@ function cmdStatus() {
   // 找错方向了。宁可让 status 慢一点(多读一个交接书)也不能给假绿。
   const check = runGovernanceCheck({ withFreshness: true });
   emit({
+    // emit 恒发 ok: true;payload 在其后展开,故这里显式覆盖。见函数末尾 exitCode 注释。
+    ok: check.ok,
     mode: 'status',
     lifecycleCounts: counts,
     // status 也必须报心跳陈旧度。它此前只给 heartbeatAt 原始值,而 next 会算
@@ -474,6 +476,14 @@ function cmdStatus() {
     governanceGateOk: check.ok,
     governanceErrors: check.errors.slice(0, 10)
   });
+  // 顶层 ok 与 exitCode 必须跟着 governanceGateOk。emit 恒发 ok: true,于是
+  // 实测出现过 `"ok": true` 与 `"governanceGateOk": false` 同时印在一份输出里、
+  // 退出码还是 0 的状态——而 ok 是所有其他 gov 子命令表示成败的字段。
+  //
+  // 只改 governanceGateOk 不改 ok 等于把假绿从一层挪到另一层:管道里 `gov status
+  // && 下一步` 或只看 ok 的读者仍旧被放行。status 是只读命令,红代表「治理数据当前
+  // 不满足门禁」,不代表本命令执行失败——但对使用者而言这两者要做的事是同一件:先修红。
+  if (!check.ok) process.exitCode = 1;
 }
 
 function cmdClaim(args) {
@@ -1031,7 +1041,8 @@ if (!command || command === '--help' || command === 'help') {
     mode: 'help',
     commands: {
       'gov next [--release V0.5]': '列出可 claim 的切片、在飞切片（带心跳新鲜度）与被阻塞切片',
-      'gov status': '执行面板汇总 + 治理门禁当前是否通过',
+      'gov status': '执行面板汇总 + 治理门禁当前是否通过（含 freshness 判定；'
+        + '门禁红时顶层 ok=false 且退出码 1，与 verify --tier governance 结论一致）',
       'gov claim --slice W-X --owner me [--claim-id id] [--recovery-trigger 文本]': '原子占用切片并置 active',
       'gov heartbeat --slice W-X [--owner me]': '刷新心跳，证明仍在推进',
       'gov release --slice W-X [--owner me] [--force]': '释放 claim 并退回 ready',
