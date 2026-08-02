@@ -254,7 +254,8 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-REL-F-SCALE-02"
+        "W-REL-F-SCALE-02",
+        "W-REL-F-ACCEPT-02"
       ],
       "evidenceRefs": [],
       "blockerRefs": [],
