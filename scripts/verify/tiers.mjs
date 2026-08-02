@@ -43,6 +43,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:ai-fake-loop': 'unit',
   'test:desktop-security': 'unit',
   'test:editor-document-store': 'unit',
+  // 统一原生 mutation 写链：取消/确认重试/staging 失败三条分支收敛到一处后，
+  // 任一分支静默丢失都不影响正常路径通过，必须由负向断言门禁化。
+  'test:editor-mutation-service': 'unit',
   'test:emedf-schema': 'unit',
   'test:emevd-dsl-compiler': 'unit',
   'test:emevd-envelope-map': 'unit',

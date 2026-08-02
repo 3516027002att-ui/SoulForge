@@ -38,6 +38,7 @@
     "bridge:verify:flver-glb": "npm run test:native-flver-glb -w @soulforge/core",
     "test:asset-import": "npm run test:asset-import -w @soulforge/core",
     "test:editor-document-store": "npm run test:editor-document-store -w @soulforge/core",
+    "test:editor-mutation-service": "npm run test:editor-mutation-service -w @soulforge/core",
     "test:model-service-vault-contract": "npm run test:model-service-vault-contract -w @soulforge/core",
     "test:hex-scene": "npm run test:hex-scene -w @soulforge/core",
     "test:scene-draw-list": "npm run test:scene-draw-list -w @soulforge/core",

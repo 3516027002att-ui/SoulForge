@@ -22,6 +22,7 @@ export * from './editing/msbBridgeRead.js';
 export * from './editing/msbBridgeCommit.js';
 export * from './editing/workbenchProjections.js';
 export * from './editing/bridgeStaging.js';
+export * from './editing/editorMutationService.js';
 export * from './scene/msbSceneManifest.js';
 export * from './scene/sceneDrawList.js';
 export * from './scene/sceneAssetInventory.js';
