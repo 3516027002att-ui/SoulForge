@@ -375,12 +375,26 @@ check('cli/next-item-self-sufficient',
   {
     const slicesPath = join(cliRoot, 'docs/governance/slices.json');
     const pristine = readFileSync(slicesPath, 'utf8');
-    const perturbed = JSON.parse(pristine);
+
+    // claim 是执行面板状态，会被正常的 release 清空——所以场景必须自己构造，
+    // 不能把「真实数据碰巧有 activeClaim」当前提。实测过后果：把 5 条被遗弃的
+    // claim 全部释放后 activeClaims 变空，这条门禁就报
+    // 「无法构造心跳陈旧场景」而红，而当时治理数据完全合法、CLI 也没退化。
+    // 那是判据依赖了会正常变化的状态，不是真实缺陷。
+    //
+    // 自己 claim 一条 ready 切片即可：claim 不提升 authority、不写 Evidence，
+    // 且这段结束时连同心跳扰动一起被 pristine 逐字节还原。
+    const claimSeed = JSON.parse(pristine).slices.find((slice) => slice.lifecycle === 'ready');
+    if (claimSeed) {
+      runGov(['claim', '--slice', claimSeed.sliceId, '--owner', 'fixture-heartbeat'], cliRoot);
+    }
+    const perturbed = JSON.parse(readFileSync(slicesPath, 'utf8'));
     const targetClaim = perturbed.activeClaims?.[0] ?? null;
 
     if (targetClaim === null) {
       check('cli/next-stale-claim-scenario-constructible', false,
-        '治理数据里没有 activeClaims，无法构造心跳陈旧场景；判据未被执行等于没有门禁。');
+        '既无既有 activeClaims 也无 lifecycle=ready 切片可供 claim，心跳陈旧场景无从构造；'
+        + '判据未被执行等于没有门禁，故失败关闭而不是跳过。');
     } else {
       const sliceId = targetClaim.sliceId;
 
@@ -437,10 +451,12 @@ check('cli/next-item-self-sufficient',
         + `实际 ${JSON.stringify(unparsableEntry)?.slice(0, 300)}`);
 
       // 扰动必须还原，否则其后每条断言都跑在被改过的数据上（本 fixture 实测踩过）。
+      // pristine 取自本段开头、即 claim 之前，所以这一次写回同时撤掉三次心跳改写
+      // 与上面为构造场景所做的 claim，无需单独 release。
       writeFileSync(slicesPath, pristine, 'utf8');
       check('cli/next-stale-claim-fixture-restored',
         readFileSync(slicesPath, 'utf8') === pristine,
-        '心跳场景的扰动必须还原，否则后续 seal 与投影断言全部跑在被改过的 slices.json 上。');
+        '心跳场景的扰动（含为构造场景而做的 claim）必须还原，否则后续 seal 与投影断言全部跑在被改过的 slices.json 上。');
     }
   }
 }
@@ -581,6 +597,21 @@ if (targetSlice) {
   // seal-success-path-reachable。故快照 → 断言 → 还原 → 锁定还原成功。
   const slicesPathForSuccess = join(cliRoot, 'docs/governance/slices.json');
   const gatesPathForSuccess = join(cliRoot, 'docs/governance/gates.json');
+  // 与心跳段同一个根因：successTarget 原本直接找 lifecycle=active 的切片，
+  // 而 active 是会被正常 release 清空的执行面板状态。实测把 5 条被遗弃 claim
+  // 全部释放后，本段整体被静默跳过——4 条断言（含刚修好的还原断言）一条不跑，
+  // 而 checks 总数只是变小，没有任何门禁转红。所以这里自己 claim 一条 ready
+  // 切片来构造前提，让本段的可达性不依赖真实面板状态。
+  //
+  // 快照必须取在这个 claim 之前，否则还原会把 fixture 自己制造的 claim 留在
+  // 数据里，让下游 seal 断言跑在多出一条 activeClaim 的状态上。
+  const slicesBeforeSeed = readFileSync(slicesPathForSuccess, 'utf8');
+  const gatesBeforeSeed = readFileSync(gatesPathForSuccess, 'utf8');
+  const validationBeforeSeed = readFileSync(join(cliRoot, 'docs/governance/validation.json'), 'utf8');
+  if (!JSON.parse(slicesBeforeSeed).slices.some((slice) => slice.lifecycle === 'active')) {
+    const seed = JSON.parse(slicesBeforeSeed).slices.find((slice) => slice.lifecycle === 'ready');
+    if (seed) runGov(['claim', '--slice', seed.sliceId, '--owner', 'fixture-complete'], cliRoot);
+  }
   const successRoot = JSON.parse(readFileSync(slicesPathForSuccess, 'utf8'));
   const successTarget = successRoot.slices.find((slice) => slice.lifecycle === 'active');
   if (successTarget) {
@@ -594,9 +625,11 @@ if (targetSlice) {
     const gateWith = gatesForSuccess.gates.find((gate) =>
       gate.gateState === 'open' && (gate.sliceRefs ?? []).includes(successTarget.sliceId));
     if (gateWith) {
-      const slicesSnapshot = readFileSync(slicesPathForSuccess, 'utf8');
-      const gatesSnapshot = readFileSync(gatesPathForSuccess, 'utf8');
-      const validationSnapshot = readFileSync(join(cliRoot, 'docs/governance/validation.json'), 'utf8');
+      // 复用 seed claim 之前的三份快照，使还原同时撤掉本段的后继切片扰动
+      // 与为构造前提而做的 claim。
+      const slicesSnapshot = slicesBeforeSeed;
+      const gatesSnapshot = gatesBeforeSeed;
+      const validationSnapshot = validationBeforeSeed;
       const successorId = `${successTarget.sliceId}-SUCCESSOR`;
       successRoot.slices.push({
         ...successTarget,
