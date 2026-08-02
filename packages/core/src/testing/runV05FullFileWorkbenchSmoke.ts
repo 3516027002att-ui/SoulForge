@@ -3,9 +3,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import type { OperationLogRecord, OperationStatus } from '@soulforge/shared';
 import {
   openFileResource,
@@ -84,15 +84,22 @@ interface TempModPaths {
   large: string;
 }
 
-async function buildTempModWorkspace(): Promise<{
+/**
+ * 在给定的临时工作区里建一套 Mod/游戏目录。
+ *
+ * `slot` 让同一次运行里的多套目录互不干扰——改造前每次调用各自 mkdtemp 且从不清理，
+ * 单次运行泄漏 3 个目录（main 一次 + happy path 循环两次）。现在全部落在
+ * withSmokeWorkspace 的 root 下，一次 dispose 全删。
+ */
+async function buildTempModWorkspace(root: string, slot: string): Promise<{
   root: string;
   overlayRoot: string;
   baseRoot: string;
   paths: TempModPaths;
 }> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-ffw-'));
-  const overlayRoot = join(root, 'mod');
-  const baseRoot = join(root, 'game');
+  const slotRoot = join(root, slot);
+  const overlayRoot = join(slotRoot, 'mod');
+  const baseRoot = join(slotRoot, 'game');
   const dirs = ['msg', 'script', 'event', 'map', 'param', 'chr', 'obj', 'other'];
   for (const d of dirs) {
     await mkdir(join(overlayRoot, d), { recursive: true });
@@ -123,17 +130,21 @@ async function buildTempModWorkspace(): Promise<{
   await writeFile(paths.baseTxt, 'base-only\n', 'utf8');
   await writeFile(paths.large, Buffer.alloc(DEFAULT_PROBE_PREFIX_BYTES + 64 * 1024, 0));
 
-  return { root, overlayRoot, baseRoot, paths };
+  return { root: slotRoot, overlayRoot, baseRoot, paths };
 }
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('ffw', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const evidence: Array<{ requirement: string; pass: boolean; detail: string }> = [];
   const mark = (requirement: string, pass: boolean, detail: string) => {
     evidence.push({ requirement, pass, detail });
     if (!pass) throw new Error(`FAIL ${requirement}: ${detail}`);
   };
 
-  const ws = await buildTempModWorkspace();
+  const ws = await buildTempModWorkspace(root, 'main');
   const session = await openWorkspaceSession({
     overlayRoot: ws.overlayRoot,
     baseRoot: ws.baseRoot,
@@ -174,7 +185,8 @@ async function main(): Promise<void> {
     proposal: textProp,
     session,
     workspaceRoot: ws.overlayRoot,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Text file edit through PatchIR + WorkspaceTransaction',
@@ -204,7 +216,8 @@ async function main(): Promise<void> {
       subjects: ['resource', 'high', 'ALL_RISKS'],
       riskLevel: 'caution',
       sourceUri: 'file://other/blob.bin'
-    })
+    }),
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Binary raw edit through PatchIR + WorkspaceTransaction',
@@ -226,8 +239,10 @@ async function main(): Promise<void> {
     proposal: denyReplaceProp,
     session,
     workspaceRoot: ws.overlayRoot,
-    operationLog: store
+    operationLog: store,
     // no confirmation
+    // 本段预期被确认门拦下、不落还原点；仍显式指定，避免将来改成可通过时重新泄漏。
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Native/packed whole-file replace high-risk confirmation',
@@ -256,7 +271,8 @@ async function main(): Promise<void> {
     proposal: denyRawProp,
     session,
     workspaceRoot: ws.overlayRoot,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Native/packed whole-file replace high-risk confirmation',
@@ -294,7 +310,8 @@ async function main(): Promise<void> {
       subjects: ['resource', 'high', 'ALL_RISKS', 'file://event/e0000.emevd.dcx'],
       riskLevel: 'high',
       sourceUri: 'file://event/e0000.emevd.dcx'
-    })
+    }),
+    backupBaseDir: join(root, 'backups')
   });
   if (replaceCommit.changedFiles.length === 0) {
     throw new Error(`packed replace failed: ${JSON.stringify(replaceCommit.diagnostics)}`);
@@ -328,7 +345,8 @@ async function main(): Promise<void> {
     proposal: baseProp,
     session,
     workspaceRoot: ws.overlayRoot,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Base write blocked',
@@ -352,7 +370,8 @@ async function main(): Promise<void> {
     proposal: outProp,
     session,
     workspaceRoot: ws.overlayRoot,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Workspace outside write blocked',
@@ -379,7 +398,9 @@ async function main(): Promise<void> {
   });
   const tx = createWorkspaceTransaction({
     workspaceId: session.meta.workspaceId,
-    workspaceRoot: ws.overlayRoot
+    workspaceRoot: ws.overlayRoot,
+    // 本段预期 hash 陈旧被拦、不落还原点；仍显式指定，避免将来改成提交成功时重新泄漏。
+    backupBaseDir: join(root, 'backups')
   });
   tx.addPatch(patch);
   await tx.stage();
@@ -413,7 +434,8 @@ async function main(): Promise<void> {
     {
       workspaceRoot: ws.overlayRoot,
       session,
-      operationLog: new FailingPendingLogStore()
+      operationLog: new FailingPendingLogStore(),
+      backupBaseDir: join(root, 'backups')
     }
   );
   mark(
@@ -444,7 +466,8 @@ async function main(): Promise<void> {
       workspaceRoot: ws.overlayRoot,
       session,
       operationLog: new FailOnCommittedLogStore(),
-      recoveryDir: join(ws.root, 'recovery')
+      recoveryDir: join(ws.root, 'recovery'),
+      backupBaseDir: join(root, 'backups')
     }
   );
   const afterCommitLog = await readFile(ws.paths.txt, 'utf8');
@@ -588,7 +611,9 @@ async function main(): Promise<void> {
     opId: textCommit.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(textCommit.opId)
+    confirmation: rollbackConfirmation(textCommit.opId),
+    // 回滚会建还原点；不指定时落系统临时目录且有意保留，无人清理。
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Text file edit through PatchIR + WorkspaceTransaction',
@@ -602,7 +627,8 @@ async function main(): Promise<void> {
     opId: rawCommit.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(rawCommit.opId)
+    confirmation: rollbackConfirmation(rawCommit.opId),
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Binary raw edit through PatchIR + WorkspaceTransaction',
@@ -616,7 +642,8 @@ async function main(): Promise<void> {
     opId: replaceCommit.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(replaceCommit.opId)
+    confirmation: rollbackConfirmation(replaceCommit.opId),
+    backupBaseDir: join(root, 'backups')
   });
   mark(
     'Native/packed whole-file replace high-risk confirmation',
@@ -626,7 +653,7 @@ async function main(): Promise<void> {
 
   // Run write path twice on fresh temps (happy path)
   for (const label of ['run2a', 'run2b']) {
-    const again = await buildTempModWorkspace();
+    const again = await buildTempModWorkspace(root, label);
     const s2 = await openWorkspaceSession({ overlayRoot: again.overlayRoot, game: 'unknown' });
     const p = await proposeTextFileEdit({
       workspaceId: s2.meta.workspaceId,
@@ -639,7 +666,8 @@ async function main(): Promise<void> {
       proposal: p,
       session: s2,
       workspaceRoot: again.overlayRoot,
-      operationLog: new MemoryOperationLogStore()
+      operationLog: new MemoryOperationLogStore(),
+      backupBaseDir: join(root, 'backups')
     });
     if ((await readFile(again.paths.txt, 'utf8')) !== `${label}\n`) {
       throw new Error(`fresh temp write failed ${label}`);

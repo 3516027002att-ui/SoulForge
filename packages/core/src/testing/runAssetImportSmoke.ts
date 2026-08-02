@@ -2,13 +2,16 @@
  * Asset import staging smoke — drives real stageAssetImport on synthetic open-format bytes.
  */
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { planAssetImport, stageAssetImport } from '../assets/assetImport.js';
 
-async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-asset-import-'));
+function main(): Promise<void> {
+  return withSmokeWorkspace('asset-import', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const stagingRoot = join(root, 'staging');
   const sourceDir = join(root, 'source');
   await mkdir(sourceDir, { recursive: true });

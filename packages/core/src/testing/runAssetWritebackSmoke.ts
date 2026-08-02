@@ -2,16 +2,19 @@
  * Real path: stage PNG → PatchIR file_replace into temp Mod overlay → reread hash.
  */
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { commitAssetImportThroughPatchIr } from '../assets/assetImportWriteback.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 
-async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-asset-writeback-'));
+function main(): Promise<void> {
+  return withSmokeWorkspace('asset-writeback', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');
   const sourceDir = join(root, 'source');
@@ -49,7 +52,9 @@ async function main(): Promise<void> {
     expectedTargetHash: expectedHash,
     confirmationReceiptId: confirmation.id,
     title: 'PNG 导入写回 smoke'
-  }, { session, operationLog: store });
+    // 提交会建还原点；不指定 backupBaseDir 时它落系统临时目录且有意保留，无人清理。
+    // 实测：改用 harness 后静态门禁已判干净，运行期仍每次残留一个 soulforge-backup-*。
+  }, { session, operationLog: store, backupBaseDir: join(root, 'backups') });
 
   if (!result.ok) {
     throw new Error(`writeback failed: ${JSON.stringify(result.diagnostics)}`);
@@ -72,7 +77,8 @@ async function main(): Promise<void> {
     targetAbsolutePath: targetPath,
     expectedTargetHash: expectedHash, // original hash, file already changed
     confirmationReceiptId: confirmation.id
-  }, { session, operationLog: store });
+    // 本段预期 hash 门拦下、不落还原点；仍显式指定，避免将来改成可通过时重新泄漏。
+  }, { session, operationLog: store, backupBaseDir: join(root, 'backups') });
   if (stale.ok) throw new Error('stale hash writeback must fail');
 
   console.log(JSON.stringify({

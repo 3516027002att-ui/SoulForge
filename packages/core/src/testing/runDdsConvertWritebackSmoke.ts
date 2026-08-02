@@ -2,17 +2,20 @@
  * Real path: encode RGBA → DDS → stage → PatchIR writeback → reread DDS magic/hash.
  */
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { convertRgbaToDdsAndWriteback } from '../assets/convertAndWriteback.js';
 import { isDdsBuffer } from '../assets/pngToDds.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 
-async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-dds-convert-'));
+function main(): Promise<void> {
+  return withSmokeWorkspace('dds-convert', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');
   await mkdir(join(overlay, 'parts', 'tex'), { recursive: true });
@@ -41,7 +44,9 @@ async function main(): Promise<void> {
     conversionRuleId: 'sekiro.dds.from-rgba',
     image: { solid: { width: 4, height: 4, r: 32, g: 64, b: 128, a: 255 } },
     title: 'RGBA→DDS 写回 smoke'
-  }, { session, operationLog: store });
+    // 提交会建还原点；不指定 backupBaseDir 时它落系统临时目录且有意保留，无人清理。
+    // 实测：改用 harness 后静态门禁已判干净，运行期仍每次残留一个 soulforge-backup-*。
+  }, { session, operationLog: store, backupBaseDir: join(root, 'backups') });
 
   if (!result.ok) throw new Error(`convert writeback failed: ${JSON.stringify(result.diagnostics)}`);
   const after = await readFile(targetPath);

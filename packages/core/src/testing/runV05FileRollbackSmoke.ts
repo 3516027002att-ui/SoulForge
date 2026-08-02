@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
 import { MemoryOperationLogStore } from '../patch/operationLog.js';
@@ -9,8 +9,11 @@ import { rollbackFile } from '../patch/rollback.js';
 import { createConfirmationReceipt } from '../patch/writerContract.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 
-async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-file-rollback-'));
+function main(): Promise<void> {
+  return withSmokeWorkspace('file-rollback', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   await mkdir(overlayRoot, { recursive: true });
   const firstPath = join(overlayRoot, 'first.txt');
@@ -28,7 +31,12 @@ async function main(): Promise<void> {
       textEdit('file://second.txt', secondPath, 'second-before\n', 'second-after\n')
     ]
   });
-  const committed = await executePatchIrThroughTransaction(patch, { session, operationLog: store });
+  const committed = await executePatchIrThroughTransaction(patch, {
+    session,
+    operationLog: store,
+    // 提交会建还原点；不指定时落系统临时目录且有意保留，无人清理。
+    backupBaseDir: join(root, 'backups')
+  });
   if (!committed.operation || committed.changedFiles.length !== 2) throw new Error('Two-file commit failed.');
 
   const rolled = await rollbackFile({

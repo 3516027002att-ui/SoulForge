@@ -13,8 +13,8 @@
  * is copied to a temp overlay; the original Mod file is never touched.
  */
 import { createHash } from 'node:crypto';
-import { copyFile, mkdtemp, mkdir, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, mkdir, readFile } from 'node:fs/promises';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { join } from 'node:path';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
@@ -51,13 +51,16 @@ function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('native-script-replace', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const source = await resolveNativeFixture(
     process.argv[2],
     'luabnd-primary',
     '../../mods/script/aicommon.luabnd.dcx'
   );
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-native-script-replace-'));
   const overlay = join(root, 'mod');
   await mkdir(join(overlay, 'script'), { recursive: true });
   const target = join(overlay, 'script', 'aicommon.luabnd.dcx');
@@ -136,7 +139,9 @@ async function main(): Promise<void> {
     }]
   });
 
-  const committed = await executePatchIrThroughTransaction(patch, { session, operationLog: store });
+  const committed = await executePatchIrThroughTransaction(patch, { session, operationLog: store,
+    backupBaseDir: join(root, 'backups')
+  });
   if (!committed.operation || committed.changedFiles.length !== 1) {
     throw new Error(`Script container replace failed: ${JSON.stringify(committed.diagnostics)}`);
   }
@@ -164,7 +169,9 @@ async function main(): Promise<void> {
       subjects: [`ROLLBACK_OPERATION:${committed.opId}`],
       riskLevel: 'high',
       note: 'native script container replace smoke'
-    })
+    }),
+    // 回滚会建还原点；不指定时落系统临时目录且有意保留，无人清理。
+    backupBaseDir: join(root, 'backups')
   });
   if (!rolled.ok || !(await readFile(target)).equals(original)) {
     throw new Error(`Script container rollback failed: ${JSON.stringify(rolled.diagnostics)}`);

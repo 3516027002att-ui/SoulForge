@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { copyFile, mkdtemp, mkdir, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, mkdir, readFile } from 'node:fs/promises';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { join } from 'node:path';
 import { createPatchIr } from '../patch-engine/patchIr.js';
 import { executePatchIrThroughTransaction } from '../patch/durablePatchCommit.js';
@@ -19,13 +19,16 @@ interface Envelope {
   };
 }
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('native-bnd4-transaction', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const source = await resolveNativeFixture(
     process.argv[2],
     'chrbnd-primary',
     '../../mods/chr/c0000.anibnd.dcx'
   );
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-native-bnd4-transaction-'));
   const overlay = join(root, 'mod');
   await mkdir(join(overlay, 'chr'), { recursive: true });
   const target = join(overlay, 'chr', 'c0000.anibnd.dcx');
@@ -79,7 +82,9 @@ async function main(): Promise<void> {
     allowedRoots: [overlay],
     timeoutMs: 60_000
   });
-  const committed = await executePatchIrThroughTransaction(patch, { session, operationLog: store });
+  const committed = await executePatchIrThroughTransaction(patch, { session, operationLog: store,
+    backupBaseDir: join(root, 'backups')
+  });
   if (!committed.operation || committed.changedFiles.length !== 1) {
     throw new Error(`Native BND4 transaction failed: ${JSON.stringify(committed.diagnostics)}`);
   }
@@ -104,7 +109,9 @@ async function main(): Promise<void> {
       subjects: [`ROLLBACK_OPERATION:${committed.opId}`],
       riskLevel: 'high',
       note: 'native BND4 transaction smoke'
-    })
+    }),
+    // 回滚会建还原点；不指定时落系统临时目录且有意保留，无人清理。
+    backupBaseDir: join(root, 'backups')
   });
   if (!rolled.ok || !(await readFile(target)).equals(original)) {
     throw new Error(`Native BND4 rollback failed: ${JSON.stringify(rolled.diagnostics)}`);
@@ -201,7 +208,8 @@ async function main(): Promise<void> {
     });
     const mutationCommit = await executePatchIrThroughTransaction(mutationPatch, {
       session,
-      operationLog: store
+      operationLog: store,
+      backupBaseDir: join(root, 'backups')
     });
     if (!mutationCommit.operation) {
       throw new Error(`${mutation} transaction failed: ${JSON.stringify(mutationCommit.diagnostics)}`);
@@ -347,7 +355,8 @@ async function main(): Promise<void> {
     });
     const mutationCommit = await executePatchIrThroughTransaction(mutationPatch, {
       session,
-      operationLog: store
+      operationLog: store,
+      backupBaseDir: join(root, 'backups')
     });
     if (!mutationCommit.operation) {
       throw new Error(`${mutation} operation transaction failed: ${JSON.stringify(mutationCommit.diagnostics)}`);
@@ -360,7 +369,8 @@ async function main(): Promise<void> {
         subjects: [`ROLLBACK_OPERATION:${mutationCommit.opId}`],
         riskLevel: 'high',
         note: `native BND4 ${mutation} smoke`
-      })
+      }),
+      backupBaseDir: join(root, 'backups')
     });
     if (!mutationRollback.ok || !(await readFile(target)).equals(baselineBytes)) {
       throw new Error(`${mutation} operation rollback failed.`);

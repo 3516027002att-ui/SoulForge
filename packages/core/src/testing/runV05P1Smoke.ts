@@ -1,6 +1,6 @@
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { saveTextResource } from '../editing/saveTextResource.js';
 import {
   assessEditRisk,
@@ -36,8 +36,11 @@ function makeFile(partial: Partial<IndexedFile> & Pick<IndexedFile, 'sourceUri' 
   };
 }
 
-async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-v05-p1-'));
+function main(): Promise<void> {
+  return withSmokeWorkspace('v05-p1', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const overlayRoot = join(root, 'mod');
   await mkdir(join(overlayRoot, 'msg'), { recursive: true });
   await mkdir(join(overlayRoot, 'event'), { recursive: true });
@@ -113,7 +116,9 @@ async function main(): Promise<void> {
     file: bakFile,
     newText: 'bak-v2\n',
     session,
-    operationLog: store
+    operationLog: store,
+    // 本段预期被确认门拦下、不落还原点；仍显式指定，避免将来改成可通过时重新泄漏。
+    backupBaseDir: join(root, 'backups')
   });
   if (denied.ok || !denied.requiresConfirmation) {
     throw new Error('Backup save without confirmation must require confirmation.');
@@ -133,7 +138,9 @@ async function main(): Promise<void> {
     newText: 'bak-v2\n',
     session,
     operationLog: store,
-    confirmation: receipt
+    confirmation: receipt,
+    // 提交会建还原点；不指定时落系统临时目录且有意保留，无人清理。
+    backupBaseDir: join(root, 'backups')
   });
   if (!confirmed.ok) {
     throw new Error(`Confirmed backup save failed: ${confirmed.diagnostics.map((d) => d.message).join('; ')}`);
@@ -166,7 +173,8 @@ async function main(): Promise<void> {
     file: textFile,
     newText: 'v2\n',
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   if (!saved.ok || !saved.graph) throw new Error('Safe text save should succeed with graph.');
   const history = await store.history(session.meta.workspaceId);

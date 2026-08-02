@@ -4,9 +4,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import type { IndexedFile } from '@soulforge/shared';
 import {
   resolveResourceCapabilities
@@ -58,8 +58,11 @@ function makeFile(
   };
 }
 
-async function main(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-raw-wb-'));
+function main(): Promise<void> {
+  return withSmokeWorkspace('raw-wb', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const overlay = join(root, 'mod');
   await mkdir(join(overlay, 'msg'), { recursive: true });
   await mkdir(join(overlay, 'event'), { recursive: true });
@@ -166,7 +169,8 @@ async function main(): Promise<void> {
     expectedHash: binHash,
     newContentBase64: Buffer.from([0xde, 0xad]).toString('base64'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   if (noConfirm.ok || !noConfirm.diagnostics.some((d) => d.code === 'EDIT_CONFIRMATION_REQUIRED')) {
     throw new Error('raw replace without confirmation must fail');
@@ -184,7 +188,8 @@ async function main(): Promise<void> {
     newContentBase64: Buffer.from([0xde, 0xad, 0xbe, 0xef]).toString('base64'),
     confirmation: receipt,
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   if (!replaced.ok || !replaced.opId) {
     throw new Error(`raw replace failed: ${JSON.stringify(replaced.diagnostics)}`);
@@ -196,7 +201,9 @@ async function main(): Promise<void> {
     opId: replaced.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(replaced.opId)
+    confirmation: rollbackConfirmation(replaced.opId),
+    // 回滚会建还原点；不指定时落系统临时目录且有意保留，无人清理。
+    backupBaseDir: join(root, 'backups')
   });
   if (!rolled.ok) throw new Error(`rollback replace failed: ${JSON.stringify(rolled.diagnostics)}`);
   if (!(await readFile(binPath)).equals(binBytes)) throw new Error('rollback replace did not restore');
@@ -215,7 +222,8 @@ async function main(): Promise<void> {
       sourceUri: files.bin.sourceUri
     }),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   if (badHash.ok || !badHash.diagnostics.some((d) => d.code === 'HASH_MISMATCH')) {
     throw new Error('wrong expectedHash must fail');
@@ -233,7 +241,8 @@ async function main(): Promise<void> {
       sourceUri: files.bin.sourceUri
     }),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   if (!patched.ok || !patched.opId) throw new Error(`byte patch failed: ${JSON.stringify(patched.diagnostics)}`);
   if ((await readFile(binPath))[1] !== 0xff) throw new Error('byte patch not applied');
@@ -241,7 +250,8 @@ async function main(): Promise<void> {
     opId: patched.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(patched.opId)
+    confirmation: rollbackConfirmation(patched.opId),
+    backupBaseDir: join(root, 'backups')
   });
   if (!rolledPatch.ok || !(await readFile(binPath)).equals(binBytes)) {
     throw new Error('byte patch rollback failed');
@@ -260,7 +270,8 @@ async function main(): Promise<void> {
       sourceUri: files.bin.sourceUri
     }),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   if (oobPatch.ok) throw new Error('OOB patch must fail');
 
@@ -269,7 +280,9 @@ async function main(): Promise<void> {
     file: files.dcx,
     newText: 'nope',
     session,
-    operationLog: store
+    operationLog: store,
+    // 本段预期在 packed dcx 上失败、不落还原点；仍显式指定，避免将来改成可通过时重新泄漏。
+    backupBaseDir: join(root, 'backups')
   });
   if (textOnDcx.ok) throw new Error('saveTextResource must fail on packed dcx');
 
@@ -279,7 +292,8 @@ async function main(): Promise<void> {
     expectedHash: dcxHash,
     newContentBase64: Buffer.from([0x44, 0x43, 0x58, 0x00, 0x99]).toString('base64'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   if (dcxNoConfirm.ok) throw new Error('dcx raw replace without confirmation must fail');
 
@@ -296,7 +310,8 @@ async function main(): Promise<void> {
       sourceUri: files.dcx.sourceUri
     }),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   if (!dcxOk.ok || !dcxOk.opId) {
     throw new Error(`dcx raw replace failed: ${JSON.stringify(dcxOk.diagnostics)}`);
@@ -306,7 +321,8 @@ async function main(): Promise<void> {
     opId: dcxOk.opId,
     store,
     session,
-    confirmation: rollbackConfirmation(dcxOk.opId)
+    confirmation: rollbackConfirmation(dcxOk.opId),
+    backupBaseDir: join(root, 'backups')
   });
   if (!(await readFile(dcxPath)).equals(dcxBytes)) throw new Error('dcx rollback failed');
 

@@ -11,9 +11,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import type { IndexedFile } from '@soulforge/shared';
 import {
   resolveResourceCapabilities,
@@ -87,9 +87,12 @@ function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
 
-async function main(): Promise<void> {
+function main(): Promise<void> {
+  return withSmokeWorkspace('v06', (workspace) => mainInWorkspace(workspace.root));
+}
+
+async function mainInWorkspace(root: string): Promise<void> {
   const results: string[] = [];
-  const root = await mkdtemp(join(tmpdir(), 'soulforge-v06-'));
   const overlay = join(root, 'mod');
   await mkdir(join(overlay, 'msg'), { recursive: true });
   await mkdir(join(overlay, 'bin'), { recursive: true });
@@ -133,7 +136,8 @@ async function main(): Promise<void> {
     newContentBase64: '!!!!not-valid!!!!',
     confirmation: confirm('file://other/blob.bin'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   assert(!badB64.ok, 'illegal base64 replace must fail');
   assert((await readFile(binPath)).equals(binOrig), 'target must be unchanged after illegal base64');
@@ -147,7 +151,8 @@ async function main(): Promise<void> {
     replacementBase64: 'not!!valid',
     confirmation: confirm('file://other/blob.bin'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   assert(!badRange.ok, 'illegal replacementBase64 must fail');
   assert((await readFile(binPath)).equals(binOrig), 'byte-range illegal base64 must not mutate target');
@@ -168,7 +173,8 @@ async function main(): Promise<void> {
     newContentBase64: Buffer.from('attacker-payload').toString('base64'),
     confirmation: confirm('file://other/race.bin'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   assert(!raceResult.ok, 'TOCTOU: commit must fail when file changed');
   assert(
@@ -361,7 +367,8 @@ async function main(): Promise<void> {
     expectedChildHash: sha256(childA),
     newContentBase64: Buffer.from('x').toString('base64'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   assert(!noConfirm.ok, 'no confirmation must fail');
   assert(
@@ -379,7 +386,8 @@ async function main(): Promise<void> {
     newContentBase64: Buffer.from('x').toString('base64'),
     confirmation: confirm('file://msg/item.msgbnd.dcx'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   assert(!hashMismatch.ok, 'hash mismatch must fail');
   assert(
@@ -398,7 +406,8 @@ async function main(): Promise<void> {
     confirmation: confirm('file://msg/item.msgbnd.dcx'),
     session,
     operationLog: store,
-    title: 'v06 nested child replace'
+    title: 'v06 nested child replace',
+    backupBaseDir: join(root, 'backups')
   });
   assert(success.ok, `container replace must succeed: ${success.diagnostics.map((d) => d.code).join(',')}`);
   assert(success.opId, 'opId required');
@@ -458,7 +467,8 @@ async function main(): Promise<void> {
     newContentBase64: fmgPatched.bytes!.toString('base64'),
     confirmation: confirm('file://msg/item.msgbnd.dcx'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   assert(fmgReplace.ok, `FMG-in-container replace: ${fmgReplace.diagnostics.map((d) => d.code).join(',')}`);
   const fmgAfterRead = await readContainerChild(nestedPath, fmgChild.childUri, {
@@ -498,7 +508,9 @@ async function main(): Promise<void> {
     file: nestedFile,
     newText: 'nope',
     session,
-    operationLog: store
+    operationLog: store,
+    // 本段预期在 packed 容器上失败、不落还原点；仍显式指定，避免将来改成可通过时重新泄漏。
+    backupBaseDir: join(root, 'backups')
   });
   assert(!textOnPacked.ok, 'saveText on packed must fail');
   results.push('regression packed text gate ok');
@@ -510,7 +522,8 @@ async function main(): Promise<void> {
     newContentBase64: Buffer.from([9, 8, 7, 6]).toString('base64'),
     confirmation: confirm('file://other/blob.bin'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   assert(legalRaw.ok, 'legal raw replace still works');
   assert((await readFile(binPath)).equals(Buffer.from([9, 8, 7, 6])), 'raw replace content');
@@ -523,7 +536,8 @@ async function main(): Promise<void> {
     allowEmpty: false,
     confirmation: confirm('file://other/blob.bin'),
     session,
-    operationLog: store
+    operationLog: store,
+    backupBaseDir: join(root, 'backups')
   });
   assert(!emptyFail.ok, 'empty payload allowEmpty=false fails');
 
