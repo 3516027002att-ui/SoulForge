@@ -265,6 +265,25 @@ check('cli/next-item-self-sufficient',
     check(`cli/next-release-${releaseId}-active-blocked-scoped`, leaked.length === 0,
       `${releaseId} 的 activeSlices/blockedSlices 不得混入其他版本切片，实际混入 `
       + JSON.stringify(leaked.map((entry) => `${entry.sliceId}@${releaseOf.get(entry.sliceId)}`)));
+
+    // 无可 claim 切片时，出路必须与该版本切片的实际 lifecycle 分布匹配。
+    // 实测踩过：V0.6 的 3 条切片全是 deferred 且 blockerRefs 为空数组，而消息一律说
+    // 「先完成或释放在飞切片，或按 blockers.json 解阻塞」——agent 去查 blockers.json
+    // 什么都查不到，deferred 也不是靠释放 claim 能变 ready 的。给错出路比不给更糟。
+    if ((scoped.payload?.claimable ?? []).length === 0) {
+      const lifecycles = new Set(
+        slicesData.slices.filter((slice) => slice.targetRelease === releaseId).map((slice) => slice.lifecycle)
+      );
+      const message = String(scoped.payload?.message ?? '');
+      if (lifecycles.has('deferred')) {
+        check(`cli/next-release-${releaseId}-deferred-guidance`,
+          message.includes('resumeRequires') && !message.includes('按 blockers.json 解阻塞'),
+          `${releaseId} 只剩 deferred 切片时，出路必须指向 scope.json 的 resumeRequires 而非 blockers.json，实际「${message}」`);
+      }
+      check(`cli/next-release-${releaseId}-empty-message-names-lifecycle`,
+        [...lifecycles].some((lifecycle) => message.includes(lifecycle)),
+        `${releaseId} 无可 claim 时消息必须点明实际 lifecycle（${[...lifecycles].join('/')}），实际「${message}」`);
+    }
   }
 
   const allReleases = runGov(['next', '--all'], cliRoot);

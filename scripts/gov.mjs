@@ -201,6 +201,47 @@ function withGovernanceWrite(owner, mutate) {
 // ---------------------------------------------------------------------------
 
 /**
+ * 没有可 claim 切片时，按该版本切片的实际 lifecycle 分布给出正确出路。
+ *
+ * 原先无论什么原因都回同一句「先完成或释放在飞切片，或按 blockers.json 解阻塞」。
+ * 实测 `next --release V0.6` 撞上死路：V0.6 的 3 条切片全是 lifecycle=deferred，
+ * blockerRefs 全为空数组，agent 按指引去查 blockers.json 什么都查不到，而 deferred
+ * 也不是靠释放 claim 或解阻塞能变 ready 的——真正的出路是 scope.json 里那条
+ * scopeItem 的 resumeRequires。给错出路比不给更糟：agent 会沿着错误方向反复尝试。
+ */
+function emptyCandidateMessage(slicesInRelease, release) {
+  const counts = new Map();
+  for (const slice of slicesInRelease) {
+    counts.set(slice.lifecycle, (counts.get(slice.lifecycle) ?? 0) + 1);
+  }
+  const scope = release === null ? '全部版本' : release;
+
+  if (slicesInRelease.length === 0) {
+    return `${scope} 下没有任何切片；新版本要先在 slices.json 里登记 targetRelease=${scope} 的切片。`;
+  }
+
+  const parts = [];
+  const deferred = counts.get('deferred') ?? 0;
+  const active = counts.get('active') ?? 0;
+  const blocked = counts.get('blocked') ?? 0;
+
+  if (deferred > 0) {
+    parts.push(`${deferred} 条为 lifecycle=deferred——解法不是解阻塞或释放 claim，`
+      + '而是先满足 docs/governance/scope.json 里对应 scopeItem 的 resumeRequires，'
+      + '再由用户裁定解除延期');
+  }
+  if (active > 0) parts.push(`${active} 条在飞（gov release 释放，或 gov complete 收尾）`);
+  if (blocked > 0) parts.push(`${blocked} 条被阻塞（按 blockers.json 的 blockerRefs 解阻塞）`);
+
+  const others = [...counts.entries()]
+    .filter(([lifecycle]) => !['deferred', 'active', 'blocked', 'ready'].includes(lifecycle))
+    .map(([lifecycle, count]) => `${count} 条 ${lifecycle}`);
+  if (others.length > 0) parts.push(others.join('、'));
+
+  return `${scope} 下没有 lifecycle=ready 的切片：${parts.join('；')}。`;
+}
+
+/**
  * 列出可推进的切片。判定依据只有治理数据，不含任何人工优先级——
  * 优先级一旦写进 CLI 就成了第二份权威，会与 slices.json 漂移。
  */
@@ -260,7 +301,7 @@ function cmdNext(args) {
       blockerRefs: slice.blockerRefs
     })),
     message: candidates.length === 0
-      ? '没有 lifecycle=ready 的切片；先完成或释放在飞切片，或按 blockers.json 解阻塞。'
+      ? emptyCandidateMessage(data.slices.filter(inRelease), release)
       : `${candidates.length} 条切片可 claim；claim 前请先读 entryPoints 与 requiredValidation。`,
     note: 'claim 只是并发协调，不构成 Evidence，也不提升 authority。',
     // 选点输出必须自带完整闭环，否则 agent 拿到切片后仍要回交接书里找「做完之后
