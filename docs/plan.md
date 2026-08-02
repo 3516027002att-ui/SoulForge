@@ -46,12 +46,23 @@ Write-Output ("CLI=$cli B  交接书=$doc B  倍数=" + [math]::Round($doc / $cl
 必须包含:`goal`、`hardPrerequisites`、`entryPoints`、`requiredValidation`、`authorityCap`,
 外加 claim → 实现 → 验证 → 封存 → complete 的 `workflow` 骨架。
 
-推论:凡"方向对但不到位"的指引都要补全,不能停在"去某个文件里找"。
+推论一:凡"方向对但不到位"的指引都要补全,不能停在"去某个文件里找"。
 实测例:deferred 切片的出路本来只说"去 `scope.json` 找 `resumeRequires`",而 V0.6 的 3 条
 切片对应 12 个 scopeItem,靠 `capabilityId` 反查是每个 agent 都要重做一遍的活。现在直接投影。
 
+推论二:**状态相同但结论相反的两种情形,输出里必须能区分。** 否则 agent 会一致地选错那一边。
+实测例:被遗弃的 claim 与真有人在推进的 claim 此前都只显示 `sliceId` + `owner`。5 条
+`coordinator-agent` claim 心跳停在 2026-08-01(其后 24 个提交全在治理层、没有一个碰过这些
+切片的 `entryPoints`),接手的 agent 一律读成"有人在做"而避开,V0.5 可 claim 面被无声压到 4 条,
+且没有任何门禁会因此转红。现在 `activeSlices` 带 `heartbeatStale`/`staleFor`/`recoveryHint`。
+
+该修法本身也受第 4 条约束:CLI **不自动释放** claim,只给出"先按 `recoveryTrigger` 核实,
+再 release 或 complete"。误报比漏报危险——擅自释放会撞上另一个真在跑的进程。同理心跳不可
+解析时判为未知而非陈旧,不让格式问题冒充协作问题。推进期间用 `gov heartbeat` 刷新即可。
+
 门禁:`cli/next-item-self-sufficient`、`cli/next-includes-workflow`、
-`cli/next-release-<id>-deferred-projected`。
+`cli/next-release-<id>-deferred-projected`、`cli/next-stale-claim-flagged`、
+`cli/next-fresh-claim-not-flagged`、`cli/next-unparsable-heartbeat-not-flagged`。
 
 ## 3. 引用真实性约束
 
@@ -183,4 +194,14 @@ npm run build
   `docs/AGENT_EXECUTION_PLAYBOOK.md` 与本文。
 - 临时目录泄漏台账尚有 18 项存量欠债(`npm run test:smoke-temp-cleanup` 守着,只允许缩小)。
 - 部分 native smoke 的资源释放不在 `finally` 中,异常路径可能泄漏 bridge 句柄。
+- **5 条 `owner=coordinator-agent` 的在飞 claim 已确认被中断**(心跳停在 2026-08-01;
+  其后的提交无一碰过它们的 `entryPoints`,同期证据全是 `EV-REL-SCOPE-*`):
+  `W-EMEVD-FULL-01`、`W-REL-F-SCALE-02`、`W-A-RECOVERY-INTEGRATION-04`、
+  `W-REL-B-CORPUS-02`、`W-EMEVD-FMG-PARAM-03`。`gov next` 现在会标出来。
+  接手时按各自 `recoveryTrigger` 核实工作树与写进程,再决定 release 还是续做——
+  **不要不核实就批量 release**,那五条的 `authority` 都在 partial 及以上,半成品可能已入库。
+- 4 条分支未合并到 main,均为历史快照且各自领先 1~2 个提交:
+  `backup/local-ahead-225c08d`、`codex/v05-current-project`、`codex/v05-worktree-publish`、
+  `worktree-v05-open-format-import`。按用户裁定**保留不删、不推 origin**;
+  main 领先 `origin/main` 150 个提交也按裁定不推。worktree 已只剩主工作树。
 
