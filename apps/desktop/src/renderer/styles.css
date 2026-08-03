@@ -402,6 +402,7 @@ kbd {
 }
 .tab__name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tab__dirty { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); flex: none; }
+.tab__lock { display: grid; place-items: center; color: var(--ink-3); flex: none; }
 .tab__close {
   width: 18px; height: 18px; display: grid; place-items: center; flex: none;
   color: var(--ink-3); border-radius: var(--radius-s); opacity: 0;
@@ -521,10 +522,10 @@ table.grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .hex-byte--hi { color: var(--ember-text); background: var(--ember-soft); border-radius: 3px; }
 .hex-ascii { color: var(--ink-1); }
 
-/* ── 欢迎页：安全写入链是本产品的签名 ── */
+/* ── 欢迎页：真实工作区摘要（统计/待审查/最近打开） ── */
 .editor-welcome {
-  position: absolute; inset: 0; display: grid; place-items: center;
-  background: var(--forge-0); z-index: 3; overflow-y: auto; padding: 32px 0;
+  position: absolute; inset: 0; display: grid; place-items: start center;
+  background: var(--forge-0); z-index: 3; overflow-y: auto; padding: 8vh 0 32px;
   transition: opacity var(--dur-trans) var(--ease-standard), visibility var(--dur-trans);
 }
 .editor-welcome.is-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
@@ -674,7 +675,7 @@ table.grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .ctx-chip {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: 10.5px; font-family: var(--font-mono); color: var(--ember-text);
-  background: var(--ember-soft); padding: 2px 8px; border-radius: 999px;
+  background: var(--ember-soft); padding: 2px 8px; border-radius: var(--radius-s);
 }
 .ctx-clear { color: var(--ink-3); width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; }
 .ctx-clear:hover { color: var(--danger); background: var(--danger-soft); }
