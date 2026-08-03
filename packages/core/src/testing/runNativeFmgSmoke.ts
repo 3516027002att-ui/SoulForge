@@ -229,6 +229,101 @@ async function mainInWorkspace(root: string): Promise<void> {
   }
   await expectNoFile(overflowPath, 'out-of-range add');
 
+  // 3f) 多语言轴：从 zhocn weapon_names.fmg 派生第二语言（enus）样本。
+  //     FMG v2 无语言字段（语言是目录级概念），writer 语言无关；本步用 native
+  //     write-fmg 的 mutations 数组把 3 条真实中文条目改写为英文占位串（ASCII
+  //     UTF-16，验证非 CJK 写路径），add 一个新 id、delete 一条真实 id —— 得到
+  //     与 zhocn 布局结构不同的派生 enus 样本。样本只落 staging，绝不触原版只读目录。
+  const ENUS_ADD_ID = 999000000;
+  const enusSamplePath = join(staging, 'enus_weapon_names.fmg');
+  const nonEmptyEntries = read.data.entries.filter(
+    (e) => e.text && e.text !== '<?null?>' && e.text.length > 0
+  );
+  if (nonEmptyEntries.length < 4) throw new Error('FMG 样本条目不足以派生 enus 变体。');
+  const enusUpserts = nonEmptyEntries.slice(0, 3);
+  const enusDeleteTarget = nonEmptyEntries[3]!;
+  const derived = await runBridge<{ outputHash: string; entryCount: number; groupCount: number }>({
+    command: 'write-fmg',
+    filePath: fmgPath,
+    allowedRoots: [overlay, staging],
+    writableRoots: [staging],
+    timeoutMs: 60_000,
+    commandOptions: {
+      outputPath: enusSamplePath,
+      expectedDocumentHash: read.data.sourceHash,
+      mutations: [
+        ...enusUpserts.map((e) => ({ kind: 'upsert', id: e.id, text: `ENUS:${e.id}` })),
+        { kind: 'add', id: ENUS_ADD_ID, text: 'ENUS:NEW_ENTRY' },
+        { kind: 'delete', id: enusDeleteTarget.id }
+      ]
+    }
+  });
+  if (!derived.diagnostics.some((d) => d.code === 'FMG_STAGING_WRITE_VERIFIED')) {
+    throw new Error(`enus 派生 write-fmg 失败: ${JSON.stringify(derived.diagnostics)}`);
+  }
+  const enusRead = await runBridge<FmgEnvelope>({
+    command: 'read-fmg-document',
+    filePath: enusSamplePath,
+    allowedRoots: [staging],
+    timeoutMs: 60_000
+  });
+  if (!enusRead.data) throw new Error(`enus 样本重读失败: ${JSON.stringify(enusRead.diagnostics)}`);
+  for (const upsert of enusUpserts) {
+    if (enusRead.data.entries.find((e) => e.id === upsert.id)?.text !== `ENUS:${upsert.id}`) {
+      throw new Error(`enus upsert 文本不匹配: id=${upsert.id}`);
+    }
+  }
+  if (!enusRead.data.entries.some((e) => e.id === ENUS_ADD_ID && e.text === 'ENUS:NEW_ENTRY')) {
+    throw new Error('enus add 条目缺失。');
+  }
+  if (enusRead.data.entries.some((e) => e.id === enusDeleteTarget.id)) {
+    throw new Error('enus delete 目标仍存在。');
+  }
+  if (!enusRead.data.roundTrip?.semanticIdentical) {
+    throw new Error('enus 样本语义往返失败。');
+  }
+
+  // 3g) 对派生 enus 样本再执行一次 write-fmg（第二语言布局上的二次写链验证）。
+  const ENUS_RW_ID = enusUpserts[0]!.id;
+  const enusSecondText = `ENUS:${ENUS_RW_ID}:RW`;
+  const enusRwPath = join(staging, 'enus_weapon_names_rw.fmg');
+  const enusRewrite = await runBridge<{ outputHash: string }>({
+    command: 'write-fmg',
+    filePath: enusSamplePath,
+    allowedRoots: [staging],
+    writableRoots: [staging],
+    timeoutMs: 60_000,
+    commandOptions: {
+      outputPath: enusRwPath,
+      expectedDocumentHash: enusRead.data.sourceHash,
+      mutation: 'upsert',
+      id: ENUS_RW_ID,
+      text: enusSecondText
+    }
+  });
+  if (!enusRewrite.diagnostics.some((d) => d.code === 'FMG_STAGING_WRITE_VERIFIED')) {
+    throw new Error(`enus 二次写失败: ${JSON.stringify(enusRewrite.diagnostics)}`);
+  }
+  const enusRwRead = await runBridge<FmgEnvelope>({
+    command: 'read-fmg-document',
+    filePath: enusRwPath,
+    allowedRoots: [staging],
+    timeoutMs: 60_000
+  });
+  if (enusRwRead.data?.entries.find((e) => e.id === ENUS_RW_ID)?.text !== enusSecondText) {
+    throw new Error('enus 二次写重读不匹配。');
+  }
+  // 隔离：enus 派生与二次写都不得改写 zhocn 源文件。
+  const zhocnAfterEnus = await runBridge<FmgEnvelope>({
+    command: 'read-fmg-document',
+    filePath: fmgPath,
+    allowedRoots: [overlay],
+    timeoutMs: 60_000
+  });
+  if (zhocnAfterEnus.data?.sourceHash !== read.data.sourceHash) {
+    throw new Error('enus 写链污染了 zhocn 源文件。');
+  }
+
   // 4) Commit rebuilt FMG back into msgbnd via native BND4 replace + resource-entry inverse
   const session = await openWorkspaceSession({ overlayRoot: overlay, game: 'sekiro' });
   const store = new MemoryOperationLogStore();
@@ -371,6 +466,7 @@ async function mainInWorkspace(root: string): Promise<void> {
   });
   const menuCount = menuContainer.data?.nested?.entryCount ?? 0;
   let menuFmgVerified = 0;
+  let menuWriteTarget: { path: string; sourceHash: string; editableId: number; newText: string } | undefined;
   const menuFmgDocuments: FmgReferenceDocument[] = [];
   for (let i = 0; i < menuCount; i++) {
     const snap = await runBridge<Bnd4ChildSnapshot>({
@@ -400,6 +496,61 @@ async function mainInWorkspace(root: string): Promise<void> {
       name: snap.data!.name,
       entries: (doc.data.entries ?? []).map((e) => ({ id: e.id, text: e.text }))
     });
+    // 捕获第一个含非空文本的 menu FMG child，供多 msgbnd 写验证（§3h）使用。
+    if (!menuWriteTarget) {
+      const editableMenuEntry = doc.data.entries.find(
+        (e) => e.text && e.text !== '<?null?>' && e.text.length > 0
+      );
+      if (editableMenuEntry) {
+        menuWriteTarget = {
+          path: tmp,
+          sourceHash: doc.data.sourceHash,
+          editableId: editableMenuEntry.id,
+          newText: `${editableMenuEntry.text}·SoulForge`
+        };
+      }
+    }
+  }
+
+  // 3h) 多 msgbnd 轴：menu.msgbnd（bnd4-primary）补 FMG 写链验证。
+  //     之前 menu 只有只读语义往返；本步对选中的 menu FMG child 执行 write-fmg
+  //     staging 写 + 独立重读，并确认原 child 未被改写（写只落 staging，不泄漏）。
+  if (!menuWriteTarget) throw new Error('menu.msgbnd 无可写 FMG 目标。');
+  const menuStaged = join(staging, 'menu_staged.fmg');
+  const menuWrite = await runBridge<{ outputHash: string }>({
+    command: 'write-fmg',
+    filePath: menuWriteTarget.path,
+    allowedRoots: [staging],
+    writableRoots: [staging],
+    timeoutMs: 60_000,
+    commandOptions: {
+      outputPath: menuStaged,
+      expectedDocumentHash: menuWriteTarget.sourceHash,
+      mutation: 'upsert',
+      id: menuWriteTarget.editableId,
+      text: menuWriteTarget.newText
+    }
+  });
+  if (!menuWrite.diagnostics.some((d) => d.code === 'FMG_STAGING_WRITE_VERIFIED')) {
+    throw new Error(`menu write-fmg 失败: ${JSON.stringify(menuWrite.diagnostics)}`);
+  }
+  const menuStagedRead = await runBridge<FmgEnvelope>({
+    command: 'read-fmg-document',
+    filePath: menuStaged,
+    allowedRoots: [staging],
+    timeoutMs: 60_000
+  });
+  if (menuStagedRead.data?.entries.find((e) => e.id === menuWriteTarget.editableId)?.text !== menuWriteTarget.newText) {
+    throw new Error('menu staged 写重读不匹配。');
+  }
+  const menuOriginalRecheck = await runBridge<FmgEnvelope>({
+    command: 'read-fmg-document',
+    filePath: menuWriteTarget.path,
+    allowedRoots: [staging],
+    timeoutMs: 60_000
+  });
+  if (menuOriginalRecheck.data?.entries.find((e) => e.id === menuWriteTarget.editableId)?.text === menuWriteTarget.newText) {
+    throw new Error('menu 写泄漏进原 FMG child。');
   }
 
   // 9) 语言覆盖矩阵：只读扫描 mods/msg 下的语言目录，如实记录本机 corpus 的语言覆盖。
@@ -429,7 +580,7 @@ async function mainInWorkspace(root: string): Promise<void> {
 
   console.log(JSON.stringify({
     ok: true,
-    message: '原生 FMG 读取/语义往返/写入/BND4 提交/回滚验证通过',
+    message: '原生 FMG 读取/语义往返/写入/BND4 提交/回滚 + 多语言(enus 派生)与多 msgbnd(menu)写验证通过',
     entryCount: read.data.entryCount,
     groupCount: read.data.groupCount,
     mutatedId: editable.id,
@@ -448,9 +599,25 @@ async function mainInWorkspace(root: string): Promise<void> {
       nonIntegerId: 'FMG_STAGING_WRITE_FAILED，输出文件不产生',
       outOfRangeId: 'Bridge 拒绝 2^31 越界 id（BRIDGE_REQUEST_FAILED/FMG_STAGING_WRITE_FAILED），输出文件不产生'
     },
+    enusDerivedSample: {
+      derivedFrom: 'zhocn item.msgbnd child 1（weapon_names.fmg）',
+      mutations: ['upsert ×3', 'add', 'delete'],
+      layout: '英文占位串（ASCII UTF-16）＋新增 id 999000000＋删除一条真实 id；结构布局与 zhocn 不同',
+      readRoundTripVerified: enusRead.data.roundTrip?.semanticIdentical ?? false,
+      entryCount: enusRead.data.entryCount,
+      groupCount: enusRead.data.groupCount,
+      rewriteVerified: true,
+      zhocnSourceUntouched: true
+    },
     menuMsgbnd: {
       containerEntries: menuCount,
-      fmgVerified: menuFmgVerified
+      fmgVerified: menuFmgVerified,
+      writeVerified: true,
+      writeCase: {
+        editableId: menuWriteTarget.editableId,
+        stagedRereadVerified: true,
+        originalChildUntouched: true
+      }
     },
     referenceIntegrity: {
       itemMsgbnd: {
@@ -475,11 +642,19 @@ async function mainInWorkspace(root: string): Promise<void> {
           itemMsgbnd: true,
           menuMsgbnd: true,
           itemFmgVerified: fmgVerified,
-          menuFmgVerified
+          menuFmgVerified,
+          itemWriteChainVerified: true,
+          menuWriteVerified: true
+        },
+        enus: {
+          derivedFmgSample: 'weapon_names.fmg（派生，非真实官方语料）',
+          readRoundTripVerified: true,
+          mutationVerified: ['upsert', 'add', 'delete'],
+          rewriteVerified: true
         }
       },
-      unverifiedLanguages: ['全部其他语言（本机 corpus 仅 zhocn，未覆盖）'],
-      note: 'FMG add/upsert mutation 与引用完整性诊断仅在本机 zhocn 语料上验证；其他语言变体未覆盖，不冒充多语言完成。'
+      unverifiedLanguages: ['真实官方语言语料（本机 corpus 仅 zhocn；enus 为派生占位样本）'],
+      note: '多语言写验证：zhocn 真实语料（item 18/18、menu 15/15 语义往返；item 全链 staging→BND4 提交→回滚；menu 新补 staging 写链）+ 派生 enus 样本（英文占位串 upsert/add/delete，布局与 zhocn 不同，二次写验证）+ 跨语言/跨 msgbnd 隔离（写链只落 staging，源文件零污染）。enus 样本为合成派生（FMG 语言无关），不冒充真实英文翻译，authority 保持 partial。'
     }
   }, null, 2));
   await disposeBridgeDaemonPool();
