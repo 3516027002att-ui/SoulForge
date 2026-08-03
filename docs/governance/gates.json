@@ -115,7 +115,7 @@
       "gateId": "REL-A",
       "targetRelease": "V0.5",
       "capability": "全部 writer 与事务",
-      "gateState": "open",
+      "gateState": "passed",
       "applicability": "in-scope",
       "sliceRefs": [
         "W-A-RECOVERY-INTEGRATION-04"
@@ -137,7 +137,7 @@
       "gateId": "REL-B",
       "targetRelease": "V0.5",
       "capability": "容器发布 corpus",
-      "gateState": "open",
+      "gateState": "passed",
       "applicability": "in-scope",
       "sliceRefs": [
         "W-REL-B-CORPUS-02"
@@ -264,7 +264,7 @@
       "gateId": "REL-F",
       "targetRelease": "V0.5",
       "capability": "编辑器验收",
-      "gateState": "open",
+      "gateState": "passed",
       "applicability": "in-scope",
       "sliceRefs": [
         "W-REL-F-ACCEPT-02"
@@ -285,7 +285,7 @@
       "gateId": "REL-G",
       "targetRelease": "V0.5",
       "capability": "双协议 AI",
-      "gateState": "open",
+      "gateState": "passed",
       "applicability": "in-scope",
       "sliceRefs": [
         "W-AI-CONFORMANCE-03"
@@ -378,7 +378,7 @@
       "gateId": "REL-COMPLIANCE",
       "targetRelease": "V0.5",
       "capability": "内部测试构建合规",
-      "gateState": "open",
+      "gateState": "passed",
       "applicability": "in-scope",
       "sliceRefs": [
         "W-REL-COMPLIANCE-02"
