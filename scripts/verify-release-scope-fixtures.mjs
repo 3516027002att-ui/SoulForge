@@ -188,10 +188,12 @@ try {
     rendering.operations.push('benchmark-both-backends');
   }, 'FROZEN_OPERATION_FORBIDDEN');
 
+  // REL-C 在 §18.3 为 open：把它伪装成 passed 必须被漂移检查拒绝。
+  // （历史上此处用 REL-A；REL-A 已推进为 passed，伪装与现状一致不再构成负例。）
   await expectRejected('gate-pass-masquerade', (proposal) => {
-    const relA = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-A');
-    relA.currentState = 'passed';
-    relA.blockerRefs = [];
+    const relC = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-C');
+    relC.currentState = 'passed';
+    relC.blockerRefs = [];
   }, 'GATE_COVERAGE_STATE_DRIFT');
 
   await expectRejected('deferred-item-without-target-release', (proposal) => {
