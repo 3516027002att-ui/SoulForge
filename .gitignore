@@ -45,6 +45,10 @@ apps/*/src/**/*.d.ts.map
 # Electron/app artifacts
 release/
 *.log
+
+# Playwright transient artifacts
+apps/desktop/e2e/playwright/playwright-report/
+apps/desktop/e2e/playwright/test-results/
 apps/desktop/.native/
 
 # SoulForge local state
