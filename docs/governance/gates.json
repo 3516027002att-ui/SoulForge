@@ -168,7 +168,8 @@
         "W-REL-C-MULTILANG-01"
       ],
       "evidenceRefs": [
-        "EV-EMEVD-FMG-PARAM-03-20260803"
+        "EV-EMEVD-FMG-PARAM-03-20260803",
+        "EV-FMG-MULTILANG-WRITE-20260804"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
