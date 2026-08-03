@@ -296,7 +296,8 @@
         "W-AI-CONFORMANCE-03"
       ],
       "evidenceRefs": [
-        "EV-AI-CONFORMANCE-03-20260803"
+        "EV-AI-CONFORMANCE-03-20260803",
+        "EV-AI-CODEX-KERNEL-20260804"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
