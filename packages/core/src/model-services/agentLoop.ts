@@ -89,7 +89,20 @@ export function isToolAllowedInMode(
       // Scaffold typed registry read tools — plan mode stays strictly read-only.
       'workspace.stats',
       'resource.graph.query',
-      'workspace.readFile'
+      'workspace.readFile',
+      // Production workspace registry read/analyze tools (ai/toolRegistry.ts).
+      'workspace_stats',
+      'search_resources',
+      'search_events',
+      'search_map_entities',
+      'search_param_rows',
+      'search_text_entries',
+      'lookup_text_id',
+      'find_text_references',
+      'explain_text_entry',
+      'find_references',
+      'explain_event',
+      'list_operations'
     ]);
     if (!planAllow.has(toolName)) {
       return {

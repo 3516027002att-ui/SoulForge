@@ -29,6 +29,7 @@ import {
 } from '../transactions/workspaceTransaction.js';
 import { sha256File } from '../validators/textHash.js';
 import { verifyPathInsideRoot } from '../workspace/pathBoundary.js';
+import { validateToolInput, type ToolInputShape } from '../ai/toolRegistry.js';
 import { evaluatePolicyGate, maxPermissionFromMode } from './policyGate.js';
 
 export interface ScaffoldToolContext {
@@ -146,6 +147,19 @@ export class ScaffoldToolRegistry {
         toolCallId,
         diagnostics: result.diagnostics,
         details: { toolName: name, ok: false, decision }
+      }));
+      return result;
+    }
+
+    const inputCheck = validateToolInput(normalizeInputShape(tool.inputSchema.shape), input);
+    if (!inputCheck.ok) {
+      const result = { ...failTyped(name, 'INVALID_INPUT', inputCheck.message), toolCallId };
+      auditLog.append(createAuditEntry({
+        actor: { kind: 'agent', id: 'scaffold-tool-registry' },
+        eventKind: 'tool_call',
+        toolCallId,
+        diagnostics: result.diagnostics,
+        details: { toolName: name, ok: false, decision, invalidInput: true }
       }));
       return result;
     }
@@ -568,6 +582,14 @@ export function createMockAgentPlan(goal: string): AgentPlan {
 export async function hashFile(path: string): Promise<string> {
   const bytes = await readFile(path);
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function normalizeInputShape(shape: Record<string, unknown>): ToolInputShape {
+  const normalized: ToolInputShape = {};
+  for (const [key, value] of Object.entries(shape)) {
+    normalized[key] = String(value);
+  }
+  return normalized;
 }
 
 function ensureGraph(context: ScaffoldToolContext): MemoryResourceGraph {
