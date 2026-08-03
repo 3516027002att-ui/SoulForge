@@ -14,6 +14,7 @@
     "prepare:database-native": "node ../../scripts/prepare-electron-sqlite-binding.mjs",
     "test:database-utility": "node ../../scripts/run-database-utility-smoke.mjs",
     "test:me3-runtime-gateway": "node ../../scripts/run-me3-runtime-gateway-smoke.mjs",
+    "test:renderer-playwright": "playwright test -c e2e/playwright/playwright.config.mjs",
     "release:installer:manifest": "node ../../scripts/generate-release-installer-manifest.mjs",
     "test:installer-lifecycle": "node ../../scripts/verify-installer-lifecycle.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -27,6 +28,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",
+    "@playwright/test": "^1.49.0",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "@types/three": "^0.172.0",

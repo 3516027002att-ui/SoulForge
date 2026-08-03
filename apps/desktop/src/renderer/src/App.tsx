@@ -777,14 +777,14 @@ export function App(): ReactElement {
     setStatus('正在构建轻量证据索引...');
     const nextAnalysis = await window.soulforge.analyzeWorkspace();
     setAnalysis(nextAnalysis);
-    setTools(nextAnalysis.tools);
-    setEventUri(nextAnalysis.events[0]?.uri ?? '');
+    setTools(nextAnalysis?.tools ?? []);
+    setEventUri(nextAnalysis?.events?.[0]?.uri ?? '');
     await refreshOperationHistory();
     const baseLabel = result.session.baseMounted
       ? ' · 已挂载只读原版游戏目录'
       : ' · 未挂载原版游戏目录';
     setBaseRootChoice(null);
-    setStatus(`已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis.parsedFiles} 个文本/mock 资源${baseLabel}`);
+    setStatus(`已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
   }
 
   async function search(): Promise<void> {
