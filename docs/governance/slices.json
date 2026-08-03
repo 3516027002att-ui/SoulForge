@@ -596,7 +596,7 @@
     {
       "sliceId": "W-SCRIPT-READONLY-01",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "candidate",
       "authorityCap": "candidate",
       "authorityCapNote": "cap=candidate；只覆盖容器级枚举与只读投影，真实容器替换闭环与游戏加载已验证前不得提升",
@@ -817,7 +817,7 @@
     {
       "sliceId": "W-EMEVD-FMG-PARAM-03",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只覆盖实际完成的 mutation 路径",
@@ -861,7 +861,7 @@
     {
       "sliceId": "W-ME3-INSTALL-04",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只提升实际验证的运行操作",
@@ -960,32 +960,7 @@
       "declaresUnfrozenValidation": true
     }
   ],
-  "activeClaims": [
-    {
-      "sliceId": "W-SCRIPT-READONLY-01",
-      "claimId": "claim-w-script-readonly-01-20260803",
-      "owner": "main-agent",
-      "claimedAt": "2026-08-03T01:43:15.185Z",
-      "heartbeatAt": "2026-08-03T01:43:15.185Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
-      "sliceId": "W-EMEVD-FMG-PARAM-03",
-      "claimId": "claim-w-emevd-fmg-param-03-20260803",
-      "owner": "main-agent",
-      "claimedAt": "2026-08-03T01:43:17.148Z",
-      "heartbeatAt": "2026-08-03T01:43:17.148Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
-      "sliceId": "W-ME3-INSTALL-04",
-      "claimId": "claim-w-me3-install-04-20260803",
-      "owner": "main-agent",
-      "claimedAt": "2026-08-03T01:43:18.062Z",
-      "heartbeatAt": "2026-08-03T01:43:18.062Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    }
-  ],
+  "activeClaims": [],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",
