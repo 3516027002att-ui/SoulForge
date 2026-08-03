@@ -218,6 +218,7 @@ function renderTabbar() {
       id="${tabId(name)}" aria-controls="${paneId(name)}"
       aria-selected="${name === activeTab}" tabindex="${name === activeTab ? '0' : '-1'}">
       <span class="tab__name">${esc(name)}</span>
+      ${FILE_META[name] && !FILE_META[name].editable ? '<span class="tab__lock" role="img" aria-label="只读" title="只读"><svg viewBox="0 0 24 24" width="10" height="10"><rect x="5" y="10" width="14" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="2"/></svg></span>' : ''}
       ${dirtyTabs.has(name) ? '<span class="tab__dirty" role="img" aria-label="未暂存的修改" title="未暂存的修改"></span>' : ''}
       <button class="tab__close" data-close="${esc(name)}" aria-label="关闭 ${esc(name)}" title="关闭">✕</button>
     </div>`).join('');
@@ -265,6 +266,9 @@ function activateTab(name) {
   $('#editorWelcome').classList.add('is-hidden');
   const meta = FILE_META[name];
   $('#stCurrent').textContent = `当前：${name}${meta.editable ? '' : '（只读）'}`;
+  $('#composerContext').innerHTML = `
+    <span class="ctx-chip" title="Agent 上下文：当前资源">${esc(name)}</span>
+    <button class="ctx-clear" title="清除上下文" aria-label="清除上下文">×</button>`;
 }
 
 function closeTab(name) {
@@ -278,6 +282,7 @@ function closeTab(name) {
       activeTab = null;
       $('#editorWelcome').classList.remove('is-hidden');
       $('#stCurrent').textContent = '当前：无';
+      $('#composerContext').innerHTML = '';
       renderTabbar();
     }
   } else renderTabbar();
@@ -787,7 +792,9 @@ function initAgent() {
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   });
-  $('.ctx-clear').addEventListener('click', () => { $('#composerContext').innerHTML = ''; });
+  $('#composerContext').addEventListener('click', (e) => {
+    if (e.target.closest('.ctx-clear')) $('#composerContext').innerHTML = '';
+  });
 }
 
 /* ═══════════ 命令面板 ═══════════ */
