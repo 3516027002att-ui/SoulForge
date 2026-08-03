@@ -49,6 +49,7 @@ release/
 # Playwright transient artifacts
 apps/desktop/e2e/playwright/playwright-report/
 apps/desktop/e2e/playwright/test-results/
+apps/desktop/test-results/
 apps/desktop/.native/
 
 # SoulForge local state
