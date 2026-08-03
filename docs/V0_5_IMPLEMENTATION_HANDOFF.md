@@ -10,7 +10,24 @@
 
 ---
 
-## 0. 如何使用本文
+## 0. 从这里开始（本文唯一入口）
+
+你正在读的这一节就是入口，从交接书开始接手是对的路径。**读完本节就去跑下面两条命令，不要顺着往下通读第 1 节及之后。** 全文是按区域检索的地形图，不是上手必读的顺序读物。
+
+~~~powershell
+node scripts/gov.mjs next      # 可 claim 的切片 + 每条的入口、前置、所需验证
+node scripts/gov.mjs help      # 全部命令与 seal 四步流程
+~~~
+
+为什么入口在 CLI 而不在正文：**可 claim 与否由 `docs/governance/slices.json` 的 lifecycle 决定，通读全文也读不出来**。本文的治理区块是那些 JSON 的投影。`gov next` 的输出自带闭环——每条切片给出 `goal`、`hardPrerequisites`、`entryPoints`、`requiredValidation`，外加 claim → 实现 → 验证 → 封存 → complete 的流程骨架，足以开始工作。
+
+体量差随每次封存变化，别信写死的数字，要用时现测：
+
+~~~powershell
+node -e "const {execSync}=require('child_process');const h=require('fs').statSync('docs/V0_5_IMPLEMENTATION_HANDOFF.md').size;const c=execSync('node scripts/gov.mjs next').length+execSync('node scripts/gov.mjs help').length;console.log({handoff:h,cli:c,ratio:+(h/c).toFixed(1)})"
+~~~
+
+选定切片后再回本文，按该切片的 `capabilityIds` 查对应区域地图（第 4～12 节）、当前技术前沿（第 13 节）和相关证据（第 17 节）。
 
 本文不是固定工单，不要求 Agent 按机械顺序逐项执行。
 
@@ -23,15 +40,6 @@
 - 哪些仍属于候选推断；
 - 哪些被真实环境或格式证据阻塞；
 - 前人留下了哪些可复现证据。
-
-**不要从通读本文开始。** 先跑：
-
-~~~powershell
-node scripts/gov.mjs next      # 可 claim 的切片 + 每条的入口、前置、所需验证
-node scripts/gov.mjs help      # 全部命令与 seal 四步流程
-~~~
-
-`gov next` 输出自带工作流和每个切片的 `entryPoints`、`hardPrerequisites`、`requiredValidation`，足以开始工作。实测两条命令合计 8896 B，本文 431597 B，差 48.5 倍。本文用于需要地形背景时按区域检索，不是上手必读。
 
 接手者应当：
 
