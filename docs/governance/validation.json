@@ -9,9 +9,9 @@
   ],
   "unfrozen": [
     {
-      "sliceId": "W-REL-C-MULTILANG-01",
+      "sliceId": "W-REL-C-MULTILANG-02",
       "targetRelease": "V0.5",
-      "reason": "FMG 多语言写验证（本机 corpus 仅 zhocn，需注册第二语言样本）"
+      "reason": "全官方语言 FMG 写验证（本机仅 zhocn 展开，其余官方语言在原版 .bdt 归档内，需真实多语言语料）"
     },
     {
       "sliceId": "W-REL-D-GAMELOAD-01",

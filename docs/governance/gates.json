@@ -165,7 +165,7 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-REL-C-MULTILANG-01"
+        "W-REL-C-MULTILANG-02"
       ],
       "evidenceRefs": [
         "EV-EMEVD-FMG-PARAM-03-20260803",
