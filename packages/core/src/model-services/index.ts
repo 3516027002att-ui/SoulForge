@@ -9,3 +9,5 @@ export * from './contextBroker.js';
 export * from './retryPolicy.js';
 export * from './rolloutRecorder.js';
 export * from './contextCompactor.js';
+export * from './fileRolloutStorage.js';
+export * from './agentSessionHost.js';

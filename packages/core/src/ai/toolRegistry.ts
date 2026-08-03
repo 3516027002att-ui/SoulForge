@@ -43,8 +43,62 @@ export interface ToolResult<T = unknown> {
 
 type ToolHandler = (input: unknown, context: ToolContext) => Promise<ToolResult> | ToolResult;
 
+/**
+ * Declared input contract: field name -> expected type
+ * ('string' | 'number' | 'boolean' | 'array' | 'object'; trailing '?' marks
+ * the field optional; unrecognized type names pass through). Undeclared extra
+ * fields are ignored — callers may attach context markers.
+ */
+export type ToolInputShape = Record<string, string>;
+
 export interface RegisteredTool extends ToolDescriptor {
+  inputSchema?: ToolInputShape;
   run: ToolHandler;
+}
+
+export function validateToolInput(
+  shape: ToolInputShape | undefined,
+  input: unknown
+): { ok: true } | { ok: false; message: string } {
+  if (!shape || Object.keys(shape).length === 0) return { ok: true };
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return { ok: false, message: '工具输入必须是 JSON 对象。' };
+  }
+  const record = input as Record<string, unknown>;
+  const problems: string[] = [];
+  for (const [key, declared] of Object.entries(shape)) {
+    const optional = declared.endsWith('?');
+    const expectedType = optional ? declared.slice(0, -1) : declared;
+    const value = record[key];
+    if (value === undefined) {
+      if (!optional) problems.push(`缺少必填字段 ${key}`);
+      continue;
+    }
+    if (!matchesDeclaredType(value, expectedType)) {
+      problems.push(`字段 ${key} 类型应为 ${expectedType}`);
+    }
+  }
+  if (problems.length > 0) {
+    return { ok: false, message: `INVALID_INPUT: ${problems.join('；')}。` };
+  }
+  return { ok: true };
+}
+
+function matchesDeclaredType(value: unknown, expectedType: string): boolean {
+  switch (expectedType) {
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return typeof value === 'number' && Number.isFinite(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'array':
+      return Array.isArray(value);
+    case 'object':
+      return typeof value === 'object' && value !== null && !Array.isArray(value);
+    default:
+      return true;
+  }
 }
 
 export class ToolRegistry {
@@ -74,6 +128,11 @@ export class ToolRegistry {
       return fail('TOOL_PERMISSION_DENIED', `Tool '${name}' requires ${level} permission in ${context.mode} mode.`);
     }
 
+    const inputCheck = validateToolInput(tool.inputSchema, input);
+    if (!inputCheck.ok) {
+      return fail('INVALID_INPUT', inputCheck.message);
+    }
+
     try {
       return await tool.run(input, context);
     } catch (error) {
@@ -98,6 +157,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Search indexed workspace files by path, extension, or resource kind.',
     permission: 'read',
     permissionLevel: 'read',
+    inputSchema: { query: 'string', limit: 'number?', kinds: 'array?' },
     run: (input, context) => {
       const value = asRecord(input);
       const query = asString(value.query, '');
@@ -112,6 +172,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Search parsed event symbols.',
     permission: 'read',
     permissionLevel: 'read',
+    inputSchema: { query: 'string', limit: 'number?' },
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchEvents(asString(value.query, ''), asNumber(value.limit, 50)));
@@ -123,6 +184,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Search parsed map entities and regions.',
     permission: 'read',
     permissionLevel: 'read',
+    inputSchema: { query: 'string', limit: 'number?' },
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchMapEntities(asString(value.query, ''), asNumber(value.limit, 50)));
@@ -134,6 +196,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Search parsed param rows.',
     permission: 'read',
     permissionLevel: 'read',
+    inputSchema: { query: 'string', limit: 'number?' },
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchParamRows(asString(value.query, ''), asNumber(value.limit, 50)));
@@ -145,6 +208,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Search parsed text entries.',
     permission: 'read',
     permissionLevel: 'read',
+    inputSchema: { query: 'string', limit: 'number?' },
     run: (input, context) => {
       const value = asRecord(input);
       return ok(context.workspaceIndex.searchTextEntries(asString(value.query, ''), asNumber(value.limit, 50)));
@@ -156,6 +220,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Look up parsed text entries by numeric textId and optional category.',
     permission: 'read',
     permissionLevel: 'read',
+    inputSchema: { textId: 'number', category: 'string?' },
     run: (input, context) => {
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
@@ -172,6 +237,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Find events or other symbols that reference a parsed textId.',
     permission: 'analyze',
     permissionLevel: 'analyze',
+    inputSchema: { textId: 'number', category: 'string?' },
     run: (input, context) => {
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
@@ -192,6 +258,12 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Build evidence-first AI explanation contexts for a parsed textId.',
     permission: 'analyze',
     permissionLevel: 'analyze',
+    inputSchema: {
+      textId: 'number',
+      category: 'string?',
+      maxReferences: 'number?',
+      maxMarkdownChars: 'number?'
+    },
     run: (input, context) => {
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
@@ -215,6 +287,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Find evidence graph references connected to a URI.',
     permission: 'analyze',
     permissionLevel: 'analyze',
+    inputSchema: { uri: 'string', direction: 'string?' },
     run: (input, context) => {
       const value = asRecord(input);
       const uri = asString(value.uri);
@@ -229,6 +302,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Build an evidence-first explanation input for one event URI.',
     permission: 'analyze',
     permissionLevel: 'analyze',
+    inputSchema: { uri: 'string' },
     run: (input, context) => {
       const value = asRecord(input);
       const uri = asString(value.uri);
@@ -244,6 +318,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Create a text-only patch proposal. It does not save files.',
     permission: 'propose',
     permissionLevel: 'propose',
+    inputSchema: {
+      targetUri: 'string',
+      targetPath: 'string',
+      newText: 'string',
+      title: 'string?',
+      mode: 'string?'
+    },
     run: (input, context) => {
       const value = asRecord(input);
       const workspaceId = context.workspaceIndex.workspaceId;
@@ -281,6 +362,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Run Patch Engine validation in staging. It does not save files.',
     permission: 'validate',
     permissionLevel: 'validate',
+    inputSchema: { changes: 'array' },
     run: async (input) => {
       const proposal = input as PatchProposal;
       if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
@@ -295,6 +377,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Project a patch proposal into the v0.5 graph patch IR for review.',
     permission: 'analyze',
     permissionLevel: 'analyze',
+    inputSchema: { changes: 'array' },
     run: (input) => {
       const proposal = input as PatchProposal;
       if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
@@ -310,6 +393,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Assess Files-mode edit risk and resolve writer contract for an indexed file snapshot.',
     permission: 'analyze',
     permissionLevel: 'analyze',
+    inputSchema: {
+      file: 'object',
+      truncated: 'boolean?',
+      structuredEditable: 'boolean?',
+      parseStatus: 'string?',
+      changeKind: 'string?'
+    },
     run: (input) => {
       const value = asRecord(input);
       const file = value.file as IndexedFile | undefined;
@@ -351,6 +441,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Rollback a committed operation from its backup. Requires full-permission mode.',
     permission: 'rollback',
     permissionLevel: 'rollback',
+    inputSchema: { opId: 'string' },
     run: async (input) => {
       const value = asRecord(input);
       const opId = asString(value.opId);

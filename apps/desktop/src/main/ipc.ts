@@ -1,13 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
+  createAgentToolBridge,
+  createConfiguredModelServiceAdapter,
   createDefaultToolRegistry,
   createConfirmationReceipt,
+  listRolloutSessions,
+  loadRolloutSession,
+  runAgentSession,
   disposeBridgeDaemonPool,
   commitEmevdMutationViaBridge,
   fingerprintEmedfRegistry,
@@ -73,6 +78,12 @@ import type {
   ResourceKind,
   StructuredDiagnostic
 } from '@soulforge/shared';
+import type {
+  AgentEvent,
+  ChatMessage,
+  ResumedRollout,
+  RolloutSessionMeta
+} from '@soulforge/core';
 import {
   sanitizeDiagnostics,
   sanitizeRendererValue,
@@ -457,6 +468,66 @@ export interface RollbackOperationIpcResult {
   inverseOpId?: string;
   restoredFiles: string[];
   diagnostics: Diagnostic[];
+}
+
+/* ------------------------------------------------------------------ */
+/*  AI agent session IPC contract (Codex-derived kernel).             */
+/*  Keys never cross the bridge; events are redacted by the host.     */
+/* ------------------------------------------------------------------ */
+
+export interface AiAgentRunRequest {
+  configId: string;
+  prompt: string;
+  mode?: 'plan' | 'normal' | 'fullPermission';
+  streaming?: boolean;
+  /** Session-relative rollout path as returned by ai.agent.sessions. */
+  resumeSessionPath?: string;
+}
+
+export type AiAgentRunIpcResult =
+  | { ok: true; sessionId: string }
+  | { ok: false; error: { code: string; message: string } };
+
+export interface AiAgentSessionSummaryIpc {
+  /** Path relative to the agent sessions dir; opaque to the renderer. */
+  sessionPath: string;
+  fileName: string;
+  sessionId: string | null;
+  startedAt: string | null;
+  messageCount: number;
+  parseErrors: number;
+  interrupted: boolean;
+  compactedWindows: number;
+  sizeBytes: number;
+  modifiedAt: string;
+}
+
+export type AiAgentSessionListIpcResult =
+  | { ok: true; sessions: AiAgentSessionSummaryIpc[] }
+  | { ok: false; error: { code: string; message: string } };
+
+export type AiAgentSessionLoadIpcResult =
+  | {
+      ok: true;
+      meta: RolloutSessionMeta | null;
+      messageCount: number;
+      parseErrors: number;
+      interrupted: boolean;
+      compactedWindows: number;
+      /** Bounded tail page (hard constraint 17). */
+      messagesPage: ChatMessage[];
+    }
+  | { ok: false; error: { code: string; message: string } };
+
+export type AiAgentSessionLifecycleEvent =
+  | { type: 'session-accepted'; mode: 'plan' | 'normal' | 'fullPermission' }
+  | { type: 'session-done'; finishReason: string; steps: number; rolloutFileName: string }
+  | { type: 'session-error'; code: string; message: string };
+
+/** Envelope pushed on the 'ai:agent:event' channel. */
+export interface AiAgentEventEnvelope {
+  sessionId: string;
+  event: AgentEvent | AiAgentSessionLifecycleEvent;
 }
 
 export interface DirectorySelection {
@@ -2788,5 +2859,188 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   handle('modelService.delete', async (_event, configId: string) => {
     await modelServiceVault.deleteConfig(configId);
     return { ok: true };
+  });
+
+  /* ---------------------------------------------------------------- */
+  /*  AI agent sessions (Codex-derived kernel). Long tasks run async, */
+  /*  report progress via 'ai:agent:event', cancel and have timeouts  */
+  /*  (hard constraint 16). Keys stay in main (vault + adapter only). */
+  /* ---------------------------------------------------------------- */
+
+  const agentSessionsBaseDir = join(app.getPath('userData'), 'agent');
+  const activeAgentRuns = new Map<string, AbortController>();
+
+  const sendAgentEvent = (
+    sessionId: string,
+    event: AgentEvent | AiAgentSessionLifecycleEvent
+  ): void => {
+    if (webContents.isDestroyed()) return;
+    const envelope: AiAgentEventEnvelope = { sessionId, event };
+    webContents.send('ai:agent:event', sanitizeRendererValue(envelope));
+  };
+
+  const resolveSessionPath = (
+    sessionPath: string
+  ): { ok: true; absolute: string } | { ok: false; error: { code: string; message: string } } => {
+    const base = resolve(agentSessionsBaseDir);
+    const absolute = resolve(base, sessionPath);
+    if (absolute !== base && !absolute.startsWith(base + sep)) {
+      return {
+        ok: false,
+        error: { code: 'ROLLOUT_PATH_FORBIDDEN', message: '会话路径必须位于会话目录内。' }
+      };
+    }
+    return { ok: true, absolute };
+  };
+
+  handle('ai.agent.run', async (_event, request: AiAgentRunRequest): Promise<AiAgentRunIpcResult> => {
+    if (!activeIndex) {
+      return {
+        ok: false,
+        error: { code: 'WORKSPACE_NOT_ANALYZED', message: '请先分析工作区再运行 AI Agent。' }
+      };
+    }
+    if (
+      typeof request?.configId !== 'string' || request.configId.trim() === ''
+      || typeof request?.prompt !== 'string' || request.prompt.trim() === ''
+    ) {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: 'configId 与 prompt 必填。' } };
+    }
+    const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === request.configId);
+    if (!stored) {
+      return { ok: false, error: { code: 'MODEL_SERVICE_CONFIG_NOT_FOUND', message: '模型服务配置不存在。' } };
+    }
+    if (!stored.hasCredential) {
+      return {
+        ok: false,
+        error: { code: 'MODEL_SERVICE_UNCONFIGURED', message: '模型服务未配置凭据；未发起网络请求。' }
+      };
+    }
+    const apiKey = await modelServiceVault.resolveApiKey(stored.id);
+    if (!apiKey) {
+      return {
+        ok: false,
+        error: { code: 'MODEL_SERVICE_UNCONFIGURED', message: '模型服务凭据不可解密；未发起网络请求。' }
+      };
+    }
+    const modelConfig = {
+      id: stored.id,
+      displayName: stored.displayName,
+      protocol: stored.protocol,
+      baseUrl: stored.baseUrl,
+      model: stored.model,
+      hasCredential: true as const,
+      createdAt: stored.createdAt,
+      updatedAt: stored.updatedAt
+    };
+    const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey });
+    if (!adapterResult.ok) {
+      const diagnostic = adapterResult.diagnostics[0];
+      return { ok: false, error: { code: diagnostic?.code ?? 'MODEL_SERVICE_INVALID', message: diagnostic?.message ?? '模型服务配置无效。' } };
+    }
+    const mode: ToolContext['mode'] = request.mode === 'normal' || request.mode === 'fullPermission'
+      ? request.mode
+      : 'plan';
+    const bridge = createAgentToolBridge({
+      registry: toolRegistry,
+      context: { workspaceIndex: activeIndex, mode }
+    });
+
+    let resumeFrom: ResumedRollout | undefined;
+    if (request.resumeSessionPath !== undefined) {
+      const resolved = resolveSessionPath(request.resumeSessionPath);
+      if (!resolved.ok) return { ok: false, error: resolved.error };
+      const loaded = await loadRolloutSession(resolved.absolute);
+      if (!loaded.ok) {
+        return { ok: false, error: { code: loaded.code, message: loaded.message } };
+      }
+      const { ok: _ok, path: _path, ...resumed } = loaded;
+      resumeFrom = resumed;
+    }
+
+    const sessionId = randomUUID();
+    const controller = new AbortController();
+    activeAgentRuns.set(sessionId, controller);
+    sendAgentEvent(sessionId, { type: 'session-accepted', mode });
+
+    const permissionMode = mode === 'fullPermission' ? 'full' : mode;
+    void runAgentSession({
+      sessionsDir: agentSessionsBaseDir,
+      sessionId,
+      adapter: adapterResult.adapter,
+      config: modelConfig,
+      apiKey,
+      prompt: request.prompt,
+      permissionMode,
+      tools: bridge.tools,
+      executeTool: bridge.executeTool,
+      signal: controller.signal,
+      ...(request.streaming === true ? { streaming: true } : {}),
+      ...(resumeFrom ? { resumeFrom } : {}),
+      onEvent: (event) => sendAgentEvent(sessionId, event)
+    }).then((result) => {
+      activeAgentRuns.delete(sessionId);
+      sendAgentEvent(sessionId, {
+        type: 'session-done',
+        finishReason: result.run.finishReason,
+        steps: result.run.steps,
+        rolloutFileName: basename(result.rolloutPath)
+      });
+    }).catch((error: unknown) => {
+      activeAgentRuns.delete(sessionId);
+      sendAgentEvent(sessionId, {
+        type: 'session-error',
+        code: 'AGENT_SESSION_FAILED',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
+
+    return { ok: true, sessionId };
+  });
+
+  handle('ai.agent.cancel', async (_event, sessionId: string): Promise<{ ok: boolean }> => {
+    const controller = activeAgentRuns.get(sessionId);
+    if (controller) controller.abort();
+    return { ok: true };
+  });
+
+  handle('ai.agent.sessions', async (): Promise<AiAgentSessionListIpcResult> => {
+    const sessions = await listRolloutSessions(agentSessionsBaseDir, 50);
+    return {
+      ok: true,
+      sessions: sessions.map((session) => ({
+        sessionPath: relative(agentSessionsBaseDir, session.path),
+        fileName: session.fileName,
+        sessionId: session.sessionId,
+        startedAt: session.startedAt,
+        messageCount: session.messageCount,
+        parseErrors: session.parseErrors,
+        interrupted: session.interrupted,
+        compactedWindows: session.compactedWindows,
+        sizeBytes: session.sizeBytes,
+        modifiedAt: session.modifiedAt
+      }))
+    };
+  });
+
+  handle('ai.agent.session.load', async (_event, sessionPath: string): Promise<AiAgentSessionLoadIpcResult> => {
+    if (typeof sessionPath !== 'string' || sessionPath.trim() === '') {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: 'sessionPath 必填。' } };
+    }
+    const resolved = resolveSessionPath(sessionPath);
+    if (!resolved.ok) return { ok: false, error: resolved.error };
+    const loaded = await loadRolloutSession(resolved.absolute);
+    if (!loaded.ok) {
+      return { ok: false, error: { code: loaded.code, message: loaded.message } };
+    }
+    return {
+      ok: true,
+      meta: loaded.meta,
+      messageCount: loaded.messages.length,
+      parseErrors: loaded.parseErrors,
+      interrupted: loaded.interrupted,
+      compactedWindows: loaded.compactedWindows,
+      messagesPage: loaded.messages.slice(-20)
+    };
   });
 }

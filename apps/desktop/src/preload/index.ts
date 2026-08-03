@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  AiAgentEventEnvelope,
+  AiAgentRunIpcResult,
+  AiAgentRunRequest,
+  AiAgentSessionListIpcResult,
+  AiAgentSessionLoadIpcResult,
   AnalyzeWorkspaceSummary,
   DirectorySelection,
   OpenWorkspaceScanOptions,
@@ -285,7 +290,28 @@ const api = {
     updatedAt: string;
   }> => ipcRenderer.invoke('modelService.upsert', input),
   deleteModelService: (configId: string): Promise<{ ok: true }> =>
-    ipcRenderer.invoke('modelService.delete', configId)
+    ipcRenderer.invoke('modelService.delete', configId),
+  /**
+   * AI agent sessions (Codex-derived kernel). Runs async in main; progress
+   * arrives on onAiAgentEvent envelopes; keys never cross the bridge.
+   */
+  runAiAgent: (request: AiAgentRunRequest): Promise<AiAgentRunIpcResult> =>
+    ipcRenderer.invoke('ai.agent.run', request),
+  cancelAiAgent: (sessionId: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('ai.agent.cancel', sessionId),
+  listAiAgentSessions: (): Promise<AiAgentSessionListIpcResult> =>
+    ipcRenderer.invoke('ai.agent.sessions'),
+  loadAiAgentSession: (sessionPath: string): Promise<AiAgentSessionLoadIpcResult> =>
+    ipcRenderer.invoke('ai.agent.session.load', sessionPath),
+  onAiAgentEvent: (callback: (envelope: AiAgentEventEnvelope) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, envelope: AiAgentEventEnvelope): void => {
+      callback(envelope);
+    };
+    ipcRenderer.on('ai:agent:event', listener);
+    return () => {
+      ipcRenderer.removeListener('ai:agent:event', listener);
+    };
+  }
 };
 
 contextBridge.exposeInMainWorld('soulforge', api);

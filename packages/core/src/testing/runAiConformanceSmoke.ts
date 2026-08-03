@@ -73,6 +73,17 @@
  *   + prefixed summary) with an audit entry and rollout checkpoint; a failing
  *   summary request fails closed and keeps the original history
  *
+ * Production wiring additions (54-58):
+ * - agentToolBridge maps the workspace ToolRegistry to the agent loop
+ *   contract (parallel policy for read/analyze, typed error mapping,
+ *   structured invalid-JSON refusal)
+ * - ToolRegistry input shape validation matrix (required/optional/types,
+ *   undeclared extras ignored, non-object refusal)
+ * - FileRolloutStorage append-only roundtrip + sessions/YYYY/MM/DD layout
+ * - runAgentSession end-to-end with rollout persistence, listing, loading
+ *   and resume seeding the follow-up run
+ * - session cancellation leaves a durable interrupted marker
+ *
  * All cases use local fake HTTP servers or injected fetch failures.
  * No real provider credentials or network access required.
  *
@@ -116,6 +127,16 @@ import {
   DEFAULT_SUMMARIZATION_PROMPT,
   DEFAULT_SUMMARY_PREFIX
 } from '../model-services/contextCompactor.js';
+import { ToolRegistry, validateToolInput } from '../ai/toolRegistry.js';
+import { createAgentToolBridge } from '../ai/agentToolBridge.js';
+import {
+  FileRolloutStorage,
+  listRolloutSessions,
+  loadRolloutSession,
+  newRolloutFilePath
+} from '../model-services/fileRolloutStorage.js';
+import { runAgentSession } from '../model-services/agentSessionHost.js';
+import type { ResumedRollout } from '../model-services/rolloutRecorder.js';
 import type {
   AgentEvent,
   AgentPermissionMode,
@@ -417,7 +438,7 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 53;
+  const total = 58;
 
   // --- Case 1: HTTP 429 rate limit ---
   {
@@ -2567,9 +2588,238 @@ async function main(): Promise<void> {
     passed++;
   }
 
+  // --- Case 54: agent tool bridge — production registry surfaces as agent
+  // --- loop tools with parallel policy; typed results map to loop contract ---
+  {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'read_thing',
+      description: 'read',
+      permission: 'read',
+      permissionLevel: 'read',
+      run: () => ({ ok: true, data: { value: 42 } })
+    });
+    registry.register({
+      name: 'propose_thing',
+      description: 'propose',
+      permission: 'propose',
+      permissionLevel: 'propose',
+      run: () => ({ ok: false, error: { code: 'WRITE_GATE_CLOSED', message: 'writer unavailable' } })
+    });
+    const bridge = createAgentToolBridge({
+      registry,
+      context: { workspaceIndex: {} as never, mode: 'fullPermission' }
+    });
+    const byName = new Map(bridge.tools.map((tool) => [tool.name, tool]));
+    if (byName.get('read_thing')?.supportsParallel !== true) {
+      throw new Error('Case 54: read tool must be parallel-capable.');
+    }
+    if (byName.get('propose_thing')?.supportsParallel !== false) {
+      throw new Error('Case 54: propose tool must stay exclusive.');
+    }
+    const okCall = await bridge.executeTool({ id: 'c1', name: 'read_thing', argumentsJson: '{"q":"x"}' });
+    if (!okCall.ok || !okCall.content.includes('42')) throw new Error('Case 54: ok mapping wrong.');
+    const failCall = await bridge.executeTool({ id: 'c2', name: 'propose_thing', argumentsJson: '{"t":"y"}' });
+    if (failCall.ok || failCall.code !== 'WRITE_GATE_CLOSED') throw new Error('Case 54: error mapping wrong.');
+    const badJson = await bridge.executeTool({ id: 'c3', name: 'read_thing', argumentsJson: '{oops' });
+    if (badJson.ok || badJson.code !== 'TOOL_INPUT_INVALID') {
+      throw new Error('Case 54: invalid JSON must surface as TOOL_INPUT_INVALID.');
+    }
+    passed++;
+  }
+
+  // --- Case 55: production registry input validation — declared shapes are
+  // --- enforced before handlers; undeclared extras stay ignored ---
+  {
+    if (validateToolInput({ query: 'string' }, {}).ok) {
+      throw new Error('Case 55: missing required field must fail.');
+    }
+    if (validateToolInput({ limit: 'number' }, { limit: 'many' }).ok) {
+      throw new Error('Case 55: wrong type must fail.');
+    }
+    if (!validateToolInput({ category: 'string?' }, {}).ok) {
+      throw new Error('Case 55: absent optional must pass.');
+    }
+    if (!validateToolInput({ query: 'string' }, { query: 'x', chainContext: 'marker' }).ok) {
+      throw new Error('Case 55: undeclared extras must be ignored.');
+    }
+    if (validateToolInput({ query: 'string' }, 'plain').ok) {
+      throw new Error('Case 55: non-object input must fail.');
+    }
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'guarded_tool',
+      description: 'g',
+      permission: 'read',
+      permissionLevel: 'read',
+      inputSchema: { query: 'string' },
+      run: () => ({ ok: true, data: 'ran' })
+    });
+    const rejected = await registry.run('guarded_tool', {}, { workspaceIndex: {} as never, mode: 'normal' });
+    if (rejected.ok || rejected.error?.code !== 'INVALID_INPUT') {
+      throw new Error('Case 55: registry must reject invalid input with INVALID_INPUT.');
+    }
+    const accepted = await registry.run('guarded_tool', { query: 'x' }, { workspaceIndex: {} as never, mode: 'normal' });
+    if (!accepted.ok) throw new Error('Case 55: valid input must run.');
+    passed++;
+  }
+
+  // --- Case 56: file rollout storage — append-only roundtrip, flush, close,
+  // --- Codex-style sessions/YYYY/MM/DD path layout ---
+  {
+    const base = await mkdtemp(join(tmpdir(), 'soulforge-rollout-fs-'));
+    try {
+      const fixedDate = new Date('2026-08-04T01:02:03.456Z');
+      const filePath = newRolloutFilePath(base, 'sess-fs', fixedDate);
+      if (!filePath.includes(join('sessions', '2026', '08', '04')) || !filePath.endsWith('sess-fs.jsonl')) {
+        throw new Error(`Case 56: path layout wrong: ${filePath}`);
+      }
+      const storage = new FileRolloutStorage(filePath);
+      await storage.appendLines(['{"a":1}', '{"b":2}']);
+      await storage.appendLines(['{"c":3}']);
+      await storage.flush();
+      const lines = await storage.readLines();
+      if (lines.join('|') !== '{"a":1}|{"b":2}|{"c":3}') {
+        throw new Error(`Case 56: append/read roundtrip wrong: ${JSON.stringify(lines)}`);
+      }
+      await storage.close();
+      let threw = false;
+      try {
+        await storage.appendLines(['x']);
+      } catch {
+        threw = true;
+      }
+      if (!threw) throw new Error('Case 56: append after close must throw.');
+      passed++;
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }
+
+  // --- Case 57: agent session host end-to-end — rollout persisted with the
+  // --- user prompt, list/load resume, history seeds the follow-up run ---
+  {
+    const base = await mkdtemp(join(tmpdir(), 'soulforge-agent-host-'));
+    try {
+      let turn = 0;
+      const seenRequests: ModelCompleteRequest[] = [];
+      const hostAdapter: ModelServiceAdapter = {
+        protocol: 'openai-compatible',
+        async complete(request) {
+          turn += 1;
+          seenRequests.push({ ...request, messages: [...request.messages] });
+          if (turn === 1) {
+            return {
+              message: {
+                role: 'assistant',
+                content: '',
+                toolCalls: [{ id: 'call-h', name: 'read_h', argumentsJson: '{"p":"a"}' }]
+              },
+              finishReason: 'tool_use',
+              diagnostics: []
+            };
+          }
+          return { message: { role: 'assistant', content: 'host-done' }, finishReason: 'stop', diagnostics: [] };
+        },
+        async *stream() {
+          throw new Error('unused');
+        }
+      };
+      const events: AgentEvent[] = [];
+      const config = makeConfig(9, 'openai-compatible');
+      const first = await runAgentSession({
+        sessionsDir: base,
+        adapter: hostAdapter,
+        config,
+        apiKey: 'sk-test',
+        prompt: 'first question',
+        permissionMode: 'normal',
+        tools: [{ name: 'read_h', description: 'r', parametersJsonSchema: { type: 'object' } }],
+        executeTool: async () => ({ ok: true, content: 'h-result' }),
+        onEvent: (event) => {
+          events.push(event);
+        }
+      });
+      if (first.run.finishReason !== 'stop') throw new Error(`Case 57: ${first.run.finishReason}`);
+      if (!events.some((event) => event.type === 'turn-complete')) {
+        throw new Error('Case 57: lifecycle events missing.');
+      }
+      const listed = await listRolloutSessions(base);
+      if (listed.length !== 1 || listed[0]?.sessionId !== first.sessionId) {
+        throw new Error('Case 57: session listing wrong.');
+      }
+      const loaded = await loadRolloutSession(first.rolloutPath);
+      if (!loaded.ok) throw new Error('Case 57: load failed.');
+      if (!loaded.messages.some((message) => message.content === 'first question')) {
+        throw new Error('Case 57: user prompt must be recorded.');
+      }
+      const { ok: _loadedOk, path: _loadedPath, ...resumed } = loaded;
+      const second = await runAgentSession({
+        sessionsDir: base,
+        adapter: hostAdapter,
+        config,
+        apiKey: 'sk-test',
+        prompt: 'follow-up',
+        permissionMode: 'normal',
+        tools: [],
+        executeTool: async () => ({ ok: false, content: 'unused' }),
+        resumeFrom: resumed
+      });
+      if (second.run.finishReason !== 'stop') throw new Error(`Case 57: resume run ${second.run.finishReason}`);
+      const resumeRequest = seenRequests[seenRequests.length - 1];
+      const resumeContents = (resumeRequest?.messages ?? []).map((message) => message.content);
+      if (
+        !resumeContents.includes('first question')
+        || !resumeContents.includes('host-done')
+        || !resumeContents.includes('follow-up')
+      ) {
+        throw new Error('Case 57: resumed history must seed the next run.');
+      }
+      passed++;
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }
+
+  // --- Case 58: session cancellation — pre-aborted signal yields 'cancelled'
+  // --- and a durable interrupted marker in the rollout ---
+  {
+    const base = await mkdtemp(join(tmpdir(), 'soulforge-agent-cancel-'));
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      const config = makeConfig(9, 'openai-compatible');
+      const result = await runAgentSession({
+        sessionsDir: base,
+        adapter: {
+          protocol: 'openai-compatible',
+          async complete() {
+            return { message: { role: 'assistant', content: 'never' }, finishReason: 'stop', diagnostics: [] };
+          },
+          async *stream() {
+            throw new Error('unused');
+          }
+        },
+        config,
+        apiKey: 'sk-test',
+        prompt: 'cancelled question',
+        permissionMode: 'normal',
+        tools: [],
+        executeTool: async () => ({ ok: false, content: 'unused' }),
+        signal: controller.signal
+      });
+      if (result.run.finishReason !== 'cancelled') throw new Error(`Case 58: ${result.run.finishReason}`);
+      const loaded = await loadRolloutSession(result.rolloutPath);
+      if (!loaded.ok || !loaded.interrupted) throw new Error('Case 58: interrupted marker missing.');
+      passed++;
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     ok: true,
-    message: 'AI 双协议错误/取消/超时/限额矩阵 + 真实 SSE 流式（含流式取消/超时/错误分类）+ 脱敏矩阵 + Context Broker 证据装配 + 真实工作区多步 typed mutation 写矩阵 + Codex 派生内核（重试退避/并行工具/流式事件/rollout 持久化/上下文压缩）conformance 验证通过',
+    message: 'AI 双协议错误/取消/超时/限额矩阵 + 真实 SSE 流式（含流式取消/超时/错误分类）+ 脱敏矩阵 + Context Broker 证据装配 + 真实工作区多步 typed mutation 写矩阵 + Codex 派生内核（重试退避/并行工具/流式事件/rollout 持久化/上下文压缩）+ production 接线（工具桥/输入校验/文件 rollout/会话宿主）conformance 验证通过',
     passed,
     total,
     nonClaims: [
@@ -2581,6 +2831,7 @@ async function main(): Promise<void> {
       'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
       'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不属于 V0.5 验收。',
       'Codex 派生内核（重试退避、并行工具、流式事件、rollout、compaction）参考 openai/codex（Apache-2.0）设计重写；离线矩阵不证明与 Codex 行为逐位一致，也不提升 provider 或 native authority。',
+      'production 接线（agentToolBridge、文件 rollout、session host、desktop IPC/preload 契约）由 typecheck/build + 本 smoke 的 fake adapter/registry 验证；未经真实 provider 端到端运行，renderer agent 任务面板归前端 Agent。',
       '真实 provider 凭据不属于 V0.5 验收。'
     ]
   }));

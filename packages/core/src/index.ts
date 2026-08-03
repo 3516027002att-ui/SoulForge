@@ -82,6 +82,7 @@ export * from './emevd/dslParser.js';
 export * from './emevd/dslCompiler.js';
 export * from './emevd/dslRenderer.js';
 export * from './ai/toolRegistry.js';
+export * from './ai/agentToolBridge.js';
 export * from './ai/toolPermissions.js';
 export * from './ai/aiContextBuilder.js';
 export * from './ai/assistantSession.js';
