@@ -10,7 +10,7 @@ const RESOURCE_TREE = [
   {
     group: 'FMG / 文本', kind: 'fmg', items: [
       { name: 'item.msgbnd.dcx', ext: 'FMG', desc: '道具文本 · 342 条' },
-      { name: 'menu.msgbnd.dcx', ext: 'FMG', desc: '菜单文本 · 518 条' },
+      { name: 'menu.msgbnd.dcx', ext: 'FMG', desc: '菜单文本 · 518 条', status: 'partial', diag: '部分解析：512 / 518 条可读，其余条目只读' },
       { name: 'npc.msgbnd.dcx', ext: 'FMG', desc: 'NPC 对话 · 264 条' }
     ]
   },
@@ -24,12 +24,13 @@ const RESOURCE_TREE = [
     group: 'EMEVD / 事件', kind: 'emevd', items: [
       { name: 'common.emevd.dcx', ext: 'EMEVD', desc: '公共事件 · 四视图' },
       { name: 'm10_00_00_00.emevd.dcx', ext: 'EMEVD', desc: '苇名城 城邑' },
-      { name: 'm11_00_00_00.emevd.dcx', ext: 'EMEVD', desc: '苇名城 主城' }
+      { name: 'm11_00_00_00.emevd.dcx', ext: 'EMEVD', desc: '苇名城 主城', status: 'error', diag: '解析失败：未知事件头（偏移 0x1F40）' }
     ]
   },
   {
     group: 'BND4 / 容器', kind: 'bnd', items: [
-      { name: 'chrc11.anibnd.dcx', ext: 'BND4', desc: '角色动画容器' }
+      { name: 'chrc11.anibnd.dcx', ext: 'BND4', desc: '角色动画容器' },
+      { name: 'chrc11_anibnd_with_extended_variant_suffix_for_layout_test.anibnd.dcx', ext: 'BND4', desc: '长文件名截断样本 · 只读', lock: '只读' }
     ]
   },
   {
@@ -131,7 +132,8 @@ const CMDS = [
   { icon: '◧', label: '切换侧栏面板', hint: 'Ctrl B', run: toggleSidebar },
   { icon: '✦', label: '切换 AI Agent 面板', hint: 'Ctrl J', run: toggleAgent },
   { icon: '☾', label: '切换暗色 / 亮色主题', hint: '', run: toggleTheme },
-  { icon: '⎘', label: '写入暂存区中的变更', hint: '写入前备份', run: commitStaging }
+  { icon: '⎘', label: '写入暂存区中的变更', hint: '写入前备份', run: commitStaging },
+  { icon: '⚠', label: '演示：写入失败（开发样本）', hint: 'dev', run: simulateWriteFailure }
 ];
 
 /* ═══════════ 工具 ═══════════ */
@@ -165,9 +167,11 @@ function renderTree() {
       </button>
       <div class="tree-group__children"><div class="tree-group__inner">
         ${g.items.map((it) => `
-          <button class="tree-item" data-file="${esc(it.name)}" title="${esc(it.desc)}">
+          <button class="tree-item" data-file="${esc(it.name)}" title="${esc(it.status ? it.diag : it.desc)}">
             <span class="kind-dot kind-${g.kind}"></span>
             <span class="tree-item__name">${esc(it.name)}</span>
+            ${it.status === 'error' ? '<span class="tree-item__status tree-item__status--error" role="img" aria-label="解析失败" title="解析失败"><svg viewBox="0 0 24 24" width="11" height="11"><path d="M12 3l9.5 17h-19Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 9.5v4.5M12 17.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>' : ''}
+            ${it.status === 'partial' ? '<span class="tree-item__status tree-item__status--partial" role="img" aria-label="部分解析" title="部分解析"><svg viewBox="0 0 24 24" width="11" height="11"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor"/></svg></span>' : ''}
             ${it.lock ? `<span class="tree-item__lock">${esc(it.lock)}</span>` : ''}
             <span class="tree-item__ext">${esc(it.ext)}</span>
           </button>`).join('')}
@@ -193,13 +197,14 @@ let activeTab = null;
 
 const FILE_META = {
   'item.msgbnd.dcx': { type: 'fmg', crumb: 'msg / <b>item.msgbnd.dcx</b>', editable: true },
-  'menu.msgbnd.dcx': { type: 'fmg', crumb: 'msg / <b>menu.msgbnd.dcx</b>', editable: true },
+  'menu.msgbnd.dcx': { type: 'fmg', crumb: 'msg / <b>menu.msgbnd.dcx</b>', editable: true, status: 'partial', diag: '部分解析：512 / 518 条可读，其余条目只读' },
   'npc.msgbnd.dcx': { type: 'fmg', crumb: 'msg / <b>npc.msgbnd.dcx</b>', editable: true },
   'gameparam.parambnd.dcx': { type: 'param', crumb: 'param / <b>gameparam.parambnd.dcx</b> / EquipParamGoods', editable: true },
-  'actionbutton.parambnd.dcx': { type: 'param', crumb: 'param / <b>actionbutton.parambnd.dcx</b>', editable: false },
+  'actionbutton.parambnd.dcx': { type: 'param', crumb: 'param / <b>actionbutton.parambnd.dcx</b>', editable: false, status: 'error', diag: 'ParamDef 版本与资源头部不一致', code: 'PARAM_DEF_MISMATCH' },
   'common.emevd.dcx': { type: 'emevd', crumb: 'event / <b>common.emevd.dcx</b> · DSL 视图', editable: true },
   'm10_00_00_00.emevd.dcx': { type: 'emevd', crumb: 'event / <b>m10_00_00_00.emevd.dcx</b> · DSL 视图', editable: true },
-  'm11_00_00_00.emevd.dcx': { type: 'emevd', crumb: 'event / <b>m11_00_00_00.emevd.dcx</b> · DSL 视图', editable: true },
+  'm11_00_00_00.emevd.dcx': { type: 'emevd', crumb: 'event / <b>m11_00_00_00.emevd.dcx</b> · DSL 视图', editable: false, status: 'error', diag: '解析失败：未知事件头（偏移 0x1F40）', code: 'PARSE_HEADER_UNKNOWN' },
+  'chrc11_anibnd_with_extended_variant_suffix_for_layout_test.anibnd.dcx': { type: 'hex', crumb: 'chr / <b>chrc11_anibnd_…anibnd.dcx</b> · 只读证据', editable: false },
   'chrc11.anibnd.dcx': { type: 'hex', crumb: 'chr / <b>chrc11.anibnd.dcx</b> · 只读证据', editable: false },
   'common.luabnd.dcx': { type: 'hex', crumb: 'script / <b>common.luabnd.dcx</b> · Hex 证据视图', editable: false },
   'm10_00_00_00.msb.dcx': { type: 'hex', crumb: 'map / <b>m10_00_00_00.msb.dcx</b> · V0.6 只读预览', editable: false },
@@ -302,7 +307,7 @@ function buildPane(name) {
     <div class="pane-toolbar">
       <span class="crumb">${meta.crumb}</span>${lockNote}
       <span class="toolbar-spacer"></span>
-      ${meta.type !== 'hex' ? `<span class="toolbar-filter"><input type="text" placeholder="过滤行…" data-filter aria-label="过滤行" /></span>` : ''}
+      ${meta.type !== 'hex' && meta.status !== 'error' ? `<span class="toolbar-filter"><input type="text" placeholder="过滤行…" data-filter aria-label="过滤行" /></span>` : ''}
     </div>
     <div class="pane-content"></div>`;
   $('#editorViewport').appendChild(pane);
@@ -311,11 +316,11 @@ function buildPane(name) {
   const content = $('.pane-content', pane);
   const renderContent = () => {
     content.innerHTML = '';
-    if (name === 'actionbutton.parambnd.dcx') {
-      content.appendChild(buildErrorView(name, () => {
+    if (meta.status === 'error') {
+      content.appendChild(buildErrorView(name, meta, () => {
         content.innerHTML = '';
         content.appendChild(buildSkeleton(meta));
-        setTimeout(() => { content.innerHTML = ''; content.appendChild(buildGrid(name, PARAM_ROWS, 'param')); }, 420 * ANIM + 60);
+        setTimeout(renderContent, 420 * ANIM + 60);
       }));
       return;
     }
@@ -323,6 +328,7 @@ function buildPane(name) {
     else if (meta.type === 'param') content.appendChild(buildGrid(name, PARAM_ROWS, 'param'));
     else if (meta.type === 'emevd') content.appendChild(buildCodeView(EMEVD_SOURCE));
     else content.appendChild(buildHexView());
+    if (meta.status === 'partial') content.appendChild(buildWarnBar(meta.diag));
   };
   content.appendChild(buildSkeleton(meta));
   setTimeout(renderContent, 480 * ANIM + 60);
@@ -358,7 +364,7 @@ function buildSkeleton(meta) {
 }
 
 /* ── 错误态：明确原因 + 恢复路径 ── */
-function buildErrorView(name, onRetry) {
+function buildErrorView(name, meta, onRetry) {
   const el = document.createElement('div');
   el.className = 'pane-error';
   el.setAttribute('role', 'alert');
@@ -367,10 +373,17 @@ function buildErrorView(name, onRetry) {
       <path d="M12 8v5M12 16.5v.5M12 3l9.5 17h-19Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <h3>资源解析失败</h3>
-    <p>Bridge 对 <span class="mono">${esc(name)}</span> 的原生解析返回诊断码
-    <span class="mono">PARAM_DEF_MISMATCH</span>：ParamDef 版本与资源头部不一致。资源本体未受影响。</p>
+    <p><span class="mono">${esc(name)}</span>：${esc(meta.diag ?? '解析返回未知诊断码')}。资源本体未受影响，未做任何修改。</p>
+    <div class="pane-error__meta">diagnostic: ${esc(meta.code ?? 'PARSE_UNKNOWN')} · source revision r127</div>
     <button class="btn btn--ghost btn--sm" data-retry>重试加载</button>`;
   $('[data-retry]', el).addEventListener('click', onRetry);
+  return el;
+}
+
+function buildWarnBar(text) {
+  const el = document.createElement('div');
+  el.className = 'code-diag-bar';
+  el.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13"><path d="M12 8v5M12 16.5v.5M12 3l9.5 17h-19Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>${esc(text)}`;
   return el;
 }
 
@@ -457,7 +470,7 @@ function buildHexView() {
       }).join('\n')}</pre>
     </div>
     <div class="code-diag-bar code-evidence-bar">
-      只读证据视图 · 高亮为容器 magic（\\x1bLuaQ）· renderer 不暴露字节级写路径
+      只读证据视图 · 高亮为容器 magic（\\x1bLuaQ）· 该资源当前版本不提供写入入口
     </div>`;
   return frag;
 }
@@ -545,20 +558,41 @@ function renderStaging() {
   }));
 }
 
+let committing = false;
 function commitStaging() {
-  if (!staging.length) return;
-  const n = staging.length;
-  staging = [];
-  renderStaging();
+  if (!staging.length || committing) return;
+  committing = true;
+  const btn = $('#commitBtn');
+  btn.disabled = true;
+  btn.textContent = '写入中…';
+  setTimeout(() => {
+    const n = staging.length;
+    staging = [];
+    renderStaging();
+    AUDIT_ENTRIES.unshift({
+      type: 'commit',
+      title: `Patch #125 已写入`,
+      meta: `刚刚 · ${n} 项变更 · 原文件已备份 · hash ${Math.random().toString(16).slice(2, 6)}…${Math.random().toString(16).slice(2, 6)}`,
+      rollback: true
+    });
+    renderAudit();
+    renderWelcome();
+    toast(`写入成功：${n} 项变更已写入，原文件已备份，可回滚`);
+    btn.textContent = '写入补丁';
+    committing = false;
+  }, 480 * ANIM + 120);
+}
+
+/* 开发样本：演示写入失败态（staging 保留、文件未动、可重试） */
+function simulateWriteFailure() {
   AUDIT_ENTRIES.unshift({
-    type: 'commit',
-    title: `Patch #125 已写入`,
-    meta: `刚刚 · ${n} 项变更 · 原文件已备份 · hash ${Math.random().toString(16).slice(2, 6)}…${Math.random().toString(16).slice(2, 6)}`,
-    rollback: true
+    type: 'rollback',
+    title: 'Patch #125 写入失败',
+    meta: '刚刚 · ORIGINAL_CHANGED_DURING_STAGING · 暂存保留，未修改任何文件',
+    rollback: false
   });
   renderAudit();
-  renderWelcome();
-  toast(`写入成功：${n} 项变更已写入，原文件已备份，可回滚`);
+  toast('写入失败：暂存后资源被外部修改。暂存已保留，未修改任何文件，请重读证据后重试', 'warn');
 }
 
 function initStaging() {
@@ -758,6 +792,14 @@ async function simulateAgentRun(userText) {
   await sleep(520 * ANIM + 80);
   addLog('生成 1 项变更，暂存校验通过');
   await sleep(300 * ANIM + 80);
+
+  if (/失败|冲突/.test(userText)) {
+    addLog('写入校验失败：ORIGINAL_CHANGED_DURING_STAGING', 'is-danger');
+    addLog('未产生任何修改。可重读证据后重试，或查看审计面板', 'is-warn');
+    setAgentState('失败 · 校验冲突', false);
+    agentBusy = false;
+    return;
+  }
 
   setAgentState('待审批', false);
   mutationCard({
