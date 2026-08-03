@@ -116,8 +116,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     scaleDimensions: ['bytes'],
     contractSources: [
       'packages/core/src/editing/hexDocument.ts',
-      'packages/core/src/preview/openResourcePreview.ts',
-      'apps/desktop/src/renderer/src/editors/HexEditorPanel.tsx'
+      'packages/core/src/preview/openResourcePreview.ts'
     ]
   },
   bnd4: {
@@ -139,7 +138,6 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
       'bridge/SoulForge.Bridge/Bnd4NativeWriter.cs',
       'packages/core/src/editing/saveContainerChild.ts',
       'apps/desktop/src/main/ipc.ts',
-      'apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx',
       'packages/shared/src/container-workbench.ts'
     ]
   },
@@ -159,8 +157,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     scaleDimensions: ['entries'],
     contractSources: [
       'packages/core/src/editing/fmgBridgeCommit.ts',
-      'apps/desktop/src/main/ipc.ts',
-      'apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx'
+      'apps/desktop/src/main/ipc.ts'
     ]
   },
   param: {
@@ -180,8 +177,6 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     contractSources: [
       'packages/core/src/editing/paramBridgeCommit.ts',
       'apps/desktop/src/main/ipc.ts',
-      'apps/desktop/src/renderer/src/editors/ParamTablePanel.tsx',
-      'apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx',
       'bridge/SoulForge.Bridge/ParamNativeDocument.cs'
     ]
   },
@@ -202,8 +197,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
       'packages/core/src/editing/emevdBridgeCommit.ts',
       'packages/core/src/editing/emevdFullDocument.ts',
       'packages/core/src/emevd/dslRenderer.ts',
-      'apps/desktop/src/main/ipc.ts',
-      'apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx'
+      'apps/desktop/src/main/ipc.ts'
     ]
   },
   msb: {
@@ -224,8 +218,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     contractSources: [
       'packages/core/src/editing/msbBridgeRead.ts',
       'packages/core/src/editing/msbBridgeCommit.ts',
-      'packages/shared/src/scene-ir.ts',
-      'apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx'
+      'packages/shared/src/scene-ir.ts'
     ]
   },
   tae: {
@@ -289,7 +282,6 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
       'packages/core/src/script/scriptContainerEvidence.ts',
       'apps/desktop/src/main/ipc.ts',
       'apps/desktop/src/preload/index.ts',
-      'apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx',
       'packages/shared/src/script-container.ts'
     ]
   },

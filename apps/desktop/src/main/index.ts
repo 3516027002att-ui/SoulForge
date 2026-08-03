@@ -1,6 +1,6 @@
 import { app, BrowserWindow } from 'electron';
 import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
 import { disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
 
@@ -8,9 +8,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
 
 function createWindow(): void {
-  const rendererFilePath = join(here, '../renderer/index.html');
+  // Renderer UI has been removed from the repository; the main process keeps
+  // its backend surface (IPC, Bridge daemon) and loads an empty placeholder
+  // document instead of a packaged renderer bundle.
   const developmentRendererUrl = resolveDevelopmentRendererUrl();
-  const rendererDocumentUrl = developmentRendererUrl ?? pathToFileURL(rendererFilePath).href;
+  const emptyDocumentUrl = 'data:text/html,<title>SoulForge</title><body>SoulForge backend (renderer removed)</body>';
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -40,12 +42,12 @@ function createWindow(): void {
     mainWindow.show();
   });
 
-  registerIpcHandlers(mainWindow.webContents, rendererDocumentUrl);
+  registerIpcHandlers(mainWindow.webContents, emptyDocumentUrl);
 
   if (developmentRendererUrl) {
     void mainWindow.loadURL(developmentRendererUrl);
   } else {
-    void mainWindow.loadFile(rendererFilePath);
+    void mainWindow.loadURL(emptyDocumentUrl);
   }
 }
 

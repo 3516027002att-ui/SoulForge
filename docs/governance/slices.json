@@ -217,7 +217,6 @@
         "packages/core/src/editing/emevdFullDocument.ts",
         "packages/core/src/util/dcxDflt.ts",
         "apps/desktop/src/main/ipc.ts",
-        "apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx",
         "bridge/SoulForge.Bridge/EmevdNativeDocument.cs"
       ],
       "requiredValidation": "npm run test:emevd-dsl-compiler、npm run test:emedf-schema、npm run test:emevd-plan-production、npm run test:emevd-coverage、npm run test:emevd-full-document、npm run test:emevd-ipc-contract、npm run test:emevd-external-adapter；validation-unfrozen：完整 EMEDF schema 覆盖与真实导入 EMEDF 交叉验证",
@@ -258,8 +257,7 @@
       "hardPrerequisites": "entity identity 与 revision 稳定；renderer 无绝对路径；延期期间不得开放任何 MSB 写入（contract / shared 清单 / 主进程 IPC 三层失败关闭）；已验证的 mutationKinds 记录不删除，V0.6 恢复只需翻回标记",
       "entryPoints": [
         "packages/shared/src/scene-ir.ts",
-        "packages/core/src/editing/msbBridgeRead.ts",
-        "apps/desktop/src/renderer/src/scene/threeSceneController.ts"
+        "packages/core/src/editing/msbBridgeRead.ts"
       ],
       "requiredValidation": "npm run bridge:verify:msb、npm run test:scene-draw-list、npm run test:three-scene-module",
       "declaresUnfrozenValidation": false,
@@ -429,8 +427,7 @@
       "goal": "历史切片原要求代表性硬件/地图与量化性能基线；用户已裁定其不属于 V0.5 验收",
       "hardPrerequisites": "由 W-RENDER-FUNCTIONAL-02 取代；性能优化可独立推进但不得恢复为隐含 Gate",
       "entryPoints": [
-        "packages/core/src/scene",
-        "apps/desktop/src/renderer/src/scene"
+        "packages/core/src/scene"
       ],
       "requiredValidation": "历史验收不再执行",
       "declaresUnfrozenValidation": false
@@ -450,7 +447,6 @@
       "hardPrerequisites": "真实 native semantic scene/FLVER projection；不要求代表性硬件档位、地图集合、性能预算或 benchmark threshold",
       "entryPoints": [
         "packages/core/src/scene",
-        "apps/desktop/src/renderer/src/scene/threeSceneController.ts",
         "webgpuDetect.ts"
       ],
       "requiredValidation": "npm run test:scene-draw-list、npm run test:three-scene-module；validation-unfrozen：WebGPU/WebGL2 functional fallback smoke",
@@ -620,8 +616,6 @@
         "packages/core/src/editing/saveContainerChild.ts",
         "apps/desktop/src/main/ipc.ts",
         "apps/desktop/src/preload/index.ts",
-        "apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx",
-        "apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx",
         "packages/core/src/testing/runNativeScriptContainerReplaceSmoke.ts"
       ],
       "requiredValidation": "npm run test:release-editor-acceptance、npm run test:desktop-live-editor-contract、npm run test:script-container-evidence、npm run test:script-container-replace（本机环境注入时真实 luabnd）",
@@ -709,11 +703,7 @@
         "packages/core/src/editing/editorCapabilityContract.ts",
         "packages/core/src/editing/emevdFullDocument.ts",
         "packages/core/src/emevd/dslRenderer.ts",
-        "apps/desktop/src/main/ipc.ts",
-        "apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx",
-        "apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx",
-        "apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx",
-        "apps/desktop/src/renderer/src/App.tsx"
+        "apps/desktop/src/main/ipc.ts"
       ],
       "requiredValidation": "npm run test:release-editor-acceptance、npm run test:desktop-live-editor-contract、npm run test:emevd-full-document、npm run test:emevd-dsl-compiler；validation-unfrozen：真实文档完整有界访问与 Electron functional smoke",
       "declaresUnfrozenValidation": true
@@ -734,10 +724,7 @@
       "entryPoints": [
         "packages/core/src/editing/editorCapabilityContract.ts",
         "packages/core/src/editing/releaseEditorAcceptance.ts",
-        "apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx",
-        "apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx",
-        "apps/desktop/src/main/ipc.ts",
-        "apps/desktop/src/renderer/src/App.tsx"
+        "apps/desktop/src/main/ipc.ts"
       ],
       "requiredValidation": "npm run test:release-editor-acceptance、npm run test:desktop-live-editor-contract、npm run test:desktop-ipc-contract；validation-unfrozen：Electron 真实文档功能验收",
       "declaresUnfrozenValidation": true

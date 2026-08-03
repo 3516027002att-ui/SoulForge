@@ -277,21 +277,8 @@ function assertReadOnlyHexAndAssetExclusions(): void {
   }
 
   const root = resolve('../..');
-  const panel = readFileSync(
-    resolve(root, 'apps/desktop/src/renderer/src/editors/HexEditorPanel.tsx'),
-    'utf8'
-  );
-  const app = readFileSync(resolve(root, 'apps/desktop/src/renderer/src/App.tsx'), 'utf8');
   const preload = readFileSync(resolve(root, 'apps/desktop/src/preload/index.ts'), 'utf8');
   const ipc = readFileSync(resolve(root, 'apps/desktop/src/main/ipc.ts'), 'utf8');
-  for (const forbidden of ['onPatch', 'patchFirstByte', 'hex_byte_patch', '翻转本页首字节']) {
-    if (panel.includes(forbidden)) {
-      throw new Error(`read-only Hex panel still exposes ${forbidden}`);
-    }
-  }
-  if (/<HexEditorPanel[\s\S]{0,500}\bonPatch=/u.test(app)) {
-    throw new Error('App still wires a Hex mutation callback');
-  }
   for (const forbiddenRendererChannel of [
     'resource.capabilities',
     'resource.saveRawReplace',
@@ -308,42 +295,17 @@ function assertReadOnlyHexAndAssetExclusions(): void {
 
 function assertScaleContractsMatchCurrentSources(): void {
   const root = resolve('../..');
+  // Renderer editor panels were removed from the repository (renderer UI
+  // deleted); these checks now cover only the core sources that remain the
+  // single bounded-access authority shared by any future UI.
   const sourceChecks: Array<[string, string[]]> = [
-    [
-      'apps/desktop/src/renderer/src/editors/HexEditorPanel.tsx',
-      ['const pageSize = 16', 'pageBytes']
-    ],
     [
       'packages/core/src/preview/openResourcePreview.ts',
       ['const DEFAULT_MAX_BYTES = 64 * 1024', 'truncated']
     ],
     [
-      'apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx',
-      ['readFmgPage', 'FMG_PAGE_SIZE', 'pageCount', 'pageEntries']
-    ],
-    [
-      'apps/desktop/src/renderer/src/editors/ParamTablePanel.tsx',
-      ['readParamPage', 'PARAM_PAGE_SIZE', 'pageCount', 'pageRows']
-    ],
-    [
-      'apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx',
-      ['readParamPage', 'PAGE_SIZE', 'pageCount', 'pageRows']
-    ],
-    [
-      'apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx',
-      ['listContainerChildrenPage', 'pageCount', 'pageChildren']
-    ],
-    [
-      'apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx',
-      ['listScriptContainerEntriesPage', 'SCRIPT_PAGE_SIZE', 'pageCount', 'pageEntries']
-    ],
-    [
       'packages/core/src/editing/paramBridgeCommit.ts',
       ['const maxRows = input.maxRows ?? 500', '.slice(0, maxRows)']
-    ],
-    [
-      'apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx',
-      ['pageEvents.map', 'EVENTS_PAGE_SIZE']
     ],
     [
       'packages/core/src/emevd/dslRenderer.ts',
@@ -352,11 +314,6 @@ function assertScaleContractsMatchCurrentSources(): void {
     [
       'packages/core/src/editing/emevdFullDocument.ts',
       ['instructionPageSize', 'readFullEmevdDocumentViaBridge']
-    ],
-    [
-      'apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx',
-      ['maxNodes: props.maxNodes ?? 2000', 'chunkSize: 512',
-        'buildSceneDrawList(manifest, { maxItems: props.maxNodes ?? 2000 })']
     ]
   ];
   for (const [relativePath, tokens] of sourceChecks) {

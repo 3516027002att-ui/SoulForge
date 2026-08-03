@@ -4,7 +4,6 @@ const files = {
   main: await readFile(new URL('../apps/desktop/src/main/index.ts', import.meta.url), 'utf8'),
   ipc: await readFile(new URL('../apps/desktop/src/main/ipc.ts', import.meta.url), 'utf8'),
   preload: await readFile(new URL('../apps/desktop/src/preload/index.ts', import.meta.url), 'utf8'),
-  rendererHtml: await readFile(new URL('../apps/desktop/src/renderer/index.html', import.meta.url), 'utf8'),
   rendererDto: await readFile(new URL('../apps/desktop/src/main/rendererDto.ts', import.meta.url), 'utf8'),
   databaseUtility: await readFile(new URL('../apps/desktop/src/main/databaseUtility.ts', import.meta.url), 'utf8'),
   operationLogUtilityClient: await readFile(
@@ -29,7 +28,6 @@ const checks = [
     && files.main.includes("url.hostname === '127.0.0.1'")
     && files.main.includes("url.hostname === '[::1]'")],
   ['权限请求默认拒绝', files.main.includes('setPermissionRequestHandler')],
-  ['CSP 已声明', files.rendererHtml.includes('Content-Security-Policy')],
   ['IPC 统一校验发送方', files.ipc.includes('assertTrustedSender(event, channel)')],
   ['IPC 校验主文档地址', files.ipc.includes('trustedRendererDocuments')
     && files.ipc.includes('actualDocument !== expectedDocument')],
