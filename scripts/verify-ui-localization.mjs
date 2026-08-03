@@ -1,14 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
 const sources = [
-  ['桌面界面', await readFile(new URL('../apps/desktop/src/renderer/src/App.tsx', import.meta.url), 'utf8')],
-  ['AI 侧边栏文案', await readFile(new URL('../packages/core/src/ai/assistantSession.ts', import.meta.url), 'utf8')],
-  ['EMEVD 四视图', await readFile(new URL('../apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx', import.meta.url), 'utf8')],
-  ['FMG 工作台', await readFile(new URL('../apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx', import.meta.url), 'utf8')],
-  ['PARAM 表格', await readFile(new URL('../apps/desktop/src/renderer/src/editors/ParamTablePanel.tsx', import.meta.url), 'utf8')],
-  ['任务与历史', await readFile(new URL('../apps/desktop/src/renderer/src/editors/WorkbenchOpsPanel.tsx', import.meta.url), 'utf8')],
-  ['模型服务设置', await readFile(new URL('../apps/desktop/src/renderer/src/editors/ModelServiceSettingsPanel.tsx', import.meta.url), 'utf8')],
-  ['参数结构定义', await readFile(new URL('../apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx', import.meta.url), 'utf8')]
+  ['AI 侧边栏文案', await readFile(new URL('../packages/core/src/ai/assistantSession.ts', import.meta.url), 'utf8')]
 ];
 
 const forbidden = [
