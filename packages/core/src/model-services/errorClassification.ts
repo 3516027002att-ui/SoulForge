@@ -9,6 +9,25 @@ export interface ModelServiceDiagnostic {
   severity: 'error';
   code: string;
   message: string;
+  /** Parsed Retry-After hint in milliseconds, when the server supplied one. */
+  retryAfterMs?: number;
+}
+
+/**
+ * Parse an HTTP Retry-After header into milliseconds. Supports delta-seconds
+ * (e.g. "30") and HTTP-date forms. Returns undefined when absent or invalid.
+ */
+export function parseRetryAfterHeader(header: string | null | undefined): number | undefined {
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed) * 1000;
+  }
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+  return undefined;
 }
 
 export interface FetchErrorClassificationOptions {
@@ -86,10 +105,12 @@ export function classifyHttpError(
 ): ModelServiceDiagnostic {
   const truncated = bodyText.slice(0, 200);
   if (status === 429) {
+    const retryAfterMs = parseRetryAfterHeader(retryAfterHeader);
     return {
       severity: 'error',
       code: 'MODEL_SERVICE_RATE_LIMITED',
-      message: `${protocol} 速率限制 (HTTP 429)。${retryAfterHeader ? ` Retry-After: ${retryAfterHeader}。` : ''}${truncated ? ` ${truncated}` : ''}`
+      message: `${protocol} 速率限制 (HTTP 429)。${retryAfterHeader ? ` Retry-After: ${retryAfterHeader}。` : ''}${truncated ? ` ${truncated}` : ''}`,
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {})
     };
   }
   if (status >= 500) {

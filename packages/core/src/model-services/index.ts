@@ -6,3 +6,6 @@ export * from './anthropicCompatibleAdapter.js';
 export * from './agentLoop.js';
 export * from './errorClassification.js';
 export * from './contextBroker.js';
+export * from './retryPolicy.js';
+export * from './rolloutRecorder.js';
+export * from './contextCompactor.js';
