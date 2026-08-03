@@ -7,6 +7,23 @@ import { fileURLToPath } from 'node:url';
 import { validateReleaseCorpusRegistry } from '../packages/core/dist/index.js';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+// frozen schema 对账：分类逻辑必须与冻结闭集一致。Bridge data.variant 输出
+// 必须在 x-constants 推导的信封变体集合内，未识别变体以明确 code 失败关闭，
+// 而不是等到 registry 校验兜底（那样诊断指向错误方向）。
+const frozenSchema = JSON.parse(await readFile(
+  resolve(repositoryRoot, 'packages/core/src/bridge/releaseCorpusRegistry.schema.json'),
+  'utf8'
+));
+const frozenVariantsByFormat = frozenSchema?.['x-constants']?.observedVariantsByFormat;
+if (!frozenVariantsByFormat?.DFLT || !frozenVariantsByFormat?.KRAK) {
+  fail('LOCAL_RELEASE_CORPUS_SCHEMA_INVALID', 'frozen schema x-constants 缺失；无法对账变体分类。');
+}
+const frozenBridgeEnvelopeVariants = new Set([
+  ...frozenVariantsByFormat.DFLT.map((variant) => variant.slice('DCX_'.length)),
+  ...frozenVariantsByFormat.KRAK.map((variant) => variant.slice('DCX_'.length))
+]);
+
 const fixtureRegistryPath = process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim();
 const fixtureRootInput = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim();
 const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
@@ -82,6 +99,7 @@ for (const path of dcxFiles) {
       observedVariant = `DCX_${document.variant}`;
     }
   }
+  assertVariantReconciled(document, format, observedVariant);
   observations.filesClassified += 1;
   const relativePath = relative(fixtureRoot, path).replaceAll('\\', '/');
   const observed = {
@@ -241,6 +259,35 @@ function assertKrak(document) {
     || typeof document.payloadHash !== 'string'
     || document.payloadHash.length !== 64) {
     fail('LOCAL_RELEASE_CORPUS_KRAK_UNVERIFIED', 'Registered KRAK document failed its legal-runtime read assertion.');
+  }
+}
+
+/**
+ * 分类对账门禁：本次分类得到的 observedVariant 必须属于 frozen schema 闭集，
+ * 且 Bridge `data.variant` 必须属于推导的信封变体闭集。任一侧漂移都以
+ * LOCAL_RELEASE_CORPUS_VARIANT_UNCLASSIFIED 失败关闭。
+ */
+function assertVariantReconciled(document, format, observedVariant) {
+  const formatVariants = frozenVariantsByFormat[format];
+  if (!Array.isArray(formatVariants) || !formatVariants.includes(observedVariant)) {
+    fail(
+      'LOCAL_RELEASE_CORPUS_VARIANT_UNCLASSIFIED',
+      `Bridge 输出的 variant（format=${format}, observedVariant=${observedVariant}）不在 frozen schema 闭集内。`
+    );
+  }
+  if (format !== 'BND4') {
+    if (typeof document.variant !== 'string' || !frozenBridgeEnvelopeVariants.has(document.variant)) {
+      fail(
+        'LOCAL_RELEASE_CORPUS_VARIANT_UNCLASSIFIED',
+        `Bridge 信封变体 ${document.variant} 不在 frozen schema 信封闭集内。`
+      );
+    }
+  } else if (typeof document.variant !== 'string' || !frozenBridgeEnvelopeVariants.has(document.variant)) {
+    // BND4 嵌套在 DFLT 信封里，信封变体必须同样被冻结。
+    fail(
+      'LOCAL_RELEASE_CORPUS_VARIANT_UNCLASSIFIED',
+      `BND4 容器的 DFLT 信封变体 ${document.variant} 不在 frozen schema 信封闭集内。`
+    );
   }
 }
 

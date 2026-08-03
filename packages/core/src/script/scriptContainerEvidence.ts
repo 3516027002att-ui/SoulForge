@@ -153,6 +153,50 @@ export function classifyScriptEntry(name: string, headerBytes?: number[] | Uint8
   return 'unknown';
 }
 
+/**
+ * Fail-closed load-prerequisite check for a whole-inner-file replacement.
+ *
+ * Verifies the replaced entry still begins with the `\x1bLua` compiled-bytecode
+ * signature (`\x1bLuaP` / `\x1bLuaQ`). A container whose inner script entries
+ * lost their bytecode magic is not loadable by the game as a script container,
+ * so an anomaly MUST produce an error diagnostic — never a silent pass.
+ *
+ * This is a structural prerequisite only: it proves the bytecode family magic
+ * survived the replacement, never that the game can execute the bytes. Real
+ * in-game load requires user confirmation (see the game-load smoke); authority
+ * stays `candidate` until then. SoulForge never decompiles, recompiles or
+ * generates bytecode.
+ */
+export function checkReplacedEntryMagic(
+  entryLabel: string,
+  headerBytes: number[] | Uint8Array
+): { ok: boolean; diagnostics: StructuredDiagnostic[] } {
+  const diagnostics: StructuredDiagnostic[] = [];
+  const bytes = headerBytes instanceof Uint8Array ? headerBytes : new Uint8Array(headerBytes);
+  if (bytes.length < LUA_SIGNATURE.length + 1) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'SCRIPT_LOAD_MAGIC_SHORT',
+      message: `${entryLabel} 替换后头部不足 \x1bLua 字节码签名长度（${bytes.length} 字节），容器不能按脚本容器加载。`
+    }));
+    return { ok: false, diagnostics };
+  }
+  if (!isHavokScriptBytecode(bytes)) {
+    diagnostics.push(createDiagnostic({
+      severity: 'error',
+      code: 'SCRIPT_LOAD_MAGIC_LOST',
+      message: `${entryLabel} 替换后 \x1bLua 编译字节码 magic 丢失，容器不能按脚本容器加载。`,
+      details: {
+        headerHex: [...bytes.subarray(0, HEADER_PREVIEW_BYTES)]
+          .map((byte) => byte.toString(16).padStart(2, '0'))
+          .join('')
+      }
+    }));
+    return { ok: false, diagnostics };
+  }
+  return { ok: true, diagnostics };
+}
+
 export function magicLabel(classification: ScriptEntryClassification): string {
   switch (classification) {
     case 'lua-bytecode': return '\\x1bLuaP/\\x1bLuaQ (Havok Script compiled bytecode)';

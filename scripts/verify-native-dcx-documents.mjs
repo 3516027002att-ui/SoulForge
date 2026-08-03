@@ -1,12 +1,37 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const root = resolve(process.argv[2] ?? process.env.SOULFORGE_NATIVE_FIXTURE_ROOT ?? 'mods');
 const executable = resolve('bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe');
+
+// frozen schema 对账：Bridge data.variant 输出必须属于 observedVariant 闭集
+// 按 `DCX_` 前缀约定推导出的信封变体集合。schema 是机器可读权威，脚本不复制
+// 第二份枚举——漂移会在这里失败关闭。
+const schemaJson = JSON.parse(await readFile(
+  resolve('packages/core/src/bridge/releaseCorpusRegistry.schema.json'),
+  'utf8'
+));
+const observedVariantsByFormat = schemaJson?.['x-constants']?.observedVariantsByFormat;
+if (!observedVariantsByFormat?.DFLT || !observedVariantsByFormat?.KRAK) {
+  console.error(JSON.stringify({
+    ok: false,
+    status: 'failed',
+    code: 'RELEASE_CORPUS_SCHEMA_MISSING',
+    message: 'frozen schema x-constants 缺少 observedVariantsByFormat；无法对账 Bridge variant。'
+  }, null, 2));
+  process.exitCode = 1;
+  process.exit();
+}
+const bridgeEnvelopeVariants = new Set([
+  ...observedVariantsByFormat.DFLT.map((variant) => variant.slice('DCX_'.length)),
+  ...observedVariantsByFormat.KRAK.map((variant) => variant.slice('DCX_'.length))
+]);
+const unrecognizedVariants = new Set();
+
 const files = (await walk(root)).filter((path) => extname(path).toLowerCase() === '.dcx');
 const variants = new Map();
 const failures = [];
@@ -28,6 +53,7 @@ for (const file of files) {
     const data = result.data;
     if (data?.compressionFormat === 'DFLT' && data.roundTrip?.payloadIdentical === true
       && data.roundTrip?.variantIdentical === true) {
+      if (!recognizeVariant(data, file)) continue;
       dfltVerified += 1;
       variants.set(data.variant, (variants.get(data.variant) ?? 0) + 1);
       if (data.nested?.format === 'BND4' && data.nested?.roundTrip?.entriesIdentical === true) {
@@ -41,6 +67,7 @@ for (const file of files) {
     } else if (data?.compressionFormat === 'KRAK'
       && typeof data.payloadHash === 'string'
       && /^[a-f0-9]{64}$/u.test(data.payloadHash)) {
+      if (!recognizeVariant(data, file)) continue;
       krakReadVerified += 1;
       variants.set(data.variant, (variants.get(data.variant) ?? 0) + 1);
       if (data.nested?.format === 'BND4') {
@@ -67,7 +94,7 @@ for (const file of files) {
   }
 }
 if (dfltVerified === 0 || failures.length > 0) {
-  console.error(JSON.stringify({ ok: false, files: files.length, dfltVerified, krakReadVerified, krakBlocked, krakNestedBnd4Verified, krakNestedBnd4Entries, variants: Object.fromEntries(variants), failures }, null, 2));
+  console.error(JSON.stringify({ ok: false, files: files.length, dfltVerified, krakReadVerified, krakBlocked, krakNestedBnd4Verified, krakNestedBnd4Entries, variants: Object.fromEntries(variants), unrecognizedVariants: [...unrecognizedVariants], failures }, null, 2));
   process.exitCode = 1;
 } else {
   console.log(JSON.stringify({
@@ -82,8 +109,31 @@ if (dfltVerified === 0 || failures.length > 0) {
     nestedBnd4Verified,
     nestedBnd4Entries,
     variants: Object.fromEntries([...variants].sort()),
+    reconciliation: {
+      observedVariants: [...variants.keys()].sort(),
+      allRecognized: unrecognizedVariants.size === 0,
+      unrecognizedVariants: [...unrecognizedVariants],
+      frozenEnvelopeVariants: [...bridgeEnvelopeVariants].sort()
+    },
     failures
   }, null, 2));
+}
+
+/**
+ * 对账门禁：Bridge `data.variant` 必须属于 frozen schema 推导的信封变体闭集。
+ * 未识别变体以 UNRECOGNIZED_BRIDGE_VARIANT 失败关闭，不计为 verified。
+ */
+function recognizeVariant(data, file) {
+  if (typeof data.variant !== 'string' || !bridgeEnvelopeVariants.has(data.variant)) {
+    unrecognizedVariants.add(data.variant ?? '<missing>');
+    failures.push({
+      file: relative(file),
+      code: 'UNRECOGNIZED_BRIDGE_VARIANT',
+      variant: data.variant ?? '<missing>'
+    });
+    return false;
+  }
+  return true;
 }
 
 async function walk(directory) {

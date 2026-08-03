@@ -177,8 +177,16 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:param-metadata-native': 'native',
   'test:script-container-evidence': 'native',
   'test:script-container-replace': 'native',
+  // SCOPE-BEHAVIOR-SCRIPT game-load：真实 luabnd 整内层保持原样替换 → 结构/放位/
+  // magic 加载前置预检（leg 2）+ opt-in 真实游戏内加载确认（leg 3，validation-unfrozen）。
+  // 缺环境时结构化 skipped（exit 0，不冒充通过）；真实加载未自动验证前 authority 保持 candidate。
+  'test:script-container-game-load': 'native',
   'test:private-native-gate': 'native',
   'test:section28-sekiro-gate': 'native',
+  // 真实 me3 → Sekiro launch/terminate/restart 会话。缺 SOULFORGE_SEKIRO_GAME_ROOT
+  // 或 SOULFORGE_ME3_SEKIRO_SESSION_RUN 时结构化跳过（runner 连 build 都不触发），
+  // 不会在公共 CI 上误启动游戏，故归 native 而非 unit/release。
+  'test:me3-sekiro-session': 'native',
   'probe:behavior-headers': 'native',
 
   // ---- release：打包、安装器、可复现构建。慢 ----
@@ -188,6 +196,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:release-content': 'release',
   'test:release-compliance-fixtures': 'release',
   'test:release-reproducible': 'release',
+  // 跨机指纹重建机制：缺第二台机器时本机 audit + 协议输出（partial），
+  // --compare 两份导出记录一致才算跨机复现证据。慢且偏发布链，归 release。
+  'test:release-cross-machine': 'release',
   'test:portable-packaging-gate': 'release',
   'test:portable-packaging-config-fixtures': 'release',
   'test:installer-lifecycle': 'release'

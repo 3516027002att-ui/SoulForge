@@ -35,6 +35,8 @@ export class MainMe3RuntimeGateway implements Me3RuntimeGateway {
   private readonly localDataRoot: string;
   private launchedProcess: ChildProcess | null = null;
   private launchedPid: number | null = null;
+  /** Pids this gateway has launched and not yet confirmed terminated. */
+  private readonly knownLaunchPids = new Set<number>();
 
   constructor(options: MainMe3RuntimeGatewayOptions) {
     if (!isAbsolute(options.localDataRoot)) throw new Error('ME3_LOCAL_DATA_ROOT_NOT_ABSOLUTE');
@@ -88,22 +90,21 @@ export class MainMe3RuntimeGateway implements Me3RuntimeGateway {
 
   async terminateProcess(request: Me3TerminateRequest): Promise<Me3TerminateResult> {
     if (request.operation !== 'terminate') throw new Error('ME3_OPERATION_UNSUPPORTED');
-    if (!this.launchedProcess || this.launchedPid !== request.pid) {
+    const pid = request.pid;
+    if (!Number.isSafeInteger(pid) || pid <= 0) return { terminated: false };
+    // The pid must be one this gateway launched. The known set is cleared when
+    // the launcher closes; a live launcher is the tree root that taskkill /T /F
+    // must terminate, and the session smoke is the final authority for game
+    // process (sekiro.exe) disappearance.
+    if (this.launchedPid !== pid && !this.knownLaunchPids.has(pid)) {
       return { terminated: false };
     }
     try {
-      // Kill the process tree on Windows
-      if (process.platform === 'win32') {
-        spawn('taskkill', ['/pid', String(request.pid), '/T', '/F'], {
-          shell: false,
-          windowsHide: true,
-          stdio: 'ignore'
-        });
-      } else {
-        this.launchedProcess.kill('SIGTERM');
-      }
-      this.launchedProcess = null;
+      const confirmed = await terminateTreeAndConfirm(pid, request.timeoutMs);
+      if (!confirmed) return { terminated: false };
+      if (this.launchedPid === pid) this.launchedProcess = null;
       this.launchedPid = null;
+      this.knownLaunchPids.delete(pid);
       return { terminated: true };
     } catch {
       return { terminated: false };
@@ -117,6 +118,17 @@ export class MainMe3RuntimeGateway implements Me3RuntimeGateway {
 
     const args = ['launch', '-g', request.game, '-p', request.profileName];
     if (request.diagnostics) args.push('-d');
+    // Main-process-only launch augmentation. The pinned Sekiro game root lets a
+    // non-Steam install be targeted via `-e`; the suspend flag keeps an automated
+    // session from running the renderer. Neither value is ever returned to core
+    // or the renderer — argv stays inside the privileged gateway.
+    const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+    if (gameRoot && isAbsolute(gameRoot)) {
+      args.push('-e', join(gameRoot, 'sekiro.exe'));
+    }
+    if (process.env.SOULFORGE_ME3_SEKIRO_SUSPEND === '1') {
+      args.push('--suspend');
+    }
 
     let child: ChildProcess;
     try {
@@ -134,6 +146,7 @@ export class MainMe3RuntimeGateway implements Me3RuntimeGateway {
     const pid = child.pid ?? null;
     this.launchedProcess = child;
     this.launchedPid = pid;
+    if (pid !== null) this.knownLaunchPids.add(pid);
 
     // Capture initial output but don't wait for exit — this is a long-running process
     let stdout = '';
@@ -152,6 +165,7 @@ export class MainMe3RuntimeGateway implements Me3RuntimeGateway {
         this.launchedProcess = null;
         this.launchedPid = null;
       }
+      if (child.pid !== undefined) this.knownLaunchPids.delete(child.pid);
     });
 
     // Return immediately with the PID — don't wait for the game to exit
@@ -310,6 +324,69 @@ function classifySpawnFailure(error: unknown): Me3SpawnFailure {
 function errorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
   return typeof error.code === 'string' ? error.code : undefined;
+}
+
+/**
+ * Terminate the launched process tree and confirm the root pid is gone.
+ *
+ * On Windows this awaits `taskkill /pid <pid> /T /F` instead of firing and
+ * forgetting, then polls until the pid no longer appears in the process table.
+ * A taskkill exit code of 128 (no such process) is treated as success because
+ * the tree is already gone. On other platforms a SIGTERM is sent and the same
+ * pid disappearance is polled.
+ *
+ * Returns true only when the pid is confirmed gone within the deadline.
+ */
+async function terminateTreeAndConfirm(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + Math.max(Math.min(timeoutMs, 15_000), 2_000);
+  if (process.platform === 'win32') {
+    const exitCode = await runTaskkill(pid);
+    if (exitCode === null) return false;
+  } else {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // pid already gone
+    }
+  }
+  while (Date.now() < deadline) {
+    if (!(await processWithPidExists(pid))) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
+function runTaskkill(pid: number): Promise<number | null> {
+  return new Promise((resolveKill) => {
+    const child = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], {
+      shell: false,
+      windowsHide: true,
+      stdio: 'ignore'
+    });
+    child.once('error', () => resolveKill(null));
+    child.once('close', (code) => resolveKill(code));
+  });
+}
+
+function processWithPidExists(pid: number): Promise<boolean> {
+  return new Promise((resolveExists) => {
+    const child = spawn('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk;
+      if (stdout.length < 4096) stdout = (stdout + text).slice(0, 4096);
+    });
+    child.once('error', () => resolveExists(false));
+    child.once('close', (code) => resolveExists(code === 0 && stdout.includes(String(pid))));
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
 const PROFILE_OUTPUT_LIMIT_BYTES = 4096;

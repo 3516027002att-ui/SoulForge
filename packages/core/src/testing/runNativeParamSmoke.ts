@@ -259,6 +259,137 @@ async function mainInWorkspace(root: string): Promise<void> {
     throw new Error(`No PARAM children verified: ${JSON.stringify(failed.slice(0, 5))}`);
   }
 
+  // Legacy layout coverage: the three known old-layout params must be detected as the legacy
+  // layout family, roundtrip byte-identically, accept a staged field-level upsert (write path
+  // open), and fail closed on add/delete (headerless last row + variable tail are not losslessly
+  // re-layout-able). These are real native samples from the pinned corpus.
+  const legacyNames = new Set([
+    'default_AIStandardInfoBank.param',
+    'default_EnemyBehaviorBank.param',
+    'MenuColorTableParam.param'
+  ]);
+  const legacyFound: Array<{ index: number; name: string }> = [];
+  for (let i = 0; i < count; i++) {
+    const snap = await runBridge<Bnd4ChildSnapshot>({
+      command: 'snapshot-bnd4-child',
+      filePath: sourceBnd,
+      allowedRoots: [dirname(sourceBnd)],
+      timeoutMs: 120_000,
+      commandOptions: { entryIndex: i }
+    });
+    const base = (snap.data?.name ?? '').split(/[\\/]+/).pop() ?? '';
+    if (legacyNames.has(base)) legacyFound.push({ index: i, name: base });
+  }
+  if (legacyFound.length !== legacyNames.size) {
+    throw new Error(`PARAM legacy corpus incomplete: ${JSON.stringify(legacyFound)}`);
+  }
+  const legacyLayouts: Array<Record<string, unknown>> = [];
+  for (const { index, name } of legacyFound) {
+    const snap = await runBridge<Bnd4ChildSnapshot>({
+      command: 'snapshot-bnd4-child',
+      filePath: sourceBnd,
+      allowedRoots: [dirname(sourceBnd)],
+      timeoutMs: 120_000,
+      commandOptions: { entryIndex: index }
+    });
+    if (!snap.data?.contentBase64) {
+      throw new Error(`legacy ${name} snapshot failed: ${JSON.stringify(snap.diagnostics)}`);
+    }
+    const tmp = join(staging, `legacy-${index}-${name}`);
+    await writeFile(tmp, Buffer.from(snap.data.contentBase64, 'base64'));
+    const doc = await runBridge<ParamEnvelope & { layout?: string }>({
+      command: 'read-param-document',
+      filePath: tmp,
+      allowedRoots: [staging],
+      timeoutMs: 60_000,
+      commandOptions: {}
+    });
+    if (doc.data?.layout !== 'legacy') {
+      throw new Error(`legacy ${name} layout misdetected: ${JSON.stringify(doc.data?.layout)}`);
+    }
+    if (!doc.data?.roundTrip?.semanticIdentical || !doc.data?.roundTrip?.byteIdentical) {
+      throw new Error(`legacy ${name} roundtrip failed: ${JSON.stringify(doc.data?.roundTrip)}`);
+    }
+    const firstRow = doc.data.rows[0];
+    if (!firstRow) {
+      throw new Error(`legacy ${name} has no rows`);
+    }
+    const firstRowId = firstRow.id;
+    // Staged field-level upsert on the first row: read row bytes straight from the staged legacy
+    // file (Bridge payload preview gating excludes wide/many-row params), flip the first byte,
+    // then re-read the staged output and assert the byte landed and the source stayed untouched.
+    const fileBytes = await readFile(tmp);
+    const dataStart = fileBytes.readUInt16LE(4);
+    const rowSize = doc.data.rowDataSize;
+    if (dataStart + rowSize > fileBytes.length) {
+      throw new Error(`legacy ${name} dataStart/rowSize out of range`);
+    }
+    const originalFirstByte = fileBytes[dataStart];
+    const flippedFirstByte = originalFirstByte === 0x5a ? 0xa5 : 0x5a;
+    const nextRow = Buffer.from(fileBytes.subarray(dataStart, dataStart + rowSize));
+    nextRow[0] = flippedFirstByte;
+    const stagedOut = join(staging, `legacy-${index}-${name}.staged`);
+    const written = await runBridge({
+      command: 'write-param',
+      filePath: tmp,
+      allowedRoots: [staging],
+      writableRoots: [staging],
+      timeoutMs: 60_000,
+      commandOptions: {
+        outputPath: stagedOut,
+        expectedDocumentHash: doc.data.sourceHash,
+        mutation: 'upsert',
+        id: firstRowId,
+        dataBase64: nextRow.toString('base64')
+      }
+    });
+    if (!written.diagnostics.some((d) => d.code === 'PARAM_STAGING_WRITE_VERIFIED')) {
+      throw new Error(`legacy ${name} staged upsert failed: ${JSON.stringify(written.diagnostics)}`);
+    }
+    const stagedBytes = await readFile(stagedOut);
+    const stagedDataStart = stagedBytes.readUInt16LE(4);
+    const stagedFirstByte = stagedBytes[stagedDataStart];
+    if (stagedFirstByte === undefined || stagedFirstByte !== flippedFirstByte) {
+      throw new Error(`legacy ${name} staged first byte mismatch`);
+    }
+    if (!(await readFile(tmp)).equals(fileBytes)) {
+      throw new Error(`legacy ${name} source mutated by staged write`);
+    }
+    // add/delete must fail closed with a structured diagnostic (no silent skip, no guessed layout).
+    for (const kind of ['add', 'delete'] as const) {
+      const rejected = await runBridge({
+        command: 'write-param',
+        filePath: tmp,
+        allowedRoots: [staging],
+        writableRoots: [staging],
+        timeoutMs: 60_000,
+        commandOptions: {
+          outputPath: join(staging, `legacy-${index}-${name}.${kind}`),
+          expectedDocumentHash: doc.data.sourceHash,
+          mutation: kind,
+          ...(kind === 'add'
+            ? { id: 99_999_999, dataBase64: Buffer.alloc(rowSize, 1).toString('base64') }
+            : { id: firstRowId })
+        }
+      });
+      const failClosed = rejected.parseStatus === 'failed'
+        && rejected.diagnostics.some((d) => d.code === 'PARAM_STAGING_WRITE_FAILED');
+      if (!failClosed) {
+        throw new Error(`legacy ${name} ${kind} did not fail closed: ${JSON.stringify(rejected.diagnostics)}`);
+      }
+    }
+    legacyLayouts.push({
+      name,
+      rowCount: doc.data.rowCount,
+      rowDataSize: rowSize,
+      byteIdenticalNoop: true,
+      semanticIdenticalNoop: true,
+      stagedUpsertVerified: true,
+      sourceRowImmutable: true,
+      addDeleteFailClosed: true
+    });
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: '原生 PARAM 读取/语义往返/写入/BND4 提交/回滚验证通过',
@@ -272,6 +403,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     corpusFailed: failed.length,
     failures: failed.slice(0, 5),
     containerEntries: count,
+    legacyLayouts,
     fieldLevelSet: {
       fieldId: 'f_first_byte',
       value: FIELD_SET_VALUE,

@@ -61,7 +61,7 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
       });
     } catch (error) {
       cleanup();
-      return errorResult(classifyFetchError(error, 'OpenAI Responses', signal));
+      return errorResult(classifyFetchError(error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -98,7 +98,7 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
       });
     } catch (error) {
       cleanup();
-      yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal));
+      yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
       return;
     }
     if (!response.ok || !response.body) {
@@ -224,7 +224,7 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
         yield { type: 'message-stop', finishReason: 'cancelled' };
         return;
       }
-      yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal));
+      yield errorStreamEvent(classifyFetchError(error, 'OpenAI Responses', signal, { callerSignal: request.signal }));
     }
   }
 }

@@ -41,6 +41,7 @@
     "test:emevd-corpus-matrix": "tsc -b ../shared . && node dist/testing/runEmevdCorpusMatrixSmoke.js",
     "test:script-container-evidence": "tsc -b ../shared . && node dist/testing/runScriptContainerEvidenceSmoke.js",
     "test:script-container-replace": "tsc -b ../shared . && node dist/testing/runNativeScriptContainerReplaceSmoke.js",
+    "test:script-container-game-load": "tsc -b ../shared . && node dist/testing/runScriptContainerGameLoadSmoke.js",
     "test:flver-candidate": "tsc -b ../shared . && node dist/testing/runFlverCandidateSmoke.js",
     "test:fmg-msb-ipc-contract": "tsc -b ../shared . && node dist/testing/runFmgMsbIpcContractSmoke.js",
     "test:fmg-reference-integrity": "tsc -b ../shared . && node dist/testing/runFmgReferenceIntegritySmoke.js",

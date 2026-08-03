@@ -41,6 +41,20 @@
  *   into evidence context and surfaced in the audit
  * - policy gate full matrix (every permission × plan/normal/full + receipt)
  *
+ * W-AI-CONFORMANCE-03 additions (29-41):
+ * - Anthropic error matrix closure: HTTP 500 / network / malformed JSON /
+ *   timeout / active cancellation are verified with the Anthropic request
+ *   shape (x-api-key header, /v1/messages), not just the OpenAI side
+ * - MODEL_SERVICE_CANCELLED: active caller abort no longer collapses into
+ *   MODEL_SERVICE_TIMEOUT (case 7 + cases 33)
+ * - stream cancellation → 'cancelled' and stream timeout →
+ *   MODEL_SERVICE_TIMEOUT error event for BOTH protocols
+ * - Anthropic real SSE happy path: text deltas, tool args accumulated across
+ *   input_json_delta chunks, usage, tool_use finish
+ * - Anthropic stream HTTP 500 + SSE `error` event classification
+ * - redaction matrix: sk- / Bearer / x-api-key / api_key forms are redacted and
+ *   rejected by assertNoSecretLeak via the shared patterns
+ *
  * All cases use local fake HTTP servers or injected fetch failures.
  * No real provider credentials or network access required.
  *
@@ -50,7 +64,7 @@
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TypedToolResult } from '@soulforge/shared';
@@ -67,7 +81,7 @@ import {
 import {
   AnthropicCompatibleAdapter
 } from '../model-services/anthropicCompatibleAdapter.js';
-import { isToolAllowedInMode, runAgentToolLoop, assertNoSecretLeak } from '../model-services/agentLoop.js';
+import { isToolAllowedInMode, runAgentToolLoop, assertNoSecretLeak, redactSecrets } from '../model-services/agentLoop.js';
 import { createContextBroker } from '../model-services/contextBroker.js';
 import type {
   AgentPermissionMode,
@@ -90,6 +104,48 @@ function listen(server: Server): Promise<number> {
 function close(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+/**
+ * SSE server that writes one initial chunk (headers + optional first event) and
+ * then stalls with periodic pings. Used to exercise stream cancellation and
+ * per-request timeouts deterministically. Tracks sockets so close() never hangs
+ * on an abandoned response body.
+ */
+function startStallingSseServer(initialChunk: string): Promise<{
+  baseUrl: string;
+  close: () => Promise<void>;
+}> {
+  const sockets = new Set<Socket>();
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (initialChunk) res.write(initialChunk);
+    const timer = setInterval(() => {
+      try {
+        res.write('data: {}\n\n');
+      } catch {
+        clearInterval(timer);
+      }
+    }, 500);
+    res.on('close', () => clearInterval(timer));
+  });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('no port');
+      resolve({
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        close: async () => {
+          for (const socket of sockets) socket.destroy();
+          await close(server);
+        }
+      });
+    });
   });
 }
 
@@ -326,7 +382,7 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 28;
+  const total = 41;
 
   // --- Case 1: HTTP 429 rate limit ---
   {
@@ -492,8 +548,8 @@ async function main(): Promise<void> {
         signal: controller.signal
       });
       if (result.finishReason !== 'error') throw new Error('expected error finish');
-      if (result.diagnostics[0]!.code !== 'MODEL_SERVICE_TIMEOUT') {
-        throw new Error(`expected TIMEOUT (abort), got ${result.diagnostics[0]!.code}`);
+      if (result.diagnostics[0]!.code !== 'MODEL_SERVICE_CANCELLED') {
+        throw new Error(`expected CANCELLED (active abort), got ${result.diagnostics[0]!.code}`);
       }
       passed++;
     } finally {
@@ -1425,13 +1481,425 @@ async function main(): Promise<void> {
     passed++;
   }
 
+  // --- Case 29: Anthropic HTTP 500 server error (independent request shape) ---
+  {
+    const server = createServer((_req, res) => {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end('internal server error');
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      const result = await adapter.complete({ messages: [{ role: 'user', content: 'hi' }] });
+      if (result.finishReason !== 'error') throw new Error('Case 29: expected error finish');
+      if (result.diagnostics[0]!.code !== 'MODEL_SERVICE_SERVER_ERROR') {
+        throw new Error(`Case 29: expected SERVER_ERROR, got ${result.diagnostics[0]!.code}`);
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 30: Anthropic network failure (fetch throws) ---
+  {
+    const adapter = new AnthropicCompatibleAdapter({
+      baseUrl: 'http://127.0.0.1:1',
+      apiKey: 'sk-ant-test',
+      model: 'test',
+      fetchImpl: async () => { throw new TypeError('fetch failed'); }
+    });
+    const result = await adapter.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    if (result.finishReason !== 'error') throw new Error('Case 30: expected error finish');
+    if (result.diagnostics[0]!.code !== 'MODEL_SERVICE_NETWORK_ERROR') {
+      throw new Error(`Case 30: expected NETWORK_ERROR, got ${result.diagnostics[0]!.code}`);
+    }
+    passed++;
+  }
+
+  // --- Case 31: Anthropic malformed JSON response ---
+  {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('not valid json {{{');
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      const result = await adapter.complete({ messages: [{ role: 'user', content: 'hi' }] });
+      if (result.finishReason !== 'error') throw new Error('Case 31: expected error finish');
+      if (result.diagnostics[0]!.code !== 'MODEL_SERVICE_RESPONSE_PARSE_FAILED') {
+        throw new Error(`Case 31: expected PARSE_FAILED, got ${result.diagnostics[0]!.code}`);
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 32: Anthropic timeout (independent of caller abort) ---
+  {
+    const server = createServer((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ content: [{ type: 'text', text: 'late' }], stop_reason: 'end_turn' }));
+      }, 5000);
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      const result = await adapter.complete({
+        messages: [{ role: 'user', content: 'hi' }],
+        timeoutMs: 100
+      });
+      if (result.finishReason !== 'error') throw new Error('Case 32: expected error finish');
+      if (result.diagnostics[0]!.code !== 'MODEL_SERVICE_TIMEOUT') {
+        throw new Error(`Case 32: expected TIMEOUT, got ${result.diagnostics[0]!.code}`);
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 33: Anthropic active cancellation → MODEL_SERVICE_CANCELLED ---
+  {
+    const controller = new AbortController();
+    const server = createServer((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ content: [{ type: 'text', text: 'late' }], stop_reason: 'end_turn' }));
+      }, 5000);
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      setTimeout(() => controller.abort(), 50);
+      const result = await adapter.complete({
+        messages: [{ role: 'user', content: 'hi' }],
+        signal: controller.signal
+      });
+      if (result.finishReason !== 'error') throw new Error('Case 33: expected error finish');
+      if (result.diagnostics[0]!.code !== 'MODEL_SERVICE_CANCELLED') {
+        throw new Error(`Case 33: expected CANCELLED, got ${result.diagnostics[0]!.code}`);
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 34: OpenAI stream cancellation → 'cancelled' ---
+  {
+    const controller = new AbortController();
+    const openaiChunk = `data: ${JSON.stringify({ choices: [{ delta: { content: 'hello' } }] })}\n\n`;
+    const server = await startStallingSseServer(openaiChunk);
+    try {
+      const adapter = new OpenAiCompatibleAdapter({
+        baseUrl: server.baseUrl,
+        apiKey: 'sk-test',
+        model: 'test'
+      });
+      const events: string[] = [];
+      const reasons: string[] = [];
+      let armed = false;
+      for await (const event of adapter.stream({
+        messages: [{ role: 'user', content: 'hi' }],
+        signal: controller.signal
+      })) {
+        if (event.type === 'text-delta') {
+          events.push(event.text);
+          if (!armed) {
+            armed = true;
+            setTimeout(() => controller.abort(), 10);
+          }
+        } else if (event.type === 'message-stop') {
+          reasons.push(event.finishReason);
+        } else if (event.type === 'error') {
+          reasons.push(event.code);
+        }
+      }
+      if (!events.includes('hello')) throw new Error(`Case 34: delta missing before cancel, got ${JSON.stringify(events)}`);
+      if (!reasons.includes('cancelled')) {
+        throw new Error(`Case 34: expected stream 'cancelled', got ${JSON.stringify(reasons)}`);
+      }
+      passed++;
+    } finally {
+      await server.close();
+    }
+  }
+
+  // --- Case 35: OpenAI stream timeout → MODEL_SERVICE_TIMEOUT error event ---
+  {
+    const server = await startStallingSseServer('');
+    try {
+      const adapter = new OpenAiCompatibleAdapter({
+        baseUrl: server.baseUrl,
+        apiKey: 'sk-test',
+        model: 'test'
+      });
+      const events: string[] = [];
+      for await (const event of adapter.stream({
+        messages: [{ role: 'user', content: 'hi' }],
+        timeoutMs: 100
+      })) {
+        if (event.type === 'error') events.push(event.code);
+        if (event.type === 'message-stop') events.push(event.finishReason);
+      }
+      if (!events.includes('MODEL_SERVICE_TIMEOUT')) {
+        throw new Error(`Case 35: expected stream TIMEOUT, got ${JSON.stringify(events)}`);
+      }
+      passed++;
+    } finally {
+      await server.close();
+    }
+  }
+
+  // --- Case 36: Anthropic stream cancellation → 'cancelled' (real SSE) ---
+  {
+    const controller = new AbortController();
+    const anthropicChunk = `data: ${JSON.stringify({
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text: 'hello' }
+    })}\n\n`;
+    const server = await startStallingSseServer(anthropicChunk);
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: server.baseUrl,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      const events: string[] = [];
+      const reasons: string[] = [];
+      let armed = false;
+      for await (const event of adapter.stream({
+        messages: [{ role: 'user', content: 'hi' }],
+        signal: controller.signal
+      })) {
+        if (event.type === 'text-delta') {
+          events.push(event.text);
+          if (!armed) {
+            armed = true;
+            setTimeout(() => controller.abort(), 10);
+          }
+        } else if (event.type === 'message-stop') {
+          reasons.push(event.finishReason);
+        } else if (event.type === 'error') {
+          reasons.push(event.code);
+        }
+      }
+      if (!events.includes('hello')) throw new Error(`Case 36: delta missing before cancel, got ${JSON.stringify(events)}`);
+      if (!reasons.includes('cancelled')) {
+        throw new Error(`Case 36: expected stream 'cancelled', got ${JSON.stringify(reasons)}`);
+      }
+      passed++;
+    } finally {
+      await server.close();
+    }
+  }
+
+  // --- Case 37: Anthropic stream timeout → MODEL_SERVICE_TIMEOUT error event ---
+  {
+    const server = await startStallingSseServer('');
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: server.baseUrl,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      const events: string[] = [];
+      for await (const event of adapter.stream({
+        messages: [{ role: 'user', content: 'hi' }],
+        timeoutMs: 100
+      })) {
+        if (event.type === 'error') events.push(event.code);
+        if (event.type === 'message-stop') events.push(event.finishReason);
+      }
+      if (!events.includes('MODEL_SERVICE_TIMEOUT')) {
+        throw new Error(`Case 37: expected stream TIMEOUT, got ${JSON.stringify(events)}`);
+      }
+      passed++;
+    } finally {
+      await server.close();
+    }
+  }
+
+  // --- Case 38: Anthropic real SSE happy path — text deltas, tool args
+  // --- accumulated across input_json_delta chunks, usage, tool_use finish ---
+  {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const chunk = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+      chunk({ type: 'message_start', message: { role: 'assistant', content: [], usage: { input_tokens: 11 } } });
+      chunk({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+      chunk({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello ' } });
+      chunk({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'world' } });
+      chunk({ type: 'content_block_stop', index: 0 });
+      chunk({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_sse', name: 'search_workspace', input: {} } });
+      chunk({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"query":' } });
+      chunk({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '"ember"}' } });
+      chunk({ type: 'content_block_stop', index: 1 });
+      chunk({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 9 } });
+      chunk({ type: 'message_stop' });
+      res.end();
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      const texts: string[] = [];
+      const toolCalls: Array<{ name: string; args: string }> = [];
+      let finish: string | undefined;
+      let usage: { inputTokens?: number; outputTokens?: number } | undefined;
+      for await (const event of adapter.stream({ messages: [{ role: 'user', content: 'hi' }] })) {
+        if (event.type === 'text-delta') texts.push(event.text);
+        else if (event.type === 'tool-call') toolCalls.push({ name: event.toolCall.name, args: event.toolCall.argumentsJson });
+        else if (event.type === 'message-stop') finish = event.finishReason;
+        else if (event.type === 'usage') usage = event;
+      }
+      if (texts.join('') !== 'Hello world') {
+        throw new Error(`Case 38: expected 'Hello world', got ${JSON.stringify(texts)}`);
+      }
+      if (toolCalls.length !== 1 || toolCalls[0]!.name !== 'search_workspace') {
+        throw new Error(`Case 38: tool call not assembled, got ${JSON.stringify(toolCalls)}`);
+      }
+      let parsedArgs: unknown;
+      try {
+        parsedArgs = JSON.parse(toolCalls[0]!.args);
+      } catch {
+        throw new Error(`Case 38: tool args are not valid JSON: ${toolCalls[0]!.args}`);
+      }
+      if ((parsedArgs as { query?: string }).query !== 'ember') {
+        throw new Error(`Case 38: partial_json not accumulated, got ${toolCalls[0]!.args}`);
+      }
+      if (finish !== 'tool_use') throw new Error(`Case 38: expected tool_use finish, got ${finish}`);
+      if (usage?.inputTokens !== 11 || usage?.outputTokens !== 9) {
+        throw new Error(`Case 38: usage not captured, got ${JSON.stringify(usage)}`);
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 39: Anthropic stream non-2xx HTTP → SERVER_ERROR error event ---
+  {
+    const server = createServer((_req, res) => {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end('internal server error');
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      const codes: string[] = [];
+      for await (const event of adapter.stream({ messages: [{ role: 'user', content: 'hi' }] })) {
+        if (event.type === 'error') codes.push(event.code);
+      }
+      if (!codes.includes('MODEL_SERVICE_SERVER_ERROR')) {
+        throw new Error(`Case 39: expected stream SERVER_ERROR, got ${JSON.stringify(codes)}`);
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 40: Anthropic SSE error event classification (rate_limit_error) ---
+  {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        error: { type: 'rate_limit_error', message: 'stream rate limited' }
+      })}\n\n`);
+      res.end();
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new AnthropicCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-ant-test',
+        model: 'test'
+      });
+      const codes: string[] = [];
+      for await (const event of adapter.stream({ messages: [{ role: 'user', content: 'hi' }] })) {
+        if (event.type === 'error') codes.push(event.code);
+      }
+      if (!codes.includes('MODEL_SERVICE_RATE_LIMITED')) {
+        throw new Error(`Case 40: expected RATE_LIMITED from SSE error, got ${JSON.stringify(codes)}`);
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 41: redaction matrix — sk-, Bearer, header inline secrets are all
+  // --- redacted and rejected by assertNoSecretLeak via the shared patterns ---
+  {
+    const bearerToken = 'eyJhbGciOiJIUzI1NiJ9.some.signature';
+    const headerInline = 'sk-ant-header-secret-abcdefghijk';
+    const apiKeyForm = 'apikey_abcdefghijklmnopqrstuvwxyz';
+    const liveSk = 'sk-live-secret-abcdefghijk';
+    const raw = [
+      `Bearer ${bearerToken}`,
+      `x-api-key: ${headerInline}`,
+      `api_key = "${apiKeyForm}"`,
+      liveSk
+    ].join('\n');
+    const redacted = redactSecrets(raw);
+    for (const secret of [bearerToken, headerInline, apiKeyForm, liveSk]) {
+      if (redacted.includes(secret)) throw new Error(`Case 41: ${secret} survived redaction.`);
+    }
+    if (!redacted.includes('[REDACTED]')) throw new Error('Case 41: no redaction marker.');
+    // assertNoSecretLeak must reject every form even when the exact key is not
+    // passed as the apiKey argument (pattern branch, not includes branch).
+    const forms = [raw, `Bearer ${bearerToken}`, `x-api-key: ${headerInline}`, liveSk];
+    for (const form of forms) {
+      let threw = false;
+      try {
+        assertNoSecretLeak({ leaked: form }, '');
+      } catch (error) {
+        threw = String((error as Error).message).includes('MODEL_SERVICE_SECRET_LEAK');
+      }
+      if (!threw) throw new Error(`Case 41: assertNoSecretLeak missed form ${form}`);
+    }
+    passed++;
+  }
+
   console.log(JSON.stringify({
     ok: true,
-    message: 'AI 双协议错误/取消/超时/限额 + Context Broker 证据装配 + 真实工作区多步 typed mutation 写矩阵 conformance 验证通过',
+    message: 'AI 双协议错误/取消/超时/限额矩阵 + 真实 SSE 流式（含流式取消/超时/错误分类）+ 脱敏矩阵 + Context Broker 证据装配 + 真实工作区多步 typed mutation 写矩阵 conformance 验证通过',
     passed,
     total,
     nonClaims: [
       '离线 conformance 不证明任何第三方真实服务可用。',
+      'Anthropic 真实 SSE 只在本机确定性 contract server 上验证事件解析/取消/超时/错误分类；第三方流式事件形状差异不属于 V0.5 验收。',
+      'MODEL_SERVICE_CANCELLED 区分主动取消与超时是 conformance 层的错误码语义；不影响真实 provider 行为。',
       '写矩阵只覆盖实际接线的安全写路径（scaffold text_edit + WorkspaceTransaction），不提升 native writer authority 或 Patch Engine authority。',
       'plan 只读在 agent loop 层强制；policy gate 层按既有 architecture scaffold 契约保留 stage/validate 上限。',
       'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
