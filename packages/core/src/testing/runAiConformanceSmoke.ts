@@ -55,6 +55,24 @@
  * - redaction matrix: sk- / Bearer / x-api-key / api_key forms are redacted and
  *   rejected by assertNoSecretLeak via the shared patterns
  *
+ * Codex-derived kernel additions (42-53), design reference openai/codex
+ * (Apache-2.0, see licenses/openai-codex.txt):
+ * - retry policy: exponential backoff math, jitter bounds, Retry-After
+ *   precedence, delay cap, attempt cap, retryable whitelist, decideRetry
+ * - loop retry: two 500s then success (3 hits, 2 audit retries, retry
+ *   events); non-retryable 401 fails fast with exactly 1 hit
+ * - parallel tool calls: supportsParallel tools overlap at runtime while
+ *   results are recorded in model emission order; exclusive tools stay serial
+ * - streaming path: SSE text deltas surface as agent-message-delta events and
+ *   assemble into the final message; SSE tool_calls drive one tool step;
+ *   a failed first stream attempt is retried at the stream budget
+ * - rollout: recorder flush → parse roundtrip with meta + messages, corrupt
+ *   line tolerance, recorder-level secret redaction, marker-based rollback
+ *   truncation without rewriting durable lines
+ * - compaction: auto trigger replaces history (system + recent user messages
+ *   + prefixed summary) with an audit entry and rollout checkpoint; a failing
+ *   summary request fails closed and keeps the original history
+ *
  * All cases use local fake HTTP servers or injected fetch failures.
  * No real provider credentials or network access required.
  *
@@ -83,10 +101,27 @@ import {
 } from '../model-services/anthropicCompatibleAdapter.js';
 import { isToolAllowedInMode, runAgentToolLoop, assertNoSecretLeak, redactSecrets } from '../model-services/agentLoop.js';
 import { createContextBroker } from '../model-services/contextBroker.js';
+import {
+  computeBackoffDelayMs,
+  decideRetry,
+  isRetryableErrorCode,
+  resolveRetryPolicy
+} from '../model-services/retryPolicy.js';
+import {
+  InMemoryRolloutStorage,
+  RolloutRecorder,
+  parseRolloutLines
+} from '../model-services/rolloutRecorder.js';
+import {
+  DEFAULT_SUMMARIZATION_PROMPT,
+  DEFAULT_SUMMARY_PREFIX
+} from '../model-services/contextCompactor.js';
 import type {
+  AgentEvent,
   AgentPermissionMode,
   AgentRunResult,
   ContextEvidenceSource,
+  ModelCompleteRequest,
   ModelServiceConfig,
   ToolCall,
   ModelServiceAdapter,
@@ -382,7 +417,7 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 41;
+  const total = 53;
 
   // --- Case 1: HTTP 429 rate limit ---
   {
@@ -1891,9 +1926,650 @@ async function main(): Promise<void> {
     passed++;
   }
 
+  // --- Case 42: retry policy backoff math, jitter bounds, Retry-After
+  // --- precedence, delay cap and attempt caps ---
+  {
+    const policy = resolveRetryPolicy({});
+    if (policy.maxAttempts !== 4 || policy.baseDelayMs !== 200 || policy.backoffFactor !== 2) {
+      throw new Error('Case 42: default policy mismatch.');
+    }
+    const neutral = computeBackoffDelayMs(policy, 1, undefined, () => 0.5);
+    if (neutral !== 200) throw new Error(`Case 42: attempt1 expected 200, got ${neutral}`);
+    const attempt3Low = computeBackoffDelayMs(policy, 3, undefined, () => 0);
+    const attempt3High = computeBackoffDelayMs(policy, 3, undefined, () => 1);
+    if (attempt3Low !== 720 || attempt3High !== 880) {
+      throw new Error(`Case 42: jitter bounds expected [720,880], got [${attempt3Low},${attempt3High}]`);
+    }
+    const retryAfterWins = computeBackoffDelayMs(policy, 1, 5000, () => 0.5);
+    if (retryAfterWins !== 5000) throw new Error('Case 42: Retry-After must dominate the computed delay.');
+    const capped = computeBackoffDelayMs(
+      resolveRetryPolicy({ baseDelayMs: 20_000, maxDelayMs: 30_000 }),
+      3,
+      undefined,
+      () => 1
+    );
+    if (capped !== 30_000) throw new Error(`Case 42: delay cap expected 30000, got ${capped}`);
+    if (resolveRetryPolicy({ maxAttempts: 500 }).maxAttempts !== 100) {
+      throw new Error('Case 42: attempt cap must be 100.');
+    }
+    if (resolveRetryPolicy({ maxAttempts: 0 }).maxAttempts !== 1) {
+      throw new Error('Case 42: attempt floor must be 1.');
+    }
+    passed++;
+  }
+
+  // --- Case 43: retryable whitelist + decideRetry budget / Retry-After ---
+  {
+    for (const code of [
+      'MODEL_SERVICE_TIMEOUT',
+      'MODEL_SERVICE_NETWORK_ERROR',
+      'MODEL_SERVICE_RATE_LIMITED',
+      'MODEL_SERVICE_SERVER_ERROR'
+    ]) {
+      if (!isRetryableErrorCode(code)) throw new Error(`Case 43: ${code} should be retryable.`);
+    }
+    for (const code of [
+      'MODEL_SERVICE_CANCELLED',
+      'MODEL_SERVICE_AUTH_ERROR',
+      'MODEL_SERVICE_HTTP_ERROR',
+      'MODEL_SERVICE_REQUEST_FAILED',
+      'MODEL_SERVICE_RESPONSE_PARSE_FAILED'
+    ]) {
+      if (isRetryableErrorCode(code)) throw new Error(`Case 43: ${code} must not be retryable.`);
+    }
+    const policy = resolveRetryPolicy({ maxAttempts: 2 });
+    const exhausted = decideRetry(
+      [{ severity: 'error', code: 'MODEL_SERVICE_SERVER_ERROR', message: '' }],
+      2,
+      policy,
+      () => 0.5
+    );
+    if (exhausted.retry || exhausted.code !== 'MODEL_SERVICE_SERVER_ERROR') {
+      throw new Error('Case 43: budget-exhausted decision wrong.');
+    }
+    const rateLimited = decideRetry(
+      [{ severity: 'error', code: 'MODEL_SERVICE_RATE_LIMITED', message: '', retryAfterMs: 3000 }],
+      1,
+      resolveRetryPolicy({ baseDelayMs: 100 }),
+      () => 0.5
+    );
+    if (!rateLimited.retry || rateLimited.delayMs < 3000) {
+      throw new Error('Case 43: Retry-After not honored by decideRetry.');
+    }
+    const nonRetryable = decideRetry(
+      [{ severity: 'error', code: 'MODEL_SERVICE_AUTH_ERROR', message: '' }],
+      1,
+      policy,
+      () => 0.5
+    );
+    if (nonRetryable.retry) throw new Error('Case 43: auth error must not retry.');
+    passed++;
+  }
+
+  // --- Case 44: loop retry — two 500s then success: 3 hits, 2 audit retries,
+  // --- retry-scheduled events, recovered final message ---
+  {
+    let hits = 0;
+    const server = createServer((_req, res) => {
+      hits += 1;
+      if (hits <= 2) {
+        res.writeHead(500, { 'content-type': 'text/plain' });
+        res.end('boom');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'recovered' }, finish_reason: 'stop' }] }));
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new OpenAiCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-test',
+        model: 'test'
+      });
+      const events: AgentEvent[] = [];
+      const result = await runAgentToolLoop(adapter, {
+        config: makeConfig(port, 'openai-compatible'),
+        apiKey: 'sk-test',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+        permissionMode: 'normal',
+        executeTool: async () => ({ ok: false, content: 'unused' }),
+        retryPolicy: { baseDelayMs: 1, maxAttempts: 4 },
+        onEvent: (event) => {
+          events.push(event);
+        }
+      });
+      if (result.finishReason !== 'stop') throw new Error(`Case 44: expected stop, got ${result.finishReason}`);
+      if (hits !== 3) throw new Error(`Case 44: expected 3 hits, got ${hits}`);
+      if (!result.audit.retries || result.audit.retries.length !== 2) {
+        throw new Error('Case 44: retry audit must record two retries.');
+      }
+      if (result.audit.retries[0]?.code !== 'MODEL_SERVICE_SERVER_ERROR') {
+        throw new Error('Case 44: retry audit code wrong.');
+      }
+      if (events.filter((event) => event.type === 'retry-scheduled').length !== 2) {
+        throw new Error('Case 44: retry-scheduled events missing.');
+      }
+      if (result.messages[result.messages.length - 1]?.content !== 'recovered') {
+        throw new Error('Case 44: final message wrong.');
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 45: non-retryable 401 fails fast with exactly one hit ---
+  {
+    let hits = 0;
+    const server = createServer((_req, res) => {
+      hits += 1;
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'invalid key' } }));
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new OpenAiCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'bad-key',
+        model: 'test'
+      });
+      const result = await runAgentToolLoop(adapter, {
+        config: makeConfig(port, 'openai-compatible'),
+        apiKey: 'bad-key',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+        permissionMode: 'normal',
+        executeTool: async () => ({ ok: false, content: 'unused' }),
+        retryPolicy: { baseDelayMs: 1, maxAttempts: 4 }
+      });
+      if (result.finishReason !== 'error') throw new Error('Case 45: expected error finish.');
+      if (hits !== 1) throw new Error(`Case 45: auth failure must not retry, got ${hits} hits.`);
+      if (!result.diagnostics.some((entry) => entry.code === 'MODEL_SERVICE_AUTH_ERROR')) {
+        throw new Error('Case 45: auth code missing.');
+      }
+      if (result.audit.retries) throw new Error('Case 45: retry audit must be absent.');
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 46: parallel tool calls — supportsParallel tools overlap at
+  // --- runtime; results recorded in model emission order; exclusive serial ---
+  {
+    let turn = 0;
+    const fakeAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      async complete() {
+        turn += 1;
+        if (turn === 1) {
+          return {
+            message: {
+              role: 'assistant',
+              content: '',
+              toolCalls: [
+                { id: 'call-a', name: 'read_a', argumentsJson: '{"path":"a"}' },
+                { id: 'call-b', name: 'read_b', argumentsJson: '{"path":"b"}' }
+              ]
+            },
+            finishReason: 'tool_use',
+            diagnostics: []
+          };
+        }
+        if (turn === 2) {
+          return {
+            message: {
+              role: 'assistant',
+              content: '',
+              toolCalls: [{ id: 'call-c', name: 'write_c', argumentsJson: '{"path":"c"}' }]
+            },
+            finishReason: 'tool_use',
+            diagnostics: []
+          };
+        }
+        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+      },
+      async *stream() {
+        throw new Error('unused');
+      }
+    };
+    let active = 0;
+    let maxActive = 0;
+    let releaseB: (() => void) | undefined;
+    const bStarted = new Promise<void>((resolve) => {
+      releaseB = resolve;
+    });
+    const executed: string[] = [];
+    const events: AgentEvent[] = [];
+    const tools: ToolDefinition[] = [
+      { name: 'read_a', description: 'r', parametersJsonSchema: { type: 'object' }, supportsParallel: true },
+      { name: 'read_b', description: 'r', parametersJsonSchema: { type: 'object' }, supportsParallel: true },
+      { name: 'write_c', description: 'w', parametersJsonSchema: { type: 'object' } }
+    ];
+    const result = await runAgentToolLoop(fakeAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [{ role: 'user', content: 'go' }],
+      tools,
+      permissionMode: 'normal',
+      executeTool: async (call) => {
+        executed.push(call.name);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        try {
+          if (call.name === 'read_a') {
+            const winner = await Promise.race([
+              bStarted.then(() => 'b'),
+              new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 1500))
+            ]);
+            if (winner === 'timeout') throw new Error('Case 46: read_a/read_b did not overlap.');
+          }
+          if (call.name === 'read_b') releaseB?.();
+        } finally {
+          active -= 1;
+        }
+        return { ok: true, content: `${call.name}-result` };
+      },
+      onEvent: (event) => {
+        events.push(event);
+      }
+    });
+    if (result.finishReason !== 'stop') throw new Error(`Case 46: expected stop, got ${result.finishReason}`);
+    if (maxActive !== 2) throw new Error(`Case 46: expected concurrent execution, maxActive=${maxActive}`);
+    if (executed.join(',') !== 'read_a,read_b,write_c') {
+      throw new Error(`Case 46: execution order wrong: ${executed.join(',')}`);
+    }
+    const toolMessageIds = result.messages
+      .filter((message) => message.role === 'tool')
+      .map((message) => message.toolCallId);
+    if (toolMessageIds.join(',') !== 'call-a,call-b,call-c') {
+      throw new Error(`Case 46: recording order wrong: ${toolMessageIds.join(',')}`);
+    }
+    const begins = events.flatMap((event) => (event.type === 'tool-call-begin' ? [event.callId] : []));
+    const ends = events.flatMap((event) => (event.type === 'tool-call-end' ? [event.callId] : []));
+    if (begins.join(',') !== 'call-a,call-b,call-c' || ends.join(',') !== 'call-a,call-b,call-c') {
+      throw new Error(`Case 46: tool span events wrong: begins=${begins.join(',')} ends=${ends.join(',')}`);
+    }
+    passed++;
+  }
+
+  // --- Case 47: streaming happy path — SSE deltas surface as
+  // --- agent-message-delta events and assemble into the final message ---
+  {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'hel' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'lo' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new OpenAiCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-test',
+        model: 'test'
+      });
+      const events: AgentEvent[] = [];
+      const result = await runAgentToolLoop(adapter, {
+        config: makeConfig(port, 'openai-compatible'),
+        apiKey: 'sk-test',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+        permissionMode: 'normal',
+        executeTool: async () => ({ ok: false, content: 'unused' }),
+        streaming: true,
+        onEvent: (event) => {
+          events.push(event);
+        }
+      });
+      if (result.finishReason !== 'stop') throw new Error(`Case 47: expected stop, got ${result.finishReason}`);
+      if (result.messages[result.messages.length - 1]?.content !== 'hello') {
+        throw new Error('Case 47: streamed text not assembled.');
+      }
+      if (result.audit.streaming !== true) throw new Error('Case 47: audit.streaming missing.');
+      const deltas = events.flatMap((event) => (event.type === 'agent-message-delta' ? [event.text] : []));
+      if (deltas.join('|') !== 'hel|lo') throw new Error(`Case 47: deltas wrong: ${JSON.stringify(deltas)}`);
+      for (const required of ['turn-started', 'step-complete', 'turn-complete']) {
+        if (!events.some((event) => event.type === required)) {
+          throw new Error(`Case 47: missing lifecycle event ${required}`);
+        }
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 48: streaming tool_use — tool args accumulated across SSE chunks
+  // --- drive one executed tool step with begin/end span events ---
+  {
+    let hits = 0;
+    const server = createServer((_req, res) => {
+      hits += 1;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (hits === 1) {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-s', function: { name: 'read_s', arguments: '{"pa' } }] } }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'th":"a"}' } }] } }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      }
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new OpenAiCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-test',
+        model: 'test'
+      });
+      const seenCalls: ToolCall[] = [];
+      const events: AgentEvent[] = [];
+      const tools: ToolDefinition[] = [
+        { name: 'read_s', description: 'r', parametersJsonSchema: { type: 'object' } }
+      ];
+      const result = await runAgentToolLoop(adapter, {
+        config: makeConfig(port, 'openai-compatible'),
+        apiKey: 'sk-test',
+        messages: [{ role: 'user', content: 'go' }],
+        tools,
+        permissionMode: 'normal',
+        executeTool: async (call) => {
+          seenCalls.push(call);
+          return { ok: true, content: 's-result' };
+        },
+        streaming: true,
+        onEvent: (event) => {
+          events.push(event);
+        }
+      });
+      if (result.finishReason !== 'stop') throw new Error(`Case 48: expected stop, got ${result.finishReason}`);
+      if (seenCalls.length !== 1 || seenCalls[0]?.argumentsJson !== '{"path":"a"}') {
+        throw new Error(`Case 48: streamed tool args not accumulated: ${JSON.stringify(seenCalls)}`);
+      }
+      const begins = events.flatMap((event) => (event.type === 'tool-call-begin' ? [event.callId] : []));
+      const ends = events.flatMap((event) => (event.type === 'tool-call-end' ? [event.callId] : []));
+      if (begins.join(',') !== 'call-s' || ends.join(',') !== 'call-s') {
+        throw new Error('Case 48: tool span events missing.');
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 49: stream-level retry — first request 500, second succeeds ---
+  {
+    let hits = 0;
+    const server = createServer((_req, res) => {
+      hits += 1;
+      if (hits === 1) {
+        res.writeHead(500, { 'content-type': 'text/plain' });
+        res.end('stream gateway down');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    const port = await listen(server);
+    try {
+      const adapter = new OpenAiCompatibleAdapter({
+        baseUrl: `http://127.0.0.1:${port}`,
+        apiKey: 'sk-test',
+        model: 'test'
+      });
+      const result = await runAgentToolLoop(adapter, {
+        config: makeConfig(port, 'openai-compatible'),
+        apiKey: 'sk-test',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+        permissionMode: 'normal',
+        executeTool: async () => ({ ok: false, content: 'unused' }),
+        streaming: true,
+        retryPolicy: { baseDelayMs: 1 }
+      });
+      if (result.finishReason !== 'stop') throw new Error(`Case 49: expected stop, got ${result.finishReason}`);
+      if (hits !== 2) throw new Error(`Case 49: expected 2 hits, got ${hits}`);
+      if (!result.audit.retries || result.audit.retries.length !== 1) {
+        throw new Error('Case 49: stream retry audit missing.');
+      }
+      passed++;
+    } finally {
+      await close(server);
+    }
+  }
+
+  // --- Case 50: rollout roundtrip — meta + messages persisted, secrets never
+  // --- durable, corrupt lines tolerated on resume ---
+  {
+    let turn = 0;
+    const secret = 'sk-abcdefghij1234';
+    const fakeAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      async complete() {
+        turn += 1;
+        if (turn === 1) {
+          return {
+            message: {
+              role: 'assistant',
+              content: `leak ${secret} here`,
+              toolCalls: [{ id: 'call-r', name: 'read_r', argumentsJson: '{"path":"a"}' }]
+            },
+            finishReason: 'tool_use',
+            diagnostics: []
+          };
+        }
+        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+      },
+      async *stream() {
+        throw new Error('unused');
+      }
+    };
+    const storage = new InMemoryRolloutStorage();
+    const recorder = new RolloutRecorder(storage, {
+      sessionId: 'sess-1',
+      startedAt: new Date().toISOString(),
+      configId: 'cfg-1',
+      protocol: 'openai-compatible',
+      permissionMode: 'normal'
+    });
+    const tools: ToolDefinition[] = [
+      { name: 'read_r', description: 'r', parametersJsonSchema: { type: 'object' } }
+    ];
+    const result = await runAgentToolLoop(fakeAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [{ role: 'user', content: 'go' }],
+      tools,
+      permissionMode: 'normal',
+      executeTool: async () => ({ ok: true, content: 'r-result' }),
+      rollout: recorder
+    });
+    if (result.finishReason !== 'stop') throw new Error(`Case 50: expected stop, got ${result.finishReason}`);
+    const lines = await storage.readLines();
+    if (lines.some((line) => line.includes(secret))) {
+      throw new Error('Case 50: secret leaked into rollout storage.');
+    }
+    const resumed = parseRolloutLines(lines);
+    if (resumed.meta?.sessionId !== 'sess-1' || resumed.parseErrors !== 0) {
+      throw new Error('Case 50: resume meta/parse wrong.');
+    }
+    if (resumed.messages.length < 2) throw new Error('Case 50: rollout messages missing.');
+    const corrupted = [...lines];
+    corrupted.splice(2, 0, '{{{not-json');
+    const tolerant = parseRolloutLines(corrupted);
+    if (tolerant.parseErrors !== 1 || tolerant.meta?.sessionId !== 'sess-1') {
+      throw new Error('Case 50: corrupt line tolerance failed.');
+    }
+    await recorder.close();
+    passed++;
+  }
+
+  // --- Case 51: rollback marker truncates logically without rewriting lines ---
+  {
+    const lines = [
+      JSON.stringify({ type: 'session-meta', meta: { sessionId: 'sess-2', startedAt: 't0', configId: 'cfg', protocol: 'openai-compatible', permissionMode: 'normal' } }),
+      JSON.stringify({ type: 'message', step: 1, message: { role: 'user', content: 'u1' } }),
+      JSON.stringify({ type: 'message', step: 1, message: { role: 'assistant', content: 'a1' } }),
+      JSON.stringify({ type: 'message', step: 2, message: { role: 'user', content: 'u2' } }),
+      JSON.stringify({ type: 'message', step: 2, message: { role: 'assistant', content: 'a2' } }),
+      JSON.stringify({ type: 'rollback-marker', at: 't1', keepLastUserTurns: 1 })
+    ];
+    const resumed = parseRolloutLines(lines);
+    const contents = resumed.messages.map((message) => message.content).join(',');
+    if (contents !== 'u2,a2') throw new Error(`Case 51: rollback truncation wrong: ${contents}`);
+    if (resumed.meta?.sessionId !== 'sess-2') throw new Error('Case 51: meta lost after rollback.');
+    passed++;
+  }
+
+  // --- Case 52: auto-compaction — history replaced by system + recent user
+  // --- messages + prefixed summary, with audit entry and rollout checkpoint ---
+  {
+    let callNo = 0;
+    const requests: ModelCompleteRequest[] = [];
+    const compactAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      async complete(request) {
+        callNo += 1;
+        // Snapshot: the loop keeps a live reference to its messages array.
+        requests.push({ ...request, messages: [...request.messages] });
+        const last = request.messages[request.messages.length - 1];
+        if (callNo === 1 && last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
+          return {
+            message: { role: 'assistant', content: '摘要：任务X 已完成。' },
+            finishReason: 'stop',
+            diagnostics: []
+          };
+        }
+        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+      },
+      async *stream() {
+        throw new Error('unused');
+      }
+    };
+    const storage = new InMemoryRolloutStorage();
+    const recorder = new RolloutRecorder(storage, {
+      sessionId: 'sess-3',
+      startedAt: new Date().toISOString(),
+      configId: 'cfg',
+      protocol: 'openai-compatible',
+      permissionMode: 'normal'
+    });
+    const events: AgentEvent[] = [];
+    const result = await runAgentToolLoop(compactAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [
+        { role: 'system', content: 'SYS' },
+        { role: 'user', content: 'older question' },
+        { role: 'assistant', content: 'older answer' },
+        { role: 'user', content: 'newer question' }
+      ],
+      tools: [],
+      permissionMode: 'normal',
+      executeTool: async () => ({ ok: false, content: 'unused' }),
+      compaction: { autoCompactTokenLimit: 1 },
+      rollout: recorder,
+      onEvent: (event) => {
+        events.push(event);
+      }
+    });
+    if (result.finishReason !== 'stop') throw new Error(`Case 52: expected stop, got ${result.finishReason}`);
+    if (
+      !result.audit.compactions ||
+      result.audit.compactions.length !== 1 ||
+      result.audit.compactions[0]?.reason !== 'auto' ||
+      result.audit.compactions[0]?.summaryBytes === 0
+    ) {
+      throw new Error('Case 52: compaction audit missing.');
+    }
+    if (requests.length !== 2) throw new Error(`Case 52: expected 2 model calls, got ${requests.length}`);
+    const summaryRequest = requests[0];
+    if (summaryRequest?.messages[summaryRequest.messages.length - 1]?.content !== DEFAULT_SUMMARIZATION_PROMPT) {
+      throw new Error('Case 52: summarization prompt not sent.');
+    }
+    const mainRequest = requests[1];
+    const mainContents = (mainRequest?.messages ?? []).map((message) => message.content);
+    if (!mainContents.includes('SYS')) throw new Error('Case 52: system context dropped.');
+    if (mainContents.some((content) => content.includes('older answer'))) {
+      throw new Error('Case 52: assistant history must be compacted away.');
+    }
+    const lastMain = mainRequest?.messages[(mainRequest?.messages.length ?? 0) - 1];
+    if (!lastMain || !lastMain.content.startsWith(DEFAULT_SUMMARY_PREFIX)) {
+      throw new Error('Case 52: prefixed summary message missing.');
+    }
+    if (!events.some((event) => event.type === 'context-compacted')) {
+      throw new Error('Case 52: context-compacted event missing.');
+    }
+    if (!result.diagnostics.some((entry) => entry.code === 'CONTEXT_COMPACTION_APPLIED')) {
+      throw new Error('Case 52: compaction diagnostic missing.');
+    }
+    const durable = await storage.readLines();
+    if (!durable.some((line) => line.includes('"type":"compacted"'))) {
+      throw new Error('Case 52: rollout compaction checkpoint missing.');
+    }
+    await recorder.close();
+    passed++;
+  }
+
+  // --- Case 53: compaction fails closed — failing summary requests keep the
+  // --- original history and surface COMPACTION_SUMMARY_FAILED ---
+  {
+    const failingAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      async complete(request) {
+        const last = request.messages[request.messages.length - 1];
+        if (last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
+          return {
+            message: { role: 'assistant', content: '' },
+            finishReason: 'error',
+            diagnostics: [{ severity: 'error', code: 'MODEL_SERVICE_SERVER_ERROR', message: 'summary unavailable' }]
+          };
+        }
+        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+      },
+      async *stream() {
+        throw new Error('unused');
+      }
+    };
+    const result = await runAgentToolLoop(failingAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [
+        { role: 'system', content: 'SYS' },
+        { role: 'user', content: 'older question' },
+        { role: 'assistant', content: 'older answer' }
+      ],
+      tools: [],
+      permissionMode: 'normal',
+      executeTool: async () => ({ ok: false, content: 'unused' }),
+      compaction: { autoCompactTokenLimit: 1 }
+    });
+    if (result.finishReason !== 'stop') throw new Error(`Case 53: expected stop, got ${result.finishReason}`);
+    if (result.audit.compactions) {
+      throw new Error('Case 53: failed compaction must not be audited as applied.');
+    }
+    if (!result.diagnostics.some((entry) => entry.code === 'COMPACTION_SUMMARY_FAILED')) {
+      throw new Error('Case 53: COMPACTION_SUMMARY_FAILED missing.');
+    }
+    if (!result.messages.some((message) => message.content.includes('older answer'))) {
+      throw new Error('Case 53: original history must survive fail-closed.');
+    }
+    passed++;
+  }
+
   console.log(JSON.stringify({
     ok: true,
-    message: 'AI 双协议错误/取消/超时/限额矩阵 + 真实 SSE 流式（含流式取消/超时/错误分类）+ 脱敏矩阵 + Context Broker 证据装配 + 真实工作区多步 typed mutation 写矩阵 conformance 验证通过',
+    message: 'AI 双协议错误/取消/超时/限额矩阵 + 真实 SSE 流式（含流式取消/超时/错误分类）+ 脱敏矩阵 + Context Broker 证据装配 + 真实工作区多步 typed mutation 写矩阵 + Codex 派生内核（重试退避/并行工具/流式事件/rollout 持久化/上下文压缩）conformance 验证通过',
     passed,
     total,
     nonClaims: [
@@ -1904,6 +2580,7 @@ async function main(): Promise<void> {
       'plan 只读在 agent loop 层强制；policy gate 层按既有 architecture scaffold 契约保留 stage/validate 上限。',
       'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
       'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不属于 V0.5 验收。',
+      'Codex 派生内核（重试退避、并行工具、流式事件、rollout、compaction）参考 openai/codex（Apache-2.0）设计重写；离线矩阵不证明与 Codex 行为逐位一致，也不提升 provider 或 native authority。',
       '真实 provider 凭据不属于 V0.5 验收。'
     ]
   }));

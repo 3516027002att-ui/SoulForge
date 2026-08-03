@@ -43,6 +43,13 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parametersJsonSchema: Record<string, unknown>;
+  /**
+   * When true, consecutive calls of this tool in one model turn may execute
+   * concurrently; results are still recorded in model emission order.
+   * Default false — exclusive, serialized execution (Codex
+   * supports_parallel_tool_calls semantics).
+   */
+  supportsParallel?: boolean;
 }
 
 export type StreamEvent =
@@ -75,6 +82,73 @@ export interface ModelServiceAdapter {
   stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined>;
 }
 
+export interface RetryPolicyOptions {
+  /** Total attempts including the first. Default 4, capped at 100. */
+  maxAttempts?: number;
+  /** Initial backoff delay in milliseconds. Default 200. */
+  baseDelayMs?: number;
+  /** Exponential backoff factor. Default 2. */
+  backoffFactor?: number;
+  /** Symmetric jitter ratio applied to each delay. Default 0.1 (±10%). */
+  jitterRatio?: number;
+  /** Upper bound for any single computed delay. Default 30000. */
+  maxDelayMs?: number;
+}
+
+/**
+ * Agent-level events emitted during a run (Codex EventMsg subset). Deltas are
+ * transient — rollout persistence decides separately which items are durable.
+ */
+export type AgentEvent =
+  | { type: 'turn-started'; step: number }
+  | { type: 'agent-message-delta'; step: number; text: string }
+  | { type: 'tool-call-begin'; step: number; callId: string; name: string }
+  | { type: 'tool-call-end'; step: number; callId: string; name: string; ok: boolean; code?: string }
+  | { type: 'retry-scheduled'; step: number; attempt: number; maxAttempts: number; delayMs: number; code: string }
+  | { type: 'context-assembled'; step: number; sections: number; totalBytes: number }
+  | { type: 'context-compacted'; step: number; reason: 'auto'; tokenLimit: number }
+  | { type: 'step-complete'; step: number; finishReason: string }
+  | { type: 'turn-complete'; finishReason: string; steps: number };
+
+/**
+ * Durable rollout items (Codex RolloutItem subset). Append-only JSONL; the
+ * storage location is injected by the caller — never the Mod workspace.
+ */
+export interface RolloutSessionMeta {
+  sessionId: string;
+  startedAt: string;
+  configId: string;
+  protocol: ModelServiceProtocol;
+  permissionMode: AgentPermissionMode;
+  model?: string;
+}
+
+export type RolloutItem =
+  | { type: 'session-meta'; meta: RolloutSessionMeta }
+  | { type: 'message'; step: number; message: ChatMessage }
+  | { type: 'compacted'; at: string; windowId: string }
+  | { type: 'interrupted'; at: string }
+  | { type: 'rollback-marker'; at: string; keepLastUserTurns: number };
+
+/** Minimal sink the agent loop needs; RolloutRecorder implements it. */
+export interface RolloutSink {
+  enqueue(item: RolloutItem): void;
+  flush(): Promise<void>;
+}
+
+export interface CompactionOptions {
+  /**
+   * Auto-compaction trigger: when the estimated context tokens reach this
+   * limit before a model call, the history is summarized and replaced.
+   * Auto-compaction is off when unset.
+   */
+  autoCompactTokenLimit?: number;
+  /** Token budget for recent user messages kept verbatim. Default 20000. */
+  userMessageBudgetTokens?: number;
+  summarizationPrompt?: string;
+  summaryPrefix?: string;
+}
+
 export interface AgentRunRequest {
   config: ModelServiceConfig;
   /** Resolved only in main/core — never passed to renderer. */
@@ -98,6 +172,21 @@ export interface AgentRunRequest {
    */
   contextBroker?: ContextBroker;
   contextBrokerOptions?: ContextBrokerOptions;
+  /**
+   * Retry/backoff policy for model calls (Codex request-level semantics).
+   * Defaults to 4 attempts with 200ms×2^n ±10% jitter.
+   */
+  retryPolicy?: RetryPolicyOptions;
+  /** Retry budget for the streaming path. Default 5. */
+  streamMaxRetries?: number;
+  /** Consume adapter.stream() instead of complete(); requires onEvent for deltas. */
+  streaming?: boolean;
+  /** Agent-level event sink (turn lifecycle, deltas, tool spans, retries). */
+  onEvent?: (event: AgentEvent) => void;
+  /** Append-only session recorder; flushed before the run returns. */
+  rollout?: RolloutSink;
+  /** Context compaction behavior; auto-compaction requires autoCompactTokenLimit. */
+  compaction?: CompactionOptions;
 }
 
 export interface AgentRunResult {
@@ -112,6 +201,12 @@ export interface AgentRunResult {
     permissionMode: AgentPermissionMode;
     toolCalls: Array<{ name: string; ok: boolean; code?: string }>;
     redacted: true;
+    /** True when the run consumed adapter.stream() instead of complete(). */
+    streaming?: boolean;
+    /** Retry/backoff log — one entry per scheduled retry. */
+    retries?: Array<{ step: number; attempt: number; code: string; delayMs: number }>;
+    /** Compaction log — one entry per applied context compaction. */
+    compactions?: Array<{ step: number; reason: 'auto'; tokenLimit: number; summaryBytes: number }>;
     /**
      * Context Broker assembly log — metadata only, never evidence content.
      * Populated when `contextBroker` is provided on the run request.
