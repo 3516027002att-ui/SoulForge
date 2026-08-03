@@ -903,8 +903,75 @@ const SCOPE_SUBJECT_SET = Object.freeze({
   handoffSections: Object.freeze([]),
   handoffBlocks: Object.freeze([RELEASE_SCOPE_PROPOSAL_SUBJECT])
 });
+const REL_A_SUBJECT_SET = Object.freeze({
+  files: Object.freeze([
+    'packages/core/src/transactions/workspaceTransaction.ts',
+    'packages/core/src/patch/durablePatchCommit.ts',
+    'packages/core/src/patch/recoveryRepair.ts',
+    'packages/core/src/patch/sqliteOperationLogStore.ts',
+    'packages/core/src/testing/runWriterFailureMatrixSmoke.ts',
+    'packages/core/src/testing/runStandaloneWriterFailureMatrixSmoke.ts',
+    'packages/core/src/testing/runPowerLossRecoverySmoke.ts',
+    'packages/core/src/testing/runLargeTransactionRecoverySmoke.ts',
+    'packages/core/src/testing/runCrossSessionJournalSmoke.ts',
+    'packages/core/src/testing/runUpgradeRecoverySmoke.ts'
+  ]),
+  handoffSections: Object.freeze([]),
+  handoffBlocks: Object.freeze([])
+});
+const REL_B_SUBJECT_SET = Object.freeze({
+  files: Object.freeze([
+    'packages/core/src/bridge/releaseCorpusRegistry.ts',
+    'packages/core/src/bridge/releaseCorpusRegistry.schema.json',
+    'scripts/verify-native-dcx-documents.mjs',
+    'scripts/build-local-release-corpus-registry.mjs',
+    'packages/core/src/testing/runNativeCorpusWriteBackSmoke.ts',
+    'packages/core/src/testing/runReleaseCorpusRegistrySmoke.ts'
+  ]),
+  handoffSections: Object.freeze([]),
+  handoffBlocks: Object.freeze([])
+});
+const REL_F_SUBJECT_SET = Object.freeze({
+  files: Object.freeze([
+    'packages/core/src/editing/editorCapabilityContract.ts',
+    'packages/core/src/editing/releaseEditorAcceptance.ts',
+    'packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts',
+    'packages/core/src/testing/runDesktopLiveEditorContractSmoke.ts'
+  ]),
+  handoffSections: Object.freeze([]),
+  handoffBlocks: Object.freeze([])
+});
+const REL_G_SUBJECT_SET = Object.freeze({
+  files: Object.freeze([
+    'packages/core/src/model-services/agentLoop.ts',
+    'packages/core/src/model-services/errorClassification.ts',
+    'packages/core/src/model-services/anthropicCompatibleAdapter.ts',
+    'packages/core/src/model-services/openaiCompatibleAdapter.ts',
+    'packages/core/src/ai-tools/scaffoldToolRegistry.ts',
+    'packages/core/src/testing/runAiConformanceSmoke.ts',
+    'packages/core/src/testing/runAiFakeLoopSmoke.ts'
+  ]),
+  handoffSections: Object.freeze([]),
+  handoffBlocks: Object.freeze([])
+});
+const REL_COMPLIANCE_SUBJECT_SET = Object.freeze({
+  files: Object.freeze([
+    'scripts/release-compliance-lib.mjs',
+    'scripts/verify-release-package-content.mjs',
+    'apps/desktop/electron-builder.json',
+    'scripts/verify-installer-lifecycle.mjs',
+    'scripts/verify-release-compliance-fixtures.mjs'
+  ]),
+  handoffSections: Object.freeze([]),
+  handoffBlocks: Object.freeze([])
+});
 const GATE_SUBJECT_SETS = new Map([
-  ['REL-SCOPE', SCOPE_SUBJECT_SET]
+  ['REL-SCOPE', SCOPE_SUBJECT_SET],
+  ['REL-A', REL_A_SUBJECT_SET],
+  ['REL-B', REL_B_SUBJECT_SET],
+  ['REL-F', REL_F_SUBJECT_SET],
+  ['REL-G', REL_G_SUBJECT_SET],
+  ['REL-COMPLIANCE', REL_COMPLIANCE_SUBJECT_SET]
 ]);
 
 export function handoffSectionSubjectRef(sectionId) {
