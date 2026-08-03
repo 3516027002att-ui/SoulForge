@@ -17,8 +17,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
+      # fetch-depth 0：治理门禁（GATE_FRESHNESS）需要验证交接书 Evidence
+      # 锚点的 Git 祖先关系，shallow clone 会使祖先不可见而 fail-closed。
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
