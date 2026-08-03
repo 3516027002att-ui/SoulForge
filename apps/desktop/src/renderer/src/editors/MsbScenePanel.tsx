@@ -135,7 +135,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       return;
     }
     if (!props.writeEnabled || !props.onPartPositionCommit) {
-      setStatus('当前为演示模式：位置微调不会提交到补丁引擎。');
+      setStatus('MSB 写入在当前版本未开放：位置微调仅为本地预览，不会写入。');
       return;
     }
     const next = {
@@ -155,7 +155,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       return;
     }
     if (!props.writeEnabled || !props.onRegionPositionCommit) {
-      setStatus('当前为演示模式：region 位置微调不会提交到补丁引擎。');
+      setStatus('MSB 写入在当前版本未开放：region 位置微调仅为本地预览，不会写入。');
       return;
     }
     props.onRegionPositionCommit({
@@ -265,7 +265,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           ? `${deferredRelease} 只读预览：既有 write-msb typed mutation 写链已在本版关闭，主进程会拒绝写入请求。`
           : props.writeEnabled
             ? '实时模式：part/region 位置微调经 Bridge write-msb → Patch Engine 提交。'
-            : '演示模式：微调仅本地提示，不会写入。'}
+            : 'MSB 写入未开放：微调仅为本地预览，不会写入。'}
       </p>
     </section>
   );
