@@ -2,6 +2,11 @@
  * Dual model-service fake-server tool loop smoke.
  * Drives real OpenAI-compatible + Anthropic-compatible adapters against local
  * fake HTTP servers — no live cloud keys required.
+ *
+ * Covers: OpenAI + Anthropic complete()/stream(), real Anthropic SSE parsing
+ * (partial_json tool-arg accumulation), Anthropic multi-turn tool loop
+ * (assistant tool_use echo + tool_result mapping), policy/plan gating, evidence
+ * gate, and the four-form secret redaction matrix (sk- / Bearer / header inline).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createConfiguredModelServiceAdapter } from '../model-services/configuredAdapter.js';
@@ -113,7 +118,12 @@ function startOpenAiFake(): Promise<{ baseUrl: string; close: () => Promise<void
   });
 }
 
-function startAnthropicFake(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+function startAnthropicFake(): Promise<{
+  baseUrl: string;
+  close: () => Promise<void>;
+  history: Array<{ messages: unknown[]; system?: string }>;
+}> {
+  const history: Array<{ messages: unknown[]; system?: string }> = [];
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const body = await readBody(req);
     const key = req.headers['x-api-key'];
@@ -125,30 +135,77 @@ function startAnthropicFake(): Promise<{ baseUrl: string; close: () => Promise<v
       res.writeHead(404).end('not found');
       return;
     }
-    const parsed = JSON.parse(body) as { messages?: unknown[] };
-    const hasToolResult = JSON.stringify(parsed.messages ?? []).includes('tool_result');
-    if (!hasToolResult) {
-      res.writeHead(200, { 'content-type': 'application/json' });
+    const parsed = JSON.parse(body) as {
+      messages?: unknown[];
+      system?: string;
+      stream?: boolean;
+    };
+    const messagesJson = JSON.stringify(parsed.messages ?? []);
+    history.push({
+      messages: parsed.messages ?? [],
+      ...(typeof parsed.system === 'string' ? { system: parsed.system } : {})
+    });
+    // Multi-turn: the request already carries N assistant tool_use blocks echoed
+    // back for the N completed tool rounds, so the fake answers with the next
+    // tool_use (round 0 → search_workspace, round 1 → apply_patch) and only
+    // stops after two tool rounds have completed (toolUseCount >= 2).
+    const toolUseCount = (messagesJson.match(/"type":"tool_use"/g) ?? []).length;
+    const done = toolUseCount >= 2;
+    const usage = { input_tokens: 11 + toolUseCount * 3, output_tokens: 6 };
+
+    const chunk = (obj: unknown) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    if (parsed.stream === true) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      chunk({
+        type: 'message_start',
+        message: { role: 'assistant', content: [], usage: { input_tokens: usage.input_tokens } }
+      });
+      if (done) {
+        chunk({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+        chunk({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Anthropic fake final answer' } });
+        chunk({ type: 'content_block_stop', index: 0 });
+        chunk({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: usage.output_tokens } });
+      } else {
+        const tool = toolUseCount === 0
+          ? { id: 'toolu_1', name: 'search_workspace', input: { query: 'ember' } }
+          : { id: 'toolu_2', name: 'apply_patch', input: { patch: 'demo' } };
+        chunk({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+        chunk({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: toolUseCount === 0 ? 'Need search' : 'Need patch' } });
+        chunk({ type: 'content_block_stop', index: 0 });
+        chunk({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: tool.id, name: tool.name, input: {} } });
+        // Split the JSON args across two input_json_delta chunks so the real
+        // SSE parser must accumulate partial_json before emitting tool-call.
+        const partial = JSON.stringify(tool.input);
+        const split = Math.ceil(partial.length / 2);
+        chunk({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: partial.slice(0, split) } });
+        chunk({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: partial.slice(split) } });
+        chunk({ type: 'content_block_stop', index: 1 });
+        chunk({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: usage.output_tokens } });
+      }
+      chunk({ type: 'message_stop' });
+      res.end();
+      return;
+    }
+
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (done) {
       res.end(JSON.stringify({
-        content: [
-          { type: 'text', text: 'Need search' },
-          {
-            type: 'tool_use',
-            id: 'toolu_1',
-            name: 'search_workspace',
-            input: { query: 'ember' }
-          }
-        ],
-        stop_reason: 'tool_use',
-        usage: { input_tokens: 11, output_tokens: 6 }
+        content: [{ type: 'text', text: 'Anthropic fake final answer' }],
+        stop_reason: 'end_turn',
+        usage
       }));
       return;
     }
-    res.writeHead(200, { 'content-type': 'application/json' });
+    const tool = toolUseCount === 0
+      ? { id: 'toolu_1', name: 'search_workspace', input: { query: 'ember' } }
+      : { id: 'toolu_2', name: 'apply_patch', input: { patch: 'demo' } };
     res.end(JSON.stringify({
-      content: [{ type: 'text', text: 'Anthropic fake final answer' }],
-      stop_reason: 'end_turn',
-      usage: { input_tokens: 22, output_tokens: 9 }
+      content: [
+        { type: 'text', text: toolUseCount === 0 ? 'Need search' : 'Need patch' },
+        { type: 'tool_use', id: tool.id, name: tool.name, input: tool.input }
+      ],
+      stop_reason: 'tool_use',
+      usage
     }));
   });
   return new Promise((resolve) => {
@@ -157,7 +214,8 @@ function startAnthropicFake(): Promise<{ baseUrl: string; close: () => Promise<v
       if (!address || typeof address === 'string') throw new Error('no port');
       resolve({
         baseUrl: `http://127.0.0.1:${address.port}`,
-        close: () => new Promise((r) => server.close(() => r()))
+        close: () => new Promise((r) => server.close(() => r())),
+        history
       });
     });
   });
@@ -180,6 +238,7 @@ async function main(): Promise<void> {
 
   const openaiServer = await startOpenAiFake();
   const anthropicServer = await startAnthropicFake();
+  const anthropicHistory = anthropicServer.history;
   try {
     const openaiConfig: ModelServiceConfig = {
       id: 'cfg-openai',
@@ -229,6 +288,32 @@ async function main(): Promise<void> {
       if (event.type === 'message-stop') break;
     }
 
+    // Real SSE streaming path for Anthropic (message_start / content_block_* /
+    // message_delta / message_stop). Tool args arrive split across two
+    // input_json_delta chunks and must be accumulated by the adapter.
+    const anthropicStreamText: string[] = [];
+    const anthropicStreamTools: Array<{ name: string; args: string }> = [];
+    for await (const event of anthropicAdapter.stream({
+      messages: [{ role: 'user', content: 'stream please' }],
+      tools
+    })) {
+      if (event.type === 'text-delta') anthropicStreamText.push(event.text);
+      if (event.type === 'tool-call') {
+        anthropicStreamTools.push({ name: event.toolCall.name, args: event.toolCall.argumentsJson });
+      }
+      if (event.type === 'message-stop') break;
+    }
+    if (!anthropicStreamText.join('').includes('Need search')) {
+      throw new Error(`Anthropic SSE stream text missing, got ${JSON.stringify(anthropicStreamText)}`);
+    }
+    if (anthropicStreamTools.length !== 1 || anthropicStreamTools[0]!.name !== 'search_workspace') {
+      throw new Error(`Anthropic SSE stream tool not assembled, got ${JSON.stringify(anthropicStreamTools)}`);
+    }
+    const anthropicStreamArgs = JSON.parse(anthropicStreamTools[0]!.args) as { query?: string };
+    if (anthropicStreamArgs.query !== 'ember') {
+      throw new Error(`Anthropic SSE partial_json not accumulated, got ${anthropicStreamTools[0]!.args}`);
+    }
+
     const openaiRun = await runAgentToolLoop(openaiAdapter, {
       config: openaiConfig,
       apiKey: OPENAI_KEY,
@@ -254,6 +339,37 @@ async function main(): Promise<void> {
       }),
       maxSteps: 4
     });
+
+    // Multi-turn Anthropic tool loop: two consecutive tool_use rounds must echo
+    // the assistant tool_use content blocks and map tool results back as
+    // tool_result user messages before the fake answers with a final stop.
+    if (anthropicRun.steps !== 3) {
+      throw new Error(`Anthropic multi-turn expected 3 steps, got ${anthropicRun.steps}`);
+    }
+    if (anthropicRun.finishReason !== 'stop') {
+      throw new Error(`Anthropic multi-turn expected stop, got ${anthropicRun.finishReason}`);
+    }
+    const anthropicToolNames = anthropicRun.audit.toolCalls.map((call) => call.name);
+    if (!anthropicToolNames.includes('search_workspace') || !anthropicToolNames.includes('apply_patch')) {
+      throw new Error(`Anthropic multi-turn tool calls missing, got ${JSON.stringify(anthropicToolNames)}`);
+    }
+    // The final request history entry must echo both assistant tool_use blocks
+    // (search_workspace then apply_patch) and both tool_result mappings back to
+    // the fake, proving the loop closed two full tool rounds.
+    const anthropicFinalReq = anthropicHistory[anthropicHistory.length - 1];
+    if (!anthropicFinalReq) throw new Error('Anthropic multi-turn missing final request history');
+    const finalJson = JSON.stringify(anthropicFinalReq.messages);
+    if (!finalJson.includes('"type":"tool_use"') || !finalJson.includes('"name":"search_workspace"')) {
+      throw new Error('Anthropic assistant tool_use block was not echoed back on the final round');
+    }
+    if (!finalJson.includes('"name":"apply_patch"')) {
+      throw new Error('Anthropic second-round tool_use was not echoed back');
+    }
+    if (!finalJson.includes('"type":"tool_result"')
+      || !finalJson.includes('"tool_use_id":"toolu_1"')
+      || !finalJson.includes('"tool_use_id":"toolu_2"')) {
+      throw new Error('Anthropic tool_result was not mapped back for both rounds');
+    }
 
     // Policy deny in plan mode for write tool
     const denied = isToolAllowedInMode('apply_patch', 'plan', new Set(tools.map((t) => t.name)));
@@ -312,6 +428,23 @@ async function main(): Promise<void> {
     if (redacted.includes(OPENAI_KEY) || redacted.includes(ANTHROPIC_KEY)) {
       throw new Error('redactSecrets failed');
     }
+    // Redaction matrix: Bearer tokens and header-inline secrets use different
+    // SECRET_PATTERNS than sk-; assert each form is redacted and rejected.
+    const bearerToken = 'eyJhbGciOiJIUzI1NiJ9.sig.value';
+    const headerInline = 'sk-ant-inline-header-secret-abcdef';
+    const redactedForms = redactSecrets(
+      `Bearer ${bearerToken}\nx-api-key: ${headerInline}\napi_key = "synthetic_api_key_12345"`
+    );
+    if (redactedForms.includes(bearerToken) || redactedForms.includes(headerInline)) {
+      throw new Error('Bearer/header inline secrets were not redacted');
+    }
+    let bearerLeakCaught = false;
+    try {
+      assertNoSecretLeak({ toolResult: `Bearer ${bearerToken}` }, '');
+    } catch {
+      bearerLeakCaught = true;
+    }
+    if (!bearerLeakCaught) throw new Error('assertNoSecretLeak must reject a Bearer inline secret');
     assertNoSecretLeak(openaiRun.audit, OPENAI_KEY);
     assertNoSecretLeak(anthropicRun.audit, ANTHROPIC_KEY);
     assertNoSecretLeak({ openai: openaiRun.messages, anthropic: anthropicRun.messages }, OPENAI_KEY);
@@ -372,7 +505,12 @@ async function main(): Promise<void> {
       anthropic: {
         steps: anthropicRun.steps,
         finishReason: anthropicRun.finishReason,
-        toolCalls: anthropicRun.audit.toolCalls
+        toolCalls: anthropicRun.audit.toolCalls,
+        multiTurn: true,
+        stream: {
+          text: anthropicStreamText.join(''),
+          toolCalls: anthropicStreamTools
+        }
       },
       planModeDeniedWrite: denied.code,
       fullPermissionStillGated: fullRun.audit.toolCalls,

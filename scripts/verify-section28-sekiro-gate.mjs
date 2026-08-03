@@ -73,13 +73,14 @@ const report = {
   steps: /** @type {Array<Record<string, unknown>>} */ ([])
 };
 
-function runNpm(args, signal) {
+function runNpm(args, signal, extraEnv = {}) {
   return runProcess({
     command: process.execPath,
     args: [npmCli, ...args],
     cwd: root,
     timeoutMs: stepTimeoutMs,
-    signal
+    signal,
+    env: { ...process.env, ...extraEnv }
   });
 }
 
@@ -127,21 +128,30 @@ if (!report.sekiroExePresent) {
   process.exit();
 }
 
-// Real in-game launch automation is not shipped; record partial gate honestly.
+// Real game launch through the pinned me3 gateway is now part of this gate.
+// The me3-sekiro-session step runs a bounded launch/terminate/restart session
+// in suspend mode (game process present, renderer not running) and records an
+// honest native-verified observation. Status remains capped at partial: this
+// machine is not a substitute for packaged-game acceptance.
 const smokes = [
   { name: 'bridge:verify:oodle', args: ['run', 'bridge:verify:oodle'] },
   { name: 'bridge:verify:emevd', args: ['run', 'bridge:verify:emevd'] },
-  { name: 'bridge:verify:msb', args: ['run', 'bridge:verify:msb'] }
+  { name: 'bridge:verify:msb', args: ['run', 'bridge:verify:msb'] },
+  {
+    name: 'me3-sekiro-session',
+    args: ['run', 'test:me3-sekiro-session'],
+    env: { SOULFORGE_ME3_SEKIRO_SESSION_RUN: '1', SOULFORGE_ME3_SEKIRO_SUSPEND: '1' }
+  }
 ];
 let failed = false;
 const cancellation = createProcessCancellation();
 try {
-  for (const step of smokes) {
-    const result = await runNpm(step.args, cancellation.signal);
+  for (const entry of smokes) {
+    const result = await runNpm(entry.args, cancellation.signal, entry.env ?? {});
     const ok = processSucceeded(result);
     if (!ok) failed = true;
     report.steps.push({
-      name: step.name,
+      name: entry.name,
       ok,
       code: result.code,
       timedOut: result.timedOut,
@@ -161,8 +171,8 @@ try {
 report.status = failed ? 'failed' : 'partial';
 report.ok = !failed;
 report.message = failed
-  ? 'section-28 前置 native smoke 失败。'
-  : 'section-28 前置 native smoke 通过；完整游戏启动/Mod 加载自动化未实现，不得声明 section-28 全绿。';
+  ? 'section-28 前置 native smoke 或真实 me3 启动会话失败。'
+  : 'section-28 前置 native smoke 与真实 me3 启动会话（suspend）通过；本机真实验证不替代打包游戏验收，不得声明 section-28 全绿。';
 
 const outPath = join(scratch, 'section28-sekiro-gate.json');
 await writeFile(outPath, JSON.stringify(report, null, 2), 'utf8');

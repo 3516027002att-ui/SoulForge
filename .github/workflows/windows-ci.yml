@@ -154,8 +154,28 @@ jobs:
           npm run test:private-native-gate
           npm run test:section28-sekiro-gate
 
+      # Real me3 → Sekiro launch/terminate/restart session. Public CI has no real
+      # game assets (SOULFORGE_SEKIRO_GAME_ROOT unset), so this is an honest skip
+      # and never builds or launches anything.
+      - name: me3 Sekiro session (honest skip without game root)
+        run: npm run test:me3-sekiro-session
+
       - name: Build
         run: npm run build
+
+      # Public CI previously produced no NSIS artifact, so test:release-content
+      # failed structurally with INSTALLER_MISSING. Building the unsigned NSIS
+      # installer here restores the installer integrity chain on every run.
+      # CSC_IDENTITY_AUTO_DISCOVERY=false keeps electron-builder from probing for
+      # a signing identity on a runner that has none (unsigned build is honest).
+      - name: Build NSIS installer (unsigned, for integrity chain)
+        working-directory: apps/desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --win nsis
+
+      - name: Record installer compliance manifest
+        run: npm run release:installer:manifest
 
       - name: Release compliance negative fixtures
         run: |
@@ -167,6 +187,14 @@ jobs:
 
       - name: Reproducible build fingerprint
         run: npm run test:release-reproducible
+
+      # Execute-mode installer lifecycle on the clean runner: install → upgrade →
+      # uninstall → clean-target in an owner-controlled temp target. Honest skip
+      # is NOT acceptable here because the runner is disposable and isolated.
+      - name: Installer lifecycle (execute mode)
+        env:
+          SOULFORGE_INSTALLER_LIFECYCLE_RUN: '1'
+        run: npm run test:installer-lifecycle
 
       - name: Portable packaging config gate
         run: npm run test:portable-packaging-gate

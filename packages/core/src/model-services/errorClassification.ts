@@ -11,19 +11,57 @@ export interface ModelServiceDiagnostic {
   message: string;
 }
 
-export function classifyFetchError(error: unknown, protocol: string, signal?: AbortSignal): ModelServiceDiagnostic {
-  if (signal?.aborted) {
+export interface FetchErrorClassificationOptions {
+  /**
+   * The caller-supplied signal (not the combined timeout+caller signal).
+   * Lets the classifier distinguish an active caller cancellation
+   * (MODEL_SERVICE_CANCELLED) from an internal timeout (MODEL_SERVICE_TIMEOUT)
+   * instead of collapsing both into one code.
+   */
+  callerSignal?: AbortSignal | undefined;
+}
+
+export function classifyFetchError(
+  error: unknown,
+  protocol: string,
+  signal?: AbortSignal,
+  options?: FetchErrorClassificationOptions
+): ModelServiceDiagnostic {
+  const callerAborted = options?.callerSignal?.aborted ?? false;
+  if (signal?.aborted || callerAborted) {
+    if (callerAborted) {
+      return {
+        severity: 'error',
+        code: 'MODEL_SERVICE_CANCELLED',
+        message: `${protocol} 请求已取消。`
+      };
+    }
+    const reason = signal?.reason as { name?: string } | undefined;
+    if (reason?.name === 'TimeoutError') {
+      return {
+        severity: 'error',
+        code: 'MODEL_SERVICE_TIMEOUT',
+        message: `${protocol} 请求超时。`
+      };
+    }
     return {
       severity: 'error',
-      code: 'MODEL_SERVICE_TIMEOUT',
-      message: `${protocol} 请求超时或已取消。`
+      code: 'MODEL_SERVICE_CANCELLED',
+      message: `${protocol} 请求已取消。`
     };
   }
   if (error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+    if (error.name === 'TimeoutError') {
+      return {
+        severity: 'error',
+        code: 'MODEL_SERVICE_TIMEOUT',
+        message: `${protocol} 请求超时。`
+      };
+    }
     return {
       severity: 'error',
-      code: 'MODEL_SERVICE_TIMEOUT',
-      message: `${protocol} 请求超时或已取消。`
+      code: 'MODEL_SERVICE_CANCELLED',
+      message: `${protocol} 请求已取消。`
     };
   }
   if (error instanceof TypeError) {

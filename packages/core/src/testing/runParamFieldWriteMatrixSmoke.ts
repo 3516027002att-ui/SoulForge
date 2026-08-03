@@ -12,6 +12,13 @@
  * Every field type in the derived set is written and byte-asserted; the source
  * row is never mutated; failures carry structured codes.
  *
+ * Part 1.5 (synthetic legacy layout, unconditional): constructs one
+ * old-layout PARAM (embedded ASCII type name, 12-byte row headers with
+ * [dataEnd, nameOffset, id], headerless last row, variable zero tail) per the
+ * rules verified against real gameparam defaults, and proves Bridge read ->
+ * byte-identical roundtrip -> staged field upsert -> add/delete fail-closed.
+ * This pins the Bridge legacy parser/writer without needing the real corpus.
+ *
  * Part 2 (native, honest-skip when env missing): on the real
  * gameparam.parambnd.dcx, probe a spread of container indices. For each
  * layout:
@@ -25,7 +32,7 @@
  *                   (PARAM_LAYOUT_UNSUPPORTED / PARAM_DOCUMENT_READ_FAILED).
  * Every probed layout must land in exactly one bucket; no silent skip.
  */
-import { access, mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ParamDefDocument, ParamFieldDef, ParamFieldScalarType } from '@soulforge/shared';
@@ -213,6 +220,182 @@ function writeBytes(buf: Buffer, field: ParamFieldDef, value: number | string | 
 }
 
 // ---------------------------------------------------------------------------
+// Part 1.5: synthetic legacy-layout PARAM (unconditional).
+// Builds one old-layout PARAM per the rules derived from and verified against
+// the real gameparam defaults (embedded ASCII type name, (N-1) x 12-byte row
+// headers [dataEnd, nameOffset, id], headerless last default row, variable zero
+// tail, verbatim name region), then proves Bridge read/roundtrip/staged-upsert
+// and add/delete fail-closed WITHOUT requiring the real corpus.
+// ---------------------------------------------------------------------------
+
+interface LegacySyntheticRow {
+  id: number;
+  name: string;
+  data: number[];
+}
+
+function buildSyntheticLegacyParam(typeName: string, rows: LegacySyntheticRow[]): Buffer {
+  const n = rows.length;
+  const first = rows[0];
+  if (!first || n < 2) throw new Error('synthetic legacy needs >= 2 rows');
+  const rowSize = first.data.length;
+  const tailLen = 28; // canonical tail shared by default_AIStandardInfoBank / default_EnemyBehaviorBank
+  const headerEnd = 0x40 + (n - 1) * 12;
+  const dataStart = headerEnd + tailLen;
+  const nameRegionStart = dataStart + n * rowSize;
+  const nameOffsets: number[] = [];
+  const nameBytes: number[] = [];
+  let cursor = nameRegionStart;
+  for (let i = 0; i < n; i++) {
+    const row = rows[i]!;
+    if (row.name === '') {
+      nameOffsets.push(0);
+      continue;
+    }
+    nameOffsets.push(cursor);
+    const encoded = [...Buffer.from(row.name, 'ascii'), 0];
+    nameBytes.push(...encoded);
+    cursor += encoded.length;
+  }
+  const out = Buffer.alloc(cursor);
+  // Header (0x40): nameDataStart@0, dataStart@4 (u16), unk@6=1, version@8=1,
+  // rowCount@10, embedded type name@0x0C (32 bytes), unk@2C/30=0, dataStart@34,
+  // nameDataStart@38, unk@3C=0.
+  out.writeInt32LE(nameRegionStart, 0);
+  out.writeUInt16LE(dataStart, 4);
+  out.writeUInt16LE(1, 6);
+  out.writeUInt16LE(1, 8);
+  out.writeUInt16LE(n, 10);
+  out.write(typeName, 0x0c, 'ascii');
+  out.writeInt32LE(0, 0x2c);
+  out.writeInt32LE(0, 0x30);
+  out.writeInt32LE(dataStart, 0x34);
+  out.writeInt32LE(nameRegionStart, 0x38);
+  out.writeInt32LE(0, 0x3c);
+  // Row headers for rows 0..n-2 (last row is the headerless default).
+  for (let k = 0; k < n - 1; k++) {
+    const o = 0x40 + k * 12;
+    out.writeInt32LE(dataStart + (k + 1) * rowSize, o);
+    out.writeInt32LE(nameOffsets[k] ?? 0, o + 4);
+    out.writeInt32LE(rows[k]!.id, o + 8);
+  }
+  // Tail stays zero (buffer zero-initialized).
+  for (let i = 0; i < n; i++) {
+    rows[i]!.data.forEach((byte, j) => {
+      out[dataStart + i * rowSize + j] = byte;
+    });
+  }
+  nameBytes.forEach((byte, j) => {
+    out[dataStart + n * rowSize + j] = byte;
+  });
+  return out;
+}
+
+async function runSyntheticLegacy(): Promise<{
+  verified: boolean;
+  caseCount: number;
+  byteIdenticalNoop: boolean;
+  stagedUpsertVerified: boolean;
+  addDeleteFailClosed: boolean;
+}> {
+  const scratch = await mkdtemp(join(tmpdir(), 'soulforge-legacy-'));
+  const staging = join(scratch, 'staging');
+  await mkdir(staging, { recursive: true });
+  try {
+    const rows: LegacySyntheticRow[] = [
+      { id: 100, name: 'Alpha', data: [1, 2, 3, 4, 5, 6, 7, 8] },
+      { id: 101, name: 'Beta', data: [9, 10, 11, 12, 13, 14, 15, 16] },
+      { id: 110, name: 'Gamma', data: [17, 18, 19, 20, 21, 22, 23, 24] },
+      { id: 0, name: '', data: [0, 0, 0, 0, 0, 0, 0, 0] } // headerless default row
+    ];
+    const file = buildSyntheticLegacyParam('SYNTH_LEGACY_ST', rows);
+    const path = join(staging, 'synthetic-legacy.param');
+    await writeFile(path, file);
+    const read = await runBridge<ParamEnvelope & { layout?: string }>({
+      command: 'read-param-document',
+      filePath: path,
+      allowedRoots: [staging],
+      timeoutMs: 60_000,
+      commandOptions: {}
+    });
+    if (read.parseStatus === 'failed' || read.data?.layout !== 'legacy') {
+      throw new Error(`synthetic legacy misdetected: ${JSON.stringify(read.diagnostics)}`);
+    }
+    const ids = read.data.rows.map((r) => r.id);
+    if (ids.join(',') !== '100,101,110,0') {
+      throw new Error(`synthetic legacy ids wrong: ${ids.join(',')}`);
+    }
+    if (!read.data?.roundTrip?.semanticIdentical || !read.data?.roundTrip?.byteIdentical) {
+      throw new Error(`synthetic legacy roundtrip failed: ${JSON.stringify(read.data?.roundTrip)}`);
+    }
+    // Staged field upsert on row 100 (first byte flip), then independent re-read.
+    const first = read.data.rows[0];
+    if (!first) throw new Error('synthetic legacy has no rows');
+    if (first.dataBase64 === null) throw new Error('synthetic legacy payload missing');
+    const next = Buffer.from(first.dataBase64, 'base64');
+    const original = next[0];
+    next[0] = original === 0x5a ? 0xa5 : 0x5a;
+    const stagedPath = join(staging, 'synthetic-legacy.staged');
+    const written = await runBridge({
+      command: 'write-param',
+      filePath: path,
+      allowedRoots: [staging],
+      writableRoots: [staging],
+      timeoutMs: 60_000,
+      commandOptions: {
+        outputPath: stagedPath,
+        expectedDocumentHash: read.data.sourceHash,
+        mutation: 'upsert',
+        id: first.id,
+        dataBase64: next.toString('base64')
+      }
+    });
+    if (!written.diagnostics.some((d) => d.code === 'PARAM_STAGING_WRITE_VERIFIED')) {
+      throw new Error(`synthetic legacy staged upsert failed: ${JSON.stringify(written.diagnostics)}`);
+    }
+    const stagedBytes = await readFile(stagedPath);
+    const stagedDataStart = stagedBytes.readUInt16LE(4);
+    if (stagedBytes[stagedDataStart] !== next[0]) {
+      throw new Error('synthetic legacy staged first byte mismatch');
+    }
+    if (!(await readFile(path)).equals(file)) {
+      throw new Error('synthetic legacy source mutated by staged write');
+    }
+    // add/delete must fail closed.
+    for (const kind of ['add', 'delete'] as const) {
+      const rejected = await runBridge({
+        command: 'write-param',
+        filePath: path,
+        allowedRoots: [staging],
+        writableRoots: [staging],
+        timeoutMs: 60_000,
+        commandOptions: {
+          outputPath: join(staging, `synthetic-legacy.${kind}`),
+          expectedDocumentHash: read.data.sourceHash,
+          mutation: kind,
+          ...(kind === 'add'
+            ? { id: 99_999_999, dataBase64: Buffer.alloc(read.data.rowDataSize, 1).toString('base64') }
+            : { id: first.id })
+        }
+      });
+      if (rejected.parseStatus !== 'failed'
+        || !rejected.diagnostics.some((d) => d.code === 'PARAM_STAGING_WRITE_FAILED')) {
+        throw new Error(`synthetic legacy ${kind} did not fail closed: ${JSON.stringify(rejected.diagnostics)}`);
+      }
+    }
+    return {
+      verified: true,
+      caseCount: 4,
+      byteIdenticalNoop: true,
+      stagedUpsertVerified: true,
+      addDeleteFailClosed: true
+    };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Part 2: native matrix on real gameparam (env-gated).
 // ---------------------------------------------------------------------------
 
@@ -248,8 +431,8 @@ interface NativeLayoutResult {
   message?: string;
 }
 
-/** Indices known to be structurally excluded by the real native corpus. */
-const EXPECTED_UNSUPPORTED_INDICES = new Set([32, 33, 81]);
+/** Indices known to be structurally excluded by the real native corpus (payload gate, not layout). */
+const EXPECTED_UNSUPPORTED_INDICES = new Set([32, 81]);
 /** Spread across the container so both small and large layouts are represented. */
 const PROBE_INDICES = [0, 1, 2, 3, 4, 10, 20, 30, 31, 32, 33, 81];
 
@@ -447,6 +630,7 @@ async function verifyLayoutMatrix(
 
 async function main(): Promise<void> {
   const synthetic = runSyntheticMatrix();
+  const legacySynthetic = await runSyntheticLegacy();
   const sourceBnd = await resolveNativeFixture(
     process.argv[2],
     'param-primary',
@@ -472,6 +656,7 @@ async function main(): Promise<void> {
         caseCount: synthetic.caseCount,
         layouts: synthetic.layouts
       },
+      legacySynthetic,
       reason: '本机 gameparam.parambnd.dcx 不可用，跨布局写矩阵真实 leg 结构化跳过。',
       diagnostics: [{
         severity: 'info',
@@ -509,6 +694,7 @@ async function main(): Promise<void> {
       caseCount: synthetic.caseCount,
       layouts: synthetic.layouts
     },
+    legacySynthetic,
     results
   };
   if (seenSizes.size < 2) {

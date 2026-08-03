@@ -20,6 +20,8 @@ const ENV_REQUIREMENT = Object.freeze({
   SOULFORGE_EMEDF_PATH: 'emedf',
   SOULFORGE_INSTALLER_LIFECYCLE_RUN: 'opt-in',
   SOULFORGE_FUNCTIONAL_SMOKE: 'opt-in',
+  // script 容器 game-load 真实加载确认：opt-in 用户游戏内确认，未设置时该 leg 结构化跳过。
+  SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED: 'opt-in',
   SOULFORGE_DOTNET: 'dotnet'
 });
 

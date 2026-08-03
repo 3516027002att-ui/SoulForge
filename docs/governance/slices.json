@@ -268,7 +268,7 @@
     {
       "sliceId": "W-BEHAVIOR-MAP-01",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "completed",
       "authority": "candidate",
       "authorityCap": "candidate",
       "authorityCapNote": "cap=candidate；仅覆盖注册样本的容器级 inventory 与字节码格式识别，不证明脚本语义、反编译、重编译或 writer",
@@ -600,7 +600,7 @@
     {
       "sliceId": "W-SCRIPT-READONLY-01",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "candidate",
       "authorityCap": "candidate",
       "authorityCapNote": "cap=candidate；只覆盖容器级枚举与只读投影，真实容器替换闭环与游戏加载已验证前不得提升",
@@ -721,7 +721,7 @@
     {
       "sliceId": "W-REL-F-ACCEPT-02",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "candidate",
       "authorityCap": "candidate",
       "authorityCapNote": "cap=candidate；Electron 真实文档功能验收完成前不提升 REL-F",
@@ -787,7 +787,7 @@
     {
       "sliceId": "W-A-RECOVERY-INTEGRATION-04",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；仅提升实际验证的恢复路径",
@@ -809,7 +809,7 @@
     {
       "sliceId": "W-REL-B-CORPUS-02",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "partial",
       "authorityCap": "native-verified",
       "authorityCapNote": "cap=native-verified；只覆盖实际执行的 corpus 操作",
@@ -830,7 +830,7 @@
     {
       "sliceId": "W-EMEVD-FMG-PARAM-03",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只覆盖实际完成的 mutation 路径",
@@ -852,7 +852,7 @@
     {
       "sliceId": "W-AI-CONFORMANCE-03",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；离线 conformance 不证明第三方服务可用性",
@@ -874,7 +874,7 @@
     {
       "sliceId": "W-ME3-INSTALL-04",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只提升实际验证的运行操作",
@@ -894,7 +894,7 @@
     {
       "sliceId": "W-REL-COMPLIANCE-02",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；不声明外部分发或签名发布通过",
@@ -913,7 +913,72 @@
       "declaresUnfrozenValidation": false
     }
   ],
-  "activeClaims": [],
+  "activeClaims": [
+    {
+      "sliceId": "W-SCRIPT-READONLY-01",
+      "claimId": "claim-w-script-readonly-01-20260803",
+      "owner": "main-agent",
+      "claimedAt": "2026-08-03T01:43:15.185Z",
+      "heartbeatAt": "2026-08-03T01:43:15.185Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    },
+    {
+      "sliceId": "W-REL-F-ACCEPT-02",
+      "claimId": "claim-w-rel-f-accept-02-20260803",
+      "owner": "main-agent",
+      "claimedAt": "2026-08-03T01:43:15.627Z",
+      "heartbeatAt": "2026-08-03T01:43:15.627Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    },
+    {
+      "sliceId": "W-A-RECOVERY-INTEGRATION-04",
+      "claimId": "claim-w-a-recovery-integration-04-20260803",
+      "owner": "main-agent",
+      "claimedAt": "2026-08-03T01:43:16.111Z",
+      "heartbeatAt": "2026-08-03T01:43:16.111Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    },
+    {
+      "sliceId": "W-REL-B-CORPUS-02",
+      "claimId": "claim-w-rel-b-corpus-02-20260803",
+      "owner": "main-agent",
+      "claimedAt": "2026-08-03T01:43:16.618Z",
+      "heartbeatAt": "2026-08-03T01:43:16.618Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    },
+    {
+      "sliceId": "W-EMEVD-FMG-PARAM-03",
+      "claimId": "claim-w-emevd-fmg-param-03-20260803",
+      "owner": "main-agent",
+      "claimedAt": "2026-08-03T01:43:17.148Z",
+      "heartbeatAt": "2026-08-03T01:43:17.148Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    },
+    {
+      "sliceId": "W-AI-CONFORMANCE-03",
+      "claimId": "claim-w-ai-conformance-03-20260803",
+      "owner": "main-agent",
+      "claimedAt": "2026-08-03T01:43:17.605Z",
+      "heartbeatAt": "2026-08-03T01:43:17.605Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    },
+    {
+      "sliceId": "W-ME3-INSTALL-04",
+      "claimId": "claim-w-me3-install-04-20260803",
+      "owner": "main-agent",
+      "claimedAt": "2026-08-03T01:43:18.062Z",
+      "heartbeatAt": "2026-08-03T01:43:18.062Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    },
+    {
+      "sliceId": "W-REL-COMPLIANCE-02",
+      "claimId": "claim-w-rel-compliance-02-20260803",
+      "owner": "main-agent",
+      "claimedAt": "2026-08-03T01:43:18.545Z",
+      "heartbeatAt": "2026-08-03T01:43:18.545Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    }
+  ],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",

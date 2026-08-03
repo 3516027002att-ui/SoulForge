@@ -3,16 +3,42 @@ using System.Security.Cryptography;
 using System.Text;
 
 /// <summary>
+/// Native PARAM layout families handled losslessly by the Bridge.
+/// </summary>
+internal enum ParamLayout
+{
+    /// <summary>Sekiro regulation-style: type name at file end (header 0x40, row headers 0x18).</summary>
+    Compact,
+    /// <summary>
+    /// Old gameparam-default style (default_AIStandardInfoBank / default_EnemyBehaviorBank /
+    /// MenuColorTableParam): embedded ASCII type name at header 0x0C, (rowCount-1) row headers of
+    /// 12 bytes [dataEndOffset, nameOffset, id], a variable zero tail before the data region,
+    /// fixed-size data rows and a verbatim Shift-JIS name region at the end. The last data row has
+    /// no row header (its id/name are not stored). Layout rules derived from and verified against
+    /// the private gameparam.parambnd.dcx corpus (index 32/33/81).
+    /// </summary>
+    Legacy
+}
+
+/// <summary>
 /// Sekiro PARAM (regulation/gameparam child) lossless document.
 /// Row field interpretation requires paramdef; without def, rows are raw byte payloads
-/// keyed by ID. Layout derived from private gameparam.parambnd.dcx corpus.
+/// keyed by ID. Layout derived from the private gameparam.parambnd.dcx corpus.
 /// </summary>
 internal sealed class ParamNativeDocument
 {
     private const int HeaderSize = 0x40;
     private const int RowHeaderSize = 0x18;
+    private const int LegacyRowHeaderSize = 0x0C;
     private const int MaxRows = 500_000;
     private const int MaxSourceBytes = 64 * 1024 * 1024;
+    private const int MaxNameBytes = 512;
+
+    private static readonly Encoding ShiftJisEncoding = CreateShiftJisEncoding();
+
+    private readonly int[] _legacyNameOffsets = Array.Empty<int>();
+    private readonly byte[] _legacyTail = Array.Empty<byte>();
+    private readonly byte[] _legacyNameRegion = Array.Empty<byte>();
 
     private ParamNativeDocument(
         byte[] sourceBytes,
@@ -23,6 +49,24 @@ internal sealed class ParamNativeDocument
         string typeName,
         int rowDataSize,
         IReadOnlyList<ParamRow> rows)
+        : this(sourceBytes, headerPrefix, dataVersion, unk04, unk06, typeName, rowDataSize, rows,
+            ParamLayout.Compact, Array.Empty<int>(), Array.Empty<byte>(), Array.Empty<byte>())
+    {
+    }
+
+    private ParamNativeDocument(
+        byte[] sourceBytes,
+        byte[] headerPrefix,
+        ushort dataVersion,
+        ushort unk04,
+        ushort unk06,
+        string typeName,
+        int rowDataSize,
+        IReadOnlyList<ParamRow> rows,
+        ParamLayout layout,
+        int[] legacyNameOffsets,
+        byte[] legacyTail,
+        byte[] legacyNameRegion)
     {
         SourceBytes = sourceBytes;
         HeaderPrefix = headerPrefix;
@@ -32,6 +76,10 @@ internal sealed class ParamNativeDocument
         TypeName = typeName;
         RowDataSize = rowDataSize;
         Rows = rows;
+        Layout = layout;
+        _legacyNameOffsets = legacyNameOffsets;
+        _legacyTail = legacyTail;
+        _legacyNameRegion = legacyNameRegion;
     }
 
     public byte[] SourceBytes { get; }
@@ -42,12 +90,21 @@ internal sealed class ParamNativeDocument
     public string TypeName { get; }
     public int RowDataSize { get; }
     public IReadOnlyList<ParamRow> Rows { get; }
+    public ParamLayout Layout { get; }
     public string SourceHash => Hash(SourceBytes);
 
     public static ParamNativeDocument Read(byte[] source)
     {
         if (source.Length < HeaderSize + 4 || source.Length > MaxSourceBytes)
             throw new InvalidDataException($"PARAM 大小 {source.Length} 超出安全范围。");
+        var embeddedName = TryReadEmbeddedName(source);
+        if (embeddedName is not null)
+            return ReadLegacy(source, embeddedName);
+        return ReadCompact(source);
+    }
+
+    private static ParamNativeDocument ReadCompact(byte[] source)
+    {
         var nameOffset = ReadInt32(source, 0);
         var unk04 = ReadUInt16(source, 4);
         var unk06 = ReadUInt16(source, 6);
@@ -111,6 +168,80 @@ internal sealed class ParamNativeDocument
             rows);
     }
 
+    private static ParamNativeDocument ReadLegacy(byte[] source, string embeddedName)
+    {
+        var nameDataStart = ReadInt32(source, 0);
+        var dataStart = ReadUInt16(source, 4);
+        var unk06 = ReadUInt16(source, 6);
+        var dataVersion = ReadUInt16(source, 8);
+        var rowCount = ReadUInt16(source, 10);
+        if (string.IsNullOrEmpty(embeddedName))
+            throw new InvalidDataException("PARAM 旧布局类型名为空。");
+        if (dataStart < HeaderSize || nameDataStart < dataStart || nameDataStart > source.Length)
+            throw new InvalidDataException($"PARAM 旧布局区段偏移无效：dataStart={dataStart}，nameDataStart={nameDataStart}。");
+
+        var rows = new List<ParamRow>(rowCount);
+        var nameOffsets = new int[rowCount];
+        if (rowCount == 0)
+        {
+            var emptyTail = source.AsSpan(HeaderSize, dataStart - HeaderSize).ToArray();
+            var emptyNameRegion = source.AsSpan(nameDataStart, source.Length - nameDataStart).ToArray();
+            return new ParamNativeDocument(source, source.AsSpan(0, HeaderSize).ToArray(), dataVersion, dataStart, unk06,
+                embeddedName, 0, rows, ParamLayout.Legacy, nameOffsets, emptyTail, emptyNameRegion);
+        }
+
+        var rowDataSize = (nameDataStart - dataStart) / rowCount;
+        if (rowDataSize <= 0 || rowDataSize * rowCount != nameDataStart - dataStart)
+            throw new InvalidDataException($"PARAM 旧布局行数据大小不一致：rowDataSize={rowDataSize}。");
+
+        // Row headers: rows 0..rowCount-2 carry one 12-byte header each; the last data row is the
+        // headerless default row (id/name not stored). A variable zero tail (possibly absent or, in
+        // MenuColorTableParam, overlapping the data region by up to one header) separates the header
+        // region from the data region.
+        var headerEnd = HeaderSize + (rowCount - 1) * LegacyRowHeaderSize;
+        var tailLen = dataStart - headerEnd;
+        if (tailLen < -LegacyRowHeaderSize)
+            throw new InvalidDataException($"PARAM 旧布局行头区与数据区重叠超出单行头宽度：tail={tailLen}。");
+        if (tailLen > 0)
+        {
+            for (var p = headerEnd; p < dataStart; p++)
+            {
+                if (source[p] != 0)
+                    throw new InvalidDataException($"PARAM 旧布局行头区尾部非零，拒绝猜测解析。");
+            }
+        }
+
+        for (var i = 0; i < rowCount; i++)
+        {
+            var dataOff = dataStart + i * rowDataSize;
+            rows.Add(new ParamRow(0, source.AsSpan(dataOff, rowDataSize).ToArray(), null));
+        }
+
+        for (var k = 0; k < rowCount - 1; k++)
+        {
+            var o = HeaderSize + k * LegacyRowHeaderSize;
+            var dataEnd = ReadInt32(source, o);
+            var nameOff = ReadInt32(source, o + 4);
+            var id = ReadInt32(source, o + 8);
+            if (dataEnd != dataStart + (k + 1) * rowDataSize)
+                throw new InvalidDataException($"PARAM 旧布局第 {k} 行 dataEnd 非紧凑布局。");
+            string? name = null;
+            if (nameOff != 0)
+            {
+                if (nameOff < nameDataStart || nameOff >= source.Length)
+                    throw new InvalidDataException($"PARAM 旧布局第 {k} 行名称偏移越界。");
+                name = DecodeShiftJisName(source, nameOff);
+                nameOffsets[k] = nameOff;
+            }
+            rows[k] = new ParamRow(id, rows[k].Data, name);
+        }
+
+        var tail = tailLen > 0 ? source.AsSpan(headerEnd, tailLen).ToArray() : Array.Empty<byte>();
+        var nameRegion = source.AsSpan(nameDataStart, source.Length - nameDataStart).ToArray();
+        return new ParamNativeDocument(source, source.AsSpan(0, HeaderSize).ToArray(), dataVersion, dataStart, unk06,
+            embeddedName, rowDataSize, rows, ParamLayout.Legacy, nameOffsets, tail, nameRegion);
+    }
+
     public static ParamNativeDocument ReadFile(string path)
     {
         var info = new FileInfo(path);
@@ -142,6 +273,13 @@ internal sealed class ParamNativeDocument
     }
 
     public byte[] Rebuild(IReadOnlyList<ParamRow> nextRows)
+    {
+        return Layout == ParamLayout.Legacy
+            ? RebuildLegacy(nextRows)
+            : RebuildCompact(nextRows);
+    }
+
+    private byte[] RebuildCompact(IReadOnlyList<ParamRow> nextRows)
     {
         if (nextRows.Count > MaxRows) throw new InvalidDataException("PARAM 行数超出安全上限。");
         foreach (var row in nextRows)
@@ -204,7 +342,61 @@ internal sealed class ParamNativeDocument
         return rebuilt;
     }
 
+    private byte[] RebuildLegacy(IReadOnlyList<ParamRow> nextRows)
+    {
+        if (nextRows.Count > MaxRows) throw new InvalidDataException("PARAM 行数超出安全上限。");
+        if (nextRows.Count != Rows.Count)
+            throw new InvalidDataException("PARAM 旧布局行数不可变更：add/delete 会破坏无行头末行与可变尾部的无损性。");
+        foreach (var row in nextRows)
+        {
+            if (row.Data.Length != RowDataSize)
+                throw new InvalidDataException($"PARAM 行 ID {row.Id} 数据长度 {row.Data.Length} 与行宽 {RowDataSize} 不一致。");
+        }
+
+        var n = nextRows.Count;
+        var dataStart = Unk04;
+        // For the zero-row edge the name region offset comes straight from the source header;
+        // otherwise it follows the recomputed data region.
+        var nameDataStart = n == 0
+            ? ReadInt32(SourceBytes, 0)
+            : dataStart + n * RowDataSize;
+        var headerEnd = HeaderSize + Math.Max(0, n - 1) * LegacyRowHeaderSize;
+        var fileSize = nameDataStart + _legacyNameRegion.Length;
+        var rebuilt = new byte[fileSize];
+        // Preserve the full 0x40 header verbatim, then overwrite the layout-defining fields.
+        HeaderPrefix.AsSpan(0, Math.Min(HeaderSize, HeaderPrefix.Length)).CopyTo(rebuilt);
+        WriteInt32(rebuilt, 0, nameDataStart);
+        WriteUInt16(rebuilt, 4, (ushort)dataStart);
+        WriteUInt16(rebuilt, 6, Unk06);
+        WriteUInt16(rebuilt, 8, DataVersion);
+        WriteUInt16(rebuilt, 10, (ushort)n);
+        WriteInt32(rebuilt, 0x34, dataStart);
+        WriteInt32(rebuilt, 0x38, nameDataStart);
+
+        for (var k = 0; k < n - 1; k++)
+        {
+            var o = HeaderSize + k * LegacyRowHeaderSize;
+            WriteInt32(rebuilt, o, dataStart + (k + 1) * RowDataSize);
+            WriteInt32(rebuilt, o + 4, _legacyNameOffsets[k]);
+            WriteInt32(rebuilt, o + 8, nextRows[k].Id);
+        }
+        _legacyTail.CopyTo(rebuilt, headerEnd);
+        for (var i = 0; i < n; i++)
+        {
+            nextRows[i].Data.CopyTo(rebuilt, dataStart + i * RowDataSize);
+        }
+        _legacyNameRegion.CopyTo(rebuilt, nameDataStart);
+        return rebuilt;
+    }
+
     public byte[] ApplyMutations(IReadOnlyList<ParamPatch> patches)
+    {
+        return Layout == ParamLayout.Legacy
+            ? ApplyLegacyMutations(patches)
+            : ApplyCompactMutations(patches);
+    }
+
+    private byte[] ApplyCompactMutations(IReadOnlyList<ParamPatch> patches)
     {
         var rows = Rows.Select(r => new ParamRow(r.Id, r.Data.ToArray(), r.Name)).ToList();
         foreach (var patch in patches)
@@ -246,6 +438,37 @@ internal sealed class ParamNativeDocument
         return Rebuild(rows);
     }
 
+    private byte[] ApplyLegacyMutations(IReadOnlyList<ParamPatch> patches)
+    {
+        var rows = Rows.Select(r => new ParamRow(r.Id, r.Data.ToArray(), r.Name)).ToList();
+        foreach (var patch in patches)
+        {
+            switch (patch.Kind)
+            {
+                case "upsert":
+                {
+                    if (patch.DataBase64 is null) throw new InvalidDataException("PARAM upsert 需要 dataBase64。");
+                    var data = Convert.FromBase64String(patch.DataBase64);
+                    if (data.Length != RowDataSize) throw new InvalidDataException("PARAM upsert 行宽不匹配。");
+                    var idx = rows.FindIndex(r => r.Id == patch.Id);
+                    if (idx < 0)
+                        throw new InvalidDataException($"PARAM 旧布局不支持新增行 upsert：ID {patch.Id} 不存在且无行头可无损新增。");
+                    if (patch.Name is not null && patch.Name != rows[idx].Name)
+                        throw new InvalidDataException("PARAM 旧布局不支持行名变更（名称区按字节保留）。");
+                    rows[idx] = new ParamRow(patch.Id, data, rows[idx].Name);
+                    break;
+                }
+                case "delete":
+                    throw new InvalidDataException("PARAM 旧布局不支持 delete：无行头末行与可变尾部无法无损删除。");
+                case "add":
+                    throw new InvalidDataException("PARAM 旧布局不支持 add：末行无行头，新增行无法无损落位。");
+                default:
+                    throw new InvalidDataException($"未知 PARAM mutation：{patch.Kind}。");
+            }
+        }
+        return Rebuild(rows);
+    }
+
     public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0)
     {
         // Large params (multi-MB / wide rows) must not dump payloads into one NDJSON frame.
@@ -267,6 +490,7 @@ internal sealed class ParamNativeDocument
             dataVersion = DataVersion,
             rowCount = totalRows,
             rowDataSize = RowDataSize,
+            layout = Layout == ParamLayout.Legacy ? "legacy" : "compact",
             sourceSize = SourceBytes.Length,
             sourceHash = SourceHash,
             rows = pageRows.Select(r => new
@@ -288,6 +512,48 @@ internal sealed class ParamNativeDocument
             authority = report is { SemanticIdentical: true } ? "native-verified" : "candidate",
             fieldLayout = "raw-row-bytes-without-paramdef"
         };
+    }
+
+    /// <summary>
+    /// Detects the legacy layout family by the embedded ASCII type name at header offset 0x0C.
+    /// Compact-layout headers carry zeros there; the legacy family stores a printable C-string.
+    /// </summary>
+    private static string? TryReadEmbeddedName(byte[] source)
+    {
+        var length = 0;
+        for (var i = 0; i < 32; i++)
+        {
+            var c = source[0x0C + i];
+            if (c == 0) break;
+            if (c < 0x20 || c > 0x7e) return null;
+            length++;
+        }
+        return length >= 2 ? Encoding.ASCII.GetString(source, 0x0C, length) : null;
+    }
+
+    private static string? DecodeShiftJisName(byte[] source, int offset)
+    {
+        var end = offset;
+        while (end < source.Length && source[end] != 0 && end - offset < MaxNameBytes)
+        {
+            end++;
+        }
+        if (end - offset == 0 || (end - offset >= MaxNameBytes && source[end - 1] != 0)) return null;
+        try
+        {
+            return ShiftJisEncoding.GetString(source, offset, end - offset);
+        }
+        catch (Exception ex) when (ex is ArgumentException or DecoderFallbackException)
+        {
+            return null;
+        }
+    }
+
+    private static Encoding CreateShiftJisEncoding()
+    {
+        // CodePagesEncodingProvider ships with the .NET runtime pack; no extra package dependency.
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        return Encoding.GetEncoding(932);
     }
 
     private static string ReadAsciiZ(byte[] source, int offset)

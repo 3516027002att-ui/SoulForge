@@ -180,9 +180,11 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-BEHAVIOR-MAP-01"
+        "W-SCRIPT-READONLY-01"
       ],
-      "evidenceRefs": [],
+      "evidenceRefs": [
+        "EV-BEHAVIOR-MAP-01-20260803"
+      ],
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-BEHAVIOR-ANIMATION",
@@ -191,7 +193,7 @@
         "SCOPE-BEHAVIOR-SCRIPT"
       ],
       "openRulings": [
-        "V0.5 收窄为 SCOPE-BEHAVIOR-SCRIPT 的只读证据视图与整个内层文件替换：HKS/Lua 经实测为 Havok Script 编译字节码（\\\\x1bLuaQ），反编译与重编译已延期至 V0.6。需完成容器条目枚举、只读字节码/常量池证据投影，以及经 Patch Engine 的整文件替换、重读与回滚。SCOPE-BEHAVIOR-ANIMATION / TAE / ESD 已延期至 V0.6。"
+        "V0.5 收窄为 SCOPE-BEHAVIOR-SCRIPT 的只读证据视图与整个内层文件替换：HKS/Lua 经实测为 Havok Script 编译字节码（\\\\x1bLuaP，0x50），反编译与重编译已延期至 V0.6。需完成容器条目枚举、只读字节码/常量池证据投影，以及经 Patch Engine 的整文件替换、重读与回滚。SCOPE-BEHAVIOR-ANIMATION / TAE / ESD 已延期至 V0.6。"
       ],
       "successorRequirement": "本 Gate 的 4 个范围条目中 animation/TAE/ESD 三项已延期 V0.6，仅 SCOPE-BEHAVIOR-SCRIPT 留在 V0.5，因此 Gate 保持 open 而非 deferred；后继只要求 script 容器只读证据视图与整内层文件替换的写/重读/回滚/游戏加载闭环。TAE/ESD 登记样本 native document 与延期预览面板保留只读，不得据此声称本版行为语义能力"
     },

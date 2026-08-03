@@ -14,9 +14,11 @@ import type {
 
 const SECRET_PATTERNS = [
   /sk-[a-zA-Z0-9_-]{10,}/g,
-  /Bearer\s+[A-Za-z0-9._\-]+/gi,
-  /x-api-key["']?\s*[:=]\s*["'][^"']+["']/gi,
-  /api[_-]?key["']?\s*[:=]\s*["'][^"']+["']/gi
+  /\bBearer\s+[A-Za-z0-9._\-]+/gi,
+  // Header inline secrets may appear quoted or bare; the value token class keeps
+  // the match anchored to the header keyword so prose cannot false-positive.
+  /x-api-key["']?\s*[:=]\s*["']?[A-Za-z0-9._\-]+["']?/gi,
+  /api[_-]?key["']?\s*[:=]\s*["']?[A-Za-z0-9._\-]+["']?/gi
 ];
 
 export function redactSecrets(text: string): string {
@@ -32,7 +34,9 @@ export function assertNoSecretLeak(payload: unknown, apiKey: string): void {
   if (apiKey && serialized.includes(apiKey)) {
     throw new Error('MODEL_SERVICE_SECRET_LEAK: audit or DTO payload contains raw API key.');
   }
-  if (/sk-[a-zA-Z0-9_-]{20,}/.test(serialized)) {
+  // Any remaining secret-shaped text (sk- token, Bearer token, x-api-key: /
+  // api_key: inline value) is rejected via the same redaction patterns.
+  if (redactSecrets(serialized) !== serialized) {
     throw new Error('MODEL_SERVICE_SECRET_LEAK: payload appears to contain an API key pattern.');
   }
 }
@@ -149,6 +153,17 @@ export async function runAgentToolLoop(
       ...(request.signal ? { signal: request.signal } : {}),
       ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
     });
+    // An active cancellation landing mid-request surfaces as 'cancelled' rather
+    // than being collapsed into the adapter's timeout/error finish reason.
+    if (request.signal?.aborted) {
+      finishReason = 'cancelled';
+      diagnostics.push({
+        severity: 'warning',
+        code: 'AGENT_CANCELLED',
+        message: 'Agent 循环在模型调用期间取消。'
+      });
+      break;
+    }
     diagnostics.push(...completion.diagnostics);
     if (completion.usage?.outputTokens) {
       totalOutputTokens += completion.usage.outputTokens;

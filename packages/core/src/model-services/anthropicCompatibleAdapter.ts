@@ -16,7 +16,8 @@ import {
   classifyParseError,
   createRequestSignal,
   errorResult,
-  errorStreamEvent
+  errorStreamEvent,
+  type ModelServiceDiagnostic
 } from './errorClassification.js';
 
 export interface AnthropicCompatibleAdapterOptions {
@@ -60,7 +61,7 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
       });
     } catch (error) {
       cleanup();
-      return errorResult(classifyFetchError(error, 'Anthropic-compatible', signal));
+      return errorResult(classifyFetchError(error, 'Anthropic-compatible', signal, { callerSignal: request.signal }));
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -115,34 +116,183 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
   }
 
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
-    // Fake-compatible streaming: perform complete() then emit synthetic deltas.
-    // Real SSE can be layered later without changing the public StreamEvent contract.
+    // Real SSE streaming over POST /v1/messages with stream:true, mirroring the
+    // OpenAI Chat Completions adapter. Events parsed: message_start, content_block_*
+    // (text_delta / input_json_delta / tool_use), message_delta (stop_reason +
+    // output usage), message_stop, and error. Cancellation / timeout / network
+    // failures classify exactly like the non-stream path.
+    const body = buildMessagesBody(this.model, request, true);
+    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
+    let response: Response;
     try {
-      const result = await this.complete(request);
-      if (result.finishReason === 'error') {
-        const diag = result.diagnostics[0];
-        yield errorStreamEvent({
-          severity: 'error',
-          code: diag?.code ?? 'MODEL_SERVICE_HTTP_ERROR',
-          message: diag?.message ?? 'Anthropic-compatible 请求失败。'
-        });
-        return;
-      }
-      if (result.message.content) {
-        yield { type: 'text-delta', text: result.message.content };
-      }
-      for (const toolCall of result.message.toolCalls ?? []) {
-        yield { type: 'tool-call', toolCall };
-      }
-      yield { type: 'message-stop', finishReason: result.finishReason };
+      response = await this.fetchImpl(`${this.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': this.apiVersion
+        },
+        body: JSON.stringify(body),
+        ...(signal ? { signal } : {})
+      });
     } catch (error) {
+      cleanup();
+      yield errorStreamEvent(classifyFetchError(error, 'Anthropic-compatible', signal, { callerSignal: request.signal }));
+      return;
+    }
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => '');
+      cleanup();
+      yield errorStreamEvent(classifyHttpError(
+        response.status, text, 'Anthropic-compatible',
+        response.headers.get('retry-after')
+      ));
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+    let finishReason: Extract<StreamEvent, { type: 'message-stop' }>['finishReason'] = 'stop';
+    let inputTokens: number | undefined;
+    let outputTokens: number | undefined;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n');
+        buffer = parts.pop() ?? '';
+        for (const line of parts) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          let event: AnthropicStreamEvent;
+          try {
+            event = JSON.parse(data) as AnthropicStreamEvent;
+          } catch {
+            // ignore malformed SSE chunk
+            continue;
+          }
+          const type = event.type;
+          if (type === 'content_block_start' && event.content_block?.type === 'tool_use'
+            && event.content_block.id && event.content_block.name) {
+            toolAcc.set(event.index ?? 0, {
+              id: event.content_block.id,
+              name: event.content_block.name,
+              args: ''
+            });
+            continue;
+          }
+          if (type === 'content_block_delta') {
+            const delta = event.delta;
+            if (delta?.type === 'text_delta' && delta.text) {
+              yield { type: 'text-delta', text: delta.text };
+            } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+              const index = event.index ?? 0;
+              const current = toolAcc.get(index) ?? { id: '', name: '', args: '' };
+              current.args += delta.partial_json;
+              toolAcc.set(index, current);
+            }
+            continue;
+          }
+          if (type === 'message_start' && event.message?.usage?.input_tokens !== undefined) {
+            inputTokens = event.message.usage.input_tokens;
+            continue;
+          }
+          if (type === 'message_delta') {
+            const stopReason = event.delta?.stop_reason;
+            if (stopReason === 'tool_use') finishReason = 'tool_use';
+            else if (stopReason === 'max_tokens') finishReason = 'length';
+            else if (stopReason === 'end_turn') finishReason = 'stop';
+            if (event.usage?.output_tokens !== undefined) {
+              outputTokens = event.usage.output_tokens;
+            }
+            continue;
+          }
+          if (type === 'error') {
+            cleanup();
+            yield errorStreamEvent(classifyAnthropicStreamError(event.error));
+            return;
+          }
+          if (type === 'message_stop') {
+            cleanup();
+            yield* emitFinalEvents(toolAcc, inputTokens, outputTokens, finishReason);
+            return;
+          }
+          // ping and unknown events are ignored
+        }
+      }
+      cleanup();
+      yield* emitFinalEvents(toolAcc, inputTokens, outputTokens, finishReason);
+    } catch (error) {
+      cleanup();
       if (request.signal?.aborted) {
         yield { type: 'message-stop', finishReason: 'cancelled' };
         return;
       }
-      yield errorStreamEvent(classifyFetchError(error, 'Anthropic-compatible', request.signal));
+      yield errorStreamEvent(classifyFetchError(error, 'Anthropic-compatible', signal, { callerSignal: request.signal }));
     }
   }
+}
+
+/**
+ * Emit the terminal events of a successful stream: accumulated tool calls, usage
+ * (when the server reported it), and the message-stop with the mapped finish
+ * reason. A generator so stream() can forward with yield*.
+ */
+function* emitFinalEvents(
+  toolAcc: Map<number, { id: string; name: string; args: string }>,
+  inputTokens: number | undefined,
+  outputTokens: number | undefined,
+  finishReason: Extract<StreamEvent, { type: 'message-stop' }>['finishReason']
+): Generator<StreamEvent, void, undefined> {
+  const hasTool = toolAcc.size > 0;
+  for (const tool of toolAcc.values()) {
+    yield {
+      type: 'tool-call',
+      toolCall: { id: tool.id, name: tool.name, argumentsJson: tool.args }
+    };
+  }
+  if (inputTokens !== undefined || outputTokens !== undefined) {
+    yield {
+      type: 'usage',
+      ...(inputTokens !== undefined ? { inputTokens } : {}),
+      ...(outputTokens !== undefined ? { outputTokens } : {})
+    };
+  }
+  yield { type: 'message-stop', finishReason: hasTool ? 'tool_use' : finishReason };
+}
+
+interface AnthropicStreamEvent {
+  type?: string;
+  index?: number;
+  content_block?: { type?: string; id?: string; name?: string };
+  delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
+  message?: { usage?: { input_tokens?: number; output_tokens?: number } };
+  usage?: { input_tokens?: number; output_tokens?: number };
+  error?: { type?: string; message?: string };
+}
+
+function classifyAnthropicStreamError(error: { type?: string; message?: string } | undefined): ModelServiceDiagnostic {
+  const errType = error?.type;
+  const message = error?.message ?? 'Anthropic-compatible 流错误。';
+  if (errType === 'rate_limit_error') {
+    return { severity: 'error', code: 'MODEL_SERVICE_RATE_LIMITED', message };
+  }
+  if (errType === 'authentication_error' || errType === 'permission_error') {
+    return { severity: 'error', code: 'MODEL_SERVICE_AUTH_ERROR', message };
+  }
+  if (errType === 'api_error' || errType === 'overloaded_error') {
+    return { severity: 'error', code: 'MODEL_SERVICE_SERVER_ERROR', message };
+  }
+  if (errType === 'invalid_request_error') {
+    return { severity: 'error', code: 'MODEL_SERVICE_HTTP_ERROR', message };
+  }
+  return { severity: 'error', code: 'MODEL_SERVICE_STREAM_FAILED', message };
 }
 
 function buildMessagesBody(model: string, request: ModelCompleteRequest, stream: boolean): Record<string, unknown> {

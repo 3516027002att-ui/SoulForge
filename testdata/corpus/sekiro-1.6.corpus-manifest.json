@@ -1,0 +1,2202 @@
+{
+  "schemaVersion": "1.0.0",
+  "manifestId": "sekiro-1-6-owner-corpus-v1",
+  "game": "sekiro",
+  "gameBuild": "1.6",
+  "generatedAt": "2026-08-03T02:26:41.169Z",
+  "entryCount": 198,
+  "summary": {
+    "uniqueContentEntries": 198,
+    "formatCounts": {
+      "BND4": 75,
+      "DFLT": 67,
+      "KRAK": 56
+    },
+    "observedVariantCounts": {
+      "BND4_40_24": 75,
+      "DCX_DFLT_11000_44_9_0": 57,
+      "DCX_DFLT_10000_44_9_0": 10,
+      "DCX_KRAK_11000_44_6_0": 56
+    }
+  },
+  "entries": [
+    {
+      "logicalId": "sekiro-bnd4-06304a3a91d6827f971fd9ed",
+      "sha256": "06304a3a91d6827f971fd9ed77ff85473d32e432559796fda730b915471a87ec",
+      "size": 7516841,
+      "containerChain": [
+        "corpus/bnd4/06304a3a91d6827f971fd9ed"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-0b8bfea557519c1ff60ba45a",
+      "sha256": "0b8bfea557519c1ff60ba45a88f7344c2a95d00b3f63878ed16ad50705e8d44d",
+      "size": 3451550,
+      "containerChain": [
+        "corpus/bnd4/0b8bfea557519c1ff60ba45a"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-0c30b532e4fa6a2bb32ae979",
+      "sha256": "0c30b532e4fa6a2bb32ae979d374480d95eb45fc5296fc2bca0f3c638aa58262",
+      "size": 28580,
+      "containerChain": [
+        "corpus/bnd4/0c30b532e4fa6a2bb32ae979"
+      ],
+      "resourceKind": "obj",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-0e2dd84dc4f1b5b969ef95dd",
+      "sha256": "0e2dd84dc4f1b5b969ef95ddd1315a24227d6a2b2490fb73ae6ace20a326f48e",
+      "size": 10911387,
+      "containerChain": [
+        "corpus/bnd4/0e2dd84dc4f1b5b969ef95dd"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-1143650a027c7afb3d6c1a62",
+      "sha256": "1143650a027c7afb3d6c1a62946d12358a16b55902e838397f12d036d766c90a",
+      "size": 3470644,
+      "containerChain": [
+        "corpus/bnd4/1143650a027c7afb3d6c1a62"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-1224b070ad70a93fb6bb4136",
+      "sha256": "1224b070ad70a93fb6bb41369c35f4c82b14b291ab9ed3671a2a058416838923",
+      "size": 20202195,
+      "containerChain": [
+        "corpus/bnd4/1224b070ad70a93fb6bb4136"
+      ],
+      "resourceKind": "sfx",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-1328d97743147fa1d0292353",
+      "sha256": "1328d97743147fa1d0292353d7a7a9cbc17f1f3c8b89c4c448a260b9d16f0918",
+      "size": 2898588,
+      "containerChain": [
+        "corpus/bnd4/1328d97743147fa1d0292353"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-1620169404730144fd9d0736",
+      "sha256": "1620169404730144fd9d0736dc249f7a2c9bf0a6bb79ba048357f11bde3ef16f",
+      "size": 17832415,
+      "containerChain": [
+        "corpus/bnd4/1620169404730144fd9d0736"
+      ],
+      "resourceKind": "sfx",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-171e81154634949c9c580cab",
+      "sha256": "171e81154634949c9c580cababdf214cced7ea8fa75b0a24f62b6dae74a9cff1",
+      "size": 312097,
+      "containerChain": [
+        "corpus/bnd4/171e81154634949c9c580cab"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-19eb559b155a163c89c88739",
+      "sha256": "19eb559b155a163c89c887394ef9689006029f53c90c7e41a24d4226702620d0",
+      "size": 11908569,
+      "containerChain": [
+        "corpus/bnd4/19eb559b155a163c89c88739"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-233ce95da836ca7f181b161e",
+      "sha256": "233ce95da836ca7f181b161e86d2e9b811ff63e7257ddec41ffba75998a8254b",
+      "size": 6952581,
+      "containerChain": [
+        "corpus/bnd4/233ce95da836ca7f181b161e"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-235d684da8135d1a9a96273b",
+      "sha256": "235d684da8135d1a9a96273b31c6aa506356825e5a125fcf57eb18b97c14145c",
+      "size": 47795,
+      "containerChain": [
+        "corpus/bnd4/235d684da8135d1a9a96273b"
+      ],
+      "resourceKind": "obj",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-24d49faf328231c3cbd9ebff",
+      "sha256": "24d49faf328231c3cbd9ebffe49a93e44ead0739beb0abcaec07e4e741c30352",
+      "size": 4623277,
+      "containerChain": [
+        "corpus/bnd4/24d49faf328231c3cbd9ebff"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-28ca7e77055bec686f09dbec",
+      "sha256": "28ca7e77055bec686f09dbecdc77f86ceb177c478a66f059cead24ea727d35c3",
+      "size": 91902,
+      "containerChain": [
+        "corpus/bnd4/28ca7e77055bec686f09dbec"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-2d5537e81175155cda6abda3",
+      "sha256": "2d5537e81175155cda6abda3b65b8ba09636354582604641a4486fc0a0e23ba2",
+      "size": 314148,
+      "containerChain": [
+        "corpus/bnd4/2d5537e81175155cda6abda3"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-30f24b879eb595b2b637af8b",
+      "sha256": "30f24b879eb595b2b637af8bde18968c5077d6cc31131825744f721d85f9df29",
+      "size": 223356,
+      "containerChain": [
+        "corpus/bnd4/30f24b879eb595b2b637af8b"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-33d10a97800d1f340ebc854d",
+      "sha256": "33d10a97800d1f340ebc854dc5c58d379439d6a7bdd4a0163f7624b119ee1e1a",
+      "size": 68922,
+      "containerChain": [
+        "corpus/bnd4/33d10a97800d1f340ebc854d"
+      ],
+      "resourceKind": "ai",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-3670b0b4adf3bd37b249158b",
+      "sha256": "3670b0b4adf3bd37b249158b8c03e13a1b1cdb57ae905f9aabfd8703a565ea1e",
+      "size": 10160699,
+      "containerChain": [
+        "corpus/bnd4/3670b0b4adf3bd37b249158b"
+      ],
+      "resourceKind": "sfx",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-372f92f2c9925d5400fe2dae",
+      "sha256": "372f92f2c9925d5400fe2dae525e26a1b4bf42d7c29eec77976b11290ba31017",
+      "size": 71679,
+      "containerChain": [
+        "corpus/bnd4/372f92f2c9925d5400fe2dae"
+      ],
+      "resourceKind": "msg",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-3866e97ef024dc536b6caad9",
+      "sha256": "3866e97ef024dc536b6caad995a047c34472a8b64ea5c9f03827fc1195dfb942",
+      "size": 10245426,
+      "containerChain": [
+        "corpus/bnd4/3866e97ef024dc536b6caad9"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-3e5bc4a681839682b598c56c",
+      "sha256": "3e5bc4a681839682b598c56c8d2034dc536c6d5fb488197cfdc070c834b021b1",
+      "size": 3445274,
+      "containerChain": [
+        "corpus/bnd4/3e5bc4a681839682b598c56c"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-3f13df240e25d89d6a7b7bb1",
+      "sha256": "3f13df240e25d89d6a7b7bb107a81e6a06eec54aa6e5d9bc14870dfcf1f54c84",
+      "size": 671778,
+      "containerChain": [
+        "corpus/bnd4/3f13df240e25d89d6a7b7bb1"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-3fea221d87225dc0c66ff77e",
+      "sha256": "3fea221d87225dc0c66ff77e714104242057e86df28788b565e10b2422a30981",
+      "size": 2193302,
+      "containerChain": [
+        "corpus/bnd4/3fea221d87225dc0c66ff77e"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-45b71c8b968ad8cc92f559f9",
+      "sha256": "45b71c8b968ad8cc92f559f9de18072f7b9bb6e334f190742ae1b077c7ac736f",
+      "size": 1395886,
+      "containerChain": [
+        "corpus/bnd4/45b71c8b968ad8cc92f559f9"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-4cb9900a734e21f28495b285",
+      "sha256": "4cb9900a734e21f28495b2857a6dcf75ee881508f3eaf80b58cd94253dc9bebe",
+      "size": 174309,
+      "containerChain": [
+        "corpus/bnd4/4cb9900a734e21f28495b285"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-562957b59e38e417c158c097",
+      "sha256": "562957b59e38e417c158c097cdf3d76d93dea345d7f4e0c8185e94e7d1ef5999",
+      "size": 293367,
+      "containerChain": [
+        "corpus/bnd4/562957b59e38e417c158c097"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-58df0bd862ddfd02e864011a",
+      "sha256": "58df0bd862ddfd02e864011a915ffdb43039b382ad4401be1a5bc5d1052afb04",
+      "size": 5534641,
+      "containerChain": [
+        "corpus/bnd4/58df0bd862ddfd02e864011a"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-58fb438b8ef7541122289e07",
+      "sha256": "58fb438b8ef7541122289e078b87f08f1ef5f727ea349caeed4e5045146c240d",
+      "size": 305074,
+      "containerChain": [
+        "corpus/bnd4/58fb438b8ef7541122289e07"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-61d289abbd402badee91f408",
+      "sha256": "61d289abbd402badee91f40864a7642aafb3a3fdcdf9aca58dcfa081c3459f07",
+      "size": 3586651,
+      "containerChain": [
+        "corpus/bnd4/61d289abbd402badee91f408"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-61f8cbf2a777c8424f92887c",
+      "sha256": "61f8cbf2a777c8424f92887c397b73aba31711237630c57b65bf93b63de23c0e",
+      "size": 4565637,
+      "containerChain": [
+        "corpus/bnd4/61f8cbf2a777c8424f92887c"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-6252583febcb116912a67970",
+      "sha256": "6252583febcb116912a67970cfde1bef6dd9721ca6a56d26ed848a8a235dda9b",
+      "size": 3124759,
+      "containerChain": [
+        "corpus/bnd4/6252583febcb116912a67970"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-627b4f82c457a7a40f2fd44d",
+      "sha256": "627b4f82c457a7a40f2fd44ddf3fec12f522bf4d47905066c6b2421cdcb0a76f",
+      "size": 371447,
+      "containerChain": [
+        "corpus/bnd4/627b4f82c457a7a40f2fd44d"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-628d0e578b02e3102a4f7c26",
+      "sha256": "628d0e578b02e3102a4f7c26b712cf8b07a74f86a24f4934be0a7b53d61a5406",
+      "size": 626838,
+      "containerChain": [
+        "corpus/bnd4/628d0e578b02e3102a4f7c26"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-64693b89306873181ddbc4c1",
+      "sha256": "64693b89306873181ddbc4c1a17260cc5f89631d3b3165772240582abf26345d",
+      "size": 1236318,
+      "containerChain": [
+        "corpus/bnd4/64693b89306873181ddbc4c1"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-647f93540bdcf7821834662d",
+      "sha256": "647f93540bdcf7821834662d878927708d4a607079b741ef88ed5511bca75213",
+      "size": 68923,
+      "containerChain": [
+        "corpus/bnd4/647f93540bdcf7821834662d"
+      ],
+      "resourceKind": "ai",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-65069825a28854d7a7212e4e",
+      "sha256": "65069825a28854d7a7212e4e3359423a7011ca55cbd35256c9c495183aae4dc9",
+      "size": 3667784,
+      "containerChain": [
+        "corpus/bnd4/65069825a28854d7a7212e4e"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-697070c5a5f88116740a93e8",
+      "sha256": "697070c5a5f88116740a93e8c7a91f77d486393783359f88dd84897e92f6d83b",
+      "size": 7552144,
+      "containerChain": [
+        "corpus/bnd4/697070c5a5f88116740a93e8"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-70d9b7ac3794332cd8ef5c4e",
+      "sha256": "70d9b7ac3794332cd8ef5c4e704b4c0626df93c06b2bca04e4688d19c946bec1",
+      "size": 4607358,
+      "containerChain": [
+        "corpus/bnd4/70d9b7ac3794332cd8ef5c4e"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-757d353eab2b70b97b144381",
+      "sha256": "757d353eab2b70b97b144381887ac88e4c6e89658008d92c15b7fb3f3fdafff4",
+      "size": 19589,
+      "containerChain": [
+        "corpus/bnd4/757d353eab2b70b97b144381"
+      ],
+      "resourceKind": "obj",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-7600d35e2760d96a3eb52907",
+      "sha256": "7600d35e2760d96a3eb529078d0865de59cd9471554741712f5803faea8cd85a",
+      "size": 4329913,
+      "containerChain": [
+        "corpus/bnd4/7600d35e2760d96a3eb52907"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-76a228ec5ca9d6228d63172f",
+      "sha256": "76a228ec5ca9d6228d63172f24d45002c8d0765e5a58395e4b1a9ba6aa6bac09",
+      "size": 177000132,
+      "containerChain": [
+        "corpus/bnd4/76a228ec5ca9d6228d63172f"
+      ],
+      "resourceKind": "sfx",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-790abfbf8db3dce89cbf96bd",
+      "sha256": "790abfbf8db3dce89cbf96bd1a68dd3798e401b948a039ed69794e6b0da9e1c0",
+      "size": 5853039,
+      "containerChain": [
+        "corpus/bnd4/790abfbf8db3dce89cbf96bd"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-83853ec9b3a22d5fd00764e2",
+      "sha256": "83853ec9b3a22d5fd00764e2f182cacf260e85410630747a3553649fbbddedde",
+      "size": 2380081,
+      "containerChain": [
+        "corpus/bnd4/83853ec9b3a22d5fd00764e2"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-868e036adc5da501ceb1260b",
+      "sha256": "868e036adc5da501ceb1260b86cc1b664ab2e7bb38e722164afc270cb2112ccd",
+      "size": 4827656,
+      "containerChain": [
+        "corpus/bnd4/868e036adc5da501ceb1260b"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-887ea7eb070c105ac838dfb6",
+      "sha256": "887ea7eb070c105ac838dfb607d2684fad70b578f19f9b0a82e5aa73edfb755c",
+      "size": 3114071,
+      "containerChain": [
+        "corpus/bnd4/887ea7eb070c105ac838dfb6"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-899ec74c3f89147caee8026b",
+      "sha256": "899ec74c3f89147caee8026b7f396f53520f5d09d10506dcaf682bdebd5b0bde",
+      "size": 71026,
+      "containerChain": [
+        "corpus/bnd4/899ec74c3f89147caee8026b"
+      ],
+      "resourceKind": "ai",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-8b139fc6d2c1df3246740282",
+      "sha256": "8b139fc6d2c1df3246740282d9ffbe891317f4f3489f5ba849be12e9805a93ef",
+      "size": 1841158,
+      "containerChain": [
+        "corpus/bnd4/8b139fc6d2c1df3246740282"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-901d9a91bf18c22635994437",
+      "sha256": "901d9a91bf18c226359944379075a3043de80ca64b575686b350e5e6e9904023",
+      "size": 285409,
+      "containerChain": [
+        "corpus/bnd4/901d9a91bf18c22635994437"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-960e1155d3f156ea1fd76f15",
+      "sha256": "960e1155d3f156ea1fd76f153eecdb2e22bf9dab72840c86a7b0ffd4a850f0f6",
+      "size": 4852430,
+      "containerChain": [
+        "corpus/bnd4/960e1155d3f156ea1fd76f15"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-9723b3d4615bbdff3cc80024",
+      "sha256": "9723b3d4615bbdff3cc80024954a07a2d2f1592bf1ddf3f5fc6c359f7a0c6604",
+      "size": 11441453,
+      "containerChain": [
+        "corpus/bnd4/9723b3d4615bbdff3cc80024"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-9b4f07a6fda653e7d0759847",
+      "sha256": "9b4f07a6fda653e7d07598477b311d65f2507c97d585fa138801d9577279b784",
+      "size": 361200,
+      "containerChain": [
+        "corpus/bnd4/9b4f07a6fda653e7d0759847"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-9e27bdf2ec662498ba2c72ee",
+      "sha256": "9e27bdf2ec662498ba2c72ee744d0c30d0339200134ace870ad479cc97613c83",
+      "size": 9438163,
+      "containerChain": [
+        "corpus/bnd4/9e27bdf2ec662498ba2c72ee"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-a29255f6bd7b5b28620cc183",
+      "sha256": "a29255f6bd7b5b28620cc18348b0b97ba58fadbd43cf7505a8d482acfd796ac0",
+      "size": 7332643,
+      "containerChain": [
+        "corpus/bnd4/a29255f6bd7b5b28620cc183"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-a66e6a583dadb84125bfd57e",
+      "sha256": "a66e6a583dadb84125bfd57e2d12004a7676e1f75945f430ab9e31781d868e5e",
+      "size": 6168817,
+      "containerChain": [
+        "corpus/bnd4/a66e6a583dadb84125bfd57e"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-a93a649b51d59017b072a626",
+      "sha256": "a93a649b51d59017b072a626dad0f4ecab78bab1bcc4b9d159b88f05ee2140fb",
+      "size": 3607492,
+      "containerChain": [
+        "corpus/bnd4/a93a649b51d59017b072a626"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-b189d8be9be9decdd9aeba4c",
+      "sha256": "b189d8be9be9decdd9aeba4c1b13f1466aa6e8f06699739e3e3f4edbd5cc3379",
+      "size": 3181082,
+      "containerChain": [
+        "corpus/bnd4/b189d8be9be9decdd9aeba4c"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-b275c8361d6f8af804579a18",
+      "sha256": "b275c8361d6f8af804579a189c26666e407c45912907092b06fa9e7bf9d412bd",
+      "size": 12336,
+      "containerChain": [
+        "corpus/bnd4/b275c8361d6f8af804579a18"
+      ],
+      "resourceKind": "menu",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-bc8f63b85b232e3419a60af0",
+      "sha256": "bc8f63b85b232e3419a60af02bd8a9c16eb07beab79a3d8cdb1c7a850f413f60",
+      "size": 20478,
+      "containerChain": [
+        "corpus/bnd4/bc8f63b85b232e3419a60af0"
+      ],
+      "resourceKind": "obj",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-ca1b0cd485b65371d67531f6",
+      "sha256": "ca1b0cd485b65371d67531f6630734c770eeb16483dd999ef3a4f374bd825889",
+      "size": 2223147,
+      "containerChain": [
+        "corpus/bnd4/ca1b0cd485b65371d67531f6"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-d1bae6fffecbac5dfeb49365",
+      "sha256": "d1bae6fffecbac5dfeb49365dad665cf1870c6c8fa499fade8a962866df1ffaf",
+      "size": 241930,
+      "containerChain": [
+        "corpus/bnd4/d1bae6fffecbac5dfeb49365"
+      ],
+      "resourceKind": "script",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-d1c321cd974a2028ae8de8c1",
+      "sha256": "d1c321cd974a2028ae8de8c1f553f87b77a866e7db04ad03d07313623c1b257b",
+      "size": 2056608,
+      "containerChain": [
+        "corpus/bnd4/d1c321cd974a2028ae8de8c1"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-d476661e8346599f60e7bc52",
+      "sha256": "d476661e8346599f60e7bc529f4fc0a456d551f059bd67cd14696d322bf5bb25",
+      "size": 7053029,
+      "containerChain": [
+        "corpus/bnd4/d476661e8346599f60e7bc52"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-d67d00ace5670d6081ceab53",
+      "sha256": "d67d00ace5670d6081ceab53904dec346e58b40c658606901cc3b961dd18731f",
+      "size": 2059346,
+      "containerChain": [
+        "corpus/bnd4/d67d00ace5670d6081ceab53"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-d854fdba0deb0895cface0b0",
+      "sha256": "d854fdba0deb0895cface0b01b74fa3b1fe6ba38f9c529caa7d93ea8fbabac8b",
+      "size": 1475546,
+      "containerChain": [
+        "corpus/bnd4/d854fdba0deb0895cface0b0"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-db240d696d1a4cc34d02772d",
+      "sha256": "db240d696d1a4cc34d02772ded298dbe99e0b5fa7db4c90d33ac4cc450d882ed",
+      "size": 219514,
+      "containerChain": [
+        "corpus/bnd4/db240d696d1a4cc34d02772d"
+      ],
+      "resourceKind": "msg",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-e3596444ca22a75d1d4a242e",
+      "sha256": "e3596444ca22a75d1d4a242ee26e348ff82b60205cf876af423ad339f8006af2",
+      "size": 4167802,
+      "containerChain": [
+        "corpus/bnd4/e3596444ca22a75d1d4a242e"
+      ],
+      "resourceKind": "sfx",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-e5c4c559e935801d7e490f6a",
+      "sha256": "e5c4c559e935801d7e490f6a9560f548bf1eaa74c51d6531999e137ad8d7a3ab",
+      "size": 3449180,
+      "containerChain": [
+        "corpus/bnd4/e5c4c559e935801d7e490f6a"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-e735c6f4f2bba1ead570b7ff",
+      "sha256": "e735c6f4f2bba1ead570b7ff46328e62eb18c8db0d831385b46ae90cccd1cbde",
+      "size": 6640672,
+      "containerChain": [
+        "corpus/bnd4/e735c6f4f2bba1ead570b7ff"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-e9ea16b4aae11cd779f9b554",
+      "sha256": "e9ea16b4aae11cd779f9b554f7b0caf503bceadfd192a1c0a2a0ea95159c4691",
+      "size": 72383,
+      "containerChain": [
+        "corpus/bnd4/e9ea16b4aae11cd779f9b554"
+      ],
+      "resourceKind": "ai",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-f20c0578ff58b5fb31e7af1d",
+      "sha256": "f20c0578ff58b5fb31e7af1d3213faa569d1a87d64d20a069aec32637c18de98",
+      "size": 1069247,
+      "containerChain": [
+        "corpus/bnd4/f20c0578ff58b5fb31e7af1d"
+      ],
+      "resourceKind": "param",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-f4d656b5571d0bdb8979ad9f",
+      "sha256": "f4d656b5571d0bdb8979ad9f61decaf31f7ca7136e2079d350dead001fa998ac",
+      "size": 627643,
+      "containerChain": [
+        "corpus/bnd4/f4d656b5571d0bdb8979ad9f"
+      ],
+      "resourceKind": "obj",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-f8960c44cf29234f23d3cf61",
+      "sha256": "f8960c44cf29234f23d3cf6106feea96a7d32327b9f09100851c94ccc6fbae34",
+      "size": 4271821,
+      "containerChain": [
+        "corpus/bnd4/f8960c44cf29234f23d3cf61"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-f9d8f226803bbc9c68fbceac",
+      "sha256": "f9d8f226803bbc9c68fbceacd829120ff740dda6074aaab69b6fd15c5f17cf42",
+      "size": 4653752,
+      "containerChain": [
+        "corpus/bnd4/f9d8f226803bbc9c68fbceac"
+      ],
+      "resourceKind": "action",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-fa37b11e35a7d98cd827025d",
+      "sha256": "fa37b11e35a7d98cd827025dc6f70f286abebc18c7c2c00c83c71e169d51a46b",
+      "size": 2612222,
+      "containerChain": [
+        "corpus/bnd4/fa37b11e35a7d98cd827025d"
+      ],
+      "resourceKind": "chr",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-bnd4-fe73b722a43269629fea2a29",
+      "sha256": "fe73b722a43269629fea2a2955cd957a27486383cefa257923e3f6698767e398",
+      "size": 55036,
+      "containerChain": [
+        "corpus/bnd4/fe73b722a43269629fea2a29"
+      ],
+      "resourceKind": "obj",
+      "format": "BND4",
+      "observedVariant": "BND4_40_24"
+    },
+    {
+      "logicalId": "sekiro-dflt-01262b868634c12fe9c67d94",
+      "sha256": "01262b868634c12fe9c67d949f36511d60b8b9f1fae0c981aaa86ddbcab39739",
+      "size": 29777631,
+      "containerChain": [
+        "corpus/dflt/01262b868634c12fe9c67d94"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-031f40bbfda5586cdfb06b9d",
+      "sha256": "031f40bbfda5586cdfb06b9d5806cfdca6753a04b569dbf995475ee95a73cda2",
+      "size": 491550,
+      "containerChain": [
+        "corpus/dflt/031f40bbfda5586cdfb06b9d"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-08139410ce458823e3eacc63",
+      "sha256": "08139410ce458823e3eacc63ea8c39521c0ffe94abe3cb97101ce350f76ec0b5",
+      "size": 1161246,
+      "containerChain": [
+        "corpus/dflt/08139410ce458823e3eacc63"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-0dbc9b1c1861b76e3751eb64",
+      "sha256": "0dbc9b1c1861b76e3751eb64416fb28a4e8fae2ea2f3c0d83af4a4ec5896921e",
+      "size": 583576,
+      "containerChain": [
+        "corpus/dflt/0dbc9b1c1861b76e3751eb64"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-116da436aab852b40165a56b",
+      "sha256": "116da436aab852b40165a56b43c42f7a40d54257278da2e2394ea840cce042ed",
+      "size": 2151321,
+      "containerChain": [
+        "corpus/dflt/116da436aab852b40165a56b"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-1b64d5996677dc92e2b16143",
+      "sha256": "1b64d5996677dc92e2b16143f3cf6d4475eddc849a9b4af971d2b21ada085785",
+      "size": 432973,
+      "containerChain": [
+        "corpus/dflt/1b64d5996677dc92e2b16143"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-1e52dfcd56a334ae22d8a2ad",
+      "sha256": "1e52dfcd56a334ae22d8a2ad73b8f68ec83c7faf80b73880ebc68fba1ea350b1",
+      "size": 1247241,
+      "containerChain": [
+        "corpus/dflt/1e52dfcd56a334ae22d8a2ad"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-1f565a92ba83d02a52379389",
+      "sha256": "1f565a92ba83d02a52379389558f566d07ae1e2166e6a46d44ce4d24b2de63fa",
+      "size": 494871,
+      "containerChain": [
+        "corpus/dflt/1f565a92ba83d02a52379389"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-24c1f73cf8f8274e33f59cf1",
+      "sha256": "24c1f73cf8f8274e33f59cf1f59809a90a45221816cafbc0db630784816b7519",
+      "size": 525653,
+      "containerChain": [
+        "corpus/dflt/24c1f73cf8f8274e33f59cf1"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-25b2939ff28df1e12d3d2ca0",
+      "sha256": "25b2939ff28df1e12d3d2ca0542f065389377dcb822cc5c42bccbd20881b7156",
+      "size": 1046902,
+      "containerChain": [
+        "corpus/dflt/25b2939ff28df1e12d3d2ca0"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-2614e6a82b5c0831525cccb7",
+      "sha256": "2614e6a82b5c0831525cccb7023100451bcfba298244a1374dc9d9e1d68e9652",
+      "size": 454975,
+      "containerChain": [
+        "corpus/dflt/2614e6a82b5c0831525cccb7"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-2a98193aa7522aac3da783ba",
+      "sha256": "2a98193aa7522aac3da783ba56359c75f9d82e7647b9c767a9892ea99395b0ba",
+      "size": 377374,
+      "containerChain": [
+        "corpus/dflt/2a98193aa7522aac3da783ba"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-2bc721ae8d33355f12ef4498",
+      "sha256": "2bc721ae8d33355f12ef4498e2167fc0d383f9121f0df496f2a5f13f62d9f223",
+      "size": 130403,
+      "containerChain": [
+        "corpus/dflt/2bc721ae8d33355f12ef4498"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-392ee698fb0afb908a90588d",
+      "sha256": "392ee698fb0afb908a90588d0eed11e34cdc4255f3639bfaaec15371a94ce5ba",
+      "size": 377352,
+      "containerChain": [
+        "corpus/dflt/392ee698fb0afb908a90588d"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-3b2924ac8927088f6f7c086f",
+      "sha256": "3b2924ac8927088f6f7c086fcdb7f8d374baca58c19a2beaa7b30b06c45f60bc",
+      "size": 426026,
+      "containerChain": [
+        "corpus/dflt/3b2924ac8927088f6f7c086f"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-3c44025d50a6930162227aeb",
+      "sha256": "3c44025d50a6930162227aebce95f2c8e323adabc97654c79c019bde3c78bfae",
+      "size": 1405150,
+      "containerChain": [
+        "corpus/dflt/3c44025d50a6930162227aeb"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-3dec5a74356c1b5a44db3909",
+      "sha256": "3dec5a74356c1b5a44db3909c0c12ef0785bb64201ff9ea65f4529cce5187ec4",
+      "size": 473541,
+      "containerChain": [
+        "corpus/dflt/3dec5a74356c1b5a44db3909"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-3e434903b57f20d1dcd6a9ad",
+      "sha256": "3e434903b57f20d1dcd6a9adeae403dbb63a583b21d6a4bae84e3e267971c184",
+      "size": 932208,
+      "containerChain": [
+        "corpus/dflt/3e434903b57f20d1dcd6a9ad"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-48d5a4eb518cdfe1ecaddd62",
+      "sha256": "48d5a4eb518cdfe1ecaddd621bcaefecddd88fe3cc034fa35437ac6204be14af",
+      "size": 409500,
+      "containerChain": [
+        "corpus/dflt/48d5a4eb518cdfe1ecaddd62"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-4b55c097b4f57c9af4427285",
+      "sha256": "4b55c097b4f57c9af442728577de20aef859813ea68d7bbbfd197e71143640f9",
+      "size": 1260896,
+      "containerChain": [
+        "corpus/dflt/4b55c097b4f57c9af4427285"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-501bba508548e564e35cdde6",
+      "sha256": "501bba508548e564e35cdde6d1ed7636ddecdca1c845ec1eab211efe3c902fba",
+      "size": 30277,
+      "containerChain": [
+        "corpus/dflt/501bba508548e564e35cdde6"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-5389c6c053d6161a8ab21e1e",
+      "sha256": "5389c6c053d6161a8ab21e1e3e57bbc7d99ffe9fadafd416bad40d95f8c23088",
+      "size": 1448686,
+      "containerChain": [
+        "corpus/dflt/5389c6c053d6161a8ab21e1e"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-53e2dbf8a3af4120a4832699",
+      "sha256": "53e2dbf8a3af4120a4832699d7ff5f5bf6c2bd811d93016e9aefc621ea03fd51",
+      "size": 1265435,
+      "containerChain": [
+        "corpus/dflt/53e2dbf8a3af4120a4832699"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-546953634c388b908d48c20e",
+      "sha256": "546953634c388b908d48c20e4cf72800c41b5f04e760404de8e1c94778ac6480",
+      "size": 458703,
+      "containerChain": [
+        "corpus/dflt/546953634c388b908d48c20e"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-55e905b051e740d62a56a3f7",
+      "sha256": "55e905b051e740d62a56a3f75cab09a68960bf913ce33878ee79b65f2ae1edd0",
+      "size": 421989,
+      "containerChain": [
+        "corpus/dflt/55e905b051e740d62a56a3f7"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-5f0e33067e0780f92d321df6",
+      "sha256": "5f0e33067e0780f92d321df69a72c5048caf3d7f08a3d7f151e4ec927b0d9697",
+      "size": 107006,
+      "containerChain": [
+        "corpus/dflt/5f0e33067e0780f92d321df6"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-640aeb0527930683a80e0fbd",
+      "sha256": "640aeb0527930683a80e0fbd0a65155e8f2e95bd4b84c6188b3640517d325dcb",
+      "size": 2065133,
+      "containerChain": [
+        "corpus/dflt/640aeb0527930683a80e0fbd"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-70dc46c97d8fb29d9602e31c",
+      "sha256": "70dc46c97d8fb29d9602e31c0fac6b0c2647b2744de8759f858f35505368abba",
+      "size": 820271,
+      "containerChain": [
+        "corpus/dflt/70dc46c97d8fb29d9602e31c"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-7277d02693252d2879713a10",
+      "sha256": "7277d02693252d2879713a10f8176a5d4de0232f2a70ad0e51d03c87f4353a4c",
+      "size": 401934,
+      "containerChain": [
+        "corpus/dflt/7277d02693252d2879713a10"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-771f48e7c226792c9de5b6a0",
+      "sha256": "771f48e7c226792c9de5b6a0bf3ded40182718b27705fbf95a72ab3e07ddcf48",
+      "size": 35562,
+      "containerChain": [
+        "corpus/dflt/771f48e7c226792c9de5b6a0"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-7ccb0f13eb4d8d8ad7e40972",
+      "sha256": "7ccb0f13eb4d8d8ad7e409726fd4d5e7bcb637ae73ec6f9e7e803e85daa5064a",
+      "size": 1976,
+      "containerChain": [
+        "corpus/dflt/7ccb0f13eb4d8d8ad7e40972"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-7f9b64c19f0569341a63e7d1",
+      "sha256": "7f9b64c19f0569341a63e7d1dbab3d6a442510d69e10aa43dd0482f567c98dc5",
+      "size": 524068,
+      "containerChain": [
+        "corpus/dflt/7f9b64c19f0569341a63e7d1"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-84aa45409fbd3894f2319d92",
+      "sha256": "84aa45409fbd3894f2319d924ecbe395aa0589d6f5781397c872426bfc48c141",
+      "size": 49383,
+      "containerChain": [
+        "corpus/dflt/84aa45409fbd3894f2319d92"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-8aaf9cf8027a16786b7281dd",
+      "sha256": "8aaf9cf8027a16786b7281dd6830ebbd80da932476fc82ed54418bf8923ddd45",
+      "size": 151067,
+      "containerChain": [
+        "corpus/dflt/8aaf9cf8027a16786b7281dd"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-94513773b11b2c19e1dbc6a1",
+      "sha256": "94513773b11b2c19e1dbc6a12332aa766d65c7f2977c99d09298d1b79f5b5171",
+      "size": 427043,
+      "containerChain": [
+        "corpus/dflt/94513773b11b2c19e1dbc6a1"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-9641b3d4d77fc708d002acc2",
+      "sha256": "9641b3d4d77fc708d002acc2caaa8a6028aa1752e285ec25430982e076a4d54f",
+      "size": 1067571,
+      "containerChain": [
+        "corpus/dflt/9641b3d4d77fc708d002acc2"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-9678418af73d657b1e15a789",
+      "sha256": "9678418af73d657b1e15a78953772a8de8d2b7d8d0862c9100cd54550cb1a4e6",
+      "size": 399561,
+      "containerChain": [
+        "corpus/dflt/9678418af73d657b1e15a789"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-9e10d90acedc8b4b7e6d2797",
+      "sha256": "9e10d90acedc8b4b7e6d2797c0cd592b6901b40e3f035dd29adbe3d5e8d8f472",
+      "size": 58605,
+      "containerChain": [
+        "corpus/dflt/9e10d90acedc8b4b7e6d2797"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-a04254999dbf71e7510e2b24",
+      "sha256": "a04254999dbf71e7510e2b24f7e2e33d658f943160abcd3b56ae2eb0e4665203",
+      "size": 855772,
+      "containerChain": [
+        "corpus/dflt/a04254999dbf71e7510e2b24"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-a3260419011ab5284d32da90",
+      "sha256": "a3260419011ab5284d32da90fdde5f5229b8ed277ee6ab8dc08729c217992f0a",
+      "size": 460356,
+      "containerChain": [
+        "corpus/dflt/a3260419011ab5284d32da90"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-a771117d2dc6008651ea40bd",
+      "sha256": "a771117d2dc6008651ea40bd2e4c2f2124ed0d15ef75d7a9f64466b681ef6e65",
+      "size": 492389,
+      "containerChain": [
+        "corpus/dflt/a771117d2dc6008651ea40bd"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-ab6e75e1e7397126b342df85",
+      "sha256": "ab6e75e1e7397126b342df8597d0e926a5eb33c9a7d01b484bacbb5d8bcdf391",
+      "size": 822756,
+      "containerChain": [
+        "corpus/dflt/ab6e75e1e7397126b342df85"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-ab75ca43d54167055292eb81",
+      "sha256": "ab75ca43d54167055292eb81a0828530691ef434d3ed664efa21eeed5e0f142a",
+      "size": 868579,
+      "containerChain": [
+        "corpus/dflt/ab75ca43d54167055292eb81"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-acff2fcc46de630dadd4b849",
+      "sha256": "acff2fcc46de630dadd4b849db642ff591fc556e0c36c0e2cc7798b651908449",
+      "size": 48203,
+      "containerChain": [
+        "corpus/dflt/acff2fcc46de630dadd4b849"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-b0472796c3f8185230901fc5",
+      "sha256": "b0472796c3f8185230901fc5d12a3179475537f30231900c1449f3383eb71bfc",
+      "size": 540678,
+      "containerChain": [
+        "corpus/dflt/b0472796c3f8185230901fc5"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-b166e9e072661c4beae7ca7c",
+      "sha256": "b166e9e072661c4beae7ca7c823e4d35ab805f263f09c06cfbd7fab234e8e69f",
+      "size": 410907,
+      "containerChain": [
+        "corpus/dflt/b166e9e072661c4beae7ca7c"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-b24a4129ebf3710abf7f3dc1",
+      "sha256": "b24a4129ebf3710abf7f3dc1784f68d969ff4ff5217ee9032ef22c7a9045dcf1",
+      "size": 1934023,
+      "containerChain": [
+        "corpus/dflt/b24a4129ebf3710abf7f3dc1"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-b6312f0f6655b6e70e5fb862",
+      "sha256": "b6312f0f6655b6e70e5fb862bcaec1920b5f14151e0e6431f88dd235c7cd9acb",
+      "size": 1320237,
+      "containerChain": [
+        "corpus/dflt/b6312f0f6655b6e70e5fb862"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-b68ef040ba03570e127e0a52",
+      "sha256": "b68ef040ba03570e127e0a525ca1e598b723d22cecc3bd1a47b65daf8caa17d9",
+      "size": 21997847,
+      "containerChain": [
+        "corpus/dflt/b68ef040ba03570e127e0a52"
+      ],
+      "resourceKind": "other",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-b9d0eaf4c2f8ed880bfd10ff",
+      "sha256": "b9d0eaf4c2f8ed880bfd10ff072dc786f3d52b344d6a9bc93f663e5213314671",
+      "size": 63485593,
+      "containerChain": [
+        "corpus/dflt/b9d0eaf4c2f8ed880bfd10ff"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-ba05107e1ed3cf10a3cfc8e6",
+      "sha256": "ba05107e1ed3cf10a3cfc8e6ebc56ca885acdbde4f893e265b4752e99d5e7773",
+      "size": 53440,
+      "containerChain": [
+        "corpus/dflt/ba05107e1ed3cf10a3cfc8e6"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-bb75309cf5c659220b019f11",
+      "sha256": "bb75309cf5c659220b019f117b6a5bcec1c570a4f24d023f0bd6f5431b914c95",
+      "size": 70153,
+      "containerChain": [
+        "corpus/dflt/bb75309cf5c659220b019f11"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-bc18645e8c40bd0f6c7b6837",
+      "sha256": "bc18645e8c40bd0f6c7b683725fe75d5e6fdbfda445478e8eefa6981ff950a87",
+      "size": 416988,
+      "containerChain": [
+        "corpus/dflt/bc18645e8c40bd0f6c7b6837"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-c4e1770c0dbbcbde8039656d",
+      "sha256": "c4e1770c0dbbcbde8039656d755f11829ccf124c357417ddea20a7cdee17198e",
+      "size": 101461,
+      "containerChain": [
+        "corpus/dflt/c4e1770c0dbbcbde8039656d"
+      ],
+      "resourceKind": "event",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-c537477a4410ceb48547a932",
+      "sha256": "c537477a4410ceb48547a932f4ea5b1d38d5fe36437fcee88110c7c497e00366",
+      "size": 376815,
+      "containerChain": [
+        "corpus/dflt/c537477a4410ceb48547a932"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-d079cc297bdb31553d4c9fdc",
+      "sha256": "d079cc297bdb31553d4c9fdcfe0829446af4b278d32b95c00444824269eb3f43",
+      "size": 425551,
+      "containerChain": [
+        "corpus/dflt/d079cc297bdb31553d4c9fdc"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-dabcf90abd0821b7fef11b05",
+      "sha256": "dabcf90abd0821b7fef11b05cae274caa64f3e875ed91a58c187d22d63695346",
+      "size": 1248982,
+      "containerChain": [
+        "corpus/dflt/dabcf90abd0821b7fef11b05"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-e521a95c4d708eb27304c1d1",
+      "sha256": "e521a95c4d708eb27304c1d14d9a37e0667f8c41bfe3dd1c298ff65b26d91c0b",
+      "size": 352442,
+      "containerChain": [
+        "corpus/dflt/e521a95c4d708eb27304c1d1"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-e5e28ca0122f1fff29642234",
+      "sha256": "e5e28ca0122f1fff296422347f2fb0b3081459ba00b3ab86d2f9dabc6ab768d3",
+      "size": 515160,
+      "containerChain": [
+        "corpus/dflt/e5e28ca0122f1fff29642234"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-edf29cfdea5f2aaba1841b06",
+      "sha256": "edf29cfdea5f2aaba1841b06dc95582db444c043bd5311ea4b405553694727bc",
+      "size": 2149261,
+      "containerChain": [
+        "corpus/dflt/edf29cfdea5f2aaba1841b06"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-f0fcd64385640c1b8a3526e5",
+      "sha256": "f0fcd64385640c1b8a3526e5c021d456b1418a335053479fa7e134834042087d",
+      "size": 1273303,
+      "containerChain": [
+        "corpus/dflt/f0fcd64385640c1b8a3526e5"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-f3d2dea8befcb86d036c41e8",
+      "sha256": "f3d2dea8befcb86d036c41e88be02cb6a6c4cd826c2aa86ec837d313d35e6447",
+      "size": 1408398,
+      "containerChain": [
+        "corpus/dflt/f3d2dea8befcb86d036c41e8"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-f81e6e478e06e18ffd97b27c",
+      "sha256": "f81e6e478e06e18ffd97b27c887d62f8bf55af3e6b8d5d101cf76422384091a2",
+      "size": 497690,
+      "containerChain": [
+        "corpus/dflt/f81e6e478e06e18ffd97b27c"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-fad3725518e5ffef862655fe",
+      "sha256": "fad3725518e5ffef862655fe1cf4ba6fb1ca29c297867e8b62785e34361b6733",
+      "size": 431126,
+      "containerChain": [
+        "corpus/dflt/fad3725518e5ffef862655fe"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-fc44de61c34655c721e33a33",
+      "sha256": "fc44de61c34655c721e33a332bb1197773c9fd1fe9b38718373f0c8ceb3de255",
+      "size": 535157,
+      "containerChain": [
+        "corpus/dflt/fc44de61c34655c721e33a33"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-fd927acfcc2edcf07561944b",
+      "sha256": "fd927acfcc2edcf07561944bdddde47d3cc9ca5f4cae87dc06f9438a1aeab4d0",
+      "size": 177910,
+      "containerChain": [
+        "corpus/dflt/fd927acfcc2edcf07561944b"
+      ],
+      "resourceKind": "map",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_10000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-dflt-feb4abc5f628de376f8d7e93",
+      "sha256": "feb4abc5f628de376f8d7e93bb8065118a13f745471e00f0dc6761e9def23f3a",
+      "size": 1438267,
+      "containerChain": [
+        "corpus/dflt/feb4abc5f628de376f8d7e93"
+      ],
+      "resourceKind": "menu",
+      "format": "DFLT",
+      "observedVariant": "DCX_DFLT_11000_44_9_0"
+    },
+    {
+      "logicalId": "sekiro-krak-00d42028d636317f65c4cfd7",
+      "sha256": "00d42028d636317f65c4cfd73472ea5dc197887abe21b9e46747031c523b99e0",
+      "size": 7808,
+      "containerChain": [
+        "corpus/krak/00d42028d636317f65c4cfd7"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-0522a2600ac10927e8ae14f0",
+      "sha256": "0522a2600ac10927e8ae14f01fe3940c1bbd5fd2657d6b5329d1eb6968de3b1e",
+      "size": 7376,
+      "containerChain": [
+        "corpus/krak/0522a2600ac10927e8ae14f0"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-0ac53db963c2d34c2cc0f77e",
+      "sha256": "0ac53db963c2d34c2cc0f77e3c24d447d645211ef1ae311b9d0fce588720bbef",
+      "size": 25264,
+      "containerChain": [
+        "corpus/krak/0ac53db963c2d34c2cc0f77e"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-0d705f2ebbc32967affeb9c0",
+      "sha256": "0d705f2ebbc32967affeb9c000c5e42cd98b4dd10d969b9272870c474b0438e7",
+      "size": 7296,
+      "containerChain": [
+        "corpus/krak/0d705f2ebbc32967affeb9c0"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-11d65e2b2756cdd3091a8cfa",
+      "sha256": "11d65e2b2756cdd3091a8cfabc8b7fc8f072b81442ceb9a63554b99c7de10fc4",
+      "size": 2368,
+      "containerChain": [
+        "corpus/krak/11d65e2b2756cdd3091a8cfa"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-12695bcf1806b785db5887b9",
+      "sha256": "12695bcf1806b785db5887b932d5b9efa68e63e8d13f8388c7baa40d6af4ef10",
+      "size": 12048,
+      "containerChain": [
+        "corpus/krak/12695bcf1806b785db5887b9"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-12c2d5ec5da6d5a4eb3072dd",
+      "sha256": "12c2d5ec5da6d5a4eb3072dde522eda8bcb7af88d404b5663f1fe3e44be61468",
+      "size": 2352,
+      "containerChain": [
+        "corpus/krak/12c2d5ec5da6d5a4eb3072dd"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-1448d37ed248fed2c3c3a86f",
+      "sha256": "1448d37ed248fed2c3c3a86f39cf4dc36b22e7b3bf362cfb8eba0db515f5f5c3",
+      "size": 3328,
+      "containerChain": [
+        "corpus/krak/1448d37ed248fed2c3c3a86f"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-17d335b0b96096c1de165127",
+      "sha256": "17d335b0b96096c1de1651276df2c2c430e7f8a2d4cb0d397bd16d023dc64410",
+      "size": 33136,
+      "containerChain": [
+        "corpus/krak/17d335b0b96096c1de165127"
+      ],
+      "resourceKind": "script",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-1bf4386d026f3294991a59ee",
+      "sha256": "1bf4386d026f3294991a59ee18cacd1e2921e83090609ebc7e6de9fe39e21b4f",
+      "size": 8160,
+      "containerChain": [
+        "corpus/krak/1bf4386d026f3294991a59ee"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-1e4127b521ffe4598534bb25",
+      "sha256": "1e4127b521ffe4598534bb2528deda5ceac1cd2e9e93ed85194f2a7cb7283564",
+      "size": 8848,
+      "containerChain": [
+        "corpus/krak/1e4127b521ffe4598534bb25"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-2070c6f1ddf9a7ff25f6b5c6",
+      "sha256": "2070c6f1ddf9a7ff25f6b5c6bb9ce20de9f39c4ac34d5a2e0d6af40469a7d9f5",
+      "size": 7424,
+      "containerChain": [
+        "corpus/krak/2070c6f1ddf9a7ff25f6b5c6"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-21b1d9fd1503d7a14d7427ef",
+      "sha256": "21b1d9fd1503d7a14d7427ef13c03796023ea7745c1c6e05ccf918caf16d3b12",
+      "size": 8144,
+      "containerChain": [
+        "corpus/krak/21b1d9fd1503d7a14d7427ef"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-27634828da4b50cdb2feebeb",
+      "sha256": "27634828da4b50cdb2feebebeb68452718a252392f202690936f9ba675e1806d",
+      "size": 2288,
+      "containerChain": [
+        "corpus/krak/27634828da4b50cdb2feebeb"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-29e245ea4aff873087df2097",
+      "sha256": "29e245ea4aff873087df20973cb55afba6f80c27a74452d6988a25663be73341",
+      "size": 1024,
+      "containerChain": [
+        "corpus/krak/29e245ea4aff873087df2097"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-2a9e06dca67a1f425ace938d",
+      "sha256": "2a9e06dca67a1f425ace938dbd499cafabf0cb5f9470c5439e3aec188758b63b",
+      "size": 2704,
+      "containerChain": [
+        "corpus/krak/2a9e06dca67a1f425ace938d"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-31668284df7c50b32e7e9afc",
+      "sha256": "31668284df7c50b32e7e9afc9f77cce178c4c463a7268133ace98f84d696fce0",
+      "size": 1920,
+      "containerChain": [
+        "corpus/krak/31668284df7c50b32e7e9afc"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-3307e5f78b382f0288cae49c",
+      "sha256": "3307e5f78b382f0288cae49cd7f8c2147df3f7129db4bb37d850b1c9c00c92f8",
+      "size": 11840,
+      "containerChain": [
+        "corpus/krak/3307e5f78b382f0288cae49c"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-33d15355f74263185f5df82e",
+      "sha256": "33d15355f74263185f5df82ee3e543eb858270e157d4cdf1289e5c3c981aca40",
+      "size": 2449,
+      "containerChain": [
+        "corpus/krak/33d15355f74263185f5df82e"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-385b3135c1bb020f867244cb",
+      "sha256": "385b3135c1bb020f867244cb9f02edb8a901645e3b99515434126dba1f2a130f",
+      "size": 10464,
+      "containerChain": [
+        "corpus/krak/385b3135c1bb020f867244cb"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-4a5a69c6946bbbdf0b092ac8",
+      "sha256": "4a5a69c6946bbbdf0b092ac8e1afb42543e7b4a5cfeb946512b9ab8dcb1d017e",
+      "size": 7904,
+      "containerChain": [
+        "corpus/krak/4a5a69c6946bbbdf0b092ac8"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-4e34c3f6217fa74645b9eb33",
+      "sha256": "4e34c3f6217fa74645b9eb33c469aebae9cbd6adc1bcbf9dfa748554a0ba993b",
+      "size": 9488,
+      "containerChain": [
+        "corpus/krak/4e34c3f6217fa74645b9eb33"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-50731ffeb96f32b89ae6448c",
+      "sha256": "50731ffeb96f32b89ae6448c16a5e2f47fff897630dee8b07955943b0c21e1c8",
+      "size": 2560,
+      "containerChain": [
+        "corpus/krak/50731ffeb96f32b89ae6448c"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-53ef34c6526262e6f4fbc209",
+      "sha256": "53ef34c6526262e6f4fbc209a86ea7f551af6bab66b92f6365b06ee199c9ab00",
+      "size": 2256,
+      "containerChain": [
+        "corpus/krak/53ef34c6526262e6f4fbc209"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-59b9c972b79c8a471ba05ae6",
+      "sha256": "59b9c972b79c8a471ba05ae6c630adbc49eb381653758bdeecab65dbfe96c321",
+      "size": 1296,
+      "containerChain": [
+        "corpus/krak/59b9c972b79c8a471ba05ae6"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-6305fef0f6fd77cf93fc926c",
+      "sha256": "6305fef0f6fd77cf93fc926c71ce7adc71455292334646db90183ae31269c75e",
+      "size": 10288,
+      "containerChain": [
+        "corpus/krak/6305fef0f6fd77cf93fc926c"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-67e5563f7ee9dbf48d596fa8",
+      "sha256": "67e5563f7ee9dbf48d596fa839a6f0634b4025c8dd9dbe7a14e154954e98076e",
+      "size": 3568,
+      "containerChain": [
+        "corpus/krak/67e5563f7ee9dbf48d596fa8"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-718cb3a72e3eee59efc97a0e",
+      "sha256": "718cb3a72e3eee59efc97a0e52787a4f3912fbc8e15d0dbb67e1b62cd2eaf39e",
+      "size": 7600,
+      "containerChain": [
+        "corpus/krak/718cb3a72e3eee59efc97a0e"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-742f16651d3c1e296dd70ee5",
+      "sha256": "742f16651d3c1e296dd70ee5be05d558d1f4440cbefcd147a78877d98c58cbc3",
+      "size": 12016,
+      "containerChain": [
+        "corpus/krak/742f16651d3c1e296dd70ee5"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-7530006137aae489c88b541d",
+      "sha256": "7530006137aae489c88b541d3ea6d74718378ff3d2455c842bf577b49d42ae2a",
+      "size": 12048,
+      "containerChain": [
+        "corpus/krak/7530006137aae489c88b541d"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-89f6763a3bac609c6ca9bcab",
+      "sha256": "89f6763a3bac609c6ca9bcabcd522a6398c52eed7a9b77b29adaa2ec7e228397",
+      "size": 3360,
+      "containerChain": [
+        "corpus/krak/89f6763a3bac609c6ca9bcab"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-8dacb87fc025d737527642ee",
+      "sha256": "8dacb87fc025d737527642ee399c0709b7677476163c15df38ae9ed9807cd40b",
+      "size": 2496,
+      "containerChain": [
+        "corpus/krak/8dacb87fc025d737527642ee"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-908da340fadd353bf439ccc8",
+      "sha256": "908da340fadd353bf439ccc80bb286edfbe88d27eab55f7181267a91eec73d35",
+      "size": 7344,
+      "containerChain": [
+        "corpus/krak/908da340fadd353bf439ccc8"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-9585a06a2f1aa1d7b07b63b0",
+      "sha256": "9585a06a2f1aa1d7b07b63b047fb719e9ef7ced71fa69a144ba126979b6271bb",
+      "size": 2944,
+      "containerChain": [
+        "corpus/krak/9585a06a2f1aa1d7b07b63b0"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-9b0f86ff21dd3205bb8b1b53",
+      "sha256": "9b0f86ff21dd3205bb8b1b539f646e4551d65ea9f94746c25f13b4fd3355d105",
+      "size": 1632,
+      "containerChain": [
+        "corpus/krak/9b0f86ff21dd3205bb8b1b53"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-9d4a59eebfe7138018055e6c",
+      "sha256": "9d4a59eebfe7138018055e6c0b537c1727c126b23902dca526e1cc7f43679b74",
+      "size": 1905,
+      "containerChain": [
+        "corpus/krak/9d4a59eebfe7138018055e6c"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-b81a44ada504865e4d1c4c7a",
+      "sha256": "b81a44ada504865e4d1c4c7a6c5deedc239b12e5a7ae1ca3f4c7debd5a7204ac",
+      "size": 3264,
+      "containerChain": [
+        "corpus/krak/b81a44ada504865e4d1c4c7a"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-baede8b1c9498abb301fb3d2",
+      "sha256": "baede8b1c9498abb301fb3d200bddf7d01413d667187062ca8cbb96bdba3f2a4",
+      "size": 1712,
+      "containerChain": [
+        "corpus/krak/baede8b1c9498abb301fb3d2"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-baef6f3be0ded6f657659536",
+      "sha256": "baef6f3be0ded6f65765953601699063b6d2d820c201061af2b78965a491e45e",
+      "size": 7536,
+      "containerChain": [
+        "corpus/krak/baef6f3be0ded6f657659536"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-c61dba70e284e77bc1fee238",
+      "sha256": "c61dba70e284e77bc1fee2380c8b96231b24c7e47cf2e49bd5941f489d80098a",
+      "size": 12016,
+      "containerChain": [
+        "corpus/krak/c61dba70e284e77bc1fee238"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-c9f4ef12ed7725a90de00522",
+      "sha256": "c9f4ef12ed7725a90de00522fcc6670072e64da8f606c91d641e8e4162007c6c",
+      "size": 3264,
+      "containerChain": [
+        "corpus/krak/c9f4ef12ed7725a90de00522"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-ca675e78ca46b8550d3182e4",
+      "sha256": "ca675e78ca46b8550d3182e48abee9701adb3785737993316c7a1428b0a46586",
+      "size": 1744,
+      "containerChain": [
+        "corpus/krak/ca675e78ca46b8550d3182e4"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-d5b07893fd4cae94f00a745c",
+      "sha256": "d5b07893fd4cae94f00a745cd4b6f8905784bd44d91a9bcd91447c8670ecb431",
+      "size": 14576,
+      "containerChain": [
+        "corpus/krak/d5b07893fd4cae94f00a745c"
+      ],
+      "resourceKind": "script",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-d650927d99d3bd0f3fe0be2f",
+      "sha256": "d650927d99d3bd0f3fe0be2fab09d9285a4259dbbccb5e2f55ff11d5f44eeee6",
+      "size": 2400,
+      "containerChain": [
+        "corpus/krak/d650927d99d3bd0f3fe0be2f"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-dc8f5b3b2e9286dd19054ce8",
+      "sha256": "dc8f5b3b2e9286dd19054ce8eeddceff7448955efe6b9afeba600871dd667ce2",
+      "size": 2704,
+      "containerChain": [
+        "corpus/krak/dc8f5b3b2e9286dd19054ce8"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-df86f10425a1f0c747047da8",
+      "sha256": "df86f10425a1f0c747047da8522b3a1aa84dbaae3eeaf04f6c8f81108c9e80de",
+      "size": 7376,
+      "containerChain": [
+        "corpus/krak/df86f10425a1f0c747047da8"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-e36551a63663d1c7ef95414b",
+      "sha256": "e36551a63663d1c7ef95414b555c0cff61887a5f1b960783d9b5bbf9f536e51b",
+      "size": 8016,
+      "containerChain": [
+        "corpus/krak/e36551a63663d1c7ef95414b"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-e4cc84d9211e8c31f4ad0f5e",
+      "sha256": "e4cc84d9211e8c31f4ad0f5e7b9488685bbd9bf8d30017d638aa170b582c9a58",
+      "size": 3152,
+      "containerChain": [
+        "corpus/krak/e4cc84d9211e8c31f4ad0f5e"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-e57413a535b29932f89be6c0",
+      "sha256": "e57413a535b29932f89be6c0e8a4f2e1a02193c229b922e84cef66086d2904f6",
+      "size": 2944,
+      "containerChain": [
+        "corpus/krak/e57413a535b29932f89be6c0"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-e5f4788db2c65a6a85fe4be5",
+      "sha256": "e5f4788db2c65a6a85fe4be56fa5b192b5109b59ae982a2fec7964477c840b1a",
+      "size": 2432,
+      "containerChain": [
+        "corpus/krak/e5f4788db2c65a6a85fe4be5"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-e9d743c8953eec33e134906f",
+      "sha256": "e9d743c8953eec33e134906f5bd0cdd57f60bf28b4b792789759264d4bf1ae19",
+      "size": 2320,
+      "containerChain": [
+        "corpus/krak/e9d743c8953eec33e134906f"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-f3b9590983ac0298595f09a9",
+      "sha256": "f3b9590983ac0298595f09a9f61a833618af95e969be86c5bff6108cf1a7079e",
+      "size": 14832,
+      "containerChain": [
+        "corpus/krak/f3b9590983ac0298595f09a9"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-f49c48145f802b7eccaf2300",
+      "sha256": "f49c48145f802b7eccaf230035413ad5ccf152e62a4d22b3ab79636185488ffe",
+      "size": 2384,
+      "containerChain": [
+        "corpus/krak/f49c48145f802b7eccaf2300"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-f634e1f557cb5d2679aef850",
+      "sha256": "f634e1f557cb5d2679aef8507c6c03495c1a35a70c50485e508a79ae8e05adf5",
+      "size": 1975936,
+      "containerChain": [
+        "corpus/krak/f634e1f557cb5d2679aef850"
+      ],
+      "resourceKind": "map",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-f8be16679f78d476bc865d28",
+      "sha256": "f8be16679f78d476bc865d2842009dab8c3991b710e44b2f2c43b83f63439f5e",
+      "size": 2288,
+      "containerChain": [
+        "corpus/krak/f8be16679f78d476bc865d28"
+      ],
+      "resourceKind": "event",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    },
+    {
+      "logicalId": "sekiro-krak-fd48a2bd037efdff10f7cf08",
+      "sha256": "fd48a2bd037efdff10f7cf08029355cb5d83f63782c1fb2bd9083c419f10e6ab",
+      "size": 1728,
+      "containerChain": [
+        "corpus/krak/fd48a2bd037efdff10f7cf08"
+      ],
+      "resourceKind": "param",
+      "format": "KRAK",
+      "observedVariant": "DCX_KRAK_11000_44_6_0"
+    }
+  ]
+}

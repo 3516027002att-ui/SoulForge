@@ -350,10 +350,20 @@ if (!uninstallSucceeded) {
 }
 
 const targetGone = await waitForCondition(() => !existsSync(targetDir), cleanWaitMs);
+// The NSIS uninstaller removes the HKCU uninstall key asynchronously after the
+// uninstaller process exits (observed: the key is still present immediately
+// after the process closes and disappears shortly after). Judging residual
+// state from a single snapshot taken right after exit is a race; wait out the
+// clean window for the key to settle before declaring residuals.
+let residualUninstallKeys = [];
+await waitForCondition(() => {
+  const after = snapshotState();
+  residualUninstallKeys = after.uninstallKeys.filter(
+    (key) => !preInstall.uninstallKeys.includes(key)
+  );
+  return residualUninstallKeys.length === 0;
+}, cleanWaitMs);
 const afterUninstall = snapshotState();
-const residualUninstallKeys = afterUninstall.uninstallKeys.filter(
-  (key) => !preInstall.uninstallKeys.includes(key)
-);
 const residualShortcuts = [
   ...afterUninstall.startMenuShortcuts,
   ...afterUninstall.desktopShortcuts

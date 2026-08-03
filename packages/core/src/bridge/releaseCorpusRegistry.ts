@@ -23,6 +23,12 @@ export const RELEASE_CORPUS_OBSERVED_VARIANTS_BY_FORMAT = {
   BND4: ['BND4_40_24'],
   KRAK: ['DCX_KRAK_6', 'DCX_KRAK_9', 'DCX_KRAK_11000_44_6_0']
 } as const;
+/**
+ * Frozen machine-readable spec authority: packages/core/src/bridge/releaseCorpusRegistry.schema.json.
+ * The constants below must match the schema's `x-constants` block value-for-value;
+ * test:release-corpus-registry enforces that sync gate. Changing an enum here without
+ * bumping the schema (or vice versa) fails closed.
+ */
 export const RELEASE_CORPUS_OPERATIONS = [
   'classify',
   'read',
@@ -58,6 +64,35 @@ export const RELEASE_CORPUS_RESOURCE_KINDS = [
   'obj',
   'other'
 ] as const;
+
+/**
+ * Bridge `read-dcx-document` `data.variant` 输出的冻结闭集，由 observedVariant
+ * 闭集按约定（DFLT/KRAK 去掉 `DCX_` 前缀）推导。native 对账门禁用它判定任何
+ * Bridge 输出的信封变体都必须是已冻结分类，未识别变体即失败关闭。
+ */
+export const RELEASE_CORPUS_BRIDGE_ENVELOPE_VARIANTS: readonly string[] = [
+  ...RELEASE_CORPUS_OBSERVED_VARIANTS_BY_FORMAT.DFLT.map((variant) => variant.slice('DCX_'.length)),
+  ...RELEASE_CORPUS_OBSERVED_VARIANTS_BY_FORMAT.KRAK.map((variant) => variant.slice('DCX_'.length))
+];
+
+/**
+ * registry `observedVariant` → Bridge `data.variant`（DCX 信封变体）。
+ * `BND4` 的 `observedVariant`（`BND4_40_24`）来自内嵌 BND4 header 布局而非 DCX
+ * 信封，没有对应的 envelope variant，返回 null。
+ */
+export function observedVariantToBridgeVariant(
+  format: ReleaseCorpusFormat,
+  observedVariant: ReleaseCorpusObservedVariant
+): string | null {
+  if (format === 'BND4') return null;
+  if (!observedVariant.startsWith('DCX_')) return null;
+  return observedVariant.slice('DCX_'.length);
+}
+
+/** Bridge 信封变体是否属于已冻结闭集（native 对账门禁的判定函数）。 */
+export function isBridgeEnvelopeVariant(bridgeVariant: string): boolean {
+  return RELEASE_CORPUS_BRIDGE_ENVELOPE_VARIANTS.includes(bridgeVariant);
+}
 
 export type ReleaseCorpusGame = (typeof RELEASE_CORPUS_GAMES)[number];
 export type ReleaseCorpusFormat = (typeof RELEASE_CORPUS_FORMATS)[number];
@@ -133,8 +168,7 @@ const REGISTRY_KEYS = new Set([
   'createdAt',
   'entryCount',
   'entries'
-]);
-const ENTRY_KEYS = new Set([
+]);const ENTRY_KEYS = new Set([
   'logicalId',
   'sha256',
   'size',
