@@ -35,6 +35,32 @@ interface Bnd4ChildSnapshot {
   index: number;
 }
 
+// extract-bnd4-child is the file-backed sibling of snapshot-bnd4-child: it writes the
+// child to an outputPath and returns metadata only, so >1MB children (e.g. SpEffectParam)
+// do not blow the daemon frame limit the way a base64 snapshot would.
+interface Bnd4ChildExtracted {
+  contentHash: string;
+  name: string;
+  id: number;
+  index: number;
+  contentSize: number;
+  outputPath: string;
+}
+
+interface CorpusEntry {
+  index: number;
+  name: string;
+  filePath: string;
+  typeName: string;
+  dataVersion?: number;
+  rowCount: number;
+  rowDataSize: number;
+  sourceHash: string;
+  semanticIdentical: boolean;
+  byteIdentical: boolean;
+  firstRow?: { id: number; dataBase64: string; dataHash: string };
+}
+
 function main(): Promise<void> {
   return withSmokeWorkspace('native-param', (workspace) => mainInWorkspace(workspace.root));
 }
@@ -210,7 +236,10 @@ async function mainInWorkspace(root: string): Promise<void> {
     throw new Error(`PARAM container rollback failed: ${JSON.stringify(rolled.diagnostics)}`);
   }
 
-  // Corpus: sample first 20 PARAM children for semantic roundtrip
+  // Corpus: extract every PARAM child to disk via the file-backed extract path, then require a
+  // semantic roundtrip on each. The base64 snapshot path is capped by the daemon frame limit
+  // (1MB), so the largest child (SpEffectParam, ~8.6MB) only passes through extract-bnd4-child;
+  // running the whole corpus through it exercises every ParamType in the real parambnd.
   const container = await runBridge<{ nested?: { entryCount: number } }>({
     command: 'read-dcx-document',
     filePath: sourceBnd,
@@ -218,26 +247,24 @@ async function mainInWorkspace(root: string): Promise<void> {
     timeoutMs: 120_000
   });
   const count = container.data?.nested?.entryCount ?? 0;
-  let verified = 0;
-  let failed: Array<{ index: number; message: string }> = [];
-  const limit = Math.min(count, 40);
-  for (let i = 0; i < limit; i++) {
-    const snap = await runBridge<Bnd4ChildSnapshot>({
-      command: 'snapshot-bnd4-child',
+  const corpus: CorpusEntry[] = [];
+  const failed: Array<{ index: number; message: string }> = [];
+  for (let i = 0; i < count; i++) {
+    const tmp = join(staging, `corpus-${i}.param`);
+    const extracted = await runBridge<Bnd4ChildExtracted>({
+      command: 'extract-bnd4-child',
       filePath: sourceBnd,
       allowedRoots: [dirname(sourceBnd)],
       timeoutMs: 120_000,
-      commandOptions: { entryIndex: i }
+      commandOptions: { entryIndex: i, outputPath: tmp }
     });
-    if (!snap.data?.contentBase64) {
+    if (!extracted.data?.contentHash) {
       failed.push({
         index: i,
-        message: snap.diagnostics[0]?.message ?? 'snapshot failed'
+        message: extracted.diagnostics[0]?.message ?? 'extract failed'
       });
       continue;
     }
-    const tmp = join(staging, `corpus-${i}.param`);
-    await writeFile(tmp, Buffer.from(snap.data.contentBase64, 'base64'));
     const doc = await runBridge<ParamEnvelope>({
       command: 'read-param-document',
       filePath: tmp,
@@ -252,9 +279,21 @@ async function mainInWorkspace(root: string): Promise<void> {
       });
       continue;
     }
-    verified += 1;
+    corpus.push({
+      index: i,
+      name: (extracted.data.name || '').split(/[\\/]+/).pop() ?? `corpus-${i}.param`,
+      filePath: tmp,
+      typeName: doc.data.typeName,
+      ...(doc.data.dataVersion === undefined ? {} : { dataVersion: doc.data.dataVersion }),
+      rowCount: doc.data.rowCount,
+      rowDataSize: doc.data.rowDataSize,
+      sourceHash: doc.data.sourceHash,
+      semanticIdentical: doc.data.roundTrip.semanticIdentical,
+      byteIdentical: doc.data.roundTrip.byteIdentical,
+      ...(doc.data.rows[0] === undefined ? {} : { firstRow: doc.data.rows[0] })
+    });
   }
-
+  const verified = corpus.length;
   if (verified === 0) {
     throw new Error(`No PARAM children verified: ${JSON.stringify(failed.slice(0, 5))}`);
   }
@@ -390,6 +429,105 @@ async function mainInWorkspace(root: string): Promise<void> {
     });
   }
 
+  // Write-path breadth: drive the same field-level staged-upsert contract (TS field codec set →
+  // Bridge write-param upsert → Bridge independent re-read byte match → source immutable) on a
+  // diverse spread of modern ParamType layouts, reusing the extracted corpus files. Together with
+  // ActionGuideParam (index 1) above and the three legacy layouts this proves the writer is open
+  // beyond a single canonical layout, not just the one exercised at the top of this smoke.
+  const writeExtension: Array<Record<string, unknown>> = [];
+  const modern = corpus
+    .filter((c) => c.index !== 1 && !legacyNames.has(c.name) && c.rowCount > 0 && c.firstRow);
+  const bySize = [...modern].sort((a, b) => a.rowDataSize - b.rowDataSize);
+  const candidates = new Map<string, CorpusEntry>();
+  const takeCandidate = (label: string, position: number): void => {
+    const c = bySize[position];
+    if (c && !candidates.has(label)) candidates.set(label, c);
+  };
+  takeCandidate('smallest', 0);
+  takeCandidate('median', Math.floor(bySize.length / 2));
+  takeCandidate('largest', bySize.length - 1);
+  for (const [label, entry] of candidates) {
+    if (!entry.firstRow) continue;
+    const sourceBytes = await readFile(entry.filePath);
+    // read-param-document only includes row payloads for narrow/short params (payload preview
+    // gating), so derive the first row's data straight from the file like the legacy loop above:
+    // in the compact layout row 0's data offset lives in the first row header at 0x40 + 8.
+    const firstDataOffset = sourceBytes.readInt32LE(0x40 + 8);
+    if (firstDataOffset + entry.rowDataSize > sourceBytes.length) {
+      throw new Error(`write-ext ${entry.name} firstDataOffset/rowDataSize out of range`);
+    }
+    const original = Buffer.from(sourceBytes.subarray(firstDataOffset, firstDataOffset + entry.rowDataSize));
+    const flipped = original[0] === 0x5a ? 0xa5 : 0x5a;
+    const def: ParamDefDocument = {
+      schemaVersion: 1,
+      typeName: entry.typeName,
+      version: entry.dataVersion ?? 0,
+      rowDataSize: entry.rowDataSize,
+      origin: 'fixture',
+      fields: [
+        { id: 'f_first_byte', name: 'firstByte', type: 'u8', offset: 0, size: 1 }
+      ]
+    };
+    const set = applyParamFieldMutation({
+      rowDataBase64: original.toString('base64'),
+      definition: def,
+      fieldId: 'f_first_byte',
+      value: flipped
+    });
+    if (!set.ok) throw new Error(`write-ext ${entry.name} field set failed: ${set.message}`);
+    const mutated = Buffer.from(set.nextDataBase64, 'base64');
+    const stagedOut = join(staging, `write-ext-${entry.index}.param`);
+    const written = await runBridge({
+      command: 'write-param',
+      filePath: entry.filePath,
+      allowedRoots: [staging],
+      writableRoots: [staging],
+      timeoutMs: 60_000,
+      commandOptions: {
+        outputPath: stagedOut,
+        expectedDocumentHash: entry.sourceHash,
+        mutation: 'upsert',
+        id: entry.firstRow.id,
+        dataBase64: mutated.toString('base64')
+      }
+    });
+    if (!written.diagnostics.some((d) => d.code === 'PARAM_STAGING_WRITE_VERIFIED')) {
+      throw new Error(`write-ext ${entry.name} staged upsert failed: ${JSON.stringify(written.diagnostics)}`);
+    }
+    // Independent byte check straight off the staged file: find the upserted row by id in the
+    // compact row-header table (0x40 + i*0x18, data offset at +8) and assert its first byte.
+    // The envelope read would be gated for wide rows, and row order is not guaranteed by the
+    // writer, so scan the raw layout instead of trusting position.
+    const stagedBytes = await readFile(stagedOut);
+    let stagedFirstByte: number | undefined;
+    for (let ri = 0; ri < entry.rowCount; ri++) {
+      const rowHeader = 0x40 + ri * 0x18;
+      if (rowHeader + 0x18 > stagedBytes.length) break;
+      if (stagedBytes.readInt32LE(rowHeader) !== entry.firstRow.id) continue;
+      const rowDataOff = stagedBytes.readInt32LE(rowHeader + 8);
+      if (rowDataOff < 0 || rowDataOff >= stagedBytes.length) break;
+      stagedFirstByte = stagedBytes[rowDataOff];
+      break;
+    }
+    if (stagedFirstByte === undefined || stagedFirstByte !== flipped) {
+      throw new Error(`write-ext ${entry.name} Bridge staged first byte mismatch`);
+    }
+    if (!(await readFile(entry.filePath)).equals(sourceBytes)) {
+      throw new Error(`write-ext ${entry.name} source mutated by staged write`);
+    }
+    writeExtension.push({
+      label,
+      index: entry.index,
+      name: entry.name,
+      typeName: entry.typeName,
+      rowCount: entry.rowCount,
+      rowDataSize: entry.rowDataSize,
+      stagedUpsertVerified: true,
+      bridgeStagedByteMatch: true,
+      sourceImmutable: true
+    });
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: '原生 PARAM 读取/语义往返/写入/BND4 提交/回滚验证通过',
@@ -398,12 +536,14 @@ async function mainInWorkspace(root: string): Promise<void> {
     rowDataSize: read.data.rowDataSize,
     byteIdenticalNoop: read.data.roundTrip?.byteIdentical ?? false,
     semanticIdenticalNoop: true,
-    corpusSampled: limit,
+    corpusTotal: count,
     corpusVerified: verified,
+    corpusByteIdentical: corpus.filter((c) => c.byteIdentical).length,
     corpusFailed: failed.length,
     failures: failed.slice(0, 5),
     containerEntries: count,
     legacyLayouts,
+    writeExtension,
     fieldLevelSet: {
       fieldId: 'f_first_byte',
       value: FIELD_SET_VALUE,
