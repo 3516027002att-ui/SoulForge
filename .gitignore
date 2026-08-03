@@ -21,7 +21,8 @@ CLAUDE.md
 graphify-out/
 mcps/
 .playwright-cli/
-output/playwright/
+.workbuddy/
+output/
 
 # One-off local generation scratch files.
 scripts/_tmp_*
