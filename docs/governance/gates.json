@@ -120,7 +120,9 @@
       "sliceRefs": [
         "W-A-RECOVERY-INTEGRATION-04"
       ],
-      "evidenceRefs": [],
+      "evidenceRefs": [
+        "EV-A-RECOVERY-INTEGRATION-04-20260803"
+      ],
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-A-WORKSPACE",
@@ -140,7 +142,9 @@
       "sliceRefs": [
         "W-REL-B-CORPUS-02"
       ],
-      "evidenceRefs": [],
+      "evidenceRefs": [
+        "EV-REL-B-CORPUS-02-20260803"
+      ],
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-DFLT",
@@ -161,7 +165,9 @@
       "sliceRefs": [
         "W-EMEVD-FMG-PARAM-03"
       ],
-      "evidenceRefs": [],
+      "evidenceRefs": [
+        "EV-EMEVD-FMG-PARAM-03-20260803"
+      ],
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-FMG",
@@ -184,7 +190,8 @@
         "W-SCRIPT-READONLY-01"
       ],
       "evidenceRefs": [
-        "EV-BEHAVIOR-MAP-01-20260803"
+        "EV-BEHAVIOR-MAP-01-20260803",
+        "EV-SCRIPT-READONLY-01-20260803"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -262,7 +269,9 @@
       "sliceRefs": [
         "W-REL-F-ACCEPT-02"
       ],
-      "evidenceRefs": [],
+      "evidenceRefs": [
+        "EV-REL-F-ACCEPT-02-20260803"
+      ],
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-EDITORS"
@@ -281,7 +290,9 @@
       "sliceRefs": [
         "W-AI-CONFORMANCE-03"
       ],
-      "evidenceRefs": [],
+      "evidenceRefs": [
+        "EV-AI-CONFORMANCE-03-20260803"
+      ],
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-AI"
@@ -300,7 +311,9 @@
       "sliceRefs": [
         "W-ME3-INSTALL-04"
       ],
-      "evidenceRefs": [],
+      "evidenceRefs": [
+        "EV-ME3-INSTALL-04-20260803"
+      ],
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-SEKIRO-BUILD",
@@ -370,7 +383,9 @@
       "sliceRefs": [
         "W-REL-COMPLIANCE-02"
       ],
-      "evidenceRefs": [],
+      "evidenceRefs": [
+        "EV-REL-COMPLIANCE-02-20260803"
+      ],
       "blockerRefs": [],
       "scopeItemIds": [
         "SCOPE-COMPLIANCE"
