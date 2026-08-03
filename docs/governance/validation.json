@@ -9,14 +9,19 @@
   ],
   "unfrozen": [
     {
-      "sliceId": "W-ME3-INSTALL-04",
+      "sliceId": "W-REL-C-MULTILANG-01",
       "targetRelease": "V0.5",
-      "reason": "NSIS installer lifecycle、真实 Sekiro launch/terminate 与 rollback-restart smoke"
+      "reason": "FMG 多语言写验证（本机 corpus 仅 zhocn，需注册第二语言样本）"
     },
     {
-      "sliceId": "W-REL-F-ACCEPT-02",
+      "sliceId": "W-REL-D-GAMELOAD-01",
       "targetRelease": "V0.5",
-      "reason": "Electron 真实文档功能验收（opt-in）与各编辑器结构化 UI/DSL 收尾"
+      "reason": "真实 Sekiro 游戏内加载确认（SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED opt-in）"
+    },
+    {
+      "sliceId": "W-REL-H-CROSSMACHINE-01",
+      "targetRelease": "V0.5",
+      "reason": "跨机/干净机 NSIS 安装/升级/卸载复现"
     }
   ],
   "frozen": [

@@ -711,7 +711,7 @@
     {
       "sliceId": "W-REL-F-ACCEPT-02",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "candidate",
       "authorityCap": "candidate",
       "authorityCapNote": "cap=candidate；Electron 真实文档功能验收完成前不提升 REL-F",
@@ -774,7 +774,7 @@
     {
       "sliceId": "W-A-RECOVERY-INTEGRATION-04",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；仅提升实际验证的恢复路径",
@@ -796,7 +796,7 @@
     {
       "sliceId": "W-REL-B-CORPUS-02",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "native-verified",
       "authorityCapNote": "cap=native-verified；只覆盖实际执行的 corpus 操作",
@@ -839,7 +839,7 @@
     {
       "sliceId": "W-AI-CONFORMANCE-03",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；离线 conformance 不证明第三方服务可用性",
@@ -881,7 +881,7 @@
     {
       "sliceId": "W-REL-COMPLIANCE-02",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；不声明外部分发或签名发布通过",
@@ -898,6 +898,66 @@
       ],
       "requiredValidation": "npm run test:release-compliance-fixtures、npm run test:release-content",
       "declaresUnfrozenValidation": false
+    },
+    {
+      "sliceId": "W-REL-C-MULTILANG-01",
+      "targetRelease": "V0.5",
+      "lifecycle": "ready",
+      "authority": "partial",
+      "authorityCap": "partial",
+      "authorityCapNote": "cap=partial；只覆盖实际注册的多语言布局",
+      "capabilityIds": [
+        "C-FMG"
+      ],
+      "blockerRefs": [],
+      "goal": "补 FMG 多语言与多 msgbnd 写验证（本机 corpus 仅 zhocn，需注册第二语言样本）",
+      "hardPrerequisites": "本机 corpus 语言覆盖受限（mods/msg 仅 zhocn）；注册多语言 fixture 样本不触原版只读目录",
+      "entryPoints": [
+        "bridge/SoulForge.Bridge/FmgNativeWriter.cs",
+        "packages/core/src/testing/runNativeFmgSmoke.ts"
+      ],
+      "requiredValidation": "npm run bridge:verify:fmg；validation-unfrozen：FMG 多语言写验证",
+      "declaresUnfrozenValidation": true
+    },
+    {
+      "sliceId": "W-REL-D-GAMELOAD-01",
+      "targetRelease": "V0.5",
+      "lifecycle": "ready",
+      "authority": "candidate",
+      "authorityCap": "candidate",
+      "authorityCapNote": "cap=candidate；真实游戏内加载确认前 authority 保持 candidate",
+      "capabilityIds": [
+        "D-BEHAVIOR"
+      ],
+      "blockerRefs": [],
+      "goal": "真实 Sekiro 游戏内加载确认：替换后 script 容器放入真实 mods/script 后游戏能读到脚本阶段不崩溃",
+      "hardPrerequisites": "W-SCRIPT-READONLY-01 完成（preflight 已过）；需用户游戏内确认（SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED）",
+      "entryPoints": [
+        "packages/core/src/testing/runScriptContainerGameLoadSmoke.ts",
+        "packages/core/src/script/scriptContainerEvidence.ts"
+      ],
+      "requiredValidation": "node scripts/with-local-has-game-env.mjs npm run test:script-container-game-load；validation-unfrozen：真实游戏内加载确认",
+      "declaresUnfrozenValidation": true
+    },
+    {
+      "sliceId": "W-REL-H-CROSSMACHINE-01",
+      "targetRelease": "V0.5",
+      "lifecycle": "ready",
+      "authority": "partial",
+      "authorityCap": "partial",
+      "authorityCapNote": "cap=partial；只覆盖实际执行的跨机/干净机复现",
+      "capabilityIds": [
+        "H-RUNTIME"
+      ],
+      "blockerRefs": [],
+      "goal": "跨机/干净机 NSIS 安装、升级、卸载复现与真实 me3 会话跨机验证",
+      "hardPrerequisites": "本机 NSIS 安装/升级/卸载已过；需第二台 Windows x64 机器或干净机环境",
+      "entryPoints": [
+        "scripts/verify-installer-lifecycle.mjs",
+        "scripts/verify-me3-sekiro-session.mjs"
+      ],
+      "requiredValidation": "SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 node scripts/verify-installer-lifecycle.mjs；跨机 me3 会话 smoke",
+      "declaresUnfrozenValidation": true
     }
   ],
   "activeClaims": [
@@ -910,30 +970,6 @@
       "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
     },
     {
-      "sliceId": "W-REL-F-ACCEPT-02",
-      "claimId": "claim-w-rel-f-accept-02-20260803",
-      "owner": "main-agent",
-      "claimedAt": "2026-08-03T01:43:15.627Z",
-      "heartbeatAt": "2026-08-03T01:43:15.627Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
-      "sliceId": "W-A-RECOVERY-INTEGRATION-04",
-      "claimId": "claim-w-a-recovery-integration-04-20260803",
-      "owner": "main-agent",
-      "claimedAt": "2026-08-03T01:43:16.111Z",
-      "heartbeatAt": "2026-08-03T01:43:16.111Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
-      "sliceId": "W-REL-B-CORPUS-02",
-      "claimId": "claim-w-rel-b-corpus-02-20260803",
-      "owner": "main-agent",
-      "claimedAt": "2026-08-03T01:43:16.618Z",
-      "heartbeatAt": "2026-08-03T01:43:16.618Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
       "sliceId": "W-EMEVD-FMG-PARAM-03",
       "claimId": "claim-w-emevd-fmg-param-03-20260803",
       "owner": "main-agent",
@@ -942,27 +978,11 @@
       "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
     },
     {
-      "sliceId": "W-AI-CONFORMANCE-03",
-      "claimId": "claim-w-ai-conformance-03-20260803",
-      "owner": "main-agent",
-      "claimedAt": "2026-08-03T01:43:17.605Z",
-      "heartbeatAt": "2026-08-03T01:43:17.605Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
       "sliceId": "W-ME3-INSTALL-04",
       "claimId": "claim-w-me3-install-04-20260803",
       "owner": "main-agent",
       "claimedAt": "2026-08-03T01:43:18.062Z",
       "heartbeatAt": "2026-08-03T01:43:18.062Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    },
-    {
-      "sliceId": "W-REL-COMPLIANCE-02",
-      "claimId": "claim-w-rel-compliance-02-20260803",
-      "owner": "main-agent",
-      "claimedAt": "2026-08-03T01:43:18.545Z",
-      "heartbeatAt": "2026-08-03T01:43:18.545Z",
       "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
     }
   ],
