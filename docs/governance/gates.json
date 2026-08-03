@@ -164,7 +164,6 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-EMEVD-FMG-PARAM-03",
         "W-REL-C-MULTILANG-01"
       ],
       "evidenceRefs": [
@@ -189,7 +188,6 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-SCRIPT-READONLY-01",
         "W-REL-D-GAMELOAD-01"
       ],
       "evidenceRefs": [
@@ -314,7 +312,6 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-ME3-INSTALL-04",
         "W-REL-H-CROSSMACHINE-01"
       ],
       "evidenceRefs": [
