@@ -3,7 +3,7 @@ name: windows-ci
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, agent/frontend-renovation]
   pull_request:
     branches: [main, master]
   workflow_dispatch:
@@ -162,6 +162,22 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Renderer end-to-end: real Electron + production preload + built renderer,
+      # synthetic fixtures only (no private game assets). Covers the
+      # candidate → approve → staged → validate → write state machine.
+      - name: Renderer e2e (Playwright + Electron fixture)
+        run: npm run test:renderer-playwright -w @soulforge/desktop
+
+      - name: Upload renderer e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer-e2e-report
+          path: |
+            apps/desktop/e2e/playwright/playwright-report/
+            apps/desktop/e2e/playwright/test-results/
+          if-no-files-found: ignore
 
       # Public CI previously produced no NSIS artifact, so test:release-content
       # failed structurally with INSTALLER_MISSING. Building the unsigned NSIS
