@@ -41,6 +41,7 @@ apps/*/src/**/*.js.map
 apps/*/src/**/*.d.ts
 apps/*/src/**/*.d.ts.map
 !apps/desktop/src/renderer/src/global.d.ts
+!apps/desktop/src/renderer/app.js
 
 # Electron/app artifacts
 release/
