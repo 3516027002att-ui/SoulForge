@@ -1033,7 +1033,7 @@ export function App(): ReactElement {
       <header className="top-bar">
         <section>
           <h1>SoulForge</h1>
-          <p>魂游 Mod 专业工作台 · V0.5 安全底座 | Mod 覆盖层可写 · 原版游戏目录只读 · 补丁引擎唯一写入</p>
+          <p>Mod 覆盖层可写 · 原版游戏目录只读 · 写入仅经补丁引擎</p>
         </section>
         <div className="top-bar-actions">
           <button type="button" className="secondary-action" onClick={() => void chooseBaseDirectory()}>
