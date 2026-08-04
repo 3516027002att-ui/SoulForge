@@ -302,7 +302,8 @@
       "evidenceRefs": [
         "EV-AI-CONFORMANCE-03-20260803",
         "EV-AI-CODEX-KERNEL-20260804",
-        "EV-AI-CODEX-PRODUCTION-20260804"
+        "EV-AI-CODEX-PRODUCTION-20260804",
+        "EV-AI-CODEX-SUBJECT-SET-20260804"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
