@@ -159,32 +159,40 @@ internal sealed class TpfNativeDocument
         return SourceBytes.AsSpan((int)entry.DataOffset, (int)entry.DataSize).ToArray();
     }
 
-    public object ToEnvelope(TpfRoundTripReport? report = null) => new
+    public object ToEnvelope(TpfRoundTripReport? report = null)
     {
-        format = "TPF",
-        sourceSize = SourceBytes.Length,
-        sourceHash = SourceHash,
-        textureCount = Textures.Count,
-        dataLength = DataLength,
-        platform = Platform,
-        encoding = EncodingByte,
-        flags = Flags,
-        textures = Textures.Select(t => new
+        // 全部纹理均含合法 DDS 头（解析时已校验 DDS 魔数；此处要求宽高>0）→ native-verified，否则 partial。
+        var authority = Textures.Count > 0 && Textures.All(t =>
+            t.DataSize >= DdsHeaderMinSize && t.Width > 0 && t.Height > 0)
+            ? "native-verified"
+            : "partial";
+        return new
         {
-            index = t.Index,
-            name = t.Name,
-            format = FormatName(t.Format),
-            formatByte = t.Format,
-            mipCount = t.MipCount,
-            dataOffset = t.DataOffset,
-            dataSize = t.DataSize,
-            width = t.Width,
-            height = t.Height,
-            ddsFourCC = t.DdsFourCC
-        }).ToArray(),
-        roundTrip = report ?? VerifyRoundTrip(),
-        authority = "candidate"
-    };
+            format = "TPF",
+            sourceSize = SourceBytes.Length,
+            sourceHash = SourceHash,
+            textureCount = Textures.Count,
+            dataLength = DataLength,
+            platform = Platform,
+            encoding = EncodingByte,
+            flags = Flags,
+            textures = Textures.Select(t => new
+            {
+                index = t.Index,
+                name = t.Name,
+                format = FormatName(t.Format),
+                formatByte = t.Format,
+                mipCount = t.MipCount,
+                dataOffset = t.DataOffset,
+                dataSize = t.DataSize,
+                width = t.Width,
+                height = t.Height,
+                ddsFourCC = t.DdsFourCC
+            }).ToArray(),
+            roundTrip = report ?? VerifyRoundTrip(),
+            authority
+        };
+    }
 
     private byte[] Rebuild()
     {

@@ -182,7 +182,7 @@ async function main(): Promise<void> {
     textureSlotCount: slotCount,
     textureSlotsTyped: typedSlots,
     dummyCount,
-    authority: 'candidate',
+    authority: (doc.data.authority as string) ?? 'candidate',
     roundTrip: doc.diagnostics?.map((d: { code: string }) => d.code)
   }, null, 2));
 

@@ -16,6 +16,7 @@ const CHUNK_JSON = 0x4e4f534a; // 'JSON'
 const CHUNK_BIN = 0x004e4942; // 'BIN\0'
 const COMPONENT_FLOAT = 5126;
 const COMPONENT_UINT16 = 5123;
+const COMPONENT_UINT32 = 5125;
 const TARGET_ARRAY_BUFFER = 34962;
 const TARGET_ELEMENT_ARRAY_BUFFER = 34963;
 
@@ -23,7 +24,8 @@ interface MeshArrays {
   positions: Float32Array;
   normals: Float32Array | null;
   uvs: Float32Array | null;
-  indices: Uint16Array | null;
+  indices: Uint16Array | Uint32Array | null;
+  indicesType: 'u16' | 'u32';
   vertexCount: number;
 }
 
@@ -95,7 +97,7 @@ export async function exportFlverToGlb(
       command: 'read-flver-mesh',
       filePath: sourceUri,
       allowedRoots,
-      commandOptions: { meshIndex: i },
+      commandOptions: { meshIndex: i, maxVertices: 1_000_000, maxIndices: 3_000_000 },
       timeoutMs
     });
     const data = mesh.data as Record<string, unknown> | undefined;
@@ -114,12 +116,20 @@ export async function exportFlverToGlb(
     const uvs = uvsBytes.byteLength >= vertexCount * 8
       ? new Float32Array(uvsBytes.buffer, uvsBytes.byteOffset, vertexCount * 2)
       : null;
+    const indexFormat = (data.indexFormat as number | undefined) ?? 16;
     const indicesBytes = decodeBase64(data.indicesBase64 as string | undefined);
-    const indices = indicesBytes.byteLength >= 2
-      ? new Uint16Array(indicesBytes.buffer, indicesBytes.byteOffset, indicesBytes.byteLength / 2)
-      : null;
+    let indices: Uint16Array | Uint32Array | null = null;
+    let indicesType: 'u16' | 'u32' = 'u16';
+    if (indicesBytes.byteLength >= 2 && (indexFormat === 16 || indexFormat === 32)) {
+      if (indexFormat === 32) {
+        indices = new Uint32Array(indicesBytes.buffer, indicesBytes.byteOffset, indicesBytes.byteLength / 4);
+        indicesType = 'u32';
+      } else {
+        indices = new Uint16Array(indicesBytes.buffer, indicesBytes.byteOffset, indicesBytes.byteLength / 2);
+      }
+    }
 
-    meshes.push({ positions, normals, uvs, indices, vertexCount });
+    meshes.push({ positions, normals, uvs, indices, indicesType, vertexCount });
   }
 
   if (meshes.length === 0) throw new Error('未能提取任何网格几何。');
@@ -192,7 +202,12 @@ export function buildGlb(meshes: MeshArrays[]): Uint8Array {
     if (mesh.indices && mesh.indices.length > 0) {
       const indexView = addBufferView(new Uint8Array(mesh.indices.buffer, mesh.indices.byteOffset, mesh.indices.byteLength), TARGET_ELEMENT_ARRAY_BUFFER);
       primitive.indices = json.accessors.length;
-      json.accessors.push({ bufferView: indexView, componentType: COMPONENT_UINT16, count: mesh.indices.length, type: 'SCALAR' });
+      json.accessors.push({
+        bufferView: indexView,
+        componentType: mesh.indicesType === 'u32' ? COMPONENT_UINT32 : COMPONENT_UINT16,
+        count: mesh.indices.length,
+        type: 'SCALAR'
+      });
     }
 
     json.meshes.push({ primitives: [primitive] });
