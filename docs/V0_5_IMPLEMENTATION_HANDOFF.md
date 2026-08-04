@@ -3873,35 +3873,31 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 
 `npm run test:v06-deferral-index` 校验本节与上述权威记录逐项一致：条目缺失、多写、目标版本不符或权威侧状态变化后未同步，都会失败关闭。因此本节不能成为独立漂移的第二口径。
 
-延期到 V0.6 的 12 个范围条目（全部 `operations=[]`，`authorityAtRuling` 为裁定当时的真实上限，不是承诺）：
+延期到 V0.6 的 8 个范围条目（全部 `operations=[]`，`authorityAtRuling` 为裁定当时的真实上限，不是承诺）：
 
 | 范围条目 | 目标版本 | 裁定时 authority | 归属线 |
 |---|---|---|---|
-| `SCOPE-MSB` | V0.6 | `partial` | C-MSB |
 | `SCOPE-BEHAVIOR-ANIMATION` | V0.6 | `unverified` | D-BEHAVIOR |
 | `SCOPE-BEHAVIOR-TAE` | V0.6 | `candidate` | D-BEHAVIOR |
 | `SCOPE-BEHAVIOR-ESD` | V0.6 | `candidate` | D-BEHAVIOR |
 | `SCOPE-ASSETS` | V0.6 | `candidate` | E-ASSET |
-| `SCOPE-ASSET-FLVER` | V0.6 | `candidate` | E-ASSET |
-| `SCOPE-ASSET-TPF` | V0.6 | `unverified` | E-ASSET |
 | `SCOPE-ASSET-MTD` | V0.6 | `unverified` | E-ASSET |
 | `SCOPE-ASSET-COLLISION` | V0.6 | `unverified` | E-ASSET |
 | `SCOPE-ASSET-NAVIGATION` | V0.6 | `unverified` | E-ASSET |
 | `SCOPE-ASSET-OPEN-CONVERSION` | V0.6 | `candidate` | E-ASSET |
-| `SCOPE-RENDERING` | V0.6 | `partial` | I-RENDER |
 
-延期 Gate：`REL-E`（资产只读与导出矩阵）、`REL-I`（渲染功能闭环）。两者均为 `gateState=deferred` + `applicability=deferred-v0.6`，本版不判定，也不阻止 V0.5 完成。`REL-C` 与 `REL-D` 保持 `open`：它们各自仍有留在 V0.5 的支持条目（EMEVD/FMG/PARAM 与 `SCOPE-BEHAVIOR-SCRIPT`），因此不整体延期。
+延期 Gate：无。V0.6 承接后 `REL-E`（资产只读与导出矩阵）与 `REL-I`（渲染功能闭环）已由 `deferred-v0.6` 恢复为 `passed`/`in-scope`，不再属于延期索引。`REL-C`、`REL-D` 与 `REL-H` 保持 `open`：它们各自仍有留在 V0.5 的支持条目（EMEVD/FMG/PARAM、`SCOPE-BEHAVIOR-SCRIPT` 与跨机复现），因此不整体延期。
 
-延期切片：`W-MSB-SCENE-01`、`W-FLVER-READ-01`、`W-RENDER-FUNCTIONAL-02`（均 `lifecycle=deferred`）。
+延期切片：无。V0.6 承接后 `W-MSB-SCENE-01`、`W-FLVER-READ-01`、`W-RENDER-FUNCTIONAL-02` 已全部完成（lifecycle=completed），不再属于延期索引。
 
 延期只读预览编辑器：`msb`、`tae`、`esd`、`flver`。四者已实现的读取与投影保留并在 UI 标记为 V0.6 预览，`countedAsReleaseEditor=false`，写入在 `editorCapabilityContract.releaseWriteEnabled`、`@soulforge/shared` 的 `DEFERRED_PREVIEW_EDITOR_KINDS` 与主进程 `EDITOR_DEFERRED_TO_V06_READONLY` 三层失败关闭。
 
-V0.6 恢复任一条目时的强制顺序：
+V0.6 恢复任一条目时的强制顺序（已应用于本轮承接的 `SCOPE-MSB`/`SCOPE-ASSET-FLVER`/`SCOPE-ASSET-TPF`/`SCOPE-RENDERING`，其余 8 个延期条目后续恢复时同样适用）：
 
 1. 取得用户裁定，把范围条目从 `deferred` 改回 `supported` 并写回真实 `operations`；
 2. 同步 §18.3 Gate 与 §13.1 切片脱离 `deferred`，其 `required validation` 重新进入 §13.4 未冻结清单；
 3. 需要写能力时，先补齐对应 parser / writer / validator / 恢复与 authority 门槛，再翻开 `releaseWriteEnabled`；
-4. 重新封存 Evidence。**已延期期间保留的"曾经验证过"记录（如 MSB `msb_set_part_transform`）不能直接当作恢复后的验证证据，必须重跑。**
+4. 重新封存 Evidence。**已延期期间保留的"曾经验证过"记录不能直接当作恢复后的验证证据，必须重跑。**本轮承接在封存前已对 MSB/FLVER/TPF/渲染全部 12 组 native smoke 与功能 smoke 重跑并逐项核对。
 
 延期不清偿技术缺口，不降低 native authority、验证、回滚或生态集成标准。
 
