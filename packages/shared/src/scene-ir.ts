@@ -150,7 +150,12 @@ export function buildMsbSceneManifest(input: SceneResourceMetadata & {
   chunkSize?: number;
 }): SceneManifest {
   const metadata = validateMetadata(input);
-  const maxNodes = positiveInteger(input.maxNodes ?? 50_000, 'SCENE_MAX_NODES_INVALID');
+  // 三层截断移除后不再有默认硬上限：不传 maxNodes 即投影全部可绘制节点；
+  // 调用方显式传入 maxNodes 时作为有界窗口（scaleAccess=bounded-window 语义），
+  // 并给出 SCENE_NODE_TRUNCATED 结构化诊断。
+  const maxNodes = input.maxNodes === undefined
+    ? undefined
+    : positiveInteger(input.maxNodes, 'SCENE_MAX_NODES_INVALID');
   const chunkSize = positiveInteger(input.chunkSize ?? 512, 'SCENE_CHUNK_SIZE_INVALID');
   const diagnostics: SceneProjectionDiagnostic[] = [];
   const models = input.models ?? [];
@@ -219,12 +224,12 @@ export function buildMsbSceneManifest(input: SceneResourceMetadata & {
   }
   for (const event of events) entities.push(createEntity('msb-event', event));
 
-  const nodes = drawable.slice(0, maxNodes);
-  if (drawable.length > maxNodes) {
+  const nodes = maxNodes === undefined ? drawable : drawable.slice(0, maxNodes);
+  if (maxNodes !== undefined && drawable.length > maxNodes) {
     diagnostics.push({
       severity: 'warning',
       code: 'SCENE_NODE_TRUNCATED',
-      message: `可绘制节点超过 ${maxNodes}，render projection 已截断。`
+      message: `调用方显式请求有界窗口 ${maxNodes}，render projection 已截断（非默认行为）。`
     });
   }
   if (Object.keys(sourceCounts).some((key) => {
@@ -280,18 +285,22 @@ export function buildSceneDrawList(
 ): SceneDrawList {
   const chunked = options?.chunkIndex !== undefined;
   const chunkIndex = nonNegativeInteger(options?.chunkIndex ?? 0, 'SCENE_CHUNK_INDEX_INVALID');
-  const maxItems = positiveInteger(options?.maxItems ?? 10_000, 'SCENE_MAX_ITEMS_INVALID');
+  // 无默认硬上限：不传 maxItems 即输出全部可用项；显式传入时为有界窗口，
+  // 并给出 SCENE_RENDER_PACKET_TRUNCATED 结构化诊断。
+  const maxItems = options?.maxItems === undefined
+    ? undefined
+    : positiveInteger(options.maxItems, 'SCENE_MAX_ITEMS_INVALID');
   const chunkCount = chunked
     ? Math.ceil(manifest.nodeCount / manifest.chunkSize)
     : (manifest.nodeCount === 0 ? 0 : 1);
   const available = chunked ? chunkSceneNodes(manifest, chunkIndex) : manifest.nodes;
-  const selected = available.slice(0, maxItems);
+  const selected = maxItems === undefined ? available : available.slice(0, maxItems);
   const diagnostics = [...manifest.diagnostics];
-  if (available.length > maxItems) {
+  if (maxItems !== undefined && available.length > maxItems) {
     diagnostics.push({
       severity: 'warning',
       code: 'SCENE_RENDER_PACKET_TRUNCATED',
-      message: `render packet 超过 ${maxItems} 项，已截断。`
+      message: `调用方显式请求有界窗口 ${maxItems} 项，render packet 已截断（非默认行为）。`
     });
   }
   const items: SceneDrawItem[] = selected.map((node) => ({

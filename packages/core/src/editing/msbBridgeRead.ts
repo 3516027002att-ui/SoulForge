@@ -1,5 +1,9 @@
 /**
  * MSB Bridge read helper for desktop scene / workbench (renderer-safe DTOs only).
+ *
+ * 三层截断移除后，默认返回 Bridge 完整实体表（models/parts/regions/events/routes）。
+ * maxParts/maxRegions/maxModels/maxEvents 仅在调用方显式传入时作为有界窗口
+ * （scaleAccess=bounded-window），默认不截断。
  */
 
 import { runBridge } from '../bridge/runBridge.js';
@@ -7,6 +11,8 @@ import { runBridge } from '../bridge/runBridge.js';
 export interface MsbBridgePart {
   name: string;
   nativeOffset?: number;
+  typeId: number;
+  modelIndex?: number;
   posX: number;
   posY: number;
   posZ: number;
@@ -35,6 +41,14 @@ export interface MsbBridgeEvent {
   name: string;
   nativeOffset?: number;
   typeId: number;
+  eventId?: number;
+}
+
+export interface MsbBridgeRoute {
+  name: string;
+  nativeOffset?: number;
+  typeId: number;
+  id?: number;
 }
 
 export interface MsbBridgeDocument {
@@ -44,10 +58,12 @@ export interface MsbBridgeDocument {
   partCount: number;
   regionCount: number;
   eventCount: number;
+  routeCount: number;
   models: MsbBridgeModel[];
   parts: MsbBridgePart[];
   regions: MsbBridgeRegion[];
   events: MsbBridgeEvent[];
+  routes: MsbBridgeRoute[];
   authority?: string;
   entityEdit?: string;
 }
@@ -72,10 +88,12 @@ export async function readMsbDocumentViaBridge(input: {
     partCount?: number;
     regionCount?: number;
     eventCount?: number;
+    routeCount?: number;
     models?: Array<Record<string, unknown>>;
     parts?: Array<Record<string, unknown>>;
     regions?: Array<Record<string, unknown>>;
     events?: Array<Record<string, unknown>>;
+    routes?: Array<Record<string, unknown>>;
     authority?: string;
     entityEdit?: string;
   }>({
@@ -94,10 +112,12 @@ export async function readMsbDocumentViaBridge(input: {
       }))
     };
   }
-  const maxParts = input.maxParts ?? 256;
-  const maxRegions = input.maxRegions ?? 128;
-  const maxModels = input.maxModels ?? 128;
-  const maxEvents = input.maxEvents ?? 128;
+  const bounded = (count: number | undefined, defaultValue: number): number | undefined =>
+    count === undefined ? defaultValue : count;
+  const maxParts = bounded(input.maxParts, Number.MAX_SAFE_INTEGER);
+  const maxRegions = bounded(input.maxRegions, Number.MAX_SAFE_INTEGER);
+  const maxModels = bounded(input.maxModels, Number.MAX_SAFE_INTEGER);
+  const maxEvents = bounded(input.maxEvents, Number.MAX_SAFE_INTEGER);
   const models = (result.data.models ?? []).slice(0, maxModels).map((model) => ({
     name: String(model.name ?? ''),
     ...(model.offset === undefined ? {} : { nativeOffset: Number(model.offset) }),
@@ -106,6 +126,8 @@ export async function readMsbDocumentViaBridge(input: {
   const parts = (result.data.parts ?? []).slice(0, maxParts).map((p) => ({
     name: String(p.name ?? ''),
     ...(p.offset === undefined ? {} : { nativeOffset: Number(p.offset) }),
+    typeId: Number(p.typeId ?? 0),
+    ...(p.modelIndex === undefined ? {} : { modelIndex: Number(p.modelIndex) }),
     posX: Number(p.posX ?? 0),
     posY: Number(p.posY ?? 0),
     posZ: Number(p.posZ ?? 0),
@@ -125,7 +147,14 @@ export async function readMsbDocumentViaBridge(input: {
   const events = (result.data.events ?? []).slice(0, maxEvents).map((event) => ({
     name: String(event.name ?? ''),
     ...(event.offset === undefined ? {} : { nativeOffset: Number(event.offset) }),
-    typeId: Number(event.typeId ?? 0)
+    typeId: Number(event.typeId ?? 0),
+    ...(event.eventId === undefined ? {} : { eventId: Number(event.eventId) })
+  }));
+  const routes = (result.data.routes ?? []).map((route) => ({
+    name: String(route.name ?? ''),
+    ...(route.offset === undefined ? {} : { nativeOffset: Number(route.offset) }),
+    typeId: Number(route.typeId ?? 0),
+    ...(route.id === undefined ? {} : { id: Number(route.id) })
   }));
   return {
     ok: true,
@@ -133,13 +162,15 @@ export async function readMsbDocumentViaBridge(input: {
       sourceHash: result.data.sourceHash,
       version: result.data.version ?? 0,
       modelCount: result.data.modelCount ?? 0,
-      partCount: result.data.partCount ?? parts.length,
-      regionCount: result.data.regionCount ?? regions.length,
+      partCount: result.data.partCount ?? 0,
+      regionCount: result.data.regionCount ?? 0,
       eventCount: result.data.eventCount ?? 0,
+      routeCount: result.data.routeCount ?? 0,
       models,
       parts,
       regions,
       events,
+      routes,
       ...(result.data.authority ? { authority: result.data.authority } : {}),
       ...(result.data.entityEdit ? { entityEdit: result.data.entityEdit } : {})
     },
