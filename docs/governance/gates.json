@@ -214,8 +214,8 @@
       "gateId": "REL-E",
       "targetRelease": "V0.6",
       "capability": "资产只读与导出矩阵",
-      "gateState": "deferred",
-      "applicability": "deferred-v0.6",
+      "gateState": "passed",
+      "applicability": "in-scope",
       "sliceRefs": [
         "W-FLVER-READ-01"
       ],
@@ -264,9 +264,9 @@
         "SCOPE-ASSET-OPEN-CONVERSION"
       ],
       "openRulings": [
-        "整条资产线已裁定移出 V0.5、延期至 V0.6：五类 native 资产的全量只读语义 authority、引用与 native-to-open 导出矩阵均不属于 V0.5 验收。既有 FLVER/TPF/MTD 只读实现保留为标记 V0.6 预览且必须只读。"
+        "资产只读线已 V0.6 承接交付：SCOPE-ASSET-FLVER 与 SCOPE-ASSET-TPF 恢复为 supported@V0.6，只读 native document 在登记样本上经 byte-identical 往返与多样本覆盖验证；SCOPE-ASSETS（聚合）、SCOPE-ASSET-MTD（candidate）、SCOPE-ASSET-COLLISION / SCOPE-ASSET-NAVIGATION（格式定位记录、parser 未交付）与 SCOPE-ASSET-OPEN-CONVERSION 仍按既有裁定保持 deferred，范围再裁定留待后继里程碑规划。"
       ],
-      "successorRequirement": "整条资产线延期至 V0.6。既有 FLVER/TPF 登记样本 native document、MTD 只读投影与 GLB/PNG/TGA/DDS 导出保留为标记 V0.6 预览且必须只读；V0.6 恢复时继续 collision/navigation、完整引用和五类只读/导出闭环"
+      "successorRequirement": "资产线 V0.6 部分已交付：FLVER/TPF 只读 authority 在登记样本上验证完成（native-verified）；5 项范围条目仍保持 deferred，后继里程碑继续 MTD 语义读取 authority、collision（.clm2 in-BND4）/navigation 格式解析、完整引用对齐与 native-to-open 导出闭环；既有 deferred 预览保持只读。"
     },
     {
       "gateId": "REL-F",
@@ -341,8 +341,8 @@
       "gateId": "REL-I",
       "targetRelease": "V0.6",
       "capability": "渲染功能闭环",
-      "gateState": "deferred",
-      "applicability": "deferred-v0.6",
+      "gateState": "passed",
+      "applicability": "in-scope",
       "sliceRefs": [
         "W-RENDER-FUNCTIONAL-02"
       ],
@@ -385,9 +385,9 @@
         "SCOPE-RENDERING"
       ],
       "openRulings": [
-        "3D 渲染已裁定移出 V0.5、延期至 V0.6：MSB 场景与资产线同时延期后，V0.5 不再有 in-scope 的 3D 编辑目标，WebGPU 主路径/WebGL2 功能回退闭环不属于 V0.5 验收。既有 renderer-independent semantic scene 架构与 Three.js 骨架保留，不得推翻。"
+        "渲染功能闭环已 V0.6 承接交付：SCOPE-RENDERING 恢复为 supported@V0.6，renderer-independent semantic scene、WebGPU 主后端与 WebGL2 自动回退在所有者机器上经功能 smoke 验证（backend resolution / 真实 FLVER mesh 渲染 / picking / 资源释放闭环）；代表性硬件档位与性能预算不属于验收，authority 保持 partial。"
       ],
-      "successorRequirement": "3D 渲染延期至 V0.6。MSB 与资产线同时延期后，V0.5 无 in-scope 3D 编辑目标。renderer-independent semantic scene、render packet 与 Three.js WebGPU/WebGL2 骨架保留不推翻；V0.6 恢复时继续真实 FLVER 渲染、picking、transform 更新与资源释放闭环"
+      "successorRequirement": "渲染线 V0.6 部分已交付：真实 FLVER 渲染、picking、transform 更新与资源释放功能闭环在所有者机器上验证完成（owner-machine 功能 smoke）；后继里程碑按真实资源基准推进性能预算与更广硬件覆盖，representative-hardware-tier 验收仍不成立。"
     },
     {
       "gateId": "REL-COMPLIANCE",

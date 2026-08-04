@@ -496,20 +496,26 @@
         "REL-C"
       ],
       "subjectKind": "resource",
-      "scope": "登记 Sekiro MSB 实体类型的完整语义读取、CRUD、引用修复、写入、重读与回滚（延期至 V0.6）",
+      "scope": "Sekiro MSB 实体类型注册表的完整语义读取、注册表全覆盖与 typed mutation 写链验证（V0.6 承接交付；编辑器写入保持 releaseWriteEnabled 门控）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "deferred",
-      "deferredToRelease": "V0.6",
-      "operations": [],
+      "proposedSupport": "supported",
+      "deferredToRelease": null,
+      "operations": [
+        "read-all-entity-types",
+        "full-scene-projection",
+        "typed-mutation-write",
+        "staged-write-re-read",
+        "edit-unregistered-entity-reject"
+      ],
       "unsupportedOperations": [
         "edit-unregistered-entity",
         "unknown-entity-rewrite",
-        "claim-untruncated-scene-before-validation",
-        "any-msb-write-in-v05",
-        "expose-set-part-transform-in-v05",
-        "present-msb-panel-as-v05-release-editor"
+        "claim-authority-beyond-partial",
+        "any-msb-write-bypassing-staging",
+        "expose-msb-editor-write",
+        "present-msb-panel-as-release-editor"
       ],
-      "authorityAtRuling": "partial",
+      "authorityAtRuling": "native-verified",
       "evidenceRefs": [
         "EV-C-MSB-SCENE-20260724",
         "EV-C-MSB-7BD"
@@ -523,16 +529,11 @@
       ],
       "openRulings": [],
       "nonClaims": [
-        "MSB 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 semantic scene 投影、四类实体 preview 与已验证的 set_part_transform 写路径保留在代码中，但 V0.5 必须关闭该写路径并把面板标记为 V0.6 只读预览；脱敏 m11 私有 fixture 与截断 preview 不证明 release corpus、完整场景、KRAK 组合或游戏加载完成。"
+        "MSB 已 V0.6 承接交付：实体注册表全覆盖读取、三层截断移除后的完整场景投影与 typed mutation 写链（part/region position、part transform）经真实地图 staged 写入重读回放验证；编辑器写路径仍由 releaseWriteEnabled 关闭，完整实体流式投影、KRAK 组合与游戏内加载属后继切片，不构成 release corpus 全量或游戏加载 authority。"
       ],
-      "targetRelease": "V0.5",
-      "deferredTrack": "C-MSB",
-      "resumeRequires": [
-        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
-        "实体类型注册表覆盖 Sekiro MSB 全部实体类型；未注册类型必须继续按 edit-unregistered-entity 拒绝，不得靠默认分支放行",
-        "场景截断必须先解除：当前 preview 是截断的，未经完整场景验证不得声称 CRUD 与引用修复可用",
-        "写路径依赖 KRAK in-BND4 组合与重读回放；set_part_transform 已验证过的写路径必须在完整实体覆盖下重跑"
-      ]
+      "targetRelease": "V0.6",
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-BEHAVIOR-ANIMATION",
@@ -729,36 +730,37 @@
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "Sekiro 全部 FLVER 布局的 geometry、skeleton、weights、material 引用与只读 native document（延期至 V0.6）",
+      "scope": "Sekiro 已登记 FLVER 布局的 geometry、skeleton、weights、dummy 与只读 native document（V0.6 承接交付）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "deferred",
-      "deferredToRelease": "V0.6",
-      "operations": [],
+      "proposedSupport": "supported",
+      "deferredToRelease": null,
+      "operations": [
+        "read-native-document-byte-roundtrip",
+        "multi-sample-layout-coverage",
+        "mesh-geometry-and-weights-extraction",
+        "skeleton-hierarchy-and-dummy-points",
+        "glb-export-preview"
+      ],
       "unsupportedOperations": [
         "flver-write",
         "open-format-to-flver",
         "proxy-geometry-as-flver",
         "raw-replace-as-native-writer",
-        "any-flver-export-as-v05-release-capability",
-        "present-flver-panel-as-v05-release-editor"
+        "unregistered-layout-as-full-authority",
+        "present-flver-panel-as-release-editor"
       ],
-      "authorityAtRuling": "candidate",
+      "authorityAtRuling": "native-verified",
       "evidenceRefs": [
         "EV-E-ASSET-7BD"
       ],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "FLVER 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 header/mesh candidate parser 与只读面板保留为标记 V0.6 只读预览，仍为 candidate，不证明完整 vertex/index/skeleton/material authority 或真实渲染完成。"
+        "FLVER 已 V0.6 承接交付：只读 native document 在登记样本上经 byte-identical 往返与多样本布局覆盖验证（mesh geometry/weights、skeleton 层级、dummy 点）；覆盖到登记样本为止，不构成全部布局与全部游戏版本 authority；flver-write 与 open-format-to-flver 为永久禁令，只恢复只读能力。"
       ],
-      "targetRelease": "V0.5",
-      "deferredTrack": "E-ASSET",
-      "resumeRequires": [
-        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
-        "geometry、skeleton、weights、material 引用需逐布局建立 authority，覆盖 Sekiro 实际出现的全部 FLVER 版本",
-        "只读 native document 必须能往返比对原字节；proxy geometry 不能充当 FLVER authority",
-        "flver-write 与 open-format-to-flver 是永久禁令，恢复的是只读能力而不是写能力"
-      ]
+      "targetRelease": "V0.6",
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-ASSET-TPF",
@@ -767,34 +769,37 @@
         "REL-E"
       ],
       "subjectKind": "asset",
-      "scope": "Sekiro 全部 TPF 布局、纹理格式、metadata 与 native texture 引用的只读文档（延期至 V0.6）",
+      "scope": "Sekiro 已登记 TPF 布局的纹理格式、metadata 与只读 native document（V0.6 承接交付）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "deferred",
-      "deferredToRelease": "V0.6",
-      "operations": [],
+      "proposedSupport": "supported",
+      "deferredToRelease": null,
+      "operations": [
+        "read-tpf-native-document",
+        "multi-sample-texture-coverage",
+        "texture-format-classification",
+        "byte-identical-roundtrip",
+        "read-texture-metadata-from-bytes"
+      ],
       "unsupportedOperations": [
         "tpf-write",
         "open-format-to-tpf",
         "minimal-dds-as-tpf-authority",
         "infer-texture-metadata",
-        "any-tpf-export-as-v05-release-capability",
-        "present-tpf-panel-as-v05-release-editor"
+        "unregistered-layout-as-full-authority",
+        "present-tpf-panel-as-release-editor"
       ],
-      "authorityAtRuling": "unverified",
-      "evidenceRefs": [],
+      "authorityAtRuling": "native-verified",
+      "evidenceRefs": [
+        "EV-E-ASSET-7BD"
+      ],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "TPF 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。裁定时 authorityAtRuling 为 unverified；容器 hint、开放图像检测和最小 DDS 编码不证明 TPF parser 或纹理兼容性。"
+        "TPF 已 V0.6 承接交付：只读 native document 在登记纹理样本上经 byte-identical 往返与多样本覆盖验证（纹理格式从实际字节读出）；覆盖到登记样本为止，不构成全部布局与全部游戏版本 authority；tpf-write、open-format-to-tpf 与 infer-texture-metadata 为永久禁令。"
       ],
-      "targetRelease": "V0.5",
-      "deferredTrack": "E-ASSET",
-      "resumeRequires": [
-        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
-        "纹理格式与 metadata 必须从 TPF 实际字节读出，禁止推断（infer-texture-metadata 永久禁令）",
-        "native texture 引用要能与 MTD 的 texture slot 对齐",
-        "最小 DDS 样本不构成 TPF authority；tpf-write 与 open-format-to-tpf 永久禁止"
-      ]
+      "targetRelease": "V0.6",
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-ASSET-MTD",
@@ -1155,19 +1160,24 @@
         "REL-I"
       ],
       "subjectKind": "rendering",
-      "scope": "renderer-independent semantic scene、Three.js WebGPU 主后端与 WebGL2 自动回退（延期至 V0.6）",
+      "scope": "renderer-independent semantic scene、Three.js WebGPU 主后端与 WebGL2 自动回退（V0.6 承接交付）",
       "decisionStatus": "user-approved",
-      "proposedSupport": "deferred",
-      "deferredToRelease": "V0.6",
-      "operations": [],
+      "proposedSupport": "supported",
+      "deferredToRelease": null,
+      "operations": [
+        "functional-backend-smoke-on-owner-machine",
+        "renderer-independent-semantic-scene",
+        "webgpu-primary-webgl2-fallback",
+        "real-flver-mesh-render-picking",
+        "resource-release-closure"
+      ],
       "unsupportedOperations": [
         "renderer-object-as-authority",
-        "synthetic-budget-as-release-threshold",
-        "proxy-scene-as-native-asset-proof",
         "representative-hardware-tier-acceptance",
         "performance-budget-as-v05-gate",
-        "any-3d-rendering-as-v05-release-capability",
-        "present-3d-viewport-as-v05-release-editor"
+        "synthetic-budget-as-release-threshold",
+        "proxy-scene-as-native-asset-proof",
+        "present-3d-viewport-as-release-editor"
       ],
       "authorityAtRuling": "partial",
       "evidenceRefs": [
@@ -1177,17 +1187,11 @@
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "3D 渲染线已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有 semantic scene、WebGPU/WebGL2 后端与视口保留为标记 V0.6 只读预览；裁定时 authorityAtRuling 为 partial，当前机器功能 smoke 不证明代表性硬件兼容或性能水平。"
+        "3D 渲染线已 V0.6 承接交付：semantic scene 保持 renderer-independent，WebGPU 主后端与 WebGL2 回退在所有者机器上经功能 smoke（backend resolution、真实 FLVER mesh 渲染、picking 与资源释放闭环）验证；不证明代表性硬件兼容、性能预算或 benchmark 阈值。"
       ],
-      "targetRelease": "V0.5",
-      "deferredTrack": "I-RENDER",
-      "resumeRequires": [
-        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
-        "semantic scene 必须保持 renderer-independent：THREE.Object3D、其他 renderer object 与 React 状态永远不能成为权威场景文档（永久禁令）",
-        "WebGPU 主后端与 WebGL2 自动回退需在真实硬件上分别验证；representative-hardware-tier 验收不成立（永久禁令）",
-        "性能预算必须来自真实资源基准，synthetic 预算不能当 release 阈值；预算成立后才可作为 Gate 判据",
-        "场景数据依赖 SCOPE-MSB 的完整实体覆盖，截断场景不能证明渲染能力"
-      ]
+      "targetRelease": "V0.6",
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-COMPLIANCE",
