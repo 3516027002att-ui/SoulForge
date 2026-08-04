@@ -614,6 +614,10 @@ internal sealed class BridgeCommandService
                     new Diagnostic("info", "MSB_STAGING_WRITE_VERIFIED", "MSB 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
                 }, written);
             }
+            catch (MsbUnregisteredEntityException ex)
+            {
+                return BridgeResult<object>.Failed(file, "map", "MSB_UNREGISTERED_ENTITY_TYPE", ex.Message);
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "map", "MSB_STAGING_WRITE_FAILED", ex.Message);

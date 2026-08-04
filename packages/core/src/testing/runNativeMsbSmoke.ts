@@ -10,6 +10,10 @@ import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { readMsbDocumentViaBridge } from '../editing/msbBridgeRead.js';
 import { buildMsbSceneManifest } from '../scene/msbSceneManifest.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import {
+  isRegisteredMsbType,
+  type MsbEntityFamilyKey
+} from '@soulforge/shared';
 
 interface MsbEnvelope {
   sourceHash: string;
@@ -18,12 +22,15 @@ interface MsbEnvelope {
   partCount: number;
   regionCount?: number;
   eventCount?: number;
+  routeCount?: number;
   authority: string;
   entityEdit: string;
   models: Array<{ name: string; offset: number; sibPath?: string; typeId: number }>;
   parts: Array<{
     name: string;
     offset: number;
+    typeId: number;
+    modelIndex?: number;
     posX: number;
     posY: number;
     posZ: number;
@@ -34,6 +41,7 @@ interface MsbEnvelope {
   }>;
   regions?: Array<{ name: string; offset: number; typeId: number; posX: number; posY: number; posZ: number }>;
   events?: Array<{ name: string; offset: number; typeId: number }>;
+  routes?: Array<{ name: string; offset: number; typeId: number; id?: number }>;
   roundTrip?: { semanticIdentical: boolean; byteIdentical: boolean };
 }
 
@@ -52,6 +60,7 @@ function projectNativeScene(envelope: MsbEnvelope) {
     parts: envelope.parts.map((part) => ({
       name: part.name,
       nativeOffset: part.offset,
+      typeId: part.typeId,
       posX: part.posX,
       posY: part.posY,
       posZ: part.posZ,
@@ -133,7 +142,45 @@ async function mainInWorkspace(root: string): Promise<void> {
   if (!read.data.entityEdit.includes('part-transform')) {
     throw new Error(`unexpected entityEdit: ${read.data.entityEdit}`);
   }
+  // 注册表覆盖：真实实体 type 必须全部落在权威注册表内（负向由 writer 守卫 smoke 覆盖）。
+  const families: Array<{ family: MsbEntityFamilyKey; samples: Array<{ name: string; typeId: number }> }> = [
+    { family: 'model', samples: read.data.models },
+    { family: 'part', samples: read.data.parts },
+    { family: 'region', samples: read.data.regions ?? [] },
+    { family: 'event', samples: read.data.events ?? [] },
+    { family: 'route', samples: read.data.routes ?? [] }
+  ];
+  for (const { family, samples } of families) {
+    for (const sample of samples) {
+      if (!isRegisteredMsbType(family, sample.typeId)) {
+        throw new Error(`未注册实体类型 ${family}/${sample.typeId}（${sample.name}）`);
+      }
+    }
+  }
+  const typeCoverage = families.reduce<Record<string, number>>((acc, { family, samples }) => {
+    acc[family] = new Set(samples.map((s) => s.typeId)).size;
+    return acc;
+  }, {});
+
+  // renderer-safe DTO 默认完整返回（三层截断已移除），nativeOffset 身份必须保留。
   const rendererRead = await readMsbDocumentViaBridge({
+    sourcePath: msbPath,
+    allowedRoots: [root],
+    timeoutMs: 120_000
+  });
+  if (!rendererRead.ok || !rendererRead.data
+    || rendererRead.data.models.length !== read.data.modelCount
+    || rendererRead.data.parts.length !== read.data.partCount
+    || rendererRead.data.regions.length !== (read.data.regionCount ?? 0)
+    || rendererRead.data.events.length !== (read.data.eventCount ?? 0)
+    || rendererRead.data.routes.length !== (read.data.routeCount ?? 0)
+    || rendererRead.data.parts.some((item) => item.nativeOffset === undefined)
+    || rendererRead.data.regions.some((item) => item.nativeOffset === undefined)
+    || rendererRead.data.routes.some((item) => item.nativeOffset === undefined)) {
+    throw new Error(`renderer-safe MSB DTO 未完整返回或丢失 native identity: ${JSON.stringify(rendererRead)}`);
+  }
+  // 显式有界窗口（scaleAccess=bounded-window）仍按调用方窗口截断。
+  const boundedRead = await readMsbDocumentViaBridge({
     sourcePath: msbPath,
     allowedRoots: [root],
     timeoutMs: 120_000,
@@ -142,16 +189,16 @@ async function mainInWorkspace(root: string): Promise<void> {
     maxRegions: 64,
     maxEvents: 64
   });
-  if (!rendererRead.ok || !rendererRead.data
-    || rendererRead.data.models.length === 0
-    || rendererRead.data.events.length === 0
-    || rendererRead.data.parts.some((item) => item.nativeOffset === undefined)
-    || rendererRead.data.regions.some((item) => item.nativeOffset === undefined)) {
-    throw new Error(`renderer-safe MSB DTO lost entity kinds or native identity: ${JSON.stringify(rendererRead)}`);
+  if (!boundedRead.ok || !boundedRead.data) {
+    throw new Error(`bounded-window MSB DTO 读取失败: ${JSON.stringify(boundedRead.diagnostics)}`);
+  }
+  if (boundedRead.data.parts.length > 64 || boundedRead.data.models.length > 64
+    || boundedRead.data.regions.length > 64 || boundedRead.data.events.length > 64) {
+    throw new Error('bounded-window MSB DTO 超出显式窗口');
   }
   const sceneBefore = projectNativeScene(read.data);
-  if (!sceneBefore.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL')) {
-    throw new Error('native MSB preview projection must stay partial while Bridge truncates entity tables');
+  if (sceneBefore.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL')) {
+    throw new Error('三层截断移除后 native 投影必须是完整投影，不得出现 SCENE_PROJECTION_PARTIAL');
   }
   if (sceneBefore.diagnostics.some((item) => item.code === 'SCENE_IDENTITY_FALLBACK')) {
     throw new Error('native MSB entities must retain offset-backed identity');
@@ -220,6 +267,9 @@ async function mainInWorkspace(root: string): Promise<void> {
   }
   if ((read.data.eventCount ?? 0) < 1) {
     throw new Error(`expected map events, got ${read.data.eventCount}`);
+  }
+  if ((read.data.routeCount ?? 0) < 1 || (read.data.routes?.length ?? 0) < 1) {
+    throw new Error(`expected routes, got ${read.data.routeCount}`);
   }
   const region = read.data.regions?.[0];
   if (!region) throw new Error('no region sample');
@@ -331,6 +381,9 @@ async function mainInWorkspace(root: string): Promise<void> {
     partCount: read.data.partCount,
     regionCount: read.data.regionCount,
     eventCount: read.data.eventCount,
+    routeCount: read.data.routeCount,
+    typeCoverage,
+    sampleRoute: read.data.routes?.[0]?.name,
     sampleRegion: region.name,
     sampleEvent: read.data.events?.[0]?.name,
     sampleModel: read.data.models[0]?.name,
