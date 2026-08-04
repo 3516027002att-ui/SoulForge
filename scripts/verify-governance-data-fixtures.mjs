@@ -267,7 +267,9 @@ expectCodes('frozen-authority-at-ruling-cannot-be-raised', ({ read, write }) => 
 
 expectCodes('frozen-release-item-cannot-be-deleted', ({ read, write }) => {
   const scope = read('scope.json');
-  scope.scopeItems = scope.scopeItems.filter((entry) => entry.scopeItemId !== 'SCOPE-MSB');
+  // 必须删除仍冻结的 V0.5 条目：SCOPE-MSB 已随 V0.6 承接恢复为 supported@V0.6，
+  // 不在 V0.5 冻结保护内，删除它不会触发 FREEZE_VIOLATION。
+  scope.scopeItems = scope.scopeItems.filter((entry) => entry.scopeItemId !== 'SCOPE-DFLT');
   write('scope.json', scope);
 }, ['FREEZE_VIOLATION'], {}, runWithMutationInRepo);
 
