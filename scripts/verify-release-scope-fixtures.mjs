@@ -197,13 +197,13 @@ try {
   }, 'GATE_COVERAGE_STATE_DRIFT');
 
   await expectRejected('deferred-item-without-target-release', (proposal) => {
-    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
-    delete rendering.deferredToRelease;
+    const mtd = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-ASSET-MTD');
+    delete mtd.deferredToRelease;
   }, 'DEFERRED_RELEASE_INVALID');
 
   await expectRejected('deferred-item-claims-v05-operation', (proposal) => {
-    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
-    rendering.operations.push('render-flver-msb-collision-navigation');
+    const mtd = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-ASSET-MTD');
+    mtd.operations.push('read-mtd-native-document');
   }, 'DEFERRED_OPERATIONS_FORBIDDEN');
 
   await expectRejected('supported-item-claims-deferred-release', (proposal) => {
@@ -212,23 +212,28 @@ try {
   }, 'DEFERRED_RELEASE_UNEXPECTED');
 
   await expectRejected('deferred-item-targets-unapproved-release', (proposal) => {
-    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
-    rendering.deferredToRelease = 'V0.7';
+    const mtd = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-ASSET-MTD');
+    mtd.deferredToRelease = 'V0.7';
   }, 'DEFERRED_RELEASE_INVALID');
 
+  // V0.6 承接后真实数据已无 deferred Gate（REL-E/REL-I 恢复 passed），
+  // 下面四条从 REL-I 反造 deferred 状态，验证延期 Gate 规则仍会触发。
   await expectRejected('deferred-gate-carries-blocker', (proposal) => {
     const relI = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-I');
+    relI.currentState = 'deferred';
     relI.blockerRefs = ['BLK-RENDER-HARDWARE'];
   }, 'DEFERRED_GATE_WITH_BLOCKER');
 
   await expectRejected('deferred-gate-still-has-supported-scope', (proposal) => {
-    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
-    rendering.proposedSupport = 'supported';
-    delete rendering.deferredToRelease;
-    rendering.operations = ['functional-backend-smoke-on-owner-machine'];
+    const relI = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-I');
+    relI.currentState = 'deferred';
   }, 'DEFERRED_GATE_WITH_SUPPORTED_SCOPE');
 
   await expectRejected('fully-deferred-gate-written-as-open', (proposal) => {
+    const rendering = proposal.scopeItems.find((item) => item.scopeItemId === 'SCOPE-RENDERING');
+    rendering.proposedSupport = 'deferred';
+    rendering.deferredToRelease = 'V0.6';
+    rendering.operations = [];
     const relI = proposal.gateCoverage.find((gate) => gate.gateId === 'REL-I');
     relI.currentState = 'open';
   }, 'FULLY_DEFERRED_GATE_STATE_INVALID');
