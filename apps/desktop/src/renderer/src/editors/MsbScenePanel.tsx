@@ -34,6 +34,19 @@ export interface MsbScenePanelProps {
     posY: number;
     posZ: number;
   }) => void;
+  /** When set, enables full part transform commits (position + rotation + scale). */
+  onPartTransformCommit?: (input: {
+    partName: string;
+    posX: number;
+    posY: number;
+    posZ: number;
+    rotX: number;
+    rotY: number;
+    rotZ: number;
+    scaleX: number;
+    scaleY: number;
+    scaleZ: number;
+  }) => void;
   writeEnabled?: boolean;
   /**
    * 非空表示该编辑器已延期至指定里程碑，本版仅作标记只读预览：
@@ -58,6 +71,14 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const [status, setStatus] = useState('正在初始化 3D 场景…');
   const [nodeCount, setNodeCount] = useState(0);
   const [nudge, setNudge] = useState({ x: 0.5, y: 0, z: 0 });
+  const [transform, setTransform] = useState<{
+    rotX: number;
+    rotY: number;
+    rotZ: number;
+    scaleX: number;
+    scaleY: number;
+    scaleZ: number;
+  }>({ rotX: 0, rotY: 0, rotZ: 0, scaleX: 1, scaleY: 1, scaleZ: 1 });
   const regions = props.regions ?? [];
 
   useEffect(() => {
@@ -128,6 +149,21 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     return props.parts.find((part) => part.name === selected.label) ?? null;
   }
 
+  // 选中 part 变化时同步 transform 编辑字段（rotation 为角度，scale 为倍率）。
+  useEffect(() => {
+    const part = resolveSelectedPart();
+    if (!part) return;
+    setTransform({
+      rotX: part.rotX ?? 0,
+      rotY: part.rotY ?? 0,
+      rotZ: part.rotZ ?? 0,
+      scaleX: part.scaleX ?? 1,
+      scaleY: part.scaleY ?? 1,
+      scaleZ: part.scaleZ ?? 1
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, props.parts]);
+
   function commitNudge(): void {
     const part = resolveSelectedPart();
     if (!part) {
@@ -167,6 +203,31 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     setStatus(`正在提交 region 位置：${region.name}`);
   }
 
+  function commitTransform(): void {
+    const part = resolveSelectedPart();
+    if (!part) {
+      setStatus('请先选择一个 part 节点。');
+      return;
+    }
+    if (!props.writeEnabled || !props.onPartTransformCommit) {
+      setStatus('MSB 写入在当前版本未开放：transform 更新仅为本地预览，不会写入。');
+      return;
+    }
+    props.onPartTransformCommit({
+      partName: part.name,
+      posX: part.posX,
+      posY: part.posY,
+      posZ: part.posZ,
+      rotX: transform.rotX,
+      rotY: transform.rotY,
+      rotZ: transform.rotZ,
+      scaleX: transform.scaleX,
+      scaleY: transform.scaleY,
+      scaleZ: transform.scaleZ
+    });
+    setStatus(`正在提交 part transform：${part.name}`);
+  }
+
   const deferredRelease = props.deferredPreviewRelease;
 
   return (
@@ -189,6 +250,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       <p className="muted">{status}</p>
       {selected ? <p>已选择 {selected.kind === 'msb-region' ? 'region' : 'part'}：{selected.label}</p> : null}
       {deferredRelease ? null : (
+      <>
       <div className="row gap" aria-label="part 位置微调">
         <label>
           ΔX
@@ -232,6 +294,70 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           提交 region 位置
         </button>
       </div>
+      <div className="row gap" aria-label="part transform 微调">
+        <label>
+          rotX
+          <input
+            type="number"
+            step="1"
+            value={transform.rotX}
+            onChange={(e) => setTransform((t) => ({ ...t, rotX: Number(e.target.value) || 0 }))}
+          />
+        </label>
+        <label>
+          rotY
+          <input
+            type="number"
+            step="1"
+            value={transform.rotY}
+            onChange={(e) => setTransform((t) => ({ ...t, rotY: Number(e.target.value) || 0 }))}
+          />
+        </label>
+        <label>
+          rotZ
+          <input
+            type="number"
+            step="1"
+            value={transform.rotZ}
+            onChange={(e) => setTransform((t) => ({ ...t, rotZ: Number(e.target.value) || 0 }))}
+          />
+        </label>
+        <label>
+          scaleX
+          <input
+            type="number"
+            step="0.1"
+            value={transform.scaleX}
+            onChange={(e) => setTransform((t) => ({ ...t, scaleX: Number(e.target.value) || 1 }))}
+          />
+        </label>
+        <label>
+          scaleY
+          <input
+            type="number"
+            step="0.1"
+            value={transform.scaleY}
+            onChange={(e) => setTransform((t) => ({ ...t, scaleY: Number(e.target.value) || 1 }))}
+          />
+        </label>
+        <label>
+          scaleZ
+          <input
+            type="number"
+            step="0.1"
+            value={transform.scaleZ}
+            onChange={(e) => setTransform((t) => ({ ...t, scaleZ: Number(e.target.value) || 1 }))}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={selected?.kind !== 'msb-part'}
+          onClick={commitTransform}
+        >
+          提交 part transform
+        </button>
+      </div>
+      </>
       )}
       {regions.length > 0 && (
         <div className="binder-child-table" role="table" aria-label="MSB regions">

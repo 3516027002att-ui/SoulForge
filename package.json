@@ -48,6 +48,7 @@
     "test:asset-writeback": "npm run test:asset-writeback -w @soulforge/core",
     "test:vault-ipc-contract": "npm run test:vault-ipc-contract -w @soulforge/core",
     "test:three-scene-module": "npm run test:three-scene-module -w @soulforge/core",
+    "test:three-scene-functional": "npm run test:three-scene-functional -w @soulforge/desktop",
     "test:emevd-four-view": "npm run test:emevd-four-view -w @soulforge/core",
     "test:emevd-plan-commit": "npm run test:emevd-plan-commit -w @soulforge/core",
     "test:emevd-dsl-compiler": "npm run test:emevd-dsl-compiler -w @soulforge/core",
