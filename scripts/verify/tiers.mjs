@@ -158,6 +158,8 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:flver-mesh': 'native',
   'bridge:verify:fmg': 'native',
   'bridge:verify:msb': 'native',
+  'bridge:verify:msb-all': 'native',
+  'bridge:verify:msb-writer': 'native',
   'bridge:verify:oodle': 'native',
   'bridge:verify:param': 'native',
   'bridge:verify:tae': 'native',
