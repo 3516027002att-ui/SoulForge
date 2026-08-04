@@ -15,6 +15,7 @@
     "test:database-utility": "node ../../scripts/run-database-utility-smoke.mjs",
     "test:me3-runtime-gateway": "node ../../scripts/run-me3-runtime-gateway-smoke.mjs",
     "test:renderer-playwright": "playwright test -c e2e/playwright/playwright.config.mjs",
+    "test:three-scene-functional": "node ../../scripts/run-three-scene-functional-smoke.mjs",
     "release:installer:manifest": "node ../../scripts/generate-release-installer-manifest.mjs",
     "test:installer-lifecycle": "node ../../scripts/verify-installer-lifecycle.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"

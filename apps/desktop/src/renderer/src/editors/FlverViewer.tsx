@@ -1,4 +1,11 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
+import {
+  mountFlverScene,
+  type FlverSceneHandle,
+  type FlverSceneMesh,
+  type FlverSemanticScene,
+  type FlverSceneTexture
+} from '../scene/threeSceneController.js';
 
 export interface FlverViewerProps {
   sourceUri?: string;
@@ -22,21 +29,42 @@ interface MeshData {
   vertexCount: number;
 }
 
+interface SkeletonBone {
+  name: string;
+  parentIndex: number;
+  translation: [number, number, number];
+  rotation: [number, number, number];
+}
+
+interface DummyPoint {
+  referenceId: number;
+  position: [number, number, number];
+}
+
+const EMPTY_SCENE: FlverSemanticScene = {
+  meshes: [],
+  bounds: { min: [-50, -50, -50], max: [50, 50, 50], center: [0, 0, 0] }
+};
+
 /**
- * FLVER 3D 预览器：显示包围盒、坐标轴和第一个网格的线框。
- * 使用 Three.js WebGL2 渲染（WebGPU 回退由 threeSceneController 处理）。
+ * FLVER 3D 预览器：真实 FLVER mesh 渲染（WebGPU-first / WebGL2 fallback）。
+ *
+ * 权威场景是渲染器无关的语义场景（typed buffer + 变换，由 IPC readFlverMesh
+ * 读入的原始数据构建），投影层（threeSceneController）只消费它并持有全部
+ * renderer 对象；本组件不创建任何 THREE 对象，遵守硬约束 18。
  */
 export function FlverViewer(props: FlverViewerProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
-  const handleRef = useRef<{ dispose: () => void } | null>(null);
+  const handleRef = useRef<FlverSceneHandle | null>(null);
+  const contentRef = useRef<FlverSemanticScene>(EMPTY_SCENE);
   const [meshData, setMeshData] = useState<MeshData | null>(null);
   const [meshError, setMeshError] = useState<string | null>(null);
-  const [skeletonBones, setSkeletonBones] = useState<
-    Array<{ name: string; parentIndex: number; translation: [number, number, number]; rotation: [number, number, number] }> | null
-  >(null);
-  const [dummyPoints, setDummyPoints] = useState<
-    Array<{ referenceId: number; position: [number, number, number] }> | null
-  >(null);
+  const [skeletonBones, setSkeletonBones] = useState<SkeletonBone[] | null>(null);
+  const [dummyPoints, setDummyPoints] = useState<DummyPoint[] | null>(null);
+  const [texture, setTexture] = useState<FlverSceneTexture | null>(null);
+  const [selected, setSelected] = useState<{ id: string; label: string } | null>(null);
+  const [backend, setBackend] = useState<'webgpu' | 'webgl2' | 'detecting'>('detecting');
+  const [sceneError, setSceneError] = useState<string | null>(null);
 
   // Load dummy attachment points via IPC when sourceUri changes.
   useEffect(() => {
@@ -63,8 +91,8 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   }, [props.sourceUri]);
 
   // Load skeleton hierarchy via IPC when sourceUri changes.
-  // Stores raw parent-relative transforms; world transforms are computed in the
-  // scene-building effect (where three.js matrices are available).
+  // Parent-relative transforms; world transforms are projected by the scene
+  // controller (renderer layer), keeping the semantic scene pure typed data.
   useEffect(() => {
     if (!props.sourceUri || typeof window.soulforge.readFlverSkeleton !== 'function') return;
     setSkeletonBones(null);
@@ -122,363 +150,78 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
     })();
   }, [props.sourceUri, props.meshIndex]);
 
+  // Decode texture bytes (base64 → DDS parse / RGBA fallback) into semantic form.
+  // 渲染器对象（CompressedTexture / DataTexture）由投影层构造并纳入 dispose。
+  useEffect(() => {
+    if (!props.textureBase64) {
+      setTexture(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const decoded = await decodeFlverTexture(props.textureBase64!);
+      if (!cancelled) setTexture(decoded);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.textureBase64]);
+
+  // Rebuild the renderer-independent semantic scene whenever source data changes.
+  useEffect(() => {
+    const scene = buildSemanticScene({
+      meshData,
+      meshIndex: props.meshIndex ?? 0,
+      skeleton: skeletonBones ?? [],
+      dummies: dummyPoints ?? [],
+      boundingBox: props.boundingBox,
+      texture
+    });
+    contentRef.current = scene;
+    handleRef.current?.setScene(scene);
+  }, [meshData, skeletonBones, dummyPoints, props.boundingBox, texture, props.meshIndex]);
+
+  // Mount the Three projection layer once; later data updates flow through setScene.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-
-    let disposed = false;
-
+    let cancelled = false;
     void (async () => {
-      const three = await import('three');
-      const { OrbitControls } = await import('three/examples/jsm/controls/OrbitControls.js') as {
-        OrbitControls: new (camera: unknown, domElement: HTMLElement) => {
-          enableDamping: boolean; dampingFactor: number; update: () => void; dispose: () => void;
-        };
-      };
-      const ddsLoaderModule = await import('three/examples/jsm/loaders/DDSLoader.js');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const DDSLoader = (ddsLoaderModule as any).DDSLoader as { parse(buffer: ArrayBuffer, loadMipmaps: boolean): { mipmaps: Array<{ data: Uint8Array; width: number; height: number }>; width: number; height: number; format: number; mipmapCount: number } };
-      const canvas = document.createElement('canvas');
-      canvas.style.width = '100%';
-      canvas.style.height = '100%';
-      canvas.style.display = 'block';
-      container.replaceChildren(canvas);
-
-      const renderer = new three.WebGLRenderer({ canvas, antialias: true, alpha: false });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-      const scene = new three.Scene();
-      scene.background = new three.Color(0x1a1d23);
-
-      const camera = new three.PerspectiveCamera(55, 1, 0.1, 50_000);
-      scene.add(new three.AmbientLight(0xffffff, 0.55));
-      const key = new three.DirectionalLight(0xffffff, 0.85);
-      key.position.set(40, 80, 20);
-      scene.add(key);
-      scene.add(new three.GridHelper(200, 20, 0x3a4150, 0x2a303c));
-      scene.add(new three.AxesHelper(10));
-
-      // Draw bounding box if available.
-      if (props.boundingBox) {
-        const { min, max } = props.boundingBox;
-        const box = new three.Box3(
-          new three.Vector3(min[0], min[1], min[2]),
-          new three.Vector3(max[0], max[1], max[2])
-        );
-        const helper = new three.Box3Helper(box, 0x44aaff);
-        scene.add(helper);
-
-        // Center camera on bounding box.
-        const center = box.getCenter(new three.Vector3());
-        const size = box.getSize(new three.Vector3());
-        const maxDim = Math.max(size.x, size.y, size.z);
-        camera.position.set(center.x + maxDim, center.y + maxDim * 0.5, center.z + maxDim);
-        camera.lookAt(center);
-      } else {
-        camera.position.set(50, 30, 50);
-        camera.lookAt(0, 0, 0);
+      try {
+        const handle = await mountFlverScene({
+          container,
+          scene: contentRef.current,
+          onSelect: (id) => {
+            if (!id) {
+              setSelected(null);
+              return;
+            }
+            const label = id.startsWith('mesh-')
+              ? `mesh[${id.slice('mesh-'.length)}]`
+              : id;
+            setSelected({ id, label });
+          }
+        });
+        if (cancelled) {
+          handle.dispose();
+          return;
+        }
+        handleRef.current = handle;
+        setBackend(handle.rendererBackend);
+        // Content may have arrived while the mount promise was pending.
+        handle.setScene(contentRef.current);
+      } catch (error) {
+        setSceneError(error instanceof Error ? error.message : 'FLVER 3D 场景初始化失败');
       }
-
-      // Render mesh geometry if available.
-      if (meshData) {
-        try {
-          const posBytes = Uint8Array.from(atob(meshData.positionsBase64), (c) => c.charCodeAt(0));
-          const positions = new Float32Array(posBytes.buffer);
-          const geometry = new three.BufferGeometry();
-          geometry.setAttribute('position', new three.BufferAttribute(positions, 3));
-
-          // Add UV coordinates if available.
-          if (meshData.uvsBase64) {
-            const uvBytes = Uint8Array.from(atob(meshData.uvsBase64), (c) => c.charCodeAt(0));
-            const uvs = new Float32Array(uvBytes.buffer);
-            geometry.setAttribute('uv', new three.BufferAttribute(uvs, 2));
-          }
-
-          // Add normals: use FLVER normals if available, otherwise compute from positions.
-          if (meshData.normalsBase64) {
-            const normBytes = Uint8Array.from(atob(meshData.normalsBase64), (c) => c.charCodeAt(0));
-            const normals = new Float32Array(normBytes.buffer);
-            geometry.setAttribute('normal', new three.BufferAttribute(normals, 3));
-          } else {
-            geometry.computeVertexNormals();
-          }
-
-          if (meshData.indicesBase64) {
-            const idxBytes = Uint8Array.from(atob(meshData.indicesBase64), (c) => c.charCodeAt(0));
-            const indices = new Uint16Array(idxBytes.buffer);
-            geometry.setIndex(new three.BufferAttribute(indices, 1));
-          }
-
-          geometry.computeVertexNormals();
-
-          // Assign color based on mesh index for visual distinction.
-          const hue = ((props.meshIndex ?? 0) * 137.508) % 360; // Golden angle for distinct colors
-          const color = new three.Color().setHSL(hue / 360, 0.5, 0.55);
-
-          // Try to load texture if available.
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          let texture: any;
-          if (props.textureBase64) {
-            try {
-              const texBytes = Uint8Array.from(atob(props.textureBase64), (c) => c.charCodeAt(0));
-              // Check for DDS magic "DDS " (0x20534444).
-              const isDds = texBytes.length > 4 && texBytes[0] === 0x44 && texBytes[1] === 0x44 && texBytes[2] === 0x53 && texBytes[3] === 0x20;
-              if (isDds && texBytes.length > 128) {
-                // Decode DDS (DXT1/DXT5/BC4/BC5) via three.js DDSLoader into a CompressedTexture.
-                try {
-                  const dds = DDSLoader.parse(texBytes.buffer.slice(texBytes.byteOffset, texBytes.byteOffset + texBytes.byteLength), true);
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const compressedTexture = new three.CompressedTexture(dds.mipmaps as any, dds.width, dds.height, dds.format as any, three.UnsignedByteType);
-                  compressedTexture.minFilter = dds.mipmapCount > 1 ? three.LinearMipmapLinearFilter : three.LinearFilter;
-                  compressedTexture.magFilter = three.LinearFilter;
-                  compressedTexture.generateMipmaps = false;
-                  compressedTexture.flipY = false;
-                  compressedTexture.needsUpdate = true;
-                  texture = compressedTexture;
-                } catch {
-                  // DDS decode failed (unsupported fourCC); fall back to gradient placeholder.
-                  const dv = new DataView(texBytes.buffer);
-                  const height = dv.getUint32(12, true) ?? 256;
-                  const width = dv.getUint32(16, true) ?? 256;
-                  const fourCC = String.fromCharCode(texBytes[84] ?? 0, texBytes[85] ?? 0, texBytes[86] ?? 0, texBytes[87] ?? 0);
-                  const size = Math.min(256, Math.max(1, Math.min(width, height)));
-                  const data = new Uint8Array(size * size * 4);
-                  for (let i = 0; i < data.length; i += 4) {
-                    const x = (i / 4) % size;
-                    const y = Math.floor((i / 4) / size);
-                    data[i] = Math.floor((x / size) * 255);
-                    data[i + 1] = Math.floor((y / size) * 255);
-                    data[i + 2] = fourCC === 'DXT1' ? 128 : 200;
-                    data[i + 3] = 255;
-                  }
-                  texture = new three.DataTexture(data, size, size, three.RGBAFormat);
-                  texture.needsUpdate = true;
-                }
-              } else {
-                // Non-DDS or too small: create a simple DataTexture.
-                const size = Math.min(256, Math.floor(Math.sqrt(texBytes.length / 4)));
-                if (size > 0) {
-                  const data = new Uint8Array(size * size * 4);
-                  data.set(texBytes.subarray(0, Math.min(texBytes.length, data.length)));
-                  texture = new three.DataTexture(data, size, size, three.RGBAFormat);
-                  texture.needsUpdate = true;
-                }
-              }
-            } catch {
-              // Texture decode failed; use solid color.
-            }
-          }
-
-          const material = new three.MeshStandardMaterial({
-            color: texture ? 0xffffff : color,
-            ...(texture ? { map: texture } : {}),
-            wireframe: false,
-            side: three.DoubleSide,
-            flatShading: !texture
-          });
-          const mesh = new three.Mesh(geometry, material);
-          scene.add(mesh);
-
-          // Add bone weight visualization if available.
-          // Bone weights are stored as 4 bytes per vertex (4 bone influences, each 0-255 ≈ 0.0-1.0).
-          // The 4 influences sum to ~255, so visualize the PRIMARY (first) bone weight:
-          // red = vertex tightly bound to one bone, blue = weight spread across bones.
-          if (meshData.boneWeightsBase64) {
-            try {
-              const weightBytes = Uint8Array.from(atob(meshData.boneWeightsBase64), (c) => c.charCodeAt(0));
-              const vertexCount = positions.length / 3;
-              const colors = new Float32Array(vertexCount * 3);
-              for (let v = 0; v < vertexCount; v++) {
-                const primaryWeight = (weightBytes[v * 4] ?? 0) / 255;
-                colors[v * 3] = primaryWeight; // R
-                colors[v * 3 + 1] = 0.2; // G
-                colors[v * 3 + 2] = 1 - primaryWeight; // B
-              }
-              geometry.setAttribute('color', new three.BufferAttribute(colors, 3));
-              material.vertexColors = true;
-              material.needsUpdate = true;
-            } catch {
-              // Bone weight decode failed; skip visualization.
-            }
-          }
-
-          // Add bone index visualization if available.
-          // Bone indices are stored as 4 bytes per vertex (4 bone influences).
-          // Visualize as vertex colors: different colors for different bone indices.
-          if (meshData.boneIndicesBase64 && !meshData.boneWeightsBase64) {
-            try {
-              const indexBytes = Uint8Array.from(atob(meshData.boneIndicesBase64), (c) => c.charCodeAt(0));
-              const vertexCount = positions.length / 3;
-              const colors = new Float32Array(vertexCount * 3);
-              // Color palette for bone indices (up to 256 bones).
-              const boneColors = [
-                [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0],
-                [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 0.5, 0.0], [0.5, 0.0, 1.0],
-                [0.0, 1.0, 0.5], [0.5, 1.0, 0.0], [1.0, 0.0, 0.5], [0.0, 0.5, 1.0]
-              ];
-              for (let v = 0; v < vertexCount; v++) {
-                // Use the first bone index for coloring.
-                const boneIdx = (indexBytes[v * 4] ?? 0) % boneColors.length;
-                const color = boneColors[boneIdx] ?? [1.0, 1.0, 1.0];
-                colors[v * 3] = color[0] ?? 1.0;
-                colors[v * 3 + 1] = color[1] ?? 1.0;
-                colors[v * 3 + 2] = color[2] ?? 1.0;
-              }
-              geometry.setAttribute('color', new three.BufferAttribute(colors, 3));
-              material.vertexColors = true;
-              material.needsUpdate = true;
-            } catch {
-              // Bone index decode failed; skip visualization.
-            }
-          }
-
-          // Also add wireframe overlay.
-          const wireMaterial = new three.MeshBasicMaterial({
-            color: 0x88bbee,
-            wireframe: true,
-            transparent: true,
-            opacity: 0.15
-          });
-          const wireMesh = new three.Mesh(geometry, wireMaterial);
-          scene.add(wireMesh);
-        } catch {
-          // Mesh data decode failed; show bounding box only.
-        }
-      }
-
-      // Draw bone hierarchy. Skeleton bones carry parent-relative transforms;
-      // compute world positions by chaining local TRS matrices up the parent chain.
-      if (skeletonBones && skeletonBones.length > 0) {
-        const boneGroup = new three.Group();
-        const boneMaterial = new three.LineBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.6 });
-        const jointMaterial = new three.MeshBasicMaterial({ color: 0xffcc66 });
-        const jointGeometry = new three.SphereGeometry(0.15, 8, 8);
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const worldMatrices: any[] = new Array(skeletonBones.length);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const computeWorld = (i: number, depth: number): any => {
-          const cached = worldMatrices[i];
-          if (cached) return cached;
-          const b = skeletonBones[i];
-          if (!b) return new three.Matrix4();
-          const local = new three.Matrix4();
-          local.makeRotationFromEuler(new three.Euler(b.rotation[0], b.rotation[1], b.rotation[2], 'XYZ'));
-          local.setPosition(b.translation[0], b.translation[1], b.translation[2]);
-          const parent = b.parentIndex;
-          let world = local;
-          if (parent >= 0 && parent < skeletonBones.length && parent !== i && depth < skeletonBones.length) {
-            world = computeWorld(parent, depth + 1).clone().multiply(local);
-          }
-          worldMatrices[i] = world;
-          return world;
-        };
-        for (let i = 0; i < skeletonBones.length; i++) computeWorld(i, 0);
-        const worldPositions = worldMatrices.map(
-          (m) => new three.Vector3().setFromMatrixPosition(m)
-        );
-
-        for (let i = 0; i < skeletonBones.length; i++) {
-          const pos = worldPositions[i];
-          const bone = skeletonBones[i];
-          if (!pos || !bone) continue;
-          const joint = new three.Mesh(jointGeometry, jointMaterial);
-          joint.position.copy(pos);
-          boneGroup.add(joint);
-
-          const parent = bone.parentIndex;
-          if (parent >= 0 && parent < skeletonBones.length) {
-            const parentPos = worldPositions[parent];
-            if (parentPos) {
-              const lineGeometry = new three.BufferGeometry().setFromPoints([pos, parentPos]);
-              boneGroup.add(new three.Line(lineGeometry, boneMaterial));
-            }
-          }
-        }
-        scene.add(boneGroup);
-      } else if (props.bones && props.bones.length > 0) {
-        // Fallback: bones passed directly via props already carry world positions.
-        const boneGroup = new three.Group();
-        const boneMaterial = new three.LineBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.6 });
-        const jointMaterial = new three.MeshBasicMaterial({ color: 0xffcc66 });
-        const jointGeometry = new three.SphereGeometry(0.15, 8, 8);
-
-        for (const bone of props.bones) {
-          const joint = new three.Mesh(jointGeometry, jointMaterial);
-          joint.position.set(bone.position[0], bone.position[1], bone.position[2]);
-          boneGroup.add(joint);
-
-          if (bone.parentIndex >= 0 && bone.parentIndex < props.bones.length) {
-            const parent = props.bones[bone.parentIndex];
-            if (parent) {
-              const points = [
-                new three.Vector3(bone.position[0], bone.position[1], bone.position[2]),
-                new three.Vector3(parent.position[0], parent.position[1], parent.position[2])
-              ];
-              const lineGeometry = new three.BufferGeometry().setFromPoints(points);
-              boneGroup.add(new three.Line(lineGeometry, boneMaterial));
-            }
-          }
-        }
-        scene.add(boneGroup);
-      }
-
-      // Draw dummy attachment points as octahedron markers colored by reference ID.
-      if (dummyPoints && dummyPoints.length > 0) {
-        const dummyGroup = new three.Group();
-        const dummyGeometry = new three.OctahedronGeometry(0.06, 0);
-        for (const dummy of dummyPoints) {
-          const hue = ((dummy.referenceId * 47) % 360) / 360;
-          const markerMaterial = new three.MeshBasicMaterial({
-            color: new three.Color().setHSL(hue, 0.85, 0.55)
-          });
-          const marker = new three.Mesh(dummyGeometry, markerMaterial);
-          marker.position.set(dummy.position[0], dummy.position[1], dummy.position[2]);
-          dummyGroup.add(marker);
-        }
-        scene.add(dummyGroup);
-      }
-
-      const setSize = (): void => {
-        const width = Math.max(container.clientWidth, 1);
-        const height = Math.max(container.clientHeight, 1);
-        renderer.setSize(width, height, false);
-        camera.aspect = width / height;
-        camera.updateProjectionMatrix();
-      };
-      setSize();
-      window.addEventListener('resize', setSize);
-
-      // Orbit controls for rotate/zoom/pan.
-      const controls = new OrbitControls(camera, canvas);
-      controls.enableDamping = true;
-      controls.dampingFactor = 0.08;
-
-      let raf = 0;
-      const tick = (): void => {
-        if (disposed) return;
-        controls.update();
-        renderer.render(scene, camera);
-        raf = requestAnimationFrame(tick);
-      };
-      tick();
-
-      handleRef.current = {
-        dispose: () => {
-          disposed = true;
-          cancelAnimationFrame(raf);
-          window.removeEventListener('resize', setSize);
-          controls.dispose();
-          renderer.dispose();
-          canvas.remove();
-        }
-      };
     })();
-
     return () => {
+      cancelled = true;
       handleRef.current?.dispose();
       handleRef.current = null;
     };
-  }, [props.boundingBox, props.boneCount, props.meshCount, meshData, skeletonBones, dummyPoints]);
+  }, []);
+
+  const meshLabel = `mesh[${props.meshIndex ?? 0}]`;
 
   return (
     <div style={{ position: 'relative', width: '100%', height: 300, background: '#1a1d23', borderRadius: 4 }}>
@@ -488,8 +231,211 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
       }}>
         FLVER 3D 预览 · {props.boneCount ?? 0} bones · {props.meshCount ?? 0} meshes
-        {meshData ? ` · mesh[0] ${meshData.vertexCount} verts` : meshError ? ` · ${meshError}` : ''}
+        {' · '}{backend === 'detecting' ? 'backend…' : `backend ${backend}`}
+        {meshData ? ` · ${meshLabel} ${meshData.vertexCount} verts` : meshError ? ` · ${meshError}` : ''}
+        {sceneError ? ` · ${sceneError}` : ''}
+      </div>
+      {selected ? (
+        <div style={{
+          position: 'absolute', top: 8, right: 8, color: '#9fd0ff', fontSize: 12,
+          background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: 4
+        }}>
+          已选择 {selected.label}
+        </div>
+      ) : null}
+      <div style={{
+        position: 'absolute', bottom: 8, left: 8, color: '#6a7686', fontSize: 11,
+        background: 'rgba(0,0,0,0.45)', padding: '2px 8px', borderRadius: 4
+      }}>
+        点击网格选中 / 再次点击取消 · 网格数据只读
       </div>
     </div>
   );
+}
+
+function buildSemanticScene(input: {
+  meshData: MeshData | null;
+  meshIndex: number;
+  skeleton: SkeletonBone[];
+  dummies: DummyPoint[];
+  boundingBox?: { min: number[]; max: number[] } | undefined;
+  texture: FlverSceneTexture | null;
+}): FlverSemanticScene {
+  const meshes: FlverSceneMesh[] = [];
+  if (input.meshData) {
+    const positions = decodeFloat32Array(input.meshData.positionsBase64);
+    const mesh: FlverSceneMesh = {
+      id: `mesh-${input.meshIndex}`,
+      label: `mesh[${input.meshIndex}]`,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+      positions,
+      vertexCount: input.meshData.vertexCount || positions.length / 3,
+      wireframeOverlay: true
+    };
+    if (input.meshData.uvsBase64) mesh.uvs = decodeFloat32Array(input.meshData.uvsBase64);
+    if (input.meshData.normalsBase64) mesh.normals = decodeFloat32Array(input.meshData.normalsBase64);
+    if (input.meshData.indicesBase64) mesh.indices = decodeUint16Array(input.meshData.indicesBase64);
+    if (input.meshData.boneWeightsBase64) {
+      mesh.vertexColors = boneWeightColors(input.meshData.boneWeightsBase64, positions.length / 3);
+    } else if (input.meshData.boneIndicesBase64) {
+      mesh.vertexColors = boneIndexColors(input.meshData.boneIndicesBase64, positions.length / 3);
+    }
+    if (input.texture) mesh.texture = input.texture;
+    meshes.push(mesh);
+  }
+  const bounds = computeSceneBounds(input.boundingBox, meshes);
+  const bones = input.skeleton.map((bone, index) => ({
+    id: `bone-${index}`,
+    name: bone.name,
+    parentIndex: bone.parentIndex,
+    translation: bone.translation,
+    rotation: bone.rotation
+  }));
+  const dummies = input.dummies.map((dummy, index) => ({
+    id: `dummy-${index}`,
+    referenceId: dummy.referenceId,
+    position: dummy.position
+  }));
+  return {
+    meshes,
+    ...(bones.length > 0 ? { bones } : {}),
+    ...(dummies.length > 0 ? { dummies } : {}),
+    bounds
+  };
+}
+
+function computeSceneBounds(
+  boundingBox: { min: number[]; max: number[] } | undefined,
+  meshes: FlverSceneMesh[]
+): FlverSemanticScene['bounds'] {
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  if (boundingBox) {
+    min[0] = boundingBox.min[0] ?? 0;
+    min[1] = boundingBox.min[1] ?? 0;
+    min[2] = boundingBox.min[2] ?? 0;
+    max[0] = boundingBox.max[0] ?? 0;
+    max[1] = boundingBox.max[1] ?? 0;
+    max[2] = boundingBox.max[2] ?? 0;
+  }
+  for (const mesh of meshes) {
+    for (let index = 0; index < mesh.positions.length; index += 3) {
+      const x = mesh.positions[index] ?? 0;
+      const y = mesh.positions[index + 1] ?? 0;
+      const z = mesh.positions[index + 2] ?? 0;
+      if (x < min[0]) min[0] = x;
+      if (y < min[1]) min[1] = y;
+      if (z < min[2]) min[2] = z;
+      if (x > max[0]) max[0] = x;
+      if (y > max[1]) max[1] = y;
+      if (z > max[2]) max[2] = z;
+    }
+  }
+  if (!Number.isFinite(min[0])) {
+    min[0] = -50;
+    min[1] = -50;
+    min[2] = -50;
+    max[0] = 50;
+    max[1] = 50;
+    max[2] = 50;
+  }
+  const [minX, minY, minZ] = min;
+  const [maxX, maxY, maxZ] = max;
+  return {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ],
+    center: [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2]
+  };
+}
+
+function decodeFloat32Array(base64: string): Float32Array {
+  const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+  const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return new Float32Array(copy);
+}
+
+function decodeUint16Array(base64: string): Uint16Array {
+  const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+  const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return new Uint16Array(copy);
+}
+
+// 骨权重着色：主骨权重高为红（顶点紧绑单骨），分散为蓝。4 bytes/顶点 × 4 影响。
+function boneWeightColors(weightsBase64: string, vertexCount: number): Float32Array {
+  const weightBytes = Uint8Array.from(atob(weightsBase64), (char) => char.charCodeAt(0));
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const primaryWeight = (weightBytes[v * 4] ?? 0) / 255;
+    colors[v * 3] = primaryWeight;
+    colors[v * 3 + 1] = 0.2;
+    colors[v * 3 + 2] = 1 - primaryWeight;
+  }
+  return colors;
+}
+
+const BONE_PALETTE: Array<[number, number, number]> = [
+  [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 0.0],
+  [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 0.5, 0.0], [0.5, 0.0, 1.0],
+  [0.0, 1.0, 0.5], [0.5, 1.0, 0.0], [1.0, 0.0, 0.5], [0.0, 0.5, 1.0]
+];
+
+// 骨索引着色：按首个骨索引取调色板色。4 bytes/顶点 × 4 影响。
+function boneIndexColors(indicesBase64: string, vertexCount: number): Float32Array {
+  const indexBytes = Uint8Array.from(atob(indicesBase64), (char) => char.charCodeAt(0));
+  const colors = new Float32Array(vertexCount * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const boneIdx = (indexBytes[v * 4] ?? 0) % BONE_PALETTE.length;
+    const color = BONE_PALETTE[boneIdx] ?? [1.0, 1.0, 1.0];
+    colors[v * 3] = color[0];
+    colors[v * 3 + 1] = color[1];
+    colors[v * 3 + 2] = color[2];
+  }
+  return colors;
+}
+
+/**
+ * 将 base64 纹理字节解码为语义纹理（DDS mipmaps 或 RGBA bytes）。
+ * 纯数据解析（DDSLoader.parse），不创建渲染器对象。
+ */
+async function decodeFlverTexture(textureBase64: string): Promise<FlverSceneTexture | null> {
+  try {
+    const texBytes = Uint8Array.from(atob(textureBase64), (char) => char.charCodeAt(0));
+    // DDS magic "DDS " (0x20534444)。
+    const isDds = texBytes.length > 4
+      && texBytes[0] === 0x44 && texBytes[1] === 0x44 && texBytes[2] === 0x53 && texBytes[3] === 0x20;
+    if (isDds && texBytes.length > 128) {
+      const ddsLoaderModule = await import('three/examples/jsm/loaders/DDSLoader.js');
+      const dds = new ddsLoaderModule.DDSLoader().parse(
+        texBytes.buffer.slice(texBytes.byteOffset, texBytes.byteOffset + texBytes.byteLength),
+        true
+      );
+      return {
+        kind: 'dds',
+        width: dds.width,
+        height: dds.height,
+        mipmaps: dds.mipmaps,
+        format: dds.format as import('three').CompressedPixelFormat,
+        mipmapCount: dds.mipmapCount
+      };
+    }
+    // 非 DDS / 过小：RGBA 渐变占位纹理（语义形态，投影层建 DataTexture）。
+    const dv = new DataView(texBytes.buffer);
+    const width = dv.getUint32(12, true) || 256;
+    const height = dv.getUint32(16, true) || 256;
+    const size = Math.min(256, Math.max(1, Math.min(width, height)));
+    const data = new Uint8Array(size * size * 4);
+    for (let index = 0; index < data.length; index += 4) {
+      const x = (index / 4) % size;
+      const y = Math.floor(index / 4 / size);
+      data[index] = Math.floor((x / size) * 255);
+      data[index + 1] = Math.floor((y / size) * 255);
+      data[index + 2] = 200;
+      data[index + 3] = 255;
+    }
+    return { kind: 'rgba', width: size, height: size, rgbaBytes: data };
+  } catch {
+    return null;
+  }
 }
