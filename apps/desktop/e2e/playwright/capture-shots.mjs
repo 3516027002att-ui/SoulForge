@@ -16,7 +16,8 @@ window.on('dialog', (dialog) => {
   dialog.accept().catch(() => undefined);
 });
 await window.waitForLoadState('domcontentloaded');
-await window.waitForSelector('.change-queue');
+// IDE 布局下变更队列位于暂存侧栏面板内（初始为隐藏面板），等待挂载即可。
+await window.waitForSelector('.change-queue', { state: 'attached' });
 await window.screenshot({ path: path.join(shotsDir, 'final-01-empty-workspace.png') });
 
 await window.getByRole('button', { name: '打开 Mod 工作区' }).click();

@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useState, useSyncExternalStore, type ReactElement } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  type ReactElement
+} from 'react';
 import {
   DEFERRED_PREVIEW_TARGET_RELEASE,
   isDeferredPreviewEditorKind
@@ -69,6 +78,7 @@ import { ChangeQueuePanel } from './staging/ChangeQueuePanel.js';
 const RESOURCE_KIND_ORDER: ResourceKind[] = ['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx', 'chr', 'obj', 'other', 'unknown'];
 
 type WorkspaceMode = ResourceKind | 'files' | 'bnd4' | 'ai' | 'settings' | 'ops';
+type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
 
 const WORKSPACE_MODES: Array<{ id: WorkspaceMode; label: string }> = [
   { id: 'files', label: '文件' },
@@ -91,6 +101,10 @@ const WORKSPACE_MODES: Array<{ id: WorkspaceMode; label: string }> = [
 
 /** 无实时 MSB 数据时的空 parts（真实数据经 Bridge 读取后填充）。 */
 const EMPTY_MSB_PARTS: MsbPartTransformLike[] = [];
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
 
 function hexTextToBase64(hexText: string): string {
   const cleaned = hexText.replace(/[^0-9a-fA-F]/g, '');
@@ -164,6 +178,8 @@ export function App(): ReactElement {
   const [files, setFiles] = useState<RendererIndexedFile[]>([]);
   const [allFiles, setAllFiles] = useState<RendererIndexedFile[]>([]);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('files');
+  const [sidebarView, setSidebarView] = useState<SidebarView>('explorer');
+  const [agentOpen, setAgentOpen] = useState(true);
   const [status, setStatus] = useState('就绪');
   const [emevdDocument, setEmevdDocument] = useState<EmevdEditorDocument>(EMPTY_EMEVD_DOCUMENT);
   const [emevdSourceHash, setEmevdSourceHash] = useState<string | null>(null);
@@ -203,6 +219,20 @@ export function App(): ReactElement {
   const [aiMode] = useState<AiPermissionMode>('plan');
   const [aiPrompt, setAiPrompt] = useState('解释当前资源的证据链，并给出下一步安全修改计划。');
   const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [agentGoal, setAgentGoal] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(264);
+  const [cmdkOpen, setCmdkOpen] = useState(false);
+  const [cmdkQuery, setCmdkQuery] = useState('');
+  const [cmdkIndex, setCmdkIndex] = useState(0);
+  const [clockText, setClockText] = useState('--:--');
+  const [toasts, setToasts] = useState<Array<{ id: number; text: string; kind: 'ok' | 'warn' }>>([]);
+  const [openTabs, setOpenTabs] = useState<RendererIndexedFile[]>([]);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const cmdkInputRef = useRef<HTMLInputElement>(null);
+  const toastIdRef = useRef(0);
+  const prevPendingCountRef = useRef(0);
 
   const counts = useMemo(() => workspace?.countsByKind ?? null, [workspace]);
   const diagnostics = [...(workspace?.diagnostics ?? []), ...(analysis?.diagnostics ?? []), ...(preview?.diagnostics ?? [])];
@@ -212,8 +242,65 @@ export function App(): ReactElement {
   const editDirty = editText !== lastSavedText;
   const changeStore = useMemo(() => new ChangeControlStore(), []);
   const changeState = useSyncExternalStore(changeStore.subscribe, changeStore.getState);
+  const pendingChangeCount = changeState.items.filter((item) =>
+    item.status === 'draft' || item.status === 'staged' || item.status === 'failed'
+  ).length;
   const hasUncommittedChanges = editDirty
     || changeState.items.some((item) => item.status === 'draft' || item.status === 'staged');
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = 'dark';
+  }, []);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent): void => {
+      if (event.ctrlKey || event.metaKey) {
+        const key = event.key.toLowerCase();
+        if (key === 'k') {
+          event.preventDefault();
+          if (cmdkOpen) {
+            setCmdkOpen(false);
+          } else {
+            openCmdk();
+          }
+          return;
+        }
+        if (key === 'j') {
+          event.preventDefault();
+          setAgentOpen((open) => !open);
+          return;
+        }
+        if (key === 'b') {
+          event.preventDefault();
+          setSidebarCollapsed((collapsed) => !collapsed);
+          return;
+        }
+      }
+      if (event.key === 'Escape') setCmdkOpen(false);
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, [cmdkOpen]);
+
+  useEffect(() => {
+    const tick = (): void => {
+      const now = new Date();
+      setClockText(`${pad2(now.getHours())}:${pad2(now.getMinutes())}`);
+    };
+    tick();
+    const timer = window.setInterval(tick, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // 首个候选变更出现时自动切到暂存面板，保证审查动作可见可达。
+  useEffect(() => {
+    const previous = prevPendingCountRef.current;
+    prevPendingCountRef.current = pendingChangeCount;
+    if (previous === 0 && pendingChangeCount > 0) {
+      setSidebarCollapsed(false);
+      setSidebarView('staging');
+    }
+  }, [pendingChangeCount]);
 
   useEffect(() => {
     if (!hasUncommittedChanges) return undefined;
@@ -749,6 +836,81 @@ export function App(): ReactElement {
     setStatus('已清除原版游戏目录选择');
   }
 
+  function openCmdk(): void {
+    setCmdkQuery('');
+    setCmdkIndex(0);
+    setCmdkOpen(true);
+    window.setTimeout(() => cmdkInputRef.current?.focus(), 30);
+  }
+
+  function closeCmdk(): void {
+    setCmdkOpen(false);
+  }
+
+  function focusSearchPanel(): void {
+    setSidebarCollapsed(false);
+    setSidebarView('search');
+    window.setTimeout(() => searchInputRef.current?.focus(), 0);
+  }
+
+  function activateSidebarView(view: SidebarView): void {
+    if (view === sidebarView && !sidebarCollapsed) {
+      setSidebarCollapsed(true);
+      return;
+    }
+    setSidebarCollapsed(false);
+    setSidebarView(view);
+  }
+
+  function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const handleMove = (moveEvent: PointerEvent): void => {
+      setSidebarWidth(Math.min(480, Math.max(180, startWidth + moveEvent.clientX - startX)));
+    };
+    const handleUp = (): void => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+    };
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+  }
+
+  function pushToast(text: string, kind: 'ok' | 'warn' = 'ok'): void {
+    toastIdRef.current += 1;
+    const id = toastIdRef.current;
+    setToasts((list) => [...list, { id, text, kind }]);
+    window.setTimeout(() => {
+      setToasts((list) => list.filter((toast) => toast.id !== id));
+    }, 4200);
+  }
+
+  async function sendAgentPrompt(): Promise<void> {
+    const text = aiPrompt.trim();
+    if (!text || aiBusy) return;
+    setAgentGoal(text);
+    setAiBusy(true);
+    try {
+      await buildAiDraft();
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  function closeTab(file: RendererIndexedFile): void {
+    const next = openTabs.filter((tab) => tab.sourceUri !== file.sourceUri);
+    setOpenTabs(next);
+    if (selectedFile?.sourceUri === file.sourceUri) {
+      const fallback = next.length > 0 ? next[next.length - 1] : null;
+      if (fallback) {
+        void selectFile(fallback);
+      } else {
+        setSelectedFile(null);
+        setPreview(null);
+      }
+    }
+  }
+
   async function openWorkspace(): Promise<void> {
     const workspaceSelection = await window.soulforge.openWorkspaceDialog();
     if (!workspaceSelection) return;
@@ -763,8 +925,11 @@ export function App(): ReactElement {
     setAllFiles(result.files);
     setFiles(result.files);
     setWorkspaceMode('files');
+    setSidebarView('explorer');
     setSelectedFile(null);
     setPreview(null);
+    setOpenTabs([]);
+    setAgentGoal(null);
     setEditText('');
     setLastSavedText('');
     setMsgRows([]);
@@ -805,7 +970,7 @@ export function App(): ReactElement {
       return;
     }
     if (mode === 'settings') {
-    setStatus('设置：模型服务、思考强度和权限模式见右侧 AI 面板');
+      setStatus('设置：模型服务、思考强度和权限模式见左侧「设置」面板');
       return;
     }
     const filtered = filterFilesForMode(allFiles, mode, query);
@@ -816,6 +981,9 @@ export function App(): ReactElement {
 
   async function selectFile(file: RendererIndexedFile): Promise<void> {
     setSelectedFile(file);
+    setOpenTabs((tabs) =>
+      tabs.some((tab) => tab.sourceUri === file.sourceUri) ? tabs : [...tabs, file]
+    );
     setPreview(null);
     setEditText('');
     setLastSavedText('');
@@ -946,6 +1114,12 @@ export function App(): ReactElement {
         ? `写入完成：${result.written} 项已写入，原文件已备份，可回滚。`
         : `写入结束：${result.written} 项已写入，${result.failed} 项失败（原因见诊断）。`
     );
+    pushToast(
+      result.failed === 0
+        ? `写入完成：${result.written} 项已写入，原文件已备份，可回滚`
+        : `写入结束：${result.failed} 项失败（原因见诊断）`,
+      result.failed === 0 ? 'ok' : 'warn'
+    );
   }
 
   async function rollbackOp(opId: string): Promise<void> {
@@ -1027,103 +1201,473 @@ export function App(): ReactElement {
     const result = await window.soulforge.runAiTool('explain_event', { uri: eventUri });
     setToolOutput(result);
   }
+  const cmdkCommands: Array<{ id: string; icon: string; label: string; hint?: string; run: () => void }> = [
+    ...WORKSPACE_MODES.map((mode) => ({
+      id: `mode-${mode.id}`,
+      icon: '◧',
+      label: `切换到 ${mode.label} 模式`,
+      ...(isResourceKindMode(mode.id) && counts ? { hint: String(counts[mode.id] ?? 0) } : {}),
+      run: (): void => {
+        setSidebarCollapsed(false);
+        setSidebarView('explorer');
+        switchMode(mode.id);
+      }
+    })),
+    { id: 'open-workspace', icon: '⌘', label: '打开 Mod 工作区…', run: (): void => { void openWorkspace(); } },
+    { id: 'focus-search', icon: '⌕', label: '聚焦资源搜索', hint: '搜索', run: focusSearchPanel },
+    { id: 'toggle-agent', icon: '✦', label: '切换 AI Agent 面板', hint: 'Ctrl J', run: (): void => { setAgentOpen((open) => !open); } },
+    { id: 'toggle-sidebar', icon: '◨', label: '切换侧栏', hint: 'Ctrl B', run: (): void => { setSidebarCollapsed((collapsed) => !collapsed); } }
+  ];
+  const cmdkNormalized = cmdkQuery.trim().toLowerCase();
+  const filteredCmdkCommands = cmdkCommands.filter(
+    (command) => !cmdkNormalized || command.label.toLowerCase().includes(cmdkNormalized)
+  );
+  const cmdkResourceHits = cmdkNormalized
+    ? (allFiles.length > 0 ? allFiles : files)
+        .filter((file) => file.relativePath.toLowerCase().includes(cmdkNormalized))
+        .slice(0, 8)
+    : [];
+  const cmdkItemCount = filteredCmdkCommands.length + cmdkResourceHits.length;
+  const selectedCmdkIndex = Math.min(cmdkIndex, Math.max(0, cmdkItemCount - 1));
+
+  function runCmdkItem(index: number): void {
+    if (index < filteredCmdkCommands.length) {
+      const command = filteredCmdkCommands[index];
+      if (command) {
+        setCmdkOpen(false);
+        command.run();
+      }
+      return;
+    }
+    const file = cmdkResourceHits[index - filteredCmdkCommands.length];
+    if (file) {
+      setCmdkOpen(false);
+      void selectFile(file);
+    }
+  }
+
+  const welcomeStats = workspace
+    ? `已索引 ${allFiles.length} 个资源 · ${workspace.workspaceLabel}${analysis ? ` · 已解析 ${analysis.parsedFiles}` : ''}`
+    : '未打开 Mod 工作区 · 从左侧资源浏览器打开';
+  const lastOperation = operationHistory.length > 0 ? operationHistory[0] : null;
+  const sidebarStyle = { '--sidebar-w': `${sidebarWidth}px` } as CSSProperties;
 
   return (
-    <main className="app-shell">
-      <header className="top-bar">
-        <section>
-          <h1>SoulForge</h1>
-          <p>Mod 覆盖层可写 · 原版游戏目录只读 · 写入仅经补丁引擎</p>
-        </section>
-        <div className="top-bar-actions">
-          <button type="button" className="secondary-action" onClick={() => void chooseBaseDirectory()}>
-            {baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录（可选）'}
+    <div className="app-root">
+      {/* ══════════ 标题栏 ══════════ */}
+      <header className="titlebar">
+        <div className="titlebar__brand">
+          <svg className="brand-mark" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <path d="M12 2 L21 7 V17 L12 22 L3 17 V7 Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+            <path d="M12 7 L16.5 9.6 V14.4 L12 17 L7.5 14.4 V9.6 Z" fill="currentColor" opacity=".85" />
+          </svg>
+          <span className="brand-name">SoulForge</span>
+          <span className="brand-tag" title={sessionMeta?.workspaceLabel ?? workspace?.workspaceLabel ?? '未打开工作区'}>
+            {workspace?.workspaceLabel ?? '未打开工作区'} · {sessionMeta?.game ?? 'sekiro'}
+          </span>
+        </div>
+        <div className="titlebar__center">
+          <button type="button" className="cmdk-trigger" onClick={openCmdk} title="命令面板">
+            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="2" />
+              <path d="M16.5 16.5 L21 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            <span>搜索资源或命令…</span>
+            <kbd>Ctrl K</kbd>
           </button>
-          {baseRootChoice && (
-            <button type="button" className="ghost-action" onClick={clearBaseDirectory}>清除原版游戏目录</button>
-          )}
-          <button type="button" onClick={() => void openWorkspace()}>打开 Mod 工作区</button>
         </div>
       </header>
 
-      <nav className="mode-tabs" aria-label="编辑器模式">
-        {WORKSPACE_MODES.map((mode) => (
+      <div className="shell">
+        {/* ══════════ 活动栏 ══════════ */}
+        <nav className="activitybar" aria-label="主导航">
           <button
-            key={mode.id}
             type="button"
-            className={workspaceMode === mode.id ? (mode.id === 'ai' ? 'active ai-tab' : 'active') : mode.id === 'ai' ? 'ai-tab' : undefined}
-            onClick={() => switchMode(mode.id)}
+            className={sidebarView === 'explorer' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
+            onClick={() => activateSidebarView('explorer')}
+            title="资源浏览器"
+            aria-label="资源浏览器"
+            aria-current={sidebarView === 'explorer' && !sidebarCollapsed ? true : undefined}
           >
-            {mode.label}
-            {counts && isResourceKindMode(mode.id) ? ` ${counts[mode.id] ?? 0}` : ''}
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.2h9A1.5 1.5 0 0 1 21 8.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+            </svg>
           </button>
-        ))}
-      </nav>
+          <button
+            type="button"
+            className={sidebarView === 'search' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
+            onClick={() => activateSidebarView('search')}
+            title="搜索"
+            aria-label="搜索"
+            aria-current={sidebarView === 'search' && !sidebarCollapsed ? true : undefined}
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M15.8 15.8L20 20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={sidebarView === 'staging' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
+            onClick={() => activateSidebarView('staging')}
+            title="暂存区"
+            aria-label={pendingChangeCount > 0 ? `暂存区（${pendingChangeCount} 项待处理）` : '暂存区'}
+            aria-current={sidebarView === 'staging' && !sidebarCollapsed ? true : undefined}
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+              <path d="M12 12l8-4.5M12 12L4 7.5M12 12v9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+            </svg>
+            {pendingChangeCount > 0 && <span className="ab-badge" aria-hidden="true">{pendingChangeCount}</span>}
+          </button>
+          <button
+            type="button"
+            className={sidebarView === 'audit' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
+            onClick={() => activateSidebarView('audit')}
+            title="审计与回滚"
+            aria-label="审计与回滚"
+            aria-current={sidebarView === 'audit' && !sidebarCollapsed ? true : undefined}
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path d="M12 3a9 9 0 1 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+              <path d="M12 7v5l3.2 2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+              <path d="M18.5 2.5v4h-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <div className="ab-spacer"></div>
+          <button
+            type="button"
+            className={agentOpen ? 'ab-item is-active' : 'ab-item'}
+            onClick={() => setAgentOpen((open) => !open)}
+            title="AI Agent"
+            aria-label="AI Agent 面板"
+            aria-pressed={agentOpen}
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path d="M12 2.8l1.9 5.6 5.6 1.9-5.6 1.9L12 17.8l-1.9-5.6-5.6-1.9 5.6-1.9Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+              <path d="M18.6 15.4l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8Z" fill="currentColor" opacity=".7" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={sidebarView === 'settings' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
+            onClick={() => activateSidebarView('settings')}
+            title="设置"
+            aria-label="设置"
+            aria-current={sidebarView === 'settings' && !sidebarCollapsed ? true : undefined}
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.7" />
+              <path d="M19 12a7 7 0 0 0-.14-1.4l2-1.55-2-3.46-2.36.95A7 7 0 0 0 14 5.3L13.7 2.8h-3.4L10 5.3a7 7 0 0 0-2.5 1.24l-2.36-.95-2 3.46 2 1.55a7 7 0 0 0 0 2.8l-2 1.55 2 3.46 2.36-.95a7 7 0 0 0 2.5 1.24l.3 2.5h3.4l.3-2.5a7 7 0 0 0 2.5-1.24l2.36.95 2-3.46-2-1.55c.09-.46.14-.93.14-1.4Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </nav>
 
-      <section className="workspace-summary">
-        <div className="workspace-summary-lines">
-          <div>
-            <strong>工作区（Mod 覆盖层）：</strong> {workspace?.workspaceLabel ?? '未打开'}
-            <span className="mode-badge">{workspaceModeLabel(workspaceMode)}</span>
-          </div>
-          <div>
-            <strong>原版游戏目录（只读）：</strong>{' '}
-            {sessionMeta?.baseLabel
-              ?? baseRootChoice?.label
-              ?? (sessionMeta ? '未挂载' : '打开工作区前可先选择')}
-            {sessionMeta && (
-              <span className={!sessionMeta.baseMounted ? 'base-pill missing' : 'base-pill ready'}>
-                {sessionMeta.baseMounted ? '已挂载' : '未挂载'}
+        {/* ══════════ 侧栏 ══════════ */}
+        <aside className={`sidebar${sidebarCollapsed ? ' is-collapsed' : ''}`} style={sidebarStyle}>
+          {/* ── 资源浏览器 ── */}
+          <section className={sidebarView === 'explorer' ? 'panel is-active' : 'panel'} data-panel-id="explorer" aria-label="资源浏览器">
+            <div className="panel__header">
+              <h2 className="panel__title">资源浏览器</h2>
+              <span className="panel__hint">{workspace?.workspaceLabel ?? '未打开工作区'}</span>
+            </div>
+            <div className="panel__body panel__body--pad">
+              <div className="explorer-actions">
+                <button type="button" className="btn btn--primary btn--block" onClick={() => void openWorkspace()}>
+                  打开 Mod 工作区
+                </button>
+                <div className="row gap">
+                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => void chooseBaseDirectory()}>
+                    {baseRootChoice ? '更换原版目录' : '选择原版目录'}
+                  </button>
+                  {baseRootChoice && (
+                    <button type="button" className="btn btn--ghost btn--sm" onClick={clearBaseDirectory}>清除</button>
+                  )}
+                </div>
+                {baseRootChoice && (
+                  <p className="explorer-base-note" title={baseRootChoice.label}>
+                    原版（下次打开生效）：{baseRootChoice.label}
+                  </p>
+                )}
+              </div>
+              <div className="mode-tabs" aria-label="编辑器模式">
+                {WORKSPACE_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    className={workspaceMode === mode.id ? 'active' : undefined}
+                    onClick={() => switchMode(mode.id)}
+                  >
+                    {mode.label}
+                    {counts && isResourceKindMode(mode.id) ? ` ${counts[mode.id] ?? 0}` : ''}
+                  </button>
+                ))}
+              </div>
+              <div className="search-box">
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="过滤路径 / 类型"
+                  aria-label="过滤资源列表"
+                />
+              </div>
+              <div className="file-list">
+                {visibleFiles.map((file) => (
+                  <button
+                    type="button"
+                    key={file.sourceUri}
+                    className={selectedFile?.sourceUri === file.sourceUri ? 'file-item selected' : 'file-item'}
+                    onClick={() => void selectFile(file)}
+                  >
+                    <span className="file-item__name">{file.relativePath}</span>
+                    <small className="file-item__meta">{file.resourceKind} | {file.formatLabel} | {(file.size / 1024).toFixed(1)} KB</small>
+                  </button>
+                ))}
+                {visibleFiles.length === 0 && (
+                  <p className="empty-hint">当前模式没有匹配资源。可切换到文件模式或调整搜索。</p>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {/* ── 搜索 ── */}
+          <section className={sidebarView === 'search' ? 'panel is-active' : 'panel'} data-panel-id="search" aria-label="搜索">
+            <div className="panel__header"><h2 className="panel__title">搜索</h2></div>
+            <div className="panel__body panel__body--pad">
+              <div className="search-box search-box--with-action">
+                <input
+                  ref={searchInputRef}
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void search();
+                    }
+                  }}
+                  placeholder="在资源中搜索…"
+                  autoComplete="off"
+                  aria-label="在资源中搜索"
+                />
+                <button type="button" className="btn btn--ghost btn--sm" onClick={() => void search()}>搜索</button>
+              </div>
+              <div className="search-results">
+                {query.trim() === '' && (
+                  <p className="empty-hint">输入关键字，按路径 / 类型检索工作区资源；回车调用资源搜索。</p>
+                )}
+                {query.trim() !== '' && visibleFiles.length === 0 && <p className="empty-hint">无匹配结果。</p>}
+                {query.trim() !== '' && visibleFiles.slice(0, 60).map((file) => (
+                  <button type="button" key={file.sourceUri} className="search-hit" onClick={() => void selectFile(file)}>
+                    <div className="search-hit__path">{file.relativePath}</div>
+                    <div className="search-hit__line">{file.resourceKind} · {file.formatLabel} · {(file.size / 1024).toFixed(1)} KB</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* ── 暂存区 ── */}
+          <section className={sidebarView === 'staging' ? 'panel is-active' : 'panel'} data-panel-id="staging" aria-label="暂存区">
+            <div className="panel__header">
+              <h2 className="panel__title">暂存区</h2>
+              <span className={pendingChangeCount > 0 ? 'pill pill--warn' : 'pill'}>
+                {pendingChangeCount > 0 ? `${pendingChangeCount} 项待处理` : '暂存为空'}
               </span>
-            )}
-          </div>
-        </div>
-        {counts && (
-          <div className="counts">
-            {RESOURCE_KIND_ORDER.map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                className={workspaceMode === kind ? 'count-chip active' : 'count-chip'}
-                onClick={() => switchMode(kind)}
-              >
-                {kind}: {counts[kind]}
-              </button>
-            ))}
-          </div>
-        )}
-      </section>
+            </div>
+            <div className="panel__body panel__body--pad">
+              <ChangeQueuePanel
+                state={changeState}
+                actions={{
+                  approve: (id) => { changeStore.approve(id); },
+                  reject: (id) => { changeStore.reject(id); },
+                  undoToDraft: (id) => { changeStore.undoToDraft(id); },
+                  discard: (id) => { changeStore.discard(id); },
+                  clearTerminal: () => { changeStore.clearTerminal(); },
+                  commit: () => { void commitStagedChanges(); }
+                }}
+              />
+            </div>
+          </section>
 
-      <section className="content-grid">
-        <aside className="resource-pane">
-          <div className="search-row">
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索路径 / 类型"
-            />
-            <button type="button" onClick={search}>搜索</button>
-          </div>
-          <div className="file-list">
-            {visibleFiles.map((file) => (
-              <button
-                type="button"
-                key={file.sourceUri}
-                className={selectedFile?.sourceUri === file.sourceUri ? 'file-item selected' : 'file-item'}
-                onClick={() => void selectFile(file)}
-              >
-                <span>{file.relativePath}</span>
-                <small>{file.resourceKind} | {file.formatLabel} | {(file.size / 1024).toFixed(1)} KB</small>
+          {/* ── 审计与回滚 ── */}
+          <section className={sidebarView === 'audit' ? 'panel is-active' : 'panel'} data-panel-id="audit" aria-label="审计与回滚">
+            <div className="panel__header">
+              <h2 className="panel__title">审计与回滚</h2>
+              <button type="button" className="btn btn--ghost btn--sm" disabled={!workspace} onClick={() => void refreshOperationHistory()}>
+                刷新
               </button>
-            ))}
-            {visibleFiles.length === 0 && (
-              <p className="muted pane-empty">当前模式没有匹配资源。可切换到文件模式或调整搜索。</p>
-            )}
-          </div>
+            </div>
+            <div className="panel__body panel__body--pad">
+              {!workspace && <p className="empty-hint">打开工作区并完成至少一次补丁提交后可在此回滚。</p>}
+              {workspace && operationHistory.length === 0 && (
+                <p className="empty-hint">尚无已记录操作。写入暂存变更后会记录到持久操作日志。</p>
+              )}
+              <div className="audit-timeline">
+                {operationHistory.map((entry) => (
+                  <div
+                    key={entry.opId}
+                    className={
+                      entry.status === 'rolled_back'
+                        ? 'audit-entry audit-entry--rollback'
+                        : entry.status === 'failed'
+                          ? 'audit-entry audit-entry--failed'
+                          : 'audit-entry audit-entry--commit'
+                    }
+                  >
+                    <div className="audit-entry__title">{entry.title}</div>
+                    <div className="audit-entry__meta">
+                      <span className={`op-status op-status-${entry.status}`}>{operationStatusLabel(entry.status)}</span>
+                      <span>{entry.fileCount} 个文件 · {entry.committedAt ?? entry.createdAt}</span>
+                    </div>
+                    <div className="audit-entry__meta" title={entry.changedPaths.join('\n')}>
+                      <span>
+                        {entry.changedPaths[0] ? shortenPath(entry.changedPaths[0]) : '—'}
+                        {entry.changedPaths.length > 1 ? ` +${entry.changedPaths.length - 1}` : ''}
+                      </span>
+                    </div>
+                    {entry.status === 'committed' && (
+                      <div className="audit-entry__actions">
+                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => void rollbackOp(entry.opId)}>
+                          回滚
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* ── 设置 ── */}
+          <section className={sidebarView === 'settings' ? 'panel is-active' : 'panel'} data-panel-id="settings" aria-label="设置">
+            <div className="panel__header"><h2 className="panel__title">设置</h2></div>
+            <div className="panel__body panel__body--pad">
+              <div className="setting-row setting-row--control">
+                <div>
+                  <div className="setting-name">模型服务</div>
+                  <div className="setting-desc">计划草稿与证据分析</div>
+                </div>
+                <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)} aria-label="模型服务">
+                  <option value="mock">本地计划草稿</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="anthropic">Anthropic</option>
+                </select>
+              </div>
+              <div className="setting-row setting-row--control">
+                <div>
+                  <div className="setting-name">思考强度</div>
+                  <div className="setting-desc">草稿生成深度</div>
+                </div>
+                <select value={aiThinking} onChange={(event) => setAiThinking(event.target.value as AiThinkingLevel)} aria-label="思考强度">
+                  <option value="fast">快速</option>
+                  <option value="normal">普通</option>
+                  <option value="deep">深入</option>
+                  <option value="extreme">极致</option>
+                </select>
+              </div>
+              <div className="setting-row setting-row--control">
+                <div>
+                  <div className="setting-name">权限模式</div>
+                  <div className="setting-desc">P0 安全收口期间锁定</div>
+                </div>
+                <select value={aiMode} disabled title="P0 安全收口期间由主进程锁定为计划模式" aria-label="权限模式">
+                  <option value="plan">计划模式</option>
+                </select>
+              </div>
+              <div className="setting-row">
+                <div>
+                  <div className="setting-name">原版游戏目录（只读）</div>
+                  <div className="setting-desc">
+                    {sessionMeta?.baseLabel
+                      ?? baseRootChoice?.label
+                      ?? (sessionMeta ? '未挂载' : '打开工作区前可先选择')}
+                  </div>
+                </div>
+                <span className={sessionMeta?.baseMounted ? 'pill pill--ok' : 'pill'}>
+                  {sessionMeta ? (sessionMeta.baseMounted ? '已挂载' : '未挂载') : '待选择'}
+                </span>
+              </div>
+              <div className="row gap setting-actions">
+                <button type="button" className="btn btn--ghost btn--sm" onClick={() => void chooseBaseDirectory()}>
+                  {baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录'}
+                </button>
+                {baseRootChoice && (
+                  <button type="button" className="btn btn--ghost btn--sm" onClick={clearBaseDirectory}>清除选择</button>
+                )}
+              </div>
+              <div className="setting-row">
+                <div>
+                  <div className="setting-name">写入路径</div>
+                  <div className="setting-desc">变更必须经暂存与备份后写入（内部：PatchIR / Patch Engine）</div>
+                </div>
+                <span className="pill pill--ok">强制</span>
+              </div>
+              <div className="setting-row">
+                <div>
+                  <div className="setting-name">回滚</div>
+                  <div className="setting-desc">写入前自动备份，可按操作回滚</div>
+                </div>
+                <span className="pill pill--ok">可用</span>
+              </div>
+              <div className="setting-row">
+                <div>
+                  <div className="setting-name">界面主题</div>
+                  <div className="setting-desc">锻造台暗色</div>
+                </div>
+                <span className="pill">暗色（亮色待定）</span>
+              </div>
+            </div>
+          </section>
+
+          <div className="sidebar-resizer" onPointerDown={startSidebarResize} aria-hidden="true"></div>
         </aside>
 
-        <section className="viewer-pane">
-          <h2>{selectedFile?.relativePath ?? '资源预览'}</h2>
+        {/* ══════════ 编辑器主区 ══════════ */}
+        <main className="editor-area">
+          <div className="tabbar" role="tablist" aria-label="打开的资源">
+            {openTabs.map((tab) => {
+              const isActive = selectedFile?.sourceUri === tab.sourceUri;
+              const shortName = tab.relativePath.split(/[\\/]/).pop() ?? tab.relativePath;
+              return (
+                <div
+                  key={tab.sourceUri}
+                  className={isActive ? 'tab is-active' : 'tab'}
+                  role="tab"
+                  aria-selected={isActive}
+                  title={tab.relativePath}
+                  onClick={() => void selectFile(tab)}
+                >
+                  <span className="tab__name">{shortName}</span>
+                  {isActive && hasUncommittedChanges && <span className="tab__dirty" title="有未写入变更"></span>}
+                  <button
+                    type="button"
+                    className="tab__close"
+                    aria-label={`关闭 ${tab.relativePath}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      closeTab(tab);
+                    }}
+                  >
+                    <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+                      <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" />
+                    </svg>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <div className="editor-viewport">
+            <div className="editor-pane is-active">
+              <div className="pane-toolbar">
+                <span className="crumb">
+                  <b>{workspaceModeLabel(workspaceMode)}</b>
+                  {selectedFile ? ` · ${selectedFile.relativePath}` : ' · 资源预览'}
+                </span>
+                <span className="toolbar-spacer"></span>
+                {hasUncommittedChanges && <span className="pill pill--warn">未写入变更</span>}
+              </div>
+              <div className="pane-content">
+                <div className="viewer-content">
           {!selectedFile && <p className="muted">选择左侧资源后显示限量文本或十六进制预览。</p>}
           {preview?.structuredPreview && <StructuredPreviewCard preview={preview.structuredPreview} />}
           {preview?.nativeInspection && <NativeInspectionCard inspection={preview.nativeInspection} />}
@@ -1544,189 +2088,354 @@ export function App(): ReactElement {
             <TpfWorkbenchPanel resourceUri={selectedFile.sourceUri} data={tpfData as never} />
           )}
           {preview?.truncated && <p className="muted">预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开。</p>}
-        </section>
+                  {workspaceMode === 'ai' && (
+                    <>
+                      <p className="muted">计划优先，证据优先，写入必须经过 Patch Engine。</p>
+                      <div className="context-card ai-context-card">
+                        <strong>当前上下文</strong>
+                        <span>{selectedFile?.sourceUri ?? '未选择资源'}</span>
+                        {analysis && (
+                          <span>引用：高 {analysis.referenceStats.high} / 中 {analysis.referenceStats.medium} / 低 {analysis.referenceStats.low}</span>
+                        )}
+                        <span>{diagnostics.length ? `范围内有 ${diagnostics.length} 条诊断` : '范围内没有诊断'}</span>
+                      </div>
 
-        <aside className="ai-pane">
-          <div className="ai-pane-header">
-            <div>
-              <h2>AI 侧边栏</h2>
-              <p>计划优先，证据优先，写入必须经过 Patch Engine。</p>
+                      <div className="tool-panel">
+                        <strong>安全工具</strong>
+                        <div className="tool-group">
+                          <small>读取 / 分析</small>
+                          <div className="tool-list">
+                            {groupedTools.read.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
+                          </div>
+                        </div>
+                        <div className="tool-group">
+                          <small>提案 / 验证</small>
+                          <div className="tool-list">
+                            {groupedTools.plan.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
+                          </div>
+                        </div>
+                        <div className="tool-group">
+                          <small>提交 / 回滚</small>
+                          <div className="tool-list">
+                            {groupedTools.write.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
+                          </div>
+                        </div>
+                        <div className="tool-row">
+                          <input value={toolQuery} onChange={(event) => setToolQuery(event.target.value)} placeholder="输入资源搜索条件" aria-label="工具资源搜索条件" />
+                          <button type="button" onClick={() => void runToolSearch()}>运行</button>
+                        </div>
+                        <div className="tool-row">
+                          <input value={eventUri} onChange={(event) => setEventUri(event.target.value)} placeholder="event://..." aria-label="事件 URI" />
+                          <button type="button" onClick={() => void explainEvent()}>解释事件</button>
+                        </div>
+                      </div>
+
+                      {analysis && (
+                        <div className="context-card">
+                          <strong>证据索引</strong>
+                          <span>已解析：{analysis.parsedFiles}</span>
+                          <span>已检查：{analysis.inspectedFiles}</span>
+                          <span>引用：高 {analysis.referenceStats.high} / 中 {analysis.referenceStats.medium} / 低 {analysis.referenceStats.low}</span>
+                        </div>
+                      )}
+
+                      {toolOutput && <pre className="tool-output">{JSON.stringify(toolOutput, null, 2)}</pre>}
+                    </>
+                  )}
+                </div>
+              </div>
             </div>
-            <span className={aiProvider === 'mock' ? 'provider-pill ready' : 'provider-pill'}>
-              {aiProvider === 'mock' ? '本地草稿' : '需要配置'}
-            </span>
+
+            {/* ── 欢迎页：真实工作区摘要 ── */}
+            <div className={`editor-welcome${openTabs.length > 0 ? ' is-hidden' : ''}`}>
+              <div className="welcome">
+                <div className="welcome__head">
+                  <svg viewBox="0 0 24 24" width="26" height="26" className="welcome-mark" aria-hidden="true">
+                    <path d="M12 2 L21 7 V17 L12 22 L3 17 V7 Z" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+                    <path d="M12 7 L16.5 9.6 V14.4 L12 17 L7.5 14.4 V9.6 Z" fill="currentColor" opacity=".8" />
+                  </svg>
+                  <h1>SoulForge</h1>
+                  <span className="welcome__ws">{workspace?.workspaceLabel ?? '未打开工作区'} · {sessionMeta?.game ?? 'sekiro'}</span>
+                </div>
+                <p className="welcome__stats">{welcomeStats}</p>
+
+                <section className="welcome__section" aria-label="待审查变更">
+                  <div className="welcome-quick__label">待审查变更</div>
+                  {changeState.items.filter((item) => item.status === 'draft').length === 0 ? (
+                    <p className="empty-hint welcome-empty">没有待审查的变更。</p>
+                  ) : (
+                    changeState.items
+                      .filter((item) => item.status === 'draft')
+                      .slice(0, 5)
+                      .map((item) => (
+                        <div className="review-row" key={item.id}>
+                          <span className="review-row__target" title={item.sourceUri}>{item.target}</span>
+                          <span className="review-row__delta">{item.summary}</span>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => {
+                              setSidebarCollapsed(false);
+                              setSidebarView('staging');
+                            }}
+                          >
+                            审查
+                          </button>
+                        </div>
+                      ))
+                  )}
+                </section>
+
+                <section className="welcome__section" aria-label="最近打开">
+                  <div className="welcome-quick__label">最近打开</div>
+                  {openTabs.length === 0 ? (
+                    <p className="empty-hint welcome-empty">暂无最近打开。从左侧资源树选择资源，或按 Ctrl K 搜索。</p>
+                  ) : (
+                    <div className="welcome-quick__grid">
+                      {openTabs.slice(-6).reverse().map((tab) => (
+                        <button type="button" key={tab.sourceUri} className="quick-item" onClick={() => void selectFile(tab)}>
+                          <span className="quick-item__body">
+                            <span className="quick-item__name">{tab.relativePath}</span>
+                            <span className="quick-item__desc">{tab.resourceKind} · {tab.formatLabel}</span>
+                          </span>
+                          <span className="quick-item__ext">{tab.formatLabel}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <div className="welcome-meta">
+                  <span>
+                    {lastOperation
+                      ? `最近写入 ${lastOperation.title} · ${lastOperation.committedAt ?? lastOperation.createdAt}`
+                      : '本工作区尚无写入记录'}
+                  </span>
+                  <div className="welcome-shortcuts">
+                    <span><kbd>Ctrl K</kbd> 命令面板</span>
+                    <span><kbd>Ctrl J</kbd> AI Agent</span>
+                    <span><kbd>Ctrl B</kbd> 侧栏</span>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
+        </main>
 
-          <ChangeQueuePanel
-            state={changeState}
-            actions={{
-              approve: (id) => { changeStore.approve(id); },
-              reject: (id) => { changeStore.reject(id); },
-              undoToDraft: (id) => { changeStore.undoToDraft(id); },
-              discard: (id) => { changeStore.discard(id); },
-              clearTerminal: () => { changeStore.clearTerminal(); },
-              commit: () => { void commitStagedChanges(); }
-            }}
-          />
-
-          <div className="ai-control-grid">
-            <label>
-              模型服务
-              <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)}>
-                <option value="mock">本地计划草稿</option>
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-              </select>
-            </label>
-            <label>
-              思考强度
-              <select value={aiThinking} onChange={(event) => setAiThinking(event.target.value as AiThinkingLevel)}>
-                <option value="fast">快速</option>
-                <option value="normal">普通</option>
-                <option value="deep">深入</option>
-                <option value="extreme">极致</option>
-              </select>
-            </label>
-            <label>
-              权限模式
-              <select value={aiMode} disabled title="P0 安全收口期间由主进程锁定为计划模式">
-                <option value="plan">计划模式</option>
-              </select>
-            </label>
+        {/* ══════════ Agent 面板 ══════════ */}
+        <aside className={`agent${agentOpen ? '' : ' is-collapsed'}`} aria-label="AI Agent 面板">
+          <div className="agent__header">
+            <div className="agent__title">
+              <span className={`agent-dot${aiBusy ? ' is-busy' : ''}`}></span>
+              <span>Agent</span>
+              <span className="agent-model">{aiBusy ? '执行中' : modelServiceLabel(aiProvider)}</span>
+            </div>
+            <button type="button" className="tb-btn" onClick={() => setAgentOpen(false)} title="收起" aria-label="收起 Agent 面板">
+              <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
+                <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" />
+              </svg>
+            </button>
           </div>
-
-          <div className="context-card ai-context-card">
-            <strong>当前上下文</strong>
-            <span>{selectedFile?.sourceUri ?? '未选择资源'}</span>
-            {analysis && <span>引用：高 {analysis.referenceStats.high} / 中 {analysis.referenceStats.medium} / 低 {analysis.referenceStats.low}</span>}
-            <span>{diagnostics.length ? `范围内有 ${diagnostics.length} 条诊断` : '范围内没有诊断'}</span>
+          <div className="agent__stream" role="log" aria-live="polite" aria-label="Agent 会话记录">
+            {agentGoal === null && !aiDraft && !aiBusy && (
+              <div className="agent-empty">
+                没有进行中的任务。在下方描述目标，Agent 会生成计划草稿；变更经你批准后才会进入暂存区。
+              </div>
+            )}
+            {agentGoal !== null && (
+              <div className="task-goal">
+                <span className="task-goal__label">目标</span>
+                {agentGoal}
+              </div>
+            )}
+            {aiBusy && (
+              <div className="agent-block">
+                <div className="agent-block__label">日志</div>
+                <div className="agent-log">
+                  <div className="agent-log__row">
+                    <span className="spinner" aria-hidden="true"></span>
+                    <span>正在生成计划草稿…</span>
+                  </div>
+                </div>
+              </div>
+            )}
+            {aiDraft && (
+              <div className="agent-block">
+                <div className="agent-block__label">
+                  计划草稿 · {modelServiceLabel(aiDraft.provider)} / {thinkingLabel(aiDraft.thinking)} / {permissionModeLabel(aiDraft.mode)}
+                </div>
+                <div className="agent-draft">
+                  <strong>{aiDraft.title}</strong>
+                  <p>{aiDraft.summary}</p>
+                  {aiDraft.recommendedTools.length > 0 && (
+                    <div className="agent-tools">
+                      {aiDraft.recommendedTools.map((tool) => (
+                        <span key={tool.toolName} className="tool-chip" title={tool.reason}>{tool.toolName}</span>
+                      ))}
+                    </div>
+                  )}
+                  {aiDraft.nextActions.length > 0 && (
+                    <div className="agent-log">
+                      {aiDraft.nextActions.map((action) => (
+                        <div key={action} className="agent-log__row"><span>→ {action}</span></div>
+                      ))}
+                    </div>
+                  )}
+                  <details>
+                    <summary>提示词预览</summary>
+                    <pre className="tool-output">{aiDraft.promptPreview}</pre>
+                  </details>
+                </div>
+              </div>
+            )}
           </div>
-
-          <label className="ai-prompt-box">
-            目标
+          <div className="agent__composer">
+            <div className="composer-context">
+              {selectedFile && <span className="ctx-chip">{selectedFile.relativePath}</span>}
+              <span className="ctx-chip">{workspaceModeLabel(workspaceMode)}</span>
+            </div>
             <textarea
+              rows={2}
               value={aiPrompt}
               onChange={(event) => setAiPrompt(event.target.value)}
-              placeholder="例如：解释当前事件引用了哪些文本和参数，并提出安全修改计划。"
-            />
-          </label>
-          <button className="primary-action" type="button" onClick={() => void buildAiDraft()}>生成计划草稿</button>
-
-          {aiDraft && (
-            <section className="ai-draft-card">
-              <div className="ai-draft-title">
-                <strong>{aiDraft.title}</strong>
-                <span>{modelServiceLabel(aiDraft.provider)} / {thinkingLabel(aiDraft.thinking)} / {permissionModeLabel(aiDraft.mode)}</span>
-              </div>
-              <p>{aiDraft.summary}</p>
-
-              <div className="ai-mini-section">
-                <strong>建议工具</strong>
-                {aiDraft.recommendedTools.length === 0 && <span className="muted">暂无建议。</span>}
-                {aiDraft.recommendedTools.map((tool) => (
-                  <span key={tool.toolName} className="tool-chip" title={tool.reason}>{tool.toolName}</span>
-                ))}
-              </div>
-
-              <div className="ai-mini-section">
-                <strong>下一步</strong>
-                <ol>
-                  {aiDraft.nextActions.map((action) => <li key={action}>{action}</li>)}
-                </ol>
-              </div>
-
-              <details>
-                <summary>提示词预览</summary>
-                <pre className="tool-output">{aiDraft.promptPreview}</pre>
-              </details>
-            </section>
-          )}
-
-          <div className="tool-panel">
-            <strong>安全工具</strong>
-            <div className="tool-group">
-              <small>读取 / 分析</small>
-              <div className="tool-list">
-                {groupedTools.read.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
-              </div>
-            </div>
-            <div className="tool-group">
-              <small>提案 / 验证</small>
-              <div className="tool-list">
-                {groupedTools.plan.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
-              </div>
-            </div>
-            <div className="tool-group">
-              <small>提交 / 回滚</small>
-              <div className="tool-list">
-                {groupedTools.write.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
-              </div>
-            </div>
-            <div className="tool-row">
-              <input value={toolQuery} onChange={(event) => setToolQuery(event.target.value)} placeholder="输入资源搜索条件" />
-              <button type="button" onClick={() => void runToolSearch()}>运行</button>
-            </div>
-            <div className="tool-row">
-              <input value={eventUri} onChange={(event) => setEventUri(event.target.value)} placeholder="event://..." />
-              <button type="button" onClick={() => void explainEvent()}>解释事件</button>
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  void sendAgentPrompt();
+                }
+              }}
+              placeholder="描述修改目标，例如：把伤药葫芦的持有上限调到 12"
+              aria-label="向 Agent 描述修改目标"
+            ></textarea>
+            <div className="composer-bar">
+              <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+              <button type="button" className="btn btn--primary btn--sm" onClick={() => void sendAgentPrompt()}>发送</button>
             </div>
           </div>
-
-          {analysis && (
-            <div className="context-card">
-              <strong>证据索引</strong>
-              <span>已解析：{analysis.parsedFiles}</span>
-              <span>已检查：{analysis.inspectedFiles}</span>
-              <span>引用：高 {analysis.referenceStats.high} / 中 {analysis.referenceStats.medium} / 低 {analysis.referenceStats.low}</span>
-            </div>
-          )}
-
-          <section className="operation-history-panel">
-            <div className="operation-history-header">
-              <strong>操作历史</strong>
-              <button type="button" className="ghost-action" disabled={!workspace} onClick={() => void refreshOperationHistory()}>
-                刷新
-              </button>
-            </div>
-            {!workspace && <p className="muted">打开工作区并完成至少一次补丁提交后可在此回滚。</p>}
-            {workspace && operationHistory.length === 0 && (
-              <p className="muted">尚无已记录操作。保存文本资源后会写入持久操作日志。</p>
-            )}
-            <div className="operation-history-list">
-              {operationHistory.map((entry) => (
-                <div key={entry.opId} className="operation-history-item">
-                  <div className="operation-history-meta">
-                    <strong title={entry.opId}>{entry.title}</strong>
-                    <span className={`op-status op-status-${entry.status}`}>{operationStatusLabel(entry.status)}</span>
-                    <small>
-                      {entry.fileCount} 个文件 · {entry.committedAt ?? entry.createdAt}
-                    </small>
-                    <small className="muted" title={entry.changedPaths.join('\n')}>
-                      {entry.changedPaths[0] ? shortenPath(entry.changedPaths[0]) : '—'}
-                      {entry.changedPaths.length > 1 ? ` +${entry.changedPaths.length - 1}` : ''}
-                    </small>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={entry.status !== 'committed'}
-                    onClick={() => void rollbackOp(entry.opId)}
-                  >
-                    回滚
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          {toolOutput && <pre className="tool-output">{JSON.stringify(toolOutput, null, 2)}</pre>}
         </aside>
-      </section>
+      </div>
 
+      {/* ══════════ 状态栏 ══════════ */}
       <footer className="status-bar">
-        <span>{status}</span>
-        <span>{diagnostics.length ? `${diagnostics.length} 条诊断` : '没有诊断'}</span>
+        <div className="statusbar__left">
+          <span className="st-item st-branch" title="工作区">
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+              <path d="M6 3v6a4 4 0 0 0 4 4h4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <circle cx="6" cy="5" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <circle cx="6" cy="19" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <circle cx="18" cy="13" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M6 7v10" stroke="currentColor" strokeWidth="1.6" />
+            </svg>
+            {workspace?.workspaceLabel ?? '未打开工作区'}
+          </span>
+          <span className="st-item" title="VFS 索引">
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+              <ellipse cx="12" cy="5.5" rx="7" ry="2.8" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M5 5.5v6c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-6M5 11.5v6c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-6" fill="none" stroke="currentColor" strokeWidth="1.5" />
+            </svg>
+            {allFiles.length} 资源已索引
+          </span>
+          <span className="st-item" title="当前中央资源">当前：{selectedFile?.relativePath ?? '无'}</span>
+        </div>
+        <div className="statusbar__right">
+          <span className="st-item st-status" role="status" title={status}>{status}</span>
+          <span className="st-item">{diagnostics.length ? `${diagnostics.length} 条诊断` : '没有诊断'}</span>
+          <span className="st-item st-ok" title="写入前自动备份">
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+              <path d="M12 3l7 3v5c0 4.4-3 8-7 10-4-2-7-5.6-7-10V6Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+              <path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+            备份：启用 · 可回滚
+          </span>
+          <span className="st-item">{clockText}</span>
+        </div>
       </footer>
-    </main>
+
+      {/* ══════════ 命令面板 ══════════ */}
+      <div
+        className={`cmdk-overlay${cmdkOpen ? ' is-open' : ''}`}
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) closeCmdk();
+        }}
+      >
+        <div className="cmdk" role="dialog" aria-modal="true" aria-label="命令面板">
+          <div className="cmdk__input-wrap">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="2" />
+              <path d="M16.5 16.5L21 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            <input
+              ref={cmdkInputRef}
+              value={cmdkQuery}
+              onChange={(event) => {
+                setCmdkQuery(event.target.value);
+                setCmdkIndex(0);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowDown') {
+                  event.preventDefault();
+                  setCmdkIndex((index) => (cmdkItemCount === 0 ? 0 : (index + 1) % cmdkItemCount));
+                } else if (event.key === 'ArrowUp') {
+                  event.preventDefault();
+                  setCmdkIndex((index) => (cmdkItemCount === 0 ? 0 : (index - 1 + cmdkItemCount) % cmdkItemCount));
+                } else if (event.key === 'Enter') {
+                  event.preventDefault();
+                  runCmdkItem(selectedCmdkIndex);
+                }
+              }}
+              placeholder="输入命令或搜索资源…"
+              autoComplete="off"
+              aria-label="输入命令或搜索资源"
+            />
+          </div>
+          <div className="cmdk__list">
+            {cmdkItemCount === 0 && <p className="empty-hint">无匹配命令或资源。</p>}
+            {filteredCmdkCommands.map((command, index) => (
+              <button
+                key={command.id}
+                type="button"
+                className={index === selectedCmdkIndex ? 'cmdk-item is-selected' : 'cmdk-item'}
+                onClick={() => {
+                  closeCmdk();
+                  command.run();
+                }}
+              >
+                <span className="cmdk-item__icon" aria-hidden="true">{command.icon}</span>
+                <span className="cmdk-item__label">{command.label}</span>
+                {command.hint && <span className="cmdk-item__hint">{command.hint}</span>}
+              </button>
+            ))}
+            {cmdkResourceHits.map((file, index) => {
+              const itemIndex = filteredCmdkCommands.length + index;
+              return (
+                <button
+                  key={file.sourceUri}
+                  type="button"
+                  className={itemIndex === selectedCmdkIndex ? 'cmdk-item is-selected' : 'cmdk-item'}
+                  onClick={() => {
+                    closeCmdk();
+                    void selectFile(file);
+                  }}
+                >
+                  <span className="cmdk-item__icon" aria-hidden="true">⌘</span>
+                  <span className="cmdk-item__label">{file.relativePath}</span>
+                  <span className="cmdk-item__hint">{file.formatLabel}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="toast-root" role="status" aria-live="polite">
+        {toasts.map((toast) => (
+          <div key={toast.id} className={`toast toast--${toast.kind}`}>
+            <span className="toast__icon" aria-hidden="true">{toast.kind === 'ok' ? '✓' : '⚠'}</span>
+            {toast.text}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
