@@ -17,5 +17,6 @@ export * from './emevd-editor-ir.js';
 export * from './emevd-dsl.js';
 export * from './paramdef.js';
 export * from './scene-ir.js';
+export * from './msb-entity-registry.js';
 export * from './script-container.js';
 export * from './container-workbench.js';
