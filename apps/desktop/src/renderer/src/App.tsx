@@ -158,6 +158,34 @@ interface MsbPositionCommitInput {
   posZ: number;
 }
 
+interface MsbTransformCommitInput {
+  partName: string;
+  posX: number;
+  posY: number;
+  posZ: number;
+  rotX: number;
+  rotY: number;
+  rotZ: number;
+  scaleX: number;
+  scaleY: number;
+  scaleZ: number;
+}
+
+/** applyMsbMutation 支持的原生 MSB mutation 形态（与 preload 通道一致）。 */
+type MsbNativeMutation = {
+  kind: 'set_part_position' | 'set_part_transform' | 'set_region_position';
+  partName: string;
+  posX?: number;
+  posY?: number;
+  posZ?: number;
+  rotX?: number;
+  rotY?: number;
+  rotZ?: number;
+  scaleX?: number;
+  scaleY?: number;
+  scaleZ?: number;
+};
+
 export function App(): ReactElement {
   const [workspace, setWorkspace] = useState<RendererWorkspaceScanResult | null>(null);
   const [sessionMeta, setSessionMeta] = useState<RendererWorkspaceSession | null>(null);
@@ -717,36 +745,29 @@ export function App(): ReactElement {
   }
 
   /**
-   * MSB 写路径在 V0.5 已延期为只读预览，因此本函数当前不会被面板接线。
-   * 保留实现与 IPC 通道，V0.6 恢复时只需把 msb 的 deferredPreview 置为 null。
+   * MSB 写路径当前为延期只读预览（V0.6 治理承接后开闸），函数保留接线。
+   * 实际是否放行以 IPC 返回为准：主进程在 deferredPreview 门禁下 fail-closed。
    */
-  async function commitMsbPosition(
-    input: MsbPositionCommitInput,
-    kind: 'set_part_position' | 'set_region_position'
+  async function applyMsbNativeMutationAndReload(
+    mutation: MsbNativeMutation,
+    label: string
   ): Promise<void> {
     if (!msbLive || !msbSourceHash || !selectedFile) {
-      setStatus('MSB 位置提交仅在实时模式可用。');
+      setStatus('MSB 写入仅在实时模式可用。');
       return;
     }
     if (typeof window.soulforge.applyMsbMutation !== 'function') {
       setStatus('当前预加载未暴露 applyMsbMutation。');
       return;
     }
-    const label = kind === 'set_region_position' ? 'region' : 'part';
-    setStatus(`正在提交 MSB ${label} 位置：${input.partName}`);
+    setStatus(`正在提交 MSB ${label}…`);
     const result = await window.soulforge.applyMsbMutation(
       selectedFile.sourceUri,
       msbSourceHash,
-      {
-        kind,
-        partName: input.partName,
-        posX: input.posX,
-        posY: input.posY,
-        posZ: input.posZ
-      }
+      mutation
     );
     if (!result.ok) {
-      setStatus(result.diagnostics?.[0]?.message ?? `MSB ${label} 位置提交失败`);
+      setStatus(result.diagnostics?.[0]?.message ?? `MSB ${label} 提交失败`);
       return;
     }
     const reload = await window.soulforge.readMsbDocument(selectedFile.sourceUri) as {
@@ -817,11 +838,47 @@ export function App(): ReactElement {
         events: reload.data.eventCount ?? reload.data.events?.length ?? 0
       });
       setMsbSourceHash(reload.data.sourceHash ?? null);
-      setStatus(`MSB ${label} ${input.partName} 位置已提交并重读。`);
+      setStatus(`MSB ${label} 已提交并重读。`);
     } else {
       setStatus('MSB 已提交，但重读失败。');
     }
     await refreshOperationHistory();
+  }
+
+  async function commitMsbPosition(
+    input: MsbPositionCommitInput,
+    kind: 'set_part_position' | 'set_region_position'
+  ): Promise<void> {
+    const label = kind === 'set_region_position' ? 'region' : 'part';
+    await applyMsbNativeMutationAndReload(
+      {
+        kind,
+        partName: input.partName,
+        posX: input.posX,
+        posY: input.posY,
+        posZ: input.posZ
+      },
+      `${label} 位置`
+    );
+  }
+
+  async function commitMsbTransform(input: MsbTransformCommitInput): Promise<void> {
+    await applyMsbNativeMutationAndReload(
+      {
+        kind: 'set_part_transform',
+        partName: input.partName,
+        posX: input.posX,
+        posY: input.posY,
+        posZ: input.posZ,
+        rotX: input.rotX,
+        rotY: input.rotY,
+        rotZ: input.rotZ,
+        scaleX: input.scaleX,
+        scaleY: input.scaleY,
+        scaleZ: input.scaleZ
+      },
+      `transform ${input.partName}`
+    );
   }
 
   async function chooseBaseDirectory(): Promise<void> {
@@ -1740,6 +1797,9 @@ export function App(): ReactElement {
                       },
                       onRegionPositionCommit: (input: MsbPositionCommitInput) => {
                         void commitMsbPosition(input, 'set_region_position');
+                      },
+                      onPartTransformCommit: (input: MsbTransformCommitInput) => {
+                        void commitMsbTransform(input);
                       }
                     })}
               />
