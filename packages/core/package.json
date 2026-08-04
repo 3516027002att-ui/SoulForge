@@ -58,6 +58,8 @@
     "test:native-flver-mesh": "tsc -b ../shared . && node dist/testing/runNativeFlverMeshSmoke.js",
     "test:native-fmg": "tsc -b ../shared . && node dist/testing/runNativeFmgSmoke.js",
     "test:native-msb": "tsc -b ../shared . && node dist/testing/runNativeMsbSmoke.js",
+    "test:native-msb-all": "tsc -b ../shared . && node dist/testing/runNativeMsbAllMapsSmoke.js",
+    "test:native-msb-writer": "tsc -b ../shared . && node dist/testing/runNativeMsbWriterSmoke.js",
     "test:native-param": "tsc -b ../shared . && node dist/testing/runNativeParamSmoke.js",
     "test:native-preview": "tsc -b ../shared . && node dist/testing/runNativeInspectSmoke.js",
     "test:native-tae": "tsc -b ../shared . && node dist/testing/runNativeTaeSmoke.js",
