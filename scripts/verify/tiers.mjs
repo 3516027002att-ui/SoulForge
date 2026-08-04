@@ -87,6 +87,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:scene-draw-list': 'unit',
   'test:subprocess-control': 'unit',
   'test:three-scene-module': 'unit',
+  // 场景投影层头less功能冒烟（backend-resolution/picking/resource-release）。
+  // 合成语义场景驱动，filesystemAccess=false，无真实资源依赖，故归 unit。
+  'test:three-scene-functional': 'unit',
   'test:ui-localization': 'unit',
   'test:vault-encrypt-contract': 'unit',
   'test:vault-ipc-contract': 'unit',
@@ -155,6 +158,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:esd': 'native',
   'bridge:verify:flver': 'native',
   'bridge:verify:flver-glb': 'native',
+  // 多样本只读 authority：flver-multi（11 样本）/ tpf-multi（52 纹理）真实读取，
+  // collision-nav 为负向证据（corpus 无 hkx/hkt/nav/nvmtx/col）。需真机环境，归 native。
+  'bridge:verify:flver-multi': 'native',
+  'bridge:verify:tpf-multi': 'native',
+  'bridge:verify:collision-nav': 'native',
   'bridge:verify:flver-mesh': 'native',
   'bridge:verify:fmg': 'native',
   'bridge:verify:msb': 'native',
