@@ -43,6 +43,9 @@ apps/*/src/**/*.d.ts
 apps/*/src/**/*.d.ts.map
 !apps/desktop/src/renderer/src/global.d.ts
 
+# Local dev launcher (compiled from scripts/launch-soulforge.cs). Do not commit binaries.
+/SoulForge.exe
+
 # Electron/app artifacts
 release/
 *.log
