@@ -705,6 +705,28 @@ assertCodes(
 );
 
 assertCodes(
+  'passed-gate-invalidated-by-real-subject-drift',
+  buildDocument({
+    gates: [
+      cloneRows(baseGates)[0],
+      { id: 'REL-G', slices: '`W-REL-G-01`', state: 'passed', applicability: 'in-scope', refs: '`EV-SEALED-01`' }
+    ]
+  }),
+  ['GATE_EVIDENCE_STALE'],
+  {
+    freshnessContext: {
+      anchors: {
+        [SEAL_FIELDS.head]: {
+          isAncestor: true,
+          subjectScanAvailable: true,
+          changedSubjects: ['packages/core/src/ai/agentToolBridge.ts']
+        }
+      }
+    }
+  }
+);
+
+assertCodes(
   'fresh-unrelated-evidence-cannot-mask-stale-scope-ruling',
   buildDocument({
     slices: passedScopeSlices,
