@@ -421,12 +421,14 @@ internal sealed class BridgeCommandService
             {
                 var document = FlverNativeDocument.ReadFile(file);
                 var meshIndex = options.TryGetProperty("meshIndex", out var mi) && mi.TryGetInt32(out var idx) ? idx : 0;
-                var positions = document.GetMeshPositionsBase64(meshIndex);
-                var indices = document.GetMeshIndicesBase64(meshIndex);
-                var uvs = document.GetMeshUVsBase64(meshIndex);
-                var normals = document.GetMeshNormalsBase64(meshIndex);
-                var boneWeights = document.GetMeshBoneWeightsBase64(meshIndex);
-                var boneIndices = document.GetMeshBoneIndicesBase64(meshIndex);
+                var maxVertices = options.TryGetProperty("maxVertices", out var mv) && mv.TryGetInt32(out var mvc) ? mvc : 10_000;
+                var maxIndices = options.TryGetProperty("maxIndices", out var mxi) && mxi.TryGetInt32(out var mxii) ? mxii : 30_000;
+                var positions = document.GetMeshPositionsBase64(meshIndex, maxVertices);
+                var indices = document.GetMeshIndicesBase64(meshIndex, maxIndices);
+                var uvs = document.GetMeshUVsBase64(meshIndex, maxVertices);
+                var normals = document.GetMeshNormalsBase64(meshIndex, maxVertices);
+                var boneWeights = document.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
+                var boneIndices = document.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
                 if (positions == null)
                     return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
                 var mesh = document.Meshes[meshIndex];
@@ -439,6 +441,8 @@ internal sealed class BridgeCommandService
                 {
                     meshIndex,
                     vertexCount = mesh.VertexCount,
+                    vertexStride = mesh.VertexStride,
+                    bufferLayoutIndex = mesh.BufferLayoutIndex,
                     materialIndex = mesh.MaterialIndex,
                     indexFormat = mesh.IndexFormat,
                     positionsBase64 = positions,

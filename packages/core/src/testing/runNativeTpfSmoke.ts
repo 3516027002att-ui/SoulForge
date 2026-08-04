@@ -49,7 +49,7 @@ async function main(): Promise<void> {
       filePath: source,
       allowedRoots: [source.replace(/[/\\][^/\\]+$/, '')],
       writableRoots: [tmpDir],
-      commandOptions: { childPath: '.tpf', outputPath: tpfPath },
+      commandOptions: { childPath: 'c4510.tpf', outputPath: tpfPath },
       timeoutMs: 120_000
     });
     if (extract.parseStatus === 'failed' || !extract.data?.contentSize) {
