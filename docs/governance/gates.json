@@ -165,7 +165,8 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-REL-C-MULTILANG-02"
+        "W-REL-C-MULTILANG-02",
+        "W-REL-C-PARAM-04"
       ],
       "evidenceRefs": [
         "EV-EMEVD-FMG-PARAM-03-20260803",
@@ -298,7 +299,8 @@
       ],
       "evidenceRefs": [
         "EV-AI-CONFORMANCE-03-20260803",
-        "EV-AI-CODEX-KERNEL-20260804"
+        "EV-AI-CODEX-KERNEL-20260804",
+        "EV-AI-CODEX-PRODUCTION-20260804"
       ],
       "blockerRefs": [],
       "scopeItemIds": [

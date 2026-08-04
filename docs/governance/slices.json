@@ -940,6 +940,26 @@
       "declaresUnfrozenValidation": true
     },
     {
+      "sliceId": "W-REL-C-PARAM-04",
+      "targetRelease": "V0.5",
+      "lifecycle": "active",
+      "authority": "partial",
+      "authorityCap": "partial",
+      "authorityCapNote": "cap=partial；只覆盖 gameparam.parambnd.dcx 实际注册的 ParamType 布局",
+      "capabilityIds": [
+        "C-PARAM"
+      ],
+      "blockerRefs": [],
+      "goal": "全部 ParamType 读往返矩阵与写路径扩展：对 gameparam.parambnd.dcx 全部子项执行 native 读+语义往返（大文件条目经 file-backed extract-bnd4-child 绕开 snapshot base64 帧上限），并扩展多布局 ParamType 的字段级 staged upsert 写验证",
+      "hardPrerequisites": "W-EMEVD-FMG-PARAM-03 完成（bridge:verify:param corpus 40/40 + 3 legacy 已通）；真实 gameparam.parambnd.dcx 在本机，138 子项全部可经 file-backed extract 读取",
+      "entryPoints": [
+        "bridge/SoulForge.Bridge/Bnd4NativeWriter.cs",
+        "packages/core/src/testing/runNativeParamSmoke.ts"
+      ],
+      "requiredValidation": "npm run bridge:verify:param",
+      "declaresUnfrozenValidation": false
+    },
+    {
       "sliceId": "W-REL-D-GAMELOAD-01",
       "targetRelease": "V0.5",
       "lifecycle": "ready",
@@ -980,7 +1000,16 @@
       "declaresUnfrozenValidation": true
     }
   ],
-  "activeClaims": [],
+  "activeClaims": [
+    {
+      "sliceId": "W-REL-C-PARAM-04",
+      "claimId": "claim-w-rel-c-param-04-20260803",
+      "owner": "me",
+      "claimedAt": "2026-08-03T20:13:32.989Z",
+      "heartbeatAt": "2026-08-03T20:13:32.989Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    }
+  ],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",
