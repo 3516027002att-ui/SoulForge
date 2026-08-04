@@ -244,24 +244,24 @@
     {
       "sliceId": "W-MSB-SCENE-01",
       "targetRelease": "V0.6",
-      "lifecycle": "deferred",
-      "authority": "partial",
-      "authorityCap": "partial",
-      "authorityCapNote": "cap=partial；完整实体流式投影、writer、FLVER 或游戏加载进入后继切片",
+      "lifecycle": "completed",
+      "authority": "native-verified",
+      "authorityCap": "native-verified",
+      "authorityCapNote": "cap=native-verified（登记样本集）；编辑器写路径（releaseWriteEnabled）、完整实体流式投影与游戏内加载仍属后继切片",
       "capabilityIds": [
         "C-MSB",
         "I-RENDER"
       ],
       "blockerRefs": [],
-      "goal": "MSB 与渲染线延期 V0.6；本切片成果保留为只读预览，releaseWriteEnabled=false 必须保持关闭",
-      "hardPrerequisites": "entity identity 与 revision 稳定；renderer 无绝对路径；延期期间不得开放任何 MSB 写入（contract / shared 清单 / 主进程 IPC 三层失败关闭）；已验证的 mutationKinds 记录不删除，V0.6 恢复只需翻回标记",
+      "goal": "MSB 实体注册表全覆盖读取、完整场景投影与 typed mutation 写链已在登记样本上验证完成：9 张地图实体类型并集与权威注册表精确一致，25 条 typed mutation 写链经 staged 写入重读回放验证",
+      "hardPrerequisites": "已满足：实体 identity 与 revision 稳定；renderer 无绝对路径；MSB 写仅限 staging（Patch Engine），releaseWriteEnabled=false 保持关闭；未注册实体类型写入被 MSB_UNREGISTERED_ENTITY_TYPE 守卫拒绝",
       "entryPoints": [
         "packages/shared/src/scene-ir.ts",
         "packages/core/src/editing/msbBridgeRead.ts"
       ],
-      "requiredValidation": "npm run bridge:verify:msb、npm run test:scene-draw-list、npm run test:three-scene-module",
+      "requiredValidation": "npm run bridge:verify:msb、npm run bridge:verify:msb-all、npm run bridge:verify:msb-writer、npm run test:scene-draw-list、npm run test:three-scene-module",
       "declaresUnfrozenValidation": false,
-      "evidence": "已建立 shared schema v2 semantic scene/render packet、四类 Bridge preview、稳定 identity/revision、chunk、路径防线和 production canvas/picking，且 msb_set_part_transform typed mutation 曾经真实 MSB 验证通过；文本优先裁定后 MSB 与渲染线延期 V0.6，本切片成果保留为标记只读预览，releaseWriteEnabled=false 关闭写路径"
+      "evidence": "V0.6 承接交付完成：MSB 注册表全覆盖读取与写链验证（9 图 m10/m11/m11_01/m11_02/m13/m15/m17/m20/m25，实体类型并集与权威注册表精确一致）；三层截断移除后 renderer-safe DTO 默认完整返回且 nativeOffset 身份保留（显式有界窗口仍按调用方截断）；场景投影 8875 entities/7707 nodes，transform-only 变更后 scene identity 稳定；typed mutation 写链 25 条（part/region 位置、part transform）经 staged 写入重读回放验证，未注册实体类型写入被守卫拒绝；releaseWriteEnabled=false 保持关闭，编辑器写路径未开放"
     },
     {
       "sliceId": "W-BEHAVIOR-MAP-01",
@@ -289,25 +289,25 @@
     {
       "sliceId": "W-FLVER-READ-01",
       "targetRelease": "V0.6",
-      "lifecycle": "deferred",
-      "authority": "partial",
-      "authorityCap": "partial",
-      "authorityCapNote": "cap=partial；当前只读覆盖为 partial（MTD 为 candidate），不开放 native writer",
+      "lifecycle": "completed",
+      "authority": "native-verified",
+      "authorityCap": "native-verified",
+      "authorityCapNote": "cap=native-verified（登记样本集）；MTD 仍为 candidate，native writer 不开放；collision/navigation 为真实缺口（corpus 无源文件可验）",
       "capabilityIds": [
         "E-ASSET"
       ],
       "blockerRefs": [],
-      "goal": "继续 collision / navigation 格式定位；FLVER/TPF/MTD 只读线已完成，随渲染线延期 V0.6",
-      "hardPrerequisites": "合法 corpus root/registry 已可用；布局冲突失败关闭；内层扩展名计数不构成 native document；MTD 语义读取不构成 native authority",
+      "goal": "FLVER/TPF 只读 native document 已在登记多样本上验证完成（FLVER 11 samples / 572 meshes，TPF 4 texbnd / 52 textures，byte-identical 往返与多样本布局覆盖）；MTD 只读 XML 投影保持 candidate；collision/navigation 定位完成（corpus 无源文件，属真实缺口）",
+      "hardPrerequisites": "已满足：合法 corpus root/registry 已可用；布局冲突失败关闭；内层扩展名计数不构成 native document；MTD 语义读取不构成 native authority",
       "entryPoints": [
         "bridge/SoulForge.Bridge/FlverNativeDocument.cs",
         "bridge/SoulForge.Bridge/TpfNativeDocument.cs",
         "bridge/SoulForge.Bridge/MtdNativeDocument.cs",
         "bridge/SoulForge.Bridge/BridgeCommandService.cs"
       ],
-      "requiredValidation": "npm run bridge:verify:flver、npm run bridge:verify:tpf、npm run bridge:build",
+      "requiredValidation": "npm run bridge:verify:flver、npm run bridge:verify:flver-multi、npm run bridge:verify:tpf、npm run bridge:verify:tpf-multi、npm run bridge:verify:collision-nav、npm run bridge:build",
       "declaresUnfrozenValidation": false,
-      "evidence": "已构建 FLVER native document parser（346 bones, 36 materials, 44 meshes, 182K faces, byte-identical roundtrip）和 TPF native document parser（16 textures, BC1/BC4/BC5）；新增 MTD 只读 XML 结构投影 MtdNativeDocument（candidate，DTD/外部实体拒绝、大小/元素上限、重复解析一致性验证）与 read-mtd-document / inventory-asset-resources（容器级资产类别 inventory，脱敏）Bridge 命令；继续 collision/navigation 定位"
+      "evidence": "V0.6 承接交付完成：FLVER native document parser 多样本只读验证（11 samples / 572 meshes，单样本 346 bones / 36 materials / 36 meshes / 182,865 faces，byte-identical roundtrip）；TPF native document parser 多样本验证（4 texbnd / 52 textures，单样本 16 textures，格式从实际字节读出）；MTD 只读 XML 结构投影 MtdNativeDocument（candidate，DTD/外部实体拒绝、大小/元素上限、重复解析一致性验证）；collision/navigation 侦察确认 corpus 无 hkx/hkt/nav/nvmtx/col 源文件（Sekiro 碰撞与导航位于游戏本体 archive），c1020_c.clm2 存在于 chrbnd 但解析器未实现，属真实缺口"
     },
     {
       "sliceId": "W-AI-REAL-01",
@@ -435,23 +435,23 @@
     {
       "sliceId": "W-RENDER-FUNCTIONAL-02",
       "targetRelease": "V0.6",
-      "lifecycle": "deferred",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "partial",
-      "authorityCapNote": "cap=partial；只证明已覆盖的 renderer contract，不外推所有者机器功能闭环、性能或硬件兼容矩阵",
+      "authorityCapNote": "cap=partial；功能闭环在所有者机器上验证完成，不外推代表性硬件兼容、性能预算或 benchmark 阈值",
       "capabilityIds": [
         "I-RENDER"
       ],
       "blockerRefs": [],
-      "goal": "延期 V0.6：真实 FLVER 渲染、picking、transform 更新与资源释放的功能闭环",
-      "hardPrerequisites": "真实 native semantic scene/FLVER projection；不要求代表性硬件档位、地图集合、性能预算或 benchmark threshold",
+      "goal": "真实 FLVER 渲染、picking、transform 更新与资源释放的功能闭环已在所有者机器上验证完成（WebGPU 主后端 + WebGL2 自动回退）",
+      "hardPrerequisites": "已满足：真实 native semantic scene/FLVER projection；不要求代表性硬件档位、地图集合、性能预算或 benchmark threshold",
       "entryPoints": [
         "packages/core/src/scene",
         "webgpuDetect.ts"
       ],
-      "requiredValidation": "npm run test:scene-draw-list、npm run test:three-scene-module；validation-unfrozen：WebGPU/WebGL2 functional fallback smoke",
-      "declaresUnfrozenValidation": true,
-      "evidence": "WebGPU 检测已实现（adapter info + capability report）；WebGPU-first 渲染器已集成到 threeSceneController（three/webgpu 按需加载 + WebGL2 回退 + rendererBackend 报告）；继续真实 FLVER 渲染、picking、transform 更新与资源释放功能闭环"
+      "requiredValidation": "npm run test:scene-draw-list、npm run test:three-scene-module、npm run test:three-scene-functional",
+      "declaresUnfrozenValidation": false,
+      "evidence": "V0.6 承接交付完成：renderer-independent semantic scene 保持稳定，WebGPU 主后端与 WebGL2 自动回退在所有者机器上经 9 项功能 smoke 验证（backend resolution、WebGL2 自然回退、picking 高亮、真实 FLVER mesh 渲染/纹理、场景替换资源释放、重复挂载卸载无泄漏、绝对路径访问被拒）；authority 保持 partial，代表性硬件兼容与性能预算属后继里程碑"
     },
     {
       "sliceId": "W-REL-SCOPE-01",

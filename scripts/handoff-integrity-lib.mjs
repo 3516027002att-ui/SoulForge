@@ -973,12 +973,53 @@ const REL_COMPLIANCE_SUBJECT_SET = Object.freeze({
   handoffSections: Object.freeze([]),
   handoffBlocks: Object.freeze([])
 });
+// REL-E 资产只读线主题域：FLVER/TPF/MTD native document、资产 smoke 与候选权威。
+// V0.6 承接时 REL-E 从 deferred 恢复为 passed，必须登记 freshness 主题域，
+// 否则 passed Gate 因 GATE_SUBJECT_SET_UNDEFINED 失败关闭。
+const REL_E_SUBJECT_SET = Object.freeze({
+  files: Object.freeze([
+    'bridge/SoulForge.Bridge/FlverNativeDocument.cs',
+    'bridge/SoulForge.Bridge/TpfNativeDocument.cs',
+    'bridge/SoulForge.Bridge/MtdNativeDocument.cs',
+    'bridge/SoulForge.Bridge/BridgeCommandService.cs',
+    'packages/core/src/testing/runNativeFlverSmoke.ts',
+    'packages/core/src/testing/runNativeFlverMultiSampleSmoke.ts',
+    'packages/core/src/testing/runNativeFlverMeshSmoke.ts',
+    'packages/core/src/testing/runNativeFlverGlbSmoke.ts',
+    'packages/core/src/testing/runNativeTpfSmoke.ts',
+    'packages/core/src/testing/runNativeTpfMultiSampleSmoke.ts',
+    'packages/core/src/testing/runNativeCollisionNavInventorySmoke.ts',
+    'packages/core/src/scene/flverCandidate.ts',
+    // 范围矩阵里 FLVER/TPF 的 authorityAtRuling 与支持状态属于资产 Gate 的
+    // 冻结主题域：改写 scope.json 而不使 REL-E 失效，等于改裁定绕过门禁。
+    'docs/governance/scope.json'
+  ]),
+  handoffSections: Object.freeze([]),
+  handoffBlocks: Object.freeze([])
+});
+// REL-I 渲染功能闭环主题域：semantic scene / render packet 与渲染投影层。
+// V0.6 承接时 REL-I 从 deferred 恢复为 passed，必须登记 freshness 主题域。
+const REL_I_SUBJECT_SET = Object.freeze({
+  files: Object.freeze([
+    'apps/desktop/src/renderer/src/scene/threeSceneController.ts',
+    'apps/desktop/src/renderer/src/scene/webgpuDetect.ts',
+    'apps/desktop/src/renderer/src/scene/runThreeSceneFunctionalSmoke.ts',
+    'packages/shared/src/scene-ir.ts',
+    'packages/core/src/scene/sceneDrawList.ts',
+    'packages/core/src/scene/sceneAssetInventory.ts',
+    'apps/desktop/src/renderer/src/editors/FlverViewer.tsx'
+  ]),
+  handoffSections: Object.freeze([]),
+  handoffBlocks: Object.freeze([])
+});
 const GATE_SUBJECT_SETS = new Map([
   ['REL-SCOPE', SCOPE_SUBJECT_SET],
   ['REL-A', REL_A_SUBJECT_SET],
   ['REL-B', REL_B_SUBJECT_SET],
+  ['REL-E', REL_E_SUBJECT_SET],
   ['REL-F', REL_F_SUBJECT_SET],
   ['REL-G', REL_G_SUBJECT_SET],
+  ['REL-I', REL_I_SUBJECT_SET],
   ['REL-COMPLIANCE', REL_COMPLIANCE_SUBJECT_SET]
 ]);
 
