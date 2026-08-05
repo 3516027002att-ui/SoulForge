@@ -2,7 +2,7 @@
  * Local has-game env injector for developer machines.
  *
  * Only fills missing SOULFORGE_* vars when BOTH:
- * - a readable local Sekiro root exists under the repo, and
+ * - a readable local Sekiro root exists (see localGameRootCandidates), and
  * - testdata/native-fixtures/has-game-registry.json is readable.
  *
  * Never invents paths. Never writes game root/mods. Never overrides
@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const localGameRootCandidates = [
+  'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro',
   resolve(repoRoot, 'Sekiro Shadows Die Twice')
 ];
 const localRegistryPath = resolve(

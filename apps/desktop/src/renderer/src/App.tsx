@@ -51,7 +51,6 @@ import type {
 } from '@soulforge/core';
 import { HexEditorPanel } from './editors/HexEditorPanel.js';
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
-import { ModelServiceSettingsPanel } from './editors/ModelServiceSettingsPanel.js';
 import { EmevdFourViewPanel } from './editors/EmevdFourViewPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
 import { ParamTablePanel } from './editors/ParamTablePanel.js';
@@ -74,30 +73,21 @@ import {
   type ChangeDiagnostic
 } from './staging/changeControl.js';
 import { ChangeQueuePanel } from './staging/ChangeQueuePanel.js';
+import {
+  describeBridgeAbsence,
+  getRendererRuntime
+} from './runtime/rendererRuntime.js';
+import { RESOURCE_FAMILIES, type ResourceMode } from './navigation/resourceFamilies.js';
+import { WorkspaceResourceBar } from './navigation/WorkspaceResourceBar.js';
+import { AgentSidebar } from './agent/AgentSidebar.js';
 
-const RESOURCE_KIND_ORDER: ResourceKind[] = ['event', 'map', 'param', 'msg', 'menu', 'script', 'action', 'ai', 'sfx', 'chr', 'obj', 'other', 'unknown'];
-
-type WorkspaceMode = ResourceKind | 'files' | 'bnd4' | 'ai' | 'settings' | 'ops';
 type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
 
-const WORKSPACE_MODES: Array<{ id: WorkspaceMode; label: string }> = [
-  { id: 'files', label: '文件' },
-  { id: 'event', label: 'EMEVD 事件' },
-  { id: 'map', label: 'MSB 地图' },
-  { id: 'param', label: 'PARAM 参数' },
-  { id: 'msg', label: 'FMG 文本' },
-  { id: 'menu', label: '菜单' },
-  { id: 'script', label: '脚本' },
-  { id: 'bnd4', label: 'BND4 容器' },
-  { id: 'action', label: '动作' },
-  { id: 'chr', label: '角色资源' },
-  { id: 'obj', label: '物件资源' },
-  { id: 'sfx', label: 'SFX 特效' },
-  { id: 'other', label: '其他' },
-  { id: 'ops', label: '任务与历史' },
-  { id: 'ai', label: 'AI' },
-  { id: 'settings', label: '设置' }
-];
+/** 中央内容：资源编辑 / 任务与历史；设置位于左侧面板，不再占用中央区。 */
+type CenterView = 'resource' | 'operations' | 'settings';
+
+/** P0 安全收口：权限模式由主进程锁定，renderer 不得自行切换。 */
+const AI_PERMISSION_LOCK_REASON = 'P0 安全收口期间由主进程锁定为计划模式；renderer 不能抬高授权。';
 
 /** 无实时 MSB 数据时的空 parts（真实数据经 Bridge 读取后填充）。 */
 const EMPTY_MSB_PARTS: MsbPartTransformLike[] = [];
@@ -187,6 +177,10 @@ type MsbNativeMutation = {
 };
 
 export function App(): ReactElement {
+  // 运行表面在页面生命周期内稳定：Electron 桥接或 browser-preview 降级。
+  const runtime = getRendererRuntime();
+  const bridge = runtime.bridge;
+  const isBrowserPreview = runtime.kind === 'browser-preview';
   const [workspace, setWorkspace] = useState<RendererWorkspaceScanResult | null>(null);
   const [sessionMeta, setSessionMeta] = useState<RendererWorkspaceSession | null>(null);
   const [baseRootChoice, setBaseRootChoice] = useState<DirectorySelection | null>(null);
@@ -200,12 +194,13 @@ export function App(): ReactElement {
   const [msgRows, setMsgRows] = useState<EditableMsgRow[]>([]);
   const [saveDiagnostics, setSaveDiagnostics] = useState<string[]>([]);
   const [query, setQuery] = useState('');
-  const [toolQuery, setToolQuery] = useState('');
   const [eventUri, setEventUri] = useState('');
   const [toolOutput, setToolOutput] = useState<ToolResult | null>(null);
   const [files, setFiles] = useState<RendererIndexedFile[]>([]);
   const [allFiles, setAllFiles] = useState<RendererIndexedFile[]>([]);
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('files');
+  const [resourceMode, setResourceMode] = useState<ResourceMode>('all');
+  const [centerView, setCenterView] = useState<CenterView>('resource');
+  const [bnd4Forced, setBnd4Forced] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>('explorer');
   const [agentOpen, setAgentOpen] = useState(true);
   const [status, setStatus] = useState('就绪');
@@ -264,7 +259,13 @@ export function App(): ReactElement {
 
   const counts = useMemo(() => workspace?.countsByKind ?? null, [workspace]);
   const diagnostics = [...(workspace?.diagnostics ?? []), ...(analysis?.diagnostics ?? []), ...(preview?.diagnostics ?? [])];
-  const groupedTools = useMemo(() => groupToolsByPermission(tools), [tools]);
+  // BND 不是顶层目录：选择真实 BND 文件后自动进入容器工作台，
+  // 命令面板可对任意选中强制「以 BND4 容器打开」。
+  const selectedIsContainer = selectedFile !== null
+    && (selectedFile.formatKind === 'bnd' || selectedFile.formatKind === 'dcx'
+      || selectedFile.compoundExtension.includes('.bnd')
+      || selectedFile.compoundExtension.includes('.dcx'));
+  const showBnd4Workbench = centerView === 'resource' && (bnd4Forced || selectedIsContainer);
   const canEditText = preview?.previewKind === 'text' && preview.structuredPreview?.editable === true && !preview.truncated;
   const hasMsgTable = canEditText && msgRows.length > 0;
   const editDirty = editText !== lastSavedText;
@@ -339,18 +340,18 @@ export function App(): ReactElement {
     return () => window.removeEventListener('beforeunload', handler);
   }, [hasUncommittedChanges]);
   const visibleFiles = useMemo(
-    () => filterFilesForMode(allFiles.length > 0 ? allFiles : files, workspaceMode, query),
-    [allFiles, files, workspaceMode, query]
+    () => filterFilesForMode(allFiles.length > 0 ? allFiles : files, resourceMode, query),
+    [allFiles, files, resourceMode, query]
   );
 
   useEffect(() => {
     let cancelled = false;
     async function loadParam(): Promise<void> {
-      if (workspaceMode !== 'param') return;
+      if (resourceMode !== 'param') return;
       const target = selectedFile
         ?? visibleFiles.find((file) => file.resourceKind === 'param')
         ?? null;
-      if (!target || typeof window.soulforge.readParamDocument !== 'function') {
+      if (!bridge || !target || typeof bridge.readParamDocument !== 'function') {
         setParamRows(EMPTY_PARAM_ROWS);
         setParamTypeName('');
         setParamSourceHash(null);
@@ -360,7 +361,7 @@ export function App(): ReactElement {
       }
       setStatus(`正在读取 PARAM：${target.relativePath}`);
       try {
-        const result = await window.soulforge.readParamDocument(target.sourceUri) as {
+        const result = await bridge.readParamDocument(target.sourceUri) as {
           ok?: boolean;
           data?: {
             sourceHash?: string;
@@ -413,16 +414,16 @@ export function App(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [workspaceMode, selectedFile, visibleFiles]);
+  }, [bridge, resourceMode, selectedFile, visibleFiles]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadFmg(): Promise<void> {
-      if (workspaceMode !== 'msg') return;
+      if (resourceMode !== 'msg') return;
       const target = selectedFile
         ?? visibleFiles.find((file) => file.resourceKind === 'msg')
         ?? null;
-      if (!target || typeof window.soulforge.readFmgDocument !== 'function') {
+      if (!bridge || !target || typeof bridge.readFmgDocument !== 'function') {
         setFmgEntries(EMPTY_FMG_ENTRIES);
         setFmgSourceHash(null);
         setFmgLive(false);
@@ -430,7 +431,7 @@ export function App(): ReactElement {
       }
       setStatus(`正在读取 FMG：${target.relativePath}`);
       try {
-        const result = await window.soulforge.readFmgDocument(target.sourceUri) as {
+        const result = await bridge.readFmgDocument(target.sourceUri) as {
           ok?: boolean;
           data?: {
             sourceHash?: string;
@@ -464,16 +465,16 @@ export function App(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [workspaceMode, selectedFile, visibleFiles]);
+  }, [bridge, resourceMode, selectedFile, visibleFiles]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadMsb(): Promise<void> {
-      if (workspaceMode !== 'map') return;
+      if (resourceMode !== 'map') return;
       const target = selectedFile
         ?? visibleFiles.find((file) => file.resourceKind === 'map')
         ?? null;
-      if (!target || typeof window.soulforge.readMsbDocument !== 'function') {
+      if (!bridge || !target || typeof bridge.readMsbDocument !== 'function') {
         setMsbParts(EMPTY_MSB_PARTS);
         setMsbModels([]);
         setMsbRegions([]);
@@ -484,7 +485,7 @@ export function App(): ReactElement {
       }
       setStatus(`正在读取 MSB：${target.relativePath}`);
       try {
-        const result = await window.soulforge.readMsbDocument(target.sourceUri) as {
+        const result = await bridge.readMsbDocument(target.sourceUri) as {
           ok?: boolean;
           data?: {
             sourceHash?: string;
@@ -581,16 +582,16 @@ export function App(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [workspaceMode, selectedFile, visibleFiles]);
+  }, [bridge, resourceMode, selectedFile, visibleFiles]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadEmevd(): Promise<void> {
-      if (workspaceMode !== 'event') return;
+      if (resourceMode !== 'event') return;
       const target = selectedFile
         ?? visibleFiles.find((file) => file.resourceKind === 'event')
         ?? null;
-      if (!target || typeof window.soulforge.readEmevdDocument !== 'function') {
+      if (!bridge || !target || typeof bridge.readEmevdDocument !== 'function') {
         setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
         setEmevdSourceHash(null);
         setEmevdLive(false);
@@ -598,7 +599,7 @@ export function App(): ReactElement {
       }
       setStatus(`正在读取 EMEVD：${target.relativePath}`);
       try {
-        const result = await window.soulforge.readEmevdDocument(target.sourceUri) as {
+        const result = await bridge.readEmevdDocument(target.sourceUri) as {
           ok?: boolean;
           data?: BridgeEmevdEnvelopeLike | null;
           diagnostics?: Array<{ message?: string }>;
@@ -630,8 +631,8 @@ export function App(): ReactElement {
         );
         // Load the authoritative full-document DSL template in the background;
         // renderer never receives the full document itself.
-        if (typeof window.soulforge.readEmevdFullDocument === 'function') {
-          const full = await window.soulforge.readEmevdFullDocument(
+        if (typeof bridge.readEmevdFullDocument === 'function') {
+          const full = await bridge.readEmevdFullDocument(
             target.sourceUri,
             `renderer-${target.sourceUri}-${Date.now()}`
           );
@@ -658,16 +659,17 @@ export function App(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [workspaceMode, selectedFile, visibleFiles]);
+  }, [bridge, resourceMode, selectedFile, visibleFiles]);
 
   async function refreshOperationHistory(): Promise<void> {
-    const history = await window.soulforge.listOperations();
+    if (!bridge) return;
+    const history = await bridge.listOperations();
     setOperationHistory(history);
   }
 
   async function reloadParamRowsFromSource(): Promise<void> {
-    if (!selectedFile) return;
-    const reload = await window.soulforge.readParamDocument(selectedFile.sourceUri) as {
+    if (!bridge || !selectedFile) return;
+    const reload = await bridge.readParamDocument(selectedFile.sourceUri) as {
       ok?: boolean;
       data?: {
         sourceHash?: string;
@@ -711,14 +713,20 @@ export function App(): ReactElement {
         diagnostics: [{ code: 'PARAM_FIELD_NO_LIVE_DOCUMENT', message: '需要实时 PARAM 文档才能提交字段。' }]
       };
     }
-    if (typeof window.soulforge.applyParamFieldMutation !== 'function') {
+    if (!bridge) {
+      return {
+        ok: false,
+        diagnostics: [{ code: 'BRIDGE_UNAVAILABLE', message: describeBridgeAbsence('提交 PARAM 字段') }]
+      };
+    }
+    if (typeof bridge.applyParamFieldMutation !== 'function') {
       return {
         ok: false,
         diagnostics: [{ code: 'PRELOAD_MISSING', message: '当前预加载未暴露 applyParamFieldMutation。' }]
       };
     }
     setStatus('正在经 Bridge/补丁引擎提交 PARAM 字段…');
-    const result = await window.soulforge.applyParamFieldMutation(
+    const result = await bridge.applyParamFieldMutation(
       selectedFile.sourceUri,
       paramSourceHash,
       {
@@ -756,12 +764,16 @@ export function App(): ReactElement {
       setStatus('MSB 写入仅在实时模式可用。');
       return;
     }
-    if (typeof window.soulforge.applyMsbMutation !== 'function') {
+    if (!bridge) {
+      setStatus(describeBridgeAbsence(`提交 MSB ${label}`));
+      return;
+    }
+    if (typeof bridge.applyMsbMutation !== 'function') {
       setStatus('当前预加载未暴露 applyMsbMutation。');
       return;
     }
     setStatus(`正在提交 MSB ${label}…`);
-    const result = await window.soulforge.applyMsbMutation(
+    const result = await bridge.applyMsbMutation(
       selectedFile.sourceUri,
       msbSourceHash,
       mutation
@@ -770,7 +782,7 @@ export function App(): ReactElement {
       setStatus(result.diagnostics?.[0]?.message ?? `MSB ${label} 提交失败`);
       return;
     }
-    const reload = await window.soulforge.readMsbDocument(selectedFile.sourceUri) as {
+    const reload = await bridge.readMsbDocument(selectedFile.sourceUri) as {
       ok?: boolean;
       data?: {
         sourceHash?: string;
@@ -881,11 +893,28 @@ export function App(): ReactElement {
     );
   }
 
+  /** Electron-only 操作在 browser-preview 表面的统一可见降级：不抛异常、不静默。 */
+  function announceDesktopOnly(operation: string): void {
+    const message = describeBridgeAbsence(operation);
+    setStatus(message);
+    pushToast(message, 'warn');
+  }
+
   async function chooseBaseDirectory(): Promise<void> {
-    const selection = await window.soulforge.openBaseDialog();
-    if (!selection) return;
-    setBaseRootChoice(selection);
-    setStatus(`已选择只读原版游戏目录：${selection.label}（下次打开 Mod 工作区时生效）`);
+    if (!bridge) {
+      announceDesktopOnly('选择原版目录');
+      return;
+    }
+    try {
+      const selection = await bridge.openBaseDialog();
+      if (!selection) return;
+      setBaseRootChoice(selection);
+      setStatus(`已选择只读原版游戏目录：${selection.label}（下次打开 Mod 工作区时生效）`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`选择原版目录失败：${message}`);
+      pushToast(`选择原版目录失败：${message}`, 'warn');
+    }
   }
 
   function clearBaseDirectory(): void {
@@ -969,71 +998,96 @@ export function App(): ReactElement {
   }
 
   async function openWorkspace(): Promise<void> {
-    const workspaceSelection = await window.soulforge.openWorkspaceDialog();
-    if (!workspaceSelection) return;
+    if (!bridge) {
+      announceDesktopOnly('打开 Mod 工作区');
+      return;
+    }
+    try {
+      const workspaceSelection = await bridge.openWorkspaceDialog();
+      // 用户取消目录对话框：安静返回，不显示错误。
+      if (!workspaceSelection) return;
 
-    setStatus('正在扫描工作区...');
-    const result = await window.soulforge.scanWorkspace({
-      overlaySelectionId: workspaceSelection.selectionId,
-      ...(baseRootChoice ? { baseSelectionId: baseRootChoice.selectionId } : {})
-    });
-    setWorkspace(result);
-    setSessionMeta(result.session ?? null);
-    setAllFiles(result.files);
-    setFiles(result.files);
-    setWorkspaceMode('files');
-    setSidebarView('explorer');
-    setSelectedFile(null);
-    setPreview(null);
-    setOpenTabs([]);
-    setAgentGoal(null);
-    setEditText('');
-    setLastSavedText('');
-    setMsgRows([]);
-    setSaveDiagnostics([]);
-    setAnalysis(null);
-    setToolOutput(null);
-    setAiDraft(null);
-    setOperationHistory([]);
+      setStatus('正在扫描工作区...');
+      const result = await bridge.scanWorkspace({
+        overlaySelectionId: workspaceSelection.selectionId,
+        ...(baseRootChoice ? { baseSelectionId: baseRootChoice.selectionId } : {})
+      });
+      setWorkspace(result);
+      setSessionMeta(result.session ?? null);
+      setAllFiles(result.files);
+      setFiles(result.files);
+      setResourceMode('all');
+      setCenterView('resource');
+      setSidebarView('explorer');
+      setSelectedFile(null);
+      setPreview(null);
+      setOpenTabs([]);
+      setAgentGoal(null);
+      setEditText('');
+      setLastSavedText('');
+      setMsgRows([]);
+      setSaveDiagnostics([]);
+      setAnalysis(null);
+      setToolOutput(null);
+      setAiDraft(null);
+      setOperationHistory([]);
+      setBnd4Forced(false);
 
-    setStatus('正在构建轻量证据索引...');
-    const nextAnalysis = await window.soulforge.analyzeWorkspace();
-    setAnalysis(nextAnalysis);
-    setTools(nextAnalysis?.tools ?? []);
-    setEventUri(nextAnalysis?.events?.[0]?.uri ?? '');
-    await refreshOperationHistory();
-    const baseLabel = result.session.baseMounted
-      ? ' · 已挂载只读原版游戏目录'
-      : ' · 未挂载原版游戏目录';
-    setBaseRootChoice(null);
-    setStatus(`已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
+      setStatus('正在构建轻量证据索引...');
+      const nextAnalysis = await bridge.analyzeWorkspace();
+      setAnalysis(nextAnalysis);
+      setTools(nextAnalysis?.tools ?? []);
+      setEventUri(nextAnalysis?.events?.[0]?.uri ?? '');
+      await refreshOperationHistory();
+      const baseLabel = result.session.baseMounted
+        ? ' · 已挂载只读原版游戏目录'
+        : ' · 未挂载原版游戏目录';
+      setBaseRootChoice(null);
+      setStatus(`已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`打开工作区失败：${message}`);
+      pushToast(`打开工作区失败：${message}`, 'warn');
+    }
   }
 
   async function search(): Promise<void> {
-    const result = await window.soulforge.searchResources(query);
+    if (!bridge) {
+      announceDesktopOnly('资源搜索');
+      return;
+    }
+    const result = await bridge.searchResources(query);
     setAllFiles(result);
     setFiles(result);
     setStatus(`搜索返回 ${result.length} 个文件`);
   }
 
-  function switchMode(mode: WorkspaceMode): void {
-    if (mode !== workspaceMode && editDirty) {
-      const confirmed = window.confirm('当前文本有未生成变更的修改，切换模式将保留草稿但可能离开编辑视图。继续？');
+  function selectResourceMode(mode: ResourceMode): void {
+    if (mode !== resourceMode && editDirty) {
+      const confirmed = window.confirm('当前文本有未生成变更的修改，切换目录将保留草稿但可能离开编辑视图。继续？');
       if (!confirmed) return;
     }
-    setWorkspaceMode(mode);
-    if (mode === 'ai') {
-      setStatus('AI 侧边栏已聚焦：计划优先，写入必须经过 Patch Engine');
-      return;
-    }
-    if (mode === 'settings') {
-      setStatus('设置：模型服务、思考强度和权限模式见左侧「设置」面板');
-      return;
-    }
+    setResourceMode(mode);
+    setCenterView('resource');
     const filtered = filterFilesForMode(allFiles, mode, query);
-    setStatus(mode === 'files'
-      ? `文件模式：${filtered.length} 个文件`
-      : `${workspaceModeLabel(mode)}：${filtered.length} 个资源`);
+    setStatus(mode === 'all'
+      ? `全部资源：${filtered.length} 个文件`
+      : `${mode}：${filtered.length} 个资源`);
+  }
+
+  function openOperationsView(): void {
+    setCenterView('operations');
+    setStatus('任务与历史：写入、回滚与诊断记录');
+  }
+
+  function openBnd4ForSelection(): void {
+    if (!selectedFile) {
+      setStatus('先选择一个容器资源，再以 BND4 容器打开。');
+      return;
+    }
+    setBnd4Forced(true);
+    setCenterView('resource');
+    setStatus(`以 BND4 容器打开：${selectedFile.relativePath}`);
   }
 
   async function selectFile(file: RendererIndexedFile): Promise<void> {
@@ -1051,28 +1105,34 @@ export function App(): ReactElement {
     setEsdData(null);
     setFlverData(null);
     setTpfData(null);
+    setBnd4Forced(false);
+    setCenterView('resource');
+    if (!bridge) {
+      setStatus(describeBridgeAbsence(`打开 ${file.relativePath}`));
+      return;
+    }
     setStatus(`正在打开 ${file.relativePath}...`);
-    const nextPreview = await window.soulforge.openResourcePreview(file.sourceUri);
+    const nextPreview = await bridge.openResourcePreview(file.sourceUri);
     setPreview(nextPreview);
     const text = nextPreview?.text ?? '';
     setEditText(text);
     setLastSavedText(text);
     setMsgRows(extractMsgRows(nextPreview));
     // Load TAE/ESD/FLVER document data via IPC.
-    if (file.relativePath.endsWith('.tae') && typeof window.soulforge.readTaeDocument === 'function') {
-      const result = await window.soulforge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+    if (file.relativePath.endsWith('.tae') && typeof bridge.readTaeDocument === 'function') {
+      const result = await bridge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setTaeData(result.data);
     }
-    if (file.relativePath.endsWith('.esd') && typeof window.soulforge.readEsdDocument === 'function') {
-      const result = await window.soulforge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+    if (file.relativePath.endsWith('.esd') && typeof bridge.readEsdDocument === 'function') {
+      const result = await bridge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setEsdData(result.data);
     }
-    if (file.relativePath.endsWith('.flver') && typeof window.soulforge.readFlverDocument === 'function') {
-      const result = await window.soulforge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+    if (file.relativePath.endsWith('.flver') && typeof bridge.readFlverDocument === 'function') {
+      const result = await bridge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setFlverData(result.data);
     }
-    if (file.relativePath.endsWith('.tpf') && typeof window.soulforge.readTpfDocument === 'function') {
-      const result = await window.soulforge.readTpfDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+    if (file.relativePath.endsWith('.tpf') && typeof bridge.readTpfDocument === 'function') {
+      const result = await bridge.readTpfDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setTpfData(result.data);
     }
     setStatus(nextPreview ? `已打开 ${file.relativePath}` : '无法预览该资源');
@@ -1099,11 +1159,17 @@ export function App(): ReactElement {
   ): Promise<{ ok: boolean; diagnostics?: ChangeDiagnostic[] }> {
     const mapDiag = (list?: Diagnostic[]): ChangeDiagnostic[] =>
       (list ?? []).map((diagnostic) => ({ code: diagnostic.code, message: diagnostic.message }));
+    if (!bridge) {
+      return {
+        ok: false,
+        diagnostics: [{ code: 'BRIDGE_UNAVAILABLE', message: describeBridgeAbsence('写入暂存变更') }]
+      };
+    }
     switch (change.kind) {
       case 'text': {
-        const result = await window.soulforge.saveTextResource(change.sourceUri, change.newValue);
+        const result = await bridge.saveTextResource(change.sourceUri, change.newValue);
         if (result.ok) {
-          const refreshed = await window.soulforge.openResourcePreview(change.sourceUri);
+          const refreshed = await bridge.openResourcePreview(change.sourceUri);
           setPreview(refreshed);
           const text = refreshed?.text ?? change.newValue;
           setEditText(text);
@@ -1117,13 +1183,13 @@ export function App(): ReactElement {
           return { ok: false, diagnostics: [{ code: 'FMG_NO_LIVE_HASH', message: 'FMG 实时 hash 缺失，拒绝写入。' }] };
         }
         const payload = change.payload as { op: 'upsert' | 'add' | 'delete'; id: number; text?: string };
-        const result = await window.soulforge.applyFmgMutation(change.sourceUri, fmgSourceHash, {
+        const result = await bridge.applyFmgMutation(change.sourceUri, fmgSourceHash, {
           kind: payload.op,
           id: payload.id,
           ...(payload.text !== undefined ? { text: payload.text } : {})
         });
         if (result.ok) {
-          const reload = await window.soulforge.readFmgDocument(change.sourceUri) as {
+          const reload = await bridge.readFmgDocument(change.sourceUri) as {
             ok?: boolean;
             data?: { sourceHash?: string; entries?: Array<{ id: number; text: string }> } | null;
           };
@@ -1139,7 +1205,7 @@ export function App(): ReactElement {
           return { ok: false, diagnostics: [{ code: 'PARAM_NO_LIVE_HASH', message: 'PARAM 实时 hash 缺失，拒绝写入。' }] };
         }
         const payload = change.payload as { op: 'upsert' | 'delete'; id: number; dataBase64?: string };
-        const result = await window.soulforge.applyParamMutation(
+        const result = await bridge.applyParamMutation(
           change.sourceUri,
           paramSourceHash,
           payload.op === 'delete'
@@ -1180,15 +1246,19 @@ export function App(): ReactElement {
   }
 
   async function rollbackOp(opId: string): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('回滚操作');
+      return;
+    }
     setStatus(`正在回滚操作 ${opId.slice(0, 8)}...`);
-    const result = await window.soulforge.rollbackOperation(opId);
+    const result = await bridge.rollbackOperation(opId);
     await refreshOperationHistory();
     if (!result.ok) {
       setStatus(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`);
       return;
     }
     if (selectedFile) {
-      const refreshed = await window.soulforge.openResourcePreview(selectedFile.sourceUri);
+      const refreshed = await bridge.openResourcePreview(selectedFile.sourceUri);
       setPreview(refreshed);
       const text = refreshed?.text ?? '';
       setEditText(text);
@@ -1243,34 +1313,50 @@ export function App(): ReactElement {
       availableTools: tools
     };
 
+    if (!bridge) {
+      setStatus(describeBridgeAbsence('生成计划草稿'));
+      return;
+    }
     setStatus('正在生成 AI 计划草稿...');
-    const draft = await window.soulforge.buildAiSidebarDraft(request);
+    const draft = await bridge.buildAiSidebarDraft(request);
     setAiDraft(draft);
     setStatus(draft.status === 'ready' ? 'AI 计划草稿已生成' : 'AI 模型服务尚未配置，已生成本地计划草稿');
   }
 
-  async function runToolSearch(): Promise<void> {
-    const result = await window.soulforge.runAiTool('search_resources', { query: toolQuery, limit: 8 });
+  async function runToolSearch(toolQuery: string): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('运行安全工具');
+      return;
+    }
+    const result = await bridge.runAiTool('search_resources', { query: toolQuery, limit: 8 });
     setToolOutput(result);
   }
 
-  async function explainEvent(): Promise<void> {
-    const result = await window.soulforge.runAiTool('explain_event', { uri: eventUri });
+  async function explainEvent(uri: string): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('解释事件');
+      return;
+    }
+    const result = await bridge.runAiTool('explain_event', { uri });
     setToolOutput(result);
   }
-  const cmdkCommands: Array<{ id: string; icon: string; label: string; hint?: string; run: () => void }> = [
-    ...WORKSPACE_MODES.map((mode) => ({
-      id: `mode-${mode.id}`,
+  // 命令面板与顶部资源栏共用 RESOURCE_FAMILIES 配置源，不维护第二套标签和顺序。
+  const cmdkCommands: Array<{ id: string; icon: string; label: string; hint?: string; run: () => void }> = [
+    ...RESOURCE_FAMILIES.map((family) => ({
+      id: `resource-${family.id}`,
       icon: '◧',
-      label: `切换到 ${mode.label} 模式`,
-      ...(isResourceKindMode(mode.id) && counts ? { hint: String(counts[mode.id] ?? 0) } : {}),
+      label: family.id === 'all' ? '显示全部资源' : `切换到 ${family.label} 目录`,
+      ...(family.id !== 'all' && counts ? { hint: String(counts[family.id] ?? 0) } : {}),
       run: (): void => {
         setSidebarCollapsed(false);
         setSidebarView('explorer');
-        switchMode(mode.id);
+        selectResourceMode(family.id);
       }
     })),
+    { id: 'open-bnd4', icon: '▤', label: '以 BND4 容器打开当前选择', run: openBnd4ForSelection },
     { id: 'open-workspace', icon: '⌘', label: '打开 Mod 工作区…', run: (): void => { void openWorkspace(); } },
+    { id: 'view-operations', icon: '◷', label: '切换到任务与历史', run: openOperationsView },
+    { id: 'open-settings', icon: '⚙', label: '切换到设置', run: (): void => { setSidebarCollapsed(false); setSidebarView('settings'); } },
     { id: 'focus-search', icon: '⌕', label: '聚焦资源搜索', hint: '搜索', run: focusSearchPanel },
     { id: 'toggle-agent', icon: '✦', label: '切换 AI Agent 面板', hint: 'Ctrl J', run: (): void => { setAgentOpen((open) => !open); } },
     { id: 'toggle-sidebar', icon: '◨', label: '切换侧栏', hint: 'Ctrl B', run: (): void => { setSidebarCollapsed((collapsed) => !collapsed); } }
@@ -1334,6 +1420,12 @@ export function App(): ReactElement {
           </button>
         </div>
       </header>
+
+      <WorkspaceResourceBar
+        mode={resourceMode}
+        counts={counts}
+        onSelect={selectResourceMode}
+      />
 
       <div className="shell">
         {/* ══════════ 活动栏 ══════════ */}
@@ -1426,15 +1518,38 @@ export function App(): ReactElement {
           <section className={sidebarView === 'explorer' ? 'panel is-active' : 'panel'} data-panel-id="explorer" aria-label="资源浏览器">
             <div className="panel__header">
               <h2 className="panel__title">资源浏览器</h2>
-              <span className="panel__hint">{workspace?.workspaceLabel ?? '未打开工作区'}</span>
+              <span className="panel__hint">{resourceMode} · {visibleFiles.length} 项</span>
             </div>
             <div className="panel__body panel__body--pad">
+              {isBrowserPreview && (
+                <div className="runtime-notice" role="note">
+                  浏览器预览：文件系统功能仅在 SoulForge 桌面版可用
+                </div>
+              )}
               <div className="explorer-actions">
-                <button type="button" className="btn btn--primary btn--block" onClick={() => void openWorkspace()}>
+                <button
+                  type="button"
+                  className="btn btn--primary btn--block"
+                  data-testid="open-workspace"
+                  onClick={() => void openWorkspace()}
+                  {...(isBrowserPreview ? {
+                    'aria-disabled': true,
+                    title: '浏览器预览：「打开 Mod 工作区」仅在 SoulForge 桌面版可用'
+                  } : {})}
+                >
                   打开 Mod 工作区
                 </button>
                 <div className="row gap">
-                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => void chooseBaseDirectory()}>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    data-testid="choose-base-directory"
+                    onClick={() => void chooseBaseDirectory()}
+                    {...(isBrowserPreview ? {
+                      'aria-disabled': true,
+                      title: '浏览器预览：「选择原版目录」仅在 SoulForge 桌面版可用'
+                    } : {})}
+                  >
                     {baseRootChoice ? '更换原版目录' : '选择原版目录'}
                   </button>
                   {baseRootChoice && (
@@ -1446,19 +1561,14 @@ export function App(): ReactElement {
                     原版（下次打开生效）：{baseRootChoice.label}
                   </p>
                 )}
-              </div>
-              <div className="mode-tabs" aria-label="编辑器模式">
-                {WORKSPACE_MODES.map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    className={workspaceMode === mode.id ? 'active' : undefined}
-                    onClick={() => switchMode(mode.id)}
-                  >
-                    {mode.label}
-                    {counts && isResourceKindMode(mode.id) ? ` ${counts[mode.id] ?? 0}` : ''}
-                  </button>
-                ))}
+                <div className="explorer-mount">
+                  <span className="explorer-mount__item" title={workspace?.workspaceLabel ?? '未打开 Mod 工作区'}>
+                    工作区：{workspace?.workspaceLabel ?? '未打开'}
+                  </span>
+                  <span className={sessionMeta?.baseMounted ? 'pill pill--ok' : 'pill'}>
+                    原版：{sessionMeta?.baseMounted ? '已挂载（只读）' : baseRootChoice ? '待打开生效' : '未挂载'}
+                  </span>
+                </div>
               </div>
               <div className="search-box">
                 <input
@@ -1481,7 +1591,7 @@ export function App(): ReactElement {
                   </button>
                 ))}
                 {visibleFiles.length === 0 && (
-                  <p className="empty-hint">当前模式没有匹配资源。可切换到文件模式或调整搜索。</p>
+                  <p className="empty-hint">当前目录没有匹配资源。可切换到 all 或调整路径过滤。</p>
                 )}
               </div>
             </div>
@@ -1599,38 +1709,7 @@ export function App(): ReactElement {
           <section className={sidebarView === 'settings' ? 'panel is-active' : 'panel'} data-panel-id="settings" aria-label="设置">
             <div className="panel__header"><h2 className="panel__title">设置</h2></div>
             <div className="panel__body panel__body--pad">
-              <div className="setting-row setting-row--control">
-                <div>
-                  <div className="setting-name">模型服务</div>
-                  <div className="setting-desc">计划草稿与证据分析</div>
-                </div>
-                <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProvider)} aria-label="模型服务">
-                  <option value="mock">本地计划草稿</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="anthropic">Anthropic</option>
-                </select>
-              </div>
-              <div className="setting-row setting-row--control">
-                <div>
-                  <div className="setting-name">思考强度</div>
-                  <div className="setting-desc">草稿生成深度</div>
-                </div>
-                <select value={aiThinking} onChange={(event) => setAiThinking(event.target.value as AiThinkingLevel)} aria-label="思考强度">
-                  <option value="fast">快速</option>
-                  <option value="normal">普通</option>
-                  <option value="deep">深入</option>
-                  <option value="extreme">极致</option>
-                </select>
-              </div>
-              <div className="setting-row setting-row--control">
-                <div>
-                  <div className="setting-name">权限模式</div>
-                  <div className="setting-desc">P0 安全收口期间锁定</div>
-                </div>
-                <select value={aiMode} disabled title="P0 安全收口期间由主进程锁定为计划模式" aria-label="权限模式">
-                  <option value="plan">计划模式</option>
-                </select>
-              </div>
+              {/* 模型、思考强度与权限模式已迁入右侧 Agent 面板；此处只保留工作区与安全基础设施设置。 */}
               <div className="setting-row">
                 <div>
                   <div className="setting-name">原版游戏目录（只读）</div>
@@ -1645,7 +1724,12 @@ export function App(): ReactElement {
                 </span>
               </div>
               <div className="row gap setting-actions">
-                <button type="button" className="btn btn--ghost btn--sm" onClick={() => void chooseBaseDirectory()}>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => void chooseBaseDirectory()}
+                  {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
+                >
                   {baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录'}
                 </button>
                 {baseRootChoice && (
@@ -1717,7 +1801,7 @@ export function App(): ReactElement {
             <div className="editor-pane is-active">
               <div className="pane-toolbar">
                 <span className="crumb">
-                  <b>{workspaceModeLabel(workspaceMode)}</b>
+                  <b>{centerView === 'operations' ? '任务与历史' : resourceMode}</b>
                   {selectedFile ? ` · ${selectedFile.relativePath}` : ' · 资源预览'}
                 </span>
                 <span className="toolbar-spacer"></span>
@@ -1768,7 +1852,7 @@ export function App(): ReactElement {
             />
           )}
           {preview?.previewKind === 'hex' && !preview.hex && <pre className="muted">无 Hex 预览数据。</pre>}
-          {workspaceMode === 'map' && (
+          {centerView === 'resource' && resourceMode === 'map' && (
             <>
               <p className="muted">
                 {msbLive ? '实时 Bridge MSB parts' : '空场景（未选中可解析 MSB 或读取失败）'}
@@ -1805,7 +1889,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {workspaceMode === 'event' && (
+          {centerView === 'resource' && resourceMode === 'event' && (
             <>
               <p className="muted">
                 {emevdLive
@@ -1821,8 +1905,8 @@ export function App(): ReactElement {
                       dslTemplateTruncated: true,
                       dslTemplateTotalLines: emevdDslTemplateTotalLines,
                       onLoadFullDslTemplate: async () => {
-                        if (!selectedFile) return;
-                        const full = await window.soulforge.readEmevdFullDocument(
+                        if (!selectedFile || !bridge) return;
+                        const full = await bridge.readEmevdFullDocument(
                           selectedFile.sourceUri,
                           `renderer-${selectedFile.sourceUri}-${Date.now()}`,
                           true
@@ -1845,15 +1929,21 @@ export function App(): ReactElement {
                       diagnostics: [{ severity: 'error', code: 'EMEVD_DSL_NO_LIVE_DOCUMENT', message: '需要实时 EMEVD 文档才能提交 DSL。' }]
                     };
                   }
-                  if (typeof window.soulforge.submitEmevdDslPlan !== 'function') {
+                  if (!bridge) {
+                    return {
+                      ok: false,
+                      diagnostics: [{ severity: 'error', code: 'BRIDGE_UNAVAILABLE', message: describeBridgeAbsence('提交 EMEVD DSL') }]
+                    };
+                  }
+                  if (typeof bridge.submitEmevdDslPlan !== 'function') {
                     return {
                       ok: false,
                       diagnostics: [{ severity: 'error', code: 'PRELOAD_MISSING', message: '当前预加载未暴露 submitEmevdDslPlan。' }]
                     };
                   }
-                  const result = await window.soulforge.submitEmevdDslPlan(selectedFile.sourceUri, sourceText);
+                  const result = await bridge.submitEmevdDslPlan(selectedFile.sourceUri, sourceText);
                   if (result.ok) {
-                    const reload = await window.soulforge.readEmevdFullDocument(
+                    const reload = await bridge.readEmevdFullDocument(
                       selectedFile.sourceUri,
                       `renderer-${selectedFile.sourceUri}-${Date.now()}`
                     );
@@ -1862,7 +1952,7 @@ export function App(): ReactElement {
                       setEmevdDslTemplateTruncated(reload.dslTemplateTruncated ?? false);
                       setEmevdDslTemplateTotalLines(reload.dslTemplateTotalLines ?? 0);
                       if (reload.sourceHash) setEmevdSourceHash(reload.sourceHash);
-                      const refreshed = await window.soulforge.readEmevdDocument(selectedFile.sourceUri) as {
+                      const refreshed = await bridge.readEmevdDocument(selectedFile.sourceUri) as {
                         ok?: boolean;
                         data?: BridgeEmevdEnvelopeLike | null;
                       };
@@ -1891,7 +1981,11 @@ export function App(): ReactElement {
                       setStatus('当前资源未实时加载，不能生成 mutation；请先选中可解析资源。');
                       return;
                     }
-                    if (typeof window.soulforge.applyEmevdMutation !== 'function') {
+                    if (!bridge) {
+                      setStatus(describeBridgeAbsence('提交 EMEVD mutation'));
+                      return;
+                    }
+                    if (typeof bridge.applyEmevdMutation !== 'function') {
                       setStatus('当前预加载未暴露 applyEmevdMutation。');
                       return;
                     }
@@ -1910,7 +2004,7 @@ export function App(): ReactElement {
                             eventId,
                             newEventId: mutation.newEventId
                           };
-                    const result = await window.soulforge.applyEmevdMutation(
+                    const result = await bridge.applyEmevdMutation(
                       selectedFile.sourceUri,
                       emevdSourceHash,
                       bridgeMutation
@@ -1920,7 +2014,7 @@ export function App(): ReactElement {
                       return;
                     }
                     setStatus('EMEVD mutation 已提交；正在重读…');
-                    const reload = await window.soulforge.readEmevdDocument(selectedFile.sourceUri) as {
+                    const reload = await bridge.readEmevdDocument(selectedFile.sourceUri) as {
                       ok?: boolean;
                       data?: BridgeEmevdEnvelopeLike | null;
                     };
@@ -1939,7 +2033,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {workspaceMode === 'msg' && (
+          {centerView === 'resource' && resourceMode === 'msg' && (
             <>
               <p className="muted">
                 {fmgLive
@@ -1981,7 +2075,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {workspaceMode === 'param' && (
+          {centerView === 'resource' && resourceMode === 'param' && (
             <>
               <p className="muted">
                 {paramLive
@@ -2076,7 +2170,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {workspaceMode === 'script' && (
+          {centerView === 'resource' && resourceMode === 'script' && (
             <>
               <p className="muted">
                 {selectedFile
@@ -2090,7 +2184,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {workspaceMode === 'bnd4' && (
+          {showBnd4Workbench && (
             <>
               <p className="muted">
                 {selectedFile
@@ -2104,7 +2198,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {workspaceMode === 'settings' && <ModelServiceSettingsPanel />}          {workspaceMode === 'ops' && (
+          {centerView === 'operations' && (
             <WorkbenchOpsPanel
               jobs={[]}
               history={operationHistory.map((entry) => ({
@@ -2125,7 +2219,11 @@ export function App(): ReactElement {
               patchImpact={null}
               onCancelJob={() => setStatus('任务取消请求已记录；待 TaskQueue IPC。')}
               onRollback={(opId) => {
-                void window.soulforge.rollbackOperation(opId).then(() => {
+                if (!bridge) {
+                  announceDesktopOnly('回滚操作');
+                  return;
+                }
+                void bridge.rollbackOperation(opId).then(() => {
                   setStatus(`已请求回滚 ${opId}`);
                 }).catch((error: unknown) => {
                   setStatus(error instanceof Error ? error.message : '回滚失败');
@@ -2148,60 +2246,6 @@ export function App(): ReactElement {
             <TpfWorkbenchPanel resourceUri={selectedFile.sourceUri} data={tpfData as never} />
           )}
           {preview?.truncated && <p className="muted">预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开。</p>}
-                  {workspaceMode === 'ai' && (
-                    <>
-                      <p className="muted">计划优先，证据优先，写入必须经过 Patch Engine。</p>
-                      <div className="context-card ai-context-card">
-                        <strong>当前上下文</strong>
-                        <span>{selectedFile?.sourceUri ?? '未选择资源'}</span>
-                        {analysis && (
-                          <span>引用：高 {analysis.referenceStats.high} / 中 {analysis.referenceStats.medium} / 低 {analysis.referenceStats.low}</span>
-                        )}
-                        <span>{diagnostics.length ? `范围内有 ${diagnostics.length} 条诊断` : '范围内没有诊断'}</span>
-                      </div>
-
-                      <div className="tool-panel">
-                        <strong>安全工具</strong>
-                        <div className="tool-group">
-                          <small>读取 / 分析</small>
-                          <div className="tool-list">
-                            {groupedTools.read.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
-                          </div>
-                        </div>
-                        <div className="tool-group">
-                          <small>提案 / 验证</small>
-                          <div className="tool-list">
-                            {groupedTools.plan.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
-                          </div>
-                        </div>
-                        <div className="tool-group">
-                          <small>提交 / 回滚</small>
-                          <div className="tool-list">
-                            {groupedTools.write.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)}
-                          </div>
-                        </div>
-                        <div className="tool-row">
-                          <input value={toolQuery} onChange={(event) => setToolQuery(event.target.value)} placeholder="输入资源搜索条件" aria-label="工具资源搜索条件" />
-                          <button type="button" onClick={() => void runToolSearch()}>运行</button>
-                        </div>
-                        <div className="tool-row">
-                          <input value={eventUri} onChange={(event) => setEventUri(event.target.value)} placeholder="event://..." aria-label="事件 URI" />
-                          <button type="button" onClick={() => void explainEvent()}>解释事件</button>
-                        </div>
-                      </div>
-
-                      {analysis && (
-                        <div className="context-card">
-                          <strong>证据索引</strong>
-                          <span>已解析：{analysis.parsedFiles}</span>
-                          <span>已检查：{analysis.inspectedFiles}</span>
-                          <span>引用：高 {analysis.referenceStats.high} / 中 {analysis.referenceStats.medium} / 低 {analysis.referenceStats.low}</span>
-                        </div>
-                      )}
-
-                      {toolOutput && <pre className="tool-output">{JSON.stringify(toolOutput, null, 2)}</pre>}
-                    </>
-                  )}
                 </div>
               </div>
             </div>
@@ -2283,96 +2327,30 @@ export function App(): ReactElement {
         </main>
 
         {/* ══════════ Agent 面板 ══════════ */}
-        <aside className={`agent${agentOpen ? '' : ' is-collapsed'}`} aria-label="AI Agent 面板">
-          <div className="agent__header">
-            <div className="agent__title">
-              <span className={`agent-dot${aiBusy ? ' is-busy' : ''}`}></span>
-              <span>Agent</span>
-              <span className="agent-model">{aiBusy ? '执行中' : modelServiceLabel(aiProvider)}</span>
-            </div>
-            <button type="button" className="tb-btn" onClick={() => setAgentOpen(false)} title="收起" aria-label="收起 Agent 面板">
-              <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
-                <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" />
-              </svg>
-            </button>
-          </div>
-          <div className="agent__stream" role="log" aria-live="polite" aria-label="Agent 会话记录">
-            {agentGoal === null && !aiDraft && !aiBusy && (
-              <div className="agent-empty">
-                没有进行中的任务。在下方描述目标，Agent 会生成计划草稿；变更经你批准后才会进入暂存区。
-              </div>
-            )}
-            {agentGoal !== null && (
-              <div className="task-goal">
-                <span className="task-goal__label">目标</span>
-                {agentGoal}
-              </div>
-            )}
-            {aiBusy && (
-              <div className="agent-block">
-                <div className="agent-block__label">日志</div>
-                <div className="agent-log">
-                  <div className="agent-log__row">
-                    <span className="spinner" aria-hidden="true"></span>
-                    <span>正在生成计划草稿…</span>
-                  </div>
-                </div>
-              </div>
-            )}
-            {aiDraft && (
-              <div className="agent-block">
-                <div className="agent-block__label">
-                  计划草稿 · {modelServiceLabel(aiDraft.provider)} / {thinkingLabel(aiDraft.thinking)} / {permissionModeLabel(aiDraft.mode)}
-                </div>
-                <div className="agent-draft">
-                  <strong>{aiDraft.title}</strong>
-                  <p>{aiDraft.summary}</p>
-                  {aiDraft.recommendedTools.length > 0 && (
-                    <div className="agent-tools">
-                      {aiDraft.recommendedTools.map((tool) => (
-                        <span key={tool.toolName} className="tool-chip" title={tool.reason}>{tool.toolName}</span>
-                      ))}
-                    </div>
-                  )}
-                  {aiDraft.nextActions.length > 0 && (
-                    <div className="agent-log">
-                      {aiDraft.nextActions.map((action) => (
-                        <div key={action} className="agent-log__row"><span>→ {action}</span></div>
-                      ))}
-                    </div>
-                  )}
-                  <details>
-                    <summary>提示词预览</summary>
-                    <pre className="tool-output">{aiDraft.promptPreview}</pre>
-                  </details>
-                </div>
-              </div>
-            )}
-          </div>
-          <div className="agent__composer">
-            <div className="composer-context">
-              {selectedFile && <span className="ctx-chip">{selectedFile.relativePath}</span>}
-              <span className="ctx-chip">{workspaceModeLabel(workspaceMode)}</span>
-            </div>
-            <textarea
-              rows={2}
-              value={aiPrompt}
-              onChange={(event) => setAiPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  void sendAgentPrompt();
-                }
-              }}
-              placeholder="描述修改目标，例如：把伤药葫芦的持有上限调到 12"
-              aria-label="向 Agent 描述修改目标"
-            ></textarea>
-            <div className="composer-bar">
-              <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
-              <button type="button" className="btn btn--primary btn--sm" onClick={() => void sendAgentPrompt()}>发送</button>
-            </div>
-          </div>
-        </aside>
+        <AgentSidebar
+          open={agentOpen}
+          busy={aiBusy}
+          provider={aiProvider}
+          thinking={aiThinking}
+          permissionMode={aiMode}
+          permissionLockReason={AI_PERMISSION_LOCK_REASON}
+          goal={agentGoal}
+          draft={aiDraft}
+          prompt={aiPrompt}
+          contextLabel={resourceMode}
+          selectedFilePath={selectedFile?.relativePath ?? null}
+          tools={tools}
+          toolOutput={toolOutput}
+          eventUri={eventUri}
+          onEventUriChange={setEventUri}
+          onProviderChange={setAiProvider}
+          onThinkingChange={setAiThinking}
+          onPromptChange={setAiPrompt}
+          onSend={() => void sendAgentPrompt()}
+          onClose={() => setAgentOpen(false)}
+          onRunToolSearch={(toolQuery) => void runToolSearch(toolQuery)}
+          onExplainEvent={(uri) => void explainEvent(uri)}
+        />
       </div>
 
       {/* ══════════ 状态栏 ══════════ */}
@@ -2948,45 +2926,6 @@ function summarizeEvidenceValue(value: unknown): string {
   }
 }
 
-function groupToolsByPermission(tools: ToolDescriptor[]): Record<'read' | 'plan' | 'write', ToolDescriptor[]> {
-  const levelOf = (tool: ToolDescriptor): string => tool.permissionLevel ?? tool.permission;
-  return {
-    read: tools.filter((tool) => {
-      const level = levelOf(tool);
-      return level === 'read' || level === 'analyze';
-    }),
-    plan: tools.filter((tool) => {
-      const level = levelOf(tool);
-      return level === 'propose' || level === 'stage' || level === 'validate' || level === 'plan';
-    }),
-    write: tools.filter((tool) => {
-      const level = levelOf(tool);
-      return level === 'commit' || level === 'rollback' || level === 'write';
-    })
-  };
-}
-
-function isResourceKindMode(mode: WorkspaceMode): mode is ResourceKind {
-  return mode !== 'files' && mode !== 'bnd4' && mode !== 'ai' && mode !== 'settings' && mode !== 'ops';
-}
-
-function workspaceModeLabel(mode: WorkspaceMode): string {
-  return WORKSPACE_MODES.find((item) => item.id === mode)?.label ?? mode;
-}
-
-function modelServiceLabel(provider: AiProvider): string {
-  if (provider === 'mock') return '本地计划草稿';
-  return provider === 'openai' ? 'OpenAI 模型服务' : 'Anthropic 模型服务';
-}
-
-function thinkingLabel(level: AiThinkingLevel): string {
-  return ({ fast: '快速', normal: '普通', deep: '深入', extreme: '极致' } as const)[level];
-}
-
-function permissionModeLabel(mode: AiPermissionMode): string {
-  return ({ plan: '计划模式', normal: '普通模式', fullPermission: '完全权限' } as const)[mode];
-}
-
 function operationStatusLabel(status: string): string {
   return ({
     planned: '已计划',
@@ -3000,21 +2939,18 @@ function operationStatusLabel(status: string): string {
   } as Record<string, string>)[status] ?? status;
 }
 
+/**
+ * 'all' 显示全部文件（含 unknown，不合并、不隐藏）；
+ * 其余模式按顶层目录 resourceKind 精确过滤。
+ */
 function filterFilesForMode(
   files: RendererIndexedFile[],
-  mode: WorkspaceMode,
+  mode: ResourceMode,
   query: string
 ): RendererIndexedFile[] {
   const normalized = query.trim().toLowerCase();
   return files.filter((file) => {
-    if (mode === 'bnd4') {
-      const looksContainer = file.formatKind === 'bnd' || file.formatKind === 'dcx'
-        || file.compoundExtension.includes('.bnd')
-        || file.compoundExtension.includes('.dcx');
-      if (!looksContainer) return false;
-    } else if (isResourceKindMode(mode) && file.resourceKind !== mode) {
-      return false;
-    }
+    if (mode !== 'all' && file.resourceKind !== mode) return false;
     if (!normalized) return true;
     return file.relativePath.toLowerCase().includes(normalized)
       || file.resourceKind.toLowerCase().includes(normalized)

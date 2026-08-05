@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react';
+import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
 
 interface ModelServiceDto {
   id: string;
@@ -11,10 +12,16 @@ interface ModelServiceDto {
   updatedAt: string;
 }
 
+function isLoopbackService(row: ModelServiceDto): boolean {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?([/?#]|$)/i.test(row.baseUrl);
+}
+
 /**
  * 模型服务设置：只展示 hasCredential，密钥仅在保存时一次性交给 main 加密。
+ * 保存、删除与脱敏 DTO 契约不变；browser-preview 表面返回可见诊断。
  */
 export function ModelServiceSettingsPanel(): ReactElement {
+  const bridge = getRendererBridge();
   const [rows, setRows] = useState<ModelServiceDto[]>([]);
   const [encryptionOk, setEncryptionOk] = useState(false);
   const [displayName, setDisplayName] = useState('本地兼容模型服务');
@@ -25,9 +32,13 @@ export function ModelServiceSettingsPanel(): ReactElement {
   const [status, setStatus] = useState('');
 
   async function refresh(): Promise<void> {
+    if (!bridge) {
+      setStatus(describeBridgeAbsence('模型服务管理'));
+      return;
+    }
     const [list, available] = await Promise.all([
-      window.soulforge.listModelServices(),
-      window.soulforge.modelServiceEncryptionAvailable()
+      bridge.listModelServices(),
+      bridge.modelServiceEncryptionAvailable()
     ]);
     setRows(list);
     setEncryptionOk(available);
@@ -40,8 +51,12 @@ export function ModelServiceSettingsPanel(): ReactElement {
   }, []);
 
   async function save(): Promise<void> {
+    if (!bridge) {
+      setStatus(describeBridgeAbsence('保存模型服务'));
+      return;
+    }
     try {
-      const saved = await window.soulforge.upsertModelService({
+      const saved = await bridge.upsertModelService({
         displayName,
         protocol,
         baseUrl,
@@ -57,7 +72,11 @@ export function ModelServiceSettingsPanel(): ReactElement {
   }
 
   async function remove(id: string): Promise<void> {
-    await window.soulforge.deleteModelService(id);
+    if (!bridge) {
+      setStatus(describeBridgeAbsence('删除模型服务'));
+      return;
+    }
+    await bridge.deleteModelService(id);
     await refresh();
     setStatus('已删除模型服务配置');
   }
@@ -118,6 +137,9 @@ export function ModelServiceSettingsPanel(): ReactElement {
           </li>
         ))}
       </ul>
+      {!rows.some(isLoopbackService) && (
+        <p className="muted">未配置本地模型：真实本地模型需保存回环地址（127.0.0.1 / localhost）服务配置。</p>
+      )}
       <p className="muted">{status}</p>
     </section>
   );
