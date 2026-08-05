@@ -169,7 +169,7 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-REL-C-MULTILANG-02"
+        "W-REL-C-MULTILANG-03"
       ],
       "evidenceRefs": [
         "EV-EMEVD-FMG-PARAM-03-20260803",
@@ -187,7 +187,7 @@
       "openRulings": [
         "V0.5 收窄为 FMG / PARAM(gameparam) / EMEVD 三类文本与逻辑资源：需完成全官方语言 FMG、全部 ParamType 与 EMEVD 的 release corpus、writer、引用和游戏加载矩阵。SCOPE-MSB 已延期至 V0.6，其既有 transform 写路径必须在 V0.5 关闭。"
       ],
-      "successorRequirement": "EMEVD DSL plan 的 production Bridge/PatchIR transaction 接线已完成；继续完整 EMEDF schema/control-flow、DSL 全局指令级 mutation、UI submit 接线；并行继续 FMG 全语言、全部 ParamType、MSB 实体和回滚"
+      "successorRequirement": "EMEVD DSL production Bridge/PatchIR transaction 与 138 ParamType corpus 已完成；FMG 已完成 14/14 官方语言真实 item staged 写入/重读。继续全语言 item/menu 容器级 Patch Engine 提交/独立重读/回滚与跨语言引用矩阵；完成后再单列真实 Sekiro 游戏加载确认"
     },
     {
       "gateId": "REL-D",

@@ -9,9 +9,9 @@
   ],
   "unfrozen": [
     {
-      "sliceId": "W-REL-C-MULTILANG-02",
+      "sliceId": "W-REL-C-MULTILANG-03",
       "targetRelease": "V0.5",
-      "reason": "全官方语言 FMG 写验证（本机仅 zhocn 展开，其余官方语言在原版 .bdt 归档内，需真实多语言语料）"
+      "reason": "全官方语言 item/menu 容器级 Patch Engine 提交/回滚与跨语言引用矩阵"
     },
     {
       "sliceId": "W-REL-D-GAMELOAD-01",

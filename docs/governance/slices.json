@@ -922,7 +922,7 @@
     {
       "sliceId": "W-REL-C-MULTILANG-02",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只覆盖实际注册的官方语言布局",
@@ -937,6 +937,28 @@
         "packages/core/src/testing/runNativeFmgSmoke.ts"
       ],
       "requiredValidation": "npm run bridge:verify:fmg；validation-unfrozen：全官方语言 FMG 写验证",
+      "declaresUnfrozenValidation": true
+    },
+    {
+      "sliceId": "W-REL-C-MULTILANG-03",
+      "targetRelease": "V0.5",
+      "lifecycle": "ready",
+      "authority": "partial",
+      "authorityCap": "partial",
+      "authorityCapNote": "cap=partial；只覆盖经 Patch Engine 提交/回滚与引用扫描的实际语言和容器",
+      "capabilityIds": [
+        "C-FMG"
+      ],
+      "blockerRefs": [],
+      "goal": "全官方语言 FMG 容器闭环：补 item/menu 容器级 Patch Engine 提交、独立重读、回滚与跨语言引用矩阵",
+      "hardPrerequisites": "W-REL-C-MULTILANG-02 已完成 14/14 官方语言真实 item FMG staged 写入/重读且原容器哈希不变；本切片只使用系统临时 overlay，不触碰原版或 live Mod，真实游戏加载另由后继切片失败关闭",
+      "entryPoints": [
+        "packages/core/src/testing/runNativeFmgSmoke.ts",
+        "packages/core/src/testing/runFmgReferenceIntegritySmoke.ts",
+        "packages/core/src/editing/fmgBridgeCommit.ts",
+        "apps/desktop/src/main/ipc.ts"
+      ],
+      "requiredValidation": "npm run bridge:verify:fmg；npm run test:fmg-reference-integrity；validation-unfrozen：全官方语言 item/menu 容器提交/回滚与跨语言引用矩阵",
       "declaresUnfrozenValidation": true
     },
     {
@@ -1000,16 +1022,7 @@
       "declaresUnfrozenValidation": true
     }
   ],
-  "activeClaims": [
-    {
-      "sliceId": "W-REL-C-MULTILANG-02",
-      "claimId": "claim-w-rel-c-multilang-02-20260805",
-      "owner": "codex-root",
-      "claimedAt": "2026-08-05T07:29:23.408Z",
-      "heartbeatAt": "2026-08-05T07:29:23.408Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    }
-  ],
+  "activeClaims": [],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",
