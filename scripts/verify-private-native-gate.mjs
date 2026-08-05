@@ -2,6 +2,7 @@
  * P7 private native gate — runs real native checks when env roots exist,
  * otherwise records an honest skip without claiming V0.5 complete.
  */
+import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +40,20 @@ try {
   process.exit(1);
 }
 
+let assessmentFixtureCases;
+try {
+  assessmentFixtureCases = verifyAssessmentClassifier();
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    status: 'failed',
+    gate: 'private-native',
+    code: 'PRIVATE_NATIVE_ASSESSMENT_FIXTURE_FAILED',
+    message: error instanceof Error ? error.message : String(error)
+  }, null, 2));
+  process.exit(1);
+}
+
 let scratch;
 try {
   scratch = await resolveSafeScratchRoot({
@@ -67,6 +82,7 @@ const report = {
   timestamp: new Date().toISOString(),
   sekiroRootPresent: Boolean(sekiro),
   nativeFixturePresent: Boolean(nativeFixture),
+  assessmentFixtureCases,
   steps: /** @type {Array<Record<string, unknown>>} */ ([]),
   status: 'unknown',
   message: ''
@@ -170,6 +186,18 @@ function assessStep(name, result) {
         : '命令失败或未返回 ok=true 的结构化结果。';
     return { ok: false, partial: false, status: 'failed', reason };
   }
+  const semanticStatus = typeof result.result.status === 'string' ? result.result.status : '';
+  if (semanticStatus === 'failed') {
+    return { ok: false, partial: false, status: 'failed', reason: '子步骤返回 status=failed。' };
+  }
+  if (['skipped', 'unverified', 'unsupported', 'candidate', 'fixture-confirmed', 'partial', 'blocked'].includes(semanticStatus)) {
+    return {
+      ok: true,
+      partial: true,
+      status: semanticStatus,
+      reason: `子步骤返回 status=${semanticStatus}，不能算完整 native pass。`
+    };
+  }
   if (name === 'bridge:verify:oodle') {
     const success = result.result.realRuntimeSuccessPath === 'krak-decompress-preview-verified';
     return success
@@ -184,6 +212,34 @@ function assessStep(name, result) {
     return { ok: true, partial: true, status: authority, reason: `返回 authority=${authority}，不能算完整 native pass。` };
   }
   return { ok: true, partial: false, status: 'passed', reason: '结构化断言通过。' };
+}
+
+function verifyAssessmentClassifier() {
+  const success = (result) => ({
+    code: 0,
+    timedOut: false,
+    cancelled: false,
+    result: { ok: true, ...result }
+  });
+  const cases = [
+    ['skipped', 'bridge:verify:esd', success({ status: 'skipped' }), { ok: true, partial: true, status: 'skipped' }],
+    ['unverified', 'bridge:verify:esd', success({ status: 'unverified' }), { ok: true, partial: true, status: 'unverified' }],
+    ['unsupported', 'bridge:verify:esd', success({ status: 'unsupported' }), { ok: true, partial: true, status: 'unsupported' }],
+    ['candidate-status', 'bridge:verify:tae', success({ status: 'candidate' }), { ok: true, partial: true, status: 'candidate' }],
+    ['fixture-authority', 'bridge:verify:tae', success({ authority: 'fixture-confirmed' }), { ok: true, partial: true, status: 'fixture-confirmed' }],
+    ['native-verified', 'bridge:verify:emevd', success({ status: 'native-verified' }), { ok: true, partial: false, status: 'passed' }],
+    ['oodle-success', 'bridge:verify:oodle', success({ realRuntimeSuccessPath: 'krak-decompress-preview-verified' }), { ok: true, partial: false, status: 'passed' }],
+    ['param-partial', 'bridge:verify:param', success({ corpusFailed: 2 }), { ok: true, partial: true, status: 'partial' }],
+    ['semantic-failed', 'bridge:verify:esd', success({ status: 'failed' }), { ok: false, partial: false, status: 'failed' }],
+    ['process-failed', 'bridge:verify:esd', { code: 1, timedOut: false, cancelled: false, result: null }, { ok: false, partial: false, status: 'failed' }]
+  ];
+  for (const [label, name, result, expected] of cases) {
+    const actual = assessStep(name, result);
+    for (const [key, value] of Object.entries(expected)) {
+      assert.deepEqual(actual[key], value, `${label}: ${key}`);
+    }
+  }
+  return cases.length;
 }
 
 function extractLastJsonObject(stdout) {
