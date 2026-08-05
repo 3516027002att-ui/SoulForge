@@ -781,7 +781,7 @@ me3 是可替换的运行适配器，不是工作区、Patch Engine 或语义模
 - release content、许可证 inventory、凭据/私有资产路径扫描和同机可复现构建指纹；
 - electron-builder 配置使用严格 JSON 闭集解析，拒绝未知键、workspace link 和 falsy manifest 漂移；scratch root、子进程树终止、超时/取消和 stdout/stderr 上限有公开负向 fixture；
 - electron-builder 当前配置已收敛为 Windows x64 NSIS-only，只复制最终 `better_sqlite3.node` 与确定性 metadata，packaged main 从 `process.resourcesPath/native` 解析 binding；legacy-named packaging gate 的可选 `--dir` 仅生成内容扫描中间产物，不构成 portable release；
-- private native gate 可执行并按各子步骤真实 authority 汇总为 `partial`；section-28 仍诚实失败关闭；
+- private native gate 可执行并按各子步骤真实 `status` / `authority` 汇总为 `partial`；汇总器内置 10 个确定性分类 fixture，`skipped` / `unverified` / `unsupported` / `candidate` / `fixture-confirmed` / `partial` / `blocked` 均不得折算为 `passed`；当前 ESD 因未登记且延期 V0.6 如实保留 `skipped`，section-28 仍诚实失败关闭；
 - production lockfile 许可证正文 inventory 当前为 123 present / 0 metadata-only / 49 not-installed（可选平台包）；
 - 基础性能 smoke。
 
