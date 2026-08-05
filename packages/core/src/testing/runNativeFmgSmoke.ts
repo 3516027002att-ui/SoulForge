@@ -36,6 +36,49 @@ interface Bnd4ChildSnapshot {
   index: number;
 }
 
+const SEKIRO_OFFICIAL_FMG_LANGUAGES = [
+  'deude',
+  'engus',
+  'frafr',
+  'itait',
+  'jpnjp',
+  'korkr',
+  'polpl',
+  'porbr',
+  'rusru',
+  'spaar',
+  'spaes',
+  'thath',
+  'zhocn',
+  'zhotw'
+] as const;
+
+interface OfficialLanguageFmgVerification {
+  language: string;
+  itemMsgbnd: true;
+  menuMsgbndPresent: true;
+  itemContainerSha256: string;
+  sourceFmgSha256: string;
+  childIndex: number;
+  childName: string;
+  entryCount: number;
+  mutatedId: number;
+  semanticRoundTripVerified: true;
+  stagedRereadVerified: true;
+  originalContainerUntouched: true;
+}
+
+interface OfficialLanguageFmgMatrix {
+  executed: boolean;
+  corpusRoot: string | null;
+  requiredLanguages: readonly string[];
+  availableLanguages: string[];
+  ignoredDirectories: string[];
+  missingLanguages: string[];
+  verified: OfficialLanguageFmgVerification[];
+  reason?: string;
+}
+
 function main(): Promise<void> {
   return withSmokeWorkspace('native-fmg', (workspace) => mainInWorkspace(workspace.root));
 }
@@ -553,12 +596,24 @@ async function mainInWorkspace(root: string): Promise<void> {
     throw new Error('menu 写泄漏进原 FMG child。');
   }
 
-  // 9) 语言覆盖矩阵：只读扫描 mods/msg 下的语言目录，如实记录本机 corpus 的语言覆盖。
-  //    引用完整性诊断是只读的（不开放写路径），与语义往返一并完成。
-  const msgRoot = join(dirname(dirname(sourceMsgbnd)));
+  // 9) 全官方语言矩阵：原版已解包 msg 只读，FMG 仅提取到 smoke staging 后写入。
+  //    每种官方语言都执行真实 FMG v2 upsert → 独立重读，并复核原容器哈希不变。
+  //    未提供已解包 msg 时保持结构化未执行，不把 zhocn/派生 enus 冒充全语言覆盖。
+  const configuredGameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
+    || process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+    || '';
+  const expandedMsgRoot = configuredGameRoot ? join(configuredGameRoot, 'msg') : '';
+  const officialLanguageMatrix = await verifyOfficialLanguageFmgMatrix(
+    expandedMsgRoot,
+    staging,
+    configuredGameRoot
+  );
+
+  // 保留 fixture registry 的 mods/msg 可见性，避免把外部已解包 corpus 与登记 fixture 混为一谈。
+  const fixtureMsgRoot = join(dirname(dirname(sourceMsgbnd)));
   let languageCorpus: string[] = [];
   try {
-    languageCorpus = (await readdir(msgRoot, { withFileTypes: true }))
+    languageCorpus = (await readdir(fixtureMsgRoot, { withFileTypes: true }))
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort();
@@ -580,7 +635,9 @@ async function mainInWorkspace(root: string): Promise<void> {
 
   console.log(JSON.stringify({
     ok: true,
-    message: '原生 FMG 读取/语义往返/写入/BND4 提交/回滚 + 多语言(enus 派生)与多 msgbnd(menu)写验证通过',
+    message: officialLanguageMatrix.executed
+      ? '原生 FMG 全链与全部官方语言真实语料 staged 写入/重读验证通过'
+      : '原生 FMG 全链通过；全部官方语言真实语料矩阵未执行',
     entryCount: read.data.entryCount,
     groupCount: read.data.groupCount,
     mutatedId: editable.id,
@@ -635,8 +692,9 @@ async function mainInWorkspace(root: string): Promise<void> {
       note: '引用完整性为只读诊断；`<?tag@id?>` 目标不在容器条目集合时产 warning（kgiconKc/gdsparam 等 tag 可能引用外部资源，SoulForge 不声明其语义）；不在容器集合的悬空引用不开放任何写路径。'
     },
     languageMatrix: {
-      corpusRoot: msgRoot.replaceAll('\\', '/'),
-      availableLanguages: languageCorpus,
+      fixtureCorpusRoot: fixtureMsgRoot.replaceAll('\\', '/'),
+      fixtureLanguages: languageCorpus,
+      official: officialLanguageMatrix,
       verified: {
         zhocn: {
           itemMsgbnd: true,
@@ -653,11 +711,182 @@ async function mainInWorkspace(root: string): Promise<void> {
           rewriteVerified: true
         }
       },
-      unverifiedLanguages: ['真实官方语言语料（本机 corpus 仅 zhocn；enus 为派生占位样本）'],
-      note: '多语言写验证：zhocn 真实语料（item 18/18、menu 15/15 语义往返；item 全链 staging→BND4 提交→回滚；menu 新补 staging 写链）+ 派生 enus 样本（英文占位串 upsert/add/delete，布局与 zhocn 不同，二次写验证）+ 跨语言/跨 msgbnd 隔离（写链只落 staging，源文件零污染）。enus 样本为合成派生（FMG 语言无关），不冒充真实英文翻译，authority 保持 partial。'
+      unverifiedLanguages: officialLanguageMatrix.executed
+        ? []
+        : officialLanguageMatrix.missingLanguages,
+      note: officialLanguageMatrix.executed
+        ? '14 个官方语言目录均使用真实 item.msgbnd 中的 FMG v2 子项执行 upsert staged 写入与独立重读；item/menu 容器存在性已核对，原版容器哈希逐项不变。zhocn 另保留完整 Patch Engine 容器提交/回滚与 menu 写验证；authority 仍只覆盖本次实际 corpus。'
+        : '仅保留 zhocn 真实语料 + 派生 enus 样本的既有验证；全部官方语言矩阵缺少已解包 msg corpus，未执行且不构成完成声明。'
     }
   }, null, 2));
   await disposeBridgeDaemonPool();
+}
+
+async function verifyOfficialLanguageFmgMatrix(
+  msgRoot: string,
+  staging: string,
+  gameRoot: string
+): Promise<OfficialLanguageFmgMatrix> {
+  const requiredLanguages = [...SEKIRO_OFFICIAL_FMG_LANGUAGES];
+  if (!msgRoot || !(await pathReadable(msgRoot))) {
+    return {
+      executed: false,
+      corpusRoot: null,
+      requiredLanguages,
+      availableLanguages: [],
+      ignoredDirectories: [],
+      missingLanguages: requiredLanguages,
+      verified: [],
+      reason: '未提供含已解包 msg 的 SOULFORGE_SEKIRO_GAME_ROOT/SOULFORGE_NATIVE_FIXTURE_ROOT。'
+    };
+  }
+
+  const directories = (await readdir(msgRoot, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name.toLowerCase())
+    .sort();
+  const availableSet = new Set(directories);
+  const missingLanguages: string[] = [];
+  for (const language of requiredLanguages) {
+    const item = join(msgRoot, language, 'item.msgbnd.dcx');
+    const menu = join(msgRoot, language, 'menu.msgbnd.dcx');
+    if (!availableSet.has(language) || !(await pathReadable(item)) || !(await pathReadable(menu))) {
+      missingLanguages.push(language);
+    }
+  }
+  const ignoredDirectories = directories.filter((language) => !requiredLanguages.includes(language as typeof requiredLanguages[number]));
+  if (missingLanguages.length > 0) {
+    return {
+      executed: false,
+      corpusRoot: 'configured-game-root/msg',
+      requiredLanguages,
+      availableLanguages: directories.filter((language) => requiredLanguages.includes(language as typeof requiredLanguages[number])),
+      ignoredDirectories,
+      missingLanguages,
+      verified: [],
+      reason: '已解包 msg corpus 未完整覆盖全部官方语言的 item/menu.msgbnd.dcx。'
+    };
+  }
+
+  const verified: OfficialLanguageFmgVerification[] = [];
+  for (const language of requiredLanguages) {
+    const itemMsgbnd = join(msgRoot, language, 'item.msgbnd.dcx');
+    const originalHash = sha256(await readFile(itemMsgbnd));
+    const sample = await snapshotEditableFmg(itemMsgbnd, staging, language, gameRoot);
+    const editable = sample.document.entries.find(
+      (entry) => entry.text && entry.text !== '<?null?>' && entry.text.length > 0
+    );
+    if (!editable) throw new Error(`${language}: item.msgbnd 中没有可写 FMG 条目。`);
+
+    const stagedPath = join(staging, `official-${language}-staged.fmg`);
+    const newText = `${editable.text}·SoulForge:${language}`;
+    const write = await runBridge<{ outputHash: string; rereadVerified: boolean }>({
+      command: 'write-fmg',
+      filePath: sample.path,
+      allowedRoots: [staging],
+      writableRoots: [staging],
+      timeoutMs: 60_000,
+      commandOptions: {
+        outputPath: stagedPath,
+        expectedDocumentHash: sample.document.sourceHash,
+        mutation: 'upsert',
+        id: editable.id,
+        text: newText
+      }
+    });
+    if (!write.diagnostics.some((diagnostic) => diagnostic.code === 'FMG_STAGING_WRITE_VERIFIED')) {
+      throw new Error(`${language}: write-fmg 失败: ${JSON.stringify(write.diagnostics)}`);
+    }
+    const reread = await runBridge<FmgEnvelope>({
+      command: 'read-fmg-document',
+      filePath: stagedPath,
+      allowedRoots: [staging],
+      timeoutMs: 60_000
+    });
+    if (reread.data?.entries.find((entry) => entry.id === editable.id)?.text !== newText
+      || !reread.data.roundTrip?.semanticIdentical) {
+      throw new Error(`${language}: staged FMG 独立重读不匹配。`);
+    }
+    if (sha256(await readFile(itemMsgbnd)) !== originalHash) {
+      throw new Error(`${language}: 原版 item.msgbnd 哈希发生变化。`);
+    }
+    verified.push({
+      language,
+      itemMsgbnd: true,
+      menuMsgbndPresent: true,
+      itemContainerSha256: originalHash,
+      sourceFmgSha256: sample.document.sourceHash,
+      childIndex: sample.snapshot.index,
+      childName: sample.snapshot.name,
+      entryCount: sample.document.entryCount,
+      mutatedId: editable.id,
+      semanticRoundTripVerified: true,
+      stagedRereadVerified: true,
+      originalContainerUntouched: true
+    });
+  }
+
+  return {
+    executed: true,
+    corpusRoot: 'configured-game-root/msg',
+    requiredLanguages,
+    availableLanguages: requiredLanguages,
+    ignoredDirectories,
+    missingLanguages: [],
+    verified
+  };
+}
+
+async function snapshotEditableFmg(
+  msgbndPath: string,
+  staging: string,
+  language: string,
+  gameRoot: string
+): Promise<{ snapshot: Bnd4ChildSnapshot; path: string; document: FmgEnvelope }> {
+  const container = await runBridge<{ nested?: { entryCount: number } }>({
+    command: 'read-dcx-document',
+    filePath: msgbndPath,
+    allowedRoots: [dirname(msgbndPath)],
+    oodleRuntimeRoot: gameRoot,
+    timeoutMs: 60_000
+  });
+  const count = container.data?.nested?.entryCount ?? 0;
+  const preferredIndices = [1, ...Array.from({ length: count }, (_, index) => index).filter((index) => index !== 1)];
+  for (const index of preferredIndices) {
+    const snapshot = await runBridge<Bnd4ChildSnapshot>({
+      command: 'snapshot-bnd4-child',
+      filePath: msgbndPath,
+      allowedRoots: [dirname(msgbndPath)],
+      oodleRuntimeRoot: gameRoot,
+      timeoutMs: 60_000,
+      commandOptions: { entryIndex: index }
+    });
+    if (!snapshot.data?.contentBase64) continue;
+    const bytes = Buffer.from(snapshot.data.contentBase64, 'base64');
+    if (bytes.length < 0x28 || bytes.readUInt32LE(0) !== 0x00020000) continue;
+    const path = join(staging, `official-${language}-source-${index}.fmg`);
+    await writeFile(path, bytes);
+    const read = await runBridge<FmgEnvelope>({
+      command: 'read-fmg-document',
+      filePath: path,
+      allowedRoots: [staging],
+      timeoutMs: 60_000
+    });
+    if (read.data?.roundTrip?.semanticIdentical
+      && read.data.entries.some((entry) => entry.text && entry.text !== '<?null?>' && entry.text.length > 0)) {
+      return { snapshot: snapshot.data, path, document: read.data };
+    }
+  }
+  throw new Error(`${language}: item.msgbnd 未找到可写且语义往返一致的 FMG v2 子项。`);
+}
+
+async function pathReadable(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Asserts a rejected mutation produced no staged output file. */
