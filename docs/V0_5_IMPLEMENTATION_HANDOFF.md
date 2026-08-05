@@ -1828,6 +1828,7 @@ entries[]:
 | `EV-REL-SCOPE-20260804-V06-FIXTURE-FIX` | `scope-ruling:user-approved`；scope-deferral:`REL-E`:V0.6:user-approved；scope-deferral:`REL-I`:V0.6:user-approved；revalidates=`EV-V06-RESUME-20260804`；V0.6 承接后负向 fixture 适配：`SCOPE-MSB` 恢复 supported@V0.6 后不再受 V0.5 冻结保护，frozen-release-item-cannot-be-deleted 改删仍冻结的 `SCOPE-DFLT`；范围语义未变，仅校准 fixture 靶标 |
 | `EV-REL-SCOPE-20260805-V06-RESUME-SCOPE-FIXTURES` | `scope-ruling:user-approved`；scope-deferral:`REL-E`:V0.6:user-approved；scope-deferral:`REL-I`:V0.6:user-approved；revalidates=`EV-REL-SCOPE-20260804-V06-FIXTURE-FIX`；V0.6 承接后 release-scope 负向 fixture 适配：`SCOPE-RENDERING`/`REL-I` 已非延期，条目负例改靶 `SCOPE-ASSET-MTD`，Gate 负例从 `REL-I` 反造 deferred 验证拦截仍触发；范围语义未变，仅校准 fixture 靶标 |
 | `EV-FMG-OFFICIAL-LANGUAGES-20260805` | `W-REL-C-MULTILANG-02`：14 个官方语言真实 item.msgbnd FMG v2 staged 写入与独立重读矩阵 |
+| `EV-PRIVATE-NATIVE-STATUS-CLASSIFICATION-20260805` | private native gate 子步骤 status/authority 诚实分类与 skipped 误报修复 |
 
 <!-- SOULFORGE_PROJECTION_END:evidence-index -->
 
