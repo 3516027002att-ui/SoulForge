@@ -174,7 +174,8 @@
       "evidenceRefs": [
         "EV-EMEVD-FMG-PARAM-03-20260803",
         "EV-FMG-MULTILANG-WRITE-20260804",
-        "EV-PARAM-CORPUS-138-20260804"
+        "EV-PARAM-CORPUS-138-20260804",
+        "EV-FMG-OFFICIAL-LANGUAGES-20260805"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
