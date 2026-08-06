@@ -205,6 +205,8 @@ const api = {
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
   readFlverDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverDocument', sourceUri),
+  readTpfDocument: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTpfDocument', sourceUri),
   readFlverMesh: (sourceUri: string, meshIndex: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverMesh', sourceUri, meshIndex),
   readFlverSkeleton: (sourceUri: string): Promise<unknown> =>

@@ -1,5 +1,6 @@
 /**
- * AI tool policy gate — commit/rollback cannot bypass this layer.
+ * TEST HARNESS ONLY — scaffold 写矩阵用 policy gate。
+ * 生产路径权限判定见 `ai/toolPermissions.ts`。
  */
 
 import type {
@@ -8,7 +9,7 @@ import type {
   ToolPermission
 } from '@soulforge/shared';
 import { AI_TOOL_PERMISSION_LEVELS } from '@soulforge/shared';
-import { maxPermissionForMode } from '../ai/toolPermissions.js';
+import { maxPermissionForMode } from '../../ai/toolPermissions.js';
 
 const RANK: Record<ToolPermission, number> = {
   read: 0,

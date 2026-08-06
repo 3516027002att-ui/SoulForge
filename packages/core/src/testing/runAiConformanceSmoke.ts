@@ -101,8 +101,8 @@ import {
   ScaffoldToolRegistry,
   createScaffoldToolRegistry,
   type ScaffoldToolContext
-} from '../ai-tools/scaffoldToolRegistry.js';
-import { evaluatePolicyGate, maxPermissionFromMode } from '../ai-tools/policyGate.js';
+} from './harness/scaffoldToolRegistry.js';
+import { evaluatePolicyGate, maxPermissionFromMode } from './harness/scaffoldPolicyGate.js';
 import { MemoryAuditLogStore } from '../audit-log/memoryAuditLog.js';
 import {
   OpenAiCompatibleAdapter

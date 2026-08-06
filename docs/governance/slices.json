@@ -852,7 +852,7 @@
       "hardPrerequisites": "W-AI-CONFORMANCE-02 已完成错误/取消/超时/限额；不要求真实 provider 凭据",
       "entryPoints": [
         "packages/core/src/model-services",
-        "packages/core/src/ai-tools/scaffoldToolRegistry.ts",
+        "packages/core/src/testing/harness/scaffoldToolRegistry.ts",
         "packages/core/src/testing/runAiConformanceSmoke.ts"
       ],
       "requiredValidation": "npm run test:ai-conformance、npm run test:ai-fake-loop",

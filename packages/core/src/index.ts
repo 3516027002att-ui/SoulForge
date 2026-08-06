@@ -103,8 +103,8 @@ export * from './backup/index.js';
 export * from './audit-log/index.js';
 export * from './transactions/index.js';
 export * from './vfs/index.js';
-export * from './ai-tools/index.js';
 
 // `./testing/*` is deliberately NOT re-exported here. The production barrel is
 // what electron-builder ships, and re-exporting harness helpers would drag
 // dist/testing into app.asar. Harnesses import their helpers by direct path.
+// 历史 `ai-tools/scaffoldToolRegistry` 已迁入 testing/harness，仅供 smoke 引用。

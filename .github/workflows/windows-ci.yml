@@ -1,4 +1,9 @@
 # SoulForge V0.5 Windows CI — automated gates only (no private game assets).
+#
+# 验证入口统一走 scripts/verify.mjs：
+# - governance + unit 使用 --require-executed：跳过/部分跳过算失败（公开 CI 必须真跑）
+# - synthetic / release 不强制 require-executed：缺私有语料时可诚实 skip
+# - native 仅跑公开可跳过门禁，绝不用 --require-executed 冒充 native 完成
 name: windows-ci
 
 on:
@@ -15,7 +20,7 @@ concurrency:
 jobs:
   verify:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       # fetch-depth 0：治理门禁（GATE_FRESHNESS）需要验证交接书 Evidence
       # 锚点的 Git 祖先关系，shallow clone 会使祖先不可见而 fail-closed。
@@ -38,131 +43,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
+      # 层级登记表与 package.json 漂移时拒绝继续；空登记等于没人跑。
+      - name: Verify registry audit
+        run: node scripts/verify.mjs --audit
 
-      # Core smoke processes are intentionally separate. Each command preserves
-      # the original npm-workspace cwd so the diagnostic split cannot change behavior.
-      - name: Core — reference confidence
-        working-directory: packages/core
-        run: node dist/testing/runSyntheticConfirmedReferenceSmoke.js
+      # 治理 + 单元/契约层：必须真实执行。typecheck、AI conformance、桌面安全、
+      # core `test` 聚合 smoke 等都在这两层登记表内，不再散装 40+ 条 npm script。
+      - name: Governance + unit (require executed)
+        run: node scripts/verify.mjs --tier governance,unit --require-executed --json-out output/verify-ci-governance-unit.json --timeout-ms 1200000
 
-      - name: Core — V0.5 foundation
-        working-directory: packages/core
-        run: node dist/testing/runV05FoundationSmoke.js
+      # 合成层：允许缺私有 Smithbox/语料时诚实 skip，但不接受 exit 非 0。
+      - name: Synthetic (orchestrator; skip allowed)
+        run: node scripts/verify.mjs --tier synthetic --json-out output/verify-ci-synthetic.json --timeout-ms 1200000
 
-      - name: Core — file rollback
-        working-directory: packages/core
-        run: node dist/testing/runV05FileRollbackSmoke.js
+      # Public CI 无游戏 corpus：只跑会诚实 skip 的 native 门禁，验证 skip 检测链路本身。
+      - name: Native honest-skip — private-native-gate
+        run: node scripts/verify.mjs --tier native --filter private-native-gate --json-out output/verify-ci-native-private.json
 
-      - name: Core — security boundary
-        working-directory: packages/core
-        run: node dist/testing/runV05SecurityBoundarySmoke.js
+      - name: Native honest-skip — section28-sekiro-gate
+        run: node scripts/verify.mjs --tier native --filter section28-sekiro-gate --json-out output/verify-ci-native-section28.json
 
-      - name: Core — SQLite authority
-        working-directory: packages/core
-        run: node dist/testing/runV05SqliteAuthoritySmoke.js
-
-      - name: Core — persistence
-        working-directory: packages/core
-        run: node dist/testing/runV05PersistSmoke.js
-
-      - name: Core — P1 integration
-        working-directory: packages/core
-        run: node dist/testing/runV05P1Smoke.js
-
-      - name: Core — architecture scaffold
-        working-directory: packages/core
-        run: node dist/testing/runV05ArchitectureScaffoldSmoke.js
-
-      - name: Core — write-path consolidation
-        working-directory: packages/core
-        run: node dist/testing/runV05WritePathConsolidationSmoke.js
-
-      - name: Core — full-file workbench
-        working-directory: packages/core
-        run: node dist/testing/runV05FullFileWorkbenchSmoke.js
-
-      - name: Core — raw-file workbench
-        working-directory: packages/core
-        run: node dist/testing/runV05RawFileWorkbenchSmoke.js
-
-      - name: Core — native container workbench
-        working-directory: packages/core
-        run: node dist/testing/runV06NativeContainerWorkbenchSmoke.js
-
-      - name: Core — EMEVD DSL compiler
-        working-directory: packages/core
-        run: node dist/testing/runEmevdDslCompilerSmoke.js
-
-      - name: Desktop security gate
-        run: npm run test:desktop-security
-
-      - name: UI localization gate
-        run: npm run test:ui-localization
-
-      - name: Database utility smoke
-        run: npm run test:database-utility
-
-      - name: Bridge synthetic fixtures
-        run: npm run bridge:verify:synthetic
-
-      - name: Bridge daemon
-        run: npm run bridge:verify:daemon
-
-      - name: Bridge recovery harness
-        run: |
-          npm run test:subprocess-control
-          npm run test:bridge-recovery-harness
-
-      - name: OpenAI Responses adapter
-        run: npm run test:openai-responses
-
-      - name: Workbench projections
-        run: npm run test:workbench-projections
-
-      - name: EMEVD four-view
-        run: npm run test:emevd-four-view
-
-      - name: DDS convert writeback
-        run: npm run test:dds-convert-writeback
-
-      - name: Vault encrypt contract
-        run: npm run test:vault-encrypt-contract
-
-      - name: Scene asset inventory
-        run: npm run test:scene-asset-inventory
-
-      - name: Performance baseline
-        run: npm run test:performance-baseline
-
-      - name: PARAM metadata / me3 runtime contracts
-        run: |
-          npm run test:paramdef-layout
-          npm run test:param-metadata-mismatch
-          npm run test:me3-runtime-adapter
-
-      - name: EMEVD / FMG / MSB / PARAM IPC contracts
-        run: |
-          npm run test:emevd-ipc-contract
-          npm run test:fmg-msb-ipc-contract
-          npm run test:param-msb-write-ipc-contract
-          npm run test:desktop-live-editor-contract
-          npm run test:emedf-schema
-          npm run test:emevd-envelope-map
-          npm run test:flver-candidate
-          npm run test:vault-encrypt-contract
-
-      - name: Private native / section-28 honest skip
-        run: |
-          npm run test:private-native-gate
-          npm run test:section28-sekiro-gate
-
-      # Real me3 → Sekiro launch/terminate/restart session. Public CI has no real
-      # game assets (SOULFORGE_SEKIRO_GAME_ROOT unset), so this is an honest skip
-      # and never builds or launches anything.
-      - name: me3 Sekiro session (honest skip without game root)
-        run: npm run test:me3-sekiro-session
+      - name: Native honest-skip — me3-sekiro-session
+        run: node scripts/verify.mjs --tier native --filter me3-sekiro-session --json-out output/verify-ci-native-me3.json
 
       - name: Build
         run: npm run build
@@ -173,7 +75,7 @@ jobs:
       - name: Renderer e2e (Playwright + Electron fixture)
         run: npm run test:renderer-playwright -w @soulforge/desktop
 
-      - name: Upload renderer e2e artifacts
+      - name: Upload verify + e2e artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -181,6 +83,7 @@ jobs:
           path: |
             apps/desktop/e2e/playwright/playwright-report/
             apps/desktop/e2e/playwright/test-results/
+            output/verify-ci-*.json
           if-no-files-found: ignore
 
       # Public CI previously produced no NSIS artifact, so test:release-content
@@ -197,16 +100,17 @@ jobs:
       - name: Record installer compliance manifest
         run: npm run release:installer:manifest
 
-      - name: Release compliance negative fixtures
-        run: |
-          npm run test:release-compliance-fixtures
-          npm run test:portable-packaging-config-fixtures
+      - name: Release — compliance fixtures
+        run: node scripts/verify.mjs --tier release --filter release-compliance --json-out output/verify-ci-release-compliance.json
 
-      - name: Release content / license manifest
-        run: npm run test:release-content
+      - name: Release — portable packaging
+        run: node scripts/verify.mjs --tier release --filter portable-packaging --json-out output/verify-ci-release-portable.json
 
-      - name: Reproducible build fingerprint
-        run: npm run test:release-reproducible
+      - name: Release — package content
+        run: node scripts/verify.mjs --tier release --filter release-content --json-out output/verify-ci-release-content.json
+
+      - name: Release — reproducible fingerprint
+        run: node scripts/verify.mjs --tier release --filter release-reproducible --json-out output/verify-ci-release-reproducible.json
 
       # Execute-mode installer lifecycle on the clean runner: install → upgrade →
       # uninstall → clean-target in an owner-controlled temp target. Honest skip
@@ -216,23 +120,7 @@ jobs:
           SOULFORGE_INSTALLER_LIFECYCLE_RUN: '1'
         run: npm run test:installer-lifecycle
 
-      - name: Portable packaging config gate
-        run: npm run test:portable-packaging-gate
-
-      - name: Release corpus registry / editor acceptance harnesses
-        run: |
-          npm run test:release-corpus-registry
-          npm run test:release-editor-acceptance
-
-      - name: Release scope proposal / handoff governance
-        run: |
-          npm run test:release-scope-fixtures
-          npm run test:release-scope-proposal
-          npm run test:handoff-integrity
-
-      # Intentionally NOT run in public CI:
-      # - test:native-preview / test:real-mod (private mods)
-      # - bridge:verify:oodle / native emevd/msb/fmg/param against local mods (private corpus)
-      # - signed installer / real Sekiro launch (P7 private gate)
+      # Intentionally NOT run with --require-executed in public CI:
+      # - full native tier (private mods / Oodle / real Sekiro)
+      # - signed installer / real Sekiro launch
       # - SOULFORGE_PORTABLE_PACK=1 unsigned pack (optional local only)
-      # - test:release-scope strict freeze gate (blocked until explicit user ruling)
