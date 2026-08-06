@@ -1,5 +1,4 @@
-import { KNOWN_RESOURCE_DIRS } from '@soulforge/core';
-import type { ResourceKind } from '@soulforge/shared';
+import { KNOWN_RESOURCE_DIRS, type ResourceKind } from '@soulforge/shared';
 
 /** 资源目录模式：'all' 是功能入口，其余为工作区顶层目录原名。 */
 export type ResourceMode = 'all' | ResourceKind;

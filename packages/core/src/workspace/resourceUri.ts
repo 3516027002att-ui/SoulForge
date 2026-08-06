@@ -1,9 +1,10 @@
-import { relative, sep } from 'node:path';
+import { relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ResourceKind } from '@soulforge/shared';
 
+/** 统一为正斜杠路径；不依赖 path.sep，避免被误打进 renderer 时对 node:path named export 绑定失败。 */
 export function toPosixPath(pathValue: string): string {
-  return pathValue.split(sep).join('/').replaceAll('\\', '/');
+  return pathValue.replaceAll('\\', '/');
 }
 
 export function makeWorkspaceRelativePath(workspaceRoot: string, absolutePath: string): string {
