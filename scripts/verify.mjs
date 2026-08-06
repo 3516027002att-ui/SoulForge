@@ -23,8 +23,8 @@
  *   node scripts/verify.mjs --audit             只做登记审计
  *   node scripts/verify.mjs --list              只列出计划，不执行
  */
-import { writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { classifyScript, loadWorkspaces } from './verify/scriptGraph.mjs';
 import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './verify/tiers.mjs';
 import { OUTCOME, runSuite } from './verify/runner.mjs';
@@ -271,7 +271,11 @@ const summary = {
 };
 
 if (options.jsonOut) {
-  writeFileSync(resolve(repoRoot, options.jsonOut), `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+  // 失败路径也必须能落盘摘要：CI 用 --json-out output/... 时 output/ 往往尚未创建。
+  // 写出前建父目录，避免「真实 suite 失败」被 ENOENT 二次掩盖。
+  const jsonPath = resolve(repoRoot, options.jsonOut);
+  mkdirSync(dirname(jsonPath), { recursive: true });
+  writeFileSync(jsonPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
 }
 console.log(JSON.stringify(summary, null, 2));
 process.exit(ok ? 0 : 1);

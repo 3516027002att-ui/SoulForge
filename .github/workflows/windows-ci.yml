@@ -47,6 +47,10 @@ jobs:
       - name: Verify registry audit
         run: node scripts/verify.mjs --audit
 
+      # verify --json-out 会自动建父目录；此处预建便于人工查看与 artifact 收集。
+      - name: Ensure output directory
+        run: mkdir output -Force
+
       # 治理 + 单元/契约层：必须真实执行。typecheck、AI conformance、桌面安全、
       # core `test` 聚合 smoke 等都在这两层登记表内，不再散装 40+ 条 npm script。
       - name: Governance + unit (require executed)

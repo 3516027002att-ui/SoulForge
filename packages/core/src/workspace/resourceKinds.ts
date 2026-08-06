@@ -1,24 +1,11 @@
-import type { ResourceKind } from '@soulforge/shared';
+import {
+  ALL_RESOURCE_KINDS,
+  KNOWN_RESOURCE_DIRS,
+  type ResourceKind
+} from '@soulforge/shared';
 
-export const KNOWN_RESOURCE_DIRS: readonly ResourceKind[] = [
-  'event',
-  'map',
-  'param',
-  'msg',
-  'menu',
-  'script',
-  'action',
-  'ai',
-  'sfx',
-  'chr',
-  'obj',
-  'other'
-] as const;
-
-export const ALL_RESOURCE_KINDS: readonly ResourceKind[] = [
-  ...KNOWN_RESOURCE_DIRS,
-  'unknown'
-] as const;
+// 权威列表已下沉到 @soulforge/shared（renderer 可安全引用）；core 仅做 re-export + 分类逻辑。
+export { ALL_RESOURCE_KINDS, KNOWN_RESOURCE_DIRS };
 
 export function classifyResourceKind(relativePath: string): ResourceKind {
   const normalized = relativePath.replaceAll('\\', '/').toLowerCase();
