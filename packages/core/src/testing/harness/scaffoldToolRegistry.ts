@@ -1,6 +1,10 @@
 /**
- * Scaffold ToolRegistry with policy gate and typed results.
- * Tools call core scaffold only — never write files directly.
+ * TEST HARNESS ONLY — 不进 production barrel。
+ *
+ * 桌面生产路径使用 `ai/toolRegistry` + `ai/agentToolBridge`。
+ * 本文件为 AI conformance / architecture smoke 的 typed policy 写矩阵夹具：
+ * 提供 propose→stage→validate→commit 工具面与 policy gate 联测。
+ * 不得从 `@soulforge/core` 公共 API 导出，也不得被 apps/desktop 引用。
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -16,21 +20,21 @@ import type {
   TypedToolResult
 } from '@soulforge/shared';
 import { createDiagnostic } from '@soulforge/shared';
-import { createAuditEntry, MemoryAuditLogStore } from '../audit-log/memoryAuditLog.js';
+import { createAuditEntry, MemoryAuditLogStore } from '../../audit-log/memoryAuditLog.js';
 import {
   createPatchIr,
   createTextEditOperation,
   validatePatchIr
-} from '../patch-engine/patchIr.js';
-import { MemoryResourceGraph } from '../resource-graph/memoryResourceGraph.js';
+} from '../../patch-engine/patchIr.js';
+import { MemoryResourceGraph } from '../../resource-graph/memoryResourceGraph.js';
 import {
   createWorkspaceTransaction,
   type WorkspaceTransaction
-} from '../transactions/workspaceTransaction.js';
-import { sha256File } from '../validators/textHash.js';
-import { verifyPathInsideRoot } from '../workspace/pathBoundary.js';
-import { validateToolInput, type ToolInputShape } from '../ai/toolRegistry.js';
-import { evaluatePolicyGate, maxPermissionFromMode } from './policyGate.js';
+} from '../../transactions/workspaceTransaction.js';
+import { sha256File } from '../../validators/textHash.js';
+import { verifyPathInsideRoot } from '../../workspace/pathBoundary.js';
+import { validateToolInput, type ToolInputShape } from '../../ai/toolRegistry.js';
+import { evaluatePolicyGate, maxPermissionFromMode } from './scaffoldPolicyGate.js';
 
 export interface ScaffoldToolContext {
   workspaceId: string;

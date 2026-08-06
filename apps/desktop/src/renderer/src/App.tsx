@@ -1118,20 +1118,20 @@ export function App(): ReactElement {
     setEditText(text);
     setLastSavedText(text);
     setMsgRows(extractMsgRows(nextPreview));
-    // Load TAE/ESD/FLVER document data via IPC.
-    if (file.relativePath.endsWith('.tae') && typeof bridge.readTaeDocument === 'function') {
+    // Load TAE/ESD/FLVER/TPF document data via typed preload IPC (V0.6 只读预览族)。
+    if (file.relativePath.endsWith('.tae')) {
       const result = await bridge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setTaeData(result.data);
     }
-    if (file.relativePath.endsWith('.esd') && typeof bridge.readEsdDocument === 'function') {
+    if (file.relativePath.endsWith('.esd')) {
       const result = await bridge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setEsdData(result.data);
     }
-    if (file.relativePath.endsWith('.flver') && typeof bridge.readFlverDocument === 'function') {
+    if (file.relativePath.endsWith('.flver')) {
       const result = await bridge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setFlverData(result.data);
     }
-    if (file.relativePath.endsWith('.tpf') && typeof bridge.readTpfDocument === 'function') {
+    if (file.relativePath.endsWith('.tpf')) {
       const result = await bridge.readTpfDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setTpfData(result.data);
     }

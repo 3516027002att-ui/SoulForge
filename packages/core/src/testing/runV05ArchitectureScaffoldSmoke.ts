@@ -30,7 +30,7 @@ import { MemoryAuditLogStore } from '../audit-log/memoryAuditLog.js';
 import {
   createScaffoldToolRegistry,
   type ScaffoldToolContext
-} from '../ai-tools/scaffoldToolRegistry.js';
+} from './harness/scaffoldToolRegistry.js';
 import {
   buildScaffoldCapabilityMatrix,
   createSyntheticInspectEnvelope,
