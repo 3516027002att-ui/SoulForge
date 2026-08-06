@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { ParamDefDocument, ParamFieldDef, ParamRowPage } from '@soulforge/shared';
 import { base64ToUint8Array } from '../utils/binary.js';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 
 export interface ParamDefPanelProps {
   typeName: string;
@@ -65,8 +66,10 @@ const PAGE_SIZE = 20;
  * Patch Engine。
  */
 export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
+  const bridge = getRendererBridge();
   const liveMode = props.live === true
-    && typeof window.soulforge.readParamPage === 'function';
+    && bridge !== null
+    && typeof bridge.readParamPage === 'function';
   const [page, setPage] = useState(0);
   const [pageRows, setPageRows] = useState<Array<{
     id: number;
@@ -84,11 +87,11 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
 
   // Live path: fetch one page from main (complete coverage via navigation).
   useEffect(() => {
-    if (!liveMode || !props.resourceUri) return;
+    if (!liveMode || bridge === null || !props.resourceUri) return;
     let cancelled = false;
     setLoading(true);
     setPageError(null);
-    window.soulforge.readParamPage(props.resourceUri, page, PAGE_SIZE, '')
+    bridge.readParamPage(props.resourceUri, page, PAGE_SIZE, '')
       .then((result: ParamRowPage) => {
         if (cancelled) return;
         if (!result.ok) {
@@ -111,7 +114,7 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [liveMode, props.resourceUri, page]);
+  }, [liveMode, bridge, props.resourceUri, page]);
 
   // Demo/fallback path: client-side page window over props.rows.
   useEffect(() => {

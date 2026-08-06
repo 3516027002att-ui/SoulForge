@@ -6,6 +6,7 @@ import {
   type FlverSemanticScene,
   type FlverSceneTexture
 } from '../scene/threeSceneController.js';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 
 export interface FlverViewerProps {
   sourceUri?: string;
@@ -66,13 +67,15 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   const [backend, setBackend] = useState<'webgpu' | 'webgl2' | 'detecting'>('detecting');
   const [sceneError, setSceneError] = useState<string | null>(null);
 
+  const bridge = getRendererBridge();
+
   // Load dummy attachment points via IPC when sourceUri changes.
   useEffect(() => {
-    if (!props.sourceUri || typeof window.soulforge.readFlverDummies !== 'function') return;
+    if (!props.sourceUri || bridge === null || typeof bridge.readFlverDummies !== 'function') return;
     setDummyPoints(null);
     void (async () => {
       try {
-        const result = await window.soulforge.readFlverDummies(props.sourceUri!) as {
+        const result = await bridge.readFlverDummies(props.sourceUri!) as {
           ok: boolean;
           data?: { dummies?: Array<{ referenceId: number; position: number[] }> };
         };
@@ -88,17 +91,17 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         // Dummy load failed; leave markers hidden.
       }
     })();
-  }, [props.sourceUri]);
+  }, [props.sourceUri, bridge]);
 
   // Load skeleton hierarchy via IPC when sourceUri changes.
   // Parent-relative transforms; world transforms are projected by the scene
   // controller (renderer layer), keeping the semantic scene pure typed data.
   useEffect(() => {
-    if (!props.sourceUri || typeof window.soulforge.readFlverSkeleton !== 'function') return;
+    if (!props.sourceUri || bridge === null || typeof bridge.readFlverSkeleton !== 'function') return;
     setSkeletonBones(null);
     void (async () => {
       try {
-        const result = await window.soulforge.readFlverSkeleton(props.sourceUri!) as {
+        const result = await bridge.readFlverSkeleton(props.sourceUri!) as {
           ok: boolean;
           data?: { bones?: Array<{ name: string; parentIndex: number; translation: number[]; rotation: number[] }> };
         };
@@ -116,17 +119,17 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         // Skeleton load failed; leave hierarchy hidden.
       }
     })();
-  }, [props.sourceUri]);
+  }, [props.sourceUri, bridge]);
 
   // Load mesh data via IPC when sourceUri or meshIndex changes.
   useEffect(() => {
-    if (!props.sourceUri || typeof window.soulforge.readFlverMesh !== 'function') return;
+    if (!props.sourceUri || bridge === null || typeof bridge.readFlverMesh !== 'function') return;
     setMeshData(null);
     setMeshError(null);
     const idx = props.meshIndex ?? 0;
     void (async () => {
       try {
-        const result = await window.soulforge.readFlverMesh(props.sourceUri!, idx) as {
+        const result = await bridge.readFlverMesh(props.sourceUri!, idx) as {
           ok: boolean;
           data?: { positionsBase64?: string; indicesBase64?: string; uvsBase64?: string; normalsBase64?: string; boneWeightsBase64?: string; boneIndicesBase64?: string; vertexCount?: number };
           diagnostics?: Array<{ message: string }>;
@@ -148,7 +151,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         setMeshError(error instanceof Error ? error.message : '网格加载失败');
       }
     })();
-  }, [props.sourceUri, props.meshIndex]);
+  }, [props.sourceUri, props.meshIndex, bridge]);
 
   // Decode texture bytes (base64 → DDS parse / RGBA fallback) into semantic form.
   // 渲染器对象（CompressedTexture / DataTexture）由投影层构造并纳入 dispose。

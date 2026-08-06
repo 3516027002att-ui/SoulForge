@@ -6,6 +6,7 @@ import type {
 } from '@soulforge/shared';
 import { HexEditorPanel } from './HexEditorPanel.js';
 import { isLikelyBase64, uint8ArrayToBase64 } from '../utils/binary.js';
+import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
 
 export interface Bnd4WorkbenchPanelProps {
   resourceUri: string;
@@ -49,6 +50,8 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   /** Fixed page size for the paginated container entry table (hard constraint 17). */
   const CONTAINER_PAGE_SIZE = 50;
 
+  const bridge = getRendererBridge();
+
   const load = useCallback(async (): Promise<void> => {
     if (!props.resourceUri) {
       setRoot(null);
@@ -60,12 +63,19 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
       setLoadError(null);
       return;
     }
+    if (bridge === null) {
+      setRoot(null);
+      setPageChildren([]);
+      setTotalChildren(0);
+      setLoadError(describeBridgeAbsence('读取 BND4 容器'));
+      return;
+    }
     setLoading(true);
     setLoadError(null);
     try {
-      const treePromise = window.soulforge.inspectContainerTree(props.resourceUri);
-      const pagePromise = typeof window.soulforge.listContainerChildrenPage === 'function'
-        ? window.soulforge.listContainerChildrenPage(props.resourceUri, 0, CONTAINER_PAGE_SIZE, false)
+      const treePromise = bridge.inspectContainerTree(props.resourceUri);
+      const pagePromise = typeof bridge.listContainerChildrenPage === 'function'
+        ? bridge.listContainerChildrenPage(props.resourceUri, 0, CONTAINER_PAGE_SIZE, false)
         : null;
       const [tree, firstPage] = await Promise.all([treePromise, pagePromise]);
       setRoot(tree);
@@ -81,7 +91,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
       } else {
         // Paginated channel unavailable or failed: fall back to the full list
         // (bounded containers) so the workbench stays functional.
-        const list = await window.soulforge.listContainerChildren(props.resourceUri);
+        const list = await bridge.listContainerChildren(props.resourceUri);
         setPageChildren(list.children);
         setTotalChildren(list.children.length);
         setPageCount(Math.max(1, Math.ceil(list.children.length / CONTAINER_PAGE_SIZE)));
@@ -99,14 +109,14 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     } finally {
       setLoading(false);
     }
-  }, [props.resourceUri]);
+  }, [props.resourceUri, bridge]);
 
   async function changePage(next: number): Promise<void> {
-    if (typeof window.soulforge.listContainerChildrenPage !== 'function') return;
+    if (bridge === null || typeof bridge.listContainerChildrenPage !== 'function') return;
     setPageLoading(true);
     setPageError(null);
     try {
-      const result = await window.soulforge.listContainerChildrenPage(
+      const result = await bridge.listContainerChildrenPage(
         props.resourceUri,
         next,
         CONTAINER_PAGE_SIZE,
@@ -144,9 +154,17 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     setReplaceOpen(false);
     setReplaceBytes('');
     setReplaceResult(null);
+    if (bridge === null) {
+      setChildReadDiagnostics([{
+        severity: 'error',
+        code: 'BRIDGE_UNAVAILABLE',
+        message: describeBridgeAbsence('读取容器子项')
+      }]);
+      return;
+    }
     setLoadingChild(true);
     try {
-      const read = await window.soulforge.readContainerChild(child.childUri);
+      const read = await bridge.readContainerChild(child.childUri);
       if (read.ok && read.bytes) {
         setChildHexBase64(uint8ArrayToBase64(read.bytes));
         setChildHash(read.hash ?? null);
@@ -185,6 +203,14 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
 
   async function submitReplace(): Promise<void> {
     if (!selectedChild || !root?.root) return;
+    if (bridge === null) {
+      setReplaceResult({
+        ok: false,
+        message: describeBridgeAbsence('替换容器子项'),
+        diagnostics: []
+      });
+      return;
+    }
     const base64 = replaceBytes.trim();
     if (!isLikelyBase64(base64)) {
       setReplaceResult({
@@ -199,7 +225,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     setReplacing(true);
     setReplaceResult(null);
     try {
-      const result = await window.soulforge.replaceContainerChild(
+      const result = await bridge.replaceContainerChild(
         selectedChild.childUri,
         containerHash,
         expectedChildHash,

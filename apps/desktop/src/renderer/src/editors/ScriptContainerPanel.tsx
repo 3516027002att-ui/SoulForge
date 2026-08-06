@@ -9,6 +9,7 @@ import type {
 import { SCRIPT_CLASSIFICATION_ORDER, scriptClassificationLabel } from '@soulforge/shared';
 import { HexEditorPanel } from './HexEditorPanel.js';
 import { isLikelyBase64, uint8ArrayToBase64 } from '../utils/binary.js';
+import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
 
 /** Fixed page size for the paginated script container entry table (hard constraint 17). */
 const SCRIPT_PAGE_SIZE = 50;
@@ -62,16 +63,23 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   const [pageLoading, setPageLoading] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
 
+  const bridge = getRendererBridge();
+
   const load = useCallback(async (): Promise<void> => {
     if (!props.resourceUri) {
       setEvidence(null);
       setLoadError(null);
       return;
     }
+    if (bridge === null) {
+      setEvidence(null);
+      setLoadError(describeBridgeAbsence('读取脚本容器证据'));
+      return;
+    }
     setLoading(true);
     setLoadError(null);
     try {
-      const result = await window.soulforge.scriptContainerEvidence(props.resourceUri);
+      const result = await bridge.scriptContainerEvidence(props.resourceUri);
       setEvidence(result);
       if (!result.ok) {
         setLoadError(result.diagnostics?.[0]?.message ?? '脚本容器证据读取失败。');
@@ -82,7 +90,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     } finally {
       setLoading(false);
     }
-  }, [props.resourceUri]);
+  }, [props.resourceUri, bridge]);
 
   useEffect(() => {
     void load();
@@ -94,14 +102,15 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
    * When the channel is unavailable, the bounded evidence projection is shown
    * as a degraded fallback.
    */
-  const pageChannelAvailable = typeof window.soulforge.listScriptContainerEntriesPage === 'function';
+  const pageChannelAvailable = bridge !== null
+    && typeof bridge.listScriptContainerEntriesPage === 'function';
 
   const loadPage = useCallback(async (targetPage: number): Promise<void> => {
-    if (!props.resourceUri || !pageChannelAvailable) return;
+    if (!props.resourceUri || !pageChannelAvailable || bridge === null) return;
     setPageLoading(true);
     setPageError(null);
     try {
-      const result = await window.soulforge.listScriptContainerEntriesPage(
+      const result = await bridge.listScriptContainerEntriesPage(
         props.resourceUri,
         targetPage,
         SCRIPT_PAGE_SIZE
@@ -124,7 +133,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     } finally {
       setPageLoading(false);
     }
-  }, [props.resourceUri, pageChannelAvailable]);
+  }, [props.resourceUri, pageChannelAvailable, bridge]);
 
   useEffect(() => {
     if (props.resourceUri) void loadPage(0);
@@ -157,13 +166,24 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
 
   async function openReplace(): Promise<void> {
     if (!selected) return;
+    if (bridge === null) {
+      setReplaceCtx({
+        entry: selected,
+        childUri: '',
+        containerHash: '',
+        childHash: '',
+        supported: false,
+        message: describeBridgeAbsence('脚本容器内层替换')
+      });
+      return;
+    }
     setReplacing(true);
     setReplaceResult(null);
     setReplaceBytes('');
     try {
-      const container = await window.soulforge.inspectContainerTree(props.resourceUri);
+      const container = await bridge.inspectContainerTree(props.resourceUri);
       const containerHash = container.root?.hash ?? '';
-      const list = await window.soulforge.listContainerChildren(props.resourceUri);
+      const list = await bridge.listContainerChildren(props.resourceUri);
       const child: RendererContainerChild | undefined = list.children.find((item: RendererContainerChild) => item.name === selected.name);
       if (!child) {
         setReplaceCtx({
@@ -176,7 +196,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         });
         return;
       }
-      const read = await window.soulforge.readContainerChild(child.childUri);
+      const read = await bridge.readContainerChild(child.childUri);
       const supported = Boolean(container.root?.canReplaceChild)
         && child.canReplace
         && read.ok
@@ -221,6 +241,14 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
 
   async function submitReplace(): Promise<void> {
     if (!replaceCtx || !replaceCtx.supported) return;
+    if (bridge === null) {
+      setReplaceResult({
+        ok: false,
+        message: describeBridgeAbsence('脚本容器内层替换'),
+        diagnostics: []
+      });
+      return;
+    }
     const base64 = replaceBytes.trim();
     if (!isLikelyBase64(base64)) {
       setReplaceResult({
@@ -233,7 +261,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     setReplacing(true);
     setReplaceResult(null);
     try {
-      const result = await window.soulforge.replaceContainerChild(
+      const result = await bridge.replaceContainerChild(
         replaceCtx.childUri,
         replaceCtx.containerHash,
         replaceCtx.childHash,
