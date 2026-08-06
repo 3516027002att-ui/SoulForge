@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { FmgEntryPage } from '@soulforge/shared';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 
 export interface FmgEntryRow {
   id: number;
@@ -34,8 +35,10 @@ const FMG_PAGE_SIZE = 100;
  * 不再一次渲染全部条目。
  */
 export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
+  const bridge = getRendererBridge();
   const liveMode = props.live === true
-    && typeof window.soulforge.readFmgPage === 'function';
+    && bridge !== null
+    && typeof bridge.readFmgPage === 'function';
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
   const [pageEntries, setPageEntries] = useState<FmgEntryRow[]>([]);
@@ -48,11 +51,11 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
 
   // Live path: fetch one page from main (complete coverage via navigation).
   useEffect(() => {
-    if (!liveMode || !props.resourceUri) return;
+    if (!liveMode || bridge === null || !props.resourceUri) return;
     let cancelled = false;
     setLoading(true);
     setPageError(null);
-    window.soulforge.readFmgPage(props.resourceUri, page, FMG_PAGE_SIZE, query)
+    bridge.readFmgPage(props.resourceUri, page, FMG_PAGE_SIZE, query)
       .then((result: FmgEntryPage) => {
         if (cancelled) return;
         if (!result.ok) {
@@ -77,7 +80,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [liveMode, props.resourceUri, page, query]);
+  }, [liveMode, bridge, props.resourceUri, page, query]);
 
   // Demo/fallback path: client-side filter + explicit page window.
   const demoFiltered = useMemo(() => {

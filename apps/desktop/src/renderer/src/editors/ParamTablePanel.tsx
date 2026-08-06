@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { ParamRowPage } from '@soulforge/shared';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 
 export interface ParamRowView {
   id: number;
@@ -39,8 +40,10 @@ const PARAM_PAGE_SIZE = 20;
  * 编辑仍在 ParamDefPanel。演示回退路径在 renderer 内显式分页。
  */
 export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
+  const bridge = getRendererBridge();
   const liveMode = props.live === true
-    && typeof window.soulforge.readParamPage === 'function';
+    && bridge !== null
+    && typeof bridge.readParamPage === 'function';
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
   const [pageRows, setPageRows] = useState<ParamRowView[]>([]);
@@ -52,11 +55,11 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
 
   // Live path: fetch one page from main (complete coverage via navigation).
   useEffect(() => {
-    if (!liveMode || !props.resourceUri) return;
+    if (!liveMode || bridge === null || !props.resourceUri) return;
     let cancelled = false;
     setLoading(true);
     setPageError(null);
-    window.soulforge.readParamPage(props.resourceUri, page, PARAM_PAGE_SIZE, query)
+    bridge.readParamPage(props.resourceUri, page, PARAM_PAGE_SIZE, query)
       .then((result: ParamRowPage) => {
         if (cancelled) return;
         if (!result.ok) {
@@ -86,7 +89,7 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [liveMode, props.resourceUri, page, query]);
+  }, [liveMode, bridge, props.resourceUri, page, query]);
 
   // Demo/fallback path: client-side filter + explicit page window.
   const demoFiltered = useMemo(() => {

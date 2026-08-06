@@ -21,8 +21,10 @@ await window.waitForSelector('.change-queue', { state: 'attached' });
 await window.screenshot({ path: path.join(shotsDir, 'final-01-empty-workspace.png') });
 
 await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
+await window.locator('.status-bar').waitFor({ state: 'visible' });
+// 顶部资源目录栏：切换 msg 族后文件列表与 FMG 工作台联动。
+await window.locator('[data-resource-mode="msg"]').click();
 await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
-await window.getByRole('button', { name: /FMG 文本/ }).click();
 await window.getByRole('row', { name: /伤药葫芦/ }).click();
 await window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea').fill('伤药葫芦·改');
 const queue = window.locator('.change-queue');
