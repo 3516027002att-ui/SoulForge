@@ -23,15 +23,34 @@
  *   node scripts/verify-corpus-manifest.mjs <corpusRoot> [--manifest <path>]
  */
 import { createHash } from 'node:crypto';
-import { createReadStream, statSync } from 'node:fs';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
 import { extname, join, relative, resolve } from 'node:path';
 
-const corpusRoot = resolve(process.argv[2]
-  ?? process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
-  ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
-  ?? 'mods');
+/**
+ * corpus 根解析。与 verify-native-dcx-documents.mjs 采用同一口径，理由见那里的
+ * 长注释：SOULFORGE_NATIVE_FIXTURE_ROOT / SOULFORGE_SEKIRO_GAME_ROOT 在本仓库
+ * 是**游戏根**（has-game-registry.json 的 localPath 全部以 `mods/` 开头），
+ * 而本脚本需要的是 Mod 语料根。
+ *
+ * 不下沉的后果（实测）：经 with-local-has-game-env 跑时扫整个游戏根 8065 个
+ * .dcx，extraFiles 里塞满 chr/shader/font 等根本不属于 corpus manifest 覆盖面的
+ * 文件。虽然 status 仍是 matched（本脚本容忍 extra），但 filesScanned 与
+ * extraFiles 两个数字失去意义，读者无法从输出判断 corpus 是否真的对齐。
+ * 下沉后：filesScanned 214、extraFiles 0、matchedEntries 214。
+ *
+ * 显式传参时不下沉——那是调用方明确指定的目录。
+ */
+const corpusRoot = (() => {
+  if (process.argv[2]) return resolve(process.argv[2]);
+  const envRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+    ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  if (!envRoot) return resolve('mods');
+  const base = resolve(envRoot);
+  const modsUnder = join(base, 'mods');
+  return existsSync(modsUnder) ? modsUnder : base;
+})();
 const manifestArgIndex = process.argv.indexOf('--manifest');
 const manifestPath = resolve(
   manifestArgIndex >= 0 && process.argv[manifestArgIndex + 1]
