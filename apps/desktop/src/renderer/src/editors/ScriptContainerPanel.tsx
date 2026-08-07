@@ -147,10 +147,21 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     await loadPage(next);
   }
 
-  const tableEntries = pageChannelAvailable ? pageEntries : (evidence?.entries ?? []);
+  /**
+   * 分页通道不可用时的降级：真实截断到一页并说清，而不是全量渲染。
+   *
+   * 此前这里直接把 evidence.entries 整块渲染。脚本容器条目数可达数千，首屏一次
+   * 建出全部 DOM；而翻页控件按 pageChannelAvailable 隐藏，用户既看不到「还有更多」
+   * 也无法翻页——界面上「只显示了前 N 条」与「一共就这么多」不可区分。
+   */
+  const fallbackEntries = evidence?.entries ?? [];
+  const fallbackTruncated = !pageChannelAvailable && fallbackEntries.length > SCRIPT_PAGE_SIZE;
+  const tableEntries = pageChannelAvailable
+    ? pageEntries
+    : fallbackEntries.slice(0, SCRIPT_PAGE_SIZE);
   const displayEntryCount = pageChannelAvailable && entryCount > 0
     ? entryCount
-    : (evidence?.entryCount ?? 0);
+    : (evidence?.entryCount ?? fallbackEntries.length);
 
   const selected = useMemo(
     () => tableEntries.find((entry) => entry.name === selectedName) ?? null,
@@ -329,6 +340,14 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
               : `证据投影 ${evidence.entries.length} 条`}</span>
             <span>{entriesComplete ? '条目完整' : 'Bridge 仅返回采样条目，导航覆盖采样子集'}</span>
           </div>
+
+          {/* 降级截断必须可见：无分页通道时表格只渲染前一页，界面必须说清「还有
+              更多但看不到」，否则用户会把截断当成完整数据。 */}
+          {fallbackTruncated && (
+            <p className="muted">
+              分页通道不可用：已解析 {fallbackEntries.length} 条，仅显示前 {SCRIPT_PAGE_SIZE} 条。
+            </p>
+          )}
 
           <div className="native-chip-row">
             {summaryChips.map((chip) => (

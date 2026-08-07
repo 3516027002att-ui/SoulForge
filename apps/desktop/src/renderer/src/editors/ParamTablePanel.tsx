@@ -156,6 +156,7 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
             setPage(0);
           }}
           placeholder="筛选 row id / name（作用于完整行表）"
+          aria-label="筛选 PARAM 行 id 或 name"
         />
         <button type="button" disabled={page <= 0 || loading} onClick={() => setPage((p) => p - 1)}>上一页</button>
         <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>

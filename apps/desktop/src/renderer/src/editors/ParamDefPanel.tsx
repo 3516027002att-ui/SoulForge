@@ -53,6 +53,8 @@ interface CommitResultView {
 }
 
 const PAGE_SIZE = 20;
+/** 字段表每页字段数。宽 PARAM 的 paramdef 可达数百字段，全量渲染会建出同样多的受控 input。 */
+const FIELD_PAGE_SIZE = 40;
 
 /**
  * PARAM 字段级查看/编辑面板。
@@ -155,6 +157,26 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
     if (!selectedRowBytes || !props.definition) return [];
     return props.definition.fields.map((field) => decodeFieldView(selectedRowBytes, field));
   }, [selectedRowBytes, props.definition]);
+
+  /**
+   * 字段表分页。
+   *
+   * 行表本来就分页（PAGE_SIZE 行/页），但字段表此前是 fieldViews 全量 map，每个
+   * 字段一个 <input>。宽 PARAM 的 paramdef 有数百字段——一次建出数百个受控输入，
+   * 首屏卡顿且每次 keystroke 都触发整表重渲染。硬约束 17 要求大规模访问分页，
+   * 字段数与行数一样不可控。
+   *
+   * 选中行变化时回到第一页：否则在字段少的行上会停在一个空页面。
+   */
+  const [fieldPage, setFieldPage] = useState(0);
+  useEffect(() => {
+    setFieldPage(0);
+  }, [selectedRowId, props.definition]);
+  const fieldPageCount = Math.max(1, Math.ceil(fieldViews.length / FIELD_PAGE_SIZE));
+  const visibleFieldViews = useMemo(
+    () => fieldViews.slice(fieldPage * FIELD_PAGE_SIZE, (fieldPage + 1) * FIELD_PAGE_SIZE),
+    [fieldViews, fieldPage]
+  );
 
   const definitionCanCommit = props.definition !== null
     && (props.definition.origin === 'user-derived' || props.definition.origin === 'imported')
@@ -265,6 +287,30 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
       )}
 
       {selectedRow && selectedRowDataBase64 && props.definition && fieldViews.length > 0 && (
+        <>
+        {fieldViews.length > FIELD_PAGE_SIZE && (
+          <div className="row gap pager">
+            <button
+              type="button"
+              disabled={fieldPage <= 0}
+              onClick={() => setFieldPage((current) => current - 1)}
+            >
+              上一组字段
+            </button>
+            <span className="muted">
+              字段 {fieldPage * FIELD_PAGE_SIZE + 1}–
+              {Math.min((fieldPage + 1) * FIELD_PAGE_SIZE, fieldViews.length)}
+              {' / '}共 {fieldViews.length} 个
+            </span>
+            <button
+              type="button"
+              disabled={fieldPage >= fieldPageCount - 1}
+              onClick={() => setFieldPage((current) => current + 1)}
+            >
+              下一组字段
+            </button>
+          </div>
+        )}
         <div className="binder-child-table paramdef-field-table" role="table">
           <div className="binder-child-row binder-child-header paramdef-field-row" role="row">
             <span>字段</span>
@@ -274,7 +320,7 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
             <span>当前值</span>
             <span>操作</span>
           </div>
-          {fieldViews.map((field) => {
+          {visibleFieldViews.map((field) => {
             const draft = drafts[field.fieldId];
             const displayValue = draft !== undefined
               ? draft
@@ -332,6 +378,7 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
           })}
           {props.definition.fields.length === 0 && <p className="muted">定义不含字段。</p>}
         </div>
+        </>
       )}
 
       {selectedRow && selectedRowDataBase64 && props.definition && fieldViews.length === 0 && (

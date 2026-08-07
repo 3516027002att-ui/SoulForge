@@ -105,6 +105,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
               className="input"
               style={{ flex: 1 }}
               placeholder="搜索名称…"
+              aria-label="搜索网格或材质名称"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />

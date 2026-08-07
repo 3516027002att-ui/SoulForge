@@ -46,6 +46,8 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   const [replaceBytes, setReplaceBytes] = useState('');
   const [replacing, setReplacing] = useState(false);
   const [replaceResult, setReplaceResult] = useState<ReplaceResultView | null>(null);
+  /** 分页通道缺失时的降级说明。为 null 表示正常分页路径。 */
+  const [degraded, setDegraded] = useState<string | null>(null);
 
   /** Fixed page size for the paginated container entry table (hard constraint 17). */
   const CONTAINER_PAGE_SIZE = 50;
@@ -61,6 +63,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
       setPageCount(1);
       setListDiagnostics([]);
       setLoadError(null);
+      setDegraded(null);
       return;
     }
     if (bridge === null) {
@@ -72,6 +75,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     }
     setLoading(true);
     setLoadError(null);
+    setDegraded(null);
     try {
       const treePromise = bridge.inspectContainerTree(props.resourceUri);
       const pagePromise = typeof bridge.listContainerChildrenPage === 'function'
@@ -89,13 +93,25 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
           setLoadError(tree.diagnostics?.[0]?.message ?? '容器读取失败。');
         }
       } else {
-        // Paginated channel unavailable or failed: fall back to the full list
-        // (bounded containers) so the workbench stays functional.
+        // 分页通道不可用：退回全量列表，但**真实截断到一页**并显式说明。
+        //
+        // 此前这里把全量结果整块塞进 pageChildren，同时按 ceil(len/PAGE) 算出
+        // pageCount 照常渲染翻页按钮——而 changePage 在该路径开头就 return。
+        // 结果是「按钮可见但点不动」，且首屏一次性渲染全部子项（大容器可达数千
+        // 条 DOM）。两个问题都不会报错，用户只看到界面卡住且翻页无反应。
+        //
+        // 硬约束 17 要求大规模访问必须分页；分页通道缺失时正确的降级是「少给、
+        // 说清」，不是「全给、装作能翻页」。
         const list = await bridge.listContainerChildren(props.resourceUri);
-        setPageChildren(list.children);
+        const truncated = list.children.length > CONTAINER_PAGE_SIZE;
+        setPageChildren(list.children.slice(0, CONTAINER_PAGE_SIZE));
         setTotalChildren(list.children.length);
-        setPageCount(Math.max(1, Math.ceil(list.children.length / CONTAINER_PAGE_SIZE)));
+        // pageCount=1：翻页按钮据此禁用，不再出现点不动的控件。
+        setPageCount(1);
         setPage(0);
+        setDegraded(truncated
+          ? `分页通道不可用：已解析 ${list.children.length} 个子项，仅显示前 ${CONTAINER_PAGE_SIZE} 个。`
+          : '分页通道不可用：已退回全量读取（本容器子项数未超过单页）。');
         setListDiagnostics([...(tree.diagnostics ?? []), ...(list.diagnostics ?? [])]);
         if (!tree.ok && list.children.length === 0) {
           setLoadError(tree.diagnostics?.[0]?.message ?? '容器读取失败。');
@@ -289,6 +305,10 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
         </>
       )}
 
+      {/* 降级说明必须可见：否则「只显示了前 N 条」与「一共就这么多」在界面上
+          无法区分，用户会把截断当成完整数据。 */}
+      {degraded !== null && <p className="muted">{degraded}</p>}
+
       <div className="row gap pager">
         <button
           type="button"
@@ -297,7 +317,10 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
         >
           上一页
         </button>
-        <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
+        <span className="muted">
+          {pageCount > 0 ? page + 1 : 0}/{pageCount}
+          {totalChildren > 0 && ` · 共 ${totalChildren} 项`}
+        </span>
         <button
           type="button"
           disabled={page >= pageCount - 1 || pageLoading}
