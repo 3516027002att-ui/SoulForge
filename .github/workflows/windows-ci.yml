@@ -88,8 +88,11 @@ jobs:
       # Renderer end-to-end: real Electron + production preload + built renderer,
       # synthetic fixtures only (no private game assets). Covers the
       # candidate → approve → staged → validate → write state machine.
+      # 经 verify 入口调度而不是直调 npm：直调绕开五态判定，「什么都没跑」与
+      # 「真实执行并通过」在退出码上不可区分。--require-executed 让 skip 算失败
+      # ——干净 runner 上产物齐备，e2e 没有诚实跳过的理由。
       - name: Renderer e2e (Playwright + Electron fixture)
-        run: npm run test:renderer-playwright -w @soulforge/desktop
+        run: node scripts/verify.mjs --tier synthetic --filter renderer-e2e --require-executed --json-out output/verify-ci-renderer-e2e.json --timeout-ms 900000
 
       - name: Upload verify + e2e artifacts
         if: always()
