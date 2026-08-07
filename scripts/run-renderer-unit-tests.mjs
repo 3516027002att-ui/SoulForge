@@ -74,7 +74,14 @@ for (const test of tests) {
     target: 'node22',
     sourcemap: 'inline',
     // node:test / node:assert 必须留给运行时；@soulforge/* 走真实实现（bundle 进来）。
-    external: ['node:*']
+    external: ['node:*'],
+    // 打包后 import.meta.url 指向 node_modules/.cache，任何靠它推算仓库相对路径的
+    // 测试都会 ENOENT。注入编译期常量而不是让测试自己猜：靠 process.cwd() 会随
+    // 调用目录漂移，而漂移的表现是「测试在 CI 上找不到文件」这类只在别处复现的红。
+    define: {
+      __SOULFORGE_REPO_ROOT__: JSON.stringify(root),
+      __SOULFORGE_RENDERER_ROOT__: JSON.stringify(rendererRoot)
+    }
   });
   outfiles.push(outfile);
 }

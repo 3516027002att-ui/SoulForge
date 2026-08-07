@@ -85,6 +85,7 @@ import {
   type EditableMsgRow
 } from './format/msgRows.js';
 import { filterFilesForMode, operationStatusLabel, shortenPath } from './format/uiText.js';
+import { resetAllDocuments, type DocumentResetActions } from './staging/documentReset.js';
 
 type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
 
@@ -255,6 +256,55 @@ export function App(): ReactElement {
   const cmdkInputRef = useRef<HTMLInputElement>(null);
   const toastIdRef = useRef(0);
   const prevPendingCountRef = useRef(0);
+
+  /**
+   * 每种资源族的编辑态复位动作。
+   *
+   * 切换工作区与切换选中文件都必须把全部族清空，否则面板会继续显示上一个资源的
+   * 行/条目/场景。此前这两处是手写 setter 列表，实测 openWorkspace **8 个族一个
+   * 都没复位**、selectFile 漏掉 FMG/PARAM/EMEVD/MSB——而漏一项不会有编译错误、
+   * 测试失败或诊断，只能靠肉眼发现。
+   *
+   * 现在改为一处登记（staging/documentReset.ts）+ 一次 resetAllDocuments 调度，
+   * 并由单测对着本文件源码做双向对账：登记表漏项或新增未登记的 setter 都会红。
+   * 写入侧本就有 live + sourceHash 双重前置条件，所以这个 bug 不会写错文件；
+   * 它污染的是显示层的「已解析」观感（硬约束 7 要求严格区分 authority 状态）。
+   */
+  const documentResetActions = useMemo<DocumentResetActions>(() => ({
+    fmg: () => {
+      setFmgEntries(EMPTY_FMG_ENTRIES);
+      setFmgSourceHash(null);
+      setFmgLive(false);
+    },
+    param: () => {
+      setParamRows(EMPTY_PARAM_ROWS);
+      setParamTypeName('');
+      setParamSourceHash(null);
+      setParamLive(false);
+      setParamRowPayloads(new Map());
+    },
+    emevd: () => {
+      setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
+      setEmevdSourceHash(null);
+      setEmevdLive(false);
+      setEmevdDslTemplate(null);
+      setEmevdDslTemplateTruncated(false);
+      setEmevdDslTemplateTotalLines(0);
+    },
+    msb: () => {
+      setMsbParts(EMPTY_MSB_PARTS);
+      setMsbModels([]);
+      setMsbRegions([]);
+      setMsbEvents([]);
+      setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
+      setMsbLive(false);
+      setMsbSourceHash(null);
+    },
+    tae: () => setTaeData(null),
+    esd: () => setEsdData(null),
+    flver: () => setFlverData(null),
+    tpf: () => setTpfData(null)
+  }), []);
 
   const counts = useMemo(() => workspace?.countsByKind ?? null, [workspace]);
   const diagnostics = [...(workspace?.diagnostics ?? []), ...(analysis?.diagnostics ?? []), ...(preview?.diagnostics ?? [])];
@@ -1031,6 +1081,9 @@ export function App(): ReactElement {
       setAiDraft(null);
       setOperationHistory([]);
       setBnd4Forced(false);
+      // 换工作区必须清空全部资源族编辑态：否则新工作区的面板会继续显示上一个
+      // 工作区的 FMG 条目 / PARAM 行 / EMEVD 事件 / MSB 场景。
+      resetAllDocuments(documentResetActions);
 
       setStatus('正在构建轻量证据索引...');
       const nextAnalysis = await bridge.analyzeWorkspace();
@@ -1100,10 +1153,9 @@ export function App(): ReactElement {
     setMsgRows([]);
     setSaveDiagnostics([]);
     setAiDraft(null);
-    setTaeData(null);
-    setEsdData(null);
-    setFlverData(null);
-    setTpfData(null);
+    // 换选中文件同样要清空全部资源族：此前这里只清了 TAE/ESD/FLVER/TPF，
+    // FMG/PARAM/EMEVD/MSB 会残留到下一个文件的面板上。
+    resetAllDocuments(documentResetActions);
     setBnd4Forced(false);
     setCenterView('resource');
     if (!bridge) {
