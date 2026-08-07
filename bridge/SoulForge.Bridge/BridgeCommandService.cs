@@ -88,9 +88,20 @@ internal sealed class BridgeCommandService
 
         if (command == "extract-bnd4-child")
         {
+            // outputPath 必须用 daemon 已校验并规范化的那一个，不能让 writer 自己再从
+            // options 里取原始字符串：daemon 侧对 writable-root 的判定是针对
+            // BridgePathBoundary.Verify 的 CanonicalPath 做的，writer 若绕回原始值，
+            // 「..」「符号链接」「大小写差异」这类等价路径就能落在校验之外——校验通过、
+            // 落盘却在别处。CLI 直调模式没有 daemon 协商的 writableRoots，此时
+            // outputPath 为 null，仍回落到 options（与其他 writer 命令一致）。
+            if (string.IsNullOrWhiteSpace(outputPath))
+            {
+                return BridgeResult<object>.Failed(file, resourceKind, "BND4_CHILD_OUTPUT_REQUIRED",
+                    "extract-bnd4-child 需要 options.outputPath，且必须经 writable-root 校验。");
+            }
             try
             {
-                var result = Bnd4NativeWriter.ExtractChild(file, options, oodleRuntimeRoot);
+                var result = Bnd4NativeWriter.ExtractChild(file, outputPath, options, oodleRuntimeRoot);
                 return BridgeResult<object>.Partial(file, resourceKind, new[]
                 {
                     new Diagnostic("info", "BND4_CHILD_EXTRACTED", "BND4 子项已提取到文件。", BridgeResult<object>.MakeSourceUri(file), result)
@@ -343,7 +354,24 @@ internal sealed class BridgeCommandService
                     outputBytes = dds;
                     code = "DDS";
                 }
-                await File.WriteAllBytesAsync(outputPath, outputBytes, cancellationToken);
+                // temp + Move(overwrite)，与五个 native writer 一致：直接写目标文件时
+                // 中途失败（取消、磁盘满）会留下截断的图片，而它看起来像导出成功。
+                var exportDirectory = Path.GetDirectoryName(outputPath);
+                if (string.IsNullOrEmpty(exportDirectory))
+                {
+                    return BridgeResult<object>.Failed(file, "texture", "TPF_EXPORT_OUTPUT_INVALID", "outputPath 没有父目录。");
+                }
+                Directory.CreateDirectory(exportDirectory);
+                var exportTemporary = Path.Combine(exportDirectory, $".soulforge-tpf-{Guid.NewGuid():N}.tmp");
+                try
+                {
+                    await File.WriteAllBytesAsync(exportTemporary, outputBytes, cancellationToken);
+                    File.Move(exportTemporary, outputPath, overwrite: true);
+                }
+                finally
+                {
+                    if (File.Exists(exportTemporary)) File.Delete(exportTemporary);
+                }
                 var entry = document.Textures[textureIndex];
                 return BridgeResult<object>.Partial(file, "texture", new[]
                 {

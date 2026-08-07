@@ -123,6 +123,7 @@
     "test:smoke-temp-cleanup": "node scripts/verify-smoke-temp-cleanup-gate.mjs",
     "test:probe-residual-gate": "node scripts/verify-probe-residual-gate.mjs",
     "test:bridge-exit-hygiene": "node scripts/verify-bridge-exit-hygiene-gate.mjs",
+    "test:bridge-write-boundary": "node scripts/verify-bridge-write-boundary-gate.mjs",
     "test:desktop-contract-mutations": "node scripts/contract/verify-desktop-contract-mutations.mjs",
     "test:ui-localization": "node scripts/verify-ui-localization.mjs",
     "test:database-utility": "npm run test:database-utility -w @soulforge/desktop",
