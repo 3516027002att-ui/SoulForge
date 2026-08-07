@@ -50,7 +50,24 @@ internal static class Bnd4NativeWriter
         foreach (var (mutation, step) in plan)
             ApplyMutation(mutation, step, entries, affectedIndexes, contentReplacedKeys);
         cancellationToken.ThrowIfCancellationRequested();
-        var rebuiltBinder = binder.Repack(entries);
+        // 布局等价的写入必须走布局保持重建，不能一律走通用 Repack。
+        //
+        // Repack 是变长/增删/重命名共用的重排器，它必然重算名字区与数据区布局，
+        // 因此对布局等价输入（等长内容替换）也会改掉源的对齐间隙、名字区留白，
+        // 以及「头部声明的 dataOffset 与首个子项实际起点之差」。结果是：
+        // 同尺寸原样替换写回后，解压 payload 与源不逐字节相同。
+        //
+        // ef9f55e 已按场景切分出 RebuildPreservingLayout，但它当时只接进
+        // VerifyRoundTrip 与 VerifyLayoutGuard（Bnd4NativeDocument.cs:96/292），
+        // 也就是只修了往返**报告**；生产落盘这条路径仍无条件走 Repack。
+        // 实测后果：read 侧报 roundTrip.byteIdentical=true，而 write-bnd4 落盘后
+        // 重读的 payloadHash 与源不等——报告说无损，产物不是。
+        //
+        // IsLayoutPreservingRepack 自己判定是否布局等价；不等价时（变长、增删、
+        // 重命名）仍走 Repack，那些场景本就不该期望逐字节一致。
+        var rebuiltBinder = binder.IsLayoutPreservingRepack(entries)
+            ? binder.RebuildPreservingLayout(entries)
+            : binder.Repack(entries);
         byte[] rebuiltDcx;
         if (dcx.CompressionFormat == "KRAK")
         {
