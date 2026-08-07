@@ -268,6 +268,58 @@ test('Electron：workspace.openDialog 被调用；用户取消时安静返回', 
   await cancelled.app.close();
 });
 
+test('IPC 发送方校验：主文档之外的调用被拒绝', async () => {
+  // 这条覆盖生产 ipc.ts 的 handle 包装器里那道 assertTrustedSender —— 56 个
+  // channel 的必经之路，也是「渲染进程被导航到外部页面后不得继续调 IPC」这条
+  // 边界的唯一执行点。此前 fixture main 完全没有这层校验，于是 e2e 跑的是一个
+  // 没有安全层的 main：改坏 assertTrustedSender 不会让任何用例变红。
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 正常路径：主文档发起的调用必须成功（先确认校验没有把合法调用一起挡掉，
+  // 否则下面的「被拒绝」可能只是因为一切都被拒绝）。
+  const allowed = await window.evaluate(async () => {
+    try {
+      await window.soulforge.listOperations();
+      return 'ok';
+    } catch (error) {
+      return `rejected:${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+  expect(allowed).toBe('ok');
+
+  // 越界路径：从 main 侧直接向一个**未登记为受信任文档**的 webContents 发起
+  // 同一 channel。用真实的第二个窗口而不是伪造 event：伪造的 event 只能测到
+  // 我们自己写的桩，测不到 Electron 真实的 senderFrame 语义。
+  const rejection = await app.evaluate(async ({ BrowserWindow, ipcMain }) => {
+    const rogue = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false } });
+    await rogue.loadURL('data:text/html,<html><body>rogue</body></html>');
+    try {
+      // 直接调用注册在 ipcMain 上的 handler，带上 rogue 窗口的 sender。
+      // ipcMain 没有公开的「以任意 sender 触发」API，所以走 executeJavaScript
+      // 让 rogue 页面自己发 —— 它没有 preload，因此用 nodeIntegration 拿 ipcRenderer。
+      const result = await rogue.webContents.executeJavaScript(`
+        (async () => {
+          try {
+            await require('electron').ipcRenderer.invoke('operation.list');
+            return 'unexpectedly-allowed';
+          } catch (error) {
+            return 'rejected:' + String(error && error.message ? error.message : error);
+          }
+        })()
+      `);
+      return result;
+    } finally {
+      rogue.destroy();
+    }
+  });
+
+  // 必须被拒绝，且诊断里点名 channel —— 「被拒绝」不等于「因为正确的原因被拒绝」。
+  expect(rejection).toContain('rejected:');
+  expect(rejection).toContain('operation.list');
+  await app.close();
+});
+
 test('browser-preview 表面：可见降级提示，无 pageerror / console error', async () => {
   const { app, window, pageErrors, consoleErrors } = await launchApp({ SF_TEST_BROWSER_PREVIEW: '1' });
 
