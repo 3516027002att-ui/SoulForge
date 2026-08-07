@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react';
+import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
 import type {
   AiPermissionMode,
   AiProvider,
@@ -8,6 +8,11 @@ import type {
   ToolResult
 } from '@soulforge/core';
 import { ModelServiceSettingsPanel } from '../editors/ModelServiceSettingsPanel.js';
+import {
+  FOCUSABLE_SELECTOR,
+  isTrappableElement,
+  nextTrappedFocusIndex
+} from '../a11y/focusTrap.js';
 import { AgentSessionControls } from './AgentSessionControls.js';
 import { modelServiceLabel, permissionModeLabel, thinkingLabel } from './agentLabels.js';
 
@@ -83,6 +88,44 @@ export function AgentSidebar({
   onExplainEvent
 }: AgentSidebarProps): ReactElement {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  /** 抽屉打开前的焦点位置；关闭时归还，避免焦点掉回文档开头。 */
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  function openSettings(): void {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setSettingsOpen(true);
+  }
+
+  function closeSettings(): void {
+    setSettingsOpen(false);
+    // 焦点归还排在卸载之后：卸载时浏览器会把焦点打回 body，先 focus 等于白做。
+    const target = returnFocusRef.current;
+    returnFocusRef.current = null;
+    if (target !== null && document.contains(target)) {
+      window.setTimeout(() => target.focus(), 0);
+    }
+  }
+
+  /** 抽屉内的 Tab 环绕。索引计算与可聚焦判定由 a11y/focusTrap 负责（有单测）。 */
+  function trapTab(event: ReactKeyboardEvent): void {
+    const container = drawerRef.current;
+    if (container === null || event.key !== 'Tab') return;
+    const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+      .filter((element) => isTrappableElement(element));
+    if (focusable.length === 0) return;
+    const currentIndex = focusable.findIndex((element) => element === document.activeElement);
+    const nextIndex = nextTrappedFocusIndex({
+      focusableCount: focusable.length,
+      currentIndex,
+      shift: event.shiftKey
+    });
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    focusable[nextIndex]?.focus();
+  }
   const [toolQuery, setToolQuery] = useState('');
   const groupedTools = groupToolsByPermission(tools);
 
@@ -98,7 +141,7 @@ export function AgentSidebar({
           <button
             type="button"
             className="tb-btn"
-            onClick={() => setSettingsOpen((value) => !value)}
+            onClick={() => (settingsOpen ? closeSettings() : openSettings())}
             title="Agent 设置"
             aria-label="打开 Agent 设置"
             aria-expanded={settingsOpen}
@@ -256,10 +299,27 @@ export function AgentSidebar({
       </div>
 
       {settingsOpen && (
-        <div className="agent-drawer" role="dialog" aria-label="模型服务管理">
+        // aria-modal 此前缺失：辅助技术不知道背后内容已被遮挡，会继续把主界面
+        // 读给用户。Tab 也不受拦，焦点能落到被遮住的元素上。
+        <div
+          className="agent-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-label="模型服务管理"
+          ref={drawerRef}
+          onKeyDown={(event) => {
+            // Escape 关闭：模态必须能用键盘退出，否则键盘用户被困在里面。
+            if (event.key === 'Escape') {
+              event.stopPropagation();
+              closeSettings();
+              return;
+            }
+            trapTab(event);
+          }}
+        >
           <div className="agent-drawer__header">
             <strong>模型服务管理</strong>
-            <button type="button" className="tb-btn" onClick={() => setSettingsOpen(false)} aria-label="关闭模型服务管理">
+            <button type="button" className="tb-btn" onClick={closeSettings} aria-label="关闭模型服务管理">
               <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
                 <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" />
               </svg>
