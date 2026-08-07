@@ -51,7 +51,7 @@ TypeError: Cannot read properties of undefined (reading 'openWorkspaceDialog')
 
 ## 3. 设计方向
 
-沿用 `docs/frontend-renovation/design-system.md` 已有的 Precision & Density、锻造台暗色、hairline 分层和单一余火强调色，不重做配色或品牌。
+沿用既有设计系统，不重做配色或品牌：Precision & Density、锻造台暗色、hairline 分层、单一余火强调色（强调色只用于当前主操作与危险确认，不用于装饰）。载体是 `apps/desktop/src/renderer/src/styles.css` 的 token；对比度按 WCAG AA（小文本 ≥4.5:1），改 token 后必须重新核对对比度。视觉硬约束见 `docs/frontend-renovation/anti-ai-design.md`。
 
 本轮的结构签名是“顶层资源根导航”：目录切换始终位于窗口上方，文件树只显示当前目录族；Agent 会话控制始终贴近右侧输入区。
 
