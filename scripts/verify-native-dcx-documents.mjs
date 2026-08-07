@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
+import { cpus } from 'node:os';
 import { extname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -61,13 +62,68 @@ let nestedBnd4Verified = 0;
 let nestedBnd4Entries = 0;
 let krakNestedBnd4Verified = 0;
 let krakNestedBnd4Entries = 0;
-for (const file of files) {
+/**
+ * 并发度。
+ *
+ * 为什么必须并发：本脚本对语料根下**每个** .dcx 各 spawn 一次 Bridge。
+ * 实测本机语料根是整个游戏目录，8065 个 .dcx，串行耗时 **1264 秒（21 分钟）**
+ * ——而 scripts/verify.mjs 的 DEFAULT_TIMEOUT_MS 是 900 秒。也就是说这条套件
+ * 经 verify 调度时**必然被判超时失败**，只有直接 npm run 才跑得完。
+ * 一条只能绕过调度器才能跑的验证，等于不在验证体系里。
+ *
+ * 为什么并发是安全的：每次调用都是独立进程、纯只读解析（read-dcx-document），
+ * 不写盘、不共享状态，累加全部发生在 await 之后的主循环里，因此结果与串行一致。
+ *
+ * 取 CPU 核数但夹在 [2,8]：上限压住是因为每个 Bridge 进程会解压 payload，
+ * 内存与磁盘 I/O 都不便宜；下限保证单核机器也不退化成串行。
+ * 可用 SOULFORGE_DCX_CONCURRENCY 覆盖（排查时设 1 可还原串行行为）。
+ */
+const CONCURRENCY = (() => {
+  const raw = Number.parseInt(process.env.SOULFORGE_DCX_CONCURRENCY ?? '', 10);
+  if (Number.isInteger(raw) && raw > 0) return raw;
+  return Math.min(8, Math.max(2, cpus().length));
+})();
+
+/** 读一个文件，返回 { file, stdout } 或 { file, error }。不做任何累加。 */
+async function readOne(file) {
   try {
     const { stdout } = await execFileAsync(executable, ['read-dcx-document', file], {
       windowsHide: true,
       maxBuffer: 8 * 1024 * 1024,
       timeout: 60_000
     });
+    return { file, stdout };
+  } catch (error) {
+    return { file, error };
+  }
+}
+
+/** 定容并发池：始终保持 CONCURRENCY 个在飞，按完成顺序产出。 */
+async function* readConcurrently(paths, limit) {
+  const queue = [...paths];
+  const inFlight = new Set();
+  const start = () => {
+    const next = queue.shift();
+    if (next === undefined) return;
+    const p = readOne(next).then((value) => {
+      inFlight.delete(p);
+      return value;
+    });
+    inFlight.add(p);
+  };
+  for (let i = 0; i < limit; i += 1) start();
+  while (inFlight.size > 0) {
+    const done = await Promise.race(inFlight);
+    start();
+    yield done;
+  }
+}
+
+for await (const outcome of readConcurrently(files, CONCURRENCY)) {
+  const file = outcome.file;
+  try {
+    if (outcome.error !== undefined) throw outcome.error;
+    const { stdout } = outcome;
     const result = JSON.parse(stdout);
     const data = result.data;
     if (data?.compressionFormat === 'DFLT' && data.roundTrip?.payloadIdentical === true
@@ -113,13 +169,14 @@ for (const file of files) {
   }
 }
 if (dfltVerified === 0 || failures.length > 0) {
-  console.error(JSON.stringify({ ok: false, files: files.length, dfltVerified, krakReadVerified, krakBlocked, krakNestedBnd4Verified, krakNestedBnd4Entries, variants: Object.fromEntries(variants), unrecognizedVariants: [...unrecognizedVariants], failures }, null, 2));
+  console.error(JSON.stringify({ ok: false, files: files.length, concurrency: CONCURRENCY, dfltVerified, krakReadVerified, krakBlocked, krakNestedBnd4Verified, krakNestedBnd4Entries, variants: Object.fromEntries(variants), unrecognizedVariants: [...unrecognizedVariants], failures }, null, 2));
   process.exitCode = 1;
 } else {
   console.log(JSON.stringify({
     ok: true,
     message: '真实 DCX 文档完整读取与 DFLT payload roundtrip 验证通过',
     files: files.length,
+    concurrency: CONCURRENCY,
     dfltVerified,
     krakReadVerified,
     krakBlocked,
