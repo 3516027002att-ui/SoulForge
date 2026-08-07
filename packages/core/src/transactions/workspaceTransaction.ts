@@ -791,24 +791,63 @@ export class WorkspaceTransaction {
     const diagnostics: StructuredDiagnostic[] = [];
 
     if (!restored.ok) {
-      // Try to put back pre-rollback bytes.
+      // 回滚失败后的二次补救：把回滚前的字节写回去。
+      //
+      // 这里曾经是 `catch { /* ignore */ }`。后果不是崩溃而是**信息消失**：
+      // ROLLBACK_FAILED 只报 restored.errors，preRollbackHashes 记的是回滚前的
+      // 哈希而非补救结果，于是「补救也失败」这件事没有任何出口。操作员因此无法
+      // 区分两种截然不同的现场——文件已回到 pre-rollback 状态（可重试），还是
+      // 处于既非 pre-rollback 也非目标状态的第三种未知状态（必须人工介入）。
+      // 恢复边界上吞掉失败等于让最需要诊断的那一刻没有诊断（硬约束 8）。
+      const recoveryAttempts: Array<{
+        path: string;
+        ok: boolean;
+        code?: string;
+        message?: string;
+      }> = [];
       for (const snap of preRollbackSnapshots) {
         try {
           await writeFile(snap.path, snap.bytes);
-        } catch {
-          // ignore
+          recoveryAttempts.push({ path: snap.path, ok: true });
+        } catch (error) {
+          recoveryAttempts.push({
+            path: snap.path,
+            ok: false,
+            ...safeErrorDetails(error)
+          });
         }
       }
+      const failedRecoveries = recoveryAttempts.filter((attempt) => !attempt.ok);
+
       diagnostics.push(createDiagnostic({
         severity: 'error',
         code: 'ROLLBACK_FAILED',
         message: `Rollback failed: ${restored.errors.join('; ')}`
       }));
+      if (failedRecoveries.length > 0) {
+        // 单列一条诊断而不是并进上面那条：这两件事的处置完全不同。
+        // ROLLBACK_FAILED 可重试；补救失败意味着磁盘上的文件状态未知，重试之前
+        // 必须先确认现场。
+        diagnostics.push(createDiagnostic({
+          severity: 'error',
+          code: 'ROLLBACK_RECOVERY_FAILED',
+          message: '回滚失败后的字节补救也失败：受影响文件既不在回滚前状态，也不在目标状态，'
+            + '需先人工确认现场再决定重试。',
+          details: {
+            transactionId: this.transactionId,
+            failedPaths: failedRecoveries.map((attempt) => attempt.path),
+            attempts: recoveryAttempts
+          }
+        }));
+      }
       this.status = 'failed';
       this.failureRecovery = {
         phase: 'rollback',
         errors: restored.errors,
-        preRollbackHashes: preRollbackSnapshots.map((item) => ({ path: item.path, hash: item.hash }))
+        preRollbackHashes: preRollbackSnapshots.map((item) => ({ path: item.path, hash: item.hash })),
+        // 补救结果必须进 failureRecovery，因为它是恢复流程唯一会重新读取的结构。
+        recoveryAttempts,
+        recoveryComplete: failedRecoveries.length === 0
       };
       this.auditLog.append(createAuditEntry({
         transactionId: this.transactionId,
