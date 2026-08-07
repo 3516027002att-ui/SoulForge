@@ -4,6 +4,18 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
 import { disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
 
+/**
+ * 脱敏函数从 main 入口再导出一次，供安全门禁在生产构建产物上真实调用。
+ *
+ * 这不是为测试开的后门：它只是把一个**纯函数**变成可观测的。安全门禁此前只能
+ * 断言 rendererDto 源码里含 'containsWindowsDrivePath' 这类字符串——那只证明
+ * 「代码里提到过」，不证明它对真实载荷有效，改个内部实现就静默失去覆盖。
+ * 导出后门禁可以直接喂真实敏感载荷、断言输出里既无敏感键也无敏感值。
+ *
+ * 安全性上无新增暴露面：main 侧模块导出不经 contextBridge，renderer 永远拿不到。
+ */
+export { sanitizeRendererValue } from './rendererDto.js';
+
 const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
 
