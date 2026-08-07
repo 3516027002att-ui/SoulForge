@@ -16,6 +16,7 @@ import { createPatchIr } from '../patch-engine/patchIr.js';
 import { createWorkspaceTransaction } from '../transactions/workspaceTransaction.js';
 import { createScaffoldValidators } from '../validators/index.js';
 import { createScaffoldWriterAdapters } from '../writers/index.js';
+import { assertNoPathLeak } from './assertNoPathLeak.js';
 
 const CAPABILITIES = [
   'text_edit',
@@ -156,9 +157,9 @@ async function main(): Promise<void> {
         if (!diagnostics.some((item) => item.code === expectedCode)) {
           throw new Error(`${capability}/${phase}: missing ${expectedCode}: ${JSON.stringify(diagnostics)}`);
         }
-        if (JSON.stringify(diagnostics).includes(root)) {
-          throw new Error(`${capability}/${phase}: diagnostics leaked an absolute local path.`);
-        }
+        // 不用 JSON.stringify(...).includes(root)：Windows 上 stringify 会把 \ 转义成
+        // \\，字面比较恒假，真泄漏也报绿。判据见 assertNoPathLeak.ts。
+        assertNoPathLeak(`${capability}/${phase}`, diagnostics, root);
         if (transaction.getStatus() !== 'failed') {
           throw new Error(`${capability}/${phase}: status=${transaction.getStatus()}.`);
         }

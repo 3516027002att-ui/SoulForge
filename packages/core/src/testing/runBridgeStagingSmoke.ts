@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { stageBridgeOutput } from '../editing/bridgeStaging.js';
+import { findPathLeak } from './assertNoPathLeak.js';
 
 async function main(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'soulforge-bridge-staging-'));
@@ -116,7 +117,8 @@ function assertCode(
   if (result.ok || !result.diagnostics.some((item) => item.code === code)) {
     throw new Error(`Expected ${code}, got ${JSON.stringify(result)}`);
   }
-  if (JSON.stringify(result.diagnostics).includes(forbiddenAbsoluteRoot)) {
+  // 见 assertNoPathLeak.ts：stringify 后的转义会让字面比较恒假。
+  if (findPathLeak(result.diagnostics, forbiddenAbsoluteRoot) !== null) {
     throw new Error(`${code} leaked the absolute staging root.`);
   }
 }

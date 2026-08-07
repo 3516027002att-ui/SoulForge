@@ -10,6 +10,7 @@ import { createScaffoldValidators } from '../validators/index.js';
 import { ContainerChildReplaceWriter } from '../writers/containerChildReplaceWriter.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { findPathLeak } from './assertNoPathLeak.js';
 
 interface NativeBndEnvelope {
   sourceHash: string;
@@ -195,7 +196,8 @@ async function runFixtureMatrix(
     if (!diagnostics.some((item) => item.code === expectedCode)) {
       throw new Error(`${spec.label} ${phase} missing ${expectedCode}: ${JSON.stringify(diagnostics)}`);
     }
-    if (JSON.stringify(diagnostics).includes(root)) {
+    // 见 assertNoPathLeak.ts：stringify 后的转义会让字面比较恒假。
+    if (findPathLeak(diagnostics, root) !== null) {
       throw new Error(`${spec.label} ${phase} diagnostics leaked an absolute local path.`);
     }
     if (transaction.getStatus() !== 'failed') {

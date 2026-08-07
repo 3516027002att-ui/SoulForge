@@ -11,6 +11,7 @@ import {
   type BridgeRecoveryHarnessEvent,
   type BridgeRecoveryHarnessFault
 } from './bridgeRecoveryHarnessProtocol.js';
+import { findPathLeak } from './assertNoPathLeak.js';
 
 const FIXTURE_DAEMON = fileURLToPath(new URL('./bridgeRecoveryFixtureDaemon.js', import.meta.url));
 
@@ -49,7 +50,8 @@ async function main(): Promise<void> {
         && item.details.phase === 'write')) {
       throw new Error(`Bridge staging failure did not fail closed: ${JSON.stringify(stagingFailure)}`);
     }
-    if (JSON.stringify(stagingFailure.diagnostics).includes(root)) {
+    // 见 assertNoPathLeak.ts：stringify 后的转义会让字面比较恒假。
+    if (findPathLeak(stagingFailure.diagnostics, root) !== null) {
       throw new Error('Bridge staging failure leaked the temporary absolute root.');
     }
     if ((await readdir(stagingRoot)).length !== 0) {
