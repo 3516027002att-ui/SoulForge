@@ -162,7 +162,10 @@ if (scriptNames.size > 0) {
   // `gov help` 报成不支持——门禁指向错误原因,比没有门禁更糟。
   const govCommands = new Set();
   const govSource = readOrNull('scripts/gov.mjs');
-  if (govSource !== null) {
+  if (govSource === null) {
+    add('error', 'GOV_SOURCE_UNREADABLE', 'scripts/gov.mjs',
+      '无法读取 gov CLI 源码；子命令清单不可提取，文档里的命令引用将不再被校验。');
+  } else {
     const commandsBlock = govSource.match(/const COMMANDS = Object\.freeze\(\{([\s\S]*?)^\}\)/m);
     for (const name of commandsBlock?.[1].match(/^\s{2}(\w+):/gm) ?? []) {
       govCommands.add(name.trim().replace(':', ''));
@@ -171,6 +174,19 @@ if (scriptNames.size > 0) {
     let branchMatch;
     while ((branchMatch = branchPattern.exec(govSource)) !== null) {
       govCommands.add(branchMatch[1]);
+    }
+    // 提取失败必须失败关闭，而不是静默跳过后面的 GOV_SUBCOMMAND_MISSING 检查。
+    //
+    // 这里原本是在循环里 `if (govCommands.size === 0) continue;`。那条 continue 的
+    // 后果不是漏报一条，而是**整块检查消失**：上面的正则依赖 gov.mjs 恰好写成
+    // `const COMMANDS = Object.freeze({` 且两空格缩进，只要有人改名、改缩进或换
+    // 写法，集合就为空，于是交接书里所有 gov 子命令引用从此不再校验——而门禁
+    // 依旧全绿。同仓库两处同类提取（verify-v06-deferral-index.mjs、
+    // verify-handoff-projection-fixtures.mjs）在取不到值时都判红，只有这一处是跳过。
+    if (govCommands.size === 0) {
+      add('error', 'GOV_COMMAND_LIST_UNEXTRACTABLE', 'scripts/gov.mjs',
+        '无法从 gov.mjs 提取任何子命令（COMMANDS 表写法或缩进可能已变）；'
+        + '提取失败必须失败关闭，否则文档里的 gov 命令引用将静默不再被校验。');
     }
   }
 
@@ -190,6 +206,8 @@ if (scriptNames.size > 0) {
       }
     }
 
+    // 集合为空时上面已登记 GOV_COMMAND_LIST_UNEXTRACTABLE 并失败关闭；这里跳过
+    // 逐条比对只是避免拿空集合报出一堆无意义的「不支持」误报。
     if (govCommands.size === 0) continue;
     const govPattern = /gov(?:\.mjs)? ([a-z]+)/g;
     const seenCommands = new Set();
