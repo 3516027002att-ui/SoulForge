@@ -243,11 +243,24 @@ function verifyAssessmentClassifier() {
 }
 
 function extractLastJsonObject(stdout) {
-  for (let start = stdout.lastIndexOf('{'); start >= 0; start = stdout.lastIndexOf('{', start - 1)) {
+  // start > 0 而不是 start >= 0：`'{bad'.lastIndexOf('{', -1)` 返回 **0**，不是 -1，
+  // 所以原先的 `start >= 0` 在「输出首字符是 { 且整段不可解析」时永真——死循环。
+  // 实测：该输入下循环不终止；表现为门禁超时，而超时会被误读成环境问题
+  // （缺语料/机器慢），真正原因是解析逻辑本身。
+  //
+  // 0 位单独在循环外处理，保证首字符是 { 的合法 JSON 仍能被解析到。
+  for (let start = stdout.lastIndexOf('{'); start > 0; start = stdout.lastIndexOf('{', start - 1)) {
     try {
       return JSON.parse(stdout.slice(start));
     } catch {
       // npm may print non-JSON prefixes; keep searching earlier object starts.
+    }
+  }
+  if (stdout.startsWith('{')) {
+    try {
+      return JSON.parse(stdout);
+    } catch {
+      return undefined;
     }
   }
   return undefined;
