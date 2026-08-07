@@ -769,6 +769,37 @@ function cmdComplete(args) {
 }
 
 /**
+ * 从 commands 自由文本里找出「非零退出码」的声明。
+ *
+ * 为什么用文本识别而不是要求结构化输入：commands 现有 100 条历史记录全是自由
+ * 文本，强制结构化会让所有历史记录不可解析，而重写它们等于改写已封存的事实。
+ * 折中是——识别已有的书写惯例，把「带红封存」变成需要显式接受的动作。
+ *
+ * 识别的形态来自仓库现有记录的真实写法：
+ *   "npm run x (exit 0)"、"npm run x exit 1"、"exit code 1"、"退出码 1"、
+ *   "(exit 1, ...)"。
+ * 只认紧跟在 exit/退出码 后面的数字，避免把 "13/13" "58/58" 这类计数误判。
+ *
+ * 刻意宁漏不误报：误报会逼调用方为每条正常封存都加 --accept-nonzero，那个参数
+ * 就会退化成仪式，反而掩盖真正带红的情况。漏报的代价只是回到现状。
+ */
+function detectNonZeroExitClaims(commands) {
+  const found = new Set();
+  const patterns = [
+    /exit\s*(?:code\s*)?[=:]?\s*(\d+)/gi,
+    /退出码\s*[=:]?\s*(\d+)/g
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(commands)) !== null) {
+      const code = Number.parseInt(match[1], 10);
+      if (Number.isInteger(code) && code !== 0) found.add(match[0].trim());
+    }
+  }
+  return [...found];
+}
+
+/**
  * 从目标 Gate 已引用的证据里算出必须继承的用户批准标记，报出 subject 里缺的那些。
  *
  * 判据是「目标 Gate 现有证据声明过的标记」而不是一份硬编码清单：标记形态由治理
@@ -873,6 +904,50 @@ function cmdSeal(args) {
       return;
     }
     values[key] = value.trim();
+  }
+
+  // commands 字段的极性约束：带着红色结论封存必须是显式动作，不能是自由文本里
+  // 藏着的一句话。
+  //
+  // 本模块只搬运事实、不生产事实（见文件头），所以它无法证明命令真跑过。但它
+  // 至少能拦住一种已经发生过的形态：EV-UI-RENOVATION-20260807 的 commands 末尾
+  // 写着「npm run test:desktop-ipc-contract exit 1（既有假红…）」——一条 exit 1
+  // 被手填进封存并通过全部门禁，随后那条红在 main 上停留了四次 CI，还因为
+  // verify 默认 bail 让同层 20 条恢复/写入套件全部 not-attempted。
+  //
+  // 诊断当时是对的（确实是门禁分类问题），但处置错了。所以这里把「带红封存」
+  // 从「写在自由文本里」提升为「必须显式声明 --accept-nonzero 并给出理由，且
+  // 理由会被写进 nonClaims」。这不阻止任何合法场景，只是让它留下痕迹。
+  const nonZeroEvidence = detectNonZeroExitClaims(values.commands);
+  const acceptNonZero = typeof args['accept-nonzero'] === 'string'
+    ? args['accept-nonzero'].trim()
+    : (args['accept-nonzero'] === true ? '' : null);
+  if (nonZeroEvidence.length > 0 && acceptNonZero === null) {
+    fail(
+      'SEAL_NONZERO_EXIT_NOT_ACCEPTED',
+      'commands 里出现非零退出码的声明，但未显式接受。带着红色结论封存必须是'
+      + '显式动作：确认这些红确实不影响本条证据的结论后，加 '
+      + '--accept-nonzero "<为什么可以带红封存>"，该理由会并入 nonClaims。'
+      + '若这些红本该先修掉，请先修——封存不会让红消失。',
+      { detected: nonZeroEvidence }
+    );
+    return;
+  }
+  if (nonZeroEvidence.length > 0 && acceptNonZero.length === 0) {
+    fail(
+      'SEAL_NONZERO_REASON_REQUIRED',
+      '--accept-nonzero 必须带理由（为什么这些非零退出码不影响本条证据的结论）。'
+      + '空理由等于没有约束。',
+      { detected: nonZeroEvidence }
+    );
+    return;
+  }
+  if (nonZeroEvidence.length > 0) {
+    // 理由并入 nonClaims 而不是塞回 commands：nonClaims 是「本条证据不声明什么」
+    // 的唯一位置，把带红的边界写在那里，后续读者才会在正确的地方看到它。
+    values['non-claims'] = `${values['non-claims']}；`
+      + `本条证据带非零退出码封存（${nonZeroEvidence.join('、')}），`
+      + `接受理由：${acceptNonZero}`;
   }
   const resolvedRelease = resolveRelease(args.release);
   if (!resolvedRelease.ok) {
@@ -1090,6 +1165,13 @@ if (!command || command === '--help' || command === 'help') {
       + '(3) subject 里带 revalidates=<既有EvidenceId> 继承既有用户批准标记，工程侧重验证不需要用户再授权；'
       + '(4) subject 还必须原样带齐目标 Gate 现有证据声明过的 user-approved 标记（如 scope-ruling:user-approved、scope-deferral:<Gate>:<Release>:user-approved）。漏标记时 freshness 筛不出可继承证据，报错会是 GATE_EVIDENCE_STALE（指向错误原因）；本命令已在追加前预检并指名缺哪个。',
     sealRequiredArgs: '--id、--subject、--commands、--result、--non-claims 全部必填，缺任一项在追加前失败（SEAL_ID_INVALID / SEAL_FIELD_REQUIRED）。要恢复 Gate 还需 --gates。',
+    sealNonZeroPolicy: 'commands 里出现非零退出码声明（exit 1 / 退出码 1 之类）时，'
+      + '必须显式加 --accept-nonzero "<为什么可以带红封存>"，否则在追加前失败'
+      + '（SEAL_NONZERO_EXIT_NOT_ACCEPTED；空理由报 SEAL_NONZERO_REASON_REQUIRED）。'
+      + '理由会自动并入 nonClaims。这条约束的来由：曾有一条 exit 1 被写在 commands '
+      + '自由文本末尾并通过全部门禁，那条红随后在 main 上停留四次 CI，还因 verify '
+      + '默认 bail 让同层 20 条套件全部 not-attempted。封存不会让红消失——先修红，'
+      + '确实该带红封存时留下痕迹。',
     concurrency: '所有写命令在系统临时目录的文件锁下串行执行；锁不写入仓库与 Mod 工作区。',
     staleClaims: `next 的 activeSlices 与 status 的 activeClaims 都会报 heartbeatStale：`
       + `心跳超过 ${STALE_CLAIM_HOURS} 小时即视为可能被遗弃，两命令判定逐字段一致。`
