@@ -1395,7 +1395,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 138 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 139 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1422,12 +1422,13 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（36 条）
+**unit**（37 条）
 
 ~~~powershell
 npm run test
 npm run test:ai-conformance
 npm run test:ai-fake-loop
+npm run test:ai-tool-permission
 npm run test:core-journal-wiring
 npm run test:database-utility
 npm run test:desktop-security
