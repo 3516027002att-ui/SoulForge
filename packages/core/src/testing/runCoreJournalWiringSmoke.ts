@@ -416,7 +416,118 @@ async function legDDiskErrors(
   const d1 = await legDReadOnlyTarget(root, openedDatabases);
   const d2 = await legDTempCleanupFailure(root, openedDatabases);
   const d3 = await legDCorruptJournal(root, openedDatabases);
-  return { readOnlyTarget: d1, tempCleanupFailure: d2, corruptJournal: d3 };
+  const d4 = await legDRestoreVerifyMismatch(root, openedDatabases);
+  return {
+    readOnlyTarget: d1,
+    tempCleanupFailure: d2,
+    corruptJournal: d3,
+    restoreVerifyMismatch: d4
+  };
+}
+
+/**
+ * legD4：还原「成功」但还原后哈希与 journal 记录的 beforeHash 不一致。
+ *
+ * 为什么必须单独覆盖：recoveryRepair 有四个失败出口，此前三个各有唯一覆盖者
+ * （corruption_blocked、restore_failed 的 copyFile 失败分支、marked_failed），
+ * 而 RECOVERY_RESTORE_VERIFY_FAILED（recoveryRepair.ts:219-227）**无人覆盖**。
+ *
+ * 它守的场景比 copyFile 失败更隐蔽：还原动作本身报成功，但落地字节与预期不符
+ * ——备份文件被外部改动、磁盘静默损坏、或备份与 journal 记录的哈希本就不匹配。
+ * 这类情况下 journal 必须**保持非终态**，因为把它标成 rolled_back 等于声称
+ * 「已回到原始状态」，而磁盘上的字节并不是原始字节。恢复边界上最不能出现的
+ * 就是这种「声称已恢复但实际没有」。
+ *
+ * 构造方式：备份目录里的备份文件被替换成第三种内容。restoreFromPoint 会成功
+ * 把它拷回目标（copyFile 不校验内容），随后的哈希复验必然失败——这正是该分支
+ * 的真实触发条件，不是人为注入的假失败。
+ */
+async function legDRestoreVerifyMismatch(
+  root: string,
+  openedDatabases: Array<{ open: boolean; close(): void }>
+): Promise<Record<string, unknown>> {
+  const legRoot = join(root, 'leg-d4');
+  const overlayRoot = join(legRoot, 'mod');
+  const databasePath = join(legRoot, 'workspace.db');
+  const backupRoot = join(legRoot, 'backups');
+  await mkdir(overlayRoot, { recursive: true });
+  await mkdir(backupRoot, { recursive: true });
+
+  const target = join(overlayRoot, 'verify.txt');
+  const before = Buffer.from('verify-before\n');
+  const after = Buffer.from('verify-after\n');
+  await writeFile(target, before);
+
+  const database = openWorkspaceDatabase(databasePath);
+  openedDatabases.push(database);
+  await ensureWorkspaceRow(database, overlayRoot, WORKSPACE_D);
+  const store = new SqliteOperationLogStore(database, WORKSPACE_D, true);
+  const repository = new DurableWorkspaceRepository(database, WORKSPACE_D);
+
+  const restorePoint = await createRestorePoint({
+    sourcePaths: [target], baseDir: backupRoot, label: 'leg-d4'
+  });
+  const txId = 'tx-core-d4';
+  const now = new Date().toISOString();
+  await store.record({
+    opId: 'op-core-d4', workspaceId: WORKSPACE_D, title: 'leg d4 restore verify',
+    author: 'user', mode: 'normal', status: 'pending',
+    createdAt: now, files: [], diagnostics: []
+  });
+  await store.createTransaction({
+    transactionId: txId, opId: 'op-core-d4', phase: 'replacing',
+    state: {
+      backupRoot: restorePoint.root,
+      sizeBytes: restorePoint.sizeBytes,
+      restorePointFiles: restorePoint.files.map((file) => ({
+        sourcePath: file.sourcePath, backupPath: file.backupPath,
+        beforeHash: file.beforeHash, sizeBytes: file.sizeBytes
+      })),
+      afterHashes: { [target]: sha256(after) }
+    },
+    createdAt: now, updatedAt: now
+  });
+
+  try {
+    // 目标处于「中断后的写入结果」状态。
+    await writeFile(target, after);
+    // 备份被外部改成第三种内容：还原会成功，但复验必然失败。
+    const backupPath = restorePoint.files[0]!.backupPath;
+    await writeFile(backupPath, Buffer.from('verify-tampered-backup\n'));
+
+    const repair = await recoverIncompleteTransactions({ store, repository });
+    const outcome = repair.recovered.find((item) => item.transactionId === txId);
+    assert(outcome?.action === 'restore_failed', `legD4: action ${outcome?.action}`);
+    assert(
+      repair.diagnostics.some((item) => item.code === 'RECOVERY_RESTORE_VERIFY_FAILED'),
+      'legD4: RECOVERY_RESTORE_VERIFY_FAILED diagnostic missing'
+    );
+    // journal 必须保持非终态：标成 rolled_back 等于声称已回到原始状态，
+    // 而磁盘上的字节并不是原始字节。
+    assert(
+      repository.getTransaction(txId)?.phase === 'replacing',
+      'legD4: journal must stay non-terminal after restore verify failure'
+    );
+    // 诊断必须带上实测哈希，否则操作员无法判断现场到底是什么状态。
+    const verifyDiagnostic = repair.diagnostics.find(
+      (item) => item.code === 'RECOVERY_RESTORE_VERIFY_FAILED'
+    );
+    const details = verifyDiagnostic?.details as { errors?: unknown[] } | undefined;
+    assert(
+      Array.isArray(details?.errors) && details.errors.length > 0,
+      'legD4: verify diagnostic must report which paths mismatched'
+    );
+    assert(database.pragma('quick_check', { simple: true }) === 'ok', 'legD4: integrity');
+  } finally {
+    store.close();
+    database.close();
+    openedDatabases.pop();
+  }
+  return {
+    action: 'restore_failed',
+    journalNonTerminal: true,
+    diagnosticCode: 'RECOVERY_RESTORE_VERIFY_FAILED'
+  };
 }
 
 async function legDReadOnlyTarget(
