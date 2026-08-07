@@ -56,8 +56,20 @@ jobs:
       - name: Governance + unit (require executed)
         run: node scripts/verify.mjs --tier governance,unit --require-executed --json-out output/verify-ci-governance-unit.json --timeout-ms 1200000
 
+      # synthetic 层的 desktop-ipc-contract / desktop-contract-mutations 观测的是
+      # apps/desktop/out 生产产物。此前产物只是 unit 层 test:database-utility 顺带
+      # `npm run build -w @soulforge/desktop` 的副作用——那条 smoke 一旦被挪走、
+      # 跳过或改实现，两条最强的运行期契约门禁就会一起静默跳过，而 synthetic 层
+      # 不带 --require-executed，CI 依旧全绿。依赖必须显式。
+      - name: Build desktop bundles (required by contract gates)
+        run: npm run build -w @soulforge/desktop
+
       # 合成层：允许缺私有 Smithbox/语料时诚实 skip，但不接受 exit 非 0。
+      # SOULFORGE_CONTRACT_REQUIRE_BUNDLES=1：干净 runner 上产物缺失一定是流水线
+      # 配置错误而非环境限制，故不允许跳过冒充通过（本机开发仍允许诚实跳过）。
       - name: Synthetic (orchestrator; skip allowed)
+        env:
+          SOULFORGE_CONTRACT_REQUIRE_BUNDLES: '1'
         run: node scripts/verify.mjs --tier synthetic --json-out output/verify-ci-synthetic.json --timeout-ms 1200000
 
       # Public CI 无游戏 corpus：只跑会诚实 skip 的 native 门禁，验证 skip 检测链路本身。

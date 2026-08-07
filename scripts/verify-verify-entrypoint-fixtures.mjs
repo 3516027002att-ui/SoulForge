@@ -8,11 +8,14 @@
  * 都要有一条负向用例证明它真的会触发。
  *
  * 本脚本只做纯静态断言（不 spawn 真实套件），因此在任何机器上都能跑。
- * 端到端行为（wrapper 注入生效 / 不生效两种情况下同一套件被判 passed 与
- * skipped）由 npm run verify:self 覆盖。
+ *
+ * 诚实边界：端到端行为（wrapper 注入生效 / 不生效两种情况下同一套件分别被判
+ * passed 与 skipped）本脚本不覆盖，也不假装覆盖。此前这里写的是「由
+ * npm run verify:self 覆盖」——该 script 在 package.json 中并不存在，属于
+ * 「注释声称有覆盖、实际没有」，比不写更误导，故改为如实声明缺口。
  */
 import { classifyOutcome, detectSkipSignals, OUTCOME } from './verify/runner.mjs';
-import { EXCLUDED, TIER_BY_SCRIPT, TIER_ORDER } from './verify/tiers.mjs';
+import { EXCLUDED, SILENT_ON_SUCCESS, TIER_BY_SCRIPT, TIER_ORDER } from './verify/tiers.mjs';
 import { parseScriptCommand } from './verify/classify.mjs';
 import { loadWorkspaces } from './verify/scriptGraph.mjs';
 
@@ -78,6 +81,78 @@ expect(
   { wholeSkipped: false, skippedLegs: [] }
 );
 
+/* ---- 2b. 缩进（pretty-print）形态：本轮实测的真实失效形态 -------------
+ *
+ * 上面 1/2 节的用例全部是单行 JSON，而仓库里真正在跑的门禁几乎都用
+ * `JSON.stringify(x, null, 2)` 输出。实测：pretty-print 的整体跳过曾被判成
+ * passed —— CI 里 private-native-gate / section28-sekiro-gate /
+ * me3-sekiro-session 三条门禁每次都把「什么都没跑」报成「真实执行并通过」。
+ * 单行用例全绿而真实形态失效，正是「退化后与正常表现完全一致」的标本，
+ * 所以这一节按输出形态而不是按字段种类补齐。
+ */
+
+expect(
+  'pretty-print 的 status:skipped 必须判为整体跳过',
+  detectSkipSignals(JSON.stringify({ ok: null, status: 'skipped', reason: '缺语料' }, null, 2)),
+  { wholeSkipped: true, skippedLegs: [] }
+);
+
+expect(
+  'pretty-print 的 skipped:true 必须判为整体跳过',
+  detectSkipSignals(JSON.stringify({ ok: true, skipped: true }, null, 2)),
+  { wholeSkipped: true, skippedLegs: [] }
+);
+
+expect(
+  'pretty-print 的嵌套 leg 必须判为部分跳过',
+  detectSkipSignals(JSON.stringify({ ok: true, legs: { native: 'skipped' } }, null, 2)),
+  { wholeSkipped: false, skippedLegs: ['legs.native'] }
+);
+
+// 括号深度扫描不得把字符串字面量里的花括号当结构，否则正常输出里一句
+// 说明文案就能把 passed 误判成 skipped——反方向的同一类错误。
+expect(
+  '字符串字面量内的 skip JSON 不得误判',
+  detectSkipSignals(JSON.stringify({
+    ok: true,
+    hint: '缺语料时输出形如 {"status":"skipped"}'
+  }, null, 2)),
+  { wholeSkipped: false, skippedLegs: [] }
+);
+
+expect(
+  '字符串内的转义引号不得打乱扫描',
+  detectSkipSignals(JSON.stringify({
+    ok: true,
+    note: 'he wrote \\"status\\": \\"skipped\\" in the doc'
+  }, null, 2)),
+  { wholeSkipped: false, skippedLegs: [] }
+);
+
+// 数组元素里的对象不是顶层结论：若把它当整体结论，某个子项 skipped 会把
+// 精确的 partial 误升成整条套件 skipped。
+expect(
+  '数组元素内的 skipped 不得当作整体跳过',
+  detectSkipSignals('[{"status":"skipped"}]\n{"ok":true,"cases":3}'),
+  { wholeSkipped: false, skippedLegs: [] }
+);
+
+expect(
+  '同一段输出里多个顶层对象都要被扫到',
+  detectSkipSignals(
+    `${JSON.stringify({ ok: true, phase: 1 }, null, 2)}\n${JSON.stringify({ status: 'skipped' }, null, 2)}`
+  ),
+  { wholeSkipped: true, skippedLegs: [] }
+);
+
+// 结构化结论写到 stderr 的套件（verify-private-native-gate 用 console.error）
+// 若只扫 stdout，它们的跳过信号会整体丢失。
+expect(
+  'stderr 里的跳过信号必须被采到',
+  detectSkipSignals('', JSON.stringify({ status: 'skipped' }, null, 2)),
+  { wholeSkipped: true, skippedLegs: [] }
+);
+
 /* ---- 3. 四态判定：exit 0 绝不无条件等于 passed ------------------------ */
 
 expect(
@@ -108,6 +183,66 @@ expect(
 expect(
   '整体跳过优先于部分跳过',
   classifyOutcome(0, '{"ok":true,"skipped":true}\n{"ok":true,"realLeg":"skipped"}').outcome,
+  OUTCOME.SKIPPED
+);
+
+expect(
+  'pretty-print 的整体跳过必须判 skipped，不得判 passed',
+  classifyOutcome(0, JSON.stringify({ ok: null, status: 'skipped' }, null, 2)).outcome,
+  OUTCOME.SKIPPED
+);
+
+// 空输出不得算通过：本仓库要求每条套件输出结构化结论，什么都不输出说明
+// 没跑到结论，算 passed 等于让「没跑」冒充「跑过并通过」。
+expect(
+  '未登记套件的空 stdout + exit 0 不得判 passed',
+  classifyOutcome(0, '').outcome,
+  OUTCOME.SKIPPED
+);
+
+// 例外必须显式登记，且只对登记者生效——否则「允许空输出」会让所有套件的
+// 静默退化一起变绿。
+expect(
+  'SILENT_ON_SUCCESS 登记的套件（tsc）空输出可判 passed',
+  classifyOutcome(0, '', '', 'typecheck').outcome,
+  OUTCOME.PASSED
+);
+
+expect(
+  '未登记的套件名不得蹭到静默豁免',
+  classifyOutcome(0, '', '', 'test:some-unregistered-suite').outcome,
+  OUTCOME.SKIPPED
+);
+
+expect(
+  '静默豁免不得掩盖跳过信号',
+  classifyOutcome(0, JSON.stringify({ status: 'skipped' }, null, 2), '', 'typecheck').outcome,
+  OUTCOME.SKIPPED
+);
+
+expect(
+  '静默豁免不得掩盖非零退出码',
+  classifyOutcome(1, '', '', 'typecheck').outcome,
+  OUTCOME.FAILED
+);
+
+expect(
+  '每条静默豁免都必须写明理由（否则会变成绕过验证的后门）',
+  Object.entries(SILENT_ON_SUCCESS)
+    .filter(([, reason]) => typeof reason !== 'string' || reason.trim().length === 0)
+    .map(([name]) => name),
+  []
+);
+
+expect(
+  '静默豁免不得登记不存在的 script',
+  Object.keys(SILENT_ON_SUCCESS).filter((name) => !TIER_BY_SCRIPT[name]),
+  []
+);
+
+expect(
+  '仅 stderr 有跳过信号时也必须判 skipped',
+  classifyOutcome(0, '', JSON.stringify({ status: 'skipped' }, null, 2)).outcome,
   OUTCOME.SKIPPED
 );
 

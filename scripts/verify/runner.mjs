@@ -15,6 +15,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
+import { SILENT_ON_SUCCESS } from './tiers.mjs';
 
 /**
  * 超时时杀掉整棵进程树，而不只是直接子进程。
@@ -58,39 +59,104 @@ export const OUTCOME = Object.freeze({
 });
 
 /**
- * 从 stdout 中提取跳过信号。
+ * 从一段输出里切出所有顶层 JSON 对象的源文本。
+ *
+ * 为什么不能按行 JSON.parse：套件的结构化结论有两种形态，单行
+ * `JSON.stringify(x)` 与缩进的 `JSON.stringify(x, null, 2)`。按行处理只能
+ * 认出前者——缩进形态的首行是裸 `{`（parse 失败），而 `"status": "skipped"`
+ * 那行不以 `{` 开头会被直接跳过，于是整段输出一个跳过信号都采不到，落到
+ * PASSED。实测后果：CI 里三条 native 门禁（private-native-gate、
+ * section28-sekiro-gate、me3-sekiro-session）全部用缩进形态输出跳过，
+ * 因此每次都把「什么都没跑」报成「真实执行并通过」——这是唯一一处门禁
+ * 报告的绿色与事实相反，比覆盖不足危险得多。
+ *
+ * 所以改为按花括号深度扫描整段文本。必须跳过字符串字面量内的花括号与
+ * 转义字符，否则正常输出里一句 `"提示：形如 {\"status\":\"skipped\"}"`
+ * 会被当成结构化结论，把通过误判成跳过——那是反方向的同一类错误。
+ */
+function extractTopLevelJsonValues(text) {
+  const values = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    // 数组与对象一起计深度，只取最外层。若只跟踪花括号，数组元素里的对象会
+    // 被当成顶层结论——那会让「某个子项 skipped」冒充「整条套件 skipped」，
+    // 把精确的 partial 误升为 skipped。
+    if (char === '{' || char === '[') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (char === '}' || char === ']') {
+      if (depth === 0) continue;
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        values.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return values;
+}
+
+/**
+ * 从套件输出中提取跳过信号。
  *
  * 只认结构化 JSON 与显式 'skipped' 字段值，不做模糊文本匹配——
  * 模糊匹配会把 "0 skipped" 这类正常输出误判成跳过。
  *
+ * 同时扫 stdout 与 stderr：仓库里有套件把结构化结论写到 stderr
+ * （verify-private-native-gate.mjs 用 console.error 输出前置失败与跳过），
+ * 只看 stdout 会让这些套件的跳过信号整体丢失。
+ *
+ * @param {string} stdout
+ * @param {string} [stderr]
  * @returns {{ wholeSkipped: boolean, skippedLegs: string[] }}
  */
-export function detectSkipSignals(stdout) {
+export function detectSkipSignals(stdout, stderr = '') {
   const skippedLegs = [];
   let wholeSkipped = false;
 
-  for (const line of stdout.split(/\r?\n/)) {
-    const text = line.trim();
-    if (!text.startsWith('{')) continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      continue;
-    }
-    if (parsed === null || typeof parsed !== 'object') continue;
+  for (const source of [stdout, stderr]) {
+    if (typeof source !== 'string' || source.length === 0) continue;
+    for (const candidate of extractTopLevelJsonValues(source)) {
+      let parsed;
+      try {
+        parsed = JSON.parse(candidate);
+      } catch {
+        continue;
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
 
-    // 形态 1/2：整条套件跳过。
-    if (parsed.status === 'skipped' || parsed.skipped === true) {
-      wholeSkipped = true;
-      continue;
-    }
-    // 形态 3：某个 leg 跳过（字段值恰为 'skipped'）。
-    for (const [key, value] of Object.entries(parsed)) {
-      if (value === 'skipped') skippedLegs.push(key);
-      else if (value && typeof value === 'object' && !Array.isArray(value)) {
-        for (const [innerKey, innerValue] of Object.entries(value)) {
-          if (innerValue === 'skipped') skippedLegs.push(`${key}.${innerKey}`);
+      // 形态 1/2：整条套件跳过。
+      if (parsed.status === 'skipped' || parsed.skipped === true) {
+        wholeSkipped = true;
+        continue;
+      }
+      // 形态 3：某个 leg 跳过（字段值恰为 'skipped'）。
+      for (const [key, value] of Object.entries(parsed)) {
+        if (value === 'skipped') skippedLegs.push(key);
+        else if (value && typeof value === 'object' && !Array.isArray(value)) {
+          for (const [innerKey, innerValue] of Object.entries(value)) {
+            if (innerValue === 'skipped') skippedLegs.push(`${key}.${innerKey}`);
+          }
         }
       }
     }
@@ -102,14 +168,26 @@ export function detectSkipSignals(stdout) {
 /**
  * 判定单条套件的结果。
  *
+ * 空输出默认不判 PASSED：本仓库要求每条套件输出结构化结论，什么都不输出说明
+ * 套件没真正跑到结论（壳层提前退出、被外部工具吞掉输出等）。把它算成通过
+ * 等于让「没跑」冒充「跑过并通过」，与 --require-executed 的整个目的相反。
+ *
+ * 例外只认 SILENT_ON_SUCCESS 白名单（如 tsc 成功时本就静默）。用白名单而不是
+ * 一律放行：一律放行会让所有套件的静默退化都变成绿色。
+ *
  * @param {number|null} exitCode
  * @param {string} stdout
+ * @param {string} [stderr]
+ * @param {string} [scriptName] 用于查 SILENT_ON_SUCCESS 白名单
  */
-export function classifyOutcome(exitCode, stdout) {
+export function classifyOutcome(exitCode, stdout, stderr = '', scriptName = '') {
   if (exitCode !== 0) return { outcome: OUTCOME.FAILED, skippedLegs: [] };
-  const { wholeSkipped, skippedLegs } = detectSkipSignals(stdout);
+  const { wholeSkipped, skippedLegs } = detectSkipSignals(stdout, stderr);
   if (wholeSkipped) return { outcome: OUTCOME.SKIPPED, skippedLegs };
   if (skippedLegs.length > 0) return { outcome: OUTCOME.PARTIAL, skippedLegs };
+  if ((stdout ?? '').trim().length === 0 && !SILENT_ON_SUCCESS[scriptName]) {
+    return { outcome: OUTCOME.SKIPPED, skippedLegs: ['empty-stdout'] };
+  }
   return { outcome: OUTCOME.PASSED, skippedLegs: [] };
 }
 
@@ -176,7 +254,7 @@ export function runSuite({ repoRoot, scriptName, timeoutMs, injectEnv = true }) 
       clearTimeout(timer);
       const { outcome, skippedLegs } = timedOut
         ? { outcome: OUTCOME.FAILED, skippedLegs: [] }
-        : classifyOutcome(exitCode, stdout);
+        : classifyOutcome(exitCode, stdout, stderr, scriptName);
       resolvePromise({
         scriptName,
         outcome,

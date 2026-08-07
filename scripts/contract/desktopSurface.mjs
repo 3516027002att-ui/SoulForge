@@ -21,7 +21,7 @@
  *  - 桩只提供加载期与注册期需要的最小面；handler 内部真实执行仍需真机语料。
  */
 import { registerHooks } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,7 +116,11 @@ function createMainStub(record) {
     id: 1,
     once() {},
     on() {},
-    send() {},
+    // 记录主进程往渲染进程推送的 channel。注册期通常采不到（send 发生在
+    // handler 或异步回调内），所以调用方对推送类 channel 的断言不能只依赖
+    // 这里——采到就是运行期证据，采不到必须显式降级为文本级证据并说明。
+    send(channel) { record.sentChannels.push(channel); },
+    isDestroyed() { return false; },
     setWindowOpenHandler() {},
     session: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} }
   };
@@ -183,7 +187,8 @@ export async function observeMainSurface() {
     ipcMainOnChannels: [],
     appEvents: [],
     browserWindowOptions: [],
-    loadedRendererTargets: []
+    loadedRendererTargets: [],
+    sentChannels: []
   };
   beginObservation(MAIN_BUNDLE, createMainStub(record));
   await import(pathToFileURL(MAIN_BUNDLE).href);
@@ -204,7 +209,11 @@ export async function observeMainSurface() {
     duplicateChannels: record.duplicateChannels,
     ipcMainOnChannels: record.ipcMainOnChannels,
     browserWindowOptions: record.browserWindowOptions,
-    loadedRendererTargets: record.loadedRendererTargets
+    loadedRendererTargets: record.loadedRendererTargets,
+    /** 注册期观测到的 webContents.send channel（通常为空，见 stub 注释）。 */
+    sentChannels: [...new Set(record.sentChannels)].sort(),
+    /** main bundle 源文本，供推送类 channel 在注册期采不到时做降级取证。 */
+    bundleText: readFileSync(MAIN_BUNDLE, 'utf8')
   };
 }
 
@@ -240,7 +249,16 @@ export async function observePreloadSurface() {
   }
   const [{ key, value }] = exposures;
   const methods = Object.keys(value).sort();
-  /** methodName -> 该方法真实 invoke 的 channel 列表（通常恰好 1 个）。 */
+  /**
+   * methodName -> 该方法真实触达的 channel，按 IPC 方向分开。
+   *
+   * 必须分开的理由：`invoke` 是请求/响应，对面必须有 ipcMain.handle；
+   * `on` 是订阅主进程用 webContents.send 推来的事件，对面**不应该**有
+   * handle。早先把三者合并成一个 channels 数组，双向对账就把订阅当成了
+   * invoke，于是 onAiAgentEvent 被报成「invoke 了 main 未注册的 channel」
+   * ——一条永久红，而正确的接线反而被判违规。观测层当时已经给 on 打了
+   * listener 标记，却在汇总时丢掉，属于信息在最后一步被抹平。
+   */
   const channelByMethod = new Map();
   for (const method of methods) {
     invocations.length = 0;
@@ -252,7 +270,18 @@ export async function observePreloadSurface() {
     try {
       // 探针参数是无害占位：桩的 invoke 不会到达 main，也不触碰文件系统。
       await probe('soulforge-contract-probe://uri', 1, 2, 3);
-      channelByMethod.set(method, { channels: invocations.map((item) => item.channel) });
+      const invokeChannels = invocations.filter((item) => !item.listener && !item.send)
+        .map((item) => item.channel);
+      const subscribeChannels = invocations.filter((item) => item.listener).map((item) => item.channel);
+      const sendChannels = invocations.filter((item) => item.send).map((item) => item.channel);
+      channelByMethod.set(method, {
+        // channels 保留为三者并集，供既有调用方使用；方向敏感的断言必须用
+        // 下面三个字段，不要用它。
+        channels: invocations.map((item) => item.channel),
+        invokeChannels,
+        subscribeChannels,
+        sendChannels
+      });
     } catch (error) {
       channelByMethod.set(method, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -299,10 +328,34 @@ export function createAssertions(label) {
       if (record.error) {
         return this.check(false, `preload 方法 ${method} 探针调用失败`, record);
       }
+      const actual = record.invokeChannels ?? record.channels;
       return this.check(
-        record.channels.length === 1 && record.channels[0] === channel,
+        actual.length === 1 && actual[0] === channel,
         `preload.${method} 应当只 invoke ${channel}`,
-        { actualChannels: record.channels }
+        { actualInvokeChannels: actual, actualAllChannels: record.channels }
+      );
+    },
+
+    /**
+     * preload 方法必须订阅（ipcRenderer.on）指定的推送 channel。
+     *
+     * 这是 invoke 类之外的第二条方向：主进程用 webContents.send 主动推事件，
+     * 渲染进程只能订阅。若只对 invoke 类做断言，「订阅接线整条消失」不会被
+     * 任何门禁发现——AI agent 的全部进度/结果事件都走这条路。
+     */
+    requirePreloadSubscription(preload, method, channel) {
+      const record = preload.channelByMethod.get(method);
+      if (!record) {
+        return this.check(false, `preload 未暴露订阅方法: ${method}`, { exposedMethods: preload.methods.length });
+      }
+      if (record.error) {
+        return this.check(false, `preload 订阅方法 ${method} 探针调用失败`, record);
+      }
+      const actual = record.subscribeChannels ?? [];
+      return this.check(
+        actual.includes(channel),
+        `preload.${method} 应当订阅 ${channel}`,
+        { actualSubscribeChannels: actual, actualInvokeChannels: record.invokeChannels ?? [] }
       );
     },
     forbidPreloadMethod(preload, method) {
@@ -310,6 +363,31 @@ export function createAssertions(label) {
         !preload.methods.includes(method),
         `preload 暴露了本应禁止的方法: ${method}`,
         { exposed: preload.methods.includes(method) }
+      );
+    },
+
+    /**
+     * main 必须真的会往该 channel 推送，否则 preload 订阅的是一个永不来事件
+     * 的 channel——运行期不会报错，表现是「功能静默不工作」。
+     *
+     * 取证分两级并在诊断里如实标注：注册期采到 send 调用是运行期证据；采不到
+     * 时退化为在 main 产物里搜 channel 字面量（send 通常在 handler 内异步触发，
+     * 注册期本就采不到）。降级必须显式说明，不能让文本级证据看起来像运行期
+     * 观测。
+     */
+    requireMainPush(main, channel) {
+      if (main.sentChannels.includes(channel)) {
+        return this.check(true, `main 应当向 ${channel} 推送`, { evidence: 'runtime-observed' });
+      }
+      const present = main.bundleText.includes(`"${channel}"`) || main.bundleText.includes(`'${channel}'`);
+      return this.check(
+        present,
+        `main 未向 ${channel} 推送：preload 订阅了一个永不来事件的 channel`,
+        {
+          evidence: 'bundle-text-only',
+          evidenceNote: '注册期未观测到 send（send 在 handler 内异步触发），本条为文本级证据，非运行期观测。',
+          observedRuntimeSends: main.sentChannels
+        }
       );
     },
     get count() { return passed + failures.length; },
@@ -333,10 +411,33 @@ export function createAssertions(label) {
 }
 
 /**
- * 构建产物缺失时的结构化跳过。绝不写成通过：这些契约验证的是构建产物的运行时
- * 表面，产物不在就没有观测对象。
+ * 构建产物缺失时的处置。绝不写成通过：这些契约验证的是构建产物的运行时表面，
+ * 产物不在就没有观测对象。
+ *
+ * 但「诚实跳过」在 CI 里是不够的。实测过一条隐蔽链路：CI 的 synthetic 层
+ * （含本契约与其变异测试）排在 Build 步骤**之前**，产物只是 unit 层
+ * test:database-utility 顺带 `npm run build -w @soulforge/desktop` 的副作用。
+ * 一旦那条 smoke 被挪走、跳过或改实现，这两条最强的运行期契约门禁就会一起
+ * 静默跳过，而 synthetic 层不带 --require-executed → CI 依旧全绿。
+ * 又是「退化后与正常表现完全一致」。
+ *
+ * 因此 SOULFORGE_CONTRACT_REQUIRE_BUNDLES=1 时，产物缺失改为失败关闭：
+ * 本机开发允许没构建就跳过（合理），而 CI 是一次性干净 runner，产物缺失一定
+ * 是流水线配置错误，不是环境限制。
  */
 export function structuredSkip(label, reason) {
+  if (process.env.SOULFORGE_CONTRACT_REQUIRE_BUNDLES === '1') {
+    console.error(JSON.stringify({
+      ok: false,
+      contract: label,
+      code: 'DESKTOP_BUNDLES_MISSING',
+      reason,
+      remedy: 'npm run build -w @soulforge/desktop',
+      requireBundles: '本环境设置了 SOULFORGE_CONTRACT_REQUIRE_BUNDLES=1：'
+        + '产物缺失必须失败关闭，不接受跳过冒充通过。'
+    }, null, 2));
+    process.exit(1);
+  }
   console.log(JSON.stringify({
     ok: null,
     contract: label,

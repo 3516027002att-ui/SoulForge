@@ -13,6 +13,10 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 复用同一个 structuredSkip：它同时承载 SOULFORGE_CONTRACT_REQUIRE_BUNDLES
+// 的失败关闭语义。这里本来有一份逐字重复的副本，两份并存时只改一处就会让
+// 两条门禁在 CI 里的行为不一致，而症状是「其中一条静默跳过」——查不出来。
+import { structuredSkip } from './desktopSurface.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
@@ -21,17 +25,8 @@ const PRELOAD_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'preload', 'inde
 const CONTRACT = join(here, 'verify-desktop-ipc-contract.mjs');
 const LABEL = 'desktop-contract-mutations';
 
-function structuredSkip(reason) {
-  console.log(JSON.stringify({
-    ok: null, contract: LABEL, harnessStatus: 'skipped', reason,
-    remedy: 'npm run build -w @soulforge/desktop',
-    skipSemantics: '结构跳过：未声称通过，也不计为失败。'
-  }, null, 2));
-  process.exit(0);
-}
-
 if (!existsSync(MAIN_BUNDLE) || !existsSync(PRELOAD_BUNDLE)) {
-  structuredSkip('桌面构建产物缺失，无法做变异测试');
+  structuredSkip(LABEL, '桌面构建产物缺失，无法做变异测试');
 }
 
 function sha256(path) {
@@ -96,6 +91,30 @@ const MUTATIONS = [
     scenario: 'preload 换掉 exposeInMainWorld 的键名（renderer 契约断裂）',
     apply: (source) => source.replace('"soulforge", api', '"soulforgeLegacy", api'),
     expectCodes: ['soulforge']
+  },
+  // 以下三条覆盖推送类（webContents.send / ipcRenderer.on）方向。此前门禁把
+  // 订阅当成 invoke 对账，导致正确接线被判违规、真实断裂反而无人管；按方向
+  // 拆开后必须证明两个方向都仍会失败关闭，否则「修掉误报」会顺手变成「放宽」。
+  {
+    id: 'preload-subscription-renamed',
+    file: PRELOAD_BUNDLE,
+    scenario: 'preload 订阅 channel 改名（AI agent 事件静默不再到达渲染进程）',
+    apply: (source) => source.replace('"ai:agent:event"', '"ai:agent:eventOld"'),
+    expectCodes: ['ai:agent:event']
+  },
+  {
+    id: 'main-push-removed',
+    file: MAIN_BUNDLE,
+    scenario: 'main 不再向 ai:agent:event 推送（preload 订阅永不来的事件）',
+    apply: (source) => source.replaceAll('"ai:agent:event"', '"ai:agent:eventRemoved"'),
+    expectCodes: ['ai:agent:event']
+  },
+  {
+    id: 'push-channel-becomes-handler',
+    file: MAIN_BUNDLE,
+    scenario: '推送 channel 被误注册为 ipcMain.handle（invoke 与 send 语义互斥）',
+    apply: (source) => source.replace('"ai.agent.cancel"', '"ai:agent:event"'),
+    expectCodes: ['ai:agent:event']
   }
 ];
 
