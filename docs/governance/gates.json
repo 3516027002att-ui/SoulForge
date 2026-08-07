@@ -92,7 +92,8 @@
         "EV-REPACK-A11Y-20260807",
         "EV-PRELOAD-SURFACE-RULING-20260807",
         "EV-NAMING-HONESTY-ROUNDTRIP-20260807",
-        "EV-PRELOAD-FIX-CODEXPRO-REMOVAL-20260808"
+        "EV-PRELOAD-FIX-CODEXPRO-REMOVAL-20260808",
+        "EV-REBASE-REANCHOR-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -141,7 +142,8 @@
       "evidenceRefs": [
         "EV-A-RECOVERY-INTEGRATION-04-20260803",
         "EV-SECURITY-BOUNDARY-RUNTIME-20260807",
-        "EV-RECOVERY-AIPERM-COVERAGE-20260807"
+        "EV-RECOVERY-AIPERM-COVERAGE-20260807",
+        "EV-REBASE-REANCHOR-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -165,7 +167,8 @@
       "evidenceRefs": [
         "EV-REL-B-CORPUS-02-20260803",
         "EV-ROUNDTRIP-PAGINATION-20260807",
-        "EV-REPACK-A11Y-20260807"
+        "EV-REPACK-A11Y-20260807",
+        "EV-REBASE-REANCHOR-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -277,7 +280,8 @@
         "EV-REL-SCOPE-20260805-V06-RESUME-SCOPE-FIXTURES",
         "EV-SECURITY-BOUNDARY-RUNTIME-20260807",
         "EV-ROUNDTRIP-PAGINATION-20260807",
-        "EV-SKIP-SEMANTICS-TPF-TAE-20260807"
+        "EV-SKIP-SEMANTICS-TPF-TAE-20260807",
+        "EV-REBASE-REANCHOR-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -306,7 +310,8 @@
       "evidenceRefs": [
         "EV-REL-F-ACCEPT-02-20260803",
         "EV-REL-SCOPE-20260803-RENDERER-REMOVAL",
-        "EV-NAMING-HONESTY-ROUNDTRIP-20260807"
+        "EV-NAMING-HONESTY-ROUNDTRIP-20260807",
+        "EV-REBASE-REANCHOR-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -414,7 +419,8 @@
         "EV-UI-RENOVATION-20260807",
         "EV-RENDERER-UNIT-SPLIT-20260807",
         "EV-ROUNDTRIP-PAGINATION-20260807",
-        "EV-REPACK-A11Y-20260807"
+        "EV-REPACK-A11Y-20260807",
+        "EV-REBASE-REANCHOR-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
