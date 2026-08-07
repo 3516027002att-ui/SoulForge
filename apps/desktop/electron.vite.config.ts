@@ -30,7 +30,28 @@ export default defineConfig({
     }
   },
   preload: {
-    plugins: [externalizeDepsPlugin()]
+    plugins: [externalizeDepsPlugin()],
+    // preload 必须产出 CommonJS（.js），不能跟随本包的 "type": "module" 产出 ESM。
+    //
+    // 原因：生产窗口用 sandbox: true（这是被 verify-desktop-security-runtime.mjs:113
+    // 运行期断言的安全要求，不能为了打包方便改掉），而 Electron 的 sandboxed
+    // preload **不支持 ESM** —— 加载 .mjs 会报
+    // "SyntaxError: Cannot use import statement outside a module"，
+    // 于是 contextBridge 完全不执行，window.soulforge 不存在，所有 IPC 功能失效。
+    //
+    // 这个组合此前没被任何验证覆盖：e2e 的 fixture-main.mjs:313 用 sandbox: false
+    // 且指向 index.mjs，两处都与生产不同，所以 16/16 全绿而真实启动是坏的。
+    // 扩展名必须是 .cjs 而不是 .js：本包 package.json 声明 "type": "module"，
+    // 因此 .js 会被 Node/Electron 当作 ESM 解析，CJS 内容会报
+    // "require is not defined in ES module scope"。.cjs 显式脱离该声明。
+    build: {
+      rollupOptions: {
+        output: {
+          format: 'cjs',
+          entryFileNames: '[name].cjs'
+        }
+      }
+    }
   },
   renderer: {
     root: resolve(here, 'src/renderer'),

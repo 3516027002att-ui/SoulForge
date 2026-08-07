@@ -5,7 +5,7 @@
  *
  * ── 覆盖边界（如实声明，不要读成「e2e 覆盖了 main」）──────────────────────
  *
- * 真实的部分：真 Electron 进程、真生产 preload（out/preload/index.mjs）、真
+ * 真实的部分：真 Electron 进程、真生产 preload（out/preload/index.cjs，CJS）、真
  * 构建后的 renderer、真 contextBridge 语义，以及**与生产同形态的发送方校验**
  * （handleTrusted 包装器 + assertTrustedSender，见下）。
  *
@@ -309,7 +309,7 @@ async function createWindow({ withPreload }) {
     height: 820,
     show: false,
     webPreferences: {
-      ...(withPreload ? { preload: path.join(outRoot, 'preload', 'index.mjs') } : {}),
+      ...(withPreload ? { preload: path.join(outRoot, 'preload', 'index.cjs') } : {}),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false

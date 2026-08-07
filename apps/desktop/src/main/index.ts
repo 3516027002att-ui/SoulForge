@@ -31,7 +31,18 @@ function createWindow(): void {
     show: false,
     title: 'SoulForge',
     webPreferences: {
-      preload: join(here, '../preload/index.js'),
+      // 与 electron.vite.config.ts 的 preload 输出约定成对：产物是 CommonJS 的
+      // index.cjs。两个约束共同决定了这个扩展名：
+      //  · sandbox: true 的 preload 不支持 ESM（加载 .mjs 报 "Cannot use import
+      //    statement outside a module"），所以必须是 CJS；
+      //  · 本包 package.json 声明 "type": "module"，所以 .js 会被当 ESM 解析，
+      //    CJS 内容报 "require is not defined in ES module scope"。.cjs 显式脱离。
+      //
+      // 三处必须同时对（这里、vite 配置的 entryFileNames、e2e fixture），否则
+      // preload 静默加载失败——界面照常渲染（首屏是静态骨架），但
+      // window.soulforge 不注入，所有 IPC 功能不可用，按钮全部显示
+      // 「浏览器预览：仅在 SoulForge 桌面版可用」。
+      preload: join(here, '../preload/index.cjs'),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,

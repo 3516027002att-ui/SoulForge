@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
-const preloadPath = resolve(repoRoot, 'apps/desktop/out/preload/index.mjs');
+const preloadPath = resolve(repoRoot, 'apps/desktop/out/preload/index.cjs');
 const rendererPath = resolve(repoRoot, 'apps/desktop/out/renderer/index.html');
 const harnessMainPath = resolve(here, 'editorFunctionalSmokeMain.mjs');
 
@@ -47,7 +47,7 @@ if (!explicit) {
   structuredSkip('SOULFORGE_FUNCTIONAL_SMOKE 未显式置 1（默认跳过，避免在无显示/CI 环境启动 Electron）');
 }
 if (!built) {
-  structuredSkip('desktop 构建产物缺失（apps/desktop/out/preload/index.mjs 或 out/renderer/index.html），请先构建桌面包');
+  structuredSkip('desktop 构建产物缺失（apps/desktop/out/preload/index.cjs 或 out/renderer/index.html），请先构建桌面包');
 }
 if (headlessLinux) {
   structuredSkip('无显示环境（Linux DISPLAY 未设置），Electron 无法打开窗口');
