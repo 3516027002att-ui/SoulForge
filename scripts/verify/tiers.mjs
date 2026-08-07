@@ -168,6 +168,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // handler 齐全，但界面上没有入口，于是「已实现」与「用户可用」出现系统性偏差，
   // 且每个未使用方法都是不受 renderer 守卫保护的表面。纯静态读源码，归 unit。
   'test:preload-surface-ruling': 'unit',
+  // renderer 最后一跳可达性：功能入口在所有分支下都拿不到数据时报红。
+  // 补的是 preload-surface-ruling 管不到的那一段——它守 preload 边界，
+  // 而三个实测断点（PARAM 字段编辑、任务队列、补丁影响面）都在 renderer
+  // 内部的 props 链上。纯静态读源码，归 unit。
+  'test:renderer-reachability': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。
