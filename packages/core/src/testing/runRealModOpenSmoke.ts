@@ -28,7 +28,7 @@ async function main(): Promise<void> {
       status: 'skipped',
       smoke: 'real-mod-open',
       reason: `本机 Mod 语料目录不存在：${workspaceRoot}`,
-      remedy: 'npm run test:real-mod -w @soulforge/core -- <你的 Mod 目录>',
+      remedy: 'npm run test:real-mod-readonly-preview -w @soulforge/core -- <你的 Mod 目录>',
       skipSemantics: '结构跳过：未声称通过，也不构成 native 完成声明。'
     }));
     return;

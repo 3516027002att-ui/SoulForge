@@ -262,7 +262,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     // mutation，只提供只读证据投影与经 Patch Engine 的整个内层文件替换，
     // 因此 mutationKinds 为空但 releaseWriteEnabled=true。
     // game-load 边界：整内层替换产物的结构/放位/magic 加载前置由
-    // test:script-container-game-load 的 preflight 验证；真实游戏内加载需用户
+    // test:script-container-load-preflight 的 preflight 验证；真实游戏内加载需用户
     // 游戏内确认（opt-in，validation-unfrozen，SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED）。
     // 仓库不 ship 游戏启动自动化；真实游戏加载被自动验证前，script 的 authority
     // 必须保持 candidate，不得提升。

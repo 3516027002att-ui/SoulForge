@@ -105,7 +105,7 @@ function extractEntryFiles(command) {
  * 理由：本仓库 packages/core 有一批 test:v05-* 是便利别名，它们指向的 smoke 文件
  * 早已串在 core 自己的 `test` 链里（根 `test` 用 --workspaces 聚合，因此可达）。
  * 按名字判会把这些别名全报成孤岛——那是噪声，会让门禁被无视。按入口文件判才能
- * 只留下真正没人跑的：实测唯一一条是 test:real-mod（runRealModOpenSmoke.js
+ * 只留下真正没人跑的：实测唯一一条是 test:real-mod-readonly-preview（runRealModOpenSmoke.js
  * 既不在 core 的 test 链里，也没有任何根转发）。
  */
 function isReachableFromRoot(workspaces, workspaceName, workspace, scriptName) {
@@ -156,7 +156,7 @@ function auditRegistration(workspaces) {
   // 此前 audit 只枚举 rootScripts，于是 workspace 自己声明的验证入口对它完全不可见。
   // 实测两个后果：apps/desktop 的 test:renderer-playwright 是唯一的真实 Electron
   // e2e（13 用例），却不在任何 tier —— 只有 CI 直调，本机跑 `verify --tier all`
-  // 永远不会执行它；packages/core 的 test:real-mod 既不在根 package.json、也不在
+  // 永远不会执行它；packages/core 的 test:real-mod-readonly-preview 既不在根 package.json、也不在
   // core 的 test 聚合链里，任何层级都跑不到，而 orphan-smoke-gate 因为「有 core
   // script」就判它 reachable。两道门禁各自留了对方该补的盲区。
   for (const [workspaceName, workspace] of workspaces.byName) {

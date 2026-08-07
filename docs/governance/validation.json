@@ -127,7 +127,7 @@
       "script": "npm run test:me3-runtime-adapter",
       "fixture": "synthetic privileged gateway responses与固定 0.12.1 policy；缺失/歧义、非法 schema/policy、精确版本、截断/超限输出、非零退出、spawn failure、timeout/cancel/close/reject race 和 unsupported operation 共 22 类 contract case",
       "assertion": "renderer-safe DTO 不泄漏路径/process/argv/cwd/env；core timeout/cancel 会 abort gateway signal；匹配版本仍为 exit-zero-unverified 且 canPrepareProfile/canLaunch=false；profile/launch/diagnostics/terminate 均结构化 unsupported",
-      "exitSemantics": "命令须 exit 0 且全部断言执行才支持 fixture-confirmed contract；realMe3Executed=false、realSekiroExecuted=false，不支持 native runtime authority、REL-H 或启动成功声明"
+      "exitSemantics": "命令须 exit 0 且全部断言执行才支持 fixture-confirmed contract；realMe3Executed=false、sekiroProcessLifecycleObserved=false，不支持 native runtime authority、REL-H 或启动成功声明"
     },
     {
       "sliceId": "W-ME3-MAIN-DETECT-02",
@@ -135,7 +135,7 @@
       "script": "npm run test:me3-runtime-gateway；npm run test:desktop-security；npm run test:me3-runtime-adapter",
       "fixture": "系统临时固定工具槽中的 synthetic executable 正负 case；本机固定 0.12.1 工具槽存在时执行真实 `--version` probe",
       "assertion": "main-only realpath/containment、固定 argv、无 shell、最小环境、隐藏窗口、1,024 字节上限、timeout/cancel 与脱敏；renderer IPC 不接受路径；本机真实 probe 识别 0.12.1 但保持 exit-zero-unverified、canPrepareProfile=false、canLaunch=false",
-      "exitSemantics": "三个命令均须 exit 0；realMe3Executed 可为 true，但 realSekiroExecuted 必须保持 false，本切片只支持 fixture-confirmed detection gateway，不支持 profile/launch 或 REL-H"
+      "exitSemantics": "三个命令均须 exit 0；realMe3Executed 可为 true，但 sekiroProcessLifecycleObserved 必须保持 false，本切片只支持 fixture-confirmed detection gateway，不支持 profile/launch 或 REL-H"
     },
     {
       "sliceId": "W-ME3-PROFILE-03",
@@ -143,7 +143,7 @@
       "script": "npm run test:me3-runtime-adapter；npm run test:me3-runtime-gateway；npm run test:desktop-security",
       "fixture": "core 的 25 个闭集 adapter case，包含 profile-create、launch、collect-diagnostics 与 terminate 结果；desktop main 固定工具槽 synthetic 正负 case，以及仅执行 `--version` 的本机 0.12.1 probe",
       "assertion": "profile/launch/diagnostics/terminate 继续通过 renderer-safe DTO 和 main-owned gateway；IPC/preload 不接受或返回特权路径、argv、cwd、env；超时、取消、非法响应和缺失进程失败关闭",
-      "exitSemantics": "三个命令均须 exit 0；只支持 adapter/gateway 接线的 fixture-confirmed，以及真实 me3 version probe 的 exit-zero-unverified；realSekiroExecuted=false、nativeRuntimeAuthority=false，不证明真实启动/终止、回滚后重启、installer lifecycle 或 REL-H"
+      "exitSemantics": "三个命令均须 exit 0；只支持 adapter/gateway 接线的 fixture-confirmed，以及真实 me3 version probe 的 exit-zero-unverified；sekiroProcessLifecycleObserved=false、nativeRuntimeAuthority=false，不证明真实启动/终止、回滚后重启、installer lifecycle 或 REL-H"
     },
     {
       "sliceId": "W-AI-CONFORMANCE-02",

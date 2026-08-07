@@ -1,5 +1,11 @@
 /**
- * Script-container game-load smoke (W-SCRIPT-READONLY-01 game-load leg).
+ * Script-container load **preflight** smoke (W-SCRIPT-READONLY-01 game-load leg).
+ *
+ * 名字里是 preflight 而不是 game-load：本套件**从不启动游戏**（见下方 Leg 2/3
+ * 与 realLoad 字段）。它做的是「为游戏加载做前置检查」——原名
+ * test:script-container-game-load 在脚本列表里读起来像「游戏内加载已验证」，
+ * 而实质是「整内层原样替换 → Bridge 重读 → 结构/放位/magic 前置 → 回滚字节一致」。
+ * 免责声明写在输出的 realLoad 字段里，承诺写在名字里，而名字是被看见的那一个。
  *
  * Covers SCOPE-BEHAVIOR-SCRIPT `game-load` honestly under the repository rule
  * "Real in-game launch automation is not shipped" (see
@@ -540,7 +546,7 @@ async function runWriteChainPreflight(source: string): Promise<void> {
       unknownFieldsPreserved: true,
       // 报事务实测落点换算出的游戏相对路径，而不是一个由常量拼出来的字面量。
       placementGamePath: `mods/${committedModRelative}`,
-      realLoadInstructions: '要在真实游戏内确认：通过桌面 script 面板（或手动）把整内层替换产物放入 <SOULFORGE_SEKIRO_GAME_ROOT>/mods/script/aicommon.luabnd.dcx，启动游戏确认能读到脚本阶段不崩溃，再设 SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED=<ISO时间戳> 重跑本套件。'
+      realLoadInstructions: '要在真实游戏内确认：通过桌面 script 面板（或手动）把整内层替换产物放入 <SOULFORGE_SEKIRO_GAME_ROOT>/mods/script/aicommon.luabnd.dcx，启动游戏确认能读到脚本阶段不崩溃，再设 SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED=<ISO时间戳> 重跑本套件（npm run test:script-container-load-preflight）。'
     }, null, 2));
   });
 }

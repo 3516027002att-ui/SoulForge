@@ -378,7 +378,7 @@ async function main(): Promise<void> {
     authority: 'fixture-confirmed',
     nativeRuntimeAuthority: false,
     realMe3Executed: false,
-    realSekiroExecuted: false,
+    sekiroProcessLifecycleObserved: false,
     cases: [
       'invalid-timeout',
       'oversized-timeout',

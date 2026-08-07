@@ -995,10 +995,10 @@
       "goal": "真实 Sekiro 游戏内加载确认：替换后 script 容器放入真实 mods/script 后游戏能读到脚本阶段不崩溃",
       "hardPrerequisites": "W-SCRIPT-READONLY-01 完成（preflight 已过）；需用户游戏内确认（SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED）",
       "entryPoints": [
-        "packages/core/src/testing/runScriptContainerGameLoadSmoke.ts",
+        "packages/core/src/testing/runScriptContainerLoadPreflightSmoke.ts",
         "packages/core/src/script/scriptContainerEvidence.ts"
       ],
-      "requiredValidation": "node scripts/with-local-has-game-env.mjs npm run test:script-container-game-load；validation-unfrozen：真实游戏内加载确认",
+      "requiredValidation": "node scripts/with-local-has-game-env.mjs npm run test:script-container-load-preflight；validation-unfrozen：真实游戏内加载确认",
       "declaresUnfrozenValidation": true
     },
     {

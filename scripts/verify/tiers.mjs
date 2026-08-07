@@ -188,7 +188,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 只在 packages/core 有入口、根无转发、也不在任何 tier —— verify 任何层级都跑不到，
   // 而 orphan-smoke-gate 因为「有 core script」判它 reachable。两道门禁互相掩盖。
   // 本轮补了根转发与无语料时的结构化跳过，层级归 native。
-  'test:real-mod': 'native',
+  'test:real-mod-readonly-preview': 'native',
   // Bridge 宿主退出卫生：真跑三个代表性 bridge smoke，判它们是否自行退出。
   // 抓的缺陷只有运行期可见——断言全过、退出码 0，但 daemon 句柄挂住宿主。
   // 实测事故：runNativeFlverSmoke 挂死 4 小时并锁住 bridge 输出 exe，使之后
@@ -234,7 +234,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // SCOPE-BEHAVIOR-SCRIPT game-load：真实 luabnd 整内层保持原样替换 → 结构/放位/
   // magic 加载前置预检（leg 2）+ opt-in 真实游戏内加载确认（leg 3，validation-unfrozen）。
   // 缺环境时结构化 skipped（exit 0，不冒充通过）；真实加载未自动验证前 authority 保持 candidate。
-  'test:script-container-game-load': 'native',
+  'test:script-container-load-preflight': 'native',
   'test:private-native-gate': 'native',
   'test:section28-sekiro-gate': 'native',
   // 真实 me3 → Sekiro launch/terminate/restart 会话。缺 SOULFORGE_SEKIRO_GAME_ROOT
