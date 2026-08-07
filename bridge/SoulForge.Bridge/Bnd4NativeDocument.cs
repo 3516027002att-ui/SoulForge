@@ -65,16 +65,48 @@ internal sealed class Bnd4NativeDocument
         return new Bnd4NativeDocument(source, checked((int)dataOffset), checked((int)fileHeaderSize), entries, entryBytes);
     }
 
+    /// <summary>
+    /// 往返验证：真实重建容器后与源字节逐字节比对。
+    ///
+    /// ByteIdentical 此前传的是字面量 <c>true</c>，而 reparsed 只是把同一份
+    /// SourceBytes 再解析一次——两者都不可能为假，所以这份报告从未证明过任何事，
+    /// 而它正是 authority 报告里 roundTrip 字段的来源。
+    ///
+    /// 现在改为复用 Repack(ToRepackEntries())：那是「每个子项都不改」的 no-op
+    /// 重建，输出必须与源逐字节相同。这条判据会真的红——重建时任何对齐、名字
+    /// 编码、未知字段的处理偏差都会暴露，而那些偏差正是开放 writer 前必须先关掉
+    /// 的风险。
+    /// </summary>
     public Bnd4RoundTripReport VerifyRoundTrip()
     {
         var reparsed = Read(SourceBytes.ToArray());
         var entriesEqual = reparsed.Entries.Count == Entries.Count
             && reparsed.Entries.Zip(Entries).All(pair => pair.First == pair.Second);
+
+        bool byteIdentical;
+        string rebuiltHash;
+        try
+        {
+            var rebuilt = Repack(ToRepackEntries());
+            byteIdentical = rebuilt.Length == SourceBytes.Length
+                && rebuilt.AsSpan().SequenceEqual(SourceBytes);
+            // 报告重建产物自己的哈希。此前这里填的是 reparsed.SourceHash——也就是
+            // 源哈希——所以 sourceHash 与 rebuiltHash 永远相等，读者看不出任何差异。
+            rebuiltHash = Hash(rebuilt);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or OverflowException or ArgumentException)
+        {
+            // 重建失败本身就是「不是逐字节一致」的一种，必须报 false 而不是抛给
+            // 调用方——调用方拿到的是往返报告，不是重建服务。
+            byteIdentical = false;
+            rebuiltHash = "repack-failed";
+        }
+
         return new Bnd4RoundTripReport(
-            true,
+            byteIdentical,
             entriesEqual,
             SourceHash,
-            reparsed.SourceHash,
+            rebuiltHash,
             Entries.Count,
             Entries.Count(entry => entry.DuplicateOrdinal > 0));
     }

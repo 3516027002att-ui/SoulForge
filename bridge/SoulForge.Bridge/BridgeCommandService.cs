@@ -424,14 +424,17 @@ internal sealed class BridgeCommandService
             {
                 var document = FlverNativeDocument.ReadFile(file);
                 var roundTrip = document.VerifyRoundTrip();
+                // 措辞与判据对齐：FLVER 无 writer，能验证的只是「同一输入两次解析
+                // 得到相同结论」，不是「重建后逐字节一致」。旧码 *_ROUNDTRIP_BYTE_VERIFIED
+                // 对一个只读解析器是过强表述，会被读成无损可写的证据。
                 var diagnostics = new[]
                 {
                     new Diagnostic(
                         roundTrip.ByteIdentical ? "info" : "error",
-                        roundTrip.ByteIdentical ? "FLVER_DOCUMENT_ROUNDTRIP_BYTE_VERIFIED" : "FLVER_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.ByteIdentical ? "FLVER_DOCUMENT_REPARSE_DETERMINISTIC" : "FLVER_DOCUMENT_REPARSE_NONDETERMINISTIC",
                         roundTrip.ByteIdentical
-                            ? $"FLVER 只读往返字节级一致；materials={document.MaterialCount}, bones={document.BoneCount}, meshes={document.MeshCount}。"
-                            : "FLVER 只读往返字节不一致。",
+                            ? $"FLVER 重解析确定（只读，无 writer；不构成无损可写声明）；materials={document.MaterialCount}, bones={document.BoneCount}, meshes={document.MeshCount}。"
+                            : "FLVER 重解析结果不确定：同一输入两次解析结论不同。",
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };

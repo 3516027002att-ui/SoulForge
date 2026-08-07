@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -31,6 +32,24 @@ const bridgeEnvelopeVariants = new Set([
   ...observedVariantsByFormat.KRAK.map((variant) => variant.slice('DCX_'.length))
 ]);
 const unrecognizedVariants = new Set();
+
+// 语料根不存在时结构化跳过，而不是让 readdir 抛 ENOENT。
+//
+// 本条属 native 层，默认根是仓库外的 mods/（或 SOULFORGE_NATIVE_FIXTURE_ROOT）。
+// 此前没有跳过分支：本机无语料时它以 ENOENT 崩溃，而 native 层缺环境的正确表现
+// 是诚实跳过——崩溃会让「缺语料」与「解析真的坏了」在退出码上不可区分，正是
+// 硬约束 7 要求区分的两种状态。同 runRealModOpenSmoke 的处置口径。
+if (!existsSync(root)) {
+  console.log(JSON.stringify({
+    ok: null,
+    status: 'skipped',
+    gate: 'native-dcx-documents',
+    reason: `本机 native 语料根不存在：${root}`,
+    remedy: 'npm run bridge:verify:dcx-documents -- <语料目录>，或设置 SOULFORGE_NATIVE_FIXTURE_ROOT',
+    skipSemantics: '结构跳过：未声称通过，也不构成 native 完成声明。'
+  }, null, 2));
+  process.exit(0);
+}
 
 const files = (await walk(root)).filter((path) => extname(path).toLowerCase() === '.dcx');
 const variants = new Map();

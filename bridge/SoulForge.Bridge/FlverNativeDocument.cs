@@ -846,9 +846,24 @@ internal sealed class FlverNativeDocument
         return Read(File.ReadAllBytes(path));
     }
 
+    /// <summary>
+    /// 重解析确定性检查（**不是**字节级往返验证）。
+    ///
+    /// FLVER 没有 writer，因此不存在「重建后与源比对」这件事可做。此前这里写的是
+    /// <c>_source.AsSpan().SequenceEqual(reparsed.SourceBytes)</c>——而 Read(_source)
+    /// 保存的就是同一个数组引用，所以那是「数组与自身比」，恒真。上层却据此发出
+    /// FLVER_DOCUMENT_ROUNDTRIP_BYTE_VERIFIED 与「字节级一致」的文案，对一个无
+    /// writer 的解析器是过强表述。
+    ///
+    /// 现在如实表达能验证的东西：同一输入两次解析必须得到相同的结构化结论
+    /// （ReparseDeterministic）。这能抓到解析器里的可变静态状态、缓存污染、
+    /// 依赖迭代顺序的哈希等真实缺陷；它**不**证明无损可写。
+    /// </summary>
     public FlverRoundTripReport VerifyRoundTrip()
     {
-        var reparsed = Read(_source);
+        // 刻意从字节副本重新解析，而不是复用 _source 引用：只有这样两次解析才是
+        // 真正独立的两次，恒真的自比对才被消除。
+        var reparsed = Read(_source.ToArray());
         var byteIdentical = _source.AsSpan().SequenceEqual(reparsed.SourceBytes);
         var semanticIdentical = byteIdentical
             && reparsed.InternalVersion == InternalVersion
