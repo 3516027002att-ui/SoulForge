@@ -73,10 +73,33 @@ export class TextFileWriter implements WriterAdapterContract {
       const stagingPath = join(input.stagingRoot, stagingRelativeName(op));
       await mkdir(dirname(stagingPath), { recursive: true });
 
+      // 先把原文件内容铺进暂存区，让后续的部分编辑基于真实原文。
+      //
+      // 这里曾经是 `catch { writeFile(stagingPath, Buffer.alloc(0)) }`——任何读取
+      // 失败（权限、文件被占用、IO 错误）都与「文件不存在」合并成同一个「写空
+      // buffer」分支。危险在于 text_edit 允许不带 expectedHash
+      // （validators/textHash.ts 对无 hash 的 text_edit 直接放行），所以这条路径上
+      // 没有第二道关卡：一次瞬时读失败会被静默当成「这是个新文件」，把原内容
+      // 替换成仅含本次编辑结果的文件。表现是静默数据丢失，不是报错。
+      //
+      // 因此只有 ENOENT（确实不存在，合法新建）才允许空起点，其余 errno 必须
+      // 返回结构化诊断并跳过该 op（硬约束 8）。
       try {
         const original = await readFile(op.targetPath);
         await writeFile(stagingPath, original);
-      } catch {
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (code !== 'ENOENT') {
+          diagnostics.push(createDiagnostic({
+            severity: 'error',
+            code: 'TEXT_WRITER_ORIGINAL_READ_FAILED',
+            message: '读取原文件失败，无法确定暂存起点；拒绝以空内容继续，'
+              + '否则本次编辑会静默覆盖原有内容。',
+            targetUri: op.targetUri,
+            details: { targetPath: op.targetPath, causeCode: code ?? 'UNKNOWN' }
+          }));
+          continue;
+        }
         await writeFile(stagingPath, Buffer.alloc(0));
       }
 

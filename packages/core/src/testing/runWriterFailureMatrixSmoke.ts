@@ -182,17 +182,103 @@ async function main(): Promise<void> {
       }
     }
 
+    const swallowCases = await verifyNoSilentSwallow(root);
+
     console.log(JSON.stringify({
       ok: true,
       message: 'public writer failure matrix passed',
       capabilities: CAPABILITIES,
       phases: PHASES,
       cases: results.length,
-      results
+      results,
+      silentSwallowCases: swallowCases
     }, null, 2));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * 「读失败被当成新文件」这条静默数据丢失路径的负向覆盖。
+ *
+ * 上面那套矩阵注入的是 writer/validator 抛异常，抓不到本条：TextFileWriter 铺设
+ * 暂存起点时曾经用 `catch { writeFile(staging, Buffer.alloc(0)) }`，把任何读取失败
+ * （权限、被占用、EISDIR、IO 错误）与「文件不存在」合并成同一个空起点分支。
+ *
+ * 危险性来自它与 hash 前置条件的组合：text_edit 允许不带 expectedHash
+ * （validators/textHash.ts 对无 hash 的 text_edit 直接放行），所以这条路径上没有
+ * 第二道关卡。一次瞬时读失败会把原文件内容替换成仅含本次编辑结果的文件，而
+ * 全过程零诊断、零异常、退出码 0——正是「退化后与正常表现完全一致」。
+ *
+ * 因此这里必须同时断言两侧：ENOENT 仍放行（否则合法新建被误伤），非 ENOENT
+ * 必须返回结构化诊断并且不产出 writtenTarget。
+ */
+async function verifyNoSilentSwallow(root: string): Promise<Array<{
+  case: string;
+  blocked: boolean;
+  diagnosticCodes: string[];
+}>> {
+  const writers = createScaffoldWriterAdapters();
+  const textWriter = writers.find((writer) => writer.writerId === 'writer:text-file');
+  if (!textWriter) throw new Error('silent-swallow: writer:text-file 未注册，无法验证。');
+
+  const stagingRoot = join(root, 'swallow-staging');
+  await mkdir(stagingRoot, { recursive: true });
+  const cases: Array<{ case: string; blocked: boolean; diagnosticCodes: string[] }> = [];
+
+  // 情形 1：目标确实不存在（ENOENT）——合法新建，必须放行。
+  const missing = join(root, 'swallow-new.txt');
+  const created = await textWriter.applyToStaging({
+    stagingRoot,
+    operations: [buildTextOperation('swallow-new', missing, 'fresh content')]
+  });
+  const createdErrors = created.diagnostics.filter((item) => item.severity === 'error');
+  if (createdErrors.length > 0 || created.writtenTargets.length !== 1) {
+    throw new Error(
+      'silent-swallow: ENOENT 合法新建被误伤 —— '
+      + `diagnostics=${JSON.stringify(created.diagnostics.map((item) => item.code))}`
+    );
+  }
+  cases.push({ case: 'enoent-allows-new-file', blocked: false, diagnosticCodes: [] });
+
+  // 情形 2：目标位置是目录（EISDIR/EPERM，取决于平台）——必须结构化阻断。
+  // 用目录而不是 chmod：Windows 上 chmod 对读权限基本无效，会让这条负例在
+  // 一半平台上静默变成「没测到」。
+  const directoryTarget = join(root, 'swallow-directory');
+  await mkdir(directoryTarget, { recursive: true });
+  const blockedResult = await textWriter.applyToStaging({
+    stagingRoot,
+    operations: [buildTextOperation('swallow-dir', directoryTarget, 'must not be written')]
+  });
+  const diagnosticCodes = blockedResult.diagnostics.map((item) => item.code);
+  const blocked = diagnosticCodes.includes('TEXT_WRITER_ORIGINAL_READ_FAILED')
+    && blockedResult.writtenTargets.length === 0;
+  if (!blocked) {
+    throw new Error(
+      'silent-swallow: 非 ENOENT 读失败未被阻断 —— 一次读失败会静默覆盖原文件内容。'
+      + ` diagnostics=${JSON.stringify(diagnosticCodes)}`
+      + ` writtenTargets=${blockedResult.writtenTargets.length}`
+    );
+  }
+  cases.push({ case: 'non-enoent-read-failure-blocked', blocked: true, diagnosticCodes });
+
+  return cases;
+}
+
+function buildTextOperation(
+  id: string,
+  targetPath: string,
+  newText: string
+): PatchIrOperation {
+  return {
+    id,
+    kind: 'text_edit',
+    targetUri: `file:///${id}`,
+    targetPath,
+    resourceKind: 'other',
+    newText,
+    preconditions: []
+  } as unknown as PatchIrOperation;
 }
 
 function buildOperation(
