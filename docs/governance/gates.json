@@ -89,7 +89,8 @@
         "EV-RENDERER-UNIT-SPLIT-20260807",
         "EV-ROUNDTRIP-PAGINATION-20260807",
         "EV-RECOVERY-AIPERM-COVERAGE-20260807",
-        "EV-REPACK-A11Y-20260807"
+        "EV-REPACK-A11Y-20260807",
+        "EV-PRELOAD-SURFACE-RULING-20260807"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
