@@ -224,6 +224,31 @@ internal static class BridgeDaemonHost
         });
     }
 
+    /// <summary>
+    /// 每一个会按 options.outputPath 落盘的命令。
+    ///
+    /// 为什么必须是一处注册表而不是 if 链：此前这里是六个 Equals 串起来的条件，
+    /// 而 extract-bnd4-child 也按 options.outputPath 落盘
+    /// （Bnd4NativeWriter.ExtractChild → File.WriteAllBytes）却漏在链外。
+    /// 漏掉的后果不是报错而是**没有 writable-root 校验**：输出路径只受
+    /// AllowedRoots 约束，而 AllowedRoots 必须包含原版游戏目录（Oodle 需要），
+    /// 于是指向游戏目录的 outputPath 会被放行——直接违反「原版游戏目录永远只读」。
+    ///
+    /// if 链的问题在于「新增写命令时必须记得同步改它」，而漏改既不会有编译错误
+    /// 也不会有测试失败。注册表把它变成一处显式声明，并由 VerifyDiskWriteRegistry
+    /// 在启动时与实际 dispatch 表对账，失败关闭。
+    /// </summary>
+    private static readonly HashSet<string> DiskWritingCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "write-bnd4",
+        "write-fmg",
+        "write-param",
+        "write-emevd",
+        "write-msb",
+        "export-tpf-texture",
+        "extract-bnd4-child"
+    };
+
     private static async Task HandleRequestAsync(BridgeInboundFrame frame, DaemonState state)
     {
         BridgeRequestPayload? payload;
@@ -256,12 +281,7 @@ internal static class BridgeDaemonHost
         }
 
         string? outputPath = null;
-        if (payload.Command.Equals("write-bnd4", StringComparison.OrdinalIgnoreCase)
-            || payload.Command.Equals("write-fmg", StringComparison.OrdinalIgnoreCase)
-            || payload.Command.Equals("write-param", StringComparison.OrdinalIgnoreCase)
-            || payload.Command.Equals("write-emevd", StringComparison.OrdinalIgnoreCase)
-            || payload.Command.Equals("write-msb", StringComparison.OrdinalIgnoreCase)
-            || payload.Command.Equals("export-tpf-texture", StringComparison.OrdinalIgnoreCase))
+        if (DiskWritingCommands.Contains(payload.Command))
         {
             if (payload.Options is not { ValueKind: JsonValueKind.Object }
                 || !payload.Options.Value.TryGetProperty("outputPath", out var outputElement)

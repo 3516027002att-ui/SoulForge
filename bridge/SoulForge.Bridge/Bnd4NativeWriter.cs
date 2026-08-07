@@ -205,10 +205,17 @@ internal static class Bnd4NativeWriter
     /// <summary>
     /// Extract a BND4 child entry directly to a file on disk.
     /// Returns metadata only (no content in response frame), safe for large assets.
+    ///
+    /// outputPath 由调用方传入而不是从 options 自取：daemon 已对它做过
+    /// writable-root 边界校验并规范化，writer 再从 options 取原始字符串会让等价
+    /// 但不同形态的路径（..、符号链接、大小写）绕过那次校验。
     /// </summary>
-    public static object ExtractChild(string sourcePath, JsonElement options, string? oodleRuntimeRoot)
+    public static object ExtractChild(string sourcePath, string outputPath, JsonElement options, string? oodleRuntimeRoot)
     {
-        var outputPath = RequiredString(options, "outputPath");
+        if (string.IsNullOrWhiteSpace(outputPath))
+        {
+            throw new InvalidDataException("extract-bnd4-child 需要已校验的 outputPath。");
+        }
         var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
         var binder = Bnd4NativeDocument.Read(dcx.Payload);
         var index = ResolveEntryIndex(options, binder);
@@ -216,7 +223,18 @@ internal static class Bnd4NativeWriter
         var bytes = binder.GetStoredBytes(index);
         var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
         Directory.CreateDirectory(directory);
-        File.WriteAllBytes(outputPath, bytes);
+        // temp + Move(overwrite) 与其余五个 writer 一致：直接 WriteAllBytes 在写入
+        // 中途失败会留下截断的半个文件，而它看起来像一次成功的提取。
+        var temporary = Path.Combine(directory, $".soulforge-extract-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllBytes(temporary, bytes);
+            File.Move(temporary, outputPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
         return new
         {
             sourceHash = dcx.SourceHash,

@@ -133,6 +133,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 必然失败），旧 grep 式 smoke 退出 0 并打印「契约验证通过」。门禁不被变异
   // 验证过，就无法区分「没有退化」和「门禁是盲的」。
   'test:desktop-contract-mutations': 'synthetic',
+  // Bridge 写盘边界（硬约束 2/3）。用自造微小 BND4-in-DCX，不需要真实游戏语料，
+  // 所以能在公开 CI 真跑而不是诚实跳过。它验证的是运行期行为：越界 outputPath
+  // 必须失败关闭且不留文件——源码扫描抓不到「校验通过但 writer 绕回原始路径」
+  // 这类等价路径逃逸。归 synthetic：需要真实 exe，但不需要真实语料。
+  'test:bridge-write-boundary': 'synthetic',
   'test:smithbox-param-metadata-source': 'synthetic',
   'test:flver-candidate': 'synthetic',
   'test:asset-import': 'synthetic',
