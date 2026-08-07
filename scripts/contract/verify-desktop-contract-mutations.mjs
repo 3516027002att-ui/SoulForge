@@ -21,7 +21,7 @@ import { structuredSkip } from './desktopSurface.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 const MAIN_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'main', 'index.js');
-const PRELOAD_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'preload', 'index.mjs');
+const PRELOAD_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'preload', 'index.cjs');
 const CONTRACT = join(here, 'verify-desktop-ipc-contract.mjs');
 const LABEL = 'desktop-contract-mutations';
 

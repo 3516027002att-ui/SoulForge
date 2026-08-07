@@ -30,7 +30,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = resolve(here, '..', '..');
 
 export const MAIN_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'main', 'index.js');
-export const PRELOAD_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'preload', 'index.mjs');
+export const PRELOAD_BUNDLE = join(repoRoot, 'apps', 'desktop', 'out', 'preload', 'index.cjs');
 
 const STUB_URL = 'soulforge-contract-stub:electron';
 
@@ -102,7 +102,7 @@ export function desktopBundlesBuilt() {
 export function missingBundles() {
   return [
     ...(existsSync(MAIN_BUNDLE) ? [] : ['apps/desktop/out/main/index.js']),
-    ...(existsSync(PRELOAD_BUNDLE) ? [] : ['apps/desktop/out/preload/index.mjs'])
+    ...(existsSync(PRELOAD_BUNDLE) ? [] : ['apps/desktop/out/preload/index.cjs'])
   ];
 }
 

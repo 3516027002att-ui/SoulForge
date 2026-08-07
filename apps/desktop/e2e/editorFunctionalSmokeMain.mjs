@@ -2,7 +2,7 @@
  * Electron functional smoke harness main (W-REL-F-SCALE-02, validation-unfrozen).
  *
  * Runs inside a REAL Electron main process with the REAL production preload
- * (out/preload/index.mjs) context bridge and the REAL built renderer page, then
+ * (out/preload/index.cjs) context bridge and the REAL built renderer page, then
  * drives the five release-editor paginated channels (bnd4/fmg/param/emevd/script)
  * against the REAL native corpus through the SAME channel names and DTO shapes
  * the desktop main serves (`resource.readFmgPage`, `resource.readParamPage`,
@@ -43,7 +43,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
-const preloadPath = resolve(repoRoot, 'apps/desktop/out/preload/index.mjs');
+const preloadPath = resolve(repoRoot, 'apps/desktop/out/preload/index.cjs');
 const rendererPagePath = resolve(here, 'harness.html');
 
 const SCRIPT_PAGE_SIZE = 50;
@@ -290,10 +290,15 @@ async function main() {
     show: process.env.SOULFORGE_FUNCTIONAL_SMOKE_SHOW === '1',
     webPreferences: {
       preload: preloadPath,
-      // The production preload build output is ESM (out/preload/index.mjs);
-      // sandboxed preloads cannot be ESM in Electron, so this test harness
-      // window uses an unsandboxed preload while keeping the real security
-      // boundary that matters (contextIsolation: true, nodeIntegration: false).
+      // 生产 preload 现在产出 CommonJS（out/preload/index.cjs），正是因为
+      // Electron 的 sandboxed preload 不支持 ESM —— 这条注释此前指出了该限制，
+      // 但产物当时是 .mjs 且生产 main 找的是 .js，两边都错，于是生产启动时
+      // preload 静默加载失败（window.soulforge 完全不注入）。已修。
+      //
+      // 本 harness 仍用 sandbox: false：它要在 preload 之外注入测试替身，
+      // 保留真正要紧的边界（contextIsolation: true, nodeIntegration: false）。
+      // 注意这与生产窗口的 sandbox: true 不同——正因如此，harness 无法覆盖
+      // 「sandbox + preload 格式」这个组合，那个缺陷只能由真实启动巡检发现。
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
