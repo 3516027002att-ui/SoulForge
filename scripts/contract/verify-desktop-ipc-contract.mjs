@@ -89,6 +89,17 @@ const REQUIRED_PRELOAD_WIRING = Object.freeze({
 });
 
 /**
+ * 推送类接线：main 用 webContents.send 主动推、preload 用 ipcRenderer.on 订阅。
+ *
+ * 这类 channel **不该**有 ipcMain.handle——它不是请求/响应。把它和 invoke 类
+ * 混在一起对账，正确的接线会被判成「invoke 了未注册的 channel」，而真正的
+ * 断裂（订阅接线消失、两侧 channel 名改了一侧）反而没人管。
+ */
+const REQUIRED_PRELOAD_SUBSCRIPTIONS = Object.freeze({
+  onAiAgentEvent: 'ai:agent:event'
+});
+
+/**
  * 渲染进程绝不允许触达的能力。这些是安全边界，靠「源码里没这个字符串」证明
  * 太弱——真实观测到 preload 表面里没有它们才是证据。
  */
@@ -130,18 +141,27 @@ assert.check(
 for (const [method, channel] of Object.entries(REQUIRED_PRELOAD_WIRING)) {
   assert.requirePreloadChannel(preload, method, channel);
 }
+for (const [method, channel] of Object.entries(REQUIRED_PRELOAD_SUBSCRIPTIONS)) {
+  assert.requirePreloadSubscription(preload, method, channel);
+  // 光有订阅不够：main 侧必须真的会推，否则订阅的是永不来事件的 channel。
+  assert.requireMainPush(main, channel);
+}
 for (const method of FORBIDDEN_PRELOAD_METHODS) assert.forbidPreloadMethod(preload, method);
 
 /**
- * 双向对账：preload 暴露的每个方法都必须对应一个 main 真实注册的 channel。
- * 这一条是文本匹配根本无法表达的——它抓的是「preload 连到一个不存在的 channel」
- * 这类只在运行时才暴露的断裂，也抓「channel 改名只改了一侧」。
+ * 双向对账：preload **invoke** 的每个 channel 都必须对应一个 main 真实注册的
+ * handler。这一条是文本匹配根本无法表达的——它抓的是「preload 连到一个不存在
+ * 的 channel」这类只在运行时才暴露的断裂，也抓「channel 改名只改了一侧」。
+ *
+ * 只看 invokeChannels：订阅类（ipcRenderer.on）走 webContents.send，按 Electron
+ * 语义不该有 ipcMain.handle，把它算进来会把正确接线判成违规。订阅类由上面的
+ * requirePreloadSubscription + requireMainPush 两条覆盖，不存在放宽。
  */
 const orphanedPreloadChannels = [];
 for (const method of preload.methods) {
   const record = preload.channelByMethod.get(method);
-  if (!record || record.error || record.channels.length === 0) continue;
-  for (const channel of record.channels) {
+  if (!record || record.error) continue;
+  for (const channel of record.invokeChannels ?? []) {
     if (!main.handlers.has(channel)) orphanedPreloadChannels.push({ method, channel });
   }
 }
@@ -149,6 +169,18 @@ assert.check(
   orphanedPreloadChannels.length === 0,
   'preload 方法 invoke 了 main 未注册的 channel（运行时必然失败）',
   { orphaned: orphanedPreloadChannels }
+);
+
+/**
+ * 订阅类 channel 不得同时被注册成 invoke handler。两者语义互斥，同时存在说明
+ * 有人把推送改成了请求/响应（或反之）而只改了一半。
+ */
+const subscriptionChannelsWithHandlers = Object.values(REQUIRED_PRELOAD_SUBSCRIPTIONS)
+  .filter((channel) => main.handlers.has(channel));
+assert.check(
+  subscriptionChannelsWithHandlers.length === 0,
+  '推送类 channel 同时被注册为 ipcMain.handle（invoke 与 send 语义互斥）',
+  { conflicting: subscriptionChannelsWithHandlers }
 );
 
 /**
@@ -160,12 +192,16 @@ const preloadChannels = new Set(
   preload.methods.flatMap((method) => preload.channelByMethod.get(method)?.channels ?? [])
 );
 const mainOnlyChannels = main.channels.filter((channel) => !preloadChannels.has(channel));
+const preloadSubscribeChannels = [...new Set(
+  preload.methods.flatMap((method) => preload.channelByMethod.get(method)?.subscribeChannels ?? [])
+)].sort();
 
 assert.finish({
-  message: '桌面 IPC 契约通过真实执行观测验证（main 注册 + preload 暴露 + 双向对账）',
+  message: '桌面 IPC 契约通过真实执行观测验证（main 注册 + preload 暴露 + 按方向双向对账）',
   observedMainChannels: main.channels.length,
   observedPreloadMethods: preload.methods.length,
   preloadReachableChannels: preloadChannels.size,
+  preloadSubscribeChannels,
   mainOnlyChannels,
   evidence: 'apps/desktop/out 生产构建产物真实加载；electron 为受控桩，未伪造 Electron 语义'
 });
