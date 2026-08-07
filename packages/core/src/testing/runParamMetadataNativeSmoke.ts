@@ -17,9 +17,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { importPinnedSmithboxSdtParamMetadata } from '../param/smithboxParamMetadataSource.js';
+import { matchParamMetadataPackage } from '../param/paramMetadata.js';
 import { decodeRowFields, validateParamDef } from '../param/paramdefLayout.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
-import type { ParamDefDocument, ParamFieldDef, ParamMetadataDefinition } from '@soulforge/shared';
+import type {
+  ParamDefDocument,
+  ParamFieldDef,
+  ParamMetadataDefinition,
+  ParamMetadataTrustPolicy
+} from '@soulforge/shared';
 
 // ---------------------------------------------------------------------------
 // Bridge response shapes
@@ -66,6 +72,16 @@ interface ExpectedUnsupportedDetail {
 /** Indices 32 and 33 fail semantic roundtrip in the native PARAM smoke. */
 const EXPECTED_UNSUPPORTED_INDICES = new Set([32, 33, 81]);
 
+/**
+ * 5-key 匹配里的 game / gameBuild 常量。
+ *
+ * 提成常量而不是内联字面量：本文件既要喂生产 matcher 的 descriptor、又要拼本地
+ * 索引 key 做交叉对账，两处必须同源。此前两处各写一份 'sekiro' 与 '1.6'，
+ * 分叉时的表现是「交叉对账永远不相等」——那会被误读成 matcher 有 bug。
+ */
+const SEKIRO_METADATA_GAME = 'sekiro';
+const SEKIRO_METADATA_GAME_BUILD = '1.6';
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -87,6 +103,35 @@ async function main(): Promise<void> {
 
   const definitions = imported.package.definitions;
   const definitionIndex = buildDefinitionIndex(definitions);
+
+  /**
+   * 显式用户信任策略。
+   *
+   * 生产 matchParamMetadataPackage 要求它必须存在（缺失时报
+   * PARAM_METADATA_TRUST_POLICY_REQUIRED 并拒绝匹配）——这是「Paramdex 兼容
+   * metadata 只有在用户显式信任该来源后才可用于字段写入」这条边界的执行点。
+   *
+   * 本文件此前手拼 key + Map.get 绕过了 matcher，因此也绕过了这道校验：即
+   * 「未经用户信任的 metadata 照样能匹配上」在真机语料路径上从未被拦过。
+   * 这里按真实导入包的 digest/license/revision 构造策略，等价于「用户已确认
+   * 信任这个具体版本的 Smithbox 源」——digest 变了策略即失效，不是无条件放行。
+   */
+  const trustPolicy: ParamMetadataTrustPolicy = {
+    schemaVersion: 1,
+    policyId: 'test.param-metadata-native-smoke',
+    trustedPackages: [
+      {
+        packageId: imported.package.packageId,
+        packageVersion: imported.package.packageVersion,
+        packageDigest: imported.package.packageDigest,
+        sourceIdentity: imported.package.source.identity,
+        sourceRevision: imported.package.source.revision,
+        sourceContentDigest: imported.package.source.contentDigest,
+        licenseSpdxExpression: imported.package.license.spdxExpression,
+        licenseTextDigest: imported.package.license.textDigest
+      }
+    ]
+  };
 
   // 2. Resolve native corpus via fixture registry.
   const sourceBnd = await resolveNativeFixture(
@@ -210,9 +255,40 @@ async function main(): Promise<void> {
       const nativeDataVersion = doc.data.dataVersion;
       const nativeRowDataSize = doc.data.rowDataSize;
 
-      // 4. 5-key strict match against metadata definitions.
-      const matchKey = `sekiro|1.6|${nativeTypeName}|${nativeDataVersion}|${nativeRowDataSize}`;
-      const definition = definitionIndex.get(matchKey);
+      // 4. 5-key strict match —— 必须调**生产** matcher。
+      //
+      // 此前这里手拼 `sekiro|1.6|type|version|rowSize` 再 Map.get，等于在测试里
+      // 重实现了一遍 5-key 匹配。后果是生产 matchParamMetadataPackage 在真机语料
+      // 上**零执行**：改坏它的 key 拼装、trust policy 校验或 provenance 判定，
+      // 这条 native smoke 照样全绿。而 runParamMetadataMismatchSmoke 虽然调它，
+      // 用的是合成 fixture，覆盖不到真实 gameparam 的 typeName/version/rowSize 组合。
+      const matchResult = matchParamMetadataPackage(
+        imported.package,
+        {
+          game: SEKIRO_METADATA_GAME,
+          gameBuild: SEKIRO_METADATA_GAME_BUILD,
+          typeName: nativeTypeName,
+          dataVersion: nativeDataVersion,
+          rowDataSize: nativeRowDataSize
+        },
+        trustPolicy
+      );
+      const definition = matchResult.ok ? matchResult.definition : undefined;
+      // 生产 matcher 与本地索引必须给出同一答案。分叉说明两者对 5-key 的口径不同
+      // ——那正是「测试里的重实现掩盖生产缺陷」的形态，必须失败关闭而不是二选一。
+      const indexedDefinition = definitionIndex.get(
+        `${SEKIRO_METADATA_GAME}|${SEKIRO_METADATA_GAME_BUILD}`
+        + `|${nativeTypeName}|${nativeDataVersion}|${nativeRowDataSize}`
+      );
+      if (Boolean(definition) !== Boolean(indexedDefinition)) {
+        throw new Error(
+          `PARAM_METADATA_MATCHER_DIVERGED: ${nativeTypeName} `
+          + `(v${nativeDataVersion}, row=${nativeRowDataSize}) —— `
+          + `生产 matcher ${definition ? '匹配' : '未匹配'}，本地索引 `
+          + `${indexedDefinition ? '匹配' : '未匹配'}。两者对 5-key 的口径已分叉。`
+          + ` matcher 诊断：${JSON.stringify(matchResult.diagnostics)}`
+        );
+      }
 
       if (!definition) {
         // Try a relaxed lookup to produce better diagnostics.
