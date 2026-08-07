@@ -27,6 +27,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
 
+let declaredDiskWritingCommands = [];
+let coveredWriteCommands = [];
 const LABEL = 'bridge-write-boundary';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXE_CANDIDATES = [
@@ -201,12 +203,75 @@ try {
     throw new Error(`BRIDGE_HANDSHAKE_FAILED: ${JSON.stringify(handshake.payload).slice(0, 300)}`);
   }
 
-  /** 每一个按 options.outputPath 落盘的命令都必须被边界拦住。 */
+  /**
+   * 每一个按 options.outputPath 落盘的命令都必须被边界拦住。
+   *
+   * 这份清单必须与 BridgeDaemonHost.cs 的 DiskWritingCommands 逐项对齐——
+   * 下方 assertCoversAllDiskWritingCommands 会强制这一点。
+   *
+   * 此前只列了 3 个（extract-bnd4-child / write-bnd4 / export-tpf-texture），
+   * 而 DiskWritingCommands 有 7 个：write-fmg / write-param / write-emevd /
+   * write-msb **从未被越界测过**，且成功输出里的 coveredCommands 硬编码同样 3 个，
+   * 于是门禁一边宣称「所有按 outputPath 落盘的命令都失败关闭」，一边只测了 3/7。
+   *
+   * 补齐这 4 个的成本很低，因为边界校验发生在**命令分派之前**
+   * （BridgeDaemonHost.cs:284-300 只读 options.outputPath，不解析命令语义）：
+   * 只要给出结构合法的 options，越界路径就必然在进入 writer 之前被拦下。
+   * 各命令的 options 取其最小必需字段——它们不会被执行到，但缺字段会让请求在
+   * 边界检查之前就以 BRIDGE_OUTPUT_PATH_REQUIRED 之外的原因失败，那样测到的
+   * 就不是边界了。
+   */
   const writeCommands = [
     { command: 'extract-bnd4-child', options: { childPath: childName } },
     { command: 'write-bnd4', options: { childPath: childName, newContentBase64: childBytes.toString('base64') } },
-    { command: 'export-tpf-texture', options: { textureIndex: 0 } }
+    { command: 'export-tpf-texture', options: { textureIndex: 0 } },
+    // 以下 4 个此前完全未覆盖。mutations/entries 给最小合法形态即可：
+    // 边界在分派前生效，请求不会走到各自的 writer 实现里。
+    { command: 'write-fmg', options: { entries: [{ id: 1, text: 'boundary-probe' }] } },
+    { command: 'write-param', options: { mutations: [{ mutation: 'update', rowId: 1, fields: {} }] } },
+    { command: 'write-emevd', options: { mutations: [] } },
+    { command: 'write-msb', options: { mutations: [] } }
   ];
+
+  /**
+   * 防漂移：本门禁的 writeCommands 必须覆盖 C# 侧 DiskWritingCommands 的**全集**。
+   *
+   * 为什么必须机器校验而不是靠人对齐：漏一个命令的后果是它完全跳过 writable-root
+   * 校验（BridgeDaemonHost.cs:284 只对集合内命令做边界检查），而这既不会有编译
+   * 错误，也不会让任何测试失败，门禁照样全绿——正是本门禁注释里描述的事故形态。
+   * 此前实测就是这个状态：集合 7 个，门禁测 3 个，4 个从未被越界测过。
+   *
+   * 判据直接从 C# 源码解析集合初始化块，因此新增写命令时若忘了补测，这里立刻报红。
+   * 解析失败也失败关闭——提取不到集合就等于判据消失。
+   */
+  {
+    const hostSource = readFileSync(
+      resolve(root, 'bridge', 'SoulForge.Bridge', 'BridgeDaemonHost.cs'), 'utf8'
+    );
+    const blockMatch = /DiskWritingCommands\s*=\s*new\([^)]*\)\s*\{([^}]*)\}/s.exec(hostSource);
+    if (blockMatch === null) {
+      throw new Error(
+        'WRITE_BOUNDARY_REGISTRY_UNREADABLE: 无法从 BridgeDaemonHost.cs 解析'
+        + ' DiskWritingCommands 集合。提取失败必须失败关闭，否则覆盖面判据会消失。'
+      );
+    }
+    const declared = [...blockMatch[1].matchAll(/"([a-z0-9-]+)"/g)].map((m) => m[1]);
+    if (declared.length === 0) {
+      throw new Error('WRITE_BOUNDARY_REGISTRY_EMPTY: DiskWritingCommands 解析结果为空。');
+    }
+    const covered = new Set(writeCommands.map((entry) => entry.command));
+    const missing = declared.filter((name) => !covered.has(name));
+    const extra = [...covered].filter((name) => !declared.includes(name));
+    if (missing.length > 0 || extra.length > 0) {
+      throw new Error(
+        'WRITE_BOUNDARY_COVERAGE_DRIFT: 本门禁的 writeCommands 与 C# 侧'
+        + ` DiskWritingCommands 不一致。未覆盖=${JSON.stringify(missing)}`
+        + ` 多余=${JSON.stringify(extra)}。漏测的命令会完全跳过 writable-root 校验。`
+      );
+    }
+    declaredDiskWritingCommands = declared;
+    coveredWriteCommands = writeCommands.map((entry) => entry.command);
+  }
 
   let requestId = 0;
   for (const { command, options } of writeCommands) {
@@ -361,7 +426,9 @@ report({
   gate: LABEL,
   status: 'passed',
   assertions: checks.length,
-  coveredCommands: ['extract-bnd4-child', 'write-bnd4', 'export-tpf-texture'],
+  // 从实测清单派生，并已与 C# 侧 DiskWritingCommands 全集对账（见上方防漂移判据）。
+  coveredCommands: coveredWriteCommands,
+  declaredDiskWritingCommands,
   message: '所有按 outputPath 落盘的命令都对只读根与 .. 逃逸失败关闭，且 writable root 内正向写入成功。',
   fixture: 'synthetic BND4-in-DFLT-DCX（微小、合法构造、明确标记，非 native authority）',
   nonClaim: '本门禁只证明路径边界，不证明任何格式的解析或写回 authority。'
