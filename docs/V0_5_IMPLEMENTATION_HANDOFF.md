@@ -1395,7 +1395,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 134 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 136 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1461,7 +1461,7 @@ npm run test:workbench-projections
 npm run typecheck
 ~~~
 
-**synthetic**（33 条）
+**synthetic**（34 条）
 
 ~~~powershell
 npm run bridge:build
@@ -1492,6 +1492,7 @@ npm run test:paramdef-layout
 npm run test:power-loss-recovery
 npm run test:release-corpus-registry
 npm run test:release-editor-acceptance
+npm run test:renderer-e2e
 npm run test:smithbox-param-metadata-source
 npm run test:sqlite-crash-recovery
 npm run test:standalone-writer-failure-matrix
@@ -1499,7 +1500,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（39 条）
+**native**（40 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1537,6 +1538,7 @@ npm run test:param-duplicate-native
 npm run test:param-field-write-matrix
 npm run test:param-metadata-native
 npm run test:private-native-gate
+npm run test:real-mod
 npm run test:script-container-evidence
 npm run test:script-container-game-load
 npm run test:script-container-replace
