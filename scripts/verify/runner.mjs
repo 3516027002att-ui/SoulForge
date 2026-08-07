@@ -116,6 +116,47 @@ function extractTopLevelJsonValues(text) {
   return values;
 }
 
+/** 递归下探时的深度上限。防御畸形/自引用输出，不是业务约束。 */
+const SKIP_SCAN_MAX_DEPTH = 8;
+
+/**
+ * 递归收集跳过的 leg 名。
+ *
+ * 认两种值形态：字段值恰为字符串 'skipped'，或 `skipped: true` / `status: 'skipped'`
+ * 出现在某个子对象里。数组元素以 `key[i]` 命名，便于诊断指到具体位置。
+ *
+ * @param {unknown} node
+ * @param {string} path 当前路径前缀（顶层为 ''）
+ * @param {string[]} out 收集结果
+ * @param {number} [depth]
+ */
+function collectSkippedLegs(node, path, out, depth = 0) {
+  if (depth > SKIP_SCAN_MAX_DEPTH || node === null || typeof node !== 'object') return;
+
+  if (Array.isArray(node)) {
+    node.forEach((item, index) => {
+      collectSkippedLegs(item, `${path}[${index}]`, out, depth + 1);
+    });
+    return;
+  }
+
+  // 这一层自身声明了跳过。顶层（path === ''）由调用方按整套跳过处理，不在此登记。
+  if (path !== '' && (node.skipped === true || node.status === 'skipped')) {
+    out.push(path);
+    // 已判定为跳过的子树不再下探——里面的字段是该跳过的细节，不是独立的 leg。
+    return;
+  }
+
+  for (const [key, value] of Object.entries(node)) {
+    const childPath = path === '' ? key : `${path}.${key}`;
+    if (value === 'skipped') {
+      out.push(childPath);
+      continue;
+    }
+    collectSkippedLegs(value, childPath, out, depth + 1);
+  }
+}
+
 /**
  * 从套件输出中提取跳过信号。
  *
@@ -150,15 +191,24 @@ export function detectSkipSignals(stdout, stderr = '') {
         wholeSkipped = true;
         continue;
       }
-      // 形态 3：某个 leg 跳过（字段值恰为 'skipped'）。
-      for (const [key, value] of Object.entries(parsed)) {
-        if (value === 'skipped') skippedLegs.push(key);
-        else if (value && typeof value === 'object' && !Array.isArray(value)) {
-          for (const [innerKey, innerValue] of Object.entries(value)) {
-            if (innerValue === 'skipped') skippedLegs.push(`${key}.${innerKey}`);
-          }
-        }
-      }
+      // 形态 3：某个 leg 跳过。
+      //
+      // 两种写法都必须认，且深度不限：
+      //   { real: { skipped: true } }      布尔
+      //   { real: { status: 'skipped' } }  字符串
+      //   { steps: [{ skipped: true }] }   数组元素内
+      //
+      // 原实现只在顶层认 `skipped === true`，嵌套层只认字符串 'skipped'，
+      // 且只下探一层、不进数组。实测三种盲区：嵌套布尔、数组元素内、二层嵌套。
+      // runNativeCorpusWriteBackSmoke.ts:469 缺语料时输出
+      //   real: { skipped: true, message: '真实 corpus 写回未执行，不构成声明。' }
+      // 正好落在第一种盲区里——「未执行」对调度器完全不可见，整套按完整通过计入。
+      //
+      // 这是同一类盲区的第二次发生（上一次是逐行 parse 对 pretty-print 全盲）。
+      // 根因不是漏了某个形态，而是**形态没有单一约定**、检测端只能枚举猜测；
+      // 枚举永远漏。这里改为递归遍历 + 两种形态都认，把枚举面收敛到「值」而不是
+      // 「位置」；位置层面的约定由 collectSkipShapeViolations 单独校验。
+      collectSkippedLegs(parsed, '', skippedLegs);
     }
   }
 
