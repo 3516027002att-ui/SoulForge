@@ -153,6 +153,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 必须失败关闭且不留文件——源码扫描抓不到「校验通过但 writer 绕回原始路径」
   // 这类等价路径逃逸。归 synthetic：需要真实 exe，但不需要真实语料。
   'test:bridge-write-boundary': 'synthetic',
+  // BND4 重建路径的场景边界：「无损往返」与「通用重排」不得共用一条实现当判据。
+  // 用自造带宽间隙的 fixture（复现真实容器形态），不需真实语料，公开 CI 可真跑。
+  // 布局守卫本身在 IPC 层不可达（调用方永远传 no-op），故由文档内部自检上报，
+  // 门禁断言其四项全真——否则放宽守卫会让变长字节越界覆盖后续子项而无人发现。
+  'test:bnd4-repack-scope': 'synthetic',
   // 桌面安全边界的运行期版本：观测生产产物真实的 webPreferences、preload 表面与
   // 脱敏行为。与 test:desktop-security（源码文本级）并存而不是取代——后者的
   // must-exist 判据改名即红，是安全方向；本条替掉的是它那批 `!includes(旧名)`
