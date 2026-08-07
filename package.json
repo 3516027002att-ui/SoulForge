@@ -167,7 +167,8 @@
     "probe:behavior-headers": "npm run probe:behavior-headers -w @soulforge/core",
     "handoff:project": "node scripts/generate-handoff-projection.mjs",
     "test:handoff-projection": "node scripts/verify-handoff-projection-fixtures.mjs && node scripts/generate-handoff-projection.mjs --check",
-    "gov:seal": "node scripts/gov.mjs seal"
+    "gov:seal": "node scripts/gov.mjs seal",
+    "test:ai-tool-permission": "npm run test:ai-tool-permission -w @soulforge/core"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",
