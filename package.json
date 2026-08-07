@@ -125,6 +125,8 @@
     "test:bridge-exit-hygiene": "node scripts/verify-bridge-exit-hygiene-gate.mjs",
     "test:bridge-write-boundary": "node scripts/verify-bridge-write-boundary-gate.mjs",
     "test:desktop-security-runtime": "node scripts/verify-desktop-security-runtime.mjs",
+    "test:renderer-e2e": "npm run test:renderer-playwright -w @soulforge/desktop",
+    "test:real-mod": "npm run test:real-mod -w @soulforge/core",
     "test:desktop-contract-mutations": "node scripts/contract/verify-desktop-contract-mutations.mjs",
     "test:ui-localization": "node scripts/verify-ui-localization.mjs",
     "test:database-utility": "npm run test:database-utility -w @soulforge/desktop",

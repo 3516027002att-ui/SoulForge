@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ResourceFormatKind, ResourceKind } from '@soulforge/shared';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
@@ -14,6 +15,25 @@ interface PreviewCounts {
 
 async function main(): Promise<void> {
   const workspaceRoot = resolve(process.argv[2] ?? '../../mods');
+
+  // 语料缺失时结构化跳过，而不是让 scanWorkspace 抛 ENOENT。
+  //
+  // 这条 smoke 打的是本机真实 Mod 目录（默认 ../../mods），公开环境没有它。此前
+  // 它既没有跳过分支、又不在任何 tier —— 于是「无法执行」和「无人调度」两个问题
+  // 互相掩盖：登记进 native 层后必须能诚实跳过，否则会把缺语料伪装成失败。
+  // 跳过标记用单行 status:'skipped'，由 verify 的五态判定识别，绝不冒充通过。
+  if (!existsSync(workspaceRoot)) {
+    console.log(JSON.stringify({
+      ok: null,
+      status: 'skipped',
+      smoke: 'real-mod-open',
+      reason: `本机 Mod 语料目录不存在：${workspaceRoot}`,
+      remedy: 'npm run test:real-mod -w @soulforge/core -- <你的 Mod 目录>',
+      skipSemantics: '结构跳过：未声称通过，也不构成 native 完成声明。'
+    }));
+    return;
+  }
+
   const result = await scanWorkspace({ workspaceRoot });
 
   const previewCounts: PreviewCounts = {
