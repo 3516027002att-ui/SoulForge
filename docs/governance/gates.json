@@ -86,7 +86,8 @@
         "EV-SECURITY-BOUNDARY-RUNTIME-20260807",
         "EV-GATE-HARDENING-20260807",
         "EV-SEAL-POLARITY-FIXTURE-20260807",
-        "EV-RENDERER-UNIT-SPLIT-20260807"
+        "EV-RENDERER-UNIT-SPLIT-20260807",
+        "EV-ROUNDTRIP-PAGINATION-20260807"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -156,7 +157,8 @@
         "W-REL-B-CORPUS-02"
       ],
       "evidenceRefs": [
-        "EV-REL-B-CORPUS-02-20260803"
+        "EV-REL-B-CORPUS-02-20260803",
+        "EV-ROUNDTRIP-PAGINATION-20260807"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -266,7 +268,8 @@
         "EV-V06-RESUME-20260804",
         "EV-REL-SCOPE-20260804-V06-FIXTURE-FIX",
         "EV-REL-SCOPE-20260805-V06-RESUME-SCOPE-FIXTURES",
-        "EV-SECURITY-BOUNDARY-RUNTIME-20260807"
+        "EV-SECURITY-BOUNDARY-RUNTIME-20260807",
+        "EV-ROUNDTRIP-PAGINATION-20260807"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -399,7 +402,8 @@
         "EV-REL-SCOPE-20260804-V06-FIXTURE-FIX",
         "EV-REL-SCOPE-20260805-V06-RESUME-SCOPE-FIXTURES",
         "EV-UI-RENOVATION-20260807",
-        "EV-RENDERER-UNIT-SPLIT-20260807"
+        "EV-RENDERER-UNIT-SPLIT-20260807",
+        "EV-ROUNDTRIP-PAGINATION-20260807"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
