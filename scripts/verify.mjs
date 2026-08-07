@@ -276,6 +276,9 @@ let bailed = false;
 for (const entry of plan) {
   if (bailed) {
     results.push({ ...entry, outcome: OUTCOME.NOT_ATTEMPTED, durationMs: 0, skippedLegs: [] });
+    // 终端逐条输出是人最先看到的地方：这里必须显式说「没跑」，否则被 bail 掩掉的
+    // 条目在屏幕上完全不出现，读者会以为本层只有前几条。
+    console.error(`SKIPPED-BY-BAIL [${entry.tier}] ${entry.scriptName} (未执行)`);
     continue;
   }
   const result = await runSuite({
@@ -318,15 +321,28 @@ for (const outcome of Object.values(OUTCOME)) {
 const failures = results.filter((result) => result.treatedAsFailure);
 const ok = failures.length === 0;
 
+// bail 中断后未执行的条目。它们既不是通过也不是跳过，而是**根本没跑**。
+//
+// 为什么要单列并写进 message：默认 bail 下，一条红会让同层其余套件全部变成
+// not-attempted，而汇总里 `not-attempted: 15` 与 `passed: 2` 并列呈现，读起来
+// 像「15 条不适用」。实测事故：治理层 18 条只跑了 3 条就中断，输出里 15 条
+// not-attempted，而真实状态是 3 条失败；不加 --no-bail 根本看不到全貌。
+// 这类「没跑被读成通过」是本仓库反复出现的一类问题，判据必须自己说清楚。
+const notAttempted = results.filter((r) => r.outcome === OUTCOME.NOT_ATTEMPTED);
+const bailNote = notAttempted.length > 0
+  ? `；另有 ${notAttempted.length} 条因 bail 中断而**未执行**（不是通过、也不是跳过），`
+    + '加 --no-bail 可看到本层全貌'
+  : '';
+
 const summary = {
   ok,
   mode: 'run',
-  message: ok
+  message: (ok
     ? `${counts.passed} 条套件真实执行并通过`
       + (counts.skipped > 0 || counts.partial > 0
         ? `；${counts.skipped} 条整体跳过、${counts.partial} 条部分跳过（缺本机资源，不构成 native 完成声明）`
         : '')
-    : `${failures.length} 条套件失败`,
+    : `${failures.length} 条套件失败`) + bailNote,
   tiers: options.tiers,
   filter: options.filter,
   requireExecuted: options.requireExecuted,
@@ -338,6 +354,9 @@ const summary = {
     .filter((r) => r.outcome === OUTCOME.PARTIAL)
     .map((r) => ({ scriptName: r.scriptName, skippedLegs: r.skippedLegs })),
   failed: failures.map((r) => r.scriptName),
+  // 与 executedAndPassed / skippedEntirely 并列：把「没跑」也变成一个显式清单，
+  // 而不是只体现为 counts 里一个容易被误读的数字。
+  notAttemptedDueToBail: notAttempted.map((r) => r.scriptName),
   results
 };
 
