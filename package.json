@@ -124,6 +124,7 @@
     "test:probe-residual-gate": "node scripts/verify-probe-residual-gate.mjs",
     "test:bridge-exit-hygiene": "node scripts/verify-bridge-exit-hygiene-gate.mjs",
     "test:bridge-write-boundary": "node scripts/verify-bridge-write-boundary-gate.mjs",
+    "test:bnd4-repack-scope": "node scripts/verify-bnd4-repack-scope-gate.mjs",
     "test:desktop-security-runtime": "node scripts/verify-desktop-security-runtime.mjs",
     "test:renderer-e2e": "npm run test:renderer-playwright -w @soulforge/desktop",
     "test:seal-cli": "node scripts/verify-seal-cli-fixtures.mjs",

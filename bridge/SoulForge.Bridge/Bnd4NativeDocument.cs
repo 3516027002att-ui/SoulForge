@@ -87,7 +87,13 @@ internal sealed class Bnd4NativeDocument
         string rebuiltHash;
         try
         {
-            var rebuilt = Repack(ToRepackEntries());
+            // 走布局保持路径而不是通用 Repack：no-op 输入的正确基线是「以源字节为
+            // 基底、只改必要字段」。通用 Repack 会重排名字区与数据区，对真实容器
+            // 注定不逐字节还原（源的对齐间隙比 16 字节宽、头部声明的 dataOffset 与
+            // 首个子项实际起点相差 8 字节），那属于「通用重排不适合当无损基线」，
+            // 不是重建有 bug。
+            var noOpEntries = ToRepackEntries();
+            var rebuilt = RebuildPreservingLayout(noOpEntries);
             byteIdentical = rebuilt.Length == SourceBytes.Length
                 && rebuilt.AsSpan().SequenceEqual(SourceBytes);
             // 报告重建产物自己的哈希。此前这里填的是 reparsed.SourceHash——也就是
@@ -99,7 +105,7 @@ internal sealed class Bnd4NativeDocument
             // 重建失败本身就是「不是逐字节一致」的一种，必须报 false 而不是抛给
             // 调用方——调用方拿到的是往返报告，不是重建服务。
             byteIdentical = false;
-            rebuiltHash = "repack-failed";
+            rebuiltHash = "rebuild-failed";
         }
 
         return new Bnd4RoundTripReport(
@@ -169,16 +175,128 @@ internal sealed class Bnd4NativeDocument
         entry.Flags, entry.Unknown, entry.Id, entry.Name, EntryBytes[index].ToArray(), entry.UncompressedSize)).ToArray();
 
     /// <summary>
+    /// 判断一批 repack 条目是否与当前文档在**布局上**完全等价：条目数、顺序、
+    /// 名字、存储长度与条目头字段都未变。
+    ///
+    /// 这个区分是往返验证能否用「逐字节一致」作判据的前提。Repack 是通用重排器
+    /// （变长、增删、重命名都走它），它必然重算名字区与数据区布局，因此对真实
+    /// 容器**注定**不会逐字节还原——实测差异全部落在 dataOffset 相关字段：源容器
+    /// 在名字区末尾与子项之间留有比 16 字节对齐更宽的间隙（item.msgbnd.dcx 累计
+    /// 168 字节），且头部声明的 dataOffset 与第一个子项实际起点在源里就相差 8 字节。
+    ///
+    /// 对这类布局差异，正确结论不是「Repack 有 bug」，而是「通用重排不适合当
+    /// 无损基线」。无损基线应当走 RebuildPreservingLayout：以源字节为基底，只改
+    /// 必要字段。
+    /// </summary>
+    /// <summary>
+    /// 布局守卫的自检：用当前文档的条目集合构造三种越界输入，断言守卫都拒绝。
+    ///
+    /// 为什么要在文档内部自检而不是只靠外部门禁：RebuildPreservingLayout 目前只被
+    /// VerifyRoundTrip / VerifyFieldPreservation 调用，而它们**永远传 no-op 输入**，
+    /// 因此长度守卫在 IPC 层不可达——外部门禁无论怎么构造请求都测不到它。实测过：
+    /// 注释掉长度守卫，写盘边界、CRUD、往返三类门禁全部照样通过。
+    ///
+    /// 而这道守卫是布局保持重建的唯一正确性前提：放宽它会让更长的字节被写进源的
+    /// 原位，**越界覆盖后续子项**。所以判据必须跟着实现走，随 envelope 一起上报。
+    /// </summary>
+    public Bnd4LayoutGuardReport VerifyLayoutGuard()
+    {
+        if (Entries.Count == 0)
+        {
+            return new Bnd4LayoutGuardReport(true, true, true, true, "empty-container");
+        }
+        var baseline = ToRepackEntries();
+        var acceptsNoOp = IsLayoutPreservingRepack(baseline);
+
+        // 变长：存储字节比源长一个字节。
+        var longer = baseline.ToList();
+        longer[0] = longer[0] with
+        {
+            StoredBytes = longer[0].StoredBytes.Concat(new byte[] { 0x00 }).ToArray()
+        };
+        var rejectsLonger = !IsLayoutPreservingRepack(longer);
+
+        // 改名：名字变化必须重排名字区，不可走布局保持路径。
+        var renamed = baseline.ToList();
+        renamed[0] = renamed[0] with { Name = $"{renamed[0].Name}.renamed" };
+        var rejectsRename = !IsLayoutPreservingRepack(renamed);
+
+        // 删条目：条目数变化。
+        var removed = baseline.ToList();
+        removed.RemoveAt(0);
+        var rejectsCountChange = !IsLayoutPreservingRepack(removed);
+
+        return new Bnd4LayoutGuardReport(
+            acceptsNoOp, rejectsLonger, rejectsRename, rejectsCountChange, null);
+    }
+
+    public bool IsLayoutPreservingRepack(IReadOnlyList<Bnd4RepackEntry> nextEntries)
+    {
+        if (nextEntries.Count != Entries.Count) return false;
+        for (var index = 0; index < Entries.Count; index++)
+        {
+            var source = Entries[index];
+            var next = nextEntries[index];
+            if (next.StoredBytes.Length != source.CompressedSize) return false;
+            if ((next.UncompressedSize ?? next.StoredBytes.Length) != source.UncompressedSize) return false;
+            if (next.Flags != source.Flags || next.Unknown != source.Unknown || next.Id != source.Id) return false;
+            if (!string.Equals(next.Name, source.Name, StringComparison.Ordinal)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// 布局保持重建：以源字节为基底，把每个子项的存储字节原地写回。
+    ///
+    /// 仅在 <see cref="IsLayoutPreservingRepack"/> 为真时可用——也就是「条目集合与
+    /// 布局都没变，只是内容可能被等长替换」这一种场景。它与 ReplaceEntrySameSize
+    /// 同思路（复制源、只改必要字节），因此对 no-op 输入必然逐字节还原：源的对齐
+    /// 间隙、名字区留白、头部声明与实际起点的差异全部原样保留。
+    ///
+    /// 变长 / 增删 / 重命名不得走这里——那些场景必须重排布局，走 Repack。
+    /// </summary>
+    public byte[] RebuildPreservingLayout(IReadOnlyList<Bnd4RepackEntry> nextEntries)
+    {
+        if (!IsLayoutPreservingRepack(nextEntries))
+        {
+            throw new InvalidDataException(
+                "RebuildPreservingLayout 只接受布局等价的条目集合；变长、增删或重命名必须走 Repack。");
+        }
+        var rebuilt = SourceBytes.ToArray();
+        for (var index = 0; index < nextEntries.Count; index++)
+        {
+            var source = Entries[index];
+            nextEntries[index].StoredBytes.CopyTo(rebuilt.AsSpan(source.DataOffset, source.CompressedSize));
+        }
+        return rebuilt;
+    }
+
+    /// <summary>
     /// No-op repack preservation: rebuild the container with every entry unchanged
     /// and compare the unknown/header and entry-level fields byte-for-byte against
     /// the source BND4 payload. For KRAK this is the honest per-byte boundary that
     /// re-compression cannot guarantee at the outer DCX layer.
+    ///
+    /// 逐字节判据走布局保持重建（RebuildPreservingLayout）；字段级判据仍对通用
+    /// Repack 的产物做，因为那才是变长路径真正会写出的东西——两者问的是不同问题：
+    /// 「no-op 能否逐字节还原」与「重排后条目字段/名字/存储字节是否保住」。
+    /// 混用一个 Repack 产物会让前者对真实容器恒假，从而掩盖后者的真实结论。
     /// </summary>
     public Bnd4FieldPreservationReport VerifyFieldPreservation()
     {
-        var rebuilt = Repack(ToRepackEntries());
-        var noOpByteIdentical = rebuilt.Length == SourceBytes.Length
-            && rebuilt.AsSpan().SequenceEqual(SourceBytes);
+        var noOpEntries = ToRepackEntries();
+        var rebuilt = Repack(noOpEntries);
+        bool noOpByteIdentical;
+        try
+        {
+            var preserved = RebuildPreservingLayout(noOpEntries);
+            noOpByteIdentical = preserved.Length == SourceBytes.Length
+                && preserved.AsSpan().SequenceEqual(SourceBytes);
+        }
+        catch (InvalidDataException)
+        {
+            noOpByteIdentical = false;
+        }
         var headerUnknownPreserved = SourceBytes.Length >= 0x40 && rebuilt.Length >= 0x40
             && SourceBytes.AsSpan(0x18, 8).SequenceEqual(rebuilt.AsSpan(0x18, 8))
             && SourceBytes.AsSpan(0x30, 0x10).SequenceEqual(rebuilt.AsSpan(0x30, 0x10));
@@ -318,6 +436,7 @@ internal sealed class Bnd4NativeDocument
         roundTrip = VerifyRoundTrip(),
         crud = VerifyCrud(),
         fieldPreservation = VerifyFieldPreservation(),
+        layoutGuard = VerifyLayoutGuard(),
         authority = "candidate"
     };
 
@@ -363,6 +482,14 @@ internal sealed record Bnd4Entry(
     int CompressedSize,
     int UncompressedSize,
     string ContentHash);
+
+/// <summary>布局守卫自检结果。四项必须全为 true，否则布局保持重建可能越界写入。</summary>
+internal sealed record Bnd4LayoutGuardReport(
+    bool AcceptsNoOp,
+    bool RejectsLongerStoredBytes,
+    bool RejectsRename,
+    bool RejectsEntryCountChange,
+    string? Note);
 
 internal sealed record Bnd4RoundTripReport(
     bool ByteIdentical,
