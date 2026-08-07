@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import {
+  SceneProjectionError,
   buildMsbSceneManifest,
   buildSceneDrawList,
   type MsbMapEventLike,
@@ -87,21 +88,57 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     const host = hostRef.current;
     if (!host) return;
 
-    const manifest = buildMsbSceneManifest({
-      sourceUri: props.mapResourceUri,
-      sourcePath: props.sourcePath,
-      game: props.game,
-      resourceKind: 'map',
-      revision: props.revision,
-      ...(props.models ? { models: props.models } : {}),
-      parts: props.parts,
-      regions,
-      ...(props.events ? { events: props.events } : {}),
-      ...(props.sourceCounts ? { sourceCounts: props.sourceCounts } : {}),
-      maxNodes: props.maxNodes ?? 2000,
-      chunkSize: 512
-    });
-    const drawList = buildSceneDrawList(manifest, { maxItems: props.maxNodes ?? 2000 });
+    // 未选中资源时不构建场景，直接进空态。
+    //
+    // 实测缺陷：App.tsx 传 `selectedFile?.sourceUri ?? ''`，未选文件时是空字符串；
+    // validateMetadata 要求 sourceUri 含 '://'，于是抛 SCENE_URI_INVALID。这个异常
+    // 在 useEffect 里同步抛出、无人捕获，会冒泡成未捕获错误并**炸掉整个 React 树**
+    // ——实测点资源栏的 map 目录后，界面全部元素消失（按钮不在 DOM、其余 tab 点不动、
+    // Tab 键无任何停靠点），等于应用白屏。
+    //
+    // 这里做两层：先空态早退（正常路径不该走到校验失败），再对构建过程兜 try/catch
+    // （投影校验是安全边界，它该继续 fail-closed，但失败必须呈现为面板内可读状态，
+    // 不能把整个界面带走）。
+    if (!props.mapResourceUri || !props.mapResourceUri.includes('://')) {
+      setStatus('未选中可解析的 MSB 资源：请先在资源浏览器里选择一个 map 资源。');
+      setNodeCount(0);
+      return;
+    }
+
+    let manifest: ReturnType<typeof buildMsbSceneManifest>;
+    let drawList: ReturnType<typeof buildSceneDrawList>;
+    try {
+      manifest = buildMsbSceneManifest({
+        sourceUri: props.mapResourceUri,
+        sourcePath: props.sourcePath,
+        game: props.game,
+        resourceKind: 'map',
+        revision: props.revision,
+        ...(props.models ? { models: props.models } : {}),
+        parts: props.parts,
+        regions,
+        ...(props.events ? { events: props.events } : {}),
+        ...(props.sourceCounts ? { sourceCounts: props.sourceCounts } : {}),
+        maxNodes: props.maxNodes ?? 2000,
+        chunkSize: 512
+      });
+      drawList = buildSceneDrawList(manifest, { maxItems: props.maxNodes ?? 2000 });
+    } catch (error) {
+      // 结构化呈现，不吞：把诊断码与消息给用户，同时留在 console 供排查。
+      // 注意 SceneProjectionError 的构造是 super(code)，所以 Error.message 里装的是
+      // **码**而不是人话；可读消息在 diagnostic.message。直接用 error.message 会把
+      // 「SCENE_URI_INVALID」当描述展示给用户。
+      const code = error instanceof SceneProjectionError
+        ? error.diagnostic.code
+        : 'SCENE_BUILD_FAILED';
+      const message = error instanceof SceneProjectionError
+        ? error.diagnostic.message
+        : (error instanceof Error ? error.message : String(error));
+      setStatus(`场景投影失败（${code}）：${message}`);
+      setNodeCount(0);
+      console.error('[MsbScenePanel] 场景投影失败', { code, message });
+      return;
+    }
     setNodeCount(drawList.itemCount);
 
     void mountThreeProxyScene({

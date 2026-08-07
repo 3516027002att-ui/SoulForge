@@ -79,6 +79,7 @@ import {
   StructuredPreviewCard
 } from './components/PreviewCards.js';
 import { MsgTableEditor } from './components/MsgTableEditor.js';
+import { PanelErrorBoundary } from './components/PanelErrorBoundary.js';
 import {
   extractMsgRows,
   nextMsgId,
@@ -1910,6 +1911,14 @@ export function App(): ReactElement {
               </div>
               <div className="pane-content">
                 <div className="viewer-content">
+          {/* 面板级错误边界：任何一个资源族面板抛异常时只降级它自己，不带走整个界面。
+              renderer 此前完全没有 ErrorBoundary，实测点 map 目录触发
+              SCENE_URI_INVALID 后全部元素消失（详见 PanelErrorBoundary 注释）。
+              key 绑定当前资源，切换资源时重建边界，避免上一份错误状态粘住。 */}
+          <PanelErrorBoundary
+            label={`${resourceMode} 资源面板`}
+            key={`panel-boundary:${selectedFile?.sourceUri ?? 'none'}`}
+          >
           {!selectedFile && <p className="muted">选择左侧资源后显示限量文本或十六进制预览。</p>}
           {preview?.structuredPreview && <StructuredPreviewCard preview={preview.structuredPreview} />}
           {preview?.nativeInspection && <NativeInspectionCard inspection={preview.nativeInspection} />}
@@ -2354,6 +2363,7 @@ export function App(): ReactElement {
             <TpfWorkbenchPanel resourceUri={selectedFile.sourceUri} data={tpfData as never} />
           )}
           {preview?.truncated && <p className="muted">预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开。</p>}
+          </PanelErrorBoundary>
                 </div>
               </div>
             </div>
