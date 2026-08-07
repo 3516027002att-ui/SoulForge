@@ -50,8 +50,10 @@ const text = (buffer) => buffer.toString('utf8').trim();
  * 参数若有第二份写法，两处算出的 trackedDiffSha256 会在某些改动下分叉，
  * 而分叉的表现是「封存当时通过、门禁却判无效」——最难查的一类。
  *
- * 反过来说，这里必须与那个脚本保持逐参数一致。verify-seal-cli-fixtures.mjs
- * 用真实工作树逐字段比对两者输出，任何一侧漂移都会失败关闭。
+ * 反过来说，这里必须与那个脚本保持逐参数一致。scripts/verify-seal-cli-fixtures.mjs
+ * 在真实工作树上逐字段比对两者输出，任何一侧漂移都会失败关闭。
+ * （该 fixture 此前只存在于本注释里——文件根本没有。注释声称有覆盖、实际没有，
+ * 比不写更误导；现已按注释描述的判据补齐并登记进 governance 层。）
  */
 function computeFingerprint(root) {
   const head = git(root, ['rev-parse', '--verify', 'HEAD']);

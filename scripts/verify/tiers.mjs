@@ -40,6 +40,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 治理锁与 claim CLI 的负向 fixture：坏锁与好锁在顺序执行下表现一致，
   // 只有并发与崩溃场景能区分，不门禁化就等于没有锁。
   'test:gov-cli': 'governance',
+  // seal 的指纹算法一致性与 commands 极性约束。守的是「两套 git 参数分叉」——
+  // 分叉表现为封存当时通过、门禁却判无效，seal.mjs 自己把它列为最难查的一类。
+  // 此前这条 fixture 只存在于 seal.mjs 的注释里，文件不存在。纯静态 + 只读工作树，
+  // 任何机器可跑，归 governance。
+  'test:seal-cli': 'governance',
   // 孤儿 smoke 门禁。verify:audit 只能看见「已登记的 script 缺层级」，看不见
   // 「有 smoke 文件但没有任何 script」——本轮实测到 5 个这样的文件共 3869 行，
   // 其中一个还被生产代码注释引用为覆盖依据。秒级，归 governance。
