@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import {
   buildMsbSceneManifest,
   buildSceneDrawList,
@@ -366,12 +367,16 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             <span>Type</span>
             <span>位置</span>
           </div>
-          {regions.slice(0, 40).map((region) => (
+          {/* 行选择必须键盘可达：选中区域后才会显示坐标详情与场景高亮。 */}
+          {regions.slice(0, 40).map((region, rowIndex) => (
             <div
               key={region.name}
               className="binder-child-row"
-              role="row"
-              onClick={() => setSelectedRegion(region.name)}
+              {...selectableRowAttributes({
+                selected: selectedRegion === region.name,
+                isTabEntry: isRowTabEntry(rowIndex, selectedRegion !== null),
+                onSelect: () => setSelectedRegion(region.name)
+              })}
               style={selectedRegion === region.name ? { outline: '1px solid var(--accent, #6af)' } : undefined}
             >
               <span title={region.name}>{region.name.slice(0, 28)}</span>

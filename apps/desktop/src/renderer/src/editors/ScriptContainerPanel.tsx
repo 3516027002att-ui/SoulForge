@@ -10,6 +10,7 @@ import { SCRIPT_CLASSIFICATION_ORDER, scriptClassificationLabel } from '@soulfor
 import { HexEditorPanel } from './HexEditorPanel.js';
 import { isLikelyBase64, uint8ArrayToBase64 } from '../utils/binary.js';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 
 /** Fixed page size for the paginated script container entry table (hard constraint 17). */
 const SCRIPT_PAGE_SIZE = 50;
@@ -393,14 +394,17 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
               <span>索引</span>
               <span>标识</span>
             </div>
-            {tableEntries.map((entry) => (
+            {tableEntries.map((entry, rowIndex) => (
               <div
                 key={`${entry.index}-${entry.name}`}
                 className={entry.name === selectedName
                   ? 'binder-child-row script-entry-row selected'
                   : 'binder-child-row script-entry-row'}
-                role="row"
-                onClick={() => selectEntry(entry.name)}
+                {...selectableRowAttributes({
+                  selected: entry.name === selectedName,
+                  isTabEntry: isRowTabEntry(rowIndex, selectedName !== null),
+                  onSelect: () => selectEntry(entry.name)
+                })}
               >
                 <span title={entry.name}>{entry.name}</span>
                 <span className="muted">{scriptClassificationLabel(entry.classification)}</span>

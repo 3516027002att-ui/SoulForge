@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { ParamDefDocument, ParamFieldDef, ParamRowPage } from '@soulforge/shared';
 import { base64ToUint8Array } from '../utils/binary.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 
 export interface ParamDefPanelProps {
   typeName: string;
@@ -267,12 +268,17 @@ export function ParamDefPanel(props: ParamDefPanelProps): ReactElement {
           <span>Name</span>
           <span>Raw 预览</span>
         </div>
-        {pageRows.map((row) => (
+        {/* 行选择必须键盘可达：字段表只在选中行后出现，此前键盘用户根本进不去
+            字段编辑态。属性由 selectableRowAttributes 统一产出。 */}
+        {pageRows.map((row, rowIndex) => (
           <div
             key={row.id}
             className={row.id === selectedRowId ? 'binder-child-row selected' : 'binder-child-row'}
-            role="row"
-            onClick={() => selectRow(row.id)}
+            {...selectableRowAttributes({
+              selected: row.id === selectedRowId,
+              isTabEntry: isRowTabEntry(rowIndex, selectedRowId !== null),
+              onSelect: () => selectRow(row.id)
+            })}
           >
             <span>{row.id}</span>
             <span>{row.name ?? '—'}</span>

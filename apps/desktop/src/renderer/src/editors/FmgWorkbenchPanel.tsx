@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import type { FmgEntryPage } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 
 export interface FmgEntryRow {
   id: number;
@@ -171,12 +172,18 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           <span>ID</span>
           <span>文本</span>
         </div>
-        {pageEntries.map((row) => (
+        {/* 行选择必须键盘可达：编辑 textarea 只在选中后出现，此前键盘用户
+            根本进不去编辑态。属性由 selectableRowAttributes 统一产出，行为契约
+            （Enter/Space 触发、roving tabindex）由其单测锁定。 */}
+        {pageEntries.map((row, rowIndex) => (
           <div
             key={row.id}
             className="binder-child-row"
-            role="row"
-            onClick={() => setSelectedId(row.id)}
+            {...selectableRowAttributes({
+              selected: row.id === selectedId,
+              isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
+              onSelect: () => setSelectedId(row.id)
+            })}
             style={row.id === selectedId ? { background: '#243044' } : undefined}
           >
             <span>{row.id}</span>
