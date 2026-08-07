@@ -8,7 +8,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import type {
   AuditActor,
   AuditLogStore,
@@ -113,7 +113,8 @@ export class WorkspaceTransaction {
       transactionId: this.transactionId,
       actor: this.actor,
       eventKind: 'transaction_created',
-      details: { workspaceId: this.workspaceId, workspaceRoot: this.workspaceRoot }
+      // 不放 workspaceRoot 绝对路径：诊断会外流到日志与审计产物。
+      details: { workspaceId: this.workspaceId }
     }));
   }
 
@@ -142,6 +143,32 @@ export class WorkspaceTransaction {
    * Exposed so a durable journal driver can persist per-target after-hashes
    * before the replace loop begins.
    */
+  /**
+   * 把绝对本机路径脱敏成工作区相对路径，供 diagnostics.details 使用。
+   *
+   * 为什么必须有：诊断会流到调用方（含 renderer）、日志与审计产物里，绝对路径
+   * 会把本机目录结构一起带出去。实测抓到的泄漏在提交后验证失败的分支：
+   * details.committedPaths[0] 是绝对路径。
+   *
+   * 此前没被发现，是因为守这条的判据写成
+   *   JSON.stringify(diagnostics).includes(root)
+   * 而 Windows 上 stringify 把 \ 转义成 \\，字面比较**恒假**——真泄漏也报绿。
+   * 判据已改用 testing/assertNoPathLeak.ts 的递归查找。
+   *
+   * 落在工作区之外的路径只保留 basename：那种情况本身是异常（越界写入尝试），
+   * 完整路径对诊断无益，而它恰恰是最不该外泄的那类。
+   */
+  private redactPath(absolutePath: string): string {
+    const rel = relative(this.workspaceRoot, absolutePath);
+    if (rel.length === 0) return '.';
+    if (rel.startsWith('..')) return `<outside-workspace>/${basename(absolutePath)}`;
+    return rel.replaceAll('\\', '/');
+  }
+
+  private redactPaths(paths: readonly string[]): string[] {
+    return paths.map((item) => this.redactPath(item));
+  }
+
   getCommitTargets(): Array<{ op: PatchIrOperation; targetPath: string; stagingPath: string }> {
     return this.collectCommitTargets();
   }
@@ -601,7 +628,7 @@ export class WorkspaceTransaction {
           severity: 'error',
           code: 'TRANSACTION_RECOVERY_REQUIRED',
           message: '提交中途失败，且自动恢复未能还原所有文件。',
-          details: { errors: restored.errors, partialCommitted: committedPaths }
+          details: { errors: restored.errors, partialCommitted: this.redactPaths(committedPaths) }
         }));
       }
       this.status = 'failed';
@@ -669,8 +696,8 @@ export class WorkspaceTransaction {
             : '提交后验证失败，且自动还原失败，需要恢复处理。',
           details: {
             transactionId: this.transactionId,
-            committedPaths,
-            restoredPaths: rolledBack.restoredPaths
+            committedPaths: this.redactPaths(committedPaths),
+            restoredPaths: this.redactPaths(rolledBack.restoredPaths)
           }
         })
       ];
