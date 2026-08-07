@@ -203,7 +203,18 @@ internal sealed class Bnd4NativeDocument
     {
         if (Entries.Count == 0)
         {
-            return new Bnd4LayoutGuardReport(true, true, true, true, "empty-container");
+            // 空容器下 IsLayoutPreservingRepack 一次都没被调用，因此这四项是
+            // 「没测」而不是「全拒」。原先返回四个 true，而消费方
+            // verify-bnd4-repack-scope-gate.mjs:256-260 只读四个布尔、从不读 note
+            // ——于是「守卫未被执行」在门禁里表现为「守卫全部生效」，是 fail-open。
+            //
+            // 同一个类里的 VerifyCrud 在同一条件下返回 false + 说明字符串
+            // （见下方），两种写法并存说明这四个 true 是主动写死的。
+            //
+            // 这道守卫是布局保持重建的唯一正确性前提（放宽会让更长的字节写进源的
+            // 原位、越界覆盖后续子项），它的报告绝不能在未执行时冒充通过。
+            return new Bnd4LayoutGuardReport(false, false, false, false,
+                "empty-container: 无子项可构造越界输入，四项守卫均未执行（不是通过）。");
         }
         var baseline = ToRepackEntries();
         var acceptsNoOp = IsLayoutPreservingRepack(baseline);
