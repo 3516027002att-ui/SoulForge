@@ -161,9 +161,25 @@ export function sanitizeRendererValue(value: unknown): unknown {
   return output;
 }
 
+/**
+ * 把含本机路径的字符串整条替换掉。
+ *
+ * 前置分隔符要求曾经是 `(^|[\s('"=])`——只认行首与 ASCII 空白/引号/括号/等号。
+ * 问题是本仓库的诊断文案全是中文：`写入失败：D:\workspace\mod\a.fmg 被占用` 里
+ * 驱动器盘符前面是全角冒号，不在那个字符类里，于是整条绝对路径原样进入渲染
+ * 进程。UNC 同理（`占用（\\?\UNC\host\share\b.fmg）`）。这不会让任何断言变红，
+ * 表现是安全边界静默漏一类最常见的载荷。
+ *
+ * 改为「盘符前不是 ASCII 字母或数字」这一条否定断言：
+ *  - 任何标点、CJK 字符、行首都会被覆盖（真实泄漏形态）；
+ *  - `pathD:\x` 这种把盘符当标识符后缀的情况仍不误报；
+ *  - `file:///workspace/a.fmg` 这类工作区相对 URI 仍不误报（无盘符）。
+ * 判据由 verify-desktop-security-runtime.mjs 用真实载荷运行期断言，不再靠
+ * 「源码里提到过这个函数名」。
+ */
 function sanitizeRendererString(value: string): string {
-  const containsWindowsDrivePath = /(^|[\s('"=])(?:[A-Za-z]:[\\/])/.test(value);
-  const containsUncOrDevicePath = /(^|[\s('"=])\\\\(?:[?.]\\)?[^\\/\s]+[\\/]/.test(value);
+  const containsWindowsDrivePath = /(?<![A-Za-z0-9])[A-Za-z]:[\\/]/.test(value);
+  const containsUncOrDevicePath = /\\\\(?:[?.]\\)?[^\\/\s]+[\\/]/.test(value);
   const containsAbsoluteFileUri = /file:\/\/\/[A-Za-z]:\//i.test(value);
   return containsWindowsDrivePath || containsUncOrDevicePath || containsAbsoluteFileUri
     ? '[本机路径已隐藏]'
