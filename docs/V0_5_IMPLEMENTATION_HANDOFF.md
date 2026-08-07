@@ -1565,7 +1565,7 @@ npm run test:release-cross-machine
 npm run test:release-reproducible
 ~~~
 
-另有 22 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
+另有 16 条 script 显式排除在验证调度之外（写入命令、外部工具或入口自身）：
 
 - `verify`：统一验证入口本身，自调度会无限递归
 - `verify:all`：同上（全层级别名）
@@ -1574,12 +1574,6 @@ npm run test:release-reproducible
 - `bridge:publish`：发布产物构建，由 release 链按需调用
 - `corpus:build-local-release`：生成本机 corpus registry，写 testdata，不是验证
 - `corpus:build-local-release:configured`：同上（被 wrapper 调用的内层）
-- `codexpro:doctor`：外部工具集成，与本仓库验证无关
-- `codexpro:setup`：外部工具集成
-- `codexpro:start`：外部工具集成
-- `codexpro:start:agent`：外部工具集成
-- `codexpro:start:handoff`：外部工具集成
-- `codexpro:pro-bundle`：外部工具集成
 - `gov`：治理写入 CLI，不是验证；正确性由 test:gov-cli 门禁
 - `gov:next`：同上（只读子命令，但仍属操作入口）
 - `gov:status`：同上
@@ -3959,9 +3953,10 @@ Synthetic 技术规格当前存在工作树状态分歧：以下文件在文档�
 - 若确认删除，必须同步清理 README 引用并确认没有仍依赖文档规格的测试/实现；
 - 若确认保留，应从 Git 恢复原文，而不是重新编造规格。
 
-开发桥：
-
-- `docs/CODEXPRO_QUICKSTART.md`
-- `docs/CODEXPRO_INTEGRATION.md`
+开发桥（CodexPro）已按用户裁定于 2026-08-07 整体移除：`codexpro` 依赖、6 条
+`codexpro:*` script、`docs/CODEXPRO_QUICKSTART.md`、`docs/CODEXPRO_INTEGRATION.md`、
+`.ai-bridge/`（该目录为 CodexPro 专属上下文）、`licenses/openai-codex.txt`、
+`.gitignore` 的 CodexPro 段与 `tiers.mjs` 的 6 条排除登记均已删除。
+它是开发期 MCP 桥，从不属于 Electron 应用运行时，移除不影响任何产品能力。
 
 除稳定格式规格外，不再创建与本文平行的路线、任务、状态和日志文档。

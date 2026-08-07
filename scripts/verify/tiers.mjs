@@ -290,12 +290,6 @@ export const EXCLUDED = Object.freeze({
   'bridge:publish': '发布产物构建，由 release 链按需调用',
   'corpus:build-local-release': '生成本机 corpus registry，写 testdata，不是验证',
   'corpus:build-local-release:configured': '同上（被 wrapper 调用的内层）',
-  'codexpro:doctor': '外部工具集成，与本仓库验证无关',
-  'codexpro:setup': '外部工具集成',
-  'codexpro:start': '外部工具集成',
-  'codexpro:start:agent': '外部工具集成',
-  'codexpro:start:handoff': '外部工具集成',
-  'codexpro:pro-bundle': '外部工具集成',
   // gov CLI 是治理数据的写入口，不是验证：跑它会改执行面板状态。
   // 其正确性由已登记的 test:gov-cli 负向 fixture 保证。
   gov: '治理写入 CLI，不是验证；正确性由 test:gov-cli 门禁',
