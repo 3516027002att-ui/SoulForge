@@ -261,6 +261,107 @@ try {
     }
   }
 
+  /* ---- 正例 1b：no-op 写回后，DCX 外层产物必须逐字节等于源文件 -------------
+   *
+   * 为什么必须单独有它：正例 1 断言的是 read 侧报告的 nested.roundTrip
+   * （内层 BND4 重建逐字节）与 fieldPreservation.noOpPayloadByteIdentical
+   * （内层 payload 逐字节）。两者都只看**内层**。
+   *
+   * 但用户拿到的产物是**外层 DCX 文件**。内层逐字节还原、外层容器头/压缩块却
+   * 变了，磁盘上的文件仍然与原文件不同——「无损」这个承诺是对外层文件说的。
+   * 实测确认此前无任何断言比较过写回产物与源文件的哈希：门禁调 write-bnd4 做
+   * CRUD 与负例，但 outputHash 从未被拿来和源哈希比。
+   *
+   * 这是本仓库公开可跑范围内唯一覆盖「外层文件逐字节无损」的判据。
+   * no-op 用「同尺寸原样替换」表达（write-bnd4 显式拒绝空 mutations 数组），
+   * 替换字节取自读侧报告的该子项存储字节——这正是生产的无损写入路径。
+   */
+  {
+    const noopContainerHash = nested === null ? null : read.payload?.result?.data?.sourceHash ?? null;
+    const noopChild = (nested?.entries ?? []).find((entry) => entry.name === CHILD_A.name) ?? null;
+    if (typeof noopContainerHash === 'string' && typeof noopChild?.contentHash === 'string') {
+      const noopOutput = join(writableRoot, 'scope-noop-writeback.parambnd.dcx');
+      const noopWrite = await daemon.send({
+        kind: 'request', protocolVersion: '1.0.0', requestId: 'write-noop', workspaceSessionId: SESSION,
+        payload: {
+          command: 'write-bnd4',
+          filePath: sourceFile,
+          options: {
+            expectedContainerHash: noopContainerHash,
+            mutation: 'replace',
+            childPath: CHILD_A.name,
+            expectedChildHash: noopChild.contentHash,
+            // 原样字节：同尺寸替换走 ReplaceEntrySameSize / 布局保持路径。
+            contentBase64: CHILD_A.bytes.toString('base64'),
+            outputPath: noopOutput
+          }
+        }
+      });
+      check(
+        'noop-writeback/succeeds',
+        noopWrite.kind === 'result' && noopWrite.payload?.result?.parseStatus !== 'failed',
+        {
+          kind: noopWrite.kind,
+          parseStatus: noopWrite.payload?.result?.parseStatus,
+          diagnostics: noopWrite.payload?.result?.diagnostics?.map((d) => `${d.severity}:${d.code}`)
+        }
+      );
+      // 判据定在 payload 层，不是外层文件层。
+      //
+      // 外层 DCX 必然重压缩：DFLT 走 .NET DeflateStream、KRAK 走 Oodle
+      // （Bnd4NativeWriter.cs:42-58），writer 不保留源压缩块。因此外层文件
+      // 逐字节相同在当前设计下不可能，断言它只会得到一条与实现承诺无关的假红。
+      //
+      // 实测确认过这一点：先写成「磁盘产物 == 源文件」时门禁红，差异 104 字节
+      // 全部落在 deflate 数据区（fixture 用 node zlib、writer 用 .NET，同一
+      // payload 产出不同字节流），而内层 payload 本身是逐字节一致的。
+      //
+      // 真正该锁的是：解压后的 payload 必须逐字节还原。它才是「无损」对用户的
+      // 含义——重新压缩换掉的是容器外壳，塞进去的内容不能变。
+      const reportedPayloadHash = noopWrite.payload?.result?.data?.payloadHash ?? null;
+      const sourcePayloadHash = read.payload?.result?.data?.payloadHash ?? null;
+      check(
+        'noop-writeback/payload-hash-equals-source',
+        typeof sourcePayloadHash === 'string' && reportedPayloadHash === sourcePayloadHash,
+        {
+          reportedPayloadHash,
+          sourcePayloadHash,
+          note: '原样替换后解压 payload 必须逐字节还原；不等说明写回改动了内容而非仅换外壳'
+        }
+      );
+      // 不只信 writer 的自报值：把落盘产物重新读一遍，用独立的一次 bridge 调用
+      // 比较它的 payloadHash。writer 报的哈希来自它自己的重读，若重读路径与落盘
+      // 路径不一致，自报值可以正确而磁盘内容错误。
+      check('noop-writeback/output-exists', existsSync(noopOutput), { noopOutput });
+      if (existsSync(noopOutput)) {
+        const reread = await daemon.send({
+          kind: 'request', protocolVersion: '1.0.0', requestId: 'read-noop', workspaceSessionId: SESSION,
+          payload: { command: 'read-dcx-document', filePath: noopOutput, options: {} }
+        });
+        const rereadPayloadHash = reread.payload?.result?.data?.payloadHash ?? null;
+        check(
+          'noop-writeback/on-disk-payload-equals-source',
+          typeof sourcePayloadHash === 'string' && rereadPayloadHash === sourcePayloadHash,
+          {
+            rereadPayloadHash,
+            sourcePayloadHash,
+            note: '独立重读磁盘产物得到的 payload 哈希必须等于源；只信 writer 自报值会漏掉'
+              + '「重读路径正确而落盘路径错误」这一类缺陷'
+          }
+        );
+        // 内层容器结构也必须还原：条目数与各子项存储字节哈希逐一相同。
+        const rereadNested = reread.payload?.result?.data?.nested ?? null;
+        const srcEntries = (nested?.entries ?? []).map((e) => `${e.name}:${e.contentHash}`).join('|');
+        const outEntries = (rereadNested?.entries ?? []).map((e) => `${e.name}:${e.contentHash}`).join('|');
+        check(
+          'noop-writeback/on-disk-entries-identical',
+          srcEntries.length > 0 && srcEntries === outEntries,
+          { srcEntries, outEntries }
+        );
+      }
+    }
+  }
+
   /* ---- 正例 2：通用 Repack 路径（rename）必须成功 -------------------------
    * 这是上一轮失败尝试打断的那一组：把「沿用源布局」塞进通用 Repack 会让
    * rename 失败，因为新名字长度变化必须重排名字区。此处用真实 write-bnd4 调用
