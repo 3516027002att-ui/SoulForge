@@ -150,12 +150,6 @@
     "test:governance-data-fixtures": "node scripts/verify-governance-data-fixtures.mjs",
     "test:governance-equivalence": "node scripts/verify-governance-equivalence.mjs",
     "test:governance": "npm run test:governance-data-fixtures && node scripts/verify-governance.mjs && npm run test:governance-equivalence",
-    "codexpro:doctor": "codexpro doctor --root .",
-    "codexpro:setup": "codexpro setup --root . --mode agent --write workspace --bash safe --bash-session soulforge --require-bash-session --tool-mode standard",
-    "codexpro:start": "codexpro start --root . --mode agent --write workspace --bash safe --bash-session soulforge --require-bash-session --tool-mode standard",
-    "codexpro:start:agent": "npm run codexpro:start",
-    "codexpro:start:handoff": "codexpro start --root . --mode handoff --no-bash --tool-mode standard",
-    "codexpro:pro-bundle": "codexpro pro-bundle --root .",
     "test:emevd-plan-production": "npm run test:emevd-plan-production -w @soulforge/core",
     "test:emevd-coverage": "npm run test:emevd-coverage -w @soulforge/core",
     "test:emevd-external-adapter": "npm run test:emevd-external-adapter -w @soulforge/core",
@@ -174,7 +168,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.1",
-    "codexpro": "0.28.5",
+    "ajv": "8.20.0",
     "typescript": "^5.7.3"
   }
 }
