@@ -277,7 +277,20 @@ internal sealed class MsbNativeDocument
 
     public MsbRoundTripReport VerifyRoundTrip()
     {
-        // No-op rebuild is source-preserving.
+        // 注意这条往返验证的真实判别力边界，不要按名字理解它。
+        //
+        // rebuilt 是**源字节的拷贝**，不是经 writer 重建的产物。因此：
+        //  · ByteIdentical 恒真——它比较的是源与源，永远相等；
+        //  · 真正被验证的只有 SemanticIdentical，即「重新解析同一批字节能否得到
+        //    同样的模型/部件/区域/事件/路线集合」，也就是 **parser 的自洽性**，
+        //    不是 writer 的无损性。
+        //
+        // MSB 没有 writer（V0.6 延期，全仓无 write-msb 落盘路径），所以这里
+        // 不存在可比的重建产物。保持现状是诚实的，但 ByteIdentical 字段名会让
+        // 读者误以为它证明了写回无损，故显式传 false 并让语义项承载结论。
+        //
+        // 若将来接入 MSB writer，这里必须改成 Rebuild() 的真实产物再比较；
+        // 那时 ByteIdentical 才有意义。
         var rebuilt = SourceBytes.ToArray();
         var reparsed = Read(rebuilt);
         var modelsEqual = reparsed.Models.Count == Models.Count
@@ -305,7 +318,9 @@ internal sealed class MsbNativeDocument
                 pair.First.Name == pair.Second.Name
                 && pair.First.TypeId == pair.Second.TypeId);
         return new MsbRoundTripReport(
-            true,
+            // ByteIdentical=false：没有经 writer 重建的产物可比（见上方注释）。
+            // 原先硬编码 true，比较的是源与源自身的拷贝，是恒真判据。
+            false,
             modelsEqual && partsEqual && regionsEqual && eventsEqual && routesEqual,
             SourceHash,
             Hash(rebuilt),
