@@ -203,6 +203,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:bnd4-transaction': 'native',
   'bridge:verify:bnd4-writer': 'native',
   'bridge:verify:dcx-documents': 'native',
+  // corpus manifest 对账：把本机语料与入库 manifest 逐内容哈希比对。
+  // 此前它没有任何 npm 入口、不在任何 tier —— orphan-smoke-gate 原先只扫
+  // packages/core/src/testing，--audit 只查已存在的 script，两道门禁都看不见它。
+  // 需要真实语料，归 native。
+  'test:corpus-manifest': 'native',
   'bridge:verify:emevd': 'native',
   'bridge:verify:esd': 'native',
   'bridge:verify:flver': 'native',
