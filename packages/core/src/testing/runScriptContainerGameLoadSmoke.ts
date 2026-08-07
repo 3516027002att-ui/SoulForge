@@ -466,20 +466,42 @@ async function runWriteChainPreflight(source: string): Promise<void> {
     if (!magicCheck.ok) throw new StructuredError(magicCheck.diagnostics[0]!);
 
     // Placement: the staged output must land where the game reads it.
-    const modRelative = relative(modRoot, target).replace(/\\/g, '/');
-    if (modRelative !== LUA_SCRIPT_CONTAINER_MOD_RELATIVE) {
+    //
+    // 判据源必须是事务报告的实际落点（committed.changedFiles ← 事务的
+    // committedPaths ← 原子替换真正写入的 targetPath），不能是本 smoke 自己
+    // 拼出来的路径。
+    //
+    // 原实现有两段断言，第二段恒真：常量是
+    //   MOD_REL  = `script/${NAME}`
+    //   GAME_REL = `mods/${MOD_REL}`
+    // 而它先断言 modRelative === MOD_REL、再算 gameRelative = `mods/${modRelative}`
+    // 与 GAME_REL 比 —— 第一段通过后两边是同一表达式展开，不存在能让它为假的
+    // 输入。第一段也只是把自造的 target 反推回它自己的常量，同样测不到写入行为。
+    // 于是「放位」这条本该拦住「写到了游戏读不到的地方」的判据，实际什么都没拦。
+    if (committed.changedFiles.length !== 1) {
       throw new StructuredError(createDiagnostic({
         severity: 'error',
         code: 'SCRIPT_LOAD_PLACEMENT_MISMATCH',
-        message: `替换产物放位错误：期望 mod 相对路径 ${LUA_SCRIPT_CONTAINER_MOD_RELATIVE}，实际 ${modRelative}。`
+        message: `事务应恰好改动 1 个文件，实际 ${committed.changedFiles.length}：`
+          + `${JSON.stringify(committed.changedFiles)}`
       }));
     }
-    const gameRelative = `mods/${modRelative}`;
-    if (gameRelative !== LUA_SCRIPT_CONTAINER_GAME_RELATIVE) {
+    const committedPath = committed.changedFiles[0]!;
+    const committedModRelative = relative(modRoot, committedPath).replace(/\\/g, '/');
+    // 落点必须在 overlay 内（不得穿越到 overlay 之外）且恰好是游戏读取的位置。
+    if (committedModRelative.startsWith('..') || isAbsolute(committedModRelative)) {
+      throw new StructuredError(createDiagnostic({
+        severity: 'error',
+        code: 'SCRIPT_LOAD_PLACEMENT_ESCAPED_OVERLAY',
+        message: `事务写入落到 overlay 之外：${committedPath}（overlay=${modRoot}）。`
+      }));
+    }
+    if (committedModRelative !== LUA_SCRIPT_CONTAINER_MOD_RELATIVE) {
       throw new StructuredError(createDiagnostic({
         severity: 'error',
         code: 'SCRIPT_LOAD_PLACEMENT_MISMATCH',
-        message: `替换产物游戏路径错误：期望 ${LUA_SCRIPT_CONTAINER_GAME_RELATIVE}，实际 ${gameRelative}。`
+        message: `替换产物放位错误：游戏在 <gameRoot>/${LUA_SCRIPT_CONTAINER_GAME_RELATIVE} 读取此容器，`
+          + `因此事务落点的 mod 相对路径必须是 ${LUA_SCRIPT_CONTAINER_MOD_RELATIVE}，实际 ${committedModRelative}。`
       }));
     }
 
@@ -516,7 +538,8 @@ async function runWriteChainPreflight(source: string): Promise<void> {
       replacedMagicPreserved: true,
       entryCountUnchanged: true,
       unknownFieldsPreserved: true,
-      placementGamePath: gameRelative,
+      // 报事务实测落点换算出的游戏相对路径，而不是一个由常量拼出来的字面量。
+      placementGamePath: `mods/${committedModRelative}`,
       realLoadInstructions: '要在真实游戏内确认：通过桌面 script 面板（或手动）把整内层替换产物放入 <SOULFORGE_SEKIRO_GAME_ROOT>/mods/script/aicommon.luabnd.dcx，启动游戏确认能读到脚本阶段不崩溃，再设 SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED=<ISO时间戳> 重跑本套件。'
     }, null, 2));
   });
