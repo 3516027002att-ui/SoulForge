@@ -52,7 +52,8 @@ jobs:
         run: mkdir output -Force
 
       # 治理 + 单元/契约层：必须真实执行。typecheck、AI conformance、桌面安全、
-      # core `test` 聚合 smoke 等都在这两层登记表内，不再散装 40+ 条 npm script。
+      # renderer 纯逻辑单元测试、core `test` 聚合 smoke 等都在这两层登记表内，
+      # 不再散装 40+ 条 npm script。
       - name: Governance + unit (require executed)
         run: node scripts/verify.mjs --tier governance,unit --require-executed --json-out output/verify-ci-governance-unit.json --timeout-ms 1200000
 
