@@ -6,6 +6,7 @@
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { classifyChildExtract, reportInfrastructureFailure } from './nativeFixtureExtract.js';
 
 interface TpfEnvelope {
   format: string;
@@ -52,12 +53,20 @@ async function main(): Promise<void> {
       commandOptions: { childPath: 'c4510.tpf', outputPath: tpfPath },
       timeoutMs: 120_000
     });
-    if (extract.parseStatus === 'failed' || !extract.data?.contentSize) {
+    // 「缺语料」与「环境/基础设施坏了」必须区分（硬约束 7）。判定逻辑与理由见
+    // nativeFixtureExtract.ts —— TAE smoke 用同一份，不各写一遍。
+    const verdict = classifyChildExtract(extract);
+    if (verdict.kind === 'infrastructure-failure') {
+      reportInfrastructureFailure('TPF', 'TPF_FIXTURE_EXTRACT_INFRASTRUCTURE_FAILURE', verdict);
+      await disposeBridgeDaemonPool();
+      return;
+    }
+    if (verdict.kind === 'missing-child') {
       console.log(JSON.stringify({
         ok: true,
         status: 'skipped',
-        message: 'TPF fixture not available in container.',
-        diagnostics: extract.diagnostics?.map((d) => d.code)
+        message: 'TPF fixture not available in container (子项不存在).',
+        diagnostics: verdict.codes
       }));
       await disposeBridgeDaemonPool();
       return;
