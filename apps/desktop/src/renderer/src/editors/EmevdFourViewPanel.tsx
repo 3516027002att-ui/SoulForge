@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactElement } from 'react';
 import type { EmevdEditorDocument, EmevdSelection, EmevdViewId } from '@soulforge/shared';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 
 export interface EmevdDslSubmitResult {
   ok: boolean;
@@ -178,12 +179,16 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
             <span>Instructions</span>
             <span>URI</span>
           </div>
-          {pageEvents.map((event) => (
+          {/* 行选择必须键盘可达：四视图的指令/字节视图都以选中事件为前提。 */}
+          {pageEvents.map((event, rowIndex) => (
             <div
               key={event.eventUri}
               className="binder-child-row"
-              role="row"
-              onClick={() => selectEvent(event.eventUri)}
+              {...selectableRowAttributes({
+                selected: event.eventUri === selection.eventUri,
+                isTabEntry: isRowTabEntry(rowIndex, Boolean(selection.eventUri)),
+                onSelect: () => selectEvent(event.eventUri)
+              })}
             >
               <span>{event.eventId}</span>
               <span>{event.restBehavior}</span>

@@ -7,6 +7,7 @@ import type {
 import { HexEditorPanel } from './HexEditorPanel.js';
 import { isLikelyBase64, uint8ArrayToBase64 } from '../utils/binary.js';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 
 export interface Bnd4WorkbenchPanelProps {
   resourceUri: string;
@@ -342,14 +343,17 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
           <span>嵌套</span>
           <span>替换</span>
         </div>
-        {pageChildren.map((child) => (
+        {pageChildren.map((child, rowIndex) => (
           <div
             key={child.childUri}
             className={child.childUri === selectedChildUri
               ? 'binder-child-row bnd4-child-row selected'
               : 'binder-child-row bnd4-child-row'}
-            role="row"
-            onClick={() => void selectChild(child)}
+            {...selectableRowAttributes({
+              selected: child.childUri === selectedChildUri,
+              isTabEntry: isRowTabEntry(rowIndex, selectedChildUri !== null),
+              onSelect: () => void selectChild(child)
+            })}
           >
             <span title={child.name ?? ''}>{child.name ?? '（无名称）'}</span>
             <span className="muted">{child.childId}</span>

@@ -183,6 +183,68 @@ test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', asy
   await app.close();
 });
 
+test('纯键盘可完成 FMG 编辑：行选择不再阻断编辑态', async () => {
+  // 这条覆盖一个实测缺陷：FMG 与 PARAM 面板的行选择此前是
+  // `<div role="row" onClick={...}>`，键盘完全不可达。而编辑控件只在选中行后才
+  // 出现，因此键盘用户**根本进不去编辑态**——不是「体验差」，是功能不可用。
+  //
+  // 断言方式是走完整个流程而不是检查属性：tabIndex=0 存在但 onKeyDown 不响应
+  // Space，用户视角仍然是不可用。
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  await window.locator('[data-resource-mode="msg"]').click();
+  await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
+
+  const row = window.getByRole('row', { name: /伤药葫芦/ });
+  await expect(row).toBeVisible();
+
+  // 行必须能被聚焦（roving tabindex 让选中行/首行进 Tab 序列）。
+  await row.focus();
+  await expect(row).toBeFocused();
+  // 未选中时 aria-selected 必须是 false —— 屏幕阅读器据此播报选中态。
+  await expect(row).toHaveAttribute('aria-selected', 'false');
+
+  // Space 触发选择（只认 Enter 会让习惯 Space 的用户以为行不可选）。
+  await window.keyboard.press(' ');
+  await expect(row).toHaveAttribute('aria-selected', 'true');
+
+  // 选中后编辑控件出现，且可用键盘填入内容。
+  const editor = window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea');
+  await expect(editor).toBeVisible();
+  await editor.focus();
+  await expect(editor).toBeFocused();
+  // 用 fill 而不是 Control+a + type：这里要证明的是「选中行后编辑控件可达且可
+  // 编辑」，输入法层面的全选行为不属于本断言，混进来只会让用例对无关差异敏感。
+  await editor.fill('键盘编辑·改');
+
+  // 变更进入审查队列——即键盘路径与鼠标路径落到同一条写入链。
+  const queue = window.locator('.change-queue');
+  await expect(queue.locator('.cq-row')).toHaveCount(1);
+  await expect(queue.locator('.cq-summary')).toContainText('键盘编辑·改');
+
+  // Enter 同样能触发行选择（换一行验证，避免只测到 Space 一条分支）。
+  const otherRow = window.getByRole('row', { name: /返回骨片/ });
+  await otherRow.focus();
+  await window.keyboard.press('Enter');
+  await expect(otherRow).toHaveAttribute('aria-selected', 'true');
+  await expect(window.locator('label', { hasText: '编辑 ID 101' }).locator('textarea')).toBeVisible();
+
+  // 切换选中行会让上一行的编辑内容留在审查队列里（未提交的候选不因换行而丢失）。
+  // 这一条顺带确认换行没有静默丢弃变更——那会是比键盘不可达更糟的行为。
+  await expect(queue.locator('.cq-summary')).toContainText('键盘编辑·改');
+
+  // 关闭前清掉未提交候选：App 对 draft/staged 装了 beforeunload 守卫（防误关丢
+  // 变更），它会让 Electron 的窗口关闭挂起，表现是 app.close() 超时而不是断言
+  // 失败——排查时极易误判成用例本身的问题。这里显式走「拒绝」而不是绕过守卫，
+  // 因为守卫本身是正确行为。draft 状态的按钮是「拒绝」，rejected 后不再计入
+  // 未提交集合。
+  await queue.locator('.cq-row').first().getByRole('button', { name: '拒绝' }).click();
+  await expect(queue.locator('.cq-row').first()).toHaveAttribute('data-status', 'rejected');
+
+  await app.close();
+});
+
 test('写入失败：保留诊断，状态为 failed，可重新批准', async () => {
   const { app, window } = await launchApp({ SF_TEST_APPLY_FAIL: '1' });
   await openFixtureWorkspace(window);
