@@ -3,6 +3,23 @@
  * （微小、合法构造、明确标记）注册与生产同名的 IPC 通道，
  * 驱动 renderer 状态机的端到端测试。不触碰真实游戏资产。
  *
+ * ── 覆盖边界（如实声明，不要读成「e2e 覆盖了 main」）──────────────────────
+ *
+ * 真实的部分：真 Electron 进程、真生产 preload（out/preload/index.mjs）、真
+ * 构建后的 renderer、真 contextBridge 语义，以及**与生产同形态的发送方校验**
+ * （handleTrusted 包装器 + assertTrustedSender，见下）。
+ *
+ * 不真实的部分：main 侧业务逻辑整体是 fixture。本文件自己注册 19 个 channel，
+ * 生产 ipc.ts 有 56 个，且 registerIpcHandlers 从未被加载。因此以下**没有**被
+ * e2e 覆盖，不得据本套件声称它们可用：
+ *   - PARAM / EMEVD / 脚本容器 / TPF / TAE / FLVER / ESD 面板的读写与分页
+ *     （readParamPage、readEmevdDocument、listScriptContainerEntriesPage 等）
+ *   - saveText 等文本写入链路的 main 侧实现
+ *   - Bridge 子进程、SQLite、utilityProcess、凭据 vault 的真实行为
+ * 这些由 core smoke、契约门禁与 native 层分别覆盖。要把 e2e 提升为真实 main
+ * 覆盖，需让本文件加载生产 registerIpcHandlers 并只把最外层依赖（Bridge、
+ * SQLite、文件系统根）替换为受控替身——那是独立工作项。
+ *
  * 环境变量：
  * - SF_TEST_APPLY_FAIL=1：FMG 写入返回 ORIGINAL_CHANGED_DURING_STAGING 失败。
  * - SF_TEST_CANCEL_DIALOG=1：workspace.openDialog 返回 null（用户取消路径）。
@@ -10,7 +27,7 @@
  */
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outRoot = path.resolve(here, '../../out');
@@ -66,14 +83,69 @@ function track(channel) {
   global.__fixtureIpcCalls[channel] = (global.__fixtureIpcCalls[channel] ?? 0) + 1;
 }
 
+/**
+ * 受信任的 renderer 主文档地址：window.webContents.id -> 归一化后的 document URL。
+ *
+ * 与生产 main 的 trustedRendererDocuments 同语义。fixture 必须自己也走这道校验，
+ * 否则 e2e 跑的是一个**没有安全层的** main —— 生产侧 assertTrustedSender
+ * （ipc.ts 的 handle 包装器里，56 个 channel 的必经之路）在 e2e 中零覆盖，
+ * 而它正是「渲染进程被导航到外部页面后不得继续调 IPC」这条边界的唯一执行点。
+ */
+const trustedRendererDocuments = new Map();
+
+function normalizeRendererDocumentUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    url.search = '';
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 与生产 ipc.ts:assertTrustedSender 逐条件对齐。
+ *
+ * 刻意不留「关闭校验」的环境变量开关：那种开关会成为绕过安全断言的后门，而
+ * 后门存在本身就让「e2e 覆盖了安全层」这句话失效。做负向证明时临时改这个函数
+ * 并在验证后还原（本轮已实测：临时放行后用例报 unexpectedly-allowed 并失败）。
+ */
+function assertTrustedSender(event, channel) {
+  const expectedDocument = trustedRendererDocuments.get(event.sender.id);
+  const frame = event.senderFrame;
+  const actualDocument = frame ? normalizeRendererDocumentUrl(frame.url) : null;
+  if (!expectedDocument
+    || !frame
+    || frame !== event.sender.mainFrame
+    || actualDocument !== expectedDocument) {
+    throw new Error(`已拒绝不受信任的 IPC 调用：${channel}`);
+  }
+}
+
+/**
+ * 注册 channel 的统一入口，镜像生产 ipc.ts 的 handle 包装器：
+ * 先校验发送方，再执行 handler。
+ *
+ * 用包装器而不是在每个 handler 里手写校验：生产侧就是这个形态（一处包装、
+ * 56 个 channel 必经），fixture 若逐个手写会漏，而漏掉的那个 channel 在 e2e
+ * 里就成了「绕过安全层也能通」的样本。
+ */
+function handleTrusted(channel, listener) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    assertTrustedSender(event, channel);
+    return listener(event, ...args);
+  });
+}
+
 function registerFixtureIpc() {
-  ipcMain.handle('workspace.openDialog', () => {
+  handleTrusted('workspace.openDialog', () => {
     track('workspace.openDialog');
     if (CANCEL_DIALOG) return null;
     return { selectionId: 'fixture-overlay', label: 'fixture-overlay' };
   });
 
-  ipcMain.handle('workspace.scan', () => {
+  handleTrusted('workspace.scan', () => {
     track('workspace.scan');
     return {
       workspaceSessionId: 'fixture-session',
@@ -94,7 +166,7 @@ function registerFixtureIpc() {
     };
   });
 
-  ipcMain.handle('workspace.analyze', () => ({
+  handleTrusted('workspace.analyze', () => ({
     parsedFiles: fixtureFiles.length,
     inspectedFiles: fixtureFiles.length,
     referenceStats: { high: 0, medium: 0, low: 0, suppressedAmbiguousNumbers: 0 },
@@ -103,14 +175,14 @@ function registerFixtureIpc() {
     tools: []
   }));
 
-  ipcMain.handle('workspace.openBaseDialog', () => {
+  handleTrusted('workspace.openBaseDialog', () => {
     track('workspace.openBaseDialog');
     if (CANCEL_DIALOG) return null;
     return { selectionId: 'fixture-base', label: 'fixture-base' };
   });
 
-  ipcMain.handle('resource.search', () => []);
-  ipcMain.handle('resource.preview', () => null);
+  handleTrusted('resource.search', () => []);
+  handleTrusted('resource.preview', () => null);
 
   // 容器工作台合成通道：微小、合法构造、明确标记（AGENTS.md §15）。
   const containerChildren = [
@@ -129,7 +201,7 @@ function registerFixtureIpc() {
       rawBytesAvailable: false, canReplace: false
     }
   ];
-  ipcMain.handle('resource.inspectContainerTree', (_event, uri) => ({
+  handleTrusted('resource.inspectContainerTree', (_event, uri) => ({
     ok: true,
     rootUri: uri,
     root: {
@@ -141,7 +213,7 @@ function registerFixtureIpc() {
     },
     diagnostics: []
   }));
-  ipcMain.handle('resource.listContainerChildrenPage', (_event, _uri, page, pageSize) => ({
+  handleTrusted('resource.listContainerChildrenPage', (_event, _uri, page, pageSize) => ({
     ok: true,
     totalCount: containerChildren.length,
     page,
@@ -150,30 +222,30 @@ function registerFixtureIpc() {
     children: containerChildren.slice(page * pageSize, page * pageSize + pageSize),
     diagnostics: []
   }));
-  ipcMain.handle('resource.listContainerChildren', () => ({
+  handleTrusted('resource.listContainerChildren', () => ({
     ok: true,
     children: containerChildren.map((child) => ({ ...child })),
     diagnostics: []
   }));
-  ipcMain.handle('operation.list', () => []);
-  ipcMain.handle('operation.rollback', (_event, opId) => ({
+  handleTrusted('operation.list', () => []);
+  handleTrusted('operation.rollback', (_event, opId) => ({
     ok: false,
     opId,
     restoredFiles: [],
     diagnostics: [{ severity: 'warning', code: 'FIXTURE_NO_ROLLBACK', message: 'fixture 不提供回滚。' }]
   }));
-  ipcMain.handle('ai.tools', () => []);
-  ipcMain.handle('ai.sidebarDraft', () => ({
+  handleTrusted('ai.tools', () => []);
+  handleTrusted('ai.sidebarDraft', () => ({
     summary: 'fixture draft',
     steps: [],
     evidence: [],
     diagnostics: []
   }));
-  ipcMain.handle('modelService.list', () => []);
-  ipcMain.handle('modelService.encryptionAvailable', () => false);
-  ipcMain.handle('runtime.detectMe3', () => ({ detected: false }));
+  handleTrusted('modelService.list', () => []);
+  handleTrusted('modelService.encryptionAvailable', () => false);
+  handleTrusted('runtime.detectMe3', () => ({ detected: false }));
 
-  ipcMain.handle('resource.readFmgDocument', () => ({
+  handleTrusted('resource.readFmgDocument', () => ({
     ok: true,
     data: {
       sourceHash: fixture.fmg.sourceHash,
@@ -183,7 +255,7 @@ function registerFixtureIpc() {
     }
   }));
 
-  ipcMain.handle('resource.readFmgPage', (_event, _uri, page, pageSize) => {
+  handleTrusted('resource.readFmgPage', (_event, _uri, page, pageSize) => {
     const start = page * pageSize;
     return {
       ok: true,
@@ -196,7 +268,7 @@ function registerFixtureIpc() {
     };
   });
 
-  ipcMain.handle('resource.applyFmgMutation', (_event, _uri, expectedHash, mutation) => {
+  handleTrusted('resource.applyFmgMutation', (_event, _uri, expectedHash, mutation) => {
     if (APPLY_FAIL) {
       return {
         ok: false,
@@ -243,7 +315,17 @@ async function createWindow({ withPreload }) {
       nodeIntegration: false
     }
   });
-  await window.loadFile(path.join(outRoot, 'renderer', 'index.html'));
+  const rendererFile = path.join(outRoot, 'renderer', 'index.html');
+  // 先登记受信任文档再加载，顺序与生产一致：登记晚于首个 IPC 调用会让正常
+  // 启动路径被自己的安全校验拒绝。
+  trustedRendererDocuments.set(
+    window.webContents.id,
+    normalizeRendererDocumentUrl(pathToFileURL(rendererFile).href)
+  );
+  window.webContents.once('destroyed', () => {
+    trustedRendererDocuments.delete(window.webContents.id);
+  });
+  await window.loadFile(rendererFile);
   return window;
 }
 
