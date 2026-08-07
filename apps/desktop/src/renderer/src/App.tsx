@@ -1886,6 +1886,13 @@ export function App(): ReactElement {
                 readOnly={!canEditText}
                 onChange={(event) => setEditText(event.target.value)}
                 spellCheck={false}
+                /* 主编辑器此前无可访问名：屏幕阅读器只念「文本区域」，用户无从
+                   判断正在编辑哪个资源。只读态也要说明，否则「改不了」在无障碍
+                   视角下是静默的。 */
+                aria-label={selectedFile
+                  ? `${selectedFile.relativePath} 文本内容${canEditText ? '' : '（只读）'}`
+                  : '资源文本内容（未选择文件）'}
+                aria-readonly={!canEditText}
               />
               {saveDiagnostics.length > 0 && (
                 <div className="save-diagnostics">

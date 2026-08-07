@@ -62,6 +62,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
             <input
               className="input"
               placeholder="搜索状态组 ID…"
+              aria-label="搜索状态组 ID"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />

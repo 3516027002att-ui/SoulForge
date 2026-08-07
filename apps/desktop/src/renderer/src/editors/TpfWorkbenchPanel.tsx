@@ -26,6 +26,9 @@ export interface TpfWorkbenchPanelProps {
   data: TpfDocumentData | null;
 }
 
+/** 表格一次最多渲染多少个纹理行（硬约束 17：大规模访问不得全量建 DOM）。 */
+const TEXTURE_RENDER_LIMIT = 200;
+
 const FORMAT_NAMES: Record<number, string> = {
   0x00: 'BC1 (DXT1)',
   0x01: 'BC1 Alpha',
@@ -51,6 +54,17 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
     );
   }, [data?.textures, query]);
 
+  /**
+   * 表格渲染上限。TPF 纹理数不可控，此前是 filtered 全量 map（无分页、无上限），
+   * 只靠容器的 maxHeight+overflow 挡住视觉——DOM 仍然全量建出。
+   *
+   * 这里用「截断 + 显式说明」而不是分页：TPF 是 V0.6 延期的只读预览族，加完整
+   * 分页控件属于超出当前范围的功能；但静默截断会让用户把部分数据当成全部，
+   * 那是硬约束 7 意义上的伪造观感。搜索框已能定位具体纹理，说清即可。
+   */
+  const visible = filtered.slice(0, TEXTURE_RENDER_LIMIT);
+  const truncatedCount = filtered.length - visible.length;
+
   return (
     <section className="panel" aria-label="TPF 纹理包面板">
       <header className="panel-header">
@@ -68,8 +82,14 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
               placeholder="搜索纹理名称或格式…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              aria-label="搜索纹理名称或格式"
             />
           </div>
+          {truncatedCount > 0 && (
+            <p className="muted">
+              匹配 {filtered.length} 个纹理，仅显示前 {TEXTURE_RENDER_LIMIT} 个；用搜索框缩小范围。
+            </p>
+          )}
           <div className="row gap" style={{ marginTop: 8 }}>
             <div style={{ flex: 1, overflowY: 'auto', maxHeight: 300 }}>
               <table className="table">
@@ -83,7 +103,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((tex) => (
+                  {visible.map((tex) => (
                     <tr
                       key={tex.index}
                       className={selectedTexture?.index === tex.index ? 'selected' : ''}

@@ -63,6 +63,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
             <input
               className="input"
               placeholder="搜索动画 ID 或 HKX 名称…"
+              aria-label="搜索动画 ID 或 HKX 名称"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
