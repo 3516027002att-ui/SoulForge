@@ -109,6 +109,73 @@ expect(
   { wholeSkipped: false, skippedLegs: ['legs.native'] }
 );
 
+// ── 跳过信号的三处形态盲区（实测：三种都曾对调度器不可见）──
+//
+// 检测器原先只在顶层认 `skipped === true`，嵌套层只认字符串 'skipped'，
+// 且只下探一层、不进数组。于是同一个语义写成不同形态时，可见性不一致：
+// 「未执行」被静默算成通过。这是同一类盲区的第二次发生（上一次是逐行 parse
+// 对 pretty-print 全盲），根因是形态没有单一约定、检测端只能枚举猜测。
+//
+// 三条断言各自钉住一种曾经的盲区形态，退化任一条都会红。
+
+// 盲区 1：嵌套布尔。runNativeCorpusWriteBackSmoke.ts:469 缺语料时的真实输出形态
+// ——「真实 corpus 写回未执行，不构成声明」曾对调度器完全不可见，整套按完整通过计入。
+expect(
+  '嵌套 skipped:true 必须判为部分跳过（曾是盲区，整套被算作完整通过）',
+  detectSkipSignals(JSON.stringify({
+    ok: true,
+    synthetic: { leg: 'synthetic', unconditional: true },
+    real: { skipped: true, message: '未配置语料；真实 corpus 写回未执行，不构成声明。' }
+  }, null, 2)),
+  { wholeSkipped: false, skippedLegs: ['real'] }
+);
+
+// 盲区 2：数组元素内。verify-section28-sekiro-gate.mjs:91 把跳过写进 report.steps[]。
+expect(
+  '数组元素内的 skipped:true 必须判为部分跳过（曾是盲区）',
+  detectSkipSignals(JSON.stringify({
+    ok: true,
+    steps: [
+      { name: 'build', ok: true },
+      { name: 'environment', ok: true, skipped: true, reason: '缺 SOULFORGE_SEKIRO_GAME_ROOT' }
+    ]
+  }, null, 2)),
+  { wholeSkipped: false, skippedLegs: ['steps[1]'] }
+);
+
+// 盲区 3：二层以上嵌套。只下探一层的实现对它全盲。
+expect(
+  '二层嵌套的 skipped:true 必须判为部分跳过（曾是盲区）',
+  detectSkipSignals(JSON.stringify({
+    ok: true,
+    legs: { native: { corpus: { skipped: true, reason: '缺语料' } } }
+  }, null, 2)),
+  { wholeSkipped: false, skippedLegs: ['legs.native.corpus'] }
+);
+
+// 已判定跳过的子树不再下探：里面的字段是该跳过的细节，不是独立的 leg。
+// 否则一条跳过会被报成多条，诊断里的 skippedLegs 数量失真。
+expect(
+  '已跳过子树内部不再重复登记为独立 leg',
+  detectSkipSignals(JSON.stringify({
+    ok: true,
+    real: { skipped: true, detail: { phase: 'skipped' } }
+  }, null, 2)),
+  { wholeSkipped: false, skippedLegs: ['real'] }
+);
+
+// 正常输出不得被误判。"0 skipped" 这类汇总数字、以及描述性文本里的 skipped
+// 都不能触发信号——误报的代价是把真跑过的套件报成没跑。
+expect(
+  '汇总计数与描述文本不得误判为跳过',
+  detectSkipSignals(JSON.stringify({
+    ok: true,
+    summary: { passed: 91, skipped: 0, partial: 0 },
+    message: 'no legs were skipped in this run'
+  }, null, 2)),
+  { wholeSkipped: false, skippedLegs: [] }
+);
+
 // 括号深度扫描不得把字符串字面量里的花括号当结构，否则正常输出里一句
 // 说明文案就能把 passed 误判成 skipped——反方向的同一类错误。
 expect(
