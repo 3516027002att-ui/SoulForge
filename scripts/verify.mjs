@@ -91,6 +91,51 @@ function parseArgs(argv) {
   return { options };
 }
 
+/** 从一条 script 命令里抽出它执行的入口文件（dist/testing/xxx.js 之类）。 */
+function extractEntryFiles(command) {
+  if (typeof command !== 'string') return [];
+  return [...command.matchAll(/node\s+((?:\.\/)?[A-Za-z0-9./_-]+\.(?:js|mjs|cjs))/g)]
+    .map((match) => match[1].replace(/^\.\//, ''));
+}
+
+/**
+ * workspace 侧 test* script 是否真的会被执行到。
+ *
+ * 判据不是「有没有同名根 script」，而是**它的入口文件有没有别的可达 script 也在跑**。
+ * 理由：本仓库 packages/core 有一批 test:v05-* 是便利别名，它们指向的 smoke 文件
+ * 早已串在 core 自己的 `test` 链里（根 `test` 用 --workspaces 聚合，因此可达）。
+ * 按名字判会把这些别名全报成孤岛——那是噪声，会让门禁被无视。按入口文件判才能
+ * 只留下真正没人跑的：实测唯一一条是 test:real-mod（runRealModOpenSmoke.js
+ * 既不在 core 的 test 链里，也没有任何根转发）。
+ */
+function isReachableFromRoot(workspaces, workspaceName, workspace, scriptName) {
+  // 根 `test` 用 `--workspaces --if-present` 聚合：workspace 自己的 `test` 一定可达。
+  if (scriptName === 'test') return true;
+
+  const rootCommands = Object.values(workspaces.rootScripts);
+  const forwarded = rootCommands.some((command) => {
+    if (typeof command !== 'string') return false;
+    if (!command.includes(scriptName)) return false;
+    return command.includes(`-w ${workspaceName}`) || command.includes(`run ${scriptName}`);
+  });
+  if (forwarded) return true;
+
+  // 入口文件是否已被本 workspace 内某条可达 script 覆盖。
+  const ownEntries = extractEntryFiles(workspace.scripts?.[scriptName]);
+  if (ownEntries.length === 0) return false;
+  const coveredEntries = new Set();
+  for (const [otherName, otherCommand] of Object.entries(workspace.scripts ?? {})) {
+    if (otherName === scriptName) continue;
+    const reachable = otherName === 'test'
+      || rootCommands.some((command) => typeof command === 'string'
+        && command.includes(otherName)
+        && (command.includes(`-w ${workspaceName}`) || command.includes(`run ${otherName}`)));
+    if (!reachable) continue;
+    for (const entry of extractEntryFiles(otherCommand)) coveredEntries.add(entry);
+  }
+  return ownEntries.every((entry) => coveredEntries.has(entry));
+}
+
 /** 登记审计：确保没有「存在但没人跑」的验证。 */
 function auditRegistration(workspaces) {
   const findings = [];
@@ -104,6 +149,32 @@ function auditRegistration(workspaces) {
       message: '新 script 未登记层级也未写明排除理由；未登记的验证等于没人跑。'
         + ' 请在 scripts/verify/tiers.mjs 的 TIER_BY_SCRIPT 或 EXCLUDED 中登记。'
     });
+  }
+
+  // workspace 侧的 test* script 也要纳入登记要求。
+  //
+  // 此前 audit 只枚举 rootScripts，于是 workspace 自己声明的验证入口对它完全不可见。
+  // 实测两个后果：apps/desktop 的 test:renderer-playwright 是唯一的真实 Electron
+  // e2e（13 用例），却不在任何 tier —— 只有 CI 直调，本机跑 `verify --tier all`
+  // 永远不会执行它；packages/core 的 test:real-mod 既不在根 package.json、也不在
+  // core 的 test 聚合链里，任何层级都跑不到，而 orphan-smoke-gate 因为「有 core
+  // script」就判它 reachable。两道门禁各自留了对方该补的盲区。
+  for (const [workspaceName, workspace] of workspaces.byName) {
+    for (const scriptName of Object.keys(workspace.scripts ?? {})) {
+      if (!scriptName.startsWith('test')) continue;
+      const qualified = `${workspaceName}:${scriptName}`;
+      if (TIER_BY_SCRIPT[scriptName] || EXCLUDED[scriptName]) continue;
+      if (TIER_BY_SCRIPT[qualified] || EXCLUDED[qualified]) continue;
+      if (isReachableFromRoot(workspaces, workspaceName, workspace, scriptName)) continue;
+      findings.push({
+        severity: 'error',
+        code: 'WORKSPACE_SUITE_UNREGISTERED',
+        where: `${workspace.dir}/package.json scripts.${scriptName}`,
+        message: `workspace 验证入口 ${qualified} 既未登记层级、也没有任何根 script 能到达；`
+          + '它在 verify 的任何层级里都不会被执行。请登记到 tiers.mjs（键用 '
+          + `"${qualified}"），或写明排除理由，或加一条根转发。`
+      });
+    }
   }
   const known = new Set(all);
   for (const name of Object.keys(TIER_BY_SCRIPT)) {

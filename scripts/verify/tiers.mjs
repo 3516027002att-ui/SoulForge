@@ -143,6 +143,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // must-exist 判据改名即红，是安全方向；本条替掉的是它那批 `!includes(旧名)`
   // must-not 判据（改名即静默失覆盖）。需要构建产物，故归 synthetic。
   'test:desktop-security-runtime': 'synthetic',
+  // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
+  // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
+  // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。
+  'test:renderer-e2e': 'synthetic',
   'test:smithbox-param-metadata-source': 'synthetic',
   'test:flver-candidate': 'synthetic',
   'test:asset-import': 'synthetic',
@@ -155,6 +159,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 原生文件，本机无语料时恒定 failed —— 属于层级登记错误，不是能力缺陷。
   // 已改为无语料时结构化 skipped，层级同步移到 native。
   'test:native-preview': 'native',
+  // 与 test:native-preview 同一形态：扫真实 Mod 工作区（默认 ../../mods）。此前它
+  // 只在 packages/core 有入口、根无转发、也不在任何 tier —— verify 任何层级都跑不到，
+  // 而 orphan-smoke-gate 因为「有 core script」判它 reachable。两道门禁互相掩盖。
+  // 本轮补了根转发与无语料时的结构化跳过，层级归 native。
+  'test:real-mod': 'native',
   // Bridge 宿主退出卫生：真跑三个代表性 bridge smoke，判它们是否自行退出。
   // 抓的缺陷只有运行期可见——断言全过、退出码 0，但 daemon 句柄挂住宿主。
   // 实测事故：runNativeFlverSmoke 挂死 4 小时并锁住 bridge 输出 exe，使之后
