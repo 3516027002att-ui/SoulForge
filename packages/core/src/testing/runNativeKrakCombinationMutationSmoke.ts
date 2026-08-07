@@ -148,8 +148,28 @@ async function main(): Promise<void> {
         || !fp.storedBytesPreserved || !fp.namesPreserved) {
         throw new Error(`${sample.id} no-op roundtrip 未知字段未逐字节保持：${JSON.stringify(fp)}`);
       }
-      if (baseline.data?.payloadHash !== baseline.data.payloadHash) {
-        throw new Error(`${sample.id} baseline payload hash 异常。`);
+      // 此处原为 `payloadHash !== payloadHash` —— 自己跟自己比，恒假，永不触发。
+      // 它是本 smoke 里唯一校验 baseline 哈希的判据，恒假等于该校验不存在。
+      //
+      // 真判据两条：
+      //  1. Bridge 报的 sourceHash 必须等于本地实测的源字节哈希。不一致说明
+      //     Bridge 读的不是我们放进 overlay 的那个文件（allowedRoots 解析错、
+      //     路径穿越、或缓存命中旧内容），后续所有 expectedChildHash 前置条件
+      //     都会建立在错误的基线上。
+      //  2. payloadHash 是解压后内层字节的哈希（DcxNativeDocument.cs:36
+      //     PayloadHash => HexHash(Payload)），不是源文件哈希，因此不能与
+      //     sourceHash 比。它必须存在且是合法 sha256——缺失或格式不对说明
+      //     KRAK 解压路径没真正产出 payload，而下面的组合 mutation 全部依赖它。
+      if (baseline.data?.sourceHash !== sourceHash) {
+        throw new Error(
+          `${sample.id} baseline sourceHash 与本地实测不一致：`
+          + `bridge=${baseline.data?.sourceHash} local=${sourceHash}`
+        );
+      }
+      if (typeof baseline.data?.payloadHash !== 'string' || !/^[0-9a-f]{64}$/.test(baseline.data.payloadHash)) {
+        throw new Error(
+          `${sample.id} baseline payloadHash 缺失或非法：${JSON.stringify(baseline.data?.payloadHash)}`
+        );
       }
 
       const entries = nested.entries;
