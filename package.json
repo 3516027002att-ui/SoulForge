@@ -127,6 +127,7 @@
     "test:desktop-security-runtime": "node scripts/verify-desktop-security-runtime.mjs",
     "test:renderer-e2e": "npm run test:renderer-playwright -w @soulforge/desktop",
     "test:seal-cli": "node scripts/verify-seal-cli-fixtures.mjs",
+    "test:renderer-unit": "node scripts/run-renderer-unit-tests.mjs",
     "test:real-mod": "npm run test:real-mod -w @soulforge/core",
     "test:desktop-contract-mutations": "node scripts/contract/verify-desktop-contract-mutations.mjs",
     "test:ui-localization": "node scripts/verify-ui-localization.mjs",

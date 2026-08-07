@@ -68,6 +68,10 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 错误/ACL 失败关闭。不依赖真机 corpus，故归 unit。
   'test:core-journal-wiring': 'unit',
   'test:editor-document-store': 'unit',
+  // renderer 纯逻辑单元测试（changeControl 状态机等）。此前 renderer 侧零单元测试，
+  // 唯一的 e2e 又跑在 mock main 上（19/56 通道），拆 App.tsx 时没有安全网——状态
+  // 复位漏一处不会有编译错误也不会有测试失败。无 DOM/IPC 依赖，故归 unit。
+  'test:renderer-unit': 'unit',
   // 统一原生 mutation 写链：取消/确认重试/staging 失败三条分支收敛到一处后，
   // 任一分支静默丢失都不影响正常路径通过，必须由负向断言门禁化。
   'test:editor-mutation-service': 'unit',

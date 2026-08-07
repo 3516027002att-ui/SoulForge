@@ -66,7 +66,10 @@ export function validateChange(change: CandidateChange): ChangeDiagnostic[] {
       break;
     case 'fmg': {
       const id = change.payload.id;
-      if (typeof id !== 'number' || !Number.isFinite(id) || id < 0) {
+      // Number.isInteger 而不是 isFinite：诊断文案说的是「非负整数」，而只判
+      // isFinite 会放行 1.5 —— FMG 条目 ID 在二进制格式里是整数，小数会一路走到
+      // writer 才出问题，且那时的诊断不会指向这里。判据必须与文案一致。
+      if (typeof id !== 'number' || !Number.isInteger(id) || id < 0) {
         problems.push({ code: 'FMG_ID_INVALID', message: 'FMG 条目 ID 必须是非负整数。' });
       }
       const op = change.payload.op;
