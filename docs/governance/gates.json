@@ -90,7 +90,8 @@
         "EV-ROUNDTRIP-PAGINATION-20260807",
         "EV-RECOVERY-AIPERM-COVERAGE-20260807",
         "EV-REPACK-A11Y-20260807",
-        "EV-PRELOAD-SURFACE-RULING-20260807"
+        "EV-PRELOAD-SURFACE-RULING-20260807",
+        "EV-NAMING-HONESTY-ROUNDTRIP-20260807"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -302,7 +303,8 @@
       ],
       "evidenceRefs": [
         "EV-REL-F-ACCEPT-02-20260803",
-        "EV-REL-SCOPE-20260803-RENDERER-REMOVAL"
+        "EV-REL-SCOPE-20260803-RENDERER-REMOVAL",
+        "EV-NAMING-HONESTY-ROUNDTRIP-20260807"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
