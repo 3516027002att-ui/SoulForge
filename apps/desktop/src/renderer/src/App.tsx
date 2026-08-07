@@ -5,6 +5,7 @@ import {
   useState,
   useSyncExternalStore,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactElement
 } from 'react';
@@ -86,6 +87,11 @@ import {
 } from './format/msgRows.js';
 import { filterFilesForMode, operationStatusLabel, shortenPath } from './format/uiText.js';
 import { resetAllDocuments, type DocumentResetActions } from './staging/documentReset.js';
+import {
+  FOCUSABLE_SELECTOR,
+  isTrappableElement,
+  nextTrappedFocusIndex
+} from './a11y/focusTrap.js';
 
 type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
 
@@ -254,6 +260,9 @@ export function App(): ReactElement {
   const [openTabs, setOpenTabs] = useState<RendererIndexedFile[]>([]);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const cmdkInputRef = useRef<HTMLInputElement>(null);
+  const cmdkDialogRef = useRef<HTMLDivElement>(null);
+  /** 命令面板打开前的焦点位置；关闭时归还，避免焦点掉回文档开头。 */
+  const cmdkReturnFocusRef = useRef<HTMLElement | null>(null);
   const toastIdRef = useRef(0);
   const prevPendingCountRef = useRef(0);
 
@@ -337,7 +346,7 @@ export function App(): ReactElement {
         if (key === 'k') {
           event.preventDefault();
           if (cmdkOpen) {
-            setCmdkOpen(false);
+            closeCmdk();
           } else {
             openCmdk();
           }
@@ -354,7 +363,10 @@ export function App(): ReactElement {
           return;
         }
       }
-      if (event.key === 'Escape') setCmdkOpen(false);
+      // 必须走 closeCmdk 而不是 setCmdkOpen(false)：后者绕过焦点归还，Escape 关闭
+      // 后焦点会掉回文档开头。三条关闭路径（Escape、Ctrl+K 再按、点遮罩）都必须
+      // 用同一个出口，否则「哪条路径会归还焦点」变成随机的。
+      if (event.key === 'Escape' && cmdkOpen) closeCmdk();
     };
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
@@ -972,6 +984,11 @@ export function App(): ReactElement {
   }
 
   function openCmdk(): void {
+    // 记住打开前的焦点：关闭时要还回去，否则焦点掉回文档开头，键盘用户丢失
+    // 上下文（刚才在哪一行、哪个按钮上，全部要重新 Tab 找回）。
+    cmdkReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
     setCmdkQuery('');
     setCmdkIndex(0);
     setCmdkOpen(true);
@@ -980,6 +997,39 @@ export function App(): ReactElement {
 
   function closeCmdk(): void {
     setCmdkOpen(false);
+    // 焦点归还。用 setTimeout 让它排在 React 卸载模态之后：卸载时浏览器会把焦点
+    // 打回 body，先 focus 再卸载等于白做。
+    const target = cmdkReturnFocusRef.current;
+    cmdkReturnFocusRef.current = null;
+    if (target !== null && document.contains(target)) {
+      window.setTimeout(() => target.focus(), 0);
+    }
+  }
+
+  /**
+   * 模态内的 Tab 环绕。
+   *
+   * 命令面板与 Agent 抽屉都是 role="dialog"，但此前都不拦 Tab——焦点可以 Tab 出
+   * 模态落到背后的主界面上。对键盘/屏幕阅读器用户来说是「对话框开着，但我在操作
+   * 被它遮住的东西」，且没有任何提示。
+   *
+   * 索引计算与可聚焦判定都在 a11y/focusTrap.ts（纯逻辑、有单测覆盖环绕边界）；
+   * 这里只负责 DOM 查询与 focus() 调用。
+   */
+  function trapTabWithin(container: HTMLElement | null, event: ReactKeyboardEvent): void {
+    if (container === null || event.key !== 'Tab') return;
+    const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+      .filter((element) => isTrappableElement(element));
+    if (focusable.length === 0) return;
+    const currentIndex = focusable.findIndex((element) => element === document.activeElement);
+    const nextIndex = nextTrappedFocusIndex({
+      focusableCount: focusable.length,
+      currentIndex,
+      shift: event.shiftKey
+    });
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    focusable[nextIndex]?.focus();
   }
 
   function focusSearchPanel(): void {
@@ -2454,7 +2504,14 @@ export function App(): ReactElement {
           if (event.target === event.currentTarget) closeCmdk();
         }}
       >
-        <div className="cmdk" role="dialog" aria-modal="true" aria-label="命令面板">
+        <div
+          className="cmdk"
+          role="dialog"
+          aria-modal="true"
+          aria-label="命令面板"
+          ref={cmdkDialogRef}
+          onKeyDown={(event) => trapTabWithin(cmdkDialogRef.current, event)}
+        >
           <div className="cmdk__input-wrap">
             <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
               <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="2" />

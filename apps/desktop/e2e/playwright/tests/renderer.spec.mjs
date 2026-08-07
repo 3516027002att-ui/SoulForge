@@ -183,6 +183,73 @@ test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', asy
   await app.close();
 });
 
+test('命令面板：焦点被困在模态内，关闭后归还打开前的焦点', async () => {
+  // 覆盖两个实测缺陷：命令面板是 role="dialog" aria-modal="true" 但此前不拦
+  // Tab——焦点能 Tab 出模态落到背后的主界面上（对键盘/屏幕阅读器用户是「对话框
+  // 开着，但我在操作被它遮住的东西」，且无任何提示）；关闭时也不恢复打开前的
+  // 焦点，焦点掉回文档开头，用户丢失上下文。
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 先把焦点放在一个可识别的主界面元素上，作为「归还目标」。
+  //
+  // 全程用 document.activeElement 判定而不是 toBeFocused()：Electron 的
+  // fixture 窗口在无头/未激活状态下 Playwright 会把焦点判为 "inactive"，那反映
+  // 的是窗口激活状态，不是页面内的焦点位置——而本用例要验证的恰恰是后者。
+  // 归还目标用一个稳定可聚焦的元素：搜索框。
+  //
+  // 不用资源栏 tab：它走 roving tabindex，未选中时是 tabindex="-1"，而选中状态
+  // 会被同一 describe 内前序用例改动（serial 模式共享 app 生命周期之外的 UI 约定），
+  // 于是「点它 → 断言它被聚焦」在套件内跑与单独跑结果不同。搜索框永远 tabindex=0，
+  // 不受选中态影响，是更稳的锚点。
+  const searchInput = window.locator('.cmdk-trigger');
+  const activeIsTrigger = () => window.evaluate(
+    () => document.activeElement?.classList.contains('cmdk-trigger') ?? false
+  );
+  await searchInput.focus();
+  await expect.poll(activeIsTrigger, { timeout: 5000 }).toBe(true);
+
+  await window.keyboard.press('Control+k');
+  await expect(window.locator('.cmdk-overlay')).toHaveClass(/is-open/);
+  // openCmdk 用 setTimeout(30) 把焦点移进输入框；不等它落定就按 Tab，事件会打在
+  // 模态外的元素上，测到的是「焦点还没进来」而不是「trap 失效」。
+  // 用 poll 读 document.activeElement 而不是 toBeFocused()：后者会先等元素稳定，
+  // 那一步本身可能与这个 30ms 的异步聚焦竞争。
+  await expect.poll(
+    () => window.evaluate(() => document.activeElement?.tagName ?? null),
+    { timeout: 5000 }
+  ).toBe('INPUT');
+
+  // 焦点是否仍在模态内，直接在页面里判定。
+  //
+  // 不用 locator.evaluate 读 document.activeElement：Playwright 会在 evaluate 前
+  // 等待元素稳定，那一步本身可能改变焦点，于是读到的是「检查动作之后」的状态。
+  // 在 page.evaluate 里一次性取当前焦点最贴近真实按键序列。
+  const focusInsideModal = () => window.evaluate(() => {
+    const dialog = document.querySelector('.cmdk');
+    return dialog !== null && dialog.contains(document.activeElement);
+  });
+
+  // 连续 Tab 远超模态内可聚焦元素数量；焦点必须始终留在模态内。
+  for (let step = 0; step < 25; step += 1) {
+    await window.keyboard.press('Tab');
+    expect(await focusInsideModal(), `第 ${step + 1} 次 Tab 后焦点逃出了模态`).toBe(true);
+  }
+
+  // 反向同样受困（只处理正向是最常见的半成品 focus trap）。
+  for (let step = 0; step < 10; step += 1) {
+    await window.keyboard.press('Shift+Tab');
+    expect(await focusInsideModal(), `第 ${step + 1} 次 Shift+Tab 后焦点逃出了模态`).toBe(true);
+  }
+
+  // 关闭后焦点归还到打开前的元素，而不是掉回 body。
+  await window.keyboard.press('Escape');
+  await expect(window.locator('.cmdk-overlay')).not.toHaveClass(/is-open/);
+  await expect.poll(activeIsTrigger, { timeout: 5000 }).toBe(true);
+
+  await app.close();
+});
+
 test('纯键盘可完成 FMG 编辑：行选择不再阻断编辑态', async () => {
   // 这条覆盖一个实测缺陷：FMG 与 PARAM 面板的行选择此前是
   // `<div role="row" onClick={...}>`，键盘完全不可达。而编辑控件只在选中行后才
