@@ -130,10 +130,6 @@ Synthetic 技术规格：
 
 在删除意图被裁定前，不恢复、不覆盖这些路径，也不将其描述为当前可读文档。synthetic authority 以实际 fixture 生成器、Bridge 代码和 `npm run bridge:verify:synthetic` 断言为准，而非上述文档。
 
-开发桥：
-
-- [CodexPro 快速启动](docs/CODEXPRO_QUICKSTART.md)
-- [CodexPro 接入说明](docs/CODEXPRO_INTEGRATION.md)
 
 旧 milestone、fork、task、project-state、next-actions 和 development-log 文档不再作为当前口径，也不应恢复。
 
