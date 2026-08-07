@@ -52,7 +52,7 @@ process.stdout.write(`${JSON.stringify({
   localProbeState: detected.state,
   detectedVersion: detected.detectedVersion ?? null,
   realMe3Executed: detected.detected,
-  realSekiroExecuted: false,
+  sekiroProcessLifecycleObserved: false,
   authority: detected.authority,
   nativeRuntimeAuthority: detected.nativeRuntimeAuthority
 }, null, 2)}\n`);

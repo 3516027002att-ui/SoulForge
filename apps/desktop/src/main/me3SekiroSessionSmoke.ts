@@ -62,7 +62,7 @@ const report: Record<string, unknown> = {
   scope: 'win-x64-real-sekiro-session',
   suspendMode: SUSPEND,
   sekiroRootPresent: Boolean(GAME_ROOT),
-  realSekiroExecuted: false,
+  sekiroProcessLifecycleObserved: false,
   startedAt: new Date().toISOString(),
   steps: [],
   diagnostics: []
@@ -395,10 +395,27 @@ async function main(): Promise<void> {
     && me3Residual.length === 0
     && changes.length === 0;
   if (clean) {
-    report.realSekiroExecuted = true;
-    report.authority = 'native-verified';
+    // 字段名与 authority 都必须与本套件真正观测到的东西对齐。
+    //
+    // 本套件观测的全是**进程生命周期**：profile 创建、launch、轮询 tasklist
+    // 确认存活、terminate 后进程树消失、游戏目录快照无变动。它用 --suspend
+    // 启动（渲染器不运行），且 me3RuntimeAdapter 传入的 packagePaths 为空数组
+    // ——启动的 profile 里 Mod 包数为零。没有任何一步读内存、读游戏日志或观察画面。
+    //
+    // 因此：
+    //  · 字段名从 sekiroProcessLifecycleObserved 改为 sekiroProcessLifecycleObserved
+    //    ——「executed」读起来像「游戏跑起来了并加载了我们的东西」；
+    //  · authority 不再置 native-verified。进程起来又干净退出，不足以支撑
+    //    「原生已验证」；真实 Mod 加载确认仍是 REL-H 的 open 项。
+    //
+    // 另注意成功判据里的 changes.length === 0 是「我们没写游戏目录」，
+    // 它是 Mod 已加载的**反面**证据，不能被读成加载成功。
+    report.sekiroProcessLifecycleObserved = true;
+    report.authority = 'candidate';
     finish('passed',
-      '真实 Sekiro 会话通过：profile 创建、launch、进程存活、terminate 进程树消失、回滚后复启均已确认。');
+      '真实 Sekiro 进程生命周期通过：profile 创建、launch、进程存活、terminate 进程树消失、'
+      + '回滚后复启均已确认。**不含**游戏内 Mod 加载确认——本次以 --suspend 启动且 profile '
+      + '内 Mod 包数为零，authority 保持 candidate。');
   }
   failClosed('会话存在未清理的进程或游戏目录变动。', {
     terminateConfirmed: term2.ok === true,
