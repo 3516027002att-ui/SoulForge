@@ -7,7 +7,41 @@ import { extname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const root = resolve(process.argv[2] ?? process.env.SOULFORGE_NATIVE_FIXTURE_ROOT ?? 'mods');
+
+/**
+ * 语料根解析。
+ *
+ * SOULFORGE_NATIVE_FIXTURE_ROOT 在本仓库有**两种语义**，混用会出错：
+ *   · 用法 A（registry 基准）：has-game-registry.json 里的 localPath 全部以
+ *     `mods/` 开头，所以它是**游戏根**。nativeFixtureRegistry.ts 按这个用。
+ *     with-local-has-game-env.mjs:60 也把它设成游戏根。
+ *   · 用法 B（遍历根）：本脚本与 verify-corpus-manifest 直接拿它当扫描起点。
+ *
+ * 本脚本原先按用法 B 直接用它，于是经 with-local-has-game-env 跑时扫的是
+ * **整个游戏根 8065 个 .dcx**，而不是设计意图里的 mods/。实测后果：多出的
+ * shader/font/parts/facegen 文件带来 12 条 UNRECOGNIZED_BRIDGE_VARIANT
+ * （新变体 DFLT_10000_24_9_0，frozen schema 闭集里只有它的旧四段写法
+ * DFLT_10000_24_9）、1 条 176 字节退化容器的 CRUD 失败、1 条读取失败，
+ * 于是这条套件恒定 exit 1。而 EV-REL-B-CORPUS-02 记录它当初 exit 0、
+ * dflt=144/krak=70/allRecognized=true —— 那次扫的正是 mods 下的 214 个。
+ *
+ * 修法：若给定根下存在 mods/ 子目录，就下沉到它——这与 registry localPath 的
+ * `mods/` 前缀、以及 verify-private-native-gate 的 resolve(root, 'mods') 一致。
+ * 显式传参（argv[2]）时不下沉，因为那是调用方明确指定的目录。
+ *
+ * 不改 frozen schema 去容纳新变体：那等于在没验证这些变体能否无损往返的前提下
+ * 扩大 native authority 声明面，而 shader/font/parts 本就不在 V0.5「文本优先」
+ * 五个编辑器范围内。游戏根语料的变体对账是独立议题，见交接书 §9.14。
+ */
+const explicitRoot = process.argv[2];
+const root = (() => {
+  if (explicitRoot) return resolve(explicitRoot);
+  const envRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim();
+  if (!envRoot) return resolve('mods');
+  const base = resolve(envRoot);
+  const modsUnder = join(base, 'mods');
+  return existsSync(modsUnder) ? modsUnder : base;
+})();
 const executable = resolve('bridge/SoulForge.Bridge/bin/Debug/net10.0/win-x64/SoulForge.Bridge.exe');
 
 // frozen schema 对账：Bridge data.variant 输出必须属于 observedVariant 闭集
