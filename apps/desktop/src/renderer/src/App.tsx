@@ -2097,13 +2097,28 @@ export function App(): ReactElement {
                     // 接 readRawRange（main handler ipc.ts:1170）——预览只读前 64 KiB，
                     // 而实测 mods 下 237 个文件有 148 个超过它，此前 hex 证据对这些文件
                     // 只能看到开头且把前缀长度当总量显示。硬约束 17 要求大规模访问分页。
+                    // 不用 `as` 整体断言 IPC 返回值——第一版那样写掩盖了一个真 bug：
+                    // core 的字段叫 base64（rawRead.ts:35）而我写成 bytesBase64，
+                    // 断言让 typecheck 通过、功能却永远读不到数据。改为逐字段取值 +
+                    // 运行期类型判断，字段名对不上时至少 diagnostics 会带出原因。
                     onLoadRange: async (offset: number, length: number) => {
-                      const raw = await bridge.readRawRange(selectedFile.sourceUri, offset, length);
-                      return raw as {
-                        ok: boolean;
-                        bytesBase64?: string;
-                        fileSize?: number;
-                        diagnostics?: Array<{ code: string; message: string }>;
+                      const raw = await bridge.readRawRange(
+                        selectedFile.sourceUri,
+                        offset,
+                        length
+                      ) as Record<string, unknown> | null;
+                      const rec = raw ?? {};
+                      const diags = Array.isArray(rec.diagnostics)
+                        ? (rec.diagnostics as Array<{ code?: unknown; message?: unknown }>).map((d) => ({
+                            code: String(d.code ?? 'UNKNOWN'),
+                            message: String(d.message ?? '')
+                          }))
+                        : [];
+                      return {
+                        ok: rec.ok === true,
+                        ...(typeof rec.base64 === 'string' ? { base64: rec.base64 } : {}),
+                        ...(typeof rec.fileSize === 'number' ? { fileSize: rec.fileSize } : {}),
+                        diagnostics: diags
                       };
                     }
                   }
