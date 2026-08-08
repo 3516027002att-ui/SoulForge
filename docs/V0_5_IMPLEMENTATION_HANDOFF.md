@@ -1395,7 +1395,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 153 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 154 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1470,7 +1470,7 @@ npm run test:workbench-projections
 npm run typecheck
 ~~~
 
-**synthetic**（41 条）
+**synthetic**（42 条）
 
 ~~~powershell
 npm run bridge:build
@@ -1500,6 +1500,7 @@ npm run test:emevd-plan-production
 npm run test:esd-gap-visibility
 npm run test:flver-candidate
 npm run test:flver-gap-visibility
+npm run test:flver-gxlist
 npm run test:large-transaction-recovery
 npm run test:param-field-mutation
 npm run test:param-metadata-mismatch

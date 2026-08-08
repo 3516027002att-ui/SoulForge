@@ -16,21 +16,25 @@
  *   ② 同语义的第 2+ 个 member 被 `when plan.X == null` 守卫静默挡掉：
  *      实测 UV member 共 108 个，而 layout（≈Position member）73 个 —— 至少 35 个
  *      UV2/UV3 从未被投影，也从未被记录。
- *   ③ material 32 字节只读了前 16；后 16 字节（首个 int32 是 FLVER2 gxIndex → GXList
- *      引用）从未读取，全仓 C# 侧 grep "gx" 零命中。实测 11 个样本共 505 条 material，
- *      后 16 字节**全部**非零，gxIndex 取值分散（388/396/1062/1314/1342/2054…）。
- *      也就是说这不是「保留区恒 0」，而是携带真实引用的区间被整段跳过。
+ *   ③（**已修复，不再由本门禁覆盖**）material 32 字节只读了前 16。该缺口 2026-08-08
+ *      已真正解析：32 字节全部读出，GX 列表按双源核对的规范解析，真实语料 505/505
+ *      成功。顺带更正了两处字段误标——**+0x10 是 Flags 不是 gxIndex，+0x14 是
+ *      gxOffset（字节偏移）不是索引**。收窄后的缺口（GX item payload 未解码）与
+ *      后 16 字节的逐字段正确性改由 **test:flver-gxlist** 覆盖。
  *
- * 放大器：Authority 此前唯一的降级依据是 `_layoutWarnings.Count > 0`，而上面三条
+ * 放大器：Authority 此前唯一的降级依据是 `_layoutWarnings.Count > 0`，而上面几条
  * **全在不写 warning 的路径上**。后果是 11 个样本一律 authority=native-verified、
  * layoutWarnings=0 —— 一个对自己读没读全完全失明的 authority。项目红线「未有真实
  * parser 时不得声称格式已解析」的执行机制就是让 authority 对缺口敏感。
  *
- * ── 为什么是诚实标记而不是补全解析 ──
+ * ── 为什么这几条是诚实标记而不是补全解析 ──
  *
- * 补一条解析只填一个洞；把缺口接进降级机制修的是「缺口不可见」这个根因。而且
- * FLVER 属 V0.6 延期只读预览族（docs/governance/scope.json 的 SCOPE-ASSET-FLVER），
- * 在没有 GXList 往返验证的前提下解析它，等于在未验证的前提下扩大 native 声明面。
+ * 补一条解析只填一个洞；把缺口接进降级机制修的是「缺口不可见」这个根因。
+ * 剩下这 5 条顶点语义缺口要真正实现，需要 tangent/bitangent/vertexColor 的投影语义
+ * 与真实渲染对照验证，属独立工作项。
+ * （注：SCOPE-ASSET-FLVER 实测是 `proposedSupport: supported`、authorityAtRuling
+ * 为 partial，**不是** V0.6 延期族——本文件旧注释把它写成「V0.6 延期只读预览族」
+ * 是错的。GX 列表因此可以在 V0.5 实现，而 ESD 那种 `deferred` 项才需要用户裁定。）
  *
  * ── 判据打在哪 ──
  *
@@ -38,7 +42,7 @@
  * 造一个合法的 synthetic FLVER，经生产命令 read-flver-document 读出 envelope，
  * 断言 authority 与 unparsedGaps 的对应关系。两种形态各造一个：
  *   A. 只含五个已实现语义、单 UV、无 material → 不应产生任何缺口；
- *   B. 含 tangent/bitangent/vertexColor、双 UV、有 material → 必须逐条报出缺口，
+ *   B. 含 tangent/bitangent/vertexColor、双 UV 或未知语义 → 必须逐条报出缺口，
  *      且 authority 必须降为 partial。
  * A 组的存在是关键：没有它，「无条件把 authority 钉成 partial」也会报绿，那样
  * 判据就与实现无关了。
@@ -91,7 +95,7 @@ const TYPE = { FLOAT3: 0x02, BYTE4B: 0x11, BYTE4C: 0x13, UV: 0x15, UVPAIR: 0x16 
 /**
  * 造一个合法的最小 FLVER。
  * @param opts.members  layout member 列表 [{semantic, type, structOffset, index}]
- * @param opts.materialCount  material 条数（>0 会触发 material 后 16 字节缺口）
+ * @param opts.materialCount  material 条数（后 16 字节现已解析，不再产生缺口）
  */
 function buildFlver(opts) {
   const members = opts.members;
@@ -153,18 +157,27 @@ function buildFlver(opts) {
   b.writeInt32LE(bufferLayoutCount, 0x54);
   b.writeInt32LE(textureCount, 0x58);
 
-  // Materials：只填前 16 字节（nameOffset/mtdOffset/textureCount/firstTextureIndex）。
-  // 后 16 字节刻意写非零，模拟真实语料（实测 505 条全部非零，首个 int32 是 gxIndex）。
+  // Materials：32 字节全填。字段标注见下方逐行注释（2026-08-08 更正过一次）。
   for (let i = 0; i < materialCount; i++) {
     const at = materialsAt + 32 * i;
     b.writeInt32LE(0, at + 0x00);       // nameOffset=0 → 读成空串（合法）
     b.writeInt32LE(0, at + 0x04);
     b.writeInt32LE(0, at + 0x08);       // textureCount
     b.writeInt32LE(0, at + 0x0c);       // firstTextureIndex
-    b.writeInt32LE(388, at + 0x10);     // gxIndex：真实语料里的典型取值
-    b.writeInt32LE(106224, at + 0x14);  // unk18
-    b.writeInt32LE(i, at + 0x18);
-    b.writeInt32LE(0, at + 0x1c);
+    // ⚠️ 这四个字段的标注在 2026-08-08 更正过（双源核对 SoulsFormats 与
+    // SoulsFormatsNEXT）：+0x10 是 **Flags**（旧注释误标为 gxIndex），
+    // +0x14 是 **gxOffset —— 字节偏移**（旧注释误标为 unk18），+0x18 才是 Unk18。
+    b.writeInt32LE(388, at + 0x10);     // Flags：真实语料里的典型取值
+    // gxOffset 必须为 0：本 fixture 只有 598 字节，写真实语料的 106224 会被
+    // TryReadGxList 正确判为「偏移越界」并记 layoutWarning，于是本组
+    // 「缺口不得混进 layoutWarnings」那条断言必然红——**测到的是 fixture 越界，
+    // 不是缺口可见性**。0 表示该 material 无 GX 列表，是完全合法的形态
+    // （真实语料 505 条恰好都非零，但格式允许 0，SoulsFormats 用 0 表示 GXIndex=-1）。
+    // 本组要测的缺口是「GX payload 未解码」，由 test:flver-gxlist 用带真实 GX 区的
+    // fixture 覆盖；这里只需保证 material 存在且不引入无关的越界警告。
+    b.writeInt32LE(0, at + 0x14);       // gxOffset = 0（无 GX 列表）
+    b.writeInt32LE(i, at + 0x18);       // Unk18
+    b.writeInt32LE(0, at + 0x1c);       // 保留：规范断言恒 0
   }
 
   // Mesh[0]
@@ -369,13 +382,16 @@ try {
       materialCount: 0,
       note: 'switch 此前无 default 分支，未知语义完全静默。'
     },
-    {
-      label: 'material-tail',
-      needle: 'material:',
-      members: CLEAN_MEMBERS,
-      materialCount: 2,
-      note: 'material 后 16/32 字节（含 gxIndex→GXList）从未读取；真实语料 505 条全部非零。'
-    }
+    // ⚠️ 原先这里还有一条 `material-tail` 用例，断言「material 后 16/32 字节未读」
+    // 这个缺口可见。**该缺口已在 2026-08-08 真正修掉**（32 字节全部读出，GX 列表按
+    // 双源核对的规范解析，真实语料 505/505 成功），所以那条用例的前提不再成立——
+    // 留着它会永远报红，而「修好了导致门禁红」正是 [承接后 fixture 靶标会失去前提]
+    // 那类问题：靶标必须随实现推进改靶或删除，不能靠放宽判据转绿。
+    //
+    // 缺口没有消失，只是**收窄**了：GX item 的 payload 仍不解码。收窄后的缺口连同
+    // material 后 16 字节的逐字段正确性，一起由 **test:flver-gxlist** 覆盖
+    // （34 断言，含「全部 item 无 payload 时不得报假缺口」这条判别力用例）。
+    // 本门禁继续守剩下 5 条顶点语义缺口——它们仍然真实存在。
   ];
 
   for (const item of gapCases) {

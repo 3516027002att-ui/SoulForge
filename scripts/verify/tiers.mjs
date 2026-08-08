@@ -232,6 +232,17 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 判据打在运行期 envelope 上（不是 grep），且必带「无缺口基线仍 native-verified」
   // 一组——否则无条件降级也会报绿。需要真实 exe、不需真实语料，归 synthetic。
   'test:flver-gap-visibility': 'synthetic',
+  // FLVER2 GX 列表解析。material 32 字节里的后 16 字节此前**整段未读**，只登记为缺口；
+  // 现按双源核对的规范解析（+0x10 Flags、+0x14 gxOffset 字节偏移、+0x18 Unk18、
+  // +0x1C 断言 0；GXList 循环读 item 至 int.MaxValue/-1 哨兵，item 长度含 12 字节头，
+  // 终止填充长度 = 写盘值 − 0xC）。真实语料 11 个 chrbnd / 505 条 material 全部解析成功。
+  // 失效形态全是静默的——+0x10/+0x14 读反、itemLength 含头与否读错、漏判 -1 哨兵、
+  // 忘减 0xC，都产出结构完好但内容错误的输出，所以判据逐字段打在值上。
+  // harness 自身是编码器（期望值由同一份语义内容推出，不解析自己写的字节）。
+  // 另钉两条容易退化的性质：payload 未解码仍须是可见缺口（收窄≠消失），
+  // 以及全部 item 无 payload 时不得报假缺口（否则「无条件登记」也会全绿）。
+  // 需要真实 exe、不需真实语料，归 synthetic。
+  'test:flver-gxlist': 'synthetic',
   // ESD「未解析结构必须可见」。与上面 FLVER 那条同源同形：守的不是某一条解析，
   // 而是**缺口不可见**这个根因。ESD 有两处字段区间读都没读——condition 的
   // +0x00 targetStateOffset（跳转目标，即状态转移边）与 commandCall 的 +0x04

@@ -773,6 +773,8 @@ internal sealed class FlverNativeDocument
         }
 
         // --- Materials（32B/条）---
+        // 全 32 字节都读：前 16 是名字/MTD/贴图索引，后 16 是 Flags / GxOffset / Unk18 /
+        // 保留字段。后 16 字节此前整段未读（只登记为缺口），现按双源核对的规范解析。
         var materials = new List<FlverMaterialEntry>(materialCount);
         for (var i = 0; i < materialCount; i++, off += MaterialSize)
         {
@@ -780,9 +782,32 @@ internal sealed class FlverNativeDocument
             int mtdOffset = ReadInt32(source, off + 0x04);
             int textureCountInMaterial = ReadInt32(source, off + 0x08);
             int firstTextureIndex = ReadInt32(source, off + 0x0C);
+            int flags = ReadInt32(source, off + 0x10);
+            int gxOffset = ReadInt32(source, off + 0x14);
+            int unk18 = ReadInt32(source, off + 0x18);
+            int reserved = ReadInt32(source, off + 0x1C);
             string name = ReadStringAtOffset(source, nameOffset, unicode);
             string mtdPath = ReadStringAtOffset(source, mtdOffset, unicode);
-            materials.Add(new FlverMaterialEntry(i, name, mtdPath, textureCountInMaterial, firstTextureIndex));
+
+            // 规范要求 +0x1C 恒为 0（两份实现都是 AssertInt32(0)）。实测 505/505 成立。
+            // 这里**不抛异常**而是记 layoutWarning：FLVER 是只读预览路径，为一个保留
+            // 字段拒绝整个文件会把「布局有出入」升级成「文件不可读」，代价不对等。
+            if (reserved != 0)
+                warnings.Add($"material[{i}]:+0x1C 保留字段应为 0，实际 {reserved}（布局可能与已登记形态不同）。");
+
+            FlverGxList? gxList = null;
+            if (gxOffset != 0)
+            {
+                gxList = TryReadGxList(source, gxOffset, out var gxError);
+                // 解析失败必须留痕：GX 列表读不出来时若静默置 null，
+                // 「该 material 没有 GX 列表」与「有但没读懂」在输出上不可区分。
+                if (gxList is null)
+                    warnings.Add($"material[{i}]:GX 列表解析失败（gxOffset={gxOffset}）：{gxError}");
+            }
+
+            materials.Add(new FlverMaterialEntry(
+                i, name, mtdPath, textureCountInMaterial, firstTextureIndex,
+                flags, gxOffset, unk18, gxList));
         }
 
         // --- Bones（128B/条）---
@@ -951,6 +976,111 @@ internal sealed class FlverNativeDocument
             warnings);
     }
 
+    /// <summary>
+    /// 按 FLVER2 规范读一个 GX 列表。失败返回 null 并通过 <paramref name="error"/> 给出原因，
+    /// **不抛异常**——FLVER 是只读预览路径，为一处未识别的材质扩展拒绝整个模型文件，
+    /// 会把「布局有出入」升级成「文件不可读」，代价不对等。失败原因由调用方记进
+    /// layoutWarnings，从而压 authority 到 partial：读不懂也必须留痕。
+    ///
+    /// ── 结构依据（双源核对，2026-08-08）──
+    /// JKAnderson/SoulsFormats 与 soulsmods/SoulsFormatsNEXT 的 FLVER2 GXList/GXItem
+    /// 逐字段一致：
+    ///   · item 循环：读到 <c>id == int.MaxValue</c> 或 <c>id == -1</c> 即停，该 id 是终止 ID；
+    ///   · item 头 12 字节：id(int32) / unk04(int32) / length(int32)，
+    ///     payload 长度 = length − 12，**length 含头**；
+    ///   · 终止记录：终止 id 之后紧跟恒为 100 的 int32，再一个 int32，
+    ///     真实填充长度 = 该值 − 0xC，填充区按规范全零。
+    ///
+    /// ── 真实语料验证 ──
+    /// 11 个 Sekiro chrbnd 的 505 条 material（全部 gxOffset 非零）：
+    /// **505/505 解析成功、零错误**；常量 100 命中 505/505；填充全零 505/505；
+    /// item 数分布 1×392 / 2×56 / 3×8 / 5×34 / 7×14 / 9×1；
+    /// ID 为 4 字节 ASCII（GX00 505、GXMD 64、GX04 49、GX15 41、GX80/GX81 各 34…）。
+    ///
+    /// ── 两处与本文件旧注释的分歧（旧注释已作废）──
+    /// ① 旧注释称 material +0x10 是 <c>gxIndex</c>。**不对**：+0x10 是 <c>Flags</c>，
+    ///    +0x14 才是 GX 列表的**字节偏移**。两份实现都是先 <c>Flags = ReadInt32()</c>
+    ///    再 <c>int gxOffset = ReadInt32()</c>；实测 505 条的 +0x14 逐条严格单调递增、
+    ///    相邻差值以 64 为主（384/504 条），且全部 &lt; dataOffset —— 偏移的形态，
+    ///    不是索引。SoulsFormats 的公开属性 <c>GXIndex</c> 是**去重后**的列表序号
+    ///    （由 gxOffset → 列表表的映射得来），不是文件里的字段。
+    /// ② SoulsFormatsNEXT 把 +0x18 命名为 <c>Index</c>，但实测它**不是 material 序号**：
+    ///    11 个样本无一满足 <c>+0x18 == i</c>（c1020 前五条是 0,1,2,2,0）。故此处保留
+    ///    中性名 <c>Unk18</c> 并如实标注，不按上游命名反推语义。
+    ///
+    /// payload 一律**不解释**：各 GX ID 的字段语义按材质着色参数分歧，
+    /// 未经真实往返验证解码它就是在未验证前提下扩大 native 声明面。
+    /// 这里只导出 (id, unk04, length) 与长度，与 ESD 的 RPN 字节码同一口径。
+    /// </summary>
+    private static FlverGxList? TryReadGxList(byte[] source, int gxOffset, out string error)
+    {
+        error = string.Empty;
+        // 上界用 12 而不是 0：终止记录本身就要 12 字节，连它都放不下时偏移必然不合法。
+        if (gxOffset < 0 || (long)gxOffset + 12 > source.Length)
+        {
+            error = $"偏移越界（文件 {source.Length} 字节）";
+            return null;
+        }
+
+        var items = new List<FlverGxItem>();
+        var position = gxOffset;
+        // 上限防御：畸形长度可能构造出不前进的循环。505 条实测最多 9 项，
+        // 512 留足余量而不至于让坏数据把进程拖死。
+        const int maxItems = 512;
+        while (true)
+        {
+            if (items.Count > maxItems)
+            {
+                error = $"item 数超过安全上限 {maxItems}";
+                return null;
+            }
+            if ((long)position + 12 > source.Length)
+            {
+                error = "item 头越界";
+                return null;
+            }
+            var id = ReadInt32(source, position);
+            if (id == int.MaxValue || id == -1) break;   // 终止哨兵
+            var unk04 = ReadInt32(source, position + 4);
+            var itemLength = ReadInt32(source, position + 8);
+            // itemLength 含 12 字节头，故 < 12 不合法；== 12 是合法的「无 payload」。
+            // 不校验这一条会让 itemLength <= 0 造出原地死循环。
+            if (itemLength < 12 || (long)position + itemLength > source.Length)
+            {
+                error = $"item 长度不合法（{itemLength}）";
+                return null;
+            }
+            var idAscii = System.Text.Encoding.ASCII.GetString(source, position, 4);
+            items.Add(new FlverGxItem(idAscii, id, unk04, itemLength, itemLength - 12));
+            position += itemLength;
+        }
+
+        var terminatorId = ReadInt32(source, position);
+        var hundred = ReadInt32(source, position + 4);
+        if (hundred != 100)
+        {
+            // 规范里这是 AssertInt32(100)。实测 505/505 命中，不符说明布局与已登记形态
+            // 不同——如实报失败而不是猜着往下读。
+            error = $"终止记录的常量应为 100，实际 {hundred}";
+            return null;
+        }
+        var rawLength = ReadInt32(source, position + 8);
+        var terminatorLength = rawLength - 0xC;
+        if (terminatorLength < 0 || (long)position + 12 + terminatorLength > source.Length)
+        {
+            error = $"终止填充长度不合法（{terminatorLength}）";
+            return null;
+        }
+        var paddingAllZero = true;
+        for (var k = 0; k < terminatorLength; k++)
+        {
+            if (source[position + 12 + k] != 0) { paddingAllZero = false; break; }
+        }
+
+        var endOffset = position + 12 + terminatorLength;
+        return new FlverGxList(items, terminatorId, terminatorLength, paddingAllZero, endOffset - gxOffset);
+    }
+
     private static long ComputeSectionEnd(
         byte[] source,
         int dummyCount, int materialCount, int boneCount, int meshCount,
@@ -1087,9 +1217,44 @@ internal sealed class FlverNativeDocument
             {
                 name = m.Name,
                 mtdPath = m.MtdPath,
-                textureCount = m.TextureCount
+                textureCount = m.TextureCount,
+                // material 后 16 字节（此前整段未读）。gxOffset==0 表示该 material 无 GX 列表；
+                // gxList 为 null 且 gxOffset!=0 表示解析失败（另有 layoutWarning）。
+                flags = m.Flags,
+                gxOffset = m.GxOffset,
+                unk18 = m.Unk18,
+                gxList = m.GxList is null ? null : new
+                {
+                    itemCount = m.GxList.Items.Count,
+                    byteLength = m.GxList.ByteLength,
+                    terminatorId = m.GxList.TerminatorId,
+                    terminatorLength = m.GxList.TerminatorLength,
+                    terminatorPaddingAllZero = m.GxList.TerminatorPaddingAllZero,
+                    // payload 只报长度不报内容：语义未验证，见 TryReadGxList 注释。
+                    items = m.GxList.Items.Select(x => new
+                    {
+                        id = x.Id,
+                        unk04 = x.Unk04,
+                        itemLength = x.ItemLength,
+                        dataLength = x.DataLength
+                    }).ToArray()
+                }
             }).ToArray(),
             materialsTruncated = Materials.Count > SampleLimit,
+            // 全量 GX 覆盖面（不受 SampleLimit 截断影响）：消费方要能判断
+            // 「样本里没有 GX 列表」与「整个文件都没有」的区别。
+            gxCoverage = new
+            {
+                materialsWithGxOffset = Materials.Count(m => m.GxOffset != 0),
+                gxListsParsed = Materials.Count(m => m.GxList is not null),
+                gxListsFailed = Materials.Count(m => m.GxOffset != 0 && m.GxList is null),
+                gxItemsTotal = Materials.Where(m => m.GxList is not null).Sum(m => m.GxList!.Items.Count),
+                gxPayloadBytesUndecoded = Materials.Where(m => m.GxList is not null)
+                    .Sum(m => (long)m.GxList!.Items.Sum(x => x.DataLength)),
+                distinctItemIds = Materials.Where(m => m.GxList is not null)
+                    .SelectMany(m => m.GxList!.Items.Select(x => x.Id))
+                    .Distinct().OrderBy(id => id, StringComparer.Ordinal).ToArray()
+            },
             bones = Bones.Take(SampleLimit).Select(b => new
             {
                 name = b.Name,
@@ -1126,25 +1291,55 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>
-    /// material 结构 32 字节里本实现只读了前 16（nameOffset/mtdOffset/textureCount/
-    /// firstTextureIndex）。后 16 字节从未读取——按 SoulsFormats 的 FLVER2 Material，
-    /// 该区间的首个 int32 是 <c>gxIndex</c>（指向 GXList 表的索引），其后是 unk18 与
-    /// 两个保留字段。全仓 grep "gx" 在 C# 侧零命中，即 GXList 完全未解析。
+    /// material 后 16 字节的缺口登记。
     ///
-    /// 2026-08-08 实测 11 个 Sekiro chrbnd 的 505 条 material：后 16 字节**全部**非零，
-    /// gxIndex 取值分散（388/396/1062/1314/1342/2054…）。也就是说这不是「保留区恒 0、
-    /// 读不读无所谓」，而是携带真实引用的字段区间被整段跳过。
+    /// **历史**：本方法原先无条件登记「后 16/32 字节未解析（含 FLVER2 gxIndex →
+    /// GXList 引用）」。那条缺口现已消除——32 字节全部读出（Flags / GxOffset / Unk18 /
+    /// 保留字段），GX 列表按双源核对的规范解析，真实语料 505/505 成功。
+    /// 原注释还有两处事实错误（+0x10 不是 gxIndex 而是 Flags；+0x14 是字节偏移不是
+    /// 索引），已在 <see cref="TryReadGxList"/> 的注释里逐条更正。
     ///
-    /// 这里**只登记缺口、不解析 GXList**：GXList 是变长表且其条目布局按版本分歧，
-    /// 在没有该结构的往返验证前解析它就是在未验证的前提下扩大 native 声明面
-    /// （FLVER 属 V0.6 延期只读预览族）。诚实标记是当前证据支持的最强结论。
+    /// **保留本方法的理由**：GX item 的 <b>payload 仍不解释</b>。各 ID（GX00/GXMD/GX04…）
+    /// 的字段语义按材质着色参数分歧，未经真实往返验证解码就是在未验证前提下扩大 native
+    /// 声明面。所以缺口从「整段未读」收窄为「payload 未解码」——**收窄不等于消失**，
+    /// 仍须让 authority 看见（与 ESD 的 RPN 字节码同一口径）。
+    ///
+    /// 判据挂在「确实存在 payload」上而不是无条件登记：全部 item 都是 length==12
+    /// （无 payload）时没有未解码内容，此时报缺口是假缺口，会稀释真信号。
     /// </summary>
     private void RecordMaterialUnparsedTail()
     {
         if (Materials.Count == 0) return;
+
+        var listCount = 0;
+        var itemCount = 0;
+        var payloadBytes = 0L;
+        var failedLists = 0;
+        foreach (var material in Materials)
+        {
+            if (material.GxOffset == 0) continue;
+            if (material.GxList is null) { failedLists += 1; continue; }
+            listCount += 1;
+            foreach (var item in material.GxList.Items)
+            {
+                itemCount += 1;
+                payloadBytes += item.DataLength;
+            }
+        }
+
         // 只登记种类，不逐条展开（去重由 AddUnparsedGap 的 SortedSet 完成）。
-        AddUnparsedGap(
-            $"material:后 16/32 字节未解析（含 FLVER2 gxIndex → GXList 引用）；materialCount={Materials.Count}");
+        if (payloadBytes > 0)
+        {
+            AddUnparsedGap(
+                $"material:GX item payload 未解码（按 ID 分歧的材质着色参数，只按 (id, unk04, length) 上报）；"
+                + $"lists={listCount}, items={itemCount}, payloadBytes={payloadBytes}");
+        }
+        // 解析失败与「未解码」是两件事：前者是读不懂（数据可疑，已另记 layoutWarning），
+        // 这里再登记一次能力边界，确保即使 payload 为 0 也不会把失败掩盖成「无缺口」。
+        if (failedLists > 0)
+        {
+            AddUnparsedGap($"material:GX 列表解析失败 {failedLists} 条（布局与已登记形态不同）");
+        }
     }
 
     /// <summary>
@@ -1244,7 +1439,48 @@ internal sealed class FlverNativeDocument
 }
 
 internal sealed record FlverMaterialEntry(
-    int Index, string Name, string MtdPath, int TextureCount, int FirstTextureIndex);
+    int Index, string Name, string MtdPath, int TextureCount, int FirstTextureIndex,
+    // ── material 32 字节的后 16 字节（此前整段未读）──
+    // 字段语义经**双源核对**（JKAnderson/SoulsFormats 与 soulsmods/SoulsFormatsNEXT
+    // 的 FLVER2/Material.cs 逐字段一致）。注意与本文件旧注释的分歧：旧注释把 +0x10
+    // 说成 gxIndex，实测与两份实现都表明 **+0x10 是 Flags**、+0x14 才是 GX 列表的
+    // **字节偏移**（不是索引）。旧注释的说法已作废，理由见 ReadGxList 的注释。
+    int Flags,            // +0x10
+    int GxOffset,         // +0x14：GX 列表字节偏移；0 表示该 material 无 GX 列表
+    int Unk18,            // +0x18：SoulsFormatsNEXT 命名为 Index，但实测非序号（见注释）
+    FlverGxList? GxList); // 按 GxOffset 解析出的列表；null 表示 GxOffset==0 或解析失败
+
+/// <summary>
+/// FLVER2 GX 列表：一串 <see cref="FlverGxItem"/> 后跟一个终止记录。
+///
+/// 结构双源核对（2026-08-08，两份独立实现逐字段一致）：
+///   循环读 item 直到 id == int.MaxValue 或 id == -1；该 id 即 TerminatorId，
+///   其后紧跟一个恒为 100 的 int32，再一个 int32 长度（真实填充长度 = 该值 - 0xC），
+///   填充区按规范应为全零。
+///
+/// 真实语料验证（11 个 Sekiro chrbnd、505 条 material，全部 gxOffset 非零）：
+/// 505/505 按本结构解析成功、零错误；terminator 后的常量 100 命中 505/505；
+/// 填充区全零 505/505；item 数分布 1×392、2×56、3×8、5×34、7×14、9×1；
+/// item ID 是 4 字节 ASCII 标签（GX00 505、GXMD 64、GX04 49、GX15 41、GX80/GX81 各 34…）。
+/// </summary>
+internal sealed record FlverGxList(
+    IReadOnlyList<FlverGxItem> Items,
+    int TerminatorId,
+    int TerminatorLength,
+    bool TerminatorPaddingAllZero,
+    int ByteLength);
+
+/// <summary>
+/// GX 列表里的一项。<c>Data</c> 按 <see cref="DataLength"/> 原样保留但**不解释**——
+/// 各 ID 的 payload 语义按材质着色参数分歧，未经真实往返验证不做解码
+/// （否则就是在未验证前提下扩大 native 声明面）。
+/// </summary>
+internal sealed record FlverGxItem(
+    string Id,          // 4 字节 ASCII（如 "GX00"）
+    int RawId,          // 同一 4 字节的 int32 视图，便于与规范里的 int 比较
+    int Unk04,
+    int ItemLength,     // 含 12 字节头
+    int DataLength);    // ItemLength - 12
 
 internal sealed record FlverBoneEntry(
     int Index, string Name, short NextSiblingIndex, short ParentIndex, short ChildIndex,
