@@ -96,7 +96,8 @@
         "EV-REBASE-REANCHOR-20260808",
         "EV-PROD-E2E-REACHABILITY-20260808",
         "EV-CORPUS-ROOT-ORPHAN-20260808",
-        "EV-GATE-COVERAGE-FRESHNESS-20260808"
+        "EV-GATE-COVERAGE-FRESHNESS-20260808",
+        "EV-SILENT-DISCARD-WRITEPATH-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -447,7 +448,8 @@
         "W-REL-COMPLIANCE-02"
       ],
       "evidenceRefs": [
-        "EV-REL-COMPLIANCE-02-20260803"
+        "EV-REL-COMPLIANCE-02-20260803",
+        "EV-SILENT-DISCARD-WRITEPATH-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
