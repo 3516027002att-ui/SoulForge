@@ -103,6 +103,24 @@ internal sealed class FlverNativeDocument
     private readonly IReadOnlyList<FlverTextureSlotEntry> _textureSlots;
     private readonly List<string> _layoutWarnings;
 
+    /// <summary>
+    /// 已识别但**本实现未解析**的结构缺口。与 <see cref="_layoutWarnings"/> 刻意分成两个集合：
+    ///
+    ///   layoutWarnings = 「读到的东西不对」（越界引用、未知 member 大小、structOffset 越界）
+    ///                    → 数据可疑，是**异常**。
+    ///   unparsedGaps   = 「有东西我根本没读」（已定义未实现的语义、未读的字段区间）
+    ///                    → 数据没问题，是**能力边界**。
+    ///
+    /// 为什么必须分开：把缺口塞进 layoutWarnings 会让 11 个真实样本全部出现「警告」，
+    /// 而它们的数据其实完好——那是**误报**，且会淹没真正的越界警告（后者才需要人去查
+    /// 数据）。反过来，缺口若不进入任何集合，就是当前的状态：不可见。
+    ///
+    /// 两者都参与 <see cref="Authority"/> 的降级判定，但语义与诊断分开呈现。
+    /// 项目红线「未有真实 parser 时不得声称格式已解析」的执行机制正是这一条：
+    /// 让 authority 对缺口敏感，而不是让缺口悄悄通过。
+    /// </summary>
+    private readonly SortedSet<string> _unparsedGaps;
+
     private FlverNativeDocument(
         byte[] sourceBytes,
         string versionString,
@@ -164,6 +182,8 @@ internal sealed class FlverNativeDocument
         _faceSets = faceSets;
         _textureSlots = textureSlots;
         _layoutWarnings = layoutWarnings;
+        _unparsedGaps = new SortedSet<string>(StringComparer.Ordinal);
+        RecordMaterialUnparsedTail();
     }
 
     public byte[] SourceBytes { get; }
@@ -202,12 +222,48 @@ internal sealed class FlverNativeDocument
 
     public IReadOnlyList<string> LayoutWarnings => _layoutWarnings;
 
-    /// <summary>依据解析完整性计算 authority：无降级警告且至少一个 mesh 顶点可解码 → native-verified。</summary>
+    /// <summary>
+    /// 已识别但未解析的结构缺口（能力边界，不是数据异常）。
+    /// 访问前会触发一次 mesh plan 构建，确保顶点语义缺口已被登记——否则「没人调用过
+    /// BuildMeshPlan」与「真的没有缺口」不可区分。
+    /// </summary>
+    public IReadOnlyList<string> UnparsedGaps
+    {
+        get
+        {
+            EnsureVertexSemanticGapsProbed();
+            return _unparsedGaps.ToArray();
+        }
+    }
+
+    /// <summary>
+    /// 依据解析完整性计算 authority。
+    ///
+    /// 降级依据有**两条**，不是一条：
+    ///   ① _layoutWarnings：读到的东西不对（数据可疑）。
+    ///   ② _unparsedGaps：有东西没读（能力边界）。
+    ///
+    /// ⚠️ 此前只有 ①。那让这个 getter 成为一批缺口的**共同放大器**：
+    /// SemTangent/SemBitangent/SemVertexColor 三个语义声明后零引用、顶点语义 switch
+    /// 无 default 分支、material 后 16 字节从未读取——全都在不写 warning 的路径上，
+    /// 于是 11 个真实 Sekiro 样本一律报 native-verified、warnings=0（2026-08-08 实测），
+    /// 而实际未解析的 member 有 194 个（tangent 93 / bitangent 22 / vertexColor 79），
+    /// 每个 material 的后 16 字节（含 gxIndex，实测 11 个样本 505 条 material **全部**
+    /// 非零）也从未读出。缺口不进入任何集合，就等于对上层不存在。
+    ///
+    /// 现在缺口会把 authority 降到 partial。这是**故意收紧**：native-verified 的含义
+    /// 回到「本实现读到的东西已覆盖它宣称的结构」，而不是「没报错就算全对」。
+    /// </summary>
     public string Authority
     {
         get
         {
+            // 先探测再判定。顺序反了会有一个真实漏洞：BuildMeshPlan 自己也会写
+            // layoutWarnings（越界引用等），若在探测之前就读 _layoutWarnings.Count，
+            // 探测过程中新发现的警告在本次调用里看不到。
+            EnsureVertexSemanticGapsProbed();
             if (_layoutWarnings.Count > 0) return "partial";
+            if (_unparsedGaps.Count > 0) return "partial";
             try
             {
                 for (var i = 0; i < Math.Min(Meshes.Count, 4); i++)
@@ -297,6 +353,14 @@ internal sealed class FlverNativeDocument
                     Offset = member.StructOffset,
                     Type = member.Type
                 };
+                // 语义分派。五个已实现语义各取**首个**出现的 member；其余一律登记为缺口。
+                //
+                // ⚠️ 这个 switch 此前没有 default 分支，于是两类东西被静默丢弃：
+                //   ① 已定义但未实现的语义（SemTangent/SemBitangent/SemVertexColor）；
+                //   ② 被 `when plan.X == null` 守卫挡掉的**第二个及以后**的同语义 member
+                //      —— 实测 11 个 Sekiro 样本里 UV member 有 108 个而 layout 只有 73 个，
+                //      也就是至少 35 个 UV（UV2/UV3 等）落在守卫之外、无人知晓。
+                // 现在两类都登记为缺口，让 Authority 与 envelope 能看见它们。
                 switch (member.Semantic)
                 {
                     case SemPosition when plan.Position == null: plan.Position = access; break;
@@ -304,6 +368,29 @@ internal sealed class FlverNativeDocument
                     case SemUV when plan.UV == null: plan.UV = access; break;
                     case SemBoneWeights when plan.Weights == null: plan.Weights = access; break;
                     case SemBoneIndices when plan.BoneIndices == null: plan.BoneIndices = access; break;
+
+                    case SemTangent:
+                        AddUnparsedGap($"vertex-semantic:tangent(0x{SemTangent:X}) 已定义未解析（type=0x{member.Type:X}）");
+                        break;
+                    case SemBitangent:
+                        AddUnparsedGap($"vertex-semantic:bitangent(0x{SemBitangent:X}) 已定义未解析（type=0x{member.Type:X}）");
+                        break;
+                    case SemVertexColor:
+                        AddUnparsedGap($"vertex-semantic:vertexColor(0x{SemVertexColor:X}) 已定义未解析（type=0x{member.Type:X}）");
+                        break;
+
+                    // 被守卫挡掉的重复语义：数据完好，但本实现只取首个，其余未投影。
+                    case SemPosition:
+                    case SemNormal:
+                    case SemUV:
+                    case SemBoneWeights:
+                    case SemBoneIndices:
+                        AddUnparsedGap($"vertex-semantic:0x{member.Semantic:X} 的第 2+ 个 member 未投影（index={member.Index} type=0x{member.Type:X}）");
+                        break;
+
+                    default:
+                        AddUnparsedGap($"vertex-semantic:0x{member.Semantic:X} 未识别（type=0x{member.Type:X}）");
+                        break;
                 }
             }
         }
@@ -942,7 +1029,10 @@ internal sealed class FlverNativeDocument
     public object ToEnvelope(FlverRoundTripReport? report = null)
     {
         var rt = report ?? VerifyRoundTrip();
+        // 顺序要紧：Authority 会触发缺口探测，必须在读 gaps 之前求值，
+        // 否则 envelope 里的 unparsedGaps 会比 authority 少看到一轮登记。
         var authority = Authority;
+        var gaps = UnparsedGaps;
         var meshSamples = Meshes.Take(SampleLimit).Select(m => new
         {
             index = m.Index,
@@ -1011,6 +1101,9 @@ internal sealed class FlverNativeDocument
             meshesTruncated = Meshes.Count > SampleLimit,
             bufferLayouts = layoutSamples,
             layoutWarnings = _layoutWarnings.ToArray(),
+            // 与 layoutWarnings 并列而不是合并：前者是「数据可疑」，本项是「能力边界」。
+            // 上层若把两者混为一谈，就会把「我没读」误报成「文件坏了」。
+            unparsedGaps = gaps,
             roundTrip = rt,
             authority
         };
@@ -1021,6 +1114,59 @@ internal sealed class FlverNativeDocument
         if (_layoutWarnings.Count < 64)
             _layoutWarnings.Add(message);
     }
+
+    /// <summary>
+    /// 登记一个「已识别但未解析」的缺口。用 SortedSet 去重：194 个未解析 member 会产生
+    /// 大量同文本条目，逐条堆积只是噪音；缺口的价值在**种类**，不在计数。
+    /// </summary>
+    private void AddUnparsedGap(string message)
+    {
+        if (_unparsedGaps.Count < 64)
+            _unparsedGaps.Add(message);
+    }
+
+    /// <summary>
+    /// material 结构 32 字节里本实现只读了前 16（nameOffset/mtdOffset/textureCount/
+    /// firstTextureIndex）。后 16 字节从未读取——按 SoulsFormats 的 FLVER2 Material，
+    /// 该区间的首个 int32 是 <c>gxIndex</c>（指向 GXList 表的索引），其后是 unk18 与
+    /// 两个保留字段。全仓 grep "gx" 在 C# 侧零命中，即 GXList 完全未解析。
+    ///
+    /// 2026-08-08 实测 11 个 Sekiro chrbnd 的 505 条 material：后 16 字节**全部**非零，
+    /// gxIndex 取值分散（388/396/1062/1314/1342/2054…）。也就是说这不是「保留区恒 0、
+    /// 读不读无所谓」，而是携带真实引用的字段区间被整段跳过。
+    ///
+    /// 这里**只登记缺口、不解析 GXList**：GXList 是变长表且其条目布局按版本分歧，
+    /// 在没有该结构的往返验证前解析它就是在未验证的前提下扩大 native 声明面
+    /// （FLVER 属 V0.6 延期只读预览族）。诚实标记是当前证据支持的最强结论。
+    /// </summary>
+    private void RecordMaterialUnparsedTail()
+    {
+        if (Materials.Count == 0) return;
+        // 只登记种类，不逐条展开（去重由 AddUnparsedGap 的 SortedSet 完成）。
+        AddUnparsedGap(
+            $"material:后 16/32 字节未解析（含 FLVER2 gxIndex → GXList 引用）；materialCount={Materials.Count}");
+    }
+
+    /// <summary>
+    /// 确保顶点语义缺口已被探测过。
+    ///
+    /// 缺口是在 <see cref="BuildMeshPlan"/> 里登记的，而 BuildMeshPlan 只在真正取顶点
+    /// 数据时才被调用。若 Authority 在任何 plan 构建之前被读取，_unparsedGaps 会是空的
+    /// ——那样「没探测过」会被误读成「没有缺口」，正是本次要修的那类不可见性。
+    /// 故此处对全部 mesh 各构建一次 plan（幂等，只为登记缺口）。
+    /// </summary>
+    private void EnsureVertexSemanticGapsProbed()
+    {
+        if (_vertexSemanticGapsProbed) return;
+        _vertexSemanticGapsProbed = true;
+        for (var i = 0; i < Meshes.Count; i++)
+        {
+            try { BuildMeshPlan(i); }
+            catch (Exception) { AddLayoutWarning($"mesh[{i}] 语义缺口探测抛出异常。"); }
+        }
+    }
+
+    private bool _vertexSemanticGapsProbed;
 
     // --- Private helpers ---
 

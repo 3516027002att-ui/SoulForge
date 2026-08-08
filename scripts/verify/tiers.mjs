@@ -173,6 +173,29 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 按规范公式独立推导，不解析块本身。BC7 块可自造、无需真实资产，但解码在 C# 侧
   // 需要真实 exe，故与 test:bridge-write-boundary 同归 synthetic。
   'test:bc7-decode': 'synthetic',
+  // BC3 (DXT5) 颜色块。守的是一个真实存在过的**正确性缺陷**：BC3 曾复用带 BC1
+  // punchthrough 分支的颜色解码，于是所有 c0 <= c1 的 BC3 块槽 2/3 取值错误，
+  // 且 idx==3 的 alpha 被强行清零——alpha 块里已正确解出的值被无声丢弃、像素被
+  // 错误透明化。按 D3D/S3TC 规范 BC2/BC3 颜色块恒用 4 色不透明插值，无 punchthrough
+  // （Khronos 正文 + 其 Issue (6) 把 MSDN 的相反暗示判为文档 bug，双源一致）。
+  // 失效形态静默（PNG 结构完好、导出成功），故判据打在像素值上；fixture 的 alpha
+  // 刻意非 0，否则「被清零」与「本来是 0」不可区分。同时带 BC1 对照组，钉住
+  // 「BC1 有 punchthrough、BC3 没有」这条差异本身——只钉一半会让「顺手统一两处
+  // 重复代码」报绿。真实语料 BC3 零命中，但 dxgi 77 / "DXT5" 两条 dispatch 早已
+  // 对外可达，故修复并门禁化。需要真实 exe、不需真实语料，归 synthetic。
+  'test:bc3-color-block': 'synthetic',
+  // FLVER「解析缺口必须可见」。守的不是某一条解析，而是缺口不可见这个**根因**：
+  // FlverNativeDocument.Authority 此前唯一的降级依据是 layoutWarnings.Count > 0，
+  // 而三批缺口全在不写 warning 的路径上——SemTangent/SemBitangent/SemVertexColor
+  // 声明后零引用且语义 switch 无 default、同语义第 2+ 个 member 被 when 守卫静默挡掉、
+  // material 后 16/32 字节（含 gxIndex→GXList）从未读取。于是 11 个真实 Sekiro 样本
+  // 一律 authority=native-verified/warnings=0，而实测未解析 member 194 个、505 条
+  // material 后 16 字节全部非零。缺口不进任何集合就等于对上层不存在。
+  // 处置是诚实标记而非补全解析：补一条解析只填一个洞，接进降级机制才是修根因；
+  // 且 FLVER 属 V0.6 延期只读预览族，无往返验证就解析 GXList 等于扩大未验证声明面。
+  // 判据打在运行期 envelope 上（不是 grep），且必带「无缺口基线仍 native-verified」
+  // 一组——否则无条件降级也会报绿。需要真实 exe、不需真实语料，归 synthetic。
+  'test:flver-gap-visibility': 'synthetic',
   // 桌面安全边界的运行期版本：观测生产产物真实的 webPreferences、preload 表面与
   // 脱敏行为。与 test:desktop-security（源码文本级）并存而不是取代——后者的
   // must-exist 判据改名即红，是安全方向；本条替掉的是它那批 `!includes(旧名)`
