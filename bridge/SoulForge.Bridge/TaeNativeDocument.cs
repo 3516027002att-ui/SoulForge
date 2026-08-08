@@ -5,10 +5,26 @@ using System.Text;
 /// <summary>
 /// Sekiro TAE (Time Act Editor) read-only native document.
 /// Layout verified against a00.tae (938 animations, 2,890,432 bytes).
-/// TAE defines per-animation event timing (hitboxes, SFX, VFX, camera shakes).
 /// All offsets are absolute int64 except event-group event arrays which use int32.
 /// Times are float32 stored at absolute offsets within a per-animation times array.
 /// Strings are UTF-16LE null-terminated.
+///
+/// <para><b>解析到哪一层：只到 timing，事件参数体未解码。</b>
+/// 本解析器对每个事件读出 startTime / endTime / eventTypeId 与两个偏移
+/// （eventDataOffset、paramDataOffset，见 :203），<b>paramDataOffset 指向的参数体
+/// 一字节未读</b>，envelope 也只导出 timing 与计数（:348-355）。
+///
+/// 原类文档在这一行写的是「TAE defines per-animation event timing (hitboxes,
+/// SFX, VFX, camera shakes)」，与上一行的「Layout verified」并排——读起来像那四项
+/// 都已解析，而它们全在未读的 paramData 区。TAE 的事件参数按 eventTypeId 分派、
+/// 每类布局不同，缺一类就不能开 writer，所以「读出 hitbox 数据」与「读出事件在
+/// 时间轴上的位置」是两件相差很远的事。措辞已按 EsdNativeDocument 的先例改为
+/// 明确标注未解码（那里写的是 "Expression bytecode is reported as opaque
+/// (offset, length) pairs — not decoded"）。
+///
+/// 这不是待办标记：TAE 属 V0.6 延期只读预览族，不解参数体是当前范围内的正确状态。
+/// 要解它必须先按 eventTypeId 逐类登记布局并有真实样本验证，否则无法无损保留
+/// 未知字段、也就不得开放 writer。</para>
 /// </summary>
 internal sealed class TaeNativeDocument
 {
