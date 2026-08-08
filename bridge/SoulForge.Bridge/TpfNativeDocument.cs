@@ -190,10 +190,24 @@ internal sealed class TpfNativeDocument
                 ddsFourCC = t.DdsFourCC
             }).ToArray(),
             roundTrip = report ?? VerifyRoundTrip(),
+            // 覆盖面报告随 envelope 上报：无修改重建的无损性依赖「未覆盖区在源里
+            // 全零」这个前提，不上报的话消费方只能看到一个 byteIdentical 布尔，
+            // 无从判断 false 是因为丢了 padding 还是因为解析错了。
+            rebuildCoverage = MeasureUncoveredBytes(),
             authority
         };
     }
 
+    /// <summary>
+    /// 无修改重建。**只回填四个区**：头部（0x00-0x0F）、条目表、名字区、纹理数据。
+    /// 缓冲是 new byte[] 全零起始，所以源文件里这四区之外的字节（padding、对齐
+    /// 间隙、未建模的尾部区域）会被写成 0。
+    ///
+    /// 这不是缺陷但是个**条件性无损**：只要源文件那些区本来就是全零，重建就逐字节
+    /// 一致。ByteIdentical（VerifyRoundTrip :128）是真实重建比对，所以 padding 非零
+    /// 时它会如实报 false——但报了 false 也说不清差异在哪。
+    /// <see cref="MeasureUncoveredBytes"/> 把这件事变成可核对的数字。
+    /// </summary>
     private byte[] Rebuild()
     {
         var rebuilt = new byte[SourceBytes.Length];
@@ -236,6 +250,56 @@ internal sealed class TpfNativeDocument
         }
 
         return rebuilt;
+    }
+
+    /// <summary>
+    /// 统计 Rebuild() 未回填的字节区间，以及其中有多少在源文件里**非零**。
+    ///
+    /// 为什么需要它：Rebuild 的无损性依赖「未覆盖区在源里恰好全零」这个前提，
+    /// 而此前没有任何地方核对过这个前提。2026-08-08 实测四个真实 texbnd 的 TPF，
+    /// 未覆盖字节数分别是 108/54/144/126、**全部为零**——所以真实语料上无损。
+    /// 但「实测恰好成立」与「被证明成立」是两件事：换一批语料、或将来有人改了
+    /// 名字区布局，前提可能不再成立，而那时 ByteIdentical 只会报一个 false。
+    ///
+    /// 判据刻意分两个数：uncoveredBytes（覆盖面缺口有多大）与
+    /// uncoveredNonZeroBytes（其中多少会真的丢信息）。只报后者的话，
+    /// 「Rebuild 把整个文件都覆盖了」与「未覆盖区恰好全零」无法区分——前者是
+    /// 更强的无损保证，后者是运气。
+    /// </summary>
+    public TpfCoverageReport MeasureUncoveredBytes()
+    {
+        var covered = new bool[SourceBytes.Length];
+
+        void Mark(long start, long length)
+        {
+            if (start < 0 || length <= 0) return;
+            var from = (int)Math.Min(start, SourceBytes.Length);
+            var to = (int)Math.Min(start + length, SourceBytes.Length);
+            for (var i = from; i < to; i++) covered[i] = true;
+        }
+
+        Mark(0, HeaderSize);
+        for (var i = 0; i < Textures.Count; i++) Mark(HeaderSize + i * EntrySize, EntrySize);
+        foreach (var t in Textures)
+        {
+            // 名字是 UTF-16LE + null 终止，与 Rebuild :227 的编码方式一致。
+            Mark(t.NameOffset, Encoding.Unicode.GetBytes(t.Name + "\0").Length);
+            Mark(t.DataOffset, t.DataSize);
+        }
+
+        var uncovered = 0;
+        var uncoveredNonZero = 0;
+        var firstNonZeroOffset = -1;
+        for (var i = 0; i < covered.Length; i++)
+        {
+            if (covered[i]) continue;
+            uncovered++;
+            if (SourceBytes[i] == 0) continue;
+            uncoveredNonZero++;
+            if (firstNonZeroOffset < 0) firstNonZeroOffset = i;
+        }
+
+        return new TpfCoverageReport(uncovered, uncoveredNonZero, firstNonZeroOffset);
     }
 
     private static string FormatName(byte format) => format switch
@@ -291,6 +355,17 @@ internal sealed record TpfTextureEntry(
     uint Width,
     uint Height,
     string DdsFourCC);
+
+/// <summary>
+/// Rebuild() 的覆盖面报告。<paramref name="UncoveredBytes"/> 是未回填的字节数，
+/// <paramref name="UncoveredNonZeroBytes"/> 是其中在源文件里非零的字节数——
+/// 后者大于 0 就意味着无修改重建会丢信息，ByteIdentical 必然为 false。
+/// <paramref name="FirstNonZeroOffset"/> 给出第一处，便于定位而不必自己扫全文。
+/// </summary>
+internal sealed record TpfCoverageReport(
+    int UncoveredBytes,
+    int UncoveredNonZeroBytes,
+    int FirstNonZeroOffset);
 
 internal sealed record TpfRoundTripReport(
     bool ByteIdentical,
