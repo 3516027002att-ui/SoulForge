@@ -175,7 +175,8 @@
         "EV-REPACK-A11Y-20260807",
         "EV-REBASE-REANCHOR-20260808",
         "EV-PROD-E2E-REACHABILITY-20260808",
-        "EV-CORPUS-ROOT-ORPHAN-20260808"
+        "EV-CORPUS-ROOT-ORPHAN-20260808",
+        "EV-RELB-SCHEMAVER-COMPAT-20260808"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
