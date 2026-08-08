@@ -9,7 +9,7 @@
  */
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { inflateSync } from 'node:zlib';
+import { decompressDfltDcx } from '../util/dcxDflt.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 import { createSmokeWorkspace } from './harness/smokeWorkspace.js';
@@ -40,23 +40,6 @@ interface MsbEnvelope {
   events: Array<{ name: string; offset: number; typeId: number; eventId?: number }>;
   routes: Array<{ name: string; offset: number; typeId: number; id?: number }>;
   roundTrip?: { semanticIdentical: boolean; byteIdentical: boolean };
-}
-
-function decompressDfltDcx(source: Buffer): Buffer {
-  let dca = -1;
-  for (let i = 0x30; i < 0x100; i++) {
-    if (source[i] === 0x44 && source[i + 1] === 0x43 && source[i + 2] === 0x41 && source[i + 3] === 0) {
-      dca = i;
-      break;
-    }
-  }
-  if (dca < 0) throw new Error('DCA missing');
-  const dcaLen = source.readUInt32BE(dca + 4);
-  const payloadOff = dca + dcaLen;
-  const compressedSize = source.readUInt32BE(0x20);
-  const format = source.subarray(0x28, 0x2c).toString('ascii');
-  if (format !== 'DFLT') throw new Error(`expected DFLT, got ${format}`);
-  return inflateSync(source.subarray(payloadOff, payloadOff + compressedSize));
 }
 
 const close = (a: number, b: number) => Math.abs(a - b) < 0.001;

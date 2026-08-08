@@ -5,11 +5,12 @@
  * Authority: native-verified（偏移表驱动全枚举；per-type 内层载荷未语义解析，
  * 源字节重写保持无损）。缺真实资源环境时结构化跳过，不冒充。
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { inflateSync } from 'node:zlib';
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve } from 'node:path';
+import { decompressDfltDcx } from '../util/dcxDflt.js';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { createSmokeWorkspace } from './harness/smokeWorkspace.js';
+import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 import {
   SEKIRO_MSB_ENTITY_TYPE_REGISTRY,
   isRegisteredMsbType,
@@ -34,6 +35,16 @@ interface MsbEnvelope {
 
 const ALL_MAPS = ['m10', 'm11', 'm11_01', 'm11_02', 'm13', 'm15', 'm17', 'm20', 'm25'];
 
+/**
+ * registry 里以 testRole=msb-primary 登记的那张图。
+ *
+ * has-game-registry.json 实测只登记了 m11（localPath
+ * mods/map/mapstudio/m11_00_00_00.msb.dcx，带 sha256），其余 8 张未登记。
+ * 已登记的必须走 resolveNativeFixture 以获得哈希与 root 边界校验；把 9 张全部
+ * 手拼路径（改动前的形态）等于对唯一有登记哈希的那张也放弃校验。
+ */
+const REGISTERED_MAP = 'm11';
+
 // Sekiro map id 文件命名：基础图 mXX_00_00_00，子图 mXX_YY_00_00。
 const MAP_FILES: Record<string, string> = {
   m10: 'm10_00_00_00.msb.dcx',
@@ -46,23 +57,6 @@ const MAP_FILES: Record<string, string> = {
   m20: 'm20_00_00_00.msb.dcx',
   m25: 'm25_00_00_00.msb.dcx'
 };
-
-function decompressDfltDcx(source: Buffer): Buffer {
-  let dca = -1;
-  for (let i = 0x30; i < 0x100; i++) {
-    if (source[i] === 0x44 && source[i + 1] === 0x43 && source[i + 2] === 0x41 && source[i + 3] === 0) {
-      dca = i;
-      break;
-    }
-  }
-  if (dca < 0) throw new Error('DCA missing');
-  const dcaLen = source.readUInt32BE(dca + 4);
-  const payloadOff = dca + dcaLen;
-  const compressedSize = source.readUInt32BE(0x20);
-  const format = source.subarray(0x28, 0x2c).toString('ascii');
-  if (format !== 'DFLT') throw new Error(`expected DFLT, got ${format}`);
-  return inflateSync(source.subarray(payloadOff, payloadOff + compressedSize));
-}
 
 function registryTypeIds(family: MsbEntityFamilyKey): Set<number> {
   const def = SEKIRO_MSB_ENTITY_TYPE_REGISTRY.families[family];
@@ -110,12 +104,36 @@ async function main(): Promise<void> {
   ];
   for (const { family } of registeredFamilies) union.set(family, new Set());
 
+  // 语料根：显式传参优先，否则用环境变量给的游戏根 + 固定相对目录。
+  const mapDir = explicitPath ?? join(gameRoot!, 'mods', 'map', 'mapstudio');
+  const canonicalMapDir = await realpath(resolve(mapDir));
+
   for (const map of ALL_MAPS) {
-    let sourceDcx: string;
-    if (explicitPath) {
-      sourceDcx = join(explicitPath, MAP_FILES[map]!);
-    } else {
-      sourceDcx = join(gameRoot!, 'mods', 'map', 'mapstudio', MAP_FILES[map]!);
+    // 本套件读 9 张图，而 registry 只登记了其中一张（msb-primary = m11）。
+    // 已登记的那张必须走 resolveNativeFixture，未登记的仍需最低边界校验——
+    // 此前整条路径是手拼 join()，两道保护全绕过了：
+    //   · NATIVE_FIXTURE_HASH_MISMATCH（文件内容与登记哈希不符）
+    //   · NATIVE_FIXTURE_OUTSIDE_ROOT（路径越出 fixture root）
+    // 绕过的后果不是报错而是**静默读到别的文件**：解析结果照样产出，
+    // 而「我们验证的是哪份字节」变得不可知。
+    // resolveNativeFixture(explicitPath, testRole, legacyRelativePath)：第一个参数
+    // 是显式覆盖路径（给就直接用），所以这里必须传 undefined 才会真正走 registry
+    // 的哈希与 root 校验；legacy 相对路径与 registry 登记的 localPath 保持一致。
+    const sourceDcx = map === REGISTERED_MAP && !explicitPath
+      ? await resolveNativeFixture(
+        undefined,
+        'msb-primary',
+        join(canonicalMapDir, MAP_FILES[map]!)
+      )
+      : join(canonicalMapDir, MAP_FILES[map]!);
+
+    // 未登记的 8 张图至少要证明没有路径穿越（MAP_FILES 是本文件内的常量，
+    // 但把边界判据建在「常量当前是干净的」之上，等于下次改常量时无人拦）。
+    const relativeToDir = relative(canonicalMapDir, resolve(sourceDcx));
+    if (relativeToDir.startsWith('..') || isAbsolute(relativeToDir)) {
+      throw new Error(
+        `MSB_ALL_MAPS_SOURCE_OUTSIDE_ROOT: ${map} 的语料路径越出语料根 ${canonicalMapDir}。`
+      );
     }
     const payload = decompressDfltDcx(await readFile(sourceDcx));
     const msbPath = join(root, `${map}.msb`);
