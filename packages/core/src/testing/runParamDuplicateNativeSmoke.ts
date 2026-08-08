@@ -5,6 +5,7 @@
 import { copyFile, mkdir, writeFile } from 'node:fs/promises';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
 import { join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 
 interface ParamEnvelope {
@@ -23,7 +24,37 @@ function main(): Promise<void> {
 }
 
 async function mainInWorkspace(root: string): Promise<void> {
-  const sourceBnd = resolve(process.argv[2] ?? '../../mods/param/gameparam/gameparam.parambnd.dcx');
+  // 语料根解析：此前硬编码 `../../mods/param/...`，从仓库根跑时 resolve 落到
+  // D:\Repository\SoulForge\mods\param\... —— 一个不存在的路径，于是 copyFile 直接
+  // ENOENT 崩溃。而同目录的 runNativeInspectSmoke:27-35 早已修过同一个坑并留了
+  // 注释，本文件是那次改造的漏改点（2026-08-08 native 全量跑实测 FAIL 才暴露）。
+  //
+  // 修法与 scripts/verify-native-dcx-documents.mjs:28-30 一致：环境变量给的根下
+  // 若存在 mods/ 就下沉（registry 的 localPath 全部以 mods/ 开头，所以那个变量的
+  // 语义是**游戏根**），显式传参时不下沉——那是调用方明确指定的目录。
+  const explicitPath = process.argv[2]?.trim();
+  const envRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+    ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() ?? '';
+  const corpusRoot = envRoot === ''
+    ? ''
+    : (existsSync(join(envRoot, 'mods')) ? join(envRoot, 'mods') : envRoot);
+  const sourceBnd = explicitPath !== undefined && explicitPath !== ''
+    ? resolve(explicitPath)
+    : (corpusRoot === '' ? '' : join(corpusRoot, 'param', 'gameparam', 'gameparam.parambnd.dcx'));
+
+  // 缺语料是「没有可验证对象」，不是「验证失败」（硬约束 7：缺语料与真坏必须
+  // 可区分）。此前直接 copyFile 崩溃，把环境问题报成了缺陷。
+  if (sourceBnd === '' || !existsSync(sourceBnd)) {
+    console.log(JSON.stringify({
+      ok: true,
+      status: 'skipped',
+      testId: 'PARAM-DUPLICATE-NATIVE',
+      reason: sourceBnd === ''
+        ? '未配置本机语料根（SOULFORGE_NATIVE_FIXTURE_ROOT / SOULFORGE_SEKIRO_GAME_ROOT），PARAM 重复行 native 验证未执行。'
+        : `语料不存在：${sourceBnd}；PARAM 重复行 native 验证未执行。`
+    }, null, 2));
+    return;
+  }
   const overlay = join(root, 'mod');
   const staging = join(root, 'staging');
   await mkdir(join(overlay, 'param', 'gameparam'), { recursive: true });
