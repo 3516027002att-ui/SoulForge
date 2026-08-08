@@ -86,7 +86,12 @@ import {
   serializeMsgRowsToTsv,
   type EditableMsgRow
 } from './format/msgRows.js';
-import { filterFilesForMode, operationStatusLabel, shortenPath } from './format/uiText.js';
+import {
+  filterFilesForMode,
+  formatPreviewTruncation,
+  operationStatusLabel,
+  shortenPath
+} from './format/uiText.js';
 import { resetAllDocuments, type DocumentResetActions } from './staging/documentReset.js';
 import {
   FOCUSABLE_SELECTOR,
@@ -2377,7 +2382,11 @@ export function App(): ReactElement {
           {selectedFile?.relativePath?.endsWith('.tpf') && (
             <TpfWorkbenchPanel resourceUri={selectedFile.sourceUri} data={tpfData as never} />
           )}
-          {preview?.truncated && <p className="muted">预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开。</p>}
+          {preview?.truncated && (
+            <p className="muted">
+              {formatPreviewTruncation(preview.bytesRead, preview.file?.size)}
+            </p>
+          )}
           </PanelErrorBoundary>
                 </div>
               </div>

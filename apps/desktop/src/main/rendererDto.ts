@@ -88,6 +88,7 @@ export function toRendererResourcePreview(preview: ResourcePreview): RendererRes
       : {}),
     ...(preview.structuredPreview !== undefined ? { structuredPreview: preview.structuredPreview } : {}),
     truncated: preview.truncated,
+    bytesRead: preview.bytesRead,
     diagnostics: sanitizeDiagnostics(preview.diagnostics)
   };
 }
