@@ -121,16 +121,23 @@ Bridge 与本机 native smoke 见根 `package.json`。真实游戏或私有 corp
 
 Synthetic 技术规格：
 
-以下 synthetic 规格文档在文档同步基线 `2002076` 中受 Git 跟踪，但在当前工作树中处于删除状态，删除意图尚未确认并形成提交（见交接书第 19 节）：
+四份 V0_3 synthetic 规格文档（FMG / EVENT_PARAM / MAP / BND）曾在文档同步基线 `2002076` 中受 Git 跟踪，删除已完成并入库——它们既不在工作树、也不再被跟踪，不存在待裁定的悬空状态。不要恢复这些路径。
 
-- `docs/V0_3_FMG_SYNTHETIC_FIXTURE.md`
-- `docs/V0_3_SYNTHETIC_EVENT_PARAM_FIXTURES.md`
-- `docs/V0_3_SYNTHETIC_MAP_FIXTURE.md`
-- `docs/V0_3_SYNTHETIC_BND_FIXTURE.md`
-
-在删除意图被裁定前，不恢复、不覆盖这些路径，也不将其描述为当前可读文档。synthetic authority 以实际 fixture 生成器、Bridge 代码和 `npm run bridge:verify:synthetic` 断言为准，而非上述文档。
+synthetic authority 以实际 fixture 生成器、Bridge 代码和 `npm run bridge:verify:synthetic` 断言为准，而非文档。
 
 
 旧 milestone、fork、task、project-state、next-actions 和 development-log 文档不再作为当前口径，也不应恢复。
 
 真实游戏资产、用户 Mod、私有测试语料、Oodle DLL 和任何明文凭据都不得提交。
+
+## 许可证
+
+SoulForge 按 [Apache License 2.0](LICENSE) 授权。归属与第三方声明见 [NOTICE](NOTICE)。
+
+`packages/core/src/model-services/` 的 AI agent kernel 含派生自 openai/codex（Apache-2.0，Copyright 2025 OpenAI）的设计，各文件头注释已标明；上游同为 Apache-2.0，授权兼容。被再分发的二进制依赖的许可证副本在 `licenses/` 下，各依赖保留自身许可。
+
+SoulForge 不附带任何游戏资产、专有压缩库或 FromSoftware 代码。
+
+想说的话：
+这个ui太丑了，有没有大手子帮我做一版好看的
+This UI is hideous. Is there an expert who can help me create a better-looking version?

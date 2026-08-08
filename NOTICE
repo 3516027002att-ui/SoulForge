@@ -1,0 +1,35 @@
+SoulForge
+Copyright 2026 SoulForge contributors
+
+This product includes software developed as part of the SoulForge project,
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------
+Third-party attributions
+--------------------------------------------------------------------------
+
+openai/codex (Apache License 2.0, Copyright 2025 OpenAI)
+
+  The AI agent kernel in packages/core/src/model-services/ carries designs
+  derived from openai/codex. The derivation is by design reference, not a
+  verbatim source copy. Each deriving file states the derivation in its
+  header comment:
+
+    packages/core/src/model-services/agentLoop.ts
+    packages/core/src/model-services/contextCompactor.ts
+    packages/core/src/model-services/retryPolicy.ts
+    packages/core/src/model-services/rolloutRecorder.ts
+
+  openai/codex is itself Apache-2.0 licensed, so this derivation is
+  license-compatible with SoulForge's own Apache-2.0 terms.
+
+--------------------------------------------------------------------------
+
+Runtime and build dependencies retain their own licenses. Copies of the
+licenses for redistributed binary dependencies are kept under licenses/.
+
+FromSoftware file formats are interoperated with for modding purposes.
+SoulForge ships no game assets, no proprietary compression libraries, and
+no FromSoftware code. External FromSoftware community tools are consulted
+for behavior, format-family and workflow comparison only; incompatibly
+licensed source is not copied.
