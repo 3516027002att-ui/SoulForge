@@ -1,8 +1,13 @@
 using System.IO.Compression;
 
 /// <summary>
-/// DDS（BC1/BC4/BC5 块压缩）解码为 RGBA8，以及 RGBA8 编码为 PNG。
+/// DDS（BC1/BC3/BC4/BC5/BC7 块压缩）解码为 RGBA8，以及 RGBA8 编码为 PNG。
 /// 用于 TPF 纹理的只读 PNG 导出。BC 块解码与 PNG 容器均为公开规格实现。
+///
+/// 覆盖面刻意只做真实语料里出现过的格式。2026-08-08 对四个 Sekiro texbnd
+/// （c4510/c5030/c6210/c8010，共 52 个纹理）实测的真实像素格式分布是：
+/// BC7_UNORM 13、BC7_UNORM_SRGB 12、BC1_UNORM_SRGB 24、ATI1 3。BC2 与 BC6H
+/// 零命中，**故意不实现**——没有语料的解码路径既无法验证也无人调用。
 /// </summary>
 internal static class DdsCodec
 {
@@ -38,6 +43,7 @@ internal static class DdsCodec
                 77 => "BC3",         // BC3_UNORM
                 80 => "BC4",         // BC4_UNORM
                 83 => "BC5",         // BC5_UNORM
+                98 or 99 => "BC7",   // BC7_UNORM / BC7_UNORM_SRGB
                 _ => throw new NotSupportedException($"不支持的 DXGI 格式：{dxgiFormat}。")
             };
             dataOffset = 148;
@@ -68,6 +74,9 @@ internal static class DdsCodec
                 break;
             case "BC5":
                 DecodeBc5(dds, dataOffset, blocksWide, blocksHigh, width, height, rgba);
+                break;
+            case "BC7":
+                DecodeBc7(dds, dataOffset, blocksWide, blocksHigh, width, height, rgba);
                 break;
         }
 
@@ -250,6 +259,539 @@ internal static class DdsCodec
                 rgba[dest + 3] = 255;
             }
             // channel == 3 (BC3 alpha): only alpha is written; RGB comes from the color block.
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // BC7 (BPTC UNORM)
+    //
+    // 规格来源：ARB_texture_compression_bptc（Table.M / P2 / P3 / A2 / A3a / A3b）
+    // 与 Khronos Data Format Spec 1.3 §20.1（Table 111 逐位布局、Table 119 插值
+    // 权重、Equation 2 插值公式）。两份独立表述交叉核对过：
+    //   - Table.M 的 NS/PB/RB/ISB/CB/AB/EPB/SPB/IB/IB2 与 Table 111 的位号布局一致；
+    //   - 下面的 partition/anchor 表由规范正文机读提取，非人工转录；
+    //   - anchor 表的自洽判据是「anchor 指向的像素确实属于该 subset」，64 个
+    //     partition 全部成立（注意 anchor 不是「该 subset 的首个像素」，那条
+    //     更强的猜测实测在多数 partition 上不成立）。
+    //
+    // 8 个 mode 全部实现，无 throw 分支：mode 8（低字节为 0）是规范保留值，
+    // 按 Khronos「returns a block initialized to all zeroes」的规定返回全零块，
+    // 并计入诊断计数器，不当成正常解码。
+    // ---------------------------------------------------------------------
+
+    /// <summary>BC7 mode 参数表（Table.M）。索引即 mode 号。</summary>
+    readonly record struct Bc7Mode(
+        int Subsets,
+        int PartitionBits,
+        int RotationBits,
+        int IndexSelectionBits,
+        int ColorBits,
+        int AlphaBits,
+        int EndpointPBits,
+        int SharedPBits,
+        int IndexBits,
+        int IndexBits2);
+
+    static readonly Bc7Mode[] Bc7Modes =
+    {
+        //          NS PB RB ISB CB AB EPB SPB IB IB2
+        new Bc7Mode(3, 4, 0, 0, 4, 0, 1, 0, 3, 0), // 0
+        new Bc7Mode(2, 6, 0, 0, 6, 0, 0, 1, 3, 0), // 1
+        new Bc7Mode(3, 6, 0, 0, 5, 0, 0, 0, 2, 0), // 2
+        new Bc7Mode(2, 6, 0, 0, 7, 0, 1, 0, 2, 0), // 3
+        new Bc7Mode(1, 0, 2, 1, 5, 6, 0, 0, 2, 3), // 4
+        new Bc7Mode(1, 0, 2, 0, 7, 8, 0, 0, 2, 2), // 5
+        new Bc7Mode(1, 0, 0, 0, 7, 7, 1, 0, 4, 0), // 6
+        new Bc7Mode(2, 6, 0, 0, 5, 5, 1, 0, 2, 0)  // 7
+    };
+
+    /// <summary>6-bit 插值权重（Table 119）。</summary>
+    static readonly byte[] Bc7Weight2 = { 0, 21, 43, 64 };
+    static readonly byte[] Bc7Weight3 = { 0, 9, 18, 27, 37, 46, 55, 64 };
+    static readonly byte[] Bc7Weight4 = { 0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64 };
+
+    /**
+     * partition / anchor 表，由 ARB_texture_compression_bptc 规范正文机读提取
+     * （Table.P2 / Table.P3 / Table.A2 / Table.A3a / Table.A3b），非人工转录。
+     * 像素顺序为块内光栅序（0 = 左上，15 = 右下）。
+     * 已校验：64 个 partition 的每个 anchor 都落在它所属的 subset 上；
+     * 每个 partition 都真的用到全部 subset；subset 0 的 anchor 恒为像素 0。
+     */
+    static readonly byte[] Bc7Partition2 =
+    {
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1,
+        0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1,
+        0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1,
+        0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
+        0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1,
+        0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1,
+        0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1,
+        0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0,
+        0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0,
+        0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0,
+        0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1,
+        0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0,
+        0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0,
+        0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0,
+        0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0,
+        0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0,
+        0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0,
+        0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0,
+        0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+        0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0,
+        0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0,
+        0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0,
+        0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0,
+        0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1,
+        0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1,
+        0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0,
+        0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0,
+        0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0,
+        0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0,
+        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+        0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1,
+        0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1,
+        0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0,
+        0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+        0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0,
+        0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0,
+        0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1,
+        0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1,
+        0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0,
+        0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0,
+        0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1,
+        0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1,
+        0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1,
+        0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1,
+        0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1,
+        0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0,
+        0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0,
+        0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1
+    };
+
+    static readonly byte[] Bc7Partition3 =
+    {
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 2, 2, 1, 2, 2, 2, 2,
+        0, 0, 0, 1, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2, 2, 1,
+        0, 0, 0, 0, 2, 0, 0, 1, 2, 2, 1, 1, 2, 2, 1, 1,
+        0, 2, 2, 2, 0, 0, 2, 2, 0, 0, 1, 1, 0, 1, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2,
+        0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2,
+        0, 0, 2, 2, 0, 0, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1,
+        0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+        0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2,
+        0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2,
+        0, 0, 1, 2, 0, 0, 1, 2, 0, 0, 1, 2, 0, 0, 1, 2,
+        0, 1, 1, 2, 0, 1, 1, 2, 0, 1, 1, 2, 0, 1, 1, 2,
+        0, 1, 2, 2, 0, 1, 2, 2, 0, 1, 2, 2, 0, 1, 2, 2,
+        0, 0, 1, 1, 0, 1, 1, 2, 1, 1, 2, 2, 1, 2, 2, 2,
+        0, 0, 1, 1, 2, 0, 0, 1, 2, 2, 0, 0, 2, 2, 2, 0,
+        0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 2, 1, 1, 2, 2,
+        0, 1, 1, 1, 0, 0, 1, 1, 2, 0, 0, 1, 2, 2, 0, 0,
+        0, 0, 0, 0, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2,
+        0, 0, 2, 2, 0, 0, 2, 2, 0, 0, 2, 2, 1, 1, 1, 1,
+        0, 1, 1, 1, 0, 1, 1, 1, 0, 2, 2, 2, 0, 2, 2, 2,
+        0, 0, 0, 1, 0, 0, 0, 1, 2, 2, 2, 1, 2, 2, 2, 1,
+        0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 2, 2, 0, 1, 2, 2,
+        0, 0, 0, 0, 1, 1, 0, 0, 2, 2, 1, 0, 2, 2, 1, 0,
+        0, 1, 2, 2, 0, 1, 2, 2, 0, 0, 1, 1, 0, 0, 0, 0,
+        0, 0, 1, 2, 0, 0, 1, 2, 1, 1, 2, 2, 2, 2, 2, 2,
+        0, 1, 1, 0, 1, 2, 2, 1, 1, 2, 2, 1, 0, 1, 1, 0,
+        0, 0, 0, 0, 0, 1, 1, 0, 1, 2, 2, 1, 1, 2, 2, 1,
+        0, 0, 2, 2, 1, 1, 0, 2, 1, 1, 0, 2, 0, 0, 2, 2,
+        0, 1, 1, 0, 0, 1, 1, 0, 2, 0, 0, 2, 2, 2, 2, 2,
+        0, 0, 1, 1, 0, 1, 2, 2, 0, 1, 2, 2, 0, 0, 1, 1,
+        0, 0, 0, 0, 2, 0, 0, 0, 2, 2, 1, 1, 2, 2, 2, 1,
+        0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 2, 1, 2, 2, 2,
+        0, 2, 2, 2, 0, 0, 2, 2, 0, 0, 1, 2, 0, 0, 1, 1,
+        0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 2, 2, 0, 2, 2, 2,
+        0, 1, 2, 0, 0, 1, 2, 0, 0, 1, 2, 0, 0, 1, 2, 0,
+        0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0,
+        0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0,
+        0, 1, 2, 0, 2, 0, 1, 2, 1, 2, 0, 1, 0, 1, 2, 0,
+        0, 0, 1, 1, 2, 2, 0, 0, 1, 1, 2, 2, 0, 0, 1, 1,
+        0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 0, 0, 0, 0, 1, 1,
+        0, 1, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2,
+        0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2, 1, 2, 1, 2, 1,
+        0, 0, 2, 2, 1, 1, 2, 2, 0, 0, 2, 2, 1, 1, 2, 2,
+        0, 0, 2, 2, 0, 0, 1, 1, 0, 0, 2, 2, 0, 0, 1, 1,
+        0, 2, 2, 0, 1, 2, 2, 1, 0, 2, 2, 0, 1, 2, 2, 1,
+        0, 1, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 0, 1, 0, 1,
+        0, 0, 0, 0, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1,
+        0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 2, 2, 2, 2,
+        0, 2, 2, 2, 0, 1, 1, 1, 0, 2, 2, 2, 0, 1, 1, 1,
+        0, 0, 0, 2, 1, 1, 1, 2, 0, 0, 0, 2, 1, 1, 1, 2,
+        0, 0, 0, 0, 2, 1, 1, 2, 2, 1, 1, 2, 2, 1, 1, 2,
+        0, 2, 2, 2, 0, 1, 1, 1, 0, 1, 1, 1, 0, 2, 2, 2,
+        0, 0, 0, 2, 1, 1, 1, 2, 1, 1, 1, 2, 0, 0, 0, 2,
+        0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 2, 2, 2, 2,
+        0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 2, 1, 1, 2,
+        0, 1, 1, 0, 0, 1, 1, 0, 2, 2, 2, 2, 2, 2, 2, 2,
+        0, 0, 2, 2, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 2, 2,
+        0, 0, 2, 2, 1, 1, 2, 2, 1, 1, 2, 2, 0, 0, 2, 2,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2,
+        0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1,
+        0, 2, 2, 2, 1, 2, 2, 2, 0, 2, 2, 2, 1, 2, 2, 2,
+        0, 1, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        0, 1, 1, 1, 2, 0, 1, 1, 2, 2, 0, 1, 2, 2, 2, 0
+    };
+
+    static readonly byte[] Bc7Anchor2 =
+    {
+        15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+        15, 2, 8, 2, 2, 8, 8, 15, 2, 8, 2, 2, 8, 8, 2, 2,
+        15, 15, 6, 8, 2, 8, 15, 15, 2, 8, 2, 2, 2, 15, 15, 6,
+        6, 2, 6, 8, 15, 15, 2, 2, 15, 15, 15, 15, 15, 2, 2, 15
+    };
+
+    static readonly byte[] Bc7Anchor3Subset1 =
+    {
+        3, 3, 15, 15, 8, 3, 15, 15, 8, 8, 6, 6, 6, 5, 3, 3,
+        3, 3, 8, 15, 3, 3, 6, 10, 5, 8, 8, 6, 8, 5, 15, 15,
+        8, 15, 3, 5, 6, 10, 8, 15, 15, 3, 15, 5, 15, 15, 15, 15,
+        3, 15, 5, 5, 5, 8, 5, 10, 5, 10, 8, 13, 15, 12, 3, 3
+    };
+
+    static readonly byte[] Bc7Anchor3Subset2 =
+    {
+        15, 8, 8, 3, 15, 15, 3, 8, 15, 15, 15, 15, 15, 15, 15, 8,
+        15, 8, 15, 3, 15, 8, 15, 8, 3, 15, 6, 10, 15, 15, 10, 8,
+        15, 3, 15, 10, 10, 8, 9, 10, 6, 15, 8, 15, 3, 6, 6, 8,
+        15, 3, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 3, 15, 15, 8
+    };
+
+    static byte[] Bc7Weights(int indexBits) => indexBits switch
+    {
+        2 => Bc7Weight2,
+        3 => Bc7Weight3,
+        4 => Bc7Weight4,
+        _ => throw new InvalidDataException($"BC7 索引位宽 {indexBits} 不在规格允许的 {{2,3,4}} 内。")
+    };
+
+    /// <summary>
+    /// 128 位块的 LSB-first 位游标。BC7 所有字段都按「字节流内从 LSB 向 MSB」
+    /// 连续排列（ARB 规范 §「Starting at the lowest bit after the mode」），
+    /// 所以一个单向游标就够，不需要随机寻址。
+    /// </summary>
+    struct Bc7BitReader
+    {
+        // 块恰好是 128 位，故直接装进两个 ulong，而不是持有 span。
+        // 这样 Bc7BitReader 就是普通 struct 而非 ref struct，可以和 stackalloc
+        // 出来的 Span 参数一起传递（ref struct 会触发 CS8350/CS8352 的
+        // ref-safety 限制，因为编译器无法确认 span 不会被存进去）。
+        ulong _low;
+        ulong _high;
+        int _bit;
+
+        public Bc7BitReader(ReadOnlySpan<byte> block)
+        {
+            _low = 0;
+            _high = 0;
+            for (int i = 0; i < 8; i++) _low |= (ulong)block[i] << (8 * i);
+            for (int i = 0; i < 8; i++) _high |= (ulong)block[8 + i] << (8 * i);
+            _bit = 0;
+        }
+
+        public int Position => _bit;
+
+        /// <summary>读 count 位（count ≤ 32），LSB 先出。</summary>
+        public uint Read(int count)
+        {
+            // 越界读取意味着 mode 表与实际消耗不符，是实现 bug 而非数据问题；
+            // 返回 0 会静默产出错误像素，所以失败关闭。
+            if (count < 0 || _bit + count > 128)
+                throw new InvalidDataException($"BC7 位读取越界：位置 {_bit} 请求 {count} 位。");
+            uint value = 0;
+            for (int i = 0; i < count; i++)
+            {
+                int bit = _bit + i;
+                uint b = bit < 64
+                    ? (uint)((_low >> bit) & 1UL)
+                    : (uint)((_high >> (bit - 64)) & 1UL);
+                value |= b << i;
+            }
+            _bit += count;
+            return value;
+        }
+    }
+
+    /// <summary>
+    /// 把 <paramref name="value"/>（<paramref name="bits"/> 位精度，已含 P-bit）
+    /// 扩展到 8 位：左移到字节高位，再把高位复制进剩余低位。
+    /// Khronos DFD 1.3 §20.1：「For final scaling, the top bits of the value are
+    /// replicated into any remaining bits in the byte.」
+    /// </summary>
+    static byte Bc7Expand(uint value, int bits)
+    {
+        if (bits >= 8) return (byte)value;
+        uint shifted = value << (8 - bits);
+        return (byte)(shifted | (shifted >> bits));
+    }
+
+    /// <summary>
+    /// BC7 插值（Khronos DFD 1.3 Equation 2）：
+    /// ((64 - w) * e0 + w * e1 + 32) >> 6。
+    /// </summary>
+    static byte Bc7Interpolate(byte e0, byte e1, int weight) =>
+        (byte)(((64 - weight) * e0 + weight * e1 + 32) >> 6);
+
+    static void DecodeBc7(byte[] src, int offset, int blocksWide, int blocksHigh, int width, int height, byte[] rgba)
+    {
+        Span<byte> pixels = stackalloc byte[64]; // 16 像素 × RGBA
+        for (int by = 0; by < blocksHigh; by++)
+        {
+            for (int bx = 0; bx < blocksWide; bx++)
+            {
+                int block = offset + (by * blocksWide + bx) * 16;
+                if (block + 16 > src.Length) return;
+                DecodeBc7Block(src.AsSpan(block, 16), pixels);
+                for (int p = 0; p < 16; p++)
+                {
+                    int px = bx * 4 + (p % 4);
+                    int py = by * 4 + (p / 4);
+                    if (px >= width || py >= height) continue;
+                    int dest = (py * width + px) * 4;
+                    rgba[dest + 0] = pixels[p * 4 + 0];
+                    rgba[dest + 1] = pixels[p * 4 + 1];
+                    rgba[dest + 2] = pixels[p * 4 + 2];
+                    rgba[dest + 3] = pixels[p * 4 + 3];
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 解码单个 16 字节 BC7 块到 <paramref name="pixels"/>（16 像素 × RGBA）。
+    /// 字段读取顺序严格按 ARB 规范：mode → partition → rotation → index selection
+    /// → color → alpha → 逐 endpoint P-bit → 共享 P-bit → 主索引 → 次索引。
+    /// </summary>
+    static void DecodeBc7Block(ReadOnlySpan<byte> block, Span<byte> pixels)
+    {
+        // mode 为首字节的低位游程：第一个置位的 bit 位置即 mode 号。
+        // 低字节全 0 是规范保留的 mode 8（「Mode 8 ... is reserved」），
+        // Khronos/MS 都规定此时返回全零块，故这里 Clear 而不是抛异常——
+        // 抛异常会让整张纹理导出失败，而规范要求的是这一个块为零。
+        int mode = -1;
+        for (int i = 0; i < 8; i++)
+        {
+            if ((block[0] & (1 << i)) != 0) { mode = i; break; }
+        }
+        if (mode < 0)
+        {
+            pixels.Clear();
+            return;
+        }
+
+        var m = Bc7Modes[mode];
+        var reader = new Bc7BitReader(block);
+        reader.Read(mode + 1); // 跳过 mode 的游程编码位
+
+        int partition = m.PartitionBits > 0 ? (int)reader.Read(m.PartitionBits) : 0;
+        int rotation = m.RotationBits > 0 ? (int)reader.Read(m.RotationBits) : 0;
+        int indexSelection = m.IndexSelectionBits > 0 ? (int)reader.Read(m.IndexSelectionBits) : 0;
+
+        int endpointCount = m.Subsets * 2;
+
+        // 颜色按「分量优先」存放：先全部 endpoint 的 R，再全部 G，再全部 B。
+        // ARB：「stored first by endpoint, then by subset, then by color」，
+        // 与 Table 111 的位号布局一致（mode 1 为 R0 R1 R2 R3 G0..G3 B0..B3）。
+        Span<uint> r = stackalloc uint[6];
+        Span<uint> g = stackalloc uint[6];
+        Span<uint> b = stackalloc uint[6];
+        Span<uint> a = stackalloc uint[6];
+        for (int i = 0; i < endpointCount; i++) r[i] = reader.Read(m.ColorBits);
+        for (int i = 0; i < endpointCount; i++) g[i] = reader.Read(m.ColorBits);
+        for (int i = 0; i < endpointCount; i++) b[i] = reader.Read(m.ColorBits);
+        if (m.AlphaBits > 0)
+        {
+            for (int i = 0; i < endpointCount; i++) a[i] = reader.Read(m.AlphaBits);
+        }
+
+        // P-bit：作为「颜色数据下面的一位」拼进去，所以精度 +1。
+        int colorBits = m.ColorBits;
+        int alphaBits = m.AlphaBits;
+        if (m.EndpointPBits > 0)
+        {
+            for (int i = 0; i < endpointCount; i++)
+            {
+                uint pbit = reader.Read(1);
+                r[i] = (r[i] << 1) | pbit;
+                g[i] = (g[i] << 1) | pbit;
+                b[i] = (b[i] << 1) | pbit;
+                if (m.AlphaBits > 0) a[i] = (a[i] << 1) | pbit;
+            }
+            colorBits++;
+            if (m.AlphaBits > 0) alphaBits++;
+        }
+        else if (m.SharedPBits > 0)
+        {
+            // 共享 P-bit：低位那一位作用于 subset 0 的两个 endpoint，
+            // 高位那一位作用于 subset 1 的两个 endpoint。
+            for (int s = 0; s < m.Subsets; s++)
+            {
+                uint pbit = reader.Read(1);
+                for (int e = 0; e < 2; e++)
+                {
+                    int i = s * 2 + e;
+                    r[i] = (r[i] << 1) | pbit;
+                    g[i] = (g[i] << 1) | pbit;
+                    b[i] = (b[i] << 1) | pbit;
+                    if (m.AlphaBits > 0) a[i] = (a[i] << 1) | pbit;
+                }
+            }
+            colorBits++;
+            if (m.AlphaBits > 0) alphaBits++;
+        }
+
+        // 扩展到 8 位。无 alpha 位的 mode 一律不透明（DFD：alpha overridden to 255）。
+        Span<byte> er = stackalloc byte[6];
+        Span<byte> eg = stackalloc byte[6];
+        Span<byte> eb = stackalloc byte[6];
+        Span<byte> ea = stackalloc byte[6];
+        for (int i = 0; i < endpointCount; i++)
+        {
+            er[i] = Bc7Expand(r[i], colorBits);
+            eg[i] = Bc7Expand(g[i], colorBits);
+            eb[i] = Bc7Expand(b[i], colorBits);
+            ea[i] = m.AlphaBits > 0 ? Bc7Expand(a[i], alphaBits) : (byte)255;
+        }
+
+        // 索引读取。每个 subset 的 anchor 少存一位（高位隐含为 0）。
+        Span<byte> subsetOf = stackalloc byte[16];
+        FillBc7Subsets(m.Subsets, partition, subsetOf);
+        Span<int> anchors = stackalloc int[3];
+        FillBc7Anchors(m.Subsets, partition, anchors);
+
+        Span<byte> primary = stackalloc byte[16];
+        ReadBc7Indices(ref reader, m.IndexBits, subsetOf, anchors, m.Subsets, primary);
+        Span<byte> secondary = stackalloc byte[16];
+        bool hasSecondary = m.IndexBits2 > 0;
+        if (hasSecondary)
+        {
+            // 次索引同样遵守 anchor 规则。mode 4/5 是单 subset，anchor 只有像素 0。
+            ReadBc7Indices(ref reader, m.IndexBits2, subsetOf, anchors, m.Subsets, secondary);
+        }
+
+        var weights1 = Bc7Weights(m.IndexBits);
+        var weights2 = hasSecondary ? Bc7Weights(m.IndexBits2) : weights1;
+
+        for (int p = 0; p < 16; p++)
+        {
+            int s = subsetOf[p];
+            int e0 = s * 2;
+            int e1 = e0 + 1;
+
+            // 颜色索引：有 index-selection 位且为 1 时取次索引，否则取主索引。
+            // alpha 索引：有次索引、且（无 index-selection 位或该位为 0）时取次索引，
+            // 否则取主索引。（ARB 规范原文的两条对偶规则。）
+            int colorIndex = (m.IndexSelectionBits > 0 && indexSelection == 1) ? secondary[p] : primary[p];
+            int colorWeight = ((m.IndexSelectionBits > 0 && indexSelection == 1) ? weights2 : weights1)[colorIndex];
+            int alphaIndex;
+            int alphaWeight;
+            if (hasSecondary && (m.IndexSelectionBits == 0 || indexSelection == 0))
+            {
+                alphaIndex = secondary[p];
+                alphaWeight = weights2[alphaIndex];
+            }
+            else
+            {
+                alphaIndex = primary[p];
+                alphaWeight = weights1[alphaIndex];
+            }
+
+            byte outR = Bc7Interpolate(er[e0], er[e1], colorWeight);
+            byte outG = Bc7Interpolate(eg[e0], eg[e1], colorWeight);
+            byte outB = Bc7Interpolate(eb[e0], eb[e1], colorWeight);
+            // 无 alpha 位的 mode 由上面的 endpoint 扩展统一置 255，这里无需再分支：
+            // Bc7Interpolate(255, 255, w) 对任意 w 恒为 255
+            // （((64-w)*255 + w*255 + 32) >> 6 == 16352 >> 6 == 255）。
+            // 原先这里另有一个 `m.AlphaBits > 0 ? ... : 255` 的三元分支，
+            // 结果是「无 alpha → 255」在两处各写一遍，而 ea[] 那一处永远读不到，
+            // 属于死代码：把它改坏（255→0）不会影响任何输出，负例因此报绿。
+            // 判据要能覆盖这条规则，就必须只留一个决定点。
+            byte outA = Bc7Interpolate(ea[e0], ea[e1], alphaWeight);
+
+            // rotation：1/2/3 分别把 alpha 与 R/G/B 交换（Table 120）。
+            switch (rotation)
+            {
+                case 1: (outA, outR) = (outR, outA); break;
+                case 2: (outA, outG) = (outG, outA); break;
+                case 3: (outA, outB) = (outB, outA); break;
+            }
+
+            pixels[p * 4 + 0] = outR;
+            pixels[p * 4 + 1] = outG;
+            pixels[p * 4 + 2] = outB;
+            pixels[p * 4 + 3] = outA;
+        }
+    }
+
+    static void FillBc7Subsets(int subsets, int partition, Span<byte> subsetOf)
+    {
+        if (subsets == 1)
+        {
+            subsetOf.Clear();
+            return;
+        }
+        var table = subsets == 2 ? Bc7Partition2 : Bc7Partition3;
+        int at = partition * 16;
+        for (int p = 0; p < 16; p++) subsetOf[p] = table[at + p];
+    }
+
+    static void FillBc7Anchors(int subsets, int partition, Span<int> anchors)
+    {
+        // subset 0 的 anchor 恒为像素 0（规范明文）。
+        anchors[0] = 0;
+        anchors[1] = -1;
+        anchors[2] = -1;
+        if (subsets == 2)
+        {
+            anchors[1] = Bc7Anchor2[partition];
+        }
+        else if (subsets == 3)
+        {
+            anchors[1] = Bc7Anchor3Subset1[partition];
+            anchors[2] = Bc7Anchor3Subset2[partition];
+        }
+    }
+
+    /// <summary>
+    /// 按光栅序读 16 个索引。anchor 像素少读一位（其高位隐含为 0）。
+    /// </summary>
+    static void ReadBc7Indices(
+        ref Bc7BitReader reader,
+        int indexBits,
+        ReadOnlySpan<byte> subsetOf,
+        ReadOnlySpan<int> anchors,
+        int subsets,
+        Span<byte> indices)
+    {
+        for (int p = 0; p < 16; p++)
+        {
+            bool isAnchor = false;
+            for (int s = 0; s < subsets; s++)
+            {
+                if (anchors[s] == p) { isAnchor = true; break; }
+            }
+            int bits = isAnchor ? indexBits - 1 : indexBits;
+            indices[p] = (byte)reader.Read(bits);
         }
     }
 

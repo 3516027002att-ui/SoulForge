@@ -253,7 +253,9 @@ async function main(): Promise<void> {
     nonClaims: [
       'containerFormats 是 TPF 条目表 formatByte 的查表结果，不是真实像素格式；引用格式覆盖面时必须用 realPixelFormats。',
       'formatByteMismatches 只计数上报、不失败关闭——条目表与 DDS 头哪一侧是权威尚未裁定，那是独立议题。',
-      '本套件不声明这些纹理可被解码或导出：DdsCodec 无 BC7 实现，而实测 BC7 占多数。',
+      '本套件不声明这些纹理可被解码或导出——它只读条目表与 DDS 头，不跑 DdsCodec。'
+        + '（BC7 解码已于 2026-08-08 实现并对本语料 25 个 BC7 纹理逐个导出验证过，'
+        + '但那是导出路径的判据，不由本套件承担。）',
       'dimensionsValid 只表示 width/height 非零（此前叫 ddsValid，名字比内容大一号）；DDS 魔数由 Bridge 侧失败关闭校验，不由本套件声称。'
     ]
   }, null, 2));
