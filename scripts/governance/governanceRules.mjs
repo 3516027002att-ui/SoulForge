@@ -141,6 +141,19 @@ export function evidenceHasClaim(evidence, id, marker) {
 export function evaluateEvidenceFreshness(evidence, id, subjectRefs, freshnessContext) {
   if (freshnessContext === undefined) return 'static-mode';
   if (!evidenceIsSealed(evidence, id)) return 'not-sealed';
+  // 空主题域必须失败关闭，不能判 fresh。
+  //
+  // 原先直接走下面的 `subjectRefs.some(...)`，空数组时 some 恒假 → 返回 'fresh'。
+  // 实测：refs 命中已变更主题域 → stale；refs 非空但无关 → fresh；
+  //       **refs 为空数组 → fresh**。
+  // 而调用侧（本文件 :699）只守 `subjectRefs === null`，全仓 `subjectRefs.length`
+  // 零命中。后果：清空 GATE_SUBJECT_SETS 里任一条目的 files 而保留 key，
+  // 该 Gate 的 passed 证据从此**永不 stale**——freshness 判定被静默关掉，
+  // 而 GATE_SUBJECT_SET_UNDEFINED 那道失败关闭完全绕过（key 还在，不是 null）。
+  //
+  // 「没有主题域可比」与「主题域未变更」是两件事：前者说明配置坏了，
+  // 判定无从进行，必须报出来；后者才是 fresh。
+  if (subjectRefs.length === 0) return 'subject-set-empty';
   const anchor = evidence.get(id).seal.fields.head;
   const anchorState = freshnessContext.anchors?.[anchor];
   if (!anchorState || anchorState.subjectScanAvailable === false) return 'unverifiable';
@@ -165,10 +178,24 @@ export function checkEvidenceFreshness(
   if (freshnessContext === undefined) return null;
   if (evidenceIds.length === 0) return null;
   let sawUnverifiable = false;
+  let sawEmptySubjectSet = false;
   for (const id of evidenceIds) {
     const status = evaluateEvidenceFreshness(evidence, id, subjectRefs, freshnessContext);
     if (status === 'fresh' || status === 'static-mode') return null;
     if (status === 'unverifiable') sawUnverifiable = true;
+    if (status === 'subject-set-empty') sawEmptySubjectSet = true;
+  }
+  // 空主题域单列诊断码：它落到 staleCode 也会失败关闭，但报「证据 stale」会把
+  // 读者引向「重跑验证并重封存」，而真正该做的是修 GATE_SUBJECT_SETS 的配置。
+  // 症状指向错误的修复方向，和「门禁超时被误读成环境问题」同一类问题。
+  if (sawEmptySubjectSet) {
+    return makeFinding(
+      'GATE_SUBJECT_SET_EMPTY',
+      where,
+      'passed Gate 登记了 freshness 主题域但内容为空，无从判定新鲜度，失败关闭。'
+      + '「没有主题域可比」不等于「主题域未变更」——请修 GATE_SUBJECT_SETS 配置，'
+      + '而不是重跑验证重封存。'
+    );
   }
   if (sawUnverifiable) {
     return makeFinding(
