@@ -738,3 +738,135 @@ test('大工作区：过滤后页码复位，且搜索结果显式说明被截�
   await window.screenshot({ path: 'test-results/12-search-truncation.png' });
   await app.close();
 });
+
+test('AI 任务：运行发起后进度事件真的更新界面，取消真的发出 IPC', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  const panel = window.locator('[data-testid="agent-task-panel"]');
+  const status = window.locator('[data-testid="agent-task-status"]');
+  const cancel = window.locator('[data-testid="agent-task-cancel"]');
+  const run = window.locator('[data-testid="agent-task-run"]');
+
+  await expect(panel).toBeVisible();
+  // 起点必须是「没有任务」且取消不可用：一个 idle 下就能点的取消按钮
+  // 不会发出任何 IPC，属于假入口。
+  await expect(status).toContainText('没有进行中的任务');
+  await expect(cancel).toBeDisabled();
+
+  // 运行前置：fixture 提供一个已配置凭据的合成服务，故运行按钮可用。
+  await expect(window.locator('#agent-task-service')).toHaveValue('fixture-service');
+  await expect(run).toBeEnabled();
+
+  await window.locator('.agent__composer textarea').fill('把伤药葫芦的持有上限调到 12');
+  await run.click();
+
+  // 1) 发起真的走了 IPC。
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.run'] ?? 0).toBeGreaterThan(0);
+
+  // 2) renderer 不得抬高授权：run 请求里不能带 mode（省略时主进程落到 plan）。
+  const modeCalls = await ipcCalls(app);
+  expect(modeCalls['ai.agent.run:mode=absent'] ?? 0).toBeGreaterThan(0);
+  expect(modeCalls['ai.agent.run:mode=fullPermission'] ?? 0).toBe(0);
+  expect(modeCalls['ai.agent.run:mode=normal'] ?? 0).toBe(0);
+
+  // 3) 推送事件到达后界面真的更新：步号、工具调用与产出量都必须出现。
+  //    fixture 按计时器推 turn-started(1) → tool-call → delta，且刻意不推终态。
+  await expect(status).toContainText('第 1 步');
+  await expect(status).toContainText('可随时取消');
+  const toolCalls = window.locator('[data-testid="agent-task-tool-calls"]');
+  await expect(toolCalls).toContainText('search_resources');
+  await expect(toolCalls).toContainText('成功');
+  await expect(status).toContainText('已产出 6 字符');
+
+  // 4) 运行中取消必须可用——硬约束 16 的「可取消」在界面上成立。
+  await expect(cancel).toBeEnabled();
+  await cancel.click();
+
+  // 5) 取消真的发出 IPC。这是本用例的核心断言：只改本地状态的「取消」会让
+  //    任务继续跑到底，而界面显示已取消。
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.cancel'] ?? 0).toBeGreaterThan(0);
+
+  // 6) 终态由主进程回报，界面据此收敛；取消后不再可取消。
+  await expect(status).toContainText('已被取消');
+  await expect(cancel).toBeDisabled();
+  await expect(panel).toContainText('fixture-rollout.jsonl');
+
+  await window.screenshot({ path: 'test-results/13-agent-task-run-cancel.png' });
+  await app.close();
+});
+
+test('AI 任务：会话历史分页、载入与承接各自走对应 IPC', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  const history = window.locator('[data-testid="agent-session-history"]');
+  await history.locator('summary').click();
+  await window.locator('[data-testid="agent-sessions-refresh"]').click();
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.sessions'] ?? 0).toBeGreaterThan(0);
+
+  // 分页文案必须回答「这一页覆盖第几到第几、共多少」。fixture 给 23 条、每页 10，
+  // 确实跨过阈值——先断言前提成立，再断言目标，避免断言掉进永假分支。
+  const range = window.locator('[data-testid="agent-sessions-range"]');
+  await expect(range).toContainText('共 23');
+  await expect(range).toContainText('会话 1–10');
+  await expect(history).toContainText('fixture-rollout-0000.jsonl');
+
+  // 数据源上限必须明说：主进程只回最近 50 个会话文件。
+  await expect(window.locator('[data-testid="agent-sessions-source-limit"]')).toContainText('最近 50 个会话文件');
+
+  // 翻页真的换内容。
+  await history.getByRole('button', { name: '下一页' }).click();
+  await expect(range).toContainText('会话 11–20');
+  await expect(history).toContainText('fixture-rollout-0010.jsonl');
+  await expect(history).not.toContainText('fixture-rollout-0000.jsonl');
+
+  // 载入：走 ai.agent.session.load，详情报出真实条数与「只取尾部若干条」。
+  await history.getByRole('button', { name: '查看' }).first().click();
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.session.load'] ?? 0).toBeGreaterThan(0);
+  const detail = window.locator('[data-testid="agent-session-detail"]');
+  await expect(detail).toContainText('共 12 条消息');
+  await expect(detail).toContainText('尾部 1 条');
+  await expect(detail).toContainText('plan');
+
+  // 承接：走 ai.agent.run 并带 resumeSessionPath。
+  await history.getByRole('button', { name: '承接' }).first().click();
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.run:resume'] ?? 0).toBeGreaterThan(0);
+
+  await app.close();
+});
+
+test('AI 任务：工具清单来自 ai.tools，且界面不提供抬高授权的入口', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  await expect.poll(async () => (await ipcCalls(app))['ai.tools'] ?? 0).toBeGreaterThan(0);
+  const inventory = window.locator('[data-testid="agent-tool-inventory"]');
+  await expect(inventory).toContainText('已注册工具 2 个');
+  await inventory.locator('summary').click();
+  await expect(inventory).toContainText('search_resources');
+  await expect(inventory).toContainText('stage');
+
+  // 权限模式只读回显；renderer 侧不存在可抬高授权的控件。
+  const permission = window.locator('[data-testid="agent-task-permission"]');
+  await expect(permission).toContainText('renderer 不能抬高授权');
+
+  // 判据必须**限定在权限 select 内部**。原先写成全页 option[value="normal"] 必须为 0，
+  // 而 normal 在本仓库是 AiThinkingLevel 的合法值（App.tsx:292 的 aiThinking 初值），
+  // 思考强度下拉里本来就有它——于是这条断言把一个正常控件报成安全问题。
+  // 全页匹配 value 时要先确认那个值在别处没有合法用途，否则判据会对着错的东西红。
+  const permissionSelect = window.locator('#agent-permission');
+  await expect(permissionSelect).toBeDisabled();
+  // 权限枚举的可抬高档位（plan 之外的全部）都不得出现在该 select 里。
+  for (const elevated of ['normal', 'fullPermission', 'validate', 'commit', 'rollback']) {
+    expect(
+      await permissionSelect.locator(`option[value="${elevated}"]`).count(),
+      `权限 select 不得提供 ${elevated} 档位（renderer 不能抬高授权）`
+    ).toBe(0);
+  }
+  // 全页仍不得有 fullPermission —— 那个值在本仓库没有任何非权限用途，
+  // 所以全页断言对它是精确的（与 normal 不同）。
+  expect(await window.locator('option[value="fullPermission"]').count()).toBe(0);
+
+  await app.close();
+});

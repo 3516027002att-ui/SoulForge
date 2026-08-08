@@ -160,6 +160,21 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setAiDraft: 'AI 草稿，由 selectFile 单独清空',
   setAiBusy: 'AI 忙碌标记',
   setAgentGoal: 'Agent 目标',
+  // ── AI agent 任务态（REL-G 的 renderer 入口）────────────────────────────
+  //
+  // 这一组刻意**不**参与资源族复位，理由不是「与资源无关」这么一句：任务在主
+  // 进程异步跑，取消要靠 sessionId（ipc.ts:3027 的 activeAgentRuns.get）。切换
+  // 工作区时把 setAgentTask 清回 idle，会让一个仍在跑的任务从界面上消失且再也
+  // 取消不掉——那正违反硬约束 16（长任务必须可报告进度、可取消）。
+  // 显示层的「陈旧」风险也不存在：任务态描述的是那次运行本身，不是当前资源。
+  setAgentTask: 'AI 任务态；跨工作区保留是有意的——清空会让仍在跑的任务失去取消入口（硬约束 16）',
+  setAgentServices: '模型服务清单，来自凭据 vault，与工作区无关',
+  setAgentServiceId: '选中的模型服务，跨工作区保留是有意的',
+  setAgentSessions: '会话历史列表，来自 userData/agent，与工作区无关',
+  setAgentSessionsPage: '会话列表页码，随刷新自行复位',
+  setAgentSessionsError: '会话读取的结构化诊断，随下次读取覆盖',
+  setAgentSessionDetail: '已载入会话的详情，随下次载入覆盖',
+  setAgentTools: 'AI 工具清单（来自 ai.tools），是权限阶梯的展示侧，与资源无关',
   setSidebarCollapsed: '布局状态',
   setSidebarWidth: '布局状态',
   setCmdkOpen: '命令面板状态',

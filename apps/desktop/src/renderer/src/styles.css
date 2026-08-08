@@ -803,6 +803,11 @@ pre.tool-output {
 .agent-controls__label { font-size: 11px; color: var(--ink-2); }
 .agent-controls__hint { font-size: 10.5px; color: var(--ink-3); line-height: 1.5; }
 .agent-controls__lock { font-size: 10.5px; color: var(--warn); line-height: 1.5; }
+/* 任务面板的权限回显。与 .agent-controls__lock 视觉一致（同 --warn token、同字号），
+   但**必须是独立 class**：两者归属不同面板，而同 class 会让 Playwright 严格模式下
+   locator('.agent-controls__lock') 解析到 2 个元素并报 strict mode violation
+   ——实测打破了 renderer.spec.mjs:362 的既有断言。不新造颜色。 */
+.agent-task__lock { font-size: 10.5px; color: var(--warn); line-height: 1.5; }
 
 /* 模型服务管理抽屉：由 header 齿轮打开，不占用会话滚动区 */
 .agent-drawer {

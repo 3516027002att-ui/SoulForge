@@ -14,6 +14,7 @@ import {
   nextTrappedFocusIndex
 } from '../a11y/focusTrap.js';
 import { AgentSessionControls } from './AgentSessionControls.js';
+import { AgentTaskPanel, type AgentTaskPanelProps } from './AgentTaskPanel.js';
 import { modelServiceLabel, permissionModeLabel, thinkingLabel } from './agentLabels.js';
 
 export interface AgentSidebarProps {
@@ -30,6 +31,14 @@ export interface AgentSidebarProps {
   selectedFilePath: string | null;
   tools: ToolDescriptor[];
   toolOutput: ToolResult | null;
+  /**
+   * AI 任务面板的全套受控 props（运行 / 取消 / 会话历史）。
+   *
+   * 用一个整体对象而不是把十几个字段平铺进本接口：这些字段只服务任务面板，
+   * 平铺会让 AgentSidebar 的 props 表变成两块能力的混合体，且每加一个任务字段
+   * 都要改三处签名。`tools` 保持在外层——工具清单同时喂给既有的「安全工具」区。
+   */
+  task: Omit<AgentTaskPanelProps, 'tools' | 'permissionLockReason'>;
   eventUri: string;
   onEventUriChange: (uri: string) => void;
   onProviderChange: (provider: AiProvider) => void;
@@ -77,6 +86,7 @@ export function AgentSidebar({
   selectedFilePath,
   tools,
   toolOutput,
+  task,
   eventUri,
   onEventUriChange,
   onProviderChange,
@@ -172,6 +182,9 @@ export function AgentSidebar({
       </details>
 
       <div className="agent__stream" role="log" aria-live="polite" aria-label="Agent 会话记录">
+        {/* 任务面板排在最前：正在跑的长任务是用户最需要先看到的状态，也是取消
+            入口所在。它自带空态文案，故不受下面那个 agent-empty 分支管辖。 */}
+        <AgentTaskPanel {...task} tools={tools} permissionLockReason={permissionLockReason} />
         {goal === null && !draft && !busy && (
           <div className="agent-empty">
             没有进行中的任务。在下方描述目标，Agent 会生成计划草稿；变更经你批准后才会进入暂存区。
