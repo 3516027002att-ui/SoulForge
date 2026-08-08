@@ -51,7 +51,7 @@ internal sealed class BridgeCommandService
             {
                 var document = DcxNativeDocument.Read(file, oodleRuntimeRoot);
                 var roundTrip = document.VerifyRoundTrip();
-                var diagnostics = new[]
+                var diagnostics = new List<Diagnostic>
                 {
                     new Diagnostic(
                         roundTrip.PayloadIdentical ? "info" : "warning",
@@ -602,18 +602,30 @@ internal sealed class BridgeCommandService
             {
                 var document = EsdNativeDocument.ReadFile(file);
                 var roundTrip = document.VerifyRoundTrip();
-                var diagnostics = new[]
+                var diagnostics = new List<Diagnostic>
                 {
                     new Diagnostic(
                         roundTrip.SemanticIdentical ? "info" : "error",
                         roundTrip.SemanticIdentical ? "ESD_DOCUMENT_ROUNDTRIP_VERIFIED" : "ESD_DOCUMENT_ROUNDTRIP_FAILED",
                         roundTrip.SemanticIdentical
-                            ? $"ESD 只读往返验证通过；stateGroups={document.StateGroups.Count}, states={document.ParsedStateCount}, conditions={document.ParsedConditionCount}。"
+                            ? $"ESD 只读重解析确定性通过；stateGroups={document.StateGroups.Count}, states={document.ParsedStateCount}, conditions={document.ParsedConditionCount}。本项只证明同一份字节解析两遍一致，不构成解析完整性声明。"
                             : "ESD 只读往返语义不一致。",
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
-                return BridgeResult<object>.Partial(file, "script", diagnostics, document.ToEnvelope(roundTrip));
+                // 覆盖率残缺必须单列诊断，不能只靠 authority 降级：消费方常只读
+                // authority，而「哪几项没解析全」才是排查入口（硬约束 8 要求
+                // partial 返回结构化诊断）。
+                if (!document.CoverageComplete)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "warning",
+                        "ESD_DECLARED_PARSED_DIVERGED",
+                        $"ESD 声明量与实解析量不一致：{string.Join("; ", document.CoverageShortfalls())}。authority 已降为 partial。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new { coverageShortfalls = document.CoverageShortfalls() }));
+                }
+                return BridgeResult<object>.Partial(file, "script", diagnostics.ToArray(), document.ToEnvelope(roundTrip));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
