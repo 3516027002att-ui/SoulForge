@@ -3354,14 +3354,15 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "unregistered-layout-as-full-authority",
         "present-flver-panel-as-release-editor"
       ],
-      "authorityAtRuling": "native-verified",
+      "authorityAtRuling": "partial",
       "evidenceRefs": [
         "EV-E-ASSET-7BD"
       ],
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "FLVER 已 V0.6 承接交付：只读 native document 在登记样本上经 byte-identical 往返与多样本布局覆盖验证（mesh geometry/weights、skeleton 层级、dummy 点）；覆盖到登记样本为止，不构成全部布局与全部游戏版本 authority；flver-write 与 open-format-to-flver 为永久禁令，只恢复只读能力。"
+        "FLVER 已 V0.6 承接交付：只读 native document 在登记样本上经 byte-identical 往返与多样本布局覆盖验证（mesh geometry/weights、skeleton 层级、dummy 点）；覆盖到登记样本为止，不构成全部布局与全部游戏版本 authority；flver-write 与 open-format-to-flver 为永久禁令，只恢复只读能力。",
+        "2026-08-08 实测更正 authorityAtRuling：native-verified 改为 partial。本机 11 个 chrbnd 的 FLVER 子项实测存在未解析结构——顶点语义 194 个 member 未处理（tangent 93 / bitangent 22 / vertexColor 79），material 32 字节只读前 16、505 条的后 16 字节全部非零（含 FLVER2 gxIndex 到 GXList 引用），另有重复语义的第二个及以后 member 被静默挡掉（实测涉及 UV / Position / Normal）。这些缺口此前对 authority 不可见——Authority getter 唯一降级依据是 layoutWarnings，而缺口都在不写 warning 的路径上，于是 11 个样本全部报 native-verified。缺口现已接入 authority 降级并随 envelope 上报 unparsedGaps（与 layoutWarnings 并列而非合并：前者是「我没读」、后者是「文件坏了」）。**这是下调而非提升**：既有 byte-identical 往返与多样本布局覆盖的结论未被推翻，改的是「已验证范围之外的部分此前被算进了 authority」。flver-write 仍为永久禁令，不因本次改动松动。"
       ],
       "targetRelease": "V0.6",
       "deferredTrack": null,
