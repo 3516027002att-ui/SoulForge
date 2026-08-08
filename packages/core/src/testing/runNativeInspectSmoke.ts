@@ -1,4 +1,5 @@
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { openResourcePreview } from '../preview/openResourcePreview.js';
 import { scanWorkspace } from '../workspace/scanWorkspace.js';
@@ -28,12 +29,19 @@ async function main(): Promise<void> {
   // ——一个既不存在也不属于本项目的路径。改为沿用 native 层统一的语料环境变量
   // SOULFORGE_NATIVE_FIXTURE_ROOT（由 scripts/with-local-has-game-env.mjs 注入），
   // 显式参数仍然优先。都没有时下面会走结构化 skip。
-  const workspaceRoot = resolve(
-    process.argv[2]
-    ?? process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
-    ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
-    ?? '../../mods'
-  );
+  // 环境变量给的是**游戏根**（registry 的 localPath 全部以 mods/ 开头，
+  // with-local-has-game-env.mjs 也把它设成游戏根），而本 smoke 要扫的是 mods/。
+  // 不下沉的后果（2026-08-08 native 全量跑实测）：扫整个游戏根那一层，采不到任何
+  // native 文件，于是抛 "did not produce any container summaries" 报 FAIL——
+  // 把「扫错了目录」报成了「没有可验证对象」。
+  // 修法与 scripts/verify-native-dcx-documents.mjs:28-30 一致：给定根下存在 mods/
+  // 就下沉，显式传参（argv[2]）时不下沉——那是调用方明确指定的目录。
+  const explicitRoot = process.argv[2]?.trim();
+  const envRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
+    ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() ?? '../../mods';
+  const workspaceRoot = explicitRoot !== undefined && explicitRoot !== ''
+    ? resolve(explicitRoot)
+    : resolve(existsSync(join(envRoot, 'mods')) ? join(envRoot, 'mods') : envRoot);
   const result = await scanWorkspace({ workspaceRoot });
   const nativeFiles = result.files
     .filter((file) => file.formatKind !== 'text' && file.formatKind !== 'unknown')
