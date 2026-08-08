@@ -42,7 +42,9 @@ const RULED_FAMILY = Object.freeze({
   'me3-runtime': ['detectMe3', 'prepareMe3Profile', 'launchMe3', 'terminateMe3'],
   'ai-agent': ['runAiAgent', 'cancelAiAgent', 'listAiAgentSessions', 'loadAiAgentSession', 'onAiAgentEvent', 'listAiTools'],
   'container-diagnostics': ['roundTripContainer', 'validateContainer', 'probeContainerCapabilities'],
-  'raw-bytes': ['readRawMetadata', 'readRawRange']
+  // readRawRange 已接线（2026-08-08），从族划分与登记表同步移除——本门禁的
+  // 判据 5 要求两者双向一致，只改一处会报 PRELOAD_RULING_FAMILY_ORPHAN。
+  'raw-bytes': ['readRawMetadata']
 });
 
 const RULED_NOT_YET_WIRED = Object.freeze({
@@ -88,9 +90,39 @@ const RULED_NOT_YET_WIRED = Object.freeze({
   // 裁定：保留，且 readRawRange 应尽快接线。HexEditorPanel 目前只接
   // initialBytesBase64（一次性全量），因此大文件的 hex 证据无法按偏移翻页——
   // 而硬约束 17 要求大规模访问必须分页。readRawRange 正是那个分页入口。
-  readRawMetadata: 'raw 证据层：尺寸/哈希元数据，hex 分页的前置查询',
-  readRawRange: 'raw 证据层：按偏移分页读取；HexEditorPanel 接线后可满足硬约束 17'
+  // readRawRange 已于 2026-08-08 接线（App.tsx 的 hex 预览分支 → HexEditorPanel
+  // 的 onLoadRange），故从本表移除——门禁的 PRELOAD_RULING_STALE 判据正是为此。
+  // 接线动因：预览只读前 64 KiB（openResourcePreview.ts 的 DEFAULT_MAX_BYTES），
+  // 而实测 mods 下 237 个文件有 148 个超过它；此前面板还把已加载前缀的长度当文件
+  // 总量显示，对 168 MB 的文件会说「65536 字节」。硬约束 17 要求大规模访问分页。
+  readRawMetadata: 'raw 证据层：尺寸/哈希元数据。readRawRange 已接线并自带 fileSize，'
+    + '故本条的独立价值只剩「不读内容就拿哈希」（大文件校验前置）；接线点待定'
 });
+
+/**
+ * 接线优先级提示。只对**仍在** RULED_NOT_YET_WIRED 里的方法生效（输出处过滤），
+ * 所以某条接线完成后它自动消失，不需要有人记得来删。
+ *
+ * 排序即优先级：后端证据越充分、缺口越具体的排前面。
+ */
+const WIRING_PRIORITY = Object.freeze([
+  {
+    method: 'runAiAgent',
+    why: 'REL-G 已 passed，仅缺 renderer 任务面板入口——本表里唯一「后端已 passed、只差 UI」的一族'
+  },
+  {
+    method: 'readRawMetadata',
+    why: '不读内容即可拿哈希/尺寸，是大文件校验的前置查询；readRawRange 已接线并自带 fileSize，故本条只剩这一项独立价值'
+  },
+  {
+    method: 'probeContainerCapabilities',
+    why: '决定容器工作台开放哪些操作；当前只有 inspectContainerTree 的聚合结论，逐项诊断不可查'
+  },
+  {
+    method: 'detectMe3',
+    why: 'SCOPE-RUNTIME 已 user-approved，但 REL-H 仍 open——接线需真实 Sekiro 启动证据（§9.6 BLOCK-3/4），且 scope 明禁「能力探测缺失或含糊时启动」'
+  }
+]);
 
 function report(payload, exitCode) {
   (exitCode === 0 ? console.log : console.error)(JSON.stringify(payload, null, 2));
@@ -314,10 +346,12 @@ report({
   ruledFamilies: Object.fromEntries(
     Object.entries(RULED_FAMILY).map(([family, members]) => [family, members.length])
   ),
-  nextWiring: [
-    'runAiAgent 一族：REL-G 已 passed，仅缺 renderer 任务面板入口，接线优先级最高',
-    'readRawRange：HexEditorPanel 接线后可满足硬约束 17 的大文件分页要求'
-  ],
+  // 从登记表**推导**而非硬编码：原先是两条字面量，readRawRange 接线后它仍在
+  // 建议「接 readRawRange」——一条会随施工过期的建议，和它要治的「登记表不随
+  // 接线收缩」是同一个病。只列仍在 RULED_NOT_YET_WIRED 里的项，收缩自动跟随。
+  nextWiring: WIRING_PRIORITY
+    .filter((hint) => hint.method in RULED_NOT_YET_WIRED)
+    .map((hint) => `${hint.method}：${hint.why}`),
   nonClaim: '本门禁只校验「暴露面 = 已用 ∪ 已裁定」这条静态等式，不验证任何 IPC 的'
     + '运行期行为（那由 desktop-ipc-contract 与 desktop-security-runtime 负责），'
     + '也不声明已裁定待接线的能力对用户可用。'
