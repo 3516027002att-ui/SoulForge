@@ -5,7 +5,29 @@
  * proves that metadata is classifiable; it does not grant native authority.
  */
 
-export const RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION = '1.0.0' as const;
+export const RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION = '1.1.0' as const;
+
+/**
+ * registry 的 schemaVersion 是否可被本实现读取。
+ *
+ * 规则（spec §3）：同 MAJOR 且 MINOR/PATCH 不超过当前版本即可读。
+ * 同一 MAJOR 内的提升都是兼容扩展（新增枚举、放宽约束、新增可选字段），
+ * 所以旧 registry 必须继续合法；而来自**更高**版本的 registry 要拒绝，
+ * 因为它可能携带本实现不认识的枚举值，放行等于静默接受未知约束。
+ */
+export function isReadableSchemaVersion(version: unknown): boolean {
+  if (typeof version !== 'string') return false;
+  const parse = (text: string): [number, number, number] | null => {
+    const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(text);
+    return m === null ? null : [Number(m[1]), Number(m[2]), Number(m[3])];
+  };
+  const got = parse(version);
+  const current = parse(RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION);
+  if (got === null || current === null) return false;
+  if (got[0] !== current[0]) return false;
+  if (got[1] !== current[1]) return got[1] < current[1];
+  return got[2] <= current[2];
+}
 /** Maximum entry count for one registry shard. Larger corpora must be split out of repo. */
 export const RELEASE_CORPUS_MAX_ENTRIES = 10_000;
 export const RELEASE_CORPUS_GAMES = ['sekiro'] as const;
@@ -13,6 +35,7 @@ export const RELEASE_CORPUS_FORMATS = ['DFLT', 'BND4', 'KRAK'] as const;
 export const RELEASE_CORPUS_OBSERVED_VARIANTS_BY_FORMAT = {
   DFLT: [
     'DCX_DFLT_10000_24_9',
+    'DCX_DFLT_10000_24_9_0',
     'DCX_DFLT_10000_44_9',
     'DCX_DFLT_10000_44_9_0',
     'DCX_DFLT_11000_44_8',
@@ -226,12 +249,24 @@ export function validateReleaseCorpusRegistry(input: unknown): ReleaseCorpusRegi
   } else if (FIXTURE_MARKER.test(input.gameBuild)) {
     addFixtureDiagnostic(diagnostics, '$.gameBuild');
   }
-  if (input.schemaVersion !== RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION) {
+  // 兼容读取：接受当前 MAJOR 内的历史版本，拒绝其它。
+  //
+  // spec §3 对 MINOR 的定义写明「旧 schemaVersion 的 registry **仍可被读**，
+  // 但新 registry 必须写新版本号」。原实现只接受 RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION
+  // 一个值，于是 1.0.0 → 1.1.0 这次纯新增枚举的兼容扩展会把全部既有 registry
+  // 判成 RELEASE_CORPUS_SCHEMA_VERSION_UNSUPPORTED ——那是 MAJOR 语义，不是 MINOR。
+  // 实测：提升版本号后 test:release-corpus-registry 立刻以该码拒绝了它自己的
+  // 合法样例 manifest。
+  //
+  // 判据改为「同 MAJOR 且 MINOR/PATCH 不超过当前」：同一 MAJOR 内向后兼容，
+  // 而来自更高版本的 registry 仍然拒绝（它可能含本实现不认识的枚举值，
+  // 放行等于静默接受未知约束）。
+  if (!isReadableSchemaVersion(input.schemaVersion)) {
     addDiagnostic(
       diagnostics,
       'RELEASE_CORPUS_SCHEMA_VERSION_UNSUPPORTED',
       '$.schemaVersion',
-      `schemaVersion 必须为 ${RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION}。`
+      `schemaVersion 必须是与 ${RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION} 同 MAJOR 且不高于它的版本。`
     );
   }
   if (!isRfc3339(input.createdAt)) {

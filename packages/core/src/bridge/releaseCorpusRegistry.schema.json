@@ -15,25 +15,55 @@
     "entries"
   ],
   "properties": {
-    "registryId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$" },
-    "game": { "$ref": "#/$defs/game" },
-    "gameBuild": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$" },
-    "schemaVersion": { "const": "1.0.0" },
-    "createdAt": { "type": "string", "format": "date-time" },
-    "entryCount": { "type": "integer", "minimum": 1, "maximum": 10000 },
+    "registryId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "game": {
+      "$ref": "#/$defs/game"
+    },
+    "gameBuild": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+    },
+    "schemaVersion": {
+      "const": "1.1.0"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "entryCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
     "entries": {
       "type": "array",
       "minItems": 1,
       "maxItems": 10000,
-      "items": { "$ref": "#/$defs/registryEntry" }
+      "items": {
+        "$ref": "#/$defs/registryEntry"
+      }
     }
   },
   "$defs": {
-    "game": { "enum": ["sekiro"] },
-    "format": { "enum": ["DFLT", "BND4", "KRAK"] },
+    "game": {
+      "enum": [
+        "sekiro"
+      ]
+    },
+    "format": {
+      "enum": [
+        "DFLT",
+        "BND4",
+        "KRAK"
+      ]
+    },
     "dfltObservedVariant": {
       "enum": [
         "DCX_DFLT_10000_24_9",
+        "DCX_DFLT_10000_24_9_0",
         "DCX_DFLT_10000_44_9",
         "DCX_DFLT_10000_44_9_0",
         "DCX_DFLT_11000_44_8",
@@ -42,9 +72,17 @@
         "DCX_DFLT_11000_44_9_15"
       ]
     },
-    "bnd4ObservedVariant": { "enum": ["BND4_40_24"] },
+    "bnd4ObservedVariant": {
+      "enum": [
+        "BND4_40_24"
+      ]
+    },
     "krakObservedVariant": {
-      "enum": ["DCX_KRAK_6", "DCX_KRAK_9", "DCX_KRAK_11000_44_6_0"]
+      "enum": [
+        "DCX_KRAK_6",
+        "DCX_KRAK_9",
+        "DCX_KRAK_11000_44_6_0"
+      ]
     },
     "operation": {
       "enum": [
@@ -57,9 +95,21 @@
         "preserve-unknown-fields"
       ]
     },
-    "privacyClass": { "enum": ["private-game-asset", "private-user-mod", "public-redistributable"] },
+    "privacyClass": {
+      "enum": [
+        "private-game-asset",
+        "private-user-mod",
+        "public-redistributable"
+      ]
+    },
     "expectedAuthority": {
-      "enum": ["unsupported", "candidate", "partial", "native-verified", "unverified"]
+      "enum": [
+        "unsupported",
+        "candidate",
+        "partial",
+        "native-verified",
+        "unverified"
+      ]
     },
     "resourceKind": {
       "enum": [
@@ -77,8 +127,14 @@
         "other"
       ]
     },
-    "opaqueIdentity": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$" },
-    "containerChainItem": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/#:-]{0,255}$" },
+    "opaqueIdentity": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "containerChainItem": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/#:-]{0,255}$"
+    },
     "registryEntry": {
       "type": "object",
       "additionalProperties": false,
@@ -95,57 +151,118 @@
         "privacyClass"
       ],
       "properties": {
-        "logicalId": { "$ref": "#/$defs/opaqueIdentity" },
-        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "size": { "type": "integer", "minimum": 1 },
+        "logicalId": {
+          "$ref": "#/$defs/opaqueIdentity"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
         "containerChain": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/containerChainItem" }
+          "items": {
+            "$ref": "#/$defs/containerChainItem"
+          }
         },
-        "resourceKind": { "$ref": "#/$defs/resourceKind" },
-        "format": { "$ref": "#/$defs/format" },
-        "observedVariant": { "type": "string" },
+        "resourceKind": {
+          "$ref": "#/$defs/resourceKind"
+        },
+        "format": {
+          "$ref": "#/$defs/format"
+        },
+        "observedVariant": {
+          "type": "string"
+        },
         "permittedOperations": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/operation" },
-          "contains": { "const": "classify" }
+          "items": {
+            "$ref": "#/$defs/operation"
+          },
+          "contains": {
+            "const": "classify"
+          }
         },
-        "expectedAuthority": { "$ref": "#/$defs/expectedAuthority" },
-        "privacyClass": { "$ref": "#/$defs/privacyClass" }
+        "expectedAuthority": {
+          "$ref": "#/$defs/expectedAuthority"
+        },
+        "privacyClass": {
+          "$ref": "#/$defs/privacyClass"
+        }
       },
       "allOf": [
         {
-          "if": { "properties": { "format": { "const": "DFLT" } } },
+          "if": {
+            "properties": {
+              "format": {
+                "const": "DFLT"
+              }
+            }
+          },
           "then": {
-            "properties": { "observedVariant": { "$ref": "#/$defs/dfltObservedVariant" } }
+            "properties": {
+              "observedVariant": {
+                "$ref": "#/$defs/dfltObservedVariant"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "format": { "const": "BND4" } } },
+          "if": {
+            "properties": {
+              "format": {
+                "const": "BND4"
+              }
+            }
+          },
           "then": {
-            "properties": { "observedVariant": { "$ref": "#/$defs/bnd4ObservedVariant" } }
+            "properties": {
+              "observedVariant": {
+                "$ref": "#/$defs/bnd4ObservedVariant"
+              }
+            }
           }
         },
         {
-          "if": { "properties": { "format": { "const": "KRAK" } } },
+          "if": {
+            "properties": {
+              "format": {
+                "const": "KRAK"
+              }
+            }
+          },
           "then": {
-            "properties": { "observedVariant": { "$ref": "#/$defs/krakObservedVariant" } }
+            "properties": {
+              "observedVariant": {
+                "$ref": "#/$defs/krakObservedVariant"
+              }
+            }
           }
         }
       ]
     }
   },
   "x-constants": {
-    "schemaVersion": "1.0.0",
+    "schemaVersion": "1.1.0",
     "maxEntries": 10000,
-    "games": ["sekiro"],
-    "formats": ["DFLT", "BND4", "KRAK"],
+    "games": [
+      "sekiro"
+    ],
+    "formats": [
+      "DFLT",
+      "BND4",
+      "KRAK"
+    ],
     "observedVariantsByFormat": {
       "DFLT": [
         "DCX_DFLT_10000_24_9",
+        "DCX_DFLT_10000_24_9_0",
         "DCX_DFLT_10000_44_9",
         "DCX_DFLT_10000_44_9_0",
         "DCX_DFLT_11000_44_8",
@@ -153,8 +270,14 @@
         "DCX_DFLT_11000_44_9_0",
         "DCX_DFLT_11000_44_9_15"
       ],
-      "BND4": ["BND4_40_24"],
-      "KRAK": ["DCX_KRAK_6", "DCX_KRAK_9", "DCX_KRAK_11000_44_6_0"]
+      "BND4": [
+        "BND4_40_24"
+      ],
+      "KRAK": [
+        "DCX_KRAK_6",
+        "DCX_KRAK_9",
+        "DCX_KRAK_11000_44_6_0"
+      ]
     },
     "operations": [
       "classify",
@@ -165,8 +288,18 @@
       "reread",
       "preserve-unknown-fields"
     ],
-    "privacyClasses": ["private-game-asset", "private-user-mod", "public-redistributable"],
-    "expectedAuthorities": ["unsupported", "candidate", "partial", "native-verified", "unverified"],
+    "privacyClasses": [
+      "private-game-asset",
+      "private-user-mod",
+      "public-redistributable"
+    ],
+    "expectedAuthorities": [
+      "unsupported",
+      "candidate",
+      "partial",
+      "native-verified",
+      "unverified"
+    ],
     "resourceKinds": [
       "event",
       "map",

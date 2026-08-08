@@ -33,6 +33,11 @@ if (schema['x-constants'] === undefined) {
 const expectedObservedVariants = {
   DFLT: [
     'DCX_DFLT_10000_24_9',
+    // 1.1.0 新增：游戏根语料实测 12 个文件（font/facegen/parts/shader）全部报此变体。
+    // 四段写法 DCX_DFLT_10000_24_9 是历史残留；ClassifyVariant 产出五段。
+    // 这份清单刻意独立于 TS 常量——它是「已人工审阅的 Bridge 边界」，
+    // 变体扩张必须三处同步（schema / TS 常量 / 本清单），漂移即失败关闭。
+    'DCX_DFLT_10000_24_9_0',
     'DCX_DFLT_10000_44_9',
     'DCX_DFLT_10000_44_9_0',
     'DCX_DFLT_11000_44_8',
