@@ -223,6 +223,19 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 判据打在运行期 envelope 上（不是 grep），且必带「无缺口基线仍 native-verified」
   // 一组——否则无条件降级也会报绿。需要真实 exe、不需真实语料，归 synthetic。
   'test:flver-gap-visibility': 'synthetic',
+  // ESD「未解析结构必须可见」。与上面 FLVER 那条同源同形：守的不是某一条解析，
+  // 而是**缺口不可见**这个根因。ESD 有两处字段区间读都没读——condition 的
+  // +0x00 targetStateOffset（跳转目标，即状态转移边）与 commandCall 的 +0x04
+  // commandID——此前只是两行被动注释，不进集合、不压 authority、不进 envelope，
+  // 而 envelope 同时还发着 ESD_DOCUMENT_ROUNDTRIP_VERIFIED（那条只证明同一份字节
+  // 解析两遍一致，parser 确定性下恒真）。于是「节点全解析、一条边没连」对消费方
+  // 完全不可见。本版不解析转移边是**正确状态**（user-approved 的 V0.6 延期，
+  // scope.json SCOPE-BEHAVIOR-ESD 范围原文含「跳转关系的完整读写」），
+  // 「本版不做但看不出来」才是缺陷。
+  // 判据含一条零结构对照：无 condition 时不得报对应缺口——否则「无条件返回一句话」
+  // 这种假标注也会全绿。真实 ESD 语料按延期未登记（bridge:verify:esd 恒诚实跳过），
+  // 故这两处缺口只能靠本门禁的 synthetic 字节盯住。归 synthetic。
+  'test:esd-gap-visibility': 'synthetic',
   // 桌面安全边界的运行期版本：观测生产产物真实的 webPreferences、preload 表面与
   // 脱敏行为。与 test:desktop-security（源码文本级）并存而不是取代——后者的
   // must-exist 判据改名即红，是安全方向；本条替掉的是它那批 `!includes(旧名)`

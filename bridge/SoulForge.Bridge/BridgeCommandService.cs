@@ -648,6 +648,26 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         new { coverageShortfalls = document.CoverageShortfalls() }));
                 }
+                // 本版刻意未解析的字段区间**单列诊断码**，不并进上面那条。
+                // 两者都会压 authority，但处置方向相反：DIVERGED 指向「去查 parser
+                // 为什么少读了」，而这一条指向「本版范围如此，要做得先走 V0.6 承接」。
+                // 混成一条会让下一个人去修一个不存在的 bug（ESD 哨兵那次就是这么
+                // 被误判的），也会让真实的解析缺口被结构性缺口的噪音盖住。
+                var esdUnparsedGaps = document.UnparsedGaps();
+                if (esdUnparsedGaps.Length > 0)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "warning",
+                        "ESD_STRUCTURE_NOT_PARSED_IN_SCOPE",
+                        $"ESD 本版未解析以下字段区间：{string.Join("; ", esdUnparsedGaps)}。"
+                        + "这是 user-approved 的 V0.6 延期范围（scope.json SCOPE-BEHAVIOR-ESD，"
+                        + "范围原文含「跳转关系的完整读写」），不是解析缺陷；"
+                        + "但 authority 因此不得停留在 candidate，已降为 partial。"
+                        + "状态转移边未构建意味着本文档只能回答「有哪些状态」，"
+                        + "不能回答「状态之间怎么跳」。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new { unparsedGaps = esdUnparsedGaps }));
+                }
                 return BridgeResult<object>.Partial(file, "script", diagnostics.ToArray(), document.ToEnvelope(roundTrip));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)

@@ -9,6 +9,33 @@ using System.Security.Cryptography;
 /// All post-header offsets are relative to dataStart (0x6C).
 /// Expression bytecode is reported as opaque (offset, length) pairs — not decoded.
 ///
+/// <para><b>解析到哪一层：只到节点与计数，状态转移图未构建。</b>
+/// 本解析器认出 state group → state → condition → command call 的**结构与计数**，
+/// 但有两处字段区间**读都没读**，因此状态机的「图」部分整体缺失：
+/// <list type="bullet">
+///   <item>condition 的 <c>+0x00 targetStateOffset</c>（跳转目标）——不跟随，
+///     于是**节点全解析、一条边没连**。</item>
+///   <item>command call 的 <c>+0x04 commandID</c>——只聚合了 <c>bank</c>，
+///     命令身份未知，所以「调用了哪个命令」无法回答。</item>
+/// </list>
+/// 这不是待办标记，也不是缺陷：ESD 是 user-approved 的 V0.6 延期项
+/// （scope.json 的 SCOPE-BEHAVIOR-ESD，范围原文写的就是「跳转关系的完整读写」），
+/// 在本版不解析转移边是**范围内的正确状态**。要解它必须先按该 scopeItem 的
+/// resumeRequires 走承接流程（用户裁定改回 supported、跳转关系双向解析且能检出
+/// 悬空目标），否则就是在未验证的前提下扩大 native 声明面。
+///
+/// 但「本版不做」必须**对上层可见**：此前这两处只是两行被动注释
+/// （<c>// ... (graph edge, not followed)</c>），不进任何集合、不影响 authority、
+/// 不出现在 envelope 里——于是缺口对消费方根本不存在，而 envelope 同时还发着
+/// ESD_DOCUMENT_ROUNDTRIP_VERIFIED。这与 FLVER 在 bf34 之前的病完全同源
+/// （缺口不在任何集合里 → 对上层不存在）。故按 FlverNativeDocument 已验证的
+/// <c>_unparsedGaps</c> 模式登记：见 <see cref="UnparsedGaps"/>。
+///
+/// <b>两类缺口刻意分开，不合并进 <see cref="CoverageShortfalls"/></b>：后者表示
+/// 「声明量与实解析量不符」= 数据可疑或 parser 漏读；本组表示「这一段本版就没打算读」
+/// = 能力边界。混在一起会让「结构性未实现」看起来像「解析出错」，下一个人会去修
+/// 一个不存在的 bug。</para>
+///
 /// <para><b>State 记录数 vs 语义状态数（0x30 的单位）。</b>
 /// 文件头 0x30 计的是**物理 State 记录数**，不是语义状态数。每个 state group 的
 /// states 数组实际占 <c>stateCount + 1</c> 个 72 字节槽：索引 0..stateCount-1 是
@@ -132,6 +159,38 @@ internal sealed class EsdNativeDocument
     public IReadOnlyList<int> CommandBanks { get; }
     public IReadOnlyList<EsdBytecodeRegion> BytecodeRegions { get; }
     public string SourceHash => Hash(SourceBytes);
+
+    /// <summary>
+    /// **本版刻意未解析的字段区间**（能力边界，不是解析错误）。详见类型注释。
+    ///
+    /// 与 <see cref="CoverageShortfalls"/> 的区别是语义而非程度：那里是「声明量与
+    /// 实解析量不符」= 数据可疑；这里是「这段本版就没读」= 范围边界。两者混报会让
+    /// 结构性未实现看起来像 parser 出错，把下一个人引向修一个不存在的 bug。
+    ///
+    /// 为什么用**计算属性**而不是解析时累积的集合：这两处缺口是**结构性**的
+    /// ——只要文件里存在 condition / command call，对应字段就必然未被读取，
+    /// 不存在「这个文件读了、那个文件没读」。用可变集合累积反而会引入
+    /// 「探测过才可见」的时序陷阱（FLVER 就为此专门加了 EnsureVertexSemanticGapsProbed：
+    /// 缺口在取顶点数据时才登记，authority 若先被读取就会把「没探测过」
+    /// 误报成「没有缺口」）。这里没有那个时序问题，所以不引入它。
+    /// </summary>
+    public string[] UnparsedGaps()
+    {
+        var gaps = new List<string>();
+        // 判据挂在「结构是否存在」上，而不是无条件返回：空 ESD（零 condition）
+        // 报「转移边未解析」是假缺口，会稀释真缺口的信号。
+        if (ParsedConditionCount > 0)
+        {
+            gaps.Add($"condition:+0x00 targetStateOffset 未跟随（状态转移边未解析，"
+                + $"节点已解析但图未构建）；conditionCount={ParsedConditionCount}");
+        }
+        if (ParsedCommandCallCount > 0)
+        {
+            gaps.Add($"commandCall:+0x04 commandID 未读（只聚合了 bank，命令身份未知）；"
+                + $"commandCallCount={ParsedCommandCallCount}，banks={CommandBanks.Count}");
+        }
+        return gaps.ToArray();
+    }
 
     // ══════════════════════════════════════════════════════════════
     //  Read
@@ -353,7 +412,9 @@ internal sealed class EsdNativeDocument
         if (!visitedConditions.Add(abs)) return; // already parsed (shared condition)
 
         var a = checked((int)abs);
-        // +0x00: targetStateOffset (graph edge, not followed)
+        // +0x00: targetStateOffset（跳转目标）**不跟随** —— 状态转移边因此整体缺失。
+        // 缺口由 ParseInternal 收尾时统一登记进 _unparsedGaps（见类型注释）：
+        // 这里逐条件登记会产出成千上万条同文本噪音，而缺口的价值在种类不在计数。
         var passCmdRel = ReadInt64(source, a + 0x08);
         var passCmdCount = ReadInt64(source, a + 0x10);
         var subcondRel = ReadInt64(source, a + 0x18);
@@ -413,7 +474,11 @@ internal sealed class EsdNativeDocument
             if (!visitedCalls.Add(cOff)) continue; // shared call, already counted
 
             var bank = ReadInt32(source, cOff);
-            // +0x04: commandID (read but only bank is aggregated)
+            // +0x04: commandID —— **未读**。原注释写的是「read but only bank is
+            // aggregated」，那句话是错的：这里从来没有对 cOff + 0x04 发起过读取，
+            // 不是「读了但没聚合」。注释自称读过而实际没读，比不写注释更有害——
+            // 它会让审阅者以为 commandID 已在手、只差往外导。
+            // 缺口统一登记进 _unparsedGaps（见类型注释）。
             var argsRel = ReadInt64(source, cOff + 0x08);
             var argsCount = ReadInt64(source, cOff + 0x10);
 
@@ -592,6 +657,9 @@ internal sealed class EsdNativeDocument
             bytecodeRegionCount = BytecodeRegions.Count,
             coverageComplete = CoverageComplete,
             coverageShortfalls = CoverageShortfalls(),
+            // 本版刻意未解析的字段区间。与 coverageShortfalls 分列（一个是能力边界、
+            // 一个是数据可疑），两者都会压 authority 但指向完全不同的处置。
+            unparsedGaps = UnparsedGaps(),
             roundTrip = report,
             // 解析不完整时不得停留在 candidate——candidate 表示「结构已认出、
             // 待真实语料确认」，而「声明 500 只读出 3」是另一回事：那是解析
@@ -601,7 +669,14 @@ internal sealed class EsdNativeDocument
             // （scope.json SCOPE-BEHAVIOR-ESD，authorityAtRuling=candidate）。
             // 计数对齐只说明**结构计数**已闭合，不构成表达式 schema、writer 或
             // 真实游戏加载的验证——RPN 字节码仍按不透明 (offset,length) 上报。
-            authority = CoverageComplete ? "candidate" : "partial"
+            //
+            // UnparsedGaps 非空同样压到 partial，与 FlverNativeDocument 的处置一致
+            // （那里 _unparsedGaps 与 _layoutWarnings 各自独立降级）。理由：candidate
+            // 的含义是「结构已认出、待真实语料确认」，而「状态转移边整段没读」不是
+            // 待确认，是**已知没做**。让它停在 candidate 会让消费方以为拿到的是
+            // 完整状态机——真实语料下 conditionCount 恒 > 0，所以 ESD 现在恒为
+            // partial，这正是如实结论（硬约束 7：partial 与 candidate 必须严格区分）。
+            authority = CoverageComplete && UnparsedGaps().Length == 0 ? "candidate" : "partial"
         };
     }
 
