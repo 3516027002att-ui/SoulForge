@@ -136,8 +136,23 @@ const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: string }> = [];
 
 /**
- * 空 paramdef：origin 为 fixture 且无字段，definitionCanCommit 永不放行写入；
- * 真实字段定义来自 main 侧 Smithbox 固定 metadata 投影。
+ * 空 paramdef：origin 为 fixture 且无字段，definitionCanCommit 永不放行写入。
+ *
+ * ⚠️ 真实字段定义的来源**已实现但尚未接进 main**（2026-08-08 实测）：
+ * packages/core/src/param/smithboxParamMetadataSource.ts 是 Paramdex-compatible
+ * metadata 投影，已从 core barrel 导出（index.ts:72），并有
+ * runSmithboxParamMetadataSourceSmoke 与 runParamMetadataNativeSmoke 两条验证。
+ * 但 apps/desktop/src/main 侧对它零引用——没有任何 IPC 通道把它送到 renderer。
+ *
+ * 所以下面 :2261 那处 `definition={paramLive ? null : EMPTY_PARAM_DEF}` 的两条
+ * 分支都进不了字段表：live 分支给 null 触发 ParamDefPanel 短路，非 live 分支给
+ * fields:[] 导致 fieldViews 为空。这不是「投影不存在」，是最后一跳没接
+ * ——原注释写成「来自 main 侧投影」是把待接线状态写成了已完成状态。
+ *
+ * 接线前不要把这里改成看起来能用：definitionCanCommit 靠 origin/fields 拦住写入，
+ * 是保护性设计。要解除断点需先建 main→renderer 的 metadata 通道，
+ * 且 matchParamMetadataPackage 要求显式用户信任策略（缺失报
+ * PARAM_METADATA_TRUST_POLICY_REQUIRED 并拒绝匹配），不能绕过。
  */
 const EMPTY_PARAM_DEF: ParamDefDocument = {
   schemaVersion: 1,
