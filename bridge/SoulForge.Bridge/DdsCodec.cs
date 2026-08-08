@@ -94,14 +94,51 @@ internal static class DdsCodec
                 if (block + 16 > src.Length) return;
                 // First 8 bytes: alpha block (BC4-style) into channel 3.
                 DecodeBc4Block(src, block, rgba, width, height, bx, by, channel: 3);
-                // Next 8 bytes: BC1 color block (but keep the alpha we just wrote).
-                DecodeBc1ColorOnly(src, block + 8, rgba, width, height, bx, by);
+                // Next 8 bytes: 颜色块。**必须走 BC2/BC3 专用解码**（恒 4 色、不碰 alpha），
+                // 不能复用 BC1 的调色板规则——见 DecodeBc3ColorBlock 的双源规范依据。
+                DecodeBc3ColorBlock(src, block + 8, rgba, width, height, bx, by);
             }
         }
     }
 
-    /// <summary>BC1 颜色解码，但保留目标已有的 alpha 通道（供 BC3 复用）。</summary>
-    static void DecodeBc1ColorOnly(byte[] src, int block, byte[] rgba, int width, int height, int bx, int by)
+    /// <summary>
+    /// BC2/BC3 的颜色块解码：**恒用 4 色不透明插值**，且不触碰 alpha 通道。
+    ///
+    /// ⚠️ 这里刻意与 <see cref="DecodeBc1"/> 分开，不是重复代码——两者的调色板规则
+    /// 在规范层面就不同，合并会必然重新引入下面这个缺陷。
+    ///
+    /// BC1 用 c0 与 c1 的大小关系切换「4 色」与「3 色 + 透明黑」两种模式
+    /// （punchthrough / 1-bit alpha）。**BC2 与 BC3 没有这个切换**：它们的 alpha 来自
+    /// 独立的 alpha 块（BC2 显式 4-bit、BC3 为 BC4 式插值），颜色块因此永远是
+    /// 4 色不透明模式，与 c0/c1 的实际大小无关。
+    ///
+    /// 双源核验（2026-08-08，两份独立规格）：
+    ///   ① Khronos EXT_texture_compression_s3tc（规范正文，DXT3 与 DXT5 两节逐字相同）：
+    ///      "Each RGB image data block is encoded according to the
+    ///       COMPRESSED_RGB_S3TC_DXT1_EXT format, with the exception that the two code
+    ///       bits always use the non-transparent encodings. In other words, they are
+    ///       treated as though color0 > color1, regardless of the actual values of
+    ///       color0 and color1."
+    ///      同文档 Issue (6) 直接点名 MSDN 的相反暗示是**文档 bug**：
+    ///      "RESOLVED: Yes -- this appears to be a bug in the MSDN documentation.
+    ///       The specification for the DXT2-DXT5 formats require decoding using the
+    ///       opaque block encoding, regardless of the relative values of color0 and color1."
+    ///   ② Microsoft Learn《Block Compression (Direct3D 10)》：punchthrough 分支
+    ///      （color_2 = 1/2*color_0 + 1/2*color_1; color_3 = 0）**只出现在 BC1 一节**；
+    ///      BC2/BC3 两节只说「颜色位数与数据布局同 BC1」并把差异全部限定在 alpha，
+    ///      全文未给 BC2/BC3 任何依 c0/c1 切换调色板的规则。
+    ///   两源一致：BC2/BC3 颜色块恒 4 色。①还额外把②的措辞歧义标为已知文档缺陷。
+    ///
+    /// 修复前的行为（本函数曾是「BC1 颜色解码 + 保留 alpha」）：对 c0 &lt;= c1 的 BC3 块
+    /// 会走 3 色+黑分支，并对 idx==3 强行把 alpha 覆写为 0。后果是**颜色错误 + 错误
+    /// 透明化**，且 alpha 块里已正确解出的值被无声丢弃。这类块完全合法（编码器对
+    /// 低色彩变化块产出 c0 == c1 很常见，而 c0 == c1 同样落进 c0 &lt;= c1 分支）。
+    ///
+    /// Khronos 同文档的 NVIDIA Implementation Note 记录了 NV4x/G7x 系 GPU 确实按 BC1
+    /// 规则解 DXT3/DXT5，并明确称其 "at variance with the specification"。此处按规范走，
+    /// 不复刻那批硬件的偏差。
+    /// </summary>
+    static void DecodeBc3ColorBlock(byte[] src, int block, byte[] rgba, int width, int height, int bx, int by)
     {
         ushort c0 = BitConverter.ToUInt16(src, block);
         ushort c1 = BitConverter.ToUInt16(src, block + 2);
@@ -109,18 +146,11 @@ internal static class DdsCodec
         Span<byte> palette = stackalloc byte[12]; // 4 colors × RGB
         Expand565Rgb(c0, palette, 0);
         Expand565Rgb(c1, palette, 3);
-        if (c0 > c1)
+        // 恒 4 色插值：无 c0/c1 分支。改成带分支即重新引入上述规范违背。
+        for (int i = 0; i < 3; i++)
         {
-            for (int i = 0; i < 3; i++)
-            {
-                palette[6 + i] = (byte)((2 * palette[i] + palette[3 + i]) / 3);
-                palette[9 + i] = (byte)((palette[i] + 2 * palette[3 + i]) / 3);
-            }
-        }
-        else
-        {
-            for (int i = 0; i < 3; i++) palette[6 + i] = (byte)((palette[i] + palette[3 + i]) / 2);
-            palette[9] = 0; palette[10] = 0; palette[11] = 0;
+            palette[6 + i] = (byte)((2 * palette[i] + palette[3 + i]) / 3);
+            palette[9 + i] = (byte)((palette[i] + 2 * palette[3 + i]) / 3);
         }
         for (int p = 0; p < 16; p++)
         {
@@ -132,8 +162,7 @@ internal static class DdsCodec
             rgba[dest + 0] = palette[idx * 3 + 0];
             rgba[dest + 1] = palette[idx * 3 + 1];
             rgba[dest + 2] = palette[idx * 3 + 2];
-            // BC3 explicit alpha already written; for transparent index in c0<=c1 mode set 0.
-            if (c0 <= c1 && idx == 3) rgba[dest + 3] = 0;
+            // alpha 一律不动：BC3 的 alpha 唯一权威是 alpha 块（已由调用方先写入）。
         }
     }
 

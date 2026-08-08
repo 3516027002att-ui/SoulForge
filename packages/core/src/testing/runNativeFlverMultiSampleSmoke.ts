@@ -33,6 +33,8 @@ interface FlverEnvelope {
   vertexStrides: number[];
   boundingBox: { min: number[]; max: number[] };
   layoutWarnings: string[];
+  /** 已识别但未解析的结构缺口（能力边界，与 layoutWarnings 的「数据可疑」分开）。 */
+  unparsedGaps?: string[];
   sourceSize: number;
 }
 
@@ -78,6 +80,7 @@ interface SampleReport {
   meshesOk: number;
   decodeFailures: string[];
   layoutWarnings: number;
+  unparsedGaps: string[];
 }
 
 async function verifyMesh(
@@ -182,8 +185,35 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
   }
   const e = doc.data;
   if (e.meshCount <= 0) throw new Error(`FLVER ${id} has no meshes`);
-  if (e.authority !== 'native-verified') {
-    throw new Error(`FLVER ${id} authority=${e.authority} (expected native-verified); warnings=${JSON.stringify(e.layoutWarnings)}`);
+
+  // layoutWarnings 必须为空：那一类是「读到的东西不对」（越界引用、未知 member 大小、
+  // structOffset 越界），在已登记样本上出现任何一条都是真实回归，必须失败关闭。
+  if ((e.layoutWarnings ?? []).length > 0) {
+    throw new Error(`FLVER ${id} layoutWarnings 非空（数据可疑，不是能力边界）：${JSON.stringify(e.layoutWarnings)}`);
+  }
+
+  // authority 判据刻意**不**再要求 native-verified。
+  //
+  // FlverNativeDocument.Authority 现在对 unparsedGaps 敏感：已识别但未解析的结构
+  // （tangent/bitangent/vertexColor 三个语义、重复语义的第 2+ 个 member、material 后
+  // 16 字节含 gxIndex→GXList）会把 authority 降为 partial。这批缺口在**全部**已登记
+  // 样本上都存在（2026-08-08 实测 11 个 chrbnd：194 个未解析 member、505 条 material
+  // 后 16 字节全部非零），所以 partial 是当前实现的**正确**自述，不是回归。
+  //
+  // 此前这条断言要求 native-verified 并且能通过——那恰恰是因为 Authority 当时唯一的
+  // 降级依据是 layoutWarnings，对上述缺口完全不敏感。把断言改回 native-verified 只能
+  // 靠让 authority 重新对缺口失明来实现，那是放宽判据而不是修复。
+  //
+  // 仍然失败关闭的形态：authority 不在这个闭集里（例如变成 unsupported/blocked），
+  // 说明解析真的退化了。
+  if (e.authority !== 'partial' && e.authority !== 'native-verified') {
+    throw new Error(`FLVER ${id} authority=${e.authority}（期望 partial 或 native-verified）；warnings=${JSON.stringify(e.layoutWarnings)}`);
+  }
+
+  // 缺口必须**可见**：authority 一旦是 partial，就必须给出结构化缺口清单。
+  // 「降级了但不说为什么」是此前那批缺口不可见的同一个病，不能换个位置重演。
+  if (e.authority === 'partial' && (e.unparsedGaps ?? []).length === 0 && (e.layoutWarnings ?? []).length === 0) {
+    throw new Error(`FLVER ${id} authority=partial 但既无 unparsedGaps 也无 layoutWarnings：降级原因不可见。`);
   }
 
   const checkCount = Math.min(e.meshCount, 4);
@@ -202,7 +232,8 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
     meshesChecked: checkCount,
     meshesOk: checkCount - decodeFailures.length,
     decodeFailures,
-    layoutWarnings: (e.layoutWarnings ?? []).length
+    layoutWarnings: (e.layoutWarnings ?? []).length,
+    unparsedGaps: e.unparsedGaps ?? []
   };
 }
 
