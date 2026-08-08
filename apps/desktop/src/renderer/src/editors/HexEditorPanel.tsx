@@ -24,6 +24,23 @@ export interface HexEditorPanelProps {
    * 无法按偏移回读，此时不传即退化为「只看已加载前缀」并如实标注。
    * 硬约束 17 要求大规模访问必须分页——传了它才真正满足。
    */
+  /**
+   * 读整资源元数据（尺寸、内容哈希、能力矩阵）。接 IPC 的 `readRawMetadata`
+   * （main handler 在 ipc.ts:1198，core 实现 files/rawRead.ts:52）。
+   *
+   * 独立价值是「**不读内容就能拿到哈希**」：hex 视图一次只加载一个 4 KiB 窗口，
+   * 无法据此算整文件哈希，而校验「我看的这份字节属于哪个文件版本」需要它。
+   * core 侧对超过上限的文件诚实报 hashStatus='deferred' 而不是硬算
+   * （rawRead.ts:65-77），所以对 168 MB 的容器也安全。
+   *
+   * 按需触发而非随面板加载：computeHash 会读整个文件。
+   */
+  onLoadMetadata?: () => Promise<{
+    size?: number;
+    contentHash?: string;
+    hashStatus?: string;
+    diagnostics?: Array<{ code: string; message: string }>;
+  } | null>;
   onLoadRange?: (offset: number, length: number) => Promise<{
     ok: boolean;
     /**
@@ -70,12 +87,21 @@ export function HexEditorPanel(props: HexEditorPanelProps): ReactElement {
   const [loading, setLoading] = useState(false);
   // main 报的真实文件大小优先于 props（readRawRange 的返回值带 fileSize）。
   const [reportedSize, setReportedSize] = useState<number | undefined>(undefined);
+  // 整资源元数据（按需读）。null = 未读；对象 = 已读（其中 hash 可能是 deferred）。
+  const [meta, setMeta] = useState<{
+    contentHash: string | null;
+    hashStatus: string;
+    error: string | null;
+  } | null>(null);
 
   useEffect(() => {
     setWindowBytes(prefixBytes);
     setWindowOffset(0);
     setRangeError(null);
     setReportedSize(undefined);
+    // 换文件必须清掉旧元数据——否则会把上一个文件的哈希显示成当前文件的，
+    // 那是硬约束 7 意义上的伪造观感（界面声称的证据与实际对象不符）。
+    setMeta(null);
   }, [prefixBytes]);
 
   const canSeek = props.onLoadRange !== undefined;
@@ -115,6 +141,29 @@ export function HexEditorPanel(props: HexEditorPanelProps): ReactElement {
     }
   }, [props, prefixBytes, reachableBytes]);
 
+  const loadMeta = useCallback(async (): Promise<void> => {
+    if (!props.onLoadMetadata) return;
+    setMeta({ contentHash: null, hashStatus: 'loading', error: null });
+    try {
+      const raw = await props.onLoadMetadata();
+      if (raw === null) {
+        setMeta({ contentHash: null, hashStatus: 'unavailable', error: '资源未索引，无法读取元数据' });
+        return;
+      }
+      setMeta({
+        contentHash: typeof raw.contentHash === 'string' ? raw.contentHash : null,
+        hashStatus: typeof raw.hashStatus === 'string' ? raw.hashStatus : 'unknown',
+        error: null
+      });
+    } catch (cause) {
+      setMeta({
+        contentHash: null,
+        hashStatus: 'failed',
+        error: cause instanceof Error ? cause.message : String(cause)
+      });
+    }
+  }, [props]);
+
   const atStart = windowOffset <= 0;
   const atEnd = windowOffset + windowBytes.length >= reachableBytes;
 
@@ -152,6 +201,28 @@ export function HexEditorPanel(props: HexEditorPanelProps): ReactElement {
           本视图未接按偏移读取通道，只能翻已加载的前 {prefixBytes.length} 字节
           （共 {totalBytes} 字节）。未加载部分无法在此查看。
         </p>
+      )}
+      {/*
+        整资源哈希：hex 视图一次只加载一个窗口，算不出整文件哈希，而校验「我看的
+        这份字节属于哪个文件版本」需要它。按需读——computeHash 会读整个文件。
+        deferred 必须如实显示而不是留空：留空会让用户以为哈希算过且为空。
+      */}
+      {props.onLoadMetadata !== undefined && (
+        <div className="row gap">
+          {meta === null && (
+            <button type="button" className="btn btn--sm" onClick={() => void loadMeta()}>
+              读取整资源哈希
+            </button>
+          )}
+          {meta?.hashStatus === 'loading' && <span className="muted">计算中…</span>}
+          {meta !== null && meta.hashStatus !== 'loading' && (
+            <span className="muted">
+              整资源哈希：{meta.contentHash ?? '未提供'}（{meta.hashStatus}）
+              {meta.hashStatus === 'deferred' && '——文件超过哈希上限，已按 core 策略延后而非硬算'}
+            </span>
+          )}
+          {meta?.error != null && <span className="diag-error">{meta.error}</span>}
+        </div>
       )}
       <p className="muted">仅显示偏移和原始字节；不能从此视图创建或提交 mutation。</p>
     </section>

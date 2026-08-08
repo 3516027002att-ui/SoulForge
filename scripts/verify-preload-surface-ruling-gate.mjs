@@ -38,95 +38,34 @@ const PRELOAD = join(root, 'apps', 'desktop', 'src', 'preload', 'index.ts');
  * 每条必须写：为什么保留（而不是撤下）、依据哪条治理裁定、接线的前置条件是什么。
  * 没有依据的条目等于「先放着」，那正是本门禁要消除的状态。
  */
-const RULED_FAMILY = Object.freeze({
-  'me3-runtime': ['detectMe3', 'prepareMe3Profile', 'launchMe3', 'terminateMe3'],
-  // ai-agent 全族已于 2026-08-08 接线（AgentTaskPanel + App.tsx 的订阅与调用），
-  // 故整族从划分与登记表同时移除。判据 5 要求两者双向一致，只改一处会报
-  // PRELOAD_RULING_FAMILY_ORPHAN / PRELOAD_RULING_FAMILY_MISSING。
-  // 族键本身也一并删掉：留一个空数组会让 ruledFamilies 报出 "ai-agent": 0，
-  // 而「有这个族但为零」和「这个族已清空」在盘点上不是一回事。
-  // container-diagnostics 三条已于 2026-08-08 接线（Bnd4WorkbenchPanel 的
-  // 「逐项容器诊断」按需展开块），族与登记表同步清空——判据 5 要求两者双向一致。
-  'container-diagnostics': [],
-  // readRawRange 已接线（2026-08-08），从族划分与登记表同步移除——本门禁的
-  // 判据 5 要求两者双向一致，只改一处会报 PRELOAD_RULING_FAMILY_ORPHAN。
-  'raw-bytes': ['readRawMetadata']
-});
-
-const RULED_NOT_YET_WIRED = Object.freeze({
-  // ── me3 运行时（SCOPE-RUNTIME / capabilityId H-RUNTIME / REL-H，
-  //    targetRelease=V0.5、decisionStatus=user-approved、gateState=open）──
-  //
-  // 裁定：保留。scope.json 明确把「检测、profile、启动、日志、终止与回滚后复启」
-  // 列为 V0.5 supported 且用户已批准，REL-H 仍为 open 表示这条能力线尚未收口。
-  // 撤下 preload 等于把已批准的 V0.5 能力从可达面移除，与范围裁定冲突。
-  // 接线前置：REL-H 需要真实 Sekiro 启动与安装生命周期证据（本机以外不可复现），
-  // 属 §9.6 BLOCK-3/BLOCK-4 范畴。
-  detectMe3: 'SCOPE-RUNTIME V0.5 supported；REL-H open，等真实启动证据后接 UI',
-  prepareMe3Profile: 'SCOPE-RUNTIME V0.5 supported；同上',
-  launchMe3: 'SCOPE-RUNTIME V0.5 supported；同上',
-  terminateMe3: 'SCOPE-RUNTIME V0.5 supported；同上（终止是启动的回滚路径，不可单独撤）',
-
-  // ── AI agent 会话（SCOPE-AI / capabilityId G-AGENT / REL-G）──
-  //
-  // 六条已于 2026-08-08 全部接线，故整族从本表移除——判据 2
-  // （PRELOAD_RULING_STALE）正是为此。接线点：
-  //   runAiAgent / cancelAiAgent / listAiAgentSessions / loadAiAgentSession
-  //     → App.tsx 的 runAgentTask / cancelAgentTask / refreshAgentSessions /
-  //       loadAgentSession，经 AgentSidebar 的 task props 下发到 AgentTaskPanel；
-  //   onAiAgentEvent → App.tsx 的挂载期订阅 effect，事件折叠在
-  //     agent/agentTaskState.ts 的 reduceAgentTaskEvent（有单测）；
-  //   listAiTools → App.tsx 的模型服务/工具清单 effect，喂 AgentTaskPanel 的工具清单。
-  //
-  // 接线时刻意**不**传 request.mode：省略时主进程落到 'plan'（ipc.ts:2967 的三元），
-  // 而传 'fullPermission' 会真的抬高工具上限。renderer 不得抬高授权。
-  //
-  // 未接线的相邻能力（如实记账，不写进本表因为它们不是 preload 暴露方法）：
-  // ai.agent.run 不接受 timeoutMs，主进程调 runAgentSession 时也没传（ipc.ts:2993
-  // 起的参数表），因此长任务只有 maxSteps 默认 8 与取消两道闸，没有墙钟超时。
-
-  // ── 容器只读诊断 ──
-  //
-  // 裁定：保留。这三条是容器工作台的诊断能力（往返安全性、结构校验、能力探测），
-  // Bnd4WorkbenchPanel 已展示 containerRoundTripSafe / canListChildren /
-  // canReplaceChild 等字段，但那些来自 inspectContainerTree 的聚合结果；单独调用
-  // 这三条可以给出逐项诊断。撤下会让「为什么这个容器不可写」失去可查询入口。
-  // ── 容器只读诊断三条已于 2026-08-08 接线，从本表移除 ──
-  //
-  // 接线点：Bnd4WorkbenchPanel 的「逐项容器诊断（按需读取）」details 块。
-  // 动因正是本表原先写的那句——inspectContainerTree 只给聚合结论
-  // （containerRoundTripSafe / canListChildren / canReplaceChild 三个布尔回答
-  // 「能不能」），而这三条各答一个「为什么」：往返差在哪、结构校验的结构化原因、
-  // 能力探测决定开放哪些操作。撤下会让「为什么这个容器不可写」失去可查询入口。
-  //
-  // 刻意做成按需展开而非随面板加载：三条都要读整个容器字节（roundTrip 还要重建
-  // 一遍），默认跑等于每次点开文件都做一次全量往返。
-  //
-  // 接线前先修了一处路径泄漏：probeContainerCapabilities 的 handler 直接 return
-  // 含 absolutePath 的 ResourceCapabilityMatrix（resourceCapabilities.ts:45）、
-  // 未走 sanitizeRendererValue——与 readRawMetadata 那处（3b67e63）同形态。
-  // 另两条实测不含路径，故未无差别包脱敏。
-
-  // ── raw 字节读取 ──
-  //
-  // 裁定：保留，且 readRawRange 应尽快接线。HexEditorPanel 目前只接
-  // initialBytesBase64（一次性全量），因此大文件的 hex 证据无法按偏移翻页——
-  // 而硬约束 17 要求大规模访问必须分页。readRawRange 正是那个分页入口。
-  // readRawRange 已于 2026-08-08 接线（App.tsx 的 hex 预览分支 → HexEditorPanel
-  // 的 onLoadRange），故从本表移除——门禁的 PRELOAD_RULING_STALE 判据正是为此。
-  // 接线动因：预览只读前 64 KiB（openResourcePreview.ts 的 DEFAULT_MAX_BYTES），
-  // 而实测 mods 下 237 个文件有 148 个超过它；此前面板还把已加载前缀的长度当文件
-  // 总量显示，对 168 MB 的文件会说「65536 字节」。硬约束 17 要求大规模访问分页。
-  readRawMetadata: 'raw 证据层：尺寸/哈希元数据。readRawRange 已接线并自带 fileSize，'
-    + '故本条的独立价值只剩「不读内容就拿哈希」（大文件校验前置）；接线点待定'
-});
+/**
+ * 按能力族划分的裁定表。**当前为空：15 条待接线项已于 2026-08-08 全部接线。**
+ *
+ * 历史（按接线顺序）：
+ *   raw-bytes 2 条            readRawRange → HexEditorPanel 按偏移翻页；
+ *                             readRawMetadata → 同面板的整资源哈希（不读内容即可拿）
+ *   ai-agent 6 条             AgentTaskPanel + App.tsx 的订阅与调用
+ *   container-diagnostics 3 条 Bnd4WorkbenchPanel 的「逐项容器诊断」按需展开块
+ *   me3-runtime 4 条          runtime/Me3RuntimePanel 挂在设置面板
+ *                             （用户裁定「四条全接、启动默认禁用」）
+ *
+ * 族键在接线后**整个删掉**而不是留空数组：留空会让 ruledFamilies 报出
+ * "某族": 0，而「有这个族但为零」与「这个族已清空」在盘点上不是一回事。
+ *
+ * 若将来 preload 新增暴露方法而 renderer 尚未引用，本表就是它的登记处。
+ * 每条必须写：为什么保留（而不是撤下）、依据哪条治理裁定、接线的前置条件是什么。
+ * 没有依据的条目等于「先放着」，那正是本门禁要消除的状态。
+ */
+const RULED_FAMILY = Object.freeze({});
 
 /**
- * 接线优先级提示。只对**仍在** RULED_NOT_YET_WIRED 里的方法生效（输出处过滤），
- * 所以某条接线完成后它自动消失，不需要有人记得来删。
+ * 已裁定但尚未接线的暴露方法。**当前为空**，见上面的历史记录。
  *
- * 排序即优先级：后端证据越充分、缺口越具体的排前面。
+ * 判据 5 要求本表与 RULED_FAMILY 双向一致：一条方法在其中之一出现而另一处没有，
+ * 会报 PRELOAD_RULING_FAMILY_ORPHAN / PRELOAD_RULING_FAMILY_MISSING。
  */
+const RULED_NOT_YET_WIRED = Object.freeze({});
+
 const WIRING_PRIORITY = Object.freeze([
   // runAiAgent 曾是本表第一优先项，已于 2026-08-08 接线。条目**保留**：输出处按
   // 「是否仍在 RULED_NOT_YET_WIRED」过滤，已接线项自动消失，不需要有人记得来删；

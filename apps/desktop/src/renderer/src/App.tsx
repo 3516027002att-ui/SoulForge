@@ -73,6 +73,7 @@ import {
 } from './runtime/rendererRuntime.js';
 import { RESOURCE_FAMILIES, type ResourceMode } from './navigation/resourceFamilies.js';
 import { WorkspaceResourceBar } from './navigation/WorkspaceResourceBar.js';
+import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import type {
   AgentSessionDetail,
@@ -2163,6 +2164,17 @@ export function App(): ReactElement {
                 </div>
                 <span className="pill">暗色（亮色待定）</span>
               </div>
+
+              {/*
+                me3 运行时挂在设置面板：它是工作区级的运行基础设施，不属任何单个资源。
+                放这里不违反本面板的 e2e 约束（renderer.spec.mjs:354-356 只禁
+                「思考强度」「模型服务」「运行 / 权限模式」三个词，那些属 Agent 面板）。
+
+                启动按钮默认禁用，门槛走 me3LaunchGuard 的纯判定——scope.json 的
+                SCOPE-RUNTIME 明禁 launch-with-missing-or-ambiguous-capability，
+                而 launchMe3 会真实启动零售游戏。
+              */}
+              <Me3RuntimePanel />
             </div>
           </section>
 
@@ -2271,6 +2283,24 @@ export function App(): ReactElement {
                 ? preview.hex
                 : hexTextToBase64(preview.hex)}
               totalBytes={preview.file?.size}
+              {...(selectedFile && bridge
+                ? {
+                    // 接 readRawMetadata（main handler ipc.ts:1198）。独立价值是
+                    // 「不读内容就能拿到整文件哈希」——hex 视图一次只加载一个
+                    // 4 KiB 窗口，算不出整文件哈希，而校验「我看的这份字节属于哪个
+                    // 文件版本」需要它。core 对超上限文件报 deferred 而非硬算。
+                    onLoadMetadata: async () => {
+                      const raw = await bridge.readRawMetadata(selectedFile.sourceUri) as
+                        Record<string, unknown> | null;
+                      if (raw === null) return null;
+                      return {
+                        ...(typeof raw.size === 'number' ? { size: raw.size } : {}),
+                        ...(typeof raw.contentHash === 'string' ? { contentHash: raw.contentHash } : {}),
+                        ...(typeof raw.hashStatus === 'string' ? { hashStatus: raw.hashStatus } : {})
+                      };
+                    }
+                  }
+                : {})}
               {...(selectedFile && bridge
                 ? {
                     // 接 readRawRange（main handler ipc.ts:1170）——预览只读前 64 KiB，
