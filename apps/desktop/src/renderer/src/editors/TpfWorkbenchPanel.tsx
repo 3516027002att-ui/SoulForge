@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactElement } from 'react';
+import { formatListTruncation } from '../format/uiText.js';
 
 export interface TpfTextureEntry {
   index: number;
@@ -63,7 +64,12 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
    * 那是硬约束 7 意义上的伪造观感。搜索框已能定位具体纹理，说清即可。
    */
   const visible = filtered.slice(0, TEXTURE_RENDER_LIMIT);
-  const truncatedCount = filtered.length - visible.length;
+  const truncationNote = formatListTruncation({
+    total: filtered.length,
+    shown: visible.length,
+    noun: '个纹理',
+    hint: '用搜索框按名称或格式缩小范围'
+  });
 
   return (
     <section className="panel" aria-label="TPF 纹理包面板">
@@ -85,10 +91,8 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
               aria-label="搜索纹理名称或格式"
             />
           </div>
-          {truncatedCount > 0 && (
-            <p className="muted">
-              匹配 {filtered.length} 个纹理，仅显示前 {TEXTURE_RENDER_LIMIT} 个；用搜索框缩小范围。
-            </p>
+          {truncationNote && (
+            <p className="muted" data-testid="tpf-truncation">{truncationNote}</p>
           )}
           <div className="row gap" style={{ marginTop: 8 }}>
             <div style={{ flex: 1, overflowY: 'auto', maxHeight: 300 }}>

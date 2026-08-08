@@ -1,4 +1,11 @@
 import { useMemo, useState, type ReactElement } from 'react';
+import { formatListTruncation } from '../format/uiText.js';
+
+/**
+ * 状态组表渲染上限。ESD 是 V0.6 延期的只读预览族，不加分页控件（超出当前范围），
+ * 但静默截断会让用户把部分状态组当成全部——搜索框已能定位具体 ID，说清即可。
+ */
+const STATE_GROUP_RENDER_LIMIT = 200;
 
 export interface EsdStateGroupSummary {
   groupId: number;
@@ -41,6 +48,13 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
   }, [data?.stateGroups, query]);
 
   const selected = data?.stateGroups?.find((g) => g.groupId === selectedGroupId) ?? null;
+  const visibleGroups = filtered.slice(0, STATE_GROUP_RENDER_LIMIT);
+  const truncationNote = formatListTruncation({
+    total: filtered.length,
+    shown: visibleGroups.length,
+    noun: '个状态组',
+    hint: '用搜索框按 ID 缩小范围'
+  });
 
   return (
     <section className="panel" aria-label="ESD 状态机面板">
@@ -67,6 +81,9 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
               onChange={(e) => setQuery(e.target.value)}
             />
           </div>
+          {truncationNote && (
+            <p className="muted" data-testid="esd-truncation">{truncationNote}</p>
+          )}
           <div className="row gap" style={{ marginTop: 8 }}>
             <div style={{ flex: 1, overflowY: 'auto', maxHeight: 300 }}>
               <table className="table">
@@ -77,7 +94,7 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.slice(0, 200).map((group) => (
+                  {visibleGroups.map((group) => (
                     <tr
                       key={group.groupId}
                       className={group.groupId === selectedGroupId ? 'selected' : ''}

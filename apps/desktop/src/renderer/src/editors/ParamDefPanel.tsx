@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { PARAM_PAGE_SIZE } from '@soulforge/shared';
 import type { ParamDefDocument, ParamFieldDef, ParamRowPage } from '@soulforge/shared';
 import { base64ToUint8Array } from '../utils/binary.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
@@ -53,8 +54,16 @@ interface CommitResultView {
   diagnostics: Array<{ code: string; message: string }>;
 }
 
-const PAGE_SIZE = 20;
-/** 字段表每页字段数。宽 PARAM 的 paramdef 可达数百字段，全量渲染会建出同样多的受控 input。 */
+/*
+ * 行表页大小与主进程 `resource.readParamPage` 同源（@soulforge/shared）。
+ * 此前这里叫 PAGE_SIZE 且是本地字面量 20，与 ParamTablePanel 的 PARAM_PAGE_SIZE
+ * 是同一个 channel 的同一个值，却各写一遍。
+ */
+const PAGE_SIZE = PARAM_PAGE_SIZE;
+/**
+ * 字段表每页字段数。宽 PARAM 的 paramdef 可达数百字段，全量渲染会建出同样多的
+ * 受控 input。这个值**不进 shared**：字段表分页纯在 renderer 内，没有对侧消费者。
+ */
 const FIELD_PAGE_SIZE = 40;
 
 /**

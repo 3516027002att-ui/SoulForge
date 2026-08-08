@@ -40,16 +40,22 @@ import {
   runBridge,
   sanitizeEntryName
 } from '@soulforge/core';
+import {
+  CONTAINER_PAGE_SIZE,
+  FMG_PAGE_SIZE,
+  PARAM_PAGE_SIZE,
+  SCRIPT_PAGE_SIZE
+} from '@soulforge/shared';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
 const preloadPath = resolve(repoRoot, 'apps/desktop/out/preload/index.cjs');
 const rendererPagePath = resolve(here, 'harness.html');
 
-const SCRIPT_PAGE_SIZE = 50;
-const CONTAINER_PAGE_SIZE = 50;
-const FMG_PAGE_SIZE = 100;
-const PARAM_PAGE_SIZE = 20;
+/*
+ * 页大小从 @soulforge/shared 导入（唯一来源）。harness 自己写一份字面量时，
+ * 生产改了页大小而 harness 没改，smoke 照样全绿——它验的是另一个口径。
+ */
 
 let stagingRoot = '';
 let fixtureCache = new Map();

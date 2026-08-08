@@ -68,6 +68,12 @@ import {
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification
 } from '@soulforge/core';
+import {
+  CONTAINER_PAGE_SIZE,
+  FMG_PAGE_SIZE,
+  PARAM_PAGE_SIZE,
+  SCRIPT_PAGE_SIZE
+} from '@soulforge/shared';
 import type {
   ConfirmationReceipt,
   Diagnostic,
@@ -121,10 +127,10 @@ const emevdFullDocuments = new Map<string, EmevdEditorDocument>();
 /*  mutation commit so the next page fetch re-reads the fresh file.    */
 /* ------------------------------------------------------------------ */
 
-const FMG_PAGE_SIZE = 100;
-const PARAM_PAGE_SIZE = 20;
-const CONTAINER_PAGE_SIZE = 50;
-const SCRIPT_PAGE_SIZE = 50;
+/*
+ * 页大小来自 @soulforge/shared（唯一来源）。此前主进程、renderer 6 处面板与 e2e
+ * harness 各写一遍字面量，任一侧改动都没有编译错误，症状是分页错位或末页重复。
+ */
 /** Upper bound for the paginated PARAM channel's complete-coverage read. */
 const MAX_PAGED_PARAM_ROWS = 100_000;
 

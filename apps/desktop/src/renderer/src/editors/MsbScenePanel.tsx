@@ -11,6 +11,10 @@ import {
   type PartLike
 } from '../scene/sceneManifestBrowser.js';
 import { mountThreeProxyScene, type ThreeSceneHandle } from '../scene/threeSceneController.js';
+import { formatListTruncation } from '../format/uiText.js';
+
+/** Region 表渲染上限。 */
+const REGION_RENDER_LIMIT = 40;
 
 export interface MsbScenePanelProps {
   mapResourceUri: string;
@@ -82,6 +86,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     scaleZ: number;
   }>({ rotX: 0, rotY: 0, rotZ: 0, scaleX: 1, scaleY: 1, scaleZ: 1 });
   const regions = props.regions ?? [];
+  const regionTruncationNote = formatListTruncation({
+    total: regions.length,
+    shown: Math.min(regions.length, REGION_RENDER_LIMIT),
+    noun: '个 region'
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -405,7 +414,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             <span>位置</span>
           </div>
           {/* 行选择必须键盘可达：选中区域后才会显示坐标详情与场景高亮。 */}
-          {regions.slice(0, 40).map((region, rowIndex) => (
+          {regions.slice(0, REGION_RENDER_LIMIT).map((region, rowIndex) => (
             <div
               key={region.name}
               className="binder-child-row"
@@ -423,8 +432,9 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               </span>
             </div>
           ))}
-          {regions.length > 40 && (
-            <p className="muted">仅显示前 40 个 region（共 {regions.length}）。</p>
+          {/* 文案走统一 helper：此前是手写串，与其他面板口径不一致（不报「未显示多少」）。 */}
+          {regionTruncationNote && (
+            <p className="muted" data-testid="msb-region-truncation">{regionTruncationNote}</p>
           )}
         </div>
       )}

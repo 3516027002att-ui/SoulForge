@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type ReactElement } from 'react';
+import { CONTAINER_PAGE_SIZE } from '@soulforge/shared';
 import type {
   Diagnostic,
   RendererContainerChild,
@@ -50,8 +51,11 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   /** 分页通道缺失时的降级说明。为 null 表示正常分页路径。 */
   const [degraded, setDegraded] = useState<string | null>(null);
 
-  /** Fixed page size for the paginated container entry table (hard constraint 17). */
-  const CONTAINER_PAGE_SIZE = 50;
+  /*
+   * 页大小（硬约束 17）来自 @soulforge/shared，与主进程
+   * `resource.listContainerChildrenPage` 同一常量——此前是函数体内的局部
+   * 字面量 50，与主进程各写一遍。
+   */
 
   const bridge = getRendererBridge();
 

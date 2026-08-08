@@ -6,14 +6,20 @@ import type {
   ScriptContainerEvidence,
   ScriptEntryClassification
 } from '@soulforge/shared';
-import { SCRIPT_CLASSIFICATION_ORDER, scriptClassificationLabel } from '@soulforge/shared';
+import {
+  SCRIPT_CLASSIFICATION_ORDER,
+  SCRIPT_PAGE_SIZE,
+  scriptClassificationLabel
+} from '@soulforge/shared';
 import { HexEditorPanel } from './HexEditorPanel.js';
 import { isLikelyBase64, uint8ArrayToBase64 } from '../utils/binary.js';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 
-/** Fixed page size for the paginated script container entry table (hard constraint 17). */
-const SCRIPT_PAGE_SIZE = 50;
+/*
+ * 分页页大小（硬约束 17）来自 @soulforge/shared，与主进程
+ * `resource.listScriptContainerEntriesPage` 同一常量。
+ */
 
 export interface ScriptContainerPanelProps {
   /** Selected script container (e.g. a luabnd/bnd4 container). */

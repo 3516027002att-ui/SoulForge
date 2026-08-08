@@ -66,6 +66,31 @@ const fixtureFiles = [
   makeFile({ dir: '', name: 'regulation.bin', kind: 'unknown', formatKind: 'unknown', formatLabel: 'BIN', extension: '.bin', compoundExtension: '.bin' })
 ];
 
+/**
+ * 大工作区 fixture（SF_TEST_LARGE_WORKSPACE=1 启用）。
+ *
+ * 为什么需要它：默认 fixture 只有 8 个文件，**低于分页页大小与搜索上限**，所以
+ * 分页控件和截断说明在默认套件里根本不会出现——那等于这两条行为在 e2e 层零覆盖。
+ * 这里构造 460 个合成条目（微小、显式构造、不含真实游戏资产，AGENTS.md §15），
+ * 跨过 200/页 与搜索 60 条两个阈值，让「翻页真的换内容」「截断说明真的出现」
+ * 可以被断言。
+ */
+const LARGE_WORKSPACE = process.env.SF_TEST_LARGE_WORKSPACE === '1';
+const LARGE_FILE_COUNT = 460;
+
+function makeLargeFixtureFiles() {
+  return Array.from({ length: LARGE_FILE_COUNT }, (_unused, index) => makeFile({
+    dir: 'map',
+    // 序号补零：排序后页内顺序稳定，断言才能指名某一页的首项。
+    name: `m${String(index).padStart(4, '0')}.msb.dcx`,
+    kind: 'map',
+    formatKind: 'msb',
+    formatLabel: 'MSB',
+    extension: '.dcx',
+    compoundExtension: '.msb.dcx'
+  }));
+}
+
 const fixture = {
   workspaceUri: 'fixture://workspace/sekiro-test',
   fmg: {
@@ -147,12 +172,15 @@ function registerFixtureIpc() {
 
   handleTrusted('workspace.scan', () => {
     track('workspace.scan');
+    const scanned = LARGE_WORKSPACE
+      ? [...fixtureFiles, ...makeLargeFixtureFiles()]
+      : fixtureFiles;
     return {
       workspaceSessionId: 'fixture-session',
       workspaceLabel: 'fixture-workspace',
-      files: fixtureFiles.map((file) => ({ ...file })),
+      files: scanned.map((file) => ({ ...file })),
       countsByKind: {
-        event: 1, map: 0, param: 0, msg: 1, menu: 0, script: 0,
+        event: 1, map: LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0, param: 0, msg: 1, menu: 0, script: 0,
         action: 1, ai: 1, sfx: 1, chr: 1, obj: 0, other: 1, unknown: 1
       },
       diagnostics: [],
