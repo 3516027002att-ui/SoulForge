@@ -343,10 +343,20 @@ internal sealed class BridgeCommandService
                 var dds = document.GetTextureData(textureIndex);
                 byte[] outputBytes;
                 string code;
+                string? pngColorSpace = null;
                 if (format.Equals("png", StringComparison.OrdinalIgnoreCase))
                 {
-                    var (width, height, rgba) = DdsCodec.DecodeDds(dds);
-                    outputBytes = DdsCodec.EncodePng(width, height, rgba);
+                    // 必须用带色彩空间的重载：DXGI 的 *_UNORM 与 *_UNORM_SRGB 解出的
+                    // 像素值完全相同，区分只存在于头部声明里。丢掉它不会让任何断言
+                    // 变红，只会让色彩管理的查看器按自己的假设解释亮度。
+                    var (width, height, rgba, colorSpace) = DdsCodec.DecodeDdsWithColorSpace(dds);
+                    outputBytes = DdsCodec.EncodePng(width, height, rgba, colorSpace);
+                    pngColorSpace = colorSpace switch
+                    {
+                        DdsCodec.DdsColorSpace.Srgb => "srgb",
+                        DdsCodec.DdsColorSpace.Linear => "linear",
+                        _ => "unknown"
+                    };
                     code = $"PNG {width}x{height}";
                 }
                 else
@@ -373,18 +383,31 @@ internal sealed class BridgeCommandService
                     if (File.Exists(exportTemporary)) File.Delete(exportTemporary);
                 }
                 var entry = document.Textures[textureIndex];
-                return BridgeResult<object>.Partial(file, "texture", new[]
+                var exportDiagnostics = new List<Diagnostic>
                 {
                     new Diagnostic("info", "TPF_TEXTURE_EXPORTED",
                         $"TPF 纹理 {textureIndex} 已导出为 {code}（{outputBytes.Length} 字节）。",
                         BridgeResult<object>.MakeSourceUri(file))
-                }, new
+                };
+                // 色彩空间未声明必须可见：不写诊断的话，「DDS 头没给信息」与「已确认线性」
+                // 在产物上完全一样（都没有 sRGB chunk），下游无从区分（硬约束 7/8）。
+                if (pngColorSpace == "unknown")
+                {
+                    exportDiagnostics.Add(new Diagnostic("warn", "TPF_TEXTURE_COLOR_SPACE_UNDECLARED",
+                        "DDS 头未声明色彩空间（非 DX10 的 fourCC 形态不携带该信息），"
+                        + "PNG 因此不写 sRGB/gAMA/cHRM chunk。这是「未声明」而非「已确认线性」；"
+                        + "色彩管理的查看器会按自身默认假设解释，亮度可能与游戏内不一致。",
+                        BridgeResult<object>.MakeSourceUri(file)));
+                }
+                return BridgeResult<object>.Partial(file, "texture", exportDiagnostics.ToArray(), new
                 {
                     textureIndex,
                     name = entry.Name,
                     format,
                     outputPath,
-                    byteLength = outputBytes.Length
+                    byteLength = outputBytes.Length,
+                    // 只在 PNG 路径有意义；DDS 直传不解码也不重写头，故为 null。
+                    colorSpace = pngColorSpace
                 });
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or ArgumentOutOfRangeException)

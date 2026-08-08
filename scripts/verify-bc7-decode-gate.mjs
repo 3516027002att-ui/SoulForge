@@ -1158,8 +1158,9 @@ try {
   }
 
   // ---- dxgi 98 与 99 都必须落在 BC7 dispatch 上 ----
-  // 两者走**完全相同**的解码路径（无 sRGB 传递函数），所以这里断言的是
-  // 「99 也被 dispatch 到 BC7」，不是「sRGB 已验证」。见结论里的 nonClaims。
+  // 两者走**完全相同**的解码路径且解出的像素值逐字节相同（规范如此：差别只在
+  // 解释，不在数值），所以这里断言的是「99 也被 dispatch 到 BC7」，不是「sRGB
+  // 已验证」。PNG 侧的色彩空间标注由 test:png-color-space 单独覆盖。
   const dispatchSpec = makeSpec(6, 0);
   const dispatchBlock = encodeBlock(dispatchSpec).block;
   const dispatchExpected = expectedPixels(dispatchSpec);
@@ -1262,8 +1263,11 @@ report({
   message: '8 个 mode 各自的特有规则均逐像素验证；P2/P3 各 64 个 partition 穷举；'
     + 'dxgi 98/99 dispatch、mode 8 保留值、位预算求和 128、Khronos worked example 全部通过。',
   nonClaims: [
-    'sRGB 转换未验证：dxgi 99 与 98 走完全相同的解码路径，实现里没有 sRGB↔linear 传递函数，'
-      + 'EncodePng 也不写 sRGB/gAMA chunk。本门禁只证明 99 被 dispatch 到 BC7，不证明 sRGB 正确。',
+    'sRGB 的色彩空间标注不由本门禁覆盖：dxgi 99 与 98 的**解码路径与像素值**完全相同'
+      + '（规范如此：差别只在解释，不在数值），本门禁只证明 99 也被 dispatch 到 BC7。'
+      + '导出 PNG 是否如实写 sRGB/gAMA/cHRM chunk 由 test:png-color-space 单独门禁；'
+      + '实现刻意不做 sRGB↔linear 数值转换（PNG 的 sRGB chunk 表达的正是「样本值已是 '
+      + 'sRGB 编码值」），故不存在需要本门禁验证的转换公式。',
     'mip 链未验证：DecodeDds 只解 mip 0，fixture 也只有 mip 0。',
     'BC6H / BC2 未覆盖：真实语料零命中，DdsCodec 也刻意未实现，补判据会造出零覆盖代码。',
     'partition / anchor 表「符合规范」不由本门禁单独证明：harness 副本与 C# 表逐值比对只能抓单侧漂移'

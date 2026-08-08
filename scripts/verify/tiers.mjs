@@ -190,6 +190,17 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 重复代码」报绿。真实语料 BC3 零命中，但 dxgi 77 / "DXT5" 两条 dispatch 早已
   // 对外可达，故修复并门禁化。需要真实 exe、不需真实语料，归 synthetic。
   'test:bc3-color-block': 'synthetic',
+  // PNG 色彩空间声明。守的是「DDS 头声明的色彩空间必须如实带到导出的 PNG」。
+  // DXGI 把同一种块压缩分成 UNORM 与 UNORM_SRGB（BC7 是 98/99、BC1 是 71/72），
+  // 块字节与解码数值**完全相同**，差别只在「数值该被解释为线性光还是 sRGB 编码值」。
+  // 此前两者合并成同一条路径且 PNG 不写任何色彩空间 chunk，真实语料里
+  // 36/52 张纹理（BC7_UNORM_SRGB 12 + BC1_UNORM_SRGB 24）的 sRGB 声明被丢弃。
+  // 这类缺陷不会让任何既有断言变红——像素值本来就没变，丢的是元数据；不做色彩
+  // 管理的查看器照样显示正常。所以必须专门门禁化，且正反两侧都钉：sRGB 变体必须
+  // 有 chunk、线性变体必须没有（多写和少写都是谎报），非 DX10 fourCC 必须报
+  // 「未声明」诊断（「未声明」与「已确认线性」在产物上完全一样，只有诊断能区分）。
+  // 需要真实 exe、不需真实语料，与上面两条同归 synthetic。
+  'test:png-color-space': 'synthetic',
   // FLVER「解析缺口必须可见」。守的不是某一条解析，而是缺口不可见这个**根因**：
   // FlverNativeDocument.Authority 此前唯一的降级依据是 layoutWarnings.Count > 0，
   // 而三批缺口全在不写 warning 的路径上——SemTangent/SemBitangent/SemVertexColor

@@ -11,8 +11,41 @@ using System.IO.Compression;
 /// </summary>
 internal static class DdsCodec
 {
+    /// <summary>
+    /// DDS 像素数据声明的传递函数（色彩空间）。
+    ///
+    /// 为什么必须是独立返回值而不是内部细节：DXGI 把同一种块压缩分成 UNORM 与
+    /// UNORM_SRGB 两个格式号（BC7 是 98/99，BC1 是 71/72），**块字节完全相同、
+    /// 解码出的数值也完全相同**，唯一差别是这些数值该被解释为线性光还是 sRGB
+    /// 编码值。丢掉这个区分不会让任何解码断言变红——它只会让导出的 PNG 在色彩
+    /// 管理的查看器里显示错误的亮度，而在不做色彩管理的查看器里看起来正常。
+    /// 这正是硬约束 7 要求区分的那类情形：数据在手，不表达出来就等于失真。
+    /// </summary>
+    internal enum DdsColorSpace
+    {
+        /// <summary>DDS 头没有给出足以判定色彩空间的信息（非 DX10 头的 fourCC 形态）。</summary>
+        Unknown,
+        /// <summary>数值是线性光（DXGI 的 *_UNORM）。</summary>
+        Linear,
+        /// <summary>数值是 sRGB 编码值（DXGI 的 *_UNORM_SRGB）。</summary>
+        Srgb
+    }
+
     /// <summary>从 DDS blob 解码为 RGBA8 像素（行优先，自顶向下）。返回 (width, height, rgba)。</summary>
+    /// <remarks>
+    /// 不带色彩空间的重载：保留给只关心像素值的调用方。需要如实导出色彩空间的
+    /// 路径应当用 <see cref="DecodeDdsWithColorSpace"/>，否则 sRGB 区分会在这里被丢弃。
+    /// </remarks>
     public static (int Width, int Height, byte[] Rgba) DecodeDds(byte[] dds)
+    {
+        var (width, height, rgba, _) = DecodeDdsWithColorSpace(dds);
+        return (width, height, rgba);
+    }
+
+    /// <summary>
+    /// 与 <see cref="DecodeDds"/> 同一实现，额外返回 DDS 声明的色彩空间。
+    /// </summary>
+    public static (int Width, int Height, byte[] Rgba, DdsColorSpace ColorSpace) DecodeDdsWithColorSpace(byte[] dds)
     {
         if (dds.Length < 128 || dds[0] != (byte)'D' || dds[1] != (byte)'D' || dds[2] != (byte)'S' || dds[3] != 0x20)
             throw new InvalidDataException("不是有效的 DDS 文件。");
@@ -33,6 +66,7 @@ internal static class DdsCodec
         // DXGI extended header follows the 124-byte DDS header (data starts at 148).
         string bcFormat;
         int dataOffset;
+        DdsColorSpace colorSpace;
         if (fourCc == "DX10")
         {
             if (dds.Length < 148) throw new InvalidDataException("DX10 DDS 头不完整。");
@@ -46,6 +80,16 @@ internal static class DdsCodec
                 98 or 99 => "BC7",   // BC7_UNORM / BC7_UNORM_SRGB
                 _ => throw new NotSupportedException($"不支持的 DXGI 格式：{dxgiFormat}。")
             };
+            // 色彩空间与块格式是**两个正交维度**，故单独判定而不是塞进上面的 switch：
+            // 上面回答「用哪个解码器」，这里回答「解出的数值是什么含义」。
+            // 只有 _UNORM_SRGB 变体声明 sRGB；BC4/BC5 是单/双通道数据（法线、遮罩、
+            // 粗糙度），DXGI 根本没有它们的 SRGB 变体，故恒为线性。
+            colorSpace = dxgiFormat switch
+            {
+                72 or 99 => DdsColorSpace.Srgb,      // BC1_UNORM_SRGB / BC7_UNORM_SRGB
+                71 or 77 or 80 or 83 or 98 => DdsColorSpace.Linear,
+                _ => DdsColorSpace.Unknown
+            };
             dataOffset = 148;
         }
         else
@@ -58,6 +102,11 @@ internal static class DdsCodec
                 "ATI2" or "BC5U" => "BC5",
                 _ => throw new NotSupportedException($"不支持的 DDS 压缩格式：{fourCc}。")
             };
+            // 非 DX10 的 fourCC 形态（DXT1/DXT5/ATI1/ATI2）**不携带色彩空间信息**：
+            // 这些 fourCC 早于 DXGI 的 sRGB 变体，D3D9 时代靠采样器状态外部指定。
+            // 这里如实返回 Unknown 而不是猜 sRGB——猜出来的值和真实声明无法区分，
+            // 下游就再也判断不出「这张图的色彩空间到底是已知还是被假定的」。
+            colorSpace = DdsColorSpace.Unknown;
             dataOffset = 128;
         }
 
@@ -80,7 +129,7 @@ internal static class DdsCodec
                 break;
         }
 
-        return (width, height, rgba);
+        return (width, height, rgba, colorSpace);
     }
 
     /// <summary>BC3 (DXT5)：BC4 alpha 块 + BC1 颜色块（带显式 alpha）。</summary>
@@ -853,7 +902,50 @@ internal static class DdsCodec
     }
 
     /// <summary>将 RGBA8 像素编码为 PNG（非隔行，8-bit RGBA）。使用 ZLibStream 压缩 IDAT。</summary>
+    /// <remarks>
+    /// 不带色彩空间的重载：产出的 PNG **不含任何色彩空间 chunk**，即「未声明」。
+    /// 需要如实标注 sRGB 的路径应当用带 <see cref="DdsColorSpace"/> 的重载。
+    /// </remarks>
     public static byte[] EncodePng(int width, int height, byte[] rgba)
+        => EncodePng(width, height, rgba, DdsColorSpace.Unknown);
+
+    /// <summary>
+    /// 将 RGBA8 像素编码为 PNG，并按 <paramref name="colorSpace"/> 写入色彩空间 chunk。
+    ///
+    /// <para>
+    /// <b>为什么需要这个参数</b>：DXGI 的 BC7_UNORM(98) 与 BC7_UNORM_SRGB(99) 块字节
+    /// 与解码数值完全相同，差别只在「这些数值是线性光还是 sRGB 编码值」。此前两者
+    /// 走同一条路径且 PNG 不写任何色彩空间 chunk，于是真实语料里 12 个
+    /// BC7_UNORM_SRGB 与 24 个 BC1_UNORM_SRGB 纹理导出后**色彩空间声明全部丢失**。
+    /// 后果不会让任何解码断言变红：不做色彩管理的查看器照样显示正常，只有色彩管理
+    /// 的查看器（浏览器、Photoshop）会按自己的默认假设去解释，亮度随之偏移。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>只标注不转换</b>：这里刻意**不做** sRGB↔linear 数值转换。PNG 的 sRGB chunk
+    /// 表达的正是「样本值已经是 sRGB 编码值」，所以对 dxgi 99 而言，原样写出 + 写
+    /// sRGB chunk 就是正确且无损的；把它转成线性再写反而会既失真又需要 16 位深度。
+    /// 对 Linear（dxgi 98）不写 sRGB chunk：写了就是谎报。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Unknown 不写</b>：非 DX10 的 fourCC（DXT1/ATI1…）不携带色彩空间信息。
+    /// 「未声明」与「声明为线性」在 PNG 里是不同的事实，猜一个写进去就无法再区分。
+    /// </para>
+    ///
+    /// <para>
+    /// gAMA / cHRM 的数值取自 PNG 规范推荐的 sRGB 伴随值，经**两份独立来源**逐值核对
+    /// （W3C REC-PNG-20031110 与 libpng PNG-Chunks 1.2，两处完全一致）：
+    /// gAMA=45455；cHRM 白点 (31270, 32900)、红 (64000, 33000)、绿 (30000, 60000)、
+    /// 蓝 (15000, 6000)，均为实际值 ×100000。它们是给不认识 sRGB chunk 的老解码器
+    /// 用的回退，规范要求与 sRGB chunk 同时出现时保持这组固定值。
+    /// </para>
+    ///
+    /// <para>
+    /// chunk 顺序按规范：sRGB / gAMA / cHRM 必须在 IHDR 之后、IDAT 之前。
+    /// </para>
+    /// </remarks>
+    public static byte[] EncodePng(int width, int height, byte[] rgba, DdsColorSpace colorSpace)
     {
         using var output = new MemoryStream();
         // PNG signature.
@@ -869,6 +961,26 @@ internal static class DdsCodec
         ihdr[11] = 0; // filter
         ihdr[12] = 0; // interlace
         WriteChunk(output, "IHDR", ihdr);
+
+        if (colorSpace == DdsColorSpace.Srgb)
+        {
+            // sRGB：1 字节 rendering intent。0 = Perceptual，图像内容的常规取值。
+            WriteChunk(output, "sRGB", new byte[] { 0 });
+            // 规范推荐的伴随回退值，供不认识 sRGB chunk 的解码器使用。
+            var gama = new byte[4];
+            WriteInt32BigEndian(gama, 0, 45455);
+            WriteChunk(output, "gAMA", gama);
+            var chrm = new byte[32];
+            WriteInt32BigEndian(chrm, 0, 31270);  // white point x
+            WriteInt32BigEndian(chrm, 4, 32900);  // white point y
+            WriteInt32BigEndian(chrm, 8, 64000);  // red x
+            WriteInt32BigEndian(chrm, 12, 33000); // red y
+            WriteInt32BigEndian(chrm, 16, 30000); // green x
+            WriteInt32BigEndian(chrm, 20, 60000); // green y
+            WriteInt32BigEndian(chrm, 24, 15000); // blue x
+            WriteInt32BigEndian(chrm, 28, 6000);  // blue y
+            WriteChunk(output, "cHRM", chrm);
+        }
 
         // IDAT: each scanline prefixed with filter byte 0, then zlib-compressed.
         using var idatData = new MemoryStream();
