@@ -19,6 +19,7 @@ import {
   parseSealBaseline
 } from './handoff-integrity-lib.mjs';
 import { validateGovernanceData } from './governance/validateGovernanceData.mjs';
+import { checkEvidenceFreshness } from './governance/governanceRules.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const GOV = 'docs/governance';
@@ -118,6 +119,8 @@ function expectClean(name) {
 
 // ---- 基线：真实数据必须干净，否则后续断言无意义 -------------------------
 expectClean('untouched-real-data-is-clean');
+
+
 
 // ---- schema 拦截 ---------------------------------------------------------
 expectCodes('schema-rejects-unknown-field', ({ read, write }) => {
@@ -283,6 +286,79 @@ expectCodes('unknown-target-release-is-rejected', ({ read, write }) => {
   gates.gates[0].targetRelease = 'V9.9';
   write('gates.json', gates);
 }, ['TARGET_RELEASE_UNKNOWN']);
+
+/* ── freshness 规则族（直接测规则函数）───────────────────────────────────
+ *
+ * 本文件此前对 freshness 完全没有覆盖：全文 STALE|FRESHNESS token 计数为 0。
+ * 而 freshness 是「passed Gate 的证据是否还有效」的唯一判据，它松动的后果是
+ * 已封存证据永久有效、改了主题域也不报 stale。
+ *
+ * 为什么直接测 checkEvidenceFreshness 而不经 validateGovernanceData：后者的
+ * freshnessContext 由 buildFreshnessContext 从**真实 git 状态**构造
+ * （validateGovernanceData.mjs:122-129），不接受外部注入，而本文件的沙箱是
+ * 临时目录、不是 git 仓库。判定逻辑本身就在 checkEvidenceFreshness，
+ * 这里是它的正确测试层次。
+ */
+function freshnessCase(name, subjectRefs, anchorState, expectedCode) {
+  const id = 'EV-FIXTURE-FRESHNESS';
+  const evidence = new Map([[id, {
+    type: 'sealed-current-run',
+    sealValid: true,
+    claim: '',
+    seal: { fields: { head: 'fixture-anchor' } }
+  }]]);
+  const ctx = { anchors: { 'fixture-anchor': anchorState } };
+  const finding = checkEvidenceFreshness(
+    'fixture', [id], evidence, subjectRefs, ctx,
+    'GATE_EVIDENCE_STALE', 'fixture stale message'
+  );
+  const actual = finding === null ? '(无 finding)' : finding.code;
+  if (actual === expectedCode) {
+    cases.push({ name, ok: true, expectedCodes: [expectedCode] });
+  } else {
+    failures += 1;
+    cases.push({ name, ok: false, expected: [expectedCode], actual: [actual] });
+    console.error(`FAIL  ${name}`);
+    console.error(`        期望: ${expectedCode}`);
+    console.error(`        实际: ${actual}`);
+  }
+}
+
+const FRESH_ANCHOR = { isAncestor: true, subjectScanAvailable: true, changedSubjects: [] };
+
+// ① 主题域已变更 → stale。防「freshness 判定被整体关掉」。
+freshnessCase('freshness-detects-changed-subject',
+  ['docs/governance/scope.json'],
+  { ...FRESH_ANCHOR, changedSubjects: ['docs/governance/scope.json'] },
+  'GATE_EVIDENCE_STALE');
+
+// ② 锚点不是当前 HEAD 的祖先（历史被改写，例如 rebase）→ stale。
+//    实测过这个场景：rebase 重写 46 个提交后六个 Gate 同时 stale。
+freshnessCase('freshness-detects-non-ancestor-anchor',
+  ['docs/governance/scope.json'],
+  { ...FRESH_ANCHOR, isAncestor: false },
+  'GATE_EVIDENCE_STALE');
+
+// ③ 主题域扫描不可用 → 必须失败关闭，而不是当作「没变更」放行。
+freshnessCase('freshness-unverifiable-fails-closed',
+  ['docs/governance/scope.json'],
+  { ...FRESH_ANCHOR, subjectScanAvailable: false },
+  'GATE_FRESHNESS_UNVERIFIABLE');
+
+// ④ 登记了主题域但内容为空 → GATE_SUBJECT_SET_EMPTY。
+//    钉住已修掉的 fail-open：空数组时 subjectRefs.some(...) 恒假，原实现返回
+//    fresh，于是清空某 Gate 的三项主题域即可让它的证据永不 stale，且
+//    GATE_SUBJECT_SET_UNDEFINED 那道失败关闭被绕过（key 还在，不是 null）。
+freshnessCase('freshness-empty-subject-set-fails-closed',
+  [],
+  { ...FRESH_ANCHOR, changedSubjects: ['docs/governance/scope.json'] },
+  'GATE_SUBJECT_SET_EMPTY');
+
+// ⑤ 主题域未变更 → 不得误报。防判据变严后把正常状态报成 stale。
+freshnessCase('freshness-unchanged-subject-is-clean',
+  ['docs/governance/scope.json'],
+  { ...FRESH_ANCHOR, changedSubjects: ['docs/unrelated.md'] },
+  '(无 finding)');
 
 const result = {
   ok: failures === 0,
