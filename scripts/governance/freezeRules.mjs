@@ -93,7 +93,7 @@ function canonical(value) {
  * 比较冻结字段在基线与当前数据之间是否发生变化。
  * 只报告归属于该冻结版本（targetRelease 匹配）的条目。
  */
-function diffFrozenField(release, spec, baseline, current, findings, where) {
+function diffFrozenField(release, spec, baseline, current, findings, where, unfrozenItemIds = null) {
   const parsed = parseFrozenField(spec);
   if (parsed === null) {
     findings.push(makeFinding(
@@ -136,6 +136,9 @@ function diffFrozenField(release, spec, baseline, current, findings, where) {
   for (const [id, currentItem] of currentItems) {
     // 只保护属于该冻结版本的条目。V0.6 新条目自由，V0.5 条目不可动。
     if (currentItem.targetRelease !== undefined && currentItem.targetRelease !== release) continue;
+    // 按条目解冻：只放开 unfreezeRuling.scopeItemIds 里显式列出的条目。
+    // 未列出的条目继续比对基线——这是「按条目」与「整版放开」的全部区别。
+    if (unfrozenItemIds !== null && unfrozenItemIds.has(id)) continue;
     const baselineItem = baselineItems.get(id);
     if (!baselineItem) continue; // 新增条目由范围裁定规则管，不属于冻结篡改。
     const before = parsed.field === null ? baselineItem : baselineItem[parsed.field];
@@ -153,6 +156,9 @@ function diffFrozenField(release, spec, baseline, current, findings, where) {
 
   for (const [id, baselineItem] of baselineItems) {
     if (baselineItem.targetRelease !== undefined && baselineItem.targetRelease !== release) continue;
+    // 删除保护**不随解冻放开**：解冻允许改裁定字段，不允许让条目消失。
+    // 条目消失会让它彻底脱离所有判据（连「被改过」都看不见），
+    // 与「改一个字段」不是同一量级的动作。
     if (!currentItems.has(id)) {
       findings.push(makeFinding(
         'FREEZE_VIOLATION',
@@ -215,16 +221,53 @@ export function validateCrossVersionFreeze(data, findings, options = {}) {
 
   for (const entry of releases) {
     if (entry.frozen !== true) continue;
+
+    // ── 解冻裁定：**按条目**放开，不是整版放开 ──
+    //
+    // 负向证明（2026-08-08 实测六条，改治理数据后复跑 verify-governance）：
+    //   U1 改**未列出**条目的 authorityAtRuling → 仍报 FREEZE_VIOLATION ✓
+    //   U2 改未列出条目的 operations           → 仍报 FREEZE_VIOLATION ✓
+    //   U3 删除未列出的条目                    → 仍报 FREEZE_VIOLATION ✓
+    //   U4 删除**已解冻**的 ESD 条目           → 仍报 FREEZE_VIOLATION ✓
+    //      （解冻允许改字段，不允许条目消失——条目消失会让它脱离所有判据）
+    //   U5 scopeItemIds 为空数组               → 失败关闭，不退回整版放开 ✓
+    //   U6 ESD 的裁定字段改动                  → 被放行（否则解冻等于没生效）✓
+    // U1 首次用 proposedSupport 做靶标时不命中：把 supported 改成 deferred 会缺
+    // deferredToRelease，被 schema 先拦下，测到的是「schema 不合法」而不是冻结拦截。
+    // 换成 authorityAtRuling 后才是有效退化——**退化必须精准到只破坏被测的那一件事**。
+    //
+    // 原实现在这里直接 `continue`，于是一旦某版声明了 unfreezeRuling，该版**全部**
+    // scopeItem 的裁定字段一起脱离基线比对。真实场景里解冻通常只针对一条
+    // （2026-08-08 用户裁定只涉及 SCOPE-BEHAVIOR-ESD），整版放开等于为了改一条
+    // 而把其余十几条的保护一起关掉，且关掉期间无人会注意——这正是「一道门禁被
+    // 合法用途顺带关掉」的形态。
+    //
+    // 现在要求裁定显式列出 scopeItemIds，未列出的条目继续比对基线。
+    let unfrozenItemIds = null;
     if (entry.unfreezeRuling !== null && entry.unfreezeRuling !== undefined) {
-      // 已声明解冻裁定：跳过拦截，但必须留下可审计记录。
-      // 解冻裁定本身的真实性属于工程复核范围，门禁只保证它存在且被显式声明。
+      const ruling = entry.unfreezeRuling;
+      const ids = Array.isArray(ruling?.scopeItemIds) ? ruling.scopeItemIds : null;
+      // 形态不合法必须失败关闭：若默认按整版放开，写错字段名就悄悄退回旧行为，
+      // 而「保护面变小」不会有任何信号。
+      if (ids === null || ids.length === 0 || ids.some((id) => typeof id !== 'string' || id.trim() === '')) {
+        findings.push(makeFinding(
+          'FREEZE_UNFREEZE_RULING_INVALID',
+          'docs/governance/releases.json',
+          `${entry.release} 的 unfreezeRuling 必须显式列出非空 scopeItemIds（字符串数组），`
+            + '用来限定本次解冻放开哪些条目。缺失或为空时失败关闭——'
+            + '否则一条写错字段的裁定会把该版全部裁定字段的保护一起关掉。'
+        ));
+        continue;
+      }
+      unfrozenItemIds = new Set(ids);
       findings.push({
         severity: 'info',
         code: 'FREEZE_UNFROZEN_BY_RULING',
         where: 'docs/governance/releases.json',
-        message: `${entry.release} 声明了 unfreezeRuling，冻结拦截已按裁定放开；该裁定的真实性由工程复核负责。`
+        message: `${entry.release} 声明了 unfreezeRuling，已按条目放开冻结拦截：`
+          + `${[...unfrozenItemIds].join(', ')}。其余条目继续比对 git 基线；`
+          + '该裁定的真实性由工程复核负责。'
       });
-      continue;
     }
 
     const baseline = readFromGit(root, baselineRef, 'docs/governance/scope.json');
@@ -270,7 +313,8 @@ export function validateCrossVersionFreeze(data, findings, options = {}) {
         baselineScope,
         data.scope,
         findings,
-        'docs/governance/scope.json'
+        'docs/governance/scope.json',
+        unfrozenItemIds
       );
     }
   }

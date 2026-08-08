@@ -659,14 +659,34 @@ internal sealed class BridgeCommandService
                     diagnostics.Add(new Diagnostic(
                         "warning",
                         "ESD_STRUCTURE_NOT_PARSED_IN_SCOPE",
-                        $"ESD 本版未解析以下字段区间：{string.Join("; ", esdUnparsedGaps)}。"
-                        + "这是 user-approved 的 V0.6 延期范围（scope.json SCOPE-BEHAVIOR-ESD，"
-                        + "范围原文含「跳转关系的完整读写」），不是解析缺陷；"
-                        + "但 authority 因此不得停留在 candidate，已降为 partial。"
-                        + "状态转移边未构建意味着本文档只能回答「有哪些状态」，"
-                        + "不能回答「状态之间怎么跳」。",
+                        $"ESD 刻意不解码以下区间：{string.Join("; ", esdUnparsedGaps)}。"
+                        + "RPN 字节码按不透明 (offset,length) 上报——scope.json 的 "
+                        + "SCOPE-BEHAVIOR-ESD 把「未知表达式或命令不得重编码」列为永久禁令，"
+                        + "不解码是刻意的，不是解析缺陷；但 authority 因此不得停留在 candidate，"
+                        + "已降为 partial。",
                         BridgeResult<object>.MakeSourceUri(file),
                         new { unparsedGaps = esdUnparsedGaps }));
+                }
+                // 跳转图不闭合必须单列：悬空目标意味着写入会破坏状态机可达性
+                // （scope.json 的 resumeRequires 明写这一条）。与「刻意不解码」分开，
+                // 因为处置完全不同——那个是范围，这个是数据有问题。
+                if (!document.TransitionGraphClosed)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "error",
+                        "ESD_TRANSITION_GRAPH_NOT_CLOSED",
+                        $"ESD 跳转图不闭合：悬空目标 {document.DanglingEdges.Count} 条、"
+                        + $"指向尾随哨兵槽 {document.SentinelTargetEdges.Count} 条。"
+                        + "悬空目标指向的偏移不落在任何语义 state 记录起点上；"
+                        + "指向哨兵说明哨兵被当成可跳转状态。两者都会让状态机的可达性判断失效，"
+                        + "写入前必须先解决（真实语料实测 192/192 文件闭合，出现此诊断说明遇到了"
+                        + "未登记形态）。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new
+                        {
+                            dangling = document.DanglingEdges.Count,
+                            sentinelTargets = document.SentinelTargetEdges.Count
+                        }));
                 }
                 return BridgeResult<object>.Partial(file, "script", diagnostics.ToArray(), document.ToEnvelope(roundTrip));
             }

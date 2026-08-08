@@ -26,7 +26,16 @@
         "quantitativeAcceptancePolicy"
       ],
       "frozenFieldsNote": "只冻结用户裁定字段。工程进度字段（gates[].gateState、slices[].lifecycle、slices[].authority、evidence 追加）不在冻结范围内——否则 V0.5 自身无法继续推进。",
-      "unfreezeRuling": null
+      "unfreezeRuling": {
+        "status": "user-approved",
+        "approvedBy": "user",
+        "approvedAt": "2026-08-08",
+        "decisionRef": "EV-ESD-SUPPORTED-TRANSITION-EDGES-20260808",
+        "scopeItemIds": [
+          "SCOPE-BEHAVIOR-ESD"
+        ],
+        "reason": "用户裁定把 SCOPE-BEHAVIOR-ESD 从 V0.6 延期改回 supported，并实现状态转移边的只读解析（跟随 condition 的 targetStateOffset、读出 command call 的 commandID、检出悬空目标与指向哨兵槽的边）。写能力不在本次裁定范围内：any-esd-write-in-v05 与 raw-hex-write 保持禁止，unknown-expression-or-command-reencode 仍是永久禁令。scopeItemIds 限定只放开该条目；V0.5 其余 scopeItem 继续受 git 基线比对保护，条目删除保护不随解冻放开。"
+      }
     },
     {
       "release": "V0.6",

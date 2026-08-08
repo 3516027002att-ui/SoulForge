@@ -3228,17 +3228,24 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "Sekiro 全部 ESD 状态机、条件表达式、命令与跳转关系的完整读写（延期至 V0.6）",
+      "scope": "Sekiro ESD 状态机、条件表达式、命令与跳转关系的只读解析（含转移边闭合图与悬空目标检出）；表达式与命令参数体的 RPN 字节码按不透明 (offset,length) 上报，写能力不在本范围内",
       "decisionStatus": "user-approved",
-      "proposedSupport": "deferred",
-      "deferredToRelease": "V0.6",
-      "operations": [],
+      "proposedSupport": "supported",
+      "deferredToRelease": null,
+      "operations": [
+        "read-esd-document",
+        "parse-state-groups-and-states",
+        "parse-conditions-and-command-calls",
+        "follow-transition-edges-and-detect-dangling-targets"
+      ],
       "unsupportedOperations": [
         "borrow-other-game-esd-layout",
         "raw-hex-write",
         "unknown-expression-or-command-reencode",
         "any-esd-write-in-v05",
-        "present-esd-panel-as-v05-release-editor"
+        "present-esd-panel-as-v05-release-editor",
+        "decode-rpn-bytecode-semantics",
+        "claim-esd-native-verified-without-game-load"
       ],
       "authorityAtRuling": "candidate",
       "evidenceRefs": [
@@ -3247,16 +3254,15 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "ESD 已延期至 V0.6，不属于 V0.5 支持范围也不属于 V0.5 完成条件。既有注册样本 native document parser（36 groups / 295 states / 315 conditions 及 RPN bytecode）与只读工作台保留为标记 V0.6 只读预览，仍为 candidate，不证明表达式 schema、writer 或真实游戏加载；ESD 为二进制状态机与 RPN 字节码，不属于本轮裁定的文本类格式。"
+        "ESD 由用户裁定（2026-08-08）从 V0.6 延期改回 supported，范围**仅限只读解析**：state group / state / condition / command call 结构与计数、转移边跟随与悬空目标检出。真实语料实测 192 个 .esd / 41467 条转移边（resolved 30893 + none 10574）悬空 0、指向哨兵 0、192/192 跳转图闭合；命令调用 23626 条含此前未读的 commandID。",
+        "不声明表达式或命令参数体的 RPN 字节码已解码：仍按不透明 (offset,length) 上报，authority 因此为 partial。unknown-expression-or-command-reencode 是永久禁令。",
+        "不声明 ESD 具备 writer：any-esd-write-in-v05 与 raw-hex-write 保持禁止；写能力开放前需要条件表达式与命令块未知字段的无损往返证据。",
+        "不声明 native-verified：authority 上限为 candidate，提升需要真实语料往返与游戏内加载证据，不由解析完整性推导。",
+        "不声明 ESD 面板可作为 V0.5 release editor 呈现。"
       ],
       "targetRelease": "V0.5",
-      "deferredTrack": "D-BEHAVIOR",
-      "resumeRequires": [
-        "按 scopeDeferralPolicy 走通用承接流程（用户裁定改回 supported、同步 gates/slices 脱离 deferred、补齐 parser/writer/validator/恢复与 authority 门槛、重新封存 Evidence）",
-        "ESD 状态机、条件表达式、命令与跳转关系需完整解析；未知表达式或命令不得重编码（永久禁令）",
-        "跳转关系要能构成闭合图并检出悬空目标，否则写入会破坏状态机可达性",
-        "ESD 写能力开放前需要条件表达式与命令块的未知字段无损往返证据；raw-hex-write 永久禁止"
-      ]
+      "deferredTrack": null,
+      "resumeRequires": []
     },
     {
       "scopeItemId": "SCOPE-BEHAVIOR-SCRIPT",

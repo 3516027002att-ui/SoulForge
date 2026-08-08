@@ -11,11 +11,27 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Local agent/tool metadata and generated knowledge graphs. Tracked legacy files
-# remain tracked; these rules only prevent new local state from entering commits.
+# Per-assistant instruction files and local tool metadata. These are machine-local
+# operator config, not project scope: they differ per developer and per tool, so a
+# commit of one silently imposes one operator's setup on everyone else. Derived
+# copies (CLAUDE.md.bak-*, AGENTS.md.orig, ...) are covered too — a backup of an
+# ignored file is just as local as the original, and leaving it untracked also
+# poisons the handoff fingerprint's untracked manifest.
 AGENTS.md
+AGENTS.md.*
 CLAUDE.md
+CLAUDE.md.*
+GEMINI.md
+GEMINI.md.*
+QWEN.md
+QWEN.md.*
+.cursorrules
+.windsurfrules
+.github/copilot-instructions.md
 .claude/
+.codex/
+.gemini/
+.qwen/
 .cursor/
 .gitattributes
 graphify-out/

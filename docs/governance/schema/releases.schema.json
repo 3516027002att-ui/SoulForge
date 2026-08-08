@@ -35,12 +35,19 @@
           "unfreezeRuling": {
             "type": ["object", "null"],
             "additionalProperties": false,
-            "required": ["status", "approvedBy", "approvedAt", "decisionRef"],
+            "required": ["status", "approvedBy", "approvedAt", "decisionRef", "scopeItemIds"],
             "properties": {
               "status": { "const": "user-approved" },
               "approvedBy": { "type": "string", "minLength": 1 },
               "approvedAt": { "type": "string", "minLength": 1 },
-              "decisionRef": { "type": "string", "minLength": 1 }
+              "decisionRef": { "type": "string", "minLength": 1 },
+              "scopeItemIds": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 },
+                "description": "本次解冻放开哪些 scopeItem 的裁定字段。**必填且非空**：解冻是按条目的，未列出的条目继续受 git 基线比对保护。若允许省略，一条裁定就会把该版全部裁定字段的保护一起关掉，而保护面变小不会有任何信号。"
+              },
+              "reason": { "type": "string", "minLength": 1 }
             }
           }
         }
