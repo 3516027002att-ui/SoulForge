@@ -63,6 +63,15 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 判据从 csproj 的 TargetFramework 推导而非写死版本号，故升级 TFM 时不会误报。
   // 纯文件系统扫描，秒级，归 governance。
   'test:stale-tfm-gate': 'governance',
+  // 跨机复现**判定逻辑**的负向 fixture。BLOCK-4「跨机 installer 验证」结构上需要
+  // 第二台机器，本机确实无法解除；但判定逻辑本身不需要第二台机器就能验证，
+  // 而实测它零覆盖：test:release-cross-machine 只调默认 audit 模式，
+  // --export 与 --compare 全仓零调用。也就是说等真有了第二台机器，用来下
+  // 「跨机指纹是否一致」这个判定的代码，从来没人证明过它会在该红时红。
+  // 最坏形态是误绿——compare 把两份不同指纹判成一致，而它是 REL-COMPLIANCE 的依据之一。
+  // 判据用构造的导出记录驱动 compare，逐字段单独差异各测一次（只测「全都不同」会让
+  // 「只比一个字段」的实现全绿）。纯静态、临时目录、秒级，归 governance。
+  'test:cross-machine-fixtures': 'governance',
 
   // ---- unit：编译 + 跨包单元与契约。代码改动必跑 ----
   typecheck: 'unit',

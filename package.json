@@ -131,6 +131,7 @@
     "test:png-color-space": "node scripts/verify-png-color-space-gate.mjs",
     "test:dds-truncation": "node scripts/verify-dds-truncation-gate.mjs",
     "test:esd-gap-visibility": "node scripts/verify-esd-gap-visibility-gate.mjs",
+    "test:cross-machine-fixtures": "node scripts/verify-cross-machine-fixtures.mjs",
     "test:bc3-color-block": "node scripts/verify-bc3-color-block-gate.mjs",
     "test:flver-gap-visibility": "node scripts/verify-flver-gap-visibility-gate.mjs",
     "test:desktop-security-runtime": "node scripts/verify-desktop-security-runtime.mjs",

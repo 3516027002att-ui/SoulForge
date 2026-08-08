@@ -1395,14 +1395,15 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 152 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 153 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
-**governance**（19 条）
+**governance**（20 条）
 
 ~~~powershell
 npm run handoff:fingerprint
+npm run test:cross-machine-fixtures
 npm run test:gov-cli
 npm run test:governance
 npm run test:governance-data-fixtures
