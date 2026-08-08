@@ -3928,13 +3928,12 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 
 `npm run test:v06-deferral-index` 校验本节与上述权威记录逐项一致：条目缺失、多写、目标版本不符或权威侧状态变化后未同步，都会失败关闭。因此本节不能成为独立漂移的第二口径。
 
-延期到 V0.6 的 8 个范围条目（全部 `operations=[]`，`authorityAtRuling` 为裁定当时的真实上限，不是承诺）：
+延期到 V0.6 的 7 个范围条目（全部 `operations=[]`，`authorityAtRuling` 为裁定当时的真实上限，不是承诺）：
 
 | 范围条目 | 目标版本 | 裁定时 authority | 归属线 |
 |---|---|---|---|
 | `SCOPE-BEHAVIOR-ANIMATION` | V0.6 | `unverified` | D-BEHAVIOR |
 | `SCOPE-BEHAVIOR-TAE` | V0.6 | `candidate` | D-BEHAVIOR |
-| `SCOPE-BEHAVIOR-ESD` | V0.6 | `candidate` | D-BEHAVIOR |
 | `SCOPE-ASSETS` | V0.6 | `candidate` | E-ASSET |
 | `SCOPE-ASSET-MTD` | V0.6 | `unverified` | E-ASSET |
 | `SCOPE-ASSET-COLLISION` | V0.6 | `unverified` | E-ASSET |
@@ -3946,6 +3945,8 @@ blocker `reason` 只允许：`private-corpus | credential | hardware | user-ruli
 延期切片：无。V0.6 承接后 `W-MSB-SCENE-01`、`W-FLVER-READ-01`、`W-RENDER-FUNCTIONAL-02` 已全部完成（lifecycle=completed），不再属于延期索引。
 
 延期只读预览编辑器：`msb`、`tae`、`esd`、`flver`。四者已实现的读取与投影保留并在 UI 标记为 V0.6 预览，`countedAsReleaseEditor=false`，写入在 `editorCapabilityContract.releaseWriteEnabled`、`@soulforge/shared` 的 `DEFERRED_PREVIEW_EDITOR_KINDS` 与主进程 `EDITOR_DEFERRED_TO_V06_READONLY` 三层失败关闭。
+
+`esd` 留在这份预览清单里而 `SCOPE-BEHAVIOR-ESD` 已改回 supported，两者不矛盾：本轮裁定只放开**只读解析**，`any-esd-write-in-v05` 与 `present-esd-panel-as-v05-release-editor` 都仍是禁令，所以 ESD 面板的写入必须继续按三层失败关闭。范围条目脱离 deferred ≠ 编辑器获得写权限。
 
 V0.6 恢复任一条目时的强制顺序（已应用于本轮承接的 `SCOPE-MSB`/`SCOPE-ASSET-FLVER`/`SCOPE-ASSET-TPF`/`SCOPE-RENDERING`，其余 8 个延期条目后续恢复时同样适用）：
 
