@@ -33,7 +33,25 @@ function sortedList(values) {
 }
 
 /** 双向集合比对：缺失与多写都是错误，方向不同诊断不同。 */
+/**
+ * 每一路对账的规模。两侧皆空时 compareSets 恒真——那不是「校验通过」，
+ * 而是「当前没有这类记录可校验」。两者必须在输出里区分开。
+ *
+ * 实测：source 2（延期 Gate）与 source 3（延期切片）两侧皆为 0，因为
+ * gates.json 现存 gateState 只有 passed/open、slices.json 的 lifecycle 只有
+ * completed/superseded/ready —— deferred 已不在现存枚举内。而门禁把这两路
+ * 一并列进 checkedSources 并声明「与全部权威记录逐项一致」，读者会以为它们
+ * 被逐项校验过。这是记忆库里「承接后 fixture 靶标会失去前提」的复发。
+ */
+const reconciliationScale = [];
+
 function compareSets(label, where, authoritative, indexed) {
+  reconciliationScale.push({
+    label,
+    authoritative: authoritative.size,
+    indexed: indexed.size,
+    vacuous: authoritative.size === 0 && indexed.size === 0
+  });
   const missing = [...authoritative].filter((value) => !indexed.has(value));
   const extra = [...indexed].filter((value) => !authoritative.has(value));
   if (missing.length > 0) {
@@ -224,9 +242,17 @@ process.stdout.write(`${JSON.stringify({
     `${HANDOFF} §13.1 执行面板（lifecycle）`,
     `${EDITOR_PROTOCOL}（DEFERRED_PREVIEW_EDITOR_KINDS / DEFERRED_PREVIEW_TARGET_RELEASE）`
   ],
+  // 逐路对账规模。vacuous=true 表示该路两侧皆空——compareSets 恒真，
+  // 「通过」只说明当前没有这类记录，不说明判据被行使过。
+  reconciliationScale,
+  vacuousSources: reconciliationScale.filter((entry) => entry.vacuous).map((entry) => entry.label),
   findings,
   note: ok
-    ? '§18.5 派生索引与全部权威记录逐项一致；索引不构成独立范围口径或能力声明。'
+    ? (reconciliationScale.some((entry) => entry.vacuous)
+      ? '§18.5 派生索引与**当前存在的**权威记录逐项一致。注意 vacuousSources 列出的'
+        + '路径两侧皆空（现存枚举里已无 deferred 记录），那些路径的判据本轮未被行使'
+        + '——它们的「通过」不构成覆盖证明。索引不构成独立范围口径或能力声明。'
+      : '§18.5 派生索引与全部权威记录逐项一致；索引不构成独立范围口径或能力声明。')
     : '§18.5 与权威记录不一致，失败关闭。'
 }, null, 2)}\n`);
 process.exit(ok ? 0 : 1);
