@@ -2,6 +2,7 @@
  * FMG Bridge stage helpers — writers only touch staging; callers commit via Patch Engine.
  */
 
+import { BRIDGE_STAGING_WRITE_VERIFIED_CODES } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 
 export type FmgBridgeMutation =
@@ -49,7 +50,9 @@ export async function commitFmgMutationViaBridge(
     timeoutMs: request.timeoutMs ?? 60_000,
     commandOptions
   });
-  const ok = result.diagnostics.some((d) => d.code === 'FMG_STAGING_WRITE_VERIFIED');
+  const ok = result.diagnostics.some(
+    (d) => d.code === BRIDGE_STAGING_WRITE_VERIFIED_CODES.fmg
+  );
   return {
     ok,
     ...(result.data?.outputHash ? { outputHash: result.data.outputHash } : {}),

@@ -16,7 +16,7 @@ import type {
   WriterWritePlan,
   WriterWrittenTarget
 } from '@soulforge/shared';
-import { createDiagnostic } from '@soulforge/shared';
+import { BRIDGE_STAGING_WRITE_VERIFIED_CODES, createDiagnostic } from '@soulforge/shared';
 import { replaceContainerChildInMemory } from '../containers/containerService.js';
 import { decodeStrictBase64, StrictBase64Error } from '../util/base64.js';
 import { checkOriginalContentHash, resolveExpectedHash } from '../validators/textHash.js';
@@ -103,7 +103,9 @@ export class ContainerChildReplaceWriter implements WriterAdapterContract {
           ...(diagnostic.details === undefined ? {} : { details: diagnostic.details })
         })));
         if (bridgeResult.parseStatus === 'failed'
-          || !bridgeResult.diagnostics.some((diagnostic) => diagnostic.code === 'BND4_STAGING_WRITE_VERIFIED')) {
+          || !bridgeResult.diagnostics.some(
+            (diagnostic) => diagnostic.code === BRIDGE_STAGING_WRITE_VERIFIED_CODES.bnd4
+          )) {
           continue;
         }
         writtenTargets.push({ opId: op.id, targetUri: op.targetUri, targetPath: op.targetPath, stagingPath });

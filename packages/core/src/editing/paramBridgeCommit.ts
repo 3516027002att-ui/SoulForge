@@ -2,6 +2,7 @@
  * PARAM Bridge stage helpers — writers only touch staging; callers commit via Patch Engine.
  */
 
+import { BRIDGE_STAGING_WRITE_VERIFIED_CODES } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 
 export type ParamBridgeMutation =
@@ -48,7 +49,9 @@ export async function commitParamMutationViaBridge(
     timeoutMs: request.timeoutMs ?? 60_000,
     commandOptions
   });
-  const ok = result.diagnostics.some((d) => d.code === 'PARAM_STAGING_WRITE_VERIFIED');
+  const ok = result.diagnostics.some(
+    (d) => d.code === BRIDGE_STAGING_WRITE_VERIFIED_CODES.param
+  );
   return {
     ok,
     ...(result.data?.outputHash ? { outputHash: result.data.outputHash } : {}),

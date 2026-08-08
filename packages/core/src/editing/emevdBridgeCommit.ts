@@ -4,6 +4,7 @@
  */
 
 import type { EmevdEditorMutation } from '@soulforge/shared';
+import { BRIDGE_STAGING_WRITE_VERIFIED_CODES } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 
 export interface EmevdBridgeMutationRequest {
@@ -110,7 +111,9 @@ async function runEmevdWriteCommand(input: {
     timeoutMs: input.timeoutMs ?? 120_000,
     commandOptions: input.commandOptions
   });
-  const ok = result.diagnostics.some((d) => d.code === 'EMEVD_STAGING_WRITE_VERIFIED');
+  const ok = result.diagnostics.some(
+    (d) => d.code === BRIDGE_STAGING_WRITE_VERIFIED_CODES.emevd
+  );
   return {
     ok,
     ...(result.data?.outputHash ? { outputHash: result.data.outputHash } : {}),

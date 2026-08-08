@@ -2,6 +2,7 @@
  * MSB Bridge stage helpers for part/region transform writes.
  */
 
+import { BRIDGE_STAGING_WRITE_VERIFIED_CODES } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 
 export type MsbBridgeMutation =
@@ -65,7 +66,9 @@ export async function commitMsbMutationViaBridge(
     timeoutMs: request.timeoutMs ?? 120_000,
     commandOptions
   });
-  const ok = result.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED');
+  const ok = result.diagnostics.some(
+    (d) => d.code === BRIDGE_STAGING_WRITE_VERIFIED_CODES.msb
+  );
   return {
     ok,
     ...(result.data?.outputHash ? { outputHash: result.data.outputHash } : {}),
