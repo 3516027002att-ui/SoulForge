@@ -147,6 +147,22 @@ function collectSkippedLegs(node, path, out, depth = 0) {
     return;
   }
 
+  // 形态 4：非空的 skips / skipReasons 数组。
+  //
+  // 实测：runEmevdImportedRegistryProductionSmoke 缺语料时输出
+  //   { ok: true, realCorpusLegs: 0, skips: ['...未设置：真实 corpus leg 跳过。'] }
+  // 它**自己记录了跳过**，但 runner 只认 status/skipped 字段，于是整套被判 passed，
+  // --require-executed 对它完全无效。这是「跳过信号形态没有单一约定」的第四个实例
+  // （前三个是嵌套布尔、数组元素内、二层嵌套）。
+  //
+  // 只认非空数组：空 skips 表示「本轮没有跳过」，那是正常通过。
+  for (const key of ['skips', 'skipReasons', 'skippedLegs']) {
+    const value = node[key];
+    if (Array.isArray(value) && value.length > 0) {
+      out.push(path === '' ? key : `${path}.${key}`);
+    }
+  }
+
   for (const [key, value] of Object.entries(node)) {
     const childPath = path === '' ? key : `${path}.${key}`;
     if (value === 'skipped') {
