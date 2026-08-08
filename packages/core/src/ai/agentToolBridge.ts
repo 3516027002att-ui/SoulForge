@@ -12,10 +12,20 @@
  * read/analyze tools may run concurrently within one model turn; anything
  * that proposes, validates or rolls back stays exclusive. Results are
  * recorded in model emission order by the loop itself.
+ *
+ * Schema policy: each tool's model-facing parametersJsonSchema is *projected*
+ * from the same ToolInputShape that ToolRegistry.run enforces at runtime
+ * (toolInputShapeToJsonSchema). Before this, every tool advertised a bare
+ * `{ type: 'object' }`, which told the model nothing about field names —
+ * the model had to guess `q` vs `query`, `id` vs `textId`, and a wrong guess
+ * came back as INVALID_INPUT with no way for the model to know the real name.
+ * That was the root cause of unreliable tool calling, and it is exactly the
+ * failure a projection cannot reintroduce: rename a field in the shape and
+ * the advertised schema follows.
  */
 
 import type { ToolCall, ToolDefinition as AgentToolDefinition } from '../model-services/types.js';
-import type { ToolContext, ToolRegistry } from './toolRegistry.js';
+import { toolInputShapeToJsonSchema, type ToolContext, type ToolRegistry } from './toolRegistry.js';
 
 export interface AgentToolBridgeOptions {
   registry: ToolRegistry;
@@ -34,7 +44,7 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
   const tools: AgentToolDefinition[] = registry.list().map((descriptor) => ({
     name: descriptor.name,
     description: descriptor.description,
-    parametersJsonSchema: { type: 'object' },
+    parametersJsonSchema: toolInputShapeToJsonSchema(descriptor.inputSchema),
     supportsParallel: PARALLEL_SAFE_LEVELS.has(descriptor.permissionLevel ?? 'read')
   }));
 

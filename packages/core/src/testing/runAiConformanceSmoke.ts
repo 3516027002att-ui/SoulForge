@@ -2606,6 +2606,14 @@ async function main(): Promise<void> {
       permissionLevel: 'propose',
       run: () => ({ ok: false, error: { code: 'WRITE_GATE_CLOSED', message: 'writer unavailable' } })
     });
+    registry.register({
+      name: 'schema_thing',
+      description: 'declared',
+      permission: 'read',
+      permissionLevel: 'read',
+      inputSchema: { query: 'string', limit: 'number?' },
+      run: () => ({ ok: true, data: 'ran' })
+    });
     const bridge = createAgentToolBridge({
       registry,
       context: { workspaceIndex: {} as never, mode: 'fullPermission' }
@@ -2624,6 +2632,30 @@ async function main(): Promise<void> {
     const badJson = await bridge.executeTool({ id: 'c3', name: 'read_thing', argumentsJson: '{oops' });
     if (badJson.ok || badJson.code !== 'TOOL_INPUT_INVALID') {
       throw new Error('Case 54: invalid JSON must surface as TOOL_INPUT_INVALID.');
+    }
+    // 声明的字段名与类型必须到达模型。此前投影是不带 properties 的空壳,
+    // 模型只能猜字段名,猜错拿到的 INVALID_INPUT 又不含正确名字。
+    const declaredSchema = byName.get('schema_thing')?.parametersJsonSchema as
+      | { type?: string; properties?: Record<string, { type?: string }>; required?: string[] }
+      | undefined;
+    if (declaredSchema?.properties?.query?.type !== 'string') {
+      throw new Error(`Case 54: declared field 'query' must surface as string, got ${JSON.stringify(declaredSchema)}`);
+    }
+    if (declaredSchema?.properties?.limit?.type !== 'number') {
+      throw new Error("Case 54: declared field 'limit' must surface as number.");
+    }
+    if (!declaredSchema?.required?.includes('query')) {
+      throw new Error("Case 54: required field 'query' must be marked required.");
+    }
+    if (declaredSchema?.required?.includes('limit')) {
+      throw new Error("Case 54: optional field 'limit' must not be marked required.");
+    }
+    // 零声明工具投影成空 properties,而不是凭空造字段。
+    const bareSchema = byName.get('read_thing')?.parametersJsonSchema as
+      | { properties?: Record<string, unknown> }
+      | undefined;
+    if (Object.keys(bareSchema?.properties ?? {}).length !== 0) {
+      throw new Error('Case 54: undeclared tool must project empty properties.');
     }
     passed++;
   }

@@ -177,7 +177,8 @@
     "test:ai-tool-permission": "npm run test:ai-tool-permission -w @soulforge/core",
     "test:renderer-reachability": "node scripts/verify-renderer-reachability-gate.mjs",
     "test:corpus-manifest": "node scripts/verify-corpus-manifest.mjs",
-    "test:ai-tool-write-path": "node scripts/verify-ai-tool-write-path-gate.mjs"
+    "test:ai-tool-write-path": "node scripts/verify-ai-tool-write-path-gate.mjs",
+    "test:agent-tool-schema": "node scripts/verify-agent-tool-schema-gate.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

@@ -29,6 +29,12 @@ export interface ToolDescriptor {
   description: string;
   permission: ToolPermission;
   permissionLevel?: AiToolPermissionLevel;
+  /**
+   * Declared input contract, surfaced so callers (notably the agent loop
+   * bridge) can project it into a model-facing JSON Schema. Absent means the
+   * tool takes no arguments.
+   */
+  inputSchema?: ToolInputShape;
 }
 
 export interface ToolResult<T = unknown> {
@@ -84,6 +90,58 @@ export function validateToolInput(
   return { ok: true };
 }
 
+/**
+ * Project a declared ToolInputShape into the JSON Schema the model sees.
+ *
+ * This is deliberately a *projection* of the same declaration that
+ * validateToolInput enforces at runtime, not a second hand-written schema.
+ * Two independent copies would drift silently: the model would be told about
+ * fields the validator rejects, or vice versa, and nothing would fail.
+ *
+ * `additionalProperties` stays true on purpose — validateToolInput ignores
+ * undeclared extras (callers attach context markers), so advertising a closed
+ * object would misdescribe the runtime contract.
+ */
+export function toolInputShapeToJsonSchema(shape: ToolInputShape | undefined): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  for (const [key, declared] of Object.entries(shape ?? {})) {
+    const optional = declared.endsWith('?');
+    const declaredType = optional ? declared.slice(0, -1) : declared;
+    properties[key] = jsonSchemaForDeclaredType(declaredType);
+    if (!optional) required.push(key);
+  }
+  return {
+    type: 'object',
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+    additionalProperties: true
+  };
+}
+
+/**
+ * Mirror of matchesDeclaredType's accepted type names. Unrecognized names pass
+ * validation unchecked there, so they must project to an unconstrained schema
+ * here — claiming a type the validator does not enforce would be a lie to the
+ * model in the permissive direction.
+ */
+function jsonSchemaForDeclaredType(declaredType: string): Record<string, unknown> {
+  switch (declaredType) {
+    case 'string':
+      return { type: 'string' };
+    case 'number':
+      return { type: 'number' };
+    case 'boolean':
+      return { type: 'boolean' };
+    case 'array':
+      return { type: 'array' };
+    case 'object':
+      return { type: 'object' };
+    default:
+      return {};
+  }
+}
+
 function matchesDeclaredType(value: unknown, expectedType: string): boolean {
   switch (expectedType) {
     case 'string':
@@ -111,11 +169,15 @@ export class ToolRegistry {
   }
 
   list(): ToolDescriptor[] {
-    return [...this.tools.values()].map(({ name, description, permission, permissionLevel }) => ({
+    return [...this.tools.values()].map(({ name, description, permission, permissionLevel, inputSchema }) => ({
       name,
       description,
       permission,
-      permissionLevel: permissionLevel ?? normalizePermissionLevel(permission)
+      permissionLevel: permissionLevel ?? normalizePermissionLevel(permission),
+      // Surfaced verbatim (not cloned-and-renamed) so the model-facing schema
+      // and the runtime validateToolInput check can never disagree: both read
+      // this same declaration.
+      ...(inputSchema && Object.keys(inputSchema).length > 0 ? { inputSchema } : {})
     }));
   }
 

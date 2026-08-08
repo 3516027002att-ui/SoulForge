@@ -277,6 +277,14 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // createPatchProposal）。但「当前恰好没有」不等于「不可能有」，故门禁化。
   // 纯静态读源码，归 unit。
   'test:ai-tool-write-path': 'unit',
+  // 生产 AI 工具向模型暴露的 parametersJsonSchema 必须携带真实字段名与类型。
+  // 修复前 agentToolBridge 投影的是不带 properties 的空壳 `{ type: 'object' }`
+  // ——编译通过、测试全绿、运行期也不报错,唯一症状是「模型好像不会用工具」:
+  // 它只能猜 q 还是 query、id 还是 textId,猜错回来一条不含正确字段名的
+  // INVALID_INPUT,无法从失败中恢复。这类缺陷不会以任何形式失败,只能靠门禁钉。
+  // 判据⑥把 schema 的 required 与 validateToolInput 的实际强制对钉,防止两份
+  // 声明各自漂移。观测编译产物的运行期投影结果,故需先 build,归 unit。
+  'test:agent-tool-schema': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。
