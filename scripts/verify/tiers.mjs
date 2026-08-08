@@ -173,6 +173,12 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 而三个实测断点（PARAM 字段编辑、任务队列、补丁影响面）都在 renderer
   // 内部的 props 链上。纯静态读源码，归 unit。
   'test:renderer-reachability': 'unit',
+  // 生产 AI 工具写路径（硬约束 5/11）：注册表内不得直接写盘，写类工具必须经
+  // Patch Engine。一次审计称「PATCH_ENGINE_REQUIRED 生产零实现」，核对后不采信
+  // ——那个码全在 testing/ 里，生产侧的保证是结构性的（唯一写路径经
+  // createPatchProposal）。但「当前恰好没有」不等于「不可能有」，故门禁化。
+  // 纯静态读源码，归 unit。
+  'test:ai-tool-write-path': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。
