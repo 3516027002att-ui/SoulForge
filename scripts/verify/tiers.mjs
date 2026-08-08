@@ -318,7 +318,22 @@ export const EXCLUDED = Object.freeze({
   'verify:all': '同上（全层级别名）',
   'verify:list': '同上（只列计划，不是验证）',
   dev: '交互式开发服务器，不是验证',
-  'bridge:publish': '发布产物构建，由 release 链按需调用',
+  // ⚠️ 排除理由已按实测改写（2026-08-08）。原文写的是「由 release 链按需调用」，
+  // 而实测 release 层 10 条脚本（build / release:installer:manifest /
+  // release:manifest / test:installer-lifecycle / test:portable-packaging-* /
+  // test:release-compliance-fixtures / test:release-content /
+  // test:release-cross-machine / test:release-reproducible）**没有任何一条调它**，
+  // 全仓也只有 package.json 的定义处与本行提到它。错误的排除理由比没有理由更糟：
+  // 它让审阅者以为这条脚本在别处有覆盖。
+  //
+  // 它确实不该进任何 tier（跑一次 Release publish 要几分钟且产物不参与验证判据），
+  // 但真实原因是「当前没有消费方」。附带后果：runBridge.ts 的 exe 候选链里前两条
+  // Release 路径实测都不存在，永远回落到第三条 Debug——那不是死代码（publish 一跑
+  // 就会命中），但「Release 产物从未被生成过」这个事实此前只写在锐评里、不在代码旁。
+  'bridge:publish': '发布产物构建。**当前无任何调用方**（release 层 10 条脚本均不调它，'
+    + '实测 2026-08-08）；跑一次 Release publish 要几分钟且产物不参与任何验证判据，'
+    + '故不进 tier。若将来 release 链要用它，请一并把 runBridge.ts 的 Release 候选路径'
+    + '纳入验证——那两条路径至今从未被生成过。',
   'corpus:build-local-release': '生成本机 corpus registry，写 testdata，不是验证',
   'corpus:build-local-release:configured': '同上（被 wrapper 调用的内层）',
   // gov CLI 是治理数据的写入口，不是验证：跑它会改执行面板状态。
