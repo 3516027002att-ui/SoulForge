@@ -24,6 +24,11 @@ internal static class BridgeDaemonHost
         TextWriter output,
         CancellationToken cancellationToken)
     {
+        // 启动期自检：写盘命令注册表必须与能力声明一致。
+        // 放在读第一帧之前——注册表漂移意味着某个写命令可能完全跳过 writable-root
+        // 校验，那种状态下不应该开始服务任何请求。抛出即拒绝启动（fail-closed）。
+        VerifyDiskWriteRegistry();
+
         var state = new DaemonState(output);
         var running = new ConcurrentDictionary<string, Task>(StringComparer.Ordinal);
 
@@ -236,7 +241,7 @@ internal static class BridgeDaemonHost
     ///
     /// if 链的问题在于「新增写命令时必须记得同步改它」，而漏改既不会有编译错误
     /// 也不会有测试失败。注册表把它变成一处显式声明，并由 VerifyDiskWriteRegistry
-    /// 在启动时与实际 dispatch 表对账，失败关闭。
+    /// 在启动时与能力声明对账，失败关闭。
     /// </summary>
     private static readonly HashSet<string> DiskWritingCommands = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -248,6 +253,52 @@ internal static class BridgeDaemonHost
         "export-tpf-texture",
         "extract-bnd4-child"
     };
+
+    /// <summary>
+    /// 启动期自检：DiskWritingCommands 必须与能力声明保持一致。
+    ///
+    /// 上面的注释此前承诺「由 VerifyDiskWriteRegistry 在启动时与实际 dispatch 表
+    /// 对账，失败关闭」，但该方法**从未存在**——全仓只有那一行注释命中，无定义
+    /// 无调用。也就是说注释描述的保护机制是空的：新增写命令时漏登记注册表，
+    /// 既无编译错误、无测试失败，也没有任何启动期检查会拦住它，
+    /// 而后果是该命令完全跳过 writable-root 校验（见上方注释）。
+    ///
+    /// 判据：能力声明里每个以 "write-" 开头的命令都必须已登记进注册表。
+    /// 这一条抓的正是「新增了写命令但忘了登记」这个真实场景——写命令的命名约定
+    /// 是稳定的（write-bnd4/write-fmg/write-param/write-emevd/write-msb），
+    /// 新增一个不叫 write-* 的落盘命令属于另一类问题，由外部门禁
+    /// test:bridge-write-boundary 的双向对账覆盖（它直接解析本注册表与门禁清单）。
+    ///
+    /// **不做反向检查（注册表 → 能力声明）**：实测过，那样会误报。
+    /// 能力声明的 commands 列表并不是实现全集——它漏了 6 个已实现命令
+    /// （export-tpf-texture、inventory-asset-resources、read-flver-dummies /
+    /// -skeleton / -texture-slots、read-mtd-document），又列了 5 个走
+    /// `switch` 与 `command is` 形态而非 `command ==` 的命令（inspect、
+    /// export-event/map/param/msg）。第一版自检按「注册表必须是能力声明的子集」
+    /// 判定，启动时即以 export-tpf-texture「不存在」拒绝服务——那是判据锚点选错，
+    /// 不是注册表漂移。
+    ///
+    /// 为什么不反射 dispatch 表：ExecuteAsync 是 if 链 + switch 混合形态，
+    /// 不是可枚举结构，运行期读不到。真正的全集对账留给外部门禁做源码解析。
+    /// </summary>
+    private static void VerifyDiskWriteRegistry()
+    {
+        var capabilities = BuildCapabilities(null);
+        var declared = (string[])capabilities.GetType()
+            .GetProperty("commands")!.GetValue(capabilities)!;
+
+        var missing = declared
+            .Where(name => name.StartsWith("write-", StringComparison.OrdinalIgnoreCase))
+            .Where(name => !DiskWritingCommands.Contains(name))
+            .ToArray();
+        if (missing.Length > 0)
+        {
+            throw new InvalidOperationException(
+                "BRIDGE_DISK_WRITE_REGISTRY_INCOMPLETE: 能力声明里的写命令未登记进"
+                + $" DiskWritingCommands：{string.Join(", ", missing)}。"
+                + "未登记的写命令会完全跳过 writable-root 校验，直接违反「原版游戏目录永远只读」。");
+        }
+    }
 
     private static async Task HandleRequestAsync(BridgeInboundFrame frame, DaemonState state)
     {
