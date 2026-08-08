@@ -59,14 +59,24 @@ async function main(): Promise<void> {
     throw new Error(`ESD read failed: ${JSON.stringify(r.diagnostics)}`);
   }
 
+  // stateCount 是**语义状态数**（不含每组尾随哨兵槽）；文件头 0x30 计的是物理记录数，
+  // 由 parsedStateRecordCount 对照。两者相差恰好 stateGroupCount，详见
+  // EsdNativeDocument.cs 类型注释。这里把两组都打出来，避免读者把 659 与 707 之一
+  // 当成「另一个算错了」。
   console.log(JSON.stringify({
     ok: true,
-    message: `ESD native 读取验证通过（${d.stateGroupCount} groups, ${d.stateCount} states, ${d.conditionCount} conditions）`,
+    message: `ESD native 读取验证通过（${d.stateGroupCount} groups, ${d.stateCount} states`
+      + `（+${d.stateGroupCount} 尾随哨兵 = ${d.parsedStateRecordCount} 条记录）, ${d.conditionCount} conditions）`,
     stateGroupCount: d.stateGroupCount,
     stateCount: d.stateCount,
+    parsedStateRecordCount: d.parsedStateRecordCount,
+    declaredStateCount: d.declaredStateCount,
+    stateSentinelModelConsistent: d.stateSentinelModelConsistent,
     conditionCount: d.conditionCount,
     commandCallCount: d.commandCallCount,
     commandBanks: d.commandBanks,
+    coverageComplete: d.coverageComplete,
+    coverageShortfalls: d.coverageShortfalls,
     authority: d.authority,
     roundTrip: r.diagnostics?.map((x: { code: string }) => x.code)
   }, null, 2));
