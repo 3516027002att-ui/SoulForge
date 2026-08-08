@@ -9,6 +9,7 @@ import type {
   ParseStatus
 } from '@soulforge/shared';
 import type { WorkspaceIndex } from './workspaceIndex.js';
+import { isKnownResourceKind } from '../workspace/resourceKinds.js';
 
 export interface IngestResult {
   accepted: boolean;
@@ -34,6 +35,35 @@ export function ingestBridgeResult(index: WorkspaceIndex, result: BridgeResult<u
       severity: 'warning',
       code: 'BRIDGE_RESULT_HAS_NO_DATA',
       message: 'Bridge reported a parsed/partial result without structured data.',
+      sourceUri: result.sourceUri
+    });
+    return { accepted: false, parseStatus: 'partial', diagnostics };
+  }
+
+  // resourceKind 越界必须与「合法但不深度摄取」分开报。
+  //
+  // 实测（2026-08-08）：C# 侧发出的 resourceKind 含 "texture"
+  // （BridgeCommandService 的 TPF 路径），而 TS 的 ResourceKind union
+  // （packages/shared/src/types.ts:1-14）14 个值里没有它。两侧各写一份枚举、
+  // 手工同步、无 codegen、无契约测试，TS 侧也没有任何一处校验 C# 送来的值
+  // 是否在 union 内——于是越界值会一路走到下面那条
+  // INGEST_RESOURCE_KIND_SKIPPED，与 chr/obj/sfx 这类「合法但 v0.1 不做深度
+  // 摄取」的正当情形混成同一条 info 诊断。
+  //
+  // 两者处置完全不同：后者是设计如此，前者是契约漂移，意味着有一族资源在
+  // 类型系统里根本不存在、任何按 union 穷举的下游逻辑都不会覆盖它。混报
+  // 等于让漂移永久隐形（硬约束 8：不能静默丢弃，必须结构化诊断）。
+  //
+  // 判据用 isKnownResourceKind（workspace/resourceKinds.ts:21，权威列表在
+  // @soulforge/shared），不自建清单——自建清单的门禁从不扫真实枚举，是本仓库
+  // 已记录的假门禁形态。
+  if (!isKnownResourceKind(result.resourceKind)) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'INGEST_RESOURCE_KIND_OUT_OF_CONTRACT',
+      message: `Bridge 送来的 resourceKind '${result.resourceKind}' 不在 TS ResourceKind 契约内。`
+        + ' 这是 TS↔C# 契约漂移，不是「本版不摄取」：该值在类型系统里不存在，'
+        + ' 任何按 union 穷举的下游逻辑都不会覆盖它。需裁定是补进 union 还是让 C# 不再发。',
       sourceUri: result.sourceUri
     });
     return { accepted: false, parseStatus: 'partial', diagnostics };
@@ -67,10 +97,12 @@ export function ingestBridgeResult(index: WorkspaceIndex, result: BridgeResult<u
     return { accepted: Boolean(parsed.value), parseStatus: parsed.value ? result.parseStatus : 'partial', diagnostics };
   }
 
+  // 到这里的 resourceKind 一定在契约内（越界已在上面失败关闭），所以这条
+  // 诊断现在只表达一件事：合法资源族，但本版不做深度摄取。info 级是对的。
   diagnostics.push({
     severity: 'info',
     code: 'INGEST_RESOURCE_KIND_SKIPPED',
-    message: `Resource kind '${result.resourceKind}' is not a deep-ingest target for v0.1.`,
+    message: `Resource kind '${result.resourceKind}' is in contract but not a deep-ingest target for v0.1.`,
     sourceUri: result.sourceUri
   });
 
