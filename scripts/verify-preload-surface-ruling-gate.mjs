@@ -40,7 +40,11 @@ const PRELOAD = join(root, 'apps', 'desktop', 'src', 'preload', 'index.ts');
  */
 const RULED_FAMILY = Object.freeze({
   'me3-runtime': ['detectMe3', 'prepareMe3Profile', 'launchMe3', 'terminateMe3'],
-  'ai-agent': ['runAiAgent', 'cancelAiAgent', 'listAiAgentSessions', 'loadAiAgentSession', 'onAiAgentEvent', 'listAiTools'],
+  // ai-agent 全族已于 2026-08-08 接线（AgentTaskPanel + App.tsx 的订阅与调用），
+  // 故整族从划分与登记表同时移除。判据 5 要求两者双向一致，只改一处会报
+  // PRELOAD_RULING_FAMILY_ORPHAN / PRELOAD_RULING_FAMILY_MISSING。
+  // 族键本身也一并删掉：留一个空数组会让 ruledFamilies 报出 "ai-agent": 0，
+  // 而「有这个族但为零」和「这个族已清空」在盘点上不是一回事。
   'container-diagnostics': ['roundTripContainer', 'validateContainer', 'probeContainerCapabilities'],
   // readRawRange 已接线（2026-08-08），从族划分与登记表同步移除——本门禁的
   // 判据 5 要求两者双向一致，只改一处会报 PRELOAD_RULING_FAMILY_ORPHAN。
@@ -61,19 +65,23 @@ const RULED_NOT_YET_WIRED = Object.freeze({
   launchMe3: 'SCOPE-RUNTIME V0.5 supported；同上',
   terminateMe3: 'SCOPE-RUNTIME V0.5 supported；同上（终止是启动的回滚路径，不可单独撤）',
 
-  // ── AI agent 会话（SCOPE-AI / capabilityId G-AGENT / REL-G，
-  //    targetRelease=V0.5、decisionStatus=user-approved、gateState=passed）──
+  // ── AI agent 会话（SCOPE-AI / capabilityId G-AGENT / REL-G）──
   //
-  // 裁定：保留并优先接线。REL-G 已 passed，说明双协议 AI 的证据链成立；缺的只是
-  // renderer 侧的任务面板入口。AgentSessionControls 目前只有 provider/thinking/
-  // permissionMode 三个 props，没有 run/cancel/session 入口。
-  // 这是本清单里唯一「后端已 passed、只差 UI」的一族，因此是接线优先级最高的。
-  runAiAgent: 'SCOPE-AI V0.5 supported；REL-G passed，仅缺 renderer 任务面板入口',
-  cancelAiAgent: 'SCOPE-AI V0.5 supported；取消是长任务的必需路径（硬约束 16）',
-  listAiAgentSessions: 'SCOPE-AI V0.5 supported；会话列表是 rollout 持久化的读侧',
-  loadAiAgentSession: 'SCOPE-AI V0.5 supported；同上',
-  onAiAgentEvent: 'SCOPE-AI V0.5 supported；进度事件推送通道，已由 ipc-contract 的订阅断言覆盖',
-  listAiTools: 'SCOPE-AI V0.5 supported；工具清单是权限阶梯的展示侧',
+  // 六条已于 2026-08-08 全部接线，故整族从本表移除——判据 2
+  // （PRELOAD_RULING_STALE）正是为此。接线点：
+  //   runAiAgent / cancelAiAgent / listAiAgentSessions / loadAiAgentSession
+  //     → App.tsx 的 runAgentTask / cancelAgentTask / refreshAgentSessions /
+  //       loadAgentSession，经 AgentSidebar 的 task props 下发到 AgentTaskPanel；
+  //   onAiAgentEvent → App.tsx 的挂载期订阅 effect，事件折叠在
+  //     agent/agentTaskState.ts 的 reduceAgentTaskEvent（有单测）；
+  //   listAiTools → App.tsx 的模型服务/工具清单 effect，喂 AgentTaskPanel 的工具清单。
+  //
+  // 接线时刻意**不**传 request.mode：省略时主进程落到 'plan'（ipc.ts:2967 的三元），
+  // 而传 'fullPermission' 会真的抬高工具上限。renderer 不得抬高授权。
+  //
+  // 未接线的相邻能力（如实记账，不写进本表因为它们不是 preload 暴露方法）：
+  // ai.agent.run 不接受 timeoutMs，主进程调 runAgentSession 时也没传（ipc.ts:2993
+  // 起的参数表），因此长任务只有 maxSteps 默认 8 与取消两道闸，没有墙钟超时。
 
   // ── 容器只读诊断 ──
   //
@@ -106,6 +114,9 @@ const RULED_NOT_YET_WIRED = Object.freeze({
  * 排序即优先级：后端证据越充分、缺口越具体的排前面。
  */
 const WIRING_PRIORITY = Object.freeze([
+  // runAiAgent 曾是本表第一优先项，已于 2026-08-08 接线。条目**保留**：输出处按
+  // 「是否仍在 RULED_NOT_YET_WIRED」过滤，已接线项自动消失，不需要有人记得来删；
+  // 而删掉它反而会让「这条优先级是否曾被处理过」不可追溯。
   {
     method: 'runAiAgent',
     why: 'REL-G 已 passed，仅缺 renderer 任务面板入口——本表里唯一「后端已 passed、只差 UI」的一族'

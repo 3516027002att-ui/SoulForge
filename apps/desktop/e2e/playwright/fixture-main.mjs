@@ -262,14 +262,145 @@ function registerFixtureIpc() {
     restoredFiles: [],
     diagnostics: [{ severity: 'warning', code: 'FIXTURE_NO_ROLLBACK', message: 'fixture 不提供回滚。' }]
   }));
-  handleTrusted('ai.tools', () => []);
+  handleTrusted('ai.tools', () => {
+    track('ai.tools');
+    return [
+      { name: 'search_resources', description: 'fixture 只读工具', permission: 'read', permissionLevel: 'read' },
+      { name: 'stage_patch', description: 'fixture 暂存工具', permission: 'plan', permissionLevel: 'stage' }
+    ];
+  });
+
+  /* ── AI agent 会话（合成，不调用任何模型）─────────────────────────────────
+     这里**不跑真实模型**，只驱动 renderer 的推送折叠与取消链路：run 受理后按
+     计时器推 turn-started / tool-call / delta，cancel 停掉计时器并推终态。
+
+     为什么必须有推送：`ai:agent:event` 是 webContents.send，进度只能靠事件到达
+     推进。fixture 若只回一个 sessionId 不推事件，「进度事件到达界面就更新」这条
+     在 e2e 层等于零覆盖——而那正是本轮要守的两条行为之一。
+
+     覆盖边界：不验证真实 provider、不验证主进程的 AbortController 语义（那是
+     生产 ipc.ts 的行为），只验证 renderer 发出了 ai.agent.cancel 并据推送更新界面。 */
+  const agentTimers = new Set();
+  let agentSessionSeq = 0;
+
+  function pushAgentEvent(window, sessionId, event) {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) return;
+    window.webContents.send('ai:agent:event', { sessionId, event });
+  }
+
+  function scheduleAgentEvent(window, sessionId, delayMs, event) {
+    const timer = setTimeout(() => {
+      agentTimers.delete(timer);
+      pushAgentEvent(window, sessionId, event);
+    }, delayMs);
+    agentTimers.add(timer);
+  }
+
+  handleTrusted('ai.agent.run', (event, request) => {
+    track('ai.agent.run');
+    // 与生产同形态的必填校验（ipc.ts:2929）：configId / prompt 缺失即结构化失败。
+    if (typeof request?.configId !== 'string' || request.configId.trim() === ''
+      || typeof request?.prompt !== 'string' || request.prompt.trim() === '') {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: 'configId 与 prompt 必填。' } };
+    }
+    if (request.resumeSessionPath !== undefined) track('ai.agent.run:resume');
+    // 生产侧 request.mode 省略时落到 'plan'（ipc.ts:2967）。renderer 若开始传
+    // fullPermission，这里的记账会让它在断言中现形。
+    track(`ai.agent.run:mode=${request.mode ?? 'absent'}`);
+    agentSessionSeq += 1;
+    const sessionId = `fixture-session-${agentSessionSeq}`;
+    const window = BrowserWindow.fromWebContents(event.sender);
+    pushAgentEvent(window, sessionId, { type: 'session-accepted', mode: 'plan' });
+    scheduleAgentEvent(window, sessionId, 120, { type: 'turn-started', step: 1 });
+    scheduleAgentEvent(window, sessionId, 200, {
+      type: 'tool-call-begin', step: 1, callId: 'fixture-call-1', name: 'search_resources'
+    });
+    scheduleAgentEvent(window, sessionId, 280, {
+      type: 'tool-call-end', step: 1, callId: 'fixture-call-1', name: 'search_resources', ok: true
+    });
+    scheduleAgentEvent(window, sessionId, 360, {
+      type: 'agent-message-delta', step: 1, text: '合成增量文本'
+    });
+    // 刻意**不**自动推终态：任务停在运行中，取消用例才有可取消的对象。
+    return { ok: true, sessionId };
+  });
+
+  handleTrusted('ai.agent.cancel', (event, sessionId) => {
+    track('ai.agent.cancel');
+    for (const timer of agentTimers) clearTimeout(timer);
+    agentTimers.clear();
+    const window = BrowserWindow.fromWebContents(event.sender);
+    // 终态由主进程回报，与生产一致（ipc.ts:3009 的 session-done）。
+    pushAgentEvent(window, sessionId, {
+      type: 'session-done', finishReason: 'cancelled', steps: 1, rolloutFileName: 'fixture-rollout.jsonl'
+    });
+    return { ok: true };
+  });
+
+  handleTrusted('ai.agent.sessions', () => {
+    track('ai.agent.sessions');
+    // 23 条：跨过每页 10 条的阈值，分页控件与区间文案才会真的出现。
+    return {
+      ok: true,
+      sessions: Array.from({ length: 23 }, (_unused, index) => ({
+        sessionPath: `2026/08/08/fixture-rollout-${String(index).padStart(4, '0')}.jsonl`,
+        fileName: `fixture-rollout-${String(index).padStart(4, '0')}.jsonl`,
+        sessionId: `fixture-s-${index}`,
+        startedAt: `2026-08-08T10:${String(index).padStart(2, '0')}:00.000Z`,
+        messageCount: index,
+        parseErrors: 0,
+        interrupted: false,
+        compactedWindows: 0,
+        sizeBytes: 4096,
+        modifiedAt: `2026-08-08T10:${String(index).padStart(2, '0')}:00.000Z`
+      }))
+    };
+  });
+
+  handleTrusted('ai.agent.session.load', (_event, sessionPath) => {
+    track('ai.agent.session.load');
+    if (typeof sessionPath !== 'string' || sessionPath.trim() === '') {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: 'sessionPath 必填。' } };
+    }
+    return {
+      ok: true,
+      meta: {
+        sessionId: 'fixture-loaded',
+        startedAt: '2026-08-08T10:00:00.000Z',
+        configId: 'fixture-service',
+        protocol: 'openai-compatible',
+        permissionMode: 'plan'
+      },
+      messageCount: 12,
+      parseErrors: 0,
+      interrupted: false,
+      compactedWindows: 0,
+      messagesPage: [{ role: 'user', content: 'fixture 会话尾部消息' }]
+    };
+  });
+
   handleTrusted('ai.sidebarDraft', () => ({
     summary: 'fixture draft',
     steps: [],
     evidence: [],
     diagnostics: []
   }));
-  handleTrusted('modelService.list', () => []);
+  /*
+   * 合成模型服务：hasCredential=true 只表示「vault 里有一条已加密记录」，
+   * 不代表存在可用的真实 provider——fixture 从不发起网络请求。
+   * 需要它是因为任务面板的运行入口以「有已配置凭据的服务」为前置条件，
+   * 空列表下运行按钮恒禁用，取消链路在 e2e 层就无从触达。
+   */
+  handleTrusted('modelService.list', () => [{
+    id: 'fixture-service',
+    displayName: 'fixture 合成模型服务',
+    protocol: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:11434',
+    model: 'fixture-model',
+    hasCredential: true,
+    createdAt: '2026-08-08T00:00:00.000Z',
+    updatedAt: '2026-08-08T00:00:00.000Z'
+  }]);
   handleTrusted('modelService.encryptionAvailable', () => false);
   handleTrusted('runtime.detectMe3', () => ({ detected: false }));
 

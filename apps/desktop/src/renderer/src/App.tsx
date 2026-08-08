@@ -74,6 +74,20 @@ import {
 import { RESOURCE_FAMILIES, type ResourceMode } from './navigation/resourceFamilies.js';
 import { WorkspaceResourceBar } from './navigation/WorkspaceResourceBar.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
+import type {
+  AgentSessionDetail,
+  AgentSessionRow,
+  ModelServiceChoice
+} from './agent/AgentTaskPanel.js';
+import {
+  INITIAL_AGENT_TASK_STATE,
+  describeRunBlocker,
+  isAgentTaskActive,
+  markAgentTaskCancelling,
+  reduceAgentTaskEvent,
+  startAgentTask,
+  type AgentTaskState
+} from './agent/agentTaskState.js';
 import {
   NativeInspectionCard,
   StructuredPreviewCard
@@ -281,6 +295,17 @@ export function App(): ReactElement {
   const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [agentGoal, setAgentGoal] = useState<string | null>(null);
+  /* ── AI agent 任务（REL-G 的 renderer 入口）───────────────────────────────
+     任务状态全部由 agentTaskState 的纯函数折叠，本组件只持有它的当前值——
+     折叠规则放在组件里就只能靠真实 Electron 才能测，而那一层抓不到规则本身的错。 */
+  const [agentTask, setAgentTask] = useState<AgentTaskState>(INITIAL_AGENT_TASK_STATE);
+  const [agentServices, setAgentServices] = useState<ModelServiceChoice[]>([]);
+  const [agentServiceId, setAgentServiceId] = useState<string | null>(null);
+  const [agentSessions, setAgentSessions] = useState<AgentSessionRow[]>([]);
+  const [agentSessionsPage, setAgentSessionsPage] = useState(0);
+  const [agentSessionsError, setAgentSessionsError] = useState<string | null>(null);
+  const [agentSessionDetail, setAgentSessionDetail] = useState<AgentSessionDetail | null>(null);
+  const [agentTools, setAgentTools] = useState<ToolDescriptor[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(264);
   const [cmdkOpen, setCmdkOpen] = useState(false);
@@ -431,6 +456,51 @@ export function App(): ReactElement {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [hasUncommittedChanges]);
+
+  /**
+   * 订阅 AI agent 进度推送（onAiAgentEvent）。
+   *
+   * 这是 invoke 之外的第二种形态：主进程用 webContents.send 主动推
+   * （ipc.ts:2899），preload 用 ipcRenderer.on 订阅并返回退订函数
+   * （preload/index.ts:308-316）。挂载期只订阅一次，退订交给 effect 的清理函数——
+   * 每次状态变化都重订会造成同一事件被折叠多次，而进度数字翻倍不会抛异常。
+   *
+   * 折叠里的会话隔离（reduceAgentTaskEvent 对 sessionId 不符者原样返回）保证
+   * 上一次运行的迟到事件不会把新任务标成已结束。
+   */
+  useEffect(() => {
+    if (!bridge) return undefined;
+    return bridge.onAiAgentEvent((envelope) => {
+      setAgentTask((current) => reduceAgentTaskEvent(current, envelope));
+    });
+  }, [bridge]);
+
+  /** 模型服务与工具清单：任务面板的两个前置数据源，与工作区无关，挂载期取一次。 */
+  useEffect(() => {
+    if (!bridge) return;
+    void (async () => {
+      try {
+        const [services, toolList] = await Promise.all([
+          bridge.listModelServices(),
+          bridge.listAiTools()
+        ]);
+        setAgentServices(services.map((service) => ({
+          id: service.id,
+          displayName: service.displayName,
+          hasCredential: service.hasCredential
+        })));
+        setAgentTools(toolList);
+        // 默认选中第一个已配置凭据的服务：未配置凭据的服务会被主进程以
+        // MODEL_SERVICE_UNCONFIGURED 拒绝（ipc.ts:2939），默认选它等于默认失败。
+        setAgentServiceId((current) => current
+          ?? services.find((service) => service.hasCredential)?.id
+          ?? services[0]?.id
+          ?? null);
+      } catch (error) {
+        setAgentSessionsError(error instanceof Error ? error.message : '读取模型服务或工具清单失败');
+      }
+    })();
+  }, [bridge]);
   const visibleFiles = useMemo(
     () => filterFilesForMode(allFiles.length > 0 ? allFiles : files, resourceMode, query),
     [allFiles, files, resourceMode, query]
@@ -1497,6 +1567,115 @@ export function App(): ReactElement {
     const draft = await bridge.buildAiSidebarDraft(request);
     setAiDraft(draft);
     setStatus(draft.status === 'ready' ? 'AI 计划草稿已生成' : 'AI 模型服务尚未配置，已生成本地计划草稿');
+  }
+
+  /* ── AI agent 任务：运行 / 取消 / 会话历史 ───────────────────────────────
+     六个通道的 renderer 侧唯一调用点。权限模式**不由这里传**：ai.agent.run 的
+     request.mode 省略时主进程落到 'plan'（ipc.ts:2967 的三元），传 'fullPermission'
+     会真的抬高工具上限。renderer 抬高授权是红线，故这里刻意不带 mode 字段。 */
+
+  async function refreshAgentSessions(): Promise<void> {
+    if (!bridge) {
+      setAgentSessionsError(describeBridgeAbsence('读取 AI 会话历史'));
+      return;
+    }
+    const result = await bridge.listAiAgentSessions();
+    if (!result.ok) {
+      setAgentSessionsError(`${result.error.code}：${result.error.message}`);
+      return;
+    }
+    setAgentSessionsError(null);
+    setAgentSessions(result.sessions);
+    setAgentSessionsPage(0);
+  }
+
+  /**
+   * 发起任务。resumeSessionPath 有值时承接既有会话。
+   *
+   * 失败分支必须落到可见状态：主进程对未分析工作区、缺配置、缺凭据分别返回
+   * WORKSPACE_NOT_ANALYZED / MODEL_SERVICE_CONFIG_NOT_FOUND /
+   * MODEL_SERVICE_UNCONFIGURED（ipc.ts:2923-2951），吞掉它们会让用户看到
+   * 「点了没反应」。
+   */
+  async function runAgentTask(resumeSessionPath?: string): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('运行 AI 任务');
+      return;
+    }
+    if (agentServiceId === null) {
+      setStatus('尚未选择模型服务，未发起 AI 任务');
+      return;
+    }
+    const prompt = aiPrompt.trim();
+    if (prompt === '') {
+      setStatus('任务描述为空，未发起 AI 任务');
+      return;
+    }
+    setAgentTask(INITIAL_AGENT_TASK_STATE);
+    setStatus('正在发起 AI 任务...');
+    const result = await bridge.runAiAgent({
+      configId: agentServiceId,
+      prompt,
+      ...(resumeSessionPath !== undefined ? { resumeSessionPath } : {})
+    });
+    if (!result.ok) {
+      setAgentTask({
+        ...INITIAL_AGENT_TASK_STATE,
+        phase: 'error',
+        error: { code: result.error.code, message: result.error.message }
+      });
+      setStatus(`AI 任务未发起：${result.error.code}`);
+      pushToast(`AI 任务未发起：${result.error.message}`, 'warn');
+      return;
+    }
+    setAgentGoal(prompt);
+    setAgentTask(startAgentTask(result.sessionId));
+    setStatus('AI 任务已发起，进度会在 Agent 面板更新');
+  }
+
+  /**
+   * 取消当前任务。
+   *
+   * 必须真的发出 IPC：主进程持有 AbortController（ipc.ts:2988 的 activeAgentRuns），
+   * cancel 通道 abort 它（ipc.ts:3027-3031）。只改本地状态不发 IPC 的「取消」会让
+   * 任务继续跑到底，而界面显示已取消——那比没有取消按钮更糟。
+   *
+   * 本地只落到 cancelling，终态仍等主进程的 session-done/session-error。
+   */
+  async function cancelAgentTask(): Promise<void> {
+    const sessionId = agentTask.sessionId;
+    if (!bridge || sessionId === null) {
+      announceDesktopOnly('取消 AI 任务');
+      return;
+    }
+    setAgentTask((current) => markAgentTaskCancelling(current));
+    setStatus('已发出取消请求，等待当前步骤让出');
+    await bridge.cancelAiAgent(sessionId);
+  }
+
+  async function loadAgentSession(sessionPath: string): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('查看 AI 会话');
+      return;
+    }
+    const result = await bridge.loadAiAgentSession(sessionPath);
+    if (!result.ok) {
+      setAgentSessionsError(`${result.error.code}：${result.error.message}`);
+      setAgentSessionDetail(null);
+      return;
+    }
+    setAgentSessionsError(null);
+    setAgentSessionDetail({
+      sessionPath,
+      messageCount: result.messageCount,
+      parseErrors: result.parseErrors,
+      interrupted: result.interrupted,
+      compactedWindows: result.compactedWindows,
+      loadedMessages: result.messagesPage.length,
+      permissionMode: result.meta?.permissionMode ?? null,
+      protocol: result.meta?.protocol ?? null
+    });
+    setStatus(`已载入会话 ${sessionPath}，共 ${result.messageCount} 条消息`);
   }
 
   async function runToolSearch(toolQuery: string): Promise<void> {
@@ -2620,8 +2799,30 @@ export function App(): ReactElement {
           prompt={aiPrompt}
           contextLabel={resourceMode}
           selectedFilePath={selectedFile?.relativePath ?? null}
-          tools={tools}
+          tools={agentTools.length > 0 ? agentTools : tools}
           toolOutput={toolOutput}
+          task={{
+            task: agentTask,
+            services: agentServices,
+            selectedServiceId: agentServiceId,
+            runBlocker: describeRunBlocker({
+              hasBridge: bridge !== null,
+              configId: agentServiceId,
+              prompt: aiPrompt,
+              active: isAgentTaskActive(agentTask)
+            }),
+            sessions: agentSessions,
+            sessionsPage: agentSessionsPage,
+            sessionsError: agentSessionsError,
+            sessionDetail: agentSessionDetail,
+            onSelectService: setAgentServiceId,
+            onRun: () => void runAgentTask(),
+            onCancel: () => void cancelAgentTask(),
+            onRefreshSessions: () => void refreshAgentSessions(),
+            onSessionsPageChange: setAgentSessionsPage,
+            onLoadSession: (sessionPath) => void loadAgentSession(sessionPath),
+            onResumeSession: (sessionPath) => void runAgentTask(sessionPath)
+          }}
           eventUri={eventUri}
           onEventUriChange={setEventUri}
           onProviderChange={setAiProvider}
