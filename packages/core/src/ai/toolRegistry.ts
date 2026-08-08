@@ -54,8 +54,29 @@ type ToolHandler = (input: unknown, context: ToolContext) => Promise<ToolResult>
  * ('string' | 'number' | 'boolean' | 'array' | 'object'; trailing '?' marks
  * the field optional; unrecognized type names pass through). Undeclared extra
  * fields are ignored — callers may attach context markers.
+ *
+ * Enumerations use `enum:a|b|c` (optional as `enum:a|b|c?`). Before this, a
+ * field like `direction` was declared as bare `'string'` and the model was
+ * told nothing about the three accepted values; a wrong value did not fail but
+ * silently fell back to a default (`'sideways'` → `'both'`, `mode: 'destroy'`
+ * → the session mode), so the model acted on a result it did not ask for.
  */
 export type ToolInputShape = Record<string, string>;
+
+const ENUM_PREFIX = 'enum:';
+
+/** Split a declared type string into its bare type and optionality. */
+function parseDeclaredType(declared: string): { bare: string; optional: boolean } {
+  const optional = declared.endsWith('?');
+  return { bare: optional ? declared.slice(0, -1) : declared, optional };
+}
+
+/** Accepted values for an `enum:a|b|c` declaration, or null if not an enum. */
+function enumValues(bare: string): string[] | null {
+  if (!bare.startsWith(ENUM_PREFIX)) return null;
+  const values = bare.slice(ENUM_PREFIX.length).split('|').filter((value) => value.length > 0);
+  return values.length > 0 ? values : null;
+}
 
 export interface RegisteredTool extends ToolDescriptor {
   inputSchema?: ToolInputShape;
@@ -73,11 +94,19 @@ export function validateToolInput(
   const record = input as Record<string, unknown>;
   const problems: string[] = [];
   for (const [key, declared] of Object.entries(shape)) {
-    const optional = declared.endsWith('?');
-    const expectedType = optional ? declared.slice(0, -1) : declared;
+    const { bare: expectedType, optional } = parseDeclaredType(declared);
     const value = record[key];
     if (value === undefined) {
       if (!optional) problems.push(`缺少必填字段 ${key}`);
+      continue;
+    }
+    const allowed = enumValues(expectedType);
+    if (allowed !== null) {
+      // Enum values are enforced here rather than silently defaulted in the
+      // handler, so a wrong value comes back naming the accepted set.
+      if (typeof value !== 'string' || !allowed.includes(value)) {
+        problems.push(`字段 ${key} 取值应为 ${allowed.join(' | ')} 之一`);
+      }
       continue;
     }
     if (!matchesDeclaredType(value, expectedType)) {
@@ -106,8 +135,7 @@ export function toolInputShapeToJsonSchema(shape: ToolInputShape | undefined): R
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
   for (const [key, declared] of Object.entries(shape ?? {})) {
-    const optional = declared.endsWith('?');
-    const declaredType = optional ? declared.slice(0, -1) : declared;
+    const { bare: declaredType, optional } = parseDeclaredType(declared);
     properties[key] = jsonSchemaForDeclaredType(declaredType);
     if (!optional) required.push(key);
   }
@@ -126,6 +154,8 @@ export function toolInputShapeToJsonSchema(shape: ToolInputShape | undefined): R
  * model in the permissive direction.
  */
 function jsonSchemaForDeclaredType(declaredType: string): Record<string, unknown> {
+  const allowed = enumValues(declaredType);
+  if (allowed !== null) return { type: 'string', enum: allowed };
   switch (declaredType) {
     case 'string':
       return { type: 'string' };
@@ -349,7 +379,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Find evidence graph references connected to a URI.',
     permission: 'analyze',
     permissionLevel: 'analyze',
-    inputSchema: { uri: 'string', direction: 'string?' },
+    inputSchema: { uri: 'string', direction: 'enum:from|to|both?' },
     run: (input, context) => {
       const value = asRecord(input);
       const uri = asString(value.uri);
@@ -385,7 +415,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       targetPath: 'string',
       newText: 'string',
       title: 'string?',
-      mode: 'string?'
+      mode: 'enum:plan|normal|fullPermission?'
     },
     run: (input, context) => {
       const value = asRecord(input);
@@ -421,10 +451,23 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'validate_patch',
-    description: 'Run Patch Engine validation in staging. It does not save files.',
+    description: 'Run Patch Engine validation in staging on a full PatchProposal. It does not save files.',
     permission: 'validate',
     permissionLevel: 'validate',
-    inputSchema: { changes: 'array' },
+    // The whole input *is* the PatchProposal, so every required proposal field
+    // must be declared. Declaring only `changes` told the model the rest was
+    // unnecessary: dryRunPatchProposal then returned ok:true at the tool layer
+    // with an inner PATCH_IR_MISSING_WORKSPACE failure, which the agent loop
+    // reads as a successful call.
+    inputSchema: {
+      opId: 'string',
+      workspaceId: 'string',
+      changes: 'array',
+      title: 'string?',
+      author: 'string?',
+      mode: 'string?',
+      createdAt: 'string?'
+    },
     run: async (input) => {
       const proposal = input as PatchProposal;
       if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
@@ -436,10 +479,22 @@ export function createDefaultToolRegistry(): ToolRegistry {
 
   registry.register({
     name: 'build_patch_graph',
-    description: 'Project a patch proposal into the v0.5 graph patch IR for review.',
+    description: 'Project a full PatchProposal into the v0.5 graph patch IR for review.',
     permission: 'analyze',
     permissionLevel: 'analyze',
-    inputSchema: { changes: 'array' },
+    // Same whole-input-is-the-proposal contract as validate_patch. With only
+    // `changes` declared, a proposal missing opId produced ok:true carrying
+    // node id "op:undefined" and summary "op=undefined files=1" — polluted
+    // output with no error anywhere in the chain.
+    inputSchema: {
+      opId: 'string',
+      workspaceId: 'string',
+      changes: 'array',
+      title: 'string?',
+      author: 'string?',
+      mode: 'string?',
+      createdAt: 'string?'
+    },
     run: (input) => {
       const proposal = input as PatchProposal;
       if (!proposal || typeof proposal !== 'object' || !Array.isArray(proposal.changes)) {
@@ -456,17 +511,36 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permission: 'analyze',
     permissionLevel: 'analyze',
     inputSchema: {
+      // `file` can only be declared as a bare object: ToolInputShape is
+      // Record<string, string> and cannot express nested required fields.
+      // The run body checks them explicitly and names what is missing.
       file: 'object',
       truncated: 'boolean?',
       structuredEditable: 'boolean?',
-      parseStatus: 'string?',
-      changeKind: 'string?'
+      parseStatus: 'enum:unparsed|parsed|partial|unsupported|failed?',
+      changeKind: 'enum:text|structured|binary?'
     },
     run: (input) => {
       const value = asRecord(input);
       const file = value.file as IndexedFile | undefined;
       if (!file || typeof file !== 'object' || typeof file.sourceUri !== 'string') {
         return fail('INVALID_INPUT', 'assess_edit_risk requires an IndexedFile in { file }.');
+      }
+      // ToolInputShape is Record<string, string>: it can say `file: 'object'`
+      // but cannot express which inner fields are required. Checking only
+      // sourceUri let a half-built file through, and isTextLikeIndexedFile
+      // then threw on extension.toLowerCase() — surfacing as a bare
+      // TOOL_EXCEPTION that named no field. Hard constraint: failures must
+      // return structured diagnostics, not swallowed or anonymous exceptions.
+      const missingFileFields = (['extension', 'compoundExtension'] as const)
+        .filter((field) => typeof file[field] !== 'string');
+      if (missingFileFields.length > 0) {
+        return fail(
+          'INVALID_INPUT',
+          `assess_edit_risk 的 file 缺少必要字段:${missingFileFields.join('、')}。`
+            + ' 请传入完整的 IndexedFile(search_resources 的返回项即为完整形态)。',
+          { missingFileFields, requiredFileFields: ['sourceUri', 'extension', 'compoundExtension'] }
+        );
       }
       const riskOptions = {
         ...(value.truncated === true ? { truncated: true as const } : {}),
@@ -596,3 +670,30 @@ function asPatchMode(value: unknown, fallback: ToolContext['mode']): PatchMode {
   if (value === 'plan' || value === 'normal' || value === 'fullPermission') return value;
   return fallback;
 }
+
+/**
+ * Handler-side normalizers for every `enum:`-declared field, keyed
+ * `toolName.fieldName`. Exported so the schema gate can prove each declared
+ * value is actually accepted rather than silently defaulted.
+ *
+ * A declaration is free to list a value the handler does not accept — that
+ * costs nothing at compile time and nothing at runtime, but it makes the model
+ * pass a value it believes is legal and receive a different one. Reading the
+ * real normalizers (instead of restating the accepted sets in the gate) keeps
+ * that check from becoming a second copy that drifts.
+ */
+export const ENUM_FIELD_NORMALIZERS: Record<string, (value: string) => string> = {
+  'find_references.direction': (value) => asReferenceDirection(value),
+  // asPatchMode falls back to the session mode. Probing with a sentinel
+  // fallback keeps every declared value testable — using a real mode as the
+  // fallback would make that one value indistinguishable between "accepted"
+  // and "rejected then defaulted".
+  'propose_text_patch.mode': (value) => asPatchMode(value, '__unaccepted__' as PatchMode),
+  // The handler passes any string through (`typeof === 'string'`), so all
+  // declared values are accepted. The declaration is deliberately narrower
+  // than the handler here: narrowing only under-promises to the model, which
+  // is the safe direction. assessEditRisk itself only branches on
+  // 'unsupported' / 'failed' (writerContract.ts:273).
+  'assess_edit_risk.parseStatus': (value) => value,
+  'assess_edit_risk.changeKind': (value) => (value === 'structured' || value === 'binary' ? value : 'text')
+};
