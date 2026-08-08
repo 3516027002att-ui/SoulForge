@@ -1198,7 +1198,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   handle('resource.readRawMetadata', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) return null;
-    return readRawResourceMetadata(file, { computeHash: file.size <= 32 * 1024 * 1024 });
+    const meta = await readRawResourceMetadata(file, { computeHash: file.size <= 32 * 1024 * 1024 });
+    // 必须脱敏：RawResourceMetadata 含 absolutePath（rawRead.ts:16），而
+    // verify-desktop-security-runtime.mjs 把 absolutePath 列为泄漏键。此前这里
+    // 直接 return 原对象，等于把本机绝对路径送进 renderer——同文件其余 handler
+    // （:675/:904/:933/:948）都走了 sanitizeRendererValue，只有这一条漏了。
+    // 该 channel 此前 renderer 零引用，所以泄漏一直没被触发；接线前必须先补上。
+    return sanitizeRendererValue(meta);
   });
 
   /** Renderer-safe EMEVD envelope (no absolute paths). */

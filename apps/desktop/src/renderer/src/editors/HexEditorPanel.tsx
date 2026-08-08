@@ -26,7 +26,14 @@ export interface HexEditorPanelProps {
    */
   onLoadRange?: (offset: number, length: number) => Promise<{
     ok: boolean;
-    bytesBase64?: string;
+    /**
+     * 窗口字节的 base64。**字段名必须与 core 的 RawResourceRangeResult 一致**
+     * （packages/core/src/files/rawRead.ts:35 叫 `base64`）——我第一版这里写成
+     * `bytesBase64`，于是永远读不到数据、翻页静默停在原窗口，而 typecheck 抓不到，
+     * 因为调用侧对 IPC 返回值用了 as 断言。IPC 边界上类型是断言出来的而非检查出来
+     * 的，字段名对不上只会表现为「功能不工作」，不会有编译错误。
+     */
+    base64?: string;
     fileSize?: number;
     diagnostics?: Array<{ code: string; message: string }>;
   }>;
@@ -97,8 +104,8 @@ export function HexEditorPanel(props: HexEditorPanelProps): ReactElement {
         return;
       }
       if (typeof result.fileSize === 'number' && result.fileSize > 0) setReportedSize(result.fileSize);
-      if (typeof result.bytesBase64 === 'string') {
-        setWindowBytes(decodeBase64(result.bytesBase64));
+      if (typeof result.base64 === 'string') {
+        setWindowBytes(decodeBase64(result.base64));
         setWindowOffset(clamped);
       }
     } catch (error) {
