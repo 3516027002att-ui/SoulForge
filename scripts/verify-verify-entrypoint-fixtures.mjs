@@ -166,6 +166,34 @@ expect(
 
 // 正常输出不得被误判。"0 skipped" 这类汇总数字、以及描述性文本里的 skipped
 // 都不能触发信号——误报的代价是把真跑过的套件报成没跑。
+// 盲区 4：非空 skips / skipReasons 数组。
+// runEmevdImportedRegistryProductionSmoke 缺语料时输出
+//   { ok: true, realCorpusLegs: 0, skips: ['...真实 corpus leg 跳过。'] }
+// 它自己记录了跳过，但 runner 原先只认 status/skipped 字段，于是整套被判 passed，
+// --require-executed 对它完全无效。这是「跳过形态没有单一约定」的第四个实例。
+expect(
+  '非空 skips 数组必须判为部分跳过（曾是盲区）',
+  detectSkipSignals(JSON.stringify({
+    ok: true,
+    realCorpusLegs: 0,
+    skips: ['SOULFORGE_NATIVE_FIXTURE_ROOT 未设置：真实 corpus leg 跳过。']
+  }, null, 2)),
+  { wholeSkipped: false, skippedLegs: ['skips'] }
+);
+
+expect(
+  '非空 skipReasons 数组同样必须判为部分跳过',
+  detectSkipSignals(JSON.stringify({ ok: true, skipReasons: ['缺语料'] }, null, 2)),
+  { wholeSkipped: false, skippedLegs: ['skipReasons'] }
+);
+
+// 空 skips 表示「本轮没有跳过」，是正常通过，不得误报。
+expect(
+  '空 skips 数组不得判为跳过',
+  detectSkipSignals(JSON.stringify({ ok: true, skips: [] }, null, 2)),
+  { wholeSkipped: false, skippedLegs: [] }
+);
+
 expect(
   '汇总计数与描述文本不得误判为跳过',
   detectSkipSignals(JSON.stringify({
