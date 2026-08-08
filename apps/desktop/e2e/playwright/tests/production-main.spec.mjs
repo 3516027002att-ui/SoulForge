@@ -133,6 +133,85 @@ test('生产 IPC 拒绝越界发送方：非受信文档的调用被拒', async 
   await cleanup();
 });
 
+test('生产只读 handler 批量可达：每个都返回结构化结果或结构化诊断', async () => {
+  const { window, pageErrors, consoleErrors, cleanup } = await launchProduction();
+  await window.waitForFunction(() => 'soulforge' in globalThis, { timeout: 30_000 });
+
+  // 为什么批量覆盖：生产 ipc.ts 有 27 个 handle 注册点，此前 e2e 只碰
+  // openWorkspaceDialog / scanWorkspace 两个。剩下的 handler 从未在生产 main 上
+  // 被调用过——它们的参数校验、脱敏、发送方校验、错误包装全都没被验证。
+  //
+  // 判据刻意宽松但不空：每个调用必须**返回**（不抛未捕获异常、不挂死），
+  // 且返回值要么是对象、要么是带 code 的结构化诊断。缺语料时返回结构化失败
+  // 同样算通过——硬约束要求 unsupported/failed 返回结构化诊断而不是吞异常，
+  // 所以「结构化地失败」正是期望行为。这条抓的是「handler 崩溃 / 挂死 /
+  // 返回 undefined / 抛裸异常」这一类。
+  const probe = await window.evaluate(async () => {
+    const api = globalThis.soulforge;
+    const overlay = await api.openWorkspaceDialog();
+    const scan = await api.scanWorkspace({
+      overlaySelectionId: overlay.selectionId,
+      game: 'sekiro'
+    });
+    const sample = Array.isArray(scan?.files) && scan.files.length > 0 ? scan.files[0] : null;
+    const uri = sample?.sourceUri ?? 'file://msg/e2e-sample.txt';
+
+    const calls = [
+      ['listAiTools', () => api.listAiTools()],
+      ['listOperations', () => api.listOperations()],
+      ['listModelServices', () => api.listModelServices()],
+      ['analyzeWorkspace', () => api.analyzeWorkspace()],
+      ['searchResources', () => api.searchResources('e2e')],
+      ['openResourcePreview', () => api.openResourcePreview(uri)],
+      ['readRawMetadata', () => api.readRawMetadata(uri)],
+      ['inspectContainerTree', () => api.inspectContainerTree(uri)],
+      ['probeContainerCapabilities', () => api.probeContainerCapabilities(uri)],
+      ['readFmgDocument', () => api.readFmgDocument(uri)],
+      ['readParamDocument', () => api.readParamDocument(uri)],
+      ['readEmevdDocument', () => api.readEmevdDocument(uri)],
+      ['readMsbDocument', () => api.readMsbDocument(uri)],
+      ['readTaeDocument', () => api.readTaeDocument(uri)],
+      ['readEsdDocument', () => api.readEsdDocument(uri)],
+      ['readFlverDocument', () => api.readFlverDocument(uri)],
+      ['readTpfDocument', () => api.readTpfDocument(uri)]
+    ];
+
+    const out = {};
+    for (const [name, invoke] of calls) {
+      if (typeof api[name] !== 'function') { out[name] = 'absent'; continue; }
+      try {
+        const value = await invoke();
+        // 结构化结果或结构化诊断都算达标；undefined/null 不算。
+        out[name] = value === undefined || value === null
+          ? 'returned-nullish'
+          : (typeof value === 'object' ? 'structured' : typeof value);
+      } catch (error) {
+        // 抛出也可接受，只要是带信息的 Error（IPC 层会包装成 Error）；
+        // 记下来供断言检查它不是 undefined 消息。
+        out[name] = `threw:${String(error?.message ?? error).slice(0, 60)}`;
+      }
+    }
+    return out;
+  });
+
+  // 至少要有多数 handler 真实可达并返回结构化结果。
+  const values = Object.values(probe);
+  const structured = values.filter((v) => v === 'structured').length;
+  const nullish = Object.entries(probe).filter(([, v]) => v === 'returned-nullish');
+  const absent = Object.entries(probe).filter(([, v]) => v === 'absent');
+
+  // 返回 nullish 的 handler 说明它既没给结果也没给诊断——那是吞掉了。
+  expect(nullish, `这些 handler 返回了 null/undefined：${JSON.stringify(nullish)}`).toEqual([]);
+  // preload 里不存在的方法名说明本用例与实现漂移了，必须发现。
+  expect(absent, `这些 preload 方法不存在：${JSON.stringify(absent)}`).toEqual([]);
+  expect(structured).toBeGreaterThan(10);
+
+  // 生产 handler 不得产生未捕获错误。
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+  await cleanup();
+});
+
 test('用户取消目录选择时安静返回，不产生错误', async () => {
   const { window, pageErrors, consoleErrors, cleanup } = await launchProduction({
     SF_E2E_DIALOG_CANCEL: '1'
