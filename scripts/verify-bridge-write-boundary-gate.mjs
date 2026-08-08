@@ -26,9 +26,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
 
 let declaredDiskWritingCommands = [];
 let coveredWriteCommands = [];
+let stagingWriteCodeContract = null;
 const LABEL = 'bridge-write-boundary';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXE_CANDIDATES = [
@@ -183,6 +185,176 @@ let daemon;
 function check(name, condition, observed) {
   checks.push({ name, ok: Boolean(condition), observed });
   if (!condition) findings.push({ name, observed });
+}
+
+/**
+ * 写入成功诊断码的 TS↔C# 契约。
+ *
+ * 守的形态：生产侧五条写路径把「写入是否成功」完全押在一个诊断码字面量上
+ * （fmg/param/emevd/msbBridgeCommit.ts 与 writers/containerChildReplaceWriter.ts）。
+ * 这些码由 C# BridgeCommandService 发出，两侧靠字面量恰好相同来耦合。
+ * **C# 改一个码名，写入会静默变成 ok:false——无编译错误、无公开层测试失败**，
+ * 用户侧症状只是「点保存没反应」。
+ *
+ * 为什么此前没人守：断言这些码的 9 个 smoke 全在 native 层，需要私有游戏语料，
+ * 公开 CI 结构上跑不到（实测 bridge:verify:{fmg,param,emevd,msb} 与
+ * runNative*Smoke 全部 tier=native）。于是最危险的那条耦合恰好落在公开验证之外。
+ *
+ * 判据分两层，缺一不可：
+ *  1) **运行期观测**——真的做一次成功的 write-bnd4，断言响应里确实带
+ *     BND4_STAGING_WRITE_VERIFIED。这是唯一能证明「码真的会被发出」的方式；
+ *     文本对账只能证明两边字符串一样，证明不了它出现在成功路径上。
+ *  2) **双向文本对账**——五个码在 shared 常量与 C# 源码里必须一一对应。
+ *     运行期只覆盖 bnd4 一条（其余四个需要对应格式的合法样本，属 native 层），
+ *     所以另外四个靠对账兜住改名。这一层的降级如实标注：它不是运行期证据。
+ *
+ * 为什么 bnd4 那条能在公开层真跑：本门禁的合成 BND4-in-DFLT-DCX 是合法容器，
+ * write-bnd4 的 replace 突变只需要 expectedContainerHash + expectedChildHash，
+ * 不需要任何真实游戏资产。
+ */
+async function assertStagingWriteVerifiedContract(daemon, fixture) {
+  // 单一声明点：shared 常量。生产 TS 从此引用它而不是内联字面量。
+  const sharedSource = readFileSync(
+    resolve(root, 'packages', 'shared', 'src', 'bridge-protocol.ts'), 'utf8'
+  );
+  const blockMatch = /BRIDGE_STAGING_WRITE_VERIFIED_CODES\s*=\s*Object\.freeze\(\{([\s\S]*?)\}\s*as const\)/
+    .exec(sharedSource);
+  if (blockMatch === null) {
+    throw new Error(
+      'STAGING_CODE_REGISTRY_UNREADABLE: 无法从 bridge-protocol.ts 解析'
+      + ' BRIDGE_STAGING_WRITE_VERIFIED_CODES。提取失败必须失败关闭，否则本判据会消失。'
+    );
+  }
+  const declared = new Map(
+    [...blockMatch[1].matchAll(/(\w+)\s*:\s*'([A-Z0-9_]+)'/g)].map((m) => [m[1], m[2]])
+  );
+  if (declared.size === 0) {
+    throw new Error('STAGING_CODE_REGISTRY_EMPTY: 常量解析结果为空。');
+  }
+
+  // C# 侧实际发出的码名，从 Diagnostic 构造调用里取。
+  const serviceSource = readFileSync(
+    resolve(root, 'bridge', 'SoulForge.Bridge', 'BridgeCommandService.cs'), 'utf8'
+  );
+  const csCodes = new Set(
+    [...serviceSource.matchAll(/"([A-Z0-9]+_STAGING_WRITE_VERIFIED)"/g)].map((m) => m[1])
+  );
+  if (csCodes.size === 0) {
+    throw new Error(
+      'STAGING_CODE_CS_UNREADABLE: BridgeCommandService.cs 里没有任何'
+      + ' *_STAGING_WRITE_VERIFIED 码。提取不到就等于判据消失，必须失败关闭。'
+    );
+  }
+
+  const missingInCs = [...declared.values()].filter((code) => !csCodes.has(code));
+  const missingInShared = [...csCodes].filter((code) => ![...declared.values()].includes(code));
+  check(
+    'staging 写入码：shared 常量与 C# 源码双向一致（文本级证据，非运行期观测）',
+    missingInCs.length === 0 && missingInShared.length === 0,
+    {
+      evidence: 'source-text-only',
+      declared: [...declared.values()],
+      csEmitted: [...csCodes],
+      missingInCs,
+      missingInShared
+    }
+  );
+
+  // 生产 TS 不得再内联这些码的字面量——内联会让单一声明点失去意义。
+  const productionFiles = [
+    'packages/core/src/editing/fmgBridgeCommit.ts',
+    'packages/core/src/editing/paramBridgeCommit.ts',
+    'packages/core/src/editing/emevdBridgeCommit.ts',
+    'packages/core/src/editing/msbBridgeCommit.ts',
+    'packages/core/src/writers/containerChildReplaceWriter.ts'
+  ];
+  const inlined = [];
+  for (const relative of productionFiles) {
+    const source = readFileSync(resolve(root, relative), 'utf8');
+    for (const code of declared.values()) {
+      // 只看字符串字面量形态；引用常量时源码里不会出现带引号的码名。
+      if (source.includes(`'${code}'`) || source.includes(`"${code}"`)) {
+        inlined.push({ file: relative, code });
+      }
+    }
+  }
+  check(
+    'staging 写入码：生产写路径必须引用 shared 常量，不得内联字面量',
+    inlined.length === 0,
+    { inlined, checkedFiles: productionFiles.length }
+  );
+
+  // 运行期观测：真的成功写一次，断言码确实出现在成功路径上。
+  const stagingOut = join(fixture.writableRoot, 'staging-code-observed.bnd4.dcx');
+  const containerHash = createHash('sha256')
+    .update(readFileSync(fixture.sourceFile)).digest('hex');
+  const observed = await daemon.send({
+    kind: 'request',
+    protocolVersion: '1.0.0',
+    requestId: 'staging-code-1',
+    workspaceSessionId: SESSION,
+    payload: {
+      command: 'write-bnd4',
+      filePath: fixture.sourceFile,
+      options: {
+        mutation: 'replace',
+        childPath: fixture.childName,
+        expectedContainerHash: containerHash,
+        expectedChildHash: createHash('sha256').update(fixture.childBytes).digest('hex'),
+        contentBase64: Buffer.from('SOULFORGE-SYNTHETIC-STAGING-CODE-PROBE', 'utf8').toString('base64'),
+        outputPath: stagingOut
+      }
+    }
+  });
+  const observedCodes = (observed.payload?.result?.diagnostics ?? []).map((d) => d.code);
+  check(
+    'staging 写入码：成功的 write-bnd4 必须真的发出 BND4_STAGING_WRITE_VERIFIED（运行期观测）',
+    observed.kind === 'result'
+      && observed.payload?.result?.parseStatus !== 'failed'
+      && observedCodes.includes(declared.get('bnd4')),
+    {
+      evidence: 'runtime-observed',
+      kind: observed.kind,
+      parseStatus: observed.payload?.result?.parseStatus ?? null,
+      expected: declared.get('bnd4') ?? null,
+      observedCodes,
+      landed: existsSync(stagingOut)
+    }
+  );
+  // 正向对照的反面：这条码只在真的写成功时出现。写入被拒时不得出现，
+  // 否则「码存在」就不再等于「写入成功」，生产的成功判据会被彻底架空。
+  const refusedOut = join(readOnlyRoot, 'staging-code-refused.bnd4.dcx');
+  const refused = await daemon.send({
+    kind: 'request',
+    protocolVersion: '1.0.0',
+    requestId: 'staging-code-2',
+    workspaceSessionId: SESSION,
+    payload: {
+      command: 'write-bnd4',
+      filePath: fixture.sourceFile,
+      options: {
+        mutation: 'replace',
+        childPath: fixture.childName,
+        expectedContainerHash: containerHash,
+        expectedChildHash: createHash('sha256').update(fixture.childBytes).digest('hex'),
+        contentBase64: Buffer.from('SOULFORGE-SYNTHETIC-STAGING-CODE-PROBE', 'utf8').toString('base64'),
+        outputPath: refusedOut
+      }
+    }
+  });
+  const refusedCodes = (refused.payload?.result?.diagnostics ?? []).map((d) => d.code);
+  check(
+    'staging 写入码：被边界拒绝时不得出现该码（否则成功判据被架空）',
+    !refusedCodes.includes(declared.get('bnd4')) && !existsSync(refusedOut),
+    { kind: refused.kind, refusedCodes, landed: existsSync(refusedOut) }
+  );
+  if (existsSync(refusedOut)) rmSync(refusedOut, { force: true });
+  if (existsSync(stagingOut)) rmSync(stagingOut, { force: true });
+  stagingWriteCodeContract = {
+    declared: Object.fromEntries(declared),
+    runtimeObserved: [declared.get('bnd4')],
+    reconciledByTextOnly: [...declared.values()].filter((c) => c !== declared.get('bnd4'))
+  };
 }
 
 try {
@@ -354,6 +526,8 @@ try {
     );
   }
 
+  await assertStagingWriteVerifiedContract(daemon, { sourceFile, childName, childBytes, writableRoot });
+
   // 未协商 writable root 时必须直接拒绝，而不是回落到 allowedRoots。
   const secondSession = openDaemon();
   try {
@@ -429,7 +603,12 @@ report({
   // 从实测清单派生，并已与 C# 侧 DiskWritingCommands 全集对账（见上方防漂移判据）。
   coveredCommands: coveredWriteCommands,
   declaredDiskWritingCommands,
-  message: '所有按 outputPath 落盘的命令都对只读根与 .. 逃逸失败关闭，且 writable root 内正向写入成功。',
+  // 写入成功诊断码的 TS↔C# 契约。runtimeObserved 是运行期证据；
+  // reconciledByTextOnly 只做了源码文本对账，**不构成运行期证据**——
+  // 那四个码需要对应格式的合法样本，属 native 层。诚实标注降级，不假装同级。
+  stagingWriteCodeContract,
+  message: '所有按 outputPath 落盘的命令都对只读根与 .. 逃逸失败关闭，且 writable root 内正向写入成功；'
+    + '写入成功诊断码与 C# 侧双向一致，其中 BND4 一条经运行期观测。',
   fixture: 'synthetic BND4-in-DFLT-DCX（微小、合法构造、明确标记，非 native authority）',
   nonClaim: '本门禁只证明路径边界，不证明任何格式的解析或写回 authority。'
 }, 0);
