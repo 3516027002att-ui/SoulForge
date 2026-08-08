@@ -395,7 +395,27 @@ report.nonClaim = '本 harness 只证明所有者内部临时目标上的安装/
 finish();
 }
 
+/**
+ * 输出报告并**终止进程**。
+ *
+ * 必须终止，不能只设 exitCode：本文件有 10 处 `finish();` 作为早退使用，
+ * 而原实现只设 process.exitCode，函数返回后代码继续往下执行。
+ * 其中两处是保护用户环境的前置拒绝：
+ *   · :230 EXISTING_INSTALLATION_FOUND —— 「本机已注册 SoulForge 安装，
+ *     拒绝执行以避免覆盖用户环境」
+ *   · :240 SOULFORGE_PROCESS_RUNNING —— 「检测到运行中的 SoulForge 进程，拒绝执行」
+ * 这两处 finish() 之后紧接着就是真实的安装/升级/卸载步骤。也就是说：
+ * **拒绝理由被打印出来了，破坏性操作照样执行**。这类守卫失效不会体现为测试
+ * 失败——退出码甚至是 1（看起来"正确地失败了"），而副作用已经发生。
+ *
+ * 用 process.exit 而不是给 10 处逐个补 return：后者漏一处就恢复原状，
+ * 且 else 分支里的嵌套早退用 return 会改变控制流语义。终止是这里唯一正确的语义
+ * ——finish 的每一次调用都表示"本次判定已完成"。
+ *
+ * 注意 process.exit 会跳过挂起的异步清理；本脚本的清理都是同步 fs 操作，
+ * 且早退路径本就未启动任何安装步骤，故安全。
+ */
 function finish() {
   console.log(JSON.stringify(report, null, 2));
-  process.exitCode = report.status === 'skipped' || report.status === 'passed' ? 0 : 1;
+  process.exit(report.status === 'skipped' || report.status === 'passed' ? 0 : 1);
 }
