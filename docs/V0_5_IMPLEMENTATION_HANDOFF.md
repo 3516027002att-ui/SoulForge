@@ -1395,7 +1395,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 145 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 146 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1468,7 +1468,7 @@ npm run test:workbench-projections
 npm run typecheck
 ~~~
 
-**synthetic**（35 条）
+**synthetic**（36 条）
 
 ~~~powershell
 npm run bridge:build
@@ -1478,6 +1478,7 @@ npm run bridge:verify:daemon
 npm run bridge:verify:synthetic
 npm run test:asset-import
 npm run test:asset-writeback
+npm run test:bc7-decode
 npm run test:bnd4-repack-scope
 npm run test:bridge-recovery-harness
 npm run test:bridge-staging
