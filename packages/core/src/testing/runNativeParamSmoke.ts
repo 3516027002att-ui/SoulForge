@@ -251,10 +251,23 @@ async function mainInWorkspace(root: string): Promise<void> {
   const failed: Array<{ index: number; message: string }> = [];
   for (let i = 0; i < count; i++) {
     const tmp = join(staging, `corpus-${i}.param`);
+    // extract-bnd4-child 会按 options.outputPath 落盘，因此必须声明 writableRoots。
+    //
+    // 原先完全没传 writableRoots，于是 daemon 在边界检查阶段就以
+    // BRIDGE_WRITABLE_ROOT_REQUIRED 拒绝（BridgeDaemonHost.cs:295-299），
+    // 5 个 PARAM 子项全部进 failed，最终抛 "No PARAM children verified"。
+    // 该 smoke 因此在真实语料环境下**恒定 exit 1**，并让 test:private-native-gate
+    // 的 10 步里 1 步失败。这是**调用侧缺参数**，不是 daemon 或 param 解析缺陷
+    // ——writable-root 校验本身在正确工作（T4-2 补的那道）。
+    //
+    // 不需要把 staging 也写进 allowedRoots：runBridge.ts:42-46 会自动把
+    // writableRoots 并入 allowedRoots。我一度多写了一项，实测去掉后仍 exit 0，
+    // 确认多余，已撤回——保持最小改动。
     const extracted = await runBridge<Bnd4ChildExtracted>({
       command: 'extract-bnd4-child',
       filePath: sourceBnd,
       allowedRoots: [dirname(sourceBnd)],
+      writableRoots: [staging],
       timeoutMs: 120_000,
       commandOptions: { entryIndex: i, outputPath: tmp }
     });
