@@ -201,6 +201,16 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 「未声明」诊断（「未声明」与「已确认线性」在产物上完全一样，只有诊断能区分）。
   // 需要真实 exe、不需真实语料，与上面两条同归 synthetic。
   'test:png-color-space': 'synthetic',
+  // DDS 截断失败关闭。五条解码路径的块循环各有一句 `if (block + N > src.Length) return;`
+  // ——越界即提前 return，而 rgba 是 new byte[] 全零起始，缺的块留成**黑色**。
+  // 实测（8x8 逐档截断）：给一半块 → 50% 像素全零、给 1/4 → 75%、零数据 → 100% 纯黑，
+  // 而三者一律报 TPF_TEXTURE_EXPORTED info 成功、无任何警告：「导出成功」与「导出了
+  // 一张黑图」在输出上不可区分（违反硬约束 8）。需要多少字节是可算的（块数 × 块字节），
+  // 所以这不是「信息不足只能尽力」，判据本来就该有。
+  // 判据两侧都钉：截断必须 failed，而完整数据与带 mip 链的多余字节必须照常成功——
+  // 只钉前者的话，「一律拒绝」这种假修复仍会全绿，而那会删掉一整项已交付能力。
+  // 需要真实 exe、不需真实语料，归 synthetic。
+  'test:dds-truncation': 'synthetic',
   // FLVER「解析缺口必须可见」。守的不是某一条解析，而是缺口不可见这个**根因**：
   // FlverNativeDocument.Authority 此前唯一的降级依据是 layoutWarnings.Count > 0，
   // 而三批缺口全在不写 warning 的路径上——SemTangent/SemBitangent/SemVertexColor

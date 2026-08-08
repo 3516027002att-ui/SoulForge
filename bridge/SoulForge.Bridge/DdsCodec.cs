@@ -58,6 +58,12 @@ internal static class DdsCodec
             (char)dds[84], (char)dds[85], (char)dds[86], (char)dds[87]
         });
 
+        // 宽高必须先校验：负值会让 new byte[width * height * 4] 抛
+        // OverflowException/OutOfMemory 这类与「DDS 头坏了」无关的异常，
+        // 诊断会把格式问题报成运行时故障。
+        if (width <= 0 || height <= 0)
+            throw new InvalidDataException($"DDS 头声明的宽高非法：{width}x{height}。");
+
         int blocksWide = Math.Max(1, (width + 3) / 4);
         int blocksHigh = Math.Max(1, (height + 3) / 4);
         var rgba = new byte[width * height * 4];
@@ -108,6 +114,29 @@ internal static class DdsCodec
             // 下游就再也判断不出「这张图的色彩空间到底是已知还是被假定的」。
             colorSpace = DdsColorSpace.Unknown;
             dataOffset = 128;
+        }
+
+        // ── 像素数据必须够长，否则失败关闭 ──
+        //
+        // 每个 Decode* 的块循环里都有 `if (block + N > src.Length) return;`：越界即
+        // **提前 return**，而 rgba 是 new byte[] 全零起始，于是缺的块留成全零。
+        // 实测（2026-08-08，8x8 BC1/BC7 逐档截断）：给一半块 → 50% 像素全零、
+        // 给 1/4 → 75%、零像素数据 → **100% 全黑**，而三者一律报
+        // TPF_TEXTURE_EXPORTED info 成功、无任何警告。即「导出成功」与「导出了一张
+        // 黑图」在输出上不可区分（违反硬约束 8）。
+        //
+        // 需要的字节数是可算的（块数 × 块字节），所以这不是「无法判断只能尽力」的
+        // 情形，而是判据本来就该有。放在这里而不是各 Decode* 内部：一处算清、
+        // 五条解码路径共用，避免漏改某一条（BC4/BC5 各自还有独立的块循环）。
+        int blockBytes = bcFormat == "BC1" || bcFormat == "BC4" ? 8 : 16;
+        long requiredBytes = (long)blocksWide * blocksHigh * blockBytes;
+        long availableBytes = dds.Length - dataOffset;
+        if (availableBytes < requiredBytes)
+        {
+            throw new InvalidDataException(
+                $"DDS 像素数据被截断：{bcFormat} {width}x{height} 需要 {requiredBytes} 字节"
+                + $"（{blocksWide}×{blocksHigh} 块 × {blockBytes} 字节），实际只有 {availableBytes} 字节。"
+                + " 继续解码会产出「缺失部分静默变全黑」的图像，且与正常导出无法区分，故失败关闭。");
         }
 
         switch (bcFormat)
