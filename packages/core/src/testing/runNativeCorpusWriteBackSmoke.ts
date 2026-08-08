@@ -25,6 +25,7 @@
  * diagnostics, never counted as a pass.
  */
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, relative } from 'node:path';
@@ -432,6 +433,25 @@ function isOodleBlocked(error: unknown): boolean {
 async function main(): Promise<void> {
   const gameRoot = process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim()
     ?? process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+
+  // ⚠️ 这个环境变量有**两种语义**，本 smoke 同时需要两者，不能混用：
+  //   · allowedRoots / oodleRuntimeRoot 要**游戏根**——Oodle DLL 在那里，KRAK
+  //     解压必须能从游戏目录加载它；
+  //   · runRealLeg 的**遍历根**要 mods/——registry 的 localPath 全部以 mods/
+  //     开头，那才是设计意图里的语料范围。
+  //
+  // 此前遍历根直接用 gameRoot，于是扫的是整个游戏树。实测 2026-08-08：
+  // 游戏根下 **8065 个 .dcx**，mods/ 下 **214 个**，相差 38 倍。串行逐个
+  // read-dcx-document 必然撞 verify.mjs 的 DEFAULT_TIMEOUT_MS（900 秒）——
+  // native 全量跑里本条 durationMs=900639，精确撞线，**是超时被杀而不是断言失败**。
+  //
+  // 这是「语料根语义混用」的第三个漏改点（第四轮 fd59420 修过 dcx-documents 与
+  // corpus-manifest，本轮 4317204 修过 param-duplicate 与 native-preview）。
+  // 下沉形态与它们一致：给定根下存在 mods/ 就下沉，显式传参时不下沉。
+  const traversalRoot = gameRoot !== undefined && existsSync(join(gameRoot, 'mods'))
+    ? join(gameRoot, 'mods')
+    : gameRoot;
+
   const root = await mkdtemp(join(tmpdir(), 'soulforge-corpus-writeback-'));
   const overlay = join(root, 'mod');
   await mkdir(overlay, { recursive: true });
@@ -450,8 +470,10 @@ async function main(): Promise<void> {
       message: '完整 corpus BND4 写回矩阵、未知字段保持与回滚验证通过',
       synthetic: syntheticOutcome
     };
-    if (gameRoot) {
-      const real = await runRealLeg(ctx, gameRoot);
+    if (traversalRoot) {
+      // 传 traversalRoot 而不是 gameRoot——ctx.allowedRoots 仍含游戏根（Oodle 需要），
+      // 但遍历只走 mods/。两者是不同语义，见上面的说明。
+      const real = await runRealLeg(ctx, traversalRoot);
       report.real = {
         filesScanned: real.filesScanned,
         dfltRead: real.dfltRead,
