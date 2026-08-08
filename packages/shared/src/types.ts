@@ -53,6 +53,27 @@ export type ResourceFormatKind =
   | 'backup'
   | 'unknown';
 
+/**
+ * 资源解析状态。**这个 union 由两条来源共用**，逐值标明产出方——
+ * 2026-08-08 有人（按锐评 T4-4 ③ 的判断）以为 parsed/unparsed 是 C# 永不发的
+ * 死值而尝试删除，typecheck 立刻抓出四处真实用法。删任何一个成员前先读这里。
+ *
+ * - `unparsed`：**TS 侧产出**。scanWorkspace.ts:139 给「已扫到但尚未解析」的
+ *   文件打初始状态，与 Bridge 无关。
+ * - `parsed`：**TS 侧产出**。workspacePipeline.ts:216 走 JSON fixture 摄取路径时
+ *   使用（不经 Bridge）；resourceCapabilities.ts:154 据它推 semanticReadTier，
+ *   openResourcePreview.ts:257 也读它。
+ * - `partial`：**C# 产出**（ParserTypes.cs:29 BridgeResult.Partial）。解析出结构
+ *   但不构成完整 authority。
+ * - `unsupported`：**C# 产出**（ParserTypes.cs:12）。格式已识别但本版不支持该语义导出。
+ * - `failed`：**C# 产出**（ParserTypes.cs:23）。解析失败，必须附结构化诊断。
+ *
+ * 实测确认（bridge 全目录 grep）：C# 三个工厂只产出 partial / unsupported /
+ * failed 三值，`"parsed"` 与 `"unparsed"` 字面量在 C# 侧零命中。所以**从 Bridge
+ * 收到的信封里判 parsed 恒假**——若要判「Bridge 解析成功」，正确的判据是
+ * partial 加 authority 字段，不是 parsed。这不是缺陷：authority 体系刻意保守，
+ * native-verified 需另有真实往返证据支撑，Bridge 不自称「完全解析成功」。
+ */
 export type ParseStatus = 'unparsed' | 'parsed' | 'partial' | 'unsupported' | 'failed';
 
 export type DiagnosticSeverity = 'info' | 'warning' | 'error';
