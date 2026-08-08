@@ -122,6 +122,7 @@
     "test:orphan-smoke-gate": "node scripts/verify-orphan-smoke-gate.mjs",
     "test:smoke-temp-cleanup": "node scripts/verify-smoke-temp-cleanup-gate.mjs",
     "test:probe-residual-gate": "node scripts/verify-probe-residual-gate.mjs",
+    "test:stale-tfm-gate": "node scripts/verify-stale-tfm-gate.mjs",
     "test:bridge-exit-hygiene": "node scripts/verify-bridge-exit-hygiene-gate.mjs",
     "test:bridge-write-boundary": "node scripts/verify-bridge-write-boundary-gate.mjs",
     "test:bridge-command-advertisement": "node scripts/verify-bridge-command-advertisement-gate.mjs",

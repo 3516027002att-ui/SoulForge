@@ -57,6 +57,12 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // git status 永远干净，实测一次清出 16 个、最早跨半个月无人发现。扫实际文件名
   // 而非维护清单，拦残留不拦存在。纯文件系统扫描，秒级，归 governance。
   'test:probe-residual-gate': 'governance',
+  // 陈旧 TFM 构建产物门禁。与探针残留同源（gitignore 覆盖、全仓零引用、无人清理），
+  // 但更危险：残留的是**能跑起来的旧版 Bridge**，手误指向它会拿到一个月前的解析行为。
+  // 实测清出 bin/Debug/net6.0 与 net8.0 两个目录、各含 SoulForge.Bridge.exe。
+  // 判据从 csproj 的 TargetFramework 推导而非写死版本号，故升级 TFM 时不会误报。
+  // 纯文件系统扫描，秒级，归 governance。
+  'test:stale-tfm-gate': 'governance',
 
   // ---- unit：编译 + 跨包单元与契约。代码改动必跑 ----
   typecheck: 'unit',
