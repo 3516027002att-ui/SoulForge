@@ -269,14 +269,16 @@ internal static class BridgeDaemonHost
     /// 新增一个不叫 write-* 的落盘命令属于另一类问题，由外部门禁
     /// test:bridge-write-boundary 的双向对账覆盖（它直接解析本注册表与门禁清单）。
     ///
-    /// **不做反向检查（注册表 → 能力声明）**：实测过，那样会误报。
-    /// 能力声明的 commands 列表并不是实现全集——它漏了 6 个已实现命令
-    /// （export-tpf-texture、inventory-asset-resources、read-flver-dummies /
-    /// -skeleton / -texture-slots、read-mtd-document），又列了 5 个走
-    /// `switch` 与 `command is` 形态而非 `command ==` 的命令（inspect、
-    /// export-event/map/param/msg）。第一版自检按「注册表必须是能力声明的子集」
-    /// 判定，启动时即以 export-tpf-texture「不存在」拒绝服务——那是判据锚点选错，
-    /// 不是注册表漂移。
+    /// **不做反向检查（注册表 → 能力声明）**：实测过，那样会误报。第一版自检按
+    /// 「注册表必须是能力声明的子集」判定，启动时即以 export-tpf-texture
+    /// 「不存在」拒绝服务——那是判据锚点选错，不是注册表漂移。
+    ///
+    /// 当时能力声明确实不是实现全集：它漏了 6 个已实现命令（export-tpf-texture、
+    /// inventory-asset-resources、read-flver-dummies / -skeleton / -texture-slots、
+    /// read-mtd-document）。这一漂移已由 AdvertisedCommands 补齐并撤下 MTD 修正，
+    /// 现由 test:bridge-command-advertisement 做三方对账守住。
+    /// 但**反向检查仍然不做**：广告面与写盘注册表回答的是不同问题，且判据方向
+    /// 一旦反过来，任何「已实现但按裁定不该广告」的命令都会让 daemon 拒绝启动。
     ///
     /// 为什么不反射 dispatch 表：ExecuteAsync 是 if 链 + switch 混合形态，
     /// 不是可枚举结构，运行期读不到。真正的全集对账留给外部门禁做源码解析。
@@ -485,11 +487,42 @@ internal static class BridgeDaemonHost
         await state.WriteAsync(kind, frame.RequestId, frame.WorkspaceSessionId, frame.ResourceUri, payload);
     }
 
+    /// <summary>
+    /// 能力声明里广告的命令集。
+    ///
+    /// 此前是 BuildCapabilities 里的一个内联字面量数组，与 BridgeCommandService
+    /// 的实际 dispatch 分开演进，于是漂移无人发现：实测广告 24 条、实际 dispatch
+    /// 26 条，**6 个已实现命令从未被广告**（inventory-asset-resources、
+    /// export-tpf-texture、read-flver-skeleton/-texture-slots/-dummies、
+    /// read-mtd-document）。漂移之所以能长期存在，是因为消费端
+    /// bridgeDaemonClient.capabilities() 全仓零调用者——广告没人读，就没人发现它错。
+    ///
+    /// 提成常量是为了给它一个单一声明点，让 test:bridge-command-advertisement
+    /// 能把它与 dispatch 集双向对账（与 DiskWritingCommands 同一范式）。
+    ///
+    /// 语义边界：广告表示「该命令会被受理」，**不表示**对应格式具备 native
+    /// parser/writer authority——authority 由各能力格自行裁定。
+    /// </summary>
+    internal static readonly string[] AdvertisedCommands =
+    {
+        "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child",
+        "extract-bnd4-child", "write-bnd4", "inventory-asset-resources",
+        "read-fmg-document", "write-fmg", "read-param-document", "write-param",
+        "read-emevd-document", "write-emevd", "read-msb-document", "write-msb",
+        "read-tpf-document", "export-tpf-texture", "read-tae-document",
+        "read-flver-document", "read-flver-mesh", "read-flver-skeleton",
+        "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
+        // read-mtd-document 不在此列：它已从 dispatch 撤下（V0.6 延期项，
+        // 见 BridgeCommandService 里那段说明）。广告面不得声明未受理的命令。
+        "export-event", "export-map", "export-param",
+        "export-msg", "probe-oodle"
+    };
+
     private static object BuildCapabilities(string? oodleRuntimeRoot) => new
     {
         authority = "candidate",
         nativeFormatAuthority = false,
-        commands = new[] { "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child", "extract-bnd4-child", "write-bnd4", "read-fmg-document", "write-fmg", "read-param-document", "write-param", "read-emevd-document", "write-emevd", "read-msb-document", "write-msb", "read-tpf-document", "read-tae-document", "read-flver-document", "read-flver-mesh", "read-esd-document", "export-event", "export-map", "export-param", "export-msg", "probe-oodle" },
+        commands = AdvertisedCommands,
         envelopes = new[] { "DFLT-candidate", "KRAK-runtime-dependent", "BND4-unsupported" },
         oodleRuntime = OodleRuntimeLocator.Probe(oodleRuntimeRoot).Runtime,
         cancellation = true,

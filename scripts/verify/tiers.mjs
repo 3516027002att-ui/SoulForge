@@ -153,6 +153,12 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 必须失败关闭且不留文件——源码扫描抓不到「校验通过但 writer 绕回原始路径」
   // 这类等价路径逃逸。归 synthetic：需要真实 exe，但不需要真实语料。
   'test:bridge-write-boundary': 'synthetic',
+  // Bridge 命令集三方对账（广告面 / 实际 dispatch / TS 两份 union）。此前一方都没
+  // 被校验，实测漂移：广告 24 条而 dispatch 26 条，6 个已实现命令从未被广告；
+  // read-mtd-document 在 C# 已实现而 TS 两份 union 都没有——应用层结构上不可达。
+  // 漂移长期无人发现的原因是唯一消费端 client.capabilities() 全仓零调用者：
+  // 广告没人读，就没人发现它错。纯源码文本对账、无需 exe 与语料，故归 unit。
+  'test:bridge-command-advertisement': 'unit',
   // BND4 重建路径的场景边界：「无损往返」与「通用重排」不得共用一条实现当判据。
   // 用自造带宽间隙的 fixture（复现真实容器形态），不需真实语料，公开 CI 可真跑。
   // 布局守卫本身在 IPC 层不可达（调用方永远传 no-op），故由文档内部自检上报，

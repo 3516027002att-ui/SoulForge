@@ -582,31 +582,19 @@ internal sealed class BridgeCommandService
             }
         }
 
-        if (command == "read-mtd-document")
-        {
-            try
-            {
-                var document = MtdNativeDocument.ReadFile(file);
-                var verification = document.VerifyStructure();
-                var diagnostics = document.Diagnostics.Append(new Diagnostic(
-                    verification.Consistent ? "info" : "error",
-                    verification.Consistent ? "MTD_DOCUMENT_STRUCTURE_VERIFIED" : "MTD_DOCUMENT_STRUCTURE_INCONSISTENT",
-                    verification.Consistent
-                        ? $"MTD 结构投影一致；root={document.RootElement}, params={document.Params.Count}, textureRefs={document.Textures.Count}。"
-                        : (verification.Note ?? "MTD 重复解析的结构投影不一致。"),
-                    BridgeResult<object>.MakeSourceUri(file),
-                    verification)).ToArray();
-                return BridgeResult<object>.Partial(file, "mtd", diagnostics, document.ToEnvelope(verification));
-            }
-            catch (NotSupportedException ex)
-            {
-                return BridgeResult<object>.Unsupported(file, "mtd", ex.Message);
-            }
-            catch (Exception ex) when (ex is InvalidDataException or IOException)
-            {
-                return BridgeResult<object>.Failed(file, "mtd", "MTD_DOCUMENT_READ_FAILED", ex.Message);
-            }
-        }
+        // read-mtd-document 已从 dispatch 撤下（落到尾部 UNKNOWN_COMMAND）。
+        //
+        // 为什么撤下而不是补进 TS：MTD 是 user-approved 的 V0.6 延期项
+        // （scope.json 的 SCOPE-ASSET-MTD 与 SCOPE-ASSETS，authorityAtRuling=unverified），
+        // 把它接进 TS union 等于在没有 parser/writer/validator/authority 门槛的前提下
+        // 扩大 V0.5 的可调用面。而留在「C# 已实现、TS 不可达」这个中间状态更糟：
+        // 254 行的 MtdNativeDocument 既不可达也无人验证，却会被能力盘点读成已交付。
+        //
+        // MtdNativeDocument 与 MTD_DOCUMENT_* 诊断码**保留不动**：撤下的是入口，
+        // 不是实现。V0.6 承接时按 scope.json 的 resumeRequires 走通用流程
+        // （用户裁定改回 supported → 同步 gates/slices → 补齐门槛 → 重新封存），
+        // 届时同时恢复本分支、AdvertisedCommands 与两侧 TS union 三处。
+        // test:bridge-command-advertisement 会在任一处漏掉时失败关闭。
 
         if (command == "read-esd-document")
         {
