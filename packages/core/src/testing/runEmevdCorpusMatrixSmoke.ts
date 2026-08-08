@@ -71,6 +71,10 @@ import {
   type MultiLengthKindInfo
 } from '../emevd/emevdCorpusMatrix.js';
 import { importDs3EmedfFile } from '../emevd/emedfExternalAdapter.js';
+// searchRealEmedf 与候选路径清单共享自 realEmedfLocator，与另三条 emevd smoke
+// 同源。此前本文件**只读 env 与 argv、不调定位器**，于是同一台机器上另三条能
+// 跑到真实 EMEDF leg、唯独这条恒跳过——两道判据之间的盲区，各自都有理由不管。
+import { searchRealEmedf } from './realEmedfLocator.js';
 import {
   analyzeEmedfCoverage,
   type EmevdInstructionDistributionEntry
@@ -638,7 +642,7 @@ async function main(): Promise<void> {
   const nativeFixtureArg = process.argv[2]?.trim() || undefined;
   const emedfPathArg = process.env.SOULFORGE_EMEDF_PATH?.trim()
     || process.argv[3]?.trim()
-    || undefined;
+    || (await searchRealEmedf());
   const nativeEnvAvailable = Boolean(
     (process.env.SOULFORGE_NATIVE_FIXTURE_REGISTRY?.trim() && process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim())
     || nativeFixtureArg
@@ -659,7 +663,7 @@ async function main(): Promise<void> {
         if (!realImport.ok) throw new Error(`real EMEDF import failed: ${realImport.message}`);
         realEmedf = await realCorpusMatrixLeg(root, sourceDcx, realImport.registry, 'real-emedf');
       } else {
-        skipReasons.push('SOULFORGE_EMEDF_PATH 未设置且未提供 arg 3：真实 DarkScript3 EMEDF 文件缺失，真实导入 registry 的 matrix leg 结构化跳过（fail-closed）。');
+        skipReasons.push('SOULFORGE_EMEDF_PATH 未设置、未提供 arg 3、且 searchRealEmedf 未在本机定位到真实 DarkScript3 EMEDF：真实导入 registry 的 matrix leg 结构化跳过（fail-closed）。');
       }
     } else {
       skipReasons.push('SOULFORGE_NATIVE_FIXTURE_REGISTRY/SOULFORGE_NATIVE_FIXTURE_ROOT 未设置：真实 common.emevd corpus matrix leg 跳过。');
