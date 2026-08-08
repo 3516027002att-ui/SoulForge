@@ -430,6 +430,38 @@ internal sealed class EsdNativeDocument
     //  Envelope
     // ══════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// 声明量与实解析量的差值。四对计数此前双双导出却从不比较——declared=500
+    /// 而 parsed=3 时 SemanticIdentical 仍为真（它拿同一份字节解析两遍自比，
+    /// parser 确定性下恒真），上层照样发 ESD_DOCUMENT_ROUNDTRIP_VERIFIED，
+    /// 而消息体里还把 parsed 的 3 插在「验证通过」后面。覆盖率数据在手却没
+    /// 变成判据。
+    ///
+    /// 判据刻意定在**独立字段 + 诊断码 + authority**，不并进 SemanticIdentical：
+    /// 后者管的是「同一份字节解析两遍是否一致」（parser 确定性），与「解析
+    /// 得是否完整」是正交语义。混进去会让往返确定性这个概念失去意义。
+    /// </summary>
+    public bool CoverageComplete =>
+        ParsedStateCount == DeclaredStateCount
+        && ParsedConditionCount == DeclaredConditionCount
+        && ParsedCommandCallCount == DeclaredCommandCallCount
+        && ParsedCommandArgCount == DeclaredCommandArgCount;
+
+    /// <summary>逐项列出未解析完整的计数，供诊断引用。</summary>
+    public string[] CoverageShortfalls()
+    {
+        var gaps = new List<string>();
+        if (ParsedStateCount != DeclaredStateCount)
+            gaps.Add($"states declared={DeclaredStateCount} parsed={ParsedStateCount}");
+        if (ParsedConditionCount != DeclaredConditionCount)
+            gaps.Add($"conditions declared={DeclaredConditionCount} parsed={ParsedConditionCount}");
+        if (ParsedCommandCallCount != DeclaredCommandCallCount)
+            gaps.Add($"commandCalls declared={DeclaredCommandCallCount} parsed={ParsedCommandCallCount}");
+        if (ParsedCommandArgCount != DeclaredCommandArgCount)
+            gaps.Add($"commandArgs declared={DeclaredCommandArgCount} parsed={ParsedCommandArgCount}");
+        return gaps.ToArray();
+    }
+
     public object ToEnvelope(EsdRoundTripReport? report = null)
     {
         report ??= VerifyRoundTrip();
@@ -441,10 +473,20 @@ internal sealed class EsdNativeDocument
             sourceSize = SourceBytes.Length,
             sourceHash = SourceHash,
             stateGroupCount = DeclaredStateGroupCount,
+            // ⚠️ 裸名 stateCount/conditionCount/... 携带的是**声明量**，而
+            // EsdWorkbenchPanel.tsx:51 把它显示成「N states」、:98 显示成
+            // 「状态数」。只解析出 3 个而声明 500 时，界面会说 500——违反
+            // 硬约束 7（界面必须能回答「已解析多少」）。裸名保留以兼容既有
+            // 消费方，同时补 declared* 显式名与 parsed* 对照，UI 应改用后两组。
             stateCount = DeclaredStateCount,
             conditionCount = DeclaredConditionCount,
             commandCallCount = DeclaredCommandCallCount,
             commandArgCount = DeclaredCommandArgCount,
+            declaredStateGroupCount = DeclaredStateGroupCount,
+            declaredStateCount = DeclaredStateCount,
+            declaredConditionCount = DeclaredConditionCount,
+            declaredCommandCallCount = DeclaredCommandCallCount,
+            declaredCommandArgCount = DeclaredCommandArgCount,
             parsedStateCount = ParsedStateCount,
             parsedConditionCount = ParsedConditionCount,
             parsedCommandCallCount = ParsedCommandCallCount,
@@ -457,8 +499,13 @@ internal sealed class EsdNativeDocument
             stateGroupsTruncated = StateGroups.Count > sampleLimit,
             commandBanks = CommandBanks,
             bytecodeRegionCount = BytecodeRegions.Count,
+            coverageComplete = CoverageComplete,
+            coverageShortfalls = CoverageShortfalls(),
             roundTrip = report,
-            authority = "candidate"
+            // 解析不完整时不得停留在 candidate——candidate 表示「结构已认出、
+            // 待真实语料确认」，而「声明 500 只读出 3」是另一回事：那是解析
+            // 覆盖面残缺，必须降到 partial 并附结构化诊断（硬约束 8）。
+            authority = CoverageComplete ? "candidate" : "partial"
         };
     }
 
