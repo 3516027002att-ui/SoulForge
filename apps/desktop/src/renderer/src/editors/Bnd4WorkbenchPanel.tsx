@@ -26,6 +26,26 @@ interface ReplaceResultView {
  * 子项替换。不提供 typed mutation（bnd4 contract mutationKinds=[]）；
  * 替换字节必须由用户提供，SoulForge 不生成内容。
  */
+/**
+ * 逐项容器诊断（按需加载）。
+ *
+ * inspectContainerTree 给的是聚合结论——三个布尔回答「能不能」，但不回答
+ * 「为什么不能」。这三条 IPC 各答一个：
+ *   roundTripContainer        往返是否逐字节安全，不安全时差在哪
+ *   validateContainer         结构校验，unsupported 时的结构化原因
+ *   probeContainerCapabilities 能力探测，决定工作台开放哪些操作
+ *
+ * 刻意做成按需展开而不是随面板加载：三条都要读整个容器字节（roundTrip 还要
+ * 重建一遍），对 168 MB 的容器默认就跑等于每次点开文件都做一次全量往返。
+ */
+interface ContainerDiagnosticsView {
+  loading: boolean;
+  error: string | null;
+  roundTrip: Record<string, unknown> | null;
+  validation: Record<string, unknown> | null;
+  capabilities: Record<string, unknown> | null;
+}
+
 export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement {
   const [root, setRoot] = useState<RendererContainerTreeSummary | null>(null);
   const [pageChildren, setPageChildren] = useState<RendererContainerChild[]>([]);
@@ -50,6 +70,55 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   const [replaceResult, setReplaceResult] = useState<ReplaceResultView | null>(null);
   /** 分页通道缺失时的降级说明。为 null 表示正常分页路径。 */
   const [degraded, setDegraded] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<ContainerDiagnosticsView | null>(null);
+
+  /**
+   * 并发调三条诊断 IPC。
+   *
+   * 三条互不依赖，串行只会让等待时间变成三倍——而它们各自都要读整个容器字节。
+   * 用 allSettled 而不是 all：其中一条失败（例如 unsupported 容器的 roundTrip）
+   * 不应让另两条的结果一起丢掉，那正是「聚合结论掩盖逐项原因」的老问题。
+   *
+   * 返回值逐字段取而不用 `as` 整体断言：IPC 边界上类型是断言出来的而非检查出来
+   * 的，字段名对不上只会表现为「功能不工作」而 typecheck 照过（本轮 readRawRange
+   * 接线就踩过：core 字段叫 base64 而我写 bytesBase64，翻页恒静默失败）。
+   */
+  const loadDiagnostics = useCallback(async (): Promise<void> => {
+    const bridge = getRendererBridge();
+    if (bridge === null) {
+      setDiagnostics({
+        loading: false,
+        error: describeBridgeAbsence('读取逐项容器诊断'),
+        roundTrip: null,
+        validation: null,
+        capabilities: null
+      });
+      return;
+    }
+    setDiagnostics({ loading: true, error: null, roundTrip: null, validation: null, capabilities: null });
+
+    const asRecord = (value: unknown): Record<string, unknown> | null =>
+      typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
+
+    const [rt, vc, caps] = await Promise.allSettled([
+      bridge.roundTripContainer(props.resourceUri),
+      bridge.validateContainer(props.resourceUri),
+      bridge.probeContainerCapabilities(props.resourceUri)
+    ]);
+
+    // 三条全失败才算整体失败；部分失败按「未报告」显示，理由见上面的注释。
+    const rejected = [rt, vc, caps].filter((r) => r.status === 'rejected');
+    const allFailed = rejected.length === 3;
+    setDiagnostics({
+      loading: false,
+      error: allFailed
+        ? `三条容器诊断全部失败：${rejected.map((r) => String((r as PromiseRejectedResult).reason)).join('；')}`
+        : null,
+      roundTrip: rt.status === 'fulfilled' ? asRecord(rt.value) : null,
+      validation: vc.status === 'fulfilled' ? asRecord(vc.value) : null,
+      capabilities: caps.status === 'fulfilled' ? asRecord(caps.value) : null
+    });
+  }, [props.resourceUri]);
 
   /*
    * 页大小（硬约束 17）来自 @soulforge/shared，与主进程
@@ -307,6 +376,68 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
               该容器未提供子项列表（原生 BND 未带 SFBN 标记，或为不支持解压的 DCX）；只读证据层级不可用。
             </p>
           )}
+
+          {/*
+            逐项诊断：上面三个布尔回答「能不能」，这里回答「为什么」。
+            按需触发——三条 IPC 都要读整个容器字节，默认跑等于每次点开文件都做
+            一次全量往返。失败必须可见且带诊断码，静默失败会让用户以为容器没问题。
+          */}
+          <details className="container-diag">
+            <summary>逐项容器诊断（按需读取）</summary>
+            {diagnostics === null && (
+              <button
+                type="button"
+                className="btn btn--sm"
+                onClick={() => void loadDiagnostics()}
+              >
+                读取逐项诊断
+              </button>
+            )}
+            {diagnostics?.loading === true && <p className="muted">读取中…</p>}
+            {diagnostics?.error != null && <p className="diag-error">{diagnostics.error}</p>}
+            {diagnostics !== null && !diagnostics.loading && diagnostics.error === null && (
+              <div className="structured-preview-grid">
+                <span>
+                  往返逐字节：
+                  {diagnostics.roundTrip?.byteIdentical === true ? '一致'
+                    : diagnostics.roundTrip?.byteIdentical === false ? '不一致' : '未报告'}
+                </span>
+                <span>
+                  结构校验：
+                  {diagnostics.validation?.ok === true ? '通过'
+                    : diagnostics.validation?.ok === false ? '未通过' : '未报告'}
+                </span>
+                <span>
+                  能力探测 rawWritable：
+                  {diagnostics.capabilities?.rawWritable === true ? '是'
+                    : diagnostics.capabilities?.rawWritable === false ? '否' : '未报告'}
+                </span>
+                <span>
+                  semanticReadTier：
+                  {String(diagnostics.capabilities?.semanticReadTier ?? '未报告')}
+                </span>
+              </div>
+            )}
+            {/* 三条各自的结构化诊断码逐条列出——聚合布尔丢掉的正是这些原因。 */}
+            {diagnostics !== null && !diagnostics.loading && (
+              <ul className="muted container-diag__codes">
+                {[
+                  ['往返', diagnostics.roundTrip],
+                  ['校验', diagnostics.validation],
+                  ['能力', diagnostics.capabilities]
+                ].flatMap(([label, payload]) => {
+                  const list = Array.isArray((payload as Record<string, unknown>)?.diagnostics)
+                    ? (payload as { diagnostics: Array<{ code?: unknown; message?: unknown }> }).diagnostics
+                    : [];
+                  return list.map((d, i) => (
+                    <li key={`${String(label)}-${i}`}>
+                      {String(label)}：{String(d.code ?? 'UNKNOWN')} — {String(d.message ?? '')}
+                    </li>
+                  ));
+                })}
+              </ul>
+            )}
+          </details>
         </>
       )}
 

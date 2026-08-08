@@ -2569,7 +2569,17 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) return null;
     const probed = await probeContainerCapabilityOptions(file.absolutePath);
-    return resolveResourceCapabilities(file, probed);
+    // 必须脱敏：ResourceCapabilityMatrix 含 absolutePath
+    // （resourceCapabilities.ts:45），而 verify-desktop-security-runtime.mjs 把它
+    // 列为泄漏键。这与 readRawMetadata 那处（commit 3b67e63）同形态——handler 直接
+    // return 含绝对路径的对象，而同文件其余 handler 都走了 sanitizeRendererValue。
+    // 该 channel 此前 renderer 零引用，所以泄漏一直没被触发；接线前必须先补上，
+    // 否则接线的同一刻就打开了泄漏。
+    //
+    // 另两条同族（roundTripContainer / validateContainer）实测**不含**路径
+    // （ContainerRoundTripReport 与校验报告都只有布尔与计数），故未加脱敏——
+    // 无差别包一层会让「哪些返回值真的带路径」这个事实变得看不出来。
+    return sanitizeRendererValue(resolveResourceCapabilities(file, probed));
   });
 
   handle('resource.scriptContainerEvidence', async (_event, sourceUri: string) => {

@@ -45,7 +45,9 @@ const RULED_FAMILY = Object.freeze({
   // PRELOAD_RULING_FAMILY_ORPHAN / PRELOAD_RULING_FAMILY_MISSING。
   // 族键本身也一并删掉：留一个空数组会让 ruledFamilies 报出 "ai-agent": 0，
   // 而「有这个族但为零」和「这个族已清空」在盘点上不是一回事。
-  'container-diagnostics': ['roundTripContainer', 'validateContainer', 'probeContainerCapabilities'],
+  // container-diagnostics 三条已于 2026-08-08 接线（Bnd4WorkbenchPanel 的
+  // 「逐项容器诊断」按需展开块），族与登记表同步清空——判据 5 要求两者双向一致。
+  'container-diagnostics': [],
   // readRawRange 已接线（2026-08-08），从族划分与登记表同步移除——本门禁的
   // 判据 5 要求两者双向一致，只改一处会报 PRELOAD_RULING_FAMILY_ORPHAN。
   'raw-bytes': ['readRawMetadata']
@@ -89,9 +91,21 @@ const RULED_NOT_YET_WIRED = Object.freeze({
   // Bnd4WorkbenchPanel 已展示 containerRoundTripSafe / canListChildren /
   // canReplaceChild 等字段，但那些来自 inspectContainerTree 的聚合结果；单独调用
   // 这三条可以给出逐项诊断。撤下会让「为什么这个容器不可写」失去可查询入口。
-  roundTripContainer: '容器诊断：往返安全性逐项查询；inspectContainerTree 只给聚合结论',
-  validateContainer: '容器诊断：结构校验；unsupported 时的结构化原因来源',
-  probeContainerCapabilities: '容器诊断：能力探测；决定工作台开放哪些操作',
+  // ── 容器只读诊断三条已于 2026-08-08 接线，从本表移除 ──
+  //
+  // 接线点：Bnd4WorkbenchPanel 的「逐项容器诊断（按需读取）」details 块。
+  // 动因正是本表原先写的那句——inspectContainerTree 只给聚合结论
+  // （containerRoundTripSafe / canListChildren / canReplaceChild 三个布尔回答
+  // 「能不能」），而这三条各答一个「为什么」：往返差在哪、结构校验的结构化原因、
+  // 能力探测决定开放哪些操作。撤下会让「为什么这个容器不可写」失去可查询入口。
+  //
+  // 刻意做成按需展开而非随面板加载：三条都要读整个容器字节（roundTrip 还要重建
+  // 一遍），默认跑等于每次点开文件都做一次全量往返。
+  //
+  // 接线前先修了一处路径泄漏：probeContainerCapabilities 的 handler 直接 return
+  // 含 absolutePath 的 ResourceCapabilityMatrix（resourceCapabilities.ts:45）、
+  // 未走 sanitizeRendererValue——与 readRawMetadata 那处（3b67e63）同形态。
+  // 另两条实测不含路径，故未无差别包脱敏。
 
   // ── raw 字节读取 ──
   //
