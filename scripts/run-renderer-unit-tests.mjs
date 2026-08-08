@@ -74,7 +74,14 @@ for (const test of tests) {
     target: 'node22',
     sourcemap: 'inline',
     // node:test / node:assert 必须留给运行时；@soulforge/* 走真实实现（bundle 进来）。
-    external: ['node:*'],
+    //
+    // react / react-dom 也必须 external：它们是 CJS，bundle 进 ESM 产物后
+    // esbuild 会把内部的 require('util') 变成运行期抛错的 shim
+    // （"Dynamic require of util is not supported"）。留给 Node 自己解析即可 ——
+    // 渲染期断言（*.test.tsx 用 react-dom/server 真渲染面板）依赖这一条，
+    // 否则整个文件在导入阶段就崩，表现为「测试文件级失败」而非断言失败。
+    external: ['node:*', 'react', 'react-dom', 'react-dom/server', 'react/jsx-runtime'],
+    jsx: 'automatic',
     // 打包后 import.meta.url 指向 node_modules/.cache，任何靠它推算仓库相对路径的
     // 测试都会 ENOENT。注入编译期常量而不是让测试自己猜：靠 process.cwd() 会随
     // 调用目录漂移，而漂移的表现是「测试在 CI 上找不到文件」这类只在别处复现的红。

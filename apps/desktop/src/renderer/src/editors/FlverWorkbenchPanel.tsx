@@ -1,5 +1,14 @@
 import { useMemo, useState, type ReactElement } from 'react';
 import { FlverViewer } from './FlverViewer.js';
+import { formatListTruncation } from '../format/uiText.js';
+
+/**
+ * 三个 tab 各自的渲染上限。FLVER 是 V0.6 延期的只读预览族，不加分页控件
+ * （超出当前范围），但静默截断会让用户把部分材质/骨骼/网格当成全部。
+ */
+const MATERIAL_RENDER_LIMIT = 100;
+const BONE_RENDER_LIMIT = 200;
+const MESH_RENDER_LIMIT = 100;
 
 export interface FlverMaterialSummary {
   name: string;
@@ -68,6 +77,32 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
 
   const bbox = data?.boundingBox;
 
+  const allMeshes = data?.meshes ?? [];
+  const visibleMaterials = filteredMaterials.slice(0, MATERIAL_RENDER_LIMIT);
+  const visibleBones = filteredBones.slice(0, BONE_RENDER_LIMIT);
+  const visibleMeshes = allMeshes.slice(0, MESH_RENDER_LIMIT);
+
+  /** 当前 tab 的截断说明。按 tab 取，避免报出用户看不到的那张表的数字。 */
+  const truncationNote = tab === 'materials'
+    ? formatListTruncation({
+      total: filteredMaterials.length,
+      shown: visibleMaterials.length,
+      noun: '个材质',
+      hint: '用搜索框按名称或 MTD 路径缩小范围'
+    })
+    : tab === 'bones'
+      ? formatListTruncation({
+        total: filteredBones.length,
+        shown: visibleBones.length,
+        noun: '个骨骼',
+        hint: '用搜索框按名称缩小范围'
+      })
+      : formatListTruncation({
+        total: allMeshes.length,
+        shown: visibleMeshes.length,
+        noun: '个网格'
+      });
+
   return (
     <section className="panel" aria-label="FLVER 3D 模型面板">
       <header className="panel-header">
@@ -110,6 +145,9 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
               onChange={(e) => setQuery(e.target.value)}
             />
           </div>
+          {truncationNote && (
+            <p className="muted" data-testid="flver-truncation">{truncationNote}</p>
+          )}
           <div style={{ overflowY: 'auto', maxHeight: 300, marginTop: 8 }}>
             {tab === 'materials' && (
               <table className="table">
@@ -117,7 +155,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                   <tr><th>名称</th><th>MTD 路径</th><th>纹理数</th></tr>
                 </thead>
                 <tbody>
-                  {filteredMaterials.slice(0, 100).map((m, i) => (
+                  {visibleMaterials.map((m, i) => (
                     <tr key={i}>
                       <td>{m.name}</td>
                       <td className="muted">{m.mtdPath?.split('\\').pop() ?? '—'}</td>
@@ -133,7 +171,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                   <tr><th>名称</th><th>父骨骼</th><th>下一兄弟</th></tr>
                 </thead>
                 <tbody>
-                  {filteredBones.slice(0, 200).map((b, i) => (
+                  {visibleBones.map((b, i) => (
                     <tr key={i}>
                       <td>{b.name}</td>
                       <td>{b.parentIndex}</td>
@@ -149,7 +187,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                   <tr><th>#</th><th>顶点数</th><th>材质索引</th><th>索引格式</th></tr>
                 </thead>
                 <tbody>
-                  {(data.meshes ?? []).slice(0, 100).map((m, i) => (
+                  {visibleMeshes.map((m, i) => (
                     <tr
                       key={i}
                       className={i === selectedMeshIndex ? 'selected' : ''}

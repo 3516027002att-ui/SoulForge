@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { FMG_PAGE_SIZE } from '@soulforge/shared';
 import type { FmgEntryPage } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
@@ -24,8 +25,10 @@ export interface FmgWorkbenchPanelProps {
   }) => void;
 }
 
-/** Fixed page size for the paginated FMG entry table (hard constraint 17). */
-const FMG_PAGE_SIZE = 100;
+/*
+ * 分页页大小（硬约束 17）来自 @soulforge/shared，与主进程 `resource.readFmgPage`
+ * 用同一常量。此前两侧各写一遍 100，改一侧不报错，症状是分页错位或末页重复。
+ */
 
 /**
  * FMG 本地化工作台：分页条目表 + 筛选/编辑/增删。

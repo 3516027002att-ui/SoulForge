@@ -87,7 +87,11 @@ import {
   type EditableMsgRow
 } from './format/msgRows.js';
 import {
+  FILE_LIST_PAGE_SIZE,
+  SEARCH_HIT_LIMIT,
   filterFilesForMode,
+  formatListTruncation,
+  formatPageRange,
   formatPreviewTruncation,
   operationStatusLabel,
   shortenPath
@@ -106,6 +110,12 @@ type CenterView = 'resource' | 'operations' | 'settings';
 
 /** P0 安全收口：权限模式由主进程锁定，renderer 不得自行切换。 */
 const AI_PERMISSION_LOCK_REASON = 'P0 安全收口期间由主进程锁定为计划模式；renderer 不能抬高授权。';
+
+/** 欢迎页「待审查变更」摘要显示条数。摘要之外的条数由截断说明报出。 */
+const WELCOME_DRAFT_LIMIT = 5;
+
+/** 命令面板（Ctrl K）列出的资源命中条数。命中总数由截断说明报出。 */
+const CMDK_RESOURCE_HIT_LIMIT = 8;
 
 /** 无实时 MSB 数据时的空 parts（真实数据经 Bridge 读取后填充）。 */
 const EMPTY_MSB_PARTS: MsbPartTransformLike[] = [];
@@ -425,6 +435,50 @@ export function App(): ReactElement {
     () => filterFilesForMode(allFiles.length > 0 ? allFiles : files, resourceMode, query),
     [allFiles, files, resourceMode, query]
   );
+
+  /**
+   * 资源浏览器分页。
+   *
+   * 此前 `visibleFiles.map` 无分页无上限，只靠 `.file-list` 的 `overflow-y: auto`
+   * 挡住视觉——DOM 仍然全量建出。规模不可控（实测整个只狼解包树 9111 个文件），
+   * 属于硬约束 17 明确要求分页/虚拟化的场景。
+   *
+   * 页码必须随过滤条件复位，否则「停在第 30 页时改过滤词」会得到一个空页面，
+   * 而空页面看起来与「没有匹配资源」完全一样——用户无法区分是真没有还是页码
+   * 越界了。
+   */
+  const [filePage, setFilePage] = useState(0);
+  const filePageCount = Math.max(1, Math.ceil(visibleFiles.length / FILE_LIST_PAGE_SIZE));
+  const clampedFilePage = Math.min(filePage, filePageCount - 1);
+  useEffect(() => {
+    setFilePage(0);
+  }, [resourceMode, query, allFiles, files]);
+  const pagedFiles = useMemo(
+    () => visibleFiles.slice(
+      clampedFilePage * FILE_LIST_PAGE_SIZE,
+      clampedFilePage * FILE_LIST_PAGE_SIZE + FILE_LIST_PAGE_SIZE
+    ),
+    [visibleFiles, clampedFilePage]
+  );
+  const searchHits = useMemo(() => visibleFiles.slice(0, SEARCH_HIT_LIMIT), [visibleFiles]);
+  /**
+   * 欢迎页「待审查变更」摘要条数。摘要不是队列本体——完整队列在暂存区面板，
+   * 所以这里保留截断，但必须说清还有多少没显示（否则 5 条与 50 条长得一样，
+   * 用户会以为只剩 5 个待审）。
+   */
+  const draftChanges = changeState.items.filter((item) => item.status === 'draft');
+  const draftTruncationNote = formatListTruncation({
+    total: draftChanges.length,
+    shown: Math.min(draftChanges.length, WELCOME_DRAFT_LIMIT),
+    noun: '项待审查变更',
+    hint: '完整队列见暂存区面板'
+  });
+  const searchTruncationNote = formatListTruncation({
+    total: visibleFiles.length,
+    shown: searchHits.length,
+    noun: '个资源',
+    hint: '缩小关键字，或到资源浏览器分页浏览全部'
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -1487,11 +1541,24 @@ export function App(): ReactElement {
   const filteredCmdkCommands = cmdkCommands.filter(
     (command) => !cmdkNormalized || command.label.toLowerCase().includes(cmdkNormalized)
   );
-  const cmdkResourceHits = cmdkNormalized
+  /**
+   * 命令面板的资源命中。
+   *
+   * 保留 8 条上限：命令面板是「快速跳转」而不是浏览器，列长了反而选不动。但必须
+   * 说清命中总数——此前静默截断，用户敲了个宽泛关键字看到 8 条，会以为工作区里
+   * 只有这 8 个匹配文件（实测整树 9111 文件，宽泛关键字可命中数千）。
+   */
+  const cmdkAllResourceMatches = cmdkNormalized
     ? (allFiles.length > 0 ? allFiles : files)
         .filter((file) => file.relativePath.toLowerCase().includes(cmdkNormalized))
-        .slice(0, 8)
     : [];
+  const cmdkResourceHits = cmdkAllResourceMatches.slice(0, CMDK_RESOURCE_HIT_LIMIT);
+  const cmdkTruncationNote = formatListTruncation({
+    total: cmdkAllResourceMatches.length,
+    shown: cmdkResourceHits.length,
+    noun: '个资源',
+    hint: '到资源浏览器按目录分页浏览，或用更精确的关键字'
+  });
   const cmdkItemCount = filteredCmdkCommands.length + cmdkResourceHits.length;
   const selectedCmdkIndex = Math.min(cmdkIndex, Math.max(0, cmdkItemCount - 1));
 
@@ -1640,7 +1707,13 @@ export function App(): ReactElement {
           <section className={sidebarView === 'explorer' ? 'panel is-active' : 'panel'} data-panel-id="explorer" aria-label="资源浏览器">
             <div className="panel__header">
               <h2 className="panel__title">资源浏览器</h2>
-              <span className="panel__hint">{resourceMode} · {visibleFiles.length} 项</span>
+              {/* 超过一页时标题栏就要说明「显示的是一页」，否则 200 与 9111 长得一样。 */}
+              <span className="panel__hint">
+                {resourceMode} · {visibleFiles.length} 项
+                {visibleFiles.length > FILE_LIST_PAGE_SIZE
+                  ? ` · 本页 ${pagedFiles.length}`
+                  : ''}
+              </span>
             </div>
             <div className="panel__body panel__body--pad">
               {isBrowserPreview && (
@@ -1701,7 +1774,7 @@ export function App(): ReactElement {
                 />
               </div>
               <div className="file-list">
-                {visibleFiles.map((file) => (
+                {pagedFiles.map((file) => (
                   <button
                     type="button"
                     key={file.sourceUri}
@@ -1716,6 +1789,35 @@ export function App(): ReactElement {
                   <p className="empty-hint">当前目录没有匹配资源。可切换到 all 或调整路径过滤。</p>
                 )}
               </div>
+              {/* 分页导航：只在真的超过一页时出现，避免小工作区多一排无意义控件。 */}
+              {visibleFiles.length > FILE_LIST_PAGE_SIZE && (
+                <div className="row gap pager" data-testid="file-list-pager">
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    disabled={clampedFilePage <= 0}
+                    onClick={() => setFilePage((page) => Math.max(0, page - 1))}
+                  >
+                    上一页
+                  </button>
+                  <span className="muted" data-testid="file-list-page-range">
+                    {formatPageRange({
+                      page: clampedFilePage,
+                      pageSize: FILE_LIST_PAGE_SIZE,
+                      total: visibleFiles.length,
+                      noun: '资源'
+                    })}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    disabled={clampedFilePage >= filePageCount - 1}
+                    onClick={() => setFilePage((page) => Math.min(filePageCount - 1, page + 1))}
+                  >
+                    下一页
+                  </button>
+                </div>
+              )}
             </div>
           </section>
 
@@ -1745,7 +1847,10 @@ export function App(): ReactElement {
                   <p className="empty-hint">输入关键字，按路径 / 类型检索工作区资源；回车调用资源搜索。</p>
                 )}
                 {query.trim() !== '' && visibleFiles.length === 0 && <p className="empty-hint">无匹配结果。</p>}
-                {query.trim() !== '' && visibleFiles.slice(0, 60).map((file) => (
+                {query.trim() !== '' && searchTruncationNote && (
+                  <p className="muted" data-testid="search-truncation">{searchTruncationNote}</p>
+                )}
+                {query.trim() !== '' && searchHits.map((file) => (
                   <button type="button" key={file.sourceUri} className="search-hit" onClick={() => void selectFile(file)}>
                     <div className="search-hit__path">{file.relativePath}</div>
                     <div className="search-hit__line">{file.resourceKind} · {file.formatLabel} · {(file.size / 1024).toFixed(1)} KB</div>
@@ -2424,12 +2529,11 @@ export function App(): ReactElement {
 
                 <section className="welcome__section" aria-label="待审查变更">
                   <div className="welcome-quick__label">待审查变更</div>
-                  {changeState.items.filter((item) => item.status === 'draft').length === 0 ? (
+                  {draftChanges.length === 0 ? (
                     <p className="empty-hint welcome-empty">没有待审查的变更。</p>
                   ) : (
-                    changeState.items
-                      .filter((item) => item.status === 'draft')
-                      .slice(0, 5)
+                    draftChanges
+                      .slice(0, WELCOME_DRAFT_LIMIT)
                       .map((item) => (
                         <div className="review-row" key={item.id}>
                           <span className="review-row__target" title={item.sourceUri}>{item.target}</span>
@@ -2446,6 +2550,9 @@ export function App(): ReactElement {
                           </button>
                         </div>
                       ))
+                  )}
+                  {draftTruncationNote && (
+                    <p className="muted" data-testid="welcome-draft-truncation">{draftTruncationNote}</p>
                   )}
                 </section>
 
@@ -2627,6 +2734,9 @@ export function App(): ReactElement {
                 </button>
               );
             })}
+            {cmdkTruncationNote && (
+              <p className="muted cmdk-truncation" data-testid="cmdk-truncation">{cmdkTruncationNote}</p>
+            )}
           </div>
         </div>
       </div>

@@ -981,6 +981,9 @@ pre.tool-output {
 .cmdk-item__label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmdk-item__hint { font-size: 10.5px; color: var(--ink-2); font-family: var(--font-mono); }
 .cmdk__list .empty-hint { color: var(--ink-2); }
+/* 截断说明：沿用既有 ink token，不新造颜色。 */
+.cmdk-truncation { font-size: 10.5px; color: var(--ink-3); padding: 6px 8px 2px; }
+.preview-truncation { font-size: 11px; }
 
 /* ═══════════ Toast ═══════════ */
 .toast-root { position: fixed; right: 16px; bottom: 40px; z-index: 120; display: flex; flex-direction: column; gap: 8px; }

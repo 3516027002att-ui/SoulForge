@@ -13,6 +13,7 @@ export * from './ai-tools.js';
 export * from './vfs.js';
 export * from './bridge-protocol.js';
 export * from './editor-protocol.js';
+export * from './editor-pagination.js';
 export * from './emevd-editor-ir.js';
 export * from './emevd-dsl.js';
 export * from './paramdef.js';

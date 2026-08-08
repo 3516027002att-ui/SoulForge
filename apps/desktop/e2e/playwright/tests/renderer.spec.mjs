@@ -637,3 +637,104 @@ test('主题 token：暗/亮主题代表性按钮 computed 值不串用', async 
   await window.screenshot({ path: 'test-results/10-theme-light.png' });
   await app.close();
 });
+
+/*
+ * 大工作区：分页与截断说明。
+ *
+ * 默认 fixture 只有 8 个文件，低于分页页大小（200）与搜索上限（60），所以这两条
+ * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 468 个
+ * 合成条目，跨过两个阈值。
+ *
+ * 断言的是**用户能看到什么**：DOM 里真的只有一页节点、翻页真的换内容、说明里的
+ * 数字与真实总数一致。只断言「pager 存在」不够——一个点了不换页的 pager 也满足。
+ */
+test('大工作区：文件列表分页，且标题栏与导航报出真实规模', async () => {
+  const { app, window, pageErrors, consoleErrors } = await launchApp({
+    SF_TEST_LARGE_WORKSPACE: '1'
+  });
+  await openFixtureWorkspace(window);
+
+  // 一次只建一页 DOM：这是硬约束 17 的实质，不是「有个 pager 控件」。
+  const items = window.locator('.file-item');
+  await expect(items).toHaveCount(200);
+
+  const pager = window.locator('[data-testid="file-list-pager"]');
+  await expect(pager).toBeVisible();
+
+  // 位置文案必须报出区间与真实总数（468 = 8 基础 + 460 合成）。
+  const range = window.locator('[data-testid="file-list-page-range"]');
+  await expect(range).toContainText('1–200');
+  await expect(range).toContainText('468');
+  await expect(range).toContainText('第 1/3 页');
+
+  // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 468 长得一样。
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('468 项');
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
+
+  // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。
+  const firstBefore = await items.first().innerText();
+  await window.getByRole('button', { name: '下一页' }).first().click();
+  await expect(range).toContainText('201–400');
+  await expect(range).toContainText('第 2/3 页');
+  const firstAfter = await items.first().innerText();
+  expect(firstAfter).not.toBe(firstBefore);
+
+  // 末页只剩余数条，且「下一页」到底后禁用。
+  await window.getByRole('button', { name: '下一页' }).first().click();
+  await expect(range).toContainText('401–468');
+  await expect(items).toHaveCount(68);
+  await expect(window.getByRole('button', { name: '下一页' }).first()).toBeDisabled();
+
+  // 回到第一页：上一页可用且内容复原。
+  await window.getByRole('button', { name: '上一页' }).first().click();
+  await window.getByRole('button', { name: '上一页' }).first().click();
+  await expect(range).toContainText('1–200');
+  await expect(window.getByRole('button', { name: '上一页' }).first()).toBeDisabled();
+
+  await window.screenshot({ path: 'test-results/11-file-list-pagination.png' });
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+  await app.close();
+});
+
+test('大工作区：过滤后页码复位，且搜索结果显式说明被截断', async () => {
+  const { app, window } = await launchApp({ SF_TEST_LARGE_WORKSPACE: '1' });
+  await openFixtureWorkspace(window);
+
+  const range = window.locator('[data-testid="file-list-page-range"]');
+  await window.locator('[data-panel-id="explorer"] .search-box input').fill('m0');
+  await window.getByRole('button', { name: '下一页' }).first().click();
+  await window.getByRole('button', { name: '下一页' }).first().click();
+  await expect(range).toContainText('第 3/3 页');
+
+  /*
+   * 改过滤词后必须回到第 1 页。
+   *
+   * 过滤词刻意选仍然跨页的 'msb'（460 命中 / 3 页）：若换成命中不足一页的词，
+   * pager 会整体消失，断言就只能塞进 if 分支——而那个分支在「复位被移除」时
+   * 照样通过。实测确认过：用 'm03'（100 命中）时本条负向扰动不报红。
+   * 正向与负向不能共用 if/else。
+   */
+  await window.locator('[data-panel-id="explorer"] .search-box input').fill('msb');
+  await expect(window.locator('[data-testid="file-list-pager"]')).toBeVisible();
+  await expect(range).toContainText('第 1/3 页');
+  await expect(range).toContainText('1–200');
+  await expect(window.getByRole('button', { name: '上一页' }).first()).toBeDisabled();
+
+  // 搜索面板：命中远超 60 条上限，必须出现带真实数字的截断说明。
+  // 必须先切到搜索视图——搜索面板与资源浏览器共用侧栏槽位，未激活时输入框不可见。
+  await window.locator('[data-panel-id="explorer"] .search-box input').fill('');
+  // 用 .ab-item 限定活动栏按钮：面板内也有一个名为「搜索」的按钮，
+  // getByRole('button', {name:'搜索'}) 会先命中那个，导致视图始终切不过去。
+  await window.locator('.ab-item[aria-label="搜索"]').click();
+  await window.locator('[data-panel-id="search"] .search-box input').fill('.msb');
+  const note = window.locator('[data-testid="search-truncation"]');
+  await expect(note).toBeVisible();
+  await expect(note).toContainText('460');
+  await expect(note).toContainText('60');
+  // 未显示数必须报出来，否则用户要自己做减法。
+  await expect(note).toContainText('400');
+
+  await window.screenshot({ path: 'test-results/12-search-truncation.png' });
+  await app.close();
+});

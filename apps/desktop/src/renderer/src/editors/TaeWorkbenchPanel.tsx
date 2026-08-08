@@ -1,4 +1,14 @@
 import { useMemo, useState, type ReactElement } from 'react';
+import { formatListTruncation } from '../format/uiText.js';
+
+/**
+ * 动画表渲染上限。TAE 是 V0.6 延期的只读预览族，不加分页控件（超出当前范围），
+ * 但静默截断会让用户把部分动画当成全部——搜索框已能定位具体 ID / HKX。
+ */
+const ANIMATION_RENDER_LIMIT = 200;
+
+/** 事件类型摘要行的上限。此前已报总数，但没报「未显示多少」。 */
+const EVENT_TYPE_RENDER_LIMIT = 20;
 
 export interface TaeAnimationSummary {
   animId: number;
@@ -44,6 +54,13 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   }, [data?.animations, query]);
 
   const selected = data?.animations?.find((a) => a.animId === selectedAnimId) ?? null;
+  const visibleAnimations = filtered.slice(0, ANIMATION_RENDER_LIMIT);
+  const truncationNote = formatListTruncation({
+    total: filtered.length,
+    shown: visibleAnimations.length,
+    noun: '个动画',
+    hint: '用搜索框按动画 ID 或 HKX 名称缩小范围'
+  });
 
   return (
     <section className="panel" aria-label="TAE 动画事件面板">
@@ -68,6 +85,9 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
               onChange={(e) => setQuery(e.target.value)}
             />
           </div>
+          {truncationNote && (
+            <p className="muted" data-testid="tae-truncation">{truncationNote}</p>
+          )}
           <div className="row gap" style={{ marginTop: 8 }}>
             <div style={{ flex: 1, overflowY: 'auto', maxHeight: 300 }}>
               <table className="table">
@@ -81,7 +101,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.slice(0, 200).map((anim) => (
+                  {visibleAnimations.map((anim) => (
                     <tr
                       key={anim.animId}
                       className={anim.animId === selectedAnimId ? 'selected' : ''}
@@ -112,8 +132,10 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           </div>
           <div className="row gap" style={{ marginTop: 8 }}>
             <span className="muted">
-              事件类型：{data.eventTypes?.slice(0, 20).join(', ')}
-              {(data.eventTypes?.length ?? 0) > 20 ? ` …共 ${data.eventTypes.length} 种` : ''}
+              事件类型：{data.eventTypes?.slice(0, EVENT_TYPE_RENDER_LIMIT).join(', ')}
+              {(data.eventTypes?.length ?? 0) > EVENT_TYPE_RENDER_LIMIT
+                ? ` …共 ${data.eventTypes.length} 种，未显示 ${data.eventTypes.length - EVENT_TYPE_RENDER_LIMIT} 种`
+                : ''}
             </span>
           </div>
         </>

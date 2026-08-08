@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { PARAM_PAGE_SIZE } from '@soulforge/shared';
 import type { ParamRowPage } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 
@@ -29,8 +30,10 @@ export interface ParamTablePanelProps {
   }) => void;
 }
 
-/** Fixed page size for the paginated PARAM row table (hard constraint 17). */
-const PARAM_PAGE_SIZE = 20;
+/*
+ * 分页页大小（硬约束 17）来自 @soulforge/shared，与主进程
+ * `resource.readParamPage` 用同一常量，避免两侧字面量各自漂移。
+ */
 
 /**
  * PARAM 专业表格：分页行表 + row CRUD mutation 出口。
