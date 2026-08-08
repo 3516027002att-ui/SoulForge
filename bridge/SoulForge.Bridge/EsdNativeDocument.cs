@@ -8,6 +8,25 @@ using System.Security.Cryptography;
 /// File header (0x00–0x6B) uses absolute int32 fields; data header starts at 0x6C.
 /// All post-header offsets are relative to dataStart (0x6C).
 /// Expression bytecode is reported as opaque (offset, length) pairs — not decoded.
+///
+/// <para><b>State 记录数 vs 语义状态数（0x30 的单位）。</b>
+/// 文件头 0x30 计的是**物理 State 记录数**，不是语义状态数。每个 state group 的
+/// states 数组实际占 <c>stateCount + 1</c> 个 72 字节槽：索引 0..stateCount-1 是
+/// 真实状态，第 stateCount 槽是一个**尾随哨兵**，与该组 slot 0 逐字节相同。
+/// 因此恒有 <c>0x30 == Σ(stateCount) + stateGroupCount</c>。
+///
+/// 实测依据（Sekiro 本机语料，只读）：script/talk 全部 10 个 talkesdbnd 容器共
+/// 194 个 .esd、4957 个 state group——恒等式 194/194 成立；尾随槽与本组 slot 0
+/// 逐字节相同 4957/4957；state 区按 <c>(stateCount+1)*72</c> 连续铺排无洞无重叠，
+/// 铺满槽数精确等于 0x30。另在 436 组上做全文件 int64 扫描：尾随槽的相对偏移
+/// 被引用 0/436，而 slot 0 的相对偏移被引用 436/436——尾随槽不可达，不携带独有数据。
+///
+/// 所以哨兵槽**不能**当成语义状态计入：那会把每组首状态重复计一次，让面板把
+/// 659 个真实状态显示成 707。覆盖率判据因此按**记录数**对齐 0x30
+/// （<see cref="ParsedStateRecordCount"/>），语义状态数单列
+/// （<see cref="ParsedStateCount"/>）。这不是放宽判据——同时新增了
+/// <see cref="StateRecordModelConsistent"/>：逐组核对尾随槽确实是 slot 0 的副本，
+/// 布局一旦漂移（哨兵携带独有数据 = 它其实是真状态）立刻降 partial 并列出组号。</para>
 /// </summary>
 internal sealed class EsdNativeDocument
 {
@@ -55,6 +74,8 @@ internal sealed class EsdNativeDocument
         int declaredCommandArgCount,
         IReadOnlyList<EsdStateGroupInfo> stateGroups,
         int parsedStateCount,
+        int parsedStateRecordCount,
+        IReadOnlyList<long> sentinelDivergentGroupIds,
         int parsedConditionCount,
         int parsedCommandCallCount,
         int parsedCommandArgCount,
@@ -71,6 +92,8 @@ internal sealed class EsdNativeDocument
         DeclaredCommandArgCount = declaredCommandArgCount;
         StateGroups = stateGroups;
         ParsedStateCount = parsedStateCount;
+        ParsedStateRecordCount = parsedStateRecordCount;
+        SentinelDivergentGroupIds = sentinelDivergentGroupIds;
         ParsedConditionCount = parsedConditionCount;
         ParsedCommandCallCount = parsedCommandCallCount;
         ParsedCommandArgCount = parsedCommandArgCount;
@@ -87,7 +110,22 @@ internal sealed class EsdNativeDocument
     public int DeclaredCommandCallCount { get; }
     public int DeclaredCommandArgCount { get; }
     public IReadOnlyList<EsdStateGroupInfo> StateGroups { get; }
+
+    /// <summary>语义状态数：Σ(stateCount)，不含每组尾随哨兵槽。面板应显示这个。</summary>
     public int ParsedStateCount { get; }
+
+    /// <summary>
+    /// 物理 State 记录数：Σ(stateCount + 1)，含尾随哨兵槽。与文件头 0x30 同单位，
+    /// 覆盖率判据比的是这一项。
+    /// </summary>
+    public int ParsedStateRecordCount { get; }
+
+    /// <summary>
+    /// 尾随槽与本组 slot 0 **不**逐字节相同的组 ID。实测语料下应为空；非空表示
+    /// 哨兵模型不成立（那一槽可能携带独有数据 = 它其实是个真状态），必须降 partial。
+    /// </summary>
+    public IReadOnlyList<long> SentinelDivergentGroupIds { get; }
+
     public int ParsedConditionCount { get; }
     public int ParsedCommandCallCount { get; }
     public int ParsedCommandArgCount { get; }
@@ -192,6 +230,8 @@ internal sealed class EsdNativeDocument
         var banks = new SortedSet<int>();
         var bytecode = new List<EsdBytecodeRegion>();
         var totalParsedStates = 0;
+        var totalStateRecords = 0;
+        var sentinelDivergent = new List<long>();
 
         for (var g = 0; g < declaredStateGroupCount; g++)
         {
@@ -209,9 +249,12 @@ internal sealed class EsdNativeDocument
                     $"ESD 状态组 {groupId} 状态数 {stateCount} 越界。");
 
             var statesAbs = DataStart + statesRel;
-            if (statesRel < 0 || statesAbs + stateCount * StateEntrySize > source.Length)
+            // 边界必须按 (stateCount + 1) 算：每组 states 数组尾随一个哨兵槽，
+            // 下面要读它来核对哨兵模型。按 stateCount 算会让哨兵读取越出已校验范围。
+            if (statesRel < 0 || statesAbs + (stateCount + 1) * StateEntrySize > source.Length)
                 throw new InvalidDataException(
-                    $"ESD 状态组 {groupId} 状态表越界：relOffset={statesRel}, count={stateCount}。");
+                    $"ESD 状态组 {groupId} 状态表越界：relOffset={statesRel}, count={stateCount}"
+                    + "（含尾随哨兵槽共 count+1 条记录）。");
 
             var stateIds = new long[checked((int)stateCount)];
             for (var s = 0; s < (int)stateCount; s++)
@@ -251,6 +294,20 @@ internal sealed class EsdNativeDocument
                 totalParsedStates++;
             }
 
+            // ── 尾随哨兵槽 ──
+            // 索引 stateCount 处还有一条 State 记录，头 0x30 把它计入总数。它实测
+            // 恒为本组 slot 0 的逐字节副本、且其偏移不被任何字段引用，因此**不计入
+            // 语义状态**（计入会让每组首状态重复一次），只计入记录数以对齐 0x30。
+            // 逐组核对副本关系：不成立就说明这一槽携带独有数据，哨兵模型失效。
+            var sentinelOff = checked((int)(statesAbs + stateCount * StateEntrySize));
+            var slot0Off = checked((int)statesAbs);
+            if (!source.AsSpan(sentinelOff, StateEntrySize)
+                    .SequenceEqual(source.AsSpan(slot0Off, StateEntrySize)))
+            {
+                sentinelDivergent.Add(groupId);
+            }
+            totalStateRecords += checked((int)stateCount + 1);
+
             stateGroups.Add(new EsdStateGroupInfo(groupId, checked((int)stateCount), stateIds));
         }
 
@@ -258,7 +315,7 @@ internal sealed class EsdNativeDocument
             source, version, dataSize,
             declaredStateGroupCount, declaredStateCount,
             declaredConditionCount, declaredCommandCallCount, declaredCommandArgCount,
-            stateGroups, totalParsedStates,
+            stateGroups, totalParsedStates, totalStateRecords, sentinelDivergent,
             visitedConditions.Count, visitedCalls.Count, visitedArgs.Count,
             banks.ToArray(), bytecode);
     }
@@ -404,6 +461,8 @@ internal sealed class EsdNativeDocument
             && reparsed.DeclaredCommandCallCount == DeclaredCommandCallCount
             && reparsed.DeclaredCommandArgCount == DeclaredCommandArgCount
             && reparsed.ParsedStateCount == ParsedStateCount
+            && reparsed.ParsedStateRecordCount == ParsedStateRecordCount
+            && reparsed.SentinelDivergentGroupIds.SequenceEqual(SentinelDivergentGroupIds)
             && reparsed.ParsedConditionCount == ParsedConditionCount
             && reparsed.ParsedCommandCallCount == ParsedCommandCallCount
             && reparsed.ParsedCommandArgCount == ParsedCommandArgCount
@@ -421,6 +480,7 @@ internal sealed class EsdNativeDocument
             Hash(SourceBytes),
             StateGroups.Count,
             ParsedStateCount,
+            ParsedStateRecordCount,
             ParsedConditionCount,
             ParsedCommandCallCount,
             ParsedCommandArgCount);
@@ -441,18 +501,37 @@ internal sealed class EsdNativeDocument
     /// 后者管的是「同一份字节解析两遍是否一致」（parser 确定性），与「解析
     /// 得是否完整」是正交语义。混进去会让往返确定性这个概念失去意义。
     /// </summary>
+    ///
+    /// <para>states 一项比的是 <see cref="ParsedStateRecordCount"/>（物理记录数），
+    /// 因为 0x30 计的就是记录数——详见类型注释。语义状态数
+    /// （<see cref="ParsedStateCount"/>）与 0x30 天然差一个 stateGroupCount，
+    /// 拿它去比会恒定报红。哨兵模型本身由
+    /// <see cref="StateRecordModelConsistent"/> 独立守着，没有失去检出能力。</para>
     public bool CoverageComplete =>
-        ParsedStateCount == DeclaredStateCount
+        ParsedStateRecordCount == DeclaredStateCount
+        && StateRecordModelConsistent
         && ParsedConditionCount == DeclaredConditionCount
         && ParsedCommandCallCount == DeclaredCommandCallCount
         && ParsedCommandArgCount == DeclaredCommandArgCount;
+
+    /// <summary>
+    /// 哨兵模型是否成立：每组尾随槽都是本组 slot 0 的逐字节副本。
+    /// 不成立说明那一槽携带独有数据（即它其实是个真状态），语义状态数就少算了。
+    /// </summary>
+    public bool StateRecordModelConsistent => SentinelDivergentGroupIds.Count == 0;
 
     /// <summary>逐项列出未解析完整的计数，供诊断引用。</summary>
     public string[] CoverageShortfalls()
     {
         var gaps = new List<string>();
-        if (ParsedStateCount != DeclaredStateCount)
-            gaps.Add($"states declared={DeclaredStateCount} parsed={ParsedStateCount}");
+        if (ParsedStateRecordCount != DeclaredStateCount)
+            gaps.Add($"stateRecords declared={DeclaredStateCount} parsed={ParsedStateRecordCount}"
+                + $"（语义状态 {ParsedStateCount} + 每组尾随哨兵 {StateGroups.Count}）");
+        if (!StateRecordModelConsistent)
+            gaps.Add("stateSentinelModel 失效：以下状态组的尾随槽不是本组 slot 0 的副本，"
+                + "该槽可能是未被计入的真实状态 → groupIds="
+                + string.Join(",", SentinelDivergentGroupIds.Take(20))
+                + (SentinelDivergentGroupIds.Count > 20 ? $" …共 {SentinelDivergentGroupIds.Count} 组" : ""));
         if (ParsedConditionCount != DeclaredConditionCount)
             gaps.Add($"conditions declared={DeclaredConditionCount} parsed={ParsedConditionCount}");
         if (ParsedCommandCallCount != DeclaredCommandCallCount)
@@ -473,12 +552,18 @@ internal sealed class EsdNativeDocument
             sourceSize = SourceBytes.Length,
             sourceHash = SourceHash,
             stateGroupCount = DeclaredStateGroupCount,
-            // ⚠️ 裸名 stateCount/conditionCount/... 携带的是**声明量**，而
-            // EsdWorkbenchPanel.tsx:51 把它显示成「N states」、:98 显示成
-            // 「状态数」。只解析出 3 个而声明 500 时，界面会说 500——违反
-            // 硬约束 7（界面必须能回答「已解析多少」）。裸名保留以兼容既有
-            // 消费方，同时补 declared* 显式名与 parsed* 对照，UI 应改用后两组。
-            stateCount = DeclaredStateCount,
+            // ⚠️ 裸名 conditionCount/commandCallCount/... 携带的是**声明量**，而
+            // EsdWorkbenchPanel.tsx:51 把它显示成「N conds」。只解析出 3 个而声明
+            // 500 时，界面会说 500——违反硬约束 7（界面必须能回答「已解析多少」）。
+            // 裸名保留以兼容既有消费方，同时补 declared* 显式名与 parsed* 对照，
+            // UI 应改用后两组。
+            //
+            // 裸名 stateCount 是例外：它此前挂 DeclaredStateCount，于是面板把 659 个
+            // 真实状态显示成 707——那 48 是每组的尾随哨兵槽，不是状态。这里改挂
+            // **语义状态数**，与它下方 stateGroups[].stateCount（同样是语义数）单位
+            // 一致，也与面板「状态数」的字面含义一致。声明量仍可由 declaredStateCount
+            // 取到，未丢信息。
+            stateCount = ParsedStateCount,
             conditionCount = DeclaredConditionCount,
             commandCallCount = DeclaredCommandCallCount,
             commandArgCount = DeclaredCommandArgCount,
@@ -487,7 +572,13 @@ internal sealed class EsdNativeDocument
             declaredConditionCount = DeclaredConditionCount,
             declaredCommandCallCount = DeclaredCommandCallCount,
             declaredCommandArgCount = DeclaredCommandArgCount,
+            // parsedStateCount 是语义状态数；parsedStateRecordCount 是与 0x30 同单位的
+            // 物理记录数（含每组尾随哨兵）。两者相差恰好 stateGroupCount。
             parsedStateCount = ParsedStateCount,
+            parsedStateRecordCount = ParsedStateRecordCount,
+            stateSentinelPerGroup = 1,
+            stateSentinelModelConsistent = StateRecordModelConsistent,
+            stateSentinelDivergentGroupIds = SentinelDivergentGroupIds,
             parsedConditionCount = ParsedConditionCount,
             parsedCommandCallCount = ParsedCommandCallCount,
             parsedCommandArgCount = ParsedCommandArgCount,
@@ -505,6 +596,11 @@ internal sealed class EsdNativeDocument
             // 解析不完整时不得停留在 candidate——candidate 表示「结构已认出、
             // 待真实语料确认」，而「声明 500 只读出 3」是另一回事：那是解析
             // 覆盖面残缺，必须降到 partial 并附结构化诊断（硬约束 8）。
+            //
+            // 上限就是 candidate：ESD 是 user-approved 的 V0.6 延期项
+            // （scope.json SCOPE-BEHAVIOR-ESD，authorityAtRuling=candidate）。
+            // 计数对齐只说明**结构计数**已闭合，不构成表达式 schema、writer 或
+            // 真实游戏加载的验证——RPN 字节码仍按不透明 (offset,length) 上报。
             authority = CoverageComplete ? "candidate" : "partial"
         };
     }
@@ -550,6 +646,7 @@ internal sealed record EsdRoundTripReport(
     string RebuiltHash,
     int StateGroupCount,
     int StateCount,
+    int StateRecordCount,
     int ConditionCount,
     int CommandCallCount,
     int CommandArgCount);
