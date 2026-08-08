@@ -41,6 +41,36 @@ export function runSyntheticConfirmedReferenceSmoke(): SyntheticConfirmedReferen
   const msgIngest = ingestBridgeResult(index, makeMsgExport());
   if (!msgIngest.accepted) throw new Error('Synthetic msg export was not ingested.');
 
+  // ── resourceKind 契约判据 ──
+  // 实测（2026-08-08）：C# 侧发出的 resourceKind 含 "texture"，而 TS 的
+  // ResourceKind union（packages/shared/src/types.ts:1-14）没有它。两侧各写一份
+  // 枚举、手工同步、无 codegen。此前 TS 侧无任何一处校验 C# 送来的值是否在
+  // union 内，越界值会与 chr/obj/sfx 这类「合法但 v0.1 不深度摄取」的正当情形
+  // 混成同一条 INGEST_RESOURCE_KIND_SKIPPED info 诊断。
+  //
+  // 两条断言必须成对：只测越界会红，会让判据可以退化成「一律判越界」而仍全绿。
+  const outOfContract = ingestBridgeResult(index, makeForeignKindExport());
+  if (!outOfContract.diagnostics.some((d) => d.code === 'INGEST_RESOURCE_KIND_OUT_OF_CONTRACT')) {
+    throw new Error(
+      'resourceKind 越界（C# 实发的 texture）未被识别为契约漂移：'
+      + JSON.stringify(outOfContract.diagnostics.map((d) => d.code))
+    );
+  }
+  if (outOfContract.accepted) throw new Error('越界 resourceKind 不得被 accepted。');
+
+  const inContractNotIngested = ingestBridgeResult(index, makeInContractSkippedExport());
+  if (inContractNotIngested.diagnostics.some((d) => d.code === 'INGEST_RESOURCE_KIND_OUT_OF_CONTRACT')) {
+    throw new Error(
+      '合法 union 值 chr 被误判为契约越界——判据过宽会让真实漂移淹没在噪声里。'
+    );
+  }
+  if (!inContractNotIngested.diagnostics.some((d) => d.code === 'INGEST_RESOURCE_KIND_SKIPPED')) {
+    throw new Error(
+      '合法但不深度摄取的 resourceKind 应报 INGEST_RESOURCE_KIND_SKIPPED：'
+      + JSON.stringify(inContractNotIngested.diagnostics.map((d) => d.code))
+    );
+  }
+
   const graph = buildReferenceGraph(index.toSymbolBundle(), { enableNumericFallback: true });
   const edges = graph.edges;
   const eventUri = 'event://m10_00_00_00/1000';
@@ -116,6 +146,38 @@ function hasEdge(
       && edge.kind === expected.kind
       && edge.confidence === expected.confidence
   );
+}
+
+/**
+ * C# 实际会发出的越界 resourceKind。取 "texture" 而不是随手编一个不存在的值：
+ * 它是 BridgeCommandService 的 TPF 路径真实发出的值，用真实漂移做靶标，判据才
+ * 对着真问题。编一个假值会让这条断言在 C# 改掉 texture 之后仍然全绿。
+ */
+function makeForeignKindExport(): BridgeResult<unknown> {
+  return {
+    sourceUri: 'soulforge://mod/chr/c8010.texbnd.dcx',
+    sourcePath: 'chr/c8010.texbnd.dcx',
+    game: 'unknown',
+    // 刻意绕过 TS 的 union 约束：本断言要测的正是「运行期收到编译期不该出现的值」，
+    // 而 C# 送来的 JSON 不经 TS 类型检查。用 as 让越界值能进到被测函数里。
+    resourceKind: 'texture' as BridgeResult<unknown>['resourceKind'],
+    parseStatus: 'partial',
+    diagnostics: [],
+    data: { textureCount: 11 }
+  };
+}
+
+/** 合法 union 值但不是 v0.1 深度摄取目标——用于证明判据没过宽。 */
+function makeInContractSkippedExport(): BridgeResult<unknown> {
+  return {
+    sourceUri: 'soulforge://mod/chr/c1020.chrbnd.dcx',
+    sourcePath: 'chr/c1020.chrbnd.dcx',
+    game: 'unknown',
+    resourceKind: 'chr',
+    parseStatus: 'partial',
+    diagnostics: [],
+    data: { entries: 3 }
+  };
 }
 
 function makeEventExport(): BridgeResult<unknown> {
