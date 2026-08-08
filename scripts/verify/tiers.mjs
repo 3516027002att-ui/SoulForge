@@ -164,6 +164,15 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 布局守卫本身在 IPC 层不可达（调用方永远传 no-op），故由文档内部自检上报，
   // 门禁断言其四项全真——否则放宽守卫会让变长字节越界覆盖后续子项而无人发现。
   'test:bnd4-repack-scope': 'synthetic',
+  // BC7 (BPTC) 解码的 8 个 mode。实现由真实 Sekiro 语料验证过（c8010 的 11 个 BC7
+  // 纹理全部导出、IHDR 与 DDS 头一致），但那次判据全在临时探针里、探针已删除，
+  // 于是 544 行解码代码此前零门禁。判据必须打在**像素值**上而不是「导出成功」：
+  // BC7 的失效形态全是静默的——partition 表错一行、endpoint 嵌套顺序读反、插值
+  // 少一个 +32、位复制扩展写错，都产出颜色错误但结构完好的 PNG，定在「不抛异常」
+  // 那一层会让返回全黑图的实现报绿。harness 自身是编码器，期望值由同一份语义内容
+  // 按规范公式独立推导，不解析块本身。BC7 块可自造、无需真实资产，但解码在 C# 侧
+  // 需要真实 exe，故与 test:bridge-write-boundary 同归 synthetic。
+  'test:bc7-decode': 'synthetic',
   // 桌面安全边界的运行期版本：观测生产产物真实的 webPreferences、preload 表面与
   // 脱敏行为。与 test:desktop-security（源码文本级）并存而不是取代——后者的
   // must-exist 判据改名即红，是安全方向；本条替掉的是它那批 `!includes(旧名)`

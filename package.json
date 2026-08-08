@@ -126,6 +126,7 @@
     "test:bridge-write-boundary": "node scripts/verify-bridge-write-boundary-gate.mjs",
     "test:bridge-command-advertisement": "node scripts/verify-bridge-command-advertisement-gate.mjs",
     "test:bnd4-repack-scope": "node scripts/verify-bnd4-repack-scope-gate.mjs",
+    "test:bc7-decode": "node scripts/verify-bc7-decode-gate.mjs",
     "test:desktop-security-runtime": "node scripts/verify-desktop-security-runtime.mjs",
     "test:preload-surface-ruling": "node scripts/verify-preload-surface-ruling-gate.mjs",
     "test:renderer-e2e": "npm run test:renderer-playwright -w @soulforge/desktop",
