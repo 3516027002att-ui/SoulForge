@@ -29,6 +29,20 @@ internal sealed class FlverNativeDocument
 {
     private static readonly byte[] MagicBytes = { 0x46, 0x4C, 0x56, 0x45, 0x52, 0x00 };
     private const int HeaderSize = 0x80;
+
+    /// <summary>
+    /// 已在真实语料上验证过的 FLVER internalVersion 闭集。
+    ///
+    /// 2026-08-08 实测 Sekiro mods/chr 全部 11 个 chrbnd 的 FLVER 子项：
+    /// 0x2001A ×8、0x20014 ×3（c5030 / c6210 / c8010），endian 标记全部 "L\0"。
+    ///
+    /// ⚠️ 这两个值都必须在集合里。我第一版只抽了 2 个 chrbnd 就把闭集定成
+    /// 0x2001A 单值，随即被 bridge:verify:flver-multi 打断——c5030 是 0x20014。
+    /// 抽样定闭集会把已验证路径判成不支持。扩这个集合必须先有该版本的真实样本
+    /// 与往返验证，不能凭「大概兼容」加进来——那等于在未验证的前提下扩大 native
+    /// 声明面；同理，缩小它会让已验证的样本失去支持。
+    /// </summary>
+    private static readonly int[] SupportedInternalVersions = { 0x20014, 0x2001A };
     private const int DummySize = 64;
     private const int MaterialSize = 32;
     private const int BoneSize = 128;
@@ -557,8 +571,51 @@ internal sealed class FlverNativeDocument
                 throw new InvalidDataException($"FLVER 魔数不匹配；偏移 {i} 处为 0x{source[i]:X2}，期望 0x{MagicBytes[i]:X2}。");
         }
 
+        // 0x06 的两字节是 endian 标记（"L\0" = little-endian、"B\0" = big-endian）。
+        //
+        // 此前它只被当 UTF-16 字符串读走（versionString）却从不判断，而本类的全部
+        // 读原语（ReadInt32/ReadInt64/ReadFloat32，见文件末尾）都硬绑 LittleEndian。
+        // 于是 big-endian FLVER 的失效形态是**静默错解**而不是报错：魔数 FLVER\0
+        // 与小端文件完全相同，必然通过上面那道检查，随后每个字段都被按小端错读，
+        // 产出基于错位偏移的结果——而若那些垃圾值恰好落在越界检查的合法范围内
+        // （:611 与 ComputeSectionEnd 是概率性拦截），还会带着 authority 一路上报。
+        //
+        // 照 TaeNativeDocument.cs:74 与 EsdNativeDocument.cs 的先例做**前置拒绝**
+        // 而不是记 layoutWarning：warning 只降 authority，而这里的问题是「读出来的
+        // 每个数都不可信」，继续解析没有意义。
+        if (source[0x06] != (byte)'L' || source[0x07] != 0x00)
+        {
+            throw new NotSupportedException(
+                $"仅支持 little-endian FLVER（偏移 0x06 处为 \"L\\0\"），"
+                + $"收到 0x{source[0x06]:X2} 0x{source[0x07]:X2}。"
+                + " big-endian 与 FLVER0 变体的魔数与小端文件相同，若不前置拒绝会被按"
+                + " 小端静默错解——本解析器的读原语全部硬绑 LittleEndian。");
+        }
+
         var versionString = ReadUtf16NullTerminated(source, 0x06, 4);
         var internalVersion = ReadInt32(source, 0x08);
+
+        // internalVersion 白名单。此前只读不判，而 :388（UV 除数 2048 vs 1024）与
+        // :704（indexSize 字段是否存在）已经在按 version 分支——也就是说不同版本的
+        // 布局**确实不同**，读到未登记版本时那些分支会按错误假设走。
+        //
+        // 闭集刻意只含本机真实语料实测出现过的值（2026-08-08 实测 Sekiro
+        // mods/chr 的 chrbnd：endian 恒 "L\0"、internalVersion 恒 0x2001A）。
+        // 扩这个集合必须先有该版本的真实样本与往返验证，不能凭「大概兼容」加进来
+        // ——那等于在未验证的前提下扩大 native 声明面。
+        if (Array.IndexOf(SupportedInternalVersions, internalVersion) < 0)
+        {
+            var supported = string.Join(
+                ", ",
+                Array.ConvertAll(SupportedInternalVersions, v => $"0x{v:X}"));
+            throw new NotSupportedException(
+                $"仅支持已验证的 FLVER internalVersion（{supported}），"
+                + $"收到 0x{internalVersion:X}。"
+                + " 不同 version 的 UV 除数与 FaceSet indexSize 字段布局不同"
+                + "（见本类的 version 分支），未登记版本会被按错误布局解析。"
+                + " 要支持新版本需先登记该版本的真实样本并通过往返验证。");
+        }
+
         var dataStart = ReadInt32(source, 0x0C);
         var dataLength = ReadInt32(source, 0x10);
 
