@@ -1986,6 +1986,23 @@ export function App(): ReactElement {
               initialBytesBase64={typeof preview.hex === 'string' && !preview.hex.includes(' ')
                 ? preview.hex
                 : hexTextToBase64(preview.hex)}
+              totalBytes={preview.file?.size}
+              {...(selectedFile && bridge
+                ? {
+                    // 接 readRawRange（main handler ipc.ts:1170）——预览只读前 64 KiB，
+                    // 而实测 mods 下 237 个文件有 148 个超过它，此前 hex 证据对这些文件
+                    // 只能看到开头且把前缀长度当总量显示。硬约束 17 要求大规模访问分页。
+                    onLoadRange: async (offset: number, length: number) => {
+                      const raw = await bridge.readRawRange(selectedFile.sourceUri, offset, length);
+                      return raw as {
+                        ok: boolean;
+                        bytesBase64?: string;
+                        fileSize?: number;
+                        diagnostics?: Array<{ code: string; message: string }>;
+                      };
+                    }
+                  }
+                : {})}
             />
           )}
           {preview?.previewKind === 'hex' && !preview.hex && <pre className="muted">无 Hex 预览数据。</pre>}
