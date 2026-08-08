@@ -25,7 +25,7 @@ Release corpus registry 是**纯元数据**登记：
 | `registryId` | string | 脱敏 opaque 标识 `^[a-z0-9][a-z0-9._-]{2,127}$`，非路径 |
 | `game` | string | 冻结枚举 `sekiro` |
 | `gameBuild` | string | 短、稳定、不含路径的 build 标识 |
-| `schemaVersion` | string | 必须等于 `x-constants.schemaVersion`（当前 `1.0.0`） |
+| `schemaVersion` | string | 必须等于 `x-constants.schemaVersion`（当前 `1.1.0`） |
 | `createdAt` | string | 带时区的 RFC 3339 时间 |
 | `entryCount` | integer | 正安全整数，`<= x-constants.maxEntries`，必须严格等于 `entries.length` |
 | `entries` | array | 非空，最多 `maxEntries` 条 |
@@ -63,6 +63,21 @@ Release corpus registry 是**纯元数据**登记：
 4. `test:release-corpus-registry` 同步门禁必须实测：变更后枚举与 schema 不一致时 `exit=1`（负向证明），一致时 `exit=0`。
 
 禁止「只改 TS 常量、不改 schema 文件」或反之——两者是同一冻结规格的两份投影，漂移即失败关闭。
+
+### 变更记录
+
+- **1.1.0**（2026-08-08，MINOR / 兼容扩展）：`observedVariantsByFormat.DFLT` 新增
+  `DCX_DFLT_10000_24_9_0`。
+  来源：把 `bridge:verify:dcx-documents` 的语料根从 mods 扩到整个游戏根后，
+  实测 12 个文件（font/dbgfont14h.{ccm,tpf}.dcx、facegen/facegen.fgbnd.dcx、
+  parts/fc_m_0000_m.partsbnd.dcx、shader/ 下 8 个 *.shaderbnd.dcx）全部报该变体，
+  而闭集里只有它的旧四段写法 `DCX_DFLT_10000_24_9`。variant 由
+  `DcxNativeDocument.ClassifyVariant` 产出五段
+  （`{format}_{version:X}_{hint:X}_{level}_{sub}`），四段写法是历史残留。
+  兼容性：纯新增枚举值，旧 registry 仍合法。
+  **不提升任何 authority**：登记只表示「该信封变体已被观察到且可分类」，
+  不声明这些文件可写回、不声明 shader/font/parts 进入 V0.5 范围
+  （V0.5 是文本优先五编辑器）。
 
 ## 4. observedVariant 与 Bridge variant 的对账约定
 
