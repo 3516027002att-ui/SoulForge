@@ -23,9 +23,11 @@
  * ——这属于门禁自己的盲区，不是纪律问题。dist 那处尤其值得记：它连源文件都没有了，
  * 靠删源码不会带走产物。
  *
- * 排除 node_modules 与 .git：前者是依赖树（第三方包里带 _tmp 前缀的文件不是我们的
- * 残留），后者是 git 内部存储。两者都不是我们能清理的对象，扫进来只会制造无法消除
- * 的假红。
+ * 排除三类不属于本工作副本的目录：node_modules（依赖树，第三方包里带 _tmp 前缀的
+ * 文件不是我们的残留）、.git（git 内部存储）、.claude/worktrees（子代理的独立工作
+ * 副本，本轮实测有三个共 2.0 GB / 36000 文件）。都不是本副本能清理的对象，扫进来
+ * 只会制造无法消除的假红——worktree 里的残留要在那个 worktree 里清，而它可能已经
+ * 被移除了，主仓库这边根本无从下手。
  */
 import { readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -43,6 +45,18 @@ const RESIDUAL_PREFIXES = Object.freeze(['_probe', '_tmp']);
  * 那正是本门禁要覆盖的地方，加进来等于把刚补上的盲区重新打开。
  */
 const EXCLUDED_DIRS = Object.freeze(['node_modules', '.git']);
+
+/**
+ * 按**仓库相对路径**排除的目录（不是按名字——按名字会误伤任何同名目录，
+ * 而这里要排除的是一个确定位置）。子代理 worktree 是独立工作副本，
+ * 其中的残留只能在那个副本里清理。
+ */
+const EXCLUDED_PATHS = Object.freeze(['.claude/worktrees']);
+
+function isExcludedPath(absolute) {
+  const rel = relative(repoRoot, absolute).split('\\').join('/');
+  return EXCLUDED_PATHS.includes(rel);
+}
 
 function isResidual(name) {
   return RESIDUAL_PREFIXES.some((prefix) => name.startsWith(prefix));
@@ -73,6 +87,7 @@ function scan(dir) {
     }
     if (statSync(absolute).isDirectory()) {
       if (EXCLUDED_DIRS.includes(entry)) continue;
+      if (isExcludedPath(absolute)) continue;
       scan(absolute);
     }
   }
@@ -113,6 +128,7 @@ console.log(JSON.stringify({
   scannedRoot: '.',
   scannedDirs,
   excludedDirs: [...EXCLUDED_DIRS],
+  excludedPaths: [...EXCLUDED_PATHS],
   prefixes: [...RESIDUAL_PREFIXES],
   note: '本门禁拦的是残留而非存在：工作时临时建探针合法，提交/验证前删掉即可'
 }, null, 2));
