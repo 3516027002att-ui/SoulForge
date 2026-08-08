@@ -72,6 +72,7 @@ if (positive.classification.formatCounts.DFLT !== 1
 }
 
 assertAllObservedVariantsAccepted();
+assertSchemaVersionCompatWindow();
 
 const shardBoundary = validateReleaseCorpusRegistry(buildShardBoundaryManifest());
 if (!shardBoundary.ok) {
@@ -226,6 +227,28 @@ const negativeCases: Array<{
     name: 'missing-format-coverage',
     input: removeEntry(2),
     expectedCode: 'RELEASE_CORPUS_FORMAT_COVERAGE_MISSING'
+  },
+  // schemaVersion 可读性的三条拒绝方向。spec §3 只允许「同 MAJOR 且不高于当前」，
+  // 更高版本可能携带本实现不认识的枚举值，放行等于静默接受未知约束。
+  {
+    name: 'schema-version-higher-minor',
+    input: mutateManifest({ schemaVersion: '1.2.0' }),
+    expectedCode: 'RELEASE_CORPUS_SCHEMA_VERSION_UNSUPPORTED'
+  },
+  {
+    name: 'schema-version-higher-patch',
+    input: mutateManifest({ schemaVersion: '1.1.1' }),
+    expectedCode: 'RELEASE_CORPUS_SCHEMA_VERSION_UNSUPPORTED'
+  },
+  {
+    name: 'schema-version-different-major',
+    input: mutateManifest({ schemaVersion: '2.0.0' }),
+    expectedCode: 'RELEASE_CORPUS_SCHEMA_VERSION_UNSUPPORTED'
+  },
+  {
+    name: 'schema-version-malformed',
+    input: mutateManifest({ schemaVersion: '1.1' }),
+    expectedCode: 'RELEASE_CORPUS_SCHEMA_VERSION_UNSUPPORTED'
   }
 ];
 
@@ -377,6 +400,57 @@ function assertAllObservedVariantsAccepted(): void {
         throw new Error(`${format}/${observedVariant} escalated native authority`);
       }
     }
+  }
+}
+
+/**
+ * schemaVersion 兼容窗口的**正向**判据（拒绝方向在 negativeCases 里）。
+ *
+ * spec §3 对 MINOR 的定义是兼容扩展：「旧 schemaVersion 的 registry 仍可被读，
+ * 但新 registry 必须写新版本号」。两个方向都必须钉住，而且是**同一次提升**里
+ * 最容易做反的一对：
+ *  - 只守「恰等于当前值」→ 纯新增枚举的兼容扩展会把全部既有 registry 判成
+ *    UNSUPPORTED，那是 MAJOR 语义（1.1.0 提升时实测发生过）；
+ *  - 只守「同 MAJOR 就放行」→ 更高 MINOR 携带的未知枚举被静默接受。
+ *
+ * 判据从 RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION 推导而不是硬编码版本字面量：
+ * 下次提升到 1.2.0 时这里自动跟随，不会变成一条只对 1.1.0 成立的死判据。
+ */
+function assertSchemaVersionCompatWindow(): void {
+  const current = /^(\d+)\.(\d+)\.(\d+)$/.exec(RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION);
+  if (current === null) {
+    throw new Error(
+      `RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION 不是 MAJOR.MINOR.PATCH：${RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION}`
+    );
+  }
+  const major = Number(current[1]);
+  const minor = Number(current[2]);
+  const patch = Number(current[3]);
+
+  const readable: string[] = [RELEASE_CORPUS_REGISTRY_SCHEMA_VERSION];
+  // 同 MAJOR 的每一个更低 MINOR，以及当前 MINOR 的每一个更低 PATCH，都必须仍可读。
+  for (let m = 0; m < minor; m += 1) readable.push(`${major}.${m}.0`);
+  for (let p = 0; p < patch; p += 1) readable.push(`${major}.${minor}.${p}`);
+
+  for (const version of readable) {
+    const result = validateReleaseCorpusRegistry(mutateManifest({ schemaVersion: version }));
+    if (!result.ok) {
+      throw new Error(
+        `schemaVersion ${version} 应当仍可读（spec §3 MINOR 兼容扩展），实际被拒：${codes(result)}`
+      );
+    }
+    if (result.nativeFormatAuthority !== false) {
+      throw new Error(`schemaVersion ${version} escalated native authority`);
+    }
+  }
+
+  // 兼容窗口本身必须非空且真的覆盖到「比当前低」的版本——否则当 MINOR/PATCH 都为 0
+  // 时这个函数会退化成只测当前值一条，读起来像有覆盖而实际没有。
+  if (readable.length < 2) {
+    throw new Error(
+      'schemaVersion 兼容窗口只含当前版本，无法证明旧版本仍可读；'
+      + '若当前是首个版本（x.0.0），本判据应改为在提升后启用而不是留空转。'
+    );
   }
 }
 
