@@ -1395,7 +1395,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 146 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 148 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1468,7 +1468,7 @@ npm run test:workbench-projections
 npm run typecheck
 ~~~
 
-**synthetic**（36 条）
+**synthetic**（38 条）
 
 ~~~powershell
 npm run bridge:build
@@ -1478,6 +1478,7 @@ npm run bridge:verify:daemon
 npm run bridge:verify:synthetic
 npm run test:asset-import
 npm run test:asset-writeback
+npm run test:bc3-color-block
 npm run test:bc7-decode
 npm run test:bnd4-repack-scope
 npm run test:bridge-recovery-harness
@@ -1494,6 +1495,7 @@ npm run test:emevd-coverage
 npm run test:emevd-full-document
 npm run test:emevd-plan-production
 npm run test:flver-candidate
+npm run test:flver-gap-visibility
 npm run test:large-transaction-recovery
 npm run test:param-field-mutation
 npm run test:param-metadata-mismatch
@@ -1576,7 +1578,7 @@ npm run test:release-reproducible
 - `verify:all`：同上（全层级别名）
 - `verify:list`：同上（只列计划，不是验证）
 - `dev`：交互式开发服务器，不是验证
-- `bridge:publish`：发布产物构建，由 release 链按需调用
+- `bridge:publish`：发布产物构建。**当前无任何调用方**（release 层 10 条脚本均不调它，实测 2026-08-08）；跑一次 Release publish 要几分钟且产物不参与任何验证判据，故不进 tier。若将来 release 链要用它，请一并把 runBridge.ts 的 Release 候选路径纳入验证——那两条路径至今从未被生成过。
 - `corpus:build-local-release`：生成本机 corpus registry，写 testdata，不是验证
 - `corpus:build-local-release:configured`：同上（被 wrapper 调用的内层）
 - `gov`：治理写入 CLI，不是验证；正确性由 test:gov-cli 门禁
