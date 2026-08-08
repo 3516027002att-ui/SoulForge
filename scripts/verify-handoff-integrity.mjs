@@ -30,7 +30,14 @@ const loadedGovernance = loadGovernanceData(root);
 const authoritativeEvidence = loadedGovernance.data === null
   ? null
   : projectEvidence(loadedGovernance.data.evidence, parseSealBaseline);
-if (loadedGovernance.data === null) findings.push(...loadedGovernance.findings);
+// 无条件收集 loadGovernanceData 的 findings，不能只在 data === null 时收。
+//
+// loadGovernance.mjs 对「治理数据文件缺失」「schema 缺失」「schema 校验失败」
+// 都是 push finding 后 **continue**（:58-69 等），data 仍是非 null 的部分结果。
+// 原先的 `if (data === null)` 因此把这些 findings 全部丢弃：某个治理 JSON 缺失
+// 或 schema 校验不过时，本门禁照样报绿，只是校验面静默缩小了一块。
+// 同文件 :186 已为同形态补过失败关闭 —— 三处同形态里当时只改对了一处。
+findings.push(...loadedGovernance.findings);
 
 function readOrNull(relativePath) {
   const absolutePath = join(root, relativePath);
@@ -108,7 +115,26 @@ let scriptNames = new Set();
 if (packageJsonRaw !== null) {
   try {
     const packageJson = JSON.parse(packageJsonRaw);
-    scriptNames = new Set(Object.keys(packageJson.scripts ?? {}));
+    // scripts 键缺失或不是对象时失败关闭，不能静默得到空 Set。
+    //
+    // 原先写 `packageJson.scripts ?? {}`，于是键改名/被删时 scriptNames 为空，
+    // 下方 `if (scriptNames.size > 0)` 让整块「文档里引用的 npm run X 必须是真
+    // 脚本」校验**蒸发**——门禁照样报绿，而它守的正是「文档命令与实际脚本对齐」。
+    // 空 scripts 在本仓库是不可能的正常状态（根 package.json 有 159 条），
+    // 所以「空」只可能是读错了。
+    if (packageJson.scripts === undefined || packageJson.scripts === null) {
+      add('error', 'PKG_SCRIPTS_MISSING', PKG,
+        'package.json 缺少 scripts 键；无法校验文档引用的 npm run 命令，失败关闭。');
+    } else if (typeof packageJson.scripts !== 'object' || Array.isArray(packageJson.scripts)) {
+      add('error', 'PKG_SCRIPTS_MALFORMED', PKG,
+        `package.json 的 scripts 不是对象（实际 ${Array.isArray(packageJson.scripts) ? 'array' : typeof packageJson.scripts}）；失败关闭。`);
+    } else {
+      scriptNames = new Set(Object.keys(packageJson.scripts));
+      if (scriptNames.size === 0) {
+        add('error', 'PKG_SCRIPTS_EMPTY', PKG,
+          'package.json 的 scripts 为空；本仓库不可能没有脚本，说明读取有误，失败关闭。');
+      }
+    }
   } catch (error) {
     add('error', 'PKG_PARSE_FAIL', PKG, `package.json 解析失败：${error.message}`);
   }
