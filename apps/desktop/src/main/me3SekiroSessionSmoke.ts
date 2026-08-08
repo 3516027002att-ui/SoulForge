@@ -225,9 +225,26 @@ function failClosed(message: string, extra: Record<string, unknown> = {}): never
   finish('failed', message, extra);
 }
 
+/**
+ * 收尾并按 status 决定 ok 与退出码。
+ *
+ * `skipped` 必须与 `passed` 同样报 ok:true / exit 0——它是**诚实跳过**，不是失败。
+ * 此前 `report.ok = status === 'passed'` 把 skipped 也判成 ok:false 并 exit 1，
+ * 于是「未获授权启动零售游戏」这个完全正常的状态被 runner 判成 FAIL：
+ * 2026-08-08 实测 native 全量跑时本条报 FAIL，而它自己的 message 写的是
+ * 「结构化预检 + 诚实跳过」——输出自相矛盾。
+ *
+ * 这与仓库反复处理的「跳过冒充通过」方向相反但同源：那边让失效看起来像成功，
+ * 这边让正常看起来像缺陷。两者都让状态不可信，而后者的代价是接手者会去查一个
+ * 不存在的故障（本轮我自己就先去查了 me3 gateway 才发现是判据问题）。
+ *
+ * 五态判定（runner.mjs）靠的是输出里的 status 字段而不是退出码，所以这里同时
+ * 修 ok 与退出码不会让 skipped 被误读成 passed——它仍然如实报 skipped。
+ */
 function finish(status: string, message: string, extra: Record<string, unknown> = {}): never {
   clearTimeout(watchdog);
-  report.ok = status === 'passed';
+  const honestSkip = status === 'skipped';
+  report.ok = status === 'passed' || honestSkip;
   report.status = status;
   report.message = message;
   report.steps = steps;
