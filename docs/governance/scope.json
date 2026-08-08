@@ -657,7 +657,7 @@
         "REL-D"
       ],
       "subjectKind": "behavior-animation",
-      "scope": "真实 Sekiro corpus 中 luabnd / action *.hks 脚本容器的条目枚举、只读字节码证据投影，以及经 Patch Engine 的整个内层文件替换、重读与回滚",
+      "scope": "真实 Sekiro corpus 中 luabnd / action *.hks 脚本容器的条目枚举、只读字节码证据投影、经 Patch Engine 的整个内层文件替换/重读/回滚，以及**明文条目的源码级编辑**（容器内与 action 目录下少数以纯文本存放的脚本与符号表；字节码条目不在源码级编辑范围内）",
       "decisionStatus": "user-approved",
       "proposedSupport": "supported",
       "operations": [
@@ -665,6 +665,7 @@
         "enumerate-script-container-entries",
         "project-readonly-bytecode-evidence-view",
         "replace-whole-inner-file",
+        "source-level-edit-plaintext-script-entries",
         "write",
         "re-read",
         "rollback",
@@ -684,7 +685,13 @@
       "registryRefs": [],
       "openRulings": [],
       "nonClaims": [
-        "V0.5 只承诺脚本容器条目枚举、只读字节码证据投影与整个内层文件替换。经实测，`action/script/*.hks` 与 luabnd 内层 `.lua` 均以 `\\\\x1bLuaQ` 开头，属 Havok Script（Lua 5.1 家族）编译字节码，不是可直接编辑的文本；`.luagnl` / `.luainfo` 为反编译辅助元数据。反编译、重编译与 typed script mutation 已延期至 V0.6。裁定时 authorityAtRuling 为 unverified；容器条目枚举、只读证据投影、writer 与真实游戏证据均待建立。"
+        "V0.5 承诺脚本容器条目枚举、只读字节码证据投影、整个内层文件替换，以及**明文条目的源码级编辑**（用户裁定 2026-08-08）。",
+        "明文与字节码的分界是实测结论，不是估计。两类 magic **不同版本**：luabnd 内层 296 个 `.lua` 是 `\\x1bLuaP`（第 5 字节 0x50）；action/script 下 10 个 `.hks` 是 `\\x1bLuaQ`（0x51）。此前本条目把两者合并写成「均以 \\x1bLuaQ 开头」，对 luabnd 那 296 个是错的——两种版本的重编译可行性未必相同，混为一谈会让下一个人按错的前提去找工具。",
+        "明文条目实测共 6 个，是源码级编辑的**全部**范围：aicommon.luabnd 内 `goal_list.lua`（21400 B，GOAL 编号总表）、`543000_battle.lua`（53813 B，剑圣战斗）、`801000_battle.lua`（120489 B）；action 目录下 `eventnameid.txt`（4381 个 event → .hkx 动画）、`statenameid.txt`（3225 个状态名）、`variablenameid.txt`（503 个变量）。其余 306 个条目为字节码，只能整文件替换。",
+        "不声明字节码条目可源码级编辑：`decompile-bytecode-to-source-in-v05`、`recompile-source-to-bytecode-in-v05` 与 `typed-or-source-level-script-mutation-in-v05` 对字节码条目仍是禁令。**唯一真阻塞是缺 HKS 重编译器**（反编译方向有工具，回写方向没有），不是接线或范围问题；这也是当初延期 V0.6 的实测依据。",
+        "不声明 AI 决策与动作释放是同一层能力：Lua 只报动作编号（实测 `543000_battle.lua` 用 `AddSubGoal(GOAL_COMMON_AttackTunableSpin, 10, 3006, ...)` 这类调用选招），判定帧、硬直与伤害在 TAE（延期 V0.6）与 PARAM 里，改 Lua 不改动作本身。action/script 的 `c0000_transition.hks` 含 819 条输入/连招符号（`BEH_A_GROUND_ATTACK`、`BEH_A_DEFLECT_GUARD_START/CONTINUE/END`、`BEH_ADD_R_ADD_ACTION_INPUT_RESEND` 等），但它是字节码，本版不可源码级改。",
+        "本机游戏根同级 `tools` 目录下的外部工具（DSLuaDecompiler、Yapped Rune Bear、DarkScript3）仅作**对照与辅助检测**：用于行为、格式家族与工作流对照，不入库、不作为运行期依赖、不复制其源码。DarkScript3 与 SoulsFormats 均为 All Rights Reserved。",
+        "裁定时 authorityAtRuling 为 unverified：容器条目枚举、只读证据投影、writer 与真实游戏加载证据仍待建立；本次放开源码级编辑不提升 authority。"
       ],
       "targetRelease": "V0.5",
       "deferredToRelease": null,

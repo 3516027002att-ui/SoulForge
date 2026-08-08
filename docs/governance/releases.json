@@ -32,9 +32,10 @@
         "approvedAt": "2026-08-08",
         "decisionRef": "EV-ESD-SUPPORTED-TRANSITION-EDGES-20260808",
         "scopeItemIds": [
-          "SCOPE-BEHAVIOR-ESD"
+          "SCOPE-BEHAVIOR-ESD",
+          "SCOPE-BEHAVIOR-SCRIPT"
         ],
-        "reason": "用户裁定把 SCOPE-BEHAVIOR-ESD 从 V0.6 延期改回 supported，并实现状态转移边的只读解析（跟随 condition 的 targetStateOffset、读出 command call 的 commandID、检出悬空目标与指向哨兵槽的边）。写能力不在本次裁定范围内：any-esd-write-in-v05 与 raw-hex-write 保持禁止，unknown-expression-or-command-reencode 仍是永久禁令。scopeItemIds 限定只放开该条目；V0.5 其余 scopeItem 继续受 git 基线比对保护，条目删除保护不随解冻放开。"
+        "reason": "用户裁定把 SCOPE-BEHAVIOR-ESD 从 V0.6 延期改回 supported，并实现状态转移边的只读解析（跟随 condition 的 targetStateOffset、读出 command call 的 commandID、检出悬空目标与指向哨兵槽的边）。写能力不在本次裁定范围内：any-esd-write-in-v05 与 raw-hex-write 保持禁止，unknown-expression-or-command-reencode 仍是永久禁令。scopeItemIds 限定只放开该条目；V0.5 其余 scopeItem 继续受 git 基线比对保护，条目删除保护不随解冻放开。 追加（同日第二次裁定）：SCOPE-BEHAVIOR-SCRIPT 放开**明文条目的源码级编辑**，新增 operation source-level-edit-plaintext-script-entries。实测明文条目共 6 个（luabnd 内 3 个 .lua + action 下 3 张符号表 txt），其余 306 个条目为 HKS 字节码（luabnd 侧 LuaP/0x50、action 侧 LuaQ/0x51 两种版本），对字节码的反编译与重编译仍延期 V0.6，禁令不变。scopeItemIds 仍限定只放开列出的两条，V0.5 其余 scopeItem 继续受 git 基线比对保护。"
       }
     },
     {
