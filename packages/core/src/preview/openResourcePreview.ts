@@ -88,6 +88,7 @@ export async function openResourcePreview(options: OpenResourcePreviewOptions): 
         ...(nativeInspection ? { nativeInspection } : {}),
         ...(structuredPreview ? { structuredPreview } : {}),
         truncated: false,
+        bytesRead,
         diagnostics: previewDiagnostics
       };
     }
@@ -100,6 +101,7 @@ export async function openResourcePreview(options: OpenResourcePreviewOptions): 
         ...(nativeInspection ? { nativeInspection } : {}),
         ...(structuredPreview ? { structuredPreview } : {}),
         truncated,
+        bytesRead,
         diagnostics: previewDiagnostics
       };
     }
@@ -111,6 +113,7 @@ export async function openResourcePreview(options: OpenResourcePreviewOptions): 
       ...(nativeInspection ? { nativeInspection } : {}),
       ...(structuredPreview ? { structuredPreview } : {}),
       truncated,
+      bytesRead,
       diagnostics: [
         ...previewDiagnostics,
         {
@@ -126,6 +129,9 @@ export async function openResourcePreview(options: OpenResourcePreviewOptions): 
       file: options.file,
       previewKind: 'failed',
       truncated: false,
+      // 读失败时没有读到任何字节。bytesRead 声明在 try 块内（:70 的解构），
+      // catch 里访问不到，故显式填 0——这不是占位值，是真实读取量。
+      bytesRead: 0,
       diagnostics: [
         {
           severity: 'error',

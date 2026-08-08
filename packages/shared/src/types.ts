@@ -370,6 +370,13 @@ export interface ResourcePreview {
   nativeInspection?: BridgeResult<unknown>;
   structuredPreview?: ResourceStructuredPreview;
   truncated: boolean;
+  /**
+   * 本次预览实际读取的字节数。`truncated` 只回答「是否被截断」，而界面必须能
+   * 回答「已解析多少」（anti-ai-design 的状态优先原则）——只有布尔值时，
+   * 文案只能写成「只读取了前缀」这种用户无法据以判断规模的说法。
+   * 与 `file.size` 一起用即可给出「已读 N / 共 M」。
+   */
+  bytesRead: number;
   diagnostics: Diagnostic[];
 }
 
