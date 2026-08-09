@@ -53,7 +53,21 @@ import {
  */
 export type PlaintextEditAction =
   | { kind: 'replace-once'; find: string; replace: string }
-  | { kind: 'set-whole-text'; text: string };
+  | { kind: 'set-whole-text'; text: string }
+  /**
+   * 纯 ASCII 字节级替换:`find` 与 `replace` 都必须是纯 ASCII,替换在**字节**层
+   * 完成,不做整篇解码-编码往返。
+   *
+   * 为什么需要这条路径:混合编码条目(既非 UTF-8 也非完整 Shift-JIS)此前被
+   * 一律拒绝,理由是「任何单一编码的往返都会丢字节」。那个理由只对**整篇往返**
+   * 成立 —— 实测 801000_battle.lua 有 2740 行纯 ASCII、仅 6 行含非 ASCII,
+   * 在纯 ASCII 区域做字节替换后 52 个非 ASCII 字节**完全不变**。
+   *
+   * 也就是说文件本身可以无损编辑,是我的实现强制了往返。区别在于:解码是
+   * 为了「按文本理解内容」,而改一处 `act[26] = 100` 并不需要理解那 6 行日文/中文
+   * 注释 —— 不碰就不必解得开。
+   */
+  | { kind: 'replace-ascii-bytes'; find: string; replace: string };
 
 export interface PlaintextScriptEditInput {
   /** 外层容器 URI(用于 PatchIR 溯源)。 */
@@ -141,6 +155,25 @@ export function buildPlaintextScriptEdit(
       `条目 ${input.childPath} 的真实字节不是明文(${verdict.code})。`
         + ' 源码级编辑只适用于明文条目;字节码条目请用整文件替换。',
       { verdict, diagnostics: verdict.diagnostics }
+    );
+  }
+
+  // 全部动作都是纯 ASCII 字节替换时走字节级路径,完全不解码。
+  //
+  // 这条分支让混合编码条目也能改:解码只是为了「按文本理解内容」,而改一处
+  // `act[26] = 100` 不需要理解那 6 行日文/中文注释。不碰就不必解得开。
+  const allAsciiByteActions = input.actions.every(
+    (action) => action.kind === 'replace-ascii-bytes'
+  );
+  if (allAsciiByteActions) {
+    return buildAsciiByteEdit(input, verdict);
+  }
+  if (input.actions.some((action) => action.kind === 'replace-ascii-bytes')) {
+    return fail(
+      'PLAINTEXT_EDIT_MIXED_ACTION_KINDS',
+      'replace-ascii-bytes 不能与文本级动作混用:前者在字节层工作、不解码,'
+        + '后者需要整篇解码。混用会让「哪些字节被解码过」变得无法回答。'
+        + ' 请拆成两次编辑。'
     );
   }
 
@@ -320,6 +353,188 @@ export function buildPlaintextScriptEdit(
 
 function truncateForMessage(text: string): string {
   return text.length <= 60 ? text : `${text.slice(0, 60)}…`;
+}
+
+/** 纯 ASCII 判定:每个码位都 < 0x80。 */
+function isPureAscii(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) >= 0x80) return false;
+  }
+  return true;
+}
+
+/**
+ * 字节级 ASCII 替换。
+ *
+ * 不解码、不编码 —— 用 latin1 做字节↔字符的一一映射(latin1 是唯一保证
+ * 每个字节映射到一个码位且可逆的编码),在其上做子串替换,再映射回字节。
+ * 非 ASCII 字节全程只被复制,不被解释。
+ *
+ * 校验后置且强制:替换完必须确认所有 >= 0x80 的字节序列**逐个未变**。
+ * 光靠「find/replace 是纯 ASCII」推不出这一点 —— 若 find 恰好跨越了某个
+ * 多字节序列的一半,替换就会撕裂它。
+ */
+function buildAsciiByteEdit(
+  input: PlaintextScriptEditInput,
+  verdict: PlaintextVerdict
+): PlaintextScriptEditResult {
+  const beforeHash = sha256(input.currentBytes);
+  const paddingLength = verdict.trailingPaddingBytes;
+  const contentBytes = paddingLength > 0
+    ? input.currentBytes.subarray(0, input.currentBytes.length - paddingLength)
+    : input.currentBytes;
+  // latin1:字节 n ↔ 码位 n,一一对应且可逆。用 utf8 会破坏 >= 0x80 的字节。
+  let latin = Buffer.from(contentBytes).toString('latin1');
+  const originalLatin = latin;
+
+  for (const [position, action] of input.actions.entries()) {
+    if (action.kind !== 'replace-ascii-bytes') {
+      return fail('PLAINTEXT_EDIT_MIXED_ACTION_KINDS', '内部错误:非字节级动作进入字节级路径。');
+    }
+    if (action.find === '') {
+      return fail('PLAINTEXT_EDIT_EMPTY_FIND', `第 ${position + 1} 条动作的 find 为空串。`);
+    }
+    if (!isPureAscii(action.find) || !isPureAscii(action.replace)) {
+      return fail(
+        'PLAINTEXT_EDIT_ASCII_ONLY',
+        `第 ${position + 1} 条动作的 find/replace 必须是纯 ASCII —— 字节级路径`
+          + '不解码,无法判断非 ASCII 字符该编成哪些字节。'
+          + '要写入非 ASCII 内容请用文本级动作(需目标编码可解)。'
+      );
+    }
+    const first = latin.indexOf(action.find);
+    if (first < 0) {
+      return fail(
+        'PLAINTEXT_EDIT_ANCHOR_NOT_FOUND',
+        `第 ${position + 1} 条动作的 find 在字节流里找不到:`
+          + `${JSON.stringify(truncateForMessage(action.find))}。`
+      );
+    }
+    const second = latin.indexOf(action.find, first + action.find.length);
+    if (second >= 0) {
+      return fail(
+        'PLAINTEXT_EDIT_ANCHOR_NOT_UNIQUE',
+        `第 ${position + 1} 条动作的 find 在字节流里出现多次(偏移 ${first} 与 ${second})。`
+          + ' 字节级替换同样要求唯一命中。'
+      );
+    }
+    latin = `${latin.slice(0, first)}${action.replace}${latin.slice(first + action.find.length)}`;
+  }
+
+  if (latin === originalLatin) {
+    return fail('PLAINTEXT_EDIT_NO_CHANGE', '编辑后字节与原文完全相同。', { verdict });
+  }
+
+  const editedBytes = new Uint8Array(Buffer.from(latin, 'latin1'));
+  const finalBytes = paddingLength > 0
+    ? concatBytes(editedBytes, new Uint8Array(paddingLength))
+    : editedBytes;
+
+  // 非 ASCII 字节序列必须逐个未变。
+  //
+  // ── 这是纵深防御,当前无法从公开 API 触发(实测)──
+  //
+  // 上面的 isPureAscii 已保证 find/replace 全是 ASCII 码位,而在 latin1 字节流里
+  // 纯 ASCII 的 find 只能匹配纯 ASCII 字节 —— 想撕裂某个多字节序列,find 就必须
+  // 含 >= 0x80 的码位,那会先被 ASCII_ONLY 拦下。实测三种尝试(纯 ASCII find、
+  // 跨换行的纯 ASCII find、含 latin1 高位字符的 find)都无法让这条校验报错。
+  //
+  // 保留它而不是删掉,理由是它防的是**未来的改动**:若日后放宽 isPureAscii、
+  // 或把字节流改成别的编码取字符,撕裂就变得可能,而那时的症状是静默损坏。
+  // 按「门禁必须能红」的口径,这条不算已验证的判据 —— 它没有专属负向用例,
+  // 因为构造不出来。这一点如实记在这里,不假装它被测过。
+  const originalHigh = [...contentBytes].filter((byte) => byte >= 0x80);
+  const editedHigh = [...editedBytes].filter((byte) => byte >= 0x80);
+  if (originalHigh.length !== editedHigh.length
+    || originalHigh.some((byte, index) => byte !== editedHigh[index])) {
+    return fail(
+      'PLAINTEXT_EDIT_NON_ASCII_BYTES_CHANGED',
+      `字节级替换改动了非 ASCII 字节(原 ${originalHigh.length} 个,`
+        + `现 ${editedHigh.length} 个)。最可能的原因是 find 跨越了某个多字节`
+        + '序列的一半,把它撕裂了。这条校验不能省:find 是纯 ASCII 并不保证'
+        + '它落在字节边界上。'
+    );
+  }
+
+  const afterHash = sha256(finalBytes);
+  const childUri = `${input.containerUri}#bnd/child/${input.childPath}`;
+  const operation: ContainerChildOp = {
+    id: `plaintext-ascii-byte-edit-${input.childPath}-${afterHash.slice(0, 12)}`,
+    kind: 'container_child_replace',
+    targetUri: childUri,
+    resourceKind: 'other',
+    containerUri: input.containerUri,
+    childPath: input.childPath,
+    childUri,
+    childContentBase64: Buffer.from(finalBytes).toString('base64'),
+    expectedContainerHash: input.expectedContainerHash,
+    expectedChildHash: beforeHash,
+    ...(input.containerFormat ? { containerFormat: input.containerFormat } : {}),
+    preconditions: [
+      {
+        type: 'content_hash',
+        description: '外层容器文件在写入前必须与计划时一致',
+        expectedHash: input.expectedContainerHash,
+        targetUri: input.containerUri
+      },
+      {
+        type: 'content_hash',
+        description: '目标条目字节在写入前必须与计划时一致',
+        expectedHash: beforeHash,
+        targetUri: childUri
+      },
+      {
+        type: 'custom',
+        description: '纯 ASCII 字节级替换:不解码,非 ASCII 字节逐个未变',
+        details: {
+          check: 'ascii-byte-edit',
+          detectedEncoding: verdict.detectedEncoding,
+          nonAsciiByteCount: originalHigh.length,
+          trailingPaddingBytes: paddingLength
+        }
+      }
+    ],
+    validatorRequirements: [
+      { validatorId: 'container-round-trip', scope: 'after_commit', required: true },
+      { validatorId: 'plaintext-writeback', scope: 'after_commit', required: true }
+    ],
+    rollbackHint: {
+      strategy: 'restore_backup',
+      notes: '整个外层容器由 Patch Engine 备份;回滚恢复容器即可撤销本条编辑。'
+    },
+    riskLevel: 'high',
+    metadata: {
+      sourceKind: 'plaintext-script-ascii-byte-edit',
+      entryIndex: input.entryIndex,
+      encoding: verdict.detectedEncoding,
+      nonAsciiByteCount: originalHigh.length,
+      actionKinds: input.actions.map((action) => action.kind),
+      expectedAfterHash: afterHash
+    }
+  };
+
+  return {
+    ok: true,
+    operation,
+    verdict,
+    encoding: verdict.detectedEncoding,
+    beforeBytes: input.currentBytes.length,
+    afterBytes: finalBytes.length,
+    beforeHash,
+    afterHash,
+    appliedActions: input.actions.length,
+    diagnostics: [
+      ...verdict.diagnostics,
+      createDiagnostic({
+        severity: 'info',
+        code: 'PLAINTEXT_ASCII_BYTE_EDIT_PLANNED',
+        message: `条目 ${input.childPath} 的纯 ASCII 字节级编辑已生成 PatchIR 操作:`
+          + `${input.currentBytes.length} → ${finalBytes.length} 字节,`
+          + `编码判定 ${verdict.detectedEncoding}(未解码),`
+          + `${originalHigh.length} 个非 ASCII 字节逐个未变。`
+      })
+    ]
+  };
 }
 
 function concatBytes(head: Uint8Array, tail: Uint8Array): Uint8Array {

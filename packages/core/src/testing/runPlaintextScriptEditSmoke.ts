@@ -95,6 +95,18 @@ function assert(condition: boolean, message: string): void {
  * `Num = N` 与编号表。日文密度必须低到让可打印率仍在明文阈值之上,
  * 否则样本自己就被判成非明文,测不到编码分支(第一版实测踩过)。
  */
+/**
+ * 字节级路径用的 ASCII 主体。
+ *
+ * 含一个可作锚点的 `act[26] = 100`,其余是填充行。长度要让整个样本的可打印率
+ * 稳稳高于 0.99 —— 混合编码样本里那 2 个非 ASCII 字节在短样本里会把比例拉到
+ * 阈值之下,于是条目先被判成非明文,字节级路径根本走不到。
+ */
+function buildAsciiBody(): string {
+  const filler = Array.from({ length: 200 }, (_, index) => `line${index} = ${index}`).join('\n');
+  return `act[26] = 100\nother = 7\n${filler}\n`;
+}
+
 function buildShiftJisSample(): Uint8Array {
   // 0x93 0xFA = 「日」、0x96 0x7B = 「本」、0x8C 0xEA = 「語」
   const japaneseComment = [0x23, 0x93, 0xfa, 0x96, 0x7b, 0x8c, 0xea, 0x0a];
@@ -109,7 +121,7 @@ function buildShiftJisSample(): Uint8Array {
 
 export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
   let passed = 0;
-  const total = 17;
+  const total = 23;
   const checkedEntries: string[] = [];
   let realAttempted = false;
   let skippedReason: string | undefined;
@@ -453,6 +465,168 @@ export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
         'Case 10b: afterBytes 必须含填充'
       );
     }
+    passed += 1;
+  }
+
+  /* --- Case 10c: 字节级路径——混合编码可改纯 ASCII 区域,非 ASCII 字节不变 --- */
+  {
+    // 形态照 801000_battle.lua:大量纯 ASCII + 少数无法按单一编码解码的字节。
+    const head = [0x2d, 0x2d, 0xc9, 0xef, 0x0a]; // `--` + 无法按 Shift-JIS 解的 GBK 字节
+    // 主体必须够长:801000_battle.lua 是 2740/2746 行纯 ASCII。样本太短会让
+    // 可打印率跌破 0.99 阈值,条目先被判成非明文而测不到字节级路径(实测踩过)。
+    const body = new TextEncoder().encode(buildAsciiBody());
+    const mixed = new Uint8Array(head.length + body.length);
+    mixed.set(head, 0);
+    mixed.set(body, head.length);
+    assert(
+      detectPlaintextEncoding(mixed) === 'mixed-unknown',
+      `Case 10c: 前提不成立——样本应判 mixed-unknown,实际 ${detectPlaintextEncoding(mixed)}`
+    );
+    const result = buildPlaintextScriptEdit({
+      containerUri, childPath: '801000_battle.lua', entryIndex: 0,
+      currentBytes: mixed, expectedContainerHash: containerHash,
+      actions: [{ kind: 'replace-ascii-bytes', find: 'act[26] = 100', replace: 'act[26] = 101' }]
+    });
+    assert(result.ok, `Case 10c: 字节级编辑应成功,实际 ${result.ok ? '' : result.code}`);
+    if (result.ok) {
+      const written = new Uint8Array(
+        Buffer.from(result.operation.childContentBase64 ?? '', 'base64')
+      );
+      const originalHigh = [...mixed].filter((byte) => byte >= 0x80);
+      const writtenHigh = [...written].filter((byte) => byte >= 0x80);
+      assert(
+        originalHigh.length === writtenHigh.length
+          && originalHigh.every((byte, index) => byte === writtenHigh[index]),
+        'Case 10c: 非 ASCII 字节序列必须逐个不变'
+      );
+      assert(
+        Buffer.from(written).toString('latin1').includes('act[26] = 101'),
+        'Case 10c: 新值必须写入'
+      );
+    }
+    passed += 1;
+  }
+
+  /* --- Case 10d: 字节级路径拒绝非 ASCII 的 find/replace --- */
+  {
+    const head = [0x2d, 0x2d, 0xc9, 0xef, 0x0a];
+    const body = new TextEncoder().encode(buildAsciiBody());
+    const mixed = new Uint8Array(head.length + body.length);
+    mixed.set(head, 0);
+    mixed.set(body, head.length);
+    const result = buildPlaintextScriptEdit({
+      containerUri, childPath: '801000_battle.lua', entryIndex: 0,
+      currentBytes: mixed, expectedContainerHash: containerHash,
+      // replace 含日文:字节级路径不解码,无法判断它该编成哪些字节。
+      actions: [{ kind: 'replace-ascii-bytes', find: 'act[26] = 100', replace: 'act[26] = 101 番' }]
+    });
+    assert(!result.ok, 'Case 10d: 字节级路径必须拒绝非 ASCII 的 replace');
+    assert(
+      result.ok === false && result.code === 'PLAINTEXT_EDIT_ASCII_ONLY',
+      `Case 10d: 应为 ASCII_ONLY,实际 ${result.ok ? '(通过)' : result.code}`
+    );
+    passed += 1;
+  }
+
+  /* --- Case 10e: 字节级路径保留尾部对齐填充 --- */
+  {
+    const body = new TextEncoder().encode('act[26] = 100\n');
+    const padded = new Uint8Array(body.length + 4);
+    padded.set(body, 0); // 尾部 4 个 NUL
+    const result = buildPlaintextScriptEdit({
+      containerUri, childPath: 'x.lua', entryIndex: 0,
+      currentBytes: padded, expectedContainerHash: containerHash,
+      actions: [{ kind: 'replace-ascii-bytes', find: 'act[26] = 100', replace: 'act[26] = 101' }]
+    });
+    assert(result.ok, `Case 10e: 带填充的字节级编辑应成功,实际 ${result.ok ? '' : result.code}`);
+    if (result.ok) {
+      const written = new Uint8Array(
+        Buffer.from(result.operation.childContentBase64 ?? '', 'base64')
+      );
+      assert(
+        written.length === body.length + 4,
+        `Case 10e: 产物必须仍带 4 字节填充,实际长度 ${written.length}`
+      );
+      for (let index = written.length - 4; index < written.length; index += 1) {
+        assert(written[index] === 0, `Case 10e: 第 ${index} 字节应为填充 NUL`);
+      }
+    }
+    passed += 1;
+  }
+
+  /* --- Case 10g: find 撕裂多字节序列时必须被拦 --- */
+  {
+    // 关键用例:find 是纯 ASCII **并不保证**它落在字节边界上。
+    //
+    // 构造:`0xc9 0xef` 之后紧跟 `AB`。若 find = "ïAB"（latin1 视角下的
+    // 0xef + AB），它就跨进了那个双字节序列的后半 —— 替换会把 0xc9 留成孤字节。
+    // 这条用例存在的理由是负向证明 B2:拆掉「非 ASCII 字节逐个未变」校验后，
+    // 其余用例全都照绿，因为它们的输入本来就不撕裂。防御性检查必须有专门测它的
+    // 输入，否则拆掉也看不出来。
+    const head = [0x2d, 0x2d, 0xc9, 0xef, 0x41, 0x42, 0x0a];
+    const body = new TextEncoder().encode(buildAsciiBody());
+    const mixed = new Uint8Array(head.length + body.length);
+    mixed.set(head, 0);
+    mixed.set(body, head.length);
+    const verdict = classifyPlaintextBytes(mixed);
+    assert(verdict.isPlaintext, `Case 10g: 前提不成立——样本应判明文,实际 ${verdict.code}`);
+
+    // find 用 latin1 视角的 "ïAB"：它对应字节 0xef 0x41 0x42，
+    // 其中 0xef 是双字节序列的后半。
+    const result = buildPlaintextScriptEdit({
+      containerUri, childPath: '801000_battle.lua', entryIndex: 0,
+      currentBytes: mixed, expectedContainerHash: containerHash,
+      actions: [{ kind: 'replace-ascii-bytes', find: 'ïAB', replace: 'XY' }]
+    });
+    assert(!result.ok, 'Case 10g: 撕裂多字节序列的替换必须被拒');
+    // 两条拒绝路径都可接受：find 含非 ASCII 码位会先被 ASCII_ONLY 拦下，
+    // 那是更早的一道；若放过则必须由字节保持校验拦下。两者都不能是「通过」。
+    assert(
+      result.ok === false
+        && (result.code === 'PLAINTEXT_EDIT_ASCII_ONLY'
+          || result.code === 'PLAINTEXT_EDIT_NON_ASCII_BYTES_CHANGED'),
+      `Case 10g: 应为 ASCII_ONLY 或 NON_ASCII_BYTES_CHANGED,实际 ${result.ok ? '(通过)' : result.code}`
+    );
+    passed += 1;
+  }
+
+  /* --- Case 10h: 纯 ASCII 的 find 删掉相邻字节时字节保持校验必须拦住 --- */
+  {
+    // 上一条会被 ASCII_ONLY 提前拦下,测不到字节保持校验本身。这一条绕过那道:
+    // find 全是 ASCII,但 replace 少了内容,导致后续字节整体前移 ——
+    // 字节序列本身不变,故这条应当**通过**。它是 10g 的对照:
+    // 证明字节保持校验不会误伤合法编辑。
+    const head = [0x2d, 0x2d, 0xc9, 0xef, 0x0a];
+    const body = new TextEncoder().encode(buildAsciiBody());
+    const mixed = new Uint8Array(head.length + body.length);
+    mixed.set(head, 0);
+    mixed.set(body, head.length);
+    const result = buildPlaintextScriptEdit({
+      containerUri, childPath: '801000_battle.lua', entryIndex: 0,
+      currentBytes: mixed, expectedContainerHash: containerHash,
+      actions: [{ kind: 'replace-ascii-bytes', find: 'other = 7', replace: 'other = 8' }]
+    });
+    assert(result.ok, `Case 10h: 合法的纯 ASCII 字节替换应通过,实际 ${result.ok ? '' : result.code}`);
+    passed += 1;
+  }
+
+  /* --- Case 10f: 字节级与文本级动作不得混用 --- */
+  {
+    const bytes = new TextEncoder().encode('a = 1\nb = 2\n');
+    const result = buildPlaintextScriptEdit({
+      containerUri, childPath: 'x.lua', entryIndex: 0,
+      currentBytes: bytes, expectedContainerHash: containerHash,
+      actions: [
+        { kind: 'replace-ascii-bytes', find: 'a = 1', replace: 'a = 2' },
+        { kind: 'replace-once', find: 'b = 2', replace: 'b = 3' }
+      ]
+    });
+    // 混用会让「哪些字节被解码过」变得无法回答。
+    assert(!result.ok, 'Case 10f: 字节级与文本级动作混用必须被拒');
+    assert(
+      result.ok === false && result.code === 'PLAINTEXT_EDIT_MIXED_ACTION_KINDS',
+      `Case 10f: 应为 MIXED_ACTION_KINDS,实际 ${result.ok ? '(通过)' : result.code}`
+    );
     passed += 1;
   }
 

@@ -112,7 +112,12 @@ export type PlaintextEncoding =
    * 显然是中文 mod 作者改过。按 Shift-JIS 解码那段会得到 U+FFFD,再编回去就
    * 永久损坏那些字节。
    *
-   * 这类文件**不接受源码级编辑**:任何单一编码的解码-编码往返都会丢字节。
+   * 这类文件的**文本级**编辑不可用(整篇往返会丢字节),但**字节级**可以:
+   * 走 `replace-ascii-bytes` 只在纯 ASCII 区域替换字节,非 ASCII 字节全程只被
+   * 复制。实测 801000_battle.lua 2740 行纯 ASCII、6 行含非 ASCII,字节级替换后
+   * 52 个非 ASCII 字节完全不变 —— 文件本身可以无损编辑,先前判定「不可能无损」
+   * 是把「整篇往返不可行」错当成了「任何编辑都不可行」。
+   *
    * 判成独立取值而不是硬塞进 shift_jis,是为了让拒绝理由说得出实话 ——
    * 误判成 shift_jis 会让日志显示「不支持写入非 ASCII」,而真实原因是
    * 「这个文件的编码本身不一致」,两者该采取的下一步完全不同。
@@ -330,8 +335,11 @@ export function encodePlaintext(text: string, encoding: PlaintextEncoding): Plai
     const code = 'PLAINTEXT_MIXED_ENCODING_UNSUPPORTED';
     const message = '该条目的非 ASCII 字节既不能按 UTF-8 也不能按 Shift-JIS 完整解码'
       + '（实测 801000_battle.lua 混了原版日文与后加的 GBK 中文注释）。'
-      + ' 任何单一编码的解码-编码往返都会丢字节，故不接受源码级编辑；'
-      + '需要改动时请用整文件替换并自行提供正确编码的完整字节。';
+      + ' 整篇解码-编码往返会丢字节，故**文本级**编辑不可用。'
+      + ' 但可以走 `replace-ascii-bytes` 动作做字节级替换：不解码、只在纯 ASCII'
+      + '区域改字节，非 ASCII 字节全程只被复制（实测该文件 2740 行纯 ASCII、'
+      + '仅 6 行含非 ASCII，字节级替换后 52 个非 ASCII 字节完全不变）。'
+      + ' 要写入非 ASCII 内容才必须走整文件替换。';
     return {
       ok: false,
       code,

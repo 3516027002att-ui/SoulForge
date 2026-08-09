@@ -91,6 +91,12 @@ export interface PlaintextWriteSmokeResult {
   ok: boolean;
   message: string;
   skipped?: string;
+  /** 目标**文件**总数(不含工具链那一条)。 */
+  fileTargetsTotal?: number;
+  /** 文件侧通过数。与 fileTargetsTotal 同类可比。 */
+  fileVerifiedCount?: number;
+  /** 工具侧通过数(propose_plaintext_script_edit 的完整链)。 */
+  toolVerifiedCount?: number;
   /** 每个被验证的明文条目一条。 */
   verified: PlaintextEntryOutcome[];
   /** 有语料但被跳过的条目及原因。 */
@@ -124,10 +130,11 @@ const NON_CLAIMS = [
     + '会以 PLAINTEXT_SHIFT_JIS_CHAR_UNMAPPABLE 拒绝而不是替换成 ?。'
     + '不声明该表覆盖 CP932 全集 —— 它由解码器枚举得到,与解码器一致,'
     + '但未逐码位与外部权威表对照。',
-  '混合编码条目不接受源码级编辑:801000_battle.lua 混了原版日文与后加的 GBK'
-    + '中文注释(字节 0xd7 0xf3 0xca 0xd6 在 GBK 里是「左手」),既不能按 UTF-8'
-    + '也不能按 Shift-JIS 完整解码,任何单一编码的往返都会丢字节。'
-    + '它以 PLAINTEXT_MIXED_ENCODING_UNSUPPORTED 被拒,需要改动时走整文件替换。',
+  '混合编码条目(801000_battle.lua)走**字节级**路径:不解码,只在纯 ASCII 行内'
+    + '替换字节,并强制校验非 ASCII 字节序列逐个未变(实测 52 个)。'
+    + '它的**文本级**编辑仍以 PLAINTEXT_MIXED_ENCODING_UNSUPPORTED 拒绝 ——'
+    + '写入非 ASCII 内容需要知道该编成哪些字节,而该文件的编码本身不一致。'
+    + '也就是说这类条目可改数值与 ASCII 标识符,不可改其中的日文/中文注释。',
   '每个条目只验证一次往返(一处赋值改动 → 提交 → 重读 → 回滚),不验证连续多次'
     + '编辑的累积效果,也不验证并发写同一容器。',
   '不声明游戏能加载改动后的资源:本 smoke 只证明字节层往返无损与回滚可用,'
@@ -152,7 +159,10 @@ const ASSIGNMENT_ANCHOR = /^(\s*[A-Za-z_][\w.]*(?:\[\s*\d+\s*\])*)\s*=\s*(\d+)\s
  * 而 `Num  = 4381` 这类行在 *nameid.txt 里可能重复出现。找不到唯一锚点时返回
  * null,由调用方记为 unverified 而不是静默通过。
  */
-function findUniqueAnchor(text: string): { anchor: string; replacement: string } | null {
+function findUniqueAnchor(
+  text: string,
+  options: { asciiOnly?: boolean } = {}
+): { anchor: string; replacement: string } | null {
   const lines = text.split('\n');
   /**
    * 唯一性必须按**子串**算,与 buildPlaintextScriptEdit 的 replace-once 同口径。
@@ -176,6 +186,8 @@ function findUniqueAnchor(text: string): { anchor: string; replacement: string }
 
   for (const rawLine of lines) {
     const line = rawLine.replace(/\r$/, '');
+    // 字节级路径要求锚点整行纯 ASCII:find 一旦跨进多字节序列就会撕裂它。
+    if (options.asciiOnly && /[^\x00-\x7f]/.test(line)) continue;
     const match = ASSIGNMENT_ANCHOR.exec(line);
     if (!match) continue;
     if (substringCount(line) !== 1) continue;
@@ -234,10 +246,21 @@ async function verifyContainerEntry(
     return { unverified: `${entryFileName} 按真实字节判定不是明文（${verdict.code}）` };
   }
 
-  const text = Buffer.from(bytes).toString('utf8');
-  const anchor = findUniqueAnchor(text);
+  // 混合编码条目走**字节级**路径:不解码,只在纯 ASCII 区域替换字节。
+  //
+  // 此前这类条目被一律跳过,理由是「任何单一编码的往返都会丢字节」——那只对
+  // 整篇往返成立。实测 801000_battle.lua 有 2740 行纯 ASCII、仅 6 行含非 ASCII,
+  // 字节级替换后 52 个非 ASCII 字节完全不变。文件本身可以无损编辑,
+  // 是先前的实现强制了往返。
+  const byteLevel = verdict.detectedEncoding === 'mixed-unknown';
+  // latin1 保证字节↔码位一一可逆;混合编码条目不能用 utf8 取文本。
+  const text = Buffer.from(bytes).toString(byteLevel ? 'latin1' : 'utf8');
+  const anchor = findUniqueAnchor(text, { asciiOnly: byteLevel });
   if (!anchor) {
-    return { unverified: `${entryFileName} 里找不到唯一的 NAME = 123 形态锚点` };
+    return {
+      unverified: `${entryFileName} 里找不到唯一的赋值锚点`
+        + (byteLevel ? '(纯 ASCII 行内)' : '')
+    };
   }
 
   const edit = buildPlaintextScriptEdit({
@@ -247,7 +270,9 @@ async function verifyContainerEntry(
     currentBytes: bytes,
     expectedContainerHash: containerHash,
     containerFormat: 'BND4_DFLT',
-    actions: [{ kind: 'replace-once', find: anchor.anchor, replace: anchor.replacement }]
+    actions: [byteLevel
+      ? { kind: 'replace-ascii-bytes', find: anchor.anchor, replace: anchor.replacement }
+      : { kind: 'replace-once', find: anchor.anchor, replace: anchor.replacement }]
   });
   if (!edit.ok) {
     return { unverified: `${entryFileName} 源码级编辑失败：${edit.code}` };
@@ -687,11 +712,23 @@ async function runInWorkspace(root: string): Promise<PlaintextWriteSmokeResult> 
     `工具侧链路未验证成功:${JSON.stringify(unverified.filter((e) => e.target.includes('AI 工具')))}`
   );
 
+  // 文件侧与工具侧**分开计数**。
+  //
+  // 先前把两者合并报成「6/6」,而分母是文件数 6、分子含 AI 工具那一条 ——
+  // 实际是 5 个文件 + 1 个工具链。那种说法听起来像六个文件都过了,
+  // 是统计上的取巧。分母分子必须同类。
+  const fileVerified = verified.filter((entry) => !entry.target.includes('经 AI 工具'));
+  const toolVerified = verified.filter((entry) => entry.target.includes('经 AI 工具'));
   return {
     ok: true,
-    message: `明文条目源码级写端到端验证 ${verified.length}/${PLAINTEXT_TARGETS.length} 通过:`
-      + '真实语料 → 明文判定 → 源码级编辑 → Patch Engine 提交 → 重读一致 → 回滚逐字节还原。'
+    message: `明文条目源码级写端到端验证:文件侧 ${fileVerified.length}/${PLAINTEXT_TARGETS.length} 通过,`
+      + `工具侧 ${toolVerified.length}/1 通过。`
+      + '每条都走完 真实语料 → 明文判定 → 源码级编辑 → Patch Engine 提交 → '
+      + '重读一致 → 回滚逐字节还原。'
       + (unverified.length > 0 ? ` 另有 ${unverified.length} 条未验证(见 unverified)。` : ''),
+    fileTargetsTotal: PLAINTEXT_TARGETS.length,
+    fileVerifiedCount: fileVerified.length,
+    toolVerifiedCount: toolVerified.length,
     verified,
     unverified,
     nonClaims: NON_CLAIMS
