@@ -87,6 +87,7 @@ import {
   markAgentTaskCancelling,
   reduceAgentTaskEvent,
   startAgentTask,
+  type AgentApprovalUserDecision,
   type AgentTaskState
 } from './agent/agentTaskState.js';
 import {
@@ -1665,7 +1666,7 @@ export function App(): ReactElement {
    */
   async function respondAgentApproval(
     callId: string,
-    decision: 'once' | 'always' | 'reject' | 'never'
+    decision: AgentApprovalUserDecision
   ): Promise<void> {
     const sessionId = agentTask.sessionId;
     if (!bridge || sessionId === null) {

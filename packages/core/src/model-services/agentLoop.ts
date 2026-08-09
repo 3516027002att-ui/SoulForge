@@ -40,6 +40,7 @@ import {
   sleepWithSignal
 } from './retryPolicy.js';
 import { estimateContextTokens, runCompaction } from './contextCompactor.js';
+import { APPROVAL_DECISIONS_DENYING } from './types.js';
 
 const SECRET_PATTERNS = [
   /sk-[a-zA-Z0-9_-]{10,}/g,
@@ -348,6 +349,7 @@ export async function runAgentToolLoop(
    */
   const approvalMemory = new Map<string, 'always' | 'never'>();
   const approvalsAudit: NonNullable<AgentRunResult['audit']['approvals']> = [];
+  let abortedByApproval = false;
 
   const recordMessage = (step: number, message: ChatMessage): void => {
     request.rollout?.enqueue({ type: 'message', step, message });
@@ -666,6 +668,35 @@ export async function runAgentToolLoop(
             approvalMemory.set(call.name, decision);
           }
         }
+        // abort 放弃整轮，不只是拒绝这一次调用：用户表示不想让这轮继续下去。
+        // 与 reject 的区别在于 reject 之后 loop 会带着拒绝结果走下一步，
+        // 模型可能换个方式再试。
+        if (decision === 'abort') {
+          emit({
+            type: 'approval-resolved',
+            step: steps,
+            callId: call.id,
+            toolName: call.name,
+            decision,
+            fromMemory: false
+          });
+          approvalsAudit.push({
+            name: call.name,
+            permissionLevel: level,
+            decision,
+            fromMemory: false,
+            ...(note !== undefined ? { note } : {})
+          });
+          diagnostics.push({
+            severity: 'warning',
+            code: 'AGENT_ABORTED_BY_APPROVAL',
+            message: `用户在审批 ${call.name} 时选择放弃整个任务。`
+              + `${note === undefined ? '' : note}`
+          });
+          finishReason = 'cancelled';
+          abortedByApproval = true;
+          break;
+        }
         emit({
           type: 'approval-resolved',
           step: steps,
@@ -681,14 +712,19 @@ export async function runAgentToolLoop(
           fromMemory: remembered !== undefined,
           ...(note !== undefined ? { note } : {})
         });
-        if (decision === 'reject' || decision === 'never') {
+        if (APPROVAL_DECISIONS_DENYING.includes(decision)) {
           planned.push({
             kind: 'denied',
             call,
-            code: 'APPROVAL_DENIED',
+            // 超时与拒绝用不同错误码：模型看到的原因不同，事后审计也能区分
+            // 「用户拒绝」与「没人回答」。
+            code: decision === 'timed_out' ? 'APPROVAL_TIMED_OUT' : 'APPROVAL_DENIED',
             message: decision === 'never'
               ? `用户拒绝并已在本会话内永久拒绝工具 ${call.name}。`
-              : `用户拒绝执行工具 ${call.name}。${note === undefined ? '' : note}`
+              : decision === 'timed_out'
+                ? `审批请求超时，未收到回答，按未批准处理：${call.name}。`
+                  + `${note === undefined ? '' : note}`
+                : `用户拒绝执行工具 ${call.name}。${note === undefined ? '' : note}`
           });
           continue;
         }
@@ -699,6 +735,16 @@ export async function runAgentToolLoop(
         call,
         parallel: toolDefs.get(call.name)?.supportsParallel === true
       });
+    }
+
+    // abort 必须终止整轮，而不只是跳出 planning 循环。
+    //
+    // 上面那个 break 只离开 `for (const call of toolCalls)`；不在这里再断一次，
+    // 后面的工具执行阶段与外层 while 会照常继续——用户选了「放弃任务」而任务
+    // 接着跑，且不会有任何报错。实测确认过这条路径。
+    if (abortedByApproval) {
+      recordInterrupted();
+      break;
     }
 
     const orderedResults: Array<ChatMessage | undefined> = new Array(planned.length);

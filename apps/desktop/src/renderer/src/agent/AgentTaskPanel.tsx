@@ -2,6 +2,7 @@ import type { ReactElement } from 'react';
 import type { ToolDescriptor } from '@soulforge/core';
 import { formatBytes, formatListTruncation, formatPageRange } from '../format/uiText.js';
 import { AgentApprovalPanel } from './AgentApprovalPanel.js';
+import type { AgentApprovalUserDecision } from './agentTaskState.js';
 import {
   AGENT_SESSION_PAGE_SIZE,
   AGENT_TOOL_CALL_LIMIT,
@@ -65,7 +66,7 @@ export interface AgentTaskPanelProps {
   onLoadSession: (sessionPath: string) => void;
   onResumeSession: (sessionPath: string) => void;
   /** 回答一条审批请求。 */
-  onRespondApproval: (callId: string, decision: 'once' | 'always' | 'reject' | 'never') => void;
+  onRespondApproval: (callId: string, decision: AgentApprovalUserDecision) => void;
   /** 正在发送的审批 callId；期间禁用按钮避免重复提交。 */
   respondingApprovalCallId: string | null;
   /** 上一次审批回答失败的原因。 */

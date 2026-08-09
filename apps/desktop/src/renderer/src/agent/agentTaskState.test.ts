@@ -319,6 +319,46 @@ describe('审批请求折叠成待办队列', () => {
     assert.ok(!describeAgentTaskStatus(running).includes('等待你批准'));
   });
 
+  it('timed_out 与 reject 在记录里可区分', () => {
+    // 与 Codex 的 ReviewDecision 对齐：timed_out 是与 denied 平级的独立取值。
+    // 并成一个会让「审批通道没人看」在事后看起来像「用户认真拒绝过」。
+    const base = feed(startAgentTask(SESSION), {
+      type: 'approval-requested',
+      step: 1,
+      callId: 'c-timeout',
+      toolName: 'rollback_operation',
+      permissionLevel: 'rollback',
+      argumentsJson: '{}'
+    });
+    const timedOut = feed(base, {
+      type: 'approval-resolved',
+      step: 1,
+      callId: 'c-timeout',
+      toolName: 'rollback_operation',
+      decision: 'timed_out',
+      fromMemory: false
+    });
+    assert.equal(timedOut.approvalDecisions[0]?.decision, 'timed_out');
+    assert.equal(timedOut.pendingApprovals.length, 0, '超时也要出队');
+  });
+
+  it('abort 被记录为独立结果', () => {
+    const state = feed(
+      startAgentTask(SESSION),
+      {
+        type: 'approval-requested',
+        step: 1, callId: 'c-abort', toolName: 'propose_text_patch',
+        permissionLevel: 'stage', argumentsJson: '{}'
+      },
+      {
+        type: 'approval-resolved',
+        step: 1, callId: 'c-abort', toolName: 'propose_text_patch',
+        decision: 'abort', fromMemory: false
+      }
+    );
+    assert.equal(state.approvalDecisions[0]?.decision, 'abort');
+  });
+
   it('审批等级分档把不可撤销的操作标为高危', () => {
     assert.equal(approvalSeverity('commit'), 'high');
     assert.equal(approvalSeverity('rollback'), 'high');

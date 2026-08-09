@@ -293,7 +293,10 @@ describe('审批卡片真的渲染出来', () => {
       'agent-approval-once',
       'agent-approval-reject',
       'agent-approval-always',
-      'agent-approval-never'
+      'agent-approval-never',
+      // abort 与 Codex 的 ReviewDecision 对齐；它是用户「不想让这轮继续」的
+      // 唯一入口，缺了就只能靠拒绝每一次调用来间接达到。
+      'agent-approval-abort'
     ]) {
       assert.match(html, new RegExp(`data-testid="${testid}"`), `缺少审批按钮 ${testid}`);
     }
@@ -439,6 +442,34 @@ describe('审批卡片真的渲染出来', () => {
     const html = render({ task: withApproval({ toolName: 'rollback_operation', permissionLevel: 'rollback' }) });
     assert.match(html, /等待你批准/);
     assert.match(html, /rollback_operation/);
+  });
+
+  it('超时与拒绝在历史里显示成不同的话', () => {
+    const task = feed(
+      withApproval(),
+      {
+        type: 'approval-resolved',
+        step: 1, callId: 'call-render', toolName: 'propose_text_patch',
+        decision: 'timed_out', fromMemory: false
+      }
+    );
+    const html = render({ task });
+    assert.match(html, /超时未回答/);
+    // 把超时显示成「已拒绝」会让事后回看时「没人在场」看起来像
+    // 「用户认真拒绝过」，而这两种情况该采取的下一步不同。
+    assert.ok(!/已拒绝<\/span>/.test(html), '超时不应被显示成已拒绝');
+  });
+
+  it('放弃任务在历史里有独立文案', () => {
+    const task = feed(
+      withApproval(),
+      {
+        type: 'approval-resolved',
+        step: 1, callId: 'call-render', toolName: 'propose_text_patch',
+        decision: 'abort', fromMemory: false
+      }
+    );
+    assert.match(render({ task }), /已放弃整个任务/);
   });
 
   it('来自会话记忆的自动处理被显式标注', () => {

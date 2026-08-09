@@ -31,6 +31,8 @@
  *      否则是在教用户「你的回答不影响结果」;
  *   ⑪ 不传 requestApproval 时行为与加入审批层之前一致(不得默默拦,也不得
  *      默默放行)—— 这一条保证审批层是**增量**检查点而非替换既有门;
+ *   ⑬ `timed_out` 与 `abort` 各有独立语义:前者不得被折叠成 reject(审计要能
+ *      区分「用户拒绝」与「没人回答」),后者必须终止整轮而不只是拒绝这一次;
  *   ⑫ 审批分级必须建立在生产 agentToolBridge 真实投影出的 permissionLevel 上,
  *      而不是门禁自造的工具定义 —— 判据①-⑪用自造 toolDef,看不见「bridge
  *      忘记透出 permissionLevel」这种失效。实测拆掉那一行后①-⑪全绿,而生产里
@@ -57,6 +59,21 @@
  * A12 第一版报绿,正是它暴露了判据⑫要守的盲区:判据①-⑪用本门禁自造的
  * toolDef,永远不经过生产 bridge,拆掉 bridge 那一行不会被任何判据看见。
  * A13 与 A4 的锚点最初写成跨行字面量匹配不上(源码 CRLF),改单行后成立。
+ *
+ * ── 判据⑬ 的负向证明(同日实测五条)──
+ *   C1  abort 只 break 内层 for(回到真实 bug) → ABORT_DID_NOT_STOP_LOOP
+ *   C2  审计写入处把 timed_out 折叠成 reject   → TIMEOUT_FOLDED_INTO_REJECT
+ *   C3  timed_out 从拒绝清单里移除            → TIMEOUT_STILL_EXECUTED
+ *   C4  abort 不写结构化诊断                  → ABORT_NOT_DIAGNOSED
+ *   C5  abort 后 finishReason 不是 cancelled   → ABORT_WRONG_FINISH_REASON
+ *
+ * C1 守的是一个**真实发生过**的 bug:planning 循环里的 break 只跳出内层
+ * `for (const call of toolCalls)`,不在循环后再断一次的话外层 while 会照常跑
+ * 下一步 —— 用户选了「放弃任务」而任务接着跑,且零报错。那是写这段代码时
+ * 实测才发现的,不是设想的失效。
+ * C2 最初想退化在 `decision = response.decision` 那一行,但 TS 的控制流分析
+ * 算出该处 decision 不可能是 timed_out,报 TS2367「无重叠」而非跑出判据结果
+ * ——那说明类型层已经守住了那条路径;改在审计写入处折叠才测到本判据。
  */
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -520,6 +537,73 @@ for (const [decision, shouldExecuteSecond] of [['always', true], ['never', false
   }
 }
 
+// 判据⑬:timed_out 与 abort 是与 reject 不同的结果。
+//
+// 与 Codex 的 ReviewDecision 对齐(approved / approved_for_session / denied /
+// timed_out / abort)。两条都必须阻止本次调用,但语义不同:
+//   - timed_out 记为独立取值,不能被折叠成 reject —— 审计里「用户拒绝了」与
+//     「没人回答」是两个事实,后续动作不同;
+//   - abort 终止整轮,而不只是拒绝这一次。实测踩过:planning 循环里的 break
+//     只跳出内层 for,外层 while 会照常继续跑下一步,用户选了「放弃任务」
+//     而任务接着跑且零报错。
+{
+  const timedOut = await runOnce({ approve: () => ({ decision: 'timed_out' }) });
+  if (timedOut.executed.includes('rollback_operation')) {
+    findings.push({
+      code: 'TIMEOUT_STILL_EXECUTED',
+      executed: timedOut.executed,
+      message: 'decision=timed_out 时工具仍然执行了。没人回答不是同意。'
+    });
+  }
+  const timedOutDecision = timedOut.result.audit?.approvals?.[0]?.decision;
+  if (timedOutDecision !== 'timed_out') {
+    findings.push({
+      code: 'TIMEOUT_FOLDED_INTO_REJECT',
+      decision: timedOutDecision ?? null,
+      message: `timed_out 被记成 ${timedOutDecision ?? '(无)'}。它必须作为独立取值`
+        + '留在审计里 —— 折叠成 reject 会让「审批通道没人看」在事后看起来像'
+        + '「用户认真拒绝过」。'
+    });
+  }
+
+  const aborted = await runOnce({
+    approve: () => ({ decision: 'abort' }),
+    rounds: 3
+  });
+  if (aborted.executed.length > 0) {
+    findings.push({
+      code: 'ABORT_STILL_EXECUTED',
+      executed: aborted.executed,
+      message: `decision=abort 后仍执行了 ${aborted.executed.join(', ')}。`
+        + ' 放弃任务必须在执行之前生效。'
+    });
+  }
+  if (aborted.result.steps > 1) {
+    findings.push({
+      code: 'ABORT_DID_NOT_STOP_LOOP',
+      steps: aborted.result.steps,
+      message: `decision=abort 后 loop 仍跑了 ${aborted.result.steps} 步。`
+        + ' abort 必须终止整轮 —— planning 循环里的 break 只跳出内层 for,'
+        + '不额外断一次的话外层 while 会照常继续,而这不会有任何报错。'
+    });
+  }
+  if (aborted.result.finishReason !== 'cancelled') {
+    findings.push({
+      code: 'ABORT_WRONG_FINISH_REASON',
+      finishReason: aborted.result.finishReason,
+      message: `abort 后 finishReason 是 ${aborted.result.finishReason},期望 cancelled。`
+        + ' 界面据此判断任务是被放弃还是正常结束。'
+    });
+  }
+  if (!aborted.result.diagnostics.some((entry) => entry.code === 'AGENT_ABORTED_BY_APPROVAL')) {
+    findings.push({
+      code: 'ABORT_NOT_DIAGNOSED',
+      diagnostics: aborted.result.diagnostics.map((entry) => entry.code),
+      message: 'abort 必须留下结构化诊断,否则「任务为何停了」无从回答。'
+    });
+  }
+}
+
 // 判据⑪:不传 requestApproval 时行为不变。
 {
   const { asked, executed, result } = await runOnce({});
@@ -577,8 +661,8 @@ report({
   ok: true,
   gate: LABEL,
   status: 'passed',
-  message: '审批层十二条判据通过:写类工具必经审批、拒绝真的阻止执行、'
-    + '通道异常按拒绝处理、会话记忆不跨 run、审批不越过模式门、'
+  message: '审批层十三条判据通过:写类工具必经审批、拒绝真的阻止执行、'
+    + '通道异常按拒绝处理、会话记忆不跨 run、审批不越过模式门、timed_out 与 abort 各有独立语义、'
     + '且分级建立在生产 bridge 真实投影的 permissionLevel 上。',
   defaultLevels: [...DEFAULT_APPROVAL_REQUIRED_LEVELS],
   nonClaim: '本门禁只观测 agent loop 层的审批行为(fake adapter,不发网络请求)。'

@@ -115,7 +115,38 @@ export interface RetryPolicyOptions {
  * in-memory: persisting "always allow" across sessions would let a decision
  * made in one workspace silently authorize another.
  */
-export type ApprovalDecision = 'once' | 'always' | 'reject' | 'never';
+export type ApprovalDecision =
+  | 'once'
+  | 'always'
+  | 'reject'
+  | 'never'
+  /**
+   * 无人回答，由宿主按超时结算。
+   *
+   * 独立于 `reject` 而不是并入它：审计里「用户拒绝了这次写入」与「没人回答、
+   * 超时后按拒绝处理」是两个不同事实。并成一个会让「审批通道没人看」在事后
+   * 看起来像「用户认真拒绝过」，而这两种情况的后续动作不同——前者要改方案，
+   * 后者要看是不是没人在场。
+   *
+   * 与 Codex 的 ReviewDecision 对齐：那里 `timed_out` 也是与 `denied` 平级的
+   * 独立取值（codex-rs/app-server-protocol/schema/typescript/ReviewDecision.ts）。
+   */
+  | 'timed_out'
+  /**
+   * 放弃整个任务，不只是拒绝这一次调用。
+   *
+   * 同样取自 Codex 的 ReviewDecision。`reject` 之后 loop 会带着拒绝结果继续
+   * 下一步，模型可能换个方式再试；`abort` 表示用户不想让这轮继续下去。
+   */
+  | 'abort';
+
+/** 会进入会话记忆的决定：只有这两个跨调用生效。 */
+export const APPROVAL_DECISIONS_WITH_MEMORY: readonly ApprovalDecision[] =
+  Object.freeze(['always', 'never']);
+
+/** 阻止本次调用执行的决定。 */
+export const APPROVAL_DECISIONS_DENYING: readonly ApprovalDecision[] =
+  Object.freeze(['reject', 'never', 'timed_out', 'abort']);
 
 export interface ApprovalRequest {
   step: number;

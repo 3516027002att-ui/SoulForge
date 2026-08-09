@@ -88,6 +88,7 @@ import type {
 } from '@soulforge/shared';
 import type {
   AgentEvent,
+  ApprovalDecision,
   ApprovalDiff,
   ChatMessage,
   ResumedRollout,
@@ -525,7 +526,7 @@ export interface AiAgentRunRequest {
 export interface AiAgentApprovalResponseRequest {
   sessionId: string;
   callId: string;
-  decision: 'once' | 'always' | 'reject' | 'never';
+  decision: ApprovalDecision;
   note?: string;
 }
 
@@ -2959,7 +2960,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    */
   const pendingApprovals = new Map<
     string,
-    { resolve: (response: { decision: 'once' | 'always' | 'reject' | 'never'; note?: string }) => void; timer: NodeJS.Timeout }
+    { resolve: (response: { decision: ApprovalDecision; note?: string }) => void; timer: NodeJS.Timeout }
   >();
 
   /**
@@ -2974,7 +2975,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   const settleApproval = (
     key: string,
-    response: { decision: 'once' | 'always' | 'reject' | 'never'; note?: string }
+    response: { decision: ApprovalDecision; note?: string }
   ): boolean => {
     const pending = pendingApprovals.get(key);
     if (!pending) return false;
@@ -3104,13 +3105,15 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       toolName: string;
       permissionLevel: string;
       argumentsJson: string;
-    }): Promise<{ decision: 'once' | 'always' | 'reject' | 'never'; note?: string }> =>
+    }): Promise<{ decision: ApprovalDecision; note?: string }> =>
       new Promise((resolveApproval) => {
         const key = `${sessionId}:${approvalRequest.callId}`;
         const timer = setTimeout(() => {
+          // timed_out 而不是 reject：审计里「用户拒绝了」与「没人回答」是两个
+          // 不同事实，后续动作也不同（前者要改方案，后者要看是不是没人在场）。
           settleApproval(key, {
-            decision: 'reject',
-            note: `审批请求超过 ${Math.round(APPROVAL_TIMEOUT_MS / 60_000)} 分钟未回答，已按拒绝处理。`
+            decision: 'timed_out',
+            note: `审批请求超过 ${Math.round(APPROVAL_TIMEOUT_MS / 60_000)} 分钟未回答，按未批准处理。`
           });
         }, APPROVAL_TIMEOUT_MS);
         // unref so a parked approval never keeps the process alive on quit.
@@ -3314,8 +3317,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ) {
         return { ok: false, error: { code: 'INVALID_INPUT', message: 'sessionId 与 callId 必填。' } };
       }
-      const allowed = ['once', 'always', 'reject', 'never'] as const;
-      if (!allowed.includes(request.decision)) {
+      // 用户可发起的四档。`timed_out` 刻意**不在**其中：它只能由主进程的超时
+      // 定时器产生。允许 renderer 自称超时会让「没人回答」这个事实可以被伪造，
+      // 而审计正是靠它区分「用户拒绝」与「无人在场」。
+      const allowed = ['once', 'always', 'reject', 'never', 'abort'] as const;
+      if (!allowed.includes(request.decision as (typeof allowed)[number])) {
         return {
           ok: false,
           error: {

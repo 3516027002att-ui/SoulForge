@@ -127,9 +127,24 @@ export interface AgentApprovalPreview {
 export interface AgentApprovalDecisionView {
   callId: string;
   toolName: string;
-  decision: 'once' | 'always' | 'reject' | 'never';
+  /** 含主进程产生的 timed_out 与 abort，用于回看已发生的结果。 */
+  decision: AgentApprovalDecisionKind;
   fromMemory: boolean;
 }
+
+/** 审批的全部结果种类，含主进程产生的。 */
+export type AgentApprovalDecisionKind =
+  | 'once' | 'always' | 'reject' | 'never' | 'timed_out' | 'abort';
+
+/**
+ * **用户可点**的决定。
+ *
+ * 比 AgentApprovalDecisionKind 少一个 `timed_out`：那只能由主进程的超时定时器
+ * 产生。界面上给一个「我超时了」的按钮既无意义，也会让「没人回答」这个事实
+ * 变得可以被伪造 —— 而审计正是靠它区分「用户拒绝」与「无人在场」。
+ */
+export type AgentApprovalUserDecision =
+  | 'once' | 'always' | 'reject' | 'never' | 'abort';
 
 /** 预览里 newText 的展示上限;超出部分截断并说明。 */
 export const APPROVAL_PREVIEW_TEXT_LIMIT = 2_000;

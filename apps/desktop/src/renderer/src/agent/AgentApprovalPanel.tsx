@@ -5,6 +5,7 @@ import {
   classifyDiffLines,
   describeApprovalLevel,
   type AgentApprovalDecisionView,
+  type AgentApprovalUserDecision,
   type AgentApprovalView
 } from './agentTaskState.js';
 
@@ -12,7 +13,7 @@ export interface AgentApprovalPanelProps {
   pending: AgentApprovalView[];
   decisions: AgentApprovalDecisionView[];
   /** 回答一条审批。四档语义见 ApprovalDecision。 */
-  onRespond: (callId: string, decision: 'once' | 'always' | 'reject' | 'never') => void;
+  onRespond: (callId: string, decision: AgentApprovalUserDecision) => void;
   /** 正在发送回答的 callId；期间禁用该卡片按钮，避免重复提交。 */
   respondingCallId: string | null;
   /** 上一次回答失败的原因；null 表示无错误。 */
@@ -23,13 +24,29 @@ function severityClass(level: string): string {
   return `agent-approval is-${approvalSeverity(level)}`;
 }
 
+/**
+ * 六档结果的文案。
+ *
+ * timed_out 与 abort 必须有各自的说法：把超时显示成「已拒绝」会让事后回看时
+ * 「没人在场」看起来像「用户认真拒绝过」，而这两种情况该采取的下一步不同。
+ * 返回类型不带 undefined —— 漏一档会在编译期报错而不是渲染出空白。
+ */
 function decisionLabel(decision: AgentApprovalDecisionView['decision']): string {
-  return ({
+  const labels: Record<AgentApprovalDecisionView['decision'], string> = {
     once: '已批准（仅这一次）',
     always: '已批准（本会话内不再询问）',
     reject: '已拒绝',
-    never: '已拒绝（本会话内不再询问）'
-  } as const)[decision];
+    never: '已拒绝（本会话内不再询问）',
+    timed_out: '超时未回答（按未批准处理）',
+    abort: '已放弃整个任务'
+  };
+  return labels[decision];
+}
+
+/** 拒绝类结果（含超时与放弃）用告警配色，批准类用正常配色。 */
+function isDenyingDecision(decision: AgentApprovalDecisionView['decision']): boolean {
+  return decision === 'reject' || decision === 'never'
+    || decision === 'timed_out' || decision === 'abort';
 }
 
 /**
@@ -44,11 +61,31 @@ function decisionLabel(decision: AgentApprovalDecisionView['decision']): string 
  * 是这层设计的意义所在。always 已经覆盖了「同一工具不想被反复问」的诉求，
  * 且它的作用域限于本会话。
  *
- * ── 关于「按 Codex VSCode 插件形态」这条要求 ──
+ * ── 与 Codex 的实测对照(2026-08-08)──
  *
- * 任务要求照 Codex 插件的审批形态来做。实际依据**不是**对该插件的调研：
- * 两次派出的界面调研都没有返回结论，本组件的形态是从本项目自己的权限阶梯
- * （ai/toolPermissions.ts 的七级 read→rollback）与 agentLoop 的审批门推出来的：
+ * 两次派出的界面调研都没有返回结论,最后是直接查官方文档与 openai/codex
+ * 仓库(Apache-2.0)的协议 schema 取到的。只取**名称与形态**做对照,
+ * 不复制其源码。
+ *
+ * 已核实的四点,本组件据此对齐:
+ *   1. `ReviewDecision`(codex-rs/app-server-protocol/schema/typescript/
+ *      ReviewDecision.ts)= `approved` | `approved_for_session` |
+ *      `denied{rejection}` | `timed_out` | `abort`。据此本处补了 `timed_out`
+ *      与 `abort` 两档 —— 此前超时被并进 reject,而 abort 完全没有。
+ *   2. 改动摘要形态是「文件名 + 增删行数」(官方文档示例 `Edited retry.ts +2−2`)。
+ *      本处的 diff 头显示 targetPath 与 `+N / -M`,同形。
+ *   3. 侧边栏区块名为 `CODEX`;动作词是 **Review** 与 **Undo**。
+ *   4. 空状态引导语是 `Start your first chat`(未记录更详细的空态设计)。
+ *
+ * 一处**真实差异,未对齐**:Codex 把权限拆成两个正交轴 ——
+ *   `AskForApproval` = untrusted | on-request | granular{...} | never(何时问)
+ *   `SandboxMode`    = read-only | workspace-write | danger-full-access(能碰什么)
+ * 而本项目只有一个 `permissionMode`(plan / normal / fullPermission)混合了两者。
+ * 拆成两轴会改动 IPC 契约、权限阶梯与两处已封存断言,属于范围变更,
+ * 已记录待裁定,不在本次顺带做。
+ *
+ * 其余选择是从本项目自己的权限阶梯(ai/toolPermissions.ts 的七级
+ * read→rollback)与 agentLoop 的审批门推出来的:
  *
  *   - 三档危险度来自等级语义，不是抄来的配色：commit/rollback 不可能靠再跑
  *     一次撤销，stage/write 可以，read/analyze 不该弹窗；
@@ -62,8 +99,9 @@ function decisionLabel(decision: AgentApprovalDecisionView['decision']): string 
  * 现在就能读，新内容也在参数里，两侧都齐；而 createUnifiedDiff 早已存在于
  * 仓库中，PatchChange 也一直有 diff 字段。缺的不是条件，是我没去找。
  *
- * 所以这些选择都能在本仓库内被检验，但**不声称与 Codex 逐项一致**。若日后
- * 拿到该插件的实际形态而与此处冲突，冲突点应重新裁定，而不是默认本处正确。
+ * 所以：决定档位与改动摘要形态已按实测对齐；权限双轴那一处是已知且已记录的
+ * 差异。不声称在**未核实的方面**与 Codex 一致 —— 官方文档没有记录审批卡片的
+ * 具体布局、按钮排列与空态细节，那些地方本处按自身阶梯设计。
  *
  * 全部状态由上层以受控 props 下发；本组件不持有全局状态、不直接调 IPC。
  */
@@ -227,6 +265,20 @@ export function AgentApprovalPanel({
             >
               总是拒绝此工具
             </button>
+            {/* 放弃整个任务。与「拒绝」的区别：拒绝之后 loop 会带着拒绝结果走
+                下一步，模型可能换个方式再试；放弃表示不想让这轮继续下去。
+                取自 Codex 的 ReviewDecision（approved / approved_for_session /
+                denied / timed_out / abort），那里 abort 也与 denied 平级。 */}
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              disabled={respondingCallId !== null}
+              title="拒绝这次调用并结束整个任务，而不是让 Agent 换个方式再试"
+              data-testid="agent-approval-abort"
+              onClick={() => onRespond(entry.callId, 'abort')}
+            >
+              放弃任务
+            </button>
           </div>
           <p className="muted agent-approval__scope">
             「总是」只在当前会话内生效，不会写入配置、也不会带到下一个会话。
@@ -241,7 +293,7 @@ export function AgentApprovalPanel({
             {decisions.map((entry) => (
               <div
                 key={entry.callId}
-                className={entry.decision === 'reject' || entry.decision === 'never'
+                className={isDenyingDecision(entry.decision)
                   ? 'agent-log__row is-danger'
                   : 'agent-log__row is-ok'}
               >
