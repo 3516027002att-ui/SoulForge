@@ -306,6 +306,8 @@ export function App(): ReactElement {
   const [agentSessionsPage, setAgentSessionsPage] = useState(0);
   const [agentSessionsError, setAgentSessionsError] = useState<string | null>(null);
   const [agentSessionDetail, setAgentSessionDetail] = useState<AgentSessionDetail | null>(null);
+  const [respondingApprovalCallId, setRespondingApprovalCallId] = useState<string | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
   const [agentTools, setAgentTools] = useState<ToolDescriptor[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(264);
@@ -1654,6 +1656,42 @@ export function App(): ReactElement {
     await bridge.cancelAiAgent(sessionId);
   }
 
+  /**
+   * 回答一条审批请求。
+   *
+   * 不在本地把卡片出队：出队只由主进程回的 approval-resolved 事件驱动。
+   * 本地先出队会让「点了但没送达」表现为卡片消失而任务仍在等待——用户以为
+   * 自己已经批准，实际 loop 还停在那里，十分钟后按拒绝结算。
+   */
+  async function respondAgentApproval(
+    callId: string,
+    decision: 'once' | 'always' | 'reject' | 'never'
+  ): Promise<void> {
+    const sessionId = agentTask.sessionId;
+    if (!bridge || sessionId === null) {
+      announceDesktopOnly('回答 AI 审批');
+      return;
+    }
+    setRespondingApprovalCallId(callId);
+    setApprovalError(null);
+    try {
+      const result = await bridge.respondAiAgentApproval({ sessionId, callId, decision });
+      if (!result.ok) {
+        setApprovalError(`${result.error.code}——${result.error.message}`);
+        return;
+      }
+      if (!result.matched) {
+        // 主进程已结算过这条请求（会话结束或超时）。这是正常竞态，不是错误，
+        // 但必须说出来：否则用户点了按钮却什么都没发生。
+        setApprovalError('这条审批已失效（会话已结束或等待超时），你的回答未被采纳。');
+      }
+    } catch (error) {
+      setApprovalError(`审批回答发送失败——${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setRespondingApprovalCallId(null);
+    }
+  }
+
   async function loadAgentSession(sessionPath: string): Promise<void> {
     if (!bridge) {
       announceDesktopOnly('查看 AI 会话');
@@ -2851,7 +2889,10 @@ export function App(): ReactElement {
             onRefreshSessions: () => void refreshAgentSessions(),
             onSessionsPageChange: setAgentSessionsPage,
             onLoadSession: (sessionPath) => void loadAgentSession(sessionPath),
-            onResumeSession: (sessionPath) => void runAgentTask(sessionPath)
+            onResumeSession: (sessionPath) => void runAgentTask(sessionPath),
+            onRespondApproval: (callId, decision) => void respondAgentApproval(callId, decision),
+            respondingApprovalCallId,
+            approvalError
           }}
           eventUri={eventUri}
           onEventUriChange={setEventUri}

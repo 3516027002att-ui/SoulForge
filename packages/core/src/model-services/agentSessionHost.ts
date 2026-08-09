@@ -19,6 +19,8 @@ import type {
   ApprovalResponse,
   ChatMessage,
   CompactionOptions,
+  ContextBroker,
+  ContextBrokerOptions,
   ModelServiceAdapter,
   ModelServiceConfig,
   RetryPolicyOptions,
@@ -47,6 +49,9 @@ export interface AgentSessionRunParams {
    */
   requestApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
   approvalRequiredLevels?: readonly string[];
+  /** Workspace evidence assembler injected before each model call. */
+  contextBroker?: ContextBroker;
+  contextBrokerOptions?: ContextBrokerOptions;
   retryPolicy?: RetryPolicyOptions;
   streamMaxRetries?: number;
   compaction?: CompactionOptions;
@@ -116,6 +121,10 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     ...(params.requestApproval ? { requestApproval: params.requestApproval } : {}),
     ...(params.approvalRequiredLevels
       ? { approvalRequiredLevels: params.approvalRequiredLevels }
+      : {}),
+    ...(params.contextBroker ? { contextBroker: params.contextBroker } : {}),
+    ...(params.contextBrokerOptions
+      ? { contextBrokerOptions: params.contextBrokerOptions }
       : {}),
     onEvent: emit,
     rollout: recorder

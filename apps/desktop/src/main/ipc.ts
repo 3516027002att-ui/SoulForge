@@ -10,6 +10,7 @@ import {
   createConfiguredModelServiceAdapter,
   createDefaultToolRegistry,
   createConfirmationReceipt,
+  createContextBroker,
   listRolloutSessions,
   loadRolloutSession,
   runAgentSession,
@@ -488,6 +489,42 @@ export interface AiAgentRunRequest {
   streaming?: boolean;
   /** Session-relative rollout path as returned by ai.agent.sessions. */
   resumeSessionPath?: string;
+  /**
+   * Per-model-call timeout. Before this was exposed, the loop ran with no
+   * timeout at all: a provider that accepted the connection and then stalled
+   * left the session running until the user cancelled it by hand.
+   */
+  timeoutMs?: number;
+  /** Step ceiling. The loop's own default is 8 when unset. */
+  maxSteps?: number;
+  /** Total output token budget across all steps; the loop stops when exceeded. */
+  maxTotalOutputTokens?: number;
+  /**
+   * Auto-compaction trigger in estimated context tokens. Compaction is
+   * implemented but never fired in production, because reaching it requires
+   * this value and nothing supplied one.
+   */
+  autoCompactTokenLimit?: number;
+  /** Retry attempts for model calls; the loop defaults to 4 when unset. */
+  retryMaxAttempts?: number;
+  /** Assemble workspace evidence into bounded context before each model call. */
+  useContextBroker?: boolean;
+  /** Byte ceiling for Context Broker output; ignored unless useContextBroker. */
+  contextMaxBytes?: number;
+  /**
+   * Permission levels that require user approval. Omit for the loop's default
+   * (stage/commit/rollback/write). An explicit empty array disables approval,
+   * which main refuses outside plan mode — see the handler.
+   */
+  approvalRequiredLevels?: string[];
+}
+
+/** Renderer's answer to one approval request (ai.agent.approval.respond). */
+export interface AiAgentApprovalResponseRequest {
+  sessionId: string;
+  callId: string;
+  decision: 'once' | 'always' | 'reject' | 'never';
+  note?: string;
 }
 
 export type AiAgentRunIpcResult =
@@ -2906,6 +2943,54 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   const agentSessionsBaseDir = join(app.getPath('userData'), 'agent');
   const activeAgentRuns = new Map<string, AbortController>();
 
+  /**
+   * Approval requests awaiting a renderer answer, keyed `sessionId:callId`.
+   *
+   * The loop's requestApproval is an awaited promise, but the renderer channel
+   * is push + invoke. This map is the join: main pushes an event, parks the
+   * resolver here, and ai.agent.approval.respond resolves it.
+   *
+   * A pending approval is *not* an implicit allow. Every path that discards a
+   * resolver must resolve it as a rejection first (cancel, window teardown,
+   * timeout) — dropping the promise would hang the loop, and defaulting it to
+   * an allow would execute a write nobody approved.
+   */
+  const pendingApprovals = new Map<
+    string,
+    { resolve: (response: { decision: 'once' | 'always' | 'reject' | 'never'; note?: string }) => void; timer: NodeJS.Timeout }
+  >();
+
+  /**
+   * How long an approval request waits before it self-rejects.
+   *
+   * Unbounded waiting is not an option: the loop holds the tool phase open, so
+   * a user who walks away leaves the session pinned. Rejecting on timeout is
+   * the safe direction — the agent reports "not approved" and stops, and the
+   * user can re-run. Ten minutes is long enough to read a diff.
+   */
+  const APPROVAL_TIMEOUT_MS = 600_000;
+
+  const settleApproval = (
+    key: string,
+    response: { decision: 'once' | 'always' | 'reject' | 'never'; note?: string }
+  ): boolean => {
+    const pending = pendingApprovals.get(key);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    pendingApprovals.delete(key);
+    pending.resolve(response);
+    return true;
+  };
+
+  /** Reject everything still pending for one session (cancel / teardown). */
+  const rejectSessionApprovals = (sessionId: string, note: string): void => {
+    for (const key of [...pendingApprovals.keys()]) {
+      if (key.startsWith(`${sessionId}:`)) {
+        settleApproval(key, { decision: 'reject', note });
+      }
+    }
+  };
+
   const sendAgentEvent = (
     sessionId: string,
     event: AgentEvent | AiAgentSessionLifecycleEvent
@@ -3000,6 +3085,42 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     sendAgentEvent(sessionId, { type: 'session-accepted', mode });
 
     const permissionMode = mode === 'fullPermission' ? 'full' : mode;
+
+    /**
+     * Approval bridge. Parks a resolver keyed by callId, pushes the request to
+     * the renderer, and lets ai.agent.approval.respond settle it.
+     *
+     * Wired unconditionally rather than only outside plan mode: plan mode
+     * currently denies write tools before they reach the approval gate, so the
+     * callback simply never fires there. Making it conditional would mean that
+     * whether a write can happen without approval depends on a mode check
+     * written in two places.
+     */
+    const requestApproval = (approvalRequest: {
+      step: number;
+      callId: string;
+      toolName: string;
+      permissionLevel: string;
+      argumentsJson: string;
+    }): Promise<{ decision: 'once' | 'always' | 'reject' | 'never'; note?: string }> =>
+      new Promise((resolveApproval) => {
+        const key = `${sessionId}:${approvalRequest.callId}`;
+        const timer = setTimeout(() => {
+          settleApproval(key, {
+            decision: 'reject',
+            note: `审批请求超过 ${Math.round(APPROVAL_TIMEOUT_MS / 60_000)} 分钟未回答，已按拒绝处理。`
+          });
+        }, APPROVAL_TIMEOUT_MS);
+        // unref so a parked approval never keeps the process alive on quit.
+        timer.unref?.();
+        pendingApprovals.set(key, { resolve: resolveApproval, timer });
+        if (webContents.isDestroyed()) {
+          // No renderer to ask. Reject rather than execute — a closed window is
+          // not consent.
+          settleApproval(key, { decision: 'reject', note: '渲染进程已关闭，无法请求审批。' });
+        }
+      });
+
     void runAgentSession({
       sessionsDir: agentSessionsBaseDir,
       sessionId,
@@ -3011,11 +3132,44 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       tools: bridge.tools,
       executeTool: bridge.executeTool,
       signal: controller.signal,
+      requestApproval,
+      ...(request.approvalRequiredLevels
+        ? { approvalRequiredLevels: request.approvalRequiredLevels }
+        : {}),
       ...(request.streaming === true ? { streaming: true } : {}),
+      ...(request.timeoutMs != null && request.timeoutMs > 0
+        ? { timeoutMs: Math.trunc(request.timeoutMs) }
+        : {}),
+      ...(request.maxSteps != null && request.maxSteps > 0
+        ? { maxSteps: Math.trunc(request.maxSteps) }
+        : {}),
+      ...(request.maxTotalOutputTokens != null && request.maxTotalOutputTokens > 0
+        ? { maxTotalOutputTokens: Math.trunc(request.maxTotalOutputTokens) }
+        : {}),
+      ...(request.autoCompactTokenLimit != null && request.autoCompactTokenLimit > 0
+        ? { compaction: { autoCompactTokenLimit: Math.trunc(request.autoCompactTokenLimit) } }
+        : {}),
+      // Only the attempt count is renderer-controllable, and it is clamped:
+      // backoff base and jitter stay at the loop's defaults. Exposing those
+      // would let the renderer configure a hot retry loop against a
+      // third-party provider. Read inline so the value's origin is visible at
+      // the call site rather than in a variable computed elsewhere.
+      ...(request.retryMaxAttempts != null && request.retryMaxAttempts > 0
+        ? { retryPolicy: { maxAttempts: Math.min(8, Math.trunc(request.retryMaxAttempts)) } }
+        : {}),
+      ...(request.useContextBroker === true
+        ? {
+            contextBroker: createContextBroker(),
+            ...(request.contextMaxBytes != null && request.contextMaxBytes > 0
+              ? { contextBrokerOptions: { maxBytes: Math.trunc(request.contextMaxBytes) } }
+              : {})
+          }
+        : {}),
       ...(resumeFrom ? { resumeFrom } : {}),
       onEvent: (event) => sendAgentEvent(sessionId, event)
     }).then((result) => {
       activeAgentRuns.delete(sessionId);
+      rejectSessionApprovals(sessionId, '会话已结束，未回答的审批按拒绝处理。');
       sendAgentEvent(sessionId, {
         type: 'session-done',
         finishReason: result.run.finishReason,
@@ -3024,6 +3178,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       });
     }).catch((error: unknown) => {
       activeAgentRuns.delete(sessionId);
+      // Also on the failure path: a crashed run must not leave resolvers parked.
+      rejectSessionApprovals(sessionId, '会话异常结束，未回答的审批按拒绝处理。');
       sendAgentEvent(sessionId, {
         type: 'session-error',
         code: 'AGENT_SESSION_FAILED',
@@ -3037,8 +3193,49 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   handle('ai.agent.cancel', async (_event, sessionId: string): Promise<{ ok: boolean }> => {
     const controller = activeAgentRuns.get(sessionId);
     if (controller) controller.abort();
+    // Cancel must also settle parked approvals. An abort signal does not reach
+    // a promise the loop is awaiting, so without this the loop would sit in the
+    // tool phase waiting for an answer the user has already walked away from.
+    rejectSessionApprovals(sessionId, '任务已取消，未回答的审批按拒绝处理。');
     return { ok: true };
   });
+
+  /**
+   * Renderer's answer to one approval request.
+   *
+   * Returns matched:false for an unknown key rather than throwing — a stale
+   * answer (session already ended, request already timed out) is a normal race,
+   * not an error, and the renderer needs to tell the two apart to clear its UI.
+   */
+  handle(
+    'ai.agent.approval.respond',
+    async (
+      _event,
+      request: AiAgentApprovalResponseRequest
+    ): Promise<{ ok: true; matched: boolean } | { ok: false; error: { code: string; message: string } }> => {
+      if (
+        typeof request?.sessionId !== 'string' || request.sessionId === ''
+        || typeof request?.callId !== 'string' || request.callId === ''
+      ) {
+        return { ok: false, error: { code: 'INVALID_INPUT', message: 'sessionId 与 callId 必填。' } };
+      }
+      const allowed = ['once', 'always', 'reject', 'never'] as const;
+      if (!allowed.includes(request.decision)) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_INPUT',
+            message: `decision 取值应为 ${allowed.join(' | ')} 之一。`
+          }
+        };
+      }
+      const matched = settleApproval(`${request.sessionId}:${request.callId}`, {
+        decision: request.decision,
+        ...(typeof request.note === 'string' && request.note !== '' ? { note: request.note } : {})
+      });
+      return { ok: true, matched };
+    }
+  );
 
   handle('ai.agent.sessions', async (): Promise<AiAgentSessionListIpcResult> => {
     const sessions = await listRolloutSessions(agentSessionsBaseDir, 50);

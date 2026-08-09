@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react';
 import type { ToolDescriptor } from '@soulforge/core';
 import { formatBytes, formatListTruncation, formatPageRange } from '../format/uiText.js';
+import { AgentApprovalPanel } from './AgentApprovalPanel.js';
 import {
   AGENT_SESSION_PAGE_SIZE,
   AGENT_TOOL_CALL_LIMIT,
@@ -63,6 +64,12 @@ export interface AgentTaskPanelProps {
   onSessionsPageChange: (page: number) => void;
   onLoadSession: (sessionPath: string) => void;
   onResumeSession: (sessionPath: string) => void;
+  /** 回答一条审批请求。 */
+  onRespondApproval: (callId: string, decision: 'once' | 'always' | 'reject' | 'never') => void;
+  /** 正在发送的审批 callId；期间禁用按钮避免重复提交。 */
+  respondingApprovalCallId: string | null;
+  /** 上一次审批回答失败的原因。 */
+  approvalError: string | null;
 }
 
 function toolCallStatusLabel(status: 'running' | 'ok' | 'failed'): string {
@@ -73,6 +80,26 @@ function toolCallRowClass(status: 'running' | 'ok' | 'failed'): string {
   if (status === 'ok') return 'agent-log__row is-ok';
   if (status === 'failed') return 'agent-log__row is-danger';
   return 'agent-log__row';
+}
+
+/** 参数展示上限；超出截断并说明。长参数会把日志区挤满。 */
+const TOOL_ARGUMENTS_DISPLAY_LIMIT = 1_200;
+
+/**
+ * 参数展示：能解析成 JSON 就缩进显示，否则原样回显。
+ *
+ * 刻意不在解析失败时隐藏内容：模型发出的非法 JSON 正是需要被看见的东西，
+ * 藏起来会让「模型一直发坏参数」变成一个查不到原因的失败。
+ */
+function formatToolArguments(argumentsJson: string): string {
+  let text = argumentsJson;
+  try {
+    text = JSON.stringify(JSON.parse(argumentsJson), null, 2);
+  } catch {
+    text = argumentsJson;
+  }
+  if (text.length <= TOOL_ARGUMENTS_DISPLAY_LIMIT) return text;
+  return `${text.slice(0, TOOL_ARGUMENTS_DISPLAY_LIMIT)}\n…（已截断 ${text.length - TOOL_ARGUMENTS_DISPLAY_LIMIT} 字符，完整参数在会话文件里）`;
 }
 
 /**
@@ -111,7 +138,10 @@ export function AgentTaskPanel({
   onRefreshSessions,
   onSessionsPageChange,
   onLoadSession,
-  onResumeSession
+  onResumeSession,
+  onRespondApproval,
+  respondingApprovalCallId,
+  approvalError
 }: AgentTaskPanelProps): ReactElement {
   const cancellable = isAgentTaskCancellable(task);
   const shownToolCalls = task.toolCalls.slice(-AGENT_TOOL_CALL_LIMIT);
@@ -131,6 +161,16 @@ export function AgentTaskPanel({
   return (
     <div className="agent-block" data-testid="agent-task-panel">
       <div className="agent-block__label">AI 任务</div>
+
+      {/* 审批区置顶：等待审批是唯一一种「不操作就永远不会推进」的进行中状态。
+          排在运行控件与进度日志之后，用户可能滚不到它就以为任务在正常跑。 */}
+      <AgentApprovalPanel
+        pending={task.pendingApprovals}
+        decisions={task.approvalDecisions}
+        onRespond={onRespondApproval}
+        respondingCallId={respondingApprovalCallId}
+        respondError={approvalError}
+      />
 
       <div className="agent-controls__row">
         <label className="agent-controls__label" htmlFor="agent-task-service">模型服务</label>
@@ -237,10 +277,22 @@ export function AgentTaskPanel({
         <div className="agent-log" data-testid="agent-task-tool-calls">
           {shownToolCalls.map((call) => (
             <div key={call.callId} className={toolCallRowClass(call.status)}>
+              {call.status === 'running' && <span className="spinner" aria-hidden="true"></span>}
               <span>
                 第 {call.step} 步 · {call.name} · {toolCallStatusLabel(call.status)}
                 {call.code !== undefined ? ` · ${call.code}` : ''}
               </span>
+              {/* 参数折叠展示：只显示工具名时，「读了哪个文件」「写了什么」
+                  全都看不见，用户无法判断 agent 是否在做自己要的事。参数在
+                  loop 侧已脱敏（agentLoop 的 redactSecrets 在 push 时执行）。 */}
+              {call.argumentsJson !== undefined && call.argumentsJson !== '' && (
+                <details className="agent-log__args">
+                  <summary>参数</summary>
+                  <pre className="tool-output" data-testid="agent-tool-call-arguments">
+                    {formatToolArguments(call.argumentsJson)}
+                  </pre>
+                </details>
+              )}
             </div>
           ))}
           {toolCallTruncation !== null && (

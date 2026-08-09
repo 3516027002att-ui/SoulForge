@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  AiAgentApprovalResponseRequest,
   AiAgentEventEnvelope,
   AiAgentRunIpcResult,
   AiAgentRunRequest,
@@ -301,6 +302,16 @@ const api = {
     ipcRenderer.invoke('ai.agent.run', request),
   cancelAiAgent: (sessionId: string): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('ai.agent.cancel', sessionId),
+  /**
+   * Answer one approval request. The request itself arrives as an
+   * `approval-requested` agent event; main parks the loop until this resolves.
+   * `matched: false` means the request had already been settled (session ended
+   * or timed out) — a normal race the UI uses to clear its card.
+   */
+  respondAiAgentApproval: (
+    request: AiAgentApprovalResponseRequest
+  ): Promise<{ ok: true; matched: boolean } | { ok: false; error: { code: string; message: string } }> =>
+    ipcRenderer.invoke('ai.agent.approval.respond', request),
   listAiAgentSessions: (): Promise<AiAgentSessionListIpcResult> =>
     ipcRenderer.invoke('ai.agent.sessions'),
   loadAiAgentSession: (sessionPath: string): Promise<AiAgentSessionLoadIpcResult> =>

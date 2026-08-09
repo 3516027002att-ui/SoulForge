@@ -179,7 +179,8 @@
     "test:corpus-manifest": "node scripts/verify-corpus-manifest.mjs",
     "test:ai-tool-write-path": "node scripts/verify-ai-tool-write-path-gate.mjs",
     "test:agent-tool-schema": "node scripts/verify-agent-tool-schema-gate.mjs",
-    "test:agent-approval-gate": "node scripts/verify-agent-approval-gate.mjs"
+    "test:agent-approval-gate": "node scripts/verify-agent-approval-gate.mjs",
+    "test:agent-capability-wiring": "node scripts/verify-agent-capability-wiring-gate.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

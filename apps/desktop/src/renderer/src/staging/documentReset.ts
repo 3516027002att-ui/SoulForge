@@ -175,6 +175,12 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setAgentSessionsError: '会话读取的结构化诊断，随下次读取覆盖',
   setAgentSessionDetail: '已载入会话的详情，随下次载入覆盖',
   setAgentTools: 'AI 工具清单（来自 ai.tools），是权限阶梯的展示侧，与资源无关',
+  // 与 setAgentTask 同一理由：审批属于那一次运行，不属于当前资源。切换工作区时
+  // 清空「正在发送的审批」会让按钮重新变可点，用户可能对同一条请求点第二次；
+  // 而主进程侧 pendingApprovals 是按 sessionId:callId 键的，与工作区无关。
+  // 两者都随下一次审批动作覆盖，不会长期残留。
+  setRespondingApprovalCallId: '正在发送的审批 callId；属于那次运行而非当前资源，随回答完成清空',
+  setApprovalError: '审批回答失败的结构化原因，随下次回答覆盖',
   setSidebarCollapsed: '布局状态',
   setSidebarWidth: '布局状态',
   setCmdkOpen: '命令面板状态',

@@ -848,6 +848,42 @@ pre.tool-output {
 .agent-log__row.is-warn { color: var(--warn); }
 .agent-log__row.is-danger { color: var(--danger-text); }
 .agent-empty { color: var(--ink-2); font-size: 12px; line-height: 1.7; padding: 8px 4px; }
+.agent-empty__lead { margin: 0 0 8px; }
+.agent-empty__examples { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.agent-empty__examples-label,
+.agent-empty__steps { font-size: 11px; color: var(--ink-3); }
+.agent-empty__examples .btn { text-align: left; white-space: normal; }
+.agent-empty__steps { margin: 0 0 8px; padding-left: 18px; }
+.agent-empty__steps li { margin-bottom: 3px; }
+.agent-empty__note { margin: 0; font-size: 11px; color: var(--ink-3); }
+
+/* 审批卡片。三档危险度靠左边框色区分——commit/rollback 不可能靠再跑一次撤销，
+   它们必须在扫一眼时就与「写暂存区」区分开。 */
+.agent-approval {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--bg-2);
+}
+.agent-approval.is-high { border-left-color: var(--danger, #d9534f); }
+.agent-approval.is-medium { border-left-color: var(--warn, #d9a13b); }
+.agent-approval.is-low { border-left-color: var(--line); }
+.agent-approval__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.agent-approval__level { font-size: 11px; color: var(--ink-3); }
+.agent-approval__step { margin: 4px 0 8px; font-size: 11px; color: var(--ink-2); }
+.agent-approval__preview { margin-bottom: 8px; }
+.agent-approval__target { display: flex; gap: 6px; align-items: baseline; margin-bottom: 4px; font-size: 11px; }
+.agent-approval__target-label { color: var(--ink-3); flex-shrink: 0; }
+.agent-approval__target code { word-break: break-all; }
+.agent-approval__actions { flex-wrap: wrap; margin-top: 8px; }
+.agent-approval__scope { margin: 6px 0 0; font-size: 11px; color: var(--ink-3); }
+
+.agent-log__args { margin-top: 3px; }
+.agent-log__args summary { font-size: 11px; color: var(--ink-3); cursor: pointer; }
+.composer-mode { font-size: 11px; color: var(--ink-3); margin-left: auto; margin-right: 8px; }
+.composer-awaiting { font-size: 11px; color: var(--warn, #d9a13b); }
 .spinner {
   width: 12px; height: 12px; border-radius: 50%; flex: none;
   border: 1.5px solid var(--ember-soft); border-top-color: var(--ember);

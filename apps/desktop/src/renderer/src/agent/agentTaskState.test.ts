@@ -13,10 +13,15 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   AGENT_TOOL_CALL_LIMIT,
+  APPROVAL_PREVIEW_TEXT_LIMIT,
   INITIAL_AGENT_TASK_STATE,
+  approvalSeverity,
   describeAgentTaskStatus,
+  describeApprovalLevel,
   describeRunBlocker,
+  extractApprovalPreview,
   isAgentTaskActive,
+  isAgentTaskAwaitingApproval,
   isAgentTaskCancellable,
   markAgentTaskCancelling,
   reduceAgentTaskEvent,
@@ -232,5 +237,133 @@ describe('工具调用列表上限是有限正整数', () => {
       Number.isInteger(AGENT_TOOL_CALL_LIMIT) && AGENT_TOOL_CALL_LIMIT > 0,
       `上限必须是正整数，实际 ${AGENT_TOOL_CALL_LIMIT}`
     );
+  });
+});
+
+describe('审批请求折叠成待办队列', () => {
+  it('approval-requested 入队，approval-resolved 出队并留下记录', () => {
+    const requested = feed(startAgentTask(SESSION), { type: 'turn-started', step: 1 }, {
+      type: 'approval-requested',
+      step: 1,
+      callId: 'call-1',
+      toolName: 'rollback_operation',
+      permissionLevel: 'rollback',
+      argumentsJson: '{"opId":"op-1"}'
+    });
+    assert.equal(requested.pendingApprovals.length, 1);
+    assert.equal(requested.pendingApprovals[0]?.toolName, 'rollback_operation');
+    assert.ok(isAgentTaskAwaitingApproval(requested), '有待审批且任务在进行中时必须判为等待审批');
+
+    const resolved = feed(requested, {
+      type: 'approval-resolved',
+      step: 1,
+      callId: 'call-1',
+      toolName: 'rollback_operation',
+      decision: 'once',
+      fromMemory: false
+    });
+    assert.equal(resolved.pendingApprovals.length, 0, 'resolved 之后必须出队');
+    assert.equal(resolved.approvalDecisions.length, 1);
+    assert.equal(resolved.approvalDecisions[0]?.decision, 'once');
+    assert.equal(resolved.approvalDecisions[0]?.fromMemory, false);
+  });
+
+  it('同一 callId 重复到达不会入队两次', () => {
+    const event = {
+      type: 'approval-requested' as const,
+      step: 1,
+      callId: 'dup',
+      toolName: 'propose_text_patch',
+      permissionLevel: 'stage',
+      argumentsJson: '{}'
+    };
+    const state = feed(startAgentTask(SESSION), event, event);
+    assert.equal(state.pendingApprovals.length, 1, '推送通道不保证只送一次，去重必须在折叠层');
+  });
+
+  it('多条待审批按到达顺序排队，不互相覆盖', () => {
+    const state = feed(
+      startAgentTask(SESSION),
+      { type: 'approval-requested', step: 1, callId: 'a', toolName: 't1', permissionLevel: 'stage', argumentsJson: '{}' },
+      { type: 'approval-requested', step: 1, callId: 'b', toolName: 't2', permissionLevel: 'commit', argumentsJson: '{}' }
+    );
+    // 只保留一条会让第二条在界面上消失，而 loop 仍在等它——表现为任务卡住且查不到原因。
+    assert.deepEqual(state.pendingApprovals.map((entry) => entry.callId), ['a', 'b']);
+  });
+
+  it('终态清空待审批队列', () => {
+    const pending = feed(
+      startAgentTask(SESSION),
+      { type: 'approval-requested', step: 1, callId: 'x', toolName: 't', permissionLevel: 'commit', argumentsJson: '{}' }
+    );
+    const done = feed(pending, {
+      type: 'session-done', finishReason: 'stop', steps: 1, rolloutFileName: 'f.jsonl'
+    });
+    assert.equal(done.pendingApprovals.length, 0, '会话结束后留着按钮点了没用的卡片，会让用户以为任务还在等自己');
+    const errored = feed(pending, { type: 'session-error', code: 'X', message: 'y' });
+    assert.equal(errored.pendingApprovals.length, 0);
+  });
+
+  it('等待审批时状态文案与普通进行中可区分', () => {
+    const pending = feed(
+      startAgentTask(SESSION),
+      { type: 'turn-started', step: 2 },
+      { type: 'approval-requested', step: 2, callId: 'c', toolName: 'rollback_operation', permissionLevel: 'rollback', argumentsJson: '{}' }
+    );
+    const text = describeAgentTaskStatus(pending);
+    // 「模型在想」和「停下来等你」表面上都是进行中，但后者不操作就永远不会推进。
+    assert.match(text, /等待你批准/);
+    assert.match(text, /rollback_operation/);
+    const running = feed(startAgentTask(SESSION), { type: 'turn-started', step: 2 });
+    assert.ok(!describeAgentTaskStatus(running).includes('等待你批准'));
+  });
+
+  it('审批等级分档把不可撤销的操作标为高危', () => {
+    assert.equal(approvalSeverity('commit'), 'high');
+    assert.equal(approvalSeverity('rollback'), 'high');
+    assert.equal(approvalSeverity('stage'), 'medium');
+    assert.equal(approvalSeverity('read'), 'low');
+    // 未知等级不得被当成高危也不得被当成安全——原样降级到 low 但说明可查。
+    assert.equal(approvalSeverity('unknown-level'), 'low');
+    assert.equal(describeApprovalLevel('unknown-level'), 'unknown-level', '未知等级原样回显，不猜语义');
+  });
+});
+
+describe('审批预览只从参数里已有的字段提取', () => {
+  it('提取 targetPath 与 newText', () => {
+    const preview = extractApprovalPreview(JSON.stringify({
+      targetUri: 'file://x', targetPath: 'mods/a.txt', newText: 'hello'
+    }));
+    assert.equal(preview?.targetPath, 'mods/a.txt');
+    assert.equal(preview?.newText, 'hello');
+    assert.equal(preview?.truncatedBytes, 0);
+  });
+
+  it('从 PatchProposal 形态的 changes 里取第一条', () => {
+    const preview = extractApprovalPreview(JSON.stringify({
+      opId: 'op1',
+      workspaceId: 'w1',
+      changes: [
+        { targetUri: 'file://y', targetPath: 'mods/b.txt', kind: 'text', structuredEdit: { newText: 'body' } }
+      ]
+    }));
+    assert.equal(preview?.targetPath, 'mods/b.txt');
+    assert.equal(preview?.newText, 'body');
+    assert.equal(preview?.changeCount, 1);
+  });
+
+  it('超长内容截断并报告截了多少', () => {
+    const long = 'x'.repeat(APPROVAL_PREVIEW_TEXT_LIMIT + 500);
+    const preview = extractApprovalPreview(JSON.stringify({ targetPath: 'a', newText: long }));
+    assert.equal(preview?.newText?.length, APPROVAL_PREVIEW_TEXT_LIMIT);
+    assert.equal(preview?.truncatedBytes, 500);
+  });
+
+  it('参数不是 JSON 或不含可识别字段时返回 null，而不是编一个预览', () => {
+    // 「大概是这个文件」的预览会让用户以为自己看清了改动，那比不显示更危险。
+    assert.equal(extractApprovalPreview('{oops'), null);
+    assert.equal(extractApprovalPreview('"a string"'), null);
+    assert.equal(extractApprovalPreview('[1,2]'), null);
+    assert.equal(extractApprovalPreview('{"query":"unrelated"}'), null);
   });
 });

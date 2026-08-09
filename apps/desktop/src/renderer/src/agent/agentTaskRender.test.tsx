@@ -54,6 +54,9 @@ function render(overrides: Partial<AgentTaskPanelProps> = {}): string {
     onSessionsPageChange: () => undefined,
     onLoadSession: () => undefined,
     onResumeSession: () => undefined,
+    onRespondApproval: () => undefined,
+    respondingApprovalCallId: null,
+    approvalError: null,
     ...overrides
   };
   return renderToStaticMarkup(<AgentTaskPanel {...props} />);
@@ -257,5 +260,149 @@ describe('工具调用超上限时显式说明截断', () => {
     assert.match(html, /data-testid="agent-tool-calls-truncation"/);
     assert.match(html, new RegExp(String(total)), '必须报真实总数');
     assert.match(html, new RegExp(String(total - 20)), '必须报未显示数');
+  });
+});
+
+describe('审批卡片真的渲染出来', () => {
+  /** 制造一条待审批状态。 */
+  function withApproval(overrides: {
+    toolName?: string;
+    permissionLevel?: string;
+    argumentsJson?: string;
+  } = {}): AgentTaskState {
+    return feed(
+      startAgentTask(SESSION),
+      { type: 'turn-started', step: 1 },
+      {
+        type: 'approval-requested',
+        step: 1,
+        callId: 'call-render',
+        toolName: overrides.toolName ?? 'propose_text_patch',
+        permissionLevel: overrides.permissionLevel ?? 'stage',
+        argumentsJson: overrides.argumentsJson
+          ?? JSON.stringify({ targetUri: 'file://x', targetPath: 'mods/event/common.txt', newText: '新内容' })
+      }
+    );
+  }
+
+  it('待审批时出现卡片、四档按钮与目标文件', () => {
+    const html = render({ task: withApproval() });
+    assert.match(html, /data-testid="agent-approval-card"/);
+    // 四档决定必须都能点到：少任何一档，用户就只能在「批准」和「关窗」之间选。
+    for (const testid of [
+      'agent-approval-once',
+      'agent-approval-reject',
+      'agent-approval-always',
+      'agent-approval-never'
+    ]) {
+      assert.match(html, new RegExp(`data-testid="${testid}"`), `缺少审批按钮 ${testid}`);
+    }
+    assert.match(html, /mods\/event\/common\.txt/, '必须显示目标文件——只给工具名等于让用户批准一个未知动作');
+    assert.match(html, /新内容/, '必须显示将写入的内容');
+    assert.match(html, /data-testid="agent-approval-level"/);
+  });
+
+  it('无待审批时不渲染卡片', () => {
+    // 前提断言：确认初始状态确实没有待审批，否则「没渲染」证明不了任何事。
+    assert.equal(INITIAL_AGENT_TASK_STATE.pendingApprovals.length, 0);
+    const html = render();
+    assert.ok(!html.includes('data-testid="agent-approval-card"'));
+  });
+
+  it('参数无法解析时明说无法预览，并仍然给出原始参数', () => {
+    const html = render({ task: withApproval({ argumentsJson: '{oops' }) });
+    assert.match(html, /data-testid="agent-approval-no-preview"/);
+    // 原始参数必须仍在：模型发出的坏参数正是需要被看见的东西。
+    assert.match(html, /data-testid="agent-approval-arguments"/);
+    assert.match(html, /\{oops/);
+  });
+
+  it('高危等级带高危样式类', () => {
+    const html = render({ task: withApproval({ permissionLevel: 'rollback', toolName: 'rollback_operation' }) });
+    assert.match(html, /agent-approval is-high/, 'commit/rollback 不可能靠再跑一次撤销，必须一眼可辨');
+    const staged = render({ task: withApproval({ permissionLevel: 'stage' }) });
+    assert.match(staged, /agent-approval is-medium/);
+  });
+
+  it('发送中禁用按钮，避免同一条审批被回答两次', () => {
+    const html = render({
+      task: withApproval(),
+      respondingApprovalCallId: 'call-render'
+    });
+    // React 把 disabled 渲染在 data-testid **之前**，属性顺序不由我们控制，
+    // 所以两个方向都要容许（第一版只写了 testid→disabled 一个方向，实测假红）。
+    assert.match(
+      html,
+      /<button[^>]*disabled[^>]*data-testid="agent-approval-once"|data-testid="agent-approval-once"[^>]*disabled/,
+      '发送中必须禁用按钮，否则同一条审批会被回答两次'
+    );
+    // 前提断言：不传 respondingApprovalCallId 时按钮不该是禁用的，
+    // 否则「恒定 disabled」也能让上面那条通过。
+    const enabled = render({ task: withApproval() });
+    assert.ok(
+      !/<button[^>]*disabled[^>]*data-testid="agent-approval-once"/.test(enabled),
+      '未发送时按钮必须可点——一个恒定禁用的批准按钮等于没有审批能力'
+    );
+  });
+
+  it('回答失败时显示结构化原因', () => {
+    const html = render({
+      task: withApproval(),
+      approvalError: '这条审批已失效（会话已结束或等待超时），你的回答未被采纳。'
+    });
+    assert.match(html, /data-testid="agent-approval-error"/);
+    assert.match(html, /已失效/);
+  });
+
+  it('等待审批时状态行显示等待，而不是只显示进行中', () => {
+    const html = render({ task: withApproval({ toolName: 'rollback_operation', permissionLevel: 'rollback' }) });
+    assert.match(html, /等待你批准/);
+    assert.match(html, /rollback_operation/);
+  });
+
+  it('来自会话记忆的自动处理被显式标注', () => {
+    const task = feed(
+      withApproval(),
+      {
+        type: 'approval-resolved',
+        step: 1,
+        callId: 'call-render',
+        toolName: 'propose_text_patch',
+        decision: 'always',
+        fromMemory: true
+      }
+    );
+    const html = render({ task });
+    assert.match(html, /data-testid="agent-approval-history"/);
+    // 不标注的话，「按上次决定自动放行」会被读成「用户刚刚批准了这一次」。
+    assert.match(html, /按本会话既有决定自动处理/);
+  });
+});
+
+describe('工具调用参数渲染出来', () => {
+  it('带参数的调用显示参数块', () => {
+    const task = feed(
+      startAgentTask(SESSION),
+      {
+        type: 'tool-call-begin',
+        step: 1,
+        callId: 'c-args',
+        name: 'search_events',
+        argumentsJson: '{"query":"葫芦"}'
+      }
+    );
+    const html = render({ task });
+    assert.match(html, /data-testid="agent-tool-call-arguments"/);
+    // 只显示工具名时，「读了哪个文件」「写了什么」全都看不见。
+    assert.match(html, /葫芦/);
+  });
+
+  it('无参数的调用不显示空参数块', () => {
+    const task = feed(
+      startAgentTask(SESSION),
+      { type: 'tool-call-begin', step: 1, callId: 'c-noargs', name: 'workspace_stats' }
+    );
+    const html = render({ task });
+    assert.ok(!html.includes('data-testid="agent-tool-call-arguments"'));
   });
 });

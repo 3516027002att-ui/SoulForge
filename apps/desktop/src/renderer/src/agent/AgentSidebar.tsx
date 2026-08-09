@@ -15,6 +15,7 @@ import {
 } from '../a11y/focusTrap.js';
 import { AgentSessionControls } from './AgentSessionControls.js';
 import { AgentTaskPanel, type AgentTaskPanelProps } from './AgentTaskPanel.js';
+import { isAgentTaskActive } from './agentTaskState.js';
 import { modelServiceLabel, permissionModeLabel, thinkingLabel } from './agentLabels.js';
 
 export interface AgentSidebarProps {
@@ -49,6 +50,19 @@ export interface AgentSidebarProps {
   onRunToolSearch: (query: string) => void;
   onExplainEvent: (uri: string) => void;
 }
+
+/**
+ * 空状态里的示例提问。
+ *
+ * 刻意都是**只读或提案**类的任务，且贴着本项目的真实资源类型（param 行、
+ * 事件、文本条目）。不放「帮我改掉所有 boss 的血量」这种一句话触发大批写操作的
+ * 例子：示例会被当成推荐用法，而推荐用法不该是一次性提出几十处改动。
+ */
+const AGENT_PROMPT_EXAMPLES: readonly string[] = Object.freeze([
+  '伤药葫芦的持有上限在哪个 param 里，字段叫什么',
+  '解释 event://... 这条事件做了什么，引用了哪些文本',
+  '把伤药葫芦的持有上限从 5 改到 8，先给我看改动'
+]);
 
 function groupToolsByPermission(tools: ToolDescriptor[]): Record<'read' | 'plan' | 'write', ToolDescriptor[]> {
   const levelOf = (tool: ToolDescriptor): string => tool.permissionLevel ?? tool.permission;
@@ -138,14 +152,23 @@ export function AgentSidebar({
   }
   const [toolQuery, setToolQuery] = useState('');
   const groupedTools = groupToolsByPermission(tools);
+  const awaitingApproval = task.task.pendingApprovals.length > 0;
 
   return (
     <aside className={`agent${open ? '' : ' is-collapsed'}`} aria-label="AI Agent 面板">
       <div className="agent__header">
         <div className="agent__title">
-          <span className={`agent-dot${busy ? ' is-busy' : ''}`}></span>
+          <span className={`agent-dot${busy || awaitingApproval ? ' is-busy' : ''}`}></span>
           <span>Agent</span>
-          <span className="agent-model">{busy ? '执行中' : modelServiceLabel(provider)}</span>
+          {/* 等待审批必须出现在标题栏：面板可能被折叠或滚开，而这是唯一一种
+              「不操作就永远不会推进」的状态。它优先于「执行中」。 */}
+          <span className="agent-model" data-testid="agent-header-state">
+            {awaitingApproval
+              ? `等待批准 ${task.task.pendingApprovals.length} 项`
+              : busy
+                ? '执行中'
+                : modelServiceLabel(provider)}
+          </span>
         </div>
         <div className="agent__header-actions">
           <button
@@ -186,8 +209,33 @@ export function AgentSidebar({
             入口所在。它自带空态文案，故不受下面那个 agent-empty 分支管辖。 */}
         <AgentTaskPanel {...task} tools={tools} permissionLockReason={permissionLockReason} />
         {goal === null && !draft && !busy && (
-          <div className="agent-empty">
-            没有进行中的任务。在下方描述目标，Agent 会生成计划草稿；变更经你批准后才会进入暂存区。
+          // 空状态承担引导职责：此前只有一句「没有进行中的任务」，用户既不知道
+          // 能问什么，也不知道自己的改动会不会被直接写盘。示例不是装饰——它把
+          // 「这个 agent 能做什么」变成可点击的具体动作。
+          <div className="agent-empty" data-testid="agent-empty-state">
+            <p className="agent-empty__lead">
+              没有进行中的任务。描述你想改什么，Agent 先读工作区证据、再提出改动。
+            </p>
+            <div className="agent-empty__examples" data-testid="agent-empty-examples">
+              <span className="agent-empty__examples-label">可以这样问</span>
+              {AGENT_PROMPT_EXAMPLES.map((example) => (
+                <button
+                  key={example}
+                  type="button"
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => onPromptChange(example)}
+                >
+                  {example}
+                </button>
+              ))}
+            </div>
+            <ol className="agent-empty__steps">
+              <li>Agent 用只读工具查证据（搜索资源、解释事件、查引用）。</li>
+              <li>需要改动时它给出提案，不直接落盘。</li>
+              <li>写类操作逐条弹审批，你看到目标文件与将写入的内容后再决定。</li>
+              <li>批准后经 Patch Engine 暂存、校验、提交，全程可回滚。</li>
+            </ol>
+            <p className="agent-empty__note">{permissionLockReason}</p>
           </div>
         )}
         {goal !== null && (
@@ -307,7 +355,30 @@ export function AgentSidebar({
         ></textarea>
         <div className="composer-bar">
           <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
-          <button type="button" className="btn btn--primary btn--sm" onClick={onSend}>发送</button>
+          {/* 模式在输入框旁常驻回显：模式决定 agent 能不能写盘，而它此前只出现在
+              任务面板深处。发送前看不到当前模式，就等于在不知道后果的情况下提交。
+              这里是只读回显——renderer 不提供提权入口（见 AgentTaskPanel 头注）。 */}
+          <span className="composer-mode" data-testid="composer-mode" title={permissionLockReason}>
+            {permissionModeLabel(permissionMode)}
+          </span>
+          {/* 运行中把发送换成停止：两个按钮同时可点会让用户在任务已经在跑时
+              再发一次，而 runBlocker 只会静默拒绝。 */}
+          {task.task.pendingApprovals.length > 0 ? (
+            <span className="composer-awaiting" data-testid="composer-awaiting">
+              等待你在上方批准
+            </span>
+          ) : busy || isAgentTaskActive(task.task) ? (
+            <button
+              type="button"
+              className="btn btn--danger btn--sm"
+              data-testid="composer-stop"
+              onClick={task.onCancel}
+            >
+              停止
+            </button>
+          ) : (
+            <button type="button" className="btn btn--primary btn--sm" onClick={onSend}>发送</button>
+          )}
         </div>
       </div>
 

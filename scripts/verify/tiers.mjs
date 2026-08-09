@@ -293,6 +293,14 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 全绿,而生产里每个工具都会落到默认 read 等级,审批门完全失效。
   // 用 fake adapter 跑真实 loop,不发网络请求,归 unit。
   'test:agent-approval-gate': 'unit',
+  // agent 能力接线:「实现了」与「生产会用上」是两件事。实测接线前 timeoutMs /
+  // compaction / maxTotalOutputTokens 无默认值,生产从未设过超时、上下文从不压缩;
+  // contextBroker 更彻底——createContextBroker() 生产零调用,且
+  // AgentSessionRunParams 当时根本没有这个字段,宿主层就断了。这些缺口不报错、
+  // 没有测试会红,只表现为「长任务永远不超时」。判据④用真实 host 跑一轮观测
+  // timeoutMs 是否到达 adapter,抓的是「字段名对得上但值传错」——实测把透传值
+  // 改成常量后静态判据全绿,只有运行期观测报红。静态读源码 + 假 adapter,归 unit。
+  'test:agent-capability-wiring': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。
