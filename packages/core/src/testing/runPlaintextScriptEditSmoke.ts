@@ -109,7 +109,7 @@ function buildShiftJisSample(): Uint8Array {
 
 export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
   let passed = 0;
-  const total = 15;
+  const total = 17;
   const checkedEntries: string[] = [];
   let realAttempted = false;
   let skippedReason: string | undefined;
@@ -306,13 +306,82 @@ export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
       containerUri: 'file:///synthetic/action',
       childPath: 'eventnameid.txt', entryIndex: 0,
       currentBytes: sjis, expectedContainerHash: containerHash,
-      // 引入一个非 ASCII 字符:本版无 CP932 编码器,按 UTF-8 写回会改变日文字节。
+      // 写入一个 CP932 覆盖范围内的日文字符「番」。
+      //
+      // 这条断言变过方向:此前判定「Shift-JIS 方向没有编码器」,故要求一律拒绝。
+      // 实测那让 3 个真实 *nameid.txt 完全无法编辑(首行就是日文)。编码表现在
+      // 由解码器枚举反推(encodeShiftJis),已实测三个文件的解码→编码往返逐字节
+      // 一致,所以 CP932 内的字符应当**写得进去**。
       actions: [{ kind: 'replace-once', find: 'Num = 1', replace: 'Num = 2 番' }]
     });
-    assert(!result.ok, 'Case 9: Shift-JIS 条目写入非 ASCII 必须被拒');
     assert(
-      result.ok === false && result.code === 'PLAINTEXT_SHIFT_JIS_ENCODE_UNSUPPORTED',
-      `Case 9: 应为 SHIFT_JIS_ENCODE_UNSUPPORTED,实际 ${result.ok ? '(通过)' : result.code}`
+      result.ok,
+      `Case 9: CP932 覆盖范围内的日文应可写入,实际 ${result.ok ? '' : result.code}`
+    );
+    if (result.ok) {
+      const written = new Uint8Array(
+        Buffer.from(result.operation.childContentBase64 ?? '', 'base64')
+      );
+      // 写回的字节必须能按 Shift-JIS 解码回同样的文本 —— 这才叫无损。
+      const roundTrip = new TextDecoder('shift_jis').decode(written);
+      assert(roundTrip.includes('番'), 'Case 9: 写回的字节按 Shift-JIS 解码应含「番」');
+      assert(roundTrip.includes('日本語'), 'Case 9: 原文的日文必须保持不变');
+    }
+    passed += 1;
+  }
+
+  /* --- Case 9b: CP932 覆盖不到的字符必须被拒,且不做替换 --- */
+  {
+    const sjis = buildShiftJisSample();
+    const result = buildPlaintextScriptEdit({
+      containerUri: 'file:///synthetic/action',
+      childPath: 'eventnameid.txt', entryIndex: 0,
+      currentBytes: sjis, expectedContainerHash: containerHash,
+      // Emoji 不在 CP932 里。静默换成 ? 会悄悄改变内容,必须拒绝。
+      actions: [{ kind: 'replace-once', find: 'Num = 1', replace: 'Num = 2 🗡' }]
+    });
+    assert(!result.ok, 'Case 9b: CP932 覆盖不到的字符必须被拒');
+    assert(
+      result.ok === false && result.code === 'PLAINTEXT_SHIFT_JIS_CHAR_UNMAPPABLE',
+      `Case 9b: 应为 SHIFT_JIS_CHAR_UNMAPPABLE,实际 ${result.ok ? '(通过)' : result.code}`
+    );
+    passed += 1;
+  }
+
+  /* --- Case 9c: 混合编码条目一律拒绝 --- */
+  {
+    // 原版日文 + GBK 中文:实测 801000_battle.lua(m25 容器索引 105)就是这个形态。
+    //
+    // 字节对取自真实文件的**确切失败点**:偏移 107502 处的 `0xc9 0xef` 无法按
+    // Shift-JIS 解码(整段 `ÓÒÊÖµ¯·ÉïÚ` 是 GBK 的「右手弹飞镖」)。
+    // 第一版我自己编了 `0xd7 0xf3 0xca 0xd6`,实测那四个字节恰好**也是**合法
+    // Shift-JIS 序列(只是解成别的字),于是样本被判成 shift_jis 而测不到本判据。
+    // 构造负例时凭「看起来像 GBK」挑字节是不够的,得用真实失败字节。
+    const head = [0x23, 0x93, 0xfa, 0x0a];
+    const gbk = [0x2d, 0x2d, 0xc9, 0xef, 0x0a];
+    const body = new TextEncoder().encode(
+      `Num = 1\n${Array.from({ length: 120 }, (_, i) => `${i} = "a${i}"`).join('\n')}\n`
+    );
+    const mixed = new Uint8Array(head.length + gbk.length + body.length);
+    mixed.set(head, 0);
+    mixed.set(gbk, head.length);
+    mixed.set(body, head.length + gbk.length);
+    assert(
+      detectPlaintextEncoding(mixed) === 'mixed-unknown',
+      `Case 9c: 前提不成立——混合样本应判为 mixed-unknown,实际 ${detectPlaintextEncoding(mixed)}`
+    );
+    const result = buildPlaintextScriptEdit({
+      containerUri: 'file:///synthetic/script',
+      childPath: '801000_battle.lua', entryIndex: 0,
+      currentBytes: mixed, expectedContainerHash: containerHash,
+      actions: [{ kind: 'replace-once', find: 'Num = 1', replace: 'Num = 2' }]
+    });
+    // 连纯 ASCII 结果也拒绝:解码那步已把无法识别的字节变成 U+FFFD,
+    // 「结果是纯 ASCII」只说明替换符被删掉了,写回仍然丢失原字节。
+    assert(!result.ok, 'Case 9c: 混合编码条目即使纯 ASCII 结果也必须被拒');
+    assert(
+      result.ok === false && result.code === 'PLAINTEXT_MIXED_ENCODING_UNSUPPORTED',
+      `Case 9c: 应为 MIXED_ENCODING_UNSUPPORTED,实际 ${result.ok ? '(通过)' : result.code}`
     );
     passed += 1;
   }
@@ -455,18 +524,41 @@ export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
           `Case 14: ${name} 实测是 Shift-JIS(首行为日文注释),`
             + `实际判定 ${verdict.detectedEncoding}——按 UTF-8 读写会损坏所有日文`
         );
+        // 解码前先剥掉尾部对齐填充。
+        //
+        // 第一版把含填充的整个 buffer 喂给 decodePlaintext,那 3 个 NUL 被解成
+        // 3 个   字符,编回来就多出 3 字节，往返断言差的正好是填充数。
+        // 填充属于容器对齐而非文本内容，两侧必须用同一基准。
+        const contentForDecode = verdict.trailingPaddingBytes > 0
+          ? bytes.subarray(0, bytes.length - verdict.trailingPaddingBytes)
+          : bytes;
         // 解码后必须能看到那句日文注释;看不到说明解码错了。
-        const text = decodePlaintext(bytes, verdict.detectedEncoding);
+        const text = decodePlaintext(contentForDecode, verdict.detectedEncoding);
         assert(
           text.includes('BOM') && /[^\x00-\x7f]/.test(text),
           `Case 14: ${name} 解码后应含首行注释与非 ASCII 字符`
         );
-        // 往返:整篇文本按 UTF-8 编回必须被拒,否则日文会被静默改写。
+        // 往返:整篇文本编回必须**逐字节等于原内容**。
+        //
+        // 这条断言改过方向:此前要求「必须被拒」(因为判定无编码器)。现在编码表
+        // 由解码器反推得到,真实文件的往返应当无损 —— 而「无损」比「被拒」是强得多
+        // 的断言:它同时证明了解码正确、编码正确、以及两者互逆。
+        const contentOnly = verdict.trailingPaddingBytes > 0
+          ? bytes.subarray(0, bytes.length - verdict.trailingPaddingBytes)
+          : new Uint8Array(bytes);
         const encoded = encodePlaintext(text, verdict.detectedEncoding);
         assert(
-          !encoded.ok,
-          `Case 14: ${name} 含日文的整篇文本编回必须被拒——本版无 CP932 编码器`
+          encoded.ok,
+          `Case 14: ${name} 整篇文本编回应成功,实际 ${encoded.ok ? '' : encoded.code}`
         );
+        if (encoded.ok) {
+          assert(
+            encoded.bytes.length === contentOnly.length
+              && encoded.bytes.every((byte, index) => byte === contentOnly[index]),
+            `Case 14: ${name} 解码→编码往返必须逐字节一致,`
+              + `实际 原 ${contentOnly.length} 字节 / 回 ${encoded.bytes.length} 字节`
+          );
+        }
         checkedEntries.push(`${name}(${bytes.length} B, ${verdict.detectedEncoding}, `
           + `ratio ${verdict.printableRatio.toFixed(4)})`);
       }
@@ -481,7 +573,7 @@ export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
   return {
     ok: passed === total,
     message: '明文脚本条目源码级编辑验证通过:明文判定按真实字节、字节码被拒、'
-      + 'Shift-JIS 编码边界显式拒绝、锚点唯一性强制、写后重读比对。',
+      + 'Shift-JIS 经反推 CP932 表往返无损、混合编码显式拒绝、锚点唯一性强制、写后重读比对。',
     passed,
     total,
     realCorpus: {
@@ -493,9 +585,13 @@ export async function runPlaintextScriptEditSmoke(): Promise<SmokeResult> {
       '本 smoke 不写入任何真实 Mod 资源:它验证判定与编排,落盘由 Patch Engine 负责,'
         + '容器往返由 test:script-container-replace 与 container-round-trip 校验器覆盖。',
       '不声明字节码条目可源码级编辑:唯一真阻塞是缺 HKS 重编译器,不是接线问题。',
-      'Shift-JIS 条目只允许结果为纯 ASCII 的编辑。本版没有 CP932 编码器'
-        + '(Node 的 TextEncoder 固定输出 UTF-8,仓库无 iconv 依赖),'
-        + '写入非 ASCII 内容需要单独的能力与裁定。',
+      'Shift-JIS 条目的写入用由解码器反推的 CP932 表(encodeShiftJis),已实测'
+        + '三个真实文件的解码→编码往返逐字节一致。CP932 覆盖不到的字符以'
+        + ' PLAINTEXT_SHIFT_JIS_CHAR_UNMAPPABLE 拒绝而不替换。不声明该表覆盖'
+        + ' CP932 全集——它与解码器一致,但未逐码位与外部权威表对照。',
+      '混合编码条目(既非 UTF-8 也非完整 Shift-JIS)一律拒绝源码级编辑:'
+        + '实测 801000_battle.lua 混了原版日文与后加的 GBK 中文注释,'
+        + '任何单一编码的解码-编码往返都会丢字节,故走整文件替换而非源码级编辑。',
       '明文判定阈值 0.99 来自实测(明文 1.0000、字节码 0.2029–0.6079),'
         + '但真实 Shift-JIS 条目的比例是 0.9990,余量只有 0.0090——'
         + '若日后遇到日文密度更高的明文条目,该阈值需要重新实测而不是直接放宽。',

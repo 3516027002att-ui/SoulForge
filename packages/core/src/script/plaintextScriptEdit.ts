@@ -202,7 +202,7 @@ export function buildPlaintextScriptEdit(
   }
 
   // ③ 用**同一编码**编回。Shift-JIS 条目在结果含非 ASCII 时会在这里被拒,
-  // 那是真实边界(本版无 CP932 编码器),不是可以绕过的检查。
+  // Shift-JIS 走由解码器反推的 CP932 表;表里没有的字符会被拒而不是替换。
   const encoded = encodePlaintext(text, verdict.detectedEncoding);
   if (!encoded.ok) {
     return fail(encoded.code, encoded.message, {

@@ -142,6 +142,12 @@ export const PLAN_MODE_EXTRA_DENY: ReadonlyMap<string, string> = new Map([
     'propose_text_patch 产出 PatchProposal 本身不写盘,但它是写链的入口:'
       + 'plan 模式下放行它会让「计划」与「已准备好的写入提案」在界面上难以区分。'
       + '与 validate_patch 一起拒绝,保持 plan 模式的边界是一条直线。'
+  ],
+  [
+    'propose_plaintext_script_edit',
+    '与 propose_text_patch 同一理由:它同样产出 PatchIR 而不写盘,同样是写链入口。'
+      + '两者在 plan 模式下的待遇必须一致 —— 一个被拒一个放行,'
+      + '「plan 模式能不能准备写入」就取决于用哪个工具,那不是一条能说清的边界。'
   ]
 ]);
 

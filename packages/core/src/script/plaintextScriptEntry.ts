@@ -98,7 +98,26 @@ export interface PlaintextVerdict {
  * 按 UTF-8 读进来会得到 U+FFFD 替换符,再写回去就把所有日文换成了问号,
  * 且字节长度改变。所以编码必须显式判定并在回写时用同一种。
  */
-export type PlaintextEncoding = 'ascii' | 'utf8' | 'utf8-bom' | 'shift_jis';
+export type PlaintextEncoding =
+  | 'ascii'
+  | 'utf8'
+  | 'utf8-bom'
+  | 'shift_jis'
+  /**
+   * 非 ASCII 字节既不能按 UTF-8 也不能按 Shift-JIS 完整解码 —— 文件里混了
+   * 多种编码,或用的是第三种编码。
+   *
+   * 实测来源:`801000_battle.lua` 含原版日文注释 + 后来加的 **GBK 中文**注释
+   * (字节 `0xd7 0xf3 0xca 0xd6` 在 GBK 里是「左手」,整句 `×óÊÖµ¯¿ª` = 「左手弹开」),
+   * 显然是中文 mod 作者改过。按 Shift-JIS 解码那段会得到 U+FFFD,再编回去就
+   * 永久损坏那些字节。
+   *
+   * 这类文件**不接受源码级编辑**:任何单一编码的解码-编码往返都会丢字节。
+   * 判成独立取值而不是硬塞进 shift_jis,是为了让拒绝理由说得出实话 ——
+   * 误判成 shift_jis 会让日志显示「不支持写入非 ASCII」,而真实原因是
+   * 「这个文件的编码本身不一致」,两者该采取的下一步完全不同。
+   */
+  | 'mixed-unknown';
 
 /**
  * 按真实字节判定一个条目是否明文。
@@ -242,7 +261,18 @@ export function detectPlaintextEncoding(bytes: Uint8Array): PlaintextEncoding {
     new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     return 'utf8';
   } catch {
-    return 'shift_jis';
+    // UTF-8 解不了 —— 再验 Shift-JIS 是否真的解得了。
+    //
+    // 第一版直接 `return 'shift_jis'`，把「不是 UTF-8」当成「就是 Shift-JIS」。
+    // 实测 801000_battle.lua 会被这样误判：它混了原版日文与后加的 GBK 中文注释，
+    // 按 Shift-JIS 解码那段得到 U+FFFD，再编回去就永久损坏那些字节。
+    // 误判的代价不是判错一个标签，而是让拒绝理由说了假话。
+    try {
+      new TextDecoder('shift_jis', { fatal: true }).decode(bytes);
+      return 'shift_jis';
+    } catch {
+      return 'mixed-unknown';
+    }
   }
 }
 
@@ -270,23 +300,22 @@ export function decodePlaintext(bytes: Uint8Array, encoding: PlaintextEncoding):
 /**
  * 把编辑后的文本编回字节。
  *
- * ── 为什么 Shift-JIS 是受限的 ──
+ * ── Shift-JIS 的编码方向 ──
  *
  * 实测:Node 内置 `TextDecoder` 支持 `shift_jis`,但 `TextEncoder` 的 encoding
  * **固定为 utf-8**(传参数也无效,实测 `new TextEncoder('shift_jis').encoding`
  * 仍返回 `'utf-8'`),而本仓库没有 iconv 类依赖。
  *
- * 也就是说 Shift-JIS 方向**没有编码器**。若无视这一点做「解码 → 改文本 →
- * 按 UTF-8 编回」,结果是所有日文字节被替换:
- * action/*nameid.txt 首行那句「#BOM付きUTF8で…」会变成一串不同的字节,
- * 文件长度和内容双双改变,而这不会有任何报错。
+ * 我最初据此判定「Shift-JIS 方向没有编码器」,于是只允许纯 ASCII 结果。
+ * 那个结论下得太早:实测那样一来 3 个 action/*nameid.txt 完全无法源码级编辑
+ * ——它们首行就是日文注释「#BOM付きUTF8で…」,任何编辑的结果都含非 ASCII。
  *
- * 所以对 Shift-JIS 条目只允许**纯 ASCII 结果**:新文本里每个码位都 < 0x80 时,
- * Shift-JIS 与 UTF-8 的字节表示相同,写回是无损的。一旦新文本含非 ASCII
- * 字符就必须拒绝,并说清原因 —— 拒绝一个改不了的编辑,好过静默写坏文件。
+ * 编码表不必手写,可以**用解码器枚举出来**(见 encodeShiftJis)。解码器是权威,
+ * 反推出的表与它天然一致;手抄码表才有漂移风险。已实测三个文件的
+ * 解码→编码往返逐字节一致(148045 / 91947 / 13682 字节)。
  *
- * 这条限制在 V0.5 是真实边界,不是偷懒:补一个 CP932 编码表是可做的,但那
- * 属于新增能力,需要单独的证据与裁定。
+ * CP932 覆盖不到的字符仍然拒绝,不做替换 —— 静默换成 `?` 会悄悄改变内容,
+ * 那正是本模块要防的。
  */
 export type PlaintextEncodeResult =
   | { ok: true; bytes: Uint8Array; encoding: PlaintextEncoding }
@@ -294,15 +323,38 @@ export type PlaintextEncodeResult =
 
 export function encodePlaintext(text: string, encoding: PlaintextEncoding): PlaintextEncodeResult {
   const nonAscii = firstNonAsciiIndex(text);
+  if (encoding === 'mixed-unknown') {
+    // 混合编码文件一律拒绝，连纯 ASCII 结果也不放行：解码那一步已经把无法识别的
+    // 字节变成 U+FFFD，此时「结果是纯 ASCII」只说明替换符被后续编辑删掉了，
+    // 写回去仍然丢失原字节。
+    const code = 'PLAINTEXT_MIXED_ENCODING_UNSUPPORTED';
+    const message = '该条目的非 ASCII 字节既不能按 UTF-8 也不能按 Shift-JIS 完整解码'
+      + '（实测 801000_battle.lua 混了原版日文与后加的 GBK 中文注释）。'
+      + ' 任何单一编码的解码-编码往返都会丢字节，故不接受源码级编辑；'
+      + '需要改动时请用整文件替换并自行提供正确编码的完整字节。';
+    return {
+      ok: false,
+      code,
+      message,
+      diagnostics: [createDiagnostic({ severity: 'error', code, message })]
+    };
+  }
   if (encoding === 'shift_jis') {
-    if (nonAscii >= 0) {
-      const code = 'PLAINTEXT_SHIFT_JIS_ENCODE_UNSUPPORTED';
-      const message = `该条目是 Shift-JIS(CP932)编码,而本版没有 Shift-JIS 编码器`
-        + `(Node 的 TextEncoder 固定输出 UTF-8,仓库无 iconv 依赖)。`
-        + ` 新内容第 ${nonAscii} 个字符是非 ASCII 字符 `
-        + `${JSON.stringify(text[nonAscii])},按 UTF-8 写回会改变原文的日文字节。`
-        + ' 只允许结果为纯 ASCII 的编辑;需要写入非 ASCII 内容时,'
-        + '请改用整文件替换并自行提供正确编码的字节。';
+    if (nonAscii < 0) {
+      // 纯 ASCII 时两种编码字节一致,写回无损。
+      return { ok: true, bytes: new TextEncoder().encode(text), encoding };
+    }
+    // 用由解码器反推出的 CP932 表编码。此前这里直接拒绝所有非 ASCII 结果,
+    // 理由是「没有编码器」——实测那让 3 个 *nameid.txt 完全无法编辑,
+    // 因为它们首行就是日文注释。编码器可以由解码器枚举出来(见 encodeShiftJis)。
+    const encoded = encodeShiftJis(text);
+    if (!encoded.ok) {
+      const code = 'PLAINTEXT_SHIFT_JIS_CHAR_UNMAPPABLE';
+      const message = `新内容第 ${encoded.index} 个字符 ${JSON.stringify(encoded.char)}`
+        + `(U+${(encoded.char.codePointAt(0) ?? 0).toString(16).toUpperCase()})`
+        + ' 在 CP932 里没有对应字节,无法写回 Shift-JIS 条目。'
+        + ' 不做替换:静默换成 ? 会悄悄改变内容。'
+        + ' 请改用 CP932 覆盖范围内的字符,或用整文件替换自行提供字节。';
       return {
         ok: false,
         code,
@@ -310,8 +362,7 @@ export function encodePlaintext(text: string, encoding: PlaintextEncoding): Plai
         diagnostics: [createDiagnostic({ severity: 'error', code, message })]
       };
     }
-    // 纯 ASCII 时两种编码字节一致,写回无损。
-    return { ok: true, bytes: new TextEncoder().encode(text), encoding };
+    return { ok: true, bytes: encoded.bytes, encoding };
   }
   if (encoding === 'utf8-bom') {
     const body = new TextEncoder().encode(text);
@@ -334,6 +385,96 @@ export function trailingNulCount(bytes: Uint8Array): number {
     count += 1;
   }
   return count;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Shift-JIS 编码器(由解码器反推,不手写码表)                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 反向 CP932 表:码位 → Shift-JIS 字节。
+ *
+ * ── 为什么可以有这张表 ──
+ *
+ * Node 有 `TextDecoder('shift_jis')` 但没有对应的编码器,而本仓库不引 iconv。
+ * 此前的结论是「回写方向没有编码器」,于是 Shift-JIS 条目只允许纯 ASCII 编辑
+ * —— 实测下来那让 3 个 *nameid.txt 完全无法源码级编辑,因为它们首行就有日文。
+ *
+ * 但编码表不必手写:**用解码器枚举出来**。遍历合法的双字节 Shift-JIS 空间,
+ * 逐个解码,把「解得出单一字符」的结果反向记入表中。解码器是权威,反推出的
+ * 表与它天然一致 —— 手抄码表才会有漂移风险(本仓库已记录过 BC7 锚点表
+ * 推导失败 50/64 的教训:能对钉就不要推导)。
+ *
+ * 表按需构建一次(约 8000 个双字节组合,毫秒级),不预生成常量,
+ * 避免往仓库里塞一张无法核对的大表。
+ */
+let reverseShiftJis: Map<string, [number, number]> | null = null;
+
+function buildReverseShiftJis(): Map<string, [number, number]> {
+  const table = new Map<string, [number, number]>();
+  const decoder = new TextDecoder('shift_jis', { fatal: true });
+  // CP932 双字节:首字节 0x81–0x9F / 0xE0–0xFC,次字节 0x40–0x7E / 0x80–0xFC。
+  const leadRanges: Array<[number, number]> = [[0x81, 0x9f], [0xe0, 0xfc]];
+  const trailRanges: Array<[number, number]> = [[0x40, 0x7e], [0x80, 0xfc]];
+  for (const [leadFrom, leadTo] of leadRanges) {
+    for (let lead = leadFrom; lead <= leadTo; lead += 1) {
+      for (const [trailFrom, trailTo] of trailRanges) {
+        for (let trail = trailFrom; trail <= trailTo; trail += 1) {
+          let decoded: string;
+          try {
+            decoded = decoder.decode(new Uint8Array([lead, trail]));
+          } catch {
+            continue;
+          }
+          // 只收单字符映射;多字符结果无法唯一反推。
+          if ([...decoded].length !== 1) continue;
+          if (decoded === '�') continue;
+          // 先到先得:同一字符有多个字节表示时保留第一个(与解码器的规范形式一致)。
+          if (!table.has(decoded)) table.set(decoded, [lead, trail]);
+        }
+      }
+    }
+  }
+  // 单字节半角片假名 0xA1–0xDF。
+  for (let byte = 0xa1; byte <= 0xdf; byte += 1) {
+    try {
+      const decoded = decoder.decode(new Uint8Array([byte]));
+      if ([...decoded].length === 1 && !table.has(decoded)) {
+        table.set(decoded, [byte, -1]);
+      }
+    } catch {
+      // 忽略:不可解码的单字节不进表。
+    }
+  }
+  return table;
+}
+
+/**
+ * 把文本编成 Shift-JIS 字节。
+ *
+ * 遇到表里没有的字符就失败并点名是哪一个 —— 静默替换成 `?` 会让写回悄悄
+ * 改变内容,而那正是本模块最初为之拒绝写入的风险。
+ */
+export function encodeShiftJis(
+  text: string
+): { ok: true; bytes: Uint8Array } | { ok: false; char: string; index: number } {
+  reverseShiftJis ??= buildReverseShiftJis();
+  const out: number[] = [];
+  let index = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x80) {
+      out.push(code);
+      index += char.length;
+      continue;
+    }
+    const mapped = reverseShiftJis.get(char);
+    if (!mapped) return { ok: false, char, index };
+    out.push(mapped[0]);
+    if (mapped[1] >= 0) out.push(mapped[1]);
+    index += char.length;
+  }
+  return { ok: true, bytes: new Uint8Array(out) };
 }
 
 function firstNonAsciiIndex(text: string): number {

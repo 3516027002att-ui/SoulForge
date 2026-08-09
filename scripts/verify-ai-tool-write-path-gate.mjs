@@ -41,7 +41,14 @@ const REGISTRY = join(root, 'packages', 'core', 'src', 'ai', 'toolRegistry.ts');
 const CONTROLLED_ENTRIES = Object.freeze([
   'createPatchProposal',
   'dryRunPatchProposal',
-  'rollbackOperation'
+  'rollbackOperation',
+  // 明文脚本条目的源码级编辑编排层。它只产出 PatchIR 操作,落盘仍由
+  // Patch Engine 负责 —— 实测 packages/core/src/script/plaintextScriptEdit.ts
+  // 的写盘调用数为 0(无 writeFile / appendFile / rename / unlink / copyFile),
+  // 只 import node:crypto、@soulforge/shared 类型与同目录的判定模块。
+  // 本门禁抓到过它:新增工具时它是 propose 等级却不在清单里,报了
+  // AI_WRITE_TOOL_BYPASSES_PATCH_ENGINE —— 那道判据是对的,加入前先核实了不写盘。
+  'buildPlaintextScriptEdit'
 ]);
 
 /** 禁止在注册表里直接出现的写盘调用。 */
@@ -97,7 +104,11 @@ const findings = [];
 
 // 判据③：受控入口必须真实存在。清单指向不存在的符号等于判据失效。
 for (const entry of CONTROLLED_ENTRIES) {
-  const found = ['patch', 'transactions', 'backup'].some((dir) => {
+  // script/ 与 patch/ 并列:明文脚本条目的编排层住在 script/,它产出 PatchIR
+  // 而不写盘(加入清单前已核实其写盘调用数为 0)。目录清单的作用是保证
+  // 「清单指向的符号真实存在」,不是断言它必须在某个目录 —— 但也不能放宽成
+  // 全仓搜索,否则任何同名函数都能冒充受控入口。
+  const found = ['patch', 'transactions', 'backup', 'script'].some((dir) => {
     const dirPath = join(root, 'packages', 'core', 'src', dir);
     if (!existsSync(dirPath)) return false;
     // 浅扫该目录下的 .ts，找 export 定义

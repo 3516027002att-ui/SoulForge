@@ -386,6 +386,19 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // UTF-8(按 UTF-8 读写会静默损坏所有日文),且全都带尾部 NUL 对齐填充
   // (3 / 5 / 14 字节,回写时必须原样保留)。
   'test:plaintext-script-edit': 'native',
+  // 明文条目源码级写的**端到端**验证:真实容器 → 明文判定 → 源码级编辑 →
+  // Patch Engine 提交 → Bridge 重读校验 → 回滚逐字节还原。
+  //
+  // 与上一条的分工是实测出来的缺口:test:plaintext-script-edit 验判定与编排,
+  // 产出 PatchIR 就结束——实测那个文件里 executePatchIrThroughTransaction 与
+  // runBridge 的出现次数是 0。也就是说「走 Patch Engine、写后 Bridge 重读、
+  // 可回滚」这三条此前每个零件都测过,但没有一次真实写入走完整条链;
+  // checkPlaintextWriteback 的用例喂的是手工构造的字节,不是从容器读回来的
+  // ——那证明不了「写进去的和读出来的是同一份」,而经过 BND4 重打包 + DCX
+  // 压缩两层编解码之后,那恰好是最需要证明的事。
+  //
+  // 需要真实 luabnd 语料,无语料时结构化跳过。归 native。
+  'test:plaintext-script-write': 'native',
   // SCOPE-BEHAVIOR-SCRIPT game-load：真实 luabnd 整内层保持原样替换 → 结构/放位/
   // magic 加载前置预检（leg 2）+ opt-in 真实游戏内加载确认（leg 3，validation-unfrozen）。
   // 缺环境时结构化 skipped（exit 0，不冒充通过）；真实加载未自动验证前 authority 保持 candidate。
