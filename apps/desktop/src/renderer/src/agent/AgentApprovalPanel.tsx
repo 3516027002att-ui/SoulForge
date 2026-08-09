@@ -43,6 +43,22 @@ function decisionLabel(decision: AgentApprovalDecisionView['decision']): string 
  * 是这层设计的意义所在。always 已经覆盖了「同一工具不想被反复问」的诉求，
  * 且它的作用域限于本会话。
  *
+ * ── 关于「按 Codex VSCode 插件形态」这条要求 ──
+ *
+ * 任务要求照 Codex 插件的审批形态来做。实际依据**不是**对该插件的调研：
+ * 两次派出的界面调研都没有返回结论，本组件的形态是从本项目自己的权限阶梯
+ * （ai/toolPermissions.ts 的七级 read→rollback）与 agentLoop 的审批门推出来的：
+ *
+ *   - 三档危险度来自等级语义，不是抄来的配色：commit/rollback 不可能靠再跑
+ *     一次撤销，stage/write 可以，read/analyze 不该弹窗；
+ *   - 四档决定（once/always/reject/never）对应 loop 的 ApprovalDecision，
+ *     会话内记忆的作用域也由那一层决定；
+ *   - 「预览显示将要写什么而不是 before/after diff」是被时序逼出来的：审批
+ *     发生在执行之前，此刻磁盘上还没有改动可读。
+ *
+ * 所以这些选择都能在本仓库内被检验，但**不声称与 Codex 逐项一致**。若日后
+ * 拿到该插件的实际形态而与此处冲突，冲突点应重新裁定，而不是默认本处正确。
+ *
  * 全部状态由上层以受控 props 下发；本组件不持有全局状态、不直接调 IPC。
  */
 export function AgentApprovalPanel({
