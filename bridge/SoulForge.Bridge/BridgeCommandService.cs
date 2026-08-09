@@ -14,6 +14,30 @@ internal sealed class BridgeCommandService
         string? outputPath = null)
     {
         var command = rawCommand.Trim().ToLowerInvariant();
+
+        // options 的默认值是 default(JsonElement)，其 ValueKind 为 Undefined。
+        // 对 Undefined 调 TryGetProperty 抛 InvalidOperationException
+        // ("Operation is not valid due to the current state of the object.")。
+        //
+        // 实测踩过：read-param-document 在调用方不传 commandOptions 时必然抛这个，
+        // 而本方法的 catch 只捕获 InvalidDataException / NotSupportedException /
+        // IOException，于是异常逃到守护进程兜底、被压成无出处的
+        // BRIDGE_REQUEST_FAILED。表面症状是「PARAM 读不出来」，真实原因是
+        // 「分页参数缺省时没有守卫」——两者相差很远，而原来的错误信息指不出方向。
+        //
+        // 统一走 OptionInt：它先验 ValueKind，缺省即取默认值。
+        // 此前 :221 的 EMEVD 分页有 optionsObject 守卫而 PARAM/FLVER 没有，
+        // 同一文件里两种写法并存，正是这类缺陷的温床。
+        var optionsIsObject = options.ValueKind == JsonValueKind.Object;
+
+        int OptionInt(string name, int fallback)
+        {
+            if (!optionsIsObject) return fallback;
+            if (!options.TryGetProperty(name, out var element)) return fallback;
+            if (element.ValueKind != JsonValueKind.Number) return fallback;
+            return element.TryGetInt32(out var parsed) ? parsed : fallback;
+        }
+
         var resourceKind = command switch
         {
             "export-event" => "event",
@@ -178,8 +202,8 @@ internal sealed class BridgeCommandService
                         roundTrip)
                 };
                 // Pagination parameters from the request options.
-                var rowPage = options.TryGetProperty("rowPage", out var rp) && rp.TryGetInt32(out var rpv) ? rpv : 0;
-                var rowPageSize = options.TryGetProperty("rowPageSize", out var rps) && rps.TryGetInt32(out var rpsv) ? rpsv : 0;
+                var rowPage = OptionInt("rowPage", 0);
+                var rowPageSize = OptionInt("rowPageSize", 0);
                 // Detect legacy header-embedded type-name layout and fail closed with a clear code.
                 return BridgeResult<object>.Partial(file, "param", diagnostics, document.ToEnvelope(roundTrip, rowPageSize: rowPageSize, rowPage: rowPage));
             }
@@ -474,9 +498,10 @@ internal sealed class BridgeCommandService
             try
             {
                 var document = FlverNativeDocument.ReadFile(file);
-                var meshIndex = options.TryGetProperty("meshIndex", out var mi) && mi.TryGetInt32(out var idx) ? idx : 0;
-                var maxVertices = options.TryGetProperty("maxVertices", out var mv) && mv.TryGetInt32(out var mvc) ? mvc : 10_000;
-                var maxIndices = options.TryGetProperty("maxIndices", out var mxi) && mxi.TryGetInt32(out var mxii) ? mxii : 30_000;
+                // 同 PARAM：不传 commandOptions 时裸 TryGetProperty 会抛。
+                var meshIndex = OptionInt("meshIndex", 0);
+                var maxVertices = OptionInt("maxVertices", 10_000);
+                var maxIndices = OptionInt("maxIndices", 30_000);
                 var positions = document.GetMeshPositionsBase64(meshIndex, maxVertices);
                 var indices = document.GetMeshIndicesBase64(meshIndex, maxIndices);
                 var uvs = document.GetMeshUVsBase64(meshIndex, maxVertices);

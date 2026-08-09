@@ -309,6 +309,17 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // PLAN_MODE_EXTRA_DENY——只能更严、每条带实测理由,由本门禁钉住。
   // 观测真实注册表经真实 bridge 的投影结果,归 unit。
   'test:agent-permission-unified': 'unit',
+  // Bridge 可选参数守卫。ExecuteAsync 的 options 默认值是 default(JsonElement)
+  // （ValueKind=Undefined），对它裸调 TryGetProperty 抛 InvalidOperationException。
+  //
+  // 用户报「打开 PARAM 全是空列表」时实测出的根因就是这个：read-param-document
+  // 分支两行裸 TryGetProperty("rowPage"...)，调用方不传 commandOptions 时必然抛，
+  // 而该分支 catch 只捕获 InvalidDataException/NotSupportedException/IOException，
+  // 异常逃到守护进程兜底被压成无出处的 BRIDGE_REQUEST_FAILED。表面症状指向
+  // 「PARAM 解析能力缺失」，修好后同一批 param 立刻读出 56/590/5275 行——
+  // 解析能力一直是好的。这类缺陷类型系统看不见、没有编译警告、症状指错方向。
+  // 纯静态读 C# 源码，归 unit。
+  'test:bridge-optional-args': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。

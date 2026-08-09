@@ -183,7 +183,8 @@
     "test:agent-approval-gate": "node scripts/verify-agent-approval-gate.mjs",
     "test:agent-capability-wiring": "node scripts/verify-agent-capability-wiring-gate.mjs",
     "test:agent-permission-unified": "node scripts/verify-agent-permission-unified-gate.mjs",
-    "test:plaintext-script-write": "npm run test:plaintext-script-write -w @soulforge/core"
+    "test:plaintext-script-write": "npm run test:plaintext-script-write -w @soulforge/core",
+    "test:bridge-optional-args": "node scripts/verify-bridge-optional-args-gate.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

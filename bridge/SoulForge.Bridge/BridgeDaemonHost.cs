@@ -432,7 +432,23 @@ internal static class BridgeDaemonHost
         }
         catch (Exception ex)
         {
-            await state.WriteFailureAsync(frame.RequestId, frame.WorkspaceSessionId, "BRIDGE_REQUEST_FAILED", ex.Message);
+            // 带上异常类型名与首行堆栈。
+            //
+            // 此前只回 ex.Message，实测踩过一次：PARAM 读取失败回的是
+            // "Operation is not valid due to the current state of the object."
+            // ——那是 InvalidOperationException 的默认文案，既看不出类型也看不出
+            // 出处，而 read-param-document 的 catch 只捕获 InvalidDataException /
+            // NotSupportedException / IOException，于是真实原因被兜底吞掉。
+            // 兜底 catch 的职责是「不让进程崩」，不是「让原因消失」。
+            var origin = (ex.StackTrace ?? string.Empty)
+                .Split('\n')
+                .FirstOrDefault(line => line.Contains("SoulForge.Bridge", StringComparison.Ordinal))
+                ?.Trim() ?? "(no SoulForge frame)";
+            await state.WriteFailureAsync(
+                frame.RequestId,
+                frame.WorkspaceSessionId,
+                "BRIDGE_REQUEST_FAILED",
+                $"{ex.GetType().Name}: {ex.Message} | at {origin}");
         }
         finally
         {
