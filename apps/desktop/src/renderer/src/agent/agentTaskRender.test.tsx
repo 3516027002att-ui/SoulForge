@@ -317,6 +317,87 @@ describe('审批卡片真的渲染出来', () => {
     assert.match(html, /\{oops/);
   });
 
+  it('有 diff 时渲染真正的 before/after diff 并按增删着色', () => {
+    const task = feed(
+      startAgentTask(SESSION),
+      { type: 'turn-started', step: 1 },
+      {
+        type: 'approval-requested',
+        step: 1,
+        callId: 'call-diff',
+        toolName: 'propose_text_patch',
+        permissionLevel: 'stage',
+        argumentsJson: '{"targetPath":"mods/event/common.txt","newText":"新内容"}',
+        diff: {
+          targetPath: 'mods/event/common.txt',
+          unifiedDiff: '--- mods/event/common.txt\n+++ mods/event/common.txt\n@@ -1,2 +1,2 @@\n 保留行\n-旧内容\n+新内容',
+          addedLines: 1,
+          removedLines: 1,
+          newFile: false
+        }
+      }
+    );
+    const html = render({ task });
+    assert.match(html, /data-testid="agent-approval-diff"/);
+    assert.match(html, /data-testid="agent-approval-diff-body"/);
+    // 删除侧必须出现：单侧「将写入什么」预览看不到被删掉的内容，
+    // 而「删了什么」往往比「加了什么」更需要审批者看清。
+    assert.match(html, /旧内容/, 'diff 必须显示被删除的原内容');
+    assert.match(html, /新内容/);
+    // 增删各自有样式类，不只靠文本前缀。
+    assert.match(html, /class="diff-line is-remove"/);
+    assert.match(html, /class="diff-line is-add"/);
+    assert.match(html, /class="diff-line is-hunk"/);
+    // 文件头不得被染成增删行。
+    assert.ok(
+      !/class="diff-line is-add">\+\+\+/.test(html),
+      '文件头 +++ 不应被当成新增行'
+    );
+    // 增删统计必须锚定到统计元素**内部**。
+    //
+    // 第一版写的是 `assert.match(html, /\+1/)`，实测报绿：diff 正文里的
+    // `+新内容` 和 hunk 头 `@@ -1,2 +1,2 @@` 都含 `+1`，把统计整块删掉也能过。
+    // 判据串在正文里必然出现时，全文匹配没有鉴别力（本轮第三次踩到同一形态）。
+    const addMatch = /<span class="is-add">([^<]*)<\/span>/.exec(html);
+    const removeMatch = /<span class="is-remove">([^<]*)<\/span>/.exec(html);
+    assert.ok(addMatch, '必须有新增行数元素');
+    assert.ok(removeMatch, '必须有删除行数元素');
+    assert.equal(addMatch[1], '+1', `新增统计应为 +1，实际 ${addMatch[1]}`);
+    assert.equal(removeMatch[1], '-1', `删除统计应为 -1，实际 ${removeMatch[1]}`);
+  });
+
+  it('无 diff 时明说主进程未能生成，而不是留空', () => {
+    const html = render({ task: withApproval() });
+    // withApproval 不带 diff：必须出现显式说明。空着会让用户以为没有改动。
+    assert.match(html, /data-testid="agent-approval-no-diff"/);
+    assert.match(html, /未能为这次调用生成 diff/);
+  });
+
+  it('diff 截断时说明截了多少', () => {
+    const task = feed(
+      startAgentTask(SESSION),
+      {
+        type: 'approval-requested',
+        step: 1,
+        callId: 'call-trunc',
+        toolName: 'propose_text_patch',
+        permissionLevel: 'stage',
+        argumentsJson: '{"targetPath":"a","newText":"b"}',
+        diff: {
+          targetPath: 'a',
+          unifiedDiff: '--- a\n+++ a\n@@ -1 +1 @@\n-x\n+y',
+          addedLines: 900,
+          removedLines: 800,
+          newFile: false,
+          truncatedNote: 'diff 共 2000 行，此处只显示前 400 行；完整改动为 +900 / -800 行。'
+        }
+      }
+    );
+    const html = render({ task });
+    assert.match(html, /data-testid="agent-approval-diff-truncation"/);
+    assert.match(html, /只显示前 400 行/);
+  });
+
   it('高危等级带高危样式类', () => {
     const html = render({ task: withApproval({ permissionLevel: 'rollback', toolName: 'rollback_operation' }) });
     assert.match(html, /agent-approval is-high/, 'commit/rollback 不可能靠再跑一次撤销，必须一眼可辨');

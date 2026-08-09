@@ -135,6 +135,7 @@ describe('等待审批在标题栏与输入区都可见', () => {
       toolName: 'rollback_operation',
       permissionLevel: 'rollback',
       argumentsJson: '{"opId":"op-1"}',
+      diff: null,
       preview: null
     }]
   };

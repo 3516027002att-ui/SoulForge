@@ -877,6 +877,26 @@ pre.tool-output {
 .agent-approval__target { display: flex; gap: 6px; align-items: baseline; margin-bottom: 4px; font-size: 11px; }
 .agent-approval__target-label { color: var(--ink-3); flex-shrink: 0; }
 .agent-approval__target code { word-break: break-all; }
+/* 改动 diff。增删用左边框 + 底色双重编码，不只靠颜色——只靠红绿对色觉障碍
+   用户不可读，而这里要判断的正是「哪些行被删了」。 */
+.agent-approval__diff { margin-bottom: 8px; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+.agent-approval__diff-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  padding: 4px 8px; background: var(--bg-3, var(--bg-2)); font-size: 11px; flex-wrap: wrap;
+}
+.agent-approval__diff-head code { word-break: break-all; }
+.agent-approval__diff-stat .is-add { color: var(--ok, #4a9); }
+.agent-approval__diff-stat .is-remove { color: var(--danger, #d9534f); }
+.agent-approval__diff-body {
+  margin: 0; padding: 0; max-height: 320px; overflow: auto;
+  font-size: 11px; line-height: 1.55; background: transparent;
+}
+.agent-approval__diff-body .diff-line { display: block; padding: 0 8px; border-left: 2px solid transparent; white-space: pre-wrap; word-break: break-all; }
+.agent-approval__diff-body .diff-line.is-add { background: color-mix(in srgb, var(--ok, #4a9) 12%, transparent); border-left-color: var(--ok, #4a9); }
+.agent-approval__diff-body .diff-line.is-remove { background: color-mix(in srgb, var(--danger, #d9534f) 12%, transparent); border-left-color: var(--danger, #d9534f); }
+.agent-approval__diff-body .diff-line.is-hunk { color: var(--ink-3); background: var(--bg-2); }
+.agent-approval__diff-body .diff-line.is-header { color: var(--ink-3); }
+
 .agent-approval__actions { flex-wrap: wrap; margin-top: 8px; }
 .agent-approval__scope { margin: 6px 0 0; font-size: 11px; color: var(--ink-3); }
 

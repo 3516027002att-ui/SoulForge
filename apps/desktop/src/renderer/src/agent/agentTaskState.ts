@@ -56,10 +56,53 @@ export interface AgentApprovalView {
   permissionLevel: string;
   argumentsJson: string;
   /**
-   * 从 argumentsJson 里解出的改动预览。仅当参数确实携带目标路径与新内容时
-   * 才有值 —— 猜不出来就留空,而不是编一个看起来像 diff 的东西。
+   * 主进程算出的 unified diff。
+   *
+   * 由主进程负责是因为算它要读当前文件,而 renderer 没有文件系统访问。
+   * 为 null 表示「主进程没能给出 diff」——那与「没有改动」是两件事,
+   * 界面必须说清是哪一种,不能显示一个空 diff 面板。
+   */
+  diff: AgentApprovalDiffView | null;
+  /**
+   * 从 argumentsJson 里解出的字段级预览。diff 在手时它退为辅助信息
+   * (目标路径、改动条目数);diff 缺失时它是唯一能给出的具体内容。
    */
   preview: AgentApprovalPreview | null;
+}
+
+/** 主进程回报的 unified diff(与 core 的 ApprovalDiff 同形)。 */
+export interface AgentApprovalDiffView {
+  targetPath: string;
+  unifiedDiff: string;
+  addedLines: number;
+  removedLines: number;
+  newFile: boolean;
+  truncatedNote?: string;
+}
+
+/** 把 unified diff 拆成带类型的行,供界面按增删着色。 */
+export type DiffLineKind = 'header' | 'hunk' | 'add' | 'remove' | 'context';
+
+export interface DiffLineView {
+  kind: DiffLineKind;
+  text: string;
+}
+
+/**
+ * 逐行分类 unified diff。
+ *
+ * 顺序有讲究:`---` / `+++` 必须先判为 header,否则会被当成
+ * remove / add —— 文件头会被染成一条删除行和一条新增行,而那是最容易
+ * 被忽略的错色(它看起来"像是"改动的一部分)。
+ */
+export function classifyDiffLines(unifiedDiff: string): DiffLineView[] {
+  return unifiedDiff.split('\n').map((text) => {
+    if (text.startsWith('---') || text.startsWith('+++')) return { kind: 'header' as const, text };
+    if (text.startsWith('@@')) return { kind: 'hunk' as const, text };
+    if (text.startsWith('+')) return { kind: 'add' as const, text };
+    if (text.startsWith('-')) return { kind: 'remove' as const, text };
+    return { kind: 'context' as const, text };
+  });
 }
 
 /**
@@ -270,6 +313,7 @@ export function reduceAgentTaskEvent(
             toolName: event.toolName,
             permissionLevel: event.permissionLevel,
             argumentsJson: event.argumentsJson,
+            diff: event.diff ?? null,
             preview: extractApprovalPreview(event.argumentsJson)
           }
         ]

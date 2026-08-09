@@ -11,6 +11,7 @@ import {
   createDefaultToolRegistry,
   createConfirmationReceipt,
   createContextBroker,
+  createUnifiedDiff,
   listRolloutSessions,
   loadRolloutSession,
   runAgentSession,
@@ -87,6 +88,7 @@ import type {
 } from '@soulforge/shared';
 import type {
   AgentEvent,
+  ApprovalDiff,
   ChatMessage,
   ResumedRollout,
   RolloutSessionMeta
@@ -3121,6 +3123,98 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
       });
 
+    /**
+     * Resolve a unified diff for a pending write.
+     *
+     * Lives in main because it reads the current file — the loop has no
+     * filesystem access, and giving it any would soften the "tools are the only
+     * way the agent touches the workspace" boundary.
+     *
+     * Path resolution goes through activeSession.resolveWritablePath, so the
+     * read-only-base-game constraint is enforced by the existing mechanism
+     * rather than a second check written here. An unresolvable path yields null
+     * (no diff) rather than an error: failing to *preview* a change must never
+     * decide whether it gets approved.
+     */
+    const resolveApprovalDiff = async (input: {
+      toolName: string;
+      argumentsJson: string;
+    }): Promise<ApprovalDiff | null> => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(input.argumentsJson);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+      const record = parsed as Record<string, unknown>;
+
+      // 两种形态都支持:propose_text_patch 的平铺字段,与 PatchProposal 的
+      // changes[0]。只取第一条 —— 一次审批对应一个具体动作。
+      const changes = Array.isArray(record.changes) ? record.changes : null;
+      const firstChange = typeof changes?.[0] === 'object' && changes[0] !== null
+        ? changes[0] as Record<string, unknown>
+        : null;
+      const structuredEdit = typeof firstChange?.structuredEdit === 'object'
+        && firstChange.structuredEdit !== null
+        ? firstChange.structuredEdit as Record<string, unknown>
+        : null;
+
+      const targetPath = typeof record.targetPath === 'string' && record.targetPath !== ''
+        ? record.targetPath
+        : typeof firstChange?.targetPath === 'string' ? firstChange.targetPath : '';
+      const afterText = typeof record.newText === 'string'
+        ? record.newText
+        : typeof structuredEdit?.newText === 'string' ? structuredEdit.newText : null;
+      if (targetPath === '' || afterText === null) return null;
+      if (!activeSession) return null;
+
+      // 用 Secure 版而不是同步版：同步 resolveWritablePath 的注释写明它只是
+      // **词法预检**，权威检查是 resolveWritablePathSecure（会解析 junction 与
+      // symlink）。一个指向原版游戏目录的 symlink 能骗过词法检查——这里只是读，
+      // 但「游戏目录只读」这条边界该由权威机制守，不该因为「只是预览」就放宽。
+      const writable = await activeSession.resolveWritablePathSecure(targetPath, 'overlay');
+      if (!writable.ok || typeof writable.absolutePath !== 'string') return null;
+      const resolvedPath = writable.absolutePath;
+
+      let beforeText = '';
+      let newFile = false;
+      try {
+        beforeText = await readFile(resolvedPath, 'utf8');
+      } catch {
+        // 目标不存在:整篇都是新增。这与「读失败」在界面上必须可区分,
+        // 故用 newFile 标记而不是静默当成空文件对比。
+        newFile = true;
+      }
+
+      const unifiedDiff = createUnifiedDiff(beforeText, afterText, {
+        fromFile: newFile ? '(新文件)' : targetPath,
+        toFile: targetPath
+      });
+      const lines = unifiedDiff.split('\n');
+      const addedLines = lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
+      const removedLines = lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+
+      // 上限:几千行的 diff 会把审批卡片变成读不完的墙,而读不完的 diff 等于
+      // 没有 diff。截断必须显式说明截了多少,否则用户会以为改动就这么点。
+      const MAX_DIFF_LINES = 400;
+      const truncated = lines.length > MAX_DIFF_LINES;
+
+      return {
+        targetPath,
+        unifiedDiff: truncated ? lines.slice(0, MAX_DIFF_LINES).join('\n') : unifiedDiff,
+        addedLines,
+        removedLines,
+        newFile,
+        ...(truncated
+          ? {
+              truncatedNote: `diff 共 ${lines.length} 行，此处只显示前 ${MAX_DIFF_LINES} 行；`
+                + `完整改动为 +${addedLines} / -${removedLines} 行。`
+            }
+          : {})
+      };
+    };
+
     void runAgentSession({
       sessionsDir: agentSessionsBaseDir,
       sessionId,
@@ -3133,6 +3227,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       executeTool: bridge.executeTool,
       signal: controller.signal,
       requestApproval,
+      resolveApprovalDiff,
       ...(request.approvalRequiredLevels
         ? { approvalRequiredLevels: request.approvalRequiredLevels }
         : {}),

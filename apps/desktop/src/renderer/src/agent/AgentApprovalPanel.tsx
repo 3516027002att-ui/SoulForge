@@ -2,6 +2,7 @@ import type { ReactElement } from 'react';
 import { formatBytes } from '../format/uiText.js';
 import {
   approvalSeverity,
+  classifyDiffLines,
   describeApprovalLevel,
   type AgentApprovalDecisionView,
   type AgentApprovalView
@@ -53,8 +54,13 @@ function decisionLabel(decision: AgentApprovalDecisionView['decision']): string 
  *     一次撤销，stage/write 可以，read/analyze 不该弹窗；
  *   - 四档决定（once/always/reject/never）对应 loop 的 ApprovalDecision，
  *     会话内记忆的作用域也由那一层决定；
- *   - 「预览显示将要写什么而不是 before/after diff」是被时序逼出来的：审批
- *     发生在执行之前，此刻磁盘上还没有改动可读。
+ *   - 改动预览是真正的 before/after unified diff，由主进程读当前文件后用
+ *     packages/core/src/patch/textDiff.ts 的 createUnifiedDiff 算出。
+ *
+ * 这里更正过一次错误判断：我起初写的是「审批发生在执行之前，磁盘上还没有改动
+ * 可读，所以只能显示将要写什么」，并据此做了单侧预览。那个理由站不住——原文件
+ * 现在就能读，新内容也在参数里，两侧都齐；而 createUnifiedDiff 早已存在于
+ * 仓库中，PatchChange 也一直有 diff 字段。缺的不是条件，是我没去找。
  *
  * 所以这些选择都能在本仓库内被检验，但**不声称与 Codex 逐项一致**。若日后
  * 拿到该插件的实际形态而与此处冲突，冲突点应重新裁定，而不是默认本处正确。
@@ -90,10 +96,46 @@ export function AgentApprovalPanel({
           </div>
           <p className="agent-approval__step">第 {entry.step} 步请求执行。批准或拒绝后任务才会继续。</p>
 
-          {/* 改动预览：只显示工具参数里已有的字段。审批发生在执行之前，
-              此刻磁盘上还没有改动可读，所以这里不是 before/after diff，
-              而是「将要写什么」。参数里没有目标路径时 preview 为 null，
-              此时退回显示原始参数，而不是编一个看起来像 diff 的东西。 */}
+          {/* 改动 diff 预览。
+              主进程读当前文件、用 createUnifiedDiff 算出 before/after 两侧的
+              unified diff（apps/desktop/src/main/ipc.ts 的 resolveApprovalDiff）；
+              renderer 没有文件系统访问，算不了。
+              diff 为 null 时**明说**主进程没能给出 diff，并退回字段级预览——
+              空着或显示一个空 diff 面板会让用户以为「没有改动」。 */}
+          {entry.diff !== null && (
+            <div className="agent-approval__diff" data-testid="agent-approval-diff">
+              <div className="agent-approval__diff-head">
+                <code>{entry.diff.targetPath}</code>
+                <span className="agent-approval__diff-stat">
+                  {entry.diff.newFile ? '新文件 · ' : ''}
+                  <span className="is-add">+{entry.diff.addedLines}</span>
+                  {' / '}
+                  <span className="is-remove">-{entry.diff.removedLines}</span>
+                </span>
+              </div>
+              <pre className="agent-approval__diff-body" data-testid="agent-approval-diff-body">
+                {classifyDiffLines(entry.diff.unifiedDiff).map((line, index) => (
+                  <span key={`${index}-${line.text}`} className={`diff-line is-${line.kind}`}>
+                    {line.text === '' ? ' ' : line.text}
+                    {'\n'}
+                  </span>
+                ))}
+              </pre>
+              {entry.diff.truncatedNote !== undefined && (
+                <p className="muted" data-testid="agent-approval-diff-truncation">
+                  {entry.diff.truncatedNote}
+                </p>
+              )}
+            </div>
+          )}
+          {entry.diff === null && (
+            <p className="muted" data-testid="agent-approval-no-diff">
+              主进程未能为这次调用生成 diff（可能是该工具不写文件、目标路径无法解析，
+              或参数里没有新内容）。下方是能解析出的字段与原始参数。
+            </p>
+          )}
+
+          {/* 字段级预览：diff 在手时它是辅助信息，diff 缺失时它是唯一的具体内容。 */}
           {entry.preview !== null ? (
             <div className="agent-approval__preview" data-testid="agent-approval-preview">
               {entry.preview.targetPath !== null && (
@@ -112,8 +154,10 @@ export function AgentApprovalPanel({
                 <p className="muted">该提案声明了 {entry.preview.changeCount} 处改动。</p>
               )}
               {entry.preview.newText !== null && (
-                <details open>
-                  <summary>将写入的内容</summary>
+                // diff 在手时默认折叠：两者内容重叠，展开两份会让卡片翻倍。
+                // diff 缺失时展开——那时它是唯一能看到的内容。
+                <details open={entry.diff === null}>
+                  <summary>将写入的完整内容</summary>
                   <pre className="tool-output" data-testid="agent-approval-newtext">{entry.preview.newText}</pre>
                   {entry.preview.truncatedBytes > 0 && (
                     <p className="muted" data-testid="agent-approval-truncation">

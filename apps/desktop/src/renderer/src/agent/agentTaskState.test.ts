@@ -16,6 +16,7 @@ import {
   APPROVAL_PREVIEW_TEXT_LIMIT,
   INITIAL_AGENT_TASK_STATE,
   approvalSeverity,
+  classifyDiffLines,
   describeAgentTaskStatus,
   describeApprovalLevel,
   describeRunBlocker,
@@ -326,6 +327,61 @@ describe('审批请求折叠成待办队列', () => {
     // 未知等级不得被当成高危也不得被当成安全——原样降级到 low 但说明可查。
     assert.equal(approvalSeverity('unknown-level'), 'low');
     assert.equal(describeApprovalLevel('unknown-level'), 'unknown-level', '未知等级原样回显，不猜语义');
+  });
+});
+
+describe('unified diff 逐行分类', () => {
+  it('文件头不被当成增删行', () => {
+    // 顺序错了的话 `---` / `+++` 会被判成 remove / add，文件头被染成一条删除行
+    // 和一条新增行——这是最容易被忽略的错色，因为它看起来「像是」改动的一部分。
+    const lines = classifyDiffLines('--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+c');
+    assert.deepEqual(
+      lines.map((line) => line.kind),
+      ['header', 'header', 'hunk', 'context', 'remove', 'add']
+    );
+  });
+
+  it('保留原始文本供渲染', () => {
+    const lines = classifyDiffLines('-old\n+new');
+    assert.equal(lines[0]?.text, '-old');
+    assert.equal(lines[1]?.text, '+new');
+  });
+});
+
+describe('审批请求携带主进程算出的 diff', () => {
+  it('diff 随 approval-requested 事件进入待办队列', () => {
+    const state = feed(startAgentTask(SESSION), {
+      type: 'approval-requested',
+      step: 1,
+      callId: 'c-diff',
+      toolName: 'propose_text_patch',
+      permissionLevel: 'stage',
+      argumentsJson: '{"targetPath":"mods/a.txt","newText":"b"}',
+      diff: {
+        targetPath: 'mods/a.txt',
+        unifiedDiff: '--- mods/a.txt\n+++ mods/a.txt\n@@ -1 +1 @@\n-a\n+b',
+        addedLines: 1,
+        removedLines: 1,
+        newFile: false
+      }
+    });
+    assert.equal(state.pendingApprovals[0]?.diff?.addedLines, 1);
+    assert.equal(state.pendingApprovals[0]?.diff?.removedLines, 1);
+    assert.match(state.pendingApprovals[0]?.diff?.unifiedDiff ?? '', /^--- mods\/a\.txt/);
+  });
+
+  it('事件不带 diff 时字段为 null 而不是 undefined', () => {
+    // null 与 undefined 在界面上要走不同分支：null 表示「主进程没能给出 diff」，
+    // 必须显式说出来；undefined 会让可选链静默跳过整个提示。
+    const state = feed(startAgentTask(SESSION), {
+      type: 'approval-requested',
+      step: 1,
+      callId: 'c-nodiff',
+      toolName: 'rollback_operation',
+      permissionLevel: 'rollback',
+      argumentsJson: '{"opId":"op-1"}'
+    });
+    assert.equal(state.pendingApprovals[0]?.diff, null);
   });
 });
 

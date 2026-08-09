@@ -15,6 +15,7 @@ import type {
   AgentEvent,
   AgentPermissionMode,
   AgentRunResult,
+  ApprovalDiff,
   ApprovalRequest,
   ApprovalResponse,
   ChatMessage,
@@ -48,6 +49,11 @@ export interface AgentSessionRunParams {
    * the mode and registry gates still apply.
    */
   requestApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
+  /** Resolve a unified diff for a pending change; needs filesystem access. */
+  resolveApprovalDiff?: (input: {
+    toolName: string;
+    argumentsJson: string;
+  }) => Promise<ApprovalDiff | null>;
   approvalRequiredLevels?: readonly string[];
   /** Workspace evidence assembler injected before each model call. */
   contextBroker?: ContextBroker;
@@ -119,6 +125,7 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     ...(params.streaming != null ? { streaming: params.streaming } : {}),
     ...(params.compaction ? { compaction: params.compaction } : {}),
     ...(params.requestApproval ? { requestApproval: params.requestApproval } : {}),
+    ...(params.resolveApprovalDiff ? { resolveApprovalDiff: params.resolveApprovalDiff } : {}),
     ...(params.approvalRequiredLevels
       ? { approvalRequiredLevels: params.approvalRequiredLevels }
       : {}),

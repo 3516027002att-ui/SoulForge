@@ -129,6 +129,29 @@ export interface ApprovalRequest {
    * "write THIS file" are different decisions.
    */
   argumentsJson: string;
+  /**
+   * Unified diff of the pending change, when the host can resolve one.
+   *
+   * The host (not the loop) computes this: it needs filesystem access to read
+   * the current file, which the loop deliberately does not have. Absent means
+   * "the host could not produce a diff" — a distinct state from "there are no
+   * changes", and the UI must say which one it is rather than showing an empty
+   * diff pane.
+   */
+  diff?: ApprovalDiff;
+}
+
+export interface ApprovalDiff {
+  /** Path shown in the diff header; workspace-relative where possible. */
+  targetPath: string;
+  /** Unified diff text (`--- / +++ / @@` form) produced by createUnifiedDiff. */
+  unifiedDiff: string;
+  addedLines: number;
+  removedLines: number;
+  /** True when the target file does not exist yet — every line is an addition. */
+  newFile: boolean;
+  /** Set when the diff was shortened; names what was dropped. */
+  truncatedNote?: string;
 }
 
 export interface ApprovalResponse {
@@ -149,6 +172,8 @@ export type AgentEvent =
       toolName: string;
       permissionLevel: string;
       argumentsJson: string;
+      /** Present when the host resolved a unified diff for this change. */
+      diff?: ApprovalDiff;
     }
   | {
       type: 'approval-resolved';
@@ -247,6 +272,19 @@ export interface AgentRunRequest {
    * host that forgets to wire it cannot thereby elevate anything.
    */
   requestApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
+  /**
+   * Resolve a unified diff for a pending tool call, when one applies.
+   *
+   * Supplied by the host because computing it needs filesystem access to read
+   * the current file — the loop has none, and giving it any would make the
+   * "tools are the only way the agent touches the workspace" boundary softer.
+   * Returning null means "no diff for this call" (not an error): a rollback or
+   * a query has nothing to diff.
+   */
+  resolveApprovalDiff?: (input: {
+    toolName: string;
+    argumentsJson: string;
+  }) => Promise<ApprovalDiff | null>;
   /**
    * Permission levels that require approval. Defaults to the write-capable
    * levels (stage/commit/rollback) when `requestApproval` is provided.

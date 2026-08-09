@@ -19,6 +19,7 @@ import type {
   AgentRunRequest,
   AgentRunResult,
   ApprovalDecision,
+  ApprovalDiff,
   ApprovalResponse,
   ChatMessage,
   ContextEvidenceSource,
@@ -618,13 +619,28 @@ export async function runAgentToolLoop(
         if (remembered !== undefined) {
           decision = remembered;
         } else {
+          // 先解析 diff 再发事件:界面拿到审批卡片时就该带着改动内容,
+          // 而不是先出现一张空卡片再补内容。diff 解析失败不阻塞审批 ——
+          // 「看不到 diff」要由用户决定是否照样批准,不能因此静默放行或拒绝。
+          let approvalDiff: ApprovalDiff | null = null;
+          if (request.resolveApprovalDiff) {
+            try {
+              approvalDiff = await request.resolveApprovalDiff({
+                toolName: call.name,
+                argumentsJson: call.argumentsJson
+              });
+            } catch {
+              approvalDiff = null;
+            }
+          }
           emit({
             type: 'approval-requested',
             step: steps,
             callId: call.id,
             toolName: call.name,
             permissionLevel: level,
-            argumentsJson: call.argumentsJson
+            argumentsJson: call.argumentsJson,
+            ...(approvalDiff ? { diff: approvalDiff } : {})
           });
           let response: ApprovalResponse;
           try {
@@ -633,7 +649,8 @@ export async function runAgentToolLoop(
               callId: call.id,
               toolName: call.name,
               permissionLevel: level,
-              argumentsJson: call.argumentsJson
+              argumentsJson: call.argumentsJson,
+              ...(approvalDiff ? { diff: approvalDiff } : {})
             });
           } catch (error) {
             // A failed approval channel must deny, never fall through to
