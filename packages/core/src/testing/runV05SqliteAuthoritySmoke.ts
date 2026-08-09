@@ -7,12 +7,18 @@ import { importLegacyOperationLog, LegacyOperationLogImportError } from '../patc
 import { openSqliteOperationLogStore } from '../patch/sqliteOperationLogStore.js';
 import {
   applyMigrations,
+  CHECKSUM_REANCHORS,
   migrationChecksum,
   openAppDatabase,
   openWorkspaceDatabase,
   SqliteMigrationError
 } from '../storage/sqliteDatabase.js';
-import { APP_DB_MIGRATIONS, SQLITE_MIGRATIONS, type SqlMigration } from '../storage/sqliteSchema.js';
+import {
+  APP_DB_MIGRATIONS,
+  SQLITE_MIGRATIONS,
+  getLatestAppSchemaVersion,
+  type SqlMigration
+} from '../storage/sqliteSchema.js';
 import { DurableWorkspaceRepository } from '../storage/durableWorkspaceRepository.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
 import {
@@ -121,6 +127,8 @@ async function mainInWorkspace(root: string): Promise<void> {
 
   verifyMigrationFailureRollback(join(root, 'fault.db'));
   verifyChecksumMismatch(join(root, 'checksum.db'));
+  verifyChecksumReanchorScope(root);
+  verifyFreshAppSchemaComplete(join(root, 'fresh-app.db'));
   verifyNewerSchemaRejected(join(root, 'newer-user-version.db'), join(root, 'newer-ledger.db'));
 
   console.log(JSON.stringify({
@@ -369,6 +377,109 @@ function verifyMigrationFailureRollback(path: string): void {
   const recorded = db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE id = 2').get() as { count: number };
   assert(recorded.count === 0, 'failed migration not recorded');
   db.close();
+}
+
+/**
+ * checksum 重锚只放行登记条目,不是通用后门。
+ *
+ * 背景:本机实测遇到 app.db 的 id 2 迁移曾被整条删除又补回,账本里记着旧
+ * checksum。为让既有库可开而加了 CHECKSUM_REANCHORS 白名单 —— 那是往
+ * checksum 保护里开的口子,必须证明它只开了登记的那一条。
+ */
+function verifyChecksumReanchorScope(scratchDir: string): void {
+  assert(CHECKSUM_REANCHORS.length > 0, 'reanchor list non-empty');
+  const entry = CHECKSUM_REANCHORS[0]!;
+
+  const setChecksum = (path: string, id: number, checksum: string): void => {
+    const raw = new BetterSqlite3(path);
+    raw.prepare('UPDATE schema_migrations SET checksum = ? WHERE id = ?').run(checksum, id);
+    raw.close();
+  };
+  const expectCode = (label: string, open: () => BetterSqlite3.Database, code: string | null): void => {
+    let actual: string | null = null;
+    try {
+      open().close();
+    } catch (error) {
+      actual = error instanceof SqliteMigrationError ? error.code : 'UNKNOWN';
+    }
+    assert(actual === code, `${label}: expected ${code ?? 'success'}, got ${actual ?? 'success'}`);
+  };
+
+  // 登记的历史 checksum → 放行。
+  const allowed = join(scratchDir, 'reanchor-allowed.db');
+  openAppDatabase(allowed).close();
+  setChecksum(allowed, entry.id, entry.fromChecksum);
+  expectCode('registered historical checksum', () => openAppDatabase(allowed), null);
+  // 重锚已落账:再开一次也必须干净。
+  expectCode('reanchor persisted', () => openAppDatabase(allowed), null);
+
+  // 任意其他 checksum → 仍须报错。这一条是白名单不退化成「名字对就放过」的证据。
+  const arbitrary = join(scratchDir, 'reanchor-arbitrary.db');
+  openAppDatabase(arbitrary).close();
+  setChecksum(arbitrary, entry.id, 'deadbeef'.repeat(8));
+  expectCode('arbitrary checksum', () => openAppDatabase(arbitrary),
+    'SQLITE_MIGRATION_CHECKSUM_MISMATCH');
+
+  // 未登记的 id（app id 1）被篡改 → 仍须报错。
+  const otherId = join(scratchDir, 'reanchor-other-id.db');
+  openAppDatabase(otherId).close();
+  setChecksum(otherId, 1, 'tampered');
+  expectCode('unregistered id tampered', () => openAppDatabase(otherId),
+    'SQLITE_MIGRATION_CHECKSUM_MISMATCH');
+
+  // workspace 库的同 id 带同一 checksum → 仍须报错（迁移名不同）。
+  const wrongLedger = join(scratchDir, 'reanchor-workspace.db');
+  openWorkspaceDatabase(wrongLedger).close();
+  setChecksum(wrongLedger, entry.id, entry.fromChecksum);
+  expectCode('workspace ledger same checksum', () => openWorkspaceDatabase(wrongLedger),
+    'SQLITE_MIGRATION_CHECKSUM_MISMATCH');
+
+  // 重锚只改账本、不重跑 SQL：数据必须留存。
+  const dataKept = join(scratchDir, 'reanchor-data.db');
+  const seeded = openAppDatabase(dataKept);
+  seeded.prepare(
+    "INSERT INTO app_settings (setting_key, value_json, updated_at) VALUES ('k','1','t')"
+  ).run();
+  seeded.close();
+  setChecksum(dataKept, entry.id, entry.fromChecksum);
+  const reopened = openAppDatabase(dataKept);
+  const kept = reopened.prepare('SELECT COUNT(*) AS count FROM app_settings').get() as { count: number };
+  reopened.close();
+  assert(kept.count === 1, 'reanchor keeps existing rows (SQL not re-run)');
+}
+
+/**
+ * 全新 app 库必须拿到 id 2 建的全部对象。
+ *
+ * 这一条守的是一个具体的踩坑:补回 id 2 时本打算写空占位（只为抬版本），
+ * 那会让既有库正常而**全新库缺 5 张表** —— 症状是新用户一用 AI 就崩，
+ * 老用户毫无察觉。
+ */
+function verifyFreshAppSchemaComplete(path: string): void {
+  const db = openAppDatabase(path);
+  try {
+    for (const table of ['app_settings', 'app_agent_runs', 'agent_steps', 'tool_calls',
+      'outbound_context_items']) {
+      assert(tableExists(db, table), `fresh app.db has ${table}`);
+    }
+    const columns = (db.pragma('table_info(ai_messages)') as Array<{ name?: unknown }>)
+      .map((column) => column.name);
+    for (const column of ['expires_at', 'redaction_summary', 'provider_response_id']) {
+      assert(columns.includes(column), `fresh app.db ai_messages.${column}`);
+    }
+    const indexes = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'"
+    ).all() as Array<{ name: string }>;
+    const names = indexes.map((row) => row.name);
+    for (const index of ['idx_ai_messages_expires', 'idx_app_agent_runs_conversation_created',
+      'idx_tool_calls_run_created']) {
+      assert(names.includes(index), `fresh app.db index ${index}`);
+    }
+    const version = Number(db.pragma('user_version', { simple: true }));
+    assert(version === getLatestAppSchemaVersion(), `fresh app.db user_version=${version}`);
+  } finally {
+    db.close();
+  }
 }
 
 function verifyChecksumMismatch(path: string): void {

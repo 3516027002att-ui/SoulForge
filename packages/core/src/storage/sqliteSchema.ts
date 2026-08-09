@@ -2,6 +2,24 @@ export interface SqlMigration {
   id: number;
   name: string;
   sql: string;
+  /**
+   * 需要按「列不存在才加」语义添加的列。
+   *
+   * SQLite 没有 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，而迁移可能运行在
+   * 已经有该列的既有库上（本仓库实测遇到过：一条迁移被删后重建，既有库里它
+   * 加的列已存在，裸 ALTER 报 duplicate column）。执行器逐列检查后再决定。
+   *
+   * checksum 计算包含本字段，故改动它会改变 checksum —— 这是有意的：
+   * 它和 sql 一样是迁移内容的一部分。
+   */
+  addColumns?: ReadonlyArray<{ table: string; column: string; definition: string }>;
+  /**
+   * 在 addColumns 之后执行的 SQL。
+   *
+   * 用于依赖新列的对象（如建在新列上的索引）：那些语句不能与主 sql 同批执行，
+   * 因为主 sql 跑在加列之前。
+   */
+  sqlAfterColumns?: string;
 }
 
 /**
@@ -567,6 +585,145 @@ CREATE TABLE IF NOT EXISTS trusted_signers (
   trusted_at TEXT NOT NULL,
   revoked_at TEXT
 );
+`
+  },
+  {
+    id: 2,
+    name: 'v0_5_app_ai_authority_and_retention',
+    /**
+     * 占位迁移，SQL 刻意为空。不要删。
+     *
+     * ── 它为什么存在 ──
+     *
+     * 本机实测（2026-08-09）：用户打开工作区时报
+     * `SQLITE_SCHEMA_NEWER_THAN_APPLICATION`「数据库版本高于当前应用支持版本」。
+     * 排查发现 `%APPDATA%/@soulforge/desktop/app.db` 的 user_version = 2，
+     * schema_migrations 里有两条记录：
+     *   1  v0_5_app_authority
+     *   2  v0_5_app_ai_authority_and_retention
+     * 而代码里 APP_DB_MIGRATIONS 只有 id 1。降级保护判断 2 > 1 遂拒绝打开——
+     * 那道检查没做错，它正是为防止旧代码往新库里写。
+     *
+     * 错在别处：第 2 条迁移建的那些表（ai_conversations / ai_messages /
+     * agent_steps / tool_calls / permission_grants / outbound_context_items /
+     * app_agent_runs / trusted_signers / adaptation_packages）后来被合并进了
+     * id 1 的 SQL，却没管已有数据库仍记着 user_version = 2。git 历史里搜不到
+     * 这个迁移名，说明合并发生在它入库之前，于是所有既有 app.db 都变成了
+     * 「版本过高」。
+     *
+     * 补回这条空迁移，让代码支持版本回到 2：既有库直接可开且数据全保留，
+     * 新建库连续跑 1、2 后结果与只跑 1 相同（id 1 的 CREATE TABLE IF NOT
+     * EXISTS 已建齐全部表）。
+     *
+     * 为什么不改成把表拆回 id 2：那会让**新建**库在 id 1 阶段缺表，而 id 1
+     * 已经入库并被既有库执行过——拆分只对新库生效，两类库从此走上不同路径。
+     * 空占位是唯一让两类库收敛到同一状态的改法。
+     *
+     * 126 个 workspace.db 实测全是 user_version = 6，与 SQLITE_MIGRATIONS 一致，
+     * 不受此问题影响。
+     *
+     * ── SQL 为什么不是空的 ──
+     *
+     * 第一版打算写空占位（只为把版本抬回 2）。做结构比对后发现那会制造一个更
+     * 隐蔽的缺陷：这条迁移当初建了 5 张表（app_settings / app_agent_runs /
+     * agent_steps / tool_calls / outbound_context_items）、3 个索引，还给
+     * ai_messages 加了 expires_at / redaction_summary / provider_response_id
+     * 三列。空占位会让**既有库**正常（表都在）而**全新安装的库缺这 5 张表**——
+     * 症状是新用户一用 AI 就崩，而老用户毫无察觉。
+     *
+     * 下面的 DDL 从既有库的 sqlite_master 导出后重写为 IF NOT EXISTS 形式，
+     * 与实际结构逐字段对齐（已用结构比对验证）。ALTER TABLE 那三列走
+     * addColumnIfMissing 而不是裸 ALTER：既有库里它们已存在，裸 ALTER 会报
+     * duplicate column。
+     */
+    sql: `
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  setting_key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_agent_runs (
+  run_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  service_id TEXT NOT NULL,
+  workspace_key TEXT,
+  permission_mode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  finish_reason TEXT,
+  diagnostics_json TEXT NOT NULL DEFAULT '[]',
+  audit_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  FOREIGN KEY (conversation_id) REFERENCES ai_conversations(conversation_id) ON DELETE CASCADE,
+  FOREIGN KEY (service_id) REFERENCES model_services(service_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS agent_steps (
+  step_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step_index INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  summary TEXT,
+  diagnostics_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES app_agent_runs(run_id) ON DELETE CASCADE,
+  UNIQUE (run_id, step_index)
+);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  tool_call_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step_index INTEGER,
+  tool_name TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  code TEXT,
+  arguments_json TEXT,
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES app_agent_runs(run_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS outbound_context_items (
+  context_item_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  item_index INTEGER NOT NULL,
+  resource_uri TEXT,
+  context_kind TEXT NOT NULL,
+  content_hash TEXT,
+  redaction_summary TEXT NOT NULL DEFAULT '{}',
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES app_agent_runs(run_id) ON DELETE CASCADE,
+  UNIQUE (run_id, item_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_agent_runs_conversation_created
+  ON app_agent_runs(conversation_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_run_created
+  ON tool_calls(run_id, created_at);
+`,
+    /**
+     * ai_messages 的三个附加列。
+     *
+     * 单独走 addColumns 而不是写进 sql：SQLite 没有
+     * `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，而既有库里这三列已存在，
+     * 裸 ALTER 会以 duplicate column 失败。执行器按列是否存在逐个决定。
+     *
+     * idx_ai_messages_expires 依赖 expires_at，故也放在这里、加列之后建。
+     */
+    addColumns: [
+      { table: 'ai_messages', column: 'expires_at', definition: 'TEXT' },
+      { table: 'ai_messages', column: 'redaction_summary', definition: "TEXT NOT NULL DEFAULT '{}'" },
+      { table: 'ai_messages', column: 'provider_response_id', definition: 'TEXT' }
+    ],
+    sqlAfterColumns: `
+CREATE INDEX IF NOT EXISTS idx_ai_messages_expires
+  ON ai_messages(expires_at);
 `
   }
 ];
