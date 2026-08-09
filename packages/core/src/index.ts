@@ -77,6 +77,8 @@ export * from './emevd/emedfExternalAdapter.js';
 export * from './emevd/emedfRegistryResolver.js';
 export * from './emevd/stableIdentity.js';
 export * from './script/scriptContainerEvidence.js';
+export * from './script/plaintextScriptEntry.js';
+export * from './script/plaintextScriptEdit.js';
 export * from './emevd/dslTokenizer.js';
 export * from './emevd/dslParser.js';
 export * from './emevd/dslCompiler.js';

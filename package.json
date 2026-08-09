@@ -169,6 +169,7 @@
     "test:emevd-corpus-matrix": "npm run test:emevd-corpus-matrix -w @soulforge/core",
     "test:script-container-evidence": "npm run test:script-container-evidence -w @soulforge/core",
     "test:script-container-replace": "npm run test:script-container-replace -w @soulforge/core",
+    "test:plaintext-script-edit": "npm run test:plaintext-script-edit -w @soulforge/core",
     "test:script-container-load-preflight": "npm run test:script-container-load-preflight -w @soulforge/core",
     "probe:behavior-headers": "npm run probe:behavior-headers -w @soulforge/core",
     "handoff:project": "node scripts/generate-handoff-projection.mjs",

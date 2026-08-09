@@ -14,7 +14,9 @@
  * Real-corpus finding (W-BEHAVIOR-MAP-01 probe, Sekiro luabnd): inner `.lua`
  * entries are a MIX of Havok Script compiled bytecode with magic
  * `\x1bLuaP` (0x1b 0x4c 0x75 0x61 0x50) and plain-text list files
- * (e.g. goal_list.lua / logic_list.lua). The `\x1bLuaQ` magic is the vanilla
+ * (e.g. goal_list.lua — but NOT logic_list.lua, which measured as `\x1bLuaP`
+ * bytecode with a 0.6121 printable ratio; this comment previously cited it as
+ * a plain-text example). The `\x1bLuaQ` magic is the vanilla
  * Lua 5.1 variant; both are recognized as the `\x1bLua` family. Whether a
  * specific entry's real bytes matched is reported via `magicVerified` and its
  * bounded `headerHex` — extension-based classification alone never claims

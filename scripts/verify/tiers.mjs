@@ -369,6 +369,15 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:param-metadata-native': 'native',
   'test:script-container-evidence': 'native',
   'test:script-container-replace': 'native',
+  // 明文脚本条目的源码级编辑(用户裁定 2026-08-08)。判定与编排是纯逻辑,
+  // 但 Case 14 会读本机 mods/action 下三个真实 *nameid.txt 验证 Shift-JIS
+  // 判定与编码边界——无语料时结构化跳过并说明「未执行不等于通过」。
+  // 因为断言依赖真实语料才完整,层级归 native。
+  //
+  // 这条 smoke 抓到过两个真实数据事实:三个 *nameid.txt 是 Shift-JIS 而非
+  // UTF-8(按 UTF-8 读写会静默损坏所有日文),且全都带尾部 NUL 对齐填充
+  // (3 / 5 / 14 字节,回写时必须原样保留)。
+  'test:plaintext-script-edit': 'native',
   // SCOPE-BEHAVIOR-SCRIPT game-load：真实 luabnd 整内层保持原样替换 → 结构/放位/
   // magic 加载前置预检（leg 2）+ opt-in 真实游戏内加载确认（leg 3，validation-unfrozen）。
   // 缺环境时结构化 skipped（exit 0，不冒充通过）；真实加载未自动验证前 authority 保持 candidate。

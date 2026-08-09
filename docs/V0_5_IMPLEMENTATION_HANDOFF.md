@@ -1395,7 +1395,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 155 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 158 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1424,10 +1424,12 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（42 条）
+**unit**（44 条）
 
 ~~~powershell
 npm run test
+npm run test:agent-approval-gate
+npm run test:agent-capability-wiring
 npm run test:agent-tool-schema
 npm run test:ai-conformance
 npm run test:ai-fake-loop
@@ -1518,7 +1520,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（41 条）
+**native**（42 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1556,6 +1558,7 @@ npm run test:native-writer-failure-matrix
 npm run test:param-duplicate-native
 npm run test:param-field-write-matrix
 npm run test:param-metadata-native
+npm run test:plaintext-script-edit
 npm run test:private-native-gate
 npm run test:real-mod-readonly-preview
 npm run test:script-container-evidence
@@ -3305,7 +3308,12 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "nonClaims": [
         "V0.5 承诺脚本容器条目枚举、只读字节码证据投影、整个内层文件替换，以及**明文条目的源码级编辑**（用户裁定 2026-08-08）。",
         "明文与字节码的分界是实测结论，不是估计。两类 magic **不同版本**：luabnd 内层 296 个 `.lua` 是 `\\x1bLuaP`（第 5 字节 0x50）；action/script 下 10 个 `.hks` 是 `\\x1bLuaQ`（0x51）。此前本条目把两者合并写成「均以 \\x1bLuaQ 开头」，对 luabnd 那 296 个是错的——两种版本的重编译可行性未必相同，混为一谈会让下一个人按错的前提去找工具。",
-        "明文条目实测共 6 个，是源码级编辑的**全部**范围：aicommon.luabnd 内 `goal_list.lua`（21400 B，GOAL 编号总表）、`543000_battle.lua`（53813 B，剑圣战斗）、`801000_battle.lua`（120489 B）；action 目录下 `eventnameid.txt`（4381 个 event → .hkx 动画）、`statenameid.txt`（3225 个状态名）、`variablenameid.txt`（503 个变量）。其余 306 个条目为字节码，只能整文件替换。",
+        "明文条目实测共 6 个，是源码级编辑的**全部**范围：`goal_list.lua`（21400 B，GOAL 编号总表，在 aicommon.luabnd）、`543000_battle.lua`（53813 B，剑圣战斗，在 aicommon.luabnd）、`801000_battle.lua`（120489 B，**在 m25_00_00_00.luabnd**——此前本条目写成 aicommon.luabnd，2026-08-08 全量扫描 mods/script 下 11 个容器 1179 个 .lua/.hks 条目后更正）；action 目录下 `eventnameid.txt`（148048 B，4381 个 event → .hkx 动画）、`statenameid.txt`（91952 B，3225 个状态名）、`variablenameid.txt`（13696 B，503 个变量）。其余条目为字节码，只能整文件替换。",
+        "三个 action/*nameid.txt 是 **Shift-JIS（CP932）** 而非 UTF-8，首行就是一句日文注释「#BOM付きUTF8で保存された場合に一行目が解析不能になる…」。按 UTF-8 读写会把所有日文替换成 U+FFFD 并改变字节长度，且不报任何错。Node 内置 TextDecoder 支持 shift_jis，但 TextEncoder 的 encoding 固定为 utf-8（传参数无效，实测 `new TextEncoder('shift_jis').encoding` 仍返回 utf-8），仓库也没有 iconv 依赖——**回写方向没有编码器**。故 Shift-JIS 条目的源码级编辑只允许结果为纯 ASCII（此时两种编码字节一致，无损）；写入非 ASCII 内容需要补 CP932 编码表，那属于新增能力，需单独证据与裁定。",
+        "三个 action/*nameid.txt **全都带尾部 NUL 对齐填充**（分别 3 / 5 / 14 字节，紧贴文件末尾）。它属于容器对齐而非文本内容：解码前必须剥掉、编回后必须原样补上，否则条目长度改变。判定 NUL 必须扫全文件——一个只看前 64 KB 的判定会让 148048 B 的 eventnameid.txt「通过」而 13696 B 的 variablenameid.txt 被拒，同一批文件得出相反结论，原因纯粹是文件大小。",
+        "明文/字节码的判定阈值有实测间隔：明文可打印字节比例 0.9953–1.0000（真实 Shift-JIS 条目因日文字节为 0.9953–0.9990），字节码 0.2029–0.6079，两者不重叠。阈值取 0.99 而非中点，判定靠紧明文一侧；落在中间的条目一律拒绝。但对 variablenameid.txt 余量只有 0.0053——日后遇到日文密度更高的明文条目时该阈值需重新实测，不能直接放宽。",
+        "扫描覆盖面是 **mod 侧**：game 侧 12 个 luabnd 容器为 KRAK/Oodle 压缩，需 oodleRuntimeRoot 才能读，本次未传故未覆盖（与 PARAM 的容器来源差异同源）。源码级写只写 Mod 暂存区，原版游戏目录永远只读，故这一覆盖缺口不影响写路径正确性。",
+        "现有 `classifyScriptEntry` 对所有 .lua/.hks 一律返回 `lua-bytecode`，明文只靠 `magicVerified` 区分，而那个字段来自采样（MAGIC_SAMPLE_LIMIT=12，按容器顺序取前 12 条）。实测 `543000_battle.lua`（条目索引 222）的 magicVerified 是 **undefined**，即「没验过」。源码级写因此不采用采样结论、也不采用文件名白名单，而是按需逐条读真实字节判定——文件名可以对得上而内容是字节码。",
         "不声明字节码条目可源码级编辑：`decompile-bytecode-to-source-in-v05`、`recompile-source-to-bytecode-in-v05` 与 `typed-or-source-level-script-mutation-in-v05` 对字节码条目仍是禁令。**唯一真阻塞是缺 HKS 重编译器**（反编译方向有工具，回写方向没有），不是接线或范围问题；这也是当初延期 V0.6 的实测依据。",
         "不声明 AI 决策与动作释放是同一层能力：Lua 只报动作编号（实测 `543000_battle.lua` 用 `AddSubGoal(GOAL_COMMON_AttackTunableSpin, 10, 3006, ...)` 这类调用选招），判定帧、硬直与伤害在 TAE（延期 V0.6）与 PARAM 里，改 Lua 不改动作本身。action/script 的 `c0000_transition.hks` 含 819 条输入/连招符号（`BEH_A_GROUND_ATTACK`、`BEH_A_DEFLECT_GUARD_START/CONTINUE/END`、`BEH_ADD_R_ADD_ACTION_INPUT_RESEND` 等），但它是字节码，本版不可源码级改。",
         "本机游戏根同级 `tools` 目录下的外部工具（DSLuaDecompiler、Yapped Rune Bear、DarkScript3）仅作**对照与辅助检测**：用于行为、格式家族与工作流对照，不入库、不作为运行期依赖、不复制其源码。DarkScript3 与 SoulsFormats 均为 All Rights Reserved。",
