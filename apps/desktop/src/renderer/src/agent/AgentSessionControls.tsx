@@ -12,8 +12,24 @@ export interface AgentSessionControlsProps {
 }
 
 /**
- * Agent 会话配置：模型、思考强度、权限模式。受控组件——
- * 状态仍由 App 持有，本组件不引入新的全局状态。
+ * 计划草稿设置：草稿生成器、思考强度、权限模式回显。
+ *
+ * ── 为什么这里的标签不再叫「模型服务」──
+ *
+ * 本组件的下拉是 mock/openai/anthropic 三个**硬编码**选项，只喂给
+ * `buildAiSidebarDraft`（App.tsx 的 buildAiDraft，离线规则计划器）。真实 agent
+ * 任务用的是另一个下拉——AgentTaskPanel 里那个，选项来自凭据 vault
+ * （ai.agent.run 按 configId 解析）。
+ *
+ * 两者此前都叫「模型服务」并排出现在同一个侧边栏里。用户在这里选了
+ * 「Anthropic」不会影响任务实际用哪个服务，而界面上没有任何东西说明这一点——
+ * 这不是措辞问题，是两个同名控件指向不同后端。区块重排的第一件事就是让这
+ * 两者的名字与位置区分开：本组件属于「计划草稿」，任务运行设置属于「AI 任务」。
+ *
+ * 权限模式在这里是**只读回显**，与 AgentTaskPanel 的口径一致：renderer 不提供
+ * 提权入口（见 AgentTaskPanel 头注）。
+ *
+ * 受控组件——状态仍由 App 持有，本组件不引入新的全局状态。
  */
 export function AgentSessionControls({
   provider,
@@ -26,12 +42,15 @@ export function AgentSessionControls({
   return (
     <div className="agent-controls">
       <div className="agent-controls__row">
-        <label className="agent-controls__label" htmlFor="agent-provider">模型服务</label>
+        {/* 标签是「草稿生成器」而不是「模型服务」：这三个选项只作用于计划草稿，
+            真实任务用哪个服务由「AI 任务」区的下拉决定。同名会让用户以为在这里
+            选了就生效。 */}
+        <label className="agent-controls__label" htmlFor="agent-provider">草稿生成器</label>
         <select
           id="agent-provider"
           value={provider}
           onChange={(event) => onProviderChange(event.target.value as AiProvider)}
-          aria-label="模型服务"
+          aria-label="计划草稿生成器"
         >
           <option value="mock">离线计划（不调用模型）</option>
           <option value="openai">OpenAI</option>
@@ -40,6 +59,10 @@ export function AgentSessionControls({
         {provider === 'mock' && (
           <p className="agent-controls__hint">离线规则计划器：不运行任何本地或远程模型。</p>
         )}
+        <p className="agent-controls__scope" data-testid="agent-draft-scope">
+          仅用于生成计划草稿。运行任务使用的模型服务在下方「AI 任务」区选择，
+          两者互不影响。
+        </p>
       </div>
       <div className="agent-controls__row">
         <label className="agent-controls__label" htmlFor="agent-thinking">思考强度</label>

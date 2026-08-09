@@ -192,8 +192,12 @@ export function AgentSidebar({
         </div>
       </div>
 
-      <details className="agent-settings" data-testid="agent-settings" open>
-        <summary>会话配置</summary>
+      {/* 区块顺序（Codex 形态）：待办 → 进行中 → 配置 → 参考。
+          审批与任务状态在 AgentTaskPanel 内部置顶；计划草稿设置默认折叠，
+          因为它只影响草稿而不影响任务运行——默认展开会让用户以为必须先配它。
+          此前它是 open 的，且标题「会话配置」暗示影响整个会话。 */}
+      <details className="agent-settings" data-testid="agent-settings">
+        <summary>计划草稿设置</summary>
         <AgentSessionControls
           provider={provider}
           thinking={thinking}
@@ -285,8 +289,11 @@ export function AgentSidebar({
           </div>
         )}
 
-        <div className="agent-block">
-          <div className="agent-block__label">安全工具</div>
+        {/* 手动工具台归入折叠的参考区。它不是 agent 会话流的一部分——用户在这里
+            手动跑搜索与解释，与 agent 自己调工具是两件事。此前它常驻展开在流的
+            末尾，把审批与进度挤到滚动区外。 */}
+        <details className="agent-block" data-testid="agent-manual-tools">
+          <summary className="agent-block__label">手动工具台 · {tools.length} 个已注册工具</summary>
           <div className="tool-panel agent-tool-panel">
             <div className="tool-group">
               <small>读取 / 分析</small>
@@ -332,7 +339,7 @@ export function AgentSidebar({
             </div>
             {toolOutput && <pre className="tool-output">{JSON.stringify(toolOutput, null, 2)}</pre>}
           </div>
-        </div>
+        </details>
       </div>
 
       <div className="agent__composer">

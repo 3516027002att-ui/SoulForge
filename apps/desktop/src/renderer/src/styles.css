@@ -880,6 +880,10 @@ pre.tool-output {
 .agent-approval__actions { flex-wrap: wrap; margin-top: 8px; }
 .agent-approval__scope { margin: 6px 0 0; font-size: 11px; color: var(--ink-3); }
 
+.agent-controls__scope { margin: 4px 0 0; font-size: 11px; color: var(--ink-3); }
+/* 折叠区块的 summary 复用 agent-block__label 的排版，但要能点。 */
+details.agent-block > summary.agent-block__label { cursor: pointer; }
+
 .agent-log__args { margin-top: 3px; }
 .agent-log__args summary { font-size: 11px; color: var(--ink-3); cursor: pointer; }
 .composer-mode { font-size: 11px; color: var(--ink-3); margin-left: auto; margin-right: 8px; }

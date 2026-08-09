@@ -122,9 +122,10 @@ test('ai 目录筛选真实 ai/ 资源，不与 Agent 面板冲突', async () =>
   await expect(files).toHaveCount(1);
   await expect(files.first()).toContainText('ai/m10.aibnd.dcx');
 
-  // Agent 面板仍是独立右侧面板（输入区与配置存在），中央没有占用 ai 的 Agent 页面。
+  // Agent 面板仍是独立右侧面板（输入区与配置区存在），中央没有占用 ai 的 Agent 页面。
+  // 草稿设置区默认折叠，故断言的是区块存在而不是里面的 select 可见。
   await expect(window.locator('.agent__composer textarea')).toBeVisible();
-  await expect(window.locator('#agent-provider')).toBeVisible();
+  await expect(window.locator('details.agent-settings')).toBeVisible();
   await expect(window.locator('.status-bar')).toContainText('ai');
   await app.close();
 });
@@ -355,7 +356,15 @@ test('设置归属：通用设置无模型控件，Agent 面板持有会话配�
   expect(settingsText).not.toContain('模型服务');
   expect(settingsText).not.toContain('运行 / 权限模式');
 
-  // Agent 面板：模型、思考强度、权限模式与锁定原因。
+  // 计划草稿设置区默认**折叠**：它只影响 buildAiSidebarDraft 的草稿生成，不影响
+  // 任务实际用哪个模型服务（那由「AI 任务」区的下拉决定）。默认展开会让用户以为
+  // 必须先配它才能跑任务。此前它默认展开且标题叫「会话配置」，暗示影响整个会话。
+  const details = window.locator('details.agent-settings');
+  await expect(details).toHaveAttribute('data-testid', 'agent-settings');
+  await expect(window.locator('#agent-provider')).toBeHidden();
+  await details.locator('summary').click();
+
+  // 展开后：草稿生成器、思考强度、权限模式与锁定原因。
   await expect(window.locator('#agent-provider')).toBeVisible();
   await expect(window.locator('#agent-thinking')).toBeVisible();
   await expect(window.locator('#agent-permission')).toBeDisabled();
@@ -363,11 +372,13 @@ test('设置归属：通用设置无模型控件，Agent 面板持有会话配�
   // mock 不显示为真实本地模型。
   await expect(window.locator('#agent-provider')).toContainText('离线计划（不调用模型）');
   await expect(window.locator('.agent-controls__hint')).toContainText('不运行任何本地或远程模型');
+  // 作用范围必须写在控件旁：此前这个下拉与 AgentTaskPanel 的模型服务下拉同名
+  // 「模型服务」并排出现，而两者指向不同后端——在这里选 Anthropic 不影响任务。
+  await expect(window.locator('[data-testid="agent-draft-scope"]')).toContainText('仅用于生成计划草稿');
 
-  // 折叠再打开后会话设置不丢失。
+  // 折叠再打开后草稿设置不丢失。
   await window.locator('#agent-thinking').selectOption('deep');
   await window.locator('#agent-provider').selectOption('openai');
-  const details = window.locator('details.agent-settings');
   await details.locator('summary').click();
   await expect(window.locator('#agent-provider')).toBeHidden();
   await details.locator('summary').click();
