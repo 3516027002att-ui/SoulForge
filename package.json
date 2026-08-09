@@ -178,7 +178,8 @@
     "test:renderer-reachability": "node scripts/verify-renderer-reachability-gate.mjs",
     "test:corpus-manifest": "node scripts/verify-corpus-manifest.mjs",
     "test:ai-tool-write-path": "node scripts/verify-ai-tool-write-path-gate.mjs",
-    "test:agent-tool-schema": "node scripts/verify-agent-tool-schema-gate.mjs"
+    "test:agent-tool-schema": "node scripts/verify-agent-tool-schema-gate.mjs",
+    "test:agent-approval-gate": "node scripts/verify-agent-approval-gate.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

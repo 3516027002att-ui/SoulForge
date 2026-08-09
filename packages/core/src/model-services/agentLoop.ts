@@ -18,6 +18,8 @@ import type {
   AgentEvent,
   AgentRunRequest,
   AgentRunResult,
+  ApprovalDecision,
+  ApprovalResponse,
   ChatMessage,
   ContextEvidenceSource,
   ModelCompleteRequest,
@@ -64,8 +66,42 @@ export function assertNoSecretLeak(payload: unknown, apiKey: string): void {
 }
 
 /**
+ * Permission levels that require user approval by default.
+ *
+ * These are the levels that can reach staging, a committed write, or a backup
+ * restore. `propose` and `validate` are deliberately absent: both produce
+ * artifacts without touching disk, and asking about them would train the user
+ * to click through approvals — an approval prompt that is almost always safe to
+ * accept stops being read.
+ */
+export const DEFAULT_APPROVAL_REQUIRED_LEVELS: readonly string[] = Object.freeze([
+  'stage',
+  'commit',
+  'rollback',
+  'write'
+]);
+
+/**
  * Plan mode: only allow tools that are explicitly read/analysis.
  * Full mode still cannot invent elevated tools outside the registry passed in.
+ *
+ * ── 与 ai/toolPermissions.ts 的关系(实测,2026-08-08)──
+ *
+ * 本函数与 `isAiToolPermissionAllowed` 是**两层**判据,不是一套的两份副本。
+ * 对 17 个生产工具在 plan 模式下逐个比对,分歧只有 2 个:
+ * `propose_text_patch`(propose)与 `validate_patch`(validate)—— 本层的
+ * `planAllow` 白名单拦它们,而 `maxPermissionForMode('plan')` 返回 `validate`
+ * 会放行。其余 15 个完全一致。
+ *
+ * 这个分歧是刻意的,已随证据封存:runAiConformanceSmoke 的 nonClaim 写明
+ * 「plan 只读在 agent loop 层强制;policy gate 层按既有 architecture scaffold
+ * 契约保留 stage/validate 上限」。本层严格只读,registry 层保留上限,两层都跑,
+ * 取交集 —— 严格的一层生效。
+ *
+ * 不要「统一」成任一边:收紧 maxPermissionForMode 会打断
+ * runV05FoundationSmoke:135 的既有断言(`isAiToolPermissionAllowed('propose',
+ * 'plan')` 必须为真);放宽本层白名单则是解除一道授权限制,需要用户裁定。
+ * 待定项已记录,当前保持两层不变。
  */
 export function isToolAllowedInMode(
   toolName: string,
@@ -80,6 +116,14 @@ export function isToolAllowedInMode(
     };
   }
   if (mode === 'plan') {
+    // 白名单按名字而不是按等级:本层要的是「即使某工具等级被误标,也进不了
+    // plan 模式」。代价是新增只读工具必须同步加名字 —— 实测生产注册表的 11 个
+    // read/analyze 工具当前全部在册,无遗漏。
+    //
+    // 前五个名字(read_resource / search_workspace / list_diagnostics 与下面的
+    // workspace.* / resource.graph.query)不在生产 ai/toolRegistry 里:前三个是
+    // fake-loop 与 conformance 自造的工具名,后两个属于 testing/harness 的
+    // scaffold registry。它们不是死条目,删掉会让那几个套件的 plan 只读断言失效。
     const planAllow = new Set([
       'read_resource',
       'search_workspace',
@@ -219,6 +263,21 @@ export async function runAgentToolLoop(
   let totalOutputTokens = 0;
   let lastInputTokens: number | undefined;
   let compactionWindows = 0;
+
+  // Approval gate. Defaults to the write-capable levels when a host provides
+  // the callback without naming levels — the levels that can reach staging,
+  // commit or a backup restore are exactly the ones worth a human checkpoint.
+  const approvalLevels = new Set(
+    request.approvalRequiredLevels ?? DEFAULT_APPROVAL_REQUIRED_LEVELS
+  );
+  /**
+   * Session-scoped memory for `always` / `never`, keyed by tool name.
+   *
+   * In-memory and per-run on purpose: persisting "always allow rollback" would
+   * carry a decision made about one workspace into the next one.
+   */
+  const approvalMemory = new Map<string, 'always' | 'never'>();
+  const approvalsAudit: NonNullable<AgentRunResult['audit']['approvals']> = [];
 
   const recordMessage = (step: number, message: ChatMessage): void => {
     request.rollout?.enqueue({ type: 'message', step, message });
@@ -472,6 +531,78 @@ export async function runAgentToolLoop(
         });
         continue;
       }
+
+      // Approval gate — runs after the mode and evidence gates, so a call the
+      // mode already forbids is never surfaced to the user as an approvable
+      // action. Asking about something that would be denied anyway teaches the
+      // user their answer does not matter.
+      const level = toolDefs.get(call.name)?.permissionLevel ?? 'read';
+      if (request.requestApproval && approvalLevels.has(level)) {
+        const remembered = approvalMemory.get(call.name);
+        let decision: ApprovalDecision;
+        let note: string | undefined;
+        if (remembered !== undefined) {
+          decision = remembered;
+        } else {
+          emit({
+            type: 'approval-requested',
+            step: steps,
+            callId: call.id,
+            toolName: call.name,
+            permissionLevel: level,
+            argumentsJson: call.argumentsJson
+          });
+          let response: ApprovalResponse;
+          try {
+            response = await request.requestApproval({
+              step: steps,
+              callId: call.id,
+              toolName: call.name,
+              permissionLevel: level,
+              argumentsJson: call.argumentsJson
+            });
+          } catch (error) {
+            // A failed approval channel must deny, never fall through to
+            // execute: an unreachable approver is not consent.
+            response = {
+              decision: 'reject',
+              note: `审批通道失败：${error instanceof Error ? error.message : String(error)}`
+            };
+          }
+          decision = response.decision;
+          note = response.note;
+          if (decision === 'always' || decision === 'never') {
+            approvalMemory.set(call.name, decision);
+          }
+        }
+        emit({
+          type: 'approval-resolved',
+          step: steps,
+          callId: call.id,
+          toolName: call.name,
+          decision,
+          fromMemory: remembered !== undefined
+        });
+        approvalsAudit.push({
+          name: call.name,
+          permissionLevel: level,
+          decision,
+          fromMemory: remembered !== undefined,
+          ...(note !== undefined ? { note } : {})
+        });
+        if (decision === 'reject' || decision === 'never') {
+          planned.push({
+            kind: 'denied',
+            call,
+            code: 'APPROVAL_DENIED',
+            message: decision === 'never'
+              ? `用户拒绝并已在本会话内永久拒绝工具 ${call.name}。`
+              : `用户拒绝执行工具 ${call.name}。${note === undefined ? '' : note}`
+          });
+          continue;
+        }
+      }
+
       planned.push({
         kind: 'execute',
         call,
@@ -513,7 +644,15 @@ export async function runAgentToolLoop(
       for (const index of batchIndices) {
         const batchEntry = planned[index]!;
         if (batchEntry.kind === 'execute') {
-          emit({ type: 'tool-call-begin', step: steps, callId: batchEntry.call.id, name: batchEntry.call.name });
+          // Arguments travel with the span so the UI can show *what* a tool was
+          // called with, not just its name. Already redacted at push time.
+          emit({
+            type: 'tool-call-begin',
+            step: steps,
+            callId: batchEntry.call.id,
+            name: batchEntry.call.name,
+            argumentsJson: batchEntry.call.argumentsJson
+          });
         }
       }
       const settled = await Promise.all(
@@ -597,6 +736,7 @@ export async function runAgentToolLoop(
     ...(request.streaming ? { streaming: true } : {}),
     ...(retriesAudit.length ? { retries: retriesAudit } : {}),
     ...(compactionsAudit.length ? { compactions: compactionsAudit } : {}),
+    ...(approvalsAudit.length ? { approvals: approvalsAudit } : {}),
     ...(contextAssemblies.length ? { contextAssemblies } : {})
   };
   assertNoSecretLeak({ messages, audit, diagnostics }, request.apiKey);

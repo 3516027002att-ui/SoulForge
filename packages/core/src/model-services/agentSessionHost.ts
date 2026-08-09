@@ -15,6 +15,8 @@ import type {
   AgentEvent,
   AgentPermissionMode,
   AgentRunResult,
+  ApprovalRequest,
+  ApprovalResponse,
   ChatMessage,
   CompactionOptions,
   ModelServiceAdapter,
@@ -39,6 +41,12 @@ export interface AgentSessionRunParams {
   executeTool: (call: ToolCall) => Promise<{ ok: boolean; content: string; code?: string }>;
   signal?: AbortSignal;
   streaming?: boolean;
+  /**
+   * Approval gate forwarded to the loop. Absent means no user checkpoint —
+   * the mode and registry gates still apply.
+   */
+  requestApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
+  approvalRequiredLevels?: readonly string[];
   retryPolicy?: RetryPolicyOptions;
   streamMaxRetries?: number;
   compaction?: CompactionOptions;
@@ -105,6 +113,10 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     ...(params.streamMaxRetries != null ? { streamMaxRetries: params.streamMaxRetries } : {}),
     ...(params.streaming != null ? { streaming: params.streaming } : {}),
     ...(params.compaction ? { compaction: params.compaction } : {}),
+    ...(params.requestApproval ? { requestApproval: params.requestApproval } : {}),
+    ...(params.approvalRequiredLevels
+      ? { approvalRequiredLevels: params.approvalRequiredLevels }
+      : {}),
     onEvent: emit,
     rollout: recorder
   });

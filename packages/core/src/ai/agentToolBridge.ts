@@ -45,6 +45,9 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
     name: descriptor.name,
     description: descriptor.description,
     parametersJsonSchema: toolInputShapeToJsonSchema(descriptor.inputSchema),
+    // Carried through so the loop's approval gate can group by severity from
+    // the registry's own declaration instead of guessing from the name.
+    permissionLevel: descriptor.permissionLevel ?? 'read',
     supportsParallel: PARALLEL_SAFE_LEVELS.has(descriptor.permissionLevel ?? 'read')
   }));
 

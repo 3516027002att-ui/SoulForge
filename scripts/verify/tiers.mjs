@@ -285,6 +285,14 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 判据⑥把 schema 的 required 与 validateToolInput 的实际强制对钉,防止两份
   // 声明各自漂移。观测编译产物的运行期投影结果,故需先 build,归 unit。
   'test:agent-tool-schema': 'unit',
+  // Agent 审批层(硬约束 11)。审批门被绕过时的症状是**什么都不会发生**:
+  // 工具照常执行、任务照常成功、日志照常干净,只是没人问过用户。而
+  // requestApproval 是可选字段,漏传它编译通过、测试全绿,写类工具直接执行
+  // ——类型系统对「本该传却没传」无话可说。判据⑫特意拿生产 agentToolBridge
+  // 真实投影的 permissionLevel 跑一遍:实测拆掉 bridge 那一行后前十一条判据
+  // 全绿,而生产里每个工具都会落到默认 read 等级,审批门完全失效。
+  // 用 fake adapter 跑真实 loop,不发网络请求,归 unit。
+  'test:agent-approval-gate': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。

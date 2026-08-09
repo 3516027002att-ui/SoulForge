@@ -44,6 +44,13 @@ export interface ToolDefinition {
   description: string;
   parametersJsonSchema: Record<string, unknown>;
   /**
+   * Permission level this tool requires, carried through from the registry.
+   * The loop needs it to decide which calls hit the approval gate; without it
+   * the gate would have to re-derive severity from the tool name, which is
+   * exactly the kind of second source that drifts.
+   */
+  permissionLevel?: string;
+  /**
    * When true, consecutive calls of this tool in one model turn may execute
    * concurrently; results are still recorded in model emission order.
    * Default false — exclusive, serialized execution (Codex
@@ -99,11 +106,59 @@ export interface RetryPolicyOptions {
  * Agent-level events emitted during a run (Codex EventMsg subset). Deltas are
  * transient — rollout persistence decides separately which items are durable.
  */
+/**
+ * Approval decision for one tool call (Codex approval-request semantics).
+ *
+ * `once` / `reject` apply to this call only. `always` / `never` additionally
+ * seed a session-scoped memory keyed by tool name, so the same tool is not
+ * re-asked in this session. The memory is deliberately session-scoped and
+ * in-memory: persisting "always allow" across sessions would let a decision
+ * made in one workspace silently authorize another.
+ */
+export type ApprovalDecision = 'once' | 'always' | 'reject' | 'never';
+
+export interface ApprovalRequest {
+  step: number;
+  callId: string;
+  toolName: string;
+  /** Permission level the tool declares; drives the UI's severity grouping. */
+  permissionLevel: string;
+  /**
+   * Redacted arguments as the model emitted them. Present so the user approves
+   * a concrete action rather than a bare tool name — "write a file" and
+   * "write THIS file" are different decisions.
+   */
+  argumentsJson: string;
+}
+
+export interface ApprovalResponse {
+  decision: ApprovalDecision;
+  /** Optional user-facing note recorded in the audit trail. */
+  note?: string;
+}
+
 export type AgentEvent =
   | { type: 'turn-started'; step: number }
   | { type: 'agent-message-delta'; step: number; text: string }
-  | { type: 'tool-call-begin'; step: number; callId: string; name: string }
+  | { type: 'tool-call-begin'; step: number; callId: string; name: string; argumentsJson?: string }
   | { type: 'tool-call-end'; step: number; callId: string; name: string; ok: boolean; code?: string }
+  | {
+      type: 'approval-requested';
+      step: number;
+      callId: string;
+      toolName: string;
+      permissionLevel: string;
+      argumentsJson: string;
+    }
+  | {
+      type: 'approval-resolved';
+      step: number;
+      callId: string;
+      toolName: string;
+      decision: ApprovalDecision;
+      /** True when answered from the session memory rather than a fresh prompt. */
+      fromMemory: boolean;
+    }
   | { type: 'retry-scheduled'; step: number; attempt: number; maxAttempts: number; delayMs: number; code: string }
   | { type: 'context-assembled'; step: number; sections: number; totalBytes: number }
   | { type: 'context-compacted'; step: number; reason: 'auto'; tokenLimit: number }
@@ -181,6 +236,23 @@ export interface AgentRunRequest {
   streamMaxRetries?: number;
   /** Consume adapter.stream() instead of complete(); requires onEvent for deltas. */
   streaming?: boolean;
+  /**
+   * Approval gate. When present, every tool call whose permission level is in
+   * `approvalRequiredLevels` must be approved before it executes.
+   *
+   * Absent means no approval layer — which is the pre-existing behavior, not a
+   * silent allow: without this callback the loop still enforces
+   * isToolAllowedInMode plus the registry's own permission ladder. The gate
+   * adds a *user* checkpoint on top of those, it does not replace them, so a
+   * host that forgets to wire it cannot thereby elevate anything.
+   */
+  requestApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
+  /**
+   * Permission levels that require approval. Defaults to the write-capable
+   * levels (stage/commit/rollback) when `requestApproval` is provided.
+   * An empty array means "approve nothing", which disables the gate.
+   */
+  approvalRequiredLevels?: readonly string[];
   /** Agent-level event sink (turn lifecycle, deltas, tool spans, retries). */
   onEvent?: (event: AgentEvent) => void;
   /** Append-only session recorder; flushed before the run returns. */
@@ -207,6 +279,18 @@ export interface AgentRunResult {
     retries?: Array<{ step: number; attempt: number; code: string; delayMs: number }>;
     /** Compaction log — one entry per applied context compaction. */
     compactions?: Array<{ step: number; reason: 'auto'; tokenLimit: number; summaryBytes: number }>;
+    /**
+     * Approval log — one entry per gated tool call, including the ones answered
+     * from session memory. A denial must leave a trace: "the agent did not run
+     * that tool" and "the user refused it" are different facts.
+     */
+    approvals?: Array<{
+      name: string;
+      permissionLevel: string;
+      decision: ApprovalDecision;
+      fromMemory: boolean;
+      note?: string;
+    }>;
     /**
      * Context Broker assembly log — metadata only, never evidence content.
      * Populated when `contextBroker` is provided on the run request.
