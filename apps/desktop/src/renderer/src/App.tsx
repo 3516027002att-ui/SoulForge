@@ -21,6 +21,7 @@ import type {
   MsbRegionLike,
   MsbSceneSourceCounts,
   ParamDefDocument,
+  ParamFieldDef,
   ResourceKind
 } from '@soulforge/shared';
 import type {
@@ -288,6 +289,22 @@ export function App(): ReactElement {
   const [paramSourceHash, setParamSourceHash] = useState<string | null>(null);
   const [paramLive, setParamLive] = useState(false);
   const [paramRowPayloads, setParamRowPayloads] = useState<Map<number, string>>(new Map());
+  /**
+   * 主进程给出的字段定义（Smithbox SDT 2.2.4）与缺失原因。
+   *
+   * ⚠️ 当前经**直连**取得：main 侧按 typeName 从元数据包里找定义，
+   * 未走 matchParamMetadataPackage 的包校验 + 描述符匹配 + 用户信任策略三层检查
+   * ——生产侧目前没有信任策略的构造代码（只有测试里有）。
+   *
+   * 因此字段表按**只读**呈现：读得到、改不了。写入需要先建立用户信任策略，
+   * 那是范围变更，已记录待裁定。definitionCanCommit 靠 origin 拦住写入是既有的
+   * 保护性设计，这里不绕过它——把 origin 标成 'imported' 会让写入放行，
+   * 那等于用一个字段名换掉一道授权检查。
+   */
+  const [paramFieldDefs, setParamFieldDefs] = useState<ParamFieldDef[] | null>(null);
+  const [paramFieldDefsDiagnostic, setParamFieldDefsDiagnostic] = useState<
+    { code: string; message: string } | null
+  >(null);
   const [paramRowDataSize, setParamRowDataSize] = useState<number>(16);
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
@@ -351,6 +368,10 @@ export function App(): ReactElement {
       setParamSourceHash(null);
       setParamLive(false);
       setParamRowPayloads(new Map());
+      // 字段定义必须一起清：两张 param 表的行宽通常不同，残留的字段列会让用户
+      // 对着上一张表的字段名看新表的字节。
+      setParamFieldDefs(null);
+      setParamFieldDefsDiagnostic(null);
     },
     emevd: () => {
       setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
@@ -386,6 +407,29 @@ export function App(): ReactElement {
   const showBnd4Workbench = centerView === 'resource' && (bnd4Forced || selectedIsContainer);
   const canEditText = preview?.previewKind === 'text' && preview.structuredPreview?.editable === true && !preview.truncated;
   const hasMsgTable = canEditText && msgRows.length > 0;
+
+  /**
+   * 交给 ParamDefPanel 的字段定义。
+   *
+   * origin 刻意保持 `'fixture'` 而不是 `'imported'`：ParamDefPanel 的
+   * definitionCanCommit 靠 origin 决定是否放行字段写入，而当前这份定义是**直连**
+   * 取得的——未经 matchParamMetadataPackage 的包校验、描述符匹配与用户信任策略
+   * 三层检查（生产侧还没有信任策略的构造代码）。
+   *
+   * 把 origin 写成 'imported' 会让写入放行，那等于用一个字段名换掉一道授权检查。
+   * 所以这里是「读得到、改不了」：字段名与数值可见，写入待用户裁定信任策略后再开。
+   */
+  const paramFieldDefinition = useMemo<ParamDefDocument | null>(() => {
+    if (!paramFieldDefs || paramFieldDefs.length === 0) return null;
+    return {
+      schemaVersion: 1,
+      typeName: paramTypeName,
+      version: 0,
+      rowDataSize: paramRowDataSize,
+      origin: 'fixture',
+      fields: paramFieldDefs
+    };
+  }, [paramFieldDefs, paramTypeName, paramRowDataSize]);
   const editDirty = editText !== lastSavedText;
   const changeStore = useMemo(() => new ChangeControlStore(), []);
   const changeState = useSyncExternalStore(changeStore.subscribe, changeStore.getState);
@@ -586,6 +630,10 @@ export function App(): ReactElement {
             rowDataSize?: number;
             authority?: string;
           } | null;
+          // 必须在断言里声明：不声明就读，取到的永远是 undefined 且 typecheck 不报
+          // ——那正是「字段列空着但没有任何错误」的形态。
+          fieldDefs?: ParamFieldDef[] | null;
+          fieldDefsDiagnostic?: { code?: string; message?: string } | null;
         };
         if (cancelled) return;
         if (!result?.ok || !result.data?.rows?.length) {
@@ -593,9 +641,22 @@ export function App(): ReactElement {
           setParamLive(false);
           setParamSourceHash(null);
           setParamRowPayloads(new Map());
+          setParamFieldDefs(null);
+          setParamFieldDefsDiagnostic(null);
           setStatus('PARAM 实时读取失败：显示空列表，未加载任何演示数据。');
           return;
         }
+        // 字段定义与缺失原因逐字段取，不用 as 整体断言 —— IPC 边界上字段名对不上
+        // 只会表现为「字段列空着」而 typecheck 照过（本轮接线已踩过四次）。
+        setParamFieldDefs(Array.isArray(result.fieldDefs) ? result.fieldDefs : null);
+        setParamRowDataSize(result.data.rowDataSize ?? 0);
+        setParamFieldDefsDiagnostic(
+          result.fieldDefsDiagnostic
+            && typeof result.fieldDefsDiagnostic.code === 'string'
+            && typeof result.fieldDefsDiagnostic.message === 'string'
+            ? { code: result.fieldDefsDiagnostic.code, message: result.fieldDefsDiagnostic.message }
+            : null
+        );
         const payloads = new Map<number, string>();
         setParamRows(result.data.rows.map((r) => {
           if (r.dataBase64) payloads.set(r.id, r.dataBase64);
@@ -2275,8 +2336,11 @@ export function App(): ReactElement {
             key={`panel-boundary:${selectedFile?.sourceUri ?? 'none'}`}
           >
           {!selectedFile && <p className="muted">选择左侧资源后显示限量文本或十六进制预览。</p>}
-          {preview?.structuredPreview && <StructuredPreviewCard preview={preview.structuredPreview} />}
-          {preview?.nativeInspection && <NativeInspectionCard inspection={preview.nativeInspection} />}
+          {/* Structured preview 与原生格式检查已移到本面板**末尾**并默认折叠
+              （见下方 resource-evidence-details）。
+              它们此前排在所有编辑器之前、常驻展开，于是打开一个 param 先看到的是
+              两张证据卡而不是行表——编辑器被挤到滚动区外。那两张卡是给 AI 与
+              排查用的证据投影，不是日常编辑要看的东西。 */}
           {preview?.previewKind === 'text' && (
             <section className="text-editor-panel">
               <div className="text-editor-toolbar">
@@ -2655,6 +2719,21 @@ export function App(): ReactElement {
                   setStatus('PARAM 行候选已进入审查队列。');
                 }}
               />
+              {/* 字段定义的来源与限制必须写在字段表旁边，而不是只存在状态里。
+                  没有定义时说清原因（哪一步失败），有定义时说清为什么只读
+                  ——否则用户看到一列灰掉的字段无从判断是坏了还是没权限。 */}
+              {paramLive && paramFieldDefinition !== null && (
+                <p className="muted" data-testid="param-fielddefs-readonly">
+                  字段定义来自 Smithbox SDT 2.2.4（{paramFieldDefinition.fields.length} 个字段）。
+                  当前**只读**：该定义经直连取得，未走用户信任策略校验，
+                  故字段写入尚未开放。行级编辑不受影响。
+                </p>
+              )}
+              {paramLive && paramFieldDefinition === null && paramFieldDefsDiagnostic !== null && (
+                <p className="muted" data-testid="param-fielddefs-missing">
+                  无字段定义（{paramFieldDefsDiagnostic.code}）：{paramFieldDefsDiagnostic.message}
+                </p>
+              )}
               <ParamDefPanel
                 key={`paramdef:${paramLive ? 'live' : 'empty'}:${paramSourceHash ?? ''}`}
                 typeName={paramLive ? paramTypeName : '未加载'}
@@ -2662,7 +2741,7 @@ export function App(): ReactElement {
                 origin={paramLive ? '待绑定' : 'fixture'}
                 resourceUri={selectedFile?.sourceUri ?? ''}
                 live={paramLive}
-                definition={paramLive ? null : EMPTY_PARAM_DEF}
+                definition={paramFieldDefinition}
                 rows={paramRows}
                 getRowDataBase64={(rowId) => paramRowPayloads.get(rowId)}
                 {...(paramLive && selectedFile
@@ -2771,6 +2850,20 @@ export function App(): ReactElement {
             <p className="muted">
               {formatPreviewTruncation(preview.bytesRead, preview.file?.size)}
             </p>
+          )}
+          {/* 证据与格式检查：默认折叠，排在编辑器之后。
+              内容一字未改，只改了位置与默认展开状态——它们仍是 AI 侧边栏引用的
+              同一份证据投影，排查时展开即可。 */}
+          {(preview?.structuredPreview || preview?.nativeInspection) && (
+            <details className="resource-evidence-details" data-testid="resource-evidence">
+              <summary>证据与格式检查</summary>
+              <p className="muted">
+                以下是资源的结构化证据与原生格式判定，供 AI 引用与排查使用；
+                日常编辑不需要展开。
+              </p>
+              {preview.structuredPreview && <StructuredPreviewCard preview={preview.structuredPreview} />}
+              {preview.nativeInspection && <NativeInspectionCard inspection={preview.nativeInspection} />}
+            </details>
           )}
           </PanelErrorBoundary>
                 </div>

@@ -900,6 +900,21 @@ pre.tool-output {
 .agent-approval__actions { flex-wrap: wrap; margin-top: 8px; }
 .agent-approval__scope { margin: 6px 0 0; font-size: 11px; color: var(--ink-3); }
 
+/* 证据与格式检查折叠区：排在编辑器之后，默认收起。
+   它们是给 AI 与排查用的证据投影，不是日常编辑要看的内容。 */
+.resource-evidence-details {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.resource-evidence-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-2);
+  padding: 4px 0;
+}
+.resource-evidence-details > summary:hover { color: var(--ink-1); }
+
 .agent-controls__scope { margin: 4px 0 0; font-size: 11px; color: var(--ink-3); }
 /* 折叠区块的 summary 复用 agent-block__label 的排版，但要能点。 */
 details.agent-block > summary.agent-block__label { cursor: pointer; }

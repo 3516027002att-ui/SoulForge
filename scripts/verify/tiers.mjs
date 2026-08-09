@@ -320,6 +320,17 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 解析能力一直是好的。这类缺陷类型系统看不见、没有编译警告、症状指错方向。
   // 纯静态读 C# 源码，归 unit。
   'test:bridge-optional-args': 'unit',
+  // 编辑器布局：证据投影不得占据主视图顶部。用户报「打开这些页面全是证据卡，
+  // 根本没法像编辑器一样用」——实测 StructuredPreviewCard 与 NativeInspectionCard
+  // 渲染在所有编辑器面板之前且常驻展开，打开一个 param 先看到两张证据卡、
+  // 行表被挤到滚动区外。这类缺陷没有自动信号：编译通过、测试全绿、功能「可用」
+  // （滚下去就有），只是没人愿意用，而挪一行 JSX 就能改回去。
+  //
+  // 先写过 e2e，实测验不了：当前 fixture 工作区里没有任何资源带
+  // structuredPreview/nativeInspection（event/msg/other/all 逐个试过），
+  // 证据区不渲染因而用例只能恒红。留一条永远红的 e2e 比没有更糟，改为静态判据。
+  // 纯静态读 App.tsx，归 unit。
+  'test:editor-layout': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。
