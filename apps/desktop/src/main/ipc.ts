@@ -12,6 +12,7 @@ import {
   createConfirmationReceipt,
   createContextBroker,
   createUnifiedDiff,
+  importPinnedSmithboxSdtParamMetadata,
   listRolloutSessions,
   loadRolloutSession,
   runAgentSession,
@@ -80,6 +81,7 @@ import type {
   ConfirmationReceipt,
   Diagnostic,
   EditorKind,
+  ParamMetadataPackage,
   EmevdEditorDocument,
   IndexedFile,
   ParamDefDocument,
@@ -2017,6 +2019,72 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   );
 
+  /**
+   * PARAM 元数据包（Smithbox SDT 2.2.4）的惰性缓存。
+   *
+   * 为什么缓存：导入要校验 291 MB 归档的 sha256、932 个文件的源树摘要与许可证
+   * 摘要，实测一次数秒级。每读一个 param 都跑一遍会让界面卡住。
+   *
+   * 为什么允许缺失：元数据是**可选增强**。没有它时 PARAM 仍能读出行 ID、名字与
+   * 原始字节（那部分是 native 权威），只是没有字段名/值分解。把它做成硬依赖会
+   * 让「没装 Smithbox」变成「PARAM 完全不可用」，那是把增强降级成前提。
+   *
+   * 失败原因必须留下：缓存 null 时同时记下诊断，界面据此说明「为什么没有字段列」
+   * 而不是显示一个空的第三列。
+   */
+  let paramMetadataCache: {
+    loaded: true;
+    package: ParamMetadataPackage | null;
+    diagnostic: { code: string; message: string } | null;
+  } | null = null;
+
+  const loadParamMetadata = async (): Promise<{
+    package: ParamMetadataPackage | null;
+    diagnostic: { code: string; message: string } | null;
+  }> => {
+    if (paramMetadataCache) return paramMetadataCache;
+    const localAppData = process.env.LOCALAPPDATA;
+    if (!localAppData) {
+      paramMetadataCache = {
+        loaded: true,
+        package: null,
+        diagnostic: {
+          code: 'PARAM_METADATA_NO_LOCALAPPDATA',
+          message: '无法定位 LOCALAPPDATA，未加载 PARAM 字段定义。'
+        }
+      };
+      return paramMetadataCache;
+    }
+    const cacheRoot = join(localAppData, 'SoulForge', 'tools', 'smithbox', '2.2.4');
+    try {
+      const imported = await importPinnedSmithboxSdtParamMetadata({ cacheRoot });
+      if (!imported.ok) {
+        const first = imported.diagnostics[0];
+        paramMetadataCache = {
+          loaded: true,
+          package: null,
+          diagnostic: {
+            code: first?.code ?? 'PARAM_METADATA_IMPORT_REJECTED',
+            message: first?.message ?? 'PARAM 字段定义导入被拒绝。'
+          }
+        };
+        return paramMetadataCache;
+      }
+      paramMetadataCache = { loaded: true, package: imported.package, diagnostic: null };
+      return paramMetadataCache;
+    } catch (error) {
+      paramMetadataCache = {
+        loaded: true,
+        package: null,
+        diagnostic: {
+          code: 'PARAM_METADATA_IMPORT_FAILED',
+          message: error instanceof Error ? error.message : String(error)
+        }
+      };
+      return paramMetadataCache;
+    }
+  };
+
   handle('resource.readParamDocument', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
@@ -2037,10 +2105,71 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         : [dirname(file.absolutePath)],
       maxRows: 500
     });
+    // 字段定义：按 typeName 从 Smithbox SDT 元数据里找对应 paramdef。
+    //
+    // 缺失不影响行数据返回 —— 那部分来自 native 解析，是权威的。fieldDefs 为
+    // null 时界面显示「无字段定义」并说明原因，而不是一个空的第三列。
+    const metadata = await loadParamMetadata();
+    const typeName = result.data?.typeName ?? '';
+    // definitions[].document 才是 ParamDefDocument —— definitions[] 本身只有
+    // key/digest/document 三项。逐字段核对过 shared/paramdef.ts，没有靠猜：
+    // 第一版我写成 def.typeName、f.enumId、f.bitSize，三处全错（真实为
+    // def.document.typeName、f.enumRef、f.bitfield）。IPC 边界上这类错误
+    // typecheck 未必拦得住，只表现为「字段列空着」。
+    const paramDef = metadata.package && typeName
+      ? metadata.package.definitions
+        .find((entry) => entry.document.typeName === typeName)?.document ?? null
+      : null;
+    const rowWidthMatches = paramDef !== null
+      && result.data !== undefined
+      && paramDef.rowDataSize === result.data.rowDataSize;
+
     return sanitizeRendererValue({
       ok: result.ok,
       sourceUri,
       relativePath: file.relativePath,
+      // 字段定义与行宽是否对得上：行宽不一致时不做解码 —— 用错位的布局解释字节
+      // 会产出看起来合理但完全错误的数值，那比没有字段列危险得多。
+      fieldDefs: rowWidthMatches && paramDef
+        ? paramDef.fields.map((field) => ({
+            id: field.id,
+            name: field.name,
+            type: field.type,
+            offset: field.offset,
+            size: field.size,
+            ...(field.bitfield ? { bitfield: field.bitfield } : {}),
+            ...(field.enumRef ? { enumRef: field.enumRef } : {}),
+            ...(field.min !== undefined ? { min: field.min } : {}),
+            ...(field.max !== undefined ? { max: field.max } : {})
+          }))
+        : null,
+      // 枚举定义随字段一起给：界面要把 0/1/2 显示成可读名称，
+      // 而不是让用户对着裸数字猜。
+      fieldEnums: rowWidthMatches && paramDef?.enums
+        ? paramDef.enums.map((enumDef) => ({
+            id: enumDef.id,
+            name: enumDef.name,
+            // 枚举值的显示名叫 label（不是 name）——这是本轮第四处猜错的字段名，
+            // 前三处是 def.typeName / f.enumId / f.bitSize。全部按
+            // shared/paramdef.ts 逐字段核对后改正。
+            values: enumDef.values.map((value) => ({ value: value.value, label: value.label }))
+          }))
+        : null,
+      fieldDefsDiagnostic: rowWidthMatches
+        ? null
+        : paramDef !== null && result.data !== undefined
+          ? {
+              code: 'PARAM_METADATA_ROW_WIDTH_MISMATCH',
+              message: `字段定义的行宽 ${paramDef.rowDataSize} 与实际 `
+                + `${result.data.rowDataSize} 不一致，已拒绝解码 —— `
+                + '用错位布局解释字节会产出看似合理但错误的数值。'
+            }
+          : metadata.diagnostic ?? (typeName
+            ? {
+                code: 'PARAM_METADATA_TYPE_NOT_FOUND',
+                message: `Smithbox SDT 元数据里没有类型 ${typeName} 的字段定义。`
+              }
+            : null),
       data: result.data
         ? {
             sourceHash: result.data.sourceHash,

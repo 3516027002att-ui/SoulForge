@@ -472,7 +472,21 @@ internal sealed class ParamNativeDocument
     public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0)
     {
         // Large params (multi-MB / wide rows) must not dump payloads into one NDJSON frame.
-        var includePayload = RowDataSize > 0 && RowDataSize <= 256 && Rows.Count <= rowPreviewLimit;
+        // 载荷上限按「本次实际返回多少行」算，而不是按全表行数。
+        //
+        // 原条件是 Rows.Count <= rowPreviewLimit（全表行数），于是 590 行的表
+        // 即使只请求 3 行也拿不到 dataBase64 —— 分页的意义被这一条抵消了。
+        // 实测这正是界面「有行号却没有字段值」的原因：字段解码需要行字节，
+        // 而行字节因全表太大被整体拒绝返回。
+        //
+        // 帧大小的真实约束是「这一帧里有多少字节」= 页行数 × 行宽，
+        // 故上限按页字节总量算，不按行宽单独设阈值。
+        //
+        // 原条件还有 RowDataSize <= 256。实测那让 NpcParam（行宽 896、352 个字段）
+        // 拿不到行字节，于是它的字段值永远显示不出来 —— 而 896 × 32 行 = 28 KB，
+        // 远低于守护进程 1 MB 的默认帧上限。按行宽设阈值是在用错误的量做判断：
+        // 一个 900 字节宽但只请求 3 行的页，比一个 100 字节宽请求 500 行的页小得多。
+        var includePayload = RowDataSize > 0;
         var totalRows = Rows.Count;
 
         // Pagination: when rowPageSize > 0, return only the requested page.
@@ -481,7 +495,15 @@ internal sealed class ParamNativeDocument
         var clampedPage = Math.Clamp(rowPage, 0, Math.Max(0, pageCount - 1));
         var skip = clampedPage * effectivePageSize;
         var pageRows = Rows.Skip(skip).Take(effectivePageSize).ToArray();
-        var pageIncludePayload = includePayload && pageRows.Length <= rowPreviewLimit;
+        // 页载荷字节预算：base64 会膨胀约 4/3，再留出 JSON 结构与其他字段的余量。
+        // 512 KB 原始字节 ≈ 700 KB base64，仍在默认 1 MB 帧上限内。
+        // 超预算时不返回字节而不是截断行 —— 半份行数据解码出的字段值是错的，
+        // 而错的数值比没有数值危险。
+        const int MaxPagePayloadBytes = 512 * 1024;
+        var pagePayloadBytes = (long)pageRows.Length * RowDataSize;
+        var pageIncludePayload = includePayload
+            && pageRows.Length <= rowPreviewLimit
+            && pagePayloadBytes <= MaxPagePayloadBytes;
 
         return new
         {
