@@ -2859,7 +2859,10 @@ async function main(): Promise<void> {
       'Anthropic 真实 SSE 只在本机确定性 contract server 上验证事件解析/取消/超时/错误分类；第三方流式事件形状差异不属于 V0.5 验收。',
       'MODEL_SERVICE_CANCELLED 区分主动取消与超时是 conformance 层的错误码语义；不影响真实 provider 行为。',
       '写矩阵只覆盖实际接线的安全写路径（scaffold text_edit + WorkspaceTransaction），不提升 native writer authority 或 Patch Engine authority。',
-      'plan 只读在 agent loop 层强制；policy gate 层按既有 architecture scaffold 契约保留 stage/validate 上限。',
+      'plan 只读的权威判据是 ai/toolPermissions 的等级阶梯；agent loop 不再另立一套 plan 语义，'
+        + '而是消费同一函数并叠加一份显式收紧清单 PLAN_MODE_EXTRA_DENY（只能更严、每条带实测理由，'
+        + '由 test:agent-permission-unified 钉住）。policy gate 层仍按既有 architecture scaffold 契约'
+        + '保留 stage/validate 上限——该上限被本 smoke 与 runV05FoundationSmoke 两处断言钉住，未改动。',
       'normal 模式的确认语义为：commit 被结构化拒绝，经用户确认升级后才经 Patch Engine 提交。',
       'Context Broker 是离线可测的 evidence 装配层；其真实 provider 侧接入（第三方模型上下文窗口、真实工作区索引来源）不属于 V0.5 验收。',
       'Codex 派生内核（重试退避、并行工具、流式事件、rollout、compaction）参考 openai/codex（Apache-2.0）设计重写；离线矩阵不证明与 Codex 行为逐位一致，也不提升 provider 或 native authority。',

@@ -301,6 +301,14 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // timeoutMs 是否到达 adapter,抓的是「字段名对得上但值传错」——实测把透传值
   // 改成常量后静态判据全绿,只有运行期观测报红。静态读源码 + 假 adapter,归 unit。
   'test:agent-capability-wiring': 'unit',
+  // plan 模式权限语义的单一来源。统一前 agentLoop 用按名字硬编码的白名单,
+  // 与 toolPermissions 的 maxPermissionForMode 各表达一套 plan 语义,对 17 个
+  // 生产工具分歧 2 个。代价不在这 2 个工具,而在新增工具时无人知道改哪边:
+  // read 等级的新工具漏加白名单会被拒(等级明明够),等级误标为 read 的写类
+  // 工具只要名字在册就能进 plan。统一后等级判据是唯一权威,白名单降级为
+  // PLAN_MODE_EXTRA_DENY——只能更严、每条带实测理由,由本门禁钉住。
+  // 观测真实注册表经真实 bridge 的投影结果,归 unit。
+  'test:agent-permission-unified': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。

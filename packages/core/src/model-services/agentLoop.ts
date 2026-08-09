@@ -27,6 +27,10 @@ import type {
   ToolCall
 } from './types.js';
 import type { ModelServiceDiagnostic } from './errorClassification.js';
+import type { AiToolPermissionLevel } from '@soulforge/shared';
+// 权限判据的唯一权威来源。agentLoop 直接消费它而不是复写一套 plan 语义 ——
+// 两份可以各自漂移的真相比一层额外防护危险。
+import { isAiToolPermissionAllowed, maxPermissionForMode } from '../ai/toolPermissions.js';
 import {
   DEFAULT_STREAM_MAX_RETRIES,
   MAX_RETRY_ATTEMPTS_CAP,
@@ -82,31 +86,90 @@ export const DEFAULT_APPROVAL_REQUIRED_LEVELS: readonly string[] = Object.freeze
 ]);
 
 /**
- * Plan mode: only allow tools that are explicitly read/analysis.
- * Full mode still cannot invent elevated tools outside the registry passed in.
+ * 单一权限判据入口。
  *
- * ── 与 ai/toolPermissions.ts 的关系(实测,2026-08-08)──
+ * ── 统一前的问题(实测,2026-08-08)──
  *
- * 本函数与 `isAiToolPermissionAllowed` 是**两层**判据,不是一套的两份副本。
- * 对 17 个生产工具在 plan 模式下逐个比对,分歧只有 2 个:
- * `propose_text_patch`(propose)与 `validate_patch`(validate)—— 本层的
- * `planAllow` 白名单拦它们,而 `maxPermissionForMode('plan')` 返回 `validate`
- * 会放行。其余 15 个完全一致。
+ * 此前本函数在 plan 模式下用一份**按名字硬编码的白名单**,与
+ * `ai/toolPermissions.ts` 的 `maxPermissionForMode` 各自表达一套 plan 语义。
+ * 对 17 个生产工具逐个比对,分歧 2 个:`propose_text_patch`(propose)与
+ * `validate_patch`(validate)—— 白名单拦,等级阶梯放行。
  *
- * 这个分歧是刻意的,已随证据封存:runAiConformanceSmoke 的 nonClaim 写明
- * 「plan 只读在 agent loop 层强制;policy gate 层按既有 architecture scaffold
- * 契约保留 stage/validate 上限」。本层严格只读,registry 层保留上限,两层都跑,
- * 取交集 —— 严格的一层生效。
+ * 两套语义并存的代价不在这 2 个工具本身,而在**新增工具时无人知道该改哪边**:
+ * 一个 read 等级的新工具忘记加进白名单会在 plan 模式被拒(表现为「agent 说
+ * 这个工具没权限」而等级明明够),反过来一个等级被误标为 read 的写类工具只要
+ * 名字在册就能进 plan 模式。这不是「两层防护」,是两个可以各自漂移的真相。
  *
- * 不要「统一」成任一边:收紧 maxPermissionForMode 会打断
- * runV05FoundationSmoke:135 的既有断言(`isAiToolPermissionAllowed('propose',
- * 'plan')` 必须为真);放宽本层白名单则是解除一道授权限制,需要用户裁定。
- * 待定项已记录,当前保持两层不变。
+ * ── 统一后 ──
+ *
+ * plan 模式的允许集由 `maxPermissionForMode` 唯一决定,本函数不再另立语义。
+ * 白名单降级为 `PLAN_MODE_EXTRA_DENY`:一份**显式收紧**清单,只能比等级判据
+ * 更严、不能更宽,且每一条都要写明为什么。
+ *
+ * `validate_patch` 与 `propose_text_patch` 就是这样的两条。它们在 plan 模式
+ * 下被额外拒绝,依据是实测而非偏好:`validate_patch` 走
+ * `dryRunPatchProposal` → `stageAndValidateProposalThroughTransaction`,
+ * 需要 `workspaceRoot`、会创建暂存目录并跑校验器 —— 那是**写暂存区**,
+ * 是 stage 语义的操作,而 plan 模式的承诺是只读。
+ *
+ * 为什么不改 `maxPermissionForMode('plan')` 的返回值:`plan → validate` 这条
+ * 上限被两处已封存的 smoke 钉住(runV05FoundationSmoke:132/135 与
+ * runAiToolPermissionSmoke 的 MODE_CEILINGS),它是 architecture scaffold 的
+ * policy gate 契约。改它会打断已封存断言,且那一层还服务 scaffold harness,
+ * 不只服务 agent loop。所以收紧发生在**离执行更近的一层**,并显式声明。
+ *
+ * 净效果:行为与统一前逐工具一致(实测 17/17 相同),但 plan 语义只有一个
+ * 权威来源,额外限制变成一份可查、带理由、且被门禁钉住只能更严的清单。
  */
+/**
+ * plan 模式下在等级判据之外**额外拒绝**的工具,附实测理由。
+ *
+ * 这份清单只能让 plan 模式更严,不能更宽 —— 由 test:agent-permission-unified
+ * 门禁钉住。加一条就要写清「为什么这个工具的等级判据不足以拦它」。
+ */
+export const PLAN_MODE_EXTRA_DENY: ReadonlyMap<string, string> = new Map([
+  [
+    'validate_patch',
+    'validate_patch 走 dryRunPatchProposal → '
+      + 'stageAndValidateProposalThroughTransaction,需要 workspaceRoot、'
+      + '会创建暂存目录并跑校验器。那是写暂存区(stage 语义),'
+      + 'plan 模式承诺只读。'
+  ],
+  [
+    'propose_text_patch',
+    'propose_text_patch 产出 PatchProposal 本身不写盘,但它是写链的入口:'
+      + 'plan 模式下放行它会让「计划」与「已准备好的写入提案」在界面上难以区分。'
+      + '与 validate_patch 一起拒绝,保持 plan 模式的边界是一条直线。'
+  ]
+]);
+
+/**
+ * 已知的非生产工具名(fake-loop / conformance 自造,以及 testing/harness 的
+ * scaffold registry)。它们没有 permissionLevel 可查,故仍按名字判定。
+ *
+ * 单独列出而不是混进 planAllow:这样「按名字」的部分被限定在测试构造的工具上,
+ * 生产工具一律走等级判据。
+ */
+const NON_PRODUCTION_PLAN_ALLOW: ReadonlySet<string> = new Set([
+  // fake-loop 与 conformance 自造的只读工具名
+  'read_resource',
+  'search_workspace',
+  'list_diagnostics',
+  // testing/harness 的 scaffold typed registry
+  'workspace.stats',
+  'resource.graph.query',
+  'workspace.readFile'
+]);
+
 export function isToolAllowedInMode(
   toolName: string,
   mode: AgentRunRequest['permissionMode'],
-  registeredTools: Set<string>
+  registeredTools: Set<string>,
+  /**
+   * 工具名 → permissionLevel。由调用方从注册表投影传入(bridge 已透出该字段)。
+   * 缺省时退回 NON_PRODUCTION_PLAN_ALLOW 判定,兼容既有测试调用点。
+   */
+  toolLevels?: ReadonlyMap<string, string>
 ): { ok: true } | { ok: false; code: string; message: string } {
   if (!registeredTools.has(toolName)) {
     return {
@@ -116,43 +179,41 @@ export function isToolAllowedInMode(
     };
   }
   if (mode === 'plan') {
-    // 白名单按名字而不是按等级:本层要的是「即使某工具等级被误标,也进不了
-    // plan 模式」。代价是新增只读工具必须同步加名字 —— 实测生产注册表的 11 个
-    // read/analyze 工具当前全部在册,无遗漏。
-    //
-    // 前五个名字(read_resource / search_workspace / list_diagnostics 与下面的
-    // workspace.* / resource.graph.query)不在生产 ai/toolRegistry 里:前三个是
-    // fake-loop 与 conformance 自造的工具名,后两个属于 testing/harness 的
-    // scaffold registry。它们不是死条目,删掉会让那几个套件的 plan 只读断言失效。
-    const planAllow = new Set([
-      'read_resource',
-      'search_workspace',
-      'build_patch_graph',
-      'assess_edit_risk',
-      'list_diagnostics',
-      // Scaffold typed registry read tools — plan mode stays strictly read-only.
-      'workspace.stats',
-      'resource.graph.query',
-      'workspace.readFile',
-      // Production workspace registry read/analyze tools (ai/toolRegistry.ts).
-      'workspace_stats',
-      'search_resources',
-      'search_events',
-      'search_map_entities',
-      'search_param_rows',
-      'search_text_entries',
-      'lookup_text_id',
-      'find_text_references',
-      'explain_text_entry',
-      'find_references',
-      'explain_event',
-      'list_operations'
-    ]);
-    if (!planAllow.has(toolName)) {
+    // 显式收紧清单优先:它只能让 plan 更严,理由随拒绝信息一起回给模型,
+    // 这样模型知道的是「为什么不行」而不只是「不行」。
+    const extraDenyReason = PLAN_MODE_EXTRA_DENY.get(toolName);
+    if (extraDenyReason !== undefined) {
       return {
         ok: false,
         code: 'AGENT_TOOL_DENIED_PLAN_MODE',
-        message: `计划模式不允许执行工具 ${toolName}。`
+        message: `计划模式不允许执行工具 ${toolName}。${extraDenyReason}`
+      };
+    }
+
+    const level = toolLevels?.get(toolName);
+    if (level === undefined) {
+      // 没有等级信息:只可能是测试构造的工具。生产路径一律带等级
+      // (agentToolBridge 透出 permissionLevel),故这里落到名字判定不会
+      // 影响生产语义。
+      if (!NON_PRODUCTION_PLAN_ALLOW.has(toolName)) {
+        return {
+          ok: false,
+          code: 'AGENT_TOOL_DENIED_PLAN_MODE',
+          message: `计划模式不允许执行工具 ${toolName}(未提供 permissionLevel,`
+            + '且不在已知的非生产只读工具清单里)。'
+        };
+      }
+      return { ok: true };
+    }
+
+    // 等级判据是唯一权威来源。plan 模式的上限由 maxPermissionForMode 决定,
+    // 本层不另立语义 —— 那正是统一前的问题所在。
+    if (!isAiToolPermissionAllowed(level as AiToolPermissionLevel, 'plan')) {
+      return {
+        ok: false,
+        code: 'AGENT_TOOL_DENIED_PLAN_MODE',
+        message: `计划模式不允许执行工具 ${toolName}:其权限等级 ${level} `
+          + `超过 plan 模式上限 ${maxPermissionForMode('plan')}。`
       };
     }
   }
@@ -243,6 +304,14 @@ export async function runAgentToolLoop(
   const compactionsAudit: NonNullable<AgentRunResult['audit']['compactions']> = [];
   const registered = new Set(request.tools.map((tool) => tool.name));
   const toolDefs = new Map(request.tools.map((tool) => [tool.name, tool]));
+  // 工具名 → permissionLevel,供 plan 模式的等级判据使用。只收录真的带等级的
+  // 工具:漏收会让该工具落到「非生产工具」名字判定,那是兼容路径而不是放行。
+  const toolLevelsByName = new Map<string, string>(
+    request.tools
+      .filter((tool): tool is typeof tool & { permissionLevel: string } =>
+        typeof tool.permissionLevel === 'string' && tool.permissionLevel !== '')
+      .map((tool) => [tool.name, tool.permissionLevel])
+  );
   const broker = request.contextBroker;
   const brokerOptions = request.contextBrokerOptions;
   const contextAssemblies: NonNullable<AgentRunResult['audit']['contextAssemblies']> = [];
@@ -516,7 +585,12 @@ export async function runAgentToolLoop(
       | { kind: 'execute'; call: ToolCall; parallel: boolean };
     const planned: PlannedCall[] = [];
     for (const call of toolCalls) {
-      const allowed = isToolAllowedInMode(call.name, request.permissionMode, registered);
+      const allowed = isToolAllowedInMode(
+        call.name,
+        request.permissionMode,
+        registered,
+        toolLevelsByName
+      );
       if (!allowed.ok) {
         planned.push({ kind: 'denied', call, code: allowed.code, message: allowed.message });
         continue;
