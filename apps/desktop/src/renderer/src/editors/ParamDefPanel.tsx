@@ -35,7 +35,16 @@ export interface ParamDefPanelProps {
   }) => Promise<{ ok: boolean; diagnostics?: Array<{ code: string; message: string }> }>;
 }
 
-interface DecodedFieldView {
+/**
+ * 已导出：ParamWorkbench 复用同一份解码器。
+ *
+ * 不让工作台自己再写一份的理由 —— 解码权威必须单一。两份实现会漂移，而
+ * 漂移的表现是「同一行同一字段在两个视图里显示不同的值」，用户无从判断哪个对。
+ * 尤其 bitfield：本实现在 scalarFieldView 里做了 `>>> bitOffset & mask`，
+ * 而 core 的 paramdefLayout.decodeField 不看 bitfield（只按字节读），
+ * 两者对同一个 1-bit 字段给出的值不同。这里这份是对的。
+ */
+export interface DecodedFieldView {
   fieldId: string;
   name: string;
   type: string;
@@ -445,7 +454,7 @@ const SCALAR_SIZES: Record<string, number> = {
 
 const NUMERIC_TYPES = new Set<string>(['u8', 's8', 'u16', 's16', 'u32', 's32', 'f32', 'f64']);
 
-function decodeFieldView(bytes: Uint8Array, field: ParamFieldDef): DecodedFieldView {
+export function decodeFieldView(bytes: Uint8Array, field: ParamFieldDef): DecodedFieldView {
   const base = {
     fieldId: field.id,
     name: field.name,

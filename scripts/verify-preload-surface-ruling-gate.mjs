@@ -160,9 +160,37 @@ function stripCommentsAndStrings(source) {
       i += 2;
       continue;
     }
-    // 字符串与模板字面量。模板串里的 ${...} 是真代码，保留其内容。
+    /*
+     * 字符串与模板字面量。模板串里的 ${...} 是真代码，保留其内容。
+     *
+     * ── 单/双引号不得跨行(2026-08-10 修)──
+     *
+     * 此前不设行边界，于是**正则字面量里的引号**会被当成字符串开头。实测
+     * threeSceneController.ts:695 有 `/(?:^|["'\s])…/` —— 字符类里的 `"`
+     * 让剥离器进入「字符串中」状态直到文件末尾都找不到配对，
+     * 结果把该文件之后拼接的**所有** renderer 文件内容一并吞掉。
+     *
+     * 后果是静默漏判：`git ls-files` 按字典序拼接，排在 scene/ 之后的
+     * staging/、utils/、workbench/ 里的任何接线都看不见，于是已接线的方法被
+     * 判成「renderer 零引用」，判据 1 逼人去登记一个其实已经用上的方法。
+     * 实测正是这样发现的 —— ParamWorkbench 里 4 处真实调用命中数为 0。
+     *
+     * 真代码里的单/双引号字符串不跨物理行（跨行要用模板串或显式续行）。
+     * 因此遇到换行即判定为「误入」，回退到把这个引号当普通字符：宁可少剥
+     * （可能漏判引用 → 要求登记，安全方向），也不能让一个引号吞掉半个代码库。
+     */
     if (c === '"' || c === "'" || c === '`') {
       const quote = c;
+      if (quote !== '`') {
+        const lineEnd = source.indexOf('\n', i + 1);
+        const closing = source.indexOf(quote, i + 1);
+        if (closing < 0 || (lineEnd >= 0 && closing > lineEnd)) {
+          // 本行内找不到配对：不是字符串（极可能是正则字符类里的引号）。
+          out += c;
+          i += 1;
+          continue;
+        }
+      }
       i += 1;
       while (i < n && source[i] !== quote) {
         if (source[i] === '\\') { i += 2; continue; }

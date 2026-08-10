@@ -45,22 +45,25 @@ const APP = join(root, 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx');
  * key 是 `prop名`，value 必须写清依据与解除条件。
  */
 const RULED = Object.freeze({
-  // ── PARAM 字段定义（SCOPE-PARAM / REL-C，gateState=open）──
+  // ── PARAM 字段定义（definition）已解除登记 ──
   //
-  // 裁定：保留并登记为已知断点，不豁免为「设计如此」。
-  // 现状：live 分支传 null → ParamDefPanel:295 的 `props.definition &&` 短路；
-  //       非 live 分支传 EMPTY_PARAM_DEF（fields:[]）→ fieldViews.length===0。
-  //       两条分支都进不了字段表，因此 PARAM 字段级编辑对用户不可达。
-  // 另有两道独立锁，解除本条前必须一并处理：
-  //   · ParamNativeDocument.cs:475 的 includePayload 门限
-  //     （RowDataSize<=256 && Rows.Count<=32），真实 param 远超，字节不下发，
-  //     ParamDefPanel:291 的「该行缺少完整字节」会先触发；
-  //   · App.tsx:138-140 注释声称「真实字段定义来自 main 侧 Smithbox metadata
-  //     投影」，实测 apps/desktop/src 里 Smithbox 仅 1 处命中——就是那条注释本身，
-  //     该投影不存在。
-  // 解除条件：main 侧提供真实 ParamDefDocument 且 payload 门限放开后接线，
-  //           届时本条应从 RULED 删除（判据 2 会强制它删）。
-  definition: 'REL-C open；PARAM 字段编辑五段全通但两分支都不可达，另有 payload 门限与不存在的 metadata 投影两道锁',
+  // 曾登记的形态：`definition={paramLive ? null : EMPTY_PARAM_DEF}` ——
+  // live 分支给 null 触发 ParamDefPanel 的 `props.definition &&` 短路，
+  // 非 live 分支给 fields:[] 让 fieldViews 为空，两条分支都进不去字段表。
+  //
+  // 现状：已改为 `definition={paramFieldDefinition}`，取自真实 Smithbox
+  // SDT 2.2.4 元数据投影（App.tsx:422 的 useMemo）。实测
+  // `test:param-metadata-native` 在 has-game env 下 138/138 容器子项全部匹配，
+  // 带 typeName / fieldCount / rowDataSize，字段定义确实到得了面板。
+  //
+  // 判据 2 会强制删除已修好的登记项——留着等于给一个已修好的项永久豁免，
+  // 那正是本门禁要消除的状态。故此条不再登记。
+  //
+  // 仍未打通的下一环（不属本门禁形态 A/B，不登记）：字段**写入**仍被
+  // ParamDefPanel:191 的 definitionCanCommit 挡着，因为 App.tsx 刻意把 origin
+  // 写成 'fixture'（见该处注释：直连元数据未过 matchParamMetadataPackage 的
+  // 包校验、描述符匹配与用户信任策略三层检查）。那是授权门而非可达性断点：
+  // 定义拿得到、字段看得见，只是不放行提交。接线 paramMetadataTrustStore 后解除。
 
   // ── 任务队列（WorkbenchOpsPanel 的 jobs）──
   //

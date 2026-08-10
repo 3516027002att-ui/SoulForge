@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -153,13 +154,47 @@ interface CachedParamDocument {
   typeName: string;
   rowDataSize: number;
   rowCount: number;
-  // dataBase64 is absent for params whose rows the Bridge serves without
-  // payloads (rowCount > 32 or rowDataSize > 256) — the channel reports those
-  // rows by id/name only and never fabricates bytes.
+  // 全表读取的行恒无 dataBase64：Bridge 的载荷门控按**页**算，全表等于
+  // 「页大小 = 总行数」必然超限。当前页的字节由 readParamPage 单独取一次分页
+  // 补齐（见该 handler 头部的实测记录）。此处保留 optional 是如实建模，
+  // 不是「小 param 才有字节」——原注释那个 rowDataSize<=256 的说法已不准确。
   rows: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
   authority?: string;
 }
 const paramPageCache = new Map<string, CachedParamDocument>();
+
+/**
+ * 容器内 param 子项解包后的落盘路径缓存。
+ *
+ * ── 为什么需要它 ──
+ *
+ * `read-param-document` 不解 DCX、不解 BND4：它 File.ReadAllBytes 后直接按裸
+ * PARAM 布局解析。把 parambnd 容器路径喂进去会硬失败（实测
+ * `PARAM_DOCUMENT_READ_FAILED: PARAM 类型名偏移无效`）—— 这是「打开
+ * gameparam.parambnd.dcx 显示 0 行」的根因之一。
+ *
+ * 正确链路是三步：read-dcx-document 枚举条目 → extract-bnd4-child 解包到暂存区
+ * → read-param-document 读裸 param。第二步此前只在 smoke 里用过，没有 IPC 出口，
+ * 于是 UI 能列出 138 个 param 名却拿不到其中任何一个的字节。
+ *
+ * ── 为什么缓存路径而不是每次重解 ──
+ *
+ * 分页浏览会对同一个 param 反复读取（翻页、搜索、选行取字节）。每次都重解一遍
+ * 138 项容器意味着每翻一页都要跑一次 DCX 解压，交互不可用。这里缓存解包后的
+ * 落盘路径，键含容器哈希：容器变了（被写回、被替换）键就变，旧解包不会被误用。
+ *
+ * 不用 stageBridgeOutput：它用完即删暂存目录，而这里要的正是「跨多次调用存活」。
+ * 落点仍是会话 storage 的 stagingRoot（main 拥有的可写根），不写 Mod 工作区。
+ */
+interface UnpackedParamChild {
+  /** 解包后的裸 param 绝对路径。 */
+  absolutePath: string;
+  /** 容器内条目索引。 */
+  entryIndex: number;
+  /** 条目名（basename）。 */
+  name: string;
+}
+const unpackedParamCache = new Map<string, UnpackedParamChild>();
 
 type CachedContainerChildren = Awaited<
   ReturnType<typeof listContainerChildren>
@@ -358,6 +393,179 @@ async function enumerateNativeContainerEntries(
       code: 'BND_NATIVE_ENUMERATION_COMPLETE',
       message: `原生 BND4 完整条目表已枚举：${entries.length} 项（${result.data?.compressionFormat ?? ''} 解包）。`,
       sourceUri
+    }]
+  };
+}
+
+/**
+ * 把容器内某个 param 条目解包成可读的裸 `.param` 文件，返回其绝对路径。
+ *
+ * 这是「容器 → 内部 param 文件」那一跳的实现（见 unpackedParamCache 的注释）。
+ * 解包产物落会话 stagingRoot，绝不写 Mod 工作区或原版目录。
+ *
+ * oodleRuntimeRoot 必须传：game-side 的 parambnd 是 KRAK 压缩，缺 Oodle 运行时
+ * 连条目表都读不出（实测 `DCX_DOCUMENT_READ_FAILED: 尚未挂载 Sekiro 原版游戏
+ * 目录；KRAK 只能进行原始字节读取，不能解压`）。mod-side 是 DFLT 不需要它，
+ * 但用户迟早会打开 game-side，两者必须都能工作。
+ */
+async function unpackContainerParamChild(input: {
+  containerPath: string;
+  containerUri: string;
+  containerHash: string;
+  /** 条目索引，或条目名（basename，如 `AtkParam_Npc.param`）。 */
+  entry: { index: number } | { name: string };
+}): Promise<
+  | { ok: true; child: UnpackedParamChild; diagnostics: Diagnostic[] }
+  | { ok: false; diagnostics: Diagnostic[] }
+> {
+  const storage = activeSession ? durableStoragePaths(activeSession.meta.workspaceId) : null;
+  if (!activeSession || !storage) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'PARAM_UNPACK_NO_SESSION',
+        message: '没有活动工作区会话，无法解包容器内 param（解包产物需要会话暂存区）。',
+        sourceUri: input.containerUri
+      }]
+    };
+  }
+
+  const allowedRoots = bridgeAllowedRoots(activeSession, storage.stagingRoot);
+  const oodle = activeSession.layers.baseRoot
+    ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+    : {};
+
+  // ── 第一步：枚举条目，把「名字」解析成索引 ──
+  const dcx = await runBridge<NativeDcxEnvelopeLike>({
+    command: 'read-dcx-document',
+    filePath: input.containerPath,
+    resourceUri: input.containerUri,
+    allowedRoots,
+    timeoutMs: 120_000,
+    ...oodle
+  });
+  if (dcx.parseStatus === 'failed') {
+    return { ok: false, diagnostics: sanitizeDiagnostics(dcx.diagnostics) };
+  }
+  const entries = dcx.data?.nested?.entries ?? [];
+  if (entries.length === 0) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'PARAM_UNPACK_CONTAINER_EMPTY',
+        message: 'Bridge 未返回容器内 BND4 条目表；该资源可能不是 param 容器。',
+        sourceUri: input.containerUri
+      }]
+    };
+  }
+
+  const seen = new Set<string>();
+  const named = entries.map((entry, position) => ({
+    index: entry.index ?? position,
+    name: sanitizeEntryName(entry.name ?? `entry_${position}`, entry.index ?? position, seen)
+  }));
+  // 先把联合类型解到局部常量再比较：直接在回调里访问 input.entry.index
+  // 拿不到窄化后的类型（回调边界会丢失 `'index' in` 的判别结果）。
+  const wanted = input.entry;
+  const target = 'index' in wanted
+    ? named.find((candidate) => candidate.index === wanted.index)
+    : named.find((candidate) => candidate.name === wanted.name);
+  if (!target) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'PARAM_UNPACK_ENTRY_NOT_FOUND',
+        message: `容器内没有匹配的 param 条目：${JSON.stringify(input.entry)}。`,
+        sourceUri: input.containerUri
+      }]
+    };
+  }
+
+  // 缓存键含容器哈希：容器被写回后哈希变化，旧解包不会被误用。
+  const cacheKey = `${input.containerUri}#${input.containerHash}#${target.index}`;
+  const cachedChild = unpackedParamCache.get(cacheKey);
+  if (cachedChild && existsSync(cachedChild.absolutePath)) {
+    return {
+      ok: true,
+      child: cachedChild,
+      diagnostics: [{
+        severity: 'info',
+        code: 'PARAM_UNPACK_CACHE_HIT',
+        message: `复用已解包的 ${cachedChild.name}。`,
+        sourceUri: input.containerUri
+      }]
+    };
+  }
+
+  // ── 第二步：解包到会话暂存区 ──
+  //
+  // 不用 stageBridgeOutput：它用完即删，而解包产物要跨多次分页调用存活。
+  // 目录名含容器哈希前缀与条目索引，避免不同容器/条目互相覆盖。
+  const unpackDirectory = join(
+    storage.stagingRoot,
+    'param-unpack',
+    `${input.containerHash.slice(0, 16)}-${target.index}`
+  );
+  const outputPath = join(unpackDirectory, target.name);
+  try {
+    await mkdir(unpackDirectory, { recursive: true });
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'PARAM_UNPACK_STAGING_PREPARE_FAILED',
+        message: `解包暂存目录创建失败：${error instanceof Error ? error.message : String(error)}`,
+        sourceUri: input.containerUri
+      }]
+    };
+  }
+
+  const extracted = await runBridge({
+    command: 'extract-bnd4-child',
+    filePath: input.containerPath,
+    resourceUri: input.containerUri,
+    allowedRoots,
+    // 写命令必须显式声明 main 拥有的可写根，否则 Bridge 报
+    // BRIDGE_WRITABLE_ROOT_REQUIRED（实测）。只给 stagingRoot —— 解包永远
+    // 不该能写到原版目录或 Mod 工作区。
+    writableRoots: [storage.stagingRoot],
+    timeoutMs: 120_000,
+    commandOptions: { entryIndex: target.index, outputPath },
+    ...oodle
+  });
+  if (extracted.parseStatus === 'failed' || !existsSync(outputPath)) {
+    return {
+      ok: false,
+      diagnostics: [
+        ...sanitizeDiagnostics(extracted.diagnostics),
+        {
+          severity: 'error',
+          code: 'PARAM_UNPACK_EXTRACT_FAILED',
+          message: `解包 ${target.name} 失败，未产出可读文件。`,
+          sourceUri: input.containerUri
+        }
+      ]
+    };
+  }
+
+  const child: UnpackedParamChild = {
+    absolutePath: outputPath,
+    entryIndex: target.index,
+    name: target.name
+  };
+  unpackedParamCache.set(cacheKey, child);
+  return {
+    ok: true,
+    child,
+    diagnostics: [{
+      severity: 'info',
+      code: 'PARAM_UNPACK_COMPLETE',
+      message: `已解包 ${target.name}（条目 ${target.index}/${entries.length}）。`,
+      sourceUri: input.containerUri
     }]
   };
 }
@@ -2176,14 +2384,23 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             typeName: result.data.typeName,
             rowCount: result.data.rowCount,
             rowDataSize: result.data.rowDataSize,
+            // dataBase64 必须逐行判类型：Bridge 对超出载荷门限的页不下发行字节
+            // （见 resource.readParamPage 头部注释的实测因果），真实 gameparam
+            // 几乎总是这种情况。此前无条件 Buffer.from(undefined) 会抛 TypeError，
+            // 而 handle 包装没有 try/catch，于是整个 IPC promise reject，渲染器
+            // 只看到「PARAM 读取异常」——把「本页没有字节」报成了「读取失败」。
             rows: result.data.rows.map((r) => ({
               id: r.id,
-              dataBase64: r.dataBase64,
+              ...(typeof r.dataBase64 === 'string'
+                ? {
+                    dataBase64: r.dataBase64,
+                    dataHexPreview: Buffer.from(r.dataBase64, 'base64')
+                      .subarray(0, 16)
+                      .toString('hex')
+                  }
+                : {}),
               dataHash: r.dataHash,
-              ...(r.name ? { name: r.name } : {}),
-              dataHexPreview: Buffer.from(r.dataBase64, 'base64')
-                .subarray(0, 16)
-                .toString('hex')
+              ...(r.name ? { name: r.name } : {})
             })),
             rowsTruncated: result.data.rowCount > result.data.rows.length,
             authority: result.data.authority
@@ -2199,6 +2416,26 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * pages; the renderer never receives the whole document. `query` filters the
    * complete table in main so search covers every page. Rows carry full bytes
    * so the renderer can duplicate rows and edit fields without the full set.
+   *
+   * ── 行字节为什么要单独再取一页(2026-08-10 实测)──
+   *
+   * C# 的载荷门控是按**页**算的（ParamNativeDocument.ToEnvelope）：页行数超过
+   * rowPreviewLimit（默认 32）或页字节数超过 512 KB 时，整页 `dataBase64` 全为 null。
+   * 而全表读取等于「页大小 = 总行数」，必然超限，于是缓存下来的每一行都没有字节。
+   *
+   * 实测同一个 BehaviorParam（5275 行 × 32 字节）：
+   *   commandOptions {}                  → rows 5275, payloadsIncluded=false, 无字节
+   *   commandOptions {rowPage:0,size:20} → rows 20,   payloadsIncluded=true,  有字节
+   * ATK_PARAM_ST（537 行 × 464 字节）在 pageSize 32 下同样带字节。
+   *
+   * 后果曾是：行表能显示 id/name，但字段解码、行复制、字段编辑全部拿不到输入 ——
+   * 「PARAM 页面不可编辑」的直接原因之一。
+   *
+   * 所以这里分两次读：
+   *   ① 全表一次（无分页）—— 只为 id/name 索引与跨页搜索，字节缺失是预期的；
+   *   ② 当前页一次（带 rowPage/rowPageSize）—— 取这一页的真实字节。
+   * 只有在无搜索、页窗口与 bridge 页对齐时②才可用；有搜索时页内容是过滤后的
+   * 子集，与 bridge 的物理页不对应，此时如实不给字节而不是给错字节。
    */
   handle(
     'resource.readParamPage',
@@ -2232,14 +2469,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       let cached = paramPageCache.get(sourceUri);
       if (!cached) {
-        // NOTE: reads the real document through the Bridge directly (not via
-        // readParamDocumentViaBridge) because that helper sends no
-        // commandOptions: the C# read-param-document handler calls
-        // options.TryGetProperty on a default JsonElement and throws
-        // InvalidOperationException for every real gameparam. ROOT CAUSE belongs
-        // in packages/core/src/editing/paramBridgeCommit.ts (pass
-        // commandOptions: {}); this channel passes an explicit empty object so
-        // the real-corpus paginated channel stays functional (hard constraint 17).
+        // 直接调 Bridge 而不用 readParamDocumentViaBridge：后者不传 commandOptions。
+        //
+        // 注意原注释声称「不传 commandOptions 会让 C# 抛 InvalidOperationException」
+        // ——2026-08-10 实测该说法**已不成立**：BridgeCommandService 的 optionsIsObject
+        // 守卫（commit 5b669c6）修掉了那个 crash，现在不传会正常返回、只是没有行字节。
+        // 保留显式空对象仍然是对的（不依赖对端的缺省行为），但理由变了，故更正记录，
+        // 避免后来者按过期结论去「修」一个不存在的 crash。
+        //
+        // 这里刻意读全表（无 rowPage/rowPageSize）：全表用于 id/name 索引与跨页搜索。
+        // 全表必然超出载荷门限因而无字节，当前页的字节在下方单独取一次。
         const result = await runBridge<{
           sourceHash?: string;
           typeName?: string;
@@ -2293,6 +2532,59 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         requestedPage,
         requestedPageSize || PARAM_PAGE_SIZE
       );
+
+      /**
+       * 取当前页的真实行字节（见本 handler 头部注释的实测因果）。
+       *
+       * 仅在无搜索时进行：有搜索时页内容是过滤后的子集，与 bridge 的物理页不
+       * 对应，按物理页取回的字节会**对错行**。宁可不给字节，也不能给错字节 ——
+       * 错字节会被写回去，那是静默的数据损坏。
+       *
+       * 失败不影响行表：字节缺失只让字段编辑不可用，而 id/name 列表仍然有用。
+       * 因此这里吞掉分页读取的失败但把诊断带出去，不让整个面板变空。
+       */
+      const pageBytes = new Map<number, string>();
+      const pageByteDiagnostics: Diagnostic[] = [];
+      if (q.length === 0 && window.size > 0) {
+        const bridgePage = Math.floor(window.offset / window.size);
+        const alignedOffset = bridgePage * window.size;
+        if (alignedOffset === window.offset) {
+          try {
+            const paged = await runBridge<{
+              rows?: Array<{ id: number; dataBase64?: string | null }>;
+              payloadsIncluded?: boolean;
+            }>({
+              command: 'read-param-document',
+              filePath: file.absolutePath,
+              allowedRoots: activeSession
+                ? bridgeAllowedRoots(activeSession)
+                : [dirname(file.absolutePath)],
+              timeoutMs: 60_000,
+              commandOptions: { rowPage: bridgePage, rowPageSize: window.size }
+            });
+            for (const row of paged.data?.rows ?? []) {
+              if (typeof row.dataBase64 === 'string') pageBytes.set(row.id, row.dataBase64);
+            }
+            if (paged.data?.payloadsIncluded === false) {
+              pageByteDiagnostics.push({
+                severity: 'info',
+                code: 'PARAM_PAGE_PAYLOAD_OMITTED',
+                message: '本页行字节未随分页下发（页字节数超出 Bridge 载荷门限）；'
+                  + '字段编辑对本页不可用，行列表不受影响。',
+                sourceUri
+              });
+            }
+          } catch (error) {
+            pageByteDiagnostics.push({
+              severity: 'warning',
+              code: 'PARAM_PAGE_PAYLOAD_READ_FAILED',
+              message: `本页行字节读取失败：${error instanceof Error ? error.message : String(error)}`,
+              sourceUri
+            });
+          }
+        }
+      }
+
       return {
         ok: true,
         sourceUri,
@@ -2305,26 +2597,28 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         pageCount: window.pageCount,
         rows: filtered
           .slice(window.offset, window.offset + window.size)
-          .map((row) => ({
-            id: row.id,
-            // The Bridge only includes row payloads for small params
-            // (rowCount <= rowPreviewLimit and rowDataSize <= 256); for larger
-            // real params rows arrive without dataBase64. Keep the DTO honest:
-            // carry payloads when present, otherwise expose the row id/name only
-            // so the channel never fabricates bytes or throws on null payloads.
-            ...(typeof row.dataBase64 === 'string'
-              ? {
-                  dataBase64: row.dataBase64,
-                  dataHexPreview: Buffer.from(row.dataBase64, 'base64')
-                    .subarray(0, 16)
-                    .toString('hex')
-                }
-              : {}),
-            ...(row.name ? { name: row.name } : {})
-          })),
+          .map((row) => {
+            // 字节优先取本页分页读取的结果（全表读取的行恒无字节，见头部注释）。
+            // 两处都没有时如实不带该字段——绝不伪造字节。
+            const dataBase64 = typeof row.dataBase64 === 'string'
+              ? row.dataBase64
+              : pageBytes.get(row.id);
+            return {
+              id: row.id,
+              ...(typeof dataBase64 === 'string'
+                ? {
+                    dataBase64,
+                    dataHexPreview: Buffer.from(dataBase64, 'base64')
+                      .subarray(0, 16)
+                      .toString('hex')
+                  }
+                : {}),
+              ...(row.name ? { name: row.name } : {})
+            };
+          }),
         rowsTruncated: cached.rowCount > cached.rows.length,
         ...(cached.authority ? { authority: cached.authority } : {}),
-        diagnostics: []
+        diagnostics: pageByteDiagnostics
       };
     }
   );
@@ -2474,6 +2768,265 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       });
       if (outcome.status === 'committed' && outcome.result.ok) paramPageCache.delete(sourceUri);
       return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  /**
+   * 列出 parambnd 容器内的 param 条目（Smithbox 的 Param List 那一栏）。
+   *
+   * 为什么不复用 listContainerChildrenPage：那条通道服务于通用容器工作台，
+   * 返回全部条目类型且 childUri 不可读。这里只给 param 条目，并且每一项都能
+   * 直接交给 resource.readContainerParamPage 拿到行 —— 也就是「列得出来就读得到」。
+   * 报告过的形态是反面：UI 能列出 138 个名字，却拿不到其中任何一个的字节。
+   */
+  handle('resource.listContainerParams', async (_event, containerUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+    if (!file) {
+      return {
+        ok: false,
+        containerUri,
+        params: [],
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message: '资源未索引，无法列出容器内 param。',
+          sourceUri: containerUri
+        }]
+      };
+    }
+    if (!activeSession) {
+      return {
+        ok: false,
+        containerUri,
+        params: [],
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'PARAM_LIST_NO_SESSION',
+          message: '没有活动工作区会话。',
+          sourceUri: containerUri
+        }]
+      };
+    }
+    const storage = durableStoragePaths(activeSession.meta.workspaceId);
+    const dcx = await runBridge<NativeDcxEnvelopeLike>({
+      command: 'read-dcx-document',
+      filePath: file.absolutePath,
+      resourceUri: containerUri,
+      allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+      timeoutMs: 120_000,
+      // KRAK（game-side）容器缺 Oodle 连条目表都读不出 —— 实测。
+      ...(activeSession.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
+    });
+    if (dcx.parseStatus === 'failed') {
+      return {
+        ok: false,
+        containerUri,
+        params: [],
+        diagnostics: sanitizeDiagnostics(dcx.diagnostics)
+      };
+    }
+    const entries = dcx.data?.nested?.entries ?? [];
+    const seen = new Set<string>();
+    const params = entries
+      .map((entry, position) => {
+        const index = entry.index ?? position;
+        return {
+          entryIndex: index,
+          name: sanitizeEntryName(entry.name ?? `entry_${position}`, index, seen),
+          size: entry.uncompressedSize ?? 0
+        };
+      })
+      // 只保留 .param —— 容器里也可能有别的东西，混进来会让左栏出现点不开的项。
+      .filter((entry) => entry.name.toLowerCase().endsWith('.param'));
+    return {
+      ok: true,
+      containerUri,
+      containerFormat: dcx.data?.compressionFormat ?? null,
+      params,
+      diagnostics: params.length === 0
+        ? [{
+            severity: 'info' as const,
+            code: 'PARAM_LIST_EMPTY',
+            message: `容器内 ${entries.length} 个条目中没有 .param 文件。`,
+            sourceUri: containerUri
+          }]
+        : []
+    };
+  });
+
+  /**
+   * 读取 parambnd 容器内某个 param 的一页行。
+   *
+   * 这条通道补的是「容器 → 内部 param 文件」那一跳（详见
+   * unpackContainerParamChild 的注释）：先解包成裸 param 落会话暂存区，
+   * 再复用 resource.readParamPage 的分页读取逻辑。
+   *
+   * 直接把容器 URI 交给 read-param-document 会硬失败（实测
+   * `PARAM_DOCUMENT_READ_FAILED: PARAM 类型名偏移无效`），因为它不解 DCX/BND4。
+   */
+  handle(
+    'resource.readContainerParamPage',
+    async (
+      _event,
+      containerUri: string,
+      entryIndex: number,
+      requestedPage: number,
+      requestedPageSize: number,
+      query?: string
+    ) => {
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      const failure = (code: string, message: string, extra: Diagnostic[] = []) => ({
+        ok: false,
+        containerUri,
+        entryIndex,
+        sourceHash: null,
+        typeName: null,
+        rowDataSize: 0,
+        rowCount: 0,
+        page: 0,
+        pageSize: 0,
+        pageCount: 0,
+        rows: [],
+        rowsTruncated: false,
+        diagnostics: [
+          { severity: 'error' as const, code, message, sourceUri: containerUri },
+          ...extra
+        ]
+      });
+      if (!file) return failure('RESOURCE_NOT_INDEXED', '资源未索引，无法读取容器内 param。');
+
+      const unpacked = await unpackContainerParamChild({
+        containerPath: file.absolutePath,
+        containerUri,
+        containerHash: file.sha256 ?? createHash('sha256').update(file.absolutePath).digest('hex'),
+        entry: { index: entryIndex }
+      });
+      if (!unpacked.ok) {
+        return failure(
+          'PARAM_CONTAINER_UNPACK_FAILED',
+          '容器内 param 解包失败，无法读取行。',
+          unpacked.diagnostics
+        );
+      }
+
+      const paramPath = unpacked.child.absolutePath;
+      const allowedRoots = activeSession
+        ? bridgeAllowedRoots(activeSession, durableStoragePaths(activeSession.meta.workspaceId).stagingRoot)
+        : [dirname(paramPath)];
+
+      // ── 全表读：只为 id/name 索引与跨页搜索（行字节恒缺，见 readParamPage 注释）──
+      const full = await runBridge<{
+        sourceHash?: string;
+        typeName?: string;
+        rowCount?: number;
+        rowDataSize?: number;
+        rows?: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
+        authority?: string;
+      }>({
+        command: 'read-param-document',
+        filePath: paramPath,
+        allowedRoots,
+        timeoutMs: 60_000,
+        commandOptions: {}
+      });
+      if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
+        return failure(
+          'PARAM_DOCUMENT_READ_FAILED',
+          `解包后的 ${unpacked.child.name} 无法解析为 PARAM。`,
+          sanitizeDiagnostics(full.diagnostics)
+        );
+      }
+
+      const allRows = (full.data.rows ?? []).slice(0, MAX_PAGED_PARAM_ROWS);
+      const q = (query ?? '').trim().toLowerCase();
+      const filtered = q.length === 0
+        ? allRows
+        : allRows.filter((row) =>
+            String(row.id).includes(q) || (row.name ?? '').toLowerCase().includes(q)
+          );
+      const window = normalizePageWindow(
+        filtered.length,
+        requestedPage,
+        requestedPageSize || PARAM_PAGE_SIZE
+      );
+
+      // ── 当页字节：与 readParamPage 同一策略，有搜索时不取（会对错行）──
+      const pageBytes = new Map<number, string>();
+      const pageByteDiagnostics: Diagnostic[] = [];
+      if (q.length === 0 && window.size > 0) {
+        const bridgePage = Math.floor(window.offset / window.size);
+        if (bridgePage * window.size === window.offset) {
+          try {
+            const paged = await runBridge<{
+              rows?: Array<{ id: number; dataBase64?: string | null }>;
+              payloadsIncluded?: boolean;
+            }>({
+              command: 'read-param-document',
+              filePath: paramPath,
+              allowedRoots,
+              timeoutMs: 60_000,
+              commandOptions: { rowPage: bridgePage, rowPageSize: window.size }
+            });
+            for (const row of paged.data?.rows ?? []) {
+              if (typeof row.dataBase64 === 'string') pageBytes.set(row.id, row.dataBase64);
+            }
+            if (paged.data?.payloadsIncluded === false) {
+              pageByteDiagnostics.push({
+                severity: 'info',
+                code: 'PARAM_PAGE_PAYLOAD_OMITTED',
+                message: '本页行字节未随分页下发（页字节数超出 Bridge 载荷门限）；'
+                  + '字段编辑对本页不可用，行列表不受影响。',
+                sourceUri: containerUri
+              });
+            }
+          } catch (error) {
+            pageByteDiagnostics.push({
+              severity: 'warning',
+              code: 'PARAM_PAGE_PAYLOAD_READ_FAILED',
+              message: `本页行字节读取失败：${error instanceof Error ? error.message : String(error)}`,
+              sourceUri: containerUri
+            });
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        containerUri,
+        entryIndex: unpacked.child.entryIndex,
+        paramName: unpacked.child.name,
+        sourceHash: full.data.sourceHash,
+        typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
+        rowDataSize: full.data.rowDataSize ?? 0,
+        rowCount: filtered.length,
+        page: window.page,
+        pageSize: window.size,
+        pageCount: window.pageCount,
+        rows: filtered
+          .slice(window.offset, window.offset + window.size)
+          .map((row) => {
+            const dataBase64 = typeof row.dataBase64 === 'string'
+              ? row.dataBase64
+              : pageBytes.get(row.id);
+            return {
+              id: row.id,
+              ...(typeof dataBase64 === 'string'
+                ? {
+                    dataBase64,
+                    dataHexPreview: Buffer.from(dataBase64, 'base64')
+                      .subarray(0, 16)
+                      .toString('hex')
+                  }
+                : {}),
+              ...(row.name ? { name: row.name } : {})
+            };
+          }),
+        rowsTruncated: (full.data.rowCount ?? allRows.length) > allRows.length,
+        ...(full.data.authority ? { authority: full.data.authority } : {}),
+        diagnostics: [...unpacked.diagnostics, ...pageByteDiagnostics]
+      };
     }
   );
 

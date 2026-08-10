@@ -20,15 +20,26 @@
  * 静态判据。这里如实记下这个限制：本门禁读源码结构，不证明运行期视觉顺序。
  *
  * 判据:
- *   ① 两张证据卡必须在折叠容器 resource-evidence-details 内；
+ *   ① 三处证据渲染点（两张证据卡 + Hex 视图）必须在折叠容器
+ *      resource-evidence-details 内；
  *   ② 该容器不得带 open（默认收起）；
  *   ③ 容器在源码里的位置必须晚于全部编辑器面板 —— JSX 顺序即渲染顺序；
- *   ④ 提取失败必须失败关闭：扫不到卡片或容器说明匹配规则坏了。
+ *   ④ 提取失败必须失败关闭：扫不到渲染点或容器说明匹配规则坏了。
  *
- * ── 负向证明(2026-08-10 实测三条)──
+ * ── 为什么把 Hex 也纳入(2026-08-10 补)──
+ *
+ * 第一版只管两张证据卡，结果它报绿而用户报告的形态依然存在：
+ * `previewKind === 'hex'` 是所有 FromSoftware 二进制格式的默认分支，
+ * HexEditorPanel 无条件排在全部编辑器面板之前，于是打开 param / event / chr
+ * 任何一个资源，主视图顶部先是「只读 Hex 证据」。只覆盖三分之一成因却报绿的
+ * 门禁比没有门禁更危险 —— 它给出「已守住」的假信号。
+ *
+ * ── 负向证明(2026-08-10 实测四条)──
  *   L1  折叠区加 open（等于回到原状）      → EVIDENCE_DETAILS_DEFAULT_OPEN
  *   L2  把证据卡挪回编辑器之前              → EVIDENCE_CARD_OUTSIDE_DETAILS
  *   L4  证据卡渲染点消失                    → EVIDENCE_CARDS_NOT_FOUND（失败关闭）
+ *   L5  把 HexEditorPanel 挪回编辑器之前    → EVIDENCE_CARD_OUTSIDE_DETAILS
+ *       （守的正是用户报告的原始形态）
  *
  * L2 守的正是用户报告的形态：「打开这些页面全是证据卡」。它把两张卡搬回
  * PanelErrorBoundary 开头，门禁立刻报红。
@@ -105,15 +116,28 @@ const at = (needle) => source.indexOf(needle);
 
 const structuredAt = at('<StructuredPreviewCard');
 const nativeAt = at('<NativeInspectionCard');
+/**
+ * Hex 视图也是证据投影，必须同样收在折叠区内。
+ *
+ * 为什么补这一条：本门禁第一版只管两张证据卡，于是它在代码「正确」时报绿，
+ * 而用户报告的形态依然存在 —— 因为 `previewKind === 'hex'` 是所有 FromSoftware
+ * 二进制格式的默认分支，HexEditorPanel 无条件排在全部编辑器面板之前。打开
+ * param / event / chr 任何一个资源，主视图顶部先是「只读 Hex 证据」，
+ * 工作台被挤到滚动区外。
+ *
+ * 也就是说：漏掉 Hex 让这道门禁只覆盖了三分之一的成因，报绿却没解决问题。
+ * 那比没有门禁更危险 —— 它给出「已守住」的假信号。
+ */
+const hexAt = at('<HexEditorPanel');
 const detailsAt = at('resource-evidence-details');
 
 // 判据④
-if (structuredAt < 0 || nativeAt < 0) {
+if (structuredAt < 0 || nativeAt < 0 || hexAt < 0) {
   report({
     ok: false, gate: LABEL, status: 'failed', code: 'EVIDENCE_CARDS_NOT_FOUND',
-    message: '在 App.tsx 里找不到 StructuredPreviewCard / NativeInspectionCard 的渲染点。'
-      + ' 提取失败必须失败关闭，否则判据①②③会零样本恒真。',
-    structuredAt, nativeAt
+    message: '在 App.tsx 里找不到 StructuredPreviewCard / NativeInspectionCard / HexEditorPanel'
+      + ' 的渲染点。提取失败必须失败关闭，否则判据①②③会零样本恒真。',
+    structuredAt, nativeAt, hexAt
   }, 1);
 }
 if (detailsAt < 0) {
@@ -124,8 +148,12 @@ if (detailsAt < 0) {
   }, 1);
 }
 
-// 判据①:两张卡都必须在容器之后（即容器内）。
-for (const [name, position] of [['StructuredPreviewCard', structuredAt], ['NativeInspectionCard', nativeAt]]) {
+// 判据①:三处证据渲染点都必须在容器之后（即容器内）。
+for (const [name, position] of [
+  ['StructuredPreviewCard', structuredAt],
+  ['NativeInspectionCard', nativeAt],
+  ['HexEditorPanel', hexAt]
+]) {
   if (position < detailsAt) {
     findings.push({
       code: 'EVIDENCE_CARD_OUTSIDE_DETAILS',
@@ -133,7 +161,7 @@ for (const [name, position] of [['StructuredPreviewCard', structuredAt], ['Nativ
       cardAt: position,
       detailsAt,
       message: `${name} 出现在折叠容器之前（偏移 ${position} < ${detailsAt}），`
-        + '说明它不在折叠区内。证据卡必须收进 resource-evidence-details。'
+        + '说明它不在折叠区内。证据投影必须收进 resource-evidence-details。'
     });
   }
 }
@@ -199,8 +227,10 @@ report({
   ok: true,
   gate: LABEL,
   status: 'passed',
-  message: `证据投影收在折叠区内、默认收起，且排在 ${panelPositions.length} 个编辑器面板之后。`,
+  message: `三处证据投影（结构化预览、原生检查、Hex 视图）收在折叠区内、默认收起，`
+    + `且排在 ${panelPositions.length} 个编辑器面板之后。`,
   detailsAt,
+  evidenceAt: { structuredAt, nativeAt, hexAt },
   editorPanels: panelPositions.map((entry) => ({ tag: entry.tag, at: entry.position })),
   nonClaim: '本门禁读 App.tsx 的源码结构（JSX 出现顺序与 details 属性），'
     + '不证明运行期视觉顺序、不检查 CSS 是否把元素移回顶部，也不覆盖各编辑器面板'

@@ -45,6 +45,7 @@ import type {
   ToolResult
 } from '@soulforge/core';
 import { HexEditorPanel } from './editors/HexEditorPanel.js';
+import { ParamWorkbench } from './workbench/ParamWorkbench.js';
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
 import { EmevdFourViewPanel } from './editors/EmevdFourViewPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
@@ -407,6 +408,22 @@ export function App(): ReactElement {
   const showBnd4Workbench = centerView === 'resource' && (bnd4Forced || selectedIsContainer);
   const canEditText = preview?.previewKind === 'text' && preview.structuredPreview?.editable === true && !preview.truncated;
   const hasMsgTable = canEditText && msgRows.length > 0;
+
+  /**
+   * 打开的是不是 param 容器（parambnd）。
+   *
+   * 判定按路径与复合扩展名，而不是 formatKind：实测 `.bak` 备份文件的
+   * formatLabel 是「Backup File」（`.bak` 的 endsWith 先命中），但它同样是一个
+   * parambnd 容器 —— 用户截图里打开的正是 `gameparam.parambnd.dcx.bak`，
+   * 若按 formatKind 判定会把它排除在工作台之外，回到「0 行」的老样子。
+   *
+   * 容器需要三栏工作台而不是行表：read-param-document 不解 DCX/BND4，
+   * 容器路径直接喂进去必失败，必须先选容器内某个 param 再读。
+   */
+  const selectedIsParamContainer = centerView === 'resource'
+    && selectedFile !== null
+    && selectedFile.resourceKind === 'param'
+    && /\.parambnd(\.dcx)?(\.bak)?$/i.test(selectedFile.relativePath);
 
   /**
    * 交给 ParamDefPanel 的字段定义。
@@ -2379,65 +2396,6 @@ export function App(): ReactElement {
               )}
             </section>
           )}
-          {preview?.previewKind === 'hex' && preview.hex && (
-            <HexEditorPanel
-              title={selectedFile?.relativePath ?? '二进制资源'}
-              initialBytesBase64={typeof preview.hex === 'string' && !preview.hex.includes(' ')
-                ? preview.hex
-                : hexTextToBase64(preview.hex)}
-              totalBytes={preview.file?.size}
-              {...(selectedFile && bridge
-                ? {
-                    // 接 readRawMetadata（main handler ipc.ts:1198）。独立价值是
-                    // 「不读内容就能拿到整文件哈希」——hex 视图一次只加载一个
-                    // 4 KiB 窗口，算不出整文件哈希，而校验「我看的这份字节属于哪个
-                    // 文件版本」需要它。core 对超上限文件报 deferred 而非硬算。
-                    onLoadMetadata: async () => {
-                      const raw = await bridge.readRawMetadata(selectedFile.sourceUri) as
-                        Record<string, unknown> | null;
-                      if (raw === null) return null;
-                      return {
-                        ...(typeof raw.size === 'number' ? { size: raw.size } : {}),
-                        ...(typeof raw.contentHash === 'string' ? { contentHash: raw.contentHash } : {}),
-                        ...(typeof raw.hashStatus === 'string' ? { hashStatus: raw.hashStatus } : {})
-                      };
-                    }
-                  }
-                : {})}
-              {...(selectedFile && bridge
-                ? {
-                    // 接 readRawRange（main handler ipc.ts:1170）——预览只读前 64 KiB，
-                    // 而实测 mods 下 237 个文件有 148 个超过它，此前 hex 证据对这些文件
-                    // 只能看到开头且把前缀长度当总量显示。硬约束 17 要求大规模访问分页。
-                    // 不用 `as` 整体断言 IPC 返回值——第一版那样写掩盖了一个真 bug：
-                    // core 的字段叫 base64（rawRead.ts:35）而我写成 bytesBase64，
-                    // 断言让 typecheck 通过、功能却永远读不到数据。改为逐字段取值 +
-                    // 运行期类型判断，字段名对不上时至少 diagnostics 会带出原因。
-                    onLoadRange: async (offset: number, length: number) => {
-                      const raw = await bridge.readRawRange(
-                        selectedFile.sourceUri,
-                        offset,
-                        length
-                      ) as Record<string, unknown> | null;
-                      const rec = raw ?? {};
-                      const diags = Array.isArray(rec.diagnostics)
-                        ? (rec.diagnostics as Array<{ code?: unknown; message?: unknown }>).map((d) => ({
-                            code: String(d.code ?? 'UNKNOWN'),
-                            message: String(d.message ?? '')
-                          }))
-                        : [];
-                      return {
-                        ok: rec.ok === true,
-                        ...(typeof rec.base64 === 'string' ? { base64: rec.base64 } : {}),
-                        ...(typeof rec.fileSize === 'number' ? { fileSize: rec.fileSize } : {}),
-                        diagnostics: diags
-                      };
-                    }
-                  }
-                : {})}
-            />
-          )}
-          {preview?.previewKind === 'hex' && !preview.hex && <pre className="muted">无 Hex 预览数据。</pre>}
           {centerView === 'resource' && resourceMode === 'map' && (
             <>
               <p className="muted">
@@ -2661,7 +2619,34 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {centerView === 'resource' && resourceMode === 'param' && (
+          {/* PARAM 容器工作台（Smithbox 式三栏）。
+              打开 parambnd 时它是主视图：容器本身不是可解析的 PARAM
+              （read-param-document 不解 DCX/BND4，直接喂容器会报
+              「PARAM 类型名偏移无效」），必须先在左栏选容器内某个 param。
+              这正是此前「打开 gameparam.parambnd.dcx 显示 0 行」的原因。 */}
+          {selectedIsParamContainer && selectedFile && (
+            <ParamWorkbench
+              key={`param-wb:${selectedFile.sourceUri}`}
+              containerUri={selectedFile.sourceUri}
+              containerLabel={selectedFile.relativePath}
+              resolveDefinition={(typeName, rowDataSizeFromPage) => {
+                // 只在类型名与行宽都对得上时给出定义：行宽不符说明这份元数据
+                // 描述的是另一个版本的 param，按它解码会全部错位。
+                if (!paramFieldDefs || paramFieldDefs.length === 0) return null;
+                if (paramTypeName !== typeName) return null;
+                if (paramRowDataSize !== rowDataSizeFromPage) return null;
+                return {
+                  schemaVersion: 1,
+                  typeName,
+                  version: 0,
+                  rowDataSize: paramRowDataSize,
+                  origin: 'fixture',
+                  fields: paramFieldDefs
+                };
+              }}
+            />
+          )}
+          {centerView === 'resource' && resourceMode === 'param' && !selectedIsParamContainer && (
             <>
               <p className="muted">
                 {paramLive
@@ -2853,16 +2838,87 @@ export function App(): ReactElement {
           )}
           {/* 证据与格式检查：默认折叠，排在编辑器之后。
               内容一字未改，只改了位置与默认展开状态——它们仍是 AI 侧边栏引用的
-              同一份证据投影，排查时展开即可。 */}
-          {(preview?.structuredPreview || preview?.nativeInspection) && (
+              同一份证据投影，排查时展开即可。
+
+              外层条件必须把 hex 也算进来：hex 视图搬进本折叠区后，若条件仍只看
+              structuredPreview / nativeInspection，那些**只有** hex 的资源
+              （二进制资源的常态）会连折叠区都不渲染，原始字节视图彻底消失。
+              那是能力退化而不是降级——降级只应改变位置与默认展开状态。 */}
+          {(preview?.structuredPreview
+            || preview?.nativeInspection
+            || (preview?.previewKind === 'hex' && preview.hex)) && (
             <details className="resource-evidence-details" data-testid="resource-evidence">
-              <summary>证据与格式检查</summary>
+              <summary>原始字节与证据</summary>
               <p className="muted">
-                以下是资源的结构化证据与原生格式判定，供 AI 引用与排查使用；
+                以下是资源的原始字节、结构化证据与原生格式判定，供 AI 引用与排查使用；
                 日常编辑不需要展开。
               </p>
               {preview.structuredPreview && <StructuredPreviewCard preview={preview.structuredPreview} />}
               {preview.nativeInspection && <NativeInspectionCard inspection={preview.nativeInspection} />}
+              {/* 原始字节视图：与两张证据卡同级，收在本折叠区内。
+                  它此前排在**所有**编辑器面板之前，而 previewKind === 'hex' 是所有
+                  FromSoftware 二进制格式的默认分支——于是打开 param / event / chr 任何
+                  一个资源，主视图顶部先是「只读 Hex 证据」，工作台被挤到滚动区外。
+                  偏移与原始字节是排查用的证据，不是日常编辑要看的东西。 */}
+              {preview?.previewKind === 'hex' && preview.hex && (
+                <HexEditorPanel
+                  title={selectedFile?.relativePath ?? '二进制资源'}
+                  initialBytesBase64={typeof preview.hex === 'string' && !preview.hex.includes(' ')
+                    ? preview.hex
+                    : hexTextToBase64(preview.hex)}
+                  totalBytes={preview.file?.size}
+                  {...(selectedFile && bridge
+                    ? {
+                        // 接 readRawMetadata（main handler ipc.ts:1198）。独立价值是
+                        // 「不读内容就能拿到整文件哈希」——hex 视图一次只加载一个
+                        // 4 KiB 窗口，算不出整文件哈希，而校验「我看的这份字节属于哪个
+                        // 文件版本」需要它。core 对超上限文件报 deferred 而非硬算。
+                        onLoadMetadata: async () => {
+                          const raw = await bridge.readRawMetadata(selectedFile.sourceUri) as
+                            Record<string, unknown> | null;
+                          if (raw === null) return null;
+                          return {
+                            ...(typeof raw.size === 'number' ? { size: raw.size } : {}),
+                            ...(typeof raw.contentHash === 'string' ? { contentHash: raw.contentHash } : {}),
+                            ...(typeof raw.hashStatus === 'string' ? { hashStatus: raw.hashStatus } : {})
+                          };
+                        }
+                      }
+                    : {})}
+                  {...(selectedFile && bridge
+                    ? {
+                        // 接 readRawRange（main handler ipc.ts:1170）——预览只读前 64 KiB，
+                        // 而实测 mods 下 237 个文件有 148 个超过它，此前 hex 证据对这些文件
+                        // 只能看到开头且把前缀长度当总量显示。硬约束 17 要求大规模访问分页。
+                        // 不用 `as` 整体断言 IPC 返回值——第一版那样写掩盖了一个真 bug：
+                        // core 的字段叫 base64（rawRead.ts:35）而我写成 bytesBase64，
+                        // 断言让 typecheck 通过、功能却永远读不到数据。改为逐字段取值 +
+                        // 运行期类型判断，字段名对不上时至少 diagnostics 会带出原因。
+                        onLoadRange: async (offset: number, length: number) => {
+                          const raw = await bridge.readRawRange(
+                            selectedFile.sourceUri,
+                            offset,
+                            length
+                          ) as Record<string, unknown> | null;
+                          const rec = raw ?? {};
+                          const diags = Array.isArray(rec.diagnostics)
+                            ? (rec.diagnostics as Array<{ code?: unknown; message?: unknown }>).map((d) => ({
+                                code: String(d.code ?? 'UNKNOWN'),
+                                message: String(d.message ?? '')
+                              }))
+                            : [];
+                          return {
+                            ok: rec.ok === true,
+                            ...(typeof rec.base64 === 'string' ? { base64: rec.base64 } : {}),
+                            ...(typeof rec.fileSize === 'number' ? { fileSize: rec.fileSize } : {}),
+                            diagnostics: diags
+                          };
+                        }
+                      }
+                    : {})}
+                />
+              )}
+              {preview?.previewKind === 'hex' && !preview.hex && <pre className="muted">无 Hex 预览数据。</pre>}
             </details>
           )}
           </PanelErrorBoundary>

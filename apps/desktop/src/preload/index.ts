@@ -26,6 +26,7 @@ import type {
   ToolResult
 } from '@soulforge/core';
 import type {
+  Diagnostic,
   FmgEntryPage,
   ParamRowPage,
   RendererContainerChildBytes,
@@ -239,6 +240,40 @@ const api = {
     query?: string
   ): Promise<ParamRowPage> =>
     ipcRenderer.invoke('resource.readParamPage', sourceUri, page, pageSize, query),
+  /**
+   * 列出 parambnd 容器内的 param 条目（Smithbox 的 Param List 那一栏）。
+   * 每一项都可直接交给 readContainerParamPage —— 列得出来就读得到。
+   */
+  listContainerParams: (containerUri: string): Promise<{
+    ok: boolean;
+    containerUri: string;
+    containerFormat?: string | null;
+    params: Array<{ entryIndex: number; name: string; size: number }>;
+    diagnostics: Diagnostic[];
+  }> => ipcRenderer.invoke('resource.listContainerParams', containerUri),
+  /**
+   * 读取容器内某个 param 的一页行。main 侧先把该条目解包成裸 param 落会话
+   * 暂存区再读 —— read-param-document 不解 DCX/BND4，直接喂容器必失败。
+   */
+  readContainerParamPage: (
+    containerUri: string,
+    entryIndex: number,
+    page: number,
+    pageSize: number,
+    query?: string
+  ): Promise<ParamRowPage & {
+    containerUri: string;
+    entryIndex: number;
+    paramName?: string;
+    typeName: string | null;
+  }> => ipcRenderer.invoke(
+    'resource.readContainerParamPage',
+    containerUri,
+    entryIndex,
+    page,
+    pageSize,
+    query
+  ),
   applyParamMutation: (
     sourceUri: string,
     expectedHash: string,

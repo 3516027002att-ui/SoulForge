@@ -1123,3 +1123,218 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   margin: 0; font-family: var(--font-mono); font-size: 12px;
   color: var(--ink-1); word-break: break-word;
 }
+
+/* ══════════ 多栏工作台 ══════════ */
+/* 参照 Smithbox 2.2.4：左类别 → 中条目 → 右属性 → 最右工具，各栏独立滚动、栏宽可拖。
+   工作台必须占满可用高度，否则长列表会把整页顶出滚动条——那正是「打开 param
+   先看到证据卡、行表被挤到滚动区外」的成因之一。 */
+.workbench {
+  display: flex; flex-direction: column;
+  min-height: 0; height: 100%;
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--forge-1); overflow: hidden;
+}
+.workbench__toolbar {
+  flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; border-bottom: 1px solid var(--line);
+  background: var(--forge-2);
+}
+/* min-height: 0 是必需的：flex 子项默认 min-height:auto，栏内长列表会把容器撑高
+   而不是自己滚动。漏掉它的表现正是「整页出现第二个滚动条」。 */
+.workbench__columns { flex: 1; display: flex; min-height: 0; align-items: stretch; }
+.workbench__column-slot { display: flex; min-width: 0; min-height: 0; position: relative; }
+.workbench__column {
+  flex: 1; display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  border-right: 1px solid var(--line);
+}
+.workbench__column-slot:last-child .workbench__column { border-right: none; }
+.workbench__column-header {
+  flex: none; display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 10px; border-bottom: 1px solid var(--line);
+  background: var(--forge-2);
+}
+.workbench__column-title {
+  margin: 0; font-size: 11px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--ink-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.workbench__column-hint {
+  font-size: 10px; color: var(--ink-3); margin-left: auto;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; }
+.workbench__footer {
+  flex: none; padding: 6px 10px; border-top: 1px solid var(--line);
+  background: var(--forge-2);
+}
+
+/* 分隔条：4px 命中区偏窄，用 ::after 扩到 9px 而不加宽视觉线——加宽视觉线会让
+   四栏布局看起来像被粗边框割开。键盘可聚焦（方向键调宽），因为拖拽对键盘不可达，
+   而栏宽决定字段名会不会被截断到认不出。 */
+.workbench__resizer {
+  flex: none; width: 4px; cursor: col-resize;
+  background: transparent; position: relative; z-index: 1;
+}
+.workbench__resizer::after {
+  content: ''; position: absolute; inset: 0 -3px;
+}
+.workbench__resizer:hover { background: var(--ember-soft); }
+.workbench__resizer:focus-visible {
+  outline: 2px solid var(--ember); outline-offset: -1px; background: var(--ember-soft);
+}
+
+/* ── 工作台列表（类别栏 / 条目栏共用）── */
+.wb-list { display: flex; flex-direction: column; }
+.wb-list__group-label {
+  padding: 6px 10px 3px; font-size: 10px; font-weight: 600;
+  letter-spacing: .04em; color: var(--ink-3); text-transform: uppercase;
+}
+.wb-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 3px 10px; cursor: default;
+  font-size: 12px; color: var(--ink-1);
+  border-left: 2px solid transparent;
+}
+.wb-row:hover { background: var(--forge-hover); }
+.wb-row[aria-selected='true'] {
+  background: var(--ember-soft); border-left-color: var(--ember);
+  color: var(--ink-0);
+}
+.wb-row:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
+.wb-row__id {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+  flex: none; min-width: 7ch; text-align: right;
+}
+.wb-row__name {
+  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wb-row__meta { flex: none; font-size: 10px; color: var(--ink-3); }
+.wb-empty { padding: 10px; font-size: 12px; color: var(--ink-3); }
+
+/* ── 属性表（右栏：字段名 + 数值输入）── */
+/* grid 而不是 table：字段数可达数百（ATK_PARAM_ST 有 221 个），table 布局在
+   列宽计算上会随内容跳动，grid 让名值两列对齐稳定。 */
+.wb-props { display: flex; flex-direction: column; }
+.wb-prop {
+  display: grid; grid-template-columns: minmax(9ch, 44%) 1fr;
+  gap: 8px; align-items: center; padding: 2px 10px;
+}
+.wb-prop:hover { background: var(--forge-hover); }
+.wb-prop__name {
+  font-size: 12px; color: var(--ink-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wb-prop__enum { font-size: 10px; color: var(--ember-text); }
+.wb-prop__value { min-width: 0; }
+.wb-prop__value input, .wb-prop__value select {
+  width: 100%; padding: 2px 6px; font-family: var(--font-mono); font-size: 12px;
+  color: var(--ink-0); background: var(--forge-0);
+  border: 1px solid var(--line); border-radius: var(--radius-s);
+}
+.wb-prop__value input:focus-visible, .wb-prop__value select:focus-visible {
+  outline: 2px solid var(--ember); outline-offset: -1px;
+}
+/* 只读态必须看得出来：延期格式（MSB/TAE/ESD/FLVER）与未授信元数据下的字段都是
+   只读，若与可编辑态同形，用户会以为「改了没生效」而反复尝试。 */
+.wb-prop__value input:disabled, .wb-prop__value select:disabled {
+  color: var(--ink-2); background: var(--forge-2);
+  border-color: transparent; cursor: not-allowed;
+}
+.wb-prop__value--readonly {
+  font-family: var(--font-mono); font-size: 12px; color: var(--ink-2);
+  padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── 工具栏（最右栏：分组按钮）── */
+.wb-tools { display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; }
+.wb-tools__item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; font-size: 12px; text-align: left;
+  color: var(--ink-1); background: var(--control-rest-bg);
+  border: 1px solid transparent; border-radius: var(--radius-s); cursor: pointer;
+}
+.wb-tools__item:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--ink-0); }
+.wb-tools__item:disabled { color: var(--ink-3); cursor: not-allowed; }
+.wb-tools__item:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }
+
+/* ── 延期 / 只读横幅 ── */
+/* 延期格式保留标记：做成好用的只读工作台不等于假装可编辑。用 warn 语义而非
+   danger——延期是范围裁定，不是故障。 */
+.wb-notice {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 10px; font-size: 11px; color: var(--warn);
+  background: var(--warn-soft); border-bottom: 1px solid var(--line);
+}
+
+/* ══════════ 缺失类名补齐 ══════════ */
+/* 这些类名在组件里已被引用但 styles.css 从未定义，全部退化为默认外观：
+   primary-action / secondary-action 是 EMEVD 视图切换与主提交按钮的唯一视觉
+   区分依据，diag-error 是 Hex/Bnd4 面板的错误色依据。零定义的类不会有任何
+   编译或测试信号——只会让「主按钮」和「次按钮」长得一模一样。 */
+.primary-action {
+  color: var(--on-ember); background: var(--ember);
+  border: 1px solid transparent; border-radius: var(--radius-s);
+  padding: 4px 12px; font-size: 12px; font-weight: 500; cursor: pointer;
+}
+.primary-action:disabled { color: var(--ink-3); background: var(--forge-3); cursor: not-allowed; }
+.secondary-action {
+  color: var(--ink-1); background: var(--control-rest-bg);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-s);
+  padding: 4px 12px; font-size: 12px; cursor: pointer;
+}
+.secondary-action:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--ink-0); }
+.secondary-action:disabled { color: var(--ink-3); cursor: not-allowed; }
+.diag-error { color: var(--danger-text); font-family: var(--font-mono); font-size: 12px; }
+.diag-warn { color: var(--warn); font-family: var(--font-mono); font-size: 12px; }
+
+/* 面板根容器：这几个类被组件当作根节点用，却从未定义，于是面板内各区块之间
+   没有任何间距，标题、表格、按钮全部贴在一起——这是「排版散乱、不像编辑器」
+   观感的直接来源之一。给出统一的纵向节奏。 */
+.editor-hex, .emevd-four-view, .editor-msb-scene, .me3-runtime, .agent-tool-panel {
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+}
+.container-diag { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.container-diag__codes {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+}
+.me3-runtime__diags {
+  display: flex; flex-direction: column; gap: 2px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+}
+.explorer-mount { display: flex; flex-direction: column; gap: 2px; }
+.explorer-mount__item {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 2px 4px; font-size: 11px; color: var(--ink-2);
+}
+
+/* 字段表与容器条目表：表头列与数据列必须对齐，否则数百行字段看起来就是一堆
+   无结构的文本。用 grid 而非 table——列宽由模板固定，不随内容跳动。 */
+.paramdef-field-table, .script-entry-table {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: var(--radius-s);
+  overflow: hidden; font-size: 12px;
+}
+.paramdef-field-table [role='row'], .script-entry-table [role='row'] {
+  display: grid; grid-template-columns: minmax(10ch, 1.6fr) minmax(6ch, .8fr) minmax(8ch, 1.2fr) auto;
+  gap: 8px; align-items: center; padding: 3px 8px;
+  border-top: 1px solid var(--line); min-width: 0;
+}
+.paramdef-field-table [role='row']:first-child,
+.script-entry-table [role='row']:first-child {
+  border-top: none; background: var(--forge-2);
+  font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-2);
+}
+.paramdef-field-table [role='row'] > *, .script-entry-table [role='row'] > * {
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.paramdef-field-table [role='row']:hover:not(:first-child),
+.script-entry-table [role='row']:hover:not(:first-child) { background: var(--forge-hover); }
+.paramdef-field-table [role='row'][aria-selected='true'],
+.script-entry-table [role='row'][aria-selected='true'] {
+  background: var(--ember-soft); color: var(--ink-0);
+}
+.paramdef-field-table [role='row']:focus-visible,
+.script-entry-table [role='row']:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
