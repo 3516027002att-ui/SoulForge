@@ -1210,7 +1210,31 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .wb-row__meta { flex: none; font-size: 10px; color: var(--ink-3); }
+/* 读取失败的条目：仍列在表里（不像参照工具那样移除），但明确标出。
+   左边框 + 文字标记双通道 —— 只用颜色对色觉障碍用户不可分辨。 */
+.wb-row--failed { border-left-color: var(--danger); }
+.wb-row--failed .wb-row__name { color: var(--ink-2); text-decoration: underline dotted var(--danger); }
 .wb-empty { padding: 10px; font-size: 12px; color: var(--ink-3); }
+
+/* 含虚拟列表的栏：本栏由内部虚拟容器滚动，这一层压成不滚。
+   同时它自己要能吃满栏高，否则 flex:1 的虚拟容器没有参照高度。 */
+.wb-list--virtual { flex: 1; min-height: 0; height: 100%; overflow: hidden; }
+.workbench__column-body:has(> .wb-list--virtual) { overflow: hidden; }
+
+/* ── 虚拟滚动列表 ── */
+/* 虚拟化器要一个自己测量的滚动容器。它嵌在已 overflow:auto 的
+   .workbench__column-body 里会出现双层滚动条，所以那一层由 .wb-list--virtual
+   压成不滚动，滚动权交给这里。
+   flex:1 + min-height:0 是必需的：缺 min-height 时 sizer 的绝对高度（5275×22px）
+   会把容器撑开，虚拟化失效并退化成全量渲染的观感。 */
+.wb-virtual-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+/* sizer 撑出总高度，行用 transform 定位到各自偏移。
+   用 transform 而非 top：transform 不触发布局，滚动时更稳。 */
+.wb-virtual-sizer { position: relative; width: 100%; }
+.wb-virtual-row {
+  position: absolute; top: 0; left: 0; width: 100%;
+  align-items: center;
+}
 
 /* ── 属性表（右栏：字段名 + 数值输入）── */
 /* grid 而不是 table：字段数可达数百（ATK_PARAM_ST 有 221 个），table 布局在

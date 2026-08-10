@@ -27,7 +27,8 @@
  * 「元数据包与真实 PARAM 的字段偏移是否对得上」，绕过它等于往错误偏移写数值。
  */
 
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { PARAM_PAGE_SIZE } from '@soulforge/shared';
 import type { ParamDefDocument, ParamFieldDef } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
@@ -42,6 +43,30 @@ export interface ParamEntryView {
   entryIndex: number;
   name: string;
   size: number;
+}
+
+/**
+ * 读取失败的 param 记录。
+ *
+ * ── 为什么要留这份记录 ──
+ *
+ * 对照 Smithbox：某个 param 应用 ParamDef 失败时，它把该 param 从列表里**彻底
+ * 移除**（`paramBank.Add` 在 try 内、异常路径直接跳过），用户看到的是「param
+ * 凭空不见了」加菜单栏一行会淡出的红字，两者之间没有关联线索。用户截图里那句
+ * `Could not apply ParamDef for TentativePlayerParam.param in Primary` 正是它。
+ *
+ * 那是它的可用性缺陷，本项目不照抄 —— 硬约束要求 unsupported/failed 必须返回
+ * 结构化诊断、不能吞异常。所以失败的 param 仍留在左栏，标记为失败态，
+ * 点开后右栏显示具体原因，而不是让它从列表里消失。
+ *
+ * 不预先校验全部 138 个 param：那要把每个都解包一遍，打开容器会变得极慢。
+ * 失败在点开时才知道，但一旦知道就记下来并显示。
+ */
+interface ParamEntryFailure {
+  /** 失败原因（已是人话，来自后端结构化诊断的 message）。 */
+  message: string;
+  /** 诊断码，供排查与日志对照。 */
+  code: string;
 }
 
 /** 一行。 */
@@ -114,6 +139,22 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [loadedRows, setLoadedRows] = useState<ParamRowLine[]>([]);
   const [loadedPages, setLoadedPages] = useState(0);
   const [appending, setAppending] = useState(false);
+  /** 行栏滚动容器。虚拟化器要它测量视口与滚动位置。 */
+  const rowScrollRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 筛选输入的 debounce 值。
+   *
+   * 对照结论：Smithbox 每帧重画 5000 行也不重跑搜索 —— 它把搜索结果缓存在
+   * (viewIndex, param, searchString) 上，只在搜索串真的变了那一帧重算。
+   * ImGui 每帧重建能扛，DOM diff 不能，所以这里除了 memo 还必须 debounce：
+   * 每敲一个字符就发一次 IPC 会让 5275 行的表卡住。
+   */
+  const [rowQueryDebounced, setRowQueryDebounced] = useState('');
+  /**
+   * 读取失败的 param（按 entryIndex）。见 ParamEntryFailure 的注释。
+   * 键是 entryIndex 而不是名字：容器内条目名经过 sanitize，可能重名。
+   */
+  const [entryFailures, setEntryFailures] = useState<Map<number, ParamEntryFailure>>(new Map());
   const [rowCount, setRowCount] = useState(0);
   const [rowsLoading, setRowsLoading] = useState(false);
   const [rowsError, setRowsError] = useState<string | null>(null);
@@ -223,6 +264,21 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     setCommitMessage(null);
   }, [selectedRowId]);
 
+  /*
+   * 筛选 debounce：220ms。
+   *
+   * 空串立即生效（清空筛选是「想马上看到全部」的动作，延迟会让人以为没反应）；
+   * 非空才延迟。
+   */
+  useEffect(() => {
+    if (rowQuery === '') {
+      setRowQueryDebounced('');
+      return;
+    }
+    const timer = setTimeout(() => setRowQueryDebounced(rowQuery), 220);
+    return () => clearTimeout(timer);
+  }, [rowQuery]);
+
   // ── 中栏：选中 param 的行分页 ──
   const loadRows = useCallback(() => {
     if (!bridge || typeof bridge.readContainerParamPage !== 'function') return;
@@ -230,7 +286,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     let cancelled = false;
     setRowsLoading(true);
     setRowsError(null);
-    bridge.readContainerParamPage(props.containerUri, selectedEntry, rowPage, PARAM_PAGE_SIZE, rowQuery)
+    bridge.readContainerParamPage(
+      props.containerUri, selectedEntry, rowPage, PARAM_PAGE_SIZE, rowQueryDebounced
+    )
       .then((result) => {
         if (cancelled) return;
         if (!result.ok) {
@@ -239,9 +297,35 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           // 用户会以为读到的是当前 param 的数据。
           setLoadedRows([]);
           setLoadedPages(0);
-          setRowsError(result.diagnostics?.[0]?.message ?? 'PARAM 行读取失败。');
+          const first = result.diagnostics?.[0];
+          setRowsError(first?.message ?? 'PARAM 行读取失败。');
           setPageDiagnostics([]);
+          // 登记失败：该 param 在左栏保留并标记，不像 Smithbox 那样从列表消失。
+          if (selectedEntry !== null) {
+            setEntryFailures((current) => {
+              const next = new Map(current);
+              next.set(selectedEntry, {
+                message: first?.message ?? 'PARAM 行读取失败。',
+                code: first?.code ?? 'PARAM_READ_FAILED'
+              });
+              return next;
+            });
+          }
         } else {
+          /*
+           * 成功则清掉该项的失败标记（上次可能因容器未挂载而失败，现已可读）。
+           *
+           * 用函数式更新且不读 entryFailures 当前值：把它加进 loadRows 的依赖
+           * 会造成「登记失败 → 依赖变化 → 重新加载 → 再登记」的循环。
+           */
+          if (selectedEntry !== null) {
+            setEntryFailures((current) => {
+              if (!current.has(selectedEntry)) return current;
+              const next = new Map(current);
+              next.delete(selectedEntry);
+              return next;
+            });
+          }
           const mapped = result.rows.map((row) => ({
             id: row.id,
             ...(row.name ? { name: row.name } : {}),
@@ -292,7 +376,21 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         setAppending(false);
       });
     return () => { cancelled = true; };
-  }, [bridge, props.containerUri, selectedEntry, rowPage, rowQuery]);
+    // 依赖用 debounced 值：用 rowQuery 会让每个字符都触发一次 IPC。
+  }, [bridge, props.containerUri, selectedEntry, rowPage, rowQueryDebounced]);
+
+  /*
+   * 筛选生效时回到第 0 页并清累积。
+   *
+   * 不清会把上一次筛选的结果与新结果混在一起 —— 那正是「按 id 去重」也救不了的
+   * 情形：两批行的 id 不重叠但都不属于当前筛选条件。
+   */
+  useEffect(() => {
+    setRowPage(0);
+    setLoadedRows([]);
+    setLoadedPages(0);
+    setSelectedRowId(null);
+  }, [rowQueryDebounced]);
 
   useEffect(() => {
     const dispose = loadRows();
@@ -385,6 +483,46 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     return params.filter((entry) => entry.name.toLowerCase().includes(needle));
   }, [params, paramFilter]);
 
+  /**
+   * 行表虚拟化。
+   *
+   * 为什么必须虚拟化：BehaviorParam 有 5275 行。对照 Smithbox 的取舍 —— 它一次
+   * 全画 5275 行（ImGui 每帧重建，无 DOM 节点成本），并且刻意**不**给 param 行
+   * 用 clipper（因为它的行带 decorator，高度不齐一）。DOM 下全画不可行：每行是
+   * 真实节点。所以我们的约束比它更紧，更该虚拟化，而不是退回分页。
+   *
+   * 行高锁定 22px（等高）：可变高度要测量模式，而 param 行的信息量固定
+   * （id + name），锁等高 + 溢出省略号是更简单也更稳的选择。
+   *
+   * overscan 12：滚动时预渲染视口外 12 行，避免快速拖动出现空白。
+   */
+  const rowVirtualizer = useVirtualizer({
+    count: loadedRows.length,
+    getScrollElement: () => rowScrollRef.current,
+    estimateSize: () => 22,
+    overscan: 12
+  });
+
+  /*
+   * 滚到接近底部时自动续取下一批。
+   *
+   * 取数仍按 PARAM_PAGE_SIZE（行字节的载荷门控按页算），但用户感知是连续滚动。
+   * 阈值取「最后一个可见行进入末尾 20 行范围内」，而不是精确到底 —— 到底才取
+   * 会让滚动停顿一下才继续。
+   */
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  // ?? 0 而不是非空断言：noUncheckedIndexedAccess 下索引访问可能是 undefined，
+  // 用断言会把「列表为空」这个真实状态藏起来。
+  const lastVisibleIndex = virtualRows[virtualRows.length - 1]?.index ?? 0;
+  useEffect(() => {
+    if (rowsLoading || appending) return;
+    if (loadedPages >= rowPageCount) return;
+    if (loadedRows.length === 0) return;
+    if (lastVisibleIndex < loadedRows.length - 20) return;
+    setAppending(true);
+    setRowPage(loadedPages);
+  }, [lastVisibleIndex, loadedRows.length, loadedPages, rowPageCount, rowsLoading, appending]);
+
   async function commitField(field: ParamFieldDef): Promise<void> {
     if (!canCommitFields || !definition || !selectedRow?.dataBase64 || selectedRow === null) return;
     if (!props.onApplyFieldMutation || selectedEntry === null) return;
@@ -446,21 +584,31 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           </div>
           {paramsLoading && <p className="wb-empty">加载中…</p>}
           {paramsError && <p className="wb-empty diag-error">{paramsError}</p>}
-          {filteredParams.map((entry, index) => (
-            <div
-              key={entry.entryIndex}
-              className="wb-row"
-              {...selectableRowAttributes({
-                selected: selectedEntry === entry.entryIndex,
-                isTabEntry: isRowTabEntry(index, selectedEntry !== null),
-                onSelect: () => setSelectedEntry(entry.entryIndex)
-              })}
-            >
-              <span className="wb-row__name" title={entry.name}>
-                {entry.name.replace(/\.param$/i, '')}
-              </span>
-            </div>
-          ))}
+          {filteredParams.map((entry, index) => {
+            const failure = entryFailures.get(entry.entryIndex);
+            return (
+              <div
+                key={entry.entryIndex}
+                className={failure ? 'wb-row wb-row--failed' : 'wb-row'}
+                {...selectableRowAttributes({
+                  selected: selectedEntry === entry.entryIndex,
+                  isTabEntry: isRowTabEntry(index, selectedEntry !== null),
+                  onSelect: () => setSelectedEntry(entry.entryIndex)
+                })}
+              >
+                <span
+                  className="wb-row__name"
+                  title={failure ? `${entry.name}（${failure.code}）` : entry.name}
+                >
+                  {entry.name.replace(/\.param$/i, '')}
+                </span>
+                {/* 失败标记：该 param 仍留在列表里（不像 Smithbox 那样移除），
+                    但明确标出读不出来。不只靠颜色 —— 加文字标记，
+                    否则色觉障碍用户分辨不出。 */}
+                {failure && <span className="wb-row__meta diag-error">读取失败</span>}
+              </div>
+            );
+          })}
         </div>
       )
     },
@@ -476,7 +624,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       initialWidth: 300,
       minWidth: 200,
       children: (
-        <div className="wb-list">
+        // --virtual：本栏的滚动权交给内部虚拟容器，外层不滚（否则双滚动条）。
+        <div className="wb-list wb-list--virtual">
           {selectedEntry === null && <p className="wb-empty">先在左栏选择一个 param。</p>}
           {selectedEntry !== null && (
             <>
@@ -496,41 +645,49 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               {!rowsLoading && !rowsError && loadedRows.length === 0 && (
                 <p className="wb-empty">没有匹配的行。</p>
               )}
-              {/* 连续滚动而不是翻页：5275 行分成 264 页在实际使用中不可接受。
-                  滚到接近底部时自动续取下一批（取数仍按 PARAM_PAGE_SIZE，
-                  因为行字节的载荷门控按页算 —— 见 loadedRows 的注释）。 */}
-              {loadedRows.map((row, index) => (
+              {/* 虚拟滚动：一条连续长列表，DOM 只保留可见行 + overscan。
+                  滚到接近底部自动续取（见 rowVirtualizer 附近的 effect）。
+                  role=grid + aria-rowcount 给出**总行数**而不是渲染数 ——
+                  否则屏幕阅读器会播报「共 20 行」而实际有 5275 行。 */}
+              <div
+                ref={rowScrollRef}
+                className="wb-virtual-scroll"
+                role="grid"
+                aria-rowcount={rowCount}
+                aria-label="PARAM 行列表"
+              >
                 <div
-                  key={row.id}
-                  className="wb-row"
-                  {...selectableRowAttributes({
-                    selected: selectedRowId === row.id,
-                    isTabEntry: isRowTabEntry(index, selectedRowId !== null),
-                    onSelect: () => setSelectedRowId(row.id)
+                  className="wb-virtual-sizer"
+                  style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+                >
+                  {virtualRows.map((virtualRow) => {
+                    const row = loadedRows[virtualRow.index];
+                    if (!row) return null;
+                    return (
+                      <div
+                        key={row.id}
+                        className="wb-row wb-virtual-row"
+                        style={{
+                          height: `${virtualRow.size}px`,
+                          transform: `translateY(${virtualRow.start}px)`
+                        }}
+                        aria-rowindex={virtualRow.index + 1}
+                        {...selectableRowAttributes({
+                          selected: selectedRowId === row.id,
+                          isTabEntry: isRowTabEntry(virtualRow.index, selectedRowId !== null),
+                          onSelect: () => setSelectedRowId(row.id)
+                        })}
+                      >
+                        <span className="wb-row__id">{row.id}</span>
+                        <span className="wb-row__name" title={row.name ?? ''}>{row.name ?? '—'}</span>
+                      </div>
+                    );
                   })}
-                >
-                  <span className="wb-row__id">{row.id}</span>
-                  <span className="wb-row__name" title={row.name ?? ''}>{row.name ?? '—'}</span>
                 </div>
-              ))}
-              {/* 续取入口：既是按钮也是可访问的「加载更多」，不依赖滚动事件
-                  （滚动触发对键盘用户不可达，而行选择本身是键盘可达的）。 */}
-              {loadedPages < rowPageCount && (
-                <button
-                  type="button"
-                  className="secondary-action"
-                  style={{ margin: '6px 10px', width: 'calc(100% - 20px)' }}
-                  disabled={rowsLoading || appending}
-                  onClick={() => {
-                    setAppending(true);
-                    setRowPage(loadedPages);
-                  }}
-                >
-                  {rowsLoading || appending
-                    ? '加载中…'
-                    : `继续加载（已 ${loadedRows.length} / ${rowCount} 行）`}
-                </button>
-              )}
+                {(rowsLoading || appending) && loadedRows.length > 0 && (
+                  <p className="wb-empty" style={{ padding: '4px 10px' }}>加载中…</p>
+                )}
+              </div>
             </>
           )}
         </div>
@@ -543,7 +700,28 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       minWidth: 240,
       children: (
         <div className="wb-props">
-          {selectedRowId === null && <p className="wb-empty">先在中栏选择一行。</p>}
+          {/* 选中的 param 读不出来时，右栏给出结构化原因而不是空白。
+              对照 Smithbox：它的 Fields 栏永远不会显示「此 param 无 ParamDef」
+              ——因为失败的 param 根本进不了列表，用户点不到。本项目不照抄那个
+              形态，硬约束要求 failed 必须返回结构化诊断。 */}
+          {selectedEntry !== null && entryFailures.has(selectedEntry) && (
+            <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span className="diag-error">这个 param 读不出来</span>
+              <span className="muted" style={{ fontSize: 11 }}>
+                {entryFailures.get(selectedEntry)?.message}
+              </span>
+              <span className="muted mono" style={{ fontSize: 10 }}>
+                {entryFailures.get(selectedEntry)?.code}
+              </span>
+              <span className="muted" style={{ fontSize: 11 }}>
+                容器内其他 param 不受影响；完整诊断见底部日志。
+              </span>
+            </div>
+          )}
+          {selectedRowId === null && selectedEntry !== null && !entryFailures.has(selectedEntry) && (
+            <p className="wb-empty">先在中栏选择一行。</p>
+          )}
+          {selectedEntry === null && <p className="wb-empty">先在左栏选择一个 param。</p>}
           {selectedRowId !== null && definition === null && (
             <p className="wb-empty">
               没有可用的字段定义{typeName ? `（${typeName}）` : ''}。字段视图不可用。
