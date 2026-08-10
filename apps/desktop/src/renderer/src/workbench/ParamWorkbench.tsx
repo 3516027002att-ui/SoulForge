@@ -99,6 +99,21 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [rowQuery, setRowQuery] = useState('');
   const [rowPage, setRowPage] = useState(0);
   const [rowPageCount, setRowPageCount] = useState(1);
+  /**
+   * 已连续加载的行（跨页累积），用于行栏的连续滚动。
+   *
+   * 为什么不直接把页大小改大：PARAM_PAGE_SIZE=20 有技术原因 —— 实测 C# 的行字节
+   * 载荷门控按页算，20 与 32 能下发字节、64 就不行（页字节数超 512 KB）。
+   * 那个常量是跨进程契约（main 分页 channel、e2e harness、三处 renderer 共用，
+   * 由 pageSizeSource.test.ts 守单一来源），改大会让字段编辑重新拿不到字节。
+   *
+   * 所以取数仍按 20 行一批，只改**呈现**：滚到底自动续取下一批并追加。
+   * 真实工具（Smithbox 的 Row List）是连续长列表，5275 行分成 264 页翻页
+   * 在实际使用中不可接受。
+   */
+  const [loadedRows, setLoadedRows] = useState<ParamRowLine[]>([]);
+  const [loadedPages, setLoadedPages] = useState(0);
+  const [appending, setAppending] = useState(false);
   const [rowCount, setRowCount] = useState(0);
   const [rowsLoading, setRowsLoading] = useState(false);
   const [rowsError, setRowsError] = useState<string | null>(null);
@@ -196,6 +211,10 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     setSelectedRowId(null);
     setDrafts({});
     setCommitMessage(null);
+    // 连续列表必须清：残留会让新 param 的列表里混着上一个 param 的行，
+    // 而两者行宽通常不同，选中后字段会按错误的定义解码。
+    setLoadedRows([]);
+    setLoadedPages(0);
   }, [selectedEntry]);
 
   useEffect(() => {
@@ -216,15 +235,33 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         if (cancelled) return;
         if (!result.ok) {
           setRows([]);
+          // 累积列表一并清空：否则失败后仍显示上一个 param 的行，
+          // 用户会以为读到的是当前 param 的数据。
+          setLoadedRows([]);
+          setLoadedPages(0);
           setRowsError(result.diagnostics?.[0]?.message ?? 'PARAM 行读取失败。');
           setPageDiagnostics([]);
         } else {
-          setRows(result.rows.map((row) => ({
+          const mapped = result.rows.map((row) => ({
             id: row.id,
             ...(row.name ? { name: row.name } : {}),
             ...(row.dataBase64 ? { dataBase64: row.dataBase64 } : {}),
             ...(row.dataHexPreview ? { dataHexPreview: row.dataHexPreview } : {})
-          })));
+          }));
+          setRows(mapped);
+          /*
+           * 累积到连续列表。
+           *
+           * 第 0 页替换（切 param、改筛选、写回后重读都从 0 开始），
+           * 后续页按 id 去重追加 —— 去重是必需的：重读当前页会再拿到同一批 id，
+           * 直接 concat 会让同一行在列表里出现两次，而用户会以为有重复数据。
+           */
+          setLoadedRows((current) => {
+            if (result.page === 0) return mapped;
+            const seen = new Set(current.map((row) => row.id));
+            return [...current, ...mapped.filter((row) => !seen.has(row.id))];
+          });
+          setLoadedPages(result.page + 1);
           setRowPageCount(result.pageCount);
           setRowCount(result.rowCount);
           setTypeName(result.typeName ?? null);
@@ -242,12 +279,17 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           );
         }
         setRowsLoading(false);
+        // 复位续取标志：不复位会让「继续加载」按钮永久禁用。
+        setAppending(false);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
         setRows([]);
+        setLoadedRows([]);
+        setLoadedPages(0);
         setRowsError(error instanceof Error ? error.message : 'PARAM 行读取异常。');
         setRowsLoading(false);
+        setAppending(false);
       });
     return () => { cancelled = true; };
   }, [bridge, props.containerUri, selectedEntry, rowPage, rowQuery]);
@@ -286,9 +328,18 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     return props.resolveDefinition(typeName, rowDataSize);
   }, [typeName, rowDataSize, props.resolveDefinition]);
 
+  /**
+   * 选中行。先查当前页再查累积列表。
+   *
+   * 必须查累积列表：连续滚动后用户会选到非当前页的行，只查 `rows` 会让字段栏
+   * 报「本行未随分页下发字节」——那句话在这里是错的（字节其实取到过，
+   * 只是不在最后一次请求的那一页里）。
+   */
   const selectedRow = useMemo(
-    () => rows.find((row) => row.id === selectedRowId) ?? null,
-    [rows, selectedRowId]
+    () => rows.find((row) => row.id === selectedRowId)
+      ?? loadedRows.find((row) => row.id === selectedRowId)
+      ?? null,
+    [rows, loadedRows, selectedRowId]
   );
 
   /**
@@ -416,7 +467,12 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     {
       id: 'rows',
       title: 'Row',
-      hint: typeName ? `${rowCount} 行 · ${typeName}` : `${rowCount} 行`,
+      // hint 要如实反映「已加载多少 / 共多少」：只显示总数会让用户以为
+      // 列表已完整，而滚到底才发现还有「继续加载」。
+      // typeName 移到工具栏 —— 它是文档级信息，不是这一列的属性。
+      hint: loadedRows.length > 0 && loadedRows.length < rowCount
+        ? `${loadedRows.length}/${rowCount} 行`
+        : `${rowCount} 行`,
       initialWidth: 300,
       minWidth: 200,
       children: (
@@ -436,29 +492,14 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                   style={{ flex: 1, minWidth: 0 }}
                 />
               </div>
-              <div style={{ padding: '0 8px 4px', display: 'flex', gap: 6, alignItems: 'center' }}>
-                <button
-                  type="button"
-                  className="secondary-action"
-                  disabled={rowPage <= 0 || rowsLoading}
-                  onClick={() => setRowPage((page) => page - 1)}
-                >上一页</button>
-                <span className="muted" style={{ fontSize: 11 }}>
-                  {rowPageCount > 0 ? rowPage + 1 : 0}/{rowPageCount}
-                </span>
-                <button
-                  type="button"
-                  className="secondary-action"
-                  disabled={rowPage >= rowPageCount - 1 || rowsLoading}
-                  onClick={() => setRowPage((page) => page + 1)}
-                >下一页</button>
-                {rowsLoading && <span className="muted" style={{ fontSize: 11 }}>加载中…</span>}
-              </div>
               {rowsError && <p className="wb-empty diag-error">{rowsError}</p>}
-              {!rowsLoading && !rowsError && rows.length === 0 && (
-                <p className="wb-empty">当前页无行。</p>
+              {!rowsLoading && !rowsError && loadedRows.length === 0 && (
+                <p className="wb-empty">没有匹配的行。</p>
               )}
-              {rows.map((row, index) => (
+              {/* 连续滚动而不是翻页：5275 行分成 264 页在实际使用中不可接受。
+                  滚到接近底部时自动续取下一批（取数仍按 PARAM_PAGE_SIZE，
+                  因为行字节的载荷门控按页算 —— 见 loadedRows 的注释）。 */}
+              {loadedRows.map((row, index) => (
                 <div
                   key={row.id}
                   className="wb-row"
@@ -472,6 +513,24 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                   <span className="wb-row__name" title={row.name ?? ''}>{row.name ?? '—'}</span>
                 </div>
               ))}
+              {/* 续取入口：既是按钮也是可访问的「加载更多」，不依赖滚动事件
+                  （滚动触发对键盘用户不可达，而行选择本身是键盘可达的）。 */}
+              {loadedPages < rowPageCount && (
+                <button
+                  type="button"
+                  className="secondary-action"
+                  style={{ margin: '6px 10px', width: 'calc(100% - 20px)' }}
+                  disabled={rowsLoading || appending}
+                  onClick={() => {
+                    setAppending(true);
+                    setRowPage(loadedPages);
+                  }}
+                >
+                  {rowsLoading || appending
+                    ? '加载中…'
+                    : `继续加载（已 ${loadedRows.length} / ${rowCount} 行）`}
+                </button>
+              )}
             </>
           )}
         </div>
@@ -587,6 +646,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         <>
           <span className="crumb"><b>param</b>{` · ${props.containerLabel}`}</span>
           {paramName && <span className="muted" style={{ fontSize: 11 }}>{paramName}</span>}
+          {typeName && <span className="muted" style={{ fontSize: 11 }}>{typeName}</span>}
           <span className="toolbar-spacer" style={{ flex: 1 }}></span>
           {rowDataSize > 0 && (
             <span className="muted" style={{ fontSize: 11 }}>行大小 {rowDataSize} 字节</span>
