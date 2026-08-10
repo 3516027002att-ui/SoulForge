@@ -345,14 +345,18 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
             <span>{pageChannelAvailable
               ? `分页枚举 · 每页 ${SCRIPT_PAGE_SIZE} 条`
               : `证据投影 ${evidence.entries.length} 条`}</span>
-            <span>{entriesComplete ? '条目完整' : 'Bridge 仅返回采样条目，导航覆盖采样子集'}</span>
+            {/* 「Bridge 仅返回采样条目，导航覆盖采样子集」是内部说法：用户不需要
+                知道是谁返回的采样，只需要知道看到的不是全部。 */}
+            <span>{entriesComplete ? '条目完整' : '仅部分条目（不是完整列表）'}</span>
           </div>
 
           {/* 降级截断必须可见：无分页通道时表格只渲染前一页，界面必须说清「还有
               更多但看不到」，否则用户会把截断当成完整数据。 */}
+          {/* 措辞说后果不说内部原因：用户要知道的是「还有多少没显示」，
+              而不是「分页通道不可用」这种实现细节。 */}
           {fallbackTruncated && (
             <p className="muted">
-              分页通道不可用：已解析 {fallbackEntries.length} 条，仅显示前 {SCRIPT_PAGE_SIZE} 条。
+              共 {fallbackEntries.length} 条条目，当前仅显示前 {SCRIPT_PAGE_SIZE} 条。
             </p>
           )}
 

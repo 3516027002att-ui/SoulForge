@@ -183,9 +183,20 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
         // pageCount=1：翻页按钮据此禁用，不再出现点不动的控件。
         setPageCount(1);
         setPage(0);
+        /*
+         * 只在真的看不到全部子项时提示，且不提「分页通道」。
+         *
+         * 此前无论截断与否都显示「分页通道不可用：…」——未截断时那句话没有任何
+         * 用户价值：数据全在，只是内部走了另一条读取路径。用户实测截图里正是这句
+         * 占着主区（「分页通道不可用：已退回全量读取（本容器子项数未超过单页）」），
+         * 而它既不说明问题也不给出动作。
+         *
+         * 截断是真需要告知的（否则用户把部分当全部），但措辞要说清后果而不是
+         * 内部原因：用户要知道的是「还有多少没显示」，不是哪条通道不可用。
+         */
         setDegraded(truncated
-          ? `分页通道不可用：已解析 ${list.children.length} 个子项，仅显示前 ${CONTAINER_PAGE_SIZE} 个。`
-          : '分页通道不可用：已退回全量读取（本容器子项数未超过单页）。');
+          ? `共 ${list.children.length} 个子项，当前仅显示前 ${CONTAINER_PAGE_SIZE} 个。`
+          : null);
         setListDiagnostics([...(tree.diagnostics ?? []), ...(list.diagnostics ?? [])]);
         if (!tree.ok && list.children.length === 0) {
           setLoadError(tree.diagnostics?.[0]?.message ?? '容器读取失败。');

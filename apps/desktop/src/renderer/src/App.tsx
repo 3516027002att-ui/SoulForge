@@ -46,6 +46,7 @@ import type {
 } from '@soulforge/core';
 import { HexEditorPanel } from './editors/HexEditorPanel.js';
 import { ParamWorkbench } from './workbench/ParamWorkbench.js';
+import { DiagnosticsLog } from './workbench/DiagnosticsLog.js';
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
 import { EmevdFourViewPanel } from './editors/EmevdFourViewPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
@@ -302,6 +303,8 @@ export function App(): ReactElement {
    * 保护性设计，这里不绕过它——把 origin 标成 'imported' 会让写入放行，
    * 那等于用一个字段名换掉一道授权检查。
    */
+  /** 底部日志区是否展开。默认收起 —— 日常编辑不需要看诊断。 */
+  const [logOpen, setLogOpen] = useState(false);
   const [paramFieldDefs, setParamFieldDefs] = useState<ParamFieldDef[] | null>(null);
   /**
    * 字段定义的授信来源。'imported'/'user-derived' 放行字段写入，'fixture' 只读。
@@ -415,7 +418,6 @@ export function App(): ReactElement {
     && (selectedFile.formatKind === 'bnd' || selectedFile.formatKind === 'dcx'
       || selectedFile.compoundExtension.includes('.bnd')
       || selectedFile.compoundExtension.includes('.dcx'));
-  const showBnd4Workbench = centerView === 'resource' && (bnd4Forced || selectedIsContainer);
   const canEditText = preview?.previewKind === 'text' && preview.structuredPreview?.editable === true && !preview.truncated;
   const hasMsgTable = canEditText && msgRows.length > 0;
 
@@ -434,6 +436,21 @@ export function App(): ReactElement {
     && selectedFile !== null
     && selectedFile.resourceKind === 'param'
     && /\.parambnd(\.dcx)?(\.bak)?$/i.test(selectedFile.relativePath);
+
+  /**
+   * 通用 BND4 容器视图。
+   *
+   * 定义在 selectedIsParamContainer 之后，因为它要排除 param 容器 —— parambnd
+   * 有专属的三栏编辑器，两者并存会让同一个资源出现**两张**条目表：
+   * ParamWorkbench 列出 138 个 param 名，BND4 工作台又把同样的 138 项当通用条目
+   * 再列一遍（带 0x6970 这类偏移与「只读」列）。用户实测截图里正是这个形态，
+   * 而且后者排在后面反而更显眼，观感上就是「一叠卡片竖着堆」。
+   *
+   * 同一资源只应有一个主编辑器。命令面板的「以 BND4 容器打开」（bnd4Forced）
+   * 仍然放行 —— 那是用户显式要求以容器视角查看，属于主动选择而非意外叠加。
+   */
+  const showBnd4Workbench = centerView === 'resource'
+    && (bnd4Forced || (selectedIsContainer && !selectedIsParamContainer));
 
   /**
    * 交给 ParamDefPanel 的字段定义。
@@ -680,7 +697,7 @@ export function App(): ReactElement {
           setParamRowPayloads(new Map());
           setParamFieldDefs(null);
           setParamFieldDefsDiagnostic(null);
-          setStatus('PARAM 实时读取失败：显示空列表，未加载任何演示数据。');
+          setStatus('这个 PARAM 读不出来，详情见底部日志。');
           return;
         }
         // 字段定义与缺失原因逐字段取，不用 as 整体断言 —— IPC 边界上字段名对不上
@@ -760,7 +777,7 @@ export function App(): ReactElement {
           setFmgEntries(EMPTY_FMG_ENTRIES);
           setFmgSourceHash(null);
           setFmgLive(false);
-          setStatus('FMG 实时读取失败：显示空列表，未加载任何演示数据。');
+          setStatus('这个文本资源读不出来，详情见底部日志。');
           return;
         }
         setFmgEntries(result.data.entries.map((e) => ({ id: e.id, text: e.text })));
@@ -840,7 +857,7 @@ export function App(): ReactElement {
           setMsbEvents([]);
           setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
           setMsbLive(false);
-          setStatus('MSB 实时读取失败：显示空场景，未加载任何演示数据。');
+          setStatus('这张地图读不出来，详情见底部日志。');
           return;
         }
         setMsbParts(result.data.parts.map((p) => ({
@@ -928,12 +945,12 @@ export function App(): ReactElement {
               severity: 'warning',
               code: 'EMEVD_LIVE_READ_FAILED',
               message: result?.diagnostics?.[0]?.message
-                ?? '未能从 Bridge 读取 EMEVD；显示空文档。'
+                ?? '这个事件脚本读不出来。'
             }]
           });
           setEmevdSourceHash(null);
           setEmevdLive(false);
-          setStatus('EMEVD 实时读取失败：显示空文档，未加载任何演示数据。');
+          setStatus('这个事件脚本读不出来，详情见底部日志。');
           return;
         }
         const doc = mapEmevdEnvelopeToDocument(target.sourceUri, result.data, { maxEvents: 128 });
@@ -2425,9 +2442,11 @@ export function App(): ReactElement {
           )}
           {centerView === 'resource' && resourceMode === 'map' && (
             <>
-              <p className="muted">
-                {msbLive ? '实时 Bridge MSB parts' : '空场景（未选中可解析 MSB 或读取失败）'}
-              </p>
+              {/* 删掉了「实时 Bridge MSB parts / 空场景（未选中可解析 MSB 或读取失败）」
+                  这行标题：工作台自己有标题栏与空态提示，这行只是重复；而「未选中
+                  可解析 MSB 或读取失败」把两种完全不同的情形（还没选文件 / 选了但
+                  读不出来）混成一句，用户无法据此判断下一步做什么。读取失败的原因
+                  现在进底部日志区。 */}
               <MsbScenePanel
                 key={`${selectedFile?.sourceUri ?? ''}:${msbSourceHash ?? ''}:${msbParts.length}:${msbRegions.length}`}
                 mapResourceUri={selectedFile?.sourceUri ?? ''}
@@ -2462,11 +2481,8 @@ export function App(): ReactElement {
           )}
           {centerView === 'resource' && resourceMode === 'event' && (
             <>
-              <p className="muted">
-                {emevdLive
-                  ? `实时 Bridge 文档${emevdSourceHash ? ` · hash ${emevdSourceHash.slice(0, 12)}…` : ''}`
-                  : '空文档（未选中可解析的 EMEVD 或读取失败）'}
-              </p>
+              {/* 同 map：删掉「实时 Bridge 文档 · hash … / 空文档（未选中可解析的
+                  EMEVD 或读取失败）」。hash 前缀属于证据，读取失败原因进日志区。 */}
               <EmevdFourViewPanel
                 key={`${emevdDocument.resourceUri}:${emevdDocument.revision}:${emevdLive ? 'live' : 'demo'}`}
                 initialDocument={emevdDocument}
@@ -2606,11 +2622,8 @@ export function App(): ReactElement {
           )}
           {centerView === 'resource' && resourceMode === 'msg' && (
             <>
-              <p className="muted">
-                {fmgLive
-                  ? `实时 Bridge FMG${fmgSourceHash ? ` · hash ${fmgSourceHash.slice(0, 12)}…` : ''}`
-                  : '空条目（未选中可解析 FMG 或读取失败）'}
-              </p>
+              {/* 同上：删掉「实时 Bridge FMG · hash … / 空条目（未选中可解析 FMG
+                  或读取失败）」标题行。 */}
               <FmgWorkbenchPanel
                 key={`${selectedFile?.sourceUri ?? ''}:${fmgLive ? 'live' : 'empty'}:${fmgSourceHash ?? ''}`}
                 resourceUri={selectedFile?.sourceUri ?? ''}
@@ -2723,11 +2736,8 @@ export function App(): ReactElement {
           )}
           {centerView === 'resource' && resourceMode === 'param' && !selectedIsParamContainer && (
             <>
-              <p className="muted">
-                {paramLive
-                  ? `实时 Bridge PARAM${paramSourceHash ? ` · hash ${paramSourceHash.slice(0, 12)}…` : ''}`
-                  : '空行（未选中可解析 PARAM 或读取失败）'}
-              </p>
+              {/* 同上：删掉「实时 Bridge PARAM · hash … / 空行（未选中可解析 PARAM
+                  或读取失败）」标题行。 */}
               <ParamTablePanel
                 key={`${selectedFile?.sourceUri ?? ''}:${paramLive ? 'live' : 'empty'}:${paramSourceHash ?? ''}`}
                 typeName={paramTypeName}
@@ -2834,11 +2844,9 @@ export function App(): ReactElement {
           )}
           {centerView === 'resource' && resourceMode === 'script' && (
             <>
-              <p className="muted">
-                {selectedFile
-                  ? '实时脚本容器只读证据（字节码绝不显示为可编辑源码）'
-                  : '选择左侧脚本容器（如 luabnd）后显示只读证据'}
-              </p>
+              {/* 删掉「实时脚本容器只读证据（字节码绝不显示为可编辑源码）」标题行。
+                  「字节码绝不显示为可编辑源码」是对实现的承诺，不是用户要读的说明；
+                  面板自己会说明哪些条目可编辑。 */}
               <ScriptContainerPanel
                 key={selectedFile?.sourceUri ?? 'none'}
                 resourceUri={selectedFile?.sourceUri ?? ''}
@@ -3132,6 +3140,18 @@ export function App(): ReactElement {
         />
       </div>
 
+      {/* ══════════ 底部日志区 ══════════ */}
+      {/* 诊断码与解析细节的唯一去处。此前它们印在主编辑区里
+          （DCX_PAYLOAD_BOUNDARY_CONFIRMED、「分页通道不可用」、
+          「空文档（未选中可解析 EMEVD 或读取失败）」），把要编辑的数据挤下去，
+          用户看到的是一堆看不懂的错误码而不是编辑器。 */}
+      <DiagnosticsLog
+        diagnostics={diagnostics}
+        status={status}
+        open={logOpen}
+        onToggle={() => setLogOpen((open) => !open)}
+      />
+
       {/* ══════════ 状态栏 ══════════ */}
       <footer className="status-bar">
         <div className="statusbar__left">
@@ -3156,7 +3176,17 @@ export function App(): ReactElement {
         </div>
         <div className="statusbar__right">
           <span className="st-item st-status" role="status" title={status}>{status}</span>
-          <span className="st-item">{diagnostics.length ? `${diagnostics.length} 条诊断` : '没有诊断'}</span>
+          {/* 诊断计数此前是死文本：显示「1035 条诊断」却点不开，用户无从查看。
+              现在它是日志区的开关 —— 计数与内容必须可达，否则那个数字只是噪声。 */}
+          <button
+            type="button"
+            className="st-item st-item--button"
+            onClick={() => setLogOpen((open) => !open)}
+            aria-expanded={logOpen}
+            title={logOpen ? '收起日志' : '展开日志'}
+          >
+            {diagnostics.length ? `${diagnostics.length} 条诊断` : '没有诊断'}
+          </button>
           <span className="st-item st-ok" title="写入前自动备份">
             <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
               <path d="M12 3l7 3v5c0 4.4-3 8-7 10-4-2-7-5.6-7-10V6Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
