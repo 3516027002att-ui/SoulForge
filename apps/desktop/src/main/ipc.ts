@@ -199,6 +199,16 @@ interface UnpackedParamChild {
   entryIndex: number;
   /** 条目名（basename）。 */
   name: string;
+  /**
+   * 容器内该条目的**存储字节**哈希（read-dcx-document 报告的 contentHash）。
+   *
+   * 写回时必须原样回传给 write-bnd4 的 expectedChildHash —— C# 侧拿它比对容器
+   * 内当前条目字节，这是并发保护：两个改动都基于同一份旧字节时，后一个会被
+   * 拒绝而不是静默覆盖前一个。
+   *
+   * 注意它不等于解包产物的哈希：条目在容器里可能是压缩存储的。
+   */
+  storedContentHash: string;
 }
 const unpackedParamCache = new Map<string, UnpackedParamChild>();
 
@@ -470,7 +480,8 @@ async function unpackContainerParamChild(input: {
   const seen = new Set<string>();
   const named = entries.map((entry, position) => ({
     index: entry.index ?? position,
-    name: sanitizeEntryName(entry.name ?? `entry_${position}`, entry.index ?? position, seen)
+    name: sanitizeEntryName(entry.name ?? `entry_${position}`, entry.index ?? position, seen),
+    storedContentHash: entry.contentHash ?? ''
   }));
   // 先把联合类型解到局部常量再比较：直接在回调里访问 input.entry.index
   // 拿不到窄化后的类型（回调边界会丢失 `'index' in` 的判别结果）。
@@ -493,7 +504,12 @@ async function unpackContainerParamChild(input: {
   // 缓存键含容器哈希：容器被写回后哈希变化，旧解包不会被误用。
   const cacheKey = `${input.containerUri}#${input.containerHash}#${target.index}`;
   const cachedChild = unpackedParamCache.get(cacheKey);
-  if (cachedChild && existsSync(cachedChild.absolutePath)) {
+  // 缓存命中还要求条目哈希未变：容器被写回后条目内容会变，沿用旧的
+  // storedContentHash 会让 write-bnd4 的并发保护形同虚设（拿一个过期哈希去比对，
+  // 要么误拒要么放过本该拒绝的覆盖）。哈希不符时重新解包。
+  if (cachedChild
+    && cachedChild.storedContentHash === target.storedContentHash
+    && existsSync(cachedChild.absolutePath)) {
     return {
       ok: true,
       child: cachedChild,
@@ -561,7 +577,8 @@ async function unpackContainerParamChild(input: {
   const child: UnpackedParamChild = {
     absolutePath: outputPath,
     entryIndex: target.index,
-    name: target.name
+    name: target.name,
+    storedContentHash: target.storedContentHash
   };
   unpackedParamCache.set(cacheKey, child);
   return {
@@ -2961,6 +2978,231 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   );
 
   /**
+   * 容器内 param 的字段写入：改字段 → 重打包容器 → Patch Engine 提交。
+   *
+   * ── 为什么单独一条通道 ──
+   *
+   * resource.applyParamFieldMutation 的写目标是**裸 param 文件**；而用户实际打开
+   * 的是 parambnd 容器，改动必须回到容器里才算生效。这一段此前缺失：write-param
+   * 只能产出一个裸 param 暂存文件，没有路径把它塞回 BND4 再压 DCX。
+   *
+   * ── 三段链路，全部在 staging 完成，只有最后一步经 Patch Engine 落盘 ──
+   *
+   *   ① applyParamFieldMutation（TS）——把字段值编码进行字节，得到整行 base64；
+   *   ② write-param（C#）——以整行 upsert 产出改过的裸 param（暂存）；
+   *   ③ write-bnd4 replace（C#）——把该裸 param 按 entryIndex 塞回容器副本，
+   *      C# 侧写完会重读验证（BND4_STAGING_WRITE_VERIFIED）。
+   *
+   * ②③ 的输出都落会话 stagingRoot；真正的落盘由 applyNativeMutation 的
+   * commit port（Patch Engine）完成，含备份与回滚元数据。
+   *
+   * ── 实测（2026-08-10，mods/param/gameparam/gameparam.parambnd.dcx 副本）──
+   *
+   * 138 个条目：条目数不变，只有目标条目（index 7 = BehaviorParam）内容哈希变化，
+   * 其余 137 个字节不变，write-bnd4 重读验证通过。也就是说重打包不会波及无关条目。
+   *
+   * ── expectedChildHash 为什么必须由调用方给 ──
+   *
+   * C# 的 replace 会拿它比对容器内当前条目的存储字节（Bnd4NativeWriter 的
+   * RequireHash）。不给就没有并发保护：两个改动同时基于同一份旧字节时，
+   * 后一个会静默覆盖前一个。渲染器持有解包时的条目哈希，原样回传。
+   */
+  handle(
+    'resource.applyContainerParamFieldMutation',
+    async (
+      event,
+      containerUri: string,
+      expectedContainerHash: string,
+      mutation: {
+        entryIndex: number;
+        expectedChildHash: string;
+        rowId: number;
+        fieldId: string;
+        value: number | string | boolean;
+        rowDataBase64: string;
+        definition: unknown;
+      }
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入容器内 PARAM。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(containerUri, file);
+      if (gameBlocked) return gameBlocked;
+
+      // ① 字段值编码进行字节。定义未授信时 applyParamFieldMutation 之前就该被
+      //    渲染器挡住，但这里不依赖前端守卫 —— 它只校验行宽与 base64 合法性，
+      //    真正的授权判定在 resolveTrustedParamDefinition 给出的 origin 上。
+      const definition = mutation.definition as ParamDefDocument;
+      if (definition?.origin !== 'imported' && definition?.origin !== 'user-derived') {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_FIELD_DEFINITION_NOT_TRUSTED',
+            message: '字段定义来源未授信，拒绝写入。元数据字段偏移若与真实 PARAM 不符，'
+              + '按它写入就是往错误字节位置塞数值。请先确认信任该元数据包。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const fieldResult = applyParamFieldMutation({
+        rowDataBase64: mutation.rowDataBase64,
+        definition,
+        fieldId: mutation.fieldId,
+        value: mutation.value
+      });
+      if (!fieldResult.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: fieldResult.code,
+            message: fieldResult.message,
+            sourceUri: containerUri
+          }]
+        };
+      }
+
+      // 解包目标条目：write-param 需要一个裸 param 作为输入基底。
+      const unpacked = await unpackContainerParamChild({
+        containerPath: file.absolutePath,
+        containerUri,
+        containerHash: file.sha256 ?? expectedContainerHash,
+        entry: { index: mutation.entryIndex }
+      });
+      if (!unpacked.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: sanitizeDiagnostics(unpacked.diagnostics)
+        };
+      }
+
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const oodle = activeSession.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {};
+
+      // ② 先在暂存区产出改过的裸 param。用 stageBridgeOutput 而不是自己建目录：
+      //    它保证输出路径不逃逸、用完清理，且失败带结构化诊断。
+      const paramStage = await stageBridgeOutput({
+        stagingRoot: storage.stagingRoot,
+        prefix: 'param-field',
+        fileName: `${basename(unpacked.child.name)}.mutated`,
+        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        write: async (context) => {
+          const written = await runBridge<Record<string, unknown>>({
+            command: 'write-param',
+            filePath: unpacked.child.absolutePath,
+            allowedRoots: context.allowedRoots,
+            writableRoots: context.writableRoots,
+            timeoutMs: 120_000,
+            commandOptions: {
+              outputPath: context.outputPath,
+              mutation: 'upsert',
+              id: mutation.rowId,
+              dataBase64: fieldResult.nextDataBase64
+            }
+          });
+          return {
+            ok: written.parseStatus !== 'failed'
+              && written.diagnostics.some(
+                (diagnostic) => diagnostic.code === 'PARAM_STAGING_WRITE_VERIFIED'
+              ),
+            diagnostics: written.diagnostics
+          };
+        }
+      });
+      if (!paramStage.ok || !paramStage.bytes) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [
+            ...sanitizeDiagnostics(paramStage.result?.diagnostics ?? []),
+            ...paramStage.diagnostics.map((diagnostic) => ({
+              severity: 'error' as const,
+              code: diagnostic.code,
+              message: diagnostic.message,
+              sourceUri: containerUri
+            })),
+            {
+              severity: 'error' as const,
+              code: 'PARAM_FIELD_STAGE_FAILED',
+              message: '字段改动未能产出裸 param 暂存文件，容器未被修改。',
+              sourceUri: containerUri
+            }
+          ]
+        };
+      }
+      const mutatedChildBase64 = paramStage.bytes.toString('base64');
+
+      // ③ 把裸 param 塞回容器，经 Patch Engine 提交重打包后的容器。
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri: containerUri,
+        expectedHash: expectedContainerHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        stagingPrefix: 'parambnd',
+        stagingFileName: `${basename(file.relativePath)}.repacked`,
+        stageWrite: async (context) => {
+          const written = await runBridge<Record<string, unknown>>({
+            command: 'write-bnd4',
+            filePath: file.absolutePath,
+            resourceUri: containerUri,
+            allowedRoots: context.allowedRoots,
+            writableRoots: context.writableRoots,
+            timeoutMs: 180_000,
+            commandOptions: {
+              outputPath: context.outputPath,
+              mutation: 'replace',
+              expectedContainerHash,
+              entryIndex: mutation.entryIndex,
+              expectedChildHash: mutation.expectedChildHash,
+              contentBase64: mutatedChildBase64
+            },
+            ...oodle
+          });
+          return {
+            ok: written.parseStatus !== 'failed'
+              && written.diagnostics.some(
+                (diagnostic) => diagnostic.code === 'BND4_STAGING_WRITE_VERIFIED'
+              ),
+            diagnostics: written.diagnostics
+          };
+        },
+        title: `PARAM field ${mutation.fieldId} on row ${mutation.rowId}`
+          + ` in ${unpacked.child.name}`,
+        confirmActionLabel: '提交容器内 PARAM 字段变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+
+      if (outcome.status === 'committed' && outcome.result.ok) {
+        // 容器变了：行缓存、条目缓存与解包缓存全部失效，否则下一次读会拿到旧字节。
+        paramPageCache.delete(containerUri);
+        containerChildrenCache.clear();
+        unpackedParamCache.clear();
+      }
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  /**
    * 列出 parambnd 容器内的 param 条目（Smithbox 的 Param List 那一栏）。
    *
    * 为什么不复用 listContainerChildrenPage：那条通道服务于通用容器工作台，
@@ -3186,6 +3428,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         containerUri,
         entryIndex: unpacked.child.entryIndex,
         paramName: unpacked.child.name,
+        /**
+         * 写回所需的两个哈希，原样回传给 applyContainerParamFieldMutation。
+         *
+         * containerHash 防「容器在读与写之间被改过」，childHash 防「同一条目被
+         * 并发改过」。渲染器不自己算：它拿不到容器字节，算出来的只能是猜的。
+         */
+        containerHash: file.sha256 ?? '',
+        childHash: unpacked.child.storedContentHash,
         sourceHash: full.data.sourceHash,
         typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
         rowDataSize: full.data.rowDataSize ?? 0,

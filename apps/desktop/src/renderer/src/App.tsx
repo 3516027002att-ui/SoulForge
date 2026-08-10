@@ -2674,26 +2674,50 @@ export function App(): ReactElement {
               }}
               onApplyFieldMutation={async (input) => {
                 /*
-                 * 容器内 param 的字段写入：写回链尚未接通，如实拒绝。
+                 * 容器内 param 的字段写入：改字段 → 重打包容器 → Patch Engine 提交。
                  *
-                 * 缺的是最后一段：write-param 能产出一个裸 .param 暂存文件，
-                 * 但没有路径把它塞回 BND4 再压 DCX。零件齐备（C# write-bnd4、
-                 * containerChildReplaceWriter 已认 BND4_DFLT/BND4_KRAK），
-                 * 但 resource.replaceContainerChild 的 handler 走的是 TS
-                 * synthetic 路径，没接到那个 writer。
+                 * 走 resource.applyContainerParamFieldMutation（main 侧三段链：
+                 * applyParamFieldMutation 编码 → write-param 出裸 param →
+                 * write-bnd4 replace 塞回容器）。两个哈希原样透传，是并发保护凭据。
                  *
-                 * 这里返回失败而不是静默丢弃，也不伪造成功 —— 让用户以为改动
-                 * 已提交、实际什么都没发生，比明确拒绝糟糕得多。
+                 * 直接调 IPC 而不经 changeStore：这条写入本身已经过 main 的确认端口
+                 * （electronConfirmationPort）与 Patch Engine 的备份/回滚，再套一层
+                 * 候选队列会变成双重确认。行级 mutation 走队列是因为它在渲染器侧
+                 * 攒批，字段写入是即时单条。
                  */
-                setStatus(
-                  `PARAM 字段写回容器尚未接通：${input.paramName} 行 ${input.rowId} 的`
-                  + ` ${input.fieldId} 未提交。缺 BND4 回写链（裸 param 暂存已可产出）。`
+                if (!bridge || typeof bridge.applyContainerParamFieldMutation !== 'function') {
+                  return { ok: false, message: '容器 PARAM 字段写入通道不可用。' };
+                }
+                if (!input.expectedContainerHash || !input.expectedChildHash) {
+                  // 缺哈希就不能保证并发安全，宁可拒绝也不无保护地写。
+                  return {
+                    ok: false,
+                    message: '缺少容器或条目哈希，拒绝写入（无法保证并发安全）。请重新选择该 param。'
+                  };
+                }
+                const saved = await bridge.applyContainerParamFieldMutation(
+                  selectedFile.sourceUri,
+                  input.expectedContainerHash,
+                  {
+                    entryIndex: input.entryIndex,
+                    expectedChildHash: input.expectedChildHash,
+                    rowId: input.rowId,
+                    fieldId: input.fieldId,
+                    value: input.value,
+                    rowDataBase64: input.rowDataBase64,
+                    definition: input.definition
+                  }
                 );
-                return {
-                  ok: false,
-                  message: '字段写回 parambnd 容器的链路尚未接通：write-param 可产出裸 param'
-                    + ' 暂存文件，但缺少「塞回 BND4 再压 DCX」这一段。改动未提交。'
-                };
+                if (saved.ok) {
+                  setStatus(
+                    `PARAM 字段已写入：${input.paramName} 行 ${input.rowId} 的 ${input.fieldId}。`
+                  );
+                  void refreshOperationHistory();
+                  return { ok: true };
+                }
+                const message = saved.diagnostics?.[0]?.message ?? 'PARAM 字段写入失败。';
+                setStatus(`PARAM 字段写入失败：${message}`);
+                return { ok: false, message };
               }}
             />
           )}

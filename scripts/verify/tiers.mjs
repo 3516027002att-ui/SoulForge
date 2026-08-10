@@ -331,6 +331,15 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 证据区不渲染因而用例只能恒红。留一条永远红的 e2e 比没有更糟，改为静态判据。
   // 纯静态读 App.tsx，归 unit。
   'test:editor-layout': 'unit',
+  // 容器内 PARAM 字段写回的生产调用链。守的是本仓库出过的同源事故形态：
+  // 能力做好了但只接进自检路径，生产落盘零调用——「报告说修好了、产物没修」。
+  // 这条链跨 5 段（渲染器出口 → IPC handler → 字段编码 → write-param →
+  // write-bnd4 塞回容器 → Patch Engine），任何一段没接上，界面都会显示
+  // 「已写入」而容器没变，用户按它继续改会让错误累积。
+  //
+  // 用与 desktop-ipc-contract 同一套真实执行观测（加载 out/main 生产产物），
+  // 因此需要构建产物，归 synthetic。
+  'test:container-param-writeback': 'synthetic',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。

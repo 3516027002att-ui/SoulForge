@@ -185,7 +185,8 @@
     "test:agent-permission-unified": "node scripts/verify-agent-permission-unified-gate.mjs",
     "test:plaintext-script-write": "npm run test:plaintext-script-write -w @soulforge/core",
     "test:bridge-optional-args": "node scripts/verify-bridge-optional-args-gate.mjs",
-    "test:editor-layout": "node scripts/verify-editor-layout-gate.mjs"
+    "test:editor-layout": "node scripts/verify-editor-layout-gate.mjs",
+    "test:container-param-writeback": "node scripts/verify-container-param-writeback.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

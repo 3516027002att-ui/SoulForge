@@ -64,10 +64,17 @@ export interface ParamWorkbenchProps {
    * main 侧的权威路径，渲染器不该自行拼装。
    */
   resolveDefinition?: (typeName: string, rowDataSize: number) => ParamDefDocument | null;
-  /** 字段写入出口。缺省即只读。 */
+  /**
+   * 字段写入出口。缺省即只读。
+   *
+   * 两个哈希由本组件从 readContainerParamPage 取得并透传，宿主原样交给
+   * applyContainerParamFieldMutation —— 它们是并发保护的凭据，不是可选装饰。
+   */
   onApplyFieldMutation?: (input: {
     paramName: string;
     entryIndex: number;
+    expectedContainerHash: string;
+    expectedChildHash: string;
     rowId: number;
     fieldId: string;
     value: number | string | boolean;
@@ -99,6 +106,15 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [rowDataSize, setRowDataSize] = useState(0);
   const [paramName, setParamName] = useState<string | null>(null);
   const [pageDiagnostics, setPageDiagnostics] = useState<string[]>([]);
+  /**
+   * 写回所需的两个哈希，由 readContainerParamPage 给出，写入时原样回传。
+   *
+   * 渲染器不自己算：它拿不到容器字节。容器哈希防「读与写之间容器被改过」，
+   * 条目哈希防「同一条目被并发改过」—— 缺它们就没有并发保护，两个基于同一份
+   * 旧字节的改动会互相静默覆盖。
+   */
+  const [containerHash, setContainerHash] = useState<string>('');
+  const [childHash, setChildHash] = useState<string>('');
 
   const [selectedRowId, setSelectedRowId] = useState<number | null>(null);
   const [fieldPage, setFieldPage] = useState(0);
@@ -214,6 +230,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           setTypeName(result.typeName ?? null);
           setRowDataSize(result.rowDataSize ?? 0);
           setParamName(result.paramName ?? null);
+          setContainerHash(result.containerHash ?? '');
+          setChildHash(result.childHash ?? '');
           setRowsError(null);
           // 只展示 info/warning 里对用户有行动意义的那部分（例如「本页无字节」）。
           setPageDiagnostics(
@@ -327,6 +345,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       const result = await props.onApplyFieldMutation({
         paramName: paramName ?? '',
         entryIndex: selectedEntry,
+        expectedContainerHash: containerHash,
+        expectedChildHash: childHash,
         rowId: selectedRow.id,
         fieldId: field.id,
         // 数值字段按数值提交；解析失败时原样传字符串，由 main 侧的编码器给出

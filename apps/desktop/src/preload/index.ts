@@ -290,6 +290,9 @@ const api = {
     entryIndex: number;
     paramName?: string;
     typeName: string | null;
+    /** 写回所需：容器与条目的当前哈希，原样回传即可。 */
+    containerHash?: string;
+    childHash?: string;
   }> => ipcRenderer.invoke(
     'resource.readContainerParamPage',
     containerUri,
@@ -297,6 +300,31 @@ const api = {
     page,
     pageSize,
     query
+  ),
+  /**
+   * 容器内 param 的字段写入：改字段 → 重打包容器 → Patch Engine 提交。
+   *
+   * 与 applyParamFieldMutation 的区别是写目标：那条写裸 param 文件，这条写
+   * 用户实际打开的 parambnd 容器。两个哈希来自 readContainerParamPage，
+   * 用于并发保护（容器或条目在读写之间被改过时拒绝而非静默覆盖）。
+   */
+  applyContainerParamFieldMutation: (
+    containerUri: string,
+    expectedContainerHash: string,
+    mutation: {
+      entryIndex: number;
+      expectedChildHash: string;
+      rowId: number;
+      fieldId: string;
+      value: number | string | boolean;
+      rowDataBase64: string;
+      definition: unknown;
+    }
+  ): Promise<RendererSaveResult> => ipcRenderer.invoke(
+    'resource.applyContainerParamFieldMutation',
+    containerUri,
+    expectedContainerHash,
+    mutation
   ),
   applyParamMutation: (
     sourceUri: string,
