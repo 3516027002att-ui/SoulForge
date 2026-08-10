@@ -233,6 +233,30 @@ const api = {
     ipcRenderer.invoke('resource.applyMsbMutation', sourceUri, expectedHash, mutation),
   readParamDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readParamDocument', sourceUri),
+  /**
+   * 当前 PARAM 元数据包的身份与信任状态。
+   *
+   * 界面据此决定是否显示「信任该元数据包」的一次性确认入口 —— 字段写入必须
+   * 先经这一步，因为元数据的字段偏移若与真实 PARAM 不符，按它写入就是往错误
+   * 字节位置塞数值。
+   */
+  getParamMetadataTrustState: (): Promise<{
+    ok: boolean;
+    trusted: boolean;
+    packageId: string | null;
+    packageVersion: string | null;
+    sourceIdentity?: string | null;
+    sourceRevision?: string | null;
+    licenseSpdxExpression?: string | null;
+    confirmedAt?: string;
+    diagnostics: Diagnostic[];
+  }> => ipcRenderer.invoke('param.metadata.trustState'),
+  /** 记录/撤销对当前元数据包的信任。信任绑定到包摘要，包变化会要求重新确认。 */
+  setParamMetadataTrust: (trusted: boolean): Promise<{
+    ok: boolean;
+    trusted?: boolean;
+    diagnostics: Diagnostic[];
+  }> => ipcRenderer.invoke('param.metadata.setTrust', trusted),
   readParamPage: (
     sourceUri: string,
     page: number,

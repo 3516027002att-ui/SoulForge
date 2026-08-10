@@ -31,10 +31,17 @@ import type {
   ParamMetadataTrustPolicy
 } from '@soulforge/shared';
 
-/** app_settings 里的键。改它会让既有确认失效,等同要求用户重新确认。 */
+/** 设置键。改它会让既有确认失效,等同要求用户重新确认。 */
 export const PARAM_METADATA_TRUST_SETTING_KEY = 'param.metadata.trustPolicy.v1';
 
-/** 仅需 app_settings 的读写,不依赖 better-sqlite3 的具体类型。 */
+/**
+ * 键值读写抽象,不依赖具体存储实现。
+ *
+ * 刻意只要求这三个同步方法:app.db 的 app_settings 可以实现它,
+ * userData 下的独立 JSON 文件也可以。桌面端实际用后者 —— 信任决定是一条
+ * 单值用户设置,不需要事务,也不该把「能不能打开 PARAM 字段视图」耦合到
+ * 数据库工具子进程的可用性上。
+ */
 export interface AppSettingsStore {
   get(key: string): string | undefined;
   set(key: string, valueJson: string, updatedAt: string): void;

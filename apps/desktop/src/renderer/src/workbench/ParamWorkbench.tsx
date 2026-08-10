@@ -106,6 +106,44 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [commitMessage, setCommitMessage] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
 
+  /**
+   * 元数据包的信任状态。
+   *
+   * 字段写入要放行必须先经用户确认这一步 —— 元数据的字段偏移若与真实 PARAM
+   * 不符，按它写入就是往错误字节位置塞数值，存出来的 param 静默损坏。
+   * 这个风险与「谁在改」无关：手动改也一样错，所以不能按操作者身份豁免。
+   *
+   * 「这个文件是不是那个发布」由机器校验（导入器核对归档/源树/许可证三个摘要）；
+   * 「你愿不愿意用它」只能由用户回答。确认一次后本机后续都放行，
+   * 包内容变化（升级、被替换）会因摘要不符而重新询问。
+   */
+  const [trustState, setTrustState] = useState<{
+    ok: boolean;
+    trusted: boolean;
+    packageId: string | null;
+    packageVersion: string | null;
+    confirmedAt?: string;
+  } | null>(null);
+  const [trustBusy, setTrustBusy] = useState(false);
+
+  const loadTrustState = useCallback(() => {
+    if (!bridge || typeof bridge.getParamMetadataTrustState !== 'function') return;
+    bridge.getParamMetadataTrustState()
+      .then((result) => setTrustState({
+        ok: result.ok,
+        trusted: result.trusted,
+        packageId: result.packageId,
+        packageVersion: result.packageVersion,
+        ...(result.confirmedAt ? { confirmedAt: result.confirmedAt } : {})
+      }))
+      .catch(() => setTrustState(null));
+  }, [bridge]);
+
+  useEffect(() => {
+    loadTrustState();
+  }, [loadTrustState]);
+
+
   // ── 左栏：容器内 param 列表 ──
   useEffect(() => {
     if (!bridge || typeof bridge.listContainerParams !== 'function' || !props.containerUri) return;
@@ -200,6 +238,29 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     const dispose = loadRows();
     return dispose;
   }, [loadRows]);
+
+  /**
+   * 记录/撤销信任。定义在 loadRows 之后，因为它要在成功后重新取行 ——
+   * origin 变化会改变字段写入的放行状态。
+   */
+  async function confirmTrust(next: boolean): Promise<void> {
+    if (!bridge || typeof bridge.setParamMetadataTrust !== 'function') return;
+    setTrustBusy(true);
+    setCommitMessage(null);
+    try {
+      const result = await bridge.setParamMetadataTrust(next);
+      if (!result.ok) {
+        setCommitMessage(result.diagnostics?.[0]?.message ?? '信任决定记录失败。');
+      } else {
+        loadTrustState();
+        loadRows();
+      }
+    } catch (error) {
+      setCommitMessage(error instanceof Error ? error.message : '信任决定记录异常。');
+    } finally {
+      setTrustBusy(false);
+    }
+  }
 
   // ── 右栏：选中行的字段 ──
   const definition = useMemo(() => {
@@ -485,8 +546,16 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const footerMessages = [
     ...pageDiagnostics,
     ...(commitMessage ? [commitMessage] : []),
+    // 只读原因必须说清下一步动作。只说「未授信」会让用户以为功能坏了，
+    // 而实际上点一次工具栏的确认按钮就能启用。行字节缺失是另一回事（翻页可解）。
     ...(selectedRowId !== null && definition !== null && !canCommitFields
-      ? ['字段写入未放行：字段定义来源尚未授信，或行字节缺失。数值可读，提交已关闭。']
+      ? [
+          selectedRow?.dataBase64 === undefined
+            ? '字段写入未放行：本行字节未随分页下发。'
+            : trustState?.trusted === false
+              ? '字段写入未放行：点击右上角「信任此元数据包」确认一次即可启用（只需一次）。'
+              : '字段写入未放行：字段定义来源未通过校验。数值可读，提交已关闭。'
+        ]
       : [])
   ];
 
@@ -501,6 +570,33 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           <span className="toolbar-spacer" style={{ flex: 1 }}></span>
           {rowDataSize > 0 && (
             <span className="muted" style={{ fontSize: 11 }}>行大小 {rowDataSize} 字节</span>
+          )}
+          {/* 信任确认入口：只在包可用且尚未确认时出现。
+              确认一次后本机后续都放行，所以这里不做常驻按钮 —— 常驻会让用户
+              以为每次编辑都要点一下。已确认时给一个可撤销的轻量指示。 */}
+          {trustState?.ok === true && trustState.trusted === false && (
+            <button
+              type="button"
+              className="primary-action"
+              disabled={trustBusy}
+              onClick={() => void confirmTrust(true)}
+              title={`信任 ${trustState.packageId ?? '元数据包'} ${trustState.packageVersion ?? ''}`}
+            >
+              信任此元数据包以启用字段编辑
+            </button>
+          )}
+          {trustState?.trusted === true && (
+            <button
+              type="button"
+              className="secondary-action"
+              disabled={trustBusy}
+              onClick={() => void confirmTrust(false)}
+              title={trustState.confirmedAt
+                ? `已于 ${trustState.confirmedAt} 确认；点击撤销`
+                : '点击撤销信任'}
+            >
+              字段编辑已启用
+            </button>
           )}
         </>
       }

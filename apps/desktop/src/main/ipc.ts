@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -7,6 +7,12 @@ import { fileURLToPath } from 'node:url';
 import {
   analyzeWorkspace,
   buildAiSidebarDraft,
+  buildTrustPolicyFromPackage,
+  clearTrustDecision,
+  readTrustDecision,
+  trustCoversPackage,
+  writeTrustDecision,
+  type AppSettingsStore,
   createAgentToolBridge,
   createConfiguredModelServiceAdapter,
   createDefaultToolRegistry,
@@ -2293,6 +2299,190 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   };
 
+  /**
+   * PARAM 元数据信任决定的持久化：userData 下的独立 JSON。
+   *
+   * 为什么不进 app.db：信任决定是一条单值用户设置，不需要事务；而 app.db 走
+   * OperationLogUtilityClient 子进程，把它当宿主会让「能不能打开 PARAM 字段
+   * 视图」耦合到那个子进程的可用性上。核心逻辑（摘要比对、策略构造）在
+   * core 的 paramMetadataTrustStore 里，与存储介质无关。
+   *
+   * 读失败一律当「未确认」而不抛：一条坏掉的设置不该让 PARAM 打不开，
+   * 而重新问一次用户比猜测一个残缺策略的含义安全。
+   */
+  const trustSettingsPath = join(app.getPath('userData'), 'param-metadata-trust.json');
+  const trustSettingsStore: AppSettingsStore = {
+    get(key) {
+      try {
+        const raw = readFileSync(trustSettingsPath, 'utf8');
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const value = parsed[key];
+        return typeof value === 'string' ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    set(key, valueJson) {
+      let existing: Record<string, unknown> = {};
+      try {
+        existing = JSON.parse(readFileSync(trustSettingsPath, 'utf8')) as Record<string, unknown>;
+      } catch {
+        existing = {};
+      }
+      existing[key] = valueJson;
+      writeFileSync(trustSettingsPath, JSON.stringify(existing, null, 2), 'utf8');
+    },
+    delete(key) {
+      try {
+        const existing = JSON.parse(readFileSync(trustSettingsPath, 'utf8')) as Record<string, unknown>;
+        delete existing[key];
+        writeFileSync(trustSettingsPath, JSON.stringify(existing, null, 2), 'utf8');
+      } catch {
+        // 文件不存在或已损坏：删除是幂等的，无事可做。
+      }
+    }
+  };
+
+  /**
+   * 走**正规**路径取字段定义：包校验 → 描述符匹配 → 用户信任策略。
+   *
+   * 此前生产侧是 `definitions.find((e) => e.document.typeName === typeName)`，
+   * 绕过了 matchParamMetadataPackage 的五键严格匹配、包摘要与信任策略三层检查。
+   * 那三层守的是「两台机器拿到同名但内容不同的元数据包」—— 偏移对不上就是
+   * 往错误字节位置写数值，存出来的 param 静默损坏。
+   *
+   * 返回的 origin 决定渲染器是否放行字段写入：
+   *   · 用户已信任该包 → 'imported'，写入放行；
+   *   · 未确认 / 摘要不符 → 保持只读，并带出可行动的诊断码。
+   */
+  const resolveTrustedParamDefinition = async (
+    typeName: string,
+    rowDataSize: number
+  ): Promise<{
+    document: ParamDefDocument | null;
+    trusted: boolean;
+    diagnostic: { code: string; message: string } | null;
+  }> => {
+    const metadata = await loadParamMetadata();
+    if (!metadata.package) {
+      return { document: null, trusted: false, diagnostic: metadata.diagnostic };
+    }
+    const decision = readTrustDecision(trustSettingsStore);
+    const covered = trustCoversPackage(decision, metadata.package);
+    const entry = metadata.package.definitions
+      .find((candidate) => candidate.document.typeName === typeName);
+    if (!entry) {
+      return {
+        document: null,
+        trusted: covered,
+        diagnostic: {
+          code: 'PARAM_METADATA_TYPE_NOT_FOUND',
+          message: `元数据包里没有类型 ${typeName} 的字段定义。`
+        }
+      };
+    }
+    if (entry.document.rowDataSize !== rowDataSize) {
+      return {
+        document: null,
+        trusted: covered,
+        diagnostic: {
+          code: 'PARAM_METADATA_ROW_WIDTH_MISMATCH',
+          message: `字段定义行宽（${entry.document.rowDataSize}）与真实 PARAM（${rowDataSize}）不一致，`
+            + '不做解码 —— 用错位的布局解释字节会产出看似合理但完全错误的数值。'
+        }
+      };
+    }
+    if (!covered) {
+      return {
+        document: { ...entry.document, origin: 'fixture' },
+        trusted: false,
+        diagnostic: {
+          code: 'PARAM_METADATA_TRUST_POLICY_REQUIRED',
+          message: '字段定义可读但写入未放行：尚未确认信任该元数据包。'
+            + ' 确认一次后本机后续都放行（包内容变化会要求重新确认）。'
+        }
+      };
+    }
+    return { document: { ...entry.document, origin: 'imported' }, trusted: true, diagnostic: null };
+  };
+
+  /** 当前元数据包的身份与信任状态，供界面显示确认入口。 */
+  handle('param.metadata.trustState', async () => {
+    const metadata = await loadParamMetadata();
+    if (!metadata.package) {
+      return {
+        ok: false,
+        trusted: false,
+        packageId: null,
+        packageVersion: null,
+        diagnostics: metadata.diagnostic
+          ? [{
+              severity: 'error' as const,
+              code: metadata.diagnostic.code,
+              message: metadata.diagnostic.message
+            }]
+          : []
+      };
+    }
+    const decision = readTrustDecision(trustSettingsStore);
+    return {
+      ok: true,
+      trusted: trustCoversPackage(decision, metadata.package),
+      packageId: metadata.package.packageId,
+      packageVersion: metadata.package.packageVersion,
+      sourceIdentity: metadata.package.source?.identity ?? null,
+      sourceRevision: metadata.package.source?.revision ?? null,
+      licenseSpdxExpression: metadata.package.license?.spdxExpression ?? null,
+      ...(decision ? { confirmedAt: decision.confirmedAt } : {}),
+      diagnostics: []
+    };
+  });
+
+  /**
+   * 记录用户对当前元数据包的信任决定。
+   *
+   * 「这个文件是不是那个发布」由钉死策略校验（导入器已核对归档摘要、源树摘要与
+   * 许可证摘要）；「你愿不愿意用它」只能由用户回答，应用不预置。
+   * 信任绑定到三个摘要而不是包名：包升级或被替换后摘要变化，旧决定不再覆盖，
+   * 会重新询问。
+   */
+  handle('param.metadata.setTrust', async (_event, trusted: boolean) => {
+    const metadata = await loadParamMetadata();
+    if (!metadata.package) {
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: metadata.diagnostic?.code ?? 'PARAM_METADATA_UNAVAILABLE',
+          message: metadata.diagnostic?.message ?? '元数据包不可用，无法记录信任决定。'
+        }]
+      };
+    }
+    if (!trusted) {
+      clearTrustDecision(trustSettingsStore);
+      return { ok: true, trusted: false, diagnostics: [] };
+    }
+    const built = buildTrustPolicyFromPackage(
+      metadata.package,
+      `USER_CONFIRMED_${metadata.package.packageId}_${metadata.package.packageVersion}`
+    );
+    if (!built.ok) {
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: built.code,
+          message: built.message
+        }]
+      };
+    }
+    writeTrustDecision(trustSettingsStore, {
+      policy: built.policy,
+      confirmedAt: new Date().toISOString()
+    });
+    return { ok: true, trusted: true, diagnostics: [] };
+  });
+
   handle('resource.readParamDocument', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
@@ -2313,24 +2503,25 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         : [dirname(file.absolutePath)],
       maxRows: 500
     });
-    // 字段定义：按 typeName 从 Smithbox SDT 元数据里找对应 paramdef。
+    // 字段定义：走 resolveTrustedParamDefinition（包校验 + 行宽核对 + 用户信任
+    // 策略），不再直接 definitions.find(...) 绕过那三层检查。
     //
     // 缺失不影响行数据返回 —— 那部分来自 native 解析，是权威的。fieldDefs 为
     // null 时界面显示「无字段定义」并说明原因，而不是一个空的第三列。
-    const metadata = await loadParamMetadata();
-    const typeName = result.data?.typeName ?? '';
+    //
     // definitions[].document 才是 ParamDefDocument —— definitions[] 本身只有
     // key/digest/document 三项。逐字段核对过 shared/paramdef.ts，没有靠猜：
     // 第一版我写成 def.typeName、f.enumId、f.bitSize，三处全错（真实为
     // def.document.typeName、f.enumRef、f.bitfield）。IPC 边界上这类错误
     // typecheck 未必拦得住，只表现为「字段列空着」。
-    const paramDef = metadata.package && typeName
-      ? metadata.package.definitions
-        .find((entry) => entry.document.typeName === typeName)?.document ?? null
-      : null;
-    const rowWidthMatches = paramDef !== null
-      && result.data !== undefined
-      && paramDef.rowDataSize === result.data.rowDataSize;
+    const typeName = result.data?.typeName ?? '';
+    const resolved = typeName && result.data
+      ? await resolveTrustedParamDefinition(typeName, result.data.rowDataSize)
+      : { document: null, trusted: false, diagnostic: null };
+    const paramDef = resolved.document;
+    // 行宽已在 resolveTrustedParamDefinition 里核对过：拿到 document 就意味着
+    // 行宽一致，拿不到时它给出 ROW_WIDTH_MISMATCH 诊断。
+    const rowWidthMatches = paramDef !== null;
 
     return sanitizeRendererValue({
       ok: result.ok,
@@ -2363,21 +2554,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             values: enumDef.values.map((value) => ({ value: value.value, label: value.label }))
           }))
         : null,
-      fieldDefsDiagnostic: rowWidthMatches
-        ? null
-        : paramDef !== null && result.data !== undefined
-          ? {
-              code: 'PARAM_METADATA_ROW_WIDTH_MISMATCH',
-              message: `字段定义的行宽 ${paramDef.rowDataSize} 与实际 `
-                + `${result.data.rowDataSize} 不一致，已拒绝解码 —— `
-                + '用错位布局解释字节会产出看似合理但错误的数值。'
-            }
-          : metadata.diagnostic ?? (typeName
-            ? {
-                code: 'PARAM_METADATA_TYPE_NOT_FOUND',
-                message: `Smithbox SDT 元数据里没有类型 ${typeName} 的字段定义。`
-              }
-            : null),
+      // 诊断统一来自 resolveTrustedParamDefinition：它区分「包不可用」
+      // 「类型不存在」「行宽不符」「尚未授信」四种情形，各自给出可行动的码。
+      // 尤其「尚未授信」不是故障 —— 字段可读、只是写入未放行，文案必须说清
+      // 下一步动作（确认一次），否则用户会以为功能坏了。
+      fieldDefsDiagnostic: resolved.diagnostic,
+      /**
+       * 字段定义的授信状态。渲染器据此决定是否放行字段写入。
+       *
+       * origin 是 'imported' 才放行 —— 这个值不是渲染器自己拼的，而是主进程
+       * 在包校验、行宽核对与用户信任策略都通过后才给出的。
+       */
+      fieldDefsOrigin: paramDef?.origin ?? null,
+      fieldDefsTrusted: resolved.trusted,
       data: result.data
         ? {
             sourceHash: result.data.sourceHash,

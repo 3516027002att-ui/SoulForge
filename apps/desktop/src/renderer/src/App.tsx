@@ -303,6 +303,16 @@ export function App(): ReactElement {
    * 那等于用一个字段名换掉一道授权检查。
    */
   const [paramFieldDefs, setParamFieldDefs] = useState<ParamFieldDef[] | null>(null);
+  /**
+   * 字段定义的授信来源。'imported'/'user-derived' 放行字段写入，'fixture' 只读。
+   *
+   * 值来自主进程（包校验 + 行宽核对 + 用户信任策略三层都通过才给 'imported'），
+   * 渲染器只做白名单收窄，不自行判定 —— 自行拼这个值等于用一个字段名换掉
+   * 一道授权检查，而那道检查守的是「元数据字段偏移与真实 PARAM 是否对得上」。
+   */
+  const [paramFieldDefsOrigin, setParamFieldDefsOrigin] = useState<
+    'fixture' | 'imported' | 'user-derived'
+  >('fixture');
   const [paramFieldDefsDiagnostic, setParamFieldDefsDiagnostic] = useState<
     { code: string; message: string } | null
   >(null);
@@ -428,13 +438,17 @@ export function App(): ReactElement {
   /**
    * 交给 ParamDefPanel 的字段定义。
    *
-   * origin 刻意保持 `'fixture'` 而不是 `'imported'`：ParamDefPanel 的
-   * definitionCanCommit 靠 origin 决定是否放行字段写入，而当前这份定义是**直连**
-   * 取得的——未经 matchParamMetadataPackage 的包校验、描述符匹配与用户信任策略
-   * 三层检查（生产侧还没有信任策略的构造代码）。
+   * origin 来自主进程的 fieldDefsOrigin（见 paramFieldDefsOrigin 的注释）：
+   * 它在 matchParamMetadataPackage 的包校验、行宽核对与用户信任策略三层都通过后
+   * 才给出 'imported'，否则是 'fixture'（只读）。
    *
-   * 把 origin 写成 'imported' 会让写入放行，那等于用一个字段名换掉一道授权检查。
-   * 所以这里是「读得到、改不了」：字段名与数值可见，写入待用户裁定信任策略后再开。
+   * 此前这里硬写 'fixture'，因为生产侧缺少信任策略的构造代码，于是字段编辑
+   * 恒为只读。现在那一环已接线（param.metadata.trustState / setTrust），
+   * 用户确认一次后本机后续都放行；包内容变化会因摘要不符而重新询问。
+   *
+   * 仍然不在渲染器里自行判定 origin —— 那等于用一个字段名换掉一道授权检查，
+   * 而那道检查守的是「元数据字段偏移与真实 PARAM 是否对得上」：偏移错了
+   * 就是往错误字节位置写数值，存出来的 param 静默损坏。
    */
   const paramFieldDefinition = useMemo<ParamDefDocument | null>(() => {
     if (!paramFieldDefs || paramFieldDefs.length === 0) return null;
@@ -443,10 +457,10 @@ export function App(): ReactElement {
       typeName: paramTypeName,
       version: 0,
       rowDataSize: paramRowDataSize,
-      origin: 'fixture',
+      origin: paramFieldDefsOrigin,
       fields: paramFieldDefs
     };
-  }, [paramFieldDefs, paramTypeName, paramRowDataSize]);
+  }, [paramFieldDefs, paramTypeName, paramRowDataSize, paramFieldDefsOrigin]);
   const editDirty = editText !== lastSavedText;
   const changeStore = useMemo(() => new ChangeControlStore(), []);
   const changeState = useSyncExternalStore(changeStore.subscribe, changeStore.getState);
@@ -651,6 +665,12 @@ export function App(): ReactElement {
           // ——那正是「字段列空着但没有任何错误」的形态。
           fieldDefs?: ParamFieldDef[] | null;
           fieldDefsDiagnostic?: { code?: string; message?: string } | null;
+          /**
+           * 字段定义的授信来源，由主进程在包校验 + 行宽核对 + 用户信任策略
+           * 都通过后给出。'imported' 才放行字段写入 —— 渲染器不自行拼这个值，
+           * 那等于用一个字段名换掉一道授权检查。
+           */
+          fieldDefsOrigin?: string | null;
         };
         if (cancelled) return;
         if (!result?.ok || !result.data?.rows?.length) {
@@ -667,6 +687,13 @@ export function App(): ReactElement {
         // 只会表现为「字段列空着」而 typecheck 照过（本轮接线已踩过四次）。
         setParamFieldDefs(Array.isArray(result.fieldDefs) ? result.fieldDefs : null);
         setParamRowDataSize(result.data.rowDataSize ?? 0);
+        // 只接受主进程给出的两个合法值，其余一律降级为 fixture（只读）。
+        // 白名单而不是直接透传：透传意味着后端将来多返回一个值就可能意外放行写入。
+        setParamFieldDefsOrigin(
+          result.fieldDefsOrigin === 'imported' || result.fieldDefsOrigin === 'user-derived'
+            ? result.fieldDefsOrigin
+            : 'fixture'
+        );
         setParamFieldDefsDiagnostic(
           result.fieldDefsDiagnostic
             && typeof result.fieldDefsDiagnostic.code === 'string'
@@ -2640,8 +2667,32 @@ export function App(): ReactElement {
                   typeName,
                   version: 0,
                   rowDataSize: paramRowDataSize,
-                  origin: 'fixture',
+                  // 授信来源由主进程裁定，不在此处硬写（见 paramFieldDefsOrigin）。
+                  origin: paramFieldDefsOrigin,
                   fields: paramFieldDefs
+                };
+              }}
+              onApplyFieldMutation={async (input) => {
+                /*
+                 * 容器内 param 的字段写入：写回链尚未接通，如实拒绝。
+                 *
+                 * 缺的是最后一段：write-param 能产出一个裸 .param 暂存文件，
+                 * 但没有路径把它塞回 BND4 再压 DCX。零件齐备（C# write-bnd4、
+                 * containerChildReplaceWriter 已认 BND4_DFLT/BND4_KRAK），
+                 * 但 resource.replaceContainerChild 的 handler 走的是 TS
+                 * synthetic 路径，没接到那个 writer。
+                 *
+                 * 这里返回失败而不是静默丢弃，也不伪造成功 —— 让用户以为改动
+                 * 已提交、实际什么都没发生，比明确拒绝糟糕得多。
+                 */
+                setStatus(
+                  `PARAM 字段写回容器尚未接通：${input.paramName} 行 ${input.rowId} 的`
+                  + ` ${input.fieldId} 未提交。缺 BND4 回写链（裸 param 暂存已可产出）。`
+                );
+                return {
+                  ok: false,
+                  message: '字段写回 parambnd 容器的链路尚未接通：write-param 可产出裸 param'
+                    + ' 暂存文件，但缺少「塞回 BND4 再压 DCX」这一段。改动未提交。'
                 };
               }}
             />
@@ -2710,8 +2761,9 @@ export function App(): ReactElement {
               {paramLive && paramFieldDefinition !== null && (
                 <p className="muted" data-testid="param-fielddefs-readonly">
                   字段定义来自 Smithbox SDT 2.2.4（{paramFieldDefinition.fields.length} 个字段）。
-                  当前**只读**：该定义经直连取得，未走用户信任策略校验，
-                  故字段写入尚未开放。行级编辑不受影响。
+                  {paramFieldDefsOrigin === 'fixture'
+                    ? '字段写入未放行：尚未确认信任该元数据包，在 param 容器工作台里确认一次即可启用。行级编辑不受影响。'
+                    : '字段写入已放行：该定义已通过包校验、行宽核对与用户信任策略。'}
                 </p>
               )}
               {paramLive && paramFieldDefinition === null && paramFieldDefsDiagnostic !== null && (

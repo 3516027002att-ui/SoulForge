@@ -69,6 +69,7 @@ export * from './resource-graph/index.js';
 export * from './param/paramdefLayout.js';
 export * from './param/paramMetadata.js';
 export * from './param/paramFieldMutation.js';
+export * from './param/paramMetadataTrustStore.js';
 export * from './param/smithboxParamMetadataSource.js';
 export * from './runtime/gameRuntimeAdapter.js';
 export * from './runtime/me3RuntimeAdapter.js';
