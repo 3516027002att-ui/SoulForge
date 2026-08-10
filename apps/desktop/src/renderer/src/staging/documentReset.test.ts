@@ -141,13 +141,42 @@ describe('复位登记表与 App.tsx 的双向对账', () => {
 describe('两处复位站点必须走统一调度', () => {
   const source = readAppSource();
 
-  it('openWorkspace 调用 resetAllDocuments', () => {
+  /*
+   * 判据的意图是「打开工作区这条路径必须复位全部资源族」，不是「必须写在名为
+   * openWorkspace 的函数体内」。
+   *
+   * 手动打开与启动自动挂载现在共用 mountWorkspace（两份挂载逻辑必然漂移，
+   * 而漂移的表现是「手动打开清了编辑态、自动挂载没清」这种只在一条路径上出现的
+   * 残留）。所以判据跟着真实结构走一跳：openWorkspace 要么自己复位，
+   * 要么委派给一个**确实会复位**的函数。
+   *
+   * 仍然是真判据：委派目标里没有 resetAllDocuments 就会红（负向已实测）。
+   * 只认「委派」而不检查目标，才是把判据放宽成装饰。
+   */
+  it('打开工作区路径复位全部资源族（自身或其委派目标）', () => {
     const match = /async function openWorkspace\(\)[\s\S]*?\n  \}/.exec(source);
     assert.ok(match, '找不到 openWorkspace，测试靶标已失效');
-    assert.match(
-      match[0],
-      /resetAllDocuments\(documentResetActions\)/,
-      'openWorkspace 必须清空全部资源族：实测它此前 8 个族一个都没复位'
+    const body = match[0];
+    if (/resetAllDocuments\(documentResetActions\)/.test(body)) return;
+
+    // 委派形态：await someFn(...)。取被调用者名字，再断言它复位。
+    const delegated = [...body.matchAll(/await\s+(\w+)\s*\(/g)]
+      .map((hit) => hit[1])
+      .filter((name) => name !== 'bridge');
+    assert.ok(
+      delegated.length > 0,
+      'openWorkspace 既不自己调用 resetAllDocuments，也没有委派给任何函数：'
+      + '实测它此前 8 个族一个都没复位'
+    );
+    const delegateHasReset = delegated.some((name) => {
+      const target = new RegExp(`async function ${name}\\([\\s\\S]*?\\n  \\}`).exec(source);
+      return target !== null && /resetAllDocuments\(documentResetActions\)/.test(target[0]);
+    });
+    assert.ok(
+      delegateHasReset,
+      `openWorkspace 委派给了 ${delegated.join(' / ')}，但其中没有一个调用 `
+      + 'resetAllDocuments —— 打开工作区不复位会让新工作区显示上一个工作区的'
+      + 'FMG 条目 / PARAM 行 / EMEVD 事件 / MSB 场景'
     );
   });
 
@@ -172,8 +201,15 @@ describe('两处复位站点必须走统一调度', () => {
     // 清空形态的识别：setter 后面紧跟 null / 空数组 / 空 Map / EMPTY_ 常量 / false。
     const registered = DOCUMENT_FAMILIES.flatMap((family) => [...DOCUMENT_STATE_SETTERS[family]]);
     const clearingArgument = String.raw`\(\s*(?:null|false|\[\]|new Map\(\)|EMPTY_[A-Z_]+|\{\s*models:\s*0)`;
+    /*
+     * 靶标是**实际承载复位的函数**，不是入口函数名。
+     *
+     * openWorkspace 现在只负责弹目录对话框并委派给 mountWorkspace（手动打开与
+     * 启动自动挂载共用后者）。继续扫 openWorkspace 等于扫一个空壳 —— 判据会
+     * 恒真，而「有人在挂载流程里逐个手写 setTaeData(null)」正好逃掉。
+     */
     for (const [label, pattern] of [
-      ['openWorkspace', /async function openWorkspace\(\)[\s\S]*?\n  \}/],
+      ['mountWorkspace', /async function mountWorkspace\([\s\S]*?\n  \}/],
       ['selectFile', /async function selectFile\([\s\S]*?\n  \}/]
     ] as const) {
       const body = pattern.exec(source)?.[0] ?? '';

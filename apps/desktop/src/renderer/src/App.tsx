@@ -308,6 +308,16 @@ export function App(): ReactElement {
   const [logOpen, setLogOpen] = useState(false);
   const [paramFieldDefs, setParamFieldDefs] = useState<ParamFieldDef[] | null>(null);
   /**
+   * 字段枚举表（enumRef → 值列表）。
+   *
+   * 主进程早就随 readParamDocument 返回 fieldEnums（ipc.ts 的 fieldEnums 分支），
+   * 但渲染器此前**零引用**——数据被丢弃，于是枚举字段只显示裸数字。
+   * 这是「最后一跳断线」的又一处：后端产出、前端不取，没有任何编译或测试信号。
+   */
+  const [paramFieldEnums, setParamFieldEnums] = useState<
+    Array<{ id: string; name: string; values: Array<{ value: number; label: string }> }> | null
+  >(null);
+  /**
    * 字段定义的授信来源。'imported'/'user-derived' 放行字段写入，'fixture' 只读。
    *
    * 值来自主进程（包校验 + 行宽核对 + 用户信任策略三层都通过才给 'imported'），
@@ -386,6 +396,7 @@ export function App(): ReactElement {
       // 字段定义必须一起清：两张 param 表的行宽通常不同，残留的字段列会让用户
       // 对着上一张表的字段名看新表的字节。
       setParamFieldDefs(null);
+      setParamFieldEnums(null);
       setParamFieldDefsDiagnostic(null);
       // 授信来源回落到只读：上一个 param 的 'imported' 若残留，新 param 的字段
       // 会被错误地显示为可写。授权判定必须由新文档的 fieldDefsOrigin 重新给出。
@@ -699,6 +710,12 @@ export function App(): ReactElement {
           // 必须在断言里声明：不声明就读，取到的永远是 undefined 且 typecheck 不报
           // ——那正是「字段列空着但没有任何错误」的形态。
           fieldDefs?: ParamFieldDef[] | null;
+          /** 枚举表。主进程一直在返回，此前渲染器没取（枚举因此只显示裸数字）。 */
+          fieldEnums?: Array<{
+            id?: unknown;
+            name?: unknown;
+            values?: Array<{ value?: unknown; label?: unknown }>;
+          }> | null;
           fieldDefsDiagnostic?: { code?: string; message?: string } | null;
           /**
            * 字段定义的授信来源，由主进程在包校验 + 行宽核对 + 用户信任策略
@@ -714,6 +731,7 @@ export function App(): ReactElement {
           setParamSourceHash(null);
           setParamRowPayloads(new Map());
           setParamFieldDefs(null);
+          setParamFieldEnums(null);
           setParamFieldDefsDiagnostic(null);
           // 读取失败同样要清授信来源：否则上一个 param 的 'imported' 残留，
           // 会让这个读不出来的资源看起来仍可写入字段。
@@ -724,6 +742,31 @@ export function App(): ReactElement {
         // 字段定义与缺失原因逐字段取，不用 as 整体断言 —— IPC 边界上字段名对不上
         // 只会表现为「字段列空着」而 typecheck 照过（本轮接线已踩过四次）。
         setParamFieldDefs(Array.isArray(result.fieldDefs) ? result.fieldDefs : null);
+        /*
+         * 枚举表逐字段收窄，不用 as 整体断言 —— IPC 边界上字段名对不上只会表现为
+         * 「枚举没生效」而 typecheck 照过（本文件已因此踩过四次：def.typeName、
+         * f.enumId、f.bitSize、枚举值的 label 各错一次）。
+         *
+         * values 为空数组是**正常状态**而非缺失：元数据包里多数 enum 没有值表
+         * （对照统计 228 个 enum id 里 190 个为空）。UI 必须把空 values 当
+         * 「无标签」处理，而不是当「无枚举」——后者会让本该显示枚举名的字段
+         * 变成纯数字，用户无从知道这是个枚举。
+         */
+        setParamFieldEnums(
+          Array.isArray(result.fieldEnums)
+            ? result.fieldEnums
+                .filter((entry) => typeof entry?.id === 'string')
+                .map((entry) => ({
+                  id: entry.id as string,
+                  name: typeof entry.name === 'string' ? entry.name : (entry.id as string),
+                  values: Array.isArray(entry.values)
+                    ? entry.values
+                        .filter((v) => typeof v?.value === 'number' && typeof v?.label === 'string')
+                        .map((v) => ({ value: v.value as number, label: v.label as string }))
+                    : []
+                }))
+            : null
+        );
         setParamRowDataSize(result.data.rowDataSize ?? 0);
         // 只接受主进程给出的两个合法值，其余一律降级为 fixture（只读）。
         // 白名单而不是直接透传：透传意味着后端将来多返回一个值就可能意外放行写入。
@@ -2765,6 +2808,7 @@ export function App(): ReactElement {
               key={`param-wb:${selectedFile.sourceUri}`}
               containerUri={selectedFile.sourceUri}
               containerLabel={selectedFile.relativePath}
+              fieldEnums={paramFieldEnums}
               resolveDefinition={(typeName, rowDataSizeFromPage) => {
                 // 只在类型名与行宽都对得上时给出定义：行宽不符说明这份元数据
                 // 描述的是另一个版本的 param，按它解码会全部错位。

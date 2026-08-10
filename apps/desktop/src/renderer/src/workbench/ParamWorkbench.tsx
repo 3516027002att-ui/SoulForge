@@ -90,6 +90,17 @@ export interface ParamWorkbenchProps {
    */
   resolveDefinition?: (typeName: string, rowDataSize: number) => ParamDefDocument | null;
   /**
+   * 枚举表（enumRef → 值列表）。
+   *
+   * values 为空数组是正常状态而非缺失：元数据包里多数 enum 没有值表。
+   * UI 要把空 values 当「无标签」而不是「无枚举」。
+   */
+  fieldEnums?: Array<{
+    id: string;
+    name: string;
+    values: Array<{ value: number; label: string }>;
+  }> | null;
+  /**
    * 字段写入出口。缺省即只读。
    *
    * 两个哈希由本组件从 readContainerParamPage 取得并透传，宿主原样交给
@@ -483,6 +494,33 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     return params.filter((entry) => entry.name.toLowerCase().includes(needle));
   }, [params, paramFilter]);
 
+  /** enumRef → 枚举定义，供字段栏 O(1) 查表。 */
+  const enumById = useMemo(() => {
+    const map = new Map<string, { name: string; values: Array<{ value: number; label: string }> }>();
+    for (const entry of props.fieldEnums ?? []) {
+      map.set(entry.id, { name: entry.name, values: entry.values });
+    }
+    return map;
+  }, [props.fieldEnums]);
+
+  /**
+   * 当前展开枚举列表的字段 id。
+   *
+   * 为什么用旁挂可搜索列表而不是 <select>：param 字段的「枚举」是元数据推断的
+   * **软约束** —— 底层仍是任意整数，必须允许输入表外的值。下拉会把软约束变成
+   * 硬约束，用户想填一个未列出的合法值就填不了。
+   * 参照工具同样这么分：param 字段走右键可搜索列表，而 MSB 属性（真 C# enum，
+   * 硬约束）才用真下拉。
+   */
+  const [enumOpenFieldId, setEnumOpenFieldId] = useState<string | null>(null);
+  const [enumFilter, setEnumFilter] = useState('');
+
+  // 切换选中行时收起枚举列表：它挂在具体字段上，换行后位置已无意义。
+  useEffect(() => {
+    setEnumOpenFieldId(null);
+    setEnumFilter('');
+  }, [selectedRowId]);
+
   /**
    * 行表虚拟化。
    *
@@ -523,10 +561,18 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     setRowPage(loadedPages);
   }, [lastVisibleIndex, loadedRows.length, loadedPages, rowPageCount, rowsLoading, appending]);
 
-  async function commitField(field: ParamFieldDef): Promise<void> {
+  /**
+   * 提交一个字段。
+   *
+   * explicitValue 用于枚举选值：点选后立即提交时，setDrafts 还没生效
+   * （setState 异步），从闭包里的 drafts 取会读到**上一个**值 ——
+   * 表现为「选了枚举值但提交的是旧值」，且没有任何报错。
+   * 输入框失焦提交仍走 drafts（那时 state 已更新）。
+   */
+  async function commitField(field: ParamFieldDef, explicitValue?: string): Promise<void> {
     if (!canCommitFields || !definition || !selectedRow?.dataBase64 || selectedRow === null) return;
     if (!props.onApplyFieldMutation || selectedEntry === null) return;
-    const raw = drafts[field.id];
+    const raw = explicitValue ?? drafts[field.id];
     if (raw === undefined) return;
     setCommitting(true);
     setCommitMessage(null);
@@ -755,6 +801,21 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 const decoded = decodedValues?.get(field.id);
                 const draft = drafts[field.id];
                 const shown = draft ?? decoded?.display ?? '';
+                const enumMeta = field.enumRef ? enumById.get(field.enumRef) : undefined;
+                // 当前值对应的标签。找不到（值不在表内）时为 undefined ——
+                // 那是合法情形：param 字段的枚举是软约束，允许表外值。
+                const enumLabel = enumMeta && shown !== ''
+                  ? enumMeta.values.find((option) => String(option.value) === shown)?.label
+                  : undefined;
+                const enumOpen = enumOpenFieldId === field.id;
+                const enumOptions = enumMeta && enumOpen
+                  ? enumMeta.values.filter((option) => {
+                      const needle = enumFilter.trim().toLowerCase();
+                      if (!needle) return true;
+                      return String(option.value).includes(needle)
+                        || option.label.toLowerCase().includes(needle);
+                    })
+                  : [];
                 // 字段自身不可编辑（定长串、字节块、未知类型）时即使整体放行也要禁用：
                 // 放开会让用户以为改得动，提交后才发现被编码器拒绝。
                 const editable = canCommitFields && decoded?.editable === true;
@@ -767,7 +828,16 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                         : (field.description ?? field.name)}
                     >
                       {field.name}
-                      {field.enumRef && <span className="wb-prop__enum"> {field.enumRef}</span>}
+                      {/* 枚举名显示在字段名旁（对照参照工具的做法）。
+                          有值表时显示当前值对应的标签，没有值表时只显示枚举名 ——
+                          空 values 是正常状态（多数 enum 没有值表），
+                          当成「无枚举」会让用户不知道这是个枚举字段。 */}
+                      {field.enumRef && (
+                        <span className="wb-prop__enum">
+                          {' '}
+                          {enumLabel ?? enumMeta?.name ?? field.enumRef}
+                        </span>
+                      )}
                     </span>
                     {/* 只读字段仍然是 input（readOnly）而不是 span。
                         对照结论：参照工具的只读列用「相同控件 + ReadOnly flag +
@@ -794,6 +864,61 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                         aria-readonly={!editable}
                         title={decoded?.diagnostic ?? shown}
                       />
+                      {/* 枚举选值入口：只在有值表且字段可编辑时出现。
+                          空值表的枚举没有可选项，给个按钮会点开一个空列表。 */}
+                      {editable && enumMeta && enumMeta.values.length > 0 && (
+                        <button
+                          type="button"
+                          className="wb-enum-toggle"
+                          aria-expanded={enumOpen}
+                          aria-label={`选择 ${field.name} 的枚举值`}
+                          onClick={() => {
+                            setEnumOpenFieldId(enumOpen ? null : field.id);
+                            setEnumFilter('');
+                          }}
+                        >▾</button>
+                      )}
+                      {enumOpen && enumMeta && (
+                        <div className="wb-enum-list" role="listbox" aria-label={`${field.name} 枚举值`}>
+                          <input
+                            value={enumFilter}
+                            onChange={(event) => setEnumFilter(event.target.value)}
+                            placeholder="筛选值或名称"
+                            aria-label="筛选枚举值"
+                            autoFocus
+                          />
+                          <div className="wb-enum-list__options">
+                            {enumOptions.length === 0 && (
+                              <p className="wb-empty">无匹配值。</p>
+                            )}
+                            {enumOptions.map((option) => (
+                              <button
+                                type="button"
+                                key={option.value}
+                                role="option"
+                                aria-selected={String(option.value) === shown}
+                                className="wb-enum-option"
+                                onClick={() => {
+                                  setDrafts((current) => ({
+                                    ...current,
+                                    [field.id]: String(option.value)
+                                  }));
+                                  setEnumOpenFieldId(null);
+                                  setEnumFilter('');
+                                  // 显式传值：setDrafts 还没生效，读 drafts 会拿到旧值。
+                                  void commitField(field, String(option.value));
+                                }}
+                              >
+                                <span className="wb-enum-option__value">{option.value}</span>
+                                <span className="wb-enum-option__label">{option.label}</span>
+                              </button>
+                            ))}
+                          </div>
+                          <p className="muted" style={{ fontSize: 10, padding: '2px 6px' }}>
+                            也可直接在输入框填表外的值（这里的枚举是元数据推断，不是硬约束）。
+                          </p>
+                        </div>
+                      )}
                     </span>
                   </div>
                 );

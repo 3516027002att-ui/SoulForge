@@ -63,6 +63,10 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       // 若不清，上一张表的字段列会残留在新表旁边——而两张表的行宽通常不同，
       // 那会让用户对着错误的字段名看新表的字节。
       'setParamFieldDefs',
+      // 枚举表属于「当前这个 param 文档」的状态：不同 param 的 enum 集合不同，
+      // 残留会让新表的字段配上上一张表的枚举标签 —— 那比不显示标签更糟，
+      // 因为一个错的标签看起来完全合理。
+      'setParamFieldEnums',
       'setParamFieldDefsDiagnostic',
       // 授信来源同样属于「当前这个 param 文档」的状态，必须随资源切换清掉：
       // 上一个 param 的 origin 若是 imported 而残留下来，新 param 的字段会被

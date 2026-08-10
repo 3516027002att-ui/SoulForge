@@ -1282,6 +1282,43 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 /* 只读输入框在两个只读工作台里也要能选中复制。 */
 .wb-prop__value input[readonly] { cursor: text; }
 
+/* ── 枚举选值（param 字段：软约束，不用 select）── */
+/* param 字段的枚举是元数据推断的软约束，底层仍是任意整数，必须允许表外值。
+   所以是「输入框 + 旁挂可搜索列表」而不是 <select> —— 下拉会把软约束变成硬约束。
+   MSB 属性那种真 enum 才该用下拉。 */
+.wb-prop__value { position: relative; display: flex; align-items: center; gap: 2px; }
+.wb-prop__value input { flex: 1; min-width: 0; }
+.wb-enum-toggle {
+  flex: none; width: 16px; padding: 0; line-height: 1;
+  color: var(--ink-2); background: none; border: none; cursor: pointer;
+  font-size: 10px; border-radius: var(--radius-s);
+}
+.wb-enum-toggle:hover { color: var(--ink-0); background: var(--control-hover-bg); }
+.wb-enum-toggle:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }
+/* 约 350px 宽、选项区最多约 12 行后自身滚动（对照参照工具的 GetEnumListHeight）。
+   绝对定位脱离属性表的 grid，否则会把值列撑宽。 */
+.wb-enum-list {
+  position: absolute; top: 100%; right: 0; z-index: 20;
+  width: 350px; max-width: 90vw;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--forge-2); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-m); box-shadow: var(--shadow-float);
+}
+.wb-enum-list__options { max-height: calc(12 * 20px); overflow-y: auto; }
+.wb-enum-option {
+  display: grid; grid-template-columns: 6ch 1fr; gap: 8px; align-items: baseline;
+  width: 100%; padding: 2px 6px; text-align: left;
+  font-size: 12px; color: var(--ink-1);
+  background: none; border: none; cursor: pointer; border-radius: var(--radius-s);
+}
+.wb-enum-option:hover { background: var(--control-hover-bg); color: var(--ink-0); }
+.wb-enum-option[aria-selected='true'] { background: var(--ember-soft); color: var(--ink-0); }
+.wb-enum-option:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }
+.wb-enum-option__value {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2); text-align: right;
+}
+.wb-enum-option__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ── 工具栏（最右栏：分组按钮）── */
 .wb-tools { display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; }
 .wb-tools__item {
