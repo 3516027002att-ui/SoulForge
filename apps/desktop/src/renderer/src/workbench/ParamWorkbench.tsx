@@ -769,26 +769,31 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                       {field.name}
                       {field.enumRef && <span className="wb-prop__enum"> {field.enumRef}</span>}
                     </span>
+                    {/* 只读字段仍然是 input（readOnly）而不是 span。
+                        对照结论：参照工具的只读列用「相同控件 + ReadOnly flag +
+                        变色」，全仓无 BeginDisabled。理由是 disabled/span 都会丢掉
+                        焦点与文本选中 —— 用户无法复制对照列或不可编辑字段的值，
+                        而「把这个数值抄到别处」正是只读列最常见的用途。 */}
                     <span className="wb-prop__value">
-                      {editable ? (
-                        <input
-                          value={shown}
-                          onChange={(event) => setDrafts((current) => ({
-                            ...current,
-                            [field.id]: event.target.value
-                          }))}
-                          onBlur={() => { if (drafts[field.id] !== undefined) void commitField(field); }}
-                          disabled={committing}
-                          aria-label={`${field.name} 值`}
-                        />
-                      ) : (
-                        <span
-                          className={decoded?.diagnostic ? 'wb-prop__value--readonly diag-warn' : 'wb-prop__value--readonly'}
-                          title={shown}
-                        >
-                          {shown === '' ? '—' : shown}
-                        </span>
-                      )}
+                      <input
+                        value={shown === '' && !editable ? '—' : shown}
+                        readOnly={!editable}
+                        className={editable
+                          ? undefined
+                          : (decoded?.diagnostic ? 'is-readonly diag-warn' : 'is-readonly')}
+                        onChange={(event) => {
+                          if (!editable) return;
+                          setDrafts((current) => ({ ...current, [field.id]: event.target.value }));
+                        }}
+                        onBlur={() => {
+                          if (editable && drafts[field.id] !== undefined) void commitField(field);
+                        }}
+                        // disabled 只表达「提交中」这个瞬时状态，不表达只读。
+                        disabled={editable && committing}
+                        aria-label={`${field.name} 值${editable ? '' : '（只读）'}`}
+                        aria-readonly={!editable}
+                        title={decoded?.diagnostic ?? shown}
+                      />
                     </span>
                   </div>
                 );

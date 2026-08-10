@@ -45,10 +45,18 @@ export interface WorkbenchColumnSpec {
   /**
    * 初始栏宽（px）。缺省时该栏自适应剩余空间。
    *
-   * 属性栏通常给固定初值、条目栏吃剩余空间——这与 Smithbox 的观感一致，
-   * 也避免长字段名把属性栏压成两字宽。
+   * 属性栏通常给固定初值、条目栏吃剩余空间，避免长字段名把属性栏压成两字宽。
    */
   initialWidth?: number;
+  /**
+   * 初始栏宽比例（与同一工作台内其他 initialFlex 栏按比例分配）。
+   *
+   * 与 initialWidth 互斥，优先级低于它。用于「按比例切分」的工作台 ——
+   * 对照参照工具，它的地图数据编辑器是全仓唯一写死栏宽比例的地方
+   * （0.2 / 0.4 / 0.4，可拖拽），其余编辑器交给 docking 运行时。
+   * 比例在窗口缩放时按比例跟随，固定像素不会。
+   */
+  initialFlex?: number;
   /** 最小栏宽（px），拖拽不得越过。缺省 120。 */
   minWidth?: number;
 }
@@ -140,13 +148,26 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
     };
   }, [onPointerMove, onPointerUp]);
 
+  /**
+   * 开始拖拽。
+   *
+   * 比例模式（initialFlex）或自适应模式下 widths 里还没有值，此时从 DOM 量出
+   * 当前实际宽度作为起点 —— 否则那些栏的分隔条拖不动。量到之后该栏即转为
+   * 像素模式（见 column-slot 的 style 注释）。
+   */
   function startResize(column: WorkbenchColumnSpec, event: React.PointerEvent): void {
-    const measured = widths[column.id];
-    if (typeof measured !== 'number') return;
+    let startWidth = widths[column.id];
+    if (typeof startWidth !== 'number') {
+      const slot = (event.currentTarget as HTMLElement).parentElement;
+      const measured = slot?.getBoundingClientRect().width;
+      if (typeof measured !== 'number' || measured <= 0) return;
+      startWidth = measured;
+      setWidths((current) => ({ ...current, [column.id]: measured }));
+    }
     dragState.current = {
       columnId: column.id,
       startX: event.clientX,
-      startWidth: measured,
+      startWidth,
       minWidth: column.minWidth ?? DEFAULT_MIN_WIDTH
     };
   }
@@ -159,8 +180,15 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
    */
   function onSeparatorKeyDown(column: WorkbenchColumnSpec, event: React.KeyboardEvent): void {
     const step = 16;
-    const measured = widths[column.id];
-    if (typeof measured !== 'number') return;
+    // 与 startResize 同理：比例/自适应模式下先从 DOM 量出当前宽度，
+    // 否则键盘用户在这些栏上按方向键没有任何反应。
+    let measured = widths[column.id];
+    if (typeof measured !== 'number') {
+      const slot = (event.currentTarget as HTMLElement).parentElement;
+      const fromDom = slot?.getBoundingClientRect().width;
+      if (typeof fromDom !== 'number' || fromDom <= 0) return;
+      measured = fromDom;
+    }
     const minWidth = column.minWidth ?? DEFAULT_MIN_WIDTH;
     if (event.key === 'ArrowLeft') {
       event.preventDefault();
@@ -184,9 +212,20 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
             <div
               key={column.id}
               className="workbench__column-slot"
+              /*
+               * 三种宽度模式，优先级从上到下：
+               *   ① 已被拖拽过（widths 里有值）→ 固定像素；
+               *   ② 声明了 initialFlex → 按比例分配（窗口缩放时跟随）；
+               *   ③ 都没有 → 吃满剩余空间。
+               * 拖拽会把该栏写进 widths，于是从 ②/③ 切到 ①。这是必需的：
+               * 比例模式下拖拽无法表达「就这么宽」。
+               */
               style={typeof width === 'number'
                 ? { flex: '0 0 auto', width: `${width}px` }
-                : { flex: '1 1 0', minWidth: `${column.minWidth ?? DEFAULT_MIN_WIDTH}px` }}
+                : {
+                    flex: `${column.initialFlex ?? 1} 1 0`,
+                    minWidth: `${column.minWidth ?? DEFAULT_MIN_WIDTH}px`
+                  }}
             >
               <section className="workbench__column" aria-label={column.title}>
                 <header className="workbench__column-header">
@@ -195,13 +234,27 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
                 </header>
                 <div className="workbench__column-body">{column.children}</div>
               </section>
-              {!isLast && typeof width === 'number' && (
+              {/* 分隔条对所有非末栏都出现，不再要求该栏已是像素模式 ——
+                  否则比例模式与自适应模式的栏永远拖不动。首次拖拽时
+                  startResize 会从 DOM 量出当前宽度并转入像素模式。 */}
+              {!isLast && (
                 <div
                   className="workbench__resizer"
                   role="separator"
                   aria-orientation="vertical"
                   aria-label={`调整${column.title}栏宽`}
                   tabIndex={0}
+                  /* separator 的当前值要报给辅助技术，否则键盘调宽时用户听不到
+                     任何变化反馈。未进入像素模式（尚未拖过）时无确切数值，
+                     此时不报 —— 报一个猜的数字比不报更糟。
+                     aria-valuemin 用该栏的实际下限，与拖拽/键盘的钳制一致。 */
+                  {...(typeof width === 'number'
+                    ? {
+                        'aria-valuenow': Math.round(width),
+                        'aria-valuemin': column.minWidth ?? DEFAULT_MIN_WIDTH,
+                        'aria-valuetext': `${Math.round(width)} 像素`
+                      }
+                    : {})}
                   onPointerDown={(event) => startResize(column, event)}
                   onKeyDown={(event) => onSeparatorKeyDown(column, event)}
                 ></div>

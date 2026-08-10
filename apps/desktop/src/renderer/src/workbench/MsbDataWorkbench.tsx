@@ -90,7 +90,11 @@ export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
     {
       id: 'categories',
       title: 'Base Categories',
-      initialWidth: 180,
+      // 0.2 / 0.4 / 0.4：直接采用参照工具地图数据编辑器的那组初值 ——
+      // 它是那份实现里唯一写死栏宽比例的地方（其余编辑器交给 docking 运行时），
+      // 说明这组比例是针对这三栏内容量刻意选的。用比例而非固定像素：
+      // 窗口缩放时能跟随。
+      initialFlex: 0.2,
       minWidth: 120,
       children: (
         <div className="wb-list">
@@ -120,7 +124,7 @@ export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
       id: 'entries',
       title: 'Entries',
       hint: activeCategory ? `${filteredEntries.length}/${activeCategory.entries.length}` : '',
-      initialWidth: 300,
+      initialFlex: 0.4,
       minWidth: 180,
       children: (
         <div className="wb-list">
@@ -179,17 +183,25 @@ export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
       id: 'properties',
       title: 'Properties',
       hint: selectedEntry ? `${selectedEntry.properties.length} 项` : '',
+      initialFlex: 0.4,
       minWidth: 220,
       children: (
         <div className="wb-props">
           {selectedEntry === null && <p className="wb-empty">先在中栏选择条目。</p>}
+          {/* 只读值用 readOnly input 而不是 span：MSB 属性（Entity ID、Part Name、
+              坐标）最常见的用途就是抄到别处对照，必须能选中复制。 */}
           {selectedEntry?.properties.map(([label, value]) => (
             <div className="wb-prop" key={label}>
               <span className="wb-prop__name" title={label}>{label}</span>
               <span className="wb-prop__value">
-                <span className="wb-prop__value--readonly" title={value}>
-                  {value === '' ? '—' : value}
-                </span>
+                <input
+                  className="is-readonly"
+                  value={value === '' ? '—' : value}
+                  readOnly
+                  aria-label={`${label}（只读）`}
+                  aria-readonly="true"
+                  title={value}
+                />
               </span>
             </div>
           ))}

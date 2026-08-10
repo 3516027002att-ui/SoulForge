@@ -164,13 +164,21 @@ export function ReadOnlyEntryWorkbench(props: ReadOnlyEntryWorkbenchProps): Reac
       children: (
         <div className="wb-props">
           {selected === null && <p className="wb-empty">先在左栏选择条目。</p>}
+          {/* 只读值用 readOnly input 而不是 span：用户要能选中复制。
+              这些面板的全部价值就是「看这个条目的数值」，而看完通常要抄走 ——
+              span 里的文本在表格里不易选中，disabled input 完全不能选。 */}
           {selected?.properties.map(([label, value]) => (
             <div className="wb-prop" key={label}>
               <span className="wb-prop__name" title={label}>{label}</span>
               <span className="wb-prop__value">
-                <span className="wb-prop__value--readonly" title={value}>
-                  {value === '' ? '—' : value}
-                </span>
+                <input
+                  className="is-readonly"
+                  value={value === '' ? '—' : value}
+                  readOnly
+                  aria-label={`${label}（只读）`}
+                  aria-readonly="true"
+                  title={value}
+                />
               </span>
             </div>
           ))}

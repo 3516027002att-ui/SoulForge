@@ -1260,15 +1260,27 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   outline: 2px solid var(--ember); outline-offset: -1px;
 }
 /* 只读态必须看得出来：延期格式（MSB/TAE/ESD/FLVER）与未授信元数据下的字段都是
-   只读，若与可编辑态同形，用户会以为「改了没生效」而反复尝试。 */
-.wb-prop__value input:disabled, .wb-prop__value select:disabled {
+   只读，若与可编辑态同形，用户会以为「改了没生效」而反复尝试。
+
+   但只读**不用** disabled，也不退化成纯文本 span —— 对照参照工具的做法：
+   相同控件 + readonly + 变色。disabled 和 span 都会丢掉焦点与文本选中，
+   而「把这个数值抄到别处」正是只读字段最常见的用途。 */
+.wb-prop__value input.is-readonly, .wb-prop__value select.is-readonly {
   color: var(--ink-2); background: var(--forge-2);
-  border-color: transparent; cursor: not-allowed;
+  border-color: transparent; cursor: text;
 }
+/* 仍保留 disabled 样式：它现在只表达「提交中」这个瞬时状态。 */
+.wb-prop__value input:disabled, .wb-prop__value select:disabled {
+  color: var(--ink-3); background: var(--forge-2);
+  border-color: transparent; cursor: progress;
+}
+/* 纯展示值（不可选中的场合，例如条目元信息）仍可用这个类。 */
 .wb-prop__value--readonly {
   font-family: var(--font-mono); font-size: 12px; color: var(--ink-2);
   padding: 2px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* 只读输入框在两个只读工作台里也要能选中复制。 */
+.wb-prop__value input[readonly] { cursor: text; }
 
 /* ── 工具栏（最右栏：分组按钮）── */
 .wb-tools { display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; }
