@@ -1258,6 +1258,14 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .wb-tools__item:disabled { color: var(--ink-3); cursor: not-allowed; }
 .wb-tools__item:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }
 
+/* 面板内嵌工作台：给一个确定高度，否则 flex:1 无参照物，栏体会塌成内容高度，
+   独立滚动失效（表现为长列表把整页顶出滚动条）。
+   用 min-height 而不是 vh 高度：实测 `height: 62vh` 会把内容顶高，
+   e2e 的按钮四态用例因此拿不到顶部资源栏 tab 的 :active（元素被推离
+   指针按下的坐标）。视口单位在嵌套滚动容器里不可靠 —— 它相对视口而非
+   容器，容器本身已在滚动区内时会叠加出比预期高得多的盒子。 */
+.panel > .workbench { min-height: 420px; }
+
 /* ── 延期 / 只读横幅 ── */
 /* 延期格式保留标记：做成好用的只读工作台不等于假装可编辑。用 warn 语义而非
    danger——延期是范围裁定，不是故障。 */

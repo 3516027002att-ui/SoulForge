@@ -3,6 +3,7 @@ import { FMG_PAGE_SIZE } from '@soulforge/shared';
 import type { FmgEntryPage } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 
 export interface FmgEntryRow {
   id: number;
@@ -134,15 +135,21 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     props.onMutation?.({ kind: 'fmg_entry_delete', id });
   }
 
-  return (
-    <section className="panel" aria-label="FMG 本地化工作台">
-      <header className="panel-header">
-        <h3>FMG 本地化工作台</h3>
-        <span className="muted">
-          {entryCount} 条 · 每页 {FMG_PAGE_SIZE}{props.resourceUri ? ` · ${props.resourceUri}` : ''}
-        </span>
-      </header>
-      <div className="row gap">
+  /*
+   * 布局改成左右分栏（参照 Smithbox 2.2.4 的 Text Editor：中间 Text Entries、
+   * 右侧 Text Content）。此前是纵向堆叠：条目表在上、编辑框在下，长表格把
+   * 编辑框推到滚动区外 —— 用户报「不可编辑」的形态之一，因为要编辑就得先滚动。
+   *
+   * 保留全部既有语义锚点，e2e 依赖它们（renderer.spec.mjs:254-303 的纯键盘
+   * 编辑路径、写入失败路径）：
+   *   · .binder-child-table 与 role="table"/"row"
+   *   · label 文案「编辑 ID {id}」+ 内含 textarea
+   *   · selectableRowAttributes 产出的 aria-selected 与 roving tabindex
+   * 改布局不能改契约 —— 那会把「界面更好用」变成「回归」。
+   */
+  const entriesColumn = (
+    <>
+      <div style={{ padding: '4px 8px', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <input
           value={query}
           onChange={(e) => {
@@ -151,17 +158,29 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           }}
           placeholder="筛选 ID 或文本（作用于完整条目表）"
           aria-label="筛选 FMG"
+          style={{ flex: 1, minWidth: 120 }}
         />
-        <button type="button" onClick={addEntry}>新增</button>
-        <button type="button" disabled={selectedId === null} onClick={deleteSelected}>删除</button>
+        <button type="button" className="secondary-action" onClick={addEntry}>新增</button>
+        <button
+          type="button"
+          className="secondary-action"
+          disabled={selectedId === null}
+          onClick={deleteSelected}
+        >删除</button>
       </div>
-      <div className="row gap pager">
-        <button type="button" disabled={page <= 0 || loading} onClick={() => setPage((p) => p - 1)}>
+      <div className="row gap pager" style={{ padding: '0 8px 4px' }}>
+        <button
+          type="button"
+          className="secondary-action"
+          disabled={page <= 0 || loading}
+          onClick={() => setPage((p) => p - 1)}
+        >
           上一页
         </button>
         <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
         <button
           type="button"
+          className="secondary-action"
           disabled={page >= pageCount - 1 || loading}
           onClick={() => setPage((p) => p + 1)}
         >
@@ -187,7 +206,6 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
               isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
               onSelect: () => setSelectedId(row.id)
             })}
-            style={row.id === selectedId ? { background: '#243044' } : undefined}
           >
             <span>{row.id}</span>
             <span>{row.text.slice(0, 80)}</span>
@@ -195,17 +213,54 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         ))}
         {pageEntries.length === 0 && !loading && <p className="muted">当前页无条目。</p>}
       </div>
-      {selected && (
-        <label className="stack gap">
-          编辑 ID {selected.id}
-          <textarea
-            value={selected.text}
-            onChange={(e) => updateText(e.target.value)}
-            rows={3}
-            spellCheck={false}
-          />
-        </label>
-      )}
+    </>
+  );
+
+  const contentColumn = selected ? (
+    <div style={{ padding: '6px 10px', height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <label className="stack gap" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        编辑 ID {selected.id}
+        <textarea
+          value={selected.text}
+          onChange={(e) => updateText(e.target.value)}
+          spellCheck={false}
+          style={{ flex: 1, minHeight: 120, resize: 'none' }}
+        />
+      </label>
+    </div>
+  ) : (
+    <p className="wb-empty">选择左侧条目后在此编辑文本。</p>
+  );
+
+  return (
+    <section className="panel" aria-label="FMG 本地化工作台">
+      <WorkbenchLayout
+        label="FMG 文本工作台"
+        toolbar={
+          <>
+            <span className="crumb"><b>文本</b></span>
+            <span className="muted" style={{ fontSize: 11 }}>
+              {entryCount} 条 · 每页 {FMG_PAGE_SIZE}
+            </span>
+          </>
+        }
+        columns={[
+          {
+            id: 'entries',
+            title: 'Text Entries',
+            hint: `${entryCount} 条`,
+            initialWidth: 420,
+            minWidth: 240,
+            children: entriesColumn
+          },
+          {
+            id: 'content',
+            title: 'Text Content',
+            minWidth: 240,
+            children: contentColumn
+          }
+        ]}
+      />
     </section>
   );
 }
