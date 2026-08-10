@@ -12,6 +12,7 @@ import {
 } from '../scene/sceneManifestBrowser.js';
 import { mountThreeProxyScene, type ThreeSceneHandle } from '../scene/threeSceneController.js';
 import { formatListTruncation } from '../format/uiText.js';
+import { MsbDataWorkbench } from '../workbench/MsbDataWorkbench.js';
 
 /** Region 表渲染上限。 */
 const REGION_RENDER_LIMIT = 40;
@@ -277,7 +278,92 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
 
   const deferredRelease = props.deferredPreviewRelease;
 
+  /*
+   * 地图数据属性表（Smithbox 的 Map Data Editor 形态）。
+   *
+   * 三维场景看空间关系，属性表看数值 —— 此前只有前者，于是「这个 ObjAct 的
+   * Entity ID 是多少」这类问题在界面上无从回答，用户只能去开 Smithbox。
+   * 两者并存，不互相替代。
+   *
+   * 数值格式化在这里而不是在工作台组件里：工作台只负责三栏布局与选择，
+   * 让它认识 MSB 的字段会把布局组件绑死到一种资源类型上。
+   */
+  const num = (value: number | undefined): string =>
+    value === undefined ? '' : String(Math.round(value * 1e4) / 1e4);
+
+  const dataCategories = [
+    {
+      id: 'model',
+      label: 'Model',
+      entries: (props.models ?? []).map((model) => ({
+        name: model.name,
+        properties: [
+          ['Name', model.name],
+          ...(model.sibPath ? [['Sib Path', model.sibPath] as const] : []),
+          ...(model.typeId !== undefined ? [['Type ID', String(model.typeId)] as const] : [])
+        ] as Array<readonly [string, string]>
+      }))
+    },
+    {
+      id: 'event',
+      label: 'Event',
+      entries: (props.events ?? []).map((mapEvent) => ({
+        name: mapEvent.name,
+        properties: [
+          ['Name', mapEvent.name],
+          ['Type ID', String(mapEvent.typeId)]
+        ] as Array<readonly [string, string]>
+      }))
+    },
+    {
+      id: 'region',
+      label: 'Region',
+      entries: (props.regions ?? []).map((region) => ({
+        name: region.name,
+        properties: [
+          ['Name', region.name],
+          ['Type ID', String(region.typeId)],
+          ['Position X', num(region.posX)],
+          ['Position Y', num(region.posY)],
+          ['Position Z', num(region.posZ)],
+          ['Rotation X', num(region.rotX)],
+          ['Rotation Y', num(region.rotY)],
+          ['Rotation Z', num(region.rotZ)],
+          ['Scale X', num(region.scaleX)],
+          ['Scale Y', num(region.scaleY)],
+          ['Scale Z', num(region.scaleZ)]
+        ] as Array<readonly [string, string]>
+      }))
+    },
+    {
+      id: 'part',
+      label: 'Part',
+      entries: props.parts.map((part) => ({
+        name: part.name,
+        properties: [
+          ['Name', part.name],
+          ...(part.typeId !== undefined ? [['Type ID', String(part.typeId)] as const] : []),
+          ['Position X', num(part.posX)],
+          ['Position Y', num(part.posY)],
+          ['Position Z', num(part.posZ)],
+          ['Rotation X', num(part.rotX)],
+          ['Rotation Y', num(part.rotY)],
+          ['Rotation Z', num(part.rotZ)],
+          ['Scale X', num(part.scaleX)],
+          ['Scale Y', num(part.scaleY)],
+          ['Scale Z', num(part.scaleZ)]
+        ] as Array<readonly [string, string]>
+      }))
+    }
+  ];
+
   return (
+    <>
+    <MsbDataWorkbench
+      sourcePath={props.sourcePath}
+      categories={dataCategories}
+      {...(deferredRelease ? { deferredPreviewRelease: deferredRelease } : {})}
+    />
     <section className="panel editor-msb-scene" aria-label="MSB 三维场景">
       <header className="panel-header">
         <h3>
@@ -446,5 +532,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             : 'MSB 写入未开放：微调仅为本地预览，不会写入。'}
       </p>
     </section>
+    </>
   );
 }

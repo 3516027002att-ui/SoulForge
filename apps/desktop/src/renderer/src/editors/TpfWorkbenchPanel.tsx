@@ -1,5 +1,6 @@
-import { useMemo, useState, type ReactElement } from 'react';
+import { type ReactElement } from 'react';
 import { formatListTruncation } from '../format/uiText.js';
+import { ReadOnlyEntryWorkbench } from '../workbench/ReadOnlyEntryWorkbench.js';
 
 export interface TpfTextureEntry {
   index: number;
@@ -42,26 +43,20 @@ const FORMAT_NAMES: Record<number, string> = {
  * TPF 纹理包只读面板：显示纹理列表、格式、尺寸和 DDS 信息。
  */
 export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
-  const [query, setQuery] = useState('');
-  const [selectedTexture, setSelectedTexture] = useState<TpfTextureEntry | null>(null);
   const data = props.data;
-
-  const filtered = useMemo(() => {
-    if (!data?.textures) return [];
-    const q = query.trim().toLowerCase();
-    if (!q) return data.textures;
-    return data.textures.filter(
-      (t) => t.name.toLowerCase().includes(q) || t.ddsFourCC.toLowerCase().includes(q)
-    );
-  }, [data?.textures, query]);
+  const filtered = data?.textures ?? [];
 
   /**
-   * 表格渲染上限。TPF 纹理数不可控，此前是 filtered 全量 map（无分页、无上限），
+   * 投影上限。TPF 纹理数不可控，此前是 filtered 全量 map（无分页、无上限），
    * 只靠容器的 maxHeight+overflow 挡住视觉——DOM 仍然全量建出。
    *
-   * 这里用「截断 + 显式说明」而不是分页：TPF 是 V0.6 延期的只读预览族，加完整
-   * 分页控件属于超出当前范围的功能；但静默截断会让用户把部分数据当成全部，
-   * 那是硬约束 7 意义上的伪造观感。搜索框已能定位具体纹理，说清即可。
+   * 纠正原注释一处事实错误：它写「TPF 是 V0.6 延期的只读预览族」，但
+   * shared 的 DEFERRED_PREVIEW_EDITOR_KINDS 只含 msb/tae/esd/flver，**不含 tpf**。
+   * TPF 的只读是另一回事（写回链尚未接通），不是范围裁定。两者混为一谈会让
+   * 用户无法判断该等下一个版本还是该报 bug，所以横幅文案也据此区分。
+   *
+   * 截断说明保留：静默截断会让用户把部分数据当成全部，那是伪造观感。
+   * 工作台内部另有分页，两者层次不同（这里限制投影出多少条目对象）。
    */
   const visible = filtered.slice(0, TEXTURE_RENDER_LIMIT);
   const truncationNote = formatListTruncation({
@@ -71,76 +66,42 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
     hint: '用搜索框按名称或格式缩小范围'
   });
 
+  const entries = visible.map((tex) => ({
+    id: String(tex.index),
+    label: tex.name,
+    meta: `${tex.width}×${tex.height}`,
+    properties: [
+      ['Name', tex.name],
+      ['Size', `${tex.width}×${tex.height}`],
+      ['Format', FORMAT_NAMES[tex.format] ?? tex.ddsFourCC],
+      ['DDS FourCC', tex.ddsFourCC],
+      ['Mip Levels', String(tex.mipCount)],
+      ['Data Size', `${(tex.dataSize / 1024).toFixed(1)} KB`],
+      ['Data Offset', `0x${tex.dataOffset.toString(16)}`],
+      ['Format Code', `0x${tex.format.toString(16).padStart(2, '0')}`]
+    ] as Array<readonly [string, string]>
+  }));
+
   return (
     <section className="panel" aria-label="TPF 纹理包面板">
-      <header className="panel-header">
-        <h3>TPF 纹理包</h3>
-        <span className="muted">
-          {data ? `${data.textureCount} textures · ${(data.sourceSize / 1024 / 1024).toFixed(1)} MB · ${data.authority}` : '未加载'}
-        </span>
-      </header>
-      {!data && <p className="muted">选择 .tpf 文件以查看纹理数据。</p>}
-      {data && (
-        <>
-          <div className="row gap">
-            <input
-              className="input"
-              placeholder="搜索纹理名称或格式…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              aria-label="搜索纹理名称或格式"
-            />
-          </div>
-          {truncationNote && (
-            <p className="muted" data-testid="tpf-truncation">{truncationNote}</p>
-          )}
-          <div className="row gap" style={{ marginTop: 8 }}>
-            <div style={{ flex: 1, overflowY: 'auto', maxHeight: 300 }}>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>名称</th>
-                    <th>尺寸</th>
-                    <th>格式</th>
-                    <th>Mips</th>
-                    <th>大小</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((tex) => (
-                    <tr
-                      key={tex.index}
-                      className={selectedTexture?.index === tex.index ? 'selected' : ''}
-                      onClick={() => setSelectedTexture(tex)}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <td>{tex.name}</td>
-                      <td>{tex.width}×{tex.height}</td>
-                      <td>{FORMAT_NAMES[tex.format] ?? tex.ddsFourCC}</td>
-                      <td>{tex.mipCount}</td>
-                      <td>{(tex.dataSize / 1024).toFixed(0)} KB</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {selectedTexture && (
-              <div style={{ width: 280, padding: 8 }}>
-                <h4>{selectedTexture.name}</h4>
-                <dl>
-                  <dt>尺寸</dt><dd>{selectedTexture.width}×{selectedTexture.height}</dd>
-                  <dt>格式</dt><dd>{FORMAT_NAMES[selectedTexture.format] ?? selectedTexture.ddsFourCC}</dd>
-                  <dt>DDS FourCC</dt><dd>{selectedTexture.ddsFourCC}</dd>
-                  <dt>Mip 级别</dt><dd>{selectedTexture.mipCount}</dd>
-                  <dt>数据大小</dt><dd>{(selectedTexture.dataSize / 1024).toFixed(1)} KB</dd>
-                  <dt>数据偏移</dt><dd>0x{selectedTexture.dataOffset.toString(16)}</dd>
-                  <dt>格式代码</dt><dd>0x{selectedTexture.format.toString(16).padStart(2, '0')}</dd>
-                </dl>
-              </div>
-            )}
-          </div>
-        </>
+      {truncationNote && (
+        <p className="muted" data-testid="tpf-truncation">{truncationNote}</p>
       )}
+      <ReadOnlyEntryWorkbench
+        label="TPF 纹理包工作台"
+        kindLabel="TPF 纹理包"
+        entriesTitle="Textures"
+        filterPlaceholder="搜索纹理名称或格式…"
+        entries={entries}
+        emptyHint="选择 .tpf 文件以查看纹理数据。"
+        readOnlyNote="TPF 当前只读：纹理写回链尚未接通。这不是版本范围裁定 —— TPF 不在延期编辑器清单里。"
+        {...(data
+          ? {
+              summary: `${data.textureCount} textures`
+                + ` · ${(data.sourceSize / 1024 / 1024).toFixed(1)} MB · ${data.authority}`
+            }
+          : {})}
+      />
     </section>
   );
 }
