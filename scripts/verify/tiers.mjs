@@ -340,6 +340,11 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 用与 desktop-ipc-contract 同一套真实执行观测（加载 out/main 生产产物），
   // 因此需要构建产物，归 synthetic。
   'test:container-param-writeback': 'synthetic',
+  // 「记住上次打开的目录」的失效回落。价值全在边界：目录被删、外置盘拔掉、
+  // 偏好文件损坏时必须静默回落系统默认，而不是让对话框打开无效位置或打不开。
+  // 用真实文件系统（系统临时目录）不用 mock —— 要验的就是「路径还在不在」，
+  // mock fs 等于把待验行为验掉。纯逻辑 + esbuild 转译，无需构建产物，归 unit。
+  'test:recent-paths': 'unit',
   // 真实 Electron + 生产 preload + 构建后 renderer 的端到端套件（13 用例）。
   // 此前它只被 CI 直调、不在任何 tier —— 本机跑 `verify --tier all` 永远漏掉它，
   // 而它是唯一覆盖渲染进程真实交互的验证。需要构建产物，故归 synthetic。

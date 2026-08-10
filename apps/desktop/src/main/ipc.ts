@@ -116,6 +116,7 @@ import {
   type RendererSaveResult
 } from './rendererDto.js';
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
+import { readRecentPath, writeRecentPath } from './recentPaths.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
@@ -1221,23 +1222,73 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return sanitizeRendererValue(result);
   });
 
+  /*
+   * 两个目录对话框都从「上次打开的位置」起步。
+   *
+   * 此前不传 defaultPath，每次都从系统默认位置开始 —— 而 Mod 工作区通常埋在
+   * …\Sekiro\mods\<某个 mod> 这样的深路径里，每次要重新点进去。
+   * Mod 工作区与原版目录分开记：两者是不同位置，且原版目录几乎不变而工作区
+   * 常换，合并成一个「上次目录」会让选原版目录时跳到某个 mod 文件夹。
+   *
+   * 记住的只是对话框起始位置，不授予任何访问权限 —— 读写边界仍由会话的
+   * allowedRoots / writableRoots 决定。
+   */
+  const recentPathsFile = join(app.getPath('userData'), 'recent-paths.json');
+
+  /**
+   * 上次工作区的目录选择凭据，供启动时自动挂载。
+   *
+   * ── 为什么要签发凭据而不是直接返回路径 ──
+   *
+   * workspace.scan 只接受 selectionId：那是一次性凭据（绑定窗口 id + 5 分钟过期），
+   * 目的是让「渲染器能扫哪个目录」由主进程裁定而不是渲染器自报路径。
+   * 自动挂载必须走同一条路 —— 让渲染器传路径去扫，等于把这道裁定作废。
+   *
+   * ── 只对用户选过的路径签发 ──
+   *
+   * recent-paths.json 里的值只在 openDialog / openBaseDialog 成功返回后写入，
+   * 也就是**用户亲手在系统对话框里选过**。这里不接受任何入参，因此渲染器无法
+   * 借它让主进程签发一个任意路径的凭据。
+   *
+   * 目录已不存在时 readRecentPath 返回 undefined（外置盘拔了、mod 被删），
+   * 此处如实返回 null，界面回落到空工作区 —— 自动挂载是便利，不该在路径失效时
+   * 变成启动失败。
+   */
+  handle('workspace.lastSelection', async (event): Promise<{
+    overlay: DirectorySelection | null;
+    base: DirectorySelection | null;
+  }> => {
+    const overlayPath = readRecentPath(recentPathsFile, 'overlay');
+    const basePath = readRecentPath(recentPathsFile, 'base');
+    return {
+      overlay: overlayPath ? createDirectorySelection(event, overlayPath, 'overlay') : null,
+      base: basePath ? createDirectorySelection(event, basePath, 'base') : null
+    };
+  });
+
   handle('workspace.openDialog', async (event): Promise<DirectorySelection | null> => {
+    const remembered = readRecentPath(recentPathsFile, 'overlay');
     const result = await dialog.showOpenDialog({
       title: '打开 Mod 工作区',
-      properties: ['openDirectory']
+      properties: ['openDirectory'],
+      ...(remembered ? { defaultPath: remembered } : {})
     });
 
     const selectedPath = result.canceled ? undefined : result.filePaths[0];
+    if (selectedPath) writeRecentPath(recentPathsFile, 'overlay', selectedPath);
     return selectedPath ? createDirectorySelection(event, selectedPath, 'overlay') : null;
   });
 
   handle('workspace.openBaseDialog', async (event): Promise<DirectorySelection | null> => {
+    const remembered = readRecentPath(recentPathsFile, 'base');
     const result = await dialog.showOpenDialog({
       title: '打开原版游戏目录（只读，可选）',
-      properties: ['openDirectory']
+      properties: ['openDirectory'],
+      ...(remembered ? { defaultPath: remembered } : {})
     });
 
     const selectedPath = result.canceled ? undefined : result.filePaths[0];
+    if (selectedPath) writeRecentPath(recentPathsFile, 'base', selectedPath);
     return selectedPath ? createDirectorySelection(event, selectedPath, 'base') : null;
   });
 

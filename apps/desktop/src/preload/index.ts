@@ -77,6 +77,16 @@ function stripPathFields<T>(value: T): T {
 }
 
 const api = {
+  /**
+   * 上次打开过的工作区 / 原版目录的选择凭据，供启动时自动挂载。
+   *
+   * 不接受入参：路径由主进程从「用户亲手选过」的记录里取，渲染器无法借它
+   * 让主进程为任意路径签发凭据。目录已失效时返回 null。
+   */
+  lastWorkspaceSelection: (): Promise<{
+    overlay: DirectorySelection | null;
+    base: DirectorySelection | null;
+  }> => ipcRenderer.invoke('workspace.lastSelection'),
   openWorkspaceDialog: (): Promise<DirectorySelection | null> => ipcRenderer.invoke('workspace.openDialog'),
   openBaseDialog: (): Promise<DirectorySelection | null> => ipcRenderer.invoke('workspace.openBaseDialog'),
   scanWorkspace: (options: OpenWorkspaceScanOptions): Promise<RendererWorkspaceScanResult> =>

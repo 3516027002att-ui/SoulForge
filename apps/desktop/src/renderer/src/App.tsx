@@ -1388,20 +1388,26 @@ export function App(): ReactElement {
     }
   }
 
-  async function openWorkspace(): Promise<void> {
-    if (!bridge) {
-      announceDesktopOnly('打开 Mod 工作区');
-      return;
-    }
+  /**
+   * 用已有的目录选择凭据挂载工作区。
+   *
+   * 手动打开与启动自动挂载共用这一段 —— 两份挂载逻辑必然漂移，而漂移的表现是
+   * 「手动打开清了编辑态、自动挂载没清」这类只在一条路径上出现的残留。
+   *
+   * baseSelectionId 显式传入而不是读 baseRootChoice：自动挂载时那个 state 还是
+   * 初始值 null，而上次的原版目录凭据来自 lastWorkspaceSelection。
+   */
+  async function mountWorkspace(
+    overlaySelectionId: string,
+    baseSelectionId: string | undefined,
+    origin: 'manual' | 'restored'
+  ): Promise<void> {
+    if (!bridge) return;
     try {
-      const workspaceSelection = await bridge.openWorkspaceDialog();
-      // 用户取消目录对话框：安静返回，不显示错误。
-      if (!workspaceSelection) return;
-
-      setStatus('正在扫描工作区...');
+      setStatus(origin === 'restored' ? '正在恢复上次的工作区...' : '正在扫描工作区...');
       const result = await bridge.scanWorkspace({
-        overlaySelectionId: workspaceSelection.selectionId,
-        ...(baseRootChoice ? { baseSelectionId: baseRootChoice.selectionId } : {})
+        overlaySelectionId,
+        ...(baseSelectionId ? { baseSelectionId } : {})
       });
       setWorkspace(result);
       setSessionMeta(result.session ?? null);
@@ -1437,13 +1443,77 @@ export function App(): ReactElement {
         ? ' · 已挂载只读原版游戏目录'
         : ' · 未挂载原版游戏目录';
       setBaseRootChoice(null);
-      setStatus(`已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
+      const restoredPrefix = origin === 'restored' ? '已恢复上次的工作区：' : '';
+      setStatus(`${restoredPrefix}已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setStatus(`打开工作区失败：${message}`);
-      pushToast(`打开工作区失败：${message}`, 'warn');
+      /*
+       * 自动恢复失败不弹 toast，只写状态栏。
+       *
+       * 那条路径没有用户动作在等结果 —— 启动时弹一个「打开工作区失败」的提示
+       * 会让人以为自己做错了什么，而实际原因通常是上次的目录被移动或删除了。
+       * 手动打开失败仍然弹：那时用户在等反馈。
+       */
+      setStatus(origin === 'restored'
+        ? `上次的工作区已无法打开（${message}），请重新选择。`
+        : `打开工作区失败：${message}`);
+      if (origin === 'manual') pushToast(`打开工作区失败：${message}`, 'warn');
     }
   }
+
+  async function openWorkspace(): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('打开 Mod 工作区');
+      return;
+    }
+    const workspaceSelection = await bridge.openWorkspaceDialog();
+    // 用户取消目录对话框：安静返回，不显示错误。
+    if (!workspaceSelection) return;
+    await mountWorkspace(
+      workspaceSelection.selectionId,
+      baseRootChoice?.selectionId,
+      'manual'
+    );
+  }
+
+  /**
+   * 启动时自动挂载上次的工作区。
+   *
+   * 用户要求「像别的只狼工具一样记住上一次打开的文件夹」。真实工具（Smithbox 的
+   * recent projects）不止记住对话框位置，重启后直接恢复上次的工程。
+   *
+   * 三条约束：
+   * 1. 只跑一次。ref 守卫而不是空依赖数组 —— 严格模式下 effect 会执行两次，
+   *    空依赖数组挡不住，会发出两次扫描。
+   * 2. 已有工作区就不动。用户可能在这次启动里已经手动打开了别的目录
+   *    （虽然时序上很少，但覆盖用户的显式选择比不恢复糟糕得多）。
+   * 3. 凭据由主进程签发（workspace.lastSelection），不是渲染器自报路径 ——
+   *    workspace.scan 只接受一次性凭据，绕过它等于作废那道裁定。
+   */
+  const restoreAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (restoreAttemptedRef.current) return;
+    if (!bridge || typeof bridge.lastWorkspaceSelection !== 'function') return;
+    restoreAttemptedRef.current = true;
+    void (async () => {
+      try {
+        const last = await bridge.lastWorkspaceSelection();
+        if (!last?.overlay) return;
+        // 期间用户已手动打开了工作区：不覆盖他的选择。
+        if (workspace !== null) return;
+        await mountWorkspace(
+          last.overlay.selectionId,
+          last.base?.selectionId,
+          'restored'
+        );
+      } catch {
+        // 恢复失败静默：启动时没有用户动作在等结果，报错只会让人困惑。
+        // 失败原因（若来自 scan）已由 mountWorkspace 写进状态栏。
+      }
+    })();
+    // 只依赖 bridge：workspace 进依赖会在挂载成功后重跑（已被 ref 挡住，
+    // 但依赖里留一个会变的值等于把「只跑一次」的意图藏起来）。
+  }, [bridge]);
 
   async function search(): Promise<void> {
     if (!bridge) {
