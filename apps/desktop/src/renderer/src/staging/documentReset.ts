@@ -63,7 +63,11 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       // 若不清，上一张表的字段列会残留在新表旁边——而两张表的行宽通常不同，
       // 那会让用户对着错误的字段名看新表的字节。
       'setParamFieldDefs',
-      'setParamFieldDefsDiagnostic'
+      'setParamFieldDefsDiagnostic',
+      // 授信来源同样属于「当前这个 param 文档」的状态，必须随资源切换清掉：
+      // 上一个 param 的 origin 若是 imported 而残留下来，新 param 的字段会被
+      // 错误地显示为可写 —— 那正是授权门要挡住的形态（按未校验的字段偏移写入）。
+      'setParamFieldDefsOrigin'
     ]),
     emevd: Object.freeze([
       'setEmevdDocument',
@@ -157,6 +161,7 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setBnd4Forced: '强制以 BND4 打开的标记',
   setSidebarView: '侧栏视图状态',
   setAgentOpen: 'Agent 抽屉开关',
+  setLogOpen: '底部日志区开关：属于用户偏好，切换资源时把它收起会让人重复展开',
   setStatus: '状态栏文案',
   setParamRowDataSize: '行宽由 paramdef 决定，复位为 0 会让 UI 显示错误的 0 字节；保留上次值直到新文档赋值',
   setAiProvider: 'AI 会话配置',

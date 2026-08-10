@@ -47,6 +47,7 @@ import type {
 import { HexEditorPanel } from './editors/HexEditorPanel.js';
 import { ParamWorkbench } from './workbench/ParamWorkbench.js';
 import { DiagnosticsLog } from './workbench/DiagnosticsLog.js';
+import { selectEditor } from './workbench/selectEditor.js';
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
 import { EmevdFourViewPanel } from './editors/EmevdFourViewPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
@@ -386,6 +387,9 @@ export function App(): ReactElement {
       // 对着上一张表的字段名看新表的字节。
       setParamFieldDefs(null);
       setParamFieldDefsDiagnostic(null);
+      // 授信来源回落到只读：上一个 param 的 'imported' 若残留，新 param 的字段
+      // 会被错误地显示为可写。授权判定必须由新文档的 fieldDefsOrigin 重新给出。
+      setParamFieldDefsOrigin('fixture');
     },
     emevd: () => {
       setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
@@ -438,19 +442,33 @@ export function App(): ReactElement {
     && /\.parambnd(\.dcx)?(\.bak)?$/i.test(selectedFile.relativePath);
 
   /**
-   * 通用 BND4 容器视图。
+   * 该资源用哪个编辑器 —— 唯一一个。
    *
-   * 定义在 selectedIsParamContainer 之后，因为它要排除 param 容器 —— parambnd
-   * 有专属的三栏编辑器，两者并存会让同一个资源出现**两张**条目表：
-   * ParamWorkbench 列出 138 个 param 名，BND4 工作台又把同样的 138 项当通用条目
-   * 再列一遍（带 0x6970 这类偏移与「只读」列）。用户实测截图里正是这个形态，
-   * 而且后者排在后面反而更显眼，观感上就是「一叠卡片竖着堆」。
+   * 主视图区曾有 15 个**互不排斥**的条件块，打开一个 parambnd 会同时命中三四个
+   * （param 容器工作台 + 通用 BND4 容器工作台 + preview 分支），于是主区变成
+   * 「一叠卡片竖着堆」。用户两轮反馈都指向这一点，而改单个组件解决不了：
+   * 病根在装配方式。
    *
-   * 同一资源只应有一个主编辑器。命令面板的「以 BND4 容器打开」（bnd4Forced）
-   * 仍然放行 —— 那是用户显式要求以容器视角查看，属于主动选择而非意外叠加。
+   * 现在由 selectEditor 给出唯一编辑器，下面各块按它分派。选择逻辑是纯函数，
+   * 由 selectEditor.test.ts 钉住「任何输入恰好产出一个编辑器」——那条约束
+   * 在旧 JSX 装配里无法断言。
    */
-  const showBnd4Workbench = centerView === 'resource'
-    && (bnd4Forced || (selectedIsContainer && !selectedIsParamContainer));
+  const activeEditor = selectEditor({
+    centerView,
+    resourceMode,
+    selectedFile: selectedFile
+      ? {
+          relativePath: selectedFile.relativePath,
+          resourceKind: selectedFile.resourceKind,
+          formatKind: selectedFile.formatKind,
+          compoundExtension: selectedFile.compoundExtension
+        }
+      : null,
+    previewKind: preview?.previewKind,
+    textEditable: canEditText,
+    bnd4Forced
+  });
+  const showBnd4Workbench = activeEditor === 'container';
 
   /**
    * 交给 ParamDefPanel 的字段定义。
@@ -697,6 +715,9 @@ export function App(): ReactElement {
           setParamRowPayloads(new Map());
           setParamFieldDefs(null);
           setParamFieldDefsDiagnostic(null);
+          // 读取失败同样要清授信来源：否则上一个 param 的 'imported' 残留，
+          // 会让这个读不出来的资源看起来仍可写入字段。
+          setParamFieldDefsOrigin('fixture');
           setStatus('这个 PARAM 读不出来，详情见底部日志。');
           return;
         }
@@ -2396,22 +2417,27 @@ export function App(): ReactElement {
             label={`${resourceMode} 资源面板`}
             key={`panel-boundary:${selectedFile?.sourceUri ?? 'none'}`}
           >
-          {!selectedFile && <p className="muted">选择左侧资源后显示限量文本或十六进制预览。</p>}
+          {activeEditor === 'empty' && (
+            <p className="muted">在左侧选择一个资源开始编辑。</p>
+          )}
           {/* Structured preview 与原生格式检查已移到本面板**末尾**并默认折叠
               （见下方 resource-evidence-details）。
               它们此前排在所有编辑器之前、常驻展开，于是打开一个 param 先看到的是
               两张证据卡而不是行表——编辑器被挤到滚动区外。那两张卡是给 AI 与
               排查用的证据投影，不是日常编辑要看的东西。 */}
-          {preview?.previewKind === 'text' && (
+          {/* 纯文本编辑器只在 plain-text 时出现。
+              此前条件是 `previewKind === 'text'`，而它对 FMG/msg 资源同样为真，
+              于是文本编辑器会和 FMG 文本工作台**叠在一起**——同一个资源两个编辑区，
+              正是「一叠卡片」的又一处来源。 */}
+          {activeEditor === 'plain-text' && (
             <section className="text-editor-panel">
               <div className="text-editor-toolbar">
-                <strong>{canEditText ? '文本编辑器' : '文本预览'}</strong>
+                <strong>文本编辑器</strong>
                 <div>
-                  <button type="button" disabled={!canEditText || !editDirty} onClick={() => saveCurrentText()}>生成变更候选</button>
+                  <button type="button" disabled={!editDirty} onClick={() => saveCurrentText()}>生成变更候选</button>
                   <button type="button" disabled={!editDirty} onClick={() => setEditText(lastSavedText)}>还原</button>
                 </div>
               </div>
-              {!canEditText && <p className="muted">该资源当前只读。原因通常是预览被截断、不是文本资源，或原生二进制写回器尚未启用。</p>}
               {hasMsgTable && (
                 <MsgTableEditor
                   rows={msgRows}
@@ -2440,7 +2466,7 @@ export function App(): ReactElement {
               )}
             </section>
           )}
-          {centerView === 'resource' && resourceMode === 'map' && (
+          {activeEditor === 'map' && (
             <>
               {/* 删掉了「实时 Bridge MSB parts / 空场景（未选中可解析 MSB 或读取失败）」
                   这行标题：工作台自己有标题栏与空态提示，这行只是重复；而「未选中
@@ -2479,7 +2505,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {centerView === 'resource' && resourceMode === 'event' && (
+          {activeEditor === 'event' && (
             <>
               {/* 同 map：删掉「实时 Bridge 文档 · hash … / 空文档（未选中可解析的
                   EMEVD 或读取失败）」。hash 前缀属于证据，读取失败原因进日志区。 */}
@@ -2620,7 +2646,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {centerView === 'resource' && resourceMode === 'msg' && (
+          {activeEditor === 'text' && (
             <>
               {/* 同上：删掉「实时 Bridge FMG · hash … / 空条目（未选中可解析 FMG
                   或读取失败）」标题行。 */}
@@ -2664,7 +2690,7 @@ export function App(): ReactElement {
               （read-param-document 不解 DCX/BND4，直接喂容器会报
               「PARAM 类型名偏移无效」），必须先在左栏选容器内某个 param。
               这正是此前「打开 gameparam.parambnd.dcx 显示 0 行」的原因。 */}
-          {selectedIsParamContainer && selectedFile && (
+          {activeEditor === 'param-container' && selectedFile && (
             <ParamWorkbench
               key={`param-wb:${selectedFile.sourceUri}`}
               containerUri={selectedFile.sourceUri}
@@ -2734,7 +2760,7 @@ export function App(): ReactElement {
               }}
             />
           )}
-          {centerView === 'resource' && resourceMode === 'param' && !selectedIsParamContainer && (
+          {activeEditor === 'param-rows' && (
             <>
               {/* 同上：删掉「实时 Bridge PARAM · hash … / 空行（未选中可解析 PARAM
                   或读取失败）」标题行。 */}
@@ -2842,7 +2868,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {centerView === 'resource' && resourceMode === 'script' && (
+          {activeEditor === 'script' && (
             <>
               {/* 删掉「实时脚本容器只读证据（字节码绝不显示为可编辑源码）」标题行。
                   「字节码绝不显示为可编辑源码」是对实现的承诺，不是用户要读的说明；
@@ -2901,19 +2927,27 @@ export function App(): ReactElement {
               }}
             />
           )}
-          {preview?.previewKind === 'empty' && <p className="muted">空文件。</p>}
-          {preview?.previewKind === 'failed' && <p className="danger">预览失败。</p>}
-          {selectedFile?.relativePath?.endsWith('.tae') && (
+          {/* 删掉「空文件。」与「预览失败。」两句：它们既不说明问题也不给出动作，
+              而且与下方的编辑器并存（一个资源同时出现「预览失败」和一张空表）。
+              空文件的事实由编辑器自身的空态表达；失败原因归底部日志区。 */}
+          {activeEditor === 'tae' && selectedFile && (
             <TaeWorkbenchPanel resourceUri={selectedFile.sourceUri} data={taeData as never} />
           )}
-          {selectedFile?.relativePath?.endsWith('.esd') && (
+          {activeEditor === 'esd' && selectedFile && (
             <EsdWorkbenchPanel resourceUri={selectedFile.sourceUri} data={esdData as never} />
           )}
-          {selectedFile?.relativePath?.endsWith('.flver') && (
+          {activeEditor === 'flver' && selectedFile && (
             <FlverWorkbenchPanel resourceUri={selectedFile.sourceUri} data={flverData as never} />
           )}
-          {selectedFile?.relativePath?.endsWith('.tpf') && (
+          {activeEditor === 'tpf' && selectedFile && (
             <TpfWorkbenchPanel resourceUri={selectedFile.sourceUri} data={tpfData as never} />
+          )}
+          {/* 没有语义编辑器的资源：给一句人话 + 指向折叠区的原始字节。
+              此前这类资源什么编辑器都不显示，主区只剩证据卡与错误码。 */}
+          {activeEditor === 'binary' && (
+            <p className="muted">
+              这个格式还没有专用编辑器。展开下方「原始字节与证据」可查看字节内容。
+            </p>
           )}
           {preview?.truncated && (
             <p className="muted">
