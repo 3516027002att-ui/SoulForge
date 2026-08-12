@@ -1,4 +1,7 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 internal sealed class BridgeCommandService
@@ -51,6 +54,11 @@ internal sealed class BridgeCommandService
         {
             var probe = OodleRuntimeLocator.Probe(file, BridgeResult<object>.MakeSourceUri(file));
             return BridgeResult<object>.Partial(file, "unknown", probe.Diagnostics, probe);
+        }
+
+        if (command == "probe-document-locator")
+        {
+            return ProbeDocumentLocator(file, oodleRuntimeRoot, resourceKind);
         }
 
         if (command == "inventory-asset-resources")
@@ -799,6 +807,246 @@ internal sealed class BridgeCommandService
         return SemanticCandidateExports.TryExport(file, resourceKind)
             ?? BridgeResult<object>.Unsupported(file, resourceKind, unsupportedMessage);
     }
+
+    /// <summary>
+    /// NATIVE-03: Bridge-confirmed document locator probe。
+    ///
+    /// 只对「真实读取外层后确认的 magic」产生 `confirmedBy: "bridge"` 层；
+    /// suffix/path hint 永远不能构造层。KRAK 且无可用 Oodle runtime 时返回
+    /// LOCATOR_RUNTIME_BLOCKED（可重试），不是格式失败。同名 child 出现两个
+    /// 不兼容 confirmed leaf 时返回 probeStatus=conflict 且不静默单选。
+    /// 响应只携带脱敏标识符与哈希，不含主机路径。
+    /// </summary>
+    private static BridgeResult<object> ProbeDocumentLocator(
+        string file,
+        string? oodleRuntimeRoot,
+        string resourceKind)
+    {
+        var sourceUri = BridgeResult<object>.MakeSourceUri(file);
+        try
+        {
+            var source = File.ReadAllBytes(file);
+            var outerHash = HashHex(source);
+            var layers = new List<BridgeDocumentLocatorLayerDto>();
+            var confirmedStackIds = new List<string>();
+            byte[] payload = source;
+            var layerIndex = 0;
+
+            if (source.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+            {
+                DcxNativeDocument dcx;
+                try
+                {
+                    dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or InvalidDataException)
+                {
+                    // KRAK 且 Oodle runtime 未挂载/版本不匹配 → 运行时缺失，
+                    // 按「可重试的 blocked」返回，不伪装成格式失败。
+                    return BridgeResult<object>.Failed(file, resourceKind, "LOCATOR_RUNTIME_BLOCKED",
+                        $"无法解压外层 DCX：{ex.Message}",
+                        new { compressionRuntime = "oodle-unavailable", retryable = true });
+                }
+                var dcxFormatId = dcx.CompressionFormat == "KRAK" ? "dcx-krak" : "dcx-dflt";
+                layers.Add(new BridgeDocumentLocatorLayerDto(layerIndex++, dcxFormatId, "bridge", null, null));
+                payload = dcx.Payload;
+            }
+
+            if (payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+            {
+                var binder = Bnd4NativeDocument.Read(payload);
+                var containerRole = GuessContainerRole(binder, file);
+                // 冲突判定按「原始 entry 名」分组：同名 child（含 DuplicateOrdinal
+                // 重复名）只要出现两个不兼容 confirmed leaf 即 conflict，禁止静默单选。
+                var leafByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var stackIdByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var conflicts = new List<string>();
+                var childLayers = new List<BridgeDocumentLocatorLayerDto>();
+
+                for (var index = 0; index < binder.Entries.Count; index++)
+                {
+                    var entry = binder.Entries[index];
+                    var entryBytes = binder.GetStoredBytes(index);
+                    var leaf = DetectLeafFormat(entryBytes);
+                    var stableEntryId = BuildStableEntryId(index, entry.Name);
+                    var stackId = $"locator:{outerHash[..12]}:bnd4:{stableEntryId}";
+                    if (leaf != "unknown")
+                    {
+                        if (leafByName.TryGetValue(entry.Name, out var existing) && existing != leaf)
+                        {
+                            // 同一 child 两个不兼容 confirmed leaf → conflict，禁止静默单选。
+                            if (conflicts.Count == 0 && stackIdByName.TryGetValue(entry.Name, out var firstStackId))
+                            {
+                                confirmedStackIds.Add(firstStackId);
+                            }
+                            conflicts.Add(stackId);
+                            confirmedStackIds.Add(stackId);
+                            continue;
+                        }
+                        leafByName[entry.Name] = leaf;
+                        stackIdByName[entry.Name] = stackId;
+                        confirmedStackIds.Add(stackId);
+                        childLayers.Add(new BridgeDocumentLocatorLayerDto(
+                            layerIndex++,
+                            leaf,
+                            "bridge",
+                            stableEntryId,
+                            new BridgeDocumentLocatorEntryDto(
+                                stableEntryId,
+                                index,
+                                entry.Name,
+                                entry.ContentHash)));
+                    }
+                    else
+                    {
+                        // suffix-only 或未知 magic：只作为容器 child 存在，不构成 confirmed leaf。
+                        childLayers.Add(new BridgeDocumentLocatorLayerDto(
+                            layerIndex++,
+                            "unknown",
+                            "bridge",
+                            stableEntryId,
+                            new BridgeDocumentLocatorEntryDto(
+                                stableEntryId,
+                                index,
+                                entry.Name,
+                                entry.ContentHash)));
+                    }
+                }
+
+                layers.Add(new BridgeDocumentLocatorLayerDto(layerIndex++, "bnd4", "bridge", null, null));
+                layers.AddRange(childLayers);
+
+                var leafFormatId = childLayers.Count > 0
+                    ? (conflicts.Count > 0 ? "bnd4" : MostSpecificLeaf(leafByName.Values))
+                    : "bnd4";
+                var probeStatus = conflicts.Count > 0 ? "conflict" : "confirmed";
+                var value = new
+                {
+                    outerResourceId = $"resource:{outerHash[..16]}",
+                    outerByteLength = source.Length,
+                    outerHash,
+                    containerRole,
+                    layers,
+                    leafFormatId,
+                    probeStatus,
+                    reasonCode = conflicts.Count > 0 ? "conflicting-confirmed-leaf" : (string?)null,
+                    confirmedStackIds
+                };
+                var diagnostics = new[]
+                {
+                    new Diagnostic(
+                        conflicts.Count > 0 ? "error" : "info",
+                        conflicts.Count > 0 ? "LOCATOR_CONFLICTING_LEAF" : "LOCATOR_STACK_CONFIRMED",
+                        conflicts.Count > 0
+                            ? $"外层容器内同名 child 出现不兼容的 confirmed leaf（{string.Join("; ", conflicts)}），禁止静默单选。"
+                            : $"Bridge 已确认格式栈：dcx-dflt/bnd4 + {confirmedStackIds.Count} 个 confirmed child。",
+                        sourceUri,
+                        value)
+                };
+                return BridgeResult<object>.Partial(file, resourceKind, diagnostics, value);
+            }
+
+            // Loose (non-container) resource：只按 payload magic 确认一层。
+            var looseLeaf = DetectLeafFormat(payload);
+            if (looseLeaf == "unknown")
+            {
+                return BridgeResult<object>.Failed(file, resourceKind, "LOCATOR_FORMAT_UNCONFIRMED",
+                    "输入内容没有可确认的 native magic；suffix/path 只构成 candidate，不构成 confirmed stack。");
+            }
+            layers.Add(new BridgeDocumentLocatorLayerDto(0, looseLeaf, "bridge", null, null));
+            var looseStackId = $"locator:{outerHash[..12]}:loose";
+            var looseValue = new
+            {
+                outerResourceId = $"resource:{outerHash[..16]}",
+                outerByteLength = source.Length,
+                outerHash,
+                containerRole = "none",
+                layers,
+                leafFormatId = looseLeaf,
+                probeStatus = "confirmed",
+                reasonCode = (string?)null,
+                confirmedStackIds = new[] { looseStackId }
+            };
+            return BridgeResult<object>.Partial(file, resourceKind, new[]
+            {
+                new Diagnostic("info", "LOCATOR_STACK_CONFIRMED",
+                    $"Bridge 已确认 loose 格式栈：{looseLeaf}。",
+                    sourceUri, looseValue)
+            }, looseValue);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or ArgumentOutOfRangeException)
+        {
+            return BridgeResult<object>.Failed(file, resourceKind, "LOCATOR_PROBE_FAILED", ex.Message);
+        }
+    }
+
+    private static string DetectLeafFormat(byte[] payload)
+    {
+        if (payload.Length < 4) return "unknown";
+        if (payload.AsSpan(0, 4).SequenceEqual("PARA"u8)) return "param";
+        if (payload.AsSpan(0, 4).SequenceEqual("FMG\0"u8)) return "fmg";
+        if (payload.AsSpan(0, 4).SequenceEqual("EVD\0"u8)) return "emevd";
+        if (payload.AsSpan(0, 4).SequenceEqual("MSB\0"u8)) return "msb";
+        if (payload.AsSpan(0, 4).SequenceEqual("BND4"u8)) return "bnd4";
+        return "unknown";
+    }
+
+    /// <summary>
+    /// probe-document-locator 的层 DTO。全局序列化配置是 WhenWritingNull，
+    /// 但 TS 侧契约要求容器层必须出现显式 `entry: null`（缺键会被 TS 运行时
+    /// 读成 undefined，与 `null | {...}` 契约不符）——所以这里属性级强制
+    /// JsonIgnoreCondition.Never，绕过全局省略。
+    /// </summary>
+    private sealed record BridgeDocumentLocatorLayerDto(
+        int LayerIndex,
+        string FormatId,
+        string ConfirmedBy,
+        string? ChildStableId,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+        BridgeDocumentLocatorEntryDto? Entry);
+
+    private sealed record BridgeDocumentLocatorEntryDto(
+        string StableEntryId,
+        int EntryIndex,
+        string EntryName,
+        string ExpectedEntryHash);
+
+    /// <summary>
+    /// container role 与 byte format 分开：角色是语义分类（gameparam 参数集、
+    /// msg 文本集、script 脚本集……），format 是字节 magic。判定优先看 entry
+    /// 名（Sekiro 的 parambnd 内是 ItemParam/SpEffectParam 这类真名），fallback
+    /// 到外层文件名（gameparam.parambnd.dcx、msg_*.dcx 这类惯例名）。
+    /// </summary>
+    private static string GuessContainerRole(Bnd4NativeDocument binder, string file)
+    {
+        var names = binder.Entries.Select(entry => entry.Name.ToLowerInvariant()).ToList();
+        var fileName = System.IO.Path.GetFileName(file).ToLowerInvariant();
+
+        if (names.Any(name => name.Contains("gameparam")) || fileName.Contains("gameparam")) return "gameparam-binder";
+        if (names.Any(name => name.Contains("drawparam")) || fileName.Contains("drawparam")) return "drawparam-binder";
+        if (names.Any(name => name.EndsWith(".fmg") || name.Contains(".msg")) || fileName.Contains("msg")) return "msg-binder";
+        if (names.Any(name => name.EndsWith(".lua") || name.Contains("script")) || fileName.Contains("script")) return "script-binder";
+        if (names.Any(name => name.Contains("behavior") || name.Contains("_ai_")) || fileName.Contains("behavior")) return "behavior-binder";
+        if (names.Any(name => name.EndsWith(".anibnd") || name.Contains("anibnd") || name.Contains("_anim")) || fileName.Contains("anibnd")) return "animation-binder";
+        if (names.Any(name => name.Contains("texture") || name.EndsWith(".texbnd")) || fileName.Contains("texbnd")) return "texture-binder";
+        if (names.Any(name => name.Contains("vfx") || name.Contains("fx")) || fileName.Contains("vfx")) return "vfx-binder";
+        return "generic-binder";
+    }
+
+    private static string BuildStableEntryId(int index, string name)
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(name))).ToLowerInvariant();
+        return $"bnd4:{index}:{digest[..12]}";
+    }
+
+    private static string MostSpecificLeaf(IEnumerable<string> leaves)
+    {
+        var distinct = leaves.Distinct().ToArray();
+        return distinct.Length == 1 ? distinct[0] : "bnd4";
+    }
+
+    private static string HashHex(byte[] bytes) =>
+        Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     /// <summary>
     /// Container-level asset inventory (candidate): unpack outer DCX, enumerate BND4

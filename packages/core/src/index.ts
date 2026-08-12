@@ -10,6 +10,8 @@ export * from './editing/saveRawResource.js';
 export * from './editing/saveContainerChild.js';
 export * from './editing/editorCapabilityContract.js';
 export * from './editing/editorDocumentStore.js';
+export * from './editing/nativeDocumentLocator.js';
+export * from './workspace/editorCatalog.js';
 export * from './editing/releaseEditorAcceptance.js';
 export * from './editing/hexDocument.js';
 export * from './editing/emevdFourViewController.js';

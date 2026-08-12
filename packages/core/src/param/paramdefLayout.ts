@@ -60,6 +60,7 @@ const FIELD_KEYS = new Set([
   'min',
   'max',
   'enumRef',
+  'refs',
   'bitfield',
   'description'
 ]);
@@ -421,11 +422,13 @@ function validateFieldShape(
   for (const key of ['alignment', 'min', 'max'] as const) {
     if (input[key] !== undefined) validatePrimitive(input[key], 'number', `${path}.${key}`, diagnostics);
   }
-  for (const key of ['enumRef', 'description'] as const) {
+  // refs 上限 1_024：实测最长的一条（BehaviorParam.refId 四目标带条件）是 91 字符，
+  // 给到 1K 足够留余量，同时不让畸形元数据把整行撑成大字符串。
+  for (const key of ['enumRef', 'refs', 'description'] as const) {
     if (input[key] !== undefined) {
       validateBoundedString(
         input[key],
-        key === 'enumRef' ? 256 : 4_096,
+        key === 'enumRef' ? 256 : key === 'refs' ? 1_024 : 4_096,
         `${path}.${key}`,
         diagnostics
       );

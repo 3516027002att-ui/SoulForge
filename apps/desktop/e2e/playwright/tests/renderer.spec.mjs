@@ -75,37 +75,32 @@ test('空工作区：无演示数据，变更队列为空态', async () => {
   await app.close();
 });
 
-test('顶部资源栏：目录原名、固定顺序、无格式名文案，目录切换过滤资源', async () => {
+test('顶部工作域栏：逻辑 IA、固定顺序与工作域过滤', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 左侧不再有 .mode-tabs；顶部资源栏存在且为 tablist。
+  // 左侧不再有 .mode-tabs；顶部工作域栏存在且为 tablist。
   await expect(window.locator('.mode-tabs')).toHaveCount(0);
-  const tabs = window.locator('[data-testid="resource-bar"] [role="tab"]');
-  await expect(tabs).toHaveCount(13);
+  const tabs = window.locator('[data-testid="domain-bar"] [role="tab"]');
+  await expect(tabs).toHaveCount(15);
   await expect(tabs).toHaveText([
-    /all/, /event/, /map/, /param/, /msg/, /menu/, /script/,
-    /action/, /ai/, /chr/, /obj/, /sfx/, /other/
+    /项目/, /PARAM/, /GPARAM/, /文本/, /事件/, /地图/, /脚本/, /行为/,
+    /动画/, /模型/, /纹理/, /材质/, /VFX/, /容器/, /文件/
   ]);
 
-  // 页面不出现中文格式解释文案（目录栏只用目录原名）。
+  // 页面不把物理目录名当成顶层工作域。
   const bodyText = await window.locator('body').innerText();
   expect(bodyText).not.toContain('SFX 特效');
-  expect(bodyText).not.toContain('EMEVD 事件');
   expect(bodyText).not.toContain('角色资源');
 
-  // unknown 不合并进 other：独立警告计数。
-  await expect(window.locator('.resource-bar__unknown')).toContainText('unknown 1');
-
-  // 点击 sfx：只显示 resourceKind='sfx' 的资源。
-  await window.locator('[data-resource-mode="sfx"]').click();
+  // 文件工作域保留底层资源，但不把 resourceKind 变成顶层按钮。
+  await window.locator('[data-domain="files"]').click();
   const files = window.locator('.file-item');
-  await expect(files).toHaveCount(1);
-  await expect(files.first()).toContainText('sfx/f0000.sfxbnd.dcx');
-  await expect(window.locator('.status-bar')).toContainText('sfx');
+  await expect(files.filter({ hasText: 'sfx/f0000.sfxbnd.dcx' })).toHaveCount(1);
+  await expect(window.locator('.status-bar')).toContainText('文件');
 
-  // 点击 event：只显示 event/ 资源。
-  await window.locator('[data-resource-mode="event"]').click();
+  // 点击事件工作域：只显示事件资源。
+  await window.locator('[data-domain="event"]').click();
   await expect(window.locator('.file-item')).toHaveCount(1);
   await expect(window.locator('.file-item').first()).toContainText('event/common.emevd');
 
@@ -113,20 +108,18 @@ test('顶部资源栏：目录原名、固定顺序、无格式名文案，目�
   await app.close();
 });
 
-test('ai 目录筛选真实 ai/ 资源，不与 Agent 面板冲突', async () => {
+test('文件工作域可定位 ai 资源，且不与 Agent 面板冲突', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-resource-mode="ai"]').click();
+  await window.locator('[data-domain="files"]').click();
   const files = window.locator('.file-item');
-  await expect(files).toHaveCount(1);
-  await expect(files.first()).toContainText('ai/m10.aibnd.dcx');
+  await expect(files.filter({ hasText: 'ai/m10.aibnd.dcx' })).toHaveCount(1);
 
-  // Agent 面板仍是独立右侧面板（输入区与配置区存在），中央没有占用 ai 的 Agent 页面。
-  // 草稿设置区默认折叠，故断言的是区块存在而不是里面的 select 可见。
+  // Agent 面板仍是独立右侧面板，中央没有占用 AI 页面。
   await expect(window.locator('.agent__composer textarea')).toBeVisible();
-  await expect(window.locator('details.agent-settings')).toBeVisible();
-  await expect(window.locator('.status-bar')).toContainText('ai');
+  await expect(window.locator('.agent__header')).toContainText('Agent');
+  await expect(window.locator('.status-bar')).toContainText('文件');
   await app.close();
 });
 
@@ -135,12 +128,12 @@ test('BND 外形文件自动进入容器工作台；命令面板可强制以 BND
   await openFixtureWorkspace(window);
 
   // 选择真实 BND 外形文件 → 自动进入容器工作台。
-  await window.locator('[data-resource-mode="chr"]').click();
+  await window.locator('[data-domain="container"]').click();
   await window.locator('.file-item', { hasText: 'chr/sample.chrbnd.dcx' }).click();
   await expect(window.getByRole('region', { name: 'BND4 容器工作台' })).toBeVisible();
 
   // 非容器文件 + 命令面板「以 BND4 容器打开当前选择」。
-  await window.locator('[data-resource-mode="other"]').click();
+  await window.locator('[data-domain="files"]').click();
   await window.locator('.file-item', { hasText: 'other/notes.txt' }).click();
   await expect(window.getByRole('region', { name: 'BND4 容器工作台' })).toHaveCount(0);
   await window.keyboard.press('Control+k');
@@ -156,7 +149,7 @@ test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', asy
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-resource-mode="msg"]').click();
+  await window.locator('[data-domain="text"]').click();
   await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
 
   await window.getByRole('row', { name: /伤药葫芦/ }).click();
@@ -261,7 +254,7 @@ test('纯键盘可完成 FMG 编辑：行选择不再阻断编辑态', async () 
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-resource-mode="msg"]').click();
+  await window.locator('[data-domain="text"]').click();
   await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
 
   const row = window.getByRole('row', { name: /伤药葫芦/ });
@@ -317,7 +310,7 @@ test('写入失败：保留诊断，状态为 failed，可重新批准', async (
   const { app, window } = await launchApp({ SF_TEST_APPLY_FAIL: '1' });
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-resource-mode="msg"]').click();
+  await window.locator('[data-domain="text"]').click();
   await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
   await window.getByRole('row', { name: /返回骨片/ }).click();
   const editor = window.locator('label', { hasText: '编辑 ID 101' }).locator('textarea');
@@ -343,7 +336,7 @@ test('写入失败：保留诊断，状态为 failed，可重新批准', async (
   await app.close();
 });
 
-test('设置归属：通用设置无模型控件，Agent 面板持有会话配置与锁定原因', async () => {
+test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模型设置', async () => {
   const { app, window } = await launchApp();
 
   // 通用设置面板：只保留工作区与安全基础设施。
@@ -356,15 +349,15 @@ test('设置归属：通用设置无模型控件，Agent 面板持有会话配�
   expect(settingsText).not.toContain('模型服务');
   expect(settingsText).not.toContain('运行 / 权限模式');
 
-  // 计划草稿设置区默认**折叠**：它只影响 buildAiSidebarDraft 的草稿生成，不影响
-  // 任务实际用哪个模型服务（那由「AI 任务」区的下拉决定）。默认展开会让用户以为
-  // 必须先配它才能跑任务。此前它默认展开且标题叫「会话配置」，暗示影响整个会话。
-  const details = window.locator('details.agent-settings');
-  await expect(details).toHaveAttribute('data-testid', 'agent-settings');
-  await expect(window.locator('#agent-provider')).toBeHidden();
-  await details.locator('summary').click();
+  // 设置不出现在 Agent header；从历史抽屉进入模型设置。
+  await expect(window.locator('details.agent-settings')).toHaveCount(0);
+  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
+  const history = window.locator('.agent-drawer');
+  await expect(history).toContainText('Agent 历史');
+  await history.getByRole('button', { name: '模型设置' }).click();
+  await expect(window.locator('.agent-drawer')).toContainText('模型服务设置');
 
-  // 展开后：草稿生成器、思考强度、权限模式与锁定原因。
+  // 模型/思考强度/权限模式仍保留在专用设置抽屉。
   await expect(window.locator('#agent-provider')).toBeVisible();
   await expect(window.locator('#agent-thinking')).toBeVisible();
   await expect(window.locator('#agent-permission')).toBeDisabled();
@@ -376,12 +369,12 @@ test('设置归属：通用设置无模型控件，Agent 面板持有会话配�
   // 「模型服务」并排出现，而两者指向不同后端——在这里选 Anthropic 不影响任务。
   await expect(window.locator('[data-testid="agent-draft-scope"]')).toContainText('仅用于生成计划草稿');
 
-  // 折叠再打开后草稿设置不丢失。
+  // 关闭再打开后设置不丢失。
   await window.locator('#agent-thinking').selectOption('deep');
   await window.locator('#agent-provider').selectOption('openai');
-  await details.locator('summary').click();
-  await expect(window.locator('#agent-provider')).toBeHidden();
-  await details.locator('summary').click();
+  await window.getByRole('button', { name: '关闭抽屉' }).click();
+  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
+  await window.locator('.agent-drawer').getByRole('button', { name: '模型设置' }).click();
   await expect(window.locator('#agent-provider')).toHaveValue('openai');
   await expect(window.locator('#agent-thinking')).toHaveValue('deep');
 
@@ -493,7 +486,7 @@ test('键盘导航：方向键/Home/End/Enter 选择，Escape 关闭命令面板
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  const tabs = window.locator('[data-testid="resource-bar"] [role="tab"]');
+  const tabs = window.locator('[data-testid="domain-bar"] [role="tab"]');
   await tabs.first().focus();
   await expect(tabs.first()).toBeFocused();
 
@@ -530,7 +523,7 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
 
   for (const [width, height] of [[653, 694], [768, 810], [1024, 768], [1440, 900]]) {
     await window.setViewportSize({ width, height });
-    const bar = window.locator('.resource-bar__tabs');
+    const bar = window.locator('.domain-bar__tabs');
     const metrics = await bar.evaluate((element) => ({
       scrollWidth: element.scrollWidth,
       clientWidth: element.clientWidth,
@@ -546,9 +539,9 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可点击 sfx 并保持过滤。
-    await window.locator('[data-resource-mode="sfx"]').click();
-    await expect(window.locator('.file-item')).toHaveCount(1);
+    // 窄屏仍可点击文件工作域并保持可操作。
+    await window.locator('[data-domain="files"]').click();
+    await expect(window.locator('.file-item')).toHaveCount(8);
   }
 
   await window.setViewportSize({ width: 653, height: 694 });
@@ -561,7 +554,7 @@ test('按钮四态：rest 无阴影，hover/active/focus-visible 才有层次反
   await showWindow(app);
   await openFixtureWorkspace(window);
 
-  const tab = window.locator('[data-resource-mode="event"]');
+  const tab = window.locator('[data-domain="event"]');
   const activityButton = window.getByRole('button', { name: '资源浏览器' });
   const shadowOf = (locator) => locator.evaluate((element) => getComputedStyle(element).boxShadow);
 
@@ -599,7 +592,7 @@ test('按钮四态：rest 无阴影，hover/active/focus-visible 才有层次反
   await tab.focus();
   await window.keyboard.press('ArrowRight');
   await window.keyboard.press('ArrowLeft');
-  const focusedTab = window.locator('[data-testid="resource-bar"] [role="tab"]:focus-visible');
+  const focusedTab = window.locator('[data-testid="domain-bar"] [role="tab"]:focus-visible');
   await expect(focusedTab).toHaveCount(1);
   const outlineStyle = await focusedTab.evaluate((element) => getComputedStyle(element).outlineStyle);
   expect(outlineStyle).toBe('solid');
@@ -613,7 +606,7 @@ test('主题 token：暗/亮主题代表性按钮 computed 值不串用', async 
   await showWindow(app);
   await openFixtureWorkspace(window);
 
-  const tab = window.locator('[data-resource-mode="event"]');
+  const tab = window.locator('[data-domain="event"]');
   const readStates = async () => {
     // 先移开指针，确保读到真正的静止态（不被上一轮 hover 污染）。
     await window.mouse.move(8, 8);
@@ -664,6 +657,7 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
     SF_TEST_LARGE_WORKSPACE: '1'
   });
   await openFixtureWorkspace(window);
+  await window.locator('[data-domain="files"]').click();
 
   // 一次只建一页 DOM：这是硬约束 17 的实质，不是「有个 pager 控件」。
   const items = window.locator('.file-item');
@@ -711,6 +705,7 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
 test('大工作区：过滤后页码复位，且搜索结果显式说明被截断', async () => {
   const { app, window } = await launchApp({ SF_TEST_LARGE_WORKSPACE: '1' });
   await openFixtureWorkspace(window);
+  await window.locator('[data-domain="files"]').click();
 
   const range = window.locator('[data-testid="file-list-page-range"]');
   await window.locator('[data-panel-id="explorer"] .search-box input').fill('m0');
@@ -759,17 +754,15 @@ test('AI 任务：运行发起后进度事件真的更新界面，取消真的�
   const cancel = window.locator('[data-testid="agent-task-cancel"]');
   const run = window.locator('[data-testid="agent-task-run"]');
 
+  // 空闲态只显示 welcome；发送计划提示后才挂载任务面板。
+  await expect(panel).toHaveCount(0);
+  await window.locator('.agent__composer textarea').fill('把伤药葫芦的持有上限调到 12');
+  await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
   await expect(panel).toBeVisible();
-  // 起点必须是「没有任务」且取消不可用：一个 idle 下就能点的取消按钮
-  // 不会发出任何 IPC，属于假入口。
-  await expect(status).toContainText('没有进行中的任务');
-  await expect(cancel).toBeDisabled();
 
   // 运行前置：fixture 提供一个已配置凭据的合成服务，故运行按钮可用。
   await expect(window.locator('#agent-task-service')).toHaveValue('fixture-service');
   await expect(run).toBeEnabled();
-
-  await window.locator('.agent__composer textarea').fill('把伤药葫芦的持有上限调到 12');
   await run.click();
 
   // 1) 发起真的走了 IPC。
@@ -811,9 +804,9 @@ test('AI 任务：会话历史分页、载入与承接各自走对应 IPC', asyn
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  const history = window.locator('[data-testid="agent-session-history"]');
-  await history.locator('summary').click();
-  await window.locator('[data-testid="agent-sessions-refresh"]').click();
+  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
+  const history = window.locator('.agent-history');
+  await history.getByRole('button', { name: '刷新' }).click();
   await expect.poll(async () => (await ipcCalls(app))['ai.agent.sessions'] ?? 0).toBeGreaterThan(0);
 
   // 分页文案必须回答「这一页覆盖第几到第几、共多少」。fixture 给 23 条、每页 10，
@@ -847,36 +840,16 @@ test('AI 任务：会话历史分页、载入与承接各自走对应 IPC', asyn
   await app.close();
 });
 
-test('AI 任务：工具清单来自 ai.tools，且界面不提供抬高授权的入口', async () => {
+test('AI 任务：工具清单不污染 Agent 对话，且界面不提供抬高授权的入口', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
   await expect.poll(async () => (await ipcCalls(app))['ai.tools'] ?? 0).toBeGreaterThan(0);
-  const inventory = window.locator('[data-testid="agent-tool-inventory"]');
-  await expect(inventory).toContainText('已注册工具 2 个');
-  await inventory.locator('summary').click();
-  await expect(inventory).toContainText('search_resources');
-  await expect(inventory).toContainText('stage');
-
-  // 权限模式只读回显；renderer 侧不存在可抬高授权的控件。
-  const permission = window.locator('[data-testid="agent-task-permission"]');
-  await expect(permission).toContainText('renderer 不能抬高授权');
-
-  // 判据必须**限定在权限 select 内部**。原先写成全页 option[value="normal"] 必须为 0，
-  // 而 normal 在本仓库是 AiThinkingLevel 的合法值（App.tsx:292 的 aiThinking 初值），
-  // 思考强度下拉里本来就有它——于是这条断言把一个正常控件报成安全问题。
-  // 全页匹配 value 时要先确认那个值在别处没有合法用途，否则判据会对着错的东西红。
-  const permissionSelect = window.locator('#agent-permission');
-  await expect(permissionSelect).toBeDisabled();
-  // 权限枚举的可抬高档位（plan 之外的全部）都不得出现在该 select 里。
-  for (const elevated of ['normal', 'fullPermission', 'validate', 'commit', 'rollback']) {
-    expect(
-      await permissionSelect.locator(`option[value="${elevated}"]`).count(),
-      `权限 select 不得提供 ${elevated} 档位（renderer 不能抬高授权）`
-    ).toBe(0);
-  }
-  // 全页仍不得有 fullPermission —— 那个值在本仓库没有任何非权限用途，
-  // 所以全页断言对它是精确的（与 normal 不同）。
+  // 普通对话不渲染工具库存；工具调用只在任务状态面板出现。
+  await expect(window.locator('[data-testid="agent-tool-inventory"]')).toHaveCount(0);
+  await expect(window.locator('.agent-welcome')).toBeVisible();
+  await expect(window.locator('.composer-permission')).toContainText('主进程锁定');
+  // 全页不得出现可抬高授权的 fullPermission 选项。
   expect(await window.locator('option[value="fullPermission"]').count()).toBe(0);
 
   await app.close();

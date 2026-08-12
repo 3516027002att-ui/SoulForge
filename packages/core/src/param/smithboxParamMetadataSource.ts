@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, type Dirent } from 'node:fs';
 import {
   lstat,
   readFile,
@@ -100,6 +100,8 @@ export type SmithboxSdtImportResult =
         resolvedEnumCount: number;
         unresolvedEnumCount: number;
         annotationCount: number;
+        /** 带跨表引用的字段数（实测本发布 450）。 */
+        refFieldCount: number;
       };
       diagnostics: [];
     }
@@ -119,6 +121,14 @@ interface ParsedField {
   maximum?: string;
   enumRef?: string;
 }
+
+/**
+ * 一个 param 的 `Param Meta`：字段 id → 该字段的 `Refs=` 原始字符串。
+ *
+ * 只取 `Refs`。同目录还有 `VRef`/`FmgRef`/`IsBool`/`SortID`/`AlternativeOrder`
+ * 等属性，它们各自需要另一套解析与 UI，混在一起做会让这次改动无法单独验证。
+ */
+type ParamMetaRefIndex = ReadonlyMap<string, string>;
 
 interface ParsedParamdef {
   typeName: string;
@@ -207,6 +217,7 @@ export async function importSmithboxSdtParamMetadata(
 
     const enumIndex = await loadEnumIndex(join(metadataRoot, 'Param Enums'));
     const annotations = await loadAnnotationIndex(join(metadataRoot, 'Param Annotations', 'English'));
+    const refIndex = await loadParamMetaRefIndex(join(metadataRoot, 'Param Meta'));
     const definitionFiles = (await readdir(join(metadataRoot, 'Defs'), { withFileTypes: true }))
       .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.xml'))
       .map((entry) => entry.name)
@@ -219,6 +230,7 @@ export async function importSmithboxSdtParamMetadata(
     let fieldCount = 0;
     let resolvedEnumCount = 0;
     let unresolvedEnumCount = 0;
+    let refFieldCount = 0;
     for (const fileName of definitionFiles) {
       const path = await resolveContainedFile(
         metadataRoot,
@@ -235,10 +247,24 @@ export async function importSmithboxSdtParamMetadata(
         }
         throw error;
       }
-      const projected = projectParamdef(parsed, annotations.get(parsed.typeName), enumIndex);
+      /*
+       * Refs 按 **Defs 文件名** 取，不按 ParamType。
+       *
+       * 实测依据：`Param Meta` 与 `Defs` 各 160 个文件，文件名双向一一对应（无差
+       * 集），且 `Param Meta` 里 7028 个字段节点的 id **全部**能在同名 Defs 里找到
+       * （漂移 0）。而 ParamType 虽然在本发布里也恰好唯一，却是文件**内容**，
+       * 用它当连接键会让「换个发布出现两文件同 ParamType」变成静默错配。
+       */
+      const projected = projectParamdef(
+        parsed,
+        annotations.get(parsed.typeName),
+        enumIndex,
+        refIndex.get(fileName.slice(0, -4))
+      );
       fieldCount += projected.document.fields.length;
       resolvedEnumCount += projected.resolvedEnumCount;
       unresolvedEnumCount += projected.unresolvedEnumCount;
+      refFieldCount += projected.refFieldCount;
       const key = {
         game: 'sekiro',
         gameBuild: policy.gameBuild,
@@ -295,7 +321,8 @@ export async function importSmithboxSdtParamMetadata(
         fieldCount,
         resolvedEnumCount,
         unresolvedEnumCount,
-        annotationCount: annotations.size
+        annotationCount: annotations.size,
+        refFieldCount
       },
       diagnostics: []
     };
@@ -454,6 +481,114 @@ async function loadAnnotationIndex(directory: string): Promise<Map<string, Map<s
   return index;
 }
 
+/**
+ * 读取 `Param Meta`：每个 param 的字段 → `Refs=` 原始字符串。
+ *
+ * ── 为什么单独一条读取路径 ──
+ *
+ * `Param Meta` 全部是 **UTF-16LE 带 BOM**（实测 160/160 首字节 FF FE），而 `Defs`
+ * 是 UTF-8（159 个带 BOM + 2 个裸）。共用 `readBoundedText`（固定 utf8）会把
+ * UTF-16 读成每字符夹一个 NUL 的乱码，XML 解析随即失败 —— 而且失败点离真正原因
+ * 很远。所以这里显式按 BOM 分派编码。
+ *
+ * ── 为什么缺失不算错 ──
+ *
+ * 引用是**可选增强**：没有它 param 仍然可读可编辑，只是数字不能点。目录不存在或
+ * 某个文件坏掉时返回空索引/跳过该文件，不让整个元数据包导入失败 —— 那会把
+ * 「跳转不可用」升级成「PARAM 完全不可用」。
+ * 但**已经存在且畸形**的 XML 不静默跳过 DTD 这类安全问题：与 Defs 同样禁 DTD。
+ */
+async function loadParamMetaRefIndex(directory: string): Promise<Map<string, ParamMetaRefIndex>> {
+  const index = new Map<string, ParamMetaRefIndex>();
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    return index;
+  }
+  for (const entry of entries.sort((left, right) => compareOrdinal(left.name, right.name))) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.xml')) continue;
+    const path = join(directory, entry.name);
+    let xml: string;
+    try {
+      xml = await readBoundedBomText(path, MAX_XML_BYTES, 'SMITHBOX_PARAM_META_TOO_LARGE');
+    } catch (error) {
+      if (error instanceof SmithboxSourceError) throw error;
+      continue;
+    }
+    const refs = parseParamMetaRefs(xml);
+    if (refs.size > 0) index.set(entry.name.slice(0, -4), refs);
+  }
+  return index;
+}
+
+/**
+ * 从一个 `Param Meta` XML 里取出 `<Field>` 下每个字段节点的 `Refs=`。
+ *
+ * 用 saxes 而不是正则：字段节点名是**动态的**（节点名就是字段 id），属性顺序也不
+ * 固定，正则匹配 `<name ... Refs="...">` 会在属性换序或出现 `>` 转义时错配。
+ * 只收 `<Field>` 的直接子节点 —— `<Self>` 上也有属性，但那是表级配置，不是字段。
+ */
+function parseParamMetaRefs(xml: string): ReadonlyMap<string, string> {
+  if (/<!DOCTYPE|<!ENTITY/iu.test(xml)) {
+    throw sourceError('SMITHBOX_XML_DTD_FORBIDDEN', 'DTD and entity declarations are forbidden in Smithbox metadata.');
+  }
+  const refs = new Map<string, string>();
+  let depth = 0;
+  let inFieldBlock = false;
+  let failed = false;
+  const parser = new SaxesParser({ xmlns: false });
+  parser.on('doctype', () => { failed = true; });
+  parser.on('opentag', (tag: SaxesTagPlain) => {
+    depth += 1;
+    // <PARAMMETA>(1) → <Field>(2) → 字段节点(3)
+    if (depth === 2 && tag.name === 'Field') {
+      inFieldBlock = true;
+      return;
+    }
+    if (depth !== 3 || !inFieldBlock) return;
+    const value = attributeValue(tag, 'Refs');
+    // 首次出现优先：同名字段节点重复是元数据缺陷，后者覆盖前者会让结果依赖
+    // 文档顺序，而「第一条」至少是稳定的。
+    if (value !== undefined && value.trim() !== '' && !refs.has(tag.name)) {
+      refs.set(tag.name, value.trim());
+    }
+  });
+  parser.on('closetag', (tag: SaxesTagPlain) => {
+    if (depth === 2 && tag.name === 'Field') inFieldBlock = false;
+    depth -= 1;
+  });
+  parser.on('error', () => { failed = true; });
+  try {
+    parser.write(xml).close();
+  } catch {
+    failed = true;
+  }
+  // 坏文件按「这个 param 没有引用」处理：引用是增强，不该让导入失败。
+  return failed ? new Map() : refs;
+}
+
+/**
+ * 按 BOM 分派编码读取文本。
+ *
+ * 只认 UTF-16LE（FF FE）与 UTF-8；UTF-16BE（FE FF）在本发布里不存在，遇到就当
+ * 不支持而不是按 LE 硬读 —— 按错的字节序读出来是能用的字符串，但内容全错。
+ */
+async function readBoundedBomText(path: string, maxBytes: number, code: string): Promise<string> {
+  const fileStat = await stat(path);
+  if (!fileStat.isFile() || fileStat.size <= 0 || fileStat.size > maxBytes) {
+    throw sourceError(code, 'Smithbox metadata file exceeds its supported size boundary.');
+  }
+  const bytes = await readFile(path);
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    throw sourceError('SMITHBOX_TEXT_ENCODING_UNSUPPORTED', 'UTF-16BE Smithbox metadata is unsupported.');
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return bytes.subarray(2).toString('utf16le');
+  }
+  return bytes.toString('utf8').replace(/^﻿/u, '');
+}
+
 async function loadEnumIndex(directory: string): Promise<Map<string, ParamEnumDef>> {
   const index = new Map<string, ParamEnumDef>();
   const entries = await readdir(directory, { withFileTypes: true });
@@ -588,11 +723,18 @@ function attributeValue(tag: SaxesTagPlain, name: string): string | undefined {
 function projectParamdef(
   parsed: ParsedParamdef,
   annotations: Map<string, AnnotationField> | undefined,
-  enumIndex: ReadonlyMap<string, ParamEnumDef>
-): { document: ParamDefDocument; resolvedEnumCount: number; unresolvedEnumCount: number } {
+  enumIndex: ReadonlyMap<string, ParamEnumDef>,
+  refs: ParamMetaRefIndex | undefined
+): {
+  document: ParamDefDocument;
+  resolvedEnumCount: number;
+  unresolvedEnumCount: number;
+  refFieldCount: number;
+} {
   const state: FieldLayoutState = { byteOffset: 0, bitGroup: undefined };
   const fields: ParamFieldDef[] = [];
   const referencedEnums = new Set<string>();
+  let refFieldCount = 0;
   for (const source of parsed.fields) {
     const match = FIELD_DEF.exec(source.def);
     if (!match) throw sourceError('SMITHBOX_FIELD_DEF_INVALID', 'Smithbox field Def grammar is unsupported.');
@@ -620,6 +762,18 @@ function projectParamdef(
     if (source.enumRef && isIntegerScalar(field.type)) {
       field.enumRef = source.enumRef;
       referencedEnums.add(source.enumRef);
+    }
+    /*
+     * 引用只挂在整数标量上。
+     *
+     * 引用的语义是「这个值是另一张表的行 id」，而行 id 是整数。挂到 f32 或字节块
+     * 上会给出一个点得动但一定跳不到的入口 —— 用户会以为目标表缺行，而真正的问题
+     * 是这个字段根本不是 id。位域字段仍然算整数（值域小，但确实有指向 id 的用法）。
+     */
+    const rawRefs = refs?.get(fieldId);
+    if (rawRefs !== undefined && isIntegerScalar(field.type)) {
+      field.refs = rawRefs;
+      refFieldCount += 1;
     }
     fields.push(field);
   }
@@ -649,7 +803,8 @@ function projectParamdef(
       notes: 'Pinned Smithbox SDT local import; unresolved enum names remain value-opaque.'
     },
     resolvedEnumCount,
-    unresolvedEnumCount
+    unresolvedEnumCount,
+    refFieldCount
   };
 }
 

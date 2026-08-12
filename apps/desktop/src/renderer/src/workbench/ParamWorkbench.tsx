@@ -131,22 +131,30 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [paramFilter, setParamFilter] = useState('');
   const [selectedEntry, setSelectedEntry] = useState<number | null>(null);
 
-  const [rows, setRows] = useState<ParamRowLine[]>([]);
   const [rowQuery, setRowQuery] = useState('');
+  /**
+   * 选中 param 的**完整行索引**（只 id + name，无行字节），一次读入。
+   *
+   * ── 为什么改成一次读全表 ──
+   *
+   * 原先靠「滚到底取下一页」累积，那个形态有三处撑不住的地方（都实测过）：
+   *
+   *   ① 跨表引用跳转要落到第 42 页那种位置。往累积列表里塞不连续的一页，列表顺序
+   *      就是假的；而靠行筛选跳转也不行 —— 后端 id 筛选是**子串**匹配，精确匹配项
+   *      最远排在第 36 位而页大小 20，目标压根不在第 0 页。
+   *   ② 有筛选时后端**刻意不下发行字节**（筛选页与 Bridge 物理页不对应，取了会对
+   *      错行）。也就是说旧实现下「一边筛选一边编辑字段」是做不到的。
+   *   ③ 虚拟滚动要一条完整长列表才成立，累积页数只是「已取到多少」。
+   *
+   * 成本反而更低：后端**每次**分页请求本来都要读一遍全表再切片（行字节必然缺失，
+   * 见 readContainerParamPage 的实测因果），现在一个 param 只读一次索引。
+   *
+   * 行字节仍按页取（PARAM_PAGE_SIZE=20 是跨进程契约：实测载荷门控按页算，
+   * 20/32 能下发字节、64 就超 512 KB 门限）—— 选中某行时只取包含它的那一页。
+   */
+  const [rows, setRows] = useState<ParamRowLine[]>([]);
   const [rowPage, setRowPage] = useState(0);
   const [rowPageCount, setRowPageCount] = useState(1);
-  /**
-   * 已连续加载的行（跨页累积），用于行栏的连续滚动。
-   *
-   * 为什么不直接把页大小改大：PARAM_PAGE_SIZE=20 有技术原因 —— 实测 C# 的行字节
-   * 载荷门控按页算，20 与 32 能下发字节、64 就不行（页字节数超 512 KB）。
-   * 那个常量是跨进程契约（main 分页 channel、e2e harness、三处 renderer 共用，
-   * 由 pageSizeSource.test.ts 守单一来源），改大会让字段编辑重新拿不到字节。
-   *
-   * 所以取数仍按 20 行一批，只改**呈现**：滚到底自动续取下一批并追加。
-   * 真实工具（Smithbox 的 Row List）是连续长列表，5275 行分成 264 页翻页
-   * 在实际使用中不可接受。
-   */
   const [loadedRows, setLoadedRows] = useState<ParamRowLine[]>([]);
   const [loadedPages, setLoadedPages] = useState(0);
   const [appending, setAppending] = useState(false);
@@ -258,8 +266,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
 
   // 切换 param 时重置行与字段选择：否则会停在上一个 param 的行号/字段页上。
   useEffect(() => {
-    setRowPage(0);
     setRowQuery('');
+    setRowPage(0);
     setSelectedRowId(null);
     setDrafts({});
     setCommitMessage(null);
@@ -468,6 +476,42 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     return map;
   }, [definition, selectedRow]);
 
+  /**
+   * 当前行的整数字段值，供条件引用判定（`Target(refType=1)` 里的 refType）。
+   *
+   * 从 display 字符串反解而不另走一条解码：display 已经是 decodeFieldView 的产物，
+   * 再写一份解码逻辑就会出现两套可能不一致的真值。非整数（f32、串、字节块、解码
+   * 失败）一律不进表 —— 条件字段实测全是整数标量，进表反而会让「解不出来」被当成
+   * 一个具体值参与判定。
+   */
+
+
+  /**
+   * 跳转到目标 param 的指定行。
+   *
+   * ── 为什么不用行筛选实现 ──
+   *
+   * 第一版把跳转做成「把筛选设成目标 id」，靠后端全表筛选把目标带到第 0 页。
+   * 对真实 gameparam.parambnd.dcx（138 个 param、49476 行）实测后否掉，两处硬伤：
+   *
+   *   ① 后端的 id 筛选是**子串**匹配（`String(row.id).includes(q)`）。筛 "0" 会命中
+   *      每个含 0 的 id，实测精确匹配项在筛选结果里最远排到第 36 位，而页大小是
+   *      20 —— 目标根本不在第 0 页，跳转会误报「目标表里没有这一行」。
+   *      也不能靠「id 升序所以精确匹配必然最靠前」救：实测 5 个 param
+   *      （default_AIStandardInfoBank、default_EnemyBehaviorBank、MenuColorTableParam、
+   *      NetworkAreaParam、SkeletonParam）的行 id 根本不升序。
+   *   ② 后端在**有筛选时刻意不取行字节**（筛选后的页与 Bridge 的物理页不对应，
+   *      取了会对错行）。所以哪怕跳到了，字段栏也是空的 —— 跳转的意义正是去看字段。
+   *
+   * ── 现在的做法 ──
+   *
+   * 先在无筛选的全表里定位目标行的**绝对下标**，再直接加载「包含该下标的那一页」。
+   * 实测 Bridge 的 rowPage/rowPageSize 就是按绝对下标切片（页 0/1/7/42/末页逐一核对
+   * 过 id 切片一致），且每页都带字节（payloadsIncluded=true）—— 于是跳过去就能编辑。
+   *
+   * 行 id 不唯一（实测 10 个 param 共 52 行重复 id，如 CutsceneParam 的 10000000
+   * 出现两次），所以契约明确为**第一个匹配的行**，而不是假装唯一。
+   */
   /**
    * 字段写入是否放行。
    *

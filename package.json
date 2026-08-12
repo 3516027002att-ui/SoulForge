@@ -151,6 +151,8 @@
     "test:cross-session-journal": "npm run test:cross-session-journal -w @soulforge/core",
     "test:upgrade-recovery": "npm run test:upgrade-recovery -w @soulforge/core",
     "test:bridge-staging": "npm run test:bridge-staging -w @soulforge/core",
+    "test:bridge-roots": "node scripts/verify-bridge-roots-gate.mjs",
+    "test:editor-catalog-schema": "npm run test:editor-catalog-schema -w @soulforge/shared",
     "test:bridge-recovery-harness": "npm run test:bridge-recovery-harness -w @soulforge/core",
     "test:native-writer-failure-matrix": "npm run test:native-writer-failure-matrix -w @soulforge/core",
     "test:krak-combination-mutation": "npm run test:krak-combination-mutation -w @soulforge/core",
@@ -187,7 +189,9 @@
     "test:bridge-optional-args": "node scripts/verify-bridge-optional-args-gate.mjs",
     "test:editor-layout": "node scripts/verify-editor-layout-gate.mjs",
     "test:container-param-writeback": "node scripts/verify-container-param-writeback.mjs",
-    "test:recent-paths": "node scripts/verify-recent-paths.mjs"
+    "test:recent-paths": "node scripts/verify-recent-paths.mjs",
+    "test:native-document-locator": "npm run test:native-document-locator -w @soulforge/core",
+    "test:editor-catalog": "npm run test:editor-catalog -w @soulforge/core"
   },
   "devDependencies": {
     "@types/node": "^22.13.1",

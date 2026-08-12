@@ -68,59 +68,39 @@ function render(overrides: Partial<AgentSidebarProps> = {}): string {
   return renderToStaticMarkup(<AgentSidebar {...props} />);
 }
 
-describe('侧边栏区块划分把同名不同义的控件区分开', () => {
-  it('草稿生成器与任务模型服务不再同名', () => {
+describe('Agent 壳层遵循右 dock 信息架构', () => {
+  it('header 控件顺序是新任务、历史、展开、分隔、关闭', () => {
     const html = render();
-    // 两个 select 的 label 必须不同。同名会让用户以为在草稿区选了就生效，
-    // 而它只喂给 buildAiSidebarDraft，任务实际用 agentServiceId。
-    assert.match(html, /for="agent-provider">草稿生成器</, '草稿区下拉必须叫「草稿生成器」');
-    assert.match(html, /for="agent-task-service">模型服务</, '任务区下拉保留「模型服务」');
-    // 「模型服务」这个词只应出现在任务区那一处 label 上。
-    const labelMatches = html.match(/class="agent-controls__label"[^>]*>模型服务</g) ?? [];
-    assert.equal(
-      labelMatches.length,
-      1,
-      `「模型服务」label 应只出现一次，实际 ${labelMatches.length} 次`
-    );
+    assert.match(html, /title="新任务"/);
+    assert.match(html, /title="历史"/);
+    assert.match(html, /title="展开 Agent"/);
+    assert.match(html, /class="agent__header-separator"/);
+    assert.match(html, /title="关闭"/);
+    assert.ok(!html.includes('Agent 设置'), '设置不应占据 header');
   });
 
-  it('草稿生成器旁必须写明作用范围', () => {
+  it('composer 把交互意图与权限锁定分开显示', () => {
     const html = render();
-    assert.match(html, /data-testid="agent-draft-scope"/);
-    assert.match(html, /仅用于生成计划草稿/);
+    assert.match(html, /@Agent/);
+    assert.match(html, /Ask/);
+    assert.match(html, /权限：计划模式（主进程锁定）/);
   });
 });
 
 describe('区块顺序与默认折叠状态', () => {
-  it('草稿设置区默认折叠', () => {
+  it('空闲态只渲染欢迎内容，不渲染旧的工具库存', () => {
     const html = render();
-    const match = /<details class="agent-settings"([^>]*)>/.exec(html);
-    assert.ok(match, '草稿设置区必须是 details 元素');
-    // 默认展开会让用户以为必须先配它才能跑任务，而它不影响任务运行。
-    assert.ok(
-      !(match[1] ?? '').includes('open'),
-      `草稿设置区应默认折叠，实际属性：${match[1] ?? ''}`
-    );
+    assert.match(html, /data-testid="agent-empty-state"/);
+    assert.match(html, /先读取工作区证据/);
+    assert.ok(!html.includes('已注册工具'), '空闲态不应渲染工具库存');
   });
 
-  it('手动工具台默认折叠且不占据会话流', () => {
+  it('有任务时才挂载任务面板', () => {
     const html = render();
-    assert.match(html, /data-testid="agent-manual-tools"/);
-    const match = /<details class="agent-block" data-testid="agent-manual-tools"([^>]*)>/.exec(html);
-    assert.ok(match, '手动工具台必须是可折叠区块');
-    assert.ok(!(match[1] ?? '').includes('open'), '手动工具台应默认折叠');
-  });
-
-  it('任务面板排在草稿设置之前', () => {
-    const html = render();
-    const taskIndex = html.indexOf('data-testid="agent-task-panel"');
-    const settingsIndex = html.indexOf('data-testid="agent-settings"');
-    assert.ok(taskIndex >= 0 && settingsIndex >= 0, '两个区块都必须存在');
-    // 正在跑的任务与待批准的操作是用户最需要先看到的东西。
-    assert.ok(
-      settingsIndex < taskIndex,
-      '草稿设置区（折叠的 summary）应在任务面板之前，任务内容随后展开'
-    );
+    assert.ok(!html.includes('data-testid="agent-task-panel"'));
+    const running = { ...INITIAL_AGENT_TASK_STATE, sessionId: 's', phase: 'running' as const };
+    const active = render({ task: { ...render0Task(), task: running } });
+    assert.match(active, /data-testid="agent-task-panel"/);
   });
 });
 
@@ -142,18 +122,12 @@ describe('等待审批在标题栏与输入区都可见', () => {
 
   it('标题栏显示等待批准数量', () => {
     const html = render({ task: { ...render0Task(), task: awaiting } });
-    // 断言必须锚定到标题栏那个元素**内部**的文本。
-    //
-    // 第一版写的是 `assert.match(html, /等待批准 1 项/)`，实测报绿：
-    // AgentApprovalPanel 的区块标题也是「等待批准 N 项」，所以标题栏即使完全
-    // 不显示，那句话仍在 HTML 里，断言恒真。判据串在另一处必然出现时，
-    // 全文匹配没有任何鉴别力。
     const headerMatch = /data-testid="agent-header-state"[^>]*>([^<]*)</.exec(html);
     assert.ok(headerMatch, '标题栏状态元素必须存在');
     assert.match(
       headerMatch[1] ?? '',
-      /等待批准 1 项/,
-      `标题栏应显示等待批准数量，实际内容：${headerMatch[1] ?? ''}`
+      /等待批准/,
+      `标题栏应显示等待批准状态，实际内容：${headerMatch[1] ?? ''}`
     );
     // 反向前提：不等待审批时标题栏不该说这句话，否则上面那条也可能恒真。
     const idleHeader = /data-testid="agent-header-state"[^>]*>([^<]*)</.exec(render());
@@ -187,20 +161,18 @@ describe('等待审批在标题栏与输入区都可见', () => {
   it('输入区常驻显示当前权限模式', () => {
     const html = render();
     // 模式决定 agent 能不能写盘，而它此前只出现在任务面板深处。
-    assert.match(html, /data-testid="composer-mode"/);
+    assert.match(html, /class="composer-permission"/);
   });
 });
 
-describe('空状态承担引导职责', () => {
-  it('给出可点击示例与四步流程', () => {
+describe('空状态保持克制且可执行', () => {
+  it('给出 Agent 角色与三条状态边界，不展示教程示例', () => {
     const html = render();
     assert.match(html, /data-testid="agent-empty-state"/);
-    assert.match(html, /data-testid="agent-empty-examples"/);
-    // 示例必须是真的按钮而不是静态文字，否则「可点击示例」名不副实。
-    const exampleButtons = html.match(/class="btn btn--ghost btn--sm"[^>]*>[^<]*葫芦/g) ?? [];
-    assert.ok(exampleButtons.length >= 1, '至少一个示例应渲染成按钮');
-    assert.match(html, /Agent 用只读工具查证据/);
-    assert.match(html, /写类操作逐条弹审批/);
+    assert.match(html, /先读取工作区证据/);
+    assert.match(html, /改动以提案和审批为边界/);
+    assert.match(html, /可验证、可回滚/);
+    assert.ok(!html.includes('可以这样问'), '空状态不展示示例教程');
   });
 
   it('有目标时不再显示空状态', () => {

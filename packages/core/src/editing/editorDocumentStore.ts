@@ -1,171 +1,289 @@
 /**
- * In-memory professional editor document store.
- * Tracks open tabs, revision/selection, and accepts only unified EditorMutation objects.
+ * DOCSTORE-04: owner-bound 编辑器文档仓库（§14.4 六签名闭合契约）。
+ *
+ * renderer 发送逻辑引用，main 从 trusted sender/session 推导 ownerKey 后调用
+ * 本仓库。ownerKey、绝对路径与 locator 永远不出 main/core：本模块持有完整
+ * NativeDocumentLocator（含 outerSourceUri），renderer 只拿 opaque
+ * documentHandle。
+ *
+ * 数据与写链不在本模块：分页/内容由注入的 EditorDocumentDataSource 提供，
+ * mutation 由注入的 EditorMutationApplyPort 执行（生产实现是 Patch Engine
+ * 写链，smoke 用确定性桩）。本模块只负责 ownership、revision、TTL、能力与
+ * bounded page 的裁定。
  */
 
 import { randomUUID } from 'node:crypto';
 import type {
-  EditorDocumentRef,
-  EditorKind,
+  ApplyEditorMutationRequest,
+  ApplyEditorMutationValue,
+  EditTransactionState,
+  EditorContentQuery,
+  EditorContentValue,
+  EditorDocumentErrorCode,
+  EditorDocumentPageValue,
+  EditorDocumentResult,
   EditorMutation,
-  EditorMutationBatch,
-  EditorValidationIssue
+  EditorPageItemDto,
+  EditorPageQuery,
+  OpenEditorDocumentValue,
+  ReadEditorContentRequest,
+  ReadOperationId,
+  WriteOperationId
 } from '@soulforge/shared';
-import { editorAllowsMutation } from './editorCapabilityContract.js';
+import type { NativeDocumentLocator } from './nativeDocumentLocator.js';
+import {
+  mutationCapabilityForLocator,
+  readOperationForQuery
+} from './editorMutationService.js';
 
-export interface OpenEditorDocumentInput {
-  editorKind: EditorKind;
-  resourceUri: string;
-  title: string;
+export interface EditorDocumentStoreContract {
+  open(ownerKey: string, locator: NativeDocumentLocator): Promise<EditorDocumentResult<OpenEditorDocumentValue>>;
+  get(ownerKey: string, documentHandle: string): Promise<EditorDocumentResult<OpenEditorDocumentValue>>;
+  page(ownerKey: string, request: PageEditorDocumentRequestLike): Promise<EditorDocumentResult<EditorDocumentPageValue>>;
+  readContent(ownerKey: string, request: ReadEditorContentRequest): Promise<EditorDocumentResult<EditorContentValue>>;
+  apply(ownerKey: string, request: ApplyEditorMutationRequest): Promise<EditorDocumentResult<ApplyEditorMutationValue>>;
+  close(ownerKey: string, documentHandle: string): Promise<EditorDocumentResult<{ closed: true }>>;
 }
 
-export interface EditorDocumentState extends EditorDocumentRef {
-  selectionJson?: string;
-  dirty: boolean;
-  lastMutationId?: string;
+/** §14.4 PageEditorDocumentRequest 的 core-internal 形态（shared DTO 已解码）。 */
+export interface PageEditorDocumentRequestLike {
+  readonly documentHandle: string;
+  readonly expectedRevision: string;
+  readonly query: EditorPageQuery;
+  readonly cursor: string | null;
+  readonly limit: number;
 }
 
-export class EditorDocumentStore {
-  private readonly documents = new Map<string, EditorDocumentState>();
-  private readonly pending = new Map<string, EditorMutation[]>();
-
-  open(input: OpenEditorDocumentInput): EditorDocumentState {
-    const existing = [...this.documents.values()].find(
-      (doc) => doc.resourceUri === input.resourceUri && doc.editorKind === input.editorKind
-    );
-    if (existing) return structuredClone(existing);
-    const doc: EditorDocumentState = {
-      documentId: randomUUID(),
-      editorKind: input.editorKind,
-      resourceUri: input.resourceUri,
-      revision: 0,
-      title: input.title,
-      dirty: false
-    };
-    this.documents.set(doc.documentId, doc);
-    this.pending.set(doc.documentId, []);
-    return structuredClone(doc);
-  }
-
-  list(): EditorDocumentState[] {
-    return [...this.documents.values()].map((doc) => structuredClone(doc));
-  }
-
-  get(documentId: string): EditorDocumentState | undefined {
-    const doc = this.documents.get(documentId);
-    return doc ? structuredClone(doc) : undefined;
-  }
-
-  setSelection(documentId: string, selectionJson: string): EditorValidationIssue[] {
-    const doc = this.documents.get(documentId);
-    if (!doc) {
-      return [{ severity: 'error', code: 'EDITOR_DOCUMENT_NOT_FOUND', message: '编辑器文档不存在。' }];
-    }
-    doc.selectionJson = selectionJson;
-    return [];
-  }
-
+export interface EditorDocumentDataSource {
   /**
-   * Accept a unified mutation. Rejects kind mismatch, stale revision, and unknown documents.
+   * 加载一页。返回 items=null 表示该 query kind 没有数据源（capability
+   * 未接通），与「空页」区分：空页是 items=[]。
    */
-  applyMutation(mutation: Omit<EditorMutation, 'mutationId' | 'createdAt'> & {
-    mutationId?: string;
-    createdAt?: string;
-  }): { ok: boolean; document?: EditorDocumentState; issues: EditorValidationIssue[] } {
-    const doc = this.documents.get(mutation.documentId);
-    if (!doc) {
-      return {
-        ok: false,
-        issues: [{ severity: 'error', code: 'EDITOR_DOCUMENT_NOT_FOUND', message: '编辑器文档不存在。' }]
-      };
-    }
-    if (mutation.resourceUri !== doc.resourceUri) {
-      return {
-        ok: false,
-        issues: [{ severity: 'error', code: 'EDITOR_RESOURCE_MISMATCH', message: 'mutation 资源 URI 与文档不一致。' }]
-      };
-    }
-    if (mutation.baseRevision !== doc.revision) {
-      return {
-        ok: false,
-        issues: [{
-          severity: 'error',
-          code: 'EDITOR_REVISION_CONFLICT',
-          message: `文档 revision 冲突：expected ${doc.revision}, got ${mutation.baseRevision}。`
-        }]
-      };
-    }
-    if (!editorAllowsMutation(doc.editorKind, mutation.kind)) {
-      return {
-        ok: false,
-        issues: [{
-          severity: 'error',
-          code: 'EDITOR_MUTATION_KIND_DENIED',
-          message: `编辑器 ${doc.editorKind} 不接受 mutation ${mutation.kind}。`
-        }]
-      };
-    }
+  loadPage(
+    query: EditorPageQuery,
+    cursor: string | null,
+    limit: number
+  ): Promise<{
+    items: readonly EditorPageItemDto[] | null;
+    nextCursor: string | null;
+    totalKnown: number | null;
+  }>;
+  readContent(query: EditorContentQuery): Promise<EditorContentValue | null>;
+}
 
-    const full: EditorMutation = {
-      mutationId: mutation.mutationId ?? randomUUID(),
-      documentId: mutation.documentId,
-      kind: mutation.kind,
-      resourceUri: mutation.resourceUri,
-      baseRevision: mutation.baseRevision,
-      payload: mutation.payload,
-      createdAt: mutation.createdAt ?? new Date().toISOString()
+export type EditorMutationApplyOutcome =
+  | { kind: 'committed'; operationId: string }
+  | { kind: 'cancelled' }
+  | { kind: 'rejected'; code: string };
+
+export interface EditorMutationApplyPort {
+  apply(mutation: EditorMutation): Promise<EditorMutationApplyOutcome>;
+}
+
+export interface EditorDocumentStoreOptions {
+  readonly ttlMs?: number;
+  readonly now?: () => number;
+  readonly dataSource: EditorDocumentDataSource;
+  readonly applyPort: EditorMutationApplyPort;
+}
+
+interface OpenDocumentRecord {
+  readonly handle: string;
+  readonly ownerKey: string;
+  readonly locator: NativeDocumentLocator;
+  revision: number;
+  lastAccessedAt: number;
+}
+
+/** query kind → item kind（§14.4：page 返回的 item kind 必须与 query kind 匹配）。 */
+const ITEM_KIND_FOR_QUERY = {
+  'param-tables': 'param-table',
+  'param-rows': 'param-row',
+  'param-fields': 'param-field',
+  'gparam-groups': 'gparam-group',
+  'gparam-fields': 'gparam-field',
+  'fmg-entries': 'fmg-entry',
+  'event-outline': 'event-outline',
+  'container-entries': 'container-entry',
+  'script-symbols': 'script-symbol',
+  'resource-tree': 'resource-node',
+  'properties': 'property'
+} as const satisfies Record<EditorPageQuery['kind'], EditorPageItemDto['kind']>;
+
+const READ_OPERATION_FOR_CONTENT = {
+  'fmg-content': 'read-source',
+  'event-source': 'read-source',
+  'script-source': 'read-source',
+  'resource-preview': 'read-preview'
+} as const satisfies Record<EditorContentQuery['kind'], ReadOperationId>;
+
+function ok<T>(value: T): EditorDocumentResult<T> {
+  return { ok: true, value };
+}
+
+function fail(code: EditorDocumentErrorCode, retryable: boolean): EditorDocumentResult<never> {
+  return { ok: false, code, retryable };
+}
+
+export class EditorDocumentStore implements EditorDocumentStoreContract {
+  private readonly documents = new Map<string, OpenDocumentRecord>();
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+  private readonly dataSource: EditorDocumentDataSource;
+  private readonly applyPort: EditorMutationApplyPort;
+
+  constructor(options: EditorDocumentStoreOptions) {
+    this.ttlMs = options.ttlMs ?? 30 * 60_000;
+    this.now = options.now ?? (() => Date.now());
+    this.dataSource = options.dataSource;
+    this.applyPort = options.applyPort;
+  }
+
+  private revisionOf(record: OpenDocumentRecord): string {
+    return `rev:${record.revision}`;
+  }
+
+  private toOpenValue(record: OpenDocumentRecord): OpenEditorDocumentValue {
+    const { readOperations, writeOperations } = mutationCapabilityForLocator(record.locator);
+    return {
+      documentHandle: record.handle,
+      revision: this.revisionOf(record),
+      loadState: { kind: 'ready' },
+      readOperations,
+      writeOperations
     };
-    const queue = this.pending.get(doc.documentId) ?? [];
-    queue.push(full);
-    this.pending.set(doc.documentId, queue);
-    doc.revision += 1;
-    doc.dirty = true;
-    doc.lastMutationId = full.mutationId;
-    return { ok: true, document: structuredClone(doc), issues: [] };
   }
 
-  createPatchEngineBatch(documentId: string): {
-    ok: boolean;
-    batch?: EditorMutationBatch;
-    issues: EditorValidationIssue[];
-  } {
-    const doc = this.documents.get(documentId);
-    if (!doc) {
-      return {
-        ok: false,
-        issues: [{ severity: 'error', code: 'EDITOR_DOCUMENT_NOT_FOUND', message: '编辑器文档不存在。' }]
-      };
+  private resolve(
+    ownerKey: string,
+    documentHandle: string
+  ): EditorDocumentResult<OpenDocumentRecord> {
+    const record = this.documents.get(documentHandle);
+    if (!record) return fail('not-found', false);
+    if (record.ownerKey !== ownerKey) return fail('owner-mismatch', false);
+    if (this.now() - record.lastAccessedAt > this.ttlMs) {
+      // 过期即废弃：后续访问也一律 expired，不再复活。
+      this.documents.delete(documentHandle);
+      return fail('expired', true);
     }
-    const mutations = this.pending.get(documentId) ?? [];
-    if (mutations.length === 0) {
-      return {
-        ok: false,
-        issues: [{ severity: 'error', code: 'EDITOR_NO_PENDING_MUTATIONS', message: '没有待提交的编辑 mutation。' }]
-      };
+    record.lastAccessedAt = this.now();
+    return ok(record);
+  }
+
+  async open(ownerKey: string, locator: NativeDocumentLocator): Promise<EditorDocumentResult<OpenEditorDocumentValue>> {
+    const existing = [...this.documents.values()].find(
+      (record) => record.locator.locatorId === locator.locatorId
+    );
+    if (existing) {
+      if (existing.ownerKey !== ownerKey) return fail('owner-mismatch', false);
+      existing.lastAccessedAt = this.now();
+      return ok(this.toOpenValue(existing));
     }
-    const batch: EditorMutationBatch = {
-      batchId: randomUUID(),
-      documentId,
-      mutations: structuredClone(mutations),
-      requiresPatchEngine: true
+    const record: OpenDocumentRecord = {
+      handle: randomUUID(),
+      ownerKey,
+      locator,
+      revision: 0,
+      lastAccessedAt: this.now()
     };
-    return { ok: true, batch, issues: [] };
+    this.documents.set(record.handle, record);
+    return ok(this.toOpenValue(record));
   }
 
-  markCommitted(documentId: string, batchId: string): EditorValidationIssue[] {
-    const doc = this.documents.get(documentId);
-    if (!doc) {
-      return [{ severity: 'error', code: 'EDITOR_DOCUMENT_NOT_FOUND', message: '编辑器文档不存在。' }];
+  async get(ownerKey: string, documentHandle: string): Promise<EditorDocumentResult<OpenEditorDocumentValue>> {
+    const resolved = this.resolve(ownerKey, documentHandle);
+    if (!resolved.ok) return resolved;
+    return ok(this.toOpenValue(resolved.value));
+  }
+
+  async page(
+    ownerKey: string,
+    request: PageEditorDocumentRequestLike
+  ): Promise<EditorDocumentResult<EditorDocumentPageValue>> {
+    const resolved = this.resolve(ownerKey, request.documentHandle);
+    if (!resolved.ok) return resolved;
+    const record = resolved.value;
+    if (request.expectedRevision !== this.revisionOf(record)) return fail('stale-revision', false);
+
+    const { readOperations } = mutationCapabilityForLocator(record.locator);
+    const requiredOperation = readOperationForQuery(request.query.kind);
+    if (!readOperations.includes(requiredOperation)) return fail('capability-blocked', false);
+
+    const loaded = await this.dataSource.loadPage(request.query, request.cursor, request.limit);
+    if (loaded.items === null) return fail('capability-blocked', false);
+    if (loaded.items.length > request.limit) return fail('invalid-request', false);
+
+    // §14.4：page 返回的 item kind 必须与 query kind 匹配，否则 decoder 拒绝整页。
+    // store 在 decoder 之外再兜底一层：数据源若返回错 kind，整页拒绝而不是
+    // 静默透传给 renderer。
+    const expectedKind = ITEM_KIND_FOR_QUERY[request.query.kind];
+    if (loaded.items.some((item) => item.kind !== expectedKind)) {
+      return fail('invalid-request', false);
     }
-    // batchId retained for audit correlation by caller; store only clears pending.
-    void batchId;
-    this.pending.set(documentId, []);
-    doc.dirty = false;
-    return [];
+
+    return ok({
+      documentHandle: record.handle,
+      revision: this.revisionOf(record),
+      queryKind: request.query.kind,
+      items: loaded.items,
+      nextCursor: loaded.nextCursor,
+      totalKnown: loaded.totalKnown
+    });
   }
 
-  close(documentId: string): void {
-    this.documents.delete(documentId);
-    this.pending.delete(documentId);
+  async readContent(
+    ownerKey: string,
+    request: ReadEditorContentRequest
+  ): Promise<EditorDocumentResult<EditorContentValue>> {
+    const resolved = this.resolve(ownerKey, request.documentHandle);
+    if (!resolved.ok) return resolved;
+    const record = resolved.value;
+    if (request.expectedRevision !== this.revisionOf(record)) return fail('stale-revision', false);
+
+    const { readOperations } = mutationCapabilityForLocator(record.locator);
+    const requiredOperation = READ_OPERATION_FOR_CONTENT[request.query.kind];
+    if (!readOperations.includes(requiredOperation)) return fail('capability-blocked', false);
+
+    const content = await this.dataSource.readContent(request.query);
+    if (content === null) return fail('capability-blocked', false);
+    return ok(content);
+  }
+
+  async apply(
+    ownerKey: string,
+    request: ApplyEditorMutationRequest
+  ): Promise<EditorDocumentResult<ApplyEditorMutationValue>> {
+    const resolved = this.resolve(ownerKey, request.documentHandle);
+    if (!resolved.ok) return resolved;
+    const record = resolved.value;
+    if (request.expectedRevision !== this.revisionOf(record)) return fail('stale-revision', false);
+
+    const { writeOperations } = mutationCapabilityForLocator(record.locator);
+    if (!writeOperations.includes(request.mutation.kind as WriteOperationId)) {
+      return fail('capability-blocked', false);
+    }
+
+    const outcome = await this.applyPort.apply(request.mutation);
+    if (outcome.kind === 'cancelled') return fail('cancelled', false);
+    if (outcome.kind === 'rejected') return fail('mutation-rejected', false);
+
+    record.revision += 1;
+    const transactionState: EditTransactionState = {
+      kind: 'committed',
+      operationId: outcome.operationId,
+      committedRevision: this.revisionOf(record)
+    };
+    return ok({
+      documentHandle: record.handle,
+      revision: this.revisionOf(record),
+      transactionState
+    });
+  }
+
+  async close(ownerKey: string, documentHandle: string): Promise<EditorDocumentResult<{ closed: true }>> {
+    const resolved = this.resolve(ownerKey, documentHandle);
+    if (!resolved.ok) return resolved;
+    this.documents.delete(documentHandle);
+    return ok({ closed: true });
   }
 }

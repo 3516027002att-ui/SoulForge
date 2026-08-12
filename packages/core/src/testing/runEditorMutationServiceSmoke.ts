@@ -17,11 +17,14 @@ import { createHash } from 'node:crypto';
 import type { ConfirmationReceipt, IndexedFile } from '@soulforge/shared';
 import {
   applyNativeMutation,
+  mutationCapabilityForLocator,
+  readOperationForQuery,
   type NativeMutationOutcome,
   type RawReplaceCommitPort,
   type WriteConfirmationPort
 } from '../editing/editorMutationService.js';
 import type { SaveRawResourceResult } from '../editing/saveRawResource.js';
+import type { NativeDocumentLocator } from '../editing/nativeDocumentLocator.js';
 
 const failures: string[] = [];
 let checks = 0;
@@ -81,7 +84,55 @@ function confirmPort(receipt: ConfirmationReceipt | null): WriteConfirmationPort
   };
 }
 
+/** §14.4 locator 能力判定（DOCSTORE-04）的最小构造器。 */
+function buildLocator(leafFormatId: string, containerRole: NativeDocumentLocator['containerRole'] = 'none'): NativeDocumentLocator {
+  return {
+    locatorId: `locator:${leafFormatId}:smoke`,
+    outerResourceId: `resource:${leafFormatId}-sample`,
+    outerSourceUri: 'file:///synthetic/sample.dcx',
+    sourceVariant: 'overlay',
+    expectedOuterRevision: 'rev-1',
+    expectedOuterHash: 'ab'.repeat(32),
+    containerRole,
+    layers: [
+      { layerIndex: 0, formatId: 'dcx-dflt', entry: null },
+      { layerIndex: 1, formatId: leafFormatId as never, entry: null }
+    ],
+    leafDocumentStableId: leafFormatId === 'bnd4' ? 'bnd4-root' : `loose:${leafFormatId}`
+  };
+}
+
 async function main(): Promise<void> {
+  // ── §14.4 locator → 能力判定（DOCSTORE-04）──
+  {
+    const param = mutationCapabilityForLocator(buildLocator('param'));
+    check('capability/param-write', param.writeOperations.includes('param-field-set'), 'param 必须能写 param-field-set');
+    check('capability/param-read', param.readOperations.includes('page-tables'), 'param 必须能读 page-tables');
+    check('capability/param-no-fmg', param.writeOperations.includes('fmg-entry-upsert') === false, 'param 不得写 fmg');
+
+    const gameparamBnd = mutationCapabilityForLocator(buildLocator('bnd4', 'gameparam-binder'));
+    check('capability/bnd-gameparam-write', gameparamBnd.writeOperations.includes('param-row-upsert'), 'gameparam-binder 必须能写 param-row-upsert');
+    check('capability/bnd-gameparam-read', gameparamBnd.readOperations.includes('page-rows'), 'gameparam-binder 必须能读 page-rows');
+    check('capability/bnd-gameparam-no-replace', gameparamBnd.writeOperations.includes('bnd4-child-replace') === false, 'gameparam-binder 不得写 bnd4-child-replace');
+
+    const genericBnd = mutationCapabilityForLocator(buildLocator('bnd4', 'generic-binder'));
+    check('capability/bnd-generic-write', genericBnd.writeOperations.includes('bnd4-child-replace'), 'generic-binder 只写 bnd4-child-replace');
+    check('capability/bnd-generic-no-param', genericBnd.writeOperations.includes('param-field-set') === false, 'generic-binder 不得写 param');
+
+    const fmg = mutationCapabilityForLocator(buildLocator('fmg'));
+    check('capability/fmg-write', fmg.writeOperations.includes('fmg-entry-upsert'), 'fmg 必须能写 fmg-entry-upsert');
+    check('capability/fmg-no-param', fmg.writeOperations.includes('param-field-set') === false, 'fmg 不得写 param');
+
+    const emevd = mutationCapabilityForLocator(buildLocator('emevd'));
+    check('capability/emevd-write', emevd.writeOperations.includes('emevd-source-change'), 'emevd 必须能写 emevd-source-change');
+
+    const unknown = mutationCapabilityForLocator(buildLocator('unknown'));
+    check('capability/unknown-empty', unknown.readOperations.length === 0 && unknown.writeOperations.length === 0, '未知格式能力必须为空（capability-blocked）');
+
+    check('capability/query-map', readOperationForQuery('param-rows') === 'page-rows', 'param-rows 查询必须映射到 page-rows');
+    check('capability/query-map2', readOperationForQuery('container-entries') === 'page-entries', 'container-entries 查询必须映射到 page-entries');
+  }
+
   const root = await mkdtemp(join(tmpdir(), 'soulforge-mutation-service-'));
   try {
     const payload = Buffer.from('staged-native-bytes');

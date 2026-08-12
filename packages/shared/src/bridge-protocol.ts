@@ -92,6 +92,7 @@ export type BridgeCommandName =
   | 'export-msg'
   | 'validate'
   | 'probe-oodle'
+  | 'probe-document-locator'
   | 'read-dcx-document'
   | 'write-bnd4'
   | 'snapshot-bnd4-child'
@@ -220,6 +221,39 @@ export interface BridgeCapabilityMatrix {
   commands: BridgeCommandDescriptor[];
   cells: BridgeCapabilityCell[];
   generatedAt: string;
+}
+
+/**
+ * probe-document-locator 响应（NATIVE-03）：Bridge-confirmed 格式栈。
+ *
+ * suffix/path 永远不能构造这里的层；只有 Bridge 真实读取外层容器后才能
+ * 产生 `confirmedBy: 'bridge'` 的层。响应只携带脱敏标识符与哈希，不携带
+ * 主机路径；renderer 永远只消费由 main 组装的 opaque locator。
+ */
+export interface BridgeDocumentLocatorLayerDto {
+  readonly layerIndex: number;
+  readonly formatId: string;
+  readonly confirmedBy: 'bridge';
+  readonly childStableId: string | null;
+  readonly entry: null | {
+    readonly stableEntryId: string;
+    readonly entryIndex: number;
+    readonly entryName: string;
+    readonly expectedEntryHash: string;
+  };
+}
+
+export interface BridgeDocumentLocatorValue {
+  readonly outerResourceId: string;
+  readonly outerByteLength: number;
+  readonly outerHash: string;
+  readonly containerRole: string;
+  readonly layers: readonly BridgeDocumentLocatorLayerDto[];
+  readonly leafFormatId: string;
+  /** 'confirmed' | 'blocked' | 'unsupported' | 'conflict' */
+  readonly probeStatus: string;
+  readonly reasonCode: string | null;
+  readonly confirmedStackIds: readonly string[];
 }
 
 export function createBridgeEnvelope<T>(

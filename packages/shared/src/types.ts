@@ -95,6 +95,25 @@ export interface ResourceMeta {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * CAT-05 扫描期 artifact 基础标记（§4.3）。
+ *
+ * 只做「基础标记」：scanner 不解释这些标记的语义（分类语义由
+ * packages/core/src/workspace/editorCatalog.ts 解释 §4.4 注册表决定），也不
+ * 改变现有物理 `ResourceKind`。artifactRole 的取值与 editor-catalog.ts 的
+ * ArtifactRole 保持一致（不 import 以避免 shared 内部类型循环；语义一致性
+ * 由 editorCatalog builder 的断言保证）。
+ */
+export interface ArtifactMarkers {
+  artifactRole?: 'primary' | 'base' | 'backup' | 'previous' | 'recovery' | 'projection' | 'cache' | 'audit' | 'temporary';
+  /** overlay/base 是同一逻辑资源的 source variants，不得显示成两个普通文档。 */
+  sourceLayer?: 'overlay' | 'base';
+  /** backup/previous/recovery 通过 recoveryOfResourceId 关联 primary。 */
+  recoveryOfResourceId?: string;
+  /** projection sidecar 内记录的 provenance digest（与 primary 一致才关联）。 */
+  projectionProvenanceDigest?: string;
+}
+
 export interface IndexedFile extends ResourceMeta {
   id: string;
   workspaceId: string;
@@ -107,6 +126,7 @@ export interface IndexedFile extends ResourceMeta {
   size: number;
   mtimeMs: number;
   sha256?: string;
+  artifactMarkers?: ArtifactMarkers;
 }
 
 export type ReferenceConfidence = 'high' | 'medium' | 'low';

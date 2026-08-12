@@ -49,7 +49,7 @@ import { ParamWorkbench } from './workbench/ParamWorkbench.js';
 import { DiagnosticsLog } from './workbench/DiagnosticsLog.js';
 import { selectEditor } from './workbench/selectEditor.js';
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
-import { EmevdFourViewPanel } from './editors/EmevdFourViewPanel.js';
+import { EventSourceWorkbenchPanel } from './editors/EventSourceWorkbenchPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
 import { ParamTablePanel } from './editors/ParamTablePanel.js';
 import { WorkbenchOpsPanel } from './editors/WorkbenchOpsPanel.js';
@@ -75,8 +75,16 @@ import {
   describeBridgeAbsence,
   getRendererRuntime
 } from './runtime/rendererRuntime.js';
-import { RESOURCE_FAMILIES, type ResourceMode } from './navigation/resourceFamilies.js';
-import { WorkspaceResourceBar } from './navigation/WorkspaceResourceBar.js';
+import type { ResourceMode } from './navigation/resourceFamilies.js';
+import {
+  domainForFile,
+  domainLabel,
+  filterFilesForDomain,
+  resourceModeForDomain,
+  DOMAIN_NAV_ITEMS,
+  type EditorDomainId
+} from './navigation/domainNavigation.js';
+import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import type {
@@ -100,6 +108,7 @@ import {
 } from './components/PreviewCards.js';
 import { MsgTableEditor } from './components/MsgTableEditor.js';
 import { PanelErrorBoundary } from './components/PanelErrorBoundary.js';
+import { ProjectOverviewPanel } from './workbench/ProjectOverviewPanel.js';
 import {
   extractMsgRows,
   nextMsgId,
@@ -109,7 +118,6 @@ import {
 import {
   FILE_LIST_PAGE_SIZE,
   SEARCH_HIT_LIMIT,
-  filterFilesForMode,
   formatListTruncation,
   formatPageRange,
   formatPreviewTruncation,
@@ -126,7 +134,7 @@ import {
 type SidebarView = 'explorer' | 'search' | 'staging' | 'audit' | 'settings';
 
 /** 中央内容：资源编辑 / 任务与历史；设置位于左侧面板，不再占用中央区。 */
-type CenterView = 'resource' | 'operations' | 'settings';
+type CenterView = 'project' | 'resource' | 'operations' | 'settings';
 
 /** P0 安全收口：权限模式由主进程锁定，renderer 不得自行切换。 */
 const AI_PERMISSION_LOCK_REASON = 'P0 安全收口期间由主进程锁定为计划模式；renderer 不能抬高授权。';
@@ -169,6 +177,21 @@ const EMPTY_EMEVD_DOCUMENT: EmevdEditorDocument = {
 const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 
 const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: string }> = [];
+
+const AGENT_MIN_WIDTH = 340;
+const AGENT_MAX_WIDTH = 620;
+const AGENT_DEFAULT_WIDTH = 440;
+const AGENT_EDITOR_MIN_WIDTH = 560;
+
+function clampAgentWidth(value: number): number {
+  return Math.min(AGENT_MAX_WIDTH, Math.max(AGENT_MIN_WIDTH, Math.round(value)));
+}
+
+function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
+  // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
+  const uiKey = workspaceSessionId ?? 'preview';
+  return `soulforge.ui.agentDock.v1.${uiKey}.${field}`;
+}
 
 /**
  * 空 paramdef：origin 为 fixture 且无字段，definitionCanCommit 永不放行写入。
@@ -255,11 +278,16 @@ export function App(): ReactElement {
   const [toolOutput, setToolOutput] = useState<ToolResult | null>(null);
   const [files, setFiles] = useState<RendererIndexedFile[]>([]);
   const [allFiles, setAllFiles] = useState<RendererIndexedFile[]>([]);
+  const [activeDomain, setActiveDomain] = useState<EditorDomainId>('project');
   const [resourceMode, setResourceMode] = useState<ResourceMode>('all');
   const [centerView, setCenterView] = useState<CenterView>('resource');
   const [bnd4Forced, setBnd4Forced] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>('explorer');
   const [agentOpen, setAgentOpen] = useState(true);
+  const [agentWidth, setAgentWidth] = useState(440);
+  const [agentExpanded, setAgentExpanded] = useState(false);
+  const [agentOverlay, setAgentOverlay] = useState(false);
+  const [agentInteractionMode, setAgentInteractionMode] = useState<'ask' | 'plan' | 'edit'>('ask');
   const [status, setStatus] = useState('就绪');
   const [emevdDocument, setEmevdDocument] = useState<EmevdEditorDocument>(EMPTY_EMEVD_DOCUMENT);
   const [emevdSourceHash, setEmevdSourceHash] = useState<string | null>(null);
@@ -354,6 +382,7 @@ export function App(): ReactElement {
   const [agentTools, setAgentTools] = useState<ToolDescriptor[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(264);
+  const shellRef = useRef<HTMLDivElement>(null);
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [cmdkQuery, setCmdkQuery] = useState('');
   const [cmdkIndex, setCmdkIndex] = useState(0);
@@ -425,7 +454,6 @@ export function App(): ReactElement {
     tpf: () => setTpfData(null)
   }), []);
 
-  const counts = useMemo(() => workspace?.countsByKind ?? null, [workspace]);
   const diagnostics = [...(workspace?.diagnostics ?? []), ...(analysis?.diagnostics ?? []), ...(preview?.diagnostics ?? [])];
   // BND 不是顶层目录：选择真实 BND 文件后自动进入容器工作台，
   // 命令面板可对任意选中强制「以 BND4 容器打开」。
@@ -519,6 +547,49 @@ export function App(): ReactElement {
   useEffect(() => {
     document.documentElement.dataset.theme = 'dark';
   }, []);
+
+  useEffect(() => {
+    try {
+      const savedOpen = window.localStorage.getItem(agentUiStorageKey(workspace?.workspaceSessionId, 'open'));
+      const savedWidth = window.localStorage.getItem(agentUiStorageKey(workspace?.workspaceSessionId, 'width'));
+      if (savedOpen !== null) setAgentOpen(savedOpen === 'true');
+      if (savedWidth !== null) {
+        const parsed = Number(savedWidth);
+        if (Number.isFinite(parsed)) setAgentWidth(clampAgentWidth(parsed));
+      }
+    } catch {
+      // 浏览器预览或受限 WebView 可能禁用 localStorage；不影响工作台使用。
+    }
+  }, [workspace?.workspaceSessionId]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(agentUiStorageKey(workspace?.workspaceSessionId, 'open'), String(agentOpen));
+      window.localStorage.setItem(agentUiStorageKey(workspace?.workspaceSessionId, 'width'), String(agentWidth));
+    } catch {
+      // 持久化是增强能力，不应阻塞渲染或任务状态。
+    }
+  }, [agentOpen, agentWidth, workspace?.workspaceSessionId]);
+
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const updateOverlay = (): void => {
+      const editorWidth = shell.clientWidth
+        - 48
+        - (sidebarCollapsed ? 0 : sidebarWidth)
+        - (agentOpen ? agentWidth : 0);
+      setAgentOverlay(agentOpen && editorWidth < AGENT_EDITOR_MIN_WIDTH);
+    };
+    updateOverlay();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateOverlay);
+    observer?.observe(shell);
+    window.addEventListener('resize', updateOverlay);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', updateOverlay);
+    };
+  }, [agentOpen, agentWidth, sidebarCollapsed, sidebarWidth]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
@@ -627,8 +698,8 @@ export function App(): ReactElement {
     })();
   }, [bridge]);
   const visibleFiles = useMemo(
-    () => filterFilesForMode(allFiles.length > 0 ? allFiles : files, resourceMode, query),
-    [allFiles, files, resourceMode, query]
+    () => filterFilesForDomain(allFiles.length > 0 ? allFiles : files, activeDomain, query),
+    [activeDomain, allFiles, files, query]
   );
 
   /**
@@ -647,7 +718,7 @@ export function App(): ReactElement {
   const clampedFilePage = Math.min(filePage, filePageCount - 1);
   useEffect(() => {
     setFilePage(0);
-  }, [resourceMode, query, allFiles, files]);
+  }, [activeDomain, resourceMode, query, allFiles, files]);
   const pagedFiles = useMemo(
     () => visibleFiles.slice(
       clampedFilePage * FILE_LIST_PAGE_SIZE,
@@ -1396,6 +1467,27 @@ export function App(): ReactElement {
     window.addEventListener('pointerup', handleUp);
   }
 
+  function startAgentResize(event: ReactPointerEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = agentWidth;
+    const handleMove = (moveEvent: PointerEvent): void => {
+      setAgentWidth(clampAgentWidth(startWidth - (moveEvent.clientX - startX)));
+      setAgentExpanded(false);
+    };
+    const handleUp = (): void => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+    };
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+  }
+
+  function adjustAgentWidth(delta: number): void {
+    setAgentWidth((width) => clampAgentWidth(width + delta));
+    setAgentExpanded(false);
+  }
+
   function pushToast(text: string, kind: 'ok' | 'warn' = 'ok'): void {
     toastIdRef.current += 1;
     const id = toastIdRef.current;
@@ -1415,6 +1507,18 @@ export function App(): ReactElement {
     } finally {
       setAiBusy(false);
     }
+  }
+
+  function startNewAgentTask(): void {
+    setAgentGoal(null);
+    setAiDraft(null);
+    setAiPrompt('');
+    setAiBusy(false);
+    setAgentTask(INITIAL_AGENT_TASK_STATE);
+    setToolOutput(null);
+    setApprovalError(null);
+    setRespondingApprovalCallId(null);
+    setStatus('已开始新的 Agent 任务');
   }
 
   function closeTab(file: RendererIndexedFile): void {
@@ -1456,8 +1560,9 @@ export function App(): ReactElement {
       setSessionMeta(result.session ?? null);
       setAllFiles(result.files);
       setFiles(result.files);
+      setActiveDomain('project');
       setResourceMode('all');
-      setCenterView('resource');
+      setCenterView('project');
       setSidebarView('explorer');
       setSelectedFile(null);
       setPreview(null);
@@ -1566,20 +1671,31 @@ export function App(): ReactElement {
     const result = await bridge.searchResources(query);
     setAllFiles(result);
     setFiles(result);
+    setActiveDomain('files');
+    setResourceMode('all');
+    setCenterView('resource');
     setStatus(`搜索返回 ${result.length} 个文件`);
   }
 
-  function selectResourceMode(mode: ResourceMode): void {
-    if (mode !== resourceMode && editDirty) {
-      const confirmed = window.confirm('当前文本有未生成变更的修改，切换目录将保留草稿但可能离开编辑视图。继续？');
+  function selectDomain(domain: EditorDomainId): void {
+    if (domain !== activeDomain && editDirty) {
+      const confirmed = window.confirm('当前文本有未生成变更的修改，切换工作域将保留草稿但可能离开编辑视图。继续？');
       if (!confirmed) return;
     }
-    setResourceMode(mode);
+    setActiveDomain(domain);
+    setResourceMode(resourceModeForDomain(domain));
+    setBnd4Forced(false);
+    if (domain === 'project') {
+      setSelectedFile(null);
+      setCenterView('project');
+      setStatus('项目概览');
+      return;
+    }
     setCenterView('resource');
-    const filtered = filterFilesForMode(allFiles, mode, query);
-    setStatus(mode === 'all'
-      ? `全部资源：${filtered.length} 个文件`
-      : `${mode}：${filtered.length} 个资源`);
+    const filtered = filterFilesForDomain(allFiles.length > 0 ? allFiles : files, domain, query);
+    setStatus(domain === 'gparam'
+      ? 'GPARAM 工作台尚未接入当前 Bridge 契约，未伪造可写入口。'
+      : `${domainLabel(domain)}：${filtered.length} 个资源`);
   }
 
   function openOperationsView(): void {
@@ -1598,6 +1714,8 @@ export function App(): ReactElement {
   }
 
   async function selectFile(file: RendererIndexedFile): Promise<void> {
+    setActiveDomain(domainForFile(file));
+    setResourceMode(resourceModeForDomain(domainForFile(file)));
     setSelectedFile(file);
     setOpenTabs((tabs) =>
       tabs.some((tab) => tab.sourceUri === file.sourceUri) ? tabs : [...tabs, file]
@@ -1991,17 +2109,16 @@ export function App(): ReactElement {
     const result = await bridge.runAiTool('explain_event', { uri });
     setToolOutput(result);
   }
-  // 命令面板与顶部资源栏共用 RESOURCE_FAMILIES 配置源，不维护第二套标签和顺序。
+  // 命令面板与顶部工作域栏共用 DOMAIN_NAV_ITEMS，不维护第二套 IA 标签。
   const cmdkCommands: Array<{ id: string; icon: string; label: string; hint?: string; run: () => void }> = [
-    ...RESOURCE_FAMILIES.map((family) => ({
-      id: `resource-${family.id}`,
+    ...DOMAIN_NAV_ITEMS.map((item) => ({
+      id: `domain-${item.id}`,
       icon: '◧',
-      label: family.id === 'all' ? '显示全部资源' : `切换到 ${family.label} 目录`,
-      ...(family.id !== 'all' && counts ? { hint: String(counts[family.id] ?? 0) } : {}),
+      label: `切换到 ${item.label} 工作域`,
       run: (): void => {
         setSidebarCollapsed(false);
         setSidebarView('explorer');
-        selectResourceMode(family.id);
+        selectDomain(item.id);
       }
     })),
     { id: 'open-bnd4', icon: '▤', label: '以 BND4 容器打开当前选择', run: openBnd4ForSelection },
@@ -2058,6 +2175,7 @@ export function App(): ReactElement {
     : '未打开 Mod 工作区 · 从左侧资源浏览器打开';
   const lastOperation = operationHistory.length > 0 ? operationHistory[0] : null;
   const sidebarStyle = { '--sidebar-w': `${sidebarWidth}px` } as CSSProperties;
+  const agentStyle = { '--agent-w': `${agentWidth}px` } as CSSProperties;
 
   return (
     <div className="app-root">
@@ -2085,13 +2203,13 @@ export function App(): ReactElement {
         </div>
       </header>
 
-      <WorkspaceResourceBar
-        mode={resourceMode}
-        counts={counts}
-        onSelect={selectResourceMode}
+      <DomainNavigationBar
+        domain={activeDomain}
+        files={allFiles.length > 0 ? allFiles : files}
+        onSelect={selectDomain}
       />
 
-      <div className="shell">
+      <div className="shell" ref={shellRef}>
         {/* ══════════ 活动栏 ══════════ */}
         <nav className="activitybar" aria-label="主导航">
           <button
@@ -2184,7 +2302,7 @@ export function App(): ReactElement {
               <h2 className="panel__title">资源浏览器</h2>
               {/* 超过一页时标题栏就要说明「显示的是一页」，否则 200 与 9111 长得一样。 */}
               <span className="panel__hint">
-                {resourceMode} · {visibleFiles.length} 项
+                {domainLabel(activeDomain)} · {visibleFiles.length} 项
                 {visibleFiles.length > FILE_LIST_PAGE_SIZE
                   ? ` · 本页 ${pagedFiles.length}`
                   : ''}
@@ -2514,7 +2632,11 @@ export function App(): ReactElement {
             <div className="editor-pane is-active">
               <div className="pane-toolbar">
                 <span className="crumb">
-                  <b>{centerView === 'operations' ? '任务与历史' : resourceMode}</b>
+                  <b>{centerView === 'operations'
+                    ? '任务与历史'
+                    : centerView === 'project'
+                      ? '项目'
+                      : domainLabel(activeDomain)}</b>
                   {selectedFile ? ` · ${selectedFile.relativePath}` : ' · 资源预览'}
                 </span>
                 <span className="toolbar-spacer"></span>
@@ -2527,11 +2649,29 @@ export function App(): ReactElement {
               SCENE_URI_INVALID 后全部元素消失（详见 PanelErrorBoundary 注释）。
               key 绑定当前资源，切换资源时重建边界，避免上一份错误状态粘住。 */}
           <PanelErrorBoundary
-            label={`${resourceMode} 资源面板`}
+            label={`${domainLabel(activeDomain)} 工作域`}
             key={`panel-boundary:${selectedFile?.sourceUri ?? 'none'}`}
           >
+          {activeEditor === 'project' && (
+            <ProjectOverviewPanel
+              workspaceLabel={workspace?.workspaceLabel ?? null}
+              indexedFiles={allFiles.length}
+              pendingChanges={pendingChangeCount}
+              diagnostics={diagnostics.length}
+              browserPreview={isBrowserPreview}
+              onOpenWorkspace={() => void openWorkspace()}
+            />
+          )}
+          {activeDomain === 'gparam' && activeEditor === 'empty' && (
+            <section className="domain-placeholder" data-testid="gparam-placeholder" aria-label="GPARAM 工作域">
+              <span className="domain-placeholder__eyebrow">GPARAM / CAPABILITY</span>
+              <h2>GPARAM 工作台尚未接入</h2>
+              <p>当前 Bridge 没有暴露安全的 GPARAM 读取与写入契约，因此这里不伪造表格或提交入口。</p>
+              <span className="muted">可先使用 PARAM 工作域；GPARAM 接线需要独立的 native authority 与验证注册。</span>
+            </section>
+          )}
           {activeEditor === 'empty' && (
-            <p className="muted">在左侧选择一个资源开始编辑。</p>
+            activeDomain !== 'gparam' && <p className="muted">在左侧选择一个资源开始编辑。</p>
           )}
           {/* Structured preview 与原生格式检查已移到本面板**末尾**并默认折叠
               （见下方 resource-evidence-details）。
@@ -2622,7 +2762,7 @@ export function App(): ReactElement {
             <>
               {/* 同 map：删掉「实时 Bridge 文档 · hash … / 空文档（未选中可解析的
                   EMEVD 或读取失败）」。hash 前缀属于证据，读取失败原因进日志区。 */}
-              <EmevdFourViewPanel
+              <EventSourceWorkbenchPanel
                 key={`${emevdDocument.resourceUri}:${emevdDocument.revision}:${emevdLive ? 'live' : 'demo'}`}
                 initialDocument={emevdDocument}
                 {...(emevdDslTemplate !== null ? { dslTemplate: emevdDslTemplate } : {})}
@@ -3237,8 +3377,27 @@ export function App(): ReactElement {
         </main>
 
         {/* ══════════ Agent 面板 ══════════ */}
+        {agentOpen && (
+          <div
+            className={agentOverlay ? 'agent-resizer is-hidden' : 'agent-resizer'}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整 Agent 面板宽度"
+            tabIndex={agentOverlay ? -1 : 0}
+            onPointerDown={startAgentResize}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowLeft') { event.preventDefault(); adjustAgentWidth(16); }
+              if (event.key === 'ArrowRight') { event.preventDefault(); adjustAgentWidth(-16); }
+              if (event.key === 'Home') { event.preventDefault(); setAgentWidth(AGENT_MIN_WIDTH); }
+              if (event.key === 'End') { event.preventDefault(); setAgentWidth(AGENT_MAX_WIDTH); }
+            }}
+          />
+        )}
         <AgentSidebar
           open={agentOpen}
+          overlay={agentOverlay}
+          style={agentStyle}
+          expanded={agentExpanded}
           busy={aiBusy}
           provider={aiProvider}
           thinking={aiThinking}
@@ -3247,7 +3406,7 @@ export function App(): ReactElement {
           goal={agentGoal}
           draft={aiDraft}
           prompt={aiPrompt}
-          contextLabel={resourceMode}
+          contextLabel={domainLabel(activeDomain)}
           selectedFilePath={selectedFile?.relativePath ?? null}
           tools={agentTools.length > 0 ? agentTools : tools}
           toolOutput={toolOutput}
@@ -3282,6 +3441,13 @@ export function App(): ReactElement {
           onThinkingChange={setAiThinking}
           onPromptChange={setAiPrompt}
           onSend={() => void sendAgentPrompt()}
+          onNewTask={startNewAgentTask}
+          onToggleExpand={() => {
+            setAgentExpanded((expanded) => !expanded);
+            setAgentWidth((width) => width >= AGENT_MAX_WIDTH ? AGENT_DEFAULT_WIDTH : AGENT_MAX_WIDTH);
+          }}
+          interactionMode={agentInteractionMode}
+          onInteractionModeChange={setAgentInteractionMode}
           onClose={() => setAgentOpen(false)}
           onRunToolSearch={(toolQuery) => void runToolSearch(toolQuery)}
           onExplainEvent={(uri) => void explainEvent(uri)}

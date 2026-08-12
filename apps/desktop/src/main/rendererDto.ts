@@ -1,6 +1,8 @@
 import type {
   BridgeResult,
   Diagnostic,
+  EditorCatalogSummary,
+  EditorDocumentResult,
   IndexedFile,
   PatchHistoryEntry,
   ResourcePreview,
@@ -112,6 +114,31 @@ export function toRendererSaveResult(
       ? { requiresConfirmation: result.requiresConfirmation }
       : {})
   };
+}
+
+/**
+ * CAT-05: EditorCatalog summary 的 renderer 投影。
+ *
+ * summary 本身已脱敏（resourceId 是工作区相对 file URI，不含盘符路径）；
+ * 这里在通用 sanitizeRendererValue 之外显式过一遍类型化投影，作为 IPC 边界
+ * 声明的出口。脱敏语义：renderer 拿到的永远是语义目录，不是物理路径。
+ */
+export function toRendererCatalogSummary(summary: EditorCatalogSummary): EditorCatalogSummary {
+  return sanitizeRendererValue(summary) as EditorCatalogSummary;
+}
+
+/**
+ * §14.4 DocumentStore 响应的 renderer 投影（DOCSTORE-04）。
+ *
+ * 请求侧由 shared decoder 校验后再进 store；响应侧在通用 sanitizeRendererValue
+ * 之外再显式过一遍类型化投影——§14.4 DTO 本身已脱敏（documentHandle 是
+ * opaque uuid，revision 是字符串，items 不含路径），这里作为 IPC 边界声明的
+ * 类型化出口，避免 handler 返回 Promise<unknown> 旁路。
+ */
+export function toRendererEditorDocumentResult<T>(
+  result: EditorDocumentResult<T>
+): EditorDocumentResult<T> {
+  return sanitizeRendererValue(result) as EditorDocumentResult<T>;
 }
 
 export function toRendererHistoryEntry(

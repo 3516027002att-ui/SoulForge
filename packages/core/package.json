@@ -109,7 +109,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:editor-mutation-service": "tsc -b ../shared . && node dist/testing/runEditorMutationServiceSmoke.js",
     "test:ai-tool-permission": "tsc -b ../shared . && node dist/testing/runAiToolPermissionSmoke.js",
-    "test:plaintext-script-write": "tsc -b ../shared . && node dist/testing/runPlaintextScriptWriteSmoke.js"
+    "test:plaintext-script-write": "tsc -b ../shared . && node dist/testing/runPlaintextScriptWriteSmoke.js",
+    "test:native-document-locator": "tsc -b ../shared . && node dist/testing/runNativeDocumentLocatorSmoke.js",
+    "test:editor-catalog": "tsc -b ../shared . && node dist/testing/runEditorCatalogSmoke.js"
   },
   "dependencies": {
     "@soulforge/shared": "0.0.0",

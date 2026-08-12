@@ -26,9 +26,19 @@ import type {
   ToolResult
 } from '@soulforge/core';
 import type {
+  ApplyEditorMutationRequest,
+  ApplyEditorMutationValue,
   Diagnostic,
+  EditorContentValue,
+  EditorDocumentPageValue,
+  EditorDocumentResult,
+  EditorPageQuery,
   FmgEntryPage,
+  OpenEditorDocumentRequest,
+  OpenEditorDocumentValue,
+  PageEditorDocumentRequest,
   ParamRowPage,
+  ReadEditorContentRequest,
   RendererContainerChildBytes,
   RendererContainerChildrenList,
   RendererContainerChildrenPage,
@@ -36,6 +46,7 @@ import type {
   ScriptContainerEntryPage,
   ScriptContainerEvidence
 } from '@soulforge/shared';
+import { EDITOR_DOCUMENT_IPC_CHANNELS } from '@soulforge/shared';
 
 /** Path-bearing fields that must never cross the context bridge to the renderer. */
 const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
@@ -77,6 +88,24 @@ function stripPathFields<T>(value: T): T {
 }
 
 const api = {
+  /**
+   * §14.4 DocumentStore typed facade（DOCSTORE-04）。
+   * 所有方法都是 named DTO 请求/响应，不保留 Promise<unknown> 旁路；
+   * ownerKey 由 main 从 trusted webContents 与 workspace session 派生，
+   * renderer 永远不能传入。
+   */
+  openEditorDocument: (request: OpenEditorDocumentRequest): Promise<EditorDocumentResult<OpenEditorDocumentValue>> =>
+    ipcRenderer.invoke(EDITOR_DOCUMENT_IPC_CHANNELS.open, request),
+  getEditorDocument: (documentHandle: string): Promise<EditorDocumentResult<OpenEditorDocumentValue>> =>
+    ipcRenderer.invoke(EDITOR_DOCUMENT_IPC_CHANNELS.get, documentHandle),
+  pageEditorDocument: (request: PageEditorDocumentRequest): Promise<EditorDocumentResult<EditorDocumentPageValue>> =>
+    ipcRenderer.invoke(EDITOR_DOCUMENT_IPC_CHANNELS.page, request),
+  readEditorDocumentContent: (request: ReadEditorContentRequest): Promise<EditorDocumentResult<EditorContentValue>> =>
+    ipcRenderer.invoke(EDITOR_DOCUMENT_IPC_CHANNELS.readContent, request),
+  applyEditorMutation: (request: ApplyEditorMutationRequest): Promise<EditorDocumentResult<ApplyEditorMutationValue>> =>
+    ipcRenderer.invoke(EDITOR_DOCUMENT_IPC_CHANNELS.apply, request),
+  closeEditorDocument: (documentHandle: string): Promise<EditorDocumentResult<{ closed: true }>> =>
+    ipcRenderer.invoke(EDITOR_DOCUMENT_IPC_CHANNELS.close, documentHandle),
   /**
    * 上次打开过的工作区 / 原版目录的选择凭据，供启动时自动挂载。
    *
@@ -310,6 +339,31 @@ const api = {
     page,
     pageSize,
     query
+  ),
+  /**
+   * 一次读出容器内某个 param 的完整行索引（只 id + name，不含行字节）。
+   *
+   * 行表据此建成一条完整长列表（虚拟滚动的前提），跨表引用跳转也据此按绝对下标
+   * 定位目标行。行字节仍按页取 —— 载荷门限按页算。详见 main 侧该 handler 的注释。
+   */
+  readContainerParamRowIndex: (
+    containerUri: string,
+    entryIndex: number
+  ): Promise<{
+    ok: boolean;
+    paramName: string | null;
+    typeName: string | null;
+    rowDataSize: number;
+    rowCount: number;
+    rows: Array<{ id: number; name?: string }>;
+    rowsTruncated: boolean;
+    containerHash: string;
+    childHash: string;
+    diagnostics?: Array<{ severity: string; code: string; message: string }>;
+  }> => ipcRenderer.invoke(
+    'resource.readContainerParamRowIndex',
+    containerUri,
+    entryIndex
   ),
   /**
    * 容器内 param 的字段写入：改字段 → 重打包容器 → Patch Engine 提交。

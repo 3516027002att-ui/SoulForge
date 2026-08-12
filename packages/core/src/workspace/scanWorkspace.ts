@@ -2,7 +2,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Diagnostic, IndexedFile, ResourceKind, ScanProgress, WorkspaceScanResult } from '@soulforge/shared';
 import { detectResourceFileType } from './resourceFileTypes.js';
-import { ALL_RESOURCE_KINDS, classifyResourceKind, KNOWN_RESOURCE_DIRS } from './resourceKinds.js';
+import { ALL_RESOURCE_KINDS, classifyResourceKind, detectArtifactMarkers, KNOWN_RESOURCE_DIRS } from './resourceKinds.js';
 import {
   makeFileResourceUri,
   makeStableFileId,
@@ -121,6 +121,11 @@ async function addIndexedFile(
   const fileType = detectResourceFileType(relativePath);
   const sourceUri = makeFileResourceUri(relativePath);
 
+  // CAT-05：只附加 artifact/source variant 基础标记，不改变物理 ResourceKind。
+  // scanWorkspace 只扫 overlay 层（base 由调用方挂载后另行提供），因此
+  // sourceLayer 恒为 'overlay'。
+  const artifactMarkers = detectArtifactMarkers({ relativePath, sourceLayer: 'overlay' });
+
   files.push({
     id: makeStableFileId(workspaceId, relativePath),
     workspaceId,
@@ -137,7 +142,8 @@ async function addIndexedFile(
     size: fileStat.size,
     mtimeMs: fileStat.mtimeMs,
     parseStatus: 'unparsed',
-    diagnostics: []
+    diagnostics: [],
+    ...(artifactMarkers ? { artifactMarkers } : {})
   });
 
   options.onProgress?.({ scannedFiles: files.length, currentPath: toPosixPath(relativePath) });

@@ -1,4 +1,10 @@
-import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
+import {
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement
+} from 'react';
 import type {
   AiPermissionMode,
   AiProvider,
@@ -15,11 +21,18 @@ import {
 } from '../a11y/focusTrap.js';
 import { AgentSessionControls } from './AgentSessionControls.js';
 import { AgentTaskPanel, type AgentTaskPanelProps } from './AgentTaskPanel.js';
-import { isAgentTaskActive } from './agentTaskState.js';
-import { modelServiceLabel, permissionModeLabel, thinkingLabel } from './agentLabels.js';
+import { AGENT_SESSION_PAGE_SIZE, isAgentTaskActive } from './agentTaskState.js';
+import { permissionModeLabel } from './agentLabels.js';
+import { formatPageRange } from '../format/uiText.js';
+
+export type AgentInteractionMode = 'ask' | 'plan' | 'edit';
 
 export interface AgentSidebarProps {
   open: boolean;
+  /** 窄窗口时右 dock 变成无 scrim 的 overlay。 */
+  overlay?: boolean;
+  style?: CSSProperties;
+  expanded?: boolean;
   busy: boolean;
   provider: AiProvider;
   thinking: AiThinkingLevel;
@@ -32,13 +45,6 @@ export interface AgentSidebarProps {
   selectedFilePath: string | null;
   tools: ToolDescriptor[];
   toolOutput: ToolResult | null;
-  /**
-   * AI 任务面板的全套受控 props（运行 / 取消 / 会话历史）。
-   *
-   * 用一个整体对象而不是把十几个字段平铺进本接口：这些字段只服务任务面板，
-   * 平铺会让 AgentSidebar 的 props 表变成两块能力的混合体，且每加一个任务字段
-   * 都要改三处签名。`tools` 保持在外层——工具清单同时喂给既有的「安全工具」区。
-   */
   task: Omit<AgentTaskPanelProps, 'tools' | 'permissionLockReason'>;
   eventUri: string;
   onEventUriChange: (uri: string) => void;
@@ -46,95 +52,126 @@ export interface AgentSidebarProps {
   onThinkingChange: (thinking: AiThinkingLevel) => void;
   onPromptChange: (prompt: string) => void;
   onSend: () => void;
+  onNewTask?: () => void;
+  onToggleExpand?: () => void;
+  interactionMode?: AgentInteractionMode;
+  onInteractionModeChange?: (mode: AgentInteractionMode) => void;
   onClose: () => void;
   onRunToolSearch: (query: string) => void;
   onExplainEvent: (uri: string) => void;
 }
 
-/**
- * 空状态里的示例提问。
- *
- * 刻意都是**只读或提案**类的任务，且贴着本项目的真实资源类型（param 行、
- * 事件、文本条目）。不放「帮我改掉所有 boss 的血量」这种一句话触发大批写操作的
- * 例子：示例会被当成推荐用法，而推荐用法不该是一次性提出几十处改动。
- */
-const AGENT_PROMPT_EXAMPLES: readonly string[] = Object.freeze([
-  '伤药葫芦的持有上限在哪个 param 里，字段叫什么',
-  '解释 event://... 这条事件做了什么，引用了哪些文本',
-  '把伤药葫芦的持有上限从 5 改到 8，先给我看改动'
-]);
+const INTERACTION_MODES: ReadonlyArray<{ id: AgentInteractionMode; label: string; description: string }> = [
+  { id: 'ask', label: 'Ask', description: '只读问答与解释' },
+  { id: 'plan', label: 'Plan', description: '形成提案，不直接写入' },
+  { id: 'edit', label: 'Edit', description: '在权限约束内提出编辑' }
+];
 
-function groupToolsByPermission(tools: ToolDescriptor[]): Record<'read' | 'plan' | 'write', ToolDescriptor[]> {
-  const levelOf = (tool: ToolDescriptor): string => tool.permissionLevel ?? tool.permission;
-  return {
-    read: tools.filter((tool) => {
-      const level = levelOf(tool);
-      return level === 'read' || level === 'analyze';
-    }),
-    plan: tools.filter((tool) => {
-      const level = levelOf(tool);
-      return level === 'propose' || level === 'stage' || level === 'validate' || level === 'plan';
-    }),
-    write: tools.filter((tool) => {
-      const level = levelOf(tool);
-      return level === 'commit' || level === 'rollback' || level === 'write';
-    })
-  };
+function interactionModeLabel(mode: AgentInteractionMode): string {
+  return INTERACTION_MODES.find((item) => item.id === mode)?.label ?? 'Ask';
+}
+
+function isTaskSurfaceVisible(
+  busy: boolean,
+  goal: string | null,
+  draft: AiSidebarDraft | null,
+  task: AgentSidebarProps['task']
+): boolean {
+  return busy
+    || goal !== null
+    || draft !== null
+    || task.task.phase !== 'idle'
+    || task.task.pendingApprovals.length > 0
+    || task.task.toolCalls.length > 0
+    || task.task.approvalDecisions.length > 0;
 }
 
 /**
- * 右侧 Agent 面板：会话配置、计划/工具调用日志、模型服务抽屉与底部输入区。
- * 全部状态由 App 以受控 props 下发；本组件不持有全局状态。
+ * Agent 固定右 dock。
+ *
+ * 这里保留主进程任务面板的受控状态与审批入口，但把旧的“工具库存 / 示例教程 /
+ * header 设置齿轮”移出默认路径；Agent 的消息流只承载任务状态，真实文件路径仍由
+ * 主进程审批卡片按安全边界提供，不在普通聊天消息里回显。
  */
-export function AgentSidebar({
-  open,
-  busy,
-  provider,
-  thinking,
-  permissionMode,
-  permissionLockReason,
-  goal,
-  draft,
-  prompt,
-  contextLabel,
-  selectedFilePath,
-  tools,
-  toolOutput,
-  task,
-  eventUri,
-  onEventUriChange,
-  onProviderChange,
-  onThinkingChange,
-  onPromptChange,
-  onSend,
-  onClose,
-  onRunToolSearch,
-  onExplainEvent
-}: AgentSidebarProps): ReactElement {
+export function AgentSidebar(props: AgentSidebarProps): ReactElement {
+  const {
+    open,
+    overlay = false,
+    style,
+    expanded = false,
+    busy,
+    provider,
+    thinking,
+    permissionMode,
+    permissionLockReason,
+    goal,
+    draft,
+    prompt,
+    contextLabel,
+    selectedFilePath,
+    tools,
+    toolOutput,
+    task,
+    eventUri,
+    onEventUriChange,
+    onProviderChange,
+    onThinkingChange,
+    onPromptChange,
+    onSend,
+    onNewTask,
+    onToggleExpand,
+    interactionMode = 'ask',
+    onInteractionModeChange,
+    onClose,
+    onRunToolSearch,
+    onExplainEvent
+  } = props;
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modeOpen, setModeOpen] = useState(false);
   const drawerRef = useRef<HTMLDivElement>(null);
-  /** 抽屉打开前的焦点位置；关闭时归还，避免焦点掉回文档开头。 */
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const taskSurfaceVisible = isTaskSurfaceVisible(busy, goal, draft, task);
+  const awaitingApproval = task.task.pendingApprovals.length > 0;
+  const taskRunning = busy || isAgentTaskActive(task.task);
+  const emptyWelcome = !taskSurfaceVisible && !awaitingApproval;
+  const historyPageCount = Math.max(1, Math.ceil(task.sessions.length / AGENT_SESSION_PAGE_SIZE));
+  const historyPage = Math.min(task.sessionsPage, historyPageCount - 1);
+  const pageSessions = task.sessions.slice(
+    historyPage * AGENT_SESSION_PAGE_SIZE,
+    historyPage * AGENT_SESSION_PAGE_SIZE + AGENT_SESSION_PAGE_SIZE
+  );
+  // IPC 返回值来自边界外部；旧版 fixture/历史会话可能只有 steps 字段。
+  // 归一化为数组后再渲染，避免一次不完整草稿把整个 Agent dock 卸载。
+  const draftNextActions = draft !== null && Array.isArray(draft.nextActions)
+    ? draft.nextActions
+    : [];
 
-  function openSettings(): void {
+  // 这些回调仍由 App 持有，供后续工具 picker / settings route 接线；普通 Agent
+  // 聊天面板不再把手动工具台混进消息流，也不为它制造伪入口。
+  void eventUri;
+  void onEventUriChange;
+  void onRunToolSearch;
+  void onExplainEvent;
+  void toolOutput;
+
+  function openDrawer(kind: 'history' | 'settings'): void {
     returnFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    setSettingsOpen(true);
+    setHistoryOpen(kind === 'history');
+    setSettingsOpen(kind === 'settings');
   }
 
-  function closeSettings(): void {
+  function closeDrawer(): void {
+    setHistoryOpen(false);
     setSettingsOpen(false);
-    // 焦点归还排在卸载之后：卸载时浏览器会把焦点打回 body，先 focus 等于白做。
     const target = returnFocusRef.current;
     returnFocusRef.current = null;
-    if (target !== null && document.contains(target)) {
-      window.setTimeout(() => target.focus(), 0);
-    }
+    if (target !== null && document.contains(target)) window.setTimeout(() => target.focus(), 0);
   }
 
-  /** 抽屉内的 Tab 环绕。索引计算与可聚焦判定由 a11y/focusTrap 负责（有单测）。 */
-  function trapTab(event: ReactKeyboardEvent): void {
+  function trapDrawerTab(event: ReactKeyboardEvent): void {
     const container = drawerRef.current;
     if (container === null || event.key !== 'Tab') return;
     const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
@@ -150,273 +187,258 @@ export function AgentSidebar({
     event.preventDefault();
     focusable[nextIndex]?.focus();
   }
-  const [toolQuery, setToolQuery] = useState('');
-  const groupedTools = groupToolsByPermission(tools);
-  const awaitingApproval = task.task.pendingApprovals.length > 0;
+
+  function insertPrompt(text: string): void {
+    const next = prompt.trim() === '' ? text : `${prompt.trimEnd()} ${text}`;
+    onPromptChange(next);
+  }
+
+  function handlePromptKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    onSend();
+  }
+
+  const headerState = awaitingApproval ? '等待批准' : taskRunning ? '执行中' : undefined;
 
   return (
-    <aside className={`agent${open ? '' : ' is-collapsed'}`} aria-label="AI Agent 面板">
-      <div className="agent__header">
+    <aside
+      className={`agent${open ? '' : ' is-collapsed'}${overlay ? ' is-overlay' : ''}`}
+      style={style}
+      aria-label="AI Agent 面板"
+      data-agent-expanded={expanded ? 'true' : 'false'}
+    >
+      <header className="agent__header">
         <div className="agent__title">
-          <span className={`agent-dot${busy || awaitingApproval ? ' is-busy' : ''}`}></span>
+          <span className={`agent-dot${taskRunning || awaitingApproval ? ' is-busy' : ''}`} aria-hidden="true"></span>
           <span>Agent</span>
-          {/* 等待审批必须出现在标题栏：面板可能被折叠或滚开，而这是唯一一种
-              「不操作就永远不会推进」的状态。它优先于「执行中」。 */}
-          <span className="agent-model" data-testid="agent-header-state">
-            {awaitingApproval
-              ? `等待批准 ${task.task.pendingApprovals.length} 项`
-              : busy
-                ? '执行中'
-                : modelServiceLabel(provider)}
-          </span>
+          <span className="agent__header-state" role="status" data-testid="agent-header-state">{headerState ?? ''}</span>
         </div>
-        <div className="agent__header-actions">
+        <div className="agent__header-actions" aria-label="Agent 操作">
+          <button type="button" className="agent-icon-btn" onClick={onNewTask} title="新任务" aria-label="新任务">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+            </svg>
+          </button>
           <button
             type="button"
-            className="tb-btn"
-            onClick={() => (settingsOpen ? closeSettings() : openSettings())}
-            title="Agent 设置"
-            aria-label="打开 Agent 设置"
-            aria-expanded={settingsOpen}
+            className="agent-icon-btn"
+            onClick={() => (historyOpen ? closeDrawer() : openDrawer('history'))}
+            title="历史"
+            aria-label="打开 Agent 历史"
+            aria-expanded={historyOpen}
           >
-            <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
-              <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.7" />
-              <path d="M19 12a7 7 0 0 0-.14-1.4l2-1.55-2-3.46-2.36.95A7 7 0 0 0 14 5.3L13.7 2.8h-3.4L10 5.3a7 7 0 0 0-2.5 1.24l-2.36-.95-2 3.46 2 1.55a7 7 0 0 0 0 2.8l-2 1.55 2 3.46 2.36-.95a7 7 0 0 0 2.5 1.24l.3 2.5h3.4l.3-2.5a7 7 0 0 0 2.5-1.24l2.36.95 2-3.46-2-1.55c.09-.46.14-.93.14-1.4Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path d="M3 4.5h10M3 8h10M3 11.5h7" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
           </button>
-          <button type="button" className="tb-btn" onClick={onClose} title="收起" aria-label="收起 Agent 面板">
-            <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
-              <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" />
+          <button
+            type="button"
+            className="agent-icon-btn"
+            onClick={onToggleExpand}
+            title={expanded ? '恢复 Agent 宽度' : '展开 Agent'}
+            aria-label={expanded ? '恢复 Agent 宽度' : '展开 Agent'}
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              {expanded
+                ? <path d="M5.5 3.5v3h-3M10.5 12.5v-3h3M3 6.5a5 5 0 0 1 8.9-2M13 9.5a5 5 0 0 1-8.9 2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                : <path d="M3 6V3h3M13 10v3h-3M6 3a5 5 0 0 0-3 3M10 13a5 5 0 0 0 3-3" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />}
+            </svg>
+          </button>
+          <span className="agent__header-separator" aria-hidden="true"></span>
+          <button type="button" className="agent-icon-btn" onClick={onClose} title="关闭" aria-label="关闭 Agent 面板">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path d="M3 3l10 10M13 3L3 13" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
           </button>
         </div>
-      </div>
-
-      {/* 区块顺序（Codex 形态）：待办 → 进行中 → 配置 → 参考。
-          审批与任务状态在 AgentTaskPanel 内部置顶；计划草稿设置默认折叠，
-          因为它只影响草稿而不影响任务运行——默认展开会让用户以为必须先配它。
-          此前它是 open 的，且标题「会话配置」暗示影响整个会话。 */}
-      <details className="agent-settings" data-testid="agent-settings">
-        <summary>计划草稿设置</summary>
-        <AgentSessionControls
-          provider={provider}
-          thinking={thinking}
-          permissionMode={permissionMode}
-          permissionLockReason={permissionLockReason}
-          onProviderChange={onProviderChange}
-          onThinkingChange={onThinkingChange}
-        />
-      </details>
+      </header>
 
       <div className="agent__stream" role="log" aria-live="polite" aria-label="Agent 会话记录">
-        {/* 任务面板排在最前：正在跑的长任务是用户最需要先看到的状态，也是取消
-            入口所在。它自带空态文案，故不受下面那个 agent-empty 分支管辖。 */}
-        <AgentTaskPanel {...task} tools={tools} permissionLockReason={permissionLockReason} />
-        {goal === null && !draft && !busy && (
-          // 空状态承担引导职责：此前只有一句「没有进行中的任务」，用户既不知道
-          // 能问什么，也不知道自己的改动会不会被直接写盘。示例不是装饰——它把
-          // 「这个 agent 能做什么」变成可点击的具体动作。
-          <div className="agent-empty" data-testid="agent-empty-state">
-            <p className="agent-empty__lead">
-              没有进行中的任务。描述你想改什么，Agent 先读工作区证据、再提出改动。
-            </p>
-            <div className="agent-empty__examples" data-testid="agent-empty-examples">
-              <span className="agent-empty__examples-label">可以这样问</span>
-              {AGENT_PROMPT_EXAMPLES.map((example) => (
-                <button
-                  key={example}
-                  type="button"
-                  className="btn btn--ghost btn--sm"
-                  onClick={() => onPromptChange(example)}
-                >
-                  {example}
-                </button>
-              ))}
-            </div>
-            <ol className="agent-empty__steps">
-              <li>Agent 用只读工具查证据（搜索资源、解释事件、查引用）。</li>
-              <li>需要改动时它给出提案，不直接落盘。</li>
-              <li>写类操作逐条弹审批，你看到目标文件与将写入的内容后再决定。</li>
-              <li>批准后经 Patch Engine 暂存、校验、提交，全程可回滚。</li>
-            </ol>
-            <p className="agent-empty__note">{permissionLockReason}</p>
+        {emptyWelcome && (
+          <div className="agent-welcome" data-testid="agent-empty-state">
+            <div className="agent-welcome__icon" aria-hidden="true">✦</div>
+            <h2>Agent</h2>
+            <p>从证据出发，协助你理解和修改 SoulForge 工作区。</p>
+            <ul>
+              <li>先读取工作区证据，再解释资源关系</li>
+              <li>改动以提案和审批为边界，不直接落盘</li>
+              <li>每一步都保留可验证、可回滚的状态</li>
+            </ul>
           </div>
         )}
-        {goal !== null && (
-          <div className="task-goal">
-            <span className="task-goal__label">目标</span>
-            {goal}
+        {!emptyWelcome && goal !== null && (
+          <article className="agent-message agent-message--user">
+            <div className="agent-message__meta">你</div>
+            <p>{goal}</p>
+          </article>
+        )}
+        {!emptyWelcome && busy && (
+          <div className="agent-message agent-message--system" role="status">
+            <span className="spinner" aria-hidden="true"></span>
+            <span>正在准备计划草稿…</span>
           </div>
         )}
-        {busy && (
-          <div className="agent-block">
-            <div className="agent-block__label">日志</div>
-            <div className="agent-log">
-              <div className="agent-log__row">
-                <span className="spinner" aria-hidden="true"></span>
-                <span>正在生成计划草稿…</span>
-              </div>
-            </div>
-          </div>
+        {!emptyWelcome && draft !== null && (
+          <article className="agent-message agent-message--agent">
+            <div className="agent-message__meta">Agent · 计划草稿</div>
+            <strong>{draft.title}</strong>
+            <p>{draft.summary}</p>
+            {draftNextActions.length > 0 && (
+              <ul className="agent-message__actions">
+                {draftNextActions.map((action) => <li key={action}>{action}</li>)}
+              </ul>
+            )}
+          </article>
         )}
-        {draft && (
-          <div className="agent-block">
-            <div className="agent-block__label">
-              计划草稿 · {modelServiceLabel(draft.provider)} / {thinkingLabel(draft.thinking)} / {permissionModeLabel(draft.mode)}
-            </div>
-            <div className="agent-draft">
-              <strong>{draft.title}</strong>
-              <p>{draft.summary}</p>
-              {draft.recommendedTools.length > 0 && (
-                <div className="agent-tools">
-                  {draft.recommendedTools.map((tool) => (
-                    <span key={tool.toolName} className="tool-chip" title={tool.reason}>{tool.toolName}</span>
-                  ))}
-                </div>
-              )}
-              {draft.nextActions.length > 0 && (
-                <div className="agent-log">
-                  {draft.nextActions.map((action) => (
-                    <div key={action} className="agent-log__row"><span>→ {action}</span></div>
-                  ))}
-                </div>
-              )}
-              <details>
-                <summary>提示词预览</summary>
-                <pre className="tool-output">{draft.promptPreview}</pre>
-              </details>
-            </div>
-          </div>
+        {taskSurfaceVisible && (
+          <AgentTaskPanel {...task} tools={tools} permissionLockReason={permissionLockReason} />
         )}
-
-        {/* 手动工具台归入折叠的参考区。它不是 agent 会话流的一部分——用户在这里
-            手动跑搜索与解释，与 agent 自己调工具是两件事。此前它常驻展开在流的
-            末尾，把审批与进度挤到滚动区外。 */}
-        <details className="agent-block" data-testid="agent-manual-tools">
-          <summary className="agent-block__label">手动工具台 · {tools.length} 个已注册工具</summary>
-          <div className="tool-panel agent-tool-panel">
-            <div className="tool-group">
-              <small>读取 / 分析</small>
-              <div className="tool-list">
-                {groupedTools.read.length > 0
-                  ? groupedTools.read.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)
-                  : <span className="muted">暂无已注册工具</span>}
-              </div>
-            </div>
-            <div className="tool-group">
-              <small>提案 / 验证</small>
-              <div className="tool-list">
-                {groupedTools.plan.length > 0
-                  ? groupedTools.plan.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)
-                  : <span className="muted">暂无已注册工具</span>}
-              </div>
-            </div>
-            <div className="tool-group">
-              <small>提交 / 回滚</small>
-              <div className="tool-list">
-                {groupedTools.write.length > 0
-                  ? groupedTools.write.map((tool) => <span key={tool.name} title={tool.description}>{tool.name}</span>)
-                  : <span className="muted">暂无已注册工具</span>}
-              </div>
-            </div>
-            <div className="tool-row">
-              <input
-                value={toolQuery}
-                onChange={(event) => setToolQuery(event.target.value)}
-                placeholder="输入资源搜索条件"
-                aria-label="工具资源搜索条件"
-              />
-              <button type="button" onClick={() => onRunToolSearch(toolQuery)}>运行</button>
-            </div>
-            <div className="tool-row">
-              <input
-                value={eventUri}
-                onChange={(event) => onEventUriChange(event.target.value)}
-                placeholder="event://..."
-                aria-label="事件 URI"
-              />
-              <button type="button" onClick={() => onExplainEvent(eventUri)}>解释事件</button>
-            </div>
-            {toolOutput && <pre className="tool-output">{JSON.stringify(toolOutput, null, 2)}</pre>}
-          </div>
-        </details>
       </div>
 
       <div className="agent__composer">
-        <div className="composer-context">
-          {selectedFilePath && <span className="ctx-chip">{selectedFilePath}</span>}
+        <div className="agent-composer__participant">
+          <span className="agent-participant">@Agent</span>
+          <div className="agent-mode-select">
+            <button
+              type="button"
+              className="agent-mode-trigger"
+              aria-haspopup="listbox"
+              aria-expanded={modeOpen}
+              onClick={() => setModeOpen((openState) => !openState)}
+            >
+              {interactionModeLabel(interactionMode)}
+              <span aria-hidden="true">⌄</span>
+            </button>
+            {modeOpen && (
+              <div className="agent-mode-menu" role="listbox" aria-label="Agent 交互模式">
+                {INTERACTION_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    role="option"
+                    aria-selected={interactionMode === mode.id}
+                    onClick={() => {
+                      onInteractionModeChange?.(mode.id);
+                      setModeOpen(false);
+                    }}
+                  >
+                    <strong>{mode.label}</strong><span>{mode.description}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="composer-context" aria-label="当前上下文">
+          {selectedFilePath && <span className="ctx-chip" title={selectedFilePath}>{selectedFilePath}</span>}
           <span className="ctx-chip">{contextLabel}</span>
         </div>
         <textarea
           rows={2}
           value={prompt}
           onChange={(event) => onPromptChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              onSend();
-            }
-          }}
-          placeholder="描述修改目标，例如：把伤药葫芦的持有上限调到 12"
-          aria-label="向 Agent 描述修改目标"
-        ></textarea>
+          onKeyDown={handlePromptKeyDown}
+          placeholder="与 Agent 对话。输入 / 查看可用命令，例如 /plan、/explain。"
+          aria-label="向 Agent 对话"
+        />
         <div className="composer-bar">
-          <span className="composer-hint">Enter 发送 · Shift+Enter 换行</span>
-          {/* 模式在输入框旁常驻回显：模式决定 agent 能不能写盘，而它此前只出现在
-              任务面板深处。发送前看不到当前模式，就等于在不知道后果的情况下提交。
-              这里是只读回显——renderer 不提供提权入口（见 AgentTaskPanel 头注）。 */}
-          <span className="composer-mode" data-testid="composer-mode" title={permissionLockReason}>
-            {permissionModeLabel(permissionMode)}
+          <button type="button" className="composer-tool-btn" onClick={() => insertPrompt('@Agent')} aria-label="添加 Agent 参与者">@</button>
+          <button
+            type="button"
+            className="composer-tool-btn"
+            onClick={() => selectedFilePath && insertPrompt(`#${selectedFilePath}`)}
+            disabled={!selectedFilePath}
+            aria-label="添加当前文件上下文"
+          >
+            #
+          </button>
+          <span className="composer-permission" title={permissionLockReason}>
+            权限：{permissionModeLabel(permissionMode)}（主进程锁定）
           </span>
-          {/* 运行中把发送换成停止：两个按钮同时可点会让用户在任务已经在跑时
-              再发一次，而 runBlocker 只会静默拒绝。 */}
+          <span className="composer-spacer"></span>
           {task.task.pendingApprovals.length > 0 ? (
-            <span className="composer-awaiting" data-testid="composer-awaiting">
-              等待你在上方批准
-            </span>
-          ) : busy || isAgentTaskActive(task.task) ? (
-            <button
-              type="button"
-              className="btn btn--danger btn--sm"
-              data-testid="composer-stop"
-              onClick={task.onCancel}
-            >
-              停止
-            </button>
+            <span className="composer-awaiting" data-testid="composer-awaiting">等待你在上方批准</span>
+          ) : taskRunning ? (
+            <button type="button" className="btn btn--danger btn--sm" data-testid="composer-stop" onClick={task.onCancel}>停止</button>
           ) : (
             <button type="button" className="btn btn--primary btn--sm" onClick={onSend}>发送</button>
           )}
         </div>
       </div>
 
-      {settingsOpen && (
-        // aria-modal 此前缺失：辅助技术不知道背后内容已被遮挡，会继续把主界面
-        // 读给用户。Tab 也不受拦，焦点能落到被遮住的元素上。
+      {(historyOpen || settingsOpen) && (
         <div
           className="agent-drawer"
           role="dialog"
           aria-modal="true"
-          aria-label="模型服务管理"
+          aria-label={historyOpen ? 'Agent 历史' : '模型服务设置'}
           ref={drawerRef}
           onKeyDown={(event) => {
-            // Escape 关闭：模态必须能用键盘退出，否则键盘用户被困在里面。
             if (event.key === 'Escape') {
               event.stopPropagation();
-              closeSettings();
+              closeDrawer();
               return;
             }
-            trapTab(event);
+            trapDrawerTab(event);
           }}
         >
           <div className="agent-drawer__header">
-            <strong>模型服务管理</strong>
-            <button type="button" className="tb-btn" onClick={closeSettings} aria-label="关闭模型服务管理">
-              <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true">
-                <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" />
-              </svg>
-            </button>
+            <strong>{historyOpen ? 'Agent 历史' : '模型服务设置'}</strong>
+            <button type="button" className="agent-icon-btn" onClick={closeDrawer} aria-label="关闭抽屉">×</button>
           </div>
-          <ModelServiceSettingsPanel />
+          {historyOpen ? (
+            <div className="agent-history">
+              <div className="agent-history__actions">
+                <button type="button" className="btn btn--ghost btn--sm" onClick={task.onRefreshSessions}>刷新</button>
+                <button type="button" className="btn btn--ghost btn--sm" onClick={() => {
+                  setHistoryOpen(false);
+                  setSettingsOpen(true);
+                }}>模型设置</button>
+              </div>
+              {task.sessionsError && <p className="danger">{task.sessionsError}</p>}
+              <p className="muted" data-testid="agent-sessions-range">
+                {formatPageRange({ page: historyPage, pageSize: AGENT_SESSION_PAGE_SIZE, total: task.sessions.length, noun: '会话' })}
+              </p>
+              <p className="muted" data-testid="agent-sessions-source-limit">会话列表只回报最近 50 个会话文件。</p>
+              <div className="row gap pager">
+                <button type="button" disabled={historyPage <= 0} onClick={() => task.onSessionsPageChange(historyPage - 1)}>上一页</button>
+                <span className="muted">{task.sessions.length > 0 ? historyPage + 1 : 0}/{historyPageCount}</span>
+                <button type="button" disabled={historyPage >= historyPageCount - 1} onClick={() => task.onSessionsPageChange(historyPage + 1)}>下一页</button>
+              </div>
+              {task.sessions.length === 0 && <p className="empty-hint">暂无会话记录。</p>}
+              {pageSessions.map((session) => (
+                <div className="agent-history__item" key={session.sessionPath}>
+                  <div>
+                    <strong>{session.fileName}</strong>
+                    <span>{session.startedAt ?? session.modifiedAt} · {session.messageCount} 条消息</span>
+                  </div>
+                  <div className="agent-history__item-actions">
+                    <button type="button" className="btn btn--ghost btn--sm" onClick={() => task.onLoadSession(session.sessionPath)}>查看</button>
+                    <button type="button" className="btn btn--ghost btn--sm" onClick={() => task.onResumeSession(session.sessionPath)}>承接</button>
+                  </div>
+                </div>
+              ))}
+              {task.sessionDetail !== null && (
+                <div className="agent-log" data-testid="agent-session-detail">
+                  <div className="agent-log__row"><span>已载入会话：共 {task.sessionDetail.messageCount} 条消息，本次只取尾部 {task.sessionDetail.loadedMessages} 条</span></div>
+                  <div className="agent-log__row"><span>权限模式 {task.sessionDetail.permissionMode ?? '未记录'} · 协议 {task.sessionDetail.protocol ?? '未记录'}</span></div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="agent-settings-drawer">
+              <AgentSessionControls
+                provider={provider}
+                thinking={thinking}
+                permissionMode={permissionMode}
+                permissionLockReason={permissionLockReason}
+                onProviderChange={onProviderChange}
+                onThinkingChange={onThinkingChange}
+              />
+              <ModelServiceSettingsPanel />
+            </div>
+          )}
         </div>
       )}
     </aside>

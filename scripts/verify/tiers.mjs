@@ -89,6 +89,13 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 错误/ACL 失败关闭。不依赖真机 corpus，故归 unit。
   'test:core-journal-wiring': 'unit',
   'test:editor-document-store': 'unit',
+  // EditorCatalog builder 与 Sekiro 固定规则（front-end.md CAT-05）：确定性
+  // fixture 驱动，不加载 native 资产，纯逻辑，归 unit。
+  'test:editor-catalog': 'unit',
+  // shared 侧 decoder 契约与固定注册表负向测试（front-end.md SCHEMA-02 /
+  // ROUTE-06 的 resolveIntegrationForConfirmedLeaf）。经根转发
+  // test:editor-catalog-schema 调度；纯静态、秒级，归 unit。
+  'test:editor-catalog-schema': 'unit',
   // renderer 纯逻辑单元测试（changeControl 状态机等）。此前 renderer 侧零单元测试，
   // 唯一的 e2e 又跑在 mock main 上（19/56 通道），拆 App.tsx 时没有安全网——状态
   // 复位漏一处不会有编译错误也不会有测试失败。无 DOM/IPC 依赖，故归 unit。
@@ -134,6 +141,14 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:daemon': 'synthetic',
   'test:bridge-recovery-harness': 'synthetic',
   'test:bridge-staging': 'synthetic',
+  // Bridge allowed-root 生命周期（front-end.md §13.2）：read 不得附加不存在的
+  // staging、stage 必须 mkdir→realpath→boundary check 后注册、链接越界拒绝。
+  // 用真实文件系统（含 Windows junction）验证 helper 本身，不需要 exe 与语料，
+  // 故归 unit（同 verify-recent-paths）。
+  'test:bridge-roots': 'unit',
+  // Bridge 确认格式栈与 locator 装配（front-end.md NATIVE-03）：需要真实
+  // Bridge 二进制但 fixture 自造（不加载真实游戏语料），故归 synthetic。
+  'test:native-document-locator': 'synthetic',
   'test:writer-failure-matrix': 'synthetic',
   'test:standalone-writer-failure-matrix': 'synthetic',
   'test:sqlite-crash-recovery': 'synthetic',

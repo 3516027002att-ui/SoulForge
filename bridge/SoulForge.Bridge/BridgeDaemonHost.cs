@@ -531,7 +531,7 @@ internal static class BridgeDaemonHost
         // read-mtd-document 不在此列：它已从 dispatch 撤下（V0.6 延期项，
         // 见 BridgeCommandService 里那段说明）。广告面不得声明未受理的命令。
         "export-event", "export-map", "export-param",
-        "export-msg", "probe-oodle"
+        "export-msg", "probe-oodle", "probe-document-locator"
     };
 
     private static object BuildCapabilities(string? oodleRuntimeRoot) => new

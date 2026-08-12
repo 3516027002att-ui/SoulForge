@@ -30,6 +30,17 @@ export interface ParamFieldDef {
   min?: number;
   max?: number;
   enumRef?: string;
+  /**
+   * 跨表引用：这个字段的整数值是哪些 param 的行 id。
+   *
+   * 语法与语义见 core 的 `paramFieldReference.ts`（两种实测形态：无条件
+   * `Target`、条件 `Target(siblingField=value)`）。这里存原始字符串而不是解析后的
+   * 结构：`ParamDefDocument` 参与包摘要与信任判定，字段集越简单越不容易在
+   * 摘要口径上出现歧义；解析是纯函数，随时可算。
+   *
+   * 目标名是**容器条目名**（如 `SpEffectParam`），不是 ParamType。
+   */
+  refs?: string;
   bitfield?: {
     bitOffset: number;
     bitWidth: number;

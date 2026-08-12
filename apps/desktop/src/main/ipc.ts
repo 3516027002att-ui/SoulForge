@@ -64,6 +64,11 @@ import {
   applyNativeMutation,
   validateContainer,
   isDeferredPreviewEditor,
+  buildNativeDocumentLocator,
+  EditorDocumentStore,
+  type EditorDocumentDataSource,
+  type EditorMutationApplyPort,
+  type NativeDocumentLocator,
   type NativeMutationOutcome,
   type RawReplaceCommitPort,
   type WriteConfirmationPort,
@@ -82,16 +87,33 @@ import {
   CONTAINER_PAGE_SIZE,
   FMG_PAGE_SIZE,
   PARAM_PAGE_SIZE,
-  SCRIPT_PAGE_SIZE
+  SCRIPT_PAGE_SIZE,
+  EDITOR_DOCUMENT_IPC_CHANNELS,
+  decodeOpenEditorDocumentRequest,
+  decodePageEditorDocumentRequest,
+  decodeReadEditorContentRequest,
+  decodeApplyEditorMutationRequest
 } from '@soulforge/shared';
+import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
+  ApplyEditorMutationValue,
+  BridgeDocumentLocatorValue,
   ConfirmationReceipt,
   Diagnostic,
+  EditorContentValue,
+  EditorDocumentErrorCode,
+  EditorDocumentPageValue,
+  EditorDocumentResult,
   EditorKind,
+  EditorPageQuery,
+  EditorContentQuery,
+  EditorMutation,
+  OpenEditorDocumentValue,
   ParamMetadataPackage,
   EmevdEditorDocument,
   IndexedFile,
   ParamDefDocument,
+  ReadOperationId,
   ResourceKind,
   StructuredDiagnostic
 } from '@soulforge/shared';
@@ -106,6 +128,7 @@ import type {
 import {
   sanitizeDiagnostics,
   sanitizeRendererValue,
+  toRendererEditorDocumentResult,
   toRendererHistoryEntry,
   toRendererIndexedFile,
   toRendererResourcePreview,
@@ -326,10 +349,22 @@ async function loadContainerChildrenTable(
   if (children.length === 0 && await isRealNativeBndContainer(file.absolutePath)) {
     // The read/replace chain for real BND children remains TS-synthetic-only and
     // fails closed with structured diagnostics; enumeration is still honest.
+    // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
+    let allowedRoots: string[] | null = null;
+    if (activeSession) {
+      const roots = await prepareBridgeRoots(
+        bridgeRootSession(activeSession, durableStoragePaths(activeSession.meta.workspaceId)),
+        'read'
+      );
+      if (!roots.ok) {
+        return { ok: false, children: [], diagnostics: [bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', roots)] };
+      }
+      allowedRoots = [...roots.allowedRoots];
+    }
     const native = await enumerateNativeContainerEntries(
       file.absolutePath,
       sourceUri,
-      activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)]
+      allowedRoots ?? [dirname(file.absolutePath)]
     );
     if (!native.ok) return { ok: false, children: [], diagnostics: native.diagnostics };
     children = native.children;
@@ -448,7 +483,15 @@ async function unpackContainerParamChild(input: {
     };
   }
 
-  const allowedRoots = bridgeAllowedRoots(activeSession, storage.stagingRoot);
+  // ROOT-07：解包需要 staging——mkdir → realpath → boundary check 后注册。
+  const roots = await prepareBridgeRoots(bridgeRootSession(activeSession, storage), 'stage');
+  if (!roots.ok) {
+    return {
+      ok: false,
+      diagnostics: [bridgeRootsDiagnostic('PARAM_UNPACK_STAGING_PREPARE_FAILED', roots)]
+    };
+  }
+  const allowedRoots = [...roots.allowedRoots];
   const oodle = activeSession.layers.baseRoot
     ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
     : {};
@@ -658,6 +701,72 @@ function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
 let handlersRegistered = false;
 const trustedRendererDocuments = new Map<number, string>();
 const directorySelections = new Map<string, DirectorySelectionRecord>();
+
+/* ------------------------------------------------------------------ */
+/*  §14.4 DocumentStore IPC（DOCSTORE-04）                             */
+/*  renderer 只发逻辑引用；ownerKey 由 main 从 trusted webContents 与 */
+/*  workspace session 派生，renderer 永远不能传入；locator 由 main     */
+/*  probe 组装（含 outerSourceUri），永不出 main。                     */
+/* ------------------------------------------------------------------ */
+
+let editorDocumentStore: EditorDocumentStore | null = null;
+
+/**
+ * 惰性创建文档仓库。分页数据源与写链是骨架：由后续卡（PARAM-10B、TEXT-20B
+ * 等）接入真实实现；未接入的查询/写入如实返回 capability-blocked /
+ * mutation-rejected，不假装成功。
+ */
+function ensureEditorDocumentStore(): EditorDocumentStore {
+  if (editorDocumentStore) return editorDocumentStore;
+  const skeletonDataSource: EditorDocumentDataSource = {
+    loadPage: async () => ({ items: null, nextCursor: null, totalKnown: null }),
+    readContent: async () => null
+  };
+  const skeletonApplyPort: EditorMutationApplyPort = {
+    apply: async () => ({ kind: 'rejected', code: 'WRITE_CHAIN_NOT_CONNECTED' })
+  };
+  editorDocumentStore = new EditorDocumentStore({
+    ttlMs: 30 * 60_000,
+    dataSource: skeletonDataSource,
+    applyPort: skeletonApplyPort
+  });
+  return editorDocumentStore;
+}
+
+/**
+ * ownerKey 绑定「会话 + 窗口」：另一窗口（webContents）即使猜中 handle 也
+ * 得到 owner-mismatch；重新扫描工作区（activeWorkspaceSessionId 更换）后
+ * 旧 handle 全部失效——这正是 cross-sender rejection 的实现点。
+ */
+function deriveDocumentOwnerKey(event: IpcMainInvokeEvent): string {
+  return createHash('sha256')
+    .update(`${activeWorkspaceSessionId ?? 'no-session'}:${event.sender.id}`)
+    .digest('hex');
+}
+
+/** §4.3 域 → 资源 kind 的粗粒度匹配（CAT-05 的 Catalog 校验落地后替换）。 */
+const DOMAIN_RESOURCE_KINDS: Record<string, readonly string[]> = {
+  param: ['param', 'container'],
+  gparam: ['param', 'container'],
+  container: ['container', 'param'],
+  text: ['msg'],
+  event: ['event'],
+  script: ['script'],
+  map: ['map'],
+  model: ['model'],
+  texture: ['texture'],
+  material: ['material'],
+  vfx: ['vfx'],
+  behavior: ['behavior'],
+  animation: ['animation']
+};
+
+function editorDocumentFailure(
+  code: EditorDocumentErrorCode,
+  retryable: boolean
+): EditorDocumentResult<never> {
+  return { ok: false, code, retryable };
+}
 const here = dirname(fileURLToPath(import.meta.url));
 const sqliteNativeBindingPath = app.isPackaged
   ? join(process.resourcesPath, 'native', 'better_sqlite3.node')
@@ -882,20 +991,70 @@ function localApplicationDataRoot(): string {
 }
 
 function durableStoragePaths(workspaceId: string): {
+  root: string;
   backupBaseDir: string;
   recoveryDir: string;
   stagingRoot: string;
 } {
-  const { backupBaseDir, recoveryDir, stagingRoot } = workspaceStoragePaths(workspaceId);
-  return { backupBaseDir, recoveryDir, stagingRoot };
+  return workspaceStoragePaths(workspaceId);
 }
 
-function bridgeAllowedRoots(session: WorkspaceSession, stagingRoot?: string): string[] {
-  return [
-    session.layers.overlayRoot,
-    ...(session.layers.baseRoot ? [session.layers.baseRoot] : []),
-    ...(stagingRoot ? [stagingRoot] : [])
-  ];
+/**
+ * ROOT-07（front-end.md §13.2）：Bridge 调用的 allowed-root 生命周期入口。
+ * 所有 Bridge production handler 复用；不得再向 Bridge 传递未经验证的路径。
+ */
+function bridgeRootSession(session: WorkspaceSession, storage: { root: string }): BridgeRootSession {
+  return {
+    overlayRoot: session.layers.overlayRoot,
+    baseRoot: session.layers.baseRoot ?? null,
+    storageRoot: storage.root
+  };
+}
+
+/**
+ * §13.3：Bridge 拒绝「Every allowed root must be an existing directory.」时，
+ * 转换为可行动 Problems（操作提示），不得把原始技术消息当唯一输出。
+ */
+function bridgeRootsDiagnostic(code: string, result: Extract<PrepareBridgeRootsResult, { ok: false }>): Diagnostic {
+  return {
+    severity: 'error',
+    code,
+    message: `${result.message}。操作：重试 / 打开 Problems / 检查工作区存储权限。`,
+    ...(result.details !== undefined ? { details: result.details } : {})
+  };
+}
+
+/**
+ * ROOT-07：只读调用入口。返回已验证存在的 overlay/base roots；无 session 时
+ * 退回调用方 fallback（只读枚举的真实路径），不附加 staging、不创建目录。
+ */
+async function verifiedReadRoots(
+  session: WorkspaceSession | null,
+  fallback: string
+): Promise<{ allowedRoots: string[]; diagnostics: Diagnostic[] }> {
+  if (!session) return { allowedRoots: [fallback], diagnostics: [] };
+  const roots = await prepareBridgeRoots(
+    bridgeRootSession(session, durableStoragePaths(session.meta.workspaceId)),
+    'read'
+  );
+  if (!roots.ok) return { allowedRoots: [], diagnostics: [bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', roots)] };
+  return { allowedRoots: [...roots.allowedRoots], diagnostics: [] };
+}
+
+/**
+ * ROOT-07：staging 调用入口。mkdir → realpath → boundary check 后返回
+ * allowed/writable roots；失败返回 §13.3 可行动结构化诊断。
+ */
+async function verifiedStageRoots(
+  session: WorkspaceSession,
+  storage: { root: string },
+  code: string
+): Promise<{ allowedRoots: string[]; writableRoots: string[]; diagnostics: Diagnostic[] }> {
+  const roots = await prepareBridgeRoots(bridgeRootSession(session, storage), 'stage');
+  if (!roots.ok) {
+    return { allowedRoots: [], writableRoots: [], diagnostics: [bridgeRootsDiagnostic(code, roots)] };
+  }
+  return { allowedRoots: [...roots.allowedRoots], writableRoots: [...roots.writableRoots], diagnostics: [] };
 }
 
 function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null {
@@ -1129,6 +1288,109 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   if (handlersRegistered) return;
   handlersRegistered = true;
 
+  /**
+   * §14.4 document.open：renderer 发送逻辑引用，main 从当前活动索引解析出
+   * 资源 → Bridge probe 确认格式栈 → 组装 main-only locator → 打开
+   * owner-bound 文档。open 是六通道中唯一做 native 探针的；page/readContent/
+   * apply 只认 opaque handle。「引用与活动 Catalog 精确匹配」在 CAT-05 落地
+   * 前用索引(sourceUri + 域)近似，如实标注。
+   */
+  handle(
+    EDITOR_DOCUMENT_IPC_CHANNELS.open,
+    async (event, rawRequest: unknown): Promise<EditorDocumentResult<OpenEditorDocumentValue>> => {
+      const request = decodeOpenEditorDocumentRequest(rawRequest);
+      const ownerKey = deriveDocumentOwnerKey(event);
+      if (!activeSession || !activeWorkspaceSessionId) {
+        return editorDocumentFailure('runtime-blocked', true);
+      }
+      const file = indexedFiles.find((item) => item.sourceUri === request.document.resourceId);
+      if (!file) return editorDocumentFailure('not-found', false);
+      const allowedKinds = DOMAIN_RESOURCE_KINDS[request.document.domain] ?? [];
+      if (!allowedKinds.includes(file.resourceKind)) return editorDocumentFailure('not-found', false);
+
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      // ROOT-07：locator probe 可能解包 DCX 到 staging——先 mkdir/realpath/
+      // boundary 验证再注册，绝不把不存在的目录交给 Bridge。
+      const roots = await prepareBridgeRoots(bridgeRootSession(activeSession, storage), 'stage');
+      if (!roots.ok) return editorDocumentFailure('runtime-blocked', true);
+      const probe = await runBridge<BridgeDocumentLocatorValue>({
+        command: 'probe-document-locator',
+        filePath: file.absolutePath,
+        resourceUri: file.sourceUri,
+        allowedRoots: [...roots.allowedRoots],
+        ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {}),
+        timeoutMs: 60_000
+      });
+      if (probe.parseStatus === 'failed' || probe.data === undefined) {
+        return editorDocumentFailure('native-open-failed', false);
+      }
+      const outcome = buildNativeDocumentLocator({
+        outerResourceId: probe.data.outerResourceId,
+        outerSourceUri: file.sourceUri,
+        sourceVariant: 'overlay',
+        expectedOuterRevision: file.sha256 ? `scan:${file.sha256.slice(0, 16)}` : 'scan:unknown',
+        bridgeValue: probe.data
+      });
+      if (outcome.kind === 'blocked') return editorDocumentFailure('runtime-blocked', true);
+      if (outcome.kind !== 'confirmed') return editorDocumentFailure('native-open-failed', false);
+      return toRendererEditorDocumentResult(await ensureEditorDocumentStore().open(ownerKey, outcome.locator));
+    }
+  );
+
+  handle(
+    EDITOR_DOCUMENT_IPC_CHANNELS.get,
+    async (event, documentHandle: string): Promise<EditorDocumentResult<OpenEditorDocumentValue>> => {
+      if (typeof documentHandle !== 'string' || documentHandle.length === 0) {
+        return editorDocumentFailure('invalid-request', false);
+      }
+      return toRendererEditorDocumentResult(
+        await ensureEditorDocumentStore().get(deriveDocumentOwnerKey(event), documentHandle)
+      );
+    }
+  );
+
+  handle(
+    EDITOR_DOCUMENT_IPC_CHANNELS.page,
+    async (event, rawRequest: unknown): Promise<EditorDocumentResult<EditorDocumentPageValue>> => {
+      const request = decodePageEditorDocumentRequest(rawRequest);
+      return toRendererEditorDocumentResult(
+        await ensureEditorDocumentStore().page(deriveDocumentOwnerKey(event), request)
+      );
+    }
+  );
+
+  handle(
+    EDITOR_DOCUMENT_IPC_CHANNELS.readContent,
+    async (event, rawRequest: unknown): Promise<EditorDocumentResult<EditorContentValue>> => {
+      const request = decodeReadEditorContentRequest(rawRequest);
+      return toRendererEditorDocumentResult(
+        await ensureEditorDocumentStore().readContent(deriveDocumentOwnerKey(event), request)
+      );
+    }
+  );
+
+  handle(
+    EDITOR_DOCUMENT_IPC_CHANNELS.apply,
+    async (event, rawRequest: unknown): Promise<EditorDocumentResult<ApplyEditorMutationValue>> => {
+      const request = decodeApplyEditorMutationRequest(rawRequest);
+      return toRendererEditorDocumentResult(
+        await ensureEditorDocumentStore().apply(deriveDocumentOwnerKey(event), request)
+      );
+    }
+  );
+
+  handle(
+    EDITOR_DOCUMENT_IPC_CHANNELS.close,
+    async (event, documentHandle: string): Promise<EditorDocumentResult<{ closed: true }>> => {
+      if (typeof documentHandle !== 'string' || documentHandle.length === 0) {
+        return editorDocumentFailure('invalid-request', false);
+      }
+      return toRendererEditorDocumentResult(
+        await ensureEditorDocumentStore().close(deriveDocumentOwnerKey(event), documentHandle)
+      );
+    }
+  );
+
   handle('runtime.detectMe3', async () => {
     const adapter = new Me3RuntimeAdapter({
       gateway: new MainMe3RuntimeGateway({ localDataRoot: localApplicationDataRoot() }),
@@ -1310,6 +1572,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         game: 'sekiro'
       });
       clearEditorPageCaches();
+      // 新会话 = 新 ownerKey 空间：旧文档 handle 全部作废，连同 store 一起丢弃。
+      editorDocumentStore = null;
       activeWorkspaceSessionId = randomUUID();
       const database = await ensureActiveOperationLog(activeSession);
       const scanJobId = randomUUID();
@@ -1546,6 +1810,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       };
     }
     try {
+      // ROOT-07：只读调用只传已存在并 verified 的 roots。
+      const readRoots = activeSession
+        ? await prepareBridgeRoots(
+            bridgeRootSession(activeSession, durableStoragePaths(activeSession.meta.workspaceId)),
+            'read'
+          )
+        : null;
+      if (readRoots && !readRoots.ok) {
+        return {
+          ok: false,
+          diagnostics: [bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', readRoots)]
+        };
+      }
       const result = await runBridge<{
         sourceHash?: string;
         eventCount?: number;
@@ -1557,9 +1834,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }>({
         command: 'read-emevd-document',
         filePath: file.absolutePath,
-        allowedRoots: activeSession
-          ? bridgeAllowedRoots(activeSession)
-          : [dirname(file.absolutePath)],
+        allowedRoots: readRoots ? [...readRoots.allowedRoots] : [dirname(file.absolutePath)],
         timeoutMs: 120_000
       });
       return sanitizeRendererValue({
@@ -1621,6 +1896,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      // ROOT-07：stage 前先 mkdir → realpath → boundary check 并注册 allowed
+      // roots；回调同步返回已验证集合（stageBridgeOutput 的 mkdir 幂等）。
+      const roots = await prepareBridgeRoots(bridgeRootSession(activeSession, storage), 'stage');
+      if (!roots.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [bridgeRootsDiagnostic('EMEVD_STAGING_PREPARE_FAILED', roots)]
+        };
+      }
       const bridgeMutation = {
         kind: String(mutation.kind ?? mutation.mutation ?? ''),
         ...mutation
@@ -1631,7 +1916,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceUri,
         expectedHash,
         stagingRoot: storage.stagingRoot,
-        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        allowedRoots: () => [...roots.allowedRoots],
         stagingPrefix: 'emevd',
         stagingFileName: `${basename(file.relativePath)}.mut.emevd`,
         stageWrite: (context) => commitEmevdMutationViaBridge({
@@ -1699,9 +1984,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      // ROOT-07：完整文档读取会解包 DCX 到 staging——先 mkdir/realpath/boundary
+      // 验证再注册，绝不把不存在的目录交给 Bridge。
+      const roots = await prepareBridgeRoots(bridgeRootSession(activeSession, storage), 'stage');
+      if (!roots.ok) {
+        return {
+          ok: false,
+          sourceUri,
+          diagnostics: [bridgeRootsDiagnostic('EMEVD_STAGING_PREPARE_FAILED', roots)]
+        };
+      }
       const full = await readFullEmevdDocumentViaBridge({
         filePath: file.absolutePath,
-        allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+        allowedRoots: [...roots.allowedRoots],
         tempDir: storage.stagingRoot,
         resourceUri: sourceUri,
         registry: getEmevdRegistry().registry,
@@ -1793,11 +2088,20 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // Re-resolve the decompressed staging source (DCX inputs were unwrapped
       // during load and cached as a temp file; raw .emevd uses the indexed path).
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      // ROOT-07：DSL 提交链需要 staging（解包 + 写回）——先验证再注册。
+      const roots = await prepareBridgeRoots(bridgeRootSession(activeSession, storage), 'stage');
+      if (!roots.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [bridgeRootsDiagnostic('EMEVD_STAGING_PREPARE_FAILED', roots)]
+        };
+      }
       const operationLog = await ensureActiveOperationLog(activeSession);
       const registry = getEmevdRegistry().registry;
       const full = await readFullEmevdDocumentViaBridge({
         filePath: file.absolutePath,
-        allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+        allowedRoots: [...roots.allowedRoots],
         tempDir: storage.stagingRoot,
         resourceUri: sourceUri,
         registry,
@@ -1834,7 +2138,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         registry,
         sourcePath: preparedPath,
         expectedDocumentHash: full.sourceHash ?? '',
-        allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+        allowedRoots: [...roots.allowedRoots],
         workspaceId: activeSession.meta.workspaceId,
         workspaceRoot: activeSession.layers.overlayRoot,
         stagingRoot: storage.stagingRoot,
@@ -1857,9 +2161,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       // Refresh authoritative cache + indexed preview from the committed file.
+      // 复用上面已验证的 roots（staging 已注册）。
       const refreshed = await readFullEmevdDocumentViaBridge({
         filePath: file.absolutePath,
-        allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+        allowedRoots: [...roots.allowedRoots],
         tempDir: storage.stagingRoot,
         resourceUri: sourceUri,
         registry,
@@ -1912,11 +2217,25 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    // ROOT-07：只读调用只传已存在并 verified 的 roots。
+    const readRoots = activeSession
+      ? await prepareBridgeRoots(
+          bridgeRootSession(activeSession, durableStoragePaths(activeSession.meta.workspaceId)),
+          'read'
+        )
+      : null;
+    if (readRoots && !readRoots.ok) {
+      return {
+        ok: false,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: null,
+        diagnostics: [bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', readRoots)]
+      };
+    }
     const result = await readFmgDocumentViaBridge({
       sourcePath: file.absolutePath,
-      allowedRoots: activeSession
-        ? bridgeAllowedRoots(activeSession)
-        : [dirname(file.absolutePath)]
+      allowedRoots: readRoots ? [...readRoots.allowedRoots] : [dirname(file.absolutePath)]
     });
     return sanitizeRendererValue({
       ok: result.ok,
@@ -1977,11 +2296,24 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       let cached = fmgPageCache.get(sourceUri);
       if (!cached) {
+        const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+        if (roots.diagnostics.length > 0) {
+          return {
+            ok: false,
+            sourceUri,
+            sourceHash: null,
+            entryCount: 0,
+            maxId: 0,
+            page: 0,
+            pageSize: 0,
+            pageCount: 0,
+            entries: [],
+            diagnostics: roots.diagnostics
+          };
+        }
         const result = await readFmgDocumentViaBridge({
           sourcePath: file.absolutePath,
-          allowedRoots: activeSession
-            ? bridgeAllowedRoots(activeSession)
-            : [dirname(file.absolutePath)]
+          allowedRoots: roots.allowedRoots
         });
         if (!result.ok || !result.data) {
           return {
@@ -2058,6 +2390,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      // ROOT-07：stage 前 mkdir → realpath → boundary check；回调同步返回
+      // 已验证集合（stageBridgeOutput 的 mkdir 幂等）。
+      const stage = await verifiedStageRoots(activeSession, storage, 'FMG_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
       const bridgeMutation =
         mutation.kind === 'delete'
           ? { kind: 'delete' as const, id: mutation.id }
@@ -2070,7 +2412,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceUri,
         expectedHash,
         stagingRoot: storage.stagingRoot,
-        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'fmg',
         stagingFileName: `${basename(file.relativePath)}.mut.fmg`,
         stageWrite: (context) => commitFmgMutationViaBridge({
@@ -2105,11 +2447,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await readMsbDocumentViaBridge({
       sourcePath: file.absolutePath,
-      allowedRoots: activeSession
-        ? bridgeAllowedRoots(activeSession)
-        : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       maxParts: 256,
       maxRegions: 128,
       maxModels: 128,
@@ -2144,10 +2486,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 TAE。', sourceUri }] };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-tae-document',
       filePath: file.absolutePath,
-      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
@@ -2158,10 +2502,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 ESD。', sourceUri }] };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-esd-document',
       filePath: file.absolutePath,
-      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
@@ -2172,10 +2518,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER。', sourceUri }] };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-flver-document',
       filePath: file.absolutePath,
-      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
@@ -2186,10 +2534,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 TPF。', sourceUri }] };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-tpf-document',
       filePath: file.absolutePath,
-      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
@@ -2200,10 +2550,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 网格。', sourceUri }] };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-flver-mesh',
       filePath: file.absolutePath,
-      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
       commandOptions: { meshIndex }
     });
@@ -2215,10 +2567,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 骨骼层级。', sourceUri }] };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-flver-skeleton',
       filePath: file.absolutePath,
-      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
@@ -2229,10 +2583,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 挂点。', sourceUri }] };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-flver-dummies',
       filePath: file.absolutePath,
-      allowedRoots: activeSession ? bridgeAllowedRoots(activeSession) : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
@@ -2274,13 +2630,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const deferredBlocked = rejectDeferredPreviewEditorWrite('msb', sourceUri);
       if (deferredBlocked) return deferredBlocked;
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'MSB_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
       const operationLog = await ensureActiveOperationLog(activeSession);
       const outcome = await applyNativeMutation({
         file,
         sourceUri,
         expectedHash,
         stagingRoot: storage.stagingRoot,
-        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'msb',
         stagingFileName: `${basename(file.relativePath)}.mut.msb`,
         stageWrite: (context) => commitMsbMutationViaBridge({
@@ -2564,11 +2928,24 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) {
+      return sanitizeRendererValue({
+        ok: false,
+        sourceUri,
+        relativePath: file.relativePath,
+        fieldDefs: null,
+        fieldEnums: null,
+        fieldDefsDiagnostic: null,
+        fieldDefsOrigin: null,
+        fieldDefsTrusted: false,
+        rows: [],
+        diagnostics: roots.diagnostics
+      });
+    }
     const result = await readParamDocumentViaBridge({
       sourcePath: file.absolutePath,
-      allowedRoots: activeSession
-        ? bridgeAllowedRoots(activeSession)
-        : [dirname(file.absolutePath)],
+      allowedRoots: roots.allowedRoots,
       maxRows: 500
     });
     // 字段定义：走 resolveTrustedParamDefinition（包校验 + 行宽核对 + 用户信任
@@ -2606,6 +2983,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             size: field.size,
             ...(field.bitfield ? { bitfield: field.bitfield } : {}),
             ...(field.enumRef ? { enumRef: field.enumRef } : {}),
+            // 跨表引用原样透传（解析在渲染器侧用 core 的纯函数做）：
+            // 这里做解析会把一个字段变成一棵结构，IPC 面上更容易漂移。
+            ...(field.refs ? { refs: field.refs } : {}),
             ...(field.min !== undefined ? { min: field.min } : {}),
             ...(field.max !== undefined ? { max: field.max } : {})
           }))
@@ -2736,6 +3116,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         //
         // 这里刻意读全表（无 rowPage/rowPageSize）：全表用于 id/name 索引与跨页搜索。
         // 全表必然超出载荷门限因而无字节，当前页的字节在下方单独取一次。
+        const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+        if (roots.diagnostics.length > 0) {
+          return {
+            ok: false,
+            sourceUri,
+            sourceHash: null,
+            rowCount: 0,
+            page: 0,
+            pageSize: 0,
+            pageCount: 0,
+            rows: [],
+            rowsTruncated: false,
+            diagnostics: roots.diagnostics
+          };
+        }
         const result = await runBridge<{
           sourceHash?: string;
           typeName?: string;
@@ -2747,9 +3142,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }>({
           command: 'read-param-document',
           filePath: file.absolutePath,
-          allowedRoots: activeSession
-            ? bridgeAllowedRoots(activeSession)
-            : [dirname(file.absolutePath)],
+          allowedRoots: roots.allowedRoots,
           timeoutMs: 60_000,
           commandOptions: {}
         });
@@ -2806,6 +3199,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         const bridgePage = Math.floor(window.offset / window.size);
         const alignedOffset = bridgePage * window.size;
         if (alignedOffset === window.offset) {
+          // ROOT-07：只读分页字节读取同样只传已存在并 verified 的 roots；
+          // 失败与读取失败同语义——字节缺失只让字段编辑不可用，不影响行表。
+          const pageRoots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+          if (pageRoots.diagnostics.length > 0) {
+            pageByteDiagnostics.push(...pageRoots.diagnostics);
+          } else {
           try {
             const paged = await runBridge<{
               rows?: Array<{ id: number; dataBase64?: string | null }>;
@@ -2813,9 +3212,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             }>({
               command: 'read-param-document',
               filePath: file.absolutePath,
-              allowedRoots: activeSession
-                ? bridgeAllowedRoots(activeSession)
-                : [dirname(file.absolutePath)],
+              allowedRoots: pageRoots.allowedRoots,
               timeoutMs: 60_000,
               commandOptions: { rowPage: bridgePage, rowPageSize: window.size }
             });
@@ -2838,6 +3235,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               message: `本页行字节读取失败：${error instanceof Error ? error.message : String(error)}`,
               sourceUri
             });
+          }
           }
         }
       }
@@ -2916,6 +3314,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'PARAM_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
       const bridgeMutation =
         mutation.kind === 'delete'
           ? { kind: 'delete' as const, id: mutation.id }
@@ -2926,7 +3332,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceUri,
         expectedHash,
         stagingRoot: storage.stagingRoot,
-        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'param',
         stagingFileName: `${basename(file.relativePath)}.mut.param`,
         stageWrite: (context) => commitParamMutationViaBridge({
@@ -3000,13 +3406,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
       // Send the modified row as a whole-row upsert to the Bridge
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'PARAM_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
       const operationLog = await ensureActiveOperationLog(activeSession);
       const outcome = await applyNativeMutation({
         file,
         sourceUri,
         expectedHash,
         stagingRoot: storage.stagingRoot,
-        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'param',
         stagingFileName: `${basename(file.relativePath)}.field.param`,
         stageWrite: (context) => commitParamMutationViaBridge({
@@ -3142,6 +3556,15 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
 
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      // ROOT-07：stage 前 mkdir → realpath → boundary check；两处回调共用。
+      const stage = await verifiedStageRoots(activeSession, storage, 'PARAM_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
       const operationLog = await ensureActiveOperationLog(activeSession);
       const oodle = activeSession.layers.baseRoot
         ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
@@ -3153,7 +3576,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         stagingRoot: storage.stagingRoot,
         prefix: 'param-field',
         fileName: `${basename(unpacked.child.name)}.mutated`,
-        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        allowedRoots: () => [...stage.allowedRoots],
         write: async (context) => {
           const written = await runBridge<Record<string, unknown>>({
             command: 'write-param',
@@ -3206,7 +3629,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceUri: containerUri,
         expectedHash: expectedContainerHash,
         stagingRoot: storage.stagingRoot,
-        allowedRoots: (stagingRoot) => bridgeAllowedRoots(activeSession!, stagingRoot),
+        allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'parambnd',
         stagingFileName: `${basename(file.relativePath)}.repacked`,
         stageWrite: async (context) => {
@@ -3289,12 +3712,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
-    const storage = durableStoragePaths(activeSession.meta.workspaceId);
+    // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) {
+      return {
+        ok: false,
+        containerUri,
+        params: [],
+        diagnostics: roots.diagnostics
+      };
+    }
     const dcx = await runBridge<NativeDcxEnvelopeLike>({
       command: 'read-dcx-document',
       filePath: file.absolutePath,
       resourceUri: containerUri,
-      allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+      allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
       // KRAK（game-side）容器缺 Oodle 连条目表都读不出 —— 实测。
       ...(activeSession.layers.baseRoot
@@ -3394,9 +3826,23 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
 
       const paramPath = unpacked.child.absolutePath;
-      const allowedRoots = activeSession
-        ? bridgeAllowedRoots(activeSession, durableStoragePaths(activeSession.meta.workspaceId).stagingRoot)
-        : [dirname(paramPath)];
+      // ROOT-07：解包产物在 staging——先 mkdir/realpath/boundary 验证再注册，
+      // 绝不把不存在的目录交给 Bridge。
+      const stageRoots = activeSession
+        ? await verifiedStageRoots(
+            activeSession,
+            durableStoragePaths(activeSession.meta.workspaceId),
+            'PARAM_STAGING_PREPARE_FAILED'
+          )
+        : null;
+      if (stageRoots && stageRoots.diagnostics.length > 0) {
+        return failure(
+          'PARAM_STAGING_PREPARE_FAILED',
+          '无法准备安全暂存目录。',
+          stageRoots.diagnostics
+        );
+      }
+      const allowedRoots = stageRoots ? [...stageRoots.allowedRoots] : [dirname(paramPath)];
 
       // ── 全表读：只为 id/name 索引与跨页搜索（行字节恒缺，见 readParamPage 注释）──
       const full = await runBridge<{
@@ -3516,6 +3962,140 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         rowsTruncated: (full.data.rowCount ?? allRows.length) > allRows.length,
         ...(full.data.authority ? { authority: full.data.authority } : {}),
         diagnostics: [...unpacked.diagnostics, ...pageByteDiagnostics]
+      };
+    }
+  );
+
+  /**
+   * 一次读出容器内某个 param 的**完整行索引**（只 id + name，不含行字节）。
+   *
+   * ── 为什么加这条通道 ──
+   *
+   * 行表原先靠「滚到底就取下一页」累积，实测这个形态撑不住两件事：
+   *
+   *   ① **跨表引用跳转**。目标行可能在第 42 页。往累积列表里塞第 42 页会得到一段
+   *      与前面不连续的行（第 k+1..41 页缺失），列表顺序变成假的；而靠行筛选跳转
+   *      也不行 —— 后端的 id 筛选是**子串**匹配（实测精确匹配项最远排在筛选结果第
+   *      36 位，页大小只有 20），且有筛选时刻意不下发行字节，跳过去字段栏是空的。
+   *   ② **总量语义**。虚拟滚动要一条完整长列表才成立，累积页数只是「已取到多少」。
+   *
+   * 而这条通道几乎不增加成本：后端本来就在**每次**分页请求里读一遍全表
+   * （`commandOptions: {}`，行字节必然缺失）再切片。把那份全表直接给渲染器，
+   * 换来的是「一个 param 只读一次索引」，比每滚一页读一次全表更省。
+   *
+   * 行字节仍按页取（载荷门限按页算，见 readContainerParamPage 的实测因果）：
+   * 选中某行时只取包含它的那一页。
+   */
+  handle(
+    'resource.readContainerParamRowIndex',
+    async (_event, containerUri: string, entryIndex: number) => {
+      const failure = (code: string, message: string, extra: Diagnostic[] = []) => ({
+        ok: false as const,
+        containerUri,
+        entryIndex,
+        paramName: null,
+        typeName: null,
+        rowDataSize: 0,
+        rowCount: 0,
+        rows: [],
+        rowsTruncated: false,
+        containerHash: '',
+        childHash: '',
+        diagnostics: [
+          { severity: 'error' as const, code, message, sourceUri: containerUri },
+          ...extra
+        ]
+      });
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file) return failure('RESOURCE_NOT_INDEXED', '资源未索引，无法读取 PARAM 行索引。');
+      if (!Number.isSafeInteger(entryIndex) || entryIndex < 0) {
+        return failure('PARAM_ENTRY_INDEX_INVALID', '容器条目下标非法。');
+      }
+
+      const unpacked = await unpackContainerParamChild({
+        containerPath: file.absolutePath,
+        containerUri,
+        containerHash: file.sha256 ?? createHash('sha256').update(file.absolutePath).digest('hex'),
+        entry: { index: entryIndex }
+      });
+      if (!unpacked.ok) {
+        return failure(
+          'PARAM_CONTAINER_UNPACK_FAILED',
+          '容器内 param 解包失败，无法读取行索引。',
+          unpacked.diagnostics
+        );
+      }
+
+      // ROOT-07：解包产物在 staging——先 mkdir/realpath/boundary 验证再注册。
+      const stageRoots = activeSession
+        ? await verifiedStageRoots(
+            activeSession,
+            durableStoragePaths(activeSession.meta.workspaceId),
+            'PARAM_STAGING_PREPARE_FAILED'
+          )
+        : null;
+      if (stageRoots && stageRoots.diagnostics.length > 0) {
+        return failure(
+          'PARAM_STAGING_PREPARE_FAILED',
+          '无法准备安全暂存目录。',
+          stageRoots.diagnostics
+        );
+      }
+      const full = await runBridge<{
+        sourceHash?: string;
+        typeName?: string;
+        rowCount?: number;
+        rowDataSize?: number;
+        rows?: Array<{ id: number; name?: string }>;
+        authority?: string;
+      }>({
+        command: 'read-param-document',
+        filePath: unpacked.child.absolutePath,
+        allowedRoots: stageRoots ? [...stageRoots.allowedRoots] : [dirname(unpacked.child.absolutePath)],
+        timeoutMs: 60_000,
+        commandOptions: {}
+      });
+      if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
+        return failure(
+          'PARAM_DOCUMENT_READ_FAILED',
+          `解包后的 ${unpacked.child.name} 无法解析为 PARAM。`,
+          sanitizeDiagnostics(full.diagnostics)
+        );
+      }
+
+      const allRows = full.data.rows ?? [];
+      // 截断上限与分页读取一致：两条通道的下标必须落在同一个区间，
+      // 否则按索引算出的页号会指向分页通道取不到的行。
+      const rows = allRows.slice(0, MAX_PAGED_PARAM_ROWS);
+      const declared = full.data.rowCount ?? allRows.length;
+      return {
+        ok: true as const,
+        containerUri,
+        entryIndex: unpacked.child.entryIndex,
+        paramName: unpacked.child.name,
+        typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
+        rowDataSize: full.data.rowDataSize ?? 0,
+        rowCount: rows.length,
+        rows: rows.map((row) => ({
+          id: row.id,
+          ...(row.name ? { name: row.name } : {})
+        })),
+        // 截断必须说出来：少给行而不声明，用户会以为这个 param 就这么大。
+        rowsTruncated: declared > rows.length,
+        containerHash: file.sha256 ?? '',
+        childHash: unpacked.child.storedContentHash,
+        ...(full.data.authority ? { authority: full.data.authority } : {}),
+        diagnostics: [
+          ...unpacked.diagnostics,
+          ...(declared > rows.length
+            ? [{
+                severity: 'warning' as const,
+                code: 'PARAM_ROW_INDEX_TRUNCATED',
+                message: `行索引在 ${rows.length} 行处截断（实际 ${declared} 行）。`,
+                sourceUri: containerUri
+              }]
+            : [])
+        ]
       };
     }
   );
@@ -3819,9 +4399,17 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       };
     }
     const storage = durableStoragePaths(activeSession.meta.workspaceId);
+    // ROOT-07：证据构建可能解包到 staging——先 mkdir/realpath/boundary 验证。
+    const stage = await verifiedStageRoots(activeSession, storage, 'SCRIPT_EVIDENCE_STAGING_PREPARE_FAILED');
+    if (stage.diagnostics.length > 0) {
+      return {
+        ok: false,
+        diagnostics: stage.diagnostics
+      };
+    }
     return buildScriptContainerEvidence({
       containerPath: file.absolutePath,
-      allowedRoots: bridgeAllowedRoots(activeSession, storage.stagingRoot),
+      allowedRoots: [...stage.allowedRoots],
       timeoutMs: 60_000
     });
   });
@@ -3867,13 +4455,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       let cached = scriptContainerEntriesCache.get(sourceUri);
       if (!cached) {
-        const storage = durableStoragePaths(activeSession.meta.workspaceId);
-        const allowedRoots = bridgeAllowedRoots(activeSession, storage.stagingRoot);
+        // ROOT-07：只读枚举只传已存在并 verified 的 roots，不附加 staging。
+        const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+        if (roots.diagnostics.length > 0) {
+          return failure('BRIDGE_ROOT_MISSING', '允许根目录不存在。', roots.diagnostics);
+        }
         const dcx = await runBridge<ScriptDcxDocumentLike>({
           command: 'read-dcx-document',
           filePath: file.absolutePath,
           resourceUri: `file:///${file.absolutePath.replace(/\\/g, '/')}`,
-          allowedRoots,
+          allowedRoots: roots.allowedRoots,
           timeoutMs: 60_000
         });
         const nested = dcx.parseStatus === 'failed' ? undefined : dcx.data?.nested;
@@ -3883,7 +4474,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             command: 'inventory-asset-resources',
             filePath: file.absolutePath,
             resourceUri: `file:///${file.absolutePath.replace(/\\/g, '/')}`,
-            allowedRoots,
+            allowedRoots: roots.allowedRoots,
             timeoutMs: 60_000
           });
           if (inventory.parseStatus === 'failed') {

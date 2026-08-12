@@ -22,9 +22,131 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { ConfirmationReceipt, Diagnostic, IndexedFile } from '@soulforge/shared';
+import type {
+  ConfirmationReceipt,
+  Diagnostic,
+  EditorPageQuery,
+  IndexedFile,
+  ReadOperationId,
+  WriteOperationId
+} from '@soulforge/shared';
 import { stageBridgeOutput, type BridgeStagingDiagnostic } from './bridgeStaging.js';
 import type { SaveRawResourceResult } from './saveRawResource.js';
+import type { NativeDocumentLocator } from './nativeDocumentLocator.js';
+
+// ---------------------------------------------------------------------------
+// §14.4 locator → 编辑器能力（DOCSTORE-04）
+//
+// 把 Bridge-confirmed 格式栈投影成 renderer 可见的 read/write operation id。
+// 读能力按 leafFormatId/containerRole 映射到分页查询；写能力映射到
+// EditorMutation kind（WriteOperationId 与 kind 同名，一一对应）。这层判定
+// 是 store.apply 的 capability-blocked 判据来源，也是 OpenEditorDocumentValue
+// 里 readOperations/writeOperations 的声明点。
+// ---------------------------------------------------------------------------
+
+const READ_OPERATION_FOR_QUERY = {
+  'param-tables': 'page-tables',
+  'param-rows': 'page-rows',
+  'param-fields': 'page-fields',
+  'gparam-groups': 'page-banks',
+  'gparam-fields': 'page-groups',
+  'fmg-entries': 'page-entries',
+  'event-outline': 'read-outline',
+  'container-entries': 'page-entries',
+  'script-symbols': 'read-metadata',
+  'resource-tree': 'page-entries',
+  'properties': 'read-properties'
+} as const satisfies Record<EditorPageQuery['kind'], ReadOperationId>;
+
+const WRITE_OPS_BY_LEAF: Record<string, readonly WriteOperationId[]> = {
+  param: ['param-field-set', 'param-row-upsert', 'param-row-delete'],
+  gparam: ['gparam-field-set'],
+  fmg: ['fmg-entry-upsert', 'fmg-entry-delete'],
+  emevd: ['emevd-source-change'],
+  msb: ['map-entity-upsert', 'map-entity-delete'],
+  flver: ['flver-material-slot-set'],
+  tpf: ['tpf-texture-replace'],
+  mtd: ['material-property-set'],
+  matbin: ['material-property-set'],
+  fxr: ['vfx-field-set'],
+  esd: ['behavior-transition-upsert'],
+  tae: ['tae-event-upsert']
+} as const;
+
+const READ_OPS_BY_LEAF: Record<string, readonly ReadOperationId[]> = {
+  param: ['page-tables', 'page-rows', 'page-fields', 'read-properties'],
+  gparam: ['page-banks', 'page-groups'],
+  fmg: ['page-entries', 'read-source'],
+  emevd: ['read-outline', 'read-source'],
+  msb: ['page-entries', 'read-preview'],
+  flver: ['read-preview'],
+  tpf: ['read-preview'],
+  mtd: ['read-properties'],
+  matbin: ['read-properties'],
+  fxr: ['read-preview'],
+  esd: ['read-outline'],
+  tae: ['read-source'],
+  'lua-source': ['read-metadata', 'read-source'],
+  'lua-bytecode': ['read-metadata', 'read-source'],
+  'hks-bytecode': ['read-metadata', 'read-source']
+} as const;
+
+/** bnd4 容器按 containerRole 判定域（BND4 本身只有 bnd4-child-replace）。 */
+const WRITE_OPS_BY_BND_ROLE: Record<string, readonly WriteOperationId[]> = {
+  'gameparam-binder': ['param-field-set', 'param-row-upsert', 'param-row-delete'],
+  'drawparam-binder': ['gparam-field-set'],
+  'msg-binder': ['fmg-entry-upsert', 'fmg-entry-delete'],
+  'script-binder': ['script-plaintext-change'],
+  'generic-binder': ['bnd4-child-replace']
+} as const;
+
+const READ_OPS_BY_BND_ROLE: Record<string, readonly ReadOperationId[]> = {
+  'gameparam-binder': ['page-tables', 'page-rows', 'page-fields', 'read-properties'],
+  'drawparam-binder': ['page-banks', 'page-groups'],
+  'msg-binder': ['page-entries', 'read-source'],
+  'script-binder': ['read-metadata', 'read-source'],
+  'generic-binder': ['page-entries', 'read-preview']
+} as const;
+
+/**
+ * 由 Bridge-confirmed locator 派生编辑器读写能力（§14.4 OpenEditorDocumentValue
+ * 的 readOperations/writeOperations）。bnd4 容器层的域由 containerRole 裁定；
+ * 松散文件按 leafFormatId 裁定；未知组合返回空集合（capability-blocked）。
+ */
+export function mutationCapabilityForLocator(locator: NativeDocumentLocator): {
+  readOperations: readonly ReadOperationId[];
+  writeOperations: readonly WriteOperationId[];
+} {
+  // 容器 bnd4 文档的 leafDocumentStableId 是 'bnd4-root'（无 confirmed child）
+  // 或 'bnd4:{index}:{hash}'（有 child）；loose 文件是 'loose:{format}'。
+  const leaf = locator.leafDocumentStableId === 'bnd4-root'
+    || locator.leafDocumentStableId.startsWith('bnd4:')
+    ? 'bnd4'
+    : locator.layers[locator.layers.length - 1]?.formatId ?? 'unknown';
+  if (leaf === 'bnd4') {
+    const role = locator.containerRole;
+    return {
+      readOperations: READ_OPS_BY_BND_ROLE[role] ?? [],
+      writeOperations: WRITE_OPS_BY_BND_ROLE[role] ?? []
+    };
+  }
+  return {
+    readOperations: READ_OPS_BY_LEAF[leaf] ?? [],
+    writeOperations: WRITE_OPS_BY_LEAF[leaf] ?? []
+  };
+}
+
+export function readOperationForQuery(queryKind: EditorPageQuery['kind']): ReadOperationId {
+  return READ_OPERATION_FOR_QUERY[queryKind];
+}
+
+/** decoder/数据源用：EditorMutation kind 是 WriteOperationId 的子集（同名）。 */
+export function isWriteOperationEnabled(
+  writeOperations: readonly WriteOperationId[],
+  mutationKind: string
+): boolean {
+  return writeOperations.includes(mutationKind as WriteOperationId);
+}
 
 /**
  * 确认能力端口。
