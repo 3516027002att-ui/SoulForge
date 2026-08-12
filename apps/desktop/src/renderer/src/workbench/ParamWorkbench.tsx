@@ -657,10 +657,13 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const columns: WorkbenchColumnSpec[] = [
     {
       id: 'params',
-      title: 'Param',
-      hint: `${filteredParams.length}/${params.length}`,
-      initialWidth: 240,
-      minWidth: 160,
+      title: 'Params',
+      // §7.3：table 数量只在栏头以 N tables 显示（Smithbox 形态）。
+      hint: `${params.length} tables`,
+      // §7.1 固定比例（REF-01 实测无冲突，沿用初值）：20/29/35/16，
+      // 最小宽 180/260/320/200。比例模式随窗口缩放跟随，拖拽后转像素。
+      initialFlex: 0.2,
+      minWidth: 180,
       children: (
         <div className="wb-list">
           <div style={{ padding: '4px 8px' }}>
@@ -704,15 +707,15 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     },
     {
       id: 'rows',
-      title: 'Row',
+      title: 'Rows',
       // hint 要如实反映「已加载多少 / 共多少」：只显示总数会让用户以为
       // 列表已完整，而滚到底才发现还有「继续加载」。
       // typeName 移到工具栏 —— 它是文档级信息，不是这一列的属性。
       hint: loadedRows.length > 0 && loadedRows.length < rowCount
         ? `${loadedRows.length}/${rowCount} 行`
         : `${rowCount} 行`,
-      initialWidth: 300,
-      minWidth: 200,
+      initialFlex: 0.29,
+      minWidth: 260,
       children: (
         // --virtual：本栏的滚动权交给内部虚拟容器，外层不滚（否则双滚动条）。
         <div className="wb-list wb-list--virtual">
@@ -785,9 +788,10 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     },
     {
       id: 'fields',
-      title: 'Field',
+      title: 'Fields',
       hint: definition ? `${fields.length} 个字段` : (typeName ? '无字段定义' : ''),
-      minWidth: 240,
+      initialFlex: 0.35,
+      minWidth: 320,
       children: (
         <div className="wb-props">
           {/* 选中的 param 读不出来时，右栏给出结构化原因而不是空白。
@@ -971,6 +975,23 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           )}
         </div>
       )
+    },
+    {
+      id: 'tools',
+      title: 'Tools',
+      initialFlex: 0.16,
+      minWidth: 200,
+      children: (
+        <div className="wb-list">
+          {/* §7.6：未接通真实实现的工具必须隐藏，不能放 disabled 假按钮。
+              当前 Sort Rows / Row Names / Data Comparison / Copy / Duplicate /
+              Data Transfer / Mass Edit / Reference Jump / Undo/Redo 均未接通
+              真实实现，因此整栏只给出诚实的空态说明，不渲染任何假入口。 */}
+          <p className="wb-empty">
+            暂无已接通的工具。工具只在真实能力（如排序、复制、批量编辑）可用时出现。
+          </p>
+        </div>
+      )
     }
   ];
 
@@ -996,7 +1017,12 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       columns={columns}
       toolbar={
         <>
-          <span className="crumb"><b>param</b>{` · ${props.containerLabel}`}</span>
+          {/* §7.8 正确标题：Game Parameters · 1 library · N tables。
+              不显示容器物理路径/文件名（§7.3 禁止路径、DCX、BND、大小）。
+              containerLabel prop 仍由宿主传入，但不再进入可见 DOM。 */}
+          <span className="crumb">
+            Game Parameters · 1 library · {params.length} tables
+          </span>
           {paramName && <span className="muted" style={{ fontSize: 11 }}>{paramName}</span>}
           {typeName && <span className="muted" style={{ fontSize: 11 }}>{typeName}</span>}
           <span className="toolbar-spacer" style={{ flex: 1 }}></span>

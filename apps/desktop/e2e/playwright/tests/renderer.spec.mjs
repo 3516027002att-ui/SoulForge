@@ -554,9 +554,10 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可点击文件工作域并保持可操作。
+    // 窄屏仍可点击文件工作域并保持可操作。9 = fixture 合成样本数
+    // （PARAM-10B 加入 param/gameparam/gameparam.parambnd.dcx 后）。
     await window.locator('[data-domain="files"]').click();
-    await expect(window.locator('.file-item')).toHaveCount(8);
+    await expect(window.locator('.file-item')).toHaveCount(9);
   }
 
   await window.setViewportSize({ width: 653, height: 694 });
@@ -660,8 +661,8 @@ test('主题 token：暗/亮主题代表性按钮 computed 值不串用', async 
 /*
  * 大工作区：分页与截断说明。
  *
- * 默认 fixture 只有 8 个文件，低于分页页大小（200）与搜索上限（60），所以这两条
- * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 468 个
+ * 默认 fixture 只有 9 个文件，低于分页页大小（200）与搜索上限（60），所以这两条
+ * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 469 个
  * 合成条目，跨过两个阈值。
  *
  * 断言的是**用户能看到什么**：DOM 里真的只有一页节点、翻页真的换内容、说明里的
@@ -681,15 +682,15 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
   const pager = window.locator('[data-testid="file-list-pager"]');
   await expect(pager).toBeVisible();
 
-  // 位置文案必须报出区间与真实总数（468 = 8 基础 + 460 合成）。
+  // 位置文案必须报出区间与真实总数（469 = 9 基础 + 460 合成）。
   const range = window.locator('[data-testid="file-list-page-range"]');
   await expect(range).toContainText('1–200');
-  await expect(range).toContainText('468');
+  await expect(range).toContainText('469');
   await expect(range).toContainText('第 1/3 页');
 
-  // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 468 长得一样。
+  // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 469 长得一样。
   // SHELL-09 §3.3：数量带语义单位（文件 N 个）。
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 468 个');
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 469 个');
   await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
 
   // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。
@@ -702,8 +703,8 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
 
   // 末页只剩余数条，且「下一页」到底后禁用。
   await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('401–468');
-  await expect(items).toHaveCount(68);
+  await expect(range).toContainText('401–469');
+  await expect(items).toHaveCount(69);
   await expect(window.getByRole('button', { name: '下一页' }).first()).toBeDisabled();
 
   // 回到第一页：上一页可用且内容复原。
@@ -868,5 +869,82 @@ test('AI 任务：工具清单不污染 Agent 对话，且界面不提供抬高�
   // 全页不得出现可抬高授权的 fullPermission 选项。
   expect(await window.locator('option[value="fullPermission"]').count()).toBe(0);
 
+  await app.close();
+});
+
+test('PARAM 工作台四栏：选择链、父选区清理、虚拟行、字段类型控件与局部失败（PARAM-10B）', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 从 Files 领域选 parambnd 容器，打开 Param Workbench。
+  await window.locator('[data-domain="files"]').click();
+  await window.locator('.file-item', { hasText: 'param/gameparam/gameparam.parambnd.dcx' }).click();
+
+  // 四栏同时存在（§7.1 Params/Rows/Fields/Tools；§18.14 10B Negative DOM 无三栏标题）。
+  // WorkbenchLayout 根是 div（.workbench），四栏是带 aria-label 的 section（region）。
+  await expect(window.locator('.workbench')).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Params' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Rows' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Tools' })).toBeVisible();
+
+  // §7.1 比例在运行期成立（computed flex-grow，未被拖拽覆盖时）；拖拽后转像素是允许路径。
+  const growRatios = await window.evaluate(() => {
+    const slots = [...document.querySelectorAll('.workbench__column-slot')];
+    return slots.map((slot) => getComputedStyle(slot).flexGrow);
+  });
+  expect(growRatios).toEqual(['0.2', '0.29', '0.35', '0.16']);
+
+  // 独立滚动：每栏的滚动权在栏内，不泄给整页。普通栏 body 自身滚（auto）；
+  // 虚拟栏（Rows）把滚动权交给内部 .wb-virtual-scroll（body hidden + 内部 auto）。
+  // 两者都不得是 visible —— visible 意味着滚整页。
+  const scrollHosts = await window.evaluate(() => {
+    const bodies = [...document.querySelectorAll('.workbench__column-body')];
+    return bodies.map((body) => getComputedStyle(body).overflowY);
+  });
+  expect(scrollHosts.every((value) => value === 'auto' || value === 'hidden')).toBe(true);
+
+  // §7.8 标题形态；负向清单：无 .bak/.gparam/物理路径。
+  // 页面可能有多个 .crumb（文件浏览器面包屑），用 hasText 过滤工作台的标题。
+  // 负向断言只收在工作台内部：文件浏览器显示选中文件的路径是 files 领域的正常 UI。
+  const paramCrumb = window.locator('.crumb', { hasText: 'Game Parameters' });
+  await expect(paramCrumb).toContainText('1 library · 3 tables');
+  const workbenchText = await window.locator('.workbench').innerText();
+  expect(workbenchText).not.toContain('gameparam.parambnd.dcx');
+  expect(workbenchText).not.toContain('.bak');
+  expect(workbenchText).not.toContain('.gparam');
+
+  // Tools 栏只给诚实空态，不渲染 disabled 假按钮（§7.6）。
+  const toolsColumn = window.locator('.workbench__column[aria-label="Tools"]');
+  await expect(toolsColumn).toContainText('暂无已接通的工具');
+  expect(await toolsColumn.locator('button').count()).toBe(0);
+
+  // 选择链：选 ActionGuideParam → 行出现（虚拟容器挂载，滚动权在虚拟容器自身）；选首行 → 字段出现。
+  await window.locator('.wb-list .wb-row', { hasText: 'ActionGuideParam' }).click();
+  await expect(window.locator('.wb-virtual-row', { hasText: '100' })).toBeVisible();
+  const virtualScrollOverflow = await window.locator('.wb-virtual-scroll').first()
+    .evaluate((element) => getComputedStyle(element).overflowY);
+  expect(virtualScrollOverflow).toBe('auto');
+  await window.locator('.wb-virtual-row', { hasText: '100' }).click();
+
+  // 字段类型控件：enum 字段按类型渲染——原始值留在 input（只读），
+  // 当前值标签（枚举标签「攻击」）显示在字段名旁，不是裸自由文本。
+  const behaviorProp = window.locator('.wb-prop', { hasText: 'behavior' });
+  await expect(behaviorProp).toContainText('攻击');
+  await expect(behaviorProp.locator('input')).toBeVisible();
+  await expect(behaviorProp.locator('input')).toHaveValue('1');
+
+  // 父选区清理：切到 EquipParamWeapon 后字段栏清空回空态。
+  await window.locator('.wb-list .wb-row', { hasText: 'EquipParamWeapon' }).click();
+  await expect(window.locator('.wb-virtual-row', { hasText: '500' })).toBeVisible();
+  await expect(window.locator('.wb-empty', { hasText: '先在中栏选择一行。' })).toBeVisible();
+
+  // 局部失败：BrokenParam 保留在左栏并标记失败，右栏给出结构化原因。
+  await window.locator('.wb-list .wb-row', { hasText: 'BrokenParam' }).click();
+  await expect(window.locator('.wb-row__meta', { hasText: '读取失败' })).toBeVisible();
+  await expect(window.locator('.diag-error', { hasText: '这个 param 读不出来' })).toBeVisible();
+
+  // 同尺寸对照截图（§2.4 步骤 6：以相同窗口尺寸保存 SoulForge 对照截图）。
+  await window.screenshot({ path: 'test-results/10-param-workbench.png' });
   await app.close();
 });

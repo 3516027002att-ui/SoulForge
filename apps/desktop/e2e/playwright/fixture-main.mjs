@@ -62,9 +62,63 @@ const fixtureFiles = [
   makeFile({ dir: 'sfx', name: 'f0000.sfxbnd.dcx', kind: 'sfx', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.sfxbnd.dcx' }),
   makeFile({ dir: 'chr', name: 'sample.chrbnd.dcx', kind: 'chr', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.chrbnd.dcx' }),
   makeFile({ dir: 'other', name: 'notes.txt', kind: 'other', formatKind: 'text', formatLabel: 'TXT', extension: '.txt', compoundExtension: '.txt' }),
+  // PARAM-10B fixture：legacy 路由 formatKind 'param' → param-container 工作台。
+  // 目录形态对齐真实 gameparam（param/gameparam/gameparam.parambnd.dcx）。
+  makeFile({ dir: 'param/gameparam', name: 'gameparam.parambnd.dcx', kind: 'param', formatKind: 'param', formatLabel: 'PARAM BND', extension: '.dcx', compoundExtension: '.parambnd.dcx' }),
   // unknown 不合并进 other：独立保留并在顶部栏显示警告计数。
   makeFile({ dir: '', name: 'regulation.bin', kind: 'unknown', formatKind: 'unknown', formatLabel: 'BIN', extension: '.bin', compoundExtension: '.bin' })
 ];
+
+/**
+ * 合成 PARAM 容器样本（PARAM-10B）：微小、合法构造、明确标记（AGENTS.md §15）。
+ *
+ * 三张表共享同一行布局（u32 id @0 + 64 字节名字 @4 + u8 behavior @68），
+ * 行宽 512 与 readParamDocument 的 fieldDefs 一致，字段解码才能命中。
+ * BrokenParam 是局部失败样本：条目照常列出（对照 Smithbox 的「失败即移除」），
+ * 但分页读取返回结构化失败，UI 必须保留条目并标记失败。
+ */
+const PARAM_ROW_SIZE = 512;
+function makeParamRow(id, name, behaviorValue) {
+  const buf = Buffer.alloc(PARAM_ROW_SIZE);
+  buf.writeUInt32LE(id, 0);
+  buf.write(name.slice(0, 63), 4, 'utf8');
+  buf.writeUInt8(behaviorValue, 68);
+  return { id, name, dataBase64: buf.toString('base64'), dataHash: `fixture-param-row-${id}` };
+}
+const paramTables = [
+  {
+    entryIndex: 0,
+    name: 'ActionGuideParam',
+    typeName: 'ACTION_GUIDE_PARAM_ST',
+    rows: [
+      makeParamRow(100, '引导-基础', 1),
+      makeParamRow(101, '引导-交互', 2),
+      makeParamRow(102, '引导-战斗', 0),
+      makeParamRow(103, '引导-坠落', 1)
+    ]
+  },
+  {
+    entryIndex: 1,
+    name: 'EquipParamWeapon',
+    typeName: 'ACTION_GUIDE_PARAM_ST',
+    rows: Array.from({ length: 25 }, (_, i) => makeParamRow(500 + i, `武器-${i + 1}`, i % 3))
+  },
+  { entryIndex: 2, name: 'BrokenParam', broken: true }
+];
+const paramFieldDefsFixture = [
+  { id: 'f_id', name: 'id', type: 'u32', offset: 0, size: 4 },
+  { id: 'f_name', name: 'name', type: 's8', offset: 4, size: 64 },
+  { id: 'f_behavior', name: 'behavior', type: 'u8', offset: 68, size: 1, enumRef: 'BEHAVIOR' }
+];
+const paramFieldEnumsFixture = [{
+  id: 'BEHAVIOR',
+  name: 'Behavior',
+  values: [
+    { value: 0, label: '无' },
+    { value: 1, label: '攻击' },
+    { value: 2, label: '防御' }
+  ]
+}];
 
 /**
  * 大工作区 fixture（SF_TEST_LARGE_WORKSPACE=1 启用）。
@@ -180,7 +234,7 @@ function registerFixtureIpc() {
       workspaceLabel: 'fixture-workspace',
       files: scanned.map((file) => ({ ...file })),
       countsByKind: {
-        event: 1, map: LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0, param: 0, msg: 1, menu: 0, script: 0,
+        event: 1, map: LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0, param: 1, msg: 1, menu: 0, script: 0,
         action: 1, ai: 1, sfx: 1, chr: 1, obj: 0, other: 1, unknown: 1
       },
       diagnostics: [],
@@ -211,6 +265,99 @@ function registerFixtureIpc() {
 
   handleTrusted('resource.search', () => []);
   handleTrusted('resource.preview', () => null);
+
+  // ── PARAM 容器工作台（PARAM-10B）合成通道 ──────────────────────────────
+  const fixtureParamUri = 'fixture://param/gameparam/gameparam.parambnd.dcx';
+
+  handleTrusted('resource.listContainerParams', (_event, containerUri) => {
+    track('resource.listContainerParams');
+    if (containerUri !== fixtureParamUri) {
+      return {
+        ok: false, containerUri, params: [],
+        diagnostics: [{ severity: 'error', code: 'CONTAINER_NOT_FOUND', message: `fixture 未登记的容器：${containerUri}` }]
+      };
+    }
+    return {
+      ok: true,
+      containerUri,
+      containerFormat: 'bnd4',
+      params: paramTables.map((t) => ({ entryIndex: t.entryIndex, name: t.name, size: 4096 })),
+      diagnostics: []
+    };
+  });
+
+  handleTrusted('resource.readContainerParamPage', (_event, containerUri, entryIndex, page, pageSize, query) => {
+    track('resource.readContainerParamPage');
+    const failure = (message, code) => ({
+      ok: false,
+      containerUri, entryIndex, page: 0, pageSize: 0, pageCount: 0,
+      rows: [], rowCount: 0, sourceHash: null, typeName: null, rowDataSize: 0,
+      paramName: null, containerHash: null, childHash: null,
+      diagnostics: [{ severity: 'error', code, message, containerUri }]
+    });
+    if (containerUri !== fixtureParamUri) {
+      return failure(`fixture 未登记的容器：${containerUri}`, 'CONTAINER_NOT_FOUND');
+    }
+    const table = paramTables.find((t) => t.entryIndex === entryIndex);
+    if (!table || table.broken) {
+      return failure('BrokenParam 是 fixture 的失败样本：字段层读取失败。', 'PARAM_READ_FAILED');
+    }
+    const needle = (query ?? '').trim().toLowerCase();
+    const filtered = needle
+      ? table.rows.filter((r) => String(r.id).includes(needle) || (r.name ?? '').toLowerCase().includes(needle))
+      : table.rows;
+    const size = pageSize > 0 ? pageSize : 20;
+    const pageCount = Math.max(1, Math.ceil(filtered.length / size));
+    const p = Math.min(Math.max(0, page), pageCount - 1);
+    const slice = filtered.slice(p * size, p * size + size);
+    return {
+      ok: true,
+      containerUri, entryIndex, page: p, pageSize: size, pageCount,
+      rows: slice.map((r) => ({ id: r.id, name: r.name, dataBase64: r.dataBase64, dataHash: r.dataHash })),
+      rowCount: filtered.length,
+      sourceHash: 'fixture-param-container-hash',
+      typeName: table.typeName,
+      rowDataSize: PARAM_ROW_SIZE,
+      paramName: table.name,
+      containerHash: 'fixture-container-hash',
+      childHash: `fixture-child-hash-${entryIndex}`,
+      diagnostics: []
+    };
+  });
+
+  // App 的 loadParam 会以容器 URI 调 readParamDocument（合成文档：容器不解包，
+  // fixture 直接给出一份与 paramTables[0] 同布局的文档，让字段定义可用）。
+  handleTrusted('resource.readParamDocument', (_event, sourceUri) => {
+    track('resource.readParamDocument');
+    if (sourceUri !== fixtureParamUri) {
+      return {
+        ok: false, sourceUri, relativePath: sourceUri,
+        fieldDefs: null, fieldEnums: null, fieldDefsDiagnostic: null,
+        fieldDefsOrigin: null, fieldDefsTrusted: false, rows: [],
+        diagnostics: [{ severity: 'error', code: 'RESOURCE_NOT_INDEXED', message: `fixture 未登记资源：${sourceUri}` }]
+      };
+    }
+    return {
+      ok: true,
+      sourceUri,
+      relativePath: 'param/gameparam/gameparam.parambnd.dcx',
+      fieldDefs: paramFieldDefsFixture,
+      fieldEnums: paramFieldEnumsFixture,
+      fieldDefsDiagnostic: null,
+      fieldDefsOrigin: 'fixture',
+      fieldDefsTrusted: false,
+      data: {
+        sourceHash: 'fixture-param-hash',
+        typeName: paramTables[0].typeName,
+        rowCount: paramTables[0].rows.length,
+        rowDataSize: PARAM_ROW_SIZE,
+        rows: paramTables[0].rows.map((r) => ({ id: r.id, dataBase64: r.dataBase64, dataHash: r.dataHash, name: r.name })),
+        rowsTruncated: false,
+        authority: 'fixture'
+      },
+      diagnostics: []
+    };
+  });
 
   // 容器工作台合成通道：微小、合法构造、明确标记（AGENTS.md §15）。
   const containerChildren = [

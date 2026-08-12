@@ -46,17 +46,28 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
     assert.match(html, /aria-label="PARAM 工作台"/);
   });
 
-  it('工具条面包屑显示容器名', () => {
+  it('标题是 §7.8 正确形态：Game Parameters · 1 library · N tables', () => {
     const html = render('gameparam.parambnd.dcx');
     assert.match(html, /class="crumb"/);
-    assert.ok(html.includes('gameparam.parambnd.dcx'), '面包屑必须包含容器显示名');
+    // SSR 初始 params=[]，N 为 0；标题形态不含物理路径。
+    assert.match(html, /Game Parameters · 1 library · 0 tables/);
   });
 
-  it('三栏 Param/Row/Field 同时存在（对照 Smithbox 三栏，四栏形态在 PARAM-10B）', () => {
+  it('四栏 Params/Rows/Fields/Tools 同时存在（§7.1，PARAM-10B）', () => {
     const html = render();
-    assert.match(html, /aria-label="Param"/);
-    assert.match(html, /aria-label="Row"/);
-    assert.match(html, /aria-label="Field"/);
+    assert.match(html, /aria-label="Params"/);
+    assert.match(html, /aria-label="Rows"/);
+    assert.match(html, /aria-label="Fields"/);
+    assert.match(html, /aria-label="Tools"/);
+  });
+
+  it('四栏按 §7.1 固定比例与最小宽度渲染（20/29/35/16，180/260/320/200）', () => {
+    const html = render();
+    // React SSR 的 style 序列化无空格（flex:0.2 1 0;min-width:180px）。
+    assert.match(html, /style="flex:0\.2 1 0;min-width:180px"/);
+    assert.match(html, /style="flex:0\.29 1 0;min-width:260px"/);
+    assert.match(html, /style="flex:0\.35 1 0;min-width:320px"/);
+    assert.match(html, /style="flex:0\.16 1 0;min-width:200px"/);
   });
 
   it('左栏有容器内 param 筛选输入', () => {
@@ -66,8 +77,22 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
 
   it('未选中 param 时行栏与字段栏给出空态提示而不是空白', () => {
     const html = render();
-    // 两处（Row 栏与 Field 栏）都应出现「先在左栏选择一个 param。」
+    // 两处（Rows 栏与 Fields 栏）都应出现「先在左栏选择一个 param。」
     assert.equal(html.match(/先在左栏选择一个 param。/g)?.length ?? 0, 2);
+  });
+
+  it('Tools 栏只给诚实空态，不渲染 disabled 假按钮（§7.6）', () => {
+    const html = render();
+    assert.ok(html.includes('暂无已接通的工具'), 'Tools 栏必须说明工具未接通');
+    assert.ok(!html.includes('disabled'), '未接通的工具不得以 disabled 假按钮出现');
+  });
+
+  it('容器物理路径/文件名不进可见 DOM（§7.3/§7.8 禁止列表）', () => {
+    // containerLabel prop 传入真实形态的容器名，SSR 输出不得包含它。
+    const html = render('param/gameparam/gameparam.parambnd.dcx');
+    assert.ok(!html.includes('gameparam.parambnd.dcx'), '容器文件名不得出现在 DOM');
+    assert.ok(!html.includes('.bak'), 'backup 后缀不得出现在 DOM');
+    assert.ok(!html.includes('.gparam'), 'gparam 不得混入 PARAM 工作台');
   });
 });
 
