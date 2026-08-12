@@ -2,11 +2,7 @@
 
 SoulForge 是面向 Sekiro 和 FromSoftware Mod 的 AI 原生、安全、可审查、可回滚工程工作台。
 
-产品定位：
-
-~~~text
-魂游 Mod 的 Cursor
-~~~
+产品定位：魂游 Mod 的 Cursor
 
 用户提出修改目标后，SoulForge 应从真实资源证据出发，建立跨资源关系，生成 typed mutation 与 PatchIR，在暂存区验证，通过 Patch Engine 安全提交，并能把运行结果、审计和回滚关联起来。
 
@@ -138,6 +134,7 @@ SoulForge 按 [Apache License 2.0](LICENSE) 授权。归属与第三方声明见
 
 SoulForge 不附带任何游戏资产、专有压缩库或 FromSoftware 代码。
 
-想说的话：
+## 想说的话
+
 这个ui太丑了，有没有大手子帮我做一版好看的
 This UI is hideous. Is there an expert who can help me create a better-looking version?
