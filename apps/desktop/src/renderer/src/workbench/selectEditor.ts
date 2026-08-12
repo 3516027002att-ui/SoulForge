@@ -235,6 +235,7 @@ function editorIdForLegacy(
     case 'lua':
     case 'hks': return 'script';
     case 'tpf': return 'tpf';
+    case 'gparam': return 'gparam';
     case 'bnd':
     case 'dcx': return 'container';
     // .bak/.prev：artifact-role 的 legacy 近似——备份不进入任何语义编辑器。

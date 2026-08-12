@@ -1647,3 +1647,40 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 .paramdef-field-table [role='row']:focus-visible,
 .script-entry-table [role='row']:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
+
+/* ── GPARAM 工作台（GPARAM-11B）────────────────────────────────── */
+/* 本地分页条：Groups / Params 数量随 bank 不同可达数百，栏内翻页
+   而不是一次渲染全部（硬约束 17）。 */
+.wb-pager {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; font-size: 11px; color: var(--ink-2);
+  border-top: 1px solid var(--line); margin-top: auto;
+}
+.wb-pager button {
+  padding: 1px 8px; font-size: 12px; color: var(--ink-1);
+  background: var(--forge-1); border: 1px solid var(--line);
+  border-radius: var(--radius-s); cursor: pointer;
+}
+.wb-pager button:disabled { opacity: .4; cursor: default; }
+.wb-pager button:not(:disabled):hover { background: var(--forge-hover); }
+
+/* 值列表：四列表格（序号 / 值 / valueId / unk f32），列宽固定不随内容跳动。
+   值可能数百行，走栏内滚动（.workbench__column-body 已 overflow:auto）。 */
+.gparam-values { display: flex; flex-direction: column; font-size: 12px; }
+.gparam-values__head,
+.gparam-values__row {
+  display: grid;
+  grid-template-columns: minmax(3ch, auto) 1fr minmax(8ch, auto) minmax(8ch, auto);
+  gap: 8px; align-items: center; padding: 2px 10px;
+}
+.gparam-values__head {
+  font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-2);
+  background: var(--forge-2);
+}
+.gparam-values__row { border-top: 1px solid var(--line); }
+.gparam-values__row:hover { background: var(--forge-hover); }
+.gparam-values__mono {
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

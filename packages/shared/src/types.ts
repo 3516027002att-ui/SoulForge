@@ -50,6 +50,7 @@ export type ResourceFormatKind =
   | 'hks'
   | 'gfx'
   | 'tpf'
+  | 'gparam'
   | 'backup'
   | 'unknown';
 

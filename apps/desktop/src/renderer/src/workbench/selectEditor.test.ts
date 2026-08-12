@@ -251,6 +251,12 @@ describe('selectEditor', () => {
     assert.notEqual(selectEditor(input({ selectedFile: gparam })), 'param-rows');
     assert.notEqual(selectEditor(input({ selectedFile: gparam })), 'param-container');
 
+    // formatKind 'gparam'（COMPOUND_PATTERNS 新增条目后的真实索引形态）同样
+    // 只落 GPARAM 工作台，不进通用容器视图 —— 它有自己的语义编辑器。
+    const gparamIndexed = file('param/drawparam/m00_00.gparam.dcx', 'param', 'gparam', '.gparam.dcx');
+    assert.equal(selectEditor(input({ selectedFile: gparamIndexed })), 'gparam');
+    assert.notEqual(selectEditor(input({ selectedFile: gparamIndexed })), 'container');
+
     const tpf = file('menu/hi/1000.tpf.dcx', 'menu', 'unknown', '.tpf.dcx');
     assert.equal(selectEditor(input({ selectedFile: tpf })), 'tpf');
     assert.notEqual(selectEditor(input({ selectedFile: tpf })), 'text');

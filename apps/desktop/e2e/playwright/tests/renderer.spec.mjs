@@ -554,10 +554,10 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可点击文件工作域并保持可操作。9 = fixture 合成样本数
-    // （PARAM-10B 加入 param/gameparam/gameparam.parambnd.dcx 后）。
+    // 窄屏仍可点击文件工作域并保持可操作。12 = fixture 合成样本数
+    // （PARAM-10B 加 gameparam.parambnd.dcx，GPARAM-11B 加 3 个 gparam.dcx）。
     await window.locator('[data-domain="files"]').click();
-    await expect(window.locator('.file-item')).toHaveCount(9);
+    await expect(window.locator('.file-item')).toHaveCount(12);
   }
 
   await window.setViewportSize({ width: 653, height: 694 });
@@ -662,7 +662,7 @@ test('主题 token：暗/亮主题代表性按钮 computed 值不串用', async 
  * 大工作区：分页与截断说明。
  *
  * 默认 fixture 只有 9 个文件，低于分页页大小（200）与搜索上限（60），所以这两条
- * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 469 个
+ * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 472 个
  * 合成条目，跨过两个阈值。
  *
  * 断言的是**用户能看到什么**：DOM 里真的只有一页节点、翻页真的换内容、说明里的
@@ -682,15 +682,15 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
   const pager = window.locator('[data-testid="file-list-pager"]');
   await expect(pager).toBeVisible();
 
-  // 位置文案必须报出区间与真实总数（469 = 9 基础 + 460 合成）。
+  // 位置文案必须报出区间与真实总数（472 = 12 基础 + 460 合成）。
   const range = window.locator('[data-testid="file-list-page-range"]');
   await expect(range).toContainText('1–200');
-  await expect(range).toContainText('469');
+  await expect(range).toContainText('472');
   await expect(range).toContainText('第 1/3 页');
 
-  // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 469 长得一样。
+  // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 472 长得一样。
   // SHELL-09 §3.3：数量带语义单位（文件 N 个）。
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 469 个');
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 472 个');
   await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
 
   // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。
@@ -703,8 +703,8 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
 
   // 末页只剩余数条，且「下一页」到底后禁用。
   await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('401–469');
-  await expect(items).toHaveCount(69);
+  await expect(range).toContainText('401–472');
+  await expect(items).toHaveCount(72);
   await expect(window.getByRole('button', { name: '下一页' }).first()).toBeDisabled();
 
   // 回到第一页：上一页可用且内容复原。
@@ -946,5 +946,86 @@ test('PARAM 工作台四栏：选择链、父选区清理、虚拟行、字段�
 
   // 同尺寸对照截图（§2.4 步骤 6：以相同窗口尺寸保存 SoulForge 对照截图）。
   await window.screenshot({ path: 'test-results/10-param-workbench.png' });
+  await app.close();
+});
+
+test('GPARAM 工作台四栏：banks 选择链、父选区清理、值类型展开与局部失败（GPARAM-11B）', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 从 Files 领域选 gparam 文件，打开 GPARAM Workbench。
+  await window.locator('[data-domain="files"]').click();
+  await window.locator('.file-item', { hasText: 'param/drawparam/m10_00.gparam.dcx' }).click();
+
+  // Agent 面板默认展开为 overlay，会盖住右侧 Fields/Values 栏的点击目标。
+  // PARAM-10B 用例点击目标在中栏不受影响；这里先收起再操作右栏。
+  await window.getByRole('button', { name: '关闭 Agent 面板' }).click();
+
+  // 四栏同时存在（§18.15 11B：Banks/Groups/Fields/Values/Tools）。
+  await expect(window.locator('.workbench')).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Banks' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Groups' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Fields/Values' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Tools' })).toBeVisible();
+
+  // §18.15 比例在运行期成立（computed flex-grow）。
+  const growRatios = await window.evaluate(() => {
+    const slots = [...document.querySelectorAll('.workbench__column-slot')];
+    return slots.map((slot) => getComputedStyle(slot).flexGrow);
+  });
+  expect(growRatios).toEqual(['0.18', '0.24', '0.42', '0.16']);
+
+  // 独立滚动：每栏的滚动权在栏内，不泄给整页。
+  const scrollHosts = await window.evaluate(() => {
+    const bodies = [...document.querySelectorAll('.workbench__column-body')];
+    return bodies.map((body) => getComputedStyle(body).overflowY);
+  });
+  expect(scrollHosts.every((value) => value === 'auto' || value === 'hidden')).toBe(true);
+
+  // §7.8 标题形态；负向清单：无物理路径 / .bak / PARAM 表。
+  // 物理路径只允许出现在 title（metadata details），可见文本是显示名。
+  const gparamCrumb = window.locator('.crumb', { hasText: 'Graphics Parameters' });
+  await expect(gparamCrumb).toContainText('3 banks');
+  const workbenchText = await window.locator('.workbench').innerText();
+  expect(workbenchText).not.toContain('.gparam.dcx');
+  expect(workbenchText).not.toContain('.bak');
+  expect(workbenchText).not.toContain('Game Parameters'); // PARAM 工作台标题不串台
+
+  // Tools 栏只给诚实空态：只读说明存在，无假写入按钮。
+  const toolsColumn = window.locator('.workbench__column[aria-label="Tools"]');
+  await expect(toolsColumn).toContainText('暂无已接通的工具');
+  expect(await toolsColumn.locator('button').count()).toBe(0);
+
+  // 打开时默认选中当前文件：Groups 栏出现 LightSet ParamEditor。
+  await expect(window.locator('.wb-list .wb-row', { hasText: 'LightSet ParamEditor' })).toBeVisible();
+
+  // 选择链：选 group → Fields/Values 出现 params；选 param → 值展开。
+  await window.locator('.wb-list .wb-row', { hasText: 'LightSet ParamEditor' }).click();
+  await expect(window.locator('.wb-list .wb-row', { hasText: 'Directional Light Angle0' })).toBeVisible();
+  await window.locator('.wb-list .wb-row', { hasText: 'Directional Light Angle0' }).click();
+
+  // 值类型展开：float3 每值 3 分量；valueId 与 unk f32 独立列。
+  await expect(window.locator('.gparam-values__head')).toBeVisible();
+  await expect(window.locator('.gparam-values__row').first()).toContainText('1.25, 0.5, 0.75');
+  await expect(window.locator('.gparam-values__row').first()).toContainText('11');
+
+  // 父选区清理：切到第二个 group（Shadows）后 param 选择被清——不再显示
+  // 上一个 group 的 Directional Light 值，而是当前 group 的 param 列表。
+  await window.locator('.wb-list .wb-row', { hasText: 'Shadows ParamEditor' }).click();
+  await expect(window.locator('.wb-list .wb-row', { hasText: 'Shadow Distance' })).toBeVisible();
+  await expect(window.locator('.gparam-values__row', { hasText: '1.25, 0.5, 0.75' })).toHaveCount(0);
+
+  // 父选区清理（bank 级）：切到 m11 bank 后 group 与 param 选择全部清空。
+  await window.locator('.wb-list .wb-row', { hasText: 'm11_00' }).click();
+  await expect(window.locator('.wb-list .wb-row', { hasText: 'Camera ParamEditor' })).toBeVisible();
+  await expect(window.locator('.wb-empty', { hasText: '先在中栏选择一个 group。' })).toBeVisible();
+
+  // 局部失败：broken bank 保留在 Banks 栏并标记失败，Groups 栏给出结构化原因。
+  await window.locator('.wb-list .wb-row', { hasText: 'broken' }).click();
+  await expect(window.locator('.wb-row__meta', { hasText: '读取失败' })).toBeVisible();
+  await expect(window.locator('.diag-error', { hasText: 'fixture 未登记或损坏的 GPARAM' })).toBeVisible();
+
+  // 同尺寸对照截图（§2.4 步骤 6）。
+  await window.screenshot({ path: 'test-results/11-gparam-workbench.png' });
   await app.close();
 });

@@ -33,6 +33,8 @@ const COMPOUND_PATTERNS: Array<{ suffix: string; formatKind: ResourceFormatKind;
   { suffix: '.parambnd.dcx', formatKind: 'param', label: 'PARAM BND DCX' },
   { suffix: '.gameparambnd.dcx', formatKind: 'param', label: 'GameParam BND DCX' },
   { suffix: '.drawparambnd.dcx', formatKind: 'param', label: 'DrawParam BND DCX' },
+  { suffix: '.gparam.dcx', formatKind: 'gparam', label: 'GPARAM DCX' },
+  { suffix: '.gparam', formatKind: 'gparam', label: 'GPARAM' },
   { suffix: '.fmg.dcx', formatKind: 'fmg', label: 'FMG DCX' },
   { suffix: '.msgbnd.dcx', formatKind: 'fmg', label: 'MSG BND DCX' },
   { suffix: '.luabnd.dcx', formatKind: 'lua', label: 'Lua BND DCX' },

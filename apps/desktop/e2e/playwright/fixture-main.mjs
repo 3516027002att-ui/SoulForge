@@ -65,6 +65,11 @@ const fixtureFiles = [
   // PARAM-10B fixture：legacy 路由 formatKind 'param' → param-container 工作台。
   // 目录形态对齐真实 gameparam（param/gameparam/gameparam.parambnd.dcx）。
   makeFile({ dir: 'param/gameparam', name: 'gameparam.parambnd.dcx', kind: 'param', formatKind: 'param', formatLabel: 'PARAM BND', extension: '.dcx', compoundExtension: '.parambnd.dcx' }),
+  // GPARAM-11B fixture：三个 bank（两个可读 + 一个失败样本）。目录形态对齐
+  // 真实 drawparam（param/drawparam/m10_00_0001.gparam.dcx）。
+  makeFile({ dir: 'param/drawparam', name: 'm10_00.gparam.dcx', kind: 'param', formatKind: 'gparam', formatLabel: 'GPARAM', extension: '.dcx', compoundExtension: '.gparam.dcx' }),
+  makeFile({ dir: 'param/drawparam', name: 'm11_00.gparam.dcx', kind: 'param', formatKind: 'gparam', formatLabel: 'GPARAM', extension: '.dcx', compoundExtension: '.gparam.dcx' }),
+  makeFile({ dir: 'param/drawparam', name: 'broken.gparam.dcx', kind: 'param', formatKind: 'gparam', formatLabel: 'GPARAM', extension: '.dcx', compoundExtension: '.gparam.dcx' }),
   // unknown 不合并进 other：独立保留并在顶部栏显示警告计数。
   makeFile({ dir: '', name: 'regulation.bin', kind: 'unknown', formatKind: 'unknown', formatLabel: 'BIN', extension: '.bin', compoundExtension: '.bin' })
 ];
@@ -234,7 +239,7 @@ function registerFixtureIpc() {
       workspaceLabel: 'fixture-workspace',
       files: scanned.map((file) => ({ ...file })),
       countsByKind: {
-        event: 1, map: LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0, param: 1, msg: 1, menu: 0, script: 0,
+        event: 1, map: LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0, param: 4, msg: 1, menu: 0, script: 0,
         action: 1, ai: 1, sfx: 1, chr: 1, obj: 0, other: 1, unknown: 1
       },
       diagnostics: [],
@@ -354,6 +359,106 @@ function registerFixtureIpc() {
         rows: paramTables[0].rows.map((r) => ({ id: r.id, dataBase64: r.dataBase64, dataHash: r.dataHash, name: r.name })),
         rowsTruncated: false,
         authority: 'fixture'
+      },
+      diagnostics: []
+    };
+  });
+
+  // ── GPARAM 工作台（GPARAM-11B）合成通道 ────────────────────────────
+  // 微小、合法构造、明确标记（AGENTS.md §15）。两个可读 bank 各含 2 个 group、
+  // 不同值类型（float3 / int / float2），一个失败样本（broken）。
+  const fixtureGparamBanks = {
+    'fixture://param/drawparam/m10_00.gparam.dcx': {
+      groups: [
+        {
+          groupId: 0, name1: 'LightSet ParamEditor', name2: 'LightSet',
+          paramCount: 2, comments: [], paramPreviewLimit: 50,
+          params: [
+            {
+              paramId: 0, name1: 'Directional Light Angle0', name2: 'Angle',
+              type: 'float3', typeCode: 6, valueCount: 2,
+              values: [1.25, 0.5, 0.75, 2.0, 0.1, 0.2],
+              valueIds: [11, 12], unkFloats: [0, 0]
+            },
+            {
+              paramId: 1, name1: 'Fog Enable', name2: 'Enable',
+              type: 'bool', typeCode: 5, valueCount: 1,
+              values: [1], valueIds: [21], unkFloats: [0]
+            }
+          ]
+        },
+        {
+          groupId: 1, name1: 'Shadows ParamEditor', name2: 'Shadows',
+          paramCount: 1, comments: ['shadow distance'], paramPreviewLimit: 50,
+          params: [
+            {
+              paramId: 0, name1: 'Shadow Distance', name2: 'Distance',
+              type: 'float', typeCode: 4, valueCount: 1,
+              values: [42.5], valueIds: [31], unkFloats: [0]
+            }
+          ]
+        }
+      ],
+      roundTrip: {
+        byteIdentical: true, semanticIdentical: true,
+        sourceHash: 'fixture-gparam-m10', rebuiltHash: 'fixture-gparam-m10',
+        groupCount: 2, paramCount: 3, valueCount: 4, note: null
+      }
+    },
+    'fixture://param/drawparam/m11_00.gparam.dcx': {
+      groups: [
+        {
+          groupId: 0, name1: 'Camera ParamEditor', name2: 'Camera',
+          paramCount: 2, comments: [], paramPreviewLimit: 50,
+          params: [
+            {
+              paramId: 0, name1: 'FOV Horizontal', name2: 'FOV',
+              type: 'float2', typeCode: 6, valueCount: 1,
+              values: [60, 75], valueIds: [41], unkFloats: [0]
+            },
+            {
+              paramId: 1, name1: 'Near Clip', name2: 'Near',
+              type: 'float', typeCode: 4, valueCount: 1,
+              values: [0.1], valueIds: [42], unkFloats: [0]
+            }
+          ]
+        }
+      ],
+      roundTrip: {
+        byteIdentical: true, semanticIdentical: true,
+        sourceHash: 'fixture-gparam-m11', rebuiltHash: 'fixture-gparam-m11',
+        groupCount: 1, paramCount: 2, valueCount: 2, note: null
+      }
+    }
+  };
+
+  handleTrusted('resource.readGparamDocument', (_event, sourceUri) => {
+    track('resource.readGparamDocument');
+    const bank = fixtureGparamBanks[sourceUri];
+    if (!bank) {
+      // broken.gparam.dcx 等未登记样本：结构化失败，绝不能显示为空 bank。
+      return {
+        ok: false, sourceUri,
+        data: null,
+        diagnostics: [{
+          severity: 'error', code: 'GPARAM_DOCUMENT_READ_FAILED',
+          message: 'fixture 未登记或损坏的 GPARAM：读取失败。', sourceUri
+        }]
+      };
+    }
+    return {
+      ok: true, sourceUri,
+      data: {
+        format: 'GPARAM', game: 'sekiro', gameCode: 5,
+        groupCount: bank.groups.length,
+        unk14: 0, unk50: 0, unk0D: false, unk3Count: 0,
+        sourceSize: 2048, sourceHash: bank.roundTrip.sourceHash,
+        groups: bank.groups,
+        groupPage: 0, groupPageSize: 50, groupPageCount: 1,
+        groupsTruncated: false,
+        roundTrip: bank.roundTrip,
+        authority: 'fixture',
+        fieldLayout: 'typed-gparam-values'
       },
       diagnostics: []
     };

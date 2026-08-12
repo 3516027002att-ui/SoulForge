@@ -46,6 +46,7 @@ import type {
 } from '@soulforge/core';
 import { HexEditorPanel } from './editors/HexEditorPanel.js';
 import { ParamWorkbench } from './workbench/ParamWorkbench.js';
+import { GparamWorkbench, type GparamBankView } from './workbench/GparamWorkbench.js';
 import { DiagnosticsLog } from './workbench/DiagnosticsLog.js';
 import { selectEditor } from './workbench/selectEditor.js';
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
@@ -505,6 +506,21 @@ export function App(): ReactElement {
     bnd4Forced
   });
   const showBnd4Workbench = activeEditor === 'container';
+
+  /**
+   * GPARAM 域的全部磁盘文件（工作台 Banks 栏的数据源）。
+   *
+   * 按后缀过滤而不是 resourceKind：与 selectEditor 对 gparam 的判据一致
+   * （ROUTE-06 的 legacy 路径同用 .gparam/.gparam.dcx 后缀）。任务开始时
+   * mods/param/drawparam 有 34 个文件，但那是快照不是常量 —— 这里永远按
+   * 当前索引实测计数。
+   */
+  const gparamBanks = useMemo<GparamBankView[]>(() => {
+    const indexed = allFiles.length > 0 ? allFiles : files;
+    return indexed
+      .filter((file) => /\.gparam(\.dcx)?$/i.test(file.relativePath))
+      .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
+  }, [allFiles, files]);
 
   /**
    * 交给 ParamDefPanel 的字段定义。
@@ -2770,12 +2786,24 @@ export function App(): ReactElement {
               onOpenWorkspace={() => void openWorkspace()}
             />
           )}
-          {activeDomain === 'gparam' && activeEditor === 'empty' && (
+          {activeEditor === 'gparam' && (
+            <GparamWorkbench
+              key={`gparam-wb:${selectedFile?.sourceUri ?? 'none'}`}
+              banks={gparamBanks}
+              {...(selectedFile?.sourceUri ? { initialUri: selectedFile.sourceUri } : {})}
+            />
+          )}
+          {activeDomain === 'gparam' && activeEditor === 'empty' && gparamBanks.length > 0 && (
+            <GparamWorkbench
+              key={`gparam-wb:${gparamBanks.map((b) => b.sourceUri).join(',')}`}
+              banks={gparamBanks}
+            />
+          )}
+          {activeDomain === 'gparam' && activeEditor === 'empty' && gparamBanks.length === 0 && (
             <section className="domain-placeholder" data-testid="gparam-placeholder" aria-label="GPARAM 工作域">
               <span className="domain-placeholder__eyebrow">GPARAM / CAPABILITY</span>
-              <h2>GPARAM 工作台尚未接入</h2>
-              <p>当前 Bridge 没有暴露安全的 GPARAM 读取与写入契约，因此这里不伪造表格或提交入口。</p>
-              <span className="muted">可先使用 PARAM 工作域；GPARAM 接线需要独立的 native authority 与验证注册。</span>
+              <h2>GPARAM 工作台</h2>
+              <p>工作区中没有 GPARAM 文件。挂载包含 drawparam 的 Mod 工作区后这里会列出所有 bank。</p>
             </section>
           )}
           {activeEditor === 'empty' && activeDomain !== 'gparam' && (
