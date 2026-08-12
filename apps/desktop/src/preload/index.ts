@@ -272,6 +272,8 @@ const api = {
     ipcRenderer.invoke('resource.applyMsbMutation', sourceUri, expectedHash, mutation),
   readParamDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readParamDocument', sourceUri),
+  readGparamDocument: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readGparamDocument', sourceUri),
   /**
    * 当前 PARAM 元数据包的身份与信任状态。
    *

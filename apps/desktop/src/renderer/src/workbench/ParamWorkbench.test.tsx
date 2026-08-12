@@ -132,15 +132,18 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     'utf8'
   ));
 
-  it('backup 不读：两个 PARAM 读取通道都必须拒绝（readParamDocument + readParamPage）', () => {
+  it('backup 不读：所有 param 读取通道都必须拒绝（PARAM 两个 + GPARAM 一个）', () => {
     const matches = ipcSource.match(/BACKUP_READ_FORBIDDEN/g) ?? [];
-    assert.equal(matches.length, 2,
-      'BACKUP_READ_FORBIDDEN 应恰好出现在 readParamDocument 与 readParamPage 两个 handler');
+    assert.equal(matches.length, 3,
+      'BACKUP_READ_FORBIDDEN 应恰好出现在 readParamDocument、readParamPage 与 readGparamDocument 三个 handler');
     // 每个 handler 都调用同一判定函数（行为测试见上），拒绝不能只挂在一个通道。
+    // 新加读取通道时必须同步扩展这里：少一个通道就少一处 backup 泄漏。
     const doc = sliceHandler(ipcSource, 'resource.readParamDocument');
     const page = sliceHandler(ipcSource, 'resource.readParamPage');
+    const gparam = sliceHandler(ipcSource, 'resource.readGparamDocument');
     assert.ok(doc.includes('isParamBackupPath('), 'readParamDocument 未调用 isParamBackupPath');
     assert.ok(page.includes('isParamBackupPath('), 'readParamPage 未调用 isParamBackupPath');
+    assert.ok(gparam.includes('isParamBackupPath('), 'readGparamDocument 未调用 isParamBackupPath');
   });
 
   it('backup 拒绝的诊断指向 History & Recovery（不冒充普通读取失败）', () => {

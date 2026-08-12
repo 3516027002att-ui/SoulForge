@@ -524,6 +524,7 @@ internal static class BridgeDaemonHost
         "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child",
         "extract-bnd4-child", "write-bnd4", "inventory-asset-resources",
         "read-fmg-document", "write-fmg", "read-param-document", "write-param",
+        "read-gparam-document",
         "read-emevd-document", "write-emevd", "read-msb-document", "write-msb",
         "read-tpf-document", "export-tpf-texture", "read-tae-document",
         "read-flver-document", "read-flver-mesh", "read-flver-skeleton",

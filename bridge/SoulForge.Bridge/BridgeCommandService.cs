@@ -94,7 +94,13 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
-                return BridgeResult<object>.Partial(file, GuessKindFromPath(file), diagnostics, document.ToEnvelope(roundTrip));
+                // includePayload=true 且 payload 足够小时返回 payloadBase64：供
+                // 测试/工具拿到解压后的裸 payload（如 GPARAM loose 样本）。
+                var includePayload = optionsIsObject
+                    && options.TryGetProperty("includePayload", out var includeEl)
+                    && includeEl.ValueKind == JsonValueKind.True;
+                return BridgeResult<object>.Partial(file, GuessKindFromPath(file), diagnostics,
+                    document.ToEnvelope(roundTrip, includePayload));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or InvalidOperationException or IOException)
             {
@@ -221,6 +227,47 @@ internal sealed class BridgeCommandService
                     ? "PARAM_LAYOUT_UNSUPPORTED"
                     : "PARAM_DOCUMENT_READ_FAILED";
                 return BridgeResult<object>.Failed(file, "param", code, ex.Message);
+            }
+        }
+
+        if (command == "read-gparam-document")
+        {
+            try
+            {
+                // 支持 loose .gparam 与 .gparam.dcx：DCX 由 DcxNativeDocument 解压，
+                // 裸文件直接读字节。GPARAM 解析不借用 PARAM parser —— group/param
+                // 嵌套与值类型是独立格式家族（见 GparamNativeDocument 布局说明）。
+                var sourceBytes = Path.GetExtension(file).Equals(".dcx", StringComparison.OrdinalIgnoreCase)
+                    ? DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload
+                    : File.ReadAllBytes(file);
+                var document = GparamNativeDocument.Read(sourceBytes);
+                var roundTrip = document.VerifyRoundTrip();
+                var diagnostics = new[]
+                {
+                    new Diagnostic(
+                        roundTrip.SemanticIdentical ? "info" : "error",
+                        roundTrip.SemanticIdentical ? "GPARAM_DOCUMENT_ROUNDTRIP_SEMANTIC_VERIFIED" : "GPARAM_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.SemanticIdentical
+                            ? (roundTrip.ByteIdentical
+                                ? "GPARAM 无修改往返字节级一致。"
+                                : "GPARAM 无修改往返语义一致。")
+                            : roundTrip.Note ?? "GPARAM 无修改往返语义不一致。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        roundTrip)
+                };
+                // 分页参数来自请求 options；groupPageSize=0 时全量返回（实测
+                // 34 个样本均 ≤ 23 group × ≤ 25 param × 255 值，单帧在 1MB 内）。
+                var groupPage = OptionInt("groupPage", 0);
+                var groupPageSize = OptionInt("groupPageSize", 0);
+                return BridgeResult<object>.Partial(file, "gparam", diagnostics,
+                    document.ToEnvelope(roundTrip, groupPage: groupPage, groupPageSize: groupPageSize));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                var code = ex is NotSupportedException
+                    ? "GPARAM_GAME_UNSUPPORTED"
+                    : "GPARAM_DOCUMENT_READ_FAILED";
+                return BridgeResult<object>.Failed(file, "gparam", code, ex.Message);
             }
         }
 

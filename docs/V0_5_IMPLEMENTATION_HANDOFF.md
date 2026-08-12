@@ -1395,7 +1395,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 168 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 169 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1529,7 +1529,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（43 条）
+**native**（44 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1543,6 +1543,7 @@ npm run bridge:verify:flver-glb
 npm run bridge:verify:flver-mesh
 npm run bridge:verify:flver-multi
 npm run bridge:verify:fmg
+npm run bridge:verify:gparam
 npm run bridge:verify:msb
 npm run bridge:verify:msb-all
 npm run bridge:verify:msb-writer

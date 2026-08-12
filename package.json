@@ -25,6 +25,7 @@
     "bridge:verify:bnd4-transaction": "npm run test:native-bnd4-transaction -w @soulforge/core",
     "bridge:verify:fmg": "npm run test:native-fmg -w @soulforge/core",
     "bridge:verify:param": "npm run test:native-param -w @soulforge/core",
+    "bridge:verify:gparam": "npm run test:native-gparam -w @soulforge/core",
     "test:ai-fake-loop": "npm run test:ai-fake-loop -w @soulforge/core",
     "test:ai-conformance": "npm run test:ai-conformance -w @soulforge/core",
     "test:model-service-configuration": "npm run test:model-service-configuration -w @soulforge/core",

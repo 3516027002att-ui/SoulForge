@@ -114,6 +114,7 @@ import type {
   EmevdEditorDocument,
   IndexedFile,
   ParamDefDocument,
+  GparamDocument,
   ReadOperationId,
   ResourceKind,
   StructuredDiagnostic
@@ -3067,6 +3068,93 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             authority: result.data.authority
           }
         : null,
+      diagnostics: result.diagnostics
+    });
+  });
+
+  /**
+   * GPARAM-11A：graphics param（.gparam / .gparam.dcx）typed 读取。
+   *
+   * 与 PARAM 同一把锁：backup 不读（.bak/.prev 只经 History & Recovery 显式
+   * 只读打开）；未索引资源结构化失败。Bridge 侧 read-gparam-document 解 DCX
+   * （KRAK 需要 Oodle 运行时，故传 activeSession.layers.baseRoot）并返回
+   * 分组分页的 typed 文档 —— 不能借 PARAM parser，也不能把读取失败显示成
+   * 空 bank（失败一律 ok:false + 结构化诊断）。
+   */
+  handle('resource.readGparamDocument', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'RESOURCE_NOT_INDEXED',
+          message: '资源未索引，无法读取 GPARAM。',
+          sourceUri
+        }]
+      };
+    }
+    if (isParamBackupPath(file.relativePath)) {
+      return {
+        ok: false,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: null,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'BACKUP_READ_FORBIDDEN',
+          message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能作为 GPARAM 文档读取。',
+          sourceUri
+        }]
+      };
+    }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) {
+      return sanitizeRendererValue({
+        ok: false,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: null,
+        diagnostics: roots.diagnostics
+      });
+    }
+    const gameRoot = activeSession?.layers.baseRoot;
+    const result = await runBridge<GparamDocument>({
+      command: 'read-gparam-document',
+      filePath: file.absolutePath,
+      allowedRoots: roots.allowedRoots,
+      ...(gameRoot ? { oodleRuntimeRoot: gameRoot } : {}),
+      timeoutMs: 120_000,
+      // 显式空 options：与 readParamDocument 同一范式，规避缺省 JsonElement 的分页缺陷。
+      commandOptions: {}
+    });
+    if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
+      return sanitizeRendererValue({
+        ok: false,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: null,
+        diagnostics: result.diagnostics
+      });
+    }
+    return sanitizeRendererValue({
+      ok: true,
+      sourceUri,
+      relativePath: file.relativePath,
+      data: {
+        format: result.data.format,
+        game: result.data.game,
+        groupCount: result.data.groupCount,
+        sourceHash: result.data.sourceHash,
+        sourceSize: result.data.sourceSize,
+        groups: result.data.groups,
+        groupPage: result.data.groupPage,
+        groupPageSize: result.data.groupPageSize,
+        groupPageCount: result.data.groupPageCount,
+        groupsTruncated: result.data.groupsTruncated,
+        roundTrip: result.data.roundTrip,
+        authority: result.data.authority
+      },
       diagnostics: result.diagnostics
     });
   });

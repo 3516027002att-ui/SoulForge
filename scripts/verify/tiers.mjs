@@ -411,6 +411,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:msb-writer': 'native',
   'bridge:verify:oodle': 'native',
   'bridge:verify:param': 'native',
+  'bridge:verify:gparam': 'native',
   'bridge:verify:tae': 'native',
   'bridge:verify:tpf': 'native',
   'test:emevd-corpus-matrix': 'native',

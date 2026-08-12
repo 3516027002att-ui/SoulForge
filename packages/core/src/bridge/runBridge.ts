@@ -8,7 +8,7 @@ import {
   BridgeDaemonError
 } from './bridgeDaemonClient.js';
 
-export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'inventory-asset-resources' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'read-tae-document' | 'read-tpf-document' | 'export-tpf-texture' | 'read-flver-document' | 'read-flver-mesh' | 'read-flver-skeleton' | 'read-flver-texture-slots' | 'read-flver-dummies' | 'read-esd-document' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle' | 'probe-document-locator';
+export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'inventory-asset-resources' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-gparam-document' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'read-tae-document' | 'read-tpf-document' | 'export-tpf-texture' | 'read-flver-document' | 'read-flver-mesh' | 'read-flver-skeleton' | 'read-flver-texture-slots' | 'read-flver-dummies' | 'read-esd-document' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle' | 'probe-document-locator';
 
 export interface RunBridgeOptions {
   bridgeProjectPath?: string;
@@ -236,6 +236,7 @@ function commandToResourceKind(command: BridgeCommand): ResourceKind {
     case 'write-fmg': return 'msg';
     case 'read-param-document': return 'param';
     case 'write-param': return 'param';
+    case 'read-gparam-document': return 'param';
     case 'read-emevd-document': return 'event';
     case 'write-emevd': return 'event';
     case 'read-msb-document': return 'map';

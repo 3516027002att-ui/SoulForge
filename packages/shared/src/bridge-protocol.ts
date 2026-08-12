@@ -102,6 +102,7 @@ export type BridgeCommandName =
   | 'write-fmg'
   | 'read-param-document'
   | 'write-param'
+  | 'read-gparam-document'
   | 'read-emevd-document'
   | 'write-emevd'
   | 'read-msb-document'
