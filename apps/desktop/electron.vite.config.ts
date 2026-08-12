@@ -30,7 +30,15 @@ export default defineConfig({
     }
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['@soulforge/shared'] })],
+    // @soulforge/shared 必须打进 bundle 而不是 external：
+    // DOCSTORE-04 起 preload 运行时引用 EDITOR_DOCUMENT_IPC_CHANNELS（§14.4
+    // 契约的通道权威），external 化后产物是 require('@soulforge/shared')，
+    // 而 sandbox: true 的 preload 没有 node_modules 解析能力，报
+    // "module not found: @soulforge/shared"，window.soulforge 完全不注入
+    // （production-main e2e 实测抓到）。rollup 会把 shared 的 ESM 转成 CJS。
+    // @soulforge/core 在 preload 里只有 type import，保持 external。
+    //
     // preload 必须产出 CommonJS（.js），不能跟随本包的 "type": "module" 产出 ESM。
     //
     // 原因：生产窗口用 sandbox: true（这是被 verify-desktop-security-runtime.mjs:113

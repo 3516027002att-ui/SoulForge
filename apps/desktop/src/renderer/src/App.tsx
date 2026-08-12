@@ -76,15 +76,10 @@ import {
   getRendererRuntime
 } from './runtime/rendererRuntime.js';
 import type { ResourceMode } from './navigation/resourceFamilies.js';
-import {
-  domainForFile,
-  domainLabel,
-  filterFilesForDomain,
-  resourceModeForDomain,
-  DOMAIN_NAV_ITEMS,
-  type EditorDomainId
-} from './navigation/domainNavigation.js';
+import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
+import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation.js';
 import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
+import { WorkspaceResourceBar } from './navigation/WorkspaceResourceBar.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import type {
@@ -118,6 +113,8 @@ import {
 import {
   FILE_LIST_PAGE_SIZE,
   SEARCH_HIT_LIMIT,
+  filterFilesForMode,
+  formatFilesCount,
   formatListTruncation,
   formatPageRange,
   formatPreviewTruncation,
@@ -697,9 +694,42 @@ export function App(): ReactElement {
       }
     })();
   }, [bridge]);
-  const visibleFiles = useMemo(
-    () => filterFilesForDomain(allFiles.length > 0 ? allFiles : files, activeDomain, query),
-    [activeDomain, allFiles, files, query]
+  /**
+   * 领域栏数据源（SHELL-09 §4.1）：DomainSummary 由「固定领域集合 × read
+   * contract 注册状态」构造，不根据任何文件数据分类。read contract 的
+   * renderer 可观测形态是 preload bridge 的方法存在性（方法存在 = 主进程
+   * 已注册该领域的 read 通道）；browser-preview 表面运行条件不满足。
+   */
+  const domainSummaries = useMemo<readonly DomainSummary[]>(() => {
+    const readContract = new Set<EditorDomainId>();
+    if (bridge) {
+      if (typeof bridge.readParamDocument === 'function') readContract.add('param');
+      if (typeof bridge.readFmgDocument === 'function') readContract.add('text');
+      if (typeof bridge.readEmevdDocument === 'function') readContract.add('event');
+      if (typeof bridge.readMsbDocument === 'function') readContract.add('map');
+      if (typeof bridge.inspectContainerTree === 'function') readContract.add('container');
+      if (typeof bridge.listScriptContainerEntriesPage === 'function') readContract.add('script');
+      if (typeof bridge.readTaeDocument === 'function') readContract.add('animation');
+      if (typeof bridge.readEsdDocument === 'function') readContract.add('behavior');
+      if (typeof bridge.readFlverDocument === 'function') readContract.add('model');
+      if (typeof bridge.readTpfDocument === 'function') readContract.add('texture');
+    }
+    return buildDomainSummaries({
+      readContract,
+      runtimeReady: !isBrowserPreview
+    });
+  }, [bridge, isBrowserPreview]);
+
+  /**
+   * 物理浏览列表：只存在于 Files 领域（§18.13 Steps：Files 独占物理浏览；
+   * 语义领域不渲染全局 resource browser）。过滤只走物理 taxonomy
+   * （filterFilesForMode：resourceKind/路径/格式名），不参与语义领域。
+   */
+  const physicalBrowseFiles = useMemo(
+    () => activeDomain === 'files'
+      ? filterFilesForMode(allFiles.length > 0 ? allFiles : files, resourceMode, query)
+      : [],
+    [activeDomain, resourceMode, query, allFiles, files]
   );
 
   /**
@@ -714,19 +744,40 @@ export function App(): ReactElement {
    * 越界了。
    */
   const [filePage, setFilePage] = useState(0);
-  const filePageCount = Math.max(1, Math.ceil(visibleFiles.length / FILE_LIST_PAGE_SIZE));
+  const filePageCount = Math.max(1, Math.ceil(physicalBrowseFiles.length / FILE_LIST_PAGE_SIZE));
   const clampedFilePage = Math.min(filePage, filePageCount - 1);
   useEffect(() => {
     setFilePage(0);
   }, [activeDomain, resourceMode, query, allFiles, files]);
   const pagedFiles = useMemo(
-    () => visibleFiles.slice(
+    () => physicalBrowseFiles.slice(
       clampedFilePage * FILE_LIST_PAGE_SIZE,
       clampedFilePage * FILE_LIST_PAGE_SIZE + FILE_LIST_PAGE_SIZE
     ),
-    [visibleFiles, clampedFilePage]
+    [physicalBrowseFiles, clampedFilePage]
   );
-  const searchHits = useMemo(() => visibleFiles.slice(0, SEARCH_HIT_LIMIT), [visibleFiles]);
+  /**
+   * 搜索面板的全局命中（不受领域限制）：搜索是定位手段，不是当前领域过滤。
+   * 只取前 SEARCH_HIT_LIMIT 条渲染，总数由 searchTruncationNote 报出。
+   */
+  const searchHits = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return [];
+    const base = allFiles.length > 0 ? allFiles : files;
+    return base
+      .filter((file) => file.relativePath.toLowerCase().includes(normalized)
+        || file.resourceKind.toLowerCase().includes(normalized)
+        || file.formatLabel.toLowerCase().includes(normalized))
+      .slice(0, SEARCH_HIT_LIMIT);
+  }, [allFiles, files, query]);
+  const globalSearchTotal = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return 0;
+    const base = allFiles.length > 0 ? allFiles : files;
+    return base.filter((file) => file.relativePath.toLowerCase().includes(normalized)
+      || file.resourceKind.toLowerCase().includes(normalized)
+      || file.formatLabel.toLowerCase().includes(normalized)).length;
+  }, [allFiles, files, query]);
   /**
    * 欢迎页「待审查变更」摘要条数。摘要不是队列本体——完整队列在暂存区面板，
    * 所以这里保留截断，但必须说清还有多少没显示（否则 5 条与 50 条长得一样，
@@ -740,20 +791,26 @@ export function App(): ReactElement {
     hint: '完整队列见暂存区面板'
   });
   const searchTruncationNote = formatListTruncation({
-    total: visibleFiles.length,
+    total: globalSearchTotal,
     shown: searchHits.length,
     noun: '个资源',
-    hint: '缩小关键字，或到资源浏览器分页浏览全部'
+    hint: '缩小关键字，或到 Files 领域分页浏览全部'
   });
 
   useEffect(() => {
     let cancelled = false;
     async function loadParam(): Promise<void> {
-      if (resourceMode !== 'param') return;
-      const target = selectedFile
-        ?? visibleFiles.find((file) => file.resourceKind === 'param')
-        ?? null;
-      if (!bridge || !target || typeof bridge.readParamDocument !== 'function') {
+      // SHELL-09：语义领域不再有兜底文件列表；只有用户显式选中的 param 文件才加载。
+      const target = selectedFile;
+      if (!target || target.resourceKind !== 'param') {
+        setParamRows(EMPTY_PARAM_ROWS);
+        setParamTypeName('');
+        setParamSourceHash(null);
+        setParamLive(false);
+        setParamRowPayloads(new Map());
+        return;
+      }
+      if (!bridge || typeof bridge.readParamDocument !== 'function') {
         setParamRows(EMPTY_PARAM_ROWS);
         setParamTypeName('');
         setParamSourceHash(null);
@@ -881,16 +938,20 @@ export function App(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [bridge, resourceMode, selectedFile, visibleFiles]);
+  }, [bridge, selectedFile]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadFmg(): Promise<void> {
-      if (resourceMode !== 'msg') return;
-      const target = selectedFile
-        ?? visibleFiles.find((file) => file.resourceKind === 'msg')
-        ?? null;
-      if (!bridge || !target || typeof bridge.readFmgDocument !== 'function') {
+      // SHELL-09：只有用户显式选中的 msg 资源才加载；语义领域无兜底列表。
+      const target = selectedFile;
+      if (!target || target.resourceKind !== 'msg') {
+        setFmgEntries(EMPTY_FMG_ENTRIES);
+        setFmgSourceHash(null);
+        setFmgLive(false);
+        return;
+      }
+      if (!bridge || typeof bridge.readFmgDocument !== 'function') {
         setFmgEntries(EMPTY_FMG_ENTRIES);
         setFmgSourceHash(null);
         setFmgLive(false);
@@ -932,16 +993,23 @@ export function App(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [bridge, resourceMode, selectedFile, visibleFiles]);
+  }, [bridge, selectedFile]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadMsb(): Promise<void> {
-      if (resourceMode !== 'map') return;
-      const target = selectedFile
-        ?? visibleFiles.find((file) => file.resourceKind === 'map')
-        ?? null;
-      if (!bridge || !target || typeof bridge.readMsbDocument !== 'function') {
+      // SHELL-09：只有用户显式选中的 map 资源才加载；语义领域无兜底列表。
+      const target = selectedFile;
+      if (!target || target.resourceKind !== 'map') {
+        setMsbParts(EMPTY_MSB_PARTS);
+        setMsbModels([]);
+        setMsbRegions([]);
+        setMsbEvents([]);
+        setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
+        setMsbLive(false);
+        return;
+      }
+      if (!bridge || typeof bridge.readMsbDocument !== 'function') {
         setMsbParts(EMPTY_MSB_PARTS);
         setMsbModels([]);
         setMsbRegions([]);
@@ -1049,16 +1117,20 @@ export function App(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [bridge, resourceMode, selectedFile, visibleFiles]);
+  }, [bridge, selectedFile]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadEmevd(): Promise<void> {
-      if (resourceMode !== 'event') return;
-      const target = selectedFile
-        ?? visibleFiles.find((file) => file.resourceKind === 'event')
-        ?? null;
-      if (!bridge || !target || typeof bridge.readEmevdDocument !== 'function') {
+      // SHELL-09：只有用户显式选中的 event 资源才加载；语义领域无兜底列表。
+      const target = selectedFile;
+      if (!target || target.resourceKind !== 'event') {
+        setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
+        setEmevdSourceHash(null);
+        setEmevdLive(false);
+        return;
+      }
+      if (!bridge || typeof bridge.readEmevdDocument !== 'function') {
         setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
         setEmevdSourceHash(null);
         setEmevdLive(false);
@@ -1126,7 +1198,7 @@ export function App(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [bridge, resourceMode, selectedFile, visibleFiles]);
+  }, [bridge, selectedFile]);
 
   async function refreshOperationHistory(): Promise<void> {
     if (!bridge) return;
@@ -1683,7 +1755,6 @@ export function App(): ReactElement {
       if (!confirmed) return;
     }
     setActiveDomain(domain);
-    setResourceMode(resourceModeForDomain(domain));
     setBnd4Forced(false);
     if (domain === 'project') {
       setSelectedFile(null);
@@ -1691,11 +1762,21 @@ export function App(): ReactElement {
       setStatus('项目概览');
       return;
     }
+    // SHELL-09：语义领域不再过滤物理文件（§4.1）；领域切换清掉上一份选中，
+    // 让领域占位/未来逻辑库成为该领域的默认视图（§18.13 Done：PARAM 入口
+    // 直接打开逻辑库）。Files 领域独占物理浏览。
+    setSelectedFile(null);
+    setPreview(null);
     setCenterView('resource');
-    const filtered = filterFilesForDomain(allFiles.length > 0 ? allFiles : files, domain, query);
-    setStatus(domain === 'gparam'
-      ? 'GPARAM 工作台尚未接入当前 Bridge 契约，未伪造可写入口。'
-      : `${domainLabel(domain)}：${filtered.length} 个资源`);
+    if (domain === 'files') {
+      setResourceMode('all');
+      setStatus('文件：物理浏览');
+      return;
+    }
+    const capability = domainSummaries.find((entry) => entry.domain === domain)?.capability ?? 'deferred';
+    setStatus(capability === 'read-ready'
+      ? `${domainLabel(domain)}：逻辑库工作域（等待成熟工作台接线）`
+      : `${domainLabel(domain)}：${capability === 'deferred' ? 'read contract 尚未接线' : '运行条件不满足'}`);
   }
 
   function openOperationsView(): void {
@@ -1714,8 +1795,8 @@ export function App(): ReactElement {
   }
 
   async function selectFile(file: RendererIndexedFile): Promise<void> {
-    setActiveDomain(domainForFile(file));
-    setResourceMode(resourceModeForDomain(domainForFile(file)));
+    // SHELL-09：打开文件不再把领域切到「文件所属领域」（§4.1 禁止按文件分类
+    // 驱动领域导航）；领域保持当前选择，编辑器由 selectEditor 唯一分派。
     setSelectedFile(file);
     setOpenTabs((tabs) =>
       tabs.some((tab) => tab.sourceUri === file.sourceUri) ? tabs : [...tabs, file]
@@ -2109,16 +2190,17 @@ export function App(): ReactElement {
     const result = await bridge.runAiTool('explain_event', { uri });
     setToolOutput(result);
   }
-  // 命令面板与顶部工作域栏共用 DOMAIN_NAV_ITEMS，不维护第二套 IA 标签。
+  // 命令面板与顶部工作域栏共用 domainSummaries（同一份 DomainSummary 数据源），
+  // 不维护第二套 IA 标签。
   const cmdkCommands: Array<{ id: string; icon: string; label: string; hint?: string; run: () => void }> = [
-    ...DOMAIN_NAV_ITEMS.map((item) => ({
-      id: `domain-${item.id}`,
+    ...domainSummaries.map((entry) => ({
+      id: `domain-${entry.domain}`,
       icon: '◧',
-      label: `切换到 ${item.label} 工作域`,
+      label: `切换到 ${entry.label} 工作域`,
       run: (): void => {
         setSidebarCollapsed(false);
         setSidebarView('explorer');
-        selectDomain(item.id);
+        selectDomain(entry.domain);
       }
     })),
     { id: 'open-bnd4', icon: '▤', label: '以 BND4 容器打开当前选择', run: openBnd4ForSelection },
@@ -2205,7 +2287,7 @@ export function App(): ReactElement {
 
       <DomainNavigationBar
         domain={activeDomain}
-        files={allFiles.length > 0 ? allFiles : files}
+        domains={domainSummaries}
         onSelect={selectDomain}
       />
 
@@ -2300,12 +2382,14 @@ export function App(): ReactElement {
           <section className={sidebarView === 'explorer' ? 'panel is-active' : 'panel'} data-panel-id="explorer" aria-label="资源浏览器">
             <div className="panel__header">
               <h2 className="panel__title">资源浏览器</h2>
-              {/* 超过一页时标题栏就要说明「显示的是一页」，否则 200 与 9111 长得一样。 */}
+              {/* SHELL-09：数量只在 Files 物理浏览内出现且带语义单位（§3.3）；
+                  语义领域不显示任何文件数。 */}
               <span className="panel__hint">
-                {domainLabel(activeDomain)} · {visibleFiles.length} 项
-                {visibleFiles.length > FILE_LIST_PAGE_SIZE
-                  ? ` · 本页 ${pagedFiles.length}`
-                  : ''}
+                {activeDomain === 'files'
+                  ? `${formatFilesCount(physicalBrowseFiles.length)}${physicalBrowseFiles.length > FILE_LIST_PAGE_SIZE ? ` · 本页 ${pagedFiles.length}` : ''}`
+                  : activeDomain === 'project'
+                    ? '项目概览'
+                    : `${domainLabel(activeDomain)} · 逻辑库`}
               </span>
             </div>
             <div className="panel__body panel__body--pad">
@@ -2358,57 +2442,81 @@ export function App(): ReactElement {
                   </span>
                 </div>
               </div>
-              <div className="search-box">
-                <input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="过滤路径 / 类型"
-                  aria-label="过滤资源列表"
-                />
-              </div>
-              <div className="file-list">
-                {pagedFiles.map((file) => (
-                  <button
-                    type="button"
-                    key={file.sourceUri}
-                    className={selectedFile?.sourceUri === file.sourceUri ? 'file-item selected' : 'file-item'}
-                    onClick={() => void selectFile(file)}
-                  >
-                    <span className="file-item__name">{file.relativePath}</span>
-                    <small className="file-item__meta">{file.resourceKind} | {file.formatLabel} | {(file.size / 1024).toFixed(1)} KB</small>
-                  </button>
-                ))}
-                {visibleFiles.length === 0 && (
-                  <p className="empty-hint">当前目录没有匹配资源。可切换到 all 或调整路径过滤。</p>
-                )}
-              </div>
-              {/* 分页导航：只在真的超过一页时出现，避免小工作区多一排无意义控件。 */}
-              {visibleFiles.length > FILE_LIST_PAGE_SIZE && (
-                <div className="row gap pager" data-testid="file-list-pager">
-                  <button
-                    type="button"
-                    className="btn btn--ghost btn--sm"
-                    disabled={clampedFilePage <= 0}
-                    onClick={() => setFilePage((page) => Math.max(0, page - 1))}
-                  >
-                    上一页
-                  </button>
-                  <span className="muted" data-testid="file-list-page-range">
-                    {formatPageRange({
-                      page: clampedFilePage,
-                      pageSize: FILE_LIST_PAGE_SIZE,
-                      total: visibleFiles.length,
-                      noun: '资源'
-                    })}
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn--ghost btn--sm"
-                    disabled={clampedFilePage >= filePageCount - 1}
-                    onClick={() => setFilePage((page) => Math.min(filePageCount - 1, page + 1))}
-                  >
-                    下一页
-                  </button>
+              {activeDomain === 'files' ? (
+                <>
+                  <div className="search-box">
+                    <input
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="过滤路径 / 类型"
+                      aria-label="过滤资源列表"
+                    />
+                  </div>
+                  {/* SHELL-09：物理 taxonomy 只出现在 Files 领域（§16 resourceFamilies
+                      从领域栏 production 依赖中移除，只允许 Files 高级过滤复用）。 */}
+                  <WorkspaceResourceBar
+                    mode={resourceMode}
+                    counts={workspace?.countsByKind ?? null}
+                    onSelect={setResourceMode}
+                  />
+                  <div className="file-list">
+                    {pagedFiles.map((file) => (
+                      <button
+                        type="button"
+                        key={file.sourceUri}
+                        className={selectedFile?.sourceUri === file.sourceUri ? 'file-item selected' : 'file-item'}
+                        onClick={() => void selectFile(file)}
+                      >
+                        <span className="file-item__name">{file.relativePath}</span>
+                        <small className="file-item__meta">{file.resourceKind} | {file.formatLabel} | {(file.size / 1024).toFixed(1)} KB</small>
+                      </button>
+                    ))}
+                    {physicalBrowseFiles.length === 0 && (
+                      <p className="empty-hint">当前目录没有匹配资源。可切换到 all 或调整路径过滤。</p>
+                    )}
+                  </div>
+                  {/* 分页导航：只在真的超过一页时出现，避免小工作区多一排无意义控件。 */}
+                  {physicalBrowseFiles.length > FILE_LIST_PAGE_SIZE && (
+                    <div className="row gap pager" data-testid="file-list-pager">
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        disabled={clampedFilePage <= 0}
+                        onClick={() => setFilePage((page) => Math.max(0, page - 1))}
+                      >
+                        上一页
+                      </button>
+                      <span className="muted" data-testid="file-list-page-range">
+                        {formatPageRange({
+                          page: clampedFilePage,
+                          pageSize: FILE_LIST_PAGE_SIZE,
+                          total: physicalBrowseFiles.length,
+                          noun: '资源'
+                        })}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        disabled={clampedFilePage >= filePageCount - 1}
+                        onClick={() => setFilePage((page) => Math.min(filePageCount - 1, page + 1))}
+                      >
+                        下一页
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="domain-browse-placeholder" data-testid="domain-browse-placeholder">
+                  <span className="domain-placeholder__eyebrow">DOMAIN / {domainLabel(activeDomain)}</span>
+                  <p>语义领域不渲染全局资源浏览器（§3.3）；物理浏览只在 Files 领域。</p>
+                  <p className="muted">
+                    {(() => {
+                      const capability = domainSummaries.find((entry) => entry.domain === activeDomain)?.capability;
+                      if (capability === 'read-ready') return 'read contract 已注册，等待成熟工作台接线（对应任务卡）。';
+                      if (capability === 'runtime-blocked') return 'read contract 已注册，但当前运行条件不满足（浏览器预览表面）。';
+                      return 'read contract 尚未接线；候选格式不能制造可操作领域（§3.2）。';
+                    })()}
+                  </p>
                 </div>
               )}
             </div>
@@ -2439,7 +2547,7 @@ export function App(): ReactElement {
                 {query.trim() === '' && (
                   <p className="empty-hint">输入关键字，按路径 / 类型检索工作区资源；回车调用资源搜索。</p>
                 )}
-                {query.trim() !== '' && visibleFiles.length === 0 && <p className="empty-hint">无匹配结果。</p>}
+                {query.trim() !== '' && searchHits.length === 0 && <p className="empty-hint">无匹配结果。</p>}
                 {query.trim() !== '' && searchTruncationNote && (
                   <p className="muted" data-testid="search-truncation">{searchTruncationNote}</p>
                 )}
@@ -2670,8 +2778,14 @@ export function App(): ReactElement {
               <span className="muted">可先使用 PARAM 工作域；GPARAM 接线需要独立的 native authority 与验证注册。</span>
             </section>
           )}
-          {activeEditor === 'empty' && (
-            activeDomain !== 'gparam' && <p className="muted">在左侧选择一个资源开始编辑。</p>
+          {activeEditor === 'empty' && activeDomain !== 'gparam' && (
+            activeDomain === 'files'
+              ? <p className="muted">在左侧选择一个文件开始编辑。</p>
+              : <section className="domain-placeholder" data-testid="domain-editor-placeholder" aria-label={`${domainLabel(activeDomain)} 工作域`}>
+                  <span className="domain-placeholder__eyebrow">DOMAIN / {domainLabel(activeDomain)}</span>
+                  <h2>{domainLabel(activeDomain)} 逻辑库工作域</h2>
+                  <p>对应成熟工作台由后续任务卡接线；当前领域不渲染物理文件浏览（§3.3）。</p>
+                </section>
           )}
           {/* Structured preview 与原生格式检查已移到本面板**末尾**并默认折叠
               （见下方 resource-evidence-details）。

@@ -264,7 +264,7 @@ kbd {
   height: 2px; border-radius: 1px; background: var(--ember);
 }
 .domain-tab__label { white-space: nowrap; }
-.domain-tab__count { color: var(--ink-3); font: 10px var(--font-mono); font-variant-numeric: tabular-nums; }
+/* SHELL-09 §3.3：领域栏不显示无单位文件数，count 样式已随实现删除 */
 
 /* browser-preview 表面降级提示 */
 .runtime-notice {
@@ -521,10 +521,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 }
 .editor-pane.is-active { display: flex; }
 .pane-content { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+/* SHELL-09 §6.1 full-bleed：编辑器贴合 client area，不再套 16px 四周留白；
+   内边距由各工作台自己管理（Smithbox 工作台一律 0 外距 + pane 内衬）。 */
 .viewer-content {
   flex: 1; min-height: 0; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 12px;
-  padding: 16px;
+  display: flex; flex-direction: column;
+  padding: 0;
 }
 
 .project-overview,
@@ -550,6 +552,17 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .project-overview__facts small { color: var(--ink-3); font-size: 10px; }
 .domain-placeholder { border-left-color: var(--warn); }
 .domain-placeholder .muted { display: block; margin-top: 12px; font-size: 11px; line-height: 1.6; }
+
+/* SHELL-09：语义领域在资源浏览器侧栏内的占位（不渲染物理文件列表） */
+.domain-browse-placeholder {
+  padding: 18px 16px; border-left: 2px solid var(--warn);
+  background: var(--forge-1); color: var(--ink-2); font-size: 12px; line-height: 1.7;
+}
+.domain-browse-placeholder .domain-placeholder__eyebrow {
+  color: var(--ember-text); font: 10px var(--font-mono); letter-spacing: .12em;
+}
+.domain-browse-placeholder p { margin-top: 8px; }
+.domain-browse-placeholder .muted { font-size: 11px; color: var(--ink-3); }
 
 .event-source-workbench {
   display: flex; flex-direction: column; min-height: 0; height: 100%;

@@ -9,9 +9,11 @@ export interface WorkspaceResourceBarProps {
 }
 
 /**
- * 顶部资源目录栏（titlebar 下方、shell 上方）：单行紧凑标签，
- * 窄窗口水平滚动；当前项余火色下划线。与命令面板共用
- * RESOURCE_FAMILIES 配置源。
+ * SHELL-09：Files 领域内嵌的物理目录过滤条。
+ *
+ * §16 迁移表：本组件已从顶部全局 shell 断开（顶部由 DomainNavigationBar
+ * 取代）；只在 Files 领域作为物理浏览的高级过滤条出现，与命令面板共用
+ * RESOURCE_FAMILIES 配置源。语义领域不得渲染它。
  */
 export function WorkspaceResourceBar({ mode, counts, onSelect }: WorkspaceResourceBarProps): ReactElement {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -33,8 +35,8 @@ export function WorkspaceResourceBar({ mode, counts, onSelect }: WorkspaceResour
   }
 
   return (
-    <nav className="resource-bar" aria-label="资源目录">
-      <div className="resource-bar__tabs" role="tablist" aria-label="工作区顶层目录" data-testid="resource-bar">
+    <nav className="resource-bar" aria-label="物理目录过滤">
+      <div className="resource-bar__tabs" role="tablist" aria-label="物理目录" data-testid="resource-bar">
         {RESOURCE_FAMILIES.map((family, index) => {
           const selected = family.id === mode;
           const count = family.id === 'all'

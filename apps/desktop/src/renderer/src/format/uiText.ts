@@ -64,6 +64,16 @@ export function shortenPath(path: string): string {
   return `…/${parts.slice(-3).join('/')}`;
 }
 
+/**
+ * Files 领域物理浏览的数量文案（§3.3：数量带语义单位，顶部领域栏不显示）。
+ *
+ * 领域栏禁止无单位文件数（PARAM 36 / 容器 221 那类）；Files 领域内部的
+ * 物理浏览是数量唯一合法出现的场合，且必须带单位。
+ */
+export function formatFilesCount(count: number): string {
+  return `文件 ${count} 个`;
+}
+
 
 /** 人类可读字节数。整数 KiB/MiB 不带小数，避免「1.0 MiB」这种噪声。 */
 export function formatBytes(bytes: number): string {

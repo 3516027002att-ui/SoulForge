@@ -75,7 +75,7 @@ test('空工作区：无演示数据，变更队列为空态', async () => {
   await app.close();
 });
 
-test('顶部工作域栏：逻辑 IA、固定顺序与工作域过滤', async () => {
+test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09）', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
@@ -88,21 +88,36 @@ test('顶部工作域栏：逻辑 IA、固定顺序与工作域过滤', async ()
     /动画/, /模型/, /纹理/, /材质/, /VFX/, /容器/, /文件/
   ]);
 
+  // §18.13 Done：顶部无「PARAM 36」之类的物理计数（§3.3 领域栏不显示无单位文件数）。
+  await expect(window.locator('.domain-tab__count')).toHaveCount(0);
+  for (const tab of await tabs.all()) {
+    const text = await tab.innerText();
+    expect(text).not.toMatch(/\d/, `领域 tab 不应出现数字：${text}`);
+  }
+
   // 页面不把物理目录名当成顶层工作域。
   const bodyText = await window.locator('body').innerText();
   expect(bodyText).not.toContain('SFX 特效');
   expect(bodyText).not.toContain('角色资源');
 
-  // 文件工作域保留底层资源，但不把 resourceKind 变成顶层按钮。
+  // 文件工作域独占物理浏览，但不把 resourceKind 变成顶层按钮。
   await window.locator('[data-domain="files"]').click();
   const files = window.locator('.file-item');
   await expect(files.filter({ hasText: 'sfx/f0000.sfxbnd.dcx' })).toHaveCount(1);
   await expect(window.locator('.status-bar')).toContainText('文件');
 
-  // 点击事件工作域：只显示事件资源。
+  // §18.13 Steps：语义领域不渲染全局 resource browser——事件领域显示占位而非文件列表。
   await window.locator('[data-domain="event"]').click();
-  await expect(window.locator('.file-item')).toHaveCount(1);
-  await expect(window.locator('.file-item').first()).toContainText('event/common.emevd');
+  await expect(window.locator('.file-item')).toHaveCount(0);
+  await expect(window.locator('[data-testid="domain-browse-placeholder"]')).toBeVisible();
+  await expect(window.locator('[data-testid="domain-browse-placeholder"]')).toContainText('事件');
+
+  // §18.13 Done：PARAM 入口直接打开逻辑库（占位工作域），不显示物理文件列表。
+  await window.locator('[data-domain="param"]').click();
+  await expect(window.locator('.file-item')).toHaveCount(0);
+  await expect(window.locator('[data-testid="domain-editor-placeholder"]')).toBeVisible();
+  await expect(window.locator('[data-testid="domain-editor-placeholder"]')).toContainText('PARAM');
+  expect(await window.locator('.domain-tab__count').count()).toBe(0);
 
   await window.screenshot({ path: 'test-results/04-resource-bar.png' });
   await app.close();
@@ -127,13 +142,12 @@ test('BND 外形文件自动进入容器工作台；命令面板可强制以 BND
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 选择真实 BND 外形文件 → 自动进入容器工作台。
-  await window.locator('[data-domain="container"]').click();
+  // SHELL-09：物理浏览只在 Files 领域；容器领域不再有文件列表。
+  await window.locator('[data-domain="files"]').click();
   await window.locator('.file-item', { hasText: 'chr/sample.chrbnd.dcx' }).click();
   await expect(window.getByRole('region', { name: 'BND4 容器工作台' })).toBeVisible();
 
   // 非容器文件 + 命令面板「以 BND4 容器打开当前选择」。
-  await window.locator('[data-domain="files"]').click();
   await window.locator('.file-item', { hasText: 'other/notes.txt' }).click();
   await expect(window.getByRole('region', { name: 'BND4 容器工作台' })).toHaveCount(0);
   await window.keyboard.press('Control+k');
@@ -149,7 +163,8 @@ test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', asy
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-domain="text"]').click();
+  // SHELL-09：文本领域不渲染物理浏览器；msg 文件从 Files 领域选择。
+  await window.locator('[data-domain="files"]').click();
   await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
 
   await window.getByRole('row', { name: /伤药葫芦/ }).click();
@@ -254,7 +269,7 @@ test('纯键盘可完成 FMG 编辑：行选择不再阻断编辑态', async () 
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-domain="text"]').click();
+  await window.locator('[data-domain="files"]').click();
   await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
 
   const row = window.getByRole('row', { name: /伤药葫芦/ });
@@ -310,7 +325,7 @@ test('写入失败：保留诊断，状态为 failed，可重新批准', async (
   const { app, window } = await launchApp({ SF_TEST_APPLY_FAIL: '1' });
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-domain="text"]').click();
+  await window.locator('[data-domain="files"]').click();
   await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
   await window.getByRole('row', { name: /返回骨片/ }).click();
   const editor = window.locator('label', { hasText: '编辑 ID 101' }).locator('textarea');
@@ -673,7 +688,8 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
   await expect(range).toContainText('第 1/3 页');
 
   // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 468 长得一样。
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('468 项');
+  // SHELL-09 §3.3：数量带语义单位（文件 N 个）。
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 468 个');
   await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
 
   // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。

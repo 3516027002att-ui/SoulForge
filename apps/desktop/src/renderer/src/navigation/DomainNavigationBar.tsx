@@ -1,28 +1,24 @@
 import { useRef, type KeyboardEvent, type ReactElement } from 'react';
-import type { RendererIndexedFile } from '../../../main/rendererDto.js';
-import {
-  DOMAIN_NAV_ITEMS,
-  domainLabel,
-  filterFilesForDomain,
-  type EditorDomainId
-} from './domainNavigation.js';
+import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
 
 export interface DomainNavigationBarProps {
   domain: EditorDomainId;
-  files: RendererIndexedFile[];
+  /** §4.1：只接收 DomainSummary[]，不接收 files；顶部无物理计数（§3.3）。 */
+  domains: readonly DomainSummary[];
   onSelect: (domain: EditorDomainId) => void;
 }
 
-/** 顶层工作域导航；不把 event/map/param 等物理目录直接暴露成产品 IA。 */
-export function DomainNavigationBar({ domain, files, onSelect }: DomainNavigationBarProps): ReactElement {
+/** 顶层工作域导航；只消费 catalog 生成的领域摘要，不接触任何物理文件数据。 */
+export function DomainNavigationBar({ domain, domains, onSelect }: DomainNavigationBarProps): ReactElement {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const visible = domains.filter((entry) => entry.visibility !== 'hidden');
 
   function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number): void {
     let next: number | null = null;
-    if (event.key === 'ArrowRight') next = (index + 1) % DOMAIN_NAV_ITEMS.length;
-    if (event.key === 'ArrowLeft') next = (index - 1 + DOMAIN_NAV_ITEMS.length) % DOMAIN_NAV_ITEMS.length;
+    if (event.key === 'ArrowRight') next = (index + 1) % visible.length;
+    if (event.key === 'ArrowLeft') next = (index - 1 + visible.length) % visible.length;
     if (event.key === 'Home') next = 0;
-    if (event.key === 'End') next = DOMAIN_NAV_ITEMS.length - 1;
+    if (event.key === 'End') next = visible.length - 1;
     if (next === null) return;
     event.preventDefault();
     tabRefs.current[next]?.focus();
@@ -31,27 +27,26 @@ export function DomainNavigationBar({ domain, files, onSelect }: DomainNavigatio
   return (
     <nav className="domain-bar" aria-label="工作域导航">
       <div className="domain-bar__tabs" role="tablist" aria-label="工作区工作域" data-testid="domain-bar">
-        {DOMAIN_NAV_ITEMS.map((item, index) => {
-          const selected = item.id === domain;
-          const count = item.id === 'project' || item.id === 'gparam'
-            ? null
-            : filterFilesForDomain(files, item.id, '').length;
+        {visible.map((entry, index) => {
+          const selected = entry.domain === domain;
+          const disabled = entry.visibility === 'disabled';
+          const description = capabilityDescription(entry);
           return (
             <button
-              key={item.id}
+              key={entry.domain}
               ref={(element) => { tabRefs.current[index] = element; }}
               type="button"
               role="tab"
               aria-selected={selected}
               tabIndex={selected ? 0 : -1}
+              disabled={disabled}
               className={selected ? 'domain-tab is-selected' : 'domain-tab'}
-              data-domain={item.id}
-              title={item.description}
-              onClick={() => onSelect(item.id)}
+              data-domain={entry.domain}
+              title={description}
+              onClick={() => onSelect(entry.domain)}
               onKeyDown={(event) => handleKeyDown(event, index)}
             >
-              <span className="domain-tab__label">{domainLabel(item.id)}</span>
-              {count !== null && <span className="domain-tab__count">{count}</span>}
+              <span className="domain-tab__label">{entry.label}</span>
             </button>
           );
         })}
@@ -60,3 +55,9 @@ export function DomainNavigationBar({ domain, files, onSelect }: DomainNavigatio
   );
 }
 
+/** §3.2：入口可操作性的 title 说明；不显示任何无单位文件数（§3.3）。 */
+function capabilityDescription(entry: DomainSummary): string {
+  if (entry.capability === 'deferred') return `${entry.label}：read contract 尚未接线`;
+  if (entry.capability === 'runtime-blocked') return `${entry.label}：read contract 已注册，但当前运行条件不满足`;
+  return `${entry.label}：${entry.defaultTarget ? '可直接打开' : '逻辑库工作域'}`;
+}

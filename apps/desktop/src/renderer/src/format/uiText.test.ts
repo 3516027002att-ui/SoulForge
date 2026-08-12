@@ -12,7 +12,7 @@
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { formatBytes, formatPreviewTruncation } from './uiText.js';
+import { formatBytes, formatFilesCount, formatPreviewTruncation } from './uiText.js';
 
 describe('formatBytes', () => {
   it('小于 1 KiB 用字节', () => {
@@ -81,5 +81,12 @@ describe('formatPreviewTruncation', () => {
     // 编辑截断内容，用户需要知道「看不到的部分」与「不能编辑」之间的因果。
     const text = formatPreviewTruncation(64 * 1024, 8 * 1024 * 1024);
     assert.ok(text.includes('未读'), `须说明未读部分的影响: ${text}`);
+  });
+});
+
+describe('formatFilesCount（§3.3：数量只在 Files 物理浏览内显示且带语义单位）', () => {
+  it('返回带单位的文案', () => {
+    assert.equal(formatFilesCount(36), '文件 36 个');
+    assert.equal(formatFilesCount(0), '文件 0 个');
   });
 });

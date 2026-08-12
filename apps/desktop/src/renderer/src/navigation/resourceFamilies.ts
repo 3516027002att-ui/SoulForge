@@ -1,6 +1,12 @@
 import { KNOWN_RESOURCE_DIRS, type ResourceKind } from '@soulforge/shared';
 
-/** 资源目录模式：'all' 是功能入口，其余为工作区顶层目录原名。 */
+/**
+ * SHELL-09：物理资源 taxonomy 只服务 Files 领域的物理浏览。
+ *
+ * §16 迁移表：本文件从领域栏 production 依赖中移除——语义领域（PARAM/Text/
+ * Event/...）不再按物理目录过滤；只有 Files 领域复用这套物理 taxonomy 做
+ * 高级过滤。domainNavigation 不得引用本模块（domainNavigation.test.ts 对账）。
+ */
 export type ResourceMode = 'all' | ResourceKind;
 
 export interface ResourceFamily {
@@ -10,7 +16,7 @@ export interface ResourceFamily {
 }
 
 /**
- * 固定显示顺序：顶部资源栏与命令面板共用的唯一配置源。
+ * 固定显示顺序：Files 领域物理过滤条与命令面板共用的唯一配置源。
  * 'all' 之后必须与 core KNOWN_RESOURCE_DIRS 一一对应，
  * renderer 不复制路径分类算法。
  */

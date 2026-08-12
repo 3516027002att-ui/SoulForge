@@ -219,9 +219,11 @@ describe('资源浏览器分页必须真的接进 App.tsx', () => {
   it('页码越界被夹紧，不直接用裸 filePage 取切片', () => {
     const text = source();
     assert.match(text, /clampedFilePage/, '必须存在夹紧后的页码');
+    // SHELL-09 把 visibleFiles 改名 physicalBrowseFiles（Files 独占物理浏览）；
+    // 断言的是「切片用夹紧页码」这个形态，不是具体变量名。
     assert.match(
       text,
-      /pagedFiles\s*=\s*useMemo\(\s*\(\)\s*=>\s*visibleFiles\.slice\(\s*clampedFilePage/,
+      /pagedFiles\s*=\s*useMemo\(\s*\(\)\s*=>\s*\w+\.slice\(\s*clampedFilePage/,
       '切片必须用夹紧后的页码：裸页码越界会渲染空列表，与「没有资源」无法区分'
     );
   });
