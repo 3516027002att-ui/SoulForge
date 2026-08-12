@@ -42,6 +42,7 @@ import {
   readFmgDocumentViaBridge,
   readParamDocumentViaBridge,
   readMsbDocumentViaBridge,
+  isParamBackupPath,
   openResourcePreview,
   openWorkspaceSession,
   inspectContainerTree,
@@ -2928,6 +2929,29 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    // PARAM-10A「backup 不读」：backup/previous 只经 History & Recovery 显式
+    // 只读打开（ROUTE-06）。路由层挡住普通打开路径还不够——绕过路由直接
+    // invoke 本通道的调用方也要被同一把锁拒绝，否则 backup 会以普通 PARAM
+    // 文档的身份出现在编辑器里。
+    if (isParamBackupPath(file.relativePath)) {
+      return {
+        ok: false,
+        sourceUri,
+        relativePath: file.relativePath,
+        fieldDefs: null,
+        fieldEnums: null,
+        fieldDefsDiagnostic: null,
+        fieldDefsOrigin: null,
+        fieldDefsTrusted: false,
+        rows: [],
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'BACKUP_READ_FORBIDDEN',
+          message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能作为 PARAM 文档读取。',
+          sourceUri
+        }]
+      };
+    }
     const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) {
       return sanitizeRendererValue({
@@ -3084,7 +3108,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       query?: string
     ) => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
-      const failure = (message: string) => ({
+      const failure = (message: string, code = 'RESOURCE_NOT_INDEXED') => ({
         ok: false,
         sourceUri,
         sourceHash: null,
@@ -3096,13 +3120,18 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         rowsTruncated: false,
         diagnostics: [{
           severity: 'error' as const,
-          code: 'RESOURCE_NOT_INDEXED',
+          code,
           message,
           sourceUri
         }]
       });
       if (!file) {
         return failure('资源未索引，无法分页读取 PARAM。');
+      }
+      // PARAM-10A「backup 不读」：与 readParamDocument 同一把锁。backup 只经
+      // History & Recovery 只读打开（ROUTE-06），分页通道不提供绕过出口。
+      if (isParamBackupPath(file.relativePath)) {
+        return failure('backup 文件只能在 History & Recovery 中以只读方式查看，不能分页读取 PARAM。', 'BACKUP_READ_FORBIDDEN');
       }
       let cached = paramPageCache.get(sourceUri);
       if (!cached) {

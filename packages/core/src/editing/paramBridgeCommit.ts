@@ -5,6 +5,18 @@
 import { BRIDGE_STAGING_WRITE_VERIFIED_CODES } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 
+/**
+ * backup/previous 路径判定（ROUTE-06：`.bak/.prev` History-only）。
+ *
+ * 与 artifact matcher 的判定语义一致：大小写不敏感后缀。IPC 层读取 PARAM 前
+ * 先拒绝，不依赖路由层单点防线——绕过路由直接 invoke readParamDocument 的
+ * 路径（调试工具、遗留调用方）也要被同一把锁挡住。
+ */
+export function isParamBackupPath(relativePath: string): boolean {
+  const lower = relativePath.replaceAll('\\', '/').toLowerCase();
+  return lower.endsWith('.bak') || lower.endsWith('.prev');
+}
+
 export type ParamBridgeMutation =
   | { kind: 'upsert'; id: number; dataBase64: string }
   | { kind: 'delete'; id: number };
