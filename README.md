@@ -138,6 +138,7 @@ SoulForge 按 [Apache License 2.0](LICENSE) 授权。归属与第三方声明见
 
 SoulForge 不附带任何游戏资产、专有压缩库或 FromSoftware 代码。
 
-想说的话：
+## 想说的话
+
 这个ui太丑了，有没有大手子帮我做一版好看的
 This UI is hideous. Is there an expert who can help me create a better-looking version?
