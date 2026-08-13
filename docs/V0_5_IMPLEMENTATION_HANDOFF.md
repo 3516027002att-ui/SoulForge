@@ -3927,11 +3927,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
       "scope": "MATBIN read/write(MATERIAL-53D/53E):Mod Engine 2 专用序列化格式,非 FromSoftware 原生;Sekiro 原生与测试 Mod 语料 0 个 .matbin",
       "decisionStatus": "user-approved",
       "proposedSupport": "deferred",
-      "operations": [
-        "leave-matbin-files-route",
-        "honest-skip-matbin-native-corpus",
-        "keep-suffix-candidate-files-only"
-      ],
+      "operations": [],
       "unsupportedOperations": [
         "build-matbin-native-parser",
         "claim-matbin-read-authority",
