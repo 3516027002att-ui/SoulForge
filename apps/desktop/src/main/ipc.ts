@@ -102,10 +102,17 @@ import {
   PARAM_PAGE_SIZE,
   SCRIPT_PAGE_SIZE,
   EDITOR_DOCUMENT_IPC_CHANNELS,
+  agentReferenceExpiresAt,
+  agentSelectionSummary,
+  decodeEditorSelectionContext,
   decodeOpenEditorDocumentRequest,
   decodePageEditorDocumentRequest,
   decodeReadEditorContentRequest,
   decodeApplyEditorMutationRequest,
+  mintAgentReferenceToken,
+  selectionRendererSafetyIssues,
+  type AgentResourceReference,
+  type EditorSelectionContext,
   type FmgEntryPage,
   type ScriptEntryPlaintextView
 } from '@soulforge/shared';
@@ -956,8 +963,26 @@ export type AiAgentSessionLifecycleEvent =
 /** Envelope pushed on the 'ai:agent:event' channel. */
 export interface AiAgentEventEnvelope {
   sessionId: string;
+  /**
+   * §12.11 严格递增 seq：同一 session 的推送必须严格递增。main 侧按 session 单调
+   * 盖章，renderer 侧对重复 / 倒序 seq 丢弃并记诊断（见 shared agent-ui 的
+   * applyAgentStreamSeq / reduceAgentStreamToMessages）。
+   */
+  seq: number;
   event: AgentEvent | AiAgentSessionLifecycleEvent;
 }
+
+/** §12.11 资源引用 token 校验结果（agent 通道专用；不是 param/format 读取）。 */
+export type AgentResourceReferenceCreateIpcResult =
+  | { ok: true; reference: AgentResourceReference }
+  | {
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+        diagnostics?: readonly { code: string; path: string; message: string }[];
+      };
+    };
 
 export interface DirectorySelection {
   selectionId: string;
@@ -5901,6 +5926,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   const agentSessionsBaseDir = join(app.getPath('userData'), 'agent');
   const activeAgentRuns = new Map<string, AbortController>();
+  /**
+   * main 签发的 opaque 资源引用 token 注册表（AGENT-60C）。key = token 串，
+   * value = 签发作用域（webContents.id）+ tokenId。renderer 提交资源引用时，main
+   * 先查本表再比对 sender —— 跨 sender token 在本层被拒，不依赖 renderer 自觉。
+   */
+  const agentReferenceRegistry = new Map<string, { ownerId: string; tokenId: string }>();
 
   /**
    * Approval requests awaiting a renderer answer, keyed `sessionId:callId`.
@@ -5950,12 +5981,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   };
 
+  /** §12.11 严格 seq：同一 session 的推送 seq 单调递增（renderer 侧丢弃重复/倒序）。 */
+  const agentSessionSeqs = new Map<string, number>();
   const sendAgentEvent = (
     sessionId: string,
     event: AgentEvent | AiAgentSessionLifecycleEvent
   ): void => {
     if (webContents.isDestroyed()) return;
-    const envelope: AiAgentEventEnvelope = { sessionId, event };
+    const seq = (agentSessionSeqs.get(sessionId) ?? 0) + 1;
+    agentSessionSeqs.set(sessionId, seq);
+    const envelope: AiAgentEventEnvelope = { sessionId, seq, event };
     webContents.send('ai:agent:event', sanitizeRendererValue(envelope));
   };
 
@@ -6333,4 +6368,66 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       messagesPage: loaded.messages.slice(-20)
     };
   });
+
+  /**
+   * 资源引用通道（AGENT-60C）。
+   *
+   * 把 renderer 的 §12.8 语义选区换成 main 签发的 opaque token（§12.11
+   * AgentResourceReference）。约束：
+   *  - 必须先分析工作区（root 校验）；
+   *  - 选区经 decodeEditorSelectionContext + renderer 安全白名单校验，绝对路径 /
+   *    raw parser / Hex dump 直接拒绝（AGENT_SELECTION_UNSAFE）；
+   *  - token 只携带 tokenId / sender 作用域 / TTL / 逻辑元数据，不携带任何路径；
+   *    提交时跨 sender 使用被 validateAgentReferenceScope 拒绝。
+   * 这是 agent 通道，不是 param/format 读取，**不得**返回 BACKUP_READ_FORBIDDEN。
+   */
+  handle(
+    'agent.resourceReference.create',
+    async (event, request: unknown): Promise<AgentResourceReferenceCreateIpcResult> => {
+      if (!activeIndex) {
+        return { ok: false, error: { code: 'WORKSPACE_NOT_ANALYZED', message: '请先分析工作区再引用资源。' } };
+      }
+      const selectionValue = typeof request === 'object' && request !== null
+        ? (request as Record<string, unknown>).selection
+        : undefined;
+      let selection: EditorSelectionContext;
+      try {
+        selection = decodeEditorSelectionContext(selectionValue, 'ResourceReferenceRequest.selection');
+      } catch (error) {
+        return {
+          ok: false,
+          error: { code: 'INVALID_INPUT', message: error instanceof Error ? error.message : '选区格式非法。' }
+        };
+      }
+      const issues = selectionRendererSafetyIssues(selection);
+      if (issues.length > 0) {
+        return {
+          ok: false,
+          error: {
+            code: 'AGENT_SELECTION_UNSAFE',
+            message: issues.map((issue) => issue.message).join('；'),
+            diagnostics: issues
+          }
+        };
+      }
+      const tokenId = randomUUID();
+      const ownerId = String(event.sender.id);
+      const label = agentSelectionSummary(selection);
+      const token = mintAgentReferenceToken({
+        kind: 'resource',
+        tokenId,
+        ownerId,
+        domain: selection.domain,
+        label
+      });
+      const reference: AgentResourceReference = {
+        token,
+        domain: selection.domain,
+        label,
+        expiresAt: agentReferenceExpiresAt()
+      };
+      agentReferenceRegistry.set(token, { ownerId, tokenId });
+      return { ok: true, reference };
+    }
+  );
 }

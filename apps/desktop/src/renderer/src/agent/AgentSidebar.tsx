@@ -13,6 +13,11 @@ import type {
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
+import type {
+  AgentMessageDto,
+  AgentResourceReference,
+  EditorSelectionContext
+} from '@soulforge/shared';
 import { ModelServiceSettingsPanel } from '../editors/ModelServiceSettingsPanel.js';
 import {
   FOCUSABLE_SELECTOR,
@@ -28,6 +33,8 @@ import { AgentDockResizer } from './AgentDockResizer.js';
 import { AgentDockHeader } from './AgentDockHeader.js';
 import { AgentConversationViewport } from './AgentConversationViewport.js';
 import { AgentComposer, type AgentInteractionMode } from './AgentComposer.js';
+import { AgentContextPicker } from './AgentContextPicker.js';
+import { AgentResourceReferencePicker } from './AgentResourceReferencePicker.js';
 
 /** 交互模式类型由 AgentComposer（→ AgentParticipantBar）承载，这里仅为既有引用方保留导出。 */
 export type { AgentInteractionMode } from './AgentComposer.js';
@@ -53,6 +60,23 @@ export interface AgentSidebarProps {
   prompt: string;
   contextLabel: string;
   selectedFilePath: string | null;
+  /**
+   * §12.8 当前编辑器语义选区（发送时冻结快照，切换编辑器不改变已发送目标）。
+   * 缺省时由 selectedFilePath/contextLabel 投影一个 'files' 域选区作为过渡。
+   */
+  selection?: EditorSelectionContext | null;
+  /** §12.11 已装配消息流（bounded pages）；非空时视口渲染 AgentMessageList。 */
+  messages?: readonly AgentMessageDto[];
+  /** 消息流「加载更早消息」的真实回调（透传给 AgentMessageList）。 */
+  onLoadOlderMessages?: () => void;
+  /** main 已签发的 opaque 资源引用。 */
+  resources?: readonly AgentResourceReference[];
+  /** 把当前语义选区作为资源引用加入（main 侧签发 opaque token）。 */
+  onCreateResource?: (selection: EditorSelectionContext) => void;
+  /** 移除一条资源引用。 */
+  onRemoveResource?: (token: string) => void;
+  /** 清除当前 Agent 上下文。 */
+  onClearContext?: () => void;
   tools: ToolDescriptor[];
   toolOutput: ToolResult | null;
   task: Omit<AgentTaskPanelProps, 'tools' | 'permissionLockReason'>;
@@ -87,6 +111,31 @@ function isTaskSurfaceVisible(
 }
 
 /**
+ * 60C 过渡投影：AgentSidebar 未收到 §12.8 语义选区时，从旧 production props
+ * （selectedFilePath/contextLabel）投影一个 'files' 域选区，保证新上下文组件
+ * 与旧 composer chip 展示一致。相对路径不构成路径泄漏（白名单只拒绝对路径）。
+ */
+function legacySelectionFromProps(
+  selectedFilePath: string | null,
+  _contextLabel: string
+): EditorSelectionContext | null {
+  if (selectedFilePath === null) return null;
+  return {
+    domain: 'files',
+    libraryId: null,
+    bankId: null,
+    documentId: selectedFilePath,
+    paramTableId: null,
+    rowId: null,
+    fieldId: null,
+    fmgEntryId: null,
+    eventId: null,
+    cursor: null,
+    revision: null
+  };
+}
+
+/**
  * Agent 固定右 dock。
  *
  * 这里保留主进程任务面板的受控状态与审批入口，但把旧的“工具库存 / 示例教程 /
@@ -113,6 +162,13 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     prompt,
     contextLabel,
     selectedFilePath,
+    selection = null,
+    messages = [],
+    onLoadOlderMessages,
+    resources = [],
+    onCreateResource,
+    onRemoveResource,
+    onClearContext,
     tools,
     toolOutput,
     task,
@@ -130,6 +186,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     onRunToolSearch,
     onExplainEvent
   } = props;
+  const effectiveSelection = selection ?? legacySelectionFromProps(selectedFilePath, contextLabel);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const drawerRef = useRef<HTMLDivElement>(null);
@@ -221,7 +278,11 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
         onToggleExpand={onToggleExpand ?? (() => undefined)}
         onClose={onClose}
       />
-      <AgentConversationViewport idle={emptyWelcome}>
+      <AgentConversationViewport
+        idle={emptyWelcome}
+        messages={messages}
+        {...(onLoadOlderMessages !== undefined ? { onLoadOlder: onLoadOlderMessages } : {})}
+      >
         {goal !== null && (
           <article className="agent-message agent-message--user">
             <div className="agent-message__meta">你</div>
@@ -250,6 +311,20 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
           <AgentTaskPanel {...task} tools={tools} permissionLockReason={permissionLockReason} />
         )}
       </AgentConversationViewport>
+
+      {/* §12.10 组件树：上下文选择 + 资源引用选择（opaque token，不泄漏绝对路径）。 */}
+      <div className="agent-composer-context" data-testid="agent-composer-context">
+        <AgentContextPicker
+          selection={effectiveSelection}
+          {...(onClearContext !== undefined ? { onClear: onClearContext } : {})}
+        />
+        <AgentResourceReferencePicker
+          resources={resources}
+          selection={effectiveSelection}
+          {...(onCreateResource !== undefined ? { onCreate: onCreateResource } : {})}
+          {...(onRemoveResource !== undefined ? { onRemove: onRemoveResource } : {})}
+        />
+      </div>
 
       <AgentComposer
         prompt={prompt}

@@ -6,6 +6,7 @@ import type {
   AiAgentRunRequest,
   AiAgentSessionListIpcResult,
   AiAgentSessionLoadIpcResult,
+  AgentResourceReferenceCreateIpcResult,
   AnalyzeWorkspaceSummary,
   DirectorySelection,
   OpenWorkspaceScanOptions,
@@ -27,6 +28,7 @@ import type {
   ToolResult
 } from '@soulforge/core';
 import type {
+  AgentResourceReference,
   ApplyEditorMutationRequest,
   ApplyEditorMutationValue,
   Diagnostic,
@@ -34,6 +36,7 @@ import type {
   EditorDocumentPageValue,
   EditorDocumentResult,
   EditorPageQuery,
+  EditorSelectionContext,
   FmgEntryPage,
   OpenEditorDocumentRequest,
   OpenEditorDocumentValue,
@@ -582,6 +585,15 @@ const api = {
     ipcRenderer.invoke('ai.agent.sessions'),
   loadAiAgentSession: (sessionPath: string): Promise<AiAgentSessionLoadIpcResult> =>
     ipcRenderer.invoke('ai.agent.session.load', sessionPath),
+  /**
+   * 资源引用通道（AGENT-60C）：把 renderer 的 §12.8 语义选区换成 main 签发的
+   * opaque token。main 先做 root 校验与安全白名单（绝对路径 / raw parser / Hex
+   * dump 拒绝），token 不携带任何路径，跨 sender 提交在 main 侧被拒。
+   */
+  createAgentResourceReference: (
+    selection: EditorSelectionContext
+  ): Promise<AgentResourceReferenceCreateIpcResult> =>
+    ipcRenderer.invoke('agent.resourceReference.create', { selection }),
   onAiAgentEvent: (callback: (envelope: AiAgentEventEnvelope) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, envelope: AiAgentEventEnvelope): void => {
       callback(envelope);

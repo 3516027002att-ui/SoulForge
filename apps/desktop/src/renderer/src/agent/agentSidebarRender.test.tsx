@@ -25,6 +25,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
+import type { AgentMessageDto, AgentResourceReference, EditorSelectionContext } from '@soulforge/shared';
 import { AgentSidebar, type AgentSidebarProps } from './AgentSidebar.js';
 import { INITIAL_AGENT_TASK_STATE } from './agentTaskState.js';
 import {
@@ -368,6 +369,104 @@ describe('§12.7 绝对禁止语音能力', () => {
     for (const needle of FORBIDDEN_TOKENS) {
       assert.ok(!source.includes(needle), `agent 生产源码不应包含 ${needle}`);
     }
+  });
+});
+
+describe('§12.8/§12.11 上下文、资源引用与消息流（AGENT-60C）', () => {
+  function selection0(domain: EditorSelectionContext['domain']): EditorSelectionContext {
+    return {
+      domain,
+      libraryId: null,
+      bankId: null,
+      documentId: null,
+      paramTableId: null,
+      rowId: null,
+      fieldId: null,
+      fmgEntryId: null,
+      eventId: null,
+      cursor: null,
+      revision: null
+    };
+  }
+
+  it('绝对路径选区回退空态，不进入 DOM', () => {
+    const leaking = {
+      ...selection0('param'),
+      documentId: 'D:\\mystream\\Sekiro\\param\\gameparam.parambnd.dcx'
+    };
+    const html = render({ selection: leaking });
+    assert.ok(!html.includes('D:\\mystream'), 'DOM 不应包含绝对路径');
+    assert.ok(!html.includes('gameparam.parambnd.dcx'), '泄漏的 documentId 不应进入 DOM');
+    assert.match(html, /未选择逻辑资源/, '不合格选区应回退空态');
+  });
+
+  it('hex dump / raw parser 选区不进入 DOM', () => {
+    const hex = { ...selection0('param'), documentId: '40 00 00 00 2C 01 00 00 00 00 00 00' };
+    const html = render({ selection: hex });
+    assert.ok(!html.includes('40 00 00 00'), 'hex dump 不应进入 DOM');
+    assert.match(html, /未选择逻辑资源/);
+  });
+
+  it('安全选区以 opaque 摘要进入 DOM', () => {
+    const safe = { ...selection0('param'), documentId: 'm12b/param/gameparam.parambnd.dcx' };
+    const html = render({ selection: safe });
+    assert.match(html, /param · m12b\/param\/gameparam\.parambnd\.dcx/);
+    assert.match(html, /data-testid="agent-context-picker"/);
+  });
+
+  it('资源引用只显示 opaque label，token 不进入 DOM', () => {
+    const resources: AgentResourceReference[] = [{
+      token: 'agent-ref:opaque-token-value',
+      domain: 'param',
+      label: 'PARAM · 文档',
+      expiresAt: '2026-01-01T00:00:00.000Z'
+    }];
+    const html = render({ resources });
+    assert.match(html, /PARAM · 文档/);
+    assert.ok(!html.includes('agent-ref:opaque-token-value'), 'token 不应进入 DOM');
+  });
+
+  it('未挂载真实回调时不渲染清除按钮，添加资源引用诚实 disabled', () => {
+    const html = render({ selection: selection0('param') });
+    assert.ok(!html.includes('清除上下文'), '无 onClear 回调不应渲染清除按钮');
+    const addButton = /<button[^>]*aria-label="添加资源引用"[^>]*>/.exec(html)?.[0];
+    assert.ok(addButton, '添加资源引用按钮必须存在');
+    assert.ok(addButton.includes('disabled'), '无 onCreate 回调时添加资源引用应 disabled');
+  });
+
+  it('消息流渲染 AgentMessageList，只渲染有界尾部页', () => {
+    const messages: AgentMessageDto[] = Array.from({ length: 120 }, (_, index) => ({
+      id: `m${index}`,
+      kind: 'assistant',
+      markdown: `body-${index}`,
+      streaming: false,
+      createdAt: '2026-01-01T00:00:00.000Z'
+    }));
+    const html = render({ messages, onLoadOlderMessages: () => undefined });
+    assert.match(html, /data-testid="agent-message-list"/);
+    assert.ok(!html.includes('agent-message-m0'), '最老消息不应出现在尾部页（bounded）');
+    assert.ok(html.includes('agent-message-m119'), '最新消息应出现在尾部页');
+    assert.match(html, /加载更早消息/);
+  });
+
+  it('消息流为空时回落欢迎态 / legacy 内容', () => {
+    const html = render({ messages: [] });
+    assert.ok(!html.includes('data-testid="agent-message-list"'));
+    assert.match(html, /data-testid="agent-empty-state"/);
+  });
+
+  it('agent 生产源码不含绝对路径字面量（负向扫描）', () => {
+    const agentDir = join(__SOULFORGE_RENDERER_ROOT__, 'agent');
+    const source = readdirSync(agentDir)
+      .filter((name) => (name.endsWith('.ts') || name.endsWith('.tsx')) && !name.includes('.test.'))
+      .map((name) => readFileSync(join(agentDir, name), 'utf8'))
+      .join('\n');
+    // 盘符绝对路径（排除 soulforge:// 这类 scheme，用字母前导否定）。soulforge 里
+    // 唯一合法的 `://` 是资源 URI，不携带本机路径。
+    assert.ok(
+      !/(?<![A-Za-z0-9])[A-Za-z]:[\\/]/.test(source),
+      'agent 生产源码不应包含盘符绝对路径字面量'
+    );
   });
 });
 
