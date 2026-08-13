@@ -27,7 +27,12 @@ import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { AgentMessageDto, AgentResourceReference, EditorSelectionContext } from '@soulforge/shared';
 import { AgentSidebar, type AgentSidebarProps } from './AgentSidebar.js';
-import { INITIAL_AGENT_TASK_STATE } from './agentTaskState.js';
+import { AgentSecondaryDrawer } from './AgentSecondaryDrawer.js';
+import {
+  INITIAL_AGENT_TASK_STATE,
+  type AgentApprovalView,
+  type AgentTaskState
+} from './agentTaskState.js';
 import {
   AGENT_DOCK_KEYBOARD_STEP,
   clampAgentDockWidth,
@@ -240,17 +245,27 @@ describe('区块顺序与默认折叠状态', () => {
     assert.ok(!html.includes('agent-session-history'));
     assert.ok(!html.includes('会话历史'));
     assert.ok(!html.includes('条消息'), '空闲欢迎不得回显会话数量');
-    // 反向前提:不空闲时才允许这些出现。
+    // 反向前提:不空闲时消息流出现（§12.10 任务进度进入消息流，面板不再常驻）。
     const running = { ...INITIAL_AGENT_TASK_STATE, sessionId: 's', phase: 'running' as const };
     const active = render({ task: { ...render0Task(), task: running } });
-    assert.match(active, /data-testid="agent-task-panel"/);
+    assert.match(active, /data-testid="agent-task-status"/, '运行中应显示消息流状态行');
+    assert.ok(!active.includes('data-testid="agent-task-panel"'), '运行中面板移出主栏，进入二级抽屉');
   });
 
-  it('有任务时才挂载任务面板，且不再显示欢迎态', () => {
-    const running = { ...INITIAL_AGENT_TASK_STATE, sessionId: 's', phase: 'running' as const };
+  it('运行中消息流出现状态行与工具活动，不再显示欢迎态', () => {
+    const running = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'running' as const,
+      toolCalls: [{
+        callId: 'c1', name: 'search_resources', step: 1, status: 'running' as const
+      }]
+    };
     const active = render({ task: { ...render0Task(), task: running } });
-    assert.match(active, /data-testid="agent-task-panel"/);
+    assert.match(active, /data-testid="agent-task-status"/);
     assert.ok(!active.includes('data-testid="agent-empty-state"'));
+    assert.match(active, /data-testid="agent-tool-activity-c1"/, '运行中工具活动进入消息流');
+    assert.match(active, /agent-tool-status--running/, '工具活动默认单行折叠，带运行徽标');
   });
 });
 
@@ -469,6 +484,221 @@ describe('§12.8/§12.11 上下文、资源引用与消息流（AGENT-60C）', (
     );
   });
 });
+
+describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）', () => {
+  function approvalTask(overrides: {
+    state?: Partial<ReturnType<typeof approvalFixture>>;
+    panel?: Partial<AgentSidebarProps['task']>;
+  } = {}) {
+    const fixture = { ...approvalFixture(), ...(overrides.state ?? {}) };
+    return render({ task: { ...render0Task(), ...(overrides.panel ?? {}), task: fixture } });
+  }
+
+  it('Change Review 卡显示操作/目标/diff/影响/验证/备份/回滚七要素', () => {
+    const html = approvalTask();
+    assert.match(html, /data-testid="agent-approval-card"/, '审批卡进入消息流');
+    for (const row of ['operation', 'target', 'diff', 'impact', 'validation', 'backup', 'rollback']) {
+      assert.match(html, new RegExp(`data-testid="approval-row-${row}"`), `七要素缺 ${row}`);
+    }
+    // 有 diff 时目标/diff/影响有真实内容，验证/备份/回滚如实显示不可用（不编造）。
+    assert.match(html, /m12b\/param\/gameparam\.parambnd\.dcx/, '目标显示逻辑目标');
+    assert.match(html, /agent-approval-card-diff-body/, 'diff 有真实内容');
+    assert.match(html, /\+1 \/ -1 行/, '影响范围来自 diff 统计');
+    const unavailableCount = (html.match(/approval-unavailable/g) ?? []).length;
+    assert.ok(unavailableCount >= 3, `验证/备份/回滚至少 3 处不可用，实际 ${unavailableCount}`);
+    assert.match(html, /批准并提交/, '唯一主按钮');
+    assert.match(html, /data-testid="agent-approval-card-approve"/);
+    assert.match(html, /data-testid="agent-approval-card-reject"/);
+  });
+
+  it('缺 diff 的审批如实显示不可用，不编造内容', () => {
+    const html = approvalTask({
+      state: {
+        pendingApprovals: [{
+          callId: 'c-no-diff',
+          step: 2,
+          toolName: 'rollback_operation',
+          permissionLevel: 'rollback',
+          argumentsJson: '{"opId":"op-1"}',
+          diff: null,
+          preview: null
+        }]
+      }
+    });
+    assert.match(html, /approval-unavailable/, '目标/diff/影响缺数据时如实显示不可用');
+    assert.match(html, /主进程未能为该调用生成 diff/, 'diff 缺失的说明存在');
+  });
+
+  it('提交失败显示失败阶段与回滚结果（结构化诊断，不吞异常）', () => {
+    const html = approvalTask({
+      panel: { approvalError: 'AGENT_SESSION_ENDED——会话已结束，回答未采纳。' }
+    });
+    assert.match(html, /data-testid="agent-approval-card-failure"/);
+    assert.match(html, /agent-approval-card-failure-stage/, '失败阶段必须显示');
+    assert.match(html, /失败阶段：respond/, 'respond 阶段名显示');
+    assert.match(html, /agent-approval-card-failure-rollback/, '回滚结果必须显示');
+    assert.match(html, /自动回滚：未执行/, '回滚结果如实显示');
+    assert.match(html, /AGENT_SESSION_ENDED/, '结构化诊断原文保留');
+  });
+
+  it('tool call 默认单行折叠，展开后才显示详情', () => {
+    const running = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'running' as const,
+      toolCalls: [{
+        callId: 'tool-1',
+        name: 'propose_text_patch',
+        step: 1,
+        status: 'running' as const,
+        argumentsJson: '{"targetPath":"m12b/param/x.dcx"}'
+      }]
+    };
+    const html = render({ task: { ...render0Task(), task: running } });
+    // 折叠 = details 不带 open 属性，单行摘要可见。
+    assert.match(html, /data-testid="agent-tool-activity-tool-1"/);
+    assert.match(html, /<details class="agent-tool-activity__details">/, '折叠态 details 不带 open');
+    assert.match(html, /propose_text_patch/, '单行摘要显示工具名');
+    // 详情仍在 DOM（details 内），展开才可见。
+    assert.match(html, /data-testid="agent-tool-detail-tool-1"/);
+    assert.match(html, /m12b\/param\/x\.dcx/, '参数详情在 details 内');
+  });
+
+  it('四态渲染：conversation / tool-running / approval / failure', () => {
+    // conversation：消息流
+    const conversation = render({
+      messages: [{ id: 'm1', kind: 'user', text: '你好', contextSnapshotId: 'snap', createdAt: '2026-01-01T00:00:00.000Z' }]
+    });
+    assert.match(conversation, /data-testid="agent-message-list"/);
+    assert.ok(!conversation.includes('data-testid="agent-approval-card"'));
+
+    // approval：待审批卡
+    const approvalHtml = approvalTask();
+    assert.match(approvalHtml, /data-testid="agent-approval-card"/);
+    assert.match(approvalHtml, /data-testid="agent-header-state"/);
+
+    // failure：失败态有界诊断
+    const failed = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'error' as const,
+      error: { code: 'AGENT_SESSION_FAILED', message: '模型调用超时。' }
+    };
+    const failureHtml = render({ task: { ...render0Task(), task: failed } });
+    assert.match(failureHtml, /data-testid="agent-failure"/);
+    assert.match(failureHtml, /AGENT_SESSION_FAILED/, '错误码显示');
+  });
+
+  it('失败态/审批态不替换整个 dock：header、composer 与上下文仍在', () => {
+    const failed = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'error' as const,
+      error: { code: 'AGENT_SESSION_FAILED', message: '很长的失败信息，不会撑爆整个侧栏。' }
+    };
+    const html = render({ task: { ...render0Task(), task: failed } });
+    assert.match(html, /data-testid="agent-failure"/);
+    assert.match(html, /class="agent__header"/, 'header 仍在');
+    assert.match(html, /class="agent__composer"/, 'composer 仍在');
+    assert.match(html, /data-testid="agent-composer-context"/, '上下文仍在');
+    // 失败卡有界：CSS 层限高（max-height），DOM 层不扩散到 sidebar 之外。
+    assert.ok(html.includes('agent-failure-card'), '失败卡 class 存在');
+  });
+
+  it('模型/工具/历史迁到二级抽屉，主栏不再常驻', () => {
+    const running = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'running' as const,
+      toolCalls: [{
+        callId: 'tool-1', name: 'search_resources', step: 1, status: 'running' as const
+      }]
+    };
+    const html = render({ task: { ...render0Task(), task: running } });
+    assert.match(html, /data-testid="agent-secondary-drawer"/, '二级抽屉挂载');
+    assert.ok(!html.includes('data-testid="agent-task-panel"'), '主栏不再常驻任务面板');
+    assert.ok(!html.includes('data-testid="agent-tool-inventory"'), '工具库存不在主栏');
+    // 工具库存确实在抽屉内：直接渲染抽屉历史视图验证归属。
+    const drawerHtml = renderToStaticMarkup(
+      <AgentSecondaryDrawer
+        open={true}
+        view="history"
+        onClose={() => undefined}
+        onSwitchView={() => undefined}
+        task={render0Task()}
+        tools={[{ name: 'search_resources', description: '搜索资源', permission: 'read' }]}
+        permissionLockReason="由主进程锁定为计划模式"
+        settings={{
+          provider: 'mock',
+          thinking: 'normal',
+          permissionMode: 'plan',
+          permissionLockReason: '锁',
+          onProviderChange: () => undefined,
+          onThinkingChange: () => undefined
+        }}
+      />
+    );
+    assert.match(drawerHtml, /data-testid="agent-tool-inventory"/, '工具库存迁入抽屉');
+    assert.match(drawerHtml, /search_resources/, '抽屉内显示工具名');
+  });
+
+  it('关闭 dock 不取消 main-owned task：收起仍保留消息流，取消控件只在抽屉', () => {
+    const running = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'running' as const
+    };
+    const closed = render({ open: false, task: { ...render0Task(), task: running } });
+    assert.match(closed, /class="agent is-collapsed"/);
+    assert.match(closed, /data-testid="agent-task-status"/, '收起不卸载运行中状态');
+    assert.match(closed, /class="agent__composer"/, 'composer 仍在');
+    // 关闭按钮走 onClose（App 只隐藏 dock），不映射到取消通道。
+    assert.match(closed, /aria-label="关闭 Agent 面板"/);
+  });
+
+  it('stop 只停当前生成：运行中 composer 停止键在场，任务级取消移入抽屉', () => {
+    const running = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'running' as const
+    };
+    const html = render({ task: { ...render0Task(), task: running } });
+    assert.match(html, /data-testid="composer-stop"/, '运行中停止键在 composer');
+    assert.ok(!html.includes('data-testid="agent-task-cancel"'), '任务级取消不在主栏');
+    assert.match(html, /agent-secondary-drawer/, '取消控件在二级抽屉');
+  });
+});
+
+/** AGENT-60D：带 unified diff 的待审批任务状态。 */
+function approvalFixture(): AgentTaskState {
+  const pendingApprovals: AgentApprovalView[] = [{
+    callId: 'approval-1',
+    step: 1,
+    toolName: 'propose_text_patch',
+    permissionLevel: 'commit',
+    argumentsJson: '{"targetPath":"m12b/param/gameparam.parambnd.dcx","newText":"x"}',
+    diff: {
+      targetPath: 'm12b/param/gameparam.parambnd.dcx',
+      unifiedDiff: '--- m12b/param/gameparam.parambnd.dcx\n+++ m12b/param/gameparam.parambnd.dcx\n@@ -1 +1 @@\n-old\n+new\n',
+      addedLines: 1,
+      removedLines: 1,
+      newFile: false
+    },
+    preview: {
+      targetPath: 'm12b/param/gameparam.parambnd.dcx',
+      targetUri: null,
+      newText: 'x',
+      truncatedBytes: 0,
+      changeCount: 1
+    }
+  }];
+  return {
+    ...INITIAL_AGENT_TASK_STATE,
+    sessionId: 'session-1',
+    phase: 'running' as const,
+    pendingApprovals
+  };
+}
 
 /** 复用默认 task props，避免每个用例重复整块字面量。 */
 function render0Task(): AgentSidebarProps['task'] {

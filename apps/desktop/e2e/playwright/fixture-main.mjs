@@ -1535,6 +1535,8 @@ function registerFixtureIpc() {
      生产 ipc.ts 的行为），只验证 renderer 发出了 ai.agent.cancel 并据推送更新界面。 */
   const agentTimers = new Set();
   let agentSessionSeq = 0;
+  /** approval-requested 后挂起的推进回调；ai.agent.approval.respond 触发。 */
+  let pendingApprovalAdvance = null;
 
   function pushAgentEvent(window, sessionId, event) {
     if (window.isDestroyed() || window.webContents.isDestroyed()) return;
@@ -1564,6 +1566,61 @@ function registerFixtureIpc() {
     const sessionId = `fixture-session-${agentSessionSeq}`;
     const window = BrowserWindow.fromWebContents(event.sender);
     pushAgentEvent(window, sessionId, { type: 'session-accepted', mode: 'plan' });
+
+    const prompt = request.prompt ?? '';
+
+    // AGENT-60D 审批态：停在 approval-requested，等 ai.agent.approval.respond 推进。
+    if (prompt.includes('审批')) {
+      scheduleAgentEvent(window, sessionId, 120, { type: 'turn-started', step: 1 });
+      scheduleAgentEvent(window, sessionId, 200, {
+        type: 'approval-requested', step: 1, callId: 'fixture-approval-1',
+        toolName: 'propose_text_patch', permissionLevel: 'commit',
+        argumentsJson: JSON.stringify({
+          targetPath: 'm12b/param/gameparam.parambnd.dcx',
+          changes: [{
+            targetPath: 'm12b/param/gameparam.parambnd.dcx',
+            structuredEdit: { newText: '8' }
+          }]
+        }),
+        diff: {
+          targetPath: 'm12b/param/gameparam.parambnd.dcx',
+          unifiedDiff: '--- m12b/param/gameparam.parambnd.dcx\n+++ m12b/param/gameparam.parambnd.dcx\n@@ -1 +1 @@\n-old\n+new\n',
+          addedLines: 1, removedLines: 1, newFile: false
+        }
+      });
+      pendingApprovalAdvance = (respondEvent, respondRequest) => {
+        const w = BrowserWindow.fromWebContents(respondEvent.sender);
+        pushAgentEvent(w, sessionId, {
+          type: 'approval-resolved', step: 1, callId: 'fixture-approval-1',
+          toolName: 'propose_text_patch', decision: respondRequest.decision, fromMemory: false
+        });
+        scheduleAgentEvent(w, sessionId, 120, { type: 'tool-call-begin', step: 1, callId: 'fixture-call-1', name: 'propose_text_patch' });
+        scheduleAgentEvent(w, sessionId, 200, { type: 'tool-call-end', step: 1, callId: 'fixture-call-1', name: 'propose_text_patch', ok: true });
+        scheduleAgentEvent(w, sessionId, 260, { type: 'agent-message-delta', step: 1, text: '已写入暂存区' });
+      };
+      return { ok: true, sessionId };
+    }
+
+    // AGENT-60D 失败态：推 session-error 让消息流收敛到有界失败诊断。
+    if (prompt.includes('失败')) {
+      scheduleAgentEvent(window, sessionId, 120, { type: 'turn-started', step: 1 });
+      scheduleAgentEvent(window, sessionId, 260, {
+        type: 'session-error', code: 'AGENT_SESSION_FAILED', message: 'fixture 合成失败：模型调用超时。'
+      });
+      return { ok: true, sessionId };
+    }
+
+    // AGENT-60D 工具运行态：只推 tool-call-begin，不推 end —— 停在 running 供截图。
+    if (prompt.includes('工具')) {
+      scheduleAgentEvent(window, sessionId, 120, { type: 'turn-started', step: 1 });
+      scheduleAgentEvent(window, sessionId, 200, {
+        type: 'tool-call-begin', step: 1, callId: 'fixture-call-1', name: 'search_resources',
+        argumentsJson: '{"query":"药葫芦","limit":8}'
+      });
+      return { ok: true, sessionId };
+    }
+
+    // 默认运行中：可取消（取消用例的对象）。
     scheduleAgentEvent(window, sessionId, 120, { type: 'turn-started', step: 1 });
     scheduleAgentEvent(window, sessionId, 200, {
       type: 'tool-call-begin', step: 1, callId: 'fixture-call-1', name: 'search_resources'
@@ -1588,6 +1645,24 @@ function registerFixtureIpc() {
       type: 'session-done', finishReason: 'cancelled', steps: 1, rolloutFileName: 'fixture-rollout.jsonl'
     });
     return { ok: true };
+  });
+
+  handleTrusted('ai.agent.approval.respond', (event, request) => {
+    track('ai.agent.approval.respond');
+    if (typeof request?.sessionId !== 'string' || request.sessionId === ''
+      || typeof request?.callId !== 'string' || request.callId === '') {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: 'sessionId 与 callId 必填。' } };
+    }
+    const allowed = ['once', 'always', 'reject', 'never', 'abort'];
+    if (!allowed.includes(request.decision)) {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: 'decision 非法。' } };
+    }
+    if (request.callId === 'fixture-approval-1' && typeof pendingApprovalAdvance === 'function') {
+      const advance = pendingApprovalAdvance;
+      pendingApprovalAdvance = null;
+      advance(event, request);
+    }
+    return { ok: true, matched: request.callId === 'fixture-approval-1' };
   });
 
   handleTrusted('ai.agent.sessions', () => {

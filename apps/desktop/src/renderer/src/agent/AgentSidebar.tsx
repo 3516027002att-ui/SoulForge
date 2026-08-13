@@ -2,7 +2,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
   type ReactElement
 } from 'react';
 import type {
@@ -18,23 +17,23 @@ import type {
   AgentResourceReference,
   EditorSelectionContext
 } from '@soulforge/shared';
-import { ModelServiceSettingsPanel } from '../editors/ModelServiceSettingsPanel.js';
+import { AgentTaskPanelProps } from './AgentTaskPanel.js';
 import {
-  FOCUSABLE_SELECTOR,
-  isTrappableElement,
-  nextTrappedFocusIndex
-} from '../a11y/focusTrap.js';
-import { AgentSessionControls } from './AgentSessionControls.js';
-import { AgentTaskPanel, type AgentTaskPanelProps } from './AgentTaskPanel.js';
-import { AGENT_SESSION_PAGE_SIZE, isAgentTaskActive } from './agentTaskState.js';
+  AGENT_TOOL_CALL_LIMIT,
+  describeAgentTaskStatus,
+  isAgentTaskActive
+} from './agentTaskState.js';
 import { modelServiceLabel } from './agentLabels.js';
-import { formatPageRange } from '../format/uiText.js';
 import { AgentDockResizer } from './AgentDockResizer.js';
 import { AgentDockHeader } from './AgentDockHeader.js';
 import { AgentConversationViewport } from './AgentConversationViewport.js';
 import { AgentComposer, type AgentInteractionMode } from './AgentComposer.js';
 import { AgentContextPicker } from './AgentContextPicker.js';
 import { AgentResourceReferencePicker } from './AgentResourceReferencePicker.js';
+import {
+  AgentSecondaryDrawer,
+  type AgentSecondaryDrawerView
+} from './AgentSecondaryDrawer.js';
 
 /** 交互模式类型由 AgentComposer（→ AgentParticipantBar）承载，这里仅为既有引用方保留导出。 */
 export type { AgentInteractionMode } from './AgentComposer.js';
@@ -187,21 +186,15 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     onExplainEvent
   } = props;
   const effectiveSelection = selection ?? legacySelectionFromProps(selectedFilePath, contextLabel);
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const drawerRef = useRef<HTMLDivElement>(null);
+  const [drawerView, setDrawerView] = useState<AgentSecondaryDrawerView | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const taskSurfaceVisible = isTaskSurfaceVisible(busy, goal, draft, task);
-  const awaitingApproval = task.task.pendingApprovals.length > 0;
-  const taskRunning = busy || isAgentTaskActive(task.task);
+  const taskState = task.task;
+  const awaitingApproval = taskState.pendingApprovals.length > 0;
+  const taskActive = isAgentTaskActive(taskState);
+  const taskRunning = busy || taskActive;
   // awaitingApproval ⊆ taskSurfaceVisible，所以空闲 = 没有任何任务表面内容。
   const emptyWelcome = !taskSurfaceVisible;
-  const historyPageCount = Math.max(1, Math.ceil(task.sessions.length / AGENT_SESSION_PAGE_SIZE));
-  const historyPage = Math.min(task.sessionsPage, historyPageCount - 1);
-  const pageSessions = task.sessions.slice(
-    historyPage * AGENT_SESSION_PAGE_SIZE,
-    historyPage * AGENT_SESSION_PAGE_SIZE + AGENT_SESSION_PAGE_SIZE
-  );
   // IPC 返回值来自边界外部；旧版 fixture/历史会话可能只有 steps 字段。
   // 归一化为数组后再渲染，避免一次不完整草稿把整个 Agent dock 卸载。
   const draftNextActions = draft !== null && Array.isArray(draft.nextActions)
@@ -216,38 +209,64 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
   void onExplainEvent;
   void toolOutput;
 
-  function openDrawer(kind: 'history' | 'settings'): void {
+  function openDrawer(kind: AgentSecondaryDrawerView): void {
     returnFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    setHistoryOpen(kind === 'history');
-    setSettingsOpen(kind === 'settings');
+    setDrawerView(kind);
   }
 
   function closeDrawer(): void {
-    setHistoryOpen(false);
-    setSettingsOpen(false);
+    setDrawerView(null);
     const target = returnFocusRef.current;
     returnFocusRef.current = null;
     if (target !== null && document.contains(target)) window.setTimeout(() => target.focus(), 0);
   }
 
-  function trapDrawerTab(event: ReactKeyboardEvent): void {
-    const container = drawerRef.current;
-    if (container === null || event.key !== 'Tab') return;
-    const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-      .filter((element) => isTrappableElement(element));
-    if (focusable.length === 0) return;
-    const currentIndex = focusable.findIndex((element) => element === document.activeElement);
-    const nextIndex = nextTrappedFocusIndex({
-      focusableCount: focusable.length,
-      currentIndex,
-      shift: event.shiftKey
-    });
-    if (nextIndex < 0) return;
-    event.preventDefault();
-    focusable[nextIndex]?.focus();
-  }
+  /** 从任务态派生 §12.5 工具活动行（单行折叠）。 */
+  const toolActivities = taskState.toolCalls.slice(-AGENT_TOOL_CALL_LIMIT).map((call) => ({
+    id: call.callId,
+    summary: call.name,
+    status: call.status === 'ok' ? 'succeeded' as const : call.status === 'failed' ? 'failed' as const : 'running' as const,
+    detail: call.argumentsJson ?? null,
+    step: call.step
+  }));
+
+  /**
+   * 从任务态派生 §12.9 Change Review 卡。批准/拒绝走真实 IPC：task.onRespondApproval
+   * 由 App 接线到 bridge.respondAiAgentApproval（main 的 ai.agent.approval.respond）。
+   * submitting 由「正在回答该 callId」驱动，防重复提交。
+   */
+  const approvals = taskState.pendingApprovals.map((entry) => {
+    const submitting = task.respondingApprovalCallId === entry.callId;
+    const respondFailed = !submitting && task.approvalError !== null;
+    return {
+      id: entry.callId,
+      toolName: entry.toolName,
+      permissionLevel: entry.permissionLevel,
+      step: entry.step,
+      argumentsJson: entry.argumentsJson,
+      diff: entry.diff,
+      preview: entry.preview,
+      onApprove: () => task.onRespondApproval(entry.callId, 'once'),
+      onReject: () => task.onRespondApproval(entry.callId, 'reject'),
+      submitting,
+      commitFailure: respondFailed
+        ? {
+            stage: 'respond',
+            rolledBack: false,
+            message: task.approvalError ?? '审批回答提交失败。'
+          }
+        : null
+    };
+  });
+
+  const failure = taskState.phase === 'error' && taskState.error !== null
+    ? { code: taskState.error.code, message: taskState.error.message }
+    : null;
+  const statusText = taskState.phase !== 'idle'
+    ? describeAgentTaskStatus(taskState)
+    : null;
 
   const selectedService = task.services.find((service) => service.id === task.selectedServiceId);
   const modelLabel = selectedService?.displayName ?? modelServiceLabel(provider);
@@ -271,9 +290,9 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
       <AgentDockHeader
         busy={taskRunning || awaitingApproval}
         statusText={headerState ?? ''}
-        historyOpen={historyOpen}
+        historyOpen={drawerView === 'history'}
         expanded={expanded}
-        onToggleHistory={() => (historyOpen ? closeDrawer() : openDrawer('history'))}
+        onToggleHistory={() => (drawerView === 'history' ? closeDrawer() : openDrawer('history'))}
         onNewTask={onNewTask ?? (() => undefined)}
         onToggleExpand={onToggleExpand ?? (() => undefined)}
         onClose={onClose}
@@ -282,6 +301,10 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
         idle={emptyWelcome}
         messages={messages}
         {...(onLoadOlderMessages !== undefined ? { onLoadOlder: onLoadOlderMessages } : {})}
+        toolActivities={toolActivities}
+        approvals={approvals}
+        failure={failure}
+        status={statusText}
       >
         {goal !== null && (
           <article className="agent-message agent-message--user">
@@ -307,8 +330,8 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             )}
           </article>
         )}
-        {taskSurfaceVisible && (
-          <AgentTaskPanel {...task} tools={tools} permissionLockReason={permissionLockReason} />
+        {taskState.rolloutFileName !== null && (
+          <p className="muted" data-testid="agent-rollout-file">会话记录：{taskState.rolloutFileName}</p>
         )}
       </AgentConversationViewport>
 
@@ -338,88 +361,29 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
         interactionMode={interactionMode}
         onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
         modelLabel={modelLabel}
-        onOpenModelSettings={() => {
-          setHistoryOpen(false);
-          setSettingsOpen(true);
-        }}
+        onOpenModelSettings={() => openDrawer('settings')}
         selectedFilePath={selectedFilePath}
         contextLabel={contextLabel}
       />
 
-      {(historyOpen || settingsOpen) && (
-        <div
-          className="agent-drawer"
-          role="dialog"
-          aria-modal="true"
-          aria-label={historyOpen ? 'Agent 历史' : '模型服务设置'}
-          ref={drawerRef}
-          onKeyDown={(event) => {
-            if (event.key === 'Escape') {
-              event.stopPropagation();
-              closeDrawer();
-              return;
-            }
-            trapDrawerTab(event);
-          }}
-        >
-          <div className="agent-drawer__header">
-            <strong>{historyOpen ? 'Agent 历史' : '模型服务设置'}</strong>
-            <button type="button" className="agent-icon-btn" onClick={closeDrawer} aria-label="关闭抽屉">×</button>
-          </div>
-          {historyOpen ? (
-            <div className="agent-history">
-              <div className="agent-history__actions">
-                <button type="button" className="btn btn--ghost btn--sm" onClick={task.onRefreshSessions}>刷新</button>
-                <button type="button" className="btn btn--ghost btn--sm" onClick={() => {
-                  setHistoryOpen(false);
-                  setSettingsOpen(true);
-                }}>模型设置</button>
-              </div>
-              {task.sessionsError && <p className="danger">{task.sessionsError}</p>}
-              <p className="muted" data-testid="agent-sessions-range">
-                {formatPageRange({ page: historyPage, pageSize: AGENT_SESSION_PAGE_SIZE, total: task.sessions.length, noun: '会话' })}
-              </p>
-              <p className="muted" data-testid="agent-sessions-source-limit">会话列表只回报最近 50 个会话文件。</p>
-              <div className="row gap pager">
-                <button type="button" disabled={historyPage <= 0} onClick={() => task.onSessionsPageChange(historyPage - 1)}>上一页</button>
-                <span className="muted">{task.sessions.length > 0 ? historyPage + 1 : 0}/{historyPageCount}</span>
-                <button type="button" disabled={historyPage >= historyPageCount - 1} onClick={() => task.onSessionsPageChange(historyPage + 1)}>下一页</button>
-              </div>
-              {task.sessions.length === 0 && <p className="empty-hint">暂无会话记录。</p>}
-              {pageSessions.map((session) => (
-                <div className="agent-history__item" key={session.sessionPath}>
-                  <div>
-                    <strong>{session.fileName}</strong>
-                    <span>{session.startedAt ?? session.modifiedAt} · {session.messageCount} 条消息</span>
-                  </div>
-                  <div className="agent-history__item-actions">
-                    <button type="button" className="btn btn--ghost btn--sm" onClick={() => task.onLoadSession(session.sessionPath)}>查看</button>
-                    <button type="button" className="btn btn--ghost btn--sm" onClick={() => task.onResumeSession(session.sessionPath)}>承接</button>
-                  </div>
-                </div>
-              ))}
-              {task.sessionDetail !== null && (
-                <div className="agent-log" data-testid="agent-session-detail">
-                  <div className="agent-log__row"><span>已载入会话：共 {task.sessionDetail.messageCount} 条消息，本次只取尾部 {task.sessionDetail.loadedMessages} 条</span></div>
-                  <div className="agent-log__row"><span>权限模式 {task.sessionDetail.permissionMode ?? '未记录'} · 协议 {task.sessionDetail.protocol ?? '未记录'}</span></div>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="agent-settings-drawer">
-              <AgentSessionControls
-                provider={provider}
-                thinking={thinking}
-                permissionMode={permissionMode}
-                permissionLockReason={permissionLockReason}
-                onProviderChange={onProviderChange}
-                onThinkingChange={onThinkingChange}
-              />
-              <ModelServiceSettingsPanel />
-            </div>
-          )}
-        </div>
-      )}
+      {/* §12.10 组件树：模型服务 / 工具库存 / 会话历史 / 开发设置迁到二级抽屉。 */}
+      <AgentSecondaryDrawer
+        open={drawerView !== null}
+        view={drawerView ?? 'settings'}
+        onClose={closeDrawer}
+        onSwitchView={setDrawerView}
+        task={task}
+        tools={tools}
+        permissionLockReason={permissionLockReason}
+        settings={{
+          provider,
+          thinking,
+          permissionMode,
+          permissionLockReason,
+          onProviderChange,
+          onThinkingChange
+        }}
+      />
     </aside>
   );
 }

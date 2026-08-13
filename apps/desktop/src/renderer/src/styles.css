@@ -1144,6 +1144,124 @@ pre.tool-output {
 .agent-approval__actions { flex-wrap: wrap; margin-top: 8px; }
 .agent-approval__scope { margin: 6px 0 0; font-size: 11px; color: var(--ink-3); }
 
+/* ── AGENT-60D ──────────────────────────────────────────────────────────────
+   消息流四态组件：工具活动行（默认单行折叠）、Change Review 审批卡、
+   失败态有界诊断、回到底部按钮、二级抽屉。 */
+
+/* 工具活动行：默认折叠为单行摘要（§12.5）。 */
+.agent-tool-activity {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 4px 8px;
+  background: var(--bg-2);
+  max-width: 100%;
+}
+.agent-tool-activity.is-running { border-left-color: var(--ember-text, #e07a2f); }
+.agent-tool-activity.is-succeeded { border-left-color: var(--ok, #4a9); }
+.agent-tool-activity.is-failed { border-left-color: var(--danger, #d9534f); }
+.agent-tool-activity__details > summary {
+  display: flex; align-items: center; gap: 8px;
+  list-style: none; cursor: pointer; font-size: 12px; line-height: 1.5;
+}
+.agent-tool-activity__details > summary::-webkit-details-marker { display: none; }
+.agent-tool-activity__dot {
+  width: 8px; height: 8px; flex: none; border-radius: 50%;
+  background: var(--ink-3);
+}
+.agent-tool-activity__dot.is-running { background: var(--ember-text, #e07a2f); animation: pulse 1s ease-in-out infinite; }
+.agent-tool-activity__dot.is-succeeded { background: var(--ok, #4a9); }
+.agent-tool-activity__dot.is-failed { background: var(--danger, #d9534f); }
+.agent-tool-activity__step { flex: none; color: var(--ink-3); font: 10px var(--font-mono); }
+.agent-tool-activity__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+.agent-tool-status { flex: none; font-size: 10px; font-family: var(--font-mono); color: var(--ink-3); }
+.agent-tool-status--running { color: var(--ember-text, #e07a2f); }
+.agent-tool-status--succeeded { color: var(--ok, #4a9); }
+.agent-tool-status--failed { color: var(--danger, #d9534f); }
+.agent-tool-activity__detail {
+  margin-top: 6px; padding: 6px 8px; border-top: 1px solid var(--line);
+  max-height: 220px; overflow: auto;
+}
+.agent-tool-activity__detail-label { font-size: 10px; color: var(--ink-3); margin-bottom: 4px; }
+.agent-tool-activity__detail .tool-output { margin: 0; white-space: pre-wrap; word-break: break-all; }
+
+/* Change Review 审批卡：消息流唯一强边界卡（§12.5/§12.9）。 */
+.agent-approval-card {
+  border: 1px solid var(--line-strong);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  box-shadow: none;
+  max-width: 100%;
+}
+.agent-approval-card.is-high { border-left-color: var(--danger, #d9534f); }
+.agent-approval-card.is-medium { border-left-color: var(--warn, #d9a13b); }
+.agent-approval-card.is-low { border-left-color: var(--line); }
+.agent-approval-card__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.agent-approval-card__level { font-size: 11px; color: var(--ink-3); }
+.agent-approval-card__step { margin: 4px 0 8px; font-size: 11px; color: var(--ink-2); }
+.agent-approval-card__review {
+  display: grid; gap: 4px; margin: 0 0 8px;
+  font-size: 11px; line-height: 1.6;
+}
+.agent-approval-card__row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.agent-approval-card__row dt { color: var(--ink-3); flex: none; }
+.agent-approval-card__row dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.agent-approval-card__row dd code { word-break: break-all; }
+.agent-approval-card__unavailable { color: var(--ink-3); }
+.agent-approval-card__diff { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 3px; }
+.agent-approval-card__diff-body { margin: 0; padding: 0; font-size: 11px; line-height: 1.55; background: transparent; }
+.agent-approval-card__diff-body .diff-line { display: block; padding: 0 8px; border-left: 2px solid transparent; white-space: pre-wrap; word-break: break-all; }
+.agent-approval-card__diff-body .diff-line.is-add { background: color-mix(in srgb, var(--ok, #4a9) 12%, transparent); border-left-color: var(--ok, #4a9); }
+.agent-approval-card__diff-body .diff-line.is-remove { background: color-mix(in srgb, var(--danger, #d9534f) 12%, transparent); border-left-color: var(--danger, #d9534f); }
+.agent-approval-card__diff-body .diff-line.is-hunk { color: var(--ink-3); background: var(--bg-2); }
+.agent-approval-card__diff-body .diff-line.is-header { color: var(--ink-3); }
+.agent-approval-card__args { margin-top: 6px; }
+.agent-approval-card__args summary { font-size: 11px; color: var(--ink-3); cursor: pointer; }
+.agent-approval-card__actions { flex-wrap: wrap; margin-top: 8px; }
+.agent-approval-card__failure {
+  margin-top: 8px; padding: 8px 10px;
+  border: 1px solid var(--danger, #d9534f); border-radius: 4px;
+  background: color-mix(in srgb, var(--danger, #d9534f) 8%, transparent);
+  font-size: 11px; line-height: 1.6;
+}
+.agent-approval-card__failure strong { color: var(--danger-text, #d9534f); }
+.agent-approval-card__failure p { margin: 2px 0; }
+
+/* 失败态：有界诊断，绝不替换整个 dock（§12.9 禁止巨型错误卡）。 */
+.agent-failure-card {
+  border: 1px solid var(--danger, #d9534f); border-left-width: 3px; border-radius: 4px;
+  padding: 8px 10px; background: color-mix(in srgb, var(--danger, #d9534f) 8%, transparent);
+  max-height: 160px; overflow: auto; font-size: 11px; line-height: 1.6;
+}
+.agent-failure-card strong { color: var(--danger-text, #d9534f); }
+.agent-failure-card p { margin: 2px 0; }
+
+/* 回到底部按钮：贴底隐藏，离开底部 48px 后浮现（§12.5）。 */
+.agent-scroll-to-bottom {
+  position: sticky; bottom: 8px; align-self: center;
+  display: none;
+  padding: 4px 12px;
+  border: 1px solid var(--line-strong); border-radius: 12px;
+  background: var(--forge-2); color: var(--ink-1);
+  font-size: 11px; cursor: pointer;
+  z-index: 2;
+}
+.agent-scroll-to-bottom.is-visible { display: inline-block; }
+.agent-scroll-to-bottom:hover { background: var(--forge-hover); }
+.agent-scroll-to-bottom:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
+
+/* 二级抽屉：复用旧 .agent-drawer 的对话框形态。 */
+.agent-secondary-drawer {
+  position: absolute; inset: 0; z-index: 6;
+  display: flex; flex-direction: column;
+  background: var(--forge-0);
+  border-left: 1px solid var(--line);
+}
+.agent-secondary-drawer.is-hidden { display: none; }
+
+
 /* 证据与格式检查折叠区：排在编辑器之后，默认收起。
    它们是给 AI 与排查用的证据投影，不是日常编辑要看的内容。 */
 .resource-evidence-details {

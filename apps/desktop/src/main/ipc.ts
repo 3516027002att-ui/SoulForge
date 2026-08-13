@@ -104,6 +104,7 @@ import {
   EDITOR_DOCUMENT_IPC_CHANNELS,
   agentReferenceExpiresAt,
   agentSelectionSummary,
+  decodeDecideAgentApprovalRequest,
   decodeEditorSelectionContext,
   decodeOpenEditorDocumentRequest,
   decodePageEditorDocumentRequest,
@@ -111,7 +112,9 @@ import {
   decodeApplyEditorMutationRequest,
   mintAgentReferenceToken,
   selectionRendererSafetyIssues,
+  validateAgentReferenceScope,
   type AgentResourceReference,
+  type DecideAgentApprovalRequest,
   type EditorSelectionContext,
   type FmgEntryPage,
   type ScriptEntryPlaintextView
@@ -910,6 +913,13 @@ export interface AiAgentRunRequest {
    * which main refuses outside plan mode — see the handler.
    */
   approvalRequiredLevels?: string[];
+  /**
+   * main-issued opaque resource references (§12.11 SubmitAgentRunRequest)。
+   *
+   * AGENT-60D 提交期消费点：每个 token 必须已在 agentReferenceRegistry 签发，
+   * 且 ownerId 与当前 sender 一致（跨 sender 拒绝）。未传或空数组 = 无引用。
+   */
+  resources?: readonly AgentResourceReference[];
 }
 
 /** Renderer's answer to one approval request (ai.agent.approval.respond). */
@@ -6021,6 +6031,30 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     ) {
       return { ok: false, error: { code: 'INVALID_INPUT', message: 'configId 与 prompt 必填。' } };
     }
+    // AGENT-60D 提交期消费点：资源引用 token 必须是 main 签发的、未过期、且
+    // 属于当前 sender。跨 sender / 伪造 token 在这里被拒，不进入工具上下文。
+    // 这是 agent 通道，不是 param/format 读取，**不得**返回 BACKUP_READ_FORBIDDEN。
+    const resources = request.resources ?? [];
+    const ownerId = String(_event.sender.id);
+    for (const reference of resources) {
+      const registered = agentReferenceRegistry.get(reference.token);
+      if (registered === undefined || registered.tokenId === undefined) {
+        return {
+          ok: false,
+          error: { code: 'AGENT_TOKEN_UNKNOWN', message: '资源引用 token 不在已签发注册表中，拒绝提交。' }
+        };
+      }
+      const scope = validateAgentReferenceScope(reference.token, ownerId);
+      if (!scope.ok) {
+        return { ok: false, error: { code: scope.code, message: scope.message } };
+      }
+      if (registered.ownerId !== ownerId) {
+        return {
+          ok: false,
+          error: { code: 'AGENT_TOKEN_SENDER_MISMATCH', message: '资源引用属于其他发送方，拒绝提交。' }
+        };
+      }
+    }
     const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === request.configId);
     if (!stored) {
       return { ok: false, error: { code: 'MODEL_SERVICE_CONFIG_NOT_FOUND', message: '模型服务配置不存在。' } };
@@ -6325,6 +6359,42 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         decision: request.decision,
         ...(typeof request.note === 'string' && request.note !== '' ? { note: request.note } : {})
       });
+      return { ok: true, matched };
+    }
+  );
+
+  /**
+   * §12.11 审批提交通道（DecideAgentApprovalRequest）。
+   *
+   * Change Review 卡「批准并提交 / 拒绝」的消费点。照现有 IPC 范式：named DTO +
+   * runtime decoder（decodeDecideAgentApprovalRequest）先做形状校验，再 settle
+   * 挂起的审批。decision 只有两档：`approve-and-commit`（映射 loop 的 `once`，
+   * 批准这一次并让 loop 提交）与 `reject`。`timed_out` 只能由主进程超时定时器
+   * 产生，renderer 不得自称超时。
+   *
+   * session/root 校验：reviewId 经 decoder 强制为 stable id（非路径）；settleApproval
+   * 对未知 key 返回 matched:false（会话已结束 / 已超时的正常竞态），不抛异常。
+   * 这是 agent 通道，不是 param/format 读取，**不得**返回 BACKUP_READ_FORBIDDEN。
+   */
+  handle(
+    'agent.approval.decide',
+    async (_event, request: unknown): Promise<
+      { ok: true; matched: boolean } | { ok: false; error: { code: string; message: string } }
+    > => {
+      let decoded: DecideAgentApprovalRequest;
+      try {
+        decoded = decodeDecideAgentApprovalRequest(request, 'DecideAgentApprovalRequest');
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code: 'INVALID_INPUT',
+            message: error instanceof Error ? error.message : '审批决定请求格式非法。'
+          }
+        };
+      }
+      const decision = decoded.decision === 'approve-and-commit' ? 'once' : 'reject';
+      const matched = settleApproval(`${decoded.sessionId}:${decoded.reviewId}`, { decision });
       return { ok: true, matched };
     }
   );

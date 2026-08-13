@@ -816,10 +816,10 @@ test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模�
   // 设置不出现在 Agent header；从历史抽屉进入模型设置。
   await expect(window.locator('details.agent-settings')).toHaveCount(0);
   await window.getByRole('button', { name: '打开 Agent 历史' }).click();
-  const history = window.locator('.agent-drawer');
+  const history = window.locator('.agent-secondary-drawer:not(.is-hidden)');
   await expect(history).toContainText('Agent 历史');
   await history.getByRole('button', { name: '模型设置' }).click();
-  await expect(window.locator('.agent-drawer')).toContainText('模型服务设置');
+  await expect(window.locator('.agent-secondary-drawer:not(.is-hidden)')).toContainText('模型服务设置');
 
   // 模型/思考强度/权限模式仍保留在专用设置抽屉。
   await expect(window.locator('#agent-provider')).toBeVisible();
@@ -838,7 +838,7 @@ test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模�
   await window.locator('#agent-provider').selectOption('openai');
   await window.getByRole('button', { name: '关闭抽屉' }).click();
   await window.getByRole('button', { name: '打开 Agent 历史' }).click();
-  await window.locator('.agent-drawer').getByRole('button', { name: '模型设置' }).click();
+  await window.locator('.agent-secondary-drawer:not(.is-hidden)').getByRole('button', { name: '模型设置' }).click();
   await expect(window.locator('#agent-provider')).toHaveValue('openai');
   await expect(window.locator('#agent-thinking')).toHaveValue('deep');
 
@@ -1226,25 +1226,28 @@ test('大工作区：过滤后页码复位，且搜索结果显式说明被截�
   await app.close();
 });
 
-test('AI 任务：运行发起后进度事件真的更新界面，取消真的发出 IPC', async () => {
+test('AI 任务：运行发起后进度事件真的更新消息流，取消真的发出 IPC', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  const panel = window.locator('[data-testid="agent-task-panel"]');
   const status = window.locator('[data-testid="agent-task-status"]');
-  const cancel = window.locator('[data-testid="agent-task-cancel"]');
-  const run = window.locator('[data-testid="agent-task-run"]');
+  const stop = window.locator('[data-testid="composer-stop"]');
 
-  // 空闲态只显示 welcome；发送计划提示后才挂载任务面板。
-  await expect(panel).toHaveCount(0);
+  // 空闲态只显示 welcome；发送计划提示后消息流挂载用户目标 + 计划草稿。
+  await expect(window.locator('.agent-welcome')).toBeVisible();
   await window.locator('.agent__composer textarea').fill('把伤药葫芦的持有上限调到 12');
   await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
-  await expect(panel).toBeVisible();
+  await expect(window.locator('.agent-message--user')).toContainText('把伤药葫芦的持有上限调到 12');
 
-  // 运行前置：fixture 提供一个已配置凭据的合成服务，故运行按钮可用。
+  // 运行入口在二级抽屉（§12.10 模型服务迁入抽屉）。
+  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
+  const drawer = window.locator('.agent-secondary-drawer:not(.is-hidden)');
+  await drawer.getByRole('button', { name: '模型设置' }).click();
   await expect(window.locator('#agent-task-service')).toHaveValue('fixture-service');
+  const run = window.locator('[data-testid="agent-task-run"]');
   await expect(run).toBeEnabled();
   await run.click();
+  await window.getByRole('button', { name: '关闭抽屉' }).click();
 
   // 1) 发起真的走了 IPC。
   await expect.poll(async () => (await ipcCalls(app))['ai.agent.run'] ?? 0).toBeGreaterThan(0);
@@ -1255,27 +1258,27 @@ test('AI 任务：运行发起后进度事件真的更新界面，取消真的�
   expect(modeCalls['ai.agent.run:mode=fullPermission'] ?? 0).toBe(0);
   expect(modeCalls['ai.agent.run:mode=normal'] ?? 0).toBe(0);
 
-  // 3) 推送事件到达后界面真的更新：步号、工具调用与产出量都必须出现。
+  // 3) 推送事件到达后消息流真的更新：步号、工具活动与产出量都必须出现。
   //    fixture 按计时器推 turn-started(1) → tool-call → delta，且刻意不推终态。
   await expect(status).toContainText('第 1 步');
   await expect(status).toContainText('可随时取消');
-  const toolCalls = window.locator('[data-testid="agent-task-tool-calls"]');
-  await expect(toolCalls).toContainText('search_resources');
-  await expect(toolCalls).toContainText('成功');
+  const toolRow = window.locator('[data-testid="agent-tool-activity-fixture-call-1"]');
+  await expect(toolRow).toContainText('search_resources');
+  await expect(toolRow).toContainText('成功');
   await expect(status).toContainText('已产出 6 字符');
 
-  // 4) 运行中取消必须可用——硬约束 16 的「可取消」在界面上成立。
-  await expect(cancel).toBeEnabled();
-  await cancel.click();
+  // 4) 运行中停止必须可用——硬约束 16 的「可取消」在界面上成立（stop 只停当前生成）。
+  await expect(stop).toBeVisible();
+  await stop.click();
 
   // 5) 取消真的发出 IPC。这是本用例的核心断言：只改本地状态的「取消」会让
   //    任务继续跑到底，而界面显示已取消。
   await expect.poll(async () => (await ipcCalls(app))['ai.agent.cancel'] ?? 0).toBeGreaterThan(0);
 
-  // 6) 终态由主进程回报，界面据此收敛；取消后不再可取消。
+  // 6) 终态由主进程回报，界面据此收敛；取消后停止键消失。
   await expect(status).toContainText('已被取消');
-  await expect(cancel).toBeDisabled();
-  await expect(panel).toContainText('fixture-rollout.jsonl');
+  await expect(stop).toHaveCount(0);
+  await expect(window.locator('[data-testid="agent-rollout-file"]')).toContainText('fixture-rollout.jsonl');
 
   await window.screenshot({ path: 'test-results/13-agent-task-run-cancel.png' });
   await app.close();
@@ -1332,6 +1335,90 @@ test('AI 任务：工具清单不污染 Agent 对话，且界面不提供抬高�
   await expect(window.locator('.composer-permission')).toContainText('主进程锁定');
   // 全页不得出现可抬高授权的 fullPermission 选项。
   expect(await window.locator('option[value="fullPermission"]').count()).toBe(0);
+
+  await app.close();
+});
+
+/**
+ * AGENT-60D：消息流四态渲染并保存截图。
+ *
+ * fixture 按 prompt 标记推进不同状态（fixture-main.mjs 的 ai.agent.run）：
+ *  默认      → 运行中（可取消）
+ * 含「工具」  → 停在 tool-call-begin（running）
+ * 含「审批」  → 停在 approval-requested，respond 后推进
+ * 含「失败」  → session-error
+ * 运行入口在二级抽屉（模型服务迁入抽屉，§12.10）。
+ */
+async function runInDrawer(window, promptText) {
+  await window.locator('.agent__composer textarea').fill(promptText);
+  await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
+  await expect(window.locator('.agent-message--user')).toContainText(promptText);
+  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
+  const drawer = window.locator('.agent-secondary-drawer:not(.is-hidden)');
+  await drawer.getByRole('button', { name: '模型设置' }).click();
+  await window.locator('[data-testid="agent-task-run"]').click();
+  await window.getByRole('button', { name: '关闭抽屉' }).click();
+}
+
+test('AGENT-60D：conversation 与 tool-running 两态渲染并保存截图', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // conversation：发送提示后，消息流显示用户目标 + 计划草稿。
+  await window.locator('.agent__composer textarea').fill('把伤药葫芦的持有上限调到 12');
+  await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
+  await expect(window.locator('.agent-message--user')).toContainText('把伤药葫芦的持有上限调到 12');
+  await expect(window.locator('.agent-message--agent')).toContainText('fixture draft');
+  await window.screenshot({ path: 'test-results/60d-01-conversation.png' });
+
+  // tool-running：新任务 → 运行「工具」标记 → 停在 running。
+  await window.getByRole('button', { name: '新任务' }).click();
+  await runInDrawer(window, '工具：搜索药葫芦资源');
+  const toolRow = window.locator('[data-testid="agent-tool-activity-fixture-call-1"]');
+  await expect(toolRow).toBeVisible();
+  await expect(toolRow).toContainText('search_resources');
+  await expect(toolRow).toContainText('进行中');
+  // 默认折叠：details 不带 open 属性。
+  expect(await toolRow.locator('details.agent-tool-activity__details').getAttribute('open')).toBeNull();
+  await window.screenshot({ path: 'test-results/60d-02-tool-running.png' });
+
+  await window.getByRole('button', { name: '新任务' }).click();
+  await app.close();
+});
+
+test('AGENT-60D：approval 与 failure 两态渲染并保存截图', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // approval：Change Review 卡显示七要素；批准走真实 IPC。
+  await runInDrawer(window, '审批：把药葫芦上限写到 8');
+  const card = window.locator('[data-testid="agent-approval-card"]');
+  await expect(card).toBeVisible();
+  for (const row of ['operation', 'target', 'diff', 'impact', 'validation', 'backup', 'rollback']) {
+    await expect(card.locator(`[data-testid="approval-row-${row}"]`)).toBeVisible();
+  }
+  await expect(card).toContainText('propose_text_patch');
+  await expect(card).toContainText('批准并提交');
+  await expect(card).toContainText('不可用'); // 缺的要素如实显示
+  await window.screenshot({ path: 'test-results/60d-03-approval.png' });
+
+  // 批准 → ai.agent.approval.respond；approval-resolved 后卡片出队。
+  await card.locator('[data-testid="agent-approval-card-approve"]').click();
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.approval.respond'] ?? 0).toBeGreaterThan(0);
+  await expect(window.locator('[data-testid="agent-approval-card"]')).toHaveCount(0);
+  // 批准后任务继续推进：工具活动进入消息流。
+  await expect(window.locator('[data-testid="agent-tool-activity-fixture-call-1"]')).toContainText('成功');
+
+  // failure：新任务 → 运行「失败」标记 → 有界失败诊断，不替换整个 dock。
+  await window.getByRole('button', { name: '新任务' }).click();
+  await runInDrawer(window, '失败：模拟模型调用超时');
+  const failure = window.locator('[data-testid="agent-failure"]');
+  await expect(failure).toBeVisible();
+  await expect(failure).toContainText('AGENT_SESSION_FAILED');
+  // dock 其余部件仍在（巨型错误卡不得替换 sidebar）。
+  await expect(window.locator('.agent__header')).toBeVisible();
+  await expect(window.locator('.agent__composer')).toBeVisible();
+  await window.screenshot({ path: 'test-results/60d-04-failure.png' });
 
   await app.close();
 });
