@@ -104,7 +104,12 @@ const fixtureFiles = [
   // BEHAVIOR-55B fixture：ESD 状态机样本。此前没有 .esd 文件，esd 工作台在 E2E 里
   // 进不去；这里补一个可被 readEsdDocument stub 命中的合成样本（微小、合法构造、
   // 明确标记）。ai 目录形态对齐真实 ESD（ai/*.esd）。
-  makeFile({ dir: 'ai', name: 'm10.esd', kind: 'ai', formatKind: 'unknown', formatLabel: 'ESD', extension: '.esd', compoundExtension: '.esd' })
+  makeFile({ dir: 'ai', name: 'm10.esd', kind: 'ai', formatKind: 'unknown', formatLabel: 'ESD', extension: '.esd', compoundExtension: '.esd' }),
+  // VFX-54B fixture：FXR3 特效样本。此前没有 .fxr 文件，vfx 工作台在 E2E 里
+  // 进不去；这里补一个可被 readFxrDocument stub 命中的合成样本（微小、合法构造、
+  // 明确标记）。formatKind 'unknown' → selectEditor legacy 路径归到 binary，
+  // App 装配层的 .fxr 后缀补正把它接到 vfx 编辑器。
+  makeFile({ dir: 'sfx', name: 'f0000.fxr', kind: 'sfx', formatKind: 'unknown', formatLabel: 'FXR', extension: '.fxr', compoundExtension: '.fxr' })
 ];
 
 /**
@@ -321,7 +326,7 @@ function registerFixtureIpc() {
       files: scanned.map((file) => ({ ...file })),
       countsByKind: {
         event: 2, map: (LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0) + 1, param: 4, msg: 1, menu: 2, script: 1,
-        action: 1, ai: 2, sfx: 1, chr: 2, obj: 0, other: 2, unknown: 1
+        action: 1, ai: 2, sfx: 2, chr: 2, obj: 0, other: 2, unknown: 1
       },
       diagnostics: [],
       session: {
@@ -927,6 +932,125 @@ function registerFixtureIpc() {
         diagnostics: [{
           severity: 'error', code: 'MTD_DOCUMENT_READ_FAILED',
           message: 'fixture 未登记或损坏的 MTD：读取失败。', sourceUri
+        }]
+      };
+    }
+    return { ok: true, data: { ...doc }, diagnostics: [] };
+  });
+
+  // ── VFX-54B：VFX 工作台合成通道 ──────────────────────────────────────────
+  // 微小、合法构造、明确标记（AGENTS.md §15）。一个可读 FXR：Effect 节点树含已知
+  // typeId 2000 / 2200 与一个未知节点 9999（驱动 known/unknown 断言）、1 个已知
+  // host（typeId 0）与 1 个未知 host（typeId 7777）、1 个属性（typeId 3）。
+  // authority 'partial'：unparsedGaps 非空（section11 无 schema + 未知类型），
+  // 缺口必须可见。未登记样本结构化失败，绝不显示为空文档。
+  const fixtureFxrDocs = {
+    'fixture://sfx/f0000.fxr': {
+      format: 'FXR3',
+      formatId: 'fxr',
+      version: 5,
+      sourceSize: 4096,
+      sourceHash: 'fixture-fxr-hash-0001',
+      resourceId: 0x00094F00,
+      rootNodeCount: 2,
+      totalNodeCount: 3,
+      hostCount: 2,
+      propertyCount: 1,
+      section11ValueCount: 3,
+      sectionCounts: {
+        section1: 1, section2: 1, section3: 1, section4: 3, section5: 0,
+        section6: 2, section7: 1, section8: 0, section9: 0, section10: 0,
+        section11: 3, section12: 0, section13: 0, section14: 0
+      },
+      effect: {
+        format: 'FXR3',
+        version: 5,
+        resourceId: 0x00094F00,
+        rootNodeCount: 2,
+        nodes: [
+          {
+            typeId: 2000, childCount: 1, drawEntityCount: 1, drawEntityRefCount: 0,
+            children: [
+              {
+                typeId: 2200, childCount: 0, drawEntityCount: 0, drawEntityRefCount: 0,
+                children: [], childrenTruncated: false
+              }
+            ],
+            childrenTruncated: false
+          },
+          {
+            typeId: 9999, childCount: 0, drawEntityCount: 0, drawEntityRefCount: 0,
+            children: [], childrenTruncated: false
+          }
+        ],
+        nodesTruncated: false
+      },
+      nodes: {
+        total: 3,
+        byType: [
+          { typeId: 2000, count: 1 },
+          { typeId: 2200, count: 1 },
+          { typeId: 9999, count: 1 }
+        ]
+      },
+      fields: {
+        hosts: [
+          {
+            typeId: 0, unk02: 1, unk03: 0, unk04: 2,
+            section11Count: 1, section10Count: 0, section7Count: 1,
+            properties: [
+              {
+                typeId: 3, unk04: 0, section11Count: 1, section8Count: 0,
+                values: [1, 2, 3], valuesTruncated: false,
+                section8: [], section8Truncated: false
+              }
+            ],
+            propertiesTruncated: false,
+            section10: [],
+            section10Truncated: false,
+            values: [10, 11],
+            valuesTruncated: false
+          },
+          {
+            typeId: 7777, unk02: 0, unk03: 0, unk04: 0,
+            section11Count: 0, section10Count: 0, section7Count: 0,
+            properties: [], propertiesTruncated: false,
+            section10: [], section10Truncated: false,
+            values: [], valuesTruncated: false
+          }
+        ],
+        hostsTruncated: false
+      },
+      unparsedGaps: [
+        'section11:opaque-int-array（混合 int/float 位模式，无 schema，按不透明 int 数组上报）；values=3',
+        'section12-14-empty-samples-only（真实样本恒空，非空布局未验证）',
+        'unknown-type:section4:9999',
+        'unknown-type:section6:7777'
+      ],
+      layoutWarnings: [],
+      roundTrip: {
+        consistent: true,
+        sourceHash: 'fixture-fxr-hash-0001',
+        reparsedHash: 'fixture-fxr-hash-0001',
+        nodeCount: 3,
+        propertyCount: 1,
+        section11ValueCount: 3,
+        note: null
+      },
+      authority: 'partial'
+    }
+  };
+
+  handleTrusted('resource.readFxrDocument', (_event, sourceUri) => {
+    track('resource.readFxrDocument');
+    const doc = fixtureFxrDocs[sourceUri];
+    if (!doc) {
+      return {
+        ok: false,
+        data: null,
+        diagnostics: [{
+          severity: 'error', code: 'FXR_DOCUMENT_READ_FAILED',
+          message: 'fixture 未登记或损坏的 FXR：读取失败。', sourceUri
         }]
       };
     }

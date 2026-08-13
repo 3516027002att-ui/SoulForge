@@ -63,6 +63,7 @@ import { EsdWorkbenchPanel } from './editors/EsdWorkbenchPanel.js';
 import { FlverWorkbenchPanel } from './editors/FlverWorkbenchPanel.js';
 import { TpfWorkbenchPanel, type TpfContainerView } from './editors/TpfWorkbenchPanel.js';
 import { MaterialWorkbenchPanel, type MaterialFileView } from './editors/MaterialWorkbenchPanel.js';
+import { VfxWorkbenchPanel, type VfxFileView } from './editors/VfxWorkbenchPanel.js';
 import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
@@ -510,6 +511,18 @@ export function App(): ReactElement {
   const isMaterialFile = selectedFile !== null && /\.mtd$/i.test(selectedFile.relativePath) === true;
 
   /**
+   * VFX-54B：.fxr/.fxr.dcx 后缀补正到 VFX 工作台。
+   *
+   * 与 isMaterialFile 同形态：selectEditor 的 legacy/语义路径目前把 vfx 归到
+   * 'binary'（selectEditor.ts 的 editorIdForIntegration 对 vfx 返回 binary，
+   * legacy 后缀推断也没有 .fxr）。本卡在 App 装配层做后缀补正：.fxr 文件在
+   * activeEditor 为 'binary' 时改走 VfxWorkbenchPanel，同时排除下方 binary
+   * 兜底文案。selectEditor.ts 的正式路由由主会话收尾。
+   */
+  const isVfxFile = selectedFile !== null
+    && /\.fxr(\.dcx)?$/i.test(selectedFile.relativePath) === true;
+
+  /**
    * GPARAM 域的全部磁盘文件（工作台 Banks 栏的数据源）。
    *
    * 按后缀过滤而不是 resourceKind：与 selectEditor 对 gparam 的判据一致
@@ -547,6 +560,20 @@ export function App(): ReactElement {
     const indexed = allFiles.length > 0 ? allFiles : files;
     return indexed
       .filter((file) => /\.mtd$/i.test(file.relativePath))
+      .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
+  }, [allFiles, files]);
+
+  /**
+   * VFX 域的全部 FXR 文件（工作台 Effect / Particle list 栏的数据源）。
+   *
+   * 按后缀过滤而不是 resourceKind：与 selectEditor 对 vfx 的判据一致
+   * （.fxr 是 leaf FXR，.fxr.dcx 是压缩 FXR；ffxbnd.dcx 是 binder，留在 Files）。
+   * 数量永远按当前索引实测计数。
+   */
+  const vfxFiles = useMemo<VfxFileView[]>(() => {
+    const indexed = allFiles.length > 0 ? allFiles : files;
+    return indexed
+      .filter((file) => /\.fxr(\.dcx)?$/i.test(file.relativePath))
       .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
   }, [allFiles, files]);
 
@@ -757,6 +784,7 @@ export function App(): ReactElement {
       if (typeof bridge.readEsdDocument === 'function') readContract.add('behavior');
       if (typeof bridge.readFlverDocument === 'function') readContract.add('model');
       if (typeof bridge.readTpfDocument === 'function') readContract.add('texture');
+      if (typeof bridge.readFxrDocument === 'function') readContract.add('vfx');
     }
     return buildDomainSummaries({
       readContract,
@@ -2858,7 +2886,20 @@ export function App(): ReactElement {
               <p>工作区中没有 TPF 文件。挂载包含纹理包的 Mod 工作区后这里会列出所有容器。</p>
             </section>
           )}
-          {activeEditor === 'empty' && activeDomain !== 'gparam' && activeDomain !== 'texture' && (
+          {activeDomain === 'vfx' && activeEditor === 'empty' && vfxFiles.length > 0 && (
+            <VfxWorkbenchPanel
+              key={`vfx-wb:${vfxFiles.map((f) => f.sourceUri).join(',')}`}
+              files={vfxFiles}
+            />
+          )}
+          {activeDomain === 'vfx' && activeEditor === 'empty' && vfxFiles.length === 0 && (
+            <section className="domain-placeholder" data-testid="vfx-placeholder" aria-label="VFX 工作域">
+              <span className="domain-placeholder__eyebrow">VFX / CAPABILITY</span>
+              <h2>VFX 工作台</h2>
+              <p>工作区中没有 FXR 文件。挂载包含特效文件（.fxr）的 Mod 工作区后这里会列出所有 effect。</p>
+            </section>
+          )}
+          {activeEditor === 'empty' && activeDomain !== 'gparam' && activeDomain !== 'texture' && activeDomain !== 'vfx' && (
             activeDomain === 'files'
               ? <p className="muted">在左侧选择一个文件开始编辑。</p>
               : <section className="domain-placeholder" data-testid="domain-editor-placeholder" aria-label={`${domainLabel(activeDomain)} 工作域`}>
@@ -3416,9 +3457,16 @@ export function App(): ReactElement {
               initialUri={selectedFile.sourceUri}
             />
           )}
+          {activeEditor === 'binary' && isVfxFile && selectedFile && (
+            <VfxWorkbenchPanel
+              key={`vfx-wb:${selectedFile.sourceUri}`}
+              files={vfxFiles}
+              initialUri={selectedFile.sourceUri}
+            />
+          )}
           {/* 没有语义编辑器的资源：给一句人话 + 指向折叠区的原始字节。
               此前这类资源什么编辑器都不显示，主区只剩证据卡与错误码。 */}
-          {activeEditor === 'binary' && !isMaterialFile && (
+          {activeEditor === 'binary' && !isMaterialFile && !isVfxFile && (
             <p className="muted">
               这个格式还没有专用编辑器。展开下方「原始字节与证据」可查看字节内容。
             </p>

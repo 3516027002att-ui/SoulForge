@@ -452,6 +452,64 @@ test('Animation 工作台三栏：动画 → 时间轴事件选择链，事件�
   await app.close();
 });
 
+test('VFX 工作台三栏：Effect / Particle list → 真实预览空态 → Inspector，known/unknown node 明确', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // VFX-54B：FXR 特效资源从 Files 领域选择，进入三栏 VFX 工作台。
+  await window.locator('[data-domain="files"]').click();
+  await window.locator('.file-item', { hasText: 'sfx/f0000.fxr' }).click();
+  // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
+  await expect(window.getByLabel('VFX 工作台')).toBeVisible();
+
+  // 三栏（§10.5，无 Tools 空栏）。
+  await expect(window.getByRole('region', { name: 'Effect / Particle list' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '真实预览' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Inspector' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
+
+  // Effect 节点树由 fixture envelope 的 effect 页投影派生（不按 sfx 目录分类）。
+  const left = window.getByRole('region', { name: 'Effect / Particle list' });
+  await expect(left.getByRole('row', { name: /type 2000/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /type 2200/ })).toBeVisible();
+
+  // known/unknown：未知类型节点（9999）明确标出，不给假数据。
+  await expect(left.getByText('未知类型').first()).toBeVisible();
+  await expect(left.getByRole('row', { name: /type 9999/ })).toBeVisible();
+
+  // 真实预览是诚实空态（preview isolation + no fake graph）：无 canvas。
+  const preview = window.getByRole('region', { name: '真实预览' });
+  await expect(preview.getByTestId('vfx-preview-empty')).toContainText('没有可用的实时预览渲染器');
+  await expect(window.locator('canvas')).toHaveCount(0);
+
+  // selection chain：选中已知节点 → Inspector 显示节点结构字段。
+  await left.getByRole('row', { name: /type 2000/ }).click();
+  const inspector = window.getByRole('region', { name: 'Inspector' });
+  await expect(inspector.getByText('typeId')).toBeVisible();
+  await expect(inspector.getByText('已知类型')).toBeVisible();
+  await expect(inspector.getByText('childCount')).toBeVisible();
+
+  // 选中未知节点 → Inspector 明确标 blocked，不给字段含义假数据。
+  await left.getByRole('row', { name: /type 9999/ }).click();
+  await expect(inspector.getByTestId('vfx-unknown-node-block')).toContainText('未识别');
+  await expect(inspector.getByText('未知类型（未识别，不给字段含义假数据）')).toBeVisible();
+
+  // preview isolation：选择节点后预览栏仍是诚实空态（不出现假预览）。
+  await expect(preview.getByTestId('vfx-preview-empty')).toContainText('没有可用的实时预览渲染器');
+
+  // Particles（host）：未知 host 也标出。
+  await expect(left.getByRole('row', { name: /host 7777/ })).toBeVisible();
+
+  // partial 缺口必须可见，不伪装成完整解析。
+  await expect(window.getByTestId('vfx-partial-gaps')).toContainText('未解析区间 4 项');
+
+  // 无 writer（VFX-54C 才接 field write）：无保存/提交动作。
+  await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
+
+  await window.screenshot({ path: 'test-results/19-vfx-workbench.png' });
+  await app.close();
+});
+
 test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
@@ -945,14 +1003,15 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可点击文件工作域并保持可操作。20 = fixture 合成样本数
+    // 窄屏仍可点击文件工作域并保持可操作。21 = fixture 合成样本数
     // （PARAM-10B 加 gameparam.parambnd.dcx，GPARAM-11B 加 3 个 gparam.dcx，
     // EVENT-30B 加 event/menu.emevd，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx，
     // MAP-50B 加 map/m10.msb.dcx，MODEL-51B 加 chr/c1000.flver，TEXTURE-52B 加
     // menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，MATERIAL-53B 加
-    // material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20）。
+    // material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，VFX-54B 加
+    // sfx/f0000.fxr 从 20 变 21）。
     await window.locator('[data-domain="files"]').click();
-    await expect(window.locator('.file-item')).toHaveCount(20);
+    await expect(window.locator('.file-item')).toHaveCount(21);
   }
 
   await window.setViewportSize({ width: 653, height: 694 });
@@ -1081,19 +1140,20 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
   const pager = window.locator('[data-testid="file-list-pager"]');
   await expect(pager).toBeVisible();
 
-  // 位置文案必须报出区间与真实总数（480 = 20 基础 + 460 合成；EVENT-30B 加了
+  // 位置文案必须报出区间与真实总数（481 = 21 基础 + 460 合成；EVENT-30B 加了
   // event/menu.emevd 基础样本从 12 变 13，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx
   // 从 13 变 14，MAP-50B 加 map/m10.msb.dcx 从 14 变 15，MODEL-51B 加 chr/c1000.flver
   // 从 15 变 16，TEXTURE-52B 加 menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，
-  // MATERIAL-53B 加 material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20）。
+  // MATERIAL-53B 加 material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，
+  // VFX-54B 加 sfx/f0000.fxr 从 20 变 21）。
   const range = window.locator('[data-testid="file-list-page-range"]');
   await expect(range).toContainText('1–200');
-  await expect(range).toContainText('480');
+  await expect(range).toContainText('481');
   await expect(range).toContainText('第 1/3 页');
 
   // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 479 长得一样。
   // SHELL-09 §3.3：数量带语义单位（文件 N 个）。
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 480 个');
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 481 个');
   await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
 
   // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。
@@ -1106,8 +1166,8 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
 
   // 末页只剩余数条，且「下一页」到底后禁用。
   await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('401–480');
-  await expect(items).toHaveCount(80);
+  await expect(range).toContainText('401–481');
+  await expect(items).toHaveCount(81);
   await expect(window.getByRole('button', { name: '下一页' }).first()).toBeDisabled();
 
   // 回到第一页：上一页可用且内容复原。
