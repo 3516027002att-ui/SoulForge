@@ -22,13 +22,15 @@ import {
 import { AgentSessionControls } from './AgentSessionControls.js';
 import { AgentTaskPanel, type AgentTaskPanelProps } from './AgentTaskPanel.js';
 import { AGENT_SESSION_PAGE_SIZE, isAgentTaskActive } from './agentTaskState.js';
-import { permissionModeLabel } from './agentLabels.js';
+import { modelServiceLabel } from './agentLabels.js';
 import { formatPageRange } from '../format/uiText.js';
 import { AgentDockResizer } from './AgentDockResizer.js';
 import { AgentDockHeader } from './AgentDockHeader.js';
 import { AgentConversationViewport } from './AgentConversationViewport.js';
+import { AgentComposer, type AgentInteractionMode } from './AgentComposer.js';
 
-export type AgentInteractionMode = 'ask' | 'plan' | 'edit';
+/** 交互模式类型由 AgentComposer（→ AgentParticipantBar）承载，这里仅为既有引用方保留导出。 */
+export type { AgentInteractionMode } from './AgentComposer.js';
 
 export interface AgentSidebarProps {
   open: boolean;
@@ -67,16 +69,6 @@ export interface AgentSidebarProps {
   onClose: () => void;
   onRunToolSearch: (query: string) => void;
   onExplainEvent: (uri: string) => void;
-}
-
-const INTERACTION_MODES: ReadonlyArray<{ id: AgentInteractionMode; label: string; description: string }> = [
-  { id: 'ask', label: 'Ask', description: '只读问答与解释' },
-  { id: 'plan', label: 'Plan', description: '形成提案，不直接写入' },
-  { id: 'edit', label: 'Edit', description: '在权限约束内提出编辑' }
-];
-
-function interactionModeLabel(mode: AgentInteractionMode): string {
-  return INTERACTION_MODES.find((item) => item.id === mode)?.label ?? 'Ask';
 }
 
 function isTaskSurfaceVisible(
@@ -140,7 +132,6 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
   } = props;
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [modeOpen, setModeOpen] = useState(false);
   const drawerRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const taskSurfaceVisible = isTaskSurfaceVisible(busy, goal, draft, task);
@@ -201,17 +192,8 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     focusable[nextIndex]?.focus();
   }
 
-  function insertPrompt(text: string): void {
-    const next = prompt.trim() === '' ? text : `${prompt.trimEnd()} ${text}`;
-    onPromptChange(next);
-  }
-
-  function handlePromptKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): void {
-    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
-    event.preventDefault();
-    onSend();
-  }
-
+  const selectedService = task.services.find((service) => service.id === task.selectedServiceId);
+  const modelLabel = selectedService?.displayName ?? modelServiceLabel(provider);
   const headerState = awaitingApproval ? '等待批准' : taskRunning ? '执行中' : undefined;
 
   return (
@@ -269,76 +251,25 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
         )}
       </AgentConversationViewport>
 
-      <div className="agent__composer">
-        <div className="agent-composer__participant">
-          <span className="agent-participant">@Agent</span>
-          <div className="agent-mode-select">
-            <button
-              type="button"
-              className="agent-mode-trigger"
-              aria-haspopup="listbox"
-              aria-expanded={modeOpen}
-              onClick={() => setModeOpen((openState) => !openState)}
-            >
-              {interactionModeLabel(interactionMode)}
-              <span aria-hidden="true">⌄</span>
-            </button>
-            {modeOpen && (
-              <div className="agent-mode-menu" role="listbox" aria-label="Agent 交互模式">
-                {INTERACTION_MODES.map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    role="option"
-                    aria-selected={interactionMode === mode.id}
-                    onClick={() => {
-                      onInteractionModeChange?.(mode.id);
-                      setModeOpen(false);
-                    }}
-                  >
-                    <strong>{mode.label}</strong><span>{mode.description}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="composer-context" aria-label="当前上下文">
-          {selectedFilePath && <span className="ctx-chip" title={selectedFilePath}>{selectedFilePath}</span>}
-          <span className="ctx-chip">{contextLabel}</span>
-        </div>
-        <textarea
-          rows={2}
-          value={prompt}
-          onChange={(event) => onPromptChange(event.target.value)}
-          onKeyDown={handlePromptKeyDown}
-          placeholder="与 Agent 对话。输入 / 查看可用命令，例如 /plan、/explain。"
-          aria-label="向 Agent 对话"
-        />
-        <div className="composer-bar">
-          <button type="button" className="composer-tool-btn" onClick={() => insertPrompt('@Agent')} aria-label="添加 Agent 参与者">@</button>
-          <button
-            type="button"
-            className="composer-tool-btn"
-            onClick={() => selectedFilePath && insertPrompt(`#${selectedFilePath}`)}
-            disabled={!selectedFilePath}
-            aria-label="添加当前文件上下文"
-          >
-            #
-          </button>
-          <span className="composer-permission" title={permissionLockReason}>
-            权限：{permissionModeLabel(permissionMode)}（主进程锁定）
-          </span>
-          <span className="composer-spacer"></span>
-          {task.task.pendingApprovals.length > 0 ? (
-            <span className="composer-awaiting" data-testid="composer-awaiting">等待你在上方批准</span>
-          ) : taskRunning ? (
-            <button type="button" className="btn btn--danger btn--sm" data-testid="composer-stop" onClick={task.onCancel}>停止</button>
-          ) : (
-            <button type="button" className="btn btn--primary btn--sm" onClick={onSend}>发送</button>
-          )}
-        </div>
-      </div>
+      <AgentComposer
+        prompt={prompt}
+        onPromptChange={onPromptChange}
+        onSend={onSend}
+        onStop={task.onCancel}
+        streaming={taskRunning}
+        awaitingApproval={awaitingApproval}
+        permissionMode={permissionMode}
+        permissionLockReason={permissionLockReason}
+        interactionMode={interactionMode}
+        onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
+        modelLabel={modelLabel}
+        onOpenModelSettings={() => {
+          setHistoryOpen(false);
+          setSettingsOpen(true);
+        }}
+        selectedFilePath={selectedFilePath}
+        contextLabel={contextLabel}
+      />
 
       {(historyOpen || settingsOpen) && (
         <div

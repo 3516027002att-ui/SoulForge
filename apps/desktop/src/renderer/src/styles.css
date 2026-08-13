@@ -1165,7 +1165,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 
 .agent-log__args { margin-top: 3px; }
 .agent-log__args summary { font-size: 11px; color: var(--ink-3); cursor: pointer; }
-.composer-mode { font-size: 11px; color: var(--ink-3); margin-left: auto; margin-right: 8px; }
+.composer-mode { font-size: 10.5px; color: var(--ink-3); }
 .composer-awaiting { font-size: 11px; color: var(--warn, #d9a13b); }
 .spinner {
   width: 12px; height: 12px; border-radius: 50%; flex: none;
@@ -1173,8 +1173,19 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   animation: spin .7s linear infinite;
 }
 
-.agent__composer { border-top: 1px solid var(--line); padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 7px; background: var(--forge-0); }
+.agent__composer {
+  border-top: 1px solid var(--line); padding: 10px 12px 12px;
+  display: flex; flex-direction: column; gap: 7px;
+  background: var(--forge-0);
+  /* §12.6：整个 Composer 不超过 40vh；超出由中间层滚动承接。 */
+  max-height: var(--agent-composer-max-height); overflow: hidden;
+}
 .agent-composer__participant { display: flex; align-items: center; gap: 7px; min-height: 24px; }
+/* 三层 Composer 的中间层：context chips + prompt editor，超限时内部滚动。 */
+.agent-composer__body {
+  display: flex; flex-direction: column; gap: 6px;
+  min-height: 0; overflow-y: auto;
+}
 .agent-participant { color: var(--ember-text); font: 11px var(--font-mono); }
 .agent-mode-select { position: relative; }
 .agent-mode-trigger { display: inline-flex; align-items: center; gap: 5px; padding: 2px 5px; color: var(--ink-2); font-size: 11px; border-radius: var(--radius-s); }
@@ -1194,12 +1205,23 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 .agent__composer textarea {
   width: 100%; resize: none; padding: 8px 12px; font-size: 12.5px; line-height: 1.55;
-  background: var(--forge-1);
+  background: var(--forge-1); border: 1px solid var(--line);
+  /* §12.6：正文最小 72px；自动增长由 AgentPromptEditor 的 grow 逻辑钉住 40vh。 */
+  min-height: 72px;
 }
-.composer-bar { display: flex; align-items: center; gap: 5px; min-height: 26px; }
+.agent-composer__toolbar { display: flex; align-items: center; gap: 5px; min-height: 26px; }
 .composer-tool-btn { width: 24px; height: 24px; display: grid; place-items: center; color: var(--ink-2); border-radius: var(--radius-s); }
 .composer-tool-btn:hover:not(:disabled) { color: var(--ink-0); background: var(--control-hover-bg); }
 .composer-tool-btn:disabled { opacity: .4; cursor: default; }
+.composer-model-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 7px; font-size: 10.5px; color: var(--ink-2);
+  border: 1px solid var(--line); border-radius: var(--radius-s);
+  background: var(--forge-1); max-width: 16ch;
+}
+.composer-model-btn:hover { color: var(--ink-0); background: var(--forge-hover); }
+.composer-model-btn:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
+.composer-model-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-spacer { flex: 1; }
 .composer-permission { max-width: 23ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: 10px; }
 .composer-hint { font-size: 10.5px; color: var(--ink-3); }

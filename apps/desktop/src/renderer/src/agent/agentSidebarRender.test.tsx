@@ -107,6 +107,79 @@ describe('Agent 壳层遵循右 dock 信息架构（§12.1/12.3）', () => {
   });
 });
 
+describe('Composer 三层结构（§12.6）', () => {
+  it('participant / prompt+chips / toolbar 三层按顺序渲染', () => {
+    const html = render();
+    const participantIdx = html.indexOf('agent-composer__participant');
+    const bodyIdx = html.indexOf('agent-composer__body');
+    const toolbarIdx = html.indexOf('agent-composer__toolbar');
+    assert.ok(participantIdx >= 0, '第一层 participant 存在');
+    assert.ok(bodyIdx > participantIdx, '第二层 prompt+chips 在 participant 之后');
+    assert.ok(toolbarIdx > bodyIdx, '第三层 toolbar 在 prompt+chips 之后');
+    assert.match(html, /data-testid="agent-composer"/);
+  });
+
+  it('participant 层 = @Agent + 模式选择 + 权限锁定', () => {
+    const html = render();
+    assert.match(html, /class="agent-participant">@Agent</);
+    assert.match(html, /class="agent-mode-select"/);
+    assert.match(html, /class="composer-permission"/);
+  });
+
+  it('prompt+chips 层 = context chips + 自动增高 textarea', () => {
+    const html = render();
+    assert.match(html, /data-testid="agent-context-chips"/);
+    assert.match(html, /class="agent-composer__body"[\s\S]*?<textarea/);
+    // e2e 依赖的 CSS 钩子：textarea 必须仍是 .agent__composer 的后代（§12.6 输入区）。
+    assert.match(html, /class="agent__composer"[\s\S]*?<textarea/);
+  });
+
+  it('toolbar 固定六项按 @ | # | 附件 | 模型 | Plan | 发送/停止 顺序', () => {
+    const html = render();
+    const toolbarStart = html.indexOf('class="agent-composer__toolbar"');
+    assert.ok(toolbarStart >= 0, 'toolbar 层必须存在');
+    const region = html.slice(toolbarStart);
+    const markers = [
+      'aria-label="添加 Agent 参与者"', // @
+      'aria-label="添加当前文件上下文"', // #
+      'aria-label="添加附件"', // attachment
+      'aria-label="模型服务设置"', // model
+      'data-testid="composer-plan-mode"', // plan
+      '>发送<' // send/stop
+    ];
+    let prev = -1;
+    for (const marker of markers) {
+      const idx = region.indexOf(marker);
+      assert.ok(idx > prev, `toolbar 六项应按固定顺序出现，${marker} 顺序错误`);
+      prev = idx;
+    }
+  });
+
+  it('空输入时发送按钮 disabled，非空时可用（§12.6）', () => {
+    const idleHtml = render();
+    assert.match(idleHtml, />发送<\/button>/);
+    assert.match(idleHtml, /<button[^>]*disabled[^>]*>发送<\/button>/, '空输入时发送按钮应 disabled');
+    const filledHtml = render({ prompt: '把药葫芦上限调到 8' });
+    assert.ok(!/<button[^>]*disabled[^>]*>发送<\/button>/.test(filledHtml), '非空输入时发送按钮不应 disabled');
+  });
+
+  it('未打通的能力诚实 disabled：附件按钮常驻 disabled 而不是假装可用', () => {
+    const html = render();
+    const attachmentButton = /<button[^>]*aria-label="添加附件"[^>]*>/.exec(html)?.[0];
+    assert.ok(attachmentButton, '附件按钮必须存在（固定六项之一）');
+    assert.ok(attachmentButton.includes('disabled'), '附件能力未接通（60C），应诚实 disabled');
+  });
+
+  it('未选中资源时 # 按钮 disabled，选中后可用', () => {
+    const noSelection = render();
+    const disabledContext = /<button[^>]*aria-label="添加当前文件上下文"[^>]*>/.exec(noSelection)?.[0];
+    assert.ok(disabledContext?.includes('disabled'), '未选中资源时 # 按钮应 disabled');
+    const withSelection = render({ selectedFilePath: 'm12b/fmg/fmg_item_dlc01.msgbnd.dcx' });
+    const enabledContext = /<button[^>]*aria-label="添加当前文件上下文"[^>]*>/.exec(withSelection)?.[0];
+    assert.ok(enabledContext !== undefined && !enabledContext.includes('disabled'), '选中资源后 # 按钮应可用');
+  });
+});
+
 describe('AgentDockResizer（§12.2）', () => {
   it('渲染为 4px 垂直 separator，带当前宽度与范围', () => {
     const html = render();
