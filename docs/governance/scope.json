@@ -1259,11 +1259,11 @@
     },
     {
       "scopeItemId": "SCOPE-MATBIN-53DE-DEFERRAL",
-      "capabilityId": "MATERIAL-53",
+      "capabilityId": "E-ASSET",
       "gateIds": [
         "REL-SCOPE"
       ],
-      "subjectKind": "material-format",
+      "subjectKind": "asset",
       "scope": "MATBIN read/write(MATERIAL-53D/53E):Mod Engine 2 专用序列化格式,非 FromSoftware 原生;Sekiro 原生与测试 Mod 语料 0 个 .matbin",
       "decisionStatus": "user-approved",
       "proposedSupport": "deferred",

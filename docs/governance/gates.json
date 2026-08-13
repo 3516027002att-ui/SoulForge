@@ -164,12 +164,13 @@
         "SCOPE-RUNTIME",
         "SCOPE-RELEASE",
         "SCOPE-RENDERING",
-        "SCOPE-COMPLIANCE"
+        "SCOPE-COMPLIANCE",
+        "SCOPE-MATBIN-53DE-DEFERRAL"
       ],
       "openRulings": [
         "用户逐项裁定已冻结；scope target 不提升实时 authority，技术缺口由后继 Gate 与 blocker 继续失败关闭。"
       ],
-      "successorRequirement": "27 项范围矩阵继续冻结，其中 12 项已裁定延期 V0.6（SCOPE-MSB、animation/TAE/ESD 三项、资产线 7 项、SCOPE-RENDERING）；V0.5 收窄为 BND4/FMG/PARAM(gameparam)/EMEVD/script 五编辑器的文本优先边界，script 为只读 + 整内层文件替换；Sekiro 1.6 版本族、只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界不变；工程复核与普通工程提交不得触发用户重新授权"
+      "successorRequirement": "28 项范围矩阵继续冻结，其中 13 项已裁定延期 V0.6（SCOPE-MSB、animation/TAE/ESD 三项、资产线 7 项、SCOPE-RENDERING、SCOPE-MATBIN-53DE）；V0.5 收窄为 BND4/FMG/PARAM(gameparam)/EMEVD/script 五编辑器的文本优先边界，script 为只读 + 整内层文件替换；Sekiro 1.6 版本族、只读 Hex、固定 Smithbox 本机 metadata、空模型凭据、无编辑器/installer 量化预算与允许未签名 NSIS 的内部测试边界不变；工程复核与普通工程提交不得触发用户重新授权"
     },
     {
       "gateId": "REL-A",
