@@ -7,13 +7,17 @@
  * (the DSL compiler already rejects them as read-only).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import type {
   EmevdEditorDocument,
   EmevdMutationPlan,
   PatchIR,
-  PatchIrOperation
+  PatchIrOperation,
+  StructuredDiagnostic,
+  ValidatorContract,
+  ValidatorResult
 } from '@soulforge/shared';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 import { mutateInstructionArg } from '../emevd/emedfSchema.js';
@@ -33,7 +37,14 @@ export interface EmevdPlanCommitRequest {
   document: EmevdEditorDocument;
   registry: EmedfRegistry;
   sourcePath: string;
+  /** SHA-256 of the decompressed EMEVD payload (Bridge write-emevd hash check). */
   expectedDocumentHash: string;
+  /**
+   * SHA-256 of the outer source resource file bytes (the .dcx wrapper). When
+   * the source is a .dcx, the PatchIR file_replace content_hash precondition
+   * must compare against the on-disk .dcx bytes — never the payload hash.
+   */
+  expectedOuterFileHash?: string;
   allowedRoots: string[];
   timeoutMs?: number;
 }
@@ -66,6 +77,10 @@ export interface EmevdReReadReport {
 export interface EmevdPlanCommitResult {
   ok: boolean;
   outputHash?: string;
+  /** "emevd" for raw payload output; "dcx" when the staged artifact is a rebuilt outer DCX. */
+  sourceFormat?: 'emevd' | 'dcx';
+  /** Outer container hash of the staged artifact (dcx only). */
+  outerFileHash?: string;
   eventCount?: number;
   instructionCount?: number;
   mutationCount: number;
@@ -237,6 +252,12 @@ export interface EmevdPlanStageResult {
   ok: boolean;
   bytes?: Buffer;
   result?: EmevdBridgeCommitResult;
+  /** "emevd" for raw payload output; "dcx" when the staged artifact is a rebuilt outer DCX. */
+  sourceFormat?: 'emevd' | 'dcx';
+  /** Outer container hash of the staged artifact (dcx only); the file_replace sealed expectation. */
+  outerFileHash?: string;
+  /** Rebuilt payload hash (dcx only). */
+  payloadHash?: string;
   mutationCount: number;
   diagnostics: Array<{ severity: string; code: string; message: string }>;
 }
@@ -305,6 +326,11 @@ export async function stageEmevdPlanViaBridge(
     ok: true,
     bytes: staged.bytes,
     result: staged.result,
+    ...(staged.result.sourceFormat === 'dcx' || staged.result.sourceFormat === 'emevd'
+      ? { sourceFormat: staged.result.sourceFormat }
+      : {}),
+    ...(staged.result.outerFileHash ? { outerFileHash: staged.result.outerFileHash } : {}),
+    ...(staged.result.payloadHash ? { payloadHash: staged.result.payloadHash } : {}),
     mutationCount: converted.mutations.length,
     diagnostics: staged.result.diagnostics.map((d) => ({
       severity: d.severity,
@@ -369,6 +395,95 @@ export function buildEmevdFileReplacePatch(input: {
   });
 }
 
+export interface EmevdReopenValidatorInput {
+  allowedRoots: string[];
+  timeoutMs?: number;
+}
+
+/**
+ * After-commit Bridge reopen validator for EMEVD file_replace commits
+ * (EVENT-30C). Reopens the committed resource natively and fails — which makes
+ * the WorkspaceTransaction roll the file back to its before-image — when the
+ * committed bytes cannot be re-parsed, the semantic roundtrip is not identical,
+ * or the committed file bytes diverge from the staged artifact. This is the
+ * "Bridge reopen → event/instruction semantic verify → rollback" boundary of
+ * the outer-chain write flow.
+ */
+export function createEmevdReopenValidator(
+  input: EmevdReopenValidatorInput
+): ValidatorContract {
+  return {
+    validatorId: 'emevd_reopen_verify',
+    targetResourceKinds: ['event'],
+    validationScope: ['after_commit'],
+    async validateAfterCommit(commit): Promise<ValidatorResult> {
+      const diagnostics: StructuredDiagnostic[] = [];
+      for (const committedPath of commit.committedPaths) {
+        const op = commit.operations.find((operation) => operation.targetPath === committedPath);
+        const envelope = await runBridge<EmevdReadEnvelope>({
+          command: 'read-emevd-document',
+          filePath: committedPath,
+          allowedRoots: input.allowedRoots,
+          timeoutMs: input.timeoutMs ?? 120_000
+        });
+        if (envelope.parseStatus === 'failed') {
+          diagnostics.push({
+            severity: 'error',
+            code: 'EMEVD_REOPEN_FAILED',
+            message: '提交后 Bridge 无法重开已提交的 EMEVD 资源。',
+            ...(op?.targetUri !== undefined ? { targetUri: op.targetUri } : {}),
+            details: { targetPath: committedPath, bridgeDiagnostics: envelope.diagnostics }
+          });
+          continue;
+        }
+        if (envelope.data?.roundTrip?.semanticIdentical !== true) {
+          diagnostics.push({
+            severity: 'error',
+            code: 'EMEVD_REOPEN_SEMANTIC_FAILED',
+            message: '提交后重开语义往返不一致。',
+            ...(op?.targetUri !== undefined ? { targetUri: op.targetUri } : {}),
+            details: { targetPath: committedPath }
+          });
+        }
+        if (op?.kind === 'file_replace' && op.newContentBase64) {
+          let committedBytes: Buffer;
+          try {
+            committedBytes = await readFile(committedPath);
+          } catch (error) {
+            diagnostics.push({
+              severity: 'error',
+              code: 'EMEVD_REOPEN_READ_FAILED',
+              message: error instanceof Error ? error.message : '提交后无法读取文件。',
+              targetUri: op.targetUri,
+              details: { targetPath: committedPath }
+            });
+            continue;
+          }
+          const expected = createHash('sha256')
+            .update(Buffer.from(op.newContentBase64, 'base64'))
+            .digest('hex');
+          const actual = createHash('sha256').update(committedBytes).digest('hex');
+          if (actual !== expected) {
+            diagnostics.push({
+              severity: 'error',
+              code: 'EMEVD_REOPEN_BYTE_MISMATCH',
+              message: '提交后文件字节与暂存产物不一致。',
+              targetUri: op.targetUri,
+              details: { targetPath: committedPath, expected, actual }
+            });
+          }
+        }
+      }
+      return {
+        ok: diagnostics.length === 0,
+        diagnostics,
+        scope: 'after_commit',
+        validatorId: 'emevd_reopen_verify'
+      };
+    }
+  };
+}
+
 /**
  * Production EMEVD DSL plan commit:
  * Bridge batch staging → file_replace PatchIR → WorkspaceTransaction
@@ -404,7 +519,9 @@ export async function commitEmevdPlanViaPatchEngine(
     targetUri: request.targetUri ?? pathToFileURL(request.sourcePath).toString(),
     targetPath: request.sourcePath,
     stagedBytes: staged.bytes,
-    expectedHash: request.expectedDocumentHash
+    // 修改目标始终是 outer source resource：磁盘上是 .dcx 时，file_replace 的
+    // content_hash 前置必须按 outer 文件字节（outerFileHash）比对，而不是 payload 哈希。
+    expectedHash: request.expectedOuterFileHash ?? request.expectedDocumentHash
   });
 
   const committed = await executePatchIrThroughTransaction(patch, {
@@ -412,7 +529,12 @@ export async function commitEmevdPlanViaPatchEngine(
     ...(request.session !== undefined ? { session: request.session } : {}),
     ...(request.operationLog !== undefined ? { operationLog: request.operationLog } : {}),
     ...(request.backupBaseDir !== undefined ? { backupBaseDir: request.backupBaseDir } : {}),
-    ...(request.recoveryDir !== undefined ? { recoveryDir: request.recoveryDir } : {})
+    ...(request.recoveryDir !== undefined ? { recoveryDir: request.recoveryDir } : {}),
+    // Bridge reopen 验证挂在事务的 after_commit 上：重开失败即自动回滚到 before-image。
+    appendValidators: [createEmevdReopenValidator({
+      allowedRoots: request.allowedRoots,
+      ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
+    })]
   });
   const commitDiagnostics: Array<{ severity: string; code: string; message: string }> =
     committed.diagnostics.map((d) => ({ severity: d.severity, code: d.code, message: d.message }));
@@ -427,15 +549,24 @@ export async function commitEmevdPlanViaPatchEngine(
   }
 
   // Re-read the committed file via Bridge (production re-read boundary).
+  // DCX 场景下 Bridge 重开报告的是 payload sourceHash + outerFileHash；字节一致
+  // 必须按 outer 容器哈希比对（与 C# writer 的 outputHash 口径一致）。
   const reRead = await runBridge<EmevdReadEnvelope>({
     command: 'read-emevd-document',
     filePath: request.sourcePath,
     allowedRoots: request.allowedRoots,
     timeoutMs: request.timeoutMs ?? 120_000
   });
-  const reReadHash = reRead.data?.sourceHash ?? '';
+  const sourceFormat = staged.result.sourceFormat ?? 'emevd';
+  const reReadSourceHash = reRead.data?.sourceHash ?? '';
+  const reReadOuterHash = reRead.data?.outerFileHash ?? '';
+  const expectedOutputHash = (staged.result.outputHash ?? '').toLowerCase();
+  const actualOutputHash = (sourceFormat === 'dcx' ? reReadOuterHash : reReadSourceHash).toLowerCase();
   const byteConsistent = reRead.parseStatus !== 'failed'
-    && reReadHash.toLowerCase() === (staged.result.outputHash ?? '').toLowerCase();
+    && actualOutputHash === expectedOutputHash
+    && (sourceFormat !== 'dcx'
+      || !reReadSourceHash
+      || reReadSourceHash.toLowerCase() === (staged.result.payloadHash ?? '').toLowerCase());
   const semanticIdentical = reRead.data?.roundTrip?.semanticIdentical === true;
   const reReadOk = byteConsistent && semanticIdentical;
 
@@ -452,13 +583,15 @@ export async function commitEmevdPlanViaPatchEngine(
           code: 'EMEVD_REREAD_FAILED',
           message: reRead.parseStatus === 'failed'
             ? '提交后重读失败：Bridge 无法解析已提交文件。'
-            : `提交后重读不一致：字节或语义往返未通过（期望 ${staged.result.outputHash}，实际 ${reReadHash}）。`
+            : `提交后重读不一致：字节或语义往返未通过（期望 ${staged.result.outputHash}，实际 ${reReadOuterHash || reReadSourceHash}）。`
         }])
   ];
 
   return {
     ok: reReadOk,
     ...(staged.result.outputHash ? { outputHash: staged.result.outputHash } : {}),
+    ...(staged.result.sourceFormat === 'dcx' ? { sourceFormat: staged.result.sourceFormat } : {}),
+    ...(staged.result.outerFileHash ? { outerFileHash: staged.result.outerFileHash } : {}),
     ...(staged.result.eventCount !== undefined ? { eventCount: staged.result.eventCount } : {}),
     ...(staged.result.instructionCount !== undefined
       ? { instructionCount: staged.result.instructionCount }
@@ -468,7 +601,7 @@ export async function commitEmevdPlanViaPatchEngine(
     ...(committed.changedFiles[0] !== undefined ? { committedPath: committed.changedFiles[0] } : {}),
     reRead: {
       ok: reReadOk,
-      outputHash: reReadHash,
+      outputHash: sourceFormat === 'dcx' ? reReadOuterHash : reReadSourceHash,
       eventCount: reRead.data?.eventCount ?? 0,
       instructionCount: reRead.data?.instructionCount ?? 0,
       semanticIdentical,
@@ -480,6 +613,10 @@ export async function commitEmevdPlanViaPatchEngine(
 
 interface EmevdReadEnvelope {
   sourceHash?: string;
+  /** "emevd" for raw payload; "dcx" when Bridge unwrapped a .dcx wrapper. */
+  sourceFormat?: string;
+  /** SHA-256 of the outer container bytes when opened from a .dcx. */
+  outerFileHash?: string;
   eventCount?: number;
   instructionCount?: number;
   roundTrip?: { semanticIdentical?: boolean; byteIdentical?: boolean };

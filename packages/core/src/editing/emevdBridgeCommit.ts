@@ -36,6 +36,12 @@ export type EmevdBridgeNativeMutation =
 export interface EmevdBridgeCommitResult {
   ok: boolean;
   outputHash?: string;
+  /** "emevd" for raw payload output; "dcx" when the staged artifact is a rebuilt outer DCX. */
+  sourceFormat?: 'emevd' | 'dcx';
+  /** SHA-256 of the outer container bytes (only for dcx output; the sealed file_replace expectation). */
+  outerFileHash?: string;
+  /** SHA-256 of the rebuilt EMEVD payload (for dcx output; reported as sourceHash by read-emevd-document). */
+  payloadHash?: string;
   eventCount?: number;
   instructionCount?: number;
   mutationCount?: number;
@@ -100,6 +106,9 @@ async function runEmevdWriteCommand(input: {
 }): Promise<EmevdBridgeCommitResult> {
   const result = await runBridge<{
     outputHash?: string;
+    sourceFormat?: 'emevd' | 'dcx';
+    outerFileHash?: string;
+    payloadHash?: string;
     eventCount?: number;
     instructionCount?: number;
     mutationCount?: number;
@@ -117,6 +126,11 @@ async function runEmevdWriteCommand(input: {
   return {
     ok,
     ...(result.data?.outputHash ? { outputHash: result.data.outputHash } : {}),
+    ...(result.data?.sourceFormat === 'dcx' || result.data?.sourceFormat === 'emevd'
+      ? { sourceFormat: result.data.sourceFormat }
+      : {}),
+    ...(result.data?.outerFileHash ? { outerFileHash: result.data.outerFileHash } : {}),
+    ...(result.data?.payloadHash ? { payloadHash: result.data.payloadHash } : {}),
     ...(result.data?.eventCount !== undefined ? { eventCount: result.data.eventCount } : {}),
     ...(result.data?.instructionCount !== undefined
       ? { instructionCount: result.data.instructionCount }

@@ -461,6 +461,24 @@ test('ROUTE-06: confirmed leaf 按注册表解析为 integration', () => {
   assert.deepEqual(genericBnd4, { domain: 'container', integrationId: 'container-editor', libraryKey: 'containers' });
 });
 
+test('TEXTURE-52A: menu 下的 .tpf.dcx 判 texture 而非 text', () => {
+  // formatId 由 resourceFileTypes 的 .tpf.dcx 规则给出 'tpf'，目录名 menu 不参与
+  // 分类——text 域规则（fmg-confirmed/msgbnd-confirmed）要求 formatId 为
+  // fmg/bnd4，永不匹配 tpf。所以 menu 下的 tpf 即使以「菜单」语义出现，
+  // 解析结果也只可能是 texture 或 null，绝不可能是 text。
+  const inMenu = resolveIntegrationForConfirmedLeaf('tpf', 'none', null);
+  assert.deepEqual(inMenu, { domain: 'texture', integrationId: 'texture-editor', libraryKey: 'textures' });
+  // 负向不变式：无论容器角色/语义子类型怎么给，tpf 的解析结果都落在
+  // {texture, null} 闭集里（tpf-confirmed 不要求角色，故仍回 texture；即便
+  // 未来加了约束走到 null），domain 永不为 'text'。
+  const arbitraryRole = resolveIntegrationForConfirmedLeaf('tpf', 'msg-binder', 'loose-table');
+  assert.ok(arbitraryRole === null || arbitraryRole.domain !== 'text');
+  // 对照：真正的 menu 文本资源（fmg loose-table）走 text，证明 Text 判据是
+  // formatId 驱动的，不是目录名驱动的。
+  const menuFmg = resolveIntegrationForConfirmedLeaf('fmg', 'none', 'loose-table');
+  assert.deepEqual(menuFmg, { domain: 'text', integrationId: 'text-editor', libraryKey: 'loose-text' });
+});
+
 test('ROUTE-06: 未确认 / 角色错配 / 语义子类型错配 → null', () => {
   // containerRole 决定具体规则：generic-binder 命中 generic-bnd4-confirmed，
   // 不会因 subtype 写着 gameparam-primary 而被 gameparam-confirmed 误选。

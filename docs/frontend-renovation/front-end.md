@@ -2,13 +2,20 @@
 
 > **最高优先级产品决定**
 >
-> SoulForge 的常规编辑器前端不再自行设计。以本机 `tools` 目录中 Smithbox（PARAM、GPARAM、Text、Map、Model、Texture、Material、通用 File Browser）与 DarkScript3（Event）为默认实现规范；Agent dock 照搬用户提供的 TRAE/Cursor 式参考截图。实施 Agent 不得“参考后重新设计”、现代化简化、改成卡片式网页界面，或用现有 SoulForge 组件反向限制目标结构。
+> SoulForge 的常规编辑器工作台不再自行设计。对照本机 `tools` 里的 Smithbox 2.2.4 与 DarkScript3，复制的是**选择链、窗格身份、信息密度和操作顺序**，不是把 ImGui 可拆停靠翻译成固定 CSS 四栏，也不是“参考后重新设计”成卡片式网页。Agent dock 是 SoulForge 自有外壳，构图按 TRAE/Cursor；参考截图目前不在仓库内。
 >
-> 本文的各栏结构与比例是**实施前初值**。真实权威是 §2.4 的 REF-01 实测清单：Agent 必须亲自打开参考程序测量并记录 §2.4 的全部项目。实测结果与本文初值冲突时，以实测为准，并在同一张 UI 卡内同步更新本文对应规格与 §19.2 勾选项，使差异归入 §1.2；不得静默保留两套互相矛盾的结构规格。
+> **结构权威已经写入本文 §2.5 与 §7–§11**，来源是本机
+> `D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\imgui.ini`
+> （Smithbox 2.2.4，约 2560×1440 工作区的上次真实停靠）。实施 Agent 必须打开参考程序观察行为（键盘、hover、空态、工具内容），但**不得另造一套与 §2.5 / §7–§11 不同的窗格拓扑**，也不得为“同步实测”而改写本文宪法段落。若本机换了更新的 Smithbox 且拓扑明显不同，停下来报告调用方，不要自行改规范。
 >
-> 本文件是低推理能力实施 Agent 的机械操作手册。本文中的“必须 / 不得”分别等价于 `MUST / MUST NOT`。
+> 本文中的“必须 / 不得”分别等价于 `MUST / MUST NOT`。
 >
-> 本文件不是 release、Gate、authority、Evidence 或进度来源，也不增加任何代码实施前置门槛。是否允许修改由当前任务调用方和仓库更高优先级规则决定；实施 Agent不得从本文推导额外的实施阻塞条件。
+> 本文件不是 release、Gate、authority、Evidence 或进度来源，也不增加任何代码实施前置门槛。是否允许修改由当前任务调用方和仓库更高优先级规则决定；实施 Agent 不得从本文推导额外的实施阻塞条件。
+>
+> **两层，不要混：**
+>
+> 1. **编辑器工作台**（PARAM / GPARAM / Text / Map / Model / Texture / Material / Files，Event 用 DarkScript3）：抄对照工具。
+> 2. **SoulForge 外壳**（领域栏语义目录、右侧 Agent、底部 Problems、Change Review、能力门控、D0–D10 写链）：不是抄来的。做外壳卡时不得假装在抄 Smithbox；做工作台卡时不得顺手发明另一套外壳。
 
 ---
 
@@ -30,9 +37,9 @@
 
 ### 0.2 实施者必须按此顺序工作
 
-1. 打开第 2 节指定的本机成熟工具，观察对应页面并保存参考截图。
-2. 阅读当前生产入口；不得只新增平行组件而不替换错误生产路径。
-3. 按第 18 节的技术依赖顺序实施；这些编号只是本文内部的工程步骤。
+1. 打开第 2 节指定的本机成熟工具，观察对应页面的**行为**并保存参考截图。窗格拓扑以本文 §2.5 / §7–§11 为准，不要重新发明栏数。
+2. 阅读当前生产入口和 §16 的「已落地」列；已对齐实测结构的代码不得推倒重来。
+3. 按第 18 节的技术依赖顺序实施；这些编号只是本文内部的工程步骤。UI 卡不得顺手写 native writer；writer 卡不得顺手改工作台栏数。
 4. 先写负向测试和数据契约，再实现最小改动。
 5. 逐条运行卡片测试；失败时停在当前技术问题，不跨卡“顺手修复”。
 6. 保存参考工具与 SoulForge 的同尺寸对照截图。
@@ -76,7 +83,7 @@
 
 ## 1. 不可突破的产品结论
 
-### 1.1 常规编辑器默认照搬 Smithbox
+### 1.1 常规编辑器默认照搬 Smithbox 的工作方式
 
 以下编辑器必须以 Smithbox 为默认实现规范，而不是灵感来源：
 
@@ -91,58 +98,68 @@ Material
 通用 File Browser
 ```
 
-“基本照搬”具体包含：
+Event 不抄 Smithbox 的 EMEVD Editor，抄 DarkScript3 的源码工作流（§11）。这是产品决定，不是“还没量到 Smithbox”。
 
-- 相同的编辑器职责划分；
-- 相同的栏位数量与从左到右顺序；
-- 相近的默认栏宽比例；
-- 相同的搜索框和低频工具所在区域；
+“照搬”具体包含：
+
+- 相同的编辑器职责划分（PARAM 不管 GPARAM，Text 不管 TPF）；
+- 相同的**窗格身份**和**父子选择链**（见 §2.5）；
+- 相近的默认占比（允许 ±4% 或对应像素的 splitter 误差；不要为对齐百分比重写布局）；
+- 相同的搜索框所在窗格；
 - 相同的列表、表格和属性编辑密度；
-- 相同的父子选择链；
 - 相同的整行选中、焦点、hover 和滚动模型；
-- 相同的多文档、dirty、只读和工具折叠位置；
+- 相同的多文档、dirty、只读状态；
 - 相同的“列表是列表、表格是表格、属性是属性”桌面工具构图。
 
-其中“栏位数量、顺序、默认比例”的最终值以 §2.4 REF-01 实测清单为准（见文首产品决定块与 §2.4 步骤 8）。
+Smithbox 是 Dear ImGui **可拆停靠**。SoulForge 复制的是它的**默认停靠拓扑**，实现为稳定的可拖宽 pane，**不**实现完整 ImGui docking（用户把窗格拖成任意布局）。工具在 Smithbox 里经常是右侧栈、底栏或独立可拆窗，不是“每个编辑器都必须有一条 Tools 第四数据栏”。
 
 实施 Agent 不得：
 
 - 观察 Smithbox 后自行重新设计；
-- 以“更现代”为由减少栏位或移动工具；
+- 以“更现代”为由合并窗格（尤其禁止把 GPARAM 的 Fields 与 Values 合成一栏）；
+- 把横向选择链改成移动端竖向卡片堆；
 - 把 pane 改成圆角卡片；
-- 把专业工作台堆叠成移动端卡片；
 - 用大标题、欢迎页、统计卡或证据卡占据编辑区；
 - 因现有 SoulForge 组件不兼容而保留错误结构；
-- 只模仿配色而忽略信息架构和操作顺序。
+- 只模仿配色而忽略信息架构和操作顺序；
+- 把「三栏数据区」判成缺陷并改成四条等宽栏；
+- 抄 Smithbox 在 ParamDef 失败时把 table 从列表里拿掉——SoulForge 必须留下失败项并给出结构化诊断。
 
-### 1.2 允许与 Smithbox 不同的项目
+### 1.2 允许与对照工具不同的项目
 
-只有以下差异无需复制 Smithbox：
+以下差异不是缺陷，禁止为“更像 Smithbox”而改掉：
 
 1. SoulForge 名称、图标和现有钢铁 / 灰烬 / 和纸 / 余火 token。
-2. 主窗口右侧 TRAE/Cursor 式 Agent dock。
+2. 主窗口右侧 TRAE/Cursor 式 Agent dock（外壳，不是编辑器）。
 3. Problems、Change Review、备份、验证、恢复和自动回滚。
 4. 未获得真实 read/write 能力的入口必须隐藏、只读或失败关闭。
 5. 不复制第三方源码、品牌、图标、素材、字符串和受限元数据。
 6. renderer 无文件系统权限、main-owned 状态、Bridge/Patch Engine 安全边界。
+7. 语义 `EditorCatalog` 与能力门控（Smithbox 没有这套协议）。
+8. 独立 `container` 域（Smithbox 顶栏没有 Container Editor；未识别资源走 File Browser 两栏）。
+9. Event 用 DarkScript3 源码工作流，不用 Smithbox EMEVD Editor。
+10. Talk 并进 `behavior`，TimeAct 与 Animation 并进 `animation`，Cutscene 暂留 Files（§2.6）。
+11. ParamDef / 解析失败的 table、bank、FMG 仍留在列表并标失败，不从列表消失。
+12. 不实现 Smithbox 的完整 dock 重排；PARAM 双视图对比是后续卡，缺席不是第一张 UI 卡的缺陷。
 
-除上述六项外，实施者没有另行设计的权限。
+除上述项外，实施者没有另行设计编辑器工作台的权限。
 
 ### 1.3 明确禁止的当前产品形态
 
-以下形态一律视为阻断错误（结构类条目的判定基准随 REF-01 实测更新，见文首产品决定块）：
+以下形态一律视为阻断错误：
 
 - 顶部显示 `PARAM 36`，其中 36 是磁盘文件数；
 - PARAM 第一栏列出 `param/drawparam/*.gparam.dcx`；
 - `.bak/.prev` 出现在普通资源列表、搜索、标签或当前文档；
 - GPARAM 文件被送入 PARAM Editor；
-- PARAM 只有三栏，缺少 Tools；
-- Text 因 `menu/` 路径接收 TPF；
+- GPARAM 把 Fields 和 Values 合成一栏，或把第一栏做成“磁盘文件总表”却走 PARAM 数据模型；
+- Text 把正文做成与 Categories/Entries 并列的第四竖栏，或因 `menu/` 路径接收 TPF；
 - EMEVD 默认显示“四视图”；
 - Evidence、Hex 或 parser dump 常驻日常编辑器；
 - Agent 显示模型管理、工具库存、会话计数和任务控制台；
 - 一个资源同时渲染多个编辑器；
-- 巨型错误卡清空整个工作台。
+- 巨型错误卡清空整个工作台；
+- 把 PARAM 的 Params→Rows→Fields 数据区改成四条等宽栏，或把失败 table 从列表删除以“更像 Smithbox”。
 
 ### 1.4 本机工具、metadata、Oodle 与语料边界
 
@@ -170,18 +187,18 @@ D:\mystream\Sekiro Shadows Die Twice\tools
 
 ### 2.2 主参考程序
 
-| SoulForge 页面 | 必须先查看的参考程序 | 参考内容 | 结构权威性 |
+| SoulForge 页面 | 必须先查看的参考程序 | 参考内容 | 结构权威（已写入 §2.5） |
 | --- | --- | --- | --- |
-| PARAM | `D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\Smithbox.OpenGL.exe` | Param Editor 四栏、列表密度、字段值、Tools | 真实 Smithbox：Params→Rows→Fields 是选择链；Tools 以 Smithbox 实际入口与折叠方式为准（本文初值：PARAM/GPARAM/Text 各四栏，见 §7.1/§8.1/§9.1） |
-| GPARAM | 同一 Smithbox | Graphics Param Editor 的 bank/group/value 层级 | 真实 Smithbox 实际 pane 结构，以 REF-01 实测为准（本文初值：Banks/Groups/Fields-Values/Tools） |
-| Text | 同一 Smithbox | Text Editor 的语言、容器、FMG、正文和 Tools | 真实 Smithbox 实际 pane 结构，以 REF-01 实测为准（本文初值：Languages-Containers-FileList/Entries/Content/Tools） |
-| Map | 同一 Smithbox | 资源树、viewport、inspector、tools | 真实 Smithbox 实际布局，以 REF-01 实测为准 |
-| Model | 同一 Smithbox | 模型资源树、viewport、属性检查 | 真实 Smithbox 实际布局，以 REF-01 实测为准 |
-| Texture | 同一 Smithbox | 纹理列表、预览、metadata/tools | 真实 Smithbox 实际布局，以 REF-01 实测为准（Texture 无 viewport，不套用“Resource Tree | Viewport | Inspector | Tools”通用四栏） |
-| Material | 同一 Smithbox | 材质列表、属性和值编辑 | 真实 Smithbox 实际布局，以 REF-01 实测为准（Material 无 viewport） |
-| Files | 同一 Smithbox | File Browser 的物理层级和操作密度 | 真实 Smithbox 实际布局，以 REF-01 实测为准 |
-| Event | `D:\mystream\Sekiro Shadows Die Twice\tools\事件编辑器3.4.1\DarkScript3.exe` | 源码、大纲、查找、跳转、诊断和多文档 | DarkScript3 实际布局，以 REF-01 实测为准（本文初值：Files/Outline 260px + Source + optional Inspector 320px） |
-| Agent | TRAE/Cursor 式 Agent dock | 顶栏、空闲态、消息流、底部 composer | 依赖用户提供的 TRAE 参考截图；**该参考图目前不在 `tools` 目录或仓库内，且未在 REF-01 的实测范围内**。若拿不到参考图：§12 的结构初值不可用来宣布「与 TRAE 一致」；「未对照实测」的口径必须在 AGENT-60A 报告中声明，并由调用方决定是补参考图实测、接受初值作为产品决定，还是暂停本卡。任何情况下不得由 flash Agent 自行宣布构图已与 TRAE 一致 |
+| PARAM | `D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\Smithbox.OpenGL.exe` | Param Editor：Params→Rows→Fields、字段控件、右侧工具栈、可选双视图 | 三栏数据 + 右侧 Actions 叠 Configuration。双视图是后续卡 |
+| GPARAM | 同一 Smithbox | Gparam Editor：Files→Groups→Fields→Values + 右侧 Toolbar | **五区**。Fields 与 Values 分开。第一栏窗格名是 Files，项是逻辑 bank |
+| Text | 同一 Smithbox | Text Editor：Categories + 右上 Entries + 右下 Text | **不是**四条竖栏。Toolbar 叠在 Categories 下方 |
+| Map | 同一 Smithbox | Map Object List、Viewport、Properties；其余为可拆工具窗 | 三主栏。不要强行加第四条 Tools 数据栏 |
+| Model | 同一 Smithbox | 左侧树栈、Viewport、Properties | 三主栏 + Asset Browser 等可拆窗 |
+| Texture | 同一 Smithbox | Container list、Texture list、Viewer、Properties | 无 3D viewport。容器与纹理是两级列表 |
+| Material | 同一 Smithbox | File list、Material list、属性/值 | 无 viewport。不要套 Map 四栏模板 |
+| Files | 同一 Smithbox File Browser | Browser List + Item Viewer | **两栏**，不是四栏 |
+| Event | `D:\mystream\Sekiro Shadows Die Twice\tools\事件编辑器3.4.1\DarkScript3.exe` | 标签页源码、查找替换、编译输出、跳转 | **故意不抄** Smithbox EMEVD Editor。DarkScript3 是 WinForms 源码 IDE，不是 260/320 三栏 |
+| Agent | TRAE/Cursor 式 Agent dock | 顶栏、空闲态、消息流、底部 composer | 外壳。参考图不在 `tools` 或仓库内。不得宣布「已与 TRAE 一致」 |
 
 Smithbox OpenGL 无法启动时，允许使用：
 
@@ -201,28 +218,90 @@ D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\
 
 ### 2.4 每张 UI 卡的强制参考流程
 
-实施任何编辑器前必须完成以下步骤：
+窗格拓扑已经由 §2.5 钉死。REF-01 要补的是**行为与密度证据**，不是再量一套栏数。
 
-1. 验证参考程序路径存在。若路径变化，先在同一 `tools` 根下按程序名查找。确实找不到时：结构类实施（§6–§11 的 pane 数、顺序、栏宽、行高、Tools 入口）暂停，把缺失报告给调用方，由调用方提供参考截图或实测清单后继续——结构未实测前不得实现，也不得以本文初值顶替实测；与结构无关的卡（类型、decoder、IPC、native read、测试）不受影响，继续推进。不得把“参考路径变化”当作停止全部实现的理由，也不得在无实测时宣称已与参考程序一致。
+1. 验证参考程序路径存在。若路径变化，先在同一 `tools` 根下按程序名查找。找不到时：行为观察暂停并报告调用方；与结构无关的卡（类型、decoder、IPC、native read、测试）继续。不得把“参考路径变化”当作停止全部实现的理由。
 2. 启动参考程序，打开对应编辑器。
 3. 只读观察，不在参考工具中保存游戏或 Mod 文件。
-4. 记录以下项目：
-   - pane 数量；
-   - pane 从左到右顺序；
-   - 默认宽度与最小宽度；
-   - 标题、过滤框和工具按钮位置；
+4. 对照 §2.5 确认窗格身份一致后，记录行为：
+   - 标题、过滤框和工具按钮在哪个窗格；
    - 表头、行高、列对齐和省略规则；
    - 选中、hover、focus、disabled、readonly 和 dirty 状态；
    - 各 pane 独立滚动边界；
    - 键盘方向键、Enter、Escape、搜索和快捷键行为；
-   - 空表、无匹配、失败和部分解析状态；
-   - 与本文 §6–§11 初值不一致的结构项（pane 数、顺序、栏宽、行高、Tools 入口）逐一记录差异。
+   - 空表、无匹配、失败和部分解析状态。
 5. 把参考截图保存到当前任务运行器的临时/交付产物区，不写入仓库，也不把截图自动登记成发布或能力证明。
 6. 以相同窗口尺寸保存 SoulForge 对照截图。
-7. 产出第 17 节的 Copy、Density、Swap、Squint、Grayscale 审查所需的证据（同尺寸截图 + 结构清单）。**五项审查本身是人工/调用方判断，不是 flash Agent 自己能执行的完成条件**；Agent 不得在报告里宣称「五项审查通过」，只能报告「已产出五项审查所需证据」。
-8. 实测与本文初值冲突时：以实测为准，同一张 UI 卡内同步更新本文对应结构规格与 §19.2 勾选项（差异按第 1.2 节归类后不视为差异）；无法同步时任务不得完成，且必须在报告中写明哪一项结构规格冲突、本文哪一节未同步。实测不存在冲突时，以本文初值继续。
+7. 产出第 17 节五项审查所需的证据（同尺寸截图 + 结构清单）。**五项审查是人工/调用方判断**；Agent 不得宣称「五项审查通过」，只能报告「已产出五项审查所需证据」。
+8. 若本机参考程序的窗格拓扑与 §2.5 明显冲突（换了大版本、用户重排后的 imgui.ini 不再代表默认拓扑）：**停下来报告调用方**，不要改本文，也不要按新拓扑实施。splitter 几个像素的偏差不是冲突。
 
-禁止仅阅读本文或查看一张裁切截图后凭印象实现。
+禁止仅阅读本文或查看一张裁切截图后凭印象实现。禁止为对齐百分比而改写本文。
+
+### 2.5 本机已封存的默认停靠（结构权威）
+
+来源：`...\smithbox\Smithbox-2.2.4-2026-07-24-a\win-x64\imgui.ini`，工作区约 2560×1440。像素是默认停靠的记录值，实施时按比例缩放并允许 splitter 误差。
+
+```text
+PARAM   Params 395 | Rows 740 | Fields 809 | 右侧工具栈 Actions↑ Configuration↓ 674
+        选择链：Params → Rows → Fields
+        另有 Mass Edit / Data Import & Export / 最多 10 个 ParamEditorView
+        第一张 UI 卡做单视图 + 右侧工具栈；双视图是 PARAM-10D
+
+GPARAM  Files 707 | Groups 340 | Fields 449 | Values 636 | Toolbar 515
+        选择链：Files(bank) → Groups → Fields → Values
+        禁止合并 Fields/Values；禁止把第一栏做成 PARAM table 列表
+
+TEXT    左 Categories 379（Toolbar 叠在其下约 366×662）
+        右上 Text Entries 1694×725
+        右下 Text 1694×602
+        选择链：language/container/FMG → entry → content
+
+MAP     Map Object List 483 | Viewport 1398 | Properties 682
+        另有 Profiling / Render Groups / Asset Browser / Prefabs / Selections
+        这些是可拆工具窗，不是必做的第四数据栏
+
+MODEL   左树栈（Hierarchy 或 Source/File/Contents 竖叠）| Viewport | Properties
+        Asset Browser 可拆
+
+TEXTURE Container list | Texture list | Viewer | Properties
+        Toolbar 可拆；无 3D viewport
+
+MATERIAL File list | Material list | 属性/值
+         本机 ini 里列表几乎全宽，属性跟选择走；不要发明 Preview 第四栏
+
+FILES   Browser List 457 | Item Viewer 1454
+        只有两栏
+
+EVENT   DarkScript3：菜单 + 文档标签 + 源码占主区 + 查找替换 + 编译输出
+        可选 Outline；Problems 走 SoulForge 底部 dock
+        不要做 260/320 固定三栏来“假装量过”
+
+AGENT   不是 tools 目录里的程序。§12 数值是外壳初值，不得报成 TRAE 实测
+```
+
+### 2.6 Smithbox 顶栏编辑器与 SoulForge 域
+
+Smithbox 顶栏还有本文没有做成一等域的编辑器。映射固定如下，实施时不得另开平行顶栏：
+
+| Smithbox 顶栏 | SoulForge 域 | 说明 |
+| --- | --- | --- |
+| Param Editor | `param` | |
+| Gparam Editor | `gparam` | 旧名 Graphics Editor 视为同一编辑器 |
+| Text Editor | `text` | |
+| Map Editor | `map` | |
+| Model Editor | `model` | |
+| Texture Viewer | `texture` | |
+| Material Editor | `material` | |
+| Particle Editor | `vfx` | |
+| File Browser | `files` | |
+| EMEVD Editor | （不用） | Event 走 DarkScript3 |
+| Script Editor | `script` | |
+| Talk Editor | `behavior` | 与 HKX Behavior 合并 |
+| Behavior Editor | `behavior` | |
+| TimeAct Editor / Animation Editor | `animation` | 合并 |
+| Cutscene Editor | `files` | 暂无独立域 |
+| （无） | `container` | SoulForge 自有；已确认 binder 的专属工作台 |
+| （无） | `project` | SoulForge 自有 |
 
 ---
 
@@ -886,14 +965,15 @@ export type WorkbenchRoute =
 - 拖动宽度按 workspace + editor id 持久化；
 - 键盘调整每次 16px；
 - 不用阴影区分普通 pane；
-- 日常表格和属性区不使用圆角卡片。
+- 日常表格和属性区不使用圆角卡片；
+- 复制 Smithbox 的默认停靠，不实现完整 ImGui docking。
 
 ### 6.3 高密度 token
 
 后续实现必须补齐语义 token，不得把数字散落在组件 inline style：
 
 ```css
-/* 以下数值为实施前初值；准确值由 REF-01 对 Smithbox 实测后落入 SoulForge token，不得凭空发明另一套密度 */
+/* 密度初值；行高/表头以打开 Smithbox 观察到的为准，落入 token，不得另发明一套宽松网页密度 */
 --editor-row-height: 24px;
 --editor-row-height-compact: 22px;
 --editor-header-height: 32px;
@@ -916,16 +996,16 @@ export type WorkbenchRoute =
 
 ## 7. PARAM Editor：照搬 Smithbox Param Editor
 
-### 7.1 固定结构（初值，以 REF-01 实测为准）
+### 7.1 固定结构（§2.5）
 
 ```text
-Params 20% | Rows 29% | Fields 35% | Tools 16%
-min 180px  | min 260px| min 320px  | min 200px
+Params ~395px (min 180) | Rows ~740px (min 260) | Fields ~809px (min 320)
+| 右侧工具栈 ~674px（上 Actions / 下 Configuration，min 200）
 ```
 
-以上比例与最小宽度是实施前初值，须经 REF-01 对 Smithbox Param Editor 实测后按实测更新本文。Params→Rows→Fields 是选择链而非并列三栏；Tools 的入口与折叠方式以 Smithbox 实际行为为准，若 Smithbox 没有固定的右侧第四栏，则以实测记录的真实入口为准并在本卡内改写本节。
+这是三栏**数据区**加右侧工具栈，不是四条并列数据栏。Params→Rows→Fields 是选择链。当前工作树的三栏 ParamWorkbench 数据区方向正确，缺的是右侧工具栈、逻辑库标题和局部错误，不要推倒改成四条等宽栏。
 
-第一栏必须直接显示 GameParam 内部 PARAM tables，不显示 gameparam/drawparam 物理文件。
+第一栏必须直接显示 GameParam 内部 PARAM tables，不显示 gameparam/drawparam 物理文件。解析失败的 table 留在列表并标失败。
 
 ### 7.2 打开行为
 
@@ -975,9 +1055,9 @@ min 180px  | min 260px| min 320px  | min 200px
 
 字段编辑器必须按 metadata 类型选择，不得把全部值渲染成自由文本。
 
-### 7.6 Tools 栏
+### 7.6 右侧工具栈
 
-布局和折叠方式照搬 Smithbox。只有真实能力可显示：
+Smithbox 默认是右侧上下两叠：Actions 和 Configuration。SoulForge 做成同一右栏里的两个折叠组。只有真实能力可显示：
 
 - Sort Rows；
 - Row Names；
@@ -988,17 +1068,16 @@ min 180px  | min 260px| min 320px  | min 200px
 - Reference Jump；
 - Undo/Redo。
 
-未接通真实实现的工具必须隐藏，不能放 disabled 假按钮吸引用户。
+未接通真实实现的工具必须隐藏，不能放 disabled 假按钮吸引用户。Mass Edit / Data Import & Export 在 Smithbox 是独立窗，有真实实现再作为右栏组或二级抽屉出现。PARAM 双视图对比（`ParamEditorView##0/##1`）是 PARAM-10D，不是 10B 的缺陷。
 
 ### 7.7 明确禁止
-
-以下负向清单是当前错误实现的快照；“三栏 PARAM/ROW/FIELD”的判定基准随 REF-01 实测结构更新：实测结构与本文初值不同时，本卡同步更新本节与测试断言，禁止在三栏与四栏之间留下两套互相矛盾的规定。
 
 ```text
 param/drawparam/*.gparam.dcx
 gameparam.parambnd.dcx.bak
 磁盘文件大小
-三栏 PARAM/ROW/FIELD（当前快照；以 REF-01 实测结构为准）
+把三栏数据区改成四条等宽栏
+失败 table 从列表消失
 圆角外壳
 整页错误卡
 Evidence/Hex 折叠区进入默认 DOM
@@ -1021,25 +1100,27 @@ PARAM 36 项
 
 ## 8. GPARAM Editor：照搬 Smithbox Graphics Param Editor
 
-### 8.1 固定结构（初值，以 REF-01 实测为准）
+### 8.1 固定结构（§2.5）
 
 ```text
-Banks 18% | Groups 24% | Fields / Values 42% | Tools 16%
-min 180px | min 220px | min 360px            | min 200px
+Files ~707px (min 180) | Groups ~340px (min 180)
+| Fields ~449px (min 220) | Values ~636px (min 260)
+| Toolbar ~515px (min 200)
 ```
 
-以上比例与最小宽度是实施前初值，须经 REF-01 对 Smithbox Graphics Param Editor 实测后按实测更新本文；Tools 入口以 Smithbox 实际行为为准。
+五区，从左到右。Smithbox 窗格名就是 Files / Groups / Fields / Values / Toolbar。禁止把 Fields 和 Values 合成「Fields/Values」一栏。当前 `GparamWorkbench` 的四栏合并实现必须改回五区，不要当作成品。
 
 ### 8.2 层级
 
 ```text
 Draw / Graphics Parameters
-→ map/area bank
+→ map/area bank    （窗格标题 Files）
 → group
-→ field/value
+→ field
+→ value
 ```
 
-多个 `.gparam.dcx` 是内部 banks，不是顶层磁盘资源列表。Bank 主标签优先显示 Bridge 解析的 map/area identity，文件名仅作为 tooltip 或 Details 次级信息。
+多个 `.gparam.dcx` 是同一 library 下的 banks，不是顶层磁盘资源列表。第一栏主标签优先显示 Bridge 解析的 map/area identity，文件名仅作为 tooltip 或 Details。选择链在 Fields 与 Values 之间仍是父子：选 field 后加载 values。
 
 ### 8.3 能力关闭
 
@@ -1054,16 +1135,15 @@ GPARAM 与 PARAM 可共享搜索、diff 和 Change Review 基础设施，但不�
 
 ## 9. Text Editor：照搬 Smithbox Text Editor
 
-### 9.1 固定结构（初值，以 REF-01 实测为准）
+### 9.1 固定结构（§2.5）
 
 ```text
-Languages / Containers / File List 24%
-| Text Entries 30%
-| Text Content 30%
-| Tools 16%
+左：Text Categories ~379px（min 220）；Toolbar 叠在 Categories 下方
+右上：Text Entries 占剩余宽度，约 55% 高度（min 240）
+右下：Text 正文占剩余宽度，约 45% 高度（min 200）
 ```
 
-最小宽度：`260 / 300 / 320 / 200px`。以上是实施前初值，须经 REF-01 对 Smithbox Text Editor 实测后按实测更新本文；Tools 入口以 Smithbox 实际行为为准。
+这是「左树 + 右上条目 + 右下正文」，不是四条竖栏。当前 `FmgWorkbenchPanel` 的横向四栏骨架必须改成这个拓扑。
 
 ### 9.2 固定选择链
 
@@ -1079,12 +1159,11 @@ language
 
 ### 9.3 必须复制
 
-- 左侧语言分组与展开；
-- container 和 FMG logical file list；
-- entry 的 ID 与预览文本；
-- 中央/右侧正文编辑；
-- Text Tools 折叠组；
-- 每栏搜索和独立滚动；
+- 左侧 Categories：语言分组、container、FMG logical file list；
+- 右上 Entries：ID 与预览文本；
+- 右下 Text：正文编辑（叠在 Entries 下面，不是第四竖栏）；
+- Tools 叠在 Categories 下方或作为 Categories 栏内折叠组；
+- 每区搜索和独立滚动；
 - Unicode、IME、换行和 dirty 状态。
 
 ### 9.4 明确路由
@@ -1104,10 +1183,13 @@ unknown menu child           → Files candidate
 
 ### 10.1 Container / BND4
 
-固定结构（初值，以 REF-01 实测为准）：
+`container` 是 SoulForge 自有域，Smithbox 顶栏没有对应编辑器。不要宣称这是「照抄 Smithbox 四栏」。
+
+已确认 binder 的工作台用选择链，而不是 File Browser 的两栏物理树：
 
 ```text
-Containers 20% | Entries 28% | Preview / Source / Bytes 36% | Metadata / Tools 16%
+Containers | Entries | Preview / Source（Bytes 仅显式打开）
+右侧或栏内：Metadata；未接通的 Tools 隐藏
 ```
 
 - 第一栏只列逻辑容器，不列 backup/cache；
@@ -1121,11 +1203,13 @@ Yabber 只作容器层级和结果对照；SoulForge 的生产读写仍由 Bridg
 
 ### 10.2 Script
 
-固定结构（初值，以 REF-01 实测为准）：
+Smithbox Script Editor 是文件列表 + 源码。SoulForge 默认：
 
 ```text
-Container / Files 22% | Source / Read-only Disassembly flex | Symbols / Metadata 24% | Tools 16%
+Container / Files | Source / Read-only Disassembly（主区 flex）| 可选 Symbols / Metadata
 ```
+
+工具未接通则隐藏，不要为凑四栏造 Tools 空栏。
 
 - plaintext Lua/HKS 按真实 encoding、BOM、newline、NUL policy 显示；
 - bytecode 只显示真实反编译或明确的只读字节视图；
@@ -1135,9 +1219,11 @@ Container / Files 22% | Source / Read-only Disassembly flex | Symbols / Metadata
 
 ### 10.3 Behavior 与 Animation
 
+Talk 与 HKX Behavior 都进 `behavior`；TimeAct 与 Animation 都进 `animation`（§2.6）。工作台按真实结构，不要套通用四栏：
+
 ```text
-Behavior: Machines/States | Conditions/Commands | Inspector | Tools
-Animation: Containers/Animations | Timeline/Events | Inspector | Tools
+Behavior:  Files / Machines / States | Conditions / Commands | Inspector
+Animation: Files / Animations | Timeline / Events | Inspector
 ```
 
 - Behavior 必须表达 machine → state → transition/condition/action；
@@ -1145,25 +1231,23 @@ Animation: Containers/Animations | Timeline/Events | Inspector | Tools
 - 没有真实结构 read 时先完成对应 read 卡，不用通用资源列表冒充；
 - writer 缺失时保留完整只读专业工作台，而不是空白页面。
 
-### 10.4 Smithbox 是 Map 与资产的默认布局规范
+### 10.4 不要套用“四栏万能模板”
 
-这些页面必须先打开 Smithbox 对应编辑器，复制其 pane 顺序、viewport 占比、inspector 分组和 tools 位置。下面是通用初值，真实布局以 REF-01 对各编辑器的实测为准——没有 viewport 的编辑器（Texture、Material 等）不套用“Resource Tree | Viewport | Inspector | Tools”四栏，按实测布局实施：
-
-```text
-Resource Tree | Viewport / Editor | Inspector | Tools
-```
+Map / Model 有 viewport；Texture / Material / Files 没有。禁止把所有资产页都做成 `Resource Tree | Viewport | Inspector | Tools`。
 
 ### 10.5 Map / Model / Texture / Material / VFX
 
-每个格式是独立技术卡，不允许用一个 `ASSET` 卡让 Agent自行挑一种。以下为初值，均以 REF-01 实测为准：
+每个格式是独立技术卡，不允许用一个 `ASSET` 卡自行挑一种。结构以 §2.5 为准：
 
 ```text
-Map:      Resource Tree | Viewport | Entity Inspector | Tools
-Model:    Model Tree    | Viewport | Mesh/Material Inspector | Tools
-Texture:  Banks/List    | Texture Preview | Metadata | Tools
-Material: Material List | Properties/Values | Preview/References | Tools
-VFX:      Effect Tree   | Preview/Graph when real | Inspector | Tools
+Map:      Map Object List | Viewport | Properties
+Model:    左树栈 | Viewport | Properties
+Texture:  Container list | Texture list | Viewer | Properties
+Material: File list | Material list | Properties / Values
+VFX:      Effect / Particle list | 真实预览（没有就不要假 viewport）| Inspector
 ```
+
+可拆工具窗（Asset Browser、Prefabs、Render Groups、Toolbar）有真实能力再加，不要为空凑栏。
 
 ### 10.6 能力门控
 
@@ -1175,7 +1259,7 @@ VFX:      Effect Tree   | Preview/Graph when real | Inspector | Tools
 
 ### 10.7 Files
 
-Files 是唯一允许显示真实物理目录、文件、suffix、format candidate、artifact role 和诊断来源的编辑器。
+Files 照抄 Smithbox File Browser 的**两栏**：`Browser List | Item Viewer`。它是唯一允许显示真实物理目录、文件、suffix、format candidate、artifact role 和诊断来源的编辑器。
 
 Files 必须承担：
 
@@ -1197,17 +1281,20 @@ Files 不能把 candidate 状态伪装为 ready editor。
 D:\mystream\Sekiro Shadows Die Twice\tools\事件编辑器3.4.1\DarkScript3.exe
 ```
 
-Event 不使用 Smithbox Param 四栏，也不保留 SoulForge “EMEVD 四视图”。
+Event **故意不抄** Smithbox EMEVD Editor，也不保留 SoulForge “EMEVD 四视图”。对照物是 DarkScript3：菜单 + 文档标签 + 源码占主区 + 查找替换 + 编译输出。
 
-### 11.2 固定结构（初值，以 REF-01 实测为准）
+### 11.2 固定结构
 
 ```text
-Event Files / Outline 260px
-| Source Editor flex
-| optional Inspector 320px
+文档标签
+| 可选 Outline（用户打开才显示，不要做成必有的 260px 死栏）
+| Source Editor 占满剩余
+| 可选 Inspector（显式打开）
 
-Problems / Output bottom dock
+Problems / Output → SoulForge 底部 dock
 ```
+
+不要发明 `260px + flex + 320px` 三栏来假装量过 DarkScript3。
 
 ### 11.3 Source Editor
 
@@ -1241,7 +1328,7 @@ Problems / Output bottom dock
 
 ### 12.1 产品决定
 
-Agent 常驻主窗口右侧，照搬 TRAE/Cursor 式构图；不是独立窗口，不允许重新停靠成其他 pane，也不是旧任务管理控制台。**参考来源缺口：** §2.2 所列 TRAE 参考截图目前不在 `tools` 目录或仓库内。拿不到参考图时，不得把本节初值当作「与 TRAE 一致」的证据，处置按 §2.2 Agent 行：报告缺失、由调用方决定补图实测 / 接受初值为产品决定 / 暂停本卡。拿到参考图后，以 §2.4 实测流程为准并同步本节数值。
+Agent 是 SoulForge 外壳，不是 Smithbox 对照物。常驻主窗口右侧，构图按 TRAE/Cursor；不是独立窗口，不允许重新停靠成其他 pane，也不是旧任务管理控制台。**参考图不在 `tools` 或仓库内。** 本节数值是外壳初值。拿不到参考图时不得宣布「与 TRAE 一致」；AGENT-60A 必须写明「未对照 TRAE 实测」，由调用方决定补图、接受初值或暂停。Agent 不得为“同步实测”改写本文。
 
 ```text
 48px Header
@@ -2068,24 +2155,28 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 
 ---
 
-## 16. 当前错误实现必须如何替换
+## 16. 当前工作树：已落地 vs 仍须替换
 
-| 当前入口 | 已知错误 | 后续任务必须完成的替换 |
+派卡前先读本表。**已对齐 §2.5 的代码不得推倒重来。** 按旧「四栏初值」落地、现已判错的实现必须改拓扑，不是再抄一遍旧初值。
+
+| 入口 | 本文修订时的状态 | 后续必须做的 |
 | --- | --- | --- |
-| `apps/desktop/src/renderer/src/navigation/domainNavigation.ts` | 以 `resourceKind` 和路径把物理文件分到领域 | 改为只映射 `EditorCatalogSummary`；若仍存在 `domainForFile` 则任务失败 |
-| `apps/desktop/src/renderer/src/navigation/DomainNavigationBar.tsx` | 接收 files 并显示物理数量 | 只接收 `DomainSummary[]`；顶部无数量 |
-| `apps/desktop/src/renderer/src/navigation/resourceFamilies.ts` | 固定 `event/map/param/msg/menu/...` 物理家族 | 从领域栏 production 依赖中移除；只允许 Files 高级过滤复用物理 taxonomy |
-| `apps/desktop/src/renderer/src/navigation/WorkspaceResourceBar.tsx` | 把扫描文件数直接显示在顶部 | 从 `App.tsx` production shell 断开；由 `DomainNavigationBar(EditorCatalogSummary.domains)` 取代 |
-| `apps/desktop/src/renderer/src/format/uiText.ts` | 可能按 `resourceKind` 过滤当前列表 | 物理格式文案仅用于 Files/details，不参与语义 domain 或 route |
-| `apps/desktop/src/renderer/src/App.tsx` | 语义领域继续渲染全局资源浏览器 | PARAM/GPARAM/Text/Event 直接挂载对应成熟工作台；Files 才挂物理浏览器 |
-| `apps/desktop/src/renderer/src/workbench/selectEditor.ts` | `.bak` 被允许进入 Param；目录优先 | artifact role 优先；`.bak` History-only；confirmed format 优先 |
-| `apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx` | 三栏、错误卡、物理文件标题 | Smithbox 四栏（初值，以 REF-01 实测为准）、局部错误、逻辑库标题 |
-| `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | 只有 Entries/Content，缺 language/container/file list 与 Tools | 替换成 Smithbox Text 完整选择链和四栏工作台（初值，以 REF-01 实测为准） |
-| `apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx` | 该文件仍在磁盘上，但主工作树 `App.tsx` 已不引用它（历史接线只存在于 `.claude/worktrees/` 残留中）；历史上它把流程/指令/DSL/Hex 当成默认四视图 | 保持断开；确认 `App.tsx` 无任何 production 引用后不新增引用；默认改为 DarkScript3 式 source editor，Hex 仅开发诊断。**注意：** 四视图 UI 断开的治理冲突见 §0.3——未取得 scope 裁定时不得执行断开动作，也不得删除该文件或宣布底层能力失效 |
-| `apps/desktop/src/main/ipc.ts` | 非存在 staging root 进入 Bridge allowedRoots | 复用 main-owned root preparation helper；只读不传 staging |
-| `apps/desktop/src/renderer/src/agent/AgentSidebar.tsx` | 旧控制台或非 TRAE 构图 | 48px/header + conversation + bottom composer；无语音 |
-| `apps/desktop/src/renderer/src/workbench/selectEditor.test.ts` | 可能把“按目录分派”和 `.bak` 正向路由钉成正确行为 | 删除旧正向断言，加入 History-only、confirmed-format-first 和 unique-route 负向矩阵 |
-| `apps/desktop/e2e/playwright/tests/renderer.spec.mjs` | 可能把物理目录顺序、物理数量和常驻资源浏览器钉成验收目标 | 改为 catalog domain、带单位逻辑数量、成熟工作台和 Files-only 物理浏览器验收 |
+| `packages/shared/src/editor-catalog.ts` | **已有** closed union、decoder、测试 | SCHEMA-02 视为已开工；只补缺口，不要另写一套类型 |
+| `apps/desktop/src/renderer/src/navigation/domainNavigation.ts` | **已按 §4.1** 只消费 `DomainSummary[]`，无 `domainForFile` | 保持；若回归出 `domainForFile` 则任务失败 |
+| `apps/desktop/src/renderer/src/navigation/DomainNavigationBar.tsx` | **已只接** `DomainSummary[]`，顶部无数量 | 保持 |
+| `apps/desktop/src/renderer/src/navigation/WorkspaceResourceBar.tsx` | 仍被 `App.tsx` 引用 | 从 production shell 断开；物理浏览只留 Files |
+| `apps/desktop/src/renderer/src/navigation/resourceFamilies.ts` | 仍可能被 Files / 旧壳使用 | 领域栏不得再依赖物理家族；Files 高级过滤可复用 |
+| `apps/desktop/src/renderer/src/App.tsx` | 已挂 `DomainNavigationBar`、`ParamWorkbench`、`GparamWorkbench`、`FmgWorkbenchPanel`、`EventSourceWorkbenchPanel`；仍挂 `WorkspaceResourceBar` | 语义域直接进工作台；Files 才挂物理浏览器 |
+| `apps/desktop/src/renderer/src/workbench/selectEditor.ts` | **已有** ROUTE-06 `selectWorkbenchRoute` | 保持 artifact-role / confirmed-format-first；补测试缺口 |
+| `apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx` | 三栏数据区**方向正确**；注释仍写「对照三栏」 | 补右侧工具栈、逻辑库标题、局部错误。**禁止**改成四条等宽栏。失败 table 必须留在列表 |
+| `apps/desktop/src/renderer/src/workbench/GparamWorkbench.tsx` | **拓扑错误**：四栏 `Banks \| Groups \| Fields/Values \| Tools` | 改成 §8.1 五区 `Files \| Groups \| Fields \| Values \| Toolbar` |
+| `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | **拓扑错误**：横向四栏 24/30/30/16 | 改成 §9.1 左 Categories + 右上 Entries + 右下 Text |
+| `apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx` | **已是** `App.tsx` 生产 Event 入口 | 按 §11 加强源码 IDE（CodeMirror、查找、Problems），不要做成 260/320 三栏 |
+| `apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx` | 仍在磁盘；`App.tsx` 已不引用 | 保持断开，不新增引用。未取得 §0.3 的 scope 裁定前不得删除文件或宣布底层能力失效 |
+| `apps/desktop/src/main/ipc.ts` | 仍可能把不存在的 staging root 交给 Bridge | ROOT-07：复用 main-owned helper；只读不传 staging |
+| `apps/desktop/src/renderer/src/agent/AgentSidebar.tsx` | 旧控制台 / 非 TRAE 构图 | 48px header + conversation + bottom composer；无语音 |
+| `apps/desktop/src/renderer/src/workbench/selectEditor.test.ts` | 部分 ROUTE-06 已在 | 不得把「按目录分派」和 `.bak` 正向路由钉回正确行为 |
+| `apps/desktop/e2e/playwright/tests/renderer.spec.mjs` | 可能仍钉物理目录/数量 | 改为 catalog domain、带单位逻辑数量、§2.5 工作台、Files-only 物理浏览器 |
 
 禁止在旧错误路径旁新增一套未接 production 的组件。测试必须证明生产入口已经切换。
 
@@ -2099,7 +2190,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 
 #### Copy
 
-把参考工具和 SoulForge 并排。检查栏数、顺序、表头、工具位置、行高、滚动和选择链。结构性差异即阻断。
+把参考工具和 SoulForge 并排。对照 §2.5 检查窗格身份、选择链、表头、工具位置、行高和滚动。拓扑与 §2.5 不一致即阻断；splitter 几个像素的偏差不是阻断。
 
 #### Density
 
@@ -2107,7 +2198,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 
 #### Swap
 
-临时交换相邻 pane 的视觉位置进行审查；若用户不能立即辨认哪栏是 Params/Rows/Fields/Tools，说明层级不清。
+临时交换相邻 pane 的视觉位置进行审查；若用户不能立即辨认哪栏是 Params / Rows / Fields（以及 GPARAM 的 Files / Groups / Fields / Values），说明层级不清。
 
 #### Squint
 
@@ -2171,7 +2262,9 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 
 ### 18.1 本节不增加外部前置条件
 
-`BASE-00 / REF-01 / CAT-05 / PARAM-10B` 等编号只是本文内部技术步骤。本文被交付为实现任务时，Agent直接在调用方给定范围内按本节推进，不得自行增加任务匹配或审批流程。
+`BASE-00 / REF-01 / CAT-05 / PARAM-10B` 等编号只是本文内部技术步骤。本文被交付为实现任务时，Agent 直接在调用方给定范围内按本节推进，不得自行增加任务匹配或审批流程。
+
+**UI 卡与 writer 卡分开执行。** `*C` / `*D` / `*E` 里的 native writer、roundtrip、Patch 不是「照抄 Smithbox UI」。派到工作台卡时不得顺手写 C# writer；派到 writer 卡时不得改窗格拓扑。共享 native writer / Patch Engine / 协议的卡必须串行。
 
 只有以下情况允许停下：当前步骤依赖的上一技术步骤实际失败；缺少必须由用户选择的输入；更高优先级规则明确禁止某项操作。停止报告必须写明具体失败命令、错误和仍可继续的部分，不能写“缺少前端任务”。
 
@@ -2208,6 +2301,7 @@ BASE-00 → REF-01 → SCHEMA-02 → NATIVE-03 → DOCSTORE-04
 DOCSTORE-04 → CAT-05 → ROUTE-06 → ROOT-07
 ROUTE-06 → SHELL-09
 SHELL-09 → PARAM-10A → PARAM-10B → PARAM-10C
+PARAM-10B → PARAM-10D
 SHELL-09 → GPARAM-11A → GPARAM-11B → GPARAM-11C
 SHELL-09 → TEXT-20A → TEXT-20B → TEXT-20C
 SHELL-09 → EVENT-30A → EVENT-30B → EVENT-30C
@@ -2239,20 +2333,20 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 - **Tests**：按顺序执行 `npm run typecheck`、`npm run test:renderer-unit`、`npm run test:desktop-security`、`npm run test:desktop-ipc-contract`；逐条保存 exit code 和首个根错误。
 - **Done**：得到开始时文件清单和逐命令结果；后续只归因于本任务实际触碰的文件。任何编辑器 UI 卡开始前，desktop typecheck 必须归零；错误边界或截图不能替代。
 
-### 18.5 REF-01 — 成熟工具参考基线
+### 18.5 REF-01 — 成熟工具行为基线
 
-- **Allowed**：无仓库文件修改；截图只进任务临时/交付产物区。
-- **Steps**：打开 Smithbox PARAM、GPARAM、Text、Map、Model、Texture、Material、Files；打开 DarkScript3 Event；记录第 2.4 节全部测量。
-- **Outputs**：每个页面一张完整参考截图、一份 pane/控件/密度清单、一份与本文 §6–§11 初值逐项对照的结构差异清单；不得只截局部。
-- **Tests**：每张截图必须能同时看见完整窗口、全部 panes、页面标题和非空样本；检查文件实际存在、分辨率非 0、对应页面名称与清单一致；结构差异清单必须覆盖 pane 数、顺序、栏宽、行高、Tools 入口五项。
-- **Done**：所有后续 UI 卡都能引用同尺寸参考图；与本文初值冲突的结构项已按 §2.4 步骤 8 在相应卡内同步更新本文，或已明确标注「该卡未对照参考程序实测」。
+- **Allowed**：无仓库文件修改；截图只进任务临时/交付产物区。**不得修改本文。**
+- **Steps**：打开 Smithbox PARAM、GPARAM、Text、Map、Model、Texture、Material、Files；打开 DarkScript3 Event。对照 §2.5 确认窗格身份后，按 §2.4 记录行为与密度。
+- **Outputs**：每个页面一张完整参考截图、一份行为/密度清单。拓扑以 §2.5 为准，不要另写「新栏数」。
+- **Tests**：每张截图必须能同时看见完整窗口、全部默认 panes、页面标题和非空样本；文件存在、分辨率非 0。
+- **Done**：后续 UI 卡能引用同尺寸参考图。拓扑与 §2.5 冲突只报告调用方，不改本文。
 
 ### 18.6 SCHEMA-02 — 闭合 shared 类型与 decoder
 
-- **Allowed**：`[CREATE] packages/shared/src/editor-catalog.ts`；`[MODIFY] packages/shared/src/editor-protocol.ts`；`[MODIFY] packages/shared/src/index.ts`；`[MODIFY] packages/shared/package.json`。
+- **Allowed**：`[MODIFY] packages/shared/src/editor-catalog.ts`（已存在，只补缺口，禁止另起一套类型）；`[MODIFY] packages/shared/src/editor-protocol.ts`；`[MODIFY] packages/shared/src/index.ts`；`[MODIFY] packages/shared/package.json`。
 - **Input/Output**：第 4、5、12、14 节的 closed union → exported types + runtime decoders。
 - **Steps**：实现 `EditorDomainId`、format candidate/confirmed stack、catalog、capability、route、load/transaction state、selection context；所有 decoder 拒绝 absolute path 和 unknown extra fields。
-- **Tests**：`[CREATE] packages/shared/src/editor-catalog.test.ts`；在 shared package 新增精确 `test:editor-catalog-schema` 命令。
+- **Tests**：`[MODIFY] packages/shared/src/editor-catalog.test.ts`（已存在则补缺口）；shared package 的 `test:editor-catalog-schema` 或等价命令必须跑通。
 - **Done**：`npm run typecheck -w @soulforge/shared` 和 `npm run test:editor-catalog-schema -w @soulforge/shared` 通过；preload/renderer 不出现 `unknown` DTO。
 
 ### 18.7 NATIVE-03 — Bridge 确认格式栈和 main-only locator
@@ -2311,18 +2405,25 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 - **Flow**：Catalog primary handle→Bridge outer open/extract→Param pages→DocumentStore→bounded DTO；Mod DFLT 不依赖 base mount/staging。
 - **Tests**：`npm run bridge:verify:param`、`npm run test:param-metadata-native`、renderer unit；backup 不读、失败非 empty。
 
-#### PARAM-10B — Smithbox 四栏 UI（初值，以 REF-01 实测为准）
+#### PARAM-10B — Params / Rows / Fields + 右侧工具栈
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY after PARAM-10A] apps/desktop/src/renderer/src/workbench/ParamWorkbench.test.tsx`。
-- **Steps**：实现 Params/Rows/Fields/Tools 20/29/35/16（初值，以 REF-01 实测为准）、虚拟行、字段类型控件、父选区清理、局部错误和真实 tools gating。
-- **Negative DOM**：无 `.gparam.dcx`、`.bak`、物理路径、Evidence、Hex、三栏标题。
-- **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；断言四栏（或 REF-01 实测结构）同时存在、比例/min-width、父选区清理、独立滚动、虚拟 row、字段类型控件、局部失败和同尺寸截图。
+- **Steps**：在现有三栏数据区上补右侧工具栈（Actions 叠 Configuration，§7.1/§7.6）；虚拟行、字段类型控件、父选区清理、局部错误、真实 tools gating。失败 table 留在 Params 列表。逻辑库标题按 §7.8。
+- **Negative DOM**：无 `.gparam.dcx`、`.bak`、物理路径、Evidence、Hex；无「把数据区改成四条等宽栏」。
+- **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；断言 Params/Rows/Fields 同时存在、右侧工具栈存在、父选区清理、独立滚动、虚拟 row、字段类型控件、失败项仍在列表、同尺寸截图。
 
 #### PARAM-10C — write/roundtrip
 
 - **Allowed**：`[MODIFY] bridge/SoulForge.Bridge/ParamNativeWriter.cs`；`[MODIFY] packages/core/src/editing/paramBridgeCommit.ts`；`[MODIFY] packages/core/src/editing/editorMutationService.ts`；`[MODIFY] packages/core/src/transactions/workspaceTransaction.ts`；`[MODIFY] packages/core/src/backup/restorePoint.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`。
 - **Flow**：typed field/row mutation→outer stage→sealed expectation→Patch→Bridge reopen→semantic/sibling verify→rollback。
 - **Tests**：`npm run test:param-field-mutation`、`npm run test:param-field-write-matrix`、`npm run test:container-param-writeback`；raw fixture 不替代 outer-chain test。
+- **性质**：writer 卡，不是 UI 照抄卡。
+
+#### PARAM-10D — 双视图对比（可选后续）
+
+- **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；对应测试。
+- **Steps**：Smithbox 的 `ParamEditorView##0/##1` 并排对比。10B 缺席双视图不是缺陷；本卡未做完不得在 UI 上放「对比」假按钮。
+- **Done**：两个 Params→Rows→Fields 链可独立选择并对照字段值。
 
 ### 18.15 GPARAM 任务系列（11A → 11B → 11C）
 
@@ -2333,13 +2434,13 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 - **Tests**：新增 root 命令 `bridge:verify:gparam`，运行 `npm run bridge:verify:gparam`；该命令调用 `runNativeGparamSmoke.ts` 编译产物并覆盖 loose GPARAM、DCX GPARAM、invalid header、bounded page、banks 去重和绝对路径脱敏（banks 数量按当时实测样本数断言，不写死 34）。
 - **Done**：Bridge 返回可复读的 typed GPARAM document；不能借 PARAM parser，也不能把 read failure 显示为空 bank。
 
-#### GPARAM-11B — Smithbox Graphics Param 工作台
+#### GPARAM-11B — Smithbox Gparam 五区工作台
 
-- **Allowed**：`[CREATE] apps/desktop/src/renderer/src/workbench/GparamWorkbench.tsx`；`[CREATE] apps/desktop/src/renderer/src/workbench/GparamWorkbench.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：照搬 Smithbox `Banks | Groups | Fields/Values | Tools`，比例 18/24/42/16（初值，以 REF-01 实测为准）；父级改变清理所有下游选区；bank 名称为主、物理文件名只在 metadata details。
-- **Negative DOM**：无 PARAM table、`.bak`、全局资源浏览器、证据、Hex 或假写入按钮。
-- **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；断言四栏（或 REF-01 实测结构）、banks 数按当时实测样本数、下游清理、独立滚动、read-only gating 和 Smithbox 同尺寸截图。
-- **Done**：所有 confirmed 样本只在 Banks 第一栏出现，切换 bank/group 时字段和值稳定更新且各栏独立滚动。
+- **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/workbench/GparamWorkbench.tsx`；`[MODIFY] apps/desktop/src/renderer/src/workbench/GparamWorkbench.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
+- **Steps**：现有四栏合并实现必须改成 §8.1 五区 `Files | Groups | Fields | Values | Toolbar`。父级改变清理所有下游选区。第一栏窗格名可以是 Files，项是逻辑 bank；物理文件名只在 metadata details。
+- **Negative DOM**：无 PARAM table、`.bak`、全局资源浏览器、证据、Hex、假写入按钮、合并的 Fields/Values 单栏。
+- **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；断言五区同时存在、Fields 与 Values 分开、banks 数按当时实测样本数、下游清理、独立滚动、read-only gating 和同尺寸截图。
+- **Done**：confirmed 样本只在 Files 第一栏出现；选 field 后 Values 更新；五区独立滚动。
 
 #### GPARAM-11C — typed write 与 roundtrip
 
@@ -2347,6 +2448,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 - **Flow**：`gparam-field-set` → source storage profile（loose/DCX/container）→ native writer → outer stage → sealed expectation → Patch → reopen → field/sibling verify → rollback on failure。
 - **Tests**：新增 root 命令 `bridge:verify:gparam-writer`，运行 `npm run bridge:verify:gparam-writer`；该命令调用 `runNativeGparamWriterSmoke.ts` 编译产物并分别覆盖 loose、DCX、container child，注入 reopen failure 并验证 before image。
 - **Done**：只有通过 11C 的 storage profile 才显示字段编辑控件；不存在通用 bytes replace fallback。
+- **性质**：writer 卡，不是 UI 照抄卡。
 
 ### 18.16 Text 任务系列（20A → 20B → 20C）
 
@@ -2360,10 +2462,10 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### TEXT-20B — Smithbox Text 工作台
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx`；`[MODIFY after TEXT-20A] apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：实现 `Languages/Containers/File List | Text Entries | Text Content | Tools`，比例 24/30/30/16（初值，以 REF-01 实测为准）；支持 IME、Unicode、按 ID/文本搜索、独立滚动和父级切换清理。
-- **Negative DOM**：`menu/**/*.tpf.dcx` 不出现；无物理目录 tab、主区 evidence/hex 和未接线 Tools。
-- **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；完成 language→container→table→entry→content，全链键盘/IME/Unicode、无匹配与真空表分离、Smithbox 同尺寸截图。
-- **Done**：用户能连续完成 language → container → table → entry → content，结构与 Smithbox 同尺寸对照一致。
+- **Steps**：把现有横向四栏改成 §9.1：左 Categories（语言/container/FMG + 其下 Toolbar），右上 Entries，右下 Text。IME、Unicode、按 ID/文本搜索、独立滚动、父级切换清理。
+- **Negative DOM**：`menu/**/*.tpf.dcx` 不出现；无物理目录 tab、主区 evidence/hex、未接线 Tools、正文第四竖栏。
+- **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；完成 language→container→table→entry→content；Entries 在 Content 上方；全链键盘/IME/Unicode；无匹配与真空表分离；同尺寸截图。
+- **Done**：选择链完整，拓扑与 §2.5 Text 一致。
 
 #### TEXT-20C — FMG write 与 cross-language 验证
 
@@ -2385,8 +2487,8 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。
 - **Dependencies**：在 `apps/desktop/package.json` 加入 exact 版本 `@codemirror/state@6.7.1`、`@codemirror/view@6.43.8`、`@codemirror/language@6.12.4`、`@codemirror/search@6.7.1`、`@codemirror/commands@6.10.4`、`@codemirror/autocomplete@6.20.3`、`@lezer/highlight@1.2.3`，并更新根 lockfile。
-- **Steps**：实现 files/outline 260px、source flex、optional inspector 320px、bottom Problems/Output；行号、折叠、高亮、查找替换、跳转、gutter、dirty tab 全部接真实状态。
-- **Negative DOM**：`EmevdFourViewPanel` 不再被 `App.tsx` production 引用；Flow/Hex/Raw Bytes 不在默认 viewport。
+- **Steps**：在已有 `EventSourceWorkbenchPanel` 上做成 DarkScript3 式源码 IDE：文档标签 + 源码主区 + 查找替换；Outline / Inspector 仅显式打开；Problems 走底部 dock。接 CodeMirror 6、行号、折叠、高亮、跳转、gutter、dirty tab。不要做 260/320 固定三栏。
+- **Negative DOM**：`EmevdFourViewPanel` 不再被 `App.tsx` production 引用；Flow/Hex/Raw Bytes 不在默认 viewport。未取得 §0.3 scope 裁定前不删除四视图文件。
 - **Tests**：renderer unit/E2E；对照 DarkScript3 截图；键盘、IME、large source、diagnostic gutter 和多 tab dirty 状态。
 
 #### EVENT-30C — compile、Patch 与 native reread
@@ -2401,18 +2503,18 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### CONTAINER-40
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/Bnd4WorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：实现第 10.1 节四栏（初值，以 REF-01 实测为准）、child projection、metadata/tools、typed child mutation UI。
+- **Steps**：按 §10.1 做 SoulForge 容器工作台（不是 Smithbox 顶栏编辑器，也不是四栏模板）：Containers | Entries | Preview；child projection；未接通 Tools 隐藏。
 - **Tests**：`npm run bridge:verify:bnd4-writer`、`npm run bridge:verify:bnd4-transaction`、renderer unit/E2E；若 BND4-08 未通过，本卡停止在该技术依赖，不扩大本卡文件范围。
 
 #### SCRIPT-41
 
 - **Allowed**：`[MODIFY] packages/shared/src/script-container.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEntry.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEdit.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`；`[MODIFY] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：container/source-disassembly/symbols/tools；encoding/BOM/newline/NUL 明示；bytecode 不伪装可编译。
+- **Steps**：按 §10.2：Container/Files | Source/只读反汇编主区 | 可选 Symbols。encoding/BOM/newline/NUL 明示；bytecode 不伪装可编译；不要为空凑 Tools 栏。
 - **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、renderer unit/E2E。
 
 ### 18.19 MAP/ASSET 独立卡
 
-这些格式必须分别实施。每个 `A` 只完成 native read + bounded DTO，每个 `B` 只完成 Smithbox 工作台，每个 `C` 只完成 typed mutation + native roundtrip。终局目标包含下列 C 卡；A/B 期间 UI 隐藏写控件，但不得把隐藏状态报告为整个领域完成。
+这些格式必须分别实施。每个 `A` 只完成 native read + bounded DTO，每个 `B` 只完成 §2.5 / §10.5 工作台，每个 `C` 只完成 typed mutation + native roundtrip（writer 卡，不是 UI 照抄）。终局目标包含下列 C 卡；A/B 期间 UI 隐藏写控件，但不得把隐藏状态报告为整个领域完成。禁止用「Resource Tree | Viewport | Inspector | Tools」套所有资产页。
 
 #### MAP-50A — MSB read
 
@@ -2422,8 +2524,8 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### MAP-50B — Smithbox Map workbench
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/MsbScenePanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Output**：resource tree → viewport → inspector → tools；选择、gizmo、属性和 camera 与 Smithbox 流程对照；writer 未就绪时无保存动作。
-- **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；tree/viewport/inspector 联动、无 writer action、resize/keyboard 和 Smithbox Map 对照截图。
+- **Output**：`Map Object List | Viewport | Properties`（§2.5）。选择、gizmo、属性和 camera 与 Smithbox 流程对照；Asset Browser / Prefabs 等有真实能力再加。writer 未就绪时无保存动作。
+- **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；tree/viewport/inspector 联动、无 writer action、resize/keyboard 和对照截图。
 
 #### MAP-50C — MSB write
 
@@ -2438,7 +2540,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### MODEL-51B — Smithbox Model workbench
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/FlverWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/FlverWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Output**：model tree → viewport → inspector/tools；材质槽选择与 viewport 高亮同步；无大卡片和物理文件总表。
+- **Output**：左树栈 | Viewport | Properties（§2.5）。材质槽选择与 viewport 高亮同步；无大卡片和物理文件总表。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；mesh/material-slot selection、viewport highlight、partial model、keyboard 和 Smithbox Model 对照截图。
 
 #### MODEL-51C — FLVER material-slot write
@@ -2454,7 +2556,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### TEXTURE-52B — Smithbox Texture workbench
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/TpfWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/TpfWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Output**：bank/list → preview → metadata/tools；预览失败保留列表；writer 未就绪时隐藏 replace。
+- **Output**：`Container list | Texture list | Viewer | Properties`（§2.5）。预览失败保留列表；writer 未就绪时隐藏 replace。无 3D viewport。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；texture selection/preview/metadata、preview failure isolation、no fake replace 和 Smithbox Texture 对照截图。
 
 #### TEXTURE-52C — texture replace
@@ -2470,7 +2572,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### MATERIAL-53B — Smithbox Material workbench
 
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/editors/MaterialWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/MaterialWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Output**：material list → properties/values → tools；unknown property 可见但不可编辑，不能丢弃。
+- **Output**：`File list | Material list | Properties/Values`（§2.5）。unknown property 可见但不可编辑，不能丢弃。不要发明 Preview 第四栏。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；property grouping/value type/unknown readonly/independent scroll 和 Smithbox Material 对照截图。
 
 #### MATERIAL-53C — material property write
@@ -2496,7 +2598,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### VFX-54B — Smithbox-style VFX workbench
 
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/editors/VfxWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/VfxWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Output**：resource tree → editor/preview → inspector → tools；已知/未知 node 状态明确。
+- **Output**：Effect / Particle list | 真实预览（没有就不做假 viewport）| Inspector。已知/未知 node 状态明确。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；known/unknown node、selection chain、preview isolation、no fake graph 和参考截图。
 
 #### VFX-54C — FXR write
@@ -2512,7 +2614,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### BEHAVIOR-55B — Behavior workbench
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EsdWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EsdWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Output**：resource/state tree → state/transition editor → inspector → tools；不按 action 目录分类。
+- **Output**：按 §10.3：`Files / Machines / States | Conditions / Commands | Inspector`。不按 action 目录分类；不要为空凑 Tools 栏。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；machine/state/transition selection、partial error isolation、no action-path routing 和参考截图。
 
 #### BEHAVIOR-55C — ESD transition write
@@ -2528,7 +2630,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### ANIMATION-56B — Animation workbench
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/TaeWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/TaeWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Output**：resource/animation tree → timeline/editor → inspector → tools；不按 chr/action 目录分类。
+- **Output**：按 §10.3：`Files / Animations | Timeline / Events | Inspector`。不按 chr/action 目录分类；不要为空凑 Tools 栏。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；animation/event/timeline selection、invalid range display、no path routing 和参考截图。
 
 #### ANIMATION-56C — TAE event write
@@ -2564,7 +2666,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 
 ### 18.21 VISUAL-70 与 ACCEPT-99
 
-- **VISUAL-70 Allowed**：无文件修改；产出五项审查所需证据——五种宽度的同尺寸对照截图、结构清单、200% 缩放与键盘/Narrator 观测记录（全部进临时产物区）；五项审查由用户/调用方执行（§17.1）。人工审查发现差异时退回产生差异的原 UI 卡，只使用该卡已列 Allowed，修复后重新运行 VISUAL-70 证据产出。
+- **VISUAL-70 Allowed**：无文件修改，**不得改本文**。产出五项审查所需证据——五种宽度的同尺寸对照截图、对照 §2.5 的结构清单、200% 缩放与键盘/Narrator 观测记录（全部进临时产物区）。五项审查由用户/调用方执行（§17.1）。人工审查发现差异时退回产生差异的原 UI 卡。
 - **ACCEPT-99 Allowed**：无文件修改；运行通用基线、所有已修改格式的 native 命令、renderer E2E，并把第 19 节逐项勾选后的结果交给用户/调用方确认——第 19 节含主观视觉项的勾选属于人工验收，Agent 只报告可自动验证项的实测结果。
 - **Done**：生产入口、数据层、UI、负向测试和截图全部成立；typecheck、单测、截图或 fixture 单项通过均不足以完成。
 
@@ -2581,19 +2683,17 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 - [ ] 普通列表、搜索和标签中不存在 `.bak/.prev`；
 - [ ] 点击 PARAM 打开 primary GameParam；
 - [ ] GameParam 显示 `1 library`；
-- [ ] GPARAM 文件只在 GPARAM Banks 中出现；
+- [ ] GPARAM 文件只在 GPARAM Files（逻辑 bank）栏中出现；
 - [ ] GPARAM read 未成立时不渲染假工作台；
 - [ ] History & Recovery 可找到 backup；
 - [ ] 未挂载原版时，Mod 侧 DFLT primary 仍可读；
 - [ ] Bridge 不收到不存在的 allowed root。
 
-### 19.2 Smithbox 对照
+### 19.2 Smithbox 对照（判定基准是 §2.5，不是旧四栏初值）
 
-以下结构项的判定基准是 REF-01 实测清单（§2.4 步骤 8）：实测与本文初值冲突时以实测为准并在卡内同步本文，未对照参考程序实测的卡必须明确标注「未实测」。
-
-- [ ] PARAM 是 `Params | Rows | Fields | Tools`（或 REF-01 实测结构）；
-- [ ] GPARAM 是 `Banks | Groups | Fields/Values | Tools`（或 REF-01 实测结构）；
-- [ ] Text 是 `Languages/Containers/File List | Entries | Content | Tools`（或 REF-01 实测结构）；
+- [ ] PARAM 是 `Params | Rows | Fields` + 右侧工具栈；失败 table 仍在列表；
+- [ ] GPARAM 是 `Files | Groups | Fields | Values | Toolbar`，Fields 与 Values 分开；
+- [ ] Text 是左 Categories + 右上 Entries + 右下 Content；
 - [ ] 每栏独立滚动；
 - [ ] 搜索、表头、工具位置和选择层级与 Smithbox 一致；
 - [ ] 同尺寸有效数据密度接近；
@@ -2602,23 +2702,23 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 
 ### 19.3 其他成熟编辑器
 
-- [ ] Container 是 `Containers | Entries | Preview/Source/Bytes | Metadata/Tools`，且 child 只产生受确认的语义投影；
-- [ ] Script 是 `Container | Source/Read-only Disassembly | Symbols/Metadata | Tools`，bytecode 不伪装可编辑源码；
-- [ ] Map 是资源树、viewport、inspector、tools，交互顺序与 Smithbox 一致；
-- [ ] Model 是模型资源树、viewport、属性 inspector，材质槽选择能定位关联项；
-- [ ] Texture 是 texture bank/list、预览、metadata/tools，`menu/**/*.tpf.dcx` 只能到此或 Files；
-- [ ] Material 是材质列表、属性/值编辑和真实 Tools；
+- [ ] Container 是 SoulForge 自有：`Containers | Entries | Preview`，child 只产生受确认的语义投影；
+- [ ] Script 是 `Container/Files | Source/只读反汇编`，bytecode 不伪装可编辑源码；
+- [ ] Map 是 `Map Object List | Viewport | Properties`；
+- [ ] Model 是左树栈、viewport、Properties，材质槽选择能定位关联项；
+- [ ] Texture 是 container list + texture list + viewer + properties；`menu/**/*.tpf.dcx` 只能到此或 Files；
+- [ ] Material 是 file list + material list + 属性/值；
 - [ ] Behavior、Animation、VFX 各自使用已确认格式的专用工作台，未确认资源留在 Files；
-- [ ] 只有 Files 显示物理目录、绝对层级的脱敏投影和无专属编辑器资源；
+- [ ] Files 是 `Browser List | Item Viewer` 两栏，且只有 Files 显示物理目录；
 - [ ] 任一编辑按钮出现时，对应 typed mutation、native rebuild、Patch、复读和回滚验收同时成立。
 
 ### 19.4 Event 与 Agent
 
-- [ ] Event 打开即进入 DarkScript3 式 Source Editor；
-- [ ] Event 有 files/outline、source、optional inspector、bottom Problems；
+- [ ] Event 打开即进入 DarkScript3 式 Source Editor（源码主区，不是 260/320 三栏）；
+- [ ] Outline / Inspector 仅显式打开；Problems 在底部 dock；
 - [ ] 用户不可见“EMEVD 四视图”；
 - [ ] Agent 常驻右侧且可折叠、拖宽、持久化；
-- [ ] Agent 空闲态、消息流和 Composer 构图与 TRAE 一致（参考图缺失时按 §12 初值口径，勾选时标注「未对照 TRAE 实测」）；
+- [ ] Agent 空闲态、消息流和 Composer 按 §12；参考图缺失时勾选必须标注「未对照 TRAE 实测」，不得写「与 TRAE 一致」；
 - [ ] 不存在旧任务控制台、工具清单、会话计数和推荐问题；
 - [ ] 不存在麦克风、语音占位、权限、音频 IPC 或语音测试；
 - [ ] 所有可见 Composer 控件有真实功能测试。
@@ -2656,10 +2756,10 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 2. 生产入口已经替换，不是平行 demo。
 3. 负向测试先于或伴随实现落地。
 4. typecheck 和相关 unit/integration/E2E 全部通过。
-5. 与 Smithbox/DarkScript3/TRAE 的同尺寸截图对照已产出，且人工对照确认通过（Agent 只负责产出截图与清单，不负责宣布通过）。
-6. Copy、Density、Swap、Squint、Grayscale 已由用户/调用方人工审查通过（§17.1）。
+5. 与对照工具的同尺寸截图和结构清单已产出。Agent 只报告证据，不得宣布五项审查通过；人工审查是调用方的事，不是 Agent 卡住不收工的理由（UI 卡在自动测试通过 + 证据齐备后即可报 `implementation-complete`）。
+6. 窗格拓扑与 §2.5 / 对应 §7–§11 一致，没有退回旧四栏初值或合并 Fields/Values。
 7. 未引入假能力、绝对路径泄露或 renderer 文件系统权限。
-8. 可编辑操作完成适用的 D0–D10 闭环。
+8. 本卡若是 writer 卡：可编辑操作完成适用的 D0–D10 闭环。纯 UI 卡不得冒充 native 完成。
 9. 失败状态可行动，且不会清空无关可浏览内容。
 10. 明确记录能力限制，不把 fixture/static/UI 通过冒充 native/release 完成。
 
@@ -2687,8 +2787,10 @@ D:\Repository\SoulForge\docs\frontend-renovation\front-end.md
    - 顶部物理文件计数；
    - `.bak` 正常 Param route；
    - 独立 Agent 窗口；
-   - EMEVD 四视图；
+   - EMEVD 四视图作为默认 UI；
    - 语音功能；
+   - 把「四栏 20/29/35/16」「Banks | Fields/Values」或 Text 四竖栏当作必须实现的结构；
+   - 要求 Agent 为同步实测而改写本文；
 4. 运行 `git diff --check -- docs/frontend-renovation/front-end.md`；
 5. 确认除本文外没有文件因本次任务发生变化；
 6. 确认本文未改动 `docs/governance/` 下任何文件（本文对治理冲突只作标注与处置指示，不直接改治理数据）；

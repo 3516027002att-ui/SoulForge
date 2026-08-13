@@ -50,7 +50,10 @@ import { GparamWorkbench, type GparamBankView } from './workbench/GparamWorkbenc
 import { DiagnosticsLog } from './workbench/DiagnosticsLog.js';
 import { selectEditor } from './workbench/selectEditor.js';
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
-import { EventSourceWorkbenchPanel } from './editors/EventSourceWorkbenchPanel.js';
+import {
+  EventSourceWorkbenchPanel,
+  type EventSourceTabData
+} from './editors/EventSourceWorkbenchPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
 import { ParamTablePanel } from './editors/ParamTablePanel.js';
 import { WorkbenchOpsPanel } from './editors/WorkbenchOpsPanel.js';
@@ -58,7 +61,7 @@ import { ParamDefPanel } from './editors/ParamDefPanel.js';
 import { TaeWorkbenchPanel } from './editors/TaeWorkbenchPanel.js';
 import { EsdWorkbenchPanel } from './editors/EsdWorkbenchPanel.js';
 import { FlverWorkbenchPanel } from './editors/FlverWorkbenchPanel.js';
-import { TpfWorkbenchPanel } from './editors/TpfWorkbenchPanel.js';
+import { TpfWorkbenchPanel, type TpfContainerView } from './editors/TpfWorkbenchPanel.js';
 import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
@@ -66,6 +69,7 @@ import {
   mapEmevdEnvelopeToDocument,
   type BridgeEmevdEnvelopeLike
 } from './emevd/mapEmevdEnvelope.js';
+import { alignEmevdDocumentAnchors } from './emevd/alignEmevdDocumentAnchors.js';
 import {
   ChangeControlStore,
   type CandidateChange,
@@ -287,17 +291,15 @@ export function App(): ReactElement {
   const [agentOverlay, setAgentOverlay] = useState(false);
   const [agentInteractionMode, setAgentInteractionMode] = useState<'ask' | 'plan' | 'edit'>('ask');
   const [status, setStatus] = useState('就绪');
-  const [emevdDocument, setEmevdDocument] = useState<EmevdEditorDocument>(EMPTY_EMEVD_DOCUMENT);
-  const [emevdSourceHash, setEmevdSourceHash] = useState<string | null>(null);
-  const [emevdLive, setEmevdLive] = useState(false);
-  /** Patch-DSL template from the authoritative full document (main-side). */
-  const [emevdDslTemplate, setEmevdDslTemplate] = useState<string | null>(null);
-  const [emevdDslTemplateTruncated, setEmevdDslTemplateTruncated] = useState(false);
-  const [emevdDslTemplateTotalLines, setEmevdDslTemplateTotalLines] = useState(0);
+  /**
+   * EVENT-30B：最近一次打开/刷新的 EMEVD 逻辑文档标签（有界 DSL 投影 + 派生
+   * document）。工作台按 tabId 去重合并；renderer 永不持有文件系统路径或完整
+   * document（bounded outline + 有界模板）。
+   */
+  const [eventPendingTab, setEventPendingTab] = useState<EventSourceTabData | null>(null);
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
-  const [tpfData, setTpfData] = useState<Record<string, unknown> | null>(null);
   const [fmgEntries, setFmgEntries] = useState(EMPTY_FMG_ENTRIES);
   const [fmgSourceHash, setFmgSourceHash] = useState<string | null>(null);
   const [fmgLive, setFmgLive] = useState(false);
@@ -429,14 +431,7 @@ export function App(): ReactElement {
       // 会被错误地显示为可写。授权判定必须由新文档的 fieldDefsOrigin 重新给出。
       setParamFieldDefsOrigin('fixture');
     },
-    emevd: () => {
-      setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
-      setEmevdSourceHash(null);
-      setEmevdLive(false);
-      setEmevdDslTemplate(null);
-      setEmevdDslTemplateTruncated(false);
-      setEmevdDslTemplateTotalLines(0);
-    },
+    emevd: () => setEventPendingTab(null),
     msb: () => {
       setMsbParts(EMPTY_MSB_PARTS);
       setMsbModels([]);
@@ -448,8 +443,7 @@ export function App(): ReactElement {
     },
     tae: () => setTaeData(null),
     esd: () => setEsdData(null),
-    flver: () => setFlverData(null),
-    tpf: () => setTpfData(null)
+    flver: () => setFlverData(null)
   }), []);
 
   const diagnostics = [...(workspace?.diagnostics ?? []), ...(analysis?.diagnostics ?? []), ...(preview?.diagnostics ?? [])];
@@ -519,6 +513,19 @@ export function App(): ReactElement {
     const indexed = allFiles.length > 0 ? allFiles : files;
     return indexed
       .filter((file) => /\.gparam(\.dcx)?$/i.test(file.relativePath))
+      .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
+  }, [allFiles, files]);
+
+  /**
+   * TEXTURE 域的全部 TPF 文件（工作台 Containers 栏的数据源）。
+   *
+   * 按后缀过滤而不是 resourceKind：与 selectEditor 对 tpf 的判据一致
+   * （legacy 路径同用 .tpf/.tpf.dcx 后缀）。数量永远按当前索引实测计数。
+   */
+  const textureContainers = useMemo<TpfContainerView[]>(() => {
+    const indexed = allFiles.length > 0 ? allFiles : files;
+    return indexed
+      .filter((file) => /\.tpf(\.dcx)?$/i.test(file.relativePath))
       .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
   }, [allFiles, files]);
 
@@ -985,18 +992,23 @@ export function App(): ReactElement {
           } | null;
         };
         if (cancelled) return;
-        if (!result?.ok || !result.data?.entries?.length) {
+        // TEXT-20C：live 门禁以 sourceHash 为准而不是条目非空。真空表（合法容器、
+        // 0 条）仍然 live，用户要能在里面新增条目；读取失败（ok:false / 无 hash）
+        // 才判不可编辑。这同时让 msgbnd/DCX 容器在真实游戏里能进入 live（旧判据
+        // 依赖裸 FMG 解析，容器走 readFmgDocument 会因 DCX magic 硬失败）。
+        if (!result?.ok || !result.data?.sourceHash) {
           setFmgEntries(EMPTY_FMG_ENTRIES);
           setFmgSourceHash(null);
           setFmgLive(false);
           setStatus('这个文本资源读不出来，详情见底部日志。');
           return;
         }
-        setFmgEntries(result.data.entries.map((e) => ({ id: e.id, text: e.text })));
+        const loadedEntries = (result.data.entries ?? []).map((e) => ({ id: e.id, text: e.text }));
+        setFmgEntries(loadedEntries);
         setFmgSourceHash(result.data.sourceHash ?? null);
         setFmgLive(true);
         setStatus(
-          `已加载 FMG：${result.data.entryCount ?? result.data.entries.length} 条`
+          `已加载 FMG：${result.data.entryCount ?? loadedEntries.length} 条`
           + (result.data.authority ? ` · authority=${result.data.authority}` : '')
         );
       } catch (error) {
@@ -1141,15 +1153,11 @@ export function App(): ReactElement {
       // SHELL-09：只有用户显式选中的 event 资源才加载；语义领域无兜底列表。
       const target = selectedFile;
       if (!target || target.resourceKind !== 'event') {
-        setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
-        setEmevdSourceHash(null);
-        setEmevdLive(false);
+        setEventPendingTab(null);
         return;
       }
       if (!bridge || typeof bridge.readEmevdDocument !== 'function') {
-        setEmevdDocument(EMPTY_EMEVD_DOCUMENT);
-        setEmevdSourceHash(null);
-        setEmevdLive(false);
+        setEventPendingTab(null);
         return;
       }
       setStatus(`正在读取 EMEVD：${target.relativePath}`);
@@ -1161,31 +1169,39 @@ export function App(): ReactElement {
         };
         if (cancelled) return;
         if (!result?.ok || !result.data) {
-          setEmevdDocument({
-            ...EMPTY_EMEVD_DOCUMENT,
+          setEventPendingTab({
+            tabId: target.sourceUri,
+            title: target.relativePath,
             resourceUri: target.sourceUri,
-            diagnostics: [{
-              severity: 'warning',
-              code: 'EMEVD_LIVE_READ_FAILED',
-              message: result?.diagnostics?.[0]?.message
-                ?? '这个事件脚本读不出来。'
-            }]
+            document: {
+              ...EMPTY_EMEVD_DOCUMENT,
+              resourceUri: target.sourceUri,
+              diagnostics: [{
+                severity: 'warning',
+                code: 'EMEVD_LIVE_READ_FAILED',
+                message: result?.diagnostics?.[0]?.message
+                  ?? '这个事件脚本读不出来。'
+              }]
+            },
+            sourceHash: null,
+            live: false,
+            dslTemplate: null,
+            dslTemplateTruncated: false,
+            dslTemplateTotalLines: 0
           });
-          setEmevdSourceHash(null);
-          setEmevdLive(false);
           setStatus('这个事件脚本读不出来，详情见底部日志。');
           return;
         }
         const doc = mapEmevdEnvelopeToDocument(target.sourceUri, result.data, { maxEvents: 128 });
-        setEmevdDocument(doc);
-        setEmevdSourceHash(result.data.sourceHash ?? null);
-        setEmevdLive(true);
         setStatus(
           `已加载 EMEVD：${result.data.eventCount ?? doc.events.length} 事件 / `
           + `${result.data.instructionCount ?? 0} 指令（authority=${result.data.authority ?? 'unknown'}）`
         );
-        // Load the authoritative full-document DSL template in the background;
-        // renderer never receives the full document itself.
+        // Load the authoritative bounded full-document DSL template; renderer
+        // never receives the full document itself (EVENT-30A bounded outline).
+        let dslTemplate: string | null = null;
+        let dslTemplateTruncated = false;
+        let dslTemplateTotalLines = 0;
         if (typeof bridge.readEmevdFullDocument === 'function') {
           const full = await bridge.readEmevdFullDocument(
             target.sourceUri,
@@ -1193,20 +1209,30 @@ export function App(): ReactElement {
           );
           if (cancelled) return;
           if (full?.ok && full.dslTemplate) {
-            setEmevdDslTemplate(full.dslTemplate);
-            setEmevdDslTemplateTruncated(full.dslTemplateTruncated ?? false);
-            setEmevdDslTemplateTotalLines(full.dslTemplateTotalLines ?? 0);
+            dslTemplate = full.dslTemplate;
+            dslTemplateTruncated = full.dslTemplateTruncated ?? false;
+            dslTemplateTotalLines = full.dslTemplateTotalLines ?? 0;
           } else {
-            setEmevdDslTemplate(null);
-            setEmevdDslTemplateTruncated(false);
-            setEmevdDslTemplateTotalLines(0);
             setStatus(full?.diagnostics?.[0]?.message ?? '完整文档 DSL 模板加载失败；DSL 视图保持只读。');
           }
         }
+        setEventPendingTab({
+          tabId: target.sourceUri,
+          title: target.relativePath,
+          resourceUri: target.sourceUri,
+          // EVENT-30B：envelope 投影的事件没有 anchor，而 diagnostic gutter /
+          // Go to Event 要靠 `event @e:<localNodeId>` 命中事件；权威锚源是
+          // dslTemplate 本身（readEmevdFullDocument 来自同一份 Bridge 文档）。
+          document: alignEmevdDocumentAnchors(doc, dslTemplate),
+          sourceHash: result.data.sourceHash ?? null,
+          live: true,
+          dslTemplate,
+          dslTemplateTruncated,
+          dslTemplateTotalLines
+        });
       } catch (error) {
         if (cancelled) return;
-        setEmevdLive(false);
-        setEmevdSourceHash(null);
+        setEventPendingTab(null);
         setStatus(error instanceof Error ? error.message : 'EMEVD 读取异常');
       }
     }
@@ -1778,6 +1804,14 @@ export function App(): ReactElement {
       setStatus('项目概览');
       return;
     }
+    if (domain === activeDomain) {
+      // 重复点已激活领域：保留当前选中与多文档工作台。EVENT-30B 事件工作台
+      // 在领域切换时会被卸载（下方 setSelectedFile(null) → activeEditor 变
+      // 'empty'）；用户从 Files 再选第二个事件文档依赖「已激活 Files 领域不清
+      // 选中」，否则每次切文件都重建工作台、多 tab 永远凑不齐。
+      if (domain === 'files') setStatus('文件：物理浏览');
+      return;
+    }
     // SHELL-09：语义领域不再过滤物理文件（§4.1）；领域切换清掉上一份选中，
     // 让领域占位/未来逻辑库成为该领域的默认视图（§18.13 Done：PARAM 入口
     // 直接打开逻辑库）。Files 领域独占物理浏览。
@@ -1852,10 +1886,6 @@ export function App(): ReactElement {
       const result = await bridge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setFlverData(result.data);
     }
-    if (file.relativePath.endsWith('.tpf')) {
-      const result = await bridge.readTpfDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
-      if (result.ok && result.data) setTpfData(result.data);
-    }
     setStatus(nextPreview ? `已打开 ${file.relativePath}` : '无法预览该资源');
   }
 
@@ -1903,12 +1933,17 @@ export function App(): ReactElement {
         if (!fmgSourceHash) {
           return { ok: false, diagnostics: [{ code: 'FMG_NO_LIVE_HASH', message: 'FMG 实时 hash 缺失，拒绝写入。' }] };
         }
-        const payload = change.payload as { op: 'upsert' | 'add' | 'delete'; id: number; text?: string };
-        const result = await bridge.applyFmgMutation(change.sourceUri, fmgSourceHash, {
-          kind: payload.op,
-          id: payload.id,
-          ...(payload.text !== undefined ? { text: payload.text } : {})
-        });
+        const payload = change.payload as { op: 'upsert' | 'add' | 'delete'; id: number; text?: string; tableId?: string };
+        const result = await bridge.applyFmgMutation(
+          change.sourceUri,
+          fmgSourceHash,
+          {
+            kind: payload.op,
+            id: payload.id,
+            ...(payload.text !== undefined ? { text: payload.text } : {})
+          },
+          payload.tableId
+        );
         if (result.ok) {
           const reload = await bridge.readFmgDocument(change.sourceUri) as {
             ok?: boolean;
@@ -2774,7 +2809,11 @@ export function App(): ReactElement {
               key 绑定当前资源，切换资源时重建边界，避免上一份错误状态粘住。 */}
           <PanelErrorBoundary
             label={`${domainLabel(activeDomain)} 工作域`}
-            key={`panel-boundary:${selectedFile?.sourceUri ?? 'none'}`}
+            /* key 按编辑器类型而非 selectedFile：EVENT-30B 多文档工作台（事件/
+               GPARAM）跨资源保留标签与未提交编辑，key 绑 selectedFile 会让
+               切文件即卸载重建、内部 tabs 全丢。错误隔离仍按类型成立：某类型
+               面板崩溃只降级该类型，不带走整个界面。 */
+            key={`panel-boundary:${activeEditor}`}
           >
           {activeEditor === 'project' && (
             <ProjectOverviewPanel
@@ -2806,7 +2845,20 @@ export function App(): ReactElement {
               <p>工作区中没有 GPARAM 文件。挂载包含 drawparam 的 Mod 工作区后这里会列出所有 bank。</p>
             </section>
           )}
-          {activeEditor === 'empty' && activeDomain !== 'gparam' && (
+          {activeDomain === 'texture' && activeEditor === 'empty' && textureContainers.length > 0 && (
+            <TpfWorkbenchPanel
+              key={`tpf-wb:${textureContainers.map((c) => c.sourceUri).join(',')}`}
+              containers={textureContainers}
+            />
+          )}
+          {activeDomain === 'texture' && activeEditor === 'empty' && textureContainers.length === 0 && (
+            <section className="domain-placeholder" data-testid="texture-placeholder" aria-label="纹理工作域">
+              <span className="domain-placeholder__eyebrow">TEXTURE / CAPABILITY</span>
+              <h2>Texture 工作台</h2>
+              <p>工作区中没有 TPF 文件。挂载包含纹理包的 Mod 工作区后这里会列出所有容器。</p>
+            </section>
+          )}
+          {activeEditor === 'empty' && activeDomain !== 'gparam' && activeDomain !== 'texture' && (
             activeDomain === 'files'
               ? <p className="muted">在左侧选择一个文件开始编辑。</p>
               : <section className="domain-placeholder" data-testid="domain-editor-placeholder" aria-label={`${domainLabel(activeDomain)} 工作域`}>
@@ -2905,33 +2957,13 @@ export function App(): ReactElement {
               {/* 同 map：删掉「实时 Bridge 文档 · hash … / 空文档（未选中可解析的
                   EMEVD 或读取失败）」。hash 前缀属于证据，读取失败原因进日志区。 */}
               <EventSourceWorkbenchPanel
-                key={`${emevdDocument.resourceUri}:${emevdDocument.revision}:${emevdLive ? 'live' : 'demo'}`}
-                initialDocument={emevdDocument}
-                {...(emevdDslTemplate !== null ? { dslTemplate: emevdDslTemplate } : {})}
-                {...(emevdDslTemplateTruncated
-                  ? {
-                      dslTemplateTruncated: true,
-                      dslTemplateTotalLines: emevdDslTemplateTotalLines,
-                      onLoadFullDslTemplate: async () => {
-                        if (!selectedFile || !bridge) return;
-                        const full = await bridge.readEmevdFullDocument(
-                          selectedFile.sourceUri,
-                          `renderer-${selectedFile.sourceUri}-${Date.now()}`,
-                          true
-                        );
-                        if (full?.ok && full.dslTemplate) {
-                          setEmevdDslTemplate(full.dslTemplate);
-                          setEmevdDslTemplateTruncated(false);
-                          setEmevdDslTemplateTotalLines(full.dslTemplateTotalLines ?? 0);
-                          setStatus(`完整 DSL 模板已加载（共 ${full.dslTemplateTotalLines ?? 0} 行）。`);
-                        } else {
-                          setStatus(full?.diagnostics?.[0]?.message ?? '完整模板加载失败。');
-                        }
-                      }
-                    }
-                  : {})}
-                onDslSubmit={async (sourceText) => {
-                  if (!emevdLive || !selectedFile) {
+                /* EVENT-30B：工作台自己管理多文档标签与 dirty；App 只按资源 URI
+                   提供最近一次打开/刷新的有界投影（pendingTab），并把提交/加载/
+                   结构化 mutation 的能力上抛。key 固定，切资源时工作台不重挂载，
+                   标签与未提交编辑得以保留。 */
+                pendingTab={eventPendingTab}
+                onDslSubmit={async (tab, sourceText) => {
+                  if (!tab.live) {
                     return {
                       ok: false,
                       diagnostics: [{ severity: 'error', code: 'EMEVD_DSL_NO_LIVE_DOCUMENT', message: '需要实时 EMEVD 文档才能提交 DSL。' }]
@@ -2949,24 +2981,32 @@ export function App(): ReactElement {
                       diagnostics: [{ severity: 'error', code: 'PRELOAD_MISSING', message: '当前预加载未暴露 submitEmevdDslPlan。' }]
                     };
                   }
-                  const result = await bridge.submitEmevdDslPlan(selectedFile.sourceUri, sourceText);
+                  const result = await bridge.submitEmevdDslPlan(tab.resourceUri, sourceText);
                   if (result.ok) {
                     const reload = await bridge.readEmevdFullDocument(
-                      selectedFile.sourceUri,
-                      `renderer-${selectedFile.sourceUri}-${Date.now()}`
+                      tab.resourceUri,
+                      `renderer-${tab.resourceUri}-${Date.now()}`
                     );
                     if (reload?.ok && reload.dslTemplate) {
-                      setEmevdDslTemplate(reload.dslTemplate);
-                      setEmevdDslTemplateTruncated(reload.dslTemplateTruncated ?? false);
-                      setEmevdDslTemplateTotalLines(reload.dslTemplateTotalLines ?? 0);
-                      if (reload.sourceHash) setEmevdSourceHash(reload.sourceHash);
-                      const refreshed = await bridge.readEmevdDocument(selectedFile.sourceUri) as {
+                      const refreshed = await bridge.readEmevdDocument(tab.resourceUri) as {
                         ok?: boolean;
                         data?: BridgeEmevdEnvelopeLike | null;
                       };
-                      if (refreshed?.ok && refreshed.data) {
-                        setEmevdDocument(mapEmevdEnvelopeToDocument(selectedFile.sourceUri, refreshed.data, { maxEvents: 128 }));
-                      }
+                      setEventPendingTab({
+                        ...tab,
+                        document: refreshed?.ok && refreshed.data
+                          ? alignEmevdDocumentAnchors(
+                              mapEmevdEnvelopeToDocument(tab.resourceUri, refreshed.data, { maxEvents: 128 }),
+                              reload.dslTemplate
+                            )
+                          : tab.document,
+                        sourceHash: refreshed?.ok && refreshed.data
+                          ? refreshed.data.sourceHash ?? tab.sourceHash
+                          : tab.sourceHash,
+                        dslTemplate: reload.dslTemplate,
+                        dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
+                        dslTemplateTotalLines: reload.dslTemplateTotalLines ?? 0
+                      });
                       return {
                         ok: true,
                         diagnostics: result.diagnostics ?? [],
@@ -2983,9 +3023,28 @@ export function App(): ReactElement {
                     }]
                   };
                 }}
-                onStructuredMutation={(mutation) => {
+                onLoadFullDslTemplate={async (tab) => {
+                  if (!bridge) return;
+                  const full = await bridge.readEmevdFullDocument(
+                    tab.resourceUri,
+                    `renderer-${tab.resourceUri}-${Date.now()}`,
+                    true
+                  );
+                  if (full?.ok && full.dslTemplate) {
+                    setEventPendingTab({
+                      ...tab,
+                      dslTemplate: full.dslTemplate,
+                      dslTemplateTruncated: false,
+                      dslTemplateTotalLines: full.dslTemplateTotalLines ?? 0
+                    });
+                    setStatus(`完整 DSL 模板已加载（共 ${full.dslTemplateTotalLines ?? 0} 行）。`);
+                  } else {
+                    setStatus(full?.diagnostics?.[0]?.message ?? '完整模板加载失败。');
+                  }
+                }}
+                onStructuredMutation={(tab, mutation) => {
                   void (async () => {
-                    if (!emevdLive || !emevdSourceHash || !selectedFile) {
+                    if (!tab.live || !tab.sourceHash) {
                       setStatus('当前资源未实时加载，不能生成 mutation；请先选中可解析资源。');
                       return;
                     }
@@ -3013,8 +3072,8 @@ export function App(): ReactElement {
                             newEventId: mutation.newEventId
                           };
                     const result = await bridge.applyEmevdMutation(
-                      selectedFile.sourceUri,
-                      emevdSourceHash,
+                      tab.resourceUri,
+                      tab.sourceHash,
                       bridgeMutation
                     );
                     if (!result.ok) {
@@ -3022,15 +3081,22 @@ export function App(): ReactElement {
                       return;
                     }
                     setStatus('EMEVD mutation 已提交；正在重读…');
-                    const reload = await bridge.readEmevdDocument(selectedFile.sourceUri) as {
+                    const reload = await bridge.readEmevdDocument(tab.resourceUri) as {
                       ok?: boolean;
                       data?: BridgeEmevdEnvelopeLike | null;
                     };
                     if (reload?.ok && reload.data) {
-                      setEmevdDocument(mapEmevdEnvelopeToDocument(selectedFile.sourceUri, reload.data, {
-                        maxEvents: 128
-                      }));
-                      setEmevdSourceHash(reload.data.sourceHash ?? null);
+                      setEventPendingTab({
+                        ...tab,
+                        // 结构化 mutation 不改事件顺序，沿用当前 dslTemplate 的锚对齐。
+                        document: alignEmevdDocumentAnchors(
+                          mapEmevdEnvelopeToDocument(tab.resourceUri, reload.data, {
+                            maxEvents: 128
+                          }),
+                          tab.dslTemplate
+                        ),
+                        sourceHash: reload.data.sourceHash ?? tab.sourceHash
+                      });
                       setStatus('EMEVD 已提交并重读。');
                     } else {
                       setStatus('EMEVD 已提交，但重读失败。');
@@ -3072,7 +3138,8 @@ export function App(): ReactElement {
                     payload: {
                       op,
                       id: mutation.id,
-                      ...(mutation.text !== undefined ? { text: mutation.text } : {})
+                      ...(mutation.text !== undefined ? { text: mutation.text } : {}),
+                      ...(mutation.tableId !== undefined ? { tableId: mutation.tableId } : {})
                     }
                   });
                   setStatus('FMG 候选变更已进入审查队列。');
@@ -3335,8 +3402,12 @@ export function App(): ReactElement {
           {activeEditor === 'flver' && selectedFile && (
             <FlverWorkbenchPanel resourceUri={selectedFile.sourceUri} data={flverData as never} />
           )}
-          {activeEditor === 'tpf' && selectedFile && (
-            <TpfWorkbenchPanel resourceUri={selectedFile.sourceUri} data={tpfData as never} />
+          {activeEditor === 'tpf' && (
+            <TpfWorkbenchPanel
+              key={`tpf-wb:${selectedFile?.sourceUri ?? 'none'}`}
+              containers={textureContainers}
+              {...(selectedFile?.sourceUri ? { initialUri: selectedFile.sourceUri } : {})}
+            />
           )}
           {/* 没有语义编辑器的资源：给一句人话 + 指向折叠区的原始字节。
               此前这类资源什么编辑器都不显示，主区只剩证据卡与错误码。 */}

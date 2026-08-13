@@ -251,6 +251,8 @@ internal static class BridgeDaemonHost
         "write-emevd",
         "write-msb",
         "write-gparam",
+        "write-flver",
+        "write-tpf-texture-replace",
         "export-tpf-texture",
         "extract-bnd4-child"
     };
@@ -525,9 +527,10 @@ internal static class BridgeDaemonHost
         "inspect", "validate", "read-dcx-document", "snapshot-bnd4-child",
         "extract-bnd4-child", "write-bnd4", "inventory-asset-resources",
         "read-fmg-document", "write-fmg", "read-param-document", "write-param",
-        "read-gparam-document", "write-gparam",
+        "read-gparam-document", "write-gparam", "write-flver", "read-text-catalog",
         "read-emevd-document", "write-emevd", "read-msb-document", "write-msb",
-        "read-tpf-document", "export-tpf-texture", "read-tae-document",
+        "read-tpf-document", "export-tpf-texture", "read-tpf-texture-preview",
+        "write-tpf-texture-replace", "read-tae-document",
         "read-flver-document", "read-flver-mesh", "read-flver-skeleton",
         "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
         // read-mtd-document 不在此列：它已从 dispatch 撤下（V0.6 延期项，

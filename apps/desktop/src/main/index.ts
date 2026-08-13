@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
@@ -19,7 +19,24 @@ export { sanitizeRendererValue } from './rendererDto.js';
 const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
 
+/**
+ * 与 renderer `--forge-0` / `--ink-0` 暗色 token 的 sRGB 近似。
+ * Windows / macOS 的 titleBarOverlay 只接受 hex，不能读 CSS 变量。
+ */
+const TITLEBAR_OVERLAY = {
+  color: '#090C11',
+  symbolColor: '#E2E5EA',
+  height: 40
+} as const;
+
 function createWindow(): void {
+  // Electron 默认挂一套 File / Edit / View / Window 菜单。Windows 上会占掉
+  // 一整条系统菜单栏，叠在应用自绘 titlebar 上面。macOS 保留系统菜单，
+  // 否则 Cmd+Q / 拷贝粘贴角色会一起丢掉。
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null);
+  }
+
   const rendererFilePath = join(here, '../renderer/index.html');
   const developmentRendererUrl = resolveDevelopmentRendererUrl();
   const rendererDocumentUrl = developmentRendererUrl ?? pathToFileURL(rendererFilePath).href;
@@ -30,6 +47,10 @@ function createWindow(): void {
     minHeight: 640,
     show: false,
     title: 'SoulForge',
+    backgroundColor: TITLEBAR_OVERLAY.color,
+    autoHideMenuBar: true,
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    ...(process.platform === 'linux' ? {} : { titleBarOverlay: TITLEBAR_OVERLAY }),
     webPreferences: {
       // 与 electron.vite.config.ts 的 preload 输出约定成对：产物是 CommonJS 的
       // index.cjs。两个约束共同决定了这个扩展名：
@@ -62,6 +83,18 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
+
+  // 去掉默认 View 菜单后，开发态仍保留打开检查器的快捷键。
+  if (!app.isPackaged) {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return;
+      const toggleInspector = input.key === 'F12'
+        || (input.key.toLowerCase() === 'i' && input.control && input.shift);
+      if (!toggleInspector) return;
+      event.preventDefault();
+      mainWindow.webContents.toggleDevTools();
+    });
+  }
 
   registerIpcHandlers(mainWindow.webContents, rendererDocumentUrl);
 

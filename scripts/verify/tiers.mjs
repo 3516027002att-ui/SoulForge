@@ -96,6 +96,12 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // ROUTE-06 的 resolveIntegrationForConfirmedLeaf）。经根转发
   // test:editor-catalog-schema 调度；纯静态、秒级，归 unit。
   'test:editor-catalog-schema': 'unit',
+  // MODEL-51A 的 FLVER 前端 DTO pages 投影契约（front-end.md §18.19）。纯
+  // node:test 单元测试，无 native 语料依赖；经根转发 test:flver-pages 调度，归 unit。
+  'test:flver-pages': 'unit',
+  // TEXTURE-52A 的 TPF 前端 DTO pages 投影契约（front-end.md §18.19）。纯
+  // node:test 单元测试，无 native 语料依赖；经根转发 test:tpf-pages 调度，归 unit。
+  'test:tpf-pages': 'unit',
   // renderer 纯逻辑单元测试（changeControl 状态机等）。此前 renderer 侧零单元测试，
   // 唯一的 e2e 又跑在 mock main 上（19/56 通道），拆 App.tsx 时没有安全网——状态
   // 复位漏一处不会有编译错误也不会有测试失败。无 DOM/IPC 依赖，故归 unit。
@@ -413,6 +419,15 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:param': 'native',
   'bridge:verify:gparam': 'native',
   'bridge:verify:gparam-writer': 'native',
+  // TEXTURE-52C TPF 单纹理替换 writer smoke（front-end.md §18.19）。typed replace
+  // 原位/重排/失败注入 + reopen roundtrip + before image 保留；需要真实 texbnd
+  // 语料（SOULFORGE_NATIVE_FIXTURE_ROOT），未配置时诚实跳过。归 native。
+  'bridge:verify:tpf-writer': 'native',
+  // MODEL-51C FLVER material-slot-set 字节补丁 writer smoke（front-end.md §18.19）。
+  // loose 与 chrbnd 容器两 profile + 7 类失败注入 + reopen failure；需要真实
+  // chrbnd 语料（SOULFORGE_NATIVE_FIXTURE_ROOT / SOULFORGE_SEKIRO_GAME_ROOT），
+  // 未配置时诚实跳过。与 bridge:verify:flver-multi 同源语料，归 native。
+  'bridge:verify:flver-writer': 'native',
   'bridge:verify:tae': 'native',
   'bridge:verify:tpf': 'native',
   'test:emevd-corpus-matrix': 'native',

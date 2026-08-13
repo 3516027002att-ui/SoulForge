@@ -6,6 +6,7 @@ import type {
   RendererContainerTreeSummary
 } from '@soulforge/shared';
 import { HexEditorPanel } from './HexEditorPanel.js';
+import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { isLikelyBase64, uint8ArrayToBase64 } from '../utils/binary.js';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
@@ -22,10 +23,33 @@ interface ReplaceResultView {
 }
 
 /**
- * BND4 容器工作台：只读条目树 + 子项 Hex 证据 + 用户提供字节的整个
- * 子项替换。不提供 typed mutation（bnd4 contract mutationKinds=[]）；
- * 替换字节必须由用户提供，SoulForge 不生成内容。
+ * 已确认子项格式 → 专属编辑器标签（§10.1 child projection 的展示侧）。
+ *
+ * child.formatKind 由 core（bndSynthetic.ts 的 guessFormatKind）产出，renderer
+ * 只把生产方给出的格式名映射为可读目标，不自建解析。真实打开仍需资源树导航
+ * —— 本面板不制造专属能力。
  */
+const FORMAT_EDITOR_LABEL: Record<string, string> = {
+  fmg: '文本编辑器（FMG）',
+  param: '参数编辑器（PARAM）',
+  emevd: '事件编辑器（EMEVD）',
+  msb: '地图编辑器（MSB）'
+};
+
+function childProjectionLabel(child: RendererContainerChild): string | null {
+  if (child.nestedFormat === 'dcx' || child.nestedFormat === 'bnd3' || child.nestedFormat === 'bnd4') {
+    return `该子项是嵌套容器（${child.nestedFormat}），可在资源树中打开并进入其专属工作台；此处只读展示。`;
+  }
+  const label = FORMAT_EDITOR_LABEL[child.formatKind];
+  if (label) {
+    return `已确认格式（${child.formatKind}）：可投影到${label}。在左侧资源树中打开对应资源进入编辑。`;
+  }
+  if (child.formatKind && child.formatKind !== 'unknown') {
+    return `格式 ${child.formatKind}：未接入专属编辑器，仅在此只读预览，不制造专属能力。`;
+  }
+  return null;
+}
+
 /**
  * 逐项容器诊断（按需加载）。
  *
@@ -46,6 +70,17 @@ interface ContainerDiagnosticsView {
   capabilities: Record<string, unknown> | null;
 }
 
+/**
+ * BND4 容器工作台（CONTAINER-40）。
+ *
+ * 三栏 Containers | Entries | Preview / Source（§10.1，不用四栏模板——Tools
+ * 未接通就隐藏）。第一栏只列逻辑容器（旁路/历史文件由 App 的 artifact-role
+ * prefilter 拦在资源树层，不进本工作台）；Entries 用稳定 child identity
+ * （childId + childUri，不靠可重复文件名）；Preview 对已确认格式子项标注
+ * 投影目标，未确认子项只读展示；Bytes 只在用户显式选择原始视图时出现。
+ * 唯一写路径是用户提供字节的整个子项替换（bnd4 contract mutationKinds=[]，
+ * 无 typed add/delete），SoulForge 不生成内容。
+ */
 export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement {
   const [root, setRoot] = useState<RendererContainerTreeSummary | null>(null);
   const [pageChildren, setPageChildren] = useState<RendererContainerChild[]>([]);
@@ -59,6 +94,8 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [selectedChildUri, setSelectedChildUri] = useState<string | null>(null);
+  /** Bytes 原始视图是否显式打开（§10.1：Bytes 只在用户显式选择时出现）。 */
+  const [showBytes, setShowBytes] = useState(false);
   const [childHexBase64, setChildHexBase64] = useState<string | null>(null);
   const [childHash, setChildHash] = useState<string | null>(null);
   const [childReadDiagnostics, setChildReadDiagnostics] = useState<Diagnostic[]>([]);
@@ -247,14 +284,36 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     [pageChildren, selectedChildUri]
   );
 
-  async function selectChild(child: RendererContainerChild): Promise<void> {
+  /**
+   * 选中子项只更新选择与预览元数据；**不**自动读取字节——
+   * §10.1「Bytes 只在用户显式选择原始视图时出现」。此前选中即读整个子项
+   * 字节，大容器下翻页选中就触发整文件读，属无效 IO。
+   */
+  function selectChild(child: RendererContainerChild): void {
     setSelectedChildUri(child.childUri);
+    setShowBytes(false);
     setChildHexBase64(null);
     setChildHash(null);
     setChildReadDiagnostics([]);
     setReplaceOpen(false);
     setReplaceBytes('');
     setReplaceResult(null);
+  }
+
+  /** 显式「查看原始字节」才读子项字节并展示只读 Hex 证据。 */
+  async function toggleBytes(): Promise<void> {
+    if (showBytes) {
+      setShowBytes(false);
+      setChildHexBase64(null);
+      setChildHash(null);
+      setChildReadDiagnostics([]);
+      return;
+    }
+    if (!selectedChild) return;
+    setShowBytes(true);
+    setChildHexBase64(null);
+    setChildHash(null);
+    setChildReadDiagnostics([]);
     if (bridge === null) {
       setChildReadDiagnostics([{
         severity: 'error',
@@ -265,7 +324,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     }
     setLoadingChild(true);
     try {
-      const read = await bridge.readContainerChild(child.childUri);
+      const read = await bridge.readContainerChild(selectedChild.childUri);
       if (read.ok && read.bytes) {
         setChildHexBase64(uint8ArrayToBase64(read.bytes));
         setChildHash(read.hash ?? null);
@@ -358,18 +417,12 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   }
 
   const canReplace = Boolean(root?.root?.canReplaceChild);
+  const projectionLabel = selectedChild ? childProjectionLabel(selectedChild) : null;
 
-  return (
-    <section className="panel" aria-label="BND4 容器工作台">
-      <header className="panel-header">
-        <h3>BND4 容器工作台</h3>
-        <span className="muted">{totalChildren} 个子项</span>
-      </header>
-
-      {loading && <p className="muted">正在读取容器…</p>}
+  /* ── 左栏：Containers（只列逻辑容器，旁路/历史文件不进本工作台）────── */
+  const containersColumn = (
+    <div className="stack gap">
       {loadError && <p className="danger">{loadError}</p>}
-      {!loading && !loadError && !root && <p className="muted">选择左侧容器资源后显示工作台。</p>}
-
       {root?.root && (
         <>
           <div className="structured-preview-grid">
@@ -429,7 +482,6 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
                 </span>
               </div>
             )}
-            {/* 三条各自的结构化诊断码逐条列出——聚合布尔丢掉的正是这些原因。 */}
             {diagnostics !== null && !diagnostics.loading && (
               <ul className="muted container-diag__codes">
                 {[
@@ -451,11 +503,15 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
           </details>
         </>
       )}
+      {loading && <p className="muted">正在读取容器…</p>}
+      {!loading && !loadError && !root && <p className="muted">选择左侧容器资源后显示工作台。</p>}
+    </div>
+  );
 
-      {/* 降级说明必须可见：否则「只显示了前 N 条」与「一共就这么多」在界面上
-          无法区分，用户会把截断当成完整数据。 */}
+  /* ── 中栏：Entries（稳定 child identity：childId + childUri）──────── */
+  const entriesColumn = (
+    <div className="stack gap">
       {degraded !== null && <p className="muted">{degraded}</p>}
-
       <div className="row gap pager">
         <button
           type="button"
@@ -478,7 +534,6 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
         {pageLoading && <span className="muted">加载中…</span>}
       </div>
       {pageError && <p className="danger">{pageError}</p>}
-
       <div className="binder-child-table script-entry-table" role="table">
         <div className="binder-child-row binder-child-header script-entry-row" role="row">
           <span>名称</span>
@@ -498,7 +553,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
             {...selectableRowAttributes({
               selected: child.childUri === selectedChildUri,
               isTabEntry: isRowTabEntry(rowIndex, selectedChildUri !== null),
-              onSelect: () => void selectChild(child)
+              onSelect: () => selectChild(child)
             })}
           >
             <span title={child.name ?? ''}>{child.name ?? '（无名称）'}</span>
@@ -514,7 +569,6 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
         ))}
         {pageChildren.length === 0 && !loading && <p className="muted">无子项列表。</p>}
       </div>
-
       {listDiagnostics.length > 0 && (
         <div className="save-diagnostics">
           {listDiagnostics.map((diagnostic) => (
@@ -524,19 +578,36 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
           ))}
         </div>
       )}
+    </div>
+  );
 
-      {loadingChild && <p className="muted">正在读取子项字节…</p>}
-      {childHexBase64 && (
+  /* ── 右栏：Preview / Source（未确认子项只读；Bytes 仅显式打开）───── */
+  const previewColumn = (
+    <div className="stack gap">
+      {!selectedChild && <p className="muted">选择条目后显示预览。</p>}
+      {selectedChild && (
         <>
-          <HexEditorPanel
-            title={`${selectedChild?.name ?? '子项'} 只读 Hex 证据${childHash ? ` · ${shortHash(childHash)}` : ''}`}
-            initialBytesBase64={childHexBase64}
-          />
-          <p className="muted">子项字节为只读证据视图；替换须由用户提供字节，SoulForge 不生成内容。</p>
+          <div className="structured-preview-grid">
+            <span>名称：{selectedChild.name ?? selectedChild.childId}</span>
+            <span>ID：{selectedChild.childId}</span>
+            <span>格式：{selectedChild.formatKind}</span>
+            <span>偏移：0x{selectedChild.offset.toString(16)}</span>
+            <span>大小：{selectedChild.size}{selectedChild.compressedSize !== undefined && selectedChild.compressedSize !== selectedChild.size
+              ? `（压缩 ${selectedChild.compressedSize}）`
+              : ''}</span>
+            <span>嵌套格式：{selectedChild.nestedFormat ?? '—'}</span>
+            <span>条目校验：{shortHash(selectedChild.hash)}</span>
+            <span>替换：{selectedChild.canReplace ? '可' : '只读'}</span>
+          </div>
+          {projectionLabel && <p className="muted">{projectionLabel}</p>}
+
           <div className="row gap">
+            <button type="button" onClick={() => void toggleBytes()}>
+              {showBytes ? '收起原始字节（Bytes）' : '查看原始字节（Bytes）'}
+            </button>
             <button
               type="button"
-              disabled={!canReplace || !selectedChild?.canReplace}
+              disabled={!canReplace || !selectedChild.canReplace}
               onClick={() => {
                 setReplaceOpen((current) => !current);
                 setReplaceResult(null);
@@ -546,71 +617,99 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
             </button>
             {!canReplace && <span className="muted">当前容器不支持权威子项替换。</span>}
           </div>
-        </>
-      )}
 
-      {childReadDiagnostics.length > 0 && (
-        <div className="save-diagnostics">
-          {childReadDiagnostics.map((diagnostic) => (
-            <span key={`${diagnostic.code}-${diagnostic.message}`}>
-              {diagnostic.code}: {diagnostic.message}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {replaceOpen && selectedChild && (
-        <div className="stack gap">
-          <p className="muted">
-            替换目标：{selectedChild.name ?? selectedChild.childId}
-            {childHash ? ` · 条目校验 ${shortHash(childHash)}` : ''}
-            {root?.root ? ` · 容器校验 ${shortHash(root.root.hash)}` : ''}
-          </p>
-          <label className="stack gap">
-            选择替换字节文件（由你提供）
-            <input type="file" onChange={handleFileChange} />
-          </label>
-          <label className="stack gap">
-            或粘贴 base64 字节
-            <textarea
-              value={replaceBytes}
-              onChange={(event) => {
-                setReplaceBytes(event.target.value);
-                setReplaceResult(null);
-              }}
-              rows={3}
-              spellCheck={false}
-              placeholder="dataBase64…"
-            />
-          </label>
-          <div className="row gap">
-            <button
-              type="button"
-              disabled={replacing || replaceBytes.trim().length === 0}
-              onClick={() => void submitReplace()}
-            >
-              {replacing ? '提交中…' : '经 Patch Engine 替换并提交'}
-            </button>
-            <button type="button" disabled={replacing} onClick={() => setReplaceOpen(false)}>
-              取消
-            </button>
-          </div>
-          {replaceResult && (
-            <p className={replaceResult.ok ? undefined : 'danger'}>{replaceResult.message}</p>
+          {showBytes && loadingChild && <p className="muted">正在读取子项字节…</p>}
+          {showBytes && childHexBase64 && (
+            <>
+              <HexEditorPanel
+                title={`${selectedChild.name ?? '子项'} 只读 Hex 证据${childHash ? ` · ${shortHash(childHash)}` : ''}`}
+                initialBytesBase64={childHexBase64}
+              />
+              <p className="muted">子项字节为只读证据视图；替换须由用户提供字节，SoulForge 不生成内容。</p>
+            </>
           )}
-          {replaceResult && replaceResult.diagnostics.length > 0 && (
+          {showBytes && !loadingChild && !childHexBase64 && childReadDiagnostics.length > 0 && (
             <div className="save-diagnostics">
-              {replaceResult.diagnostics.map((diagnostic) => (
+              {childReadDiagnostics.map((diagnostic) => (
                 <span key={`${diagnostic.code}-${diagnostic.message}`}>
                   {diagnostic.code}: {diagnostic.message}
                 </span>
               ))}
             </div>
           )}
-          <p className="muted">整个子项替换会经 Patch Engine 事务并弹出主进程确认对话框；不提供 typed mutation。</p>
-        </div>
+
+          {replaceOpen && (
+            <div className="stack gap">
+              <p className="muted">
+                替换目标：{selectedChild.name ?? selectedChild.childId}
+                {childHash ? ` · 条目校验 ${shortHash(childHash)}` : ''}
+                {root?.root ? ` · 容器校验 ${shortHash(root.root.hash)}` : ''}
+              </p>
+              <label className="stack gap">
+                选择替换字节文件（由你提供）
+                <input type="file" onChange={handleFileChange} />
+              </label>
+              <label className="stack gap">
+                或粘贴 base64 字节
+                <textarea
+                  value={replaceBytes}
+                  onChange={(event) => {
+                    setReplaceBytes(event.target.value);
+                    setReplaceResult(null);
+                  }}
+                  rows={3}
+                  spellCheck={false}
+                  placeholder="dataBase64…"
+                />
+              </label>
+              <div className="row gap">
+                <button
+                  type="button"
+                  disabled={replacing || replaceBytes.trim().length === 0}
+                  onClick={() => void submitReplace()}
+                >
+                  {replacing ? '提交中…' : '经 Patch Engine 替换并提交'}
+                </button>
+                <button type="button" disabled={replacing} onClick={() => setReplaceOpen(false)}>
+                  取消
+                </button>
+              </div>
+              {replaceResult && (
+                <p className={replaceResult.ok ? undefined : 'danger'}>{replaceResult.message}</p>
+              )}
+              {replaceResult && replaceResult.diagnostics.length > 0 && (
+                <div className="save-diagnostics">
+                  {replaceResult.diagnostics.map((diagnostic) => (
+                    <span key={`${diagnostic.code}-${diagnostic.message}`}>
+                      {diagnostic.code}: {diagnostic.message}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <p className="muted">整个子项替换会经 Patch Engine 事务并弹出主进程确认对话框；不提供 typed add/delete（bnd4 contract mutationKinds=[]）。</p>
+            </div>
+          )}
+        </>
       )}
-    </section>
+    </div>
+  );
+
+  return (
+    <WorkbenchLayout
+      label="BND4 容器工作台"
+      toolbar={
+        <span className="muted">
+          {totalChildren > 0
+            ? `BND4 容器 · ${totalChildren} 个子项 · 三栏：容器 / 条目 / 预览`
+            : '选择左侧容器资源后显示工作台'}
+        </span>
+      }
+      columns={[
+        { id: 'containers', title: 'Containers', initialWidth: 280, minWidth: 200, children: containersColumn },
+        { id: 'entries', title: 'Entries', initialFlex: 1, minWidth: 260, children: entriesColumn },
+        { id: 'preview', title: 'Preview / Source', initialFlex: 1, minWidth: 240, children: previewColumn }
+      ]}
+    />
   );
 }
 

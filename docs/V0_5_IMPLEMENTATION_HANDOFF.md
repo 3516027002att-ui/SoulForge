@@ -996,7 +996,7 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 | `W-REL-COMPLIANCE-02` | `completed` | `partial` | — | `REL-COMPLIANCE` | 补真实 Sekiro gate 与跨机/远程 CI 复现；许可证覆盖与 installer 完整性链已完成｜已完成证据：package tree 内容扫描与 manifest/hash 完整性已完成（auditPackageTree/listAsarEntries：win-unpacked 必装齐全 + forbidden 路径拒绝 + asar 内 1668 条目与官方 @electron/asar 交叉一致 1668/1668；release:installer:manifest exe sha256 + source out-manifest fingerprint 链，不一致 fail-closed）；installer lifecycle harness 已完成（verify-installer-`lifecycle.mjs`：默认结构化 preflight+skip；SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 在临时目标目录安装→升级→卸载→干净目标检查→清理；真实 NSIS 构建 SoulForge-0.0.0-`x64.exe` 118,109,161 B）；继续 NSIS installer lifecycle 验证（安装/升级/卸载/干净目标）、package tree 内容扫描和 manifest/hash 完整性 | `W-REL-COMPLIANCE-01` 已完成许可证文本和 NSIS 构建；不要求代码签名 | `apps/desktop/electron-builder.json`、`scripts/release-compliance-lib.mjs` | `npm run test:release-compliance-fixtures`、`npm run test:release-content` | cap=`partial`；不声明外部分发或签名发布通过 |
 | `W-REL-C-MULTILANG-01` | `completed` | `partial` | — | `C-FMG` | 补 FMG 多语言与多 msgbnd 写验证（本机 corpus 仅 zhocn，需注册第二语言样本） | 本机 corpus 语言覆盖受限（mods/msg 仅 zhocn）；注册多语言 fixture 样本不触原版只读目录 | `bridge/SoulForge.Bridge/FmgNativeWriter.cs`、`packages/core/src/testing/runNativeFmgSmoke.ts` | `npm run bridge:verify:fmg`；`validation-unfrozen`：FMG 多语言写验证 | cap=`partial`；只覆盖实际注册的多语言布局 |
 | `W-REL-C-MULTILANG-02` | `completed` | `partial` | — | `C-FMG` | 全官方语言 FMG 写验证：对每个官方语言目录执行 native write-fmg mutations 派生样本并写回重读验证 | 本机 mods/msg 仅 zhocn 展开，其余官方语言文本位于原版 .bdt/.bhd 归档内不可直接访问；FMG v2 格式语言无关（id→UTF-16 文本表），语言是目录级概念，`W-REL-C-MULTILANG-01` 已用 zhocn+enus 派生+menu 验证写路径，本切片需真实多语言语料才能封闭全语言矩阵 | `bridge/SoulForge.Bridge/FmgNativeWriter.cs`、`packages/core/src/testing/runNativeFmgSmoke.ts` | `npm run bridge:verify:fmg`；`validation-unfrozen`：全官方语言 FMG 写验证 | cap=`partial`；只覆盖实际注册的官方语言布局 |
-| `W-REL-C-MULTILANG-03` | `ready` | `partial` | — | `C-FMG` | 全官方语言 FMG 容器闭环：补 item/menu 容器级 Patch Engine 提交、独立重读、回滚与跨语言引用矩阵 | `W-REL-C-MULTILANG-02` 已完成 14/14 官方语言真实 item FMG staged 写入/重读且原容器哈希不变；本切片只使用系统临时 overlay，不触碰原版或 live Mod，真实游戏加载另由后继切片失败关闭 | `packages/core/src/testing/runNativeFmgSmoke.ts`、`packages/core/src/testing/runFmgReferenceIntegritySmoke.ts`、`packages/core/src/editing/fmgBridgeCommit.ts`、`apps/desktop/src/main/ipc.ts` | `npm run bridge:verify:fmg`；`npm run test:fmg-reference-integrity`；`validation-unfrozen`：全官方语言 item/menu 容器提交/回滚与跨语言引用矩阵 | cap=`partial`；只覆盖经 Patch Engine 提交/回滚与引用扫描的实际语言和容器 |
+| `W-REL-C-MULTILANG-03` | `active` | `partial` | — | `C-FMG` | 全官方语言 FMG 容器闭环：补 item/menu 容器级 Patch Engine 提交、独立重读、回滚与跨语言引用矩阵 | `W-REL-C-MULTILANG-02` 已完成 14/14 官方语言真实 item FMG staged 写入/重读且原容器哈希不变；本切片只使用系统临时 overlay，不触碰原版或 live Mod，真实游戏加载另由后继切片失败关闭 | `packages/core/src/testing/runNativeFmgSmoke.ts`、`packages/core/src/testing/runFmgReferenceIntegritySmoke.ts`、`packages/core/src/editing/fmgBridgeCommit.ts`、`apps/desktop/src/main/ipc.ts` | `npm run bridge:verify:fmg`；`npm run test:fmg-reference-integrity`；`validation-unfrozen`：全官方语言 item/menu 容器提交/回滚与跨语言引用矩阵 | cap=`partial`；只覆盖经 Patch Engine 提交/回滚与引用扫描的实际语言和容器 |
 | `W-REL-C-PARAM-04` | `completed` | `partial` | — | `C-PARAM` | 全部 ParamType 读往返矩阵与写路径扩展：对 gameparam.parambnd.dcx 全部子项执行 native 读+语义往返（大文件条目经 file-backed extract-bnd4-child 绕开 snapshot base64 帧上限），并扩展多布局 ParamType 的字段级 staged upsert 写验证 | `W-EMEVD-FMG-PARAM-03` 完成（bridge:verify:param corpus 40/40 + 3 legacy 已通）；真实 gameparam.parambnd.dcx 在本机，138 子项全部可经 file-backed extract 读取 | `bridge/SoulForge.Bridge/Bnd4NativeWriter.cs`、`packages/core/src/testing/runNativeParamSmoke.ts` | `npm run bridge:verify:param` | cap=`partial`；只覆盖 gameparam.parambnd.dcx 实际注册的 ParamType 布局 |
 | `W-REL-D-GAMELOAD-01` | `ready` | `candidate` | — | `D-BEHAVIOR` | 真实 Sekiro 游戏内加载确认：替换后 script 容器放入真实 mods/script 后游戏能读到脚本阶段不崩溃 | `W-SCRIPT-READONLY-01` 完成（preflight 已过）；需用户游戏内确认（SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED） | `packages/core/src/testing/runScriptContainerLoadPreflightSmoke.ts`、`packages/core/src/script/scriptContainerEvidence.ts` | `node scripts/with-local-has-game-env.mjs` `npm run test:script-container-load-preflight`；`validation-unfrozen`：真实游戏内加载确认 | cap=`candidate`；真实游戏内加载确认前 authority 保持 candidate |
 | `W-REL-H-CROSSMACHINE-01` | `ready` | `partial` | — | `H-RUNTIME` | 跨机/干净机 NSIS 安装、升级、卸载复现与真实 me3 会话跨机验证 | 本机 NSIS 安装/升级/卸载已过；需第二台 Windows x64 机器或干净机环境 | `scripts/verify-installer-lifecycle.mjs`、`scripts/verify-me3-sekiro-session.mjs` | SOULFORGE_INSTALLER_LIFECYCLE_RUN=1 `node scripts/verify-installer-lifecycle.mjs`；跨机 me3 会话 smoke | cap=`partial`；只覆盖实际执行的跨机/干净机复现 |
@@ -1009,7 +1009,9 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 
 <!-- SOULFORGE_PROJECTION_BEGIN:active-claims -->
 
-当前没有 active claim。gov claim 获取、gov complete 释放；表格由 generate-handoff-projection 从 slices.json 投影。
+| sliceId | claimId | owner | claimedAt | heartbeatAt | recoveryTrigger |
+|---|---|---|---|---|---|
+| `W-REL-C-MULTILANG-03` | `claim-w-rel-c-multilang-03-20260813` | claude-code | 2026-08-13T02:13:46.202Z | 2026-08-13T02:13:46.202Z | 检查该切片 `entryPoints` 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready |
 
 <!-- SOULFORGE_PROJECTION_END:active-claims -->
 
@@ -1395,7 +1397,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 170 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 174 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1424,7 +1426,7 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（51 条）
+**unit**（53 条）
 
 ~~~powershell
 npm run test
@@ -1454,6 +1456,7 @@ npm run test:emevd-external-adapter
 npm run test:emevd-four-view
 npm run test:emevd-ipc-contract
 npm run test:emevd-plan-commit
+npm run test:flver-pages
 npm run test:fmg-msb-ipc-contract
 npm run test:hex-scene
 npm run test:me3-runtime-adapter
@@ -1473,6 +1476,7 @@ npm run test:scene-draw-list
 npm run test:subprocess-control
 npm run test:three-scene-functional
 npm run test:three-scene-module
+npm run test:tpf-pages
 npm run test:ui-localization
 npm run test:vault-encrypt-contract
 npm run test:vault-ipc-contract
@@ -1529,7 +1533,7 @@ npm run test:upgrade-recovery
 npm run test:writer-failure-matrix
 ~~~
 
-**native**（45 条）
+**native**（47 条）
 
 ~~~powershell
 npm run bridge:verify:bnd4-transaction
@@ -1542,6 +1546,7 @@ npm run bridge:verify:flver
 npm run bridge:verify:flver-glb
 npm run bridge:verify:flver-mesh
 npm run bridge:verify:flver-multi
+npm run bridge:verify:flver-writer
 npm run bridge:verify:fmg
 npm run bridge:verify:gparam
 npm run bridge:verify:gparam-writer
@@ -1553,6 +1558,7 @@ npm run bridge:verify:param
 npm run bridge:verify:tae
 npm run bridge:verify:tpf
 npm run bridge:verify:tpf-multi
+npm run bridge:verify:tpf-writer
 npm run probe:behavior-headers
 npm run test:bridge-exit-hygiene
 npm run test:corpus-manifest

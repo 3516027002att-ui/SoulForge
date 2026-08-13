@@ -2,8 +2,8 @@
  * 每种资源族的编辑态复位登记表（纯数据 + 纯函数，可单测）。
  *
  * 为什么需要它：App.tsx 里每个资源族（FMG / PARAM / EMEVD / MSB / TAE / ESD /
- * FLVER / TPF）各有一组 useState，而「切换工作区」与「切换选中文件」两处都需要
- * 把它们清空。此前这两处是手写 setter 列表，实测结果是：
+ * FLVER）各有一组 useState，而「切换工作区」与「切换选中文件」两处都需要把它们
+ * 清空。此前这两处是手写 setter 列表，实测结果是：
  *
  *   openWorkspace  —— 8 个资源族**一个都没复位**
  *   selectFile     —— 只复位了 TAE/ESD/FLVER/TPF，漏掉 FMG/PARAM/EMEVD/MSB
@@ -11,6 +11,11 @@
  * 症状是切换工作区或切换文件后，面板仍显示上一个资源的行/条目/场景。写入侧有
  * live+sourceHash 双重前置条件挡着（不会写错文件），但显示层会伪造「已解析」
  * 观感——而硬约束 7 要求严格区分 native-verified 与其他状态。
+ *
+ * TPF 不在此表：TEXTURE-52B 把 TpfWorkbenchPanel 改成自驱动四栏工作台（镜像
+ * GparamWorkbench），选中容器/选中纹理/预览都自持在工作台内部，由 App 的
+ * key={selectedFile.sourceUri} 重建清空，不再持有 App 级 useState —— 不需要
+ * App 级复位。
  *
  * 手写列表的根本问题是**漏一项不会有任何信号**：没有编译错误、没有测试失败、
  * 没有诊断。新增一种资源族要同步改两处，而漏改只能靠肉眼发现。
@@ -29,8 +34,7 @@ export type DocumentFamily =
   | 'msb'
   | 'tae'
   | 'esd'
-  | 'flver'
-  | 'tpf';
+  | 'flver';
 
 export const DOCUMENT_FAMILIES: readonly DocumentFamily[] = Object.freeze([
   'fmg',
@@ -39,8 +43,7 @@ export const DOCUMENT_FAMILIES: readonly DocumentFamily[] = Object.freeze([
   'msb',
   'tae',
   'esd',
-  'flver',
-  'tpf'
+  'flver'
 ]);
 
 /**
@@ -73,14 +76,10 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       // 错误地显示为可写 —— 那正是授权门要挡住的形态（按未校验的字段偏移写入）。
       'setParamFieldDefsOrigin'
     ]),
-    emevd: Object.freeze([
-      'setEmevdDocument',
-      'setEmevdSourceHash',
-      'setEmevdLive',
-      'setEmevdDslTemplate',
-      'setEmevdDslTemplateTruncated',
-      'setEmevdDslTemplateTotalLines'
-    ]),
+    // EVENT-30B：EMEVD 编辑态收敛为单个 pendingTab（工作台内部自持 tabs/dirty/
+    // draft/per-tab EditorState）。复位即清空 pendingTab；工作台收到 null 后回到
+    // 空态，不会把上一个事件的源码残留到新资源旁边。
+    emevd: Object.freeze(['setEventPendingTab']),
     msb: Object.freeze([
       'setMsbParts',
       'setMsbModels',
@@ -92,8 +91,7 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
     ]),
     tae: Object.freeze(['setTaeData']),
     esd: Object.freeze(['setEsdData']),
-    flver: Object.freeze(['setFlverData']),
-    tpf: Object.freeze(['setTpfData'])
+    flver: Object.freeze(['setFlverData'])
   });
 
 /**

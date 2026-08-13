@@ -18,11 +18,15 @@ import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { EsdWorkbenchPanel } from './EsdWorkbenchPanel.js';
 import { TaeWorkbenchPanel } from './TaeWorkbenchPanel.js';
-import { TpfWorkbenchPanel } from './TpfWorkbenchPanel.js';
 
 /*
- * 覆盖范围的显式声明：这里只渲染**不依赖 window / WebGL** 的三个面板
- * （ESD / TAE / TPF）。
+ * 覆盖范围的显式声明：这里只渲染**不依赖 window / WebGL** 的面板。
+ *
+ * TPF 已从本层移除：TEXTURE-52B 把 TpfWorkbenchPanel 改成自驱动四栏工作台
+ * （调 getRendererBridge，直接解 window.soulforge），在纯 Node 下导入即
+ * ReferenceError —— 与 FlverWorkbenchPanel / MsbScenePanel 同类。它的截断说明
+ * （tpf-truncation）由 listTruncation.test.ts 的源码对账覆盖（能抓改名/删除，
+ * 抓不到「条件改成永假」）；这个差额与 FLVER/MSB 同口径，如实记在此处。
  *
  * FlverWorkbenchPanel 与 MsbScenePanel 不在此层：它们经 FlverViewer /
  * threeSceneController 触达 `window`（rendererRuntime.getRendererBridge 直接解
@@ -105,28 +109,6 @@ describe('TAE 动画表超上限时渲染截断说明', () => {
   });
 });
 
-describe('TPF 纹理表超上限时渲染截断说明', () => {
-  const total = 400;
-  const shown = 200;
-  const html = renderToStaticMarkup(
-    <TpfWorkbenchPanel
-      resourceUri="synthetic://tpf"
-      data={{
-        format: 'TPF', sourceSize: 1024, sourceHash: 'synthetic',
-        textureCount: total, authority: 'synthetic-fixture',
-        textures: synthetic(total, (i) => ({
-          index: i, name: `tex_${i}`, format: 0, mipCount: 1,
-          dataOffset: 0, dataSize: 16, width: 4, height: 4, ddsFourCC: 'DX10'
-        }))
-      }}
-    />
-  );
-
-  it('渲染出带真实数字的截断说明', () => {
-    assertTruncationVisible(html, { testId: 'tpf-truncation', total, shown });
-  });
-});
-
 describe('未超上限时不渲染截断说明（防「完整数据被标成部分」）', () => {
   it('ESD 少量状态组：无说明', () => {
     const html = renderToStaticMarkup(
@@ -141,22 +123,5 @@ describe('未超上限时不渲染截断说明（防「完整数据被标成部�
       />
     );
     assert.doesNotMatch(html, /data-testid="esd-truncation"/);
-  });
-
-  it('TPF 少量纹理：无说明', () => {
-    const html = renderToStaticMarkup(
-      <TpfWorkbenchPanel
-        resourceUri="synthetic://tpf-small"
-        data={{
-          format: 'TPF', sourceSize: 128, sourceHash: 'synthetic',
-          textureCount: 2, authority: 'synthetic-fixture',
-          textures: synthetic(2, (i) => ({
-            index: i, name: `tex_${i}`, format: 0, mipCount: 1,
-            dataOffset: 0, dataSize: 16, width: 4, height: 4, ddsFourCC: 'DX10'
-          }))
-        }}
-      />
-    );
-    assert.doesNotMatch(html, /data-testid="tpf-truncation"/);
   });
 });

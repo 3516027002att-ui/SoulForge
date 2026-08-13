@@ -600,10 +600,10 @@ async function realParamChannelLeg(
 /** emevd channel: production paginated full-document assembly + events walk. */
 async function realEmevdChannelLeg(source: string, staging: string): Promise<RealCorpusResult> {
   const registry = createSekiroFixtureEmedf();
+  // EVENT-30A: pass the .dcx outer resource directly; Bridge unwraps natively.
   const result = await readFullEmevdDocumentViaBridge({
     filePath: source,
     allowedRoots: [dirname(source), staging],
-    tempDir: staging,
     resourceUri: 'file://event/common.emevd',
     registry,
     documentInstanceId: 'bounded-access-native',

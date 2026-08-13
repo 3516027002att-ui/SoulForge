@@ -930,6 +930,93 @@ internal static class DdsCodec
         }
     }
 
+    /// <summary>
+    /// DDS blob → PNG 的一步组合：解码 + 编码，保留 DDS 声明的色彩空间。
+    ///
+    /// 为什么要有这个组合而非调用方各写两行：TPF 的导出路径（export-tpf-texture）
+    /// 与内存预览路径（read-tpf-texture-preview）都需要「拿到 PNG + 色彩空间」，
+    /// 两条路径此前各自调 DecodeDdsWithColorSpace + EncodePng，色彩空间的选择
+    /// 规则（Srgb→写 sRGB chunk、Linear/Unknown→不写）散在命令里。收敛到这一处
+    /// 之后，任何一条路径改成「丢色彩空间」都只影响本函数，负例可以集中打这里。
+    /// </summary>
+    public static (int Width, int Height, byte[] Png, DdsColorSpace ColorSpace) DecodeDdsToPng(byte[] dds)
+    {
+        var (width, height, rgba, colorSpace) = DecodeDdsWithColorSpace(dds);
+        return (width, height, EncodePng(width, height, rgba, colorSpace), colorSpace);
+    }
+
+    /// <summary>
+    /// DDS blob → 受界 PNG 预览：先全分辨率解码，再按 <paramref name="maxDimension"/>
+    /// 盒式下采样到不超过该边长。原始尺寸由调用方另报（见 read-tpf-texture-preview 的
+    /// sourceWidth/sourceHeight）。
+    ///
+    /// 为什么必须下采样：read-tpf-texture-preview 经 bridge 的 NDJSON 帧返回 base64
+    /// token，帧上限是协商值（runBridge 16 MiB）。Sekiro 的 TPF 里 2048×2048 甚至
+    /// 4096×4096 的 BC7 纹理全分辨率 PNG 动辄数 MiB，base64 再乘 4/3，实测超出帧上限
+    /// 直接返回 BRIDGE_OUTBOUND_FRAME_TOO_LARGE。预览本就要在受限的 Viewer 里显示，
+    /// 下采样既保住帧内传输，也避免为缩略图做全分辨率解码后立刻丢弃。
+    ///
+    /// 下采样用盒式（区域平均）而非最近邻：最近邻在 4×1 非等比缩放下会整行丢色，
+    /// 纹理检查时看不出内容。盒式对每个目标像素平均其源足迹，质量可接受。
+    /// </summary>
+    public static (int Width, int Height, byte[] Png, DdsColorSpace ColorSpace) DecodeDdsToPngPreview(byte[] dds, int maxDimension)
+    {
+        var (width, height, rgba, colorSpace) = DecodeDdsWithColorSpace(dds);
+        if (width <= maxDimension && height <= maxDimension)
+        {
+            return (width, height, EncodePng(width, height, rgba, colorSpace), colorSpace);
+        }
+        var scale = Math.Min((double)maxDimension / width, (double)maxDimension / height);
+        var tw = Math.Max(1, (int)Math.Round(width * scale));
+        var th = Math.Max(1, (int)Math.Round(height * scale));
+        var (pw, ph, downscaled) = DownscaleRgbaBox(rgba, width, height, tw, th);
+        return (pw, ph, EncodePng(pw, ph, downscaled, colorSpace), colorSpace);
+    }
+
+    /// <summary>
+    /// RGBA8 盒式（区域平均）下采样到 (tw × th)。每个目标像素对源里覆盖它的
+    /// 足迹做整数对齐平均。仅用于预览，非等比缩放也保持每个源像素恰好进一个足迹。
+    /// </summary>
+    static (int Width, int Height, byte[] Rgba) DownscaleRgbaBox(byte[] src, int sw, int sh, int tw, int th)
+    {
+        var output = new byte[tw * th * 4];
+        for (var y = 0; y < th; y++)
+        {
+            var y0 = (int)((long)y * sh / th);
+            var y1 = (int)((long)(y + 1) * sh / th);
+            if (y1 <= y0) y1 = y0 + 1;
+            if (y1 > sh) y1 = sh;
+            for (var x = 0; x < tw; x++)
+            {
+                var x0 = (int)((long)x * sw / tw);
+                var x1 = (int)((long)(x + 1) * sw / tw);
+                if (x1 <= x0) x1 = x0 + 1;
+                if (x1 > sw) x1 = sw;
+                long r = 0, g = 0, b = 0, a = 0;
+                var count = 0;
+                for (var sy = y0; sy < y1; sy++)
+                {
+                    var srcRow = sy * sw * 4;
+                    for (var sx = x0; sx < x1; sx++)
+                    {
+                        var o = srcRow + sx * 4;
+                        r += src[o];
+                        g += src[o + 1];
+                        b += src[o + 2];
+                        a += src[o + 3];
+                        count++;
+                    }
+                }
+                var dest = (y * tw + x) * 4;
+                output[dest] = (byte)(r / count);
+                output[dest + 1] = (byte)(g / count);
+                output[dest + 2] = (byte)(b / count);
+                output[dest + 3] = (byte)(a / count);
+            }
+        }
+        return (tw, th, output);
+    }
+
     /// <summary>将 RGBA8 像素编码为 PNG（非隔行，8-bit RGBA）。使用 ZLibStream 压缩 IDAT。</summary>
     /// <remarks>
     /// 不带色彩空间的重载：产出的 PNG **不含任何色彩空间 chunk**，即「未声明」。

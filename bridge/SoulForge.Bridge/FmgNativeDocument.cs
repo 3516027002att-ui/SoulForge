@@ -329,3 +329,173 @@ internal sealed record FmgRoundTripReport(
     string RebuiltHash,
     int EntryCount,
     int GroupCount);
+
+/// <summary>
+/// TEXT-20A 的容器级文本目录读取器。
+///
+/// 只接受 msgbnd（DCX + BND4 + msg-binder）文本容器，逐个读取 FMG child 确认格式
+/// （magic 0x00020000）并取得 entryCount。language / containerKind 的语义 ID 由
+/// 容器逻辑身份推导（父目录名=语言、文件名干=容器类型），但推导只构成 hint——
+/// 格式确认必须来自对容器内容的实际读取。这与 front-end.md §4.4「路径只提供
+/// language hint，不单独确认格式」一致。renderer 只消费这里产出的 typed ID，
+/// 从不自行解析 msg/ 路径。
+///
+/// 两种形态：
+///  - tableEntryIndex 缺省 → 只返回目录元数据（表列表/计数）；
+///  - tableEntryIndex 指定 → 额外返回该表的完整条目（供主进程缓存后分页，
+///    不经临时文件）。容器内部 FMG 的读取直接走字节，不落盘。
+/// </summary>
+internal sealed class FmgTextCatalogReader
+{
+    private FmgTextCatalogReader() { }
+
+    public static FmgTextCatalogDto Read(
+        string containerPath,
+        string? oodleRuntimeRoot,
+        int? tableEntryIndex)
+    {
+        var source = File.ReadAllBytes(containerPath);
+        var outerHash = HashHex(source);
+        byte[] payload = source;
+        string? outerCompression = null;
+        if (source.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+        {
+            var dcx = DcxNativeDocument.Read(containerPath, oodleRuntimeRoot);
+            payload = dcx.Payload;
+            outerCompression = dcx.CompressionFormat;
+        }
+
+        if (!payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+        {
+            // TPF/loose 资源不是 msgbnd；不能借 Text route 读取。
+            throw new NotSupportedException(
+                "text-catalog 只接受 msgbnd（DCX+BND4）文本容器；非 BND4 资源走各自 route。");
+        }
+        var binder = Bnd4NativeDocument.Read(payload);
+        if (GuessContainerRole(binder, containerPath) != "msg-binder")
+        {
+            throw new NotSupportedException("容器不是 msg-binder，不能建立 Text 语言/容器目录。");
+        }
+
+        var languageId = NormalizeKey(GetParentDirectoryName(containerPath));
+        var containerKind = NormalizeKey(GetContainerKind(containerPath));
+        if (languageId.Length == 0)
+            throw new InvalidDataException($"无法从容器路径推导语言 ID：{containerPath}");
+        if (containerKind.Length == 0)
+            throw new InvalidDataException($"无法从容器文件名推导 container kind：{containerPath}");
+
+        var tables = new List<FmgTextTableDto>();
+        var tableByIndex = new Dictionary<int, FmgTextTableDto>();
+        for (var i = 0; i < binder.Entries.Count; i++)
+        {
+            var entry = binder.Entries[i];
+            var childBytes = binder.GetStoredBytes(i);
+            // FMG v2 的 0 号字段是版本标记 0x00020000（LE 字节 00 00 02 00），
+            // 不是 "FMG\0" ASCII 魔数 —— 与 FmgNativeDocument.Read /
+            // FmgNativeWriter.WriteContainerAsync 的校验一致。曾误写成 "FMG\0"
+            // 导致真实 corpus child 全被跳过（只有 mock fixture 不经过真实
+            // Bridge，目录读的缺陷没被 e2e 捕获）；本行修正后目录读与写链同判据。
+            if (childBytes.Length < 4 || BinaryPrimitives.ReadInt32LittleEndian(childBytes.AsSpan(0, 4)) != 0x00020000) continue;
+            var fmg = FmgNativeDocument.Read(childBytes);
+            var table = new FmgTextTableDto(
+                StableId: $"text:{languageId}:{containerKind}:{BuildTableKey(entry.Name, i)}",
+                EntryIndex: i,
+                EntryName: entry.Name,
+                EntryCount: fmg.Entries.Count,
+                FormatVersion: fmg.VersionMarker);
+            tables.Add(table);
+            tableByIndex[i] = table;
+        }
+        if (tables.Count == 0)
+            throw new InvalidDataException("msg-binder 容器内没有确认的 FMG child，无法建立文本目录。");
+
+        IReadOnlyList<FmgTextEntryDto>? entries = null;
+        string? tableSourceHash = null;
+        if (tableEntryIndex is int index)
+        {
+            if (!tableByIndex.TryGetValue(index, out _))
+                throw new InvalidDataException($"容器内没有 entryIndex={index} 的 FMG child。");
+            var childBytes = binder.GetStoredBytes(index);
+            var fmg = FmgNativeDocument.Read(childBytes);
+            entries = fmg.Entries.Select(e => new FmgTextEntryDto(e.Id, e.Text)).ToArray();
+            tableSourceHash = fmg.SourceHash;
+        }
+
+        return new FmgTextCatalogDto(
+            Format: "text-catalog",
+            ConfirmedBy: "bridge",
+            LanguageId: languageId,
+            ContainerKind: containerKind,
+            ContainerId: $"text:{languageId}:{containerKind}",
+            ContainerRole: "msg-binder",
+            OuterCompression: outerCompression,
+            OuterHash: outerHash,
+            TableCount: tables.Count,
+            Tables: tables,
+            Entries: entries,
+            TableSourceHash: tableSourceHash,
+            Authority: "native-verified");
+    }
+
+    /// <summary>语义角色只看 entry 名与文件名，不展开 child 语义。</summary>
+    private static string GuessContainerRole(Bnd4NativeDocument binder, string file)
+    {
+        var names = binder.Entries.Select(e => e.Name.ToLowerInvariant()).ToList();
+        var fileName = System.IO.Path.GetFileName(file).ToLowerInvariant();
+        if (names.Any(n => n.EndsWith(".fmg") || n.Contains(".msg")) || fileName.Contains("msg"))
+            return "msg-binder";
+        return "generic-binder";
+    }
+
+    private static string GetParentDirectoryName(string path)
+    {
+        var parent = System.IO.Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(parent)) return string.Empty;
+        return System.IO.Path.GetFileName(parent) ?? string.Empty;
+    }
+
+    private static string GetContainerKind(string path)
+    {
+        var fileName = System.IO.Path.GetFileName(path);
+        if (string.IsNullOrWhiteSpace(fileName)) return string.Empty;
+        var lower = fileName.ToLowerInvariant();
+        foreach (var suffix in new[] { ".msgbnd.dcx", ".msgbnd" })
+        {
+            if (lower.EndsWith(suffix)) return lower[..^suffix.Length];
+        }
+        return lower;
+    }
+
+    private static string BuildTableKey(string entryName, int index)
+    {
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(entryName))).ToLowerInvariant();
+        return $"{index}-{digest[..12]}";
+    }
+
+    private static string NormalizeKey(string value)
+    {
+        var normalized = new string((value ?? string.Empty).ToLowerInvariant()
+            .Select(c => char.IsAsciiLetterOrDigit(c) ? c : '-').ToArray());
+        return normalized.Trim('-');
+    }
+
+    private static string HashHex(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+}
+
+internal sealed record FmgTextCatalogDto(
+    string Format,
+    string ConfirmedBy,
+    string LanguageId,
+    string ContainerKind,
+    string ContainerId,
+    string ContainerRole,
+    string? OuterCompression,
+    string OuterHash,
+    int TableCount,
+    IReadOnlyList<FmgTextTableDto> Tables,
+    IReadOnlyList<FmgTextEntryDto>? Entries,
+    string? TableSourceHash,
+    string Authority);
+
+internal sealed record FmgTextTableDto(string StableId, int EntryIndex, string EntryName, int EntryCount, int FormatVersion);
+internal sealed record FmgTextEntryDto(int Id, string Text);

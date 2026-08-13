@@ -87,6 +87,66 @@ export interface ScriptContainerEntryPage {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * 明文判定的编码标签（与 core `plaintextScriptEntry.ts` 的 PlaintextEncoding
+ * 同构；shared 不依赖 core，故此处声明自己的 union）。
+ */
+export type ScriptEntryEncoding =
+  | 'ascii'
+  | 'utf8'
+  | 'utf8-bom'
+  | 'shift_jis'
+  | 'mixed-unknown';
+
+/** 解码文本的换行统计（CRLF 优先匹配，不重复计数）。 */
+export interface ScriptEntryNewlines {
+  /** CRLF 成对换行数。 */
+  crlf: number;
+  /** 独立 LF（\n）换行数。 */
+  lf: number;
+  /** 独立 CR（\r）换行数。 */
+  cr: number;
+}
+
+/**
+ * 单条脚本内层条目的源码级只读视图（SCRIPT-41）。
+ *
+ * 主进程用真实字节判定：不看文件名、不用证据采样的分类，逐个条目调用
+ * `classifyPlaintextBytes`（阈值 0.99）。明文条目返回按真实 encoding 解码的
+ * 文本；字节码条目只返回判定证据，渲染器只展示明确的只读字节视图，
+ * 绝不把字节码呈现为可编辑源码。
+ */
+export interface ScriptEntryPlaintextView {
+  ok: boolean;
+  /** Logical inner entry name. */
+  name: string;
+  /** 与 ScriptContainerEntryEvidence 同源的分类。 */
+  classification: ScriptEntryClassification;
+  /** 真实字节判定是否为明文。 */
+  isPlaintext: boolean;
+  /** 判定结论码，例如 PLAINTEXT_CONFIRMED / PLAINTEXT_REJECTED_LUA_BYTECODE_MAGIC。 */
+  verdictCode: string;
+  /** 可打印字节比例（基于采样）。 */
+  printableRatio: number;
+  /** 总字节数（含尾部填充）。 */
+  totalBytes: number;
+  /** 尾部 NUL 对齐填充字节数（容器对齐，不属于文本内容）。 */
+  trailingPaddingBytes: number;
+  /** 内容区（剥掉尾部填充后）是否含 NUL。 */
+  containsNul: boolean;
+  /** 是否命中 `\x1bLua` 字节码签名。 */
+  luaBytecodeMagic: boolean;
+  /** 判定出的真实编码。 */
+  encoding: ScriptEntryEncoding;
+  /** 是否带 UTF-8 BOM。 */
+  hasBom: boolean;
+  /** 换行统计（仅明文条目，字节码条目恒为全零）。 */
+  newlines: ScriptEntryNewlines;
+  /** 判定为明文时的解码文本（不含尾部填充字节）。 */
+  text?: string;
+  diagnostics: Diagnostic[];
+}
+
 /** Fixed display order for classification chips. */
 export const SCRIPT_CLASSIFICATION_ORDER: readonly ScriptEntryClassification[] = [
   'lua-bytecode',

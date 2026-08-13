@@ -131,10 +131,12 @@ describe('复位登记表与 App.tsx 的双向对账', () => {
 
   it('对账能发现登记表指向不存在的 setter（负向）', () => {
     // 从源码里抹掉一个已登记的 setter，对账必须报 registeredButMissing。
-    const stripped = readAppSource().replaceAll('setTpfData', 'setRenamedTpfData');
+    // 用 setTaeData：TPF 已于 TEXTURE-52B 移出自驱动工作台（不再持有 App 级
+    // useState），仍登记的 TAE 才是当前登记表的真实成员。
+    const stripped = readAppSource().replaceAll('setTaeData', 'setRenamedTaeData');
     const report = assertDocumentResetCoverage(stripped);
     assert.equal(report.ok, false);
-    assert.ok(report.registeredButMissing.includes('setTpfData'));
+    assert.ok(report.registeredButMissing.includes('setTaeData'));
   });
 });
 
@@ -194,9 +196,9 @@ describe('两处复位站点必须走统一调度', () => {
     // 抓「有人在复位站点里逐个手写 setTaeData(null) 之类」的回退。
     //
     // 判据只针对**清空**调用，不针对加载：selectFile 在复位之后会按扩展名读取
-    // TAE/ESD/FLVER/TPF 并 setXxxData(result.data)，那是正当的加载。把两者一起
+    // TAE/ESD/FLVER 并 setXxxData(result.data)，那是正当的加载。把两者一起
     // 禁掉会逼人把加载搬出这个函数，属于为过测试而改结构——测试该贴合真实约束，
-    // 不该反过来拧代码。
+    // 不该反过来拧代码。（TPF 已自驱动，不再走 App 级 setTpfData。）
     //
     // 清空形态的识别：setter 后面紧跟 null / 空数组 / 空 Map / EMPTY_ 常量 / false。
     const registered = DOCUMENT_FAMILIES.flatMap((family) => [...DOCUMENT_STATE_SETTERS[family]]);
@@ -232,7 +234,7 @@ describe('两处复位站点必须走统一调度', () => {
     // 失败而本用例照样通过——那正是「负向 fixture 自己失效」的形态。
     const injected = source.replace(
       /resetAllDocuments\(documentResetActions\);(\r?\n\s*)setBnd4Forced\(false\);/,
-      'setTpfData(null);$1setBnd4Forced(false);'
+      'setTaeData(null);$1setBnd4Forced(false);'
     );
     assert.notEqual(injected, source, '注入失败：靶标已变，请更新本用例');
 
@@ -247,7 +249,7 @@ describe('两处复位站点必须走统一调度', () => {
     );
     assert.deepEqual(
       detected,
-      ['setTpfData'],
+      ['setTaeData'],
       '判据必须抓到注入的手写清空，否则上一条断言形同虚设'
     );
   });

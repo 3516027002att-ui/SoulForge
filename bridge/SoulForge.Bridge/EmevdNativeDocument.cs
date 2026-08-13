@@ -635,7 +635,8 @@ internal sealed class EmevdNativeDocument
         throw new InvalidDataException($"EMEVD 指令索引 {globalIndex} 越界。");
     }
 
-    public object ToEnvelope(EmevdRoundTripReport? report = null, int page = 0, int pageSize = 256)
+    public object ToEnvelope(EmevdRoundTripReport? report = null, int page = 0, int pageSize = 256,
+        string? sourceFormat = "emevd", string? outerFileHash = null)
     {
         report ??= VerifyRoundTrip();
         if (page < 0 || pageSize < 1) throw new InvalidDataException("EMEVD instruction 分页参数无效。");
@@ -709,6 +710,11 @@ internal sealed class EmevdNativeDocument
             versionBytes = "00FF01FF",
             sourceSize = SourceBytes.Length,
             sourceHash = SourceHash,
+            // EVENT-30A: how the outer resource was opened and the outer file's
+            // hash. "emevd" + null for a raw .emevd (file hash == payload hash);
+            // "dcx" + DcxNativeDocument.SourceHash when Bridge unwrapped a .dcx.
+            sourceFormat = sourceFormat ?? "emevd",
+            outerFileHash = outerFileHash,
             eventCount = Events.Count,
             instructionCount = Instructions.Count,
             layerCount = LayerCount,

@@ -298,6 +298,37 @@ export function decodePlaintext(bytes: Uint8Array, encoding: PlaintextEncoding):
   return new TextDecoder('utf-8').decode(bytes);
 }
 
+/**
+ * 统计解码文本的换行形态（CRLF / LF / CR 三档）。
+ *
+ * 渲染器要明示 newline（§10.2），而解码后的 JS 字符串无法直接看出原始
+ * 换行字节——`\r\n` 与 `\n` 在 UI 里都渲染成回车。逐个字符扫：CRLF 成对
+ * 计一次并把 LF 跳过，避免把 `\r\n` 同时计成 cr 与 lf。
+ */
+export function analyzePlaintextLineEndings(text: string): {
+  crlf: number;
+  lf: number;
+  cr: number;
+} {
+  let crlf = 0;
+  let lf = 0;
+  let cr = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code === 13) {
+      if (text.charCodeAt(index + 1) === 10) {
+        crlf += 1;
+        index += 1;
+      } else {
+        cr += 1;
+      }
+    } else if (code === 10) {
+      lf += 1;
+    }
+  }
+  return { crlf, lf, cr };
+}
+
 /* ------------------------------------------------------------------ */
 /*  编码回写                                                          */
 /* ------------------------------------------------------------------ */

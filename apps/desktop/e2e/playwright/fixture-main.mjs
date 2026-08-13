@@ -28,6 +28,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import zlib from 'node:zlib';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outRoot = path.resolve(here, '../../out');
@@ -56,6 +57,7 @@ function makeFile({ dir, name, kind, formatKind, formatLabel, extension, compoun
 
 const fixtureFiles = [
   makeFile({ dir: 'event', name: 'common.emevd', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.emevd', compoundExtension: '.emevd' }),
+  makeFile({ dir: 'event', name: 'menu.emevd', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.emevd', compoundExtension: '.emevd' }),
   makeFile({ dir: 'msg', name: 'test.msgbnd.dcx', kind: 'msg', formatKind: 'fmg', formatLabel: 'FMG', extension: '.dcx', compoundExtension: '.msgbnd.dcx' }),
   makeFile({ dir: 'action', name: 'c0000.tae', kind: 'action', formatKind: 'unknown', formatLabel: 'TAE', extension: '.tae', compoundExtension: '.tae' }),
   makeFile({ dir: 'ai', name: 'm10.aibnd.dcx', kind: 'ai', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.aibnd.dcx' }),
@@ -71,7 +73,26 @@ const fixtureFiles = [
   makeFile({ dir: 'param/drawparam', name: 'm11_00.gparam.dcx', kind: 'param', formatKind: 'gparam', formatLabel: 'GPARAM', extension: '.dcx', compoundExtension: '.gparam.dcx' }),
   makeFile({ dir: 'param/drawparam', name: 'broken.gparam.dcx', kind: 'param', formatKind: 'gparam', formatLabel: 'GPARAM', extension: '.dcx', compoundExtension: '.gparam.dcx' }),
   // unknown 不合并进 other：独立保留并在顶部栏显示警告计数。
-  makeFile({ dir: '', name: 'regulation.bin', kind: 'unknown', formatKind: 'unknown', formatLabel: 'BIN', extension: '.bin', compoundExtension: '.bin' })
+  makeFile({ dir: '', name: 'regulation.bin', kind: 'unknown', formatKind: 'unknown', formatLabel: 'BIN', extension: '.bin', compoundExtension: '.bin' }),
+  // SCRIPT-41 fixture：脚本容器。formatKind 用 'script'（不是 'bnd'），legacy
+  // 推断才会命中 `.luabnd.dcx` → script 编辑器而不是 container。
+  makeFile({ dir: 'script', name: 'm25_00_00_00.luabnd.dcx', kind: 'script', formatKind: 'script', formatLabel: 'SCRIPT BND', extension: '.dcx', compoundExtension: '.luabnd.dcx' }),
+  // MAP-50B fixture：MSB 地图样本。基础 fixture 此前没有 map 文件，msb 工作台在
+  // E2E 里进不去；这里补一个可被 readMsbDocument stub 命中的合成样本
+  // （微小、合法构造、明确标记，AGENTS.md §15）。大工作区合成的 mXXXX 是 4 位补零，
+  // m10.msb.dcx 不与它们重名，排序稳定。
+  makeFile({ dir: 'map', name: 'm10.msb.dcx', kind: 'map', formatKind: 'msb', formatLabel: 'MSB', extension: '.dcx', compoundExtension: '.msb.dcx' }),
+  // MODEL-51B fixture：FLVER 模型样本。此前没有 .flver 文件，flver 工作台在 E2E 里
+  // 进不去；这里补一个可被 readFlverDocument stub 命中的合成样本（微小、合法构造、
+  // 明确标记，AGENTS.md §15）。formatKind 'unknown' → selectEditor 走 legacy 路径按
+  // .flver 后缀派发到 flver 编辑器（与 c0000.tae 同形态）。
+  makeFile({ dir: 'chr', name: 'c1000.flver', kind: 'chr', formatKind: 'unknown', formatLabel: 'FLVER', extension: '.flver', compoundExtension: '.flver' }),
+  // TEXTURE-52B fixture：TPF 纹理包样本。menu 目录形态对齐真实菜单纹理
+  // （menu/start.tpf.dcx，52A 的「menu 下 .tpf.dcx 判 texture 而非 text」路由语义）。
+  // formatKind 'tpf' → selectEditor legacy 路径命中 'tpf' 编辑器。broken 是读取失败
+  // 样本（对照 Smithbox 的「失败即移除」，失败容器保留在列表并标记）。
+  makeFile({ dir: 'menu', name: 'start.tpf.dcx', kind: 'menu', formatKind: 'tpf', formatLabel: 'TPF', extension: '.dcx', compoundExtension: '.tpf.dcx' }),
+  makeFile({ dir: 'menu', name: 'broken.tpf.dcx', kind: 'menu', formatKind: 'tpf', formatLabel: 'TPF', extension: '.dcx', compoundExtension: '.tpf.dcx' })
 ];
 
 /**
@@ -148,6 +169,54 @@ function makeLargeFixtureFiles() {
     extension: '.dcx',
     compoundExtension: '.msb.dcx'
   }));
+}
+
+let crcTable = null;
+/** PNG-32 CRC（Node 无内置；合成 fixture 预览需要真实 PNG 头才能被 img 解码）。 */
+function crc32(buf) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0; n < 256; n += 1) {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      crcTable[n] = c;
+    }
+  }
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i += 1) c = crcTable[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+/** 合成 RGBA 纯色 PNG 的 data URI（TEXTURE-52B 预览 stub 用，合法可被 <img> 解码）。 */
+function makePngDataUri(width, height) {
+  const sig = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+  const chunk = (type, data) => {
+    const out = Buffer.alloc(8 + data.length + 4);
+    out.writeUInt32BE(data.length, 0);
+    out.write(type, 4, 'ascii');
+    data.copy(out, 8);
+    out.writeUInt32BE(crc32(out.subarray(4, 8 + data.length)), 8 + data.length);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // color type: RGBA
+  const stride = width * 4 + 1;
+  const raw = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y += 1) {
+    const rowStart = y * stride;
+    raw[rowStart] = 0; // filter none
+    for (let x = 0; x < width * 4; x += 1) raw[rowStart + 1 + x] = 0x88;
+  }
+  const png = Buffer.concat([
+    sig,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0))
+  ]);
+  return `data:image/png;base64,${png.toString('base64')}`;
 }
 
 const fixture = {
@@ -239,8 +308,8 @@ function registerFixtureIpc() {
       workspaceLabel: 'fixture-workspace',
       files: scanned.map((file) => ({ ...file })),
       countsByKind: {
-        event: 1, map: LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0, param: 4, msg: 1, menu: 0, script: 0,
-        action: 1, ai: 1, sfx: 1, chr: 1, obj: 0, other: 1, unknown: 1
+        event: 2, map: (LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0) + 1, param: 4, msg: 1, menu: 2, script: 1,
+        action: 1, ai: 1, sfx: 1, chr: 2, obj: 0, other: 1, unknown: 1
       },
       diagnostics: [],
       session: {
@@ -270,6 +339,185 @@ function registerFixtureIpc() {
 
   handleTrusted('resource.search', () => []);
   handleTrusted('resource.preview', () => null);
+
+  // ── MSB 地图工作台（MAP-50B）合成通道 ──────────────────────────────────
+  // 基础 fixture 没有 map 文件，readMsbDocument 从未被 stub——选中 map 文件会走
+  // 真实 Bridge 读不存在的源文件，工作台永远停在「读不出来」。这里注册合成 DTO
+  // （微小、合法构造、明确标记）：2 models / 3 parts / 2 regions / 1 event，
+  // 全部带 nativeOffset（id 稳定为 offset-<hex>），供 tree↔viewport↔inspector 联动断言。
+  const fixtureMapUri = 'fixture://map/m10.msb.dcx';
+
+  handleTrusted('resource.readMsbDocument', (_event, sourceUri) => {
+    track('resource.readMsbDocument');
+    if (sourceUri !== fixtureMapUri) {
+      return {
+        ok: false,
+        diagnostics: [{ severity: 'error', code: 'MSB_NOT_REGISTERED', message: `fixture 未登记的 MSB：${sourceUri}` }]
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        sourceHash: 'fixture-msb-hash-0001',
+        version: 101,
+        modelCount: 2,
+        partCount: 3,
+        regionCount: 2,
+        eventCount: 1,
+        routeCount: 0,
+        models: [
+          { name: 'c0000', nativeOffset: 0x10, typeId: 0 },
+          { name: 'a0000', nativeOffset: 0x20, typeId: 1 }
+        ],
+        parts: [
+          { name: 'p0000', nativeOffset: 0x30, typeId: 0, modelIndex: 0, posX: 0, posY: 0, posZ: 0, rotX: 0, scaleX: 1, scaleY: 1, scaleZ: 1 },
+          { name: 'p0001', nativeOffset: 0x40, typeId: 0, modelIndex: 1, posX: 10, posY: 0, posZ: 0, rotX: 0, scaleX: 1, scaleY: 1, scaleZ: 1 },
+          { name: 'p0002', nativeOffset: 0x50, typeId: 1, modelIndex: 0, posX: -5, posY: 2, posZ: 3, rotX: 0, scaleX: 1, scaleY: 1, scaleZ: 1 }
+        ],
+        regions: [
+          { name: 'r0000', nativeOffset: 0x60, typeId: 0, posX: 0, posY: 0, posZ: 0 },
+          { name: 'r0001', nativeOffset: 0x70, typeId: 1, posX: 5, posY: 0, posZ: 5 }
+        ],
+        events: [
+          { name: 'e0000', nativeOffset: 0x80, typeId: 0, eventId: 100 }
+        ]
+      },
+      diagnostics: []
+    };
+  });
+
+  // ── FLVER 模型工作台（MODEL-51B）合成通道 ──────────────────────────────
+  // 基础 fixture 此前没有 .flver 文件，readFlverDocument 从未被 stub——选中 flver
+  // 文件会走真实 Bridge 读不存在的源文件，工作台永远停在「读不出来」。这里注册
+  // 合成 envelope（微小、合法构造、明确标记）：2 meshes / 1 material / 2 texture
+  // slots / 2 bones，全部带 index，供 tree↔viewport↔inspector 联动断言。
+  const fixtureFlverUri = 'fixture://chr/c1000.flver';
+
+  handleTrusted('resource.readFlverDocument', (_event, sourceUri) => {
+    track('resource.readFlverDocument');
+    if (sourceUri !== fixtureFlverUri) {
+      return {
+        ok: false,
+        diagnostics: [{ severity: 'error', code: 'FLVER_NOT_REGISTERED', message: `fixture 未登记的 FLVER：${sourceUri}` }]
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        format: 'FLVER',
+        version: 'L',
+        internalVersion: '0x2001A',
+        sourceSize: 4096,
+        sourceHash: 'fixture-flver-hash-0001',
+        skeletonTransformCount: 2,
+        materialCount: 1,
+        boneCount: 2,
+        vertexBufferCount: 1,
+        meshCount: 2,
+        faceSetCount: 2,
+        bufferLayoutCount: 1,
+        textureCount: 2,
+        faceCount: 24,
+        totalFaceCount: 24,
+        vertexStride: 40,
+        vertexStrides: [40],
+        unicode: false,
+        boundingBox: { min: [0, 0, 0], max: [10, 20, 30] },
+        materials: [
+          { name: 'mat_a', mtdPath: 'mtd/m_a.mtd', textureCount: 2, flags: 0, gxOffset: 0, unk18: 0, gxList: null }
+        ],
+        materialsTruncated: false,
+        bones: [
+          { name: 'root', parentIndex: -1, nextSiblingIndex: -1 },
+          { name: 'hand', parentIndex: 0, nextSiblingIndex: -1 }
+        ],
+        bonesTruncated: false,
+        meshes: [
+          { index: 0, dynamic: 0, materialIndex: 0, defaultBoneIndex: 0, vertexCount: 10, vertexStride: 40, bufferLayoutIndex: 0, faceSetCount: 1, boneCount: 2, indexFormat: 16 },
+          { index: 1, dynamic: 0, materialIndex: 0, defaultBoneIndex: 0, vertexCount: 6, vertexStride: 40, bufferLayoutIndex: 0, faceSetCount: 1, boneCount: 2, indexFormat: 16 }
+        ],
+        meshesTruncated: false,
+        bufferLayouts: [],
+        textureSlots: [
+          { index: 0, type: 'g', path: 'tex/a.dds', materialIndex: 0 },
+          { index: 1, type: 'g', path: 'tex/b.dds', materialIndex: 0 }
+        ],
+        texturesTruncated: false,
+        layoutWarnings: [],
+        unparsedGaps: [],
+        roundTrip: {
+          byteIdentical: true, semanticIdentical: true,
+          sourceHash: 'fixture-flver-hash-0001', rebuiltHash: 'fixture-flver-hash-0001',
+          skeletonTransformCount: 2, materialCount: 1, boneCount: 2, meshCount: 2
+        },
+        authority: 'native-verified'
+      },
+      diagnostics: []
+    };
+  });
+
+  // FlverViewer 在 sourceUri/meshIndex 变化时并行读 mesh/skeleton/dummies；
+  // 不 stub 会走真实 Bridge 报「未登记」。返回合成基元（3 顶点三角形），
+  // 让 viewport 渲染语义场景且 selection summary 有真实 mesh 数据可依赖。
+  handleTrusted('resource.readFlverMesh', (_event, sourceUri, meshIndex) => {
+    track('resource.readFlverMesh');
+    const floats = [0, 0, 0, 1, 0, 0, 0, 1, 0];
+    const buf = Buffer.alloc(floats.length * 4);
+    floats.forEach((v, i) => buf.writeFloatLE(v, i * 4));
+    return {
+      ok: true,
+      data: {
+        meshIndex,
+        vertexCount: 3,
+        vertexStride: 12,
+        bufferLayoutIndex: 0,
+        materialIndex: 0,
+        indexFormat: 16,
+        positionsBase64: buf.toString('base64'),
+        indicesBase64: null,
+        uvsBase64: null,
+        normalsBase64: null,
+        boneWeightsBase64: null,
+        boneIndicesBase64: null
+      },
+      diagnostics: []
+    };
+  });
+
+  handleTrusted('resource.readFlverSkeleton', () => {
+    track('resource.readFlverSkeleton');
+    return {
+      ok: true,
+      data: {
+        boneCount: 2,
+        bones: [
+          { index: 0, name: 'root', parentIndex: -1, nextSiblingIndex: -1, translation: [0, 0, 0], rotation: [0, 0, 0] },
+          { index: 1, name: 'hand', parentIndex: 0, nextSiblingIndex: -1, translation: [0, 1, 0], rotation: [0, 0, 0] }
+        ]
+      },
+      diagnostics: []
+    };
+  });
+
+  handleTrusted('resource.readFlverDummies', () => {
+    track('resource.readFlverDummies');
+    return { ok: true, data: { dummyCount: 0, dummies: [] }, diagnostics: [] };
+  });
+
+  handleTrusted('resource.readFlverTextureSlots', (_event, sourceUri) => {
+    track('resource.readFlverTextureSlots');
+    return {
+      ok: true,
+      data: {
+        textureCount: 2,
+        textures: [
+          { index: 0, type: 'g', path: 'tex/a.dds', materialIndex: 0 },
+          { index: 1, type: 'g', path: 'tex/b.dds', materialIndex: 0 }
+        ]
+      },
+      diagnostics: []
+    };
+  });
 
   // ── PARAM 容器工作台（PARAM-10B）合成通道 ──────────────────────────────
   const fixtureParamUri = 'fixture://param/gameparam/gameparam.parambnd.dcx';
@@ -526,6 +774,281 @@ function registerFixtureIpc() {
     };
   });
 
+  // ── TEXTURE-52B：TPF 纹理工作台合成通道 ──────────────────────────────
+  // 微小、合法构造、明确标记（AGENTS.md §15）。一个可读容器（start）含 3 张纹理：
+  // 纹理 0/1 可预览（受界 512 下采样，原始尺寸经 sourceWidth/sourceHeight 上报），
+  // 纹理 2 是预览失败样本（对应真实里不可解码的纹理，驱动 preview failure
+  // isolation）；broken 容器是读取失败样本（保留在列表并标记，不能显示为空包）。
+  const fixtureTpfContainers = {
+    'fixture://menu/start.tpf.dcx': {
+      sourceHash: 'fixture-tpf-start',
+      textures: [
+        { index: 0, name: 'm_00_title', format: 'BC1', formatByte: 0x00, mipCount: 8, dataOffset: 0x40, dataSize: 1048576, width: 512, height: 512, ddsFourCC: 'DX10' },
+        { index: 1, name: 'm_01_icon', format: 'BC4', formatByte: 0x67, mipCount: 6, dataOffset: 0x100040, dataSize: 524288, width: 256, height: 256, ddsFourCC: 'ATI1' },
+        { index: 2, name: 'm_02_hud', format: 'BC1', formatByte: 0x00, mipCount: 8, dataOffset: 0x180040, dataSize: 2048, width: 4, height: 4, ddsFourCC: 'DX10' }
+      ]
+    }
+  };
+
+  handleTrusted('resource.readTpfDocument', (_event, sourceUri) => {
+    track('resource.readTpfDocument');
+    const container = fixtureTpfContainers[sourceUri];
+    if (!container) {
+      // broken.tpf.dcx 等未登记样本：结构化失败，绝不能显示为空包。
+      return {
+        ok: false, sourceUri,
+        data: null,
+        diagnostics: [{
+          severity: 'error', code: 'TPF_DOCUMENT_READ_FAILED',
+          message: 'fixture 未登记或损坏的 TPF：读取失败。', sourceUri
+        }]
+      };
+    }
+    return {
+      ok: true, sourceUri,
+      data: {
+        format: 'TPF', game: 'sekiro', gameCode: 5,
+        sourceSize: 2048, sourceHash: container.sourceHash,
+        textureCount: container.textures.length,
+        platform: 1, encoding: 0, flags: 0,
+        textures: container.textures,
+        roundTrip: {
+          byteIdentical: true, semanticIdentical: true,
+          sourceHash: container.sourceHash, rebuiltHash: container.sourceHash,
+          textureCount: container.textures.length
+        },
+        rebuildCoverage: { uncoveredBytes: 0, uncoveredNonZeroBytes: 0, firstNonZeroOffset: -1 },
+        authority: 'fixture'
+      },
+      diagnostics: []
+    };
+  });
+
+  handleTrusted('resource.readTpfTexturePreview', (_event, sourceUri, textureIndex) => {
+    track('resource.readTpfTexturePreview');
+    const container = fixtureTpfContainers[sourceUri];
+    const tex = container && container.textures.find((t) => t.index === textureIndex);
+    if (!container || !tex) {
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error', code: 'TPF_TEXTURE_PREVIEW_FAILED',
+          message: 'fixture 未登记或越界的纹理：预览失败。', sourceUri
+        }]
+      };
+    }
+    if (textureIndex === 2) {
+      // m_02_hud：预览失败样本（真实里不可解码的纹理）。纹理列表保留、选择链
+      // 不清空，Viewer 栏独立给出结构化诊断。
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error', code: 'TPF_TEXTURE_PREVIEW_FAILED',
+          message: '纹理不可解码，无法生成预览。', sourceUri
+        }]
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        textureIndex,
+        name: tex.name,
+        width: Math.min(tex.width, 512),
+        height: Math.min(tex.height, 512),
+        sourceWidth: tex.width,
+        sourceHeight: tex.height,
+        colorSpace: 'srgb',
+        mediaType: 'image/png',
+        byteLength: 4096,
+        previewToken: makePngDataUri(Math.max(1, Math.min(tex.width, 512)), Math.max(1, Math.min(tex.height, 512)))
+      },
+      diagnostics: []
+    };
+  });
+
+  // ── EVENT-30B：DarkScript3 式事件源码工作台合成通道 ──────────────────
+  // 微小、合法构造、明确标记（AGENTS.md §15）。两个登记 bank（对应两个事件
+  // 文件，驱动多 tab 测试）：common 的 event 60 有一条指令但样本缺失 → 投影为
+  // unknown（read-only），驱动 diagnostic gutter 的 warning 标记；menu 是干净
+  // 文档（无未知指令）。未登记资源结构化失败，绝不显示为空文档。
+  function makeFixtureEmevdBank({ events, instructionsSample, dslTemplate }) {
+    const bank = {
+      sourceHash: 'fixture-emevd-0001',
+      events,
+      instructionsSample,
+      dslTemplate,
+      envelope() {
+        return {
+          sourceHash: this.sourceHash,
+          eventCount: this.events.length,
+          instructionCount: (this.instructionsSample ?? []).length,
+          events: this.events,
+          instructionsSample: this.instructionsSample ?? [],
+          authority: 'fixture'
+        };
+      }
+    };
+    return bank;
+  }
+  const fixtureEmevdBanks = {
+    'fixture://event/common.emevd': makeFixtureEmevdBank({
+      events: [
+        { id: 50, restBehavior: 1, layer: -1, instructionCount: 1, instructionStartIndex: 0 },
+        { id: 60, restBehavior: 0, layer: -1, instructionCount: 1, instructionStartIndex: 1 }
+      ],
+      // index 1 缺失：event 60 的那条指令在 bounded projection 里是 unknown。
+      instructionsSample: [{ index: 0, bank: 0, id: 0, argsBase64: '' }],
+      dslTemplate: [
+        'resource "fixture://event/common.emevd"',
+        'base revision 0 schema "sekiro"',
+        'event @e:ev50 {',
+        '  set id = 50',
+        '  set rest = 1',
+        '  instruction @i:ev50-0 { set arg bank = 0; set arg id = 0; }',
+        '}',
+        'event @e:ev60 {',
+        '  set id = 60',
+        '  set rest = 0',
+        '  // read-only ev60-0 bank=1 id=20',
+        '}',
+        ''
+      ].join('\n')
+    }),
+    'fixture://event/menu.emevd': makeFixtureEmevdBank({
+      events: [
+        { id: 100, restBehavior: 1, layer: -1, instructionCount: 1, instructionStartIndex: 0 },
+        { id: 110, restBehavior: 0, layer: -1, instructionCount: 0, instructionStartIndex: -1 }
+      ],
+      instructionsSample: [{ index: 0, bank: 0, id: 10, argsBase64: '' }],
+      dslTemplate: [
+        'resource "fixture://event/menu.emevd"',
+        'base revision 0 schema "sekiro"',
+        'event @e:ev100 {',
+        '  set id = 100',
+        '  set rest = 1',
+        '  instruction @i:ev100-0 { set arg bank = 0; set arg id = 10; }',
+        '}',
+        'event @e:ev110 {',
+        '  set id = 110',
+        '  set rest = 0',
+        '}',
+        ''
+      ].join('\n')
+    })
+  };
+
+  const emevdBank = (sourceUri) => fixtureEmevdBanks[sourceUri];
+
+  handleTrusted('resource.readEmevdDocument', (_event, sourceUri) => {
+    track('resource.readEmevdDocument');
+    const bank = emevdBank(sourceUri);
+    if (!bank) {
+      return {
+        ok: false,
+        data: null,
+        diagnostics: [{
+          severity: 'error', code: 'RESOURCE_NOT_INDEXED',
+          message: `fixture 未登记的 EMEVD 资源：${sourceUri}`, sourceUri
+        }]
+      };
+    }
+    return { ok: true, data: bank.envelope() };
+  });
+
+  handleTrusted('resource.readEmevdFullDocument', (_event, sourceUri, documentInstanceId, _loadFullDslTemplate) => {
+    track('resource.readEmevdFullDocument');
+    const bank = emevdBank(sourceUri);
+    if (!bank) {
+      return {
+        ok: false,
+        sourceUri,
+        diagnostics: [{
+          severity: 'error', code: 'RESOURCE_NOT_INDEXED',
+          message: `fixture 未登记的 EMEVD 资源：${sourceUri}`, sourceUri
+        }]
+      };
+    }
+    return {
+      ok: true,
+      sourceUri,
+      documentInstanceId,
+      revision: 0,
+      eventCount: bank.events.length,
+      instructionCount: bank.events.reduce((sum, e) => sum + (e.instructionCount ?? 0), 0),
+      dslTemplate: bank.dslTemplate,
+      dslTemplateTruncated: false,
+      dslTemplateTotalLines: bank.dslTemplate.split('\n').length,
+      sourceHash: bank.sourceHash,
+      sourceFormat: 'emevd',
+      outerFileHash: null,
+      outline: null,
+      diagnostics: []
+    };
+  });
+
+  // 提交 DSL：fixture 接受登记资源的任意源码（合成内存态），sourceHash 递增，
+  // 提交后重读即见新模板（与 TEXT-20C 的写回模式同构）。未登记/空源码结构化失败。
+  handleTrusted('resource.submitEmevdDslPlan', (_event, sourceUri, sourceText) => {
+    track('resource.submitEmevdDslPlan');
+    const bank = emevdBank(sourceUri);
+    if (!bank || typeof sourceText !== 'string' || sourceText.trim() === '') {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error', code: 'EMEVD_DSL_SUBMIT_FAILED',
+          message: 'fixture 拒绝提交：未登记资源或空源码。', sourceUri
+        }]
+      };
+    }
+    bank.dslTemplate = sourceText;
+    bank.sourceHash = `fixture-emevd-${String(Number(bank.sourceHash.split('-').pop()) + 1).padStart(4, '0')}`;
+    return {
+      ok: true,
+      sourceUri,
+      changedFiles: [{ sourceUri, action: 'modify' }],
+      diagnostics: [{
+        severity: 'info', code: 'EMEVD_DSL_SUBMIT_VERIFIED',
+        message: 'fixture EMEVD DSL 已写入（合成）并验证。', sourceUri
+      }]
+    };
+  });
+
+  handleTrusted('resource.applyEmevdMutation', (_event, sourceUri, expectedHash, _mutation) => {
+    track('resource.applyEmevdMutation');
+    const bank = emevdBank(sourceUri);
+    if (!bank) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error', code: 'EMEVD_STAGING_WRITE_FAILED',
+          message: 'fixture 未登记 EMEVD：拒绝写入。', sourceUri
+        }]
+      };
+    }
+    if (expectedHash !== bank.sourceHash) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error', code: 'EMEVD_STAGING_WRITE_FAILED',
+          message: 'EMEVD source hash 不匹配（工作副本已漂移），拒绝写入。', sourceUri
+        }]
+      };
+    }
+    bank.sourceHash = `fixture-emevd-${String(Number(bank.sourceHash.split('-').pop()) + 1).padStart(4, '0')}`;
+    return {
+      ok: true,
+      sourceUri,
+      changedFiles: [{ sourceUri, action: 'modify' }],
+      diagnostics: [{
+        severity: 'info', code: 'EMEVD_STAGING_WRITE_VERIFIED',
+        message: 'fixture EMEVD mutation 已写入（合成）并验证。', sourceUri
+      }]
+    };
+  });
+
   // 容器工作台合成通道：微小、合法构造、明确标记（AGENTS.md §15）。
   const containerChildren = [
     {
@@ -569,6 +1092,90 @@ function registerFixtureIpc() {
     children: containerChildren.map((child) => ({ ...child })),
     diagnostics: []
   }));
+
+  /* ── SCRIPT-41 fixture：合成脚本容器条目（微小、合法构造、明确标记）──
+     三条通道（evidence / 分页 / 明文视图）一起提供，renderer 才会走真实
+     readScriptEntryPlaintext 链路。goal_list.lua 判明文（CRLF 换行），
+     battle.lua 判 `\x1bLua` 字节码（只读字节视图）。 */
+  const fixtureScriptEntries = [
+    {
+      name: 'goal_list.lua', index: 0, size: 214, extension: 'lua',
+      classification: 'lua-bytecode', headerHex: '2300424f4d', magicLabel: 'plaintext sample'
+    },
+    {
+      name: 'battle.lua', index: 1, size: 4096, extension: 'lua',
+      classification: 'lua-bytecode', headerHex: '1b4c756151', magicLabel: '\\x1bLuaQ bytecode'
+    },
+    {
+      name: 'esd_common.esd', index: 2, size: 1024, extension: 'esd',
+      classification: 'esd-bytecode', headerHex: '', magicLabel: 'ESD'
+    }
+  ];
+  const fixtureScriptSummary = {
+    'lua-bytecode': 2, luagnl: 0, luainfo: 0, 'esd-bytecode': 1, 'hkx-bytecode': 0, unknown: 0
+  };
+  handleTrusted('resource.scriptContainerEvidence', () => ({
+    ok: true,
+    containerFormat: 'BND4',
+    entryCount: fixtureScriptEntries.length,
+    entries: fixtureScriptEntries.map((entry) => ({ ...entry })),
+    truncated: false,
+    classificationSummary: { ...fixtureScriptSummary },
+    diagnostics: []
+  }));
+  handleTrusted('resource.listScriptContainerEntriesPage', (_event, _uri, page, pageSize) => ({
+    ok: true,
+    containerFormat: 'BND4',
+    entryCount: fixtureScriptEntries.length,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(fixtureScriptEntries.length / pageSize)),
+    entries: fixtureScriptEntries
+      .slice(page * pageSize, page * pageSize + pageSize)
+      .map((entry) => ({ ...entry })),
+    classificationSummary: { ...fixtureScriptSummary },
+    entriesComplete: true,
+    diagnostics: []
+  }));
+  handleTrusted('resource.readScriptEntryPlaintext', (_event, _uri, entryName) => {
+    if (entryName === 'goal_list.lua') {
+      return {
+        ok: true, name: entryName, classification: 'lua-bytecode', isPlaintext: true,
+        verdictCode: 'PLAINTEXT_CONFIRMED', printableRatio: 1, totalBytes: 214,
+        trailingPaddingBytes: 0, containsNul: false, luaBytecodeMagic: false,
+        encoding: 'utf8', hasBom: false,
+        newlines: { crlf: 3, lf: 0, cr: 0 },
+        text: '-- SoulForge synthetic plaintext fixture (explicitly constructed)\r\n'
+          + '-- 目标列表示例：goal_list.lua\r\n'
+          + 'local goal = { name = "合成目标", id = 100 }\r\n',
+        diagnostics: [{ severity: 'info', code: 'PLAINTEXT_CONFIRMED', message: '条目确认为明文。' }]
+      };
+    }
+    if (entryName === 'battle.lua') {
+      return {
+        ok: true, name: entryName, classification: 'lua-bytecode', isPlaintext: false,
+        verdictCode: 'PLAINTEXT_REJECTED_LUA_BYTECODE_MAGIC', printableRatio: 0.5, totalBytes: 4096,
+        trailingPaddingBytes: 0, containsNul: false, luaBytecodeMagic: true,
+        encoding: 'mixed-unknown', hasBom: false,
+        newlines: { crlf: 0, lf: 0, cr: 0 },
+        diagnostics: [{
+          severity: 'error', code: 'PLAINTEXT_REJECTED_LUA_BYTECODE_MAGIC',
+          message: '条目以 \\x1bLua 字节码签名开头，是编译产物。'
+        }]
+      };
+    }
+    return {
+      ok: true, name: entryName, classification: 'esd-bytecode', isPlaintext: false,
+      verdictCode: 'PLAINTEXT_REJECTED_LOW_PRINTABLE_RATIO', printableRatio: 0.3, totalBytes: 1024,
+      trailingPaddingBytes: 4, containsNul: true, luaBytecodeMagic: false,
+      encoding: 'mixed-unknown', hasBom: false,
+      newlines: { crlf: 0, lf: 0, cr: 0 },
+      diagnostics: [{
+        severity: 'error', code: 'PLAINTEXT_REJECTED_LOW_PRINTABLE_RATIO',
+        message: '可打印字节比例 0.3000 低于阈值 0.99。'
+      }]
+    };
+  });
   handleTrusted('operation.list', () => []);
   handleTrusted('operation.rollback', (_event, opId) => ({
     ok: false,
@@ -741,7 +1348,60 @@ function registerFixtureIpc() {
     };
   });
 
-  handleTrusted('resource.applyFmgMutation', (_event, _uri, expectedHash, mutation) => {
+  // TEXT-20B：四栏文本工作台走目录链。fixture 只登记一个 msgbnd 容器（zhocn
+  // 语言），含两张表：item.fmg 挂 fixture.fmg.entries（写入后重读即见新文本），
+  // menu.fmg 是真空表（0 条，用于「真空表 ≠ 失败」断言）。与生产 main 的
+  // readTextCatalog / readFmgTablePage 同语义：typed tableId 定位，条目由 main
+  // 端按完整表过滤后分页。
+  handleTrusted('resource.readTextCatalog', () => ({
+    ok: true,
+    libraryId: 'game-text',
+    title: 'Text · 1 languages · 1 container',
+    languages: [{
+      languageId: 'zhocn',
+      containers: [{
+        containerId: 'text:zhocn:test-msgbnd',
+        containerKind: 'test-msgbnd',
+        sourceUri: 'fixture://msg/test.msgbnd.dcx',
+        relativePath: 'msg/test.msgbnd.dcx',
+        parseStatus: 'confirmed',
+        tableCount: 2,
+        tables: [
+          { tableId: 'text:zhocn:test-msgbnd:0-item.fmg', entryName: 'item.fmg', entryCount: fixture.fmg.entries.length, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 0 },
+          { tableId: 'text:zhocn:test-msgbnd:1-menu.fmg', entryName: 'menu.fmg', entryCount: 0, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 1 }
+        ],
+        diagnostics: []
+      }]
+    }],
+    diagnostics: []
+  }));
+
+  handleTrusted('resource.readFmgTablePage', (_event, tableId, page, pageSize, query) => {
+    if (fixture.fmg.menuEntries === undefined) fixture.fmg.menuEntries = [];
+    // TEXT-20C：menu.fmg 是真空表，但写链（applyFmgMutation 按 tableId 路由到
+    // menuEntries）落盘后重读必须可见——「真空表可新增」是 live 门禁放行的结果，
+    // 不能让分页读取把它伪装回 0 条。
+    const source = tableId.includes('menu') ? fixture.fmg.menuEntries : fixture.fmg.entries;
+    const q = (query ?? '').trim().toLowerCase();
+    const filtered = q.length === 0
+      ? source
+      : source.filter((entry) =>
+          String(entry.id).includes(q) || entry.text.toLowerCase().includes(q));
+    return {
+      ok: true,
+      sourceUri: 'fixture://msg/test.msgbnd.dcx',
+      sourceHash: fixture.fmg.sourceHash,
+      entryCount: filtered.length,
+      maxId: source.reduce((max, entry) => Math.max(max, entry.id), 0),
+      page,
+      pageSize,
+      pageCount: Math.max(1, Math.ceil(filtered.length / pageSize)),
+      entries: filtered.slice(page * pageSize, page * pageSize + pageSize),
+      diagnostics: []
+    };
+  });
+
+  handleTrusted('resource.applyFmgMutation', (_event, _uri, expectedHash, mutation, tableId) => {
     if (APPLY_FAIL) {
       return {
         ok: false,
@@ -762,14 +1422,24 @@ function registerFixtureIpc() {
         }]
       };
     }
+    // TEXT-20C：mutation 带 tableId 时按表路由（menu.fmg 是真空表，单独维护，
+    // 其余归 item.fmg = fixture.fmg.entries）。不带 tableId 的旧调用仍落 item。
+    if (fixture.fmg.menuEntries === undefined) fixture.fmg.menuEntries = [];
+    const source = typeof tableId === 'string' && tableId.includes('menu')
+      ? fixture.fmg.menuEntries
+      : fixture.fmg.entries;
     if (mutation.kind === 'delete') {
-      fixture.fmg.entries = fixture.fmg.entries.filter((entry) => entry.id !== mutation.id);
+      if (source === fixture.fmg.entries) {
+        fixture.fmg.entries = fixture.fmg.entries.filter((entry) => entry.id !== mutation.id);
+      } else {
+        fixture.fmg.menuEntries = fixture.fmg.menuEntries.filter((entry) => entry.id !== mutation.id);
+      }
     } else if (mutation.kind === 'add') {
-      fixture.fmg.entries.push({ id: mutation.id, text: mutation.text ?? '' });
+      source.push({ id: mutation.id, text: mutation.text ?? '' });
     } else {
-      const existing = fixture.fmg.entries.find((entry) => entry.id === mutation.id);
+      const existing = source.find((entry) => entry.id === mutation.id);
       if (existing) existing.text = mutation.text ?? '';
-      else fixture.fmg.entries.push({ id: mutation.id, text: mutation.text ?? '' });
+      else source.push({ id: mutation.id, text: mutation.text ?? '' });
     }
     fixture.fmg.sourceHash = `fixture-hash-${String(Number(fixture.fmg.sourceHash.split('-').pop()) + 1).padStart(4, '0')}`;
     return { ok: true, diagnostics: [] };

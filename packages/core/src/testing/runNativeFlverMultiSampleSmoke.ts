@@ -184,7 +184,11 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
     throw new Error(`FLVER read failed for ${id}: ${JSON.stringify(doc.diagnostics)}`);
   }
   const e = doc.data;
-  if (e.meshCount <= 0) throw new Error(`FLVER ${id} has no meshes`);
+  // meshCount 为负是数据异常（结构表读坏），必须失败关闭；为 0 是**合法空模型**——
+  // 头本身合法、无 material/mesh/vertex buffer（如仅含骨骼与 dummy 的占位/辅助模型，
+  // 实测 c1001.flver：materialCount=0、meshCount=0、vertexBufferCount=0、dataLength=0）。
+  // 「fail-closed」针对的是解析失败与数据可疑，不是「必须有 mesh」。
+  if (e.meshCount < 0) throw new Error(`FLVER ${id} meshCount 为负：${e.meshCount}`);
 
   // layoutWarnings 必须为空：那一类是「读到的东西不对」（越界引用、未知 member 大小、
   // structOffset 越界），在已登记样本上出现任何一条都是真实回归，必须失败关闭。
@@ -212,6 +216,25 @@ async function verifySample(root: string, tmp: string, id: string): Promise<Samp
 
   // 缺口必须**可见**：authority 一旦是 partial，就必须给出结构化缺口清单。
   // 「降级了但不说为什么」是此前那批缺口不可见的同一个病，不能换个位置重演。
+  //
+  // ⚠️ 该判据只适用于**非空**模型：合法 0-mesh 空壳没有顶点数据可解码，也没有
+  // material/语义可供登记缺口，authority=partial 是「无数据可验证」的正确自述，
+  // 不是「降级了不说为什么」。空模型在这里早退，报告 meshesChecked=0。
+  if (e.meshCount === 0) {
+    return {
+      id,
+      version: `${e.version} (${e.internalVersion})`,
+      meshCount: 0,
+      vertexStrides: e.vertexStrides,
+      authority: e.authority,
+      meshesChecked: 0,
+      meshesOk: 0,
+      decodeFailures: [],
+      layoutWarnings: (e.layoutWarnings ?? []).length,
+      unparsedGaps: e.unparsedGaps ?? []
+    };
+  }
+
   if (e.authority === 'partial' && (e.unparsedGaps ?? []).length === 0 && (e.layoutWarnings ?? []).length === 0) {
     throw new Error(`FLVER ${id} authority=partial 但既无 unparsedGaps 也无 layoutWarnings：降级原因不可见。`);
   }

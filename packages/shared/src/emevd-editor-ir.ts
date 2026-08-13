@@ -45,6 +45,36 @@ export interface EmevdEditorDocument {
   documentInstanceId?: string;
 }
 
+/** Bounded event outline row for the DarkScript3-style source IDE navigator. */
+export interface EmevdEventOutlineEntry {
+  eventUri: string;
+  eventId: number;
+  restBehavior: number;
+  layer: number;
+  instructionCount: number;
+  /** Instructions classified unknown under the bound EMEDF registry. */
+  unknownCount: number;
+}
+
+/**
+ * Bounded outline DTO for the source workbench (EVENT-30A). Summary rows only:
+ * never carries instruction bodies, arg bytes, or string payloads, so a
+ * 1,730-event real corpus stays far inside IPC/envelope budgets. Source URIs
+ * are resource-relative (绝对路径脱敏): the outline must never expose the local
+ * absolute file system path of the opened resource.
+ */
+export interface EmevdDocumentOutline {
+  schemaVersion: 1;
+  resourceUri: string;
+  eventCount: number;
+  instructionTotal: number;
+  /** True when the source document exceeded `limit` and `events` is capped. */
+  truncated: boolean;
+  /** Upper bound applied to `events`. */
+  limit: number;
+  events: EmevdEventOutlineEntry[];
+}
+
 export interface EmevdSelection {
   eventUri?: string;
   instructionUri?: string;

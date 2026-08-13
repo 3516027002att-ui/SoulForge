@@ -364,6 +364,11 @@ export interface EmevdDslPlanSubmitRequest {
   sourcePath: string;
   /** SHA-256 of the source file bytes (commit precondition). */
   expectedDocumentHash: string;
+  /**
+   * SHA-256 of the outer source resource bytes (the .dcx wrapper). When the
+   * source is a .dcx, the file_replace precondition compares against these.
+   */
+  expectedOuterFileHash?: string;
   allowedRoots: string[];
   workspaceId: string;
   /** Overlay root; the commit target must stay inside it. */
@@ -418,6 +423,9 @@ export async function submitEmevdDslPlanViaFourView(
     registry: input.registry,
     sourcePath: input.sourcePath,
     expectedDocumentHash: input.expectedDocumentHash,
+    ...(input.expectedOuterFileHash !== undefined
+      ? { expectedOuterFileHash: input.expectedOuterFileHash }
+      : {}),
     allowedRoots: input.allowedRoots,
     workspaceId: input.workspaceId,
     workspaceRoot: input.workspaceRoot,

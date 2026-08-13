@@ -7,15 +7,18 @@
  * renderer. Assembly is validated: page indices must be continuous, the
  * collected instruction total must match the envelope total, and every event's
  * instruction slice must stay in range.
+ *
+ * EVENT-30A: the outer resource is opened as-is. DCX unwrap happens natively in
+ * the C# Bridge (`DcxNativeDocument`), so production open never imports the
+ * TypeScript DCX parser and never materializes a decompressed temp file that
+ * could later be (mis)used as the Patch target. The read result therefore
+ * carries `sourceFormat` / `outerFileHash` (the outer container identity) in
+ * addition to the payload-level `sourceHash`, plus a bounded outline DTO for
+ * the source IDE.
  */
 
-import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { EmevdEditorDocument, EmevdEventIr } from '@soulforge/shared';
+import type { EmevdDocumentOutline, EmevdEditorDocument, EmevdEventIr } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
-import { decompressDfltDcx, isDcxWrapper } from '../util/dcxDflt.js';
 import { createEmevdEditorDocument } from './emevdFourViewController.js';
 import { findInstructionDef, type EmedfRegistry } from '../emevd/emedfSchema.js';
 
@@ -30,6 +33,10 @@ export interface EmevdInstructionPageEntry {
 
 export interface EmevdEnvelopePage {
   sourceHash: string;
+  /** "emevd" for raw input; "dcx" when Bridge unwrapped a .dcx wrapper. */
+  sourceFormat?: string;
+  /** SHA-256 of the file bytes as opened (the outer container, not the payload). */
+  outerFileHash?: string;
   eventCount: number;
   instructionCount: number;
   instructionTotal?: number;
@@ -48,7 +55,7 @@ export interface EmevdEnvelopePage {
 }
 
 export interface ReadFullEmevdDocumentInput {
-  /** Path to decompressed .emevd bytes on a Bridge-allowed staging root. */
+  /** Path to the outer source resource: raw .emevd or DFLT/KRAK-wrapped .dcx. */
   filePath: string;
   allowedRoots: string[];
   resourceUri: string;
@@ -56,13 +63,6 @@ export interface ReadFullEmevdDocumentInput {
   documentInstanceId?: string;
   pageSize?: number;
   timeoutMs?: number;
-  /**
-   * Directory for the DCX-unwrapped temp file when filePath is a .dcx wrapper.
-   * Must already be inside `allowedRoots` (e.g. the workspace staging root) so
-   * the caller can later reuse preparedSourcePath as a Bridge staging source.
-   * Defaults to a private tmpdir subdirectory (read-only reuse).
-   */
-  tempDir?: string;
 }
 
 export interface ReadFullEmevdDocumentResult {
@@ -73,59 +73,33 @@ export interface ReadFullEmevdDocumentResult {
   instructionTotal: number;
   /** SHA-256 of the decompressed EMEVD source bytes (Bridge commit precondition). */
   sourceHash?: string;
-  /**
-   * When the input was a DCX wrapper, the decompressed .emevd temp file path.
-   * The caller owns cleanup and may reuse it as the Bridge staging source for
-   * subsequent writes. Undefined for raw .emevd inputs.
-   */
-  preparedSourcePath?: string;
+  /** "emevd" or "dcx" — how Bridge opened the outer source. */
+  sourceFormat?: string;
+  /** SHA-256 of the outer file bytes as opened (Patch target precondition). */
+  outerFileHash?: string;
+  /** Bounded event outline for the source IDE; never carries instruction bodies. */
+  outline?: EmevdDocumentOutline;
 }
 
 const DEFAULT_PAGE_SIZE = 512;
 const MAX_PAGE_SIZE = 4096;
+export const DEFAULT_OUTLINE_LIMIT = 4096;
 
 export async function readFullEmevdDocumentViaBridge(
   input: ReadFullEmevdDocumentInput
 ): Promise<ReadFullEmevdDocumentResult> {
   const pageSize = Math.min(Math.max(1, input.pageSize ?? DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE);
   const diagnostics: ReadFullEmevdDocumentResult['diagnostics'] = [];
+  const resourceUri = sanitizeResourceUri(input.resourceUri);
 
-  // Accept raw .emevd or DFLT-wrapped .dcx; KRAK/unknown inner formats fail
-  // structurally instead of being silently skipped. For DCX inputs the
-  // decompressed temp file is handed to the caller via preparedSourcePath so
-  // it can serve as the Bridge staging source for later writes.
-  let targetPath = input.filePath;
-  let preparedSourcePath: string | undefined;
-  let unwrapRoot: string | undefined;
-  try {
-    const sourceBytes = await readFile(input.filePath);
-    if (isDcxWrapper(sourceBytes)) {
-      const payload = decompressDfltDcx(sourceBytes);
-      unwrapRoot = input.tempDir ?? await mkdtemp(join(tmpdir(), 'soulforge-emevd-dcx-'));
-      preparedSourcePath = join(unwrapRoot, `${randomUUID()}.emevd`);
-      await writeFile(preparedSourcePath, payload);
-      targetPath = preparedSourcePath;
-    }
-  } catch (error) {
-    return {
-      ok: false,
-      diagnostics: [{
-        severity: 'error',
-        code: 'EMEVD_DCX_DECOMPRESS_FAILED',
-        message: error instanceof Error ? error.message : 'DCX 解压失败（DFLT-only，KRAK 等变体结构化拒绝）。'
-      }],
-      pageCount: 0,
-      instructionTotal: 0
-    };
-  }
-
-  const bridgeRoots = unwrapRoot
-    ? [...input.allowedRoots, unwrapRoot]
-    : input.allowedRoots;
+  // Production open targets the outer resource path directly. DCX unwrap is the
+  // C# Bridge's job (DcxNativeDocument); the TypeScript side never imports a
+  // second DCX parser and never writes a decompressed temp file into the
+  // write path (negative architecture: 不以 prepared temp path 作为 Patch target).
   const first = await runBridge<EmevdEnvelopePage>({
     command: 'read-emevd-document',
-    filePath: targetPath,
-    allowedRoots: bridgeRoots,
+    filePath: input.filePath,
+    allowedRoots: input.allowedRoots,
     timeoutMs: input.timeoutMs ?? 60_000,
     commandOptions: { instructionPage: 0, instructionPageSize: pageSize }
   });
@@ -154,8 +128,8 @@ export async function readFullEmevdDocumentViaBridge(
   for (let page = 1; page < pageCount; page += 1) {
     const envelope = await runBridge<EmevdEnvelopePage>({
       command: 'read-emevd-document',
-      filePath: targetPath,
-      allowedRoots: bridgeRoots,
+      filePath: input.filePath,
+      allowedRoots: input.allowedRoots,
       timeoutMs: input.timeoutMs ?? 60_000,
       commandOptions: { instructionPage: page, instructionPageSize: pageSize }
     });
@@ -207,7 +181,7 @@ export async function readFullEmevdDocumentViaBridge(
   }
 
   const document = createEmevdEditorDocument({
-    resourceUri: input.resourceUri,
+    resourceUri,
     events,
     ...(input.documentInstanceId !== undefined ? { documentInstanceId: input.documentInstanceId } : {})
   });
@@ -223,11 +197,70 @@ export async function readFullEmevdDocumentViaBridge(
     pageCount,
     instructionTotal,
     sourceHash: first.data.sourceHash,
-    ...(preparedSourcePath !== undefined ? { preparedSourcePath } : {})
+    sourceFormat: first.data.sourceFormat ?? 'emevd',
+    ...(first.data.outerFileHash !== undefined ? { outerFileHash: first.data.outerFileHash } : {}),
+    outline: buildEmevdDocumentOutline(document)
   };
 }
 
 /** Total instruction count a page set must cover for the given events table. */
 export function expectedInstructionTotal(events: EmevdEventIr[]): number {
   return events.reduce((sum, event) => sum + event.instructions.length, 0);
+}
+
+/**
+ * 绝对路径脱敏（EVENT-30A）：resourceUri 本应资源相对（如
+ * `file://event/common.emevd`）。若调用方误传了本地绝对路径（`D:\...`、
+ * `file:///D:/...`、UNC），收敛成无盘符的相对 `file://` 形式，避免把本地
+ * 文件系统路径泄漏进 DSL 投影与 outline。已经是资源相对的 URI 原样返回。
+ */
+export function sanitizeResourceUri(uri: string): string {
+  const relativeForm = /^file:\/\/[A-Za-z0-9_.-]+(?:\/|$)/;
+  if (relativeForm.test(uri) || /^[A-Za-z0-9_.-]+(?:\/|$)/.test(uri)) {
+    return uri;
+  }
+  const pathPart = uri
+    .replace(/^file:\/\/\//, '')
+    .replace(/^file:\/\//, '')
+    .replace(/^[A-Za-z]:[\\/]/, '')
+    .replace(/\\/g, '/')
+    .replace(/^[\\/]+/, '');
+  const relative = pathPart.replace(/^[\\/]+/, '');
+  return relative ? `file://${relative}` : 'file://resource';
+}
+
+export interface BuildEmevdDocumentOutlineOptions {
+  /** Cap on outline rows; larger documents truncate with `truncated: true`. */
+  limit?: number;
+}
+
+/**
+ * Build the bounded event outline for the source IDE (EVENT-30A). Summary rows
+ * only — event identity + counts, never instruction bodies/args/strings — so a
+ * real corpus stays well inside IPC budgets. `truncated` is set when the event
+ * count exceeds `limit`.
+ */
+export function buildEmevdDocumentOutline(
+  document: EmevdEditorDocument,
+  options: BuildEmevdDocumentOutlineOptions = {}
+): EmevdDocumentOutline {
+  const limit = Math.max(1, options.limit ?? DEFAULT_OUTLINE_LIMIT);
+  const truncated = document.events.length > limit;
+  const events = document.events.slice(0, limit).map((event) => ({
+    eventUri: event.eventUri,
+    eventId: event.eventId,
+    restBehavior: event.restBehavior,
+    layer: event.layer,
+    instructionCount: event.instructions.length,
+    unknownCount: event.instructions.reduce((n, instruction) => n + (instruction.unknown ? 1 : 0), 0)
+  }));
+  return {
+    schemaVersion: 1,
+    resourceUri: document.resourceUri,
+    eventCount: document.events.length,
+    instructionTotal: expectedInstructionTotal(document.events),
+    truncated,
+    limit,
+    events
+  };
 }

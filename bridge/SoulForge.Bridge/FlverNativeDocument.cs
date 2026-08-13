@@ -1265,6 +1265,17 @@ internal sealed class FlverNativeDocument
             meshes = meshSamples,
             meshesTruncated = Meshes.Count > SampleLimit,
             bufferLayouts = layoutSamples,
+            // 纹理槽表（MODEL-51A：material-slot page 从主文档直接可读，不必再单独发
+            // read-flver-texture-slots）。每个槽已按 material 的 firstTextureIndex/
+            // textureCount 归好所属材质；未命中任何材质时为 -1。
+            textureSlots = _textureSlots.Take(SampleLimit).Select(t => new
+            {
+                index = t.Index,
+                type = t.Type,
+                path = t.Path,
+                materialIndex = t.MaterialIndex
+            }).ToArray(),
+            texturesTruncated = _textureSlots.Count > SampleLimit,
             layoutWarnings = _layoutWarnings.ToArray(),
             // 与 layoutWarnings 并列而不是合并：前者是「数据可疑」，本项是「能力边界」。
             // 上层若把两者混为一谈，就会把「我没读」误报成「文件坏了」。

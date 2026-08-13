@@ -31,13 +31,18 @@ import {
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
   buildScriptContainerEvidence,
+  analyzePlaintextLineEndings,
+  classifyPlaintextBytes,
+  decodePlaintext,
   classifyScriptEntry,
   magicLabel,
   normalizePageWindow,
   sanitizeEntryName,
   applyParamFieldMutation,
   commitFmgMutationViaBridge,
+  commitFlverMutationViaBridge,
   commitGparamMutationsViaBridge,
+  commitTpfTextureReplaceViaBridge,
   type GparamFieldSetMutation,
   commitParamMutationViaBridge,
   commitMsbMutationViaBridge,
@@ -95,7 +100,9 @@ import {
   decodeOpenEditorDocumentRequest,
   decodePageEditorDocumentRequest,
   decodeReadEditorContentRequest,
-  decodeApplyEditorMutationRequest
+  decodeApplyEditorMutationRequest,
+  type FmgEntryPage,
+  type ScriptEntryPlaintextView
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -182,6 +189,30 @@ interface CachedFmgDocument {
   authority?: string;
 }
 const fmgPageCache = new Map<string, CachedFmgDocument>();
+
+/**
+ * TEXT-20A：文本目录的表引用与表分页缓存。
+ *
+ * tableId 由 Bridge `read-text-catalog` 产出（stableId），携带语言/容器 typed
+ * 上下文；renderer 只持有 tableId 与 sourceUri，从不自行解析 msg/ 路径。目录
+ * 每次读取都重建 textTableRefs（幂等），表分页按 tableId 定位源文件与
+ * entryIndex 后经 Bridge 读取，不经临时文件（容器内 FMG 直接走字节）。
+ */
+interface TextTableRef {
+  tableId: string;
+  languageId: string;
+  containerId: string;
+  containerKind: string;
+  sourceUri: string;
+  entryIndex: number;
+  entryName: string;
+}
+const textTableRefs = new Map<string, TextTableRef>();
+
+interface CachedFmgTableDocument extends CachedFmgDocument {
+  tableId: string;
+}
+const fmgTableCache = new Map<string, CachedFmgTableDocument>();
 
 interface CachedParamDocument {
   sourceHash: string;
@@ -1043,6 +1074,109 @@ async function verifiedReadRoots(
   );
   if (!roots.ok) return { allowedRoots: [], diagnostics: [bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', roots)] };
   return { allowedRoots: [...roots.allowedRoots], diagnostics: [] };
+}
+
+/**
+ * TEXT-20A：`read-text-catalog` 的 Bridge envelope。语言/容器 typed ID 由 Bridge
+ * 产出；renderer 只消费 catalog 层，不接触 msg/ 路径。
+ */
+interface TextCatalogEnvelope {
+  format?: string;
+  confirmedBy?: string;
+  languageId: string;
+  containerKind: string;
+  containerId: string;
+  containerRole?: string;
+  outerCompression?: string;
+  outerHash?: string;
+  tableCount: number;
+  tables: Array<{
+    stableId: string;
+    entryIndex: number;
+    entryName: string;
+    entryCount: number;
+    formatVersion?: number;
+  }>;
+  entries?: Array<{ id: number; text: string }>;
+  tableSourceHash?: string;
+  authority?: string;
+}
+
+async function readTextCatalogViaBridge(input: {
+  sourcePath: string;
+  allowedRoots: string[];
+  tableEntryIndex?: number;
+  timeoutMs?: number;
+}): Promise<{
+  ok: boolean;
+  data?: TextCatalogEnvelope;
+  diagnostics: Diagnostic[];
+}> {
+  const result = await runBridge<TextCatalogEnvelope>({
+    command: 'read-text-catalog',
+    filePath: input.sourcePath,
+    allowedRoots: input.allowedRoots,
+    timeoutMs: input.timeoutMs ?? 60_000,
+    ...(input.tableEntryIndex !== undefined
+      ? { commandOptions: { tableEntryIndex: input.tableEntryIndex } }
+      : {})
+  });
+  return {
+    ok: result.parseStatus !== 'failed' && Boolean(result.data?.languageId),
+    ...(result.data ? { data: result.data } : {}),
+    diagnostics: result.diagnostics
+  };
+}
+
+/**
+ * 目录层语言/容器 typed ID 的 fallback 推导。只在 Bridge 读取失败时使用——
+ * 主路径始终以 Bridge `read-text-catalog` 的 metadata 为准；这里仅把失败容器
+ * 安放进正确的语言/容器槽位，避免「读取失败」被静默吞掉或伪装成空表。
+ * normalized key：ASCII lower-case + `-` 分隔（front-end.md §4.4）。
+ */
+function deriveTextContainerHint(relativePath: string): { languageId: string; containerKind: string } {
+  const segments = relativePath.split(/[\\/]/).filter(Boolean);
+  const fileName = segments[segments.length - 1] ?? '';
+  let containerKind = fileName.toLowerCase();
+  for (const suffix of ['.msgbnd.dcx', '.msgbnd']) {
+    if (containerKind.endsWith(suffix)) {
+      containerKind = containerKind.slice(0, -suffix.length);
+      break;
+    }
+  }
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/^-+|-+$/g, '');
+  return {
+    languageId: segments.length >= 2 ? normalize(segments[segments.length - 2] ?? '') : '',
+    containerKind: normalize(containerKind)
+  };
+}
+
+interface TextContainerNode {
+  containerId: string;
+  containerKind: string;
+  sourceUri: string;
+  relativePath: string;
+  parseStatus: 'confirmed' | 'failed';
+  tableCount: number;
+  tables: Array<{
+    tableId: string;
+    entryName: string;
+    entryCount: number;
+    sourceUri: string;
+    entryIndex: number;
+  }>;
+  diagnostics: Diagnostic[];
+}
+
+export interface TextCatalogResponse {
+  ok: boolean;
+  libraryId: 'game-text';
+  title: string;
+  languages: Array<{
+    languageId: string;
+    containers: TextContainerNode[];
+  }>;
+  diagnostics: Diagnostic[];
 }
 
 /**
@@ -1957,9 +2091,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   /**
    * Assemble the authoritative full EMEVD editor document in main via
-   * paginated Bridge reads (DCX unwrapped on demand). The renderer only ever
-   * receives a DSL template string and a documentInstanceId, never the full
-   * document. The prepared decompressed path is cached for later writes.
+   * paginated Bridge reads. The Bridge opens the outer source resource as-is:
+   * .dcx unwrap is native, so no decompressed temp file is materialized and the
+   * write path always targets the outer resource (negative architecture). The
+   * renderer only ever receives a DSL template string, a documentInstanceId and
+   * the bounded outline, never the full document.
    */
   handle(
     'resource.readEmevdFullDocument',
@@ -1988,8 +2124,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
-      // ROOT-07：完整文档读取会解包 DCX 到 staging——先 mkdir/realpath/boundary
-      // 验证再注册，绝不把不存在的目录交给 Bridge。
+      // ROOT-07：完整文档读取不需要落盘（Bridge 原生解 DCX），但 staging root
+      // 仍注册以便后续 submit 复用。
       const roots = await prepareBridgeRoots(bridgeRootSession(activeSession, storage), 'stage');
       if (!roots.ok) {
         return {
@@ -2001,7 +2137,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const full = await readFullEmevdDocumentViaBridge({
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],
-        tempDir: storage.stagingRoot,
         resourceUri: sourceUri,
         registry: getEmevdRegistry().registry,
         ...(documentInstanceId ? { documentInstanceId } : {}),
@@ -2040,7 +2175,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         dslTemplateTruncated: bounded.truncated,
         dslTemplateTotalLines: bounded.totalLines,
         sourceHash: full.sourceHash ?? null,
-        preparedSourcePath: full.preparedSourcePath ?? null,
+        sourceFormat: full.sourceFormat ?? null,
+        outerFileHash: full.outerFileHash ?? null,
+        outline: full.outline ?? null,
         diagnostics: full.diagnostics.map((d) => ({
           severity: d.severity as Diagnostic['severity'],
           code: d.code,
@@ -2089,10 +2226,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }]
         };
       }
-      // Re-resolve the decompressed staging source (DCX inputs were unwrapped
-      // during load and cached as a temp file; raw .emevd uses the indexed path).
+      // The outer source resource (file.absolutePath) is both the Bridge staging
+      // read source and the PatchIR file_replace target — never a decompressed
+      // temp path (negative architecture: 不以 prepared temp path 作为 Patch target)。
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
-      // ROOT-07：DSL 提交链需要 staging（解包 + 写回）——先验证再注册。
+      // ROOT-07：DSL 提交链需要 staging（Bridge 暂存写）——先验证再注册。
       const roots = await prepareBridgeRoots(bridgeRootSession(activeSession, storage), 'stage');
       if (!roots.ok) {
         return {
@@ -2106,7 +2244,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const full = await readFullEmevdDocumentViaBridge({
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],
-        tempDir: storage.stagingRoot,
         resourceUri: sourceUri,
         registry,
         ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
@@ -2126,7 +2263,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       const fresh = full.document;
-      const preparedPath = full.preparedSourcePath ?? file.absolutePath;
+      const targetPath = file.absolutePath;
       const schemaFingerprint = fingerprintEmedfRegistry(registry);
       const result = await submitEmevdDslPlanViaFourView({
         compileRequest: {
@@ -2140,8 +2277,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         },
         document: fresh,
         registry,
-        sourcePath: preparedPath,
+        sourcePath: targetPath,
         expectedDocumentHash: full.sourceHash ?? '',
+        // 修改目标始终是 outer source resource：.dcx 时 file_replace 前置按 outer 字节比对。
+        ...(full.outerFileHash !== undefined ? { expectedOuterFileHash: full.outerFileHash } : {}),
         allowedRoots: [...roots.allowedRoots],
         workspaceId: activeSession.meta.workspaceId,
         workspaceRoot: activeSession.layers.overlayRoot,
@@ -2169,7 +2308,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const refreshed = await readFullEmevdDocumentViaBridge({
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],
-        tempDir: storage.stagingRoot,
         resourceUri: sourceUri,
         registry,
         ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
@@ -2237,9 +2375,40 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         diagnostics: [bridgeRootsDiagnostic('BRIDGE_ROOT_MISSING', readRoots)]
       };
     }
+    const allowedRoots = readRoots ? [...readRoots.allowedRoots] : [dirname(file.absolutePath)];
+    // TEXT-20C：msgbnd/DCX 容器走目录链读。read-fmg-document 只认裸 FMG v2
+    // 文件（marker 0x00020000），喂 DCX magic 会硬失败（真实游戏里 loadFmg
+    // 恒不 live —— 正是 fixture 掩盖掉的缺口）。目录读返回整容器 outerHash
+    // （= 写链密封期望，后续 applyFmgMutation 用同一 hash 做并发保护）与首表
+    // 条目；loose `.fmg` 仍走原有 read-fmg-document。
+    if (file.compoundExtension === '.msgbnd.dcx') {
+      const catalog = await readTextCatalogViaBridge({
+        sourcePath: file.absolutePath,
+        allowedRoots,
+        tableEntryIndex: 0
+      });
+      return sanitizeRendererValue({
+        ok: Boolean(catalog.ok && catalog.data?.outerHash),
+        sourceUri,
+        relativePath: file.relativePath,
+        data: catalog.ok && catalog.data
+          ? {
+              sourceHash: catalog.data.outerHash as string,
+              entryCount: catalog.data.entries?.length ?? 0,
+              entries: (catalog.data.entries ?? []).slice(0, 500).map((e) => ({
+                id: e.id,
+                text: e.text
+              })),
+              entriesTruncated: (catalog.data.entries?.length ?? 0) > 500,
+              ...(catalog.data.authority ? { authority: catalog.data.authority } : {})
+            }
+          : null,
+        diagnostics: catalog.diagnostics
+      });
+    }
     const result = await readFmgDocumentViaBridge({
       sourcePath: file.absolutePath,
-      allowedRoots: readRoots ? [...readRoots.allowedRoots] : [dirname(file.absolutePath)]
+      allowedRoots
     });
     return sanitizeRendererValue({
       ok: result.ok,
@@ -2370,13 +2539,215 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   );
 
+  /**
+   * TEXT-20A：读取 Text 语言/容器目录（FMG 只读选择链）。
+   *
+   * 每个 indexed msgbnd 容器经 Bridge `read-text-catalog` 确认格式并取得 typed
+   * 语言/容器/表 ID；读取失败的容器保留 typed 节点并标记 failed，绝不静默消失，
+   * 也不伪装成 0 个表（"失败不返回 0 entries"）。TPF/texbnd 等资源不在此过滤内，
+   * 天然不进 Text 目录。
+   */
+  handle('resource.readTextCatalog', async (): Promise<TextCatalogResponse> => {
+    const fail = (diagnostics: Diagnostic[]): TextCatalogResponse => ({
+      ok: false,
+      libraryId: 'game-text',
+      title: 'Text',
+      languages: [],
+      diagnostics
+    });
+    if (!activeSession) {
+      return fail([{
+        severity: 'error',
+        code: 'WORKSPACE_SESSION_REQUIRED',
+        message: '请先打开工作区，再读取文本目录。'
+      }]);
+    }
+    const roots = await verifiedReadRoots(activeSession, activeSession.layers.overlayRoot);
+    if (roots.diagnostics.length > 0) return fail(roots.diagnostics);
+
+    const msgFiles = indexedFiles.filter((file) => file.compoundExtension === '.msgbnd.dcx');
+    // 目录读取幂等：每次重建表引用映射，避免上一次扫描的 entryIndex 残留。
+    textTableRefs.clear();
+
+    const languages = new Map<string, TextContainerNode[]>();
+    const diagnostics: Diagnostic[] = [];
+    let totalTables = 0;
+    for (const file of msgFiles) {
+      const hint = deriveTextContainerHint(file.relativePath);
+      const result = await readTextCatalogViaBridge({
+        sourcePath: file.absolutePath,
+        allowedRoots: roots.allowedRoots
+      });
+      if (!result.ok || !result.data) {
+        const languageId = hint.languageId || 'unknown';
+        const containerId = `text:${languageId}:${hint.containerKind || 'unknown'}`;
+        const node: TextContainerNode = {
+          containerId,
+          containerKind: hint.containerKind || 'unknown',
+          sourceUri: file.sourceUri,
+          relativePath: file.relativePath,
+          parseStatus: 'failed',
+          tableCount: 0,
+          tables: [],
+          diagnostics: result.diagnostics
+        };
+        diagnostics.push(...result.diagnostics);
+        languages.set(languageId, [...(languages.get(languageId) ?? []), node]);
+        continue;
+      }
+
+      const catalog = result.data;
+      const languageId = catalog.languageId || hint.languageId || 'unknown';
+      const containerKind = catalog.containerKind || hint.containerKind || 'unknown';
+      const containerId = catalog.containerId || `text:${languageId}:${containerKind}`;
+      const tables = catalog.tables.map((table) => {
+        const ref: TextTableRef = {
+          tableId: table.stableId,
+          languageId,
+          containerId,
+          containerKind,
+          sourceUri: file.sourceUri,
+          entryIndex: table.entryIndex,
+          entryName: table.entryName
+        };
+        textTableRefs.set(ref.tableId, ref);
+        return {
+          tableId: table.stableId,
+          entryName: table.entryName,
+          entryCount: table.entryCount,
+          sourceUri: file.sourceUri,
+          entryIndex: table.entryIndex
+        };
+      });
+      totalTables += tables.length;
+      const node: TextContainerNode = {
+        containerId,
+        containerKind,
+        sourceUri: file.sourceUri,
+        relativePath: file.relativePath,
+        parseStatus: 'confirmed',
+        tableCount: tables.length,
+        tables,
+        diagnostics: []
+      };
+      languages.set(languageId, [...(languages.get(languageId) ?? []), node]);
+    }
+
+    const languageList = [...languages.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([languageId, containers]) => ({
+        languageId,
+        containers: containers.sort((a, b) => a.containerKind.localeCompare(b.containerKind))
+      }));
+
+    return {
+      ok: true,
+      libraryId: 'game-text',
+      title: `Text · ${languageList.length} languages · ${totalTables} tables`,
+      languages: languageList,
+      diagnostics
+    };
+  });
+
+  /**
+   * TEXT-20A：按 typed tableId 分页读取 FMG 表条目（硬约束 17）。主进程定位源
+   * 文件与 entryIndex，经 Bridge 读整表后缓存并分页；query 作用于完整表，覆盖
+   * 所有页。失败返回结构化诊断，不返回 `0 entries` 伪空表。
+   */
+  handle(
+    'resource.readFmgTablePage',
+    async (
+      _event,
+      tableId: string,
+      requestedPage: number,
+      requestedPageSize: number,
+      query?: string
+    ): Promise<FmgEntryPage> => {
+      const ref = textTableRefs.get(tableId);
+      const failure = (code: string, message: string, extraDiagnostics?: Diagnostic[]): FmgEntryPage => ({
+        ok: false,
+        sourceUri: ref?.sourceUri ?? tableId,
+        sourceHash: null,
+        entryCount: 0,
+        maxId: 0,
+        page: 0,
+        pageSize: 0,
+        pageCount: 0,
+        entries: [],
+        diagnostics: extraDiagnostics ?? [{
+          severity: 'error',
+          code,
+          message,
+          ...(ref?.sourceUri ? { sourceUri: ref.sourceUri } : {})
+        }]
+      });
+      if (!ref) {
+        return failure('TEXT_TABLE_NOT_RESOLVED', `文本表 ${tableId} 未解析；请先读取文本目录（readTextCatalog）。`);
+      }
+      const file = indexedFiles.find((item) => item.sourceUri === ref.sourceUri);
+      if (!file) {
+        return failure('TEXT_TABLE_SOURCE_MISSING', `文本表 ${ref.entryName} 的源资源未索引。`);
+      }
+      let cached = fmgTableCache.get(tableId);
+      if (!cached) {
+        const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+        if (roots.diagnostics.length > 0) {
+          return failure('BRIDGE_ROOT_MISSING', '读取文本表所需 Bridge roots 不可用。', roots.diagnostics);
+        }
+        const result = await readTextCatalogViaBridge({
+          sourcePath: file.absolutePath,
+          allowedRoots: roots.allowedRoots,
+          tableEntryIndex: ref.entryIndex
+        });
+        if (!result.ok || !result.data?.entries || !result.data.tableSourceHash) {
+          return failure('TEXT_TABLE_READ_FAILED', `文本表 ${ref.entryName} 读取失败。`, result.diagnostics);
+        }
+        cached = {
+          tableId,
+          sourceHash: result.data.tableSourceHash,
+          maxId: result.data.entries.reduce((max, entry) => Math.max(max, entry.id), 0),
+          entries: result.data.entries,
+          ...(result.data.authority ? { authority: result.data.authority } : {})
+        };
+        fmgTableCache.set(tableId, cached);
+      }
+      const q = (query ?? '').trim().toLowerCase();
+      const filtered = q.length === 0
+        ? cached.entries
+        : cached.entries.filter((entry) =>
+            String(entry.id).includes(q) || entry.text.toLowerCase().includes(q)
+          );
+      const window = normalizePageWindow(
+        filtered.length,
+        requestedPage,
+        requestedPageSize || FMG_PAGE_SIZE
+      );
+      return {
+        ok: true,
+        sourceUri: ref.sourceUri,
+        sourceHash: cached.sourceHash,
+        entryCount: filtered.length,
+        maxId: cached.maxId,
+        page: window.page,
+        pageSize: window.size,
+        pageCount: window.pageCount,
+        entries: filtered
+          .slice(window.offset, window.offset + window.size)
+          .map((entry) => ({ id: entry.id, text: entry.text })),
+        ...(cached.authority ? { authority: cached.authority } : {}),
+        diagnostics: []
+      };
+    }
+  );
+
   handle(
     'resource.applyFmgMutation',
     async (
       event,
       sourceUri: string,
       expectedHash: string,
-      mutation: { kind: 'upsert' | 'delete' | 'add'; id: number; text?: string }
+      mutation: { kind: 'upsert' | 'delete' | 'add'; id: number; text?: string },
+      tableId?: string
     ): Promise<RendererSaveResult> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file || !activeSession) {
@@ -2393,6 +2764,27 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
+      // TEXT-20C storage-profile 门控：容器写必须带 tableId，且该表必须是
+      // readTextCatalog 确认过的（textTableRefs 只填 CONFIRMED 容器）。表不在
+      // refs 里 = 该 language/container profile 未确认 → 拒绝写，绝不静默退化成
+      // loose 写（loose 对 msgbnd 容器会硬失败）或放行未知 profile。
+      let entryIndex: number | undefined;
+      if (tableId !== undefined) {
+        const ref = textTableRefs.get(tableId);
+        if (!ref || ref.sourceUri !== sourceUri) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error',
+              code: 'FMG_WRITE_PROFILE_UNSUPPORTED',
+              message: `文本表 ${tableId} 不是已确认的 storage profile，拒绝写回。`,
+              sourceUri
+            }]
+          };
+        }
+        entryIndex = ref.entryIndex;
+      }
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       // ROOT-07：stage 前 mkdir → realpath → boundary check；回调同步返回
       // 已验证集合（stageBridgeOutput 的 mkdir 幂等）。
@@ -2425,7 +2817,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           expectedDocumentHash: expectedHash,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
-          mutation: bridgeMutation
+          mutation: bridgeMutation,
+          ...(entryIndex !== undefined ? { entryIndex } : {})
         }),
         title: `FMG mutation ${mutation.kind} ${mutation.id}`,
         confirmActionLabel: '提交 FMG 变更'
@@ -2433,7 +2826,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         confirm: electronConfirmationPort(event),
         commit: sessionCommitPort(activeSession, operationLog, storage)
       });
-      if (outcome.status === 'committed' && outcome.result.ok) fmgPageCache.delete(sourceUri);
+      if (outcome.status === 'committed' && outcome.result.ok) {
+        // 容器写会更新整容器 DCX hash → 同容器内所有表缓存都失效，逐表清；
+        // 裸 fmg 的页缓存照旧清。
+        fmgPageCache.delete(sourceUri);
+        for (const [cachedTableId, ref] of textTableRefs) {
+          if (ref.sourceUri === sourceUri) fmgTableCache.delete(cachedTableId);
+        }
+      }
       return toSaveResultFromOutcome(outcome, indexedFiles);
     }
   );
@@ -2549,6 +2949,82 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
 
+  handle('resource.readTpfTexturePreview', async (_event, sourceUri: string, textureIndex: number) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 TPF 纹理预览。', sourceUri }] };
+    }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    const result = await runBridge<Record<string, unknown>>({
+      command: 'read-tpf-texture-preview',
+      filePath: file.absolutePath,
+      allowedRoots: roots.allowedRoots,
+      timeoutMs: 120_000,
+      commandOptions: { textureIndex }
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
+  handle('resource.saveTpfTextureReplace', async (
+    event,
+    sourceUri: string,
+    expectedHash: string,
+    textureIndex: number,
+    newTextureBase64: string
+  ): Promise<RendererSaveResult> => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file || !activeSession) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'TPF_WRITE_NO_SESSION',
+          message: '需要已打开的工作区才能写入 TPF。',
+          sourceUri
+        }]
+      };
+    }
+    const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+    if (gameBlocked) return gameBlocked;
+    const storage = durableStoragePaths(activeSession.meta.workspaceId);
+    // ROOT-07：stage 前 mkdir → realpath → boundary check；回调同步返回
+    // 已验证集合（stageBridgeOutput 的 mkdir 幂等）。
+    const stage = await verifiedStageRoots(activeSession, storage, 'TPF_STAGING_PREPARE_FAILED');
+    if (stage.diagnostics.length > 0) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: stage.diagnostics
+      };
+    }
+    const operationLog = await ensureActiveOperationLog(activeSession);
+    const outcome = await applyNativeMutation({
+      file,
+      sourceUri,
+      expectedHash,
+      stagingRoot: storage.stagingRoot,
+      allowedRoots: () => [...stage.allowedRoots],
+      stagingPrefix: 'tpf',
+      stagingFileName: `${basename(file.relativePath)}.mut.tpf`,
+      stageWrite: (context) => commitTpfTextureReplaceViaBridge({
+        sourcePath: file.absolutePath,
+        outputPath: context.outputPath,
+        expectedDocumentHash: expectedHash,
+        allowedRoots: context.allowedRoots,
+        writableRoots: context.writableRoots,
+        replace: { textureIndex, newTextureBase64 }
+      }),
+      title: `TPF texture replace #${textureIndex}`,
+      confirmActionLabel: '替换 TPF 纹理'
+    }, {
+      confirm: electronConfirmationPort(event),
+      commit: sessionCommitPort(activeSession, operationLog, storage)
+    });
+    return toSaveResultFromOutcome(outcome, indexedFiles);
+  });
+
   handle('resource.readFlverMesh', async (_event, sourceUri: string, meshIndex: number) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
@@ -2591,6 +3067,22 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-flver-dummies',
+      filePath: file.absolutePath,
+      allowedRoots: roots.allowedRoots,
+      timeoutMs: 120_000
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
+  handle('resource.readFlverTextureSlots', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 纹理槽位。', sourceUri }] };
+    }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    const result = await runBridge<Record<string, unknown>>({
+      command: 'read-flver-texture-slots',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000
@@ -2661,6 +3153,76 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }),
         title: `MSB mutation ${mutation.kind} ${mutation.partName}`,
         confirmActionLabel: '提交 MSB 变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  handle(
+    'resource.applyFlverMutation',
+    async (
+      event,
+      sourceUri: string,
+      expectedHash: string,
+      mutation: {
+        kind: 'material-slot-set';
+        meshStableId: string;
+        slotIndex: number;
+        materialStableId: string;
+      }
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'FLVER_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入 FLVER。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+      // MODEL-51C 只交付 native 写基础设施，不改变编辑器延期裁定：FLVER 仍是
+      // V0.6 延期的只读预览（editorCapabilityContract flver 块不动）。此 handler
+      // 是 main-only 预埋（不加 preload 暴露，renderer 不可达）；万一将来被误接，
+      // 这里也失败关闭，不会静默放行写回。
+      const deferredBlocked = rejectDeferredPreviewEditorWrite('flver', sourceUri);
+      if (deferredBlocked) return deferredBlocked;
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'FLVER_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'flver',
+        stagingFileName: `${basename(file.relativePath)}.mut.flver`,
+        stageWrite: (context) => commitFlverMutationViaBridge({
+          sourcePath: file.absolutePath,
+          outputPath: context.outputPath,
+          expectedDocumentHash: expectedHash,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          mutation
+        }),
+        title: `FLVER mutation ${mutation.kind} ${mutation.meshStableId}`,
+        confirmActionLabel: '提交 FLVER 变更'
       }, {
         confirm: electronConfirmationPort(event),
         commit: sessionCommitPort(activeSession, operationLog, storage)
@@ -4764,6 +5326,98 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         classificationSummary: cached.classificationSummary,
         entriesComplete: cached.entriesComplete,
         diagnostics: cached.diagnostics
+      };
+    }
+  );
+
+  /**
+   * 脚本条目源码级只读视图（SCRIPT-41）。
+   *
+   * 主进程用**真实字节**逐条判定：不看文件名、不接受证据采样的分类结论。
+   * 明文条目返回按真实 encoding 解码的文本；字节码条目只返回判定证据，
+   * 渲染器据此只展示明确的只读字节视图。childUri 在主进程内按
+   * `containerUri#bnd/child/<entryName>` 构造（与 core readContainerChild
+   * 的解析格式一致），渲染器不接触内层地址。
+   */
+  handle(
+    'resource.readScriptEntryPlaintext',
+    async (_event, sourceUri: string, entryName: string): Promise<ScriptEntryPlaintextView> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const failure = (code: string, message: string, diagnostics?: StructuredDiagnostic[]): ScriptEntryPlaintextView => ({
+        ok: false,
+        name: entryName,
+        classification: 'unknown',
+        isPlaintext: false,
+        verdictCode: code,
+        printableRatio: 0,
+        totalBytes: 0,
+        trailingPaddingBytes: 0,
+        containsNul: false,
+        luaBytecodeMagic: false,
+        encoding: 'ascii',
+        hasBom: false,
+        newlines: { crlf: 0, lf: 0, cr: 0 },
+        diagnostics: diagnostics ?? [{
+          severity: 'error' as const,
+          code,
+          message,
+          sourceUri
+        }]
+      });
+      if (!file) {
+        return failure('RESOURCE_NOT_INDEXED', '父容器未索引，无法读取脚本条目明文。');
+      }
+      if (!activeSession) {
+        return failure('WORKSPACE_NOT_OPEN', '需要已打开的工作区才能读取脚本条目明文。');
+      }
+      const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+      const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
+      if (!read.ok || !read.bytes) {
+        return {
+          ok: false,
+          name: entryName,
+          classification: classifyScriptEntry(entryName),
+          isPlaintext: false,
+          verdictCode: 'PLAINTEXT_READ_FAILED',
+          printableRatio: 0,
+          totalBytes: read.bytes?.length ?? 0,
+          trailingPaddingBytes: 0,
+          containsNul: false,
+          luaBytecodeMagic: false,
+          encoding: 'ascii',
+          hasBom: false,
+          newlines: { crlf: 0, lf: 0, cr: 0 },
+          diagnostics: read.diagnostics
+        };
+      }
+      const verdict = classifyPlaintextBytes(read.bytes);
+      const encoding = verdict.detectedEncoding;
+      const hasBom = encoding === 'utf8-bom';
+      let text: string | undefined;
+      let newlines: { crlf: number; lf: number; cr: number } = { crlf: 0, lf: 0, cr: 0 };
+      if (verdict.isPlaintext) {
+        // 尾部 NUL 是容器对齐填充，不属于文本内容；解码前剥掉，否则解码文本会
+        // 带一串不可见的 NUL 结尾，且换行统计会被污染。
+        const contentEnd = read.bytes.length - verdict.trailingPaddingBytes;
+        text = decodePlaintext(read.bytes.subarray(0, contentEnd), encoding);
+        newlines = analyzePlaintextLineEndings(text);
+      }
+      return {
+        ok: true,
+        name: entryName,
+        classification: classifyScriptEntry(entryName),
+        isPlaintext: verdict.isPlaintext,
+        verdictCode: verdict.code,
+        printableRatio: verdict.printableRatio,
+        totalBytes: verdict.totalBytes,
+        trailingPaddingBytes: verdict.trailingPaddingBytes,
+        containsNul: verdict.containsNul,
+        luaBytecodeMagic: verdict.luaBytecodeMagic,
+        encoding,
+        hasBom,
+        newlines,
+        ...(text !== undefined ? { text } : {}),
+        diagnostics: verdict.diagnostics
       };
     }
   );

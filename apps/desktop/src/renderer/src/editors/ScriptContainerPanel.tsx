@@ -4,7 +4,9 @@ import type {
   RendererContainerChild,
   ScriptContainerEntryEvidence,
   ScriptContainerEvidence,
-  ScriptEntryClassification
+  ScriptEntryClassification,
+  ScriptEntryEncoding,
+  ScriptEntryPlaintextView
 } from '@soulforge/shared';
 import {
   SCRIPT_CLASSIFICATION_ORDER,
@@ -12,6 +14,7 @@ import {
   scriptClassificationLabel
 } from '@soulforge/shared';
 import { HexEditorPanel } from './HexEditorPanel.js';
+import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { isLikelyBase64, uint8ArrayToBase64 } from '../utils/binary.js';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
@@ -43,13 +46,33 @@ interface ReplaceResultView {
   diagnostics: Diagnostic[];
 }
 
+/** 编码标签的中文显示（§10.2：encoding 必须明示）。 */
+function encodingLabel(encoding: ScriptEntryEncoding): string {
+  switch (encoding) {
+    case 'ascii':
+      return 'ASCII';
+    case 'utf8':
+      return 'UTF-8';
+    case 'utf8-bom':
+      return 'UTF-8（带 BOM）';
+    case 'shift_jis':
+      return 'Shift-JIS (CP932)';
+    case 'mixed-unknown':
+      return '混合 / 未知编码';
+    default:
+      return encoding;
+  }
+}
+
 /**
- * 脚本容器只读证据面板。
+ * 脚本容器工作台（SCRIPT-41）。
  *
- * SoulForge 不反编译、不重编译、不执行脚本：内层 `.lua`/`.hks` 是 Havok
- * Script 编译字节码（`\x1bLuaQ`），本面板只展示只读证据，绝不把字节码
- * 呈现为可编辑源码。唯一的写路径是"用户提供字节的整个内层文件替换"，
- * 替换字节必须由用户提供，SoulForge 不生成字节码。
+ * 三栏 Container/Files | Source/只读反汇编（主区 flex）| Metadata，不用四栏
+ * 模板 —— 没有真实符号解析（V0.5 无 HKS 重编译器），Symbols 栏无从填充，
+ * 不造空栏（§10.2）。SoulForge 不反编译、不重编译、不执行脚本：内层 `.lua`/
+ * `.hks` 是 Havok Script 编译字节码（`\x1bLuaQ`）。明文条目按真实 encoding
+ * 解码展示（BOM/newline/NUL 明示）；字节码条目只展示只读字节视图，绝不把
+ * 字节码呈现为可编辑源码。唯一的写路径是"用户提供字节的整个内层文件替换"。
  */
 export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactElement {
   const [evidence, setEvidence] = useState<ScriptContainerEvidence | null>(null);
@@ -69,6 +92,10 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   const [entriesComplete, setEntriesComplete] = useState(true);
   const [pageLoading, setPageLoading] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
+  /** Source 主区的源码级只读视图（SCRIPT-41）。 */
+  const [sourceView, setSourceView] = useState<ScriptEntryPlaintextView | null>(null);
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
 
   const bridge = getRendererBridge();
 
@@ -146,11 +173,47 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     if (props.resourceUri) void loadPage(0);
   }, [props.resourceUri, loadPage]);
 
-  async function changePage(next: number): Promise<void> {
+  /**
+   * 源码级只读视图按真实字节逐条读取（SCRIPT-41）。选中条目时加载，
+   * 主进程用 `classifyPlaintextBytes` 判定，渲染器只负责展示。
+   */
+  const sourceChannelAvailable = bridge !== null
+    && typeof bridge.readScriptEntryPlaintext === 'function';
+
+  const loadSource = useCallback(async (entryName: string): Promise<void> => {
+    if (!props.resourceUri || !sourceChannelAvailable || bridge === null) {
+      setSourceView(null);
+      setSourceError(null);
+      return;
+    }
+    setSourceLoading(true);
+    setSourceError(null);
+    setSourceView(null);
+    try {
+      const view = await bridge.readScriptEntryPlaintext(props.resourceUri, entryName);
+      setSourceView(view);
+      if (!view.ok) {
+        setSourceError(view.diagnostics?.[0]?.message ?? '源码级只读视图读取失败。');
+      }
+    } catch (error) {
+      setSourceView(null);
+      setSourceError(error instanceof Error ? error.message : '源码级只读视图读取异常。');
+    } finally {
+      setSourceLoading(false);
+    }
+  }, [props.resourceUri, sourceChannelAvailable, bridge]);
+
+  function resetSelection(): void {
     setSelectedName(null);
     setReplaceCtx(null);
     setReplaceBytes('');
     setReplaceResult(null);
+    setSourceView(null);
+    setSourceError(null);
+  }
+
+  async function changePage(next: number): Promise<void> {
+    resetSelection();
     await loadPage(next);
   }
 
@@ -176,10 +239,16 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   );
 
   function selectEntry(name: string): void {
-    setSelectedName((current) => (current === name ? null : name));
-    setReplaceCtx(null);
-    setReplaceBytes('');
-    setReplaceResult(null);
+    setSelectedName((current) => {
+      const next = current === name ? null : name;
+      setReplaceCtx(null);
+      setReplaceBytes('');
+      setReplaceResult(null);
+      setSourceView(null);
+      setSourceError(null);
+      if (next !== null) void loadSource(next);
+      return next;
+    });
   }
 
   async function openReplace(): Promise<void> {
@@ -322,21 +391,16 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
       }));
   }, [pageSummary, evidence]);
 
-  return (
-    <section className="panel" aria-label="脚本容器只读证据">
-      <header className="panel-header">
-        <h3>脚本容器只读证据</h3>
-        <span className="muted">
-          {evidence
-            ? `${evidence.containerFormat} · ${displayEntryCount} 条`
-            : '未加载'}
-        </span>
-      </header>
+  const verdictMessage = useMemo(() => {
+    const diagnostics = sourceView?.diagnostics ?? [];
+    const info = diagnostics.find((d) => d.code === sourceView?.verdictCode);
+    return info?.message ?? (sourceView?.isPlaintext ? '条目确认为明文。' : '');
+  }, [sourceView]);
 
-      {loading && <p className="muted">正在构建证据…</p>}
+  /* ── 左栏：Container / Files ─────────────────────────────────────── */
+  const filesColumn = (
+    <div className="stack gap">
       {loadError && <p className="danger">{loadError}</p>}
-      {!loading && !loadError && !evidence && <p className="muted">选择左侧脚本容器后显示只读证据。</p>}
-
       {evidence && (
         <>
           <div className="structured-preview-grid">
@@ -345,21 +409,8 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
             <span>{pageChannelAvailable
               ? `分页枚举 · 每页 ${SCRIPT_PAGE_SIZE} 条`
               : `证据投影 ${evidence.entries.length} 条`}</span>
-            {/* 「Bridge 仅返回采样条目，导航覆盖采样子集」是内部说法：用户不需要
-                知道是谁返回的采样，只需要知道看到的不是全部。 */}
             <span>{entriesComplete ? '条目完整' : '仅部分条目（不是完整列表）'}</span>
           </div>
-
-          {/* 降级截断必须可见：无分页通道时表格只渲染前一页，界面必须说清「还有
-              更多但看不到」，否则用户会把截断当成完整数据。 */}
-          {/* 措辞说后果不说内部原因：用户要知道的是「还有多少没显示」，
-              而不是「分页通道不可用」这种实现细节。 */}
-          {fallbackTruncated && (
-            <p className="muted">
-              共 {fallbackEntries.length} 条条目，当前仅显示前 {SCRIPT_PAGE_SIZE} 条。
-            </p>
-          )}
-
           <div className="native-chip-row">
             {summaryChips.map((chip) => (
               <span key={chip.classification}>
@@ -368,159 +419,269 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
             ))}
             {summaryChips.length === 0 && <span>无分类统计</span>}
           </div>
+          {fallbackTruncated && (
+            <p className="muted">
+              共 {fallbackEntries.length} 条条目，当前仅显示前 {SCRIPT_PAGE_SIZE} 条。
+            </p>
+          )}
+        </>
+      )}
+      {pageChannelAvailable && (
+        <>
+          <div className="row gap pager">
+            <button
+              type="button"
+              disabled={page <= 0 || pageLoading}
+              onClick={() => void changePage(page - 1)}
+            >
+              上一页
+            </button>
+            <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
+            <button
+              type="button"
+              disabled={page >= pageCount - 1 || pageLoading}
+              onClick={() => void changePage(page + 1)}
+            >
+              下一页
+            </button>
+            {pageLoading && <span className="muted">加载中…</span>}
+          </div>
+          {pageError && <p className="danger">{pageError}</p>}
+          {!pageLoading && !pageError && pageEntries.length === 0 && (
+            <p className="muted">当前页无条目。</p>
+          )}
+        </>
+      )}
+      <div className="binder-child-table script-entry-table" role="table">
+        <div className="binder-child-row binder-child-header script-entry-row" role="row">
+          <span>名称</span>
+          <span>分类</span>
+          <span>大小</span>
+          <span>索引</span>
+          <span>标识</span>
+        </div>
+        {tableEntries.map((entry, rowIndex) => (
+          <div
+            key={`${entry.index}-${entry.name}`}
+            className={entry.name === selectedName
+              ? 'binder-child-row script-entry-row selected'
+              : 'binder-child-row script-entry-row'}
+            {...selectableRowAttributes({
+              selected: entry.name === selectedName,
+              isTabEntry: isRowTabEntry(rowIndex, selectedName !== null),
+              onSelect: () => selectEntry(entry.name)
+            })}
+          >
+            <span title={entry.name}>{entry.name}</span>
+            <span className="muted">{scriptClassificationLabel(entry.classification)}</span>
+            <span>{entry.size}</span>
+            <span className="muted">{entry.index}</span>
+            <span className="muted" title={entry.magicLabel ?? ''}>
+              {entry.headerHex ? formatHeaderHex(entry.headerHex) : entry.magicLabel ?? ''}
+            </span>
+          </div>
+        ))}
+        {tableEntries.length === 0 && !pageLoading && <p className="muted">无条目证据。</p>}
+      </div>
+      {evidence?.diagnostics.length ? (
+        <div className="save-diagnostics">
+          {evidence.diagnostics.map((diagnostic) => (
+            <span key={`${diagnostic.code}-${diagnostic.message}`}>
+              {diagnostic.code}: {diagnostic.message}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 
-          {pageChannelAvailable && (
+  /* ── 中栏：Source / 只读反汇编（主区 flex）──────────────────────── */
+  const sourceColumn = (
+    <div className="stack gap script-source">
+      {!selected && (
+        <p className="muted">选择左侧条目后显示源码级只读视图。</p>
+      )}
+      {selected && sourceLoading && <p className="muted">正在读取条目真实字节…</p>}
+      {selected && sourceError && <p className="danger">{sourceError}</p>}
+      {selected && sourceView && (
+        <>
+          <div className="native-chip-row script-source__meta">
+            <span>判定：{sourceView.isPlaintext ? '明文' : '非明文'}</span>
+            <span>编码：{encodingLabel(sourceView.encoding)}</span>
+            {sourceView.hasBom && <span>BOM：UTF-8 BOM</span>}
+            <span>{sourceView.totalBytes} 字节</span>
+            {sourceView.trailingPaddingBytes > 0 && (
+              <span>尾部对齐填充：{sourceView.trailingPaddingBytes} 字节</span>
+            )}
+          </div>
+          {sourceView.isPlaintext && (
             <>
-              <div className="row gap pager">
-                <button
-                  type="button"
-                  disabled={page <= 0 || pageLoading}
-                  onClick={() => void changePage(page - 1)}
-                >
-                  上一页
-                </button>
-                <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
-                <button
-                  type="button"
-                  disabled={page >= pageCount - 1 || pageLoading}
-                  onClick={() => void changePage(page + 1)}
-                >
-                  下一页
-                </button>
-                {pageLoading && <span className="muted">加载中…</span>}
+              <div className="native-chip-row script-source__meta">
+                <span>换行：CRLF {sourceView.newlines.crlf} · LF {sourceView.newlines.lf} · CR {sourceView.newlines.cr}</span>
+                <span>内容 NUL：{sourceView.containsNul ? '有' : '无'}</span>
               </div>
-              {pageError && <p className="danger">{pageError}</p>}
-              {!pageLoading && !pageError && pageEntries.length === 0 && (
-                <p className="muted">当前页无条目。</p>
+              <pre className="script-source__text" spellCheck={false}>
+                {sourceView.text}
+              </pre>
+              {sourceView.text?.endsWith('\n') || sourceView.text?.endsWith('\r')
+                ? <span className="muted">末尾换行：有</span>
+                : <span className="muted">末尾换行：无</span>}
+            </>
+          )}
+          {!sourceView.isPlaintext && (
+            <>
+              <p className="danger">
+                编译产物，非明文源码（{scriptClassificationLabel(sourceView.classification)}）。
+              </p>
+              {verdictMessage && <p className="muted">{verdictMessage}</p>}
+              <p className="muted">
+                SoulForge 不反编译/不重编译/不执行脚本，字节码绝不显示为可编辑源码；
+                下方为只读字节证据。
+              </p>
+              {selected.headerHex && (
+                <HexEditorPanel
+                  title={`${selected.name} 头部只读字节证据（前 ${selected.headerHex.length / 2} 字节）`}
+                  initialBytesBase64={hexToBase64(selected.headerHex)}
+                />
               )}
             </>
           )}
+        </>
+      )}
+      {selected && sourceView && !sourceView.isPlaintext && selected.headerHex
+        && <p className="muted">只读字节视图不提供编辑；整内层文件替换见底部表单（字节由你提供）。</p>}
+    </div>
+  );
 
-          <div className="binder-child-table script-entry-table" role="table">
-            <div className="binder-child-row binder-child-header script-entry-row" role="row">
-              <span>名称</span>
-              <span>分类</span>
-              <span>大小</span>
-              <span>索引</span>
-              <span>标识</span>
-            </div>
-            {tableEntries.map((entry, rowIndex) => (
-              <div
-                key={`${entry.index}-${entry.name}`}
-                className={entry.name === selectedName
-                  ? 'binder-child-row script-entry-row selected'
-                  : 'binder-child-row script-entry-row'}
-                {...selectableRowAttributes({
-                  selected: entry.name === selectedName,
-                  isTabEntry: isRowTabEntry(rowIndex, selectedName !== null),
-                  onSelect: () => selectEntry(entry.name)
-                })}
-              >
-                <span title={entry.name}>{entry.name}</span>
-                <span className="muted">{scriptClassificationLabel(entry.classification)}</span>
-                <span>{entry.size}</span>
-                <span className="muted">{entry.index}</span>
-                <span className="muted" title={entry.magicLabel ?? ''}>
-                  {entry.headerHex ? formatHeaderHex(entry.headerHex) : entry.magicLabel ?? ''}
-                </span>
+  /* ── 右栏：Metadata ──────────────────────────────────────────────── */
+  const metadataColumn = (
+    <div className="stack gap">
+      {!selected && <p className="muted">选择条目后显示元数据。</p>}
+      {selected && (
+        <div className="structured-preview-grid">
+          <span>名称：{selected.name}</span>
+          <span>分类：{scriptClassificationLabel(selected.classification)}</span>
+          <span>索引：{selected.index}</span>
+          <span>大小：{selected.size}</span>
+          {selected.magicLabel && <span>magic：{selected.magicLabel}</span>}
+        </div>
+      )}
+      {selected && sourceView && (
+        <div className="structured-preview-grid">
+          <span>判定：{sourceView.verdictCode}</span>
+          <span>可打印比例：{sourceView.printableRatio.toFixed(4)}</span>
+          <span>编码：{encodingLabel(sourceView.encoding)}</span>
+          <span>带 BOM：{sourceView.hasBom ? '是' : '否'}</span>
+          <span>内容含 NUL：{sourceView.containsNul ? '是' : '否'}</span>
+          <span>尾部填充：{sourceView.trailingPaddingBytes} 字节</span>
+          <span>换行 CRLF/LF/CR：{sourceView.newlines.crlf}/{sourceView.newlines.lf}/{sourceView.newlines.cr}</span>
+        </div>
+      )}
+      {selected && sourceView?.diagnostics.length ? (
+        <div className="save-diagnostics">
+          {sourceView.diagnostics.map((diagnostic) => (
+            <span key={`${diagnostic.code}-${diagnostic.message}`}>
+              {diagnostic.code}: {diagnostic.message}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+
+  /* ── footer：选中条目的整内层文件替换（唯一写路径）──────────────── */
+  const footer = selected ? (
+    <div className="stack gap">
+      {!replaceCtx && (
+        <div className="row gap">
+          <span className="muted">
+            已选：{selected.name}
+            {selected.magicLabel ? ` · ${selected.magicLabel}` : ''}
+          </span>
+          <button type="button" disabled={replacing} onClick={() => void openReplace()}>
+            替换内层文件（用户提供字节）
+          </button>
+        </div>
+      )}
+      {replaceCtx && (
+        <div className="stack gap">
+          <p className="muted">
+            替换目标：{replaceCtx.entry.name}
+            {replaceCtx.containerHash ? ` · 容器校验 ${shortHash(replaceCtx.containerHash)}` : ''}
+            {replaceCtx.childHash ? ` · 条目校验 ${shortHash(replaceCtx.childHash)}` : ''}
+          </p>
+          {!replaceCtx.supported && <p className="danger">{replaceCtx.message}</p>}
+          {replaceCtx.supported && (
+            <>
+              <label className="stack gap">
+                选择替换字节文件（由你提供）
+                <input type="file" onChange={handleFileChange} />
+              </label>
+              <label className="stack gap">
+                或粘贴 base64 字节
+                <textarea
+                  value={replaceBytes}
+                  onChange={(event) => {
+                    setReplaceBytes(event.target.value);
+                    setReplaceResult(null);
+                  }}
+                  rows={2}
+                  spellCheck={false}
+                  placeholder="dataBase64…"
+                />
+              </label>
+              <div className="row gap">
+                <button
+                  type="button"
+                  disabled={replacing || replaceBytes.trim().length === 0}
+                  onClick={() => void submitReplace()}
+                >
+                  {replacing ? '提交中…' : '经 Patch Engine 替换并提交'}
+                </button>
+                <button type="button" disabled={replacing} onClick={() => setReplaceCtx(null)}>
+                  取消
+                </button>
               </div>
-            ))}
-            {tableEntries.length === 0 && !pageLoading && <p className="muted">无条目证据。</p>}
-          </div>
-
-          {selected && (
-            <div className="stack gap">
-              <p className="muted">
-                已选：{selected.name}（{scriptClassificationLabel(selected.classification)}）
-                {selected.magicLabel ? ` · ${selected.magicLabel}` : ''}
-              </p>
-              <button type="button" disabled={replacing} onClick={() => void openReplace()}>
-                替换内层文件（用户提供字节）
-              </button>
-              <p className="muted">
-                替换字节必须由用户提供，SoulForge 不生成/反编译字节码；字节不会在此视图显示为可编辑源码。
-              </p>
-            </div>
+            </>
           )}
-
-          {replaceCtx && (
-            <div className="stack gap">
-              <p className="muted">
-                替换目标：{replaceCtx.entry.name}
-                {replaceCtx.containerHash
-                  ? ` · 容器校验 ${shortHash(replaceCtx.containerHash)}`
-                  : ''}
-                {replaceCtx.childHash ? ` · 条目校验 ${shortHash(replaceCtx.childHash)}` : ''}
-              </p>
-              {!replaceCtx.supported && <p className="danger">{replaceCtx.message}</p>}
-              {replaceCtx.supported && (
-                <>
-                  <label className="stack gap">
-                    选择替换字节文件（由你提供）
-                    <input type="file" onChange={handleFileChange} />
-                  </label>
-                  <label className="stack gap">
-                    或粘贴 base64 字节
-                    <textarea
-                      value={replaceBytes}
-                      onChange={(event) => {
-                        setReplaceBytes(event.target.value);
-                        setReplaceResult(null);
-                      }}
-                      rows={3}
-                      spellCheck={false}
-                      placeholder="dataBase64…"
-                    />
-                  </label>
-                  <div className="row gap">
-                    <button
-                      type="button"
-                      disabled={replacing || replaceBytes.trim().length === 0}
-                      onClick={() => void submitReplace()}
-                    >
-                      {replacing ? '提交中…' : '经 Patch Engine 替换并提交'}
-                    </button>
-                    <button type="button" disabled={replacing} onClick={() => setReplaceCtx(null)}>
-                      取消
-                    </button>
-                  </div>
-                  {replaceResult && (
-                    <p className={replaceResult.ok ? undefined : 'danger'}>{replaceResult.message}</p>
-                  )}
-                  {replaceResult && replaceResult.diagnostics.length > 0 && (
-                    <div className="save-diagnostics">
-                      {replaceResult.diagnostics.map((diagnostic) => (
-                        <span key={`${diagnostic.code}-${diagnostic.message}`}>
-                          {diagnostic.code}: {diagnostic.message}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <p className="muted">提交会经 Patch Engine 事务并弹出主进程确认对话框；替换字节必须由用户提供。</p>
-                </>
-              )}
-            </div>
+          {replaceResult && (
+            <p className={replaceResult.ok ? undefined : 'danger'}>{replaceResult.message}</p>
           )}
-
-          {evidence.diagnostics.length > 0 && (
+          {replaceResult && replaceResult.diagnostics.length > 0 && (
             <div className="save-diagnostics">
-              {evidence.diagnostics.map((diagnostic) => (
+              {replaceResult.diagnostics.map((diagnostic) => (
                 <span key={`${diagnostic.code}-${diagnostic.message}`}>
                   {diagnostic.code}: {diagnostic.message}
                 </span>
               ))}
             </div>
           )}
-
-          {selected?.headerHex && (
-            <HexEditorPanel
-              title={`${selected.name} 头部证据（前 ${selected.headerHex.length / 2} 字节，只读）`}
-              initialBytesBase64={hexToBase64(selected.headerHex)}
-            />
-          )}
-        </>
+          <p className="muted">
+            替换字节必须由用户提供，SoulForge 不生成/反编译字节码；字节不会在此视图显示为可编辑源码。
+            提交会经 Patch Engine 事务并弹出主进程确认对话框。
+          </p>
+        </div>
       )}
-    </section>
+    </div>
+  ) : undefined;
+
+  return (
+    <WorkbenchLayout
+      label="脚本容器工作台"
+      toolbar={
+        <span className="muted">
+          {evidence
+            ? `${evidence.containerFormat ?? ''} · ${displayEntryCount} 条条目 · 三栏：文件 / 源码 / 元数据`
+            : '选择左侧脚本容器后显示工作台'}
+        </span>
+      }
+      footer={footer}
+      columns={[
+        { id: 'files', title: 'Container / Files', hint: `${displayEntryCount} 条`, children: filesColumn },
+        { id: 'source', title: 'Source / 只读反汇编', initialFlex: 2, minWidth: 260, children: sourceColumn },
+        { id: 'metadata', title: 'Metadata', initialWidth: 280, minWidth: 180, children: metadataColumn }
+      ]}
+    />
   );
 }
 

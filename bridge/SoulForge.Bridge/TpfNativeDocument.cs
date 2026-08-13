@@ -159,6 +159,22 @@ internal sealed class TpfNativeDocument
         return SourceBytes.AsSpan((int)entry.DataOffset, (int)entry.DataSize).ToArray();
     }
 
+    /// <summary>
+    /// 单纹理的元数据访问器，与 <see cref="GetTextureData"/> 共享同一处越界判据。
+    ///
+    /// 为什么单独存在而不是命令里直接读 <see cref="Textures"/>[index]：预览命令与
+    /// 未来的工作台属性栏都要「先校验索引再拿元数据」，判据散在命令里会有两条
+    /// 越界分支互相漂移（一条抛 ArgumentOutOfRangeException、一条 IndexOutOfRange）。
+    /// 收敛到此处后，索引合法性只有这一个决定点。
+    /// </summary>
+    public (string Name, uint Width, uint Height, ushort MipCount, byte Format) GetTextureMetadata(int index)
+    {
+        if (index < 0 || index >= Textures.Count)
+            throw new ArgumentOutOfRangeException(nameof(index), $"TPF 纹理索引 {index} 越界；有效范围 0..{Textures.Count - 1}。");
+        var entry = Textures[index];
+        return (entry.Name, entry.Width, entry.Height, entry.MipCount, entry.Format);
+    }
+
     public object ToEnvelope(TpfRoundTripReport? report = null)
     {
         // 全部纹理均含合法 DDS 头（解析时已校验 DDS 魔数；此处要求宽高>0）→ native-verified，否则 partial。

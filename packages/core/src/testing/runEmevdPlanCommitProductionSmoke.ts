@@ -11,6 +11,14 @@
  *   staging cleaned, failure audited.
  * - Synthetic failure: wrong expectedDocumentHash is rejected with structured
  *   diagnostics and no file change.
+ * - Synthetic outer-chain (EVENT-30C): the commit target is a DFLT-wrapped
+ *   .dcx outer source resource; asserts sourceFormat=dcx, outer-hash byte
+ *   consistency, payload identity preservation and observable typed mutations.
+ * - Synthetic reopen-failure (EVENT-30C): a committed .dcx whose payload is
+ *   corrupted cannot reopen → after-commit reopen validator rejects → the
+ *   WorkspaceTransaction rolls the outer back to its before-image.
+ * - Synthetic sibling-change (EVENT-30C): committing the outer target leaves a
+ *   sibling .dcx in the same workspace byte-identical.
  * - Native variant (env-gated via with-local-has-game-env.mjs): the same
  *   production chain against the registered local common.emevd fixture with
  *   event-level typed mutations (id/rest). Honest skip when env is absent.
@@ -23,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { deflateSync } from 'node:zlib';
 import { decompressDfltDcx } from '../util/dcxDflt.js';
 import type { EmevdDslCompileRequest, ValidatorContract, ValidatorResult } from '@soulforge/shared';
 import {
@@ -31,6 +40,7 @@ import {
 } from '../editing/emevdFourViewController.js';
 import {
   buildEmevdFileReplacePatch,
+  createEmevdReopenValidator,
   stageEmevdPlanViaBridge,
   type EmevdPlanStageResult
 } from '../editing/emevdPlanCommit.js';
@@ -43,6 +53,7 @@ import { createScaffoldValidators } from '../validators/index.js';
 import { openWorkspaceSession } from '../workspace/workspaceSession.js';
 import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 import {
+  buildSyntheticEmevd,
   mutatedIfCondArgs,
   mutatedWaitForArgs,
   sha256Hex,
@@ -51,6 +62,10 @@ import {
 
 interface EmevdEnvelope {
   sourceHash: string;
+  /** "emevd" for raw payload; "dcx" when Bridge unwrapped a .dcx wrapper. */
+  sourceFormat?: string;
+  /** SHA-256 of the outer container bytes when opened from a .dcx. */
+  outerFileHash?: string;
   eventCount: number;
   instructionCount: number;
   events: Array<{ id: number; restBehavior: number; instructionCount?: number }>;
@@ -61,6 +76,32 @@ interface EmevdEnvelope {
     argsBase64: string;
   }>;
   roundTrip?: { semanticIdentical: boolean; byteIdentical: boolean };
+}
+
+/**
+ * Wrap an EMEVD payload in a DFLT-compressed DCX outer container (synthetic
+ * fixture). Header layout mirrors bridge/SoulForge.Bridge/DcxNativeDocument.cs
+ * expectations: DCX\0 magic, DCS\0 at 0x18, DCP\0 at 0x24, format at 0x28,
+ * DCA sub-header at 0x30 with payload starting at 0x38.
+ */
+function compressDfltDcx(payload: Buffer): Buffer {
+  const compressed = deflateSync(payload);
+  const header = Buffer.alloc(0x38);
+  header.write('DCX\0', 0, 'ascii');
+  header.writeUInt32BE(0x02, 0x04); // version
+  header.writeUInt32BE(0x02, 0x08); // unk
+  header.writeUInt32BE(0, 0x0c);
+  header.writeUInt32BE(0, 0x10);
+  header.writeUInt32BE(0, 0x14);
+  header.write('DCS\0', 0x18, 'ascii');
+  header.writeUInt32BE(payload.length, 0x1c); // uncompressed size
+  header.writeUInt32BE(compressed.length, 0x20); // compressed size
+  header.write('DCP\0', 0x24, 'ascii');
+  header.write('DFLT', 0x28, 'ascii');
+  header.writeUInt32BE(0, 0x2c);
+  header.write('DCA\0', 0x30, 'ascii');
+  header.writeUInt32BE(8, 0x34); // dca length
+  return Buffer.concat([header, compressed]);
 }
 
 function throwingAfterCommitValidator(): ValidatorContract {
@@ -403,6 +444,332 @@ async function syntheticFailureChain(root: string): Promise<number> {
   return 1;
 }
 
+/**
+ * EVENT-30C outer-chain success: the commit target is a DFLT-wrapped .dcx outer
+ * source resource. Bridge stages a rebuilt DCX (outerFileHash sealed), the
+ * file_replace precondition compares against the on-disk .dcx bytes, and the
+ * byte-consistency re-read compares outer container hashes.
+ */
+async function syntheticOuterChain(root: string): Promise<number> {
+  const registry = createSekiroFixtureEmedf();
+  const schemaFingerprint = fingerprintEmedfRegistry(registry);
+  const payload = standardSyntheticEmevd();
+  const outer = compressDfltDcx(payload);
+  const payloadHash = sha256Hex(payload);
+  const outerHash = hashOf(outer);
+
+  const overlayRoot = join(root, 'mod-outer');
+  const stagingRoot = join(root, 'staging-outer');
+  const backupRoot = join(root, 'backups-outer');
+  await mkdir(join(overlayRoot, 'event'), { recursive: true });
+  await mkdir(stagingRoot, { recursive: true });
+  await mkdir(backupRoot, { recursive: true });
+  const target = join(overlayRoot, 'event', 'common.emevd.dcx');
+  await writeFile(target, outer);
+
+  // Bridge opens the .dcx outer: sourceFormat=dcx, outerFileHash == sealed outer
+  // hash, sourceHash == payload hash.
+  const before = await runBridge<EmevdEnvelope>({
+    command: 'read-emevd-document',
+    filePath: target,
+    allowedRoots: [overlayRoot, stagingRoot],
+    timeoutMs: 120_000
+  });
+  if (before.parseStatus === 'failed' || !before.data?.roundTrip?.semanticIdentical) {
+    throw new Error(`synthetic DCX EMEVD rejected by Bridge: ${JSON.stringify(before.diagnostics)}`);
+  }
+  if (before.data.sourceFormat !== 'dcx') {
+    throw new Error(`expected sourceFormat=dcx, got ${before.data.sourceFormat}`);
+  }
+  if (before.data.outerFileHash !== outerHash) {
+    throw new Error(`outer hash mismatch: ${before.data.outerFileHash} vs ${outerHash}`);
+  }
+  if (before.data.sourceHash !== payloadHash) {
+    throw new Error(`payload hash mismatch: ${before.data.sourceHash} vs ${payloadHash}`);
+  }
+
+  const document = createEmevdEditorDocument({
+    resourceUri: 'file://event/common.emevd',
+    documentInstanceId: 'emevd-plan-production-outer',
+    bytesBase64: payload.toString('base64'),
+    events: [
+      {
+        eventId: 50,
+        restBehavior: 0,
+        instructions: [
+          { bank: 1000, id: 0, argsBase64: Buffer.from([0xff, 0, 0, 0, 0, 0, 0, 0]).toString('base64'), unknown: false },
+          { bank: 2000, id: 0, argsBase64: Buffer.from([1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]).toString('base64'), unknown: false },
+          { bank: 9999, id: 1, argsBase64: '', unknown: true }
+        ]
+      },
+      { eventId: 100, restBehavior: 0, instructions: [] }
+    ]
+  });
+
+  const session = await openWorkspaceSession({ overlayRoot, game: 'sekiro' });
+
+  const submitted = await submitEmevdDslPlanViaFourView({
+    compileRequest: compileRequestFor(canonicalDslSource(schemaFingerprint, document), schemaFingerprint, document),
+    document,
+    registry,
+    sourcePath: target,
+    expectedDocumentHash: payloadHash,
+    expectedOuterFileHash: outerHash,
+    allowedRoots: [overlayRoot, stagingRoot],
+    workspaceId: session.meta.workspaceId,
+    workspaceRoot: overlayRoot,
+    stagingRoot,
+    backupBaseDir: backupRoot,
+    session,
+    title: 'emevd plan outer-chain smoke'
+  });
+  if (!submitted.ok || !submitted.commit) {
+    throw new Error(`outer submit failed: ${JSON.stringify(submitted.diagnostics)}`);
+  }
+  const commit = submitted.commit;
+  if (!commit.ok) throw new Error(`outer commit failed: ${JSON.stringify(commit.diagnostics)}`);
+  if (commit.sourceFormat !== 'dcx') throw new Error(`expected commit sourceFormat=dcx, got ${commit.sourceFormat}`);
+  if (!commit.outerFileHash || commit.outerFileHash !== commit.outputHash) {
+    throw new Error('outer commit must expose outerFileHash == outputHash');
+  }
+  if (!commit.reRead?.ok) throw new Error(`outer re-read failed: ${JSON.stringify(commit.diagnostics)}`);
+  if (!commit.reRead.byteConsistent) throw new Error('outer committed bytes are not byte-consistent (outer hash)');
+  if (!commit.reRead.semanticIdentical) throw new Error('outer committed payload semantic re-read failed');
+
+  // Committed file on disk is still a .dcx whose outer hash equals the staged output.
+  const committedOuter = await readFile(target);
+  if (hashOf(committedOuter) !== commit.outputHash) {
+    throw new Error('committed .dcx outer hash does not match staged output hash');
+  }
+  // The rebuilt payload inside the committed .dcx reopens through the same
+  // Bridge read boundary (payload identity preserved, outer identity replaced).
+  const after = await runBridge<EmevdEnvelope>({
+    command: 'read-emevd-document',
+    filePath: target,
+    allowedRoots: [overlayRoot, stagingRoot],
+    timeoutMs: 120_000
+  });
+  if (after.parseStatus === 'failed') throw new Error('post-commit DCX read failed');
+  if (after.data!.sourceFormat !== 'dcx') throw new Error('post-commit sourceFormat must stay dcx');
+  if (after.data!.outerFileHash !== commit.outputHash) throw new Error('post-commit outer hash mismatch');
+  if (after.data!.sourceHash !== sha256Hex(decompressDfltDcx(committedOuter))) {
+    throw new Error('committed .dcx payload does not match Bridge re-read payload');
+  }
+  const renamed = after.data!.events.find((e) => e.id === 51);
+  if (!renamed || renamed.restBehavior !== 1) throw new Error('outer renamed event/rest not observable');
+  if (after.data!.events.some((e) => e.id === 50)) throw new Error('outer old event id still present');
+  const sample0 = after.data!.instructionsSample?.find((i) => i.index === 0);
+  const sample1 = after.data!.instructionsSample?.find((i) => i.index === 1);
+  if (!sample0 || Buffer.from(sample0.argsBase64, 'base64').equals(mutatedWaitForArgs()) === false) {
+    throw new Error('outer instruction 0 args not observable');
+  }
+  if (!sample1 || Buffer.from(sample1.argsBase64, 'base64').equals(mutatedIfCondArgs()) === false) {
+    throw new Error('outer instruction 1 args not observable');
+  }
+  return 1;
+}
+
+/**
+ * EVENT-30C reopen-failure: an after-commit Bridge reopen that cannot parse the
+ * committed artifact fails the WorkspaceTransaction and rolls the .dcx outer
+ * resource back to its before-image. The committed bytes here are deliberately
+ * not a valid EMEVD/DCX, so the reopen validator must reject and roll back.
+ */
+async function syntheticReopenFailureChain(root: string): Promise<number> {
+  const payload = standardSyntheticEmevd();
+  const outer = compressDfltDcx(payload);
+  const outerHash = hashOf(outer);
+
+  const overlayRoot = join(root, 'mod-reopen-failure');
+  const stagingRoot = join(root, 'staging-reopen-failure');
+  const backupRoot = join(root, 'backups-reopen-failure');
+  await mkdir(join(overlayRoot, 'event'), { recursive: true });
+  await mkdir(stagingRoot, { recursive: true });
+  await mkdir(backupRoot, { recursive: true });
+  const target = join(overlayRoot, 'event', 'common.emevd.dcx');
+  await writeFile(target, outer);
+
+  const session = await openWorkspaceSession({ overlayRoot, game: 'sekiro' });
+
+  // Stage a real plan through Bridge (the production staging boundary) so the
+  // reopen-failure path is exercised end-to-end, then corrupt the staged bytes
+  // so the after-commit Bridge reopen cannot succeed.
+  const registry = createSekiroFixtureEmedf();
+  const schemaFingerprint = fingerprintEmedfRegistry(registry);
+  const document = createEmevdEditorDocument({
+    resourceUri: 'file://event/common.emevd',
+    documentInstanceId: 'emevd-plan-reopen-failure',
+    bytesBase64: payload.toString('base64'),
+    events: [
+      {
+        eventId: 50,
+        restBehavior: 0,
+        instructions: [
+          { bank: 1000, id: 0, argsBase64: Buffer.from([0xff, 0, 0, 0, 0, 0, 0, 0]).toString('base64'), unknown: false },
+          { bank: 2000, id: 0, argsBase64: Buffer.from([1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]).toString('base64'), unknown: false },
+          { bank: 9999, id: 1, argsBase64: '', unknown: true }
+        ]
+      },
+      { eventId: 100, restBehavior: 0, instructions: [] }
+    ]
+  });
+  const compiled = compileEmevdPatchDsl(
+    compileRequestFor(canonicalDslSource(schemaFingerprint, document), schemaFingerprint, document),
+    document,
+    registry
+  );
+  if (!compiled.ok || !compiled.plan) throw new Error('reopen-failure compile failed');
+  const staged: EmevdPlanStageResult = await stageEmevdPlanViaBridge({
+    plan: compiled.plan,
+    document,
+    registry,
+    sourcePath: target,
+    expectedDocumentHash: sha256Hex(payload),
+    allowedRoots: [overlayRoot, stagingRoot],
+    stagingRoot,
+    timeoutMs: 120_000
+  });
+  if (!staged.ok || !staged.bytes) {
+    throw new Error(`reopen-failure staging failed: ${JSON.stringify(staged.diagnostics)}`);
+  }
+  if (staged.sourceFormat !== 'dcx') throw new Error('staged artifact must be a dcx outer');
+  // Corrupt the staged bytes: flip a payload byte so the rebuilt outer cannot
+  // reopen as EMEVD (zlib decompression or EMEVD parse must fail).
+  const corrupted = Buffer.from(staged.bytes);
+  const corruptAt = 0x38 + Math.floor(corrupted.length * 0.6);
+  const originalByte = corrupted[corruptAt] ?? 0;
+  corrupted[corruptAt] = originalByte ^ 0xff;
+
+  const patch = buildEmevdFileReplacePatch({
+    workspaceId: session.meta.workspaceId,
+    title: 'emevd reopen failure production',
+    targetUri: 'file://event/common.emevd.dcx',
+    targetPath: target,
+    stagedBytes: corrupted,
+    expectedHash: outerHash
+  });
+  const transaction = createWorkspaceTransaction({
+    workspaceId: session.meta.workspaceId,
+    workspaceRoot: overlayRoot,
+    stagingBaseDir: stagingRoot,
+    backupBaseDir: backupRoot,
+    validators: [
+      ...createScaffoldValidators(),
+      createEmevdReopenValidator({ allowedRoots: [overlayRoot, stagingRoot] })
+    ]
+  });
+  if (!transaction.addPatch(patch).ok) throw new Error('reopen-failure patch admission failed');
+  const stagedResult = await transaction.stage();
+  if (!stagedResult.ok) throw new Error(`reopen-failure stage failed: ${JSON.stringify(stagedResult.diagnostics)}`);
+  const validated = await transaction.validate();
+  if (!validated.ok) throw new Error(`reopen-failure validate failed: ${JSON.stringify(validated.diagnostics)}`);
+  const committed = await transaction.commit();
+  if (committed.ok || committed.committedPaths.length !== 0) {
+    throw new Error('reopen-failure must not leave committed files');
+  }
+  if (!committed.diagnostics.some((d) => d.code === 'EMEVD_REOPEN_FAILED')) {
+    throw new Error(`missing EMEVD_REOPEN_FAILED: ${JSON.stringify(committed.diagnostics)}`);
+  }
+  if (transaction.getStatus() !== 'failed') {
+    throw new Error(`reopen-failure transaction status ${transaction.getStatus()}, expected failed`);
+  }
+  const restored = await readFile(target);
+  if (!restored.equals(outer)) {
+    throw new Error('reopen-failure rollback did not restore the original .dcx outer bytes');
+  }
+  const audit = transaction.getAuditLog().list({ transactionId: transaction.transactionId });
+  if (!audit.some((entry) => entry.eventKind === 'failure_recovery')) {
+    throw new Error('reopen-failure rollback was not audited');
+  }
+  return 1;
+}
+
+/**
+ * EVENT-30C sibling-change: committing the outer target must leave a sibling
+ * resource in the same workspace byte-identical (the write path is scoped to
+ * the target file only).
+ */
+async function syntheticSiblingChain(root: string): Promise<number> {
+  const registry = createSekiroFixtureEmedf();
+  const schemaFingerprint = fingerprintEmedfRegistry(registry);
+  const payload = standardSyntheticEmevd();
+  const outer = compressDfltDcx(payload);
+  const siblingPayload = buildSyntheticEmevd([
+    { id: 100, restBehavior: 1, instructions: [{ bank: 1000, id: 0, args: Buffer.from([1, 0, 0, 0, 0, 0, 0, 0]) }] }
+  ]);
+  const siblingOuter = compressDfltDcx(siblingPayload);
+  const siblingOuterHash = hashOf(siblingOuter);
+
+  const overlayRoot = join(root, 'mod-sibling');
+  const stagingRoot = join(root, 'staging-sibling');
+  const backupRoot = join(root, 'backups-sibling');
+  await mkdir(join(overlayRoot, 'event'), { recursive: true });
+  await mkdir(stagingRoot, { recursive: true });
+  await mkdir(backupRoot, { recursive: true });
+  const target = join(overlayRoot, 'event', 'common.emevd.dcx');
+  const sibling = join(overlayRoot, 'event', 'menu.emevd.dcx');
+  await writeFile(target, outer);
+  await writeFile(sibling, siblingOuter);
+
+  const document = createEmevdEditorDocument({
+    resourceUri: 'file://event/common.emevd',
+    documentInstanceId: 'emevd-plan-production-sibling',
+    bytesBase64: payload.toString('base64'),
+    events: [
+      {
+        eventId: 50,
+        restBehavior: 0,
+        instructions: [
+          { bank: 1000, id: 0, argsBase64: Buffer.from([0xff, 0, 0, 0, 0, 0, 0, 0]).toString('base64'), unknown: false },
+          { bank: 2000, id: 0, argsBase64: Buffer.from([1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]).toString('base64'), unknown: false },
+          { bank: 9999, id: 1, argsBase64: '', unknown: true }
+        ]
+      },
+      { eventId: 100, restBehavior: 0, instructions: [] }
+    ]
+  });
+
+  const session = await openWorkspaceSession({ overlayRoot, game: 'sekiro' });
+
+  const submitted = await submitEmevdDslPlanViaFourView({
+    compileRequest: compileRequestFor(canonicalDslSource(schemaFingerprint, document), schemaFingerprint, document),
+    document,
+    registry,
+    sourcePath: target,
+    expectedDocumentHash: sha256Hex(payload),
+    expectedOuterFileHash: hashOf(outer),
+    allowedRoots: [overlayRoot, stagingRoot],
+    workspaceId: session.meta.workspaceId,
+    workspaceRoot: overlayRoot,
+    stagingRoot,
+    backupBaseDir: backupRoot,
+    session,
+    title: 'emevd plan sibling smoke'
+  });
+  if (!submitted.ok || !submitted.commit?.ok) {
+    throw new Error(`sibling submit failed: ${JSON.stringify(submitted.diagnostics)}`);
+  }
+  // Target mutated; sibling bytes must be byte-identical.
+  const targetBytes = await readFile(target);
+  if (targetBytes.equals(outer)) throw new Error('sibling target must be mutated');
+  const siblingBytes = await readFile(sibling);
+  if (hashOf(siblingBytes) !== siblingOuterHash) {
+    throw new Error('sibling .dcx outer bytes changed');
+  }
+  if (!siblingBytes.equals(siblingOuter)) throw new Error('sibling .dcx outer bytes are not byte-identical');
+  const siblingAfter = await runBridge<EmevdEnvelope>({
+    command: 'read-emevd-document',
+    filePath: sibling,
+    allowedRoots: [overlayRoot, stagingRoot],
+    timeoutMs: 120_000
+  });
+  if (siblingAfter.parseStatus === 'failed') throw new Error('sibling reopen failed');
+  if (siblingAfter.data!.sourceHash !== sha256Hex(siblingPayload)) {
+    throw new Error('sibling payload changed');
+  }
+  return 1;
+}
+
 async function nativeChain(root: string, fixturePathArg: string | undefined): Promise<number> {
   const registry = createSekiroFixtureEmedf();
   const schemaFingerprint = fingerprintEmedfRegistry(registry);
@@ -522,6 +889,9 @@ async function main(): Promise<void> {
     syntheticPassed += await syntheticSuccessChain(root);
     syntheticPassed += await syntheticRollbackChain(root);
     syntheticPassed += await syntheticFailureChain(root);
+    syntheticPassed += await syntheticOuterChain(root);
+    syntheticPassed += await syntheticReopenFailureChain(root);
+    syntheticPassed += await syntheticSiblingChain(root);
 
     if (nativeEnvAvailable) {
       nativePassed += await nativeChain(root, nativeFixtureArg);
@@ -544,6 +914,9 @@ async function main(): Promise<void> {
         byteConsistency: 'committed hash == Bridge staged output hash == re-read source hash',
         rollback: 'after-commit validator failure restores original bytes, staging cleaned, failure audited',
         failurePath: 'wrong expectedDocumentHash → structured EMEVD_STAGING_WRITE_FAILED, target untouched',
+        outerChain: 'dcx outer target → sourceFormat=dcx, outer-hash byte consistency, payload identity preserved, typed mutations observable',
+        reopenFailure: 'corrupted committed .dcx → after-commit reopen rejects → outer rolled back to before-image',
+        siblingChange: 'target .dcx mutated; sibling .dcx in same workspace byte-identical',
         native: nativeSkipped ? 'skipped' : 'registered local common.emevd event-level typed mutation + re-read'
       },
       nonClaims: [

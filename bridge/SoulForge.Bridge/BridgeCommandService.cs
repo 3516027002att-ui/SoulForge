@@ -7,6 +7,9 @@ using System.Text.RegularExpressions;
 internal sealed class BridgeCommandService
 {
     private const int MaxPrefixBytes = 512 * 1024;
+    // read-tpf-texture-preview 的预览边长上限。与 DdsCodec.DecodeDdsToPngPreview
+    // 配合：全分辨率 PNG 的 base64 会超 bridge 帧上限，预览受界下采样到该边长。
+    private const int PreviewMaxDimension = 512;
 
     public async Task<BridgeResult<object>> ExecuteAsync(
         string rawCommand,
@@ -184,7 +187,7 @@ internal sealed class BridgeCommandService
                 return BridgeResult<object>.Failed(file, "msg", "BRIDGE_OUTPUT_PATH_REQUIRED", "FMG writer requires a validated staging output path.");
             try
             {
-                var written = await FmgNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                var written = await FmgNativeWriter.WriteAsync(file, outputPath, options, cancellationToken, oodleRuntimeRoot);
                 return BridgeResult<object>.Partial(file, "msg", new[]
                 {
                     new Diagnostic("info", "FMG_STAGING_WRITE_VERIFIED", "FMG 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
@@ -193,6 +196,36 @@ internal sealed class BridgeCommandService
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "msg", "FMG_STAGING_WRITE_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-text-catalog")
+        {
+            // TEXT-20A：容器级文本目录。tableEntryIndex 缺省只返回目录元数据；
+            // 指定时额外返回该表完整条目（主进程缓存后分页，不经临时文件）。
+            var tableEntryIndex = optionsIsObject
+                && options.TryGetProperty("tableEntryIndex", out var entryIndexEl)
+                && entryIndexEl.ValueKind == JsonValueKind.Number
+                && entryIndexEl.TryGetInt32(out var parsedEntryIndex)
+                ? parsedEntryIndex
+                : (int?)null;
+            try
+            {
+                var catalog = FmgTextCatalogReader.Read(file, oodleRuntimeRoot, tableEntryIndex);
+                return BridgeResult<object>.Partial(file, "msg", new[]
+                {
+                    new Diagnostic("info", "TEXT_CATALOG_CONFIRMED",
+                        $"Bridge 已确认文本容器：{catalog.LanguageId}/{catalog.ContainerKind}，{catalog.TableCount} 个 FMG 表。",
+                        BridgeResult<object>.MakeSourceUri(file), catalog)
+                }, catalog);
+            }
+            catch (NotSupportedException ex)
+            {
+                return BridgeResult<object>.Failed(file, "msg", "TEXT_CATALOG_ROUTE_REJECTED", ex.Message);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or IOException or ArgumentOutOfRangeException)
+            {
+                return BridgeResult<object>.Failed(file, "msg", "TEXT_CATALOG_READ_FAILED", ex.Message);
             }
         }
 
@@ -311,8 +344,27 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                // Accept raw EMEVD or DFLT-wrapped DCX payload path: caller must pass decompressed EVD bytes file.
-                var document = EmevdNativeDocument.ReadFile(file);
+                // EVENT-30A: production open accepts the outer source resource
+                // as-is — raw .emevd OR DFLT/KRAK-wrapped .dcx. DCX unwrap is
+                // native (DcxNativeDocument), so the TypeScript side never
+                // imports a second DCX parser and never hands back a
+                // decompressed temp file to be reused as the Patch target.
+                string sourceFormat;
+                string? outerFileHash;
+                EmevdNativeDocument document;
+                if (IsDcxFile(file))
+                {
+                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+                    document = EmevdNativeDocument.Read(dcx.Payload);
+                    sourceFormat = "dcx";
+                    outerFileHash = dcx.SourceHash;
+                }
+                else
+                {
+                    document = EmevdNativeDocument.ReadFile(file);
+                    sourceFormat = "emevd";
+                    outerFileHash = document.SourceHash;
+                }
                 var roundTrip = document.VerifyRoundTrip();
                 var optionsObject = options.ValueKind == JsonValueKind.Object;
                 var page = optionsObject && options.TryGetProperty("instructionPage", out var pageEl)
@@ -338,9 +390,10 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
-                return BridgeResult<object>.Partial(file, "event", diagnostics, document.ToEnvelope(roundTrip, page, pageSize));
+                return BridgeResult<object>.Partial(file, "event", diagnostics,
+                    document.ToEnvelope(roundTrip, page, pageSize, sourceFormat, outerFileHash));
             }
-            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or InvalidOperationException)
             {
                 return BridgeResult<object>.Failed(file, "event", "EMEVD_DOCUMENT_READ_FAILED", ex.Message);
             }
@@ -352,7 +405,7 @@ internal sealed class BridgeCommandService
                 return BridgeResult<object>.Failed(file, "event", "BRIDGE_OUTPUT_PATH_REQUIRED", "EMEVD writer requires a validated staging output path.");
             try
             {
-                var written = await EmevdNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                var written = await EmevdNativeWriter.WriteAsync(file, outputPath, oodleRuntimeRoot, options, cancellationToken);
                 return BridgeResult<object>.Partial(file, "event", new[]
                 {
                     new Diagnostic("info", "EMEVD_STAGING_WRITE_VERIFIED", "EMEVD 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
@@ -510,6 +563,79 @@ internal sealed class BridgeCommandService
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or ArgumentOutOfRangeException)
             {
                 return BridgeResult<object>.Failed(file, "texture", "TPF_TEXTURE_EXPORT_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-tpf-texture-preview")
+        {
+            int textureIndex = 0;
+            if (options.ValueKind == JsonValueKind.Object
+                && options.TryGetProperty("textureIndex", out var indexElement)
+                && indexElement.ValueKind == JsonValueKind.Number)
+            {
+                textureIndex = indexElement.GetInt32();
+            }
+            try
+            {
+                var document = TpfNativeDocument.ReadFile(file);
+                var (name, sourceWidth, sourceHeight, _, _) = document.GetTextureMetadata(textureIndex);
+                var dds = document.GetTextureData(textureIndex);
+                // 预览必须受界下采样：全分辨率 PNG 的 base64 会超 bridge 帧上限
+                // （实测 BRIDGE_OUTBOUND_FRAME_TOO_LARGE）。原始尺寸经
+                // sourceWidth/sourceHeight 上报，工作台属性栏仍能显示真实分辨率。
+                var (width, height, png, colorSpace) = DdsCodec.DecodeDdsToPngPreview(dds, PreviewMaxDimension);
+                var colorSpaceName = colorSpace switch
+                {
+                    DdsCodec.DdsColorSpace.Srgb => "srgb",
+                    DdsCodec.DdsColorSpace.Linear => "linear",
+                    _ => "unknown"
+                };
+                var previewToken = "data:image/png;base64," + Convert.ToBase64String(png);
+                return BridgeResult<object>.Partial(file, "texture",
+                    new[]
+                    {
+                        new Diagnostic("info", "TPF_TEXTURE_PREVIEW_READY",
+                            $"TPF 纹理 {textureIndex} 预览已生成（{width}x{height} PNG，原始 {sourceWidth}x{sourceHeight}）。",
+                            BridgeResult<object>.MakeSourceUri(file))
+                    },
+                    new
+                    {
+                        textureIndex,
+                        name,
+                        width,
+                        height,
+                        sourceWidth,
+                        sourceHeight,
+                        colorSpace = colorSpaceName,
+                        mediaType = "image/png",
+                        byteLength = png.Length,
+                        previewToken
+                    });
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or ArgumentOutOfRangeException)
+            {
+                return BridgeResult<object>.Failed(file, "texture", "TPF_TEXTURE_PREVIEW_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "write-tpf-texture-replace")
+        {
+            // TEXTURE-52C：TPF 单纹理替换写回。只收 typed replace（textureIndex +
+            // newTextureBase64），outputPath 必须是已校验的暂存区路径（越界之外的
+            // 边界检查由 BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
+            if (string.IsNullOrWhiteSpace(outputPath))
+                return BridgeResult<object>.Failed(file, "texture", "BRIDGE_OUTPUT_PATH_REQUIRED", "TPF writer requires a validated staging output path.");
+            try
+            {
+                var written = await TpfNativeWriter.WriteAsync(file, outputPath, options, cancellationToken, oodleRuntimeRoot);
+                return BridgeResult<object>.Partial(file, "texture", new[]
+                {
+                    new Diagnostic("info", "TPF_STAGING_WRITE_VERIFIED", "TPF 纹理已替换并写入暂存区且重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
+                }, written);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "texture", "TPF_STAGING_WRITE_FAILED", ex.Message);
             }
         }
 
@@ -700,6 +826,27 @@ internal sealed class BridgeCommandService
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "chr", "FLVER_DUMMIES_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "write-flver")
+        {
+            // MODEL-51C：FLVER 材质槽写回。字节补丁 writer，outputPath 必须
+            // 是已校验的暂存区路径（BRIDGE_OUTPUT_PATH_REQUIRED 之外的边界
+            // 检查由 BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
+            if (string.IsNullOrWhiteSpace(outputPath))
+                return BridgeResult<object>.Failed(file, "chr", "BRIDGE_OUTPUT_PATH_REQUIRED", "FLVER writer requires a validated staging output path.");
+            try
+            {
+                var written = await FlverNativeWriter.WriteAsync(file, outputPath, options, cancellationToken, oodleRuntimeRoot);
+                return BridgeResult<object>.Partial(file, "chr", new[]
+                {
+                    new Diagnostic("info", "FLVER_STAGING_WRITE_VERIFIED", "FLVER 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
+                }, written);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "chr", "FLVER_STAGING_WRITE_FAILED", ex.Message);
             }
         }
 
@@ -1112,6 +1259,25 @@ internal sealed class BridgeCommandService
 
     private static string HashHex(byte[] bytes) =>
         Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    /// <summary>
+    /// Cheap magic check (4 bytes) so read-emevd-document can dispatch to the
+    /// native DCX unwrap without loading the full file twice.
+    /// </summary>
+    private static bool IsDcxFile(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4);
+            Span<byte> magic = stackalloc byte[4];
+            var read = fs.Read(magic);
+            return read == 4 && magic.SequenceEqual("DCX\0"u8);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// Container-level asset inventory (candidate): unpack outer DCX, enumerate BND4

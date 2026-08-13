@@ -15,12 +15,14 @@ import type {
   PatchIR,
   PatchIrOperation,
   ContainerChildOp,
-  PatchMode
+  PatchMode,
+  ValidatorContract
 } from '@soulforge/shared';
 import { toLegacyDiagnostic } from '@soulforge/shared';
 import {
   createWorkspaceTransaction
 } from '../transactions/workspaceTransaction.js';
+import { createScaffoldValidators } from '../validators/index.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import {
   createCommittedOperationRecord,
@@ -45,6 +47,12 @@ export interface ExecutePatchIrOptions {
   inverseOfOpId?: string;
   rollbackScope?: OperationLogRecord['rollbackScope'];
   rollbackTargetUri?: string;
+  /**
+   * Validators appended after the scaffold list. after_commit validators here
+   * run inside the transaction's commit boundary: a failure rolls the files
+   * back and the operation log records the recovery (e.g. EMEVD Bridge reopen).
+   */
+  appendValidators?: ValidatorContract[];
   resourceEntryChanges?: Array<{
     id: string;
     resourceUri: string;
@@ -157,6 +165,10 @@ export async function executePatchIrThroughTransaction(
       kind: author === 'ai' ? 'agent' : 'user',
       id: options.actorId ?? `files-mode:${author}`
     },
+    validators: [
+      ...createScaffoldValidators(),
+      ...(options.appendValidators ?? [])
+    ],
     ...(options.backupBaseDir !== undefined ? { backupBaseDir: options.backupBaseDir } : {}),
     // Persist the restore point into the durable journal before any target is
     // replaced. A hard process termination mid-commit then leaves enough state

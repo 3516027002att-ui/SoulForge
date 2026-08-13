@@ -2,10 +2,14 @@
  * Native EMEVD structural + instruction-arg smoke:
  * DFLT-decompress common.emevd.dcx → correct Sekiro header parse →
  * no-op roundtrip → set_rest_behavior → set_instruction_args → reread.
+ * EVENT-30A: production open reads the .dcx outer resource directly — Bridge
+ * unwraps DFLT natively (no TypeScript DCX parser in production), cross-checked
+ * against the TypeScript decompressor for the payload hash.
  */
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { decompressDfltDcx } from '../util/dcxDflt.js';
 import {
@@ -17,6 +21,8 @@ import { resolveNativeFixture } from './nativeFixtureRegistry.js';
 
 interface EmevdEnvelope {
   sourceHash: string;
+  sourceFormat?: string;
+  outerFileHash?: string;
   eventCount: number;
   instructionCount: number;
   events: Array<{
@@ -36,6 +42,10 @@ interface EmevdEnvelope {
   authority?: string;
 }
 
+function hashOf(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex');
+}
+
 async function main(): Promise<void> {
   const sourceDcx = await resolveNativeFixture(
     process.argv[2],
@@ -51,6 +61,29 @@ async function main(): Promise<void> {
     const payload = decompressDfltDcx(dcxBytes);
     const emevdPath = join(staging, 'common.emevd');
     await writeFile(emevdPath, payload);
+
+    // EVENT-30A production open: Bridge reads the .dcx outer resource natively.
+    const dcxRead = await runBridge<EmevdEnvelope>({
+      command: 'read-emevd-document',
+      filePath: sourceDcx,
+      allowedRoots: [staging, dirname(sourceDcx)],
+      timeoutMs: 60_000
+    });
+    if (dcxRead.parseStatus === 'failed' || !dcxRead.data) {
+      throw new Error(`native DCX open failed: ${JSON.stringify(dcxRead.diagnostics)}`);
+    }
+    if (dcxRead.data.sourceFormat !== 'dcx') {
+      throw new Error(`native DCX open must report sourceFormat=dcx, got ${dcxRead.data.sourceFormat}`);
+    }
+    if (dcxRead.data.outerFileHash !== hashOf(dcxBytes)) {
+      throw new Error('native DCX outerFileHash must hash the .dcx file bytes');
+    }
+    if (dcxRead.data.sourceHash !== hashOf(payload)) {
+      throw new Error('Bridge native payload hash must equal TypeScript decompressed payload hash');
+    }
+    if (dcxRead.data.instructionCount < 1000) {
+      throw new Error(`native DCX instructionCount ${dcxRead.data.instructionCount}`);
+    }
 
     const read = await runBridge<EmevdEnvelope>({
       command: 'read-emevd-document',
@@ -300,6 +333,11 @@ async function main(): Promise<void> {
       eventCount: read.data.eventCount,
       instructionCount: read.data.instructionCount,
       authority: read.data.authority,
+      nativeDcxOpen: {
+        sourceFormat: dcxRead.data.sourceFormat,
+        outerFileHashMatchesDcx: dcxRead.data.outerFileHash === hashOf(dcxBytes),
+        payloadHashMatchesTsDecompress: dcxRead.data.sourceHash === hashOf(payload)
+      },
       restEventId: target.id,
       restBehavior: nextRest,
       restRangeRejected: true,

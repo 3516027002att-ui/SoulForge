@@ -10,7 +10,8 @@ import type {
   DirectorySelection,
   OpenWorkspaceScanOptions,
   RendererWorkspaceScanResult,
-  RollbackOperationIpcResult
+  RollbackOperationIpcResult,
+  TextCatalogResponse
 } from '../main/ipc.js';
 import type {
   RendererIndexedFile,
@@ -44,7 +45,8 @@ import type {
   RendererContainerChildrenPage,
   RendererContainerTreeSummary,
   ScriptContainerEntryPage,
-  ScriptContainerEvidence
+  ScriptContainerEvidence,
+  ScriptEntryPlaintextView
 } from '@soulforge/shared';
 import { EDITOR_DOCUMENT_IPC_CHANNELS } from '@soulforge/shared';
 
@@ -189,6 +191,11 @@ const api = {
       page,
       pageSize
     ).then(stripPathFields),
+  readScriptEntryPlaintext: (
+    sourceUri: string,
+    entryName: string
+  ): Promise<ScriptEntryPlaintextView> =>
+    ipcRenderer.invoke('resource.readScriptEntryPlaintext', sourceUri, entryName),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),
@@ -214,6 +221,24 @@ const api = {
     dslTemplateTruncated?: boolean;
     dslTemplateTotalLines?: number;
     sourceHash?: string | null;
+    sourceFormat?: string | null;
+    outerFileHash?: string | null;
+    outline?: {
+      schemaVersion: 1;
+      resourceUri: string;
+      eventCount: number;
+      instructionTotal: number;
+      truncated: boolean;
+      limit: number;
+      events: Array<{
+        eventUri: string;
+        eventId: number;
+        restBehavior: number;
+        layer: number;
+        instructionCount: number;
+        unknownCount: number;
+      }>;
+    } | null;
     diagnostics?: Array<{ severity: string; code: string; message: string }>;
   }> => ipcRenderer.invoke(
     'resource.readEmevdFullDocument',
@@ -232,12 +257,22 @@ const api = {
     query?: string
   ): Promise<FmgEntryPage> =>
     ipcRenderer.invoke('resource.readFmgPage', sourceUri, page, pageSize, query),
+  readTextCatalog: (): Promise<TextCatalogResponse> =>
+    ipcRenderer.invoke('resource.readTextCatalog'),
+  readFmgTablePage: (
+    tableId: string,
+    page: number,
+    pageSize: number,
+    query?: string
+  ): Promise<FmgEntryPage> =>
+    ipcRenderer.invoke('resource.readFmgTablePage', tableId, page, pageSize, query),
   applyFmgMutation: (
     sourceUri: string,
     expectedHash: string,
-    mutation: { kind: 'upsert' | 'delete' | 'add'; id: number; text?: string }
+    mutation: { kind: 'upsert' | 'delete' | 'add'; id: number; text?: string },
+    tableId?: string
   ): Promise<RendererSaveResult> =>
-    ipcRenderer.invoke('resource.applyFmgMutation', sourceUri, expectedHash, mutation),
+    ipcRenderer.invoke('resource.applyFmgMutation', sourceUri, expectedHash, mutation, tableId),
   readMsbDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMsbDocument', sourceUri),
   readTaeDocument: (sourceUri: string): Promise<unknown> =>
@@ -248,12 +283,23 @@ const api = {
     ipcRenderer.invoke('resource.readFlverDocument', sourceUri),
   readTpfDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTpfDocument', sourceUri),
+  readTpfTexturePreview: (sourceUri: string, textureIndex: number): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTpfTexturePreview', sourceUri, textureIndex),
+  saveTpfTextureReplace: (
+    sourceUri: string,
+    expectedHash: string,
+    textureIndex: number,
+    newTextureBase64: string
+  ): Promise<unknown> =>
+    ipcRenderer.invoke('resource.saveTpfTextureReplace', sourceUri, expectedHash, textureIndex, newTextureBase64),
   readFlverMesh: (sourceUri: string, meshIndex: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverMesh', sourceUri, meshIndex),
   readFlverSkeleton: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverSkeleton', sourceUri),
   readFlverDummies: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverDummies', sourceUri),
+  readFlverTextureSlots: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readFlverTextureSlots', sourceUri),
   applyMsbMutation: (
     sourceUri: string,
     expectedHash: string,

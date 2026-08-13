@@ -17,6 +17,8 @@ export interface FmgBridgeCommitRequest {
   allowedRoots: string[];
   writableRoots: string[];
   mutation: FmgBridgeMutation;
+  /** msgbnd/DCX 容器写：FMG 表在 BND4 里的 child 下标。缺省 = loose profile。 */
+  entryIndex?: number;
   timeoutMs?: number;
 }
 
@@ -24,6 +26,7 @@ export interface FmgBridgeCommitResult {
   ok: boolean;
   outputHash?: string;
   entryCount?: number;
+  storageProfile?: 'loose' | 'msgbnd';
   diagnostics: Array<{ severity: string; code: string; message: string }>;
 }
 
@@ -39,9 +42,13 @@ export async function commitFmgMutationViaBridge(
   if (request.mutation.kind === 'upsert' || request.mutation.kind === 'add') {
     commandOptions.text = request.mutation.text;
   }
+  if (request.entryIndex !== undefined) {
+    commandOptions.entryIndex = request.entryIndex;
+  }
   const result = await runBridge<{
     outputHash?: string;
     entryCount?: number;
+    storageProfile?: 'loose' | 'msgbnd';
   }>({
     command: 'write-fmg',
     filePath: request.sourcePath,
@@ -57,6 +64,7 @@ export async function commitFmgMutationViaBridge(
     ok,
     ...(result.data?.outputHash ? { outputHash: result.data.outputHash } : {}),
     ...(result.data?.entryCount !== undefined ? { entryCount: result.data.entryCount } : {}),
+    ...(result.data?.storageProfile ? { storageProfile: result.data.storageProfile } : {}),
     diagnostics: result.diagnostics.map((d) => ({
       severity: d.severity,
       code: d.code,

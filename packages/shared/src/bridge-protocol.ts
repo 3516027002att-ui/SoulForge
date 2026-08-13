@@ -104,6 +104,7 @@ export type BridgeCommandName =
   | 'write-param'
   | 'read-gparam-document'
   | 'write-gparam'
+  | 'read-text-catalog'
   | 'read-emevd-document'
   | 'write-emevd'
   | 'read-msb-document'
@@ -111,7 +112,10 @@ export type BridgeCommandName =
   | 'read-tae-document'
   | 'read-tpf-document'
   | 'export-tpf-texture'
+  | 'read-tpf-texture-preview'
+  | 'write-tpf-texture-replace'
   | 'read-flver-document'
+  | 'write-flver'
   | 'read-flver-mesh'
   | 'read-flver-skeleton'
   | 'read-flver-texture-slots'
@@ -144,7 +148,9 @@ export const BRIDGE_STAGING_WRITE_VERIFIED_CODES = Object.freeze({
   emevd: 'EMEVD_STAGING_WRITE_VERIFIED',
   msb: 'MSB_STAGING_WRITE_VERIFIED',
   bnd4: 'BND4_STAGING_WRITE_VERIFIED',
-  gparam: 'GPARAM_STAGING_WRITE_VERIFIED'
+  gparam: 'GPARAM_STAGING_WRITE_VERIFIED',
+  flver: 'FLVER_STAGING_WRITE_VERIFIED',
+  tpf: 'TPF_STAGING_WRITE_VERIFIED'
 } as const);
 
 export type BridgeStagingWriteVerifiedCode =

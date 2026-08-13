@@ -263,6 +263,7 @@ async function assertStagingWriteVerifiedContract(daemon, fixture) {
   // 生产 TS 不得再内联这些码的字面量——内联会让单一声明点失去意义。
   const productionFiles = [
     'packages/core/src/editing/fmgBridgeCommit.ts',
+    'packages/core/src/editing/flverBridgeCommit.ts',
     'packages/core/src/editing/paramBridgeCommit.ts',
     'packages/core/src/editing/emevdBridgeCommit.ts',
     'packages/core/src/editing/msbBridgeCommit.ts',
@@ -402,7 +403,8 @@ try {
     { command: 'write-fmg', options: { entries: [{ id: 1, text: 'boundary-probe' }] } },
     { command: 'write-param', options: { mutations: [{ mutation: 'update', rowId: 1, fields: {} }] } },
     { command: 'write-emevd', options: { mutations: [] } },
-    { command: 'write-msb', options: { mutations: [] } }
+    { command: 'write-msb', options: { mutations: [] } },
+    { command: 'write-flver', options: { mutations: [] } }
   ];
 
   /**

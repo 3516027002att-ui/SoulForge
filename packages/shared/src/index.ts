@@ -20,6 +20,8 @@ export * from './emevd-dsl.js';
 export * from './param-field-reference.js';
 export * from './paramdef.js';
 export * from './gparam-editor.js';
+export * from './flver-editor.js';
+export * from './tpf-editor.js';
 export * from './scene-ir.js';
 export * from './msb-entity-registry.js';
 export * from './script-container.js';

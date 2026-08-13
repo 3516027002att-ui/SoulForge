@@ -5,32 +5,119 @@ internal static class EmevdNativeWriter
     public static async Task<object> WriteAsync(
         string sourcePath,
         string outputPath,
+        string? oodleRuntimeRoot,
         JsonElement options,
         CancellationToken cancellationToken)
     {
         var source = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
+        // EVENT-30C: the write target is always the outer source resource. When
+        // the source is a .dcx wrapper the staged artifact must stay outer too —
+        // unwrap → mutate payload → rebuild the DCX natively (DFLT zlib / KRAK
+        // via Oodle). The TypeScript side never compresses, and never hands a
+        // decompressed temp path back as the Patch target.
+        if (source.Length >= 4 && source.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+            return await WriteDcxOuterAsync(sourcePath, outputPath, oodleRuntimeRoot, options, cancellationToken);
+        return await WriteRawAsync(sourcePath, outputPath, source, options, cancellationToken);
+    }
+
+    /// <summary>Raw .emevd payload path (unchanged behaviour).</summary>
+    private static async Task<object> WriteRawAsync(
+        string sourcePath,
+        string outputPath,
+        byte[] source,
+        JsonElement options,
+        CancellationToken cancellationToken)
+    {
         var document = EmevdNativeDocument.Read(source);
         RequireHash(options, "expectedDocumentHash", document.SourceHash, "EMEVD source hash");
-
-        var patches = new List<EmevdPatch>();
-        if (options.TryGetProperty("mutations", out var mutations) && mutations.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in mutations.EnumerateArray())
-                patches.Add(ParsePatch(item));
-        }
-        else
-        {
-            patches.Add(ParsePatch(options));
-        }
+        var patches = ParsePatches(options);
         if (patches.Count == 0) throw new InvalidDataException("EMEVD writer 需要至少一条 mutation。");
         cancellationToken.ThrowIfCancellationRequested();
         var rebuilt = document.ApplyMutations(patches);
+        await AtomicWriteAsync(outputPath, rebuilt, cancellationToken);
+        var reread = EmevdNativeDocument.ReadFile(outputPath);
+        VerifyMutations(reread, patches);
+        return new
+        {
+            mutationCount = patches.Count,
+            outputHash = reread.SourceHash,
+            eventCount = reread.Events.Count,
+            instructionCount = reread.Instructions.Count,
+            outputSize = reread.SourceBytes.Length,
+            sourceFormat = "emevd",
+            rereadVerified = true
+        };
+    }
+
+    /// <summary>
+    /// Outer .dcx path: the staged artifact is a rebuilt DCX whose outer file
+    /// hash is the sealed expectation for the file_replace PatchIR. Payload
+    /// semantics are re-read through the native unwrap for mutation verify.
+    /// </summary>
+    private static async Task<object> WriteDcxOuterAsync(
+        string sourcePath,
+        string outputPath,
+        string? oodleRuntimeRoot,
+        JsonElement options,
+        CancellationToken cancellationToken)
+    {
+        var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
+        var document = EmevdNativeDocument.Read(dcx.Payload);
+        RequireHash(options, "expectedDocumentHash", document.SourceHash, "EMEVD source hash");
+        var patches = ParsePatches(options);
+        if (patches.Count == 0) throw new InvalidDataException("EMEVD writer 需要至少一条 mutation。");
+        cancellationToken.ThrowIfCancellationRequested();
+        var rebuiltPayload = document.ApplyMutations(patches);
+        byte[] rebuiltOuter;
+        if (dcx.CompressionFormat == "DFLT")
+        {
+            rebuiltOuter = dcx.RebuildDflt(rebuiltPayload);
+        }
+        else if (dcx.CompressionFormat == "KRAK")
+        {
+            using var opened = OodleRuntimeLocator.Open(oodleRuntimeRoot, BridgeResult<object>.MakeSourceUri(sourcePath));
+            if (opened.Session is null)
+                throw new InvalidOperationException(
+                    opened.Diagnostics.FirstOrDefault()?.Message ?? "Oodle 运行库不可用；无法重建 KRAK outer。");
+            rebuiltOuter = dcx.RebuildKrak(rebuiltPayload, opened.Session);
+        }
+        else
+        {
+            throw new NotSupportedException($"DCX 压缩格式 {dcx.CompressionFormat} 尚不支持 outer 写回。");
+        }
+        await AtomicWriteAsync(outputPath, rebuiltOuter, cancellationToken);
+
+        // Re-open the staged outer artifact natively and verify every mutation.
+        var rereadDcx = DcxNativeDocument.Read(outputPath, oodleRuntimeRoot);
+        var reread = EmevdNativeDocument.Read(rereadDcx.Payload);
+        VerifyMutations(reread, patches);
+        return new
+        {
+            mutationCount = patches.Count,
+            // Sealed expectation for the committed .dcx file bytes.
+            outputHash = rereadDcx.SourceHash,
+            // Same outer container identity, spelled out so the TS staging layer
+            // can expose it without guessing (raw path reports the payload hash
+            // in both slots; DCX reports the container hash in both).
+            outerFileHash = rereadDcx.SourceHash,
+            // Payload identity (Bridge read-emevd-document reports this as sourceHash).
+            payloadHash = reread.SourceHash,
+            eventCount = reread.Events.Count,
+            instructionCount = reread.Instructions.Count,
+            outputSize = rereadDcx.SourceBytes.Length,
+            sourceFormat = "dcx",
+            rereadVerified = true
+        };
+    }
+
+    private static async Task AtomicWriteAsync(string outputPath, byte[] bytes, CancellationToken cancellationToken)
+    {
         var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
         Directory.CreateDirectory(directory);
         var temporary = Path.Combine(directory, $".soulforge-{Guid.NewGuid():N}.tmp");
         try
         {
-            await File.WriteAllBytesAsync(temporary, rebuilt, cancellationToken);
+            await File.WriteAllBytesAsync(temporary, bytes, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporary, outputPath, overwrite: true);
         }
@@ -38,9 +125,10 @@ internal static class EmevdNativeWriter
         {
             if (File.Exists(temporary)) File.Delete(temporary);
         }
+    }
 
-        var reread = EmevdNativeDocument.ReadFile(outputPath);
-
+    private static void VerifyMutations(EmevdNativeDocument reread, List<EmevdPatch> patches)
+    {
         // Build the id rename map (original -> final) so verification can locate
         // events renamed by update_id even when a later patch references the old id.
         var renameMap = new Dictionary<long, long>();
@@ -86,16 +174,6 @@ internal static class EmevdNativeWriter
                     throw new InvalidDataException("EMEVD delete 后事件仍存在。");
             }
         }
-
-        return new
-        {
-            mutationCount = patches.Count,
-            outputHash = reread.SourceHash,
-            eventCount = reread.Events.Count,
-            instructionCount = reread.Instructions.Count,
-            outputSize = reread.SourceBytes.Length,
-            rereadVerified = true
-        };
     }
 
     /// <summary>Follow the rename chain to the final event id after update_id patches.</summary>
@@ -106,6 +184,21 @@ internal static class EmevdNativeWriter
         while (renameMap.TryGetValue(current, out var next) && guard++ < 64)
             current = next;
         return current;
+    }
+
+    private static List<EmevdPatch> ParsePatches(JsonElement options)
+    {
+        var patches = new List<EmevdPatch>();
+        if (options.TryGetProperty("mutations", out var mutations) && mutations.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in mutations.EnumerateArray())
+                patches.Add(ParsePatch(item));
+        }
+        else
+        {
+            patches.Add(ParsePatch(options));
+        }
+        return patches;
     }
 
     private static EmevdPatch ParsePatch(JsonElement item)
