@@ -40,6 +40,7 @@
     "bridge:verify:flver": "npm run test:native-flver -w @soulforge/core",
     "bridge:verify:esd": "npm run test:native-esd -w @soulforge/core",
     "bridge:verify:mtd": "npm run test:native-mtd -w @soulforge/core",
+    "bridge:verify:fxr": "npm run test:native-fxr -w @soulforge/core",
     "bridge:verify:flver-mesh": "npm run test:native-flver-mesh -w @soulforge/core",
     "bridge:verify:flver-glb": "npm run test:native-flver-glb -w @soulforge/core",
     "bridge:verify:flver-multi": "npm run test:native-flver-multi -w @soulforge/core",

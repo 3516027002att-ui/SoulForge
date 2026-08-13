@@ -897,6 +897,72 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-fxr-document")
+        {
+            // VFX-54A：FXR3 只读。FXR 是 ffxbnd.dcx 容器内子项，支持三种输入形态：
+            //   ① 裸 .fxr 文件 → 直接解析；
+            //   ② .dcx 容器 → DcxNativeDocument 解压，再判定 BND4 容器定位 FXR 子项；
+            //   ③ ffxbnd.dcx 容器 → Bnd4NativeDocument 定位 .fxr 子项。
+            // 与 read-tpf-document 同构：TS 侧不维护第二套 native parser，
+            // 容器解压与子项定位全在 C# 侧完成。
+            //
+            // authority 上限 candidate（无 writer、Section11 无 schema、Section9/
+            // Section12-14 未在真实样本验证），真实语料恒为 partial——发现未识别
+            // node type（unparsedGaps）或重复解析不一致时降 partial。
+            // resourceKind 用 "sfx"（VFX/effect 资源族）。
+            try
+            {
+                var sourceBytes = File.ReadAllBytes(file);
+                byte[] fxrPayload = sourceBytes;
+                if (sourceBytes.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+                {
+                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+                    fxrPayload = dcx.Payload;
+                }
+                if (fxrPayload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+                {
+                    var binder = Bnd4NativeDocument.Read(fxrPayload);
+                    var entry = binder.Entries.FirstOrDefault(e =>
+                        e.Name.EndsWith(".fxr", StringComparison.OrdinalIgnoreCase));
+                    if (entry is null)
+                        throw new InvalidDataException("BND4 容器中没有 .fxr 子项。");
+                    fxrPayload = binder.GetStoredBytes(entry.Index);
+                }
+                var document = FxrNativeDocument.Read(fxrPayload);
+                var roundTrip = document.VerifyRoundTrip();
+                var diagnostics = new List<Diagnostic>
+                {
+                    new Diagnostic(
+                        roundTrip.Consistent ? "info" : "error",
+                        roundTrip.Consistent ? "FXR_DOCUMENT_ROUNDTRIP_VERIFIED" : "FXR_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.Consistent
+                            ? $"FXR3 只读重解析确定性通过；rootNodes={document.RootNodeCount}, nodes={document.TotalSection4NodeCount}, hosts={document.Hosts.Count}, properties={document.Section7Total}。本项只证明同一份字节解析两遍一致，不构成解析完整性声明。"
+                            : "FXR3 只读往返语义不一致。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        roundTrip)
+                };
+                // 能力边界必须单列诊断，不能只靠 authority 降级：消费方常只读
+                // authority，而「哪几项没解析全」才是排查入口（硬约束 8）。
+                var fxrUnparsedGaps = document.UnparsedGaps();
+                if (fxrUnparsedGaps.Length > 0)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "warning",
+                        "FXR_STRUCTURE_NOT_PARSED_IN_SCOPE",
+                        $"FXR3 刻意不解析以下区间：{string.Join("; ", fxrUnparsedGaps)}。"
+                        + "Section11 无 schema 按不透明 int 数组上报；Section9/Section12-14"
+                        + "未在真实样本验证。authority 已降为 partial。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new { unparsedGaps = fxrUnparsedGaps }));
+                }
+                return BridgeResult<object>.Partial(file, "sfx", diagnostics.ToArray(), document.ToEnvelope(roundTrip));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "sfx", "FXR_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-esd-document")
         {
             try

@@ -25,6 +25,7 @@ export * from './tpf-editor.js';
 export * from './behavior-editor.js';
 export * from './animation-editor.js';
 export * from './material-editor.js';
+export * from './vfx-editor.js';
 export * from './scene-ir.js';
 export * from './msb-entity-registry.js';
 export * from './script-container.js';

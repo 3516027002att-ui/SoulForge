@@ -122,6 +122,7 @@ export type BridgeCommandName =
   | 'read-flver-dummies'
   | 'read-esd-document'
   | 'read-mtd-document'
+  | 'read-fxr-document'
   | 'capabilities'
   | 'health';
 
