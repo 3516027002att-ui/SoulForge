@@ -13,6 +13,20 @@
   --sidebar-w: 264px;
   --agent-w: 440px;
 
+  /* Agent dock 外壳（§12.2 初值；参考图缺失，未对照 TRAE 实测） */
+  --agent-dock-default: 440px;
+  --agent-dock-min: 340px;
+  --agent-dock-max: 620px;
+  --agent-header-height: 48px;
+  --agent-resizer-width: 4px;
+  --agent-side-padding: 16px;
+  --agent-composer-min-height: 168px;
+  --agent-composer-max-height: min(320px, 40vh);
+  --agent-composer-toolbar-height: 44px;
+  --agent-icon-button-size: 28px;
+  --agent-send-button-size: 32px;
+  --agent-welcome-max-width: 360px;
+
   /* 圆角：Sharp 体系 4 / 6 / 8，模态 12 */
   --radius-s: 4px;
   --radius-m: 6px;
@@ -942,35 +956,42 @@ pre.tool-output {
 }
 
 /* ═══════════ Agent 面板 ═══════════ */
+/* §12.1 固定三行：48px header / minmax conversation / bottom composer */
 .agent {
-  width: var(--agent-w); min-width: 340px; max-width: 620px; flex: none;
-  display: grid; grid-template-rows: 48px minmax(0, 1fr) auto;
-  background: var(--forge-0); border-left: 1px solid var(--line);
+  width: var(--agent-w); min-width: var(--agent-dock-min); max-width: var(--agent-dock-max); flex: none;
+  display: grid; grid-template-rows: var(--agent-header-height) minmax(0, 1fr) auto;
+  color: var(--ink-0); background: var(--forge-0); border-left: 1px solid var(--line);
+  box-shadow: none;
   position: relative;
   transition: margin-right var(--dur-trans) var(--ease-standard);
 }
 .agent.is-collapsed { margin-right: calc(-1 * var(--agent-w)); border-left-color: transparent; }
+/* §12.2.1 固定视觉：AgentDockHeader */
 .agent__header {
-  flex: none; display: flex; align-items: center; justify-content: space-between;
-  min-height: 48px; padding: 0 10px 0 12px; border-bottom: 1px solid var(--line);
+  height: var(--agent-header-height); flex: none;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 12px 0 16px; border-bottom: 1px solid var(--line);
 }
-.agent__title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 12.5px; }
+.agent__title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
 .agent-dot {
   width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
   animation: pulse 2.4s ease-in-out infinite;
 }
 .agent-dot.is-busy { background: var(--ember); animation-duration: .9s; }
 .agent__header-actions { display: flex; align-items: center; gap: 4px; }
+/* §12.3：28×28 按钮、16px 图标；默认无背景无边框，hover 只显示一级表面色 */
 .agent-icon-btn {
-  width: 26px; height: 26px; display: grid; place-items: center;
+  width: var(--agent-icon-button-size); height: var(--agent-icon-button-size);
+  display: grid; place-items: center;
   color: var(--ink-2); border-radius: var(--radius-s);
-  background: var(--control-rest-bg);
-  transition: color var(--dur-micro), background var(--dur-micro), box-shadow var(--dur-micro);
+  background: transparent;
+  transition: color var(--dur-micro), background var(--dur-micro);
 }
-.agent-icon-btn:hover { color: var(--ink-0); background: var(--control-hover-bg); box-shadow: var(--control-hover-shadow); }
-.agent-icon-btn:active { background: var(--control-active-bg); }
+.agent-icon-btn:hover { color: var(--ink-0); background: var(--forge-hover); }
+.agent-icon-btn:active { background: var(--forge-active); }
+.agent-icon-btn:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
 .agent__header-state { color: var(--warn); font-size: 10.5px; font-weight: 500; }
-.agent__header-separator { width: 1px; height: 16px; margin: 0 3px; background: var(--line-strong); }
+.agent__header-separator { width: 1px; height: 24px; margin: 0 3px; background: var(--line-strong); }
 
 /* 可折叠会话配置（模型/思考强度/权限模式）——收起再展开不丢状态 */
 .agent-settings { flex: none; border-bottom: 1px solid var(--line); }
@@ -1009,18 +1030,37 @@ pre.tool-output {
 }
 .agent-drawer > .panel { flex: 1; overflow-y: auto; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 
-.agent__stream { overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
-
-.agent-welcome {
-  max-width: 34ch; margin: auto; padding: 20px 8px 28px;
-  color: var(--ink-1); text-align: center;
+/* conversation viewport：水平 padding 16px，消息之间 16px（§12.2.1）。
+   硬约束 17（分页/虚拟化）由 AGENT-60C 的 AgentMessageList 承担。 */
+.agent-conversation {
+  overflow-y: auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 16px;
+  padding: 0 16px;
 }
-.agent-welcome__icon { color: var(--ember); font-size: 24px; line-height: 1; margin-bottom: 10px; }
-.agent-welcome h2 { color: var(--ink-0); font-size: 15px; font-weight: 600; }
-.agent-welcome p { margin-top: 6px; font-size: 11.5px; line-height: 1.65; }
-.agent-welcome ul { display: grid; gap: 6px; margin-top: 18px; padding: 0; list-style: none; text-align: left; font-size: 11px; }
-.agent-welcome li { position: relative; padding-left: 16px; line-height: 1.55; }
-.agent-welcome li::before { content: "✓"; position: absolute; left: 0; color: var(--ember-text); }
+
+/* §12.2.1 + §12.4 固定欢迎态：垂直居中并下移约 24px */
+.agent-welcome {
+  width: min(100% - 32px, var(--agent-welcome-max-width));
+  margin: auto;
+  transform: translateY(24px);
+  text-align: center;
+  color: var(--ink-1);
+}
+.agent-welcome__icon {
+  width: 44px; height: 44px; margin: 0 auto 12px;
+  display: grid; place-items: center;
+  border-radius: 4px;
+  background: var(--forge-2);
+  color: var(--ember-text); font-size: 20px; line-height: 1;
+}
+.agent-welcome h2 { color: var(--ink-0); font-size: 28px; font-weight: 600; }
+.agent-welcome p { margin-top: 8px; font-size: 14px; color: var(--ink-3); }
+.agent-welcome ul {
+  display: grid; gap: 8px; margin-top: 22px; padding: 0; list-style: none;
+  text-align: left; font-size: 14px; line-height: 1.8;
+}
+.agent-welcome li { position: relative; padding-left: 22px; line-height: 1.8; }
+.agent-welcome li::before { content: "✓"; position: absolute; left: 0; color: var(--ok); }
 .agent-message { padding: 9px 10px; border: 1px solid var(--line); background: var(--forge-1); font-size: 12px; line-height: 1.6; user-select: text; }
 .agent-message--user { border-left: 2px solid var(--line-strong); }
 .agent-message--agent { border-left: 2px solid var(--ember); }
@@ -1172,9 +1212,19 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .agent-history__item span { color: var(--ink-3); font-size: 10px; }
 .agent-history__item-actions { display: flex; flex: none; gap: 4px; }
 
-.agent-resizer { width: 5px; flex: none; cursor: col-resize; border-left: 1px solid transparent; border-right: 1px solid transparent; z-index: 4; }
-.agent-resizer:hover, .agent-resizer:focus-visible { border-color: var(--ember-soft); background: var(--ember-soft); }
-.agent-resizer.is-hidden { display: none; }
+/* §12.2：4px resizer，普通状态只有 1px 左分隔线（.agent 的 border-left 承担）。
+   dock 左缘手柄在 aside 内部绝对定位，向编辑器侧伸出 4px。 */
+.agent-dock-resizer {
+  position: absolute; left: calc(-1 * var(--agent-resizer-width));
+  top: 0; bottom: 0;
+  width: var(--agent-resizer-width);
+  cursor: col-resize; z-index: 40;
+  background: transparent;
+  transition: background var(--dur-micro);
+}
+.agent-dock-resizer:hover,
+.agent-dock-resizer:focus-visible { background: var(--ember-soft); }
+.agent-dock-resizer.is-hidden { display: none; }
 .agent.is-overlay { position: absolute; top: 0; right: 0; bottom: 0; z-index: 30; box-shadow: var(--shadow-float); }
 
 /* AI 工作台（编辑器区 ai 模式） */

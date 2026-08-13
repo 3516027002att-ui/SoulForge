@@ -24,6 +24,9 @@ import { AgentTaskPanel, type AgentTaskPanelProps } from './AgentTaskPanel.js';
 import { AGENT_SESSION_PAGE_SIZE, isAgentTaskActive } from './agentTaskState.js';
 import { permissionModeLabel } from './agentLabels.js';
 import { formatPageRange } from '../format/uiText.js';
+import { AgentDockResizer } from './AgentDockResizer.js';
+import { AgentDockHeader } from './AgentDockHeader.js';
+import { AgentConversationViewport } from './AgentConversationViewport.js';
 
 export type AgentInteractionMode = 'ask' | 'plan' | 'edit';
 
@@ -33,6 +36,11 @@ export interface AgentSidebarProps {
   overlay?: boolean;
   style?: CSSProperties;
   expanded?: boolean;
+  /** dock 当前宽度与范围，交给 AgentDockResizer 做拖拽/键盘 resize。 */
+  agentWidth: number;
+  agentMinWidth: number;
+  agentMaxWidth: number;
+  onAgentWidthChange: (width: number) => void;
   busy: boolean;
   provider: AiProvider;
   thinking: AiThinkingLevel;
@@ -99,6 +107,10 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     overlay = false,
     style,
     expanded = false,
+    agentWidth,
+    agentMinWidth,
+    agentMaxWidth,
+    onAgentWidthChange,
     busy,
     provider,
     thinking,
@@ -134,7 +146,8 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
   const taskSurfaceVisible = isTaskSurfaceVisible(busy, goal, draft, task);
   const awaitingApproval = task.task.pendingApprovals.length > 0;
   const taskRunning = busy || isAgentTaskActive(task.task);
-  const emptyWelcome = !taskSurfaceVisible && !awaitingApproval;
+  // awaitingApproval ⊆ taskSurfaceVisible，所以空闲 = 没有任何任务表面内容。
+  const emptyWelcome = !taskSurfaceVisible;
   const historyPageCount = Math.max(1, Math.ceil(task.sessions.length / AGENT_SESSION_PAGE_SIZE));
   const historyPage = Math.min(task.sessionsPage, historyPageCount - 1);
   const pageSessions = task.sessions.slice(
@@ -208,78 +221,38 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
       aria-label="AI Agent 面板"
       data-agent-expanded={expanded ? 'true' : 'false'}
     >
-      <header className="agent__header">
-        <div className="agent__title">
-          <span className={`agent-dot${taskRunning || awaitingApproval ? ' is-busy' : ''}`} aria-hidden="true"></span>
-          <span>Agent</span>
-          <span className="agent__header-state" role="status" data-testid="agent-header-state">{headerState ?? ''}</span>
-        </div>
-        <div className="agent__header-actions" aria-label="Agent 操作">
-          <button type="button" className="agent-icon-btn" onClick={onNewTask} title="新任务" aria-label="新任务">
-            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-              <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className="agent-icon-btn"
-            onClick={() => (historyOpen ? closeDrawer() : openDrawer('history'))}
-            title="历史"
-            aria-label="打开 Agent 历史"
-            aria-expanded={historyOpen}
-          >
-            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-              <path d="M3 4.5h10M3 8h10M3 11.5h7" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className="agent-icon-btn"
-            onClick={onToggleExpand}
-            title={expanded ? '恢复 Agent 宽度' : '展开 Agent'}
-            aria-label={expanded ? '恢复 Agent 宽度' : '展开 Agent'}
-          >
-            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-              {expanded
-                ? <path d="M5.5 3.5v3h-3M10.5 12.5v-3h3M3 6.5a5 5 0 0 1 8.9-2M13 9.5a5 5 0 0 1-8.9 2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                : <path d="M3 6V3h3M13 10v3h-3M6 3a5 5 0 0 0-3 3M10 13a5 5 0 0 0 3-3" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />}
-            </svg>
-          </button>
-          <span className="agent__header-separator" aria-hidden="true"></span>
-          <button type="button" className="agent-icon-btn" onClick={onClose} title="关闭" aria-label="关闭 Agent 面板">
-            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-              <path d="M3 3l10 10M13 3L3 13" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
-          </button>
-        </div>
-      </header>
-
-      <div className="agent__stream" role="log" aria-live="polite" aria-label="Agent 会话记录">
-        {emptyWelcome && (
-          <div className="agent-welcome" data-testid="agent-empty-state">
-            <div className="agent-welcome__icon" aria-hidden="true">✦</div>
-            <h2>Agent</h2>
-            <p>从证据出发，协助你理解和修改 SoulForge 工作区。</p>
-            <ul>
-              <li>先读取工作区证据，再解释资源关系</li>
-              <li>改动以提案和审批为边界，不直接落盘</li>
-              <li>每一步都保留可验证、可回滚的状态</li>
-            </ul>
-          </div>
-        )}
-        {!emptyWelcome && goal !== null && (
+      {/* resizer 是 dock 左缘的 4px 手柄；overlay 或收起时隐藏。宽度状态在 App，这里只回报新宽度。 */}
+      <AgentDockResizer
+        overlay={overlay || !open}
+        currentWidth={agentWidth}
+        minWidth={agentMinWidth}
+        maxWidth={agentMaxWidth}
+        onWidthChange={onAgentWidthChange}
+      />
+      <AgentDockHeader
+        busy={taskRunning || awaitingApproval}
+        statusText={headerState ?? ''}
+        historyOpen={historyOpen}
+        expanded={expanded}
+        onToggleHistory={() => (historyOpen ? closeDrawer() : openDrawer('history'))}
+        onNewTask={onNewTask ?? (() => undefined)}
+        onToggleExpand={onToggleExpand ?? (() => undefined)}
+        onClose={onClose}
+      />
+      <AgentConversationViewport idle={emptyWelcome}>
+        {goal !== null && (
           <article className="agent-message agent-message--user">
             <div className="agent-message__meta">你</div>
             <p>{goal}</p>
           </article>
         )}
-        {!emptyWelcome && busy && (
+        {busy && (
           <div className="agent-message agent-message--system" role="status">
             <span className="spinner" aria-hidden="true"></span>
             <span>正在准备计划草稿…</span>
           </div>
         )}
-        {!emptyWelcome && draft !== null && (
+        {draft !== null && (
           <article className="agent-message agent-message--agent">
             <div className="agent-message__meta">Agent · 计划草稿</div>
             <strong>{draft.title}</strong>
@@ -294,7 +267,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
         {taskSurfaceVisible && (
           <AgentTaskPanel {...task} tools={tools} permissionLockReason={permissionLockReason} />
         )}
-      </div>
+      </AgentConversationViewport>
 
       <div className="agent__composer">
         <div className="agent-composer__participant">

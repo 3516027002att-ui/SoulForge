@@ -88,6 +88,7 @@ import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
 import { WorkspaceResourceBar } from './navigation/WorkspaceResourceBar.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
+import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
 import type {
   AgentSessionDetail,
   AgentSessionRow,
@@ -185,10 +186,6 @@ const AGENT_MIN_WIDTH = 340;
 const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
 const AGENT_EDITOR_MIN_WIDTH = 560;
-
-function clampAgentWidth(value: number): number {
-  return Math.min(AGENT_MAX_WIDTH, Math.max(AGENT_MIN_WIDTH, Math.round(value)));
-}
 
 function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
   // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
@@ -599,7 +596,7 @@ export function App(): ReactElement {
       if (savedOpen !== null) setAgentOpen(savedOpen === 'true');
       if (savedWidth !== null) {
         const parsed = Number(savedWidth);
-        if (Number.isFinite(parsed)) setAgentWidth(clampAgentWidth(parsed));
+        if (Number.isFinite(parsed)) setAgentWidth(clampAgentDockWidth(parsed, AGENT_MIN_WIDTH, AGENT_MAX_WIDTH));
       }
     } catch {
       // 浏览器预览或受限 WebView 可能禁用 localStorage；不影响工作台使用。
@@ -1603,27 +1600,6 @@ export function App(): ReactElement {
     };
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
-  }
-
-  function startAgentResize(event: ReactPointerEvent<HTMLDivElement>): void {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = agentWidth;
-    const handleMove = (moveEvent: PointerEvent): void => {
-      setAgentWidth(clampAgentWidth(startWidth - (moveEvent.clientX - startX)));
-      setAgentExpanded(false);
-    };
-    const handleUp = (): void => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
-    };
-    window.addEventListener('pointermove', handleMove);
-    window.addEventListener('pointerup', handleUp);
-  }
-
-  function adjustAgentWidth(delta: number): void {
-    setAgentWidth((width) => clampAgentWidth(width + delta));
-    setAgentExpanded(false);
   }
 
   function pushToast(text: string, kind: 'ok' | 'warn' = 'ok'): void {
@@ -3621,27 +3597,20 @@ export function App(): ReactElement {
         </main>
 
         {/* ══════════ Agent 面板 ══════════ */}
-        {agentOpen && (
-          <div
-            className={agentOverlay ? 'agent-resizer is-hidden' : 'agent-resizer'}
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="调整 Agent 面板宽度"
-            tabIndex={agentOverlay ? -1 : 0}
-            onPointerDown={startAgentResize}
-            onKeyDown={(event) => {
-              if (event.key === 'ArrowLeft') { event.preventDefault(); adjustAgentWidth(16); }
-              if (event.key === 'ArrowRight') { event.preventDefault(); adjustAgentWidth(-16); }
-              if (event.key === 'Home') { event.preventDefault(); setAgentWidth(AGENT_MIN_WIDTH); }
-              if (event.key === 'End') { event.preventDefault(); setAgentWidth(AGENT_MAX_WIDTH); }
-            }}
-          />
-        )}
+        {/* resize 已内聚到 AgentDockResizer（AgentSidebar 内部）；宽度状态仍由 App
+            持有，因为 overlay 判定与 workspace 持久化都要读它。 */}
         <AgentSidebar
           open={agentOpen}
           overlay={agentOverlay}
           style={agentStyle}
           expanded={agentExpanded}
+          agentWidth={agentWidth}
+          agentMinWidth={AGENT_MIN_WIDTH}
+          agentMaxWidth={AGENT_MAX_WIDTH}
+          onAgentWidthChange={(width) => {
+            setAgentWidth(width);
+            setAgentExpanded(false);
+          }}
           busy={aiBusy}
           provider={aiProvider}
           thinking={aiThinking}
