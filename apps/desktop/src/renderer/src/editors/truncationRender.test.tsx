@@ -72,8 +72,29 @@ describe('ESD 状态组表超上限时渲染截断说明', () => {
       data={{
         format: 'ESD', version: 1, sourceSize: 1024, sourceHash: 'synthetic',
         stateGroupCount: total, stateCount: total, conditionCount: 0,
-        commandCallCount: 0, commandArgCount: 0, commandBanks: [], authority: 'synthetic-fixture',
-        stateGroups: synthetic(total, (i) => ({ groupId: i, stateCount: 1 }))
+        commandCallCount: 0, commandArgCount: 0,
+        declaredStateGroupCount: total, declaredStateCount: total,
+        declaredConditionCount: 0, declaredCommandCallCount: 0, declaredCommandArgCount: 0,
+        parsedStateCount: total, parsedStateRecordCount: total,
+        stateSentinelPerGroup: 1, stateSentinelModelConsistent: true,
+        stateSentinelDivergentGroupIds: [],
+        parsedConditionCount: 0, parsedCommandCallCount: 0, parsedCommandArgCount: 0,
+        stateGroups: synthetic(total, (i) => ({ groupId: i, stateCount: 1 })),
+        stateGroupsTruncated: false, commandBanks: [], bytecodeRegionCount: 0,
+        conditionSamples: [], conditionSamplesTruncated: false,
+        transitionGraph: {
+          edgeCount: 0, resolved: 0, none: 0, sentinel: 0, dangling: 0, closed: true,
+          danglingSamples: [], sentinelSamples: [], edges: [], edgesTruncated: false
+        },
+        commandCalls: { total: 0, distinctCommandIds: 0, bySlot: [], samples: [], samplesTruncated: false },
+        coverageComplete: true, coverageShortfalls: [], unparsedGaps: [],
+        roundTrip: {
+          byteIdentical: true, semanticIdentical: true,
+          sourceHash: 'synthetic', rebuiltHash: 'synthetic',
+          stateGroupCount: total, stateCount: total, stateRecordCount: total,
+          conditionCount: 0, commandCallCount: 0, commandArgCount: 0
+        },
+        authority: 'candidate'
       }}
     />
   );
@@ -94,12 +115,20 @@ describe('TAE 动画表超上限时渲染截断说明', () => {
     <TaeWorkbenchPanel
       resourceUri="synthetic://tae"
       data={{
-        format: 'TAE', version: 1, sourceSize: 1024, sourceHash: 'synthetic',
+        format: 'TAE', version: '0x20', sourceSize: 1024, sourceHash: 'synthetic',
         animationCount: total, totalEventCount: 0, totalGroupCount: 0,
-        eventTypes: [], authority: 'synthetic-fixture',
+        eventTypes: [], authority: 'candidate',
         animations: synthetic(total, (i) => ({
-          animId: i, eventCount: 0, groupCount: 0, timesCount: 0
-        }))
+          animId: i, eventCount: 0, groupCount: 0, timesCount: 0,
+          events: [], eventsTruncated: false
+        })),
+        animationsTruncated: false,
+        roundTrip: {
+          byteIdentical: true, semanticIdentical: true,
+          sourceHash: 'synthetic', rebuiltHash: 'synthetic',
+          animationCount: total, totalEventCount: 0, totalGroupCount: 0
+        },
+        diagnostics: []
       }}
     />
   );
@@ -117,8 +146,29 @@ describe('未超上限时不渲染截断说明（防「完整数据被标成部�
         data={{
           format: 'ESD', version: 1, sourceSize: 128, sourceHash: 'synthetic',
           stateGroupCount: 3, stateCount: 3, conditionCount: 0,
-          commandCallCount: 0, commandArgCount: 0, commandBanks: [], authority: 'synthetic-fixture',
-          stateGroups: synthetic(3, (i) => ({ groupId: i, stateCount: 1 }))
+          commandCallCount: 0, commandArgCount: 0,
+          declaredStateGroupCount: 3, declaredStateCount: 3,
+          declaredConditionCount: 0, declaredCommandCallCount: 0, declaredCommandArgCount: 0,
+          parsedStateCount: 3, parsedStateRecordCount: 3,
+          stateSentinelPerGroup: 1, stateSentinelModelConsistent: true,
+          stateSentinelDivergentGroupIds: [],
+          parsedConditionCount: 0, parsedCommandCallCount: 0, parsedCommandArgCount: 0,
+          stateGroups: synthetic(3, (i) => ({ groupId: i, stateCount: 1 })),
+          stateGroupsTruncated: false, commandBanks: [], bytecodeRegionCount: 0,
+          conditionSamples: [], conditionSamplesTruncated: false,
+          transitionGraph: {
+            edgeCount: 0, resolved: 0, none: 0, sentinel: 0, dangling: 0, closed: true,
+            danglingSamples: [], sentinelSamples: [], edges: [], edgesTruncated: false
+          },
+          commandCalls: { total: 0, distinctCommandIds: 0, bySlot: [], samples: [], samplesTruncated: false },
+          coverageComplete: true, coverageShortfalls: [], unparsedGaps: [],
+          roundTrip: {
+            byteIdentical: true, semanticIdentical: true,
+            sourceHash: 'synthetic', rebuiltHash: 'synthetic',
+            stateGroupCount: 3, stateCount: 3, stateRecordCount: 3,
+            conditionCount: 0, commandCallCount: 0, commandArgCount: 0
+          },
+          authority: 'candidate'
         }}
       />
     );

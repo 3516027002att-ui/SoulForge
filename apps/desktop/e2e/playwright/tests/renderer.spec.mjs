@@ -298,6 +298,159 @@ test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽
   await app.close();
 });
 
+test('Material 工作台三栏：File list → Material list → Properties/Values，unknown 只读，无 Preview 第四栏', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // MATERIAL-53B：MTD 材质资源从 Files 领域选择，进入三栏材质工作台。
+  await window.locator('[data-domain="files"]').click();
+  await window.locator('.file-item', { hasText: 'material/materials.mtd' }).click();
+  // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
+  await expect(window.getByLabel('Material 工作台')).toBeVisible();
+
+  // 三栏（§2.5，无 viewport：不要发明 Preview 第四栏，无 Tools 空栏）。
+  await expect(window.getByRole('region', { name: 'File list' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Material list' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Properties / Values' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Preview' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
+
+  // File list 栏列出材质文件，显示名去 .mtd。
+  const fileList = window.getByRole('region', { name: 'File list' });
+  await expect(fileList.getByText('materials')).toBeVisible();
+
+  // Material list 栏：材质来自 fixture envelope 的 pages 投影（material/textureReferences）。
+  const materialList = window.getByRole('region', { name: 'Material list' });
+  await expect(materialList.getByText('m_test_material')).toBeVisible();
+  await expect(materialList.getByText('tex/base.dds')).toBeVisible();
+
+  // Properties / Values 栏：值类型与 unknown readonly（值可见但无任何编辑控件）。
+  const props = window.getByRole('region', { name: 'Properties / Values' });
+  await expect(props.getByText('DiffuseIntensity')).toBeVisible();
+  await expect(props.getByText('0.8')).toBeVisible();
+  await expect(props.getByText(' · float').first()).toBeVisible();
+  // unknown 属性必须可见（不能丢弃）：unkAttr 行出现且只读标记明确。
+  await expect(window.getByTestId('mtd-unknown-prop')).toContainText('unkAttr（未识别）');
+  await expect(window.getByTestId('mtd-unknown-prop')).toContainText('0x2a');
+  // 本卡无 writer（MATERIAL-53C 才接写回）：无任何按钮/输入框/保存动作。
+  await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
+  await expect(window.locator('.wb-prop__value input')).toHaveCount(0);
+
+  // partial 缺口必须可见，不伪装成完整解析。
+  await expect(window.getByTestId('mtd-partial-gaps')).toContainText('未识别结构 1 项');
+
+  // 纹理引用选择链：点击引用，右侧显示引用元数据。
+  await materialList.getByRole('row', { name: /tex\/base\.dds/ }).click();
+  await expect(props.getByText('路径')).toBeVisible();
+  const pathRow = props.locator('.wb-prop', { hasText: '路径' });
+  await expect(pathRow.getByText('tex/base.dds', { exact: true })).toBeVisible();
+
+  // 独立滚动：三个栏各自是滚动宿主（WorkbenchLayout 每栏 overflow-y auto）。
+  const columnBodies = window.locator('.workbench__column-body');
+  await expect(columnBodies).toHaveCount(3);
+
+  await window.screenshot({ path: 'test-results/16-material-workbench.png' });
+  await app.close();
+});
+
+test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，partial 缺口可见', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // BEHAVIOR-55B：ESD 状态机资源从 Files 领域选择，进入三栏行为工作台。
+  await window.locator('[data-domain="files"]').click();
+  await window.locator('.file-item', { hasText: 'ai/m10.esd' }).click();
+  // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
+  await expect(window.getByLabel('Behavior 工作台')).toBeVisible();
+
+  // 三栏（§10.3，无 Tools 空栏）。
+  await expect(window.getByRole('region', { name: 'Files / Machines / States' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Conditions / Commands' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Inspector' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
+
+  // 机器列表由 fixture envelope 的 pages 投影派生（不按 action 目录分类）。
+  const left = window.getByRole('region', { name: 'Files / Machines / States' });
+  await expect(left.getByText('状态组 0')).toBeVisible();
+  await expect(left.getByText('状态组 1')).toBeVisible();
+  await expect(left.getByText('全部语义状态')).toBeVisible();
+
+  // machine → state：选中机器，States 组显示该机器状态摘要，中栏按机器过滤条件。
+  await left.getByRole('row', { name: /状态组 0/ }).click();
+  await expect(left.getByText('状态组 0 的状态')).toBeVisible();
+  const middle = window.getByRole('region', { name: 'Conditions / Commands' });
+  await expect(middle.getByText(/已按状态组 0 过滤/)).toBeVisible();
+  await expect(middle.getByRole('row', { name: /条件 @0x10/ })).toBeVisible();
+
+  // 条件（转移载体）选中 → Inspector 显示转移明细。
+  await middle.getByRole('row', { name: /条件 @0x10/ }).click();
+  const inspector = window.getByRole('region', { name: 'Inspector' });
+  await expect(inspector.getByText('条件偏移')).toBeVisible();
+  await expect(inspector.getByText('目标状态偏移')).toBeVisible();
+  await expect(inspector.getByText('0x28')).toBeVisible();
+
+  // 命令选中 → Inspector 显示命令明细。
+  await middle.getByRole('row', { name: /命令 10/ }).click();
+  await expect(inspector.getByText('命令 ID')).toBeVisible();
+  await expect(inspector.getByText('槽位')).toBeVisible();
+  await expect(inspector.getByText('entry')).toBeVisible();
+
+  // 无 writer（BEHAVIOR-55C 才接 transition write）：无保存/提交动作。
+  await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
+
+  await window.screenshot({ path: 'test-results/17-behavior-workbench.png' });
+  await app.close();
+});
+
+test('Animation 工作台三栏：动画 → 时间轴事件选择链，事件参数体未解码边界明确', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // ANIMATION-56B：TAE 动画资源从 Files 领域选择，进入三栏动画工作台。
+  await window.locator('[data-domain="files"]').click();
+  await window.locator('.file-item', { hasText: 'action/c0000.tae' }).click();
+  // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
+  await expect(window.getByLabel('Animation 工作台')).toBeVisible();
+
+  // 三栏（§10.3，无 Tools 空栏）。
+  await expect(window.getByRole('region', { name: 'Files / Animations' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Timeline / Events' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Inspector' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
+
+  // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类）。
+  const left = window.getByRole('region', { name: 'Files / Animations' });
+  await expect(left.getByText('动画 0')).toBeVisible();
+  await expect(left.getByText('动画 1')).toBeVisible();
+  await expect(left.getByText('a0000.hkx')).toBeVisible();
+
+  // animation → timeline：选中动画 0，中栏按动画过滤时间轴事件。
+  await left.getByRole('row', { name: /动画 0/ }).click();
+  const middle = window.getByRole('region', { name: 'Timeline / Events' });
+  await expect(middle.getByText(/已按动画 0 过滤/)).toBeVisible();
+  await expect(middle.getByRole('row', { name: /0s → 1s/ })).toBeVisible();
+
+  // timeline 事件选中 → Inspector 显示事件明细。
+  await middle.getByRole('row', { name: /0s → 1s/ }).click();
+  const inspector = window.getByRole('region', { name: 'Inspector' });
+  await expect(inspector.getByText('动画 ID')).toBeVisible();
+  await expect(inspector.getByText('开始时间')).toBeVisible();
+  await expect(inspector.getByText('事件类型 ID')).toBeVisible();
+  // 事件参数体未解码边界必须明示（不伪装成完整解析）。
+  await expect(inspector.getByText('参数体')).toBeVisible();
+  await expect(inspector.getByText(/未解码/)).toBeVisible();
+
+  // Events 组汇总：事件总数 / 事件类型 distinct。
+  await expect(middle.getByText('事件总数')).toBeVisible();
+  await expect(middle.getByText('事件类型 3')).toBeVisible();
+
+  // 无 writer（ANIMATION-56C 才接 event write）：无保存/提交动作。
+  await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
+
+  await window.screenshot({ path: 'test-results/18-animation-workbench.png' });
+  await app.close();
+});
+
 test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
@@ -791,13 +944,14 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可点击文件工作域并保持可操作。18 = fixture 合成样本数
+    // 窄屏仍可点击文件工作域并保持可操作。20 = fixture 合成样本数
     // （PARAM-10B 加 gameparam.parambnd.dcx，GPARAM-11B 加 3 个 gparam.dcx，
     // EVENT-30B 加 event/menu.emevd，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx，
     // MAP-50B 加 map/m10.msb.dcx，MODEL-51B 加 chr/c1000.flver，TEXTURE-52B 加
-    // menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18）。
+    // menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，MATERIAL-53B 加
+    // material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20）。
     await window.locator('[data-domain="files"]').click();
-    await expect(window.locator('.file-item')).toHaveCount(18);
+    await expect(window.locator('.file-item')).toHaveCount(20);
   }
 
   await window.setViewportSize({ width: 653, height: 694 });
@@ -926,18 +1080,19 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
   const pager = window.locator('[data-testid="file-list-pager"]');
   await expect(pager).toBeVisible();
 
-  // 位置文案必须报出区间与真实总数（478 = 18 基础 + 460 合成；EVENT-30B 加了
+  // 位置文案必须报出区间与真实总数（480 = 20 基础 + 460 合成；EVENT-30B 加了
   // event/menu.emevd 基础样本从 12 变 13，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx
   // 从 13 变 14，MAP-50B 加 map/m10.msb.dcx 从 14 变 15，MODEL-51B 加 chr/c1000.flver
-  // 从 15 变 16，TEXTURE-52B 加 menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18）。
+  // 从 15 变 16，TEXTURE-52B 加 menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，
+  // MATERIAL-53B 加 material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20）。
   const range = window.locator('[data-testid="file-list-page-range"]');
   await expect(range).toContainText('1–200');
-  await expect(range).toContainText('478');
+  await expect(range).toContainText('480');
   await expect(range).toContainText('第 1/3 页');
 
-  // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 477 长得一样。
+  // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 479 长得一样。
   // SHELL-09 §3.3：数量带语义单位（文件 N 个）。
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 478 个');
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 480 个');
   await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
 
   // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。
@@ -950,8 +1105,8 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
 
   // 末页只剩余数条，且「下一页」到底后禁用。
   await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('401–478');
-  await expect(items).toHaveCount(78);
+  await expect(range).toContainText('401–480');
+  await expect(items).toHaveCount(80);
   await expect(window.getByRole('button', { name: '下一页' }).first()).toBeDisabled();
 
   // 回到第一页：上一页可用且内容复原。

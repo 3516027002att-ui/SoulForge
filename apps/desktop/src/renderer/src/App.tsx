@@ -62,6 +62,7 @@ import { TaeWorkbenchPanel } from './editors/TaeWorkbenchPanel.js';
 import { EsdWorkbenchPanel } from './editors/EsdWorkbenchPanel.js';
 import { FlverWorkbenchPanel } from './editors/FlverWorkbenchPanel.js';
 import { TpfWorkbenchPanel, type TpfContainerView } from './editors/TpfWorkbenchPanel.js';
+import { MaterialWorkbenchPanel, type MaterialFileView } from './editors/MaterialWorkbenchPanel.js';
 import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
@@ -502,6 +503,16 @@ export function App(): ReactElement {
   const showBnd4Workbench = activeEditor === 'container';
 
   /**
+   * MATERIAL-53B：.mtd 后缀补正到 material 工作台。
+   *
+   * selectEditor 的 legacy/语义路径目前把 material 归到 'binary'（material 工作台
+   * 实施前的显式占位）。本卡在 App 装配层做后缀补正：.mtd 文件在 activeEditor 为
+   * 'binary' 时改走 MaterialWorkbenchPanel，同时排除下方 binary 兜底文案，保证
+   * 「每个输入恰好渲染一个编辑器」。selectEditor.ts 的正式路由由主会话收尾。
+   */
+  const isMaterialFile = selectedFile !== null && /\.mtd$/i.test(selectedFile.relativePath) === true;
+
+  /**
    * GPARAM 域的全部磁盘文件（工作台 Banks 栏的数据源）。
    *
    * 按后缀过滤而不是 resourceKind：与 selectEditor 对 gparam 的判据一致
@@ -526,6 +537,19 @@ export function App(): ReactElement {
     const indexed = allFiles.length > 0 ? allFiles : files;
     return indexed
       .filter((file) => /\.tpf(\.dcx)?$/i.test(file.relativePath))
+      .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
+  }, [allFiles, files]);
+
+  /**
+   * MATERIAL 域的全部 MTD 文件（工作台 File list 栏的数据源）。
+   *
+   * 按后缀过滤而不是 resourceKind：与 selectEditor 对后缀的判据同口径
+   * （material 尚未进 selectEditor 的 legacy 路径，见下方 isMaterialFile 补正）。
+   */
+  const materialFiles = useMemo<MaterialFileView[]>(() => {
+    const indexed = allFiles.length > 0 ? allFiles : files;
+    return indexed
+      .filter((file) => /\.mtd$/i.test(file.relativePath))
       .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
   }, [allFiles, files]);
 
@@ -3409,9 +3433,16 @@ export function App(): ReactElement {
               {...(selectedFile?.sourceUri ? { initialUri: selectedFile.sourceUri } : {})}
             />
           )}
+          {activeEditor === 'binary' && isMaterialFile && selectedFile && (
+            <MaterialWorkbenchPanel
+              key={`mtd-wb:${selectedFile.sourceUri}`}
+              files={materialFiles}
+              initialUri={selectedFile.sourceUri}
+            />
+          )}
           {/* 没有语义编辑器的资源：给一句人话 + 指向折叠区的原始字节。
               此前这类资源什么编辑器都不显示，主区只剩证据卡与错误码。 */}
-          {activeEditor === 'binary' && (
+          {activeEditor === 'binary' && !isMaterialFile && (
             <p className="muted">
               这个格式还没有专用编辑器。展开下方「原始字节与证据」可查看字节内容。
             </p>

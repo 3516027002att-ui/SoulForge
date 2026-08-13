@@ -9,11 +9,14 @@
  * 构建后的 renderer、真 contextBridge 语义，以及**与生产同形态的发送方校验**
  * （handleTrusted 包装器 + assertTrustedSender，见下）。
  *
- * 不真实的部分：main 侧业务逻辑整体是 fixture。本文件自己注册 19 个 channel，
+ * 不真实的部分：main 侧业务逻辑整体是 fixture。本文件自己注册 48 个 channel，
  * 生产 ipc.ts 有 56 个，且 registerIpcHandlers 从未被加载。因此以下**没有**被
  * e2e 覆盖，不得据本套件声称它们可用：
- *   - PARAM / EMEVD / 脚本容器 / TPF / TAE / FLVER / ESD 面板的读写与分页
+ *   - PARAM / EMEVD / 脚本容器 面板的读写与分页
  *     （readParamPage、readEmevdDocument、listScriptContainerEntriesPage 等）
+ *   - TAE / ESD / FLVER / MTD 面板的**主进程侧**读写实现：read 通道已在 fixture
+ *     里 stub（合成 DTO），但生产 registerIpcHandlers 从未被加载，写通道与
+ *     main 侧解析实现不在本套件覆盖内
  *   - saveText 等文本写入链路的 main 侧实现
  *   - Bridge 子进程、SQLite、utilityProcess、凭据 vault 的真实行为
  * 这些由 core smoke、契约门禁与 native 层分别覆盖。要把 e2e 提升为真实 main
@@ -92,7 +95,16 @@ const fixtureFiles = [
   // formatKind 'tpf' → selectEditor legacy 路径命中 'tpf' 编辑器。broken 是读取失败
   // 样本（对照 Smithbox 的「失败即移除」，失败容器保留在列表并标记）。
   makeFile({ dir: 'menu', name: 'start.tpf.dcx', kind: 'menu', formatKind: 'tpf', formatLabel: 'TPF', extension: '.dcx', compoundExtension: '.tpf.dcx' }),
-  makeFile({ dir: 'menu', name: 'broken.tpf.dcx', kind: 'menu', formatKind: 'tpf', formatLabel: 'TPF', extension: '.dcx', compoundExtension: '.tpf.dcx' })
+  makeFile({ dir: 'menu', name: 'broken.tpf.dcx', kind: 'menu', formatKind: 'tpf', formatLabel: 'TPF', extension: '.dcx', compoundExtension: '.tpf.dcx' }),
+  // MATERIAL-53B fixture：MTD 材质样本。此前没有 .mtd 文件，material 工作台在 E2E
+  // 里进不去；这里补一个可被 readMtdDocument stub 命中的合成样本（微小、合法构造、
+  // 明确标记，AGENTS.md §15）。formatKind 'unknown' → selectEditor legacy 路径归到
+  // binary，App 装配层的 .mtd 后缀补正把它接到 material 编辑器。
+  makeFile({ dir: 'material', name: 'materials.mtd', kind: 'other', formatKind: 'unknown', formatLabel: 'MTD', extension: '.mtd', compoundExtension: '.mtd' }),
+  // BEHAVIOR-55B fixture：ESD 状态机样本。此前没有 .esd 文件，esd 工作台在 E2E 里
+  // 进不去；这里补一个可被 readEsdDocument stub 命中的合成样本（微小、合法构造、
+  // 明确标记）。ai 目录形态对齐真实 ESD（ai/*.esd）。
+  makeFile({ dir: 'ai', name: 'm10.esd', kind: 'ai', formatKind: 'unknown', formatLabel: 'ESD', extension: '.esd', compoundExtension: '.esd' })
 ];
 
 /**
@@ -309,7 +321,7 @@ function registerFixtureIpc() {
       files: scanned.map((file) => ({ ...file })),
       countsByKind: {
         event: 2, map: (LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0) + 1, param: 4, msg: 1, menu: 2, script: 1,
-        action: 1, ai: 1, sfx: 1, chr: 2, obj: 0, other: 1, unknown: 1
+        action: 1, ai: 2, sfx: 1, chr: 2, obj: 0, other: 2, unknown: 1
       },
       diagnostics: [],
       session: {
@@ -864,6 +876,202 @@ function registerFixtureIpc() {
       },
       diagnostics: []
     };
+  });
+
+  // ── MATERIAL-53B：Material 工作台合成通道 ────────────────────────────────
+  // 微小、合法构造、明确标记（AGENTS.md §15）。一个可读 MTD：3 个属性（含一个带
+  // 未识别属性 unkAttr 的 UnknownParam，驱动 unknown readonly 断言）＋ 1 个纹理
+  // 引用。authority 'partial'：unparsedGaps 非空，gap 区段必须可见。未登记样本
+  // 结构化失败，绝不显示为空文档。
+  const fixtureMtdDocs = {
+    'fixture://material/materials.mtd': {
+      format: 'MTD-XML',
+      formatId: 'mtd',
+      sourceSize: 2048,
+      sourceHash: 'fixture-mtd-hash-0001',
+      rootElement: 'material',
+      name: 'm_test_material',
+      version: '1.0',
+      header: null,
+      shaderPath: 'shader/standard.mtdshader',
+      materialCount: 1,
+      properties: [
+        { id: 'p1', type: 'float', name: 'DiffuseIntensity', value: '0.8' },
+        { id: 'p2', type: 'texture', name: 'BaseColorMap', value: 'tex/base.dds' },
+        { id: 'p3', type: 'float', name: 'UnknownParam', value: '1.0', unknown: { unkAttr: '0x2a' } }
+      ],
+      propertiesTruncated: false,
+      textureRefs: [{ path: 'tex/base.dds', type: 'g', name: 'BaseColorMap' }],
+      textureRefsTruncated: false,
+      unparsedGaps: ['param UnknownParam 的未识别属性 unkAttr'],
+      layoutWarnings: [],
+      roundTrip: {
+        consistent: true,
+        sourceHash: 'fixture-mtd-hash-0001',
+        reparsedHash: 'fixture-mtd-hash-0001',
+        paramCount: 3,
+        textureRefCount: 1,
+        note: null
+      },
+      authority: 'partial'
+    }
+  };
+
+  handleTrusted('resource.readMtdDocument', (_event, sourceUri) => {
+    track('resource.readMtdDocument');
+    const doc = fixtureMtdDocs[sourceUri];
+    if (!doc) {
+      return {
+        ok: false,
+        data: null,
+        diagnostics: [{
+          severity: 'error', code: 'MTD_DOCUMENT_READ_FAILED',
+          message: 'fixture 未登记或损坏的 MTD：读取失败。', sourceUri
+        }]
+      };
+    }
+    return { ok: true, data: { ...doc }, diagnostics: [] };
+  });
+
+  // ── BEHAVIOR-55B：Behavior 工作台合成通道 ────────────────────────────────
+  // 微小、合法构造、明确标记（AGENTS.md §15）。一个可读 ESD：2 个状态组 / 2 个条件
+  // 样本 / 2 个命令调用，authority 'candidate'（闭合、无缺口），驱动
+  // machine → state → condition 选择链断言。未登记样本结构化失败，绝不显示为空文档。
+  const fixtureEsdDocs = {
+    'fixture://ai/m10.esd': {
+      format: 'ESD',
+      version: 1,
+      sourceSize: 4096,
+      sourceHash: 'fixture-esd-hash-0001',
+      stateGroupCount: 2,
+      stateCount: 4,
+      conditionCount: 2,
+      commandCallCount: 2,
+      commandArgCount: 2,
+      declaredStateGroupCount: 2,
+      declaredStateCount: 4,
+      declaredConditionCount: 2,
+      declaredCommandCallCount: 2,
+      declaredCommandArgCount: 2,
+      parsedStateCount: 4,
+      parsedStateRecordCount: 6,
+      stateSentinelPerGroup: 1,
+      stateSentinelModelConsistent: true,
+      stateSentinelDivergentGroupIds: [],
+      parsedConditionCount: 2,
+      parsedCommandCallCount: 2,
+      parsedCommandArgCount: 2,
+      stateGroups: [
+        { groupId: 0, stateCount: 2 },
+        { groupId: 1, stateCount: 2 }
+      ],
+      stateGroupsTruncated: false,
+      commandBanks: [0],
+      bytecodeRegionCount: 2,
+      conditionSamples: [
+        { conditionRelOffset: 0x10, sourceGroupId: 0, sourceStateRelOffset: 0x0, targetStateRelOffset: 0x28, subConditionCount: 1, evaluatorLength: 8, passCommandCount: 1 },
+        { conditionRelOffset: 0x20, sourceGroupId: 1, sourceStateRelOffset: 0x4, targetStateRelOffset: -1, subConditionCount: 0, evaluatorLength: 4, passCommandCount: 0 }
+      ],
+      conditionSamplesTruncated: false,
+      transitionGraph: {
+        edgeCount: 2, resolved: 1, none: 1, sentinel: 0, dangling: 0, closed: true,
+        danglingSamples: [], sentinelSamples: [], edges: [], edgesTruncated: false
+      },
+      commandCalls: {
+        total: 2, distinctCommandIds: 2,
+        bySlot: [
+          { slot: 'entry', count: 1 },
+          { slot: 'condition-pass', count: 1 }
+        ],
+        samples: [
+          { sourceGroupId: 0, slot: 'entry', bank: 0, commandId: 10, argCount: 2 },
+          { sourceGroupId: 1, slot: 'condition-pass', bank: 0, commandId: 20, argCount: 1 }
+        ],
+        samplesTruncated: false
+      },
+      coverageComplete: true,
+      coverageShortfalls: [],
+      unparsedGaps: [],
+      roundTrip: {
+        byteIdentical: true, semanticIdentical: true,
+        sourceHash: 'fixture-esd-hash-0001', rebuiltHash: 'fixture-esd-hash-0001',
+        stateGroupCount: 2, stateCount: 4, stateRecordCount: 6,
+        conditionCount: 2, commandCallCount: 2, commandArgCount: 2
+      },
+      authority: 'candidate'
+    }
+  };
+
+  handleTrusted('resource.readEsdDocument', (_event, sourceUri) => {
+    track('resource.readEsdDocument');
+    const doc = fixtureEsdDocs[sourceUri];
+    if (!doc) {
+      return {
+        ok: false,
+        data: null,
+        diagnostics: [{
+          severity: 'error', code: 'ESD_DOCUMENT_READ_FAILED',
+          message: 'fixture 未登记或损坏的 ESD：读取失败。', sourceUri
+        }]
+      };
+    }
+    return { ok: true, data: { ...doc }, diagnostics: [] };
+  });
+
+  // ── ANIMATION-56B：Animation 工作台合成通道 ──────────────────────────────
+  // 微小、合法构造、明确标记（AGENTS.md §15）。一个可读 TAE：2 个动画 / 3 个时间轴
+  // 事件 / 3 种事件类型，authority 'candidate'，驱动 animation → timeline 选择链断言。
+  // 未登记样本结构化失败，绝不显示为空文档。
+  const fixtureTaeDocs = {
+    'fixture://action/c0000.tae': {
+      format: 'TAE',
+      version: '0x20',
+      sourceSize: 4096,
+      sourceHash: 'fixture-tae-hash-0001',
+      animationCount: 2,
+      totalEventCount: 3,
+      totalGroupCount: 1,
+      animations: [
+        {
+          animId: 0, eventCount: 2, groupCount: 1, timesCount: 2, hkxName: 'a0000.hkx',
+          events: [
+            { startTime: 0, endTime: 1, eventTypeId: 1 },
+            { startTime: 1.5, endTime: 2, eventTypeId: 2 }
+          ],
+          eventsTruncated: false
+        },
+        {
+          animId: 1, eventCount: 1, groupCount: 0, timesCount: 1,
+          events: [{ startTime: 0, endTime: 5, eventTypeId: 3 }],
+          eventsTruncated: false
+        }
+      ],
+      animationsTruncated: false,
+      eventTypes: [1, 2, 3],
+      roundTrip: {
+        byteIdentical: true, semanticIdentical: true,
+        sourceHash: 'fixture-tae-hash-0001', rebuiltHash: 'fixture-tae-hash-0001',
+        animationCount: 2, totalEventCount: 3, totalGroupCount: 1
+      },
+      diagnostics: [],
+      authority: 'candidate'
+    }
+  };
+
+  handleTrusted('resource.readTaeDocument', (_event, sourceUri) => {
+    track('resource.readTaeDocument');
+    const doc = fixtureTaeDocs[sourceUri];
+    if (!doc) {
+      return {
+        ok: false,
+        data: null,
+        diagnostics: [{
+          severity: 'error', code: 'TAE_DOCUMENT_READ_FAILED',
+          message: 'fixture 未登记或损坏的 TAE：读取失败。', sourceUri
+        }]
+      };
+    }
+    return { ok: true, data: { ...doc }, diagnostics: [] };
   });
 
   // ── EVENT-30B：DarkScript3 式事件源码工作台合成通道 ──────────────────

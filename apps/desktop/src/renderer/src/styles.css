@@ -1514,6 +1514,29 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 /* 只读输入框在两个只读工作台里也要能选中复制。 */
 .wb-prop__value input[readonly] { cursor: text; }
 
+/* ── MTD unknown 属性（MATERIAL-53B）：可见但不可编辑 ──
+   未识别属性由 C# 原样保留（MaterialPropertyWire.unknown），本卡只读展示；
+   值用虚线下划线标记「已保留但未完全解释」，不伪装成已解析。 */
+.mtd-unknown-value {
+  color: var(--ink-2);
+  font-style: italic;
+  text-decoration: underline dotted;
+}
+.mtd-partial {
+  margin: 8px 10px; font-size: 12px;
+}
+.mtd-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.mtd-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+
+/* ── ESD / TAE partial 缺口区段（BEHAVIOR-55B / ANIMATION-56B）──
+   authority=partial 时 coverageShortfalls / unparsedGaps / diagnostics /
+   跳转图未闭合必须对用户可见，不能伪装成完整解析。 */
+.esd-partial, .tae-partial {
+  margin: 8px 10px; font-size: 12px;
+}
+.esd-partial summary, .tae-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.esd-partial ul, .tae-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+
 /* ── 跨表引用跳转（param 字段的值是另一张表的行 id）── */
 /* 独占网格第 2 列的第二行：字段名列留空，跳转钮与上方的值输入框左对齐，
    视觉上「这个值指向那张表」。

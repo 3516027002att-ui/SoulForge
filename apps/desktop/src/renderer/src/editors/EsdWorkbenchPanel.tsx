@@ -1,107 +1,442 @@
-import { type ReactElement } from 'react';
-import { formatListTruncation } from '../format/uiText.js';
-import { ReadOnlyEntryWorkbench } from '../workbench/ReadOnlyEntryWorkbench.js';
-
 /**
- * 状态组表渲染上限。ESD 是 V0.6 延期的只读预览族，不加分页控件（超出当前范围），
- * 但静默截断会让用户把部分状态组当成全部——搜索框已能定位具体 ID，说清即可。
+ * BEHAVIOR-55B：Behavior 工作台（§10.3）。
+ *
+ * 三栏：`Files / Machines / States | Conditions / Commands | Inspector`。
+ *
+ * ── 层级 ──
+ *
+ * 机器（状态组）→ 状态 → 转移/条件/动作。数据源是 BEHAVIOR-55A 的 read-esd-document
+ * envelope（EsdDocument），经 projectEsdDocumentPages 投影出 states / conditions /
+ * transitions 三页，renderer 不维护第二套 native parser。
+ *
+ * ── 不按 action 目录分类 ──
+ *
+ * 左栏列的是状态组（machine），不是磁盘 action 目录；右栏是 conditions/commands，
+ * 不为凑四栏造 Tools 空栏（§10.3）。
+ *
+ * ── authority 语义 ──
+ *
+ * unknown layout 由 authority 表达：RPN 字节码不解码登记在 unparsedGaps、声明量与
+ * 实解析量不符登记在 coverageShortfalls，任一非空都会把 authority 压到 partial。
+ * partial 时 Inspector 必须把 coverageShortfalls / unparsedGaps / transitionGraph
+ * 闭合性暴露给用户，不能把「读出来了」伪装成「完整解析」。
+ *
+ * ── 转移选择 ──
+ *
+ * 条件行就是转移载体（每条 condition 携带源状态/目标状态偏移）；选中条件行，
+ * Inspector 显示该转移的明细。§10.3 的列名是 Conditions / Commands，不另开
+ * Transitions 组。
  */
+
+import { useMemo, useState, type ReactElement } from 'react';
+import {
+  isEsdDocument,
+  projectEsdDocumentPages,
+  type EsdConditionSampleWire,
+  type EsdDocument
+} from '@soulforge/shared';
+import { formatListTruncation } from '../format/uiText.js';
+import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
+
+/** 状态组表渲染上限（上游数据截断；列表本身由布局栏滚动承载）。 */
 const STATE_GROUP_RENDER_LIMIT = 200;
-
-export interface EsdStateGroupSummary {
-  groupId: number;
-  stateCount: number;
-}
-
-export interface EsdDocumentData {
-  format: string;
-  version: number;
-  sourceSize: number;
-  sourceHash: string;
-  stateGroupCount: number;
-  stateCount: number;
-  conditionCount: number;
-  commandCallCount: number;
-  commandArgCount: number;
-  commandBanks: number[];
-  authority: string;
-  stateGroups?: EsdStateGroupSummary[];
-}
+/** 条件样本渲染上限。 */
+const CONDITION_RENDER_LIMIT = 200;
+/** 命令调用样本渲染上限。 */
+const COMMAND_RENDER_LIMIT = 200;
 
 export interface EsdWorkbenchPanelProps {
   resourceUri: string;
-  data: EsdDocumentData | null;
+  data: EsdDocument | null;
 }
 
-/**
- * ESD 状态机只读面板：显示状态组、条件和命令统计。
- */
-export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
-  const data = props.data;
+type EsdSelectionKind = 'file' | 'machine' | 'condition' | 'command';
 
-  /*
-   * 筛选与选中态已由 ReadOnlyEntryWorkbench 承担，这里只做上游截断。
-   *
-   * 保留 STATE_GROUP_RENDER_LIMIT 的理由：它限制的是**投影出多少条目**，
-   * 与工作台内部的分页是两件事。去掉它会让极端语料一次性构造出全部条目对象。
-   */
-  const visibleGroups = (data?.stateGroups ?? []).slice(0, STATE_GROUP_RENDER_LIMIT);
-  const filtered = data?.stateGroups ?? [];
-  const truncationNote = formatListTruncation({
-    total: filtered.length,
-    shown: visibleGroups.length,
-    noun: '个状态组',
-    hint: '用搜索框按 ID 缩小范围'
+interface EsdSelection {
+  kind: EsdSelectionKind;
+  id: string;
+  label: string;
+  /** 选中条件/命令所属的状态组（sourceGroupId），驱动中栏过滤。 */
+  machineGroupId?: number;
+  /** 选中条件的条件记录偏移（稳定 identity）。 */
+  conditionOffset?: number;
+  /** 选中命令在 commandCalls.samples 全数组里的索引。 */
+  commandIndex?: number;
+}
+
+/** 文件显示名：取 sourceUri 的 basename。 */
+function fileLabel(resourceUri: string): string {
+  const base = resourceUri.split(/[/\\]/).pop() ?? resourceUri;
+  return base || resourceUri;
+}
+
+export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
+  const [selected, setSelected] = useState<EsdSelection | null>(null);
+
+  const document = useMemo(
+    () => (props.data && isEsdDocument(props.data) ? props.data : null),
+    [props.data]
+  );
+  const pages = useMemo(
+    () => (document ? projectEsdDocumentPages(document) : null),
+    [document]
+  );
+
+  const states = pages?.states;
+  const conditions = pages?.conditions;
+  const transitions = pages?.transitions;
+  const stateGroups = states?.stateGroups ?? [];
+  const conditionSamples: EsdConditionSampleWire[] = conditions?.samples ?? [];
+  const commandSamples = document?.commandCalls.samples ?? [];
+
+  // 未选机器时条件/命令按全部展示；选中后按机器过滤（machine → state → condition）。
+  const activeMachine = selected?.kind === 'machine' || selected?.kind === 'condition' || selected?.kind === 'command'
+    ? (selected?.machineGroupId ?? null)
+    : null;
+
+  const visibleStateGroups = stateGroups.slice(0, STATE_GROUP_RENDER_LIMIT);
+  const stateGroupTruncation = formatListTruncation({
+    total: stateGroups.length,
+    shown: visibleStateGroups.length,
+    noun: '个状态组'
   });
 
-  /*
-   * 改为通用只读工作台（左状态组 / 右属性）。
-   *
-   * 此前是纵向堆叠的 <table>，且行选择是裸 `<tr onClick>` —— 键盘完全不可达，
-   * 而选中行才出现右侧详情，于是键盘用户根本看不到任何状态组的字段。
-   * 现在走共用的 selectableRowAttributes（键盘契约由其单测锁定）。
-   *
-   * 截断说明保留 data-testid="esd-truncation"：test:esd-gap-visibility 断言它。
-   * 通用工作台已内置分页，但截断说明说的是**上游数据**的截断
-   * （stateGroups 只带回前 N 组），与分页无关，因此仍要显示。
-   */
-  const entries = visibleGroups.map((group) => ({
-    id: String(group.groupId),
-    label: `状态组 ${group.groupId}`,
-    meta: `${group.stateCount} 状态`,
-    properties: [
-      ['State Group ID', String(group.groupId)],
-      ['State Count', String(group.stateCount)]
-    ] as Array<readonly [string, string]>
-  }));
+  const visibleConditions = conditionSamples
+    .filter((sample) => activeMachine === null || sample.sourceGroupId === activeMachine)
+    .slice(0, CONDITION_RENDER_LIMIT);
+  const filteredConditionCount = conditionSamples
+    .filter((sample) => activeMachine === null || sample.sourceGroupId === activeMachine)
+    .length;
+  const conditionsTruncation = formatListTruncation({
+    total: filteredConditionCount,
+    shown: visibleConditions.length,
+    noun: '个条件'
+  });
+
+  const visibleCommands = commandSamples
+    .map((sample, index) => ({ sample, index }))
+    .filter(({ sample }) => activeMachine === null || sample.sourceGroupId === activeMachine)
+    .slice(0, COMMAND_RENDER_LIMIT);
+  const filteredCommandCount = commandSamples
+    .filter((sample) => activeMachine === null || sample.sourceGroupId === activeMachine)
+    .length;
+  const commandsTruncation = formatListTruncation({
+    total: filteredCommandCount,
+    shown: visibleCommands.length,
+    noun: '个命令调用'
+  });
+
+  const authority = document?.authority;
+  const isPartial = authority === 'partial';
+  const gapCount = document?.unparsedGaps.length ?? 0;
+  const shortfallCount = document?.coverageShortfalls.length ?? 0;
+  const graphClosed = transitions?.closed ?? false;
+  const visibleGaps = (document?.unparsedGaps ?? []).slice(0, 8);
+  const visibleShortfalls = (document?.coverageShortfalls ?? []).slice(0, 8);
+
+  function selectMachine(groupId: number): void {
+    setSelected({
+      kind: 'machine',
+      id: `machine-${groupId}`,
+      label: `状态组 ${groupId}`,
+      machineGroupId: groupId
+    });
+  }
+
+  function selectFile(): void {
+    setSelected({ kind: 'file', id: 'file', label: fileLabel(props.resourceUri) });
+  }
+
+  function selectCondition(sample: EsdConditionSampleWire): void {
+    setSelected({
+      kind: 'condition',
+      id: `cond-${sample.conditionRelOffset}`,
+      label: `条件 @0x${sample.conditionRelOffset.toString(16)}`,
+      machineGroupId: sample.sourceGroupId,
+      conditionOffset: sample.conditionRelOffset
+    });
+  }
+
+  function selectCommand(index: number): void {
+    const sample = commandSamples[index];
+    if (!sample) return;
+    setSelected({
+      kind: 'command',
+      id: `cmd-${index}`,
+      label: `命令 ${sample.commandId}`,
+      machineGroupId: sample.sourceGroupId,
+      commandIndex: index
+    });
+  }
+
+  /** Inspector 内容（按选中项）。 */
+  function inspectorRows(): Array<readonly [string, string]> {
+    if (selected?.kind === 'condition') {
+      const sample = conditionSamples.find(
+        (item) => item.conditionRelOffset === selected.conditionOffset
+      );
+      if (!sample) return [['条件', '—']];
+      return [
+        ['条件偏移', `0x${sample.conditionRelOffset.toString(16)}`],
+        ['源状态组', String(sample.sourceGroupId)],
+        ['源状态偏移', `0x${sample.sourceStateRelOffset.toString(16)}`],
+        ['目标状态偏移', sample.targetStateRelOffset >= 0
+          ? `0x${sample.targetStateRelOffset.toString(16)}`
+          : '—（不跳转）'],
+        ['子条件数', String(sample.subConditionCount)],
+        ['evaluator 长度', `${sample.evaluatorLength} 字节（未解码）`],
+        ['pass 命令数', String(sample.passCommandCount)]
+      ];
+    }
+    if (selected?.kind === 'command') {
+      const sample = selected.commandIndex === undefined
+        ? undefined
+        : commandSamples[selected.commandIndex];
+      if (!sample) return [['命令', '—']];
+      return [
+        ['命令 ID', String(sample.commandId)],
+        ['槽位', sample.slot],
+        ['bank', String(sample.bank)],
+        ['参数数', String(sample.argCount)],
+        ['源状态组', String(sample.sourceGroupId)]
+      ];
+    }
+    if (selected?.kind === 'machine') {
+      const group = stateGroups.find((item) => item.groupId === selected.machineGroupId);
+      return [
+        ['状态组 ID', String(group?.groupId ?? selected.machineGroupId ?? '—')],
+        ['语义状态数', String(group?.stateCount ?? '—')],
+        ['声明状态组数', String(document?.declaredStateGroupCount ?? '—')],
+        ['已解析状态数', String(document?.parsedStateCount ?? '—')],
+        ['转移边总数', String(transitions?.edgeCount ?? 0)],
+        ['已解析转移', String(transitions?.resolved ?? 0)],
+        ['不跳转', String(transitions?.none ?? 0)],
+        ['哨兵目标', String(transitions?.sentinel ?? 0)],
+        ['悬空目标', String(transitions?.dangling ?? 0)],
+        ['跳转图闭合', transitions?.closed ? '是' : '否']
+      ];
+    }
+    // file / 未选中：文件级统计。
+    return [
+      ['格式', document?.format ?? 'ESD'],
+      ['版本', String(document?.version ?? '—')],
+      ['状态组数', String(states?.stateGroupCount ?? 0)],
+      ['语义状态数', String(states?.stateCount ?? 0)],
+      ['物理状态记录', String(states?.stateRecordCount ?? 0)],
+      ['声明条件数', String(conditions?.declaredConditionCount ?? 0)],
+      ['已解析条件数', String(conditions?.parsedConditionCount ?? 0)],
+      ['命令调用（声明）', String(document?.declaredCommandCallCount ?? 0)],
+      ['命令调用（已解析）', String(document?.parsedCommandCallCount ?? 0)],
+      ['coverageComplete', document?.coverageComplete ? '是' : '否'],
+      ['authority', authority ?? '—']
+    ];
+  }
+
+  const selectedMachineRow = selected?.kind === 'machine'
+    ? stateGroups.find((item) => item.groupId === selected.machineGroupId)
+    : null;
 
   return (
-    <section className="panel" aria-label="ESD 状态机面板">
-      {truncationNote && (
-        <p className="muted" data-testid="esd-truncation">{truncationNote}</p>
-      )}
-      <ReadOnlyEntryWorkbench
-        label="ESD 状态机工作台"
-        kindLabel="ESD 状态机"
-        entriesTitle="State Groups"
-        filterPlaceholder="搜索状态组 ID…"
-        deferredPreviewRelease="V0.6"
-        entries={entries}
-        emptyHint="选择 .esd 文件以查看状态机数据。"
-        {...(data
-          ? {
-              summary: `${data.stateGroupCount} groups · ${data.stateCount} states`
-                + ` · ${data.conditionCount} conds · ${data.authority}`,
-              footer: (
-                <span className="muted" style={{ fontSize: 11 }}>
-                  命令 banks：{data.commandBanks?.join(', ') ?? '—'} ·
-                  命令调用：{data.commandCallCount} ·
-                  命令参数：{data.commandArgCount}
-                </span>
-              )
-            }
-          : {})}
-      />
-    </section>
+    <WorkbenchLayout
+      label="Behavior 工作台"
+      columns={[
+        {
+          id: 'files-machines-states',
+          title: 'Files / Machines / States',
+          hint: `${states?.stateGroupCount ?? 0} machines · ${states?.stateCount ?? 0} states`,
+          initialFlex: 0.28,
+          minWidth: 200,
+          children: (
+            <div className="wb-list">
+              {document === null ? (
+                <p className="wb-empty">选择 .esd 文件以查看状态机数据。</p>
+              ) : (
+                <>
+                  <div className="wb-list__group-label">Files</div>
+                  <div
+                    className="wb-row"
+                    {...selectableRowAttributes({
+                      selected: selected?.kind === 'file',
+                      isTabEntry: isRowTabEntry(0, selected !== null),
+                      onSelect: selectFile
+                    })}
+                  >
+                    <span className="wb-row__name">{fileLabel(props.resourceUri)}</span>
+                  </div>
+                  <div className="wb-list__group-label">Machines</div>
+                  {visibleStateGroups.map((group) => (
+                    <div
+                      key={group.groupId}
+                      className="wb-row"
+                      {...selectableRowAttributes({
+                        selected: selected?.kind === 'machine' && selected.machineGroupId === group.groupId,
+                        isTabEntry: false,
+                        onSelect: () => selectMachine(group.groupId)
+                      })}
+                    >
+                      <span className="wb-row__name">状态组 {group.groupId}</span>
+                      <span className="wb-row__meta">{group.stateCount} 状态</span>
+                    </div>
+                  ))}
+                  {stateGroupTruncation && (
+                    <p className="muted" data-testid="esd-truncation">{stateGroupTruncation}</p>
+                  )}
+                  <div className="wb-list__group-label">States</div>
+                  {selectedMachineRow ? (
+                    <div className="wb-row">
+                      <span className="wb-row__name">状态组 {selectedMachineRow.groupId} 的状态</span>
+                      <span className="wb-row__meta">{selectedMachineRow.stateCount} 语义状态</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="wb-row">
+                        <span className="wb-row__name">全部语义状态</span>
+                        <span className="wb-row__meta">{states?.stateCount ?? 0}</span>
+                      </div>
+                      <div className="wb-row">
+                        <span className="wb-row__name">物理状态记录</span>
+                        <span className="wb-row__meta">{states?.stateRecordCount ?? 0}</span>
+                      </div>
+                      {states && states.stateSentinelModelConsistent === false && (
+                        <p className="wb-empty diag-error" data-testid="esd-sentinel-divergence">
+                          哨兵模型不一致：组 {states.stateSentinelDivergentGroupIds.join(', ') || '—'}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        },
+        {
+          id: 'conditions-commands',
+          title: 'Conditions / Commands',
+          hint: `${conditionSamples.length} conds · ${commandSamples.length} cmds`,
+          initialFlex: 0.32,
+          minWidth: 220,
+          children: (
+            <div className="wb-list">
+              {document === null && <p className="wb-empty">先选择 .esd 文件。</p>}
+              {document !== null && (
+                <>
+                  <div className="wb-list__group-label">Conditions（转移载体）</div>
+                  {activeMachine !== null && (
+                    <p className="muted" style={{ fontSize: 11 }}>
+                      已按状态组 {activeMachine} 过滤
+                    </p>
+                  )}
+                  {visibleConditions.map((sample) => (
+                    <div
+                      key={sample.conditionRelOffset}
+                      className="wb-row"
+                      {...selectableRowAttributes({
+                        selected: selected?.kind === 'condition' && selected.id === `cond-${sample.conditionRelOffset}`,
+                        isTabEntry: false,
+                        onSelect: () => selectCondition(sample)
+                      })}
+                    >
+                      <span className="wb-row__name">条件 @0x{sample.conditionRelOffset.toString(16)}</span>
+                      <span className="wb-row__meta">
+                        {sample.targetStateRelOffset >= 0
+                          ? `→ 0x${sample.targetStateRelOffset.toString(16)}`
+                          : '不跳转'}
+                      </span>
+                    </div>
+                  ))}
+                  {conditionsTruncation && (
+                    <p className="muted" data-testid="esd-conditions-truncation">{conditionsTruncation}</p>
+                  )}
+                  {visibleConditions.length === 0 && (
+                    <p className="wb-empty">没有可显示的条件样本。</p>
+                  )}
+                  <div className="wb-list__group-label">Commands</div>
+                  {visibleCommands.map(({ sample, index }) => (
+                    <div
+                      key={`${sample.sourceGroupId}-${sample.slot}-${sample.commandId}-${index}`}
+                      className="wb-row"
+                      {...selectableRowAttributes({
+                        selected: selected?.kind === 'command' && selected.commandIndex === index,
+                        isTabEntry: false,
+                        onSelect: () => selectCommand(index)
+                      })}
+                    >
+                      <span className="wb-row__name">命令 {sample.commandId}</span>
+                      <span className="wb-row__meta">{sample.slot} · {sample.argCount} 参数</span>
+                    </div>
+                  ))}
+                  {commandsTruncation && (
+                    <p className="muted" data-testid="esd-commands-truncation">{commandsTruncation}</p>
+                  )}
+                  {visibleCommands.length === 0 && (
+                    <p className="wb-empty">没有可显示的命令调用。</p>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        },
+        {
+          id: 'inspector',
+          title: 'Inspector',
+          ...(selected ? { hint: selected.label } : {}),
+          initialFlex: 0.4,
+          minWidth: 260,
+          children: (
+            <div className="wb-list">
+              {document === null && <p className="wb-empty">选择 .esd 文件后查看详情。</p>}
+              {document !== null && (
+                <>
+                  <div className="wb-list__group-label">
+                    {selected ? selected.label : '文件统计'}
+                  </div>
+                  <div className="wb-props">
+                    {inspectorRows().map(([name, value]) => (
+                      <div key={name} className="wb-prop">
+                        <span className="wb-prop__name">{name}</span>
+                        <span className="wb-prop__value wb-prop__value--readonly">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {isPartial && (gapCount > 0 || shortfallCount > 0 || graphClosed === false) && (
+                    <details className="esd-partial" data-testid="esd-partial-gaps">
+                      <summary>
+                        authority={authority}
+                        {gapCount > 0 ? ` · 未解析区间 ${gapCount} 项` : ''}
+                        {shortfallCount > 0 ? ` · 覆盖率缺口 ${shortfallCount} 项` : ''}
+                        {graphClosed === false ? ' · 跳转图未闭合' : ''}
+                      </summary>
+                      <ul>
+                        {visibleShortfalls.map((shortfall, index) => (
+                          <li key={`sf-${index}`} className="muted">{shortfall}</li>
+                        ))}
+                        {visibleGaps.map((gap, index) => (
+                          <li key={`gap-${index}`} className="muted">{gap}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  <div className="wb-list__group-label">写回</div>
+                  <p className="wb-empty">
+                    ESD 写回链尚未接通（BEHAVIOR-55C），当前为只读工作台；转移/条件/命令不可编辑。
+                  </p>
+                </>
+              )}
+            </div>
+          )
+        }
+      ]}
+      toolbar={
+        <>
+          <span className="crumb">Behavior · {fileLabel(props.resourceUri)}</span>
+          {document && (
+            <span className="muted" style={{ fontSize: 11 }}>
+              {states?.stateCount ?? 0} states · {conditionSamples.length} conds · {authority}
+            </span>
+          )}
+        </>
+      }
+    />
   );
 }
