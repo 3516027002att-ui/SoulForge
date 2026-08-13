@@ -121,6 +121,7 @@ export type BridgeCommandName =
   | 'read-flver-texture-slots'
   | 'read-flver-dummies'
   | 'read-esd-document'
+  | 'read-mtd-document'
   | 'capabilities'
   | 'health';
 

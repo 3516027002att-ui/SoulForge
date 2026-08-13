@@ -5,7 +5,7 @@
  * Authority: candidate — read-only, no writer or game-load verification.
  */
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
-import { resolveNativeFixture } from './nativeFixtureRegistry.js';
+import { nativeFixtureRoleRegistered, resolveNativeFixture } from './nativeFixtureRegistry.js';
 import { classifyChildExtract, reportInfrastructureFailure } from './nativeFixtureExtract.js';
 
 interface TaeEnvelope {
@@ -28,6 +28,17 @@ interface TaeEnvelope {
 }
 
 async function main(): Promise<void> {
+  const explicitPath = process.argv[2]?.trim();
+  // TAE 属 V0.6 只读预览族，本机 registry 未登记 tae-primary 是合法状态，应诚实跳过。
+  // 与 runNativeEsdSmoke 同款：只放行「未登记」；一旦登记，样本损坏/哈希不符/越界仍失败关闭。
+  if (!explicitPath && !(await nativeFixtureRoleRegistered('tae-primary'))) {
+    console.log(JSON.stringify({
+      ok: true,
+      status: 'skipped',
+      message: 'tae-primary not registered in native fixture registry (TAE read-only preview family).'
+    }));
+    return;
+  }
   const source = await resolveNativeFixture(
     process.argv[2],
     'tae-primary',

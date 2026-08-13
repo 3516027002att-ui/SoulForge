@@ -533,8 +533,7 @@ internal static class BridgeDaemonHost
         "write-tpf-texture-replace", "read-tae-document",
         "read-flver-document", "read-flver-mesh", "read-flver-skeleton",
         "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
-        // read-mtd-document 不在此列：它已从 dispatch 撤下（V0.6 延期项，
-        // 见 BridgeCommandService 里那段说明）。广告面不得声明未受理的命令。
+        "read-mtd-document",
         "export-event", "export-map", "export-param",
         "export-msg", "probe-oodle", "probe-document-locator"
     };

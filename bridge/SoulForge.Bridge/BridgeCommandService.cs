@@ -850,19 +850,52 @@ internal sealed class BridgeCommandService
             }
         }
 
-        // read-mtd-document 已从 dispatch 撤下（落到尾部 UNKNOWN_COMMAND）。
-        //
-        // 为什么撤下而不是补进 TS：MTD 是 user-approved 的 V0.6 延期项
-        // （scope.json 的 SCOPE-ASSET-MTD 与 SCOPE-ASSETS，authorityAtRuling=unverified），
-        // 把它接进 TS union 等于在没有 parser/writer/validator/authority 门槛的前提下
-        // 扩大 V0.5 的可调用面。而留在「C# 已实现、TS 不可达」这个中间状态更糟：
-        // 254 行的 MtdNativeDocument 既不可达也无人验证，却会被能力盘点读成已交付。
-        //
-        // MtdNativeDocument 与 MTD_DOCUMENT_* 诊断码**保留不动**：撤下的是入口，
-        // 不是实现。V0.6 承接时按 scope.json 的 resumeRequires 走通用流程
-        // （用户裁定改回 supported → 同步 gates/slices → 补齐门槛 → 重新封存），
-        // 届时同时恢复本分支、AdvertisedCommands 与两侧 TS union 三处。
-        // test:bridge-command-advertisement 会在任一处漏掉时失败关闭。
+        if (command == "read-mtd-document")
+        {
+            // MATERIAL-53A：恢复 read-mtd-document。MTD 是 user-approved 的 V0.6
+            // 延期项（scope.json 的 SCOPE-ASSET-MTD，authorityAtRuling=unverified），
+            // 按 resumeRequires 走通用承接流程时恢复三处入口：本分支、
+            // AdvertisedCommands 与两侧 TS union（test:bridge-command-advertisement
+            // 会在任一处漏掉时失败关闭）。
+            //
+            // MtdNativeDocument 是**只读安全 XML 投影**：无 writer、无字节重建、
+            // 无 schema 语义解释（infer-mtd-schema 永久禁令），authority 上限
+            // candidate——发现未识别 XML 元素/属性（unparsedGaps）或重复解析
+            // 不一致时降 partial。resourceKind 用 "material"。
+            try
+            {
+                var document = MtdNativeDocument.ReadFile(file);
+                var roundTrip = document.VerifyStructure();
+                var diagnostics = new List<Diagnostic>
+                {
+                    new Diagnostic(
+                        roundTrip.Consistent ? "info" : "error",
+                        roundTrip.Consistent ? "MTD_DOCUMENT_ROUNDTRIP_VERIFIED" : "MTD_DOCUMENT_ROUNDTRIP_FAILED",
+                        roundTrip.Consistent
+                            ? $"MTD 只读重解析确定性通过；params={document.Params.Count}, textures={document.Textures.Count}。本项只证明同一份字节解析两遍一致，不构成解析完整性声明。"
+                            : "MTD 只读往返语义不一致。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        roundTrip)
+                };
+                // 未识别结构必须单列诊断，不能只靠 authority 降级：消费方常只读
+                // authority，而「哪几项没解析全」才是排查入口（硬约束 8 要求
+                // partial 返回结构化诊断）。
+                if (document.UnparsedGaps.Count > 0)
+                {
+                    diagnostics.Add(new Diagnostic(
+                        "warning",
+                        "MTD_STRUCTURE_NOT_PARSED_IN_SCOPE",
+                        $"MTD 未识别以下 XML 元素/属性：{string.Join("; ", document.UnparsedGaps)}。authority 已降为 partial。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        new { unparsedGaps = document.UnparsedGaps }));
+                }
+                return BridgeResult<object>.Partial(file, "material", diagnostics.ToArray(), document.ToEnvelope(roundTrip));
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "material", "MTD_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
 
         if (command == "read-esd-document")
         {

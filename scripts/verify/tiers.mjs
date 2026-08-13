@@ -145,6 +145,13 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:client': 'synthetic',
   'bridge:verify:crash': 'synthetic',
   'bridge:verify:daemon': 'synthetic',
+  // MATERIAL-53A read-mtd-document 三页投影（front-end.md §18.19）。与同批
+  // esd/tae（bridge:verify:esd / bridge:verify:tae）不同——那两条缺语料时
+  // 恒诚实跳过，本条缺语料时走自造 synthetic fixture leg 并真实经过 C#
+  // MtdNativeDocument 跑通（无需真实 .mtd 语料，infer-mtd-schema 永久禁令
+  // 下本机也可能登记不到 mtd-primary）。故按 test:native-document-locator
+  // 的先例（需要真实 exe、fixture 自造）归 synthetic 而非 native。
+  'bridge:verify:mtd': 'synthetic',
   'test:bridge-recovery-harness': 'synthetic',
   'test:bridge-staging': 'synthetic',
   // Bridge allowed-root 生命周期（front-end.md §13.2）：read 不得附加不存在的

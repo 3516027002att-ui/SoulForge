@@ -94,6 +94,7 @@ internal sealed class EsdNativeDocument
     private const int MaxConditions = 1_000_000;
     private const long MaxSourceBytes = 64L * 1024 * 1024;
     private const int MaxConditionDepth = 64;
+    private const int MaxConditionSamples = 200;
 
     private EsdNativeDocument(
         byte[] sourceBytes,
@@ -114,7 +115,8 @@ internal sealed class EsdNativeDocument
         IReadOnlyList<int> commandBanks,
         IReadOnlyList<EsdBytecodeRegion> bytecodeRegions,
         IReadOnlyList<EsdTransitionEdge> transitionEdges,
-        IReadOnlyList<EsdCommandCall> commandCalls)
+        IReadOnlyList<EsdCommandCall> commandCalls,
+        IReadOnlyList<EsdConditionInfo> conditionInfos)
     {
         SourceBytes = sourceBytes;
         Version = version;
@@ -135,6 +137,7 @@ internal sealed class EsdNativeDocument
         BytecodeRegions = bytecodeRegions;
         TransitionEdges = transitionEdges;
         CommandCalls = commandCalls;
+        ConditionInfos = conditionInfos;
     }
 
     public byte[] SourceBytes { get; }
@@ -173,6 +176,14 @@ internal sealed class EsdNativeDocument
 
     /// <summary>命令调用（含此前未读的 commandID），按 entry/exit/while/condition-pass 分槽。</summary>
     public IReadOnlyList<EsdCommandCall> CommandCalls { get; }
+
+    /// <summary>
+    /// 每个唯一 condition 一行的轻量明细（相对偏移、跳转目标、子条件数、evaluator 长度、
+    /// condition-pass 命令数）。行数与 <see cref="ParsedConditionCount"/> 一致——两者都
+    /// 在 visitedConditions 去重后登记，共享 condition 只占一行。供工作台条件页做
+    /// bounded 列表，只携带元数据，不含 evaluator/命令参数体的字节内容。
+    /// </summary>
+    public IReadOnlyList<EsdConditionInfo> ConditionInfos { get; }
 
     /// <summary>悬空目标的边：既非 −1 也不落在任何语义 state 记录起点上。</summary>
     public IReadOnlyList<EsdTransitionEdge> DanglingEdges =>
@@ -327,6 +338,7 @@ internal sealed class EsdNativeDocument
         var sentinelDivergent = new List<long>();
         var edges = new List<EsdTransitionEdge>();
         var commandCalls = new List<EsdCommandCall>();
+        var conditionInfos = new List<EsdConditionInfo>();
         // state 相对偏移 → (groupId, stateId)。转移边的目标是**相对偏移**，
         // 解析成状态需要这张表；表只能在全部 group 遍历完后才完整，
         // 所以边先记原始偏移，最后统一解析（见 ResolveEdges）。
@@ -380,7 +392,7 @@ internal sealed class EsdNativeDocument
                     {
                         var condRel = ReadInt64(source, checked((int)(condArrAbs + (long)c * 8)));
                         ParseCondition(source, condRel, 0,
-                            visitedConditions, visitedCalls, visitedArgs, banks, bytecode,
+                            visitedConditions, visitedCalls, visitedArgs, banks, bytecode, conditionInfos,
                             groupId, statesRel + (long)s * StateEntrySize, edges, commandCalls);
                     }
                 }
@@ -432,7 +444,7 @@ internal sealed class EsdNativeDocument
             declaredConditionCount, declaredCommandCallCount, declaredCommandArgCount,
             stateGroups, totalParsedStates, totalStateRecords, sentinelDivergent,
             visitedConditions.Count, visitedCalls.Count, visitedArgs.Count,
-            banks.ToArray(), bytecode, resolvedEdges, commandCalls);
+            banks.ToArray(), bytecode, resolvedEdges, commandCalls, conditionInfos);
     }
 
     /// <summary>
@@ -506,6 +518,7 @@ internal sealed class EsdNativeDocument
         HashSet<long> visitedArgs,
         SortedSet<int> banks,
         List<EsdBytecodeRegion> bytecode,
+        List<EsdConditionInfo> conditionInfos,
         long ownerGroupId,
         long ownerStateRelOffset,
         List<EsdTransitionEdge> edges,
@@ -544,6 +557,16 @@ internal sealed class EsdNativeDocument
         var evalRel = ReadInt64(source, a + 0x28);
         var evalLength = ReadInt64(source, a + 0x30);
 
+        // ── Condition 明细行（只登记已读出的元数据，不改变任何解析语义）──
+        // 与 visitedConditions 同生命周期：每个唯一 condition 恰好一行，
+        // 因此行数恒等于 ParsedConditionCount。evaluator 与命令参数体仍按
+        // 不透明 (offset, length) 上报，这里只带长度计数，不含字节内容。
+        conditionInfos.Add(new EsdConditionInfo(
+            condRelOffset, ownerGroupId, ownerStateRelOffset, targetStateRel,
+            checked((int)Math.Max(0, subcondCount)),
+            checked((int)Math.Max(0, evalLength)),
+            checked((int)Math.Max(0, passCmdCount))));
+
         // Evaluator bytecode region (opaque)
         if (evalRel >= 0 && evalLength > 0)
         {
@@ -570,7 +593,7 @@ internal sealed class EsdNativeDocument
             {
                 var childRel = ReadInt64(source, checked((int)(subAbs + (long)i * 8)));
                 ParseCondition(source, childRel, depth + 1,
-                    visitedConditions, visitedCalls, visitedArgs, banks, bytecode,
+                    visitedConditions, visitedCalls, visitedArgs, banks, bytecode, conditionInfos,
                     ownerGroupId, ownerStateRelOffset, edges, commandCalls);
             }
         }
@@ -792,6 +815,24 @@ internal sealed class EsdNativeDocument
             stateGroupsTruncated = StateGroups.Count > sampleLimit,
             commandBanks = CommandBanks,
             bytecodeRegionCount = BytecodeRegions.Count,
+            // ── 条件明细页（bounded：按 conditionRelOffset 排序取前 MaxConditionSamples 行）──
+            // 行数恒等于 parsedConditionCount（同一 visitedConditions 去重生命周期）；
+            // 只携带元数据，不含 evaluator 字节。工作台条件页用它做列表；
+            // 完整分页需 V0.6 承接分页 channel。
+            conditionSamples = ConditionInfos
+                .OrderBy(c => c.ConditionRelOffset)
+                .Take(MaxConditionSamples)
+                .Select(c => new
+                {
+                    conditionRelOffset = c.ConditionRelOffset,
+                    sourceGroupId = c.SourceGroupId,
+                    sourceStateRelOffset = c.SourceStateRelOffset,
+                    targetStateRelOffset = c.TargetStateRelOffset,
+                    subConditionCount = c.SubConditionCount,
+                    evaluatorLength = c.EvaluatorLength,
+                    passCommandCount = c.PassCommandCount
+                }).ToArray(),
+            conditionSamplesTruncated = ConditionInfos.Count > MaxConditionSamples,
             // ── 状态转移图（此前整体缺失：节点全解析、一条边没连）──
             transitionGraph = new
             {
@@ -942,6 +983,20 @@ internal sealed record EsdCommandCall(
     int Bank,
     int CommandId,
     int ArgCount);
+
+/// <summary>
+/// 一个 condition 的轻量元数据行。只登记解析中已读出的字段，不改变解析语义，
+/// 供工作台条件页做 bounded 列表。<paramref name="ConditionRelOffset"/> 是条件记录
+/// 的相对偏移（相对 DataStart），是 stable identity，envelope 里按它排序取前 N。
+/// </summary>
+internal sealed record EsdConditionInfo(
+    long ConditionRelOffset,
+    long SourceGroupId,
+    long SourceStateRelOffset,
+    long TargetStateRelOffset,
+    int SubConditionCount,
+    int EvaluatorLength,
+    int PassCommandCount);
 
 internal sealed record EsdRoundTripReport(
     bool ByteIdentical,

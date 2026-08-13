@@ -11,8 +11,9 @@ using System.Text;
 ///
 /// <para><b>解析到哪一层：只到 timing，事件参数体未解码。</b>
 /// 本解析器对每个事件读出 startTime / endTime / eventTypeId 与两个偏移
-/// （eventDataOffset、paramDataOffset，见 :203），<b>paramDataOffset 指向的参数体
-/// 一字节未读</b>，envelope 也只导出 timing 与计数（:348-355）。
+/// （eventDataOffset、paramDataOffset），<b>paramDataOffset 指向的参数体
+/// 一字节未读</b>；envelope 只导出 timing 与计数，外加 bounded 的逐动画
+/// 事件时间表（startTime / endTime / eventTypeId，见 ToEnvelope）。
 ///
 /// 原类文档在这一行写的是「TAE defines per-animation event timing (hitboxes,
 /// SFX, VFX, camera shakes)」，与上一行的「Layout verified」并排——读起来像那四项
@@ -352,6 +353,8 @@ internal sealed class TaeNativeDocument
     {
         report ??= VerifyRoundTrip();
         const int sampleLimit = 20;
+        const int timelineEventLimit = 200; // 每动画事件时间表上限（bounded 分页）
+        var invalidTimeRangeCount = CountInvalidTimeRanges();
         return new
         {
             format = "TAE",
@@ -367,13 +370,47 @@ internal sealed class TaeNativeDocument
                 eventCount = a.EventCount,
                 groupCount = a.EventGroupCount,
                 timesCount = a.TimesCount,
-                hkxName = a.HkxName
+                hkxName = a.HkxName,
+                events = a.Events.Take(timelineEventLimit).Select(e => new
+                {
+                    startTime = e.StartTime,
+                    endTime = e.EndTime,
+                    eventTypeId = e.EventTypeId
+                }).ToArray(),
+                eventsTruncated = a.Events.Count > timelineEventLimit
             }).ToArray(),
             animationsTruncated = Animations.Count > sampleLimit,
             eventTypes = EventTypes,
             roundTrip = report,
-            authority = "candidate"
+            diagnostics = invalidTimeRangeCount > 0
+                ? new[]
+                {
+                    new Diagnostic(
+                        "error",
+                        "TAE_INVALID_TIME_RANGE",
+                        $"检测到 {invalidTimeRangeCount} 个事件时间范围非法（startTime > endTime 或非有限值），timeline 投影降级为 partial。")
+                }
+                : Array.Empty<Diagnostic>(),
+            authority = invalidTimeRangeCount > 0 ? "partial" : "candidate"
         };
+    }
+
+    /// <summary>
+    /// 统计 startTime &gt; endTime 或任一时间非有限值的事件数。非零时 envelope 的
+    /// authority 降为 partial 并携带 TAE_INVALID_TIME_RANGE 诊断（见 ToEnvelope）。
+    /// </summary>
+    private int CountInvalidTimeRanges()
+    {
+        var count = 0;
+        foreach (var animation in Animations)
+        {
+            foreach (var ev in animation.Events)
+            {
+                if (!float.IsFinite(ev.StartTime) || !float.IsFinite(ev.EndTime) || ev.StartTime > ev.EndTime)
+                    count++;
+            }
+        }
+        return count;
     }
 
     // ── Binary helpers ──

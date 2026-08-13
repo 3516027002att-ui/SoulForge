@@ -2917,6 +2917,22 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
 
+  handle('resource.readMtdDocument', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 MTD。', sourceUri }] };
+    }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    const result = await runBridge<Record<string, unknown>>({
+      command: 'read-mtd-document',
+      filePath: file.absolutePath,
+      allowedRoots: roots.allowedRoots,
+      timeoutMs: 120_000
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
   handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {

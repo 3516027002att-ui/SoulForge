@@ -279,6 +279,8 @@ const api = {
     ipcRenderer.invoke('resource.readTaeDocument', sourceUri),
   readEsdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
+  readMtdDocument: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readMtdDocument', sourceUri),
   readFlverDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverDocument', sourceUri),
   readTpfDocument: (sourceUri: string): Promise<unknown> =>
