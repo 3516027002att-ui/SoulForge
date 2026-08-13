@@ -152,6 +152,15 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 下本机也可能登记不到 mtd-primary）。故按 test:native-document-locator
   // 的先例（需要真实 exe、fixture 自造）归 synthetic 而非 native。
   'bridge:verify:mtd': 'synthetic',
+  // esd/tae/mtd writer 与 fxr read 的 native smoke：registry 未登记真实语料时走
+  // 自造 synthetic fixture 仍真实经过 C# writer/document 验证（双路径，authority
+  // 恒 partial，同 bridge:verify:mtd）。需要真实 Bridge exe、不需真实语料，故归
+  // synthetic。此前只被各自卡 seal 时人工跑过、从未被任何 tier 调度
+  // （SUITE_UNREGISTERED 实测暴露），登记后进入合成层真跑而不是诚实跳过。
+  'bridge:verify:mtd-writer': 'synthetic',
+  'bridge:verify:esd-writer': 'synthetic',
+  'bridge:verify:tae-writer': 'synthetic',
+  'bridge:verify:fxr': 'synthetic',
   'test:bridge-recovery-harness': 'synthetic',
   'test:bridge-staging': 'synthetic',
   // Bridge allowed-root 生命周期（front-end.md §13.2）：read 不得附加不存在的
