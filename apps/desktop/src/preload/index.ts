@@ -351,6 +351,23 @@ const api = {
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.commitMtdPropertySet', sourceUri, expectedDocumentHash, set),
   /**
+   * BEHAVIOR-55C：ESD 状态转移写回（behavior-transition-upsert）。
+   * mutation 定位用读信封的 stable relOffset（stateRelOffset / conditionRelOffset /
+   * targetStateRelOffset）。命令参数体（RPN 字节码）永久不解码，触碰它的 mutation
+   * 由 C# 侧 fail-closed 拒绝。
+   */
+  commitEsdTransition: (
+    sourceUri: string,
+    expectedDocumentHash: string,
+    mutations: Array<{
+      mutation: string;
+      stateRelOffset?: number;
+      conditionRelOffset?: number;
+      targetStateRelOffset?: number;
+    }>
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.commitEsdTransition', sourceUri, expectedDocumentHash, mutations),
+  /**
    * 当前 PARAM 元数据包的身份与信任状态。
    *
    * 界面据此决定是否显示「信任该元数据包」的一次性确认入口 —— 字段写入必须

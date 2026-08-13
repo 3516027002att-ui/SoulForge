@@ -1069,6 +1069,37 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "write-esd-document")
+        {
+            // BEHAVIOR-55C：ESD 状态转移写回（behavior-transition-upsert）。
+            // 只收 typed transition mutation：set-transition-target（字节级外科替换
+            // 条件记录的 targetStateOffset）/ insert-transition（entry 表内新增
+            // 裸跳转条件）/ set-command-arg（命令参数体是 RPN 字节码，永久不解码
+            // gap → ESD_WRITE_BLOCKED_UNKNOWN_STRUCTURE，fail-closed）。
+            // outputPath 必须是已校验的暂存区路径（越界之外的边界检查由
+            // BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
+            // writer 只接受 loose .esd；talkesdbnd.dcx 容器外层重建由
+            // Patch Engine 在 main 侧完成，本层不重复实现容器逻辑。
+            if (string.IsNullOrWhiteSpace(outputPath))
+                return BridgeResult<object>.Failed(file, "script", "BRIDGE_OUTPUT_PATH_REQUIRED", "ESD writer requires a validated staging output path.");
+            try
+            {
+                var written = await EsdNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                return BridgeResult<object>.Partial(file, "script", new[]
+                {
+                    new Diagnostic("info", "ESD_STAGING_WRITE_VERIFIED", "ESD 状态转移已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
+                }, written);
+            }
+            catch (EsdWriteBlockedException ex)
+            {
+                return BridgeResult<object>.Failed(file, "script", "ESD_WRITE_BLOCKED_UNKNOWN_STRUCTURE", ex.Message, ex.Details);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "script", "ESD_STAGING_WRITE_FAILED", ex.Message);
+            }
+        }
+
         if (command == "write-msb")
         {
             if (string.IsNullOrWhiteSpace(outputPath))

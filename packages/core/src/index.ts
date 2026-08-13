@@ -23,6 +23,7 @@ export * from './editing/flverBridgeCommit.js';
 export * from './editing/paramBridgeCommit.js';
 export * from './editing/gparamBridgeCommit.js';
 export * from './editing/materialBridgeCommit.js';
+export * from './editing/esdBridgeCommit.js';
 export * from './editing/tpfBridgeCommit.js';
 export * from './editing/msbBridgeRead.js';
 export * from './editing/msbBridgeCommit.js';

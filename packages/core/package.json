@@ -54,6 +54,7 @@
     "test:native-bnd4-writer": "tsc -b ../shared . && node dist/testing/runNativeBnd4WriterSmoke.js",
     "test:native-emevd": "tsc -b ../shared . && node dist/testing/runNativeEmevdSmoke.js",
     "test:native-esd": "tsc -b ../shared . && node dist/testing/runNativeEsdSmoke.js",
+    "test:native-esd-writer": "tsc -b ../shared . && node dist/testing/runNativeEsdWriterSmoke.js",
     "test:native-mtd": "tsc -b ../shared . && node dist/testing/runNativeMtdSmoke.js",
     "test:native-mtd-writer": "tsc -b ../shared . && node dist/testing/runNativeMtdWriterSmoke.js",
     "test:native-fxr": "tsc -b ../shared . && node dist/testing/runNativeFxrSmoke.js",
