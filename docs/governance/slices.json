@@ -942,7 +942,7 @@
     {
       "sliceId": "W-REL-C-MULTILANG-03",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只覆盖经 Patch Engine 提交/回滚与引用扫描的实际语言和容器",
@@ -1022,7 +1022,16 @@
       "declaresUnfrozenValidation": true
     }
   ],
-  "activeClaims": [],
+  "activeClaims": [
+    {
+      "sliceId": "W-REL-C-MULTILANG-03",
+      "claimId": "claim-w-rel-c-multilang-03-20260813",
+      "owner": "claude-code",
+      "claimedAt": "2026-08-13T02:13:46.202Z",
+      "heartbeatAt": "2026-08-13T02:13:46.202Z",
+      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    }
+  ],
   "invariants": [
     "authority 不得高于 authorityCap；unverified 表示尚无所需证据，不是绕过 cap 的高等级。",
     "completed 只表示该切片完成，不表示整条路线或 Gate 完成。",
