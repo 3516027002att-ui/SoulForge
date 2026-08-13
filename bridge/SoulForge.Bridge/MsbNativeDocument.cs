@@ -54,6 +54,7 @@ internal sealed class MsbNativeDocument
         IReadOnlyList<MsbRegion> regions,
         IReadOnlyList<MsbMapEvent> events,
         IReadOnlyList<MsbRoute> routes,
+        IReadOnlyDictionary<string, MsbParam> paramsByFamily,
         int partsSectionOffset,
         int firstPartOffset)
     {
@@ -64,6 +65,7 @@ internal sealed class MsbNativeDocument
         Regions = regions;
         Events = events;
         Routes = routes;
+        Params = paramsByFamily;
         PartsSectionOffset = partsSectionOffset;
         FirstPartOffset = firstPartOffset;
     }
@@ -75,6 +77,8 @@ internal sealed class MsbNativeDocument
     public IReadOnlyList<MsbRegion> Regions { get; }
     public IReadOnlyList<MsbMapEvent> Events { get; }
     public IReadOnlyList<MsbRoute> Routes { get; }
+    /// <summary>8 个 param 链的原始索引，delete mutation 需要重写偏移表。</summary>
+    private IReadOnlyDictionary<string, MsbParam> Params { get; }
     public int PartsSectionOffset { get; }
     public int FirstPartOffset { get; }
     public string SourceHash => Hash(SourceBytes);
@@ -106,6 +110,7 @@ internal sealed class MsbNativeDocument
             regions,
             events,
             routes,
+            paramsByFamily,
             partsParam.Offset,
             parts.Count > 0 ? (int)partsParam.EntryOffsets[0] : 0);
     }
@@ -145,7 +150,7 @@ internal sealed class MsbNativeDocument
             var nextOffset = ReadInt64(source, start + ParamHeaderSize + (offsetCount - 1) * 8);
             var name = nameOffset > 0 && nameOffset < source.Length ? ReadUtf16(source, (int)nameOffset) : string.Empty;
             if (!string.IsNullOrEmpty(name))
-                result[name] = new MsbParam(start, version, name, entryOffsets, nextOffset);
+                result[name] = new MsbParam(start, version, name, nameOffset, entryOffsets, nextOffset);
             if (nextOffset <= 0 || nextOffset >= source.Length || nextOffset <= start)
                 break;
             start = (int)nextOffset;
@@ -379,6 +384,33 @@ internal sealed class MsbNativeDocument
                     WriteFloat(rebuilt, baseOff + 8, patch.PosZ.Value);
                     break;
                 }
+                case "delete_part":
+                {
+                    var index = Parts.ToList().FindIndex(p => p.Name == patch.PartName);
+                    if (index < 0) throw new InvalidDataException($"MSB part 不存在：{patch.PartName}");
+                    var part = Parts[index];
+                    GuardRegisteredPart(part);
+                    RemoveEntryFromParam(rebuilt, Params["PARTS_PARAM_ST"], part.Offset);
+                    break;
+                }
+                case "delete_region":
+                {
+                    var index = Regions.ToList().FindIndex(r => r.Name == patch.PartName);
+                    if (index < 0) throw new InvalidDataException($"MSB region 不存在：{patch.PartName}");
+                    var region = Regions[index];
+                    GuardRegisteredRegion(region);
+                    RemoveEntryFromParam(rebuilt, Params["POINT_PARAM_ST"], region.Offset);
+                    break;
+                }
+                case "delete_event":
+                {
+                    var index = Events.ToList().FindIndex(e => e.Name == patch.PartName);
+                    if (index < 0) throw new InvalidDataException($"MSB event 不存在：{patch.PartName}");
+                    var ev = Events[index];
+                    GuardRegisteredEvent(ev);
+                    RemoveEntryFromParam(rebuilt, Params["EVENT_PARAM_ST"], ev.Offset);
+                    break;
+                }
                 default:
                     throw new InvalidDataException($"未知或尚未支持的 MSB mutation：{patch.Kind}。");
             }
@@ -396,6 +428,46 @@ internal sealed class MsbNativeDocument
     {
         if (!MsbEntityTypeRegistry.RegionTypes.Contains(region.TypeId))
             throw new MsbUnregisteredEntityException("region", region.Name, region.TypeId);
+    }
+
+    private static void GuardRegisteredEvent(MsbMapEvent ev)
+    {
+        if (!MsbEntityTypeRegistry.EventTypes.Contains(ev.TypeId))
+            throw new MsbUnregisteredEntityException("event", ev.Name, ev.TypeId);
+    }
+
+    /// <summary>
+    /// 从 param 偏移表删除一个条目（软删除）。
+    ///
+    /// MSB 各 param 头为固定 0x10 字节 + offsetCount 个 int64 偏移表
+    /// （末位为下一 param 的绝对偏移 nextParamOffset）。删除 = 从偏移表
+    /// 移除该条目偏移、offsetCount-1、表尾 8 字节前移；条目字节本身留在
+    /// 原绝对偏移处（SoulsFormats 同样不自动压缩/重连 sibling 名引用，
+    /// 删除后目标只是不再被官方 param 表引用）。其他条目偏移全部不变，
+    /// 因此无损。
+    /// </summary>
+    private static void RemoveEntryFromParam(byte[] target, MsbParam param, int entryOffsetToRemove)
+    {
+        var oldCount = param.EntryOffsets.Length;
+        var index = Array.IndexOf(param.EntryOffsets, (long)entryOffsetToRemove);
+        if (index < 0)
+            throw new InvalidDataException($"MSB param {param.Name} 中找不到待删除条目偏移 0x{entryOffsetToRemove:X}。");
+        var newCount = oldCount - 1;
+        WriteInt32(target, param.Offset, param.Version);
+        WriteInt32(target, param.Offset + 4, newCount + 1);
+        WriteInt64(target, param.Offset + 8, param.NameOffset);
+        var cursor = 0;
+        for (var i = 0; i < oldCount; i++)
+        {
+            if (i == index) continue;
+            WriteInt64(target, param.Offset + ParamHeaderSize + cursor * 8, param.EntryOffsets[i]);
+            cursor++;
+        }
+        WriteInt64(target, param.Offset + ParamHeaderSize + newCount * 8, param.NextOffset);
+        // 压缩后表尾空出 8 字节，清零避免外部读取器把残留旧偏移当成有效条目。
+        var freedStart = param.Offset + ParamHeaderSize + (newCount + 1) * 8;
+        var oldEnd = param.Offset + ParamHeaderSize + (oldCount + 1) * 8;
+        for (var i = freedStart; i < oldEnd; i++) target[i] = 0;
     }
 
     public object ToEnvelope(MsbRoundTripReport? report = null) => new
@@ -482,9 +554,11 @@ internal sealed class MsbNativeDocument
     private static long ReadInt64(byte[] source, int offset) => BinaryPrimitives.ReadInt64LittleEndian(source.AsSpan(offset, 8));
     private static float ReadFloat(byte[] source, int offset) => BinaryPrimitives.ReadSingleLittleEndian(source.AsSpan(offset, 4));
     private static void WriteFloat(byte[] target, int offset, float value) => BinaryPrimitives.WriteSingleLittleEndian(target.AsSpan(offset, 4), value);
+    private static void WriteInt32(byte[] target, int offset, int value) => BinaryPrimitives.WriteInt32LittleEndian(target.AsSpan(offset, 4), value);
+    private static void WriteInt64(byte[] target, int offset, long value) => BinaryPrimitives.WriteInt64LittleEndian(target.AsSpan(offset, 8), value);
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
-    private sealed record MsbParam(int Offset, int Version, string Name, long[] EntryOffsets, long NextOffset);
+    private sealed record MsbParam(int Offset, int Version, string Name, long NameOffset, long[] EntryOffsets, long NextOffset);
 }
 
 /// <summary>

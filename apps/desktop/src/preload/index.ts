@@ -308,7 +308,8 @@ const api = {
     sourceUri: string,
     expectedHash: string,
     mutation: {
-      kind: 'set_part_position' | 'set_part_transform' | 'set_region_position';
+      kind: 'set_part_position' | 'set_part_transform' | 'set_region_position'
+        | 'delete_part' | 'delete_region' | 'delete_event';
       partName: string;
       posX?: number;
       posY?: number;

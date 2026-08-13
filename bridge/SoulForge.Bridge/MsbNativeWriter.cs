@@ -25,9 +25,12 @@ internal static class MsbNativeWriter
         if (patches.Count == 0) throw new InvalidDataException("MSB writer 需要至少一条 mutation。");
         foreach (var patch in patches)
         {
-            var matches = patch.Kind == "set_region_position"
-                ? document.Regions.Count(item => item.Name == patch.PartName)
-                : document.Parts.Count(item => item.Name == patch.PartName);
+            var matches = patch.Kind switch
+            {
+                "set_region_position" or "delete_region" => document.Regions.Count(item => item.Name == patch.PartName),
+                "delete_event" => document.Events.Count(item => item.Name == patch.PartName),
+                _ => document.Parts.Count(item => item.Name == patch.PartName),
+            };
             if (matches != 1)
                 throw new InvalidDataException($"MSB mutation target must resolve uniquely: {patch.PartName}; matches={matches}.");
         }
@@ -50,6 +53,20 @@ internal static class MsbNativeWriter
         var reread = MsbNativeDocument.ReadFile(outputPath);
         foreach (var patch in patches)
         {
+            if (patch.Kind is "delete_part" or "delete_region" or "delete_event")
+            {
+                // 删除后重读必须确认目标已从对应家族消失。
+                var stillPresent = patch.Kind switch
+                {
+                    "delete_part" => reread.Parts.Any(p => p.Name == patch.PartName),
+                    "delete_region" => reread.Regions.Any(r => r.Name == patch.PartName),
+                    _ => reread.Events.Any(e => e.Name == patch.PartName),
+                };
+                if (stillPresent)
+                    throw new InvalidDataException($"MSB delete 后目标仍存在：{patch.PartName}。");
+                continue;
+            }
+
             if (patch.Kind == "set_region_position")
             {
                 var region = reread.Regions.FirstOrDefault(r => r.Name == patch.PartName)

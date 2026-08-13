@@ -16,6 +16,10 @@ export type MsbBridgeMutation =
       scaleX?: number;
       scaleY?: number;
       scaleZ?: number;
+    }
+  | {
+      kind: 'delete_part' | 'delete_region' | 'delete_event';
+      partName: string;
     };
 
 export interface MsbBridgeCommitRequest {
@@ -46,13 +50,17 @@ export async function commitMsbMutationViaBridge(
     mutation: m.kind,
     partName: m.partName
   };
-  if (m.posX !== undefined) commandOptions.posX = m.posX;
-  if (m.posY !== undefined) commandOptions.posY = m.posY;
-  if (m.posZ !== undefined) commandOptions.posZ = m.posZ;
-  if (m.rotX !== undefined) commandOptions.rotX = m.rotX;
-  if (m.scaleX !== undefined) commandOptions.scaleX = m.scaleX;
-  if (m.scaleY !== undefined) commandOptions.scaleY = m.scaleY;
-  if (m.scaleZ !== undefined) commandOptions.scaleZ = m.scaleZ;
+  // kind 是联合字面量判别，!== 链不能把 delete 变体从联合中整体剔除；
+  // 'posX' in m 才是对「该成员带 transform 字段」的结构收窄。
+  if ('posX' in m) {
+    if (m.posX !== undefined) commandOptions.posX = m.posX;
+    if (m.posY !== undefined) commandOptions.posY = m.posY;
+    if (m.posZ !== undefined) commandOptions.posZ = m.posZ;
+    if (m.rotX !== undefined) commandOptions.rotX = m.rotX;
+    if (m.scaleX !== undefined) commandOptions.scaleX = m.scaleX;
+    if (m.scaleY !== undefined) commandOptions.scaleY = m.scaleY;
+    if (m.scaleZ !== undefined) commandOptions.scaleZ = m.scaleZ;
+  }
 
   const result = await runBridge<{
     outputHash?: string;
