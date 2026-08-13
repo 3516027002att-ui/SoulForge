@@ -1100,6 +1100,37 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "write-tae-document")
+        {
+            // ANIMATION-56C：TAE 事件写回（tae-event-upsert）。
+            // 只收 typed event upsert mutation：update-event-times（字节级外科替换
+            // 事件 startTime/endTime，时间槽被兄弟共享时 fail-closed）/ insert-event
+            // （事件参数体按模板逐字节拷贝后追加新事件，布局不连续时
+            // TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE，fail-closed）。
+            // outputPath 必须是已校验的暂存区路径（越界之外的边界检查由
+            // BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
+            // writer 只接受 loose .tae；anibnd.dcx 容器外层重建由
+            // Patch Engine 在 main 侧完成，本层不重复实现容器逻辑。
+            if (string.IsNullOrWhiteSpace(outputPath))
+                return BridgeResult<object>.Failed(file, "action", "BRIDGE_OUTPUT_PATH_REQUIRED", "TAE writer requires a validated staging output path.");
+            try
+            {
+                var written = await TaeNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                return BridgeResult<object>.Partial(file, "action", new[]
+                {
+                    new Diagnostic("info", "TAE_STAGING_WRITE_VERIFIED", "TAE 事件写回已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
+                }, written);
+            }
+            catch (TaeWriteBlockedException ex)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE", ex.Message, ex.Details);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_STAGING_WRITE_FAILED", ex.Message);
+            }
+        }
+
         if (command == "write-msb")
         {
             if (string.IsNullOrWhiteSpace(outputPath))

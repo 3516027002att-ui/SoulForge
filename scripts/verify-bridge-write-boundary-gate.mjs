@@ -408,7 +408,8 @@ try {
     { command: 'write-gparam', options: { mutations: [] } },
     { command: 'write-tpf-texture-replace', options: { textureIndex: 0 } },
     { command: 'write-mtd-document', options: { paramId: '0', newValue: 'boundary-probe' } },
-    { command: 'write-esd-document', options: { mutations: [] } }
+    { command: 'write-esd-document', options: { mutations: [] } },
+    { command: 'write-tae-document', options: { mutations: [] } }
   ];
 
   /**

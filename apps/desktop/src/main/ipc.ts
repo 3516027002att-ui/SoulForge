@@ -45,6 +45,8 @@ import {
   commitMtdPropertySetViaBridge,
   commitEsdTransitionViaBridge,
   type EsdTransitionMutation,
+  commitTaeEventViaBridge,
+  type TaeEventUpsertMutation,
   commitTpfTextureReplaceViaBridge,
   type GparamFieldSetMutation,
   commitParamMutationViaBridge,
@@ -4038,6 +4040,101 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }),
         title: `ESD transition upsert × ${mutations.length}`,
         confirmActionLabel: '提交 ESD 状态转移变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  /**
+   * ANIMATION-56C：TAE 事件写回（tae-event-upsert）。
+   *
+   * 渲染器回传读时的 sourceHash 作为 expectedDocumentHash；mutation 为
+   * update-event-times（字节级外科替换事件 startTime/endTime float32，时间槽被
+   * 兄弟事件共享时 C# 侧 fail-closed TAE_WRITE_BLOCKED_UNKNOWN_STRUCTURE）/
+   * insert-event（事件参数体按模板逐字节拷贝后追加新事件）。写链照
+   * ESD/PARAM 同一范式：stageBridgeOutput 落暂存 → applyNativeMutation 经
+   * Patch Engine 提交（含备份、确认与回滚元数据）。TAE 在 anibnd.dcx 容器内时，
+   * 容器外层重建由 Patch 管线完成。
+   */
+  handle(
+    'resource.commitTaeEvent',
+    async (
+      event,
+      sourceUri: string,
+      expectedDocumentHash: string,
+      mutations: TaeEventUpsertMutation[]
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'TAE_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入 TAE。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+      if (isParamBackupPath(file.relativePath)) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'BACKUP_READ_FORBIDDEN',
+            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 TAE。',
+            sourceUri
+          }]
+        };
+      }
+      if (!Array.isArray(mutations) || mutations.length === 0
+        || !mutations.every((m) => m && typeof m.mutation === 'string')) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'TAE_EVENT_MUTATIONS_REQUIRED',
+            message: 'TAE typed write 需要至少一条 event upsert mutation（tae-event-upsert）。',
+            sourceUri
+          }]
+        };
+      }
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'TAE_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash: expectedDocumentHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'tae',
+        stagingFileName: `${basename(file.relativePath)}.mut`,
+        stageWrite: (context) => commitTaeEventViaBridge({
+          sourcePath: file.absolutePath,
+          outputPath: context.outputPath,
+          expectedDocumentHash,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          mutations
+        }),
+        title: `TAE event upsert × ${mutations.length}`,
+        confirmActionLabel: '提交 TAE 事件变更'
       }, {
         confirm: electronConfirmationPort(event),
         commit: sessionCommitPort(activeSession, operationLog, storage)

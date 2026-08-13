@@ -36,6 +36,7 @@
     "bridge:verify:msb-all": "npm run test:native-msb-all -w @soulforge/core",
     "bridge:verify:msb-writer": "npm run test:native-msb-writer -w @soulforge/core",
     "bridge:verify:tae": "npm run test:native-tae -w @soulforge/core",
+    "bridge:verify:tae-writer": "npm run test:native-tae-writer -w @soulforge/core",
     "bridge:verify:tpf": "npm run test:native-tpf -w @soulforge/core",
     "bridge:verify:flver": "npm run test:native-flver -w @soulforge/core",
     "bridge:verify:esd": "npm run test:native-esd -w @soulforge/core",

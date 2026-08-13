@@ -368,6 +368,26 @@ const api = {
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.commitEsdTransition', sourceUri, expectedDocumentHash, mutations),
   /**
+   * ANIMATION-56C：TAE 事件写回（tae-event-upsert）。
+   * mutation 定位用 animId + 事件表下标；update-event-times 是字节级外科替换
+   * 事件时间，insert-event 按模板逐字节拷贝参数体后追加新事件。时间槽被兄弟
+   * 事件共享时由 C# 侧 fail-closed 拒绝。
+   */
+  commitTaeEvent: (
+    sourceUri: string,
+    expectedDocumentHash: string,
+    mutations: Array<{
+      mutation: string;
+      animId?: number;
+      eventIndex?: number;
+      templateEventIndex?: number;
+      eventTypeId?: number;
+      startTime?: number;
+      endTime?: number;
+    }>
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.commitTaeEvent', sourceUri, expectedDocumentHash, mutations),
+  /**
    * 当前 PARAM 元数据包的身份与信任状态。
    *
    * 界面据此决定是否显示「信任该元数据包」的一次性确认入口 —— 字段写入必须
