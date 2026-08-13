@@ -103,6 +103,7 @@ export type BridgeCommandName =
   | 'read-param-document'
   | 'write-param'
   | 'read-gparam-document'
+  | 'write-gparam'
   | 'read-emevd-document'
   | 'write-emevd'
   | 'read-msb-document'
@@ -142,7 +143,8 @@ export const BRIDGE_STAGING_WRITE_VERIFIED_CODES = Object.freeze({
   param: 'PARAM_STAGING_WRITE_VERIFIED',
   emevd: 'EMEVD_STAGING_WRITE_VERIFIED',
   msb: 'MSB_STAGING_WRITE_VERIFIED',
-  bnd4: 'BND4_STAGING_WRITE_VERIFIED'
+  bnd4: 'BND4_STAGING_WRITE_VERIFIED',
+  gparam: 'GPARAM_STAGING_WRITE_VERIFIED'
 } as const);
 
 export type BridgeStagingWriteVerifiedCode =

@@ -19,10 +19,13 @@
  * 值类型有单值（byte/short/int/bool/float）与多分量（float2/3/4、byte4），
  * 解码已在 Bridge 完成，这里只按类型展开显示。
  *
- * ── 只读与失败 ──
+ * ── 编辑与失败 ──
  *
- * 11B 不提供任何写入控件：Tools 栏是诚实空态，不做假按钮（11C 接线前
- * 「可编辑」是谎言）。读取失败的 bank 保留在列表并标记失败，Fields/Values
+ * 11C 接线 typed 写回：选中 param 的值行可编辑（每分量一个输入框），改动
+ * 收集为 field-set drafts，Tools 栏在有 drafts 时出现「保存」入口，经
+ * resource.commitGparamMutations（write-gparam）提交 —— 只有 typed 定位才有
+ * 写入口，没有通用 bytes replace fallback。写入失败保留 drafts 并给出结构化
+ * 诊断，不静默丢改动。读取失败的 bank 保留在列表并标记失败，Fields/Values
  * 栏给出结构化诊断 —— 不能把 read failure 显示成空 bank。
  */
 
@@ -89,6 +92,14 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
   const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null);
   const [selectedParamId, setSelectedParamId] = useState<number | null>(null);
 
+  // ── 11C 编辑 drafts：key = `${groupId}|${paramId}|${valueIndex}` → 用户输入 ──
+  const [drafts, setDrafts] = useState<Map<string, string>>(new Map());
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  // 保存成功后强制重读（read 通道每次直读，refresh 只是重触发 effect）。
+  const [refreshToken, setRefreshToken] = useState(0);
+
   // ── 选择链：bank → group → param ──
   useEffect(() => {
     setSelectedGroupId(null);
@@ -97,6 +108,13 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
   useEffect(() => {
     setSelectedParamId(null);
   }, [selectedGroupId]);
+  // 换 param 清 drafts：drafts 的 key 含 paramId，留着会让「N 处修改」跨选区
+  // 漂移，用户会困惑改了 A 的却显示在 B 上。
+  useEffect(() => {
+    setDrafts(new Map());
+    setSaveError(null);
+    setSaveNotice(null);
+  }, [selectedParamId, selectedGroupId, selectedBankUri]);
 
   // ── 读取选中 bank ──
   useEffect(() => {
@@ -148,7 +166,7 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [bridge, selectedBankUri]);
+  }, [bridge, selectedBankUri, refreshToken]);
 
   // ── 本地分页（Groups / Params 都可能有数百条）──
   const [groupPage, setGroupPage] = useState(0);
@@ -195,6 +213,48 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
   }, [selectedParam]);
 
   const bankError = selectedBankUri ? bankFailures.get(selectedBankUri) : undefined;
+
+  // ── 保存：drafts → typed mutations → commitGparamMutations ──
+  const draftCount = drafts.size;
+  const allFinite = [...drafts.values()].every((text) => Number.isFinite(Number(text)));
+  const commitDrafts = useCallback(async () => {
+    if (!bridge || typeof bridge.commitGparamMutations !== 'function') return;
+    if (document === null || selectedBankUri === null || selectedGroupId === null) return;
+    const mutations: Array<{ groupId: number; paramId: number; valueIndex: number; value: number }> = [];
+    for (const [key, text] of drafts) {
+      const parts = key.split('|');
+      const value = Number(text);
+      if (!Number.isFinite(value)) {
+        setSaveError('存在非数字输入，无法提交。');
+        return;
+      }
+      mutations.push({
+        groupId: Number(parts[0]),
+        paramId: Number(parts[1]),
+        valueIndex: Number(parts[2]),
+        value
+      });
+    }
+    if (mutations.length === 0) return;
+    setSaving(true);
+    setSaveError(null);
+    setSaveNotice(null);
+    try {
+      const raw = await bridge.commitGparamMutations(selectedBankUri, document.sourceHash, mutations);
+      const result = raw as { ok?: boolean; diagnostics?: Array<{ message?: string }> };
+      if (result.ok) {
+        setDrafts(new Map());
+        setSaveNotice(`已提交 ${mutations.length} 处修改并重读验证。`);
+        setRefreshToken((token) => token + 1);
+      } else {
+        setSaveError(result.diagnostics?.[0]?.message ?? 'GPARAM 写入被拒绝。');
+      }
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'GPARAM 写入异常。');
+    } finally {
+      setSaving(false);
+    }
+  }, [bridge, document, selectedBankUri, selectedGroupId, drafts]);
 
   const columns: WorkbenchColumnSpec[] = [
     {
@@ -313,14 +373,42 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
                 <span>valueId</span>
                 <span>unk f32</span>
               </div>
-              {valueLines.map((line) => (
-                <div key={line.index} className="gparam-values__row">
-                  <span>{line.index}</span>
-                  <span>{line.values.join(', ')}</span>
-                  <span className="gparam-values__mono">{line.valueId}</span>
-                  <span className="gparam-values__mono">{formatValue('float', line.unkFloat)}</span>
-                </div>
-              ))}
+              {valueLines.map((line) => {
+                const comps = componentCount(selectedParam.type);
+                const rowEdited = line.values.some((_, c) =>
+                  drafts.has(`${selectedGroupId}|${selectedParam.paramId}|${line.index * comps + c}`));
+                return (
+                  <div key={line.index} className={rowEdited ? 'gparam-values__row gparam-values__row--edited' : 'gparam-values__row'}>
+                    <span>{line.index}</span>
+                    <span className="gparam-values__editors">
+                      {line.values.map((formatted, c) => {
+                        const valueIndex = line.index * comps + c;
+                        const raw = selectedParam.values[valueIndex];
+                        const key = `${selectedGroupId}|${selectedParam.paramId}|${valueIndex}`;
+                        return (
+                          <input
+                            key={valueIndex}
+                            type="text"
+                            inputMode="decimal"
+                            aria-label={`值 ${valueIndex}`}
+                            className="gparam-values__input"
+                            value={drafts.get(key) ?? (raw === undefined ? '' : formatValue(selectedParam.type, raw))}
+                            onChange={(e) => {
+                              const next = new Map(drafts);
+                              next.set(key, e.target.value);
+                              setDrafts(next);
+                              // 新一轮编辑开始，清掉上一次的提交成功提示。
+                              setSaveNotice(null);
+                            }}
+                          />
+                        );
+                      })}
+                    </span>
+                    <span className="gparam-values__mono">{line.valueId}</span>
+                    <span className="gparam-values__mono">{formatValue('float', line.unkFloat)}</span>
+                  </div>
+                );
+              })}
               {valueLines.length === 0 && <p className="wb-empty">该 param 没有值。</p>}
             </div>
           )}
@@ -334,10 +422,32 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
       minWidth: 140,
       children: (
         <div className="wb-list">
-          <p className="wb-empty">暂无已接通的工具</p>
-          <p className="wb-empty">
-            GPARAM 目前只读：字段写入由 GPARAM-11C 接线后才会出现，不会用假按钮占位。
-          </p>
+          {/* 提交成功提示在 drafts 清空后仍须可见：清空会立即切回诚实空态，
+              若只挂在 draftCount>0 分支里，成功确认会被同一次渲染抹掉。 */}
+          {saveNotice && <p className="wb-empty">{saveNotice}</p>}
+          {draftCount > 0 && document !== null ? (
+            <>
+              <div className="wb-list__group-label">字段写入（typed field-set）</div>
+              <p className="wb-empty">共 {draftCount} 处修改，提交后经 write-gparam 重读验证。</p>
+              {saveError && <p className="wb-empty diag-error">{saveError}</p>}
+              {!allFinite && <p className="wb-empty diag-error">存在非数字输入，无法提交。</p>}
+              <button
+                type="button"
+                className="primary-action"
+                disabled={saving || !allFinite}
+                onClick={() => { void commitDrafts(); }}
+              >
+                {saving ? '提交中…' : `保存 ${draftCount} 处修改`}
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="wb-empty">暂无已接通的工具</p>
+              <p className="wb-empty">
+                选中 param 后修改值，此处出现 typed 保存入口（没有 bytes replace fallback）。
+              </p>
+            </>
+          )}
         </div>
       )
     }

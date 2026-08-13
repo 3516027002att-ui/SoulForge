@@ -37,6 +37,8 @@ import {
   sanitizeEntryName,
   applyParamFieldMutation,
   commitFmgMutationViaBridge,
+  commitGparamMutationsViaBridge,
+  type GparamFieldSetMutation,
   commitParamMutationViaBridge,
   commitMsbMutationViaBridge,
   readFmgDocumentViaBridge,
@@ -3158,6 +3160,103 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       diagnostics: result.diagnostics
     });
   });
+
+  /**
+   * GPARAM-11C：drawparam 的 typed 字段写入（loose / DCX storage profile）。
+   *
+   * 与 PARAM 容器通道同一形态：typed field-set mutation（group→param→
+   * valueIndex→value）→ write-gparam（C#：只认 typed 定位，无 bytes replace
+   * fallback；重读验证目标值与兄弟值后才报告 GPARAM_STAGING_WRITE_VERIFIED）
+   * → stageBridgeOutput 落暂存 → applyNativeMutation 经 Patch Engine 提交
+   * （含备份、确认与回滚元数据）。DCX 源需要 Oodle 运行时（baseRoot）。
+   *
+   * expectedDocumentHash 由渲染器回传 read 时的 sourceHash：哈希不符说明
+   * 工作副本已漂移，拒绝写入（并发保护，与 PARAM 同一语义）。
+   */
+  handle(
+    'resource.commitGparamMutations',
+    async (
+      event,
+      sourceUri: string,
+      expectedDocumentHash: string,
+      mutations: GparamFieldSetMutation[]
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'GPARAM_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入 GPARAM。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+      if (isParamBackupPath(file.relativePath)) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'BACKUP_READ_FORBIDDEN',
+            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 GPARAM。',
+            sourceUri
+          }]
+        };
+      }
+      if (!Array.isArray(mutations) || mutations.length === 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'GPARAM_MUTATIONS_REQUIRED',
+            message: 'GPARAM typed write 需要至少一条 mutation；没有 typed 定位就没有写入口。',
+            sourceUri
+          }]
+        };
+      }
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'GPARAM_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const gameRoot = activeSession.layers.baseRoot;
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash: expectedDocumentHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'gparam',
+        stagingFileName: `${basename(file.relativePath)}.mut`,
+        stageWrite: (context) => commitGparamMutationsViaBridge({
+          sourcePath: file.absolutePath,
+          outputPath: context.outputPath,
+          expectedDocumentHash,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          mutations,
+          ...(gameRoot ? { oodleRuntimeRoot: gameRoot } : {})
+        }),
+        title: `GPARAM field-set ${mutations.length} mutations`,
+        confirmActionLabel: '提交 GPARAM 字段变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
 
   /**
    * Paginated PARAM row access (hard constraint 17). Main assembles/caches the

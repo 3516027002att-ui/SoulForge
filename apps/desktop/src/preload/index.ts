@@ -275,6 +275,21 @@ const api = {
   readGparamDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readGparamDocument', sourceUri),
   /**
+   * GPARAM-11C：typed field-set 写回（无 bytes replace fallback——只有 typed
+   * 定位才有写入口）。expectedDocumentHash 由渲染器回传 read 时的 sourceHash。
+   */
+  commitGparamMutations: (
+    sourceUri: string,
+    expectedDocumentHash: string,
+    mutations: Array<{
+      groupId: number;
+      paramId: number;
+      valueIndex: number;
+      value: number;
+    }>
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.commitGparamMutations', sourceUri, expectedDocumentHash, mutations),
+  /**
    * 当前 PARAM 元数据包的身份与信任状态。
    *
    * 界面据此决定是否显示「信任该元数据包」的一次性确认入口 —— 字段写入必须

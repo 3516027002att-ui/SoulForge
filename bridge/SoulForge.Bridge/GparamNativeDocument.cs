@@ -424,6 +424,28 @@ internal sealed class GparamNativeDocument
     /// 按格式规则完整重建字节。Unk0D/Unk14/Unk50 取解析值，UnkBlock2 与
     /// Unk3 区原样保留，因此无修改重建应与源字节一致。
     /// </summary>
+    /// <summary>
+    /// 返回 groups 被替换后的新文档实例（其余头字段、Unk 区、注释原样保留）。
+    ///
+    /// 供 GparamNativeWriter 使用：typed field-set 只改目标 param 的 Values，
+    /// 其余字节不动 —— 通过「替换 groups → Rebuild」完成，而不是直接改源字节
+    /// （那样要重算全部偏移，等价于手写一遍 PlanOffsets）。
+    /// </summary>
+    public GparamNativeDocument WithGroups(IReadOnlyList<GparamGroup> groups)
+    {
+        return new GparamNativeDocument(
+            SourceBytes,
+            Unk0D,
+            groups.Count,
+            Unk14,
+            Unk3Count,
+            Unk50,
+            _unk3SourceOffset,
+            UnkBlock2,
+            CommentGroups,
+            groups);
+    }
+
     public byte[] Rebuild()
     {
         var plan = PlanOffsets();

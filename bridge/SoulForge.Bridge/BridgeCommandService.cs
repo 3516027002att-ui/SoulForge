@@ -271,6 +271,24 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "write-gparam")
+        {
+            if (string.IsNullOrWhiteSpace(outputPath))
+                return BridgeResult<object>.Failed(file, "gparam", "BRIDGE_OUTPUT_PATH_REQUIRED", "GPARAM writer requires a validated staging output path.");
+            try
+            {
+                var written = await GparamNativeWriter.WriteAsync(file, outputPath, options, cancellationToken, oodleRuntimeRoot);
+                return BridgeResult<object>.Partial(file, "gparam", new[]
+                {
+                    new Diagnostic("info", "GPARAM_STAGING_WRITE_VERIFIED", "GPARAM 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
+                }, written);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or FormatException)
+            {
+                return BridgeResult<object>.Failed(file, "gparam", "GPARAM_STAGING_WRITE_FAILED", ex.Message);
+            }
+        }
+
         if (command == "write-param")
         {
             if (string.IsNullOrWhiteSpace(outputPath))

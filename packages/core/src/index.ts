@@ -20,6 +20,7 @@ export * from './editing/emevdEnvelopeToDocument.js';
 export * from './editing/emevdFullDocument.js';
 export * from './editing/fmgBridgeCommit.js';
 export * from './editing/paramBridgeCommit.js';
+export * from './editing/gparamBridgeCommit.js';
 export * from './editing/msbBridgeRead.js';
 export * from './editing/msbBridgeCommit.js';
 export * from './editing/workbenchProjections.js';

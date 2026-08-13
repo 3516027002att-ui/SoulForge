@@ -1680,6 +1680,15 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 .gparam-values__row { border-top: 1px solid var(--line); }
 .gparam-values__row:hover { background: var(--forge-hover); }
+.gparam-values__row--edited { background: var(--forge-3); }
+.gparam-values__editors { display: flex; gap: 6px; flex-wrap: wrap; }
+.gparam-values__input {
+  min-width: 7ch; max-width: 14ch; padding: 1px 6px;
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--ink-1); background: var(--field); border: 1px solid var(--line);
+  border-radius: 3px;
+}
+.gparam-values__input:focus { border-color: var(--accent); outline: none; }
 .gparam-values__mono {
   font-family: var(--font-mono); font-size: 11px; color: var(--ink-2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

@@ -464,6 +464,68 @@ function registerFixtureIpc() {
     };
   });
 
+  // GPARAM-11C：typed field-set 写回（合成内存态，明确标记 synthetic）。
+  // 登记 bank：逐条校验 mutation 定位并就地更新值（重读即看到新值）；
+  // 未登记/越界/空 mutations：结构化失败，绝不静默成功。
+  handleTrusted('resource.commitGparamMutations', (_event, sourceUri, expectedDocumentHash, mutations) => {
+    track('resource.commitGparamMutations');
+    const bank = fixtureGparamBanks[sourceUri];
+    if (!bank) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error', code: 'GPARAM_STAGING_WRITE_FAILED',
+          message: 'fixture 未登记或损坏的 GPARAM：拒绝写入。', sourceUri
+        }]
+      };
+    }
+    if (expectedDocumentHash !== bank.roundTrip.sourceHash) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error', code: 'GPARAM_STAGING_WRITE_FAILED',
+          message: 'GPARAM source hash 不匹配（工作副本已漂移），拒绝写入。', sourceUri
+        }]
+      };
+    }
+    if (!Array.isArray(mutations) || mutations.length === 0) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error', code: 'GPARAM_MUTATIONS_REQUIRED',
+          message: 'GPARAM typed write 需要至少一条 mutation。', sourceUri
+        }]
+      };
+    }
+    const comps = (type) => ({ float2: 2, float3: 3, float4: 4, byte4: 4 }[type] ?? 1);
+    for (const m of mutations) {
+      const group = bank.groups.find((g) => g.groupId === m.groupId);
+      const param = group && group.params.find((p) => p.paramId === m.paramId);
+      const count = param ? param.valueCount * comps(param.type) : 0;
+      if (!param || m.valueIndex < 0 || m.valueIndex >= count) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error', code: 'GPARAM_STAGING_WRITE_FAILED',
+            message: `fixture mutation 越界：group ${m.groupId} param ${m.paramId} valueIndex ${m.valueIndex}。`,
+            sourceUri
+          }]
+        };
+      }
+      param.values[m.valueIndex] = m.value; // 就地更新：重读即看到新值（synthetic 内存态）
+    }
+    return {
+      ok: true,
+      sourceUri,
+      changedFiles: [{ sourceUri, action: 'modify' }],
+      diagnostics: [{ severity: 'info', code: 'GPARAM_STAGING_WRITE_VERIFIED', message: 'fixture GPARAM 已写入（合成）并重读验证。', sourceUri }]
+    };
+  });
+
   // 容器工作台合成通道：微小、合法构造、明确标记（AGENTS.md §15）。
   const containerChildren = [
     {

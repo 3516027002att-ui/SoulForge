@@ -1004,16 +1004,21 @@ test('GPARAM 工作台四栏：banks 选择链、父选区清理、值类型展�
   await expect(window.locator('.wb-list .wb-row', { hasText: 'Directional Light Angle0' })).toBeVisible();
   await window.locator('.wb-list .wb-row', { hasText: 'Directional Light Angle0' }).click();
 
-  // 值类型展开：float3 每值 3 分量；valueId 与 unk f32 独立列。
+  // 值类型展开：float3 每值 3 个 typed 输入框（11C）；valueId 与 unk f32 独立列。
   await expect(window.locator('.gparam-values__head')).toBeVisible();
-  await expect(window.locator('.gparam-values__row').first()).toContainText('1.25, 0.5, 0.75');
-  await expect(window.locator('.gparam-values__row').first()).toContainText('11');
+  const firstValueRow = window.locator('.gparam-values__row').first();
+  await expect(firstValueRow.locator('.gparam-values__input')).toHaveCount(3);
+  await expect(firstValueRow.locator('.gparam-values__input').nth(0)).toHaveValue('1.25');
+  await expect(firstValueRow.locator('.gparam-values__input').nth(1)).toHaveValue('0.5');
+  await expect(firstValueRow.locator('.gparam-values__input').nth(2)).toHaveValue('0.75');
+  await expect(firstValueRow).toContainText('11');
 
   // 父选区清理：切到第二个 group（Shadows）后 param 选择被清——不再显示
   // 上一个 group 的 Directional Light 值，而是当前 group 的 param 列表。
   await window.locator('.wb-list .wb-row', { hasText: 'Shadows ParamEditor' }).click();
   await expect(window.locator('.wb-list .wb-row', { hasText: 'Shadow Distance' })).toBeVisible();
-  await expect(window.locator('.gparam-values__row', { hasText: '1.25, 0.5, 0.75' })).toHaveCount(0);
+  // 父选区清理后值编辑器整体消失：不再有前一个 group 的任何 typed 输入框。
+  await expect(window.locator('.gparam-values__input')).toHaveCount(0);
 
   // 父选区清理（bank 级）：切到 m11 bank 后 group 与 param 选择全部清空。
   await window.locator('.wb-list .wb-row', { hasText: 'm11_00' }).click();
@@ -1027,5 +1032,60 @@ test('GPARAM 工作台四栏：banks 选择链、父选区清理、值类型展�
 
   // 同尺寸对照截图（§2.4 步骤 6）。
   await window.screenshot({ path: 'test-results/11-gparam-workbench.png' });
+  await app.close();
+});
+
+test('GPARAM typed 写回：值行编辑 → Tools 保存 → 重读新值，非法输入禁用提交（GPARAM-11C）', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  await window.locator('[data-domain="files"]').click();
+  await window.locator('.file-item', { hasText: 'param/drawparam/m10_00.gparam.dcx' }).click();
+  await window.getByRole('button', { name: '关闭 Agent 面板' }).click();
+
+  // 打开默认 bank（m10_00）：LightSet → Directional Light Angle0（float3 × 2 值）。
+  await expect(window.locator('.workbench')).toBeVisible();
+  await window.locator('.wb-list .wb-row', { hasText: 'LightSet ParamEditor' }).click();
+  await window.locator('.wb-list .wb-row', { hasText: 'Directional Light Angle0' }).click();
+
+  // 值行是 typed 输入框：2 值 × 3 分量 = 6 个 input，初始值为 fixture 值。
+  const inputs = window.locator('.gparam-values__input');
+  await expect(inputs).toHaveCount(6);
+  await expect(inputs.nth(0)).toHaveValue('1.25');
+  await expect(inputs.nth(1)).toHaveValue('0.5');
+
+  // 未修改时 Tools 栏无保存按钮（诚实空态）。
+  const toolsColumn = window.locator('.workbench__column[aria-label="Tools"]');
+  await expect(toolsColumn).toContainText('暂无已接通的工具');
+  expect(await toolsColumn.locator('button').count()).toBe(0);
+
+  // 修改第一个分量 → Tools 栏出现保存入口，行标记为已编辑。
+  await inputs.nth(0).fill('2.5');
+  await expect(window.locator('.gparam-values__row--edited').first()).toBeVisible();
+  await expect(window.getByRole('button', { name: '保存 1 处修改' })).toBeVisible();
+  await expect(toolsColumn).toContainText('共 1 处修改');
+
+  // 保存 → 提交并重读：输入框回到服务端值（fixture 内存态已更新为 2.5）。
+  await window.getByRole('button', { name: '保存 1 处修改' }).click();
+  await expect(toolsColumn).toContainText('已提交 1 处修改并重读验证。');
+  await expect(window.locator('.gparam-values__input').nth(0)).toHaveValue('2.5');
+  // 兄弟分量未被改动（只提交了 1 处）。
+  await expect(window.locator('.gparam-values__input').nth(1)).toHaveValue('0.5');
+  // 保存后 drafts 清空：按钮消失，回到诚实空态。
+  expect(await toolsColumn.locator('button').count()).toBe(0);
+
+  // 非法输入：非数字 → 保存按钮禁用并给出诊断，不提交。
+  await window.locator('.gparam-values__input').nth(1).fill('abc');
+  await expect(toolsColumn).toContainText('存在非数字输入，无法提交。');
+  const saveButton = window.getByRole('button', { name: '保存 1 处修改' });
+  await expect(saveButton).toBeVisible();
+  expect(await saveButton.isDisabled()).toBe(true);
+
+  // 改回合法数字 → 按钮恢复可提交。
+  await window.locator('.gparam-values__input').nth(1).fill('0.5');
+  await expect(toolsColumn).not.toContainText('存在非数字输入，无法提交。'); // 诊断消失
+  expect(await saveButton.isDisabled()).toBe(false);
+
+  await window.screenshot({ path: 'test-results/11-gparam-writer.png' });
   await app.close();
 });

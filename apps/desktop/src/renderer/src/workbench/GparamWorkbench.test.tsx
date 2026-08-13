@@ -1,5 +1,5 @@
 /**
- * GPARAM-11B：GparamWorkbench 的渲染结构 + 选择链清理 + 负向清单。
+ * GPARAM-11B/C：GparamWorkbench 的渲染结构 + 选择链清理 + 负向清单。
  *
  * 三条主线：
  * 1. SSR 结构断言：真渲染 GparamWorkbench（react-dom/server），钉住工作台
@@ -12,7 +12,9 @@
  * 3. Negative source tests：ipc.ts 的 readGparamDocument 通道必须带
  *    BACKUP_READ_FORBIDDEN（在 ParamWorkbench.test.tsx 的三通道断言里，此处
  *    不再重复）；App.tsx 不再引用 gparam-placeholder 的「尚未接入」文案；
- *    GparamWorkbench 不渲染任何写入控件（11B 只读，Tools 栏诚实空态）。
+ *    GparamWorkbench 的写入**只有** commitGparamMutations 这一个 typed 出口
+ *    （GPARAM-11C：没有 bytes replace fallback，没有假保存按钮 —— SSR 初始
+ *    无选中即无任何 type=button）。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -68,11 +70,11 @@ describe('GparamWorkbench 初始结构（挂载即有的骨架）', () => {
     assert.doesNotMatch(html, />m10_00\.gparam\.dcx</);
   });
 
-  it('Tools 栏诚实空态：无假按钮、无写入控件（11B 只读）', () => {
+  it('Tools 栏诚实空态：未选中无保存按钮（11C 编辑入口只随 drafts 出现）', () => {
     const html = render();
     assert.match(html, /暂无已接通的工具/);
-    // 只读说明存在：写入由 11C 接线，不渲染假编辑入口。
-    assert.match(html, /GPARAM-11C/);
+    // 11C 说明存在：编辑入口只在有 drafts 时出现，不做假按钮占位。
+    assert.match(html, /没有 bytes replace fallback/);
     assert.doesNotMatch(html, /type="button"/);
   });
 
@@ -104,10 +106,24 @@ describe('Negative source tests（GPARAM-11B）', () => {
     assert.doesNotMatch(appSource, /GPARAM 接线需要独立的 native authority/);
   });
 
-  it('GparamWorkbench 不渲染写入控件（onApply 出口、提交按钮）', () => {
-    assert.doesNotMatch(workbenchSource, /onApply|applyGparam|field-set|commitGparam|提交|保存/);
-    // 分页条按钮（‹/›）是导航控件，不是写入入口；禁止的是「提交/写入」按钮。
-    assert.doesNotMatch(workbenchSource, /className="primary-action"|提交变更|生成变更候选/);
+  it('写入只有 commitGparamMutations 一个 typed 出口，无 bytes replace fallback（11C）', () => {
+    // 渲染器侧唯一写调用：commitGparamMutations。禁止其它写出口与通用字节直写。
+    assert.doesNotMatch(workbenchSource, /contentBase64|dataBase64|applyParamFieldMutation/);
+    // 桥接调用只有读取 + commitGparamMutations 一个写出口。「无 bytes replace
+    // fallback」由这条调用面断言 + 上面的字节直写禁令共同证明；源码注释本身
+    // 会用该词描述约束（SSR 测试也断言了「没有 bytes replace fallback」文案），
+    // 所以不 grep 字样，而是 grep 调用面。
+    const bridgeCalls = [...workbenchSource.matchAll(/bridge\.(\w+)\s*\(/g)]
+      .map((m) => m[1])
+      .filter((name): name is string => name !== undefined);
+    assert.ok(bridgeCalls.length > 0, '工作台没有任何 bridge 调用（typed 写出口缺失）');
+    assert.ok(
+      bridgeCalls.every((name) => name.startsWith('read') || name === 'commitGparamMutations'),
+      `发现非 typed 桥接调用：${bridgeCalls.filter((n) => !n.startsWith('read') && n !== 'commitGparamMutations').join(', ')}`
+    );
+    assert.match(workbenchSource, /commitGparamMutations/);
+    // 保存按钮只在有 drafts 时渲染（draftCount > 0 分支），不是常驻控件。
+    assert.match(workbenchSource, /draftCount > 0 && document !== null/);
   });
 
   it('GparamWorkbench 不引用 PARAM 读取通道（不能借 PARAM parser）', () => {

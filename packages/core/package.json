@@ -66,6 +66,7 @@
     "test:native-msb-writer": "tsc -b ../shared . && node dist/testing/runNativeMsbWriterSmoke.js",
     "test:native-param": "tsc -b ../shared . && node dist/testing/runNativeParamSmoke.js",
     "test:native-gparam": "tsc -b ../shared . && node dist/testing/runNativeGparamSmoke.js",
+    "test:native-gparam-writer": "tsc -b ../shared . && node dist/testing/runNativeGparamWriterSmoke.js",
     "test:native-preview": "tsc -b ../shared . && node dist/testing/runNativeInspectSmoke.js",
     "test:native-tae": "tsc -b ../shared . && node dist/testing/runNativeTaeSmoke.js",
     "test:native-tpf": "tsc -b ../shared . && node dist/testing/runNativeTpfSmoke.js",
