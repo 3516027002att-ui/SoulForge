@@ -1131,6 +1131,37 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "write-fxr-document")
+        {
+            // VFX-54C：FXR3 字段写回（vfx-field-set）。
+            // 只收 typed mutation：vfx-field-set 字节级外科替换某个「已知布局」容器
+            // （host/property/section8）里 Section11 的一个 Int32。未知 node type、
+            // layout warning、Section9 非空或 Section12-14 非空都视为未知结构 →
+            // FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE，fail-closed。
+            // outputPath 必须是已校验的暂存区路径（越界之外的边界检查由
+            // BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
+            // writer 只接受 loose .fxr；ffxbnd.dcx 容器外层重建由
+            // Patch Engine 在 main 侧完成，本层不重复实现容器逻辑。
+            if (string.IsNullOrWhiteSpace(outputPath))
+                return BridgeResult<object>.Failed(file, "sfx", "BRIDGE_OUTPUT_PATH_REQUIRED", "FXR writer requires a validated staging output path.");
+            try
+            {
+                var written = await FxrNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                return BridgeResult<object>.Partial(file, "sfx", new[]
+                {
+                    new Diagnostic("info", "FXR_STAGING_WRITE_VERIFIED", "FXR 字段已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
+                }, written);
+            }
+            catch (FxrWriteBlockedException ex)
+            {
+                return BridgeResult<object>.Failed(file, "sfx", "FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE", ex.Message, ex.Details);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "sfx", "FXR_STAGING_WRITE_FAILED", ex.Message);
+            }
+        }
+
         if (command == "write-msb")
         {
             if (string.IsNullOrWhiteSpace(outputPath))

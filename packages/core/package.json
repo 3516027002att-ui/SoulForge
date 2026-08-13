@@ -58,6 +58,7 @@
     "test:native-mtd": "tsc -b ../shared . && node dist/testing/runNativeMtdSmoke.js",
     "test:native-mtd-writer": "tsc -b ../shared . && node dist/testing/runNativeMtdWriterSmoke.js",
     "test:native-fxr": "tsc -b ../shared . && node dist/testing/runNativeFxrSmoke.js",
+    "test:native-fxr-writer": "tsc -b ../shared . && node dist/testing/runNativeFxrWriterSmoke.js",
     "test:native-flver": "tsc -b ../shared . && node dist/testing/runNativeFlverSmoke.js",
     "test:native-flver-glb": "tsc -b ../shared . && node dist/testing/runNativeFlverGlbSmoke.js",
     "test:native-flver-mesh": "tsc -b ../shared . && node dist/testing/runNativeFlverMeshSmoke.js",

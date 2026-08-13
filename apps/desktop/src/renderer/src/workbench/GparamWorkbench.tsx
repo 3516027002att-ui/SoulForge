@@ -1,31 +1,39 @@
 /**
- * GPARAM 四栏工作台（对照 Smithbox Graphics Param Editor）。
+ * GPARAM 五区工作台（对照 Smithbox Graphics Param Editor，§8.1）。
  *
- * 左一：Banks   —— gparam 域全部磁盘文件（drawparam 等）
- * 左二：Groups  —— 选中 bank 的面板（group name1 为主、name2 为次）
- * 中右：Fields/Values —— 选中 group 的 param（名 + 类型 + 值）
- * 最右：Tools   —— 诚实空态（GPARAM-11B 只读，写控件由 11C 接线）
+ * 左一：Files     —— gparam 域全部逻辑 bank（drawparam 等；物理文件名只在 title/details）
+ * 左二：Groups    —— 选中 bank 的面板（group name1 为主、name2 为次）
+ * 中三：Fields    —— 选中 group 的 param（field）列表（名 + 类型 + 值数）
+ * 中四：Values    —— 选中 field 的逐值展开（分量输入 / valueId / unk f32）
+ * 最右：Toolbar   —— 搜索/工具操作；write 未通时写控件隐藏
  *
  * ── 为什么是它 ──
  *
- * 打开 .gparam.dcx 之前只有「未接入」占位。GPARAM-11A 已在 Bridge 侧给出
- * read-gparam-document：DCX 解压 / loose 直读、round-trip 逐字节比对、
- * 分组分页。本组件是它的第一个消费者 —— 与 ParamWorkbench 对
- * readContainerParamPage 的关系相同。
+ * §8.1 明确「禁止把 Fields 和 Values 合成 Fields/Values 一栏」。早期四栏合并
+ * 实现（Banks | Groups | Fields/Values | Tools）把 field 列表与 value 展开塞进
+ * 同一栏、靠 selection 切换显示，已按规范返工为五区并存。§2.5 的默认停靠是
+ * Files 707 | Groups 340 | Fields 449 | Values 636 | Toolbar 515，这里按比例
+ * 折算成 initialFlex。
  *
  * ── 层级 ──
  *
- * bank（文件）→ group（面板）→ param（同一组值控制同一图形参数的多个情景）。
+ * bank（文件）→ group（面板）→ field（param）→ value（该 field 的多个情景值）。
  * 值类型有单值（byte/short/int/bool/float）与多分量（float2/3/4、byte4），
  * 解码已在 Bridge 完成，这里只按类型展开显示。
  *
+ * ── 选择链 ──
+ *
+ * Files → Groups → Fields → Values 是父子链：父级改变清空所有下游选区。
+ * 换 bank 清 group/field 选择，换 group 清 field 选择。Fields 栏始终列出
+ * 当前 group 的全部 param；选 field 后 Values 栏加载该 field 的值。
+ *
  * ── 编辑与失败 ──
  *
- * 11C 接线 typed 写回：选中 param 的值行可编辑（每分量一个输入框），改动
- * 收集为 field-set drafts，Tools 栏在有 drafts 时出现「保存」入口，经
+ * 11C 接线 typed 写回：选中 field 的值行可编辑（每分量一个输入框），改动
+ * 收集为 field-set drafts，Toolbar 栏在有 drafts 时出现「保存」入口，经
  * resource.commitGparamMutations（write-gparam）提交 —— 只有 typed 定位才有
  * 写入口，没有通用 bytes replace fallback。写入失败保留 drafts 并给出结构化
- * 诊断，不静默丢改动。读取失败的 bank 保留在列表并标记失败，Fields/Values
+ * 诊断，不静默丢改动。读取失败的 bank 保留在列表并标记失败，Groups/Fields/Values
  * 栏给出结构化诊断 —— 不能把 read failure 显示成空 bank。
  */
 
@@ -35,7 +43,7 @@ import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { WorkbenchLayout, type WorkbenchColumnSpec } from './WorkbenchLayout.js';
 
-/** Banks 栏的一个条目：工作区索引里的 gparam 文件。 */
+/** Files 栏的一个条目：工作区索引里的一个 gparam 逻辑 bank。 */
 export interface GparamBankView {
   /** 稳定标识（文件浏览器与索引共用）。 */
   sourceUri: string;
@@ -100,7 +108,8 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
   // 保存成功后强制重读（read 通道每次直读，refresh 只是重触发 effect）。
   const [refreshToken, setRefreshToken] = useState(0);
 
-  // ── 选择链：bank → group → param ──
+  // ── 选择链清理：父级改变清空所有下游选区 ──
+  // bank → 清 group/field；group → 清 field。
   useEffect(() => {
     setSelectedGroupId(null);
     setSelectedParamId(null);
@@ -108,7 +117,7 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
   useEffect(() => {
     setSelectedParamId(null);
   }, [selectedGroupId]);
-  // 换 param 清 drafts：drafts 的 key 含 paramId，留着会让「N 处修改」跨选区
+  // 换 field 清 drafts：drafts 的 key 含 paramId，留着会让「N 处修改」跨选区
   // 漂移，用户会困惑改了 A 的却显示在 B 上。
   useEffect(() => {
     setDrafts(new Map());
@@ -168,11 +177,11 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
     return () => { cancelled = true; };
   }, [bridge, selectedBankUri, refreshToken]);
 
-  // ── 本地分页（Groups / Params 都可能有数百条）──
+  // ── 本地分页（Groups / Fields 都可能有数百条）──
   const [groupPage, setGroupPage] = useState(0);
-  const [paramPage, setParamPage] = useState(0);
+  const [fieldPage, setFieldPage] = useState(0);
   useEffect(() => { setGroupPage(0); }, [selectedBankUri]);
-  useEffect(() => { setParamPage(0); }, [selectedGroupId]);
+  useEffect(() => { setFieldPage(0); }, [selectedGroupId]);
 
   const groups = document?.groups ?? [];
   const groupPageCount = Math.max(1, Math.ceil(groups.length / LIST_PAGE_SIZE));
@@ -182,16 +191,16 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
     () => document?.groups.find((g) => g.groupId === selectedGroupId) ?? null,
     [document, selectedGroupId]
   );
-  const params = selectedGroup?.params ?? [];
-  const paramPageCount = Math.max(1, Math.ceil(params.length / LIST_PAGE_SIZE));
-  const paramSlice = params.slice(paramPage * LIST_PAGE_SIZE, (paramPage + 1) * LIST_PAGE_SIZE);
+  const fields = selectedGroup?.params ?? [];
+  const fieldPageCount = Math.max(1, Math.ceil(fields.length / LIST_PAGE_SIZE));
+  const fieldSlice = fields.slice(fieldPage * LIST_PAGE_SIZE, (fieldPage + 1) * LIST_PAGE_SIZE);
 
   const selectedParam = useMemo(
     () => selectedGroup?.params.find((p) => p.paramId === selectedParamId) ?? null,
     [selectedGroup, selectedParamId]
   );
 
-  // ── Fields/Values：选中 param 的值列表 ──
+  // ── Values 栏：选中 field 的值列表 ──
   const valueLines = useMemo(() => {
     if (!selectedParam) return [];
     const comps = componentCount(selectedParam.type);
@@ -258,12 +267,14 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
 
   const columns: WorkbenchColumnSpec[] = [
     {
-      id: 'banks',
-      title: 'Banks',
+      id: 'files',
+      title: 'Files',
       // bank 数量按当前索引实测（任务开始时 34 个是快照，不是验收常量）。
       hint: `${props.banks.length} banks`,
-      initialFlex: 0.18,
-      minWidth: 150,
+      // §2.5 停靠：Files 707 | Groups 340 | Fields 449 | Values 636 | Toolbar 515，
+      // 折算比例 ≈ 0.27 / 0.13 / 0.17 / 0.24 / 0.19。
+      initialFlex: 0.27,
+      minWidth: 180,
       children: (
         <div className="wb-list">
           {props.banks.length === 0 && <p className="wb-empty">工作区中没有 GPARAM 文件。</p>}
@@ -291,11 +302,11 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
       id: 'groups',
       title: 'Groups',
       hint: `${groups.length} groups`,
-      initialFlex: 0.24,
-      minWidth: 200,
+      initialFlex: 0.13,
+      minWidth: 180,
       children: (
         <div className="wb-list">
-          {selectedBankUri === null && <p className="wb-empty">先在最左栏选择一个 bank。</p>}
+          {selectedBankUri === null && <p className="wb-empty">先在 Files 栏选择一个 bank。</p>}
           {selectedBankUri !== null && loading && <p className="wb-empty">加载中…</p>}
           {selectedBankUri !== null && !loading && bankError && (
             <p className="wb-empty diag-error">{bankError.message}</p>
@@ -331,14 +342,14 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
     },
     {
       id: 'fields',
-      title: 'Fields/Values',
-      hint: selectedGroup ? `${selectedGroup.name1} · ${params.length} params` : 'params',
-      initialFlex: 0.42,
-      minWidth: 280,
+      title: 'Fields',
+      hint: selectedGroup ? `${selectedGroup.name1} · ${fields.length} params` : 'params',
+      initialFlex: 0.17,
+      minWidth: 220,
       children: (
         <div className="wb-list">
           {selectedGroupId === null && <p className="wb-empty">先在中栏选择一个 group。</p>}
-          {selectedGroupId !== null && selectedParamId === null && paramSlice.map((param, index) => (
+          {selectedGroupId !== null && fieldSlice.map((param, index) => (
             <div
               key={param.paramId}
               className="wb-row"
@@ -354,13 +365,25 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
               <span className="wb-row__meta">{param.type} · {param.valueCount} 值</span>
             </div>
           ))}
-          {selectedGroupId !== null && paramPageCount > 1 && (
+          {selectedGroupId !== null && fieldPageCount > 1 && (
             <div className="wb-pager">
-              <button type="button" disabled={paramPage === 0} onClick={() => setParamPage(paramPage - 1)}>‹</button>
-              <span>{paramPage + 1}/{paramPageCount}</span>
-              <button type="button" disabled={paramPage >= paramPageCount - 1} onClick={() => setParamPage(paramPage + 1)}>›</button>
+              <button type="button" disabled={fieldPage === 0} onClick={() => setFieldPage(fieldPage - 1)}>‹</button>
+              <span>{fieldPage + 1}/{fieldPageCount}</span>
+              <button type="button" disabled={fieldPage >= fieldPageCount - 1} onClick={() => setFieldPage(fieldPage + 1)}>›</button>
             </div>
           )}
+        </div>
+      )
+    },
+    {
+      id: 'values',
+      title: 'Values',
+      hint: selectedParam ? `${selectedParam.type} · ${selectedParam.valueCount} 值` : '值',
+      initialFlex: 0.24,
+      minWidth: 260,
+      children: (
+        <div className="wb-list">
+          {selectedParamId === null && <p className="wb-empty">先在 Fields 栏选择一个 field。</p>}
           {selectedParamId !== null && selectedParam && (
             <div className="gparam-values">
               <div className="wb-list__group-label">
@@ -409,17 +432,17 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
                   </div>
                 );
               })}
-              {valueLines.length === 0 && <p className="wb-empty">该 param 没有值。</p>}
+              {valueLines.length === 0 && <p className="wb-empty">该 field 没有值。</p>}
             </div>
           )}
         </div>
       )
     },
     {
-      id: 'tools',
-      title: 'Tools',
-      initialFlex: 0.16,
-      minWidth: 140,
+      id: 'toolbar',
+      title: 'Toolbar',
+      initialFlex: 0.19,
+      minWidth: 200,
       children: (
         <div className="wb-list">
           {/* 提交成功提示在 drafts 清空后仍须可见：清空会立即切回诚实空态，
@@ -444,7 +467,7 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
             <>
               <p className="wb-empty">暂无已接通的工具</p>
               <p className="wb-empty">
-                选中 param 后修改值，此处出现 typed 保存入口（没有 bytes replace fallback）。
+                选中 field 后修改值，此处出现 typed 保存入口（没有 bytes replace fallback）。
               </p>
             </>
           )}

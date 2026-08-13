@@ -134,13 +134,13 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
 
   it('backup 不读：所有 param 读取通道都必须拒绝（PARAM 两个 + GPARAM 一个）', () => {
     // 3 个读取通道（readParamDocument / readParamPage / readGparamDocument）各带
-    // 一处 BACKUP_READ_FORBIDDEN；四个写通道（GPARAM/MTD/ESD/TAE：
+    // 一处 BACKUP_READ_FORBIDDEN；五个写通道（GPARAM/MTD/ESD/TAE/FXR：
     // commitGparamMutations、commitMtdPropertySet、commitEsdTransition、
-    // commitTaeEvent）也各带一处（backup 是 History-only，写同样被拒）—— 所以
-    // 非注释总数是 7。
+    // commitTaeEvent、commitFxrFieldSet）也各带一处（backup 是 History-only，
+    // 写同样被拒）—— 所以非注释总数是 8。
     const matches = ipcSource.match(/BACKUP_READ_FORBIDDEN/g) ?? [];
-    assert.equal(matches.length, 7,
-      'BACKUP_READ_FORBIDDEN 应覆盖 3 个读取通道 + 4 个写通道（GPARAM/MTD/ESD/TAE）');
+    assert.equal(matches.length, 8,
+      'BACKUP_READ_FORBIDDEN 应覆盖 3 个读取通道 + 5 个写通道（GPARAM/MTD/ESD/TAE/FXR）');
     // 每个 handler 都调用同一判定函数（行为测试见上），拒绝不能只挂在一个通道。
     // 新加读取/写入通道时必须同步扩展这里：少一个通道就少一处 backup 泄漏。
     const doc = sliceHandler(ipcSource, 'resource.readParamDocument');
@@ -150,6 +150,7 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     const mtdWrite = sliceHandler(ipcSource, 'resource.commitMtdPropertySet');
     const esdWrite = sliceHandler(ipcSource, 'resource.commitEsdTransition');
     const taeWrite = sliceHandler(ipcSource, 'resource.commitTaeEvent');
+    const fxrWrite = sliceHandler(ipcSource, 'resource.commitFxrFieldSet');
     assert.ok(doc.includes('isParamBackupPath('), 'readParamDocument 未调用 isParamBackupPath');
     assert.ok(page.includes('isParamBackupPath('), 'readParamPage 未调用 isParamBackupPath');
     assert.ok(gparam.includes('isParamBackupPath('), 'readGparamDocument 未调用 isParamBackupPath');
@@ -157,6 +158,7 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     assert.ok(mtdWrite.includes('isParamBackupPath('), 'commitMtdPropertySet 未调用 isParamBackupPath');
     assert.ok(esdWrite.includes('isParamBackupPath('), 'commitEsdTransition 未调用 isParamBackupPath');
     assert.ok(taeWrite.includes('isParamBackupPath('), 'commitTaeEvent 未调用 isParamBackupPath');
+    assert.ok(fxrWrite.includes('isParamBackupPath('), 'commitFxrFieldSet 未调用 isParamBackupPath');
   });
 
   it('backup 拒绝的诊断指向 History & Recovery（不冒充普通读取失败）', () => {

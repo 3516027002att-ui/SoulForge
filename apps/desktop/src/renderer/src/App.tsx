@@ -523,7 +523,7 @@ export function App(): ReactElement {
     && /\.fxr(\.dcx)?$/i.test(selectedFile.relativePath) === true;
 
   /**
-   * GPARAM 域的全部磁盘文件（工作台 Banks 栏的数据源）。
+   * GPARAM 域的全部磁盘文件（工作台 Files 栏的数据源，§2.5 Files 是逻辑 bank）。
    *
    * 按后缀过滤而不是 resourceKind：与 selectEditor 对 gparam 的判据一致
    * （ROUTE-06 的 legacy 路径同用 .gparam/.gparam.dcx 后缀）。任务开始时

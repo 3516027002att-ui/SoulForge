@@ -391,6 +391,28 @@ const api = {
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.commitTaeEvent', sourceUri, expectedDocumentHash, mutations),
   /**
+   * VFX-54C：FXR 字段写回（vfx-field-set）。
+   * mutation 定位用结构性路径（host 收集序 + property/§8 下标 + Section11 值下标）；
+   * C# 侧只在已知布局下开放写入口，未知 node type / layout warning / Section9 非空 /
+   * Section12-14 非空都 fail-closed 拒绝。
+   */
+  commitFxrFieldSet: (
+    sourceUri: string,
+    expectedDocumentHash: string,
+    mutations: Array<{
+      mutation: string;
+      address: {
+        container: string;
+        hostIndex: number;
+        propertyIndex?: number;
+        section8Index?: number;
+        valueIndex: number;
+      };
+      value: number;
+    }>
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.commitFxrFieldSet', sourceUri, expectedDocumentHash, mutations),
+  /**
    * 当前 PARAM 元数据包的身份与信任状态。
    *
    * 界面据此决定是否显示「信任该元数据包」的一次性确认入口 —— 字段写入必须

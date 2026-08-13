@@ -161,6 +161,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'bridge:verify:esd-writer': 'synthetic',
   'bridge:verify:tae-writer': 'synthetic',
   'bridge:verify:fxr': 'synthetic',
+  // VFX-54C write：与 fxr read 同型——registry 未登记真实语料时走自造 synthetic
+  // fixture 仍真实经过 C# FxrNativeWriter 验证写回（双路径，authority 恒 partial）。
+  'bridge:verify:fxr-writer': 'synthetic',
   'test:bridge-recovery-harness': 'synthetic',
   'test:bridge-staging': 'synthetic',
   // Bridge allowed-root 生命周期（front-end.md §13.2）：read 不得附加不存在的

@@ -47,6 +47,8 @@ import {
   type EsdTransitionMutation,
   commitTaeEventViaBridge,
   type TaeEventUpsertMutation,
+  commitVfxFieldSetViaBridge,
+  type VfxFieldSetMutation,
   commitTpfTextureReplaceViaBridge,
   type GparamFieldSetMutation,
   commitParamMutationViaBridge,
@@ -4170,6 +4172,101 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }),
         title: `TAE event upsert × ${mutations.length}`,
         confirmActionLabel: '提交 TAE 事件变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  /**
+   * VFX-54C：FXR 字段写回（vfx-field-set）。
+   *
+   * 渲染器回传读时的 sourceHash 作为 expectedDocumentHash；mutation 为
+   * vfx-field-set（字节级外科替换某个「已知布局」容器——host/property/section8——
+   * 里 Section11 的一个 Int32）。C# 侧只在整份文件结构被完全理解时开放写入口：
+   * 未识别 node type、layout warning、Section9 非空、Section12-14 非空都会以
+   * FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE fail-closed。写链照 ESD/TAE 同一范式：
+   * stageBridgeOutput 落暂存 → applyNativeMutation 经 Patch Engine 提交（含备份、
+   * 确认与回滚元数据）。FXR 在 ffxbnd.dcx 容器内时，容器外层重建由 Patch 管线完成。
+   */
+  handle(
+    'resource.commitFxrFieldSet',
+    async (
+      event,
+      sourceUri: string,
+      expectedDocumentHash: string,
+      mutations: VfxFieldSetMutation[]
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'FXR_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入 FXR。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+      if (isParamBackupPath(file.relativePath)) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'BACKUP_READ_FORBIDDEN',
+            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 FXR。',
+            sourceUri
+          }]
+        };
+      }
+      if (!Array.isArray(mutations) || mutations.length === 0
+        || !mutations.every((m) => m && typeof m.mutation === 'string')) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'FXR_FIELD_SET_MUTATIONS_REQUIRED',
+            message: 'FXR typed write 需要至少一条 field set mutation（vfx-field-set）。',
+            sourceUri
+          }]
+        };
+      }
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'FXR_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash: expectedDocumentHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'fxr',
+        stagingFileName: `${basename(file.relativePath)}.mut`,
+        stageWrite: (context) => commitVfxFieldSetViaBridge({
+          sourcePath: file.absolutePath,
+          outputPath: context.outputPath,
+          expectedDocumentHash,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          mutations
+        }),
+        title: `FXR field set × ${mutations.length}`,
+        confirmActionLabel: '提交 FXR 字段变更'
       }, {
         confirm: electronConfirmationPort(event),
         commit: sessionCommitPort(activeSession, operationLog, storage)
