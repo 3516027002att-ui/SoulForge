@@ -1256,6 +1256,40 @@
       "deferredToRelease": null,
       "deferredTrack": null,
       "resumeRequires": []
+    },
+    {
+      "scopeItemId": "SCOPE-MATBIN-53DE-DEFERRAL",
+      "capabilityId": "MATERIAL-53",
+      "gateIds": [
+        "REL-SCOPE"
+      ],
+      "subjectKind": "material-format",
+      "scope": "MATBIN read/write(MATERIAL-53D/53E):Mod Engine 2 专用序列化格式,非 FromSoftware 原生;Sekiro 原生与测试 Mod 语料 0 个 .matbin",
+      "decisionStatus": "user-approved",
+      "proposedSupport": "deferred",
+      "operations": [],
+      "unsupportedOperations": [
+        "build-matbin-native-parser",
+        "claim-matbin-read-authority",
+        "claim-matbin-write-authority",
+        "reuse-mtd-parser-for-matbin",
+        "treat-suffix-as-confirmation"
+      ],
+      "authorityAtRuling": "unverified",
+      "evidenceRefs": [],
+      "registryRefs": [],
+      "openRulings": [],
+      "nonClaims": [
+        "MATBIN 无确认 parser 时留 Files(53A 先例),不建 MatbinNativeDocument.cs;Sekiro 0 个 .matbin,格式无公开规范,建 parser 会违反「没有真实 parser 就不能声称格式已解析」硬约束;53D/53E 延期 V0.6,resume 需 Mod Engine mods/parts 真实语料与格式证据"
+      ],
+      "targetRelease": "V0.5",
+      "deferredToRelease": "V0.6",
+      "deferredTrack": "material-matbin",
+      "resumeRequires": [
+        "mod-engine-mods-parts-matbin-corpus",
+        "matbin-format-spec-or-reverse-evidence",
+        "confirmed-native-parser"
+      ]
     }
   ]
 }
