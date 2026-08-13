@@ -133,7 +133,8 @@ test('文件工作域可定位 ai 资源，且不与 Agent 面板冲突', async 
 
   // Agent 面板仍是独立右侧面板，中央没有占用 AI 页面。
   await expect(window.locator('.agent__composer textarea')).toBeVisible();
-  await expect(window.locator('.agent__header')).toContainText('Agent');
+  // §12.3：Agent dock header 左侧产品名是 SoulForge（不是 "Agent"）。
+  await expect(window.locator('.agent__header')).toContainText('SoulForge');
   await expect(window.locator('.status-bar')).toContainText('文件');
   await app.close();
 });
