@@ -897,6 +897,35 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "write-mtd-document")
+        {
+            // MATERIAL-53C：MTD 材质属性写回。只收 typed property set（paramId +
+            // newValue），outputPath 必须是已校验的暂存区路径（越界之外的边界检查由
+            // BridgeDaemonHost 的 DiskWritingCommands 门在分派前完成）。
+            //
+            // 字节外科替换：目标 param 文本值之外的一切字节原样保留，未知字段无损；
+            // 目标 param 文本内容区间含 XML 标记时 MtdWriteBlockedException →
+            // MTD_WRITE_BLOCKED_UNKNOWN_STRUCTURE（结构化诊断，不写坏）。
+            if (string.IsNullOrWhiteSpace(outputPath))
+                return BridgeResult<object>.Failed(file, "material", "BRIDGE_OUTPUT_PATH_REQUIRED", "MTD writer requires a validated staging output path.");
+            try
+            {
+                var written = await MtdNativeWriter.WriteAsync(file, outputPath, options, cancellationToken, oodleRuntimeRoot);
+                return BridgeResult<object>.Partial(file, "material", new[]
+                {
+                    new Diagnostic("info", "MTD_STAGING_WRITE_VERIFIED", "MTD 材质属性已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
+                }, written);
+            }
+            catch (MtdWriteBlockedException ex)
+            {
+                return BridgeResult<object>.Failed(file, "material", "MTD_WRITE_BLOCKED_UNKNOWN_STRUCTURE", ex.Message, ex.Details);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "material", "MTD_STAGING_WRITE_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-fxr-document")
         {
             // VFX-54A：FXR3 只读。FXR 是 ffxbnd.dcx 容器内子项，支持三种输入形态：

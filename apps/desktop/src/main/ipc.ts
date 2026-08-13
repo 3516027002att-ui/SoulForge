@@ -42,6 +42,7 @@ import {
   commitFmgMutationViaBridge,
   commitFlverMutationViaBridge,
   commitGparamMutationsViaBridge,
+  commitMtdPropertySetViaBridge,
   commitTpfTextureReplaceViaBridge,
   type GparamFieldSetMutation,
   commitParamMutationViaBridge,
@@ -3844,6 +3845,101 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }),
         title: `GPARAM field-set ${mutations.length} mutations`,
         confirmActionLabel: '提交 GPARAM 字段变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  /**
+   * MTD 材质属性写回（MATERIAL-53C）。与 commitGparamMutations 同一形态：
+   * typed property set（paramId + newValue）→ write-mtd-document（C#：只认 typed
+   * 定位，目标 param 文本区间含 XML 标记时 fail-closed MTD_WRITE_BLOCKED_）
+   * → stageBridgeOutput 落暂存 → applyNativeMutation 经 Patch Engine 提交
+   * （含备份、确认与回滚元数据）。DCX 源需要 Oodle 运行时（baseRoot）。
+   *
+   * expectedDocumentHash 由渲染器回传 read 时的 sourceHash：哈希不符说明
+   * 工作副本已漂移，拒绝写入（并发保护，与 PARAM/GPARAM 同一语义）。
+   */
+  handle(
+    'resource.commitMtdPropertySet',
+    async (
+      event,
+      sourceUri: string,
+      expectedDocumentHash: string,
+      set: { paramId: string; newValue?: string }
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'MTD_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入 MTD。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+      if (isParamBackupPath(file.relativePath)) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'BACKUP_READ_FORBIDDEN',
+            message: 'backup 文件只能在 History & Recovery 中以只读方式查看，不能写入 MTD。',
+            sourceUri
+          }]
+        };
+      }
+      if (!set || typeof set.paramId !== 'string' || set.paramId.length === 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'MTD_PROPERTY_SET_REQUIRED',
+            message: 'MTD typed write 需要 paramId + newValue；没有 typed 定位就没有写入口。',
+            sourceUri
+          }]
+        };
+      }
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'MTD_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const gameRoot = activeSession.layers.baseRoot;
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash: expectedDocumentHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'mtd',
+        stagingFileName: `${basename(file.relativePath)}.mut`,
+        stageWrite: (context) => commitMtdPropertySetViaBridge({
+          sourcePath: file.absolutePath,
+          outputPath: context.outputPath,
+          expectedDocumentHash,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          set: { paramId: set.paramId, newValue: set.newValue ?? '' },
+          ...(gameRoot ? { oodleRuntimeRoot: gameRoot } : {})
+        }),
+        title: `MTD property ${set.paramId}`,
+        confirmActionLabel: '提交 MTD 材质属性变更'
       }, {
         confirm: electronConfirmationPort(event),
         commit: sessionCommitPort(activeSession, operationLog, storage)

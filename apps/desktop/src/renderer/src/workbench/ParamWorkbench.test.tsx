@@ -134,11 +134,12 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
 
   it('backup 不读：所有 param 读取通道都必须拒绝（PARAM 两个 + GPARAM 一个）', () => {
     // 3 个读取通道（readParamDocument / readParamPage / readGparamDocument）各带
-    // 一处 BACKUP_READ_FORBIDDEN；GPARAM 写通道 commitGparamMutations 也带一处
-    // （backup 是 History-only，写同样被拒）—— 所以非注释总数是 4。
+    // 一处 BACKUP_READ_FORBIDDEN；GPARAM 写通道 commitGparamMutations 与
+    // MTD 写通道 commitMtdPropertySet 也各带一处（backup 是 History-only，
+    // 写同样被拒）—— 所以非注释总数是 5。
     const matches = ipcSource.match(/BACKUP_READ_FORBIDDEN/g) ?? [];
-    assert.equal(matches.length, 4,
-      'BACKUP_READ_FORBIDDEN 应覆盖 3 个读取通道 + 1 个 GPARAM 写通道');
+    assert.equal(matches.length, 5,
+      'BACKUP_READ_FORBIDDEN 应覆盖 3 个读取通道 + 2 个写通道（GPARAM/MTD）');
     // 每个 handler 都调用同一判定函数（行为测试见上），拒绝不能只挂在一个通道。
     // 新加读取/写入通道时必须同步扩展这里：少一个通道就少一处 backup 泄漏。
     const doc = sliceHandler(ipcSource, 'resource.readParamDocument');

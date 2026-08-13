@@ -122,6 +122,7 @@ export type BridgeCommandName =
   | 'read-flver-dummies'
   | 'read-esd-document'
   | 'read-mtd-document'
+  | 'write-mtd-document'
   | 'read-fxr-document'
   | 'capabilities'
   | 'health';
@@ -152,7 +153,8 @@ export const BRIDGE_STAGING_WRITE_VERIFIED_CODES = Object.freeze({
   bnd4: 'BND4_STAGING_WRITE_VERIFIED',
   gparam: 'GPARAM_STAGING_WRITE_VERIFIED',
   flver: 'FLVER_STAGING_WRITE_VERIFIED',
-  tpf: 'TPF_STAGING_WRITE_VERIFIED'
+  tpf: 'TPF_STAGING_WRITE_VERIFIED',
+  mtd: 'MTD_STAGING_WRITE_VERIFIED'
 } as const);
 
 export type BridgeStagingWriteVerifiedCode =

@@ -253,6 +253,7 @@ internal static class BridgeDaemonHost
         "write-gparam",
         "write-flver",
         "write-tpf-texture-replace",
+        "write-mtd-document",
         "export-tpf-texture",
         "extract-bnd4-child"
     };
@@ -533,7 +534,7 @@ internal static class BridgeDaemonHost
         "write-tpf-texture-replace", "read-tae-document",
         "read-flver-document", "read-flver-mesh", "read-flver-skeleton",
         "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
-        "read-mtd-document", "read-fxr-document",
+        "read-mtd-document", "write-mtd-document", "read-fxr-document",
         "export-event", "export-map", "export-param",
         "export-msg", "probe-oodle", "probe-document-locator"
     };

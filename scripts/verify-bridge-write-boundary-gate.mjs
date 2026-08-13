@@ -398,13 +398,16 @@ try {
     { command: 'extract-bnd4-child', options: { childPath: childName } },
     { command: 'write-bnd4', options: { childPath: childName, newContentBase64: childBytes.toString('base64') } },
     { command: 'export-tpf-texture', options: { textureIndex: 0 } },
-    // 以下 4 个此前完全未覆盖。mutations/entries 给最小合法形态即可：
+    // 以下 6 个此前未全覆盖。mutations/entries 给最小合法形态即可：
     // 边界在分派前生效，请求不会走到各自的 writer 实现里。
     { command: 'write-fmg', options: { entries: [{ id: 1, text: 'boundary-probe' }] } },
     { command: 'write-param', options: { mutations: [{ mutation: 'update', rowId: 1, fields: {} }] } },
     { command: 'write-emevd', options: { mutations: [] } },
     { command: 'write-msb', options: { mutations: [] } },
-    { command: 'write-flver', options: { mutations: [] } }
+    { command: 'write-flver', options: { mutations: [] } },
+    { command: 'write-gparam', options: { mutations: [] } },
+    { command: 'write-tpf-texture-replace', options: { textureIndex: 0 } },
+    { command: 'write-mtd-document', options: { paramId: '0', newValue: 'boundary-probe' } }
   ];
 
   /**
