@@ -20,6 +20,11 @@ import {
   createContextBroker,
   createUnifiedDiff,
   importPinnedSmithboxSdtParamMetadata,
+  applyYappedFieldOverlay,
+  readYappedSdtDefsIndex,
+  readYappedSdtRowNamesIndex,
+  type YappedParamOverlay,
+  type YappedSourceDiagnostic,
   listRolloutSessions,
   loadRolloutSession,
   runAgentSession,
@@ -3547,6 +3552,110 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   };
 
+  /* ------------------------------------------------------------------ */
+  /*  本机 Yapped 只读覆盖（T5-1）                                       */
+  /*                                                                    */
+  /*  Smithbox 元数据给的是英文字段名。用户装的中文汉化版 Yapped 在      */
+  /*  Paramdex\\SDT\\Defs\\*.xml 里带中文 DisplayName/Description，       */
+  /*  本模块只从本机 Yapped 安装只读抽这两样，覆盖到 Smithbox 文档上。    */
+  /*  这是**显示层覆盖**：origin 与偏移不动，写链只消费字段 id/type/      */
+  /*  offset，不受显示名影响。                                          */
+  /*                                                                    */
+  /*  刻意不做成 Smithbox 那样的钉死发布包：Yapped 是本机第三方工具     */
+  /*  安装目录，不是可再分发来源，没有归档摘要可钉。这里只读、不入库、   */
+  /*  失败降级（拿不到就回落到 Smithbox 英文）。                          */
+  /* ------------------------------------------------------------------ */
+
+  /** T5 固定候选：本机 Yapped Rune Bear 发布包真实落地（grok 已求证存在）。 */
+  const YAPPED_SDT_FIXED_CANDIDATES = [
+    'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\Yapped Rune Bear v2.14.1'
+      + '\\Yapped Rune Bear v2.14.1\\Paramdex\\SDT'
+  ];
+
+  /**
+   * 定位本机 Yapped 的 `Paramdex\SDT` 根（含 Defs/ 与 Names/）。
+   *
+   * 候选顺序：SOULFORGE_YAPPED_SDT_ROOT 显式环境变量 → 固定候选 → 已挂载
+   * 会话兄弟 tools/<一层子目录>/Paramdex/SDT。找不到返回 null，由调用方
+   * 降级到 Smithbox 英文 —— 这是可选增强，绝不能把「中文名不可用」升级成
+   * 「PARAM 不可用」。
+   */
+  const locateYappedSdtRootSync = (): string | null => {
+    const probe = (candidate: string): boolean => {
+      try {
+        return existsSync(join(candidate, 'Defs')) && existsSync(join(candidate, 'Names'));
+      } catch {
+        return false;
+      }
+    };
+    const explicit = process.env.SOULFORGE_YAPPED_SDT_ROOT?.trim();
+    if (explicit) {
+      const candidate = resolve(explicit);
+      if (probe(candidate)) return candidate;
+    }
+    for (const candidate of YAPPED_SDT_FIXED_CANDIDATES) {
+      if (probe(candidate)) return candidate;
+    }
+    const roots: string[] = [];
+    pushToolsSubdirs(roots, activeSession?.layers.baseRoot);
+    const overlay = activeSession?.layers.overlayRoot?.trim();
+    if (overlay) pushToolsSubdirs(roots, dirname(dirname(overlay)));
+    const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+    if (gameRootEnv) pushToolsSubdirs(roots, gameRootEnv);
+    for (const root of roots) {
+      const candidate = join(root, 'Paramdex', 'SDT');
+      if (probe(candidate)) return candidate;
+    }
+    return null;
+  };
+
+  let yappedOverlayCache: {
+    loaded: true;
+    /** ParamType → 字段覆盖；null 表示本机无 Yapped 或读不到可用 Defs。 */
+    defs: ReadonlyMap<string, YappedParamOverlay> | null;
+    /** 容器条目名 → 行 id → 行名；null 表示本机无 Yapped 或读不到可用 Names。 */
+    rowNames: ReadonlyMap<string, ReadonlyMap<number, string>> | null;
+    diagnostics: YappedSourceDiagnostic[];
+  } | null = null;
+
+  /**
+   * 惰性读本机 Yapped Defs/Names 索引并缓存。只读一次：160 个 xml + 160 个
+   * txt 实测数秒级，每读一个 param 都跑一遍会让界面卡住。空/缺失回 null，
+   * 不抛 —— 失败降级到 Smithbox 英文。
+   */
+  const loadYappedOverlay = async (): Promise<{
+    defs: ReadonlyMap<string, YappedParamOverlay> | null;
+    rowNames: ReadonlyMap<string, ReadonlyMap<number, string>> | null;
+    diagnostics: YappedSourceDiagnostic[];
+  }> => {
+    if (yappedOverlayCache) return yappedOverlayCache;
+    const sdtRoot = locateYappedSdtRootSync();
+    if (!sdtRoot) {
+      yappedOverlayCache = {
+        loaded: true,
+        defs: null,
+        rowNames: null,
+        diagnostics: [{
+          severity: 'info',
+          code: 'YAPPED_SDT_NOT_FOUND',
+          message: '未找到本机 Yapped Paramdex/SDT，字段名回落 Smithbox 英文标注。'
+        }]
+      };
+      return yappedOverlayCache;
+    }
+    const [defs, names] = await Promise.all([
+      readYappedSdtDefsIndex(join(sdtRoot, 'Defs')),
+      readYappedSdtRowNamesIndex(join(sdtRoot, 'Names'))
+    ]);
+    yappedOverlayCache = {
+      loaded: true,
+      defs: defs.ok ? defs.byTypeName : null,
+      rowNames: names.ok ? names.byEntryName : null,
+      diagnostics: [...defs.diagnostics, ...names.diagnostics]
+    };
+    return yappedOverlayCache;
+  };
+
   /**
    * PARAM 元数据信任决定的持久化：userData 下的独立 JSON。
    *
@@ -3640,9 +3749,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
       };
     }
+    // 显示层覆盖：本机 Yapped 有该类型的中文 DisplayName/Description 就套上，
+    // 没有（或本机没装 Yapped）就原样回落 Smithbox。覆盖不改变 origin。
+    const yapped = await loadYappedOverlay();
+    const applyOverlay = (document: ParamDefDocument): ParamDefDocument =>
+      yapped.defs ? applyYappedFieldOverlay(document, yapped.defs) : document;
     if (!covered) {
       return {
-        document: { ...entry.document, origin: 'fixture' },
+        document: applyOverlay({ ...entry.document, origin: 'fixture' }),
         trusted: false,
         diagnostic: {
           code: 'PARAM_METADATA_TRUST_POLICY_REQUIRED',
@@ -3651,7 +3765,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
       };
     }
-    return { document: { ...entry.document, origin: 'imported' }, trusted: true, diagnostic: null };
+    return {
+      document: applyOverlay({ ...entry.document, origin: 'imported' }),
+      trusted: true,
+      diagnostic: null
+    };
   };
 
   /** 当前元数据包的身份与信任状态，供界面显示确认入口。 */
@@ -5421,7 +5539,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
                 ...(field.enumRef ? { enumRef: field.enumRef } : {}),
                 ...(field.refs ? { refs: field.refs } : {}),
                 ...(field.min !== undefined ? { min: field.min } : {}),
-                ...(field.max !== undefined ? { max: field.max } : {})
+                ...(field.max !== undefined ? { max: field.max } : {}),
+                ...(field.description ? { description: field.description } : {})
               }))
             : null,
           fieldEnums: containerRowWidthMatches && containerParamDef?.enums
@@ -5535,7 +5654,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               ...(field.enumRef ? { enumRef: field.enumRef } : {}),
               ...(field.refs ? { refs: field.refs } : {}),
               ...(field.min !== undefined ? { min: field.min } : {}),
-              ...(field.max !== undefined ? { max: field.max } : {})
+              ...(field.max !== undefined ? { max: field.max } : {}),
+              ...(field.description ? { description: field.description } : {})
             }))
           : null,
         fieldEnums: containerRowWidthMatches && containerParamDef?.enums
