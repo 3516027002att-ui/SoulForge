@@ -65,7 +65,7 @@ export type EditorId =
   | 'tae' | 'esd' | 'flver' | 'tpf'
   | 'plain-text'        // 可编辑纯文本资源
   | 'binary'            // 无专属编辑器的二进制：原始字节
-  | 'project'            // 项目概览
+  | 'project'            // 开始页（挂载入口 + 工作区状态）
   | 'operations'        // 任务与历史（非资源视图）
   | 'settings'          // 设置视图（非资源视图）
   | 'empty';            // 未选择资源（或不可路由：history-only / hidden）

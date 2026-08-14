@@ -28,7 +28,7 @@ import {
 
 /** §3.2 固定顺序对应的中文标签（渲染侧文案；core 的英文 DOMAIN_LABELS 不参与）。 */
 const DOMAIN_LABELS: Record<EditorDomainId, string> = {
-  project: '项目',
+  project: '开始',
   param: 'PARAM',
   gparam: 'GPARAM',
   text: '文本',

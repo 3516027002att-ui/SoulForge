@@ -311,7 +311,7 @@ Smithbox 顶栏还有本文没有做成一等域的编辑器。映射固定如�
 
 ```text
 系统菜单                                      OS / Electron
-领域编辑器栏                                  Project / PARAM / Text / ...（R1 裁定后无独立 GPARAM）
+领域编辑器栏                                  Start / PARAM / Text / ...（R1 裁定后无独立 GPARAM）
 文档标签栏                                    逻辑文档，不是每个磁盘文件
 主工作区                                      唯一 full-bleed 编辑器 + 右侧 Agent dock
 Problems / Output                             底部 dock
@@ -324,8 +324,7 @@ Problems / Output                             底部 dock
 
 > **R1 裁定投影（2026-08-14，用户裁定，覆盖本节顶栏固定列表）：**
 > 领域顶栏**删除独立的「GPARAM」**。PARAM 与 GPARAM 都进左侧「参数」逻辑库：
-> 放在「更换 Mod 工作区 / 选择原版目录 / 工作区状态」下面，两者并列，作为比
-> 「文本」更大的一块主工作面（渲染器实现：`domainLibraries.filesForDomain('param')`
+> 作为比「文本」更大的一块主工作面（渲染器实现：`domainLibraries.filesForDomain('param')`
 > 同时返回 parambnd 容器与 gparam bank；`buildDomainSummaries` 把 gparam 的
 > `visibility` 投影为 `hidden`，顶栏与命令面板不提供一级入口，域仍可路由）。
 > 这是信息架构变更，不是 `display:none` 藏 UI；本节与 §2.6 已同步本投影。
@@ -353,7 +352,7 @@ export type EditorDomainId =
 领域栏固定显示产品名称，不显示裸物理目录，不显示无单位文件数：
 
 ```text
-项目 | PARAM | 文本 | 事件 | 地图 | 脚本 |
+开始 | PARAM | 文本 | 事件 | 地图 | 脚本 |
 行为 | 动画 | 模型 | 纹理 | 材质 | VFX | 容器 | 文件
 ```
 

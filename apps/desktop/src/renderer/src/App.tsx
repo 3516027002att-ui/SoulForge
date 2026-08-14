@@ -124,7 +124,7 @@ import {
 import { MsgTableEditor } from './components/MsgTableEditor.js';
 import { PanelErrorBoundary } from './components/PanelErrorBoundary.js';
 import { hexTextToSafeBase64 } from './utils/binary.js';
-import { ProjectOverviewPanel } from './workbench/ProjectOverviewPanel.js';
+import { StartWorkspacePanel } from './workbench/StartWorkspacePanel.js';
 import {
   extractMsgRows,
   nextMsgId,
@@ -314,7 +314,7 @@ export function App(): ReactElement {
   // §16 #4：资源族过滤条已从 production shell 断开，物理浏览只留 Files。
   // resourceMode 冻结为常量 'all' —— 唯一写它的 onSelect（资源条）已移除。
   const resourceMode: ResourceMode = 'all';
-  const [centerView, setCenterView] = useState<CenterView>('resource');
+  const [centerView, setCenterView] = useState<CenterView>('project');
   const [bnd4Forced, setBnd4Forced] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>('explorer');
   const [agentOpen, setAgentOpen] = useState(true);
@@ -637,7 +637,9 @@ export function App(): ReactElement {
     || (activeDomain === 'text' && activeEditor === 'empty' && workspace !== null);
   const showEventWorkbench = activeEditor === 'event'
     || (activeDomain === 'event' && activeEditor === 'empty' && workspace !== null);
-  const showEditorWelcome = shouldShowEditorWelcome({
+  // T2：开始页（project 域）接管空工作区，欢迎层不再覆盖它 —— 欢迎层只在
+  // 非开始工作域的「无工作区」空态出现，避免 z-index:3 拦截开始页按钮点击。
+  const showEditorWelcome = activeDomain !== 'project' && shouldShowEditorWelcome({
     hasWorkspace: workspace !== null,
     openTabCount: openTabs.length
   });
@@ -1911,7 +1913,7 @@ export function App(): ReactElement {
     if (domain === 'project') {
       setSelectedFile(null);
       setCenterView('project');
-      setStatus('项目概览');
+      setStatus('开始页');
       return;
     }
     if (domain === activeDomain) {
@@ -2586,7 +2588,7 @@ export function App(): ReactElement {
                 {activeDomain === 'files'
                   ? `${formatFilesCount(physicalBrowseFiles.length)}${physicalBrowseFiles.length > FILE_LIST_PAGE_SIZE ? ` · 本页 ${pagedFiles.length}` : ''}`
                   : activeDomain === 'project'
-                    ? '项目概览'
+                    ? '开始'
                     : `${domainLabel(activeDomain)} · 逻辑库`}
               </span>
               <SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />
@@ -2597,50 +2599,6 @@ export function App(): ReactElement {
                   浏览器预览：文件系统功能仅在 SoulForge 桌面版可用
                 </div>
               )}
-              <div className="explorer-actions">
-                <button
-                  type="button"
-                  className={workspace ? 'btn btn--ghost btn--block' : 'btn btn--primary btn--block'}
-                  data-testid="open-workspace"
-                  onClick={() => void openWorkspace()}
-                  {...(isBrowserPreview ? {
-                    'aria-disabled': true,
-                    title: '浏览器预览：「打开 Mod 工作区」仅在 SoulForge 桌面版可用'
-                  } : {})}
-                >
-                  {workspace ? '更换 Mod 工作区' : '打开 Mod 工作区'}
-                </button>
-                <div className="row gap">
-                  <button
-                    type="button"
-                    className="btn btn--ghost btn--sm"
-                    data-testid="choose-base-directory"
-                    onClick={() => void chooseBaseDirectory()}
-                    {...(isBrowserPreview ? {
-                      'aria-disabled': true,
-                      title: '浏览器预览：「选择原版目录」仅在 SoulForge 桌面版可用'
-                    } : {})}
-                  >
-                    {baseRootChoice ? '更换原版目录' : '选择原版目录'}
-                  </button>
-                  {baseRootChoice && (
-                    <button type="button" className="btn btn--ghost btn--sm" onClick={clearBaseDirectory}>清除</button>
-                  )}
-                </div>
-                {baseRootChoice && (
-                  <p className="explorer-base-note" title={baseRootChoice.label}>
-                    原版（下次打开生效）：{baseRootChoice.label}
-                  </p>
-                )}
-                <div className="explorer-mount">
-                  <span className="explorer-mount__item" title={workspace?.workspaceLabel ?? '未打开 Mod 工作区'}>
-                    工作区：{workspace?.workspaceLabel ?? '未打开'}
-                  </span>
-                  <span className={sessionMeta?.baseMounted ? 'pill pill--ok' : 'pill'}>
-                    原版：{sessionMeta?.baseMounted ? '已挂载（只读）' : baseRootChoice ? '待打开生效' : '未挂载'}
-                  </span>
-                </div>
-              </div>
               {activeDomain === 'files' ? (
                 <>
                   <div className="search-box">
@@ -2701,10 +2659,7 @@ export function App(): ReactElement {
                   )}
                 </>
               ) : activeDomain === 'project' ? (
-                <div className="domain-browse-placeholder" data-testid="domain-browse-placeholder">
-                  <span className="domain-placeholder__eyebrow">DOMAIN / 项目</span>
-                  <p>项目概览在中央编辑区。用顶部工作域进入 PARAM、文本、事件或文件。</p>
-                </div>
+                <p className="empty-hint" data-testid="start-sidebar-hint">在中央开始页打开工作区。</p>
               ) : (
                 <DomainLibraryList
                   files={domainLibraries}
@@ -2954,7 +2909,7 @@ export function App(): ReactElement {
                   <b>{centerView === 'operations'
                     ? '任务与历史'
                     : centerView === 'project'
-                      ? '项目'
+                      ? '开始'
                       : domainLabel(activeDomain)}</b>
                   {/* R1/P7 裁定：面包屑用逻辑名，物理相对路径只进 tooltip。 */}
                   {selectedFile
@@ -2979,33 +2934,14 @@ export function App(): ReactElement {
             key={`panel-boundary:${activeEditor}`}
           >
           {activeEditor === 'project' && (
-            <ProjectOverviewPanel
+            <StartWorkspacePanel
               workspaceLabel={workspace?.workspaceLabel ?? null}
-              indexedFiles={allFiles.length}
-              pendingChanges={pendingChangeCount}
-              diagnostics={diagnostics.length}
+              baseRootChoiceLabel={baseRootChoice?.label ?? null}
+              baseMounted={sessionMeta?.baseMounted ?? false}
               browserPreview={isBrowserPreview}
               onOpenWorkspace={() => void openWorkspace()}
-              draftChanges={draftChanges.slice(0, WELCOME_DRAFT_LIMIT).map((item) => ({
-                id: item.id,
-                target: item.target,
-                summary: item.summary
-              }))}
-              recentFiles={openTabs.slice(-6).reverse().map((tab) => ({
-                sourceUri: tab.sourceUri,
-                relativePath: tab.relativePath,
-                resourceKind: tab.resourceKind,
-                formatLabel: tab.formatLabel
-              }))}
-              onSelectFile={(sourceUri) => {
-                const match = indexedFiles.find((item) => item.sourceUri === sourceUri);
-                if (match) void selectFile(match);
-              }}
-              onReviewChanges={() => {
-                setSidebarCollapsed(false);
-                setSidebarView('staging');
-              }}
-              onSelectDomain={selectDomain}
+              onChooseBaseDirectory={() => void chooseBaseDirectory()}
+              onClearBaseDirectory={clearBaseDirectory}
             />
           )}
           {activeEditor === 'gparam' && (

@@ -36,10 +36,10 @@ describe('buildDomainSummaries', () => {
   it('领域集合与顺序来自 shared EDITOR_DOMAIN_IDS（§3.2 固定顺序）', () => {
     const summaries = buildDomainSummaries({ readContract: new Set(), runtimeReady: true });
     assert.deepEqual(summaries.map((entry) => entry.domain), [...EDITOR_DOMAIN_IDS]);
-    // §3.2 固定顺序快照：项目 | PARAM | GPARAM | 文本 | 事件 | 地图 | 脚本 | 行为
+    // §3.2 固定顺序快照：开始 | PARAM | GPARAM | 文本 | 事件 | 地图 | 脚本 | 行为
     // | 动画 | 模型 | 纹理 | 材质 | VFX | 容器 | 文件
     assert.deepEqual(summaries.map((entry) => entry.label), [
-      '项目', 'PARAM', 'GPARAM', '文本', '事件', '地图', '脚本',
+      '开始', 'PARAM', 'GPARAM', '文本', '事件', '地图', '脚本',
       '行为', '动画', '模型', '纹理', '材质', 'VFX', '容器', '文件'
     ]);
   });

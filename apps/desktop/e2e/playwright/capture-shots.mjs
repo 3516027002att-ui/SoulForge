@@ -28,6 +28,8 @@ await window.waitForLoadState('domcontentloaded');
 await window.waitForSelector('.change-queue', { state: 'attached' });
 await window.screenshot({ path: path.join(shotsDir, 'final-01-empty-workspace.png') });
 
+// T2：打开工作区入口移到中央开始页；窄窗口下 Agent dock 压缩中央，先收起。
+await closeAgentPanel(window);
 await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
 await window.locator('.status-bar').waitFor({ state: 'visible' });
 // Files 域物理浏览：SHELL-09 下文本域不渲染文件树，须先切到 Files 域并收起

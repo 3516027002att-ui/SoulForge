@@ -60,6 +60,9 @@ async function ipcCalls(app) {
 }
 
 async function openFixtureWorkspace(window) {
+  // T2：打开工作区入口从侧栏移到中央开始页；窄窗口（633px）下 Agent dock
+  // 默认展开会压缩中央编辑区，先收 Agent 让开始页按钮可见可点。
+  await closeAgentPanel(window);
   await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
   await expect(window.locator('.status-bar')).toContainText('已索引');
 }
@@ -97,7 +100,7 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 工作区打开后欢迎层必须让出编辑区，否则项目概览与工作台被半透明层盖住。
+  // 工作区打开后欢迎层必须让出编辑区，否则开始页与工作台被半透明层盖住。
   await expect(window.locator('.editor-welcome')).toBeHidden();
   await expect(window.locator('.project-overview')).toBeVisible();
 
@@ -108,7 +111,7 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   // 固定顺序快照 14 项。
   await expect(tabs).toHaveCount(14);
   await expect(tabs).toHaveText([
-    /项目/, /PARAM/, /文本/, /事件/, /地图/, /脚本/, /行为/,
+    /开始/, /PARAM/, /文本/, /事件/, /地图/, /脚本/, /行为/,
     /动画/, /模型/, /纹理/, /材质/, /VFX/, /容器/, /文件/
   ]);
 
@@ -955,6 +958,7 @@ test('Electron：workspace.openDialog 被调用；用户取消时安静返回', 
 
   // 取消路径：不显示错误，不打开工作区。
   const cancelled = await launchApp({ SF_TEST_CANCEL_DIALOG: '1' });
+  await closeAgentPanel(cancelled.window);
   await cancelled.window.getByRole('button', { name: '打开 Mod 工作区' }).click();
   await expect(cancelled.window.locator('.toast--warn')).toHaveCount(0);
   await expect(cancelled.window.locator('.titlebar')).toContainText('未打开工作区');
@@ -1018,6 +1022,12 @@ test('IPC 发送方校验：主文档之外的调用被拒绝', async () => {
 
 test('browser-preview 表面：可见降级提示，无 pageerror / console error', async () => {
   const { app, window, pageErrors, consoleErrors } = await launchApp({ SF_TEST_BROWSER_PREVIEW: '1' });
+  // T2：开始页按钮在中央编辑区。隐藏窗口（show:false）下 Chromium 节流
+  // BeginFrame，Agent 折叠的 margin-right 过渡恒停在 0 —— dock 仍占 440px 且
+  // 重叠中央区，把开始页按钮压成 34px 竖条、中心落在视口外。先显示窗口让过渡
+  // 真正跑完，再收 Agent（与其他用例一致的「先收起 Agent 再操作」路径）。
+  await showWindow(app);
+  await closeAgentPanel(window);
 
   // 资源浏览器显示运行表面降级提示。
   await expect(window.locator('.runtime-notice')).toContainText('浏览器预览：文件系统功能仅在 SoulForge 桌面版可用');
@@ -1027,6 +1037,10 @@ test('browser-preview 表面：可见降级提示，无 pageerror / console erro
   const chooseBaseButton = window.getByTestId('choose-base-directory');
   await expect(openWorkspaceButton).toHaveAttribute('aria-disabled', 'true');
   await expect(chooseBaseButton).toHaveAttribute('aria-disabled', 'true');
+
+  // 显示窗口后 Agent 折叠过渡开始跑，但点击若抢在过渡完成前会落在 dock 上
+  // （中心仍被 .agent 覆盖），toast 永不出现。等按钮回到可点击几何再 force click。
+  await expect.poll(async () => (await openWorkspaceButton.boundingBox())?.width ?? 0).toBeGreaterThan(100);
 
   // 点击或回车均有明确反馈（toast + 状态栏），不抛异常。
   // aria-disabled 按钮保持可触发：force 绕过 Playwright 的 enabled 等待。
@@ -1316,21 +1330,27 @@ test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动
   }
 
   await window.emulateMedia({ reducedMotion: 'reduce' });
-  const reduced = await window.evaluate(() => {
-    const canvas = document.getElementById('sf-ambient-field');
-    const before = getComputedStyle(document.body, '::before');
-    return {
-      mode: document.documentElement.dataset.ambient ?? 'css',
-      motion: canvas?.dataset.ambientMotion ?? null,
-      duration: before.animationDuration,
-      iteration: before.animationIterationCount
-    };
-  });
-  if (reduced.mode === 'shader') {
-    expect(reduced.motion).toBe('off');
+  // emulateMedia resolve ≠ 渲染器已应用 reduced-motion：shader 分支要在下一帧 rAF draw
+  // 里才写 canvas.dataset.ambientMotion，css 分支要等样式 recalc。直接读会抢到旧值
+  //（实测 shader 3/3 翻车，css 分支同样概率性失败），先等条件成立再断言。
+  const reducedMode = await window.evaluate(() => document.documentElement.dataset.ambient ?? 'css');
+  if (reducedMode === 'shader') {
+    await expect.poll(() =>
+      window.evaluate(() => document.getElementById('sf-ambient-field')?.dataset.ambientMotion ?? null)
+    ).toBe('off');
   } else {
-    expect(reduced.iteration).toBe('1');
-    expect(parseFloat(reduced.duration)).toBeLessThan(0.1);
+    await expect.poll(() =>
+      window.evaluate(() => {
+        const before = getComputedStyle(document.body, '::before');
+        return {
+          duration: parseFloat(before.animationDuration),
+          iteration: before.animationIterationCount
+        };
+      })
+    ).toMatchObject({ iteration: '1' });
+    const before = await window.evaluate(() => getComputedStyle(document.body, '::before'));
+    expect(before.animationIterationCount).toBe('1');
+    expect(parseFloat(before.animationDuration)).toBeLessThan(0.1);
   }
 
   await window.screenshot({ path: 'test-results/12-ambient-reduced-motion.png' });
