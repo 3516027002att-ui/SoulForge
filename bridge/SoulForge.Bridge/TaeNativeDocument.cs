@@ -349,12 +349,25 @@ internal sealed class TaeNativeDocument
             TotalGroupCount);
     }
 
-    public object ToEnvelope(TaeRoundTripReport? report = null)
+    public object ToEnvelope(TaeRoundTripReport? report = null, IReadOnlyList<Diagnostic>? extraDiagnostics = null)
     {
         report ??= VerifyRoundTrip();
         const int sampleLimit = 20;
         const int timelineEventLimit = 200; // 每动画事件时间表上限（bounded 分页）
         var invalidTimeRangeCount = CountInvalidTimeRanges();
+        // 合并上游诊断（如 anibnd 提取 TAE 的 TAE_FROM_ANIBND_EXTRACTED），
+        // 使预览面板能显示提取来源而不是只见文档自身诊断。
+        var diagnostics = (extraDiagnostics ?? Array.Empty<Diagnostic>())
+            .Concat(invalidTimeRangeCount > 0
+                ? new[]
+                {
+                    new Diagnostic(
+                        "error",
+                        "TAE_INVALID_TIME_RANGE",
+                        $"检测到 {invalidTimeRangeCount} 个事件时间范围非法（startTime > endTime 或非有限值），timeline 投影降级为 partial。")
+                }
+                : Array.Empty<Diagnostic>())
+            .ToArray();
         return new
         {
             format = "TAE",
@@ -382,15 +395,7 @@ internal sealed class TaeNativeDocument
             animationsTruncated = Animations.Count > sampleLimit,
             eventTypes = EventTypes,
             roundTrip = report,
-            diagnostics = invalidTimeRangeCount > 0
-                ? new[]
-                {
-                    new Diagnostic(
-                        "error",
-                        "TAE_INVALID_TIME_RANGE",
-                        $"检测到 {invalidTimeRangeCount} 个事件时间范围非法（startTime > endTime 或非有限值），timeline 投影降级为 partial。")
-                }
-                : Array.Empty<Diagnostic>(),
+            diagnostics = diagnostics,
             authority = invalidTimeRangeCount > 0 ? "partial" : "candidate"
         };
     }

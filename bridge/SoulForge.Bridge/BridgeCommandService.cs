@@ -656,7 +656,61 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = TaeNativeDocument.ReadFile(file);
+                TaeNativeDocument document;
+                Diagnostic[] extractionDiagnostics;
+                if (IsAnibndPath(file))
+                {
+                    // T3（2026-08-15）：`*.anibnd.dcx` 是 DCX(DFLT)→BND4 容器，内含多个
+                    // 独立 TAE 条目。解 DCX→解析 BND4→按 "TAE " 魔数挑主 TAE
+                    // （优先 id 5000000，其次字节最大的 TAE 条目）→TaeNativeDocument.Read。
+                    // hkx 是逐条 DCX，本命令不读。envelope 合并提取来源诊断，使 UI 能
+                    // 显示「从 anibnd 提取」而不是把 BND4 子项当成容器打开。
+                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+                    var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
+                    int? mainIndex = null;
+                    var taeEntryCount = 0;
+                    var largestIndex = -1;
+                    var largestBytes = -1L;
+                    for (var i = 0; i < bnd4.Entries.Count; i++)
+                    {
+                        var bytes = bnd4.GetStoredBytes(i);
+                        if (bytes.Length < 4 || !bytes.AsSpan(0, 4).SequenceEqual("TAE "u8)) continue;
+                        taeEntryCount++;
+                        if (bnd4.Entries[i].Id == 5000000)
+                        {
+                            mainIndex = i;
+                            break;
+                        }
+                        if (bytes.Length > largestBytes)
+                        {
+                            largestBytes = bytes.Length;
+                            largestIndex = i;
+                        }
+                    }
+                    mainIndex ??= largestIndex >= 0 ? largestIndex : null;
+                    if (mainIndex is null)
+                    {
+                        return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+                    }
+                    var mainBytes = bnd4.GetStoredBytes(mainIndex.Value);
+                    var mainEntryId = bnd4.Entries[mainIndex.Value].Id;
+                    document = TaeNativeDocument.Read(mainBytes);
+                    extractionDiagnostics = new[]
+                    {
+                        new Diagnostic(
+                            "info",
+                            "TAE_FROM_ANIBND_EXTRACTED",
+                            $"从 anibnd 容器提取 TAE（BND4 内 {taeEntryCount} 个 TAE 条目，本次打开 id={mainEntryId}，大小 {mainBytes.Length} 字节）。hkx 未读取。",
+                            BridgeResult<object>.MakeSourceUri(file),
+                            new { taeEntryCount, mainEntryId, mainTaeBytes = mainBytes.Length })
+                    };
+                }
+                else
+                {
+                    document = TaeNativeDocument.ReadFile(file);
+                    extractionDiagnostics = Array.Empty<Diagnostic>();
+                }
+
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -668,8 +722,8 @@ internal sealed class BridgeCommandService
                             : "TAE 只读往返语义不一致。",
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
-                };
-                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip));
+                }.Concat(extractionDiagnostics).ToArray();
+                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip, extractionDiagnostics));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -1511,6 +1565,16 @@ internal sealed class BridgeCommandService
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// 是否为 TAE 打包容器（anibnd）。T3（2026-08-15）：动作域的 `*.anibnd.dcx`
+    /// 在 TAE 读链里由 Bridge 提取内部 TAE，不落 BND4 通用容器页。
+    /// </summary>
+    private static bool IsAnibndPath(string path)
+    {
+        var lower = path.ToLowerInvariant();
+        return lower.EndsWith(".anibnd.dcx") || lower.EndsWith(".anibnd");
     }
 
     /// <summary>
