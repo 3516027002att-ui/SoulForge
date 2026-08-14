@@ -984,7 +984,7 @@
     {
       "sliceId": "W-REL-D-GAMELOAD-01",
       "targetRelease": "V0.5",
-      "lifecycle": "ready",
+      "lifecycle": "active",
       "authority": "candidate",
       "authorityCap": "candidate",
       "authorityCapNote": "cap=candidate；真实游戏内加载确认前 authority 保持 candidate",
@@ -1028,8 +1028,16 @@
       "claimId": "claim-w-rel-c-multilang-03-20260813",
       "owner": "claude-code",
       "claimedAt": "2026-08-13T02:13:46.202Z",
-      "heartbeatAt": "2026-08-14T03:08:21.706Z",
+      "heartbeatAt": "2026-08-14T04:27:23.038Z",
       "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
+    },
+    {
+      "sliceId": "W-REL-D-GAMELOAD-01",
+      "claimId": "claim-w-rel-d-gameload-01-20260814",
+      "owner": "claude-code",
+      "claimedAt": "2026-08-14T04:27:22.409Z",
+      "heartbeatAt": "2026-08-14T04:27:22.409Z",
+      "recoveryTrigger": "检查 runScriptContainerLoadPreflightSmoke 相关写进程与工作树改动；无相关写进程则 release 回 ready"
     }
   ],
   "invariants": [
