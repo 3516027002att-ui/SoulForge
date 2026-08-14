@@ -1,20 +1,23 @@
 /**
- * VFX-54B：VfxWorkbenchPanel 的渲染结构 + 纯逻辑 + 负向清单。
+ * VFX-54B/54C：VfxWorkbenchPanel 的渲染结构 + 纯逻辑 + 负向清单 + vfx-field-set 接线。
  *
  * renderer-unit 是纯 node SSR（react-dom/server，无 DOM、不跑 effect）。面板自驱动
  * 经 getRendererBridge 读 read-fxr-document（同 MaterialWorkbenchPanel 模式），SSR 下
- * bridge 为 null → 读取 effect 全部短路，这里钉住「挂载即有的结构」；真实 live 链路
- * （Bridge → ipc → readFxrDocument）由 e2e 覆盖。
+ * bridge 为 null → 读取 effect 全部短路。已加载文档态用 initialDocument/initialSelection
+ * 测试 seam 注入（生产不传），真实 live 链路（Bridge → ipc → readFxrDocument /
+ * commitFxrFieldSet）由 e2e 覆盖。
  *
  * 三类契约：
  * 1. SSR 结构：三栏 Effect / Particle list | 真实预览 | Inspector 挂载即存在，
  *    中栏是诚实空态（不渲染假 viewport / 假 graph）；文件列表由 props 派生、显示名
- *    去 .fxr；未选文件时各栏给引导空态。
+ *    去 .fxr；未选文件时各栏给引导空态；未加载文档时不渲染任何编辑输入框。
  * 2. 纯逻辑：parseUnknownFxrTypes 从 gap 字符串解析未知类型集合；
- *    flattenFxrNodes 给递归树稳定路径 id + 深度；fxrValuePreview 摘要不透明 int 数组。
- * 3. Negative source：本卡只有 read（VFX-54C 才接写回）——无 type=button、无输入框/
- *    textarea；不引用 three/canvas（无假 viewport）；known/unknown node 状态必须通过
- *    gap 解析明确区分，unknown 行只给原始结构字段、不给字段含义假数据。
+ *    flattenFxrNodes 给递归树稳定路径 id + 深度；fxrValuePreview 摘要不透明 int 数组；
+ *    buildVfxFieldSetMutation / isVfxFieldSetValue / fxrWriteBlockReasons / fxrCommitNotice
+ *    钉住 VFX-54C 写回契约。
+ * 3. Negative source：unknown 行只给原始结构字段、不给字段含义假数据；known-layout
+ *    门（unknown node type / layout warning / Section9 非空 / Section12-14 非空）
+ *    fail-closed，UI 预先禁用编辑控件并给原因；不引用 three/canvas（无假 viewport）。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -23,11 +26,16 @@ import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   VfxWorkbenchPanel,
+  buildVfxFieldSetMutation,
   flattenFxrNodes,
+  fxrCommitNotice,
   fxrValuePreview,
+  fxrWriteBlockReasons,
+  isVfxFieldSetValue,
   parseUnknownFxrTypes,
   vfxFileDisplayName,
-  type VfxFileView
+  type VfxFileView,
+  type VfxSelection
 } from './VfxWorkbenchPanel.js';
 import type { FxrDocument } from '@soulforge/shared';
 
@@ -150,6 +158,113 @@ function makeDocument(overrides: Record<string, unknown> = {}): FxrDocument {
   } as FxrDocument;
 }
 
+/**
+ * VFX-54C 可写文档：去掉 unknown-type gap 与 layout warning，只留能力边界 gap
+ * （section11:opaque-int-array / section12-14-empty-samples-only）——这两类不阻止写，
+ * 与 C# FxrNativeWriter 的 EnsureKnownLayout 口径一致。
+ */
+function makeWritableDocument(): FxrDocument {
+  return makeDocument({
+    layoutWarnings: [],
+    unparsedGaps: [
+      'section11:opaque-int-array（混合 int/float 位模式，无 schema，按不透明 int 数组上报）；values=6',
+      'section12-14-empty-samples-only（真实样本恒空，非空布局未验证）'
+    ]
+  });
+}
+
+/** 未知 host 文档：host.typeId=7777 命中 unknown-type:section6:7777 gap。 */
+function makeUnknownHostDocument(): FxrDocument {
+  return makeDocument({
+    fields: {
+      hosts: [
+        {
+          typeId: 7777,
+          unk02: 1,
+          unk03: 0,
+          unk04: 2,
+          section11Count: 2,
+          section10Count: 0,
+          section7Count: 1,
+          properties: [
+            {
+              typeId: 3,
+              unk04: 0,
+              section11Count: 2,
+              section8Count: 0,
+              values: [0, 1],
+              valuesTruncated: false,
+              section8: [],
+              section8Truncated: false
+            }
+          ],
+          propertiesTruncated: false,
+          section10: [],
+          section10Truncated: false,
+          values: [10, 11],
+          valuesTruncated: false
+        }
+      ],
+      hostsTruncated: false
+    }
+  });
+}
+
+/** 未知 property 文档：property.typeId=66 命中 unknown-type:section7:66 gap。 */
+function makeUnknownPropertyDocument(): FxrDocument {
+  return makeDocument({
+    fields: {
+      hosts: [
+        {
+          typeId: 0,
+          unk02: 1,
+          unk03: 0,
+          unk04: 2,
+          section11Count: 2,
+          section10Count: 0,
+          section7Count: 1,
+          properties: [
+            {
+              typeId: 66,
+              unk04: 0,
+              section11Count: 2,
+              section8Count: 0,
+              values: [0, 1],
+              valuesTruncated: false,
+              section8: [],
+              section8Truncated: false
+            }
+          ],
+          propertiesTruncated: false,
+          section10: [],
+          section10Truncated: false,
+          values: [10, 11],
+          valuesTruncated: false
+        }
+      ],
+      hostsTruncated: false
+    }
+  });
+}
+
+const hostSelection: VfxSelection = { kind: 'host', id: '0', label: 'host 0' };
+
+/** SSR 渲染已加载文档态：bridge 为 null（effect 短路），文档/选中态走 seam 注入。 */
+function renderLoaded(
+  doc: FxrDocument,
+  selection: VfxSelection | null,
+  initialUri = 'fixture://sfx/f0000.fxr'
+): string {
+  return renderToStaticMarkup(
+    <VfxWorkbenchPanel
+      files={files}
+      initialUri={initialUri}
+      initialDocument={doc}
+      initialSelection={selection}
+    />
+  );
+}
+
 describe('VfxWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () => {
   it('工作台根的可访问名是「VFX 工作台」', () => {
     assert.match(render(), /aria-label="VFX 工作台"/);
@@ -180,7 +295,7 @@ describe('VfxWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.match(html, /先在最左栏选择一个 FXR 文件/);
   });
 
-  it('初始渲染无任何 type=button 与编辑输入框（本卡无 writer）', () => {
+  it('未加载文档时无任何 type=button 与编辑输入框（编辑控件以读到的文档为前提）', () => {
     const html = render();
     assert.doesNotMatch(html, /type="button"/);
     assert.doesNotMatch(html, /type="number"/);
@@ -278,28 +393,180 @@ describe('fxrValuePreview（Section11 不透明 int 数组摘要）', () => {
   });
 });
 
-describe('Negative source tests（VFX-54B）', () => {
+describe('VFX-54C vfx-field-set 接线', () => {
   const repoRoot = process.cwd();
   const panelSource = readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'VfxWorkbenchPanel.tsx'),
     'utf8'
   );
 
-  it('渲染侧桥接调用只有 read，无任何写出口（54C 才接写回）', () => {
+  it('buildVfxFieldSetMutation:host 容器地址与值正确', () => {
+    const mutation = buildVfxFieldSetMutation({ container: 'host', hostIndex: 1, valueIndex: 2 }, 42);
+    assert.deepEqual(mutation, {
+      mutation: 'vfx-field-set',
+      address: { container: 'host', hostIndex: 1, valueIndex: 2 },
+      value: 42
+    });
+  });
+
+  it('buildVfxFieldSetMutation:property 容器带 propertyIndex', () => {
+    const mutation = buildVfxFieldSetMutation(
+      { container: 'property', hostIndex: 0, propertyIndex: 2, valueIndex: 5 },
+      -1
+    );
+    assert.deepEqual(mutation, {
+      mutation: 'vfx-field-set',
+      address: { container: 'property', hostIndex: 0, propertyIndex: 2, valueIndex: 5 },
+      value: -1
+    });
+  });
+
+  it('buildVfxFieldSetMutation:section8 容器带 propertyIndex+section8Index', () => {
+    const mutation = buildVfxFieldSetMutation(
+      { container: 'section8', hostIndex: 0, propertyIndex: 1, section8Index: 3, valueIndex: 0 },
+      4_294_967_295
+    );
+    assert.deepEqual(mutation, {
+      mutation: 'vfx-field-set',
+      address: { container: 'section8', hostIndex: 0, propertyIndex: 1, section8Index: 3, valueIndex: 0 },
+      value: 4294967295
+    });
+  });
+
+  it('isVfxFieldSetValue 只接受 int32/uint32 位模式（不据值做类型推断）', () => {
+    assert.ok(isVfxFieldSetValue(0));
+    assert.ok(isVfxFieldSetValue(-2_147_483_648));
+    assert.ok(isVfxFieldSetValue(4_294_967_295));
+    assert.ok(!isVfxFieldSetValue(-2_147_483_649));
+    assert.ok(!isVfxFieldSetValue(4_294_967_296));
+    assert.ok(!isVfxFieldSetValue(1.5));
+    assert.ok(!isVfxFieldSetValue(Number.NaN));
+  });
+
+  it('fxrWriteBlockReasons:能力边界 gap（section11 不透明 / section12-14 恒空）不阻止写', () => {
+    assert.deepEqual(fxrWriteBlockReasons(makeWritableDocument()), []);
+  });
+
+  it('fxrWriteBlockReasons:unknown node type 与 layout warning 各自命中', () => {
+    const codes = fxrWriteBlockReasons(makeDocument()).map((reason) => reason.code);
+    assert.ok(codes.includes('unknown-node-types'));
+    assert.ok(codes.includes('layout-warnings-present'));
+  });
+
+  it('fxrWriteBlockReasons:Section9 非空 / Section12-14 非空命中', () => {
+    const doc = makeDocument({
+      unparsedGaps: [
+        'section9-not-verified（SoulsFormats 布局，121 样本全部未实测）',
+        'section12-14:opaque-int-array（非空布局未验证）'
+      ]
+    });
+    const codes = fxrWriteBlockReasons(doc).map((reason) => reason.code);
+    assert.ok(codes.includes('section9-not-verified'));
+    assert.ok(codes.includes('section12-14-nonempty'));
+  });
+
+  it('known host:数值字段渲染 int32 输入框 + 写回按钮,不 disabled', () => {
+    const html = renderLoaded(makeWritableDocument(), hostSelection);
+    assert.match(html, /type="number"/);
+    assert.match(html, /vfx-value-input-host:0:-:-:0/);
+    assert.match(html, /vfx-value-input-property:0:0:-:0/);
+    assert.match(html, /vfx-value-submit-host:0:-:-:0/);
+    assert.match(html, /aria-label="host\[0\]" value="10"/);
+    assert.match(html, /aria-label="property 3\[0\]" value="0"/);
+    assert.doesNotMatch(html, /vfx-value-input-host:0:-:-:0"[^>]*disabled/);
+  });
+
+  it('unknown host:无任何编辑控件,保留 blocked 提示', () => {
+    const html = renderLoaded(makeUnknownHostDocument(), { kind: 'host', id: '0', label: 'host 7777' });
+    assert.match(html, /vfx-unknown-host-block/);
+    assert.doesNotMatch(html, /vfx-value-input-/);
+    assert.doesNotMatch(html, /type="number"/);
+  });
+
+  it('fail-closed:known host 输入框存在但 disabled,且给出原因', () => {
+    const html = renderLoaded(makeDocument(), hostSelection);
+    assert.match(html, /vfx-write-blocked/);
+    assert.match(html, /vfx-write-block-layout-warnings-present/);
+    assert.match(html, /vfx-write-block-unknown-node-types/);
+    assert.match(html, /vfx-value-input-host:0:-:-:0/);
+    assert.match(html, /vfx-value-input-host:0:-:-:0"[^>]*disabled/);
+    assert.match(html, /（禁用）/);
+  });
+
+  it('unknown property:该属性不渲染编辑行,host 直连值仍受文档级门禁禁用', () => {
+    const html = renderLoaded(makeUnknownPropertyDocument(), hostSelection);
+    assert.match(html, /vfx-unknown-property/);
+    assert.doesNotMatch(html, /vfx-value-input-property:0:0:-:/);
+    assert.match(html, /vfx-value-input-host:0:-:-:0"[^>]*disabled/);
+  });
+
+  it('提交期间禁用重复提交:提交按钮与输入框都绑 committing', () => {
+    assert.match(panelSource, /disabled=\{props\.disabled \|\| props\.committing \|\| invalid\}/);
+    assert.match(panelSource, /disabled=\{props\.disabled \|\| props\.committing\}/);
+  });
+
+  it('fxrCommitNotice:ok 给「已重新读取」成功提示', () => {
+    const notice = fxrCommitNotice({ ok: true, changedFiles: ['fixture://sfx/f0000.fxr'], diagnostics: [] });
+    assert.equal(notice.kind, 'success');
+    assert.match(notice.title, /重新读取/);
+    assert.deepEqual(notice.lines, []);
+  });
+
+  it('fxrCommitNotice:失败给 diagnostics 与回滚提示', () => {
+    const notice = fxrCommitNotice({
+      ok: false,
+      changedFiles: [],
+      diagnostics: [{
+        severity: 'error',
+        code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE',
+        message: '存在未识别的 node type'
+      }]
+    });
+    assert.equal(notice.kind, 'failure');
+    assert.ok(notice.lines.some((line) => line.includes('回滚')));
+    assert.ok(notice.lines.some((line) => line.includes('FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE')));
+  });
+
+  it('ok=true 后重读:read effect 依赖 reloadKey 刷新触发器', () => {
+    assert.match(panelSource, /reloadKey/);
+    assert.match(panelSource, /\[bridge, selectedUri, reloadKey\]/);
+    assert.match(panelSource, /setReloadKey\(\(k\) => k \+ 1\)/);
+  });
+
+  it('失败不清空已读节点树:commit 失败路径不触碰 document', () => {
+    const commitHandler = panelSource.match(/function commitFieldValue[\s\S]*?\n  \}/)?.[0] ?? '';
+    assert.ok(commitHandler.includes('setCommitOutcome'), 'commit 处理器必须设置提交结果');
+    assert.doesNotMatch(commitHandler, /setDocument/, 'commit 失败路径不得清空已读节点树');
+  });
+});
+
+describe('Negative source tests（VFX-54B/54C）', () => {
+  const repoRoot = process.cwd();
+  const panelSource = readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'VfxWorkbenchPanel.tsx'),
+    'utf8'
+  );
+
+  it('桥接调用只有两个通道：read-fxr-document 读入 + commitFxrFieldSet 写回', () => {
     const bridgeCalls = [...panelSource.matchAll(/bridge\.(\w+)\s*\(/g)]
       .map((m) => m[1])
       .filter((name): name is string => name !== undefined);
-    assert.ok(bridgeCalls.length > 0, '工作台没有任何 bridge 调用（read 通道缺失）');
-    assert.ok(
-      bridgeCalls.every((name) => name.startsWith('read')),
-      `发现非 read 桥接调用：${bridgeCalls.filter((n) => !n.startsWith('read')).join(', ')}`
+    assert.ok(bridgeCalls.includes('readFxrDocument'), 'read 通道缺失');
+    assert.ok(bridgeCalls.includes('commitFxrFieldSet'), 'vfx-field-set 写回通道缺失');
+    const unDeclared = bridgeCalls.filter(
+      (name) => name !== 'readFxrDocument' && name !== 'commitFxrFieldSet'
     );
+    assert.deepEqual(unDeclared, [], `发现未声明的桥接调用：${unDeclared.join(', ')}`);
   });
 
-  it('writer 未就绪时隐藏编辑入口：只给诚实说明，无属性输入控件', () => {
-    assert.match(panelSource, /FXR 写回链尚未接通（VFX-54C）/);
-    assert.match(panelSource, /只读工作台/);
-    assert.doesNotMatch(panelSource, /<input/);
+  it('编辑控件以 known-layout 门为前置：fail-closed 预禁用 + 给原因', () => {
+    // 组件必须实现 C# EnsureKnownLayout 的镜像门禁（不是等 commit 失败）。
+    assert.match(panelSource, /fxrWriteBlockReasons/);
+    assert.match(panelSource, /vfx-write-blocked/);
+    // 编辑入口存在（vfx-field-set 已接线），但值输入框带 disabled 能力。
+    assert.match(panelSource, /commitFxrFieldSet/);
+    assert.match(panelSource, /vfx-value-input-/);
+    assert.match(panelSource, /disabled=\{/);
   });
 
   it('partial 必须把 unparsedGaps 暴露给用户，不伪装成完整解析', () => {

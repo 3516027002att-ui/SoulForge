@@ -111,7 +111,7 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
         onInsertMention={insertMention}
         onInsertContext={insertContext}
         contextDisabled={selectedFilePath === null}
-        attachmentReason="附件需要 main 下发的 renderer-safe 引用 token，尚未接通（60C 接线）；不会假装可用。"
+        attachmentReason="文件附件尚未接通（60C 只接资源引用）；当前文件可经上方「+ 资源引用」添加 main 签发的 opaque 引用。"
         modelLabel={modelLabel}
         onOpenModelSettings={onOpenModelSettings}
         planLabel={interactionModeLabel(interactionMode)}

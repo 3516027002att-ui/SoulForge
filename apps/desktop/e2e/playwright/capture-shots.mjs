@@ -22,8 +22,7 @@ await window.screenshot({ path: path.join(shotsDir, 'final-01-empty-workspace.pn
 
 await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
 await window.locator('.status-bar').waitFor({ state: 'visible' });
-// 顶部资源目录栏：切换 msg 族后文件列表与 FMG 工作台联动。
-await window.locator('[data-resource-mode="msg"]').click();
+// Files 域物理浏览：直接定位 msgbnd 文件进入 FMG 工作台。
 await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
 await window.getByRole('row', { name: /伤药葫芦/ }).click();
 await window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea').fill('伤药葫芦·改');

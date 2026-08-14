@@ -1,5 +1,5 @@
 /**
- * BEHAVIOR-55B：EsdWorkbenchPanel 三栏工作台的渲染结构 + 负向清单。
+ * BEHAVIOR-55B/55C：EsdWorkbenchPanel 三栏工作台的渲染结构 + 55C 转移目标写回。
  *
  * renderer-unit 是纯 node SSR（react-dom/server，无 DOM、不跑 effect）。ESD 面板是
  * props 驱动（App 经 read-esd-document 取数后传入），不触达 window，因此 SSR 能看到
@@ -11,16 +11,29 @@
  *    挂载即存在；无 Tools 空栏；列表由 shared pages 投影派生（不按 action 目录分类）。
  * 2. authority 语义：partial 时 coverageShortfalls / unparsedGaps / 跳转图未闭合
  *    必须暴露给用户（esd-partial-gaps），不能伪装成完整解析。
- * 3. Negative source：无 writer（无按钮/输入框）；不扫字节；不按 action 路径路由。
- * 4. 截断说明：esd-truncation testId + formatListTruncation（listTruncation 契约）。
+ * 3. 55C typed 写回：`submitEsdTransitionEdit` 纯逻辑（提交参数从选中条件取 relOffset、
+ *    expectedDocumentHash 取 sourceHash、ok=true 后重读、ok=false 返回诊断且不重读、
+ *    bridge 缺失结构化诊断）；编辑入口只随条件选中出现，evaluator 参数体保持
+ *    「未解码」只读标注（不给字节码假编辑）；提交期间禁用重复提交。
+ * 4. Negative source：无字节直写 fallback；不扫字节；不按 action 路径路由。
+ * 5. 截断说明：esd-truncation testId + formatListTruncation（listTruncation 契约）。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { EsdWorkbenchPanel } from './EsdWorkbenchPanel.js';
-import type { EsdDocument } from '@soulforge/shared';
+import {
+  EsdWorkbenchPanel,
+  parseEsdTargetOffset,
+  submitEsdTransitionEdit,
+  type EsdTransitionEditBridge
+} from './EsdWorkbenchPanel.js';
+import type { EsdConditionSampleWire, EsdDocument } from '@soulforge/shared';
+
+// node 环境没有 window；面板在点击提交时才调 getRendererBridge。设为空对象 →
+// bridge 为 null → SSR 渲染不触达 window（纯初始结构）。
+(globalThis as unknown as { window: Record<string, unknown> }).window = {};
 
 function makeDocument(overrides: Record<string, unknown> = {}): EsdDocument {
   return {
@@ -147,7 +160,7 @@ describe('EsdWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.match(html, /authority/);
   });
 
-  it('无 writer：不渲染任何按钮/输入框', () => {
+  it('未选中条件时不渲染任何按钮/输入框（55C 编辑入口只随条件选中出现）', () => {
     const html = render();
     assert.doesNotMatch(html, /type="button"/);
     assert.doesNotMatch(html, /<input|type="number"/);
@@ -206,13 +219,186 @@ describe('Negative source tests（BEHAVIOR-55B）', () => {
     assert.doesNotMatch(panelSource, /relativePath/);
   });
 
-  it('无 writer 出口（55C 才接 transition write），不触达 bridge', () => {
-    assert.doesNotMatch(panelSource, /getRendererBridge|bridge\./);
-    assert.doesNotMatch(panelSource, /commit|upsert|applyEsd/);
+  it('55C typed 写回已接线：唯一写出口是 commitEsdTransition（set-transition-target），无字节直写 fallback', () => {
+    const bridgeCalls = [...panelSource.matchAll(/bridge\.(\w+)\s*\(/g)]
+      .map((m) => m[1])
+      .filter((name): name is string => name !== undefined);
+    assert.ok(bridgeCalls.includes('commitEsdTransition'), '缺少 commitEsdTransition 写出口');
+    assert.ok(
+      bridgeCalls.every((name) => name.startsWith('read') || name === 'commitEsdTransition'),
+      `发现非 typed 桥接调用：${bridgeCalls.filter((n) => !n.startsWith('read') && n !== 'commitEsdTransition').join(', ')}`
+    );
+    // 没有 bytes replace 直写，也没有绕过 typed mutation 的 applyEsd 出口。
+    assert.doesNotMatch(panelSource, /contentBase64|dataBase64|applyEsd/);
   });
 
   it('截断说明走 formatListTruncation 且保留 esd-truncation testId', () => {
     assert.match(panelSource, /formatListTruncation/);
     assert.match(panelSource, /data-testid="esd-truncation"/);
+  });
+});
+
+describe('EsdTransitionEdit 纯逻辑（BEHAVIOR-55C 写回接线）', () => {
+  const sample: EsdConditionSampleWire = {
+    conditionRelOffset: 0x10,
+    sourceGroupId: 0,
+    sourceStateRelOffset: 0x0,
+    targetStateRelOffset: 0x28,
+    subConditionCount: 1,
+    evaluatorLength: 8,
+    passCommandCount: 1
+  };
+
+  function makeBridge(overrides: Record<string, unknown> = {}): {
+    bridge: EsdTransitionEditBridge;
+    calls: {
+      commit: Array<{ sourceUri: string; expectedDocumentHash: string; mutations: unknown[] }>;
+      reread: string[];
+    };
+  } {
+    const calls = {
+      commit: [] as Array<{ sourceUri: string; expectedDocumentHash: string; mutations: unknown[] }>,
+      reread: [] as string[]
+    };
+    const bridge: EsdTransitionEditBridge = {
+      commitEsdTransition: async (sourceUri, expectedDocumentHash, mutations) => {
+        calls.commit.push({ sourceUri, expectedDocumentHash, mutations });
+        return { ok: true, changedFiles: [], diagnostics: [] };
+      },
+      readEsdDocument: async (sourceUri) => {
+        calls.reread.push(sourceUri);
+        return { ok: true, data: makeDocument() };
+      },
+      ...overrides
+    };
+    return { bridge, calls };
+  }
+
+  it('提交参数正确：mutation 从选中条件取 relOffset，expectedDocumentHash 取 sourceHash', async () => {
+    const doc = makeDocument();
+    const { bridge, calls } = makeBridge();
+    const outcome = await submitEsdTransitionEdit({
+      bridge,
+      resourceUri: 'fixture://ai/m10.esd',
+      document: doc,
+      sample,
+      targetStateRelOffset: 0xF8
+    });
+    assert.equal(outcome.ok, true);
+    assert.equal(calls.commit.length, 1);
+    const first = calls.commit[0]!;
+    assert.equal(first.sourceUri, 'fixture://ai/m10.esd');
+    assert.equal(first.expectedDocumentHash, doc.sourceHash);
+    assert.deepEqual(first.mutations, [{
+      mutation: 'set-transition-target',
+      stateRelOffset: 0x0,       // sample.sourceStateRelOffset
+      conditionRelOffset: 0x10,  // sample.conditionRelOffset
+      targetStateRelOffset: 0xF8 // 编辑后的目标偏移
+    }]);
+  });
+
+  it('ok=true 后重读：readEsdDocument 被调用，outcome.refreshed 携带新 envelope', async () => {
+    const { bridge, calls } = makeBridge();
+    const outcome = await submitEsdTransitionEdit({
+      bridge,
+      resourceUri: 'fixture://ai/m10.esd',
+      document: makeDocument(),
+      sample,
+      targetStateRelOffset: 0xF8
+    });
+    assert.equal(outcome.ok, true);
+    assert.equal(calls.reread.length, 1);
+    assert.equal(calls.reread[0], 'fixture://ai/m10.esd');
+    assert.ok(outcome.refreshed !== null && outcome.refreshed !== undefined);
+    assert.equal(outcome.refreshed?.sourceHash, 'fixture-esd-hash');
+  });
+
+  it('ok=false 返回诊断且不重读、不带 refreshed（已读内容保留由面板不覆盖 props 保证）', async () => {
+    const { bridge, calls } = makeBridge({
+      commitEsdTransition: async () => ({
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{ code: 'ESD_STAGING_WRITE_FAILED', message: '目标状态 relOffset=0x123456 不存在。' }]
+      })
+    });
+    const outcome = await submitEsdTransitionEdit({
+      bridge,
+      resourceUri: 'fixture://ai/m10.esd',
+      document: makeDocument(),
+      sample,
+      targetStateRelOffset: 0x123456
+    });
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.refreshed, null);
+    assert.equal(calls.reread.length, 0);
+    assert.ok(outcome.diagnostics.some((d) => d.code === 'ESD_STAGING_WRITE_FAILED'));
+  });
+
+  it('bridge 缺失时返回结构化诊断（不吞异常）', async () => {
+    const outcome = await submitEsdTransitionEdit({
+      bridge: null,
+      resourceUri: 'fixture://ai/m10.esd',
+      document: makeDocument(),
+      sample,
+      targetStateRelOffset: 0xF8
+    });
+    assert.equal(outcome.ok, false);
+    assert.ok(outcome.diagnostics.some((d) => d.code === 'ESD_WRITE_UNAVAILABLE'));
+  });
+
+  it('parseEsdTargetOffset：0x 十六进制 / 十进制 / -1 清空 / 空与非法输入', () => {
+    assert.equal(parseEsdTargetOffset('0xF8'), 0xF8);
+    assert.equal(parseEsdTargetOffset('0xf8'), 0xF8);
+    assert.equal(parseEsdTargetOffset('248'), 248);
+    assert.equal(parseEsdTargetOffset('-1'), -1);
+    assert.equal(parseEsdTargetOffset(''), null);
+    assert.equal(parseEsdTargetOffset('   '), null);
+    assert.equal(parseEsdTargetOffset('abc'), null);
+    assert.equal(parseEsdTargetOffset('0xZZ'), null);
+  });
+});
+
+describe('BEHAVIOR-55C 编辑入口（条件选中才出现，evaluator 不做假编辑）', () => {
+  const repoRoot = process.cwd();
+  const panelSource = readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EsdWorkbenchPanel.tsx'),
+    'utf8'
+  );
+
+  it('Inspector 写回区不再说「尚未接通」，说明编辑入口随条件选中出现', () => {
+    const html = render();
+    assert.match(html, /写回（transition upsert）/);
+    assert.match(html, /选中一条条件后/);
+    assert.doesNotMatch(html, /尚未接通/);
+  });
+
+  it('条件选中后渲染编辑入口：目标偏移输入框 + 提交按钮（源码判定）', () => {
+    assert.match(panelSource, /selectedConditionSample \? \(/);
+    assert.match(panelSource, /data-testid="esd-transition-edit"/);
+    assert.match(panelSource, /aria-label="重定向目标偏移"/);
+    assert.match(panelSource, /提交转移目标/);
+    assert.match(panelSource, /selected\?\.kind === 'condition'/);
+  });
+
+  it('evaluator 区域无编辑控件：参数体保持「未解码」只读标注，不给字节码假编辑', () => {
+    const html = render();
+    assert.match(panelSource, /evaluator 长度/);
+    assert.match(panelSource, /未解码/);
+    // 唯一编辑输入框是目标偏移（重定向目标偏移），没有 evaluator/字节码输入框。
+    const inputs = panelSource.match(/<input/g) ?? [];
+    assert.equal(inputs.length, 1);
+    assert.match(panelSource, /<input[\s\S]*?aria-label="重定向目标偏移"/);
+    // 初始渲染（未选条件）没有任何输入框/按钮。
+    assert.doesNotMatch(html, /<input|type="button"/);
+  });
+
+  it('写回失败给结构化诊断 + 回滚提示，不清空已读内容（源码判定）', () => {
+    assert.match(panelSource, /History & Recovery 回滚/);
+    assert.match(panelSource, /已读内容保留/);
+  });
+
+  it('提交期间禁用重复提交（源码判定）', () => {
+    assert.match(panelSource, /if \(submitting\) return/);
+    assert.match(panelSource, /disabled=\{!canSubmit\}/);
   });
 });

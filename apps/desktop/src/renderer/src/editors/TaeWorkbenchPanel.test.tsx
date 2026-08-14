@@ -1,9 +1,11 @@
 /**
- * ANIMATION-56B：TaeWorkbenchPanel 三栏工作台的渲染结构 + 纯逻辑 + 负向清单。
+ * ANIMATION-56B / ANIMATION-56C：TaeWorkbenchPanel 三栏工作台的渲染结构 + 纯逻辑
+ * + typed 写回接线 + 负向清单。
  *
  * renderer-unit 是纯 node SSR（react-dom/server，无 DOM、不跑 effect）。TAE 面板是
- * props 驱动（App 经 read-tae-document 取数后传入），不触达 window，SSR 能看到完整
- * 三栏结构、动画列表、时间轴事件与 Inspector 的初始文件统计；选择联动由 e2e 覆盖。
+ * props 驱动（App 经 read-tae-document 取数后传入），SSR 能看到完整三栏结构、
+ * 动画列表、时间轴事件与 Inspector 的初始文件统计；选择联动由 e2e 覆盖。
+ * 面板只在提交/重读处理器里触达 window，SSR 渲染路径不触达，无需假 window。
  *
  * 覆盖：
  * 1. SSR 结构：三栏 Files / Animations | Timeline / Events | Inspector 挂载即存在；
@@ -11,16 +13,34 @@
  * 2. 纯逻辑：isInvalidTimeRange（startTime > endTime / 非有限时间判非法）。
  * 3. authority 语义：partial（TAE_INVALID_TIME_RANGE）时 diagnostics 必须暴露给
  *    用户（tae-partial-diagnostics），非法时间行在时间轴标 failed。
- * 4. Negative source：无 writer；事件参数体未解码的边界不伪装成完整解析。
- * 5. 截断说明：tae-truncation testId + formatListTruncation（listTruncation 契约）。
+ * 4. ANIMATION-56C 写回接线：
+ *    - 事件选中后 Inspector 出现时间编辑（update-event-times）与新增事件
+ *      （insert-event，模板 = 当前事件）入口；提交期间禁用重复提交。
+ *    - mutation 构建纯函数：update-event-times 带 animId+eventIndex+startTime+endTime；
+ *      insert-event 带 animId+templateEventIndex+eventTypeId+startTime+endTime。
+ *    - eventIndex = 事件在其动画 events 数组里的下标（timeline 有序展平回推）。
+ *    - ok=true 后经 readTaeDocument 重读并覆盖本地文档（refresh 触发器）；
+ *      ok=false 显示 diagnostics + 回滚提示，不清空时间轴。
+ *    - 参数体未解码边界：参数体只读展示，编辑区只有时间/类型输入，无参数编辑控件。
+ * 5. Negative source：写回只有 commitTaeEvent 一个 typed 出口（无通用文本保存 /
+ *    字节直写 fallback）；事件参数体未解码的边界不伪装成完整解析。
+ * 6. 截断说明：tae-truncation testId + formatListTruncation（listTruncation 契约）。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { TaeWorkbenchPanel, isInvalidTimeRange } from './TaeWorkbenchPanel.js';
-import type { TaeDocument } from '@soulforge/shared';
+import {
+  TaeWorkbenchPanel,
+  TaeEventEditor,
+  buildInsertEventMutation,
+  buildUpdateEventTimesMutation,
+  eventIndexOfTimelineRow,
+  formatWriteDiagnostics,
+  isInvalidTimeRange
+} from './TaeWorkbenchPanel.js';
+import type { TaeDocument, TaeTimelineEventRow } from '@soulforge/shared';
 
 function makeDocument(overrides: Record<string, unknown> = {}): TaeDocument {
   return {
@@ -62,6 +82,20 @@ function makeDocument(overrides: Record<string, unknown> = {}): TaeDocument {
 function render(data: TaeDocument | null = makeDocument()): string {
   return renderToStaticMarkup(
     <TaeWorkbenchPanel resourceUri="fixture://action/c0000.tae" data={data} />
+  );
+}
+
+/** 选中 timeline 第 0 行（动画 0 的第一个事件）时的渲染。 */
+function renderWithSelection(): string {
+  return renderToStaticMarkup(
+    <TaeWorkbenchPanel
+      resourceUri="fixture://action/c0000.tae"
+      data={makeDocument()}
+      initialSelection={{
+        kind: 'timeline', id: 'tl-0', label: '事件 1 @0s',
+        animationId: 0, timelineIndex: 0, eventIndex: 0
+      }}
+    />
   );
 }
 
@@ -113,7 +147,7 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.match(html, /事件总数/);
   });
 
-  it('无 writer：不渲染任何按钮/输入框', () => {
+  it('未选中事件时不渲染任何按钮/输入框（写回入口随事件选中出现）', () => {
     const html = render();
     assert.doesNotMatch(html, /type="button"/);
     assert.doesNotMatch(html, /<input|type="number"/);
@@ -169,7 +203,110 @@ describe('authority 语义（partial 非法时间范围必须暴露）', () => {
   });
 });
 
-describe('Negative source tests（ANIMATION-56B）', () => {
+describe('ANIMATION-56C 写回接线（typed event write）', () => {
+  it('事件选中后 Inspector 有时间编辑与新增事件入口（各带提交按钮）', () => {
+    const html = renderWithSelection();
+    assert.match(html, /data-testid="tae-event-editor"/);
+    assert.match(html, /编辑事件时间（update-event-times）/);
+    assert.match(html, /更新事件时间/);
+    assert.match(html, /新增事件（模板：当前事件）/);
+    assert.match(html, /新增事件/);
+    // 编辑区输入：时间 2（起止）+ 新增 3（类型/起止）= 5 个 number 输入。
+    const inputs = html.match(/type="number"/g) ?? [];
+    assert.equal(inputs.length, 5);
+  });
+
+  it('参数体区无编辑控件：参数体只读展示，编辑区只有时间/类型输入', () => {
+    const html = renderWithSelection();
+    // Inspector 属性行里参数体是只读值。
+    assert.match(html, /参数体/);
+    assert.match(html, /未解码（ANIMATION-56C 只开放时间\/类型编辑/);
+    // 编辑区本身不出现参数体字样，也没有参数编辑输入（总输入恒为 5 个时间/类型）。
+    const editorHtml = renderToStaticMarkup(
+      <TaeEventEditor
+        row={{ animId: 0, startTime: 0, endTime: 1, eventTypeId: 1 }}
+        eventIndex={0}
+        timeDraft={null}
+        insertDraft={null}
+        saving={false}
+        notice={null}
+        onTimeDraftChange={() => {}}
+        onInsertDraftChange={() => {}}
+        onSubmitTime={() => {}}
+        onSubmitInsert={() => {}}
+      />
+    );
+    assert.doesNotMatch(editorHtml, /参数体/);
+    const editorInputs = editorHtml.match(/type="number"/g) ?? [];
+    assert.equal(editorInputs.length, 5);
+  });
+
+  it('提交期间禁用重复提交：saving 时按钮 disabled', () => {
+    const html = renderToStaticMarkup(
+      <TaeEventEditor
+        row={{ animId: 0, startTime: 0, endTime: 1, eventTypeId: 1 }}
+        eventIndex={0}
+        timeDraft={{ startText: '0', endText: '1' }}
+        insertDraft={{ eventTypeIdText: '1', startText: '0', endText: '1' }}
+        saving
+        notice={null}
+        onTimeDraftChange={() => {}}
+        onInsertDraftChange={() => {}}
+        onSubmitTime={() => {}}
+        onSubmitInsert={() => {}}
+      />
+    );
+    assert.match(html, /type="button"[^>]*disabled/);
+  });
+
+  it('buildUpdateEventTimesMutation：animId + eventIndex + startTime + endTime 正确', () => {
+    const row: TaeTimelineEventRow = { animId: 3, startTime: 0, endTime: 1, eventTypeId: 7 };
+    assert.deepEqual(
+      buildUpdateEventTimesMutation(row, 2, { startText: '1.25', endText: '2.5' }),
+      { mutation: 'update-event-times', animId: 3, eventIndex: 2, startTime: 1.25, endTime: 2.5 }
+    );
+    // 非有限时间 → null（不把非法输入发往 C#）。
+    assert.equal(buildUpdateEventTimesMutation(row, 0, { startText: 'abc', endText: '2' }), null);
+  });
+
+  it('buildInsertEventMutation：templateEventIndex + eventTypeId + startTime + endTime 正确', () => {
+    const row: TaeTimelineEventRow = { animId: 3, startTime: 0, endTime: 1, eventTypeId: 7 };
+    assert.deepEqual(
+      buildInsertEventMutation(row, 2, { eventTypeIdText: '7', startText: '3', endText: '4' }),
+      { mutation: 'insert-event', animId: 3, templateEventIndex: 2, eventTypeId: 7, startTime: 3, endTime: 4 }
+    );
+    assert.equal(
+      buildInsertEventMutation(row, 2, { eventTypeIdText: 'x', startText: '3', endText: '4' }),
+      null
+    );
+  });
+
+  it('eventIndexOfTimelineRow：按 animId 分组计数回推动画内事件下标', () => {
+    const rows: TaeTimelineEventRow[] = [
+      { animId: 0, startTime: 0, endTime: 1, eventTypeId: 1 },
+      { animId: 0, startTime: 1.5, endTime: 2, eventTypeId: 2 },
+      { animId: 1, startTime: 0, endTime: 5, eventTypeId: 3 }
+    ];
+    assert.equal(eventIndexOfTimelineRow(rows, 0), 0);
+    assert.equal(eventIndexOfTimelineRow(rows, 1), 1);
+    assert.equal(eventIndexOfTimelineRow(rows, 2), 0);
+    assert.equal(eventIndexOfTimelineRow(rows, 99), undefined);
+  });
+
+  it('formatWriteDiagnostics：诊断带 code 回显，空诊断给兜底句', () => {
+    assert.equal(
+      formatWriteDiagnostics([{
+        severity: 'error',
+        code: 'TAE_WRITE_BLOCKED_SHARED_SLOT',
+        message: '时间槽被兄弟事件共享。'
+      }]),
+      '[TAE_WRITE_BLOCKED_SHARED_SLOT] 时间槽被兄弟事件共享。'
+    );
+    assert.equal(formatWriteDiagnostics(undefined), '写入被拒绝');
+  });
+});
+
+describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
   const repoRoot = process.cwd();
   const panelSource = readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'TaeWorkbenchPanel.tsx'),
@@ -188,11 +325,38 @@ describe('Negative source tests（ANIMATION-56B）', () => {
   it('事件参数体未解码的边界必须明示，不伪装成完整解析', () => {
     assert.match(panelSource, /参数体/);
     assert.match(panelSource, /未解码/);
+    // 前端不发送/不编辑参数体字节：insert 依赖 templateEventIndex 由 C# 侧拷贝，
+    // mutation 结构里不出现 paramBody 字段。
+    assert.doesNotMatch(panelSource, /paramBody/);
   });
 
-  it('无 writer 出口（56C 才接 event write），不触达 bridge', () => {
-    assert.doesNotMatch(panelSource, /getRendererBridge|bridge\./);
-    assert.doesNotMatch(panelSource, /commit|upsert|applyTae/);
+  it('写回只有 commitTaeEvent 一个 typed 出口，无通用文本保存/字节直写 fallback', () => {
+    assert.match(panelSource, /getRendererBridge/);
+    assert.match(panelSource, /commitTaeEvent/);
+    assert.match(panelSource, /update-event-times/);
+    assert.match(panelSource, /insert-event/);
+    assert.doesNotMatch(panelSource, /saveTextResource|applyTae|contentBase64|dataBase64/);
+    const bridgeCalls = [...panelSource.matchAll(/bridge\.(\w+)\s*\(/g)]
+      .map((m) => m[1])
+      .filter((name): name is string => name !== undefined);
+    assert.ok(
+      bridgeCalls.every((name) => name.startsWith('read') || name === 'commitTaeEvent'),
+      `发现非 typed 桥接调用：${bridgeCalls.filter((n) => !n.startsWith('read') && n !== 'commitTaeEvent').join(', ')}`
+    );
+  });
+
+  it('ok=true 后经 readTaeDocument 重读并覆盖本地文档（refresh 触发器）', () => {
+    assert.match(panelSource, /readTaeDocument/);
+    assert.match(panelSource, /setRefreshedDocument/);
+    assert.match(panelSource, /refreshedDocument \?\? props\.data/);
+    assert.match(panelSource, /写入成功，但重读失败/);
+  });
+
+  it('ok=false 时显示 diagnostics + 回滚提示，不清空时间轴', () => {
+    assert.match(panelSource, /formatWriteDiagnostics/);
+    assert.match(panelSource, /已回滚，时间轴保持原状/);
+    assert.match(panelSource, /data-testid="tae-write-notice"/);
+    assert.match(panelSource, /diag-error/);
   });
 
   it('截断说明走 formatListTruncation 且保留 tae-truncation testId', () => {

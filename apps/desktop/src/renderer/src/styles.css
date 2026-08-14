@@ -352,7 +352,15 @@ kbd {
 [data-panel-id="explorer"] .panel__body { display: flex; flex-direction: column; overflow: hidden; }
 
 /* ── 资源浏览器 ── */
-.explorer-actions { flex: none; display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.explorer-actions {
+  /* 高度不足时允许收缩且内容可滚动：极矮窗口下若 explorer-actions 占满，
+     会 .file-list 被压到 0 高度（文件列表不可见=无法选资源）。收缩自身
+     并把滚动留给挂载提示等次要信息；min-height 保底保证「打开工作区」主按钮
+     始终可见可点（否则 flex 竞争下会被 placeholder 压到 0，浏览器预览表面
+     实测覆盖主按钮）。文件列表保底高度见 .file-list。 */
+  flex: 0 1 auto; min-height: 40px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px;
+}
 .explorer-base-note {
   font-size: 10.5px; color: var(--ink-3); font-family: var(--font-mono);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -362,7 +370,12 @@ kbd {
 /* 资源目录分类已迁至顶部 .resource-bar；左侧不再保留第二套分类按钮。 */
 
 /* ── 文件列表（e2e 钩子：.file-item） ── */
-.file-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.file-list {
+  /* 保底高度：矮视口下 explorer-actions 收缩后文件列表至少保留可滚动空间。
+     正常高度下 flex:1 自然增长，min-height 不产生视觉差异。 */
+  flex: 1 1 0; min-height: 120px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
 .file-item {
   display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
   padding: 5px 10px; border-radius: var(--radius-m);
@@ -571,6 +584,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 
 /* SHELL-09：语义领域在资源浏览器侧栏内的占位（不渲染物理文件列表） */
 .domain-browse-placeholder {
+  flex: 1 1 0; min-height: 0; overflow-y: auto;
   padding: 18px 16px; border-left: 2px solid var(--warn);
   background: var(--forge-1); color: var(--ink-2); font-size: 12px; line-height: 1.7;
 }
@@ -593,7 +607,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 
 /* EVENT-30B DarkScript3 式源码 IDE：文档标签 + 源码主区 + 查找替换；Outline /
    Inspector 仅显式打开；Problems 底部 dock。不做 260/320 固定三栏。 */
-.esw-tabs { display: flex; align-items: stretch; gap: 2px; padding: 6px 6px 0; border-bottom: 1px solid var(--line); background: var(--forge-2); overflow-x: auto; }
+.esw-tabs {
+  display: flex; align-items: stretch; gap: 2px; padding: 6px 6px 0; border-bottom: 1px solid var(--line); background: var(--forge-2); overflow-x: auto;
+  /* tab 按钮是点击目标，不可被极矮视口下的 flex 压缩压扁（实测 tabs 被压到 7px，
+     tab 按钮溢出容器，中心点落在容器外被 header 拦截，Playwright 点击超时）。 */
+  flex: none;
+}
 .esw-tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid transparent; border-bottom: none; border-radius: var(--radius-s) var(--radius-s) 0 0; background: transparent; color: var(--ink-3); font-size: 11px; cursor: pointer; white-space: nowrap; }
 .esw-tab:hover { background: var(--control-hover-bg); color: var(--ink-1); }
 .esw-tab.is-active { border-color: var(--line); background: var(--forge-1); color: var(--ink-0); }
@@ -603,13 +622,17 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .esw-tab__close:hover { color: var(--danger-text); }
 .esw-tabs__empty { padding: 7px 10px; font-size: 11px; }
 
-.esw-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; border-bottom: 1px solid var(--line); background: var(--forge-2); }
+.esw-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; border-bottom: 1px solid var(--line); background: var(--forge-2);
+  /* 工具条按钮是点击目标，不可被压缩（与 .esw-tabs 同理由）。 */
+  flex: none;
+}
 .esw-toolbar__group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .toolbar-button { padding: 4px 8px; font-size: 10.5px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--forge-1); color: var(--ink-2); cursor: pointer; }
 .toolbar-button:hover { background: var(--control-hover-bg); color: var(--ink-1); }
 .toolbar-button.is-active { border-color: var(--ember); color: var(--ember-text); background: var(--ember-soft); }
 
-.esw-body { flex: 1; min-height: 0; display: flex; align-items: stretch; }
+.esw-body { flex: 1 1 0; min-height: 64px; display: flex; align-items: stretch; }
 .esw-source { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
 .esw-source__host { flex: 1; min-height: 0; overflow: hidden; background: var(--forge-0); }
 .esw-source__host .cm-editor { height: 100%; }
@@ -627,8 +650,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .event-source__facts dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); user-select: text; }
 .esw-inspector > .secondary-action { margin: 9px; }
 
-.esw-dock { border-top: 1px solid var(--line); background: var(--forge-1); }
-.esw-dock__body { max-height: 150px; overflow-y: auto; }
+.esw-dock {
+  border-top: 1px solid var(--line); background: var(--forge-1);
+  /* 底部 dock：极矮视口下允许被压，问题列表在 dock 内滚动，不让主源码区被挤塌。 */
+  display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0;
+}
+.esw-dock__body { flex: 1; min-height: 0; overflow-y: auto; max-height: 150px; }
 .event-source__problem { display: flex; gap: 8px; padding: 6px 9px; font-size: 10.5px; border-bottom: 1px solid var(--line); }
 .event-source__problem strong { color: var(--danger-text); font-family: var(--font-mono); }
 .event-source__problem span { color: var(--ink-2); }
@@ -956,13 +983,20 @@ pre.tool-output {
 }
 
 /* ═══════════ Agent 面板 ═══════════ */
-/* §12.1 固定三行：48px header / minmax conversation / bottom composer */
+/* §12.1 固定行：48px header / minmax conversation / context / composer。
+   DOM 有四个 grid item（header、conversation、composer-context、composer），
+   模板必须给四行：漏掉一行会让 composer 落到隐式行，auto 行先取内容高，
+   minmax(0,1fr) 的 conversation 只能分到剩余（极矮视口下是 0，实测审批卡
+   直接塌没、approve 按钮不可达）。composer 是输入核心（发送按钮在 toolbar），
+   auto 保内容高；context 是辅助信息，minmax(0,auto) 允许被压且超高内滚；
+   conversation minmax(48px,1fr) 保底可滚动——内容再高都能滚到，不再塌没。 */
 .agent {
   width: var(--agent-w); min-width: var(--agent-dock-min); max-width: var(--agent-dock-max); flex: none;
-  display: grid; grid-template-rows: var(--agent-header-height) minmax(0, 1fr) auto;
+  display: grid; grid-template-rows: var(--agent-header-height) minmax(48px, 1fr) minmax(0, auto) auto;
   color: var(--ink-0); background: var(--forge-0); border-left: 1px solid var(--line);
   box-shadow: none;
   position: relative;
+  overflow: hidden;
   transition: margin-right var(--dur-trans) var(--ease-standard);
 }
 .agent.is-collapsed { margin-right: calc(-1 * var(--agent-w)); border-left-color: transparent; }
@@ -1289,6 +1323,12 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   width: 12px; height: 12px; border-radius: 50%; flex: none;
   border: 1.5px solid var(--ember-soft); border-top-color: var(--ember);
   animation: spin .7s linear infinite;
+}
+
+/* 上下文选择 + 资源引用选择（§12.10）。极矮视口下允许被 grid 压缩（辅助信息），
+   超高时内部滚动，不把 conversation 挤塌、不溢出面板。 */
+.agent-composer-context {
+  min-height: 0; overflow-y: auto;
 }
 
 .agent__composer {
@@ -1647,6 +1687,33 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
    同时它自己要能吃满栏高，否则 flex:1 的虚拟容器没有参照高度。 */
 .wb-list--virtual { flex: 1; min-height: 0; height: 100%; overflow: hidden; }
 .workbench__column-body:has(> .wb-list--virtual) { overflow: hidden; }
+
+/* ── FMG §9.1：左 Categories + 右上 Entries + 右下 Text，不是四条竖栏 ──
+   左栏：树滚动、Toolbar(flex:none)叠在 Categories 下方。右区：Entries 55% /
+   Text 45% 上下两块，各带独立滚动宿主。column-body 只做宿主，滚动权交给内层。
+   极矮视口下右区两块 min-height 之和超出栏高，.fmg-right 兜底可滚，内容不丢。 */
+.workbench__column-body:has(> .fmg-categories),
+.workbench__column-body:has(> .fmg-right) { overflow: hidden; }
+
+.fmg-categories { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.fmg-categories__search { flex: none; padding: 4px 8px 0; }
+.fmg-categories__search input { width: 100%; box-sizing: border-box; }
+.fmg-categories__tree { flex: 1 1 0; min-height: 0; overflow-y: auto; }
+.fmg-categories__toolbar { flex: none; border-top: 1px solid var(--line); background: var(--forge-2); }
+
+.fmg-right { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow-y: auto; }
+.fmg-right__pane { display: flex; flex-direction: column; min-height: 0; }
+.fmg-right__pane--entries { flex: 55 1 0; min-height: 240px; }
+.fmg-right__pane--text { flex: 45 1 0; min-height: 200px; border-top: 1px solid var(--line); }
+.fmg-right__pane-header {
+  flex: none; display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--forge-2);
+}
+.fmg-right__pane-header h3 {
+  margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-1);
+}
+.fmg-right__pane-body { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 2px 0; }
 
 /* ── 虚拟滚动列表 ── */
 /* 虚拟化器要一个自己测量的滚动容器。它嵌在已 overflow:auto 的
@@ -2015,4 +2082,25 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
     var(--forge-2) 0% 25%, var(--forge-3) 0% 50%) 0 0 / 16px 16px;
   user-select: none;
 }
+
+/* ══════════ 格式写回控件（TEXTURE-52C / VFX-54C / ANIMATION-56C）══════════
+   控件本身复用 .wb-prop / .btn / .wb-empty 布局，这里只补各写回区的专属形态：
+   TPF 纹理替换入口的源选择列、VFX 值编辑行内联的「写回」按钮、TAE 事件编辑区
+   的纵向节奏。无 DDS 源时 TPF 区整体保持可读的禁用态。 */
+.tpf-replace { display: flex; flex-direction: column; gap: 6px; padding: 2px 10px 10px; }
+.tpf-replace__label { font-size: 11px; color: var(--ink-2); }
+.tpf-replace__select { min-width: 0; }
+.tpf-replace__submit { align-self: flex-start; }
+.tpf-replace__ok { color: var(--ink-2); }
+
+.vfx-commit {
+  flex: none; padding: 1px 8px; font-size: 11px;
+  color: var(--ink-1); background: var(--control-rest-bg);
+  border: 1px solid var(--line-strong); border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.vfx-commit:hover:not(:disabled) { background: var(--control-hover-bg); color: var(--ink-0); }
+.vfx-commit:disabled { color: var(--ink-3); cursor: not-allowed; }
+
+.tae-edit { display: flex; flex-direction: column; }
 

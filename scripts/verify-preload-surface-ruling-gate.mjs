@@ -39,9 +39,15 @@ const PRELOAD = join(root, 'apps', 'desktop', 'src', 'preload', 'index.ts');
  * 没有依据的条目等于「先放着」，那正是本门禁要消除的状态。
  */
 /**
- * 按能力族划分的裁定表。**当前为空：15 条待接线项已于 2026-08-08 全部接线。**
+ * 按能力族划分的裁定表。
  *
- * 历史（按接线顺序）：
+ * 2026-08-14 更新：盘点发现 15 条新增暴露面无 renderer 引用（08-10 封存的通过态是
+ * 60/60 全被引用，见 EV-WORKBENCH-PARAM-TRUST-20260810）。它们不是待办 TODO——
+ * 每条都对应已封存的写/读能力切片（writer/IPC/native 层），只是各 write 切片
+ * Allowed 明确不含 preload/renderer，UI 入口属于未来切片。族划分与
+ * RULED_NOT_YET_WIRED 严格互为覆盖（判据 5）。
+ *
+ * 历史（2026-08-08 清零前，按接线顺序）：
  *   raw-bytes 2 条            readRawRange → HexEditorPanel 按偏移翻页；
  *                             readRawMetadata → 同面板的整资源哈希（不读内容即可拿）
  *   ai-agent 6 条             AgentTaskPanel + App.tsx 的订阅与调用
@@ -56,15 +62,62 @@ const PRELOAD = join(root, 'apps', 'desktop', 'src', 'preload', 'index.ts');
  * 每条必须写：为什么保留（而不是撤下）、依据哪条治理裁定、接线的前置条件是什么。
  * 没有依据的条目等于「先放着」，那正是本门禁要消除的状态。
  */
-const RULED_FAMILY = Object.freeze({});
+const RULED_FAMILY = Object.freeze({
+  'editor-document-facade': [
+    'openEditorDocument', 'getEditorDocument', 'pageEditorDocument',
+    'readEditorDocumentContent', 'applyEditorMutation', 'closeEditorDocument',
+  ],
+  'format-read-primitive': [
+    'readFmgPage', 'readFlverTextureSlots', 'readContainerParamRowIndex',
+  ],
+});
 
 /**
- * 已裁定但尚未接线的暴露方法。**当前为空**，见上面的历史记录。
+ * 已裁定但尚未接线的暴露方法。**2026-08-14 接线 6 项后剩 9 条。**
+ *
+ * 历史：2026-08-08 曾清零（57/57 全引用，EV-T14-WIRING-COMPLETE）；08-10 前端施工
+ * 期间 write 能力切片把 IPC 入口暴露进 preload，但各 write 切片 Allowed 不含
+ * renderer，UI 写入入口未接线——这正是本门禁要守的「已实现但用户不可用」差距，
+ * 显式登记，不假装可用。
+ *
+ * 2026-08-14：format-write-ui 5 条 + agent-resource-reference 1 条**已全部接线**
+ * （Material 属性编辑 / ESD transition / TAE event / FXR field / TPF texture
+ * replace / Agent 资源引用，各工作台经 getRendererBridge 直连 bridge.commit*），
+ * 从本表与族划分一并删除——接线即收缩，不留永久豁免。剩余 9 条属
+ * editor-document-facade 与 format-read-primitive 两族，均需未来切片收敛。
  *
  * 判据 5 要求本表与 RULED_FAMILY 双向一致：一条方法在其中之一出现而另一处没有，
  * 会报 PRELOAD_RULING_FAMILY_ORPHAN / PRELOAD_RULING_FAMILY_MISSING。
  */
-const RULED_NOT_YET_WIRED = Object.freeze({});
+const RULED_NOT_YET_WIRED = Object.freeze({
+  // ── editor-document-facade（DOCSTORE-04 typed facade，§14.4）──
+  openEditorDocument:
+    'DOCSTORE-04 typed DocumentStore facade 已封存，main handler 在 ipc.ts:1479。'
+    + 'renderer 现走各格式专用 read 方法（readEmevdDocument/readParamDocument 等），'
+    + '未采用通用 facade。接线前置：未来切片把格式编辑器统一收敛到 DocumentStore 通道。',
+  getEditorDocument:
+    '同 DOCSTORE-04 家族；facade 的按 handle 读取。前置同 openEditorDocument。',
+  pageEditorDocument:
+    '同 DOCSTORE-04 家族；facade 的分页读取（硬约束 17 的有界页面契约）。前置同 openEditorDocument。',
+  readEditorDocumentContent:
+    '同 DOCSTORE-04 家族；facade 的内容读取。前置同 openEditorDocument。',
+  applyEditorMutation:
+    '同 DOCSTORE-04 家族；facade 的 mutation 提交。前置同 openEditorDocument。',
+  closeEditorDocument:
+    '同 DOCSTORE-04 家族；facade 的关闭。前置同 openEditorDocument。',
+
+  // ── format-read-primitive（低层读取原语，当前工作台用更高层 API）──
+  readFmgPage:
+    '硬约束 17 的有界页面访问器之一（main 注释 resource.readFmgPage/readParamPage/'
+    + 'listContainerChildrenPage），main handler 在 ipc.ts:2483，e2e 直连通道验证。'
+    + 'Text 工作台用表级 readFmgTablePage。接线前置：未来切片的 FMG 工作台合并或撤下。',
+  readFlverTextureSlots:
+    'FLVER 纹理槽读取原语，main handler 存在，Model 工作台未消费。'
+    + '接线前置：未来 Model 工作台的纹理槽检查器。',
+  readContainerParamRowIndex:
+    '容器 param 行索引查询原语；ParamWorkbench 用 readContainerParamPage + '
+    + 'applyContainerParamFieldMutation，未消费行索引。接线前置：未来行级导航。',
+});
 
 const WIRING_PRIORITY = Object.freeze([
   // runAiAgent 曾是本表第一优先项，已于 2026-08-08 接线。条目**保留**：输出处按
@@ -86,6 +139,10 @@ const WIRING_PRIORITY = Object.freeze([
     method: 'detectMe3',
     why: 'SCOPE-RUNTIME 已 user-approved，但 REL-H 仍 open——接线需真实 Sekiro 启动证据（§9.6 BLOCK-3/4），且 scope 明禁「能力探测缺失或含糊时启动」'
   }
+  // 2026-08-14 曾新增 6 条 write/agent 接线优先项（createAgentResourceReference /
+  // commitMtdPropertySet / saveTpfTextureReplace / commitEsdTransition /
+  // commitTaeEvent / commitFxrFieldSet），本轮已全部接线并从登记表删除——
+  // nextWiring 按登记表过滤，无需再列；保留注释以追溯「已处理过」。
 ]);
 
 function report(payload, exitCode) {

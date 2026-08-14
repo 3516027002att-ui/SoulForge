@@ -1,9 +1,10 @@
 /**
- * PARAM 三栏工作台（对照 Smithbox 2.2.4 的 Param Editor）。
+ * PARAM 四栏工作台（对照 Smithbox 2.2.4 的 Param Editor）。
  *
- * 左：Param List —— parambnd 容器内的 param 条目
- * 中：Row List   —— 选中 param 的行（id + name），分页 + 筛选
- * 右：Field List —— 选中行的字段（名 + 值）
+ * 一：Params —— parambnd 容器内的 param 条目
+ * 二：Rows   —— 选中 param 的行（id + name），分页 + 筛选 + 虚拟滚动
+ * 三：Fields —— 选中行的字段（名 + 值）；应用 ParamDef 失败时保留失败 param 并标「读取失败」
+ * 四：Tools  —— 工具栈（当前诚实空态）
  *
  * ── 为什么需要它 ──
  *

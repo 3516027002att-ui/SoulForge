@@ -26,9 +26,18 @@
  * 条件行就是转移载体（每条 condition 携带源状态/目标状态偏移）；选中条件行，
  * Inspector 显示该转移的明细。§10.3 的列名是 Conditions / Commands，不另开
  * Transitions 组。
+ *
+ * ── 55C 转移目标编辑 ──
+ *
+ * 选中条件后 Inspector 出现「重定向目标偏移」编辑入口，提交
+ * behavior-transition-upsert 能力族下的 set-transition-target（字节级外科替换
+ * 条件记录的 targetStateOffset；-1 清空转移）。RPN 参数体永久不解码，evaluator
+ * 行只显示「未解码」只读标注，不给字节码假编辑。成功（ok=true）后面板自身经
+ * read-esd-document 重读并覆盖 props.data 显示新 envelope；失败显示结构化诊断
+ * + 回滚提示，不清空已读内容。提交期间禁用重复提交。
  */
 
-import { useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   isEsdDocument,
   projectEsdDocumentPages,
@@ -38,6 +47,7 @@ import {
 import { formatListTruncation } from '../format/uiText.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 
 /** 状态组表渲染上限（上游数据截断；列表本身由布局栏滚动承载）。 */
 const STATE_GROUP_RENDER_LIMIT = 200;
@@ -45,6 +55,111 @@ const STATE_GROUP_RENDER_LIMIT = 200;
 const CONDITION_RENDER_LIMIT = 200;
 /** 命令调用样本渲染上限。 */
 const COMMAND_RENDER_LIMIT = 200;
+
+/** 55C 写回所需的 bridge 表面（按用即取，测试可注入桩；不依赖完整 preload 类型）。 */
+export interface EsdTransitionEditBridge {
+  commitEsdTransition?: (
+    sourceUri: string,
+    expectedDocumentHash: string,
+    mutations: Array<{
+      mutation: string;
+      stateRelOffset?: number;
+      conditionRelOffset?: number;
+      targetStateRelOffset?: number;
+    }>
+  ) => Promise<{ ok?: boolean; diagnostics?: Array<{ code?: string; message?: string }> }>;
+  readEsdDocument?: (sourceUri: string) => Promise<unknown>;
+}
+
+/** 一条 set-transition-target 写回 mutation（wire 形状与 preload commitEsdTransition 一致）。 */
+export interface EsdTransitionMutationWire {
+  mutation: string;
+  stateRelOffset: number;
+  conditionRelOffset: number;
+  targetStateRelOffset: number;
+}
+
+export interface EsdTransitionEditInput {
+  bridge: EsdTransitionEditBridge | null;
+  resourceUri: string;
+  document: EsdDocument;
+  sample: EsdConditionSampleWire;
+  targetStateRelOffset: number;
+}
+
+export interface EsdTransitionEditOutcome {
+  ok: boolean;
+  mutation?: EsdTransitionMutationWire;
+  diagnostics: Array<{ code?: string; message?: string }>;
+  /** ok=true 且重读成功时携带新 envelope；失败/未重读时为 null。 */
+  refreshed?: EsdDocument | null;
+}
+
+/** 解析用户输入的目标偏移：0x 前缀按十六进制，其余按十进制；-1 表示清空转移。 */
+export function parseEsdTargetOffset(text: string): number | null {
+  const trimmed = text.trim();
+  if (trimmed === '') return null;
+  const value = /^0x/i.test(trimmed)
+    ? Number.parseInt(trimmed.slice(2), 16)
+    : Number(trimmed);
+  return Number.isInteger(value) ? value : null;
+}
+
+/**
+ * 提交一条 ESD 状态转移重定向（behavior-transition-upsert 能力族下的
+ * set-transition-target）。成功（ok=true）后立即经 read-esd-document 重读，
+ * 让 Inspector 显示写回后的新 envelope；失败返回结构化诊断，不吞异常。
+ *
+ * relOffset 定位全部取自读信封：sourceStateRelOffset → stateRelOffset、
+ * conditionRelOffset → conditionRelOffset，编辑后的目标偏移 → targetStateRelOffset；
+ * expectedDocumentHash 取 document.sourceHash（读时快照，防并发漂移）。
+ */
+export async function submitEsdTransitionEdit(
+  input: EsdTransitionEditInput
+): Promise<EsdTransitionEditOutcome> {
+  const { bridge, resourceUri, document, sample, targetStateRelOffset } = input;
+  if (!bridge?.commitEsdTransition) {
+    return {
+      ok: false,
+      diagnostics: [{ code: 'ESD_WRITE_UNAVAILABLE', message: '桌面桥接能力缺失，无法提交 ESD 状态转移。' }],
+      refreshed: null
+    };
+  }
+  const mutation: EsdTransitionMutationWire = {
+    // C# EsdNativeWriter 只接受 set-transition-target（behavior-transition-upsert
+    // 能力族里的转移重定向 mutation）；RPN 参数体相关的 set-command-arg 恒被
+    // C# 侧 fail-closed 拒绝，这里从不构造。
+    mutation: 'set-transition-target',
+    stateRelOffset: sample.sourceStateRelOffset,
+    conditionRelOffset: sample.conditionRelOffset,
+    targetStateRelOffset
+  };
+  try {
+    const raw = await bridge.commitEsdTransition(resourceUri, document.sourceHash, [mutation]);
+    const result = raw as { ok?: boolean; diagnostics?: Array<{ code?: string; message?: string }> };
+    if (!result.ok) {
+      return { ok: false, mutation, diagnostics: result.diagnostics ?? [], refreshed: null };
+    }
+    // ok=true → 重读。面板是 props 驱动（App 传 data），写回经 Patch Engine 落盘后
+    // 只有面板自己再发 read-esd-document 才能拿到新 envelope。
+    let refreshed: EsdDocument | null = null;
+    if (bridge.readEsdDocument) {
+      const reread = await bridge.readEsdDocument(resourceUri) as { ok?: boolean; data?: unknown };
+      if (reread.ok && isEsdDocument(reread.data)) refreshed = reread.data;
+    }
+    return { ok: true, mutation, diagnostics: result.diagnostics ?? [], refreshed };
+  } catch (error) {
+    return {
+      ok: false,
+      mutation,
+      diagnostics: [{
+        code: 'ESD_TRANSITION_WRITE_EXCEPTION',
+        message: error instanceof Error ? error.message : 'ESD 状态转移写入异常。'
+      }],
+      refreshed: null
+    };
+  }
+}
 
 export interface EsdWorkbenchPanelProps {
   resourceUri: string;
@@ -74,10 +189,22 @@ function fileLabel(resourceUri: string): string {
 export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
   const [selected, setSelected] = useState<EsdSelection | null>(null);
 
-  const document = useMemo(
-    () => (props.data && isEsdDocument(props.data) ? props.data : null),
-    [props.data]
-  );
+  // ── 55C 转移目标编辑状态 ──
+  const [targetOffsetText, setTargetOffsetText] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitNotice, setSubmitNotice] = useState<string | null>(null);
+  // 写回成功后的重读结果：面板 props 驱动，重读只能由面板自身发 bridge 读，
+  // 用 (refreshedUri, refreshedDocument) 按文件归位，避免跨文件串数据。
+  const [refreshedDocument, setRefreshedDocument] = useState<EsdDocument | null>(null);
+  const [refreshedUri, setRefreshedUri] = useState<string | null>(null);
+
+  const document = useMemo(() => {
+    const candidate = refreshedUri === props.resourceUri && refreshedDocument
+      ? refreshedDocument
+      : props.data;
+    return candidate && isEsdDocument(candidate) ? candidate : null;
+  }, [props.data, props.resourceUri, refreshedDocument, refreshedUri]);
   const pages = useMemo(
     () => (document ? projectEsdDocumentPages(document) : null),
     [document]
@@ -134,6 +261,85 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
   const graphClosed = transitions?.closed ?? false;
   const visibleGaps = (document?.unparsedGaps ?? []).slice(0, 8);
   const visibleShortfalls = (document?.coverageShortfalls ?? []).slice(0, 8);
+
+  // ── 55C 编辑状态：换文件/换选中条件时归位 ──
+  // 换文件丢弃上一份文件的重读结果与提交状态（props 驱动，不改 App）。
+  useEffect(() => {
+    setRefreshedDocument(null);
+    setRefreshedUri(null);
+    setSubmitError(null);
+    setSubmitNotice(null);
+    setTargetOffsetText('');
+  }, [props.resourceUri]);
+
+  // 换选中条件时预填当前目标偏移（十六进制），并清掉上一轮提交状态。
+  useEffect(() => {
+    setSubmitError(null);
+    setSubmitNotice(null);
+    if (selected?.kind !== 'condition') {
+      setTargetOffsetText('');
+      return;
+    }
+    const sample = conditionSamples.find((item) => item.conditionRelOffset === selected.conditionOffset);
+    if (!sample) return;
+    setTargetOffsetText(
+      sample.targetStateRelOffset >= 0
+        ? `0x${sample.targetStateRelOffset.toString(16)}`
+        : '-1'
+    );
+    // conditionRelOffset 是稳定 identity，document 重读后不随条件变化重填。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
+
+  const selectedConditionSample: EsdConditionSampleWire | null =
+    selected?.kind === 'condition'
+      ? conditionSamples.find((item) => item.conditionRelOffset === selected.conditionOffset) ?? null
+      : null;
+  const parsedTarget = selectedConditionSample && targetOffsetText.trim() !== ''
+    ? parseEsdTargetOffset(targetOffsetText)
+    : null;
+  const targetOffsetError = selectedConditionSample && targetOffsetText.trim() !== ''
+    ? (parsedTarget === null ? '目标偏移必须是整数（0x 前缀按十六进制；-1 清空转移）。' : null)
+    : null;
+  const canSubmit = selectedConditionSample !== null
+    && parsedTarget !== null
+    && targetOffsetError === null
+    && !submitting;
+
+  const handleSubmitTransition = useCallback(async () => {
+    if (!document || !selectedConditionSample || parsedTarget === null) return;
+    if (submitting) return; // 提交期间禁用重复提交。
+    setSubmitting(true);
+    setSubmitError(null);
+    setSubmitNotice(null);
+    try {
+      const outcome = await submitEsdTransitionEdit({
+        bridge: getRendererBridge(),
+        resourceUri: props.resourceUri,
+        document,
+        sample: selectedConditionSample,
+        targetStateRelOffset: parsedTarget
+      });
+      if (outcome.ok) {
+        if (outcome.refreshed) {
+          setRefreshedDocument(outcome.refreshed);
+          setRefreshedUri(props.resourceUri);
+        }
+        setSubmitNotice(
+          outcome.refreshed
+            ? '已提交转移目标并重读验证。'
+            : '已提交转移目标；重读未成功，界面仍显示写回前数据。'
+        );
+      } else {
+        const detail = outcome.diagnostics.map((d) => d.message).filter(Boolean).join('；');
+        setSubmitError(
+          `${detail || 'ESD 状态转移写入被拒绝。'}（写回失败可经 History & Recovery 回滚，已读内容保留。）`
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }, [document, selectedConditionSample, parsedTarget, submitting, props.resourceUri]);
 
   function selectMachine(groupId: number): void {
     setSelected({
@@ -417,10 +623,51 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                       </ul>
                     </details>
                   )}
-                  <div className="wb-list__group-label">写回</div>
-                  <p className="wb-empty">
-                    ESD 写回链尚未接通（BEHAVIOR-55C），当前为只读工作台；转移/条件/命令不可编辑。
-                  </p>
+                  <div className="wb-list__group-label">写回（transition upsert）</div>
+                  {selectedConditionSample ? (
+                    <div data-testid="esd-transition-edit">
+                      <div className="wb-prop">
+                        <span className="wb-prop__name">重定向目标偏移</span>
+                        <span className="wb-prop__value">
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            aria-label="重定向目标偏移"
+                            value={targetOffsetText}
+                            disabled={submitting}
+                            onChange={(e) => {
+                              setTargetOffsetText(e.target.value);
+                              setSubmitNotice(null);
+                            }}
+                          />
+                        </span>
+                      </div>
+                      <p className="muted" style={{ fontSize: 11 }}>
+                        修改该条件的跳转目标；0x 前缀按十六进制，-1 清空转移。RPN 参数体永久不解码，不做假编辑。
+                      </p>
+                      {targetOffsetError && (
+                        <p className="wb-empty diag-error" data-testid="esd-transition-edit-error">{targetOffsetError}</p>
+                      )}
+                      {submitError && (
+                        <p className="wb-empty diag-error" data-testid="esd-transition-submit-error">{submitError}</p>
+                      )}
+                      {submitNotice && (
+                        <p className="wb-empty" data-testid="esd-transition-submit-notice">{submitNotice}</p>
+                      )}
+                      <button
+                        type="button"
+                        className="primary-action"
+                        disabled={!canSubmit}
+                        onClick={() => { void handleSubmitTransition(); }}
+                      >
+                        {submitting ? '提交中…' : '提交转移目标'}
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="wb-empty">
+                      选中一条条件后，此处出现「重定向目标偏移」编辑入口（BEHAVIOR-55C transition upsert）；RPN 参数体永久不解码，不做假编辑。
+                    </p>
+                  )}
                 </>
               )}
             </div>

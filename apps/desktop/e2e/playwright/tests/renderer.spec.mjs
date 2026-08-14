@@ -64,6 +64,24 @@ async function openFixtureWorkspace(window) {
   await expect(window.locator('.status-bar')).toContainText('已索引');
 }
 
+/**
+ * e2e 隐藏窗口视口固定为 633×379（Renderer CSS px，约为 1280×820 的 2× 缩放）。
+ * 该视口下 agentOpen 默认 true → Agent dock 进入 is-overlay 全屏覆盖（x=13..633,
+ * y=76..332），侧栏文件列表完全被盖，file-item 不可点击（实测 GPARAM/BND/MSB 均
+ * 因此失败）。真实用户路径是「先收起 Agent 再浏览文件」，测试统一复刻它。
+ */
+async function closeAgentPanel(window) {
+  const close = window.getByRole('button', { name: '关闭 Agent 面板' });
+  if (await close.isVisible().catch(() => false)) {
+    await close.click();
+  }
+}
+
+async function selectFileItem(window, text) {
+  await closeAgentPanel(window);
+  await window.locator('.file-item', { hasText: text }).click();
+}
+
 test('空工作区：无演示数据，变更队列为空态', async () => {
   const { app, window } = await launchApp();
   await expect(window.locator('.change-queue')).toContainText('没有候选变更');
@@ -145,13 +163,13 @@ test('BND 外形文件自动进入容器工作台；命令面板可强制以 BND
 
   // SHELL-09：物理浏览只在 Files 领域；容器领域不再有文件列表。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'chr/sample.chrbnd.dcx' }).click();
+  await selectFileItem(window, 'chr/sample.chrbnd.dcx');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region;
   // 工作台根用 getByLabel,列级 section 仍用 getByRole('region')。
   await expect(window.getByLabel('BND4 容器工作台')).toBeVisible();
 
   // 非容器文件 + 命令面板「以 BND4 容器打开当前选择」。
-  await window.locator('.file-item', { hasText: 'other/notes.txt' }).click();
+  await selectFileItem(window, 'other/notes.txt');
   await expect(window.getByLabel('BND4 容器工作台')).toHaveCount(0);
   await window.keyboard.press('Control+k');
   await window.locator('.cmdk__input-wrap input').fill('BND4');
@@ -168,7 +186,7 @@ test('脚本容器进入三栏工作台：明文按 encoding 显示，字节码�
 
   // SCRIPT-41：脚本容器资源从 Files 领域选择，进入三栏脚本工作台。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'script/m25_00_00_00.luabnd.dcx' }).click();
+  await selectFileItem(window, 'script/m25_00_00_00.luabnd.dcx');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('脚本容器工作台')).toBeVisible();
 
@@ -201,7 +219,7 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
 
   // MAP-50B：MSB 地图资源从 Files 领域选择，进入三栏地图工作台。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'map/m10.msb.dcx' }).click();
+  await selectFileItem(window, 'map/m10.msb.dcx');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('MSB 地图工作台')).toBeVisible();
 
@@ -251,7 +269,7 @@ test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽
 
   // MODEL-51B：FLVER 模型资源从 Files 领域选择，进入三栏模型工作台。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'chr/c1000.flver' }).click();
+  await selectFileItem(window, 'chr/c1000.flver');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('FLVER 模型工作台')).toBeVisible();
 
@@ -305,7 +323,7 @@ test('Material 工作台三栏：File list → Material list → Properties/Valu
 
   // MATERIAL-53B：MTD 材质资源从 Files 领域选择，进入三栏材质工作台。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'material/materials.mtd' }).click();
+  await selectFileItem(window, 'material/materials.mtd');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('Material 工作台')).toBeVisible();
 
@@ -328,14 +346,23 @@ test('Material 工作台三栏：File list → Material list → Properties/Valu
   // Properties / Values 栏：值类型与 unknown readonly（值可见但无任何编辑控件）。
   const props = window.getByRole('region', { name: 'Properties / Values' });
   await expect(props.getByText('DiffuseIntensity')).toBeVisible();
-  await expect(props.getByText('0.8')).toBeVisible();
+  // known 属性值渲染为可编辑 input（MATERIAL-53C 写回），不再匹配 getByText——
+  // 值断言走 input value（见下），这里保留类型标签断言。
   await expect(props.getByText(' · float').first()).toBeVisible();
   // unknown 属性必须可见（不能丢弃）：unkAttr 行出现且只读标记明确。
   await expect(window.getByTestId('mtd-unknown-prop')).toContainText('unkAttr（未识别）');
   await expect(window.getByTestId('mtd-unknown-prop')).toContainText('0x2a');
-  // 本卡无 writer（MATERIAL-53C 才接写回）：无任何按钮/输入框/保存动作。
-  await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
-  await expect(window.locator('.wb-prop__value input')).toHaveCount(0);
+  // MATERIAL-53C 写回：known 属性可编辑输入框（blur/Enter 提交），unknown 保留且只读。
+  const diffuseInput = window.getByLabel('DiffuseIntensity 值');
+  await expect(diffuseInput).toBeVisible();
+  await expect(diffuseInput).toHaveValue('0.8');
+  await diffuseInput.fill('0.9');
+  await diffuseInput.blur();
+  await expect(window.getByTestId('mtd-commit-success')).toContainText('已保存 DiffuseIntensity 并重读验证');
+  // 重读后输入框反映新值（fixture stub 就地更新 + 面板 refreshKey 重读）。
+  await expect(diffuseInput).toHaveValue('0.9');
+  // unknown 属性无编辑控件：readonly span，没有 input。
+  await expect(window.getByTestId('mtd-unknown-prop').locator('input')).toHaveCount(0);
 
   // partial 缺口必须可见，不伪装成完整解析。
   await expect(window.getByTestId('mtd-partial-gaps')).toContainText('未识别结构 1 项');
@@ -360,7 +387,7 @@ test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，
 
   // BEHAVIOR-55B：ESD 状态机资源从 Files 领域选择，进入三栏行为工作台。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'ai/m10.esd' }).click();
+  await selectFileItem(window, 'ai/m10.esd');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('Behavior 工作台')).toBeVisible();
 
@@ -390,14 +417,22 @@ test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，
   await expect(inspector.getByText('目标状态偏移')).toBeVisible();
   await expect(inspector.getByText('0x28')).toBeVisible();
 
-  // 命令选中 → Inspector 显示命令明细。
+  // BEHAVIOR-55C transition upsert：条件选中时出现「重定向目标偏移」编辑入口并提交。
+  await expect(window.getByTestId('esd-transition-edit')).toBeVisible();
+  const targetInput = window.getByLabel('重定向目标偏移');
+  await expect(targetInput).toHaveValue('0x28');
+  await targetInput.fill('0x50');
+  await window.getByRole('button', { name: '提交转移目标' }).click();
+  await expect(window.getByTestId('esd-transition-submit-notice')).toContainText('已提交转移目标并重读验证');
+  // 提交后 Inspector 的目标状态偏移随 fixture stub 就地更新重读为 0x50。
+  await expect(inspector.getByText('0x50')).toBeVisible();
+
+  // 命令选中 → Inspector 显示命令明细（transition 编辑入口随条件切换消失）。
   await middle.getByRole('row', { name: /命令 10/ }).click();
   await expect(inspector.getByText('命令 ID')).toBeVisible();
   await expect(inspector.getByText('槽位')).toBeVisible();
   await expect(inspector.getByText('entry')).toBeVisible();
-
-  // 无 writer（BEHAVIOR-55C 才接 transition write）：无保存/提交动作。
-  await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
+  await expect(window.getByTestId('esd-transition-edit')).toHaveCount(0);
 
   await window.screenshot({ path: 'test-results/17-behavior-workbench.png' });
   await app.close();
@@ -409,7 +444,7 @@ test('Animation 工作台三栏：动画 → 时间轴事件选择链，事件�
 
   // ANIMATION-56B：TAE 动画资源从 Files 领域选择，进入三栏动画工作台。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'action/c0000.tae' }).click();
+  await selectFileItem(window, 'action/c0000.tae');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('Animation 工作台')).toBeVisible();
 
@@ -445,8 +480,13 @@ test('Animation 工作台三栏：动画 → 时间轴事件选择链，事件�
   await expect(middle.getByText('事件总数')).toBeVisible();
   await expect(middle.getByText('事件类型 3')).toBeVisible();
 
-  // 无 writer（ANIMATION-56C 才接 event write）：无保存/提交动作。
-  await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
+  // ANIMATION-56C event write：选中 timeline 事件后出现事件编辑入口，更新事件时间。
+  await expect(window.getByTestId('tae-event-editor')).toBeVisible();
+  const startInput = window.getByLabel('新开始时间');
+  await expect(startInput).toHaveValue('0');
+  await startInput.fill('0.5');
+  await window.getByRole('button', { name: '更新事件时间' }).click();
+  await expect(window.getByTestId('tae-write-notice')).toContainText('事件时间已更新并重读验证');
 
   await window.screenshot({ path: 'test-results/18-animation-workbench.png' });
   await app.close();
@@ -458,7 +498,7 @@ test('VFX 工作台三栏：Effect / Particle list → 真实预览空态 → In
 
   // VFX-54B：FXR 特效资源从 Files 领域选择，进入三栏 VFX 工作台。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'sfx/f0000.fxr' }).click();
+  await selectFileItem(window, 'sfx/f0000.fxr');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('VFX 工作台')).toBeVisible();
 
@@ -503,8 +543,23 @@ test('VFX 工作台三栏：Effect / Particle list → 真实预览空态 → In
   // partial 缺口必须可见，不伪装成完整解析。
   await expect(window.getByTestId('vfx-partial-gaps')).toContainText('未解析区间 4 项');
 
-  // 无 writer（VFX-54C 才接 field write）：无保存/提交动作。
-  await expect(window.getByRole('button', { name: /提交|保存|写入/ })).toHaveCount(0);
+  // VFX-54C field write：选中 known host（host 0）出现值编辑行 +「写回」按钮。
+  // 文档是 partial（含 unknown-type gap），known-layout 门未满 → 编辑控件为禁用态，
+  // 不做假写回（fail-closed，镜像 C# EnsureKnownLayout）。
+  await left.getByRole('row', { name: /^host 0/ }).click();
+  await expect(window.getByTestId('vfx-known-host')).toHaveAttribute('aria-selected', 'true');
+  // Inspector 顶部 hint 也显示 selection.label（host 0），group-label 与 hint 文案相同，
+  // getByText 会 strict 违规——精确匹配 group 标签。
+  await expect(inspector.locator('.wb-list__group-label').filter({ hasText: /^host 0$/ })).toBeVisible();
+  const vfxValueInput = window.locator('[data-testid^="vfx-value-input-"]').first();
+  await expect(vfxValueInput).toBeVisible();
+  await expect(vfxValueInput).toBeDisabled();
+  await expect(window.locator('[data-testid^="vfx-value-submit-"]').first()).toBeDisabled();
+  await expect(window.getByTestId('vfx-write-blocked')).toBeVisible();
+  // unknown host（7777）选中：明确标 blocked，无任何编辑控件。
+  await left.getByRole('row', { name: /host 7777/ }).click();
+  await expect(window.getByTestId('vfx-unknown-host-block')).toBeVisible();
+  await expect(window.locator('[data-testid^="vfx-value-input-"]')).toHaveCount(0);
 
   await window.screenshot({ path: 'test-results/19-vfx-workbench.png' });
   await app.close();
@@ -516,7 +571,7 @@ test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', asy
 
   // SHELL-09：文本领域不渲染物理浏览器；msg 文件从 Files 领域选择。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
+  await selectFileItem(window, 'msg/test.msgbnd.dcx');
 
   await window.getByRole('row', { name: /伤药葫芦/ }).click();
   const editor = window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea');
@@ -621,7 +676,7 @@ test('纯键盘可完成 FMG 编辑：行选择不再阻断编辑态', async () 
   await openFixtureWorkspace(window);
 
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
+  await selectFileItem(window, 'msg/test.msgbnd.dcx');
 
   const row = window.getByRole('row', { name: /伤药葫芦/ });
   await expect(row).toBeVisible();
@@ -677,7 +732,7 @@ test('写入失败：保留诊断，状态为 failed，可重新批准', async (
   await openFixtureWorkspace(window);
 
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
+  await selectFileItem(window, 'msg/test.msgbnd.dcx');
   await window.getByRole('row', { name: /返回骨片/ }).click();
   const editor = window.locator('label', { hasText: '编辑 ID 101' }).locator('textarea');
   await editor.fill('返回骨片·改');
@@ -702,24 +757,26 @@ test('写入失败：保留诊断，状态为 failed，可重新批准', async (
   await app.close();
 });
 
-test('TEXT-20B：四栏文本工作台走完 language→container→table→entry→content 全链', async () => {
+test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右下 Text）走完 language→container→table→entry→content 全链', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
   // 从 Files 领域打开 msgbnd：目录链自动定位到该容器第一个表（item.fmg）。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
+  await selectFileItem(window, 'msg/test.msgbnd.dcx');
 
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
   await expect(fmgPanel).toBeVisible();
 
-  // 四栏结构：Languages/Containers/File List · Text Entries · Text Content · Tools
+  // §9.1 拓扑：左 Text Categories + 右区（右上 Text Entries / 右下 Text Content），不是四条竖栏。
   const columns = fmgPanel.locator('.workbench__column');
-  await expect(columns).toHaveCount(4);
-  await expect(columns.nth(0).locator('h3')).toContainText('Languages/Containers/File List');
-  await expect(columns.nth(1).locator('h3')).toContainText('Text Entries');
-  await expect(columns.nth(2).locator('h3')).toContainText('Text Content');
-  await expect(columns.nth(3).locator('h3')).toContainText('Tools');
+  await expect(columns).toHaveCount(2);
+  await expect(columns.nth(0).locator('.workbench__column-title')).toContainText('Text Categories');
+  await expect(columns.nth(1).locator('.workbench__column-title')).toContainText('Text');
+  const entriesPane = fmgPanel.getByRole('region', { name: 'Text Entries' });
+  await expect(entriesPane.locator('h3')).toContainText('Text Entries');
+  const textPane = fmgPanel.getByRole('region', { name: 'Text Content' });
+  await expect(textPane.locator('h3')).toContainText('Text Content');
 
   // 目录树三层可见：语言银行 → 容器 → 表。
   await expect(fmgPanel.getByRole('row', { name: /zhocn/ })).toBeVisible();
@@ -734,7 +791,7 @@ test('TEXT-20B：四栏文本工作台走完 language→container→table→entr
 
   // 切换表 → 父级切换清理：item.fmg 的条目被清空；menu.fmg 真空表显示空态而非失败。
   await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
-  const entriesColumn = columns.nth(1);
+  const entriesColumn = fmgPanel.getByRole('region', { name: 'Text Entries' });
   await expect(entriesColumn).toContainText('当前页无条目');
   await expect(entriesColumn).not.toContainText('伤药葫芦');
   await expect(entriesColumn).not.toContainText('danger');
@@ -752,9 +809,9 @@ test('TEXT-20B：四栏文本工作台走完 language→container→table→entr
   const workbenchText = await fmgPanel.innerText();
   expect(workbenchText).not.toContain('.tpf');
   expect(workbenchText).not.toContain('texbnd');
-  await expect(columns.nth(3)).toContainText('暂无已接通的工具');
+  await expect(fmgPanel.getByRole('region', { name: 'Text Categories' })).toContainText('暂无已接通的工具');
 
-  await window.screenshot({ path: 'test-results/text-20b-four-column.png' });
+  await window.screenshot({ path: 'test-results/text-20b-s91-topology.png' });
   await app.close();
 });
 
@@ -764,7 +821,7 @@ test('TEXT-20C：真空表新增经 review 队列落盘，写按 tableId 路由�
 
   // 从 Files 打开 msgbnd：TEXT-20C 起 live 门禁以 sourceHash 为准，真空表也 live。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
+  await selectFileItem(window, 'msg/test.msgbnd.dcx');
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
   await expect(fmgPanel).toBeVisible();
 
@@ -1429,7 +1486,7 @@ test('PARAM 工作台四栏：选择链、父选区清理、虚拟行、字段�
 
   // 从 Files 领域选 parambnd 容器，打开 Param Workbench。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'param/gameparam/gameparam.parambnd.dcx' }).click();
+  await selectFileItem(window, 'param/gameparam/gameparam.parambnd.dcx');
 
   // 四栏同时存在（§7.1 Params/Rows/Fields/Tools；§18.14 10B Negative DOM 无三栏标题）。
   // WorkbenchLayout 根是 div（.workbench），四栏是带 aria-label 的 section（region）。
@@ -1506,11 +1563,11 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
 
   // 从 Files 领域选 gparam 文件，打开 GPARAM Workbench。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'param/drawparam/m10_00.gparam.dcx' }).click();
+  await selectFileItem(window, 'param/drawparam/m10_00.gparam.dcx');
 
   // Agent 面板默认展开为 overlay，会盖住右侧 Fields/Values 两栏的点击目标。
   // PARAM-10B 用例点击目标在中栏不受影响；这里先收起再操作右栏。
-  await window.getByRole('button', { name: '关闭 Agent 面板' }).click();
+  await closeAgentPanel(window);
 
   // 五区同时存在（§18.15 11B：Files/Groups/Fields/Values/Toolbar；§8.1 禁止合并 Fields/Values）。
   await expect(window.locator('.workbench')).toBeVisible();
@@ -1595,8 +1652,8 @@ test('GPARAM typed 写回：值行编辑 → Toolbar 保存 → 重读新值，�
   await openFixtureWorkspace(window);
 
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'param/drawparam/m10_00.gparam.dcx' }).click();
-  await window.getByRole('button', { name: '关闭 Agent 面板' }).click();
+  await selectFileItem(window, 'param/drawparam/m10_00.gparam.dcx');
+  await closeAgentPanel(window);
 
   // 打开默认 bank（m10_00）：LightSet → Directional Light Angle0（float3 × 2 值）。
   await expect(window.locator('.workbench')).toBeVisible();
@@ -1651,10 +1708,10 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
 
   // 从 Files 领域选 tpf 文件，打开 Texture Workbench。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'menu/start.tpf.dcx' }).click();
+  await selectFileItem(window, 'menu/start.tpf.dcx');
 
   // Agent 面板默认展开为 overlay，会盖住右侧 Viewer/Properties 栏的点击目标。
-  await window.getByRole('button', { name: '关闭 Agent 面板' }).click();
+  await closeAgentPanel(window);
 
   // 四栏同时存在（§2.5：Container list | Texture list | Viewer | Properties）。
   await expect(window.locator('.workbench')).toBeVisible();
@@ -1687,9 +1744,14 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
   await expect(propertiesColumn).toContainText('ATI1');
   await expect(propertiesColumn).toContainText('256×256');
   await expect(propertiesColumn).toContainText('Mip Levels');
-  // no fake replace：writer 未就绪只给诚实说明，整个工作台无替换控件。
-  await expect(propertiesColumn).toContainText('纹理写回链尚未接通');
-  expect(await window.locator('.workbench button').count()).toBe(0);
+  // TEXTURE-52C replace 入口：替换控件已接线（源来自工作区 DDS 文件，无文件对话框）。
+  // fixture 工作区没有 DDS 文件 → 源选择与提交按钮为禁用态，诚实不给假替换。
+  await expect(propertiesColumn.locator('.tpf-replace')).toBeVisible();
+  await expect(propertiesColumn.getByText('替换源（DDS）')).toBeVisible();
+  await expect(window.locator('#tpf-replace-source')).toBeDisabled();
+  const tpfReplaceButton = window.getByRole('button', { name: '替换选中纹理' });
+  await expect(tpfReplaceButton).toBeVisible();
+  expect(await tpfReplaceButton.isDisabled()).toBe(true);
 
   // 受界下采样上限：512×512 源 → 512×512 预览（512 是上限，不缩）。
   await window.locator('.wb-list .wb-row', { hasText: 'm_00_title' }).click();
@@ -1725,7 +1787,7 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
 
 async function openEventWorkbench(window, fileName) {
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: fileName }).click();
+  await selectFileItem(window, fileName);
   const workbench = window.locator('[aria-label="Event 源码工作台"]');
   await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();
   return workbench;
@@ -1853,7 +1915,7 @@ test('EVENT-30B：多 tab 各自 dirty，切 tab 保留未提交编辑', async (
   // 打开第二个事件文档 → 新 tab 出现并被激活（无 dirty）。事件工作台跨资源
   // 保留标签：切 Files 领域再选 menu.emevd 不应卸载工作台。
   await window.locator('[data-domain="files"]').click();
-  await window.locator('.file-item', { hasText: 'event/menu.emevd' }).click();
+  await selectFileItem(window, 'event/menu.emevd');
   const tabs = workbench.locator('[role="tab"]');
   await expect(tabs).toHaveCount(2);
   await expect(tabs.first()).toContainText('event/common.emevd');

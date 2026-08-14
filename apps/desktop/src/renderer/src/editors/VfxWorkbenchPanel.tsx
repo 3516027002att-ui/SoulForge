@@ -32,16 +32,27 @@
  * （parseUnknownFxrTypes），据此给行加「未知类型」标记；未知行可选中，
  * 但 Inspector 明确标 blocked 并只给已解析的原始结构字段，不给字段含义假数据。
  *
+ * ── 写回（VFX-54C）──
+ *
+ * 已封存的 vfx-field-set 写能力只对 known-layout 开放：C# 侧（FxrNativeWriter）
+ * 对 unknown node type / layout warning / Section9 非空 / Section12-14 非空
+ * fail-closed。本组件用 fxrWriteBlockReasons 镜像同一门禁，在这些条件下预先
+ * 禁用编辑控件并给原因，而不是等 commit 失败。unknown node/host 保持
+ * blocked/只读，不给字段含义假数据。Section11 值是混合 int/float 位模式的
+ * int32（无 schema），编辑按不透明 int32 处理，不据值做类型推断。
+ *
  * ── 失败 ──
  *
  * 读取失败的文件保留在文件列表并标记失败（对照 Smithbox 的「失败即移除」，
  * 本项目不照抄：硬约束要求 failed 必须返回结构化诊断），内容栏给出原因。
+ * 写回失败不触发 document 清空：保留已读节点树，显示 diagnostics + 回滚提示。
  */
 
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   isFxrDocument,
   projectFxrDocumentPages,
+  type Diagnostic,
   type FxrDocument,
   type FxrHostWire,
   type FxrNodeWire
@@ -64,6 +75,13 @@ export interface VfxWorkbenchPanelProps {
   files: VfxFileView[];
   /** 打开时默认选中的文件（当前选中资源）。 */
   initialUri?: string;
+  /**
+   * 测试 seam：renderer-unit 是 SSR（effect 不跑），读取结果直接注入初值
+   * （生产不传）。只做 document 初值，不构成第二套数据源。
+   */
+  initialDocument?: FxrDocument | null;
+  /** 测试 seam：SSR 下选中态直接注入初值（生产不传）。 */
+  initialSelection?: VfxSelection | null;
 }
 
 /** Effect 节点树扁平化后的一行（树太大不能一次全渲，见 NODE_RENDER_LIMIT）。 */
@@ -83,6 +101,8 @@ const HOST_RENDER_LIMIT = 200;
 const PROPERTY_RENDER_LIMIT = 200;
 /** 每个属性值的预览条数（值是 Section11 不透明 int 数组，只需摘要）。 */
 const VALUE_PREVIEW_LIMIT = 8;
+/** 每个值数组可编辑条目的渲染上限（大数组不能一次全渲，超限报未显示数）。 */
+const EDIT_VALUE_RENDER_LIMIT = 32;
 
 /** FXR 显示名：去 .fxr/.fxr.dcx，物理路径只在 title/details。 */
 export function vfxFileDisplayName(file: VfxFileView): string {
@@ -136,7 +156,7 @@ export function flattenFxrNodes(nodes: FxrNodeWire[]): FlatFxrNode[] {
 
 type VfxSelectionKind = 'file' | 'node' | 'host';
 
-interface VfxSelection {
+export interface VfxSelection {
   kind: VfxSelectionKind;
   /** node 时为树路径 id；host 时为 fields.hosts 数组索引。 */
   id?: string;
@@ -151,16 +171,216 @@ export function fxrValuePreview(values: number[], limit: number): string {
   return values.length > limit ? `${shown}, …` : shown;
 }
 
+// ── VFX-54C：vfx-field-set 写回 —— 结构性地址 / 已知布局门 / 提交结果 ──
+// container 取值以 C# FxrNativeWriter 为准：'host' | 'property' | 'section8'
+// （Section11 值数组所在的三类容器），与 vfxBridgeCommit.VfxFieldContainer 一致。
+
+/** vfx-field-set 的目标容器（C# 侧同一字符串，见 FxrNativeWriter）。 */
+export type VfxFieldContainer = 'host' | 'property' | 'section8';
+
+/** 一条 vfx-field-set 的结构性路径：与 read 信封的下标一一对应。 */
+export interface VfxEditTarget {
+  container: VfxFieldContainer;
+  /** host 在 fields.hosts[] 收集序中的下标。 */
+  hostIndex: number;
+  /** property 在 host.properties[] 连续序中的下标（container=host 时省略）。 */
+  propertyIndex?: number;
+  /** property 的 section8 下标（container=section8 时需要）。 */
+  section8Index?: number;
+  /** 容器 Section11 值数组下标。 */
+  valueIndex: number;
+}
+
+/** 稳定键：一条可编辑值在 UI 里的唯一身份（draft state 与 testid 共用）。 */
+export function vfxEditTargetKey(target: VfxEditTarget): string {
+  return [
+    target.container,
+    target.hostIndex,
+    target.propertyIndex ?? '-',
+    target.section8Index ?? '-',
+    target.valueIndex
+  ].join(':');
+}
+
+/** 把一次 UI 编辑意图编译成 preload 接受的 vfx-field-set mutation。 */
+export function buildVfxFieldSetMutation(
+  target: VfxEditTarget,
+  value: number
+): {
+  mutation: 'vfx-field-set';
+  address: {
+    container: VfxFieldContainer;
+    hostIndex: number;
+    propertyIndex?: number;
+    section8Index?: number;
+    valueIndex: number;
+  };
+  value: number;
+} {
+  return {
+    mutation: 'vfx-field-set',
+    address: {
+      container: target.container,
+      hostIndex: target.hostIndex,
+      ...(target.propertyIndex !== undefined ? { propertyIndex: target.propertyIndex } : {}),
+      ...(target.section8Index !== undefined ? { section8Index: target.section8Index } : {}),
+      valueIndex: target.valueIndex
+    },
+    value
+  };
+}
+
+/**
+ * Section11 值是无 schema 的 32 位位模式。C# 侧接受 int32 十进制与 uint32 十进制
+ * （0x80000000..0xFFFFFFFF 按 int64 读后截断成位模式），合法输入区间是
+ * [-2^31, 2^32-1]；不据值做类型推断（混合 int/float 位模式，不知道是哪种）。
+ */
+export function isVfxFieldSetValue(value: number): boolean {
+  return Number.isInteger(value) && value >= -2_147_483_648 && value <= 4_294_967_295;
+}
+
+/** fail-closed 门（C# FxrNativeWriter.EnsureKnownLayout 的镜像）：任一理由都禁写。 */
+export interface FxrWriteBlockReason {
+  code: string;
+  message: string;
+}
+
+export function fxrWriteBlockReasons(document: FxrDocument): FxrWriteBlockReason[] {
+  const reasons: FxrWriteBlockReason[] = [];
+  const gaps = document.unparsedGaps ?? [];
+  const warnings = document.layoutWarnings ?? [];
+  if (warnings.length > 0) {
+    reasons.push({
+      code: 'layout-warnings-present',
+      message: `文件存在 ${warnings.length} 条布局警告（数据可疑，布局可能与已登记形态不同）。`
+    });
+  }
+  const unknownTypes = gaps.filter(
+    (gap) => gap.startsWith('unknown-type:') || gap.startsWith('unexpected-type:')
+  );
+  if (unknownTypes.length > 0) {
+    reasons.push({
+      code: 'unknown-node-types',
+      message: `存在 ${unknownTypes.length} 个未识别的 node type（unknown/unexpected-type gap）。`
+    });
+  }
+  if (gaps.some((gap) => gap.startsWith('section9-not-verified'))) {
+    reasons.push({
+      code: 'section9-not-verified',
+      message: 'Section9 布局从未在真实样本验证，拒绝写回。'
+    });
+  }
+  if (gaps.some((gap) => gap.startsWith('section12-14:opaque-int-array'))) {
+    reasons.push({
+      code: 'section12-14-nonempty',
+      message: 'Section12-14 非空布局未验证，拒绝写回。'
+    });
+  }
+  return reasons;
+}
+
+/** 一次 vfx-field-set 提交的结果（RendererSaveResult 的 UI 子集）。 */
+export interface VfxCommitOutcome {
+  ok: boolean;
+  changedFiles?: string[];
+  diagnostics: Array<{ severity: string; code: string; message: string }>;
+}
+
+/** 提交结果 → 提示内容（纯函数，可单测）。 */
+export function fxrCommitNotice(
+  outcome: VfxCommitOutcome
+): { kind: 'success' | 'failure'; title: string; lines: string[] } {
+  if (outcome.ok) {
+    return { kind: 'success', title: '写回成功，已重新读取。', lines: [] };
+  }
+  return {
+    kind: 'failure',
+    title: 'FXR 写回失败（vfx-field-set 未生效）。',
+    lines: [
+      ...outcome.diagnostics.map((d) => `${d.code}：${d.message}`),
+      '如已部分落盘将由 Patch Engine 回滚；已读节点树保留，未清空。'
+    ]
+  };
+}
+
+/** 写回结果提示条（success / failure + 回滚提示）。 */
+export function VfxCommitNotice({ outcome }: { outcome: VfxCommitOutcome }): ReactElement {
+  const notice = fxrCommitNotice(outcome);
+  return (
+    <div className="wb-notice" data-testid="vfx-commit-notice">
+      <span className={notice.kind === 'success' ? 'muted' : 'diag-error'}>{notice.title}</span>
+      {notice.lines.map((line, index) => (
+        <span key={index} className="muted">{line}</span>
+      ))}
+    </div>
+  );
+}
+
+/** 单条可编辑值的一行：int32 输入框 + 写回按钮（known-layout 才可提交）。 */
+interface FxrValueEditorRowProps {
+  target: VfxEditTarget;
+  label: string;
+  value: number;
+  /** fail-closed：文档不满足已知布局门时禁用。 */
+  disabled: boolean;
+  /** 提交进行中：禁用重复提交。 */
+  committing: boolean;
+  draft: string;
+  onDraft: (key: string, raw: string) => void;
+  onCommit: (target: VfxEditTarget, raw: string) => void;
+}
+
+function FxrValueEditorRow(props: FxrValueEditorRowProps): ReactElement {
+  const key = vfxEditTargetKey(props.target);
+  const raw = props.draft !== '' ? props.draft : String(props.value);
+  const invalid = !isVfxFieldSetValue(Number(raw));
+  return (
+    <div className="wb-prop" data-testid={`vfx-field-${key}`}>
+      <span className="wb-prop__name">{props.label}</span>
+      <span className="wb-prop__value">
+        <input
+          type="number"
+          step={1}
+          inputMode="numeric"
+          data-testid={`vfx-value-input-${key}`}
+          aria-label={props.label}
+          value={raw}
+          disabled={props.disabled || props.committing}
+          onChange={(e) => props.onDraft(key, e.target.value)}
+        />
+        <button
+          type="button"
+          className="vfx-commit"
+          data-testid={`vfx-value-submit-${key}`}
+          disabled={props.disabled || props.committing || invalid}
+          onClick={() => props.onCommit(props.target, raw)}
+        >
+          {props.committing ? '写回中' : '写回'}
+        </button>
+        {props.disabled && <span className="muted">（禁用）</span>}
+      </span>
+    </div>
+  );
+}
+
 export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
   const bridge = getRendererBridge();
 
   const [selectedUri, setSelectedUri] = useState<string | null>(props.initialUri ?? null);
   /** 选中文件的读取结果；null 表示未选或失败。 */
-  const [document, setDocument] = useState<FxrDocument | null>(null);
+  const [document, setDocument] = useState<FxrDocument | null>(props.initialDocument ?? null);
   /** 文件 → 读取失败诊断；失败文件保留在列表并标记。 */
   const [readFailure, setReadFailure] = useState<{ code: string; message: string } | null>(null);
   const [loading, setLoading] = useState(false);
-  const [selection, setSelection] = useState<VfxSelection | null>(null);
+  const [selection, setSelection] = useState<VfxSelection | null>(props.initialSelection ?? null);
+  /** VFX-54C：值编辑草稿（key = vfxEditTargetKey；未提交前保留用户输入）。 */
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  /** 提交进行中：期间禁用重复提交。 */
+  const [committing, setCommitting] = useState(false);
+  /** 最近一次 vfx-field-set 提交结果；null = 还没有提交过。 */
+  const [commitOutcome, setCommitOutcome] = useState<VfxCommitOutcome | null>(null);
+  /** 写回成功后自增，驱动 read effect 重新读取（ok=true → 重读）。 */
+  const [reloadKey, setReloadKey] = useState(0);
 
   // ── 读取选中文件 ──
   useEffect(() => {
@@ -203,11 +423,13 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [bridge, selectedUri]);
+  }, [bridge, selectedUri, reloadKey]);
 
-  // 新文件 → 选中态回到文件级统计。
+  // 新文件 → 选中态回到文件级统计，清空写回态。
   useEffect(() => {
     setSelection(null);
+    setDrafts({});
+    setCommitOutcome(null);
   }, [selectedUri]);
 
   const pages = useMemo(
@@ -258,6 +480,8 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
     : null;
   const selectedNodeUnknown = selectedNode !== null
     && unknownTypes.section4.has(selectedNode.node.typeId);
+  const selectedHostUnknown = selectedHost !== null
+    && unknownTypes.section6.has(selectedHost.typeId);
 
   const fileLabel = selectedUri
     ? vfxFileDisplayName({ sourceUri: selectedUri, relativePath: selectedUri })
@@ -291,6 +515,121 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
 
   function selectFileStats(): void {
     setSelection({ kind: 'file', label: '文件统计' });
+  }
+
+  // ── VFX-54C：known-layout 写回门禁（C# FxrNativeWriter.EnsureKnownLayout 的镜像）──
+  const writeBlockReasons = useMemo(
+    () => (document ? fxrWriteBlockReasons(document) : []),
+    [document]
+  );
+  const writeBlocked = writeBlockReasons.length > 0;
+
+  const selectedHostIndex = selection?.kind === 'host' && selection.id !== undefined
+    ? Number(selection.id)
+    : -1;
+
+  function setDraft(key: string, raw: string): void {
+    setDrafts((prev) => ({ ...prev, [key]: raw }));
+  }
+
+  function commitFieldValue(target: VfxEditTarget, raw: string): void {
+    if (!document || !selectedUri) return;
+    const value = Number(raw);
+    if (!isVfxFieldSetValue(value)) return;
+    if (!bridge || typeof bridge.commitFxrFieldSet !== 'function') {
+      setCommitOutcome({
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'FXR_WRITE_BRIDGE_UNAVAILABLE',
+          message: 'FXR 写回桥接能力缺失，无法提交 vfx-field-set。'
+        }]
+      });
+      return;
+    }
+    setCommitting(true);
+    setCommitOutcome(null);
+    bridge.commitFxrFieldSet(selectedUri, document.sourceHash, [buildVfxFieldSetMutation(target, value)])
+      .then((result) => {
+        if (result.ok) {
+          // ok=true → 重读：自增 reloadKey 让 read effect 重新拉取文档。
+          setReloadKey((k) => k + 1);
+          setDrafts((prev) => {
+            const next = { ...prev };
+            delete next[vfxEditTargetKey(target)];
+            return next;
+          });
+        }
+        setCommitOutcome({
+          ok: result.ok,
+          changedFiles: result.changedFiles ?? [],
+          diagnostics: result.diagnostics ?? []
+        });
+      })
+      .catch((error: unknown) => {
+        // ok=false → 显示 diagnostics + 回滚提示，不清空已读节点树（不触碰 document）。
+        setCommitOutcome({
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'FXR_COMMIT_EXCEPTION',
+            message: error instanceof Error ? error.message : 'FXR 写回异常。'
+          }]
+        });
+      })
+      .finally(() => setCommitting(false));
+  }
+
+  /** 一个值数组的可编辑行（known host 下按 container 编译结构性地址）。 */
+  function renderValueRows(options: {
+    container: VfxFieldContainer;
+    hostIndex: number;
+    propertyIndex?: number;
+    section8Index?: number;
+    values: number[];
+    valuesTruncated: boolean;
+    labelPrefix: string;
+  }): ReactElement {
+    const shownValues = options.values.slice(0, EDIT_VALUE_RENDER_LIMIT);
+    return (
+      <>
+        {shownValues.map((value, valueIndex) => {
+          const target: VfxEditTarget = {
+            container: options.container,
+            hostIndex: options.hostIndex,
+            ...(options.propertyIndex !== undefined ? { propertyIndex: options.propertyIndex } : {}),
+            ...(options.section8Index !== undefined ? { section8Index: options.section8Index } : {}),
+            valueIndex
+          };
+          const key = vfxEditTargetKey(target);
+          return (
+            <FxrValueEditorRow
+              key={key}
+              target={target}
+              label={`${options.labelPrefix}${valueIndex}]`}
+              value={value}
+              disabled={writeBlocked}
+              committing={committing}
+              draft={drafts[key] ?? ''}
+              onDraft={setDraft}
+              onCommit={commitFieldValue}
+            />
+          );
+        })}
+        {options.values.length > EDIT_VALUE_RENDER_LIMIT && (
+          <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
+            前 {EDIT_VALUE_RENDER_LIMIT} 个可编辑；其余 {options.values.length - EDIT_VALUE_RENDER_LIMIT} 个未显示。
+          </p>
+        )}
+        {options.valuesTruncated && (
+          <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
+            该值数组上游已截断（valuesTruncated），只显示前 {shownValues.length} 个。
+          </p>
+        )}
+      </>
+    );
   }
 
   /** Inspector 内容（按选中项）。 */
@@ -547,28 +886,100 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                       </div>
                     ))}
                   </div>
-                  {selectedHost && visibleProperties.length > 0 && (
+                  {selectedHost && (
                     <>
+                      {selectedHostUnknown && (
+                        <div className="wb-notice" data-testid="vfx-unknown-host-block">
+                          <span className="diag-warn">
+                            该 host 类型未识别（unknown-type:section6:{selectedHost.typeId}）
+                          </span>
+                          <span className="muted">
+                            不提供该类型的字段含义数据；下方为已解析的原始结构字段。
+                          </span>
+                        </div>
+                      )}
+                      {writeBlocked && (
+                        <div className="wb-notice" data-testid="vfx-write-blocked">
+                          <span className="diag-warn">该文件不满足已知布局门，写回已预先禁用。</span>
+                          {writeBlockReasons.map((reason) => (
+                            <span
+                              key={reason.code}
+                              className="muted"
+                              data-testid={`vfx-write-block-${reason.code}`}
+                            >
+                              {reason.code}：{reason.message}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="wb-list__group-label">属性（Section7 · {selectedHost.properties.length}）</div>
+                      {visibleProperties.length === 0 && (
+                        <p className="wb-empty">这个 host 没有可显示的属性样本。</p>
+                      )}
                       {visibleProperties.map((prop, propIndex) => {
                         const propUnknown = unknownTypes.section7.has(prop.typeId);
+                        const editable = !selectedHostUnknown && !propUnknown;
                         return (
-                          <div
-                            key={`${prop.typeId}-${propIndex}`}
-                            className="wb-prop"
-                            data-testid={propUnknown ? 'vfx-unknown-property' : 'vfx-known-property'}
-                          >
-                            <span className="wb-prop__name">
-                              property {prop.typeId}
-                              {propUnknown ? <span className="wb-prop__enum"> 未知类型</span> : null}
-                              <span className="wb-prop__enum"> · s11×{prop.section11Count} · s8×{prop.section8Count}</span>
-                            </span>
-                            <span className="wb-prop__value wb-prop__value--readonly">
-                              {fxrValuePreview(prop.values, VALUE_PREVIEW_LIMIT)}
-                            </span>
+                          <div key={`${prop.typeId}-${propIndex}`}>
+                            <div
+                              className="wb-prop"
+                              data-testid={propUnknown ? 'vfx-unknown-property' : 'vfx-known-property'}
+                            >
+                              <span className="wb-prop__name">
+                                property {prop.typeId}
+                                {propUnknown ? <span className="wb-prop__enum"> 未知类型</span> : null}
+                                <span className="wb-prop__enum"> · s11×{prop.section11Count} · s8×{prop.section8Count}</span>
+                              </span>
+                              <span className="wb-prop__value wb-prop__value--readonly">
+                                {fxrValuePreview(prop.values, VALUE_PREVIEW_LIMIT)}
+                              </span>
+                            </div>
+                            {editable && (
+                              <>
+                                {renderValueRows({
+                                  container: 'property',
+                                  hostIndex: selectedHostIndex,
+                                  propertyIndex: propIndex,
+                                  values: prop.values,
+                                  valuesTruncated: prop.valuesTruncated,
+                                  labelPrefix: `property ${prop.typeId}[`
+                                })}
+                                {prop.section8.map((section8, section8Index) => (
+                                  <div key={`${prop.typeId}-s8-${section8Index}`}>
+                                    <div className="wb-prop">
+                                      <span className="wb-prop__name">
+                                        section8 {section8.typeId} · s11×{section8.section11Count}
+                                        <span className="wb-prop__enum"> · {section8.section9.length} s9</span>
+                                      </span>
+                                    </div>
+                                    {renderValueRows({
+                                      container: 'section8',
+                                      hostIndex: selectedHostIndex,
+                                      propertyIndex: propIndex,
+                                      section8Index,
+                                      values: section8.values,
+                                      valuesTruncated: section8.valuesTruncated,
+                                      labelPrefix: `section8[${section8Index}]`
+                                    })}
+                                  </div>
+                                ))}
+                              </>
+                            )}
                           </div>
                         );
                       })}
+                      {!selectedHostUnknown && (
+                        <>
+                          <div className="wb-list__group-label">host Section11 值（container=host）</div>
+                          {renderValueRows({
+                            container: 'host',
+                            hostIndex: selectedHostIndex,
+                            values: selectedHost.values,
+                            valuesTruncated: selectedHost.valuesTruncated,
+                            labelPrefix: 'host['
+                          })}
+                        </>
+                      )}
                     </>
                   )}
                   {isPartial && (unparsedGaps.length > 0 || layoutWarnings.length > 0) && (
@@ -587,10 +998,22 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                       </ul>
                     </details>
                   )}
-                  <div className="wb-list__group-label">写回</div>
-                  <p className="wb-empty">
-                    FXR 写回链尚未接通（VFX-54C），当前为只读工作台；节点/粒子/属性不可编辑。
-                  </p>
+                  <div className="wb-list__group-label">写回（vfx-field-set）</div>
+                  {commitOutcome && <VfxCommitNotice outcome={commitOutcome} />}
+                  {selectedHost && !selectedHostUnknown && !writeBlocked && (
+                    <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
+                      Section11 值是混合 int/float 位模式的 int32（无 schema），按不透明
+                      int32 编辑，可输入 -2147483648…4294967295。
+                    </p>
+                  )}
+                  {!selectedHost && (
+                    <p className="wb-empty">选中一个粒子（host）后即可编辑其数值字段。</p>
+                  )}
+                  {writeBlocked && (
+                    <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
+                      已知布局门未满足时编辑控件为禁用态，不做假写回。
+                    </p>
+                  )}
                 </>
               )}
             </div>

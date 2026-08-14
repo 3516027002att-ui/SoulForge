@@ -1,5 +1,5 @@
 /**
- * ANIMATION-56B：Animation 工作台（§10.3）。
+ * ANIMATION-56B / ANIMATION-56C：Animation 工作台（§10.3）+ TAE 事件 typed 写回。
  *
  * 三栏：`Files / Animations | Timeline / Events | Inspector`。
  *
@@ -17,25 +17,43 @@
  *
  * 每个事件只导出 startTime / endTime / eventTypeId 与计数，paramDataOffset 指向的
  * 参数体一字节未读。UI 不得把「读出了事件在时间轴上的位置」伪装成「读出了
- * hitbox/SFX/VFX 参数」——缺 eventTypeId 逐类布局就不能开放 writer（ANIMATION-56C）。
+ * hitbox/SFX/VFX 参数」——缺 eventTypeId 逐类布局就不能开放参数编辑。ANIMATION-56C
+ * 只开放**已解码字段**：事件时间（update-event-times）与按模板新增事件
+ * （insert-event，参数体逐字节拷贝自模板事件）。
  *
  * ── invalid time range ──
  *
  * 存在 startTime > endTime 或非有限时间时，C# 侧降 partial 并在 diagnostics 里给
  * TAE_INVALID_TIME_RANGE。本面板必须把 diagnostics 暴露给用户，并把非法时间行标记
- * 出来，不能把「读出来了」伪装成「完整解析」。
+ * 出来，不能把「读出来了」伪装成「完整解析」。时间编辑本身可用来修复非法范围；
+ * 若提交后仍非法、或时间槽被兄弟事件共享，C# 侧 fail-closed，面板展示诊断并保持
+ * 时间轴原状（失败不清空时间轴）。
+ *
+ * ── 写回（ANIMATION-56C）──
+ *
+ * Inspector 选中时间轴事件时渲染「编辑事件时间」与「新增事件（模板）」两个入口，
+ * 经 preload 的 commitTaeEvent（write-tae-document）提交。mutation 定位用 animId +
+ * 事件表下标：eventIndex 是该事件在其动画 events 数组内的下标（timeline 是各动画
+ * events 的有序展平，按值匹配可回推）；templateEventIndex 同理用于新增事件。
+ * expectedDocumentHash 取读信封的 sourceHash。提交成功后经 readTaeDocument 重读并
+ * 覆盖本地文档（refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间
+ * 禁用重复提交。写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed
+ * 出口。
  */
 
-import { useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   isTaeDocument,
   projectTaeDocumentPages,
   TAE_INVALID_TIME_RANGE,
+  type Diagnostic,
   type TaeAnimationWire,
-  type TaeDocument
+  type TaeDocument,
+  type TaeTimelineEventRow
 } from '@soulforge/shared';
 import { formatListTruncation } from '../format/uiText.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 
 /** 动画表渲染上限（上游数据截断；列表本身由布局栏滚动承载）。 */
@@ -48,11 +66,13 @@ const EVENT_TYPE_RENDER_LIMIT = 20;
 export interface TaeWorkbenchPanelProps {
   resourceUri: string;
   data: TaeDocument | null;
+  /** 可选初始选中（测试/深链用）；不传等价于只读初始态。 */
+  initialSelection?: TaeSelection;
 }
 
 type TaeSelectionKind = 'file' | 'animation' | 'timeline';
 
-interface TaeSelection {
+export interface TaeSelection {
   kind: TaeSelectionKind;
   id: string;
   label: string;
@@ -60,6 +80,27 @@ interface TaeSelection {
   animationId?: number;
   /** 选中时间轴事件在 timeline 页全数组里的索引。 */
   timelineIndex?: number;
+  /** 选中时间轴事件在其所属动画 events 数组内的下标（写回定位用）。 */
+  eventIndex?: number | undefined;
+}
+
+/** 时间编辑草稿（字符串输入态，提交时再解析为 number）。 */
+export interface TaeTimeDraft {
+  startText: string;
+  endText: string;
+}
+
+/** 新增事件草稿（字符串输入态）。 */
+export interface TaeInsertDraft {
+  eventTypeIdText: string;
+  startText: string;
+  endText: string;
+}
+
+/** 写回结果提示：成功或失败诊断。 */
+export interface TaeWriteNotice {
+  kind: 'success' | 'error';
+  message: string;
 }
 
 /** 文件显示名：取 sourceUri 的 basename。 */
@@ -78,17 +119,240 @@ export function isInvalidTimeRange(startTime: number, endTime: number): boolean 
   return !Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime;
 }
 
-export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
-  const [selected, setSelected] = useState<TaeSelection | null>(null);
+/**
+ * 时间轴行在其所属动画 events 数组内的下标。
+ *
+ * timeline 页是各动画 events 的有序展平（projectTaeDocumentPages 按 animId 分组
+ * 顺序 push），所以「同一 animId 的此前行数」就是该行在动画 events 数组里的下标。
+ * 用计数而非值匹配，避免同一动画内重复事件（同 start/end/type）取错下标。
+ */
+export function eventIndexOfTimelineRow(
+  rows: readonly TaeTimelineEventRow[],
+  index: number
+): number | undefined {
+  const row = rows[index];
+  if (!row) return undefined;
+  let count = 0;
+  for (let i = 0; i < index; i += 1) {
+    if (rows[i]?.animId === row.animId) count += 1;
+  }
+  return count;
+}
 
-  const document = useMemo(
-    () => (props.data && isTaeDocument(props.data) ? props.data : null),
-    [props.data]
+/**
+ * 把时间编辑草稿解析成 update-event-times mutation；时间非法（非有限）返回 null。
+ * startTime > endTime 不在这里拦截：时间编辑可能正用于修复现存非法范围，C# 侧
+ * 对非有限/start>end/共享时间槽 fail-closed，失败由提交诊断回显。
+ */
+export function buildUpdateEventTimesMutation(
+  row: TaeTimelineEventRow,
+  eventIndex: number,
+  draft: TaeTimeDraft
+): { mutation: 'update-event-times'; animId: number; eventIndex: number; startTime: number; endTime: number } | null {
+  const startTime = Number(draft.startText);
+  const endTime = Number(draft.endText);
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return null;
+  return { mutation: 'update-event-times', animId: row.animId, eventIndex, startTime, endTime };
+}
+
+/**
+ * 把新增事件草稿解析成 insert-event mutation；类型或时间非法返回 null。
+ * 参数体按模板逐字节拷贝，eventTypeId 与模板不一致时由 C# 侧 fail-closed。
+ */
+export function buildInsertEventMutation(
+  row: TaeTimelineEventRow,
+  templateEventIndex: number,
+  draft: TaeInsertDraft
+): { mutation: 'insert-event'; animId: number; templateEventIndex: number; eventTypeId: number; startTime: number; endTime: number } | null {
+  const eventTypeId = Number(draft.eventTypeIdText);
+  const startTime = Number(draft.startText);
+  const endTime = Number(draft.endText);
+  if (!Number.isFinite(eventTypeId) || !Number.isFinite(startTime) || !Number.isFinite(endTime)) return null;
+  return { mutation: 'insert-event', animId: row.animId, templateEventIndex, eventTypeId, startTime, endTime };
+}
+
+/** 诊断列表 → 用户可见文案（空列表给兜底句，不吞失败）。 */
+export function formatWriteDiagnostics(diagnostics: readonly Diagnostic[] | undefined): string {
+  const list = diagnostics ?? [];
+  if (list.length === 0) return '写入被拒绝';
+  return list.map((diag) => `[${diag.code}] ${diag.message}`).join('；');
+}
+
+/**
+ * Inspector 里的事件编辑区：时间编辑（update-event-times）+ 新增事件
+ * （insert-event，以当前事件为模板）。参数体未解码，这里不出现任何参数编辑控件。
+ */
+export interface TaeEventEditorProps {
+  row: TaeTimelineEventRow;
+  /** 事件在所属动画 events 数组内的下标；undefined 时禁用提交。 */
+  eventIndex: number | undefined;
+  timeDraft: TaeTimeDraft | null;
+  insertDraft: TaeInsertDraft | null;
+  saving: boolean;
+  notice: TaeWriteNotice | null;
+  onTimeDraftChange: (draft: TaeTimeDraft) => void;
+  onInsertDraftChange: (draft: TaeInsertDraft) => void;
+  onSubmitTime: () => void;
+  onSubmitInsert: () => void;
+}
+
+export function TaeEventEditor(props: TaeEventEditorProps): ReactElement {
+  const { row, eventIndex, saving, notice } = props;
+  const startText = props.timeDraft?.startText ?? String(row.startTime);
+  const endText = props.timeDraft?.endText ?? String(row.endTime);
+  const insertTypeText = props.insertDraft?.eventTypeIdText ?? String(row.eventTypeId);
+  const insertStartText = props.insertDraft?.startText ?? String(row.startTime);
+  const insertEndText = props.insertDraft?.endText ?? String(row.endTime);
+
+  return (
+    <div className="tae-edit" data-testid="tae-event-editor">
+      {notice && (
+        <p className={notice.kind === 'error' ? 'diag-error' : 'muted'} data-testid="tae-write-notice">
+          {notice.message}
+        </p>
+      )}
+      <div className="wb-list__group-label">编辑事件时间（update-event-times）</div>
+      {eventIndex === undefined && (
+        <p className="wb-empty diag-error" data-testid="tae-event-index-missing">
+          无法确定该事件在动画事件表中的下标，写回已禁用。
+        </p>
+      )}
+      <div className="wb-prop">
+        <span className="wb-prop__name">起始时间</span>
+        <span className="wb-prop__value">
+          <input
+            type="number"
+            step="any"
+            aria-label="新开始时间"
+            value={startText}
+            disabled={saving}
+            onChange={(event) => props.onTimeDraftChange({ startText: event.target.value, endText })}
+          />
+        </span>
+      </div>
+      <div className="wb-prop">
+        <span className="wb-prop__name">结束时间</span>
+        <span className="wb-prop__value">
+          <input
+            type="number"
+            step="any"
+            aria-label="新结束时间"
+            value={endText}
+            disabled={saving}
+            onChange={(event) => props.onTimeDraftChange({ startText, endText: event.target.value })}
+          />
+        </span>
+      </div>
+      <div className="wb-prop">
+        <span className="wb-prop__name" />
+        <span className="wb-prop__value">
+          <button type="button" disabled={saving || eventIndex === undefined} onClick={props.onSubmitTime}>
+            更新事件时间
+          </button>
+        </span>
+      </div>
+      <div className="wb-list__group-label">新增事件（模板：当前事件）</div>
+      <p className="muted" style={{ fontSize: 11 }}>
+        新增事件的参数区从模板事件逐字节拷贝；事件类型与模板不一致会被 C# 侧拒绝。
+      </p>
+      <div className="wb-prop">
+        <span className="wb-prop__name">类型 ID</span>
+        <span className="wb-prop__value">
+          <input
+            type="number"
+            step="1"
+            aria-label="新事件类型 ID"
+            value={insertTypeText}
+            disabled={saving}
+            onChange={(event) => props.onInsertDraftChange({
+              eventTypeIdText: event.target.value,
+              startText: insertStartText,
+              endText: insertEndText
+            })}
+          />
+        </span>
+      </div>
+      <div className="wb-prop">
+        <span className="wb-prop__name">起始时间</span>
+        <span className="wb-prop__value">
+          <input
+            type="number"
+            step="any"
+            aria-label="新事件开始时间"
+            value={insertStartText}
+            disabled={saving}
+            onChange={(event) => props.onInsertDraftChange({
+              eventTypeIdText: insertTypeText,
+              startText: event.target.value,
+              endText: insertEndText
+            })}
+          />
+        </span>
+      </div>
+      <div className="wb-prop">
+        <span className="wb-prop__name">结束时间</span>
+        <span className="wb-prop__value">
+          <input
+            type="number"
+            step="any"
+            aria-label="新事件结束时间"
+            value={insertEndText}
+            disabled={saving}
+            onChange={(event) => props.onInsertDraftChange({
+              eventTypeIdText: insertTypeText,
+              startText: insertStartText,
+              endText: event.target.value
+            })}
+          />
+        </span>
+      </div>
+      <div className="wb-prop">
+        <span className="wb-prop__name" />
+        <span className="wb-prop__value">
+          <button type="button" disabled={saving || eventIndex === undefined} onClick={props.onSubmitInsert}>
+            新增事件
+          </button>
+        </span>
+      </div>
+    </div>
   );
+}
+
+export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
+  const [selected, setSelected] = useState<TaeSelection | null>(props.initialSelection ?? null);
+  /** 提交成功后本地重读的文档（优先于 props.data；换文件/App 重读时清空）。 */
+  const [refreshedDocument, setRefreshedDocument] = useState<TaeDocument | null>(null);
+  /** 选中事件的时间编辑草稿（null = 未编辑/未选中）。 */
+  const [timeDraft, setTimeDraft] = useState<TaeTimeDraft | null>(null);
+  /** 选中事件的新增事件草稿。 */
+  const [insertDraft, setInsertDraft] = useState<TaeInsertDraft | null>(null);
+  /** 提交进行中：禁用重复提交。 */
+  const [saving, setSaving] = useState(false);
+  /** 最近一次写回结果提示（失败诊断/成功确认；跨选区清空）。 */
+  const [writeNotice, setWriteNotice] = useState<TaeWriteNotice | null>(null);
+
+  const document = useMemo(() => {
+    const source = refreshedDocument ?? props.data;
+    return source && isTaeDocument(source) ? source : null;
+  }, [refreshedDocument, props.data]);
   const pages = useMemo(
     () => (document ? projectTaeDocumentPages(document) : null),
     [document]
   );
+
+  // 换文件或 App 重新传入数据时丢弃本地重读缓存（避免跨文件残留旧文档）。
+  useEffect(() => {
+    setRefreshedDocument(null);
+  }, [props.resourceUri, props.data]);
+
+  // 离开时间轴事件选择时清空编辑草稿与写回提示（避免跨选区残留）。
+  useEffect(() => {
+    if (selected?.kind !== 'timeline') {
+      setTimeDraft(null);
+      setInsertDraft(null);
+      setWriteNotice(null);
+    }
+  }, [selected]);
 
   const animations: TaeAnimationWire[] = pages?.animations.animations ?? [];
   const timelineRows = pages?.timeline.events ?? [];
@@ -153,8 +417,111 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       id: `tl-${index}`,
       label: `事件 ${row.eventTypeId} @${formatTime(row.startTime)}s`,
       animationId: row.animId,
-      timelineIndex: index
+      timelineIndex: index,
+      eventIndex: eventIndexOfTimelineRow(timelineRows, index)
     });
+    setTimeDraft({ startText: String(row.startTime), endText: String(row.endTime) });
+    setInsertDraft({
+      eventTypeIdText: String(row.eventTypeId),
+      startText: String(row.startTime),
+      endText: String(row.endTime)
+    });
+    setWriteNotice(null);
+  }
+
+  /** 提交成功后的重读：经 bridge 直读最新 envelope 并放入本地缓存。 */
+  async function refreshAfterCommit(): Promise<boolean> {
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeDocument !== 'function') return false;
+    try {
+      const raw = await bridge.readTaeDocument(props.resourceUri) as { ok?: boolean; data?: unknown };
+      if (raw.ok && raw.data && isTaeDocument(raw.data)) {
+        setRefreshedDocument(raw.data);
+        return true;
+      }
+    } catch {
+      // 落入统一失败提示。
+    }
+    return false;
+  }
+
+  /** 统一写回入口：typed mutations → commitTaeEvent → 成功重读 / 失败诊断回显。 */
+  async function commitMutations(
+    mutations: Array<{
+      mutation: string;
+      animId?: number;
+      eventIndex?: number;
+      templateEventIndex?: number;
+      eventTypeId?: number;
+      startTime?: number;
+      endTime?: number;
+    }>,
+    successMessage: string
+  ): Promise<void> {
+    if (document === null) {
+      setWriteNotice({ kind: 'error', message: '当前没有可写回的 TAE 文档。' });
+      return;
+    }
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.commitTaeEvent !== 'function') {
+      setWriteNotice({ kind: 'error', message: 'TAE 写回能力不可用（需要桌面桥接）。' });
+      return;
+    }
+    setSaving(true);
+    setWriteNotice(null);
+    try {
+      const raw = await bridge.commitTaeEvent(props.resourceUri, document.sourceHash, mutations);
+      const result = raw as { ok?: boolean; diagnostics?: Diagnostic[] };
+      if (result.ok) {
+        const refreshed = await refreshAfterCommit();
+        if (refreshed) {
+          setWriteNotice({ kind: 'success', message: successMessage });
+        } else {
+          setWriteNotice({ kind: 'error', message: '写入成功，但重读失败；请重新打开文件确认最新状态。' });
+        }
+      } else {
+        setWriteNotice({
+          kind: 'error',
+          message: `${formatWriteDiagnostics(result.diagnostics)}，已回滚，时间轴保持原状。`
+        });
+      }
+    } catch (error) {
+      setWriteNotice({ kind: 'error', message: error instanceof Error ? error.message : 'TAE 写入异常。' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** 提交 update-event-times：选中事件的 animId + 事件表下标 + 新起止时间。 */
+  async function submitTimeEdit(): Promise<void> {
+    const row = selected?.kind === 'timeline' ? timelineRows[selected.timelineIndex ?? -1] : undefined;
+    if (!row || selected?.kind !== 'timeline' || !timeDraft) return;
+    if (selected.eventIndex === undefined) {
+      setWriteNotice({ kind: 'error', message: '无法确定该事件在动画事件表中的下标，写入被拒绝。' });
+      return;
+    }
+    const mutation = buildUpdateEventTimesMutation(row, selected.eventIndex, timeDraft);
+    if (!mutation) {
+      setWriteNotice({ kind: 'error', message: '时间必须是有限数字。' });
+      return;
+    }
+    await commitMutations([mutation], '事件时间已更新并重读验证。');
+  }
+
+  /** 提交 insert-event：以选中事件为模板追加新事件。 */
+  async function submitInsert(): Promise<void> {
+    const row = selected?.kind === 'timeline' ? timelineRows[selected.timelineIndex ?? -1] : undefined;
+    if (!row || selected?.kind !== 'timeline' || !insertDraft) return;
+    if (selected.eventIndex === undefined) {
+      setWriteNotice({ kind: 'error', message: '无法确定模板事件在动画事件表中的下标，写入被拒绝。' });
+      return;
+    }
+    const mutation = buildInsertEventMutation(row, selected.eventIndex, insertDraft);
+    if (!mutation) {
+      setWriteNotice({ kind: 'error', message: '事件类型与时间必须是有限数字。' });
+      return;
+    }
+    await commitMutations([mutation], '已新增事件并重读验证。');
   }
 
   /** Inspector 内容（按选中项）。 */
@@ -167,7 +534,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         ['开始时间', `${formatTime(row.startTime)}s`],
         ['结束时间', `${formatTime(row.endTime)}s`],
         ['事件类型 ID', String(row.eventTypeId)],
-        ['时间范围', isInvalidTimeRange(row.startTime, row.endTime) ? '非法（startTime > endTime）' : '合法']
+        ['时间范围', isInvalidTimeRange(row.startTime, row.endTime) ? '非法（startTime > endTime）' : '合法'],
+        ['参数体', '未解码（ANIMATION-56C 只开放时间/类型编辑，无参数布局）']
       ];
     }
     if (selected?.kind === 'animation') {
@@ -180,7 +548,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         ['时间数', String(animation.timesCount)],
         ['HKX 名称', animation.hkxName ?? '—'],
         ['事件时间表', animation.eventsTruncated ? '已截断（未全量）' : '完整（本动画）'],
-        ['参数体', '未解码（能力边界，ANIMATION-56C 前不开放 writer）']
+        ['参数体', '未解码（能力边界；事件参数体不开放编辑）']
       ];
     }
     // file / 未选中：文件级统计。
@@ -194,6 +562,10 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       ['authority', authority ?? '—']
     ];
   }
+
+  const selectedTimelineRow = selected?.kind === 'timeline'
+    ? (selected.timelineIndex === undefined ? undefined : timelineRows[selected.timelineIndex])
+    : null;
 
   return (
     <WorkbenchLayout
@@ -353,10 +725,24 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     </details>
                   )}
                   <div className="wb-list__group-label">写回</div>
-                  <p className="wb-empty">
-                    TAE 写回链尚未接通（ANIMATION-56C），当前为只读工作台；
-                    事件参数体未解码，不开放任何事件编辑入口。
-                  </p>
+                  {selectedTimelineRow ? (
+                    <TaeEventEditor
+                      row={selectedTimelineRow}
+                      eventIndex={selected?.kind === 'timeline' ? selected.eventIndex : undefined}
+                      timeDraft={timeDraft}
+                      insertDraft={insertDraft}
+                      saving={saving}
+                      notice={writeNotice}
+                      onTimeDraftChange={(draft) => setTimeDraft(draft)}
+                      onInsertDraftChange={(draft) => setInsertDraft(draft)}
+                      onSubmitTime={() => void submitTimeEdit()}
+                      onSubmitInsert={() => void submitInsert()}
+                    />
+                  ) : (
+                    <p className="wb-empty" data-testid="tae-write-hint">
+                      选中 Timeline 的时间轴事件后，可编辑事件时间（update-event-times）或按当前事件为模板新增事件（insert-event）。事件参数体未解码，不开放参数编辑。
+                    </p>
+                  )}
                 </>
               )}
             </div>

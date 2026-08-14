@@ -44,10 +44,13 @@ export interface FmgWorkbenchPanelProps {
  */
 
 /**
- * FMG 本地化工作台（TEXT-20B，对照 Smithbox Text Editor 四栏）：
+ * FMG 本地化工作台（TEXT-20B；对照 Smithbox Text Editor，拓扑按 §9.1）：
  *
- *   Languages/Containers/File List | Text Entries | Text Content | Tools
- *   ── 24% ─────────────────────── 30% ─ 30% ─ 16% ──
+ *   左：Text Categories ~379px（min 220）；Toolbar 叠在 Categories 下方
+ *   右上：Text Entries 占剩余宽度约 55% 高（min 240）
+ *   右下：Text 正文占剩余宽度约 45% 高（min 200）
+ *
+ * 不是四条竖栏：右区是 Entries / Text 上下两块，各自独立滚动。
  *
  * ── 选择链 ──
  *
@@ -86,6 +89,9 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   const [selectedLanguageId, setSelectedLanguageId] = useState<string | null>(null);
   const [selectedContainerId, setSelectedContainerId] = useState<string | null>(null);
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
+
+  // ── 左树搜索（§9.3 每区搜索）：只过滤目录行显示，不动选择链 ──
+  const [treeQuery, setTreeQuery] = useState('');
 
   // ── 条目分页（与 `resource.readFmgTablePage` 的窗口对应）──
   const [query, setQuery] = useState('');
@@ -280,8 +286,18 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   };
   const treeRows: TreeRow[] = [];
   if (catalog) {
+    // §9.3 每区搜索：q 非空时只显示命中行及其祖先链，整组无命中则跳过。
+    const q = treeQuery.trim().toLowerCase();
+    const hits = (s: string): boolean => !q || s.toLowerCase().includes(q);
     for (const language of catalog.languages) {
       const languageSelected = language.languageId === selectedLanguageId;
+      const langHit = hits(language.languageId);
+      if (q && !langHit
+        && !language.containers.some(
+          (c) => hits(c.containerKind) || hits(c.relativePath) || c.tables.some((t) => hits(t.entryName))
+        )) {
+        continue;
+      }
       treeRows.push({
         key: `language:${language.languageId}`,
         level: 0,
@@ -293,6 +309,8 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
       if (!languageSelected) continue;
       for (const container of language.containers) {
         const containerSelected = container.containerId === selectedContainerId;
+        const contHit = hits(container.containerKind) || hits(container.relativePath);
+        if (q && !langHit && !contHit && !container.tables.some((t) => hits(t.entryName))) continue;
         treeRows.push({
           key: `container:${container.containerId}`,
           level: 1,
@@ -307,6 +325,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         });
         if (!containerSelected) continue;
         for (const table of container.tables) {
+          if (q && !langHit && !contHit && !hits(table.entryName)) continue;
           treeRows.push({
             key: `table:${table.tableId}`,
             level: 2,
@@ -321,28 +340,38 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   }
 
   const treeColumn = (
-    <div className="wb-list">
-      {catalogLoading && <p className="wb-empty">正在读取文本目录…</p>}
-      {catalogError && <p className="wb-empty diag-error">{catalogError}</p>}
-      {!catalogLoading && !catalogError && catalog === null && (
-        <p className="wb-empty">文本目录需要桌面版才能读取。</p>
-      )}
-      {catalog && treeRows.map((row, index) => (
-        <div
-          key={row.key}
-          className={row.failed ? 'wb-row wb-row--failed' : 'wb-row'}
-          style={{ paddingLeft: 8 + row.level * 14 }}
-          {...selectableRowAttributes({
-            selected: row.selected,
-            isTabEntry: isRowTabEntry(index, treeRows.some((r) => r.selected)),
-            onSelect: row.onSelect
-          })}
-        >
-          <span className="wb-row__name" title={row.title}>{row.label}</span>
-          <span className="wb-row__meta">{row.meta}</span>
-        </div>
-      ))}
-    </div>
+    <>
+      <div className="fmg-categories__search">
+        <input
+          value={treeQuery}
+          onChange={(e) => setTreeQuery(e.target.value)}
+          placeholder="筛选语言 / 容器 / 表"
+          aria-label="筛选文本目录树"
+        />
+      </div>
+      <div className="wb-list">
+        {catalogLoading && <p className="wb-empty">正在读取文本目录…</p>}
+        {catalogError && <p className="wb-empty diag-error">{catalogError}</p>}
+        {!catalogLoading && !catalogError && catalog === null && (
+          <p className="wb-empty">文本目录需要桌面版才能读取。</p>
+        )}
+        {catalog && treeRows.map((row, index) => (
+          <div
+            key={row.key}
+            className={row.failed ? 'wb-row wb-row--failed' : 'wb-row'}
+            style={{ paddingLeft: 8 + row.level * 14 }}
+            {...selectableRowAttributes({
+              selected: row.selected,
+              isTabEntry: isRowTabEntry(index, treeRows.some((r) => r.selected)),
+              onSelect: row.onSelect
+            })}
+          >
+            <span className="wb-row__name" title={row.title}>{row.label}</span>
+            <span className="wb-row__meta">{row.meta}</span>
+          </div>
+        ))}
+      </div>
+    </>
   );
 
   // ── 中栏：分页条目表（真空表 / 无匹配 / 未选择三种空态分离）──
@@ -454,36 +483,44 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     </div>
   );
 
+  // ── §9.1 拓扑：左 Categories + 右上 Entries + 右下 Text，不是四条竖栏 ──
+  // 右区是上下两块（Entries 55% / Text 45%），各带独立滚动与可访问名。
+  const rightPane = (
+    <div className="fmg-right">
+      <section className="fmg-right__pane fmg-right__pane--entries" aria-label="Text Entries">
+        <header className="fmg-right__pane-header">
+          <h3>Text Entries</h3>
+          <span className="muted">{entryCount} 条</span>
+        </header>
+        <div className="fmg-right__pane-body">{entriesColumn}</div>
+      </section>
+      <section className="fmg-right__pane fmg-right__pane--text" aria-label="Text Content">
+        <header className="fmg-right__pane-header">
+          <h3>Text Content</h3>
+        </header>
+        <div className="fmg-right__pane-body">{contentColumn}</div>
+      </section>
+    </div>
+  );
+
   const columns: WorkbenchColumnSpec[] = [
     {
-      id: 'languages',
-      title: 'Languages/Containers/File List',
+      id: 'categories',
+      title: 'Text Categories',
       hint: catalog ? `${catalog.languages.length} languages` : '',
-      initialFlex: 0.24,
-      minWidth: 180,
-      children: treeColumn
-    },
-    {
-      id: 'entries',
-      title: 'Text Entries',
-      hint: `${entryCount} 条`,
-      initialFlex: 0.30,
+      initialWidth: 379,
       minWidth: 220,
-      children: entriesColumn
+      children: (
+        <div className="fmg-categories">
+          <div className="fmg-categories__tree">{treeColumn}</div>
+          <div className="fmg-categories__toolbar">{toolsColumn}</div>
+        </div>
+      )
     },
     {
-      id: 'content',
-      title: 'Text Content',
-      initialFlex: 0.30,
-      minWidth: 220,
-      children: contentColumn
-    },
-    {
-      id: 'tools',
-      title: 'Tools',
-      initialFlex: 0.16,
-      minWidth: 140,
-      children: toolsColumn
+      id: 'text',
+      title: 'Text',
+      children: rightPane
     }
   ];
 

@@ -39,6 +39,11 @@ import {
   dockWidthForResizeKey
 } from './AgentDockResizer.js';
 
+// node 环境没有 window，而 AgentSidebar 现在经 getRendererBridge()（读 window.soulforge）
+// 判定资源引用能力。设为空对象 → browser-preview 表面 → bridge null → 「添加资源
+// 引用」诚实 disabled；与 ParamWorkbench.test.tsx 等 SSR 测试同一范式。
+(globalThis as unknown as { window: Record<string, unknown> }).window = {};
+
 /** renderer 源码根,由测试入口在编译期注入(不能用 import.meta.url:打包后指向缓存目录)。 */
 declare const __SOULFORGE_RENDERER_ROOT__: string;
 
@@ -439,6 +444,19 @@ describe('§12.8/§12.11 上下文、资源引用与消息流（AGENT-60C）', (
     const html = render({ resources });
     assert.match(html, /PARAM · 文档/);
     assert.ok(!html.includes('agent-ref:opaque-token-value'), 'token 不应进入 DOM');
+  });
+
+  it('资源引用渲染移除入口，移除按钮的 label 不携带 token', () => {
+    const resources: AgentResourceReference[] = [{
+      token: 'agent-ref:remove-me-token',
+      domain: 'param',
+      label: 'PARAM · 文档',
+      expiresAt: '2026-01-01T00:00:00.000Z'
+    }];
+    const html = render({ resources });
+    const removeButton = /<button[^>]*aria-label="移除引用 PARAM · 文档"[^>]*>/.exec(html)?.[0];
+    assert.ok(removeButton, '资源引用必须提供移除入口（本地草稿可移除）');
+    assert.ok(!html.includes('agent-ref:remove-me-token'), '移除按钮不得把 token 带进 DOM');
   });
 
   it('未挂载真实回调时不渲染清除按钮，添加资源引用诚实 disabled', () => {

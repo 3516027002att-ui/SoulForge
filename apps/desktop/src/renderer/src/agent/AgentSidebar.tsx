@@ -1,4 +1,6 @@
 import {
+  useEffect,
+  useReducer,
   useRef,
   useState,
   type CSSProperties,
@@ -30,6 +32,12 @@ import { AgentConversationViewport } from './AgentConversationViewport.js';
 import { AgentComposer, type AgentInteractionMode } from './AgentComposer.js';
 import { AgentContextPicker } from './AgentContextPicker.js';
 import { AgentResourceReferencePicker } from './AgentResourceReferencePicker.js';
+import {
+  createInitialResourceReferenceDraft,
+  createResourceReferenceFlow,
+  reduceAgentResourceReferenceDraft
+} from './agentResourceReferences.js';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import {
   AgentSecondaryDrawer,
   type AgentSecondaryDrawerView
@@ -74,6 +82,12 @@ export interface AgentSidebarProps {
   onCreateResource?: (selection: EditorSelectionContext) => void;
   /** 移除一条资源引用。 */
   onRemoveResource?: (token: string) => void;
+  /**
+   * §12.11 资源引用草稿的变化通知（AGENT-60D 提交期消费点：App 在 runAgentTask
+   * 里把 resources 随 runAiAgent 提交，main 按 agentReferenceRegistry 校验）。
+   * 可选；不传则草稿仍是 AgentSidebar 内部私有态。
+   */
+  onResourcesChange?: (resources: readonly AgentResourceReference[]) => void;
   /** 清除当前 Agent 上下文。 */
   onClearContext?: () => void;
   tools: ToolDescriptor[];
@@ -167,6 +181,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     resources = [],
     onCreateResource,
     onRemoveResource,
+    onResourcesChange,
     onClearContext,
     tools,
     toolOutput,
@@ -188,6 +203,26 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
   const effectiveSelection = selection ?? legacySelectionFromProps(selectedFilePath, contextLabel);
   const [drawerView, setDrawerView] = useState<AgentSecondaryDrawerView | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  // §12.11 资源引用草稿：本地 state 持有已添加的 opaque 引用（props.resources 作
+  // 初始种子，兼容既有受控入口；App 尚未传 selection 时由 legacy 投影补齐）。
+  const [resourceDraft, dispatchResourceDraft] = useReducer(
+    reduceAgentResourceReferenceDraft,
+    resources,
+    createInitialResourceReferenceDraft
+  );
+  // AGENT-60D 提交期消费点：草稿变化时冒泡给 App（runAgentTask 把 resources 随
+  // runAiAgent 提交；main 按 agentReferenceRegistry 校验跨 sender）。不传回调时
+  // 草稿仍是面板内部私有态，既有行为不变。
+  useEffect(() => {
+    onResourcesChange?.(resourceDraft.resources);
+  }, [resourceDraft.resources, onResourcesChange]);
+  // renderer 不伪造 token、不提交路径：只把 §12.8 选区交给 main 的
+  // 'agent.resourceReference.create'（root 校验 + 白名单，token 不携带路径）。
+  const rendererBridge = getRendererBridge();
+  const bridgeCreateResourceReference = rendererBridge !== null
+    ? rendererBridge.createAgentResourceReference
+    : null;
+  const resourceCreateCapable = onCreateResource !== undefined || bridgeCreateResourceReference !== null;
   const taskSurfaceVisible = isTaskSurfaceVisible(busy, goal, draft, task);
   const taskState = task.task;
   const awaitingApproval = taskState.pendingApprovals.length > 0;
@@ -221,6 +256,35 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     const target = returnFocusRef.current;
     returnFocusRef.current = null;
     if (target !== null && document.contains(target)) window.setTimeout(() => target.focus(), 0);
+  }
+
+  /**
+   * §12.11 添加资源引用：把当前 §12.8 选区交给 main 签发 opaque token，成功后写进
+   * 草稿，失败显示诊断。外部 onCreateResource 存在时优先走外部（App 未来受控入口）；
+   * 缺省走内部 bridge 流程 —— renderer 不伪造 token、不提交路径。
+   */
+  function handleCreateResource(selection: EditorSelectionContext): void {
+    if (onCreateResource !== undefined) {
+      onCreateResource(selection);
+      return;
+    }
+    if (bridgeCreateResourceReference === null) {
+      dispatchResourceDraft({
+        type: 'create-failed',
+        message: '创建资源引用需要桌面桥接能力（Electron 桌面版）。'
+      });
+      return;
+    }
+    void createResourceReferenceFlow(bridgeCreateResourceReference, selection, dispatchResourceDraft);
+  }
+
+  /** 移除一条资源引用（外部回调优先，否则从本地草稿移除）。 */
+  function handleRemoveResource(token: string): void {
+    if (onRemoveResource !== undefined) {
+      onRemoveResource(token);
+      return;
+    }
+    dispatchResourceDraft({ type: 'remove', token });
   }
 
   /** 从任务态派生 §12.5 工具活动行（单行折叠）。 */
@@ -342,10 +406,12 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
           {...(onClearContext !== undefined ? { onClear: onClearContext } : {})}
         />
         <AgentResourceReferencePicker
-          resources={resources}
+          resources={resourceDraft.resources}
           selection={effectiveSelection}
-          {...(onCreateResource !== undefined ? { onCreate: onCreateResource } : {})}
-          {...(onRemoveResource !== undefined ? { onRemove: onRemoveResource } : {})}
+          creating={resourceDraft.creating}
+          error={resourceDraft.error}
+          {...(resourceCreateCapable ? { onCreate: handleCreateResource } : {})}
+          onRemove={handleRemoveResource}
         />
       </div>
 

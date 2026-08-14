@@ -9,7 +9,7 @@
  * 构建后的 renderer、真 contextBridge 语义，以及**与生产同形态的发送方校验**
  * （handleTrusted 包装器 + assertTrustedSender，见下）。
  *
- * 不真实的部分：main 侧业务逻辑整体是 fixture。本文件自己注册 48 个 channel，
+ * 不真实的部分：main 侧业务逻辑整体是 fixture。本文件自己注册 54 个 channel，
  * 生产 ipc.ts 有 56 个，且 registerIpcHandlers 从未被加载。因此以下**没有**被
  * e2e 覆盖，不得据本套件声称它们可用：
  *   - PARAM / EMEVD / 脚本容器 面板的读写与分页
@@ -841,6 +841,45 @@ function registerFixtureIpc() {
     };
   });
 
+  // TPF-55C：纹理替换写回（合成内存态，明确标记 synthetic）。
+  // textureIndex 越界拒绝；base64 仅验证非空透传（真实 C# 校验 dimensions/format/
+  // color-space/mipmap 与源一致，不匹配则 TPF_STAGING_WRITE_FAILED）。fixture 不
+  // 建模像素数据，替换只验证边界与链路，不做模拟解码。
+  handleTrusted('resource.saveTpfTextureReplace', (_event, sourceUri, expectedDocumentHash, textureIndex, textureDataBase64) => {
+    track('resource.saveTpfTextureReplace');
+    const container = fixtureTpfContainers[sourceUri];
+    if (!container) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'TPF_STAGING_WRITE_FAILED', message: 'fixture 未登记或损坏的 TPF：拒绝写入。', sourceUri }]
+      };
+    }
+    if (expectedDocumentHash !== container.sourceHash) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'TPF_STAGING_WRITE_FAILED', message: 'TPF source hash 不匹配（工作副本已漂移），拒绝写入。', sourceUri }]
+      };
+    }
+    const tex = container.textures.find((t) => t.index === textureIndex);
+    if (!tex) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'TPF_STAGING_WRITE_FAILED', message: `fixture TPF 纹理越界：textureIndex ${textureIndex}。`, sourceUri }]
+      };
+    }
+    if (typeof textureDataBase64 !== 'string' || textureDataBase64.length === 0) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'TPF_STAGING_WRITE_FAILED', message: 'fixture TPF 替换载荷为空：拒绝写入。', sourceUri }]
+      };
+    }
+    return {
+      ok: true, sourceUri,
+      changedFiles: [{ sourceUri, action: 'modify' }],
+      diagnostics: [{ severity: 'info', code: 'TPF_STAGING_WRITE_VERIFIED', message: 'fixture TPF 纹理替换已接受（合成）。', sourceUri }]
+    };
+  });
+
   handleTrusted('resource.readTpfTexturePreview', (_event, sourceUri, textureIndex) => {
     track('resource.readTpfTexturePreview');
     const container = fixtureTpfContainers[sourceUri];
@@ -936,6 +975,40 @@ function registerFixtureIpc() {
       };
     }
     return { ok: true, data: { ...doc }, diagnostics: [] };
+  });
+
+  // MATERIAL-53C：MTD typed property-set 写回（合成内存态，明确标记 synthetic）。
+  // 就地更新已登记属性（p1/p2 可写；p3 UnknownParam 是 unknown——production 侧
+  // unknown 不可写，fixture 同样拒绝）→ 重读即看到新值；未登记/unknown/漂移：
+  // 结构化失败，绝不静默成功。
+  handleTrusted('resource.commitMtdPropertySet', (_event, sourceUri, expectedDocumentHash, set) => {
+    track('resource.commitMtdPropertySet');
+    const doc = fixtureMtdDocs[sourceUri];
+    if (!doc) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'MTD_STAGING_WRITE_FAILED', message: 'fixture 未登记或损坏的 MTD：拒绝写入。', sourceUri }]
+      };
+    }
+    if (expectedDocumentHash !== doc.sourceHash) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'MTD_STAGING_WRITE_FAILED', message: 'MTD source hash 不匹配（工作副本已漂移），拒绝写入。', sourceUri }]
+      };
+    }
+    const prop = doc.properties.find((p) => p.id === set?.paramId);
+    if (!prop || prop.unknown) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'MTD_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: `fixture MTD 属性不可写：paramId ${set?.paramId}（未登记或 unknown）。`, sourceUri }]
+      };
+    }
+    prop.value = String(set.newValue ?? '');
+    return {
+      ok: true, sourceUri,
+      changedFiles: [{ sourceUri, action: 'modify' }],
+      diagnostics: [{ severity: 'info', code: 'MTD_STAGING_WRITE_VERIFIED', message: 'fixture MTD 属性已写入（合成）并重读验证。', sourceUri }]
+    };
   });
 
   // ── VFX-54B：VFX 工作台合成通道 ──────────────────────────────────────────
@@ -1057,6 +1130,80 @@ function registerFixtureIpc() {
     return { ok: true, data: { ...doc }, diagnostics: [] };
   });
 
+  // VFX-54C：FXR vfx-field-set 写回（合成内存态，明确标记 synthetic）。
+  // address 按 read 信封下标定位（host 收集序 / property 连续序 / section8 下标 /
+  // valueIndex）；越界、unknown host（typeId 7777）拒绝——镜像 C# fail-closed。
+  handleTrusted('resource.commitFxrFieldSet', (_event, sourceUri, expectedDocumentHash, mutations) => {
+    track('resource.commitFxrFieldSet');
+    const doc = fixtureFxrDocs[sourceUri];
+    if (!doc) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: 'fixture 未登记或损坏的 FXR：拒绝写入。', sourceUri }]
+      };
+    }
+    if (expectedDocumentHash !== doc.sourceHash) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: 'FXR source hash 不匹配（工作副本已漂移），拒绝写入。', sourceUri }]
+      };
+    }
+    for (const m of mutations ?? []) {
+      const addr = m.address;
+      if (!addr || m.mutation !== 'vfx-field-set') {
+        return {
+          ok: false, changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: 'fixture FXR mutation 形状非法。', sourceUri }]
+        };
+      }
+      const host = doc.fields.hosts[addr.hostIndex];
+      if (!host || host.typeId === 7777) {
+        return {
+          ok: false, changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: `fixture FXR host 不可写：hostIndex ${addr.hostIndex}（不存在或 unknown type）。`, sourceUri }]
+        };
+      }
+      if (addr.container === 'host') {
+        if (addr.valueIndex < 0 || addr.valueIndex >= host.values.length) {
+          return {
+            ok: false, changedFiles: [],
+            diagnostics: [{ severity: 'error', code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: `fixture FXR value 越界：host ${addr.hostIndex} valueIndex ${addr.valueIndex}。`, sourceUri }]
+          };
+        }
+        host.values[addr.valueIndex] = m.value;
+      } else if (addr.container === 'property') {
+        const prop = host.properties[addr.propertyIndex];
+        if (!prop || addr.valueIndex < 0 || addr.valueIndex >= prop.values.length) {
+          return {
+            ok: false, changedFiles: [],
+            diagnostics: [{ severity: 'error', code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: `fixture FXR property 越界：host ${addr.hostIndex} property ${addr.propertyIndex} value ${addr.valueIndex}。`, sourceUri }]
+          };
+        }
+        prop.values[addr.valueIndex] = m.value;
+      } else if (addr.container === 'section8') {
+        const prop = host.properties[addr.propertyIndex];
+        const sec8 = prop && prop.section8[addr.section8Index];
+        if (!prop || !sec8 || addr.valueIndex < 0 || addr.valueIndex >= sec8.values.length) {
+          return {
+            ok: false, changedFiles: [],
+            diagnostics: [{ severity: 'error', code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: `fixture FXR section8 越界：host ${addr.hostIndex} property ${addr.propertyIndex} sec8 ${addr.section8Index} value ${addr.valueIndex}。`, sourceUri }]
+          };
+        }
+        sec8.values[addr.valueIndex] = m.value;
+      } else {
+        return {
+          ok: false, changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'FXR_WRITE_BLOCKED_UNKNOWN_STRUCTURE', message: `fixture FXR 未知容器：${addr.container}。`, sourceUri }]
+        };
+      }
+    }
+    return {
+      ok: true, sourceUri,
+      changedFiles: [{ sourceUri, action: 'modify' }],
+      diagnostics: [{ severity: 'info', code: 'FXR_STAGING_WRITE_VERIFIED', message: 'fixture FXR 字段已写入（合成）并重读验证。', sourceUri }]
+    };
+  });
+
   // ── BEHAVIOR-55B：Behavior 工作台合成通道 ────────────────────────────────
   // 微小、合法构造、明确标记（AGENTS.md §15）。一个可读 ESD：2 个状态组 / 2 个条件
   // 样本 / 2 个命令调用，authority 'candidate'（闭合、无缺口），驱动
@@ -1142,6 +1289,48 @@ function registerFixtureIpc() {
     return { ok: true, data: { ...doc }, diagnostics: [] };
   });
 
+  // BEHAVIOR-55B：ESD 转移目标写回（合成内存态，明确标记 synthetic）。
+  // mutation 必须是 'set-transition-target'（C# EsdNativeWriter.ParseMutation 只接受
+  // set-transition-target / insert-transition / set-command-arg）；按 conditionRelOffset
+  // 命中 conditionSamples 就地更新 targetStateRelOffset。
+  handleTrusted('resource.commitEsdTransition', (_event, sourceUri, expectedDocumentHash, mutations) => {
+    track('resource.commitEsdTransition');
+    const doc = fixtureEsdDocs[sourceUri];
+    if (!doc) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'ESD_STAGING_WRITE_FAILED', message: 'fixture 未登记或损坏的 ESD：拒绝写入。', sourceUri }]
+      };
+    }
+    if (expectedDocumentHash !== doc.sourceHash) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'ESD_STAGING_WRITE_FAILED', message: 'ESD source hash 不匹配（工作副本已漂移），拒绝写入。', sourceUri }]
+      };
+    }
+    for (const m of mutations ?? []) {
+      if (m.mutation !== 'set-transition-target' || typeof m.conditionRelOffset !== 'number') {
+        return {
+          ok: false, changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'ESD_STAGING_WRITE_FAILED', message: 'fixture ESD mutation 形状非法。', sourceUri }]
+        };
+      }
+      const cond = doc.conditionSamples.find((c) => c.conditionRelOffset === m.conditionRelOffset);
+      if (!cond) {
+        return {
+          ok: false, changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'ESD_STAGING_WRITE_FAILED', message: `fixture ESD 条件不存在：conditionRelOffset ${m.conditionRelOffset}。`, sourceUri }]
+        };
+      }
+      cond.targetStateRelOffset = m.targetStateRelOffset;
+    }
+    return {
+      ok: true, sourceUri,
+      changedFiles: [{ sourceUri, action: 'modify' }],
+      diagnostics: [{ severity: 'info', code: 'ESD_STAGING_WRITE_VERIFIED', message: 'fixture ESD 转移目标已写入（合成）并重读验证。', sourceUri }]
+    };
+  });
+
   // ── ANIMATION-56B：Animation 工作台合成通道 ──────────────────────────────
   // 微小、合法构造、明确标记（AGENTS.md §15）。一个可读 TAE：2 个动画 / 3 个时间轴
   // 事件 / 3 种事件类型，authority 'candidate'，驱动 animation → timeline 选择链断言。
@@ -1196,6 +1385,68 @@ function registerFixtureIpc() {
       };
     }
     return { ok: true, data: { ...doc }, diagnostics: [] };
+  });
+
+  // ANIMATION-56B：TAE 事件时间/新增写回（合成内存态，明确标记 synthetic）。
+  // update-event-times 按 animId + eventIndex 命中 events 就地更新 startTime/endTime；
+  // insert-event 以 templateEventIndex 为模板，eventTypeId 必须一致（C# fail-closed），
+  // 插入到模板后。参数体未建模，insert 只登记位置与类型。
+  handleTrusted('resource.commitTaeEvent', (_event, sourceUri, expectedDocumentHash, mutations) => {
+    track('resource.commitTaeEvent');
+    const doc = fixtureTaeDocs[sourceUri];
+    if (!doc) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'TAE_STAGING_WRITE_FAILED', message: 'fixture 未登记或损坏的 TAE：拒绝写入。', sourceUri }]
+      };
+    }
+    if (expectedDocumentHash !== doc.sourceHash) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'TAE_STAGING_WRITE_FAILED', message: 'TAE source hash 不匹配（工作副本已漂移），拒绝写入。', sourceUri }]
+      };
+    }
+    for (const m of mutations ?? []) {
+      const anim = doc.animations.find((a) => a.animId === m.animId);
+      if (!anim) {
+        return {
+          ok: false, changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'TAE_STAGING_WRITE_FAILED', message: `fixture TAE 动画不存在：animId ${m.animId}。`, sourceUri }]
+        };
+      }
+      if (m.mutation === 'update-event-times') {
+        const ev = anim.events[m.eventIndex];
+        if (!ev) {
+          return {
+            ok: false, changedFiles: [],
+            diagnostics: [{ severity: 'error', code: 'TAE_STAGING_WRITE_FAILED', message: `fixture TAE 事件越界：anim ${m.animId} eventIndex ${m.eventIndex}。`, sourceUri }]
+          };
+        }
+        ev.startTime = m.startTime;
+        ev.endTime = m.endTime;
+      } else if (m.mutation === 'insert-event') {
+        const template = anim.events[m.templateEventIndex];
+        if (!template || template.eventTypeId !== m.eventTypeId) {
+          return {
+            ok: false, changedFiles: [],
+            diagnostics: [{ severity: 'error', code: 'TAE_STAGING_WRITE_FAILED', message: `fixture TAE 模板不一致：anim ${m.animId} templateIndex ${m.templateEventIndex}。`, sourceUri }]
+          };
+        }
+        anim.events.splice(m.templateEventIndex + 1, 0, {
+          startTime: m.startTime, endTime: m.endTime, eventTypeId: m.eventTypeId
+        });
+      } else {
+        return {
+          ok: false, changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'TAE_STAGING_WRITE_FAILED', message: 'fixture TAE mutation 形状非法。', sourceUri }]
+        };
+      }
+    }
+    return {
+      ok: true, sourceUri,
+      changedFiles: [{ sourceUri, action: 'modify' }],
+      diagnostics: [{ severity: 'info', code: 'TAE_STAGING_WRITE_VERIFIED', message: 'fixture TAE 事件已写入（合成）并重读验证。', sourceUri }]
+    };
   });
 
   // ── EVENT-30B：DarkScript3 式事件源码工作台合成通道 ──────────────────
@@ -1523,6 +1774,34 @@ function registerFixtureIpc() {
     ];
   });
 
+  // AGENT-60C：资源引用签发（opaque token，合成内存态）。
+  // 与生产同形态：preload 传 { selection } 包裹，main 解 selection 后做安全校验。
+  // fixture 只镜像路径形式白名单——files 域 + 相对路径；绝对路径 / raw parser /
+  // Hex dump 域拒绝（生产是 selectionRendererSafetyIssues）。token 不携带路径。
+  handleTrusted('agent.resourceReference.create', (_event, request) => {
+    track('agent.resourceReference.create');
+    const selection = request && typeof request === 'object' ? request.selection : undefined;
+    if (!selection || typeof selection !== 'object' || selection.domain !== 'files') {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: '资源引用只支持 files 域选区。' } };
+    }
+    const documentId = selection.documentId;
+    if (typeof documentId !== 'string' || documentId.trim() === '') {
+      return { ok: false, error: { code: 'AGENT_SELECTION_UNSAFE', message: '缺少文档路径，无法签发资源引用。' } };
+    }
+    if (documentId.startsWith('/') || documentId.startsWith('\\\\') || /^[a-zA-Z]:/.test(documentId)) {
+      return { ok: false, error: { code: 'AGENT_SELECTION_UNSAFE', message: '资源引用拒绝绝对路径。' } };
+    }
+    return {
+      ok: true,
+      reference: {
+        token: `agent-ref:fixture:${documentId}`,
+        domain: 'files',
+        label: `fixture 资源引用：${documentId}`,
+        expiresAt: 4102444800000
+      }
+    };
+  });
+
   /* ── AI agent 会话（合成，不调用任何模型）─────────────────────────────────
      这里**不跑真实模型**，只驱动 renderer 的推送折叠与取消链路：run 受理后按
      计时器推 turn-started / tool-call / delta，cancel 停掉计时器并推终态。
@@ -1755,7 +2034,7 @@ function registerFixtureIpc() {
     };
   });
 
-  // TEXT-20B：四栏文本工作台走目录链。fixture 只登记一个 msgbnd 容器（zhocn
+  // TEXT-20B：§9.1 文本工作台走目录链。fixture 只登记一个 msgbnd 容器（zhocn
   // 语言），含两张表：item.fmg 挂 fixture.fmg.entries（写入后重读即见新文本），
   // menu.fmg 是真空表（0 条，用于「真空表 ≠ 失败」断言）。与生产 main 的
   // readTextCatalog / readFmgTablePage 同语义：typed tableId 定位，条目由 main

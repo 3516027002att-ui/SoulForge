@@ -15,12 +15,14 @@
  * 文件（.mtd 包文件）→ 材质（单文件 = 单材质定义）→ 属性/值（右侧展示选中材质的
  * 属性行）。无 3D viewport（§2.5：MATERIAL 无 viewport，不要发明 Preview 第四栏）。
  *
- * ── unknown property 可见但不可编辑 ──
+ * ── known 可编辑、unknown 可见但不可编辑（MATERIAL-53C）──
  *
- * param 元素上的未识别属性由 C# 原样保留在 MaterialPropertyWire.unknown 里，同时进
- * unparsedGaps 并降 partial。本卡是只读工作台（MATERIAL-53C 才接写回），unknown
- * 属性必须**可见**（渲染为只读值行，不能丢弃），且**不可编辑**（本卡不渲染任何
- * 写控件/输入框）。
+ * 53C 接线 typed 属性写回：known（非 unknown）属性行渲染为输入框，blur/Enter 提交，
+ * 经 resource.commitMtdPropertySet（write-mtd-document）落盘——只有 typed paramId
+ * 定位才有写入口，没有通用 XML 文本替换 fallback。param 元素上的未识别属性由 C#
+ * 原样保留在 MaterialPropertyWire.unknown 里，同时进 unparsedGaps 并降 partial；
+ * unknown 属性必须**可见**（渲染为只读值行，不能丢弃）且**不可编辑**（unknown
+ * 分支不渲染任何写控件/输入框）。
  *
  * ── partial 不能伪装成完整解析 ──
  *
@@ -30,7 +32,8 @@
  * ── 失败 ──
  *
  * 读取失败的文件保留在列表并标记失败，Material list 栏给出结构化诊断，不能把 read
- * failure 显示成空包。
+ * failure 显示成空包。属性写回失败显示结构化诊断（severity/code/message）与回滚
+ * 提示，保留已读内容与用户输入，不静默丢弃（局部失败不清空）。
  */
 
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
@@ -88,7 +91,7 @@ export interface MaterialPropertyRow {
   value: string;
   /** 属性 value 的声明类型（param type 属性），可能缺失。 */
   type?: string;
-  /** 未识别属性行：可见但不可编辑（本卡无 writer）。 */
+  /** 未识别属性行：可见但不可编辑（unknown 分支不渲染输入框，保留只读标注）。 */
   unknown?: boolean;
 }
 
@@ -116,6 +119,51 @@ export function materialPropertyRows(properties: MaterialPropertyWire[]): Materi
   return rows;
 }
 
+/** MTD 属性写回的 typed set 载荷：paramId + newValue。
+ *  sourceUri/sourceHash 由调用点拼接（commitMtdPropertySet(selectedUri,
+ *  document.sourceHash, set)），并发保护依赖 read 时的 sourceHash 未漂移。 */
+export function mtdPropertySetPayload(rowId: string, newValue: string): { paramId: string; newValue: string } {
+  return { paramId: rowId, newValue };
+}
+
+/** commit 结果的 renderer 侧窄视图：只读 ok 与 diagnostics。 */
+export interface MtdPropertyCommitResult {
+  ok?: boolean;
+  diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
+}
+
+export interface MtdPropertyCommitDiagnostic {
+  severity?: string;
+  code: string;
+  message: string;
+}
+
+/** commit 失败 → 第一条诊断；ok → null。无诊断给 fail-closed 默认值，不吞失败。 */
+export function mtdPropertyCommitError(result: MtdPropertyCommitResult): MtdPropertyCommitDiagnostic | null {
+  if (result.ok) return null;
+  const first = result.diagnostics?.[0];
+  return {
+    ...(first?.severity ? { severity: first.severity } : {}),
+    code: first?.code ?? 'MTD_COMMIT_FAILED',
+    message: first?.message ?? 'MTD 写入被拒绝。'
+  };
+}
+
+export interface MtdCommitApplied {
+  notice: string | null;
+  error: MtdPropertyCommitDiagnostic | null;
+  /** ok 时 true：组件应触发重读并清空该行 draft。 */
+  refresh: boolean;
+}
+
+/** 把 commit 结果归约成 UI 状态迁移（纯逻辑，可测）。失败不触发重读、不丢内容。 */
+export function reduceMtdCommitResult(result: MtdPropertyCommitResult, label: string): MtdCommitApplied {
+  if (result.ok) {
+    return { notice: `已保存 ${label} 并重读验证。`, error: null, refresh: true };
+  }
+  return { notice: null, error: mtdPropertyCommitError(result), refresh: false };
+}
+
 export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): ReactElement {
   const bridge = getRendererBridge();
 
@@ -126,6 +174,17 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
   const [readFailure, setReadFailure] = useState<{ code: string; message: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [selection, setSelection] = useState<MaterialSelection | null>(null);
+
+  /** 每行当前编辑值（rowId → 输入文本）；未编辑时回退到行投影值。 */
+  const [drafts, setDrafts] = useState<Map<string, string>>(new Map());
+  /** 正在提交的属性行 id；非 null 期间禁用重复提交。 */
+  const [committingId, setCommittingId] = useState<string | null>(null);
+  /** 最近一次属性写回的失败诊断（成功时清空）。 */
+  const [commitError, setCommitError] = useState<MtdPropertyCommitDiagnostic | null>(null);
+  /** 最近一次属性写回的成功提示。 */
+  const [commitNotice, setCommitNotice] = useState<string | null>(null);
+  /** 提交成功后强制重读（read effect 的 deps 触发器）。 */
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // ── 读取选中文件 ──
   useEffect(() => {
@@ -168,11 +227,14 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [bridge, selectedUri]);
+  }, [bridge, selectedUri, refreshKey]);
 
-  // 新文件 → 选中态回到材质本身。
+  // 新文件 → 选中态回到材质本身，编辑草稿与提交状态一并清空（避免跨文件漂移）。
   useEffect(() => {
     setSelection(null);
+    setDrafts(new Map());
+    setCommitError(null);
+    setCommitNotice(null);
   }, [selectedUri]);
 
   const pages = useMemo(
@@ -225,6 +287,42 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
 
   function selectTextureRef(index: number, label: string): void {
     setSelection({ kind: 'texture', label, textureIndex: index });
+  }
+
+  /** 单行 known 属性写回：blur/Enter 触发。typed set 载荷只含 paramId + newValue，
+   *  sourceUri/sourceHash 用 read 时选定拼接，哈希漂移由 main 侧并发保护拒绝。
+   *  提交期间 committingId 非 null，禁止重复提交。 */
+  function commitProperty(row: MaterialPropertyRow): void {
+    if (!bridge || typeof bridge.commitMtdPropertySet !== 'function') return;
+    if (selectedUri === null || document === null) return;
+    if (row.unknown || committingId !== null) return;
+    const newValue = drafts.get(row.id) ?? row.value;
+    setCommittingId(row.id);
+    setCommitError(null);
+    setCommitNotice(null);
+    bridge.commitMtdPropertySet(selectedUri, document.sourceHash, mtdPropertySetPayload(row.id, newValue))
+      .then((raw) => {
+        const applied = reduceMtdCommitResult(raw as MtdPropertyCommitResult, row.name);
+        if (applied.error) setCommitError(applied.error);
+        if (applied.notice) setCommitNotice(applied.notice);
+        if (applied.refresh) {
+          setDrafts((current) => {
+            const next = new Map(current);
+            next.delete(row.id);
+            return next;
+          });
+          setRefreshKey((key) => key + 1);
+        }
+      })
+      .catch((caught: unknown) => {
+        setCommitError({
+          code: 'MTD_COMMIT_EXCEPTION',
+          message: caught instanceof Error ? caught.message : 'MTD 写入异常。'
+        });
+      })
+      .finally(() => {
+        setCommittingId(null);
+      });
   }
 
   /** Inspector 栏内容：材质 → 属性行；纹理引用 → 该引用元数据。 */
@@ -370,12 +468,28 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
                             {row.type ? <span className="wb-prop__enum"> · {row.type}</span> : null}
                           </span>
                         );
-                        const valueCell = (
-                          <span className={row.unknown
-                            ? 'wb-prop__value wb-prop__value--readonly mtd-unknown-value'
-                            : 'wb-prop__value wb-prop__value--readonly'}
-                          >
+                        const valueCell = row.unknown ? (
+                          <span className="wb-prop__value wb-prop__value--readonly mtd-unknown-value">
                             {row.value}
+                          </span>
+                        ) : (
+                          <span className="wb-prop__value">
+                            <input
+                              type="text"
+                              aria-label={`${row.name} 值`}
+                              value={drafts.get(row.id) ?? row.value}
+                              disabled={committingId === row.id}
+                              onChange={(event) => {
+                                const next = new Map(drafts);
+                                next.set(row.id, event.target.value);
+                                setDrafts(next);
+                                setCommitNotice(null);
+                              }}
+                              onBlur={() => commitProperty(row)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') event.currentTarget.blur();
+                              }}
+                            />
                           </span>
                         );
                         return row.unknown ? (
@@ -408,9 +522,20 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
                     </details>
                   )}
                   <div className="wb-list__group-label">写回</div>
-                  <p className="wb-empty">
-                    MTD 写回链尚未接通（MATERIAL-53C），当前没有属性编辑入口；未识别属性保留且只读。
-                  </p>
+                  {commitNotice && (
+                    <p className="muted" data-testid="mtd-commit-success">{commitNotice}</p>
+                  )}
+                  {commitError && (
+                    <p className="wb-empty diag-error" data-testid="mtd-commit-error">
+                      [{commitError.severity ?? 'error'}] {commitError.code}: {commitError.message}
+                      {' · '}写入失败已回滚，当前内容未清除。
+                    </p>
+                  )}
+                  {!commitNotice && !commitError && (
+                    <p className="wb-empty">
+                      修改 known 属性值后按 Enter 或移开焦点提交；unknown 属性保留且只读。
+                    </p>
+                  )}
                 </>
               )}
             </div>

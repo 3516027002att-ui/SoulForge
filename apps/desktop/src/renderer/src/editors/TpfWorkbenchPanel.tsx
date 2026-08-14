@@ -22,11 +22,15 @@
  * （preview failure isolation）——不能把「某张纹理预览读不出来」显示成
  * 「这个包没有纹理」，也不能让一次预览失败把用户从列表里弹出来。
  *
- * ── writer 未就绪，隐藏 replace ──
+ * ── writer 就绪后接 replace（TEXTURE-52C）──
  *
- * TEXTURE-52C 才接 tpf-texture-replace。本卡不渲染任何 replace 控件，
- * Properties 栏只给诚实说明 —— 不做假按钮占位（与 GPARAM-11B 的
- * 「没有 bytes replace fallback」同口径）。
+ * tpf-texture-replace 已封存。选中纹理的 Properties 栏「写回」区渲染
+ * replace 入口：从工作区索引选一个 DDS 源文件（searchResources 列源 +
+ * readRawRange 读完整文件字节成 base64），提交走
+ * bridge.saveTpfTextureReplace(sourceUri, document.sourceHash, textureIndex,
+ * newTextureBase64)。源 DDS 与目标纹理的 dimensions/format/color-space/
+ * mipmap 必须一致，validate 在 native 层失败关闭并回滚（TPF_STAGING_WRITE_FAILED），
+ * 面板显示 diagnostics、保留纹理列表、触发重读。
  *
  * ── 失败 ──
  *
@@ -104,8 +108,70 @@ interface TpfTexturePreviewView {
   previewToken: string;
 }
 
+/** 工作区索引里可作 replace 源的 DDS 文件（searchResources 投影）。 */
+export interface TpfDdsSourceView {
+  sourceUri: string;
+  relativePath: string;
+  size: number;
+}
+
+/** replace 提交结果（saveTpfTextureReplace 的 renderer 侧投影）。 */
+export interface TpfReplaceResultView {
+  ok: boolean;
+  message: string;
+}
+
 function formatBytes(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+/**
+ * 从工作区索引投影 DDS 源文件。TEXTURE-52C 的 replace 源字节来自工作区里已存在
+ * 的 DDS 文件（renderer 无文件系统权限，也没有文件对话框 IPC；禁止为此新增
+ * preload 方法）。按 .dds 后缀过滤，与 textureContainers 的容器过滤同一口径，
+ * 并给出稳定排序。纯函数，不做任何 I/O。
+ */
+export function filterTpfDdsSources(
+  files: Array<{ sourceUri: string; relativePath: string; size?: number }>
+): TpfDdsSourceView[] {
+  return files
+    .filter((file) => /\.dds$/i.test(file.relativePath))
+    .map((file) => ({
+      sourceUri: file.sourceUri,
+      relativePath: file.relativePath,
+      size: file.size ?? 0
+    }))
+    .sort((a, b) => a.relativePath.toLowerCase().localeCompare(b.relativePath.toLowerCase()));
+}
+
+/**
+ * 提交一次 TPF 纹理替换：把完整 DDS 字节（base64）交给 saveTpfTextureReplace。
+ * main 侧经 Patch/reopen/rollback 提交，C# writer 校验 dimensions/format/
+ * color-space/mipmap 一致，不一致时失败关闭并回滚。本函数只做参数透传与结果
+ * 投影，纯逻辑、不触达 React 状态，便于 renderer-unit 直接断言参数与分支。
+ */
+export async function submitTpfTextureReplace(args: {
+  save: (
+    sourceUri: string,
+    expectedHash: string,
+    textureIndex: number,
+    newTextureBase64: string
+  ) => Promise<unknown>;
+  sourceUri: string;
+  expectedHash: string;
+  textureIndex: number;
+  newTextureBase64: string;
+}): Promise<TpfReplaceResultView> {
+  const raw = await args.save(args.sourceUri, args.expectedHash, args.textureIndex, args.newTextureBase64);
+  const result = raw as { ok?: boolean; diagnostics?: Array<{ code?: string; message?: string }> };
+  if (result.ok) {
+    return { ok: true, message: '纹理已替换，工作台已重新读取。' };
+  }
+  const first = result.diagnostics?.[0];
+  return {
+    ok: false,
+    message: first?.message ?? '纹理替换失败。'
+  };
 }
 
 export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
@@ -123,15 +189,32 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
   const [previewFailure, setPreviewFailure] = useState<{ code: string; message: string } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
+  // ── TEXTURE-52C：replace 源与提交状态 ──
+  /** 工作区索引里的 DDS 源文件（replace 源字节的唯一合法来源）。 */
+  const [ddsSources, setDdsSources] = useState<TpfDdsSourceView[]>([]);
+  const [ddsSourcesError, setDdsSourcesError] = useState<string | null>(null);
+  /** 下拉选中的源文件；null 表示未选。 */
+  const [replaceSourceUri, setReplaceSourceUri] = useState<string | null>(null);
+  /** 已读到的源文件完整字节（base64）；null 表示未选/读取中/读取失败。 */
+  const [replaceSourceBase64, setReplaceSourceBase64] = useState<string | null>(null);
+  const [replaceSourceError, setReplaceSourceError] = useState<string | null>(null);
+  const [replaceReading, setReplaceReading] = useState(false);
+  const [replaceSubmitting, setReplaceSubmitting] = useState(false);
+  const [replaceResult, setReplaceResult] = useState<TpfReplaceResultView | null>(null);
+  /** 递增触发 document/preview 重读（替换成功后置位）。 */
+  const [refreshToken, setRefreshToken] = useState(0);
+
   // ── 选择链：container → texture ──
   useEffect(() => {
     setSelectedTextureIndex(null);
     setPreview(null);
     setPreviewFailure(null);
+    setReplaceResult(null);
   }, [selectedContainerUri]);
   useEffect(() => {
     setPreview(null);
     setPreviewFailure(null);
+    setReplaceResult(null);
   }, [selectedTextureIndex]);
 
   // ── 读取选中 container ──
@@ -187,7 +270,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [bridge, selectedContainerUri]);
+  }, [bridge, selectedContainerUri, refreshToken]);
 
   // ── 读取选中纹理的预览 ──
   useEffect(() => {
@@ -227,7 +310,66 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
         setPreviewLoading(false);
       });
     return () => { cancelled = true; };
-  }, [bridge, selectedContainerUri, selectedTextureIndex]);
+  }, [bridge, selectedContainerUri, selectedTextureIndex, refreshToken]);
+
+  // ── TEXTURE-52C：工作区 DDS 源列表（replace 源选择的数据源）──
+  useEffect(() => {
+    if (!bridge || typeof bridge.searchResources !== 'function') return;
+    let cancelled = false;
+    bridge.searchResources('.dds')
+      .then((raw) => {
+        if (cancelled) return;
+        const files = Array.isArray(raw) ? raw : [];
+        setDdsSources(filterTpfDdsSources(files as Array<{ sourceUri: string; relativePath: string; size?: number }>));
+        if (files.length === 0) {
+          setDdsSourcesError('工作区索引里没有 DDS 文件，暂无可选的替换源。');
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDdsSourcesError('无法读取工作区 DDS 源列表。');
+      });
+    return () => { cancelled = true; };
+  }, [bridge]);
+
+  // ── TEXTURE-52C：选中源后读完整 DDS 字节（readRawRange → base64）──
+  useEffect(() => {
+    if (!bridge || typeof bridge.readRawRange !== 'function') return;
+    if (replaceSourceUri === null) {
+      setReplaceSourceBase64(null);
+      setReplaceSourceError(null);
+      return;
+    }
+    const source = ddsSources.find((item) => item.sourceUri === replaceSourceUri);
+    if (!source) return;
+    let cancelled = false;
+    setReplaceReading(true);
+    setReplaceSourceError(null);
+    bridge.readRawRange(replaceSourceUri, 0, source.size)
+      .then((raw) => {
+        if (cancelled) return;
+        const result = raw as {
+          ok?: boolean;
+          base64?: string;
+          diagnostics?: Array<{ code?: string; message?: string }>;
+        };
+        if (result.ok && typeof result.base64 === 'string') {
+          setReplaceSourceBase64(result.base64);
+        } else {
+          setReplaceSourceBase64(null);
+          const first = result.diagnostics?.[0];
+          setReplaceSourceError(first?.message ?? '读取替换源失败。');
+        }
+        setReplaceReading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setReplaceSourceBase64(null);
+        setReplaceSourceError(error instanceof Error ? error.message : '读取替换源异常。');
+        setReplaceReading(false);
+      });
+    return () => { cancelled = true; };
+  }, [bridge, replaceSourceUri, ddsSources]);
 
   // ── 本地分页（Textures 可能有数百条）──
   const [texturePage, setTexturePage] = useState(0);
@@ -243,6 +385,50 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
   );
 
   const containerError = selectedContainerUri ? containerFailures.get(selectedContainerUri) : undefined;
+
+  // ── TEXTURE-52C：提交替换（经 submitTpfTextureReplace 纯逻辑）──
+  const selectedReplaceSource = replaceSourceUri
+    ? ddsSources.find((item) => item.sourceUri === replaceSourceUri) ?? null
+    : null;
+  const canReplace = document !== null
+    && selectedTextureIndex !== null
+    && replaceSourceBase64 !== null
+    && !replaceReading
+    && !replaceSubmitting;
+  const handleReplace = useCallback(async () => {
+    if (!bridge || typeof bridge.saveTpfTextureReplace !== 'function') return;
+    // 提交期间防重复：正在提交时直接忽略新的触发（按钮同时 disabled）。
+    if (replaceSubmitting) return;
+    if (document === null || selectedContainerUri === null || selectedTextureIndex === null) return;
+    if (replaceSourceBase64 === null) return;
+    setReplaceSubmitting(true);
+    setReplaceResult(null);
+    try {
+      const outcome = await submitTpfTextureReplace({
+        save: (sourceUri, expectedHash, textureIndex, newTextureBase64) =>
+          bridge.saveTpfTextureReplace(sourceUri, expectedHash, textureIndex, newTextureBase64),
+        sourceUri: selectedContainerUri,
+        expectedHash: document.sourceHash,
+        textureIndex: selectedTextureIndex,
+        newTextureBase64: replaceSourceBase64
+      });
+      if (outcome.ok) {
+        setReplaceResult({ ok: true, message: outcome.message });
+        // 替换成功 → 递增 refreshToken，触发 document 与 preview 重读。
+        setRefreshToken((token) => token + 1);
+      } else {
+        setReplaceResult({ ok: false, message: outcome.message });
+      }
+    } catch (error) {
+      // IPC 异常也必须落回可操作状态：清掉提交中标志并给出结构化诊断。
+      setReplaceResult({
+        ok: false,
+        message: error instanceof Error ? error.message : '纹理替换异常。'
+      });
+    } finally {
+      setReplaceSubmitting(false);
+    }
+  }, [bridge, document, selectedContainerUri, selectedTextureIndex, replaceSourceBase64, replaceSubmitting]);
 
   // 截断说明：全量纹理数 vs 本页显示数。分页与截断是两层——这里只报
   // 「还有多少没显示」，静默截断会让用户把部分数据当成全部。
@@ -399,8 +585,50 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
                 ))}
               </div>
               <div className="wb-list__group-label">写回</div>
-              {/* writer 未就绪时隐藏 replace：不渲染任何替换控件，只给诚实说明。 */}
-              <p className="wb-empty">纹理写回链尚未接通（TEXTURE-52C），当前没有 replace 入口。</p>
+              {/* TEXTURE-52C：replace 入口。源字节来自工作区索引里的 DDS 文件
+                  （searchResources → readRawRange），禁止文件对话框/新增 IPC。 */}
+              <div className="tpf-replace">
+                <label className="tpf-replace__label" htmlFor="tpf-replace-source">
+                  替换源（DDS）
+                </label>
+                <select
+                  id="tpf-replace-source"
+                  className="tpf-replace__select"
+                  value={replaceSourceUri ?? ''}
+                  disabled={ddsSources.length === 0 || replaceSubmitting}
+                  onChange={(event) => setReplaceSourceUri(event.target.value || null)}
+                >
+                  <option value="">选择 DDS 源…</option>
+                  {ddsSources.map((source) => (
+                    <option key={source.sourceUri} value={source.sourceUri}>
+                      {source.relativePath}
+                    </option>
+                  ))}
+                </select>
+                {ddsSourcesError && <p className="wb-empty diag-error">{ddsSourcesError}</p>}
+                {replaceReading && <p className="wb-empty">读取源字节中…</p>}
+                {replaceSourceError && <p className="wb-empty diag-error">{replaceSourceError}</p>}
+                {!replaceReading && selectedReplaceSource && replaceSourceBase64 !== null && (
+                  <p className="wb-empty muted">源字节就绪 · {formatBytes(selectedReplaceSource.size)}</p>
+                )}
+                <button
+                  type="button"
+                  className="btn btn--sm btn--primary tpf-replace__submit"
+                  disabled={!canReplace}
+                  onClick={() => { void handleReplace(); }}
+                >
+                  {replaceSubmitting ? '替换中…' : '替换选中纹理'}
+                </button>
+                {replaceResult && (
+                  <p
+                    className={replaceResult.ok ? 'wb-empty tpf-replace__ok' : 'wb-empty diag-error tpf-replace__failed'}
+                    data-testid={replaceResult.ok ? 'tpf-replace-success' : 'tpf-replace-failure'}
+                  >
+                    {replaceResult.message}
+                    {!replaceResult.ok ? ' 写入已中止并回滚，纹理列表保留。' : ''}
+                  </p>
+                )}
+              </div>
             </>
           )}
         </div>

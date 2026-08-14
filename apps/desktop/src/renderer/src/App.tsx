@@ -14,6 +14,7 @@ import {
   isDeferredPreviewEditorKind
 } from '@soulforge/shared';
 import type {
+  AgentResourceReference,
   Diagnostic,
   MsbMapEventLike,
   MsbModelLike,
@@ -86,7 +87,6 @@ import type { ResourceMode } from './navigation/resourceFamilies.js';
 import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
 import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation.js';
 import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
-import { WorkspaceResourceBar } from './navigation/WorkspaceResourceBar.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
@@ -280,7 +280,9 @@ export function App(): ReactElement {
   const [files, setFiles] = useState<RendererIndexedFile[]>([]);
   const [allFiles, setAllFiles] = useState<RendererIndexedFile[]>([]);
   const [activeDomain, setActiveDomain] = useState<EditorDomainId>('project');
-  const [resourceMode, setResourceMode] = useState<ResourceMode>('all');
+  // §16 #4：资源族过滤条已从 production shell 断开，物理浏览只留 Files。
+  // resourceMode 冻结为常量 'all' —— 唯一写它的 onSelect（资源条）已移除。
+  const resourceMode: ResourceMode = 'all';
   const [centerView, setCenterView] = useState<CenterView>('resource');
   const [bnd4Forced, setBnd4Forced] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>('explorer');
@@ -289,6 +291,9 @@ export function App(): ReactElement {
   const [agentExpanded, setAgentExpanded] = useState(false);
   const [agentOverlay, setAgentOverlay] = useState(false);
   const [agentInteractionMode, setAgentInteractionMode] = useState<'ask' | 'plan' | 'edit'>('ask');
+  // AGENT-60D 提交期消费点：AgentSidebar 草稿里 §12.11 的 opaque 资源引用冒泡到
+  // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
+  const [agentResources, setAgentResources] = useState<readonly AgentResourceReference[]>([]);
   const [status, setStatus] = useState('就绪');
   /**
    * EVENT-30B：最近一次打开/刷新的 EMEVD 逻辑文档标签（有界 DSL 投影 + 派生
@@ -801,7 +806,7 @@ export function App(): ReactElement {
     () => activeDomain === 'files'
       ? filterFilesForMode(allFiles.length > 0 ? allFiles : files, resourceMode, query)
       : [],
-    [activeDomain, resourceMode, query, allFiles, files]
+    [activeDomain, query, resourceMode, allFiles, files]
   );
 
   /**
@@ -820,7 +825,7 @@ export function App(): ReactElement {
   const clampedFilePage = Math.min(filePage, filePageCount - 1);
   useEffect(() => {
     setFilePage(0);
-  }, [activeDomain, resourceMode, query, allFiles, files]);
+  }, [activeDomain, query, resourceMode, allFiles, files]);
   const pagedFiles = useMemo(
     () => physicalBrowseFiles.slice(
       clampedFilePage * FILE_LIST_PAGE_SIZE,
@@ -1703,7 +1708,6 @@ export function App(): ReactElement {
       setAllFiles(result.files);
       setFiles(result.files);
       setActiveDomain('project');
-      setResourceMode('all');
       setCenterView('project');
       setSidebarView('explorer');
       setSelectedFile(null);
@@ -1814,7 +1818,6 @@ export function App(): ReactElement {
     setAllFiles(result);
     setFiles(result);
     setActiveDomain('files');
-    setResourceMode('all');
     setCenterView('resource');
     setStatus(`搜索返回 ${result.length} 个文件`);
   }
@@ -1847,7 +1850,6 @@ export function App(): ReactElement {
     setPreview(null);
     setCenterView('resource');
     if (domain === 'files') {
-      setResourceMode('all');
       setStatus('文件：物理浏览');
       return;
     }
@@ -2154,7 +2156,10 @@ export function App(): ReactElement {
     const result = await bridge.runAiAgent({
       configId: agentServiceId,
       prompt,
-      ...(resumeSessionPath !== undefined ? { resumeSessionPath } : {})
+      ...(resumeSessionPath !== undefined ? { resumeSessionPath } : {}),
+      // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
+      // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
+      ...(agentResources.length > 0 ? { resources: agentResources } : {})
     });
     if (!result.ok) {
       setAgentTask({
@@ -2532,12 +2537,8 @@ export function App(): ReactElement {
                     />
                   </div>
                   {/* SHELL-09：物理 taxonomy 只出现在 Files 领域（§16 resourceFamilies
-                      从领域栏 production 依赖中移除，只允许 Files 高级过滤复用）。 */}
-                  <WorkspaceResourceBar
-                    mode={resourceMode}
-                    counts={workspace?.countsByKind ?? null}
-                    onSelect={setResourceMode}
-                  />
+                      从领域栏 production 依赖中移除）。资源族过滤条已断开：Files 物理
+                      浏览由搜索框（路径/类型子串）+ .file-list 承载。 */}
                   <div className="file-list">
                     {pagedFiles.map((file) => (
                       <button
@@ -3669,6 +3670,7 @@ export function App(): ReactElement {
           prompt={aiPrompt}
           contextLabel={domainLabel(activeDomain)}
           selectedFilePath={selectedFile?.relativePath ?? null}
+          onResourcesChange={setAgentResources}
           tools={agentTools.length > 0 ? agentTools : tools}
           toolOutput={toolOutput}
           task={{

@@ -1,12 +1,14 @@
 /**
- * TEXT-20B：FMG 四栏 Smithbox 式工作台接入后的 renderer 单元测试。
+ * TEXT-20B：FMG §9.1 拓扑工作台（左 Text Categories + 右上 Text Entries + 右下
+ * Text Content）接入后的 renderer 单元测试。
  *
  * renderer-unit 是纯 node SSR（react-dom/server，无 DOM、不跑 effect），而
  * FmgWorkbenchPanel 的条目/目录展示完全由 effect（readTextCatalog → 选表 →
  * readFmgTablePage 分页）驱动，SSR 只能看到挂载即有的骨架与空态。因此这里钉
  * 三类契约：
  *
- * 1. SSR 结构：工作台骨架（区域名、四栏、工具条面包屑）挂载即存在，未选表时
+ * 1. SSR 结构：工作台骨架（区域名、左 Categories + 右上下两区、工具条面包屑）
+ *    挂载即存在，未选表时
  *    是显式「先选择语言、容器与文本表」空态而不是错误；
  * 2. 纯渲染语义（source contract）：真空表 / 无匹配 / 失败三个空态分离
  *    （muted 空态 vs danger 诊断）、重复 FMG ID 槽位保留（行 map 不去重）、
@@ -40,17 +42,21 @@ function render(entries: unknown[] = []): string {
   );
 }
 
-describe('FmgWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () => {
+describe('FmgWorkbenchPanel 初始结构（挂载即有的 §9.1 骨架：左 Categories + 右上 Entries + 右下 Text）', () => {
   it('区域名是「FMG 本地化工作台」', () => {
     assert.match(render(), /aria-label="FMG 本地化工作台"/);
   });
 
-  it('四栏 Languages/Containers/File List · Text Entries · Text Content · Tools 同时存在', () => {
+  it('§9.1 拓扑：Text Categories 左栏 + 右上 Text Entries + 右下 Text Content，不是四条竖栏', () => {
     const html = render();
-    assert.match(html, /aria-label="Languages\/Containers\/File List"/);
+    assert.match(html, /aria-label="Text Categories"/);
     assert.match(html, /aria-label="Text Entries"/);
     assert.match(html, /aria-label="Text Content"/);
-    assert.match(html, /aria-label="Tools"/);
+    // 右区是上下两块（entries 在上、text 在下）；Tools 叠在 Categories 下方，
+    // 不是独立第四竖栏。
+    assert.match(html, /fmg-right__pane--entries/);
+    assert.match(html, /fmg-right__pane--text/);
+    assert.match(html, /fmg-categories__toolbar/);
   });
 
   it('工具条面包屑是「文本」', () => {

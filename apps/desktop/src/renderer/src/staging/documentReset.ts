@@ -200,6 +200,11 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setAgentExpanded: 'Agent 停靠栏布局状态',
   setAgentOverlay: 'Agent 停靠栏响应式布局派生状态',
   setAgentInteractionMode: 'Agent composer 交互意图状态，与资源文档无关',
+  // AGENT-60D 提交期消费：Agent 资源引用草稿由 AgentSidebar 内部 reducer 冒泡
+  // （App 在 runAgentTask 里把 resources 随 runAiAgent 提交，main 按
+  // agentReferenceRegistry 校验 token）。它是用户显式添加的 Agent 输入上下文，
+  // 不随切换工作区/文件清空——清空会让进行中的 Agent 任务丢失已引用资源。
+  setAgentResources: 'Agent 资源引用草稿；属于 Agent 那次运行的输入上下文，与当前资源文档无关，跨工作区保留',
   setCmdkOpen: '命令面板状态',
   setCmdkQuery: '命令面板状态',
   setCmdkIndex: '命令面板状态',
