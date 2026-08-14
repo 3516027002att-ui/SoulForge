@@ -618,7 +618,9 @@ export function App(): ReactElement {
     || changeState.items.some((item) => item.status === 'draft' || item.status === 'staged');
 
   useEffect(() => {
-    document.documentElement.dataset.theme = 'dark';
+    // 流光溢彩白是默认主题；显式落一次防止首帧残留未知主题态（§11.1）。
+    // dark 路径仍在，任何主题切换 UI 只要写入同一 dataset 即可覆盖此默认值。
+    document.documentElement.dataset.theme = 'light';
   }, []);
 
   useEffect(() => {
@@ -2761,9 +2763,9 @@ export function App(): ReactElement {
               <div className="setting-row">
                 <div>
                   <div className="setting-name">界面主题</div>
-                  <div className="setting-desc">锻造台暗色</div>
+                  <div className="setting-desc">流光溢彩白（默认）</div>
                 </div>
-                <span className="pill">暗色（亮色待定）</span>
+                <span className="pill pill--accent">流光溢彩白</span>
               </div>
 
               {/*

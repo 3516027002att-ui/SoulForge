@@ -260,7 +260,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                                   onSelect: () => selectItem(group.id, entry.index, entry.label)
                                 })}
                                 style={selected?.kind === group.id && selected?.index === entry.index
-                                  ? { outline: '1px solid var(--accent, #6af)' }
+                                  ? { outline: '1px solid var(--ember)' }
                                   : undefined}
                               >
                                 <span title={entry.label}>{entry.label.slice(0, 40)}</span>

@@ -10,6 +10,14 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtureMain = path.resolve(here, 'fixture-main.mjs');
 const shotsDir = path.resolve(here, '../../../../docs/frontend-renovation/shots');
 
+/** 与 spec 的 selectFileItem 同口径：Agent dock 默认覆盖 Files 列，收起才能点 file-item。 */
+async function closeAgentPanel(window) {
+  const close = window.getByRole('button', { name: '关闭 Agent 面板' });
+  if (await close.isVisible().catch(() => false)) {
+    await close.click();
+  }
+}
+
 const app = await electron.launch({ args: [fixtureMain] });
 const window = await app.firstWindow();
 window.on('dialog', (dialog) => {
@@ -22,7 +30,10 @@ await window.screenshot({ path: path.join(shotsDir, 'final-01-empty-workspace.pn
 
 await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
 await window.locator('.status-bar').waitFor({ state: 'visible' });
-// Files 域物理浏览：直接定位 msgbnd 文件进入 FMG 工作台。
+// Files 域物理浏览：SHELL-09 下文本域不渲染文件树，须先切到 Files 域并收起
+// Agent dock（spec 同口径），再定位 msgbnd 文件进入 FMG 工作台。
+await window.locator('[data-domain="files"]').click();
+await closeAgentPanel(window);
 await window.locator('.file-item', { hasText: 'msg/test.msgbnd.dcx' }).click();
 await window.getByRole('row', { name: /伤药葫芦/ }).click();
 await window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea').fill('伤药葫芦·改');

@@ -626,6 +626,8 @@ test('命令面板：焦点被困在模态内，关闭后归还打开前的焦�
 
   await window.keyboard.press('Control+k');
   await expect(window.locator('.cmdk-overlay')).toHaveClass(/is-open/);
+  // §14.1-5 浮层证据：cmdk/modal 在流光溢彩白下的呈现（非行为改动，仅捕获）。
+  await window.screenshot({ path: 'test-results/12-cmdk-modal-light.png' });
   // openCmdk 用 setTimeout(30) 把焦点移进输入框；不等它落定就按 Tab，事件会打在
   // 模态外的元素上，测到的是「焦点还没进来」而不是「trap 失效」。
   // 用 poll 读 document.activeElement 而不是 toBeFocused()：后者会先等元素稳定，
@@ -1096,6 +1098,8 @@ test('按钮四态：rest 无阴影，hover/active/focus-visible 才有层次反
     await window.waitForTimeout(250);
     return shadowOf(tab);
   }, { timeout: 8000 }).not.toBe('none');
+  // §13.2「focus-visible 与 hover 可区分」：hover 只走阴影通道，不冒用键盘焦点环。
+  expect(await tab.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe('none');
   await window.screenshot({ path: 'test-results/09-buttons-hover.png' });
 
   // active（pressed）：阴影收窄存在，无跳动。
@@ -1123,6 +1127,20 @@ test('按钮四态：rest 无阴影，hover/active/focus-visible 才有层次反
   await expect(focusedTab).toHaveCount(1);
   const outlineStyle = await focusedTab.evaluate((element) => getComputedStyle(element).outlineStyle);
   expect(outlineStyle).toBe('solid');
+  // §13.2「focus-visible 与 hover 可区分」双向互斥：键盘焦点时把指针移开，不残留
+  // hover 阴影（pointer 反馈不属于键盘导航），焦点环在键盘通道独立成立。CSS 若把
+  // hover 阴影挂到 :focus-visible 上，这里会读到非 none 而红。
+  await window.mouse.move(8, 8);
+  await expect.poll(
+    () => tab.evaluate((element) => getComputedStyle(element).boxShadow),
+    { timeout: 5000 }
+  ).toBe('none');
+  const focusOnly = await tab.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { shadow: style.boxShadow, outline: style.outlineStyle };
+  });
+  expect(focusOnly.shadow).toBe('none');
+  expect(focusOnly.outline).toBe('solid');
   await window.screenshot({ path: 'test-results/09-buttons-focus-visible.png' });
 
   await app.close();
@@ -1135,27 +1153,43 @@ test('主题 token：暗/亮主题代表性按钮 computed 值不串用', async 
 
   const tab = window.locator('[data-domain="event"]');
   const readStates = async () => {
-    // 先移开指针，确保读到真正的静止态（不被上一轮 hover 污染）。
+    // 先移开指针，确保读到真正的静止态（不被上一轮 hover 污染）。hover 离开后
+    // box-shadow 走 transition（--dur-micro），负载下固定 250ms 等待偶发不够——
+    // 全量串行跑时实测 rest 读到 hover 阴影的过渡中间帧。轮询等它真正落回 none
+    // 再采，把「过渡未完成」从「rest 本就有阴影」里剥出来。
     await window.mouse.move(8, 8);
-    await window.waitForTimeout(250);
-    const rest = await tab.evaluate((element) => getComputedStyle(element).boxShadow);
-    // hover 的 shadow/background 必须取「判定非 none」的同一帧：在 poll fn 内
+    await expect.poll(
+      () => tab.evaluate((element) => getComputedStyle(element).boxShadow),
+      { timeout: 5000 }
+    ).toBe('none');
+    const rest = await tab.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { shadow: style.boxShadow, color: style.color };
+    });
+    // hover 的 shadow/background/color 必须取「判定非 none」的同一帧：在 poll fn 内
     // 同步写入外部变量，poll 通过后读到的就是判定的那帧。此前 poll 判定后再次
     // evaluate，两个时刻之间 hover 状态可能回落，偶发读到 stale 的 none。
-    let latest = { shadow: 'none', background: '' };
+    let latest = { shadow: 'none', background: '', color: '' };
     await expect.poll(async () => {
       await tab.hover();
       await window.waitForTimeout(250);
       latest = await tab.evaluate((element) => {
         const style = getComputedStyle(element);
-        return { shadow: style.boxShadow, background: style.backgroundColor };
+        return { shadow: style.boxShadow, background: style.backgroundColor, color: style.color };
       });
       return latest.shadow;
     }, { timeout: 8000 }).not.toBe('none');
-    return { restShadow: rest, hoverShadow: latest.shadow, hoverBackground: latest.background };
+    return {
+      restShadow: rest.shadow,
+      restColor: rest.color,
+      hoverShadow: latest.shadow,
+      hoverBackground: latest.background,
+      hoverColor: latest.color
+    };
   };
 
-  // 暗色（默认由 App 固定为 dark）。
+  // 显式强制暗色读一组 token：默认主题现在是流光溢彩白（light），
+  // 本用例不依赖默认值，只验证 dark 路径的 token 仍可用、且与 light 不串用。
   await window.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
   const dark = await readStates();
   expect(dark.restShadow).toBe('none');
@@ -1168,8 +1202,139 @@ test('主题 token：暗/亮主题代表性按钮 computed 值不串用', async 
   expect(light.hoverShadow).not.toBe('none');
   expect(light.hoverShadow).not.toBe(dark.hoverShadow);
   expect(light.hoverBackground).not.toBe(dark.hoverBackground);
+  // §13.2「light 与 dark 的 computed background/foreground 不串用」：
+  // 前景色 token 也在两主题间切换（light 深墨 / dark 浅墨），不能「亮背景配
+  // 暗色前景」把文字读不出来（此前只断言了背景通道，前景缺失）。
+  expect(light.restColor).not.toBe(dark.restColor);
+  expect(light.hoverColor).not.toBe(dark.hoverColor);
 
   await window.screenshot({ path: 'test-results/10-theme-light.png' });
+  await app.close();
+});
+
+test('主题首帧：默认流光溢彩白，Electron 背景与窗口按钮区无暗色闪帧（§13.2）', async () => {
+  const { app, window } = await launchApp();
+  await showWindow(app);
+
+  // 渲染器首帧即 light：index.html 静态 data-theme="light"，早于 App 的 useEffect。
+  expect(await window.evaluate(() => document.documentElement.dataset.theme)).toBe('light');
+
+  // Electron 窗口背景与 light 画布同值（#FBFBF9），首帧不闪暗色。
+  const platform = await app.evaluate(() => process.platform);
+  const background = await app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].getBackgroundColor()
+  );
+  expect(background.toLowerCase()).toBe('#fbfbf9');
+  // 暗色窗口按钮区只在 Windows 的 titleBarOverlay 上是真实风险；Electron 43 读不回
+  // overlay 颜色（getTitleBarOverlay 不存在），改由渲染器侧的 Window Controls Overlay
+  // API 确认 overlay 已激活（窗口按钮画在 overlay 区），颜色靠 fixture 镜像生产 +
+  // 截图人工确认（main/index.ts TITLEBAR_OVERLAY #FBFBF9/#383C42）。
+  if (platform === 'win32') {
+    const wco = await window.evaluate(() => {
+      const api = navigator.windowControlsOverlay;
+      return api ? { visible: api.visible } : null;
+    });
+    expect(wco).not.toBeNull();
+    expect(wco.visible).toBe(true);
+  }
+
+  await window.screenshot({ path: 'test-results/11-first-frame-light.png' });
+  await app.close();
+});
+
+test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动画（§13.2）', async () => {
+  const { app, window } = await launchApp();
+  await showWindow(app);
+
+  // ambient 在 body 伪元素上、z-index 0（.app-root z-index 1 之上），且不接收指针。
+  const ambient = await window.evaluate(() => {
+    const before = getComputedStyle(document.body, '::before');
+    const after = getComputedStyle(document.body, '::after');
+    return {
+      beforePointer: before.pointerEvents,
+      afterPointer: after.pointerEvents,
+      beforeZ: before.zIndex,
+      name: before.animationName,
+      duration: before.animationDuration,
+      iteration: before.animationIterationCount
+    };
+  });
+  expect(ambient.beforePointer).toBe('none');
+  expect(ambient.afterPointer).toBe('none');
+  expect(ambient.beforeZ).toBe('0');
+  // 默认：58s 变换动画无限交替。
+  expect(ambient.name).toBe('sf-ambient-a');
+  expect(ambient.duration).toBe('58s');
+  expect(ambient.iteration).toBe('infinite');
+
+  // reduced-motion：全局规则把动画压成一次瞬发（不持续漂移，静态流光保留）。
+  await window.emulateMedia({ reducedMotion: 'reduce' });
+  const reduced = await window.evaluate(() => {
+    const before = getComputedStyle(document.body, '::before');
+    return { duration: before.animationDuration, iteration: before.animationIterationCount };
+  });
+  expect(reduced.iteration).toBe('1');
+  expect(parseFloat(reduced.duration)).toBeLessThan(0.1);
+
+  await window.screenshot({ path: 'test-results/12-ambient-reduced-motion.png' });
+  await app.close();
+});
+
+test('主题表面：普通 pane/数据行/主工作台去卡片化，无圆角浮块（§13.2）', async () => {
+  // 与「变更状态机」同配方（不开 showWindow）：computed style 采样不依赖 BeginFrame
+  // 解冻，保持与既有 FMG 流程完全一致，避免隐藏/显示窗口带来的布局差异。
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 复用变更状态机配方：打开 FMG 工作台并造一个 draft 变更，让 .workbench、
+  // .binder-child-row 与 .cq-row 同时在场；.viewer-content .panel 若存在则一并采样。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'msg/test.msgbnd.dcx');
+  await window.getByRole('row', { name: /伤药葫芦/ }).click();
+  const editor = window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea');
+  await expect(editor).toBeVisible();
+  await editor.fill('伤药葫芦·改');
+  await expect(window.locator('.change-queue .cq-row')).toHaveCount(1);
+
+  const sampled = await window.evaluate(() => {
+    const selectors = ['.workbench', '.viewer-content .panel', '.binder-child-row', '.cq-row'];
+    const rows = [];
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        const s = getComputedStyle(el);
+        rows.push({
+          selector,
+          radius: s.borderRadius,
+          shadow: s.boxShadow,
+          // 选中行的 inset 余火指示是 §8.3 双通道（软底+2px 接缝），不属于卡片
+          // 阴影；去卡片化只约束「常驻圆角 + 浮块阴影」，选中指示不在其列。
+          selected: el.classList.contains('selected') || el.getAttribute('aria-selected') === 'true'
+        });
+      }
+    }
+    return rows;
+  });
+  // 至少主工作台与数据行在场，否则采样无意义。
+  expect(sampled.some((r) => r.selector === '.workbench')).toBe(true);
+  expect(sampled.some((r) => r.selector === '.binder-child-row')).toBe(true);
+  for (const row of sampled) {
+    const flatRadius = parseFloat(row.radius) === 0;
+    // 选中行的 inset 余火指示是 §8.3 双通道（软底+2px 接缝），不属于卡片阴影。
+    // Chromium 把 inset box-shadow 序列化为「颜色+偏移... inset」（inset 在末尾）。
+    const flatShadow = row.selected ? / inset$/i.test(row.shadow) : row.shadow === 'none';
+    expect({ ...row, ok: flatRadius && flatShadow }, JSON.stringify(row))
+      .toMatchObject({ ok: true });
+  }
+
+  await window.screenshot({ path: 'test-results/13-decarded-surfaces.png' });
+
+  // App 对未提交变更挂了 beforeunload（App.tsx hasUncommittedChanges）：draft 状态
+  // 直接 close 会触发确认对话框挂起。先走完 draft → written 清除未提交态再关闭，
+  // 与「变更状态机」测试的关闭路径一致（它也是写完后才关）。
+  const queue = window.locator('.change-queue');
+  await queue.getByRole('button', { name: '批准入暂存' }).click();
+  await queue.getByTestId('cq-commit').click();
+  await expect(queue.locator('.cq-row').first()).toHaveAttribute('data-status', 'written');
   await app.close();
 });
 

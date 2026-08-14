@@ -420,7 +420,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                                 onSelect: () => selectEntity(entity)
                               })}
                               style={selected?.id === entity.id
-                                ? { outline: '1px solid var(--accent, #6af)' }
+                                ? { outline: '1px solid var(--ember)' }
                                 : undefined}
                             >
                               <span title={entity.label}>{entity.label.slice(0, 40)}</span>

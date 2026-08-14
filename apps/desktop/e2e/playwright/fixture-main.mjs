@@ -2137,6 +2137,14 @@ async function createWindow({ withPreload }) {
     width: 1280,
     height: 820,
     show: false,
+    backgroundColor: '#FBFBF9', // 与生产 light 首帧一致（main/index.ts TITLEBAR_OVERLAY）
+    // 镜像生产窗口帧（main/index.ts createWindow）：hidden 无边框 + Windows/macOS
+    // titleBarOverlay 为流光溢彩白，让 e2e 能断言「暗色窗口按钮区」不复现。Linux 无
+    // overlay 字段，与生产一致。
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    ...(process.platform === 'linux' ? {} : {
+      titleBarOverlay: { color: '#FBFBF9', symbolColor: '#383C42', height: 40 }
+    }),
     webPreferences: {
       ...(withPreload ? { preload: path.join(outRoot, 'preload', 'index.cjs') } : {}),
       sandbox: false,

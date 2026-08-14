@@ -20,12 +20,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
 
 /**
- * 与 renderer `--forge-0` / `--ink-0` 暗色 token 的 sRGB 近似。
+ * 与 renderer light 主题 `--canvas` / `--ink-0` 的 sRGB 近似。
  * Windows / macOS 的 titleBarOverlay 只接受 hex，不能读 CSS 变量。
+ * 背景用 `#FBFBF9`（= --canvas 流光溢彩白），按钮 symbolColor 用中性深墨，
+ * 与 renderer 首帧连续，避免暗色闪帧或窗口按钮区明暗割裂（§11.1）。
  */
 const TITLEBAR_OVERLAY = {
-  color: '#090C11',
-  symbolColor: '#E2E5EA',
+  color: '#FBFBF9',
+  symbolColor: '#383C42',
   height: 40
 } as const;
 
