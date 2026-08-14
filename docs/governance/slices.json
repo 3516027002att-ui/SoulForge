@@ -942,7 +942,7 @@
     {
       "sliceId": "W-REL-C-MULTILANG-03",
       "targetRelease": "V0.5",
-      "lifecycle": "active",
+      "lifecycle": "completed",
       "authority": "partial",
       "authorityCap": "partial",
       "authorityCapNote": "cap=partial；只覆盖经 Patch Engine 提交/回滚与引用扫描的实际语言和容器",
@@ -1023,14 +1023,6 @@
     }
   ],
   "activeClaims": [
-    {
-      "sliceId": "W-REL-C-MULTILANG-03",
-      "claimId": "claim-w-rel-c-multilang-03-20260813",
-      "owner": "claude-code",
-      "claimedAt": "2026-08-13T02:13:46.202Z",
-      "heartbeatAt": "2026-08-14T04:27:23.038Z",
-      "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
-    },
     {
       "sliceId": "W-REL-D-GAMELOAD-01",
       "claimId": "claim-w-rel-d-gameload-01-20260814",

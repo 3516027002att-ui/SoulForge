@@ -9,11 +9,6 @@
   ],
   "unfrozen": [
     {
-      "sliceId": "W-REL-C-MULTILANG-03",
-      "targetRelease": "V0.5",
-      "reason": "全官方语言 item/menu 容器级 Patch Engine 提交/回滚与跨语言引用矩阵"
-    },
-    {
       "sliceId": "W-REL-D-GAMELOAD-01",
       "targetRelease": "V0.5",
       "reason": "真实 Sekiro 游戏内加载确认（SOULFORGE_SCRIPT_REAL_LOAD_CONFIRMED opt-in）"
