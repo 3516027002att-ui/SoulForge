@@ -98,6 +98,7 @@
     "test:scene-asset-inventory": "tsc -b ../shared . && node dist/testing/runSceneAssetInventorySmoke.js",
     "test:scene-draw-list": "tsc -b ../shared . && node dist/testing/runSceneDrawListSmoke.js",
     "test:smithbox-param-metadata-source": "tsc -b ../shared . && node dist/testing/runSmithboxParamMetadataSourceSmoke.js",
+    "test:yapped-param-metadata-source": "tsc -b ../shared . && node dist/testing/runYappedParamMetadataSourceSmoke.js",
     "test:sqlite-crash-recovery": "tsc -b ../shared . && node dist/testing/runSqliteCrashRecoverySmoke.js",
     "test:standalone-writer-failure-matrix": "tsc -b ../shared . && node dist/testing/runStandaloneWriterFailureMatrixSmoke.js",
     "test:three-scene-module": "tsc -b ../shared . && node dist/testing/runThreeSceneModuleSmoke.js",

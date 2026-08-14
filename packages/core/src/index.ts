@@ -80,6 +80,7 @@ export * from './param/paramMetadata.js';
 export * from './param/paramFieldMutation.js';
 export * from './param/paramMetadataTrustStore.js';
 export * from './param/smithboxParamMetadataSource.js';
+export * from './param/yappedParamMetadataSource.js';
 export * from './runtime/gameRuntimeAdapter.js';
 export * from './runtime/me3RuntimeAdapter.js';
 export * from './emevd/emedfSchema.js';
