@@ -661,6 +661,70 @@ function registerFixtureIpc() {
     };
   });
 
+  // T5-3/T5-6：容器内 PARAM 行名提交。fixture 走合成内存态（就地改名，重读即见
+  // 新值），不真写盘 —— 与 GPARAM 的 synthetic 内存态（L816）同一套约定。
+  handleTrusted('resource.applyContainerParamRowNameMutation', (_event, containerUri, _expectedContainerHash, mutation) => {
+    track('resource.applyContainerParamRowNameMutation');
+    if (containerUri !== fixtureParamUri) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'CONTAINER_NOT_FOUND', message: `fixture 未登记的容器：${containerUri}`, containerUri }]
+      };
+    }
+    const table = paramTables.find((t) => t.entryIndex === mutation?.entryIndex);
+    const row = table?.rows.find((r) => r.id === mutation?.rowId);
+    if (!table || !row) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'PARAM_ROW_NOT_FOUND', message: `fixture 找不到行 ${mutation?.rowId}。`, containerUri }]
+      };
+    }
+    row.name = mutation.name;
+    return {
+      ok: true,
+      changedFiles: [{ sourceUri: containerUri, sourcePath: 'param/gameparam/gameparam.parambnd.dcx', changed: true }],
+      diagnostics: []
+    };
+  });
+
+  // T5-4/T5-6：CSV 导入导出。fixture 不真开对话框、不写盘，返回成功诊断；
+  // 渲染器 footer 据此显示「操作完成」类文案（与生产 RendererSaveResult 同面）。
+  function csvOk(code, message) {
+    return { ok: true, changedFiles: [], diagnostics: [{ severity: 'info', code, message, containerUri: fixtureParamUri }] };
+  }
+  function tableLabel(entryIndex) {
+    const table = paramTables.find((t) => t.entryIndex === entryIndex);
+    return table ? `${table.name}（${table.rows.length} 行）` : `entry ${entryIndex}`;
+  }
+  handleTrusted('param.exportRowsCsv', (_event, containerUri, _expectedContainerHash, entryIndex) => {
+    track('param.exportRowsCsv');
+    if (containerUri !== fixtureParamUri) {
+      return { ok: false, changedFiles: [], diagnostics: [{ severity: 'error', code: 'CONTAINER_NOT_FOUND', message: `fixture 未登记的容器：${containerUri}`, containerUri }] };
+    }
+    return csvOk('PARAM_EXPORT_ROWS_OK', `fixture 导出 ${tableLabel(entryIndex)}行数据。`);
+  });
+  handleTrusted('param.exportNamesCsv', (_event, containerUri, _expectedContainerHash, entryIndex) => {
+    track('param.exportNamesCsv');
+    if (containerUri !== fixtureParamUri) {
+      return { ok: false, changedFiles: [], diagnostics: [{ severity: 'error', code: 'CONTAINER_NOT_FOUND', message: `fixture 未登记的容器：${containerUri}`, containerUri }] };
+    }
+    return csvOk('PARAM_EXPORT_NAMES_OK', `fixture 导出 ${tableLabel(entryIndex)}行名。`);
+  });
+  handleTrusted('param.importNamesCsv', (_event, containerUri, _expectedContainerHash, entryIndex, _expectedChildHash) => {
+    track('param.importNamesCsv');
+    if (containerUri !== fixtureParamUri) {
+      return { ok: false, changedFiles: [], diagnostics: [{ severity: 'error', code: 'CONTAINER_NOT_FOUND', message: `fixture 未登记的容器：${containerUri}`, containerUri }] };
+    }
+    return csvOk('PARAM_IMPORT_NAMES_OK', `fixture 导入 ${tableLabel(entryIndex)}行名完成。`);
+  });
+  handleTrusted('param.importRowsCsv', (_event, containerUri, _expectedContainerHash, entryIndex, _expectedChildHash) => {
+    track('param.importRowsCsv');
+    if (containerUri !== fixtureParamUri) {
+      return { ok: false, changedFiles: [], diagnostics: [{ severity: 'error', code: 'CONTAINER_NOT_FOUND', message: `fixture 未登记的容器：${containerUri}`, containerUri }] };
+    }
+    return csvOk('PARAM_IMPORT_ROWS_OK', `fixture 导入 ${tableLabel(entryIndex)}行数据完成。`);
+  });
+
   // ── GPARAM 工作台（GPARAM-11B）合成通道 ────────────────────────────
   // 微小、合法构造、明确标记（AGENTS.md §15）。两个可读 bank 各含 2 个 group、
   // 不同值类型（float3 / int / float2），一个失败样本（broken）。

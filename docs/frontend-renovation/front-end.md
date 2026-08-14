@@ -1012,13 +1012,10 @@ export type WorkbenchRoute =
 ### 7.1 固定结构（§2.5）
 
 ```text
-Params ~395px (min 180) | Rows ~740px (min 260) | Fields ~809px (min 320)
-| 右侧工具栈 ~674px（上 Actions / 下 Configuration，min 200）
+Params 20% (min 180) | Rows 29% (min 260) | Fields 35% (min 320)
 ```
 
-这是三栏**数据区**加右侧工具栈，不是四条并列数据栏。Params→Rows→Fields 是选择链。当前工作树的三栏 ParamWorkbench 数据区方向正确，缺的是右侧工具栈、逻辑库标题和局部错误，不要推倒改成四条等宽栏。
-
-第一栏必须直接显示 GameParam 内部 PARAM tables，不显示 gameparam/drawparam 物理文件。解析失败的 table 留在列表并标失败。
+这是三栏**数据区**，T5-4 删除了第四栏 Tools，不再有右侧工具栈。Params→Rows→Fields 是选择链。比例固定（20/29/35），随窗口缩放跟随，拖拽后转像素。第一栏必须直接显示 GameParam 内部 PARAM tables，不显示 gameparam/drawparam 物理文件。解析失败的 table 留在列表并标失败。禁止推倒改成四条等宽栏。
 
 ### 7.2 打开行为
 
@@ -1050,6 +1047,8 @@ Params ~395px (min 180) | Rows ~740px (min 260) | Fields ~809px (min 320)
 
 - 表头至少包含 `Id`、`Name`；
 - 高密度、虚拟化或分页；
+- 行名可编辑（选中行出现名字输入框，Enter 提交）；名字优先 Bridge 解码，空则查本机 Yapped `Paramdex\SDT\Names\<Param>.txt`（不入库），再空显示 `—`；
+- 行名提交与字段写入同一条 Patch 链（`applyContainerParamRowNameMutation` → write-param upsert 带 name → write-bnd4 → Patch Engine），禁止 `fs.writeFile` 写 Mod；
 - 搜索 ID 与名称；
 - 选择 table 后立即清理旧 row/field；
 - 选择 row 后加载 Fields；
@@ -1058,8 +1057,9 @@ Params ~395px (min 180) | Rows ~740px (min 260) | Fields ~809px (min 320)
 
 ### 7.5 Fields 栏
 
-- 字段名；
-- 当前值；
+- 字段名（左，中文 DisplayName 优先：本机 Yapped Defs 的 `DisplayName` 覆盖为字段 `name`；Yapped 缺的字段用 Smithbox **英文** Annotation，禁止用日文 DisplayName 当主标签）；
+- 悬停 Description（字段名 span 的 `title` 取 `description`，无 description 时回落字段名）；
+- 当前值（可编辑，已有 input；行宽与定义一致即自动授信放行，去掉「必须先点信任」路径）；
 - 对照值或原始值；
 - 枚举名称；
 - 类型、范围和说明；
@@ -1068,20 +1068,15 @@ Params ~395px (min 180) | Rows ~740px (min 260) | Fields ~809px (min 320)
 
 字段编辑器必须按 metadata 类型选择，不得把全部值渲染成自由文本。
 
-### 7.6 右侧工具栈
+### 7.6 CSV 工具条（T5-4 删第四栏 Tools）
 
-Smithbox 默认是右侧上下两叠：Actions 和 Configuration。SoulForge 做成同一右栏里的两个折叠组。只有真实能力可显示：
+工具条放在三栏上方同一条（Rows 列顶或上方），四个真实按钮，未选表时禁用（没有可导入导出的目标）：
 
-- Sort Rows；
-- Row Names；
-- Data Comparison；
-- Copy / Duplicate；
-- Data Transfer；
-- Mass Edit；
-- Reference Jump；
-- Undo/Redo。
+- 导出行（CSV：`id,name,<字段内部 id>…`；主进程保存对话框，用户选目录；**不写进 Mod 工作区旁路文件**）；
+- 导入行（CSV：表头 `id,name,<字段内部 id>…`，空单元格=不改；主进程打开对话框；写入走 Patch Engine）；
+- 导出备注 / 导入备注（行名 `id,name`，对照 Yapped Export/Import Names；同样对话框 + Patch）。
 
-未接通真实实现的工具必须隐藏，不能放 disabled 假按钮吸引用户。Mass Edit / Data Import & Export 在 Smithbox 是独立窗，有真实实现再作为右栏组或二级抽屉出现。PARAM 双视图对比（`ParamEditorView##0/##1`）是 PARAM-10D，不是 10B 的缺陷。
+CSV 逻辑权威在 main 侧（对话框 + 读表 + 解析 + 提交），renderer 只触发 bridge 方法并显示诊断。字段值表头用**内部字段 id** 而非显示名——中文名可能重名，用显示名回写会写错列。导出是自选路径的新文件不走 Patch Engine，但拒绝写进游戏目录与 Mod 工作区。未接通真实实现的工具必须隐藏，不能放 disabled 假按钮吸引用户。
 
 ### 7.7 明确禁止
 
@@ -1089,6 +1084,7 @@ Smithbox 默认是右侧上下两叠：Actions 和 Configuration。SoulForge 做
 param/drawparam/*.gparam.dcx
 gameparam.parambnd.dcx.bak
 磁盘文件大小
+行大小
 把三栏数据区改成四条等宽栏
 失败 table 从列表消失
 圆角外壳
@@ -1098,15 +1094,15 @@ Evidence/Hex 折叠区进入默认 DOM
 
 ### 7.8 正确标题
 
-```text
-Game Parameters · 1 library · N tables
-```
+T5-4 删掉「Game Parameters · 1 library · N tables」crumb、类型名与行大小。PARAM 工作台**不再显示文档级标题或信息**：容器物理路径/文件名不进可见 DOM，备份后缀（.bak/.prev）与 gparam 同被禁止。
 
 不得显示：
 
 ```text
 PARAM · param/gameparam/gameparam.parambnd.dcx.bak
+Game Parameters · 1 library · N tables
 PARAM 36 项
+行大小
 ```
 
 ---

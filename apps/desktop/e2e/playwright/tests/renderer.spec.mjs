@@ -1853,6 +1853,40 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await expect(behaviorProp.locator('.wb-prop__name'))
     .toHaveAttribute('title', '行为模式（引导/攻击/防御）');
 
+  // T5-3/T5-6：行名可编辑。选中行出现名字输入框（aria-label「行 N 的名字」），
+  // 改名后 Enter 提交 —— 走与字段写入同一条 Patch 链（fixture 合成内存态），
+  // footer 显示提交结果，重读后行名更新为新值。
+  const rowNameInput = window.getByLabel('行 100 的名字');
+  await expect(rowNameInput).toBeVisible();
+  await rowNameInput.fill('引导-改名');
+  await rowNameInput.press('Enter');
+  await expect(window.locator('.workbench__footer'))
+    .toContainText('行 100 的名字已提交到变更候选。');
+  await expect.poll(async () =>
+    (await ipcCalls(app))['resource.applyContainerParamRowNameMutation'] ?? 0
+  ).toBeGreaterThan(0);
+  // 重读后新行名回到名称列（id 仍可定位同一行）。
+  await expect(window.getByLabel('行 100 的名字')).toHaveValue('引导-改名');
+
+  // T5-4/T5-6：CSV 工具条四个按钮真实触发 bridge（fixture 不真开对话框/不写盘，
+  // 只回成功诊断）。footer 显示各操作的完成文案，且对应 channel 被调用。
+  const footer = window.locator('.workbench__footer');
+  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导出行' }).click();
+  await expect(footer).toContainText('fixture 导出 ActionGuideParam（4 行）行数据。');
+  await expect.poll(async () => (await ipcCalls(app))['param.exportRowsCsv'] ?? 0).toBeGreaterThan(0);
+
+  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导出备注' }).click();
+  await expect(footer).toContainText('fixture 导出 ActionGuideParam（4 行）行名。');
+  await expect.poll(async () => (await ipcCalls(app))['param.exportNamesCsv'] ?? 0).toBeGreaterThan(0);
+
+  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导入行' }).click();
+  await expect(footer).toContainText('fixture 导入 ActionGuideParam（4 行）行数据完成。');
+  await expect.poll(async () => (await ipcCalls(app))['param.importRowsCsv'] ?? 0).toBeGreaterThan(0);
+
+  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导入备注' }).click();
+  await expect(footer).toContainText('fixture 导入 ActionGuideParam（4 行）行名完成。');
+  await expect.poll(async () => (await ipcCalls(app))['param.importNamesCsv'] ?? 0).toBeGreaterThan(0);
+
   // 父选区清理：切到 EquipParamWeapon 后字段栏清空回空态。
   await window.locator('.wb-list .wb-row', { hasText: 'EquipParamWeapon' }).click();
   await expect(window.locator('.wb-virtual-row', { hasText: '500' })).toBeVisible();
