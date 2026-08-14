@@ -1884,6 +1884,13 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .wb-row__name {
   flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* 行名编辑框（T5-3）：与只读 span 等高同宽，点击不触发行选择。 */
+.wb-row__name-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 2px; padding: 0 4px;
+  background: var(--surface-1); color: var(--ink-1);
+}
+.wb-row__name-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .wb-row__meta { flex: none; font-size: 10px; color: var(--ink-3); }
 /* 读取失败的条目：仍列在表里（不像参照工具那样移除），但明确标出。
    左边框 + 文字标记双通道 —— 只用颜色对色觉障碍用户不可分辨。 */

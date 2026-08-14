@@ -5192,6 +5192,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             timeoutMs: 120_000,
             commandOptions: {
               outputPath: context.outputPath,
+              // expectedDocumentHash 是 Bridge write-param 的必填并发保护：哈希不符
+              // 说明「读与写之间条目被改过」，拒绝写入。实测（probeParamWrite）缺它会
+              // 恒定 PARAM_STAGING_WRITE_FAILED。unpacked.child.storedContentHash 就是
+              // 该裸 param 文件的 SourceHash（entry ContentHash 对存储字节取哈希）。
+              expectedDocumentHash: unpacked.child.storedContentHash,
               mutation: 'upsert',
               id: mutation.rowId,
               dataBase64: fieldResult.nextDataBase64
@@ -5274,6 +5279,210 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
       if (outcome.status === 'committed' && outcome.result.ok) {
         // 容器变了：行缓存、条目缓存与解包缓存全部失效，否则下一次读会拿到旧字节。
+        paramPageCache.delete(containerUri);
+        containerChildrenCache.clear();
+        unpackedParamCache.clear();
+      }
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  /**
+   * 容器内 PARAM 的**行名**写入（T5-3）。
+   *
+   * 与 resource.applyContainerParamFieldMutation 走同一条 Patch 链（grok T5：
+   * 「提交走与字段写入相同的 Patch 链，禁止 fs.writeFile 写 Mod」）：
+   *
+   *   ① write-param upsert（C#）—— 行数据原样回传、只带新 name，产出改过的裸 param；
+   *   ② write-bnd4 replace（C#）—— 按 entryIndex 塞回容器副本，C# 侧重读验证；
+   *   ③ 真正落盘由 applyNativeMutation 的 commit port（Patch Engine）完成，含备份
+   *      与回滚元数据。
+   *
+   * name 允许空串（清掉该行名字）。upsert 的 dataBase64 必须原样携带当前行字节：
+   * C# 的 ApplyCompactMutations 对 upsert 强制要求 dataBase64 且长度=行宽，
+   * 名字只改不改数据，字节原样回传即可。
+   */
+  handle(
+    'resource.applyContainerParamRowNameMutation',
+    async (
+      event,
+      containerUri: string,
+      expectedContainerHash: string,
+      mutation: {
+        entryIndex: number;
+        expectedChildHash: string;
+        rowId: number;
+        name: string;
+        rowDataBase64: string;
+      }
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入容器内 PARAM 行名。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(containerUri, file);
+      if (gameBlocked) return gameBlocked;
+      if (typeof mutation.name !== 'string') {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_ROW_NAME_INVALID',
+            message: '行名必须是字符串。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      if (typeof mutation.rowDataBase64 !== 'string' || mutation.rowDataBase64.length === 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_ROW_DATA_MISSING',
+            message: '行名写入需要当前行字节（原样回传，避免写宽错位）。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+
+      // 解包目标条目：write-param 需要一个裸 param 作为输入基底。
+      const unpacked = await unpackContainerParamChild({
+        containerPath: file.absolutePath,
+        containerUri,
+        containerHash: file.sha256 ?? expectedContainerHash,
+        entry: { index: mutation.entryIndex }
+      });
+      if (!unpacked.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: sanitizeDiagnostics(unpacked.diagnostics)
+        };
+      }
+
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'PARAM_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const oodle = activeSession.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {};
+
+      // ① 暂存区产出改过行名的裸 param。expectedDocumentHash = 该裸 param 的
+      //    SourceHash（= 容器条目的 ContentHash，见字段写入的注释）。
+      const paramStage = await stageBridgeOutput({
+        stagingRoot: storage.stagingRoot,
+        prefix: 'param-row-name',
+        fileName: `${basename(unpacked.child.name)}.renamed`,
+        allowedRoots: () => [...stage.allowedRoots],
+        write: async (context) => {
+          const written = await runBridge<Record<string, unknown>>({
+            command: 'write-param',
+            filePath: unpacked.child.absolutePath,
+            allowedRoots: context.allowedRoots,
+            writableRoots: context.writableRoots,
+            timeoutMs: 120_000,
+            commandOptions: {
+              outputPath: context.outputPath,
+              expectedDocumentHash: unpacked.child.storedContentHash,
+              mutation: 'upsert',
+              id: mutation.rowId,
+              dataBase64: mutation.rowDataBase64,
+              name: mutation.name
+            }
+          });
+          return {
+            ok: written.parseStatus !== 'failed'
+              && written.diagnostics.some(
+                (diagnostic) => diagnostic.code === 'PARAM_STAGING_WRITE_VERIFIED'
+              ),
+            diagnostics: written.diagnostics
+          };
+        }
+      });
+      if (!paramStage.ok || !paramStage.bytes) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [
+            ...sanitizeDiagnostics(paramStage.result?.diagnostics ?? []),
+            ...paramStage.diagnostics.map((diagnostic) => ({
+              severity: 'error' as const,
+              code: diagnostic.code,
+              message: diagnostic.message,
+              sourceUri: containerUri
+            })),
+            {
+              severity: 'error' as const,
+              code: 'PARAM_ROW_NAME_STAGE_FAILED',
+              message: '行名改动未能产出裸 param 暂存文件，容器未被修改。',
+              sourceUri: containerUri
+            }
+          ]
+        };
+      }
+      const renamedChildBase64 = paramStage.bytes.toString('base64');
+
+      // ② 把裸 param 塞回容器，经 Patch Engine 提交重打包后的容器。
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri: containerUri,
+        expectedHash: expectedContainerHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'parambnd',
+        stagingFileName: `${basename(file.relativePath)}.repacked`,
+        stageWrite: async (context) => {
+          const written = await runBridge<Record<string, unknown>>({
+            command: 'write-bnd4',
+            filePath: file.absolutePath,
+            resourceUri: containerUri,
+            allowedRoots: context.allowedRoots,
+            writableRoots: context.writableRoots,
+            timeoutMs: 180_000,
+            commandOptions: {
+              outputPath: context.outputPath,
+              mutation: 'replace',
+              expectedContainerHash,
+              entryIndex: mutation.entryIndex,
+              expectedChildHash: mutation.expectedChildHash,
+              contentBase64: renamedChildBase64
+            },
+            ...oodle
+          });
+          return {
+            ok: written.parseStatus !== 'failed'
+              && written.diagnostics.some(
+                (diagnostic) => diagnostic.code === 'BND4_STAGING_WRITE_VERIFIED'
+              ),
+            diagnostics: written.diagnostics
+          };
+        },
+        title: `PARAM row name for row ${mutation.rowId} in ${unpacked.child.name}`,
+        confirmActionLabel: '提交容器内 PARAM 行名变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+
+      if (outcome.status === 'committed' && outcome.result.ok) {
         paramPageCache.delete(containerUri);
         containerChildrenCache.clear();
         unpackedParamCache.clear();
@@ -5508,6 +5717,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // ── 全量路径（用户裁定）：一次返回全部行（含字节）；渲染器本地过滤与
       //    虚拟化，不再分批续取；字段定义照常随页下发（P1 裁定，与分页路径一致）。
       if (loadAll) {
+        // T5-3 行名回落：Bridge 没解码出名字的行，查本机 Yapped Names（条目名键）。
+        // 键是容器条目名（SpEffectParam，不带 .param），与 Defs 的 ParamType 键不同。
+        const yappedRowNames = (await loadYappedOverlay()).rowNames;
+        const yappedEntryName = unpacked.child.name.replace(/\.param$/i, '');
+        const yappedNameFor = (rowId: number): string | undefined =>
+          yappedRowNames?.get(yappedEntryName)?.get(rowId);
         return {
           ok: true,
           containerUri,
@@ -5549,6 +5764,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           pageCount: 1,
           rows: filtered.map((row) => {
             const dataBase64 = typeof row.dataBase64 === 'string' ? row.dataBase64 : undefined;
+            const yappedName = row.name ? undefined : yappedNameFor(row.id);
             return {
               id: row.id,
               ...(dataBase64 !== undefined
@@ -5559,7 +5775,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
                       .toString('hex')
                   }
                 : {}),
-              ...(row.name ? { name: row.name } : {})
+              ...(row.name
+                ? { name: row.name }
+                : (yappedName ? { name: yappedName, nameOrigin: 'yapped' as const } : {}))
             };
           }),
           rowsTruncated: (full.data.rowCount ?? allRows.length) > allRows.length,

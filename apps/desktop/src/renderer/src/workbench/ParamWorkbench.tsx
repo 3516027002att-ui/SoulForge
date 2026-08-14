@@ -117,6 +117,21 @@ export interface ParamWorkbenchProps {
     rowDataBase64: string;
     definition: ParamDefDocument;
   }) => Promise<{ ok: boolean; message?: string }>;
+  /**
+   * 行名写入出口（T5-3）。缺省即行名只读。
+   *
+   * 与字段写入同一条 Patch 链（write-param upsert 带 name → write-bnd4 →
+   * Patch Engine）。rowDataBase64 是当前行字节，原样回传不修改。
+   */
+  onApplyRowNameMutation?: (input: {
+    paramName: string;
+    entryIndex: number;
+    expectedContainerHash: string;
+    expectedChildHash: string;
+    rowId: number;
+    name: string;
+    rowDataBase64: string;
+  }) => Promise<{ ok: boolean; message?: string }>;
 }
 
 /** 字段全量渲染（用户裁定 2026-08-14）：字段不再分页，一次全部显示。 */
@@ -209,6 +224,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [commitMessage, setCommitMessage] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
+  /** 行名编辑草稿：非 null 表示正在编辑选中行的名字。 */
+  const [rowNameDraft, setRowNameDraft] = useState<string | null>(null);
+  const [rowNameCommitting, setRowNameCommitting] = useState(false);
 
   // ── 左栏：容器内 param 列表 ──
   useEffect(() => {
@@ -258,6 +276,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   useEffect(() => {
     setDrafts({});
     setCommitMessage(null);
+    setRowNameDraft(null);
   }, [selectedRowId]);
 
   /*
@@ -625,6 +644,46 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     }
   }
 
+  /**
+   * 提交一个行名（T5-3）。
+   *
+   * 与字段写入同一条 Patch 链：onApplyRowNameMutation 由宿主接到
+   * applyContainerParamRowNameMutation → write-param upsert(带 name) →
+   * write-bnd4 → Patch Engine。名字为空串 = 清掉该行名字（允许）。
+   * 名字没变（或只去掉首尾空白）时不发请求。
+   */
+  async function commitRowName(row: ParamRowLine, rawName: string): Promise<void> {
+    if (!props.onApplyRowNameMutation || selectedEntry === null) return;
+    if (!row.dataBase64) return;
+    const normalized = rawName.trim();
+    if (normalized === (row.name ?? '')) {
+      setRowNameDraft(null);
+      return;
+    }
+    setRowNameCommitting(true);
+    setCommitMessage(null);
+    try {
+      const result = await props.onApplyRowNameMutation({
+        paramName: paramName ?? '',
+        entryIndex: selectedEntry,
+        expectedContainerHash: containerHash,
+        expectedChildHash: childHash,
+        rowId: row.id,
+        name: normalized,
+        rowDataBase64: row.dataBase64
+      });
+      setCommitMessage(result.ok
+        ? `行 ${row.id} 的名字已提交到变更候选。`
+        : (result.message ?? `行 ${row.id} 的名字提交失败。`));
+      setRowNameDraft(null);
+      if (result.ok) loadRows();
+    } catch (error) {
+      setCommitMessage(error instanceof Error ? error.message : '行名提交异常。');
+    } finally {
+      setRowNameCommitting(false);
+    }
+  }
+
   const columns: WorkbenchColumnSpec[] = [
     {
       id: 'params',
@@ -736,7 +795,34 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                         })}
                       >
                         <span className="wb-row__id">{row.id}</span>
-                        <span className="wb-row__name" title={row.name ?? ''}>{row.name ?? '—'}</span>
+                        {selectedRowId === row.id && props.onApplyRowNameMutation && row.dataBase64
+                          ? (
+                            <input
+                              className="wb-row__name-input"
+                              value={rowNameDraft ?? row.name ?? ''}
+                              aria-label={`行 ${row.id} 的名字`}
+                              disabled={rowNameCommitting}
+                              onClick={(event) => event.stopPropagation()}
+                              onChange={(event) => setRowNameDraft(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') {
+                                  event.stopPropagation();
+                                  void commitRowName(row, event.currentTarget.value);
+                                } else if (event.key === 'Escape') {
+                                  event.stopPropagation();
+                                  setRowNameDraft(null);
+                                }
+                              }}
+                              onBlur={() => {
+                                if (rowNameDraft !== null) void commitRowName(row, rowNameDraft);
+                              }}
+                            />
+                          )
+                          : (
+                            <span className="wb-row__name" title={row.name ?? ''}>
+                              {row.name ?? '—'}
+                            </span>
+                          )}
                       </div>
                     );
                   })}

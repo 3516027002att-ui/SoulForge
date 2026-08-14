@@ -562,6 +562,26 @@ const api = {
     expectedContainerHash,
     mutation
   ),
+  /**
+   * 容器内 param 的**行名**写入（T5-3）：与字段写入同一条 Patch 链。
+   * rowDataBase64 原样携带当前行字节；name 允许空串（清名）。
+   */
+  applyContainerParamRowNameMutation: (
+    containerUri: string,
+    expectedContainerHash: string,
+    mutation: {
+      entryIndex: number;
+      expectedChildHash: string;
+      rowId: number;
+      name: string;
+      rowDataBase64: string;
+    }
+  ): Promise<RendererSaveResult> => ipcRenderer.invoke(
+    'resource.applyContainerParamRowNameMutation',
+    containerUri,
+    expectedContainerHash,
+    mutation
+  ),
   applyParamMutation: (
     sourceUri: string,
     expectedHash: string,

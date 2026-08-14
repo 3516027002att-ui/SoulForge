@@ -3292,6 +3292,43 @@ export function App(): ReactElement {
                 setStatus(`PARAM 字段写入失败：${message}`);
                 return { ok: false, message };
               }}
+              onApplyRowNameMutation={async (input) => {
+                /*
+                 * 容器内 param 的**行名**写入（T5-3）：与字段写入同一条 Patch 链
+                 * （write-param upsert 带 name → write-bnd4 → Patch Engine），
+                 * 不经 fs.writeFile。两个哈希原样透传，是并发保护凭据。
+                 */
+                if (!bridge || typeof bridge.applyContainerParamRowNameMutation !== 'function') {
+                  return { ok: false, message: '容器 PARAM 行名写入通道不可用。' };
+                }
+                if (!input.expectedContainerHash || !input.expectedChildHash) {
+                  return {
+                    ok: false,
+                    message: '缺少容器或条目哈希，拒绝写入（无法保证并发安全）。请重新选择该 param。'
+                  };
+                }
+                const saved = await bridge.applyContainerParamRowNameMutation(
+                  paramWorkbenchFile.sourceUri,
+                  input.expectedContainerHash,
+                  {
+                    entryIndex: input.entryIndex,
+                    expectedChildHash: input.expectedChildHash,
+                    rowId: input.rowId,
+                    name: input.name,
+                    rowDataBase64: input.rowDataBase64
+                  }
+                );
+                if (saved.ok) {
+                  setStatus(
+                    `PARAM 行名已写入：${input.paramName} 行 ${input.rowId} →「${input.name}」。`
+                  );
+                  void refreshOperationHistory();
+                  return { ok: true };
+                }
+                const message = saved.diagnostics?.[0]?.message ?? 'PARAM 行名写入失败。';
+                setStatus(`PARAM 行名写入失败：${message}`);
+                return { ok: false, message };
+              }}
             />
           )}
           {activeEditor === 'param-rows' && (
