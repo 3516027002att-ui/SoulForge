@@ -3701,7 +3701,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   };
 
   /**
-   * 走**正规**路径取字段定义：包校验 → 描述符匹配 → 用户信任策略。
+   * 走**正规**路径取字段定义：包校验 → 描述符匹配 →（T5-2 起）行宽自动授信。
    *
    * 此前生产侧是 `definitions.find((e) => e.document.typeName === typeName)`，
    * 绕过了 matchParamMetadataPackage 的五键严格匹配、包摘要与信任策略三层检查。
@@ -3709,8 +3709,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * 往错误字节位置写数值，存出来的 param 静默损坏。
    *
    * 返回的 origin 决定渲染器是否放行字段写入：
-   *   · 用户已信任该包 → 'imported'，写入放行；
-   *   · 未确认 / 摘要不符 → 保持只读，并带出可行动的诊断码。
+   *   · 行宽与定义一致 → 'imported'，写入放行（T5-2 自动授信，不再要求先点信任）；
+   *   · 未确认信任 → 不再挡编辑（grok T5：「可留开发者撤销，但不挡编辑」），
+   *     仅保留 param.metadata.setTrust 作为开发者侧的可选撤销入口。
    */
   const resolveTrustedParamDefinition = async (
     typeName: string,
@@ -3724,14 +3725,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (!metadata.package) {
       return { document: null, trusted: false, diagnostic: metadata.diagnostic };
     }
-    const decision = readTrustDecision(trustSettingsStore);
-    const covered = trustCoversPackage(decision, metadata.package);
     const entry = metadata.package.definitions
       .find((candidate) => candidate.document.typeName === typeName);
     if (!entry) {
       return {
         document: null,
-        trusted: covered,
+        trusted: false,
         diagnostic: {
           code: 'PARAM_METADATA_TYPE_NOT_FOUND',
           message: `元数据包里没有类型 ${typeName} 的字段定义。`
@@ -3741,7 +3740,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (entry.document.rowDataSize !== rowDataSize) {
       return {
         document: null,
-        trusted: covered,
+        trusted: false,
         diagnostic: {
           code: 'PARAM_METADATA_ROW_WIDTH_MISMATCH',
           message: `字段定义行宽（${entry.document.rowDataSize}）与真实 PARAM（${rowDataSize}）不一致，`
@@ -3754,17 +3753,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const yapped = await loadYappedOverlay();
     const applyOverlay = (document: ParamDefDocument): ParamDefDocument =>
       yapped.defs ? applyYappedFieldOverlay(document, yapped.defs) : document;
-    if (!covered) {
-      return {
-        document: applyOverlay({ ...entry.document, origin: 'fixture' }),
-        trusted: false,
-        diagnostic: {
-          code: 'PARAM_METADATA_TRUST_POLICY_REQUIRED',
-          message: '字段定义可读但写入未放行：尚未确认信任该元数据包。'
-            + ' 确认一次后本机后续都放行（包内容变化会要求重新确认）。'
-        }
-      };
-    }
+    // T5-2：行宽匹配即授信。包在导入时已核对归档/源树/许可证三个摘要（钉死），
+    // 行宽匹配保证本表字段偏移对齐 —— 两把锁都过，不再把「用户点过确认」当第三道门。
     return {
       document: applyOverlay({ ...entry.document, origin: 'imported' }),
       trusted: true,

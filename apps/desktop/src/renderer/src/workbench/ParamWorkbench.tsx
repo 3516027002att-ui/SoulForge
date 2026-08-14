@@ -210,44 +210,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [commitMessage, setCommitMessage] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
 
-  /**
-   * 元数据包的信任状态。
-   *
-   * 字段写入要放行必须先经用户确认这一步 —— 元数据的字段偏移若与真实 PARAM
-   * 不符，按它写入就是往错误字节位置塞数值，存出来的 param 静默损坏。
-   * 这个风险与「谁在改」无关：手动改也一样错，所以不能按操作者身份豁免。
-   *
-   * 「这个文件是不是那个发布」由机器校验（导入器核对归档/源树/许可证三个摘要）；
-   * 「你愿不愿意用它」只能由用户回答。确认一次后本机后续都放行，
-   * 包内容变化（升级、被替换）会因摘要不符而重新询问。
-   */
-  const [trustState, setTrustState] = useState<{
-    ok: boolean;
-    trusted: boolean;
-    packageId: string | null;
-    packageVersion: string | null;
-    confirmedAt?: string;
-  } | null>(null);
-  const [trustBusy, setTrustBusy] = useState(false);
-
-  const loadTrustState = useCallback(() => {
-    if (!bridge || typeof bridge.getParamMetadataTrustState !== 'function') return;
-    bridge.getParamMetadataTrustState()
-      .then((result) => setTrustState({
-        ok: result.ok,
-        trusted: result.trusted,
-        packageId: result.packageId,
-        packageVersion: result.packageVersion,
-        ...(result.confirmedAt ? { confirmedAt: result.confirmedAt } : {})
-      }))
-      .catch(() => setTrustState(null));
-  }, [bridge]);
-
-  useEffect(() => {
-    loadTrustState();
-  }, [loadTrustState]);
-
-
   // ── 左栏：容器内 param 列表 ──
   useEffect(() => {
     if (!bridge || typeof bridge.listContainerParams !== 'function' || !props.containerUri) return;
@@ -446,29 +408,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     return dispose;
   }, [loadRows]);
 
-  /**
-   * 记录/撤销信任。定义在 loadRows 之后，因为它要在成功后重新取行 ——
-   * origin 变化会改变字段写入的放行状态。
-   */
-  async function confirmTrust(next: boolean): Promise<void> {
-    if (!bridge || typeof bridge.setParamMetadataTrust !== 'function') return;
-    setTrustBusy(true);
-    setCommitMessage(null);
-    try {
-      const result = await bridge.setParamMetadataTrust(next);
-      if (!result.ok) {
-        setCommitMessage(result.diagnostics?.[0]?.message ?? '信任决定记录失败。');
-      } else {
-        loadTrustState();
-        loadRows();
-      }
-    } catch (error) {
-      setCommitMessage(error instanceof Error ? error.message : '信任决定记录异常。');
-    } finally {
-      setTrustBusy(false);
-    }
-  }
-
   // ── 右栏：选中行的字段 ──
   const definition = useMemo(() => {
     if (!typeName) return null;
@@ -562,12 +501,13 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   /**
    * 字段写入是否放行。
    *
-   * origin 必须是已授信来源：那道门守的是「元数据包的字段偏移与这份真实 PARAM
-   * 是否对得上」。偏移错了就是往错误字节位置写数值，存出来的 param 静默损坏。
-   * 这个风险与「谁在改」无关，手动改也一样错，所以不能按操作者身份豁免。
+   * T5-2：行宽匹配即授信。definition 非空已经意味着 resolveTrustedParamDefinition
+   * 在包校验 + 行宽核对两层都通过（行宽不符根本不返回 document），所以这里不再
+   * 检查 origin —— 把「必须先点信任」的路径去掉，行宽对上就放行字段写入。
+   * 仍要求 onApplyFieldMutation 出口存在与选中行带行字节（那是写入的必要条件，
+   * 不是授权门）。
    */
   const canCommitFields = definition !== null
-    && (definition.origin === 'user-derived' || definition.origin === 'imported')
     && definition.rowDataSize === rowDataSize
     && props.onApplyFieldMutation !== undefined
     && selectedRow?.dataBase64 !== undefined;
@@ -1016,15 +956,13 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     ...(selectedRowId !== null && definition === null && pageFieldDefsDiagnostic
       ? [`字段定义不可用：${pageFieldDefsDiagnostic.code}——${pageFieldDefsDiagnostic.message}`]
       : []),
-    // 只读原因必须说清下一步动作。只说「未授信」会让用户以为功能坏了，
-    // 而实际上点一次工具栏的确认按钮就能启用。行字节缺失是另一回事（翻页可解）。
+    // 只读原因必须说清下一步动作。T5-2 起行宽匹配即授信，字段写入不再被信任
+    // 门挡着 —— 只剩行字节缺失这一种真实的只读原因。
     ...(selectedRowId !== null && definition !== null && !canCommitFields
       ? [
           selectedRow?.dataBase64 === undefined
             ? '字段写入未放行：本行字节未随分页下发。'
-            : trustState?.trusted === false
-              ? '字段写入未放行：点击右上角「信任此元数据包」确认一次即可启用（只需一次）。'
-              : '字段写入未放行：字段定义来源未通过校验。数值可读，提交已关闭。'
+            : '字段写入未放行：字段编辑出口未接通。数值可读，提交已关闭。'
         ]
       : [])
   ];
@@ -1047,32 +985,13 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           {rowDataSize > 0 && (
             <span className="muted" style={{ fontSize: 11 }}>行大小 {rowDataSize} 字节</span>
           )}
-          {/* 信任确认入口：只在包可用且尚未确认时出现。
-              确认一次后本机后续都放行，所以这里不做常驻按钮 —— 常驻会让用户
-              以为每次编辑都要点一下。已确认时给一个可撤销的轻量指示。 */}
-          {trustState?.ok === true && trustState.trusted === false && (
-            <button
-              type="button"
-              className="primary-action"
-              disabled={trustBusy}
-              onClick={() => void confirmTrust(true)}
-              title={`信任 ${trustState.packageId ?? '元数据包'} ${trustState.packageVersion ?? ''}`}
-            >
-              信任此元数据包以启用字段编辑
-            </button>
-          )}
-          {trustState?.trusted === true && (
-            <button
-              type="button"
-              className="secondary-action"
-              disabled={trustBusy}
-              onClick={() => void confirmTrust(false)}
-              title={trustState.confirmedAt
-                ? `已于 ${trustState.confirmedAt} 确认；点击撤销`
-                : '点击撤销信任'}
-            >
-              字段编辑已启用
-            </button>
+          {/* T5-2：行宽匹配即自动授信，字段编辑不再需要先点信任。
+              「必须先点信任才能改」的路径已去掉；开发者撤销仍可通过主进程
+              param.metadata.setTrust 触发（grok T5：「可留开发者撤销，但不挡编辑」）。 */}
+          {definition !== null && (
+            <span className="muted" style={{ fontSize: 11 }} title="行宽与定义一致即自动授信">
+              字段元数据已自动授信
+            </span>
           )}
         </>
       }
