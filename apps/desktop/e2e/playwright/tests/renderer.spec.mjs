@@ -1843,6 +1843,16 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await expect(behaviorProp.locator('input')).toBeVisible();
   await expect(behaviorProp.locator('input')).toHaveValue('1');
 
+  // T5-5：Fields 中文名 + Description 悬停。字段名显示 Yapped overlay 覆盖出的
+  // 中文名（「攻击力」），名称 span 的 title 优先取 description（中文 Description）。
+  const atkProp = window.locator('.wb-prop', { hasText: '攻击力' });
+  await expect(atkProp).toBeVisible();
+  await expect(atkProp.locator('.wb-prop__name'))
+    .toHaveAttribute('title', '基础攻击力（覆盖自 Yapped defs 的中文名）');
+  // 无覆盖的英文名字段也带 description 悬停（同一个 title 通路）。
+  await expect(behaviorProp.locator('.wb-prop__name'))
+    .toHaveAttribute('title', '行为模式（引导/攻击/防御）');
+
   // 父选区清理：切到 EquipParamWeapon 后字段栏清空回空态。
   await window.locator('.wb-list .wb-row', { hasText: 'EquipParamWeapon' }).click();
   await expect(window.locator('.wb-virtual-row', { hasText: '500' })).toBeVisible();

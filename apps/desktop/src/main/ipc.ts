@@ -3938,7 +3938,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             // 这里做解析会把一个字段变成一棵结构，IPC 面上更容易漂移。
             ...(field.refs ? { refs: field.refs } : {}),
             ...(field.min !== undefined ? { min: field.min } : {}),
-            ...(field.max !== undefined ? { max: field.max } : {})
+            ...(field.max !== undefined ? { max: field.max } : {}),
+            // Yapped 覆盖的中文名/Description 悬停：裸 param 读链与容器
+            // readContainerParamPage/readContainerParamRowIndex 映射保持一致。
+            ...(field.description ? { description: field.description } : {})
           }))
         : null,
       // 枚举定义随字段一起给：界面要把 0/1/2 显示成可读名称，
@@ -4750,7 +4753,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
                 ...(field.enumRef ? { enumRef: field.enumRef } : {}),
                 ...(field.refs ? { refs: field.refs } : {}),
                 ...(field.min !== undefined ? { min: field.min } : {}),
-                ...(field.max !== undefined ? { max: field.max } : {})
+                ...(field.max !== undefined ? { max: field.max } : {}),
+                // 与 readParamDocument / readContainerParamPage 一致：透传 Yapped
+                // 覆盖的中文名/Description 悬停（见 readParamDocument 同款注释）。
+                ...(field.description ? { description: field.description } : {})
               }))
             : null,
           fieldEnums: loadAllWidthMatches && loadAllParamDef?.enums

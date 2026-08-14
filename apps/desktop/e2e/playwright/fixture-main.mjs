@@ -156,7 +156,10 @@ const paramTables = [
 const paramFieldDefsFixture = [
   { id: 'f_id', name: 'id', type: 'u32', offset: 0, size: 4 },
   { id: 'f_name', name: 'name', type: 's8', offset: 4, size: 64 },
-  { id: 'f_behavior', name: 'behavior', type: 'u8', offset: 68, size: 1, enumRef: 'BEHAVIOR' }
+  { id: 'f_behavior', name: 'behavior', type: 'u8', offset: 68, size: 1, enumRef: 'BEHAVIOR', description: '行为模式（引导/攻击/防御）' },
+  // T5-5：Yapped overlay 覆盖出的中文字段名 + Description 悬停。offset 69 是
+  // 512 字节行里未用区域（合成数据），不触碰真实布局。
+  { id: 'f_atk', name: '攻击力', type: 'u8', offset: 69, size: 1, description: '基础攻击力（覆盖自 Yapped defs 的中文名）' }
 ];
 const paramFieldEnumsFixture = [{
   id: 'BEHAVIOR',
