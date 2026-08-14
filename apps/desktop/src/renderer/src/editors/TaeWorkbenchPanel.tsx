@@ -1,44 +1,42 @@
 /**
- * ANIMATION-56B / ANIMATION-56C：Animation 工作台（§10.3）+ TAE 事件 typed 写回。
+ * ANIMATION-56B / T3（2026-08-15）：动作工作台（grok T3，对照 DSAS）。
  *
- * 三栏：`Files / Animations | Timeline / Events | Inspector`。
+ * 三栏：`Animations | 词条 + 详情 | 预览（只读）`。
  *
- * ── 层级 ──
+ * ── T3 重构（行为 + 动画合并为「动作」）──
  *
- * binder → animation → timeline event。数据源是 ANIMATION-56A 的 read-tae-document
- * envelope（TaeDocument），经 projectTaeDocumentPages 投影出 animations / timeline /
- * events 三页，renderer 不维护第二套 native parser。
- *
- * ── 不按 chr/action 目录分类 ──
- *
- * 左栏列的是动画（animId），不是磁盘 chr/action 目录；不为凑四栏造 Tools 空栏。
+ * 左栏列动画 id（hkxName 去扩展，如 a000_003013；无 hkxName 用「动画 N」）。
+ * 中栏列当前动画的词条事件列表——envelope 只有 eventTypeId 与起止时间，词条文本名
+ * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后在中栏下方
+ * 详情列出 Start Frame / End Frame / Id 与能解出的全部字段；解不出的字段写
+ * 「未解码」+ 原始数值，禁止编造 SoundType 含义。右栏是只读 3D 预览：TAE/anibnd
+ * 不是模型文件，本夜不挂伴生 chrbnd 的 FLVER，诚实空态「预览不可用」+ 文档诊断。
+ * 不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
  *
  * ── 事件参数体未解码是刻意边界 ──
  *
  * 每个事件只导出 startTime / endTime / eventTypeId 与计数，paramDataOffset 指向的
- * 参数体一字节未读。UI 不得把「读出了事件在时间轴上的位置」伪装成「读出了
- * hitbox/SFX/VFX 参数」——缺 eventTypeId 逐类布局就不能开放参数编辑。ANIMATION-56C
- * 只开放**已解码字段**：事件时间（update-event-times）与按模板新增事件
- * （insert-event，参数体逐字节拷贝自模板事件）。
+ * 参数体一字节未读（C# 侧刻意边界）。UI 不得把「读出了事件在时间轴上的位置」
+ * 伪装成「读出了 hitbox/SFX/VFX 参数」——缺 eventTypeId 逐类布局就不能开放参数
+ * 编辑。ANIMATION-56C 写回只开放已解码字段（事件时间 / 按模板新增事件）。
+ *
+ * ── 写回（ANIMATION-56C 保留，收进中栏详情）──
+ *
+ * 中栏详情在选中事件时保留「编辑事件时间」与「新增事件（模板）」两个入口，经
+ * preload 的 commitTaeEvent（write-tae-document）提交。mutation 定位用 animId +
+ * 事件表下标：eventIndex 是选中事件在其动画 events 数组内的下标（中栏词条列表
+ * 就是该动画的 events，下标直接可回推）；templateEventIndex 同理用于新增事件。
+ * expectedDocumentHash 取读信封的 sourceHash。提交成功后经 readTaeDocument 重读
+ * 并覆盖本地文档（refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间
+ * 禁用重复提交。写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed
+ * 出口。右栏始终只读。
  *
  * ── invalid time range ──
  *
  * 存在 startTime > endTime 或非有限时间时，C# 侧降 partial 并在 diagnostics 里给
- * TAE_INVALID_TIME_RANGE。本面板必须把 diagnostics 暴露给用户，并把非法时间行标记
- * 出来，不能把「读出来了」伪装成「完整解析」。时间编辑本身可用来修复非法范围；
- * 若提交后仍非法、或时间槽被兄弟事件共享，C# 侧 fail-closed，面板展示诊断并保持
- * 时间轴原状（失败不清空时间轴）。
- *
- * ── 写回（ANIMATION-56C）──
- *
- * Inspector 选中时间轴事件时渲染「编辑事件时间」与「新增事件（模板）」两个入口，
- * 经 preload 的 commitTaeEvent（write-tae-document）提交。mutation 定位用 animId +
- * 事件表下标：eventIndex 是该事件在其动画 events 数组内的下标（timeline 是各动画
- * events 的有序展平，按值匹配可回推）；templateEventIndex 同理用于新增事件。
- * expectedDocumentHash 取读信封的 sourceHash。提交成功后经 readTaeDocument 重读并
- * 覆盖本地文档（refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间
- * 禁用重复提交。写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed
- * 出口。
+ * TAE_INVALID_TIME_RANGE。面板必须把 diagnostics 暴露给用户，并把非法时间行标记
+ * 出来；时间编辑本身可用来修复非法范围。提交后仍非法、或时间槽被兄弟事件共享时
+ * C# 侧 fail-closed，面板展示诊断并保持事件表原状（失败不清空）。
  */
 
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
@@ -58,10 +56,10 @@ import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 
 /** 动画表渲染上限（上游数据截断；列表本身由布局栏滚动承载）。 */
 const ANIMATION_RENDER_LIMIT = 200;
-/** 时间轴事件渲染上限。 */
-const TIMELINE_RENDER_LIMIT = 200;
-/** 事件类型摘要行的上限。 */
-const EVENT_TYPE_RENDER_LIMIT = 20;
+/** 词条事件渲染上限。 */
+const EVENT_RENDER_LIMIT = 200;
+/** 帧率换算（Sekiro 常见 30fps；frame = second × 30）。 */
+const FRAME_RATE = 30;
 
 export interface TaeWorkbenchPanelProps {
   resourceUri: string;
@@ -70,18 +68,16 @@ export interface TaeWorkbenchPanelProps {
   initialSelection?: TaeSelection;
 }
 
-type TaeSelectionKind = 'file' | 'animation' | 'timeline';
+type TaeSelectionKind = 'animation' | 'event';
 
 export interface TaeSelection {
   kind: TaeSelectionKind;
   id: string;
   label: string;
-  /** 选中动画的 animId（timeline 过滤用）。 */
-  animationId?: number;
-  /** 选中时间轴事件在 timeline 页全数组里的索引。 */
-  timelineIndex?: number;
-  /** 选中时间轴事件在其所属动画 events 数组内的下标（写回定位用）。 */
-  eventIndex?: number | undefined;
+  /** 选中动画的 animId。 */
+  animationId: number;
+  /** 选中事件在该动画 events 数组内的下标（写回定位用）。 */
+  eventIndex?: number;
 }
 
 /** 时间编辑草稿（字符串输入态，提交时再解析为 number）。 */
@@ -109,7 +105,18 @@ function fileLabel(resourceUri: string): string {
   return base || resourceUri;
 }
 
-/** 时间轴数值格式化：有限数保留两位小数，非法值明说。 */
+/** 动画 id 显示名：hkxName 去扩展（a000_003013.hkx → a000_003013）；缺省用「动画 N」。 */
+export function animationIdLabel(animation: TaeAnimationWire): string {
+  const base = (animation.hkxName ?? '').replace(/\.hkx$/i, '');
+  return base || `动画 ${animation.animId}`;
+}
+
+/** 秒 → 帧（30fps）。非有限返回 '—'，不编造数值。 */
+export function secondsToFrame(value: number): string {
+  return Number.isFinite(value) ? String(Math.round(value * FRAME_RATE)) : '—';
+}
+
+/** 时间数值格式化：有限数保留两位小数，非法值明说。 */
 function formatTime(value: number): string {
   return Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '非法';
 }
@@ -179,8 +186,9 @@ export function formatWriteDiagnostics(diagnostics: readonly Diagnostic[] | unde
 }
 
 /**
- * Inspector 里的事件编辑区：时间编辑（update-event-times）+ 新增事件
+ * 中栏详情里的写回区：时间编辑（update-event-times）+ 新增事件
  * （insert-event，以当前事件为模板）。参数体未解码，这里不出现任何参数编辑控件。
+ * 收在中栏详情里（T3 后动作工作台无独立 Inspector 第三栏）。
  */
 export interface TaeEventEditorProps {
   row: TaeTimelineEventRow;
@@ -301,7 +309,7 @@ export function TaeEventEditor(props: TaeEventEditorProps): ReactElement {
             onChange={(event) => props.onInsertDraftChange({
               eventTypeIdText: insertTypeText,
               startText: insertStartText,
-              endText: event.target.value
+              endText: insertEndText
             })}
           />
         </span>
@@ -314,6 +322,105 @@ export function TaeEventEditor(props: TaeEventEditorProps): ReactElement {
           </button>
         </span>
       </div>
+    </div>
+  );
+}
+
+/** 中栏详情区：文件/动画/事件级统计明细 + 事件写回（ANIMATION-56C）。 */
+function DetailsSection(props: {
+  selected: TaeSelection | null;
+  document: TaeDocument | null;
+  pages: ReturnType<typeof projectTaeDocumentPages> | null;
+  selectedAnimation: TaeAnimationWire | undefined;
+  selectedAnimationEvents: TaeAnimationWire['events'];
+  selectedEvent: TaeTimelineEventRow | undefined;
+  selectedEventIndex: number | undefined;
+  timeDraft: TaeTimeDraft | null;
+  insertDraft: TaeInsertDraft | null;
+  saving: boolean;
+  writeNotice: TaeWriteNotice | null;
+  onTimeDraftChange: (draft: TaeTimeDraft) => void;
+  onInsertDraftChange: (draft: TaeInsertDraft) => void;
+  onSubmitTime: () => void;
+  onSubmitInsert: () => void;
+}): ReactElement {
+  const { selected, document } = props;
+  if (document === null) return <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看详情。</p>;
+
+  const rows: Array<readonly [string, string]> = (() => {
+    if (selected?.kind === 'event' && props.selectedEvent) {
+      const event = props.selectedEvent;
+      return [
+        ['Start Frame', `${secondsToFrame(event.startTime)}（≈ ${formatTime(event.startTime)}s @ ${FRAME_RATE}fps）`],
+        ['End Frame', `${secondsToFrame(event.endTime)}（≈ ${formatTime(event.endTime)}s @ ${FRAME_RATE}fps）`],
+        ['动画 Id', String(selected.animationId)],
+        ['事件下标', String(props.selectedEventIndex)],
+        ['事件类型 Id', String(event.eventTypeId)],
+        ['时间范围', isInvalidTimeRange(event.startTime, event.endTime) ? '非法（startTime > endTime）' : '合法'],
+        ['参数体', '未解码（envelope 只有类型与起止时间；无词条文本与参数布局）'],
+        ['原始值', `start=${formatTime(event.startTime)} end=${formatTime(event.endTime)} typeId=${event.eventTypeId}`]
+      ];
+    }
+    if (selected?.kind === 'animation' && props.selectedAnimation) {
+      const anim = props.selectedAnimation;
+      return [
+        ['动画 Id', String(anim.animId)],
+        ['事件数', String(anim.eventCount)],
+        ['组数', String(anim.groupCount)],
+        ['时间数', String(anim.timesCount)],
+        ['HKX 名称', anim.hkxName ?? '—'],
+        ['事件时间表', anim.eventsTruncated ? '已截断（未全量）' : '完整（本动画）'],
+        ['参数体', '未解码（能力边界；事件参数体不开放编辑）']
+      ];
+    }
+    return [
+      ['格式', document.format ?? 'TAE'],
+      ['版本', document.version ?? '—'],
+      ['动画数', String(props.pages?.animations.animationCount ?? 0)],
+      ['事件总数', String(props.pages?.events.totalEventCount ?? 0)],
+      ['事件组总数', String(props.pages?.events.totalGroupCount ?? 0)],
+      ['事件类型数', String(props.pages?.events.eventTypeCount ?? 0)],
+      ['authority', document.authority ?? '—']
+    ];
+  })();
+
+  const detailTitle = selected?.kind === 'event'
+    ? (selected.label ?? '事件详情')
+    : selected?.kind === 'animation'
+      ? '动画详情'
+      : '文件统计';
+
+  return (
+    <div className="wb-list" data-testid="tae-details">
+      <div className="wb-list__group-label">{detailTitle}</div>
+      <div className="wb-props">
+        {rows.map(([name, value]) => (
+          <div key={name} className="wb-prop">
+            <span className="wb-prop__name">{name}</span>
+            <span className="wb-prop__value wb-prop__value--readonly">{value}</span>
+          </div>
+        ))}
+      </div>
+      {selected?.kind === 'event' && props.selectedEvent ? (
+        <TaeEventEditor
+          row={{ animId: selected.animationId, ...props.selectedEvent }}
+          eventIndex={props.selectedEventIndex}
+          timeDraft={props.timeDraft}
+          insertDraft={props.insertDraft}
+          saving={props.saving}
+          notice={props.writeNotice}
+          onTimeDraftChange={props.onTimeDraftChange}
+          onInsertDraftChange={props.onInsertDraftChange}
+          onSubmitTime={props.onSubmitTime}
+          onSubmitInsert={props.onSubmitInsert}
+        />
+      ) : (
+        <p className="wb-empty" data-testid="tae-write-hint">
+          {selected?.kind === 'animation'
+            ? '选中词条事件后，可编辑事件时间（update-event-times）或按当前事件为模板新增事件（insert-event）。事件参数体未解码，不开放参数编辑。'
+            : '左栏选动画、中栏选词条事件后，可编辑事件时间或按模板新增事件。'}
+        </p>
+      )}
     </div>
   );
 }
@@ -345,9 +452,9 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     setRefreshedDocument(null);
   }, [props.resourceUri, props.data]);
 
-  // 离开时间轴事件选择时清空编辑草稿与写回提示（避免跨选区残留）。
+  // 离开事件选择时清空编辑草稿与写回提示（避免跨选区残留）。
   useEffect(() => {
-    if (selected?.kind !== 'timeline') {
+    if (selected?.kind !== 'event') {
       setTimeDraft(null);
       setInsertDraft(null);
       setWriteNotice(null);
@@ -355,12 +462,12 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   }, [selected]);
 
   const animations: TaeAnimationWire[] = pages?.animations.animations ?? [];
-  const timelineRows = pages?.timeline.events ?? [];
   const eventsPage = pages?.events;
 
-  const selectedAnimationId = selected?.kind === 'animation' || selected?.kind === 'timeline'
-    ? (selected.animationId ?? null)
-    : null;
+  const selectedAnimation = selected?.kind === 'animation' || selected?.kind === 'event'
+    ? animations.find((animation) => animation.animId === selected.animationId)
+    : undefined;
+  const selectedAnimationEvents = selectedAnimation?.events ?? [];
 
   const visibleAnimations = animations.slice(0, ANIMATION_RENDER_LIMIT);
   const animationsTruncation = formatListTruncation({
@@ -369,24 +476,11 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     noun: '个动画'
   });
 
-  const visibleTimeline = timelineRows
-    .map((row, index) => ({ row, index }))
-    .filter(({ row }) => selectedAnimationId === null || row.animId === selectedAnimationId)
-    .slice(0, TIMELINE_RENDER_LIMIT);
-  const filteredTimelineCount = timelineRows
-    .filter((row) => selectedAnimationId === null || row.animId === selectedAnimationId)
-    .length;
-  const timelineTruncation = formatListTruncation({
-    total: filteredTimelineCount,
-    shown: visibleTimeline.length,
-    noun: '个时间轴事件'
-  });
-
-  const visibleEventTypes = (eventsPage?.eventTypes ?? []).slice(0, EVENT_TYPE_RENDER_LIMIT);
-  const eventTypesTruncation = formatListTruncation({
-    total: eventsPage?.eventTypeCount ?? 0,
-    shown: visibleEventTypes.length,
-    noun: '种事件类型'
+  const visibleEvents = selectedAnimationEvents.slice(0, EVENT_RENDER_LIMIT);
+  const eventsTruncation = formatListTruncation({
+    total: selectedAnimationEvents.length,
+    shown: visibleEvents.length,
+    noun: '个词条事件'
   });
 
   const invalidRangeCount = (document?.diagnostics ?? [])
@@ -396,35 +490,37 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   // 具名切片而非连写：listTruncation gate 把裸 `.slice(0, N).map(` 视为静默截断。
   const visibleDiagnostics = (document?.diagnostics ?? []).slice(0, 8);
 
-  function selectFile(): void {
-    setSelected({ kind: 'file', id: 'file', label: fileLabel(props.resourceUri) });
-  }
+  const selectedEventIndex = selected?.kind === 'event'
+    ? (selected.eventIndex ?? undefined)
+    : undefined;
+  const selectedEvent = selected?.kind === 'event'
+    ? selectedAnimationEvents[selectedEventIndex ?? -1]
+    : undefined;
 
   function selectAnimation(animation: TaeAnimationWire): void {
     setSelected({
       kind: 'animation',
       id: `anim-${animation.animId}`,
-      label: `动画 ${animation.animId}`,
+      label: animationIdLabel(animation),
       animationId: animation.animId
     });
   }
 
-  function selectTimeline(index: number): void {
-    const row = timelineRows[index];
-    if (!row) return;
+  function selectEvent(index: number): void {
+    const event = selectedAnimationEvents[index];
+    if (!event || !selectedAnimation) return;
     setSelected({
-      kind: 'timeline',
-      id: `tl-${index}`,
-      label: `事件 ${row.eventTypeId} @${formatTime(row.startTime)}s`,
-      animationId: row.animId,
-      timelineIndex: index,
-      eventIndex: eventIndexOfTimelineRow(timelineRows, index)
+      kind: 'event',
+      id: `ev-${selectedAnimation.animId}-${index}`,
+      label: `事件类型 ${event.eventTypeId} @${formatTime(event.startTime)}s`,
+      animationId: selectedAnimation.animId,
+      eventIndex: index
     });
-    setTimeDraft({ startText: String(row.startTime), endText: String(row.endTime) });
+    setTimeDraft({ startText: String(event.startTime), endText: String(event.endTime) });
     setInsertDraft({
-      eventTypeIdText: String(row.eventTypeId),
-      startText: String(row.startTime),
-      endText: String(row.endTime)
+      eventTypeIdText: String(event.eventTypeId),
+      startText: String(event.startTime),
+      endText: String(event.endTime)
     });
     setWriteNotice(null);
   }
@@ -482,7 +578,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       } else {
         setWriteNotice({
           kind: 'error',
-          message: `${formatWriteDiagnostics(result.diagnostics)}，已回滚，时间轴保持原状。`
+          message: `${formatWriteDiagnostics(result.diagnostics)}，已回滚，事件表保持原状。`
         });
       }
     } catch (error) {
@@ -494,13 +590,10 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
 
   /** 提交 update-event-times：选中事件的 animId + 事件表下标 + 新起止时间。 */
   async function submitTimeEdit(): Promise<void> {
-    const row = selected?.kind === 'timeline' ? timelineRows[selected.timelineIndex ?? -1] : undefined;
-    if (!row || selected?.kind !== 'timeline' || !timeDraft) return;
-    if (selected.eventIndex === undefined) {
-      setWriteNotice({ kind: 'error', message: '无法确定该事件在动画事件表中的下标，写入被拒绝。' });
-      return;
-    }
-    const mutation = buildUpdateEventTimesMutation(row, selected.eventIndex, timeDraft);
+    if (selected?.kind !== 'event' || !selectedEvent || selectedEventIndex === undefined) return;
+    if (!timeDraft) return;
+    const row: TaeTimelineEventRow = { animId: selected.animationId, ...selectedEvent };
+    const mutation = buildUpdateEventTimesMutation(row, selectedEventIndex, timeDraft);
     if (!mutation) {
       setWriteNotice({ kind: 'error', message: '时间必须是有限数字。' });
       return;
@@ -510,13 +603,10 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
 
   /** 提交 insert-event：以选中事件为模板追加新事件。 */
   async function submitInsert(): Promise<void> {
-    const row = selected?.kind === 'timeline' ? timelineRows[selected.timelineIndex ?? -1] : undefined;
-    if (!row || selected?.kind !== 'timeline' || !insertDraft) return;
-    if (selected.eventIndex === undefined) {
-      setWriteNotice({ kind: 'error', message: '无法确定模板事件在动画事件表中的下标，写入被拒绝。' });
-      return;
-    }
-    const mutation = buildInsertEventMutation(row, selected.eventIndex, insertDraft);
+    if (selected?.kind !== 'event' || !selectedEvent || selectedEventIndex === undefined) return;
+    if (!insertDraft) return;
+    const row: TaeTimelineEventRow = { animId: selected.animationId, ...selectedEvent };
+    const mutation = buildInsertEventMutation(row, selectedEventIndex, insertDraft);
     if (!mutation) {
       setWriteNotice({ kind: 'error', message: '事件类型与时间必须是有限数字。' });
       return;
@@ -524,90 +614,38 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     await commitMutations([mutation], '已新增事件并重读验证。');
   }
 
-  /** Inspector 内容（按选中项）。 */
-  function inspectorRows(): Array<readonly [string, string]> {
-    if (selected?.kind === 'timeline') {
-      const row = selected.timelineIndex === undefined ? undefined : timelineRows[selected.timelineIndex];
-      if (!row) return [['事件', '—']];
-      return [
-        ['动画 ID', String(row.animId)],
-        ['开始时间', `${formatTime(row.startTime)}s`],
-        ['结束时间', `${formatTime(row.endTime)}s`],
-        ['事件类型 ID', String(row.eventTypeId)],
-        ['时间范围', isInvalidTimeRange(row.startTime, row.endTime) ? '非法（startTime > endTime）' : '合法'],
-        ['参数体', '未解码（ANIMATION-56C 只开放时间/类型编辑，无参数布局）']
-      ];
-    }
-    if (selected?.kind === 'animation') {
-      const animation = animations.find((item) => item.animId === selected.animationId);
-      if (!animation) return [['动画', '—']];
-      return [
-        ['动画 ID', String(animation.animId)],
-        ['事件数', String(animation.eventCount)],
-        ['组数', String(animation.groupCount)],
-        ['时间数', String(animation.timesCount)],
-        ['HKX 名称', animation.hkxName ?? '—'],
-        ['事件时间表', animation.eventsTruncated ? '已截断（未全量）' : '完整（本动画）'],
-        ['参数体', '未解码（能力边界；事件参数体不开放编辑）']
-      ];
-    }
-    // file / 未选中：文件级统计。
-    return [
-      ['格式', document?.format ?? 'TAE'],
-      ['版本', document?.version ?? '—'],
-      ['动画数', String(pages?.animations.animationCount ?? 0)],
-      ['事件总数', String(eventsPage?.totalEventCount ?? 0)],
-      ['事件组总数', String(eventsPage?.totalGroupCount ?? 0)],
-      ['事件类型数', String(eventsPage?.eventTypeCount ?? 0)],
-      ['authority', authority ?? '—']
-    ];
-  }
-
-  const selectedTimelineRow = selected?.kind === 'timeline'
-    ? (selected.timelineIndex === undefined ? undefined : timelineRows[selected.timelineIndex])
-    : null;
-
   return (
     <WorkbenchLayout
-      label="Animation 工作台"
+      label="动作工作台"
       columns={[
         {
-          id: 'files-animations',
-          title: 'Files / Animations',
+          id: 'animations',
+          title: 'Animations',
           hint: `${pages?.animations.animationCount ?? 0} animations`,
-          initialFlex: 0.28,
+          initialFlex: 0.3,
           minWidth: 200,
           children: (
             <div className="wb-list">
               {document === null ? (
-                <p className="wb-empty">选择 .tae 文件以查看动画事件数据。</p>
+                <p className="wb-empty">选择 .tae / .anibnd.dcx 文件以查看动画事件数据。</p>
               ) : (
                 <>
-                  <div className="wb-list__group-label">Files</div>
-                  <div
-                    className="wb-row"
-                    {...selectableRowAttributes({
-                      selected: selected?.kind === 'file',
-                      isTabEntry: isRowTabEntry(0, selected !== null),
-                      onSelect: selectFile
-                    })}
-                  >
-                    <span className="wb-row__name">{fileLabel(props.resourceUri)}</span>
-                  </div>
-                  <div className="wb-list__group-label">Animations</div>
+                  <div className="wb-list__group-label">动画</div>
                   {visibleAnimations.map((animation) => (
                     <div
                       key={animation.animId}
                       className="wb-row"
                       {...selectableRowAttributes({
-                        selected: selected?.kind === 'animation' && selected.animationId === animation.animId,
-                        isTabEntry: false,
+                        selected: selected?.kind !== 'event'
+                          && selected?.kind === 'animation'
+                          && selected.animationId === animation.animId,
+                        isTabEntry: isRowTabEntry(0, selected !== null),
                         onSelect: () => selectAnimation(animation)
                       })}
                     >
-                      <span className="wb-row__name">动画 {animation.animId}</span>
+                      <span className="wb-row__name">{animationIdLabel(animation)}</span>
                       <span className="wb-row__meta">
-                        {animation.hkxName ?? `${animation.eventCount} 事件`}
+                        {animation.hkxName ? `id ${animation.animId}` : `${animation.eventCount} 事件`}
                       </span>
                     </div>
                   ))}
@@ -620,95 +658,91 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           )
         },
         {
-          id: 'timeline-events',
-          title: 'Timeline / Events',
-          hint: `${timelineRows.length} timeline events`,
-          initialFlex: 0.32,
-          minWidth: 220,
+          id: 'events',
+          title: 'Events / 词条',
+          hint: selectedAnimation ? `${selectedAnimationEvents.length} events` : '—',
+          initialFlex: 0.36,
+          minWidth: 240,
           children: (
             <div className="wb-list">
-              {document === null && <p className="wb-empty">先选择 .tae 文件。</p>}
-              {document !== null && (
+              {document === null && <p className="wb-empty">先选择 .tae / .anibnd.dcx 文件。</p>}
+              {document !== null && selectedAnimation === undefined && (
+                <p className="wb-empty" data-testid="tae-events-pick-animation">
+                  选中左侧动画以查看其词条事件列表。
+                </p>
+              )}
+              {document !== null && selectedAnimation !== undefined && (
                 <>
-                  <div className="wb-list__group-label">Timeline</div>
-                  {selectedAnimationId !== null && (
-                    <p className="muted" style={{ fontSize: 11 }}>
-                      已按动画 {selectedAnimationId} 过滤
-                    </p>
-                  )}
-                  {visibleTimeline.map(({ row, index }) => {
-                    const invalid = isInvalidTimeRange(row.startTime, row.endTime);
+                  <div className="wb-list__group-label">
+                    词条 · 动画 {selectedAnimation.animId}
+                    {selectedAnimation.hkxName ? `（${animationIdLabel(selectedAnimation)}）` : ''}
+                  </div>
+                  {visibleEvents.map((event, index) => {
+                    const invalid = isInvalidTimeRange(event.startTime, event.endTime);
                     return (
                       <div
-                        key={`${row.animId}-${row.startTime}-${row.endTime}-${row.eventTypeId}-${index}`}
+                        key={`${selectedAnimation.animId}-${index}`}
                         className={invalid ? 'wb-row wb-row--failed' : 'wb-row'}
                         {...selectableRowAttributes({
-                          selected: selected?.kind === 'timeline' && selected.timelineIndex === index,
+                          selected: selected?.kind === 'event' && selected.eventIndex === index,
                           isTabEntry: false,
-                          onSelect: () => selectTimeline(index)
+                          onSelect: () => selectEvent(index)
                         })}
                       >
-                        <span className="wb-row__name">
-                          {formatTime(row.startTime)}s → {formatTime(row.endTime)}s
-                        </span>
+                        <span className="wb-row__name">事件类型 {event.eventTypeId}</span>
                         <span className="wb-row__meta">
-                          类型 {row.eventTypeId}
+                          {formatTime(event.startTime)}s → {formatTime(event.endTime)}s
                           {invalid ? ' · 非法时间' : ''}
                         </span>
                       </div>
                     );
                   })}
-                  {timelineTruncation && (
-                    <p className="muted" data-testid="tae-timeline-truncation">{timelineTruncation}</p>
+                  {eventsTruncation && (
+                    <p className="muted" data-testid="tae-events-truncation">{eventsTruncation}</p>
                   )}
-                  {visibleTimeline.length === 0 && (
-                    <p className="wb-empty">没有可显示的时间轴事件。</p>
-                  )}
-                  <div className="wb-list__group-label">Events</div>
-                  <div className="wb-row">
-                    <span className="wb-row__name">事件总数</span>
-                    <span className="wb-row__meta">{eventsPage?.totalEventCount ?? 0}</span>
-                  </div>
-                  <div className="wb-row">
-                    <span className="wb-row__name">事件组总数</span>
-                    <span className="wb-row__meta">{eventsPage?.totalGroupCount ?? 0}</span>
-                  </div>
-                  <div className="wb-list__group-label">事件类型（distinct）</div>
-                  {visibleEventTypes.map((eventTypeId) => (
-                    <div key={eventTypeId} className="wb-row">
-                      <span className="wb-row__name">事件类型 {eventTypeId}</span>
-                    </div>
-                  ))}
-                  {eventTypesTruncation && (
-                    <p className="muted" data-testid="tae-events-truncation">{eventTypesTruncation}</p>
+                  {visibleEvents.length === 0 && (
+                    <p className="wb-empty">该动画没有可显示的词条事件。</p>
                   )}
                 </>
               )}
+              {/* 中栏下方：选中后详情 + 写回（T3：详情收进中栏，无 Inspector 第三栏）。 */}
+              <div className="wb-list__group-label">详情</div>
+              <DetailsSection
+                selected={selected}
+                document={document}
+                pages={pages}
+                selectedAnimation={selectedAnimation}
+                selectedAnimationEvents={selectedAnimationEvents}
+                selectedEvent={selectedEvent}
+                selectedEventIndex={selectedEventIndex}
+                timeDraft={timeDraft}
+                insertDraft={insertDraft}
+                saving={saving}
+                writeNotice={writeNotice}
+                onTimeDraftChange={(draft) => setTimeDraft(draft)}
+                onInsertDraftChange={(draft) => setInsertDraft(draft)}
+                onSubmitTime={() => void submitTimeEdit()}
+                onSubmitInsert={() => void submitInsert()}
+              />
             </div>
           )
         },
         {
-          id: 'inspector',
-          title: 'Inspector',
-          ...(selected ? { hint: selected.label } : {}),
-          initialFlex: 0.4,
-          minWidth: 260,
+          id: 'preview',
+          title: '预览（只读）',
+          initialFlex: 0.34,
+          minWidth: 220,
           children: (
             <div className="wb-list">
-              {document === null && <p className="wb-empty">选择 .tae 文件后查看详情。</p>}
+              {document === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
               {document !== null && (
                 <>
-                  <div className="wb-list__group-label">
-                    {selected ? selected.label : '文件统计'}
-                  </div>
-                  <div className="wb-props">
-                    {inspectorRows().map(([name, value]) => (
-                      <div key={name} className="wb-prop">
-                        <span className="wb-prop__name">{name}</span>
-                        <span className="wb-prop__value wb-prop__value--readonly">{value}</span>
-                      </div>
-                    ))}
-                  </div>
+                  <p className="wb-empty" data-testid="tae-preview-unavailable">
+                    预览不可用
+                  </p>
+                  <p className="muted" style={{ fontSize: 11 }}>
+                    TAE / anibnd 是动作数据文件，不是模型；本夜不挂伴生 chrbnd 的 FLVER 预览。
+                  </p>
                   {isPartial && invalidRangeCount > 0 && (
                     <details className="tae-partial" data-testid="tae-partial-diagnostics">
                       <summary>
@@ -724,23 +758,9 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       </ul>
                     </details>
                   )}
-                  <div className="wb-list__group-label">写回</div>
-                  {selectedTimelineRow ? (
-                    <TaeEventEditor
-                      row={selectedTimelineRow}
-                      eventIndex={selected?.kind === 'timeline' ? selected.eventIndex : undefined}
-                      timeDraft={timeDraft}
-                      insertDraft={insertDraft}
-                      saving={saving}
-                      notice={writeNotice}
-                      onTimeDraftChange={(draft) => setTimeDraft(draft)}
-                      onInsertDraftChange={(draft) => setInsertDraft(draft)}
-                      onSubmitTime={() => void submitTimeEdit()}
-                      onSubmitInsert={() => void submitInsert()}
-                    />
-                  ) : (
-                    <p className="wb-empty" data-testid="tae-write-hint">
-                      选中 Timeline 的时间轴事件后，可编辑事件时间（update-event-times）或按当前事件为模板新增事件（insert-event）。事件参数体未解码，不开放参数编辑。
+                  {document.diagnostics.length > 0 && !(isPartial && invalidRangeCount > 0) && (
+                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-diagnostics">
+                      {document.diagnostics.length} 条文档诊断（见底部日志）。
                     </p>
                   )}
                 </>
@@ -751,7 +771,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       ]}
       toolbar={
         <>
-          <span className="crumb">Animation · {fileLabel(props.resourceUri)}</span>
+          <span className="crumb">动作 · {fileLabel(props.resourceUri)}</span>
           {document && (
             <span className="muted" style={{ fontSize: 11 }}>
               {pages?.animations.animationCount ?? 0} anims · {eventsPage?.totalEventCount ?? 0} events · {authority}

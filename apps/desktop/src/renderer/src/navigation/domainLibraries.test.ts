@@ -55,6 +55,37 @@ describe('domainLibraries', () => {
   it('显示名去掉复合扩展', () => {
     assert.equal(libraryDisplayName('param/gameparam/gameparam.parambnd.dcx'), 'gameparam');
     assert.equal(libraryDisplayName('event/common.emevd'), 'common');
+    assert.equal(libraryDisplayName('chr/c5030/c5030.anibnd.dcx'), 'c5030');
+    assert.equal(libraryDisplayName('action/c5030.tae'), 'c5030');
+  });
+
+  it('T3：动作域（behavior）侧栏列 anibnd|tae，esd/behbnd/chrbnd 不进动作', () => {
+    const files = [
+      { relativePath: 'chr/c5030/c5030.anibnd.dcx' },
+      { relativePath: 'action/c5030.tae' },
+      { relativePath: 'chr/c5030/c5030.chrbnd.dcx' },
+      { relativePath: 'ai/m10.esd' },
+      { relativePath: 'chr/c5030/c5030.behbnd.dcx' },
+      { relativePath: 'event/common.emevd' },
+      { relativePath: 'other/generic.bnd.dcx' }
+    ];
+    assert.deepEqual(
+      filesForDomain('behavior', files).map((file) => file.relativePath),
+      ['chr/c5030/c5030.anibnd.dcx', 'action/c5030.tae'],
+      '动作侧栏只列 anibnd 与 tae'
+    );
+    assert.deepEqual(
+      filesForDomain('animation', files).map((file) => file.relativePath),
+      ['chr/c5030/c5030.anibnd.dcx', 'action/c5030.tae'],
+      '隐藏的 animation 域保留同口径（可路由）'
+    );
+    // anibnd/chrbnd 都是复合后缀（\.chrbnd/\.anibnd 不匹配字面 \.bnd），
+    // 不进通用容器域侧栏；字面 .bnd 仍进容器域。
+    assert.deepEqual(
+      filesForDomain('container', files).map((file) => file.relativePath),
+      ['other/generic.bnd.dcx'],
+      'anibnd 不进容器域（T3 走动作）；chrbnd 也不进（保持现状）'
+    );
   });
 
   it('参数域分组：PARAM 与 GPARAM 两个常驻组，GPARAM 默认折叠且带 bank 数', () => {

@@ -2015,7 +2015,8 @@ export function App(): ReactElement {
     setLastSavedText(text);
     setMsgRows(extractMsgRows(nextPreview));
     // Load TAE/ESD/FLVER/TPF document data via typed preload IPC (V0.6 只读预览族)。
-    if (file.relativePath.endsWith('.tae')) {
+    // T3：`.tae` 与 `.anibnd.dcx` 都走 TAE 读链（动作域；anibnd 由 Bridge 提取内部 TAE）。
+    if (/\.(tae|anibnd)(\.dcx)?$/i.test(file.relativePath)) {
       const result = await bridge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setTaeData(result.data);
     }

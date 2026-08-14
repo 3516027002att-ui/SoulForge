@@ -44,10 +44,16 @@ export function isScriptLibraryPath(relativePath: string): boolean {
   return /\.(luabnd|hks|lua)(\.dcx)?$/i.test(relativePath);
 }
 
+/**
+ * 行为/动作域：T3（2026-08-15）行为 + 动画合并为「动作」，侧栏列
+ * `anibnd|tae`（与隐藏域 animation 同口径）。behbnd/esd/hkxbnd 不再进
+ * 动作侧栏，需要时走「文件」域（grok T3）。
+ */
 export function isBehaviorLibraryPath(relativePath: string): boolean {
-  return /\.(esd|hkxbnd|behbnd)(\.dcx)?$/i.test(relativePath);
+  return /\.(tae|anibnd)(\.dcx)?$/i.test(relativePath);
 }
 
+/** 动画域（T3 后顶栏隐藏，保留给隐藏域/测试）。 */
 export function isAnimationLibraryPath(relativePath: string): boolean {
   return /\.(tae|anibnd)(\.dcx)?$/i.test(relativePath);
 }

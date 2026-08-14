@@ -227,6 +227,11 @@ function editorIdForLegacy(
   // 命令面板强制「以 BND4 容器打开」：用户显式选择，优先于格式推断。
   if (input.bnd4Forced === true) return 'container';
 
+  // T3（2026-08-15）：`*.anibnd.dcx` / `*.tae` 走 TAE 工作台（行为 + 动画合并
+  // 后的「动作」域）。anibnd 的 formatKind 是 'bnd'，必须在 formatKind switch
+  // 之前拦截，否则会落进 BND4 通用容器页（grok T3 明确禁止 anibnd 走容器页）。
+  if (/\.(anibnd|tae)(\.dcx)?$/i.test(file.relativePath)) return 'tae';
+
   switch (file.formatKind) {
     case 'param': return 'param-container';
     case 'fmg': return 'text';
@@ -254,7 +259,7 @@ function editorIdForLegacy(
   if (path.endsWith('.emevd')) return 'event';
   if (path.endsWith('.msb')) return 'map';
   if (path.endsWith('.lua') || path.endsWith('.hks') || path.endsWith('.luabnd.dcx')) return 'script';
-  if (path.endsWith('.tae')) return 'tae';
+  // `.tae` 已被上方 T3 早返拦截（与 `.anibnd.dcx` 一并走 TAE 工作台）。
   if (path.endsWith('.esd')) return 'esd';
   if (path.endsWith('.flver')) return 'flver';
   if (path.endsWith('.tpf.dcx') || path.endsWith('.tpf')) return 'tpf';

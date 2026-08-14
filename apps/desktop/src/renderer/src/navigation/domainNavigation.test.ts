@@ -36,11 +36,13 @@ describe('buildDomainSummaries', () => {
   it('领域集合与顺序来自 shared EDITOR_DOMAIN_IDS（§3.2 固定顺序）', () => {
     const summaries = buildDomainSummaries({ readContract: new Set(), runtimeReady: true });
     assert.deepEqual(summaries.map((entry) => entry.domain), [...EDITOR_DOMAIN_IDS]);
-    // §3.2 固定顺序快照：开始 | PARAM | GPARAM | 文本 | 事件 | 地图 | 脚本 | 行为
+    // §3.2 固定顺序快照：开始 | PARAM | GPARAM | 文本 | 事件 | 地图 | 脚本 | 动作
     // | 动画 | 模型 | 纹理 | 材质 | VFX | 容器 | 文件
+    // T3（2026-08-15）：behavior 标签为「动作」；animation 枚举保留（不删 shared
+    // EDITOR_DOMAIN_IDS），顶栏经 visibility 隐藏。
     assert.deepEqual(summaries.map((entry) => entry.label), [
       '开始', 'PARAM', 'GPARAM', '文本', '事件', '地图', '脚本',
-      '行为', '动画', '模型', '纹理', '材质', 'VFX', '容器', '文件'
+      '动作', '动画', '模型', '纹理', '材质', 'VFX', '容器', '文件'
     ]);
   });
 
@@ -81,15 +83,24 @@ describe('buildDomainSummaries', () => {
     for (const entry of summaries) assert.equal(entry.defaultTarget, null);
   });
 
-  it('R1 裁定：GPARAM 从领域顶栏隐藏，其余领域 visible（并入左侧「参数」逻辑库）', () => {
+  it('R1 + T3 裁定：GPARAM 与动画从领域顶栏隐藏，其余 visible（合并入「参数」「动作」）', () => {
     const summaries = buildDomainSummaries({ readContract: new Set(), runtimeReady: true });
     for (const entry of summaries) {
-      if (entry.domain === 'gparam') {
-        assert.equal(entry.visibility, 'hidden', 'GPARAM 必须按 R1 裁定从顶栏隐藏');
+      if (entry.domain === 'gparam' || entry.domain === 'animation') {
+        assert.equal(entry.visibility, 'hidden', `${entry.domain} 必须按 R1/T3 裁定从顶栏隐藏`);
       } else {
         assert.equal(entry.visibility, 'visible');
       }
     }
+  });
+
+  it('T3 裁定：behavior 的中文标签是「动作」（行为 + 动画合并）', () => {
+    const summaries = buildDomainSummaries({ readContract: new Set(), runtimeReady: true });
+    const behavior = summaries.find((entry) => entry.domain === 'behavior');
+    const animation = summaries.find((entry) => entry.domain === 'animation');
+    assert.equal(behavior?.label, '动作');
+    assert.equal(behavior?.visibility, 'visible', '动作（behavior）必须在顶栏可见');
+    assert.equal(animation?.visibility, 'hidden', '动画（animation）必须从顶栏隐藏');
   });
 
   it('domainLabel 覆盖全部领域，不返回 undefined', () => {

@@ -35,7 +35,7 @@ const DOMAIN_LABELS: Record<EditorDomainId, string> = {
   event: '事件',
   map: '地图',
   script: '脚本',
-  behavior: '行为',
+  behavior: '动作',
   animation: '动画',
   model: '模型',
   texture: '纹理',
@@ -68,8 +68,12 @@ export interface BuildDomainSummariesInput {
  * 1. 领域集合 = shared EDITOR_DOMAIN_IDS 的固定顺序（§3.2 领域顺序固定，
  *    不因文件内容增减而变）；
  * 2. capability 按「read contract 已注册 × 运行条件满足」判定（§3.2）；
- * 3. visibility 按用户裁定（R1，2026-08-14）投影：GPARAM 从领域顶栏移除，
- *    与 PARAM 合并进左侧「参数」逻辑库（见 front-end.md §3.2 的裁定投影）。
+ * 3. visibility 按用户裁定投影：
+ *    - R1（2026-08-14）：GPARAM 从领域顶栏移除，与 PARAM 合并进左侧
+ *      「参数」逻辑库（见 front-end.md §3.2 的裁定投影）。
+ *    - T3（2026-08-15）：行为 + 动画合并为「动作」。顶栏只保留「动作」
+ *      （behavior 标签即「动作」，侧栏列 anibnd/tae）；animation 从顶栏隐藏，
+ *      与 GPARAM 同口径（域仍可路由，只是不在顶栏/命令面板提供一级入口）。
  *
  * defaultTarget 本卡恒为 null：SHELL-09 只完成外壳契约，逻辑库 document 句柄
  * 由后续 read 卡（PARAM-10A 等）经 IPC 提供；在拿到真实 EditorCatalogSummary
@@ -86,10 +90,11 @@ export function buildDomainSummaries(input: BuildDomainSummariesInput): readonly
     return {
       domain,
       label: DOMAIN_LABELS[domain],
-      // R1 裁定：顶栏删除独立「GPARAM」；PARAM 与 GPARAM 都进左侧「参数」逻辑库。
-      // 域本身仍可路由（打开 gparam 文件时工作台照常），只是不在顶栏/命令面板
+      // R1 + T3 裁定：顶栏删除独立「GPARAM」与「动画」；GPARAM 并入左侧
+      // 「参数」逻辑库，动画并入「动作」（行为标签）。域本身仍可路由
+      // （打开 gparam/anibnd/tae 文件时工作台照常），只是不在顶栏/命令面板
       // 提供一级入口。这不是 display:none 藏 UI —— 规范投影已同步（front-end.md）。
-      visibility: domain === 'gparam' ? 'hidden' : 'visible',
+      visibility: domain === 'gparam' || domain === 'animation' ? 'hidden' : 'visible',
       capability,
       defaultTarget: null
     };

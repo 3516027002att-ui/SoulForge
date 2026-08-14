@@ -310,6 +310,36 @@ describe('selectEditor', () => {
     }
   });
 
+  it('T3：anibnd/tae 走 TAE 工作台，anibnd 不落 BND4 通用容器页', () => {
+    // anibnd 的 formatKind 是 'bnd'，正是此前落进 'container' 的那条路径。
+    // T3 必须在 formatKind switch 之前拦截为 'tae'（grok T3）。
+    assert.equal(
+      selectEditor(input({
+        resourceMode: 'behavior',
+        selectedFile: file('chr/c5030/c5030.anibnd.dcx', 'chr', 'bnd', '.anibnd.dcx')
+      })),
+      'tae',
+      'c5030.anibnd.dcx 应走 TAE 工作台而不是 BND4 容器'
+    );
+    assert.equal(
+      selectEditor(input({
+        resourceMode: 'behavior',
+        selectedFile: file('action/c5030.tae', 'action', 'unknown', '.tae')
+      })),
+      'tae',
+      'loose .tae 仍走 TAE 工作台'
+    );
+    // chrbnd 不进动作：仍落 BND4 容器页（「chrbnd 仍走模型/容器」）。
+    assert.equal(
+      selectEditor(input({
+        resourceMode: 'files',
+        selectedFile: file('chr/c5030/c5030.chrbnd.dcx', 'chr', 'bnd', '.chrbnd.dcx')
+      })),
+      'container',
+      'chrbnd 不得被当成动作打开'
+    );
+  });
+
   it('无专属编辑器的容器落进通用容器视图', () => {
     assert.equal(
       selectEditor(input({
@@ -374,6 +404,8 @@ describe('selectEditor', () => {
       file('script/luabnd.dcx', 'script', 'lua'),
       file('sfx/f0000.sfxbnd.dcx', 'sfx'),
       file('chr/c1000.tae', 'chr', 'unknown', '.tae'),
+      file('chr/c5030/c5030.anibnd.dcx', 'chr', 'bnd', '.anibnd.dcx'),
+      file('chr/c5030/c5030.chrbnd.dcx', 'chr', 'bnd', '.chrbnd.dcx'),
       file('other/x.bin', 'other', 'unknown', '.bin')
     ];
     const semanticFiles = [
