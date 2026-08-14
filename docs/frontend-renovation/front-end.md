@@ -285,9 +285,9 @@ Smithbox 顶栏还有本文没有做成一等域的编辑器。映射固定如�
 
 | Smithbox 顶栏 | SoulForge 域 | 说明 |
 | --- | --- | --- |
-| Param Editor | `param` | |
-| Gparam Editor | `gparam` | 旧名 Graphics Editor 视为同一编辑器 |
-| Text Editor | `text` | |
+| Param Editor | `param` | R1 裁定（2026-08-14）：左侧「参数」逻辑库同时承载 PARAM 容器与 GPARAM bank |
+| Gparam Editor | `gparam` | 工作台拓扑不变（§2.5 五区）；一级入口并入左侧「参数」逻辑库，领域顶栏不再单列 |
+| Text Editor | `text` | R2 裁定：默认只列出简中（`zhocn`）；英语/日语整包延期 V0.6 |
 | Map Editor | `map` | |
 | Model Editor | `model` | |
 | Texture Viewer | `texture` | |
@@ -311,7 +311,7 @@ Smithbox 顶栏还有本文没有做成一等域的编辑器。映射固定如�
 
 ```text
 系统菜单                                      OS / Electron
-领域编辑器栏                                  Project / PARAM / GPARAM / Text / ...
+领域编辑器栏                                  Project / PARAM / Text / ...（R1 裁定后无独立 GPARAM）
 文档标签栏                                    逻辑文档，不是每个磁盘文件
 主工作区                                      唯一 full-bleed 编辑器 + 右侧 Agent dock
 Problems / Output                             底部 dock
@@ -321,6 +321,15 @@ Problems / Output                             底部 dock
 中央区域一次只能渲染一个编辑器。日常编辑器必须贴合 client area，不得再套外层圆角 panel。
 
 ### 3.2 一级领域
+
+> **R1 裁定投影（2026-08-14，用户裁定，覆盖本节顶栏固定列表）：**
+> 领域顶栏**删除独立的「GPARAM」**。PARAM 与 GPARAM 都进左侧「参数」逻辑库：
+> 放在「更换 Mod 工作区 / 选择原版目录 / 工作区状态」下面，两者并列，作为比
+> 「文本」更大的一块主工作面（渲染器实现：`domainLibraries.filesForDomain('param')`
+> 同时返回 parambnd 容器与 gparam bank；`buildDomainSummaries` 把 gparam 的
+> `visibility` 投影为 `hidden`，顶栏与命令面板不提供一级入口，域仍可路由）。
+> 这是信息架构变更，不是 `display:none` 藏 UI；本节与 §2.6 已同步本投影。
+> `EditorDomainId` 联合类型与 §2.5 的 GPARAM 五区工作台拓扑保持不变。
 
 ```ts
 export type EditorDomainId =
@@ -344,9 +353,12 @@ export type EditorDomainId =
 领域栏固定显示产品名称，不显示裸物理目录，不显示无单位文件数：
 
 ```text
-项目 | PARAM | GPARAM | 文本 | 事件 | 地图 | 脚本 |
+项目 | PARAM | 文本 | 事件 | 地图 | 脚本 |
 行为 | 动画 | 模型 | 纹理 | 材质 | VFX | 容器 | 文件
 ```
+
+（R1 裁定投影：原「PARAM | GPARAM | 文本 | …」中的独立 GPARAM 已移除——顶栏
+不再提供 GPARAM 一级入口，GPARAM bank 并入左侧「参数」逻辑库，见本节开头裁定块。）
 
 领域顺序和目标集合固定。运行时只有在真实 read contract 已注册且运行条件满足时才把对应入口标为可操作；`project` 和 `files` 始终存在。候选格式不能制造可操作领域。
 
@@ -1366,7 +1378,7 @@ Bottom Composer
 - workspace 级持久化；
 - 鼠标拖动或键盘每次 16px；
 - 普通状态只有 1px 左分隔线；
-- 中央编辑器不足 560px 时变为主窗口内右侧 overlay；
+- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 340–620；
 - `Ctrl+J` 显示/隐藏；
 - 隐藏不取消任务、不清除审批。
 
@@ -2233,7 +2245,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 
 - 先收起低频 Tools；
 - 再允许 Inspector overlay；
-- Agent 在中央编辑器不足 560px 时 overlay；
+- Agent 始终文档流右列，不 overlay；
 - 不把 pane 垂直堆成移动端卡片；
 - 关键表格继续支持水平滚动或列收缩。
 
@@ -2643,8 +2655,8 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 #### AGENT-60A — dock shell 与欢迎区
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockResizer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockHeader.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentConversationViewport.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentWelcome.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`。
-- **Steps**：实现 48px header / minmax conversation / bottom composer grid；340/440/620px、4px resizer、16px keyboard resize、workspace persistence 和小空间 overlay；只使用第 12.4 节固定欢迎文案。
-- **Tests**：idle 440×900 截图；340/620、Ctrl+J、drag/keyboard resize、overlay、hide/show 不清状态；无旧 task panel/tool count/session count。
+- **Steps**：实现 48px header / minmax conversation / bottom composer grid；340/440/620px、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
+- **Tests**：idle 440×900 截图；340/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
 
 #### AGENT-60B — 三层 Composer
 

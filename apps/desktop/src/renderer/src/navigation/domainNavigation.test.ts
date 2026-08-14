@@ -81,9 +81,15 @@ describe('buildDomainSummaries', () => {
     for (const entry of summaries) assert.equal(entry.defaultTarget, null);
   });
 
-  it('全部领域 visibility 为 visible：本卡无真实 catalog 数据，不得静默隐藏领域', () => {
+  it('R1 裁定：GPARAM 从领域顶栏隐藏，其余领域 visible（并入左侧「参数」逻辑库）', () => {
     const summaries = buildDomainSummaries({ readContract: new Set(), runtimeReady: true });
-    for (const entry of summaries) assert.equal(entry.visibility, 'visible');
+    for (const entry of summaries) {
+      if (entry.domain === 'gparam') {
+        assert.equal(entry.visibility, 'hidden', 'GPARAM 必须按 R1 裁定从顶栏隐藏');
+      } else {
+        assert.equal(entry.visibility, 'visible');
+      }
+    }
   });
 
   it('domainLabel 覆盖全部领域，不返回 undefined', () => {

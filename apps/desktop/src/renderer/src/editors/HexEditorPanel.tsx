@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { decodeBase64ToUint8Array } from '../utils/binary.js';
 
 /** 单次按偏移读取的字节数。与 core 的 16 MiB 单次上限相比极小——hex 视图一次只
  *  渲染一屏，拉大页宽只会让 DOM 变重而用户看不到更多。 */
@@ -56,11 +57,9 @@ export interface HexEditorPanelProps {
   }>;
 }
 
+/** P3 裁定：atob 只经严格校验的出口（decodeBase64ToUint8Array），非法输入抛可行动错误。 */
 function decodeBase64(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
-  return out;
+  return decodeBase64ToUint8Array(base64);
 }
 
 function toHex(bytes: Uint8Array): string {

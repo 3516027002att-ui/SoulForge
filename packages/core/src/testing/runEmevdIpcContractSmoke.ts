@@ -35,8 +35,18 @@ function main(): void {
   }
 
   // 硬约束 17：DSL 模板必须有界渲染，并把截断状态上报给 renderer。
-  if (!ipc.includes('renderEmevdPatchDslBounded')) {
-    throw new Error('main 必须有界渲染 DSL 模板（硬约束 17）。');
+  // R3/P4 裁定（2026-08-14）：production 反汇编入口改为 DarkScript3 式
+  // （renderEmevdDarkScriptBounded）；旧 hash DSL 渲染（renderEmevdPatchDslBounded）
+  // 已从 ipc.ts 移除，底层 dslCompiler/typed 写链保留。没 EMEDF 必须失败关闭
+  // （EMEDF_MISSING + dslTemplate null），不能再发 hash 伪源码。
+  if (!ipc.includes('renderEmevdDarkScriptBounded')) {
+    throw new Error('main 必须有界渲染 DarkScript3 式事件源码（R3/P4 裁定）。');
+  }
+  if (!ipc.includes('EMEDF_MISSING')) {
+    throw new Error('main 在未找到用户本机 EMEDF 时必须失败关闭（EMEDF_MISSING 诊断）。');
+  }
+  if (!ipc.includes('sourceStyle')) {
+    throw new Error('main 必须上报源码形态 sourceStyle（dark-script/patch-dsl/none）。');
   }
   if (!ipc.includes('dslTemplateTruncated') || !ipc.includes('dslTemplateTotalLines')) {
     throw new Error('main 必须向 renderer 上报模板截断状态与总行数。');

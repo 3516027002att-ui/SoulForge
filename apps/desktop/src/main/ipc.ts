@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
@@ -27,7 +27,7 @@ import {
   commitEmevdMutationViaBridge,
   fingerprintEmedfRegistry,
   readFullEmevdDocumentViaBridge,
-  renderEmevdPatchDslBounded,
+  renderEmevdDarkScriptBounded,
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
   buildScriptContainerEvidence,
@@ -244,6 +244,13 @@ interface CachedParamDocument {
   authority?: string;
 }
 const paramPageCache = new Map<string, CachedParamDocument>();
+
+/**
+ * 全量 PARAM 缓存（用户裁定 2026-08-14）：loadAll 请求下经
+ * `includeAllPayloads` 一次拿回全表 + 全部行字节，供 renderer 打开表即全量。
+ * 与 paramPageCache 分开：全量缓存带字节、内存明显更大，写回失效时两处都要清。
+ */
+const paramAllCache = new Map<string, CachedParamDocument>();
 
 /**
  * 容器内 param 子项解包后的落盘路径缓存。
@@ -733,20 +740,67 @@ interface ScriptInventoryDataLike {
 function clearEditorPageCaches(): void {
   fmgPageCache.clear();
   paramPageCache.clear();
+  paramAllCache.clear();
   containerChildrenCache.clear();
   scriptContainerEntriesCache.clear();
 }
 
 /**
- * Cached EMEDF registry. Resolved once from the user-provided external
- * DarkScript3 EMEDF JSON path (env SOULFORGE_EMEDF_PATH) or falls back
- * to the built-in fixture. SoulForge does NOT bundle EMEDF data.
+ * EMEDF 自动定位（同步、只读、有界）。
+ *
+ * R3/P4 裁定：事件源码必须是 DarkScript3 式（EMEDF 函数名），没 EMEDF 失败关闭。
+ * 为了开箱即用，除了 SOULFORGE_EMEDF_PATH 还自动探测常见落地形态：
+ * 1. 已挂载原版游戏根（activeSession.layers.baseRoot）的 tools 兄弟目录一层
+ *    （DarkScript3 发布包把 sekiro-common.emedf.json 放在
+ *    `<tools>/<工具目录>/Resources/` 下）；
+ * 2. 有界用户目录（Desktop/Documents/Downloads）——与 core 的
+ *    searchRealEmedf 同一批候选，这里用同步版本避免改动既有同步调用点。
+ * 绝不递归整盘；找不到返回 null，由 resolveEmevdRegistry 失败关闭到 fixture。
  */
+const EMEDF_RELATIVE_CANDIDATES = [
+  'sekiro-common.emedf.json',
+  'Sekiro/sekiro-common.emedf.json',
+  'sekiro.emedf.json',
+  'Resources/sekiro-common.emedf.json'
+];
+
+function locateUserEmedfSync(): string | null {
+  const roots: string[] = [];
+  const explicit = process.env.SOULFORGE_EMEDF_PATH?.trim();
+  if (explicit) roots.push(resolve(explicit));
+  const gameRoot = activeSession?.layers.baseRoot;
+  if (gameRoot) {
+    const toolsDir = join(dirname(gameRoot), 'tools');
+    try {
+      roots.push(toolsDir);
+      for (const entry of readdirSync(toolsDir, { withFileTypes: true })) {
+        if (entry.isDirectory()) roots.push(join(toolsDir, entry.name));
+      }
+    } catch {
+      // tools 目录不存在/不可读：跳过，继续其他候选。
+    }
+  }
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+  if (home) {
+    roots.push(join(home, 'Desktop'), join(home, 'Documents'), join(home, 'Downloads'));
+  }
+  for (const root of roots) {
+    for (const relative of EMEDF_RELATIVE_CANDIDATES) {
+      try {
+        const candidate = join(root, relative);
+        if (existsSync(candidate)) return candidate;
+      } catch {
+        // 继续下一个候选。
+      }
+    }
+  }
+  return null;
+}
+
 let cachedEmevdRegistry: ReturnType<typeof resolveEmevdRegistry> | null = null;
 function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
   if (!cachedEmevdRegistry) {
-    const externalPath = process.env.SOULFORGE_EMEDF_PATH || null;
-    cachedEmevdRegistry = resolveEmevdRegistry(externalPath);
+    cachedEmevdRegistry = resolveEmevdRegistry(locateUserEmedfSync());
   }
   return cachedEmevdRegistry;
 }
@@ -2198,14 +2252,45 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       emevdFullDocuments.set(sourceUri, full.document);
+      const registryResolution = getEmevdRegistry();
       // Hard constraint 17: the template is bounded so a real corpus document
-      // (~70K+ DSL lines) is never transferred in one IPC payload. The renderer
-      // can request the full template explicitly via loadFullDslTemplate.
-      const bounded = renderEmevdPatchDslBounded(
-        full.document,
-        getEmevdRegistry().registry,
-        loadFullDslTemplate ? undefined : 2000
-      );
+      // (~70K+ lines) is never transferred in one IPC payload. The renderer can
+      // request the full template explicitly via loadFullDslTemplate.
+      //
+      // R3/P4 裁定：反汇编必须是 DarkScript3 式（EMEDF 函数名）；没 EMEDF 失败
+      // 关闭——不再下发 hash 伪源码（旧 renderEmevdPatchDslBounded 输出已从
+      // production 入口移除，底层 dslCompiler/typed 写链保留）。
+      let dslTemplate: string | null = null;
+      let dslTemplateTruncated = false;
+      let dslTemplateTotalLines = 0;
+      let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
+      const responseDiagnostics = full.diagnostics.map((d) => ({
+        severity: d.severity as Diagnostic['severity'],
+        code: d.code,
+        message: d.message,
+        sourceUri
+      }));
+      if (registryResolution.origin === 'imported') {
+        const bounded = renderEmevdDarkScriptBounded(
+          full.document,
+          registryResolution.registry,
+          loadFullDslTemplate ? undefined : 2000
+        );
+        dslTemplate = bounded.text;
+        dslTemplateTruncated = bounded.truncated;
+        dslTemplateTotalLines = bounded.totalLines;
+        sourceStyle = 'dark-script';
+      } else {
+        responseDiagnostics.push({
+          severity: 'error' as const,
+          code: 'EMEDF_MISSING',
+          message: '未找到用户本机 EMEDF（DarkScript3 的 sekiro-common.emedf.json）：'
+            + '事件源码反汇编已失败关闭，不再提供伪解码。'
+            + '请设置环境变量 SOULFORGE_EMEDF_PATH 指向该文件，'
+            + '或在游戏根旁 tools/<工具目录>/Resources/ 放置该文件后重新打开。',
+          sourceUri
+        });
+      }
       return {
         ok: true,
         sourceUri,
@@ -2213,19 +2298,15 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         revision: full.document.revision,
         eventCount: full.document.events.length,
         instructionCount: full.instructionTotal,
-        dslTemplate: bounded.text,
-        dslTemplateTruncated: bounded.truncated,
-        dslTemplateTotalLines: bounded.totalLines,
+        dslTemplate,
+        sourceStyle,
+        dslTemplateTruncated,
+        dslTemplateTotalLines,
         sourceHash: full.sourceHash ?? null,
         sourceFormat: full.sourceFormat ?? null,
         outerFileHash: full.outerFileHash ?? null,
         outline: full.outline ?? null,
-        diagnostics: full.diagnostics.map((d) => ({
-          severity: d.severity as Diagnostic['severity'],
-          code: d.code,
-          message: d.message,
-          sourceUri
-        }))
+        diagnostics: responseDiagnostics
       };
     }
   );
@@ -2607,7 +2688,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const roots = await verifiedReadRoots(activeSession, activeSession.layers.overlayRoot);
     if (roots.diagnostics.length > 0) return fail(roots.diagnostics);
 
-    const msgFiles = indexedFiles.filter((file) => file.compoundExtension === '.msgbnd.dcx');
+    // R2 裁定：文本目录默认只列出简体中文（zhocn），英语/日语整包延期至 V0.6。
+    // 过滤时需要同时接纳 `/zhocn/` 与 Windows 分隔符 `\zhocn\`，且大小写不敏感
+    // （真实索引路径由主进程生成，分隔符随平台，段名大小写不随平台）。
+    const isZhocnPath = (relativePath: string): boolean =>
+      /[\\/]zhocn[\\/]/i.test(relativePath);
+    const allMsgFiles = indexedFiles.filter(
+      (file) => file.compoundExtension === '.msgbnd.dcx'
+    );
+    const msgFiles = allMsgFiles.filter((file) => isZhocnPath(file.relativePath));
+    const filteredOutOfZhocn = allMsgFiles.length > msgFiles.length;
     // 目录读取幂等：每次重建表引用映射，避免上一次扫描的 entryIndex 残留。
     textTableRefs.clear();
 
@@ -2681,6 +2771,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         languageId,
         containers: containers.sort((a, b) => a.containerKind.localeCompare(b.containerKind))
       }));
+
+    // 只在确实过滤掉了非 zhocn 文件时追加这条 info 诊断：它解释的是「侧栏为什么
+    // 没有英语/日语」，而不是万能口号。
+    if (filteredOutOfZhocn) {
+      diagnostics.push({
+        severity: 'info',
+        code: 'TEXT_CATALOG_ZHOCN_ONLY',
+        message: '文本目录当前只列出简体中文（zhocn）；英语/日语延期至 V0.6。'
+      });
+    }
 
     return {
       ok: true,
@@ -2901,7 +3001,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       maxParts: 256,
       maxRegions: 128,
       maxModels: 128,
-      maxEvents: 128
+      maxEvents: 128,
+      // P5 裁定：真实游戏 .msb.dcx 是 KRAK 压缩，缺 Oodle 运行时读不出实体表
+      // （表现为 3D 代理场景 0 节点 / 0 实体）。
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
     });
     return sanitizeRendererValue({
       ok: result.ok,
@@ -2938,7 +3043,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       command: 'read-tae-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      timeoutMs: 120_000
+      timeoutMs: 120_000,
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
@@ -2954,7 +3062,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       command: 'read-esd-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      timeoutMs: 120_000
+      timeoutMs: 120_000,
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
@@ -2970,7 +3081,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       command: 'read-mtd-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      timeoutMs: 120_000
+      timeoutMs: 120_000,
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
@@ -2986,7 +3100,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       command: 'read-fxr-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      timeoutMs: 120_000
+      timeoutMs: 120_000,
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
@@ -3002,7 +3119,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       command: 'read-flver-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      timeoutMs: 120_000
+      timeoutMs: 120_000,
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
@@ -3018,7 +3138,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       command: 'read-tpf-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      timeoutMs: 120_000
+      timeoutMs: 120_000,
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
@@ -3768,12 +3891,31 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       commandOptions: {}
     });
     if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
+      // P2 裁定：Oodle/KRAK 解压类失败必须给可行动的结构化诊断。Bridge 在这类
+      // 失败下可能带出含本机绝对路径的消息（如 IOException 的路径），经过
+      // sanitizeRendererValue 后会整条塌成「本机路径已隐藏」，GROUPS 栏就剩一句
+      // 不可行动的话。这里在 sanitize 之前把命中 Oodle/KRAK/解压的诊断替换成
+      // 不含路径、只讲下一步动作的文案。
+      const isOodleOrKrakFailure = result.diagnostics.some((d) =>
+        /^(GPARAM_GAME_UNSUPPORTED|OODLE_)/i.test(d.code)
+        || /Oodle|KRAK|解压/i.test(d.code)
+        || /Oodle|KRAK|解压/i.test(d.message)
+      );
+      const diagnostics = isOodleOrKrakFailure
+        ? [{
+            severity: 'error' as const,
+            code: 'GPARAM_KRAK_OODLE_REQUIRED',
+            message: 'GPARAM 读取失败：该 bank 为 KRAK 压缩，需要挂载只读原版游戏目录'
+              + '（左侧「选择原版目录」指向含 sekiro.exe 的目录）后才能解压读取。',
+            sourceUri
+          }]
+        : result.diagnostics;
       return sanitizeRendererValue({
         ok: false,
         sourceUri,
         relativePath: file.relativePath,
         data: null,
-        diagnostics: result.diagnostics
+        diagnostics
       });
     }
     return sanitizeRendererValue({
@@ -4309,7 +4451,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       sourceUri: string,
       requestedPage: number,
       requestedPageSize: number,
-      query?: string
+      query?: string,
+      loadAll?: boolean
     ) => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       const failure = (message: string, code = 'RESOURCE_NOT_INDEXED') => ({
@@ -4337,7 +4480,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       if (isParamBackupPath(file.relativePath)) {
         return failure('backup 文件只能在 History & Recovery 中以只读方式查看，不能分页读取 PARAM。', 'BACKUP_READ_FORBIDDEN');
       }
-      let cached = paramPageCache.get(sourceUri);
+      let cached = loadAll ? paramAllCache.get(sourceUri) : paramPageCache.get(sourceUri);
       if (!cached) {
         // 直接调 Bridge 而不用 readParamDocumentViaBridge：后者不传 commandOptions。
         //
@@ -4349,6 +4492,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         //
         // 这里刻意读全表（无 rowPage/rowPageSize）：全表用于 id/name 索引与跨页搜索。
         // 全表必然超出载荷门限因而无字节，当前页的字节在下方单独取一次。
+        // loadAll（用户裁定 2026-08-14）则相反：includeAllPayloads 跳过门控，
+        // 一次拿回全表 + 全部行字节（帧上限提到 32 MiB 绝对上限）。
         const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
         if (roots.diagnostics.length > 0) {
           return {
@@ -4376,8 +4521,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           command: 'read-param-document',
           filePath: file.absolutePath,
           allowedRoots: roots.allowedRoots,
-          timeoutMs: 60_000,
-          commandOptions: {}
+          timeoutMs: 120_000,
+          commandOptions: loadAll ? { includeAllPayloads: true } : {},
+          ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {})
         });
         if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
           return {
@@ -4402,7 +4548,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           rows,
           ...(result.data.authority ? { authority: result.data.authority } : {})
         };
-        paramPageCache.set(sourceUri, cached);
+        if (loadAll) paramAllCache.set(sourceUri, cached);
+        else paramPageCache.set(sourceUri, cached);
       }
       const q = (query ?? '').trim().toLowerCase();
       const filtered = q.length === 0
@@ -4410,6 +4557,72 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         : cached.rows.filter((row) =>
             String(row.id).includes(q) || (row.name ?? '').toLowerCase().includes(q)
           );
+
+      // ── 全量路径（用户裁定）：打开表一次返回全部行（含字节），renderer 本地
+      //    过滤/虚拟化，不再分批续取。行字节已经随 includeAllPayloads 全量在手，
+      //    不再走下方的页字节二次读取。字段定义照常解析（裸 param 路径的
+      //    ParamDefPanel 依赖它，与 readParamDocument 同一套三层检查）。
+      if (loadAll) {
+        const loadAllTypeName = cached.typeName ?? '';
+        const loadAllResolved = loadAllTypeName
+          ? await resolveTrustedParamDefinition(loadAllTypeName, cached.rowDataSize)
+          : { document: null, trusted: false, diagnostic: null };
+        const loadAllParamDef = loadAllResolved.document;
+        const loadAllWidthMatches = loadAllParamDef !== null;
+        return {
+          ok: true,
+          sourceUri,
+          sourceHash: cached.sourceHash,
+          typeName: cached.typeName,
+          rowDataSize: cached.rowDataSize,
+          fieldDefs: loadAllWidthMatches && loadAllParamDef
+            ? loadAllParamDef.fields.map((field) => ({
+                id: field.id,
+                name: field.name,
+                type: field.type,
+                offset: field.offset,
+                size: field.size,
+                ...(field.bitfield ? { bitfield: field.bitfield } : {}),
+                ...(field.enumRef ? { enumRef: field.enumRef } : {}),
+                ...(field.refs ? { refs: field.refs } : {}),
+                ...(field.min !== undefined ? { min: field.min } : {}),
+                ...(field.max !== undefined ? { max: field.max } : {})
+              }))
+            : null,
+          fieldEnums: loadAllWidthMatches && loadAllParamDef?.enums
+            ? loadAllParamDef.enums.map((enumDef) => ({
+                id: enumDef.id,
+                name: enumDef.name,
+                values: enumDef.values.map((value) => ({ value: value.value, label: value.label }))
+              }))
+            : null,
+          fieldDefsDiagnostic: loadAllResolved.diagnostic,
+          fieldDefsOrigin: loadAllParamDef?.origin ?? null,
+          fieldDefsTrusted: loadAllResolved.trusted,
+          rowCount: filtered.length,
+          page: 0,
+          pageSize: filtered.length,
+          pageCount: 1,
+          rows: filtered.map((row) => {
+            const dataBase64 = typeof row.dataBase64 === 'string' ? row.dataBase64 : undefined;
+            return {
+              id: row.id,
+              ...(dataBase64 !== undefined
+                ? {
+                    dataBase64,
+                    dataHexPreview: Buffer.from(dataBase64, 'base64')
+                      .subarray(0, 16)
+                      .toString('hex')
+                  }
+                : {}),
+              ...(row.name ? { name: row.name } : {})
+            };
+          }),
+          rowsTruncated: cached.rowCount > cached.rows.length,
+          ...(cached.authority ? { authority: cached.authority } : {}),
+          diagnostics: []
+        };
+      }
       const window = normalizePageWindow(
         filtered.length,
         requestedPage,
@@ -5021,7 +5234,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       entryIndex: number,
       requestedPage: number,
       requestedPageSize: number,
-      query?: string
+      query?: string,
+      loadAll?: boolean
     ) => {
       const file = indexedFiles.find((item) => item.sourceUri === containerUri);
       const failure = (code: string, message: string, extra: Diagnostic[] = []) => ({
@@ -5037,6 +5251,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         pageCount: 0,
         rows: [],
         rowsTruncated: false,
+        // P1 裁定：容器 PARAM 工作台 FIELDS 栏依赖字段定义。失败路径与成功路径
+        // 保持同一字段面，只是定义一概为空——渲染器据此显示「没有可用的字段定义」
+        // 的语义（而非「字段列渲染异常」）。
+        fieldDefs: null,
+        fieldEnums: null,
+        fieldDefsDiagnostic: null,
+        fieldDefsOrigin: null,
+        fieldDefsTrusted: false,
         diagnostics: [
           { severity: 'error' as const, code, message, sourceUri: containerUri },
           ...extra
@@ -5077,7 +5299,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const allowedRoots = stageRoots ? [...stageRoots.allowedRoots] : [dirname(paramPath)];
 
-      // ── 全表读：只为 id/name 索引与跨页搜索（行字节恒缺，见 readParamPage 注释）──
+      // ── 全表读：只为 id/name 索引与跨页搜索（行字节恒缺，见 readParamPage 注释）。
+      //    loadAll（用户裁定 2026-08-14）：includeAllPayloads 一次拿回全表 +
+      //    全部行字节（帧上限提到 32 MiB 绝对上限），renderer 打开表即全量。──
       const full = await runBridge<{
         sourceHash?: string;
         typeName?: string;
@@ -5089,8 +5313,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         command: 'read-param-document',
         filePath: paramPath,
         allowedRoots,
-        timeoutMs: 60_000,
-        commandOptions: {}
+        timeoutMs: 120_000,
+        commandOptions: loadAll ? { includeAllPayloads: true } : {},
+        ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {})
       });
       if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
         return failure(
@@ -5100,6 +5325,18 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         );
       }
 
+      // P1 裁定：容器工作台走 readContainerParamPage，渲染器的 FIELDS 栏只从
+      // fieldDefs 拿定义，而这条通道此前根本没返回。这里复用与
+      // resource.readParamDocument 完全相同的 resolveTrustedParamDefinition 与
+      // 逐字段映射（包校验 + 行宽核对 + 用户信任策略三层都不绕过）。
+      const containerTypeName = full.data.typeName ?? '';
+      const resolvedContainerDef = containerTypeName
+        ? await resolveTrustedParamDefinition(containerTypeName, full.data.rowDataSize ?? 0)
+        : { document: null, trusted: false, diagnostic: null };
+      const containerParamDef = resolvedContainerDef.document;
+      // 行宽已在 resolveTrustedParamDefinition 内核对：拿到 document 即行宽一致。
+      const containerRowWidthMatches = containerParamDef !== null;
+
       const allRows = (full.data.rows ?? []).slice(0, MAX_PAGED_PARAM_ROWS);
       const q = (query ?? '').trim().toLowerCase();
       const filtered = q.length === 0
@@ -5107,6 +5344,69 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         : allRows.filter((row) =>
             String(row.id).includes(q) || (row.name ?? '').toLowerCase().includes(q)
           );
+
+      // ── 全量路径（用户裁定）：一次返回全部行（含字节）；渲染器本地过滤与
+      //    虚拟化，不再分批续取；字段定义照常随页下发（P1 裁定，与分页路径一致）。
+      if (loadAll) {
+        return {
+          ok: true,
+          containerUri,
+          entryIndex: unpacked.child.entryIndex,
+          paramName: unpacked.child.name,
+          containerHash: file.sha256 ?? '',
+          childHash: unpacked.child.storedContentHash,
+          sourceHash: full.data.sourceHash,
+          typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
+          rowDataSize: full.data.rowDataSize ?? 0,
+          fieldDefs: containerRowWidthMatches && containerParamDef
+            ? containerParamDef.fields.map((field) => ({
+                id: field.id,
+                name: field.name,
+                type: field.type,
+                offset: field.offset,
+                size: field.size,
+                ...(field.bitfield ? { bitfield: field.bitfield } : {}),
+                ...(field.enumRef ? { enumRef: field.enumRef } : {}),
+                ...(field.refs ? { refs: field.refs } : {}),
+                ...(field.min !== undefined ? { min: field.min } : {}),
+                ...(field.max !== undefined ? { max: field.max } : {})
+              }))
+            : null,
+          fieldEnums: containerRowWidthMatches && containerParamDef?.enums
+            ? containerParamDef.enums.map((enumDef) => ({
+                id: enumDef.id,
+                name: enumDef.name,
+                values: enumDef.values.map((value) => ({ value: value.value, label: value.label }))
+              }))
+            : null,
+          fieldDefsDiagnostic: resolvedContainerDef.diagnostic,
+          fieldDefsOrigin: containerParamDef?.origin ?? null,
+          fieldDefsTrusted: resolvedContainerDef.trusted,
+          rowCount: filtered.length,
+          page: 0,
+          pageSize: filtered.length,
+          pageCount: 1,
+          rows: filtered.map((row) => {
+            const dataBase64 = typeof row.dataBase64 === 'string' ? row.dataBase64 : undefined;
+            return {
+              id: row.id,
+              ...(dataBase64 !== undefined
+                ? {
+                    dataBase64,
+                    dataHexPreview: Buffer.from(dataBase64, 'base64')
+                      .subarray(0, 16)
+                      .toString('hex')
+                  }
+                : {}),
+              ...(row.name ? { name: row.name } : {})
+            };
+          }),
+          rowsTruncated: (full.data.rowCount ?? allRows.length) > allRows.length,
+          ...(full.data.authority ? { authority: full.data.authority } : {}),
+          diagnostics: [...unpacked.diagnostics]
+        };
+      }
+
       const window = normalizePageWindow(
         filtered.length,
         requestedPage,
@@ -5169,6 +5469,33 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceHash: full.data.sourceHash,
         typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
         rowDataSize: full.data.rowDataSize ?? 0,
+        // P1 裁定：字段定义与枚举随容器 PARAM 一起下发，映射与
+        // resource.readParamDocument 完全一致（含 bitfield/enumRef/refs/min/max 的
+        // 条件展开与 enum label 字段名）。渲染器据此渲染 FIELDS 栏，而不是空列。
+        fieldDefs: containerRowWidthMatches && containerParamDef
+          ? containerParamDef.fields.map((field) => ({
+              id: field.id,
+              name: field.name,
+              type: field.type,
+              offset: field.offset,
+              size: field.size,
+              ...(field.bitfield ? { bitfield: field.bitfield } : {}),
+              ...(field.enumRef ? { enumRef: field.enumRef } : {}),
+              ...(field.refs ? { refs: field.refs } : {}),
+              ...(field.min !== undefined ? { min: field.min } : {}),
+              ...(field.max !== undefined ? { max: field.max } : {})
+            }))
+          : null,
+        fieldEnums: containerRowWidthMatches && containerParamDef?.enums
+          ? containerParamDef.enums.map((enumDef) => ({
+              id: enumDef.id,
+              name: enumDef.name,
+              values: enumDef.values.map((value) => ({ value: value.value, label: value.label }))
+            }))
+          : null,
+        fieldDefsDiagnostic: resolvedContainerDef.diagnostic,
+        fieldDefsOrigin: containerParamDef?.origin ?? null,
+        fieldDefsTrusted: resolvedContainerDef.trusted,
         rowCount: filtered.length,
         page: window.page,
         pageSize: window.size,

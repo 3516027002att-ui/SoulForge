@@ -41,6 +41,7 @@ import type {
   OpenEditorDocumentRequest,
   OpenEditorDocumentValue,
   PageEditorDocumentRequest,
+  ParamFieldDef,
   ParamRowPage,
   ReadEditorContentRequest,
   RendererContainerChildBytes,
@@ -220,7 +221,13 @@ const api = {
     revision?: number;
     eventCount?: number;
     instructionCount?: number;
-    dslTemplate?: string;
+    /** R3/P4 裁定：DarkScript3 式源码；EMEDF 缺失时失败关闭为 null（不再给伪解码）。 */
+    dslTemplate?: string | null;
+    /**
+     * 源码形态：'dark-script'（EMEDF 反汇编，只读展示）、'patch-dsl'（旧 hash
+     * DSL，仅历史路径）、'none'（EMEDF 缺失失败关闭）。
+     */
+    sourceStyle?: 'dark-script' | 'patch-dsl' | 'none';
     dslTemplateTruncated?: boolean;
     dslTemplateTotalLines?: number;
     sourceHash?: string | null;
@@ -440,9 +447,11 @@ const api = {
     sourceUri: string,
     page: number,
     pageSize: number,
-    query?: string
+    query?: string,
+    /** 全量加载（用户裁定）：一次返回全部行（含字节），renderer 本地过滤/虚拟化。 */
+    loadAll?: boolean
   ): Promise<ParamRowPage> =>
-    ipcRenderer.invoke('resource.readParamPage', sourceUri, page, pageSize, query),
+    ipcRenderer.invoke('resource.readParamPage', sourceUri, page, pageSize, query, loadAll),
   /**
    * 列出 parambnd 容器内的 param 条目（Smithbox 的 Param List 那一栏）。
    * 每一项都可直接交给 readContainerParamPage —— 列得出来就读得到。
@@ -463,7 +472,9 @@ const api = {
     entryIndex: number,
     page: number,
     pageSize: number,
-    query?: string
+    query?: string,
+    /** 全量加载（用户裁定）：一次返回全部行（含字节），renderer 本地过滤/虚拟化。 */
+    loadAll?: boolean
   ): Promise<ParamRowPage & {
     containerUri: string;
     entryIndex: number;
@@ -472,13 +483,27 @@ const api = {
     /** 写回所需：容器与条目的当前哈希，原样回传即可。 */
     containerHash?: string;
     childHash?: string;
+    /**
+     * P1：随页下发的字段定义/枚举/授信来源。主进程在 resolveTrustedParamDefinition
+     * 里完成包校验 + 行宽核对 + 用户信任策略；origin 只给白名单值，渲染器不自行判定。
+     */
+    fieldDefs?: ParamFieldDef[] | null;
+    fieldEnums?: Array<{
+      id: string;
+      name?: string;
+      values: Array<{ value: number; label: string }>;
+    }> | null;
+    fieldDefsDiagnostic?: { code: string; message: string } | null;
+    fieldDefsOrigin?: 'fixture' | 'imported' | 'user-derived' | null;
+    fieldDefsTrusted?: boolean;
   }> => ipcRenderer.invoke(
     'resource.readContainerParamPage',
     containerUri,
     entryIndex,
     page,
     pageSize,
-    query
+    query,
+    loadAll
   ),
   /**
    * 一次读出容器内某个 param 的完整行索引（只 id + name，不含行字节）。

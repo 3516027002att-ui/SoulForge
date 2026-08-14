@@ -76,6 +76,8 @@ export async function readMsbDocumentViaBridge(input: {
   maxRegions?: number;
   maxModels?: number;
   maxEvents?: number;
+  /** P5 裁定：真实游戏 .msb.dcx 是 KRAK 压缩，缺 Oodle 运行时解不出实体表。 */
+  oodleRuntimeRoot?: string;
 }): Promise<{
   ok: boolean;
   data?: MsbBridgeDocument;
@@ -100,7 +102,8 @@ export async function readMsbDocumentViaBridge(input: {
     command: 'read-msb-document',
     filePath: input.sourcePath,
     allowedRoots: input.allowedRoots,
-    timeoutMs: input.timeoutMs ?? 120_000
+    timeoutMs: input.timeoutMs ?? 120_000,
+    ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {})
   });
   if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
     return {

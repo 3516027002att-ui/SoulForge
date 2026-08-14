@@ -46,7 +46,7 @@ const PAGE_SIZE_CONSUMERS: ReadonlyArray<{
     symbol: 'PARAM_PAGE_SIZE',
     files: [
       'apps/desktop/src/main/ipc.ts',
-      'apps/desktop/src/renderer/src/editors/ParamTablePanel.tsx',
+      // ParamTablePanel 已全量加载（用户裁定 2026-08-14），不再分页消费该常量。
       'apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx',
       'apps/desktop/e2e/editorFunctionalSmokeMain.mjs'
     ]

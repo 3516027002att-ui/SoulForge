@@ -556,7 +556,7 @@ function registerFixtureIpc() {
     };
   });
 
-  handleTrusted('resource.readContainerParamPage', (_event, containerUri, entryIndex, page, pageSize, query) => {
+  handleTrusted('resource.readContainerParamPage', (_event, containerUri, entryIndex, page, pageSize, query, loadAll) => {
     track('resource.readContainerParamPage');
     const failure = (message, code) => ({
       ok: false,
@@ -576,6 +576,30 @@ function registerFixtureIpc() {
     const filtered = needle
       ? table.rows.filter((r) => String(r.id).includes(needle) || (r.name ?? '').toLowerCase().includes(needle))
       : table.rows;
+    // 用户裁定（2026-08-14）：loadAll=true 时一次返回全部行（含字节），
+    // 与生产 main 的 includeAllPayloads 全量路径同语义。
+    if (loadAll === true) {
+      return {
+        ok: true,
+        containerUri, entryIndex, page: 0, pageSize: filtered.length, pageCount: 1,
+        rows: filtered.map((r) => ({ id: r.id, name: r.name, dataBase64: r.dataBase64, dataHash: r.dataHash })),
+        rowCount: filtered.length,
+        sourceHash: 'fixture-param-container-hash',
+        typeName: table.typeName,
+        rowDataSize: PARAM_ROW_SIZE,
+        paramName: table.name,
+        containerHash: 'fixture-container-hash',
+        childHash: `fixture-child-hash-${entryIndex}`,
+        // P1：字段定义随容器 PARAM 下发（与生产 main 的 resolveTrustedParamDefinition
+        // 同字段面；fixture 统一用合成定义，明确标记 synthetic）。
+        fieldDefs: paramFieldDefsFixture,
+        fieldEnums: paramFieldEnumsFixture,
+        fieldDefsDiagnostic: null,
+        fieldDefsOrigin: 'fixture',
+        fieldDefsTrusted: false,
+        diagnostics: []
+      };
+    }
     const size = pageSize > 0 ? pageSize : 20;
     const pageCount = Math.max(1, Math.ceil(filtered.length / size));
     const p = Math.min(Math.max(0, page), pageCount - 1);

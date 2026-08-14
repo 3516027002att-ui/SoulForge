@@ -7,6 +7,12 @@ import {
   type FlverSceneTexture
 } from '../scene/threeSceneController.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { decodeBase64ToUint8Array } from '../utils/binary.js';
+
+/** P3 裁定：atob 只经严格校验的出口（decodeBase64ToUint8Array）。 */
+function decodeBase64Safe(base64: string): Uint8Array {
+  return decodeBase64ToUint8Array(base64);
+}
 
 export interface FlverViewerProps {
   sourceUri?: string;
@@ -354,20 +360,20 @@ function computeSceneBounds(
 }
 
 function decodeFloat32Array(base64: string): Float32Array {
-  const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-  const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const bytes = decodeBase64Safe(base64);
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   return new Float32Array(copy);
 }
 
 function decodeUint16Array(base64: string): Uint16Array {
-  const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-  const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const bytes = decodeBase64Safe(base64);
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   return new Uint16Array(copy);
 }
 
 // 骨权重着色：主骨权重高为红（顶点紧绑单骨），分散为蓝。4 bytes/顶点 × 4 影响。
 function boneWeightColors(weightsBase64: string, vertexCount: number): Float32Array {
-  const weightBytes = Uint8Array.from(atob(weightsBase64), (char) => char.charCodeAt(0));
+  const weightBytes = decodeBase64Safe(weightsBase64);
   const colors = new Float32Array(vertexCount * 3);
   for (let v = 0; v < vertexCount; v++) {
     const primaryWeight = (weightBytes[v * 4] ?? 0) / 255;
@@ -386,7 +392,7 @@ const BONE_PALETTE: Array<[number, number, number]> = [
 
 // 骨索引着色：按首个骨索引取调色板色。4 bytes/顶点 × 4 影响。
 function boneIndexColors(indicesBase64: string, vertexCount: number): Float32Array {
-  const indexBytes = Uint8Array.from(atob(indicesBase64), (char) => char.charCodeAt(0));
+  const indexBytes = decodeBase64Safe(indicesBase64);
   const colors = new Float32Array(vertexCount * 3);
   for (let v = 0; v < vertexCount; v++) {
     const boneIdx = (indexBytes[v * 4] ?? 0) % BONE_PALETTE.length;
@@ -404,14 +410,14 @@ function boneIndexColors(indicesBase64: string, vertexCount: number): Float32Arr
  */
 async function decodeFlverTexture(textureBase64: string): Promise<FlverSceneTexture | null> {
   try {
-    const texBytes = Uint8Array.from(atob(textureBase64), (char) => char.charCodeAt(0));
+    const texBytes = decodeBase64Safe(textureBase64);
     // DDS magic "DDS " (0x20534444)。
     const isDds = texBytes.length > 4
       && texBytes[0] === 0x44 && texBytes[1] === 0x44 && texBytes[2] === 0x53 && texBytes[3] === 0x20;
     if (isDds && texBytes.length > 128) {
       const ddsLoaderModule = await import('three/examples/jsm/loaders/DDSLoader.js');
       const dds = new ddsLoaderModule.DDSLoader().parse(
-        texBytes.buffer.slice(texBytes.byteOffset, texBytes.byteOffset + texBytes.byteLength),
+        (texBytes.buffer as ArrayBuffer).slice(texBytes.byteOffset, texBytes.byteOffset + texBytes.byteLength),
         true
       );
       return {

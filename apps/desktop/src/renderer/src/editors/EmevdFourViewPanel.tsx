@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactElement } from 'react';
 import type { EmevdEditorDocument, EmevdSelection, EmevdViewId } from '@soulforge/shared';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
+import { decodeBase64ToUint8Array } from '../utils/binary.js';
 
 export interface EmevdDslSubmitResult {
   ok: boolean;
@@ -75,9 +76,8 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
   const selectedEvent = document.events.find((event) => event.eventUri === selection.eventUri);
   const hexPreview = useMemo(() => {
     try {
-      const binary = atob(document.bytesBase64 || '');
-      const bytes = new Uint8Array(Math.min(binary.length, 64));
-      for (let i = 0; i < bytes.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      // P3 裁定：atob 只经严格校验的出口。
+      const bytes = decodeBase64ToUint8Array(document.bytesBase64 || '').subarray(0, 64);
       return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join(' ');
     } catch {
       return '（无字节预览）';

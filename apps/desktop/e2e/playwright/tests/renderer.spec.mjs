@@ -66,9 +66,9 @@ async function openFixtureWorkspace(window) {
 
 /**
  * e2e 隐藏窗口视口固定为 633×379（Renderer CSS px，约为 1280×820 的 2× 缩放）。
- * 该视口下 agentOpen 默认 true → Agent dock 进入 is-overlay 全屏覆盖（x=13..633,
- * y=76..332），侧栏文件列表完全被盖，file-item 不可点击（实测 GPARAM/BND/MSB 均
- * 因此失败）。真实用户路径是「先收起 Agent 再浏览文件」，测试统一复刻它。
+ * Agent 面板是文档流右列，默认展开会挤窄编辑区，侧栏文件列表可能被压到视口外
+ * （实测 GPARAM/BND/MSB 均因此失败）。真实用户路径是「先收起 Agent 再浏览文件」，
+ * 测试统一复刻它。
  */
 async function closeAgentPanel(window) {
   const close = window.getByRole('button', { name: '关闭 Agent 面板' });
@@ -97,12 +97,18 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
+  // 工作区打开后欢迎层必须让出编辑区，否则项目概览与工作台被半透明层盖住。
+  await expect(window.locator('.editor-welcome')).toBeHidden();
+  await expect(window.locator('.project-overview')).toBeVisible();
+
   // 左侧不再有 .mode-tabs；顶部工作域栏存在且为 tablist。
   await expect(window.locator('.mode-tabs')).toHaveCount(0);
   const tabs = window.locator('[data-testid="domain-bar"] [role="tab"]');
-  await expect(tabs).toHaveCount(15);
+  // R1 裁定（2026-08-14）：GPARAM 从领域顶栏移除（并入左侧「参数」逻辑库），
+  // 固定顺序快照 14 项。
+  await expect(tabs).toHaveCount(14);
   await expect(tabs).toHaveText([
-    /项目/, /PARAM/, /GPARAM/, /文本/, /事件/, /地图/, /脚本/, /行为/,
+    /项目/, /PARAM/, /文本/, /事件/, /地图/, /脚本/, /行为/,
     /动画/, /模型/, /纹理/, /材质/, /VFX/, /容器/, /文件/
   ]);
 
@@ -124,18 +130,34 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   await expect(files.filter({ hasText: 'sfx/f0000.sfxbnd.dcx' })).toHaveCount(1);
   await expect(window.locator('.status-bar')).toContainText('文件');
 
-  // §18.13 Steps：语义领域不渲染全局 resource browser——事件领域显示占位而非文件列表。
+  // 语义领域不渲染 Files 物理列表（.file-item），改走逻辑库。
   await window.locator('[data-domain="event"]').click();
   await expect(window.locator('.file-item')).toHaveCount(0);
-  await expect(window.locator('[data-testid="domain-browse-placeholder"]')).toBeVisible();
-  await expect(window.locator('[data-testid="domain-browse-placeholder"]')).toContainText('事件');
+  await expect(window.locator('[data-testid="domain-library-list"]')).toBeVisible();
+  await expect(window.locator('[data-testid="domain-library-list"]')).toContainText('common.emevd');
 
-  // §18.13 Done：PARAM 入口直接打开逻辑库（占位工作域），不显示物理文件列表。
+  // PARAM 入口直接打开 GameParam 逻辑库工作台，仍不显示物理文件列表。
   await window.locator('[data-domain="param"]').click();
   await expect(window.locator('.file-item')).toHaveCount(0);
-  await expect(window.locator('[data-testid="domain-editor-placeholder"]')).toBeVisible();
-  await expect(window.locator('[data-testid="domain-editor-placeholder"]')).toContainText('PARAM');
+  await expect(window.locator('.workbench')).toBeVisible();
+  await expect(window.locator('.workbench')).toContainText('Params');
   expect(await window.locator('.domain-tab__count').count()).toBe(0);
+
+  // R1 修正（用户裁定）：参数域侧栏是两级——只有 PARAM 与 GPARAM 两个常驻项，
+  // GPARAM 默认折叠、点开才出现各 bank 子选项（不得把 gparam 平铺挤掉 gameparam）。
+  const groupHeaders = window.locator('.library-group__header');
+  await expect(groupHeaders).toHaveCount(2);
+  await expect(groupHeaders.nth(0)).toContainText('PARAM');
+  await expect(groupHeaders.nth(1)).toContainText('GPARAM');
+  // GPARAM 默认折叠：组内 bank 不可见；PARAM 组展开可见 gameparam 容器。
+  await expect(groupHeaders.nth(1)).toHaveAttribute('aria-expanded', 'false');
+  await expect(window.locator('.library-group__body').nth(0)).toContainText('gameparam');
+  await expect(window.locator('.library-group__body').nth(1).locator('.library-item')).toHaveCount(0);
+  // 点开 GPARAM → bank 子选项出现。
+  await groupHeaders.nth(1).click();
+  await expect(groupHeaders.nth(1)).toHaveAttribute('aria-expanded', 'true');
+  await expect(window.locator('.library-group__body').nth(1).locator('.library-item').first()).toBeVisible();
+  await expect(window.locator('.library-group__body').nth(1)).toContainText('m10_00');
 
   await window.screenshot({ path: 'test-results/04-resource-bar.png' });
   await app.close();
@@ -252,6 +274,14 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
   await expect(window.getByText(/MSB 编辑已延期至 V0.6/)).toContainText('只读预览');
 
   // resize/keyboard：分隔条可聚焦，方向键调宽真实生效（量 DOM 宽度前后）。
+  // P1 裁定后方向键/拖拽受「其余栏 minWidth 之和」上限约束——窄窗口里其余栏
+  // 下限已经吃满容器，加宽会被 clamp 正确拦住。隐藏窗口不重排，先 show 并把
+  // 窗口放大（fixture 是 2× devicePixelRatio，2880 物理 ≈ 1440 CSS）再验证加宽。
+  await showWindow(app);
+  await app.evaluate(({ BrowserWindow }) => {
+    for (const w of BrowserWindow.getAllWindows()) w.setSize(2880, 1200);
+  });
+  await window.waitForTimeout(200);
   const resizer = window.getByRole('separator', { name: '调整Map Object List栏宽' });
   const widthBefore = await objectList.evaluate((el) => el.getBoundingClientRect().width);
   await resizer.focus();
@@ -306,6 +336,14 @@ test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽
   await expect(window.getByText(/FLVER 编辑已延期至 V0.6/)).toContainText('只读预览');
 
   // resize/keyboard：分隔条可聚焦，方向键调宽真实生效（量 DOM 宽度前后）。
+  // P1 裁定后方向键/拖拽受「其余栏 minWidth 之和」上限约束——窄窗口里其余栏
+  // 下限已经吃满容器，加宽会被 clamp 拦住。隐藏窗口不重排，先 show 并把窗口
+  // 放大（2× dpr，2880 物理 ≈ 1440 CSS）。
+  await showWindow(app);
+  await app.evaluate(({ BrowserWindow }) => {
+    for (const w of BrowserWindow.getAllWindows()) w.setSize(2880, 1200);
+  });
+  await window.waitForTimeout(200);
   const resizer = window.getByRole('separator', { name: '调整模型层级栏宽' });
   const widthBefore = await hierarchy.evaluate((el) => el.getBoundingClientRect().width);
   await resizer.focus();
@@ -517,10 +555,12 @@ test('VFX 工作台三栏：Effect / Particle list → 真实预览空态 → In
   await expect(left.getByText('未知类型').first()).toBeVisible();
   await expect(left.getByRole('row', { name: /type 9999/ })).toBeVisible();
 
-  // 真实预览是诚实空态（preview isolation + no fake graph）：无 canvas。
+  // 真实预览是诚实空态（preview isolation + no fake graph）：预览区无 canvas。
+  // （P6 裁定后全窗口有 AmbientField 流光 canvas，断言必须收窄到预览区内，
+  //   不能再数 window 级 canvas。）
   const preview = window.getByRole('region', { name: '真实预览' });
   await expect(preview.getByTestId('vfx-preview-empty')).toContainText('没有可用的实时预览渲染器');
-  await expect(window.locator('canvas')).toHaveCount(0);
+  await expect(preview.locator('canvas')).toHaveCount(0);
 
   // selection chain：选中已知节点 → Inspector 显示节点结构字段。
   await left.getByRole('row', { name: /type 2000/ }).click();
@@ -1246,11 +1286,15 @@ test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动
   const { app, window } = await launchApp();
   await showWindow(app);
 
-  // ambient 在 body 伪元素上、z-index 0（.app-root z-index 1 之上），且不接收指针。
   const ambient = await window.evaluate(() => {
+    const canvas = document.getElementById('sf-ambient-field');
     const before = getComputedStyle(document.body, '::before');
     const after = getComputedStyle(document.body, '::after');
+    const canvasStyle = canvas ? getComputedStyle(canvas) : null;
     return {
+      mode: document.documentElement.dataset.ambient ?? 'css',
+      canvasPointer: canvasStyle?.pointerEvents ?? null,
+      canvasZ: canvasStyle?.zIndex ?? null,
       beforePointer: before.pointerEvents,
       afterPointer: after.pointerEvents,
       beforeZ: before.zIndex,
@@ -1259,22 +1303,35 @@ test('主题 ambient：流光层不拦截指针，reduced-motion 下不持续动
       iteration: before.animationIterationCount
     };
   });
-  expect(ambient.beforePointer).toBe('none');
-  expect(ambient.afterPointer).toBe('none');
-  expect(ambient.beforeZ).toBe('0');
-  // 默认：58s 变换动画无限交替。
-  expect(ambient.name).toBe('sf-ambient-a');
-  expect(ambient.duration).toBe('58s');
-  expect(ambient.iteration).toBe('infinite');
+  if (ambient.mode === 'shader') {
+    expect(ambient.canvasPointer).toBe('none');
+    expect(Number(ambient.canvasZ)).toBe(0);
+  } else {
+    expect(ambient.beforePointer).toBe('none');
+    expect(ambient.afterPointer).toBe('none');
+    expect(ambient.beforeZ).toBe('0');
+    expect(ambient.name).toBe('sf-ambient-a');
+    expect(ambient.duration).toBe('58s');
+    expect(ambient.iteration).toBe('infinite');
+  }
 
-  // reduced-motion：全局规则把动画压成一次瞬发（不持续漂移，静态流光保留）。
   await window.emulateMedia({ reducedMotion: 'reduce' });
   const reduced = await window.evaluate(() => {
+    const canvas = document.getElementById('sf-ambient-field');
     const before = getComputedStyle(document.body, '::before');
-    return { duration: before.animationDuration, iteration: before.animationIterationCount };
+    return {
+      mode: document.documentElement.dataset.ambient ?? 'css',
+      motion: canvas?.dataset.ambientMotion ?? null,
+      duration: before.animationDuration,
+      iteration: before.animationIterationCount
+    };
   });
-  expect(reduced.iteration).toBe('1');
-  expect(parseFloat(reduced.duration)).toBeLessThan(0.1);
+  if (reduced.mode === 'shader') {
+    expect(reduced.motion).toBe('off');
+  } else {
+    expect(reduced.iteration).toBe('1');
+    expect(parseFloat(reduced.duration)).toBeLessThan(0.1);
+  }
 
   await window.screenshot({ path: 'test-results/12-ambient-reduced-motion.png' });
   await app.close();
@@ -1730,7 +1787,7 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'param/drawparam/m10_00.gparam.dcx');
 
-  // Agent 面板默认展开为 overlay，会盖住右侧 Fields/Values 两栏的点击目标。
+  // Agent 面板是文档流右列，默认展开会挤窄右侧 Fields/Values 两栏的点击目标。
   // PARAM-10B 用例点击目标在中栏不受影响；这里先收起再操作右栏。
   await closeAgentPanel(window);
 
@@ -1875,7 +1932,7 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
   await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'menu/start.tpf.dcx');
 
-  // Agent 面板默认展开为 overlay，会盖住右侧 Viewer/Properties 栏的点击目标。
+  // Agent 面板是文档流右列，默认展开会挤窄右侧 Viewer/Properties 栏的点击目标。
   await closeAgentPanel(window);
 
   // 四栏同时存在（§2.5：Container list | Texture list | Viewer | Properties）。

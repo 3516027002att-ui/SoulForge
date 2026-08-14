@@ -121,14 +121,36 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
   }, [props.columns]);
 
   const dragState = useRef<{ columnId: string; startX: number; startWidth: number; minWidth: number } | null>(null);
+  /** 栏容器，用于量「其余栏 minWidth 之和」给拖拽上限（P1 裁定）。 */
+  const columnsRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 拖拽/键盘右移的上限：容器宽度 − 其余栏 minWidth 之和。
+   *
+   * P1 裁定：此前拖拽只做 `Math.max(minWidth, start+delta)`，没有上限；被拖的栏
+   * 写成 `flex: 0 0 auto; width: Npx` 后可以大于可视区，把整栏（含它的分隔条）
+   * 挤出窗口右缘，鼠标和键盘都选不回来。这个上限保证任何栏最多把其余栏压到各自
+   * 的 minWidth，永远拖不出可视区。
+   */
+  function maxWidthFor(columnId: string): number {
+    const container = columnsRef.current;
+    if (!container) return Number.POSITIVE_INFINITY;
+    const othersMin = props.columns
+      .filter((column) => column.id !== columnId)
+      .reduce((sum, column) => sum + (column.minWidth ?? DEFAULT_MIN_WIDTH), 0);
+    return Math.max(0, container.clientWidth - othersMin);
+  }
 
   const onPointerMove = useCallback((event: PointerEvent) => {
     const drag = dragState.current;
     if (!drag) return;
     const delta = event.clientX - drag.startX;
-    const nextWidth = Math.max(drag.minWidth, drag.startWidth + delta);
+    const nextWidth = Math.min(
+      maxWidthFor(drag.columnId),
+      Math.max(drag.minWidth, drag.startWidth + delta)
+    );
     setWidths((current) => ({ ...current, [drag.columnId]: nextWidth }));
-  }, []);
+  }, [props.columns]);
 
   const onPointerUp = useCallback(() => {
     dragState.current = null;
@@ -197,14 +219,45 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
     }
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      setWidths((current) => ({ ...current, [column.id]: measured + step }));
+      // 与拖拽同一上限：不能把右侧栏挤出可视区（P1 裁定），但任何情况下
+      // 不得把当前栏压到低于自身 minWidth（窄窗口下其余栏 minWidth 之和可能
+      // 超过容器宽，此时上限为负也要守住本栏下限）。
+      setWidths((current) => ({
+        ...current,
+        [column.id]: Math.max(minWidth, Math.min(maxWidthFor(column.id), measured + step))
+      }));
     }
   }
+
+  /** P1 裁定：恢复初始栏宽（initialWidth 回到声明值，其余回到比例/自适应模式）。 */
+  function resetWidths(): void {
+    const initial: ColumnWidths = {};
+    for (const column of props.columns) {
+      if (typeof column.initialWidth === 'number') initial[column.id] = column.initialWidth;
+    }
+    setWidths(initial);
+  }
+
+  const hasCustomWidths = Object.keys(widths).length > 0;
 
   return (
     <div className="workbench" aria-label={props.label}>
       {props.toolbar && <div className="workbench__toolbar">{props.toolbar}</div>}
-      <div className="workbench__columns">
+      {/* P1 裁定：栏宽被拖过（进入像素模式）时提供恢复入口；被旧版本拖出窗口的
+          栏也能由此拉回默认比例。只在确实需要时出现，不常驻占空间。 */}
+      {hasCustomWidths && (
+        <div className="workbench__layout-actions">
+          <button
+            type="button"
+            className="secondary-action"
+            onClick={resetWidths}
+            title="把全部栏宽恢复为初始比例/初值"
+          >
+            恢复默认栏宽
+          </button>
+        </div>
+      )}
+      <div className="workbench__columns" ref={columnsRef}>
         {props.columns.map((column, index) => {
           const width = widths[column.id];
           const isLast = index === props.columns.length - 1;

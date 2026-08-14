@@ -267,6 +267,11 @@ function base64urlEncode(text: string): string {
 function base64urlDecode(text: string): string {
   const base64 = text.replace(/-/g, '+').replace(/_/g, '/')
     + '='.repeat((4 - (text.length % 4)) % 4);
+  // P3 裁定：atob 输入必须严格校验——token 被污染（含非 Latin1 字符）时抛
+  // 可行动错误而不是让 atob 抛 DOMException。
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+    throw new AgentReferenceTokenError('引用 token 载荷不是合法 base64（含非 Latin1 字符）。');
+  }
   const binary = atob(base64);
   const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
   return new TextDecoder().decode(bytes);

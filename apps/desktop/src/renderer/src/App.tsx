@@ -11,7 +11,8 @@ import {
 } from 'react';
 import {
   DEFERRED_PREVIEW_TARGET_RELEASE,
-  isDeferredPreviewEditorKind
+  isDeferredPreviewEditorKind,
+  PARAM_PAGE_SIZE
 } from '@soulforge/shared';
 import type {
   AgentResourceReference,
@@ -87,6 +88,17 @@ import type { ResourceMode } from './navigation/resourceFamilies.js';
 import type { DomainSummary, EditorDomainId } from '@soulforge/shared';
 import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation.js';
 import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
+import { DomainLibraryList } from './navigation/DomainLibraryList.js';
+import {
+  filesForDomain,
+  isGparamPath,
+  isParamContainerPath,
+  libraryDisplayName,
+  paramLibraryGroups,
+  pickPreferredParamContainer
+} from './navigation/domainLibraries.js';
+import { AmbientField } from './theme/AmbientField.js';
+import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
@@ -111,6 +123,7 @@ import {
 } from './components/PreviewCards.js';
 import { MsgTableEditor } from './components/MsgTableEditor.js';
 import { PanelErrorBoundary } from './components/PanelErrorBoundary.js';
+import { hexTextToSafeBase64 } from './utils/binary.js';
 import { ProjectOverviewPanel } from './workbench/ProjectOverviewPanel.js';
 import {
   extractMsgRows,
@@ -157,16 +170,35 @@ function pad2(value: number): string {
   return String(value).padStart(2, '0');
 }
 
+/**
+ * R5 裁定：侧栏每个面板头部右上角的关闭按钮——关掉后最左活动栏的对应图标
+ * 仍可点回来（activateSidebarView 同视图再点是收起/展开切换）。
+ */
+function SidebarCloseButton({ onClose }: { onClose: () => void }): ReactElement {
+  return (
+    <button
+      type="button"
+      className="sidebar__close"
+      onClick={onClose}
+      aria-label="收起侧栏"
+      title="收起侧栏（Ctrl B）"
+    >
+      <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+        <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" />
+      </svg>
+    </button>
+  );
+}
+
+/**
+ * P3 裁定：hex 文本 → base64 只经严格校验的出口（hexTextToSafeBase64）。
+ * 此前这里手工拼 btoa，且调用方把「无空格」的 preview.hex 原样当 base64 直喂
+ * atob——内容一旦不是 hex/base64（例如被误标为 hex 的文本），atob 就抛
+ * 「characters outside of the Latin1 range」把整个工作台摔死。现在统一校验，
+ * 非法输入抛可行动错误（面板错误边界可显示原因），不再出现看不懂的 DOMException。
+ */
 function hexTextToBase64(hexText: string): string {
-  const cleaned = hexText.replace(/[^0-9a-fA-F]/g, '');
-  if (cleaned.length < 2) return btoa('');
-  const bytes = new Uint8Array(Math.floor(cleaned.length / 2));
-  for (let i = 0; i < bytes.length; i += 1) {
-    bytes[i] = Number.parseInt(cleaned.slice(i * 2, i * 2 + 2), 16);
-  }
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]!);
-  return btoa(binary);
+  return hexTextToSafeBase64(hexText);
 }
 
 /** 无实时 EMEVD 文档时的空文档（真实文档经 Bridge 读取后替换）。 */
@@ -186,7 +218,6 @@ const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: strin
 const AGENT_MIN_WIDTH = 340;
 const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
-const AGENT_EDITOR_MIN_WIDTH = 560;
 
 function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
   // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
@@ -289,7 +320,6 @@ export function App(): ReactElement {
   const [agentOpen, setAgentOpen] = useState(true);
   const [agentWidth, setAgentWidth] = useState(440);
   const [agentExpanded, setAgentExpanded] = useState(false);
-  const [agentOverlay, setAgentOverlay] = useState(false);
   const [agentInteractionMode, setAgentInteractionMode] = useState<'ask' | 'plan' | 'edit'>('ask');
   // AGENT-60D 提交期消费点：AgentSidebar 草稿里 §12.11 的 opaque 资源引用冒泡到
   // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
@@ -582,6 +612,36 @@ export function App(): ReactElement {
       .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
   }, [allFiles, files]);
 
+  const indexedFiles = allFiles.length > 0 ? allFiles : files;
+  const domainLibraries = useMemo(
+    () => filesForDomain(activeDomain, indexedFiles),
+    [activeDomain, indexedFiles]
+  );
+  // R1 裁定（用户修正）：参数域侧栏是两级——只有 PARAM 与 GPARAM 两个常驻项，
+  // GPARAM 组默认折叠、点开才出现各 bank 子选项；不能把 gparam 平铺把 gameparam
+  // 挤到下面。其他域不分组，保持平铺。
+  const paramGroups = useMemo(
+    () => (activeDomain === 'param' ? paramLibraryGroups(indexedFiles) : undefined),
+    [activeDomain, indexedFiles]
+  );
+  const preferredParamContainer = useMemo(
+    () => pickPreferredParamContainer(indexedFiles),
+    [indexedFiles]
+  );
+  const paramWorkbenchFile = activeEditor === 'param-container' && selectedFile
+    ? selectedFile
+    : activeDomain === 'param' && activeEditor === 'empty'
+      ? preferredParamContainer
+      : null;
+  const showTextWorkbench = activeEditor === 'text'
+    || (activeDomain === 'text' && activeEditor === 'empty' && workspace !== null);
+  const showEventWorkbench = activeEditor === 'event'
+    || (activeDomain === 'event' && activeEditor === 'empty' && workspace !== null);
+  const showEditorWelcome = shouldShowEditorWelcome({
+    hasWorkspace: workspace !== null,
+    openTabCount: openTabs.length
+  });
+
   /**
    * 交给 ParamDefPanel 的字段定义。
    *
@@ -645,26 +705,6 @@ export function App(): ReactElement {
       // 持久化是增强能力，不应阻塞渲染或任务状态。
     }
   }, [agentOpen, agentWidth, workspace?.workspaceSessionId]);
-
-  useEffect(() => {
-    const shell = shellRef.current;
-    if (!shell) return;
-    const updateOverlay = (): void => {
-      const editorWidth = shell.clientWidth
-        - 48
-        - (sidebarCollapsed ? 0 : sidebarWidth)
-        - (agentOpen ? agentWidth : 0);
-      setAgentOverlay(agentOpen && editorWidth < AGENT_EDITOR_MIN_WIDTH);
-    };
-    updateOverlay();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateOverlay);
-    observer?.observe(shell);
-    window.addEventListener('resize', updateOverlay);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener('resize', updateOverlay);
-    };
-  }, [agentOpen, agentWidth, sidebarCollapsed, sidebarWidth]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
@@ -782,6 +822,7 @@ export function App(): ReactElement {
     const readContract = new Set<EditorDomainId>();
     if (bridge) {
       if (typeof bridge.readParamDocument === 'function') readContract.add('param');
+      if (typeof bridge.readGparamDocument === 'function') readContract.add('gparam');
       if (typeof bridge.readFmgDocument === 'function') readContract.add('text');
       if (typeof bridge.readEmevdDocument === 'function') readContract.add('event');
       if (typeof bridge.readMsbDocument === 'function') readContract.add('map');
@@ -791,6 +832,7 @@ export function App(): ReactElement {
       if (typeof bridge.readEsdDocument === 'function') readContract.add('behavior');
       if (typeof bridge.readFlverDocument === 'function') readContract.add('model');
       if (typeof bridge.readTpfDocument === 'function') readContract.add('texture');
+      if (typeof bridge.readMtdDocument === 'function') readContract.add('material');
       if (typeof bridge.readFxrDocument === 'function') readContract.add('vfx');
     }
     return buildDomainSummaries({
@@ -881,6 +923,26 @@ export function App(): ReactElement {
     async function loadParam(): Promise<void> {
       // SHELL-09：语义领域不再有兜底文件列表；只有用户显式选中的 param 文件才加载。
       const target = selectedFile;
+      // P2 裁定：gparam 文件（.gparam/.gparam.dcx）走 GPARAM 工作台，绝不让
+      // PARAM 读链去碰它——否则状态栏会串域报「这个 PARAM 读不出来」。
+      if (target && isGparamPath(target.relativePath)) {
+        setParamRows(EMPTY_PARAM_ROWS);
+        setParamTypeName('');
+        setParamSourceHash(null);
+        setParamLive(false);
+        setParamRowPayloads(new Map());
+        return;
+      }
+      // parambnd 容器由 ParamWorkbench 内部按条目读取；App 的裸 param 读链
+      // 不解 DCX/BND4，喂容器只会失败并污染状态栏，直接跳过。
+      if (target && isParamContainerPath(target.relativePath)) {
+        setParamRows(EMPTY_PARAM_ROWS);
+        setParamTypeName('');
+        setParamSourceHash(null);
+        setParamLive(false);
+        setParamRowPayloads(new Map());
+        return;
+      }
       if (!target || target.resourceKind !== 'param') {
         setParamRows(EMPTY_PARAM_ROWS);
         setParamTypeName('');
@@ -889,7 +951,7 @@ export function App(): ReactElement {
         setParamRowPayloads(new Map());
         return;
       }
-      if (!bridge || typeof bridge.readParamDocument !== 'function') {
+      if (!bridge || typeof bridge.readParamPage !== 'function') {
         setParamRows(EMPTY_PARAM_ROWS);
         setParamTypeName('');
         setParamSourceHash(null);
@@ -899,21 +961,22 @@ export function App(): ReactElement {
       }
       setStatus(`正在读取 PARAM：${target.relativePath}`);
       try {
-        const result = await bridge.readParamDocument(target.sourceUri) as {
+        // 用户裁定（2026-08-14）：打开参数即全量加载（含全部行字节 + 字段定义）。
+        // 走 readParamPage 的 loadAll 分支：main 经 includeAllPayloads 一次拿全表，
+        // 与 readParamDocument 同一套字段定义三层检查（包校验 + 行宽 + 信任策略）。
+        const result = await bridge.readParamPage(target.sourceUri, 0, PARAM_PAGE_SIZE, '', true) as {
           ok?: boolean;
-          data?: {
-            sourceHash?: string;
-            typeName?: string;
-            rows?: Array<{
-              id: number;
-              dataBase64?: string;
-              dataHexPreview?: string;
-              name?: string;
-            }>;
-            rowCount?: number;
-            rowDataSize?: number;
-            authority?: string;
-          } | null;
+          sourceHash?: string;
+          typeName?: string;
+          rowDataSize?: number;
+          rowCount?: number;
+          rows?: Array<{
+            id: number;
+            dataBase64?: string;
+            dataHexPreview?: string;
+            name?: string;
+          }>;
+          authority?: string;
           // 必须在断言里声明：不声明就读，取到的永远是 undefined 且 typecheck 不报
           // ——那正是「字段列空着但没有任何错误」的形态。
           fieldDefs?: ParamFieldDef[] | null;
@@ -932,7 +995,8 @@ export function App(): ReactElement {
           fieldDefsOrigin?: string | null;
         };
         if (cancelled) return;
-        if (!result?.ok || !result.data?.rows?.length) {
+        // readParamPage 响应是平铺结构（无 data 嵌套）。
+        if (!result?.ok || !result.rows?.length) {
           setParamRows(EMPTY_PARAM_ROWS);
           setParamLive(false);
           setParamSourceHash(null);
@@ -974,7 +1038,7 @@ export function App(): ReactElement {
                 }))
             : null
         );
-        setParamRowDataSize(result.data.rowDataSize ?? 0);
+        setParamRowDataSize(result.rowDataSize ?? 0);
         // 只接受主进程给出的两个合法值，其余一律降级为 fixture（只读）。
         // 白名单而不是直接透传：透传意味着后端将来多返回一个值就可能意外放行写入。
         setParamFieldDefsOrigin(
@@ -990,7 +1054,7 @@ export function App(): ReactElement {
             : null
         );
         const payloads = new Map<number, string>();
-        setParamRows(result.data.rows.map((r) => {
+        setParamRows(result.rows.map((r) => {
           if (r.dataBase64) payloads.set(r.id, r.dataBase64);
           return {
             id: r.id,
@@ -999,13 +1063,13 @@ export function App(): ReactElement {
           };
         }));
         setParamRowPayloads(payloads);
-        setParamTypeName(result.data.typeName ?? target.relativePath);
-        setParamSourceHash(result.data.sourceHash ?? null);
-        if (result.data.rowDataSize !== undefined) setParamRowDataSize(result.data.rowDataSize);
+        setParamTypeName(result.typeName ?? target.relativePath);
+        setParamSourceHash(result.sourceHash ?? null);
+        if (result.rowDataSize !== undefined) setParamRowDataSize(result.rowDataSize);
         setParamLive(true);
         setStatus(
-          `已加载 PARAM：${result.data.rowCount ?? result.data.rows.length} 行`
-          + (result.data.authority ? ` · ${result.data.authority}` : '')
+          `已加载 PARAM：${result.rowCount ?? result.rows.length} 行（全量）`
+          + (result.authority ? ` · ${result.authority}` : '')
         );
       } catch (error) {
         if (cancelled) return;
@@ -1243,7 +1307,8 @@ export function App(): ReactElement {
             live: false,
             dslTemplate: null,
             dslTemplateTruncated: false,
-            dslTemplateTotalLines: 0
+            dslTemplateTotalLines: 0,
+            sourceStyle: 'none'
           });
           setStatus('这个事件脚本读不出来，详情见底部日志。');
           return;
@@ -1258,6 +1323,9 @@ export function App(): ReactElement {
         let dslTemplate: string | null = null;
         let dslTemplateTruncated = false;
         let dslTemplateTotalLines = 0;
+        // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script 只读 /
+        // none 失败关闭）。
+        let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
         if (typeof bridge.readEmevdFullDocument === 'function') {
           const full = await bridge.readEmevdFullDocument(
             target.sourceUri,
@@ -1268,6 +1336,14 @@ export function App(): ReactElement {
             dslTemplate = full.dslTemplate;
             dslTemplateTruncated = full.dslTemplateTruncated ?? false;
             dslTemplateTotalLines = full.dslTemplateTotalLines ?? 0;
+            // 主进程返回 sourceStyle 时以它为准；旧 fixture/历史通道没有该字段时
+            // 按模板内容推断：`$Event(` 开头是 DarkScript 反汇编（只读），否则按旧
+            // hash DSL 处理（可编辑）。
+            sourceStyle = full.sourceStyle
+              ?? (/^\$Event\(/m.test(full.dslTemplate) ? 'dark-script' : 'patch-dsl');
+          } else if (full?.ok && full.dslTemplate === null) {
+            // EMEDF 缺失失败关闭：不提供伪解码（dslTemplate null + 诊断）。
+            sourceStyle = 'none';
           } else {
             setStatus(full?.diagnostics?.[0]?.message ?? '完整文档 DSL 模板加载失败；DSL 视图保持只读。');
           }
@@ -1284,7 +1360,8 @@ export function App(): ReactElement {
           live: true,
           dslTemplate,
           dslTemplateTruncated,
-          dslTemplateTotalLines
+          dslTemplateTotalLines,
+          sourceStyle
         });
       } catch (error) {
         if (cancelled) return;
@@ -1306,23 +1383,22 @@ export function App(): ReactElement {
 
   async function reloadParamRowsFromSource(): Promise<void> {
     if (!bridge || !selectedFile) return;
-    const reload = await bridge.readParamDocument(selectedFile.sourceUri) as {
+    // 与 loadParam 同一全量口径（用户裁定）：写回后重读也用 loadAll。
+    const reload = await bridge.readParamPage(selectedFile.sourceUri, 0, PARAM_PAGE_SIZE, '', true) as {
       ok?: boolean;
-      data?: {
-        sourceHash?: string;
-        typeName?: string;
-        rows?: Array<{
-          id: number;
-          dataBase64?: string;
-          dataHexPreview?: string;
-          name?: string;
-        }>;
-        rowDataSize?: number;
-      } | null;
+      sourceHash?: string;
+      typeName?: string;
+      rows?: Array<{
+        id: number;
+        dataBase64?: string;
+        dataHexPreview?: string;
+        name?: string;
+      }>;
+      rowDataSize?: number;
     };
-    if (reload?.ok && reload.data?.rows) {
+    if (reload?.ok && reload.rows) {
       const payloads = new Map<number, string>();
-      setParamRows(reload.data.rows.map((r) => {
+      setParamRows(reload.rows.map((r) => {
         if (r.dataBase64) payloads.set(r.id, r.dataBase64);
         return {
           id: r.id,
@@ -1331,9 +1407,9 @@ export function App(): ReactElement {
         };
       }));
       setParamRowPayloads(payloads);
-      setParamSourceHash(reload.data.sourceHash ?? null);
-      if (reload.data.typeName) setParamTypeName(reload.data.typeName);
-      if (reload.data.rowDataSize !== undefined) setParamRowDataSize(reload.data.rowDataSize);
+      setParamSourceHash(reload.sourceHash ?? null);
+      if (reload.typeName) setParamTypeName(reload.typeName);
+      if (reload.rowDataSize !== undefined) setParamRowDataSize(reload.rowDataSize);
     }
   }
 
@@ -1627,7 +1703,8 @@ export function App(): ReactElement {
     const startX = event.clientX;
     const startWidth = sidebarWidth;
     const handleMove = (moveEvent: PointerEvent): void => {
-      setSidebarWidth(Math.min(480, Math.max(180, startWidth + moveEvent.clientX - startX)));
+      // R5 裁定：侧栏下限与其他工作台栏一致——几乎能拖没，只留一条不让整列消失。
+      setSidebarWidth(Math.min(480, Math.max(44, startWidth + moveEvent.clientX - startX)));
     };
     const handleUp = (): void => {
       window.removeEventListener('pointermove', handleMove);
@@ -1844,6 +1921,36 @@ export function App(): ReactElement {
       // 选中」，否则每次切文件都重建工作台、多 tab 永远凑不齐。
       if (domain === 'files') setStatus('文件：物理浏览');
       return;
+    }
+    // 有成熟工作台的领域：直接打开首选逻辑库，而不是留下「等待接线」占位。
+    // 侧栏仍用 library-item 而不是 Files 的 .file-item。
+    const indexed = allFiles.length > 0 ? allFiles : files;
+    if (domain === 'param') {
+      const preferred = pickPreferredParamContainer(indexed);
+      if (preferred) {
+        setCenterView('resource');
+        void selectFile(preferred);
+        setStatus('PARAM：逻辑库工作台');
+        return;
+      }
+    }
+    if (domain === 'text') {
+      const first = filesForDomain('text', indexed)[0];
+      if (first) {
+        setCenterView('resource');
+        void selectFile(first);
+        setStatus('文本：逻辑库工作台');
+        return;
+      }
+    }
+    if (domain === 'event') {
+      const first = filesForDomain('event', indexed)[0];
+      if (first) {
+        setCenterView('resource');
+        void selectFile(first);
+        setStatus('事件：源码工作台');
+        return;
+      }
     }
     // SHELL-09：语义领域不再过滤物理文件（§4.1）；领域切换清掉上一份选中，
     // 让领域占位/未来逻辑库成为该领域的默认视图（§18.13 Done：PARAM 入口
@@ -2277,18 +2384,21 @@ export function App(): ReactElement {
     setToolOutput(result);
   }
   // 命令面板与顶部工作域栏共用 domainSummaries（同一份 DomainSummary 数据源），
-  // 不维护第二套 IA 标签。
+  // 不维护第二套 IA 标签。R1 裁定：GPARAM 已从顶栏隐藏（并入左侧「参数」），
+  // 命令面板同样不提供一级入口。
   const cmdkCommands: Array<{ id: string; icon: string; label: string; hint?: string; run: () => void }> = [
-    ...domainSummaries.map((entry) => ({
-      id: `domain-${entry.domain}`,
-      icon: '◧',
-      label: `切换到 ${entry.label} 工作域`,
-      run: (): void => {
-        setSidebarCollapsed(false);
-        setSidebarView('explorer');
-        selectDomain(entry.domain);
-      }
-    })),
+    ...domainSummaries
+      .filter((entry) => entry.visibility !== 'hidden')
+      .map((entry) => ({
+        id: `domain-${entry.domain}`,
+        icon: '◧',
+        label: `切换到 ${entry.label} 工作域`,
+        run: (): void => {
+          setSidebarCollapsed(false);
+          setSidebarView('explorer');
+          selectDomain(entry.domain);
+        }
+      })),
     { id: 'open-bnd4', icon: '▤', label: '以 BND4 容器打开当前选择', run: openBnd4ForSelection },
     { id: 'open-workspace', icon: '⌘', label: '打开 Mod 工作区…', run: (): void => { void openWorkspace(); } },
     { id: 'view-operations', icon: '◷', label: '切换到任务与历史', run: openOperationsView },
@@ -2346,6 +2456,8 @@ export function App(): ReactElement {
   const agentStyle = { '--agent-w': `${agentWidth}px` } as CSSProperties;
 
   return (
+    <>
+    <AmbientField />
     <div className="app-root">
       {/* ══════════ 标题栏 ══════════ */}
       <header className="titlebar">
@@ -2477,6 +2589,7 @@ export function App(): ReactElement {
                     ? '项目概览'
                     : `${domainLabel(activeDomain)} · 逻辑库`}
               </span>
+              <SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />
             </div>
             <div className="panel__body panel__body--pad">
               {isBrowserPreview && (
@@ -2487,7 +2600,7 @@ export function App(): ReactElement {
               <div className="explorer-actions">
                 <button
                   type="button"
-                  className="btn btn--primary btn--block"
+                  className={workspace ? 'btn btn--ghost btn--block' : 'btn btn--primary btn--block'}
                   data-testid="open-workspace"
                   onClick={() => void openWorkspace()}
                   {...(isBrowserPreview ? {
@@ -2495,7 +2608,7 @@ export function App(): ReactElement {
                     title: '浏览器预览：「打开 Mod 工作区」仅在 SoulForge 桌面版可用'
                   } : {})}
                 >
-                  打开 Mod 工作区
+                  {workspace ? '更换 Mod 工作区' : '打开 Mod 工作区'}
                 </button>
                 <div className="row gap">
                   <button
@@ -2587,26 +2700,36 @@ export function App(): ReactElement {
                     </div>
                   )}
                 </>
-              ) : (
+              ) : activeDomain === 'project' ? (
                 <div className="domain-browse-placeholder" data-testid="domain-browse-placeholder">
-                  <span className="domain-placeholder__eyebrow">DOMAIN / {domainLabel(activeDomain)}</span>
-                  <p>语义领域不渲染全局资源浏览器（§3.3）；物理浏览只在 Files 领域。</p>
-                  <p className="muted">
-                    {(() => {
-                      const capability = domainSummaries.find((entry) => entry.domain === activeDomain)?.capability;
-                      if (capability === 'read-ready') return 'read contract 已注册，等待成熟工作台接线（对应任务卡）。';
-                      if (capability === 'runtime-blocked') return 'read contract 已注册，但当前运行条件不满足（浏览器预览表面）。';
-                      return 'read contract 尚未接线；候选格式不能制造可操作领域（§3.2）。';
-                    })()}
-                  </p>
+                  <span className="domain-placeholder__eyebrow">DOMAIN / 项目</span>
+                  <p>项目概览在中央编辑区。用顶部工作域进入 PARAM、文本、事件或文件。</p>
                 </div>
+              ) : (
+                <DomainLibraryList
+                  files={domainLibraries}
+                  {...(paramGroups ? { groups: paramGroups } : {})}
+                  selectedUri={selectedFile?.sourceUri ?? null}
+                  emptyHint={
+                    workspace
+                      ? `${domainLabel(activeDomain)} 工作区里还没有可打开的逻辑库。可到「文件」领域按路径浏览。`
+                      : '打开 Mod 工作区后，这里会列出该领域的逻辑库。'
+                  }
+                  onSelect={(file) => {
+                    const match = indexedFiles.find((item) => item.sourceUri === file.sourceUri);
+                    if (match) void selectFile(match);
+                  }}
+                />
               )}
             </div>
           </section>
 
           {/* ── 搜索 ── */}
           <section className={sidebarView === 'search' ? 'panel is-active' : 'panel'} data-panel-id="search" aria-label="搜索">
-            <div className="panel__header"><h2 className="panel__title">搜索</h2></div>
+            <div className="panel__header">
+              <h2 className="panel__title">搜索</h2>
+              <SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />
+            </div>
             <div className="panel__body panel__body--pad">
               <div className="search-box search-box--with-action">
                 <input
@@ -2650,6 +2773,7 @@ export function App(): ReactElement {
               <span className={pendingChangeCount > 0 ? 'pill pill--warn' : 'pill'}>
                 {pendingChangeCount > 0 ? `${pendingChangeCount} 项待处理` : '暂存为空'}
               </span>
+              <SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />
             </div>
             <div className="panel__body panel__body--pad">
               <ChangeQueuePanel
@@ -2673,6 +2797,7 @@ export function App(): ReactElement {
               <button type="button" className="btn btn--ghost btn--sm" disabled={!workspace} onClick={() => void refreshOperationHistory()}>
                 刷新
               </button>
+              <SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />
             </div>
             <div className="panel__body panel__body--pad">
               {!workspace && <p className="empty-hint">打开工作区并完成至少一次补丁提交后可在此回滚。</p>}
@@ -2717,7 +2842,10 @@ export function App(): ReactElement {
 
           {/* ── 设置 ── */}
           <section className={sidebarView === 'settings' ? 'panel is-active' : 'panel'} data-panel-id="settings" aria-label="设置">
-            <div className="panel__header"><h2 className="panel__title">设置</h2></div>
+            <div className="panel__header">
+              <h2 className="panel__title">设置</h2>
+              <SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />
+            </div>
             <div className="panel__body panel__body--pad">
               {/* 模型、思考强度与权限模式已迁入右侧 Agent 面板；此处只保留工作区与安全基础设施设置。 */}
               <div className="setting-row">
@@ -2789,7 +2917,8 @@ export function App(): ReactElement {
           <div className="tabbar" role="tablist" aria-label="打开的资源">
             {openTabs.map((tab) => {
               const isActive = selectedFile?.sourceUri === tab.sourceUri;
-              const shortName = tab.relativePath.split(/[\\/]/).pop() ?? tab.relativePath;
+              // R1/P7 裁定：文档标签显示逻辑名（去复合扩展），物理路径只进 title。
+              const shortName = libraryDisplayName(tab.relativePath);
               return (
                 <div
                   key={tab.sourceUri}
@@ -2827,7 +2956,10 @@ export function App(): ReactElement {
                     : centerView === 'project'
                       ? '项目'
                       : domainLabel(activeDomain)}</b>
-                  {selectedFile ? ` · ${selectedFile.relativePath}` : ' · 资源预览'}
+                  {/* R1/P7 裁定：面包屑用逻辑名，物理相对路径只进 tooltip。 */}
+                  {selectedFile
+                    ? <span title={selectedFile.relativePath}> · {libraryDisplayName(selectedFile.relativePath)}</span>
+                    : ' · 资源预览'}
                 </span>
                 <span className="toolbar-spacer"></span>
                 {hasUncommittedChanges && <span className="pill pill--warn">未写入变更</span>}
@@ -2854,6 +2986,26 @@ export function App(): ReactElement {
               diagnostics={diagnostics.length}
               browserPreview={isBrowserPreview}
               onOpenWorkspace={() => void openWorkspace()}
+              draftChanges={draftChanges.slice(0, WELCOME_DRAFT_LIMIT).map((item) => ({
+                id: item.id,
+                target: item.target,
+                summary: item.summary
+              }))}
+              recentFiles={openTabs.slice(-6).reverse().map((tab) => ({
+                sourceUri: tab.sourceUri,
+                relativePath: tab.relativePath,
+                resourceKind: tab.resourceKind,
+                formatLabel: tab.formatLabel
+              }))}
+              onSelectFile={(sourceUri) => {
+                const match = indexedFiles.find((item) => item.sourceUri === sourceUri);
+                if (match) void selectFile(match);
+              }}
+              onReviewChanges={() => {
+                setSidebarCollapsed(false);
+                setSidebarView('staging');
+              }}
+              onSelectDomain={selectDomain}
             />
           )}
           {activeEditor === 'gparam' && (
@@ -2902,13 +3054,32 @@ export function App(): ReactElement {
               <p>工作区中没有 FXR 文件。挂载包含特效文件（.fxr）的 Mod 工作区后这里会列出所有 effect。</p>
             </section>
           )}
-          {activeEditor === 'empty' && activeDomain !== 'gparam' && activeDomain !== 'texture' && activeDomain !== 'vfx' && (
+          {activeDomain === 'material' && activeEditor === 'empty' && materialFiles.length > 0 && (
+            <MaterialWorkbenchPanel
+              key={`mtd-wb:${materialFiles.map((file) => file.sourceUri).join(',')}`}
+              files={materialFiles}
+            />
+          )}
+          {activeDomain === 'material' && activeEditor === 'empty' && materialFiles.length === 0 && (
+            <section className="domain-placeholder" data-testid="material-placeholder" aria-label="材质工作域">
+              <span className="domain-placeholder__eyebrow">MATERIAL / CAPABILITY</span>
+              <h2>Material 工作台</h2>
+              <p>工作区中没有 MTD 文件。挂载包含材质定义的 Mod 工作区后这里会列出所有文件。</p>
+            </section>
+          )}
+          {activeEditor === 'empty' && activeDomain !== 'gparam' && activeDomain !== 'texture'
+            && activeDomain !== 'vfx' && activeDomain !== 'material'
+            && !paramWorkbenchFile && !showTextWorkbench && !showEventWorkbench && (
             activeDomain === 'files'
               ? <p className="muted">在左侧选择一个文件开始编辑。</p>
               : <section className="domain-placeholder" data-testid="domain-editor-placeholder" aria-label={`${domainLabel(activeDomain)} 工作域`}>
                   <span className="domain-placeholder__eyebrow">DOMAIN / {domainLabel(activeDomain)}</span>
                   <h2>{domainLabel(activeDomain)} 逻辑库工作域</h2>
-                  <p>对应成熟工作台由后续任务卡接线；当前领域不渲染物理文件浏览（§3.3）。</p>
+                  <p>
+                    {domainLibraries.length > 0
+                      ? '从左侧逻辑库打开资源，或按 Ctrl K 搜索。'
+                      : '当前工作区没有该领域的逻辑库；可到「文件」领域按路径浏览。'}
+                  </p>
                 </section>
           )}
           {/* Structured preview 与原生格式检查已移到本面板**末尾**并默认折叠
@@ -2996,7 +3167,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {activeEditor === 'event' && (
+          {showEventWorkbench && (
             <>
               {/* 同 map：删掉「实时 Bridge 文档 · hash … / 空文档（未选中可解析的
                   EMEVD 或读取失败）」。hash 前缀属于证据，读取失败原因进日志区。 */}
@@ -3049,7 +3220,8 @@ export function App(): ReactElement {
                           : tab.sourceHash,
                         dslTemplate: reload.dslTemplate,
                         dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
-                        dslTemplateTotalLines: reload.dslTemplateTotalLines ?? 0
+                        dslTemplateTotalLines: reload.dslTemplateTotalLines ?? 0,
+                        sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
                       });
                       return {
                         ok: true,
@@ -3079,7 +3251,8 @@ export function App(): ReactElement {
                       ...tab,
                       dslTemplate: full.dslTemplate,
                       dslTemplateTruncated: false,
-                      dslTemplateTotalLines: full.dslTemplateTotalLines ?? 0
+                      dslTemplateTotalLines: full.dslTemplateTotalLines ?? 0,
+                      sourceStyle: full.sourceStyle ?? tab.sourceStyle ?? 'none'
                     });
                     setStatus(`完整 DSL 模板已加载（共 ${full.dslTemplateTotalLines ?? 0} 行）。`);
                   } else {
@@ -3151,7 +3324,7 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {activeEditor === 'text' && (
+          {showTextWorkbench && (
             <>
               {/* 同上：删掉「实时 Bridge FMG · hash … / 空条目（未选中可解析 FMG
                   或读取失败）」标题行。 */}
@@ -3196,11 +3369,11 @@ export function App(): ReactElement {
               （read-param-document 不解 DCX/BND4，直接喂容器会报
               「PARAM 类型名偏移无效」），必须先在左栏选容器内某个 param。
               这正是此前「打开 gameparam.parambnd.dcx 显示 0 行」的原因。 */}
-          {activeEditor === 'param-container' && selectedFile && (
+          {paramWorkbenchFile && (
             <ParamWorkbench
-              key={`param-wb:${selectedFile.sourceUri}`}
-              containerUri={selectedFile.sourceUri}
-              containerLabel={selectedFile.relativePath}
+              key={`param-wb:${paramWorkbenchFile.sourceUri}`}
+              containerUri={paramWorkbenchFile.sourceUri}
+              containerLabel={paramWorkbenchFile.relativePath}
               fieldEnums={paramFieldEnums}
               resolveDefinition={(typeName, rowDataSizeFromPage) => {
                 // 只在类型名与行宽都对得上时给出定义：行宽不符说明这份元数据
@@ -3242,7 +3415,7 @@ export function App(): ReactElement {
                   };
                 }
                 const saved = await bridge.applyContainerParamFieldMutation(
-                  selectedFile.sourceUri,
+                  paramWorkbenchFile.sourceUri,
                   input.expectedContainerHash,
                   {
                     entryIndex: input.entryIndex,
@@ -3506,9 +3679,10 @@ export function App(): ReactElement {
               {preview?.previewKind === 'hex' && preview.hex && (
                 <HexEditorPanel
                   title={selectedFile?.relativePath ?? '二进制资源'}
-                  initialBytesBase64={typeof preview.hex === 'string' && !preview.hex.includes(' ')
-                    ? preview.hex
-                    : hexTextToBase64(preview.hex)}
+                  /* P3 裁定：预览 hex 一律经严格校验的转换出口，不再把「无空格的
+                     preview.hex」原样当 base64 直喂 atob——内容被误标时 atob 会抛
+                     Latin1 DOMException 把工作台摔死，校验后只会得到可行动错误。 */
+                  initialBytesBase64={hexTextToSafeBase64(preview.hex)}
                   totalBytes={preview.file?.size}
                   {...(selectedFile && bridge
                     ? {
@@ -3570,7 +3744,7 @@ export function App(): ReactElement {
             </div>
 
             {/* ── 欢迎页：真实工作区摘要 ── */}
-            <div className={`editor-welcome${openTabs.length > 0 ? ' is-hidden' : ''}`}>
+            <div className={`editor-welcome${showEditorWelcome ? '' : ' is-hidden'}`}>
               <div className="welcome">
                 <div className="welcome__head">
                   <svg viewBox="0 0 24 24" width="26" height="26" className="welcome-mark" aria-hidden="true">
@@ -3652,7 +3826,6 @@ export function App(): ReactElement {
             持有，因为 overlay 判定与 workspace 持久化都要读它。 */}
         <AgentSidebar
           open={agentOpen}
-          overlay={agentOverlay}
           style={agentStyle}
           expanded={agentExpanded}
           agentWidth={agentWidth}
@@ -3872,5 +4045,6 @@ export function App(): ReactElement {
         ))}
       </div>
     </div>
+    </>
   );
 }

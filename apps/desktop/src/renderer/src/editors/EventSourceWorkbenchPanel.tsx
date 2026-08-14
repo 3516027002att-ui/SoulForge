@@ -75,6 +75,13 @@ export interface EventSourceTabData {
   dslTemplate: string | null;
   dslTemplateTruncated: boolean;
   dslTemplateTotalLines: number;
+  /**
+   * 源码形态（R3/P4 裁定）：
+   * - 'dark-script'：EMEDF 反汇编的 DarkScript3 式源码，只读展示；
+   * - 'patch-dsl'：旧 hash DSL（历史路径）；
+   * - 'none'：EMEDF 缺失失败关闭（不提供伪解码）。
+   */
+  sourceStyle?: 'dark-script' | 'patch-dsl' | 'none';
 }
 
 export interface EventSourceWorkbenchPanelProps {
@@ -105,7 +112,7 @@ interface EventLineInfo {
   warnings: number;
 }
 
-/** 无 dslTemplate（只读 demo / 读取失败）时的结构化投影基线。 */
+/** 无 dslTemplate（只读 demo / 读取失败 / EMEDF 缺失失败关闭）时的结构化投影基线。 */
 function renderSource(document: EmevdEditorDocument): string {
   const lines = [`resource ${JSON.stringify(document.resourceUri)}`];
   for (const event of document.events) {
@@ -125,13 +132,33 @@ function renderSource(document: EmevdEditorDocument): string {
   return lines.join('\n').trimEnd();
 }
 
+/**
+ * R3/P4 裁定：没 EMEDF 必须失败关闭，不能再用 hash 伪源码冒充已解码。
+ * 事件工作台在拿不到用户本机 EMEDF 时只显示这一句可行动说明，不渲染任何
+ * `instruction @i:hash` / `event @e:` 伪源码。
+ */
+const EMEDF_MISSING_SOURCE = [
+  '// 事件源码反汇编已失败关闭：未找到用户本机 EMEDF。',
+  '// 需要 DarkScript3 安装里的 sekiro-common.emedf.json：',
+  '//   1) 设置环境变量 SOULFORGE_EMEDF_PATH 指向该文件；或',
+  '//   2) 把文件放到游戏根旁 tools/<工具目录>/Resources/sekiro-common.emedf.json。',
+  '// 反汇编只消费 EMEDF 公开语法，数据留在本机，不会打进仓库。'
+].join('\n');
+
 function baselineText(tab: EventSourceTabData): string {
+  // live 但 dslTemplate 缺失 = EMEDF 缺失（主进程失败关闭，不给伪源码）。
+  if (tab.live && tab.dslTemplate === null) return EMEDF_MISSING_SOURCE;
   return tab.dslTemplate ?? renderSource(tab.document);
 }
 
 /**
- * 定位 doc 里每个 `event @e:<anchor>` 块的首行（1-based 行号），供 gutter 标记
- * 与 Go to Event。行号随 draft 编辑变化，故在 draft 变化时重建。
+ * 定位 doc 里每个事件块的首行（1-based 行号），供 gutter 标记与 Go to Event。
+ *
+ * 兼容两种形态：
+ * - 旧 Patch-DSL：`event @e:<anchor>`（有 anchor 的文档）；
+ * - R3/P4 DarkScript3 式：`$Event(` —— 模板按 document.events 顺序渲染，
+ *   所以按出现顺序映射到事件。
+ * 行号随 draft 编辑变化，故在 draft 变化时重建。
  */
 function indexEventLines(text: string, events: EmevdEventIr[]): Map<number, EventLineInfo> {
   const byAnchor = new Map<string, EmevdEventIr>();
@@ -140,13 +167,23 @@ function indexEventLines(text: string, events: EmevdEventIr[]): Map<number, Even
   }
   const map = new Map<number, EventLineInfo>();
   const lines = text.split('\n');
+  let darkScriptIndex = 0;
   for (let i = 0; i < lines.length; i += 1) {
-    const match = /^event\s+@e:(\S+)/.exec(lines[i]!);
-    if (!match) continue;
-    const event = byAnchor.get(match[1]!);
-    if (!event) continue;
-    const warnings = event.instructions.filter((instruction) => instruction.unknown).length;
-    if (warnings > 0) map.set(i + 1, { eventId: event.eventId, warnings });
+    const anchorMatch = /^event\s+@e:(\S+)/.exec(lines[i]!);
+    if (anchorMatch) {
+      const event = byAnchor.get(anchorMatch[1]!);
+      if (!event) continue;
+      const warnings = event.instructions.filter((instruction) => instruction.unknown).length;
+      if (warnings > 0) map.set(i + 1, { eventId: event.eventId, warnings });
+      continue;
+    }
+    if (/^\$Event\(/.test(lines[i]!)) {
+      const event = events[darkScriptIndex];
+      darkScriptIndex += 1;
+      if (!event) continue;
+      const warnings = event.instructions.filter((instruction) => instruction.unknown).length;
+      if (warnings > 0) map.set(i + 1, { eventId: event.eventId, warnings });
+    }
   }
   return map;
 }
@@ -458,8 +495,16 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     const pattern = new RegExp(`^event\\s+@e:${anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
     const doc = view.state.doc;
     let targetLine = 0;
+    // DarkScript3 式模板按 document.events 顺序渲染：定位第 N 个 `$Event(` 行。
+    const eventIndex = activeTab.document.events.indexOf(event);
+    let darkScriptIndex = 0;
     for (let line = 1; line <= doc.lines; line += 1) {
-      if (pattern.test(doc.line(line).text)) { targetLine = line; break; }
+      const text = doc.line(line).text;
+      if (pattern.test(text)) { targetLine = line; break; }
+      if (/^\$Event\(/.test(text)) {
+        if (darkScriptIndex === eventIndex) { targetLine = line; break; }
+        darkScriptIndex += 1;
+      }
     }
     if (targetLine > 0) {
       const from = doc.line(targetLine).from;
@@ -533,7 +578,15 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     setStatus(`已请求 restBehavior=${next}`);
   }
 
-  const readOnly = activeTab ? !activeTab.live : true;
+  const readOnly = activeTab
+    ? (!activeTab.live || activeTab.dslTemplate === null || activeTab.sourceStyle === 'dark-script')
+    : true;
+
+  /**
+   * R3/P4 裁定：DarkScript3 反汇编源码只读展示（没有对应的 DarkScript 编译器，
+   * 编辑后无法提交）。结构化 mutation（restBehavior 等）仍可用；写链保留。
+   */
+  const darkScriptReadOnly = activeTab?.sourceStyle === 'dark-script';
 
   return (
     <section className="event-source-workbench" aria-label="Event 源码工作台">
@@ -614,14 +667,20 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
               加载完整源码
             </button>
           )}
-          <button
-            type="button"
-            className="primary-action"
-            disabled={!props.onDslSubmit || submitting || readOnly}
-            onClick={() => void submitSource()}
-          >
-            {submitting ? '提交中…' : '编译并提交'}
-          </button>
+          {darkScriptReadOnly ? (
+            <span className="muted" style={{ fontSize: 11 }} title="EMEDF 反汇编源码只读展示；写入仍经结构化 mutation（如 restBehavior 切换）与 Bridge 写链。">
+              反汇编源码只读
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="primary-action"
+              disabled={!props.onDslSubmit || submitting || readOnly}
+              onClick={() => void submitSource()}
+            >
+              {submitting ? '提交中…' : '编译并提交'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -656,6 +715,19 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
         <section className="esw-source" aria-label="事件源码">
           <div ref={editorHostRef} className="esw-source__host" data-editor-engine="codemirror" />
+          {activeTab?.live && activeTab.dslTemplate === null && (
+            <div className="event-source__notice event-source__notice--blocked" role="alert">
+              事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
+              sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
+            </div>
+          )}
+          {darkScriptReadOnly && (
+            <div className="event-source__notice">
+              DarkScript3 式反汇编源码（指令名来自用户本机 EMEDF）。本版只读展示；
+              写入请用右侧 Inspector 的结构化操作（如切换 restBehavior），提交仍经
+              Bridge 与补丁引擎。
+            </div>
+          )}
           {activeTab?.dslTemplateTruncated && (
             <div className="event-source__notice">
               源码模板已按行截断，共 {activeTab.dslTemplateTotalLines} 行。可编辑的部分保持

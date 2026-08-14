@@ -48,8 +48,6 @@ export type { AgentInteractionMode } from './AgentComposer.js';
 
 export interface AgentSidebarProps {
   open: boolean;
-  /** 窄窗口时右 dock 变成无 scrim 的 overlay。 */
-  overlay?: boolean;
   style?: CSSProperties;
   expanded?: boolean;
   /** dock 当前宽度与范围，交给 AgentDockResizer 做拖拽/键盘 resize。 */
@@ -158,7 +156,6 @@ function legacySelectionFromProps(
 export function AgentSidebar(props: AgentSidebarProps): ReactElement {
   const {
     open,
-    overlay = false,
     style,
     expanded = false,
     agentWidth,
@@ -338,14 +335,14 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
 
   return (
     <aside
-      className={`agent${open ? '' : ' is-collapsed'}${overlay ? ' is-overlay' : ''}`}
+      className={open ? 'agent' : 'agent is-collapsed'}
       style={style}
       aria-label="AI Agent 面板"
       data-agent-expanded={expanded ? 'true' : 'false'}
     >
-      {/* resizer 是 dock 左缘的 4px 手柄；overlay 或收起时隐藏。宽度状态在 App，这里只回报新宽度。 */}
+      {/* resizer 是 dock 左缘的 4px 手柄；收起时隐藏。宽度状态在 App，这里只回报新宽度。 */}
       <AgentDockResizer
-        overlay={overlay || !open}
+        overlay={!open}
         currentWidth={agentWidth}
         minWidth={agentMinWidth}
         maxWidth={agentMaxWidth}

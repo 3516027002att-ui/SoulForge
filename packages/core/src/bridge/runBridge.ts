@@ -26,6 +26,11 @@ export interface RunBridgeOptions {
   cwd?: string;
   signal?: AbortSignal;
   onProgress?: (payload: unknown) => void;
+  /**
+   * 守护进程单帧上限（字节）。缺省 16 MiB；PARAM 全量载荷（includeAllPayloads）
+   * 可到数 MB~29 MB base64，调用方按需提高（守护进程绝对上限 32 MiB）。
+   */
+  maxFrameBytes?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -61,7 +66,8 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       ...(writableRoots.length ? { writableRoots } : {}),
       ...(options.oodleRuntimeRoot ? { oodleRuntimeRoot: resolve(options.oodleRuntimeRoot) } : {}),
       // PARAM/MSB children and FMG tables can exceed 1 MiB when base64-framed.
-      maxFrameBytes: 16 * 1024 * 1024,
+      // PARAM 全量载荷（includeAllPayloads）可达数 MB~29 MB base64，按需提高。
+      maxFrameBytes: options.maxFrameBytes ?? 16 * 1024 * 1024,
       maxConcurrency: 2,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     });

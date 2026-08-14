@@ -63,11 +63,13 @@ export interface BuildDomainSummariesInput {
 }
 
 /**
- * 构造领域栏的 DomainSummary[]。只做两件事：
+ * 构造领域栏的 DomainSummary[]。只做三件事：
  *
  * 1. 领域集合 = shared EDITOR_DOMAIN_IDS 的固定顺序（§3.2 领域顺序固定，
  *    不因文件内容增减而变）；
- * 2. capability 按「read contract 已注册 × 运行条件满足」判定（§3.2）。
+ * 2. capability 按「read contract 已注册 × 运行条件满足」判定（§3.2）；
+ * 3. visibility 按用户裁定（R1，2026-08-14）投影：GPARAM 从领域顶栏移除，
+ *    与 PARAM 合并进左侧「参数」逻辑库（见 front-end.md §3.2 的裁定投影）。
  *
  * defaultTarget 本卡恒为 null：SHELL-09 只完成外壳契约，逻辑库 document 句柄
  * 由后续 read 卡（PARAM-10A 等）经 IPC 提供；在拿到真实 EditorCatalogSummary
@@ -84,7 +86,10 @@ export function buildDomainSummaries(input: BuildDomainSummariesInput): readonly
     return {
       domain,
       label: DOMAIN_LABELS[domain],
-      visibility: 'visible',
+      // R1 裁定：顶栏删除独立「GPARAM」；PARAM 与 GPARAM 都进左侧「参数」逻辑库。
+      // 域本身仍可路由（打开 gparam 文件时工作台照常），只是不在顶栏/命令面板
+      // 提供一级入口。这不是 display:none 藏 UI —— 规范投影已同步（front-end.md）。
+      visibility: domain === 'gparam' ? 'hidden' : 'visible',
       capability,
       defaultTarget: null
     };

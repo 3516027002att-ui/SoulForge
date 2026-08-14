@@ -107,12 +107,12 @@
 
   /* 同一种白的四个深度：0 最底层 / 1 常驻 chrome·pane / 2 输入与密集内容保护 /
      3 modal·menu·cmdk·toast。值是不透明度，让环境流光按表面层级轻微透出。 */
-  --forge-0: rgb(255 255 255 / 0.18); /* 连续画布 / 最底层 */
-  --forge-1: rgb(255 255 255 / 0.58); /* 常驻 chrome / pane */
-  --forge-2: rgb(255 255 255 / 0.82); /* 输入、局部抬升、密集内容保护层 */
-  --forge-3: rgb(255 255 255 / 0.94); /* modal、menu、cmdk、toast */
-  --forge-hover: rgb(255 255 255 / 0.44);
-  --forge-active: rgb(255 255 255 / 0.72);
+  --forge-0: rgb(255 255 255 / 0.08); /* 连续画布 / 最底层 */
+  --forge-1: rgb(255 255 255 / 0.38); /* 常驻 chrome / pane */
+  --forge-2: rgb(255 255 255 / 0.60); /* 输入、局部抬升、密集内容保护层 */
+  --forge-3: rgb(255 255 255 / 0.84); /* modal、menu、cmdk、toast */
+  --forge-hover: rgb(255 255 255 / 0.30);
+  --forge-active: rgb(255 255 255 / 0.55);
 
   /* hairline：锻造接缝 */
   --line: oklch(20% 0.01 255 / 0.06);
@@ -250,6 +250,17 @@ input, textarea, select { font: inherit; color: inherit; }
 @keyframes sf-ambient-b {
   0% { transform: translate3d(0.8%, -0.45%, 0) scale(1.01); }
   100% { transform: translate3d(-0.9%, 0.55%, 0) scale(1.02); }
+}
+
+/* V3 WebGL 流光：成功时关掉 CSS 伪元素，避免双层叠色。失败则保留上面的伪元素。 */
+.sf-ambient-field {
+  position: fixed; inset: 0; z-index: 0;
+  width: 100%; height: 100%; display: none; pointer-events: none;
+}
+[data-theme="light"] .sf-ambient-field { display: block; }
+html[data-theme="light"][data-ambient="shader"] body::before,
+html[data-theme="light"][data-ambient="shader"] body::after {
+  display: none;
 }
 
 /* 焦点可见性（键盘可达）：2px 余火焦点环，与 hover 阴影/选中态可区分。
@@ -407,7 +418,7 @@ kbd {
 }
 
 /* ═══════════ 主体布局 ═══════════ */
-.shell { flex: 1; display: flex; min-height: 0; position: relative; }
+.shell { flex: 1; display: flex; min-height: 0; position: relative; overflow: hidden; }
 
 /* ═══════════ 活动栏 ═══════════ */
 .activitybar {
@@ -437,7 +448,7 @@ kbd {
 
 /* ═══════════ 侧栏（与画布同色，hairline 分隔） ═══════════ */
 .sidebar {
-  width: var(--sidebar-w); flex: none; min-width: 180px; max-width: 480px;
+  width: var(--sidebar-w); flex: none; min-width: 44px; max-width: 480px;
   background: var(--forge-1); border-right: 1px solid var(--line);
   position: relative; overflow: hidden;
   transition: margin-left var(--dur-trans) var(--ease-standard);
@@ -445,9 +456,25 @@ kbd {
 .sidebar.is-collapsed { margin-left: calc(-1 * var(--sidebar-w)); border-right-color: transparent; }
 .sidebar-resizer {
   position: absolute; top: 0; right: -2px; width: 5px; height: 100%;
-  cursor: col-resize; z-index: 5;
+  cursor: col-resize; pointer-events: auto; z-index: 5;
 }
 .sidebar-resizer:hover { background: var(--ember-soft); }
+
+/* 侧栏头部关闭按钮：透明小圆钮，hover 变 --forge-hover；follows .panel__header 的
+   space-between flex，靠右放置即可。 */
+.sidebar__close {
+  width: 22px; height: 22px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 50%; padding: 0;
+  background: transparent; color: var(--ink-3);
+  cursor: pointer;
+  transition: background var(--dur-micro), color var(--dur-micro);
+}
+.sidebar__close:hover {
+  background: var(--forge-hover); color: var(--ink-0);
+}
+.sidebar__close:active { background: var(--forge-active); }
+.sidebar__close:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
 
 /* 注意：布局关键容器不使用 opacity 入场动画 ——
    隐藏窗口（e2e fixture show:false）下 Chromium 节流 BeginFrame，
@@ -505,6 +532,51 @@ kbd {
 }
 .file-item.selected .file-item__name { color: var(--ink-0); }
 .file-item__meta { font-size: 10px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.library-list {
+  flex: 1 1 0; min-height: 80px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.library-item {
+  display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
+  padding: 5px 10px; border-radius: var(--radius-m);
+  transition: background var(--dur-micro);
+}
+.library-item:hover { background: var(--forge-hover); }
+.library-item.is-selected { background: var(--ember-soft); box-shadow: inset 2px 0 0 var(--ember); }
+.library-item__name {
+  font-size: 12.5px; color: var(--ink-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.library-item.is-selected .library-item__name { color: var(--ink-0); }
+.library-item__meta {
+  font-size: 10px; color: var(--ink-3); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── 分组逻辑库（R1 裁定：参数域两级——PARAM / GPARAM 常驻，GPARAM 点开出 bank） ── */
+.library-group { display: flex; flex-direction: column; gap: 1px; }
+.library-group__header {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  padding: 6px 8px; border-radius: var(--radius-m);
+  color: var(--ink-1); font-size: 12px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase;
+  transition: background var(--dur-micro);
+}
+.library-group__header:hover { background: var(--forge-hover); color: var(--ink-0); }
+.library-group__header:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
+.library-group__chevron {
+  flex: none; color: var(--ink-3);
+  transition: transform var(--dur-micro);
+}
+.library-group__header[aria-expanded="true"] .library-group__chevron { transform: rotate(90deg); }
+.library-group__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-group__hint {
+  margin-left: auto; font-size: 10px; font-weight: 400; color: var(--ink-3);
+  text-transform: none; white-space: nowrap;
+}
+.library-group__body { display: flex; flex-direction: column; gap: 1px; padding-left: 14px; }
+.library-group__empty { padding: 3px 10px 6px; font-size: 11px; }
 
 /* ── 通用小部件 ── */
 .pill {
@@ -660,7 +732,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .tab__close:hover { background: var(--danger-soft); color: var(--danger-text); }
 .tab__close:focus-visible { background: var(--danger-soft); color: var(--danger-text); }
 
-.editor-viewport { flex: 1; min-height: 0; position: relative; }
+.editor-viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; isolation: isolate; }
 .editor-pane {
   position: absolute; inset: 0; display: none; flex-direction: column; overflow: hidden;
 }
@@ -677,8 +749,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .project-overview,
 .domain-placeholder {
   max-width: 760px; width: 100%; margin: auto; padding: 28px 32px;
-  border-left: 2px solid var(--ember); background: var(--forge-1);
+  border-left: 2px solid var(--ember); background: transparent;
 }
+.project-overview__shortcuts {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px;
+}
+.project-overview__section { margin-top: 24px; }
 .project-overview__eyebrow,
 .domain-placeholder__eyebrow {
   color: var(--ember-text); font: 10px var(--font-mono); letter-spacing: .12em;
@@ -691,7 +767,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1px; margin-top: 28px; border: 1px solid var(--line); background: var(--line);
 }
-.project-overview__facts > div { display: flex; flex-direction: column; gap: 2px; padding: 12px; background: var(--forge-0); }
+.project-overview__facts > div { display: flex; flex-direction: column; gap: 2px; padding: 12px; background: var(--forge-2); }
 .project-overview__facts span { color: var(--ink-3); font-size: 10.5px; }
 .project-overview__facts strong { font: 20px var(--font-mono); color: var(--ink-0); }
 .project-overview__facts small { color: var(--ink-3); font-size: 10px; }
@@ -1054,7 +1130,7 @@ pre.tool-output {
 /* 隐藏不用 transition：节流窗口下过渡冻结可能残留幽灵遮罩。 */
 .editor-welcome {
   position: absolute; inset: 0; display: grid; place-items: start center;
-  background: var(--forge-0); z-index: 3; overflow-y: auto; padding: 8vh 0 32px;
+  background: var(--canvas, var(--forge-1)); z-index: 3; overflow-y: auto; padding: 8vh 0 32px;
 }
 .editor-welcome.is-hidden { display: none; }
 .welcome { width: min(720px, 92%); color: var(--ink-1); animation: rise-in var(--dur-trans) var(--ease-standard); }
@@ -1121,8 +1197,10 @@ pre.tool-output {
    conversation minmax(48px,1fr) 保底可滚动——内容再高都能滚到，不再塌没。 */
 .agent {
   width: var(--agent-w); min-width: var(--agent-dock-min); max-width: var(--agent-dock-max); flex: none;
-  display: grid; grid-template-rows: var(--agent-header-height) minmax(48px, 1fr) minmax(0, auto) auto;
-  color: var(--ink-0); background: var(--forge-0); border-left: 1px solid var(--line);
+  display: grid;
+  grid-template-rows: var(--agent-header-height) minmax(48px, 1fr) minmax(0, auto) auto;
+  grid-template-areas: "header" "conversation" "context" "composer";
+  color: var(--ink-0); background: var(--forge-1); border-left: 1px solid var(--line);
   box-shadow: none;
   position: relative;
   overflow: hidden;
@@ -1131,6 +1209,7 @@ pre.tool-output {
 .agent.is-collapsed { margin-right: calc(-1 * var(--agent-w)); border-left-color: transparent; }
 /* §12.2.1 固定视觉：AgentDockHeader */
 .agent__header {
+  grid-area: header;
   height: var(--agent-header-height); flex: none;
   display: flex; align-items: center; justify-content: space-between;
   padding: 0 12px 0 16px; border-bottom: 1px solid var(--line);
@@ -1196,6 +1275,7 @@ pre.tool-output {
 /* conversation viewport：水平 padding 16px，消息之间 16px（§12.2.1）。
    硬约束 17（分页/虚拟化）由 AGENT-60C 的 AgentMessageList 承担。 */
 .agent-conversation {
+  grid-area: conversation;
   overflow-y: auto; min-height: 0;
   display: flex; flex-direction: column; gap: 16px;
   padding: 0 16px;
@@ -1204,19 +1284,20 @@ pre.tool-output {
 /* §12.2.1 + §12.4 固定欢迎态：垂直居中并下移约 24px */
 .agent-welcome {
   width: min(100% - 32px, var(--agent-welcome-max-width));
+  max-height: 100%;
   margin: auto;
-  transform: translateY(24px);
+  overflow: auto;
   text-align: center;
   color: var(--ink-1);
 }
 .agent-welcome__icon {
-  width: 44px; height: 44px; margin: 0 auto 12px;
+  width: 36px; height: 36px; margin: 0 auto 10px;
   display: grid; place-items: center;
   border-radius: 4px;
   background: var(--forge-2);
-  color: var(--ember-text); font-size: 20px; line-height: 1;
+  color: var(--ember-text); font-size: 18px; line-height: 1;
 }
-.agent-welcome h2 { color: var(--ink-0); font-size: 28px; font-weight: 600; }
+.agent-welcome h2 { color: var(--ink-0); font-size: 18px; font-weight: 600; }
 .agent-welcome p { margin-top: 8px; font-size: 14px; color: var(--ink-3); }
 .agent-welcome ul {
   display: grid; gap: 8px; margin-top: 22px; padding: 0; list-style: none;
@@ -1457,13 +1538,15 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 /* 上下文选择 + 资源引用选择（§12.10）。极矮视口下允许被 grid 压缩（辅助信息），
    超高时内部滚动，不把 conversation 挤塌、不溢出面板。 */
 .agent-composer-context {
-  min-height: 0; overflow-y: auto;
+  grid-area: context;
+  min-height: 0; overflow-y: auto; min-width: 0;
 }
 
 .agent__composer {
+  grid-area: composer; min-width: 0;
   border-top: 1px solid var(--line); padding: 10px 12px 12px;
   display: flex; flex-direction: column; gap: 7px;
-  background: var(--forge-0);
+  background: var(--forge-2);
   /* §12.6：整个 Composer 不超过 40vh；超出由中间层滚动承接。 */
   max-height: var(--agent-composer-max-height); overflow: hidden;
 }
@@ -1522,19 +1605,25 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .agent-history__item-actions { display: flex; flex: none; gap: 4px; }
 
 /* §12.2：4px resizer，普通状态只有 1px 左分隔线（.agent 的 border-left 承担）。
-   dock 左缘手柄在 aside 内部绝对定位，向编辑器侧伸出 4px。 */
+   手柄贴在 dock 左缘内侧（left:0），不再伸出 aside 外：.agent 的 overflow:hidden
+   会把伸出边界的 4px 命中区裁掉，导致手柄完全点不到（R4）。内侧贴边压住 border-left，
+   命中区不会被裁剪。absolute 定位脱离 grid 流，z-index 高于编辑区/抽屉层。 */
 .agent-dock-resizer {
-  position: absolute; left: calc(-1 * var(--agent-resizer-width));
+  position: absolute; left: 0;
   top: 0; bottom: 0;
   width: var(--agent-resizer-width);
-  cursor: col-resize; z-index: 40;
+  height: 100%;
+  cursor: col-resize; pointer-events: auto; z-index: 40;
   background: transparent;
+  grid-area: 1 / 1 / -1 / 1;
   transition: background var(--dur-micro);
 }
 .agent-dock-resizer:hover,
 .agent-dock-resizer:focus-visible { background: var(--ember-soft); }
+/* 只有 dock 收起时才隐藏/禁用，正常工作时保持可拖。 */
 .agent-dock-resizer.is-hidden { display: none; }
-.agent.is-overlay { position: absolute; top: 0; right: 0; bottom: 0; z-index: 30; box-shadow: var(--shadow-float); }
+.agent.is-collapsed .agent-dock-resizer { pointer-events: none; }
+.agent-drawer { grid-area: 1 / 1 / -1 / -1; }
 
 /* AI 工作台（编辑器区 ai 模式） */
 .ai-context-card { margin-bottom: 0; }
@@ -1684,7 +1773,6 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 
 /* ═══════════ 响应式 ═══════════ */
 @media (max-width: 920px) {
-  .agent.is-overlay { position: absolute; right: 0; top: 0; bottom: 0; z-index: 30; box-shadow: var(--shadow-float); }
   .sidebar { --sidebar-w: 224px; }
   .brand-tag { display: none; }
 }
@@ -1732,6 +1820,15 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 6px 10px; border-bottom: 1px solid var(--line);
   background: var(--forge-1);
+}
+/* P1 裁定：栏宽被拖过后的「恢复默认栏宽」入口，右对齐的小行，不常驻。 */
+.workbench__layout-actions {
+  flex: none; display: flex; justify-content: flex-end;
+  padding: 2px 8px; border-bottom: 1px solid var(--line);
+  background: var(--forge-1);
+}
+.workbench__layout-actions .secondary-action {
+  padding: 1px 8px; font-size: 10.5px; border-radius: var(--radius-s, 3px);
 }
 /* min-height: 0 是必需的：flex 子项默认 min-height:auto，栏内长列表会把容器撑高
    而不是自己滚动。漏掉它的表现正是「整页出现第二个滚动条」。 */

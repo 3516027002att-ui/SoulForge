@@ -146,15 +146,22 @@ internal sealed class ParamNativeDocument
                 throw new InvalidDataException($"PARAM 第 {i} 行 dataOffset 非紧凑布局。");
             var data = source.AsSpan(dataOff, rowDataSize).ToArray();
             string? rowName = null;
+            byte[]? rowNameBytes = null;
+            string? rowNameEncoding = null;
             if (rowNameOff != 0)
             {
                 if (rowNameOff < 0 || rowNameOff >= source.Length)
                     throw new InvalidDataException($"PARAM 第 {i} 行名称偏移越界。");
-                var parsedName = ReadAsciiZ(source, rowNameOff);
+                var (parsedName, parsedBytes, parsedEncoding) = DecodeParamRowName(source, rowNameOff);
                 // Offsets that land on an empty C-string are treated as unnamed (common in Sekiro params).
-                rowName = string.IsNullOrEmpty(parsedName) ? null : parsedName;
+                if (!string.IsNullOrEmpty(parsedName))
+                {
+                    rowName = parsedName;
+                    rowNameBytes = parsedBytes;
+                    rowNameEncoding = parsedEncoding;
+                }
             }
-            rows.Add(new ParamRow(id, data, rowName));
+            rows.Add(new ParamRow(id, data, rowName, rowNameBytes, rowNameEncoding));
         }
 
         return new ParamNativeDocument(
@@ -214,7 +221,7 @@ internal sealed class ParamNativeDocument
         for (var i = 0; i < rowCount; i++)
         {
             var dataOff = dataStart + i * rowDataSize;
-            rows.Add(new ParamRow(0, source.AsSpan(dataOff, rowDataSize).ToArray(), null));
+            rows.Add(new ParamRow(0, source.AsSpan(dataOff, rowDataSize).ToArray(), null, null, null));
         }
 
         for (var k = 0; k < rowCount - 1; k++)
@@ -233,7 +240,7 @@ internal sealed class ParamNativeDocument
                 name = DecodeShiftJisName(source, nameOff);
                 nameOffsets[k] = nameOff;
             }
-            rows[k] = new ParamRow(id, rows[k].Data, name);
+            rows[k] = new ParamRow(id, rows[k].Data, name, null, null);
         }
 
         var tail = tailLen > 0 ? source.AsSpan(headerEnd, tailLen).ToArray() : Array.Empty<byte>();
@@ -299,13 +306,14 @@ internal sealed class ParamNativeDocument
         var cursor = nameOffset + typeNameBytes.Length;
         for (var i = 0; i < nextRows.Count; i++)
         {
-            if (string.IsNullOrEmpty(nextRows[i].Name))
+            var name = nextRows[i].Name;
+            if (string.IsNullOrEmpty(name))
             {
                 rowNameOffsets[i] = 0;
                 rowNameBytes.Add(Array.Empty<byte>());
                 continue;
             }
-            var encoded = Encoding.ASCII.GetBytes(nextRows[i].Name! + "\0");
+            var encoded = EncodeParamRowName(name!, nextRows[i].NameBytes, nextRows[i].NameEncoding);
             rowNameOffsets[i] = cursor;
             rowNameBytes.Add(encoded);
             cursor += encoded.Length;
@@ -398,7 +406,7 @@ internal sealed class ParamNativeDocument
 
     private byte[] ApplyCompactMutations(IReadOnlyList<ParamPatch> patches)
     {
-        var rows = Rows.Select(r => new ParamRow(r.Id, r.Data.ToArray(), r.Name)).ToList();
+        var rows = Rows.Select(r => new ParamRow(r.Id, r.Data.ToArray(), r.Name, r.NameBytes, r.NameEncoding)).ToList();
         foreach (var patch in patches)
         {
             switch (patch.Kind)
@@ -409,7 +417,16 @@ internal sealed class ParamNativeDocument
                     var data = Convert.FromBase64String(patch.DataBase64);
                     if (data.Length != RowDataSize) throw new InvalidDataException("PARAM upsert 行宽不匹配。");
                     var idx = rows.FindIndex(r => r.Id == patch.Id);
-                    var next = new ParamRow(patch.Id, data, patch.Name ?? (idx >= 0 ? rows[idx].Name : null));
+                    var prev = idx >= 0 ? rows[idx] : null;
+                    var nextName = patch.Name ?? prev?.Name;
+                    // 名称未被 patch 修改（或补丁未带 name）时保留原始字节，保证无修改往返字节一致。
+                    var keepOriginal = prev is not null && string.Equals(nextName, prev.Name, StringComparison.Ordinal);
+                    var next = new ParamRow(
+                        patch.Id,
+                        data,
+                        nextName,
+                        keepOriginal ? prev!.NameBytes : null,
+                        keepOriginal ? prev!.NameEncoding : prev?.NameEncoding);
                     if (idx >= 0) rows[idx] = next; else rows.Add(next);
                     break;
                 }
@@ -426,7 +443,7 @@ internal sealed class ParamNativeDocument
                     if (patch.DataBase64 is null) throw new InvalidDataException("PARAM add 需要 dataBase64。");
                     var data = Convert.FromBase64String(patch.DataBase64);
                     if (data.Length != RowDataSize) throw new InvalidDataException("PARAM add 行宽不匹配。");
-                    rows.Add(new ParamRow(patch.Id, data, patch.Name));
+                    rows.Add(new ParamRow(patch.Id, data, patch.Name, null, null));
                     break;
                 }
                 default:
@@ -440,7 +457,7 @@ internal sealed class ParamNativeDocument
 
     private byte[] ApplyLegacyMutations(IReadOnlyList<ParamPatch> patches)
     {
-        var rows = Rows.Select(r => new ParamRow(r.Id, r.Data.ToArray(), r.Name)).ToList();
+        var rows = Rows.Select(r => new ParamRow(r.Id, r.Data.ToArray(), r.Name, r.NameBytes, r.NameEncoding)).ToList();
         foreach (var patch in patches)
         {
             switch (patch.Kind)
@@ -455,7 +472,7 @@ internal sealed class ParamNativeDocument
                         throw new InvalidDataException($"PARAM 旧布局不支持新增行 upsert：ID {patch.Id} 不存在且无行头可无损新增。");
                     if (patch.Name is not null && patch.Name != rows[idx].Name)
                         throw new InvalidDataException("PARAM 旧布局不支持行名变更（名称区按字节保留）。");
-                    rows[idx] = new ParamRow(patch.Id, data, rows[idx].Name);
+                    rows[idx] = new ParamRow(patch.Id, data, rows[idx].Name, null, null);
                     break;
                 }
                 case "delete":
@@ -469,7 +486,7 @@ internal sealed class ParamNativeDocument
         return Rebuild(rows);
     }
 
-    public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0)
+    public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0, bool includeAllPayloads = false)
     {
         // Large params (multi-MB / wide rows) must not dump payloads into one NDJSON frame.
         // 载荷上限按「本次实际返回多少行」算，而不是按全表行数。
@@ -499,11 +516,16 @@ internal sealed class ParamNativeDocument
         // 512 KB 原始字节 ≈ 700 KB base64，仍在默认 1 MB 帧上限内。
         // 超预算时不返回字节而不是截断行 —— 半份行数据解码出的字段值是错的，
         // 而错的数值比没有数值危险。
+        //
+        // includeAllPayloads（用户裁定 2026-08-14）：显式请求时跳过 32 行 / 512 KB
+        // 门控，一次返回全表行字节（renderer 打开表即全量加载，不再分批续取）。
+        // 帧会变大（数 MB base64）；守护进程帧上限的绝对上限是 32 MB，调用方在
+        // 请求全量时必须同步提高 maxFrameBytes（见 main 侧 includeAllPayloads 路径）。
         const int MaxPagePayloadBytes = 512 * 1024;
         var pagePayloadBytes = (long)pageRows.Length * RowDataSize;
         var pageIncludePayload = includePayload
-            && pageRows.Length <= rowPreviewLimit
-            && pagePayloadBytes <= MaxPagePayloadBytes;
+            && (includeAllPayloads
+                || (pageRows.Length <= rowPreviewLimit && pagePayloadBytes <= MaxPagePayloadBytes));
 
         return new
         {
@@ -571,6 +593,146 @@ internal sealed class ParamNativeDocument
         }
     }
 
+    /// <summary>
+    /// 解码 compact 布局 PARAM 行名。只狼的行名可能是 UTF-16LE（宽 NUL 0x00 0x00 终止，
+    /// 含 NUL 交错的 ASCII 内容与 CJK/假名高位字符）、Shift-JIS（单字节 NUL 终止）或纯
+    /// ASCII。返回解码名 + 原始名称字节（不含终止符）+ 编码标签；解码失败不抛异常，
+    /// 返回 (null, null, null)，由调用方按未命名行处理并把原始字节保留给无损往返。
+    /// </summary>
+    private static (string? Name, byte[]? NameBytes, string? Encoding) DecodeParamRowName(byte[] source, int offset)
+    {
+        if (offset < 0 || offset >= source.Length)
+            return (null, null, null);
+
+        // (a) UTF-16LE：宽 NUL 终止，偶数步进扫描并逐 2 字节校验合法字符。
+        if (TryDecodeUtf16LeName(source, offset, out var utf16Name, out var utf16Bytes))
+            return (utf16Name, utf16Bytes, "utf16le");
+
+        // 单字节 NUL 终止：先判纯 ASCII，再试 Shift-JIS，最后退回 ASCII（历史 ReadAsciiZ 行为）。
+        var zlen = ScanZLength(source, offset);
+        if (zlen <= 0)
+            return (null, null, null);
+
+        var span = source.AsSpan(offset, zlen);
+        var raw = span.ToArray();
+
+        var allPrintableAscii = true;
+        for (var i = 0; i < span.Length; i++)
+        {
+            var b = span[i];
+            if (b < 0x20 || b > 0x7e) { allPrintableAscii = false; break; }
+        }
+        if (allPrintableAscii)
+            return (Encoding.ASCII.GetString(span), raw, "ascii");
+
+        try
+        {
+            var sjis = ShiftJisEncoding.GetString(span);
+            if (sjis.Length > 0 && sjis.IndexOf('\uFFFD') < 0)
+                return (sjis, raw, "shiftjis");
+        }
+        catch (Exception ex) when (ex is ArgumentException or DecoderFallbackException)
+        {
+        }
+
+        // 未知编码的高位字节：退回 ASCII（高位字节退化为 '?'，与历史行为一致）。
+        // 原始字节仍保留，名称未变时 Rebuild 原样拷贝，字节无损。
+        return (Encoding.ASCII.GetString(span), raw, "ascii");
+    }
+
+    private static bool TryDecodeUtf16LeName(byte[] source, int offset, out string? name, out byte[]? bytes)
+    {
+        name = null;
+        bytes = null;
+        var len = 0;
+        while (offset + len + 1 < source.Length && len + 2 <= MaxNameBytes)
+        {
+            if (source[offset + len] == 0 && source[offset + len + 1] == 0)
+            {
+                if (len == 0) return false;
+                var valid = true;
+                for (var p = 0; p < len; p += 2)
+                {
+                    var c = (char)(source[offset + p] | (source[offset + p + 1] << 8));
+                    if (source[offset + p + 1] == 0)
+                    {
+                        // 高位字节为 0：UTF-16LE 的 U+0000..U+00FF 区，允许可打印 ASCII
+                        // (0x20-0x7E) 与 Latin-1 可见扩展 (0xA0-0xFF，如 · × ÷ 等中日文常用标点)，
+                        // 排除控制字符与 0x7F-0x9F 未定义区。
+                        if (c < 0x20 || (c > 0x7e && c < 0xa0)) { valid = false; break; }
+                    }
+                    else if (c <= 0x7f || char.IsSurrogate(c) || c == 0xfffe || c == 0xffff)
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (!valid) return false;
+                name = Encoding.Unicode.GetString(source, offset, len);
+                bytes = source.AsSpan(offset, len).ToArray();
+                return true;
+            }
+            len += 2;
+        }
+        return false;
+    }
+
+    private static int ScanZLength(byte[] source, int offset)
+    {
+        for (var i = offset; i < source.Length; i++)
+        {
+            if (source[i] == 0) return i - offset;
+            if (i - offset >= MaxNameBytes) return -1;
+        }
+        return -1;
+    }
+
+    private static byte[] EncodeParamRowName(string name, byte[]? originalBytes, string? encoding)
+    {
+        // 名称未改：原始字节 re-decode 后等于当前名 → 原样拷贝原始字节，保证字节级无损。
+        if (originalBytes is { Length: > 0 } && NameMatchesOriginal(originalBytes, encoding, name))
+            return AppendTerminator(originalBytes, encoding);
+
+        var enc = encoding switch
+        {
+            "utf16le" => Encoding.Unicode,
+            "shiftjis" => ShiftJisEncoding,
+            _ => Encoding.ASCII
+        };
+        return AppendTerminator(enc.GetBytes(name), encoding);
+    }
+
+    private static bool NameMatchesOriginal(byte[] originalBytes, string? encoding, string name)
+    {
+        try
+        {
+            var decoded = encoding switch
+            {
+                "utf16le" => Encoding.Unicode.GetString(originalBytes),
+                "shiftjis" => ShiftJisEncoding.GetString(originalBytes),
+                _ => Encoding.ASCII.GetString(originalBytes)
+            };
+            return string.Equals(decoded, name, StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is ArgumentException or DecoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    private static byte[] AppendTerminator(byte[] body, string? encoding)
+    {
+        if (encoding == "utf16le")
+        {
+            var result = new byte[body.Length + 2];
+            body.CopyTo(result, 0);
+            return result; // 尾部两字节保持 0x00 0x00（宽 NUL）
+        }
+        var r = new byte[body.Length + 1];
+        body.CopyTo(r, 0);
+        return r; // 单字节 NUL
+    }
+
     private static Encoding CreateShiftJisEncoding()
     {
         // CodePagesEncodingProvider ships with the .NET runtime pack; no extra package dependency.
@@ -597,7 +759,7 @@ internal sealed class ParamNativeDocument
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 }
 
-internal sealed record ParamRow(int Id, byte[] Data, string? Name);
+internal sealed record ParamRow(int Id, byte[] Data, string? Name, byte[]? NameBytes, string? NameEncoding);
 internal sealed record ParamPatch(string Kind, int Id, string? DataBase64, string? Name);
 internal sealed record ParamRoundTripReport(
     bool ByteIdentical,

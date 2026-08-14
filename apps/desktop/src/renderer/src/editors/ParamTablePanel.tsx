@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactElement } from 'react';
-import { PARAM_PAGE_SIZE } from '@soulforge/shared';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import type { ParamRowPage } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 
@@ -8,16 +8,16 @@ export interface ParamRowView {
   name?: string;
   /** Hex preview of raw row bytes (no Node Buffer). */
   dataHexPreview: string;
-  /** Full row bytes (base64) carried by the paginated page. */
+  /** Full row bytes (base64) carried by the loaded document. */
   dataBase64?: string;
 }
 
 export interface ParamTablePanelProps {
   typeName: string;
   resourceUri: string;
-  /** Demo/fallback rows; only rendered when live pagination is unavailable. */
+  /** Demo/fallback rows; only rendered when live loading is unavailable. */
   rows: ParamRowView[];
-  /** True when the source is a live Bridge PARAM document (page-fetchable). */
+  /** True when the source is a live Bridge PARAM document (loadAll-fetchable). */
   live?: boolean;
   onMutation?: (mutation: {
     kind: 'param_row_upsert' | 'param_row_delete';
@@ -30,17 +30,12 @@ export interface ParamTablePanelProps {
   }) => void;
 }
 
-/*
- * 分页页大小（硬约束 17）来自 @soulforge/shared，与主进程
- * `resource.readParamPage` 用同一常量，避免两侧字面量各自漂移。
- */
-
 /**
- * PARAM 专业表格：分页行表 + row CRUD mutation 出口。
+ * PARAM 专业表格：全量行表（用户裁定 2026-08-14）+ row CRUD mutation 出口。
  *
- * Live 模式下经 `resource.readParamPage` 按页读取（renderer 只持有一页，
- * 查询在 main 端作用于完整行表，导航可覆盖完整文档）；字段级 paramdef
- * 编辑仍在 ParamDefPanel。演示回退路径在 renderer 内显式分页。
+ * Live 模式经 `resource.readParamPage(loadAll=true)` 一次取回全部行（含行字节，
+ * main 侧 includeAllPayloads 跳过 Bridge 页门控），筛选在 renderer 本地做，
+ * DOM 用虚拟滚动保持有界——打开表即全量到位，不再分批翻页。
  */
 export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
   const bridge = getRendererBridge();
@@ -48,83 +43,75 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
     && bridge !== null
     && typeof bridge.readParamPage === 'function';
   const [query, setQuery] = useState('');
-  const [page, setPage] = useState(0);
-  const [pageRows, setPageRows] = useState<ParamRowView[]>([]);
-  const [pageCount, setPageCount] = useState(1);
+  const [allRows, setAllRows] = useState<ParamRowView[]>([]);
   const [rowCount, setRowCount] = useState(0);
   const [maxId, setMaxId] = useState(0);
   const [loading, setLoading] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
+  /** 行列表滚动容器（虚拟化器测量视口）。 */
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Live path: fetch one page from main (complete coverage via navigation).
+  // Live path: fetch the complete row table once (loadAll), then filter locally.
   useEffect(() => {
     if (!liveMode || bridge === null || !props.resourceUri) return;
     let cancelled = false;
     setLoading(true);
     setPageError(null);
-    bridge.readParamPage(props.resourceUri, page, PARAM_PAGE_SIZE, query)
+    bridge.readParamPage(props.resourceUri, 0, 1, '', true)
       .then((result: ParamRowPage) => {
         if (cancelled) return;
         if (!result.ok) {
-          setPageError(result.diagnostics?.[0]?.message ?? 'PARAM 分页读取失败。');
-          setPageRows([]);
+          setPageError(result.diagnostics?.[0]?.message ?? 'PARAM 全量读取失败。');
+          setAllRows([]);
         } else {
-          setPageRows(result.rows.map((row) => ({
+          setAllRows(result.rows.map((row) => ({
             id: row.id,
             dataHexPreview: row.dataHexPreview ?? '',
             ...(row.dataBase64 ? { dataBase64: row.dataBase64 } : {}),
             ...(row.name ? { name: row.name } : {})
           })));
-          setPageCount(result.pageCount);
           setRowCount(result.rowCount);
           setMaxId(result.rows.reduce((max, row) => Math.max(max, row.id), 0));
-          setPage(result.page);
           setPageError(null);
         }
         setLoading(false);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setPageError(error instanceof Error ? error.message : 'PARAM 分页读取异常。');
-        setPageRows([]);
+        setPageError(error instanceof Error ? error.message : 'PARAM 全量读取异常。');
+        setAllRows([]);
         setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [liveMode, bridge, props.resourceUri, page, query]);
+  }, [liveMode, bridge, props.resourceUri]);
 
-  // Demo/fallback path: client-side filter + explicit page window.
-  const demoFiltered = useMemo(() => {
+  // Demo/fallback path: client-side filter over the demo rows.
+  const sourceRows = liveMode ? allRows : props.rows;
+  const visibleRows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return props.rows;
-    return props.rows.filter(
+    if (!q) return sourceRows;
+    return sourceRows.filter(
       (row) => String(row.id).includes(q) || (row.name ?? '').toLowerCase().includes(q)
     );
-  }, [props.rows, query]);
+  }, [sourceRows, query]);
 
-  useEffect(() => {
-    if (liveMode) return;
-    const demoPageCount = Math.max(1, Math.ceil(demoFiltered.length / PARAM_PAGE_SIZE));
-    const clamped = Math.min(Math.max(0, page), demoPageCount - 1);
-    const slice = demoFiltered.slice(
-      clamped * PARAM_PAGE_SIZE,
-      clamped * PARAM_PAGE_SIZE + PARAM_PAGE_SIZE
-    );
-    setPageRows(slice);
-    setPageCount(demoPageCount);
-    setRowCount(demoFiltered.length);
-    setMaxId(props.rows.reduce((max, row) => Math.max(max, row.id), 0));
-    if (clamped !== page) setPage(clamped);
-  }, [liveMode, demoFiltered, props.rows, page]);
+  // 虚拟滚动：全量数据一次在手，DOM 只渲染视口行（数万行也不卡）。
+  const virtualizer = useVirtualizer({
+    count: visibleRows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 28,
+    overscan: 12
+  });
 
   function deleteRow(id: number): void {
-    setPageRows((prev) => prev.filter((row) => row.id !== id));
+    setAllRows((prev) => prev.filter((row) => row.id !== id));
     props.onMutation?.({ kind: 'param_row_delete', id });
   }
 
   function duplicateRow(id: number): void {
-    const source = pageRows.find((row) => row.id === id);
+    const source = visibleRows.find((row) => row.id === id);
     if (!source) return;
     const nextId = maxId + 1;
     const next: ParamRowView = {
@@ -133,7 +120,7 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
       ...(source.dataBase64 ? { dataBase64: source.dataBase64 } : {}),
       ...(source.name ? { name: `${source.name}_copy` } : {})
     };
-    setPageRows((prev) => [...prev, next]);
+    setAllRows((prev) => [...prev, next]);
     props.onMutation?.({
       kind: 'param_row_upsert',
       id: nextId,
@@ -148,28 +135,16 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
       <header className="panel-header">
         <h3>PARAM：{props.typeName}</h3>
         <span className="muted">
-          {rowCount} 行 · 每页 {PARAM_PAGE_SIZE} · 字段级 def 见下方面板
+          {rowCount} 行 · 全量加载 · 字段级 def 见下方面板
         </span>
       </header>
       <div className="row gap">
         <input
           value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setPage(0);
-          }}
-          placeholder="筛选 row id / name（作用于完整行表）"
-          aria-label="筛选 PARAM 行 id 或 name"
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="筛选 row id / name（全量数据本地过滤）"
+          aria-label="筛选 PARAM 行 id 或 name（全量数据本地过滤）"
         />
-        <button type="button" disabled={page <= 0 || loading} onClick={() => setPage((p) => p - 1)}>上一页</button>
-        <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
-        <button
-          type="button"
-          disabled={page >= pageCount - 1 || loading}
-          onClick={() => setPage((p) => p + 1)}
-        >
-          下一页
-        </button>
         {loading && <span className="muted">加载中…</span>}
       </div>
       {pageError && <p className="danger">{pageError}</p>}
@@ -180,18 +155,41 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
           <span>Raw</span>
           <span>操作</span>
         </div>
-        {pageRows.map((row) => (
-          <div key={row.id} className="binder-child-row" role="row">
-            <span>{row.id}</span>
-            <span>{row.name ?? '—'}</span>
-            <span title={row.dataHexPreview}>{row.dataHexPreview.slice(0, 24)}</span>
-            <span className="row gap">
-              <button type="button" onClick={() => duplicateRow(row.id)}>复制</button>
-              <button type="button" onClick={() => deleteRow(row.id)}>删除</button>
-            </span>
+        <div
+          ref={scrollRef}
+          style={{ overflowY: 'auto', maxHeight: 420, position: 'relative' }}
+        >
+          <div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}>
+            {virtualizer.getVirtualItems().map((virtualRow) => {
+              const row = visibleRows[virtualRow.index];
+              if (!row) return null;
+              return (
+                <div
+                  key={row.id}
+                  className="binder-child-row"
+                  role="row"
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: `${virtualRow.size}px`,
+                    transform: `translateY(${virtualRow.start}px)`
+                  }}
+                >
+                  <span>{row.id}</span>
+                  <span>{row.name ?? '—'}</span>
+                  <span title={row.dataHexPreview}>{row.dataHexPreview.slice(0, 24)}</span>
+                  <span className="row gap">
+                    <button type="button" onClick={() => duplicateRow(row.id)}>复制</button>
+                    <button type="button" onClick={() => deleteRow(row.id)}>删除</button>
+                  </span>
+                </div>
+              );
+            })}
           </div>
-        ))}
-        {pageRows.length === 0 && !loading && <p className="muted">当前页无行。</p>}
+        </div>
+        {visibleRows.length === 0 && !loading && <p className="muted">没有匹配的行。</p>}
       </div>
       <p className="muted">结构定义（paramdef）编辑将写入用户派生游戏适配包，不会改官方包。</p>
     </section>

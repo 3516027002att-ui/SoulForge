@@ -44,6 +44,14 @@ internal sealed class BridgeCommandService
             return element.TryGetInt32(out var parsed) ? parsed : fallback;
         }
 
+        bool OptionBool(string name, bool fallback)
+        {
+            if (!optionsIsObject) return fallback;
+            if (!options.TryGetProperty(name, out var element)) return fallback;
+            if (element.ValueKind != JsonValueKind.True && element.ValueKind != JsonValueKind.False) return fallback;
+            return element.GetBoolean();
+        }
+
         var resourceKind = command switch
         {
             "export-event" => "event",
@@ -251,8 +259,13 @@ internal sealed class BridgeCommandService
                 // Pagination parameters from the request options.
                 var rowPage = OptionInt("rowPage", 0);
                 var rowPageSize = OptionInt("rowPageSize", 0);
+                // 全量载荷（用户裁定 2026-08-14）：打开表后一次加载全部行与行字节。
+                // 只对显式请求生效；缺省保持既有 32 行 / 512 KB 门控（守护进程帧上限）。
+                var includeAllPayloads = OptionBool("includeAllPayloads", false);
                 // Detect legacy header-embedded type-name layout and fail closed with a clear code.
-                return BridgeResult<object>.Partial(file, "param", diagnostics, document.ToEnvelope(roundTrip, rowPageSize: rowPageSize, rowPage: rowPage));
+                return BridgeResult<object>.Partial(file, "param", diagnostics,
+                    document.ToEnvelope(roundTrip, rowPageSize: rowPageSize, rowPage: rowPage,
+                        includeAllPayloads: includeAllPayloads));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {

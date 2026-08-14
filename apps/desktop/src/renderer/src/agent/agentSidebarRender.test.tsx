@@ -50,7 +50,6 @@ declare const __SOULFORGE_RENDERER_ROOT__: string;
 function render(overrides: Partial<AgentSidebarProps> = {}): string {
   const props: AgentSidebarProps = {
     open: true,
-    overlay: false,
     agentWidth: 440,
     agentMinWidth: 340,
     agentMaxWidth: 620,
@@ -202,12 +201,14 @@ describe('AgentDockResizer（§12.2）', () => {
     assert.match(html, /aria-valuemax="620"/);
   });
 
-  it('overlay 或收起时隐藏且不可聚焦', () => {
-    const overlayHtml = render({ overlay: true });
-    assert.match(overlayHtml, /agent-dock-resizer is-hidden/);
-    assert.match(overlayHtml, /tabindex="-1"/);
+  it('dock 开着时 resizer 可拖且不隐藏（常驻文档流右列，无 overlay）', () => {
+    const openHtml = render();
+    assert.match(openHtml, /class="agent-dock-resizer"/, '开着必须渲染 agent-dock-resizer');
+    assert.ok(!/agent-dock-resizer is-hidden/.test(openHtml), '开着时 resizer 不应隐藏');
+    assert.ok(!openHtml.includes('is-overlay'), 'Agent 始终文档流右列，不再有 overlay 形态');
     const closedHtml = render({ open: false });
     assert.match(closedHtml, /agent-dock-resizer is-hidden/);
+    assert.match(closedHtml, /tabindex="-1"/);
     assert.match(closedHtml, /class="agent is-collapsed"/);
   });
 

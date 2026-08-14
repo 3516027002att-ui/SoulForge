@@ -45,7 +45,7 @@ export function dockWidthForResizeKey(
 }
 
 export interface AgentDockResizerProps {
-  /** overlay 或 dock 收起时隐藏且不可聚焦（仍是 4px 分隔线语义，但不可拖拽）。 */
+  /** dock 收起时隐藏且不可聚焦（仍是 4px 分隔线语义，但不可拖拽）。 */
   overlay: boolean;
   currentWidth: number;
   minWidth: number;

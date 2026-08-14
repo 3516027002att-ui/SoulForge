@@ -30,7 +30,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { PARAM_PAGE_SIZE } from '@soulforge/shared';
 import type { ParamDefDocument, ParamFieldDef } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
@@ -120,9 +119,7 @@ export interface ParamWorkbenchProps {
   }) => Promise<{ ok: boolean; message?: string }>;
 }
 
-/** 字段分页大小。数百字段一次性建受控输入会让首屏卡顿。 */
-const FIELD_PAGE_SIZE = 40;
-
+/** 字段全量渲染（用户裁定 2026-08-14）：字段不再分页，一次全部显示。 */
 export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const bridge = getRendererBridge();
 
@@ -154,11 +151,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * 20/32 能下发字节、64 就超 512 KB 门限）—— 选中某行时只取包含它的那一页。
    */
   const [rows, setRows] = useState<ParamRowLine[]>([]);
-  const [rowPage, setRowPage] = useState(0);
-  const [rowPageCount, setRowPageCount] = useState(1);
   const [loadedRows, setLoadedRows] = useState<ParamRowLine[]>([]);
-  const [loadedPages, setLoadedPages] = useState(0);
-  const [appending, setAppending] = useState(false);
   /** 行栏滚动容器。虚拟化器要它测量视口与滚动位置。 */
   const rowScrollRef = useRef<HTMLDivElement | null>(null);
   /**
@@ -192,8 +185,27 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [containerHash, setContainerHash] = useState<string>('');
   const [childHash, setChildHash] = useState<string>('');
 
+  /**
+   * 主进程随 readContainerParamPage 返回的字段定义（P1 裁定）。
+   *
+   * 此前字段定义只经 App 的 resolveDefinition prop 下发，而那条链的数据源是
+   * readParamDocument(容器 URI)——容器喂进去必失败，于是容器工作台的 Fields
+   * 栏永远是「没有可用的字段定义」。现在主进程在 readContainerParamPage 里用
+   * 与 readParamDocument 相同的 resolveTrustedParamDefinition（包校验 + 行宽
+   * 核对 + 用户信任策略）解析并随页返回；origin 仍由主进程裁定，渲染器只消费。
+   */
+  const [pageFieldDefs, setPageFieldDefs] = useState<ParamFieldDef[] | null>(null);
+  const [pageFieldEnums, setPageFieldEnums] = useState<
+    Array<{ id: string; name: string; values: Array<{ value: number; label: string }> }> | null
+  >(null);
+  const [pageFieldDefsOrigin, setPageFieldDefsOrigin] = useState<
+    'fixture' | 'imported' | 'user-derived'
+  >('fixture');
+  const [pageFieldDefsDiagnostic, setPageFieldDefsDiagnostic] = useState<
+    { code: string; message: string } | null
+  >(null);
+
   const [selectedRowId, setSelectedRowId] = useState<number | null>(null);
-  const [fieldPage, setFieldPage] = useState(0);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [commitMessage, setCommitMessage] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
@@ -268,18 +280,20 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   // 切换 param 时重置行与字段选择：否则会停在上一个 param 的行号/字段页上。
   useEffect(() => {
     setRowQuery('');
-    setRowPage(0);
     setSelectedRowId(null);
     setDrafts({});
     setCommitMessage(null);
     // 连续列表必须清：残留会让新 param 的列表里混着上一个 param 的行，
     // 而两者行宽通常不同，选中后字段会按错误的定义解码。
     setLoadedRows([]);
-    setLoadedPages(0);
+    // 页面级字段定义同样按 param 重置：上一张表的字段列不能留到新表上。
+    setPageFieldDefs(null);
+    setPageFieldEnums(null);
+    setPageFieldDefsDiagnostic(null);
+    setPageFieldDefsOrigin('fixture');
   }, [selectedEntry]);
 
   useEffect(() => {
-    setFieldPage(0);
     setDrafts({});
     setCommitMessage(null);
   }, [selectedRowId]);
@@ -299,7 +313,12 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     return () => clearTimeout(timer);
   }, [rowQuery]);
 
-  // ── 中栏：选中 param 的行分页 ──
+  // ── 中栏：选中 param 的行 —— 全量加载（用户裁定 2026-08-14）──
+  //
+  // 打开一张 param 就把全部行（含行字节）一次取回：main 经 includeAllPayloads
+  // 跳过 Bridge 的 32 行 / 512 KB 页门控，renderer 本地过滤 + 虚拟滚动渲染。
+  // 不再分批续取、不再有「继续加载」——数万行的表也一次到位，任何一行点开
+  // 右边的字段值都能解码（行字节已全量在手）。
   const loadRows = useCallback(() => {
     if (!bridge || typeof bridge.readContainerParamPage !== 'function') return;
     if (selectedEntry === null || !props.containerUri) return;
@@ -307,16 +326,18 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     setRowsLoading(true);
     setRowsError(null);
     bridge.readContainerParamPage(
-      props.containerUri, selectedEntry, rowPage, PARAM_PAGE_SIZE, rowQueryDebounced
+      props.containerUri, selectedEntry, 0, 0, '', true
     )
       .then((result) => {
         if (cancelled) return;
         if (!result.ok) {
           setRows([]);
-          // 累积列表一并清空：否则失败后仍显示上一个 param 的行，
-          // 用户会以为读到的是当前 param 的数据。
           setLoadedRows([]);
-          setLoadedPages(0);
+          // 字段定义随失败清空：不能拿上一张 param 的字段列读当前表的字节。
+          setPageFieldDefs(null);
+          setPageFieldEnums(null);
+          setPageFieldDefsDiagnostic(null);
+          setPageFieldDefsOrigin('fixture');
           const first = result.diagnostics?.[0];
           setRowsError(first?.message ?? 'PARAM 行读取失败。');
           setPageDiagnostics([]);
@@ -352,65 +373,73 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             ...(row.dataBase64 ? { dataBase64: row.dataBase64 } : {}),
             ...(row.dataHexPreview ? { dataHexPreview: row.dataHexPreview } : {})
           }));
+          // 全量：当前页即全表（loadAll），rows 与累积列表都放全量。
           setRows(mapped);
-          /*
-           * 累积到连续列表。
-           *
-           * 第 0 页替换（切 param、改筛选、写回后重读都从 0 开始），
-           * 后续页按 id 去重追加 —— 去重是必需的：重读当前页会再拿到同一批 id，
-           * 直接 concat 会让同一行在列表里出现两次，而用户会以为有重复数据。
-           */
-          setLoadedRows((current) => {
-            if (result.page === 0) return mapped;
-            const seen = new Set(current.map((row) => row.id));
-            return [...current, ...mapped.filter((row) => !seen.has(row.id))];
-          });
-          setLoadedPages(result.page + 1);
-          setRowPageCount(result.pageCount);
-          setRowCount(result.rowCount);
+          setLoadedRows(mapped);
+          setRowCount(result.rowCount ?? mapped.length);
           setTypeName(result.typeName ?? null);
           setRowDataSize(result.rowDataSize ?? 0);
           setParamName(result.paramName ?? null);
           setContainerHash(result.containerHash ?? '');
           setChildHash(result.childHash ?? '');
           setRowsError(null);
-          // 只展示 info/warning 里对用户有行动意义的那部分（例如「本页无字节」）。
-          setPageDiagnostics(
-            (result.diagnostics ?? [])
-              .filter((d) => d.code === 'PARAM_PAGE_PAYLOAD_OMITTED'
-                || d.code === 'PARAM_PAGE_PAYLOAD_READ_FAILED')
-              .map((d) => d.message)
+          // P1：随页下发的字段定义/枚举/授信来源（主进程已做包校验 + 行宽核对
+          // + 用户信任策略；origin 白名单收窄，不自行判定）。
+          setPageFieldDefs(Array.isArray(result.fieldDefs) ? result.fieldDefs : null);
+          setPageFieldEnums(
+            Array.isArray(result.fieldEnums)
+              ? result.fieldEnums
+                  .filter((entry) => typeof entry?.id === 'string')
+                  .map((entry) => ({
+                    id: entry.id,
+                    name: typeof entry.name === 'string' ? entry.name : entry.id,
+                    values: Array.isArray(entry.values)
+                      ? entry.values
+                          .filter((v) => typeof v?.value === 'number' && typeof v?.label === 'string')
+                          .map((v) => ({ value: v.value, label: v.label }))
+                      : []
+                  }))
+              : null
           );
+          setPageFieldDefsOrigin(
+            result.fieldDefsOrigin === 'imported' || result.fieldDefsOrigin === 'user-derived'
+              ? result.fieldDefsOrigin
+              : 'fixture'
+          );
+          setPageFieldDefsDiagnostic(
+            result.fieldDefsDiagnostic
+              && typeof result.fieldDefsDiagnostic.code === 'string'
+              && typeof result.fieldDefsDiagnostic.message === 'string'
+              ? { code: result.fieldDefsDiagnostic.code, message: result.fieldDefsDiagnostic.message }
+              : null
+          );
+          // 全量模式下没有「本页无字节」类诊断（行字节已全量下发），清空旧提示。
+          setPageDiagnostics([]);
         }
         setRowsLoading(false);
-        // 复位续取标志：不复位会让「继续加载」按钮永久禁用。
-        setAppending(false);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
         setRows([]);
         setLoadedRows([]);
-        setLoadedPages(0);
         setRowsError(error instanceof Error ? error.message : 'PARAM 行读取异常。');
         setRowsLoading(false);
-        setAppending(false);
       });
     return () => { cancelled = true; };
-    // 依赖用 debounced 值：用 rowQuery 会让每个字符都触发一次 IPC。
-  }, [bridge, props.containerUri, selectedEntry, rowPage, rowQueryDebounced]);
+    // 全量模式：只在 param 切换时重载；筛选在本地做，不再触发 IPC。
+  }, [bridge, props.containerUri, selectedEntry]);
 
-  /*
-   * 筛选生效时回到第 0 页并清累积。
-   *
-   * 不清会把上一次筛选的结果与新结果混在一起 —— 那正是「按 id 去重」也救不了的
-   * 情形：两批行的 id 不重叠但都不属于当前筛选条件。
+  /**
+   * 全量数据上的本地筛选（用户裁定）：数据一次全量在手，筛选只在 renderer
+   * 过滤可见行，不再发 IPC、不再依赖后端子串匹配。
    */
-  useEffect(() => {
-    setRowPage(0);
-    setLoadedRows([]);
-    setLoadedPages(0);
-    setSelectedRowId(null);
-  }, [rowQueryDebounced]);
+  const visibleRows = useMemo(() => {
+    const needle = rowQueryDebounced.trim().toLowerCase();
+    if (!needle) return loadedRows;
+    return loadedRows.filter(
+      (row) => String(row.id).includes(needle) || (row.name ?? '').toLowerCase().includes(needle)
+    );
+  }, [loadedRows, rowQueryDebounced]);
 
   useEffect(() => {
     const dispose = loadRows();
@@ -442,9 +471,26 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
 
   // ── 右栏：选中行的字段 ──
   const definition = useMemo(() => {
-    if (!typeName || !props.resolveDefinition) return null;
-    return props.resolveDefinition(typeName, rowDataSize);
-  }, [typeName, rowDataSize, props.resolveDefinition]);
+    if (!typeName) return null;
+    // 优先宿主（App）经 readParamDocument 下发的定义（裸 param 路径）；
+    // 容器路径下宿主拿不到（容器喂 readParamDocument 必失败），回落到
+    // readContainerParamPage 随页下发的字段定义（P1 裁定）。
+    const fromHost = props.resolveDefinition
+      ? props.resolveDefinition(typeName, rowDataSize)
+      : null;
+    if (fromHost) return fromHost;
+    if (!pageFieldDefs || pageFieldDefs.length === 0) return null;
+    const fallback: ParamDefDocument = {
+      schemaVersion: 1,
+      typeName,
+      version: 0,
+      rowDataSize,
+      // 授信来源由主进程裁定（resolveTrustedParamDefinition），渲染器不自行拼。
+      origin: pageFieldDefsOrigin,
+      fields: pageFieldDefs
+    };
+    return fallback;
+  }, [typeName, rowDataSize, props.resolveDefinition, pageFieldDefs, pageFieldDefsOrigin]);
 
   /**
    * 选中行。先查当前页再查累积列表。
@@ -527,11 +573,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     && selectedRow?.dataBase64 !== undefined;
 
   const fields: ParamFieldDef[] = definition?.fields ?? [];
-  const fieldPageCount = Math.max(1, Math.ceil(fields.length / FIELD_PAGE_SIZE));
-  const visibleFields = useMemo(
-    () => fields.slice(fieldPage * FIELD_PAGE_SIZE, (fieldPage + 1) * FIELD_PAGE_SIZE),
-    [fields, fieldPage]
-  );
+  // 用户裁定（2026-08-14）：右边的值也要全量——字段不再分页（40/页），
+  // 一次渲染全部字段（数百个受控输入在选中行时挂载，可接受）。
+  const visibleFields = fields;
 
   const filteredParams = useMemo(() => {
     const needle = paramFilter.trim().toLowerCase();
@@ -539,14 +583,17 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     return params.filter((entry) => entry.name.toLowerCase().includes(needle));
   }, [params, paramFilter]);
 
-  /** enumRef → 枚举定义，供字段栏 O(1) 查表。 */
+  /** enumRef → 枚举定义，供字段栏 O(1) 查表。随页枚举优先于宿主级枚举。 */
   const enumById = useMemo(() => {
     const map = new Map<string, { name: string; values: Array<{ value: number; label: string }> }>();
     for (const entry of props.fieldEnums ?? []) {
       map.set(entry.id, { name: entry.name, values: entry.values });
     }
+    for (const entry of pageFieldEnums ?? []) {
+      if (!map.has(entry.id)) map.set(entry.id, { name: entry.name, values: entry.values });
+    }
     return map;
-  }, [props.fieldEnums]);
+  }, [props.fieldEnums, pageFieldEnums]);
 
   /**
    * 当前展开枚举列表的字段 id。
@@ -569,10 +616,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   /**
    * 行表虚拟化。
    *
-   * 为什么必须虚拟化：BehaviorParam 有 5275 行。对照 Smithbox 的取舍 —— 它一次
-   * 全画 5275 行（ImGui 每帧重建，无 DOM 节点成本），并且刻意**不**给 param 行
-   * 用 clipper（因为它的行带 decorator，高度不齐一）。DOM 下全画不可行：每行是
-   * 真实节点。所以我们的约束比它更紧，更该虚拟化，而不是退回分页。
+   * 为什么必须虚拟化：BehaviorParam 有 5275 行（用户裁定全量加载后，数据一次
+   * 全部在手，但 DOM 仍只渲染视口行）。对照 Smithbox 的取舍 —— 它一次全画
+   * 5275 行（ImGui 每帧重建，无 DOM 节点成本），并且刻意**不**给 param 行用
+   * clipper（因为它的行带 decorator，高度不齐一）。DOM 下全画不可行：每行是
+   * 真实节点。全量数据 + 虚拟滚动 = 一次加载到位 + DOM 有界。
    *
    * 行高锁定 22px（等高）：可变高度要测量模式，而 param 行的信息量固定
    * （id + name），锁等高 + 溢出省略号是更简单也更稳的选择。
@@ -580,31 +628,13 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * overscan 12：滚动时预渲染视口外 12 行，避免快速拖动出现空白。
    */
   const rowVirtualizer = useVirtualizer({
-    count: loadedRows.length,
+    count: visibleRows.length,
     getScrollElement: () => rowScrollRef.current,
     estimateSize: () => 22,
     overscan: 12
   });
 
-  /*
-   * 滚到接近底部时自动续取下一批。
-   *
-   * 取数仍按 PARAM_PAGE_SIZE（行字节的载荷门控按页算），但用户感知是连续滚动。
-   * 阈值取「最后一个可见行进入末尾 20 行范围内」，而不是精确到底 —— 到底才取
-   * 会让滚动停顿一下才继续。
-   */
   const virtualRows = rowVirtualizer.getVirtualItems();
-  // ?? 0 而不是非空断言：noUncheckedIndexedAccess 下索引访问可能是 undefined，
-  // 用断言会把「列表为空」这个真实状态藏起来。
-  const lastVisibleIndex = virtualRows[virtualRows.length - 1]?.index ?? 0;
-  useEffect(() => {
-    if (rowsLoading || appending) return;
-    if (loadedPages >= rowPageCount) return;
-    if (loadedRows.length === 0) return;
-    if (lastVisibleIndex < loadedRows.length - 20) return;
-    setAppending(true);
-    setRowPage(loadedPages);
-  }, [lastVisibleIndex, loadedRows.length, loadedPages, rowPageCount, rowsLoading, appending]);
 
   /**
    * 提交一个字段。
@@ -709,12 +739,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     {
       id: 'rows',
       title: 'Rows',
-      // hint 要如实反映「已加载多少 / 共多少」：只显示总数会让用户以为
-      // 列表已完整，而滚到底才发现还有「继续加载」。
+      // 全量加载（用户裁定）：列表一次完整，hint 直接报总数，不再有「已加载 N/M」。
       // typeName 移到工具栏 —— 它是文档级信息，不是这一列的属性。
-      hint: loadedRows.length > 0 && loadedRows.length < rowCount
-        ? `${loadedRows.length}/${rowCount} 行`
-        : `${rowCount} 行`,
+      hint: `${visibleRows.length > 0 || rowQueryDebounced === '' ? rowCount : visibleRows.length} 行`,
       initialFlex: 0.29,
       minWidth: 260,
       children: (
@@ -726,28 +753,24 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               <div style={{ padding: '4px 8px', display: 'flex', gap: 6, alignItems: 'center' }}>
                 <input
                   value={rowQuery}
-                  onChange={(event) => {
-                    setRowQuery(event.target.value);
-                    setRowPage(0);
-                  }}
-                  placeholder="筛选 id / name"
-                  aria-label="筛选 PARAM 行 id 或 name（作用于完整行表）"
+                  onChange={(event) => setRowQuery(event.target.value)}
+                  placeholder="筛选 id / name（全量数据本地过滤）"
+                  aria-label="筛选 PARAM 行 id 或 name（全量数据本地过滤）"
                   style={{ flex: 1, minWidth: 0 }}
                 />
               </div>
               {rowsError && <p className="wb-empty diag-error">{rowsError}</p>}
-              {!rowsLoading && !rowsError && loadedRows.length === 0 && (
+              {!rowsLoading && !rowsError && visibleRows.length === 0 && (
                 <p className="wb-empty">没有匹配的行。</p>
               )}
-              {/* 虚拟滚动：一条连续长列表，DOM 只保留可见行 + overscan。
-                  滚到接近底部自动续取（见 rowVirtualizer 附近的 effect）。
+              {/* 虚拟滚动：全量数据一次在手，DOM 只保留可见行 + overscan。
                   role=grid + aria-rowcount 给出**总行数**而不是渲染数 ——
                   否则屏幕阅读器会播报「共 20 行」而实际有 5275 行。 */}
               <div
                 ref={rowScrollRef}
                 className="wb-virtual-scroll"
                 role="grid"
-                aria-rowcount={rowCount}
+                aria-rowcount={visibleRows.length}
                 aria-label="PARAM 行列表"
               >
                 <div
@@ -755,7 +778,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                   style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
                 >
                   {virtualRows.map((virtualRow) => {
-                    const row = loadedRows[virtualRow.index];
+                    const row = visibleRows[virtualRow.index];
                     if (!row) return null;
                     return (
                       <div
@@ -778,7 +801,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                     );
                   })}
                 </div>
-                {(rowsLoading || appending) && loadedRows.length > 0 && (
+                {rowsLoading && visibleRows.length > 0 && (
                   <p className="wb-empty" style={{ padding: '4px 10px' }}>加载中…</p>
                 )}
               </div>
@@ -820,32 +843,21 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           {selectedRowId !== null && definition === null && (
             <p className="wb-empty">
               没有可用的字段定义{typeName ? `（${typeName}）` : ''}。字段视图不可用。
+              {pageFieldDefsDiagnostic && (
+                <span className="muted" style={{ display: 'block', fontSize: 11 }}>
+                  {pageFieldDefsDiagnostic.code}：{pageFieldDefsDiagnostic.message}
+                </span>
+              )}
             </p>
           )}
           {selectedRowId !== null && definition !== null && selectedRow?.dataBase64 === undefined && (
             <p className="wb-empty">
-              本行未随分页下发字节，字段值无法解码。翻页或缩小页大小后重试。
+              本行没有行字节，字段值无法解码（全量加载下通常不会出现；若出现说明
+              载荷被 Bridge 拒绝，见底部日志）。
             </p>
           )}
           {selectedRowId !== null && definition !== null && (
             <>
-              {fieldPageCount > 1 && (
-                <div style={{ padding: '4px 10px', display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <button
-                    type="button"
-                    className="secondary-action"
-                    disabled={fieldPage <= 0}
-                    onClick={() => setFieldPage((page) => page - 1)}
-                  >上一页</button>
-                  <span className="muted" style={{ fontSize: 11 }}>{fieldPage + 1}/{fieldPageCount}</span>
-                  <button
-                    type="button"
-                    className="secondary-action"
-                    disabled={fieldPage >= fieldPageCount - 1}
-                    onClick={() => setFieldPage((page) => page + 1)}
-                  >下一页</button>
-                </div>
-              )}
               {visibleFields.map((field) => {
                 const decoded = decodedValues?.get(field.id);
                 const draft = drafts[field.id];
@@ -999,6 +1011,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const footerMessages = [
     ...pageDiagnostics,
     ...(commitMessage ? [commitMessage] : []),
+    // 页面级字段诊断（P1）：readContainerParamPage 随页下发，主进程在
+    // resolveTrustedParamDefinition 里区分「包不可用/类型不存在/行宽不符/尚未授信」。
+    ...(selectedRowId !== null && definition === null && pageFieldDefsDiagnostic
+      ? [`字段定义不可用：${pageFieldDefsDiagnostic.code}——${pageFieldDefsDiagnostic.message}`]
+      : []),
     // 只读原因必须说清下一步动作。只说「未授信」会让用户以为功能坏了，
     // 而实际上点一次工具栏的确认按钮就能启用。行字节缺失是另一回事（翻页可解）。
     ...(selectedRowId !== null && definition !== null && !canCommitFields

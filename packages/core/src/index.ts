@@ -93,6 +93,7 @@ export * from './emevd/dslTokenizer.js';
 export * from './emevd/dslParser.js';
 export * from './emevd/dslCompiler.js';
 export * from './emevd/dslRenderer.js';
+export * from './emevd/darkScriptRenderer.js';
 export * from './ai/toolRegistry.js';
 export * from './ai/agentToolBridge.js';
 export * from './ai/toolPermissions.js';
