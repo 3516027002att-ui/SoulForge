@@ -272,9 +272,9 @@ MATERIAL File list | Material list | 属性/值
 FILES   Browser List 457 | Item Viewer 1454
         只有两栏
 
-EVENT   DarkScript3：菜单 + 文档标签 + 源码占主区 + 查找替换 + 编译输出
-        可选 Outline；Problems 走 SoulForge 底部 dock
-        不要做 260/320 固定三栏来“假装量过”
+EVENT   DarkScript3：菜单 + 文档标签 + 源码占主区 + 编译输出
+        无四钮（查找替换/Outline/Inspector/Problems 全删）；Ctrl+F 走 CM search
+        不做 260/320 固定三栏；EMEDF 指令名 autocomplete + 悬停（T4）
 
 AGENT   不是 tools 目录里的程序。§12 数值是外壳初值，不得报成 TRAE 实测
 ```
@@ -1294,44 +1294,40 @@ Files 不能把 candidate 状态伪装为 ready editor。
 D:\mystream\Sekiro Shadows Die Twice\tools\事件编辑器3.4.1\DarkScript3.exe
 ```
 
-Event **故意不抄** Smithbox EMEVD Editor，也不保留 SoulForge “EMEVD 四视图”。对照物是 DarkScript3：菜单 + 文档标签 + 源码占主区 + 查找替换 + 编译输出。
+Event **故意不抄** Smithbox EMEVD Editor，也不保留 SoulForge “EMEVD 四视图”。对照物是 DarkScript3：菜单 + 文档标签 + 源码占主区 + 编译输出。
+T4 裁定：源码主区就是唯一主体，**无四钮**（查找替换 / Outline / Inspector / Problems 四个开关、Outline 栏、Inspector “选中节点”面板、Problems dock 全部不渲染）。查找走 CodeMirror search keymap（Ctrl+F），不设工具条按钮。
 
 ### 11.2 固定结构
 
 ```text
-文档标签
-| 可选 Outline（用户打开才显示，不要做成必有的 260px 死栏）
-| Source Editor 占满剩余
-| 可选 Inspector（显式打开）
-
-Problems / Output → SoulForge 底部 dock
+[App 左文件列表]（事件域文件树，App 持有）
+| 文档标签（逻辑 EMEVD 文档，tabId=资源 URI）
+| Source Editor 占满剩余（CodeMirror 6）
 ```
 
-不要发明 `260px + flex + 320px` 三栏来假装量过 DarkScript3。
+主区只剩源码。不渲染 Outline / Inspector / Problems 任何面板；`event-source__grid` 三栏、`esw-dock`、`esw-outline` / `esw-inspector` 样式均不再出现。
 
 ### 11.3 Source Editor
 
-后续实现使用 CodeMirror 6，并具备：
+实现使用 CodeMirror 6，并具备：
 
 - 行号；
 - 代码折叠；
 - DarkScript 风格语法高亮；
-- 查找与替换；
-- Go to Event / Definition / Reference；
-- 错误与警告 gutter；
-- 多文档标签；
-- dirty 标记；
+- 查找与替换（Ctrl+F 走 `@codemirror/search` keymap，不渲染工具条按钮）；
+- 未知指令 warning gutter（`GutterMarker`）；
+- 多文档标签 + per-tab dirty 标记（per-tab EditorState 缓存 undo/redo）；
 - undo/redo；
 - 键盘导航；
-- 大文档增量渲染。
+- 大文档增量渲染；
+- **T4-3**：本机 EMEDF 公开指令名 autocomplete（Ctrl+Space + 输入时，大写开头 PascalCase 词触发）与悬停参数名列表（`hoverTooltip`）；只读 EMEDF 公开字段，EMEDF 数据不进仓库。
 
-### 11.4 Inspector 和诊断
+### 11.4 诊断与反汇编
 
-- Event list 转为左侧 Outline；
-- 指令详情和控制流只作为用户显式打开的 Inspector；
-- 原始 bytes/Hex 只能从 Developer Diagnostics 打开；
-- Problems 只显示可行动问题；
-- parser dump、Evidence、绝对路径不进入默认 editor DOM。
+- 没找到用户本机 EMEDF（DarkScript3 的 `sekiro-common.emedf.json`）时，源码区只显示结构化失败句（`// 事件源码反汇编已失败关闭…`），不提供 hash 伪源码冒充已解码；
+- 一次出完整 DarkScript 文本，不做 2000 行截断；不出现「加载完整源码」按钮与截断黄条；
+- 未知指令（fixture 故意缺 schema）在 gutter 标 warning，事件块行 `⚑`；
+- 原始 bytes/Hex 只能从 Developer Diagnostics 打开；parser dump、Evidence、绝对路径不进入 editor DOM。
 
 底层 DSL、revision、typed mutation、Bridge/Patch Engine 能力保留并重接到源码工作流；不再以前台“四视图”暴露。
 
@@ -2184,7 +2180,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 | `apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx` | **已落地** 四栏 Params/Rows/Fields/Tools：右侧工具栈（诚实空态）、逻辑库标题、局部失败 param 保留；e2e 钉 flex 0.2/0.29/0.35/0.16 | 保持 |
 | `apps/desktop/src/renderer/src/workbench/GparamWorkbench.tsx` | **已落地** §8.1 五区 Files/Groups/Fields/Values/Toolbar；e2e 钉五区 + 无合并栏 | 保持 |
 | `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | **已落地** §9.1 左 Categories + 右上 Entries(55%) + 右下 Text(45%)；e2e TEXT-20B/20C 通过 | 保持 |
-| `apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx` | **已落地** §11 加强：CodeMirror 6、查找替换、Problems dock；非 260/320 三栏 | 保持 |
+| `apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx` | **已落地** §11：CodeMirror 6、无四钮（T4）、Ctrl+F 走 CM search、EMEDF autocomplete+hover；非 260/320 三栏 | 保持 |
 | `apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx` | **已落地** 保持断开；未取得 scope 裁定前不删除文件 | 保持断开 |
 | `apps/desktop/src/main/ipc.ts` | **已落地** ROOT-07：复用 `prepareBridgeRoots`；只读 handler 只传已验证 roots，staging 显式走 `prepareBridgeRoots(…,'stage')` | 保持 |
 | `apps/desktop/src/renderer/src/agent/AgentSidebar.tsx` | **已落地** 48px header + conversation viewport + bottom composer，无语音（负向测试钉住） | 保持 |
@@ -2500,7 +2496,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。
 - **Dependencies**：在 `apps/desktop/package.json` 加入 exact 版本 `@codemirror/state@6.7.1`、`@codemirror/view@6.43.8`、`@codemirror/language@6.12.4`、`@codemirror/search@6.7.1`、`@codemirror/commands@6.10.4`、`@codemirror/autocomplete@6.20.3`、`@lezer/highlight@1.2.3`，并更新根 lockfile。
-- **Steps**：在已有 `EventSourceWorkbenchPanel` 上做成 DarkScript3 式源码 IDE：文档标签 + 源码主区 + 查找替换；Outline / Inspector 仅显式打开；Problems 走底部 dock。接 CodeMirror 6、行号、折叠、高亮、跳转、gutter、dirty tab。不要做 260/320 固定三栏。
+- **Steps**：在已有 `EventSourceWorkbenchPanel` 上做成 DarkScript3 式源码 IDE：文档标签 + 源码主区；无四钮（查找替换/Outline/Inspector/Problems），Ctrl+F 走 CodeMirror search；EMEDF 指令名 autocomplete（Ctrl+Space + 输入时）与悬停参数名列表。接 CodeMirror 6、行号、折叠、高亮、gutter、dirty tab、autocomplete/hover。不要做 260/320 固定三栏。
 - **Negative DOM**：`EmevdFourViewPanel` 不再被 `App.tsx` production 引用；Flow/Hex/Raw Bytes 不在默认 viewport。未取得 §0.3 scope 裁定前不删除四视图文件。
 - **Tests**：renderer unit/E2E；对照 DarkScript3 截图；键盘、IME、large source、diagnostic gutter 和多 tab dirty 状态。
 
@@ -2728,7 +2724,7 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 ### 19.4 Event 与 Agent
 
 - [ ] Event 打开即进入 DarkScript3 式 Source Editor（源码主区，不是 260/320 三栏）；
-- [ ] Outline / Inspector 仅显式打开；Problems 在底部 dock；
+- [ ] 无四钮（查找替换/Outline/Inspector/Problems）；Ctrl+F 走 CodeMirror search；EMEDF 指令名 autocomplete + 悬停（T4）；
 - [ ] 用户不可见“EMEVD 四视图”；
 - [ ] Agent 常驻右侧且可折叠、拖宽、持久化；
 - [ ] Agent 空闲态、消息流和 Composer 按 §12；参考图缺失时勾选必须标注「未对照 TRAE 实测」，不得写「与 TRAE 一致」；

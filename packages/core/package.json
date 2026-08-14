@@ -24,6 +24,7 @@
     "test:editor-bounded-access": "tsc -b ../shared . && node dist/testing/runEditorBoundedAccessSmoke.js",
     "test:editor-document-store": "tsc -b ../shared . && node dist/testing/runEditorDocumentStoreSmoke.js",
     "test:emedf-schema": "tsc -b ../shared . && node dist/testing/runEmedfSchemaSmoke.js",
+    "test:emedf-completion-catalog": "tsc -b ../shared . && node dist/testing/runEmedfCompletionCatalogSmoke.js",
     "test:emevd-multi-corpus-matrix": "tsc -b ../shared . && node dist/testing/runEmevdMultiCorpusMatrixSmoke.js",
     "test:native-corpus-writeback": "tsc -b ../shared . && node dist/testing/runNativeCorpusWriteBackSmoke.js",
     "test:param-field-write-matrix": "tsc -b ../shared . && node dist/testing/runParamFieldWriteMatrixSmoke.js",

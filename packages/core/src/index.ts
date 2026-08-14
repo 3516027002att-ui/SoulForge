@@ -85,6 +85,7 @@ export * from './runtime/me3RuntimeAdapter.js';
 export * from './emevd/emedfSchema.js';
 export * from './emevd/emedfExternalAdapter.js';
 export * from './emevd/emedfRegistryResolver.js';
+export * from './emevd/emedfCompletionCatalog.js';
 export * from './emevd/stableIdentity.js';
 export * from './script/scriptContainerEvidence.js';
 export * from './script/plaintextScriptEntry.js';

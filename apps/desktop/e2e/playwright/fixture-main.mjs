@@ -1639,6 +1639,41 @@ function registerFixtureIpc() {
     };
   });
 
+  // T4-3：fixture 指令名补全目录（与 core createSekiroFixtureEmedf 对齐），
+  // 供 e2e 断言 CodeMirror autocomplete / 悬停参数名。
+  handleTrusted('resource.readEmedfCompletionCatalog', () => {
+    track('resource.readEmedfCompletionCatalog');
+    return {
+      ok: true,
+      origin: 'fixture',
+      items: [
+        {
+          name: 'IfConditionGroup', bank: 2000, id: 0,
+          args: [
+            { name: 'resultConditionGroup', type: 's8' },
+            { name: 'desiredComparisonType', type: 'u8' },
+            { name: 'targetConditionGroup', type: 's8' },
+            { name: 'pad0', type: 'u8' },
+            { name: 'pad1', type: 'u32' },
+            { name: 'pad2', type: 'u32' }
+          ]
+        },
+        {
+          name: 'WaitFor', bank: 1000, id: 0,
+          args: [
+            { name: 'conditionGroup', type: 's8' },
+            { name: 'pad0', type: 'u8' },
+            { name: 'pad1', type: 'u16' },
+            { name: 'unknown', type: 'u32' }
+          ]
+        },
+        {
+          name: 'EndEvent', bank: 2003, id: 1, args: []
+        }
+      ]
+    };
+  });
+
   // 提交 DSL：fixture 接受登记资源的任意源码（合成内存态），sourceHash 递增，
   // 提交后重读即见新模板（与 TEXT-20C 的写回模式同构）。未登记/空源码结构化失败。
   handleTrusted('resource.submitEmevdDslPlan', (_event, sourceUri, sourceText) => {

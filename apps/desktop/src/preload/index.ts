@@ -23,6 +23,7 @@ import type {
 import type {
   AiSidebarDraft,
   AiSidebarDraftRequest,
+  EmedfCompletionItem,
   ResourceCapabilityMatrix,
   ToolDescriptor,
   ToolResult
@@ -258,6 +259,12 @@ const api = {
   ),
   submitEmevdDslPlan: (sourceUri: string, sourceText: string): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
+  readEmedfCompletionCatalog: (): Promise<{
+    ok: boolean;
+    origin: 'imported' | 'fixture';
+    items: EmedfCompletionItem[];
+  }> =>
+    ipcRenderer.invoke('resource.readEmedfCompletionCatalog'),
   readFmgDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFmgDocument', sourceUri),
   readFmgPage: (

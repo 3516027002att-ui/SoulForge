@@ -3,18 +3,17 @@
  *
  * 布局对照 DarkScript3（§11），不是 260/320 三栏：
  *   [文档标签栏] 逻辑文档标签（EMEVD 文档，§3.4），带 dirty 标记与关闭
- *   [工具条]     查找替换 toggle · Outline toggle · Inspector toggle · 编译并提交 · 加载完整源码
- *   [主区]       CodeMirror 6 源码占满；Outline / Inspector 仅用户显式打开
- *   [底部 dock]  Problems 折叠面板（只显示可行动问题）
+ *   [工具条]     反汇编只读标签 / 编译并提交（旧 patch-dsl 路径）· Ctrl+F 走 CM search
+ *   [主区]       CodeMirror 6 源码占满（T4：无四钮、无 Outline/Inspector/Problems）
  *
  * Negative DOM（EVENT-30B）：Flow / Hex / Raw Bytes 不在默认 viewport；原始
- * bytes 只能经 Developer Diagnostics 打开（本面板不提供）。
+ * bytes 只能经 Developer Diagnostics 打开（本面板不提供）；查找替换 / Outline /
+ * Inspector / Problems 四个开关与选中节点面板、底部 dock 均不渲染。
  *
  * 数据流：renderer 不持有文件系统路径与完整 document。App 经 `pendingTab`
- * （有界 DSL 投影 + 派生 document）按资源 URI 提供标签；提交/加载/结构化
- * mutation 都以 `EventSourceTabData` 上抛，由 App 走 Bridge → Patch 管线。
- * dirty 与编辑文本（draft）只在工作台内部，跨 tab 隔离（per-tab EditorState
- * 缓存 undo/redo 历史）。
+ * （有界 DSL 投影 + 派生 document）按资源 URI 提供标签；提交以 `EventSourceTabData`
+ * 上抛，由 App 走 Bridge → Patch 管线。dirty 与编辑文本（draft）只在工作台内部，
+ * 跨 tab 隔离（per-tab EditorState 缓存 undo/redo 历史）。
  */
 import {
   useCallback,
@@ -25,6 +24,8 @@ import {
   type ReactElement
 } from 'react';
 import type { EmevdEditorDocument, EmevdEventIr } from '@soulforge/shared';
+import type { EmedfCompletionItem } from '@soulforge/core';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { EditorState, type Extension } from '@codemirror/state';
 import {
   EditorView,
@@ -34,8 +35,10 @@ import {
   gutter,
   highlightActiveLine,
   highlightActiveLineGutter,
+  hoverTooltip,
   keymap,
-  lineNumbers
+  lineNumbers,
+  type Tooltip
 } from '@codemirror/view';
 import {
   HighlightStyle,
@@ -46,22 +49,20 @@ import {
   syntaxHighlighting
 } from '@codemirror/language';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
-import { closeSearchPanel, openSearchPanel, search, searchKeymap } from '@codemirror/search';
+import {
+  autocompletion,
+  closeBrackets,
+  closeBracketsKeymap,
+  type CompletionContext,
+  type CompletionResult
+} from '@codemirror/autocomplete';
+import { search, searchKeymap } from '@codemirror/search';
 import { tags } from '@lezer/highlight';
 
 export interface EventSourceSubmitResult {
   ok: boolean;
   diagnostics: Array<{ severity: string; code: string; message: string }>;
   nextDslTemplate?: string;
-}
-
-export interface EventSourceStructuredMutation {
-  kind: 'emevd_set_rest_behavior' | 'emevd_update_id';
-  eventUri: string;
-  restBehavior?: number;
-  newEventId?: number;
-  baseRevision: number;
 }
 
 /** 一个逻辑 EMEVD 文档标签的只读数据（App 侧维护，renderer 只展示与编辑）。 */
@@ -91,11 +92,6 @@ export interface EventSourceWorkbenchPanelProps {
     tab: EventSourceTabData,
     sourceText: string
   ) => Promise<EventSourceSubmitResult>;
-  onLoadFullDslTemplate?: (tab: EventSourceTabData) => void | Promise<void>;
-  onStructuredMutation?: (
-    tab: EventSourceTabData,
-    mutation: EventSourceStructuredMutation
-  ) => void;
 }
 
 interface InternalTab extends EventSourceTabData {
@@ -262,11 +258,100 @@ const eventDiagGutter = gutter({
   }
 });
 
+/* ------------------------------------------------------------------ */
+/*  T4-3：EMEDF 指令名 autocomplete + 悬停参数名                      */
+/*  只读 EMEDF 公开字段（name/bank/id/args），数据留在本机不进仓库。   */
+/* ------------------------------------------------------------------ */
+
+/** 参数列表展示文本：`resultConditionGroup:s8, targetConditionGroup:s8`。 */
+function renderArgSummary(item: EmedfCompletionItem): string {
+  if (item.args.length === 0) return '（无参数）';
+  return item.args
+    .map((arg) => `${arg.name}:${arg.type}${arg.vararg ? '…' : ''}`)
+    .join('，');
+}
+
+/** 取 pos 处标识符（含精确边界），无则 null。 */
+function wordAtPos(state: EditorState, pos: number): { from: number; to: number; text: string } | null {
+  const line = state.doc.lineAt(pos);
+  const relative = pos - line.from;
+  if (relative < 0 || relative > line.length) return null;
+  const re = /[A-Za-z_][A-Za-z0-9_]*/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(line.text)) !== null) {
+    const from = match.index;
+    const to = from + match[0].length;
+    if (from <= relative && relative <= to) {
+      return { from: line.from + from, to: line.from + to, text: match[0] };
+    }
+  }
+  return null;
+}
+
+/**
+ * 指令名补全：只在大写开头的 PascalCase 词上触发（避免干扰参数名/数字/关键字）。
+ * Ctrl+Space 显式触发时忽略前缀过滤。同名指令（不同 bank:id）全部列出。
+ */
+function createCompletionSource(
+  getCatalog: () => EmedfCompletionItem[]
+): (context: CompletionContext) => CompletionResult | null {
+  return (context) => {
+    const word = context.matchBefore(/^[A-Za-z_][A-Za-z0-9_]*$/);
+    if (!word) return null;
+    if (!context.explicit && !/^[A-Z]/.test(word.text)) return null;
+    const items = getCatalog();
+    if (items.length === 0) return null;
+    const prefix = word.text.toLowerCase();
+    const matches = items.filter((item) => item.name.toLowerCase().startsWith(prefix));
+    if (matches.length === 0 && !context.explicit) return null;
+    return {
+      from: word.from,
+      options: matches.map((item) => ({
+        label: item.name,
+        detail: `bank ${item.bank}:${item.id}`,
+        info: `参数：${renderArgSummary(item)}`,
+        type: 'function',
+        boost: item.name === word.text ? 10 : 0,
+        apply: item.name
+      }))
+    };
+  };
+}
+
+/** 悬停在指令名上显示参数名列表。只读展示也有效。 */
+function createHoverTooltipSource(
+  getCatalog: () => EmedfCompletionItem[]
+): (view: EditorView, pos: number, side: -1 | 1) => Tooltip | null {
+  return (view, pos) => {
+    const word = wordAtPos(view.state, pos);
+    if (!word || word.text.length < 2) return null;
+    const matches = getCatalog().filter((item) => item.name === word.text);
+    if (matches.length === 0) return null;
+    const element = document.createElement('div');
+    element.className = 'cm-emedf-hover';
+    const title = document.createElement('strong');
+    title.textContent = word.text;
+    element.appendChild(title);
+    for (const item of matches) {
+      const row = document.createElement('div');
+      row.className = 'cm-emedf-hover__row';
+      row.textContent = `bank ${item.bank}:${item.id} — ${renderArgSummary(item)}`;
+      element.appendChild(row);
+    }
+    return {
+      pos: word.from,
+      end: word.to,
+      create: () => ({ dom: element })
+    };
+  };
+}
+
 function buildEditorExtensions(
   onDocChange: (text: string, state: EditorState) => void,
-  readOnly: boolean
+  readOnly: boolean,
+  getCatalog: () => EmedfCompletionItem[]
 ): Extension[] {
-  return [
+  const extensions: Extension[] = [
     lineNumbers(),
     highlightActiveLineGutter(),
     highlightActiveLine(),
@@ -282,6 +367,9 @@ function buildEditorExtensions(
     emevdDslStreamLanguage,
     eventDiagGutter,
     EditorState.readOnly.of(readOnly),
+    // T4-3：EMEDF 指令名补全（Ctrl+Space + 输入时）与悬停参数名列表。
+    hoverTooltip(createHoverTooltipSource(getCatalog)),
+    autocompletion({ override: [createCompletionSource(getCatalog)] }),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) onDocChange(update.state.doc.toString(), update.state);
     }),
@@ -300,30 +388,51 @@ function buildEditorExtensions(
       '.cm-gutters': { backgroundColor: 'var(--forge-1)', color: 'var(--ink-3)', border: 'none' },
       '.cm-activeLine': { backgroundColor: 'var(--forge-2)' },
       '.cm-activeLineGutter': { backgroundColor: 'var(--forge-2)', color: 'var(--ink-2)' },
-      '.cm-event-diag__warn': { color: 'var(--warn)' }
+      '.cm-event-diag__warn': { color: 'var(--warn)' },
+      '.cm-emedf-hover': { font: '11px var(--font-mono)', padding: '4px 8px', color: 'var(--ink-1)' },
+      '.cm-emedf-hover strong': { display: 'block', color: 'var(--ink-0)', marginBottom: '2px' },
+      '.cm-emedf-hover__row': { whiteSpace: 'nowrap' }
     })
   ];
+  return extensions;
 }
 
 export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps): ReactElement {
   const [tabs, setTabs] = useState<InternalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  const [showOutline, setShowOutline] = useState(false);
-  const [showInspector, setShowInspector] = useState(false);
-  const [showProblems, setShowProblems] = useState(true);
-  const [showSearchPanel, setShowSearchPanel] = useState(false);
-  const [selectedEventUri, setSelectedEventUri] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState('就绪');
+  const [completionItems, setCompletionItems] = useState<EmedfCompletionItem[]>([]);
 
   const editorHostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  /** T4-3：EMEDF 指令名目录，经 ref 供 CM extensions 闭包读最新值（异步到达）。 */
+  const completionItemsRef = useRef<EmedfCompletionItem[]>([]);
+  completionItemsRef.current = completionItems;
   /** 每 tab 的 event 块行映射，gutter 经该 ref 读取（CM 闭包拿不到 React state）。 */
   const eventLineInfoRef = useRef<Map<number, EventLineInfo>>(new Map());
   /** 始终指向最新 commitDraft，供各 tab 的 CM extensions 闭包安全调用。 */
   const commitDraftRef = useRef<(tabId: string, text: string, state: EditorState) => void>(() => {});
 
   const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? null;
+
+  /** T4-3：从主进程拉取本机 EMEDF 指令名目录（只读公开字段，一次性）。 */
+  useEffect(() => {
+    const bridge = getRendererBridge();
+    if (!bridge) return;
+    let cancelled = false;
+    bridge
+      .readEmedfCompletionCatalog()
+      .then((result) => {
+        if (!cancelled && result.ok) setCompletionItems(result.items);
+      })
+      .catch(() => {
+        // 目录拉取失败只影响补全/悬停，不阻断源码展示。
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const commitDraft = useCallback((tabId: string, text: string, state: EditorState) => {
     setTabs((previous) =>
@@ -340,7 +449,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const createExtensionsFor = useCallback((tabId: string, readOnly: boolean): Extension[] => {
     return buildEditorExtensions(
       (text, state) => commitDraftRef.current(tabId, text, state),
-      readOnly
+      readOnly,
+      () => completionItemsRef.current
     );
   }, []);
 
@@ -376,7 +486,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       return [...previous, created];
     });
     setActiveTabId(pending.tabId);
-    setSelectedEventUri(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, createExtensionsFor]);
 
@@ -450,14 +559,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, activeTabId]);
 
-  const problems = useMemo(() => {
-    if (!activeTab) return [];
-    return activeTab.document.diagnostics.filter((diagnostic) => diagnostic.severity !== 'info');
-  }, [activeTab]);
-
   function activateTab(tabId: string): void {
     setActiveTabId(tabId);
-    setSelectedEventUri(null);
   }
 
   function closeTab(tabId: string): void {
@@ -470,50 +573,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       }
       return next;
     });
-  }
-
-  function toggleSearchPanel(): void {
-    const view = viewRef.current;
-    if (!view) return;
-    if (showSearchPanel) {
-      closeSearchPanel(view);
-      setShowSearchPanel(false);
-    } else {
-      openSearchPanel(view);
-      view.focus();
-      setShowSearchPanel(true);
-    }
-  }
-
-  function goToEvent(event: EmevdEventIr): void {
-    if (!activeTab) return;
-    setSelectedEventUri(event.eventUri);
-    setShowInspector(true);
-    const view = viewRef.current;
-    if (!view) return;
-    const anchor = event.anchor?.localNodeId ?? String(event.eventId);
-    const pattern = new RegExp(`^event\\s+@e:${anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
-    const doc = view.state.doc;
-    let targetLine = 0;
-    // DarkScript3 式模板按 document.events 顺序渲染：定位第 N 个 `$Event(` 行。
-    const eventIndex = activeTab.document.events.indexOf(event);
-    let darkScriptIndex = 0;
-    for (let line = 1; line <= doc.lines; line += 1) {
-      const text = doc.line(line).text;
-      if (pattern.test(text)) { targetLine = line; break; }
-      if (/^\$Event\(/.test(text)) {
-        if (darkScriptIndex === eventIndex) { targetLine = line; break; }
-        darkScriptIndex += 1;
-      }
-    }
-    if (targetLine > 0) {
-      const from = doc.line(targetLine).from;
-      view.dispatch({
-        selection: { anchor: from },
-        effects: EditorView.scrollIntoView(from, { y: 'center' })
-      });
-      view.focus();
-    }
   }
 
   async function submitSource(): Promise<void> {
@@ -556,35 +615,13 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     }
   }
 
-  async function loadFullTemplate(): Promise<void> {
-    if (!activeTab || !props.onLoadFullDslTemplate) return;
-    setStatus('正在加载完整源码模板…');
-    await props.onLoadFullDslTemplate(activeTab);
-  }
-
-  const selectedEvent = activeTab?.document.events.find(
-    (event) => event.eventUri === selectedEventUri
-  ) ?? null;
-
-  function toggleRestBehavior(): void {
-    if (!activeTab || !selectedEvent || !props.onStructuredMutation) return;
-    const next = selectedEvent.restBehavior === 0 ? 1 : 0;
-    props.onStructuredMutation(activeTab, {
-      kind: 'emevd_set_rest_behavior',
-      eventUri: selectedEvent.eventUri,
-      restBehavior: next,
-      baseRevision: activeTab.document.revision
-    });
-    setStatus(`已请求 restBehavior=${next}`);
-  }
-
   const readOnly = activeTab
     ? (!activeTab.live || activeTab.dslTemplate === null || activeTab.sourceStyle === 'dark-script')
     : true;
 
   /**
    * R3/P4 裁定：DarkScript3 反汇编源码只读展示（没有对应的 DarkScript 编译器，
-   * 编辑后无法提交）。结构化 mutation（restBehavior 等）仍可用；写链保留。
+   * 编辑后无法提交）。写链保留给 future 的 DarkScript 编译器。
    */
   const darkScriptReadOnly = activeTab?.sourceStyle === 'dark-script';
 
@@ -628,47 +665,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
       <div className="esw-toolbar">
         <div className="esw-toolbar__group">
-          <button
-            type="button"
-            className={showSearchPanel ? 'toolbar-button is-active' : 'toolbar-button'}
-            onClick={toggleSearchPanel}
-            aria-pressed={showSearchPanel}
-          >
-            查找替换
-          </button>
-          <button
-            type="button"
-            className={showOutline ? 'toolbar-button is-active' : 'toolbar-button'}
-            onClick={() => setShowOutline((value) => !value)}
-            aria-pressed={showOutline}
-          >
-            Outline
-          </button>
-          <button
-            type="button"
-            className={showInspector ? 'toolbar-button is-active' : 'toolbar-button'}
-            onClick={() => setShowInspector((value) => !value)}
-            aria-pressed={showInspector}
-          >
-            Inspector
-          </button>
-          <button
-            type="button"
-            className={showProblems ? 'toolbar-button is-active' : 'toolbar-button'}
-            onClick={() => setShowProblems((value) => !value)}
-            aria-pressed={showProblems}
-          >
-            Problems{problems.length > 0 ? ` (${problems.length})` : ''}
-          </button>
-        </div>
-        <div className="esw-toolbar__group">
-          {activeTab?.dslTemplateTruncated && (
-            <button type="button" className="secondary-action" onClick={() => void loadFullTemplate()}>
-              加载完整源码
-            </button>
-          )}
+          <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 走 CodeMirror search keymap">
+            查找：Ctrl+F
+          </span>
           {darkScriptReadOnly ? (
-            <span className="muted" style={{ fontSize: 11 }} title="EMEDF 反汇编源码只读展示；写入仍经结构化 mutation（如 restBehavior 切换）与 Bridge 写链。">
+            <span className="muted" style={{ fontSize: 11 }} title="EMEDF 反汇编源码只读展示；写入仍经 Bridge 写链。">
               反汇编源码只读
             </span>
           ) : (
@@ -685,34 +686,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       </div>
 
       <div className="esw-body">
-        {showOutline && activeTab && (
-          <section className="esw-outline" aria-label="事件大纲">
-            <div className="esw-section-header">
-              <strong>Outline</strong>
-              <span className="muted">{activeTab.document.events.length} events</span>
-            </div>
-            <div className="esw-outline__list">
-              {activeTab.document.events.map((event) => (
-                <button
-                  key={event.eventUri}
-                  type="button"
-                  className={event.eventUri === selectedEventUri ? 'esw-outline__item is-selected' : 'esw-outline__item'}
-                  onClick={() => goToEvent(event)}
-                >
-                  <strong>Event {event.eventId}</strong>
-                  <span>
-                    rest {event.restBehavior}
-                    {event.instructions.filter((instruction) => instruction.unknown).length > 0
-                      ? ` · ${event.instructions.filter((instruction) => instruction.unknown).length} 未知指令`
-                      : ''}
-                  </span>
-                </button>
-              ))}
-              {activeTab.document.events.length === 0 && <p className="empty-hint">暂无事件。</p>}
-            </div>
-          </section>
-        )}
-
         <section className="esw-source" aria-label="事件源码">
           <div ref={editorHostRef} className="esw-source__host" data-editor-engine="codemirror" />
           {activeTab?.live && activeTab.dslTemplate === null && (
@@ -724,67 +697,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           {darkScriptReadOnly && (
             <div className="event-source__notice">
               DarkScript3 式反汇编源码（指令名来自用户本机 EMEDF）。本版只读展示；
-              写入请用右侧 Inspector 的结构化操作（如切换 restBehavior），提交仍经
-              Bridge 与补丁引擎。
-            </div>
-          )}
-          {activeTab?.dslTemplateTruncated && (
-            <div className="event-source__notice">
-              源码模板已按行截断，共 {activeTab.dslTemplateTotalLines} 行。可编辑的部分保持
-              可编译；完整加载见工具条。
+              写入仍经 Bridge 与补丁引擎。
             </div>
           )}
         </section>
-
-        {showInspector && (
-          <section className="esw-inspector" aria-label="事件检查器">
-            <div className="esw-section-header">
-              <strong>Inspector</strong>
-              <span className="muted">选中节点</span>
-            </div>
-            {selectedEvent ? (
-              <>
-                <dl className="event-source__facts">
-                  <div><dt>Event ID</dt><dd>{selectedEvent.eventId}</dd></div>
-                  <div><dt>Layer</dt><dd>{selectedEvent.layer}</dd></div>
-                  <div><dt>Rest behavior</dt><dd>{selectedEvent.restBehavior}</dd></div>
-                  <div><dt>Instructions</dt><dd>{selectedEvent.instructions.length}</dd></div>
-                  <div><dt>URI</dt><dd title={selectedEvent.eventUri}>{selectedEvent.eventUri}</dd></div>
-                </dl>
-                <button
-                  type="button"
-                  className="secondary-action"
-                  disabled={readOnly || !props.onStructuredMutation}
-                  onClick={toggleRestBehavior}
-                >
-                  切换 restBehavior
-                </button>
-              </>
-            ) : (
-              <p className="empty-hint">从 Outline 选择一个事件。</p>
-            )}
-          </section>
-        )}
       </div>
-
-      {showProblems && (
-        <div className="esw-dock" aria-label="事件问题">
-          <div className="esw-section-header">
-            <strong>Problems</strong>
-            <span className={problems.length > 0 ? 'pill pill--warn' : 'pill'}>{problems.length}</span>
-          </div>
-          <div className="esw-dock__body">
-            {problems.length === 0
-              ? <p className="empty-hint">当前没有可行动的结构化问题。</p>
-              : problems.map((problem) => (
-                  <div className="event-source__problem" key={`${problem.code}:${problem.message}`}>
-                    <strong>{problem.code}</strong>
-                    <span>{problem.message}</span>
-                  </div>
-                ))}
-          </div>
-        </div>
-      )}
     </section>
   );
 }

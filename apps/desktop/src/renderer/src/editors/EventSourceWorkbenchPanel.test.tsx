@@ -4,16 +4,14 @@
  * renderer-unit 是纯 node SSR（react-dom/server，无 DOM、不跑 effect），CodeMirror
  * 只在浏览器挂载（useEffect 不执行），因此这里钉两类契约：
  *
- * 1. SSR 结构：DarkScript3 式骨架挂载即有——文档标签栏（role=tablist）、工具条
- *    （查找替换 / Outline / Inspector / Problems）、源码主区（data-editor-engine=
- *    codemirror）、Problems 底部 dock 默认展开；Outline / Inspector 默认不渲染
- *    （仅显式打开）；未打开文档时是显式空态而不是错误。
+ * 1. SSR 结构：DarkScript3 式骨架挂载即有——文档标签栏（role=tablist）、源码主区
+ *    （data-editor-engine=codemirror）；T4 后无四钮（查找替换 / Outline / Inspector /
+ *    Problems）、无 Outline/Inspector/Problems 面板、无底部 dock；未打开文档时是
+ *    显式空态而不是错误。
  * 2. Negative source（EVENT-30B 对照 §11）：不再用 textarea 兜底（source-fallback
- *    消失）；不做 260/320 固定三栏（无 event-source__grid）；Problems 不再是第四栏
- *    而是底部 dock（无 event-source__problems）；Flow / Hex / Raw Bytes 不在默认
- *    viewport；查找替换走 CodeMirror search（@codemirror/search）而非自实现查找
- *    UI；diagnostic gutter 用 GutterMarker；dirty 标记 per-tab；renderer 不持有
- *    文件系统路径。
+ *    消失）；不做 260/320 固定三栏（无 event-source__grid）；Flow / Hex / Raw Bytes
+ *    不在默认 viewport；查找走 CodeMirror search keymap（Ctrl+F）；diagnostic gutter
+ *    用 GutterMarker；dirty 标记 per-tab；renderer 不持有文件系统路径。
  *
  * 真实多 tab 交互（键盘、IME、large source、多 tab dirty、Go to Event、查找面板）
  * 由 renderer E2E（renderer.spec.mjs）覆盖——它们需要真实 DOM 与 CodeMirror。
@@ -88,23 +86,24 @@ describe('EventSourceWorkbenchPanel SSR 结构（DarkScript3 式骨架挂载即�
     assert.match(html, /暂无打开的事件文档。/);
   });
 
-  it('工具条含 查找替换 / Outline / Inspector / Problems 四个显式开关', () => {
+  it('T4：无 查找替换 / Outline / Inspector / Problems 四钮，无「选中节点」面板', () => {
     const html = render();
-    assert.match(html, />查找替换<\/button>/);
-    assert.match(html, />Outline<\/button>/);
-    assert.match(html, />Inspector<\/button>/);
-    assert.match(html, /Problems<\/button>/);
+    assert.doesNotMatch(html, />查找替换<\/button>/);
+    assert.doesNotMatch(html, />Outline<\/button>/);
+    assert.doesNotMatch(html, />Inspector<\/button>/);
+    assert.doesNotMatch(html, />Problems<\/button>/);
+    assert.doesNotMatch(html, /选中节点/);
   });
 
   it('源码主区用 CodeMirror 引擎挂载位（data-editor-engine=codemirror）', () => {
     assert.match(render(), /data-editor-engine="codemirror"/);
   });
 
-  it('Outline / Inspector 默认不渲染（仅显式打开）；Problems 底部 dock 默认展开', () => {
+  it('T4：Outline / Inspector / Problems 一律不渲染', () => {
     const html = render();
     assert.doesNotMatch(html, /aria-label="事件大纲"/);
     assert.doesNotMatch(html, /aria-label="事件检查器"/);
-    assert.match(html, /aria-label="事件问题"/);
+    assert.doesNotMatch(html, /aria-label="事件问题"/);
   });
 });
 
@@ -121,10 +120,10 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.match(panelSource, /data-editor-engine="codemirror"/);
   });
 
-  it('不做 260/320 固定三栏：无 event-source__grid，Problems 不再是第四栏', () => {
+  it('不做 260/320 固定三栏：无 event-source__grid，也无 esw-dock（Problems 全删）', () => {
     assert.doesNotMatch(panelSource, /event-source__grid/);
     assert.doesNotMatch(panelSource, /event-source__problems/);
-    assert.match(panelSource, /esw-dock/);
+    assert.doesNotMatch(panelSource, /esw-dock/);
   });
 
   it('Flow / Hex / Raw Bytes 不在默认 viewport（SSR 骨架不含这些面板，原始 bytes 只能经 Developer Diagnostics）', () => {
@@ -134,10 +133,19 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.doesNotMatch(html, /Raw Bytes/);
   });
 
-  it('查找替换走 CodeMirror search（@codemirror/search），非自实现查找 UI', () => {
+  it('T4：查找走 CodeMirror search keymap（Ctrl+F），不渲染工具条查找钮', () => {
     assert.match(panelSource, /from '@codemirror\/search'/);
     assert.match(panelSource, /searchKeymap/);
-    assert.match(panelSource, /openSearchPanel/);
+    assert.doesNotMatch(panelSource, /openSearchPanel/);
+  });
+
+  it('T4-3：EMEDF 指令名 autocomplete（Ctrl+Space + 输入时）与悬停参数名列表', () => {
+    assert.match(panelSource, /readEmedfCompletionCatalog/);
+    assert.match(panelSource, /autocompletion\(\{ override: \[createCompletionSource/);
+    assert.match(panelSource, /hoverTooltip\(createHoverTooltipSource/);
+    assert.match(panelSource, /createCompletionSource/);
+    // 只读 EMEDF 公开字段；不携带「加载完整源码」入口。
+    assert.doesNotMatch(panelSource, /loadFullDslTemplate/);
   });
 
   it('diagnostic gutter 用 GutterMarker（未知指令 → event 块行 warning 记号）', () => {

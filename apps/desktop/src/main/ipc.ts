@@ -30,6 +30,8 @@ import {
   renderEmevdDarkScriptBounded,
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
+  listEmedfCompletionItems,
+  type EmedfCompletionItem,
   buildScriptContainerEvidence,
   analyzePlaintextLineEndings,
   classifyPlaintextBytes,
@@ -749,12 +751,15 @@ function clearEditorPageCaches(): void {
  * EMEDF 自动定位（同步、只读、有界）。
  *
  * R3/P4 裁定：事件源码必须是 DarkScript3 式（EMEDF 函数名），没 EMEDF 失败关闭。
- * 为了开箱即用，除了 SOULFORGE_EMEDF_PATH 还自动探测常见落地形态：
- * 1. 已挂载原版游戏根（activeSession.layers.baseRoot）的 tools 兄弟目录一层
- *    （DarkScript3 发布包把 sekiro-common.emedf.json 放在
- *    `<tools>/<工具目录>/Resources/` 下）；
- * 2. 有界用户目录（Desktop/Documents/Downloads）——与 core 的
- *    searchRealEmedf 同一批候选，这里用同步版本避免改动既有同步调用点。
+ * T4 查找顺序（grok 2026-08-15 拍死）：
+ * 1. SOULFORGE_EMEDF_PATH（显式覆盖）；
+ * 2. 固定候选：本机 DarkScript3 事件编辑器发布包的真实落地
+ *    `<tools>/事件编辑器3.4.1/Resources/sekiro-common.emedf.json`；
+ * 3. 已挂载 baseRoot 兄弟 `tools/<一层子目录>/Resources/`（DarkScript3 发布包
+ *    常规落地形态）；
+ * 4. 已挂载 overlay 根向上两级（workspace 层）的兄弟 `tools/<一层>/Resources/`；
+ * 5. SOULFORGE_SEKIRO_GAME_ROOT 同样扫兄弟 tools；
+ * 6. 有界用户目录（Desktop/Documents/Downloads）。
  * 绝不递归整盘；找不到返回 null，由 resolveEmevdRegistry 失败关闭到 fixture。
  */
 const EMEDF_RELATIVE_CANDIDATES = [
@@ -764,22 +769,50 @@ const EMEDF_RELATIVE_CANDIDATES = [
   'Resources/sekiro-common.emedf.json'
 ];
 
+/** T4 固定候选：本机 DarkScript3 事件编辑器发布包真实落地（grok 已求证存在）。 */
+const EMEDF_FIXED_CANDIDATES = [
+  'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\事件编辑器3.4.1\\Resources\\sekiro-common.emedf.json'
+];
+
+/**
+ * 往 roots 追加某 gameRoot 兄弟 `tools/` 目录及其中一层子目录，供后续逐候选探测。
+ * 找不到 tools/ 或不可读时静默跳过，不阻断其他候选。
+ */
+function pushToolsSubdirs(roots: string[], gameRoot: string | undefined): void {
+  if (!gameRoot) return;
+  const toolsDir = join(dirname(gameRoot), 'tools');
+  try {
+    roots.push(toolsDir);
+    for (const entry of readdirSync(toolsDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) roots.push(join(toolsDir, entry.name));
+    }
+  } catch {
+    // tools 目录不存在/不可读：跳过，继续其他候选。
+  }
+}
+
 function locateUserEmedfSync(): string | null {
   const roots: string[] = [];
+  // 1) 显式环境变量优先。
   const explicit = process.env.SOULFORGE_EMEDF_PATH?.trim();
   if (explicit) roots.push(resolve(explicit));
-  const gameRoot = activeSession?.layers.baseRoot;
-  if (gameRoot) {
-    const toolsDir = join(dirname(gameRoot), 'tools');
+  // 2) 固定候选：DarkScript3 事件编辑器发布包的本机真实落地（整路径直接判存在）。
+  for (const candidate of EMEDF_FIXED_CANDIDATES) {
     try {
-      roots.push(toolsDir);
-      for (const entry of readdirSync(toolsDir, { withFileTypes: true })) {
-        if (entry.isDirectory()) roots.push(join(toolsDir, entry.name));
-      }
+      if (existsSync(candidate)) return candidate;
     } catch {
-      // tools 目录不存在/不可读：跳过，继续其他候选。
+      // 继续下一个候选。
     }
   }
+  // 3) 已挂载 baseRoot 的兄弟 tools/<一层子目录>。
+  pushToolsSubdirs(roots, activeSession?.layers.baseRoot);
+  // 4) 已挂载 overlay 根向上两级（workspace 层）的兄弟 tools/<一层>/Resources/。
+  const overlay = activeSession?.layers.overlayRoot?.trim();
+  if (overlay) pushToolsSubdirs(roots, dirname(dirname(overlay)));
+  // 5) SOULFORGE_SEKIRO_GAME_ROOT 同样扫兄弟 tools。
+  const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+  if (gameRootEnv) pushToolsSubdirs(roots, gameRootEnv);
+  // 6) 有界用户目录。
   const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
   if (home) {
     roots.push(join(home, 'Desktop'), join(home, 'Documents'), join(home, 'Downloads'));
@@ -2253,13 +2286,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       emevdFullDocuments.set(sourceUri, full.document);
       const registryResolution = getEmevdRegistry();
-      // Hard constraint 17: the template is bounded so a real corpus document
-      // (~70K+ lines) is never transferred in one IPC payload. The renderer can
-      // request the full template explicitly via loadFullDslTemplate.
-      //
       // R3/P4 裁定：反汇编必须是 DarkScript3 式（EMEDF 函数名）；没 EMEDF 失败
       // 关闭——不再下发 hash 伪源码（旧 renderEmevdPatchDslBounded 输出已从
       // production 入口移除，底层 dslCompiler/typed 写链保留）。
+      // T4：一次出完整 DarkScript 文本，不做 2000 行截断——事件源码不再有
+      // 「加载完整源码」按钮与截断黄条；全量 IPC 下发 70K+ 行文本可行，
+      // 渲染成本集中在打开时一次完成（loadFullDslTemplate 参数保留以兼容
+      // 既有 IPC 契约与 core smoke，不再影响行为）。
       let dslTemplate: string | null = null;
       let dslTemplateTruncated = false;
       let dslTemplateTotalLines = 0;
@@ -2274,7 +2307,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         const bounded = renderEmevdDarkScriptBounded(
           full.document,
           registryResolution.registry,
-          loadFullDslTemplate ? undefined : 2000
+          undefined
         );
         dslTemplate = bounded.text;
         dslTemplateTruncated = bounded.truncated;
@@ -2310,6 +2343,25 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       };
     }
   );
+
+  /**
+   * T4-3：暴露本机 EMEDF 指令名补全目录给 renderer（autocomplete/hover）。
+   * 只读 EMEDF 公开字段（name/bank/id/args），EMEDF 数据本身留在本机不进仓库。
+   * 无论 registry 来源（imported 或 fixture）都返回目录，由 renderer 决定何时展示。
+   */
+  handle('resource.readEmedfCompletionCatalog', async (): Promise<{
+    ok: boolean;
+    origin: 'imported' | 'fixture';
+    items: EmedfCompletionItem[];
+    diagnostics?: Array<{ severity: string; code: string; message: string }>;
+  }> => {
+    const resolution = getEmevdRegistry();
+    return {
+      ok: true,
+      origin: resolution.origin,
+      items: listEmedfCompletionItems(resolution.registry)
+    };
+  });
 
   /**
    * Submit a DSL patch authored in the renderer's four-view panel. The full

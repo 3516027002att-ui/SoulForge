@@ -3110,9 +3110,8 @@ export function App(): ReactElement {
                   EMEVD 或读取失败）」。hash 前缀属于证据，读取失败原因进日志区。 */}
               <EventSourceWorkbenchPanel
                 /* EVENT-30B：工作台自己管理多文档标签与 dirty；App 只按资源 URI
-                   提供最近一次打开/刷新的有界投影（pendingTab），并把提交/加载/
-                   结构化 mutation 的能力上抛。key 固定，切资源时工作台不重挂载，
-                   标签与未提交编辑得以保留。 */
+                   提供最近一次打开/刷新的有界投影（pendingTab），并把 DSL 提交能力
+                   上抛。key 固定，切资源时工作台不重挂载，标签与未提交编辑得以保留。 */
                 pendingTab={eventPendingTab}
                 onDslSubmit={async (tab, sourceText) => {
                   if (!tab.live) {
@@ -3175,88 +3174,6 @@ export function App(): ReactElement {
                       message: 'DSL 提交失败。'
                     }]
                   };
-                }}
-                onLoadFullDslTemplate={async (tab) => {
-                  if (!bridge) return;
-                  const full = await bridge.readEmevdFullDocument(
-                    tab.resourceUri,
-                    `renderer-${tab.resourceUri}-${Date.now()}`,
-                    true
-                  );
-                  if (full?.ok && full.dslTemplate) {
-                    setEventPendingTab({
-                      ...tab,
-                      dslTemplate: full.dslTemplate,
-                      dslTemplateTruncated: false,
-                      dslTemplateTotalLines: full.dslTemplateTotalLines ?? 0,
-                      sourceStyle: full.sourceStyle ?? tab.sourceStyle ?? 'none'
-                    });
-                    setStatus(`完整 DSL 模板已加载（共 ${full.dslTemplateTotalLines ?? 0} 行）。`);
-                  } else {
-                    setStatus(full?.diagnostics?.[0]?.message ?? '完整模板加载失败。');
-                  }
-                }}
-                onStructuredMutation={(tab, mutation) => {
-                  void (async () => {
-                    if (!tab.live || !tab.sourceHash) {
-                      setStatus('当前资源未实时加载，不能生成 mutation；请先选中可解析资源。');
-                      return;
-                    }
-                    if (!bridge) {
-                      setStatus(describeBridgeAbsence('提交 EMEVD mutation'));
-                      return;
-                    }
-                    if (typeof bridge.applyEmevdMutation !== 'function') {
-                      setStatus('当前预加载未暴露 applyEmevdMutation。');
-                      return;
-                    }
-                    setStatus('正在经 Bridge/补丁引擎提交 EMEVD mutation…');
-                    const eventIdMatch = /#event\/(-?\d+)/.exec(mutation.eventUri);
-                    const eventId = eventIdMatch ? Number(eventIdMatch[1]) : undefined;
-                    const bridgeMutation =
-                      mutation.kind === 'emevd_set_rest_behavior'
-                        ? {
-                            kind: 'set_rest_behavior',
-                            eventId,
-                            restBehavior: mutation.restBehavior
-                          }
-                        : {
-                            kind: 'update_id',
-                            eventId,
-                            newEventId: mutation.newEventId
-                          };
-                    const result = await bridge.applyEmevdMutation(
-                      tab.resourceUri,
-                      tab.sourceHash,
-                      bridgeMutation
-                    );
-                    if (!result.ok) {
-                      setStatus(result.diagnostics?.[0]?.message ?? 'EMEVD 提交失败');
-                      return;
-                    }
-                    setStatus('EMEVD mutation 已提交；正在重读…');
-                    const reload = await bridge.readEmevdDocument(tab.resourceUri) as {
-                      ok?: boolean;
-                      data?: BridgeEmevdEnvelopeLike | null;
-                    };
-                    if (reload?.ok && reload.data) {
-                      setEventPendingTab({
-                        ...tab,
-                        // 结构化 mutation 不改事件顺序，沿用当前 dslTemplate 的锚对齐。
-                        document: alignEmevdDocumentAnchors(
-                          mapEmevdEnvelopeToDocument(tab.resourceUri, reload.data, {
-                            maxEvents: 128
-                          }),
-                          tab.dslTemplate
-                        ),
-                        sourceHash: reload.data.sourceHash ?? tab.sourceHash
-                      });
-                      setStatus('EMEVD 已提交并重读。');
-                    } else {
-                      setStatus('EMEVD 已提交，但重读失败。');
-                    }
-                    await refreshOperationHistory();
-                  })();
                 }}
               />
             </>

@@ -2088,7 +2088,7 @@ async function openEventWorkbench(window, fileName) {
   return workbench;
 }
 
-test('EVENT-30B：事件源码工作台挂载，CodeMirror 主区 + 逻辑文档标签 + Problems 底部 dock', async () => {
+test('EVENT-30B：事件源码工作台挂载，CodeMirror 主区 + 逻辑文档标签，无四钮', async () => {
   const { app, window, pageErrors, consoleErrors } = await launchApp();
   await openFixtureWorkspace(window);
   const workbench = await openEventWorkbench(window, 'event/common.emevd');
@@ -2105,23 +2105,23 @@ test('EVENT-30B：事件源码工作台挂载，CodeMirror 主区 + 逻辑文档
   await expect(host.locator('.cm-content')).toContainText('event @e:ev50');
   await expect(host.locator('.cm-content')).toContainText('event @e:ev60');
 
-  // 默认：Outline / Inspector 不渲染（仅显式打开）；Problems 是底部 dock（默认展开）。
+  // T4：Outline / Inspector / Problems 一律不渲染；主区只剩源码。
   await expect(workbench.locator('[aria-label="事件大纲"]')).toHaveCount(0);
   await expect(workbench.locator('[aria-label="事件检查器"]')).toHaveCount(0);
-  await expect(workbench.locator('[aria-label="事件问题"]')).toBeVisible();
-  await expect(workbench.locator('[aria-label="事件问题"]')).toContainText('当前没有可行动的结构化问题');
+  await expect(workbench.locator('[aria-label="事件问题"]')).toHaveCount(0);
 
-  // 工具条四个显式开关。
-  await expect(workbench.getByRole('button', { name: '查找替换' })).toBeVisible();
-  await expect(workbench.getByRole('button', { name: 'Outline' })).toBeVisible();
-  await expect(workbench.getByRole('button', { name: 'Inspector' })).toBeVisible();
-  await expect(workbench.getByRole('button', { name: /^Problems/ })).toBeVisible();
+  // T4：无四钮。
+  await expect(workbench.getByRole('button', { name: '查找替换' })).toHaveCount(0);
+  await expect(workbench.getByRole('button', { name: 'Outline' })).toHaveCount(0);
+  await expect(workbench.getByRole('button', { name: 'Inspector' })).toHaveCount(0);
+  await expect(workbench.getByRole('button', { name: /^Problems/ })).toHaveCount(0);
 
   // Negative DOM（EVENT-30B 对照 §11）：四视图三栏 grid、textarea 兜底、
-  // 第四栏 Problems 全部消失。
+  // 第四栏 Problems、esw-dock 全部消失。
   expect(await workbench.locator('.event-source__grid').count()).toBe(0);
   expect(await workbench.locator('textarea').count()).toBe(0);
   expect(await workbench.locator('.event-source__problems').count()).toBe(0);
+  expect(await workbench.locator('.esw-dock').count()).toBe(0);
 
   // CodeMirror 集成无运行时错误。
   expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
@@ -2131,38 +2131,38 @@ test('EVENT-30B：事件源码工作台挂载，CodeMirror 主区 + 逻辑文档
   await app.close();
 });
 
-test('EVENT-30B：Outline/Inspector 显式打开、Go to Event 跳转、查找替换面板开关', async () => {
-  const { app, window } = await launchApp();
+test('EVENT-30B：无四钮，Ctrl+F 走 CodeMirror search keymap', async () => {
+  const { app, window, pageErrors, consoleErrors } = await launchApp();
   await openFixtureWorkspace(window);
   const workbench = await openEventWorkbench(window, 'event/common.emevd');
 
-  // Outline 默认收起；显式打开 → 列出两个逻辑事件，Event 60 带未知指令标注。
-  await workbench.getByRole('button', { name: 'Outline' }).click();
-  const outline = workbench.locator('[aria-label="事件大纲"]');
-  await expect(outline).toBeVisible();
-  await expect(outline.getByRole('button', { name: /Event 50/ })).toBeVisible();
-  await expect(outline.getByRole('button', { name: /Event 60/ })).toBeVisible();
-  await expect(outline.getByRole('button', { name: /1 未知指令/ })).toBeVisible();
+  // 主区只剩源码：无查找替换/Outline/Inspector/Problems 四钮，无选中节点面板。
+  await expect(workbench.getByRole('button', { name: '查找替换' })).toHaveCount(0);
+  await expect(workbench.getByRole('button', { name: 'Outline' })).toHaveCount(0);
+  await expect(workbench.getByRole('button', { name: 'Inspector' })).toHaveCount(0);
+  await expect(workbench.getByRole('button', { name: /^Problems/ })).toHaveCount(0);
+  await expect(workbench.getByText('选中节点', { exact: false })).toHaveCount(0);
 
-  // Go to Event：点 Event 60 → Inspector 自动打开并选中；源码跳到 @e:ev60 行。
-  await outline.getByRole('button', { name: /Event 60/ }).click();
-  await expect(outline.locator('.esw-outline__item.is-selected')).toContainText('Event 60');
-  const inspector = workbench.locator('[aria-label="事件检查器"]');
-  await expect(inspector).toBeVisible();
-  await expect(inspector).toContainText('Event ID');
-  await expect(inspector).toContainText('60');
-  await expect(workbench.locator('.cm-activeLine')).toContainText('event @e:ev60');
-
-  // 查找替换走 CodeMirror search（@codemirror/search）：点开 → .cm-search 出现。
-  await workbench.getByRole('button', { name: '查找替换' }).click();
-  await expect(workbench.locator('.cm-search')).toBeVisible();
-  await workbench.getByRole('button', { name: '查找替换' }).click();
+  // Ctrl+F 直接打开 CodeMirror search 面板（@codemirror/search keymap），非工具条钮。
+  const content = workbench.locator('.esw-source__host .cm-content');
+  await content.click();
+  await window.keyboard.press('Control+F');
+  const search = workbench.locator('.cm-search');
+  await expect(search).toBeVisible();
+  // CM search 用 onkeyup commit：fill() 只发 input 事件，需补一次 keyup 才触发查询更新。
+  // 高亮匹配 .cm-searchMatch 渲染在编辑器内容区（.cm-content），不在 .cm-search 面板内。
+  const findField = search.getByRole('textbox', { name: 'Find' });
+  await findField.fill('event @e:ev60');
+  await findField.dispatchEvent('keyup');
+  await expect(workbench.locator('.cm-searchMatch')).toHaveCount(1);
+  await window.keyboard.press('Escape');
   await expect(workbench.locator('.cm-search')).toHaveCount(0);
 
-  // Inspector 里可对选中事件发结构化 mutation（切换 restBehavior）。
-  await expect(inspector.getByRole('button', { name: '切换 restBehavior' })).toBeVisible();
+  // 无运行时错误。
+  expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
+  expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
 
-  await window.screenshot({ path: 'test-results/12-event-outline-inspector.png' });
+  await window.screenshot({ path: 'test-results/12-event-no-four-buttons-search.png' });
   await app.close();
 });
 
