@@ -84,6 +84,11 @@ function main(): Promise<void> {
 }
 
 async function mainInWorkspace(root: string): Promise<void> {
+  // DCX/KRAK 解压需要游戏目录里的 Oodle DLL；全语言矩阵已用 gameRoot 传
+  // oodleRuntimeRoot，这里给主流程的解压调用补上同一来源，否则 KRAK 只读不解压。
+  const gameRoot = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim()
+    || process.env.SOULFORGE_NATIVE_FIXTURE_ROOT?.trim() || '';
+  const oodle = gameRoot ? { oodleRuntimeRoot: gameRoot } : {};
   const sourceMsgbnd = await resolveNativeFixture(
     process.argv[2],
     'fmg-primary',
@@ -102,6 +107,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     filePath: msgbndPath,
     allowedRoots: [overlay],
     timeoutMs: 60_000,
+    ...oodle,
     commandOptions: { entryIndex: 1 } // 武器名.fmg — has real Chinese strings
   });
   if (!child.data?.contentBase64) throw new Error(`snapshot failed: ${JSON.stringify(child.diagnostics)}`);
@@ -423,6 +429,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     filePath: msgbndPath,
     allowedRoots: [overlay],
     timeoutMs: 60_000,
+    ...oodle,
     commandOptions: { entryIndex: child.data.index }
   });
   const afterFmgPath = join(staging, 'after.fmg');
@@ -459,7 +466,8 @@ async function mainInWorkspace(root: string): Promise<void> {
     command: 'read-dcx-document',
     filePath: sourceMsgbnd,
     allowedRoots: [dirname(sourceMsgbnd)],
-    timeoutMs: 60_000
+    timeoutMs: 60_000,
+    ...oodle
   });
   const count = container.data?.nested?.entryCount ?? 0;
   let fmgVerified = 0;
@@ -470,6 +478,7 @@ async function mainInWorkspace(root: string): Promise<void> {
       filePath: sourceMsgbnd,
       allowedRoots: [dirname(sourceMsgbnd)],
       timeoutMs: 60_000,
+      ...oodle,
       commandOptions: { entryIndex: i }
     });
     const bytes = Buffer.from(snap.data!.contentBase64, 'base64');
@@ -505,7 +514,8 @@ async function mainInWorkspace(root: string): Promise<void> {
     command: 'read-dcx-document',
     filePath: menuMsgbnd,
     allowedRoots: [dirname(menuMsgbnd)],
-    timeoutMs: 60_000
+    timeoutMs: 60_000,
+    ...oodle
   });
   const menuCount = menuContainer.data?.nested?.entryCount ?? 0;
   let menuFmgVerified = 0;
@@ -517,6 +527,7 @@ async function mainInWorkspace(root: string): Promise<void> {
       filePath: menuMsgbnd,
       allowedRoots: [dirname(menuMsgbnd)],
       timeoutMs: 60_000,
+      ...oodle,
       commandOptions: { entryIndex: i }
     });
     const bytes = Buffer.from(snap.data!.contentBase64, 'base64');
