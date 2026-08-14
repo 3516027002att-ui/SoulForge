@@ -3,8 +3,9 @@
  *
  * 三条主线：
  * 1. SSR 结构断言：真渲染 ParamWorkbench（react-dom/server），钉住工作台骨架
- *    —— 工具条面包屑、Param/Row/Field 三栏、各栏空态提示。SSR 不跑 effect，
- *    所以这里看到的是「挂载即有的结构」，异步加载结果由 e2e 负责。
+ *    —— 工具条 CSV 按钮、Param/Row/Field 三栏（T5-4 删第四栏 Tools）、各栏
+ *    空态提示。SSR 不跑 effect，所以这里看到的是「挂载即有的结构」，
+ *    异步加载结果由 e2e 负责。
  * 2. 行为测试：core 的 isParamBackupPath（ROUTE-06 后缀语义：.bak/.prev、
  *    大小写不敏感、反斜杠归一）。IPC 层用同一函数挡 backup，行为可测而不是
  *    只能对账。
@@ -46,28 +47,29 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
     assert.match(html, /aria-label="PARAM 工作台"/);
   });
 
-  it('标题是 §7.8 正确形态：Game Parameters · 1 library · N tables', () => {
+  it('标题形态（T5-4）：不再有「Game Parameters · 1 library · N tables」crumb、类型名、行大小', () => {
     const html = render('gameparam.parambnd.dcx');
-    assert.match(html, /class="crumb"/);
-    // SSR 初始 params=[]，N 为 0；标题形态不含物理路径。
-    assert.match(html, /Game Parameters · 1 library · 0 tables/);
+    // T5-4 删掉旧 crumb 与文档级信息；容器物理路径/文件名同样不出现。
+    assert.ok(!html.includes('Game Parameters'), '旧 crumb 必须删除');
+    assert.ok(!html.includes('1 library'), 'library 计数必须删除');
+    assert.ok(!html.includes('行大小'), '行大小必须删除');
+    assert.ok(!html.includes('gameparam.parambnd.dcx'), '容器文件名不得出现在 DOM');
   });
 
-  it('四栏 Params/Rows/Fields/Tools 同时存在（§7.1，PARAM-10B）', () => {
+  it('三栏 Params/Rows/Fields 同时存在（T5-4 删第四栏 Tools）', () => {
     const html = render();
     assert.match(html, /aria-label="Params"/);
     assert.match(html, /aria-label="Rows"/);
     assert.match(html, /aria-label="Fields"/);
-    assert.match(html, /aria-label="Tools"/);
+    assert.ok(!html.includes('aria-label="Tools"'), '第四栏 Tools 必须删除');
   });
 
-  it('四栏按 §7.1 固定比例与最小宽度渲染（20/29/35/16，180/260/320/200）', () => {
+  it('三栏按 §7.1 固定比例与最小宽度渲染（20/29/35，180/260/320）', () => {
     const html = render();
     // React SSR 的 style 序列化无空格（flex:0.2 1 0;min-width:180px）。
     assert.match(html, /style="flex:0\.2 1 0;min-width:180px"/);
     assert.match(html, /style="flex:0\.29 1 0;min-width:260px"/);
     assert.match(html, /style="flex:0\.35 1 0;min-width:320px"/);
-    assert.match(html, /style="flex:0\.16 1 0;min-width:200px"/);
   });
 
   it('左栏有容器内 param 筛选输入', () => {
@@ -81,10 +83,16 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
     assert.equal(html.match(/先在左栏选择一个 param。/g)?.length ?? 0, 2);
   });
 
-  it('Tools 栏只给诚实空态，不渲染 disabled 假按钮（§7.6）', () => {
+  it('工具条（T5-4）：导出行/导入行/导出备注/导入备注 四个真实按钮，未选表时禁用', () => {
     const html = render();
-    assert.ok(html.includes('暂无已接通的工具'), 'Tools 栏必须说明工具未接通');
-    assert.ok(!html.includes('disabled'), '未接通的工具不得以 disabled 假按钮出现');
+    // SSR 初始 selectedEntry=null，四个按钮 disabled（没有可导入导出的目标）。
+    // 这是真实功能的禁用态，不是 §7.6 禁止的「未接通工具的假按钮」。
+    assert.ok(html.includes('>导出行</button>'), '缺少导出行按钮');
+    assert.ok(html.includes('>导入行</button>'), '缺少导入行按钮');
+    assert.ok(html.includes('>导出备注</button>'), '缺少导出备注按钮');
+    assert.ok(html.includes('>导入备注</button>'), '缺少导入备注按钮');
+    const buttons = html.match(/<button/g) ?? [];
+    assert.equal(buttons.length, 4, '工具条应恰好 4 个按钮');
   });
 
   it('容器物理路径/文件名不进可见 DOM（§7.3/§7.8 禁止列表）', () => {

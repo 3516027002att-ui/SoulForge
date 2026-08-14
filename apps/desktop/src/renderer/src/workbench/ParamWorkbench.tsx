@@ -1,10 +1,14 @@
 /**
- * PARAM 四栏工作台（对照 Smithbox 2.2.4 的 Param Editor）。
+ * PARAM 三栏工作台（对照 Smithbox 2.2.4 的 Param Editor）。
  *
  * 一：Params —— parambnd 容器内的 param 条目
- * 二：Rows   —— 选中 param 的行（id + name），分页 + 筛选 + 虚拟滚动
- * 三：Fields —— 选中行的字段（名 + 值）；应用 ParamDef 失败时保留失败 param 并标「读取失败」
- * 四：Tools  —— 工具栈（当前诚实空态）
+ * 二：Rows   —— 选中 param 的行（id + name），筛选 + 虚拟滚动，行名可编辑
+ * 三：Fields —— 选中行的字段（中文名 + 悬停 Description + 值）；应用 ParamDef
+ *               失败时保留失败 param 并标「读取失败」
+ *
+ * 顶部工具条（T5-4）：导出行 / 导入行 / 导出备注 / 导入备注（CSV，主进程对话框，
+ * 导入写入走 Patch Engine）。不再有第四栏 Tools —— 未接通的工具不渲染假按钮
+ * （§7.6）。
  *
  * ── 为什么需要它 ──
  *
@@ -227,6 +231,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   /** 行名编辑草稿：非 null 表示正在编辑选中行的名字。 */
   const [rowNameDraft, setRowNameDraft] = useState<string | null>(null);
   const [rowNameCommitting, setRowNameCommitting] = useState(false);
+  /** CSV 导入导出（T5-4）进行中标记：防止重复点击。 */
+  const [ioBusy, setIoBusy] = useState(false);
 
   // ── 左栏：容器内 param 列表 ──
   useEffect(() => {
@@ -684,14 +690,42 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     }
   }
 
+  /**
+   * CSV 导入导出（T5-4）的统一提交与反馈。
+   *
+   * 对话框在 main 侧（save/open dialog）；这里只触发 bridge 方法并把结果诊断
+   * 显示到 footer。导入（写入）由 main 经 Patch Engine 提交 —— 本组件始终不
+   * 直接写盘。
+   */
+  async function runCsvIo(
+    action: () => Promise<{ ok: boolean; message?: string; diagnostics?: Array<{ message?: string; severity?: string }> }>
+  ): Promise<void> {
+    if (!bridge || ioBusy) return;
+    setIoBusy(true);
+    setCommitMessage(null);
+    try {
+      const result = await action();
+      const primary = result.diagnostics?.find(
+        (diagnostic) => diagnostic.severity === 'error' || diagnostic.severity === 'info'
+      );
+      setCommitMessage(result.ok
+        ? (primary?.message ?? '操作完成。')
+        : (primary?.message ?? result.message ?? '操作失败，容器未修改。'));
+    } catch (error) {
+      setCommitMessage(error instanceof Error ? error.message : 'CSV 导入导出异常。');
+    } finally {
+      setIoBusy(false);
+    }
+  }
+
   const columns: WorkbenchColumnSpec[] = [
     {
       id: 'params',
       title: 'Params',
       // §7.3：table 数量只在栏头以 N tables 显示（Smithbox 形态）。
       hint: `${params.length} tables`,
-      // §7.1 固定比例（REF-01 实测无冲突，沿用初值）：20/29/35/16，
-      // 最小宽 180/260/320/200。比例模式随窗口缩放跟随，拖拽后转像素。
+      // §7.1 固定比例（T5-4 删第四栏 Tools 后沿用前三角）：20/29/35，
+      // 最小宽 180/260/320。比例模式随窗口缩放跟随，拖拽后转像素。
       initialFlex: 0.2,
       minWidth: 180,
       children: (
@@ -1014,23 +1048,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           )}
         </div>
       )
-    },
-    {
-      id: 'tools',
-      title: 'Tools',
-      initialFlex: 0.16,
-      minWidth: 200,
-      children: (
-        <div className="wb-list">
-          {/* §7.6：未接通真实实现的工具必须隐藏，不能放 disabled 假按钮。
-              当前 Sort Rows / Row Names / Data Comparison / Copy / Duplicate /
-              Data Transfer / Mass Edit / Reference Jump / Undo/Redo 均未接通
-              真实实现，因此整栏只给出诚实的空态说明，不渲染任何假入口。 */}
-          <p className="wb-empty">
-            暂无已接通的工具。工具只在真实能力（如排序、复制、批量编辑）可用时出现。
-          </p>
-        </div>
-      )
     }
   ];
 
@@ -1059,26 +1076,68 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       columns={columns}
       toolbar={
         <>
-          {/* §7.8 正确标题：Game Parameters · 1 library · N tables。
-              不显示容器物理路径/文件名（§7.3 禁止路径、DCX、BND、大小）。
-              containerLabel prop 仍由宿主传入，但不再进入可见 DOM。 */}
-          <span className="crumb">
-            Game Parameters · 1 library · {params.length} tables
-          </span>
-          {paramName && <span className="muted" style={{ fontSize: 11 }}>{paramName}</span>}
-          {typeName && <span className="muted" style={{ fontSize: 11 }}>{typeName}</span>}
+          {/* T5-4：删掉旧的「Game Parameters · 1 library · N tables」crumb、类型名、
+              行大小。换成 CSV 导入导出工具条：导出行/导入行（字段值）、导出备注/
+              导入备注（行名，对照 Yapped Export/Import Names）。对话框都在 main 侧，
+              导入写入走 Patch Engine。未选表时按钮禁用（没有可导入导出的目标）。 */}
           <span className="toolbar-spacer" style={{ flex: 1 }}></span>
-          {rowDataSize > 0 && (
-            <span className="muted" style={{ fontSize: 11 }}>行大小 {rowDataSize} 字节</span>
-          )}
-          {/* T5-2：行宽匹配即自动授信，字段编辑不再需要先点信任。
-              「必须先点信任才能改」的路径已去掉；开发者撤销仍可通过主进程
-              param.metadata.setTrust 触发（grok T5：「可留开发者撤销，但不挡编辑」）。 */}
           {definition !== null && (
             <span className="muted" style={{ fontSize: 11 }} title="行宽与定义一致即自动授信">
               字段元数据已自动授信
             </span>
           )}
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={ioBusy || selectedEntry === null}
+            title="导出当前表所有行（id,name,字段值）为 CSV"
+            onClick={() => {
+              if (!bridge || selectedEntry === null) return;
+              void runCsvIo(() =>
+                bridge.exportParamRowsCsv(props.containerUri, containerHash, selectedEntry)
+              );
+            }}
+          >导出行</button>
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={ioBusy || selectedEntry === null}
+            title="从 CSV 导入行数据（表头 id,name,字段内部 id…；空单元格不改）"
+            onClick={() => {
+              if (!bridge || selectedEntry === null) return;
+              void runCsvIo(() =>
+                bridge.importParamRowsCsv(
+                  props.containerUri, containerHash, selectedEntry, childHash
+                )
+              );
+            }}
+          >导入行</button>
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={ioBusy || selectedEntry === null}
+            title="导出当前表行名（id,name）为 CSV，对照 Yapped Export Names"
+            onClick={() => {
+              if (!bridge || selectedEntry === null) return;
+              void runCsvIo(() =>
+                bridge.exportParamNamesCsv(props.containerUri, containerHash, selectedEntry)
+              );
+            }}
+          >导出备注</button>
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={ioBusy || selectedEntry === null}
+            title="从 CSV 导入行名（表头 id,name），对照 Yapped Import Names"
+            onClick={() => {
+              if (!bridge || selectedEntry === null) return;
+              void runCsvIo(() =>
+                bridge.importParamNamesCsv(
+                  props.containerUri, containerHash, selectedEntry, childHash
+                )
+              );
+            }}
+          >导入备注</button>
         </>
       }
       {...(footerMessages.length > 0

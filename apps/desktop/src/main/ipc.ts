@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,10 @@ import {
   normalizePageWindow,
   sanitizeEntryName,
   applyParamFieldMutation,
+  decodeRowFields,
+  encodeFieldMutation,
+  toCsvText,
+  parseCsvText,
   commitFmgMutationViaBridge,
   commitFlverMutationViaBridge,
   commitGparamMutationsViaBridge,
@@ -5488,6 +5492,806 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         unpackedParamCache.clear();
       }
       return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  /**
+   * 解包容器内 param 并全量读出（T5-4 导入导出的公共前置）。
+   *
+   * 与 resource.readContainerParamPage 同一条前置链：unpackContainerParamChild
+   * 先把条目解成裸 param 落会话暂存区，再 read-param-document（includeAllPayloads）
+   * 一次拿回全部行字节。返回的 child 同时携带 storedContentHash —— 那是写回
+   * write-param 时 requiredDocumentHash 的并发保护凭据。
+   */
+  const readContainerParamFull = async (input: {
+    file: IndexedFile;
+    containerUri: string;
+    expectedContainerHash: string;
+    entryIndex: number;
+  }): Promise<
+    | {
+        ok: true;
+        child: UnpackedParamChild;
+        typeName: string;
+        rowDataSize: number;
+        rows: Array<{ id: number; dataBase64?: string | null; name?: string }>;
+        diagnostics: Diagnostic[];
+      }
+    | { ok: false; diagnostics: Diagnostic[] }
+  > => {
+    const unpacked = await unpackContainerParamChild({
+      containerPath: input.file.absolutePath,
+      containerUri: input.containerUri,
+      containerHash: input.file.sha256 ?? input.expectedContainerHash,
+      entry: { index: input.entryIndex }
+    });
+    if (!unpacked.ok) return { ok: false, diagnostics: sanitizeDiagnostics(unpacked.diagnostics) };
+    const stageRoots = activeSession
+      ? await verifiedStageRoots(
+          activeSession,
+          durableStoragePaths(activeSession.meta.workspaceId),
+          'PARAM_STAGING_PREPARE_FAILED'
+        )
+      : null;
+    if (stageRoots && stageRoots.diagnostics.length > 0) {
+      return { ok: false, diagnostics: stageRoots.diagnostics };
+    }
+    const allowedRoots = stageRoots
+      ? [...stageRoots.allowedRoots]
+      : [dirname(unpacked.child.absolutePath)];
+    const full = await runBridge<{
+      sourceHash?: string;
+      typeName?: string;
+      rowDataSize?: number;
+      rows?: Array<{ id: number; dataBase64?: string | null; name?: string }>;
+    }>({
+      command: 'read-param-document',
+      filePath: unpacked.child.absolutePath,
+      allowedRoots,
+      timeoutMs: 120_000,
+      commandOptions: { includeAllPayloads: true },
+      maxFrameBytes: 32 * 1024 * 1024
+    });
+    if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
+      return { ok: false, diagnostics: sanitizeDiagnostics(full.diagnostics) };
+    }
+    return {
+      ok: true,
+      child: unpacked.child,
+      typeName: full.data.typeName ?? '',
+      rowDataSize: full.data.rowDataSize ?? 0,
+      rows: full.data.rows ?? [],
+      diagnostics: []
+    };
+  };
+
+  /**
+   * T5-4 批量导入的共享提交路径（grok T5：「提交走与字段写入相同的 Patch 链，
+   * 禁止 fs.writeFile 写 Mod」）。
+   *
+   * ① write-param mutations（C#）—— 批量 upsert 行数据/行名，产出改过的裸 param；
+   * ② write-bnd4 replace（C#）—— 按 entryIndex 塞回容器副本，C# 侧重读验证；
+   * ③ 真正落盘由 applyNativeMutation 的 commit port（Patch Engine）完成，含备份
+   *    与回滚元数据。
+   *
+   * unpackedChild 由调用方（readContainerParamFull）解包并读出，这里直接复用，
+   * 不重复解包；expectedDocumentHash 用它的 storedContentHash（并发保护，与
+   * 字段/行名写入一致）。write-param 的 upsert 强制 dataBase64 且长度=行宽——
+   * 导入路径的行字节一律由读回的最新字节承载，不凭空构造。
+   */
+  const commitContainerParamBulk = async (
+    event: IpcMainInvokeEvent,
+    input: {
+      containerUri: string;
+      expectedContainerHash: string;
+      file: IndexedFile;
+      entryIndex: number;
+      expectedChildHash: string;
+      unpackedChild: UnpackedParamChild;
+      mutations: Array<Record<string, unknown>>;
+      title: string;
+      confirmActionLabel: string;
+    }
+  ): Promise<RendererSaveResult> => {
+    const session = activeSession;
+    if (!session) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'PARAM_IMPORT_NO_SESSION',
+          message: '需要已打开的工作区才能写入容器内 PARAM。',
+          sourceUri: input.containerUri
+        }]
+      };
+    }
+    const storage = durableStoragePaths(session.meta.workspaceId);
+    const stage = await verifiedStageRoots(session, storage, 'PARAM_STAGING_PREPARE_FAILED');
+    if (stage.diagnostics.length > 0) {
+      return { ok: false, changedFiles: [], diagnostics: stage.diagnostics };
+    }
+    const operationLog = await ensureActiveOperationLog(session);
+    const oodle = session.layers.baseRoot
+      ? { oodleRuntimeRoot: session.layers.baseRoot }
+      : {};
+
+    const paramStage = await stageBridgeOutput({
+      stagingRoot: storage.stagingRoot,
+      prefix: 'param-import',
+      fileName: `${basename(input.unpackedChild.name)}.imported`,
+      allowedRoots: () => [...stage.allowedRoots],
+      write: async (context) => {
+        const written = await runBridge<Record<string, unknown>>({
+          command: 'write-param',
+          filePath: input.unpackedChild.absolutePath,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          timeoutMs: 120_000,
+          commandOptions: {
+            outputPath: context.outputPath,
+            expectedDocumentHash: input.unpackedChild.storedContentHash,
+            mutations: input.mutations
+          }
+        });
+        return {
+          ok: written.parseStatus !== 'failed'
+            && written.diagnostics.some(
+              (diagnostic) => diagnostic.code === 'PARAM_STAGING_WRITE_VERIFIED'
+            ),
+          diagnostics: written.diagnostics
+        };
+      }
+    });
+    if (!paramStage.ok || !paramStage.bytes) {
+      return {
+        ok: false,
+        changedFiles: [],
+        diagnostics: [
+          ...sanitizeDiagnostics(paramStage.result?.diagnostics ?? []),
+          ...paramStage.diagnostics.map((diagnostic) => ({
+            severity: 'error' as const,
+            code: diagnostic.code,
+            message: diagnostic.message,
+            sourceUri: input.containerUri
+          })),
+          {
+            severity: 'error' as const,
+            code: 'PARAM_IMPORT_STAGE_FAILED',
+            message: '批量改动未能产出裸 param 暂存文件，容器未被修改。',
+            sourceUri: input.containerUri
+          }
+        ]
+      };
+    }
+    const childBase64 = paramStage.bytes.toString('base64');
+
+    const outcome = await applyNativeMutation({
+      file: input.file,
+      sourceUri: input.containerUri,
+      expectedHash: input.expectedContainerHash,
+      stagingRoot: storage.stagingRoot,
+      allowedRoots: () => [...stage.allowedRoots],
+      stagingPrefix: 'parambnd',
+      stagingFileName: `${basename(input.file.relativePath)}.repacked`,
+      stageWrite: async (context) => {
+        const written = await runBridge<Record<string, unknown>>({
+          command: 'write-bnd4',
+          filePath: input.file.absolutePath,
+          resourceUri: input.containerUri,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          timeoutMs: 180_000,
+          commandOptions: {
+            outputPath: context.outputPath,
+            mutation: 'replace',
+            expectedContainerHash: input.expectedContainerHash,
+            entryIndex: input.entryIndex,
+            expectedChildHash: input.expectedChildHash,
+            contentBase64: childBase64
+          },
+          ...oodle
+        });
+        return {
+          ok: written.parseStatus !== 'failed'
+            && written.diagnostics.some(
+              (diagnostic) => diagnostic.code === 'BND4_STAGING_WRITE_VERIFIED'
+            ),
+          diagnostics: written.diagnostics
+        };
+      },
+      title: input.title,
+      confirmActionLabel: input.confirmActionLabel
+    }, {
+      confirm: electronConfirmationPort(event),
+      commit: sessionCommitPort(session, operationLog, storage)
+    });
+
+    if (outcome.status === 'committed' && outcome.result.ok) {
+      paramPageCache.delete(input.containerUri);
+      paramAllCache.delete(input.containerUri);
+      containerChildrenCache.clear();
+      unpackedParamCache.clear();
+    }
+    return toSaveResultFromOutcome(outcome, indexedFiles);
+  };
+
+  /**
+   * 校验导出目标路径不在受 Patch Engine 管理的目录内。
+   *
+   * 导出 CSV 是用户主动保存到自选路径的新文件，不是 Mod 资源改动，因此不走
+   * Patch Engine（硬约束针对的是「改 Mod 资源」）。但游戏目录只读、Mod 工作区
+   * 不落旁路文件，两者都挡 —— 选中这两处时拒绝并给可复现的下一步。
+   */
+  const rejectExportIntoManagedRoots = (
+    target: string,
+    containerUri: string
+  ): RendererSaveResult | null => {
+    const abs = resolve(target);
+    const roots = [
+      activeSession?.layers.baseRoot,
+      activeSession?.layers.overlayRoot
+    ];
+    for (const root of roots) {
+      if (root && (abs === root || abs.startsWith(root + sep))) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_EXPORT_INTO_MANAGED_ROOT',
+            message: '不要导出到游戏目录或 Mod 工作区：那里由 Patch Engine 管理。请选择工作区外的目录。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+    }
+    return null;
+  };
+
+  /**
+   * T5-4：导出行（CSV，主进程保存对话框）。
+   *
+   * 表头 = `id,name,<字段内部 id>…`。用内部 id 而不是显示名做表头，是为了让
+   * param.importRowsCsv 能按表头精确回写 —— 显示名（中文 DisplayName）可能重名，
+   * 拿它定位字段会写错列。字段值经 decodeRowFields 解码，解码失败或缺失的单元格
+   * 导成空串（导入时空串 = 不改，见 importRowsCsv）。
+   */
+  handle(
+    'param.exportRowsCsv',
+    async (
+      _event,
+      containerUri: string,
+      expectedContainerHash: string,
+      entryIndex: number
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_EXPORT_NO_SESSION',
+            message: '需要已打开的工作区才能导出 PARAM。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const full = await readContainerParamFull({ file, containerUri, expectedContainerHash, entryIndex });
+      if (!full.ok) {
+        return { ok: false, changedFiles: [], diagnostics: full.diagnostics };
+      }
+      const resolved = full.typeName
+        ? await resolveTrustedParamDefinition(full.typeName, full.rowDataSize)
+        : { document: null };
+      const def = resolved.document;
+      if (!def) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_EXPORT_NO_DEF',
+            message: `无法解析 ${full.typeName ?? '该表'} 的字段定义，不能导出字段值。`,
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const headers = ['id', 'name', ...def.fields.map((field) => field.id)];
+      const rows = full.rows.map((row) => {
+        const data = typeof row.dataBase64 === 'string' && row.dataBase64.length > 0
+          ? Buffer.from(row.dataBase64, 'base64')
+          : null;
+        const values = data ? decodeRowFields(data, def) : [];
+        const byId = new Map(values.map((value) => [value.fieldId, value]));
+        return [
+          String(row.id),
+          row.name ?? '',
+          ...def.fields.map((field) => {
+            const value = byId.get(field.id);
+            if (!value || value.diagnostic) return '';
+            return value.value === null ? '' : String(value.value);
+          })
+        ];
+      });
+      const csv = toCsvText(headers, rows);
+      const opened = await dialog.showSaveDialog({
+        title: '导出 PARAM 行（CSV）',
+        defaultPath: `${full.child.name.replace(/\.param$/i, '')}.csv`,
+        filters: [{ name: 'CSV', extensions: ['csv'] }]
+      });
+      if (opened.canceled || !opened.filePath) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'info',
+            code: 'CSV_EXPORT_CANCELLED',
+            message: '已取消导出。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const blocked = rejectExportIntoManagedRoots(opened.filePath, containerUri);
+      if (blocked) return blocked;
+      try {
+        await writeFile(opened.filePath, csv, 'utf8');
+      } catch (error) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_EXPORT_WRITE_FAILED',
+            message: error instanceof Error ? error.message : '写入导出文件失败。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      return {
+        ok: true,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'info',
+          code: 'CSV_EXPORT_SAVED',
+          message: `已导出 ${rows.length} 行到 ${opened.filePath}。`,
+          sourceUri: containerUri
+        }]
+      };
+    }
+  );
+
+  /**
+   * T5-4：导出备注（行名，CSV：id,name）—— 对照 Yapped Export/Import Names。
+   */
+  handle(
+    'param.exportNamesCsv',
+    async (
+      _event,
+      containerUri: string,
+      expectedContainerHash: string,
+      entryIndex: number
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_EXPORT_NO_SESSION',
+            message: '需要已打开的工作区才能导出 PARAM 行名。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const full = await readContainerParamFull({ file, containerUri, expectedContainerHash, entryIndex });
+      if (!full.ok) {
+        return { ok: false, changedFiles: [], diagnostics: full.diagnostics };
+      }
+      const csv = toCsvText(
+        ['id', 'name'],
+        full.rows.map((row) => [String(row.id), row.name ?? ''])
+      );
+      const opened = await dialog.showSaveDialog({
+        title: '导出 PARAM 行名（CSV）',
+        defaultPath: `${full.child.name.replace(/\.param$/i, '')}.names.csv`,
+        filters: [{ name: 'CSV', extensions: ['csv'] }]
+      });
+      if (opened.canceled || !opened.filePath) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'info',
+            code: 'CSV_EXPORT_CANCELLED',
+            message: '已取消导出行名。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const blocked = rejectExportIntoManagedRoots(opened.filePath, containerUri);
+      if (blocked) return blocked;
+      try {
+        await writeFile(opened.filePath, csv, 'utf8');
+      } catch (error) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_EXPORT_WRITE_FAILED',
+            message: error instanceof Error ? error.message : '写入导出文件失败。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      return {
+        ok: true,
+        changedFiles: [],
+        diagnostics: [{
+          severity: 'info',
+          code: 'CSV_EXPORT_SAVED',
+          message: `已导出 ${full.rows.length} 行行名到 ${opened.filePath}。`,
+          sourceUri: containerUri
+        }]
+      };
+    }
+  );
+
+  /**
+   * T5-4：导入备注（行名 CSV：id,name）—— 对照 Yapped Import Names。
+   *
+   * 主进程打开对话框选文件；逐 id 把「当前行字节原样回传 + 新 name」拼成
+   * write-param upsert，整批经 commitContainerParamBulk 走 Patch Engine。
+   * 行 id 不存在的记录被跳过并汇总诊断 —— 导入是部分成功，不吞异常。
+   */
+  handle(
+    'param.importNamesCsv',
+    async (
+      event,
+      containerUri: string,
+      expectedContainerHash: string,
+      entryIndex: number,
+      expectedChildHash: string
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_IMPORT_NO_SESSION',
+            message: '需要已打开的工作区才能导入 PARAM 行名。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(containerUri, file);
+      if (gameBlocked) return gameBlocked;
+      const opened = await dialog.showOpenDialog({
+        title: '导入行名（CSV：id,name）',
+        properties: ['openFile'],
+        filters: [{ name: 'CSV / 文本', extensions: ['csv', 'txt'] }]
+      });
+      if (opened.canceled || opened.filePaths.length === 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'info',
+            code: 'CSV_IMPORT_CANCELLED',
+            message: '已取消导入行名。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const selectedNamesPath = opened.filePaths[0];
+      if (!selectedNamesPath) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_NO_FILE',
+            message: '没有选中导入文件。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      let csvText: string;
+      try {
+        csvText = await readFile(selectedNamesPath, 'utf8');
+      } catch (error) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_READ_FAILED',
+            message: error instanceof Error ? error.message : '无法读取所选文件。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const parsed = parseCsvText(csvText);
+      const header0 = (parsed.headers[0] ?? '').trim().toLowerCase();
+      const header1 = (parsed.headers[1] ?? '').trim().toLowerCase();
+      if (parsed.headers.length < 2 || header0 !== 'id' || header1 !== 'name') {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_BAD_HEADER',
+            message: '行名 CSV 的表头必须是 id,name（多余列会被忽略）。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const full = await readContainerParamFull({ file, containerUri, expectedContainerHash, entryIndex });
+      if (!full.ok) {
+        return { ok: false, changedFiles: [], diagnostics: full.diagnostics };
+      }
+      const rowById = new Map(full.rows.map((row) => [row.id, row]));
+      const mutations: Array<Record<string, unknown>> = [];
+      const skipped: string[] = [];
+      for (const record of parsed.rows) {
+        const idNum = Number(record[0]);
+        if (!Number.isInteger(idNum)) {
+          skipped.push(`「${record[0] ?? ''}」不是整数 id`);
+          continue;
+        }
+        const existing = rowById.get(idNum);
+        if (!existing) {
+          skipped.push(`id ${idNum} 在表内不存在`);
+          continue;
+        }
+        if (typeof existing.dataBase64 !== 'string' || existing.dataBase64.length === 0) {
+          skipped.push(`id ${idNum} 没有可回传的行字节`);
+          continue;
+        }
+        mutations.push({ kind: 'upsert', id: idNum, dataBase64: existing.dataBase64, name: record[1] ?? '' });
+      }
+      if (mutations.length === 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_NOTHING_TO_APPLY',
+            message: skipped.length > 0
+              ? `没有可导入的行名：${skipped.slice(0, 5).join('；')}${skipped.length > 5 ? ` 等 ${skipped.length} 条` : ''}`
+              : 'CSV 没有数据行。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      return commitContainerParamBulk(event, {
+        containerUri,
+        expectedContainerHash,
+        file,
+        entryIndex,
+        expectedChildHash,
+        unpackedChild: full.child,
+        mutations,
+        title: `import ${mutations.length} row names into ${full.child.name}`,
+        confirmActionLabel: '提交批量行名导入'
+      });
+    }
+  );
+
+  /**
+   * T5-4：导入行（CSV：id,name,<字段内部 id>…）。
+   *
+   * 表头第二列起的字段列必须是该表字段的内部 id（与 exportRowsCsv 对齐）。空
+   * 单元格 = 不改该字段；bool 单元格按 /^(1|true|yes|on)$/ 判定；字段编码失败
+   * 的记录跳过并汇总诊断。整批 upsert 经 commitContainerParamBulk 走 Patch Engine。
+   */
+  handle(
+    'param.importRowsCsv',
+    async (
+      event,
+      containerUri: string,
+      expectedContainerHash: string,
+      entryIndex: number,
+      expectedChildHash: string
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_IMPORT_NO_SESSION',
+            message: '需要已打开的工作区才能导入 PARAM 行。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(containerUri, file);
+      if (gameBlocked) return gameBlocked;
+      const opened = await dialog.showOpenDialog({
+        title: '导入行（CSV：id,name,字段…）',
+        properties: ['openFile'],
+        filters: [{ name: 'CSV', extensions: ['csv'] }]
+      });
+      if (opened.canceled || opened.filePaths.length === 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'info',
+            code: 'CSV_IMPORT_CANCELLED',
+            message: '已取消导入行。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const selectedRowsPath = opened.filePaths[0];
+      if (!selectedRowsPath) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_NO_FILE',
+            message: '没有选中导入文件。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      let csvText: string;
+      try {
+        csvText = await readFile(selectedRowsPath, 'utf8');
+      } catch (error) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_READ_FAILED',
+            message: error instanceof Error ? error.message : '无法读取所选文件。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const parsed = parseCsvText(csvText);
+      const header0 = (parsed.headers[0] ?? '').trim().toLowerCase();
+      if (parsed.headers.length < 1 || header0 !== 'id') {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_BAD_HEADER',
+            message: '行数据 CSV 的表头必须是 id（其后可跟 name 与字段列）。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const header1 = (parsed.headers[1] ?? '').trim().toLowerCase();
+      const fieldIds = parsed.headers.slice(header1 === 'name' ? 2 : 1)
+        .map((header) => header.trim());
+      if (fieldIds.length === 0 && header1 !== 'name') {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_NO_COLUMNS',
+            message: '行数据 CSV 除了 id 外没有可导入的列（至少要有 name 或一个字段列）。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const full = await readContainerParamFull({ file, containerUri, expectedContainerHash, entryIndex });
+      if (!full.ok) {
+        return { ok: false, changedFiles: [], diagnostics: full.diagnostics };
+      }
+      const resolved = full.typeName
+        ? await resolveTrustedParamDefinition(full.typeName, full.rowDataSize)
+        : { document: null };
+      const def = resolved.document;
+      if (!def) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_IMPORT_NO_DEF',
+            message: `无法解析 ${full.typeName ?? '该表'} 的字段定义，不能导入行数据。`,
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const fieldById = new Map(def.fields.map((field) => [field.id, field]));
+      const unknownColumns = fieldIds.filter((id) => !fieldById.has(id));
+      if (unknownColumns.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_UNKNOWN_FIELD',
+            message: `CSV 含未知字段列：${unknownColumns.join('、')}。表头必须是该表的字段内部 id。`,
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const rowById = new Map(full.rows.map((row) => [row.id, row]));
+      const mutations: Array<Record<string, unknown>> = [];
+      const skipped: string[] = [];
+      for (const record of parsed.rows) {
+        const idNum = Number(record[0]);
+        if (!Number.isInteger(idNum)) {
+          skipped.push(`「${record[0] ?? ''}」不是整数 id`);
+          continue;
+        }
+        const existing = rowById.get(idNum);
+        if (!existing) {
+          skipped.push(`id ${idNum} 在表内不存在`);
+          continue;
+        }
+        if (typeof existing.dataBase64 !== 'string' || existing.dataBase64.length === 0) {
+          skipped.push(`id ${idNum} 没有可回传的行字节`);
+          continue;
+        }
+        let next: Buffer = Buffer.from(existing.dataBase64, 'base64');
+        const fieldErrors: string[] = [];
+        for (let column = 0; column < fieldIds.length; column += 1) {
+          const raw = record[column + (header1 === 'name' ? 2 : 1)] ?? '';
+          if (raw === '') continue; // 空单元格 = 不改该字段
+          const field = fieldById.get(fieldIds[column]!);
+          const effectiveValue = field?.type === 'bool'
+            ? /^(1|true|yes|on)$/i.test(raw)
+            : raw;
+          const encoded = encodeFieldMutation(next, def, fieldIds[column]!, effectiveValue);
+          if (!encoded.ok) {
+            fieldErrors.push(`${fieldIds[column]}: ${encoded.message}`);
+            continue;
+          }
+          next = encoded.next;
+        }
+        if (fieldErrors.length > 0) {
+          skipped.push(`id ${idNum} 部分字段未应用（${fieldErrors.join('；')}）`);
+        }
+        const name = (record[1] ?? '').trim();
+        mutations.push({
+          kind: 'upsert',
+          id: idNum,
+          dataBase64: next.toString('base64'),
+          ...(name && header1 === 'name' ? { name } : {})
+        });
+      }
+      if (mutations.length === 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'CSV_IMPORT_NOTHING_TO_APPLY',
+            message: skipped.length > 0
+              ? `没有可导入的行：${skipped.slice(0, 5).join('；')}${skipped.length > 5 ? ` 等 ${skipped.length} 条` : ''}`
+              : 'CSV 没有数据行。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      return commitContainerParamBulk(event, {
+        containerUri,
+        expectedContainerHash,
+        file,
+        entryIndex,
+        expectedChildHash,
+        unpackedChild: full.child,
+        mutations,
+        title: `import ${mutations.length} rows into ${full.child.name}`,
+        confirmActionLabel: '提交批量行数据导入'
+      });
     }
   );
 

@@ -1775,7 +1775,7 @@ test('AGENT-60D：approval 与 failure 两态渲染并保存截图', async () =>
   await app.close();
 });
 
-test('PARAM 工作台四栏：选择链、父选区清理、虚拟行、字段类型控件与局部失败（PARAM-10B）', async () => {
+test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚拟行、字段类型控件与局部失败（PARAM-10B）', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
@@ -1783,20 +1783,20 @@ test('PARAM 工作台四栏：选择链、父选区清理、虚拟行、字段�
   await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'param/gameparam/gameparam.parambnd.dcx');
 
-  // 四栏同时存在（§7.1 Params/Rows/Fields/Tools；§18.14 10B Negative DOM 无三栏标题）。
-  // WorkbenchLayout 根是 div（.workbench），四栏是带 aria-label 的 section（region）。
+  // 三栏同时存在（T5-4 删第四栏 Tools：Params/Rows/Fields）。
+  // WorkbenchLayout 根是 div（.workbench），各栏是带 aria-label 的 section（region）。
   await expect(window.locator('.workbench')).toBeVisible();
   await expect(window.getByRole('region', { name: 'Params' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Rows' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Tools' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // §7.1 比例在运行期成立（computed flex-grow，未被拖拽覆盖时）；拖拽后转像素是允许路径。
   const growRatios = await window.evaluate(() => {
     const slots = [...document.querySelectorAll('.workbench__column-slot')];
     return slots.map((slot) => getComputedStyle(slot).flexGrow);
   });
-  expect(growRatios).toEqual(['0.2', '0.29', '0.35', '0.16']);
+  expect(growRatios).toEqual(['0.2', '0.29', '0.35']);
 
   // 独立滚动：每栏的滚动权在栏内，不泄给整页。普通栏 body 自身滚（auto）；
   // 虚拟栏（Rows）把滚动权交给内部 .wb-virtual-scroll（body hidden + 内部 auto）。
@@ -1807,20 +1807,23 @@ test('PARAM 工作台四栏：选择链、父选区清理、虚拟行、字段�
   });
   expect(scrollHosts.every((value) => value === 'auto' || value === 'hidden')).toBe(true);
 
-  // §7.8 标题形态；负向清单：无 .bak/.gparam/物理路径。
-  // 页面可能有多个 .crumb（文件浏览器面包屑），用 hasText 过滤工作台的标题。
-  // 负向断言只收在工作台内部：文件浏览器显示选中文件的路径是 files 领域的正常 UI。
-  const paramCrumb = window.locator('.crumb', { hasText: 'Game Parameters' });
-  await expect(paramCrumb).toContainText('1 library · 3 tables');
+  // T5-4 工具条：导出行 / 导入行 / 导出备注 / 导入备注 四个真实按钮；未选表时禁用
+  // （没有可导入导出的目标）。不再有「Game Parameters · 1 library · N tables」
+  // crumb、类型名、行大小。
+  const toolbarButtons = window.locator('.workbench__toolbar .toolbar-button, .pane-toolbar .toolbar-button');
+  await expect(toolbarButtons).toHaveCount(4);
+  await expect(toolbarButtons.nth(0)).toHaveText('导出行');
+  await expect(toolbarButtons.nth(1)).toHaveText('导入行');
+  await expect(toolbarButtons.nth(2)).toHaveText('导出备注');
+  await expect(toolbarButtons.nth(3)).toHaveText('导入备注');
+  // 未选表：全部禁用（真实功能的禁用态，不是 §7.6 的假按钮）。
+  await expect(toolbarButtons.nth(0)).toBeDisabled();
   const workbenchText = await window.locator('.workbench').innerText();
+  expect(workbenchText).not.toContain('Game Parameters');
+  expect(workbenchText).not.toContain('行大小');
   expect(workbenchText).not.toContain('gameparam.parambnd.dcx');
   expect(workbenchText).not.toContain('.bak');
   expect(workbenchText).not.toContain('.gparam');
-
-  // Tools 栏只给诚实空态，不渲染 disabled 假按钮（§7.6）。
-  const toolsColumn = window.locator('.workbench__column[aria-label="Tools"]');
-  await expect(toolsColumn).toContainText('暂无已接通的工具');
-  expect(await toolsColumn.locator('button').count()).toBe(0);
 
   // 选择链：选 ActionGuideParam → 行出现（虚拟容器挂载，滚动权在虚拟容器自身）；选首行 → 字段出现。
   await window.locator('.wb-list .wb-row', { hasText: 'ActionGuideParam' }).click();
@@ -1829,6 +1832,9 @@ test('PARAM 工作台四栏：选择链、父选区清理、虚拟行、字段�
     .evaluate((element) => getComputedStyle(element).overflowY);
   expect(virtualScrollOverflow).toBe('auto');
   await window.locator('.wb-virtual-row', { hasText: '100' }).click();
+
+  // 选中表后工具条按钮解除禁用（导出行/导入行已可点击目标）。
+  await expect(toolbarButtons.nth(0)).toBeEnabled();
 
   // 字段类型控件：enum 字段按类型渲染——原始值留在 input（只读），
   // 当前值标签（枚举标签「攻击」）显示在字段名旁，不是裸自由文本。

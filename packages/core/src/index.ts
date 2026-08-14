@@ -42,6 +42,7 @@ export * from './assets/convertAndWriteback.js';
 export * from './capabilities/resourceCapabilities.js';
 export * from './containers/index.js';
 export * from './util/base64.js';
+export * from './format/csv.js';
 export * from './patch/patchEngine.js';
 export * from './patch/textDiff.js';
 export * from './patch/graphPatch.js';

@@ -582,6 +582,63 @@ const api = {
     expectedContainerHash,
     mutation
   ),
+  /**
+   * T5-4：导出行（CSV，主进程保存对话框）。表头 id,name,<字段内部 id>…。
+   * 导出是新建文件、不走 Patch Engine，但禁止写进游戏目录 / Mod 工作区。
+   */
+  exportParamRowsCsv: (
+    containerUri: string,
+    expectedContainerHash: string,
+    entryIndex: number
+  ): Promise<RendererSaveResult> => ipcRenderer.invoke(
+    'param.exportRowsCsv',
+    containerUri,
+    expectedContainerHash,
+    entryIndex
+  ),
+  /** T5-4：导出备注（行名 CSV：id,name），对照 Yapped Export Names。 */
+  exportParamNamesCsv: (
+    containerUri: string,
+    expectedContainerHash: string,
+    entryIndex: number
+  ): Promise<RendererSaveResult> => ipcRenderer.invoke(
+    'param.exportNamesCsv',
+    containerUri,
+    expectedContainerHash,
+    entryIndex
+  ),
+  /**
+   * T5-4：导入备注（行名 CSV：id,name，主进程打开对话框）。逐 id 走
+   * write-param upsert（行字节原样回传 + 新 name）→ 重打包 → Patch Engine。
+   */
+  importParamNamesCsv: (
+    containerUri: string,
+    expectedContainerHash: string,
+    entryIndex: number,
+    expectedChildHash: string
+  ): Promise<RendererSaveResult> => ipcRenderer.invoke(
+    'param.importNamesCsv',
+    containerUri,
+    expectedContainerHash,
+    entryIndex,
+    expectedChildHash
+  ),
+  /**
+   * T5-4：导入行（CSV：id,name,<字段内部 id>…，主进程打开对话框）。字段按表头
+   * id 逐个套到当前行字节，整批走同一条 Patch 链。
+   */
+  importParamRowsCsv: (
+    containerUri: string,
+    expectedContainerHash: string,
+    entryIndex: number,
+    expectedChildHash: string
+  ): Promise<RendererSaveResult> => ipcRenderer.invoke(
+    'param.importRowsCsv',
+    containerUri,
+    expectedContainerHash,
+    entryIndex,
+    expectedChildHash
+  ),
   applyParamMutation: (
     sourceUri: string,
     expectedHash: string,
