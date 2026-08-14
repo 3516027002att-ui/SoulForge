@@ -1028,7 +1028,7 @@
       "claimId": "claim-w-rel-c-multilang-03-20260813",
       "owner": "claude-code",
       "claimedAt": "2026-08-13T02:13:46.202Z",
-      "heartbeatAt": "2026-08-13T02:13:46.202Z",
+      "heartbeatAt": "2026-08-14T03:08:21.706Z",
       "recoveryTrigger": "检查该切片 entryPoints 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready"
     }
   ],
