@@ -296,9 +296,9 @@ Smithbox 顶栏还有本文没有做成一等域的编辑器。映射固定如�
 | File Browser | `files` | |
 | EMEVD Editor | （不用） | Event 走 DarkScript3 |
 | Script Editor | `script` | |
-| Talk Editor | `behavior` | 与 HKX Behavior 合并 |
+| Talk Editor | `behavior` | T3（2026-08-15）：行为 + 动画合并为单一「动作」域 |
 | Behavior Editor | `behavior` | |
-| TimeAct Editor / Animation Editor | `animation` | 合并 |
+| TimeAct Editor / Animation Editor | `behavior` | 与 Talk/HKX Behavior 合并进「动作」；`animation` 域从顶栏隐藏（与 GPARAM 同口径），anibnd/tae 都走「动作」侧栏 |
 | Cutscene Editor | `files` | 暂无独立域 |
 | （无） | `container` | SoulForge 自有；已确认 binder 的专属工作台 |
 | （无） | `project` | SoulForge 自有 |
@@ -353,7 +353,7 @@ export type EditorDomainId =
 
 ```text
 开始 | PARAM | 文本 | 事件 | 地图 | 脚本 |
-行为 | 动画 | 模型 | 纹理 | 材质 | VFX | 容器 | 文件
+动作 | 模型 | 纹理 | 材质 | VFX | 容器 | 文件
 ```
 
 （R1 裁定投影：原「PARAM | GPARAM | 文本 | …」中的独立 GPARAM 已移除——顶栏
@@ -705,6 +705,8 @@ renderer DTO 不得包含绝对路径、main locator、Bridge command、真实 w
 | confirmed `*.mtd/.matbin` | material | material → properties | Material | 未确认时 Files |
 | confirmed `*.fxr/*.ffxbnd.dcx` | vfx | effect bank → effect | VFX | 未确认时 Files |
 | 无法确认 | files | physical hierarchy | Files | 不得伪装 empty editor |
+
+> T3（2026-08-15）口径：顶栏不再有独立 `animation` 域——`*.anibnd.dcx` / `.tae` 都并入「动作」域侧栏（§2.6 / §10.3），`animation` 域从顶栏隐藏（与 GPARAM 同口径）。上表仍是 editor-catalog 的格式家族分类设计；顶栏/侧栏可见性以 §2.6 / §10.3 与 `domainNavigation` 的 visibility 为准。
 
 实施时不得把上表重新翻译成自由分支。`packages/shared/src/editor-catalog.ts` 必须提供以下注册表形状，`packages/core/src/workspace/editorCatalog.ts` 只解释此注册表：
 
@@ -1228,17 +1230,17 @@ Container / Files | Source / Read-only Disassembly（主区 flex）| 可选 Symb
 - 符号、引用和跳转只使用真实解析结果；
 - DSLuaDecompiler 只作交互对照，不成为写入依赖。
 
-### 10.3 Behavior 与 Animation
+### 10.3 动作域（Talk / Behavior / TimeAct / Animation 合并）
 
-Talk 与 HKX Behavior 都进 `behavior`；TimeAct 与 Animation 都进 `animation`（§2.6）。工作台按真实结构，不要套通用四栏：
+T3（2026-08-15）把 Talk、HKX Behavior、TimeAct、Animation 合并为单一「动作」域（`behavior`）。顶栏只有「动作」，没有「行为」和「动画」；侧栏列 `anibnd|tae` 逻辑库。工作台按真实结构（对照 DSAS），不要套通用四栏：
 
 ```text
-Behavior:  Files / Machines / States | Conditions / Commands | Inspector
-Animation: Files / Animations | Timeline / Events | Inspector
+动作:  Animations（动画 id 列表，hkxName 去扩展，如 a000_003013）| 词条 + 详情 | 预览（只读）
 ```
 
-- Behavior 必须表达 machine → state → transition/condition/action；
-- Animation 必须表达 binder → animation → timeline event；
+- 左栏列动画 id 列表（虚拟滚动）；中栏列当前动画的词条事件文本列表（`PlaySound_ByStateInfo` 等，能解出中文副名就显示），选中后在中栏下方详情列出 Start Frame / End Frame / Id 与能解出的全部字段；解不出的字段写「未解码」+ 原始 hex/数字，禁止编造 SoundType 含义。
+- 右栏是只读 3D：有伴生 `c5030.chrbnd.dcx` 且现有 FLVER 预览能挂就挂；否则空态「预览不可用」+ 诊断。不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
+- 打开 `*.anibnd.dcx` / `.tae` 都走 TAE 读链；`*.anibnd.dcx` 由 Bridge 从 BND4 容器提取主 TAE，**不落 BND4 通用容器页**。
 - 没有真实结构 read 时先完成对应 read 卡，不用通用资源列表冒充；
 - writer 缺失时保留完整只读专业工作台，而不是空白页面。
 

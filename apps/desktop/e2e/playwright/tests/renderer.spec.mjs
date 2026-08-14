@@ -108,11 +108,12 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   await expect(window.locator('.mode-tabs')).toHaveCount(0);
   const tabs = window.locator('[data-testid="domain-bar"] [role="tab"]');
   // R1 裁定（2026-08-14）：GPARAM 从领域顶栏移除（并入左侧「参数」逻辑库），
-  // 固定顺序快照 14 项。
-  await expect(tabs).toHaveCount(14);
+  // T3 裁定（2026-08-15）：行为 + 动画合并为「动作」，animation 从顶栏隐藏
+  // （与 GPARAM 同口径），固定顺序快照 13 项。
+  await expect(tabs).toHaveCount(13);
   await expect(tabs).toHaveText([
-    /开始/, /PARAM/, /文本/, /事件/, /地图/, /脚本/, /行为/,
-    /动画/, /模型/, /纹理/, /材质/, /VFX/, /容器/, /文件/
+    /开始/, /PARAM/, /文本/, /事件/, /地图/, /脚本/, /动作/,
+    /模型/, /纹理/, /材质/, /VFX/, /容器/, /文件/
   ]);
 
   // §18.13 Done：顶部无「PARAM 36」之类的物理计数（§3.3 领域栏不显示无单位文件数）。
@@ -161,6 +162,18 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   await expect(groupHeaders.nth(1)).toHaveAttribute('aria-expanded', 'true');
   await expect(window.locator('.library-group__body').nth(1).locator('.library-item').first()).toBeVisible();
   await expect(window.locator('.library-group__body').nth(1)).toContainText('m10_00');
+
+  // T3 裁定：行为 + 动画合并为「动作」域。顶栏只有「动作」；侧栏列 anibnd|tae
+  // 逻辑库（显示名去扩展 c5030 / c0000，物理路径只进 title），不再出现 4 个
+  // behbnd 的 BND4 形态。
+  await window.locator('[data-domain="behavior"]').click();
+  await expect(window.locator('.file-item')).toHaveCount(0);
+  const actionLibrary = window.locator('[data-testid="domain-library-list"]');
+  await expect(actionLibrary).toBeVisible();
+  await expect(actionLibrary).toContainText('c5030');
+  await expect(actionLibrary).toContainText('c0000');
+  // 显示名去扩展：.library-item__name 精确等于 c0000 / c5030（扩展只在 meta）。
+  await expect(actionLibrary.locator('.library-item__name')).toHaveText(['c0000', 'c5030']);
 
   await window.screenshot({ path: 'test-results/04-resource-bar.png' });
   await app.close();
@@ -479,49 +492,60 @@ test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，
   await app.close();
 });
 
-test('Animation 工作台三栏：动画 → 时间轴事件选择链，事件参数体未解码边界明确', async () => {
+test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件参数体未解码边界明确', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // ANIMATION-56B：TAE 动画资源从 Files 领域选择，进入三栏动画工作台。
+  // T3（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从 Files 领域选择，
+  // 进入三栏动作工作台（Animations | Events / 词条 + 详情 | 预览（只读））。
   await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'action/c0000.tae');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
-  await expect(window.getByLabel('Animation 工作台')).toBeVisible();
+  await expect(window.getByLabel('动作工作台')).toBeVisible();
 
-  // 三栏（§10.3，无 Tools 空栏）。
-  await expect(window.getByRole('region', { name: 'Files / Animations' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Timeline / Events' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Inspector' })).toBeVisible();
+  // 三栏（grok T3，无 Inspector 第三栏 / 无 Tools 空栏 / 无时间轴图）。
+  await expect(window.getByRole('region', { name: 'Animations' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Events / 词条' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '预览（只读）' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Inspector' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: 'Timeline / Events' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
-  // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类）。
-  const left = window.getByRole('region', { name: 'Files / Animations' });
-  await expect(left.getByText('动画 0')).toBeVisible();
-  await expect(left.getByText('动画 1')).toBeVisible();
-  await expect(left.getByText('a0000.hkx')).toBeVisible();
+  // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类），
+  // hkxName 去扩展作主标签。
+  const left = window.getByRole('region', { name: 'Animations' });
+  await expect(left.getByRole('row', { name: /a0000/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /动画 1/ })).toBeVisible();
 
-  // animation → timeline：选中动画 0，中栏按动画过滤时间轴事件。
-  await left.getByRole('row', { name: /动画 0/ }).click();
-  const middle = window.getByRole('region', { name: 'Timeline / Events' });
-  await expect(middle.getByText(/已按动画 0 过滤/)).toBeVisible();
+  // 未选中动画时中栏提示先选动画，不出事件行。
+  const middle = window.getByRole('region', { name: 'Events / 词条' });
+  await expect(window.getByTestId('tae-events-pick-animation')).toBeVisible();
+
+  // 选中动画 0 → 中栏词条事件列表。
+  await left.getByRole('row', { name: /a0000/ }).click();
+  await expect(middle.getByText(/词条 · 动画 0/)).toBeVisible();
+  await expect(middle.getByRole('row', { name: /事件类型 1/ })).toBeVisible();
   await expect(middle.getByRole('row', { name: /0s → 1s/ })).toBeVisible();
 
-  // timeline 事件选中 → Inspector 显示事件明细。
-  await middle.getByRole('row', { name: /0s → 1s/ }).click();
-  const inspector = window.getByRole('region', { name: 'Inspector' });
-  await expect(inspector.getByText('动画 ID')).toBeVisible();
-  await expect(inspector.getByText('开始时间')).toBeVisible();
-  await expect(inspector.getByText('事件类型 ID')).toBeVisible();
+  // 选中词条事件 → 中栏下方详情列出 Start Frame / End Frame / Id 等。
+  await middle.getByRole('row', { name: /事件类型 1/ }).click();
+  const details = window.getByTestId('tae-details');
+  await expect(details.getByText('Start Frame')).toBeVisible();
+  await expect(details.getByText('End Frame')).toBeVisible();
+  await expect(details.getByText('动画 Id')).toBeVisible();
+  await expect(details.getByText('事件类型 Id')).toBeVisible();
   // 事件参数体未解码边界必须明示（不伪装成完整解析）。
-  await expect(inspector.getByText('参数体')).toBeVisible();
-  await expect(inspector.getByText(/未解码/)).toBeVisible();
+  await expect(details.getByText('参数体')).toBeVisible();
+  await expect(details.getByText(/未解码/)).toBeVisible();
 
-  // Events 组汇总：事件总数 / 事件类型 distinct。
-  await expect(middle.getByText('事件总数')).toBeVisible();
-  await expect(middle.getByText('事件类型 3')).toBeVisible();
+  // 右栏是只读预览空态 + 诊断（不挂伴生 chrbnd 的 FLVER）。
+  await expect(window.getByTestId('tae-preview-unavailable')).toBeVisible();
+  await expect(window.getByTestId('tae-preview-unavailable')).toContainText('预览不可用');
+  // 右栏始终只读：无输入、无按钮。
+  const preview = window.getByRole('region', { name: '预览（只读）' });
+  await expect(preview.locator('input, button')).toHaveCount(0);
 
-  // ANIMATION-56C event write：选中 timeline 事件后出现事件编辑入口，更新事件时间。
+  // ANIMATION-56C event write：选中词条事件后出现事件编辑入口，更新事件时间。
   await expect(window.getByTestId('tae-event-editor')).toBeVisible();
   const startInput = window.getByLabel('新开始时间');
   await expect(startInput).toHaveValue('0');
@@ -530,6 +554,35 @@ test('Animation 工作台三栏：动画 → 时间轴事件选择链，事件�
   await expect(window.getByTestId('tae-write-notice')).toContainText('事件时间已更新并重读验证');
 
   await window.screenshot({ path: 'test-results/18-animation-workbench.png' });
+  await app.close();
+});
+
+test('anibnd 容器打开走动作工作台：不落 BND4 容器页，提取来源诊断可见', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // grok T3 完成标准：点 c5030 是动作/词条/预览，不是 hkx/BND4 表。
+  // 从动作域侧栏选 anibnd 逻辑库（去扩展显示 c5030），单击打开。
+  await window.locator('[data-domain="behavior"]').click();
+  await window.locator('.library-item', { hasText: 'c5030' }).click();
+  await expect(window.getByLabel('动作工作台')).toBeVisible();
+  // 禁止落 BND4 通用容器页。
+  await expect(window.getByLabel('BND4 容器工作台')).toHaveCount(0);
+
+  // 三栏就位 + 动画列表（hkxName 去扩展：a000_003013）。
+  const left = window.getByRole('region', { name: 'Animations' });
+  await expect(left.getByRole('row', { name: /a000_003013/ })).toBeVisible();
+  await expect(left.getByText(/anibnd/)).not.toBeVisible();
+
+  // 提取来源诊断在右栏预览区可见（TAE_FROM_ANIBND_EXTRACTED）。
+  await expect(window.getByTestId('tae-preview-diagnostics')).toBeVisible();
+
+  // 选中动画 0 → 中栏词条事件列表可用（动作/词条/预览三栏联动）。
+  await left.getByRole('row', { name: /a000_003013/ }).click();
+  const middle = window.getByRole('region', { name: 'Events / 词条' });
+  await expect(middle.getByRole('row', { name: /事件类型 7/ }).first()).toBeVisible();
+
+  await window.screenshot({ path: 'test-results/18b-anibnd-action-workbench.png' });
   await app.close();
 });
 
@@ -1116,15 +1169,15 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可点击文件工作域并保持可操作。21 = fixture 合成样本数
+    // 窄屏仍可点击文件工作域并保持可操作。22 = fixture 合成样本数
     // （PARAM-10B 加 gameparam.parambnd.dcx，GPARAM-11B 加 3 个 gparam.dcx，
     // EVENT-30B 加 event/menu.emevd，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx，
     // MAP-50B 加 map/m10.msb.dcx，MODEL-51B 加 chr/c1000.flver，TEXTURE-52B 加
     // menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，MATERIAL-53B 加
     // material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，VFX-54B 加
-    // sfx/f0000.fxr 从 20 变 21）。
+    // sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22）。
     await window.locator('[data-domain="files"]').click();
-    await expect(window.locator('.file-item')).toHaveCount(21);
+    await expect(window.locator('.file-item')).toHaveCount(22);
   }
 
   await window.setViewportSize({ width: 653, height: 694 });
@@ -1418,8 +1471,8 @@ test('主题表面：普通 pane/数据行/主工作台去卡片化，无圆角�
 /*
  * 大工作区：分页与截断说明。
  *
- * 默认 fixture 只有 9 个文件，低于分页页大小（200）与搜索上限（60），所以这两条
- * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 478 个
+ * 默认 fixture 只有 22 个文件，低于分页页大小（200）与搜索上限（60），所以这两条
+ * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 482 个
  * 合成条目，跨过两个阈值。
  *
  * 断言的是**用户能看到什么**：DOM 里真的只有一页节点、翻页真的换内容、说明里的
@@ -1439,20 +1492,20 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
   const pager = window.locator('[data-testid="file-list-pager"]');
   await expect(pager).toBeVisible();
 
-  // 位置文案必须报出区间与真实总数（481 = 21 基础 + 460 合成；EVENT-30B 加了
+  // 位置文案必须报出区间与真实总数（482 = 22 基础 + 460 合成；EVENT-30B 加了
   // event/menu.emevd 基础样本从 12 变 13，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx
   // 从 13 变 14，MAP-50B 加 map/m10.msb.dcx 从 14 变 15，MODEL-51B 加 chr/c1000.flver
   // 从 15 变 16，TEXTURE-52B 加 menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，
   // MATERIAL-53B 加 material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，
-  // VFX-54B 加 sfx/f0000.fxr 从 20 变 21）。
+  // VFX-54B 加 sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22）。
   const range = window.locator('[data-testid="file-list-page-range"]');
   await expect(range).toContainText('1–200');
-  await expect(range).toContainText('481');
+  await expect(range).toContainText('482');
   await expect(range).toContainText('第 1/3 页');
 
   // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 479 长得一样。
   // SHELL-09 §3.3：数量带语义单位（文件 N 个）。
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 481 个');
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 482 个');
   await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
 
   // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。
@@ -1465,8 +1518,8 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
 
   // 末页只剩余数条，且「下一页」到底后禁用。
   await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('401–481');
-  await expect(items).toHaveCount(81);
+  await expect(range).toContainText('401–482');
+  await expect(items).toHaveCount(82);
   await expect(window.getByRole('button', { name: '下一页' }).first()).toBeDisabled();
 
   // 回到第一页：上一页可用且内容复原。

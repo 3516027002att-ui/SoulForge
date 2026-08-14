@@ -47,7 +47,8 @@ import {
   type Diagnostic,
   type TaeAnimationWire,
   type TaeDocument,
-  type TaeTimelineEventRow
+  type TaeTimelineEventRow,
+  type TaeTimelineEventWire
 } from '@soulforge/shared';
 import { formatListTruncation } from '../format/uiText.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
@@ -333,7 +334,7 @@ function DetailsSection(props: {
   pages: ReturnType<typeof projectTaeDocumentPages> | null;
   selectedAnimation: TaeAnimationWire | undefined;
   selectedAnimationEvents: TaeAnimationWire['events'];
-  selectedEvent: TaeTimelineEventRow | undefined;
+  selectedEvent: TaeTimelineEventWire | undefined;
   selectedEventIndex: number | undefined;
   timeDraft: TaeTimeDraft | null;
   insertDraft: TaeInsertDraft | null;

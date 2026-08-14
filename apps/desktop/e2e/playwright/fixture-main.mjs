@@ -109,7 +109,12 @@ const fixtureFiles = [
   // 进不去；这里补一个可被 readFxrDocument stub 命中的合成样本（微小、合法构造、
   // 明确标记）。formatKind 'unknown' → selectEditor legacy 路径归到 binary，
   // App 装配层的 .fxr 后缀补正把它接到 vfx 编辑器。
-  makeFile({ dir: 'sfx', name: 'f0000.fxr', kind: 'sfx', formatKind: 'unknown', formatLabel: 'FXR', extension: '.fxr', compoundExtension: '.fxr' })
+  makeFile({ dir: 'sfx', name: 'f0000.fxr', kind: 'sfx', formatKind: 'unknown', formatLabel: 'FXR', extension: '.fxr', compoundExtension: '.fxr' }),
+  // T3 anibnd fixture：动作域侧栏（anibnd|tae）展示逻辑库，打开走 readTaeDocument
+  // 提取通道（T3 规定 `*.anibnd.dcx` 走 TAE 读链，禁止落 BND4 通用容器页）。
+  // formatKind 'bnd' 故意对齐真实 anibnd（DCX→BND4 容器）：selectEditor 的 T3 早返
+  // 必须在 formatKind switch 之前拦截，否则 e2e 会观察到它误进容器页。
+  makeFile({ dir: 'chr', name: 'c5030.anibnd.dcx', kind: 'action', formatKind: 'bnd', formatLabel: 'ANIBND', extension: '.dcx', compoundExtension: '.anibnd.dcx' })
 ];
 
 /**
@@ -326,7 +331,7 @@ function registerFixtureIpc() {
       files: scanned.map((file) => ({ ...file })),
       countsByKind: {
         event: 2, map: (LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0) + 1, param: 4, msg: 1, menu: 2, script: 1,
-        action: 1, ai: 2, sfx: 2, chr: 2, obj: 0, other: 2, unknown: 1
+        action: 2, ai: 2, sfx: 2, chr: 2, obj: 0, other: 2, unknown: 1
       },
       diagnostics: [],
       session: {
@@ -1391,6 +1396,47 @@ function registerFixtureIpc() {
         animationCount: 2, totalEventCount: 3, totalGroupCount: 1
       },
       diagnostics: [],
+      authority: 'candidate'
+    },
+    // T3 anibnd 容器 → TAE 提取的合成信封：sourceUri 是 anibnd 的 fixture URI，
+    // 读链与裸 .tae 相同（readTaeDocument），但 diagnostics 带 TAE_FROM_ANIBND_EXTRACTED
+    // 让 e2e 能断言「anibnd 走动作工作台而不是 BND4 容器页」。animId 用真实主 TAE
+    // 形态的 hkxName 去扩展展示名（a000_003013），区别于裸 .tae 的 a0000。
+    'fixture://chr/c5030.anibnd.dcx': {
+      format: 'TAE',
+      version: '0x20',
+      sourceSize: 8192,
+      sourceHash: 'fixture-tae-anibnd-hash-0002',
+      animationCount: 2,
+      totalEventCount: 3,
+      totalGroupCount: 1,
+      animations: [
+        {
+          animId: 0, eventCount: 2, groupCount: 1, timesCount: 2, hkxName: 'a000_003013.hkx',
+          events: [
+            { startTime: 0, endTime: 0.5, eventTypeId: 7 },
+            { startTime: 1, endTime: 2, eventTypeId: 7 }
+          ],
+          eventsTruncated: false
+        },
+        {
+          animId: 1, eventCount: 1, groupCount: 0, timesCount: 1,
+          events: [{ startTime: 0, endTime: 1.5, eventTypeId: 12 }],
+          eventsTruncated: false
+        }
+      ],
+      animationsTruncated: false,
+      eventTypes: [7, 12],
+      roundTrip: {
+        byteIdentical: true, semanticIdentical: true,
+        sourceHash: 'fixture-tae-anibnd-hash-0002', rebuiltHash: 'fixture-tae-anibnd-hash-0002',
+        animationCount: 2, totalEventCount: 3, totalGroupCount: 1
+      },
+      diagnostics: [{
+        severity: 'info', code: 'TAE_FROM_ANIBND_EXTRACTED',
+        message: '从 anibnd 容器提取 TAE（BND4 内 1 个 TAE 条目，本次打开 id=5000000）。hkx 未读取。',
+        sourceUri: 'fixture://chr/c5030.anibnd.dcx'
+      }],
       authority: 'candidate'
     }
   };
