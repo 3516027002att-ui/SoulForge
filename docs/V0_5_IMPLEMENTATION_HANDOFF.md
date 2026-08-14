@@ -1011,7 +1011,7 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 
 | sliceId | claimId | owner | claimedAt | heartbeatAt | recoveryTrigger |
 |---|---|---|---|---|---|
-| `W-REL-C-MULTILANG-03` | `claim-w-rel-c-multilang-03-20260813` | claude-code | 2026-08-13T02:13:46.202Z | 2026-08-13T02:13:46.202Z | 检查该切片 `entryPoints` 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready |
+| `W-REL-C-MULTILANG-03` | `claim-w-rel-c-multilang-03-20260813` | claude-code | 2026-08-13T02:13:46.202Z | 2026-08-14T03:08:21.706Z | 检查该切片 `entryPoints` 对应工作树改动与运行中的写进程；无相关写进程则保存后审查再原子回退 ready |
 
 <!-- SOULFORGE_PROJECTION_END:active-claims -->
 

@@ -2157,26 +2157,26 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 
 ## 16. 当前工作树：已落地 vs 仍须替换
 
-派卡前先读本表。**已对齐 §2.5 的代码不得推倒重来。** 按旧「四栏初值」落地、现已判错的实现必须改拓扑，不是再抄一遍旧初值。
+> **2026-08-14 全项核实：16 行全部落地，无真未落地项。** 本表从「待办对照」改为「落地留证」。唯一历史残留（ParamWorkbench.tsx 文件头注释写「三栏」）已修为四栏；其余行均已按 §2.5/§8.1/§9.1/§11 落实并经 e2e 钉死。
 
-| 入口 | 本文修订时的状态 | 后续必须做的 |
+| 入口 | 现状（§16 全项核实 + e2e 证据） | 结论 |
 | --- | --- | --- |
-| `packages/shared/src/editor-catalog.ts` | **已有** closed union、decoder、测试 | SCHEMA-02 视为已开工；只补缺口，不要另写一套类型 |
-| `apps/desktop/src/renderer/src/navigation/domainNavigation.ts` | **已按 §4.1** 只消费 `DomainSummary[]`，无 `domainForFile` | 保持；若回归出 `domainForFile` 则任务失败 |
-| `apps/desktop/src/renderer/src/navigation/DomainNavigationBar.tsx` | **已只接** `DomainSummary[]`，顶部无数量 | 保持 |
-| `apps/desktop/src/renderer/src/navigation/WorkspaceResourceBar.tsx` | 仍被 `App.tsx` 引用 | 从 production shell 断开；物理浏览只留 Files |
-| `apps/desktop/src/renderer/src/navigation/resourceFamilies.ts` | 仍可能被 Files / 旧壳使用 | 领域栏不得再依赖物理家族；Files 高级过滤可复用 |
-| `apps/desktop/src/renderer/src/App.tsx` | 已挂 `DomainNavigationBar`、`ParamWorkbench`、`GparamWorkbench`、`FmgWorkbenchPanel`、`EventSourceWorkbenchPanel`；仍挂 `WorkspaceResourceBar` | 语义域直接进工作台；Files 才挂物理浏览器 |
-| `apps/desktop/src/renderer/src/workbench/selectEditor.ts` | **已有** ROUTE-06 `selectWorkbenchRoute` | 保持 artifact-role / confirmed-format-first；补测试缺口 |
-| `apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx` | 三栏数据区**方向正确**；注释仍写「对照三栏」 | 补右侧工具栈、逻辑库标题、局部错误。**禁止**改成四条等宽栏。失败 table 必须留在列表 |
-| `apps/desktop/src/renderer/src/workbench/GparamWorkbench.tsx` | **拓扑错误**：四栏 `Banks \| Groups \| Fields/Values \| Tools` | 改成 §8.1 五区 `Files \| Groups \| Fields \| Values \| Toolbar` |
-| `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | **拓扑错误**：横向四栏 24/30/30/16 | 改成 §9.1 左 Categories + 右上 Entries + 右下 Text |
-| `apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx` | **已是** `App.tsx` 生产 Event 入口 | 按 §11 加强源码 IDE（CodeMirror、查找、Problems），不要做成 260/320 三栏 |
-| `apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx` | 仍在磁盘；`App.tsx` 已不引用 | 保持断开，不新增引用。未取得 §0.3 的 scope 裁定前不得删除文件或宣布底层能力失效 |
-| `apps/desktop/src/main/ipc.ts` | 仍可能把不存在的 staging root 交给 Bridge | ROOT-07：复用 main-owned helper；只读不传 staging |
-| `apps/desktop/src/renderer/src/agent/AgentSidebar.tsx` | 旧控制台 / 非 TRAE 构图 | 48px header + conversation + bottom composer；无语音 |
-| `apps/desktop/src/renderer/src/workbench/selectEditor.test.ts` | 部分 ROUTE-06 已在 | 不得把「按目录分派」和 `.bak` 正向路由钉回正确行为 |
-| `apps/desktop/e2e/playwright/tests/renderer.spec.mjs` | 可能仍钉物理目录/数量 | 改为 catalog domain、带单位逻辑数量、§2.5 工作台、Files-only 物理浏览器 |
+| `packages/shared/src/editor-catalog.ts` | **已落地** closed union、runtime decoder、负向优先测试（SCHEMA-02） | 只补缺口，勿另写一套 |
+| `apps/desktop/src/renderer/src/navigation/domainNavigation.ts` | **已落地** 只消费 `DomainSummary[]`；`domainForFile` 仅存在于负向测试断言 | 保持 |
+| `apps/desktop/src/renderer/src/navigation/DomainNavigationBar.tsx` | **已落地** 只接 `DomainSummary[]`，顶部无数量（`.domain-tab__count` 为 0） | 保持 |
+| `apps/desktop/src/renderer/src/navigation/WorkspaceResourceBar.tsx` | **已落地（#4 断开）** 已从 production shell 断开；仅 Files 域物理浏览高级过滤条复用 | 保持断开 |
+| `apps/desktop/src/renderer/src/navigation/resourceFamilies.ts` | **已落地** 领域栏不再依赖；仅 Files 高级过滤 + uiText 复用 | 保持 |
+| `apps/desktop/src/renderer/src/App.tsx` | **已落地** 断开 WorkspaceResourceBar；语义域无选区渲染 placeholder 直接进工作台，Files 才挂物理浏览器 | 保持 |
+| `apps/desktop/src/renderer/src/workbench/selectEditor.ts` | **已落地** ROUTE-06 完整：artifact-role prefilter → confirmed-leaf 优先 → candidate 落 Files | 保持 |
+| `apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx` | **已落地** 四栏 Params/Rows/Fields/Tools：右侧工具栈（诚实空态）、逻辑库标题、局部失败 param 保留；e2e 钉 flex 0.2/0.29/0.35/0.16 | 保持 |
+| `apps/desktop/src/renderer/src/workbench/GparamWorkbench.tsx` | **已落地** §8.1 五区 Files/Groups/Fields/Values/Toolbar；e2e 钉五区 + 无合并栏 | 保持 |
+| `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | **已落地** §9.1 左 Categories + 右上 Entries(55%) + 右下 Text(45%)；e2e TEXT-20B/20C 通过 | 保持 |
+| `apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx` | **已落地** §11 加强：CodeMirror 6、查找替换、Problems dock；非 260/320 三栏 | 保持 |
+| `apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx` | **已落地** 保持断开；未取得 scope 裁定前不删除文件 | 保持断开 |
+| `apps/desktop/src/main/ipc.ts` | **已落地** ROOT-07：复用 `prepareBridgeRoots`；只读 handler 只传已验证 roots，staging 显式走 `prepareBridgeRoots(…,'stage')` | 保持 |
+| `apps/desktop/src/renderer/src/agent/AgentSidebar.tsx` | **已落地** 48px header + conversation viewport + bottom composer，无语音（负向测试钉住） | 保持 |
+| `apps/desktop/src/renderer/src/workbench/selectEditor.test.ts` | **已落地** 旧正向断言已删，替换为反向测试（.bak→History、resourceKind 不单独产 route、suffix-only 不 ready） | 保持 |
+| `apps/desktop/e2e/playwright/tests/renderer.spec.mjs` | **已落地** catalog domain 15 tab 无物理计数 + 带单位逻辑数量 + §2.5 工作台 + Files-only 物理浏览器 | 保持 |
 
 禁止在旧错误路径旁新增一套未接 production 的组件。测试必须证明生产入口已经切换。
 
