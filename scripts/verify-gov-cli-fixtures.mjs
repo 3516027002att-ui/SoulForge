@@ -655,9 +655,13 @@ if (targetSlice) {
     // 实测症状是本段自己的 complete 报 GOV_PRECHECK_FAILED / GATE_OPEN_TERMINAL_SLICE
     // ——诊断指向 W-EMEVD-FULL-01 已 completed，而那是上一段的合法结果，不是本段的错。
     const gatesForSuccess = JSON.parse(readFileSync(gatesPathForSuccess, 'utf8'));
-    const gateWith = gatesForSuccess.gates.find((gate) =>
+    // 一个切片可以同时被多个 open Gate 引用（实测：W-REL-D-GAMELOAD-01 同时挂在
+    // REL-C 与 REL-D）。stranding 检查按 Gate 逐一判定，只给第一个 Gate 补后继会
+    // 让 complete 在第二个 Gate 上继续诚实拒绝——成功路径因此一次都没执行，
+    // 还让 drops-claim / prunes-unfrozen 两条断言跟着为错误原因失败。
+    const gatesWith = gatesForSuccess.gates.filter((gate) =>
       gate.gateState === 'open' && (gate.sliceRefs ?? []).includes(successTarget.sliceId));
-    if (gateWith) {
+    if (gatesWith.length > 0) {
       // 复用 seed claim 之前的三份快照，使还原同时撤掉本段的后继切片扰动
       // 与为构造前提而做的 claim。
       const slicesSnapshot = slicesBeforeSeed;
@@ -672,7 +676,9 @@ if (targetSlice) {
         blockerRefs: []
       });
       writeFileSync(slicesPathForSuccess, `${JSON.stringify(successRoot, null, 2)}\n`, 'utf8');
-      gateWith.sliceRefs = [...gateWith.sliceRefs, successorId];
+      for (const gate of gatesWith) {
+        gate.sliceRefs = [...gate.sliceRefs, successorId];
+      }
       writeFileSync(gatesPathForSuccess, `${JSON.stringify(gatesForSuccess, null, 2)}\n`, 'utf8');
 
       const validationBefore = JSON.parse(readFileSync(join(cliRoot, 'docs/governance/validation.json'), 'utf8'));
