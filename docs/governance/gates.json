@@ -136,7 +136,8 @@
         "EV-AGENT60C-SELECTION-STREAM-20260814",
         "EV-AGENT60D-TOOL-APPROVAL-DRAWER-20260814",
         "EV-REL-SCOPE-MATBIN-CLASSIFY-20260814",
-        "EV-VFX54C-GPARAM11B-20260814"
+        "EV-VFX54C-GPARAM11B-20260814",
+        "EV-REL-SCOPE-GOVCLI-MULTIGATE-20260814"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -238,7 +239,7 @@
       "gateState": "open",
       "applicability": "in-scope",
       "sliceRefs": [
-        "W-REL-C-MULTILANG-03"
+        "W-REL-D-GAMELOAD-01"
       ],
       "evidenceRefs": [
         "EV-EMEVD-FMG-PARAM-03-20260803",
