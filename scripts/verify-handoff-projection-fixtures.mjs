@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BLOCKS, loadProjectionSources, projectHandoff, beginMarker, endMarker, HANDOFF } from './generate-handoff-projection.mjs';
 import { TIER_ORDER, TIER_BY_SCRIPT, EXCLUDED } from './verify/tiers.mjs';
+import { PROPOSAL_KEY_ORDER, buildReleaseScopeProposal } from './release-scope-proposal-lib.mjs';
 
 const root = process.cwd();
 const findings = [];
@@ -121,28 +122,30 @@ const EDGE_SOURCES = {
     check(`edge/claim-col${ci}-not-blank`, text.length > 0, `claim 空字段应渲染为 —，实际第 ${ci} 列为空。`);
   }
 
-  // scope-proposal 在最小数据下必须仍产出结构完整、可解析的提案：
-  // 缺字段渲染成 null，而不是崩溃或悄悄省略键——范围门禁按键集判定，
-  // 少一个键它会报 FROZEN_POLICY_VALUE_INVALID 之类的错，指向的却是错的原因。
+  // scope-proposal 摘要在空 scopeItems 下必须退成说明文字。
+  // 渲染成只有表头的空表格才是更坏的形态：范围门禁按首列 ID 集判定，
+  // 空表格解析出 0 个 ID → SCOPE_SUMMARY_EMPTY，而真实原因是权威里没有条目，
+  // 诊断会把「数据为空」说成「投影坏了」。
   const edgeProposal = edgeBlocks['scope-proposal']();
-  const edgeLines = edgeProposal.split('\n');
-  check('edge/scope-proposal-fenced', edgeLines[0] === '```json' && edgeLines.at(-1) === '```',
-    '最小数据下仍必须是 json fenced block。');
-  let edgeParsed = null;
-  try {
-    edgeParsed = JSON.parse(edgeLines.slice(1, -1).join('\n'));
-  } catch (error) {
-    check('edge/scope-proposal-parses', false, `最小数据下块内 JSON 必须可解析：${error.message}`);
-  }
-  if (edgeParsed !== null) {
-    check('edge/scope-proposal-parses', true, '');
-    check('edge/scope-proposal-empty-items', JSON.stringify(edgeParsed.scopeItems) === '[]',
-      '空 scopeItems 应渲染为空数组而不是被省略。');
-    check('edge/scope-proposal-missing-becomes-null', edgeParsed.ruling === null && edgeParsed.gameBuildRange === null,
-      `缺失字段必须显式为 null，实际 ruling=${JSON.stringify(edgeParsed.ruling)} gameBuildRange=${JSON.stringify(edgeParsed.gameBuildRange)}`);
-    check('edge/scope-proposal-key-count', Object.keys(edgeParsed).length === 18,
-      `顶层键数必须恒为 18（缺数据也不省略键），实际 ${Object.keys(edgeParsed).length}`);
-  }
+  check('edge/scope-proposal-empty-is-prose', !edgeProposal.startsWith('|'),
+    `空 scopeItems 应渲染为说明文字而不是空表格，实际首字符 ${JSON.stringify(edgeProposal.slice(0, 1))}`);
+  check('edge/scope-proposal-empty-names-authority', edgeProposal.includes('docs/governance/scope.json'),
+    '空数据下仍必须指明权威路径——否则读者只看到「没有条目」，不知道去哪里确认。');
+
+  // 装配层在最小数据下不得崩溃、也不得省略键：范围门禁按键集判定策略完整性，
+  // 少一个键它会报 FROZEN_POLICY_VALUE_INVALID 之类的错，指向的却是错的原因。
+  // 这条从 markdown 移到装配层——键集契约现在由 release-scope-proposal-lib 承担。
+  const edgeAssembled = buildReleaseScopeProposal(EDGE_SOURCES);
+  check('edge/proposal-key-count', Object.keys(edgeAssembled).length === PROPOSAL_KEY_ORDER.length,
+    `顶层键数必须恒为 ${PROPOSAL_KEY_ORDER.length}（缺数据也不省略键），实际 ${Object.keys(edgeAssembled).length}`);
+  check('edge/proposal-missing-becomes-null',
+    edgeAssembled.ruling === null && edgeAssembled.gameBuildRange === null,
+    `缺失字段必须显式为 null，实际 ruling=${JSON.stringify(edgeAssembled.ruling)} `
+      + `gameBuildRange=${JSON.stringify(edgeAssembled.gameBuildRange)}`);
+  check('edge/proposal-empty-items', JSON.stringify(edgeAssembled.scopeItems) === '[]',
+    '空 scopeItems 应装配为空数组而不是被省略。');
+  check('edge/proposal-empty-gate-coverage', JSON.stringify(edgeAssembled.gateCoverage) === '[]',
+    '空 gates 应装配为空 gateCoverage 而不是 null——门禁对它做 .forEach。');
 }
 
 /**
@@ -150,7 +153,7 @@ const EDGE_SOURCES = {
  * 混在一起会让「第二行必须是表格分隔行」这类断言对 JSON 块报假失败，
  * 而放宽那条断言又会让真正的表格退化溜过去。
  */
-const NON_TABLE_BLOCKS = new Set(['scope-proposal', 'command-index']);
+const NON_TABLE_BLOCKS = new Set(['command-index']);
 
 {
   // §15 命令清单。原为手写分组裸命令：实测列出 38 条而 package.json 有 144 条,
@@ -190,22 +193,26 @@ const NON_TABLE_BLOCKS = new Set(['scope-proposal', 'command-index']);
 
 {
   /**
-   * §18.2.1 提案块的解析方登记表。
+   * §18.2.1 摘要块 marker 的引用方登记表。
    *
-   * 这个块被四处独立解析，各自写着自己的正则。本轮给它加投影标记时，前三处
-   * 都在治理门禁里、当场报错，第四处在 packages/core 的 TS smoke 里——
-   * 治理门禁全绿，只有 npm test 才炸，而那是本轮最后才跑的命令。
+   * 历史：这个块曾被四处独立解析，各自写着自己的正则。给它加投影标记时，前三处
+   * 都在治理门禁里、当场报错，第四处在 packages/core 的 TS smoke 里——治理门禁
+   * 全绿，只有 npm test 才炸，而那是当轮最后才跑的命令。
    *
-   * 抽公共解析器要跨 scripts/（ESM .mjs）与 packages/core（TS 构建产物）两个
-   * 模块体系，代价大于收益；改为登记 + 静态门禁：新增第五个解析方必须登记，
-   * 否则这里失败关闭并指出漏改的风险。判据是「文件里出现 BEGIN marker 字面量」，
-   * 不是正则形状——形状可以各不相同，存在性不能漏。
+   * 内嵌 JSON 退成摘要表之后，「解析块内 JSON」这件事已经没有了：提案由
+   * release-scope-proposal-lib 从治理 JSON 装配，marker 只剩定位用途（范围门禁
+   * 取首列 ID 集、handoff-integrity-lib 取主题域指纹锚点）。登记表因此从 4 条
+   * 降到 2 条，但仍然保留——它挡的是「第三个引用方悄悄出现」，与块内是 JSON
+   * 还是表格无关。判据是「文件里出现 BEGIN marker 字面量」，不是正则形状。
+   *
+   * 注意这个判据有一处已知盲区：verify-v06-deferral-index.mjs 曾用通用 fence
+   * 正则（不含 marker 字面量）解析同一个块，登记表看不见它。本轮它已改读
+   * scope.json，盲区随之消失——但判据本身仍只认 marker，换用别的锚点解析
+   * 这个块依然登记不到。
    */
   const PROPOSAL_PARSERS = Object.freeze({
-    'scripts/verify-release-scope.mjs': '范围裁定门禁（提案语义与冻结值的权威判定）',
-    'scripts/verify-release-scope-fixtures.mjs': '范围门禁的负向 fixture（构造带/不带投影标记两种形态）',
-    'scripts/handoff-integrity-lib.mjs': 'REL-SCOPE 主题域锚点（只用 marker 定位，不解析块内 JSON）',
-    'packages/core/src/testing/runReleaseEditorAcceptanceSmoke.ts': '发布编辑器验收：核对 SCOPE-EDITORS 的冻结 editorIds'
+    'scripts/verify-release-scope.mjs': '范围裁定门禁（用 marker 定位摘要块，核对首列 ID 集与 scope.json 一致；提案语义读治理 JSON）',
+    'scripts/handoff-integrity-lib.mjs': 'REL-SCOPE 主题域锚点（只用 marker 定位，不解析块内容）'
   });
   const marker = '<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->';
 
@@ -256,57 +263,78 @@ const NON_TABLE_BLOCKS = new Set(['scope-proposal', 'command-index']);
 }
 
 {
-  // §18.2.1 范围提案块。它是 scope.json + gates.json 的投影，
-  // 而 verify-release-scope.mjs 直接解析这段 markdown——渲染形状本身承担门禁职责：
-  // fence 少一层、字段顺序变了、JSON 不可解析，范围门禁就读不到权威数据。
+  /**
+   * §18.2.1 范围摘要表。
+   *
+   * 这个块此前是 1467 行内嵌 JSON，逐字复制 scope.json，占交接书 36%。它存在的
+   * 唯一原因是范围门禁解析那段 markdown 而不是权威 JSON——所以复制品与权威分叉
+   * 时没人看得见（实测 27/27 条 scopeItem 缺 targetRelease/deferredTrack/
+   * resumeRequires，schemaVersion 停在 1.6.0 而权威已是 2.0.0）。
+   *
+   * 现在门禁直读 scope.json + gates.json，这个块退成人读摘要表。断言随之换层：
+   * 不再校验「JSON 是否逐字节等于权威」（那已经由装配层保证，没有 markdown 可分叉），
+   * 改为校验「摘要是否覆盖权威的全部条目、Gate 状态列是否跟着 gates.json 走」——
+   * 摘要漏条目等于范围条目在 agent 入口处不存在。
+   *
+   * 表格通用契约（分隔行、列数、空单元格、竖线转义、反引号成对）由下面的表格
+   * 循环统一覆盖：这个块已从 NON_TABLE_BLOCKS 移出，所以那些断言自动生效，
+   * 不需要在这里重写一套更弱的。
+   */
   const body = blocks['scope-proposal']();
   const lines = body.split('\n');
-  check('scope-proposal/json-fence', lines[0] === '```json' && lines.at(-1) === '```',
-    `必须是单一 json fenced block，实际首行 ${JSON.stringify(lines[0])} 末行 ${JSON.stringify(lines.at(-1))}`);
-  check('scope-proposal/single-fence', body.split('```').length === 3,
-    '只能出现一对 fence——verify-release-scope.mjs 的 fence 正则要求块内唯一。');
+  const authorityItems = sources.scopeData.scopeItems;
 
-  let parsed = null;
-  try {
-    parsed = JSON.parse(lines.slice(1, -1).join('\n'));
-  } catch (error) {
-    check('scope-proposal/parses', false, `块内 JSON 必须可解析：${error.message}`);
-  }
-  if (parsed !== null) {
-    check('scope-proposal/parses', true, '');
-    // 与权威 JSON 逐条目比对。这是本轮引入投影的直接理由：改成投影之前
-    // 27 条 scopeItem 全部缺 targetRelease/deferredTrack/resumeRequires，
-    // deferredToRelease 缺 15 处，而范围门禁只读这份复制所以判不出分叉。
-    check('scope-proposal/schema-version-follows-authority',
-      parsed.schemaVersion === sources.scopeData.schemaVersion,
-      `schemaVersion 必须等于 scope.json 的 ${sources.scopeData.schemaVersion}，实际 ${JSON.stringify(parsed.schemaVersion)}`);
-    check('scope-proposal/items-verbatim',
-      JSON.stringify(parsed.scopeItems) === JSON.stringify(sources.scopeData.scopeItems),
-      'scopeItems 必须与 scope.json 逐字节相同——投影不得裁剪字段。');
-    check('scope-proposal/gate-coverage-count',
-      parsed.gateCoverage.length === sources.gatesData.gates.length,
-      `gateCoverage 条数必须等于 gates.json 的 ${sources.gatesData.gates.length}，实际 ${parsed.gateCoverage.length}`);
-    check('scope-proposal/gate-coverage-derived',
-      parsed.gateCoverage.every((entry, i) => {
-        const gate = sources.gatesData.gates[i];
-        return entry.gateId === gate.gateId
-          && entry.currentState === gate.gateState
-          && JSON.stringify(entry.scopeItemIds) === JSON.stringify(gate.scopeItemIds)
-          && JSON.stringify(entry.blockerRefs) === JSON.stringify(gate.blockerRefs)
-          && JSON.stringify(entry.openRulings) === JSON.stringify(gate.openRulings);
-      }),
-      'gateCoverage 必须是 gates.json 的逐字段投影（currentState ← gateState）。');
-    // 不得夹带非投影字段：多一个手写字段就是重新开一处第二权威。
-    const expectedKeys = [
-      'schemaVersion', 'proposalId', 'release', 'game', 'gameBuildRange', 'ruling', 'proposalStatus',
-      'unlistedPolicy', 'corpusPolicy', 'scopeDeferralPolicy', 'authoritySnapshotPolicy',
-      'paramMetadataSourcePolicy', 'providerCredentialPolicy', 'runtimeToolPolicy',
-      'renderingAcceptancePolicy', 'quantitativeAcceptancePolicy', 'gateCoverage', 'scopeItems'
-    ];
-    check('scope-proposal/key-set-locked',
-      JSON.stringify(Object.keys(parsed)) === JSON.stringify(expectedKeys),
-      `顶层字段集与顺序被锁定，实际 ${JSON.stringify(Object.keys(parsed))}`);
-  }
+  check('scope-proposal/is-table', lines[0].startsWith('|'),
+    `真实数据下必须是表格，实际首行 ${JSON.stringify(lines[0].slice(0, 40))}`);
+  check('scope-proposal/no-json-fence', !body.includes('```'),
+    '摘要块内不得再出现 fenced JSON——那就是把 1467 行复制品搬回来了。');
+
+  const header = splitRow(lines[0]);
+  check('scope-proposal/header-locked',
+    JSON.stringify(header.map(headerToken)) === JSON.stringify([
+      'scopeitemid', 'capability', 'gate（当前状态）', 'proposedsupport',
+      'targetrelease', 'authorityatruling', 'operations', 'unsupported', '范围'
+    ]),
+    `列集被锁定，实际 ${JSON.stringify(header.map(headerToken))}`);
+
+  const rows = lines.slice(2).map(splitRow);
+  check('scope-proposal/row-count-matches-authority', rows.length === authorityItems.length,
+    `行数必须等于 scope.json 的 ${authorityItems.length} 条，实际 ${rows.length}`);
+
+  // 首列 ID 逐条按序相等。范围门禁只按集合判定（SCOPE_SUMMARY_ITEM_MISSING /
+  // _UNKNOWN），这里额外锁顺序：顺序乱掉不影响门禁，但会让人读侧与权威对不上行。
+  const summaryIds = rows.map((row) => (row[0] ?? '').replaceAll('`', ''));
+  check('scope-proposal/ids-match-authority-in-order',
+    JSON.stringify(summaryIds) === JSON.stringify(authorityItems.map((item) => item.scopeItemId)),
+    `首列必须与 scope.json 逐条同序，实际 ${JSON.stringify(summaryIds)}`);
+
+  // Gate 状态列跟着 gates.json 走。这是本块唯一的跨源投影：写死状态会让
+  // 「Gate 已推进但交接书还写 open」在人读侧长期存在，而 --check 只比对
+  // markdown 与投影器输出，投影器自己读错源它一样报绿。
+  const gateStates = new Map(sources.gatesData.gates.map((gate) => [gate.gateId, gate.gateState]));
+  const gateCellMismatches = rows.flatMap((row, i) => {
+    const expectedCell = (authorityItems[i]?.gateIds ?? [])
+      .map((gateId) => `\`${gateId}\`（\`${gateStates.get(gateId) ?? '未登记'}\`）`)
+      .join('、');
+    return (row[2] ?? '') === expectedCell ? [] : [`${summaryIds[i]}: 期望 ${expectedCell} 实际 ${row[2]}`];
+  });
+  check('scope-proposal/gate-state-follows-gates-json', gateCellMismatches.length === 0,
+    `Gate 状态列必须是 gates.json 的投影：${gateCellMismatches.join('；')}`);
+
+  // 延期条目必须在 targetRelease 列显式写出「→ 延期 V0.x」。只写 V0.5 会让
+  // 8 条延期条目在摘要里与 20 条本版条目无法区分，而延期是范围裁定的核心信息。
+  const deferredIds = authorityItems
+    .filter((item) => item.proposedSupport === 'deferred')
+    .map((item) => item.scopeItemId);
+  const deferredMissingMark = deferredIds.filter((scopeItemId) => {
+    const row = rows[summaryIds.indexOf(scopeItemId)];
+    return !(row?.[4] ?? '').includes('延期');
+  });
+  check('scope-proposal/deferred-marked-in-target-release',
+    deferredIds.length > 0 && deferredMissingMark.length === 0,
+    deferredIds.length === 0
+      ? '权威里已无 deferred 条目，这条断言失去靶标——需改靶或反造形态，不能留着恒真。'
+      : `延期条目必须在 targetRelease 列标注：${deferredMissingMark.join('、')}`);
 }
 
 for (const [name, build] of Object.entries(blocks)) {

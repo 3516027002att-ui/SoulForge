@@ -406,6 +406,9 @@ export const TIER_BY_SCRIPT = Object.freeze({
   // 而 orphan-smoke-gate 因为「有 core script」判它 reachable。两道门禁互相掩盖。
   // 本轮补了根转发与无语料时的结构化跳过，层级归 native。
   'test:real-mod-readonly-preview': 'native',
+  // 本机 mods 全量打开矩阵：每个索引文件走生产读链。禁止抽样。
+  // 无语料结构化 skip。大文件只开目录级，不解 168MB 整包。
+  'test:workspace-completeness': 'native',
   // Bridge 宿主退出卫生：真跑三个代表性 bridge smoke，判它们是否自行退出。
   // 抓的缺陷只有运行期可见——断言全过、退出码 0，但 daemon 句柄挂住宿主。
   // 实测事故：runNativeFlverSmoke 挂死 4 小时并锁住 bridge 输出 exe，使之后

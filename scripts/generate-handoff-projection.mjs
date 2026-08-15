@@ -242,56 +242,57 @@ export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, s
   ),
 
   /**
-   * §18.2.1 范围提案 JSON 块。
+   * §18.2.1 范围条目摘要。
    *
-   * 这是交接书里最大的一处重复：1242 行内嵌 JSON，占全文 3563 行的 35%，
-   * 而它与 scope.json 已经实测全面分叉——27 条 scopeItem 全部缺 targetRelease、
-   * deferredTrack、resumeRequires，deferredToRelease 缺 15 处。分叉能长期存在
-   * 是因为 verify-release-scope.mjs 只解析这个内嵌块，从不读 scope.json：
-   * 门禁看不到权威数据，自然判不出分叉。
+   * 这里曾是交接书里最大的一处重复：1467 行内嵌 JSON，占全文 4121 行的 36%，
+   * 逐字复制 scope.json（1295 行）再加 gates.json 的四字段投影。它长期与权威
+   * 分叉——27 条 scopeItem 全部缺 targetRelease、deferredTrack、resumeRequires，
+   * deferredToRelease 缺 15 处——因为 verify-release-scope.mjs 只解析那个内嵌块，
+   * 从不读 scope.json：门禁看不到权威数据，自然判不出分叉。
    *
-   * gateCoverage 同样是复制。实测 11 条相对 gates.json 的
-   * scopeItemIds/gateState/blockerRefs/openRulings 四字段零分叉——它本就是
-   * gates.json 的投影，只是字段改了个名（gateState → currentState）。
+   * 上一轮把它改成 scope.json 的投影，消除了分叉但没消除体积：机器数据仍然
+   * 整份躺在人读文档里，而权威在旁边的 JSON 文件里。本轮退成摘要表——
+   * 一条 scopeItem 一行，operations 只给条数。
    *
-   * 投影之后 verify-release-scope.mjs 无需改动就读到权威数据：它解析的
-   * markdown 块此刻由 JSON 生成。
+   * 为什么摘要不给 operations 全文：那是范围门禁逐条判定的对象
+   * （requireFrozenOperation / forbidFrozenOperation 等），交接书复述一遍
+   * 不增加任何判定力，只会重新长出一份需要同步的副本。人读摘要要回答的是
+   * 「这一条在不在本版、归哪个 Gate、authority 到哪」，不是「第 7 个 operation
+   * 叫什么」——后者去 scope.json 查，路径就在块外的引言里。
+   *
+   * 空 scopeItems 渲染成说明文字而不是空表格：与 active-claims 同一处理，
+   * 空表格会撞 has-rows 断言，而那条断言本身是对的。
    */
   'scope-proposal': () => {
-    // key 顺序必须与原内嵌块一致，否则 diff 会淹没在字段重排里，
-    // 而 --check 的判据是逐字相等。
-    // 缺失字段必须落成显式 null 而不是被 JSON.stringify 丢掉键。
-    // 省略键会让范围门禁报出指向错误原因的诊断——它按键集判定，看到的是
-    // 「策略值不符合冻结要求」，而真实原因是 scope.json 少了这个字段。
-    const field = (key) => (scopeData[key] === undefined ? null : scopeData[key]);
-    const proposal = {
-      schemaVersion: field('schemaVersion'),
-      proposalId: field('proposalId'),
-      release: field('release'),
-      game: field('game'),
-      gameBuildRange: field('gameBuildRange'),
-      ruling: field('ruling'),
-      proposalStatus: field('proposalStatus'),
-      unlistedPolicy: field('unlistedPolicy'),
-      corpusPolicy: field('corpusPolicy'),
-      scopeDeferralPolicy: field('scopeDeferralPolicy'),
-      authoritySnapshotPolicy: field('authoritySnapshotPolicy'),
-      paramMetadataSourcePolicy: field('paramMetadataSourcePolicy'),
-      providerCredentialPolicy: field('providerCredentialPolicy'),
-      runtimeToolPolicy: field('runtimeToolPolicy'),
-      renderingAcceptancePolicy: field('renderingAcceptancePolicy'),
-      quantitativeAcceptancePolicy: field('quantitativeAcceptancePolicy'),
-      // gates.json 的四字段投影。currentState 是历史字段名，保留以免动门禁解析。
-      gateCoverage: gatesData.gates.map((gate) => ({
-        gateId: gate.gateId,
-        scopeItemIds: gate.scopeItemIds,
-        currentState: gate.gateState,
-        blockerRefs: gate.blockerRefs,
-        openRulings: gate.openRulings
-      })),
-      scopeItems: scopeData.scopeItems
-    };
-    return ['```json', JSON.stringify(proposal, null, 2), '```'].join('\n');
+    const items = Array.isArray(scopeData?.scopeItems) ? scopeData.scopeItems : [];
+    if (items.length === 0) {
+      return '当前 scope.json 未登记范围条目。权威是 docs/governance/scope.json，'
+        + '本表由 generate-handoff-projection 投影。';
+    }
+    // Gate 当前状态取自 gates.json，与 §18.3 同源。摘要里带上它，是因为
+    // 「这条范围归哪个 Gate」和「那个 Gate 现在什么状态」在人读时是同一个问题；
+    // 两处同源投影不构成副本——分叉由 --check 逐字判定挡住。
+    const gateStates = new Map((gatesData?.gates ?? []).map((gate) => [gate.gateId, gate.gateState]));
+    return table(
+      ['scopeItemId', 'capability', 'Gate（当前状态）', 'proposedSupport', 'targetRelease', 'authorityAtRuling', 'operations', 'unsupported', '范围'],
+      items.map((item) => [
+        `\`${item.scopeItemId}\``,
+        item.capabilityId === undefined || item.capabilityId === null ? '—' : `\`${item.capabilityId}\``,
+        !Array.isArray(item.gateIds) || item.gateIds.length === 0
+          ? '—'
+          : item.gateIds.map((gateId) => `\`${gateId}\`（\`${gateStates.get(gateId) ?? 'unknown'}\`）`).join('、'),
+        item.proposedSupport === undefined || item.proposedSupport === null ? '—' : `\`${item.proposedSupport}\``,
+        // deferred 条目的承接版本必须显式呈现：延期不等于放弃，而
+        // targetRelease 单独一列读起来像「本版就要做」。
+        item.proposedSupport === 'deferred' && typeof item.deferredToRelease === 'string'
+          ? `\`${item.targetRelease ?? '—'}\` → 延期 \`${item.deferredToRelease}\``
+          : (item.targetRelease === undefined || item.targetRelease === null ? '—' : `\`${item.targetRelease}\``),
+        item.authorityAtRuling === undefined || item.authorityAtRuling === null ? '—' : `\`${item.authorityAtRuling}\``,
+        String(Array.isArray(item.operations) ? item.operations.length : 0),
+        String(Array.isArray(item.unsupportedOperations) ? item.unsupportedOperations.length : 0),
+        cell(item.scope)
+      ])
+    );
   },
 
   /**

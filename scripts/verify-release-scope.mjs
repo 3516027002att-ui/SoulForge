@@ -1,5 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import {
+  SCOPE_AUTHORITY,
+  buildReleaseScopeProposal,
+  findUnprojectedScopeFields,
+  loadGovernanceSources
+} from './release-scope-proposal-lib.mjs';
 
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
 const BEGIN_MARKER = '<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->';
@@ -110,9 +116,18 @@ const ALLOWED_REGISTRY_KIND = new Set([
 const cliArgs = process.argv.slice(2);
 const proposalMode = cliArgs.includes('--proposal');
 const inputArgs = cliArgs.filter((arg) => arg.startsWith('--input='));
-const unknownArgs = cliArgs.filter((arg) => arg !== '--proposal' && !arg.startsWith('--input='));
+// 提案权威目录。--input 只换 markdown，换不了提案——提案此刻来自治理 JSON，
+// 负向 fixture 要扰动的是权威本身，所以必须能单独覆盖治理目录。
+const governanceArgs = cliArgs.filter((arg) => arg.startsWith('--governance-root='));
+const unknownArgs = cliArgs.filter((arg) => arg !== '--proposal'
+  && !arg.startsWith('--input=')
+  && !arg.startsWith('--governance-root='));
 const handoffInput = inputArgs.length === 1 ? inputArgs[0].slice('--input='.length) : HANDOFF;
 const handoffWhere = inputArgs.length === 0 ? HANDOFF : 'scope-fixture-input';
+const governanceRoot = governanceArgs.length === 1
+  ? governanceArgs[0].slice('--governance-root='.length)
+  : null;
+const proposalWhere = governanceRoot === null ? SCOPE_AUTHORITY : 'scope-fixture-governance-root';
 const findings = [];
 const add = (code, where, message) => findings.push({ severity: 'error', code, where, message });
 
@@ -240,6 +255,9 @@ if (unknownArgs.length > 0) {
 if (inputArgs.length > 1 || handoffInput.length === 0) {
   add('INPUT_ARGUMENT_INVALID', 'argv', '--input 只能提供一次且路径不能为空。');
 }
+if (governanceArgs.length > 1 || (governanceRoot !== null && governanceRoot.length === 0)) {
+  add('GOVERNANCE_ROOT_ARGUMENT_INVALID', 'argv', '--governance-root 只能提供一次且路径不能为空。');
+}
 
 let handoff = '';
 try {
@@ -258,28 +276,59 @@ if (beginCount !== 1 || endCount !== 1) {
   );
 }
 
+/**
+ * 提案来自治理 JSON，不再来自交接书。
+ *
+ * 此前本门禁只解析 §18.2.1 的内嵌 JSON——1467 行，逐字复制 scope.json。
+ * 复制品与权威分叉时门禁看不见（实测 27/27 条 scopeItem 缺 targetRelease、
+ * deferredTrack、resumeRequires，schemaVersion 停在 1.6.0 而权威是 2.0.0）。
+ * 现在直接读 scope.json + gates.json，那份复制退成人读摘要表。
+ */
 let proposal = null;
-let rawJson = '';
+let scopeData = null;
+try {
+  const sources = loadGovernanceSources(process.cwd(), governanceRoot);
+  scopeData = sources.scopeData;
+  proposal = buildReleaseScopeProposal(sources);
+} catch (error) {
+  add('GOVERNANCE_READ_FAILED', proposalWhere, error instanceof Error ? error.message : String(error));
+}
+
+/**
+ * §18.2.1 摘要块仍必须存在且是 scope.json 的完整投影。
+ *
+ * 摘要不再承载提案语义，但它承载「人读文档与权威是否同步」：交接书是 agent
+ * 的入口，摘要漏条目就等于范围条目在人读侧不存在。判据是首列 ID 集与
+ * scope.json 逐条相等，而不是「块非空」——后者对删掉 20 行的摘要照样报绿。
+ *
+ * 与 handoff:project --check 的逐字比对重叠是有意的：那条命令在
+ * governance 层，本门禁也在 governance 层，重叠成本接近零；而少了这条，
+ * 「摘要与权威分叉」只有投影门禁一道防线，它一旦被 --check 跳过就没人管了。
+ */
 if (beginCount === 1 && endCount === 1) {
   const block = sliceBetween(handoff, BEGIN_MARKER, END_MARKER);
   if (block === null) {
     add('PROPOSAL_BLOCK_ORDER_INVALID', handoffWhere, 'scope proposal marker 顺序非法。');
   } else {
-    // 提案块内侧允许包一层投影标记。该块本身是 scope.json + gates.json 的投影
-    // （原先是 1242 行手写内嵌 JSON，与 scope.json 实测 27/27 条分叉，因为本门禁
-    // 只解析这里、从不读 scope.json）。标记只是生成边界，不参与提案语义，
-    // 所以在取 fenced block 之前剥掉；剥不掉时不静默继续，让 fence 检查照常失败。
-    const stripped = block
-      .replace(/<!--\s*SOULFORGE_PROJECTION_(?:BEGIN|END):scope-proposal\s*-->/g, '');
-    const fenced = stripped.match(/^\s*```json\s*\r?\n([\s\S]*?)\r?\n```\s*$/);
-    if (!fenced) {
-      add('PROPOSAL_JSON_FENCE_INVALID', handoffWhere, 'scope proposal block 必须只包含一个 json fenced block。');
-    } else {
-      rawJson = fenced[1];
-      try {
-        proposal = JSON.parse(rawJson);
-      } catch (error) {
-        add('PROPOSAL_JSON_INVALID', handoffWhere, error instanceof Error ? error.message : String(error));
+    const summaryIds = parseFirstColumnIds(block, 'SCOPE-');
+    if (summaryIds.size === 0) {
+      add(
+        'SCOPE_SUMMARY_EMPTY',
+        '§18.2.1',
+        '§18.2.1 摘要表未解析到任何 scopeItemId；该块是 scope.json 的人读投影，'
+          + '运行 npm run handoff:project 重新生成。'
+      );
+    } else if (scopeData !== null) {
+      const authorityIds = new Set((scopeData.scopeItems ?? []).map((item) => item.scopeItemId));
+      for (const scopeItemId of authorityIds) {
+        if (!summaryIds.has(scopeItemId)) {
+          add('SCOPE_SUMMARY_ITEM_MISSING', '§18.2.1', `摘要表缺少 scope.json 已登记条目：${scopeItemId}`);
+        }
+      }
+      for (const scopeItemId of summaryIds) {
+        if (!authorityIds.has(scopeItemId)) {
+          add('SCOPE_SUMMARY_ITEM_UNKNOWN', '§18.2.1', `摘要表出现 scope.json 未登记条目：${scopeItemId}`);
+        }
       }
     }
   }
@@ -311,23 +360,43 @@ for (const gateId of gateIds) {
 }
 
 if (proposal !== null) {
-  // schemaVersion 与 proposalId 都以 scope.json 为准，不写字面量。
-  //
-  // 提案块此刻是 scope.json 的投影，两者天然同源；写死 '1.6.0' 只会在 JSON 侧
-  // 升版时把门禁变成阻碍——实测已经发生：scope.json 是 2.0.0，而内嵌复制停在
-  // 1.6.0，本门禁只读那份复制所以从未发现。
-  //
-  // proposalId 里的版本号同理取自 proposal.release，不硬编码 V0.5：治理必须能
-  // 跨到 V0.6，写死版本号意味着 V0.6 的范围提案永远过不了这道校验。
-  const scopeAuthority = JSON.parse(readFileSync(resolve(process.cwd(), 'docs/governance/scope.json'), 'utf8'));
-  if (proposal.schemaVersion !== scopeAuthority.schemaVersion) {
+  /**
+   * schemaVersion 只做结构校验，不与 scope.json 比对。
+   *
+   * 提案此刻就是从 scope.json 装配出来的，`proposal.schemaVersion ===
+   * scopeAuthority.schemaVersion` 是拿一个值和它自己比——恒真，且负向 fixture
+   * 无法构造出反例。那种断言比没有断言更糟：它占着一个 finding code，让人
+   * 以为版本分叉有门禁看着。
+   *
+   * 真正需要挡的退化是「schemaVersion 缺失或不是 semver」。分叉不再可能存在，
+   * 因为只有一份数据。
+   */
+  if (typeof proposal.schemaVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(proposal.schemaVersion)) {
     add(
       'SCHEMA_VERSION_INVALID',
       'proposal.schemaVersion',
-      `schemaVersion 必须与 docs/governance/scope.json 一致（${scopeAuthority.schemaVersion}），`
-        + `实际 ${JSON.stringify(proposal.schemaVersion)}；提案块是该文件的投影，运行 npm run handoff:project 重新生成。`
+      `schemaVersion 必须是 major.minor.patch 形式的字符串，实际 ${JSON.stringify(proposal.schemaVersion)}；`
+        + `权威是 ${SCOPE_AUTHORITY}。`
     );
   }
+  /**
+   * scope.json 新增了既不进提案、也未登记为非提案字段的键。
+   *
+   * 提案按固定键序装配，多出来的键会被静默丢掉——那个字段于是不受任何
+   * 冻结校验保护，而它看起来是「已经写进权威文件」的。失败关闭，让新增
+   * 策略字段的人必须选一边：纳入提案校验，或显式登记为非提案字段。
+   */
+  for (const key of findUnprojectedScopeFields(scopeData)) {
+    add(
+      'UNPROJECTED_SCOPE_FIELD',
+      `${SCOPE_AUTHORITY}.${key}`,
+      `scope.json 的 ${key} 既未进入提案键序，也未登记为非提案字段：`
+        + '它不受任何冻结校验保护。要么加入 PROPOSAL_KEY_ORDER 并补校验，'
+        + '要么加入 NON_PROPOSAL_SCOPE_KEYS 说明它不承载范围语义。'
+    );
+  }
+  // proposalId 里的版本号取自 proposal.release，不硬编码 V0.5：治理必须能
+  // 跨到 V0.6，写死版本号意味着 V0.6 的范围提案永远过不了这道校验。
   const proposalIdPattern = new RegExp(`^${String(proposal.release ?? '').replace('.', '\\.')}-SCOPE-[0-9]{8}$`);
   if (!/^V\d+\.\d+$/.test(proposal.release ?? '') || !proposalIdPattern.test(proposal.proposalId ?? '')) {
     add(
@@ -836,7 +905,12 @@ if (proposal !== null) {
     }
   }
 
-  if (hasAbsolutePath(rawJson)) {
+  // 扫装配后的提案序列化文本，而不是 markdown 块的原文。
+  //
+  // 实测踩过的坑正好在这条判据上：CLAUDE.md 记着「ABSOLUTE_PATH_FORBIDDEN 读的是
+  // §18.2.1 投影块而不是 scope.json，改完 scope.json 不重投影门禁会一直红在一个
+  // 已经修好的问题上」。现在读的就是权威本身，投影滞后不再影响这条判定。
+  if (hasAbsolutePath(JSON.stringify(proposal))) {
     add('ABSOLUTE_PATH_FORBIDDEN', 'proposal', 'scope proposal 不得包含绝对路径或 file URI。');
   }
   checkPrivateRegistryFields(proposal);

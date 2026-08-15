@@ -170,23 +170,21 @@ function assertInventoryDerivedFromCapabilities(
 
 function assertFrozenScopeInventory(inventory: ReleaseEditorInventoryItem[]): void {
   const root = resolve('../..');
-  const handoff = readFileSync(resolve(root, 'docs/V0_5_IMPLEMENTATION_HANDOFF.md'), 'utf8');
-  // 提案块内侧包着一层投影标记：该块是 docs/governance/scope.json 与 gates.json
-  // 的投影（原为 1242 行手写内嵌 JSON，与 scope.json 实测 27/27 条分叉）。
-  // 标记只是生成边界，不参与提案语义，所以按可选分组匹配。
-  const match = handoff.match(
-    /<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->\s*(?:<!--\s*SOULFORGE_PROJECTION_BEGIN:scope-proposal\s*-->\s*)?```json\s*([\s\S]*?)\s*```\s*(?:<!--\s*SOULFORGE_PROJECTION_END:scope-proposal\s*-->\s*)?<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->/
-  );
-  const proposalJson = match?.[1];
-  if (!proposalJson) throw new Error('frozen release-scope proposal is missing');
-  const proposal = JSON.parse(proposalJson) as {
+  // 直读 docs/governance/scope.json。
+  //
+  // 此前从交接书 §18.2.1 的内嵌 JSON 里正则抠 scopeItems——那块是 scope.json 的
+  // 逐字复制（1467 行），实测与权威分叉 27/27 条。冻结清单的权威一直是 scope.json，
+  // 从复制品读只是因为当时那份复制品存在；块退成人读摘要表后，正则会直接匹配不到。
+  const scope = JSON.parse(
+    readFileSync(resolve(root, 'docs/governance/scope.json'), 'utf8')
+  ) as {
     scopeItems?: Array<{
       scopeItemId?: string;
       editorIds?: unknown;
       hexEvidenceView?: { included?: unknown; writable?: unknown };
     }>;
   };
-  const editorScope = proposal.scopeItems?.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
+  const editorScope = scope.scopeItems?.find((item) => item.scopeItemId === 'SCOPE-EDITORS');
   if (!editorScope || !Array.isArray(editorScope.editorIds)) {
     throw new Error('SCOPE-EDITORS must expose the exact frozen editorIds');
   }

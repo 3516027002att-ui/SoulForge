@@ -3,7 +3,7 @@
  * §18.5 V0.6 延期承接索引一致性门禁。
  *
  * §18.5 是派生索引，不是第二范围口径。权威来源始终是：
- *   - §18.2.1 范围矩阵：proposedSupport=deferred + deferredToRelease
+ *   - docs/governance/scope.json：proposedSupport=deferred + deferredToRelease
  *   - §18.3 Gate 覆盖矩阵：gateState=deferred + applicability=deferred-v0.6
  *   - §13.1 执行面板：lifecycle=deferred
  *   - packages/shared/src/editor-protocol.ts：DEFERRED_PREVIEW_EDITOR_KINDS
@@ -15,6 +15,7 @@
 import { readFileSync } from 'node:fs';
 
 const HANDOFF = 'docs/V0_5_IMPLEMENTATION_HANDOFF.md';
+const SCOPE_AUTHORITY = 'docs/governance/scope.json';
 const EDITOR_PROTOCOL = 'packages/shared/src/editor-protocol.ts';
 const TARGET_RELEASE = 'V0.6';
 
@@ -87,19 +88,25 @@ if (!indexSection.includes('派生索引')) {
   );
 }
 
-// ---- 权威来源 1：§18.2.1 范围矩阵 ----
-const jsonBlock = /```json\s*(\{[\s\S]*?"scopeItems"[\s\S]*?)\n```/.exec(markdown);
-if (!jsonBlock) {
-  add('SCOPE_MATRIX_MISSING', `${HANDOFF} §18.2.1`, '未找到范围矩阵 JSON 块。');
-} else {
-  let proposal;
+// ---- 权威来源 1：docs/governance/scope.json ----
+//
+// 此前读的是 §18.2.1 的内嵌 JSON 块，用的还是通用 fence 正则
+// （/```json\s*(\{[\s\S]*?"scopeItems"...)/），既不含投影 marker 字面量，
+// 也就不在 verify-handoff-projection-fixtures 的解析方登记表里——那份登记表
+// 按 marker 判定，对这里完全是盲的。
+//
+// 那个块是 scope.json 的逐字复制（1467 行，实测 27/27 条与权威分叉），现已退成
+// 人读摘要表。直读权威后这处盲区消失：延期口径只有一个来源。
+{
+  let scope;
   try {
-    proposal = JSON.parse(jsonBlock[1]);
+    scope = JSON.parse(readFileSync(SCOPE_AUTHORITY, 'utf8'));
   } catch (error) {
-    add('SCOPE_MATRIX_UNPARSEABLE', `${HANDOFF} §18.2.1`, `范围矩阵 JSON 解析失败：${error.message}`);
+    add('SCOPE_AUTHORITY_UNPARSEABLE', SCOPE_AUTHORITY, `范围权威读取失败：${error.message}`);
   }
 
-  if (proposal) {
+  if (scope) {
+    const proposal = scope;
     const deferredItems = (proposal.scopeItems ?? []).filter(
       (item) => item?.proposedSupport === 'deferred'
     );
@@ -137,7 +144,7 @@ if (!jsonBlock) {
       if (Array.isArray(item.operations) && item.operations.length > 0) {
         add(
           'DEFERRAL_INDEX_ITEM_CLAIMS_OPERATIONS',
-          `${HANDOFF} §18.2.1 ${item.scopeItemId}`,
+          `${SCOPE_AUTHORITY} ${item.scopeItemId}`,
           `deferred 条目必须 operations=[]，实际为 ${JSON.stringify(item.operations)}。`
         );
       }
@@ -237,7 +244,7 @@ const ok = findings.length === 0;
 process.stdout.write(`${JSON.stringify({
   ok,
   checkedSources: [
-    `${HANDOFF} §18.2.1 范围矩阵（proposedSupport/deferredToRelease/authorityAtRuling/operations）`,
+    `${SCOPE_AUTHORITY}（proposedSupport/deferredToRelease/authorityAtRuling/operations）`,
     `${HANDOFF} §18.3 Gate 覆盖矩阵（gateState/applicability）`,
     `${HANDOFF} §13.1 执行面板（lifecycle）`,
     `${EDITOR_PROTOCOL}（DEFERRED_PREVIEW_EDITOR_KINDS / DEFERRED_PREVIEW_TARGET_RELEASE）`

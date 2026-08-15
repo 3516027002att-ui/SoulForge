@@ -845,6 +845,11 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     'scripts/verify-handoff-integrity.mjs',
     'scripts/verify-release-scope.mjs',
     'scripts/verify-release-scope-fixtures.mjs',
+    // 提案装配层。PROPOSAL_KEY_ORDER 决定哪些 scope.json 字段进入提案，也就决定
+    // 范围门禁按键集校验时看得见哪些策略；从里面删一个键，对应策略就不再被判定，
+    // 而 findUnprojectedScopeFields 又会把它当成「已知的非提案键」放过去。
+    // 漏登记就能在 REL-SCOPE 仍显示 fresh 的前提下让一整条冻结策略脱离校验。
+    'scripts/release-scope-proposal-lib.mjs',
     // 治理数据与其门禁实现同属范围裁定主题域：
     // 若不登记，就可以在不使 REL-SCOPE 失效的前提下改写已冻结裁定
     // 或削弱冻结拦截规则本身。
@@ -886,6 +891,18 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     'scripts/verify-gov-cli-fixtures.mjs',
     'docs/governance/releases.json',
     'docs/governance/scope.json',
+    // gates.json 必须显式登记。
+    //
+    // 它此前进入 REL-SCOPE 主题域是靠 §18.2.1 的块内容：那块曾内嵌 gates.json 的
+    // 四字段投影（gateId/scopeItemIds/gateState/blockerRefs），改 gates.json →
+    // 重投影 → 块内容变 → 指纹变。块退成人读摘要表后，只剩 gateId 与状态出现在
+    // Gate 列，条目级 scopeItemIds/blockerRefs 不再进块——也就是说改 gates.json
+    // 的这些字段不再必然扰动 REL-SCOPE 指纹。
+    //
+    // 而范围门禁现在直读 gates.json 装配 gateCoverage：它是冻结裁定判定的直接输入，
+    // 漏登记就能改写 Gate 覆盖而 REL-SCOPE 仍显示 fresh。靠「另一个块恰好投影了
+    // 它的一部分」来间接覆盖，正是那种改一处呈现就静默失效的覆盖方式。
+    'docs/governance/gates.json',
     // 七个 schema 全部登记，而不只是冻结裁定直接用到的 releases/scope 两个。
     // 理由：loadGovernance 用 schema 的 required + additionalProperties:false 承担了
     // 一部分门禁职责（等价性清单里 18 项 SCHEMA_SUPERSEDED 正是这么登记的）。
