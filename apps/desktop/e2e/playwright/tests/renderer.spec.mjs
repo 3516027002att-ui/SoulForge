@@ -62,9 +62,10 @@ async function ipcCalls(app) {
 async function openFixtureWorkspace(window) {
   // T2：打开工作区入口从侧栏移到中央开始页；窄窗口（633px）下 Agent dock
   // 默认展开会压缩中央编辑区，先收 Agent 让开始页按钮可见可点。
+  // S12：状态栏已卸载，「扫描完成」信号改等开始页 h1 出现工作区名。
   await closeAgentPanel(window);
   await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
-  await expect(window.locator('.status-bar')).toContainText('已索引');
+  await expect(window.locator('.project-overview h1')).toContainText('fixture-workspace');
 }
 
 /**
@@ -132,7 +133,6 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   await window.locator('[data-domain="files"]').click();
   const files = window.locator('.file-item');
   await expect(files.filter({ hasText: 'sfx/f0000.sfxbnd.dcx' })).toHaveCount(1);
-  await expect(window.locator('.status-bar')).toContainText('文件');
 
   // 语义领域不渲染 Files 物理列表（.file-item），改走逻辑库。
   await window.locator('[data-domain="event"]').click();
@@ -191,7 +191,6 @@ test('文件工作域可定位 ai 资源，且不与 Agent 面板冲突', async 
   await expect(window.locator('.agent__composer textarea')).toBeVisible();
   // §12.3：Agent dock header 左侧产品名是 SoulForge（不是 "Agent"）。
   await expect(window.locator('.agent__header')).toContainText('SoulForge');
-  await expect(window.locator('.status-bar')).toContainText('文件');
   await app.close();
 });
 
@@ -684,7 +683,8 @@ test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', asy
 
   await queue.getByTestId('cq-commit').click();
   await expect(queue.locator('.cq-row').first()).toHaveAttribute('data-status', 'written');
-  await expect(window.locator('.status-bar')).toContainText('写入完成');
+  // S12：状态栏已卸载，写入反馈走 toast。
+  await expect(window.locator('.toast--ok').filter({ hasText: '写入完成' })).toHaveCount(1);
 
   // 写入后 FMG 面板重读：fixture 内存语料已含新文本。
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
@@ -940,7 +940,8 @@ test('TEXT-20C：真空表新增经 review 队列落盘，写按 tableId 路由�
   // 提交：App 侧按 selectedTableId 把 tableId 传给 applyFmgMutation → fixture 路由到 menu 表。
   await queue.getByRole('button', { name: '批准入暂存' }).click();
   await queue.getByTestId('cq-commit').click();
-  await expect(window.locator('.status-bar')).toContainText('写入完成');
+  // S12：状态栏已卸载，写入反馈走 toast。
+  await expect(window.locator('.toast--ok').filter({ hasText: '写入完成' })).toHaveCount(1);
 
   // 提交后面板按新 sourceHash 重挂载并自动定位回首表（item.fmg）；切到 menu.fmg
   // 重读：新增条目自 fixture.menuEntries 可见（真空表写后不被伪装回 0 条）。
@@ -1095,15 +1096,15 @@ test('browser-preview 表面：可见降级提示，无 pageerror / console erro
   // （中心仍被 .agent 覆盖），toast 永不出现。等按钮回到可点击几何再 force click。
   await expect.poll(async () => (await openWorkspaceButton.boundingBox())?.width ?? 0).toBeGreaterThan(100);
 
-  // 点击或回车均有明确反馈（toast + 状态栏），不抛异常。
+  // 点击或回车均有明确反馈（toast），不抛异常。
   // aria-disabled 按钮保持可触发：force 绕过 Playwright 的 enabled 等待。
   await openWorkspaceButton.click({ force: true });
   await expect(window.locator('.toast--warn')).toContainText('浏览器预览：「打开 Mod 工作区」仅在 SoulForge 桌面版可用');
-  // 键盘路径：按钮可聚焦，Enter 触发同一降级反馈。
+  // 键盘路径：按钮可聚焦，Enter 触发同一降级反馈（S12 后反馈统一走 toast）。
   await chooseBaseButton.evaluate((element) => element.focus());
   await expect(chooseBaseButton).toBeFocused();
   await window.keyboard.press('Enter');
-  await expect(window.locator('.status-bar')).toContainText('浏览器预览：「选择原版目录」仅在 SoulForge 桌面版可用');
+  await expect(window.locator('.toast--warn').filter({ hasText: '选择原版目录' })).toHaveCount(1);
 
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);

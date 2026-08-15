@@ -106,8 +106,9 @@ test('生产 IPC 链路：打开工作区 → 扫描 → 界面反映索引结�
   expect(result.fileCount).toBe(1);
   expect(result.hasSessionId).toBe(true);
 
-  // 界面必须反映真实扫描结果，而不是停在空态。
-  await expect(window.locator('.status-bar')).toContainText('已索引', { timeout: 15_000 });
+  // 界面必须反映真实扫描结果，而不是停在空态。S12：状态栏已卸载，
+  // 「已索引」信号改等开始页出现（mountWorkspace 完成后 activeDomain 落回 project）。
+  await expect(window.locator('.project-overview'), { timeout: 15_000 }).toBeVisible();
 
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);

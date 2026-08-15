@@ -45,10 +45,8 @@ import type {
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
-import { HexEditorPanel } from './editors/HexEditorPanel.js';
 import { ParamWorkbench } from './workbench/ParamWorkbench.js';
 import { GparamWorkbench, type GparamBankView } from './workbench/GparamWorkbench.js';
-import { DiagnosticsLog } from './workbench/DiagnosticsLog.js';
 import { selectEditor } from './workbench/selectEditor.js';
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
 import {
@@ -102,7 +100,6 @@ import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
 import { resolveKeybinding } from './keybindings/applyKeybinding.js';
-import { statusSuitLabel } from './keybindings/keymapTable.js';
 import type {
   AgentSessionDetail,
   AgentSessionRow,
@@ -118,13 +115,8 @@ import {
   type AgentApprovalUserDecision,
   type AgentTaskState
 } from './agent/agentTaskState.js';
-import {
-  NativeInspectionCard,
-  StructuredPreviewCard
-} from './components/PreviewCards.js';
 import { MsgTableEditor } from './components/MsgTableEditor.js';
 import { PanelErrorBoundary } from './components/PanelErrorBoundary.js';
-import { hexTextToSafeBase64 } from './utils/binary.js';
 import { StartWorkspacePanel } from './workbench/StartWorkspacePanel.js';
 import {
   extractMsgRows,
@@ -139,7 +131,6 @@ import {
   formatFilesCount,
   formatListTruncation,
   formatPageRange,
-  formatPreviewTruncation,
   operationStatusLabel,
   shortenPath
 } from './format/uiText.js';
@@ -189,17 +180,6 @@ function SidebarCloseButton({ onClose }: { onClose: () => void }): ReactElement 
       </svg>
     </button>
   );
-}
-
-/**
- * P3 裁定：hex 文本 → base64 只经严格校验的出口（hexTextToSafeBase64）。
- * 此前这里手工拼 btoa，且调用方把「无空格」的 preview.hex 原样当 base64 直喂
- * atob——内容一旦不是 hex/base64（例如被误标为 hex 的文本），atob 就抛
- * 「characters outside of the Latin1 range」把整个工作台摔死。现在统一校验，
- * 非法输入抛可行动错误（面板错误边界可显示原因），不再出现看不懂的 DOMException。
- */
-function hexTextToBase64(hexText: string): string {
-  return hexTextToSafeBase64(hexText);
 }
 
 /** 无实时 EMEVD 文档时的空文档（真实文档经 Bridge 读取后替换）。 */
@@ -325,7 +305,6 @@ export function App(): ReactElement {
   // AGENT-60D 提交期消费点：AgentSidebar 草稿里 §12.11 的 opaque 资源引用冒泡到
   // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
   const [agentResources, setAgentResources] = useState<readonly AgentResourceReference[]>([]);
-  const [status, setStatus] = useState('就绪');
   /**
    * EVENT-30B：最近一次打开/刷新的 EMEVD 逻辑文档标签（有界 DSL 投影 + 派生
    * document）。工作台按 tabId 去重合并；renderer 永不持有文件系统路径或完整
@@ -367,8 +346,6 @@ export function App(): ReactElement {
    * 保护性设计，这里不绕过它——把 origin 标成 'imported' 会让写入放行，
    * 那等于用一个字段名换掉一道授权检查。
    */
-  /** 底部日志区是否展开。默认收起 —— 日常编辑不需要看诊断。 */
-  const [logOpen, setLogOpen] = useState(false);
   const [paramFieldDefs, setParamFieldDefs] = useState<ParamFieldDef[] | null>(null);
   /**
    * 字段枚举表（enumRef → 值列表）。
@@ -423,7 +400,6 @@ export function App(): ReactElement {
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [cmdkQuery, setCmdkQuery] = useState('');
   const [cmdkIndex, setCmdkIndex] = useState(0);
-  const [clockText, setClockText] = useState('--:--');
   const [toasts, setToasts] = useState<Array<{ id: number; text: string; kind: 'ok' | 'warn' }>>([]);
   const [openTabs, setOpenTabs] = useState<RendererIndexedFile[]>([]);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -762,16 +738,6 @@ export function App(): ReactElement {
     return () => window.removeEventListener('keydown', handleShortcut);
   }, [cmdkOpen, activeDomain]);
 
-  useEffect(() => {
-    const tick = (): void => {
-      const now = new Date();
-      setClockText(`${pad2(now.getHours())}:${pad2(now.getMinutes())}`);
-    };
-    tick();
-    const timer = window.setInterval(tick, 15000);
-    return () => window.clearInterval(timer);
-  }, []);
-
   // 首个候选变更出现时自动切到暂存面板，保证审查动作可见可达。
   useEffect(() => {
     const previous = prevPendingCountRef.current;
@@ -982,7 +948,6 @@ export function App(): ReactElement {
         setParamRowPayloads(new Map());
         return;
       }
-      setStatus(`正在读取 PARAM：${target.relativePath}`);
       try {
         // 用户裁定（2026-08-14）：打开参数即全量加载（含全部行字节 + 字段定义）。
         // 走 readParamPage 的 loadAll 分支：main 经 includeAllPayloads 一次拿全表，
@@ -1030,7 +995,7 @@ export function App(): ReactElement {
           // 读取失败同样要清授信来源：否则上一个 param 的 'imported' 残留，
           // 会让这个读不出来的资源看起来仍可写入字段。
           setParamFieldDefsOrigin('fixture');
-          setStatus('这个 PARAM 读不出来，详情见底部日志。');
+          pushToast('这个 PARAM 读不出来', 'warn');
           return;
         }
         // 字段定义与缺失原因逐字段取，不用 as 整体断言 —— IPC 边界上字段名对不上
@@ -1090,14 +1055,10 @@ export function App(): ReactElement {
         setParamSourceHash(result.sourceHash ?? null);
         if (result.rowDataSize !== undefined) setParamRowDataSize(result.rowDataSize);
         setParamLive(true);
-        setStatus(
-          `已加载 PARAM：${result.rowCount ?? result.rows.length} 行（全量）`
-          + (result.authority ? ` · ${result.authority}` : '')
-        );
       } catch (error) {
         if (cancelled) return;
         setParamLive(false);
-        setStatus(error instanceof Error ? error.message : 'PARAM 读取异常');
+        pushToast(error instanceof Error ? error.message : 'PARAM 读取异常', 'warn');
       }
     }
     void loadParam();
@@ -1123,7 +1084,6 @@ export function App(): ReactElement {
         setFmgLive(false);
         return;
       }
-      setStatus(`正在读取 FMG：${target.relativePath}`);
       try {
         const result = await bridge.readFmgDocument(target.sourceUri) as {
           ok?: boolean;
@@ -1143,21 +1103,17 @@ export function App(): ReactElement {
           setFmgEntries(EMPTY_FMG_ENTRIES);
           setFmgSourceHash(null);
           setFmgLive(false);
-          setStatus('这个文本资源读不出来，详情见底部日志。');
+          pushToast('这个文本资源读不出来', 'warn');
           return;
         }
         const loadedEntries = (result.data.entries ?? []).map((e) => ({ id: e.id, text: e.text }));
         setFmgEntries(loadedEntries);
         setFmgSourceHash(result.data.sourceHash ?? null);
         setFmgLive(true);
-        setStatus(
-          `已加载 FMG：${result.data.entryCount ?? loadedEntries.length} 条`
-          + (result.data.authority ? ` · authority=${result.data.authority}` : '')
-        );
       } catch (error) {
         if (cancelled) return;
         setFmgLive(false);
-        setStatus(error instanceof Error ? error.message : 'FMG 读取异常');
+        pushToast(error instanceof Error ? error.message : 'FMG 读取异常', 'warn');
       }
     }
     void loadFmg();
@@ -1189,7 +1145,6 @@ export function App(): ReactElement {
         setMsbLive(false);
         return;
       }
-      setStatus(`正在读取 MSB：${target.relativePath}`);
       try {
         const result = await bridge.readMsbDocument(target.sourceUri) as {
           ok?: boolean;
@@ -1231,7 +1186,7 @@ export function App(): ReactElement {
           setMsbEvents([]);
           setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
           setMsbLive(false);
-          setStatus('这张地图读不出来，详情见底部日志。');
+          pushToast('这张地图读不出来', 'warn');
           return;
         }
         setMsbParts(result.data.parts.map((p) => ({
@@ -1271,17 +1226,12 @@ export function App(): ReactElement {
         });
         setMsbSourceHash(result.data.sourceHash ?? null);
         setMsbLive(true);
-        setStatus(
-          `已加载 MSB：${result.data.partCount ?? result.data.parts.length} parts`
-          + (result.data.regionCount !== undefined ? ` / ${result.data.regionCount} regions` : '')
-          + (result.data.authority ? ` · ${result.data.authority}` : '')
-        );
       } catch (error) {
         if (cancelled) return;
         setMsbModels([]);
         setMsbEvents([]);
         setMsbLive(false);
-        setStatus(error instanceof Error ? error.message : 'MSB 读取异常');
+        pushToast(error instanceof Error ? error.message : 'MSB 读取异常', 'warn');
       }
     }
     void loadMsb();
@@ -1303,7 +1253,6 @@ export function App(): ReactElement {
         setEventPendingTab(null);
         return;
       }
-      setStatus(`正在读取 EMEVD：${target.relativePath}`);
       try {
         const result = await bridge.readEmevdDocument(target.sourceUri) as {
           ok?: boolean;
@@ -1333,14 +1282,10 @@ export function App(): ReactElement {
             dslTemplateTotalLines: 0,
             sourceStyle: 'none'
           });
-          setStatus('这个事件脚本读不出来，详情见底部日志。');
+          pushToast('这个事件脚本读不出来', 'warn');
           return;
         }
         const doc = mapEmevdEnvelopeToDocument(target.sourceUri, result.data, { maxEvents: 128 });
-        setStatus(
-          `已加载 EMEVD：${result.data.eventCount ?? doc.events.length} 事件 / `
-          + `${result.data.instructionCount ?? 0} 指令（authority=${result.data.authority ?? 'unknown'}）`
-        );
         // Load the authoritative bounded full-document DSL template; renderer
         // never receives the full document itself (EVENT-30A bounded outline).
         let dslTemplate: string | null = null;
@@ -1368,7 +1313,7 @@ export function App(): ReactElement {
             // EMEDF 缺失失败关闭：不提供伪解码（dslTemplate null + 诊断）。
             sourceStyle = 'none';
           } else {
-            setStatus(full?.diagnostics?.[0]?.message ?? '完整文档 DSL 模板加载失败；DSL 视图保持只读。');
+            pushToast(full?.diagnostics?.[0]?.message ?? '完整文档 DSL 模板加载失败', 'warn');
           }
         }
         setEventPendingTab({
@@ -1389,7 +1334,7 @@ export function App(): ReactElement {
       } catch (error) {
         if (cancelled) return;
         setEventPendingTab(null);
-        setStatus(error instanceof Error ? error.message : 'EMEVD 读取异常');
+        pushToast(error instanceof Error ? error.message : 'EMEVD 读取异常', 'warn');
       }
     }
     void loadEmevd();
@@ -1461,7 +1406,6 @@ export function App(): ReactElement {
         diagnostics: [{ code: 'PRELOAD_MISSING', message: '当前预加载未暴露 applyParamFieldMutation。' }]
       };
     }
-    setStatus('正在经 Bridge/补丁引擎提交 PARAM 字段…');
     const result = await bridge.applyParamFieldMutation(
       selectedFile.sourceUri,
       paramSourceHash,
@@ -1476,7 +1420,7 @@ export function App(): ReactElement {
     if (result.ok) {
       await reloadParamRowsFromSource();
       await refreshOperationHistory();
-      setStatus(`PARAM 字段 ${input.fieldId} 已提交并重读。`);
+      pushToast(`PARAM 字段 ${input.fieldId} 已提交并重读。`);
       return { ok: true, diagnostics: result.diagnostics ?? [] };
     }
     return {
@@ -1497,25 +1441,24 @@ export function App(): ReactElement {
     label: string
   ): Promise<void> {
     if (!msbLive || !msbSourceHash || !selectedFile) {
-      setStatus('MSB 写入仅在实时模式可用。');
+      pushToast('MSB 写入仅在实时模式可用。', 'warn');
       return;
     }
     if (!bridge) {
-      setStatus(describeBridgeAbsence(`提交 MSB ${label}`));
+      pushToast(describeBridgeAbsence(`提交 MSB ${label}`), 'warn');
       return;
     }
     if (typeof bridge.applyMsbMutation !== 'function') {
-      setStatus('当前预加载未暴露 applyMsbMutation。');
+      pushToast('当前预加载未暴露 applyMsbMutation。', 'warn');
       return;
     }
-    setStatus(`正在提交 MSB ${label}…`);
     const result = await bridge.applyMsbMutation(
       selectedFile.sourceUri,
       msbSourceHash,
       mutation
     );
     if (!result.ok) {
-      setStatus(result.diagnostics?.[0]?.message ?? `MSB ${label} 提交失败`);
+      pushToast(result.diagnostics?.[0]?.message ?? `MSB ${label} 提交失败`, 'warn');
       return;
     }
     const reload = await bridge.readMsbDocument(selectedFile.sourceUri) as {
@@ -1586,9 +1529,9 @@ export function App(): ReactElement {
         events: reload.data.eventCount ?? reload.data.events?.length ?? 0
       });
       setMsbSourceHash(reload.data.sourceHash ?? null);
-      setStatus(`MSB ${label} 已提交并重读。`);
+      pushToast(`MSB ${label} 已提交并重读。`);
     } else {
-      setStatus('MSB 已提交，但重读失败。');
+      pushToast('MSB 已提交，但重读失败。', 'warn');
     }
     await refreshOperationHistory();
   }
@@ -1632,7 +1575,6 @@ export function App(): ReactElement {
   /** Electron-only 操作在 browser-preview 表面的统一可见降级：不抛异常、不静默。 */
   function announceDesktopOnly(operation: string): void {
     const message = describeBridgeAbsence(operation);
-    setStatus(message);
     pushToast(message, 'warn');
   }
 
@@ -1645,17 +1587,16 @@ export function App(): ReactElement {
       const selection = await bridge.openBaseDialog();
       if (!selection) return;
       setBaseRootChoice(selection);
-      setStatus(`已选择只读原版游戏目录：${selection.label}（下次打开 Mod 工作区时生效）`);
+      pushToast(`已选择只读原版游戏目录：${selection.label}（下次打开 Mod 工作区时生效）`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setStatus(`选择原版目录失败：${message}`);
       pushToast(`选择原版目录失败：${message}`, 'warn');
     }
   }
 
   function clearBaseDirectory(): void {
     setBaseRootChoice(null);
-    setStatus('已清除原版游戏目录选择');
+    pushToast('已清除原版游戏目录选择');
   }
 
   function openCmdk(): void {
@@ -1764,7 +1705,6 @@ export function App(): ReactElement {
     setToolOutput(null);
     setApprovalError(null);
     setRespondingApprovalCallId(null);
-    setStatus('已开始新的 Agent 任务');
   }
 
   function closeTab(file: RendererIndexedFile): void {
@@ -1797,7 +1737,6 @@ export function App(): ReactElement {
   ): Promise<void> {
     if (!bridge) return;
     try {
-      setStatus(origin === 'restored' ? '正在恢复上次的工作区...' : '正在扫描工作区...');
       const result = await bridge.scanWorkspace({
         overlaySelectionId,
         ...(baseSelectionId ? { baseSelectionId } : {})
@@ -1827,31 +1766,19 @@ export function App(): ReactElement {
       // 工作区的 FMG 条目 / PARAM 行 / EMEVD 事件 / MSB 场景。
       resetAllDocuments(documentResetActions);
 
-      setStatus('正在构建轻量证据索引...');
       const nextAnalysis = await bridge.analyzeWorkspace();
       setAnalysis(nextAnalysis);
       setTools(nextAnalysis?.tools ?? []);
       setEventUri(nextAnalysis?.events?.[0]?.uri ?? '');
       await refreshOperationHistory();
-      const baseLabel = result.session.baseMounted
-        ? ' · 已挂载只读原版游戏目录'
-        : ' · 未挂载原版游戏目录';
       setBaseRootChoice(null);
-      const restoredPrefix = origin === 'restored' ? '已恢复上次的工作区：' : '';
-      setStatus(`${restoredPrefix}已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      /*
-       * 自动恢复失败不弹 toast，只写状态栏。
-       *
-       * 那条路径没有用户动作在等结果 —— 启动时弹一个「打开工作区失败」的提示
-       * 会让人以为自己做错了什么，而实际原因通常是上次的目录被移动或删除了。
-       * 手动打开失败仍然弹：那时用户在等反馈。
-       */
-      setStatus(origin === 'restored'
+      // 底栏已卸（S12）：失败统一走 toast，自动恢复失败也不例外 ——
+      // 没有状态栏后静默失败等于用户永远不知道工作区没挂上。
+      pushToast(origin === 'restored'
         ? `上次的工作区已无法打开（${message}），请重新选择。`
-        : `打开工作区失败：${message}`);
-      if (origin === 'manual') pushToast(`打开工作区失败：${message}`, 'warn');
+        : `打开工作区失败：${message}`, 'warn');
     }
   }
 
@@ -1919,7 +1846,6 @@ export function App(): ReactElement {
     setFiles(result);
     setActiveDomain('files');
     setCenterView('resource');
-    setStatus(`搜索返回 ${result.length} 个文件`);
   }
 
   function selectDomain(domain: EditorDomainId): void {
@@ -1932,7 +1858,6 @@ export function App(): ReactElement {
     if (domain === 'project') {
       setSelectedFile(null);
       setCenterView('project');
-      setStatus('开始页');
       return;
     }
     if (domain === activeDomain) {
@@ -1940,7 +1865,6 @@ export function App(): ReactElement {
       // 在领域切换时会被卸载（下方 setSelectedFile(null) → activeEditor 变
       // 'empty'）；用户从 Files 再选第二个事件文档依赖「已激活 Files 领域不清
       // 选中」，否则每次切文件都重建工作台、多 tab 永远凑不齐。
-      if (domain === 'files') setStatus('文件：物理浏览');
       return;
     }
     // 有成熟工作台的领域：直接打开首选逻辑库，而不是留下「等待接线」占位。
@@ -1951,7 +1875,6 @@ export function App(): ReactElement {
       if (preferred) {
         setCenterView('resource');
         void selectFile(preferred);
-        setStatus('PARAM：逻辑库工作台');
         return;
       }
     }
@@ -1960,7 +1883,6 @@ export function App(): ReactElement {
       if (first) {
         setCenterView('resource');
         void selectFile(first);
-        setStatus('文本：逻辑库工作台');
         return;
       }
     }
@@ -1969,7 +1891,6 @@ export function App(): ReactElement {
       if (first) {
         setCenterView('resource');
         void selectFile(first);
-        setStatus('事件：源码工作台');
         return;
       }
     }
@@ -1980,28 +1901,21 @@ export function App(): ReactElement {
     setPreview(null);
     setCenterView('resource');
     if (domain === 'files') {
-      setStatus('文件：物理浏览');
       return;
     }
-    const capability = domainSummaries.find((entry) => entry.domain === domain)?.capability ?? 'deferred';
-    setStatus(capability === 'read-ready'
-      ? `${domainLabel(domain)}：逻辑库工作域（等待成熟工作台接线）`
-      : `${domainLabel(domain)}：${capability === 'deferred' ? 'read contract 尚未接线' : '运行条件不满足'}`);
   }
 
   function openOperationsView(): void {
     setCenterView('operations');
-    setStatus('任务与历史：写入、回滚与诊断记录');
   }
 
   function openBnd4ForSelection(): void {
     if (!selectedFile) {
-      setStatus('先选择一个容器资源，再以 BND4 容器打开。');
+      pushToast('先选择一个容器资源，再以 BND4 容器打开。', 'warn');
       return;
     }
     setBnd4Forced(true);
     setCenterView('resource');
-    setStatus(`以 BND4 容器打开：${selectedFile.relativePath}`);
   }
 
   async function selectFile(file: RendererIndexedFile): Promise<void> {
@@ -2024,10 +1938,9 @@ export function App(): ReactElement {
     setBnd4Forced(false);
     setCenterView('resource');
     if (!bridge) {
-      setStatus(describeBridgeAbsence(`打开 ${file.relativePath}`));
+      pushToast(describeBridgeAbsence(`打开 ${file.relativePath}`), 'warn');
       return;
     }
-    setStatus(`正在打开 ${file.relativePath}...`);
     const nextPreview = await bridge.openResourcePreview(file.sourceUri);
     setPreview(nextPreview);
     const text = nextPreview?.text ?? '';
@@ -2048,7 +1961,6 @@ export function App(): ReactElement {
       const result = await bridge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setFlverData(result.data);
     }
-    setStatus(nextPreview ? `已打开 ${file.relativePath}` : '无法预览该资源');
   }
 
   /** 文本编辑「保存」= 生成候选变更，进入审查队列；实际写入由变更队列提交执行。 */
@@ -2063,7 +1975,7 @@ export function App(): ReactElement {
       newValue: editText,
       payload: {}
     });
-    setStatus('变更已进入审查队列：批准后暂存，写入时自动备份。');
+    pushToast('变更已进入审查队列：批准后暂存，写入时自动备份。');
   }
 
   /** 变更队列写入执行器：按 kind 调用对应 IPC，保留 hash 前置条件与重读。 */
@@ -2147,14 +2059,8 @@ export function App(): ReactElement {
   }
 
   async function commitStagedChanges(): Promise<void> {
-    setStatus('正在校验并写入已暂存变更…');
     const result = await changeStore.commitAll(applyStagedChange);
     await refreshOperationHistory();
-    setStatus(
-      result.failed === 0
-        ? `写入完成：${result.written} 项已写入，原文件已备份，可回滚。`
-        : `写入结束：${result.written} 项已写入，${result.failed} 项失败（原因见诊断）。`
-    );
     pushToast(
       result.failed === 0
         ? `写入完成：${result.written} 项已写入，原文件已备份，可回滚`
@@ -2168,11 +2074,10 @@ export function App(): ReactElement {
       announceDesktopOnly('回滚操作');
       return;
     }
-    setStatus(`正在回滚操作 ${opId.slice(0, 8)}...`);
     const result = await bridge.rollbackOperation(opId);
     await refreshOperationHistory();
     if (!result.ok) {
-      setStatus(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`);
+      pushToast(`回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || opId}`, 'warn');
       return;
     }
     if (selectedFile) {
@@ -2183,7 +2088,7 @@ export function App(): ReactElement {
       setLastSavedText(text);
       setMsgRows(extractMsgRows(refreshed));
     }
-    setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
+    pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
   }
 
   function updateMsgRow(index: number, patch: Partial<EditableMsgRow>): void {
@@ -2239,7 +2144,6 @@ export function App(): ReactElement {
     }
     const prompt = aiPrompt.trim();
     if (prompt === '') {
-      setStatus('任务描述为空，未发起 AI 任务');
       return;
     }
     // T6：没配模型在对话里写说明（不卡输入框以外的整栏，也不整次拒绝成
@@ -2247,12 +2151,10 @@ export function App(): ReactElement {
     if (agentServiceId === null) {
       setAgentIdleNotice('尚未配置模型服务，未发起 AI 任务。请在 Agent 历史 → 模型设置 中选择或配置模型服务。');
       setAgentGoal(prompt);
-      setStatus('尚未配置模型服务');
       return;
     }
     setAgentIdleNotice(null);
     setAgentTask(INITIAL_AGENT_TASK_STATE);
-    setStatus('正在发起 AI 任务...');
     const result = await bridge.runAiAgent({
       configId: agentServiceId,
       prompt,
@@ -2272,13 +2174,11 @@ export function App(): ReactElement {
         phase: 'error',
         error: { code: result.error.code, message: result.error.message }
       });
-      setStatus(`AI 任务未发起：${result.error.code}`);
       pushToast(`AI 任务未发起：${result.error.message}`, 'warn');
       return;
     }
     setAgentGoal(prompt);
     setAgentTask(startAgentTask(result.sessionId));
-    setStatus('AI 任务已发起，进度会在 Agent 面板更新');
   }
 
   /**
@@ -2297,7 +2197,6 @@ export function App(): ReactElement {
       return;
     }
     setAgentTask((current) => markAgentTaskCancelling(current));
-    setStatus('已发出取消请求，等待当前步骤让出');
     await bridge.cancelAiAgent(sessionId);
   }
 
@@ -2359,7 +2258,6 @@ export function App(): ReactElement {
       permissionMode: result.meta?.permissionMode ?? null,
       protocol: result.meta?.protocol ?? null
     });
-    setStatus(`已载入会话 ${sessionPath}，共 ${result.messageCount} 条消息`);
   }
 
   async function runToolSearch(toolQuery: string): Promise<void> {
@@ -3012,11 +2910,8 @@ export function App(): ReactElement {
                   </p>
                 </section>
           )}
-          {/* Structured preview 与原生格式检查已移到本面板**末尾**并默认折叠
-              （见下方 resource-evidence-details）。
-              它们此前排在所有编辑器之前、常驻展开，于是打开一个 param 先看到的是
-              两张证据卡而不是行表——编辑器被挤到滚动区外。那两张卡是给 AI 与
-              排查用的证据投影，不是日常编辑要看的东西。 */}
+          {/* 证据投影已整体退出编辑壳（S12）：structured preview / 原生格式检查 /
+              hex 是排查用的开发者通道，不占编辑区。 */}
           {/* 纯文本编辑器只在 plain-text 时出现。
               此前条件是 `previewKind === 'text'`，而它对 FMG/msg 资源同样为真，
               于是文本编辑器会和 FMG 文本工作台**叠在一起**——同一个资源两个编辑区，
@@ -3182,7 +3077,7 @@ export function App(): ReactElement {
                 live={fmgLive}
                 onMutation={(mutation) => {
                   if (!fmgLive || !fmgSourceHash || !selectedFile) {
-                    setStatus('当前 FMG 未实时加载，不能生成候选变更；请先选中可解析资源。');
+                    pushToast('当前 FMG 未实时加载，不能生成候选变更；请先选中可解析资源。', 'warn');
                     return;
                   }
                   const op = mutation.kind === 'fmg_entry_delete' ? 'delete'
@@ -3206,7 +3101,7 @@ export function App(): ReactElement {
                       ...(mutation.tableId !== undefined ? { tableId: mutation.tableId } : {})
                     }
                   });
-                  setStatus('FMG 候选变更已进入审查队列。');
+                  pushToast('FMG 候选变更已进入审查队列。');
                 }}
               />
             </>
@@ -3275,14 +3170,12 @@ export function App(): ReactElement {
                   }
                 );
                 if (saved.ok) {
-                  setStatus(
-                    `PARAM 字段已写入：${input.paramName} 行 ${input.rowId} 的 ${input.fieldId}。`
-                  );
+                  pushToast(`PARAM 字段已写入：${input.paramName} 行 ${input.rowId} 的 ${input.fieldId}。`);
                   void refreshOperationHistory();
                   return { ok: true };
                 }
                 const message = saved.diagnostics?.[0]?.message ?? 'PARAM 字段写入失败。';
-                setStatus(`PARAM 字段写入失败：${message}`);
+                pushToast(`PARAM 字段写入失败：${message}`, 'warn');
                 return { ok: false, message };
               }}
               onApplyRowNameMutation={async (input) => {
@@ -3312,14 +3205,12 @@ export function App(): ReactElement {
                   }
                 );
                 if (saved.ok) {
-                  setStatus(
-                    `PARAM 行名已写入：${input.paramName} 行 ${input.rowId} →「${input.name}」。`
-                  );
+                  pushToast(`PARAM 行名已写入：${input.paramName} 行 ${input.rowId} →「${input.name}」。`);
                   void refreshOperationHistory();
                   return { ok: true };
                 }
                 const message = saved.diagnostics?.[0]?.message ?? 'PARAM 行名写入失败。';
-                setStatus(`PARAM 行名写入失败：${message}`);
+                pushToast(`PARAM 行名写入失败：${message}`, 'warn');
                 return { ok: false, message };
               }}
             />
@@ -3336,7 +3227,7 @@ export function App(): ReactElement {
                 live={paramLive}
                 onMutation={(mutation) => {
                   if (!paramLive || !paramSourceHash || !selectedFile) {
-                    setStatus('当前 PARAM 未实时加载，不能生成候选变更；请先选中可解析资源。');
+                    pushToast('当前 PARAM 未实时加载，不能生成候选变更；请先选中可解析资源。', 'warn');
                     return;
                   }
                   if (mutation.kind === 'param_row_delete') {
@@ -3349,7 +3240,7 @@ export function App(): ReactElement {
                       newValue: '（删除）',
                       payload: { op: 'delete', id: mutation.id }
                     });
-                    setStatus('PARAM 行删除候选已进入审查队列。');
+                    pushToast('PARAM 行删除候选已进入审查队列。');
                     return;
                   }
                   // Duplicate/upsert payload: the paged table carries the full row
@@ -3362,7 +3253,7 @@ export function App(): ReactElement {
                       ? paramRowPayloads.get(mutation.sourceId)
                       : undefined);
                   if (!payload) {
-                    setStatus('缺少 row dataBase64，无法生成候选（截断行）。');
+                    pushToast('缺少 row dataBase64，无法生成候选（截断行）。', 'warn');
                     return;
                   }
                   changeStore.propose({
@@ -3376,7 +3267,7 @@ export function App(): ReactElement {
                     newValue: `行 ${mutation.id}（${payload.length} 字节 base64）`,
                     payload: { op: 'upsert', id: mutation.id, dataBase64: payload }
                   });
-                  setStatus('PARAM 行候选已进入审查队列。');
+                  pushToast('PARAM 行候选已进入审查队列。');
                 }}
               />
               {/* 字段定义的来源与限制必须写在字段表旁边，而不是只存在状态里。
@@ -3424,7 +3315,7 @@ export function App(): ReactElement {
                         newValue: String(input.value),
                         payload: { ...input }
                       });
-                      setStatus('PARAM 字段候选已进入审查队列。');
+                      pushToast('PARAM 字段候选已进入审查队列。');
                       return { ok: true, diagnostics: [] };
                     }
                   }
@@ -3477,16 +3368,16 @@ export function App(): ReactElement {
                 ...(d.sourceUri ? { resourceUri: d.sourceUri } : {})
               }))}
               patchImpact={null}
-              onCancelJob={() => setStatus('任务取消请求已记录；待 TaskQueue IPC。')}
+              onCancelJob={() => pushToast('任务取消请求已记录。', 'ok')}
               onRollback={(opId) => {
                 if (!bridge) {
                   announceDesktopOnly('回滚操作');
                   return;
                 }
                 void bridge.rollbackOperation(opId).then(() => {
-                  setStatus(`已请求回滚 ${opId}`);
+                  pushToast(`已请求回滚 ${opId}`);
                 }).catch((error: unknown) => {
-                  setStatus(error instanceof Error ? error.message : '回滚失败');
+                  pushToast(error instanceof Error ? error.message : '回滚失败', 'warn');
                 });
               }}
             />
@@ -3524,103 +3415,10 @@ export function App(): ReactElement {
               initialUri={selectedFile.sourceUri}
             />
           )}
-          {/* 没有语义编辑器的资源：给一句人话 + 指向折叠区的原始字节。
-              此前这类资源什么编辑器都不显示，主区只剩证据卡与错误码。 */}
+          {/* 没有语义编辑器的资源：一句人话即可。原始字节/证据投影是排查用的
+              开发者通道，不再占编辑壳（S12）。 */}
           {activeEditor === 'binary' && !isMaterialFile && !isVfxFile && (
-            <p className="muted">
-              这个格式还没有专用编辑器。展开下方「原始字节与证据」可查看字节内容。
-            </p>
-          )}
-          {preview?.truncated && (
-            <p className="muted">
-              {formatPreviewTruncation(preview.bytesRead, preview.file?.size)}
-            </p>
-          )}
-          {/* 证据与格式检查：默认折叠，排在编辑器之后。
-              内容一字未改，只改了位置与默认展开状态——它们仍是 AI 侧边栏引用的
-              同一份证据投影，排查时展开即可。
-
-              外层条件必须把 hex 也算进来：hex 视图搬进本折叠区后，若条件仍只看
-              structuredPreview / nativeInspection，那些**只有** hex 的资源
-              （二进制资源的常态）会连折叠区都不渲染，原始字节视图彻底消失。
-              那是能力退化而不是降级——降级只应改变位置与默认展开状态。 */}
-          {(preview?.structuredPreview
-            || preview?.nativeInspection
-            || (preview?.previewKind === 'hex' && preview.hex)) && (
-            <details className="resource-evidence-details" data-testid="resource-evidence">
-              <summary>原始字节与证据</summary>
-              <p className="muted">
-                以下是资源的原始字节、结构化证据与原生格式判定，供 AI 引用与排查使用；
-                日常编辑不需要展开。
-              </p>
-              {preview.structuredPreview && <StructuredPreviewCard preview={preview.structuredPreview} />}
-              {preview.nativeInspection && <NativeInspectionCard inspection={preview.nativeInspection} />}
-              {/* 原始字节视图：与两张证据卡同级，收在本折叠区内。
-                  它此前排在**所有**编辑器面板之前，而 previewKind === 'hex' 是所有
-                  FromSoftware 二进制格式的默认分支——于是打开 param / event / chr 任何
-                  一个资源，主视图顶部先是「只读 Hex 证据」，工作台被挤到滚动区外。
-                  偏移与原始字节是排查用的证据，不是日常编辑要看的东西。 */}
-              {preview?.previewKind === 'hex' && preview.hex && (
-                <HexEditorPanel
-                  title={selectedFile?.relativePath ?? '二进制资源'}
-                  /* P3 裁定：预览 hex 一律经严格校验的转换出口，不再把「无空格的
-                     preview.hex」原样当 base64 直喂 atob——内容被误标时 atob 会抛
-                     Latin1 DOMException 把工作台摔死，校验后只会得到可行动错误。 */
-                  initialBytesBase64={hexTextToSafeBase64(preview.hex)}
-                  totalBytes={preview.file?.size}
-                  {...(selectedFile && bridge
-                    ? {
-                        // 接 readRawMetadata（main handler ipc.ts:1198）。独立价值是
-                        // 「不读内容就能拿到整文件哈希」——hex 视图一次只加载一个
-                        // 4 KiB 窗口，算不出整文件哈希，而校验「我看的这份字节属于哪个
-                        // 文件版本」需要它。core 对超上限文件报 deferred 而非硬算。
-                        onLoadMetadata: async () => {
-                          const raw = await bridge.readRawMetadata(selectedFile.sourceUri) as
-                            Record<string, unknown> | null;
-                          if (raw === null) return null;
-                          return {
-                            ...(typeof raw.size === 'number' ? { size: raw.size } : {}),
-                            ...(typeof raw.contentHash === 'string' ? { contentHash: raw.contentHash } : {}),
-                            ...(typeof raw.hashStatus === 'string' ? { hashStatus: raw.hashStatus } : {})
-                          };
-                        }
-                      }
-                    : {})}
-                  {...(selectedFile && bridge
-                    ? {
-                        // 接 readRawRange（main handler ipc.ts:1170）——预览只读前 64 KiB，
-                        // 而实测 mods 下 237 个文件有 148 个超过它，此前 hex 证据对这些文件
-                        // 只能看到开头且把前缀长度当总量显示。硬约束 17 要求大规模访问分页。
-                        // 不用 `as` 整体断言 IPC 返回值——第一版那样写掩盖了一个真 bug：
-                        // core 的字段叫 base64（rawRead.ts:35）而我写成 bytesBase64，
-                        // 断言让 typecheck 通过、功能却永远读不到数据。改为逐字段取值 +
-                        // 运行期类型判断，字段名对不上时至少 diagnostics 会带出原因。
-                        onLoadRange: async (offset: number, length: number) => {
-                          const raw = await bridge.readRawRange(
-                            selectedFile.sourceUri,
-                            offset,
-                            length
-                          ) as Record<string, unknown> | null;
-                          const rec = raw ?? {};
-                          const diags = Array.isArray(rec.diagnostics)
-                            ? (rec.diagnostics as Array<{ code?: unknown; message?: unknown }>).map((d) => ({
-                                code: String(d.code ?? 'UNKNOWN'),
-                                message: String(d.message ?? '')
-                              }))
-                            : [];
-                          return {
-                            ok: rec.ok === true,
-                            ...(typeof rec.base64 === 'string' ? { base64: rec.base64 } : {}),
-                            ...(typeof rec.fileSize === 'number' ? { fileSize: rec.fileSize } : {}),
-                            diagnostics: diags
-                          };
-                        }
-                      }
-                    : {})}
-                />
-              )}
-              {preview?.previewKind === 'hex' && !preview.hex && <pre className="muted">无 Hex 预览数据。</pre>}
-            </details>
+            <p className="muted">这个格式还没有专用编辑器。</p>
           )}
           </PanelErrorBoundary>
                 </div>
@@ -3776,65 +3574,6 @@ export function App(): ReactElement {
           onExplainEvent={(uri) => void explainEvent(uri)}
         />
       </div>
-
-      {/* ══════════ 底部日志区 ══════════ */}
-      {/* 诊断码与解析细节的唯一去处。此前它们印在主编辑区里
-          （DCX_PAYLOAD_BOUNDARY_CONFIRMED、「分页通道不可用」、
-          「空文档（未选中可解析 EMEVD 或读取失败）」），把要编辑的数据挤下去，
-          用户看到的是一堆看不懂的错误码而不是编辑器。 */}
-      <DiagnosticsLog
-        diagnostics={diagnostics}
-        status={status}
-        open={logOpen}
-        onToggle={() => setLogOpen((open) => !open)}
-      />
-
-      {/* ══════════ 状态栏 ══════════ */}
-      <footer className="status-bar">
-        <div className="statusbar__left">
-          <span className="st-item st-branch" title="工作区">
-            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
-              <path d="M6 3v6a4 4 0 0 0 4 4h4" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <circle cx="6" cy="5" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <circle cx="6" cy="19" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <circle cx="18" cy="13" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <path d="M6 7v10" stroke="currentColor" strokeWidth="1.6" />
-            </svg>
-            {workspace?.workspaceLabel ?? '未打开工作区'}
-          </span>
-          <span className="st-item" title="VFS 索引">
-            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
-              <ellipse cx="12" cy="5.5" rx="7" ry="2.8" fill="none" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M5 5.5v6c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-6M5 11.5v6c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-6" fill="none" stroke="currentColor" strokeWidth="1.5" />
-            </svg>
-            {allFiles.length} 资源已索引
-          </span>
-          <span className="st-item" title="当前中央资源">当前：{selectedFile?.relativePath ?? '无'}</span>
-        </div>
-        <div className="statusbar__right">
-          <span className="st-item" title="当前键位套"> {statusSuitLabel(activeDomain)}</span>
-          <span className="st-item st-status" role="status" title={status}>{status}</span>
-          {/* 诊断计数此前是死文本：显示「1035 条诊断」却点不开，用户无从查看。
-              现在它是日志区的开关 —— 计数与内容必须可达，否则那个数字只是噪声。 */}
-          <button
-            type="button"
-            className="st-item st-item--button"
-            onClick={() => setLogOpen((open) => !open)}
-            aria-expanded={logOpen}
-            title={logOpen ? '收起日志' : '展开日志'}
-          >
-            {diagnostics.length ? `${diagnostics.length} 条诊断` : '没有诊断'}
-          </button>
-          <span className="st-item st-ok" title="写入前自动备份">
-            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
-              <path d="M12 3l7 3v5c0 4.4-3 8-7 10-4-2-7-5.6-7-10V6Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-              <path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-            备份：启用 · 可回滚
-          </span>
-          <span className="st-item">{clockText}</span>
-        </div>
-      </footer>
 
       {/* ══════════ 命令面板 ══════════ */}
       <div

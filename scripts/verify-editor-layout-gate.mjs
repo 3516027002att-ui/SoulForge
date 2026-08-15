@@ -1,57 +1,46 @@
 #!/usr/bin/env node
 /**
- * 编辑器布局门禁:证据投影不得占据主视图顶部。
+ * 编辑器布局门禁:编辑壳不得有底栏与证据折叠区（S12 卸底栏）。
  *
  * ── 守的问题 ──
  *
- * 用户报「打开这些页面全是证据卡，根本没法像编辑器一样用」。实测原因是
- * App.tsx 把 StructuredPreviewCard 与 NativeInspectionCard 渲染在**所有编辑器
- * 面板之前**且常驻展开：打开一个 param，先看到的是两张证据卡，行表被挤到滚动区
- * 外。那两张卡是给 AI 与排查用的证据投影，不是日常编辑要看的东西。
+ * 用户报「不要下方任何东西（日志、已索引），工作区贯穿到底」。实测截图里挡在
+ * 工作台下面/后面的有四层：64 KiB 预览条、「原始字节与证据」折叠区、
+ * DiagnosticsLog 底部日志、status-bar 状态栏。S12 拍死四层全部从 App.tsx
+ * 编辑壳卸载，不是折起来；64 KiB / hex / 诊断数据可留在 main 与 Agent 引用，
+ * 但不得再占编辑壳。
  *
- * 这类缺陷没有任何自动信号：编译通过、测试全绿、功能"可用"（滚下去就有），
- * 只是没人愿意用。而它极易被改回去——挪一行 JSX 就够。
+ * 这类缺陷没有任何自动信号：编译通过、测试全绿、功能"可用"，只是布局被
+ * 底栏吃掉。而它极易被改回去——把某个 <footer> 或 <details> 加回 App.tsx
+ * 就够。故用静态判据守住「编辑壳里没有这些东西」。
  *
  * ── 为什么是静态判据而不是 e2e ──
  *
- * 先写过 e2e，实测**验不了**：当前 fixture 工作区里没有任何资源带
- * structuredPreview 或 nativeInspection（逐个资源模式试过 event/msg/other/all），
- * 证据区根本不渲染，用例只能恒红。留一条永远红的 e2e 比没有更糟，故删掉改成
- * 静态判据。这里如实记下这个限制：本门禁读源码结构，不证明运行期视觉顺序。
+ * 旧版门禁先写过 e2e，实测验不了：fixture 工作区里没有资源带 structuredPreview
+ * 或 nativeInspection，证据区根本不渲染，用例只能恒红。S12 的形态（元素不存在）
+ * 更适合静态判据：直接在源码里断言「渲染点不存在」。这里如实记下这个限制：
+ * 本门禁读源码结构，不证明运行期视觉顺序，也不检查 CSS。
  *
  * 判据:
- *   ① 三处证据渲染点（两张证据卡 + Hex 视图）必须在折叠容器
- *      resource-evidence-details 内；
- *   ② 该容器不得带 open（默认收起）；
- *   ③ 容器在源码里的位置必须晚于全部编辑器面板 —— JSX 顺序即渲染顺序；
- *   ④ 提取失败必须失败关闭：扫不到渲染点或容器说明匹配规则坏了。
+ *   ① App.tsx 编辑壳内不得出现 resource-evidence-details（证据折叠区已删）；
+ *   ② 不得出现 <footer className="status-bar"（状态栏已删）；
+ *   ③ 不得出现 <DiagnosticsLog（底部日志区已删）；
+ *   ④ 证据卡（StructuredPreviewCard / NativeInspectionCard / HexEditorPanel）
+ *      不得在 App.tsx 内渲染——它们是开发者/Agent 通道，编辑壳里不出现。
+ *      若未来某个面板（如 Bnd4WorkbenchPanel）内部使用 HexEditorPanel，
+ *      判据只约束 App.tsx，不约束面板内部。
+ *   ⑤ 提取失败必须失败关闭：找不到 App.tsx 说明匹配规则坏了。
  *
- * ── 为什么把 Hex 也纳入(2026-08-10 补)──
+ * ── 负向证明(2026-08-15 实测)──
+ *   L1  把 <details className="resource-evidence-details"> 加回 App.tsx
+ *       → EVIDENCE_DETAILS_PRESENT
+ *   L2  把 <footer className="status-bar"> 加回 App.tsx → STATUS_BAR_PRESENT
+ *   L3  把 <DiagnosticsLog 加回 App.tsx → DIAGNOSTICS_LOG_PRESENT
+ *   L4  把 <StructuredPreviewCard 加回 App.tsx → EVIDENCE_CARD_PRESENT
  *
- * 第一版只管两张证据卡，结果它报绿而用户报告的形态依然存在：
- * `previewKind === 'hex'` 是所有 FromSoftware 二进制格式的默认分支，
- * HexEditorPanel 无条件排在全部编辑器面板之前，于是打开 param / event / chr
- * 任何一个资源，主视图顶部先是「只读 Hex 证据」。只覆盖三分之一成因却报绿的
- * 门禁比没有门禁更危险 —— 它给出「已守住」的假信号。
- *
- * ── 负向证明(2026-08-10 实测四条)──
- *   L1  折叠区加 open（等于回到原状）      → EVIDENCE_DETAILS_DEFAULT_OPEN
- *   L2  把证据卡挪回编辑器之前              → EVIDENCE_CARD_OUTSIDE_DETAILS
- *   L4  证据卡渲染点消失                    → EVIDENCE_CARDS_NOT_FOUND（失败关闭）
- *   L5  把 HexEditorPanel 挪回编辑器之前    → EVIDENCE_CARD_OUTSIDE_DETAILS
- *       （守的正是用户报告的原始形态）
- *
- * L2 守的正是用户报告的形态：「打开这些页面全是证据卡」。它把两张卡搬回
- * PanelErrorBoundary 开头，门禁立刻报红。
- *
- * 本门禁自身也是先红后绿的产物：第一版不剥注释，命中的是一句 JSX 注释里提到的
- * `resource-evidence-details` 字符串，算出的位置比真实容器早一万多字符，
- * 于是在代码正确时报「证据排在编辑器之前」。那种假红会让人直接关掉门禁，
- * 故加了 stripComments。
- *
- * 另有一条 L3（删掉折叠容器让证据卡裸露）已移除：它的场景与 L2 重合
- * ——两者都是「卡片不在折叠区内」，而 L2 的锚点更贴近真实回退方式。
- * 保留一个冗余用例只会增加维护面。
+ * 本门禁自身也是先红后绿的产物：旧版守的是「证据卡收进折叠区、排在编辑器
+ * 之后」；S12 的用户裁定比旧版更彻底（折叠区整个消失），故门禁从「位置」
+ * 判据改为「存在性」判据，旧判据全部失效，不得复用。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -72,17 +61,8 @@ if (!existsSync(APP)) {
 
 const rawSource = readFileSync(APP, 'utf8');
 
-/**
- * 剥掉注释后再定位。
- *
- * 实测必须这么做:第一版直接在原文里找 `resource-evidence-details`，命中的是
- * 一句 JSX 注释里提到的同名字符串（`{/* …见下方 resource-evidence-details *␑/}`），
- * 于是算出的位置比真实容器早一万多字符，门禁误报「证据排在编辑器之前」。
- * 判据把注释当代码，就会在代码正确时报红 —— 那种假红会让人直接关掉门禁。
- *
- * 用等长空格替换而不是删除：这样保留的偏移仍与原文一一对应，报告里的偏移
- * 和行号才有意义。
- */
+/** 剥掉注释后再定位：JSX 注释里可能提到这些类名（旧版实测命中过一次注释里的
+ *  `resource-evidence-details`），把注释当代码会在代码正确时报红。 */
 function stripComments(text) {
   let out = '';
   let index = 0;
@@ -114,111 +94,71 @@ const findings = [];
 /** 取标签在源码中的首次出现位置；-1 表示不存在。 */
 const at = (needle) => source.indexOf(needle);
 
-const structuredAt = at('<StructuredPreviewCard');
-const nativeAt = at('<NativeInspectionCard');
-/**
- * Hex 视图也是证据投影，必须同样收在折叠区内。
- *
- * 为什么补这一条：本门禁第一版只管两张证据卡，于是它在代码「正确」时报绿，
- * 而用户报告的形态依然存在 —— 因为 `previewKind === 'hex'` 是所有 FromSoftware
- * 二进制格式的默认分支，HexEditorPanel 无条件排在全部编辑器面板之前。打开
- * param / event / chr 任何一个资源，主视图顶部先是「只读 Hex 证据」，
- * 工作台被挤到滚动区外。
- *
- * 也就是说：漏掉 Hex 让这道门禁只覆盖了三分之一的成因，报绿却没解决问题。
- * 那比没有门禁更危险 —— 它给出「已守住」的假信号。
- */
-const hexAt = at('<HexEditorPanel');
+// 判据①：证据折叠区不得出现在编辑壳。
 const detailsAt = at('resource-evidence-details');
-
-// 判据④
-if (structuredAt < 0 || nativeAt < 0 || hexAt < 0) {
-  report({
-    ok: false, gate: LABEL, status: 'failed', code: 'EVIDENCE_CARDS_NOT_FOUND',
-    message: '在 App.tsx 里找不到 StructuredPreviewCard / NativeInspectionCard / HexEditorPanel'
-      + ' 的渲染点。提取失败必须失败关闭，否则判据①②③会零样本恒真。',
-    structuredAt, nativeAt, hexAt
-  }, 1);
-}
-if (detailsAt < 0) {
-  report({
-    ok: false, gate: LABEL, status: 'failed', code: 'EVIDENCE_DETAILS_NOT_FOUND',
-    message: '找不到 resource-evidence-details 折叠容器 —— 证据卡不在折叠区内。'
-      + ' 它们此前常驻展开在主视图顶部，用户因此看不到编辑器。'
-  }, 1);
+if (detailsAt >= 0) {
+  findings.push({
+    code: 'EVIDENCE_DETAILS_PRESENT',
+    at: detailsAt,
+    message: 'App.tsx 里出现了 resource-evidence-details —— S12 已把「原始字节与证据」'
+      + '折叠区从编辑壳卸载；64 KiB/hex/证据数据只允许留在 main 与 Agent 引用，'
+      + '不得再占编辑壳。'
+  });
 }
 
-// 判据①:三处证据渲染点都必须在容器之后（即容器内）。
-for (const [name, position] of [
-  ['StructuredPreviewCard', structuredAt],
-  ['NativeInspectionCard', nativeAt],
-  ['HexEditorPanel', hexAt]
+// 判据②：状态栏 footer 不得出现。
+const statusBarAt = at('className="status-bar"');
+if (statusBarAt >= 0) {
+  findings.push({
+    code: 'STATUS_BAR_PRESENT',
+    at: statusBarAt,
+    message: 'App.tsx 里出现了 status-bar footer —— S12 已删状态栏（已索引/备份/诊断'
+      + '计数/时钟/键位套全部随它消失）。用户原话「不要下方任何东西」。'
+  });
+}
+
+// 判据③：底部日志区不得出现。
+const diagAt = at('<DiagnosticsLog');
+if (diagAt >= 0) {
+  findings.push({
+    code: 'DIAGNOSTICS_LOG_PRESENT',
+    at: diagAt,
+    message: 'App.tsx 里渲染了 DiagnosticsLog —— S12 已把底部日志区从编辑壳卸载；'
+      + '诊断输出走编辑区内结构化句与 Agent 通道。'
+  });
+}
+
+// 判据④：三张证据卡不得在 App.tsx 渲染（它们是开发者/Agent 通道）。
+for (const [name, needle] of [
+  ['StructuredPreviewCard', '<StructuredPreviewCard'],
+  ['NativeInspectionCard', '<NativeInspectionCard'],
+  ['HexEditorPanel', '<HexEditorPanel']
 ]) {
-  if (position < detailsAt) {
+  const position = at(needle);
+  if (position >= 0) {
     findings.push({
-      code: 'EVIDENCE_CARD_OUTSIDE_DETAILS',
+      code: 'EVIDENCE_CARD_PRESENT',
       card: name,
-      cardAt: position,
-      detailsAt,
-      message: `${name} 出现在折叠容器之前（偏移 ${position} < ${detailsAt}），`
-        + '说明它不在折叠区内。证据投影必须收进 resource-evidence-details。'
+      at: position,
+      message: `App.tsx 里渲染了 ${name} —— S12 之后编辑壳不再承载原始字节证据。`
+        + '该组件可留在其它面板（如 BND4 工作台）与开发者通道，但不得回到 App 编辑壳。'
     });
   }
 }
 
-// 判据②:容器不得默认展开。
-const detailsTag = /<details className="resource-evidence-details"([^>]*)>/.exec(source);
-if (!detailsTag) {
-  findings.push({
-    code: 'EVIDENCE_DETAILS_TAG_UNPARSEABLE',
-    message: '未能解析 resource-evidence-details 的 details 标签，判据②无从校验。'
-  });
-} else if (/\bopen\b/.test(detailsTag[1])) {
-  findings.push({
-    code: 'EVIDENCE_DETAILS_DEFAULT_OPEN',
-    attributes: detailsTag[1].trim(),
-    message: '证据折叠区带了 open（默认展开）。默认展开等于回到原状：'
-      + '打开资源先看到证据卡而不是编辑器。'
-  });
-}
-
-// 判据③:容器必须晚于全部编辑器面板。
-const EDITOR_PANELS = [
-  '<ParamTablePanel',
-  '<ParamDefPanel',
-  '<FmgWorkbenchPanel',
-  '<EmevdFourViewPanel',
-  '<MsbScenePanel'
-];
-const panelPositions = EDITOR_PANELS
-  .map((tag) => ({ tag, position: at(tag) }))
-  .filter((entry) => entry.position >= 0);
-if (panelPositions.length === 0) {
+// 判据⑤：提取失败必须失败关闭 —— 编辑壳锚点全部找不到说明匹配规则坏了。
+if (at('<main') < 0 || at('</main>') < 0) {
   report({
-    ok: false, gate: LABEL, status: 'failed', code: 'NO_EDITOR_PANELS_FOUND',
-    message: '在 App.tsx 里找不到任何编辑器面板渲染点；判据③零样本恒真，失败关闭。',
-    probed: EDITOR_PANELS
+    ok: false, gate: LABEL, status: 'failed', code: 'APP_SHELL_UNPARSEABLE',
+    message: '在 App.tsx 里找不到 <main> 锚点；提取失败必须失败关闭，'
+      + '否则上述存在性判据会零样本恒真。'
   }, 1);
-}
-for (const entry of panelPositions) {
-  if (detailsAt < entry.position) {
-    findings.push({
-      code: 'EVIDENCE_BEFORE_EDITOR',
-      panel: entry.tag,
-      panelAt: entry.position,
-      detailsAt,
-      message: `证据折叠区（偏移 ${detailsAt}）排在 ${entry.tag}（偏移 ${entry.position}）之前。`
-        + ' JSX 顺序即渲染顺序 —— 证据必须排在编辑器之后，否则编辑器又被挤到下面。'
-    });
-  }
 }
 
 if (findings.length > 0) {
   report({
-    ok: false, gate: LABEL, status: 'failed', code: 'EDITOR_LAYOUT_VIOLATION',
-    message: '证据投影的位置或默认展开状态回退了。',
-    detailsAt,
-    editorPanels: panelPositions,
+    ok: false, gate: LABEL, status: 'failed', code: 'EDITOR_SHELL_VIOLATION',
+    message: '编辑壳里出现了 S12 已卸载的底栏/证据元素，或证据卡回到 App 渲染。',
     findings
   }, 1);
 }
@@ -227,14 +167,10 @@ report({
   ok: true,
   gate: LABEL,
   status: 'passed',
-  message: `三处证据投影（结构化预览、原生检查、Hex 视图）收在折叠区内、默认收起，`
-    + `且排在 ${panelPositions.length} 个编辑器面板之后。`,
-  detailsAt,
-  evidenceAt: { structuredAt, nativeAt, hexAt },
-  editorPanels: panelPositions.map((entry) => ({ tag: entry.tag, at: entry.position })),
-  nonClaim: '本门禁读 App.tsx 的源码结构（JSX 出现顺序与 details 属性），'
-    + '不证明运行期视觉顺序、不检查 CSS 是否把元素移回顶部，也不覆盖各编辑器面板'
-    + '内部的布局。先尝试过 e2e 验证，实测当前 fixture 工作区里没有任何资源带'
-    + ' structuredPreview/nativeInspection，证据区不渲染因而用例只能恒红，'
-    + '故改为静态判据 —— 这个限制是真实的，不是偷懒。'
+  message: 'App.tsx 编辑壳没有 status-bar / DiagnosticsLog / resource-evidence-details，'
+    + '也没有证据卡渲染 —— 中央编辑区贴窗口底，诊断与证据留在面板内与 Agent 通道。',
+  nonClaim: '本门禁读 App.tsx 的源码结构（元素存在性），不证明运行期视觉顺序、'
+    + '不检查 CSS 高度、也不覆盖各编辑器面板内部的布局（面板内引用 HexEditorPanel '
+    + '等证据组件是允许的）。旧版门禁守的是「证据卡在折叠区内、排在编辑器之后」，'
+    + 'S12 用户裁定改为「折叠区整体消失」，判据已随裁定更新。'
 }, 0);

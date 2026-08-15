@@ -31,7 +31,8 @@ await window.screenshot({ path: path.join(shotsDir, 'final-01-empty-workspace.pn
 // T2：打开工作区入口移到中央开始页；窄窗口下 Agent dock 压缩中央，先收起。
 await closeAgentPanel(window);
 await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
-await window.locator('.status-bar').waitFor({ state: 'visible' });
+// S12：状态栏已卸载，等开始页出现（mountWorkspace 完成后 activeDomain 落回 project）。
+await window.locator('.project-overview').waitFor({ state: 'visible' });
 // Files 域物理浏览：SHELL-09 下文本域不渲染文件树，须先切到 Files 域并收起
 // Agent dock（spec 同口径），再定位 msgbnd 文件进入 FMG 工作台。
 await window.locator('[data-domain="files"]').click();

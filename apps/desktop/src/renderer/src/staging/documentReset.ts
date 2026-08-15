@@ -164,8 +164,6 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setBnd4Forced: '强制以 BND4 打开的标记',
   setSidebarView: '侧栏视图状态',
   setAgentOpen: 'Agent 抽屉开关',
-  setLogOpen: '底部日志区开关：属于用户偏好，切换资源时把它收起会让人重复展开',
-  setStatus: '状态栏文案',
   setParamRowDataSize: '行宽由 paramdef 决定，复位为 0 会让 UI 显示错误的 0 字节；保留上次值直到新文档赋值',
   setAiProvider: 'AI 会话配置',
   setAiThinking: '同上',

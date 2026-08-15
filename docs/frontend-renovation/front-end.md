@@ -314,11 +314,12 @@ Smithbox 顶栏还有本文没有做成一等域的编辑器。映射固定如�
 领域编辑器栏                                  Start / PARAM / Text / ...（R1 裁定后无独立 GPARAM）
 文档标签栏                                    逻辑文档，不是每个磁盘文件
 主工作区                                      唯一 full-bleed 编辑器 + 右侧 Agent dock
-Problems / Output                             底部 dock
-状态栏                                        workspace / selection / revision / transaction
 ```
 
 中央区域一次只能渲染一个编辑器。日常编辑器必须贴合 client area，不得再套外层圆角 panel。
+**日常壳无底栏（S12 用户裁定）**：没有状态栏、没有 64 KiB 预览条、没有「原始字节与证据」
+折叠区、没有底部日志 dock——中央编辑区与右侧 Agent dock 贴窗口底。64 KiB / hex /
+诊断数据属于 main 与 Agent 引用等开发者通道，不得再占编辑壳。
 
 ### 3.2 一级领域
 
@@ -1806,7 +1807,7 @@ export type EditTransactionState =
   | { kind: 'failed'; operationId: string; phase: string; reasonCode: string };
 ```
 
-状态栏和 Change Review 必须显示当前状态。局部失败保留其他 pane 和已加载数据。
+Change Review 必须显示当前状态。局部失败保留其他 pane 和已加载数据。
 
 ### 14.3 能力状态
 
@@ -2413,7 +2414,7 @@ SHELL-09 → SHELL-10
 #### SHELL-10 — 键位跟域走（T7）
 
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/keybindings/keymapTable.ts`；`[CREATE] apps/desktop/src/renderer/src/keybindings/applyKeybinding.ts`；`[CREATE] apps/desktop/src/renderer/src/keybindings/keymapTable.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] docs/frontend-renovation/front-end.md`。
-- **Steps**：renderer 键位表模块（壳层三键 / 共用编辑 / PARAM/文本 / 事件 / 地图·模型视口 / 动作）；App.tsx 写死的 Ctrl+K/J/B 并入表；window keydown 输入框/textarea/contenteditable/Agent composer 内不抢工作台键，壳层三键始终生效；状态栏右侧显示套名「壳层 · PARAM」。
+- **Steps**：renderer 键位表模块（壳层三键 / 共用编辑 / PARAM/文本 / 事件 / 地图·模型视口 / 动作）；App.tsx 写死的 Ctrl+K/J/B 并入表；window keydown 输入框/textarea/contenteditable/Agent composer 内不抢工作台键，壳层三键始终生效。（S12 后日常壳无底栏，键位套名不再显示在状态栏；套名是纯内部概念。）
 - **Rules**：键位跟域走——没有视口的页不得抢 WASD；视口键仅指针在视口内命中；Alt+D 等能力不存在的键照常可命中但 UI 不得造假按钮。
 - **Tests**：`npm run test:renderer-unit`（keymapTable.test.ts）；`npm run typecheck`。
 

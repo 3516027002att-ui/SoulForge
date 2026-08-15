@@ -8,7 +8,6 @@
 :root {
   /* 尺寸（4px 基准） */
   --titlebar-h: 40px;
-  --statusbar-h: 24px;
   --activitybar-w: 48px;
   --sidebar-w: 264px;
   --agent-w: 440px;
@@ -285,7 +284,7 @@ kbd {
 }
 
 /* 数字列表对齐 */
-.st-item, .cq-counts, .audit-entry__meta, .pill, kbd {
+.cq-counts, .audit-entry__meta, .pill, kbd {
   font-variant-numeric: tabular-nums;
 }
 
@@ -1490,21 +1489,6 @@ pre.tool-output {
 .agent-secondary-drawer.is-hidden { display: none; }
 
 
-/* 证据与格式检查折叠区：排在编辑器之后，默认收起。
-   它们是给 AI 与排查用的证据投影，不是日常编辑要看的内容。 */
-.resource-evidence-details {
-  margin-top: 14px;
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
-}
-.resource-evidence-details > summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--ink-2);
-  padding: 4px 0;
-}
-.resource-evidence-details > summary:hover { color: var(--ink-1); }
-
 .agent-controls__scope { margin: 4px 0 0; font-size: 11px; color: var(--ink-3); }
 /* 折叠区块的 summary 复用 agent-block__label 的排版，但要能点。 */
 details.agent-block > summary.agent-block__label { cursor: pointer; }
@@ -1684,23 +1668,6 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .cq-commit:hover { background: var(--primary-fill-hover); }
 .cq-commit:disabled { opacity: .45; pointer-events: none; }
 
-/* ═══════════ 状态栏（e2e 钩子：.status-bar） ═══════════ */
-.status-bar {
-  height: var(--statusbar-h); flex: none; display: flex; align-items: center;
-  justify-content: space-between; gap: 12px; padding: 0 12px;
-  background: var(--forge-1); border-top: 1px solid var(--line);
-  font-size: 11px; color: var(--ink-3);
-}
-.statusbar__left, .statusbar__right { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.st-item {
-  display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px;
-  border-radius: var(--radius-s); cursor: default; white-space: nowrap;
-  transition: background var(--dur-micro), color var(--dur-micro);
-}
-.st-item:hover { background: var(--forge-hover); color: var(--ink-1); }
-.st-status { max-width: 42ch; overflow: hidden; text-overflow: ellipsis; }
-.st-ok { color: var(--ok); }
-
 /* ═══════════ 命令面板 ═══════════ */
 /* display 切换而非 opacity/visibility 过渡：节流窗口下过渡冻结会残留遮挡层。 */
 .cmdk-overlay {
@@ -1763,7 +1730,6 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 @media (max-width: 720px) {
   .cmdk-trigger span { display: none; }
   .cmdk-trigger { width: auto; }
-  .st-item:not(.st-branch):not(.st-ok):not(.st-status) { display: none; }
 }
 
 /* ═══════════ 无障碍：减少动效 ═══════════ */
@@ -2092,62 +2058,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
    容器，容器本身已在滚动区内时会叠加出比预期高得多的盒子。 */
 .panel > .workbench { min-height: 420px; }
 
-/* 状态栏里的可点项：外观与静态 st-item 一致，但有 hover/focus 反馈。
-   诊断计数此前是死文本（显示「1035 条诊断」却点不开），现在是日志开关。 */
-.st-item--button {
-  font: inherit; color: inherit; background: none;
-  border: none; padding: 0 4px; cursor: pointer; border-radius: var(--radius-s);
-}
-.st-item--button:hover { background: var(--control-hover-bg); color: var(--ink-0); }
-.st-item--button:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }
-
-/* ══════════ 底部日志区 ══════════ */
-/* 诊断码与解析细节的唯一去处。默认收起只占一行，展开时压缩编辑区而不是挤掉
-   某一栏 —— 三/四栏编辑器最缺横向空间，所以日志放底部而不是侧栏。 */
-.diaglog {
-  flex: none; display: flex; flex-direction: column;
-  border-top: 1px solid var(--line); background: var(--forge-1);
-  min-height: 0;
-}
-.diaglog.is-open { max-height: 40vh; }
-.diaglog__bar {
-  flex: none; display: flex; align-items: center; gap: 8px;
-  width: 100%; padding: 3px 10px; text-align: left;
-  font-size: 11px; color: var(--ink-1);
-  background: var(--forge-1); border: none; cursor: pointer;
-}
-.diaglog__bar:hover { background: var(--forge-2); }
-.diaglog__bar:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
-.diaglog__caret { flex: none; width: 10px; color: var(--ink-3); }
-.diaglog__label { font-weight: 600; letter-spacing: .03em; }
-.diaglog__status {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--ink-2);
-}
-.diaglog__spacer { flex: 1; min-width: 8px; }
-.diaglog__count { flex: none; color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.diaglog__body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.diaglog__toolbar {
-  flex: none; display: flex; align-items: center; gap: 8px;
-  padding: 4px 10px; border-bottom: 1px solid var(--line);
-}
-.diaglog__toolbar input[type="text"], .diaglog__toolbar input:not([type]) { min-width: 200px; }
-.diaglog__toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--ink-2); }
-.diaglog__rows { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; }
-/* grid 而非 flex：严重度/码/文案三列必须对齐，否则上千行读起来像散文。 */
-.diaglog__row {
-  display: grid; grid-template-columns: 4.5em minmax(12em, 22em) 1fr auto;
-  gap: 8px; align-items: baseline;
-  padding: 1px 10px; font-family: var(--font-mono); font-size: 11px;
-}
-.diaglog__row:hover { background: var(--forge-hover); }
-.diaglog__row > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.diaglog__sev { text-transform: uppercase; font-size: 10px; color: var(--ink-3); }
-.diaglog__row--error .diaglog__sev { color: var(--danger-text); }
-.diaglog__row--warning .diaglog__sev, .diaglog__row--warn .diaglog__sev { color: var(--warn); }
-.diaglog__code { color: var(--ink-1); }
-.diaglog__msg { color: var(--ink-2); font-family: var(--font-ui); }
-.diaglog__times { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+/* ══════════ 底部日志区（S12：编辑壳已卸载，样式随组件删除） ══════════ */
 
 /* ── 延期 / 只读横幅 ── */
 /* 延期格式保留标记：做成好用的只读工作台不等于假装可编辑。用 warn 语义而非
