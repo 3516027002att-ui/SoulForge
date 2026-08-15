@@ -103,6 +103,26 @@ async function mainInWorkspace(root: string): Promise<void> {
   );
   const staging = join(root, 'staging');
   await mkdir(staging, { recursive: true });
+
+  // S19: 生产读链必须能直接吃 .msb.dcx——磁盘上的真实形态是 DCX 头（DCX\0），
+  // Bridge read-msb-document 必须先 native 解 DCX 再认 "MSB " 魔数。以前冒烟
+  // 先在 TS 侧 decompressDfltDcx 再喂 Bridge，测的是裸 MSB 而不是用户打开的
+  // 文件；现在先直接读 DCX，失败即红（TypeScript 不得引入第二套 DCX parser）。
+  const dcxRead = await runBridge<MsbEnvelope>({
+    command: 'read-msb-document',
+    filePath: sourceDcx,
+    timeoutMs: 120_000
+  });
+  if (dcxRead.parseStatus === 'failed' || !dcxRead.data) {
+    throw new Error(`MSB DCX read failed（read-msb-document 必须 native 解 DCX）: ${JSON.stringify(dcxRead.diagnostics)}`);
+  }
+  if (!dcxRead.data.roundTrip?.semanticIdentical) {
+    throw new Error(`MSB DCX semantic roundtrip failed: ${JSON.stringify(dcxRead.data.roundTrip)}`);
+  }
+  if (dcxRead.data.partCount < 1 || dcxRead.data.modelCount < 1) {
+    throw new Error(`MSB DCX expected models/parts, got models=${dcxRead.data.modelCount} parts=${dcxRead.data.partCount}`);
+  }
+
   const payload = decompressDfltDcx(await readFile(sourceDcx));
   const msbPath = join(root, 'm10.msb');
   await writeFile(msbPath, payload);

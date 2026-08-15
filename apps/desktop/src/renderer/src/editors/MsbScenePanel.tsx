@@ -66,6 +66,11 @@ export interface MsbScenePanelProps {
   }) => void;
   writeEnabled?: boolean;
   /**
+   * App 侧读取失败的结构化诊断（S19）：非空时面板用「code + 人话 + 下一步」
+   * 取代 3D 空态——mods 里 DFLT 不该读不出，原版 KRAK 需要先挂原版目录。
+   */
+  loadError?: { code: string; message: string } | null;
+  /**
    * 非空表示该编辑器已延期至指定里程碑，本版仅作标记只读预览：
    * 面板隐藏全部提交入口并显式标注延期状态。
    */
@@ -448,11 +453,18 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           children: (
             <div className="msb-viewport">
               <div ref={hostRef} className="scene-host" style={{ minHeight: 320, background: '#1a1d23' }} />
-              <p className="muted">
-                {nodeCount > 0
-                  ? `节点 ${nodeCount} · region ${regions.length} · 无绝对路径`
-                  : status}
-              </p>
+              {props.loadError ? (
+                <div className="msb-load-error" data-testid="msb-load-error" role="alert">
+                  <p className="msb-load-error__code">{props.loadError.code}</p>
+                  <p className="msb-load-error__message">{props.loadError.message}</p>
+                </div>
+              ) : (
+                <p className="muted">
+                  {nodeCount > 0
+                    ? `节点 ${nodeCount} · region ${regions.length} · 无绝对路径`
+                    : status}
+                </p>
+              )}
               {(selected?.kind === 'msb-part' || selected?.kind === 'msb-region') ? (
                 <p data-testid="msb-selected-summary">
                   已选择 {selected.kind === 'msb-region' ? 'region' : 'part'}：{selected.label}

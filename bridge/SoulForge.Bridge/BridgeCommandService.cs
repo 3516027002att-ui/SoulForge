@@ -434,7 +434,21 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = MsbNativeDocument.ReadFile(file);
+                // S19: 磁盘上是 .msb.dcx（DCX\0 头），必须先 native 解 DCX 再认
+                // "MSB " 魔数。与 read-emevd-document 同一套：DcxNativeDocument
+                // 解压，TypeScript 侧不引入第二套 DCX parser，也不把解压临时
+                // 文件当 Patch 目标。mods 下是 DFLT（不挂原版也能开），原版是
+                // KRAK（需要 oodleRuntimeRoot）。
+                MsbNativeDocument document;
+                if (IsDcxFile(file))
+                {
+                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+                    document = MsbNativeDocument.Read(dcx.Payload);
+                }
+                else
+                {
+                    document = MsbNativeDocument.ReadFile(file);
+                }
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -1235,7 +1249,7 @@ internal sealed class BridgeCommandService
                 return BridgeResult<object>.Failed(file, "map", "BRIDGE_OUTPUT_PATH_REQUIRED", "MSB writer requires a validated staging output path.");
             try
             {
-                var written = await MsbNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                var written = await MsbNativeWriter.WriteAsync(file, outputPath, oodleRuntimeRoot, options, cancellationToken);
                 return BridgeResult<object>.Partial(file, "map", new[]
                 {
                     new Diagnostic("info", "MSB_STAGING_WRITE_VERIFIED", "MSB 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)

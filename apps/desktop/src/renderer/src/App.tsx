@@ -328,6 +328,8 @@ export function App(): ReactElement {
     events: 0
   });
   const [msbLive, setMsbLive] = useState(false);
+  /** S19：MSB 读取失败的结构化诊断（code + 人话 + 下一步），传给场景面板显示。 */
+  const [msbLoadError, setMsbLoadError] = useState<{ code: string; message: string } | null>(null);
   const [msbSourceHash, setMsbSourceHash] = useState<string | null>(null);
   const [paramTypeName, setParamTypeName] = useState('');
   const [paramRows, setParamRows] = useState(EMPTY_PARAM_ROWS);
@@ -1134,6 +1136,7 @@ export function App(): ReactElement {
         setMsbEvents([]);
         setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
         setMsbLive(false);
+        setMsbLoadError(null);
         return;
       }
       if (!bridge || typeof bridge.readMsbDocument !== 'function') {
@@ -1143,11 +1146,13 @@ export function App(): ReactElement {
         setMsbEvents([]);
         setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
         setMsbLive(false);
+        setMsbLoadError(null);
         return;
       }
       try {
         const result = await bridge.readMsbDocument(target.sourceUri) as {
           ok?: boolean;
+          diagnostics?: Array<{ code?: string; message?: string }>;
           data?: {
             sourceHash?: string;
             models?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
@@ -1186,9 +1191,18 @@ export function App(): ReactElement {
           setMsbEvents([]);
           setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
           setMsbLive(false);
-          pushToast('这张地图读不出来', 'warn');
+          // S19：失败必须在面板内给 code + 人话 + 下一步（底栏已拆，不能
+          // 「详情见底部日志」）。KRAK 未挂原版是常态，直接给可行动句。
+          const diag = result?.diagnostics?.[0];
+          const code = diag?.code ?? 'MSB_READ_FAILED';
+          const message = diag?.message && /KRAK|Oodle|oodle|DCX/i.test(diag.message)
+            ? '这份地图是 KRAK 压缩，需要先挂载只读原版游戏目录（到「开始」页选择含 sekiro.exe 的目录）再打开。'
+            : (diag?.message ?? '这份地图读不出来。');
+          setMsbLoadError({ code, message });
+          pushToast(message, 'warn');
           return;
         }
+        setMsbLoadError(null);
         setMsbParts(result.data.parts.map((p) => ({
           name: p.name,
           ...(p.nativeOffset === undefined ? {} : { nativeOffset: p.nativeOffset }),
@@ -1231,6 +1245,10 @@ export function App(): ReactElement {
         setMsbModels([]);
         setMsbEvents([]);
         setMsbLive(false);
+        setMsbLoadError({
+          code: 'MSB_READ_EXCEPTION',
+          message: error instanceof Error ? error.message : 'MSB 读取异常'
+        });
         pushToast(error instanceof Error ? error.message : 'MSB 读取异常', 'warn');
       }
     }
@@ -2955,11 +2973,8 @@ export function App(): ReactElement {
           )}
           {activeEditor === 'map' && (
             <>
-              {/* 删掉了「实时 Bridge MSB parts / 空场景（未选中可解析 MSB 或读取失败）」
-                  这行标题：工作台自己有标题栏与空态提示，这行只是重复；而「未选中
-                  可解析 MSB 或读取失败」把两种完全不同的情形（还没选文件 / 选了但
-                  读不出来）混成一句，用户无法据此判断下一步做什么。读取失败的原因
-                  现在进底部日志区。 */}
+              {/* 工作台自己有标题栏与空态提示。读取失败的原因（S19）由面板内的
+                  msb-load-error 呈现 code + 人话 + 下一步，不再依赖底部日志区。 */}
               <MsbScenePanel
                 key={`${selectedFile?.sourceUri ?? ''}:${msbSourceHash ?? ''}:${msbParts.length}:${msbRegions.length}`}
                 mapResourceUri={selectedFile?.sourceUri ?? ''}
@@ -2972,6 +2987,7 @@ export function App(): ReactElement {
                 events={msbEvents}
                 sourceCounts={msbSourceCounts}
                 maxNodes={2000}
+                loadError={msbLoadError}
                 writeEnabled={!isDeferredPreviewEditorKind('msb')
                   && msbLive
                   && Boolean(msbSourceHash)

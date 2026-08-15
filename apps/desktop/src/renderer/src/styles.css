@@ -951,6 +951,13 @@ pre.tool-output {
 }
 .msb-viewport { display: flex; flex-direction: column; gap: 8px; }
 .msb-viewport .scene-host { width: 100%; }
+/* S19：MSB 读取失败的面板内呈现（code + 人话 + 下一步），取代 3D 空态。 */
+.msb-load-error {
+  padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-l);
+  background: var(--forge-2); display: flex; flex-direction: column; gap: 4px;
+}
+.msb-load-error__code { font-family: var(--font-mono); font-size: 11px; color: var(--warn); }
+.msb-load-error__message { font-size: 12.5px; color: var(--ink-1); line-height: 1.55; }
 
 /* MODEL-51B：FLVER 三栏模型工作台（模型层级 | Viewport | Properties），
    与 MSB 工作台同族：树栈分组行/属性行复用 binder-child-row 表格骨架，只覆盖列模板。 */
