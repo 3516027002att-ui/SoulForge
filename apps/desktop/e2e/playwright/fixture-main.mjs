@@ -61,6 +61,9 @@ function makeFile({ dir, name, kind, formatKind, formatLabel, extension, compoun
 const fixtureFiles = [
   makeFile({ dir: 'event', name: 'common.emevd', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.emevd', compoundExtension: '.emevd' }),
   makeFile({ dir: 'event', name: 'menu.emevd', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.emevd', compoundExtension: '.emevd' }),
+  // S15：KRAK 压缩地图事件读取失败样本（未登记 bank → readEmevdDocument 失败分支
+  // 返回可行动句，面板正文按 code + 人话 + 下一步渲染，不出现假 resource 伪源码）。
+  makeFile({ dir: 'event', name: 'krak.emevd.dcx', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.dcx', compoundExtension: '.emevd.dcx' }),
   makeFile({ dir: 'msg', name: 'test.msgbnd.dcx', kind: 'msg', formatKind: 'fmg', formatLabel: 'FMG', extension: '.dcx', compoundExtension: '.msgbnd.dcx' }),
   makeFile({ dir: 'action', name: 'c0000.tae', kind: 'action', formatKind: 'unknown', formatLabel: 'TAE', extension: '.tae', compoundExtension: '.tae' }),
   makeFile({ dir: 'ai', name: 'm10.aibnd.dcx', kind: 'ai', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.aibnd.dcx' }),
@@ -1674,6 +1677,20 @@ function registerFixtureIpc() {
     track('resource.readEmevdDocument');
     const bank = emevdBank(sourceUri);
     if (!bank) {
+      // S15：KRAK 压缩地图事件（未挂原版）的失败样本 —— 与真实 Bridge 的
+      // DcxNativeDocument 可行动句同构，面板正文原样展示。
+      if (String(sourceUri).endsWith('krak.emevd.dcx')) {
+        return {
+          ok: false,
+          data: null,
+          diagnostics: [{
+            severity: 'error',
+            code: 'EMEVD_DOCUMENT_READ_FAILED',
+            message: '这份事件是 KRAK 压缩，需要 Oodle 运行时解压：到「开始」页选择含 sekiro.exe 的原版游戏目录后再打开。',
+            sourceUri
+          }]
+        };
+      }
       return {
         ok: false,
         data: null,

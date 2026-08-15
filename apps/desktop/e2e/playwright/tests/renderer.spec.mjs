@@ -2190,7 +2190,7 @@ test('EVENT-30B：事件源码工作台挂载，CodeMirror 主区 + 逻辑文档
   const tablist = workbench.locator('[role="tablist"]');
   await expect(tablist).toBeVisible();
   await expect(tablist.locator('[role="tab"]')).toHaveCount(1);
-  await expect(tablist.locator('[role="tab"]').first()).toContainText('event/common.emevd');
+  await expect(tablist.locator('[role="tab"]').first()).toContainText('common');
 
   // CodeMirror 6 主区渲染 DSL 源码：资源行、事件块、指令行都在。
   const host = workbench.locator('[data-editor-engine="codemirror"]');
@@ -2277,11 +2277,14 @@ test('EVENT-30B：diagnostic gutter 标注未知指令，编辑 dirty 后提交�
   await window.keyboard.type('\n// fixture e2e dirty', { delay: 0 });
   const dirtyTab = workbench.locator('[role="tab"] .esw-tab__dirty');
   await expect(dirtyTab).toHaveCount(1);
-  await expect(workbench.locator('[role="tab"]').first()).toContainText('event/common.emevd');
+  await expect(workbench.locator('[role="tab"]').first()).toContainText('common');
 
-  // 提交：fixture 接受（合成写回），dirty 清空、源码替换为已提交文本。
-  await workbench.getByRole('button', { name: '编译并提交' }).click();
+  // S14：Ctrl+S 直接应用（无「编译并提交」按钮），fixture 接受（合成写回），
+  // dirty 清空、源码替换为已提交文本、状态行给「已应用，可回滚」。
+  await expect(workbench.getByRole('button', { name: '编译并提交' })).toHaveCount(0);
+  await window.keyboard.press('Control+S');
   await expect(dirtyTab).toHaveCount(0);
+  await expect(workbench.locator('[data-testid="esw-status"]')).toContainText('已应用，可回滚');
   await expect(workbench.locator('.esw-source__host .cm-content')).toContainText('// fixture e2e dirty');
 
   await window.screenshot({ path: 'test-results/12-event-dirty-submit.png' });
@@ -2306,8 +2309,8 @@ test('EVENT-30B：多 tab 各自 dirty，切 tab 保留未提交编辑', async (
   await selectFileItem(window, 'event/menu.emevd');
   const tabs = workbench.locator('[role="tab"]');
   await expect(tabs).toHaveCount(2);
-  await expect(tabs.first()).toContainText('event/common.emevd');
-  await expect(tabs.nth(1)).toContainText('event/menu.emevd');
+  await expect(tabs.first()).toContainText('common');
+  await expect(tabs.nth(1)).toContainText('menu');
   await expect(workbench.locator('.esw-source__host .cm-content')).toContainText('event @e:ev100');
 
   // 切回 common：dirty 仍在，未提交编辑还在（per-tab EditorState 隔离）。
@@ -2321,10 +2324,47 @@ test('EVENT-30B：多 tab 各自 dirty，切 tab 保留未提交编辑', async (
   await expect(tabs.first().locator('.esw-tab__dirty')).toHaveCount(1);
 
   // 关闭 menu tab → 只剩 common。
-  await workbench.getByRole('button', { name: '关闭 event/menu.emevd' }).click();
+  await workbench.getByRole('button', { name: '关闭 menu' }).click();
   await expect(workbench.locator('[role="tab"]')).toHaveCount(1);
-  await expect(workbench.locator('[role="tab"]')).toContainText('event/common.emevd');
+  await expect(workbench.locator('[role="tab"]')).toContainText('common');
 
   await window.screenshot({ path: 'test-results/12-event-multitab.png' });
+  await app.close();
+});
+
+test('S14/S15：事件失败读取给 code + 人话 + 下一步，无假 resource 伪源码，无 Bridge 字样', async () => {
+  const { app, window, pageErrors, consoleErrors } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 打开 KRAK 失败样本（fixture 模拟「未挂原版」的 KRAK 可行动句）。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'event/krak.emevd.dcx');
+  const workbench = window.locator('[aria-label="Event 源码工作台"]');
+  await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();
+
+  // S14：没有橙色眉题 / 黄条 / 只读标签 / 编译并提交按钮。
+  await expect(workbench.locator('.event-source__header')).toHaveCount(0);
+  await expect(workbench.locator('.event-source__notice')).toHaveCount(0);
+  await expect(workbench.getByText('反汇编源码只读')).toHaveCount(0);
+  await expect(workbench.getByRole('button', { name: '编译并提交' })).toHaveCount(0);
+
+  // S15：正文是可行动句（KRAK → 去「开始」页挂原版），不出现假 resource 伪源码、
+  // 不出现「详情见底部日志」、不出现 Bridge / 补丁引擎字样。
+  const content = workbench.locator('.esw-source__host .cm-content');
+  await expect(content).toContainText('KRAK 压缩');
+  await expect(content).toContainText('sekiro.exe');
+  await expect(content).toContainText('[EMEVD_DOCUMENT_READ_FAILED]');
+  await expect(content).not.toContainText('resource "file://');
+  await expect(content).not.toContainText('详情见底部日志');
+  await expect(workbench).not.toContainText('Bridge');
+  await expect(workbench).not.toContainText('补丁引擎');
+
+  // 标签是短名（krak），不显示 event/… 路径。
+  await expect(workbench.locator('[role="tab"]').first()).toContainText('krak');
+
+  expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
+  expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
+
+  await window.screenshot({ path: 'test-results/12-event-krak-failure.png' });
   await app.close();
 });

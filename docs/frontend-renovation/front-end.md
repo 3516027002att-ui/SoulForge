@@ -2513,6 +2513,13 @@ SHELL-09 → SHELL-10
 
 #### EVENT-30B — DarkScript3 source workbench
 
+> **S14/S15（2026-08-15，用户裁定）取代本卡的「只读展示」条款**：
+> - 源码**可编辑**，`Ctrl+S`（或等价）直接应用；不要「编译并提交」按钮、不要审查对话框、不要出现 Bridge / 补丁引擎字样（底层仍经 typed mutation → Patch Engine，应用前自动备份，失败或撤销走审计与回滚）。
+> - 删橙色眉题（`.event-source__header` / eyebrow / 就绪）与黄条（`.event-source__notice`）。
+> - 内层标签只显示短名（`common` / `m11_02_71_10`），禁止 `event/….emevd.dcx`。
+> - 读取失败时编辑区正文给 `code + 人话 + 下一步`（KRAK 缺原版：到「开始」页选择含 sekiro.exe 的原版目录），禁止假 `resource "file://…"` 伪源码与「详情见底部日志」；失败随 `eventOpenFailure` 附进 Agent 系统提示，Agent 能直接复述原因和下一步。
+> - 编不了的指令：该行标未解码，不锁整份只读、不假成功写盘。
+
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。
 - **Dependencies**：在 `apps/desktop/package.json` 加入 exact 版本 `@codemirror/state@6.7.1`、`@codemirror/view@6.43.8`、`@codemirror/language@6.12.4`、`@codemirror/search@6.7.1`、`@codemirror/commands@6.10.4`、`@codemirror/autocomplete@6.20.3`、`@lezer/highlight@1.2.3`，并更新根 lockfile。
 - **Steps**：在已有 `EventSourceWorkbenchPanel` 上做成 DarkScript3 式源码 IDE：文档标签 + 源码主区；无四钮（查找替换/Outline/Inspector/Problems），Ctrl+F 走 CodeMirror search；EMEDF 指令名 autocomplete（Ctrl+Space + 输入时）与悬停参数名列表。接 CodeMirror 6、行号、折叠、高亮、gutter、dirty tab、autocomplete/hover。不要做 260/320 固定三栏。

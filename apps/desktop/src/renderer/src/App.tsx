@@ -149,6 +149,15 @@ type CenterView = 'project' | 'resource' | 'operations' | 'settings';
 /** P0 安全收口：权限模式由主进程锁定，renderer 不得自行切换。 */
 const AI_PERMISSION_LOCK_REASON = 'P0 安全收口期间由主进程锁定为计划模式；renderer 不能抬高授权。';
 
+/**
+ * S14：事件工作台标签短名 —— `event/common.emevd.dcx` → `common`，
+ * `event/m11_02_71_10.emevd.dcx` → `m11_02_71_10`。禁止内层标签显示完整路径。
+ */
+function eventTabShortTitle(relativePath: string): string {
+  const base = relativePath.split(/[/\\]/).pop() ?? relativePath;
+  return base.replace(/\.emevd(\.dcx)?$/i, '').replace(/\.dcx$/i, '');
+}
+
 /** 欢迎页「待审查变更」摘要显示条数。摘要之外的条数由截断说明报出。 */
 const WELCOME_DRAFT_LIMIT = 5;
 
@@ -311,6 +320,11 @@ export function App(): ReactElement {
    * document（bounded outline + 有界模板）。
    */
   const [eventPendingTab, setEventPendingTab] = useState<EventSourceTabData | null>(null);
+  /**
+   * S15：最近一次事件打开失败（文档短名 + code + 人话）。随 runAiAgent 提交，
+   * main 附进系统提示 —— Agent 能直接说出原因和下一步。成功打开或换资源时清空。
+   */
+  const [eventOpenFailure, setEventOpenFailure] = useState<{ document: string; code: string; message: string } | null>(null);
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   /** S17：read-tae-document 附带的 DSAS 事件类型名表（`0 JumpTable` 的「类型名」）。 */
   const [taeEventTypeNames, setTaeEventTypeNames] = useState<Record<string, string> | null>(null);
@@ -1270,32 +1284,42 @@ export function App(): ReactElement {
       const target = selectedFile;
       if (!target || target.resourceKind !== 'event') {
         setEventPendingTab(null);
+        setEventOpenFailure(null);
         return;
       }
       if (!bridge || typeof bridge.readEmevdDocument !== 'function') {
         setEventPendingTab(null);
+        setEventOpenFailure(null);
         return;
       }
       try {
         const result = await bridge.readEmevdDocument(target.sourceUri) as {
           ok?: boolean;
           data?: BridgeEmevdEnvelopeLike | null;
-          diagnostics?: Array<{ message?: string }>;
+          diagnostics?: Array<{ code?: string; message?: string }>;
         };
         if (cancelled) return;
         if (!result?.ok || !result.data) {
+          // S15：保留 Bridge 原始 code + 可行动 message（KRAK 缺原版时是「到「开始」
+          // 页选择含 sekiro.exe 的原版目录」），面板正文按 code + 人话 + 下一步渲染，
+          // 不再出现假 `resource "file://…"` 伪源码或「详情见底部日志」。
+          const bridgeDiag = result?.diagnostics?.[0];
+          setEventOpenFailure({
+            document: eventTabShortTitle(target.relativePath),
+            code: bridgeDiag?.code ?? 'EMEVD_LIVE_READ_FAILED',
+            message: bridgeDiag?.message ?? '这个事件脚本读不出来。'
+          });
           setEventPendingTab({
             tabId: target.sourceUri,
-            title: target.relativePath,
+            title: eventTabShortTitle(target.relativePath),
             resourceUri: target.sourceUri,
             document: {
               ...EMPTY_EMEVD_DOCUMENT,
               resourceUri: target.sourceUri,
               diagnostics: [{
                 severity: 'warning',
-                code: 'EMEVD_LIVE_READ_FAILED',
-                message: result?.diagnostics?.[0]?.message
-                  ?? '这个事件脚本读不出来。'
+                code: bridgeDiag?.code ?? 'EMEVD_LIVE_READ_FAILED',
+                message: bridgeDiag?.message ?? '这个事件脚本读不出来。'
               }]
             },
             sourceHash: null,
@@ -1305,9 +1329,10 @@ export function App(): ReactElement {
             dslTemplateTotalLines: 0,
             sourceStyle: 'none'
           });
-          pushToast('这个事件脚本读不出来', 'warn');
+          pushToast(bridgeDiag?.message ?? '这个事件脚本读不出来', 'warn');
           return;
         }
+        setEventOpenFailure(null);
         const doc = mapEmevdEnvelopeToDocument(target.sourceUri, result.data, { maxEvents: 128 });
         // Load the authoritative bounded full-document DSL template; renderer
         // never receives the full document itself (EVENT-30A bounded outline).
@@ -1341,7 +1366,7 @@ export function App(): ReactElement {
         }
         setEventPendingTab({
           tabId: target.sourceUri,
-          title: target.relativePath,
+          title: eventTabShortTitle(target.relativePath),
           resourceUri: target.sourceUri,
           // EVENT-30B：envelope 投影的事件没有 anchor，而 diagnostic gutter /
           // Go to Event 要靠 `event @e:<localNodeId>` 命中事件；权威锚源是
@@ -1357,6 +1382,7 @@ export function App(): ReactElement {
       } catch (error) {
         if (cancelled) return;
         setEventPendingTab(null);
+        setEventOpenFailure(null);
         pushToast(error instanceof Error ? error.message : 'EMEVD 读取异常', 'warn');
       }
     }
@@ -2190,6 +2216,9 @@ export function App(): ReactElement {
       ...(selectedFile
         ? { selection: { label: selectedFile.relativePath, resourceKind: selectedFile.resourceKind } }
         : {}),
+      // S15：事件打开失败（KRAK 缺原版等）自动随会话带上，Agent 能直接复述
+      // 原因和下一步，用户不用翻日志、不用复制文本。
+      ...(eventOpenFailure ? { eventOpenFailure } : {}),
       // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
       // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
       ...(agentResources.length > 0 ? { resources: agentResources } : {})

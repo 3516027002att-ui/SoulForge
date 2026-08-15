@@ -59,6 +59,12 @@ internal sealed class DcxNativeDocument
         if (dcaLength < 8 || payloadOffset < 0 || payloadOffset + compressed > source.Length)
             throw new InvalidDataException("DCX payload 边界无效。");
         var compressedPayload = source.AsSpan(payloadOffset, compressed).ToArray();
+        // S15（2026-08-15）：KRAK 解压必须有 Oodle 运行时（来自已挂载原版根）。
+        // 没挂原版时给可行动句而不是裸 "Oodle 不可用" —— 上层把这条消息原样投到
+        // 编辑区正文与 Agent 上下文，用户不需要翻日志。
+        if (format == "KRAK" && string.IsNullOrEmpty(oodleRuntimeRoot))
+            throw new NotSupportedException(
+                "这份事件是 KRAK 压缩，需要 Oodle 运行时解压：到「开始」页选择含 sekiro.exe 的原版游戏目录后再打开。");
         var payload = format switch
         {
             "DFLT" => DecompressDflt(compressedPayload, uncompressed),

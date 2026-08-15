@@ -1098,6 +1098,17 @@ export interface AiAgentRunRequest {
     label: string;
     resourceKind: ResourceKind;
   };
+  /**
+   * S15：最近一次事件打开失败（可选元数据）。renderer 在事件读取失败时带上
+   * 文档短名 + code + 人话（KRAK 缺原版时是「到「开始」页选择含 sekiro.exe
+   * 的原版目录」），main 附进系统提示 —— Agent 欢迎或下一条回复能直接说出
+   * 原因和下一步，用户不用翻日志、不用复制文本。
+   */
+  eventOpenFailure?: {
+    document: string;
+    code: string;
+    message: string;
+  };
 }
 
 /** Renderer's answer to one approval request (ai.agent.approval.respond). */
@@ -7984,6 +7995,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (request.selection) {
       systemPromptParts.push(
         `用户当前选区（仅可选元数据，不是默认任务对象）：${request.selection.label}（${request.selection.resourceKind}）。`
+      );
+    }
+    if (request.eventOpenFailure) {
+      // S15：失败详情随会话上下文自动带上，Agent 要能直接复述原因和下一步。
+      systemPromptParts.push(
+        `最近一次事件打开失败（用户期望你直接说明原因与下一步，不用翻日志）：` +
+        `文档 ${request.eventOpenFailure.document}，[${request.eventOpenFailure.code}] ` +
+        `${request.eventOpenFailure.message}`
       );
     }
     const systemPrompt = systemPromptParts.filter((part) => part.trim().length > 0).join('\n\n');

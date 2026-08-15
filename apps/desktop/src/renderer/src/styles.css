@@ -773,12 +773,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
   display: flex; flex-direction: column; min-height: 0; height: 100%;
   border: 1px solid var(--line); background: var(--forge-1);
 }
-.event-source__header { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
-.event-source__eyebrow { color: var(--ember-text); font: 10px var(--font-mono); letter-spacing: .1em; }
-.event-source__header h2 { margin-top: 3px; font-size: 13px; font-weight: 600; }
-.event-source__section-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--line); background: var(--forge-2); font-size: 11px; }
-.event-source__notice { padding: 7px 9px; color: var(--warn); background: var(--warn-soft); font-size: 10.5px; line-height: 1.5; border-top: 1px solid var(--line); }
-.event-source__notice button { margin-left: 5px; }
+/* S14：橙色眉题（.event-source__header / __eyebrow）与黄条（__notice）整块删除。 */
 
 /* EVENT-30B DarkScript3 式源码 IDE：文档标签 + 源码主区 + 查找替换；Outline /
    Inspector 仅显式打开；Problems 底部 dock。不做 260/320 固定三栏。 */
