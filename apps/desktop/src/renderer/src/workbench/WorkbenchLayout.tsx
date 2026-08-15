@@ -125,6 +125,14 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
   const columnsRef = useRef<HTMLDivElement | null>(null);
 
   /**
+   * 最新 props 的 ref：拖拽监听要稳定挂载（不随 columns 数组每次渲染重建而
+   * 拆装），但 maxWidthFor 需要读当前栏定义。用 ref 绕过闭包过期，同时让
+   * onPointerMove 的依赖恒为空。
+   */
+  const propsRef = useRef(props);
+  propsRef.current = props;
+
+  /**
    * 拖拽/键盘右移的上限：容器宽度 − 其余栏 minWidth 之和。
    *
    * P1 裁定：此前拖拽只做 `Math.max(minWidth, start+delta)`，没有上限；被拖的栏
@@ -135,12 +143,20 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
   function maxWidthFor(columnId: string): number {
     const container = columnsRef.current;
     if (!container) return Number.POSITIVE_INFINITY;
-    const othersMin = props.columns
+    const othersMin = propsRef.current.columns
       .filter((column) => column.id !== columnId)
       .reduce((sum, column) => sum + (column.minWidth ?? DEFAULT_MIN_WIDTH), 0);
     return Math.max(0, container.clientWidth - othersMin);
   }
 
+  /**
+   * 稳定回调：依赖恒为空，监听只挂一次。
+   *
+   * S17 修复：此前 onPointerMove 依赖 props.columns，而 TaeWorkbenchPanel 等
+   * 面板每次 render 都新建 columns 数组（`columns={[...]}`），于是拖拽中每次
+   * setWidths → re-render → 监听被拆掉重挂——高频 pointermove 在重挂窗口期
+   * 丢失，表现为「拖的时候可以跟上，松手后像假的」「再拖没反应」。
+   */
   const onPointerMove = useCallback((event: PointerEvent) => {
     const drag = dragState.current;
     if (!drag) return;
@@ -150,7 +166,7 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
       Math.max(drag.minWidth, drag.startWidth + delta)
     );
     setWidths((current) => ({ ...current, [drag.columnId]: nextWidth }));
-  }, [props.columns]);
+  }, []);
 
   const onPointerUp = useCallback(() => {
     dragState.current = null;
@@ -181,7 +197,11 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
     let startWidth = widths[column.id];
     if (typeof startWidth !== 'number') {
       const slot = (event.currentTarget as HTMLElement).parentElement;
-      const measured = slot?.getBoundingClientRect().width;
+      // S17：量栏内容（.workbench__column）而不是整个 slot——slot 是 flex 行，
+      // 含 4px 分隔条，量 slot 会把分隔条算进栏宽，写回后总宽被撑大、下一轮
+      // 拖拽的起点与上限漂移。widths 存的语义是「栏内容宽」。
+      const columnEl = slot?.querySelector('.workbench__column');
+      const measured = columnEl?.getBoundingClientRect().width;
       if (typeof measured !== 'number' || measured <= 0) return;
       startWidth = measured;
       setWidths((current) => ({ ...current, [column.id]: measured }));
@@ -202,12 +222,13 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
    */
   function onSeparatorKeyDown(column: WorkbenchColumnSpec, event: React.KeyboardEvent): void {
     const step = 16;
-    // 与 startResize 同理：比例/自适应模式下先从 DOM 量出当前宽度，
+    // 与 startResize 同理：比例/自适应模式下先从 DOM 量出当前栏内容宽，
     // 否则键盘用户在这些栏上按方向键没有任何反应。
     let measured = widths[column.id];
     if (typeof measured !== 'number') {
       const slot = (event.currentTarget as HTMLElement).parentElement;
-      const fromDom = slot?.getBoundingClientRect().width;
+      const columnEl = slot?.querySelector('.workbench__column');
+      const fromDom = columnEl?.getBoundingClientRect().width;
       if (typeof fromDom !== 'number' || fromDom <= 0) return;
       measured = fromDom;
     }

@@ -491,12 +491,12 @@ test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，
   await app.close();
 });
 
-test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件参数体未解码边界明确', async () => {
+test('动作工作台三栏（TAE）：动画 → 词条事件选择链，详情沉 footer，参数体按模板解码', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // T3（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从 Files 领域选择，
-  // 进入三栏动作工作台（Animations | Events / 词条 + 详情 | 预览（只读））。
+  // T3 / S17（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从 Files 领域选择，
+  // 进入三栏动作工作台（Animations | 词条 | 预览（只读）），详情沉三栏底 footer。
   await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'action/c0000.tae');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
@@ -510,45 +510,48 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(window.getByRole('region', { name: 'Timeline / Events' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
-  // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类），
-  // hkxName 去扩展作主标签。
+  // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类）。
+  // S17：合法 hkx 茎用茎（a0000）；无 hkxName 回退 a000_+6 位 animId（禁止「动画 N」）。
   const left = window.getByRole('region', { name: 'Animations' });
   await expect(left.getByRole('row', { name: /a0000/ })).toBeVisible();
-  await expect(left.getByRole('row', { name: /动画 1/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /a000_000001/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /动画 / })).toHaveCount(0);
 
   // 未选中动画时中栏提示先选动画，不出事件行。
   const middle = window.getByRole('region', { name: 'Events / 词条' });
   await expect(window.getByTestId('tae-events-pick-animation')).toBeVisible();
 
-  // 选中动画 0 → 中栏词条事件列表。
+  // 选中动画 0 → 中栏词条事件列表：`{typeId} {类型名}`（无模板名显示「未命名」），
+  // 行内是帧元信息（S17 不再显示 0s → 1s）。
   await left.getByRole('row', { name: /a0000/ }).click();
   await expect(middle.getByText(/词条 · 动画 0/)).toBeVisible();
-  await expect(middle.getByRole('row', { name: /事件类型 1/ })).toBeVisible();
-  await expect(middle.getByRole('row', { name: /0s → 1s/ })).toBeVisible();
+  await expect(middle.getByRole('row', { name: /^1 / })).toBeVisible();
+  await expect(middle.getByRole('row', { name: /0 → 30 帧/ })).toBeVisible();
 
-  // 选中词条事件 → 中栏下方详情列出 Start Frame / End Frame / Id 等。
-  await middle.getByRole('row', { name: /事件类型 1/ }).click();
-  const details = window.getByTestId('tae-details');
-  await expect(details.getByText('Start Frame')).toBeVisible();
-  await expect(details.getByText('End Frame')).toBeVisible();
-  await expect(details.getByText('动画 Id')).toBeVisible();
-  await expect(details.getByText('事件类型 Id')).toBeVisible();
-  // 事件参数体未解码边界必须明示（不伪装成完整解析）。
-  await expect(details.getByText('参数体')).toBeVisible();
-  await expect(details.getByText(/未解码/)).toBeVisible();
+  // 选中词条事件 → 三栏底 footer：起始帧/结束帧/完整类型/下标/参数字段。
+  await middle.getByRole('row', { name: /^1 / }).click();
+  const footer = window.getByTestId('tae-event-footer');
+  const footerMeta = footer.locator('.tae-footer__meta');
+  await expect(footerMeta.getByText(/起始帧/)).toBeVisible();
+  await expect(footerMeta.getByText(/结束帧/)).toBeVisible();
+  await expect(footerMeta.getByText(/事件下标 0/)).toBeVisible();
+  // 参数体按模板解码展示字段名+值；解不出时「未解码」+ hex 兜底（二者必居其一）。
+  const fields = window.getByTestId('tae-event-fields');
+  await expect(fields).toBeVisible();
+  await expect(fields.getByText('参数字段')).toBeVisible();
 
-  // 右栏是只读预览空态 + 诊断（不挂伴生 chrbnd 的 FLVER）。
-  await expect(window.getByTestId('tae-preview-unavailable')).toBeVisible();
-  await expect(window.getByTestId('tae-preview-unavailable')).toContainText('预览不可用');
+  // 右栏：伴生 chrbnd 解析（fixture 工作区无模型且通常未挂原版）→ 诚实空态给下一步。
+  await expect(window.getByTestId('tae-chrbnd-absent')).toBeVisible();
+  await expect(window.getByTestId('tae-chrbnd-absent')).toContainText('chrbnd');
   // 右栏始终只读：无输入、无按钮。
   const preview = window.getByRole('region', { name: '预览（只读）' });
   await expect(preview.locator('input, button')).toHaveCount(0);
 
-  // ANIMATION-56C event write：选中词条事件后出现事件编辑入口，更新事件时间。
+  // ANIMATION-56C event write（收进 footer）：帧编辑 → update-event-times（内部秒）。
   await expect(window.getByTestId('tae-event-editor')).toBeVisible();
-  const startInput = window.getByLabel('新开始时间');
+  const startInput = window.getByLabel('新开始帧');
   await expect(startInput).toHaveValue('0');
-  await startInput.fill('0.5');
+  await startInput.fill('15');
   await window.getByRole('button', { name: '更新事件时间' }).click();
   await expect(window.getByTestId('tae-write-notice')).toContainText('事件时间已更新并重读验证');
 
@@ -579,7 +582,7 @@ test('anibnd 容器打开走动作工作台：不落 BND4 容器页，提取来�
   // 选中动画 0 → 中栏词条事件列表可用（动作/词条/预览三栏联动）。
   await left.getByRole('row', { name: /a000_003013/ }).click();
   const middle = window.getByRole('region', { name: 'Events / 词条' });
-  await expect(middle.getByRole('row', { name: /事件类型 7/ }).first()).toBeVisible();
+  await expect(middle.getByRole('row', { name: /^7 / }).first()).toBeVisible();
 
   await window.screenshot({ path: 'test-results/18b-anibnd-action-workbench.png' });
   await app.close();

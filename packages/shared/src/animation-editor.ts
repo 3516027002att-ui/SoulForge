@@ -44,11 +44,29 @@ export interface TaeRoundTripReport {
   totalGroupCount: number;
 }
 
+/** 模板解码出的单个参数字段（S17：来自本机 DSAS TAE.Template.SDT.xml 布局）。 */
+export interface TaeTemplateFieldValue {
+  name: string;
+  kind: string;
+  /** 按 kind 解码的数值/布尔；解不出的字段为字符串「未解码」。 */
+  value: number | boolean | string;
+}
+
 /** read-tae-document envelope 里的事件时间表行（timeline page 的最小单元）。 */
 export interface TaeTimelineEventWire {
   startTime: number;
   endTime: number;
   eventTypeId: number;
+  /**
+   * S17：参数体按模板布局解码结果。有模板且布局全部解出时为 true，
+   * templateFields 携带字段名 + 值；无模板或布局越界时为 false，
+   * 消费方回落 parameterBytesHex（有界 hex 预览），禁止编造字段含义。
+   */
+  parameterDecoded?: boolean;
+  /** 模板解码出的字段数组（name/kind/value）；未解码时缺省。 */
+  templateFields?: TaeTemplateFieldValue[];
+  /** 参数体有界 hex 预览（无模板布局时的兜底，最多 64 字节）。 */
+  parameterBytesHex?: string;
 }
 
 /** read-tae-document envelope 里的 animation 行：摘要 + bounded 事件时间表。 */

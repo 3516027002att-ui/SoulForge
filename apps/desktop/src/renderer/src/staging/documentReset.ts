@@ -90,7 +90,7 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       'setMsbSourceHash',
       'setMsbLoadError'
     ]),
-    tae: Object.freeze(['setTaeData']),
+    tae: Object.freeze(['setTaeData', 'setTaeEventTypeNames']),
     esd: Object.freeze(['setEsdData']),
     flver: Object.freeze(['setFlverData'])
   });

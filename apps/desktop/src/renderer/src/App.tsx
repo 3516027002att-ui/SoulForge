@@ -312,6 +312,8 @@ export function App(): ReactElement {
    */
   const [eventPendingTab, setEventPendingTab] = useState<EventSourceTabData | null>(null);
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
+  /** S17：read-tae-document 附带的 DSAS 事件类型名表（`0 JumpTable` 的「类型名」）。 */
+  const [taeEventTypeNames, setTaeEventTypeNames] = useState<Record<string, string> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
   const [fmgEntries, setFmgEntries] = useState(EMPTY_FMG_ENTRIES);
@@ -456,7 +458,10 @@ export function App(): ReactElement {
       setMsbLive(false);
       setMsbSourceHash(null);
     },
-    tae: () => setTaeData(null),
+    tae: () => {
+      setTaeData(null);
+      setTaeEventTypeNames(null);
+    },
     esd: () => setEsdData(null),
     flver: () => setFlverData(null)
   }), []);
@@ -1968,8 +1973,11 @@ export function App(): ReactElement {
     // Load TAE/ESD/FLVER/TPF document data via typed preload IPC (V0.6 只读预览族)。
     // T3：`.tae` 与 `.anibnd.dcx` 都走 TAE 读链（动作域；anibnd 由 Bridge 提取内部 TAE）。
     if (/\.(tae|anibnd)(\.dcx)?$/i.test(file.relativePath)) {
-      const result = await bridge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
-      if (result.ok && result.data) setTaeData(result.data);
+      const result = await bridge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown>; eventTypeNames?: Record<string, string> };
+      if (result.ok && result.data) {
+        setTaeData(result.data);
+        setTaeEventTypeNames(result.eventTypeNames ?? null);
+      }
     }
     if (file.relativePath.endsWith('.esd')) {
       const result = await bridge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
@@ -3402,7 +3410,11 @@ export function App(): ReactElement {
               而且与下方的编辑器并存（一个资源同时出现「预览失败」和一张空表）。
               空文件的事实由编辑器自身的空态表达；失败原因归底部日志区。 */}
           {activeEditor === 'tae' && selectedFile && (
-            <TaeWorkbenchPanel resourceUri={selectedFile.sourceUri} data={taeData as never} />
+            <TaeWorkbenchPanel
+              resourceUri={selectedFile.sourceUri}
+              data={taeData as never}
+              eventTypeNames={taeEventTypeNames}
+            />
           )}
           {activeEditor === 'esd' && selectedFile && (
             <EsdWorkbenchPanel resourceUri={selectedFile.sourceUri} data={esdData as never} />

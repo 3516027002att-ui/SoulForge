@@ -737,7 +737,10 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 }.Concat(extractionDiagnostics).ToArray();
-                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip, extractionDiagnostics));
+                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(
+                    roundTrip,
+                    extractionDiagnostics,
+                    ParseTaeTemplateLayouts(options)));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -749,7 +752,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = FlverNativeDocument.ReadFile(file);
+                var document = FlverNativeDocument.Read(ResolveFlverPayload(file, oodleRuntimeRoot));
                 var roundTrip = document.VerifyRoundTrip();
                 // 措辞与判据对齐：FLVER 无 writer，能验证的只是「同一输入两次解析
                 // 得到相同结论」，不是「重建后逐字节一致」。旧码 *_ROUNDTRIP_BYTE_VERIFIED
@@ -777,7 +780,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = FlverNativeDocument.ReadFile(file);
+                var document = FlverNativeDocument.Read(ResolveFlverPayload(file, oodleRuntimeRoot));
                 // 同 PARAM：不传 commandOptions 时裸 TryGetProperty 会抛。
                 var meshIndex = OptionInt("meshIndex", 0);
                 var maxVertices = OptionInt("maxVertices", 10_000);
@@ -822,7 +825,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = FlverNativeDocument.ReadFile(file);
+                var document = FlverNativeDocument.Read(ResolveFlverPayload(file, oodleRuntimeRoot));
                 var bones = document.Bones.Select(b => new
                 {
                     index = b.Index,
@@ -853,7 +856,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = FlverNativeDocument.ReadFile(file);
+                var document = FlverNativeDocument.Read(ResolveFlverPayload(file, oodleRuntimeRoot));
                 var slots = document.GetTextureSlots();
                 var textures = slots.Select(t => new
                 {
@@ -883,7 +886,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = FlverNativeDocument.ReadFile(file);
+                var document = FlverNativeDocument.Read(ResolveFlverPayload(file, oodleRuntimeRoot));
                 var dummies = document.GetDummies();
                 var entries = dummies.Select(d => new
                 {
@@ -1589,6 +1592,88 @@ internal sealed class BridgeCommandService
     {
         var lower = path.ToLowerInvariant();
         return lower.EndsWith(".anibnd.dcx") || lower.EndsWith(".anibnd");
+    }
+
+    /// <summary>
+    /// 是否为角色模型打包容器（chrbnd）。S17（2026-08-15）：动作域 TAE 的伴生
+    /// `*.chrbnd.dcx`（overlay 或已挂载原版）在 FLVER 读链里由 Bridge 提取内部
+    /// .flver，不落 BND4 通用容器页。
+    /// </summary>
+    private static bool IsChrbndPath(string path)
+    {
+        var lower = path.ToLowerInvariant();
+        return lower.EndsWith(".chrbnd.dcx") || lower.EndsWith(".chrbnd");
+    }
+
+    /// <summary>
+    /// 解析 FLVER 读命令的 payload 字节：裸 .flver 原样返回；chrbnd 容器按
+    /// DCX→BND4→首个 .flver 子项 提取（与 read-fxr-document 的 ffxbnd 同构）。
+    /// </summary>
+    private static byte[] ResolveFlverPayload(string file, string? oodleRuntimeRoot)
+    {
+        var source = File.ReadAllBytes(file);
+        if (!IsChrbndPath(file)) return source;
+        byte[] payload = source;
+        if (payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+        {
+            var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+            payload = dcx.Payload;
+        }
+        if (payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+        {
+            var binder = Bnd4NativeDocument.Read(payload);
+            var entry = binder.Entries.FirstOrDefault(e =>
+                e.Name.EndsWith(".flver", StringComparison.OrdinalIgnoreCase));
+            if (entry is null)
+                throw new InvalidDataException("chrbnd 容器中没有 .flver 子项。");
+            return binder.GetStoredBytes(entry.Index);
+        }
+        throw new InvalidDataException("chrbnd 不是 DCX(BND4) 容器。");
+    }
+
+    /// <summary>
+    /// S17：解析 main 下发的 TAE 模板布局（来自本机 DSAS TAE.Template.SDT.xml，
+    /// main 负责读 XML，Bridge 只按布局解参数体字节）。
+    /// options.templateLayouts: { "eventTypeId": [ {name, kind, slotSize}, ... ] }
+    /// 解析失败时返回 null（参数体保持「未解码 + hex」兜底），不失败关闭——
+    /// 模板是本机可选元数据，不是 TAE 文档的一部分。
+    /// </summary>
+    private static IReadOnlyDictionary<int, TaeFieldLayout[]>? ParseTaeTemplateLayouts(JsonElement options)
+    {
+        if (options.ValueKind != JsonValueKind.Object
+            || !options.TryGetProperty("templateLayouts", out var layouts)
+            || layouts.ValueKind != JsonValueKind.Object)
+            return null;
+        var result = new Dictionary<int, TaeFieldLayout[]>();
+        foreach (var typeProperty in layouts.EnumerateObject())
+        {
+            if (!int.TryParse(typeProperty.Name, out var eventTypeId)
+                || typeProperty.Value.ValueKind != JsonValueKind.Array)
+                continue;
+            var fields = new List<TaeFieldLayout>();
+            foreach (var fieldElement in typeProperty.Value.EnumerateArray())
+            {
+                if (fieldElement.ValueKind != JsonValueKind.Object) continue;
+                var name = fieldElement.TryGetProperty("name", out var nameEl)
+                    && nameEl.ValueKind == JsonValueKind.String
+                    ? nameEl.GetString() ?? ""
+                    : "";
+                var kind = fieldElement.TryGetProperty("kind", out var kindEl)
+                    && kindEl.ValueKind == JsonValueKind.String
+                    ? kindEl.GetString() ?? ""
+                    : "";
+                var slotSize = fieldElement.TryGetProperty("slotSize", out var sizeEl)
+                    && sizeEl.ValueKind == JsonValueKind.Number
+                    && sizeEl.TryGetInt32(out var parsedSize)
+                    && parsedSize > 0
+                    ? parsedSize
+                    : 4;
+                if (name.Length == 0 || kind.Length == 0) continue;
+                fields.Add(new TaeFieldLayout(name, kind, slotSize));
+            }
+            if (fields.Count > 0) result[eventTypeId] = fields.ToArray();
+        }
+        return result.Count > 0 ? result : null;
     }
 
     /// <summary>

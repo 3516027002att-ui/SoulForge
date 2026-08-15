@@ -1,32 +1,32 @@
 /**
- * ANIMATION-56B / ANIMATION-56C：TaeWorkbenchPanel 三栏工作台的渲染结构 + 纯逻辑
- * + typed 写回接线 + 负向清单。
+ * ANIMATION-56B / ANIMATION-56C / S17：TaeWorkbenchPanel 三栏工作台的渲染结构
+ * + 纯逻辑 + typed 写回接线 + 负向清单。
  *
  * renderer-unit 是纯 node SSR（react-dom/server，无 DOM、不跑 effect）。TAE 面板是
  * props 驱动（App 经 read-tae-document 取数后传入），SSR 能看到完整三栏结构、
- * 动画列表、词条事件与中栏详情区的文件统计；选择联动由 e2e 覆盖。
+ * 动画列表、词条事件与三栏底 footer；选择联动与 chrbnd 解析由 e2e 覆盖。
  * 面板只在提交/重读处理器里触达 window，SSR 渲染路径不触达，无需假 window。
  *
- * T3（2026-08-15，grok）重构后三栏为：
- *   Animations | Events / 词条（含详情 + 写回）| 预览（只读）。
- * 没有 Timeline / Events、没有 Inspector 第三栏 —— 详情收进中栏。
+ * S17（2026-08-15，grok）重构后：
+ *   Animations | 词条 | 预览（只读），详情沉到三栏底 footer。
+ * 没有 Timeline / Events、没有 Inspector 第三栏、中栏不再有详情块。
  *
  * 覆盖：
- * 1. SSR 结构：三栏 Animations | Events / 词条 | 预览（只读）挂载即存在；
- *    无 Timeline / Events、无 Inspector、无 Tools 空栏；动画列表由 shared pages
- *    投影派生（不按 chr/action 目录分类），hkxName 去扩展作主标签。
- * 2. 纯逻辑：isInvalidTimeRange（startTime > endTime / 非有限时间判非法）。
+ * 1. SSR 结构：三栏 Animations | 词条 | 预览（只读）挂载即存在；无 Timeline /
+ *    Events、无 Inspector、无 Tools 空栏；动画列表由 shared pages 投影派生。
+ * 2. 纯逻辑：animationIdLabel（合法 hkx 茎用茎，乱码/空回退 a000_+6 位 animId，
+ *    禁止「动画 N」）；secondsToFrame / framesToSeconds；isInvalidTimeRange；
+ *    eventTypeLabel（`{typeId} {类型名}` / `{typeId} 未命名`）。
  * 3. authority 语义：partial（TAE_INVALID_TIME_RANGE）时 diagnostics 必须暴露给
  *    用户（tae-partial-diagnostics），非法时间行在词条列表标 failed。
- * 4. ANIMATION-56C 写回接线（收进中栏详情）：
- *    - 事件选中后详情区出现时间编辑（update-event-times）与新增事件
- *      （insert-event，模板 = 当前事件）入口；提交期间禁用重复提交。
- *    - mutation 构建纯函数：update-event-times 带 animId+eventIndex+startTime+endTime；
- *      insert-event 带 animId+templateEventIndex+eventTypeId+startTime+endTime。
+ * 4. ANIMATION-56C 写回接线（收进 footer）：
+ *    - 事件选中后 footer 出现帧编辑（update-event-times，输入帧、内部秒）；
+ *      insert-event 已按 S17 移除。
+ *    - mutation 构建纯函数：update-event-times 带 animId+eventIndex+startTime+endTime。
  *    - eventIndex = 事件在其动画 events 数组里的下标。
  *    - ok=true 后经 readTaeDocument 重读并覆盖本地文档（refresh 触发器）；
  *      ok=false 显示 diagnostics + 回滚提示，不清空词条列表。
- *    - 参数体未解码边界：详情区只读展示参数体，编辑区只有时间/类型输入。
+ *    - 参数体按模板解码展示字段名+值；解不出写「未解码」+ 有界 hex，不编造含义。
  * 5. Negative source：写回只有 commitTaeEvent 一个 typed 出口（无通用文本保存 /
  *    字节直写 fallback）；事件参数体未解码的边界不伪装成完整解析；右栏只读。
  * 6. 截断说明：tae-truncation testId + formatListTruncation（listTruncation 契约）。
@@ -39,15 +39,19 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   animationIdLabel,
   secondsToFrame,
+  framesToSeconds,
   TaeWorkbenchPanel,
-  TaeEventEditor,
-  buildInsertEventMutation,
+  TaeEventFooterEditor,
   buildUpdateEventTimesMutation,
   eventIndexOfTimelineRow,
+  eventTypeLabel,
   formatWriteDiagnostics,
+  formatFieldValue,
   isInvalidTimeRange
 } from './TaeWorkbenchPanel.js';
 import type { TaeDocument, TaeTimelineEventRow } from '@soulforge/shared';
+
+const EVENT_TYPE_NAMES: Record<string, string> = { 1: 'JumpTable', 2: 'PlaySound_ByStateInfo' };
 
 function makeDocument(overrides: Record<string, unknown> = {}): TaeDocument {
   return {
@@ -60,9 +64,13 @@ function makeDocument(overrides: Record<string, unknown> = {}): TaeDocument {
     totalGroupCount: 1,
     animations: [
       {
-        animId: 0, eventCount: 2, groupCount: 1, timesCount: 2, hkxName: 'a0000.hkx',
+        animId: 0, eventCount: 2, groupCount: 1, timesCount: 2, hkxName: 'a000_000000.hkt',
         events: [
-          { startTime: 0, endTime: 1, eventTypeId: 1 },
+          {
+            startTime: 0, endTime: 1, eventTypeId: 1,
+            parameterDecoded: true,
+            templateFields: [{ name: 'JumpTableID', kind: 's32', value: 12 }]
+          },
           { startTime: 1.5, endTime: 2, eventTypeId: 2 }
         ],
         eventsTruncated: false
@@ -88,7 +96,7 @@ function makeDocument(overrides: Record<string, unknown> = {}): TaeDocument {
 
 function render(data: TaeDocument | null = makeDocument()): string {
   return renderToStaticMarkup(
-    <TaeWorkbenchPanel resourceUri="fixture://action/c0000.tae" data={data} />
+    <TaeWorkbenchPanel resourceUri="fixture://action/c0000.tae" data={data} eventTypeNames={EVENT_TYPE_NAMES} />
   );
 }
 
@@ -98,7 +106,8 @@ function renderAnimationSelected(): string {
     <TaeWorkbenchPanel
       resourceUri="fixture://action/c0000.tae"
       data={makeDocument()}
-      initialSelection={{ kind: 'animation', id: 'anim-0', label: 'a0000', animationId: 0 }}
+      eventTypeNames={EVENT_TYPE_NAMES}
+      initialSelection={{ kind: 'animation', id: 'anim-0', label: 'a000_000000', animationId: 0 }}
     />
   );
 }
@@ -109,8 +118,9 @@ function renderWithSelection(): string {
     <TaeWorkbenchPanel
       resourceUri="fixture://action/c0000.tae"
       data={makeDocument()}
+      eventTypeNames={EVENT_TYPE_NAMES}
       initialSelection={{
-        kind: 'event', id: 'ev-0-0', label: '事件类型 1 @0s',
+        kind: 'event', id: 'ev-0-0', label: '1 JumpTable',
         animationId: 0, eventIndex: 0
       }}
     />
@@ -122,12 +132,12 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.match(render(), /aria-label="动作工作台"/);
   });
 
-  it('三栏 Animations | Events / 词条 | 预览（只读）同时存在，无 Timeline/Inspector/Tools', () => {
+  it('三栏 Animations | 词条 | 预览（只读）同时存在，无 Timeline/Inspector/Tools', () => {
     const html = render();
     assert.match(html, /aria-label="Animations"/);
     assert.match(html, /aria-label="Events \/ 词条"/);
     assert.match(html, /aria-label="预览（只读）"/);
-    // T3：不要时间轴图、不要 Inspector 第三栏。
+    // S17：详情沉 footer，中栏不再有 Inspector 第三栏。
     assert.doesNotMatch(html, /aria-label="Timeline \/ Events"/);
     assert.doesNotMatch(html, /aria-label="Inspector"/);
     assert.doesNotMatch(html, /aria-label="Files \/ Animations"/);
@@ -140,12 +150,13 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.doesNotMatch(html, /className="danger"/);
   });
 
-  it('动画列表由 pages 投影派生（hkxName 去扩展），不按 chr/action 目录分类', () => {
+  it('动画列表由 pages 投影派生（合法 hkx 茎去扩展），不按 chr/action 目录分类', () => {
     const html = render();
-    // a0000.hkx → a0000（去扩展主标签）；anim 1 无 hkxName → 「动画 1」。
-    assert.match(html, />a0000</);
-    assert.match(html, />动画 1</);
-    assert.doesNotMatch(html, />a0000\.hkx</);
+    // a000_000000.hkt → a000_000000（去扩展主标签）；anim 1 无 hkxName → a000_000001。
+    assert.match(html, />a000_000000</);
+    assert.match(html, />a000_000001</);
+    assert.doesNotMatch(html, />a000_000000\.hkt</);
+    assert.doesNotMatch(html, />动画 /);
     assert.doesNotMatch(html, />chr\//);
     assert.doesNotMatch(html, />action\//);
   });
@@ -159,49 +170,56 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.doesNotMatch(html, /提交|保存/);
   });
 
-  it('选中动画后中栏出现词条事件列表，详情区是动画详情', () => {
+  it('选中动画后中栏出现词条事件列表：`{typeId} {类型名}`，帧为元信息，无详情块', () => {
     const html = renderAnimationSelected();
     assert.match(html, /词条 · 动画 0/);
-    assert.match(html, /0s → 1s/);
-    assert.match(html, /1\.5s → 2s/);
-    assert.match(html, /事件类型 1/);
-    assert.match(html, /事件类型 2/);
-    assert.match(html, /data-testid="tae-details"/);
-    assert.match(html, /动画详情/);
-    assert.match(html, /事件数/);
-    assert.match(html, /HKX 名称/);
+    assert.match(html, />1 JumpTable</);
+    assert.match(html, />2 PlaySound_ByStateInfo</);
+    // 行内帧元信息（无秒）；中栏无详情块（下沉 footer）。
+    assert.match(html, />0 → 30 帧/);
+    assert.match(html, />45 → 60 帧/);
+    assert.doesNotMatch(html, /0s → 1s/);
+    assert.doesNotMatch(html, /data-testid="tae-details"/);
   });
 
-  it('未选中任何项时中栏详情显示文件级统计', () => {
+  it('未选中任何项时中栏没有详情块（文件统计已在 footer 之外移除）', () => {
     const html = render();
-    assert.match(html, /文件统计/);
-    assert.match(html, /动画数/);
-    assert.match(html, /事件总数/);
-    assert.match(html, /事件类型数/);
+    assert.doesNotMatch(html, /文件统计/);
+    assert.doesNotMatch(html, /data-testid="tae-details"/);
   });
 
-  it('右栏是只读预览空态「预览不可用」+ 诊断，不出现 3D/模型字样之外的编辑', () => {
+  it('右栏只读：未解析到 chrbnd（SSR 无 effect）时是显式 idle 空态，无输入/按钮', () => {
     const html = render();
-    assert.match(html, /data-testid="tae-preview-unavailable"/);
-    assert.match(html, /预览不可用/);
-    assert.match(html, /不是模型/);
-    // 右栏始终只读：无输入、无按钮。
-    const previewOnly = render();
-    assert.doesNotMatch(previewOnly, /tae-preview[^"]*">\s*<input|tae-preview[^"]*">\s*<button/);
+    assert.match(html, /data-testid="tae-chrbnd-idle"/);
+    assert.doesNotMatch(html, /tae-preview[^"]*">\s*<input|tae-preview[^"]*">\s*<button/);
   });
 });
 
-describe('animationIdLabel / secondsToFrame（动画标签与帧换算纯逻辑）', () => {
-  it('hkxName 去扩展；缺省回退「动画 N」', () => {
-    assert.equal(animationIdLabel({ animId: 3, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'a000_003013.hkx', events: [], eventsTruncated: false }), 'a000_003013');
-    assert.equal(animationIdLabel({ animId: 4, eventCount: 0, groupCount: 0, timesCount: 0, events: [], eventsTruncated: false }), '动画 4');
+describe('animationIdLabel / 帧换算（动画标签与帧换算纯逻辑）', () => {
+  it('合法 hkx 茎去扩展（.hkx/.hkt）；乱码/空/非文件名字符丢弃回退 a000_+6 位 animId', () => {
+    assert.equal(animationIdLabel({ animId: 3013, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'a000_003013.hkx', events: [], eventsTruncated: false }), 'a000_003013');
+    assert.equal(animationIdLabel({ animId: 600, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'a000_000600.hkt', events: [], eventsTruncated: false }), 'a000_000600');
+    // 乱码（非 ASCII 文件名）、空串、别名残留 → 回退。
+    assert.equal(animationIdLabel({ animId: 610, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: '葉', events: [], eventsTruncated: false }), 'a000_000610');
+    assert.equal(animationIdLabel({ animId: 4, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: '', events: [], eventsTruncated: false }), 'a000_000004');
+    assert.equal(animationIdLabel({ animId: 7, eventCount: 0, groupCount: 0, timesCount: 0, events: [], eventsTruncated: false }), 'a000_000007');
+    assert.equal(animationIdLabel({ animId: 9, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'a b', events: [], eventsTruncated: false }), 'a000_000009');
   });
 
-  it('秒 → 帧（30fps）；非有限给占位', () => {
+  it('秒 → 帧（30fps）；帧 → 秒；非有限给占位', () => {
     assert.equal(secondsToFrame(0.5), '15');
     assert.equal(secondsToFrame(2), '60');
     assert.equal(secondsToFrame(Number.NaN), '—');
     assert.equal(secondsToFrame(Number.POSITIVE_INFINITY), '—');
+    assert.equal(framesToSeconds('30'), 1);
+    assert.equal(framesToSeconds('15'), 0.5);
+    assert.ok(Number.isNaN(framesToSeconds('abc')));
+  });
+
+  it('eventTypeLabel：`{typeId} {类型名}`；无模板名给「未命名」', () => {
+    assert.equal(eventTypeLabel(1, EVENT_TYPE_NAMES), '1 JumpTable');
+    assert.equal(eventTypeLabel(99, EVENT_TYPE_NAMES), '99 未命名');
+    assert.equal(eventTypeLabel(5, undefined), '5 未命名');
   });
 });
 
@@ -241,14 +259,15 @@ describe('authority 语义（partial 非法时间范围必须暴露）', () => {
             }
           ]
         })}
-        initialSelection={{ kind: 'animation', id: 'anim-0', label: '动画 0', animationId: 0 }}
+        eventTypeNames={EVENT_TYPE_NAMES}
+        initialSelection={{ kind: 'animation', id: 'anim-0', label: 'a000_000000', animationId: 0 }}
       />
     );
     assert.match(html, /data-testid="tae-partial-diagnostics"/);
     assert.match(html, /TAE_INVALID_TIME_RANGE/);
     assert.match(html, /事件时间范围非法/);
     // 非法时间行在词条列表标记 failed。
-    assert.match(html, /5s → 2s/);
+    assert.match(html, /150 → 60 帧/);
     assert.match(html, /非法时间/);
     assert.match(html, /wb-row--failed/);
   });
@@ -259,93 +278,69 @@ describe('authority 语义（partial 非法时间范围必须暴露）', () => {
   });
 });
 
-describe('ANIMATION-56C 写回接线（typed event write，收进中栏详情）', () => {
-  it('事件选中后中栏详情有时间编辑与新增事件入口（各带提交按钮）', () => {
+describe('ANIMATION-56C 写回接线（typed event write，收进三栏底 footer）', () => {
+  it('事件选中后 footer 出现：起始帧/结束帧/完整类型/事件下标/参数字段 + 帧编辑', () => {
     const html = renderWithSelection();
+    assert.match(html, /data-testid="tae-event-footer"/);
     assert.match(html, /data-testid="tae-event-editor"/);
-    assert.match(html, /编辑事件时间（update-event-times）/);
+    assert.match(html, /编辑事件时间（update-event-times，内部秒）/);
     assert.match(html, /更新事件时间/);
-    assert.match(html, /新增事件（模板：当前事件）/);
-    assert.match(html, /新增事件/);
-    // 编辑区输入：时间 2（起止）+ 新增 3（类型/起止）= 5 个 number 输入。
+    // 起始帧 0 / 结束帧 30（0s/1s @ 30fps）。
+    assert.match(html, />起始帧 <strong>0<\/strong>/);
+    assert.match(html, />结束帧 <strong>30<\/strong>/);
+    // 类型名 + 下标。
+    assert.match(html, />类型 <strong>1 JumpTable<\/strong>/);
+    assert.match(html, /事件下标 0/);
+    // 帧编辑输入 2 个（insert-event 已按 S17 移除）。
     const inputs = html.match(/type="number"/g) ?? [];
-    assert.equal(inputs.length, 5);
+    assert.equal(inputs.length, 2);
   });
 
-  it('详情区列出 Start Frame / End Frame / 事件下标 / 事件类型 Id / 参数体未解码', () => {
+  it('参数字段按模板解码展示（字段名 + 值 + kind）；未解码事件给 hex 兜底', () => {
     const html = renderWithSelection();
-    assert.match(html, /Start Frame/);
-    assert.match(html, /End Frame/);
-    assert.match(html, /事件下标/);
-    assert.match(html, /事件类型 Id/);
-    // Start Frame = 0s×30 = 0；End Frame = 1s×30 = 30。
-    assert.match(html, /0（≈ 0s @ 30fps）/);
-    assert.match(html, /30（≈ 1s @ 30fps）/);
-    assert.match(html, /参数体/);
-    assert.match(html, /未解码/);
-  });
-
-  it('参数体区无编辑控件：参数体只读展示，编辑区只有时间/类型输入', () => {
-    const html = renderWithSelection();
-    // 详情属性行里参数体是只读值。
-    assert.match(html, /参数体/);
-    // 编辑区本身不出现参数体字样，也没有参数编辑输入（总输入恒为 5 个时间/类型）。
-    const editorHtml = renderToStaticMarkup(
-      <TaeEventEditor
-        row={{ animId: 0, startTime: 0, endTime: 1, eventTypeId: 1 }}
-        eventIndex={0}
-        timeDraft={null}
-        insertDraft={null}
-        saving={false}
-        notice={null}
-        onTimeDraftChange={() => {}}
-        onInsertDraftChange={() => {}}
-        onSubmitTime={() => {}}
-        onSubmitInsert={() => {}}
+    assert.match(html, /data-testid="tae-event-fields"/);
+    assert.match(html, />JumpTableID</);
+    assert.match(html, /12/);
+    assert.match(html, /\[s32\]/);
+    // 未解码事件（第 1 个动画的事件）→ 「参数体未解码」+ hex 兜底。
+    const undecoded = renderToStaticMarkup(
+      <TaeWorkbenchPanel
+        resourceUri="fixture://action/c0000.tae"
+        data={makeDocument()}
+        eventTypeNames={EVENT_TYPE_NAMES}
+        initialSelection={{
+          kind: 'event', id: 'ev-0-1', label: '2 PlaySound_ByStateInfo',
+          animationId: 0, eventIndex: 1
+        }}
       />
     );
-    const editorInputs = editorHtml.match(/type="number"/g) ?? [];
-    assert.equal(editorInputs.length, 5);
+    assert.match(undecoded, /data-testid="tae-fields-undecoded"/);
+    assert.match(undecoded, /参数体未解码/);
   });
 
   it('提交期间禁用重复提交：saving 时按钮 disabled', () => {
     const html = renderToStaticMarkup(
-      <TaeEventEditor
+      <TaeEventFooterEditor
         row={{ animId: 0, startTime: 0, endTime: 1, eventTypeId: 1 }}
         eventIndex={0}
-        timeDraft={{ startText: '0', endText: '1' }}
-        insertDraft={{ eventTypeIdText: '1', startText: '0', endText: '1' }}
+        timeDraft={{ startFrameText: '0', endFrameText: '30' }}
         saving
         notice={null}
         onTimeDraftChange={() => {}}
-        onInsertDraftChange={() => {}}
         onSubmitTime={() => {}}
-        onSubmitInsert={() => {}}
       />
     );
     assert.match(html, /type="button"[^>]*disabled/);
   });
 
-  it('buildUpdateEventTimesMutation：animId + eventIndex + startTime + endTime 正确', () => {
+  it('buildUpdateEventTimesMutation：帧输入 → 内部秒（/30），animId + eventIndex 正确', () => {
     const row: TaeTimelineEventRow = { animId: 3, startTime: 0, endTime: 1, eventTypeId: 7 };
     assert.deepEqual(
-      buildUpdateEventTimesMutation(row, 2, { startText: '1.25', endText: '2.5' }),
+      buildUpdateEventTimesMutation(row, 2, { startFrameText: '37.5', endFrameText: '75' }),
       { mutation: 'update-event-times', animId: 3, eventIndex: 2, startTime: 1.25, endTime: 2.5 }
     );
-    // 非有限时间 → null（不把非法输入发往 C#）。
-    assert.equal(buildUpdateEventTimesMutation(row, 0, { startText: 'abc', endText: '2' }), null);
-  });
-
-  it('buildInsertEventMutation：templateEventIndex + eventTypeId + startTime + endTime 正确', () => {
-    const row: TaeTimelineEventRow = { animId: 3, startTime: 0, endTime: 1, eventTypeId: 7 };
-    assert.deepEqual(
-      buildInsertEventMutation(row, 2, { eventTypeIdText: '7', startText: '3', endText: '4' }),
-      { mutation: 'insert-event', animId: 3, templateEventIndex: 2, eventTypeId: 7, startTime: 3, endTime: 4 }
-    );
-    assert.equal(
-      buildInsertEventMutation(row, 2, { eventTypeIdText: 'x', startText: '3', endText: '4' }),
-      null
-    );
+    // 非有限帧 → null（不把非法输入发往 C#）。
+    assert.equal(buildUpdateEventTimesMutation(row, 0, { startFrameText: 'abc', endFrameText: '2' }), null);
   });
 
   it('eventIndexOfTimelineRow：按 animId 分组计数回推动画内事件下标', () => {
@@ -371,9 +366,15 @@ describe('ANIMATION-56C 写回接线（typed event write，收进中栏详情）
     );
     assert.equal(formatWriteDiagnostics(undefined), '写入被拒绝');
   });
+
+  it('formatFieldValue：bool 显式 true/false，数值原样', () => {
+    assert.equal(formatFieldValue({ name: 'A', kind: 'b', value: true }), 'true');
+    assert.equal(formatFieldValue({ name: 'B', kind: 's32', value: 12 }), '12');
+    assert.equal(formatFieldValue({ name: 'C', kind: 'f32', value: 1.5 }), '1.5');
+  });
 });
 
-describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
+describe('Negative source tests（ANIMATION-56B / ANIMATION-56C / S17）', () => {
   const repoRoot = process.cwd();
   const panelSource = readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'TaeWorkbenchPanel.tsx'),
@@ -389,11 +390,25 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.doesNotMatch(panelSource, /relativePath/);
   });
 
-  it('事件参数体未解码的边界必须明示，不伪装成完整解析', () => {
+  it('S17：动画标签不猜编码，乱码回退 a000_+animId，无「动画 N」', () => {
+    assert.match(panelSource, /a000_/);
+    assert.match(panelSource, /padStart\(6, '0'\)/);
+    assert.doesNotMatch(panelSource, /`动画 /);
+    assert.doesNotMatch(panelSource, /IconButton|TreeItem/);
+  });
+
+  it('S17：词条行用 `{typeId} {类型名}`；无模板名显示「未命名」，不编造 PlaySound', () => {
+    assert.match(panelSource, /eventTypeNames/);
+    assert.match(panelSource, /未命名/);
+    assert.doesNotMatch(panelSource, /事件类型 \$\{eventTypeId\}/);
+  });
+
+  it('事件参数体未解码的边界必须明示，不伪装成完整解析；insert-event 已按 S17 移除', () => {
     assert.match(panelSource, /参数体/);
     assert.match(panelSource, /未解码/);
-    // 前端不发送/不编辑参数体字节：insert 依赖 templateEventIndex 由 C# 侧拷贝，
-    // mutation 结构里不出现 paramBody 字段。
+    assert.match(panelSource, /parameterBytesHex/);
+    // S17：新增事件入口移除；mutation 结构里不出现 paramBody 字段。
+    assert.doesNotMatch(panelSource, /insert-event/);
     assert.doesNotMatch(panelSource, /paramBody/);
   });
 
@@ -401,14 +416,13 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.match(panelSource, /getRendererBridge/);
     assert.match(panelSource, /commitTaeEvent/);
     assert.match(panelSource, /update-event-times/);
-    assert.match(panelSource, /insert-event/);
     assert.doesNotMatch(panelSource, /saveTextResource|applyTae|contentBase64|dataBase64/);
     const bridgeCalls = [...panelSource.matchAll(/bridge\.(\w+)\s*\(/g)]
       .map((m) => m[1])
       .filter((name): name is string => name !== undefined);
     assert.ok(
-      bridgeCalls.every((name) => name.startsWith('read') || name === 'commitTaeEvent'),
-      `发现非 typed 桥接调用：${bridgeCalls.filter((n) => !n.startsWith('read') && n !== 'commitTaeEvent').join(', ')}`
+      bridgeCalls.every((name) => name.startsWith('read') || name === 'commitTaeEvent' || name === 'resolveChrbndPreview'),
+      `发现非 typed 桥接调用：${bridgeCalls.filter((n) => !n.startsWith('read') && n !== 'commitTaeEvent' && n !== 'resolveChrbndPreview').join(', ')}`
     );
   });
 

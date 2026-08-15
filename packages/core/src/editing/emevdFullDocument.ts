@@ -62,6 +62,9 @@ export interface ReadFullEmevdDocumentInput {
   registry: EmedfRegistry;
   documentInstanceId?: string;
   pageSize?: number;
+  /** S15：已挂载原版根目录时传入，KRAK 压缩的地图事件（m11_02_71_10 等）需要
+   *  Oodle 运行时才能解 DCX。未挂原版时不传。 */
+  oodleRuntimeRoot?: string;
   timeoutMs?: number;
 }
 
@@ -100,6 +103,7 @@ export async function readFullEmevdDocumentViaBridge(
     command: 'read-emevd-document',
     filePath: input.filePath,
     allowedRoots: input.allowedRoots,
+    ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
     timeoutMs: input.timeoutMs ?? 60_000,
     commandOptions: { instructionPage: 0, instructionPageSize: pageSize }
   });
@@ -130,6 +134,7 @@ export async function readFullEmevdDocumentViaBridge(
       command: 'read-emevd-document',
       filePath: input.filePath,
       allowedRoots: input.allowedRoots,
+      ...(input.oodleRuntimeRoot ? { oodleRuntimeRoot: input.oodleRuntimeRoot } : {}),
       timeoutMs: input.timeoutMs ?? 60_000,
       commandOptions: { instructionPage: page, instructionPageSize: pageSize }
     });

@@ -23,6 +23,8 @@ import {
   applyYappedFieldOverlay,
   readYappedSdtDefsIndex,
   readYappedSdtRowNamesIndex,
+  readTaeEventTemplateFile,
+  type TaeEventTemplateInfo,
   type YappedParamOverlay,
   type YappedSourceDiagnostic,
   listRolloutSessions,
@@ -837,6 +839,50 @@ function locateUserEmedfSync(): string | null {
     }
   }
   return null;
+}
+
+/**
+ * S17（2026-08-15）：动作域 TAE 的伴生 chrbnd 只读解析。
+ *
+ * 虚拟 sourceUri 形如 `chrbnd:chr/c1130.chrbnd.dcx` —— renderer 只持有这个
+ * 逻辑标识，真实路径永远留在 main。查找顺序：overlay 根 → 已挂载原版根
+ * （原版只读）。拒绝 `..` 等越界片段。找不到返回 null，由调用方给空态文案。
+ */
+function resolveChrbndVirtualFile(sourceUri: string): { absolutePath: string; relativePath: string } | null {
+  if (!sourceUri.startsWith('chrbnd:')) return null;
+  const relativePath = sourceUri.slice('chrbnd:'.length).replace(/[/\\]+/g, '/').replace(/^[/\\]+/, '');
+  if (!relativePath || relativePath.split('/').some((segment) => segment === '..' || segment === '')) {
+    return null;
+  }
+  const overlay = activeSession?.layers.overlayRoot?.trim();
+  if (overlay) {
+    const candidate = join(overlay, relativePath);
+    try {
+      if (existsSync(candidate)) return { absolutePath: candidate, relativePath };
+    } catch {
+      // 不可读，继续下一个候选。
+    }
+  }
+  const base = activeSession?.layers.baseRoot?.trim();
+  if (base) {
+    const candidate = join(base, relativePath);
+    try {
+      if (existsSync(candidate)) return { absolutePath: candidate, relativePath };
+    } catch {
+      // 不可读。
+    }
+  }
+  return null;
+}
+
+/**
+ * S17：FLVER 读通道的资源解析 —— 先走已索引文件，再走 chrbnd 虚拟标识
+ * （伴生模型预览）。返回 null 时调用方按 RESOURCE_NOT_INDEXED 处理。
+ */
+function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relativePath: string } | null {
+  const indexed = indexedFiles.find((item) => item.sourceUri === sourceUri);
+  if (indexed) return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath };
+  return resolveChrbndVirtualFile(sourceUri);
 }
 
 let cachedEmevdRegistry: ReturnType<typeof resolveEmevdRegistry> | null = null;
@@ -2145,6 +2191,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         command: 'read-emevd-document',
         filePath: file.absolutePath,
         allowedRoots: readRoots ? [...readRoots.allowedRoots] : [dirname(file.absolutePath)],
+        // S15：KRAK 压缩的 emevd（地图事件，如 m11_02_71_10）需要 Oodle 运行时
+        // 才能解 DCX。PARAM/GPARAM 读链早已传 baseRoot；事件读链此前漏传，导致
+        // KRAK 事件解压失败被 UI 伪装成空文档。未挂原版时不传空路径装有。
+        ...(activeSession?.layers.baseRoot
+          ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+          : {}),
         timeoutMs: 120_000
       });
       return sanitizeRendererValue({
@@ -2312,6 +2364,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         resourceUri: sourceUri,
         registry: getEmevdRegistry().registry,
         ...(documentInstanceId ? { documentInstanceId } : {}),
+        ...(activeSession?.layers.baseRoot
+          ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+          : {}),
         pageSize: 512,
         timeoutMs: 120_000
       });
@@ -2465,6 +2520,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         resourceUri: sourceUri,
         registry,
         ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
+        ...(activeSession?.layers.baseRoot
+          ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+          : {}),
         pageSize: 512,
         timeoutMs: 120_000
       });
@@ -2529,6 +2587,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         resourceUri: sourceUri,
         registry,
         ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
+        ...(activeSession?.layers.baseRoot
+          ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+          : {}),
         pageSize: 512,
         timeoutMs: 120_000
       });
@@ -3134,16 +3195,40 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
     const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    // S17：DSAS 模板（本机只读，可选增强）→ templateLayouts 给 Bridge 解码参数体。
+    const byEventTypeId = await loadTaeEventTemplate();
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-tae-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
+      ...taeTemplateLayoutsOption(byEventTypeId),
       ...(activeSession?.layers.baseRoot
         ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
         : {})
     });
-    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+    // 事件类型名表（`0 JumpTable` 的「类型名」）：只投影文档实际出现过的
+    // eventTypeId，模板缺的 id 不出现，渲染器回退裸 `{typeId}`。
+    let eventTypeNames: Record<string, string> | undefined;
+    if (result.parseStatus !== 'failed' && result.data && byEventTypeId) {
+      const data = result.data as { eventTypes?: number[] };
+      const present = (data.eventTypes ?? []).filter(
+        (id): id is number => byEventTypeId.has(id)
+      );
+      if (present.length > 0) {
+        eventTypeNames = Object.fromEntries(
+          present.map((id) => [String(id), byEventTypeId.get(id)!.name])
+        );
+      }
+    }
+    return sanitizeRendererValue({
+      ok: result.parseStatus !== 'failed',
+      sourceUri,
+      relativePath: file.relativePath,
+      data: result.data,
+      ...(eventTypeNames ? { eventTypeNames } : {}),
+      diagnostics: result.diagnostics
+    });
   });
 
   handle('resource.readEsdDocument', async (_event, sourceUri: string) => {
@@ -3204,7 +3289,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER。', sourceUri }] };
     }
@@ -3318,7 +3403,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverMesh', async (_event, sourceUri: string, meshIndex: number) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 网格。', sourceUri }] };
     }
@@ -3335,7 +3420,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverSkeleton', async (_event, sourceUri: string) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 骨骼层级。', sourceUri }] };
     }
@@ -3351,7 +3436,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverDummies', async (_event, sourceUri: string) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 挂点。', sourceUri }] };
     }
@@ -3367,7 +3452,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverTextureSlots', async (_event, sourceUri: string) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 纹理槽位。', sourceUri }] };
     }
@@ -3380,6 +3465,57 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       timeoutMs: 120_000
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
+  /**
+   * S17：动作域 TAE 的伴生 chrbnd 解析（overlay → 已挂载原版，原版只读）。
+   * renderer 传动作文件 sourceUri；main 按同相对路径推 `chr/<id>.chrbnd.dcx`
+   * 并探存在性，返回虚拟 sourceUri（`chrbnd:<relative>`）供 FLVER 读通道用。
+   * 两边都没有时给空态文案：未挂原版时指引去「开始」页挂载。
+   */
+  handle('resource.resolveChrbndPreview', async (_event, animSourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === animSourceUri);
+    if (!file) {
+      return { ok: false, reason: 'no-anim' as const, message: '未找到该动作文件。' };
+    }
+    const relative = file.relativePath.replace(/\\/g, '/');
+    const dir = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';
+    const stem = (relative.split('/').pop() ?? '').replace(/\.(tae|anibnd)(\.dcx)?$/i, '');
+    const candidates = [`${stem}.chrbnd.dcx`, `${stem}.chrbnd`]
+      .map((name) => (dir ? `${dir}/${name}` : name))
+      .map((name) => name.replace(/\//g, sep));
+    const overlay = activeSession?.layers.overlayRoot?.trim();
+    if (overlay) {
+      for (const candidate of candidates) {
+        try {
+          if (existsSync(join(overlay, candidate))) {
+            return { ok: true, origin: 'overlay' as const, chrbndSourceUri: `chrbnd:${candidate.replace(/\\/g, '/')}` };
+          }
+        } catch {
+          // 继续下一个候选。
+        }
+      }
+    }
+    const base = activeSession?.layers.baseRoot?.trim();
+    if (base) {
+      for (const candidate of candidates) {
+        try {
+          if (existsSync(join(base, candidate))) {
+            return { ok: true, origin: 'base' as const, chrbndSourceUri: `chrbnd:${candidate.replace(/\\/g, '/')}` };
+          }
+        } catch {
+          // 继续下一个候选。
+        }
+      }
+    }
+    if (!base) {
+      return {
+        ok: false,
+        reason: 'base-not-mounted' as const,
+        message: `没有找到 ${stem} 的模型（chrbnd），且未挂载原版游戏目录；到「开始」页选择含 sekiro.exe 的目录后再试。`
+      };
+    }
+    return { ok: false, reason: 'none' as const, message: `没有找到 ${stem} 的模型（chrbnd）。` };
   });
 
   handle(
@@ -3646,6 +3782,104 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
     return null;
   };
+
+  /* ------------------------------------------------------------------ */
+  /*  本机 DSAnimStudio TAE 词条只读导入（S17 动作域）                    */
+  /*                                                                    */
+  /*  DSAnimStudio 的 Res\\TAE.Template.SDT.xml 是 Sekiro 事件类型词条表：  */
+  /*  `0 JumpTable` 这类事件行「类型名」的来源，也带每类事件参数体的      */
+  /*  字段布局（name/kind/slotSize），随 read-tae-document 的             */
+  /*  templateLayouts 选项传给 Bridge 解码参数体。                        */
+  /*                                                                    */
+  /*  同 Yapped：本机第三方工具安装目录，只读、不入库、失败降级 ——        */
+  /*  拿不到就事件行显示裸 `{typeId}`、参数体不解码，绝不把「词条不可用」 */
+  /*  升级成「TAE 不可用」。                                              */
+  /* ------------------------------------------------------------------ */
+
+  /** S17 固定候选：本机 DSAnimStudio 发布包真实落地（grok 已求证存在）。 */
+  const TAE_TEMPLATE_FIXED_CANDIDATES = [
+    'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\DSAnimStudio-4.9.9[Build 4999]'
+      + '\\Res\\TAE.Template.SDT.xml'
+  ];
+
+  /** TAE 模板在 tools/<一层子目录> 下的相对候选（DSAS 装在 Res/ 下）。 */
+  const TAE_TEMPLATE_RELATIVE_CANDIDATES = [
+    'Res\\TAE.Template.SDT.xml',
+    'TAE.Template.SDT.xml',
+    'Res\\TAE.Template.xml'
+  ];
+
+  /**
+   * 定位本机 DSAnimStudio 的 `TAE.Template.SDT.xml`。
+   *
+   * 候选顺序：SOULFORGE_TAE_TEMPLATE_PATH 显式环境变量 → 固定候选 → 已挂载
+   * 会话兄弟 tools/<一层子目录>/Res/。找不到返回 null，由调用方降级到裸
+   * typeId —— 这是可选增强，绝不能把「词条不可用」升级成「TAE 不可用」。
+   */
+  const locateTaeTemplatePathSync = (): string | null => {
+    const probe = (candidate: string): boolean => {
+      try {
+        return existsSync(candidate);
+      } catch {
+        return false;
+      }
+    };
+    const explicit = process.env.SOULFORGE_TAE_TEMPLATE_PATH?.trim();
+    if (explicit) {
+      const candidate = resolve(explicit);
+      if (probe(candidate)) return candidate;
+    }
+    for (const candidate of TAE_TEMPLATE_FIXED_CANDIDATES) {
+      if (probe(candidate)) return candidate;
+    }
+    const roots: string[] = [];
+    pushToolsSubdirs(roots, activeSession?.layers.baseRoot);
+    const overlay = activeSession?.layers.overlayRoot?.trim();
+    if (overlay) pushToolsSubdirs(roots, dirname(dirname(overlay)));
+    const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+    if (gameRootEnv) pushToolsSubdirs(roots, gameRootEnv);
+    for (const root of roots) {
+      for (const relative of TAE_TEMPLATE_RELATIVE_CANDIDATES) {
+        const candidate = join(root, relative);
+        if (probe(candidate)) return candidate;
+      }
+    }
+    return null;
+  };
+
+  let taeTemplateCache: {
+    loaded: true;
+    /** eventTypeId → 词条；null 表示本机无模板或读不到。 */
+    byEventTypeId: ReadonlyMap<number, TaeEventTemplateInfo> | null;
+  } | null = null;
+
+  /**
+   * 惰性读本机 TAE 模板索引并缓存。只读一次（73KB 单文件），每次读 TAE
+   * 都重跑会让打开卡顿。空/缺失回 null，不抛 —— 失败降级到裸 typeId。
+   */
+  const loadTaeEventTemplate = async (): Promise<ReadonlyMap<number, TaeEventTemplateInfo> | null> => {
+    if (taeTemplateCache) return taeTemplateCache.byEventTypeId;
+    const templatePath = locateTaeTemplatePathSync();
+    const result = templatePath ? await readTaeEventTemplateFile(templatePath) : null;
+    taeTemplateCache = {
+      loaded: true,
+      byEventTypeId: result?.ok ? result.byEventTypeId : null
+    };
+    return taeTemplateCache.byEventTypeId;
+  };
+
+  /** read-tae-document 的 bridge options：templateLayouts（无模板时省略）。 */
+  const taeTemplateLayoutsOption = (byEventTypeId: ReadonlyMap<number, TaeEventTemplateInfo> | null) =>
+    byEventTypeId
+      ? {
+          templateLayouts: Object.fromEntries(
+            [...byEventTypeId.entries()].map(([id, info]) => [
+              String(id),
+              info.fields.map((field) => ({ name: field.name, kind: field.kind, slotSize: field.slotSize }))
+            ])
+          )
+        }
+      : {};
 
   let yappedOverlayCache: {
     loaded: true;

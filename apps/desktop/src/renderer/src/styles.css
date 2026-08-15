@@ -2242,6 +2242,18 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 
 .tae-edit { display: flex; flex-direction: column; }
 
+/* S17：词条详情下沉三栏底 footer。meta 行一条排开，参数字段按属性表样式。 */
+.tae-footer { display: flex; flex-direction: column; gap: 6px; }
+.tae-footer__meta {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline;
+  font-size: 12px; color: var(--ink-1);
+}
+.tae-footer__meta strong { color: var(--ink-0); font-weight: 600; }
+.tae-footer__meta small { font-size: 11px; }
+.tae-footer__fields { border-top: 1px solid var(--line); padding-top: 6px; }
+.tae-footer__fields .wb-props { max-height: 160px; overflow-y: auto; }
+.tae-footer .tae-edit { border-top: 1px solid var(--line); padding-top: 6px; }
+
 /* ══════════ Light 主题收尾作用域（§10 交互态） ══════════ */
 /* §10.4：light 下输入框用 forge-2 打底——forge-0 太透、与画布几乎同色；
    焦点边框/焦点环、placeholder 均走共享规则，不需要重复。 */

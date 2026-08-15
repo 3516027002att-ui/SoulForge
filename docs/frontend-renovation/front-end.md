@@ -1232,11 +1232,18 @@ Container / Files | Source / Read-only Disassembly（主区 flex）| 可选 Symb
 T3（2026-08-15）把 Talk、HKX Behavior、TimeAct、Animation 合并为单一「动作」域（`behavior`）。顶栏只有「动作」，没有「行为」和「动画」；侧栏列 `anibnd|tae` 逻辑库。工作台按真实结构（对照 DSAS），不要套通用四栏：
 
 ```text
-动作:  Animations（动画 id 列表，hkxName 去扩展，如 a000_003013）| 词条 + 详情 | 预览（只读）
+动作:  Animations（动画 id 列表，hkx 茎去扩展，如 a000_003013）| 词条 | 预览（只读），详情沉三栏底 footer
 ```
 
-- 左栏列动画 id 列表（虚拟滚动）；中栏列当前动画的词条事件文本列表（`PlaySound_ByStateInfo` 等，能解出中文副名就显示），选中后在中栏下方详情列出 Start Frame / End Frame / Id 与能解出的全部字段；解不出的字段写「未解码」+ 原始 hex/数字，禁止编造 SoundType 含义。
-- 右栏是只读 3D：有伴生 `c5030.chrbnd.dcx` 且现有 FLVER 预览能挂就挂；否则空态「预览不可用」+ 诊断。不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
+S17（2026-08-15）拍死五件事（对照 DSAS）：
+
+1. **三栏真拖**：`WorkbenchLayout` 量栏内容宽（不含 4px 分隔条），拖拽/键盘监听用 propsRef + 空依赖 useCallback 稳定挂载——面板每次 render 新建 `columns` 数组不再拆装监听；拖完仍可再拖，松手不弹回。
+2. **动画命名**：hkxName 茎合法（ASCII 文件名）用茎；乱码/空/非文件名字符丢弃，回退 `a000_` + 至少 6 位 animId（`a000_000600`）。禁止「动画 N」、禁止乱码。C# 侧名字指针在 animFileInfo+0x10（UTF-16LE；+0x00 是 0/1 链接标志，旧码读它当指针吐乱码）。
+3. **词条行**：`{完整 typeId}  {类型名}`（`0 JumpTable`），类型名来自本机 DSAS `TAE.Template.SDT.xml`（main 只读解析注入，同 Yapped 只读模式，不提交 XML 入库）；无模板名显示「未命名」。行内元信息是帧，不显示秒。
+4. **词条详情下沉 footer**：选中词条时三栏底下（WorkbenchLayout footer，占用 S12 卸掉的 64 KiB 条位置）出现 起始帧/结束帧（主标签帧，可附 ≈秒小字）、完整 typeId + 类型名、事件下标、全部参数字段——按模板布局解码（Bridge 4 字节槽对齐，字段名 + 值 + kind）；解不出写「未解码」+ 有界 hex，禁止编造字段含义。帧编辑（update-event-times）留在 footer，输入用帧、提交内部秒；insert-event 已移除。中栏不再有 DetailsSection / Inspector 第三栏。
+5. **右栏挂伴生 chrbnd 模型**：查找顺序 overlay `chr/<id>.chrbnd.dcx` → 已挂载原版同样相对路径（原版只读）；Bridge FLVER 读命令支持 chrbnd 容器（DCX→BND4→首个 .flver 子项，与 ffxbnd/anibnd 同构）；挂上现有 FLVER 只读预览（readFlverMesh/Skeleton/Dummies 走 `chrbnd:` 虚拟 sourceUri）。两边都没有：空态「没有找到 c1130 的模型（chrbnd）」；未挂原版且 overlay 也没有：空态写明去「开始」页挂原版。不要假 FBX、不要可编辑骨骼。
+
+- 左栏列动画 id 列表（虚拟滚动）；中栏列当前动画的词条事件列表（`{typeId} {类型名}`）；右栏是只读 3D 预览（有 chrbnd 才有模型）。不要时间轴图、不要 Inspector 第三栏、不要 64 KiB 条。
 - 打开 `*.anibnd.dcx` / `.tae` 都走 TAE 读链；`*.anibnd.dcx` 由 Bridge 从 BND4 容器提取主 TAE，**不落 BND4 通用容器页**。
 - 没有真实结构 read 时先完成对应 read 卡，不用通用资源列表冒充；
 - writer 缺失时保留完整只读专业工作台，而不是空白页面。

@@ -321,6 +321,8 @@ const api = {
     ipcRenderer.invoke('resource.readFlverDummies', sourceUri),
   readFlverTextureSlots: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverTextureSlots', sourceUri),
+  resolveChrbndPreview: (animSourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.resolveChrbndPreview', animSourceUri),
   applyMsbMutation: (
     sourceUri: string,
     expectedHash: string,

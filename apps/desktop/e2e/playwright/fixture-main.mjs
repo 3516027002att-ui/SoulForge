@@ -1524,6 +1524,17 @@ function registerFixtureIpc() {
     return { ok: true, data: { ...doc }, diagnostics: [] };
   });
 
+  // S17：伴生 chrbnd 解析。fixture 工作区没有模型 → 诚实空态（未挂原版分支）。
+  handleTrusted('resource.resolveChrbndPreview', (_event, animSourceUri) => {
+    track('resource.resolveChrbndPreview');
+    const stem = String(animSourceUri).split('/').pop()?.replace(/\.(tae|anibnd)(\.dcx)?$/i, '') ?? '';
+    return {
+      ok: false,
+      reason: 'base-not-mounted',
+      message: `没有找到 ${stem} 的模型（chrbnd），且未挂载原版游戏目录；到「开始」页选择含 sekiro.exe 的目录后再试。`
+    };
+  });
+
   // ANIMATION-56B：TAE 事件时间/新增写回（合成内存态，明确标记 synthetic）。
   // update-event-times 按 animId + eventIndex 命中 events 就地更新 startTime/endTime；
   // insert-event 以 templateEventIndex 为模板，eventTypeId 必须一致（C# fail-closed），

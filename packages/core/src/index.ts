@@ -119,6 +119,7 @@ export * from './backup/index.js';
 export * from './audit-log/index.js';
 export * from './transactions/index.js';
 export * from './vfs/index.js';
+export * from './tae/taeEventTemplate.js';
 
 // `./testing/*` is deliberately NOT re-exported here. The production barrel is
 // what electron-builder ships, and re-exporting harness helpers would drag
