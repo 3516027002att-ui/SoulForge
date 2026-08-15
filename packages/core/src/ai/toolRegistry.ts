@@ -21,7 +21,7 @@ import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermis
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
 export interface ToolContext {
-  workspaceIndex: WorkspaceIndex;
+  workspaceIndex: WorkspaceIndex | null;
   mode: 'plan' | 'normal' | 'fullPermission';
 }
 
@@ -242,7 +242,11 @@ export function createDefaultToolRegistry(): ToolRegistry {
     description: 'Return indexed workspace counts for files, symbols, and references.',
     permission: 'read',
     permissionLevel: 'read',
-    run: (_input, context) => ok(context.workspaceIndex.getStats())
+    run: (_input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
+      return ok(ws.getStats());
+    }
   });
 
   registry.register({
@@ -252,11 +256,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { query: 'string', limit: 'number?', kinds: 'array?' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       const query = asString(value.query, '');
       const limit = asNumber(value.limit, 50);
       const kinds = asResourceKinds(value.kinds);
-      return ok(context.workspaceIndex.searchResources({ query, limit, ...(kinds ? { kinds } : {}) }));
+      return ok(ws.searchResources({ query, limit, ...(kinds ? { kinds } : {}) }));
     }
   });
 
@@ -267,8 +273,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { query: 'string', limit: 'number?' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      return ok(context.workspaceIndex.searchEvents(asString(value.query, ''), asNumber(value.limit, 50)));
+      return ok(ws.searchEvents(asString(value.query, ''), asNumber(value.limit, 50)));
     }
   });
 
@@ -279,8 +287,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { query: 'string', limit: 'number?' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      return ok(context.workspaceIndex.searchMapEntities(asString(value.query, ''), asNumber(value.limit, 50)));
+      return ok(ws.searchMapEntities(asString(value.query, ''), asNumber(value.limit, 50)));
     }
   });
 
@@ -291,8 +301,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { query: 'string', limit: 'number?' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      return ok(context.workspaceIndex.searchParamRows(asString(value.query, ''), asNumber(value.limit, 50)));
+      return ok(ws.searchParamRows(asString(value.query, ''), asNumber(value.limit, 50)));
     }
   });
 
@@ -303,8 +315,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { query: 'string', limit: 'number?' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      return ok(context.workspaceIndex.searchTextEntries(asString(value.query, ''), asNumber(value.limit, 50)));
+      return ok(ws.searchTextEntries(asString(value.query, ''), asNumber(value.limit, 50)));
     }
   });
 
@@ -315,11 +329,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { textId: 'number', category: 'string?' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
       if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'lookup_text_id requires numeric textId.');
       const category = asOptionalString(value.category);
-      const matches = context.workspaceIndex.lookupTextEntries(textId, category);
+      const matches = ws.lookupTextEntries(textId, category);
       if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
       return ok({ textId, category, matches });
     }
@@ -332,14 +348,16 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'analyze',
     inputSchema: { textId: 'number', category: 'string?' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
       if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'find_text_references requires numeric textId.');
       const category = asOptionalString(value.category);
-      const matches = context.workspaceIndex.lookupTextEntries(textId, category);
+      const matches = ws.lookupTextEntries(textId, category);
       if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
       const items = matches.map((entry) => {
-        const references = context.workspaceIndex.findReferences(entry.uri, 'to');
+        const references = ws.findReferences(entry.uri, 'to');
         return { entry, references, referenceStats: summarizeReferences(references) };
       });
       return ok({ textId, category, matches: items, totalReferences: items.reduce((sum, item) => sum + item.references.length, 0) });
@@ -358,16 +376,18 @@ export function createDefaultToolRegistry(): ToolRegistry {
       maxMarkdownChars: 'number?'
     },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       const textId = asNumber(value.textId, Number.NaN);
       if (!Number.isFinite(textId)) return fail('INVALID_INPUT', 'explain_text_entry requires numeric textId.');
       const category = asOptionalString(value.category);
       const maxReferences = asNumber(value.maxReferences, 80);
       const maxMarkdownChars = asNumber(value.maxMarkdownChars, 24_000);
-      const matches = context.workspaceIndex.lookupTextEntries(textId, category);
+      const matches = ws.lookupTextEntries(textId, category);
       if (matches.length === 0) return fail('TEXT_ENTRY_NOT_FOUND', `No text entry exists for textId ${textId}.`, { category });
       const contexts = matches.map((entry) => {
-        const references = context.workspaceIndex.findReferences(entry.uri, 'to');
+        const references = ws.findReferences(entry.uri, 'to');
         const aiContext = buildTextAiContext(entry, references, { maxReferences, maxMarkdownChars });
         return { context: aiContext, prompt: renderTextAiPrompt(aiContext) };
       });
@@ -382,11 +402,13 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'analyze',
     inputSchema: { uri: 'string', direction: 'enum:from|to|both?' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       const uri = asString(value.uri);
       if (!uri) return fail('INVALID_INPUT', 'find_references requires uri.');
       const direction = asReferenceDirection(value.direction);
-      return ok(context.workspaceIndex.findReferences(uri, direction));
+      return ok(ws.findReferences(uri, direction));
     }
   });
 
@@ -397,10 +419,12 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'analyze',
     inputSchema: { uri: 'string' },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       const uri = asString(value.uri);
       if (!uri) return fail('INVALID_INPUT', 'explain_event requires uri.');
-      const explanation = context.workspaceIndex.buildEventExplanationInput(uri);
+      const explanation = ws.buildEventExplanationInput(uri);
       if (!explanation) return fail('EVENT_NOT_FOUND', `No event exists for URI: ${uri}`);
       return ok(explanation);
     }
@@ -419,8 +443,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
       mode: 'enum:plan|normal|fullPermission?'
     },
     run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
-      const workspaceId = context.workspaceIndex.workspaceId;
+      const workspaceId = ws.workspaceId;
       const targetUri = asString(value.targetUri);
       const targetPath = asString(value.targetPath);
       const newText = asString(value.newText);
@@ -643,10 +669,12 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permission: 'analyze',
     permissionLevel: 'analyze',
     run: async (_input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const store = getDefaultOperationLogStore();
       return ok({
-        operations: await store.list(context.workspaceIndex.workspaceId),
-        history: await store.history(context.workspaceIndex.workspaceId)
+        operations: await store.list(ws.workspaceId),
+        history: await store.history(ws.workspaceId)
       });
     }
   });

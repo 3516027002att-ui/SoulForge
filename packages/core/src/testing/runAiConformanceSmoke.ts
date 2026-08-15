@@ -73,7 +73,7 @@
  *   + prefixed summary) with an audit entry and rollout checkpoint; a failing
  *   summary request fails closed and keeps the original history
  *
- * Production wiring additions (54-58):
+ * Production wiring additions (54-59):
  * - agentToolBridge maps the workspace ToolRegistry to the agent loop
  *   contract (parallel policy for read/analyze, typed error mapping,
  *   structured invalid-JSON refusal)
@@ -83,6 +83,9 @@
  * - runAgentSession end-to-end with rollout persistence, listing, loading
  *   and resume seeding the follow-up run
  * - session cancellation leaves a durable interrupted marker
+ * - no open Mod workspace: workspace-backed tools fail cleanly with
+ *   WORKSPACE_REQUIRED while workspace-free tools keep running; the session
+ *   host injects systemPrompt only when the history has no system message
  *
  * All cases use local fake HTTP servers or injected fetch failures.
  * No real provider credentials or network access required.
@@ -127,7 +130,7 @@ import {
   DEFAULT_SUMMARIZATION_PROMPT,
   DEFAULT_SUMMARY_PREFIX
 } from '../model-services/contextCompactor.js';
-import { ToolRegistry, validateToolInput } from '../ai/toolRegistry.js';
+import { createDefaultToolRegistry, ToolRegistry, validateToolInput, type ToolContext } from '../ai/toolRegistry.js';
 import { createAgentToolBridge } from '../ai/agentToolBridge.js';
 import {
   FileRolloutStorage,
@@ -438,7 +441,7 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 58;
+  const total = 59;
 
   // --- Case 1: HTTP 429 rate limit ---
   {
@@ -2843,6 +2846,134 @@ async function main(): Promise<void> {
       if (result.run.finishReason !== 'cancelled') throw new Error(`Case 58: ${result.run.finishReason}`);
       const loaded = await loadRolloutSession(result.rolloutPath);
       if (!loaded.ok || !loaded.interrupted) throw new Error('Case 58: interrupted marker missing.');
+      passed++;
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }
+
+  // --- Case 59: no open Mod workspace — workspace-backed tools fail cleanly
+  // --- with WORKSPACE_REQUIRED, workspace-free tools keep running; the session
+  // --- host injects systemPrompt only when the history lacks a system message ---
+  {
+    const base = await mkdtemp(join(tmpdir(), 'soulforge-agent-wsnull-'));
+    try {
+      const registry = createDefaultToolRegistry();
+      const nullContext: ToolContext = { workspaceIndex: null, mode: 'plan' };
+
+      const stats = await registry.run('workspace_stats', {}, nullContext);
+      if (stats.ok || stats.error?.code !== 'WORKSPACE_REQUIRED') {
+        throw new Error(`Case 59: workspace_stats must fail with WORKSPACE_REQUIRED when no workspace, got ${JSON.stringify(stats)}`);
+      }
+      if (stats.error?.message !== '这次工具需要先打开 Mod 工作区。') {
+        throw new Error(`Case 59: WORKSPACE_REQUIRED message mismatch: ${stats.error?.message}`);
+      }
+      const search = await registry.run('search_resources', { query: 'x' }, nullContext);
+      if (search.ok || search.error?.code !== 'WORKSPACE_REQUIRED') {
+        throw new Error('Case 59: search_resources must fail with WORKSPACE_REQUIRED when no workspace.');
+      }
+      const propose = await registry.run(
+        'propose_text_patch',
+        { targetUri: 'u', targetPath: 'p', newText: 't' },
+        nullContext
+      );
+      if (propose.ok || propose.error?.code !== 'WORKSPACE_REQUIRED') {
+        throw new Error('Case 59: propose_text_patch must fail with WORKSPACE_REQUIRED when no workspace.');
+      }
+      const listOps = await registry.run('list_operations', {}, nullContext);
+      if (listOps.ok || listOps.error?.code !== 'WORKSPACE_REQUIRED') {
+        throw new Error('Case 59: list_operations must fail with WORKSPACE_REQUIRED when no workspace.');
+      }
+
+      // 不读 workspaceIndex 的工具在 null 下照常运行 —— 守卫只拦工作区工具，不误伤无状态工具。
+      const registry2 = new ToolRegistry();
+      registry2.register({
+        name: 'standalone_tool',
+        description: 'workspace-free tool',
+        permission: 'read',
+        permissionLevel: 'read',
+        run: () => ({ ok: true, data: 'ran' })
+      });
+      const standalone = await registry2.run('standalone_tool', {}, { workspaceIndex: null, mode: 'plan' });
+      if (!standalone.ok || standalone.data !== 'ran') {
+        throw new Error('Case 59: workspace-free tool must still run with workspaceIndex null.');
+      }
+
+      // systemPrompt 注入：无 resumeFrom 时前置 system 消息。
+      const seen: ModelCompleteRequest[] = [];
+      const config = makeConfig(9, 'openai-compatible');
+      const fresh = await runAgentSession({
+        sessionsDir: base,
+        adapter: {
+          protocol: 'openai-compatible',
+          async complete(request) {
+            seen.push({ ...request, messages: [...request.messages] });
+            return { message: { role: 'assistant', content: 'sys-injected' }, finishReason: 'stop', diagnostics: [] };
+          },
+          async *stream() {
+            throw new Error('unused');
+          }
+        },
+        config,
+        apiKey: 'sk-test',
+        prompt: 'hello',
+        systemPrompt: '你是测试助手。',
+        permissionMode: 'normal',
+        tools: [],
+        executeTool: async () => ({ ok: false, content: 'unused' })
+      });
+      if (fresh.run.finishReason !== 'stop') throw new Error(`Case 59: fresh run ${fresh.run.finishReason}`);
+      const freshMessages = seen[0]?.messages ?? [];
+      if (freshMessages[0]?.role !== 'system' || freshMessages[0].content !== '你是测试助手。') {
+        throw new Error(`Case 59: systemPrompt must be prepended, got ${JSON.stringify(freshMessages[0])}`);
+      }
+      if (!freshMessages.some((message) => message.role === 'user' && message.content === 'hello')) {
+        throw new Error('Case 59: user prompt missing after system injection.');
+      }
+
+      // resume 旧会话已带 system：新 systemPrompt 不得重复注入，保留原 system 在最前。
+      const seen2: ModelCompleteRequest[] = [];
+      const resumedWithSystem: ResumedRollout = {
+        meta: null,
+        messages: [
+          { role: 'system', content: '旧 system。' },
+          { role: 'user', content: '旧问题。' }
+        ],
+        steps: 2,
+        parseErrors: 0,
+        interrupted: false,
+        compactedWindows: 0
+      };
+      const resumed = await runAgentSession({
+        sessionsDir: base,
+        adapter: {
+          protocol: 'openai-compatible',
+          async complete(request) {
+            seen2.push({ ...request, messages: [...request.messages] });
+            return { message: { role: 'assistant', content: 'resumed' }, finishReason: 'stop', diagnostics: [] };
+          },
+          async *stream() {
+            throw new Error('unused');
+          }
+        },
+        config,
+        apiKey: 'sk-test',
+        prompt: '新问题。',
+        systemPrompt: '新 system。',
+        permissionMode: 'normal',
+        tools: [],
+        executeTool: async () => ({ ok: false, content: 'unused' }),
+        resumeFrom: resumedWithSystem
+      });
+      if (resumed.run.finishReason !== 'stop') throw new Error(`Case 59: resume run ${resumed.run.finishReason}`);
+      const resumedMessages = seen2[0]?.messages ?? [];
+      const systemCount = resumedMessages.filter((message) => message.role === 'system').length;
+      if (systemCount !== 1 || resumedMessages[0]?.content !== '旧 system。') {
+        throw new Error(`Case 59: resumed system message must be kept and not duplicated, got ${JSON.stringify(resumedMessages)}`);
+      }
+      if (!resumedMessages.some((message) => message.role === 'user' && message.content === '新问题。')) {
+        throw new Error('Case 59: resumed run must include the new user prompt.');
+      }
       passed++;
     } finally {
       await rm(base, { recursive: true, force: true });

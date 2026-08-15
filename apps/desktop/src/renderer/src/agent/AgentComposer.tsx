@@ -64,10 +64,10 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
   const action = composerActionState({ prompt, streaming, awaitingApproval });
   const sendDisabled = action === 'send' && isComposerSendDisabled(prompt);
 
+  // T6-3：不自动插入 `#路径` chip——选区逻辑名/资源 kind 作为可选元数据随
+  // runAiAgent 的 selection 字段给模型（见 App.tsx runAgentTask），不污染 prompt
+  // 文本。chip 只保留域标签；`#` 按钮仍由用户手动插入，无选区时 disabled。
   const chips: AgentContextChip[] = [];
-  if (selectedFilePath !== null) {
-    chips.push({ kind: '#', label: selectedFilePath, title: selectedFilePath });
-  }
   if (contextLabel !== '') {
     chips.push({ kind: '#', label: contextLabel });
   }

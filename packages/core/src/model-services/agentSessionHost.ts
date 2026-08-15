@@ -39,6 +39,12 @@ export interface AgentSessionRunParams {
   /** Main-process only — never forwarded to events or renderer payloads. */
   apiKey: string;
   prompt: string;
+  /**
+   * Optional system prompt prepended ahead of every message in this run. Only
+   * injected when no `role === 'system'` message already exists (a resumed
+   * session may carry one from an earlier run).
+   */
+  systemPrompt?: string;
   permissionMode: AgentPermissionMode;
   tools: ToolDefinition[];
   executeTool: (call: ToolCall) => Promise<{ ok: boolean; content: string; code?: string }>;
@@ -93,10 +99,16 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
   // this run's user prompt so resume chains stay complete.
   recorder.enqueue({ type: 'message', step: 0, message: { role: 'user', content: params.prompt } });
 
-  const messages: ChatMessage[] = [
-    ...(params.resumeFrom ? params.resumeFrom.messages : []),
-    { role: 'user', content: params.prompt }
-  ];
+  const messages: ChatMessage[] = [];
+  const systemPrompt = params.systemPrompt;
+  if (systemPrompt !== undefined && systemPrompt.length > 0) {
+    const resumedMessages = params.resumeFrom ? params.resumeFrom.messages : [];
+    const alreadyHasSystem = resumedMessages.some((message) => message.role === 'system');
+    if (!alreadyHasSystem) {
+      messages.push({ role: 'system', content: systemPrompt });
+    }
+  }
+  messages.push(...(params.resumeFrom ? params.resumeFrom.messages : []), { role: 'user', content: params.prompt });
 
   // Deltas are transient UI payloads but still cross a process boundary —
   // redact secret-shaped text before emission, matching the durable policy.

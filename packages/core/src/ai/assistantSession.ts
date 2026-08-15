@@ -71,7 +71,8 @@ export function buildAiSidebarDraft(request: AiSidebarDraftRequest): AiSidebarDr
     ? `${selected.resourceKind}:${selected.relativePath}`
     : request.context.workspaceSessionId
       ? '当前工作区'
-      : '未打开工作区';
+      : '未指定分析对象';
+  const hasTarget = selected !== undefined || request.context.workspaceSessionId !== undefined;
 
   return {
     provider: request.settings.provider,
@@ -79,7 +80,7 @@ export function buildAiSidebarDraft(request: AiSidebarDraftRequest): AiSidebarDr
     mode: request.settings.mode,
     status,
     title: prompt.length > 0 ? 'AI 计划草稿' : 'AI 侧边栏待命',
-    summary: buildSummary(prompt, target, status),
+    summary: buildSummary(prompt, target, hasTarget, status),
     contextFacts,
     recommendedTools,
     safetyRails,
@@ -88,9 +89,23 @@ export function buildAiSidebarDraft(request: AiSidebarDraftRequest): AiSidebarDr
   };
 }
 
-function buildSummary(prompt: string, target: string, status: AiSidebarDraft['status']): string {
+function buildSummary(
+  prompt: string,
+  target: string,
+  hasTarget: boolean,
+  status: AiSidebarDraft['status']
+): string {
   if (status === 'notConfigured') {
     return '模型服务选择已经记录，但真实 API 通道尚未接入；当前只生成本地计划草稿，不会联网调用模型。';
+  }
+
+  if (!hasTarget) {
+    // 未打开工作区、也未选中资源：草稿按「可回答通用问题」措辞，
+    // 涉及搜库/改文件时提示先打开 Mod 工作区 —— 不把「未打开工作区」当作分析对象。
+    if (prompt.length === 0) {
+      return '随时可聊：可以回答 SoulForge 的通用问题；要搜索或修改文件时需先打开 Mod 工作区。';
+    }
+    return `可以围绕「${prompt}」展开通用讨论；涉及搜库或修改文件时需先打开 Mod 工作区。`;
   }
 
   if (prompt.length === 0) {
@@ -103,7 +118,11 @@ function buildSummary(prompt: string, target: string, status: AiSidebarDraft['st
 function buildContextFacts(context: AiWorkspaceContextSnapshot): string[] {
   const facts: string[] = [];
 
-  facts.push(context.workspaceSessionId ? '工作区：已打开' : '工作区：未打开');
+  facts.push(
+    context.workspaceSessionId
+      ? '工作区：已打开'
+      : '随时可聊：未打开工作区时，搜库/改文件类工具需先打开 Mod 工作区。'
+  );
 
   if (context.selectedResource) {
     facts.push(`已选择：${context.selectedResource.relativePath}`);

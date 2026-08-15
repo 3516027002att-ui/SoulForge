@@ -171,6 +171,7 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setAiThinking: '同上',
   setAiPrompt: '同上',
   setAiDraft: 'AI 草稿，由 selectFile 单独清空',
+  setAgentIdleNotice: 'T6 空闲说明（无模型等），非文档态，随任务生命周期清空',
   setAiBusy: 'AI 忙碌标记',
   setAgentGoal: 'Agent 目标',
   // ── AI agent 任务态（REL-G 的 renderer 入口）────────────────────────────

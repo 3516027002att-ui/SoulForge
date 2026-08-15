@@ -61,6 +61,8 @@ export interface AgentSidebarProps {
   permissionMode: AiPermissionMode;
   permissionLockReason: string;
   goal: string | null;
+  /** T6：无模型服务等「未发起任务」的对话区说明；有值就渲染为 system 消息。 */
+  idleNotice?: string | null;
   draft: AiSidebarDraft | null;
   prompt: string;
   contextLabel: string;
@@ -168,6 +170,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     permissionMode,
     permissionLockReason,
     goal,
+    idleNotice,
     draft,
     prompt,
     contextLabel,
@@ -372,6 +375,11 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             <div className="agent-message__meta">你</div>
             <p>{goal}</p>
           </article>
+        )}
+        {idleNotice !== null && (
+          <div className="agent-message agent-message--system" role="status" data-testid="agent-idle-notice">
+            <span>{idleNotice}</span>
+          </div>
         )}
         {busy && (
           <div className="agent-message agent-message--system" role="status">

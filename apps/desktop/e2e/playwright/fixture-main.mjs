@@ -2169,17 +2169,24 @@ function registerFixtureIpc() {
    * 不代表存在可用的真实 provider——fixture 从不发起网络请求。
    * 需要它是因为任务面板的运行入口以「有已配置凭据的服务」为前置条件，
    * 空列表下运行按钮恒禁用，取消链路在 e2e 层就无从触达。
+   *
+   * T6 无模型用例（FIXTURE_EMPTY_MODEL_SERVICES=1）：返回空列表模拟用户
+   * 从未配置任何模型服务。此时 renderer 发送应落「尚未配置模型服务」系统提示
+   * 且不调 ai.agent.run——那是 renderer 侧行为，fixture 只负责提供空服务。
    */
-  handleTrusted('modelService.list', () => [{
-    id: 'fixture-service',
-    displayName: 'fixture 合成模型服务',
-    protocol: 'openai-compatible',
-    baseUrl: 'http://127.0.0.1:11434',
-    model: 'fixture-model',
-    hasCredential: true,
-    createdAt: '2026-08-08T00:00:00.000Z',
-    updatedAt: '2026-08-08T00:00:00.000Z'
-  }]);
+  handleTrusted('modelService.list', () => {
+    if (process.env.FIXTURE_EMPTY_MODEL_SERVICES === '1') return [];
+    return [{
+      id: 'fixture-service',
+      displayName: 'fixture 合成模型服务',
+      protocol: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:11434',
+      model: 'fixture-model',
+      hasCredential: true,
+      createdAt: '2026-08-08T00:00:00.000Z',
+      updatedAt: '2026-08-08T00:00:00.000Z'
+    }];
+  });
   handleTrusted('modelService.encryptionAvailable', () => false);
   handleTrusted('runtime.detectMe3', () => ({ detected: false }));
 

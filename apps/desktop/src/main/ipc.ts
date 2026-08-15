@@ -971,6 +971,31 @@ export interface RollbackOperationIpcResult {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * 读装配进 Agent loop 的系统提示（prompt/system.md，仓库内自己的提示词）。
+ *
+ * T6 要求 main/core 读入装配、renderer 不拼。候选顺序：
+ *  1. SOULFORGE_SYSTEM_PROMPT_PATH（显式覆盖）
+ *  2. 打包 extraResources：process.resourcesPath/prompt/system.md
+ *  3. dev 仓库根：app.getAppPath()（dev = apps/desktop）上两级 → repo/prompt/system.md
+ * 读不到返回 null：loop 照常运行，只是没有系统提示（不硬失败）。
+ */
+function readSystemPrompt(): string | null {
+  const candidates = [
+    process.env.SOULFORGE_SYSTEM_PROMPT_PATH,
+    join(process.resourcesPath, 'prompt', 'system.md'),
+    resolve(app.getAppPath(), '..', '..', 'prompt', 'system.md')
+  ].filter((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
+  for (const candidate of candidates) {
+    try {
+      return readFileSync(candidate, 'utf8');
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
 /* ------------------------------------------------------------------ */
 /*  AI agent session IPC contract (Codex-derived kernel).             */
 /*  Keys never cross the bridge; events are redacted by the host.     */
@@ -1018,6 +1043,15 @@ export interface AiAgentRunRequest {
    * 且 ownerId 与当前 sender 一致（跨 sender 拒绝）。未传或空数组 = 无引用。
    */
   resources?: readonly AgentResourceReference[];
+  /**
+   * 当前选区（可选元数据，T6）：逻辑名 + 资源 kind。作为系统提示的一部分给模型
+   * 参考，**不是**默认任务对象，renderer 不把 `#路径` 自动写进 prompt 文本。
+   * main 装配（appends to systemPrompt）；未选中时不传。
+   */
+  selection?: {
+    label: string;
+    resourceKind: ResourceKind;
+  };
 }
 
 /** Renderer's answer to one approval request (ai.agent.approval.respond). */
@@ -7490,16 +7524,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   handle(
     'ai.runTool',
     async (_event, name: string, input: unknown): Promise<ToolResult> => {
-      if (!activeIndex) {
-        return {
-          ok: false,
-          error: {
-            code: 'WORKSPACE_NOT_ANALYZED',
-            message: 'Analyze a workspace before running AI-safe tools.'
-          }
-        };
-      }
-
+      // T6：无工作区时由工具层按工具守卫（WORKSPACE_REQUIRED），不整次拒绝。
       return toolRegistry.run(name, input, { workspaceIndex: activeIndex, mode: activeAiMode });
     }
   );
@@ -7633,12 +7658,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   };
 
   handle('ai.agent.run', async (_event, request: AiAgentRunRequest): Promise<AiAgentRunIpcResult> => {
-    if (!activeIndex) {
-      return {
-        ok: false,
-        error: { code: 'WORKSPACE_NOT_ANALYZED', message: '请先分析工作区再运行 AI Agent。' }
-      };
-    }
+    // T6：无工作区也创建会话、调模型（随时可聊）。工作区工具在工具层按工具守卫
+    // 失败关闭（WORKSPACE_REQUIRED「这次工具需要先打开 Mod 工作区」），不整次拒绝。
     if (
       typeof request?.configId !== 'string' || request.configId.trim() === ''
       || typeof request?.prompt !== 'string' || request.prompt.trim() === ''
@@ -7704,6 +7725,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const mode: ToolContext['mode'] = request.mode === 'normal' || request.mode === 'fullPermission'
       ? request.mode
       : 'plan';
+    // 无工作区时 activeIndex 为 null：工具层按工具守卫（WORKSPACE_REQUIRED），
+    // 需要工作区的工具干净失败，不整次拒绝（T6）。
     const bridge = createAgentToolBridge({
       registry: toolRegistry,
       context: { workspaceIndex: activeIndex, mode }
@@ -7720,6 +7743,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const { ok: _ok, path: _path, ...resumed } = loaded;
       resumeFrom = resumed;
     }
+
+    // T6-2：系统提示由 main 读入并装配（renderer 不拼）。选区作为可选元数据
+    // 附在系统提示里供模型参考，不是默认任务对象，也不自动写进 prompt 文本。
+    const systemPromptParts = [readSystemPrompt() ?? ''];
+    if (request.selection) {
+      systemPromptParts.push(
+        `用户当前选区（仅可选元数据，不是默认任务对象）：${request.selection.label}（${request.selection.resourceKind}）。`
+      );
+    }
+    const systemPrompt = systemPromptParts.filter((part) => part.trim().length > 0).join('\n\n');
 
     const sessionId = randomUUID();
     const controller = new AbortController();
@@ -7864,6 +7897,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       config: modelConfig,
       apiKey,
       prompt: request.prompt,
+      ...(systemPrompt.length > 0 ? { systemPrompt } : {}),
       permissionMode,
       tools: bridge.tools,
       executeTool: bridge.executeTool,
@@ -8068,8 +8102,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   handle(
     'agent.resourceReference.create',
     async (event, request: unknown): Promise<AgentResourceReferenceCreateIpcResult> => {
+      // T6：引用资源需要工作区；无工作区时干净失败（文案逐字来自产品拍死），
+      // 与 ai.runTool / ai.agent.run 的工具层守卫同一语义。
       if (!activeIndex) {
-        return { ok: false, error: { code: 'WORKSPACE_NOT_ANALYZED', message: '请先分析工作区再引用资源。' } };
+        return { ok: false, error: { code: 'WORKSPACE_REQUIRED', message: '这次工具需要先打开 Mod 工作区。' } };
       }
       const selectionValue = typeof request === 'object' && request !== null
         ? (request as Record<string, unknown>).selection

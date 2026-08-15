@@ -31,6 +31,10 @@
         "better_sqlite3.node",
         "better_sqlite3.json"
       ]
+    },
+    {
+      "from": "../prompt",
+      "to": "prompt"
     }
   ],
   "win": {

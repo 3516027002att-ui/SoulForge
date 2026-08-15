@@ -41,7 +41,6 @@ import type {
   AiPermissionMode,
   AiProvider,
   AiSidebarDraft,
-  AiSidebarDraftRequest,
   AiThinkingLevel,
   ToolDescriptor,
   ToolResult
@@ -399,6 +398,8 @@ export function App(): ReactElement {
   const [aiMode] = useState<AiPermissionMode>('plan');
   const [aiPrompt, setAiPrompt] = useState('解释当前资源的证据链，并给出下一步安全修改计划。');
   const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);
+  // T6：无模型服务时的对话区说明（不卡输入框）。发送成功后 / 新任务 / 换工作区时清除。
+  const [agentIdleNotice, setAgentIdleNotice] = useState<string | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [agentGoal, setAgentGoal] = useState<string | null>(null);
   /* ── AI agent 任务（REL-G 的 renderer 入口）───────────────────────────────
@@ -1726,20 +1727,17 @@ export function App(): ReactElement {
   }
 
   async function sendAgentPrompt(): Promise<void> {
+    // T6-1：Composer「发送」= 真正跑 Agent loop（现有 runAgentTask），不再只生成
+    // 本地草稿。空输入 / 没配模型由 runAgentTask 自己说明，不在这里拦。
     const text = aiPrompt.trim();
     if (!text || aiBusy) return;
-    setAgentGoal(text);
-    setAiBusy(true);
-    try {
-      await buildAiDraft();
-    } finally {
-      setAiBusy(false);
-    }
+    await runAgentTask();
   }
 
   function startNewAgentTask(): void {
     setAgentGoal(null);
     setAiDraft(null);
+    setAgentIdleNotice(null);
     setAiPrompt('');
     setAiBusy(false);
     setAgentTask(INITIAL_AGENT_TASK_STATE);
@@ -1802,6 +1800,7 @@ export function App(): ReactElement {
       setAnalysis(null);
       setToolOutput(null);
       setAiDraft(null);
+      setAgentIdleNotice(null);
       setOperationHistory([]);
       setBnd4Forced(false);
       // 换工作区必须清空全部资源族编辑态：否则新工作区的面板会继续显示上一个
@@ -1998,6 +1997,7 @@ export function App(): ReactElement {
     setMsgRows([]);
     setSaveDiagnostics([]);
     setAiDraft(null);
+    setAgentIdleNotice(null);
     // 换选中文件同样要清空全部资源族：此前这里只清了 TAE/ESD/FLVER/TPF，
     // FMG/PARAM/EMEVD/MSB 会残留到下一个文件的面板上。
     resetAllDocuments(documentResetActions);
@@ -2184,43 +2184,6 @@ export function App(): ReactElement {
     setEditText(serializeMsgRowsToTsv(nextRows));
   }
 
-  async function buildAiDraft(): Promise<void> {
-    const request: AiSidebarDraftRequest = {
-      settings: {
-        provider: aiProvider,
-        thinking: aiThinking,
-        mode: aiMode
-      },
-      userPrompt: aiPrompt,
-      context: {
-        ...(workspace?.workspaceSessionId ? { workspaceSessionId: workspace.workspaceSessionId } : {}),
-        ...(selectedFile
-          ? {
-              selectedResource: {
-                sourceUri: selectedFile.sourceUri,
-                relativePath: selectedFile.relativePath,
-                resourceKind: selectedFile.resourceKind
-              }
-            }
-          : {}),
-        ...(preview?.previewKind ? { previewKind: preview.previewKind } : {}),
-        diagnosticsCount: diagnostics.length,
-        ...(analysis?.referenceStats ? { referenceStats: analysis.referenceStats } : {}),
-        ...(eventUri ? { currentEventUri: eventUri } : {})
-      },
-      availableTools: tools
-    };
-
-    if (!bridge) {
-      setStatus(describeBridgeAbsence('生成计划草稿'));
-      return;
-    }
-    setStatus('正在生成 AI 计划草稿...');
-    const draft = await bridge.buildAiSidebarDraft(request);
-    setAiDraft(draft);
-    setStatus(draft.status === 'ready' ? 'AI 计划草稿已生成' : 'AI 模型服务尚未配置，已生成本地计划草稿');
-  }
-
   /* ── AI agent 任务：运行 / 取消 / 会话历史 ───────────────────────────────
      六个通道的 renderer 侧唯一调用点。权限模式**不由这里传**：ai.agent.run 的
      request.mode 省略时主进程落到 'plan'（ipc.ts:2967 的三元），传 'fullPermission'
@@ -2254,21 +2217,31 @@ export function App(): ReactElement {
       announceDesktopOnly('运行 AI 任务');
       return;
     }
-    if (agentServiceId === null) {
-      setStatus('尚未选择模型服务，未发起 AI 任务');
-      return;
-    }
     const prompt = aiPrompt.trim();
     if (prompt === '') {
       setStatus('任务描述为空，未发起 AI 任务');
       return;
     }
+    // T6：没配模型在对话里写说明（不卡输入框以外的整栏，也不整次拒绝成
+    // WORKSPACE_NOT_ANALYZED）；输入框仍可编辑，配好后可直接再发。
+    if (agentServiceId === null) {
+      setAgentIdleNotice('尚未配置模型服务，未发起 AI 任务。请在 Agent 历史 → 模型设置 中选择或配置模型服务。');
+      setAgentGoal(prompt);
+      setStatus('尚未配置模型服务');
+      return;
+    }
+    setAgentIdleNotice(null);
     setAgentTask(INITIAL_AGENT_TASK_STATE);
     setStatus('正在发起 AI 任务...');
     const result = await bridge.runAiAgent({
       configId: agentServiceId,
       prompt,
       ...(resumeSessionPath !== undefined ? { resumeSessionPath } : {}),
+      // T6-3：选区逻辑名/资源 kind 作为可选元数据随任务提交给模型；不自动插入
+      // `#路径` chip（那会污染 prompt 文本，且选区只是参考不是默认任务对象）。
+      ...(selectedFile
+        ? { selection: { label: selectedFile.relativePath, resourceKind: selectedFile.resourceKind } }
+        : {}),
       // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
       // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
       ...(agentResources.length > 0 ? { resources: agentResources } : {})
@@ -3732,6 +3705,7 @@ export function App(): ReactElement {
           permissionMode={aiMode}
           permissionLockReason={AI_PERMISSION_LOCK_REASON}
           goal={agentGoal}
+          idleNotice={agentIdleNotice}
           draft={aiDraft}
           prompt={aiPrompt}
           contextLabel={domainLabel(activeDomain)}

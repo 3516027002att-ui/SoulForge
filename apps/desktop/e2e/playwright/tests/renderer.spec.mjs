@@ -1585,23 +1585,16 @@ test('AI 任务：运行发起后进度事件真的更新消息流，取消真�
   const status = window.locator('[data-testid="agent-task-status"]');
   const stop = window.locator('[data-testid="composer-stop"]');
 
-  // 空闲态只显示 welcome；发送计划提示后消息流挂载用户目标 + 计划草稿。
+  // 空闲态只显示 welcome；T6「发送即运行」：发送后消息流挂载用户目标并直接跑任务。
   await expect(window.locator('.agent-welcome')).toBeVisible();
   await window.locator('.agent__composer textarea').fill('把伤药葫芦的持有上限调到 12');
   await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
   await expect(window.locator('.agent-message--user')).toContainText('把伤药葫芦的持有上限调到 12');
 
-  // 运行入口在二级抽屉（§12.10 模型服务迁入抽屉）。
-  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
-  const drawer = window.locator('.agent-secondary-drawer:not(.is-hidden)');
-  await drawer.getByRole('button', { name: '模型设置' }).click();
-  await expect(window.locator('#agent-task-service')).toHaveValue('fixture-service');
-  const run = window.locator('[data-testid="agent-task-run"]');
-  await expect(run).toBeEnabled();
-  await run.click();
-  await window.getByRole('button', { name: '关闭抽屉' }).click();
+  // 发送即运行：不再进二级抽屉点「模型设置 → 运行」，发送本身触发 ai.agent.run
+  //（T6 行为，计划草稿卡已从发送路径移除）。
 
-  // 1) 发起真的走了 IPC。
+  // 1) 发起真的走了 IPC（发送路径直接触发，不经抽屉）。
   await expect.poll(async () => (await ipcCalls(app))['ai.agent.run'] ?? 0).toBeGreaterThan(0);
 
   // 2) renderer 不得抬高授权：run 请求里不能带 mode（省略时主进程落到 plan）。
@@ -1699,28 +1692,26 @@ test('AI 任务：工具清单不污染 Agent 对话，且界面不提供抬高�
  * 含「工具」  → 停在 tool-call-begin（running）
  * 含「审批」  → 停在 approval-requested，respond 后推进
  * 含「失败」  → session-error
- * 运行入口在二级抽屉（模型服务迁入抽屉，§12.10）。
+ * T6「发送即运行」：填 prompt → 点发送即触发任务，不再进二级抽屉点
+ * 「模型设置 → 运行」（函数名 runInDrawer 为历史沿用）。
  */
 async function runInDrawer(window, promptText) {
   await window.locator('.agent__composer textarea').fill(promptText);
   await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
   await expect(window.locator('.agent-message--user')).toContainText(promptText);
-  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
-  const drawer = window.locator('.agent-secondary-drawer:not(.is-hidden)');
-  await drawer.getByRole('button', { name: '模型设置' }).click();
-  await window.locator('[data-testid="agent-task-run"]').click();
-  await window.getByRole('button', { name: '关闭抽屉' }).click();
 }
 
 test('AGENT-60D：conversation 与 tool-running 两态渲染并保存截图', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // conversation：发送提示后，消息流显示用户目标 + 计划草稿。
+  // conversation：T6「发送即运行」，发送后消息流显示用户目标 + 任务运行状态
+  //（不再有 `.agent-message--agent` 计划草稿卡）。
   await window.locator('.agent__composer textarea').fill('把伤药葫芦的持有上限调到 12');
   await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
   await expect(window.locator('.agent-message--user')).toContainText('把伤药葫芦的持有上限调到 12');
-  await expect(window.locator('.agent-message--agent')).toContainText('fixture draft');
+  await expect(window.locator('[data-testid="agent-task-status"]')).toContainText('第 1 步');
+  await expect(window.locator('[data-testid="agent-tool-activity-fixture-call-1"]')).toBeVisible();
   await window.screenshot({ path: 'test-results/60d-01-conversation.png' });
 
   // tool-running：新任务 → 运行「工具」标记 → 停在 running。
@@ -1772,6 +1763,54 @@ test('AGENT-60D：approval 与 failure 两态渲染并保存截图', async () =>
   await expect(window.locator('.agent__composer')).toBeVisible();
   await window.screenshot({ path: 'test-results/60d-04-failure.png' });
 
+  await app.close();
+});
+
+test('T6 冷启动：不打开工作区也能发送并收到模型回答', async () => {
+  const { app, window } = await launchApp();
+  // 刻意不调 openFixtureWorkspace：冷启动无工作区也直接发送跑任务，
+  // 验证 ai.agent.run 与工作区解耦——绝不该报 WORKSPACE_NOT_ANALYZED。
+
+  // Agent dock 默认开着，composer 可直接用。
+  await expect(window.locator('.agent__composer textarea')).toBeVisible();
+  await window.locator('.agent__composer textarea').fill('只狼 SpEffect 怎么改');
+  await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
+
+  // 用户目标进对话流；发送即运行。
+  await expect(window.locator('.agent-message--user')).toContainText('只狼 SpEffect 怎么改');
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.run'] ?? 0).toBeGreaterThan(0);
+  await expect(window.locator('[data-testid="agent-task-status"]')).toContainText('第 1 步');
+  await expect(window.locator('[data-testid="agent-tool-activity-fixture-call-1"]')).toBeVisible();
+  await expect(window.locator('[data-testid="agent-task-status"]')).toContainText('已产出 6 字符');
+
+  // 绝不该是「未打开工作区」错误。
+  const bodyText = await window.locator('body').innerText();
+  expect(bodyText).not.toContain('WORKSPACE_NOT_ANALYZED');
+
+  await window.screenshot({ path: 'test-results/14-t6-cold-start-send.png' });
+  await app.close();
+});
+
+test('T6 无模型：对话里说明，不卡输入', async () => {
+  const { app, window } = await launchApp({ FIXTURE_EMPTY_MODEL_SERVICES: '1' });
+  await expect(window.locator('.agent__composer textarea')).toBeVisible();
+  await window.locator('.agent__composer textarea').fill('只狼 SpEffect 怎么改');
+  await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
+
+  // 用户目标仍进对话流。
+  await expect(window.locator('.agent-message--user')).toContainText('只狼 SpEffect 怎么改');
+  // 对话区出现系统提示：未配置模型服务，未发起 AI 任务。
+  const bodyText = await window.locator('body').innerText();
+  expect(bodyText).toContain('尚未配置模型服务');
+  // 未发起任务（modelService.list 为空，发送只落系统提示不调 ai.agent.run）。
+  const calls = await ipcCalls(app);
+  expect(calls['ai.agent.run'] ?? 0).toBe(0);
+  // 输入框仍可用（没被禁，不卡输入）。
+  await expect(window.locator('.agent__composer textarea')).toBeEnabled();
+  // 也不是「未打开工作区」错误。
+  expect(bodyText).not.toContain('WORKSPACE_NOT_ANALYZED');
+
+  await window.screenshot({ path: 'test-results/15-t6-no-model.png' });
   await app.close();
 });
 

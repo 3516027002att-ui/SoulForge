@@ -1446,6 +1446,9 @@ Agent
 
 禁止推荐问题按钮、四步教程、工具数量、会话数量和模型警告。
 
+欢迎文案**不要求先有选区**（T6）：未打开工作区、未选中文件也照常显示本欢迎态，
+不出现「必须先有选区/先打开工作区」的引导。
+
 ### 12.5 消息流
 
 以下像素值来源与 §12.2 相同（TRAE 参考截图实测；缺失时为初值）：
@@ -1491,15 +1494,19 @@ Agent
 
 职责：
 
-- `@` 选择当前 Param/Row/Field、FMG entry、Event/cursor 等语义实体；
-- `#` 搜索 EditorCatalog 逻辑资源；
+- `@` 把参与者标记写进 prompt 文本（60C 后才升级为语义实体选择）；
+- `#` 把当前文件上下文标记写进 prompt 文本；无选区时按钮 disabled；
 - 附件只接受截图或 main-issued renderer-safe reference token；
 - 模型选择只显示已配置且健康检查通过的服务；
 - Plan 显示真实运行模式；
-- 空文本或上下文验证失败时发送 disabled；
+- **发送只由空文本 disabled**——不因「无选区」「未打开工作区」disabled（T6：随时可聊）。无选区也能发普通问题；
 - 执行中发送变为停止，停止只终止当前生成。
 
 未打通真实链路的控件必须隐藏。
+
+**选区是可选元数据，不是默认任务对象**（T6）：有选区时 App 把逻辑名 + 资源 kind 作为
+`AiAgentRunRequest.selection` 交给 main 拼进 system prompt 给模型参考；不自动把 `#路径`
+写进 prompt 文本，`#` 仍由用户手动插入。
 
 ### 12.7 绝对禁止语音
 
@@ -2318,7 +2325,7 @@ SHELL-09 → MATERIAL-53A → MATERIAL-53B → MATERIAL-53C → MATERIAL-53D →
 SHELL-09 → VFX-54A → VFX-54B → VFX-54C
 SHELL-09 → BEHAVIOR-55A → BEHAVIOR-55B → BEHAVIOR-55C
 SHELL-09 → ANIMATION-56A → ANIMATION-56B → ANIMATION-56C
-SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
+SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D → AGENT-60E
 全部目标卡 → VISUAL-70 → ACCEPT-99
 ```
 
@@ -2668,6 +2675,12 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/agent/AgentApprovalCard.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentToolActivityRow.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentSecondaryDrawer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentScrollToBottom.tsx`；`[MODIFY after AGENT-60A] apps/desktop/src/renderer/src/agent/AgentConversationViewport.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/src/main/ipc.ts`。
 - **Steps**：tool call 默认单行折叠；Change Review 是消息流唯一强边界卡；模型/工具/历史迁到 drawer；关闭 dock 不取消 main-owned task；stop 只停当前生成。
 - **Tests**：保存 conversation/tool-running/approval/failure 四态截图；审批显示 operation/target/diff/impact/validation/backup/rollback；提交失败显示 stage 和 rollback 结果；巨型错误卡不得替换 sidebar。
+
+#### AGENT-60E — 随时可聊（T6）
+
+- **Allowed**：`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/electron-builder.json`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/AgentComposer.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/AgentWelcome.tsx`；`[MODIFY] packages/core/src/model-services/agentSessionHost.ts`；`[MODIFY] packages/core/src/ai/toolRegistry.ts`；`[MODIFY] packages/core/src/ai/assistantSession.ts`；`[CREATE] prompt/system.md`；`[MODIFY] docs/frontend-renovation/front-end.md`。
+- **Steps**：Composer「发送」= 真正跑 Agent loop（sendAgentPrompt → runAgentTask），不再只生成本地草稿；`ai.agent.run` 去掉「未打开工作区」整次拒绝，工作区工具在工具层按工具守卫失败关闭（`WORKSPACE_REQUIRED`「这次工具需要先打开 Mod 工作区」）；`prompt/system.md` 由 main 读入装配进 loop（renderer 不拼），内容含 T6 政策段（可润色不可改政策）；选区逻辑名 + 资源 kind 作为 `AiAgentRunRequest.selection` 可选元数据给模型；无模型服务时对话区说明，不是 WORKSPACE_NOT_ANALYZED。
+- **Tests**：冷启动不选项目，输入「只狼 SpEffect 怎么改」能发出并收到回答（需已配模型）；未配模型则对话里说明原因；工作区工具在无工作区下干净失败。
 
 ### 18.21 VISUAL-70 与 ACCEPT-99
 
