@@ -2326,6 +2326,7 @@ SHELL-09 → VFX-54A → VFX-54B → VFX-54C
 SHELL-09 → BEHAVIOR-55A → BEHAVIOR-55B → BEHAVIOR-55C
 SHELL-09 → ANIMATION-56A → ANIMATION-56B → ANIMATION-56C
 SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D → AGENT-60E
+SHELL-09 → SHELL-10
 全部目标卡 → VISUAL-70 → ACCEPT-99
 ```
 
@@ -2408,6 +2409,13 @@ SHELL-09 → AGENT-60A → AGENT-60B → AGENT-60C → AGENT-60D → AGENT-60E
 - **Steps**：领域栏仅接 `DomainSummary[]`；删除物理计数；语义领域不渲染全局 resource browser；Files 独占物理浏览；editor full-bleed；pane 独立滚动。
 - **Negative source tests**：无 `domainForFile`、`filterFilesForDomain(files)`、`visibleFiles.length` 领域计数。
 - **Done**：顶部无 `PARAM 36`，PARAM 入口直接打开逻辑库。
+
+#### SHELL-10 — 键位跟域走（T7）
+
+- **Allowed**：`[CREATE] apps/desktop/src/renderer/src/keybindings/keymapTable.ts`；`[CREATE] apps/desktop/src/renderer/src/keybindings/applyKeybinding.ts`；`[CREATE] apps/desktop/src/renderer/src/keybindings/keymapTable.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] docs/frontend-renovation/front-end.md`。
+- **Steps**：renderer 键位表模块（壳层三键 / 共用编辑 / PARAM/文本 / 事件 / 地图·模型视口 / 动作）；App.tsx 写死的 Ctrl+K/J/B 并入表；window keydown 输入框/textarea/contenteditable/Agent composer 内不抢工作台键，壳层三键始终生效；状态栏右侧显示套名「壳层 · PARAM」。
+- **Rules**：键位跟域走——没有视口的页不得抢 WASD；视口键仅指针在视口内命中；Alt+D 等能力不存在的键照常可命中但 UI 不得造假按钮。
+- **Tests**：`npm run test:renderer-unit`（keymapTable.test.ts）；`npm run typecheck`。
 
 ### 18.14 PARAM 任务系列（10A → 10B → 10C）
 

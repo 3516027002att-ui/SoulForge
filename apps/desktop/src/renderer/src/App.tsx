@@ -101,6 +101,8 @@ import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
+import { resolveKeybinding } from './keybindings/applyKeybinding.js';
+import { statusSuitLabel } from './keybindings/keymapTable.js';
 import type {
   AgentSessionDetail,
   AgentSessionRow,
@@ -711,36 +713,54 @@ export function App(): ReactElement {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
-      if (event.ctrlKey || event.metaKey) {
-        const key = event.key.toLowerCase();
-        if (key === 'k') {
-          event.preventDefault();
-          if (cmdkOpen) {
-            closeCmdk();
-          } else {
-            openCmdk();
-          }
-          return;
-        }
-        if (key === 'j') {
-          event.preventDefault();
-          setAgentOpen((open) => !open);
-          return;
-        }
-        if (key === 'b') {
-          event.preventDefault();
-          setSidebarCollapsed((collapsed) => !collapsed);
-          return;
-        }
+      // 三条关闭路径之一：Escape 关闭命令面板，走统一出口保证焦点归还。
+      //（路径：Escape、Ctrl+K 再按、点遮罩，都用 closeCmdk，否则焦点归还变成随机的。）
+      if (event.key === 'Escape' && cmdkOpen) {
+        closeCmdk();
+        return;
       }
-      // 必须走 closeCmdk 而不是 setCmdkOpen(false)：后者绕过焦点归还，Escape 关闭
-      // 后焦点会掉回文档开头。三条关闭路径（Escape、Ctrl+K 再按、点遮罩）都必须
-      // 用同一个出口，否则「哪条路径会归还焦点」变成随机的。
-      if (event.key === 'Escape' && cmdkOpen) closeCmdk();
+      // T7：壳层/工作台键统一走键位表（keybindings/keymapTable.ts + applyKeybinding.ts）。
+      // Ctrl 与 Meta 等价（沿用既有 handler 的行为）；输入框/textarea/contenteditable/
+      // Agent composer 内由 resolveKeybinding 的 editable-target 守卫放行原生编辑键，
+      // 壳层三键始终命中（守卫前置）。
+      const target = event.target;
+      const targetIsEditable = target instanceof HTMLElement && (
+        target.tagName === 'INPUT'
+        || target.tagName === 'TEXTAREA'
+        || target.isContentEditable === true
+        || target.closest('.agent__composer') !== null
+      );
+      const outcome = resolveKeybinding(
+        {
+          key: event.key,
+          ctrlKey: event.ctrlKey || event.metaKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          metaKey: false
+        },
+        activeDomain,
+        { targetIsEditable, viewportPointerActive: false }
+      );
+      // App 只接管壳层三键；edit/domain 键由各工作台组件自己处理，这里不 preventDefault。
+      if (!outcome.hit || outcome.entry.scope !== 'shell') return;
+      event.preventDefault();
+      switch (outcome.entry.id) {
+        case 'shell.command-palette':
+          if (cmdkOpen) closeCmdk(); else openCmdk();
+          break;
+        case 'shell.agent':
+          setAgentOpen((open) => !open);
+          break;
+        case 'shell.sidebar':
+          setSidebarCollapsed((collapsed) => !collapsed);
+          break;
+        default:
+          break;
+      }
     };
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
-  }, [cmdkOpen]);
+  }, [cmdkOpen, activeDomain]);
 
   useEffect(() => {
     const tick = (): void => {
@@ -3792,6 +3812,7 @@ export function App(): ReactElement {
           <span className="st-item" title="当前中央资源">当前：{selectedFile?.relativePath ?? '无'}</span>
         </div>
         <div className="statusbar__right">
+          <span className="st-item" title="当前键位套"> {statusSuitLabel(activeDomain)}</span>
           <span className="st-item st-status" role="status" title={status}>{status}</span>
           {/* 诊断计数此前是死文本：显示「1035 条诊断」却点不开，用户无从查看。
               现在它是日志区的开关 —— 计数与内容必须可达，否则那个数字只是噪声。 */}
