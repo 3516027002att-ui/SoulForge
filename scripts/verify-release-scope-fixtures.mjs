@@ -265,6 +265,32 @@ try {
   await expectRejected('schema-version-not-semver', (scope) => {
     scope.schemaVersion = '2.0';
   }, 'SCHEMA_VERSION_INVALID');
+
+  // 以下三条扰动交接书本体，证明 Gate 收敛条件表的三种退化都会红。
+  //
+  // 第一条是真正要挡的那种：把外层 END_MARKER 上移到裁定表之前。文档看不出区别、
+  // 投影正常、handoff:project --check 全绿，但表掉出 REL-SCOPE 的指纹范围，
+  // openRulings 从此可以随意改写而证据仍 fresh。
+  await expectHandoffRejected('gate-rulings-table-outside-outer-marker', (text) => {
+    const outerEnd = '<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->\r\n';
+    const rulingsBegin = '<!-- SOULFORGE_PROJECTION_BEGIN:gate-rulings -->';
+    return text
+      .replace(outerEnd, '')
+      .replace(rulingsBegin, `${outerEnd}${rulingsBegin}`);
+  }, 'GATE_RULINGS_BLOCK_MISSING');
+
+  // 表还在 marker 内但退成占位文字：渲染函数被改坏时的实际形态。
+  await expectHandoffRejected('gate-rulings-table-degraded-to-prose', (text) =>
+    mutateGateRulingsRegion(text, (region) =>
+      region.replace(/^\|.*$/gm, '待补。')), 'GATE_RULINGS_TABLE_EMPTY');
+
+  // 漏一个 Gate：投影按 gates.json 顺序渲染，删掉末行即与权威不一致。
+  await expectHandoffRejected('gate-rulings-table-missing-gate', (text) =>
+    mutateGateRulingsRegion(text, (region) => {
+      const rows = region.match(/^\|\s*`REL-[A-Z0-9-]+`\s*\|.*$/gm) ?? [];
+      if (rows.length < 2) throw new Error('裁定表行数不足，无法构造漏 Gate 的反例。');
+      return region.replace(`${rows[rows.length - 1]}\r\n`, '');
+    }), 'GATE_RULINGS_TABLE_DIVERGED');
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
@@ -278,6 +304,48 @@ console.log(JSON.stringify({
 
 async function expectRejected(name, mutate, expectedCode) {
   await expectResult(name, mutate, 1, expectedCode);
+}
+
+/**
+ * 扰动交接书本体（而不是治理 JSON）再跑门禁。
+ *
+ * 只有结构性判据需要这个通道：GATE_RULINGS_* 判的是「表是否在外层 marker 之内」，
+ * 那是 markdown 的事实，改治理 JSON 造不出反例。
+ *
+ * 写进临时文件再用 --input 指过去，不碰真实交接书：原地改再还原的写法只要中途抛
+ * 异常就把坏 markdown 留在仓库里，而后续所有断言都会跑在坏数据上。
+ */
+async function expectHandoffRejected(name, mutateHandoff, expectedCode) {
+  const caseRoot = join(temporaryRoot, name);
+  await mkdir(caseRoot, { recursive: true });
+  const original = await readFile(HANDOFF, 'utf8');
+  const mutated = mutateHandoff(original);
+  if (mutated === original) {
+    throw new Error(`${name}: 扰动未命中锚点，交接书内容未变——该用例证明不了任何事。`);
+  }
+  const handoffPath = join(caseRoot, 'handoff.md');
+  await writeFile(handoffPath, mutated, 'utf8');
+  await writeFile(join(caseRoot, 'scope.json'), JSON.stringify(scopeSource, null, 2), 'utf8');
+  await writeFile(join(caseRoot, 'gates.json'), JSON.stringify(gatesSource, null, 2), 'utf8');
+
+  const result = await runProcess({
+    command: process.execPath,
+    args: [
+      'scripts/verify-release-scope.mjs',
+      '--proposal',
+      `--input=${handoffPath}`,
+      `--governance-root=${caseRoot}`
+    ],
+    cwd: root,
+    timeoutMs: 10_000
+  });
+  if (result.timedOut || result.cancelled || result.code !== 1) {
+    throw new Error(`${name}: expected exit 1, got ${result.code}; ${result.stderr}`);
+  }
+  if (!result.stdout.includes(expectedCode)) {
+    throw new Error(`${name}: output did not contain ${expectedCode}: ${result.stdout}`);
+  }
+  cases.push({ name, expectedExit: 1, expectedToken: expectedCode });
 }
 
 /**
@@ -315,6 +383,23 @@ async function expectResult(name, mutate, expectedExit, expectedToken, proposalM
     throw new Error(`${name}: output did not contain ${expectedToken}: ${result.stdout}`);
   }
   cases.push({ name, expectedExit, expectedToken });
+}
+
+/**
+ * 只在 gate-rulings 两个 marker 之间做替换。
+ *
+ * 全文替换会误伤：交接书里 `| \`REL-...\` |` 形态的行在 §18.1、§18.3 都有，
+ * 改到那些表会触发别的 finding code，用例就会因为「另一条断言红了」而通过——
+ * 那是假的负向证明。
+ */
+function mutateGateRulingsRegion(text, mutate) {
+  const begin = '<!-- SOULFORGE_PROJECTION_BEGIN:gate-rulings -->';
+  const end = '<!-- SOULFORGE_PROJECTION_END:gate-rulings -->';
+  const start = text.indexOf(begin);
+  const stop = text.indexOf(end, start);
+  if (start === -1 || stop === -1) throw new Error('gate-rulings marker 对不存在，扰动锚点已失效。');
+  const from = start + begin.length;
+  return text.slice(0, from) + mutate(text.slice(from, stop)) + text.slice(stop);
 }
 
 /** gates.json 里按 ID 取 Gate。提案侧的 currentState 对应这里的 gateState。 */

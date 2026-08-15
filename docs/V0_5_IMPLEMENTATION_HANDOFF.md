@@ -2098,6 +2098,28 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 | `SCOPE-MATBIN-53DE-DEFERRAL` | `E-ASSET` | `REL-SCOPE`（`passed`） | `deferred` | `V0.5` → 延期 `V0.6` | `unverified` | 0 | 5 | MATBIN read/write(MATERIAL-53D/53E):Mod Engine 2 专用序列化格式,非 FromSoftware 原生;Sekiro 原生与测试 Mod 语料 0 个 .matbin |
 
 <!-- SOULFORGE_PROJECTION_END:scope-proposal -->
+
+各 Gate 的开放裁定与收敛条件（`gates.json` 的 `openRulings`，同由 `handoff:project` 投影）。
+
+本表刻意放在 `SOULFORGE_RELEASE_SCOPE_PROPOSAL` 这对外层 marker **之内**，而不是自成一个 freshness 主题。原因：`buildFreshnessContext` 判定 `subjectScanAvailable` 时会遍历**全部**已登记块，任一块在 `git show <锚点>:交接书` 的历史版本里缺 marker，该锚点就整体判为不可验证。新增一对 marker 会让所有早于它的证据锚点永久失去可验证性——实测（2026-08-15）独立登记时 8 个 passed Gate 全部变 `GATE_FRESHNESS_UNVERIFIABLE`，且提交也修不好，因为老锚点里永远不会有新 marker。放进已存在的外层 marker 内则历史侧照旧可提取，而块内容变化仍正确使 REL-SCOPE stale。
+
+<!-- SOULFORGE_PROJECTION_BEGIN:gate-rulings -->
+
+| Gate ID | 开放裁定 / 收敛条件 |
+|---|---|
+| `REL-SCOPE` | 用户逐项裁定已冻结；scope target 不提升实时 authority，技术缺口由后继 Gate 与 blocker 继续失败关闭。 |
+| `REL-A` | 全部发布 writer 必须逐项完成真实 stage/validate/commit/re-read/rollback/crash 故障矩阵。 |
+| `REL-B` | 需建立 1.6.x release corpus，并完成 DFLT/KRAK/BND4 全量分类、KRAK 压缩写回与组合闭环。 |
+| `REL-C` | V0.5 收窄为 FMG / PARAM(gameparam) / EMEVD 三类文本与逻辑资源：需完成全官方语言 FMG、全部 ParamType 与 EMEVD 的 release corpus、writer、引用和游戏加载矩阵。`SCOPE-MSB` 已延期至 V0.6，其既有 transform 写路径必须在 V0.5 关闭。 |
+| `REL-D` | V0.5 收窄为 `SCOPE-BEHAVIOR-SCRIPT` 的只读证据视图与整个内层文件替换：HKS/Lua 经实测为 Havok Script 编译字节码（\\x1bLuaP，0x50），反编译与重编译已延期至 V0.6。需完成容器条目枚举、只读字节码/常量池证据投影，以及经 Patch Engine 的整文件替换、重读与回滚。`SCOPE-BEHAVIOR-ANIMATION` / TAE 已延期至 V0.6；`SCOPE-BEHAVIOR-ESD` 已由用户裁定（2026-08-08）改回 V0.5 supported，范围限只读解析（含转移边闭合图与悬空目标检出），any-esd-write-in-v05 保持禁止。 |
+| `REL-E` | 资产只读线已 V0.6 承接交付：`SCOPE-ASSET-FLVER` 与 `SCOPE-ASSET-TPF` 恢复为 supported@V0.6，只读 native document 在登记样本上经 byte-identical 往返与多样本覆盖验证；`SCOPE-ASSETS`（聚合）、`SCOPE-ASSET-MTD`（candidate）、`SCOPE-ASSET-COLLISION` / `SCOPE-ASSET-NAVIGATION`（格式定位记录、parser 未交付）与 `SCOPE-ASSET-OPEN-CONVERSION` 仍按既有裁定保持 deferred，范围再裁定留待后继里程碑规划。 |
+| `REL-F` | 需交付八个语义编辑器、共享只读 Hex 证据视图、完整有界访问与 Electron 真实文档功能验收；不要求量化容量或延迟门槛。 |
+| `REL-G` | 需以确定性本地 contract servers 完成双协议语义 typed tool、权限、限额、取消、审计、空配置诊断和多步写任务验证；不要求真实 provider 凭据。 |
+| `REL-H` | 需完成 me3 能力探测运行闭环及 Windows 10/11 x64 NSIS 的 manifest/hash、安装、升级、卸载和干净机验证；代码签名不属于验收范围。 |
+| `REL-I` | 渲染功能闭环已 V0.6 承接交付：`SCOPE-RENDERING` 恢复为 supported@V0.6，renderer-independent semantic scene、WebGPU 主后端与 WebGL2 自动回退在所有者机器上经功能 smoke 验证（backend resolution / 真实 FLVER mesh 渲染 / picking / 资源释放闭环）；代表性硬件档位与性能预算不属于验收，authority 保持 partial。 |
+| `REL-COMPLIANCE` | 仅允许项目所有者内部测试；外部分发仍由 notices、再分发权利与完整发行合规失败关闭。 |
+
+<!-- SOULFORGE_PROJECTION_END:gate-rulings -->
 <!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->
 
 本范围已由用户逐项批准，并由后继裁定删除代码签名、真实模型凭据、代表性渲染硬件/性能预算、编辑器容量/延迟门槛和 installer 体积/耗时预算，同时固定 Smithbox 2.2.4 本机 PARAM metadata 来源；当前未变化范围以 `EV-AUTONOMOUS-GOVERNANCE-20260731-REVIEW-OWNER` 完成工程重验证。`authorityAtRuling` 与每项 `nonClaims` 只记录 `EV-REL-SCOPE-20260730` 裁定时快照，实时 authority 唯一读取 §13.1；批准不提升 authority，也不把缺 corpus、parser、writer、adapter 或真实功能验证的项目变成完成。

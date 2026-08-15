@@ -168,6 +168,62 @@ function parseGateStates(section) {
   return states;
 }
 
+/**
+ * §18.2.1 内的 Gate 收敛条件表必须存在、必须在外层 marker 之内、必须逐条对上 gates.json。
+ *
+ * 为什么需要这道运行期断言：openRulings 是 gates.json 唯一既不进摘要表、也不被本门禁
+ * 按内容校验的 gateCoverage 字段（下方只判 isStringArray nonEmpty）。它同时是
+ * REL-SCOPE 的 freshness 覆盖的一部分——该表落在
+ * SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN/END 之内，所以改 openRulings 会让
+ * `handoff-block:release-scope-proposal` 漂移，使 REL-SCOPE 证据变 stale。
+ *
+ * 「在外层 marker 之内」是这条覆盖链唯一的结构前提，而它极易被静默破坏：把
+ * END_MARKER 上移一行，表就掉到指纹范围外，投影仍正常、handoff:project --check
+ * 仍全绿、本门禁其余断言也全绿——覆盖消失且无人报错。所以这里传入的是
+ * sliceBetween(handoff, BEGIN_MARKER, END_MARKER) 的结果而不是整份交接书：
+ * 表在块外时下面第一条就红。
+ *
+ * 不比对逐字文本（那是 handoff:project --check 的职责，重复且更脆），只比对
+ * gateId 集合与顺序：这足以挡住「表还在但退成占位」「漏一个 Gate」「表按旧顺序」，
+ * 而这三种正是投影渲染函数被改坏时的实际形态。
+ */
+function checkGateRulingsTable(proposalBlock) {
+  const begin = '<!-- SOULFORGE_PROJECTION_BEGIN:gate-rulings -->';
+  const end = '<!-- SOULFORGE_PROJECTION_END:gate-rulings -->';
+  const table = sliceBetween(proposalBlock, begin, end);
+  if (table === null) {
+    add(
+      'GATE_RULINGS_BLOCK_MISSING',
+      '§18.2.1',
+      'Gate 收敛条件表不在 SOULFORGE_RELEASE_SCOPE_PROPOSAL 外层 marker 之内。'
+        + '该表是 openRulings 的唯一指纹覆盖，落到外层 marker 之外会让 REL-SCOPE 对 '
+        + 'openRulings 改动失去 stale 判定；投影与 --check 都不会发现。'
+    );
+    return;
+  }
+  if (gatesData === null) return;
+  const authorityIds = (gatesData.gates ?? []).map((entry) => entry.gateId);
+  const rowIds = [];
+  const row = /^\|\s*`(REL-[A-Z0-9-]+)`\s*\|/gm;
+  let match;
+  while ((match = row.exec(table)) !== null) rowIds.push(match[1]);
+  if (rowIds.length === 0) {
+    add(
+      'GATE_RULINGS_TABLE_EMPTY',
+      '§18.2.1',
+      'Gate 收敛条件表未解析到任何 Gate 行；运行 npm run handoff:project 重新生成。'
+    );
+    return;
+  }
+  if (rowIds.join(',') !== authorityIds.join(',')) {
+    add(
+      'GATE_RULINGS_TABLE_DIVERGED',
+      '§18.2.1',
+      `Gate 收敛条件表与 gates.json 不一致：表为 ${rowIds.join(',')}，权威为 ${authorityIds.join(',')}。`
+    );
+  }
+}
+
 function isStringArray(value, { nonEmpty = false } = {}) {
   return Array.isArray(value)
     && (!nonEmpty || value.length > 0)
@@ -286,9 +342,11 @@ if (beginCount !== 1 || endCount !== 1) {
  */
 let proposal = null;
 let scopeData = null;
+let gatesData = null;
 try {
   const sources = loadGovernanceSources(process.cwd(), governanceRoot);
   scopeData = sources.scopeData;
+  gatesData = sources.gatesData;
   proposal = buildReleaseScopeProposal(sources);
 } catch (error) {
   add('GOVERNANCE_READ_FAILED', proposalWhere, error instanceof Error ? error.message : String(error));
@@ -331,6 +389,7 @@ if (beginCount === 1 && endCount === 1) {
         }
       }
     }
+    checkGateRulingsTable(block);
   }
 }
 

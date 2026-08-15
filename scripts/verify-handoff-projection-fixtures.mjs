@@ -132,6 +132,15 @@ const EDGE_SOURCES = {
   check('edge/scope-proposal-empty-names-authority', edgeProposal.includes('docs/governance/scope.json'),
     '空数据下仍必须指明权威路径——否则读者只看到「没有条目」，不知道去哪里确认。');
 
+  // gate-rulings 在空 gates 下同样必须退成说明文字。通用表格循环只在
+  // active-claims 上有空数据分支，碰不到这个块（EDGE_SOURCES.gatesData.gates 为空
+  // 时它若返回空表格，下面的 has-rows 断言会红在一个数据问题上）。
+  const edgeRulings = edgeBlocks['gate-rulings']();
+  check('edge/gate-rulings-empty-is-prose', !edgeRulings.startsWith('|'),
+    `空 gates 应渲染为说明文字而不是空表格，实际首字符 ${JSON.stringify(edgeRulings.slice(0, 1))}`);
+  check('edge/gate-rulings-empty-names-authority', edgeRulings.includes('docs/governance/gates.json'),
+    '空数据下仍必须指明权威路径。');
+
   // 装配层在最小数据下不得崩溃、也不得省略键：范围门禁按键集判定策略完整性，
   // 少一个键它会报 FROZEN_POLICY_VALUE_INVALID 之类的错，指向的却是错的原因。
   // 这条从 markdown 移到装配层——键集契约现在由 release-scope-proposal-lib 承担。
@@ -335,6 +344,53 @@ const NON_TABLE_BLOCKS = new Set(['command-index']);
     deferredIds.length === 0
       ? '权威里已无 deferred 条目，这条断言失去靶标——需改靶或反造形态，不能留着恒真。'
       : `延期条目必须在 targetRelease 列标注：${deferredMissingMark.join('、')}`);
+}
+
+/**
+ * §18.2.1 gate-rulings：openRulings 必须逐条、逐字进块。
+ *
+ * 这个块的作用是指纹覆盖，不是呈现：它是 §18.2.1 退成摘要后 openRulings 唯一的
+ * 覆盖来源。所以断言必须锁「全部 Gate 都在、文本与权威逐字相同」——漏一个 Gate
+ * 或截断文本，那部分就重新脱离 REL-SCOPE 指纹，而块本身看起来仍然正常。
+ */
+{
+  const body = blocks['gate-rulings']();
+  const lines = body.split('\n');
+  const authorityGates = sources.gatesData.gates;
+
+  check('gate-rulings/is-table', lines[0].startsWith('|'),
+    `真实数据下必须是表格，实际首行 ${JSON.stringify(lines[0].slice(0, 40))}`);
+
+  const rows = lines.slice(2).map(splitRow);
+  check('gate-rulings/row-count-matches-authority', rows.length === authorityGates.length,
+    `行数必须等于 gates.json 的 ${authorityGates.length} 个 Gate，实际 ${rows.length}`);
+
+  const rowIds = rows.map((row) => (row[0] ?? '').replaceAll('`', ''));
+  check('gate-rulings/ids-match-authority-in-order',
+    JSON.stringify(rowIds) === JSON.stringify(authorityGates.map((gate) => gate.gateId)),
+    `首列必须与 gates.json 逐条同序，实际 ${JSON.stringify(rowIds)}`);
+
+  // 逐字比对。只判「非空」会让截断、只投影 openRulings[0] 这类退化全部通过，
+  // 而截断掉的那部分文本正是脱离指纹的部分。
+  //
+  // 期望值从原始权威推导，不调 cell()：用生产渲染函数算期望值就是拿生产输出比
+  // 生产输出，改坏 cell 两边一起变、断言恒真。这里反向剥掉 decorate 的装饰
+  // （它只插入反引号、不删改字符，所以剥掉反引号即还原），再与权威原文比。
+  const rulingMismatches = rows.flatMap((row, i) => {
+    const expected = (authorityGates[i]?.openRulings ?? []).join('；')
+      .replaceAll('|', '\\|').replaceAll('\r\n', ' ').replaceAll('\n', ' ');
+    const actual = (row[1] ?? '').replaceAll('`', '');
+    return actual === expected ? [] : [`${rowIds[i]}: 期望 ${expected} 实际 ${actual}`];
+  });
+  check('gate-rulings/text-matches-authority', rulingMismatches.length === 0,
+    `裁定文本必须与 gates.json 逐字一致：${rulingMismatches.join('；')}`);
+
+  // 靶标存在性：真实权威里必须确实有非空 openRulings，否则上面几条在
+  // 全空数据下恒真——那是「断言被守卫跳过等于报绿」的同一类死判据。
+  check('gate-rulings/authority-has-rulings',
+    authorityGates.length > 0
+      && authorityGates.every((gate) => Array.isArray(gate.openRulings) && gate.openRulings.length > 0),
+    'gates.json 每个 Gate 都必须有非空 openRulings，否则本组断言失去靶标。');
 }
 
 for (const [name, build] of Object.entries(blocks)) {

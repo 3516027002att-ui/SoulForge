@@ -837,6 +837,21 @@ const RELEASE_SCOPE_PROPOSAL_SUBJECT = Object.freeze({
   beginMarker: '<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_BEGIN -->',
   endMarker: '<!-- SOULFORGE_RELEASE_SCOPE_PROPOSAL_END -->'
 });
+// gate-rulings 表（§18.2.1 内，投影 marker `PROJECTION_BEGIN:gate-rulings`）
+// **不在这里单列 subject**，而是靠 RELEASE_SCOPE_PROPOSAL_SUBJECT 的外层 marker
+// 把它一并纳入指纹。
+//
+// 不能单列的原因（实测 2026-08-15）：buildFreshnessContext 判定
+// subjectScanAvailable 时遍历 registry.allHandoffBlocks 的**全部**块
+// （freshnessContext.mjs:101-108），任一块在 `git show <锚点>:交接书` 的历史版本里
+// 提取不到就把该锚点整体判 subjectScanAvailable=false → GATE_FRESHNESS_UNVERIFIABLE
+// 失败关闭。新增一对 marker 时，所有早于该 marker 的证据锚点都取不到内容，于是
+// 8 个 passed Gate 全部变 unverifiable；而这个状态提交也修不好——老锚点的历史版本里
+// 永远不会出现新 marker。
+//
+// 所以「给已有 Gate 补一块指纹覆盖」的正确做法是把内容放进它**已登记**的 marker 对
+// 内部，而不是新增 marker 对。新增 marker 对只在同时重封存全部受影响 Gate 时才可行，
+// 而 seal 的 postcheck 是全局的，做不到增量到达那个状态。
 const SCOPE_SUBJECT_SET = Object.freeze({
   files: Object.freeze([
     'scripts/generate-handoff-fingerprint.mjs',
@@ -891,18 +906,29 @@ const SCOPE_SUBJECT_SET = Object.freeze({
     'scripts/verify-gov-cli-fixtures.mjs',
     'docs/governance/releases.json',
     'docs/governance/scope.json',
-    // gates.json 必须显式登记。
+    // 这里**不能**登记 docs/governance/gates.json —— 会把 seal 整条命令锁死。
     //
-    // 它此前进入 REL-SCOPE 主题域是靠 §18.2.1 的块内容：那块曾内嵌 gates.json 的
-    // 四字段投影（gateId/scopeItemIds/gateState/blockerRefs），改 gates.json →
-    // 重投影 → 块内容变 → 指纹变。块退成人读摘要表后，只剩 gateId 与状态出现在
-    // Gate 列，条目级 scopeItemIds/blockerRefs 不再进块——也就是说改 gates.json
-    // 的这些字段不再必然扰动 REL-SCOPE 指纹。
+    // 实测（2026-08-15）：登记它之后 `gov seal --gates ...` 必然回滚，
+    // SEAL_POSTCHECK_FAILED 报 REL-SCOPE GATE_EVIDENCE_STALE，而 REL-SCOPE 主题域
+    // 在封存前是干净的。链条：seal 把新 EvidenceId 追加进 gates.json 的 evidenceRefs
+    // （gov.mjs:1060 的回滚清单就含它）→ postcheck 跑 validateGovernanceData
+    // ({withFreshness:true}) → freshness 用 `git diff <anchor=本次 HEAD> -- 主题域文件`
+    // 比对**工作树**（freshnessContext.mjs:77-80）→ 刚写的 gates.json 必然出现在
+    // changedSubjects → REL-SCOPE stale（governanceRules.mjs:162）→ 回滚。
     //
-    // 而范围门禁现在直读 gates.json 装配 gateCoverage：它是冻结裁定判定的直接输入，
-    // 漏登记就能改写 Gate 覆盖而 REL-SCOPE 仍显示 fresh。靠「另一个块恰好投影了
-    // 它的一部分」来间接覆盖，正是那种改一处呈现就静默失效的覆盖方式。
-    'docs/governance/gates.json',
+    // 这不是「先提交再封存」能绕开的：写 gates.json 是 seal 自己的动作，发生在
+    // postcheck 之前，任何提交时机都躲不掉。而 postcheck 是全局的，所以 REL-SCOPE
+    // 一旦锁死，**任何** Gate 的封存都写不进去。
+    //
+    // 通则：凡传递依赖 evidenceRefs 的主题都不可登记。gate-matrix 块（§18.3）也在
+    // 此列——它渲染 `[...evidenceRefs, ...blockerRefs]`，登记它会复现同一死锁。
+    //
+    // gates.json 的覆盖改由 §18.2.1 里的 gate-rulings 表承担（在
+    // RELEASE_SCOPE_PROPOSAL 外层 marker 之内，见该 subject 上方注释）：它只渲染
+    // gateId 与 openRulings，对 evidenceRefs 追加不敏感，所以不会复现死锁。
+    // gateState 由 §18.2.1 摘要的 Gate 列覆盖；scopeItemIds 与 blockerRefs 由范围门禁
+    // 运行期双向锁死（REL_SCOPE_ITEM_NOT_REFERENCED / SCOPE_ITEM_NOT_IN_GATE_COVERAGE /
+    // OPEN_GATE_WITH_BLOCKER 等 20+ 条断言，verify-release-scope.mjs:784-901）。
     // 七个 schema 全部登记，而不只是冻结裁定直接用到的 releases/scope 两个。
     // 理由：loadGovernance 用 schema 的 required + additionalProperties:false 承担了
     // 一部分门禁职责（等价性清单里 18 项 SCHEMA_SUPERSEDED 正是这么登记的）。

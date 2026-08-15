@@ -242,6 +242,40 @@ export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, s
   ),
 
   /**
+   * §18.2.1 各 Gate 的开放裁定与收敛条件。
+   *
+   * 存在理由是覆盖而不是呈现：openRulings 是 gates.json 里唯一既不进 §18.2.1
+   * 摘要表、也不被范围门禁按内容校验的 gateCoverage 字段（门禁只判非空字符串
+   * 数组）。§18.2.1 退成摘要后，改写这 11 条收敛条件不再扰动 REL-SCOPE 指纹；
+   * 把它们投影进块，指纹就重新覆盖到（块内容变 → 主题域变 → 证据 stale）。
+   *
+   * 为什么不改成登记 gates.json 文件：seal 自己要往 gates.json 追加 evidenceRefs，
+   * 登记该文件会让 postcheck 必然判 REL-SCOPE stale 并回滚——实测锁死整条 seal。
+   * 详见 handoff-integrity-lib.mjs 里 SCOPE_SUBJECT_SET 的那段说明。
+   *
+   * 只取 gateId + openRulings：gateState 已在摘要表的 Gate 列，
+   * blockerRefs/scopeItemIds 由范围门禁运行期双向锁死。多投影一个字段就多一处
+   * 需要同步的副本，而副本不增加判定力。
+   */
+  'gate-rulings': () => {
+    const gates = Array.isArray(gatesData?.gates) ? gatesData.gates : [];
+    if (gates.length === 0) {
+      // 与 scope-proposal 同一处理：空表格会撞 has-rows 断言，而那条断言是对的。
+      return '当前 gates.json 未登记 Gate。权威是 docs/governance/gates.json，'
+        + '本表由 generate-handoff-projection 投影。';
+    }
+    return table(
+      ['Gate ID', '开放裁定 / 收敛条件'],
+      gates.map((gate) => [
+        `\`${gate.gateId}\``,
+        // 多条裁定用分号连接而不是换行：表格单元不能含裸换行（cell 会压平），
+        // 而逐条分行需要把一个 Gate 拆成多行，破坏「一 Gate 一行」与行数断言。
+        cell(Array.isArray(gate.openRulings) ? gate.openRulings.join('；') : gate.openRulings)
+      ])
+    );
+  },
+
+  /**
    * §18.2.1 范围条目摘要。
    *
    * 这里曾是交接书里最大的一处重复：1467 行内嵌 JSON，占全文 4121 行的 36%，

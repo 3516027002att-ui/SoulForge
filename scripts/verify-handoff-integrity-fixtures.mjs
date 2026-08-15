@@ -687,6 +687,16 @@ assertCodes(
   }
 );
 
+// 上面这条同时是 §18.2.1 里 gate-rulings 表（Gate 收敛条件）的指纹覆盖：该表落在
+// RELEASE_SCOPE_PROPOSAL 外层 marker **之内**，所以 openRulings 变化体现为
+// `handoff-block:release-scope-proposal` 漂移，不需要（也不能）单列 subject——
+// 单列会让所有历史锚点 subjectScanAvailable=false，理由见 handoff-integrity-lib.mjs
+// 中 RELEASE_SCOPE_PROPOSAL_SUBJECT 上方注释。
+//
+// 「表确实在外层 marker 内」这一环是结构事实，不由本 fixture 承担：由
+// verify-release-scope.mjs 的 GATE_RULINGS_* 断言在生产门禁里运行期锁死，
+// 负向用例在 verify-release-scope-fixtures.mjs。
+
 assertCodes(
   'passed-scope-invalidated-by-subject-drift',
   buildDocument({ slices: passedScopeSlices, gates: passedScopeGates }),
