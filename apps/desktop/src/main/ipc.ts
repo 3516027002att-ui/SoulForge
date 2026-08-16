@@ -197,6 +197,19 @@ import { readRecentPath, writeRecentPath } from './recentPaths.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
+import {
+  decodeTaeParamFields,
+  getTaeTemplateCatalog
+} from './taeTemplateCatalog.js';
+
+/** 只读存在性检查（chrbnd 伴生查找用；不抛异常）。 */
+function safeExists(path: string): boolean {
+  try {
+    return existsSync(path);
+  } catch {
+    return false;
+  }
+}
 
 let indexedFiles: IndexedFile[] = [];
 let activeIndex: WorkspaceIndex | null = null;
@@ -3330,6 +3343,179 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
+
+  /**
+   * S17：词条名目录。main 从本机 TAE.Template.SDT.xml 解析 eventTypeId → 名称；
+   * renderer 只拿逻辑名（渲染 `0 JumpTable` 这类词条行），绝不接触 XML 路径。
+   */
+  handle('resource.readTaeTemplateCatalog', async (): Promise<{
+    ok: boolean;
+    origin: 'imported' | 'unavailable';
+    events: Array<{ eventTypeId: number; name: string }>;
+    diagnostics?: Array<{ severity: string; code: string; message: string }>;
+  }> => {
+    const catalog = getTaeTemplateCatalog();
+    // handle() 包装器统一 sanitize；这里只组装结构化结果。
+    return {
+      ok: catalog.origin === 'imported',
+      origin: catalog.origin,
+      events: [...catalog.events.entries()].map(([eventTypeId, def]) => ({ eventTypeId, name: def.name })),
+      diagnostics: [...catalog.diagnostics]
+    };
+  });
+
+  /**
+   * S17：单个词条事件的参数体。main 按本机模板布局给 Bridge 参数长度，Bridge
+   * 原生截取参数体字节（越界失败关闭），main 再按布局解码字段（little-endian）。
+   * 无模板类型：返回未解码 + 原始 hex，不编造字段含义。
+   */
+  handle(
+    'resource.readTaeEventParams',
+    async (
+      _event,
+      sourceUri: string,
+      animId: number,
+      eventIndex: number
+    ): Promise<{
+      ok: boolean;
+      sourceUri?: string;
+      relativePath?: string;
+      data?: {
+        eventTypeId: number;
+        templateName: string | null;
+        fields: Array<{ name: string; type: string; value: string }>;
+        tailHex: string | null;
+        undecodedHex: string | null;
+      };
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 TAE 事件参数。', sourceUri }] };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      const catalog = getTaeTemplateCatalog();
+      // 第一读：paramSize 缺省 → Bridge 给前 16 字节，拿到 eventTypeId。
+      const result = await runBridge<{
+        eventTypeId?: number;
+        paramHex?: string;
+        paramSize?: number;
+      }>({
+        command: 'read-tae-event-params',
+        filePath: file.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        timeoutMs: 120_000,
+        ...(activeSession?.layers.baseRoot
+          ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+          : {}),
+        commandOptions: { animId, eventIndex }
+      });
+      if (result.parseStatus === 'failed' || !result.data) {
+        return { ok: false, diagnostics: result.diagnostics };
+      }
+      const eventTypeId = result.data.eventTypeId ?? -1;
+      const def = catalog.events.get(eventTypeId);
+      // 有模板且模板大小 ≠ 16：按模板长度重读参数体（16 字节时第一读已够）。
+      const paramSize = def?.paramSize ?? 0;
+      const needsExactRead = paramSize > 0 && paramSize !== 16;
+      const exact = needsExactRead
+        ? await runBridge<{ paramHex?: string }>({
+            command: 'read-tae-event-params',
+            filePath: file.absolutePath,
+            allowedRoots: roots.allowedRoots,
+            timeoutMs: 120_000,
+            ...(activeSession?.layers.baseRoot
+              ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+              : {}),
+            commandOptions: { animId, eventIndex, paramSize }
+          })
+        : null;
+      if (exact && (exact.parseStatus === 'failed' || !exact.data?.paramHex)) {
+        return { ok: false, diagnostics: exact.diagnostics };
+      }
+      const paramHex = exact?.data?.paramHex ?? result.data.paramHex ?? '';
+      const decoded = decodeTaeParamFields(def, paramHex);
+      // handle() 包装器统一 sanitize；这里只组装结构化结果。
+      return {
+        ok: true,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: {
+          eventTypeId,
+          templateName: def?.name ?? null,
+          fields: decoded ?? [],
+          // 模板字段之外的尾部字节（模板大小与实测参数体不一致时可见，不丢弃）。
+          tailHex: decoded ? (paramHex.slice(decoded.length * 2) || null) : null,
+          undecodedHex: def && def.paramSize > 0 ? null : (paramHex || null)
+        },
+        diagnostics: [...result.diagnostics, ...(exact?.diagnostics ?? [])]
+      };
+    }
+  );
+
+  /**
+   * S17：动作预览挂模型。按 anibnd 推断伴生 chrbnd（overlay 同目录 → 已挂原版
+   * 同相对路径），Bridge 解 DCX→BND4→首个 .flver 条目并提取网格/骨骼/挂点。
+   * renderer 只拿投影数据，绝对路径不出 main。
+   */
+  handle(
+    'resource.readTaeChrbndPreview',
+    async (
+      _event,
+      sourceUri: string,
+      meshIndex: number
+    ): Promise<{
+      ok: boolean;
+      sourceUri?: string;
+      relativePath?: string;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法定位伴生 chrbnd。', sourceUri }] };
+      }
+      const stem = basename(file.relativePath).replace(/\.anibnd(\.dcx)?$/i, '');
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      // 查找顺序：overlay 同目录 chr/<stem>.chrbnd.dcx → 已挂原版同样相对路径。
+      const overlayCandidate = join(dirname(file.absolutePath), `${stem}.chrbnd.dcx`);
+      const overlayExists = safeExists(overlayCandidate);
+      const baseRoot = activeSession?.layers.baseRoot?.trim();
+      const vanillaCandidate = baseRoot ? join(baseRoot, 'chr', `${stem}.chrbnd.dcx`) : null;
+      const vanillaExists = vanillaCandidate ? safeExists(vanillaCandidate) : false;
+      if (!overlayExists && !vanillaExists) {
+        return {
+          ok: false,
+          diagnostics: [{
+            severity: 'error' as const,
+            code: 'CHRBND_NOT_FOUND',
+            message: baseRoot
+              ? `没有找到 ${stem} 的模型（chr/${stem}.chrbnd.dcx）：overlay 与原版目录都没有该文件。`
+              : `没有找到 ${stem} 的模型（chrbnd）：overlay 没有该文件，且尚未挂载原版目录——到「开始」页选择含 sekiro.exe 的原版目录后可尝试读取原版模型。`
+          }]
+        };
+      }
+      const chrbndPath = overlayExists ? overlayCandidate : vanillaCandidate!;
+      const result = await runBridge<Record<string, unknown>>({
+        command: 'read-chrbnd-flver-preview',
+        filePath: chrbndPath,
+        allowedRoots: roots.allowedRoots,
+        timeoutMs: 120_000,
+        ...(baseRoot ? { oodleRuntimeRoot: baseRoot } : {}),
+        commandOptions: { meshIndex }
+      });
+      // handle() 包装器统一 sanitize；这里只组装结构化结果。
+      return {
+        ok: result.parseStatus !== 'failed',
+        sourceUri,
+        relativePath: file.relativePath,
+        ...(result.data !== undefined ? { data: result.data } : {}),
+        diagnostics: result.diagnostics
+      };
+    }
+  );
 
   handle('resource.readEsdDocument', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);

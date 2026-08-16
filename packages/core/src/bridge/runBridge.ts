@@ -8,7 +8,7 @@ import {
   BridgeDaemonError
 } from './bridgeDaemonClient.js';
 
-export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'inventory-asset-resources' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-gparam-document' | 'write-gparam' | 'read-text-catalog' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'read-tae-document' | 'read-tpf-document' | 'export-tpf-texture' | 'read-tpf-texture-preview' | 'write-tpf-texture-replace' | 'read-flver-document' | 'write-flver' | 'read-flver-mesh' | 'read-flver-skeleton' | 'read-flver-texture-slots' | 'read-flver-dummies' | 'read-esd-document' | 'write-esd-document' | 'write-tae-document' | 'write-fxr-document' | 'read-mtd-document' | 'write-mtd-document' | 'read-fxr-document' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle' | 'probe-document-locator';
+export type BridgeCommand = 'inspect' | 'read-dcx-document' | 'write-bnd4' | 'snapshot-bnd4-child' | 'extract-bnd4-child' | 'inventory-asset-resources' | 'read-fmg-document' | 'write-fmg' | 'read-param-document' | 'write-param' | 'read-gparam-document' | 'write-gparam' | 'read-text-catalog' | 'read-emevd-document' | 'write-emevd' | 'read-msb-document' | 'write-msb' | 'read-tae-document' | 'read-tae-event-params' | 'read-chrbnd-flver-preview' | 'read-tpf-document' | 'export-tpf-texture' | 'read-tpf-texture-preview' | 'write-tpf-texture-replace' | 'read-flver-document' | 'write-flver' | 'read-flver-mesh' | 'read-flver-skeleton' | 'read-flver-texture-slots' | 'read-flver-dummies' | 'read-esd-document' | 'write-esd-document' | 'write-tae-document' | 'write-fxr-document' | 'read-mtd-document' | 'write-mtd-document' | 'read-fxr-document' | 'export-event' | 'export-map' | 'export-param' | 'export-msg' | 'validate' | 'probe-oodle' | 'probe-document-locator';
 
 export interface RunBridgeOptions {
   bridgeProjectPath?: string;
@@ -249,6 +249,8 @@ function commandToResourceKind(command: BridgeCommand): ResourceKind {
     case 'write-emevd': return 'event';
     case 'read-msb-document': return 'map';
     case 'write-msb': return 'map';
+    case 'read-tae-event-params': return 'action';
+    case 'read-chrbnd-flver-preview': return 'chr';
     case 'write-flver': return 'chr';
     default: return 'unknown';
   }

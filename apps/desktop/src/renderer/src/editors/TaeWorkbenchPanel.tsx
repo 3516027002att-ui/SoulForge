@@ -106,10 +106,25 @@ function fileLabel(resourceUri: string): string {
   return base || resourceUri;
 }
 
-/** 动画 id 显示名：hkxName 去扩展（a000_003013.hkx → a000_003013）；缺省用「动画 N」。 */
+/**
+ * hkx 茎是否「合法文件名字符」：ASCII 字母数字开头，仅含字母数字 / _ / - / .，
+ * 非空、无空白。S17：乱码（旧 UTF-16 误读）、空串、含空白的占位名（如 "AE "）
+ * 一律不认作合法茎。
+ */
+export function isLegalHkxStem(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value);
+}
+
+/**
+ * 动画 id 显示名（S17）：
+ * - 合法 hkx 茎（去 .hkx 扩展，如 a000_003013）直接用；
+ * - 乱码 / 空 / 非文件名字符（「葉」、尾随空格、UTF-16 误读）一律丢弃，
+ *   显示干净的数字 id（`600`），禁止「动画 600」、禁止「葉」。
+ */
 export function animationIdLabel(animation: TaeAnimationWire): string {
   const base = (animation.hkxName ?? '').replace(/\.hkx$/i, '');
-  return base || `动画 ${animation.animId}`;
+  if (isLegalHkxStem(base)) return base;
+  return String(animation.animId);
 }
 
 /** 秒 → 帧（30fps）。非有限返回 '—'，不编造数值。 */
@@ -191,65 +206,133 @@ export function formatWriteDiagnostics(diagnostics: readonly Diagnostic[] | unde
  * （insert-event，以当前事件为模板）。参数体未解码，这里不出现任何参数编辑控件。
  * 收在中栏详情里（T3 后动作工作台无独立 Inspector 第三栏）。
  */
-export interface TaeEventEditorProps {
-  row: TaeTimelineEventRow;
-  /** 事件在所属动画 events 数组内的下标；undefined 时禁用提交。 */
+/**
+ * S17：三栏底 footer——只在选中词条时出现。
+ *
+ * 起始帧 / 结束帧（30fps 换算，主标签是帧，≈ 秒 作小字）、完整 typeId + 类型名、
+ * 事件在该动画里的下标、参数字段（按本机模板解码；解不出写「未解码」+ 原始 hex，
+ * 禁止编造 SoundType 含义）。时间编辑保留在 footer：标签是帧，内部仍走
+ * update-event-times（秒）。
+ */
+export interface TaeEventFooterProps {
+  event: TaeTimelineEventWire;
   eventIndex: number | undefined;
+  eventTypeName: string;
+  /** S17：按需拉取的参数体（null = 未选中/加载中态由字段自身表达）。 */
+  eventParams: {
+    loading: boolean;
+    error: string | null;
+    templateName: string | null;
+    fields: Array<{ name: string; type: string; value: string }>;
+    tailHex: string | null;
+    undecodedHex: string | null;
+  } | null;
   timeDraft: TaeTimeDraft | null;
-  insertDraft: TaeInsertDraft | null;
   saving: boolean;
-  notice: TaeWriteNotice | null;
+  writeNotice: TaeWriteNotice | null;
   onTimeDraftChange: (draft: TaeTimeDraft) => void;
-  onInsertDraftChange: (draft: TaeInsertDraft) => void;
   onSubmitTime: () => void;
-  onSubmitInsert: () => void;
 }
 
-export function TaeEventEditor(props: TaeEventEditorProps): ReactElement {
-  const { row, eventIndex, saving, notice } = props;
-  const startText = props.timeDraft?.startText ?? String(row.startTime);
-  const endText = props.timeDraft?.endText ?? String(row.endTime);
-  const insertTypeText = props.insertDraft?.eventTypeIdText ?? String(row.eventTypeId);
-  const insertStartText = props.insertDraft?.startText ?? String(row.startTime);
-  const insertEndText = props.insertDraft?.endText ?? String(row.endTime);
+export function TaeEventFooter(props: TaeEventFooterProps): ReactElement {
+  const { event, eventIndex, saving } = props;
+  const startText = props.timeDraft?.startText ?? String(event.startTime);
+  const endText = props.timeDraft?.endText ?? String(event.endTime);
+  const params = props.eventParams;
 
   return (
-    <div className="tae-edit" data-testid="tae-event-editor">
-      {notice && (
-        <p className={notice.kind === 'error' ? 'diag-error' : 'muted'} data-testid="tae-write-notice">
-          {notice.message}
+    <div className="tae-footer" data-testid="tae-event-footer">
+      {props.writeNotice && (
+        <p className={props.writeNotice.kind === 'error' ? 'diag-error' : 'muted'} data-testid="tae-write-notice">
+          {props.writeNotice.message}
         </p>
       )}
-      <div className="wb-list__group-label">编辑事件时间（update-event-times）</div>
+      <div className="wb-props">
+        <div className="wb-prop">
+          <span className="wb-prop__name">起始帧</span>
+          <span className="wb-prop__value wb-prop__value--readonly">
+            {secondsToFrame(event.startTime)}
+            <span className="muted"> ≈ {formatTime(event.startTime)}s</span>
+          </span>
+        </div>
+        <div className="wb-prop">
+          <span className="wb-prop__name">结束帧</span>
+          <span className="wb-prop__value wb-prop__value--readonly">
+            {secondsToFrame(event.endTime)}
+            <span className="muted"> ≈ {formatTime(event.endTime)}s</span>
+          </span>
+        </div>
+        <div className="wb-prop">
+          <span className="wb-prop__name">事件类型</span>
+          <span className="wb-prop__value wb-prop__value--readonly">
+            {event.eventTypeId} {props.eventTypeName}
+          </span>
+        </div>
+        <div className="wb-prop">
+          <span className="wb-prop__name">事件下标</span>
+          <span className="wb-prop__value wb-prop__value--readonly">
+            {eventIndex === undefined ? '—' : String(eventIndex)}
+          </span>
+        </div>
+      </div>
+      <div className="wb-list__group-label">参数体</div>
+      {params === null || params.loading ? (
+        <p className="muted" style={{ fontSize: 11 }}>读取参数体…</p>
+      ) : params.error !== null ? (
+        <p className="diag-error" data-testid="tae-params-error">{params.error}</p>
+      ) : params.fields.length > 0 ? (
+        <div className="wb-props" data-testid="tae-params-fields">
+          {params.fields.map((field) => (
+            <div key={`${field.name}-${field.type}`} className="wb-prop">
+              <span className="wb-prop__name">{field.name}</span>
+              <span className="wb-prop__value wb-prop__value--readonly">{field.value}</span>
+            </div>
+          ))}
+        </div>
+      ) : params.undecodedHex ? (
+        <p className="muted" style={{ fontSize: 11 }} data-testid="tae-params-undecoded">
+          未解码（模板无此事件类型定义）：{params.undecodedHex}
+        </p>
+      ) : (
+        <p className="muted" style={{ fontSize: 11 }}>该事件类型没有参数。</p>
+      )}
+      {params && params.tailHex && (
+        <p className="muted" style={{ fontSize: 11 }} data-testid="tae-params-tail">
+          未解码尾部：{params.tailHex}
+        </p>
+      )}
+      <div className="wb-list__group-label">编辑事件时间（update-event-times，内部秒）</div>
       {eventIndex === undefined && (
         <p className="wb-empty diag-error" data-testid="tae-event-index-missing">
           无法确定该事件在动画事件表中的下标，写回已禁用。
         </p>
       )}
       <div className="wb-prop">
-        <span className="wb-prop__name">起始时间</span>
+        <span className="wb-prop__name">起始帧</span>
         <span className="wb-prop__value">
           <input
             type="number"
             step="any"
-            aria-label="新开始时间"
+            aria-label="新起始帧（秒）"
             value={startText}
             disabled={saving}
             onChange={(event) => props.onTimeDraftChange({ startText: event.target.value, endText })}
           />
+          <span className="muted"> ≈ 帧 {secondsToFrame(Number(startText))}</span>
         </span>
       </div>
       <div className="wb-prop">
-        <span className="wb-prop__name">结束时间</span>
+        <span className="wb-prop__name">结束帧</span>
         <span className="wb-prop__value">
           <input
             type="number"
             step="any"
-            aria-label="新结束时间"
+            aria-label="新结束帧（秒）"
             value={endText}
             disabled={saving}
             onChange={(event) => props.onTimeDraftChange({ startText, endText: event.target.value })}
           />
+          <span className="muted"> ≈ 帧 {secondsToFrame(Number(endText))}</span>
         </span>
       </div>
       <div className="wb-prop">
@@ -260,171 +343,10 @@ export function TaeEventEditor(props: TaeEventEditorProps): ReactElement {
           </button>
         </span>
       </div>
-      <div className="wb-list__group-label">新增事件（模板：当前事件）</div>
-      <p className="muted" style={{ fontSize: 11 }}>
-        新增事件的参数区从模板事件逐字节拷贝；事件类型与模板不一致会被 C# 侧拒绝。
-      </p>
-      <div className="wb-prop">
-        <span className="wb-prop__name">类型 ID</span>
-        <span className="wb-prop__value">
-          <input
-            type="number"
-            step="1"
-            aria-label="新事件类型 ID"
-            value={insertTypeText}
-            disabled={saving}
-            onChange={(event) => props.onInsertDraftChange({
-              eventTypeIdText: event.target.value,
-              startText: insertStartText,
-              endText: insertEndText
-            })}
-          />
-        </span>
-      </div>
-      <div className="wb-prop">
-        <span className="wb-prop__name">起始时间</span>
-        <span className="wb-prop__value">
-          <input
-            type="number"
-            step="any"
-            aria-label="新事件开始时间"
-            value={insertStartText}
-            disabled={saving}
-            onChange={(event) => props.onInsertDraftChange({
-              eventTypeIdText: insertTypeText,
-              startText: event.target.value,
-              endText: insertEndText
-            })}
-          />
-        </span>
-      </div>
-      <div className="wb-prop">
-        <span className="wb-prop__name">结束时间</span>
-        <span className="wb-prop__value">
-          <input
-            type="number"
-            step="any"
-            aria-label="新事件结束时间"
-            value={insertEndText}
-            disabled={saving}
-            onChange={(event) => props.onInsertDraftChange({
-              eventTypeIdText: insertTypeText,
-              startText: insertStartText,
-              endText: insertEndText
-            })}
-          />
-        </span>
-      </div>
-      <div className="wb-prop">
-        <span className="wb-prop__name" />
-        <span className="wb-prop__value">
-          <button type="button" disabled={saving || eventIndex === undefined} onClick={props.onSubmitInsert}>
-            新增事件
-          </button>
-        </span>
-      </div>
     </div>
   );
 }
 
-/** 中栏详情区：文件/动画/事件级统计明细 + 事件写回（ANIMATION-56C）。 */
-function DetailsSection(props: {
-  selected: TaeSelection | null;
-  document: TaeDocument | null;
-  pages: ReturnType<typeof projectTaeDocumentPages> | null;
-  selectedAnimation: TaeAnimationWire | undefined;
-  selectedAnimationEvents: TaeAnimationWire['events'];
-  selectedEvent: TaeTimelineEventWire | undefined;
-  selectedEventIndex: number | undefined;
-  timeDraft: TaeTimeDraft | null;
-  insertDraft: TaeInsertDraft | null;
-  saving: boolean;
-  writeNotice: TaeWriteNotice | null;
-  onTimeDraftChange: (draft: TaeTimeDraft) => void;
-  onInsertDraftChange: (draft: TaeInsertDraft) => void;
-  onSubmitTime: () => void;
-  onSubmitInsert: () => void;
-}): ReactElement {
-  const { selected, document } = props;
-  if (document === null) return <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看详情。</p>;
-
-  const rows: Array<readonly [string, string]> = (() => {
-    if (selected?.kind === 'event' && props.selectedEvent) {
-      const event = props.selectedEvent;
-      return [
-        ['Start Frame', `${secondsToFrame(event.startTime)}（≈ ${formatTime(event.startTime)}s @ ${FRAME_RATE}fps）`],
-        ['End Frame', `${secondsToFrame(event.endTime)}（≈ ${formatTime(event.endTime)}s @ ${FRAME_RATE}fps）`],
-        ['动画 Id', String(selected.animationId)],
-        ['事件下标', String(props.selectedEventIndex)],
-        ['事件类型 Id', String(event.eventTypeId)],
-        ['时间范围', isInvalidTimeRange(event.startTime, event.endTime) ? '非法（startTime > endTime）' : '合法'],
-        ['参数体', '未解码（envelope 只有类型与起止时间；无词条文本与参数布局）'],
-        ['原始值', `start=${formatTime(event.startTime)} end=${formatTime(event.endTime)} typeId=${event.eventTypeId}`]
-      ];
-    }
-    if (selected?.kind === 'animation' && props.selectedAnimation) {
-      const anim = props.selectedAnimation;
-      return [
-        ['动画 Id', String(anim.animId)],
-        ['事件数', String(anim.eventCount)],
-        ['组数', String(anim.groupCount)],
-        ['时间数', String(anim.timesCount)],
-        ['HKX 名称', anim.hkxName ?? '—'],
-        ['事件时间表', anim.eventsTruncated ? '已截断（未全量）' : '完整（本动画）'],
-        ['参数体', '未解码（能力边界；事件参数体不开放编辑）']
-      ];
-    }
-    return [
-      ['格式', document.format ?? 'TAE'],
-      ['版本', document.version ?? '—'],
-      ['动画数', String(props.pages?.animations.animationCount ?? 0)],
-      ['事件总数', String(props.pages?.events.totalEventCount ?? 0)],
-      ['事件组总数', String(props.pages?.events.totalGroupCount ?? 0)],
-      ['事件类型数', String(props.pages?.events.eventTypeCount ?? 0)],
-      ['authority', document.authority ?? '—']
-    ];
-  })();
-
-  const detailTitle = selected?.kind === 'event'
-    ? (selected.label ?? '事件详情')
-    : selected?.kind === 'animation'
-      ? '动画详情'
-      : '文件统计';
-
-  return (
-    <div className="wb-list" data-testid="tae-details">
-      <div className="wb-list__group-label">{detailTitle}</div>
-      <div className="wb-props">
-        {rows.map(([name, value]) => (
-          <div key={name} className="wb-prop">
-            <span className="wb-prop__name">{name}</span>
-            <span className="wb-prop__value wb-prop__value--readonly">{value}</span>
-          </div>
-        ))}
-      </div>
-      {selected?.kind === 'event' && props.selectedEvent ? (
-        <TaeEventEditor
-          row={{ animId: selected.animationId, ...props.selectedEvent }}
-          eventIndex={props.selectedEventIndex}
-          timeDraft={props.timeDraft}
-          insertDraft={props.insertDraft}
-          saving={props.saving}
-          notice={props.writeNotice}
-          onTimeDraftChange={props.onTimeDraftChange}
-          onInsertDraftChange={props.onInsertDraftChange}
-          onSubmitTime={props.onSubmitTime}
-          onSubmitInsert={props.onSubmitInsert}
-        />
-      ) : (
-        <p className="wb-empty" data-testid="tae-write-hint">
-          {selected?.kind === 'animation'
-            ? '选中词条事件后，可编辑事件时间（update-event-times）或按当前事件为模板新增事件（insert-event）。事件参数体未解码，不开放参数编辑。'
-            : '左栏选动画、中栏选词条事件后，可编辑事件时间或按模板新增事件。'}
-        </p>
-      )}
-    </div>
-  );
-}
 
 export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const [selected, setSelected] = useState<TaeSelection | null>(props.initialSelection ?? null);
@@ -432,12 +354,28 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const [refreshedDocument, setRefreshedDocument] = useState<TaeDocument | null>(null);
   /** 选中事件的时间编辑草稿（null = 未编辑/未选中）。 */
   const [timeDraft, setTimeDraft] = useState<TaeTimeDraft | null>(null);
-  /** 选中事件的新增事件草稿。 */
-  const [insertDraft, setInsertDraft] = useState<TaeInsertDraft | null>(null);
   /** 提交进行中：禁用重复提交。 */
   const [saving, setSaving] = useState(false);
   /** 最近一次写回结果提示（失败诊断/成功确认；跨选区清空）。 */
   const [writeNotice, setWriteNotice] = useState<TaeWriteNotice | null>(null);
+  /** S17：词条名目录（eventTypeId → 模板名；无模板的类型不在表内 → 「未命名」）。 */
+  const [eventTypeNames, setEventTypeNames] = useState<ReadonlyMap<number, string>>(new Map());
+  /** S17：选中词条事件的参数体（按需拉取；无模板时 undecodedHex 非空）。 */
+  const [eventParams, setEventParams] = useState<{
+    loading: boolean;
+    error: string | null;
+    templateName: string | null;
+    fields: Array<{ name: string; type: string; value: string }>;
+    tailHex: string | null;
+    undecodedHex: string | null;
+  } | null>(null);
+  /** S17：伴生 chrbnd 预览状态（挂载后的模型句柄与空态原因）。 */
+  const [preview, setPreview] = useState<{
+    loading: boolean;
+    error: string | null;
+    meshCount: number;
+    boneCount: number;
+  }>({ loading: true, error: null, meshCount: 0, boneCount: 0 });
 
   const document = useMemo(() => {
     const source = refreshedDocument ?? props.data;
@@ -451,13 +389,123 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   // 换文件或 App 重新传入数据时丢弃本地重读缓存（避免跨文件残留旧文档）。
   useEffect(() => {
     setRefreshedDocument(null);
+    setEventParams(null);
+    setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0 });
   }, [props.resourceUri, props.data]);
+
+  /** S17：词条名目录一次拉取（模板只读本机；失败时列表显示数字 id + 「未命名」）。 */
+  useEffect(() => {
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeTemplateCatalog !== 'function') return;
+    let cancelled = false;
+    bridge.readTaeTemplateCatalog().then((raw) => {
+      if (cancelled) return;
+      const result = raw as { ok?: boolean; events?: Array<{ eventTypeId: number; name: string }> };
+      if (result.ok && Array.isArray(result.events)) {
+        setEventTypeNames(new Map(result.events.map((item) => [item.eventTypeId, item.name])));
+      }
+    }).catch(() => {
+      // 目录拉取失败只影响词条名，不阻断动作工作台。
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.resourceUri]);
+
+  /** S17：选中词条时按需拉取参数体（footer 展示；无模板类型给未解码 + hex）。 */
+  useEffect(() => {
+    if (selected?.kind !== 'event' || selected.eventIndex === undefined) {
+      setEventParams(null);
+      return;
+    }
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeEventParams !== 'function') return;
+    let cancelled = false;
+    setEventParams({ loading: true, error: null, templateName: null, fields: [], tailHex: null, undecodedHex: null });
+    bridge.readTaeEventParams(props.resourceUri, selected.animationId, selected.eventIndex).then((raw) => {
+      if (cancelled) return;
+      const result = raw as {
+        ok?: boolean;
+        data?: {
+          eventTypeId?: number;
+          templateName?: string | null;
+          fields?: Array<{ name: string; type: string; value: string }>;
+          tailHex?: string | null;
+          undecodedHex?: string | null;
+        };
+        diagnostics?: Array<{ message?: string }>;
+      };
+      if (result.ok && result.data) {
+        setEventParams({
+          loading: false,
+          error: null,
+          templateName: result.data.templateName ?? null,
+          fields: result.data.fields ?? [],
+          tailHex: result.data.tailHex ?? null,
+          undecodedHex: result.data.undecodedHex ?? null
+        });
+      } else {
+        setEventParams({
+          loading: false,
+          error: result.diagnostics?.[0]?.message ?? '参数体读取失败。',
+          templateName: null,
+          fields: [],
+          tailHex: null,
+          undecodedHex: null
+        });
+      }
+    }).catch(() => {
+      if (!cancelled) setEventParams({ loading: false, error: '参数体读取异常。', templateName: null, fields: [], tailHex: null, undecodedHex: null });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.resourceUri, selected?.kind, selected?.eventIndex, selected?.animationId]);
+
+  /** S17：伴生 chrbnd FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动错误）。 */
+  useEffect(() => {
+    if (!document) {
+      setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0 });
+      return;
+    }
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeChrbndPreview !== 'function') return;
+    let cancelled = false;
+    setPreview({ loading: true, error: null, meshCount: 0, boneCount: 0 });
+    bridge.readTaeChrbndPreview(props.resourceUri, 0).then((raw) => {
+      if (cancelled) return;
+      const result = raw as {
+        ok?: boolean;
+        data?: { meshCount?: number; boneCount?: number };
+        diagnostics?: Array<{ message?: string }>;
+      };
+      if (result.ok && result.data) {
+        setPreview({
+          loading: false,
+          error: null,
+          meshCount: result.data.meshCount ?? 0,
+          boneCount: result.data.boneCount ?? 0
+        });
+      } else {
+        setPreview({
+          loading: false,
+          error: result.diagnostics?.[0]?.message ?? '模型预览不可用。',
+          meshCount: 0,
+          boneCount: 0
+        });
+      }
+    }).catch(() => {
+      if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', meshCount: 0, boneCount: 0 });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.resourceUri, document]);
 
   // 离开事件选择时清空编辑草稿与写回提示（避免跨选区残留）。
   useEffect(() => {
     if (selected?.kind !== 'event') {
       setTimeDraft(null);
-      setInsertDraft(null);
       setWriteNotice(null);
     }
   }, [selected]);
@@ -518,11 +566,6 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       eventIndex: index
     });
     setTimeDraft({ startText: String(event.startTime), endText: String(event.endTime) });
-    setInsertDraft({
-      eventTypeIdText: String(event.eventTypeId),
-      startText: String(event.startTime),
-      endText: String(event.endTime)
-    });
     setWriteNotice(null);
   }
 
@@ -602,19 +645,6 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     await commitMutations([mutation], '事件时间已更新并重读验证。');
   }
 
-  /** 提交 insert-event：以选中事件为模板追加新事件。 */
-  async function submitInsert(): Promise<void> {
-    if (selected?.kind !== 'event' || !selectedEvent || selectedEventIndex === undefined) return;
-    if (!insertDraft) return;
-    const row: TaeTimelineEventRow = { animId: selected.animationId, ...selectedEvent };
-    const mutation = buildInsertEventMutation(row, selectedEventIndex, insertDraft);
-    if (!mutation) {
-      setWriteNotice({ kind: 'error', message: '事件类型与时间必须是有限数字。' });
-      return;
-    }
-    await commitMutations([mutation], '已新增事件并重读验证。');
-  }
-
   return (
     <WorkbenchLayout
       label="动作工作台"
@@ -680,6 +710,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   </div>
                   {visibleEvents.map((event, index) => {
                     const invalid = isInvalidTimeRange(event.startTime, event.endTime);
+                    const typeName = eventTypeNames.get(event.eventTypeId) ?? '未命名';
                     return (
                       <div
                         key={`${selectedAnimation.animId}-${index}`}
@@ -690,10 +721,11 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                           onSelect: () => selectEvent(index)
                         })}
                       >
-                        <span className="wb-row__name">事件类型 {event.eventTypeId}</span>
+                        <span className="wb-row__name">
+                          {event.eventTypeId} {typeName}
+                        </span>
                         <span className="wb-row__meta">
-                          {formatTime(event.startTime)}s → {formatTime(event.endTime)}s
-                          {invalid ? ' · 非法时间' : ''}
+                          {invalid ? '非法时间' : `帧 ${secondsToFrame(event.startTime)}–${secondsToFrame(event.endTime)}`}
                         </span>
                       </div>
                     );
@@ -706,25 +738,6 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   )}
                 </>
               )}
-              {/* 中栏下方：选中后详情 + 写回（T3：详情收进中栏，无 Inspector 第三栏）。 */}
-              <div className="wb-list__group-label">详情</div>
-              <DetailsSection
-                selected={selected}
-                document={document}
-                pages={pages}
-                selectedAnimation={selectedAnimation}
-                selectedAnimationEvents={selectedAnimationEvents}
-                selectedEvent={selectedEvent}
-                selectedEventIndex={selectedEventIndex}
-                timeDraft={timeDraft}
-                insertDraft={insertDraft}
-                saving={saving}
-                writeNotice={writeNotice}
-                onTimeDraftChange={(draft) => setTimeDraft(draft)}
-                onInsertDraftChange={(draft) => setInsertDraft(draft)}
-                onSubmitTime={() => void submitTimeEdit()}
-                onSubmitInsert={() => void submitInsert()}
-              />
             </div>
           )
         },
@@ -738,12 +751,24 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
               {document === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
               {document !== null && (
                 <>
-                  <p className="wb-empty" data-testid="tae-preview-unavailable">
-                    预览不可用
-                  </p>
-                  <p className="muted" style={{ fontSize: 11 }}>
-                    TAE / anibnd 是动作数据文件，不是模型；本夜不挂伴生 chrbnd 的 FLVER 预览。
-                  </p>
+                  {preview.loading && <p className="wb-empty">正在查找伴生模型（chrbnd）…</p>}
+                  {!preview.loading && preview.error !== null && (
+                    <>
+                      <p className="wb-empty" data-testid="tae-preview-unavailable">
+                        预览不可用
+                      </p>
+                      <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-error">
+                        {preview.error}
+                      </p>
+                    </>
+                  )}
+                  {!preview.loading && preview.error === null && (
+                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
+                      {preview.meshCount > 0
+                        ? `已挂伴生模型：${preview.meshCount} meshes / ${preview.boneCount} bones（只读；骨骼动画播放未接入）`
+                        : '已找到伴生模型（chrbnd），但未解析出可显示网格。'}
+                    </p>
+                  )}
                   {isPartial && invalidRangeCount > 0 && (
                     <details className="tae-partial" data-testid="tae-partial-diagnostics">
                       <summary>
@@ -770,6 +795,21 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           )
         }
       ]}
+      footer={
+        selected?.kind === 'event' && selectedEvent ? (
+          <TaeEventFooter
+            event={selectedEvent}
+            eventIndex={selectedEventIndex}
+            eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
+            eventParams={eventParams}
+            timeDraft={timeDraft}
+            saving={saving}
+            writeNotice={writeNotice}
+            onTimeDraftChange={(draft) => setTimeDraft(draft)}
+            onSubmitTime={() => void submitTimeEdit()}
+          />
+        ) : null
+      }
       toolbar={
         <>
           <span className="crumb">动作 · {fileLabel(props.resourceUri)}</span>

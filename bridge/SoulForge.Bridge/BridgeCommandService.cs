@@ -47,6 +47,14 @@ internal sealed class BridgeCommandService
             return element.TryGetInt32(out var parsed) ? parsed : fallback;
         }
 
+        long OptionInt64(string name, long fallback)
+        {
+            if (!optionsIsObject) return fallback;
+            if (!options.TryGetProperty(name, out var element)) return fallback;
+            if (element.ValueKind != JsonValueKind.Number) return fallback;
+            return element.TryGetInt64(out var parsed) ? parsed : fallback;
+        }
+
         bool OptionBool(string name, bool fallback)
         {
             if (!optionsIsObject) return fallback;
@@ -751,60 +759,14 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                TaeNativeDocument document;
-                Diagnostic[] extractionDiagnostics;
-                if (IsAnibndPath(file))
-                {
-                    // T3（2026-08-15）：`*.anibnd.dcx` 是 DCX(DFLT)→BND4 容器，内含多个
-                    // 独立 TAE 条目。解 DCX→解析 BND4→按 "TAE " 魔数挑主 TAE
-                    // （优先 id 5000000，其次字节最大的 TAE 条目）→TaeNativeDocument.Read。
-                    // hkx 是逐条 DCX，本命令不读。envelope 合并提取来源诊断，使 UI 能
-                    // 显示「从 anibnd 提取」而不是把 BND4 子项当成容器打开。
-                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
-                    var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
-                    int? mainIndex = null;
-                    var taeEntryCount = 0;
-                    var largestIndex = -1;
-                    var largestBytes = -1L;
-                    for (var i = 0; i < bnd4.Entries.Count; i++)
-                    {
-                        var bytes = bnd4.GetStoredBytes(i);
-                        if (bytes.Length < 4 || !bytes.AsSpan(0, 4).SequenceEqual("TAE "u8)) continue;
-                        taeEntryCount++;
-                        if (bnd4.Entries[i].Id == 5000000)
-                        {
-                            mainIndex = i;
-                            break;
-                        }
-                        if (bytes.Length > largestBytes)
-                        {
-                            largestBytes = bytes.Length;
-                            largestIndex = i;
-                        }
-                    }
-                    mainIndex ??= largestIndex >= 0 ? largestIndex : null;
-                    if (mainIndex is null)
-                    {
-                        return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
-                    }
-                    var mainBytes = bnd4.GetStoredBytes(mainIndex.Value);
-                    var mainEntryId = bnd4.Entries[mainIndex.Value].Id;
-                    document = TaeNativeDocument.Read(mainBytes);
-                    extractionDiagnostics = new[]
-                    {
-                        new Diagnostic(
-                            "info",
-                            "TAE_FROM_ANIBND_EXTRACTED",
-                            $"从 anibnd 容器提取 TAE（BND4 内 {taeEntryCount} 个 TAE 条目，本次打开 id={mainEntryId}，大小 {mainBytes.Length} 字节）。hkx 未读取。",
-                            BridgeResult<object>.MakeSourceUri(file),
-                            new { taeEntryCount, mainEntryId, mainTaeBytes = mainBytes.Length })
-                    };
-                }
-                else
-                {
-                    document = TaeNativeDocument.ReadFile(file);
-                    extractionDiagnostics = Array.Empty<Diagnostic>();
-                }
+                // T3（2026-08-15）：`*.anibnd.dcx` 是 DCX(DFLT)→BND4 容器，内含多个
+                // 独立 TAE 条目。解 DCX→解析 BND4→按 "TAE " 魔数挑主 TAE
+                // （优先 id 5000000，其次字节最大的 TAE 条目）→TaeNativeDocument.Read。
+                // hkx 是逐条 DCX，本命令不读。envelope 合并提取来源诊断，使 UI 能
+                // 显示「从 anibnd 提取」而不是把 BND4 子项当成容器打开。
+                // S17：提取逻辑抽成 OpenTaeDocument，read-tae-event-params 共用，
+                // 不再维护第二份 anibnd 解包。
+                var (document, extractionDiagnostics) = OpenTaeDocument(file, oodleRuntimeRoot);
 
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
@@ -820,9 +782,117 @@ internal sealed class BridgeCommandService
                 }.Concat(extractionDiagnostics).ToArray();
                 return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip, extractionDiagnostics));
             }
+            catch (TaeEntryMissingException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "action", "TAE_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-tae-event-params")
+        {
+            try
+            {
+                // S17：按需读取单个事件参数体。paramSize 由 main 从本机
+                // TAE.Template.SDT.xml 的布局算出（无模板的事件传 0 → 只给前 16 字节
+                // hex 作「未解码」证据）；Bridge 按长度截取并越界失败关闭。
+                var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot);
+                var animId = OptionInt64("animId", -1);
+                var eventIndex = OptionInt("eventIndex", -1);
+                var paramSize = OptionInt("paramSize", 0);
+                var ev = document.FindEvent(animId, eventIndex);
+                if (ev is null)
+                    throw new InvalidDataException($"TAE 动画 {animId} 事件下标 {eventIndex} 不存在。");
+                var length = paramSize > 0 ? paramSize : Math.Min(16, (int)Math.Max(0, ev.ParameterDataOffset));
+                var raw = document.ReadParameterBody(ev, length);
+                return BridgeResult<object>.Partial(file, "action", new[]
+                {
+                    new Diagnostic(
+                        "info",
+                        "TAE_EVENT_PARAMS_READ",
+                        $"TAE 事件参数体已读取：animId={animId} eventIndex={eventIndex} type={ev.EventTypeId} bytes={raw.Length}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    animId,
+                    eventIndex,
+                    eventTypeId = ev.EventTypeId,
+                    paramDataOffset = ev.ParameterDataOffset,
+                    paramHex = Convert.ToHexString(raw).ToLowerInvariant(),
+                    paramSize = raw.Length
+                });
+            }
+            catch (TaeEntryMissingException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_EVENT_PARAMS_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-chrbnd-flver-preview")
+        {
+            try
+            {
+                // S17：动作预览挂模型——伴生 chrbnd（overlay 或原版）解 DCX→BND4→
+                // 首个 .flver 条目→网格/骨骼/挂点一次返回。复用 NativeLeafPayload
+                // 的容器提取；KRAK 外层缺 Oodle 时失败码可行动。
+                var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".flver");
+                var flver = FlverNativeDocument.Read(payload);
+                var meshIndex = OptionInt("meshIndex", 0);
+                var maxVertices = OptionInt("maxVertices", 10_000);
+                var maxIndices = OptionInt("maxIndices", 30_000);
+                var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
+                if (positions == null)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
+                var indices = flver.GetMeshIndicesBase64(meshIndex, maxIndices);
+                var uvs = flver.GetMeshUVsBase64(meshIndex, maxVertices);
+                var normals = flver.GetMeshNormalsBase64(meshIndex, maxVertices);
+                var boneWeights = flver.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
+                var boneIndices = flver.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var mesh = flver.Meshes[meshIndex];
+                return BridgeResult<object>.Partial(file, "chr", new[]
+                {
+                    new Diagnostic("info", "CHRBND_FLVER_PREVIEW_EXTRACTED",
+                        $"chrbnd 内 FLVER 网格/骨骼/挂点已提取；mesh={meshIndex} vertexCount={mesh.VertexCount} bones={flver.BoneCount}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    meshIndex,
+                    vertexCount = mesh.VertexCount,
+                    positionsBase64 = positions,
+                    indicesBase64 = indices,
+                    uvsBase64 = uvs,
+                    normalsBase64 = normals,
+                    boneWeightsBase64 = boneWeights,
+                    boneIndicesBase64 = boneIndices,
+                    bones = flver.Bones.Select(b => new
+                    {
+                        name = b.Name,
+                        parentIndex = b.ParentIndex,
+                        translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
+                        rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
+                    }).ToArray(),
+                    boneCount = flver.BoneCount,
+                    meshCount = flver.MeshCount
+                });
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "chr",
+                    "CHRBND_KRAK_OODLE_UNAVAILABLE",
+                    "这份模型（chrbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看预览。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "chr", "CHRBND_FLVER_PREVIEW_FAILED", ex.Message);
             }
         }
 
@@ -1685,6 +1755,57 @@ internal sealed class BridgeCommandService
     {
         var lower = path.ToLowerInvariant();
         return lower.EndsWith(".anibnd.dcx") || lower.EndsWith(".anibnd");
+    }
+
+    /// <summary>
+    /// 打开 TAE 文档：anibnd 容器提取主 TAE（id 5000000 优先，其次字节最大），
+    /// 裸 .tae 直接读。S17：read-tae-document 与 read-tae-event-params 共用，
+    /// 不再维护第二份 anibnd 解包。找不到 TAE 条目抛 TaeEntryMissingException，
+    /// 命令层映射 TAE_ANIBND_NO_TAE_ENTRY。
+    /// </summary>
+    private static (TaeNativeDocument Document, Diagnostic[] ExtractionDiagnostics) OpenTaeDocument(
+        string file,
+        string? oodleRuntimeRoot)
+    {
+        if (!IsAnibndPath(file))
+            return (TaeNativeDocument.ReadFile(file), Array.Empty<Diagnostic>());
+        var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+        var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
+        int? mainIndex = null;
+        var taeEntryCount = 0;
+        var largestIndex = -1;
+        var largestBytes = -1L;
+        for (var i = 0; i < bnd4.Entries.Count; i++)
+        {
+            var bytes = bnd4.GetStoredBytes(i);
+            if (bytes.Length < 4 || !bytes.AsSpan(0, 4).SequenceEqual("TAE "u8)) continue;
+            taeEntryCount++;
+            if (bnd4.Entries[i].Id == 5000000)
+            {
+                mainIndex = i;
+                break;
+            }
+            if (bytes.Length > largestBytes)
+            {
+                largestBytes = bytes.Length;
+                largestIndex = i;
+            }
+        }
+        mainIndex ??= largestIndex >= 0 ? largestIndex : null;
+        if (mainIndex is null)
+            throw new TaeEntryMissingException("anibnd 容器内未找到 TAE 魔数条目。");
+        var mainBytes = bnd4.GetStoredBytes(mainIndex.Value);
+        var mainEntryId = bnd4.Entries[mainIndex.Value].Id;
+        var diagnostics = new[]
+        {
+            new Diagnostic(
+                "info",
+                "TAE_FROM_ANIBND_EXTRACTED",
+                $"从 anibnd 容器提取 TAE（BND4 内 {taeEntryCount} 个 TAE 条目，本次打开 id={mainEntryId}，大小 {mainBytes.Length} 字节）。hkx 未读取。",
+                BridgeResult<object>.MakeSourceUri(file),
+                new { taeEntryCount, mainEntryId, mainTaeBytes = mainBytes.Length })
+        };
+        return (TaeNativeDocument.Read(mainBytes), diagnostics);
     }
 
     /// <summary>

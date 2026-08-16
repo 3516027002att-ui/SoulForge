@@ -2650,12 +2650,19 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[CREATE] packages/shared/src/animation-editor.ts`；`[MODIFY] packages/shared/src/index.ts`；`[MODIFY] bridge/SoulForge.Bridge/TaeNativeDocument.cs`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`。
 - **Output/Tests**：animation/event/timeline pages；`npm run bridge:verify:tae`；invalid time ranges 为 partial/error。
+- **S17 已落地**：动画名是单字节编码（ASCII / Shift-JIS），`ReadUtf16Z` 误读已改 `ReadNameZ`（c1130 实测 `AE ` 不再是「䕁/葉」）；`OpenTaeDocument` 统一 anibnd 提取（read-tae-document / read-tae-event-params 共用）；新增 `read-tae-event-params`（按 animId+eventIndex 原生截参数体，越界失败关闭）与 `read-chrbnd-flver-preview`（DCX→BND4→.flver 条目提取网格/骨骼，KRAK 缺 Oodle 给可行动码）。
 
 #### ANIMATION-56B — Animation workbench
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/TaeWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/TaeWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
 - **Output**：按 §10.3：`Files / Animations | Timeline / Events | Inspector`。不按 chr/action 目录分类；不要为空凑 Tools 栏。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；animation/event/timeline selection、invalid range display、no path routing 和参考截图。
+- **S17 已落地**：
+  - 动画名：合法 hkx 茎直接用，乱码/空白/「葉」一律丢弃显示数字 id（`isLegalHkxStem`/`animationIdLabel` 可单测）；列表主标签是 id/hkx 茎，右侧显示事件数。
+  - 词条行：`{完整 typeId} {类型名}`（如 `0 JumpTable`），类型名来自本机 `TAE.Template.SDT.xml`（main 解析，renderer 只拿逻辑名；无模板「未命名」）；列表不再出现秒区间与「事…」截断。
+  - 中栏详情整块移除（DetailsSection/TaeEventEditor/新增事件入口删除），详情下沉到 `WorkbenchLayout` footer：起始帧/结束帧（30fps，主标签帧 + ≈ 秒小字）、完整 typeId + 类型名、事件下标、参数字段（按模板解码；无模板「未解码」+ 原始 hex，禁止编造 SoundType）；时间编辑保留在 footer（标签起始帧/结束帧，内部仍走 update-event-times 秒）。
+  - 预览挂伴生 chrbnd：overlay `chr/<id>.chrbnd.dcx` → 原版同相对路径；两边都没有给可行动空态（未挂原版写明去「开始」页）。骨骼动画播放未接入，预览如实标注静态模型（不假装播放）。
+  - `WorkbenchLayout` 拖栏修复：量栏内容宽（不含 4px 分隔条）、上限扣除分隔条总宽、window 监听不再随 `columns` 新数组反复拆装——PARAM/文本/动作同一套布局组件一并受益。
 
 #### ANIMATION-56C — TAE event write
 

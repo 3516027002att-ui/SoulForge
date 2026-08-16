@@ -83,6 +83,8 @@ export interface WorkbenchLayoutProps {
 }
 
 const DEFAULT_MIN_WIDTH = 120;
+/** 分隔条宽度（与 styles.css `.workbench__resizer` 的 width 保持一致）。 */
+const RESIZER_WIDTH = 4;
 
 /**
  * 栏宽状态：只记录被显式指定过初值的栏。
@@ -123,22 +125,49 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
   const dragState = useRef<{ columnId: string; startX: number; startWidth: number; minWidth: number } | null>(null);
   /** 栏容器，用于量「其余栏 minWidth 之和」给拖拽上限（P1 裁定）。 */
   const columnsRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 栏集合的最新值经 ref 提供给拖拽闭包。
+   *
+   * 拖拽监听挂在 window 上，回调必须稳定：TaeWorkbenchPanel 等面板每次渲染都新建
+   * `columns={[...]}` 数组，若 onPointerMove 依赖 props.columns，每次渲染都会拆装
+   * window 监听——拖拽中途一松手监听就被换掉，表现为「拖一下就断、松手后像假的」。
+   */
+  const columnsForDragRef = useRef(props.columns);
+  columnsForDragRef.current = props.columns;
 
   /**
-   * 拖拽/键盘右移的上限：容器宽度 − 其余栏 minWidth 之和。
+   * 量该栏的实际内容宽（不含分隔条）。
+   *
+   * slot 的 getBoundingClientRect 包含 4px `.workbench__resizer`：首拖把含分隔条的
+   * 宽度写回像素模式后，该栏每从比例/自适应切进像素模式就多吃 4px，下一轮命中区
+   * 与上限全部偏移。量 section（slot 第一个子元素）才是不含分隔条的真实内容宽。
+   */
+  function measureColumnWidth(slot: HTMLElement | null | undefined): number | undefined {
+    const section = slot?.firstElementChild as HTMLElement | null;
+    const measured = section?.getBoundingClientRect().width;
+    return typeof measured === 'number' && measured > 0 ? measured : undefined;
+  }
+
+  /**
+   * 拖拽/键盘右移的上限：容器宽度 − 其余栏 minWidth 之和 − 分隔条总宽。
    *
    * P1 裁定：此前拖拽只做 `Math.max(minWidth, start+delta)`，没有上限；被拖的栏
    * 写成 `flex: 0 0 auto; width: Npx` 后可以大于可视区，把整栏（含它的分隔条）
    * 挤出窗口右缘，鼠标和键盘都选不回来。这个上限保证任何栏最多把其余栏压到各自
    * 的 minWidth，永远拖不出可视区。
+   *
+   * 分隔条总宽（(N-1)×4px）必须从上限里留出：全部栏都进像素模式后，总视觉宽 =
+   * Σ栏内容宽 + (N-1)×4，不留余量会把最右栏的分隔条挤出容器。
    */
   function maxWidthFor(columnId: string): number {
     const container = columnsRef.current;
     if (!container) return Number.POSITIVE_INFINITY;
-    const othersMin = props.columns
+    const columns = columnsForDragRef.current;
+    const othersMin = columns
       .filter((column) => column.id !== columnId)
       .reduce((sum, column) => sum + (column.minWidth ?? DEFAULT_MIN_WIDTH), 0);
-    return Math.max(0, container.clientWidth - othersMin);
+    const resizerTotal = (columns.length - 1) * RESIZER_WIDTH;
+    return Math.max(0, container.clientWidth - othersMin - resizerTotal);
   }
 
   const onPointerMove = useCallback((event: PointerEvent) => {
@@ -150,7 +179,8 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
       Math.max(drag.minWidth, drag.startWidth + delta)
     );
     setWidths((current) => ({ ...current, [drag.columnId]: nextWidth }));
-  }, [props.columns]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onPointerUp = useCallback(() => {
     dragState.current = null;
@@ -180,9 +210,10 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
   function startResize(column: WorkbenchColumnSpec, event: React.PointerEvent): void {
     let startWidth = widths[column.id];
     if (typeof startWidth !== 'number') {
+      // 量内容宽（不含分隔条），否则首拖会把 4px 分隔条宽度也写进像素模式。
       const slot = (event.currentTarget as HTMLElement).parentElement;
-      const measured = slot?.getBoundingClientRect().width;
-      if (typeof measured !== 'number' || measured <= 0) return;
+      const measured = measureColumnWidth(slot);
+      if (measured === undefined) return;
       startWidth = measured;
       setWidths((current) => ({ ...current, [column.id]: measured }));
     }
@@ -202,13 +233,13 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
    */
   function onSeparatorKeyDown(column: WorkbenchColumnSpec, event: React.KeyboardEvent): void {
     const step = 16;
-    // 与 startResize 同理：比例/自适应模式下先从 DOM 量出当前宽度，
+    // 与 startResize 同理：比例/自适应模式下先从 DOM 量出当前宽度（不含分隔条），
     // 否则键盘用户在这些栏上按方向键没有任何反应。
     let measured = widths[column.id];
     if (typeof measured !== 'number') {
       const slot = (event.currentTarget as HTMLElement).parentElement;
-      const fromDom = slot?.getBoundingClientRect().width;
-      if (typeof fromDom !== 'number' || fromDom <= 0) return;
+      const fromDom = measureColumnWidth(slot);
+      if (fromDom === undefined) return;
       measured = fromDom;
     }
     const minWidth = column.minWidth ?? DEFAULT_MIN_WIDTH;

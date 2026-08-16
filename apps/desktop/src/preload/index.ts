@@ -44,6 +44,7 @@ import type {
   PageEditorDocumentRequest,
   ParamFieldDef,
   ParamRowPage,
+  RagRetrieveResult,
   ReadEditorContentRequest,
   RendererContainerChildBytes,
   RendererContainerChildrenList,
@@ -218,6 +219,12 @@ const api = {
     loadFullDslTemplate?: boolean
   ): Promise<{
     ok?: boolean;
+    /**
+     * main 侧取消：本次打开已被更晚的打开请求取代（快速切换事件文件）。它与
+     * `ok: false` 的读取失败必须分开处理 —— 取消不代表文件有问题，调用方要静默
+     * 丢弃，不能渲染成「读不出来」。
+     */
+    cancelled?: boolean;
     documentInstanceId?: string;
     revision?: number;
     eventCount?: number;
@@ -234,6 +241,8 @@ const api = {
     sourceHash?: string | null;
     sourceFormat?: string | null;
     outerFileHash?: string | null;
+    /** Bridge 往返判定：'native-verified'（语义+字节一致）/ 'candidate'（仅语义）。 */
+    authority?: string | null;
     outline?: {
       schemaVersion: 1;
       resourceUri: string;
@@ -257,6 +266,19 @@ const api = {
     documentInstanceId,
     loadFullDslTemplate === true ? true : undefined
   ),
+  /**
+   * 主动取消本窗口在飞的事件文档打开。
+   *
+   * 为什么非要有这条通道：main 的槽位只在**下一次打开请求**到达时才中止上一份，
+   * 而「切到 PARAM/MAP 域」「关掉编辑器」根本不会再发打开请求 —— 于是那次读会
+   * 一路跑完（剩余分页读 + outline + 整段反汇编），只是结果没人要。renderer 侧
+   * 清理只翻一个本地布尔值，对主进程完全不可见。
+   *
+   * 不带参数：一个窗口只有一份在飞的打开，槽位就是按窗口存的，取消的语义只能是
+   * 「我这个窗口那份」。传 sourceUri 反而会引入「传错了就静默不取消」的失败模式。
+   */
+  cancelEmevdFullDocument: (): Promise<{ ok: boolean; cancelled: boolean }> =>
+    ipcRenderer.invoke('resource.cancelEmevdFullDocument'),
   submitEmevdDslPlan: (sourceUri: string, sourceText: string): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
   readEmedfCompletionCatalog: (): Promise<{
@@ -294,6 +316,15 @@ const api = {
     ipcRenderer.invoke('resource.readMsbDocument', sourceUri),
   readTaeDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeDocument', sourceUri),
+  /** S17：词条名目录（main 解析本机 TAE.Template.SDT.xml；renderer 只拿逻辑名）。 */
+  readTaeTemplateCatalog: (): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeTemplateCatalog'),
+  /** S17：单个词条事件参数体（按本机模板解码字段；无模板返回未解码 + hex）。 */
+  readTaeEventParams: (sourceUri: string, animId: number, eventIndex: number): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeEventParams', sourceUri, animId, eventIndex),
+  /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。 */
+  readTaeChrbndPreview: (sourceUri: string, meshIndex: number): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri, meshIndex),
   readEsdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
   readMtdDocument: (sourceUri: string): Promise<unknown> =>
@@ -672,6 +703,12 @@ const api = {
     hasCredential: boolean;
     createdAt: string;
     updatedAt: string;
+    temperature?: number;
+    topP?: number;
+    topK?: number;
+    maxTokens?: number;
+    contextWindowTokens?: number;
+    thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
   }>> => ipcRenderer.invoke('modelService.list'),
   modelServiceEncryptionAvailable: (): Promise<boolean> =>
     ipcRenderer.invoke('modelService.encryptionAvailable'),
@@ -682,6 +719,12 @@ const api = {
     baseUrl: string;
     model: string;
     apiKey?: string;
+    temperature?: number;
+    topP?: number;
+    topK?: number;
+    maxTokens?: number;
+    contextWindowTokens?: number;
+    thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
   }): Promise<{
     id: string;
     displayName: string;
@@ -691,9 +734,47 @@ const api = {
     hasCredential: boolean;
     createdAt: string;
     updatedAt: string;
+    temperature?: number;
+    topP?: number;
+    topK?: number;
+    maxTokens?: number;
+    contextWindowTokens?: number;
+    thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
   }> => ipcRenderer.invoke('modelService.upsert', input),
   deleteModelService: (configId: string): Promise<{ ok: true }> =>
     ipcRenderer.invoke('modelService.delete', configId),
+  /**
+   * 为当前工作区语料生成 embedding 向量索引（分批 POST /v1/embeddings）。
+   * 服务配置必须含 embeddingModel；失败批降级返回失败数。
+   */
+  embedWorkspaceRag: (input: { configId: string }): Promise<
+    | { ok: true; embedded: number; failed: number; model: string; dim: number }
+    | { ok: false; error: { code: string; message: string } }
+  > => ipcRenderer.invoke('rag.embed', input),
+  /**
+   * 工作区混合检索：lexical + 向量 RRF 融合。configId 提供且与索引模型一致时
+   * 启用向量侧，否则退化为纯 lexical。
+   */
+  searchWorkspaceEvidence: (input: {
+    query: string;
+    configId?: string;
+    limit?: number;
+    families?: string[];
+    expandReferences?: boolean;
+  }): Promise<RagRetrieveResult> => ipcRenderer.invoke('rag.searchEvidence', input),
+  /**
+   * 拉取模型服务的可用模型列表（GET /v1/models）。按表单当前值请求，不要求
+   * 服务已保存；apiKey 可选（本地服务通常无密钥）。main 复用生产工厂的
+   * endpoint 安全校验，key 只在本次调用内使用。
+   */
+  listModelModels: (input: {
+    protocol: 'openai-compatible' | 'anthropic-compatible';
+    baseUrl: string;
+    apiKey?: string;
+  }): Promise<
+    | { ok: true; models: Array<{ id: string; displayName?: string }> }
+    | { ok: false; error: { code: string; message: string } }
+  > => ipcRenderer.invoke('modelService.listModels', input),
   /**
    * AI agent sessions (Codex-derived kernel). Runs async in main; progress
    * arrives on onAiAgentEvent envelopes; keys never cross the bridge.
