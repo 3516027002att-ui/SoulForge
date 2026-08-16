@@ -98,6 +98,7 @@ export * from './emevd/dslCompiler.js';
 export * from './emevd/dslRenderer.js';
 export * from './emevd/darkScriptRenderer.js';
 export * from './ai/toolRegistry.js';
+export * from './rag/index.js';
 export * from './ai/agentToolBridge.js';
 export * from './ai/toolPermissions.js';
 export * from './ai/aiContextBuilder.js';

@@ -3,9 +3,47 @@
  * Credentials never appear in renderer DTOs or audit payloads.
  */
 
+import type { RagRetrieveResult } from '@soulforge/shared';
+
 export type ModelServiceProtocol = 'openai-compatible' | 'anthropic-compatible';
 
 export type AgentPermissionMode = 'plan' | 'normal' | 'full';
+
+/**
+ * 思考强度：统一档位，各适配器映射到协议字段。
+ * `off` 是不下发任何 thinking 参数（旧模型不支持时保证请求不失败），也是默认值。
+ */
+export type ModelThinkingLevel = 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+
+/**
+ * OpenAI Chat Completions `reasoning_effort` 映射；off/未配置返回 undefined（不下发）。
+ * OpenAI 只有三档，deep/extreme 都收敛到 high。
+ */
+export function resolveOpenAiReasoningEffort(
+  level: ModelThinkingLevel | undefined
+): 'low' | 'medium' | 'high' | undefined {
+  switch (level) {
+    case 'fast': return 'low';
+    case 'normal': return 'medium';
+    case 'deep':
+    case 'extreme': return 'high';
+    default: return undefined;
+  }
+}
+
+/**
+ * Anthropic `thinking.budget_tokens` 映射；off/未配置返回 undefined（不下发）。
+ * Anthropic 要求 budget 最低 1024，且 max_tokens 必须大于 budget。
+ */
+export function resolveAnthropicThinkingBudget(level: ModelThinkingLevel | undefined): number | undefined {
+  switch (level) {
+    case 'fast': return 2048;
+    case 'normal': return 4096;
+    case 'deep': return 8192;
+    case 'extreme': return 16384;
+    default: return undefined;
+  }
+}
 
 export interface ModelServiceConfig {
   id: string;
@@ -71,6 +109,12 @@ export interface ModelCompleteRequest {
   tools?: ToolDefinition[];
   temperature?: number;
   maxTokens?: number;
+  /** top-p 采样；0..1，未配置不下发。 */
+  topP?: number;
+  /** top-k 采样；仅 Anthropic 协议生效（OpenAI Chat Completions 无此字段）。 */
+  topK?: number;
+  /** 思考强度；off/未配置不下发。 */
+  thinkingLevel?: ModelThinkingLevel;
   signal?: AbortSignal;
   /** Per-request timeout in milliseconds. When elapsed, the request is aborted. */
   timeoutMs?: number;
@@ -83,10 +127,37 @@ export interface ModelCompleteResult {
   diagnostics: Array<{ severity: 'info' | 'warning' | 'error'; code: string; message: string }>;
 }
 
+/** 一个可用模型的目录条目（GET /v1/models 的 data[].id 投影）。 */
+export interface ModelListEntry {
+  id: string;
+  displayName?: string;
+}
+
+export type ModelListResult =
+  | { ok: true; models: ModelListEntry[] }
+  | { ok: false; error: { code: string; message: string } };
+
 export interface ModelServiceAdapter {
   readonly protocol: ModelServiceProtocol;
   complete(request: ModelCompleteRequest): Promise<ModelCompleteResult>;
   stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined>;
+  /**
+   * 拉取该服务可用模型列表（GET /v1/models）。失败返回结构化诊断，
+   * 绝不吞异常 —— 调用方用它决定「显示错误」还是「退回手填模型名」。
+   */
+  listModels(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<ModelListResult>;
+}
+
+/**
+ * 每次模型调用的采样/能力参数。全部可选：未配置时用 provider 默认值，
+ * 任何字段都不作请求层之外的强约束。
+ */
+export interface ModelSamplingOptions {
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxTokens?: number;
+  thinkingLevel?: ModelThinkingLevel;
 }
 
 export interface RetryPolicyOptions {
@@ -217,7 +288,7 @@ export type AgentEvent =
     }
   | { type: 'retry-scheduled'; step: number; attempt: number; maxAttempts: number; delayMs: number; code: string }
   | { type: 'context-assembled'; step: number; sections: number; totalBytes: number }
-  | { type: 'context-compacted'; step: number; reason: 'auto'; tokenLimit: number }
+  | { type: 'context-compacted'; step: number; reason: 'auto' | 'overflow'; tokenLimit: number }
   | { type: 'step-complete'; step: number; finishReason: string }
   | { type: 'turn-complete'; finishReason: string; steps: number };
 
@@ -237,7 +308,18 @@ export interface RolloutSessionMeta {
 export type RolloutItem =
   | { type: 'session-meta'; meta: RolloutSessionMeta }
   | { type: 'message'; step: number; message: ChatMessage }
-  | { type: 'compacted'; at: string; windowId: string }
+  | {
+      type: 'compacted';
+      at: string;
+      windowId: string;
+      /**
+       * 压缩后的完整替换历史（Codex RolloutItem::Compacted 的 replacement_history）。
+       * resume 时用它重建压缩窗口内的历史——否则承接会话会恢复出压缩前的
+       * 完整膨胀历史，压缩等于白做且可能再次溢出。旧条目（无此字段）向后兼容：
+       * 只计数、不替换。
+       */
+      replacementHistory?: ChatMessage[];
+    }
   | { type: 'interrupted'; at: string }
   | { type: 'rollback-marker'; at: string; keepLastUserTurns: number };
 
@@ -256,6 +338,11 @@ export interface CompactionOptions {
   autoCompactTokenLimit?: number;
   /** Token budget for recent user messages kept verbatim. Default 20000. */
   userMessageBudgetTokens?: number;
+  /**
+   * Max output tokens for the summarization request itself. Default 4096 —
+   * Anthropic adapters would otherwise cap summaries at their 1024 fallback.
+   */
+  summaryMaxTokens?: number;
   summarizationPrompt?: string;
   summaryPrefix?: string;
 }
@@ -273,6 +360,12 @@ export interface AgentRunRequest {
   signal?: AbortSignal;
   /** Per-LLM-call timeout in milliseconds. */
   timeoutMs?: number;
+  /**
+   * Sampling / capability parameters applied to every model call in this run.
+   * All fields optional; absent means the provider default. Host-level only —
+   * never constructed from raw renderer input.
+   */
+  sampling?: ModelSamplingOptions;
   /** Maximum total output tokens across all steps. When exceeded, the loop stops. */
   maxTotalOutputTokens?: number;
   /**
@@ -328,6 +421,20 @@ export interface AgentRunRequest {
   rollout?: RolloutSink;
   /** Context compaction behavior; auto-compaction requires autoCompactTokenLimit. */
   compaction?: CompactionOptions;
+  /**
+   * RAG auto-search hook (host-injected; the loop holds no corpus).
+   *
+   * When present, before each model call the loop uses the most recent user
+   * message as the query, retrieves workspace evidence, and injects a
+   * `[rag-evidence query=… hits=N]` system message (a separate channel from
+   * contextBroker, which only assembles given tool-result evidence). No hits
+   * or an empty query → nothing is injected. `maxHits` caps injected hits
+   * (default 4, capped at 8).
+   */
+  ragSearch?: {
+    retrieve: (query: string) => Promise<RagRetrieveResult>;
+    maxHits?: number;
+  };
 }
 
 export interface AgentRunResult {
@@ -347,7 +454,7 @@ export interface AgentRunResult {
     /** Retry/backoff log — one entry per scheduled retry. */
     retries?: Array<{ step: number; attempt: number; code: string; delayMs: number }>;
     /** Compaction log — one entry per applied context compaction. */
-    compactions?: Array<{ step: number; reason: 'auto'; tokenLimit: number; summaryBytes: number }>;
+    compactions?: Array<{ step: number; reason: 'auto' | 'overflow'; tokenLimit: number; summaryBytes: number }>;
     /**
      * Approval log — one entry per gated tool call, including the ones answered
      * from session memory. A denial must leave a trace: "the agent did not run

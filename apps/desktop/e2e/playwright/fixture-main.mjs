@@ -1606,7 +1606,7 @@ function registerFixtureIpc() {
           instructionsSample: this.instructionsSample ?? [],
           authority: 'fixture'
         };
-      }
+      },
     };
     return bank;
   }
@@ -2174,6 +2174,9 @@ function registerFixtureIpc() {
    * 从未配置任何模型服务。此时 renderer 发送应落「尚未配置模型服务」系统提示
    * 且不调 ai.agent.run——那是 renderer 侧行为，fixture 只负责提供空服务。
    */
+  // 会话内 upsert 的服务（fixture 内存态），list 时合并返回 —— 保存后
+  // renderer 的 refresh() 才能看到新服务与高级选项字段（embedding 标记等）。
+  let savedFixtureServices = [];
   handleTrusted('modelService.list', () => {
     if (process.env.FIXTURE_EMPTY_MODEL_SERVICES === '1') return [];
     return [{
@@ -2185,8 +2188,68 @@ function registerFixtureIpc() {
       hasCredential: true,
       createdAt: '2026-08-08T00:00:00.000Z',
       updatedAt: '2026-08-08T00:00:00.000Z'
-    }];
+    }, ...savedFixtureServices];
   });
+  // 合成保存：echo 输入（含高级选项字段），供「保存模型服务」与高级选项 e2e 使用。
+  handleTrusted('modelService.upsert', (_event, input) => {
+    const saved = {
+      id: input.id ?? 'fixture-saved',
+      displayName: input.displayName,
+      protocol: input.protocol,
+      baseUrl: input.baseUrl,
+      model: input.model,
+      hasCredential: Boolean(input.apiKey),
+      createdAt: '2026-08-08T00:00:00.000Z',
+      updatedAt: new Date().toISOString(),
+      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      ...(input.topP !== undefined ? { topP: input.topP } : {}),
+      ...(input.topK !== undefined ? { topK: input.topK } : {}),
+      ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+      ...(input.contextWindowTokens !== undefined ? { contextWindowTokens: input.contextWindowTokens } : {}),
+      ...(input.thinkingLevel !== undefined ? { thinkingLevel: input.thinkingLevel } : {}),
+      ...(input.embeddingModel !== undefined ? { embeddingModel: input.embeddingModel } : {})
+    };
+    savedFixtureServices = [saved];
+    return saved;
+  });
+  // 合成模型列表：模拟 GET /v1/models 返回两个可用模型（e2e 不发真实网络）。
+  handleTrusted('modelService.listModels', () => ({
+    ok: true,
+    models: [
+      { id: 'fixture-model-a' },
+      { id: 'fixture-model-b', displayName: 'fixture 模型 B' }
+    ]
+  }));
+  // 合成向量索引：模拟 /v1/embeddings 全量生成完成（e2e 不发真实网络）。
+  handleTrusted('rag.embed', () => ({
+    ok: true,
+    embedded: 6,
+    failed: 0,
+    model: 'fixture-embed-model',
+    dim: 384
+  }));
+  // 合成混合检索：返回固定命中（e2e 不依赖真实语料）。
+  handleTrusted('rag.searchEvidence', () => ({
+    ok: true,
+    query: 'fixture query',
+    hits: [{
+      chunk: {
+        chunkId: 'rag:event:fixture',
+        workspaceId: 'fixture-ws',
+        sourceUri: 'file://fixture/common.emevd.dcx',
+        symbolUri: 'event://m10_00_00_00/1000',
+        family: 'event',
+        title: 'event 1000',
+        body: 'event 1000\nSetEventFlag flag=71000000',
+        numericIds: [1000, 71000000],
+        contentHash: 'fixture-hash'
+      },
+      score: 200,
+      reasons: ['id:71000000'],
+      excerpt: 'event 1000\nSetEventFlag flag=71000000'
+    }],
+    stats: { scanned: 6, matched: 1, expanded: 0, truncated: false }
+  }));
   handleTrusted('modelService.encryptionAvailable', () => false);
   handleTrusted('runtime.detectMe3', () => ({ detected: false }));
 

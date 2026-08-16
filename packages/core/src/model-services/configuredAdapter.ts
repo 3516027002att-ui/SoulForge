@@ -94,7 +94,11 @@ export function createConfiguredModelServiceAdapter(
   };
 }
 
-function isAllowedEndpoint(endpoint: URL): boolean {
+/**
+ * 模型服务 endpoint 安全校验：HTTPS 或本机回环 HTTP（127.0.0.1/localhost/[::1]）。
+ * 生产工厂与 modelService.listModels 共用，安全口径只有一份。
+ */
+export function isAllowedEndpoint(endpoint: URL): boolean {
   if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) return false;
   if (endpoint.protocol === 'https:') return true;
   if (endpoint.protocol !== 'http:') return false;

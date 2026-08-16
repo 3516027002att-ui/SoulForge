@@ -1724,6 +1724,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       if (selection.ownerWebContentsId === webContents.id) directorySelections.delete(selectionId);
     }
     activeEmevdOpens.dispose(webContents.id);
+    // 窗口销毁 = 用户强制中断：取消该窗口发起的 agent 运行，并把它的挂起
+    // 审批按拒绝结算（无人回答 ≠ 同意执行写入）。其他窗口的运行不受影响。
+    for (const [sessionId, entry] of activeAgentRuns) {
+      if (entry.ownerId !== webContents.id) continue;
+      entry.controller.abort();
+      rejectSessionApprovals(sessionId, '渲染进程已关闭，未回答的审批按拒绝处理。');
+    }
   });
   if (handlersRegistered) return;
   handlersRegistered = true;
@@ -7846,8 +7853,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       for (let i = 0; i < batch.length; i += 1) {
         const vector = result.vectors[i];
-        if (!vector) continue;
-        entries.push({ chunkId: batch[i].chunkId, model: stored.embeddingModel, vector });
+        const chunk = batch[i];
+        if (!vector || !chunk) continue;
+        entries.push({ chunkId: chunk.chunkId, model: stored.embeddingModel, vector });
       }
     }
     await database.replaceRagEmbeddings(entries);
@@ -8009,7 +8017,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   /* ---------------------------------------------------------------- */
 
   const agentSessionsBaseDir = join(app.getPath('userData'), 'agent');
-  const activeAgentRuns = new Map<string, AbortController>();
+  /**
+   * 运行中的 agent 会话：sessionId → 取消控制器 + 发起窗口（webContents.id）。
+   * ownerId 用于窗口销毁时只取消该窗口发起的运行——多窗口下 A 窗口关闭
+   * 不得杀掉 B 窗口正在跑的会话。
+   */
+  const activeAgentRuns = new Map<string, { controller: AbortController; ownerId: number }>();
   /**
    * main 签发的 opaque 资源引用 token 注册表（AGENT-60C）。key = token 串，
    * value = 签发作用域（webContents.id）+ tokenId。renderer 提交资源引用时，main
@@ -8226,7 +8239,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
     const sessionId = randomUUID();
     const controller = new AbortController();
-    activeAgentRuns.set(sessionId, controller);
+    activeAgentRuns.set(sessionId, { controller, ownerId: _event.sender.id });
     sendAgentEvent(sessionId, { type: 'session-accepted', mode });
 
     const permissionMode = mode === 'fullPermission' ? 'full' : mode;
@@ -8453,8 +8466,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('ai.agent.cancel', async (_event, sessionId: string): Promise<{ ok: boolean }> => {
-    const controller = activeAgentRuns.get(sessionId);
-    if (controller) controller.abort();
+    const entry = activeAgentRuns.get(sessionId);
+    if (entry) entry.controller.abort();
     // Cancel must also settle parked approvals. An abort signal does not reach
     // a promise the loop is awaiting, so without this the loop would sit in the
     // tool phase waiting for an answer the user has already walked away from.

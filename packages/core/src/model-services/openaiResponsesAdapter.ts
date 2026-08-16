@@ -8,11 +8,13 @@ import type {
   ChatMessage,
   ModelCompleteRequest,
   ModelCompleteResult,
+  ModelListResult,
   ModelServiceAdapter,
   StreamEvent,
   ToolCall,
   ToolDefinition
 } from './types.js';
+import { resolveOpenAiReasoningEffort } from './types.js';
 import {
   classifyFetchError,
   classifyHttpError,
@@ -80,6 +82,48 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
     }
     cleanup();
     return parseResponsesPayload(json);
+  }
+
+  async listModels(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<ModelListResult> {
+    const { signal, cleanup } = createRequestSignal(options?.signal, options?.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/models`, {
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${this.apiKey}`
+        },
+        ...(signal ? { signal } : {})
+      });
+    } catch (error) {
+      cleanup();
+      return listModelsError(classifyFetchError(error, 'OpenAI Responses', signal, { callerSignal: options?.signal }));
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      cleanup();
+      return listModelsError(classifyHttpError(
+        response.status, text, 'OpenAI Responses',
+        response.headers.get('retry-after')
+      ));
+    }
+    let json: { data?: Array<{ id?: unknown; display_name?: unknown }> };
+    try {
+      json = await response.json() as typeof json;
+    } catch (error) {
+      cleanup();
+      return listModelsError(classifyParseError(error, 'OpenAI Responses'));
+    }
+    cleanup();
+    const models = (json.data ?? [])
+      .filter((entry): entry is { id: string; display_name?: unknown } => typeof entry.id === 'string' && entry.id !== '')
+      .map((entry) => ({
+        id: entry.id,
+        ...(typeof entry.display_name === 'string' && entry.display_name !== ''
+          ? { displayName: entry.display_name }
+          : {})
+      }));
+    return { ok: true, models };
   }
 
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
@@ -269,6 +313,7 @@ function buildResponsesBody(
   request: ModelCompleteRequest,
   stream: boolean
 ): Record<string, unknown> {
+  const reasoningEffort = resolveOpenAiReasoningEffort(request.thinkingLevel);
   return {
     model,
     stream,
@@ -277,8 +322,19 @@ function buildResponsesBody(
       ? { tools: request.tools.map(toResponsesTool) }
       : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-    ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {})
+    ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
+    ...(request.topP !== undefined ? { top_p: request.topP } : {}),
+    // Responses API 的思考档位走 reasoning.effort；topK 协议无此字段不下发。
+    ...(reasoningEffort !== undefined ? { reasoning: { effort: reasoningEffort } } : {})
   };
+}
+
+function listModelsError(diagnostic: {
+  severity: string;
+  code: string;
+  message: string;
+}): ModelListResult {
+  return { ok: false, error: { code: diagnostic.code, message: diagnostic.message } };
 }
 
 function toResponsesInputItem(message: ChatMessage): Record<string, unknown> {

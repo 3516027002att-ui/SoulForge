@@ -1,5 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import type { Diagnostic, IndexedFile, ParseStatus, ResourceFormatKind, ResourceKind } from '@soulforge/shared';
+import type {
+  Diagnostic,
+  IndexedFile,
+  ParseStatus,
+  RagChunk,
+  RagChunkFamily,
+  ReferenceConfidence,
+  ReferenceEdge,
+  ResourceFormatKind,
+  ResourceKind
+} from '@soulforge/shared';
 import type { SqliteDatabase } from './sqliteDatabase.js';
 
 export interface PersistedDiagnostic extends Diagnostic {
@@ -136,9 +146,222 @@ FROM background_jobs WHERE workspace_id = ? ORDER BY created_at DESC, job_id`).a
     return { ...input, id: randomUUID(), workspaceId: this.workspaceId };
   }
 
+  replaceRagChunks(chunks: readonly RagChunk[]): void {
+    for (const chunk of chunks) this.assertWorkspace(chunk.workspaceId);
+    const insert = this.database.prepare(`
+INSERT INTO rag_chunks (
+ chunk_id, workspace_id, source_uri, symbol_uri, family, title, body,
+ numeric_ids_json, relative_path, resource_kind, confidence, content_hash, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const insertFts = this.database.prepare(`
+INSERT INTO rag_chunks_fts (chunk_id, title, body) VALUES (?, ?, ?)`);
+    const insertTrigram = this.database.prepare(`
+INSERT INTO rag_chunks_fts_trigram (chunk_id, title, body) VALUES (?, ?, ?)`);
+    const createdAt = new Date().toISOString();
+    this.database.transaction(() => {
+      const deleteFts = this.database.prepare(
+        'DELETE FROM rag_chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM rag_chunks WHERE workspace_id = ?)');
+      const deleteTrigram = this.database.prepare(
+        'DELETE FROM rag_chunks_fts_trigram WHERE chunk_id IN (SELECT chunk_id FROM rag_chunks WHERE workspace_id = ?)');
+      deleteFts.run(this.workspaceId);
+      deleteTrigram.run(this.workspaceId);
+      this.database.prepare('DELETE FROM rag_chunks WHERE workspace_id = ?').run(this.workspaceId);
+      for (const chunk of chunks) {
+        insert.run(
+          chunk.chunkId, this.workspaceId, chunk.sourceUri, chunk.symbolUri, chunk.family,
+          chunk.title, chunk.body, JSON.stringify(chunk.numericIds),
+          chunk.relativePath ?? null, chunk.resourceKind ?? null, chunk.confidence ?? null,
+          chunk.contentHash, createdAt
+        );
+        insertFts.run(chunk.chunkId, chunk.title, chunk.body);
+        insertTrigram.run(chunk.chunkId, chunk.title, chunk.body);
+      }
+    }).immediate();
+  }
+
+  loadRagChunks(): RagChunk[] {
+    const rows = this.database.prepare<[string], RagChunkRow>(`
+SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
+ symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
+ relative_path AS relativePath, resource_kind AS resourceKind, confidence,
+ content_hash AS contentHash
+FROM rag_chunks WHERE workspace_id = ? ORDER BY family, title, chunk_id`)
+      .all(this.workspaceId);
+    return rows.map(hydrateRagChunk);
+  }
+
+  searchRagChunks(query: string, limit = 32): RagChunk[] {
+    const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
+    const trimmed = query.trim();
+    const tokens = trimmed.split(/\s+/).filter(Boolean).map((token) => `"${token.replaceAll('"', '""')}"`);
+    if (tokens.length === 0) return this.loadRagChunks().slice(0, boundedLimit);
+
+    const selectChunks = `
+SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
+ c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
+ c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
+ c.content_hash AS contentHash
+FROM rag_chunks c
+JOIN rag_chunks_fts x ON x.chunk_id = c.chunk_id
+WHERE c.workspace_id = ? AND rag_chunks_fts MATCH ? ORDER BY rank LIMIT ?`;
+    const rows = this.database.prepare<[string, string, number], RagChunkRow>(selectChunks)
+      .all(this.workspaceId, tokens.join(' AND '), boundedLimit);
+    if (rows.length > 0) return rows.map(hydrateRagChunk);
+
+    // CJK 子串检索：unicode61 不切分中文，整串 LIKE 只能命中完整短语。
+    // trigram tokenizer（migration 8）支持任意 ≥3 字符子串（含中文）；1-2 字
+    // 短词 trigram 无 gram 可匹配，仍走有界 LIKE 子串扫描。
+    const cjkChars = countCjkChars(trimmed);
+    if (cjkChars >= 3) {
+      const phrase = `"${trimmed.replaceAll('"', '""')}"`;
+      const trigramRows = this.database.prepare<[string, string, number], RagChunkRow>(`
+SELECT c.chunk_id AS chunkId, c.workspace_id AS workspaceId, c.source_uri AS sourceUri,
+ c.symbol_uri AS symbolUri, c.family, c.title, c.body, c.numeric_ids_json AS numericIdsJson,
+ c.relative_path AS relativePath, c.resource_kind AS resourceKind, c.confidence,
+ c.content_hash AS contentHash
+FROM rag_chunks c
+JOIN rag_chunks_fts_trigram x ON x.chunk_id = c.chunk_id
+WHERE c.workspace_id = ? AND rag_chunks_fts_trigram MATCH ? ORDER BY rank LIMIT ?`)
+        .all(this.workspaceId, phrase, boundedLimit);
+      if (trigramRows.length > 0) return trigramRows.map(hydrateRagChunk);
+    }
+
+    const needle = `%${trimmed.replaceAll('%', '').replaceAll('_', '')}%`;
+    const fallback = this.database.prepare<[string, string, string, number], RagChunkRow>(`
+SELECT chunk_id AS chunkId, workspace_id AS workspaceId, source_uri AS sourceUri,
+ symbol_uri AS symbolUri, family, title, body, numeric_ids_json AS numericIdsJson,
+ relative_path AS relativePath, resource_kind AS resourceKind, confidence,
+ content_hash AS contentHash
+FROM rag_chunks
+WHERE workspace_id = ? AND (title LIKE ? OR body LIKE ?)
+ORDER BY family, title LIMIT ?`).all(this.workspaceId, needle, needle, boundedLimit);
+    return fallback.map(hydrateRagChunk);
+  }
+
+  /**
+   * 整体替换该 workspace 的 chunk 向量（embed 时先删后插）。
+   * 向量只按 chunkId 关联；语料 replaceRagChunks 后旧的向量行会被 FK 级联删除。
+   */
+  replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array }>): void {
+    const insert = this.database.prepare(`
+INSERT OR REPLACE INTO rag_embeddings (chunk_id, workspace_id, model, dim, vector, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`);
+    const createdAt = new Date().toISOString();
+    this.database.transaction(() => {
+      this.database.prepare('DELETE FROM rag_embeddings WHERE workspace_id = ?').run(this.workspaceId);
+      for (const entry of entries) {
+        insert.run(
+          entry.chunkId, this.workspaceId, entry.model, entry.vector.length,
+          Buffer.from(entry.vector.buffer, entry.vector.byteOffset, entry.vector.byteLength), createdAt
+        );
+      }
+    }).immediate();
+  }
+
+  /**
+   * 加载该 workspace 的 chunk 向量（chunkId → Float32Array）。model 是生成
+   * 向量所用的 embedding 模型 —— 查询向量必须用同一模型，调用方自行比对。
+   */
+  loadRagEmbeddings(): Map<string, Float32Array> {
+    const rows = this.database.prepare<[string], { chunkId: string; vector: Buffer }>(`
+SELECT chunk_id AS chunkId, vector FROM rag_embeddings WHERE workspace_id = ?`)
+      .all(this.workspaceId);
+    const map = new Map<string, Float32Array>();
+    for (const row of rows) {
+      map.set(row.chunkId, new Float32Array(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength / 4));
+    }
+    return map;
+  }
+
+  /** 该 workspace 是否已有向量索引，以及所用 embedding 模型名。 */
+  ragEmbeddingModel(): string | null {
+    const row = this.database.prepare<[string], { model: string | null }>(`
+SELECT model FROM rag_embeddings WHERE workspace_id = ? LIMIT 1`)
+      .get(this.workspaceId);
+    return row?.model ?? null;
+  }
+
+  replaceReferences(references: readonly ReferenceEdge[]): void {    const insert = this.database.prepare(`
+INSERT INTO reference_edges (
+ id, workspace_id, from_uri, to_uri, kind, confidence, reason, evidence_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    this.database.transaction(() => {
+      this.database.prepare('DELETE FROM reference_edges WHERE workspace_id = ?').run(this.workspaceId);
+      for (const [index, edge] of references.entries()) {
+        insert.run(
+          `${this.workspaceId}:${index}:${edge.fromUri}->${edge.toUri}:${edge.kind}`,
+          this.workspaceId,
+          edge.fromUri,
+          edge.toUri,
+          edge.kind,
+          edge.confidence,
+          edge.reason,
+          JSON.stringify(edge.evidence)
+        );
+      }
+    }).immediate();
+  }
+
+  loadReferences(): ReferenceEdge[] {
+    const rows = this.database.prepare<[string], Record<string, unknown>>(`
+SELECT from_uri AS fromUri, to_uri AS toUri, kind, confidence, reason, evidence_json AS evidenceJson
+FROM reference_edges WHERE workspace_id = ? ORDER BY from_uri, to_uri, kind`)
+      .all(this.workspaceId);
+    return rows.map((row) => ({
+      fromUri: String(row.fromUri),
+      toUri: String(row.toUri),
+      kind: String(row.kind) as ReferenceEdge['kind'],
+      confidence: String(row.confidence) as ReferenceConfidence,
+      reason: String(row.reason),
+      evidence: parseJson(String(row.evidenceJson), 'reference evidence')
+    }));
+  }
+
   private assertWorkspace(workspaceId: string): void {
     if (workspaceId !== this.workspaceId) throw new Error(`Workspace mismatch: ${workspaceId}.`);
   }
+}
+
+interface RagChunkRow {
+  chunkId: string;
+  workspaceId: string;
+  sourceUri: string;
+  symbolUri: string;
+  family: string;
+  title: string;
+  body: string;
+  numericIdsJson: string;
+  relativePath: string | null;
+  resourceKind: string | null;
+  confidence: string | null;
+  contentHash: string;
+}
+
+function hydrateRagChunk(row: RagChunkRow): RagChunk {
+  return {
+    chunkId: row.chunkId,
+    workspaceId: row.workspaceId,
+    sourceUri: row.sourceUri,
+    symbolUri: row.symbolUri,
+    family: row.family as RagChunkFamily,
+    title: row.title,
+    body: row.body,
+    numericIds: parseJson(row.numericIdsJson, 'rag numeric ids'),
+    contentHash: row.contentHash,
+    ...(row.relativePath ? { relativePath: row.relativePath } : {}),
+    ...(row.resourceKind ? { resourceKind: row.resourceKind as ResourceKind } : {}),
+    ...(row.confidence ? { confidence: row.confidence as ReferenceConfidence } : {})
+  };
+}
+
+/** CJK 统一表意文字区字符计数，用于决定 trigram 子串检索是否可用（≥3）。 */
+function countCjkChars(value: string): number {
+  let count = 0;
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code >= 0x3400 && code <= 0x9fff) count += 1;
+  }
+  return count;
 }
 
 function fileSelect(suffix: string): string {

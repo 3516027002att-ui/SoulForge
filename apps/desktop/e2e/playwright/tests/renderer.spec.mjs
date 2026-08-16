@@ -64,7 +64,31 @@ async function openFixtureWorkspace(window) {
   // 默认展开会压缩中央编辑区，先收 Agent 让开始页按钮可见可点。
   await closeAgentPanel(window);
   await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
-  await expect(window.locator('.status-bar')).toContainText('已索引');
+  /*
+   * 挂载完成的等待信号。
+   *
+   * 原判据是 `.status-bar` 含「已索引」。S12 把状态栏整块摘掉了（styles.css 还留着
+   * 那条 `.status-bar` 规则，但 renderer 里没有任何元素带这个 class，「已索引」只
+   * 出现在两个 JS 字符串里），于是这个等待**永远不会 resolve** —— 全部 40 个调用
+   * 点都卡在这一行超时。产品结构不为测试回退（不恢复状态栏），改判据。
+   *
+   * 两段等待对应 mountWorkspace 的两个阶段，与原判据同语义：
+   *
+   * 1. 开始页标题出现工作区名 —— scanWorkspace 已 resolve。App.tsx 里
+   *    setWorkspace / setAllFiles / setFiles 与标题所需的 workspace 在同一个批次
+   *    提交，所以标题一变，下游 `.file-item` 点击所需的文件数据必然已在。
+   * 2. `.welcome__stats` 出现「已解析」—— analyzeWorkspace 已 resolve
+   *    （那段文案由 `analysis ? ...` 控制，analysis 为 null 时整段不出现）。
+   *    原判据的「已索引」也是 analyze 之后才写进状态栏的，这一段把那层前提补回来，
+   *    避免测试在 analyze 在飞时开始交互、被中途的 setState 重渲染打断。
+   *
+   * `.welcome__stats` 所在的 `.editor-welcome` 在工作区打开后是 `display:none`，
+   * 但 toContainText 读 textContent、不做可见性检查，所以隐藏不影响判据。这里刻意
+   * 不改成可见元素：shell 里没有第二个消费 analysis 的 DOM 节点，为测试新增一个就
+   * 是「为测试改产品结构」。
+   */
+  await expect(window.locator('.project-overview h1')).toHaveText('fixture-workspace');
+  await expect(window.locator('.welcome__stats')).toContainText('已解析');
 }
 
 /**
@@ -998,6 +1022,53 @@ test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模�
   await expect(window.locator('#agent-thinking')).toHaveValue('deep');
 
   await window.screenshot({ path: 'test-results/06-agent-settings.png' });
+  await app.close();
+});
+
+test('模型服务高级选项：默认收起，展开可配置采样参数并保存；可拉取模型列表', async () => {
+  const { app, window } = await launchApp();
+  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
+  const history = window.locator('.agent-secondary-drawer:not(.is-hidden)');
+  await history.getByRole('button', { name: '模型设置' }).click();
+  const drawer = window.locator('.agent-secondary-drawer:not(.is-hidden)');
+  const advanced = drawer.getByTestId('model-service-advanced');
+
+  // 高级选项默认收起：details 无 open 属性，内部控件不可见。
+  await expect(advanced).toBeVisible();
+  expect(await advanced.evaluate((el) => el.open)).toBe(false);
+  await expect(advanced.getByLabel('思考强度')).not.toBeVisible();
+
+  // 点击「高级选项」展开。
+  await advanced.locator('summary').click();
+  expect(await advanced.evaluate((el) => el.open)).toBe(true);
+  await expect(advanced.getByLabel('思考强度')).toBeVisible();
+
+  // 配置采样参数：思考强度 deep、上下文/输出长度、temperature/topP/topK、embedding。
+  await advanced.getByLabel('思考强度').selectOption('deep');
+  await advanced.getByLabel('上下文长度（token）').fill('16000');
+  await advanced.getByLabel('输出长度（token）').fill('2048');
+  await advanced.getByLabel('temperature').fill('0.7');
+  await advanced.getByLabel('topP').fill('0.9');
+  await advanced.getByLabel('topK').fill('5');
+  await advanced.getByLabel('Embedding 模型').fill('fixture-embed-model');
+
+  // 保存：fixture upsert echo 输入，状态文案确认保存成功。填密钥让
+  // fixture 返回 hasCredential=true（「生成向量索引」按钮依赖它）。
+  await drawer.getByLabel('API 密钥（仅写入，不回显）').fill('fixture-api-key');
+  await drawer.getByRole('button', { name: '保存模型服务' }).click();
+  await expect(drawer).toContainText('已保存模型服务：本地兼容模型服务');
+
+  // 获取模型列表：fixture 返回两个可用模型，datalist 填入可选项。
+  await drawer.getByRole('button', { name: '获取模型列表' }).click();
+  await expect(drawer).toContainText('找到 2 个可用模型');
+  await expect(drawer.locator('datalist option')).toHaveCount(2);
+
+  // 已保存服务带 embedding 模型：列表项显示 embedding 标记与「生成向量索引」按钮。
+  await expect(drawer.locator('.list')).toContainText('embedding: fixture-embed-model');
+  await drawer.getByRole('button', { name: '生成向量索引' }).click();
+  await expect(drawer).toContainText('向量索引完成：6 个块（失败 0），模型 fixture-embed-model，维度 384。');
+
+  await window.screenshot({ path: 'test-results/06b-model-service-advanced.png' });
   await app.close();
 });
 

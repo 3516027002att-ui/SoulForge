@@ -77,6 +77,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   typecheck: 'unit',
   test: 'unit',
   'test:ai-conformance': 'unit',
+  'test:rag': 'unit',
   // AI 工具权限阶梯的**生产**实现。ai-conformance 里有 5 个 case 断言的是
   // testing/harness 下自建的 evaluatePolicyGate/maxPermissionFromMode——那三个
   // 符号全仓只存在于测试目录，生产走 ai/toolPermissions.ts 的

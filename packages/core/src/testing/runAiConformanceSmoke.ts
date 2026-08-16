@@ -152,6 +152,9 @@ import type {
   ToolDefinition
 } from '../model-services/types.js';
 
+/** 模型列表与 loop 无关：本套件的 mock adapter 统一用空列表 stub。 */
+const fakeListModels: ModelServiceAdapter['listModels'] = async () => ({ ok: true, models: [] });
+
 function listen(server: Server): Promise<number> {
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
@@ -441,7 +444,7 @@ async function runScriptedMatrix(
 
 async function main(): Promise<void> {
   let passed = 0;
-  const total = 59;
+  const total = 61;
 
   // --- Case 1: HTTP 429 rate limit ---
   {
@@ -2126,6 +2129,7 @@ async function main(): Promise<void> {
     let turn = 0;
     const fakeAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
+      listModels: fakeListModels,
       async complete() {
         turn += 1;
         if (turn === 1) {
@@ -2379,6 +2383,7 @@ async function main(): Promise<void> {
     const secret = 'sk-abcdefghij1234';
     const fakeAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
+      listModels: fakeListModels,
       async complete() {
         turn += 1;
         if (turn === 1) {
@@ -2462,6 +2467,7 @@ async function main(): Promise<void> {
     const requests: ModelCompleteRequest[] = [];
     const compactAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
+      listModels: fakeListModels,
       async complete(request) {
         callNo += 1;
         // Snapshot: the loop keeps a live reference to its messages array.
@@ -2496,6 +2502,7 @@ async function main(): Promise<void> {
         { role: 'system', content: 'SYS' },
         { role: 'user', content: 'older question' },
         { role: 'assistant', content: 'older answer' },
+        { role: 'user', content: `${DEFAULT_SUMMARY_PREFIX}\n上一轮旧摘要` },
         { role: 'user', content: 'newer question' }
       ],
       tools: [],
@@ -2521,11 +2528,17 @@ async function main(): Promise<void> {
     if (summaryRequest?.messages[summaryRequest.messages.length - 1]?.content !== DEFAULT_SUMMARIZATION_PROMPT) {
       throw new Error('Case 52: summarization prompt not sent.');
     }
+    if (summaryRequest?.maxTokens !== 4096) {
+      throw new Error(`Case 52: summarization must carry a 4096 output budget, got ${summaryRequest?.maxTokens}`);
+    }
     const mainRequest = requests[1];
     const mainContents = (mainRequest?.messages ?? []).map((message) => message.content);
     if (!mainContents.includes('SYS')) throw new Error('Case 52: system context dropped.');
     if (mainContents.some((content) => content.includes('older answer'))) {
       throw new Error('Case 52: assistant history must be compacted away.');
+    }
+    if (mainContents.some((content) => content.includes('上一轮旧摘要'))) {
+      throw new Error('Case 52: previous summary message must be filtered from the kept budget.');
     }
     const lastMain = mainRequest?.messages[(mainRequest?.messages.length ?? 0) - 1];
     if (!lastMain || !lastMain.content.startsWith(DEFAULT_SUMMARY_PREFIX)) {
@@ -2541,6 +2554,16 @@ async function main(): Promise<void> {
     if (!durable.some((line) => line.includes('"type":"compacted"'))) {
       throw new Error('Case 52: rollout compaction checkpoint missing.');
     }
+    // 压缩标记必须携带替换历史（Codex replacement_history 同款）：resume 时
+    // parseRolloutLines 恢复压缩窗口内的历史（含摘要消息），而不是压缩前的
+    // 完整膨胀历史——否则承接会话会再次溢出。
+    const resumed = parseRolloutLines(durable);
+    if (!resumed.messages.some((message) => message.content.startsWith(DEFAULT_SUMMARY_PREFIX))) {
+      throw new Error('Case 52: resume must restore the compacted window history.');
+    }
+    if (resumed.messages.some((message) => message.content.includes('older answer'))) {
+      throw new Error('Case 52: resume must not resurrect pre-compaction assistant messages.');
+    }
     await recorder.close();
     passed++;
   }
@@ -2550,6 +2573,7 @@ async function main(): Promise<void> {
   {
     const failingAdapter: ModelServiceAdapter = {
       protocol: 'openai-compatible',
+      listModels: fakeListModels,
       async complete(request) {
         const last = request.messages[request.messages.length - 1];
         if (last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
@@ -2587,6 +2611,128 @@ async function main(): Promise<void> {
     }
     if (!result.messages.some((message) => message.content.includes('older answer'))) {
       throw new Error('Case 53: original history must survive fail-closed.');
+    }
+    passed++;
+  }
+
+  // --- Case 53b: context-overflow 错误自动压缩恢复（OpenCode 模式：overflow
+  // --- 不参与退避重试，压缩历史后重试一次；压缩后仍溢出则失败关闭）---
+  {
+    let callNo = 0;
+    const overflowAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      async complete(request) {
+        callNo += 1;
+        const last = request.messages[request.messages.length - 1];
+        if (callNo === 1) {
+          return {
+            message: { role: 'assistant', content: '' },
+            finishReason: 'error',
+            diagnostics: [{
+              severity: 'error',
+              code: 'MODEL_SERVICE_HTTP_ERROR',
+              message: "This model's maximum context length is 128000 tokens. However, your messages resulted in 132000 tokens."
+            }]
+          };
+        }
+        if (last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
+          return {
+            message: { role: 'assistant', content: '摘要：溢出恢复。' },
+            finishReason: 'stop',
+            diagnostics: []
+          };
+        }
+        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+      },
+      async *stream() {
+        throw new Error('unused');
+      },
+      listModels: async () => ({ ok: true, models: [] })
+    };
+    const overflowResult = await runAgentToolLoop(overflowAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [
+        { role: 'system', content: 'SYS' },
+        { role: 'user', content: '很长的历史' }
+      ],
+      tools: [],
+      permissionMode: 'normal',
+      executeTool: async () => ({ ok: false, content: 'unused' })
+      // 故意不配 autoCompactLimit：overflow 恢复不依赖阈值配置。
+    });
+    if (overflowResult.finishReason !== 'stop') {
+      throw new Error(`Case 53b: expected stop after overflow recovery, got ${overflowResult.finishReason}`);
+    }
+    if (callNo !== 3) {
+      throw new Error(`Case 53b: expected 3 calls (overflow → summary → retry), got ${callNo}`);
+    }
+    if (!overflowResult.audit.compactions?.some((entry) => entry.reason === 'overflow')) {
+      throw new Error('Case 53b: overflow compaction audit missing.');
+    }
+    if (!overflowResult.diagnostics.some((entry) => entry.code === 'CONTEXT_OVERFLOW_RECOVERY')) {
+      throw new Error('Case 53b: CONTEXT_OVERFLOW_RECOVERY diagnostic missing.');
+    }
+    passed++;
+  }
+
+  // --- Case 53c: 摘要请求输入里的大 tool 结果被截断（2000 字符）；压缩后
+  // --- 历史保底保留最近 2 条 user 消息（预算极小也不丢当前任务上下文）---
+  {
+    const requests: ModelCompleteRequest[] = [];
+    const bigToolAdapter: ModelServiceAdapter = {
+      protocol: 'openai-compatible',
+      async complete(request) {
+        requests.push({ ...request, messages: [...request.messages] });
+        const last = request.messages[request.messages.length - 1];
+        if (last?.content === DEFAULT_SUMMARIZATION_PROMPT) {
+          return {
+            message: { role: 'assistant', content: '摘要' },
+            finishReason: 'stop',
+            diagnostics: []
+          };
+        }
+        return { message: { role: 'assistant', content: 'done' }, finishReason: 'stop', diagnostics: [] };
+      },
+      async *stream() {
+        throw new Error('unused');
+      },
+      listModels: async () => ({ ok: true, models: [] })
+    };
+    const bigTool = 'x'.repeat(5000);
+    const truncResult = await runAgentToolLoop(bigToolAdapter, {
+      config: makeConfig(9, 'openai-compatible'),
+      apiKey: 'sk-test',
+      messages: [
+        { role: 'system', content: 'SYS' },
+        { role: 'user', content: 'u1' },
+        { role: 'assistant', content: 'a1', toolCalls: [{ id: 't1', name: 'read', argumentsJson: '{}' }] },
+        { role: 'tool', content: bigTool, toolCallId: 't1' },
+        { role: 'user', content: 'u2' },
+        { role: 'user', content: 'u3' }
+      ],
+      tools: [],
+      permissionMode: 'normal',
+      executeTool: async () => ({ ok: false, content: 'unused' }),
+      compaction: { autoCompactTokenLimit: 1, userMessageBudgetTokens: 1 }
+    });
+    if (truncResult.finishReason !== 'stop') {
+      throw new Error(`Case 53c: expected stop, got ${truncResult.finishReason}`);
+    }
+    const summaryRequest = requests.find((request) =>
+      request.messages[request.messages.length - 1]?.content === DEFAULT_SUMMARIZATION_PROMPT);
+    const toolMessage = summaryRequest?.messages.find((message) => message.role === 'tool');
+    if (!toolMessage || toolMessage.content.length > 2100 || !toolMessage.content.includes('truncated for summary')) {
+      throw new Error('Case 53c: tool result must be truncated for the summary request.');
+    }
+    const mainRequest = requests[requests.length - 1];
+    const keptUser = (mainRequest?.messages ?? []).filter((message) => message.role === 'user');
+    const keptContents = keptUser.map((message) => message.content).join(',');
+    if (!keptContents.includes('u2') || !keptContents.includes('u3')) {
+      throw new Error(`Case 53c: floor must keep the two most recent user messages, got: ${keptContents}`);
+    }
+    if (keptContents.includes('u1')) {
+      throw new Error(`Case 53c: older user message must not survive a 1-token budget, got: ${keptContents}`);
     }
     passed++;
   }
@@ -2740,6 +2886,7 @@ async function main(): Promise<void> {
       const seenRequests: ModelCompleteRequest[] = [];
       const hostAdapter: ModelServiceAdapter = {
         protocol: 'openai-compatible',
+        listModels: fakeListModels,
         async complete(request) {
           turn += 1;
           seenRequests.push({ ...request, messages: [...request.messages] });
@@ -2828,6 +2975,7 @@ async function main(): Promise<void> {
         sessionsDir: base,
         adapter: {
           protocol: 'openai-compatible',
+          listModels: fakeListModels,
           async complete() {
             return { message: { role: 'assistant', content: 'never' }, finishReason: 'stop', diagnostics: [] };
           },
@@ -2906,6 +3054,7 @@ async function main(): Promise<void> {
         sessionsDir: base,
         adapter: {
           protocol: 'openai-compatible',
+          listModels: fakeListModels,
           async complete(request) {
             seen.push({ ...request, messages: [...request.messages] });
             return { message: { role: 'assistant', content: 'sys-injected' }, finishReason: 'stop', diagnostics: [] };
@@ -2948,6 +3097,7 @@ async function main(): Promise<void> {
         sessionsDir: base,
         adapter: {
           protocol: 'openai-compatible',
+          listModels: fakeListModels,
           async complete(request) {
             seen2.push({ ...request, messages: [...request.messages] });
             return { message: { role: 'assistant', content: 'resumed' }, finishReason: 'stop', diagnostics: [] };

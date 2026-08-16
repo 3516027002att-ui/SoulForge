@@ -24,6 +24,7 @@ import type {
   ContextBrokerOptions,
   ModelServiceAdapter,
   ModelServiceConfig,
+  ModelSamplingOptions,
   RetryPolicyOptions,
   ToolCall,
   ToolDefinition
@@ -70,6 +71,10 @@ export interface AgentSessionRunParams {
   maxSteps?: number;
   timeoutMs?: number;
   maxTotalOutputTokens?: number;
+  /** Sampling / capability parameters applied to every model call in this run. */
+  sampling?: ModelSamplingOptions;
+  /** RAG auto-search hook forwarded to the loop; absent means no auto-injection. */
+  ragSearch?: NonNullable<import('./types.js').AgentRunRequest['ragSearch']>;
   /** Prior rollout to continue from; its messages seed the new run. */
   resumeFrom?: ResumedRollout;
   onEvent?: (event: AgentEvent) => void;
@@ -136,6 +141,8 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
     ...(params.streamMaxRetries != null ? { streamMaxRetries: params.streamMaxRetries } : {}),
     ...(params.streaming != null ? { streaming: params.streaming } : {}),
     ...(params.compaction ? { compaction: params.compaction } : {}),
+    ...(params.sampling ? { sampling: params.sampling } : {}),
+    ...(params.ragSearch ? { ragSearch: params.ragSearch } : {}),
     ...(params.requestApproval ? { requestApproval: params.requestApproval } : {}),
     ...(params.resolveApprovalDiff ? { resolveApprovalDiff: params.resolveApprovalDiff } : {}),
     ...(params.approvalRequiredLevels
