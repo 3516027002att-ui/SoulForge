@@ -246,20 +246,67 @@ describe('S15 事件失败面：读取失败时源码区给可行动句，禁止
   });
 });
 
-describe('DarkScript 源码只读（按钮层与 CodeMirror 创建共用同一判据）', () => {
-  it('live DarkScript 也必须只读，不能只靠 !live', () => {
+describe('S14：DarkScript 源码可编辑（去橙头 / 去黄条 / 去只读锁）', () => {
+  it('live DarkScript 不再只读：$Event 源码可编辑（写链是反汇编形状对齐编译器）', () => {
     assert.equal(isSourceReadOnly({
       live: true,
       dslTemplate: '$Event(0, Default, function() {});',
       sourceStyle: 'dark-script'
+    }), false);
+  });
+
+  it('不可编只剩两类：非 live（读取失败）与无 dslTemplate（EMEDF 缺失失败关闭）', () => {
+    assert.equal(isSourceReadOnly({
+      live: false,
+      dslTemplate: 'x',
+      sourceStyle: 'dark-script'
+    }), true);
+    assert.equal(isSourceReadOnly({
+      live: true,
+      dslTemplate: null,
+      sourceStyle: 'dark-script'
     }), true);
   });
 
-  it('未标记 dark-script 的 live 模板仍可编辑（写链保留给 patch-dsl）', () => {
-    assert.equal(isSourceReadOnly({
-      live: true,
-      dslTemplate: '$Resource file://event/common.emevd',
-      sourceStyle: 'patch-dsl'
-    }), false);
+  it('没有橙色头（EVENT / SOURCE 眉题与 h2 都不渲染）', () => {
+    const html = render();
+    assert.doesNotMatch(html, /EVENT \/ SOURCE/);
+    assert.doesNotMatch(html, /event-source__header/);
+    assert.doesNotMatch(html, />事件源码工作台<\/h2>/);
+  });
+
+  it('没有日常黄条（只读展示 / 写入仍经 Bridge 与补丁引擎 字样不出现）', () => {
+    const html = render();
+    assert.doesNotMatch(html, /反汇编源码只读/);
+    assert.doesNotMatch(html, /本版只读展示/);
+    assert.doesNotMatch(html, /写入仍经 Bridge/);
+    assert.doesNotMatch(html, /补丁引擎/);
+  });
+
+  it('没有「编译并提交」按钮；工具条只留查找/保存提示', () => {
+    const html = render();
+    assert.doesNotMatch(html, />编译并提交</);
+    assert.doesNotMatch(html, /提交中…/);
+    assert.match(html, /查找：Ctrl\+F/);
+    assert.match(html, /保存：Ctrl\+S/);
+  });
+
+  it('Ctrl+S 进 CodeMirror keymap（Mod-s 保存当前源码）', () => {
+    const panelSource = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
+      'utf8'
+    );
+    assert.match(panelSource, /key: 'Mod-s'/);
+  });
+
+  it('保存失败提示是结构化诊断，不带「见底部日志」', () => {
+    const html = render();
+    // 就绪态不渲染 status；有状态变化时 role="status" 承载诊断文案。
+    assert.doesNotMatch(html, /见底部日志/);
+    const panelSource = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
+      'utf8'
+    );
+    assert.match(panelSource, /role="status"/);
   });
 });

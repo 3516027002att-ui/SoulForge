@@ -303,8 +303,8 @@ const api = {
    */
   cancelEmevdFullDocument: (): Promise<{ ok: boolean; cancelled: boolean }> =>
     ipcRenderer.invoke('resource.cancelEmevdFullDocument'),
-  submitEmevdDslPlan: (sourceUri: string, sourceText: string): Promise<RendererSaveResult> =>
-    ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
+  submitEmevdDslPlan: (sourceUri: string, sourceText: string, mode: 'patch' | 'dark-script' = 'patch'): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText, mode),
   readEmedfCompletionCatalog: (): Promise<{
     ok: boolean;
     origin: 'imported' | 'fixture';

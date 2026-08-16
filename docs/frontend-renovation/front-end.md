@@ -2554,6 +2554,14 @@ SHELL-09 → SHELL-10
 > - 读取失败时编辑区正文给 `code + 人话 + 下一步`（KRAK 缺原版：到「开始」页选择含 sekiro.exe 的原版目录），禁止假 `resource "file://…"` 伪源码与「详情见底部日志」；失败随 `eventOpenFailure` 附进 Agent 系统提示，Agent 能直接复述原因和下一步。
 > - 编不了的指令：该行标未解码，不锁整份只读、不假成功写盘。
 
+> **S14 落地（2026-08-17）**：
+> - 去头去黄条：`.event-source__header`（eyebrow + h2）、日常 `.event-source__notice`、「反汇编源码只读」标签与「编译并提交」按钮已删；工具条只留查找/保存提示与 `role="status"` 状态句；EMEDF 缺失的失败 alert（`--blocked`）保留。
+> - 可编辑写链：新增 `packages/core/src/emevd/darkScriptCompiler.ts` —— 按「反汇编形状逐事件逐行对齐」把 `$Event` 文本编译成 typed mutation（`set_event_id` / `set_event_rest_behavior` / `set_instruction_arg`），再走既有 `submitEmevdDslPlanViaFourView` → Patch Engine（备份/回滚照旧）。`compileRequest.mode` 扩展为 `'patch' | 'dark-script'`；`Ctrl+S` 直接保存，无审查对话框、无 Bridge/补丁引擎字样。
+> - 编不了的部分不锁整份：指令增删（`EMEVD_DSL_INSTRUCTION_COUNT_CHANGED`）、WaitFor 折叠块内容变化（`EMEVD_DSL_WAITFOR_READONLY`）、指令名替换（`EMEVD_DSL_INSTRUCTION_NAME_CHANGED`）、vararg 尾部修改（`EMEVD_DSL_VARARG_ARG_READONLY`）都是结构化诊断；未知指令/失败态渲染为注释行，两侧解析都丢弃。没有 DarkScript → 二进制全量编译器，不做假成功写盘。
+> - 内层标签短名：`event/common.emevd.dcx` → `common`（App 文件标签已承载完整资源）。
+> - `isSourceReadOnly` 只剩打开失败类（非 live / 无 dslTemplate），`sourceStyle === 'dark-script'` 不再是只读判据。
+> - 新增 `runEmevdDarkScriptCompilerSmoke`（no-op / 事件头 / 指令参数 / fail-closed 诊断 / 部分应用）。
+
 > **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
 > - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
 > - **B**：renderer 打开只打一枪——`readEmevdDocument` envelope 双读删除，事件数 / sourceHash / gutter 判据全部由 `readEmevdFullDocument` 的 outline 给（`unknownCount` 按完整 EMEDF 逐条判，不再有 256 条采样造成的假「整段未知」）；`mapEmevdEnvelope` / `alignEmevdDocumentAnchors` 删除，`indexEventLines` 按 `$Event(` 出现顺序映射。

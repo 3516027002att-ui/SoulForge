@@ -207,8 +207,11 @@ function cancelledRender(): RenderEmevdDarkScriptAsyncResult {
  * Render one event into `$Event(<id>, <Default|Restart>, function() { ... });`.
  * The event header line is NOT indented (DarkScript3 top-level style); the
  * closing `});` is a standalone line at column 0.
+ *
+ * 导出给 darkScriptCompiler：编译器按「反汇编形状」把用户编辑后的 `$Event`
+ * 文本与文档逐事件逐行对齐，必须与渲染侧共用同一份行切分与折叠判定。
  */
-function renderEventLines(event: EmevdEventIr, registry: EmedfRegistry): string[] {
+export function renderEventLines(event: EmevdEventIr, registry: EmedfRegistry): string[] {
   const header = `$Event(${event.eventId}, ${formatRestBehavior(event.restBehavior)}, function() {`;
   const body: string[] = [];
 
@@ -233,7 +236,7 @@ function renderEventLines(event: EmevdEventIr, registry: EmedfRegistry): string[
  * restBehavior 0 → Default, 1 → Restart; any other value is rendered verbatim
  * with a comment flagging it as an unrecognized rest behavior.
  */
-function formatRestBehavior(restBehavior: number): string {
+export function formatRestBehavior(restBehavior: number): string {
   if (restBehavior === 0) return 'Default';
   if (restBehavior === 1) return 'Restart';
   return `${restBehavior} /* unknown restBehavior */`;
@@ -245,8 +248,10 @@ function formatRestBehavior(restBehavior: number): string {
  *
  * 输入是 decodeForRender 的结果（每条指令只解码一次），三种失败态的注释文本与
  * 单次解码前逐字相同：unknown / BASE64_INVALID / <原始 code>。
+ *
+ * 导出给 darkScriptCompiler：普通指令行的 canonical 形状由这里决定。
  */
-function renderInstructionLine(item: DecodedInstruction): string {
+export function renderInstructionLine(item: DecodedInstruction): string {
   switch (item.status.kind) {
     case 'unknown':
       return `// unknown bank=${item.bank} id=${item.id}`;
@@ -270,7 +275,7 @@ function formatArgLiteral(arg: DecodedArg): string {
 /*  Condition folding                                                  */
 /* ------------------------------------------------------------------ */
 
-type Span =
+export type Span =
   | { kind: 'ordinary'; instructions: DecodedInstruction[] }
   | { kind: 'wait-block'; predicates: DecodedInstruction[]; anchor: DecodedInstruction };
 
@@ -291,7 +296,7 @@ type DecodeStatus =
   | { kind: 'base64-invalid' }
   | { kind: 'decode-failed'; code: string };
 
-interface DecodedInstruction {
+export interface DecodedInstruction {
   instruction: EmevdInstructionIr;
   bank: number;
   id: number;
@@ -319,7 +324,7 @@ interface DecodedInstruction {
  * /resultconditiongroup/i (e.g. `resultConditionGroup`, `resultConditionGroupId`).
  * Predicates write to the same non-MAIN group and are joined with `&&`.
  */
-function splitIntoSpans(instructions: EmevdInstructionIr[], registry: EmedfRegistry): Span[] {
+export function splitIntoSpans(instructions: EmevdInstructionIr[], registry: EmedfRegistry): Span[] {
   const decoded = instructions.map((instruction) => decodeForRender(instruction, registry));
   const spans: Span[] = [];
   let ordinaryBuffer: DecodedInstruction[] = [];
@@ -433,7 +438,7 @@ function isPredicate(item: DecodedInstruction): boolean {
  * 4-space event-body indent, so a line carrying an extra `INDENT` lands at the
  * 8-space continuation column that matches the DarkScript3 example.
  */
-function renderWaitBlock(
+export function renderWaitBlock(
   span: { predicates: DecodedInstruction[]; anchor: DecodedInstruction }
 ): string[] {
   const calls = span.predicates.map((predicate) =>
@@ -489,7 +494,7 @@ function isConditionGroupArg(arg: DecodedArg): boolean {
  */
 const pascalCaseCache = new Map<string, string>();
 
-function toPascalCase(name: string): string {
+export function toPascalCase(name: string): string {
   const cached = pascalCaseCache.get(name);
   if (cached !== undefined) return cached;
   const converted = toPascalCaseUncached(name);
@@ -525,7 +530,7 @@ function toPascalCaseUncached(name: string): string {
  * renderInstructionLine 各自解码一遍（base64 + decodeInstructionArgs），
  * 33266 条指令等于付两倍成本。
  */
-function decodeForRender(instruction: EmevdInstructionIr, registry: EmedfRegistry): DecodedInstruction {
+export function decodeForRender(instruction: EmevdInstructionIr, registry: EmedfRegistry): DecodedInstruction {
   const bank = instruction.bank;
   const id = instruction.id;
   if (instruction.unknown) {

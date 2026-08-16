@@ -209,6 +209,16 @@ function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open'
 }
 
 /**
+ * S14：事件文档标签短名 —— `event/common.emevd.dcx` → `common`、
+ * `m11_02_71_10.emevd.dcx` → `m11_02_71_10`。App 文件标签已承载完整资源，
+ * 工作台内层 tab 只留短名，不再重复整条相对路径。
+ */
+function eventTabShortTitle(relativePath: string): string {
+  const base = relativePath.split(/[\\/]/).pop() ?? relativePath;
+  return base.replace(/\.emevd(\.dcx)?$/i, '').replace(/\.dcx$/i, '');
+}
+
+/**
  * 空 paramdef：origin 为 fixture 且无字段，definitionCanCommit 永不放行写入。
  *
  * ⚠️ 真实字段定义的来源**已实现但尚未接进 main**（2026-08-08 实测）：
@@ -1340,7 +1350,7 @@ export function App(): ReactElement {
           });
           setEventPendingTab({
             tabId: target.sourceUri,
-            title: target.relativePath,
+            title: eventTabShortTitle(target.relativePath),
             resourceUri: target.sourceUri,
             document: {
               ...EMPTY_EMEVD_DOCUMENT,
@@ -1382,7 +1392,7 @@ export function App(): ReactElement {
         // sourceStyle 留 'none'，工作台显示可行动说明。
         setEventPendingTab(emevdPendingTabFromFullDocument({
           tabId: target.sourceUri,
-          title: target.relativePath,
+          title: eventTabShortTitle(target.relativePath),
           resourceUri: target.sourceUri,
           full,
           dslTemplate,
@@ -3194,7 +3204,11 @@ export function App(): ReactElement {
                       diagnostics: [{ severity: 'error', code: 'PRELOAD_MISSING', message: '当前预加载未暴露 submitEmevdDslPlan。' }]
                     };
                   }
-                  const result = await bridge.submitEmevdDslPlan(tab.resourceUri, sourceText);
+                  const result = await bridge.submitEmevdDslPlan(
+                    tab.resourceUri,
+                    sourceText,
+                    tab.sourceStyle === 'dark-script' ? 'dark-script' : 'patch'
+                  );
                   if (result.ok) {
                     // 同 loadEmevd：提交后重读也只发一次。以前这里紧跟一次
                     // readEmevdDocument 去换 sourceHash 与 gutter 判据，两者现在

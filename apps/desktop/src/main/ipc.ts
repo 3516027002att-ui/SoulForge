@@ -2837,7 +2837,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    */
   handle(
     'resource.submitEmevdDslPlan',
-    async (event, sourceUri: string, sourceText: string): Promise<RendererSaveResult> => {
+    // S14：mode 决定编译前端 —— 'dark-script'（$Event 源码）或 'patch'（旧 hash DSL）。
+    async (event, sourceUri: string, sourceText: string, mode: 'patch' | 'dark-script' = 'patch'): Promise<RendererSaveResult> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file || !activeSession) {
         return {
@@ -2918,7 +2919,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           baseRevision: fresh.revision,
           emedfSchemaFingerprint: schemaFingerprint,
           sourceText,
-          mode: 'patch'
+          mode
         },
         document: fresh,
         registry,
