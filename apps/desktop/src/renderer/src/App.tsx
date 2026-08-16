@@ -1284,6 +1284,8 @@ export function App(): ReactElement {
       const target = selectedFile;
       if (!target || !shouldLoadEmevd(target)) {
         setEventPendingTab(null);
+        // S15：事件没在打开，上一份事件失败不再对当前选区成立（Agent 元数据同理）。
+        setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
         return;
       }
       if (!bridge || typeof bridge.readEmevdFullDocument !== 'function') {
@@ -1311,6 +1313,21 @@ export function App(): ReactElement {
         // 但不再是唯一机制：真正的取消发生在 main，reader 侧只是不覆盖而已。
         if (full?.cancelled) return;
         if (!full?.ok) {
+          // S15 失败面：真实失败码 + 可行动句。KRAK 缺 Oodle 时 Bridge 已给完整
+          // 话术（EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE）；其它失败至少给码 +
+          // 下一步，不再只丢一句「这个事件脚本读不出来」。
+          const failureDiag = full?.diagnostics?.[0];
+          const failureCode = failureDiag?.code ?? 'EMEVD_LIVE_READ_FAILED';
+          const failureMessage = failureDiag?.message
+            ?? (failureCode === 'EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE'
+              ? '这份事件是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。'
+              : '这个事件脚本读不出来。');
+          setLastOpenFailure({
+            kind: 'event-open-failed',
+            document: target.relativePath,
+            code: failureCode,
+            message: failureMessage
+          });
           setEventPendingTab({
             tabId: target.sourceUri,
             title: target.relativePath,
@@ -1319,10 +1336,9 @@ export function App(): ReactElement {
               ...EMPTY_EMEVD_DOCUMENT,
               resourceUri: target.sourceUri,
               diagnostics: [{
-                severity: 'warning',
-                code: 'EMEVD_LIVE_READ_FAILED',
-                message: full?.diagnostics?.[0]?.message
-                  ?? '这个事件脚本读不出来。'
+                severity: 'error',
+                code: failureCode,
+                message: failureMessage
               }]
             },
             sourceHash: null,
@@ -1335,6 +1351,7 @@ export function App(): ReactElement {
           setStatus('这个事件脚本读不出来。');
           return;
         }
+        setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
         let dslTemplate: string | null = null;
         let dslTemplateTruncated = false;
         let dslTemplateTotalLines = 0;

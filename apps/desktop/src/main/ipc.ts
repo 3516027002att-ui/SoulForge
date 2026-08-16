@@ -163,6 +163,8 @@ import type {
   ParamDefDocument,
   GparamDocument,
   ReadOperationId,
+  RagChunkFamily,
+  RagRetrieveResult,
   ResourceKind,
   StructuredDiagnostic
 } from '@soulforge/shared';
@@ -2277,7 +2279,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         command: 'read-emevd-document',
         filePath: file.absolutePath,
         allowedRoots: readRoots ? [...readRoots.allowedRoots] : [dirname(file.absolutePath)],
-        timeoutMs: 120_000
+        timeoutMs: 120_000,
+        // S15：遗留通道补上与生产打开（readEmevdFullDocument）同一句 —— KRAK
+        // 事件挂上原版后必须能解，不能再当「KRAK 打不开」的根因。
+        ...(activeSession?.layers.baseRoot
+          ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+          : {})
       });
       return sanitizeRendererValue({
         ok: result.parseStatus !== 'failed',
@@ -7785,6 +7792,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         error: { code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区并完成分析，再生成向量索引。' }
       };
     }
+    if (!activeSession) {
+      return {
+        ok: false,
+        error: { code: 'WORKSPACE_REQUIRED', message: '工作区会话未就绪。' }
+      };
+    }
     const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === input.configId);
     if (!stored) {
       return { ok: false, error: { code: 'MODEL_SERVICE_CONFIG_NOT_FOUND', message: '模型服务配置不存在。' } };
@@ -7832,7 +7845,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         continue;
       }
       for (let i = 0; i < batch.length; i += 1) {
-        entries.push({ chunkId: batch[i].chunkId, model: stored.embeddingModel, vector: result.vectors[i] });
+        const vector = result.vectors[i];
+        if (!vector) continue;
+        entries.push({ chunkId: batch[i].chunkId, model: stored.embeddingModel, vector });
       }
     }
     await database.replaceRagEmbeddings(entries);
@@ -7841,7 +7856,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       embedded: entries.length,
       failed,
       model: stored.embeddingModel,
-      dim: entries[0]?.vector.length ?? 0
+      dim: entries[0]?.vector?.length ?? 0
     };
   });
 
@@ -7861,6 +7876,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       expandReferences?: boolean;
     }
   ): Promise<RagRetrieveResult> => {
+    if (!activeIndex) {
+      return { ok: false, code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区。' };
+    }
     const corpus = activeRag ?? createRagCorpus({
       workspaceId: activeIndex.workspaceId,
       builtAt: new Date().toISOString(),
@@ -7909,7 +7927,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (typeof input?.query !== 'string' || input.query.trim() === '') {
       return { ok: false, code: 'INVALID_INPUT', message: 'rag.searchEvidence 需要非空 query。' };
     }
-    if (!activeIndex) {
+    if (!activeIndex || !activeSession) {
       return { ok: false, code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区。' };
     }
     const database = await ensureActiveOperationLog(activeSession);
@@ -8384,7 +8402,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               // RAG 自动注入：每次模型调用前用最近用户消息检索工作区证据。
               // 无工作区时返回 WORKSPACE_REQUIRED（loop 不注入，不阻断会话）。
               retrieve: async (query: string) => {
-                if (!activeIndex) {
+                if (!activeIndex || !activeSession) {
                   return { ok: false, code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区。' };
                 }
                 const ragDatabase = await ensureActiveOperationLog(activeSession);

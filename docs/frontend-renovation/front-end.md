@@ -2510,6 +2510,7 @@ SHELL-09 → SHELL-10
 - **Steps**：在已有 `EventSourceWorkbenchPanel` 上做成 DarkScript3 式源码 IDE：文档标签 + 源码主区；无四钮（查找替换/Outline/Inspector/Problems），Ctrl+F 走 CodeMirror search；EMEDF 指令名 autocomplete（Ctrl+Space + 输入时）与悬停参数名列表。接 CodeMirror 6、行号、折叠、高亮、gutter、dirty tab、autocomplete/hover。不要做 260/320 固定三栏。
 - **Negative DOM**：`EmevdFourViewPanel` 不再被 `App.tsx` production 引用；Flow/Hex/Raw Bytes 不在默认 viewport。未取得 §0.3 scope 裁定前不删除四视图文件。
 - **Tests**：renderer unit/E2E；对照 DarkScript3 截图；键盘、IME、large source、diagnostic gutter 和多 tab dirty 状态。
+- **S15 失败面已落地**：读取失败（非 live 且无模板）时源码区给 code + 人话 + 下一步，禁止再画 `resource "file://event/…"` 假源码（`baselineText`/`readFailureSource` 可单测）；KRAK 缺 Oodle 时 Bridge 返回 `EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE` + 可行动话术；同一份结构化失败（`{kind:'event-open-failed', document, code, message}`）随下一次 Agent 任务提交，main 校验后进系统提示；遗留 `resource.readEmevdDocument` 通道补齐 `oodleRuntimeRoot`，与生产打开同一句。
 
 #### EVENT-30C — compile、Patch 与 native reread
 

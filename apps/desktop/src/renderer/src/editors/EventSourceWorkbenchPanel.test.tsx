@@ -23,6 +23,7 @@ import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   EventSourceWorkbenchPanel,
+  baselineText,
   type EventSourceTabData
 } from './EventSourceWorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
@@ -167,5 +168,79 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
   it('文档标签是逻辑 EMEVD 文档（tabId=资源 URI），不是扫描的物理文件计数', () => {
     assert.match(panelSource, /tabId: string/);
     assert.match(panelSource, /按 tabId 去重/);
+  });
+});
+
+describe('S15 事件失败面：读取失败时源码区给可行动句，禁止假 resource 源码', () => {
+  const FAILED_DOCUMENT: EmevdEditorDocument = {
+    schemaVersion: 1,
+    resourceUri: 'file://event/m11_02_71_10.emevd.dcx',
+    revision: 1,
+    events: [],
+    bytesBase64: '',
+    diagnostics: [{
+      severity: 'error',
+      code: 'EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE',
+      message: '这份事件是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。'
+    }],
+    documentInstanceId: 'doc-failed'
+  };
+
+  function failedTab(diagnostic: { severity: 'error' | 'info' | 'warning'; code: string; message: string }): EventSourceTabData {
+    return {
+      tabId: 'file://event/m11_02_71_10.emevd.dcx',
+      title: 'm11_02_71_10',
+      resourceUri: 'file://event/m11_02_71_10.emevd.dcx',
+      document: { ...FAILED_DOCUMENT, diagnostics: [diagnostic] },
+      sourceHash: null,
+      live: false,
+      dslTemplate: null,
+      dslTemplateTruncated: false,
+      dslTemplateTotalLines: 0,
+      sourceStyle: 'none'
+    };
+  }
+
+  it('KRAK 缺 Oodle：源码区是 code + Bridge 可行动句，不再画 resource "file://…"', () => {
+    const text = baselineText(failedTab({
+      severity: 'error',
+      code: 'EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE',
+      message: '这份事件是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。'
+    }));
+    assert.match(text, /EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE/);
+    assert.match(text, /到「开始」页选择含 sekiro\.exe 的原版目录后再打开/);
+    assert.doesNotMatch(text, /resource "file:\/\/event\//);
+  });
+
+  it('其它读取失败：code + 人话 + 下一步（下一步只在 message 未含「开始」时追加）', () => {
+    const text = baselineText(failedTab({
+      severity: 'error',
+      code: 'EMEVD_DOCUMENT_READ_FAILED',
+      message: 'EMEVD 事件表解析失败。'
+    }));
+    assert.match(text, /EMEVD_DOCUMENT_READ_FAILED/);
+    assert.match(text, /EMEVD 事件表解析失败/);
+    assert.match(text, /下一步/);
+    assert.doesNotMatch(text, /resource "file:\/\/event\//);
+  });
+
+  it('无 error/warning 诊断的失败 tab 退回 renderSource 旧基线（不凭空编失败句）', () => {
+    const tab = failedTab({ severity: 'error', code: 'X', message: 'y' });
+    const text = baselineText({
+      ...tab,
+      document: { ...tab.document, diagnostics: [{ severity: 'info', code: 'INFO', message: '记录' }] }
+    });
+    // 退回 renderSource：既有投影（resource 行 + 事件块），但**不**出现失败句。
+    assert.doesNotMatch(text, /事件脚本读不出来/);
+    assert.match(text, /resource/);
+  });
+
+  it('live + 无模板仍是 EMEDF 缺失失败关闭（不混淆两条失败路径）', () => {
+    const tab: EventSourceTabData = {
+      ...failedTab({ severity: 'error', code: 'X', message: 'y' }),
+      live: true
+    };
+    const text = baselineText(tab);
+    assert.match(text, /未找到用户本机 EMEDF/);
   });
 });
