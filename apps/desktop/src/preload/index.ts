@@ -218,6 +218,12 @@ const api = {
     loadFullDslTemplate?: boolean
   ): Promise<{
     ok?: boolean;
+    /**
+     * main 侧取消：本次打开已被更晚的打开请求取代（快速切换事件文件）。它与
+     * `ok: false` 的读取失败必须分开处理 —— 取消不代表文件有问题，调用方要静默
+     * 丢弃，不能渲染成「读不出来」。
+     */
+    cancelled?: boolean;
     documentInstanceId?: string;
     revision?: number;
     eventCount?: number;
@@ -234,6 +240,8 @@ const api = {
     sourceHash?: string | null;
     sourceFormat?: string | null;
     outerFileHash?: string | null;
+    /** Bridge 往返判定：'native-verified'（语义+字节一致）/ 'candidate'（仅语义）。 */
+    authority?: string | null;
     outline?: {
       schemaVersion: 1;
       resourceUri: string;
@@ -257,6 +265,19 @@ const api = {
     documentInstanceId,
     loadFullDslTemplate === true ? true : undefined
   ),
+  /**
+   * 主动取消本窗口在飞的事件文档打开。
+   *
+   * 为什么非要有这条通道：main 的槽位只在**下一次打开请求**到达时才中止上一份，
+   * 而「切到 PARAM/MAP 域」「关掉编辑器」根本不会再发打开请求 —— 于是那次读会
+   * 一路跑完（剩余分页读 + outline + 整段反汇编），只是结果没人要。renderer 侧
+   * 清理只翻一个本地布尔值，对主进程完全不可见。
+   *
+   * 不带参数：一个窗口只有一份在飞的打开，槽位就是按窗口存的，取消的语义只能是
+   * 「我这个窗口那份」。传 sourceUri 反而会引入「传错了就静默不取消」的失败模式。
+   */
+  cancelEmevdFullDocument: (): Promise<{ ok: boolean; cancelled: boolean }> =>
+    ipcRenderer.invoke('resource.cancelEmevdFullDocument'),
   submitEmevdDslPlan: (sourceUri: string, sourceText: string): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
   readEmedfCompletionCatalog: (): Promise<{

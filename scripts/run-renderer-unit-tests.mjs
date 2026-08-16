@@ -7,9 +7,14 @@
  * 解析回 `.ts`。这里沿用仓库既有做法（run-three-scene-functional-smoke.mjs 同一
  * 范式）：用 esbuild 把测试文件打成单个 ESM，再交给 node:test 跑。
  *
- * 只收 renderer 下的纯逻辑测试（无 DOM、无 IPC）。需要真实 Electron 或渲染的用例
- * 属于 test:renderer-e2e，不在这里——两者的失败含义不同，混在一个入口里会让
- * 「缺 Electron」和「逻辑回归」变成同一种红。
+ * 只收**纯逻辑**测试（无 DOM、无 IPC、不 import electron）。需要真实 Electron 或
+ * 渲染的用例属于 test:renderer-e2e / test:database-utility，不在这里——两者的失败
+ * 含义不同，混在一个入口里会让「缺 Electron」和「逻辑回归」变成同一种红。
+ *
+ * 扫描根有两个：renderer/src 与 main。main 侧只允许放不 import electron 的纯逻辑
+ * 模块（如 emevdOpenSlots：窗口 id 只是个数字）。加这个根是因为主进程里同样有
+ * 靠读代码无法证伪的并发时序不变式，而它们此前没有任何单元测试入口可落——
+ * 最近的替代品 test:database-utility 要起真 Electron，对纯逻辑过重。
  */
 import { buildSync } from 'esbuild';
 import { spawnSync } from 'node:child_process';
@@ -19,6 +24,15 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const rendererRoot = join(root, 'apps', 'desktop', 'src', 'renderer', 'src');
+const mainRoot = join(root, 'apps', 'desktop', 'src', 'main');
+/**
+ * 扫描根。每个根单独要求非空：只对合集判空的话，某个根下的测试被整体删掉
+ * （或目录改名导致扫不到）仍然会绿，正是「删掉测试表现为门禁通过」那类假绿。
+ */
+const scanRoots = [
+  { label: 'renderer', dir: rendererRoot },
+  { label: 'main', dir: mainRoot }
+];
 
 /** 递归收集 *.test.ts。约定式发现：新增测试文件不需要改本入口。 */
 function collectTests(directory) {
@@ -34,29 +48,32 @@ function collectTests(directory) {
   return found;
 }
 
-if (!existsSync(rendererRoot)) {
-  console.error(JSON.stringify({
-    ok: false,
-    suite: 'renderer-unit',
-    code: 'RENDERER_SOURCE_MISSING',
-    message: `renderer 源码目录不存在：${rendererRoot}`
-  }, null, 2));
-  process.exit(1);
-}
-
-const tests = collectTests(rendererRoot);
-// 空集合必须失败关闭：这个入口的存在就是为了保证 renderer 有单元测试。
-// 若允许「零文件 = 通过」，删掉最后一个测试文件反而会让门禁变绿。
-if (tests.length === 0) {
-  console.error(JSON.stringify({
-    ok: false,
-    suite: 'renderer-unit',
-    code: 'RENDERER_UNIT_TESTS_EMPTY',
-    message: 'renderer 下没有任何 *.test.ts；空集合视为失败，'
-      + '避免「删掉测试」表现为「门禁通过」。',
-    scannedRoot: relative(root, rendererRoot)
-  }, null, 2));
-  process.exit(1);
+const tests = [];
+for (const { label, dir } of scanRoots) {
+  if (!existsSync(dir)) {
+    console.error(JSON.stringify({
+      ok: false,
+      suite: 'renderer-unit',
+      code: 'UNIT_SOURCE_MISSING',
+      message: `${label} 源码目录不存在：${dir}`
+    }, null, 2));
+    process.exit(1);
+  }
+  const found = collectTests(dir);
+  // 空集合必须失败关闭：这个入口的存在就是为了保证这些目录下有单元测试。
+  // 若允许「零文件 = 通过」，删掉最后一个测试文件反而会让门禁变绿。
+  if (found.length === 0) {
+    console.error(JSON.stringify({
+      ok: false,
+      suite: 'renderer-unit',
+      code: 'UNIT_TESTS_EMPTY',
+      message: `${label} 下没有任何 *.test.ts；空集合视为失败，`
+        + '避免「删掉测试」表现为「门禁通过」。',
+      scannedRoot: relative(root, dir)
+    }, null, 2));
+    process.exit(1);
+  }
+  tests.push(...found);
 }
 
 const outDir = join(root, 'node_modules', '.cache', 'soulforge-renderer-unit');
@@ -64,7 +81,9 @@ mkdirSync(outDir, { recursive: true });
 
 const outfiles = [];
 for (const test of tests) {
-  const outfile = join(outDir, `${relative(rendererRoot, test).replace(/[\\/]/g, '__')}.mjs`);
+  // 相对**仓库根**而不是相对某个扫描根：后者对另一个根下的文件会算出 ../.. 前缀，
+  // 展平后可能与别的路径撞名，撞了就是一个测试文件静默覆盖另一个。
+  const outfile = join(outDir, `${relative(root, test).replace(/[\\/]/g, '__')}.mjs`);
   buildSync({
     entryPoints: [test],
     outfile,

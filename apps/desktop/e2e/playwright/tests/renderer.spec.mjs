@@ -64,7 +64,31 @@ async function openFixtureWorkspace(window) {
   // 默认展开会压缩中央编辑区，先收 Agent 让开始页按钮可见可点。
   await closeAgentPanel(window);
   await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
-  await expect(window.locator('.status-bar')).toContainText('已索引');
+  /*
+   * 挂载完成的等待信号。
+   *
+   * 原判据是 `.status-bar` 含「已索引」。S12 把状态栏整块摘掉了（styles.css 还留着
+   * 那条 `.status-bar` 规则，但 renderer 里没有任何元素带这个 class，「已索引」只
+   * 出现在两个 JS 字符串里），于是这个等待**永远不会 resolve** —— 全部 40 个调用
+   * 点都卡在这一行超时。产品结构不为测试回退（不恢复状态栏），改判据。
+   *
+   * 两段等待对应 mountWorkspace 的两个阶段，与原判据同语义：
+   *
+   * 1. 开始页标题出现工作区名 —— scanWorkspace 已 resolve。App.tsx 里
+   *    setWorkspace / setAllFiles / setFiles 与标题所需的 workspace 在同一个批次
+   *    提交，所以标题一变，下游 `.file-item` 点击所需的文件数据必然已在。
+   * 2. `.welcome__stats` 出现「已解析」—— analyzeWorkspace 已 resolve
+   *    （那段文案由 `analysis ? ...` 控制，analysis 为 null 时整段不出现）。
+   *    原判据的「已索引」也是 analyze 之后才写进状态栏的，这一段把那层前提补回来，
+   *    避免测试在 analyze 在飞时开始交互、被中途的 setState 重渲染打断。
+   *
+   * `.welcome__stats` 所在的 `.editor-welcome` 在工作区打开后是 `display:none`，
+   * 但 toContainText 读 textContent、不做可见性检查，所以隐藏不影响判据。这里刻意
+   * 不改成可见元素：shell 里没有第二个消费 analysis 的 DOM 节点，为测试新增一个就
+   * 是「为测试改产品结构」。
+   */
+  await expect(window.locator('.project-overview h1')).toHaveText('fixture-workspace');
+  await expect(window.locator('.welcome__stats')).toContainText('已解析');
 }
 
 /**
@@ -2322,5 +2346,200 @@ test('EVENT-30B：多 tab 各自 dirty，切 tab 保留未提交编辑', async (
   await expect(workbench.locator('[role="tab"]')).toContainText('event/common.emevd');
 
   await window.screenshot({ path: 'test-results/12-event-multitab.png' });
+  await app.close();
+});
+
+test('EVENT-30B：打开一个事件文档只发一次 readEmevdFullDocument，且零次 readEmevdDocument', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 打开前基线：两条 channel 都没被碰过。没有这一步，「恰好一次」可能是
+  // 「打开工作区时已经发过一次、打开文件时其实发了两次」的巧合。
+  const before = await ipcCalls(app);
+  expect(before['resource.readEmevdFullDocument'] ?? 0).toBe(0);
+  expect(before['resource.readEmevdDocument'] ?? 0).toBe(0);
+
+  await openEventWorkbench(window, 'event/common.emevd');
+
+  /*
+   * 一次读到底：打开事件文档以前是两次 IPC —— readEmevdDocument 拿有界 envelope
+   * 投影，readEmevdFullDocument 拿权威源码。第一次读的产物只用在状态行三个标量和
+   * gutter 的「未知指令条数」，而它的 instructionsSample 默认只覆盖前 256 条指令，
+   * 于是真实 common.emevd（33266 条指令）里第 256 条之后的事件全被标成「整段未知」。
+   * 那趟往返换回来的是一份系统性错误的判据，已整体删除；三个标量与 gutter 判据现在
+   * 都从 readEmevdFullDocument 的 outline 出。
+   *
+   * 这条判据钉的是「删掉的那次读没有以任何形式回来」：读回归会让第二个断言变 1，
+   * 而重复触发（effect 依赖漂移、StrictMode 双调用泄漏到生产构建）会让第一个变 ≥2。
+   * 两者都不会让工作台看起来有问题，只会让打开一个真实事件文件多付一整趟 Bridge。
+   */
+  const after = await ipcCalls(app);
+  expect(after['resource.readEmevdFullDocument'] ?? 0).toBe(1);
+  expect(after['resource.readEmevdDocument'] ?? 0).toBe(0);
+
+  await app.close();
+});
+
+/** 打开事件文档的 fixture 观测记录（到达时刻 / 落地顺序 / 取消次数 / 生效延迟）。 */
+async function emevdOpenLog(app) {
+  return app.evaluate(() => global.__fixtureEmevdOpenLog ?? null);
+}
+
+test('EVENT-30B：快速切换 common → menu，旧请求被取消且不覆盖 UI', async () => {
+  /*
+   * fixture 给每次 readEmevdFullDocument 加延迟并复制生产的在飞槽契约（见
+   * fixture-main.mjs 的 activeEmevdOpen）。没有延迟时 fixture handler 同步返回，
+   * 两次点击必然串行走完，「后到的请求取代先到的」这个形态压根不出现。
+   *
+   * 延迟取 8000ms 而不是「够用就好」的几百毫秒：实测两次 `.file-item` 点击之间
+   * 隔了 1990ms —— 第一次点击后中央区挂载 CodeMirror，布局抖动让第二次点击的
+   * actionability 检查一直等。700ms 的延迟在那之前就到期了，两个请求全程串行、
+   * fixture 两次都返回 ok，而 UI 断言当时仍然全绿（终态确实是 menu），整条用例
+   * 静默退化成「顺序打开两个文件」。8000ms 给了 4 倍余量，下面的前提断言再兜一道。
+   *
+   * 覆盖的是行为：被放弃的请求既不能落成 EMEVD_LIVE_READ_FAILED 警告条，也不能把已经
+   * 切走的文档写回工作台或建成标签页。
+   *
+   * **不能**声称覆盖 `if (full?.cancelled) return` 这一道。实测三格扰动矩阵（每格都
+   * 重建 bundle 后跑）：
+   *   full.cancelled 关 / 局部 cancelled 开 → 绿
+   *   full.cancelled 开 / 局部 cancelled 关 → 绿
+   *   两道都关                              → 红（2 个标签，common 抢到激活态）
+   * 换文件时 React 必然先跑上一轮 effect 的 cleanup，局部 cancelled 一定已置位，所以
+   * 这个场景里两道判据互为冗余，本用例只能证明「至少一道生效」。要单独钉住 full.cancelled
+   * 得让 effect 不重跑而 main 仍取消（本 UI 里换文件做不到这个形态）。
+   *
+   * 生产主进程侧的中止（beginEmevdOpen → 停掉剩余分页读 / outline / 写
+   * emevdFullDocuments / 整段反汇编）也不在这条 e2e 的覆盖范围内。
+   */
+  const delayMs = 8_000;
+  const { app, window, pageErrors, consoleErrors } = await launchApp({
+    SF_TEST_EMEVD_OPEN_DELAY_MS: String(delayMs)
+  });
+  await openFixtureWorkspace(window);
+  await window.locator('[data-domain="files"]').click();
+  await closeAgentPanel(window);
+
+  // 快速切换：点 common 后**不等**工作台挂载就点 menu。
+  await window.locator('.file-item', { hasText: 'event/common.emevd' }).click();
+  await window.locator('.file-item', { hasText: 'event/menu.emevd' }).click();
+
+  /*
+   * 竞态前提断言 —— 必须在 UI 断言之前，且不能与 UI 断言共用分支。
+   *
+   * 前两条钉「两次请求真的重叠」：两次到达都发生了，且间隔小于延迟。间隔一旦超过
+   * 延迟，第一次请求已经正常返回，取消分支根本没被走到 —— 那时下面的 UI 断言仍会
+   * 全绿，而它们证明的东西已经变成「顺序打开」。第三条钉「fixture 确实返回了一次
+   * cancelled」：这是取消契约被触发的直接观测，缺了它，前两条只能证明时间窗重叠，
+   * 不能证明主进程侧真的取代了旧请求。
+   */
+  await expect.poll(
+    async () => (await emevdOpenLog(app))?.arrivals.length ?? 0,
+    { timeout: 20_000 }
+  ).toBe(2);
+  const log = await emevdOpenLog(app);
+  const gapMs = log.arrivals[1].atMs - log.arrivals[0].atMs;
+  expect(
+    gapMs,
+    `两次打开请求间隔 ${gapMs}ms，已不小于 fixture 延迟 ${log.delayMs}ms：`
+    + '第二次请求落在第一次之后，本用例不再覆盖取消分支（加大 delayMs 或查为何点击变慢）'
+  ).toBeLessThan(log.delayMs);
+  expect(log.arrivals[0].sourceUri).toBe('fixture://event/common.emevd');
+  expect(log.arrivals[1].sourceUri).toBe('fixture://event/menu.emevd');
+  await expect
+    .poll(async () => (await emevdOpenLog(app))?.cancelled ?? 0, { timeout: 20_000 })
+    .toBe(1);
+
+  /*
+   * 第四条前提：被放弃的 common 必须**迟于** menu 落地。
+   *
+   * 这条不是锦上添花 —— 少了它，整条用例只能证明「旧响应不得建标签页」。要证的另一半
+   * 是「迟到的旧响应不得覆盖已经正确的 UI」，前提就是旧响应真的迟到；若 common 先落地，
+   * 后到的 menu 会自然把 UI 盖成正确终态，即便 renderer 侧的 cancelled 判据被整条删掉
+   * 也全绿。fixture 的递减延迟负责制造这个顺序，这里负责证明它成立。
+   */
+  const settled = (await emevdOpenLog(app)).settlements;
+  expect(
+    settled.map((s) => `${s.sourceUri}${s.cancelled ? '(cancelled)' : ''}`),
+    '被放弃的 common 必须最后落地，否则本用例覆盖不到「迟到的旧响应不得覆盖 UI」'
+  ).toEqual([
+    'fixture://event/menu.emevd',
+    'fixture://event/common.emevd(cancelled)'
+  ]);
+
+  const workbench = window.locator('[aria-label="Event 源码工作台"]');
+  await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();
+  const content = workbench.locator('.esw-source__host .cm-content');
+
+  /*
+   * 终态只剩最后选中的那份。上面的 settlements 断言已经确认 common（被取消的那份）
+   * 最后落地，所以走到这里两份响应都已经进过 renderer：少了 cancelled 判据时，UI 会
+   * 先显示 menu 再被 common 盖回去，下面这些断言看到的就是被盖回去之后的状态。
+   *
+   * 原先这里是 waitForTimeout(1500)，按等长延迟算的（以为两份只差 2s）。递减延迟下
+   * common 迟到约 4s，固定 1500ms 会在覆盖发生**之前**跑完 UI 断言 —— 正是「断言在
+   * 事故前通过」的假绿。现在等待条件是观测量，不是猜的墙钟。
+   */
+  // 失败时把 fixture 侧观测量一并抛出：只看 UI 断言分不清「旧响应盖了 UI」和
+  // 「又发了一趟新请求」，这两种原因的修法完全不同。
+  try {
+    await expect(content).toContainText('resource "fixture://event/menu.emevd"');
+  } catch (err) {
+    const at = await emevdOpenLog(app);
+    const tabTitles = await workbench.locator('[role="tab"]').allInnerTexts();
+    const calls = await ipcCalls(app);
+    throw new Error(
+      `${err.message}\n\n=== 失败时观测量 ===\n`
+      + `arrivals: ${JSON.stringify(at?.arrivals)}\n`
+      + `settlements: ${JSON.stringify(at?.settlements)}\n`
+      + `cancelled: ${at?.cancelled}\n`
+      + `readEmevdFullDocument 调用次数: ${calls['resource.readEmevdFullDocument'] ?? 0}\n`
+      + `标签: ${JSON.stringify(tabTitles)}`
+    );
+  }
+  await expect(content).toContainText('event @e:ev100');
+  await expect(content).not.toContainText('event @e:ev50');
+  await expect(content).not.toContainText('event @e:ev60');
+
+  // 取消不是解析失败：不得出现「读不出来」的警告条。
+  await expect(workbench.getByText('这个事件脚本读不出来。')).toHaveCount(0);
+  await expect(workbench.getByText('EMEVD_LIVE_READ_FAILED')).toHaveCount(0);
+
+  // 标签只剩 menu：common 的响应被丢弃，从未成为标签。
+  const tabs = workbench.locator('[role="tab"]');
+  await expect(tabs).toHaveCount(1);
+  await expect(tabs.first()).toContainText('event/menu.emevd');
+
+  expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
+  expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
+
+  await window.screenshot({ path: 'test-results/12-event-fast-switch.png' });
+  await app.close();
+});
+
+test('EVENT-30B：event→PARAM 切离事件域必须发出取消 IPC', async () => {
+  const delayMs = 8_000;
+  const { app, window, pageErrors, consoleErrors } = await launchApp({
+    SF_TEST_EMEVD_OPEN_DELAY_MS: String(delayMs)
+  });
+  await openFixtureWorkspace(window);
+  await window.locator('[data-domain="files"]').click();
+  await closeAgentPanel(window);
+  await window.locator('.file-item', { hasText: 'event/common.emevd' }).click();
+  await expect.poll(
+    async () => (await emevdOpenLog(app))?.arrivals.length ?? 0,
+    { timeout: 10_000 }
+  ).toBe(1);
+  await window.locator('[data-domain="param"]').click();
+  await expect.poll(
+    async () => (await ipcCalls(app))['resource.cancelEmevdFullDocument'] ?? 0,
+    { timeout: 10_000 }
+  ).toBeGreaterThan(0);
+  await expect.poll(
+    async () => (await emevdOpenLog(app))?.cancelled ?? 0,
+    { timeout: 20_000 }
+  ).toBeGreaterThan(0);
+  expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
+  expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
   await app.close();
 });

@@ -24,6 +24,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   EventSourceWorkbenchPanel,
   baselineText,
+  isSourceReadOnly,
   type EventSourceTabData
 } from './EventSourceWorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
@@ -242,5 +243,23 @@ describe('S15 事件失败面：读取失败时源码区给可行动句，禁止
     };
     const text = baselineText(tab);
     assert.match(text, /未找到用户本机 EMEDF/);
+  });
+});
+
+describe('DarkScript 源码只读（按钮层与 CodeMirror 创建共用同一判据）', () => {
+  it('live DarkScript 也必须只读，不能只靠 !live', () => {
+    assert.equal(isSourceReadOnly({
+      live: true,
+      dslTemplate: '$Event(0, Default, function() {});',
+      sourceStyle: 'dark-script'
+    }), true);
+  });
+
+  it('未标记 dark-script 的 live 模板仍可编辑（写链保留给 patch-dsl）', () => {
+    assert.equal(isSourceReadOnly({
+      live: true,
+      dslTemplate: '$Resource file://event/common.emevd',
+      sourceStyle: 'patch-dsl'
+    }), false);
   });
 });

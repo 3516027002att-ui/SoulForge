@@ -1,4 +1,6 @@
 export * from './types.js';
+export * from './workspace-format-family.js';
+export * from './rag.js';
 export * from './resourceSymbols.js';
 export * from './resource-uri.js';
 export * from './provenance.js';

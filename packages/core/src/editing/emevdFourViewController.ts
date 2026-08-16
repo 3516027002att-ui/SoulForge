@@ -48,6 +48,11 @@ export function createEmevdEditorDocument(input: {
   }>;
   bytesBase64?: string;
   documentInstanceId?: string;
+  /**
+   * 打开路径不要算稳定身份：真实 common 上 attach 要扫 33266 条指令并做大量 SHA-256，
+   * 实测约 139 ms 主线程长帧。反汇编 / outline 不需要锚。写链在提交前再 attach。
+   */
+  attachIdentity?: boolean;
 }): EmevdEditorDocument {
   const events: EmevdEventIr[] = input.events.map((event) => {
     const eventUri = `${input.resourceUri}#event/${event.eventId}`;
@@ -65,7 +70,7 @@ export function createEmevdEditorDocument(input: {
       }))
     };
   });
-  return attachEmevdStableIdentity({
+  const document: EmevdEditorDocument = {
     schemaVersion: 1,
     resourceUri: input.resourceUri,
     revision: 0,
@@ -77,10 +82,16 @@ export function createEmevdEditorDocument(input: {
           code: 'EMEVD_UNKNOWN_INSTRUCTIONS_PRESERVED',
           message: '未知 instruction 已保留为不透明 payload，禁止无 schema 的结构化修改。'
         }]
-      : []
-  }, input.documentInstanceId !== undefined
-    ? { documentInstanceId: input.documentInstanceId }
-    : undefined);
+      : [],
+    ...(input.documentInstanceId !== undefined ? { documentInstanceId: input.documentInstanceId } : {})
+  };
+  if (input.attachIdentity === false) return document;
+  return attachEmevdStableIdentity(
+    document,
+    input.documentInstanceId !== undefined
+      ? { documentInstanceId: input.documentInstanceId }
+      : undefined
+  );
 }
 
 export function renderEmevdDsl(document: EmevdEditorDocument): string {

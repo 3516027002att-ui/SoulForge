@@ -62,7 +62,7 @@ export type EditorId =
   | 'event'             // EMEVD 事件
   | 'script'            // 脚本容器
   | 'container'         // 通用 BND4 容器
-  | 'tae' | 'esd' | 'flver' | 'tpf'
+  | 'tae' | 'esd' | 'flver' | 'tpf' | 'vfx'
   | 'plain-text'        // 可编辑纯文本资源
   | 'binary'            // 无专属编辑器的二进制：原始字节
   | 'project'            // 开始页（挂载入口 + 工作区状态）
@@ -187,8 +187,8 @@ export function selectWorkbenchRoute(input: SelectEditorInput): WorkbenchRoute {
 /**
  * 把 EditorIntegration 的 editorId 投影到主视图唯一工作台标识。
  *
- * 只解释 EDITOR_INTEGRATIONS（§4.4 固定注册表）。material/vfx 对应工作台
- * 尚未实施：不假装 ready，落原始字节（candidate 视图）。
+ * 只解释 EDITOR_INTEGRATIONS（§4.4 固定注册表）。material 工作台仍走
+ * App 装配层后缀补正；vfx 已有工作台，确认叶落到 'vfx'。
  */
 function editorIdForIntegration(integrationId: string, leafFormatId: Exclude<NativeFormatId, 'unknown'>): EditorId {
   const integration = EDITOR_INTEGRATIONS.find((item) => item.integrationId === integrationId);
@@ -203,9 +203,9 @@ function editorIdForIntegration(integrationId: string, leafFormatId: Exclude<Nat
     case 'tae': return 'tae';
     case 'flver': return 'flver';
     case 'tpf': return 'tpf';
+    case 'vfx': return 'vfx';
     case 'bnd4': return 'container';
     case 'material':
-    case 'vfx':
     case 'files':
     default: return 'binary';
   }
@@ -227,6 +227,12 @@ function editorIdForLegacy(
   // 命令面板强制「以 BND4 容器打开」：用户显式选择，优先于格式推断。
   if (input.bnd4Forced === true) return 'container';
 
+  // 复合后缀必须先于 formatKind：talkesdbnd 的扫描 formatKind 仍是 lua，
+  // ffxbnd 仍是 bnd，不拦截会进 script / 通用容器。
+  if (/\.talkesdbnd(\.dcx)?$/i.test(file.relativePath)) return 'esd';
+  if (/\.ffxbnd(\.dcx)?$/i.test(file.relativePath) || /\.fxr(\.dcx)?$/i.test(file.relativePath)) {
+    return 'vfx';
+  }
   // T3（2026-08-15）：`*.anibnd.dcx` / `*.tae` 走 TAE 工作台（行为 + 动画合并
   // 后的「动作」域）。anibnd 的 formatKind 是 'bnd'，必须在 formatKind switch
   // 之前拦截，否则会落进 BND4 通用容器页（grok T3 明确禁止 anibnd 走容器页）。
@@ -260,9 +266,10 @@ function editorIdForLegacy(
   if (path.endsWith('.msb')) return 'map';
   if (path.endsWith('.lua') || path.endsWith('.hks') || path.endsWith('.luabnd.dcx')) return 'script';
   // `.tae` 已被上方 T3 早返拦截（与 `.anibnd.dcx` 一并走 TAE 工作台）。
-  if (path.endsWith('.esd')) return 'esd';
+  if (path.endsWith('.esd') || path.endsWith('.talkesdbnd.dcx')) return 'esd';
   if (path.endsWith('.flver')) return 'flver';
-  if (path.endsWith('.tpf.dcx') || path.endsWith('.tpf')) return 'tpf';
+  if (path.endsWith('.tpf.dcx') || path.endsWith('.tpf') || path.endsWith('.texbnd.dcx')) return 'tpf';
+  if (path.endsWith('.fxr') || path.endsWith('.fxr.dcx') || path.endsWith('.ffxbnd.dcx')) return 'vfx';
 
   // 容器：没有专属编辑器但能列条目树。
   if (isContainerLike(file)) return 'container';

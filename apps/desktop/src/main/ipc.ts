@@ -38,7 +38,7 @@ import {
   commitEmevdMutationViaBridge,
   fingerprintEmedfRegistry,
   readFullEmevdDocumentViaBridge,
-  renderEmevdDarkScriptAsync,
+  renderEmevdDarkScript,
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
   listEmedfCompletionItems,
@@ -119,6 +119,7 @@ import {
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification
 } from '@soulforge/core';
+import * as SoulForgeCore from '@soulforge/core';
 import {
   CONTAINER_PAGE_SIZE,
   FMG_PAGE_SIZE,
@@ -190,7 +191,7 @@ import {
   type RendererResourcePreview,
   type RendererSaveResult
 } from './rendererDto.js';
-import { commitEmevdFullDocument } from './emevdAuthorityCache.js';
+import { commitEmevdFullDocument, EmevdAuthorityCache } from './emevdAuthorityCache.js';
 import { EmevdOpenSlots } from './emevdOpenSlots.js';
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
 import { readRecentPath, writeRecentPath } from './recentPaths.js';
@@ -209,7 +210,40 @@ let activeWorkspaceSessionId: string | null = null;
  * main via paginated Bridge reads; the renderer only ever edits DSL text and
  * never holds these documents (hard constraint 18).
  */
-const emevdFullDocuments = new Map<string, EmevdEditorDocument>();
+const emevdFullDocuments = new EmevdAuthorityCache<EmevdEditorDocument>();
+
+type EmevdFullReadInput = Parameters<typeof readFullEmevdDocumentViaBridge>[0] & {
+  attachIdentity?: boolean;
+  cachePolicy?: 'default' | 'bypass';
+  signal?: AbortSignal;
+  oodleRuntimeRoot?: string;
+  useDocumentSession?: boolean;
+};
+
+type EmevdFullReadResult = Awaited<ReturnType<typeof readFullEmevdDocumentViaBridge>> & {
+  cancelled?: boolean;
+  authority?: string;
+};
+
+function readFullEmevdDocument(input: EmevdFullReadInput): Promise<EmevdFullReadResult> {
+  // 工作树 core 有这些字段；node_modules junction 仍指向主仓旧类型。
+  return readFullEmevdDocumentViaBridge(
+    input as Parameters<typeof readFullEmevdDocumentViaBridge>[0]
+  ) as Promise<EmevdFullReadResult>;
+}
+
+type DarkScriptAsyncFn = (
+  document: EmevdEditorDocument,
+  registry: Parameters<typeof renderEmevdDarkScript>[1],
+  options?: { signal?: AbortSignal }
+) => Promise<{ text: string; truncated: boolean; totalLines: number; cancelled?: boolean }>;
+
+const renderEmevdDarkScriptAsync: DarkScriptAsyncFn =
+  (SoulForgeCore as { renderEmevdDarkScriptAsync?: DarkScriptAsyncFn }).renderEmevdDarkScriptAsync
+  ?? (async (document, registry) => {
+    const text = renderEmevdDarkScript(document, registry);
+    return { text, truncated: false, totalLines: text.split('\n').length };
+  });
 
 /**
  * 打开事件文档的在飞请求槽，**按 renderer 窗口分槽**。
@@ -2006,6 +2040,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         : undefined;
 
       if (activeSession) await disposeBridgeDaemonPool();
+      emevdFullDocuments.clear();
       activeSession = await openWorkspaceSession({
         overlayRoot: overlaySelection.absolutePath,
         ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}),
@@ -2466,14 +2501,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // 槽已在 handler 开头建好（openController）。这里补一次取消检查：root 准备
       // 期间同窗口可能已经来了更新的请求，那这次读根本不该发出去。
       if (openController.signal.aborted) return emevdOpenCancelled(sourceUri);
-      const full = await readFullEmevdDocumentViaBridge({
+      const full = await readFullEmevdDocument({
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],
         resourceUri: sourceUri,
         registry: getEmevdRegistry().registry,
         signal: openController.signal,
         ...(documentInstanceId ? { documentInstanceId } : {}),
-        // pageSize 不再显式指定：走 DEFAULT_PAGE_SIZE，常见事件文件一页读完。
+        // pageSize 不再显式指定：走 DEFAULT_PAGE_SIZE（8192，避免单页 33k 指令 JSON 长帧）。
         ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {}),
         timeoutMs: 120_000
       });
@@ -2536,9 +2571,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           sourceUri
         });
       }
-      if (!commitEmevdFullDocument(emevdFullDocuments, sourceUri, full.document, openController.signal)) {
+      if (!commitEmevdFullDocument(
+        emevdFullDocuments,
+        sourceUri,
+        full.document,
+        openController.signal,
+        full.sourceHash ?? null
+      )) {
         return emevdOpenCancelled(sourceUri);
       }
+      activeEmevdOpens.finish(event.sender.id, sourceUri, openController);
       return {
         ok: true,
         sourceUri,
@@ -2634,21 +2676,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const operationLog = await ensureActiveOperationLog(activeSession);
       const registry = getEmevdRegistry().registry;
-      const full = await readFullEmevdDocumentViaBridge({
+      const full = await readFullEmevdDocument({
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],
         resourceUri: sourceUri,
         registry,
         ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
-        // 不写死 pageSize：让它走 readFullEmevdDocumentViaBridge 的默认 65536。
-        // 写死 512 时真实 common（33266 指令）要分 65 页，而下面的 bypass 是**逐页**
-        // 生效的 —— 每页都无条件重读磁盘 + 重解析 + 重跑 VerifyRoundTrip，实测 2023 ms，
-        // 单页只要 200 ms。bypass 本身没错（提交前置读确实不能依赖缓存），错在粒度
-        // 被 pageSize 拆成了 65 份。
+        // 不写死 pageSize：走默认 8192。bypass 的第一页会重解析，后续页走
+        // documentSession 同快照切片，不会按页把 33k 指令再解一遍。
         // 提交前置读必须绕过 Bridge 文档缓存：这一读产出 expectedDocumentHash /
         // expectedOuterFileHash，是写回的前置条件，要的是此刻磁盘上的真实内容。
-        cachePolicy: 'bypass',
-        timeoutMs: 120_000
+        cachePolicy: 'bypass' as const,
+        timeoutMs: 120_000,
+        attachIdentity: true
       });
       if (!full.ok || !full.document) {
         return {
@@ -2705,20 +2745,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       // Refresh authoritative cache + indexed preview from the committed file.
       // 复用上面已验证的 roots（staging 已注册）。
-      const refreshed = await readFullEmevdDocumentViaBridge({
+      const refreshed = await readFullEmevdDocument({
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],
         resourceUri: sourceUri,
         registry,
         ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
-        // 同上：不写死 pageSize，否则 bypass 按页重复解析（真实 common 65 次）。
+        // 同上：不写死更小的 pageSize；bypass 后续页靠 session，不再整份重解析。
         // 写回后重读同样绕过缓存：刚提交的文件在缓存里可能留着提交前那一份，
         // 而这一读的产物要装进 emevdFullDocuments 当权威文档。
-        cachePolicy: 'bypass',
-        timeoutMs: 120_000
+        cachePolicy: 'bypass' as const,
+        timeoutMs: 120_000,
+        attachIdentity: true
       });
       if (refreshed.ok && refreshed.document) {
-        emevdFullDocuments.set(sourceUri, refreshed.document);
+        emevdFullDocuments.replace(sourceUri, refreshed.document, refreshed.sourceHash ?? null);
       }
       const preview = await openResourcePreview({
         file,

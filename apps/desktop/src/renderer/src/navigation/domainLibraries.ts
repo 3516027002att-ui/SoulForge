@@ -63,7 +63,7 @@ export function isModelLibraryPath(relativePath: string): boolean {
 }
 
 export function isTextureLibraryPath(relativePath: string): boolean {
-  return /\.tpf(\.dcx)?$/i.test(relativePath);
+  return /\.(tpf|texbnd)(\.dcx)?$/i.test(relativePath);
 }
 
 export function isMaterialLibraryPath(relativePath: string): boolean {
@@ -71,7 +71,7 @@ export function isMaterialLibraryPath(relativePath: string): boolean {
 }
 
 export function isVfxLibraryPath(relativePath: string): boolean {
-  return /\.fxr(\.dcx)?$/i.test(relativePath);
+  return /\.(fxr|ffxbnd)(\.dcx)?$/i.test(relativePath);
 }
 
 export function isGenericContainerPath(relativePath: string): boolean {
@@ -81,7 +81,8 @@ export function isGenericContainerPath(relativePath: string): boolean {
     && !isTextureLibraryPath(relativePath)
     && !isScriptLibraryPath(relativePath)
     && !isAnimationLibraryPath(relativePath)
-    && !isBehaviorLibraryPath(relativePath);
+    && !isBehaviorLibraryPath(relativePath)
+    && !isVfxLibraryPath(relativePath);
 }
 
 const DOMAIN_MATCHERS: Partial<Record<EditorDomainId, (path: string) => boolean>> = {
