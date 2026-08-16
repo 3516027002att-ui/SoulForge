@@ -1498,6 +1498,12 @@ Agent
 [Agent icon] @Agent [Ask / Plan / Edit]
 ```
 
+**S9 裁定（2026-08-16）**：Ask/Plan/Edit 模式菜单 portal 挂 `document.body` +
+`position:fixed`（锚点取 trigger rect；窗口 resize 重锚；视口太矮自动翻到 trigger
+上方）。旧实现 `position:absolute; bottom: calc(100%+5px)` 挂在 composer 内，被
+`.agent` / composer 的 `overflow:hidden` 裁掉（「点 Ask 弹窗被挡住」）。Esc / 点
+外侧关闭；关闭时清锚点，重开不闪旧坐标。不做独立 BrowserWindow。
+
 输入区：
 
 - 正文最小 72px；

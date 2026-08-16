@@ -1074,6 +1074,80 @@ test('S8：Agent dock 可缩到 200px（下限 200，上限 620，默认 440）'
   await app.close();
 });
 
+test('S9：Ask 菜单 portal 到 body 不被裁切，Esc/外侧点击/选中均关闭', async () => {
+  const { app, window } = await launchApp();
+  // localStorage 可能持久化了上一轮的收起状态：先确保 dock 展开。
+  const agentToggle = window.getByRole('button', { name: 'AI Agent 面板' });
+  if ((await agentToggle.getAttribute('aria-pressed')) === 'false') {
+    await agentToggle.click();
+  }
+  const trigger = window.locator('.agent-mode-trigger');
+  await expect(trigger).toContainText('Ask');
+  await trigger.click();
+
+  // 菜单是 body 直接子级（portal）：不再被 .agent/composer 的 overflow:hidden 裁掉。
+  const menu = window.locator('body > .agent-mode-menu');
+  await expect(menu).toHaveCount(1);
+  await expect(menu).toContainText('Plan');
+  await expect(menu).toContainText('Edit');
+  // 完整落在视口内（矮窗口自动翻到 trigger 上方）。
+  // 完整落在视口内（不依赖固定窗口高：矮窗口自动翻到 trigger 上方）。
+  const fullyVisible = await window.evaluate(() => {
+    const rect = document.querySelector('.agent-mode-menu').getBoundingClientRect();
+    return rect.top >= 0 && rect.bottom <= window.innerHeight;
+  });
+  expect(fullyVisible).toBe(true);
+
+  // Esc 关闭。
+  await window.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+
+  // 再开，点外侧关闭。
+  await trigger.click();
+  await expect(menu).toHaveCount(1);
+  await window.locator('.agent-composer__participant').click({ position: { x: 200, y: 2 } }).catch(() => undefined);
+  await window.locator('[data-testid="agent-empty-state"], .agent-message, .ab-item').first().click({ position: { x: 5, y: 5 } });
+  await expect(menu).toHaveCount(0);
+
+  // 再开，选 Plan：菜单项真实可点（被裁掉的菜单点不到），模式切到 Plan。
+  await trigger.click();
+  await menu.getByRole('option', { name: /Plan/ }).click();
+  await expect(trigger).toContainText('Plan');
+  await expect(menu).toHaveCount(0);
+
+  // 矮窗口：菜单向下放会越出窗口底，应翻到 trigger 上方且完整可见。
+  await window.setViewportSize({ width: 633, height: 379 });
+  // Electron 窗口 resize 异步落地：等真实 innerHeight 与 trigger 新布局到位再点开。
+  await expect.poll(() => window.evaluate(() => window.innerHeight)).toBe(379);
+  await expect.poll(() => window.evaluate(() =>
+    document.querySelector('.agent-mode-trigger').getBoundingClientRect().top
+  )).toBeLessThan(400);
+  await trigger.click();
+  await expect(menu).toHaveCount(1);
+  // 等锚点/翻转 effect 落地（重开不再用旧坐标渲染）。
+  await expect.poll(() => window.evaluate(() =>
+    parseFloat(document.querySelector('.agent-mode-menu').style.top) || 0
+  )).toBeLessThan(400);
+  const flippedVisible = await window.evaluate(() => {
+    const rect = document.querySelector('.agent-mode-menu').getBoundingClientRect();
+    const trigger = document.querySelector('.agent-mode-trigger').getBoundingClientRect();
+    return {
+      visible: rect.top >= 0 && rect.bottom <= window.innerHeight,
+      aboveTrigger: rect.bottom <= trigger.top + 1,
+      menuTop: rect.top, menuBottom: rect.bottom, menuHeight: rect.height,
+      triggerTop: trigger.top, triggerBottom: trigger.bottom,
+      innerHeight: window.innerHeight
+    };
+  });
+
+  expect(flippedVisible.visible).toBe(true);
+  expect(flippedVisible.aboveTrigger).toBe(true);
+  await window.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+
+  await app.close();
+});
+
 test('Electron：workspace.openDialog 被调用；用户取消时安静返回', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);

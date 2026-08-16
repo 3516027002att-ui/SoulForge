@@ -1546,7 +1546,13 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .agent-mode-select { position: relative; }
 .agent-mode-trigger { display: inline-flex; align-items: center; gap: 5px; padding: 2px 5px; color: var(--ink-2); font-size: 11px; border-radius: var(--radius-s); }
 .agent-mode-trigger:hover { color: var(--ink-0); background: var(--control-hover-bg); }
-.agent-mode-menu { position: absolute; left: 0; bottom: calc(100% + 5px); z-index: 5; min-width: 190px; padding: 4px; border: 1px solid var(--line-strong); background: var(--forge-3); box-shadow: var(--shadow-float); }
+.agent-mode-menu {
+  /* S9：菜单 portal 到 document.body + fixed，锚点坐标由 trigger rect 计算；
+     旧 absolute 挂在 composer 内被 .agent/composer 的 overflow:hidden 裁掉。 */
+  position: fixed; z-index: 120; min-width: 190px; padding: 4px;
+  border: 1px solid var(--line-strong); background: var(--forge-3);
+  box-shadow: var(--shadow-float);
+}
 .agent-mode-menu button { display: flex; flex-direction: column; align-items: flex-start; width: 100%; gap: 1px; padding: 6px 8px; text-align: left; border-radius: var(--radius-s); }
 .agent-mode-menu button:hover, .agent-mode-menu button[aria-selected="true"] { background: var(--ember-soft); }
 .agent-mode-menu strong { font-size: 11px; }
