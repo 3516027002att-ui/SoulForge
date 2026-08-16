@@ -35,12 +35,20 @@ function main(): void {
   }
 
   // 硬约束 17：DSL 模板必须有界渲染，并把截断状态上报给 renderer。
-  // R3/P4 裁定（2026-08-14）：production 反汇编入口改为 DarkScript3 式
-  // （renderEmevdDarkScriptBounded）；旧 hash DSL 渲染（renderEmevdPatchDslBounded）
-  // 已从 ipc.ts 移除，底层 dslCompiler/typed 写链保留。没 EMEDF 必须失败关闭
-  // （EMEDF_MISSING + dslTemplate null），不能再发 hash 伪源码。
-  if (!ipc.includes('renderEmevdDarkScriptBounded')) {
-    throw new Error('main 必须有界渲染 DarkScript3 式事件源码（R3/P4 裁定）。');
+  // R3/P4 裁定（2026-08-14）：production 反汇编入口改为 DarkScript3 式；旧 hash DSL
+  // 渲染（renderEmevdPatchDslBounded）已从 ipc.ts 移除，底层 dslCompiler/typed 写链
+  // 保留。没 EMEDF 必须失败关闭（EMEDF_MISSING + dslTemplate null），不能再发 hash
+  // 伪源码。
+  //
+  // 反汇编入口另外钉住「分片异步」：同步入口那 75 ms 会让主进程事件循环整段停摆，
+  // 取消信号只能排队，于是快速切换时旧请求取消不掉。两条断言分开写是必要的 ——
+  // 异步入口若命名成 renderEmevdDarkScriptBoundedAsync，第一条会因子串关系恒真，
+  // 门禁看着绿其实已经瞎了。
+  if (!ipc.includes('renderEmevdDarkScriptAsync')) {
+    throw new Error('main 必须走分片异步 DarkScript3 反汇编入口（不得在主进程同步反汇编）。');
+  }
+  if (ipc.includes('renderEmevdDarkScriptBounded')) {
+    throw new Error('production 入口不得残留同步有界反汇编调用（会重新引入 75 ms 停摆）。');
   }
   if (!ipc.includes('EMEDF_MISSING')) {
     throw new Error('main 在未找到用户本机 EMEDF 时必须失败关闭（EMEDF_MISSING 诊断）。');

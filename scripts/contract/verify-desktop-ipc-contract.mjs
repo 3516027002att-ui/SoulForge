@@ -47,6 +47,16 @@ const REQUIRED_READ_WRITE_CHANNELS = Object.freeze([
   'resource.submitEmevdDslPlan'
 ]);
 
+/**
+ * 取消类 channel。单列一组是因为它既不是读写也不是分页，但缺了会静默退化：
+ * 没有它，renderer 切走域时主进程仍会把剩余分页读 + 整段反汇编跑完，UI 层面
+ * 完全看不出来（结果本来就被丢弃），只有主进程白干一场。放进 REQUIRED_* 是为了
+ * 让「两侧一起被删」也报红 —— 下面的双向对账只抓单侧断裂。
+ */
+const REQUIRED_CANCEL_CHANNELS = Object.freeze([
+  'resource.cancelEmevdFullDocument'
+]);
+
 /** 硬约束 17：大规模访问必须有分页 channel。 */
 const REQUIRED_PAGE_CHANNELS = Object.freeze([
   'resource.readFmgPage',
@@ -75,6 +85,7 @@ const REQUIRED_PRELOAD_WIRING = Object.freeze({
   readEmevdDocument: 'resource.readEmevdDocument',
   applyEmevdMutation: 'resource.applyEmevdMutation',
   readEmevdFullDocument: 'resource.readEmevdFullDocument',
+  cancelEmevdFullDocument: 'resource.cancelEmevdFullDocument',
   submitEmevdDslPlan: 'resource.submitEmevdDslPlan',
   readFmgPage: 'resource.readFmgPage',
   readParamPage: 'resource.readParamPage',
@@ -122,6 +133,7 @@ const preload = await observePreloadSurface();
 const assert = createAssertions(LABEL);
 
 for (const channel of REQUIRED_READ_WRITE_CHANNELS) assert.requireChannel(main, channel);
+for (const channel of REQUIRED_CANCEL_CHANNELS) assert.requireChannel(main, channel);
 for (const channel of REQUIRED_PAGE_CHANNELS) assert.requireChannel(main, channel);
 for (const channel of REQUIRED_VAULT_CHANNELS) assert.requireChannel(main, channel);
 for (const channel of FORBIDDEN_CHANNELS) assert.forbidChannel(main, channel);

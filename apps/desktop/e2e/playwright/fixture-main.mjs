@@ -1607,6 +1607,34 @@ function registerFixtureIpc() {
           authority: 'fixture'
         };
       },
+      /**
+       * 事件判据（gutter「未知指令数」）现在跟着 full document 一次下发，renderer
+       * 不再为这一列计数另发一次 readEmevdDocument。真实主进程按 EMEDF registry
+       * 逐条判 unknown；fixture 没有 registry，就沿用本 bank 既有的判据 ——
+       * 「[start, start+count) 里缺 instructionsSample 的那几条算 unknown」，
+       * 于是 common 的 event 60 仍是 1 条未知，menu 仍干净。
+       */
+      outline() {
+        const sampleIndexes = new Set((this.instructionsSample ?? []).map((item) => item.index));
+        const outlineEvents = this.events.map((event) => {
+          const start = event.instructionStartIndex ?? -1;
+          const count = event.instructionCount ?? 0;
+          let unknownCount = 0;
+          if (start >= 0) {
+            for (let i = 0; i < count; i += 1) {
+              if (!sampleIndexes.has(start + i)) unknownCount += 1;
+            }
+          }
+          return { eventId: event.id, instructionCount: count, unknownCount };
+        });
+        return {
+          eventCount: outlineEvents.length,
+          instructionTotal: outlineEvents.reduce((sum, e) => sum + e.instructionCount, 0),
+          truncated: false,
+          limit: 4096,
+          events: outlineEvents
+        };
+      }
     };
     return bank;
   }
@@ -1675,8 +1703,70 @@ function registerFixtureIpc() {
     return { ok: true, data: bank.envelope() };
   });
 
-  handleTrusted('resource.readEmevdFullDocument', (_event, sourceUri, documentInstanceId, _loadFullDslTemplate) => {
+  /*
+   * 打开事件文档的在飞槽 —— 镜像生产 ipc.ts 的 activeEmevdOpen / beginEmevdOpen /
+   * emevdOpenCancelled 三件套（ipc.ts:218-247）。
+   *
+   * 为什么 fixture 也要有：renderer 侧「被放弃的旧请求不得覆盖 UI」这条判据，唯一
+   * 的触发条件是主进程给旧请求返回 `cancelled: true`。fixture 若一律返回 ok:true，
+   * 那条分支在 e2e 里零覆盖，而它正是快速切换时唯一防止 UI 回跳的东西。
+   *
+   * 契约（与生产逐字段对齐）：新请求同步接管槽位并中止旧的；被中止的那份返回
+   * `{ ok: false, cancelled: true, EMEVD_LOAD_CANCELLED, severity: info }`，
+   * **不是**解析失败。fixture 不复制生产的分页读/outline/反汇编，只复制这个契约。
+   *
+   * SF_TEST_EMEVD_OPEN_DELAY_MS 给打开加延迟（各次不等长，见下面的 emevdOpenDelayFor）。
+   * 没有延迟时 fixture 的 handler 同步返回，两次点击必然串行完成，「后到的请求取代先到
+   * 的」这个形态根本不出现；加了延迟后第二次点击一定落在第一次的 sleep 里，竞态从
+   * 「靠运气」变成必然。默认 0：既有 40 个调用点行为不变。
+   */
+  const EMEVD_OPEN_DELAY_MS = Number(process.env.SF_TEST_EMEVD_OPEN_DELAY_MS ?? 0) || 0;
+  /*
+   * 第一个请求等满额，后续按 1/4 递减 —— 不是每次等长。
+   *
+   * 等长延迟下到达顺序 == 发起顺序，被放弃的那份**必然先完成**：实测 common 起于
+   * 12546ms、8000ms 后返回，menu 起于 14536ms、返回于 22536ms，common 早 2s 落地。
+   * 那样只覆盖「旧响应不得建标签页」，覆盖不到「迟到的旧响应不得覆盖已经正确的 UI」，
+   * 而后者才是 renderer 侧 cancelled 判据要防的回跳。递减后 common 反而最后落地
+   *（20546ms vs menu 16536ms），旧响应确实迟到约 4s，一次快速切换覆盖两条判据。
+   */
+  const emevdOpenDelayFor = (arrivalIndex) => (
+    arrivalIndex === 0 ? EMEVD_OPEN_DELAY_MS : Math.round(EMEVD_OPEN_DELAY_MS / 4)
+  );
+  let activeEmevdOpen = null;
+
+  /*
+   * 打开事件文档的观测记录，测试经 app.evaluate(() => global.__fixtureEmevdOpenLog) 读。
+   *
+   * 为什么必须暴露到测试侧：「快速切换时旧请求被取消」这条判据成立的前提是第二次请求
+   * 真的落在第一次的 sleep 里。这个前提**会自己失效** —— 实测 Playwright 两次
+   * `.file-item` 点击之间隔了 1990ms（第一次点击后工作台挂载 CodeMirror，
+   * 布局不稳，第二次点击的 actionability 检查一直等），当时的 700ms 延迟早就到期，
+   * 两个请求全程串行、fixture 两次都返回 ok。UI 断言那时仍然「看起来对」（终态确实
+   * 是 menu），于是整条用例静默退化成「顺序打开两个文件」，不再覆盖取消分支。
+   *
+   * 所以延迟本身不够，还要把到达时刻与取消次数记下来让测试断言前提成立。
+   *
+   * arrivals（发起顺序）与 settlements（响应落地顺序）分开记，两个都要：测试还要证
+   * 「被放弃的旧请求迟于它的替代者落地」，这条由上面的递减延迟制造，而延迟只是手段 ——
+   * 递减系数、点击间隔、机器快慢任一变化都能让它悄悄失效，失效后 UI 终态仍然是对的
+   *（menu），断言照样全绿。落地顺序必须记下来让测试直接断言，不能靠推断。
+   */
+  global.__fixtureEmevdOpenLog = {
+    arrivals: [], settlements: [], cancelled: 0, delayMs: EMEVD_OPEN_DELAY_MS
+  };
+  const noteEmevdSettled = (sourceUri, cancelled) => {
+    global.__fixtureEmevdOpenLog.settlements.push({
+      atMs: Math.round(performance.now()), sourceUri, cancelled
+    });
+  };
+
+  handleTrusted('resource.readEmevdFullDocument', async (_event, sourceUri, documentInstanceId, _loadFullDslTemplate) => {
     track('resource.readEmevdFullDocument');
+    global.__fixtureEmevdOpenLog.arrivals.push({
+      atMs: Math.round(performance.now()),
+      sourceUri
+    });
     const bank = emevdBank(sourceUri);
     if (!bank) {
       return {
@@ -1688,6 +1778,29 @@ function registerFixtureIpc() {
         }]
       };
     }
+    // 同步接管槽位：必须在任何 await 之前，否则新请求发出时旧请求还没被标记中止。
+    const controller = new AbortController();
+    activeEmevdOpen?.abort();
+    activeEmevdOpen = controller;
+    // arrivals 已在上面 push 过，-1 拿到本次请求自己的序号（第一个是 0）。
+    const delayMs = emevdOpenDelayFor(global.__fixtureEmevdOpenLog.arrivals.length - 1);
+    if (delayMs > 0) {
+      await new Promise((resolve) => { setTimeout(resolve, delayMs); });
+    }
+    if (controller.signal.aborted) {
+      global.__fixtureEmevdOpenLog.cancelled += 1;
+      noteEmevdSettled(sourceUri, true);
+      return {
+        ok: false,
+        cancelled: true,
+        sourceUri,
+        diagnostics: [{
+          severity: 'info', code: 'EMEVD_LOAD_CANCELLED',
+          message: '打开事件文档的请求已被更晚的打开请求取代。', sourceUri
+        }]
+      };
+    }
+    noteEmevdSettled(sourceUri, false);
     return {
       ok: true,
       sourceUri,
@@ -1701,9 +1814,19 @@ function registerFixtureIpc() {
       sourceHash: bank.sourceHash,
       sourceFormat: 'emevd',
       outerFileHash: null,
-      outline: null,
+      // fixture 是合成往返，语义与字节都由自己构造，不冒充 native-verified。
+      authority: 'fixture',
+      outline: bank.outline(),
       diagnostics: []
     };
+  });
+
+  handleTrusted('resource.cancelEmevdFullDocument', async () => {
+    track('resource.cancelEmevdFullDocument');
+    const slot = activeEmevdOpen;
+    if (!slot || slot.signal.aborted) return { ok: true, cancelled: false };
+    slot.abort();
+    return { ok: true, cancelled: true };
   });
 
   // T4-3：fixture 指令名补全目录（与 core createSekiroFixtureEmedf 对齐），

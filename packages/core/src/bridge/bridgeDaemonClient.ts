@@ -57,6 +57,10 @@ export class BridgeDaemonClient {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string, PendingRequest>();
   private stdoutBuffer = '';
+  /** stdoutBuffer 的 UTF-8 字节数，增量维护，避免每 chunk 重算。 */
+  private stdoutBufferBytes = 0;
+  /** stdoutBuffer 中已确认不含换行的前缀长度（字符数）。 */
+  private stdoutScanned = 0;
   private stderrTail = '';
   private closed = false;
   private negotiatedMaxFrameBytes: number;
@@ -394,17 +398,32 @@ export class BridgeDaemonClient {
   }
 
   private consumeStdout(chunk: string): void {
+    // 单帧可达数 MB（read-emevd-document 一页装满时 33266 条指令约 4-5 MB），
+    // 会被 stdout 切成上百个 chunk。此处两处扫描必须增量，否则每个 chunk 都
+    // 重扫整个缓冲，规模上是 O(n²)。实测量级要说清：common.emevd.dcx 一次
+    // 65536 页整读，改成增量后总耗时 274.5 ms → 257.7 ms，只省 ~17 ms —— 这条
+    // 是复杂度正确性修复，不是打开路径的主要瓶颈（主瓶颈在反汇编，见
+    // darkScriptRenderer）。页大小再涨或帧再大时这一项才会变显著。
     this.stdoutBuffer += chunk;
-    if (Buffer.byteLength(this.stdoutBuffer, 'utf8') > this.negotiatedMaxFrameBytes * 2) {
+    this.stdoutBufferBytes += Buffer.byteLength(chunk, 'utf8');
+    if (this.stdoutBufferBytes > this.negotiatedMaxFrameBytes * 2) {
       this.failAll(new BridgeDaemonError('BRIDGE_FRAME_TOO_LARGE', 'Bridge stdout exceeded the frame buffer limit.'));
       this.child.kill();
       return;
     }
     while (true) {
-      const newline = this.stdoutBuffer.indexOf('\n');
-      if (newline < 0) return;
-      const line = this.stdoutBuffer.slice(0, newline).trim();
+      // 已确认无换行的前缀不再重扫；消费掉一帧后归零。
+      const newline = this.stdoutBuffer.indexOf('\n', this.stdoutScanned);
+      if (newline < 0) {
+        this.stdoutScanned = this.stdoutBuffer.length;
+        return;
+      }
+      const rawLine = this.stdoutBuffer.slice(0, newline);
+      const line = rawLine.trim();
       this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
+      // '\n' 在 UTF-8 里恒为 1 字节。
+      this.stdoutBufferBytes -= Buffer.byteLength(rawLine, 'utf8') + 1;
+      this.stdoutScanned = 0;
       if (!line) continue;
       if (Buffer.byteLength(line, 'utf8') > this.negotiatedMaxFrameBytes) {
         this.failAll(new BridgeDaemonError('BRIDGE_FRAME_TOO_LARGE', 'Inbound Bridge frame exceeds the negotiated limit.'));

@@ -60,10 +60,23 @@ internal sealed class EmevdNativeDocument
     public long LayersOffset { get; }
     public IReadOnlyList<EmevdEvent> Events { get; }
     public IReadOnlyList<EmevdInstruction> Instructions { get; }
-    public string SourceHash => Hash(SourceBytes);
 
-    public static EmevdNativeDocument Read(byte[] source)
+    /// <summary>
+    /// 源字节的哈希。文档构造后不可变，所以只算一次。
+    /// 原实现是每次取值重算：ToEnvelope 里取两次（sourceHash + roundTrip），
+    /// VerifyRoundTrip 里再取一次，分页读时这些成本按页乘倍。
+    /// </summary>
+    public string SourceHash => sourceHashMemo ??= Hash(SourceBytes);
+
+    private string? sourceHashMemo;
+    // ToEnvelope 里与 page 无关的两块投影，按文档实例记忆化（文档不可变）。
+    // 事件表 1730 条、指令分布要遍历全部 33266 条指令，分页读时原本每页各算一遍。
+    private object[]? eventsProjectionMemo;
+    private (object[] Distribution, bool Truncated)? distributionMemo;
+
+    public static EmevdNativeDocument Read(byte[] source, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (source.Length < HeaderSize || source.Length > MaxSourceBytes)
             throw new InvalidDataException($"EMEVD 大小 {source.Length} 超出安全范围。");
         if (!source.AsSpan(0, 4).SequenceEqual("EVD\0"u8))
@@ -129,6 +142,7 @@ internal sealed class EmevdNativeDocument
         long paramSum = 0;
         for (var i = 0; i < eventCount; i++)
         {
+            if ((i & 0x3FF) == 0) cancellationToken.ThrowIfCancellationRequested();
             var o = checked((int)(eventsOffset + i * EventSize));
             var id = ReadInt64(source, o);
             var instrCount = ReadInt64(source, o + 8);
@@ -171,6 +185,7 @@ internal sealed class EmevdNativeDocument
         var instructions = new List<EmevdInstruction>((int)instructionCount);
         for (var i = 0; i < instructionCount; i++)
         {
+            if ((i & 0x3FF) == 0) cancellationToken.ThrowIfCancellationRequested();
             var o = checked((int)(instructionsOffset + i * InstructionSize));
             var bank = ReadInt32(source, o);
             var id = ReadInt32(source, o + 4);
@@ -201,22 +216,24 @@ internal sealed class EmevdNativeDocument
             events, instructions);
     }
 
-    public static EmevdNativeDocument ReadFile(string path)
+    public static EmevdNativeDocument ReadFile(string path, CancellationToken cancellationToken = default)
     {
         var info = new FileInfo(path);
         if (!info.Exists) throw new FileNotFoundException("EMEVD 文件不存在。", path);
         if (info.Length <= 0 || info.Length > MaxSourceBytes)
             throw new InvalidDataException($"EMEVD 文件大小 {info.Length} 超出安全读取范围。");
-        return Read(File.ReadAllBytes(path));
+        return Read(File.ReadAllBytes(path), cancellationToken);
     }
 
-    public EmevdRoundTripReport VerifyRoundTrip()
+    public EmevdRoundTripReport VerifyRoundTrip(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         // Prefer structural rebuild identity when event count unchanged.
         var rebuilt = Events.Count == 0
             ? SourceBytes
             : RebuildEvents(Events);
-        var reparsed = Read(rebuilt);
+        cancellationToken.ThrowIfCancellationRequested();
+        var reparsed = Read(rebuilt, cancellationToken);
         var eventsEqual = reparsed.Events.Count == Events.Count
             && reparsed.Events.Zip(Events).All(pair => pair.First == pair.Second);
         var instrEqual = reparsed.Instructions.Count == Instructions.Count
@@ -636,7 +653,7 @@ internal sealed class EmevdNativeDocument
     }
 
     public object ToEnvelope(EmevdRoundTripReport? report = null, int page = 0, int pageSize = 256,
-        string? sourceFormat = "emevd", string? outerFileHash = null)
+        string? sourceFormat = "emevd", string? outerFileHash = null, string? documentSession = null)
     {
         report ??= VerifyRoundTrip();
         if (page < 0 || pageSize < 1) throw new InvalidDataException("EMEVD instruction 分页参数无效。");
@@ -656,52 +673,8 @@ internal sealed class EmevdNativeDocument
             layerOffset = instr.LayerOffset
         }).ToArray();
 
-        // Full instruction distribution (bank/id -> count and args-length histogram).
-        // Aggregate-only: never exposes payload content; bounded to protect envelope size.
-        const int distributionLimit = 2000;
-        var distribution = new Dictionary<(long Bank, long Id), (int Count, Dictionary<int, int> Lengths)>();
-        foreach (var instr in Instructions)
-        {
-            if (!distribution.TryGetValue((instr.Bank, instr.Id), out var entry))
-            {
-                entry = (0, new Dictionary<int, int>());
-                distribution[(instr.Bank, instr.Id)] = entry;
-            }
-            entry.Count++;
-            distribution[(instr.Bank, instr.Id)] = entry; // struct tuple value: write back
-            entry.Lengths.TryGetValue(instr.Args.Length, out var freq);
-            entry.Lengths[instr.Args.Length] = freq + 1;
-        }
-        var instructionDistribution = distribution
-            .OrderByDescending(pair => pair.Value.Count)
-            .ThenBy(pair => pair.Key.Bank)
-            .ThenBy(pair => pair.Key.Id)
-            .Take(distributionLimit)
-            .Select(pair => new
-            {
-                bank = pair.Key.Bank,
-                id = pair.Key.Id,
-                count = pair.Value.Count,
-                argsLengths = pair.Value.Lengths
-                    .OrderBy(kv => kv.Key)
-                    .ToDictionary(kv => kv.Key.ToString(System.Globalization.CultureInfo.InvariantCulture), kv => kv.Value)
-            })
-            .ToArray();
-
-        var events = Events.Select(e =>
-        {
-            var start = e.InstructionCount > 0 ? e.InstructionsOffset / InstructionSize : -1L;
-            return new
-            {
-                id = e.Id,
-                instructionCount = e.InstructionCount,
-                instructionsOffset = e.InstructionsOffset,
-                instructionStartIndex = start,
-                parameterCount = e.ParameterCount,
-                parametersOffset = e.ParametersOffset,
-                restBehavior = e.RestBehavior
-            };
-        }).ToArray();
+        var (instructionDistribution, distributionTruncated) = BuildInstructionDistribution();
+        var events = BuildEventsProjection();
 
         return new
         {
@@ -715,6 +688,8 @@ internal sealed class EmevdNativeDocument
             // "dcx" + DcxNativeDocument.SourceHash when Bridge unwrapped a .dcx.
             sourceFormat = sourceFormat ?? "emevd",
             outerFileHash = outerFileHash,
+            // main/core 分页用的不可伪造会话令牌；不得转发给 renderer。
+            documentSession = documentSession,
             eventCount = Events.Count,
             instructionCount = Instructions.Count,
             layerCount = LayerCount,
@@ -730,7 +705,7 @@ internal sealed class EmevdNativeDocument
             instructionPageSize = pageSize,
             instructionPageCount,
             instructionDistribution,
-            instructionDistributionTruncated = distribution.Count > distributionLimit,
+            instructionDistributionTruncated = distributionTruncated,
             roundTrip = report,
             authority = report is { SemanticIdentical: true, ByteIdentical: true }
                 ? "native-verified"
@@ -738,6 +713,72 @@ internal sealed class EmevdNativeDocument
             instructionDecode = "raw-args-base64; typed EMEDF optional in TypeScript",
             supportsEventGc = true
         };
+    }
+
+    /// <summary>
+    /// 事件表投影（与 page 无关，按实例记忆化）。
+    /// </summary>
+    private object[] BuildEventsProjection()
+    {
+        if (eventsProjectionMemo is not null) return eventsProjectionMemo;
+        var projected = new object[Events.Count];
+        for (var i = 0; i < Events.Count; i++)
+        {
+            var e = Events[i];
+            var start = e.InstructionCount > 0 ? e.InstructionsOffset / InstructionSize : -1L;
+            projected[i] = new
+            {
+                id = e.Id,
+                instructionCount = e.InstructionCount,
+                instructionsOffset = e.InstructionsOffset,
+                instructionStartIndex = start,
+                parameterCount = e.ParameterCount,
+                parametersOffset = e.ParametersOffset,
+                restBehavior = e.RestBehavior
+            };
+        }
+        eventsProjectionMemo = projected;
+        return projected;
+    }
+
+    /// <summary>
+    /// 指令分布（bank/id → 出现次数 + args 长度直方图），与 page 无关，按实例记忆化。
+    /// 只出聚合量，不含 payload 内容；条目数受 distributionLimit 约束以控制 envelope 体积。
+    /// </summary>
+    private (object[] Distribution, bool Truncated) BuildInstructionDistribution()
+    {
+        if (distributionMemo is not null) return distributionMemo.Value;
+        const int distributionLimit = 2000;
+        var distribution = new Dictionary<(long Bank, long Id), (int Count, Dictionary<int, int> Lengths)>();
+        foreach (var instr in Instructions)
+        {
+            if (!distribution.TryGetValue((instr.Bank, instr.Id), out var entry))
+            {
+                entry = (0, new Dictionary<int, int>());
+                distribution[(instr.Bank, instr.Id)] = entry;
+            }
+            entry.Count++;
+            distribution[(instr.Bank, instr.Id)] = entry; // struct tuple value: write back
+            entry.Lengths.TryGetValue(instr.Args.Length, out var freq);
+            entry.Lengths[instr.Args.Length] = freq + 1;
+        }
+        var projected = distribution
+            .OrderByDescending(pair => pair.Value.Count)
+            .ThenBy(pair => pair.Key.Bank)
+            .ThenBy(pair => pair.Key.Id)
+            .Take(distributionLimit)
+            .Select(pair => (object)new
+            {
+                bank = pair.Key.Bank,
+                id = pair.Key.Id,
+                count = pair.Value.Count,
+                argsLengths = pair.Value.Lengths
+                    .OrderBy(kv => kv.Key)
+                    .ToDictionary(kv => kv.Key.ToString(System.Globalization.CultureInfo.InvariantCulture), kv => kv.Value)
+            })
+            .ToArray();
+        distributionMemo = (projected, distribution.Count > distributionLimit);
+        return distributionMemo.Value;
     }
 
     private static void WriteInt64(BinaryWriter bw, long value)

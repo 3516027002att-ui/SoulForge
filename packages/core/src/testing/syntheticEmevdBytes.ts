@@ -123,15 +123,26 @@ export function buildSyntheticEmevd(events: SyntheticEmevdEventSpec[]): Buffer {
   return Buffer.concat([header, eventTable, instructionTable, argsBank]);
 }
 
-/** Standard two-event smoke fixture used by EMEVD plan commit smokes. */
-export function standardSyntheticEmevd(): Buffer {
-  return buildSyntheticEmevd([
+/** Baseline args bank of instruction 0 (WaitFor fixture, conditionGroup = -1). */
+function baselineWaitForArgs(): Buffer {
+  // s8 conditionGroup=-1, u8 pad0, u16 pad1, u32 unknown
+  return Buffer.from([0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+}
+
+/**
+ * Standard two-event fixture spec, parameterized only by instruction 0's args.
+ *
+ * 只有这一处参数化：缓存身份回归要两份**字节长度完全相同**、只差一个 arg 字节的文件，
+ * 用来模拟外部工具的等长改写。共用同一份 spec 才能保证长度相同这件事是构造出来的，
+ * 而不是两份手抄常量恰好一样。
+ */
+function standardSyntheticEmevdSpec(waitForArgs: Buffer): SyntheticEmevdEventSpec[] {
+  return [
     {
       id: 50,
       restBehavior: 0,
       instructions: [
-        // bank 1000 id 0 (WaitFor fixture): s8 conditionGroup=-1, u8 pad0, u16 pad1, u32 unknown
-        { bank: 1000, id: 0, args: Buffer.from([0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) },
+        { bank: 1000, id: 0, args: waitForArgs },
         // bank 2000 id 0 (IfConditionGroup fixture): resultConditionGroup=1, desiredComparisonType=0,
         // targetConditionGroup=2, u8 pad0, u32 pad1, u32 pad2
         {
@@ -144,7 +155,54 @@ export function standardSyntheticEmevd(): Buffer {
       ]
     },
     { id: 100, restBehavior: 0, instructions: [] }
-  ]);
+  ];
+}
+
+/** Standard two-event smoke fixture used by EMEVD plan commit smokes. */
+export function standardSyntheticEmevd(): Buffer {
+  return buildSyntheticEmevd(standardSyntheticEmevdSpec(baselineWaitForArgs()));
+}
+
+/**
+ * {@link standardSyntheticEmevd} 的等长变体：instruction 0 的 args 换成
+ * {@link mutatedWaitForArgs}（-1 → -2），只差一个字节，文件长度不变。
+ *
+ * 缓存身份回归用它模拟外部工具「等长改写 + 回写原 mtime」：mtime 与 length 两个字段
+ * 都不动，只有内容变了。旧的 (path, mtime, length) 键在这一形态下会命中旧内容。
+ */
+export function standardSyntheticEmevdEqualLengthVariant(): Buffer {
+  return buildSyntheticEmevd(standardSyntheticEmevdSpec(mutatedWaitForArgs()));
+}
+
+/**
+ * 大体积 synthetic EMEVD：并发行为回归专用。
+ *
+ * 「两个不同文件不得在全局锁上串行」要观测到两次解析的**时间窗口重叠**。
+ * 368 字节的标准 fixture 解析加往返校验不到 1 ms，重叠靠碰运气；两份都放大到
+ * 数万条指令，解析窗口才宽到必然重叠，判据也才能只看峰值计数、不看时钟。
+ *
+ * `salt` 只改 arg 字节，不改任何长度或表结构：两份文件因此内容不同（各自独立的
+ * 缓存身份、必须各解析一次），但规模完全一致 —— 不会出现一份大一份小、
+ * 小的那份先跑完导致窗口不重叠。
+ */
+export function largeSyntheticEmevd(options: {
+  events: number;
+  instructionsPerEvent: number;
+  salt: number;
+}): Buffer {
+  const specs: SyntheticEmevdEventSpec[] = [];
+  for (let event = 0; event < options.events; event += 1) {
+    const instructions: SyntheticEmevdInstructionSpec[] = [];
+    for (let index = 0; index < options.instructionsPerEvent; index += 1) {
+      const args = Buffer.alloc(8);
+      // s8 conditionGroup：留在 [-128,-1]，与 baseline 同族的合法取值。
+      args.writeInt8(-1 - ((index + options.salt) % 100), 0);
+      args.writeUInt32LE((event * 131 + index * 17 + options.salt) >>> 0, 4);
+      instructions.push({ bank: 1000, id: 0, args });
+    }
+    specs.push({ id: 1000 + event, restBehavior: 0, instructions });
+  }
+  return buildSyntheticEmevd(specs);
 }
 
 /** Args bank of instruction 0 after the canonical plan-commit DSL patch (conditionGroup -1 → -2). */

@@ -393,24 +393,17 @@ internal sealed class BridgeCommandService
                     : EmevdDocumentSessionCache.CachePolicy.Default;
                 var resumeSession = OptionString("documentSession", "");
                 EmevdDocumentSessionCache.Lookup cached;
-                if (resumeSession.Length > 0
-                    && EmevdDocumentSessionCache.TryGetSession(resumeSession, out var sessionHit))
-                {
-                    cached = sessionHit;
-                }
-                else
-                {
-                    var hooks = EmevdDocumentSessionCache.TestHooksEnabled
-                        ? new EmevdDocumentSessionCache.TestHooks
-                        {
-                            HoldUntilFile = EmptyToNull(OptionString("testHoldUntilFile", "")),
-                            RewriteAfterRead = EmptyToNull(OptionString("testRewriteAfterRead", "")),
-                            CompletedFile = EmptyToNull(OptionString("testCompletedFile", "")),
-                            SignalFile = EmptyToNull(OptionString("testSignalFile", ""))
-                        }
-                        : null;
-                    // 解析工厂只吃共享 load token，不再捕获第一个调用者的 CancellationToken。
-                    cached = await EmevdDocumentSessionCache.GetOrAddAsync(
+                var hooks = EmevdDocumentSessionCache.TestHooksEnabled
+                    ? new EmevdDocumentSessionCache.TestHooks
+                    {
+                        HoldUntilFile = EmptyToNull(OptionString("testHoldUntilFile", "")),
+                        RewriteAfterRead = EmptyToNull(OptionString("testRewriteAfterRead", "")),
+                        CompletedFile = EmptyToNull(OptionString("testCompletedFile", "")),
+                        SignalFile = EmptyToNull(OptionString("testSignalFile", ""))
+                    }
+                    : null;
+                async Task<EmevdDocumentSessionCache.Lookup> LoadThroughCache() =>
+                    await EmevdDocumentSessionCache.GetOrAddAsync(
                         file,
                         oodleRuntimeRoot,
                         (bytes, loadToken) =>
@@ -440,6 +433,25 @@ internal sealed class BridgeCommandService
                         cachePolicy,
                         cancellationToken,
                         hooks);
+                if (resumeSession.Length > 0)
+                {
+                    var sessionKind = EmevdDocumentSessionCache.TryGetSession(
+                        resumeSession, file, oodleRuntimeRoot, out var sessionHit);
+                    if (sessionKind == EmevdDocumentSessionCache.SessionLookupKind.Mismatch)
+                    {
+                        return BridgeResult<object>.Failed(
+                            file,
+                            "event",
+                            "EMEVD_DOCUMENT_SESSION_MISMATCH",
+                            "文档会话与请求的文件不一致，已拒绝以免返回错误文档。");
+                    }
+                    cached = sessionKind == EmevdDocumentSessionCache.SessionLookupKind.Hit
+                        ? sessionHit
+                        : await LoadThroughCache();
+                }
+                else
+                {
+                    cached = await LoadThroughCache();
                 }
                 var document = cached.Entry.Document;
                 var sourceFormat = cached.Entry.SourceFormat;

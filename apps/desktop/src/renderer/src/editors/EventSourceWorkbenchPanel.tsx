@@ -115,7 +115,7 @@ export interface EventSourceTabData {
    * - 'patch-dsl'：旧 hash DSL（历史路径）；
    * - 'none'：EMEDF 缺失失败关闭（不提供伪解码）。
    */
-  sourceStyle?: 'dark-script' | 'patch-dsl' | 'none';
+  sourceStyle?: 'dark-script' | 'patch-dsl' | 'none' | undefined;
 }
 
 export interface EventSourceWorkbenchPanelProps {
@@ -197,6 +197,10 @@ export function readFailureSource(document: EmevdEditorDocument): string | null 
     );
   }
   return lines.join('\n');
+}
+
+export function isSourceReadOnly(tab: Pick<EventSourceTabData, 'live' | 'dslTemplate' | 'sourceStyle'>): boolean {
+  return !tab.live || tab.dslTemplate === null || tab.sourceStyle === 'dark-script';
 }
 
 export function baselineText(tab: EventSourceTabData): string {
@@ -548,6 +552,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           dslTemplate: pending.dslTemplate,
           dslTemplateTruncated: pending.dslTemplateTruncated,
           dslTemplateTotalLines: pending.dslTemplateTotalLines,
+          sourceStyle: pending.sourceStyle,
           sourceFillTarget: existing.sourceFillTarget
         };
         return previous.map((tab, i) => (i === index ? merged : tab));
@@ -560,7 +565,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         sourceFillTarget: rest.length > 0 ? base : null,
         editorState: EditorState.create({
           doc: head,
-          extensions: createExtensionsFor(pending.tabId, !pending.live)
+          extensions: createExtensionsFor(pending.tabId, isSourceReadOnly(pending))
         })
       };
       return [...previous, created];
@@ -586,8 +591,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
   useEffect(() => {
     if (!activeTab) return;
+    // 灌入进行中由 onSlice 增量扫新 chunk。这里若用 draft（仍是首帧前缀）
+    // 从空状态重扫，会把已扫到的 gutter 整表清掉，并随 setTabs 退化成 O(N²)。
+    if (activeTab.sourceFillTarget !== null) return;
     syncGutterInfo(activeTab.draft, eventWarningRowsOf(activeTab));
-  }, [activeTab, syncGutterInfo]);
+  }, [activeTabId, activeTab?.draft, activeTab?.sourceFillTarget, activeTab?.eventWarnings, syncGutterInfo]);
 
   /** 挂载 EditorView（一次）；后续经 setState 换 tab state。 */
   useEffect(() => {
@@ -632,7 +640,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     const { head, rest } = splitSourceForFirstFrame(next);
     const nextState = EditorState.create({
       doc: head,
-      extensions: createExtensionsFor(activeTabId, !pending.live)
+      extensions: createExtensionsFor(activeTabId, isSourceReadOnly(pending))
     });
     setTabs((previous) =>
       previous.map((tab) =>
@@ -670,22 +678,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       state: tab.editorState,
       rest: remaining,
       signal: controller.signal,
-      onSlice: (state) => {
+      onSlice: (state, chunk) => {
         if (sourceFillGenerationRef.current !== generation) return;
-        applyEventLineScan(indexEventLinesIncremental(
-          eventLineScanRef.current,
-          state.doc.toString(),
-          rows
-        ));
+        applyEventLineScan(indexEventLinesIncremental(eventLineScanRef.current, chunk, rows));
         const view = viewRef.current;
         if (view && view.state !== state) view.setState(state);
-        setTabs((previous) =>
-          previous.map((item) =>
-            item.tabId === tab.tabId
-              ? { ...item, draft: state.doc.toString(), editorState: state }
-              : item
-          )
-        );
       }
     }).then((result) => {
       if (sourceFillGenerationRef.current !== generation || result.cancelled) return;
@@ -737,7 +734,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         const { head, rest } = splitSourceForFirstFrame(nextText);
         const nextState = EditorState.create({
           doc: head,
-          extensions: createExtensionsFor(activeTab.tabId, !activeTab.live)
+          extensions: createExtensionsFor(activeTab.tabId, isSourceReadOnly(activeTab))
         });
         setTabs((previous) =>
           previous.map((tab) =>

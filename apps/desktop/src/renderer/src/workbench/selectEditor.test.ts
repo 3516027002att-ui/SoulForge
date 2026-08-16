@@ -294,6 +294,42 @@ describe('selectEditor', () => {
     );
   });
 
+  it('talkesdbnd 走 ESD，不进 script', () => {
+    assert.equal(
+      selectEditor(input({
+        selectedFile: file('script/talk/m11_02_00_00.talkesdbnd.dcx', 'script', 'lua', '.talkesdbnd.dcx')
+      })),
+      'esd'
+    );
+  });
+
+  it('ffxbnd 走 VFX，不进通用容器', () => {
+    assert.equal(
+      selectEditor(input({
+        selectedFile: file('sfx/sfxbnd_commoneffects.ffxbnd.dcx', 'sfx', 'bnd', '.ffxbnd.dcx')
+      })),
+      'vfx'
+    );
+  });
+
+  it('texbnd 走 TPF 纹理容器', () => {
+    assert.equal(
+      selectEditor(input({
+        selectedFile: file('chr/c4510.texbnd.dcx', 'chr', 'tpf', '.texbnd.dcx')
+      })),
+      'tpf'
+    );
+  });
+
+  it('bak 不进任何语义编辑器', () => {
+    assert.equal(
+      selectEditor(input({
+        selectedFile: file('event/common.emevd.dcx.bak', 'event', 'backup', '.emevd.dcx.bak')
+      })),
+      'binary'
+    );
+  });
+
   it('按扩展名分派 tae / esd / flver / tpf', () => {
     const cases: Array<[string, EditorId]> = [
       ['chr/c1000.tae', 'tae'],
