@@ -357,27 +357,19 @@ internal sealed class BridgeCommandService
         {
             try
             {
+                // S18-A（event-common-load.md §5A）：同一文件只解压/解析一次——
+                // EmevdDocumentCache 按 realpath + mtime + length 命中，连续分页
+                // 只切内存（ToEnvelope 是纯 Skip/Take）。计数钩子
+                // reportReadCounts 供「同一 hash 连续 10 页 Read 仍为 1」断言。
                 // EVENT-30A: production open accepts the outer source resource
                 // as-is — raw .emevd OR DFLT/KRAK-wrapped .dcx. DCX unwrap is
                 // native (DcxNativeDocument), so the TypeScript side never
                 // imports a second DCX parser and never hands back a
                 // decompressed temp file to be reused as the Patch target.
-                string sourceFormat;
-                string? outerFileHash;
-                EmevdNativeDocument document;
-                if (IsDcxFile(file))
-                {
-                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
-                    document = EmevdNativeDocument.Read(dcx.Payload);
-                    sourceFormat = "dcx";
-                    outerFileHash = dcx.SourceHash;
-                }
-                else
-                {
-                    document = EmevdNativeDocument.ReadFile(file);
-                    sourceFormat = "emevd";
-                    outerFileHash = document.SourceHash;
-                }
+                var cached = EmevdDocumentCache.GetOrRead(file, oodleRuntimeRoot);
+                var document = cached.Document;
+                var sourceFormat = cached.SourceFormat;
+                var outerFileHash = cached.OuterFileHash;
                 var roundTrip = document.VerifyRoundTrip();
                 var optionsObject = options.ValueKind == JsonValueKind.Object;
                 var page = optionsObject && options.TryGetProperty("instructionPage", out var pageEl)
@@ -403,6 +395,15 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 };
+                if (OptionBool("reportReadCounts", false))
+                {
+                    diagnostics = diagnostics.Append(new Diagnostic(
+                        "info",
+                        "EMEVD_SESSION_READ_COUNTS",
+                        $"dcxReads={EmevdDocumentCache.DcxReadCount}; emevdReads={EmevdDocumentCache.EmevdReadCount}; invalidations={EmevdDocumentCache.InvalidationCount}",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        null)).ToArray();
+                }
                 return BridgeResult<object>.Partial(file, "event", diagnostics,
                     document.ToEnvelope(roundTrip, page, pageSize, sourceFormat, outerFileHash));
             }
@@ -419,6 +420,9 @@ internal sealed class BridgeCommandService
             try
             {
                 var written = await EmevdNativeWriter.WriteAsync(file, outputPath, oodleRuntimeRoot, options, cancellationToken);
+                // S18-A：写回成功后缓存失效，下一次重读重新解析（完成标准第 4 条：
+                // 「写回后的重读另计」）。
+                EmevdDocumentCache.Invalidate(file);
                 return BridgeResult<object>.Partial(file, "event", new[]
                 {
                     new Diagnostic("info", "EMEVD_STAGING_WRITE_VERIFIED", "EMEVD 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
@@ -1568,8 +1572,9 @@ internal sealed class BridgeCommandService
     /// <summary>
     /// Cheap magic check (4 bytes) so read-emevd-document can dispatch to the
     /// native DCX unwrap without loading the full file twice.
+    /// internal：EmevdDocumentCache（S18-A 会话缓存）也用它判定解压路径。
     /// </summary>
-    private static bool IsDcxFile(string path)
+    internal static bool IsDcxFile(string path)
     {
         try
         {

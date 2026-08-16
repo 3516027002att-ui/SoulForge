@@ -39,6 +39,7 @@
     "test:emevd-coverage": "tsc -b ../shared . && node dist/testing/runEmevdCoverageSmoke.js",
     "test:emevd-external-adapter": "tsc -b ../shared . && node dist/testing/runEmevdExternalAdapterSmoke.js",
     "test:emevd-full-document": "tsc -b ../shared . && node dist/testing/runEmevdFullDocumentSmoke.js",
+    "test:emevd-session-cache": "tsc -b ../shared . && node dist/testing/runEmevdSessionCacheSmoke.js",
     "test:emevd-imported-production": "tsc -b ../shared . && node dist/testing/runEmevdImportedRegistryProductionSmoke.js",
     "test:emevd-imported-coverage": "tsc -b ../shared . && node dist/testing/runEmevdImportedCoverageSmoke.js",
     "test:emevd-corpus-matrix": "tsc -b ../shared . && node dist/testing/runEmevdCorpusMatrixSmoke.js",
