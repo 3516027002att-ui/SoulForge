@@ -1738,7 +1738,9 @@ internal sealed class BridgeCommandService
     /// Cheap magic check (4 bytes) so read-emevd-document can dispatch to the
     /// native DCX unwrap without loading the full file twice.
     /// </summary>
-    private static bool IsDcxFile(string path)
+    // S18 会话缓存（EmevdDocumentCache）与命令分发表同程序集共享；合并 7c5639a
+    // 曾把可见性回退成 private 导致编译红，这里固定为 internal。
+    internal static bool IsDcxFile(string path)
     {
         try
         {

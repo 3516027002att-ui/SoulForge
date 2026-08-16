@@ -2740,6 +2740,7 @@ SHELL-09 → SHELL-10
   - 中栏详情整块移除（DetailsSection/TaeEventEditor/新增事件入口删除），详情下沉到 `WorkbenchLayout` footer：起始帧/结束帧（30fps，主标签帧 + ≈ 秒小字）、完整 typeId + 类型名、事件下标、参数字段（按模板解码；无模板「未解码」+ 原始 hex，禁止编造 SoundType）；时间编辑保留在 footer（标签起始帧/结束帧，内部仍走 update-event-times 秒）。
   - 预览挂伴生 chrbnd：overlay `chr/<id>.chrbnd.dcx` → 原版同相对路径；两边都没有给可行动空态（未挂原版写明去「开始」页）。骨骼动画播放未接入，预览如实标注静态模型（不假装播放）。
   - `WorkbenchLayout` 拖栏修复：量栏内容宽（不含 4px 分隔条）、上限扣除分隔条总宽、window 监听不再随 `columns` 新数组反复拆装——PARAM/文本/动作同一套布局组件一并受益。
+  - **S17 3D 落地（2026-08-17）**：`read-chrbnd-flver-preview` / `read-tae-event-params` 登记进 `AdvertisedCommands`（广告门禁三方一致，44 条）；右栏挂上现有 `FlverViewer`——`read-chrbnd-flver-preview` 一次返回网格/骨骼/挂点（base64 typed buffers），经 `FlverViewer` 新增的 `externalMeshData` / `externalBones` props 直画（不走 readFlverMesh IPC）；无网格时给可行动空态（「到开始页挂原版」/「没有找到该模型的网格数据」），删「见底部日志」与「本夜不挂」注释；动画播放未接入明说「模型已挂，动画播放未接入」，不假装在播。另修合并 7c5639a 把 `BridgeCommandService.IsDcxFile` 回退成 private 导致的 S18 会话缓存编译红（固定 internal）。
 
 #### ANIMATION-56C — TAE event write
 

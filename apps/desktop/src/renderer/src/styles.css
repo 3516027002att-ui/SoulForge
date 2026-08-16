@@ -2040,6 +2040,10 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .esd-partial summary, .tae-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
 .esd-partial ul, .tae-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
 
+/* S17：动作预览右栏的 3D 视口宿主（FlverViewer 撑满列宽）。 */
+.tae-preview__viewport { flex: 1; min-height: 240px; position: relative; }
+.tae-preview__viewport > div { position: absolute; inset: 0; }
+
 /* ── 跨表引用跳转（param 字段的值是另一张表的行 id）── */
 /* 独占网格第 2 列的第二行：字段名列留空，跳转钮与上方的值输入框左对齐，
    视觉上「这个值指向那张表」。
