@@ -1148,12 +1148,15 @@ GPARAM 与 PARAM 可共享搜索、diff 和 Change Review 基础设施，但不�
 ### 9.1 固定结构（§2.5）
 
 ```text
-左：Text Categories ~379px（min 220）；Toolbar 叠在 Categories 下方
-右上：Text Entries 占剩余宽度，约 55% 高度（min 240）
-右下：Text 正文占剩余宽度，约 45% 高度（min 200）
+Text Categories | Text Entries | Text（三列竖排，各自独立滚动）
 ```
 
-这是「左树 + 右上条目 + 右下正文」，不是四条竖栏。当前 `FmgWorkbenchPanel` 的横向四栏骨架必须改成这个拓扑。
+**S13 裁定（2026-08-16）**：对照 Smithbox Text 的三列竖排；不再是「左树 + 右上
+条目/右下正文」两栏，也不要左栏底下空 Tools。Categories = 语言筛选在顶上 +
+表名平铺一行一表（逻辑表名，main 投影：basename 去 `.fmg`、同名加序号；Bridge
+内层名可以是原构建机绝对路径 `N:\GR\…\item.fmg`，出 renderer 前必须投影，
+**永不把路径打码占位当表名**）；Entries = ID + 文本预览（可搜、可增删）；Text =
+选中条目全文。
 
 ### 9.2 固定选择链
 
@@ -1169,10 +1172,10 @@ language
 
 ### 9.3 必须复制
 
-- 左侧 Categories：语言分组、container、FMG logical file list；
-- 右上 Entries：ID 与预览文本；
-- 右下 Text：正文编辑（叠在 Entries 下面，不是第四竖栏）；
-- Tools 叠在 Categories 下方或作为 Categories 栏内折叠组；
+- 左侧 Categories：语言筛选（顶上）+ 平铺表名列表（一行一表，逻辑表名）；
+- 中栏 Entries：ID 与预览文本；
+- 右栏 Text：正文编辑；
+- 不做独立 Tools 栏/块（S13 已删）；
 - 每区搜索和独立滚动；
 - Unicode、IME、换行和 dirty 状态。
 
@@ -2210,7 +2213,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 | `apps/desktop/src/renderer/src/workbench/selectEditor.ts` | **已落地** ROUTE-06 完整：artifact-role prefilter → confirmed-leaf 优先 → candidate 落 Files | 保持 |
 | `apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx` | **已落地** 四栏 Params/Rows/Fields/Tools：右侧工具栈（诚实空态）、逻辑库标题、局部失败 param 保留；e2e 钉 flex 0.2/0.29/0.35/0.16 | 保持 |
 | `apps/desktop/src/renderer/src/workbench/GparamWorkbench.tsx` | **已落地** §8.1 五区 Files/Groups/Fields/Values/Toolbar；e2e 钉五区 + 无合并栏 | 保持 |
-| `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | **已落地** §9.1 左 Categories + 右上 Entries(55%) + 右下 Text(45%)；e2e TEXT-20B/20C 通过 | 保持 |
+| `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | **已落地** §9.1（S13）Categories \| Entries \| Text 三列 + 逻辑表名投影；e2e TEXT-20B/20C 通过 | 保持 |
 | `apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx` | **已落地** §11：CodeMirror 6、无四钮（T4）、Ctrl+F 走 CM search、EMEDF autocomplete+hover；非 260/320 三栏 | 保持 |
 | `apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx` | **已落地** 保持断开；未取得 scope 裁定前不删除文件 | 保持断开 |
 | `apps/desktop/src/main/ipc.ts` | **已落地** ROOT-07：复用 `prepareBridgeRoots`；只读 handler 只传已验证 roots，staging 显式走 `prepareBridgeRoots(…,'stage')` | 保持 |
@@ -2510,7 +2513,7 @@ SHELL-09 → SHELL-10
 #### TEXT-20B — Smithbox Text 工作台
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx`；`[MODIFY after TEXT-20A] apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：把现有横向四栏改成 §9.1：左 Categories（语言/container/FMG + 其下 Toolbar），右上 Entries，右下 Text。IME、Unicode、按 ID/文本搜索、独立滚动、父级切换清理。
+- **Steps**：按 §9.1（S13）：Categories | Entries | Text 三列；Categories 顶上语言筛选 + 平铺表名（逻辑名），无缩进树、无 Tools 块；表名投影在 main（shared `logicalFmgTableName`），renderer 不二次解析路径。IME、Unicode、按 ID/文本搜索、独立滚动、父级切换清理。
 - **Negative DOM**：`menu/**/*.tpf.dcx` 不出现；无物理目录 tab、主区 evidence/hex、未接线 Tools、正文第四竖栏。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；完成 language→container→table→entry→content；Entries 在 Content 上方；全链键盘/IME/Unicode；无匹配与真空表分离；同尺寸截图。
 - **Done**：选择链完整，拓扑与 §2.5 Text 一致。

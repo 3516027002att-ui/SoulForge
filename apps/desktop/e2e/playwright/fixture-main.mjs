@@ -29,6 +29,7 @@
  * - SF_TEST_BROWSER_PREVIEW=1：创建无 preload 窗口，模拟普通浏览器预览表面。
  */
 import { app, BrowserWindow, ipcMain } from 'electron';
+import { logicalFmgTableName } from '@soulforge/shared';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
@@ -2347,28 +2348,37 @@ function registerFixtureIpc() {
   // menu.fmg 是真空表（0 条，用于「真空表 ≠ 失败」断言）。与生产 main 的
   // readTextCatalog / readFmgTablePage 同语义：typed tableId 定位，条目由 main
   // 端按完整表过滤后分页。
-  handleTrusted('resource.readTextCatalog', () => ({
-    ok: true,
-    libraryId: 'game-text',
-    title: 'Text · 1 languages · 1 container',
-    languages: [{
-      languageId: 'zhocn',
-      containers: [{
-        containerId: 'text:zhocn:test-msgbnd',
-        containerKind: 'test-msgbnd',
-        sourceUri: 'fixture://msg/test.msgbnd.dcx',
-        relativePath: 'msg/test.msgbnd.dcx',
-        parseStatus: 'confirmed',
-        tableCount: 2,
-        tables: [
-          { tableId: 'text:zhocn:test-msgbnd:0-item.fmg', entryName: 'item.fmg', entryCount: fixture.fmg.entries.length, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 0 },
-          { tableId: 'text:zhocn:test-msgbnd:1-menu.fmg', entryName: 'menu.fmg', entryCount: 0, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 1 }
-        ],
-        diagnostics: []
-      }]
-    }],
-    diagnostics: []
-  }));
+  handleTrusted('resource.readTextCatalog', () => {
+    // S13：Bridge 内层名是原构建机绝对路径（N:\GR\…\item.fmg）；fixture 模拟
+    // 生产 main 用与 ipc.ts 同一个 logicalFmgTableName 投影成逻辑表名（item/menu）。
+    const seenTableNames = new Set();
+    const rawTables = [
+      { tableId: 'text:zhocn:test-msgbnd:0-item.fmg', entryName: 'N:\\GR\\data\\INTERROOT_win64\\msg\\zhocn\\item.fmg', entryCount: fixture.fmg.entries.length, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 0 },
+      { tableId: 'text:zhocn:test-msgbnd:1-menu.fmg', entryName: 'N:\\GR\\data\\INTERROOT_win64\\msg\\zhocn\\menu.fmg', entryCount: 0, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 1 }
+    ];
+    return {
+      ok: true,
+      libraryId: 'game-text',
+      title: 'Text · 1 languages · 1 container',
+      languages: [{
+        languageId: 'zhocn',
+        containers: [{
+          containerId: 'text:zhocn:test-msgbnd',
+          containerKind: 'test-msgbnd',
+          sourceUri: 'fixture://msg/test.msgbnd.dcx',
+          relativePath: 'msg/test.msgbnd.dcx',
+          parseStatus: 'confirmed',
+          tableCount: rawTables.length,
+          tables: rawTables.map((table) => ({
+            ...table,
+            entryName: logicalFmgTableName(table.entryName, table.entryIndex, seenTableNames)
+          })),
+          diagnostics: []
+        }]
+      }],
+      diagnostics: []
+    };
+  });
 
   handleTrusted('resource.readFmgTablePage', (_event, tableId, page, pageSize, query) => {
     if (fixture.fmg.menuEntries === undefined) fixture.fmg.menuEntries = [];

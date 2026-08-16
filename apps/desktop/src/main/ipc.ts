@@ -134,6 +134,7 @@ import {
   type DecideAgentApprovalRequest,
   type EditorSelectionContext,
   type FmgEntryPage,
+  logicalFmgTableName,
   type ScriptEntryPlaintextView,
   type ScriptSourceView
 } from '@soulforge/shared';
@@ -3017,7 +3018,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const languageId = catalog.languageId || hint.languageId || 'unknown';
       const containerKind = catalog.containerKind || hint.containerKind || 'unknown';
       const containerId = catalog.containerId || `text:${languageId}:${containerKind}`;
+      // S13：Bridge 的表名可能是原构建机绝对路径（N:\GR\…\Title_Items.fmg）。
+      // 出 renderer 前投影为逻辑表名（basename、去 .fmg、同名加序号）；renderer
+      // 永不看到「[本机路径已隐藏]」当表名。tableId（stableId）仍是路由标识。
+      const seenTableNames = new Set<string>();
       const tables = catalog.tables.map((table) => {
+        const entryName = logicalFmgTableName(table.entryName, table.entryIndex ?? 0, seenTableNames);
         const ref: TextTableRef = {
           tableId: table.stableId,
           languageId,
@@ -3025,12 +3031,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           containerKind,
           sourceUri: file.sourceUri,
           entryIndex: table.entryIndex,
-          entryName: table.entryName
+          entryName
         };
         textTableRefs.set(ref.tableId, ref);
         return {
           tableId: table.stableId,
-          entryName: table.entryName,
+          entryName,
           entryCount: table.entryCount,
           sourceUri: file.sourceUri,
           entryIndex: table.entryIndex

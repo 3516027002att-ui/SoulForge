@@ -906,20 +906,23 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
   await expect(fmgPanel).toBeVisible();
 
-  // §9.1 拓扑：左 Text Categories + 右区（右上 Text Entries / 右下 Text Content），不是四条竖栏。
+  // §9.1 拓扑（S13）：Text Categories | Text Entries | Text 三列竖排。
   const columns = fmgPanel.locator('.workbench__column');
-  await expect(columns).toHaveCount(2);
+  await expect(columns).toHaveCount(3);
   await expect(columns.nth(0).locator('.workbench__column-title')).toContainText('Text Categories');
-  await expect(columns.nth(1).locator('.workbench__column-title')).toContainText('Text');
-  const entriesPane = fmgPanel.getByRole('region', { name: 'Text Entries' });
-  await expect(entriesPane.locator('h3')).toContainText('Text Entries');
-  const textPane = fmgPanel.getByRole('region', { name: 'Text Content' });
-  await expect(textPane.locator('h3')).toContainText('Text Content');
+  await expect(columns.nth(1).locator('.workbench__column-title')).toContainText('Text Entries');
+  await expect(columns.nth(2).locator('.workbench__column-title')).toContainText('Text');
 
-  // 目录树三层可见：语言银行 → 容器 → 表。
-  await expect(fmgPanel.getByRole('row', { name: /zhocn/ })).toBeVisible();
-  await expect(fmgPanel.getByRole('row', { name: /test-msgbnd/ })).toBeVisible();
-  await expect(fmgPanel.getByRole('row', { name: /item\.fmg/ })).toBeVisible();
+  // 语言是 Categories 顶上筛选（combobox），不是缩进树的一层。
+  const languageSelect = fmgPanel.getByRole('combobox', { name: '文本语言' });
+  await expect(languageSelect).toContainText('zhocn');
+
+  // 表名平铺为一行一表：fixture 喂的是原构建机绝对路径（N:\GR\…\item.fmg），
+  // main 投影成逻辑名 item/menu——窗口里绝不允许出现「[本机路径已隐藏]」当表名。
+  await expect(fmgPanel.getByRole('row', { name: /^item/ })).toBeVisible();
+  await expect(fmgPanel.getByRole('row', { name: /^menu/ })).toBeVisible();
+  expect(await fmgPanel.innerText()).not.toContain('[本机路径已隐藏]');
+  expect(await fmgPanel.innerText()).not.toContain('暂无已接通的工具');
 
   // 自动定位命中 item.fmg：条目 100/101 立即可见，选中后可编辑。
   const row100 = fmgPanel.getByRole('row', { name: /伤药葫芦/ });
@@ -927,15 +930,15 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   await row100.click();
   await expect(window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea')).toBeVisible();
 
-  // 切换表 → 父级切换清理：item.fmg 的条目被清空；menu.fmg 真空表显示空态而非失败。
-  await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
+  // 切换表 → 父级切换清理：item 的条目被清空；menu 真空表显示空态而非失败。
+  await fmgPanel.getByRole('row', { name: /^menu/ }).click();
   const entriesColumn = fmgPanel.getByRole('region', { name: 'Text Entries' });
   await expect(entriesColumn).toContainText('当前页无条目');
   await expect(entriesColumn).not.toContainText('伤药葫芦');
   await expect(entriesColumn).not.toContainText('danger');
 
-  // 切回 item.fmg：条目恢复（清理不破坏切回路径）。
-  await fmgPanel.getByRole('row', { name: /item\.fmg/ }).click();
+  // 切回 item：条目恢复（清理不破坏切回路径）。
+  await fmgPanel.getByRole('row', { name: /^item/ }).click();
   await expect(fmgPanel.getByRole('row', { name: /伤药葫芦/ })).toBeVisible();
 
   // 无匹配搜索与真空表分离：搜索无命中显示「没有匹配的条目」。
@@ -943,11 +946,11 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   await expect(entriesColumn).toContainText('没有匹配的条目');
   await entriesColumn.locator('input[aria-label="筛选 FMG"]').fill('');
 
-  // Negative DOM：文本目录树不出现 tpf/texbnd；Tools 栏诚实空态。
+  // Negative DOM：文本目录树不出现 tpf/texbnd；左栏底下没有空 Tools 块（S13 删掉）。
   const workbenchText = await fmgPanel.innerText();
   expect(workbenchText).not.toContain('.tpf');
   expect(workbenchText).not.toContain('texbnd');
-  await expect(fmgPanel.getByRole('region', { name: 'Text Categories' })).toContainText('暂无已接通的工具');
+  expect(workbenchText).not.toContain('暂无已接通的工具');
 
   await window.screenshot({ path: 'test-results/text-20b-s91-topology.png' });
   await app.close();
@@ -963,8 +966,8 @@ test('TEXT-20C：真空表新增经 review 队列落盘，写按 tableId 路由�
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
   await expect(fmgPanel).toBeVisible();
 
-  // menu.fmg 是真空表：显示「当前页无条目」而非失败（真空表 ≠ 不可编辑）。
-  await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
+  // menu 是真空表：显示「当前页无条目」而非失败（真空表 ≠ 不可编辑）。
+  await fmgPanel.getByRole('row', { name: /^menu/ }).click();
   const entriesTable = fmgPanel.locator('.binder-child-table');
   await expect(entriesTable).toContainText('当前页无条目');
 
@@ -985,11 +988,11 @@ test('TEXT-20C：真空表新增经 review 队列落盘，写按 tableId 路由�
 
   // 提交后面板按新 sourceHash 重挂载并自动定位回首表（item.fmg）；切到 menu.fmg
   // 重读：新增条目自 fixture.menuEntries 可见（真空表写后不被伪装回 0 条）。
-  await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
+  await fmgPanel.getByRole('row', { name: /^menu/ }).click();
   await expect(entriesTable).toContainText('菜单说明·新增');
 
   // sibling：menu 写不触及 item.fmg，100/101 仍在。
-  await fmgPanel.getByRole('row', { name: /item\.fmg/ }).click();
+  await fmgPanel.getByRole('row', { name: /^item/ }).click();
   await expect(fmgPanel.getByRole('row', { name: /伤药葫芦/ })).toBeVisible();
 
   await window.screenshot({ path: 'test-results/text-20c-empty-table-write.png' });
