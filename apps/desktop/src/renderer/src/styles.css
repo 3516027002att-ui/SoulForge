@@ -14,7 +14,7 @@
 
   /* Agent dock 外壳（§12.2 初值；参考图缺失，未对照 TRAE 实测） */
   --agent-dock-default: 440px;
-  --agent-dock-min: 340px;
+  --agent-dock-min: 200px;
   --agent-dock-max: 620px;
   --agent-header-height: 48px;
   --agent-resizer-width: 4px;

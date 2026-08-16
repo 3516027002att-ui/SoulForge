@@ -1374,7 +1374,7 @@ Bottom Composer
 
 ```css
 --agent-dock-default: 440px;
---agent-dock-min: 340px;
+--agent-dock-min: 200px;
 --agent-dock-max: 620px;
 --agent-header-height: 48px;
 --agent-resizer-width: 4px;
@@ -1391,7 +1391,7 @@ Bottom Composer
 - workspace 级持久化；
 - 鼠标拖动或键盘每次 16px；
 - 普通状态只有 1px 左分隔线；
-- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 340–620；
+- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 200–620（S8 下限从 340 收到 200：够放「引用 + 发送」）；
 - `Ctrl+J` 显示/隐藏；
 - 隐藏不取消任务、不清除审批。
 
@@ -2260,7 +2260,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 1440px
 1920px
 200% system/browser zoom
-340 / 440 / 620px Agent widths
+200 / 440 / 620px Agent widths（S8 下限 200）
 ```
 
 窄窗口策略：
@@ -2693,7 +2693,7 @@ SHELL-09 → SHELL-10
 #### AGENT-60A — dock shell 与欢迎区
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockResizer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockHeader.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentConversationViewport.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentWelcome.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`。
-- **Steps**：实现 48px header / minmax conversation / bottom composer grid；340/440/620px、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
+- **Steps**：实现 48px header / minmax conversation / bottom composer grid；200/440/620px（S8）、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
 - **Tests**：idle 440×900 截图；340/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
 
 #### AGENT-60B — 三层 Composer
@@ -2796,7 +2796,7 @@ SHELL-09 → SHELL-10
 
 - [ ] 1024/1280/1440/1920 可用；
 - [ ] 200% 缩放无遮挡；
-- [ ] 340/440/620px Agent 无溢出；
+- [ ] 200/440/620px Agent 无溢出（S8 下限 200）；
 - [ ] pane resizer 支持鼠标和键盘；
 - [ ] 所有列表、树、表格、编辑器和 toolbar 可仅用键盘操作；
 - [ ] focus-visible 清晰；

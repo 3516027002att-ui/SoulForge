@@ -205,7 +205,7 @@ const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 
 const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: string }> = [];
 
-const AGENT_MIN_WIDTH = 340;
+const AGENT_MIN_WIDTH = 200;
 const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
 

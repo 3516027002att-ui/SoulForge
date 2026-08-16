@@ -1052,6 +1052,28 @@ test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模�
   await app.close();
 });
 
+test('S8：Agent dock 可缩到 200px（下限 200，上限 620，默认 440）', async () => {
+  const { app, window } = await launchApp();
+  // localStorage 可能持久化了上一轮的收起状态：先确保 dock 展开，resizer 才可交互。
+  const agentToggle = window.getByRole('button', { name: 'AI Agent 面板' });
+  if ((await agentToggle.getAttribute('aria-pressed')) === 'false') {
+    await agentToggle.click();
+  }
+  // resizer 在（aria 值与 App/样式同一常量）。
+  const resizer = window.locator('.agent-dock-resizer');
+  await expect(resizer).toHaveAttribute('aria-valuemin', '200');
+  await expect(resizer).toHaveAttribute('aria-valuemax', '620');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '440');
+  await resizer.focus();
+  await window.keyboard.press('End');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '620');
+  // Home → 200：够放「引用 + 发送」，不是 0、不是一条缝。
+  await window.keyboard.press('Home');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '200');
+  await window.screenshot({ path: 'test-results/08-agent-min-200.png' });
+  await app.close();
+});
+
 test('Electron：workspace.openDialog 被调用；用户取消时安静返回', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);

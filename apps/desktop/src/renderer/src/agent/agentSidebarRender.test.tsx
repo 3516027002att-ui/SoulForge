@@ -51,7 +51,7 @@ function render(overrides: Partial<AgentSidebarProps> = {}): string {
   const props: AgentSidebarProps = {
     open: true,
     agentWidth: 440,
-    agentMinWidth: 340,
+    agentMinWidth: 200,
     agentMaxWidth: 620,
     onAgentWidthChange: () => undefined,
     busy: false,
@@ -197,7 +197,7 @@ describe('AgentDockResizer（§12.2）', () => {
     assert.match(html, /aria-orientation="vertical"/);
     assert.match(html, /aria-label="调整 Agent 面板宽度"/);
     assert.match(html, /aria-valuenow="440"/);
-    assert.match(html, /aria-valuemin="340"/);
+    assert.match(html, /aria-valuemin="200"/);
     assert.match(html, /aria-valuemax="620"/);
   });
 
@@ -212,21 +212,21 @@ describe('AgentDockResizer（§12.2）', () => {
     assert.match(closedHtml, /class="agent is-collapsed"/);
   });
 
-  it('宽度收敛到 340/620 并取整', () => {
+  it('宽度收敛到 200/620 并取整（S8：下限 200px）', () => {
     assert.equal(AGENT_DOCK_KEYBOARD_STEP, 16, '键盘每次 16px（§12.2）');
-    assert.equal(clampAgentDockWidth(440, 340, 620), 440);
-    assert.equal(clampAgentDockWidth(330, 340, 620), 340);
-    assert.equal(clampAgentDockWidth(700, 340, 620), 620);
-    assert.equal(clampAgentDockWidth(441.6, 340, 620), 442);
+    assert.equal(clampAgentDockWidth(440, 200, 620), 440);
+    assert.equal(clampAgentDockWidth(190, 200, 620), 200, '低于下限收敛到 200');
+    assert.equal(clampAgentDockWidth(700, 200, 620), 620);
+    assert.equal(clampAgentDockWidth(441.6, 200, 620), 442);
   });
 
   it('键盘 ArrowLeft/Right 每次 16px，Home/End 到边界', () => {
-    assert.equal(dockWidthForResizeKey('ArrowLeft', 440, 340, 620), 456);
-    assert.equal(dockWidthForResizeKey('ArrowRight', 440, 340, 620), 424);
-    assert.equal(dockWidthForResizeKey('ArrowLeft', 610, 340, 620), 620, '超过上限收敛到 620');
-    assert.equal(dockWidthForResizeKey('ArrowRight', 345, 340, 620), 340, '低于下限收敛到 340');
-    assert.equal(dockWidthForResizeKey('Home', 500, 340, 620), 340);
-    assert.equal(dockWidthForResizeKey('End', 400, 340, 620), 620);
+    assert.equal(dockWidthForResizeKey('ArrowLeft', 440, 200, 620), 456);
+    assert.equal(dockWidthForResizeKey('ArrowRight', 440, 200, 620), 424);
+    assert.equal(dockWidthForResizeKey('ArrowLeft', 610, 200, 620), 620, '超过上限收敛到 620');
+    assert.equal(dockWidthForResizeKey('ArrowRight', 210, 200, 620), 200, '低于下限收敛到 200');
+    assert.equal(dockWidthForResizeKey('Home', 500, 200, 620), 200);
+    assert.equal(dockWidthForResizeKey('End', 400, 200, 620), 620);
   });
 });
 
