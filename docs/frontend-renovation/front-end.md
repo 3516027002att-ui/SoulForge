@@ -2452,6 +2452,11 @@ SHELL-09 → SHELL-10
 - **Negative source tests**：无 `domainForFile`、`filterFilesForDomain(files)`、`visibleFiles.length` 领域计数。
 - **Done**：顶部无 `PARAM 36`，PARAM 入口直接打开逻辑库。
 
+> **S22 落地（2026-08-17，原版目录选完当场生效）**：
+> - 新增 `workspace.remountBase(baseSelectionId | null)` IPC：工作区已打开时保留 overlay、只重建 base 层（dispose daemon 池、清 EMEVD 文档缓存与编辑器 handle），新 `oodleRuntimeRoot` / 只读原版层立即生效 —— 动作预览、KRAK 事件、原版 chrbnd 不必重启。
+> - `chooseBaseDirectory` / `clearBaseDirectory` 在工作区已打开时立即重挂；`mountWorkspace` 的「下次打开生效」文案删除。开始页状态只分「已挂载（只读）」/「未挂载」，「待打开生效」「原版（下次打开生效）」删除。
+> - 重挂后 renderer 更新 `workspace.session` / `workspaceSessionId` 并清空打开中的编辑态（旧文档 handle 已作废）。原版仍只读（写链只允许 overlay，layer 语义未动）。
+
 #### SHELL-10 — 键位跟域走（T7）
 
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/keybindings/keymapTable.ts`；`[CREATE] apps/desktop/src/renderer/src/keybindings/applyKeybinding.ts`；`[CREATE] apps/desktop/src/renderer/src/keybindings/keymapTable.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] docs/frontend-renovation/front-end.md`。

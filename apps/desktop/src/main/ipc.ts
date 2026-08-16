@@ -229,6 +229,8 @@ let activeRag: RagCorpus | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
+/** 当前 overlay 的显示 label：remountBase 重建 session 时沿用（scan 时登记）。 */
+let activeOverlayLabel = '';
 /**
  * Authoritative full EMEVD editor documents keyed by sourceUri. Assembled in
  * main via paginated Bridge reads; the renderer only ever edits DSL text and
@@ -2307,6 +2309,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         throw error;
       }
       indexedFiles = result.files;
+      activeOverlayLabel = overlaySelection.label;
       activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
       activeIndex.setFiles(result.files);
       await refreshRagAfterScan(database, activeIndex);
@@ -2319,6 +2322,50 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         session: {
           workspaceSessionId: activeWorkspaceSessionId,
           workspaceLabel: overlaySelection.label,
+          game: activeSession.meta.game,
+          openedAt: activeSession.meta.openedAt,
+          baseMounted: !activeSession.meta.baseMissing,
+          ...(baseSelection ? { baseLabel: baseSelection.label } : {})
+        }
+      };
+    }
+  );
+
+  /**
+   * S22：工作区已打开时重挂原版目录（保留 overlay，只换 base 层）。
+   *
+   * 选/换/清原版不再「下次打开生效」：这里重建 session（dispose daemon 池、
+   * 清 EMEVD 文档缓存与编辑器 handle），新的 oodleRuntimeRoot / 原版只读层
+   * 立即生效 —— 动作预览、KRAK 事件、原版 chrbnd 不必重启就能走到新 base。
+   * baseSelectionId 为 null = 卸载原版层。原版永远只读（openWorkspaceSession
+   * 的 layer 语义不变，写链只允许 overlay）。
+   */
+  handle(
+    'workspace.remountBase',
+    async (event, baseSelectionId: string | null): Promise<{
+      workspaceSessionId: string;
+      session: RendererWorkspaceSession;
+    }> => {
+      if (!activeSession) throw new Error('请先打开工作区。');
+      const baseSelection = baseSelectionId
+        ? consumeDirectorySelection(event, baseSelectionId, 'base')
+        : undefined;
+      await disposeBridgeDaemonPool();
+      emevdFullDocuments.clear();
+      clearEditorPageCaches();
+      editorDocumentStore = null;
+      activeWorkspaceSessionId = randomUUID();
+      activeSession = await openWorkspaceSession({
+        overlayRoot: activeSession.layers.overlayRoot,
+        ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}),
+        game: activeSession.meta.game
+      });
+      const workspaceLabel = activeOverlayLabel || activeSession.meta.game;
+      return {
+        workspaceSessionId: activeWorkspaceSessionId,
+        session: {
+          workspaceSessionId: activeWorkspaceSessionId,
+          workspaceLabel,
           game: activeSession.meta.game,
           openedAt: activeSession.meta.openedAt,
           baseMounted: !activeSession.meta.baseMissing,

@@ -1660,6 +1660,32 @@ export function App(): ReactElement {
     pushToast(message, 'warn');
   }
 
+  /**
+   * S22：工作区已打开时，重挂原版目录（保留 overlay，只换 base 层）当场生效，
+   * 不用重启。session 重建后旧文档 handle 作废，清掉打开中的编辑态。
+   */
+  async function remountBase(baseSelection: DirectorySelection | null): Promise<void> {
+    if (!bridge || !workspace || typeof bridge.remountBase !== 'function') return;
+    const currentSessionId = workspace.workspaceSessionId;
+    try {
+      const result = await bridge.remountBase(baseSelection?.selectionId ?? null);
+      setWorkspace((previous) =>
+        previous && previous.workspaceSessionId === currentSessionId
+          ? { ...previous, workspaceSessionId: result.workspaceSessionId, session: result.session }
+          : previous
+      );
+      setSessionMeta(result.session);
+      setOpenTabs([]);
+      setSelectedFile(null);
+      setPreview(null);
+      resetAllDocuments(documentResetActions);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`重挂原版目录失败：${message}`);
+      pushToast(`重挂原版目录失败：${message}`, 'warn');
+    }
+  }
+
   async function chooseBaseDirectory(): Promise<void> {
     if (!bridge) {
       announceDesktopOnly('选择原版目录');
@@ -1669,7 +1695,12 @@ export function App(): ReactElement {
       const selection = await bridge.openBaseDialog();
       if (!selection) return;
       setBaseRootChoice(selection);
-      setStatus(`已选择只读原版游戏目录：${selection.label}（下次打开 Mod 工作区时生效）`);
+      if (workspace) {
+        await remountBase(selection);
+        setStatus(`已挂载只读原版游戏目录：${selection.label}`);
+      } else {
+        setStatus(`已选择只读原版游戏目录：${selection.label}`);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(`选择原版目录失败：${message}`);
@@ -1679,7 +1710,13 @@ export function App(): ReactElement {
 
   function clearBaseDirectory(): void {
     setBaseRootChoice(null);
-    setStatus('已清除原版游戏目录选择');
+    if (workspace) {
+      // S22：清原版同样当场生效（同一 overlay 重挂一个不带 base 的 session）。
+      void remountBase(null);
+      setStatus('已卸载原版游戏目录（当前工作区保持打开）');
+    } else {
+      setStatus('已清除原版游戏目录选择');
+    }
   }
 
   function openCmdk(): void {

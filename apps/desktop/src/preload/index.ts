@@ -11,6 +11,7 @@ import type {
   DirectorySelection,
   OpenWorkspaceScanOptions,
   RendererWorkspaceScanResult,
+  RendererWorkspaceSession,
   RollbackOperationIpcResult,
   TextCatalogResponse
 } from '../main/ipc.js';
@@ -129,6 +130,11 @@ const api = {
   openBaseDialog: (): Promise<DirectorySelection | null> => ipcRenderer.invoke('workspace.openBaseDialog'),
   scanWorkspace: (options: OpenWorkspaceScanOptions): Promise<RendererWorkspaceScanResult> =>
     ipcRenderer.invoke('workspace.scan', options),
+  // S22：工作区已打开时重挂原版目录（baseSelectionId=null 卸载原版层），当场生效。
+  remountBase: (baseSelectionId: string | null): Promise<{
+    workspaceSessionId: string;
+    session: RendererWorkspaceSession;
+  }> => ipcRenderer.invoke('workspace.remountBase', baseSelectionId),
   detectMe3: (): Promise<import('@soulforge/core').RuntimeCapability> =>
     ipcRenderer.invoke('runtime.detectMe3'),
   prepareMe3Profile: (): Promise<import('@soulforge/core').RuntimeOperationResult<import('@soulforge/core').RuntimeProfileRef>> =>
