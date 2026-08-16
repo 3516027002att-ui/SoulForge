@@ -58,6 +58,11 @@ import {
 } from '@codemirror/autocomplete';
 import { search, searchKeymap } from '@codemirror/search';
 import { tags } from '@lezer/highlight';
+import {
+  appendEventLineInfo,
+  splitSourceForInjection,
+  takeSourceSlice
+} from '../emevd/incrementalSourceInjection.js';
 
 export interface EventSourceSubmitResult {
   ok: boolean;
@@ -448,6 +453,21 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   completionItemsRef.current = completionItems;
   /** 每 tab 的 event 块行映射，gutter 经该 ref 读取（CM 闭包拿不到 React state）。 */
   const eventLineInfoRef = useRef<Map<number, EventLineInfo>>(new Map());
+  /**
+   * S18-E：尚未灌入全量源码的 tab 注入进度（ref，不参与渲染）。
+   * `remaining` 是还没 dispatch 进 view 的文本；dirty（用户编辑）时一次性补全。
+   */
+  const injectorRef = useRef<Map<string, {
+    remaining: string;
+    blockIndex: number;
+  }>>(new Map());
+  /** S18-E：正在做程序性注入（dispatch 来自 interval 而非用户输入）。 */
+  const injectingRef = useRef(false);
+  /** interval 循环读最新 tabs / activeTabId（避免把 16ms 循环挂进 effect 依赖）。 */
+  const tabsRef = useRef<InternalTab[]>([]);
+  tabsRef.current = tabs;
+  const activeTabIdRef = useRef<string | null>(null);
+  activeTabIdRef.current = activeTabId;
   /** 始终指向最新 commitDraft，供各 tab 的 CM extensions 闭包安全调用。 */
   const commitDraftRef = useRef<(tabId: string, text: string, state: EditorState) => void>(() => {});
   /** S14：Ctrl+S 触发保存，经 ref 调最新 submitSource（CM keymap 闭包拿不到 state）。 */
@@ -475,11 +495,16 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
   const commitDraft = useCallback((tabId: string, text: string, state: EditorState) => {
     setTabs((previous) =>
-      previous.map((tab) =>
+      previous.map((tab) => {
         // 同步最新 CM state：切换 tab 时 view.setState(activeTab.editorState)
         // 换入的是缓存 state，若编辑后不更新它，切回来会回退到未编辑的模板。
-        tab.tabId === tabId ? { ...tab, dirty: true, draft: text, editorState: state } : tab
-      )
+        if (tab.tabId !== tabId) return tab;
+        // S18-E：程序性注入的 dispatch 也会触发 updateListener —— 注入期间只
+        // 同步最新 CM state（切 tab 缓存用），不标 dirty、不把「前缀+部分」当成
+        // 用户编辑后的 draft（未编辑时 draft 保持全量，提交语义完整）。
+        if (injectingRef.current) return { ...tab, editorState: state };
+        return { ...tab, dirty: true, draft: text, editorState: state };
+      })
     );
   }, []);
   commitDraftRef.current = commitDraft;
@@ -517,15 +542,35 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         };
         return previous.map((tab, i) => (i === index ? merged : tab));
       }
+      const split = splitSourceForInjection(base, eventWarningRowsOf(pending));
       const created: InternalTab = {
         ...pending,
         dirty: false,
         draft: base,
         editorState: EditorState.create({
-          doc: base,
+          // S18-E：禁止首帧 create(全文) —— 7 万行 DarkScript 一次建树会卡死
+          // renderer。首帧只灌前缀，剩余由注入 interval 分片 dispatch 追加。
+          doc: split.prefix,
           extensions: createExtensionsFor(pending.tabId)
         })
       };
+      if (split.rest === '') {
+        injectorRef.current.delete(pending.tabId);
+      } else {
+        injectorRef.current.set(pending.tabId, {
+          remaining: split.rest,
+          blockIndex: split.prefixBlocks
+        });
+        // 前缀部分先做增量索引；剩余行随注入逐片追加。
+        eventLineInfoRef.current = new Map();
+        appendEventLineInfo(
+          eventLineInfoRef.current,
+          split.prefix,
+          1,
+          0,
+          eventWarningRowsOf(pending)
+        );
+      }
       return [...previous, created];
     });
     setActiveTabId(pending.tabId);
@@ -544,6 +589,10 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
   useEffect(() => {
     if (!activeTab) return;
+    // S18-E：注入中的 tab 其 view doc 只是「前缀 + 进度」，而 draft 是全量 ——
+    // 这里只对无注入器的 tab 全量重扫；注入中的 gutter 由 interval 增量维护
+    // （否则每次切回 tab 都把 7 万行再 split 一遍）。
+    if (injectorRef.current.has(activeTab.tabId)) return;
     syncGutterInfo(activeTab.draft, eventWarningRowsOf(activeTab));
   }, [activeTab, syncGutterInfo]);
 
@@ -576,6 +625,62 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
+  /**
+   * S18-E：16 ms 一片把激活 tab 的剩余源码增量灌入 view。
+   *
+   * - 分片：takeSourceSlice 取行，dispatch 追加到文末；gutter 只增量索引新行，
+   *   不整篇 split（7 万行每 16 ms 重扫一次是原先的卡顿源之一）。
+   * - dirty（用户编辑）：一次性补全剩余文本（编辑中的文档必须完整），结束注入。
+   * - 切走 tab：view.state 与缓存 state 不一致，跳过本片；切回时从进度续灌。
+   * - 单常驻 interval + ref 读状态，不随每片重渲染重启。
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const tabId = activeTabIdRef.current;
+      if (!tabId) return;
+      const inject = injectorRef.current.get(tabId);
+      if (!inject) return;
+      const view = viewRef.current;
+      const tab = tabsRef.current.find((item) => item.tabId === tabId);
+      if (!view || !tab) return;
+      if (view.state !== tab.editorState) return; // setState 未跟上（切换瞬间）
+      if (tab.dirty) {
+        // 用户开始编辑：立即补全剩余（一次 dispatch），文档必须完整。
+        injectorRef.current.delete(tabId);
+        view.dispatch({ changes: { from: view.state.doc.length, insert: inject.remaining } });
+        const state = view.state;
+        const text = state.doc.toString();
+        setTabs((previous) =>
+          previous.map((item) =>
+            item.tabId === tabId ? { ...item, draft: text, editorState: state } : item
+          )
+        );
+        return;
+      }
+      const { chunk, rest } = takeSourceSlice(inject.remaining);
+      const rows = eventWarningRowsOf(tab);
+      const consumed = appendEventLineInfo(
+        eventLineInfoRef.current,
+        chunk,
+        view.state.doc.lines + 1,
+        inject.blockIndex,
+        rows
+      );
+      injectingRef.current = true;
+      view.dispatch({ changes: { from: view.state.doc.length, insert: chunk } });
+      injectingRef.current = false;
+      if (rest === '') {
+        injectorRef.current.delete(tabId);
+      } else {
+        injectorRef.current.set(tabId, {
+          remaining: rest,
+          blockIndex: inject.blockIndex + consumed
+        });
+      }
+    }, 16);
+    return () => clearInterval(timer);
+  }, []);
+
   /** 提交/加载完整模板/mutation 后 App 回灌 pendingTab → 更新激活 tab 的基线（保留 dirty）。 */
   useEffect(() => {
     const pending = props.pendingTab;
@@ -586,19 +691,32 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     if (!current || current.dirty) return;
     const next = baselineText(pending);
     if (next === current.draft) return;
+    // S18-E：回灌（提交后 reload / 重开）同样禁止全量 create —— 前缀建 state，
+    // 剩余走注入 interval。
+    const rows = eventWarningRowsOf(pending);
+    const split = splitSourceForInjection(next, rows);
     const nextState = EditorState.create({
-      doc: next,
+      doc: split.prefix,
       extensions: createExtensionsFor(activeTabId)
     });
+    if (split.rest === '') {
+      injectorRef.current.delete(activeTabId);
+    } else {
+      injectorRef.current.set(activeTabId, {
+        remaining: split.rest,
+        blockIndex: split.prefixBlocks
+      });
+    }
+    eventLineInfoRef.current = new Map();
+    appendEventLineInfo(eventLineInfoRef.current, split.prefix, 1, 0, rows);
     setTabs((previous) =>
       previous.map((tab) =>
         tab.tabId === activeTabId
-          ? { ...tab, document: pending.document, sourceHash: pending.sourceHash, dslTemplate: pending.dslTemplate, draft: next, dirty: false, editorState: nextState }
+          ? { ...tab, document: pending.document, eventWarnings: pending.eventWarnings, sourceHash: pending.sourceHash, dslTemplate: pending.dslTemplate, draft: next, dirty: false, editorState: nextState }
           : tab
       )
     );
     view.setState(nextState);
-    syncGutterInfo(next, eventWarningRowsOf(pending));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, activeTabId]);
 
@@ -607,6 +725,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }
 
   function closeTab(tabId: string): void {
+    injectorRef.current.delete(tabId);
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === tabId);
       const next = previous.filter((tab) => tab.tabId !== tabId);
@@ -626,10 +745,23 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       const result = await props.onDslSubmit(activeTab, activeTab.draft);
       if (result.ok) {
         const nextText = result.nextDslTemplate ?? activeTab.draft;
+        // S18-E：提交成功后的新模板同样前缀建 state，剩余走注入 interval。
+        const rows = eventWarningRowsOf(activeTab);
+        const split = splitSourceForInjection(nextText, rows);
         const nextState = EditorState.create({
-          doc: nextText,
+          doc: split.prefix,
           extensions: createExtensionsFor(activeTab.tabId)
         });
+        if (split.rest === '') {
+          injectorRef.current.delete(activeTab.tabId);
+        } else {
+          injectorRef.current.set(activeTab.tabId, {
+            remaining: split.rest,
+            blockIndex: split.prefixBlocks
+          });
+        }
+        eventLineInfoRef.current = new Map();
+        appendEventLineInfo(eventLineInfoRef.current, split.prefix, 1, 0, rows);
         setTabs((previous) =>
           previous.map((tab) =>
             tab.tabId === activeTab.tabId
@@ -646,7 +778,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           )
         );
         viewRef.current?.setState(nextState);
-        syncGutterInfo(nextText, eventWarningRowsOf(activeTab));
         // S14：应用即备份可回滚；不再出现 Bridge / 补丁引擎字样。
         setStatus('已应用，可回滚。');
       } else {
