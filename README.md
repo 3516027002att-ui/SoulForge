@@ -49,8 +49,7 @@ npm test
 npm run build
 npm run dev
 ~~~
-
-Bridge（.NET 原生解析桥）相关的验证命令见根目录 `package.json`。如果你没有真实游戏文件或私有测试样本，相关命令会诚实地返回 `skipped / unverified`，不会用假数据冒充通过。
+下载好各种依赖之后，双击SoulForge.exe就行了
 
 ## 支持的版本
 
@@ -66,5 +65,19 @@ SoulForge 不附带任何游戏资产、专有压缩库或 FromSoftware 代码�
 
 ## 想说的话
 
-这个ui太丑了，有没有大手子帮我做一版好看的
-This UI is hideous. Is there an expert who can help me create a better-looking version?
+我用我的skill做了一版符合我口味的，我觉得超好看的ui，但是感觉和项目名称不太搭，有没有大手子帮我做一版沾边的
+
+I made a version of the UI with my skill that suits my taste — I think it looks great, but it doesn't quite match the project name. Is there an expert out there who can help me make a version that actually fits the theme?
+
+如果你发现了bug或是有其他想说的话，请不要在项目下面评论，因为我目前很少逛GitHub，你写的啥我看不到，也不会有通知。
+可以直接发邮件给我： 3516027002att@gmail.com 虽然仓库里有很多机器群发的垃圾邮件，但只要有真人给我发邮件，我就会收到。
+不过说实话，这个邮箱平时除了其他仓库的维护者的评论，基本不会有真人给我发邮件，哪怕我已经开始到处投简历了。
+因此只要我限制你只能给我发邮件，我就永远不会收到任何反馈邮件。
+这样我的项目就理所应当没有任何bug了233333
+
+If you find a bug or have something else to say, please don't leave a comment under the project — I rarely browse GitHub these days, so I won't see what you wrote and won't get any notification.
+You can email me directly at: 3516027002att@gmail.com. Even though the repo gets a lot of machine-generated spam, as long as a real person emails me, I'll receive it.
+To be honest, apart from comments from other repos' maintainers, this inbox rarely gets a real human email — even though I've already started sending out résumés everywhere.
+So, as long as I restrict you to only emailing me, I'll never receive any feedback.
+That way, my project naturally has zero bugs looooooolllll
+
