@@ -84,6 +84,7 @@ import {
   replaceContainerChild,
   resolveOperationLogStorePath,
   resolveResourceCapabilities,
+  rollbackFile,
   rollbackOperation,
   roundTripContainer,
   runBridge,
@@ -1656,7 +1657,12 @@ function consumeDirectorySelection(
 }
 
 async function requestWriteConfirmation(input: {
-  event: IpcMainInvokeEvent;
+  /**
+   * 弹对话框的宿主窗口。UI 通道（IPC handler）有 sender；AI 工具执行路径没有
+   * IPC event（executeTool 由 runAgentSession 内部调用），缺省时用无父窗口的
+   * dialog.showMessageBox —— 确认语义一致，只是不模态于某个窗口。
+   */
+  event?: IpcMainInvokeEvent;
   resourceLabel: string;
   sourceUri: string;
   actionLabel: string;
@@ -1664,7 +1670,7 @@ async function requestWriteConfirmation(input: {
   extraSubjects?: string[];
 }): Promise<ConfirmationReceipt | null> {
   if (!activeWorkspaceSessionId) return null;
-  const parent = BrowserWindow.fromWebContents(input.event.sender);
+  const parent = input.event ? BrowserWindow.fromWebContents(input.event.sender) : null;
   const options = {
     type: 'warning' as const,
     title: '确认高风险写入',
@@ -8182,6 +8188,89 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     };
   });
 
+  handle('operation.rollbackFile', async (_event, opId: string, targetUri: string): Promise<RollbackOperationIpcResult> => {
+    if (!activeSession || !activeOperationLog) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'WORKSPACE_NOT_OPEN',
+          message: 'Open a workspace before rolling back a file.'
+        }]
+      };
+    }
+
+    const sourceOperation = await activeOperationLog.get(opId);
+    if (!sourceOperation) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'OPERATION_NOT_FOUND',
+          message: '找不到要回滚的操作。'
+        }]
+      };
+    }
+    const fileRecord = sourceOperation.files.find((file) => file.targetUri === targetUri);
+    if (!fileRecord) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'ROLLBACK_FILE_NOT_FOUND',
+          message: `操作 ${opId} 中不存在资源 ${targetUri}。`
+        }]
+      };
+    }
+    const confirmation = await requestWriteConfirmation({
+      event: _event,
+      resourceLabel: `${sourceOperation.title} · ${targetUri}`,
+      sourceUri: targetUri,
+      actionLabel: '回滚该文件',
+      payloadHash: createHash('sha256').update(`${opId}:${targetUri}`).digest('hex'),
+      extraSubjects: [`ROLLBACK_FILE:${opId}:${targetUri}`]
+    });
+    if (!confirmation) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'warning',
+          code: 'WRITE_CONFIRMATION_CANCELLED',
+          message: '用户取消了该文件的回滚。'
+        }]
+      };
+    }
+
+    const storage = durableStoragePaths(activeSession.meta.workspaceId);
+
+    const result = await rollbackFile({
+      opId,
+      targetUri,
+      store: activeOperationLog,
+      session: activeSession,
+      confirmation,
+      ...storage
+    });
+
+    return {
+      ok: result.ok,
+      opId: result.opId,
+      ...(result.inverseOpId ? { inverseOpId: result.inverseOpId } : {}),
+      restoredFiles: result.restoredFiles.map((path) => {
+        return indexedFiles.find((file) => file.absolutePath === path)?.sourceUri ?? '[本机路径已隐藏]';
+      }),
+      diagnostics: sanitizeDiagnostics(result.diagnostics)
+    };
+  });
+
   handle('ai.tools', async () => toolRegistry.list());
 
   handle('ai.sidebarDraft', async (_event, request: AiSidebarDraftRequest): Promise<AiSidebarDraft> => {
@@ -8413,6 +8502,61 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       registry: toolRegistry,
       context: { workspaceIndex: activeIndex, mode }
     });
+
+    // AI 回滚接通：rollback_operation 走与 UI 操作级回滚完全相同的通道 ——
+    // main 弹原生确认对话框（subject 绑定 ROLLBACK_OPERATION:<opId>，签发的
+    // ConfirmationReceipt 与 rollbackSelected 的校验一致），并把生产上下文
+    // （真实 SQLite store / session / 备份与恢复目录）注入工具执行。审批卡
+    // （agentLoop 的 rollback 级 gate）是「允许调这个工具」，这里的对话框是
+    // 「确认这一次具体回滚」——双重防线，回滚是高危险不可逆操作。
+    {
+      const rawExecuteTool = bridge.executeTool;
+      bridge.executeTool = async (call) => {
+        if (call.name !== 'rollback_operation') return rawExecuteTool(call);
+        let input: Record<string, unknown> = {};
+        try {
+          input = call.argumentsJson.trim() === '' ? {} : JSON.parse(call.argumentsJson);
+        } catch {
+          // 参数解析交给 registry 的 INVALID_INPUT 报错，这里只需拿 opId 弹框。
+        }
+        const opId = typeof input.opId === 'string' ? input.opId : '';
+        if (opId === '' || !activeSession || !activeOperationLog) {
+          return rawExecuteTool(call);
+        }
+        const storage = durableStoragePaths(activeSession.meta.workspaceId);
+        const sourceOperation = await activeOperationLog.get(opId);
+        if (!sourceOperation) {
+          return rawExecuteTool(call);
+        }
+        const confirmation = await requestWriteConfirmation({
+          resourceLabel: sourceOperation.title,
+          sourceUri: sourceOperation.files[0]?.targetUri ?? `operation://${opId}`,
+          actionLabel: '回滚操作',
+          payloadHash: createHash('sha256').update(opId).digest('hex'),
+          extraSubjects: [`ROLLBACK_OPERATION:${opId}`]
+        });
+        if (!confirmation) {
+          return {
+            ok: false,
+            code: 'WRITE_CONFIRMATION_CANCELLED',
+            content: JSON.stringify({
+              ok: false,
+              error: {
+                code: 'WRITE_CONFIRMATION_CANCELLED',
+                message: '用户在原生确认对话框中取消了回滚操作。'
+              }
+            })
+          };
+        }
+        return rawExecuteTool(call, {
+          session: activeSession,
+          operationLogStore: activeOperationLog,
+          backupBaseDir: storage.backupBaseDir,
+          recoveryDir: storage.recoveryDir,
+          confirmation
+        });
+      };
+    }
 
     let resumeFrom: ResumedRollout | undefined;
     if (request.resumeSessionPath !== undefined) {

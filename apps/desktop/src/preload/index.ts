@@ -225,6 +225,9 @@ const api = {
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),
+  /** 文件级回滚：把某次已提交操作里的单个文件恢复到操作前状态。 */
+  rollbackFile: (opId: string, targetUri: string): Promise<RollbackOperationIpcResult> =>
+    ipcRenderer.invoke('operation.rollbackFile', opId, targetUri),
   readEmevdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readEmevdDocument', sourceUri),
   applyEmevdMutation: (

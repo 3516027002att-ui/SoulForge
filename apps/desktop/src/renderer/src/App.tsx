@@ -2154,6 +2154,25 @@ export function App(): ReactElement {
     pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
   }
 
+  /** 文件级回滚：把某次操作里的单个文件恢复到操作前状态（与操作级同一通道）。 */
+  async function rollbackFileOp(opId: string, targetUri: string): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('文件回滚');
+      return;
+    }
+    if (typeof bridge.rollbackFile !== 'function') {
+      pushToast('当前预加载未暴露文件级回滚。', 'warn');
+      return;
+    }
+    const result = await bridge.rollbackFile(opId, targetUri);
+    await refreshOperationHistory();
+    if (!result.ok) {
+      pushToast(`文件回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || targetUri}`, 'warn');
+      return;
+    }
+    pushToast(`已回滚文件（${result.restoredFiles.length} 个）`);
+  }
+
   function updateMsgRow(index: number, patch: Partial<EditableMsgRow>): void {
     const nextRows = msgRows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row);
     setMsgRows(nextRows);
@@ -2745,6 +2764,25 @@ export function App(): ReactElement {
                         <button type="button" className="btn btn--ghost btn--sm" onClick={() => void rollbackOp(entry.opId)}>
                           回滚
                         </button>
+                        <details className="audit-entry__files">
+                          <summary>文件级回滚（{entry.fileCount}）</summary>
+                          {entry.changedPaths.map((path) => (
+                            <div key={`${entry.opId}:${path}`} className="audit-entry__file">
+                              <span className="audit-entry__file-path" title={path}>{shortenPath(path)}</span>
+                              {path === '[本机路径已隐藏]' ? (
+                                <span className="audit-entry__file-hint">路径未脱敏映射，不可单文件回滚</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn btn--ghost btn--sm"
+                                  onClick={() => void rollbackFileOp(entry.opId, path)}
+                                >
+                                  回滚此文件
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </details>
                       </div>
                     )}
                   </div>

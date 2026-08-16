@@ -2611,3 +2611,48 @@ test('S14/S15：事件失败读取给 code + 人话 + 下一步，无假 resourc
   await window.screenshot({ path: 'test-results/12-event-krak-failure.png' });
   await app.close();
 });
+
+test('S-FILE-ROLLBACK：审计面板文件级回滚 UI 走 rollbackFile 通道，回滚后条目置为已回滚', async () => {
+  const { app, window, pageErrors, consoleErrors } = await launchApp({ SF_FIXTURE_OPERATIONS: '1' });
+  await openFixtureWorkspace(window);
+  // 打开审计与回滚面板（活动栏入口）。
+  await window.getByRole('button', { name: '审计与回滚' }).click();
+
+  // 种子历史：两条 committed 记录。
+  const entries = window.locator('.audit-entry');
+  await expect(entries).toHaveCount(2);
+  await expect(entries.nth(0)).toContainText('fixture 写入：item.fmg 文本');
+  await expect(entries.nth(0).locator('.op-status')).toHaveText('已提交');
+
+  // 第一条：两个文件行 + 两个「回滚此文件」按钮（details 默认收起，先展开）。
+  await entries.nth(0).locator('.audit-entry__files summary').click();
+  const firstFiles = entries.nth(0).locator('.audit-entry__file');
+  await expect(firstFiles).toHaveCount(2);
+  await expect(firstFiles.nth(0)).toContainText('item.fmg');
+  await expect(firstFiles.nth(0).getByRole('button', { name: '回滚此文件' })).toBeVisible();
+  await expect(firstFiles.nth(1)).toContainText('menu.fmg');
+  await expect(firstFiles.nth(1).getByRole('button', { name: '回滚此文件' })).toBeVisible();
+
+  // 第二条：路径未脱敏映射 → 只显示提示，不提供回滚按钮。
+  const secondFiles = entries.nth(1).locator('.audit-entry__file');
+  await expect(secondFiles).toHaveCount(1);
+  await expect(secondFiles.getByRole('button', { name: '回滚此文件' })).toHaveCount(0);
+  await expect(secondFiles.locator('.audit-entry__file-hint')).toHaveText('路径未脱敏映射，不可单文件回滚');
+
+  // 点击第一项第一文件的「回滚此文件」→ 成功反馈（toast）。
+  await firstFiles.nth(0).getByRole('button', { name: '回滚此文件' }).click();
+  await expect(window.locator('.toast--ok').filter({ hasText: '已回滚文件' })).toHaveCount(1);
+
+  // 刷新后该条目变为「已回滚」，动作区（含文件级回滚列表）随 committed 条件消失。
+  await window.getByRole('button', { name: '刷新' }).click();
+  await expect(entries.nth(0).locator('.op-status')).toHaveText('已回滚');
+  await expect(entries.nth(0).locator('.audit-entry__actions')).toHaveCount(0);
+  // 未触碰的条目保持 committed，仍可单文件回滚。
+  await expect(entries.nth(1).locator('.op-status')).toHaveText('已提交');
+
+  expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
+  expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
+
+  await window.screenshot({ path: 'test-results/file-rollback-audit.png' });
+  await app.close();
+});

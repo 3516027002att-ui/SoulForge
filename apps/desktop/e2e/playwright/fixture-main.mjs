@@ -39,6 +39,9 @@ const outRoot = path.resolve(here, '../../out');
 const APPLY_FAIL = process.env.SF_TEST_APPLY_FAIL === '1';
 const CANCEL_DIALOG = process.env.SF_TEST_CANCEL_DIALOG === '1';
 const BROWSER_PREVIEW = process.env.SF_TEST_BROWSER_PREVIEW === '1';
+// SF_FIXTURE_OPERATIONS=1：operation.list 返回播种的历史（审计与回滚面板 e2e）。
+// 默认空数组，其他测试不受影响。
+const FIXTURE_OPERATIONS = process.env.SF_FIXTURE_OPERATIONS === '1';
 
 /** Synthetic fixture corpus — tiny, constructed, explicitly labeled (AGENTS.md §15). */
 function makeFile({ dir, name, kind, formatKind, formatLabel, extension, compoundExtension, size = 2048 }) {
@@ -252,6 +255,8 @@ function makePngDataUri(width, height) {
 
 const fixture = {
   workspaceUri: 'fixture://workspace/sekiro-test',
+  operationHistory: [],
+  lastRollbackFile: null,
   fmg: {
     sourceHash: 'fixture-hash-0001',
     entries: [
@@ -2106,13 +2111,60 @@ function registerFixtureIpc() {
     }]
   };
   });
-  handleTrusted('operation.list', () => []);
+  if (FIXTURE_OPERATIONS) {
+    fixture.operationHistory = [
+      {
+        opId: 'fixture-op-0001',
+        workspaceId: 'fixture-session',
+        title: 'fixture 写入：item.fmg 文本',
+        author: 'user',
+        mode: 'normal',
+        status: 'committed',
+        createdAt: '2026-08-16T10:00:00.000Z',
+        committedAt: '2026-08-16T10:00:01.000Z',
+        fileCount: 2,
+        changedPaths: [
+          'N:\GR\data\INTERROOT_win64\msg\zhocn\item.fmg',
+          'N:\GR\data\INTERROOT_win64\msg\zhocn\menu.fmg'
+        ]
+      },
+      {
+        opId: 'fixture-op-0002',
+        workspaceId: 'fixture-session',
+        title: 'fixture 写入：隐藏路径资源',
+        author: 'ai',
+        mode: 'normal',
+        status: 'committed',
+        createdAt: '2026-08-16T10:05:00.000Z',
+        committedAt: '2026-08-16T10:05:01.000Z',
+        fileCount: 1,
+        changedPaths: ['[本机路径已隐藏]']
+      }
+    ];
+  }
+  handleTrusted('operation.list', () => fixture.operationHistory.map((entry) => ({ ...entry })));
   handleTrusted('operation.rollback', (_event, opId) => ({
     ok: false,
     opId,
     restoredFiles: [],
     diagnostics: [{ severity: 'warning', code: 'FIXTURE_NO_ROLLBACK', message: 'fixture 不提供回滚。' }]
   }));
+  handleTrusted('operation.rollbackFile', (_event, opId, targetUri) => {
+    fixture.lastRollbackFile = { opId, targetUri };
+    // 同步推进种子状态：对应条目标记为已回滚，刷新后 UI 显示「已回滚」。
+    for (const entry of fixture.operationHistory) {
+      if (entry.opId === opId && entry.changedPaths.includes(targetUri)) {
+        entry.status = 'rolled_back';
+        entry.rolledBackAt = new Date().toISOString();
+      }
+    }
+    return {
+      ok: true,
+      opId,
+      restoredFiles: [targetUri],
+      diagnostics: [{ severity: 'info', code: 'FIXTURE_ROLLBACK_FILE', message: 'fixture 已回滚该文件。' }]
+    };
+  });
   handleTrusted('ai.tools', () => {
     track('ai.tools');
     return [
