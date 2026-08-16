@@ -67,6 +67,7 @@ release/
 *.log
 
 # Playwright transient artifacts
+/test-results/
 apps/desktop/e2e/playwright/playwright-report/
 apps/desktop/e2e/playwright/test-results/
 apps/desktop/test-results/

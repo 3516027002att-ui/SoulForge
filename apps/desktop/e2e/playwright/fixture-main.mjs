@@ -83,6 +83,8 @@ const fixtureFiles = [
   // SCRIPT-41 fixture：脚本容器。formatKind 用 'script'（不是 'bnd'），legacy
   // 推断才会命中 `.luabnd.dcx` → script 编辑器而不是 container。
   makeFile({ dir: 'script', name: 'm25_00_00_00.luabnd.dcx', kind: 'script', formatKind: 'script', formatLabel: 'SCRIPT BND', extension: '.dcx', compoundExtension: '.luabnd.dcx' }),
+  // S16：独立脚本文件形态（单 Source 栏，不落容器分页）。
+  makeFile({ dir: 'script', name: 'c0000_common.hks', kind: 'script', formatKind: 'script', formatLabel: 'HKS', extension: '.hks', compoundExtension: '.hks' }),
   // MAP-50B fixture：MSB 地图样本。基础 fixture 此前没有 map 文件，msb 工作台在
   // E2E 里进不去；这里补一个可被 readMsbDocument stub 命中的合成样本
   // （微小、合法构造、明确标记，AGENTS.md §15）。大工作区合成的 mXXXX 是 4 位补零，
@@ -336,7 +338,7 @@ function registerFixtureIpc() {
       workspaceLabel: 'fixture-workspace',
       files: scanned.map((file) => ({ ...file })),
       countsByKind: {
-        event: 2, map: (LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0) + 1, param: 4, msg: 1, menu: 2, script: 1,
+        event: 2, map: (LARGE_WORKSPACE ? LARGE_FILE_COUNT : 0) + 1, param: 4, msg: 1, menu: 2, script: 2,
         action: 2, ai: 2, sfx: 2, chr: 2, obj: 0, other: 2, unknown: 1
       },
       diagnostics: [],
@@ -1906,20 +1908,38 @@ function registerFixtureIpc() {
     classificationSummary: { ...fixtureScriptSummary },
     diagnostics: []
   }));
-  handleTrusted('resource.listScriptContainerEntriesPage', (_event, _uri, page, pageSize) => ({
-    ok: true,
-    containerFormat: 'BND4',
-    entryCount: fixtureScriptEntries.length,
-    page,
-    pageSize,
-    pageCount: Math.max(1, Math.ceil(fixtureScriptEntries.length / pageSize)),
-    entries: fixtureScriptEntries
-      .slice(page * pageSize, page * pageSize + pageSize)
-      .map((entry) => ({ ...entry })),
-    classificationSummary: { ...fixtureScriptSummary },
-    entriesComplete: true,
-    diagnostics: []
-  }));
+  handleTrusted('resource.listScriptContainerEntriesPage', (_event, uri, page, pageSize) => {
+    // S16：独立脚本文件（.hks）不是容器——返回失败让 renderer 落到单 Source 形态
+    // （生产 main 对非 DCX 文件 read-dcx 失败后同样失败关闭）。
+    if (uri.endsWith('.hks') || uri.endsWith('.lua')) {
+      return {
+        ok: false,
+        containerFormat: 'unknown',
+        entryCount: 0,
+        page: 0,
+        pageSize: 0,
+        pageCount: 0,
+        entries: [],
+        classificationSummary: { ...fixtureScriptSummary },
+        entriesComplete: false,
+        diagnostics: [{ severity: 'error', code: 'SCRIPT_PAGED_INVENTORY_FAILED', message: '独立脚本文件不是容器。' }]
+      };
+    }
+    return {
+      ok: true,
+      containerFormat: 'BND4',
+      entryCount: fixtureScriptEntries.length,
+      page,
+      pageSize,
+      pageCount: Math.max(1, Math.ceil(fixtureScriptEntries.length / pageSize)),
+      entries: fixtureScriptEntries
+        .slice(page * pageSize, page * pageSize + pageSize)
+        .map((entry) => ({ ...entry })),
+      classificationSummary: { ...fixtureScriptSummary },
+      entriesComplete: true,
+      diagnostics: []
+    };
+  });
   handleTrusted('resource.readScriptEntryPlaintext', (_event, _uri, entryName) => {
     if (entryName === 'goal_list.lua') {
       return {
@@ -1958,6 +1978,87 @@ function registerFixtureIpc() {
         message: '可打印字节比例 0.3000 低于阈值 0.99。'
       }]
     };
+  });
+  /* ── S16 脚本 IDE fixture：源码视图 + 保存 ─────────────────────────
+     容器条目与独立文件统一走 readScriptSource/saveScriptSource。
+     goal_list.lua → 明文；battle.lua → 反编译（合成 Lua 文本，fixture 不 spawn
+     本机反编译器，来源标签明示）；esd_common.esd → 非 Lua 结构化失败。
+     独立 c0000_common.hks → 反编译合成文本。 */
+  handleTrusted('resource.readScriptSource', (_event, sourceUri, entryName) => {
+    if (sourceUri.endsWith('c0000_common.hks')) {
+      return {
+        ok: true,
+        logicalName: 'c0000_common.hks',
+        kind: 'decompiled',
+        sourceText: '-- SoulForge synthetic decompiled fixture (explicitly constructed)\n'
+          + 'BEH_ADD_NONE = 0\n'
+          + 'function c0000_common()\n'
+          + '  goal = 0\n'
+          + 'end\n',
+        decompiled: true,
+        decompiler: 'DSLuaDecompiler v1.1.5（fixture）',
+        writeSupported: true,
+        diagnostics: []
+      };
+    }
+    if (entryName === 'goal_list.lua') {
+      return {
+        ok: true,
+        logicalName: 'goal_list.lua',
+        kind: 'plaintext',
+        sourceText: '-- SoulForge synthetic plaintext fixture (explicitly constructed)\r\n'
+          + '-- 目标列表示例：goal_list.lua\r\n'
+          + 'local goal = { name = "合成目标", id = 100 }\r\n',
+        decompiled: false,
+        containerUri: sourceUri,
+        entryName,
+        childHash: 'child-hash-goal-list',
+        containerHash: 'container-hash-m25',
+        writeSupported: true,
+        diagnostics: [{ severity: 'info', code: 'PLAINTEXT_CONFIRMED', message: '条目确认为明文。' }]
+      };
+    }
+    if (entryName === 'battle.lua') {
+      return {
+        ok: true,
+        logicalName: 'battle.lua',
+        kind: 'decompiled',
+        sourceText: '-- SoulForge synthetic decompiled fixture (explicitly constructed)\n'
+          + 'function BattleStart()\n'
+          + '  SetHp(1000)\n'
+          + 'end\n',
+        decompiled: true,
+        decompiler: 'DSLuaDecompiler v1.1.5（fixture）',
+        containerUri: sourceUri,
+        entryName,
+        childHash: 'child-hash-battle',
+        containerHash: 'container-hash-m25',
+        writeSupported: true,
+        diagnostics: [{ severity: 'info', code: 'DECOMPILED', message: '已由本机 DSLuaDecompiler 反编译。' }]
+      };
+    }
+    return {
+      ok: false,
+      logicalName: entryName ?? 'script',
+      kind: 'failure',
+      writeSupported: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'SCRIPT_SOURCE_BYTECODE_UNSUPPORTED',
+        message: '该条目是其他类型字节码（非 Lua），本版不提供反编译，只读。'
+      }]
+    };
+  });
+  handleTrusted('resource.saveScriptSource', (_event, sourceUri, entryName, _childHash, _containerHash, sourceText) => {
+    return {
+    ok: true,
+    changedFiles: [{ sourceUri, sourcePath: `script/${entryName ?? 'c0000_common.hks'}`, changed: true }],
+    diagnostics: [{
+      severity: 'info',
+      code: 'SCRIPT_SOURCE_SAVED',
+      message: `fixture 已保存 ${entryName ?? 'c0000_common.hks'}（${sourceText.length} 字符）。`
+    }]
+  };
   });
   handleTrusted('operation.list', () => []);
   handleTrusted('operation.rollback', (_event, opId) => ({

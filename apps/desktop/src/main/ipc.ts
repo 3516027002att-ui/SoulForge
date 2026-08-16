@@ -1,6 +1,7 @@
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +46,7 @@ import {
   decodePlaintext,
   classifyScriptEntry,
   magicLabel,
+  locateDsLuaDecompilerSync,
   normalizePageWindow,
   sanitizeEntryName,
   applyParamFieldMutation,
@@ -132,7 +134,8 @@ import {
   type DecideAgentApprovalRequest,
   type EditorSelectionContext,
   type FmgEntryPage,
-  type ScriptEntryPlaintextView
+  type ScriptEntryPlaintextView,
+  type ScriptSourceView
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -1422,6 +1425,121 @@ async function verifiedStageRoots(
     return { allowedRoots: [], writableRoots: [], diagnostics: [bridgeRootsDiagnostic(code, roots)] };
   }
   return { allowedRoots: [...roots.allowedRoots], writableRoots: [...roots.writableRoots], diagnostics: [] };
+}
+
+/**
+ * S16 脚本 IDE：HKS 字节码反编译（main 进程 spawn 本机 DSLuaDecompiler.exe）。
+ *
+ * `DSLuaDecompiler <file> --console` 把 Lua 字节码反编译到 stdout；发行目标
+ * net7，本机可能只有 .NET 6/8，故注入 DOTNET_ROLL_FORWARD=LatestMajor。
+ * stdout 有界（8 MiB）、超时 kill；一切失败结构化返回，不抛给 renderer。
+ */
+export interface DsLuaDecompileRunResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  exitCode: number | null;
+  spawnFailure: string | null;
+  truncated: boolean;
+}
+
+export async function runDsLuaDecompilerCapture(
+  exePath: string,
+  hksPath: string,
+  timeoutMs: number
+): Promise<DsLuaDecompileRunResult> {
+  return await new Promise((resolveResult) => {
+    let settled = false;
+    let stdout = Buffer.alloc(0);
+    let stderr = Buffer.alloc(0);
+    let truncated = false;
+    let child: ReturnType<typeof spawn> | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    const stdoutLimit = 8 * 1024 * 1024;
+    const settle = (result: DsLuaDecompileRunResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolveResult(result);
+    };
+    const current = (exitCode: number | null, extra: Partial<DsLuaDecompileRunResult>): DsLuaDecompileRunResult => ({
+      ok: exitCode === 0 && !truncated,
+      stdout: stdout.toString('utf8'),
+      stderr: stderr.toString('utf8'),
+      timedOut: false,
+      exitCode,
+      spawnFailure: null,
+      truncated,
+      ...extra
+    });
+    timer = setTimeout(() => {
+      try { child?.kill(); } catch { /* 超时终止，尽力而为 */ }
+      settle(current(null, { timedOut: true }));
+    }, timeoutMs);
+    try {
+      child = spawn(exePath, [hksPath, '--console'], {
+        cwd: dirname(exePath),
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, DOTNET_ROLL_FORWARD: 'LatestMajor' }
+      });
+    } catch (error) {
+      settle({
+        ok: false,
+        stdout: '',
+        stderr: String(error),
+        timedOut: false,
+        exitCode: null,
+        spawnFailure: error instanceof Error ? error.message : String(error),
+        truncated: false
+      });
+      return;
+    }
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = stdoutLimit - stdout.length;
+      if (bytes.length > remaining) truncated = true;
+      if (remaining > 0) stdout = Buffer.concat([stdout, bytes.subarray(0, remaining)]);
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = stdoutLimit - stderr.length;
+      if (bytes.length > remaining) truncated = true;
+      if (remaining > 0) stderr = Buffer.concat([stderr, bytes.subarray(0, remaining)]);
+    });
+    child.once('error', (error) => {
+      settle({
+        ok: false,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+        exitCode: null,
+        spawnFailure: error.message,
+        truncated: false
+      });
+    });
+    child.once('close', (code) => {
+      settle(current(code, {}));
+    });
+  });
+}
+
+/** 反编译器命中来源的人类可读标识（renderer 展示用，不含路径）。 */
+function decompilerLabel(origin: 'explicit' | 'v1.1.5' | 'tools-scan' | 'legacy' | 'none'): string {
+  switch (origin) {
+    case 'explicit':
+      return 'DSLuaDecompiler（显式路径）';
+    case 'v1.1.5':
+      return 'DSLuaDecompiler v1.1.5';
+    case 'tools-scan':
+      return 'DSLuaDecompiler（tools 扫描）';
+    case 'legacy':
+      return 'DSLuaDecompiler（hks解码目录）';
+    default:
+      return 'DSLuaDecompiler';
+  }
 }
 
 function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null {
@@ -7670,6 +7788,269 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         ...(text !== undefined ? { text } : {}),
         diagnostics: verdict.diagnostics
       };
+    }
+  );
+
+  /**
+   * S16 脚本 IDE：源码视图（容器条目或独立脚本文件）。
+   *
+   * 明文条目按真实 encoding 返回文本；`\x1bLua` 字节码条目调本机
+   * DSLuaDecompiler 反编译为 Lua 文本（main spawn，renderer 只收文本）；
+   * 反编译不可用/失败/其他字节码 → kind='failure' 结构化原因，绝不把字节码
+   * 呈现为可编辑源码。容器条目同时回传 child/container hash 供保存时做
+   * 乐观并发校验。
+   */
+  handle(
+    'resource.readScriptSource',
+    async (_event, sourceUri: string, entryName?: string): Promise<ScriptSourceView> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const logicalName = entryName ?? (file ? basename(file.relativePath) : 'script');
+      const failure = (code: string, message: string, diagnostics?: StructuredDiagnostic[]): ScriptSourceView => ({
+        ok: false,
+        logicalName,
+        kind: 'failure',
+        writeSupported: false,
+        diagnostics: diagnostics ?? [{ severity: 'error' as const, code, message, sourceUri }]
+      });
+      if (!file) {
+        return failure('RESOURCE_NOT_INDEXED', '资源未索引，无法读取脚本源码。');
+      }
+      if (!activeSession) {
+        return failure('WORKSPACE_NOT_OPEN', '需要已打开的工作区才能读取脚本源码。');
+      }
+      let bytes: Uint8Array;
+      let childHash: string | undefined;
+      let containerHash: string | undefined;
+      if (entryName) {
+        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+        const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
+        if (!read.ok || !read.bytes) {
+          return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本容器条目失败。', read.diagnostics);
+        }
+        bytes = read.bytes;
+        childHash = read.hash;
+        const tree = await inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
+        containerHash = tree.ok && tree.tree?.rootHash ? tree.tree.rootHash : undefined;
+      } else {
+        // 独立脚本文件（.hks/.lua）：有界整读。
+        try {
+          const fileStat = await stat(file.absolutePath);
+          if (fileStat.size > 64 * 1024 * 1024) {
+            return failure('SCRIPT_SOURCE_TOO_LARGE', '脚本文件超过 64 MiB 有界读取上限，未打开。');
+          }
+          bytes = new Uint8Array(await readFile(file.absolutePath));
+        } catch (error) {
+          return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本文件失败。', [{
+            severity: 'error' as const,
+            code: 'SCRIPT_SOURCE_READ_FAILED',
+            message: error instanceof Error ? error.message : String(error),
+            sourceUri
+          }]);
+        }
+      }
+      const verdict = classifyPlaintextBytes(bytes);
+      const containerFields = entryName
+        ? {
+            containerUri: sourceUri,
+            entryName,
+            ...(childHash !== undefined ? { childHash } : {}),
+            ...(containerHash !== undefined ? { containerHash } : {})
+          }
+        : {};
+      if (verdict.isPlaintext) {
+        const contentEnd = bytes.length - verdict.trailingPaddingBytes;
+        return {
+          ok: true,
+          logicalName,
+          kind: 'plaintext',
+          sourceText: decodePlaintext(bytes.subarray(0, contentEnd), verdict.detectedEncoding),
+          decompiled: false,
+          ...containerFields,
+          writeSupported: true,
+          diagnostics: verdict.diagnostics
+        };
+      }
+      if (!verdict.luaBytecodeMagic) {
+        return failure('SCRIPT_SOURCE_BYTECODE_UNSUPPORTED',
+          '该条目是其他类型字节码（非 Lua），本版不提供反编译，只读。', [{
+            severity: 'error' as const,
+            code: 'SCRIPT_SOURCE_BYTECODE_UNSUPPORTED',
+            message: `判定依据：${verdict.code ?? '非明文'}`,
+            sourceUri
+          }]);
+      }
+      // Lua 字节码：本机 DSLuaDecompiler 反编译（只读定位，找不到给结构化失败）。
+      const probe = locateDsLuaDecompilerSync({
+        baseRoot: activeSession.layers.baseRoot ?? null,
+        overlayRoot: activeSession.layers.overlayRoot ?? null,
+        gameRootEnv: process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() ?? null
+      });
+      if (!probe.exePath) {
+        return failure('SCRIPT_DECOMPILER_NOT_FOUND',
+          '本机找不到 DSLuaDecompiler：该脚本是 Lua 字节码，需要反编译器才能编辑。请把 DSLuaDecompiler.exe 放到 Sekiro 兄弟 tools 目录，或设置 SOULFORGE_DSLUADECOMPILER_PATH。');
+      }
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'SCRIPT_DECOMPILE_STAGING_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return failure('SCRIPT_DECOMPILE_STAGING_FAILED', '无法准备反编译暂存目录。', stage.diagnostics);
+      }
+      const stageRoot = stage.writableRoots[0];
+      if (!stageRoot) {
+        return failure('SCRIPT_DECOMPILE_STAGING_FAILED', '反编译暂存目录未就绪。', stage.diagnostics);
+      }
+      const tmpPath = join(stageRoot, `s16-decompile-${randomUUID()}.hks`);
+      await writeFile(tmpPath, Buffer.from(bytes));
+      const decompiled = await runDsLuaDecompilerCapture(probe.exePath, tmpPath, 120_000);
+      await unlink(tmpPath).catch(() => { /* 暂存清理尽力而为 */ });
+      if (!decompiled.ok) {
+        if (decompiled.timedOut) {
+          return failure('SCRIPT_DECOMPILE_TIMED_OUT', '反编译超时（120 秒），请稍后重试。');
+        }
+        if (decompiled.spawnFailure) {
+          return failure('SCRIPT_DECOMPILE_SPAWN_FAILED', `反编译器无法启动：${decompiled.spawnFailure}`);
+        }
+        if (decompiled.truncated) {
+          return failure('SCRIPT_DECOMPILE_OUTPUT_TRUNCATED', '反编译输出超过 8 MiB 有界上限，未返回文本。');
+        }
+        const tail = decompiled.stderr.trim().split(/\r?\n/).slice(-5).join('\n');
+        return failure('SCRIPT_DECOMPILE_FAILED',
+          `反编译失败（退出码 ${decompiled.exitCode ?? '未知'}）${tail ? `：${tail}` : ''}`);
+      }
+      return {
+        ok: true,
+        logicalName,
+        kind: 'decompiled',
+        sourceText: decompiled.stdout,
+        decompiled: true,
+        decompiler: decompilerLabel(probe.origin),
+        ...containerFields,
+        writeSupported: true,
+        diagnostics: []
+      };
+    }
+  );
+
+  /**
+   * S16 脚本 IDE：保存源码。
+   *
+   * 容器条目 → replaceContainerChild（Patch Engine，expected hashes 乐观校验，
+   * 写回 plaintext Lua）；独立脚本文件 → saveTextResource 链。与 resource.saveText
+   * 同一确认/操作日志/回滚通道。
+   */
+  handle(
+    'resource.saveScriptSource',
+    async (
+      event,
+      sourceUri: string,
+      entryName: string | undefined,
+      expectedChildHash: string | undefined,
+      expectedContainerHash: string | undefined,
+      sourceText: string
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Resource must be indexed before script source save.',
+            sourceUri
+          }]
+        };
+      }
+      if (!activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'WORKSPACE_NOT_OPEN',
+            message: '需要已打开的工作区才能保存脚本源码。',
+            sourceUri
+          }]
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      if (entryName) {
+        const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+        if (gameBlocked) return gameBlocked;
+        let containerHash = expectedContainerHash;
+        let childHash = expectedChildHash;
+        if (!containerHash || !childHash) {
+          // 渲染器没带回 hash（异常路径）：主进程现取，不裸奔乐观校验。
+          const tree = await inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
+          containerHash = tree.ok && tree.tree?.rootHash ? tree.tree.rootHash : '';
+          const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+          const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
+          childHash = read.hash ?? '';
+        }
+        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+        const confirmation = await requestWriteConfirmation({
+          event,
+          resourceLabel: `${file.relativePath} / ${entryName}`,
+          sourceUri,
+          actionLabel: '保存脚本源码',
+          payloadHash: createHash('sha256')
+            .update(`${containerHash}\n${childHash}\n${sourceText}`)
+            .digest('hex')
+        });
+        if (!confirmation) return cancelledWrite(sourceUri);
+        const result = await replaceContainerChild({
+          file,
+          childUri,
+          expectedContainerHash: containerHash,
+          expectedChildHash: childHash,
+          newContentBase64: Buffer.from(sourceText, 'utf8').toString('base64'),
+          confirmation,
+          session: activeSession,
+          operationLog,
+          ...storage
+        });
+        if (result.ok) {
+          containerChildrenCache.clear();
+          scriptContainerEntriesCache.clear();
+        }
+        return toRendererSaveResult(result, indexedFiles);
+      }
+      let result = await saveTextResource({
+        file,
+        newText: sourceText,
+        session: activeSession,
+        operationLog,
+        ...storage
+      });
+      if (!result.ok && result.requiresConfirmation) {
+        const confirmation = await requestWriteConfirmation({
+          event,
+          resourceLabel: file.relativePath,
+          sourceUri,
+          actionLabel: '保存脚本源码',
+          payloadHash: createHash('sha256').update(sourceText).digest('hex')
+        });
+        if (!confirmation) return cancelledWrite(sourceUri);
+        result = await saveTextResource({
+          file,
+          newText: sourceText,
+          confirmation,
+          session: activeSession,
+          operationLog,
+          ...storage
+        });
+      }
+      if (result.ok) {
+        const refreshed = await openResourcePreview({
+          file,
+          inspectNative: true,
+          parseStructured: true,
+          ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+        });
+        const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
+        if (index >= 0) indexedFiles[index] = refreshed.file;
+      }
+      return toRendererSaveResult(result, indexedFiles);
     }
   );
 

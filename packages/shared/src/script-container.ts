@@ -147,6 +147,39 @@ export interface ScriptEntryPlaintextView {
   diagnostics: Diagnostic[];
 }
 
+/**
+ * 脚本源码视图（S16 脚本 IDE）。
+ *
+ * `resource.readScriptSource` 的结果：明文条目按真实 encoding 返回文本；
+ * `Lua` 字节码条目由主进程调本机 DSLuaDecompiler（只读定位，见 core
+ * dsLuaDecompilerLocator）反编译为 Lua 文本；反编译不可用/失败时
+ * `kind='failure'`，只给结构化原因，绝不把字节码呈现为可编辑源码。
+ * renderer 只收文本，不接触任何绝对路径。
+ */
+export interface ScriptSourceView {
+  ok: boolean;
+  /** 显示用逻辑名：容器内为条目名，独立文件为 basename。 */
+  logicalName: string;
+  kind: 'plaintext' | 'decompiled' | 'failure';
+  /** 可编辑源码文本（plaintext / decompiled 时存在）。 */
+  sourceText?: string;
+  /** sourceText 是否为反编译器输出（非原文件文本）。 */
+  decompiled?: boolean;
+  /** 反编译器人类可读标识，如 "DSLuaDecompiler v1.1.5"。 */
+  decompiler?: string;
+  /** 容器内条目时为其容器 uri。 */
+  containerUri?: string;
+  /** 容器内条目名。 */
+  entryName?: string;
+  /** 容器内条目替换所需的子项 hash（save 时回传做乐观并发校验）。 */
+  childHash?: string;
+  /** 容器根 hash（save 时回传做乐观并发校验）。 */
+  containerHash?: string;
+  /** 是否支持把 sourceText 写回（容器条目 / 独立脚本文件均可写）。 */
+  writeSupported: boolean;
+  diagnostics: Diagnostic[];
+}
+
 /** Fixed display order for classification chips. */
 export const SCRIPT_CLASSIFICATION_ORDER: readonly ScriptEntryClassification[] = [
   'lua-bytecode',

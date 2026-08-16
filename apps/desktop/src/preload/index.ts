@@ -201,6 +201,26 @@ const api = {
     entryName: string
   ): Promise<ScriptEntryPlaintextView> =>
     ipcRenderer.invoke('resource.readScriptEntryPlaintext', sourceUri, entryName),
+  readScriptSource: (
+    sourceUri: string,
+    entryName?: string
+  ): Promise<import('@soulforge/shared').ScriptSourceView> =>
+    ipcRenderer.invoke('resource.readScriptSource', sourceUri, entryName),
+  saveScriptSource: (
+    sourceUri: string,
+    entryName: string | undefined,
+    expectedChildHash: string | undefined,
+    expectedContainerHash: string | undefined,
+    sourceText: string
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke(
+      'resource.saveScriptSource',
+      sourceUri,
+      entryName,
+      expectedChildHash,
+      expectedContainerHash,
+      sourceText
+    ),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),

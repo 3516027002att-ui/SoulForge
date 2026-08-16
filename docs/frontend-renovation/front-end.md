@@ -212,7 +212,7 @@ D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\
 | --- | --- | --- |
 | Yapped Rune Bear | `D:\mystream\Sekiro Shadows Die Twice\tools\Yapped Rune Bear v2.14.1` | PARAM 行/字段交互的次级核对 |
 | Yabber | `D:\mystream\Sekiro Shadows Die Twice\tools\Yabber 1.3.1\Yabber.exe` | BND/DCX 容器层级和操作结果的次级核对 |
-| DSLuaDecompiler | `D:\mystream\Sekiro Shadows Die Twice\tools\hks解码\DSLuaDecompiler.exe` | Script 格式与只读反编译工作流对照 |
+| DSLuaDecompiler | `D:\mystream\Sekiro Shadows Die Twice\tools\DSLuaDecompiler\DSLuaDecompiler.exe`（v1.1.5；旧拷贝在 `tools\hks解码\`） | Script 格式对照 + S16 脚本 IDE 的本机读入反编译器（main 定位与 spawn，见 §10.2） |
 
 次级工具不得覆盖 Smithbox/DarkScript3 的主 UI 结论，也不得成为 production parser/writer authority。
 
@@ -1213,19 +1213,31 @@ Yabber 只作容器层级和结果对照；SoulForge 的生产读写仍由 Bridg
 
 ### 10.2 Script
 
-Smithbox Script Editor 是文件列表 + 源码。SoulForge 默认：
+Smithbox Script Editor 是文件列表 + 源码。SoulForge 默认（S16 裁定，2026-08-16）：
 
 ```text
-Container / Files | Source / Read-only Disassembly（主区 flex）| 可选 Symbols / Metadata
+luabnd 容器:    Files（分页条目表）| Source（可编辑源码 IDE）
+独立 .hks/.lua: Source（单栏）
 ```
 
-工具未接通则隐藏，不要为凑四栏造 Tools 空栏。
+删掉了旧三栏的 Container / Metadata 与「用户提供字节的整内层替换」表单；不造
+Tools/Symbols 空栏。写入形态是「源码 IDE」而不是字节替换：
 
-- plaintext Lua/HKS 按真实 encoding、BOM、newline、NUL policy 显示；
-- bytecode 只显示真实反编译或明确的只读字节视图；
-- 没有 compiler 时不得把反编译文本伪装成可回写源码；
-- 符号、引用和跳转只使用真实解析结果；
-- DSLuaDecompiler 只作交互对照，不成为写入依赖。
+- plaintext Lua / 独立 .hks 里的明文按真实 encoding 显示（main 判定，renderer
+  只收文本）；
+- `\x1bLua` 字节码条目由 main 进程调本机 DSLuaDecompiler（v1.1.5，只读定位：
+  显式 `SOULFORGE_DSLUADECOMPILER_PATH` → 固定候选 → 兄弟 tools 扫描 → 旧
+  hks解码拷贝）反编译为 Lua 文本（`--console` stdout，`DOTNET_ROLL_FORWARD=
+  LatestMajor`，有界 8 MiB + 超时 kill）；反编译失败给结构化原因（找不到/超时/
+  退出码/截断），绝不显示 fake hex、不把字节码伪装成可编辑源码；非 Lua 字节码
+  只读；
+- 可编辑源码 = 明文或反编译文本；Ctrl+S 应用（同 S14 话术「正在应用…」「已应用，
+  可回滚。」），容器条目经 Patch Engine `replaceContainerChild`（回传 child/
+  container hash 乐观校验，写回 plaintext Lua），独立文件走 `saveTextResource`；
+- 形态识别在 renderer 探 `listScriptContainerEntriesPage`（容器格式未知即独立
+  文件）；内层地址构造、hash 与回滚都在 main；
+- DSLuaDecompiler 是**读入依赖**（打开即反编译），不是 writer/compiler：SoulForge
+  不重编译、不执行脚本，写回什么字节由用户编辑的源码决定。
 
 ### 10.3 动作域（Talk / Behavior / TimeAct / Animation 合并）
 
@@ -2544,8 +2556,8 @@ SHELL-09 → SHELL-10
 #### SCRIPT-41
 
 - **Allowed**：`[MODIFY] packages/shared/src/script-container.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEntry.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEdit.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`；`[MODIFY] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：按 §10.2：Container/Files | Source/只读反汇编主区 | 可选 Symbols。encoding/BOM/newline/NUL 明示；bytecode 不伪装可编译；不要为空凑 Tools 栏。
-- **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、renderer unit/E2E。
+- **Steps**：按 §10.2（S16）：luabnd 容器 `Files | Source` 两栏 / 独立 `.hks/.lua` 单 Source；打开即按字节判定，`\x1bLua` 字节码由 main 调本机 DSLuaDecompiler 反编译为 Lua 文本；反编译失败给结构化原因，不显示 fake hex、不把字节码伪装成可编辑源码；明文与反编译文本均可编辑，Ctrl+S 应用（同 S14 话术）并保留回滚，容器条目经 `replaceContainerChild`、独立文件经 `saveTextResource`；形态识别与内层地址构造都在 main。
+- **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、renderer unit/E2E（S16 脚本 IDE 两用例）。
 
 ### 18.19 MAP/ASSET 独立卡
 
@@ -2745,7 +2757,7 @@ SHELL-09 → SHELL-10
 ### 19.3 其他成熟编辑器
 
 - [ ] Container 是 SoulForge 自有：`Containers | Entries | Preview`，child 只产生受确认的语义投影；
-- [ ] Script 是 `Container/Files | Source/只读反汇编`，bytecode 不伪装可编辑源码；
+- [ ] Script 是 `Files | Source` 两栏（luabnd）或单 Source（独立 .hks/.lua），`\x1bLua` 字节码经本机 DSLuaDecompiler 反编译为 Lua 文本，bytecode 不伪装可编辑源码（§10.2 S16）；
 - [ ] Map 是 `Map Object List | Viewport | Properties`；
 - [ ] Model 是左树栈、viewport、Properties，材质槽选择能定位关联项；
 - [ ] Texture 是 container list + texture list + viewer + properties；`menu/**/*.tpf.dcx` 只能到此或 Files；

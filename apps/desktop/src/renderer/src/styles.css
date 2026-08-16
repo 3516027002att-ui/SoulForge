@@ -905,8 +905,8 @@ pre.tool-output {
   background: transparent; border-bottom: 1px solid var(--line-strong);
 }
 .script-entry-row {
-  grid-template-columns: minmax(150px, 1.6fr) 118px 72px 56px minmax(160px, 1.2fr);
-  min-width: 720px;
+  grid-template-columns: minmax(150px, 1.6fr) 118px 72px 56px;
+  min-width: 460px;
 }
 .bnd4-child-row {
   grid-template-columns: minmax(150px, 1.6fr) 72px 78px 92px 96px 72px 56px;
@@ -2143,20 +2143,21 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .paramdef-field-table [role='row']:focus-visible,
 .script-entry-table [role='row']:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
 
-/* ── 脚本源码只读视图（SCRIPT-41）────────────────────────────────── */
-/* 中栏是 Source/只读反汇编主区（flex）；明文按真实 encoding 显示，字节码只给
-   只读字节证据。pre 用等宽字体 + 可滚动容器：大明文（实测 120 KB 级）不把
-   整页顶出滚动条（硬约束 17）。 */
-.script-source { padding: 4px 8px; }
-.script-source__meta { margin-top: 0; align-items: center; }
-.script-source__text {
-  margin: 0; padding: 8px 10px;
-  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
-  background: var(--forge-2); border: 1px solid var(--line); border-radius: var(--radius-m);
-  white-space: pre-wrap; word-break: break-word;
-  overflow: auto; max-height: 62vh; min-height: 90px;
-  color: var(--ink-1);
+/* ── 脚本 IDE（S16）────────────────────────────────────────────── */
+/* Source 主区是 CodeMirror 可编辑源码（flex 撑满）；明文与反编译文本都可编辑，
+   反编译失败只给结构化原因，绝不把字节码呈现为可编辑源码。 */
+.script-source { padding: 8px 10px; display: flex; flex-direction: column; min-height: 0; }
+.script-source__meta { margin-top: 0; align-items: center; flex-wrap: wrap; }
+.scp-source__host {
+  flex: 1; min-height: 200px; overflow: hidden;
+  background: var(--forge-0); border: 1px solid var(--line); border-radius: var(--radius-m);
 }
+.scp-source__host .cm-editor { height: 100%; }
+.scp-dirty {
+  color: var(--warn); background: var(--warn-soft);
+  font-size: 10.5px; padding: 1px 6px; border-radius: var(--radius-s);
+}
+.script-files { padding: 8px 10px; }
 
 /* ── GPARAM 工作台（GPARAM-11B）────────────────────────────────── */
 /* 本地分页条：Groups / Params 数量随 bank 不同可达数百，栏内翻页

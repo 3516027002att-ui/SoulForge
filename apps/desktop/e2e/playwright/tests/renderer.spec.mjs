@@ -217,36 +217,73 @@ test('BND 外形文件自动进入容器工作台；命令面板可强制以 BND
   await app.close();
 });
 
-test('脚本容器进入三栏工作台：明文按 encoding 显示，字节码只读字节视图', async () => {
+test('S16 脚本 IDE：容器 Files|Source 两栏，明文/反编译可编辑，Ctrl+S 应用', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // SCRIPT-41：脚本容器资源从 Files 领域选择，进入三栏脚本工作台。
+  // S16：脚本容器资源从 Files 领域选择，进入 Files | Source 两栏脚本 IDE。
   await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'script/m25_00_00_00.luabnd.dcx');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('脚本容器工作台')).toBeVisible();
 
-  // 三栏（不用四栏模板：无 Tools/Symbols 空栏）。
-  await expect(window.getByRole('region', { name: 'Container / Files' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Source / 只读反汇编' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Metadata' })).toBeVisible();
+  // 两栏（不用三栏/四栏模板：无 Container、Metadata、Tools/Symbols）。
+  await expect(window.getByRole('region', { name: 'Files' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Source' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Container / Files' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: 'Metadata' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
-  // 明文条目：中栏显示解码文本 + encoding/BOM/newline 明示。
+  // 明文条目：可编辑源码 + 形态明示。
   await window.getByRole('row', { name: /goal_list\.lua/ }).click();
-  const source = window.getByRole('region', { name: 'Source / 只读反汇编' });
-  await expect(source).toContainText('明文');
-  await expect(source).toContainText('UTF-8');
-  await expect(source).toContainText('CRLF 3');
+  const source = window.getByRole('region', { name: 'Source' });
   await expect(source).toContainText('goal_list.lua');
+  await expect(source).toContainText('明文源码');
+  await expect(source).toContainText('goal = { name = "合成目标"');
 
-  // 字节码条目：编译产物，只展示只读字节视图，绝不伪装成可编辑源码。
+  // 编辑 → Ctrl+S 应用（S14 话术）+ 未保存标记。
+  await window.locator('[data-editor-engine="codemirror"] .cm-content').click();
+  await window.keyboard.press('Control+End');
+  await window.keyboard.type('\n-- e2e 追加');
+  await expect(window.locator('.scp-dirty')).toHaveText('未保存');
+  await window.keyboard.press('Control+s');
+  await expect(window.getByTestId('scp-status')).toHaveText('已应用，可回滚。');
+
+  // 字节码条目：本机 DSLuaDecompiler 反编译文本（来源明示，不是 fake hex）。
   await window.getByRole('row', { name: /battle\.lua/ }).click();
-  await expect(source).toContainText('编译产物，非明文源码');
-  await expect(source).toContainText('字节码绝不显示为可编辑源码');
+  await expect(source).toContainText('反编译源码');
+  await expect(source).toContainText('DSLuaDecompiler');
+  await expect(source).toContainText('function BattleStart()');
+  await expect(source).toContainText('SetHp(1000)');
 
   await window.screenshot({ path: 'test-results/06-script-workbench.png' });
+  await app.close();
+});
+
+test('S16 脚本 IDE：独立 .hks 单 Source，打开即反编译，Ctrl+S 应用', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 独立脚本文件（.hks）：单 Source 栏，不落容器分页。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'script/c0000_common.hks');
+  await expect(window.getByLabel('脚本编辑')).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Files' })).toHaveCount(0);
+
+  const source = window.getByRole('region', { name: 'Source' });
+  await expect(source).toContainText('c0000_common.hks');
+  await expect(source).toContainText('反编译源码');
+  await expect(source).toContainText('BEH_ADD_NONE = 0');
+  await expect(source).toContainText('可编辑 · Ctrl+S 应用');
+
+  // 编辑 → Ctrl+S 应用。
+  await window.locator('[data-editor-engine="codemirror"] .cm-content').click();
+  await window.keyboard.press('Control+End');
+  await window.keyboard.type('\n-- standalone 追加');
+  await window.keyboard.press('Control+s');
+  await expect(window.getByTestId('scp-status')).toHaveText('已应用，可回滚。');
+
+  await window.screenshot({ path: 'test-results/06-script-standalone.png' });
   await app.close();
 });
 
@@ -1173,15 +1210,16 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可点击文件工作域并保持可操作。22 = fixture 合成样本数
+    // 窄屏仍可点击文件工作域并保持可操作。24 = fixture 合成样本数
     // （PARAM-10B 加 gameparam.parambnd.dcx，GPARAM-11B 加 3 个 gparam.dcx，
     // EVENT-30B 加 event/menu.emevd，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx，
     // MAP-50B 加 map/m10.msb.dcx，MODEL-51B 加 chr/c1000.flver，TEXTURE-52B 加
     // menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，MATERIAL-53B 加
     // material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，VFX-54B 加
-    // sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22）。
+    // sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22，
+    // S15 加 event/krak.emevd.dcx 从 22 变 23，S16 加 script/c0000_common.hks 从 23 变 24）。
     await window.locator('[data-domain="files"]').click();
-    await expect(window.locator('.file-item')).toHaveCount(22);
+    await expect(window.locator('.file-item')).toHaveCount(24);
   }
 
   await window.setViewportSize({ width: 653, height: 694 });
@@ -1476,7 +1514,7 @@ test('主题表面：普通 pane/数据行/主工作台去卡片化，无圆角�
  * 大工作区：分页与截断说明。
  *
  * 默认 fixture 只有 22 个文件，低于分页页大小（200）与搜索上限（60），所以这两条
- * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 482 个
+ * 行为在默认套件里根本不出现。SF_TEST_LARGE_WORKSPACE=1 让 fixture 返回 484 个
  * 合成条目，跨过两个阈值。
  *
  * 断言的是**用户能看到什么**：DOM 里真的只有一页节点、翻页真的换内容、说明里的
@@ -1496,20 +1534,21 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
   const pager = window.locator('[data-testid="file-list-pager"]');
   await expect(pager).toBeVisible();
 
-  // 位置文案必须报出区间与真实总数（482 = 22 基础 + 460 合成；EVENT-30B 加了
+  // 位置文案必须报出区间与真实总数（484 = 24 基础 + 460 合成；EVENT-30B 加了
   // event/menu.emevd 基础样本从 12 变 13，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx
   // 从 13 变 14，MAP-50B 加 map/m10.msb.dcx 从 14 变 15，MODEL-51B 加 chr/c1000.flver
   // 从 15 变 16，TEXTURE-52B 加 menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，
   // MATERIAL-53B 加 material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，
-  // VFX-54B 加 sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22）。
+  // VFX-54B 加 sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22，
+  // S15 加 event/krak.emevd.dcx 从 22 变 23，S16 加 script/c0000_common.hks 从 23 变 24）。
   const range = window.locator('[data-testid="file-list-page-range"]');
   await expect(range).toContainText('1–200');
-  await expect(range).toContainText('482');
+  await expect(range).toContainText('484');
   await expect(range).toContainText('第 1/3 页');
 
   // 标题栏在超过一页时要说明「本页显示多少」，否则 200 与 479 长得一样。
   // SHELL-09 §3.3：数量带语义单位（文件 N 个）。
-  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 482 个');
+  await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('文件 484 个');
   await expect(window.locator('[data-panel-id="explorer"] .panel__hint')).toContainText('本页 200');
 
   // 翻页必须真的换内容：记下首项，翻页后应不同且区间前移。
@@ -1522,8 +1561,8 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
 
   // 末页只剩余数条，且「下一页」到底后禁用。
   await window.getByRole('button', { name: '下一页' }).first().click();
-  await expect(range).toContainText('401–482');
-  await expect(items).toHaveCount(82);
+  await expect(range).toContainText('401–484');
+  await expect(items).toHaveCount(84);
   await expect(window.getByRole('button', { name: '下一页' }).first()).toBeDisabled();
 
   // 回到第一页：上一页可用且内容复原。
