@@ -393,6 +393,91 @@ const NON_TABLE_BLOCKS = new Set(['command-index']);
     'gates.json 每个 Gate 都必须有非空 openRulings，否则本组断言失去靶标。');
 }
 
+/**
+ * §13.4 validation-freeze：frozen 数组必须逐条进块，exitSemantics 必须逐字。
+ *
+ * 这个块替掉的是 21 段手写四元组围栏（190 行）。手写期间 `validation.json` 的
+ * `frozen` 只有 schema 校验、没有任何一致性门禁，实测已经分叉三处 exitSemantics
+ * （W-ME3-ADAPTER-01 / W-ME3-MAIN-DETECT-02 / W-ME3-PROFILE-03：权威写
+ * sekiroProcessLifecycleObserved=false，交接书写 realSekiroExecuted=false），
+ * 两套门禁全绿。改成投影以后分叉不可能再由手写产生，所以这一组断言的靶标换成
+ * 另一类退化：投影器自己把内容丢掉——截断 exitSemantics、少投几行、把列删掉。
+ *
+ * 因此不能只判「是表格、有行」。行数要等于权威条数，首列要同序（frozen 允许同
+ * 一 sliceId 出现多次，比对必须带重复而不是去重成集合），exitSemantics 要与权威
+ * 逐字相同。缺任何一条，退化后的块看起来都仍然正常。
+ */
+{
+  const body = blocks['validation-freeze']();
+  const lines = body.split('\n');
+  const frozen = sources.validationData.frozen;
+
+  check('validation-freeze/is-table', lines[0].startsWith('|'),
+    `真实数据下必须是表格，实际首行 ${JSON.stringify(lines[0].slice(0, 40))}`);
+
+  // 列集锁死。下面按下标取 exitSemantics 列，列序一变下标就指向别的字段，
+  // 逐字比对会变成拿命令比边界、报一堆无关失败而不是指出列序改了。
+  const headers = splitRow(lines[0]).map(headerToken);
+  check('validation-freeze/headers-locked',
+    JSON.stringify(headers) === JSON.stringify(['切片', 'targetrelease', '冻结命令', '边界（exitsemantics）']),
+    `列集必须稳定，实际 ${JSON.stringify(headers)}`);
+
+  const rows = lines.slice(2).map(splitRow);
+  check('validation-freeze/row-count-matches-authority', rows.length === frozen.length,
+    `行数必须等于 validation.json 的 ${frozen.length} 条 frozen，实际 ${rows.length}`);
+
+  const rowIds = rows.map((row) => (row[0] ?? '').replaceAll('`', ''));
+  check('validation-freeze/slice-ids-match-authority-in-order',
+    JSON.stringify(rowIds) === JSON.stringify(frozen.map((entry) => entry.sliceId)),
+    `首列必须与 frozen 逐条同序（含重复），实际 ${JSON.stringify(rowIds)}`);
+
+  // exitSemantics 是这张表的存在理由：它是「这条命令证明什么、不证明什么」的
+  // authority 边界。截断它等于把边界改成人读不出来的样子，而块仍然是合法表格。
+  //
+  // 期望值从权威原文反推 cell() 的转义，不调 cell() 本身——用生产函数算期望值
+  // 会让 cell 改坏时两边一起变、断言恒真。
+  //
+  // 反引号必须两边一起剥。decorate() 只插入反引号不删改字符，所以剥掉即还原——
+  // 但前提是权威原文自己没有反引号。实测这个前提不成立：frozen 有三条
+  // exitSemantics 自带反引号（W-BEHAVIOR-MAP-01 的 `\x1bLuaP`、
+  // W-AI-CONFORMANCE-02 与 W-REL-B-CORPUS-01 的切片/命令名），只剥 actual 会把
+  // 权威自带的那几对也剥掉，于是逐字比对报出与截断无关的假红。两边同样归一后
+  // 这条断言判的是「文本有没有被丢掉」，装饰是否正确由 backticks-balanced 判。
+  const stripTicks = (text) => text.replaceAll('`', '');
+  const escapeForCell = (value) => String(value ?? '')
+    .replaceAll('|', '\\|').replaceAll('\r\n', ' ').replaceAll('\n', ' ');
+
+  const boundaryMismatches = rows.flatMap((row, i) => {
+    const expected = stripTicks(escapeForCell(frozen[i]?.exitSemantics));
+    const actual = stripTicks(row[3] ?? '');
+    return actual === expected ? [] : [`${rowIds[i]}: 期望 ${expected} 实际 ${actual}`];
+  });
+  check('validation-freeze/exit-semantics-verbatim', boundaryMismatches.length === 0,
+    `exitSemantics 必须与 validation.json 逐字一致、不得截断：${boundaryMismatches.join('；')}`);
+
+  const scriptMismatches = rows.flatMap((row, i) => {
+    const expected = stripTicks(escapeForCell(frozen[i]?.script));
+    const actual = stripTicks(row[2] ?? '');
+    return actual === expected ? [] : [`${rowIds[i]}: 期望 ${expected} 实际 ${actual}`];
+  });
+  check('validation-freeze/script-verbatim', scriptMismatches.length === 0,
+    `冻结命令必须与 validation.json 逐字一致：${scriptMismatches.join('；')}`);
+
+  // 靶标存在性。frozen 为空、或 exitSemantics 全空时，上面四条逐字断言都恒真。
+  check('validation-freeze/authority-has-frozen-entries',
+    frozen.length > 0
+      && frozen.every((entry) => typeof entry.exitSemantics === 'string' && entry.exitSemantics.trim() !== '')
+      && frozen.every((entry) => typeof entry.script === 'string' && entry.script.trim() !== ''),
+    'validation.json 的 frozen 必须非空且每条都有 script 与 exitSemantics，否则本组断言失去靶标。');
+
+  // 空数据回退路径必须指回权威文件。退成空表格会让读者以为「确实没有冻结验证」，
+  // 而不是「这里该有内容但权威是别处」。
+  const emptyBody = BLOCKS({ ...sources, validationData: { frozen: [] } })['validation-freeze']();
+  check('validation-freeze/empty-data-points-at-authority',
+    !emptyBody.startsWith('|') && emptyBody.includes('docs/governance/validation.json'),
+    `frozen 为空时必须回退成指向权威的叙述，实际 ${JSON.stringify(emptyBody.slice(0, 80))}`);
+}
+
 for (const [name, build] of Object.entries(blocks)) {
   if (NON_TABLE_BLOCKS.has(name)) continue;
   const body = build();

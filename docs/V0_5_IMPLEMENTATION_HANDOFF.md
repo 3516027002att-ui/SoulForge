@@ -1102,194 +1102,45 @@ exitSemantics # pass=exit 0 且断言执行；skip/unfrozen 语义明确
 
 （`W-ME3-INSTALL-04`、`W-REL-F-ACCEPT-02`、`W-BEHAVIOR-MAP-01`、`W-REL-C-MULTILANG-03` 已 completed，不再列入未冻结清单。MULTILANG-03 的未冻结条目已由 EV-FMG-CONTAINER-CLOSED-LOOP-20260814 封存后随 complete 移除。）
 
-`W-SCRIPT-READONLY-01` 的 script 整内层文件替换真实容器验证已冻结为：
+全部 21 条冻结验证的四元组权威在 `docs/governance/validation.json` 的 `frozen` 数组。
+下表只投影其中的 `script` 与 `exitSemantics` 两列——冻结了哪几条命令、以及这些命令
+明确**不**证明什么。`fixture` 与 `assertion`（样本构造与断言枚举，占四元组 63.2% 字节）
+不复述进本文：去 `validation.json` 查，一条切片一个对象。
 
-~~~text
-script        npm run test:script-container-replace（本机环境注入时读取真实 luabnd）；npm run test:script-container-evidence（真实分支传入 luabnd 路径时）
-fixture       仓库外 luabnd-primary（mods/script/aicommon.luabnd.dcx，DCX-DFLT->BND4，301 条目）；真实内层 .lua 条目
-assertion     复制真实 luabnd 到临时 overlay；Bridge native write-bnd4 整内层替换（用户提供字节，等长 marker）→ PatchIR container_child_replace → WorkspaceTransaction 提交 → 重读条目数不变且内容更新 → operation 回滚与原文件字节一致；原 Mod 未被触碰；证据投影枚举 301 条目并分类 .lua 为 lua-bytecode
-exitSemantics 命令须 exit 0 且真实容器实际执行；synthetic 分支 20 case 无条件运行；只支持容器级枚举/整内层替换闭环的 candidate，不证明脚本语义、反编译、重编译、typed mutation 或游戏加载
-~~~
+这里此前是 21 个手写围栏、190 行，逐字复制 `frozen` 数组。`frozen` 与 `unfrozen` 不同——
+`unfrozen` 由 `validateGovernanceData` 拿 `slices.json` 双向反查，`frozen` 只有 schema 校验，
+没有任何一致性门禁。所以副本分叉不会被发现，而且已经发生：`W-ME3-ADAPTER-01`、
+`W-ME3-MAIN-DETECT-02`、`W-ME3-PROFILE-03` 三条的 `exitSemantics` 在 JSON 侧已改成
+`sekiroProcessLifecycleObserved=false`，交接书侧还留着旧字段名 `realSekiroExecuted=false`——
+改名只落了一半，两套门禁全绿。改成投影之后这类分叉在结构上不可能存在。
 
-`W-EMEVD-FMG-PARAM-03` 的 PARAM 字段级 mutation 专项验证已冻结为：
+<!-- SOULFORGE_PROJECTION_BEGIN:validation-freeze -->
 
-~~~text
-script        npm run test:param-field-mutation；npm run test:paramdef-layout；npm run test:fmg-msb-ipc-contract；npm run test:param-msb-write-ipc-contract
-fixture       ParamDefDocument 合成 definition（标量 + bitfield 共享字节）；runParamdefLayoutSmoke bitfield fixture；FMG add 四层接线静态断言源文件
-assertion     applyParamFieldMutation 10 case：标量写入、bitfield 保留其他位、无效 base64/空行/行宽不匹配/字段不存在/越界结构化失败、源行不可变；EditorMutationKind 含 fmg_entry_add、contract fmg mutationKinds 含 fmg_entry_add、IPC/preload 类型含 add；param_field_set/applyParamFieldMutation IPC 通道接线 token
-exitSemantics 四个命令均须 exit 0 且断言实际执行；只覆盖 TS 字段编码层与接线，不证明 Bridge 整行写入/真实 PARAM 文档/UI add 入口
-~~~
+| 切片 | targetRelease | 冻结命令 | 边界（exitSemantics） |
+|---|---|---|---|
+| `W-SCRIPT-READONLY-01` | `V0.5` | `npm run test:script-container-replace`（本机环境注入时读取真实 luabnd）；`npm run test:script-container-evidence`（真实分支传入 luabnd 路径时） | 命令须 exit 0 且真实容器实际执行；synthetic 分支 20 case 无条件运行；只支持容器级枚举/整内层替换闭环的 candidate，不证明脚本语义、反编译、重编译、typed mutation 或游戏加载 |
+| `W-EMEVD-FMG-PARAM-03` | `V0.5` | `npm run test:param-field-mutation`；`npm run test:paramdef-layout`；`npm run test:fmg-msb-ipc-contract`；`npm run test:param-msb-write-ipc-contract` | 四个命令均须 exit 0 且断言实际执行；只覆盖 TS 字段编码层与接线，不证明 Bridge 整行写入/真实 PARAM 文档/UI add 入口 |
+| `W-EMEVD-FULL-01` | `V0.5` | `npm run test:emevd-imported-production`；`npm run test:emevd-imported-coverage` | 两命令须 exit 0；合成 leg 无条件运行；真实 corpus leg 依赖 SOULFORGE_NATIVE_FIXTURE_REGISTRY/SOULFORGE_NATIVE_FIXTURE_ROOT，缺失结构化跳过；真实 EMEDF 文件 leg 依赖 SOULFORGE_EMEDF_PATH，缺失结构化跳过（不冒充已交叉验证） |
+| `W-EMEVD-FULL-01` | `V0.5` | `npm run test:emevd-corpus-matrix` | 命令须 exit 0；合成 leg 无条件运行；真实 corpus leg 依赖本机 fixture env，缺失结构化跳过；typed mutation 只证明写链与等长替换，不证明参数语义或完整 EMEDF/layer/游戏加载 |
+| `W-EMEVD-FMG-PARAM-03` | `V0.5` | `npm run test:fmg-reference-integrity`；`npm run test:param-metadata-native` | 两命令须 exit 0；native 段依赖本机 fixture env，缺失结构化跳过；只读诊断不开放写路径；引用语义不声明容器外 tag；FMG 多语言仅 zhocn 如实 |
+| `W-REL-B-CORPUS-02` | `V0.5` | `npm run test:krak-combination-mutation`；`npm run bridge:verify:dcx-documents` | 两命令须 exit 0 且真实样本实际执行；只覆盖实际执行的登记 corpus 操作，不外推完整 corpus；KRAK 外层 DCX 重压必然改变字节，整体字节级比对只适用 BND4 payload 层 |
+| `W-A-RECOVERY-INTEGRATION-04` | `V0.5` | `npm run test:power-loss-recovery`；`npm run test:large-transaction-recovery`；`npm run test:cross-session-journal`；`npm run test:upgrade-recovery` | 四命令须 exit 0；只作用于 SoulForge 自身进程与临时 overlay，不触碰原版游戏目录；恢复策略为回滚到 before，不自动重放/不 roll-forward；真实 installer NSIS 升级生命周期仍环境门控 |
+| `W-BEHAVIOR-MAP-01` | `V0.5` | `npm run test:script-container-evidence`（真实 leg 依赖本机 fixture env）；`npm run probe:behavior-headers`（依赖 SOULFORGE_SEKIRO_GAME_ROOT，缺失失败关闭） | 命令须 exit 0 且断言实际执行；真实 leg 缺环境结构化 skipped；只支持容器级枚举与字节码格式识别（candidate），不证明脚本语义、反编译、重编译、typed mutation 或游戏加载；真实 magic 为 `\x1bLuaP`（0x50） |
+| `W-EMEVD-PATCHIR-02` | `V0.5` | `npm run test:emevd-plan-commit`；`npm run test:emevd-plan-production`；`npm run bridge:verify:emevd` | 三个命令均须 exit 0 且断言实际执行（native 变体缺环境时诚实 skip，不提升 authority）；只支持 production 接线切片 completed 与既有 partial 边界，不证明完整 EMEDF/layer/游戏加载 |
+| `W-A-RECOVERY-HARNESS-02` | `V0.5` | `npm run test:bridge-recovery-harness`；`npm run test:bridge-staging`；`npm run bridge:verify:client` | 三个命令均须 exit 0 且断言实际执行才支持 `fixture-confirmed`；fake daemon、synthetic staging 和可复用 client 不提升任何 production native writer、A-RECOVERY 总体或 `REL-A` authority |
+| `W-PARAM-META-01` | `V0.5` | `npm run test:param-metadata-mismatch`；`npm run test:paramdef-layout` | 两个命令均须 exit 0；只支持 `fixture-confirmed` metadata contract，不证明 Paramdex 数据已捆绑/获准再分发，也不提升 native PARAM parser/writer、真实 metadata source 或 `REL-C` |
+| `W-PARAM-META-SOURCE-02` | `V0.5` | `npm run test:smithbox-param-metadata-source` | 全部确定性负向断言以及配置存在时的真实本机导入均执行且 exit 0 才支持本切片 partial；不提交/打包导入数据，不授予 native PARAM writer 或上游数据再分发权利 |
+| `W-ME3-ADAPTER-01` | `V0.5` | `npm run test:me3-runtime-adapter` | 命令须 exit 0 且全部断言执行才支持 `fixture-confirmed` contract；realMe3Executed=false、sekiroProcessLifecycleObserved=false，不支持 native runtime authority、`REL-H` 或启动成功声明 |
+| `W-ME3-MAIN-DETECT-02` | `V0.5` | `npm run test:me3-runtime-gateway`；`npm run test:desktop-security`；`npm run test:me3-runtime-adapter` | 三个命令均须 exit 0；`realMe3Executed` 可为 true，但 `sekiroProcessLifecycleObserved` 必须保持 false，本切片只支持 `fixture-confirmed` detection gateway，不支持 profile/launch 或 `REL-H` |
+| `W-ME3-PROFILE-03` | `V0.5` | `npm run test:me3-runtime-adapter`；`npm run test:me3-runtime-gateway`；`npm run test:desktop-security` | 三个命令均须 exit 0；只支持 adapter/gateway 接线的 `fixture-confirmed`，以及真实 me3 version probe 的 exit-zero-unverified；sekiroProcessLifecycleObserved=false、nativeRuntimeAuthority=false，不证明真实启动/终止、回滚后重启、installer lifecycle 或 `REL-H` |
+| `W-AI-CONFORMANCE-02` | `V0.5` | `npm run test:model-service-configuration`；`npm run test:ai-fake-loop`；`npm run test:openai-responses`；`npm run test:ai-conformance` | 四个命令均须 exit 0 才支持当前 partial 离线 conformance；不证明第三方 provider 可用，不提升 native mutation authority；真实工作区多步 typed mutation 由 ``W-AI-CONFORMANCE-03`` 继续 |
+| `W-REL-B-REGISTRY-01` | `V0.5` | `npm run test:release-corpus-registry` | 全部断言执行且 exit 0 才支持 `fixture-confirmed`；任何真实 corpus 缺失、skip 或 `expectedAuthority` 目标值均不得提升 native authority 或 `REL-B` |
+| `W-REL-B-CORPUS-01` | `V0.5` | `npm run corpus:build-local-release`；`npm run bridge:verify:dcx-documents` | 两个命令必须实际读取全部登记输入并 exit 0 才支持当前 corpus partial；本命令不执行 KRAK 重压/写回，writer authority 只由独立 `bridge:verify:oodle` 与 native writer mutation evidence 建立，未执行的组合 mutation/恢复不得解释为通过 |
+| `W-REL-F-ACCEPT-01` | `V0.5` | `npm run test:release-editor-acceptance`；`npm run test:desktop-live-editor-contract` | 两个命令均须 exit 0；只支持 candidate harness，不支持真实 Electron 真实文档功能验收或 `REL-F`；不再等待用户裁定容量、延迟、规模档位或 benchmark 阈值 |
+| `W-REL-SCOPE-01` | `V0.5` | `npm run test:release-scope-proposal`；`npm run test:release-scope` | --proposal 在结构合法时输出 ok=null/status=proposal-valid/frozen=false 且 exit 0；默认严格模式在 awaiting-user-ruling 时输出 RELEASE_SCOPE_NOT_FROZEN 且 exit 1 |
+| `W-REL-COMPLIANCE-01` | `V0.5` | `npm run test:release-compliance-fixtures`；`npm run test:portable-packaging-config-fixtures`；`npm run test:subprocess-control`；`npm run build`；`npm run test:release-content`；`npm run test:release-reproducible` | 六个命令均须 exit 0 且断言实际执行；当前正文 coverage 不再产生 LICENSE_TEXT_COVERAGE_PARTIAL；任何 skipped 不得解释为完整 `REL-COMPLIANCE`、installer lifecycle 或 `REL-H` 通过 |
 
-`W-EMEVD-FULL-01` 的导入 EMEDF production 写链与真实 corpus 覆盖率交叉验证已冻结为：
-
-~~~text
-script        npm run test:emevd-imported-production；npm run test:emevd-imported-coverage
-fixture       syntheticEmevdBytes.createSyntheticDs3EmedfJson（自构 DarkScript3 格式 JSON，非真实 DarkScript3 数据）；真实 `emevd-primary`（mods/event/common.emevd.dcx，1,730 events / 33,266 instructions）；真实 EMEDF 文件经 SOULFORGE_EMEDF_PATH（用户本机，缺失 fail-closed）
-assertion     imported-production：3 合成 leg（成功链/回滚链/失败链）+ 真实 corpus 事件级 id/rest + 2000:0 InitializeEvent eventId typed mutation；vararg 尾逐字节保留、未知指令 opaque、vararg 尾参数写编译期拒绝（EMEVD_DSL_VARARG_ARG_READONLY）、回滚恢复原字节 + 审计 failure_recovery、错误 hash → EMEVD_STAGING_WRITE_FAILED 目标未触碰；imported-coverage：analyzeEmedfCoverage 对真实分布分类 clean/长度不匹配/unknown，长度签名一致
-exitSemantics 两命令须 exit 0；合成 leg 无条件运行；真实 corpus leg 依赖 SOULFORGE_NATIVE_FIXTURE_REGISTRY/SOULFORGE_NATIVE_FIXTURE_ROOT，缺失结构化跳过；真实 EMEDF 文件 leg 依赖 SOULFORGE_EMEDF_PATH，缺失结构化跳过（不冒充已交叉验证）
-~~~
-
-`W-EMEVD-FULL-01` 的全 corpus typed-mutation 矩阵已冻结为：
-
-~~~text
-script        npm run test:emevd-corpus-matrix
-fixture       合成 EMEVD（9 条指令：2× 0:0、5× 2000:0 覆盖 12/16/20/24/32、2 条 opaque 未知）；真实 `emevd-primary` common.emevd（33,266 指令 / 142 种）
-assertion     合成 leg 5 个 typed arg/eventId mutation + 事件 id/rest 经 production 写链提交→Bridge 重读可观测、vararg 尾逐字节保留、opaque 指令字节保留；真实 leg：每个 schema 覆盖指令族 typed mutation 重读、全文档 33,266 条提交前后逐条字节比对（未覆盖 140 族 opaque 保持 30,081/30,081、covered-untouched 3,181/3,181）、未知指令双重 fail-closed（EMEDF_UNKNOWN_INSTRUCTION / EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY）、非法 vararg 长度结构化拒绝、事件级 id/rest mutation 重读可观测
-exitSemantics 命令须 exit 0；合成 leg 无条件运行；真实 corpus leg 依赖本机 fixture env，缺失结构化跳过；typed mutation 只证明写链与等长替换，不证明参数语义或完整 EMEDF/layer/游戏加载
-~~~
-
-`W-EMEVD-FMG-PARAM-03` 的 FMG 引用完整性验证已冻结为：
-
-~~~text
-script        npm run test:fmg-reference-integrity；npm run test:param-metadata-native
-fixture       真实 `fmg-primary` item.msgbnd（18 FMG/3,480 entries）与 `bnd4-primary` menu.msgbnd（15 FMG/22,638 entries）；真实 `param-primary` gameparam.parambnd.dcx（138 容器条目）
-assertion     synthetic 段 6 类诊断各 1 例 + clean 容器 + 位置确定性 + 输入不可变；真实段容器级引用扫描（重复 id→error/越界→error/悬空→warning/resolved→info）、`<?tag@id?>`/`<?tag?>` 语法提取、上限 512；param-metadata-native 135 matched/3 expected-unsupported（真实 Bridge 结构化诊断）/readFailed=0
-exitSemantics 两命令须 exit 0；native 段依赖本机 fixture env，缺失结构化跳过；只读诊断不开放写路径；引用语义不声明容器外 tag；FMG 多语言仅 zhocn 如实
-~~~
-
-`W-REL-B-CORPUS-02` 的 KRAK 组合 mutation 验证已冻结为：
-
-~~~text
-script        npm run test:krak-combination-mutation；npm run bridge:verify:dcx-documents
-fixture       3 个登记 KRAK-BND4 样本（m00/m11 talkesdbnd、m10 mapbnd，共 25 entries）；Oodle runtime（本机合法）
-assertion     18 组合 case（3 样本 × 6：rename/replace/delete/move/add 组合含 add 后链式 rename/replace）：write-bnd4 mutations 数组单次 repack+单次 Kraken 重压+单次重读→独立重读→回滚 sha256 与真实游戏文件一致（零写入原版）；未知字段保持（no-op roundtrip + mutation 后未触条目 flags/unknown/stored bytes 逐字节一致，header 未知区 0x18/0x30-3F）；dcx-documents 214 DCX（144 DFLT/70 KRAK read/3 KRAK-BND4 CRUD+字段保持/75 DFLT-BND4）
-exitSemantics 两命令须 exit 0 且真实样本实际执行；只覆盖实际执行的登记 corpus 操作，不外推完整 corpus；KRAK 外层 DCX 重压必然改变字节，整体字节级比对只适用 BND4 payload 层
-~~~
-
-`W-A-RECOVERY-INTEGRATION-04` 的真实恢复验证已冻结为：
-
-~~~text
-script        npm run test:power-loss-recovery；npm run test:large-transaction-recovery；npm run test:cross-session-journal；npm run test:upgrade-recovery
-fixture       真实 WorkspaceTransaction + SQLite journal + 真实备份；合成 800-op 大容量事务；四会话跨会话场景；旧版 SQLite 迁移 1..3→6
-assertion     power-loss：3 个 SIGKILL 注入点（hook-kill/mid-replace/committed-then-kill）子进程真实事务+SQLite journal+真实备份，journal 重放一致、未完成回滚、已提交重读一致、temp 清理、幂等；large-transaction：800 op 成功链（committed/800 files/800 backups/重读全匹配）+四阶段失败关闭+大容量恢复+损坏失败关闭（corruption_blocked 且 journal 非终态）；cross-session：4 会话无丢失/无重复+跨会话回滚+崩溃发现与修复；upgrade：旧 1..3→新 6 checksum 保留、已提交数据/journal/recovery point/audit 保留、旧中断事务用旧备份恢复
-exitSemantics 四命令须 exit 0；只作用于 SoulForge 自身进程与临时 overlay，不触碰原版游戏目录；恢复策略为回滚到 before，不自动重放/不 roll-forward；真实 installer NSIS 升级生命周期仍环境门控
-~~~
-
-`W-BEHAVIOR-MAP-01` 的 script 容器 inventory 验证已冻结为：
-
-~~~text
-script        npm run test:script-container-evidence（真实 leg 依赖本机 fixture env）；npm run probe:behavior-headers（依赖 SOULFORGE_SEKIRO_GAME_ROOT，缺失失败关闭）
-fixture       仓库外 luabnd-primary = mods/script/aicommon.luabnd.dcx（DCX-DFLT->BND4，301 条目：299 .lua + 1 .luagnl + 1 .luainfo）
-assertion     36 合成 case 无条件（分类/`\x1bLuaP`/`\x1bLuaQ` 家族 magic/文本 lua 诚实语义/`sanitizeEntryName` 确定性）；真实 301 条目枚举、扩展名分布、256 采样截断、magic 11/12 命中 `\x1bLuaP`、文本 goal_list.lua magicVerified=false 如实、条目名脱敏无绝对路径/无 INTERROOT_win64
-exitSemantics 命令须 exit 0 且断言实际执行；真实 leg 缺环境结构化 skipped；只支持容器级枚举与字节码格式识别（candidate），不证明脚本语义、反编译、重编译、typed mutation 或游戏加载；真实 magic 为 `\x1bLuaP`（0x50）
-~~~
-
-`W-EMEVD-PATCHIR-02` 的验证已冻结为：
-
-~~~text
-script        npm run test:emevd-plan-commit；npm run test:emevd-plan-production；npm run bridge:verify:emevd
-fixture       syntheticEmevdBytes 微小合法合成 EMEVD（2 events / 3 instructions，含未知指令）+ EMEDF fixture；本机环境注入时注册 `emevd-primary`（mods/event/common.emevd.dcx，1,730 events / 33,266 instructions）
-assertion     四视图 DSL submit 全链：compile → typed plan → Bridge batch staging → file_replace PatchIR → WorkspaceTransaction stage/validate/commit/backup/re-read，提交字节 hash 与 Bridge staged 输出及独立重读一致；after-commit validator 失败自动回滚且原字节恢复、暂存回收、failure 审计；错误 expectedDocumentHash 结构化失败关闭且目标文件不变；native 变体事件级 id/rest typed mutation 经 Bridge 重读可观测且事件/指令计数不变；计划应用于文档 revision+1
-exitSemantics 三个命令均须 exit 0 且断言实际执行（native 变体缺环境时诚实 skip，不提升 authority）；只支持 production 接线切片 completed 与既有 partial 边界，不证明完整 EMEDF/layer/游戏加载
-~~~
-
-`W-A-RECOVERY-HARNESS-02` 的验证已冻结为：
-
-~~~text
-script        npm run test:bridge-recovery-harness；npm run test:bridge-staging；npm run bridge:verify:client
-fixture       系统临时目录中的 synthetic protocol-only fake daemon、含 4 MiB 字符串 payload 的背压 frame、四阶段 fault 与 11 个不安全 staging path segment case；不加载 native 资产
-assertion     stage/validate/commit/re-read、超限 frame、注册期取消、timeout/cancel、同步/异步 progress、terminal race、背压 close/timeout/cancel、process exit 和显式 restart 全部结算；pending/timer 清理且无迟发 cancel；unhandledRejection=0；staging 不越界且终态无残留
-exitSemantics 三个命令均须 exit 0 且断言实际执行才支持 fixture-confirmed；fake daemon、synthetic staging 和可复用 client 不提升任何 production native writer、A-RECOVERY 总体或 REL-A authority
-~~~
-
-`W-PARAM-META-01` 的验证已冻结为：
-
-~~~text
-script        npm run test:param-metadata-mismatch；npm run test:paramdef-layout
-fixture       synthetic metadata package/definition/trust policy/display-only overlay；严格五键 mismatch、SPDX、provenance、hostile primitive、Proxy/accessor/cycle/稀疏数组/undefined、容量与调用方/返回值 mutation 负向 case
-assertion     package/source/license/definition digest 与 trust entry 闭合；匹配只读隔离 plain-data 快照；成功结果递归冻结且不冻结调用方输入；64 MiB canonical UTF-8 总预算与 256 条诊断上限失败关闭；snapshotFailureCases=9、aggregateSerializationBudgetCases=1、diagnosticLimitCases=1、immutableSnapshotCases=3
-exitSemantics 两个命令均须 exit 0；只支持 fixture-confirmed metadata contract，不证明 Paramdex 数据已捆绑/获准再分发，也不提升 native PARAM parser/writer、真实 metadata source 或 REL-C
-~~~
-
-`W-PARAM-META-SOURCE-02` 的验证已冻结为：
-
-~~~text
-script        npm run test:smithbox-param-metadata-source
-fixture       仓库内最小 XML/license 正负 fixture；可选固定 Smithbox 2.2.4 本机 source slot，公开 release/archive/tree/license digest policy 与撤回列表
-assertion     release slot、目录 realpath、文件数、archive/tree/license digest、DTD/entity/symlink、缺失/错版/篡改/升级/撤回均失败关闭；本机源存在时导入 160 definitions、7,028 fields、124 个英文注释类型，59 个 enum 引用解析且 253 个未知引用保持 opaque
-exitSemantics 全部确定性负向断言以及配置存在时的真实本机导入均执行且 exit 0 才支持本切片 partial；不提交/打包导入数据，不授予 native PARAM writer 或上游数据再分发权利
-~~~
-
-`W-ME3-ADAPTER-01` 的验证已冻结为：
-
-~~~text
-script        npm run test:me3-runtime-adapter
-fixture       synthetic privileged gateway responses与固定 0.12.1 policy；缺失/歧义、非法 schema/policy、精确版本、截断/超限输出、非零退出、spawn failure、timeout/cancel/close/reject race 和 unsupported operation 共 22 类 contract case
-assertion     renderer-safe DTO 不泄漏路径/process/argv/cwd/env；core timeout/cancel 会 abort gateway signal；匹配版本仍为 exit-zero-unverified 且 canPrepareProfile/canLaunch=false；profile/launch/diagnostics/terminate 均结构化 unsupported
-exitSemantics 命令须 exit 0 且全部断言执行才支持 fixture-confirmed contract；realMe3Executed=false、realSekiroExecuted=false，不支持 native runtime authority、REL-H 或启动成功声明
-~~~
-
-`W-ME3-MAIN-DETECT-02` 的验证已冻结为：
-
-~~~text
-script        npm run test:me3-runtime-gateway；npm run test:desktop-security；npm run test:me3-runtime-adapter
-fixture       系统临时固定工具槽中的 synthetic executable 正负 case；本机固定 0.12.1 工具槽存在时执行真实 `--version` probe
-assertion     main-only realpath/containment、固定 argv、无 shell、最小环境、隐藏窗口、1,024 字节上限、timeout/cancel 与脱敏；renderer IPC 不接受路径；本机真实 probe 识别 0.12.1 但保持 exit-zero-unverified、canPrepareProfile=false、canLaunch=false
-exitSemantics 三个命令均须 exit 0；realMe3Executed 可为 true，但 realSekiroExecuted 必须保持 false，本切片只支持 fixture-confirmed detection gateway，不支持 profile/launch 或 REL-H
-~~~
-
-`W-ME3-PROFILE-03` 的验证已冻结为：
-
-~~~text
-script        npm run test:me3-runtime-adapter；npm run test:me3-runtime-gateway；npm run test:desktop-security
-fixture       core 的 25 个闭集 adapter case，包含 profile-create、launch、collect-diagnostics 与 terminate 结果；desktop main 固定工具槽 synthetic 正负 case，以及仅执行 `--version` 的本机 0.12.1 probe
-assertion     profile/launch/diagnostics/terminate 继续通过 renderer-safe DTO 和 main-owned gateway；IPC/preload 不接受或返回特权路径、argv、cwd、env；超时、取消、非法响应和缺失进程失败关闭
-exitSemantics 三个命令均须 exit 0；只支持 adapter/gateway 接线的 fixture-confirmed，以及真实 me3 version probe 的 exit-zero-unverified；realSekiroExecuted=false、nativeRuntimeAuthority=false，不证明真实启动/终止、回滚后重启、installer lifecycle 或 REL-H
-~~~
-
-`W-AI-CONFORMANCE-02` 的验证已冻结为：
-
-~~~text
-script        npm run test:model-service-configuration；npm run test:ai-fake-loop；npm run test:openai-responses；npm run test:ai-conformance
-fixture       两类本地 contract HTTP/SSE server；空/缺失 config、endpoint/model/credential、非法协议、远程明文或内嵌凭据 endpoint 共 9 个 factory 正负 case；错误分类、timeout、AbortSignal cancel 与 agent limit 共 10 个 conformance case
-assertion     空配置返回 MODEL_SERVICE_UNCONFIGURED，不安全配置失败关闭且 networkAttempts=0；双协议错误分类、超时、取消和限额结构化结算；有效协议进入受控 tool loop；plan 写拒绝、full 仍受 Patch Engine/evidence gate、audit 不含 secret
-exitSemantics 四个命令均须 exit 0 才支持当前 partial 离线 conformance；不证明第三方 provider 可用，不提升 native mutation authority；真实工作区多步 typed mutation 由 `W-AI-CONFORMANCE-03` 继续
-~~~
-
-`W-REL-B-REGISTRY-01` 的验证已冻结为：
-
-~~~text
-script        npm run test:release-corpus-registry
-fixture       metadata-only synthetic registry；精确 10,000-entry shard 边界；格式、变体、数量、重复、路径和伪装负向 manifest
-assertion     schemaVersion/entryCount/format/observedVariant 闭集一致；DFLT/BND4/KRAK 覆盖；26 个负向 case 返回结构化诊断；所有结果 nativeFormatAuthority=false
-exitSemantics 全部断言执行且 exit 0 才支持 fixture-confirmed；任何真实 corpus 缺失、skip 或 expectedAuthority 目标值均不得提升 native authority 或 REL-B
-~~~
-
-`W-REL-B-CORPUS-01` 的 corpus 登记子验证已冻结为：
-
-~~~text
-script        npm run corpus:build-local-release；npm run bridge:verify:dcx-documents
-fixture       仓库外 `sekiro-1-6-owner-corpus-v1` 与本机合法 Oodle；locator registry 持有路径，release registry 只持 opaque id/hash/size/resourceKind/format/variant/target operations/privacy class
-assertion     当前 corpus 214/214 DCX 分类，16 个重复内容折叠为 198 项；144 DFLT payload/variant no-op、75 BND4 roundtrip/CRUD（11,344 entries）、70 KRAK read；registry 不含 localPath、盘符、UNC、凭据或资产内容，并输出脱敏资源类别/内层扩展名计数
-exitSemantics 两个命令必须实际读取全部登记输入并 exit 0 才支持当前 corpus partial；本命令不执行 KRAK 重压/写回，writer authority 只由独立 `bridge:verify:oodle` 与 native writer mutation evidence 建立，未执行的组合 mutation/恢复不得解释为通过
-~~~
-
-`W-REL-F-ACCEPT-01` 的验证已冻结为：
-
-~~~text
-script        npm run test:release-editor-acceptance；npm run test:desktop-live-editor-contract
-fixture       冻结的 BND4/FMG/PARAM/EMEVD/MSB/TAE/ESD/script 八编辑器 synthetic contract sample；Hex 只读与 FLVER 资产排除；demo/synthetic、authority、revision、typed mutation、完整有界访问和提前 pass 负向 case
-assertion     inventory 必须精确等于冻结八项，Hex/raw 不得暴露 mutation，FLVER 不得进入发布编辑器；scopeRulingStatus=user-approved、quantitativeThresholdsRequired=false；输出固定 ok=null、releaseGateDecision=pending、releasePassed=false、realFunctionalAcceptanceRun=false；当前访问/authority 缺口结构化失败关闭
-exitSemantics 两个命令均须 exit 0；只支持 candidate harness，不支持真实 Electron 真实文档功能验收或 REL-F；不再等待用户裁定容量、延迟、规模档位或 benchmark 阈值
-~~~
-
-`W-REL-SCOPE-01` 的提案验证已冻结为：
-
-~~~text
-script        npm run test:release-scope-proposal；npm run test:release-scope
-fixture       本文 §18.2.1 唯一 JSON scope proposal block
-assertion     27 个必需 scopeItemId/capabilityId 唯一且合法；显式 gateCoverage 精确覆盖 §18.1 全部 11 Gate 并与 §18.3/§18.4 引用闭合；Evidence/registry 引用合法；game/build/ruling metadata 状态一致；无绝对路径；每项保留非声明；私有 fixture registry 不得成为 release corpus
-exitSemantics --proposal 在结构合法时输出 ok=null/status=proposal-valid/frozen=false 且 exit 0；默认严格模式在 awaiting-user-ruling 时输出 RELEASE_SCOPE_NOT_FROZEN 且 exit 1
-~~~
-
-`W-REL-COMPLIANCE-01` 已冻结为：
-
-~~~text
-script        npm run test:release-compliance-fixtures；npm run test:portable-packaging-config-fixtures；npm run test:subprocess-control；npm run build；npm run test:release-content；npm run test:release-reproducible
-fixture       package-lock.json、release-compliance-policy.json、严格 NSIS-only electron-builder JSON、实际 desktop out/package/native runtime 输入；系统临时目录内 synthetic config、scratch、subprocess 与内容负向 fixture
-assertion     全部 production lockfile 依赖有版本与 allowlist license expression，许可证正文 inventory 为 123 present / 0 metadata-only / 49 not-installed；builder 闭集、portable target/config、workspace link/falsy manifest、scratch root、子进程树 timeout/cancel/output cap 失败关闭；真实输入逐文件 size/SHA-256；manifest 与当前输入逐字一致；连续两次同机构建 manifest 一致；篡改、禁用许可证、凭据路径/内容均失败关闭
-exitSemantics 六个命令均须 exit 0 且断言实际执行；当前正文 coverage 不再产生 LICENSE_TEXT_COVERAGE_PARTIAL；任何 skipped 不得解释为完整 REL-COMPLIANCE、installer lifecycle 或 REL-H 通过
-~~~
+<!-- SOULFORGE_PROJECTION_END:validation-freeze -->
 
 `validation-unfrozen` 不阻止只读 / 研究 / 协议推进，但阻止对应未验证能力被写成运行证据。`test:handoff-integrity` 会拒绝列表中的未知切片，以及 lifecycle 已为 `completed` / `superseded` 的终止切片；具体 smoke 是否足以支撑目标 authority 仍属于 §13.3 的人工语义审查。
 

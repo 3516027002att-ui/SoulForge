@@ -137,6 +137,7 @@ export function loadProjectionSources(root) {
     gatesData: readJson('docs/governance/gates.json'),
     blockersData: readJson('docs/governance/blockers.json'),
     scopeData: readJson('docs/governance/scope.json'),
+    validationData: readJson('docs/governance/validation.json'),
     evidenceRecords: readFileSync(join(root, 'docs/governance/evidence.jsonl'), 'utf8')
       .split('\n')
       .filter((line) => line.trim().length > 0)
@@ -151,7 +152,7 @@ export function loadProjectionSources(root) {
  * BLOCKER_HEADERS 逐 token 一致——那个解析器是迁移期回归网，列数或列序变了
  * 它会报 *_TABLE_SCHEMA_INVALID。列名不是自由文本，改名等于改门禁。
  */
-export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, scopeData }) => ({
+export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, scopeData, validationData }) => ({
   // 十列 schema 与 SLICE_HEADERS 对齐。注意列名与 JSON 字段并非同名：
   // 「目标能力」列装的是 capabilityIds（能力 ID 列表），「可独立验收切片」列
   // 才是 goal 文本。实测确认：capabilityIds/requiredValidation/authorityCapNote
@@ -325,6 +326,51 @@ export const BLOCKS = ({ slicesData, gatesData, blockersData, evidenceRecords, s
         String(Array.isArray(item.operations) ? item.operations.length : 0),
         String(Array.isArray(item.unsupportedOperations) ? item.unsupportedOperations.length : 0),
         cell(item.scope)
+      ])
+    );
+  },
+
+  /**
+   * §13.4 冻结验证表。
+   *
+   * 这个块此前是 21 个手写 `~~~text` 四元组围栏，190 行，逐字复制
+   * validation.json 的 frozen 数组。与 §13.1 和 §18.2.1 的病因完全一致：
+   * 权威已经外化成 JSON，但人读文档里还躺着第二份副本，而 frozen 数组
+   * **没有任何一致性门禁**（unfrozen 有——validateGovernanceData 拿它反查
+   * slices.json；frozen 只有 schema 校验），所以分叉不会被发现。
+   *
+   * 实测分叉（2026-08-15，本块落地前）：W-ME3-ADAPTER-01、
+   * W-ME3-MAIN-DETECT-02、W-ME3-PROFILE-03 三条的 exitSemantics 已经分叉——
+   * JSON 侧写 sekiroProcessLifecycleObserved=false，交接书侧还是旧字段名
+   * realSekiroExecuted=false。字段改名只落了一半，两套门禁全绿。
+   *
+   * 为什么表里只留 script 与 exitSemantics：
+   *
+   * 四个字段合计 12,479 字符，其中 assertion 占 40.6%（均 241 字符）、
+   * fixture 占 22.6%。人读 §13.4 要回答的是「这条切片冻结了哪几条命令、
+   * 它明确**不**证明什么」——后者是 authority 边界，是全仓最不能丢的一类
+   * 信息（硬约束：skipped/candidate/fixture 通过不得写成 native authority）。
+   * assertion 的样本数与断言枚举是机器细节，与 §18.2.1 的 operations 同一
+   * 性质：给指针，不给全文。fixture 一并出表，因为 exitSemantics 里已经写明
+   * 真实/合成分支与缺环境时的跳过语义。
+   *
+   * 不做截断：authority 文本截断可能把「skipped 不得解释为通过」切掉半句，
+   * 那比不写更危险。exitSemantics 整段进单元格——markdown 表格一行一条，
+   * 长单元格不增加行数。
+   */
+  'validation-freeze': () => {
+    const frozen = Array.isArray(validationData?.frozen) ? validationData.frozen : [];
+    if (frozen.length === 0) {
+      return '当前 validation.json 未登记冻结验证。权威是 docs/governance/validation.json，'
+        + '本表由 generate-handoff-projection 投影。';
+    }
+    return table(
+      ['切片', 'targetRelease', '冻结命令', '边界（exitSemantics）'],
+      frozen.map((entry) => [
+        `\`${entry.sliceId}\``,
+        entry.targetRelease === undefined || entry.targetRelease === null ? '—' : `\`${entry.targetRelease}\``,
+        cell(entry.script),
+        cell(entry.exitSemantics)
       ])
     );
   },
