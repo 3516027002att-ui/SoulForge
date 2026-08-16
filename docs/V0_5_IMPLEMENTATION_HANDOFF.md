@@ -1597,23 +1597,11 @@ entries[]:
 
 只有发生以下任一治理事件时才写回本文：切片完成、authority 变化、blocker 变化、required validation 契约变化或跨 Agent 交接。普通微步骤、无状态变化的重试和重复取得同一结果不追加 Evidence；`ready -> active` 认领只更新 §13.1 lifecycle，不生成 Evidence。
 
-发生上述治理事件时，应按实际影响同步更新：
+**证据只能用 `node scripts/gov.mjs seal` 写入。** 唯一权威是 `docs/governance/evidence.jsonl`，§17.1 是它的投影。`seal` 一次原子完成：追加 JSONL、挂 Gate `evidenceRefs`、重投影 §17.1，随后跑含 freshness 的完整门禁，失败整体回滚。一条 Evidence 带哪些字段由 `gov help` 里 `seal` 的参数定义（`--subject` / `--commands` / `--result` / `--non-claims`，可选 `--gates` / `--release`，五字段指纹自动计算），本文不再复述——此处此前那份九项清单与 §17.2 曾有的十四项模板都已与真实 schema 的八个字段脱节，且没有任何门禁会发现。
 
-1. 对应区域地图的“已有 / 仍缺 / 状态”；
-2. “当前技术前沿”表；
-3. 本节末尾追加一条自包含证据记录。
+手写证据条目不参与 freshness 判定、不参与指纹计算、不被等价性门禁比对，追加它只会制造第二份无人校验的进度口径，而这正是硬约束「不得另立进度口径」要防的东西。lifecycle 与 authority 也不是证据字段，它们在 `slices.json`，由 `claim` / `complete` 与用户裁定改动。
 
-记录至少包括：
-
-- 日期；
-- 起始 commit 与结束 commit / 五字段工作树指纹；
-- 实现内容；
-- 运行命令和结果；
-- 样本 / corpus 范围；
-- lifecycle 与 authority 变化；
-- 未验证项；
-- 非声明；
-- blockerRefs 与外部阻塞。
+投影只覆盖 §17.1 这类区块，叙述性章节仍需按实际影响手工更新：对应区域地图的“已有 / 仍缺 / 状态”，以及 §13「当前技术前沿」表。
 
 ### 17.1 当前证据索引
 
@@ -1800,34 +1788,14 @@ entries[]:
 
 引用 `historical-record` 时必须同时保留它的未验证边界。若当前真实样本与历史记录冲突，立即把对应 authority 降为 `unverified`，必要时将切片 lifecycle 改为 `blocked` 并引用 blocker；新增可封存的当前证据，不得删除冲突记录。
 
-### 17.2 证据记录格式
+### 17.2 证据指纹与 Gate freshness 契约
 
-建议格式：
-
-~~~markdown
-### YYYY-MM-DD：标题
-
-- 证据类型：`sealed-current-run` / `unsealed-record` / `historical-record`
-- 起始：`sha`
-- 结束：`sha` 或下述五字段工作树指纹
-- 路线：B / C-EMEVD / I 等
-- lifecycle 变化：`active -> completed`
-- authority 变化：`unverified -> partial`
-- blockerRefs 变化：...
-- 已实现：...
-- 已验证：`command` exit 0；样本范围 ...
-- 未验证：...
-- 非声明：...
-- 阻塞：...
-- 重复阻碍（如有）：出现次数、根因、当前缓解、是否仍阻塞；已解决的重复故障也要保留最小复现和修复证据。
-~~~
-
-**证据指纹规则**：`sealed-current-run` 的 `起始` / `结束` 必须定位到可重算状态。无论工作树是否干净，都必须记录以下全部字段；已提交状态把真实 commit 写入 `HEAD`，diff/manifest 仍按同一算法计算，缺一即只能登记为 `unsealed-record`：
+**证据指纹规则**：`sealed-current-run` 必须把验证当次的工作树定位到可重算状态。JSONL 里对应 `fingerprint` 一个字段，取值是下列五项以 `; ` 分隔的字符串；无论工作树是否干净都必须齐全，已提交状态把真实 commit 写入 `HEAD`，diff/manifest 仍按同一算法计算，缺一即只能登记为 `unsealed-record`：
 
 ~~~text
 HEAD=<40 或 64 位 commit SHA>
 trackedDiffSha256=<排除 docs/V0_5_IMPLEMENTATION_HANDOFF.md 后，全部 staged/unstaged tracked diff 的 SHA-256>
-untrackedManifestSha256=<按仓库相对路径排序的未跟踪文件路径与逐文件内容 SHA-256 清单之 SHA-256>
+untrackedManifestSha256=<未跟踪文件清单之 SHA-256；路径按 UTF-8 字节序排序，逐条以 NUL 分隔写入仓库相对路径、字节数与内容 SHA-256>
 handoffSha256BeforeEvidenceAppend=<追加本 Evidence 前、已经通过验证的交接书快照 SHA-256>
 fingerprintSha256=<以下 canonical payload 的 SHA-256>
 ~~~
@@ -1852,15 +1820,6 @@ handoffSha256BeforeEvidenceAppend=<handoffSha256BeforeEvidenceAppend>
 真实命令日志和大型产物放在应用数据目录或系统临时目录，默认不提交仓库。记录中不得包含用户绝对路径、真实资产、API key 或 Oodle DLL。
 
 旧版 P0-P7 流水记录已由本线路图取代。历史细节仍可通过 Git history 和基线提交 `7bd354d` 追溯；不要恢复旧 milestone、fork、task、project-state 或 development-log 文档作为当前口径。
-
-#### 17.2.1 本节以下的日期条目是历史留痕，不是当前口径
-
-§17.2 以下按日期排列的条目产生于证据外化到 `docs/governance/evidence.jsonl` 之前，是当时唯一的留痕位置。它们保留在此供审计追溯，但**不是权威，也不被任何门禁读取**：
-
-- 当前唯一的证据权威是 `docs/governance/evidence.jsonl`，呈现在 §17.1（该表由 `npm run handoff:project` 从 JSONL 生成）。
-- 封存新证据只用 `node scripts/gov.mjs seal`。它会写 JSONL、挂 Gate 引用、重新投影 §17.1，三步原子完成，失败整体回滚。
-- **不要在本节追加新的日期条目。** 手写条目不参与 freshness 判定、不参与指纹计算、不被等价性门禁比对——追加它只会制造第二份无人校验的进度口径，而这正是硬约束「不得另立进度口径」要防的东西。
-- 历史条目与 JSONL 记录粒度不同（28 篇日志 vs 50 条 evidence），两者不构成一一对应，也不应尝试对齐。冲突时以 JSONL 为准。
 
 ---
 
