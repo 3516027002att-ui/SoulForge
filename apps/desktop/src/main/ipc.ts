@@ -35,7 +35,7 @@ import {
   commitEmevdMutationViaBridge,
   fingerprintEmedfRegistry,
   readFullEmevdDocumentViaBridge,
-  renderEmevdDarkScriptBounded,
+  renderEmevdDarkScriptAsync,
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
   listEmedfCompletionItems,
@@ -2455,6 +2455,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * renderer only ever receives a DSL template string, a documentInstanceId and
    * the bounded outline, never the full document.
    */
+
+  /** S18-F：反汇编文本缓存（sourceHash → 文本）。容量 4：common / common_func
+   * 各一份加余量；写回后 hash 变自然落新 key，旧 key 按插入序淘汰。 */
+  const EMEVD_DISASSEMBLY_CACHE_CAPACITY = 4;
+  const emevdDisassemblyCache = new Map<string, {
+    text: string;
+    truncated: boolean;
+    totalLines: number;
+  }>();
+
   handle(
     'resource.readEmevdFullDocument',
     async (_event, sourceUri: string, documentInstanceId: string, loadFullDslTemplate?: boolean) => {
@@ -2536,14 +2546,39 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceUri
       }));
       if (registryResolution.origin === 'imported') {
-        const bounded = renderEmevdDarkScriptBounded(
-          full.document,
-          registryResolution.registry,
-          undefined
-        );
-        dslTemplate = bounded.text;
-        dslTemplateTruncated = bounded.truncated;
-        dslTemplateTotalLines = bounded.totalLines;
+        // S18-F：反汇编文本按 sourceHash 缓存 —— common / common_func 都打开过
+        // 后，切回已看过的文件零解析（Bridge 文档缓存保解析只一次，这里保
+        // 反汇编文本只生成一次）。缓存失效 = 文件写入 / hash 变：写回后新 hash
+        // 自然落到新 key，旧 key 由容量上限淘汰，不会被命中。
+        const cacheKey = full.sourceHash;
+        const cached = cacheKey ? emevdDisassemblyCache.get(cacheKey) : undefined;
+        if (cached) {
+          dslTemplate = cached.text;
+          dslTemplateTruncated = cached.truncated;
+          dslTemplateTotalLines = cached.totalLines;
+        } else {
+          // 分片异步反汇编（C）：每 ~8ms 让出主进程事件循环，渲染期间到达的
+          // IPC / 取消信号不被堵在队列里。
+          const rendered = await renderEmevdDarkScriptAsync(
+            full.document,
+            registryResolution.registry
+          );
+          dslTemplate = rendered.text;
+          dslTemplateTruncated = rendered.truncated;
+          dslTemplateTotalLines = rendered.totalLines;
+          if (cacheKey && !rendered.cancelled && !rendered.truncated) {
+            emevdDisassemblyCache.set(cacheKey, {
+              text: rendered.text,
+              truncated: rendered.truncated,
+              totalLines: rendered.totalLines
+            });
+            while (emevdDisassemblyCache.size > EMEVD_DISASSEMBLY_CACHE_CAPACITY) {
+              const oldest = emevdDisassemblyCache.keys().next().value;
+              if (oldest === undefined) break;
+              emevdDisassemblyCache.delete(oldest);
+            }
+          }
+        }
         sourceStyle = 'dark-script';
       } else {
         responseDiagnostics.push({

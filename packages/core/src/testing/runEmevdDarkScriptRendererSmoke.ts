@@ -13,7 +13,7 @@
 import { createEmevdEditorDocument } from '../editing/emevdFourViewController.js';
 import { parseDs3EmedfJson } from '../emevd/emedfExternalAdapter.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
-import { renderEmevdDarkScript, renderEmevdDarkScriptBounded } from '../emevd/darkScriptRenderer.js';
+import { renderEmevdDarkScript, renderEmevdDarkScriptAsync, renderEmevdDarkScriptBounded } from '../emevd/darkScriptRenderer.js';
 
 /**
  * Synthetic DarkScript3-format EMEDF JSON covering the instructions this smoke
@@ -142,7 +142,7 @@ function predicateArgs(result: number, a: number, b: number): string {
   return buf.toString('base64');
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const registry = createSyntheticRegistry();
 
   const document = createEmevdEditorDocument({
@@ -245,6 +245,22 @@ function main(): void {
     throw new Error('unbounded-cap render must not truncate');
   }
 
+  // S18-C：分片异步渲染的输出必须与同步路径逐字节相同（同一 finalize 规则），
+  // 取消时不返回半成品。
+  const asyncResult = await renderEmevdDarkScriptAsync(document, registry, {
+    sliceBudgetMs: 1, // 强迫每个事件后让出，覆盖多片路径
+    eventsPerClockCheck: 1
+  });
+  if (asyncResult.cancelled || asyncResult.text !== unbounded.text) {
+    throw new Error('async render must match sync output byte-for-byte');
+  }
+  const aborted = new AbortController();
+  aborted.abort();
+  const cancelled = await renderEmevdDarkScriptAsync(document, registry, { signal: aborted.signal });
+  if (!cancelled.cancelled || cancelled.text !== '') {
+    throw new Error('aborted render must return empty text with cancelled=true');
+  }
+
   console.log(JSON.stringify({
     ok: true,
     message: 'DarkScript3 源码渲染器验证通过',
@@ -257,4 +273,7 @@ function main(): void {
   }, null, 2));
 }
 
-main();
+main().catch((error) => {
+  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+  process.exitCode = 1;
+});
