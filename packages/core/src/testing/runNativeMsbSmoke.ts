@@ -1,11 +1,12 @@
 /**
  * MSB models/parts parse + part position mutation smoke.
- * Authority: native-verified for part-transform write path on DFLT-decompressed corpus sample.
+ * Authority: native-verified for part-transform write path on the real mods
+ * DFLT .msb.dcx corpus sample（外层 DCX 直读 + DCX outer 写回）。
+ * S19: read/write 直接走 .msb.dcx（Bridge 原生解 DCX），TS 侧不再 decompressDfltDcx。
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { withSmokeWorkspace } from './harness/smokeWorkspace.js';
-import { join } from 'node:path';
-import { decompressDfltDcx } from '../util/dcxDflt.js';
+import { dirname, join } from 'node:path';
 import { runBridge, disposeBridgeDaemonPool } from '../bridge/runBridge.js';
 import { readMsbDocumentViaBridge } from '../editing/msbBridgeRead.js';
 import { buildMsbSceneManifest } from '../scene/msbSceneManifest.js';
@@ -91,6 +92,17 @@ function projectNativeScene(envelope: MsbEnvelope) {
   });
 }
 
+/**
+ * S19：外层 .dcx 写回的暂存产物必须是 DCX outer（Patch 目标是外层字节），
+ * 不能是裸 MSB payload。魔数断言在 TS 侧做，防 Bridge 写链退化成 raw 输出。
+ */
+async function assertDcxOuter(path: string): Promise<void> {
+  const bytes = await readFile(path);
+  if (bytes.length < 4 || bytes.subarray(0, 4).toString('ascii') !== 'DCX\0') {
+    throw new Error(`MSB 写回产物不是 DCX outer（magic 缺失）：${path}`);
+  }
+}
+
 function main(): Promise<void> {
   return withSmokeWorkspace('native-msb', (workspace) => mainInWorkspace(workspace.root));
 }
@@ -103,14 +115,15 @@ async function mainInWorkspace(root: string): Promise<void> {
   );
   const staging = join(root, 'staging');
   await mkdir(staging, { recursive: true });
-  const payload = decompressDfltDcx(await readFile(sourceDcx));
-  const msbPath = join(root, 'm10.msb');
-  await writeFile(msbPath, payload);
+  // S19：直接喂外层 .msb.dcx —— NativeLeafPayload.Resolve 在 Bridge 侧解 DCX，
+  // TS 不再先 decompressDfltDcx 再喂裸 .msb。这条链必须能开 mods 里的 DFLT 图。
+  const msbPath = sourceDcx;
+  const fixtureDir = dirname(sourceDcx);
 
   const read = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
     filePath: msbPath,
-    allowedRoots: [root],
+    allowedRoots: [root, fixtureDir],
     timeoutMs: 120_000
   });
   if (read.parseStatus === 'failed' || !read.data) {
@@ -148,7 +161,7 @@ async function mainInWorkspace(root: string): Promise<void> {
   // renderer-safe DTO 默认完整返回（三层截断已移除），nativeOffset 身份必须保留。
   const rendererRead = await readMsbDocumentViaBridge({
     sourcePath: msbPath,
-    allowedRoots: [root],
+    allowedRoots: [root, fixtureDir],
     timeoutMs: 120_000
   });
   if (!rendererRead.ok || !rendererRead.data
@@ -165,7 +178,7 @@ async function mainInWorkspace(root: string): Promise<void> {
   // 显式有界窗口（scaleAccess=bounded-window）仍按调用方窗口截断。
   const boundedRead = await readMsbDocumentViaBridge({
     sourcePath: msbPath,
-    allowedRoots: [root],
+    allowedRoots: [root, fixtureDir],
     timeoutMs: 120_000,
     maxModels: 64,
     maxParts: 64,
@@ -197,11 +210,11 @@ async function mainInWorkspace(root: string): Promise<void> {
   const nextX = part.posX + 1.5;
   const nextY = part.posY - 0.25;
   const nextZ = part.posZ + 0.75;
-  const staged = join(staging, 'm10.mut.msb');
+  const staged = join(staging, 'm10.mut.msb.dcx');
   const written = await runBridge({
     command: 'write-msb',
     filePath: msbPath,
-    allowedRoots: [root, staging],
+    allowedRoots: [root, staging, fixtureDir],
     writableRoots: [staging],
     timeoutMs: 120_000,
     commandOptions: {
@@ -217,6 +230,12 @@ async function mainInWorkspace(root: string): Promise<void> {
   if (!written.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
     throw new Error(`MSB write failed: ${JSON.stringify(written.diagnostics)}`);
   }
+  if ((written.data as { sourceFormat?: string } | null | undefined)?.sourceFormat !== 'dcx') {
+    throw new Error(`MSB DCX 写回未走 outer 路径: ${JSON.stringify(written.data)}`);
+  }
+  // S19：外层源是 .msb.dcx 时，暂存产物必须仍是 DCX outer（patch 目标字节），
+  // 不能裸写 MSB payload。
+  await assertDcxOuter(staged);
 
   const after = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
@@ -259,11 +278,11 @@ async function mainInWorkspace(root: string): Promise<void> {
   const rX = region.posX + 2.25;
   const rY = region.posY + 1.0;
   const rZ = region.posZ - 0.5;
-  const stagedRegion = join(staging, 'm10.region.msb');
+  const stagedRegion = join(staging, 'm10.region.msb.dcx');
   const writtenRegion = await runBridge({
     command: 'write-msb',
     filePath: msbPath,
-    allowedRoots: [root, staging],
+    allowedRoots: [root, staging, fixtureDir],
     writableRoots: [staging],
     timeoutMs: 120_000,
     commandOptions: {
@@ -279,6 +298,7 @@ async function mainInWorkspace(root: string): Promise<void> {
   if (!writtenRegion.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
     throw new Error(`MSB region write failed: ${JSON.stringify(writtenRegion.diagnostics)}`);
   }
+  await assertDcxOuter(stagedRegion);
   const afterRegion = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
     filePath: stagedRegion,
@@ -304,11 +324,11 @@ async function mainInWorkspace(root: string): Promise<void> {
   const nextScaleX = part.scaleX * 1.05;
   const nextScaleY = part.scaleY * 1.1;
   const nextScaleZ = part.scaleZ * 0.95;
-  const stagedTransform = join(staging, 'm10.transform.msb');
+  const stagedTransform = join(staging, 'm10.transform.msb.dcx');
   const writtenTransform = await runBridge({
     command: 'write-msb',
     filePath: msbPath,
-    allowedRoots: [root, staging],
+    allowedRoots: [root, staging, fixtureDir],
     writableRoots: [staging],
     timeoutMs: 120_000,
     commandOptions: {
@@ -328,6 +348,7 @@ async function mainInWorkspace(root: string): Promise<void> {
   if (!writtenTransform.diagnostics.some((d) => d.code === 'MSB_STAGING_WRITE_VERIFIED')) {
     throw new Error(`MSB transform write failed: ${JSON.stringify(writtenTransform.diagnostics)}`);
   }
+  await assertDcxOuter(stagedTransform);
   const afterTransform = await runBridge<MsbEnvelope>({
     command: 'read-msb-document',
     filePath: stagedTransform,
@@ -382,6 +403,7 @@ async function mainInWorkspace(root: string): Promise<void> {
     },
     authority: after.data?.authority,
     entityEdit: read.data.entityEdit,
+    writeSourceFormat: (written.data as { sourceFormat?: string } | null | undefined)?.sourceFormat,
     sceneProjection: {
       authority: sceneBefore.authority,
       schemaVersion: sceneBefore.schemaVersion,

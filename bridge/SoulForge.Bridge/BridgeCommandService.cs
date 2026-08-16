@@ -7,6 +7,9 @@ using System.Text.RegularExpressions;
 internal sealed class BridgeCommandService
 {
     private const int MaxPrefixBytes = 512 * 1024;
+    // read-emevd-document 单页最大指令数。真实 common.emevd 有 33266 条，取 65536
+    // 可让常见事件文件一帧读完；再大的 EMEVD 仍需分页（帧上限 16 MiB）。
+    private const int MaxInstructionPageSize = 65536;
     // read-tpf-texture-preview 的预览边长上限。与 DdsCodec.DecodeDdsToPngPreview
     // 配合：全分辨率 PNG 的 base64 会超 bridge 帧上限，预览受界下采样到该边长。
     private const int PreviewMaxDimension = 512;
@@ -50,6 +53,15 @@ internal sealed class BridgeCommandService
             if (!options.TryGetProperty(name, out var element)) return fallback;
             if (element.ValueKind != JsonValueKind.True && element.ValueKind != JsonValueKind.False) return fallback;
             return element.GetBoolean();
+        }
+
+        string OptionString(string name, string fallback)
+        {
+            if (!optionsIsObject) return fallback;
+            if (!options.TryGetProperty(name, out var element)) return fallback;
+            if (element.ValueKind != JsonValueKind.String) return fallback;
+            var value = element.GetString();
+            return string.IsNullOrWhiteSpace(value) ? fallback : value;
         }
 
         var resourceKind = command switch
@@ -166,7 +178,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = FmgNativeDocument.ReadFile(file);
+                var document = FmgNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".fmg"));
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -362,34 +374,78 @@ internal sealed class BridgeCommandService
                 // native (DcxNativeDocument), so the TypeScript side never
                 // imports a second DCX parser and never hands back a
                 // decompressed temp file to be reused as the Patch target.
-                string sourceFormat;
-                string? outerFileHash;
-                EmevdNativeDocument document;
-                if (IsDcxFile(file))
+                // 分页读同一份文件时，DCX inflate / EMEVD 解析 / VerifyRoundTrip
+                // 三步的结果与 page 无关，经 EmevdDocumentSessionCache 复用。
+                // 键含外层文件完整 SHA-256（不是 mtime + length）：外部工具做等长
+                // 改写并回写原 mtime 时，前者能看出内容变了，后者看不出。
+                // cachePolicy=bypass 无条件重读磁盘，既不命中也不写缓存 —— 提交前
+                // 的新鲜读与写回后的重读用它。
+                var cachePolicy = OptionString("cachePolicy", "default") == "bypass"
+                    ? EmevdDocumentSessionCache.CachePolicy.Bypass
+                    : EmevdDocumentSessionCache.CachePolicy.Default;
+                var resumeSession = OptionString("documentSession", "");
+                EmevdDocumentSessionCache.Lookup cached;
+                if (resumeSession.Length > 0
+                    && EmevdDocumentSessionCache.TryGetSession(resumeSession, out var sessionHit))
                 {
-                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
-                    document = EmevdNativeDocument.Read(dcx.Payload);
-                    sourceFormat = "dcx";
-                    outerFileHash = dcx.SourceHash;
+                    cached = sessionHit;
                 }
                 else
                 {
-                    document = EmevdNativeDocument.ReadFile(file);
-                    sourceFormat = "emevd";
-                    outerFileHash = document.SourceHash;
+                    var hooks = EmevdDocumentSessionCache.TestHooksEnabled
+                        ? new EmevdDocumentSessionCache.TestHooks
+                        {
+                            HoldUntilFile = EmptyToNull(OptionString("testHoldUntilFile", "")),
+                            RewriteAfterRead = EmptyToNull(OptionString("testRewriteAfterRead", "")),
+                            CompletedFile = EmptyToNull(OptionString("testCompletedFile", "")),
+                            SignalFile = EmptyToNull(OptionString("testSignalFile", ""))
+                        }
+                        : null;
+                    // 解析工厂只吃共享 load token，不再捕获第一个调用者的 CancellationToken。
+                    cached = await EmevdDocumentSessionCache.GetOrAddAsync(
+                        file,
+                        oodleRuntimeRoot,
+                        (bytes, loadToken) =>
+                        {
+                            loadToken.ThrowIfCancellationRequested();
+                            string loadedFormat;
+                            string? loadedOuterHash;
+                            EmevdNativeDocument loaded;
+                            if (IsDcxBytes(bytes))
+                            {
+                                var dcx = DcxNativeDocument.Read(bytes, oodleRuntimeRoot, file);
+                                loadToken.ThrowIfCancellationRequested();
+                                loaded = EmevdNativeDocument.Read(dcx.Payload, loadToken);
+                                loadedFormat = "dcx";
+                                loadedOuterHash = dcx.SourceHash;
+                            }
+                            else
+                            {
+                                loaded = EmevdNativeDocument.Read(bytes, loadToken);
+                                loadedFormat = "emevd";
+                                loadedOuterHash = loaded.SourceHash;
+                            }
+                            loadToken.ThrowIfCancellationRequested();
+                            return new EmevdDocumentSessionCache.Entry(
+                                loaded, loaded.VerifyRoundTrip(loadToken), loadedFormat, loadedOuterHash);
+                        },
+                        cachePolicy,
+                        cancellationToken,
+                        hooks);
                 }
-                var roundTrip = document.VerifyRoundTrip();
-                var optionsObject = options.ValueKind == JsonValueKind.Object;
-                var page = optionsObject && options.TryGetProperty("instructionPage", out var pageEl)
-                    && pageEl.ValueKind == JsonValueKind.Number && pageEl.TryGetInt32(out var parsedPage)
-                    && parsedPage >= 0
-                    ? parsedPage
-                    : 0;
-                var pageSize = optionsObject && options.TryGetProperty("instructionPageSize", out var sizeEl)
-                    && sizeEl.ValueKind == JsonValueKind.Number && sizeEl.TryGetInt32(out var parsedSize)
-                    && parsedSize >= 1 && parsedSize <= 4096
-                    ? parsedSize
+                var document = cached.Entry.Document;
+                var sourceFormat = cached.Entry.SourceFormat;
+                var outerFileHash = cached.Entry.OuterFileHash;
+                var roundTrip = cached.Entry.RoundTrip;
+                var requestedPage = OptionInt("instructionPage", 0);
+                var page = requestedPage >= 0 ? requestedPage : 0;
+                // 上限提到 MaxInstructionPageSize：一次拿完 33266 条指令只需一帧，
+                // 省掉 64 次 NDJSON 往返。分页能力保留（超大 EMEVD 仍会超帧上限）。
+                var requestedPageSize = OptionInt("instructionPageSize", 256);
+                var pageSize = requestedPageSize >= 1 && requestedPageSize <= MaxInstructionPageSize
+                    ? requestedPageSize
                     : 256;
+                var cacheObservation = cached.Observation;
                 var diagnostics = new[]
                 {
                     new Diagnostic(
@@ -401,10 +457,29 @@ internal sealed class BridgeCommandService
                                 : "EMEVD 事件表语义往返一致。")
                             : "EMEVD 无修改往返语义不一致。",
                         BridgeResult<object>.MakeSourceUri(file),
-                        roundTrip)
+                        roundTrip),
+                    // 缓存行为在进程外不可见：命中与「重解析出同样内容」返回的字节完全
+                    // 相同。这条 info 诊断是同文件并发合并、bypass 不写缓存、不同文件
+                    // 不在全局锁上串行这几条属性唯一的确定性观测口。
+                    new Diagnostic(
+                        "info",
+                        "EMEVD_DOCUMENT_CACHE_STATE",
+                        $"EMEVD 文档缓存：{cacheObservation.State}。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        cacheObservation)
                 };
                 return BridgeResult<object>.Partial(file, "event", diagnostics,
-                    document.ToEnvelope(roundTrip, page, pageSize, sourceFormat, outerFileHash));
+                    document.ToEnvelope(roundTrip, page, pageSize, sourceFormat, outerFileHash, cached.SessionToken));
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                // KRAK 压缩且本机没有可用的 Oodle 运行库（未挂原版目录 / 缺 dll）。
+                // 与 MSB 同一套可行动话术：告诉用户去哪挂原版，而不是只丢一个失败码。
+                return BridgeResult<object>.Failed(
+                    file,
+                    "event",
+                    "EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE",
+                    "这份事件是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or InvalidOperationException)
             {
@@ -424,6 +499,15 @@ internal sealed class BridgeCommandService
                     new Diagnostic("info", "EMEVD_STAGING_WRITE_VERIFIED", "EMEVD 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
                 }, written);
             }
+            catch (OodleRuntimeUnavailableException)
+            {
+                // KRAK outer 写回需要 Oodle 压缩运行库；缺它时给出与读链一致的可行动提示。
+                return BridgeResult<object>.Failed(
+                    file,
+                    "event",
+                    "EMEVD_STAGING_WRITE_KRAK_OODLE_UNAVAILABLE",
+                    "这份事件是 KRAK 压缩，写回需要 Oodle 运行库：到「开始」页选择含 sekiro.exe 的原版目录后再保存。");
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "event", "EMEVD_STAGING_WRITE_FAILED", ex.Message);
@@ -434,7 +518,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = MsbNativeDocument.ReadFile(file);
+                var document = MsbNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot));
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -449,6 +533,16 @@ internal sealed class BridgeCommandService
                 };
                 return BridgeResult<object>.Partial(file, "map", diagnostics, document.ToEnvelope(roundTrip));
             }
+            catch (OodleRuntimeUnavailableException)
+            {
+                // mods 里 9 张 DFLT 图不挂原版也能开；只有原版 KRAK 图需要 Oodle。
+                // 失败码 + 可行动话术直接进编辑区，不再让用户翻日志猜「头 4 字节」。
+                return BridgeResult<object>.Failed(
+                    file,
+                    "map",
+                    "MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE",
+                    "这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。");
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "map", "MSB_DOCUMENT_READ_FAILED", ex.Message);
@@ -459,7 +553,8 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = TpfNativeDocument.ReadFile(file);
+                var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".tpf");
+                var document = TpfNativeDocument.Read(payload);
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -502,7 +597,7 @@ internal sealed class BridgeCommandService
             }
             try
             {
-                var document = TpfNativeDocument.ReadFile(file);
+                var document = TpfNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".tpf"));
                 var dds = document.GetTextureData(textureIndex);
                 byte[] outputBytes;
                 string code;
@@ -590,7 +685,7 @@ internal sealed class BridgeCommandService
             }
             try
             {
-                var document = TpfNativeDocument.ReadFile(file);
+                var document = TpfNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".tpf"));
                 var (name, sourceWidth, sourceHeight, _, _) = document.GetTextureMetadata(textureIndex);
                 var dds = document.GetTextureData(textureIndex);
                 // 预览必须受界下采样：全分辨率 PNG 的 base64 会超 bridge 帧上限
@@ -1063,7 +1158,8 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = EsdNativeDocument.ReadFile(file);
+                var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".esd");
+                var document = EsdNativeDocument.Read(payload);
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new List<Diagnostic>
                 {
@@ -1235,11 +1331,19 @@ internal sealed class BridgeCommandService
                 return BridgeResult<object>.Failed(file, "map", "BRIDGE_OUTPUT_PATH_REQUIRED", "MSB writer requires a validated staging output path.");
             try
             {
-                var written = await MsbNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                var written = await MsbNativeWriter.WriteAsync(file, outputPath, oodleRuntimeRoot, options, cancellationToken);
                 return BridgeResult<object>.Partial(file, "map", new[]
                 {
                     new Diagnostic("info", "MSB_STAGING_WRITE_VERIFIED", "MSB 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
                 }, written);
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "map",
+                    "MSB_STAGING_WRITE_KRAK_OODLE_UNAVAILABLE",
+                    "这份地图是 KRAK 压缩，写回需要 Oodle 运行库：到「开始」页选择含 sekiro.exe 的原版目录后再保存。");
             }
             catch (MsbUnregisteredEntityException ex)
             {
@@ -1566,6 +1670,12 @@ internal sealed class BridgeCommandService
             return false;
         }
     }
+
+    private static bool IsDcxBytes(byte[] bytes) =>
+        bytes.Length >= 4 && bytes.AsSpan(0, 4).SequenceEqual("DCX\0"u8);
+
+    private static string? EmptyToNull(string value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value;
 
     /// <summary>
     /// 是否为 TAE 打包容器（anibnd）。T3（2026-08-15）：动作域的 `*.anibnd.dcx`

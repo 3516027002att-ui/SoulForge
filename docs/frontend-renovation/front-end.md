@@ -2540,17 +2540,20 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[MODIFY] packages/shared/src/scene-ir.ts`；`[MODIFY] bridge/SoulForge.Bridge/MsbNativeDocument.cs`；`[MODIFY] packages/core/src/editing/msbBridgeRead.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`。
 - **Output**：map/entity tree、stable entity IDs、transform/reference pages；**Tests**：`npm run bridge:verify:msb-all`，invalid/partial MSB 不能成为 empty scene。
+- **S19 已落地**：读链直接吃外层 `.msb.dcx`（Bridge 原生解 DCX，TS 不再先 `decompressDfltDcx`）；mods 里 DFLT 图不挂原版也能开；原版 KRAK 图需要 Oodle，缺运行库时 Bridge 返回 `MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE` + 可行动话术。
 
 #### MAP-50B — Smithbox Map workbench
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/MsbScenePanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
 - **Output**：`Map Object List | Viewport | Properties`（§2.5）。选择、gizmo、属性和 camera 与 Smithbox 流程对照；Asset Browser / Prefabs 等有真实能力再加。writer 未就绪时无保存动作。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；tree/viewport/inspector 联动、无 writer action、resize/keyboard 和对照截图。
+- **S19 失败面已落地**：打开失败（KRAK 缺 Oodle / 其它读取错误）时左栏显示 code + 人话 + 下一步，viewport 不再假 0 实体；同一份结构化失败随下一次 Agent 任务提交（main 校验后进系统提示），Agent 能直接解释原因与下一步。
 
 #### MAP-50C — MSB write
 
 - **Allowed**：`[MODIFY] bridge/SoulForge.Bridge/MsbNativeWriter.cs`；`[MODIFY] packages/core/src/editing/msbBridgeCommit.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`。
 - **Flow/Tests**：`map-entity-upsert/delete` → outer stage/Patch/reopen/sibling verify/rollback；`npm run bridge:verify:msb-writer` 加 reopen-failure before-image 恢复。
+- **S19 已落地**：`write-msb` 与 write-emevd 同一套 —— 外层 `.msb.dcx` 源先 `DcxNativeDocument.Read`（带 Oodle），payload 再读/写，暂存产物仍包回 DCX outer（`sourceFormat: 'dcx'`，`outerFileHash`/`payloadHash` 分列）；TS 侧不实现第二套 DCX 解压。冒烟直读 `.msb.dcx` 并断言暂存产物是 `DCX\0` 外层。
 
 #### MODEL-51A — FLVER read
 

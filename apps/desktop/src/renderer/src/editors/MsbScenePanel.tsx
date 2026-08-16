@@ -66,6 +66,12 @@ export interface MsbScenePanelProps {
   }) => void;
   writeEnabled?: boolean;
   /**
+   * S19 失败面：打开失败的结构化诊断（code + 人话 + 下一步）。非空时工作台
+   * 显示可行动错误块（如 KRAK 缺 Oodle → 到「开始」页挂原版），不再假 0 实体。
+   * 与 App.tsx 的 lastOpenFailure 同源，绝不含绝对路径。
+   */
+  openFailure?: { code: string; message: string } | null;
+  /**
    * 非空表示该编辑器已延期至指定里程碑，本版仅作标记只读预览：
    * 面板隐藏全部提交入口并显式标注延期状态。
    */
@@ -388,7 +394,12 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           minWidth: 200,
           children: (
             <div className="msb-object-list">
-              {manifest === null ? (
+              {props.openFailure ? (
+                <div className="msb-open-failure" role="alert">
+                  <p className="msb-open-failure__code">{props.openFailure.code}</p>
+                  <p>{props.openFailure.message}</p>
+                </div>
+              ) : manifest === null ? (
                 <p className="muted">未加载 MSB 数据：请先在资源浏览器里选择一个 map 资源。</p>
               ) : groupedEntities.map((group, groupIndex) => {
                 // 硬约束 17：对象列表也可能上千条，分组内条目要分页而不是一次全渲；
@@ -449,9 +460,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
             <div className="msb-viewport">
               <div ref={hostRef} className="scene-host" style={{ minHeight: 320, background: '#1a1d23' }} />
               <p className="muted">
-                {nodeCount > 0
-                  ? `节点 ${nodeCount} · region ${regions.length} · 无绝对路径`
-                  : status}
+                {props.openFailure
+                  ? props.openFailure.message
+                  : (nodeCount > 0
+                      ? `节点 ${nodeCount} · region ${regions.length} · 无绝对路径`
+                      : status)}
               </p>
               {(selected?.kind === 'msb-part' || selected?.kind === 'msb-region') ? (
                 <p data-testid="msb-selected-summary">

@@ -435,3 +435,13 @@ internal sealed record OodleRuntimeOpenResult(
 {
     public void Dispose() => Session?.Dispose();
 }
+
+/// <summary>
+/// KRAK 解压需要本机 Oodle 运行库；未挂载原版目录 / 运行库缺失 / 版本不符时抛出。
+/// Bridge 命令层用它区分「KRAK 缺 Oodle」与其它解析失败，向 renderer 返回可行动码
+/// （如 EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE），而不是让用户翻日志猜原因。
+/// </summary>
+internal sealed class OodleRuntimeUnavailableException : InvalidOperationException
+{
+    public OodleRuntimeUnavailableException(string message) : base(message) { }
+}

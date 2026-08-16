@@ -87,7 +87,11 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       'setMsbEvents',
       'setMsbSourceCounts',
       'setMsbLive',
-      'setMsbSourceHash'
+      'setMsbSourceHash',
+      // S15/S19 失败面：跨资源族的「最近一次资源打开失败」记录。挂在 msb 族下
+      // 只是登记槽位，复位动作会把它一并清空——切换工作区/文件后，旧资源的
+      // 失败不得再进工作台显示或 Agent 元数据。
+      'setLastOpenFailure'
     ]),
     tae: Object.freeze(['setTaeData']),
     esd: Object.freeze(['setEsdData']),
@@ -164,7 +168,6 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setBnd4Forced: '强制以 BND4 打开的标记',
   setSidebarView: '侧栏视图状态',
   setAgentOpen: 'Agent 抽屉开关',
-  setLogOpen: '底部日志区开关：属于用户偏好，切换资源时把它收起会让人重复展开',
   setStatus: '状态栏文案',
   setParamRowDataSize: '行宽由 paramdef 决定，复位为 0 会让 UI 显示错误的 0 字节；保留上次值直到新文档赋值',
   setAiProvider: 'AI 会话配置',
@@ -209,7 +212,6 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setCmdkOpen: '命令面板状态',
   setCmdkQuery: '命令面板状态',
   setCmdkIndex: '命令面板状态',
-  setClockText: '时钟',
   setToasts: '通知',
   setOpenTabs: '标签页',
   setFilePage: '资源浏览器页码，由过滤条件变化的 effect 自行复位（跨资源族共用，不属于某一族的文档态）'

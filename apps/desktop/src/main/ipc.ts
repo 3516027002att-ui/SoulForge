@@ -15,6 +15,12 @@ import {
   type AppSettingsStore,
   createAgentToolBridge,
   createConfiguredModelServiceAdapter,
+  fetchEmbeddings,
+  isAllowedEndpoint,
+  OpenAiCompatibleAdapter,
+  AnthropicCompatibleAdapter,
+  retrieveEvidenceHybrid,
+  type HybridVectorSource,
   createDefaultToolRegistry,
   createConfirmationReceipt,
   createContextBroker,
@@ -32,7 +38,7 @@ import {
   commitEmevdMutationViaBridge,
   fingerprintEmedfRegistry,
   readFullEmevdDocumentViaBridge,
-  renderEmevdDarkScriptBounded,
+  renderEmevdDarkScriptAsync,
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
   listEmedfCompletionItems,
@@ -86,6 +92,9 @@ import {
   saveRawReplace,
   saveTextResource,
   scanWorkspace,
+  buildRagCorpus,
+  createRagCorpus,
+  mergeCatalogAndPersisted,
   stageBridgeOutput,
   applyNativeMutation,
   validateContainer,
@@ -101,10 +110,11 @@ import {
   type AiSidebarDraft,
   type AiSidebarDraftRequest,
   type ResourceCapabilityMatrix,
+  type RagCorpus,
   type ToolContext,
   type ToolDescriptor,
   type ToolResult,
-  type WorkspaceIndex,
+  WorkspaceIndex,
   type WorkspaceSession,
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification
@@ -161,6 +171,7 @@ import type {
   ApprovalDecision,
   ApprovalDiff,
   ChatMessage,
+  ModelListResult,
   ResumedRollout,
   RolloutSessionMeta
 } from '@soulforge/core';
@@ -177,6 +188,8 @@ import {
   type RendererResourcePreview,
   type RendererSaveResult
 } from './rendererDto.js';
+import { commitEmevdFullDocument } from './emevdAuthorityCache.js';
+import { EmevdOpenSlots } from './emevdOpenSlots.js';
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
 import { readRecentPath, writeRecentPath } from './recentPaths.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
@@ -185,6 +198,7 @@ import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
 
 let indexedFiles: IndexedFile[] = [];
 let activeIndex: WorkspaceIndex | null = null;
+let activeRag: RagCorpus | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
@@ -194,6 +208,53 @@ let activeWorkspaceSessionId: string | null = null;
  * never holds these documents (hard constraint 18).
  */
 const emevdFullDocuments = new Map<string, EmevdEditorDocument>();
+
+/**
+ * 打开事件文档的在飞请求槽，**按 renderer 窗口分槽**。
+ *
+ * renderer 一次只显示一份事件文档，所以「同一个窗口的新打开请求到达」本身就等价于
+ * 「那个窗口的上一份被放弃」—— 主进程不需要 renderer 再补发一条取消 IPC 就能判定
+ * 这件事。放弃的那份要停掉的是：剩余分页读、outline 构建、写 emevdFullDocuments、
+ * 以及整段反汇编。
+ *
+ * 之所以按 `WebContents.id` 分槽而不是用一个全局槽：全局槽下两个窗口会互相取消，
+ * B 窗口打开任何事件文档都会把 A 窗口正在读的那份打断，而 A 那边看到的是自己毫无
+ * 理由地静默丢弃。窗口之间没有任何「一次只显示一份」的关系，共享槽位是错的。
+ *
+ * 这个槽只覆盖 `resource.readEmevdFullDocument` 这条打开路径。submitEmevdDslPlan 里
+ * 的提交前置读与写回后重读**不进槽**：它们是写链的一部分，被一次无关的打开取消掉
+ * 会让提交半途而废。
+ *
+ * 能真正生效的前提是反汇编改成了分片异步（renderEmevdDarkScriptAsync）：主进程单
+ * 线程，取消信号要被看见就得先有一次事件循环让出。同步反汇编那 75 ms 里新请求的
+ * IPC 消息只能排队等着，等它跑完才轮到 abort，于是「取消」变成「取消不掉」。
+ *
+ * 槽位表实现连同它的三条并发不变式（按窗口隔离 / 到达顺序即建槽顺序 / dispose
+ * 回收）抽到了 ./emevdOpenSlots，那里有对应的单元测试；埋在本文件里只能靠读代码
+ * 确认，无法证伪。
+ */
+const activeEmevdOpens = new EmevdOpenSlots();
+
+/**
+ * 取消不是解析失败：`cancelled: true` 让 renderer 走静默丢弃分支，而不是把「用户
+ * 切走了」渲染成「这个文件打不开」。诊断 severity 因此是 info，不是 error。
+ *
+ * 槽位不显式归还：留在槽里的已完成 controller 是无害的（abort 打在已结束的操作上
+ * 是 no-op），同窗口下一次 begin 会替换它，省掉横跨整个 handler 的 try/finally。
+ */
+function emevdOpenCancelled(sourceUri: string) {
+  return {
+    ok: false as const,
+    cancelled: true as const,
+    sourceUri,
+    diagnostics: [{
+      severity: 'info' as const,
+      code: 'EMEVD_LOAD_CANCELLED',
+      message: '打开事件文档的请求已被更晚的打开请求取代。',
+      sourceUri
+    }]
+  };
+}
 
 /* ------------------------------------------------------------------ */
 /*  Paginated editor access caches (hard constraint 17)                */
@@ -1031,6 +1092,14 @@ export interface AiAgentRunRequest {
   /** Byte ceiling for Context Broker output; ignored unless useContextBroker. */
   contextMaxBytes?: number;
   /**
+   * RAG auto-search: before each model call, retrieve workspace evidence from
+   * the most recent user message and inject a [rag-evidence] system message.
+   * Default false; requires an analyzed workspace (activeRag corpus).
+   */
+  useRagSearch?: boolean;
+  /** Cap on injected rag-evidence hits per turn (1..8). */
+  ragSearchMaxHits?: number;
+  /**
    * Permission levels that require user approval. Omit for the loop's default
    * (stage/commit/rollback/write). An explicit empty array disables approval,
    * which main refuses outside plan mode — see the handler.
@@ -1051,6 +1120,26 @@ export interface AiAgentRunRequest {
   selection?: {
     label: string;
     resourceKind: ResourceKind;
+  };
+  /**
+   * 最近一次资源打开失败（可选元数据，S15/S19 失败面）：打开 KRAK / 读取失败的
+   * 资源时，renderer 把结构化失败随下一次任务提交。main 校验后附进系统提示，
+   * 让 Agent 直接解释原因与下一步，而不是等用户复制日志。
+   *
+   * 只允许逻辑名（相对路径 / basename），不含绝对路径；main 对每个字符串做
+   * 失败关闭校验（命中盘符 / UNC / file:/// 一律拒绝整次请求）。
+   */
+  openFailure?: {
+    kind:
+      | 'event-open-failed'
+      | 'msb-open-failed'
+      | 'fmg-open-failed'
+      | 'param-open-failed'
+      | 'script-open-failed'
+      | 'tae-open-failed';
+    document: string;
+    code: string;
+    message: string;
   };
 }
 
@@ -1172,6 +1261,44 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
   }
   activeOperationLog = operationLogUtility;
   return operationLogUtility;
+}
+
+function currentToolContext(): ToolContext {
+  return {
+    workspaceIndex: activeIndex,
+    mode: activeAiMode,
+    ...(activeRag ? { rag: activeRag } : {})
+  };
+}
+
+async function persistActiveRag(
+  database: OperationLogUtilityClient,
+  corpus: RagCorpus
+): Promise<void> {
+  activeRag = corpus;
+  await database.replaceRagChunks(corpus.chunks);
+  await database.replaceReferences(corpus.references);
+}
+
+async function refreshRagAfterScan(
+  database: OperationLogUtilityClient,
+  index: WorkspaceIndex
+): Promise<void> {
+  const catalog = buildRagCorpus(index);
+  const persisted = createRagCorpus({
+    workspaceId: index.workspaceId,
+    builtAt: catalog.builtAt,
+    chunks: await database.loadRagChunks(),
+    references: await database.loadReferences()
+  });
+  await persistActiveRag(database, mergeCatalogAndPersisted(catalog, persisted));
+}
+
+async function refreshRagAfterAnalyze(
+  database: OperationLogUtilityClient,
+  index: WorkspaceIndex
+): Promise<void> {
+  await persistActiveRag(database, buildRagCorpus(index));
 }
 
 function workspaceStoragePaths(workspaceId: string): {
@@ -1594,6 +1721,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     for (const [selectionId, selection] of directorySelections) {
       if (selection.ownerWebContentsId === webContents.id) directorySelections.delete(selectionId);
     }
+    activeEmevdOpens.dispose(webContents.id);
   });
   if (handlersRegistered) return;
   handlersRegistered = true;
@@ -1947,7 +2075,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         throw error;
       }
       indexedFiles = result.files;
-      activeIndex = null;
+      activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
+      activeIndex.setFiles(result.files);
+      await refreshRagAfterScan(database, activeIndex);
       return {
         workspaceSessionId: activeWorkspaceSessionId,
         workspaceLabel: overlaySelection.label,
@@ -1973,6 +2103,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
     });
     activeIndex = result.index;
+    const database = await ensureActiveOperationLog(activeSession);
+    await refreshRagAfterAnalyze(database, result.index);
 
     return {
       parsedFiles: result.parsedFiles,
@@ -2262,6 +2394,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   );
 
   /**
+   * 取消本窗口在飞的事件文档打开。
+   *
+   * 与「下一次打开请求隐式取消上一份」互补：切走域、关编辑器时不会再有打开请求，
+   * 没有这条通道那次读就会跑完整个反汇编，产物直接丢掉。返回 `cancelled` 表示
+   * 当时确实有一份在飞的读被中止 —— 没有也不是错误（用户可能已经读完了），所以
+   * `ok` 恒真，两者分开报。
+   */
+  handle('resource.cancelEmevdFullDocument', async (event) => ({
+    ok: true,
+    cancelled: activeEmevdOpens.cancel(event.sender.id)
+  }));
+
+  /**
    * Assemble the authoritative full EMEVD editor document in main via
    * paginated Bridge reads. The Bridge opens the outer source resource as-is:
    * .dcx unwrap is native, so no decompressed temp file is materialized and the
@@ -2271,7 +2416,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    */
   handle(
     'resource.readEmevdFullDocument',
-    async (_event, sourceUri: string, documentInstanceId: string, loadFullDslTemplate?: boolean) => {
+    async (event, sourceUri: string, documentInstanceId: string, loadFullDslTemplate?: boolean) => {
+      // 建槽必须在任何 await 之前：见 EmevdOpenSlots.begin 的注释。放在这里意味着连
+      // 「文件没索引到」「没工作区」这些早退分支也会先建槽，那是无害的——它们同步
+      // 返回，槽里留下一个已经用不上的 controller，等同窗口下一次打开时被替换掉。
+      // 反过来把建槽推到校验之后，就又回到「谁先建槽」由 await 时序决定的老问题。
+      const openController = activeEmevdOpens.begin(event.sender.id, sourceUri);
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file) {
         return {
@@ -2306,15 +2456,22 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           diagnostics: [bridgeRootsDiagnostic('EMEVD_STAGING_PREPARE_FAILED', roots)]
         };
       }
+      // 槽已在 handler 开头建好（openController）。这里补一次取消检查：root 准备
+      // 期间同窗口可能已经来了更新的请求，那这次读根本不该发出去。
+      if (openController.signal.aborted) return emevdOpenCancelled(sourceUri);
       const full = await readFullEmevdDocumentViaBridge({
         filePath: file.absolutePath,
         allowedRoots: [...roots.allowedRoots],
         resourceUri: sourceUri,
         registry: getEmevdRegistry().registry,
+        signal: openController.signal,
         ...(documentInstanceId ? { documentInstanceId } : {}),
-        pageSize: 512,
+        // pageSize 不再显式指定：走 DEFAULT_PAGE_SIZE，常见事件文件一页读完。
+        ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {}),
         timeoutMs: 120_000
       });
+      // 取消分支必须在失败分支之前：两者都是 ok:false，先判失败会把取消报成打开失败。
+      if (full.cancelled) return emevdOpenCancelled(sourceUri);
       if (!full.ok || !full.document) {
         return {
           ok: false,
@@ -2327,7 +2484,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }))
         };
       }
-      emevdFullDocuments.set(sourceUri, full.document);
+      // 权威缓存必须在反汇编成功（或确认无需反汇编）之后才写入。
+      // 渲染期间被取消时，被放弃的文档不得提前成为 submitEmevdDslPlan 的权威。
+      if (openController.signal.aborted) return emevdOpenCancelled(sourceUri);
       const registryResolution = getEmevdRegistry();
       // R3/P4 裁定：反汇编必须是 DarkScript3 式（EMEDF 函数名）；没 EMEDF 失败
       // 关闭——不再下发 hash 伪源码（旧 renderEmevdPatchDslBounded 输出已从
@@ -2347,11 +2506,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceUri
       }));
       if (registryResolution.origin === 'imported') {
-        const bounded = renderEmevdDarkScriptBounded(
+        // 分片异步反汇编：真实 common 这一步约 75 ms，同步跑会让主进程事件循环
+        // 整段停摆，期间到达的取消信号只能排队。输出与同步入口逐字节相同。
+        const bounded = await renderEmevdDarkScriptAsync(
           full.document,
           registryResolution.registry,
-          undefined
+          { signal: openController.signal }
         );
+        if (bounded.cancelled) return emevdOpenCancelled(sourceUri);
         dslTemplate = bounded.text;
         dslTemplateTruncated = bounded.truncated;
         dslTemplateTotalLines = bounded.totalLines;
@@ -2367,6 +2529,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           sourceUri
         });
       }
+      if (!commitEmevdFullDocument(emevdFullDocuments, sourceUri, full.document, openController.signal)) {
+        return emevdOpenCancelled(sourceUri);
+      }
       return {
         ok: true,
         sourceUri,
@@ -2381,6 +2546,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceHash: full.sourceHash ?? null,
         sourceFormat: full.sourceFormat ?? null,
         outerFileHash: full.outerFileHash ?? null,
+        // renderer 的状态行要 authority；以前它是另发一次 readEmevdDocument 才拿到的，
+        // 那次读除了这一个字符串没有别的用处（见 App.loadEmevd）。
+        authority: full.authority ?? null,
         outline: full.outline ?? null,
         diagnostics: responseDiagnostics
       };
@@ -2465,7 +2633,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         resourceUri: sourceUri,
         registry,
         ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
-        pageSize: 512,
+        // 不写死 pageSize：让它走 readFullEmevdDocumentViaBridge 的默认 65536。
+        // 写死 512 时真实 common（33266 指令）要分 65 页，而下面的 bypass 是**逐页**
+        // 生效的 —— 每页都无条件重读磁盘 + 重解析 + 重跑 VerifyRoundTrip，实测 2023 ms，
+        // 单页只要 200 ms。bypass 本身没错（提交前置读确实不能依赖缓存），错在粒度
+        // 被 pageSize 拆成了 65 份。
+        // 提交前置读必须绕过 Bridge 文档缓存：这一读产出 expectedDocumentHash /
+        // expectedOuterFileHash，是写回的前置条件，要的是此刻磁盘上的真实内容。
+        cachePolicy: 'bypass',
         timeoutMs: 120_000
       });
       if (!full.ok || !full.document) {
@@ -2529,7 +2704,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         resourceUri: sourceUri,
         registry,
         ...(document.documentInstanceId !== undefined ? { documentInstanceId: document.documentInstanceId } : {}),
-        pageSize: 512,
+        // 同上：不写死 pageSize，否则 bypass 按页重复解析（真实 common 65 次）。
+        // 写回后重读同样绕过缓存：刚提交的文件在缓存里可能留着提交前那一份，
+        // 而这一读的产物要装进 emevdFullDocuments 当权威文档。
+        cachePolicy: 'bypass',
         timeoutMs: 120_000
       });
       if (refreshed.ok && refreshed.document) {
@@ -7525,7 +7703,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     'ai.runTool',
     async (_event, name: string, input: unknown): Promise<ToolResult> => {
       // T6：无工作区时由工具层按工具守卫（WORKSPACE_REQUIRED），不整次拒绝。
-      return toolRegistry.run(name, input, { workspaceIndex: activeIndex, mode: activeAiMode });
+      return toolRegistry.run(name, input, currentToolContext());
     }
   );
 
@@ -7545,6 +7723,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         baseUrl: string;
         model: string;
         apiKey?: string;
+        temperature?: number;
+        topP?: number;
+        topK?: number;
+        maxTokens?: number;
+        contextWindowTokens?: number;
+        thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+        embeddingModel?: string;
       }
     ) => {
       // apiKey is accepted once for encryption; never returned in the response DTO.
@@ -7557,7 +7742,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         model: saved.model,
         hasCredential: saved.hasCredential,
         createdAt: saved.createdAt,
-        updatedAt: saved.updatedAt
+        updatedAt: saved.updatedAt,
+        ...(saved.temperature !== undefined ? { temperature: saved.temperature } : {}),
+        ...(saved.topP !== undefined ? { topP: saved.topP } : {}),
+        ...(saved.topK !== undefined ? { topK: saved.topK } : {}),
+        ...(saved.maxTokens !== undefined ? { maxTokens: saved.maxTokens } : {}),
+        ...(saved.contextWindowTokens !== undefined ? { contextWindowTokens: saved.contextWindowTokens } : {}),
+        ...(saved.thinkingLevel !== undefined ? { thinkingLevel: saved.thinkingLevel } : {}),
+        ...(saved.embeddingModel !== undefined ? { embeddingModel: saved.embeddingModel } : {})
       };
     }
   );
@@ -7566,6 +7758,231 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     await modelServiceVault.deleteConfig(configId);
     return { ok: true };
   });
+
+  /* ---------------------------------------------------------------- */
+  /*  工作区 RAG：向量索引生成（rag.embed）与混合检索入口               */
+  /*  （rag.searchEvidence）。向量只在 main 进程检索瞬间存在，不进       */
+  /*  renderer 载荷、不进工具上下文。                                   */
+  /* ---------------------------------------------------------------- */
+
+  const EMBED_BATCH_SIZE = 64;
+
+  /**
+   * 为当前工作区语料生成 embedding 向量索引（POST /v1/embeddings，分批）。
+   * 服务配置必须含 embeddingModel（仅 openai-compatible 支持，Anthropic 无
+   * embedding API）。按批失败降级：坏批跳过不阻塞整体，返回失败批数。
+   */
+  handle('rag.embed', async (_event, input: { configId: string }): Promise<
+    | { ok: true; embedded: number; failed: number; model: string; dim: number }
+    | { ok: false; error: { code: string; message: string } }
+  > => {
+    if (typeof input?.configId !== 'string' || input.configId.trim() === '') {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: 'configId 必填。' } };
+    }
+    if (!activeIndex) {
+      return {
+        ok: false,
+        error: { code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区并完成分析，再生成向量索引。' }
+      };
+    }
+    const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === input.configId);
+    if (!stored) {
+      return { ok: false, error: { code: 'MODEL_SERVICE_CONFIG_NOT_FOUND', message: '模型服务配置不存在。' } };
+    }
+    if (!stored.embeddingModel) {
+      return {
+        ok: false,
+        error: { code: 'EMBEDDING_MODEL_UNCONFIGURED', message: '该服务未配置 Embedding 模型（高级选项）。' }
+      };
+    }
+    if (stored.protocol !== 'openai-compatible') {
+      return {
+        ok: false,
+        error: { code: 'EMBEDDING_PROTOCOL_UNSUPPORTED', message: 'Embedding 仅支持 OpenAI 兼容协议（Anthropic 无 embedding API）。' }
+      };
+    }
+    const apiKey = await modelServiceVault.resolveApiKey(stored.id);
+    if (!apiKey) {
+      return { ok: false, error: { code: 'MODEL_SERVICE_UNCONFIGURED', message: '模型服务凭据不可解密。' } };
+    }
+    const database = await ensureActiveOperationLog(activeSession);
+    const corpus = activeRag ?? createRagCorpus({
+      workspaceId: activeIndex.workspaceId,
+      builtAt: new Date().toISOString(),
+      chunks: await database.loadRagChunks(),
+      references: await database.loadReferences()
+    });
+    if (corpus.chunks.length === 0) {
+      return { ok: false, error: { code: 'INSUFFICIENT_CORPUS', message: '语料为空：先扫描并分析工作区。' } };
+    }
+
+    const entries: Array<{ chunkId: string; model: string; vector: Float32Array }> = [];
+    let failed = 0;
+    for (let start = 0; start < corpus.chunks.length; start += EMBED_BATCH_SIZE) {
+      const batch = corpus.chunks.slice(start, start + EMBED_BATCH_SIZE);
+      const result = await fetchEmbeddings({
+        baseUrl: stored.baseUrl,
+        apiKey,
+        model: stored.embeddingModel,
+        inputs: batch.map((chunk) => `${chunk.title}\n${chunk.body}`),
+        timeoutMs: 60_000
+      });
+      if (!result.ok) {
+        failed += batch.length;
+        continue;
+      }
+      for (let i = 0; i < batch.length; i += 1) {
+        entries.push({ chunkId: batch[i].chunkId, model: stored.embeddingModel, vector: result.vectors[i] });
+      }
+    }
+    await database.replaceRagEmbeddings(entries);
+    return {
+      ok: true,
+      embedded: entries.length,
+      failed,
+      model: stored.embeddingModel,
+      dim: entries[0]?.vector.length ?? 0
+    };
+  });
+
+  /**
+   * 工作区混合检索：lexical（retrieveEvidence）与向量相似度经 RRF 融合。
+   * 语料有向量索引（rag.embed 生成）且 configId 提供、且其 embeddingModel
+   * 与索引模型一致时启用向量侧；否则退化为纯 lexical（行为不变）。
+   * rag.searchEvidence IPC 与 ai.agent.run 的 ragSearch 自动注入共用本实现。
+   */
+  const searchWorkspaceEvidence = async (
+    database: OperationLogUtilityClient,
+    query: string,
+    options: {
+      configId?: string;
+      limit?: number;
+      families?: readonly RagChunkFamily[];
+      expandReferences?: boolean;
+    }
+  ): Promise<RagRetrieveResult> => {
+    const corpus = activeRag ?? createRagCorpus({
+      workspaceId: activeIndex.workspaceId,
+      builtAt: new Date().toISOString(),
+      chunks: await database.loadRagChunks(),
+      references: await database.loadReferences()
+    });
+
+    // 向量侧（可选）：索引模型与服务配置的 embeddingModel 一致才启用。
+    let vectors: HybridVectorSource | undefined;
+    const indexedModel = await database.ragEmbeddingModel();
+    if (indexedModel && typeof options.configId === 'string' && options.configId !== '') {
+      const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === options.configId);
+      if (stored?.embeddingModel === indexedModel) {
+        const apiKey = await modelServiceVault.resolveApiKey(stored.id);
+        if (apiKey) {
+          const embedded = await fetchEmbeddings({
+            baseUrl: stored.baseUrl,
+            apiKey,
+            model: stored.embeddingModel,
+            inputs: [query],
+            timeoutMs: 30_000
+          });
+          const queryVector = embedded.ok ? embedded.vectors[0] : undefined;
+          if (queryVector) {
+            vectors = { vectors: await database.loadRagEmbeddings(), queryVector };
+          }
+        }
+      }
+    }
+
+    return retrieveEvidenceHybrid(corpus, query, {
+      ...(options.limit != null && options.limit > 0 ? { limit: Math.trunc(options.limit) } : {}),
+      ...(options.expandReferences === undefined ? {} : { expandReferences: options.expandReferences === true }),
+      ...(options.families && options.families.length > 0 ? { families: options.families } : {}),
+      ...(vectors ? { vectors } : {})
+    });
+  };
+
+  handle('rag.searchEvidence', async (_event, input: {
+    query: string;
+    configId?: string;
+    limit?: number;
+    families?: readonly RagChunkFamily[];
+    expandReferences?: boolean;
+  }): Promise<RagRetrieveResult> => {
+    if (typeof input?.query !== 'string' || input.query.trim() === '') {
+      return { ok: false, code: 'INVALID_INPUT', message: 'rag.searchEvidence 需要非空 query。' };
+    }
+    if (!activeIndex) {
+      return { ok: false, code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区。' };
+    }
+    const database = await ensureActiveOperationLog(activeSession);
+    return searchWorkspaceEvidence(database, input.query, {
+      ...(input.configId !== undefined ? { configId: input.configId } : {}),
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+      ...(input.families !== undefined ? { families: input.families } : {}),
+      ...(input.expandReferences !== undefined ? { expandReferences: input.expandReferences } : {})
+    });
+  });
+
+  /**
+   * 拉取某模型服务的可用模型列表（GET /v1/models）。
+   *
+   * 输入是表单当前值而不是 configId：用户在「保存服务」之前就要能试拉模型列表，
+   * 不必先存一个可能填错的配置。apiKey 可选 —— 本地服务（Ollama 等）通常没有
+   * 密钥。endpoint 安全校验与生产工厂共用同一套（HTTPS 或回环 HTTP），key 只在
+   * 本次调用内使用，不落盘、不进任何 DTO。
+   */
+  handle(
+    'modelService.listModels',
+    async (_event, input: {
+      protocol: 'openai-compatible' | 'anthropic-compatible';
+      baseUrl: string;
+      apiKey?: string;
+    }): Promise<ModelListResult> => {
+      const protocol = input?.protocol;
+      const baseUrl = input?.baseUrl;
+      if (protocol !== 'openai-compatible' && protocol !== 'anthropic-compatible') {
+        return { ok: false, error: { code: 'MODEL_SERVICE_PROTOCOL_UNSUPPORTED', message: '模型服务协议不受支持。' } };
+      }
+      if (typeof baseUrl !== 'string' || baseUrl.trim() === '') {
+        return { ok: false, error: { code: 'MODEL_SERVICE_ENDPOINT_INVALID', message: '请先填写服务地址。' } };
+      }
+      let endpoint: URL;
+      try {
+        endpoint = new URL(baseUrl.trim());
+      } catch {
+        return { ok: false, error: { code: 'MODEL_SERVICE_ENDPOINT_INVALID', message: '服务地址不是有效 URL。' } };
+      }
+      if (!isAllowedEndpoint(endpoint)) {
+        return {
+          ok: false,
+          error: {
+            code: 'MODEL_SERVICE_ENDPOINT_FORBIDDEN',
+            message: '服务地址必须使用 HTTPS，或仅对本机回环地址使用 HTTP。'
+          }
+        };
+      }
+      const adapter = protocol === 'openai-compatible'
+        ? new OpenAiCompatibleAdapter({
+            baseUrl: endpoint.toString().replace(/\/$/, ''),
+            apiKey: input.apiKey?.trim() ?? '',
+            model: 'list-models'
+          })
+        : new AnthropicCompatibleAdapter({
+            baseUrl: endpoint.toString().replace(/\/$/, ''),
+            apiKey: input.apiKey?.trim() ?? '',
+            model: 'list-models'
+          });
+      try {
+        return await adapter.listModels({ timeoutMs: 15_000 });
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code: 'MODEL_SERVICE_LIST_FAILED',
+            message: error instanceof Error ? error.message : '获取模型列表失败。'
+          }
+        };
+      }
+    }
+  );
 
   /* ---------------------------------------------------------------- */
   /*  AI agent sessions (Codex-derived kernel). Long tasks run async, */
@@ -7717,6 +8134,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       createdAt: stored.createdAt,
       updatedAt: stored.updatedAt
     };
+    // 采样/能力参数来自服务配置（vault），renderer 无法伪造：保存时落盘，运行
+    // 时由 main 读取下发。缺失字段 = 该次调用用 provider 默认值。
+    const sampling = {
+      ...(stored.temperature !== undefined ? { temperature: stored.temperature } : {}),
+      ...(stored.topP !== undefined ? { topP: stored.topP } : {}),
+      ...(stored.topK !== undefined ? { topK: stored.topK } : {}),
+      ...(stored.maxTokens !== undefined ? { maxTokens: stored.maxTokens } : {}),
+      ...(stored.thinkingLevel !== undefined ? { thinkingLevel: stored.thinkingLevel } : {})
+    };
+    const contextWindowTokens = stored.contextWindowTokens;
     const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey });
     if (!adapterResult.ok) {
       const diagnostic = adapterResult.diagnostics[0];
@@ -7729,7 +8156,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // 需要工作区的工具干净失败，不整次拒绝（T6）。
     const bridge = createAgentToolBridge({
       registry: toolRegistry,
-      context: { workspaceIndex: activeIndex, mode }
+      context: { ...currentToolContext(), mode }
     });
 
     let resumeFrom: ResumedRollout | undefined;
@@ -7750,6 +8177,31 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (request.selection) {
       systemPromptParts.push(
         `用户当前选区（仅可选元数据，不是默认任务对象）：${request.selection.label}（${request.selection.resourceKind}）。`
+      );
+    }
+    if (request.openFailure) {
+      // S15/S19 失败面：校验通过才进系统提示。命中绝对路径形态（盘符 / UNC /
+      // file:///）的字符串会让整次请求失败关闭——renderer 拿不到真实路径，这条
+      // 校验是防伪造的最后一层，不是起名职责。
+      const failure = request.openFailure;
+      const openFailureFields: ReadonlyArray<[string, string]> = [
+        ['kind', failure.kind],
+        ['document', failure.document],
+        ['code', failure.code],
+        ['message', failure.message]
+      ];
+      for (const [field, value] of openFailureFields) {
+        if (typeof value !== 'string' || value.trim() === '' || /[A-Za-z]:[\\/]/.test(value)
+          || /^\\\\/.test(value) || /file:\/\/\//.test(value)) {
+          return {
+            ok: false,
+            error: { code: 'OPEN_FAILURE_INVALID', message: `openFailure.${field} 不合法，已拒绝提交。` }
+          };
+        }
+      }
+      systemPromptParts.push(
+        `最近一次资源打开失败：${failure.kind}（${failure.code}）document=${failure.document}。`
+        + `${failure.message}。用户可能正想问为什么打不开；请直接解释原因和下一步，不要要求用户复制日志。`
       );
     }
     const systemPrompt = systemPromptParts.filter((part) => part.trim().length > 0).join('\n\n');
@@ -7919,6 +8371,27 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         : {}),
       ...(request.autoCompactTokenLimit != null && request.autoCompactTokenLimit > 0
         ? { compaction: { autoCompactTokenLimit: Math.trunc(request.autoCompactTokenLimit) } }
+        : contextWindowTokens != null && contextWindowTokens > 0
+          ? { compaction: { autoCompactTokenLimit: Math.trunc(contextWindowTokens) } }
+          : {}),
+      ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
+      ...(request.useRagSearch === true
+        ? {
+            ragSearch: {
+              ...(request.ragSearchMaxHits != null && request.ragSearchMaxHits > 0
+                ? { maxHits: Math.min(8, Math.trunc(request.ragSearchMaxHits)) }
+                : {}),
+              // RAG 自动注入：每次模型调用前用最近用户消息检索工作区证据。
+              // 无工作区时返回 WORKSPACE_REQUIRED（loop 不注入，不阻断会话）。
+              retrieve: async (query: string) => {
+                if (!activeIndex) {
+                  return { ok: false, code: 'WORKSPACE_REQUIRED', message: '先打开 Mod 工作区。' };
+                }
+                const ragDatabase = await ensureActiveOperationLog(activeSession);
+                return searchWorkspaceEvidence(ragDatabase, query, {});
+              }
+            }
+          }
         : {}),
       // Only the attempt count is renderer-controllable, and it is clamped:
       // backoff base and jitter stay at the loop's defaults. Exposing those

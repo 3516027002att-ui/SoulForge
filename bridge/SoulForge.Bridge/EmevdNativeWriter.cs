@@ -77,7 +77,7 @@ internal static class EmevdNativeWriter
         {
             using var opened = OodleRuntimeLocator.Open(oodleRuntimeRoot, BridgeResult<object>.MakeSourceUri(sourcePath));
             if (opened.Session is null)
-                throw new InvalidOperationException(
+                throw new OodleRuntimeUnavailableException(
                     opened.Diagnostics.FirstOrDefault()?.Message ?? "Oodle 运行库不可用；无法重建 KRAK outer。");
             rebuiltOuter = dcx.RebuildKrak(rebuiltPayload, opened.Session);
         }

@@ -41,7 +41,15 @@ internal sealed class DcxNativeDocument
         if (!info.Exists) throw new FileNotFoundException("DCX 文件不存在。", path);
         if (info.Length <= 0 || info.Length > MaxSourceBytes)
             throw new InvalidDataException($"DCX 文件大小 {info.Length} 超出安全读取范围。");
-        var source = File.ReadAllBytes(path);
+        return Read(File.ReadAllBytes(path), oodleRuntimeRoot, path);
+    }
+
+    /// <summary>
+    /// 从已读入内存的外层字节解析 DCX。哈希、解压与后续 EMEVD 解析必须共用这份
+    /// 数组，禁止再打开磁盘：两次打开之间外部工具可以改写文件。
+    /// </summary>
+    public static DcxNativeDocument Read(byte[] source, string? oodleRuntimeRoot = null, string? diagnosticPath = null)
+    {
         if (source.Length < 0x4C || !source.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
             throw new InvalidDataException("输入不是受支持的 DCX 文档。");
         if (!source.AsSpan(0x18, 4).SequenceEqual("DCS\0"u8)
@@ -59,10 +67,11 @@ internal sealed class DcxNativeDocument
         if (dcaLength < 8 || payloadOffset < 0 || payloadOffset + compressed > source.Length)
             throw new InvalidDataException("DCX payload 边界无效。");
         var compressedPayload = source.AsSpan(payloadOffset, compressed).ToArray();
+        var pathForOodle = diagnosticPath ?? "memory";
         var payload = format switch
         {
             "DFLT" => DecompressDflt(compressedPayload, uncompressed),
-            "KRAK" => DecompressKraken(compressedPayload, uncompressed, oodleRuntimeRoot, path),
+            "KRAK" => DecompressKraken(compressedPayload, uncompressed, oodleRuntimeRoot, pathForOodle),
             _ => throw new NotSupportedException($"DCX 压缩格式 {format} 尚不支持完整文档读取。")
         };
         var variant = ClassifyVariant(source, format);
@@ -172,16 +181,7 @@ internal sealed class DcxNativeDocument
     };
     }
 
-    private static DcxNativeDocument ReadBytes(byte[] bytes)
-    {
-        var temporary = Path.Combine(Path.GetTempPath(), $"soulforge-dcx-{Guid.NewGuid():N}.dcx");
-        try
-        {
-            File.WriteAllBytes(temporary, bytes);
-            return Read(temporary);
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
-    }
+    private static DcxNativeDocument ReadBytes(byte[] bytes) => Read(bytes);
 
     private static byte[] DecompressDflt(byte[] compressed, int expectedSize)
     {
@@ -199,7 +199,7 @@ internal sealed class DcxNativeDocument
     {
         using var opened = OodleRuntimeLocator.Open(root, BridgeResult<object>.MakeSourceUri(path));
         if (opened.Session is null)
-            throw new InvalidOperationException(opened.Diagnostics.FirstOrDefault()?.Message ?? "Oodle 运行库不可用。");
+            throw new OodleRuntimeUnavailableException(opened.Diagnostics.FirstOrDefault()?.Message ?? "Oodle 运行库不可用。");
         return opened.Session.Decompress(compressed, expectedSize);
     }
 
