@@ -112,6 +112,7 @@ export type BridgeCommandName =
   | 'read-tae-document'
   | 'read-tae-event-params'
   | 'read-chrbnd-flver-preview'
+  | 'read-map-part-flver-preview'
   | 'read-tpf-document'
   | 'export-tpf-texture'
   | 'read-tpf-texture-preview'

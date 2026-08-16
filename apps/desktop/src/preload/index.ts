@@ -355,6 +355,9 @@ const api = {
   /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。 */
   readTaeChrbndPreview: (sourceUri: string, meshIndex: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri, meshIndex),
+  // S23：按 modelName 在 mapbnd 容器里取 part 的 FLVER 网格（地图 viewport）。
+  readMapPartMesh: (msbSourceUri: string, modelName: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readMapPartMesh', msbSourceUri, modelName),
   readEsdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
   readMtdDocument: (sourceUri: string): Promise<unknown> =>

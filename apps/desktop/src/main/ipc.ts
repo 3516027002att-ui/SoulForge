@@ -3655,6 +3655,101 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   /**
+   * S23：地图 viewport 读 part 模型——按 modelName 在 mapbnd 容器里取 FLVER 网格。
+   *
+   * 候选顺序：overlay `map/<mapId>/<mapId>_*.mapbnd.dcx` → 原版同相对路径
+   * （KRAK 由 Bridge 用 oodleRuntimeRoot 解）。全部失败给可行动诊断：
+   * 「没有找到该 part 的模型」/「未挂原版且 overlay 无 mapbnd → 去开始页挂原版」。
+   */
+  handle(
+    'resource.readMapPartMesh',
+    async (_event, msbSourceUri: string, modelName: string): Promise<{
+      ok: boolean;
+      sourceUri?: string;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === msbSourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          diagnostics: [{ severity: 'error' as const, code: 'MAP_PART_MSB_NOT_INDEXED', message: 'MSB 资源未索引，无法定位地图模型目录。', sourceUri: msbSourceUri }]
+        };
+      }
+      const baseName = basename(file.relativePath);
+      const mapId = baseName.replace(/\.msb(\.dcx)?$/i, '');
+      if (!mapId) {
+        return {
+          ok: false,
+          diagnostics: [{ severity: 'error' as const, code: 'MAP_PART_MAP_ID_UNKNOWN', message: '无法从 MSB 文件名推断地图 id。', sourceUri: msbSourceUri }]
+        };
+      }
+      const overlayDir = join(activeSession.layers.overlayRoot, 'map', mapId);
+      const baseDir = activeSession.layers.baseRoot
+        ? join(activeSession.layers.baseRoot, 'map', mapId)
+        : null;
+      const candidateDirs = [
+        ...(safeExists(overlayDir) ? [{ dir: overlayDir, fromBase: false }] : []),
+        ...(baseDir && safeExists(baseDir) ? [{ dir: baseDir, fromBase: true }] : [])
+      ];
+      if (candidateDirs.length === 0) {
+        const baseHint = activeSession.layers.baseRoot
+          ? `map/${mapId}/ 目录下没有模型文件。`
+          : `overlay 的 map/${mapId}/ 下没有模型文件，且尚未挂载原版目录——到「开始」页选择含 sekiro.exe 的原版目录后可尝试读取原版模型。`;
+        return {
+          ok: false,
+          diagnostics: [{ severity: 'error' as const, code: 'MAP_PART_NO_MODEL_DIR', message: `没有找到 ${modelName} 的模型（mapbnd）：${baseHint}`, sourceUri: msbSourceUri }]
+        };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+
+      for (const { dir, fromBase } of candidateDirs) {
+        let mapbnds: string[];
+        try {
+          mapbnds = readdirSync(dir)
+            // mapbnd 命名 `<mapId>_<6位编号>.mapbnd.dcx`，mapId 本身含下划线，
+            // 只按后缀过滤。
+            .filter((name) => /\.mapbnd\.dcx$/i.test(name))
+            .sort()
+            .map((name) => join(dir, name));
+        } catch {
+          mapbnds = [];
+        }
+        for (const mapbndPath of mapbnds) {
+          const result = await runBridge<Record<string, unknown>>({
+            command: 'read-map-part-flver-preview',
+            filePath: mapbndPath,
+            allowedRoots: roots.allowedRoots,
+            timeoutMs: 120_000,
+            ...(fromBase && activeSession?.layers.baseRoot
+              ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+              : {}),
+            commandOptions: { modelName }
+          });
+          if (result.parseStatus !== 'failed' && result.data) {
+            return {
+              ok: true,
+              sourceUri: msbSourceUri,
+              data: result.data,
+              diagnostics: result.diagnostics
+            };
+          }
+        }
+      }
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'MAP_PART_MODEL_NOT_FOUND',
+          message: `没有找到 ${modelName} 的模型（map/${mapId}/ 下的 mapbnd 容器）；该 part 用线框占位显示。`,
+          sourceUri: msbSourceUri
+        }]
+      };
+    }
+  );
+
+  /**
    * S17：词条名目录。main 从本机 TAE.Template.SDT.xml 解析 eventTypeId → 名称；
    * renderer 只拿逻辑名（渲染 `0 JumpTable` 这类词条行），绝不接触 XML 路径。
    */

@@ -109,6 +109,18 @@ export interface SceneDrawItem {
   scale: [number, number, number];
   sourceResourceUri: string;
   colorRgb: [number, number, number];
+  /**
+   * S23：该节点对应的真实 FLVER 网格（mapbnd 里按 modelName 提取的 base64
+   * typed buffers）。提供时投影层用真实几何替换 proxy 盒子；缺省保持盒子。
+   * base64 而不是 typed array：跨 IPC 的语义场景保持可序列化。
+   */
+  mesh?: {
+    positionsBase64: string;
+    indicesBase64?: string;
+    uvsBase64?: string;
+    normalsBase64?: string;
+    vertexCount: number;
+  };
 }
 
 export interface SceneDrawList extends SceneResourceMetadata {

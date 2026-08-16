@@ -908,6 +908,98 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-map-part-flver-preview")
+        {
+            try
+            {
+                // S23：地图 viewport 读 part 模型——mapbnd（DCX→BND4）内按条目名
+                // 精确匹配 <modelName>（如 m10_00_00_00_A10_00_00.flver），取 FLVER
+                // 网格/骨骼一次返回。与 chrbnd 预览同一套提取逻辑，只是匹配规则
+                // 换成「条目名以 modelName 开头且是 .flver」。
+                var modelName = OptionString("modelName", "");
+                if (string.IsNullOrWhiteSpace(modelName))
+                {
+                    return BridgeResult<object>.Failed(file, "map", "MAPBND_MODEL_NAME_MISSING", "需要 modelName 才能定位 mapbnd 内的 FLVER 条目。");
+                }
+                var sourceBytes = File.ReadAllBytes(file);
+                var payload = sourceBytes;
+                if (payload.Length >= 4 && payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+                {
+                    payload = DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload;
+                }
+                if (payload.Length < 4 || !payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+                {
+                    return BridgeResult<object>.Failed(file, "map", "MAPBND_BND4_EXPECTED", "mapbnd 解 DCX 后必须是 BND4 容器。");
+                }
+                var binder = Bnd4NativeDocument.Read(payload);
+                var entry = binder.Entries.FirstOrDefault(item =>
+                    item.Name.StartsWith(modelName, StringComparison.OrdinalIgnoreCase)
+                    && item.Name.EndsWith(".flver", StringComparison.OrdinalIgnoreCase));
+                if (entry is null)
+                {
+                    return BridgeResult<object>.Failed(
+                        file,
+                        "map",
+                        "MAPBND_MODEL_NOT_FOUND",
+                        $"mapbnd 里没有找到 {modelName} 的模型（.flver 条目）；该 part 用线框占位显示。");
+                }
+                var entryBytes = binder.GetStoredBytes(entry.Index);
+                var flver = FlverNativeDocument.Read(entryBytes);
+                var meshIndex = OptionInt("meshIndex", 0);
+                var maxVertices = OptionInt("maxVertices", 10_000);
+                var maxIndices = OptionInt("maxIndices", 30_000);
+                var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
+                if (positions == null)
+                {
+                    return BridgeResult<object>.Failed(file, "map", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
+                }
+                var indices = flver.GetMeshIndicesBase64(meshIndex, maxIndices);
+                var uvs = flver.GetMeshUVsBase64(meshIndex, maxVertices);
+                var normals = flver.GetMeshNormalsBase64(meshIndex, maxVertices);
+                var boneWeights = flver.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
+                var boneIndices = flver.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var mesh = flver.Meshes[meshIndex];
+                return BridgeResult<object>.Partial(file, "map", new[]
+                {
+                    new Diagnostic("info", "MAP_PART_FLVER_EXTRACTED",
+                        $"mapbnd 条目 {entry.Name} 的 FLVER 网格已提取；mesh={meshIndex} vertexCount={mesh.VertexCount} bones={flver.BoneCount}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    entryName = entry.Name,
+                    meshIndex,
+                    vertexCount = mesh.VertexCount,
+                    positionsBase64 = positions,
+                    indicesBase64 = indices,
+                    uvsBase64 = uvs,
+                    normalsBase64 = normals,
+                    boneWeightsBase64 = boneWeights,
+                    boneIndicesBase64 = boneIndices,
+                    bones = flver.Bones.Select(b => new
+                    {
+                        name = b.Name,
+                        parentIndex = b.ParentIndex,
+                        translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
+                        rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
+                    }).ToArray(),
+                    boneCount = flver.BoneCount,
+                    meshCount = flver.MeshCount
+                });
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "map",
+                    "MAPBND_KRAK_OODLE_UNAVAILABLE",
+                    "这份地图模型（mapbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看模型。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "map", "MAPBND_FLVER_PREVIEW_FAILED", ex.Message);
+            }
+        }
+
         if (command == "read-flver-document")
         {
             try

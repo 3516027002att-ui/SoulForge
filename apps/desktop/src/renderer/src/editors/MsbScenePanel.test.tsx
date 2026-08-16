@@ -111,6 +111,16 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(html, /假预览|fakePreview/);
   });
 
+  it('S23：状态句不再写「无绝对路径」，part 模型加载走 mapbnd 读链', () => {
+    const html = render();
+    assert.doesNotMatch(html, /无绝对路径/);
+    assert.doesNotMatch(html, /见底部日志/);
+    assert.match(panelSource, /readMapPartMesh/);
+    assert.match(panelSource, /mapbnd/);
+    assert.match(panelSource, /applyLoadedMeshes/);
+    assert.match(panelSource, /已挂模型/);
+  });
+
   it('左栏对象列表由 scene manifest 派生，renderer 不扫字节、不猜格式', () => {
     assert.match(panelSource, /manifest\??\.entities/);
     // 注释里提及的函数名只是职责说明，负向断言针对调用——带左括号。

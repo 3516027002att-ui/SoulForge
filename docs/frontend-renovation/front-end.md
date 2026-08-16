@@ -2626,6 +2626,11 @@ SHELL-09 → SHELL-10
 - **S19 裁定（2026-08-15）**：Bridge `read-msb-document` / `write-msb` 必须先 native 解 DCX（与 EMEVD 同一套 `DcxNativeDocument`）再认 `"MSB "` 魔数——磁盘上的 `.msb.dcx` 头是 `DCX\0`。mods 里 DFLT 不挂原版也能开；原版 KRAK 挂原版 + Oodle 后同样能开。读取失败在面板内给 `code + 人话 + 下一步`（如「KRAK，到开始页选原版」），不得「详情见底部日志」。冒烟至少一条直接对 `.msb.dcx` 调 `read-msb-document`，禁止先在 TS 里 `decompressDfltDcx` 再喂。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；tree/viewport/inspector 联动、无 writer action、resize/keyboard 和对照截图。
 - **S19 失败面已落地**：打开失败（KRAK 缺 Oodle / 其它读取错误）时左栏显示 code + 人话 + 下一步，viewport 不再假 0 实体；同一份结构化失败随下一次 Agent 任务提交（main 校验后进系统提示），Agent 能直接解释原因与下一步。
+- **S23 落地（2026-08-17，viewport 读 part 模型）**：
+  - 新增 Bridge `read-map-part-flver-preview`（广告门禁三方一致，45 条）：mapbnd（DCX→BND4）内按 `<modelName>.flver` 条目取 FLVER 网格/骨骼一次返回；KRAK 缺 Oodle 给可行动失败码。
+  - 新增 IPC `resource.readMapPartMesh`：overlay `map/<mapId>/` 下的 `*.mapbnd.dcx` 优先，原版同相对路径次之（KRAK 由 Bridge 解）；全部失败给「没有找到该 part 的模型」/「未挂原版 → 去开始页挂原版」。
+  - `SceneDrawItem.mesh`（base64 typed buffers）+ `createProxyMesh` 用真实几何替换 proxy 盒子；MsbScenePanel 打开时预取前 12 个 part、选中 part 补载，`setDrawList` 渐进更新。
+  - 状态句删「无绝对路径」/「见底部日志」，改为「N 个 part 已挂模型 / M 个没找到（线框）」。写入仍按 V0.6 延期。
 
 #### MAP-50C — MSB write
 
