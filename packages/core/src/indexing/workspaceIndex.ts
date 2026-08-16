@@ -182,8 +182,16 @@ export class WorkspaceIndex {
     return this.lookupTextEntries(textId, category)[0];
   }
 
+  getFiles(): IndexedFile[] {
+    return [...this.filesByUri.values()];
+  }
+
   getFile(uri: string): IndexedFile | undefined {
     return this.filesByUri.get(uri);
+  }
+
+  listReferences(): ReferenceEdge[] {
+    return [...this.references];
   }
 
   getEvent(uri: string): EventSymbol | undefined {

@@ -148,6 +148,7 @@ function recommendTools(prompt: string, tools: ToolDescriptor[], mode: AiPermiss
   const names = new Set<string>();
 
   names.add('workspace_stats');
+  names.add('retrieve_evidence');
 
   if (lower.includes('event') || lower.includes('事件') || lower.includes('emevd')) {
     names.add('search_events');
@@ -197,6 +198,7 @@ function isDescriptorAllowed(tool: ToolDescriptor, mode: AiPermissionMode): bool
 function reasonForTool(name: string): string {
   const reasons: Record<string, string> = {
     workspace_stats: '先看索引规模，避免在空工作区里误判。',
+    retrieve_evidence: '用混合检索（精确 ID + 文本 + 引用扩展）收集有界证据。',
     search_resources: '定位相关资源文件，建立最小上下文。',
     search_events: '查找候选事件入口。',
     explain_event: '生成证据优先的事件解释输入。',

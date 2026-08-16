@@ -17,17 +17,26 @@ export interface StoredModelServiceConfig {
   hasCredential: boolean;
   createdAt: string;
   updatedAt: string;
+  /** 采样/能力参数（高级选项）。全部可选：缺失 = 使用 provider 默认值。 */
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  maxTokens?: number;
+  /** 上下文预算（token）：agent 侧自动压缩触发阈值。 */
+  contextWindowTokens?: number;
+  thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+  /**
+   * 该服务同时用作 embedding（POST /v1/embeddings，仅 openai-compatible 支持）。
+   * 配置后 workspace 语料可生成向量索引，检索走 RRF 混合（lexical + 向量）。
+   */
+  embeddingModel?: string;
 }
 
-interface VaultFile {
-  version: 1;
-  configs: StoredModelServiceConfig[];
-  /** configId -> base64 ciphertext from safeStorage.encryptString */
-  secrets: Record<string, string>;
-}
+const THINKING_LEVELS: ReadonlySet<string> = new Set(['off', 'fast', 'normal', 'deep', 'extreme']);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+function isValidOptionalNumber(value: unknown, min: number, max: number): boolean {
+  return value === undefined
+    || (typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max);
 }
 
 function isStoredConfig(value: unknown): value is StoredModelServiceConfig {
@@ -40,7 +49,28 @@ function isStoredConfig(value: unknown): value is StoredModelServiceConfig {
     && typeof value.model === 'string'
     && typeof value.hasCredential === 'boolean'
     && typeof value.createdAt === 'string'
-    && typeof value.updatedAt === 'string';
+    && typeof value.updatedAt === 'string'
+    && isValidOptionalNumber(value.temperature, 0, 2)
+    && isValidOptionalNumber(value.topP, 0, 1)
+    && (value.topK === undefined || (typeof value.topK === 'number' && Number.isInteger(value.topK) && value.topK >= 1))
+    && (value.maxTokens === undefined || (typeof value.maxTokens === 'number' && Number.isInteger(value.maxTokens) && value.maxTokens >= 1))
+    && (value.contextWindowTokens === undefined
+      || (typeof value.contextWindowTokens === 'number' && Number.isInteger(value.contextWindowTokens) && value.contextWindowTokens >= 1))
+    && (value.thinkingLevel === undefined
+      || (typeof value.thinkingLevel === 'string' && THINKING_LEVELS.has(value.thinkingLevel)))
+    && (value.embeddingModel === undefined
+      || (typeof value.embeddingModel === 'string' && value.embeddingModel.trim() !== ''));
+}
+
+interface VaultFile {
+  version: 1;
+  configs: StoredModelServiceConfig[];
+  /** configId -> base64 ciphertext from safeStorage.encryptString */
+  secrets: Record<string, string>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isCanonicalBase64(value: string): boolean {
@@ -107,6 +137,13 @@ export class ModelServiceCredentialVault {
     baseUrl: string;
     model: string;
     apiKey?: string;
+    temperature?: number;
+    topP?: number;
+    topK?: number;
+    maxTokens?: number;
+    contextWindowTokens?: number;
+    thinkingLevel?: StoredModelServiceConfig['thinkingLevel'];
+    embeddingModel?: string;
   }): Promise<StoredModelServiceConfig> {
     if (!this.isEncryptionAvailable()) {
       throw new Error('MODEL_SERVICE_SAFE_STORAGE_UNAVAILABLE');
@@ -123,7 +160,16 @@ export class ModelServiceCredentialVault {
       model: input.model,
       hasCredential: existing?.hasCredential ?? false,
       createdAt: existing?.createdAt ?? now,
-      updatedAt: now
+      updatedAt: now,
+      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      ...(input.topP !== undefined ? { topP: input.topP } : {}),
+      ...(input.topK !== undefined ? { topK: input.topK } : {}),
+      ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+      ...(input.contextWindowTokens !== undefined ? { contextWindowTokens: input.contextWindowTokens } : {}),
+      ...(input.thinkingLevel !== undefined ? { thinkingLevel: input.thinkingLevel } : {}),
+      ...(input.embeddingModel !== undefined && input.embeddingModel.trim() !== ''
+        ? { embeddingModel: input.embeddingModel.trim() }
+        : {})
     };
     if (input.apiKey !== undefined) {
       if (!input.apiKey) {

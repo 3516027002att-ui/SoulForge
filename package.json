@@ -30,6 +30,7 @@
     "bridge:verify:tpf-writer": "npm run test:native-tpf-writer -w @soulforge/core",
     "test:ai-fake-loop": "npm run test:ai-fake-loop -w @soulforge/core",
     "test:ai-conformance": "npm run test:ai-conformance -w @soulforge/core",
+    "test:rag": "npm run test:rag -w @soulforge/core",
     "test:model-service-configuration": "npm run test:model-service-configuration -w @soulforge/core",
     "bridge:verify:emevd": "npm run test:native-emevd -w @soulforge/core",
     "bridge:verify:msb": "npm run test:native-msb -w @soulforge/core",

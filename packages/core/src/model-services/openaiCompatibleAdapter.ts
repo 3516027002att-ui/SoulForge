@@ -7,11 +7,13 @@ import type {
   ChatMessage,
   ModelCompleteRequest,
   ModelCompleteResult,
+  ModelListResult,
   ModelServiceAdapter,
   StreamEvent,
   ToolCall,
   ToolDefinition
 } from './types.js';
+import { resolveOpenAiReasoningEffort } from './types.js';
 import {
   classifyFetchError,
   classifyHttpError,
@@ -108,9 +110,50 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
     };
   }
 
+  async listModels(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<ModelListResult> {
+    const { signal, cleanup } = createRequestSignal(options?.signal, options?.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/models`, {
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${this.apiKey}`
+        },
+        ...(signal ? { signal } : {})
+      });
+    } catch (error) {
+      cleanup();
+      return listModelsError(classifyFetchError(error, 'OpenAI-compatible', signal, { callerSignal: options?.signal }));
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      cleanup();
+      return listModelsError(classifyHttpError(
+        response.status, text, 'OpenAI-compatible',
+        response.headers.get('retry-after')
+      ));
+    }
+    let json: { data?: Array<{ id?: unknown; display_name?: unknown }> };
+    try {
+      json = await response.json() as typeof json;
+    } catch (error) {
+      cleanup();
+      return listModelsError(classifyParseError(error, 'OpenAI-compatible'));
+    }
+    cleanup();
+    const models = (json.data ?? [])
+      .filter((entry): entry is { id: string; display_name?: unknown } => typeof entry.id === 'string' && entry.id !== '')
+      .map((entry) => ({
+        id: entry.id,
+        ...(typeof entry.display_name === 'string' && entry.display_name !== ''
+          ? { displayName: entry.display_name }
+          : {})
+      }));
+    return { ok: true, models };
+  }
+
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
-    const body = buildChatBody(this.model, request, true);
-    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
+    const body = buildChatBody(this.model, request, true);    const { signal, cleanup } = createRequestSignal(request.signal, request.timeoutMs);
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}/v1/chat/completions`, {
@@ -220,14 +263,27 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
 }
 
 function buildChatBody(model: string, request: ModelCompleteRequest, stream: boolean): Record<string, unknown> {
+  const reasoningEffort = resolveOpenAiReasoningEffort(request.thinkingLevel);
   return {
     model,
     stream,
     messages: request.messages.map(toOpenAiMessage),
     ...(request.tools?.length ? { tools: request.tools.map(toOpenAiTool) } : {}),
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-    ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {})
+    ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
+    ...(request.topP !== undefined ? { top_p: request.topP } : {}),
+    // topK 不下发：OpenAI Chat Completions 协议无 top_k 字段，官方 API 传了会 400；
+    // 兼容服务里也只有 Anthropic 协议映射 top_k（UI 已标注「仅 Anthropic 生效」）。
+    ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {})
   };
+}
+
+function listModelsError(diagnostic: {
+  severity: string;
+  code: string;
+  message: string;
+}): ModelListResult {
+  return { ok: false, error: { code: diagnostic.code, message: diagnostic.message } };
 }
 
 function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {

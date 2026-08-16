@@ -155,10 +155,24 @@ app.whenReady().then(async () => {
       progress: { current: 1, total: 1 }, payload: {}, result: { indexed: 1 },
       createdAt: now, startedAt: now, completedAt: now, updatedAt: now
     });
+    await client.replaceRagChunks([{
+      chunkId: 'rag:file:utility',
+      workspaceId,
+      sourceUri: 'file://event/test.emevd.dcx',
+      symbolUri: 'file://event/test.emevd.dcx',
+      family: 'file',
+      title: 'event/test.emevd.dcx',
+      body: 'path event/test.emevd.dcx kind event',
+      numericIds: [],
+      contentHash: 'utility-rag',
+      relativePath: 'event/test.emevd.dcx',
+      resourceKind: 'event'
+    }]);
     if ((await client.searchFiles('test EMEVD')).length !== 1
+      || (await client.searchRagChunks('emevd', 8)).length !== 1
       || (await client.listDiagnostics())[0]?.code !== 'PARSE_PARTIAL'
       || (await client.listJobs())[0]?.status !== 'completed') {
-      throw new Error('Database utility file/diagnostic/job repository round trip failed.');
+      throw new Error('Database utility file/diagnostic/job/rag repository round trip failed.');
     }
     await client.restart();
     const restartedHealth = await client.health();

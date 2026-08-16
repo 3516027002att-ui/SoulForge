@@ -39,7 +39,7 @@ import {
   resolveRetryPolicy,
   sleepWithSignal
 } from './retryPolicy.js';
-import { estimateContextTokens, runCompaction } from './contextCompactor.js';
+import { estimateContextTokens, isContextOverflowDiagnostic, runCompaction } from './contextCompactor.js';
 import { APPROVAL_DECISIONS_DENYING } from './types.js';
 
 const SECRET_PATTERNS = [
@@ -57,6 +57,15 @@ export function redactSecrets(text: string): string {
     out = out.replace(pattern, '[REDACTED]');
   }
   return out;
+}
+
+/** 最近一条 user 消息文本（RAG 自动检索的查询串来源）。 */
+function lastUserMessageText(messages: readonly ChatMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role === 'user') return message.content;
+  }
+  return '';
 }
 
 export function assertNoSecretLeak(payload: unknown, apiKey: string): void {
@@ -364,6 +373,49 @@ export async function runAgentToolLoop(
     request.rollout?.enqueue({ type: 'interrupted', at: new Date().toISOString() });
   };
 
+  /**
+   * 执行一次上下文压缩并落地其副作用（替换历史、审计、事件、rollout 标记）。
+   * pre-sampling 阈值触发与 context-overflow 恢复共用；失败只记诊断、保留原历史。
+   */
+  const runAutoCompact = async (reason: 'auto' | 'overflow'): Promise<boolean> => {
+    const compacted = await runCompaction(adapter, {
+      messages,
+      ...(request.signal ? { signal: request.signal } : {}),
+      ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {}),
+      ...(request.compaction ? { options: request.compaction } : {})
+    });
+    if (!compacted.ok) {
+      diagnostics.push(...compacted.diagnostics);
+      return false;
+    }
+    messages.length = 0;
+    messages.push(...compacted.replacementMessages);
+    lastInputTokens = undefined;
+    compactionWindows += 1;
+    const tokenLimit = request.compaction?.autoCompactTokenLimit ?? 0;
+    compactionsAudit.push({
+      step: steps,
+      reason,
+      tokenLimit,
+      summaryBytes: compacted.summary.length
+    });
+    diagnostics.push({
+      severity: 'info',
+      code: 'CONTEXT_COMPACTION_APPLIED',
+      message: `上下文已压缩为 ${compacted.replacementMessages.length} 条消息（摘要 ${compacted.summary.length} 字符）。`
+    });
+    emit({ type: 'context-compacted', step: steps, reason, tokenLimit });
+    request.rollout?.enqueue({
+      type: 'compacted',
+      at: new Date().toISOString(),
+      windowId: `window-${compactionWindows}`,
+      // 压缩后的替换历史随标记持久化：resume 时重建压缩窗口内的历史
+      // （Codex RolloutItem::Compacted.replacement_history 同款语义）。
+      replacementHistory: compacted.replacementMessages
+    });
+    return true;
+  };
+
   while (steps < maxSteps) {
     if (request.signal?.aborted) {
       finishReason = 'cancelled';
@@ -385,37 +437,7 @@ export async function runAgentToolLoop(
     if (autoCompactLimit != null) {
       const estimatedTokens = lastInputTokens ?? estimateContextTokens(messages);
       if (estimatedTokens >= autoCompactLimit) {
-        const compacted = await runCompaction(adapter, {
-          messages,
-          ...(request.signal ? { signal: request.signal } : {}),
-          ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {}),
-          ...(request.compaction ? { options: request.compaction } : {})
-        });
-        if (compacted.ok) {
-          messages.length = 0;
-          messages.push(...compacted.replacementMessages);
-          lastInputTokens = undefined;
-          compactionWindows += 1;
-          compactionsAudit.push({
-            step: steps,
-            reason: 'auto',
-            tokenLimit: autoCompactLimit,
-            summaryBytes: compacted.summary.length
-          });
-          diagnostics.push({
-            severity: 'info',
-            code: 'CONTEXT_COMPACTION_APPLIED',
-            message: `上下文已压缩为 ${compacted.replacementMessages.length} 条消息（摘要 ${compacted.summary.length} 字符）。`
-          });
-          emit({ type: 'context-compacted', step: steps, reason: 'auto', tokenLimit: autoCompactLimit });
-          request.rollout?.enqueue({
-            type: 'compacted',
-            at: new Date().toISOString(),
-            windowId: `window-${compactionWindows}`
-          });
-        } else {
-          diagnostics.push(...compacted.diagnostics);
-        }
+        await runAutoCompact('auto');
         if (request.signal?.aborted) {
           finishReason = 'cancelled';
           recordInterrupted();
@@ -473,6 +495,33 @@ export async function runAgentToolLoop(
       }
     }
 
+    // RAG auto-search: retrieve workspace evidence from the most recent user
+    // message and inject as a separate [rag-evidence] channel. No hits or an
+    // empty query injects nothing — a failed search must not poison the turn.
+    if (request.ragSearch) {
+      const ragQuery = lastUserMessageText(messages);
+      if (ragQuery.trim().length > 0) {
+        const ragResult = await request.ragSearch.retrieve(ragQuery);
+        if (ragResult.ok && ragResult.hits.length > 0) {
+          const ragMaxHits = Math.max(1, Math.min(8, Math.trunc(request.ragSearch.maxHits ?? 4)));
+          const ragHits = ragResult.hits.slice(0, ragMaxHits);
+          const ragLines = ragHits.map((hit, index) => [
+            `-- hit ${index + 1} (score=${hit.score}, family=${hit.chunk.family}, uri=${hit.chunk.symbolUri}) --`,
+            hit.excerpt
+          ].join('\n'));
+          messages.push({
+            role: 'system',
+            content: `[rag-evidence query="${ragQuery.replaceAll('"', '\\"')}" hits=${ragHits.length}]\n${ragLines.join('\n')}`
+          });
+          diagnostics.push({
+            severity: 'info',
+            code: 'RAG_EVIDENCE_INJECTED',
+            message: `已注入 ${ragHits.length} 条工作区检索证据（查询「${ragQuery.slice(0, 80)}」）。`
+          });
+        }
+      }
+    }
+
     // Model call with retry/backoff. Both transport paths (complete/stream)
     // normalize into ModelCompleteResult, so one retry loop covers them.
     let completion: ModelCompleteResult = {
@@ -482,6 +531,15 @@ export async function runAgentToolLoop(
     };
     let cancelledDuringRetry = false;
     let attempt = 0;
+    let overflowRecovered = false;
+    // 每次模型调用统一携带宿主配置的采样/能力参数；未配置的字段不下发。
+    const samplingFields = {
+      ...(request.sampling?.temperature !== undefined ? { temperature: request.sampling.temperature } : {}),
+      ...(request.sampling?.maxTokens !== undefined ? { maxTokens: request.sampling.maxTokens } : {}),
+      ...(request.sampling?.topP !== undefined ? { topP: request.sampling.topP } : {}),
+      ...(request.sampling?.topK !== undefined ? { topK: request.sampling.topK } : {}),
+      ...(request.sampling?.thinkingLevel !== undefined ? { thinkingLevel: request.sampling.thinkingLevel } : {})
+    };
     for (;;) {
       attempt += 1;
       completion = request.streaming
@@ -490,6 +548,7 @@ export async function runAgentToolLoop(
             {
               messages,
               tools: request.tools,
+              ...samplingFields,
               ...(request.signal ? { signal: request.signal } : {}),
               ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
             },
@@ -498,10 +557,26 @@ export async function runAgentToolLoop(
         : await adapter.complete({
             messages,
             tools: request.tools,
+            ...samplingFields,
             ...(request.signal ? { signal: request.signal } : {}),
             ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
           });
       if (completion.finishReason !== 'error' || request.signal?.aborted) break;
+      // Context-overflow 错误不走退避重试（OpenCode retry.ts：overflow 不参与
+      // retry）：压缩历史后用新上下文重试一次；压缩后仍溢出则失败关闭，避免
+      // 「每次调用前都尝试压缩」的循环。
+      if (isContextOverflowDiagnostic(completion.diagnostics)) {
+        if (overflowRecovered) break;
+        overflowRecovered = true;
+        diagnostics.push({
+          severity: 'info',
+          code: 'CONTEXT_OVERFLOW_RECOVERY',
+          message: '模型调用因上下文超窗失败，压缩历史后重试。'
+        });
+        const recovered = await runAutoCompact('overflow');
+        if (!recovered || request.signal?.aborted) break;
+        continue;
+      }
       const decision = decideRetry(completion.diagnostics, attempt, activeRetryPolicy);
       if (!decision.retry) break;
       retriesAudit.push({

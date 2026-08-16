@@ -11,11 +11,15 @@ import { getDefaultOperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
 import { buildGraphPatchFromProposal, summarizeGraphPatch } from '../patch/graphPatch.js';
 import { assessEditRisk, evaluateWriterGate, resolveWriterContract } from '../patch/writerContract.js';
+import type { RagChunkFamily, RagCorpus } from '@soulforge/shared';
+import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
 import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
 import { buildPlaintextScriptEdit } from '../script/plaintextScriptEdit.js';
 import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
+import { buildRagCorpus } from '../rag/chunkBuilder.js';
+import { retrieveEvidence } from '../rag/retrieve.js';
 
 /** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
@@ -23,6 +27,8 @@ export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 export interface ToolContext {
   workspaceIndex: WorkspaceIndex | null;
   mode: 'plan' | 'normal' | 'fullPermission';
+  /** Optional durable/in-memory RAG corpus. Absent falls back to building from the index. */
+  rag?: RagCorpus;
 }
 
 export interface ToolDescriptor {
@@ -246,6 +252,37 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       return ok(ws.getStats());
+    }
+  });
+
+  registry.register({
+    name: 'retrieve_evidence',
+    description:
+      'Hybrid retrieve over the workspace evidence index: exact IDs, lexical text, and one-hop reference expansion. Use this before specialized search_* tools when the question names a flag, entity, event, textId, or unknown resource.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: {
+      query: 'string',
+      limit: 'number?',
+      families: 'array?',
+      expandReferences: 'boolean?'
+    },
+    run: (input, context) => {
+      const corpus = resolveRagCorpus(context);
+      if (corpus === null && context.workspaceIndex === null) {
+        return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
+      }
+      const value = asRecord(input);
+      const query = asString(value.query);
+      if (!query.trim()) return fail('INVALID_INPUT', 'retrieve_evidence 需要非空 query。');
+      const families = asRagFamilies(value.families);
+      const result = retrieveEvidence(corpus, query, {
+        limit: asNumber(value.limit, 8),
+        ...(value.expandReferences === undefined ? {} : { expandReferences: value.expandReferences === true }),
+        ...(families ? { families } : {})
+      });
+      if (!result.ok) return fail(result.code, result.message);
+      return ok(result);
     }
   });
 
@@ -767,6 +804,19 @@ function asResourceKinds(value: unknown): ResourceKind[] | undefined {
   const allowed = new Set<ResourceKind>(ALL_RESOURCE_KINDS);
   const kinds = value.filter((item): item is ResourceKind => typeof item === 'string' && allowed.has(item as ResourceKind));
   return kinds.length > 0 ? kinds : undefined;
+}
+
+function asRagFamilies(value: unknown): RagChunkFamily[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const allowed = new Set<RagChunkFamily>(RAG_CHUNK_FAMILIES);
+  const families = value.filter((item): item is RagChunkFamily => typeof item === 'string' && allowed.has(item as RagChunkFamily));
+  return families.length > 0 ? families : undefined;
+}
+
+function resolveRagCorpus(context: ToolContext): RagCorpus | null {
+  if (context.rag && context.rag.chunks.length > 0) return context.rag;
+  if (context.workspaceIndex) return buildRagCorpus(context.workspaceIndex);
+  return null;
 }
 
 function asReferenceDirection(value: unknown): 'from' | 'to' | 'both' {

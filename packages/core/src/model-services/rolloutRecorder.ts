@@ -198,6 +198,13 @@ export function parseRolloutLines(lines: string[]): ResumedRollout {
         break;
       case 'compacted':
         compactedWindows += 1;
+        // 压缩标记携带替换历史（新格式）：从该点起历史 = 压缩后的窗口内容，
+        // 后续 message 条目继续追加。旧格式（无 replacementHistory）只计数，
+        // 保持历史原样 —— 旧会话 resume 不会崩，只是无法回退到压缩窗口。
+        if (item.replacementHistory && item.replacementHistory.length > 0) {
+          messages.length = 0;
+          messages.push(...item.replacementHistory);
+        }
         break;
       case 'rollback-marker':
         rollbackKeep = item.keepLastUserTurns;

@@ -4,7 +4,9 @@ import type {
   OperationLogRecord,
   OperationStatus,
   PatchHistoryEntry,
-  IndexedFile
+  IndexedFile,
+  RagChunk,
+  ReferenceEdge
 } from '@soulforge/shared';
 import type { OperationLogStore } from '@soulforge/core';
 import type {
@@ -146,6 +148,43 @@ export class OperationLogUtilityClient implements OperationLogStore {
 
   searchFiles(query: string, limit?: number): Promise<IndexedFile[]> {
     return this.request('searchFiles', { query, ...(limit === undefined ? {} : { limit }) });
+  }
+
+  replaceRagChunks(chunks: RagChunk[]): Promise<void> {
+    return this.request('replaceRagChunks', { chunks }).then(() => undefined);
+  }
+
+  loadRagChunks(): Promise<RagChunk[]> {
+    return this.request('loadRagChunks', {});
+  }
+
+  async replaceRagEmbeddings(entries: Array<{ chunkId: string; model: string; vector: Float32Array }>): Promise<void> {
+    await this.request('replaceRagEmbeddings', { entries }).then(() => undefined);
+  }
+
+  async loadRagEmbeddings(): Promise<Map<string, Float32Array>> {
+    const plain = await this.request('loadRagEmbeddings', {});
+    const map = new Map<string, Float32Array>();
+    for (const [chunkId, values] of Object.entries(plain)) {
+      map.set(chunkId, Float32Array.from(values));
+    }
+    return map;
+  }
+
+  ragEmbeddingModel(): Promise<string | null> {
+    return this.request('ragEmbeddingModel', {});
+  }
+
+  searchRagChunks(query: string, limit?: number): Promise<RagChunk[]> {
+    return this.request('searchRagChunks', { query, ...(limit === undefined ? {} : { limit }) });
+  }
+
+  replaceReferences(references: ReferenceEdge[]): Promise<void> {
+    return this.request('replaceReferences', { references }).then(() => undefined);
+  }
+
+  loadReferences(): Promise<ReferenceEdge[]> {
+    return this.request('loadReferences', {});
   }
 
   replaceDiagnostics(diagnostics: Array<Omit<PersistedDiagnostic, 'workspaceId'>>): Promise<void> {

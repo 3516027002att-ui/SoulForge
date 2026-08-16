@@ -6,10 +6,12 @@ import type {
   ChatMessage,
   ModelCompleteRequest,
   ModelCompleteResult,
+  ModelListResult,
   ModelServiceAdapter,
   StreamEvent,
   ToolDefinition
 } from './types.js';
+import { resolveAnthropicThinkingBudget } from './types.js';
 import {
   classifyFetchError,
   classifyHttpError,
@@ -113,6 +115,49 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
       },
       diagnostics: []
     };
+  }
+
+  async listModels(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<ModelListResult> {
+    const { signal, cleanup } = createRequestSignal(options?.signal, options?.timeoutMs);
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/v1/models`, {
+        method: 'GET',
+        headers: {
+          'x-api-key': this.apiKey,
+          'anthropic-version': this.apiVersion
+        },
+        ...(signal ? { signal } : {})
+      });
+    } catch (error) {
+      cleanup();
+      return listModelsError(classifyFetchError(error, 'Anthropic-compatible', signal, { callerSignal: options?.signal }));
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      cleanup();
+      return listModelsError(classifyHttpError(
+        response.status, text, 'Anthropic-compatible',
+        response.headers.get('retry-after')
+      ));
+    }
+    let json: { data?: Array<{ id?: unknown; display_name?: unknown }> };
+    try {
+      json = await response.json() as typeof json;
+    } catch (error) {
+      cleanup();
+      return listModelsError(classifyParseError(error, 'Anthropic-compatible'));
+    }
+    cleanup();
+    const models = (json.data ?? [])
+      .filter((entry): entry is { id: string; display_name?: unknown } => typeof entry.id === 'string' && entry.id !== '')
+      .map((entry) => ({
+        id: entry.id,
+        ...(typeof entry.display_name === 'string' && entry.display_name !== ''
+          ? { displayName: entry.display_name }
+          : {})
+      }));
+    return { ok: true, models };
   }
 
   async *stream(request: ModelCompleteRequest): AsyncGenerator<StreamEvent, void, undefined> {
@@ -330,15 +375,39 @@ function buildMessagesBody(model: string, request: ModelCompleteRequest, stream:
     }
     messages.push({ role: message.role, content: message.content });
   }
+
+  // Extended thinking（claude-3-7+）：启用时 Anthropic 要求 temperature 必须为 1
+  // （省略即默认 1，故强制不下发），且 max_tokens 必须大于 budget_tokens。
+  const thinkingBudget = resolveAnthropicThinkingBudget(request.thinkingLevel);
+  const maxTokens = thinkingBudget !== undefined
+    ? Math.max(request.maxTokens ?? DEFAULT_MAX_TOKENS, thinkingBudget * 2)
+    : (request.maxTokens ?? DEFAULT_MAX_TOKENS);
+
   return {
     model,
     stream,
-    max_tokens: request.maxTokens ?? 1024,
+    max_tokens: maxTokens,
     messages,
     ...(system ? { system } : {}),
     ...(request.tools?.length ? { tools: request.tools.map(toAnthropicTool) } : {}),
-    ...(request.temperature !== undefined ? { temperature: request.temperature } : {})
+    ...(request.temperature !== undefined && thinkingBudget === undefined ? { temperature: request.temperature } : {}),
+    ...(request.topP !== undefined ? { top_p: request.topP } : {}),
+    ...(request.topK !== undefined ? { top_k: request.topK } : {}),
+    ...(thinkingBudget !== undefined
+      ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } }
+      : {})
   };
+}
+
+/** Anthropic 无 max_tokens 时的端侧默认（请求层下限，防止无限输出）。 */
+const DEFAULT_MAX_TOKENS = 1024;
+
+function listModelsError(diagnostic: {
+  severity: string;
+  code: string;
+  message: string;
+}): ModelListResult {
+  return { ok: false, error: { code: diagnostic.code, message: diagnostic.message } };
 }
 
 function toAnthropicTool(tool: ToolDefinition): Record<string, unknown> {

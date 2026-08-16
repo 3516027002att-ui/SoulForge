@@ -502,6 +502,80 @@ CREATE TABLE IF NOT EXISTS background_jobs (
 CREATE INDEX IF NOT EXISTS idx_background_jobs_workspace_status
   ON background_jobs(workspace_id, status, created_at);
 `
+  },
+  {
+    id: 7,
+    name: 'v0_5_rag_evidence_chunks',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS rag_chunks (
+  chunk_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  source_uri TEXT NOT NULL,
+  symbol_uri TEXT NOT NULL,
+  family TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  numeric_ids_json TEXT NOT NULL,
+  relative_path TEXT,
+  resource_kind TEXT,
+  confidence TEXT,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_family
+  ON rag_chunks(workspace_id, family);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_workspace_source
+  ON rag_chunks(workspace_id, source_uri);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts USING fts5(
+  chunk_id UNINDEXED,
+  title,
+  body,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+`
+  },
+  {
+    id: 8,
+    name: 'v0_5_rag_chunks_trigram',
+    sql: `
+-- CJK 子串检索索引：unicode61 不切分中文，LIKE fallback 只覆盖整串。
+-- trigram tokenizer（SQLite >= 3.34）把 title/body 切成 3 字符 gram，支持
+-- 任意 ≥3 字符子串匹配（含中文）；1-2 字短词仍走 LIKE fallback。
+CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunks_fts_trigram USING fts5(
+  chunk_id UNINDEXED,
+  title,
+  body,
+  tokenize = 'trigram'
+);
+`
+  },
+  {
+    id: 9,
+    name: 'v0_5_rag_embeddings',
+    sql: `
+PRAGMA foreign_keys = ON;
+
+-- chunk 级 embedding（float32 BLOB）。语料全量重建时整体替换；model 记录
+-- 生成向量所用 embedding 模型 —— 查询向量必须用同一模型，检索侧按 model 过滤。
+CREATE TABLE IF NOT EXISTS rag_embeddings (
+  chunk_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  vector BLOB NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (chunk_id) REFERENCES rag_chunks(chunk_id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_embeddings_workspace_model
+  ON rag_embeddings(workspace_id, model);
+`
   }
 ];
 

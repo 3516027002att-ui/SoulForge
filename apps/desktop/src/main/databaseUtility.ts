@@ -131,6 +131,29 @@ async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
       return null;
     case 'searchFiles':
       return requireWorkspaceDataRepository().searchFiles(request.payload.query, request.payload.limit);
+    case 'replaceRagChunks':
+      requireWorkspaceDataRepository().replaceRagChunks(request.payload.chunks);
+      return null;
+    case 'loadRagChunks':
+      return requireWorkspaceDataRepository().loadRagChunks();
+    case 'searchRagChunks':
+      return requireWorkspaceDataRepository().searchRagChunks(request.payload.query, request.payload.limit);
+    case 'replaceRagEmbeddings':
+      requireWorkspaceDataRepository().replaceRagEmbeddings(request.payload.entries);
+      return null;
+    case 'loadRagEmbeddings': {
+      const vectors = requireWorkspaceDataRepository().loadRagEmbeddings();
+      const plain: Record<string, number[]> = {};
+      for (const [chunkId, vector] of vectors) plain[chunkId] = Array.from(vector);
+      return plain;
+    }
+    case 'ragEmbeddingModel':
+      return requireWorkspaceDataRepository().ragEmbeddingModel();
+    case 'replaceReferences':
+      requireWorkspaceDataRepository().replaceReferences(request.payload.references);
+      return null;
+    case 'loadReferences':
+      return requireWorkspaceDataRepository().loadReferences();
     case 'replaceDiagnostics':
       requireWorkspaceDataRepository().replaceDiagnostics(request.payload.diagnostics);
       return null;

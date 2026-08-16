@@ -2,7 +2,9 @@ import type {
   OperationLogRecord,
   OperationStatus,
   PatchHistoryEntry,
-  IndexedFile
+  IndexedFile,
+  RagChunk,
+  ReferenceEdge
 } from '@soulforge/shared';
 import type {
   AuditEventRecord,
@@ -16,7 +18,7 @@ import type {
   OperationLogStore
 } from '@soulforge/core';
 
-export const OPERATION_LOG_UTILITY_PROTOCOL = '1.1.0' as const;
+export const OPERATION_LOG_UTILITY_PROTOCOL = '1.2.0' as const;
 
 export interface OpenWorkspaceDatabasePayload {
   appDatabasePath: string;
@@ -61,6 +63,14 @@ export interface OperationLogUtilityPayloadMap {
   finalizeCommit: { bundle: Parameters<NonNullable<OperationLogStore['finalizeCommit']>>[0] };
   replaceFiles: { files: IndexedFile[] };
   searchFiles: { query: string; limit?: number };
+  replaceRagChunks: { chunks: RagChunk[] };
+  loadRagChunks: Record<string, never>;
+  searchRagChunks: { query: string; limit?: number };
+  replaceRagEmbeddings: { entries: Array<{ chunkId: string; model: string; vector: Float32Array }> };
+  loadRagEmbeddings: Record<string, never>;
+  ragEmbeddingModel: Record<string, never>;
+  replaceReferences: { references: ReferenceEdge[] };
+  loadReferences: Record<string, never>;
   replaceDiagnostics: { diagnostics: Array<Omit<PersistedDiagnostic, 'workspaceId'>> };
   listDiagnostics: Record<string, never>;
   upsertJob: { job: Omit<BackgroundJobRecord, 'workspaceId'> };
@@ -122,6 +132,14 @@ export interface OperationLogUtilityResultMap {
   finalizeCommit: null;
   replaceFiles: null;
   searchFiles: IndexedFile[];
+  replaceRagChunks: null;
+  loadRagChunks: RagChunk[];
+  searchRagChunks: RagChunk[];
+  replaceRagEmbeddings: null;
+  loadRagEmbeddings: Record<string, number[]>;
+  ragEmbeddingModel: string | null;
+  replaceReferences: null;
+  loadReferences: ReferenceEdge[];
   replaceDiagnostics: null;
   listDiagnostics: PersistedDiagnostic[];
   upsertJob: null;
