@@ -285,7 +285,7 @@ internal sealed class TaeNativeDocument
                 var namePtr = ReadInt64(source, checked((int)animFileInfoOffset));
                 if (namePtr > 0 && namePtr + 2 <= source.Length)
                 {
-                    try { hkxName = ReadUtf16Z(source, checked((int)namePtr)); }
+                    try { hkxName = ReadNameZ(source, checked((int)namePtr)); }
                     catch (InvalidDataException) { /* best-effort */ }
                 }
             }
@@ -313,6 +313,28 @@ internal sealed class TaeNativeDocument
         if (info.Length <= 0 || info.Length > MaxSourceBytes)
             throw new InvalidDataException($"TAE 文件大小 {info.Length} 超出安全读取范围。");
         return Read(File.ReadAllBytes(path));
+    }
+
+    /// <summary>按 animId + 事件表下标定位事件（read-tae-event-params 用）。</summary>
+    public TaeEvent? FindEvent(long animId, int eventIndex)
+    {
+        var animation = Animations.FirstOrDefault(a => a.AnimId == animId);
+        if (animation is null || eventIndex < 0 || eventIndex >= animation.Events.Count) return null;
+        return animation.Events[eventIndex];
+    }
+
+    /// <summary>
+    /// 事件参数体原始字节：paramDataOffset 起截 length 字节，越界失败关闭。
+    /// length 由 main 按本机 TAE 模板布局给出；无模板类型传 0 → 只读前 16 字节
+    /// hex 作「未解码」证据。
+    /// </summary>
+    public byte[] ReadParameterBody(TaeEvent ev, int length)
+    {
+        if (length < 0) throw new InvalidDataException("TAE 参数体长度非法。");
+        if (ev.ParameterDataOffset < 0 || ev.ParameterDataOffset + length > SourceBytes.Length)
+            throw new InvalidDataException(
+                $"TAE 参数体越界：offset={ev.ParameterDataOffset} length={length} fileSize={SourceBytes.Length}。");
+        return SourceBytes.AsSpan(checked((int)ev.ParameterDataOffset), length).ToArray();
     }
 
     /// <summary>
@@ -429,18 +451,42 @@ internal sealed class TaeNativeDocument
     private static float ReadFloat32(byte[] source, int offset) =>
         BinaryPrimitives.ReadSingleLittleEndian(source.AsSpan(offset, 4));
 
-    private static string ReadUtf16Z(byte[] source, int offset)
+    /// <summary>
+    /// 读取动画名（单字节 C 字符串）。
+    ///
+    /// S17 实证（c1130.anibnd.dcx）：名字区是单字节编码（如 "AE " 的 41 45 20 00），
+    /// 不是 UTF-16——旧 ReadUtf16Z 把相邻字节拼成宽字符，读出「䕁 / 葉」一类乱码。
+    /// 全 ASCII 直接按 ASCII；含高位字节时按 Shift-JIS（Sekiro 日文名，与 PARAM
+    /// 的 CreateShiftJisEncoding 同一套注册）。
+    /// </summary>
+    private static string? ReadNameZ(byte[] source, int offset)
     {
         var end = offset;
-        while (end + 1 < source.Length && !(source[end] == 0 && source[end + 1] == 0))
+        while (end < source.Length && source[end] != 0)
         {
-            end += 2;
-            if (end - offset > 1024 * 1024)
-                throw new InvalidDataException("TAE UTF-16 字符串未终止或过长。");
+            end++;
+            if (end - offset > 1024)
+                throw new InvalidDataException("TAE 动画名未终止或过长。");
         }
-        if (end + 1 >= source.Length)
-            throw new InvalidDataException("TAE UTF-16 字符串未以空终止。");
-        return Encoding.Unicode.GetString(source, offset, end - offset);
+        if (end >= source.Length)
+            throw new InvalidDataException("TAE 动画名未以空终止。");
+        if (end == offset) return null;
+        var bytes = source.AsSpan(offset, end - offset);
+        var isAscii = true;
+        for (var i = 0; i < bytes.Length; i++)
+        {
+            if (bytes[i] >= 0x80) { isAscii = false; break; }
+        }
+        if (isAscii) return Encoding.ASCII.GetString(bytes);
+        try
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            return Encoding.GetEncoding(932).GetString(bytes);
+        }
+        catch (Exception)
+        {
+            return Encoding.UTF8.GetString(bytes);
+        }
     }
 
     private static string Hash(byte[] bytes) =>
@@ -472,6 +518,12 @@ internal sealed record TaeEventGroup(
     long GroupEventCount,
     int[] EventOffsets,
     long GroupTypeUnknown);
+
+/// <summary>anibnd 容器里没有 TAE 魔数条目（映射 TAE_ANIBND_NO_TAE_ENTRY）。</summary>
+internal sealed class TaeEntryMissingException : Exception
+{
+    public TaeEntryMissingException(string message) : base(message) { }
+}
 
 internal sealed record TaeRoundTripReport(
     bool ByteIdentical,

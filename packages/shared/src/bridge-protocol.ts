@@ -110,6 +110,8 @@ export type BridgeCommandName =
   | 'read-msb-document'
   | 'write-msb'
   | 'read-tae-document'
+  | 'read-tae-event-params'
+  | 'read-chrbnd-flver-preview'
   | 'read-tpf-document'
   | 'export-tpf-texture'
   | 'read-tpf-texture-preview'

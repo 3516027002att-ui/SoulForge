@@ -5,13 +5,109 @@ internal static class MsbNativeWriter
     public static async Task<object> WriteAsync(
         string sourcePath,
         string outputPath,
+        string? oodleRuntimeRoot,
         JsonElement options,
         CancellationToken cancellationToken)
     {
         var source = await File.ReadAllBytesAsync(sourcePath, cancellationToken);
-        var document = MsbNativeDocument.Read(source);
-        RequireHash(options, "expectedDocumentHash", document.SourceHash, "MSB source hash");
+        // 与 write-emevd 同一套：外层是 .dcx 时按 outer 写回 —— unwrap → mutate →
+        // 原生重建 DCX（DFLT zlib / KRAK via Oodle）。TypeScript 侧永不压缩，
+        // 也永不把解压后的临时路径当 Patch 目标。
+        if (source.Length >= 4 && source.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+            return await WriteDcxOuterAsync(sourcePath, outputPath, oodleRuntimeRoot, options, cancellationToken);
+        return await WriteRawAsync(sourcePath, outputPath, source, options, cancellationToken);
+    }
 
+    /// <summary>Raw .msb payload path（原行为）。</summary>
+    private static async Task<object> WriteRawAsync(
+        string sourcePath,
+        string outputPath,
+        byte[] source,
+        JsonElement options,
+        CancellationToken cancellationToken)
+    {
+        var document = MsbNativeDocument.Read(source);
+        var patches = PreparePatches(document, options);
+        cancellationToken.ThrowIfCancellationRequested();
+        var rebuilt = document.ApplyMutations(patches);
+        await AtomicWriteAsync(outputPath, rebuilt, cancellationToken);
+        var reread = MsbNativeDocument.ReadFile(outputPath);
+        VerifyMutations(reread, patches);
+        return new
+        {
+            mutationCount = patches.Count,
+            outputHash = reread.SourceHash,
+            modelCount = reread.Models.Count,
+            partCount = reread.Parts.Count,
+            regionCount = reread.Regions.Count,
+            eventCount = reread.Events.Count,
+            outputSize = reread.SourceBytes.Length,
+            sourceFormat = "msb",
+            rereadVerified = true
+        };
+    }
+
+    /// <summary>
+    /// Outer .dcx 路径：暂存产物是重建后的 DCX，外层文件哈希是 file_replace
+    /// PatchIR 的 sealed 预期；payload 语义经原生 unwrap 重读验证。
+    /// </summary>
+    private static async Task<object> WriteDcxOuterAsync(
+        string sourcePath,
+        string outputPath,
+        string? oodleRuntimeRoot,
+        JsonElement options,
+        CancellationToken cancellationToken)
+    {
+        var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
+        var document = MsbNativeDocument.Read(dcx.Payload);
+        var patches = PreparePatches(document, options);
+        cancellationToken.ThrowIfCancellationRequested();
+        var rebuiltPayload = document.ApplyMutations(patches);
+        byte[] rebuiltOuter;
+        if (dcx.CompressionFormat == "DFLT")
+        {
+            rebuiltOuter = dcx.RebuildDflt(rebuiltPayload);
+        }
+        else if (dcx.CompressionFormat == "KRAK")
+        {
+            using var opened = OodleRuntimeLocator.Open(oodleRuntimeRoot, BridgeResult<object>.MakeSourceUri(sourcePath));
+            if (opened.Session is null)
+                throw new OodleRuntimeUnavailableException(
+                    opened.Diagnostics.FirstOrDefault()?.Message ?? "Oodle 运行库不可用；无法重建 KRAK outer。");
+            rebuiltOuter = dcx.RebuildKrak(rebuiltPayload, opened.Session);
+        }
+        else
+        {
+            throw new NotSupportedException($"DCX 压缩格式 {dcx.CompressionFormat} 尚不支持 outer 写回。");
+        }
+        await AtomicWriteAsync(outputPath, rebuiltOuter, cancellationToken);
+
+        // 重新经原生 unwrap 打开暂存 outer 产物并逐条验证 mutation。
+        var rereadDcx = DcxNativeDocument.Read(outputPath, oodleRuntimeRoot);
+        var reread = MsbNativeDocument.Read(rereadDcx.Payload);
+        VerifyMutations(reread, patches);
+        return new
+        {
+            mutationCount = patches.Count,
+            // file_replace 的 sealed 预期 = 提交后的 .msb.dcx 外层字节。
+            outputHash = rereadDcx.SourceHash,
+            outerFileHash = rereadDcx.SourceHash,
+            // payload 身份（Bridge read-msb-document 的 sourceHash 报告的是 payload）。
+            payloadHash = reread.SourceHash,
+            modelCount = reread.Models.Count,
+            partCount = reread.Parts.Count,
+            regionCount = reread.Regions.Count,
+            eventCount = reread.Events.Count,
+            outputSize = rereadDcx.SourceBytes.Length,
+            sourceFormat = "dcx",
+            rereadVerified = true
+        };
+    }
+
+    /// <summary>哈希校验 + 解析 mutations + 唯一目标解析（两条路径共用）。</summary>
+    private static List<MsbPatch> PreparePatches(MsbNativeDocument document, JsonElement options)
+    {
+        RequireHash(options, "expectedDocumentHash", document.SourceHash, "MSB source hash");
         var patches = new List<MsbPatch>();
         if (options.TryGetProperty("mutations", out var mutations) && mutations.ValueKind == JsonValueKind.Array)
         {
@@ -34,23 +130,11 @@ internal static class MsbNativeWriter
             if (matches != 1)
                 throw new InvalidDataException($"MSB mutation target must resolve uniquely: {patch.PartName}; matches={matches}.");
         }
-        cancellationToken.ThrowIfCancellationRequested();
-        var rebuilt = document.ApplyMutations(patches);
-        var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
-        Directory.CreateDirectory(directory);
-        var temporary = Path.Combine(directory, $".soulforge-{Guid.NewGuid():N}.tmp");
-        try
-        {
-            await File.WriteAllBytesAsync(temporary, rebuilt, cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            File.Move(temporary, outputPath, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporary)) File.Delete(temporary);
-        }
+        return patches;
+    }
 
-        var reread = MsbNativeDocument.ReadFile(outputPath);
+    private static void VerifyMutations(MsbNativeDocument reread, List<MsbPatch> patches)
+    {
         foreach (var patch in patches)
         {
             if (patch.Kind is "delete_part" or "delete_region" or "delete_event")
@@ -97,18 +181,23 @@ internal static class MsbNativeWriter
             if (patch.ScaleZ is not null && Math.Abs(part.ScaleZ - patch.ScaleZ.Value) > 0.0001f)
                 throw new InvalidDataException("MSB scaleZ 未按预期更新。");
         }
+    }
 
-        return new
+    private static async Task AtomicWriteAsync(string outputPath, byte[] bytes, CancellationToken cancellationToken)
+    {
+        var directory = Path.GetDirectoryName(outputPath) ?? throw new InvalidDataException("outputPath 没有父目录。");
+        Directory.CreateDirectory(directory);
+        var temporary = Path.Combine(directory, $".soulforge-{Guid.NewGuid():N}.tmp");
+        try
         {
-            mutationCount = patches.Count,
-            outputHash = reread.SourceHash,
-            modelCount = reread.Models.Count,
-            partCount = reread.Parts.Count,
-            regionCount = reread.Regions.Count,
-            eventCount = reread.Events.Count,
-            outputSize = reread.SourceBytes.Length,
-            rereadVerified = true
-        };
+            await File.WriteAllBytesAsync(temporary, bytes, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporary, outputPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
     }
 
     private static MsbPatch ParsePatch(JsonElement item)

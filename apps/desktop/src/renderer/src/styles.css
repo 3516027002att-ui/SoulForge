@@ -952,6 +952,15 @@ pre.tool-output {
 }
 .msb-viewport { display: flex; flex-direction: column; gap: 8px; }
 .msb-viewport .scene-host { width: 100%; }
+/* S19 失败面：地图打开失败的可行动错误块（code + 人话），复用 notice 视觉族 */
+.msb-open-failure {
+  display: grid; gap: 4px; padding: 10px 12px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-m);
+  background: var(--warn-soft); color: var(--warn); font-size: 12px; line-height: 1.5;
+}
+.msb-open-failure__code {
+  font-family: var(--font-mono); font-size: 10.5px; opacity: 0.75; word-break: break-all;
+}
 
 /* MODEL-51B：FLVER 三栏模型工作台（模型层级 | Viewport | Properties），
    与 MSB 工作台同族：树栈分组行/属性行复用 binder-child-row 表格骨架，只覆盖列模板。 */

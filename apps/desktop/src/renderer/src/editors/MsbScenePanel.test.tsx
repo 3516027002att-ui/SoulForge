@@ -62,6 +62,21 @@ describe('MsbScenePanel 初始结构（挂载即有的三栏骨架）', () => {
     assert.match(html, /未加载 MSB 数据：请先在资源浏览器里选择一个 map 资源。/);
     assert.doesNotMatch(html, /className="danger"/);
   });
+
+  it('S19 失败面：openFailure 非空时左栏显示可行动错误块，不再假 0 实体空态', () => {
+    const html = render({
+      openFailure: {
+        code: 'MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE',
+        message: '这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。'
+      }
+    });
+    assert.match(html, /MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE/);
+    assert.match(html, /到「开始」页选择含 sekiro\.exe 的原版目录后再打开/);
+    // 失败态不能再给「未加载」的观感：两者是不同分支。
+    assert.doesNotMatch(html, /未加载 MSB 数据/);
+    // 工作台可访问名仍在（失败不是白屏）。
+    assert.match(html, /aria-label="MSB 地图工作台"/);
+  });
 });
 
 describe('Negative source tests（MAP-50B 五类覆盖）', () => {

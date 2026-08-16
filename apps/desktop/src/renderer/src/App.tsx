@@ -11,6 +11,7 @@ import {
 } from 'react';
 import {
   DEFERRED_PREVIEW_TARGET_RELEASE,
+  classifyWorkspaceOpen,
   isDeferredPreviewEditorKind,
   PARAM_PAGE_SIZE
 } from '@soulforge/shared';
@@ -45,11 +46,17 @@ import type {
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
-import { HexEditorPanel } from './editors/HexEditorPanel.js';
 import { ParamWorkbench } from './workbench/ParamWorkbench.js';
 import { GparamWorkbench, type GparamBankView } from './workbench/GparamWorkbench.js';
-import { DiagnosticsLog } from './workbench/DiagnosticsLog.js';
 import { selectEditor } from './workbench/selectEditor.js';
+import {
+  planResourceOpen,
+  shouldLoadEmevd,
+  shouldLoadFmg,
+  shouldLoadMsb,
+  shouldLoadParam
+} from './workbench/documentLoadGates.js';
+
 import { MsbScenePanel } from './editors/MsbScenePanel.js';
 import {
   EventSourceWorkbenchPanel,
@@ -68,11 +75,7 @@ import { VfxWorkbenchPanel, type VfxFileView } from './editors/VfxWorkbenchPanel
 import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
-import {
-  mapEmevdEnvelopeToDocument,
-  type BridgeEmevdEnvelopeLike
-} from './emevd/mapEmevdEnvelope.js';
-import { alignEmevdDocumentAnchors } from './emevd/alignEmevdDocumentAnchors.js';
+import { emevdPendingTabFromFullDocument } from './emevd/emevdPendingTab.js';
 import {
   ChangeControlStore,
   type CandidateChange,
@@ -90,8 +93,6 @@ import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
 import { DomainLibraryList } from './navigation/DomainLibraryList.js';
 import {
   filesForDomain,
-  isGparamPath,
-  isParamContainerPath,
   libraryDisplayName,
   paramLibraryGroups,
   pickPreferredParamContainer
@@ -102,7 +103,6 @@ import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
 import { resolveKeybinding } from './keybindings/applyKeybinding.js';
-import { statusSuitLabel } from './keybindings/keymapTable.js';
 import type {
   AgentSessionDetail,
   AgentSessionRow,
@@ -118,13 +118,8 @@ import {
   type AgentApprovalUserDecision,
   type AgentTaskState
 } from './agent/agentTaskState.js';
-import {
-  NativeInspectionCard,
-  StructuredPreviewCard
-} from './components/PreviewCards.js';
 import { MsgTableEditor } from './components/MsgTableEditor.js';
 import { PanelErrorBoundary } from './components/PanelErrorBoundary.js';
-import { hexTextToSafeBase64 } from './utils/binary.js';
 import { StartWorkspacePanel } from './workbench/StartWorkspacePanel.js';
 import {
   extractMsgRows,
@@ -139,7 +134,6 @@ import {
   formatFilesCount,
   formatListTruncation,
   formatPageRange,
-  formatPreviewTruncation,
   operationStatusLabel,
   shortenPath
 } from './format/uiText.js';
@@ -167,10 +161,6 @@ const CMDK_RESOURCE_HIT_LIMIT = 8;
 /** 无实时 MSB 数据时的空 parts（真实数据经 Bridge 读取后填充）。 */
 const EMPTY_MSB_PARTS: MsbPartTransformLike[] = [];
 
-function pad2(value: number): string {
-  return String(value).padStart(2, '0');
-}
-
 /**
  * R5 裁定：侧栏每个面板头部右上角的关闭按钮——关掉后最左活动栏的对应图标
  * 仍可点回来（activateSidebarView 同视图再点是收起/展开切换）。
@@ -189,17 +179,6 @@ function SidebarCloseButton({ onClose }: { onClose: () => void }): ReactElement 
       </svg>
     </button>
   );
-}
-
-/**
- * P3 裁定：hex 文本 → base64 只经严格校验的出口（hexTextToSafeBase64）。
- * 此前这里手工拼 btoa，且调用方把「无空格」的 preview.hex 原样当 base64 直喂
- * atob——内容一旦不是 hex/base64（例如被误标为 hex 的文本），atob 就抛
- * 「characters outside of the Latin1 range」把整个工作台摔死。现在统一校验，
- * 非法输入抛可行动错误（面板错误边界可显示原因），不再出现看不懂的 DOMException。
- */
-function hexTextToBase64(hexText: string): string {
-  return hexTextToSafeBase64(hexText);
 }
 
 /** 无实时 EMEVD 文档时的空文档（真实文档经 Bridge 读取后替换）。 */
@@ -325,7 +304,26 @@ export function App(): ReactElement {
   // AGENT-60D 提交期消费点：AgentSidebar 草稿里 §12.11 的 opaque 资源引用冒泡到
   // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
   const [agentResources, setAgentResources] = useState<readonly AgentResourceReference[]>([]);
-  const [status, setStatus] = useState('就绪');
+  // S12 卸掉状态栏后 status 无显示出口。setStatus 调用点仍保留（流程记录），
+  // S15 失败句机制（编辑区 code + 人话 + 下一步）接手时会系统性清理。
+  const [, setStatus] = useState('就绪');
+  /**
+   * S15/S19 失败面：最近一次资源打开失败的结构化记录（只含逻辑名，绝无绝对
+   * 路径——message 来自已过 sanitizer 的 IPC 诊断）。随下一次 runAiAgent 提交给
+   * 模型（main 校验后进系统提示），工作台同款话术直接进编辑区。
+   */
+  const [lastOpenFailure, setLastOpenFailure] = useState<{
+    kind:
+      | 'event-open-failed'
+      | 'msb-open-failed'
+      | 'fmg-open-failed'
+      | 'param-open-failed'
+      | 'script-open-failed'
+      | 'tae-open-failed';
+    document: string;
+    code: string;
+    message: string;
+  } | null>(null);
   /**
    * EVENT-30B：最近一次打开/刷新的 EMEVD 逻辑文档标签（有界 DSL 投影 + 派生
    * document）。工作台按 tabId 去重合并；renderer 永不持有文件系统路径或完整
@@ -367,8 +365,6 @@ export function App(): ReactElement {
    * 保护性设计，这里不绕过它——把 origin 标成 'imported' 会让写入放行，
    * 那等于用一个字段名换掉一道授权检查。
    */
-  /** 底部日志区是否展开。默认收起 —— 日常编辑不需要看诊断。 */
-  const [logOpen, setLogOpen] = useState(false);
   const [paramFieldDefs, setParamFieldDefs] = useState<ParamFieldDef[] | null>(null);
   /**
    * 字段枚举表（enumRef → 值列表）。
@@ -423,7 +419,6 @@ export function App(): ReactElement {
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [cmdkQuery, setCmdkQuery] = useState('');
   const [cmdkIndex, setCmdkIndex] = useState(0);
-  const [clockText, setClockText] = useState('--:--');
   const [toasts, setToasts] = useState<Array<{ id: number; text: string; kind: 'ok' | 'warn' }>>([]);
   const [openTabs, setOpenTabs] = useState<RendererIndexedFile[]>([]);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -477,13 +472,15 @@ export function App(): ReactElement {
       setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
       setMsbLive(false);
       setMsbSourceHash(null);
+      // S15/S19 失败面：跨资源族的「最近一次打开失败」随复位清空，避免把旧
+      // 资源的失败带进新选区（工作台显示与 Agent 元数据共用这一个状态）。
+      setLastOpenFailure(null);
     },
     tae: () => setTaeData(null),
     esd: () => setEsdData(null),
     flver: () => setFlverData(null)
   }), []);
 
-  const diagnostics = [...(workspace?.diagnostics ?? []), ...(analysis?.diagnostics ?? []), ...(preview?.diagnostics ?? [])];
   // BND 不是顶层目录：选择真实 BND 文件后自动进入容器工作台，
   // 命令面板可对任意选中强制「以 BND4 容器打开」。
   const selectedIsContainer = selectedFile !== null
@@ -558,7 +555,7 @@ export function App(): ReactElement {
    * 兜底文案。selectEditor.ts 的正式路由由主会话收尾。
    */
   const isVfxFile = selectedFile !== null
-    && /\.fxr(\.dcx)?$/i.test(selectedFile.relativePath) === true;
+    && classifyWorkspaceOpen(selectedFile.relativePath).openKind === 'vfx';
 
   /**
    * GPARAM 域的全部磁盘文件（工作台 Files 栏的数据源，§2.5 Files 是逻辑 bank）。
@@ -584,7 +581,7 @@ export function App(): ReactElement {
   const textureContainers = useMemo<TpfContainerView[]>(() => {
     const indexed = allFiles.length > 0 ? allFiles : files;
     return indexed
-      .filter((file) => /\.tpf(\.dcx)?$/i.test(file.relativePath))
+      .filter((file) => classifyWorkspaceOpen(file.relativePath).openKind === 'tpf')
       .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
   }, [allFiles, files]);
 
@@ -605,13 +602,13 @@ export function App(): ReactElement {
    * VFX 域的全部 FXR 文件（工作台 Effect / Particle list 栏的数据源）。
    *
    * 按后缀过滤而不是 resourceKind：与 selectEditor 对 vfx 的判据一致
-   * （.fxr 是 leaf FXR，.fxr.dcx 是压缩 FXR；ffxbnd.dcx 是 binder，留在 Files）。
+   * （.fxr 是 leaf FXR，.fxr.dcx 是压缩 FXR，.ffxbnd.dcx 是效果容器）。
    * 数量永远按当前索引实测计数。
    */
   const vfxFiles = useMemo<VfxFileView[]>(() => {
     const indexed = allFiles.length > 0 ? allFiles : files;
     return indexed
-      .filter((file) => /\.fxr(\.dcx)?$/i.test(file.relativePath))
+      .filter((file) => classifyWorkspaceOpen(file.relativePath).openKind === 'vfx')
       .map((file) => ({ sourceUri: file.sourceUri, relativePath: file.relativePath }));
   }, [allFiles, files]);
 
@@ -761,16 +758,6 @@ export function App(): ReactElement {
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
   }, [cmdkOpen, activeDomain]);
-
-  useEffect(() => {
-    const tick = (): void => {
-      const now = new Date();
-      setClockText(`${pad2(now.getHours())}:${pad2(now.getMinutes())}`);
-    };
-    tick();
-    const timer = window.setInterval(tick, 15000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   // 首个候选变更出现时自动切到暂存面板，保证审查动作可见可达。
   useEffect(() => {
@@ -947,26 +934,8 @@ export function App(): ReactElement {
       // SHELL-09：语义领域不再有兜底文件列表；只有用户显式选中的 param 文件才加载。
       const target = selectedFile;
       // P2 裁定：gparam 文件（.gparam/.gparam.dcx）走 GPARAM 工作台，绝不让
-      // PARAM 读链去碰它——否则状态栏会串域报「这个 PARAM 读不出来」。
-      if (target && isGparamPath(target.relativePath)) {
-        setParamRows(EMPTY_PARAM_ROWS);
-        setParamTypeName('');
-        setParamSourceHash(null);
-        setParamLive(false);
-        setParamRowPayloads(new Map());
-        return;
-      }
-      // parambnd 容器由 ParamWorkbench 内部按条目读取；App 的裸 param 读链
-      // 不解 DCX/BND4，喂容器只会失败并污染状态栏，直接跳过。
-      if (target && isParamContainerPath(target.relativePath)) {
-        setParamRows(EMPTY_PARAM_ROWS);
-        setParamTypeName('');
-        setParamSourceHash(null);
-        setParamLive(false);
-        setParamRowPayloads(new Map());
-        return;
-      }
-      if (!target || target.resourceKind !== 'param') {
+      // PARAM 读链去碰它——否则会串域报「这个 PARAM 读不出来」。
+      if (!target || !shouldLoadParam(target)) {
         setParamRows(EMPTY_PARAM_ROWS);
         setParamTypeName('');
         setParamSourceHash(null);
@@ -1030,7 +999,7 @@ export function App(): ReactElement {
           // 读取失败同样要清授信来源：否则上一个 param 的 'imported' 残留，
           // 会让这个读不出来的资源看起来仍可写入字段。
           setParamFieldDefsOrigin('fixture');
-          setStatus('这个 PARAM 读不出来，详情见底部日志。');
+          setStatus('这个 PARAM 读不出来。');
           return;
         }
         // 字段定义与缺失原因逐字段取，不用 as 整体断言 —— IPC 边界上字段名对不上
@@ -1111,7 +1080,7 @@ export function App(): ReactElement {
     async function loadFmg(): Promise<void> {
       // SHELL-09：只有用户显式选中的 msg 资源才加载；语义领域无兜底列表。
       const target = selectedFile;
-      if (!target || target.resourceKind !== 'msg') {
+      if (!target || !shouldLoadFmg(target)) {
         setFmgEntries(EMPTY_FMG_ENTRIES);
         setFmgSourceHash(null);
         setFmgLive(false);
@@ -1143,7 +1112,7 @@ export function App(): ReactElement {
           setFmgEntries(EMPTY_FMG_ENTRIES);
           setFmgSourceHash(null);
           setFmgLive(false);
-          setStatus('这个文本资源读不出来，详情见底部日志。');
+          setStatus('这个文本资源读不出来。');
           return;
         }
         const loadedEntries = (result.data.entries ?? []).map((e) => ({ id: e.id, text: e.text }));
@@ -1171,13 +1140,15 @@ export function App(): ReactElement {
     async function loadMsb(): Promise<void> {
       // SHELL-09：只有用户显式选中的 map 资源才加载；语义领域无兜底列表。
       const target = selectedFile;
-      if (!target || target.resourceKind !== 'map') {
+      if (!target || !shouldLoadMsb(target)) {
         setMsbParts(EMPTY_MSB_PARTS);
         setMsbModels([]);
         setMsbRegions([]);
         setMsbEvents([]);
         setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
         setMsbLive(false);
+        // 地图没在打开：上一份 MSB 失败不再对当前选区成立（Agent 元数据同理）。
+        setLastOpenFailure((current) => current?.kind === 'msb-open-failed' ? null : current);
         return;
       }
       if (!bridge || typeof bridge.readMsbDocument !== 'function') {
@@ -1193,6 +1164,7 @@ export function App(): ReactElement {
       try {
         const result = await bridge.readMsbDocument(target.sourceUri) as {
           ok?: boolean;
+          diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
           data?: {
             sourceHash?: string;
             models?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
@@ -1231,9 +1203,24 @@ export function App(): ReactElement {
           setMsbEvents([]);
           setMsbSourceCounts({ models: 0, parts: EMPTY_MSB_PARTS.length, regions: 0, events: 0 });
           setMsbLive(false);
-          setStatus('这张地图读不出来，详情见底部日志。');
+          // S19 失败面：结构化失败进工作台 + Agent（code + 人话 + 下一步）。
+          // message 来自已过 sanitizer 的 IPC 诊断；KRAK 缺 Oodle 时 Bridge 直接
+          // 给可行动句（到「开始」页挂原版），其它失败至少给码 + 下一步提示。
+          const diag = result.diagnostics?.[0];
+          const code = diag?.code ?? 'MSB_READ_FAILED';
+          setLastOpenFailure({
+            kind: 'msb-open-failed',
+            document: target.relativePath,
+            code,
+            message: diag?.message
+              ?? (code === 'MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE'
+                ? '这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。'
+                : '这张地图读不出来，请检查文件状态后重试。')
+          });
+          setStatus('这张地图读不出来。');
           return;
         }
+        setLastOpenFailure(null);
         setMsbParts(result.data.parts.map((p) => ({
           name: p.name,
           ...(p.nativeOffset === undefined ? {} : { nativeOffset: p.nativeOffset }),
@@ -1295,23 +1282,52 @@ export function App(): ReactElement {
     async function loadEmevd(): Promise<void> {
       // SHELL-09：只有用户显式选中的 event 资源才加载；语义领域无兜底列表。
       const target = selectedFile;
-      if (!target || target.resourceKind !== 'event') {
+      if (!target || !shouldLoadEmevd(target)) {
         setEventPendingTab(null);
+        // S15：事件没在打开，上一份事件失败不再对当前选区成立（Agent 元数据同理）。
+        setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
         return;
       }
-      if (!bridge || typeof bridge.readEmevdDocument !== 'function') {
+      if (!bridge || typeof bridge.readEmevdFullDocument !== 'function') {
         setEventPendingTab(null);
         return;
       }
       setStatus(`正在读取 EMEVD：${target.relativePath}`);
       try {
-        const result = await bridge.readEmevdDocument(target.sourceUri) as {
-          ok?: boolean;
-          data?: BridgeEmevdEnvelopeLike | null;
-          diagnostics?: Array<{ message?: string }>;
-        };
+        // 一次读到底。以前这里是两次 IPC：先 readEmevdDocument 拿有界 envelope
+        // 投影（128 事件 / 每事件最多 64 条指令），再 readEmevdFullDocument 拿
+        // 权威源码。第一次读除了 sourceHash / 计数 / authority 三个标量，唯一实际
+        // 用途是给 gutter 数「未知指令条数」—— 而它的 instructionsSample 默认只
+        // 覆盖前 256 条指令，第 256 条之后的事件全被当成「指令全未知」，1730
+        // 事件的真实文件里那些标记基本都是假的。现在这三个标量与 gutter 判据
+        // 都由 readEmevdFullDocument 的 outline 给（unknownCount 按完整 EMEDF
+        // registry 逐条判，覆盖 4096 个事件），第一次读整体删掉。
+        const full = await bridge.readEmevdFullDocument(
+          target.sourceUri,
+          `renderer-${target.sourceUri}-${Date.now()}`
+        );
         if (cancelled) return;
-        if (!result?.ok || !result.data) {
+        // main 侧取消：快速切换时旧请求被更晚的打开请求取代。它也是 ok:false，
+        // 但不是「这个文件读不出来」，不能落成 EMEVD_LIVE_READ_FAILED 警告条 ——
+        // 静默丢弃，UI 归后到的那份请求。上面的 cancelled 布尔量仍是兜底，
+        // 但不再是唯一机制：真正的取消发生在 main，reader 侧只是不覆盖而已。
+        if (full?.cancelled) return;
+        if (!full?.ok) {
+          // S15 失败面：真实失败码 + 可行动句。KRAK 缺 Oodle 时 Bridge 已给完整
+          // 话术（EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE）；其它失败至少给码 +
+          // 下一步，不再只丢一句「这个事件脚本读不出来」。
+          const failureDiag = full?.diagnostics?.[0];
+          const failureCode = failureDiag?.code ?? 'EMEVD_LIVE_READ_FAILED';
+          const failureMessage = failureDiag?.message
+            ?? (failureCode === 'EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE'
+              ? '这份事件是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。'
+              : '这个事件脚本读不出来。');
+          setLastOpenFailure({
+            kind: 'event-open-failed',
+            document: target.relativePath,
+            code: failureCode,
+            message: failureMessage
+          });
           setEventPendingTab({
             tabId: target.sourceUri,
             title: target.relativePath,
@@ -1320,10 +1336,9 @@ export function App(): ReactElement {
               ...EMPTY_EMEVD_DOCUMENT,
               resourceUri: target.sourceUri,
               diagnostics: [{
-                severity: 'warning',
-                code: 'EMEVD_LIVE_READ_FAILED',
-                message: result?.diagnostics?.[0]?.message
-                  ?? '这个事件脚本读不出来。'
+                severity: 'error',
+                code: failureCode,
+                message: failureMessage
               }]
             },
             sourceHash: null,
@@ -1333,59 +1348,43 @@ export function App(): ReactElement {
             dslTemplateTotalLines: 0,
             sourceStyle: 'none'
           });
-          setStatus('这个事件脚本读不出来，详情见底部日志。');
+          setStatus('这个事件脚本读不出来。');
           return;
         }
-        const doc = mapEmevdEnvelopeToDocument(target.sourceUri, result.data, { maxEvents: 128 });
-        setStatus(
-          `已加载 EMEVD：${result.data.eventCount ?? doc.events.length} 事件 / `
-          + `${result.data.instructionCount ?? 0} 指令（authority=${result.data.authority ?? 'unknown'}）`
-        );
-        // Load the authoritative bounded full-document DSL template; renderer
-        // never receives the full document itself (EVENT-30A bounded outline).
+        setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
         let dslTemplate: string | null = null;
         let dslTemplateTruncated = false;
         let dslTemplateTotalLines = 0;
         // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script 只读 /
         // none 失败关闭）。
         let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
-        if (typeof bridge.readEmevdFullDocument === 'function') {
-          const full = await bridge.readEmevdFullDocument(
-            target.sourceUri,
-            `renderer-${target.sourceUri}-${Date.now()}`
-          );
-          if (cancelled) return;
-          if (full?.ok && full.dslTemplate) {
-            dslTemplate = full.dslTemplate;
-            dslTemplateTruncated = full.dslTemplateTruncated ?? false;
-            dslTemplateTotalLines = full.dslTemplateTotalLines ?? 0;
-            // 主进程返回 sourceStyle 时以它为准；旧 fixture/历史通道没有该字段时
-            // 按模板内容推断：`$Event(` 开头是 DarkScript 反汇编（只读），否则按旧
-            // hash DSL 处理（可编辑）。
-            sourceStyle = full.sourceStyle
-              ?? (/^\$Event\(/m.test(full.dslTemplate) ? 'dark-script' : 'patch-dsl');
-          } else if (full?.ok && full.dslTemplate === null) {
-            // EMEDF 缺失失败关闭：不提供伪解码（dslTemplate null + 诊断）。
-            sourceStyle = 'none';
-          } else {
-            setStatus(full?.diagnostics?.[0]?.message ?? '完整文档 DSL 模板加载失败；DSL 视图保持只读。');
-          }
+        if (full.dslTemplate) {
+          dslTemplate = full.dslTemplate;
+          dslTemplateTruncated = full.dslTemplateTruncated ?? false;
+          dslTemplateTotalLines = full.dslTemplateTotalLines ?? 0;
+          // 主进程返回 sourceStyle 时以它为准；旧 fixture/历史通道没有该字段时
+          // 按模板内容推断：`$Event(` 开头是 DarkScript 反汇编（只读），否则按旧
+          // hash DSL 处理（可编辑）。
+          sourceStyle = full.sourceStyle
+            ?? (/^\$Event\(/m.test(full.dslTemplate) ? 'dark-script' : 'patch-dsl');
         }
-        setEventPendingTab({
+        // dslTemplate === null 是 EMEDF 缺失的失败关闭（不提供伪解码）：
+        // sourceStyle 留 'none'，工作台显示可行动说明。
+        setEventPendingTab(emevdPendingTabFromFullDocument({
           tabId: target.sourceUri,
           title: target.relativePath,
           resourceUri: target.sourceUri,
-          // EVENT-30B：envelope 投影的事件没有 anchor，而 diagnostic gutter /
-          // Go to Event 要靠 `event @e:<localNodeId>` 命中事件；权威锚源是
-          // dslTemplate 本身（readEmevdFullDocument 来自同一份 Bridge 文档）。
-          document: alignEmevdDocumentAnchors(doc, dslTemplate),
-          sourceHash: result.data.sourceHash ?? null,
-          live: true,
+          full,
           dslTemplate,
           dslTemplateTruncated,
           dslTemplateTotalLines,
           sourceStyle
-        });
+        }));
+        setStatus(
+          `已加载 EMEVD：${full.eventCount ?? full.outline?.eventCount ?? 0} 事件 / `
+          + `${full.instructionCount ?? full.outline?.instructionTotal ?? 0} 指令`
+          + `（authority=${full.authority ?? 'unknown'}）`
+        );
       } catch (error) {
         if (cancelled) return;
         setEventPendingTab(null);
@@ -1395,6 +1394,11 @@ export function App(): ReactElement {
     void loadEmevd();
     return () => {
       cancelled = true;
+      // 本地布尔量只让 renderer 不覆盖 UI，主进程那边照旧把剩余分页读、outline
+      // 和整段反汇编跑完。切到 PARAM/MAP 域、关掉编辑器时不会再有打开请求去隐式
+      // 顶掉它，所以必须显式发一条取消 —— 否则那次读的工作量一分不少，只是产物
+      // 没人接。取消失败不影响 renderer 的正确性（本地已置 cancelled），静默吞掉。
+      void bridge?.cancelEmevdFullDocument?.().catch(() => undefined);
     };
   }, [bridge, selectedFile]);
 
@@ -1842,7 +1846,7 @@ export function App(): ReactElement {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       /*
-       * 自动恢复失败不弹 toast，只写状态栏。
+       * 自动恢复失败不弹 toast（S12 后无状态栏，也不写底栏）。
        *
        * 那条路径没有用户动作在等结果 —— 启动时弹一个「打开工作区失败」的提示
        * 会让人以为自己做错了什么，而实际原因通常是上次的目录被移动或删除了。
@@ -1902,7 +1906,7 @@ export function App(): ReactElement {
         );
       } catch {
         // 恢复失败静默：启动时没有用户动作在等结果，报错只会让人困惑。
-        // 失败原因（若来自 scan）已由 mountWorkspace 写进状态栏。
+        // 失败原因（若来自 scan）已由 mountWorkspace 记录。
       }
     })();
     // 只依赖 bridge：workspace 进依赖会在挂载成功后重跑（已被 ref 挡住，
@@ -2034,17 +2038,16 @@ export function App(): ReactElement {
     setEditText(text);
     setLastSavedText(text);
     setMsgRows(extractMsgRows(nextPreview));
-    // Load TAE/ESD/FLVER/TPF document data via typed preload IPC (V0.6 只读预览族)。
-    // T3：`.tae` 与 `.anibnd.dcx` 都走 TAE 读链（动作域；anibnd 由 Bridge 提取内部 TAE）。
-    if (/\.(tae|anibnd)(\.dcx)?$/i.test(file.relativePath)) {
+    const openPlan = planResourceOpen(file);
+    if (openPlan.ipcMethods.includes('readTaeDocument') && typeof bridge.readTaeDocument === 'function') {
       const result = await bridge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setTaeData(result.data);
     }
-    if (file.relativePath.endsWith('.esd')) {
+    if (openPlan.ipcMethods.includes('readEsdDocument') && typeof bridge.readEsdDocument === 'function') {
       const result = await bridge.readEsdDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setEsdData(result.data);
     }
-    if (file.relativePath.endsWith('.flver')) {
+    if (openPlan.ipcMethods.includes('readFlverDocument') && typeof bridge.readFlverDocument === 'function') {
       const result = await bridge.readFlverDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setFlverData(result.data);
     }
@@ -2262,6 +2265,9 @@ export function App(): ReactElement {
       ...(selectedFile
         ? { selection: { label: selectedFile.relativePath, resourceKind: selectedFile.resourceKind } }
         : {}),
+      // S15/S19 失败面：最近一次打开失败（KRAK 缺 Oodle / 读取失败）随任务提交，
+      // main 校验后进系统提示；Agent 能直接解释原因和下一步，不等用户复制日志。
+      ...(lastOpenFailure ? { openFailure: lastOpenFailure } : {}),
       // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
       // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
       ...(agentResources.length > 0 ? { resources: agentResources } : {})
@@ -3012,11 +3018,9 @@ export function App(): ReactElement {
                   </p>
                 </section>
           )}
-          {/* Structured preview 与原生格式检查已移到本面板**末尾**并默认折叠
-              （见下方 resource-evidence-details）。
-              它们此前排在所有编辑器之前、常驻展开，于是打开一个 param 先看到的是
-              两张证据卡而不是行表——编辑器被挤到滚动区外。那两张卡是给 AI 与
-              排查用的证据投影，不是日常编辑要看的东西。 */}
+          {/* Structured preview / 原生格式检查 / 原始字节视图在 S12 前曾常驻此面板，
+              把编辑器挤到滚动区外。S12 拍死：编辑壳不再展示证据投影与 hex 视图，
+              它们只存在于 main / AI 引用 / 开发者通道。 */}
           {/* 纯文本编辑器只在 plain-text 时出现。
               此前条件是 `previewKind === 'text'`，而它对 FMG/msg 资源同样为真，
               于是文本编辑器会和 FMG 文本工作台**叠在一起**——同一个资源两个编辑区，
@@ -3063,8 +3067,8 @@ export function App(): ReactElement {
               {/* 删掉了「实时 Bridge MSB parts / 空场景（未选中可解析 MSB 或读取失败）」
                   这行标题：工作台自己有标题栏与空态提示，这行只是重复；而「未选中
                   可解析 MSB 或读取失败」把两种完全不同的情形（还没选文件 / 选了但
-                  读不出来）混成一句，用户无法据此判断下一步做什么。读取失败的原因
-                  现在进底部日志区。 */}
+                  读不出来）混成一句，用户无法据此判断下一步做什么。读取失败由
+                  工作台自身的错误态表达。 */}
               <MsbScenePanel
                 key={`${selectedFile?.sourceUri ?? ''}:${msbSourceHash ?? ''}:${msbParts.length}:${msbRegions.length}`}
                 mapResourceUri={selectedFile?.sourceUri ?? ''}
@@ -3077,6 +3081,7 @@ export function App(): ReactElement {
                 events={msbEvents}
                 sourceCounts={msbSourceCounts}
                 maxNodes={2000}
+                openFailure={lastOpenFailure?.kind === 'msb-open-failed' ? lastOpenFailure : null}
                 writeEnabled={!isDeferredPreviewEditorKind('msb')
                   && msbLive
                   && Boolean(msbSourceHash)
@@ -3127,31 +3132,24 @@ export function App(): ReactElement {
                   }
                   const result = await bridge.submitEmevdDslPlan(tab.resourceUri, sourceText);
                   if (result.ok) {
+                    // 同 loadEmevd：提交后重读也只发一次。以前这里紧跟一次
+                    // readEmevdDocument 去换 sourceHash 与 gutter 判据，两者现在
+                    // 都在 reload 的响应里（sourceHash / outline）。
                     const reload = await bridge.readEmevdFullDocument(
                       tab.resourceUri,
                       `renderer-${tab.resourceUri}-${Date.now()}`
                     );
                     if (reload?.ok && reload.dslTemplate) {
-                      const refreshed = await bridge.readEmevdDocument(tab.resourceUri) as {
-                        ok?: boolean;
-                        data?: BridgeEmevdEnvelopeLike | null;
-                      };
-                      setEventPendingTab({
-                        ...tab,
-                        document: refreshed?.ok && refreshed.data
-                          ? alignEmevdDocumentAnchors(
-                              mapEmevdEnvelopeToDocument(tab.resourceUri, refreshed.data, { maxEvents: 128 }),
-                              reload.dslTemplate
-                            )
-                          : tab.document,
-                        sourceHash: refreshed?.ok && refreshed.data
-                          ? refreshed.data.sourceHash ?? tab.sourceHash
-                          : tab.sourceHash,
+                      setEventPendingTab(emevdPendingTabFromFullDocument({
+                        tabId: tab.tabId,
+                        title: tab.title,
+                        resourceUri: tab.resourceUri,
+                        full: reload,
                         dslTemplate: reload.dslTemplate,
                         dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
                         dslTemplateTotalLines: reload.dslTemplateTotalLines ?? 0,
                         sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
-                      });
+                      }));
                       return {
                         ok: true,
                         diagnostics: result.diagnostics ?? [],
@@ -3493,7 +3491,7 @@ export function App(): ReactElement {
           )}
           {/* 删掉「空文件。」与「预览失败。」两句：它们既不说明问题也不给出动作，
               而且与下方的编辑器并存（一个资源同时出现「预览失败」和一张空表）。
-              空文件的事实由编辑器自身的空态表达；失败原因归底部日志区。 */}
+              空文件的事实由编辑器自身的空态表达；读取失败由工作台错误态表达。 */}
           {activeEditor === 'tae' && selectedFile && (
             <TaeWorkbenchPanel resourceUri={selectedFile.sourceUri} data={taeData as never} />
           )}
@@ -3510,6 +3508,13 @@ export function App(): ReactElement {
               {...(selectedFile?.sourceUri ? { initialUri: selectedFile.sourceUri } : {})}
             />
           )}
+          {activeEditor === 'vfx' && selectedFile && (
+            <VfxWorkbenchPanel
+              key={`vfx-wb:${selectedFile.sourceUri}`}
+              files={vfxFiles}
+              initialUri={selectedFile.sourceUri}
+            />
+          )}
           {activeEditor === 'binary' && isMaterialFile && selectedFile && (
             <MaterialWorkbenchPanel
               key={`mtd-wb:${selectedFile.sourceUri}`}
@@ -3524,103 +3529,19 @@ export function App(): ReactElement {
               initialUri={selectedFile.sourceUri}
             />
           )}
-          {/* 没有语义编辑器的资源：给一句人话 + 指向折叠区的原始字节。
-              此前这类资源什么编辑器都不显示，主区只剩证据卡与错误码。 */}
-          {activeEditor === 'binary' && !isMaterialFile && !isVfxFile && (
+          {activeEditor === 'binary' && !isMaterialFile && !isVfxFile && selectedFile && (
             <p className="muted">
-              这个格式还没有专用编辑器。展开下方「原始字节与证据」可查看字节内容。
+              {classifyWorkspaceOpen(selectedFile.relativePath).openKind === 'blocked-scope'
+                ? '这个容器的语义读被范围裁定挡住（HKX 不在本版解析范围）。'
+                : classifyWorkspaceOpen(selectedFile.relativePath).openKind === 'blocked-no-parser'
+                  ? '这个格式还没有确认过的 parser，不能声称已经读懂。'
+                  : classifyWorkspaceOpen(selectedFile.relativePath).openKind === 'history'
+                    ? '这是备份/历史副本，只出现在历史里，不进语义编辑器。'
+                    : '这个格式还没有专用编辑器。'}
             </p>
           )}
-          {preview?.truncated && (
-            <p className="muted">
-              {formatPreviewTruncation(preview.bytesRead, preview.file?.size)}
-            </p>
-          )}
-          {/* 证据与格式检查：默认折叠，排在编辑器之后。
-              内容一字未改，只改了位置与默认展开状态——它们仍是 AI 侧边栏引用的
-              同一份证据投影，排查时展开即可。
-
-              外层条件必须把 hex 也算进来：hex 视图搬进本折叠区后，若条件仍只看
-              structuredPreview / nativeInspection，那些**只有** hex 的资源
-              （二进制资源的常态）会连折叠区都不渲染，原始字节视图彻底消失。
-              那是能力退化而不是降级——降级只应改变位置与默认展开状态。 */}
-          {(preview?.structuredPreview
-            || preview?.nativeInspection
-            || (preview?.previewKind === 'hex' && preview.hex)) && (
-            <details className="resource-evidence-details" data-testid="resource-evidence">
-              <summary>原始字节与证据</summary>
-              <p className="muted">
-                以下是资源的原始字节、结构化证据与原生格式判定，供 AI 引用与排查使用；
-                日常编辑不需要展开。
-              </p>
-              {preview.structuredPreview && <StructuredPreviewCard preview={preview.structuredPreview} />}
-              {preview.nativeInspection && <NativeInspectionCard inspection={preview.nativeInspection} />}
-              {/* 原始字节视图：与两张证据卡同级，收在本折叠区内。
-                  它此前排在**所有**编辑器面板之前，而 previewKind === 'hex' 是所有
-                  FromSoftware 二进制格式的默认分支——于是打开 param / event / chr 任何
-                  一个资源，主视图顶部先是「只读 Hex 证据」，工作台被挤到滚动区外。
-                  偏移与原始字节是排查用的证据，不是日常编辑要看的东西。 */}
-              {preview?.previewKind === 'hex' && preview.hex && (
-                <HexEditorPanel
-                  title={selectedFile?.relativePath ?? '二进制资源'}
-                  /* P3 裁定：预览 hex 一律经严格校验的转换出口，不再把「无空格的
-                     preview.hex」原样当 base64 直喂 atob——内容被误标时 atob 会抛
-                     Latin1 DOMException 把工作台摔死，校验后只会得到可行动错误。 */
-                  initialBytesBase64={hexTextToSafeBase64(preview.hex)}
-                  totalBytes={preview.file?.size}
-                  {...(selectedFile && bridge
-                    ? {
-                        // 接 readRawMetadata（main handler ipc.ts:1198）。独立价值是
-                        // 「不读内容就能拿到整文件哈希」——hex 视图一次只加载一个
-                        // 4 KiB 窗口，算不出整文件哈希，而校验「我看的这份字节属于哪个
-                        // 文件版本」需要它。core 对超上限文件报 deferred 而非硬算。
-                        onLoadMetadata: async () => {
-                          const raw = await bridge.readRawMetadata(selectedFile.sourceUri) as
-                            Record<string, unknown> | null;
-                          if (raw === null) return null;
-                          return {
-                            ...(typeof raw.size === 'number' ? { size: raw.size } : {}),
-                            ...(typeof raw.contentHash === 'string' ? { contentHash: raw.contentHash } : {}),
-                            ...(typeof raw.hashStatus === 'string' ? { hashStatus: raw.hashStatus } : {})
-                          };
-                        }
-                      }
-                    : {})}
-                  {...(selectedFile && bridge
-                    ? {
-                        // 接 readRawRange（main handler ipc.ts:1170）——预览只读前 64 KiB，
-                        // 而实测 mods 下 237 个文件有 148 个超过它，此前 hex 证据对这些文件
-                        // 只能看到开头且把前缀长度当总量显示。硬约束 17 要求大规模访问分页。
-                        // 不用 `as` 整体断言 IPC 返回值——第一版那样写掩盖了一个真 bug：
-                        // core 的字段叫 base64（rawRead.ts:35）而我写成 bytesBase64，
-                        // 断言让 typecheck 通过、功能却永远读不到数据。改为逐字段取值 +
-                        // 运行期类型判断，字段名对不上时至少 diagnostics 会带出原因。
-                        onLoadRange: async (offset: number, length: number) => {
-                          const raw = await bridge.readRawRange(
-                            selectedFile.sourceUri,
-                            offset,
-                            length
-                          ) as Record<string, unknown> | null;
-                          const rec = raw ?? {};
-                          const diags = Array.isArray(rec.diagnostics)
-                            ? (rec.diagnostics as Array<{ code?: unknown; message?: unknown }>).map((d) => ({
-                                code: String(d.code ?? 'UNKNOWN'),
-                                message: String(d.message ?? '')
-                              }))
-                            : [];
-                          return {
-                            ok: rec.ok === true,
-                            ...(typeof rec.base64 === 'string' ? { base64: rec.base64 } : {}),
-                            ...(typeof rec.fileSize === 'number' ? { fileSize: rec.fileSize } : {}),
-                            diagnostics: diags
-                          };
-                        }
-                      }
-                    : {})}
-                />
-              )}
-              {preview?.previewKind === 'hex' && !preview.hex && <pre className="muted">无 Hex 预览数据。</pre>}
-            </details>
+          {activeEditor === 'binary' && !isMaterialFile && !isVfxFile && !selectedFile && (
+            <p className="muted">这个格式还没有专用编辑器。</p>
           )}
           </PanelErrorBoundary>
                 </div>
@@ -3776,65 +3697,6 @@ export function App(): ReactElement {
           onExplainEvent={(uri) => void explainEvent(uri)}
         />
       </div>
-
-      {/* ══════════ 底部日志区 ══════════ */}
-      {/* 诊断码与解析细节的唯一去处。此前它们印在主编辑区里
-          （DCX_PAYLOAD_BOUNDARY_CONFIRMED、「分页通道不可用」、
-          「空文档（未选中可解析 EMEVD 或读取失败）」），把要编辑的数据挤下去，
-          用户看到的是一堆看不懂的错误码而不是编辑器。 */}
-      <DiagnosticsLog
-        diagnostics={diagnostics}
-        status={status}
-        open={logOpen}
-        onToggle={() => setLogOpen((open) => !open)}
-      />
-
-      {/* ══════════ 状态栏 ══════════ */}
-      <footer className="status-bar">
-        <div className="statusbar__left">
-          <span className="st-item st-branch" title="工作区">
-            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
-              <path d="M6 3v6a4 4 0 0 0 4 4h4" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <circle cx="6" cy="5" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <circle cx="6" cy="19" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <circle cx="18" cy="13" r="2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-              <path d="M6 7v10" stroke="currentColor" strokeWidth="1.6" />
-            </svg>
-            {workspace?.workspaceLabel ?? '未打开工作区'}
-          </span>
-          <span className="st-item" title="VFS 索引">
-            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
-              <ellipse cx="12" cy="5.5" rx="7" ry="2.8" fill="none" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M5 5.5v6c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-6M5 11.5v6c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8v-6" fill="none" stroke="currentColor" strokeWidth="1.5" />
-            </svg>
-            {allFiles.length} 资源已索引
-          </span>
-          <span className="st-item" title="当前中央资源">当前：{selectedFile?.relativePath ?? '无'}</span>
-        </div>
-        <div className="statusbar__right">
-          <span className="st-item" title="当前键位套"> {statusSuitLabel(activeDomain)}</span>
-          <span className="st-item st-status" role="status" title={status}>{status}</span>
-          {/* 诊断计数此前是死文本：显示「1035 条诊断」却点不开，用户无从查看。
-              现在它是日志区的开关 —— 计数与内容必须可达，否则那个数字只是噪声。 */}
-          <button
-            type="button"
-            className="st-item st-item--button"
-            onClick={() => setLogOpen((open) => !open)}
-            aria-expanded={logOpen}
-            title={logOpen ? '收起日志' : '展开日志'}
-          >
-            {diagnostics.length ? `${diagnostics.length} 条诊断` : '没有诊断'}
-          </button>
-          <span className="st-item st-ok" title="写入前自动备份">
-            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
-              <path d="M12 3l7 3v5c0 4.4-3 8-7 10-4-2-7-5.6-7-10V6Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-              <path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-            备份：启用 · 可回滚
-          </span>
-          <span className="st-item">{clockText}</span>
-        </div>
-      </footer>
 
       {/* ══════════ 命令面板 ══════════ */}
       <div

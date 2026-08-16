@@ -7,6 +7,9 @@ using System.Text.RegularExpressions;
 internal sealed class BridgeCommandService
 {
     private const int MaxPrefixBytes = 512 * 1024;
+    // read-emevd-document 单页最大指令数。真实 common.emevd 有 33266 条，取 65536
+    // 可让常见事件文件一帧读完；再大的 EMEVD 仍需分页（帧上限 16 MiB）。
+    private const int MaxInstructionPageSize = 65536;
     // read-tpf-texture-preview 的预览边长上限。与 DdsCodec.DecodeDdsToPngPreview
     // 配合：全分辨率 PNG 的 base64 会超 bridge 帧上限，预览受界下采样到该边长。
     private const int PreviewMaxDimension = 512;
@@ -44,12 +47,29 @@ internal sealed class BridgeCommandService
             return element.TryGetInt32(out var parsed) ? parsed : fallback;
         }
 
+        long OptionInt64(string name, long fallback)
+        {
+            if (!optionsIsObject) return fallback;
+            if (!options.TryGetProperty(name, out var element)) return fallback;
+            if (element.ValueKind != JsonValueKind.Number) return fallback;
+            return element.TryGetInt64(out var parsed) ? parsed : fallback;
+        }
+
         bool OptionBool(string name, bool fallback)
         {
             if (!optionsIsObject) return fallback;
             if (!options.TryGetProperty(name, out var element)) return fallback;
             if (element.ValueKind != JsonValueKind.True && element.ValueKind != JsonValueKind.False) return fallback;
             return element.GetBoolean();
+        }
+
+        string OptionString(string name, string fallback)
+        {
+            if (!optionsIsObject) return fallback;
+            if (!options.TryGetProperty(name, out var element)) return fallback;
+            if (element.ValueKind != JsonValueKind.String) return fallback;
+            var value = element.GetString();
+            return string.IsNullOrWhiteSpace(value) ? fallback : value;
         }
 
         var resourceKind = command switch
@@ -166,7 +186,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = FmgNativeDocument.ReadFile(file);
+                var document = FmgNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".fmg"));
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -362,34 +382,78 @@ internal sealed class BridgeCommandService
                 // native (DcxNativeDocument), so the TypeScript side never
                 // imports a second DCX parser and never hands back a
                 // decompressed temp file to be reused as the Patch target.
-                string sourceFormat;
-                string? outerFileHash;
-                EmevdNativeDocument document;
-                if (IsDcxFile(file))
+                // 分页读同一份文件时，DCX inflate / EMEVD 解析 / VerifyRoundTrip
+                // 三步的结果与 page 无关，经 EmevdDocumentSessionCache 复用。
+                // 键含外层文件完整 SHA-256（不是 mtime + length）：外部工具做等长
+                // 改写并回写原 mtime 时，前者能看出内容变了，后者看不出。
+                // cachePolicy=bypass 无条件重读磁盘，既不命中也不写缓存 —— 提交前
+                // 的新鲜读与写回后的重读用它。
+                var cachePolicy = OptionString("cachePolicy", "default") == "bypass"
+                    ? EmevdDocumentSessionCache.CachePolicy.Bypass
+                    : EmevdDocumentSessionCache.CachePolicy.Default;
+                var resumeSession = OptionString("documentSession", "");
+                EmevdDocumentSessionCache.Lookup cached;
+                if (resumeSession.Length > 0
+                    && EmevdDocumentSessionCache.TryGetSession(resumeSession, out var sessionHit))
                 {
-                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
-                    document = EmevdNativeDocument.Read(dcx.Payload);
-                    sourceFormat = "dcx";
-                    outerFileHash = dcx.SourceHash;
+                    cached = sessionHit;
                 }
                 else
                 {
-                    document = EmevdNativeDocument.ReadFile(file);
-                    sourceFormat = "emevd";
-                    outerFileHash = document.SourceHash;
+                    var hooks = EmevdDocumentSessionCache.TestHooksEnabled
+                        ? new EmevdDocumentSessionCache.TestHooks
+                        {
+                            HoldUntilFile = EmptyToNull(OptionString("testHoldUntilFile", "")),
+                            RewriteAfterRead = EmptyToNull(OptionString("testRewriteAfterRead", "")),
+                            CompletedFile = EmptyToNull(OptionString("testCompletedFile", "")),
+                            SignalFile = EmptyToNull(OptionString("testSignalFile", ""))
+                        }
+                        : null;
+                    // 解析工厂只吃共享 load token，不再捕获第一个调用者的 CancellationToken。
+                    cached = await EmevdDocumentSessionCache.GetOrAddAsync(
+                        file,
+                        oodleRuntimeRoot,
+                        (bytes, loadToken) =>
+                        {
+                            loadToken.ThrowIfCancellationRequested();
+                            string loadedFormat;
+                            string? loadedOuterHash;
+                            EmevdNativeDocument loaded;
+                            if (IsDcxBytes(bytes))
+                            {
+                                var dcx = DcxNativeDocument.Read(bytes, oodleRuntimeRoot, file);
+                                loadToken.ThrowIfCancellationRequested();
+                                loaded = EmevdNativeDocument.Read(dcx.Payload, loadToken);
+                                loadedFormat = "dcx";
+                                loadedOuterHash = dcx.SourceHash;
+                            }
+                            else
+                            {
+                                loaded = EmevdNativeDocument.Read(bytes, loadToken);
+                                loadedFormat = "emevd";
+                                loadedOuterHash = loaded.SourceHash;
+                            }
+                            loadToken.ThrowIfCancellationRequested();
+                            return new EmevdDocumentSessionCache.Entry(
+                                loaded, loaded.VerifyRoundTrip(loadToken), loadedFormat, loadedOuterHash);
+                        },
+                        cachePolicy,
+                        cancellationToken,
+                        hooks);
                 }
-                var roundTrip = document.VerifyRoundTrip();
-                var optionsObject = options.ValueKind == JsonValueKind.Object;
-                var page = optionsObject && options.TryGetProperty("instructionPage", out var pageEl)
-                    && pageEl.ValueKind == JsonValueKind.Number && pageEl.TryGetInt32(out var parsedPage)
-                    && parsedPage >= 0
-                    ? parsedPage
-                    : 0;
-                var pageSize = optionsObject && options.TryGetProperty("instructionPageSize", out var sizeEl)
-                    && sizeEl.ValueKind == JsonValueKind.Number && sizeEl.TryGetInt32(out var parsedSize)
-                    && parsedSize >= 1 && parsedSize <= 4096
-                    ? parsedSize
+                var document = cached.Entry.Document;
+                var sourceFormat = cached.Entry.SourceFormat;
+                var outerFileHash = cached.Entry.OuterFileHash;
+                var roundTrip = cached.Entry.RoundTrip;
+                var requestedPage = OptionInt("instructionPage", 0);
+                var page = requestedPage >= 0 ? requestedPage : 0;
+                // 上限提到 MaxInstructionPageSize：一次拿完 33266 条指令只需一帧，
+                // 省掉 64 次 NDJSON 往返。分页能力保留（超大 EMEVD 仍会超帧上限）。
+                var requestedPageSize = OptionInt("instructionPageSize", 256);
+                var pageSize = requestedPageSize >= 1 && requestedPageSize <= MaxInstructionPageSize
+                    ? requestedPageSize
                     : 256;
+                var cacheObservation = cached.Observation;
                 var diagnostics = new[]
                 {
                     new Diagnostic(
@@ -401,10 +465,29 @@ internal sealed class BridgeCommandService
                                 : "EMEVD 事件表语义往返一致。")
                             : "EMEVD 无修改往返语义不一致。",
                         BridgeResult<object>.MakeSourceUri(file),
-                        roundTrip)
+                        roundTrip),
+                    // 缓存行为在进程外不可见：命中与「重解析出同样内容」返回的字节完全
+                    // 相同。这条 info 诊断是同文件并发合并、bypass 不写缓存、不同文件
+                    // 不在全局锁上串行这几条属性唯一的确定性观测口。
+                    new Diagnostic(
+                        "info",
+                        "EMEVD_DOCUMENT_CACHE_STATE",
+                        $"EMEVD 文档缓存：{cacheObservation.State}。",
+                        BridgeResult<object>.MakeSourceUri(file),
+                        cacheObservation)
                 };
                 return BridgeResult<object>.Partial(file, "event", diagnostics,
-                    document.ToEnvelope(roundTrip, page, pageSize, sourceFormat, outerFileHash));
+                    document.ToEnvelope(roundTrip, page, pageSize, sourceFormat, outerFileHash, cached.SessionToken));
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                // KRAK 压缩且本机没有可用的 Oodle 运行库（未挂原版目录 / 缺 dll）。
+                // 与 MSB 同一套可行动话术：告诉用户去哪挂原版，而不是只丢一个失败码。
+                return BridgeResult<object>.Failed(
+                    file,
+                    "event",
+                    "EMEVD_DOCUMENT_KRAK_OODLE_UNAVAILABLE",
+                    "这份事件是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。");
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException or InvalidOperationException)
             {
@@ -424,6 +507,15 @@ internal sealed class BridgeCommandService
                     new Diagnostic("info", "EMEVD_STAGING_WRITE_VERIFIED", "EMEVD 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
                 }, written);
             }
+            catch (OodleRuntimeUnavailableException)
+            {
+                // KRAK outer 写回需要 Oodle 压缩运行库；缺它时给出与读链一致的可行动提示。
+                return BridgeResult<object>.Failed(
+                    file,
+                    "event",
+                    "EMEVD_STAGING_WRITE_KRAK_OODLE_UNAVAILABLE",
+                    "这份事件是 KRAK 压缩，写回需要 Oodle 运行库：到「开始」页选择含 sekiro.exe 的原版目录后再保存。");
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "event", "EMEVD_STAGING_WRITE_FAILED", ex.Message);
@@ -434,7 +526,7 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = MsbNativeDocument.ReadFile(file);
+                var document = MsbNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot));
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -449,6 +541,16 @@ internal sealed class BridgeCommandService
                 };
                 return BridgeResult<object>.Partial(file, "map", diagnostics, document.ToEnvelope(roundTrip));
             }
+            catch (OodleRuntimeUnavailableException)
+            {
+                // mods 里 9 张 DFLT 图不挂原版也能开；只有原版 KRAK 图需要 Oodle。
+                // 失败码 + 可行动话术直接进编辑区，不再让用户翻日志猜「头 4 字节」。
+                return BridgeResult<object>.Failed(
+                    file,
+                    "map",
+                    "MSB_DOCUMENT_KRAK_OODLE_UNAVAILABLE",
+                    "这份地图是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。");
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "map", "MSB_DOCUMENT_READ_FAILED", ex.Message);
@@ -459,7 +561,8 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = TpfNativeDocument.ReadFile(file);
+                var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".tpf");
+                var document = TpfNativeDocument.Read(payload);
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
                 {
@@ -502,7 +605,7 @@ internal sealed class BridgeCommandService
             }
             try
             {
-                var document = TpfNativeDocument.ReadFile(file);
+                var document = TpfNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".tpf"));
                 var dds = document.GetTextureData(textureIndex);
                 byte[] outputBytes;
                 string code;
@@ -590,7 +693,7 @@ internal sealed class BridgeCommandService
             }
             try
             {
-                var document = TpfNativeDocument.ReadFile(file);
+                var document = TpfNativeDocument.Read(NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".tpf"));
                 var (name, sourceWidth, sourceHeight, _, _) = document.GetTextureMetadata(textureIndex);
                 var dds = document.GetTextureData(textureIndex);
                 // 预览必须受界下采样：全分辨率 PNG 的 base64 会超 bridge 帧上限
@@ -656,60 +759,14 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                TaeNativeDocument document;
-                Diagnostic[] extractionDiagnostics;
-                if (IsAnibndPath(file))
-                {
-                    // T3（2026-08-15）：`*.anibnd.dcx` 是 DCX(DFLT)→BND4 容器，内含多个
-                    // 独立 TAE 条目。解 DCX→解析 BND4→按 "TAE " 魔数挑主 TAE
-                    // （优先 id 5000000，其次字节最大的 TAE 条目）→TaeNativeDocument.Read。
-                    // hkx 是逐条 DCX，本命令不读。envelope 合并提取来源诊断，使 UI 能
-                    // 显示「从 anibnd 提取」而不是把 BND4 子项当成容器打开。
-                    var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
-                    var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
-                    int? mainIndex = null;
-                    var taeEntryCount = 0;
-                    var largestIndex = -1;
-                    var largestBytes = -1L;
-                    for (var i = 0; i < bnd4.Entries.Count; i++)
-                    {
-                        var bytes = bnd4.GetStoredBytes(i);
-                        if (bytes.Length < 4 || !bytes.AsSpan(0, 4).SequenceEqual("TAE "u8)) continue;
-                        taeEntryCount++;
-                        if (bnd4.Entries[i].Id == 5000000)
-                        {
-                            mainIndex = i;
-                            break;
-                        }
-                        if (bytes.Length > largestBytes)
-                        {
-                            largestBytes = bytes.Length;
-                            largestIndex = i;
-                        }
-                    }
-                    mainIndex ??= largestIndex >= 0 ? largestIndex : null;
-                    if (mainIndex is null)
-                    {
-                        return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
-                    }
-                    var mainBytes = bnd4.GetStoredBytes(mainIndex.Value);
-                    var mainEntryId = bnd4.Entries[mainIndex.Value].Id;
-                    document = TaeNativeDocument.Read(mainBytes);
-                    extractionDiagnostics = new[]
-                    {
-                        new Diagnostic(
-                            "info",
-                            "TAE_FROM_ANIBND_EXTRACTED",
-                            $"从 anibnd 容器提取 TAE（BND4 内 {taeEntryCount} 个 TAE 条目，本次打开 id={mainEntryId}，大小 {mainBytes.Length} 字节）。hkx 未读取。",
-                            BridgeResult<object>.MakeSourceUri(file),
-                            new { taeEntryCount, mainEntryId, mainTaeBytes = mainBytes.Length })
-                    };
-                }
-                else
-                {
-                    document = TaeNativeDocument.ReadFile(file);
-                    extractionDiagnostics = Array.Empty<Diagnostic>();
-                }
+                // T3（2026-08-15）：`*.anibnd.dcx` 是 DCX(DFLT)→BND4 容器，内含多个
+                // 独立 TAE 条目。解 DCX→解析 BND4→按 "TAE " 魔数挑主 TAE
+                // （优先 id 5000000，其次字节最大的 TAE 条目）→TaeNativeDocument.Read。
+                // hkx 是逐条 DCX，本命令不读。envelope 合并提取来源诊断，使 UI 能
+                // 显示「从 anibnd 提取」而不是把 BND4 子项当成容器打开。
+                // S17：提取逻辑抽成 OpenTaeDocument，read-tae-event-params 共用，
+                // 不再维护第二份 anibnd 解包。
+                var (document, extractionDiagnostics) = OpenTaeDocument(file, oodleRuntimeRoot);
 
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new[]
@@ -725,9 +782,117 @@ internal sealed class BridgeCommandService
                 }.Concat(extractionDiagnostics).ToArray();
                 return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip, extractionDiagnostics));
             }
+            catch (TaeEntryMissingException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+            }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "action", "TAE_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-tae-event-params")
+        {
+            try
+            {
+                // S17：按需读取单个事件参数体。paramSize 由 main 从本机
+                // TAE.Template.SDT.xml 的布局算出（无模板的事件传 0 → 只给前 16 字节
+                // hex 作「未解码」证据）；Bridge 按长度截取并越界失败关闭。
+                var (document, _) = OpenTaeDocument(file, oodleRuntimeRoot);
+                var animId = OptionInt64("animId", -1);
+                var eventIndex = OptionInt("eventIndex", -1);
+                var paramSize = OptionInt("paramSize", 0);
+                var ev = document.FindEvent(animId, eventIndex);
+                if (ev is null)
+                    throw new InvalidDataException($"TAE 动画 {animId} 事件下标 {eventIndex} 不存在。");
+                var length = paramSize > 0 ? paramSize : Math.Min(16, (int)Math.Max(0, ev.ParameterDataOffset));
+                var raw = document.ReadParameterBody(ev, length);
+                return BridgeResult<object>.Partial(file, "action", new[]
+                {
+                    new Diagnostic(
+                        "info",
+                        "TAE_EVENT_PARAMS_READ",
+                        $"TAE 事件参数体已读取：animId={animId} eventIndex={eventIndex} type={ev.EventTypeId} bytes={raw.Length}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    animId,
+                    eventIndex,
+                    eventTypeId = ev.EventTypeId,
+                    paramDataOffset = ev.ParameterDataOffset,
+                    paramHex = Convert.ToHexString(raw).ToLowerInvariant(),
+                    paramSize = raw.Length
+                });
+            }
+            catch (TaeEntryMissingException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_ANIBND_NO_TAE_ENTRY", "anibnd 容器内未找到 TAE 魔数条目。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "action", "TAE_EVENT_PARAMS_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "read-chrbnd-flver-preview")
+        {
+            try
+            {
+                // S17：动作预览挂模型——伴生 chrbnd（overlay 或原版）解 DCX→BND4→
+                // 首个 .flver 条目→网格/骨骼/挂点一次返回。复用 NativeLeafPayload
+                // 的容器提取；KRAK 外层缺 Oodle 时失败码可行动。
+                var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".flver");
+                var flver = FlverNativeDocument.Read(payload);
+                var meshIndex = OptionInt("meshIndex", 0);
+                var maxVertices = OptionInt("maxVertices", 10_000);
+                var maxIndices = OptionInt("maxIndices", 30_000);
+                var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
+                if (positions == null)
+                    return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
+                var indices = flver.GetMeshIndicesBase64(meshIndex, maxIndices);
+                var uvs = flver.GetMeshUVsBase64(meshIndex, maxVertices);
+                var normals = flver.GetMeshNormalsBase64(meshIndex, maxVertices);
+                var boneWeights = flver.GetMeshBoneWeightsBase64(meshIndex, maxVertices);
+                var boneIndices = flver.GetMeshBoneIndicesBase64(meshIndex, maxVertices);
+                var mesh = flver.Meshes[meshIndex];
+                return BridgeResult<object>.Partial(file, "chr", new[]
+                {
+                    new Diagnostic("info", "CHRBND_FLVER_PREVIEW_EXTRACTED",
+                        $"chrbnd 内 FLVER 网格/骨骼/挂点已提取；mesh={meshIndex} vertexCount={mesh.VertexCount} bones={flver.BoneCount}。",
+                        BridgeResult<object>.MakeSourceUri(file))
+                }, new
+                {
+                    meshIndex,
+                    vertexCount = mesh.VertexCount,
+                    positionsBase64 = positions,
+                    indicesBase64 = indices,
+                    uvsBase64 = uvs,
+                    normalsBase64 = normals,
+                    boneWeightsBase64 = boneWeights,
+                    boneIndicesBase64 = boneIndices,
+                    bones = flver.Bones.Select(b => new
+                    {
+                        name = b.Name,
+                        parentIndex = b.ParentIndex,
+                        translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
+                        rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
+                    }).ToArray(),
+                    boneCount = flver.BoneCount,
+                    meshCount = flver.MeshCount
+                });
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "chr",
+                    "CHRBND_KRAK_OODLE_UNAVAILABLE",
+                    "这份模型（chrbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再看预览。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "chr", "CHRBND_FLVER_PREVIEW_FAILED", ex.Message);
             }
         }
 
@@ -1063,7 +1228,8 @@ internal sealed class BridgeCommandService
         {
             try
             {
-                var document = EsdNativeDocument.ReadFile(file);
+                var payload = NativeLeafPayload.Resolve(file, oodleRuntimeRoot, ".esd");
+                var document = EsdNativeDocument.Read(payload);
                 var roundTrip = document.VerifyRoundTrip();
                 var diagnostics = new List<Diagnostic>
                 {
@@ -1235,11 +1401,19 @@ internal sealed class BridgeCommandService
                 return BridgeResult<object>.Failed(file, "map", "BRIDGE_OUTPUT_PATH_REQUIRED", "MSB writer requires a validated staging output path.");
             try
             {
-                var written = await MsbNativeWriter.WriteAsync(file, outputPath, options, cancellationToken);
+                var written = await MsbNativeWriter.WriteAsync(file, outputPath, oodleRuntimeRoot, options, cancellationToken);
                 return BridgeResult<object>.Partial(file, "map", new[]
                 {
                     new Diagnostic("info", "MSB_STAGING_WRITE_VERIFIED", "MSB 已写入暂存区并重读验证。", BridgeResult<object>.MakeSourceUri(file), written)
                 }, written);
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "map",
+                    "MSB_STAGING_WRITE_KRAK_OODLE_UNAVAILABLE",
+                    "这份地图是 KRAK 压缩，写回需要 Oodle 运行库：到「开始」页选择含 sekiro.exe 的原版目录后再保存。");
             }
             catch (MsbUnregisteredEntityException ex)
             {
@@ -1567,6 +1741,12 @@ internal sealed class BridgeCommandService
         }
     }
 
+    private static bool IsDcxBytes(byte[] bytes) =>
+        bytes.Length >= 4 && bytes.AsSpan(0, 4).SequenceEqual("DCX\0"u8);
+
+    private static string? EmptyToNull(string value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value;
+
     /// <summary>
     /// 是否为 TAE 打包容器（anibnd）。T3（2026-08-15）：动作域的 `*.anibnd.dcx`
     /// 在 TAE 读链里由 Bridge 提取内部 TAE，不落 BND4 通用容器页。
@@ -1575,6 +1755,57 @@ internal sealed class BridgeCommandService
     {
         var lower = path.ToLowerInvariant();
         return lower.EndsWith(".anibnd.dcx") || lower.EndsWith(".anibnd");
+    }
+
+    /// <summary>
+    /// 打开 TAE 文档：anibnd 容器提取主 TAE（id 5000000 优先，其次字节最大），
+    /// 裸 .tae 直接读。S17：read-tae-document 与 read-tae-event-params 共用，
+    /// 不再维护第二份 anibnd 解包。找不到 TAE 条目抛 TaeEntryMissingException，
+    /// 命令层映射 TAE_ANIBND_NO_TAE_ENTRY。
+    /// </summary>
+    private static (TaeNativeDocument Document, Diagnostic[] ExtractionDiagnostics) OpenTaeDocument(
+        string file,
+        string? oodleRuntimeRoot)
+    {
+        if (!IsAnibndPath(file))
+            return (TaeNativeDocument.ReadFile(file), Array.Empty<Diagnostic>());
+        var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
+        var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
+        int? mainIndex = null;
+        var taeEntryCount = 0;
+        var largestIndex = -1;
+        var largestBytes = -1L;
+        for (var i = 0; i < bnd4.Entries.Count; i++)
+        {
+            var bytes = bnd4.GetStoredBytes(i);
+            if (bytes.Length < 4 || !bytes.AsSpan(0, 4).SequenceEqual("TAE "u8)) continue;
+            taeEntryCount++;
+            if (bnd4.Entries[i].Id == 5000000)
+            {
+                mainIndex = i;
+                break;
+            }
+            if (bytes.Length > largestBytes)
+            {
+                largestBytes = bytes.Length;
+                largestIndex = i;
+            }
+        }
+        mainIndex ??= largestIndex >= 0 ? largestIndex : null;
+        if (mainIndex is null)
+            throw new TaeEntryMissingException("anibnd 容器内未找到 TAE 魔数条目。");
+        var mainBytes = bnd4.GetStoredBytes(mainIndex.Value);
+        var mainEntryId = bnd4.Entries[mainIndex.Value].Id;
+        var diagnostics = new[]
+        {
+            new Diagnostic(
+                "info",
+                "TAE_FROM_ANIBND_EXTRACTED",
+                $"从 anibnd 容器提取 TAE（BND4 内 {taeEntryCount} 个 TAE 条目，本次打开 id={mainEntryId}，大小 {mainBytes.Length} 字节）。hkx 未读取。",
+                BridgeResult<object>.MakeSourceUri(file),
+                new { taeEntryCount, mainEntryId, mainTaeBytes = mainBytes.Length })
+        };
+        return (TaeNativeDocument.Read(mainBytes), diagnostics);
     }
 
     /// <summary>

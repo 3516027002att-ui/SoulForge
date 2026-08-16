@@ -23,9 +23,16 @@ import {
   useState,
   type ReactElement
 } from 'react';
-import type { EmevdEditorDocument, EmevdEventIr } from '@soulforge/shared';
+import type { EmevdEditorDocument } from '@soulforge/shared';
 import type { EmedfCompletionItem } from '@soulforge/core';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import {
+  appendSourceSlices,
+  emptyEventLineScan,
+  indexEventLinesIncremental,
+  splitSourceForFirstFrame,
+  type EventLineScanState
+} from '../emevd/emevdSourceMount.js';
 import { EditorState, type Extension } from '@codemirror/state';
 import {
   EditorView,
@@ -65,12 +72,38 @@ export interface EventSourceSubmitResult {
   nextDslTemplate?: string;
 }
 
+/**
+ * 事件块的 gutter 判据行（按文档顺序）。
+ *
+ * 工作台只需要「第 N 个事件块是哪个 eventId、有几条未知指令」。以前它从
+ * `document.events` 里 filter 出来，逼着 App 为此保留一份带指令体的投影 ——
+ * 而那份投影只能来自另一次 `readEmevdDocument`（EVENT-30A envelope 默认只采样
+ * 256 条指令，第 256 条之后的事件会被整段误判为「全未知」，1730 事件的真实
+ * 文件里几乎每个 gutter 标记都是假的）。
+ *
+ * 现在改由 `readEmevdFullDocument` 的 outline 直接给：unknownCount 是主进程按
+ * 完整 EMEDF registry 逐条判的，覆盖 4096 个事件（实测最大 common_func 2124）。
+ */
+export interface EventWarningRow {
+  eventId: number;
+  /** 该事件里 EMEDF 无定义的指令条数；0 表示不打标记。 */
+  warnings: number;
+}
+
 /** 一个逻辑 EMEVD 文档标签的只读数据（App 侧维护，renderer 只展示与编辑）。 */
 export interface EventSourceTabData {
   tabId: string;
   title: string;
   resourceUri: string;
   document: EmevdEditorDocument;
+  /**
+   * gutter 判据。live 文档由 outline 给（权威）；缺省时退回按 `document.events`
+   * 现算，保持只读 demo / 读取失败 / 单测里手搓文档的既有行为。
+   *
+   * 显式带 `| undefined`：换文档时必须能把上一份判据清掉（`exactOptionalPropertyTypes`
+   * 下「不写这个键」与「写 undefined」是两件事，而合并 tab 时只能后者）。
+   */
+  eventWarnings?: readonly EventWarningRow[] | undefined;
   sourceHash: string | null;
   live: boolean;
   dslTemplate: string | null;
@@ -101,6 +134,8 @@ interface InternalTab extends EventSourceTabData {
   draft: string;
   /** 该标签的 CodeMirror 状态（含 undo/redo 历史），切换标签时保留。 */
   editorState: EditorState;
+  /** 增量灌入的目标全文。null 表示已齐或无需再灌。 */
+  sourceFillTarget: string | null;
 }
 
 interface EventLineInfo {
@@ -141,45 +176,81 @@ const EMEDF_MISSING_SOURCE = [
   '// 反汇编只消费 EMEDF 公开语法，数据留在本机，不会打进仓库。'
 ].join('\n');
 
-function baselineText(tab: EventSourceTabData): string {
+/**
+ * S15 失败面：读取失败（非 live 且无模板）时，源码区给 code + 人话 + 下一步，
+ * 禁止再画 `resource "file://event/…"` 假源码。message 来自已过 sanitizer 的
+ * IPC 诊断；KRAK 缺 Oodle 时 Bridge 的 message 本身就是可行动句，不再追加。
+ */
+export function readFailureSource(document: EmevdEditorDocument): string | null {
+  const failure = document.diagnostics.find(
+    (diagnostic) => diagnostic.severity === 'error' || diagnostic.severity === 'warning'
+  );
+  if (!failure) return null;
+  const lines = [
+    `// 事件脚本读不出来（${failure.code}）`,
+    `// ${failure.message}`
+  ];
+  if (!failure.message.includes('开始')) {
+    lines.push(
+      '// 下一步：在「开始」页确认已挂载含 sekiro.exe 的原版目录后重新打开；',
+      '// 仍未解决则检查该文件是否完整（KRAK 压缩需要 Oodle 运行库）。'
+    );
+  }
+  return lines.join('\n');
+}
+
+export function baselineText(tab: EventSourceTabData): string {
   // live 但 dslTemplate 缺失 = EMEDF 缺失（主进程失败关闭，不给伪源码）。
   if (tab.live && tab.dslTemplate === null) return EMEDF_MISSING_SOURCE;
+  // S15：读取失败（非 live 且无模板）→ 可行动失败句，禁止假 resource 源码。
+  if (!tab.live && tab.dslTemplate === null) {
+    return readFailureSource(tab.document) ?? renderSource(tab.document);
+  }
   return tab.dslTemplate ?? renderSource(tab.document);
+}
+
+/**
+ * 取一个标签的 gutter 判据行：优先用 App 下发的 outline 派生行（live 文档），
+ * 否则按 `document.events` 现算（只读 demo / 读取失败 / 单测手搓文档）。
+ */
+export function eventWarningRowsOf(tab: EventSourceTabData): readonly EventWarningRow[] {
+  if (tab.eventWarnings) return tab.eventWarnings;
+  return tab.document.events.map((event) => ({
+    eventId: event.eventId,
+    warnings: event.instructions.reduce((n, instruction) => n + (instruction.unknown ? 1 : 0), 0)
+  }));
 }
 
 /**
  * 定位 doc 里每个事件块的首行（1-based 行号），供 gutter 标记与 Go to Event。
  *
- * 兼容两种形态：
- * - 旧 Patch-DSL：`event @e:<anchor>`（有 anchor 的文档）；
- * - R3/P4 DarkScript3 式：`$Event(` —— 模板按 document.events 顺序渲染，
- *   所以按出现顺序映射到事件。
+ * 三种锚形态都要认，且都按「块出现顺序 = rows 顺序」对齐：
+ * - `$Event(`：R3/P4 DarkScript3 式模板，本身不带锚，只能按顺序。
+ * - `event @e:<eventId>`：`renderSource` 在文档没挂锚时的形态，锚就是十进制 eventId。
+ * - `event @e:<localNodeId>`：挂过 stableIdentity 的形态，锚是 24 位 hex，跟 eventId
+ *   无关，从 rows 里查不到。
+ *
+ * 所以锚能解析成已知 eventId 就按锚取（模板重排也不会错位），否则退回按顺序取。
+ * 原实现在锚查不到时直接 `continue`，等于「文档没挂锚 → 整列标记静默消失」；
+ * 而生产路径正好就是没挂锚的那种，标记全靠 `$Event(` 分支才没露出来。
  * 行号随 draft 编辑变化，故在 draft 变化时重建。
  */
-function indexEventLines(text: string, events: EmevdEventIr[]): Map<number, EventLineInfo> {
-  const byAnchor = new Map<string, EmevdEventIr>();
-  for (const event of events) {
-    if (event.anchor?.localNodeId) byAnchor.set(event.anchor.localNodeId, event);
-  }
+export function indexEventLines(
+  text: string,
+  rows: readonly EventWarningRow[]
+): Map<number, EventLineInfo> {
+  const byEventId = new Map<string, EventWarningRow>();
+  for (const row of rows) byEventId.set(String(row.eventId), row);
   const map = new Map<number, EventLineInfo>();
   const lines = text.split('\n');
-  let darkScriptIndex = 0;
+  let blockIndex = 0;
   for (let i = 0; i < lines.length; i += 1) {
     const anchorMatch = /^event\s+@e:(\S+)/.exec(lines[i]!);
-    if (anchorMatch) {
-      const event = byAnchor.get(anchorMatch[1]!);
-      if (!event) continue;
-      const warnings = event.instructions.filter((instruction) => instruction.unknown).length;
-      if (warnings > 0) map.set(i + 1, { eventId: event.eventId, warnings });
-      continue;
-    }
-    if (/^\$Event\(/.test(lines[i]!)) {
-      const event = events[darkScriptIndex];
-      darkScriptIndex += 1;
-      if (!event) continue;
-      const warnings = event.instructions.filter((instruction) => instruction.unknown).length;
-      if (warnings > 0) map.set(i + 1, { eventId: event.eventId, warnings });
-    }
+    if (!anchorMatch && !/^\$Event\(/.test(lines[i]!)) continue;
+    const row = (anchorMatch ? byEventId.get(anchorMatch[1]!) : undefined) ?? rows[blockIndex];
+    blockIndex += 1;
+    if (!row) continue;
+    if (row.warnings > 0) map.set(i + 1, { eventId: row.eventId, warnings: row.warnings });
   }
   return map;
 }
@@ -411,6 +482,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   completionItemsRef.current = completionItems;
   /** 每 tab 的 event 块行映射，gutter 经该 ref 读取（CM 闭包拿不到 React state）。 */
   const eventLineInfoRef = useRef<Map<number, EventLineInfo>>(new Map());
+  const eventLineScanRef = useRef<EventLineScanState>(emptyEventLineScan());
+  const sourceFillGenerationRef = useRef(0);
   /** 始终指向最新 commitDraft，供各 tab 的 CM extensions 闭包安全调用。 */
   const commitDraftRef = useRef<(tabId: string, text: string, state: EditorState) => void>(() => {});
 
@@ -466,20 +539,27 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         const merged: InternalTab = {
           ...existing,
           document: pending.document,
+          // 必须显式跟着 document 走：`...existing` 会留住上一次的 gutter 判据，
+          // 重开/提交后拿旧行给新文本打标记。pending 没有时也要清掉（undefined
+          // = 回退到按 document.events 现算）。
+          eventWarnings: pending.eventWarnings,
           sourceHash: pending.sourceHash,
           live: pending.live,
           dslTemplate: pending.dslTemplate,
           dslTemplateTruncated: pending.dslTemplateTruncated,
-          dslTemplateTotalLines: pending.dslTemplateTotalLines
+          dslTemplateTotalLines: pending.dslTemplateTotalLines,
+          sourceFillTarget: existing.sourceFillTarget
         };
         return previous.map((tab, i) => (i === index ? merged : tab));
       }
+      const { head, rest } = splitSourceForFirstFrame(base);
       const created: InternalTab = {
         ...pending,
         dirty: false,
-        draft: base,
+        draft: head,
+        sourceFillTarget: rest.length > 0 ? base : null,
         editorState: EditorState.create({
-          doc: base,
+          doc: head,
           extensions: createExtensionsFor(pending.tabId, !pending.live)
         })
       };
@@ -489,8 +569,9 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, createExtensionsFor]);
 
-  const syncGutterInfo = useCallback((text: string, events: EmevdEventIr[]) => {
-    eventLineInfoRef.current = indexEventLines(text, events);
+  const applyEventLineScan = useCallback((scan: EventLineScanState) => {
+    eventLineScanRef.current = scan;
+    eventLineInfoRef.current = scan.map;
     const view = viewRef.current;
     if (view) {
       (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
@@ -499,9 +580,13 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     }
   }, []);
 
+  const syncGutterInfo = useCallback((text: string, rows: readonly EventWarningRow[]) => {
+    applyEventLineScan(indexEventLinesIncremental(emptyEventLineScan(), text, rows));
+  }, [applyEventLineScan]);
+
   useEffect(() => {
     if (!activeTab) return;
-    syncGutterInfo(activeTab.draft, activeTab.document.events);
+    syncGutterInfo(activeTab.draft, eventWarningRowsOf(activeTab));
   }, [activeTab, syncGutterInfo]);
 
   /** 挂载 EditorView（一次）；后续经 setState 换 tab state。 */
@@ -542,22 +627,88 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     const current = tabs.find((tab) => tab.tabId === activeTabId);
     if (!current || current.dirty) return;
     const next = baselineText(pending);
-    if (next === current.draft) return;
+    if (current.sourceFillTarget === next) return;
+    if (next === current.draft && current.sourceFillTarget === null) return;
+    const { head, rest } = splitSourceForFirstFrame(next);
     const nextState = EditorState.create({
-      doc: next,
+      doc: head,
       extensions: createExtensionsFor(activeTabId, !pending.live)
     });
     setTabs((previous) =>
       previous.map((tab) =>
         tab.tabId === activeTabId
-          ? { ...tab, document: pending.document, sourceHash: pending.sourceHash, dslTemplate: pending.dslTemplate, draft: next, dirty: false, editorState: nextState }
+          ? {
+              ...tab,
+              document: pending.document,
+              eventWarnings: pending.eventWarnings,
+              sourceHash: pending.sourceHash,
+              dslTemplate: pending.dslTemplate,
+              draft: head,
+              dirty: false,
+              sourceFillTarget: rest.length > 0 ? next : null,
+              editorState: nextState
+            }
           : tab
       )
     );
     view.setState(nextState);
-    syncGutterInfo(next, pending.document.events);
+    syncGutterInfo(head, eventWarningRowsOf(pending));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, activeTabId]);
+
+  /** 后台把剩余源码灌进当前 tab。取消/切走会中止这一代填充。 */
+  useEffect(() => {
+    const tab = tabs.find((item) => item.tabId === activeTabId);
+    if (!tab || tab.dirty || tab.sourceFillTarget === null) return;
+    const remaining = tab.sourceFillTarget.slice(tab.editorState.doc.length);
+    if (remaining.length === 0) return;
+    const generation = sourceFillGenerationRef.current + 1;
+    sourceFillGenerationRef.current = generation;
+    const controller = new AbortController();
+    const rows = eventWarningRowsOf(tab);
+    void appendSourceSlices({
+      state: tab.editorState,
+      rest: remaining,
+      signal: controller.signal,
+      onSlice: (state) => {
+        if (sourceFillGenerationRef.current !== generation) return;
+        applyEventLineScan(indexEventLinesIncremental(
+          eventLineScanRef.current,
+          state.doc.toString(),
+          rows
+        ));
+        const view = viewRef.current;
+        if (view && view.state !== state) view.setState(state);
+        setTabs((previous) =>
+          previous.map((item) =>
+            item.tabId === tab.tabId
+              ? { ...item, draft: state.doc.toString(), editorState: state }
+              : item
+          )
+        );
+      }
+    }).then((result) => {
+      if (sourceFillGenerationRef.current !== generation || result.cancelled) return;
+      setTabs((previous) =>
+        previous.map((item) =>
+          item.tabId === tab.tabId
+            ? {
+                ...item,
+                draft: result.state.doc.toString(),
+                editorState: result.state,
+                sourceFillTarget: null
+              }
+            : item
+        )
+      );
+      const view = viewRef.current;
+      if (view) view.setState(result.state);
+    });
+    return () => {
+      controller.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, activeTab?.sourceFillTarget, activeTab?.dirty]);
 
   function activateTab(tabId: string): void {
     setActiveTabId(tabId);
@@ -583,8 +734,9 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       const result = await props.onDslSubmit(activeTab, activeTab.draft);
       if (result.ok) {
         const nextText = result.nextDslTemplate ?? activeTab.draft;
+        const { head, rest } = splitSourceForFirstFrame(nextText);
         const nextState = EditorState.create({
-          doc: nextText,
+          doc: head,
           extensions: createExtensionsFor(activeTab.tabId, !activeTab.live)
         });
         setTabs((previous) =>
@@ -593,17 +745,20 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
               ? {
                   ...tab,
                   dirty: false,
-                  draft: nextText,
+                  draft: head,
                   dslTemplate: nextText,
                   dslTemplateTruncated: false,
                   dslTemplateTotalLines: nextText.split('\n').length,
+                  sourceFillTarget: rest.length > 0 ? nextText : null,
                   editorState: nextState
                 }
               : tab
           )
         );
         viewRef.current?.setState(nextState);
-        syncGutterInfo(nextText, activeTab.document.events);
+        // 提交刚成功、App 还没回灌 pendingTab：先按提交前的判据行给新文本打标记，
+        // 下一轮 pendingTab 到达时会用权威 outline 覆盖。
+        syncGutterInfo(head, eventWarningRowsOf(activeTab));
         setStatus('源码已通过提交管线；等待文档刷新。');
       } else {
         setStatus(result.diagnostics[0]?.message ?? '源码提交被拒绝。');
