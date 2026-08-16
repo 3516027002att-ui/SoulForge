@@ -2554,6 +2554,14 @@ SHELL-09 → SHELL-10
 > - 读取失败时编辑区正文给 `code + 人话 + 下一步`（KRAK 缺原版：到「开始」页选择含 sekiro.exe 的原版目录），禁止假 `resource "file://…"` 伪源码与「详情见底部日志」；失败随 `eventOpenFailure` 附进 Agent 系统提示，Agent 能直接复述原因和下一步。
 > - 编不了的指令：该行标未解码，不锁整份只读、不假成功写盘。
 
+> **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
+> - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
+> - **B**：renderer 打开只打一枪——`readEmevdDocument` envelope 双读删除，事件数 / sourceHash / gutter 判据全部由 `readEmevdFullDocument` 的 outline 给（`unknownCount` 按完整 EMEDF 逐条判，不再有 256 条采样造成的假「整段未知」）；`mapEmevdEnvelope` / `alignEmevdDocumentAnchors` 删除，`indexEventLines` 按 `$Event(` 出现顺序映射。
+> - **C**：反汇编单次解码（`DecodeStatus` 化，折叠与渲染共用一份结果）+ EMEDF registry 索引（WeakMap：校验 + bank→id→def，33266 条指令从 9s 级降到 4ms 级）+ `renderEmevdDarkScriptAsync` 分片让出（可取消，不返回半成品）。
+> - **D**：sanitizer 源码字段豁免——`dslTemplate` / `text` 等是内容不是元数据，不做整串路径替换（S13 口径）；路径防线只留键名与诊断 message。
+> - **E**：CodeMirror 禁首帧 `EditorState.create(全文)`——首帧只灌 400 行前缀，常驻 interval 每 16ms `view.dispatch` 追加一片；`indexEventLines` 增量更新不整篇 split；dirty（用户编辑）一次性补全；tab 切回走缓存 state 零 parse。
+> - **F**：领域切换只开 `filesForDomain` 第一份（common_func 不预加载）；main 按 sourceHash 缓存反汇编文本，切回零解析（缓存失效 = 写入 / hash 变）。
+
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。
 - **Dependencies**：在 `apps/desktop/package.json` 加入 exact 版本 `@codemirror/state@6.7.1`、`@codemirror/view@6.43.8`、`@codemirror/language@6.12.4`、`@codemirror/search@6.7.1`、`@codemirror/commands@6.10.4`、`@codemirror/autocomplete@6.20.3`、`@lezer/highlight@1.2.3`，并更新根 lockfile。
 - **Steps**：在已有 `EventSourceWorkbenchPanel` 上做成 DarkScript3 式源码 IDE：文档标签 + 源码主区；无四钮（查找替换/Outline/Inspector/Problems），Ctrl+F 走 CodeMirror search；EMEDF 指令名 autocomplete（Ctrl+Space + 输入时）与悬停参数名列表。接 CodeMirror 6、行号、折叠、高亮、gutter、dirty tab、autocomplete/hover。不要做 260/320 固定三栏。
