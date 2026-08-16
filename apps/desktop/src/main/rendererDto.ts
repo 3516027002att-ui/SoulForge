@@ -172,6 +172,18 @@ export function sanitizeDiagnostics(diagnostics: readonly Diagnostic[]): Diagnos
   }));
 }
 
+/**
+ * 内容型字段豁免路径整串替换（S18-D / S13 口径）。
+ *
+ * `sanitizeRendererValue` 经 handle 包装拦下所有 IPC 返回值，其中
+ * `dslTemplate`（EMEVD DarkScript 反汇编，真实 common.emevd 约 7 万行）与
+ * `text`（FMG/文本条目内容）是**用户内容**不是元数据：整串跑三次正则既贵
+ * （7 万行 × 3 个正则），又会把源码里恰好出现的 `N:\` 形状文本（极少，且属于
+ * 内容）误替换成「[本机路径已隐藏]」。路径泄漏只防 absolutePath/sourcePath 等
+ * 键与诊断 message —— 那两条防线不受影响。
+ */
+const SOURCE_CONTENT_KEYS = new Set(['dslTemplate', 'sourceText', 'draft', 'text']);
+
 /** Remove filesystem authority-bearing fields from generic Bridge/container DTOs. */
 export function sanitizeRendererValue(value: unknown): unknown {
   if (typeof value === 'string') return sanitizeRendererString(value);
@@ -184,6 +196,11 @@ export function sanitizeRendererValue(value: unknown): unknown {
     if (SENSITIVE_PATH_KEYS.has(key)) continue;
     // Internal workspace ids are currently file URLs and therefore reveal the root.
     if (key === 'workspaceId') continue;
+    // 源码/正文按内容透传，不做整串路径扫描（见 SOURCE_CONTENT_KEYS 注释）。
+    if (SOURCE_CONTENT_KEYS.has(key)) {
+      output[key] = child;
+      continue;
+    }
     output[key] = sanitizeRendererValue(child);
   }
   return output;

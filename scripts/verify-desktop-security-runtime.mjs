@@ -188,6 +188,11 @@ const SENSITIVE_PROBE = {
   workspaceRoot: 'D:\\workspace\\mod',
   apiKey: 'sk-should-never-cross-the-bridge',
   token: 'bearer-should-never-cross',
+  // S18-D：源码/正文是内容不是元数据 —— dslTemplate（7 万行 DarkScript）与
+  // text（FMG 条目）必须整段透传，即使内容里出现 `N:\` 形状文本；路径防线
+  // 只落在键名与诊断 message 上。
+  dslTemplate: '$Event(50, Default, function() {\n    // 内容里的 N:\\mod\\shape 形状是源码不是泄漏\n});',
+  text: '条目正文：某目录 D:\\game\\text 说明',
   nested: {
     backupRoot: 'D:\\workspace\\.soulforge\\backup',
     message: '写入失败：D:\\workspace\\mod\\a.fmg 被占用（\\\\?\\UNC\\host\\share\\b.fmg）'
@@ -212,6 +217,13 @@ if (typeof sanitizeRendererValue === 'function') {
   assert.check(
     JSON.stringify(sanitized).includes('file:///workspace/a.fmg'),
     'sanitizeRendererValue 不得连带删除非敏感字段（否则脱敏会退化为清空一切）',
+    { serialized }
+  );
+
+  assert.check(
+    serialized.includes('内容里的 N:\\\\mod\\\\shape 形状是源码不是泄漏')
+      && serialized.includes('条目正文：某目录 D:\\\\game\\\\text 说明'),
+    'S18-D：源码/正文字段整段透传，不得对内容做路径整串替换',
     { serialized }
   );
 } else {
