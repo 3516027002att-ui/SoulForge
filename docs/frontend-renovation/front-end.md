@@ -1601,6 +1601,8 @@ AgentSidebar
 
 保留 `AgentSidebar` 外部导出名。`AgentTaskPanel` 不再作为顶部常驻控制台；任务进度、取消和审批进入消息流。模型服务、工具库存、会话历史和开发设置进入 `AgentSecondaryDrawer`。
 
+**S11 裁定（2026-08-16）**：抽屉是 Agent 列的第二个面（欢迎/对话 ↔ 抽屉）——打开时整列换页，欢迎、资源引用条、composer 全部卸掉，禁止半透明抽屉盖在欢迎 + composer 上（旧实现 `position:absolute` 叠一层，浅色主题 `--forge-0` 只有 8% 白，下层全透出）。抽屉占 `conversation` grid 区（header 以下 1fr），顶栏自带 历史|设置 视图切换 + ×，标题独占一行不与欢迎「Agent」抢行；关闭恢复原面，composer 仍在。
+
 组件不得全部塞回一个超大 `AgentSidebar.tsx`。60A–60D 必须按上述边界拆文件，并为每个有状态组件提供独立 reducer 或纯状态转换测试。
 
 ### 12.11 Agent typed DTO 和状态机

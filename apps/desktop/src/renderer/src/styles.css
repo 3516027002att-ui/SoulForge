@@ -1482,13 +1482,29 @@ pre.tool-output {
 .agent-scroll-to-bottom:focus-visible { outline: 2px solid var(--ember-text); outline-offset: 1px; }
 
 /* 二级抽屉：复用旧 .agent-drawer 的对话框形态。 */
+/* S11：整列换页——抽屉是 Agent 列的第二个面（欢迎/对话 ↔ 抽屉），不再盖在欢迎 +
+   composer 上的绝对定位半透明层（浅色主题 --forge-0 只有 8% 白，下层全透出）。
+   grid-area 占 conversation 行（1fr 撑满 header 以下）；背景是输入面层级，下面
+   没有任何可透出的文本内容。 */
 .agent-secondary-drawer {
-  position: absolute; inset: 0; z-index: 6;
+  grid-area: conversation;
+  min-height: 0;
   display: flex; flex-direction: column;
-  background: var(--forge-0);
-  border-left: 1px solid var(--line);
+  background: var(--forge-2);
+  border-top: 1px solid var(--line);
 }
 .agent-secondary-drawer.is-hidden { display: none; }
+.agent-drawer__switch { display: flex; align-items: center; gap: 4px; }
+.agent-drawer__switch-btn {
+  font-size: 11px; line-height: 1; padding: 3px 8px;
+  color: var(--ink-2); background: transparent; border: 1px solid var(--line);
+  border-radius: var(--radius-s); cursor: pointer;
+}
+.agent-drawer__switch-btn:hover { background: var(--forge-hover); color: var(--ink-0); }
+.agent-drawer__switch-btn[aria-pressed='true'] {
+  color: var(--ember-text); border-color: color-mix(in oklch, var(--ember), transparent 55%);
+  background: var(--ember-soft);
+}
 
 
 .agent-controls__scope { margin: 4px 0 0; font-size: 11px; color: var(--ink-3); }

@@ -1012,10 +1012,15 @@ test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模�
   // 设置不出现在 Agent header；从历史抽屉进入模型设置。
   await expect(window.locator('details.agent-settings')).toHaveCount(0);
   await window.getByRole('button', { name: '打开 Agent 历史' }).click();
-  const history = window.locator('.agent-secondary-drawer:not(.is-hidden)');
+  const history = window.locator('.agent-secondary-drawer');
   await expect(history).toContainText('Agent 历史');
+  // S11：整列换页——打开抽屉时欢迎/资源引用/composer 全部卸掉，不再是半透明
+  // 抽屉盖在欢迎 + 发送框上。
+  await expect(window.locator('[data-testid="agent-empty-state"]')).toHaveCount(0);
+  await expect(window.locator('[data-testid="agent-composer-context"]')).toHaveCount(0);
+  await expect(window.locator('.agent__composer')).toHaveCount(0);
   await history.getByRole('button', { name: '模型设置' }).click();
-  await expect(window.locator('.agent-secondary-drawer:not(.is-hidden)')).toContainText('模型服务设置');
+  await expect(window.locator('.agent-secondary-drawer')).toContainText('模型服务设置');
 
   // 模型/思考强度/权限模式仍保留在专用设置抽屉。
   await expect(window.locator('#agent-provider')).toBeVisible();
@@ -1032,9 +1037,14 @@ test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模�
   // 关闭再打开后设置不丢失。
   await window.locator('#agent-thinking').selectOption('deep');
   await window.locator('#agent-provider').selectOption('openai');
+  // 关上恢复原面：欢迎与 composer 回到 Agent 列。
   await window.getByRole('button', { name: '关闭抽屉' }).click();
+  await expect(window.locator('.agent-secondary-drawer')).toHaveCount(0);
+  await expect(window.locator('.agent__composer')).toBeVisible();
+  await expect(window.locator('[data-testid="agent-empty-state"]')).toBeVisible();
+  // 设置不丢失：再开历史 → 设置，选择仍在。
   await window.getByRole('button', { name: '打开 Agent 历史' }).click();
-  await window.locator('.agent-secondary-drawer:not(.is-hidden)').getByRole('button', { name: '模型设置' }).click();
+  await window.locator('.agent-secondary-drawer').getByRole('button', { name: '模型设置' }).click();
   await expect(window.locator('#agent-provider')).toHaveValue('openai');
   await expect(window.locator('#agent-thinking')).toHaveValue('deep');
 

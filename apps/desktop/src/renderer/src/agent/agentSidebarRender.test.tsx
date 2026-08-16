@@ -634,7 +634,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
       }]
     };
     const html = render({ task: { ...render0Task(), task: running } });
-    assert.match(html, /data-testid="agent-secondary-drawer"/, '二级抽屉挂载');
+    // S11：抽屉收起时不渲染（整列换页）——主栏不常驻任务面板/工具库存，抽屉
+    // 只在打开时作为第二个面出现。
+    assert.ok(!html.includes('data-testid="agent-secondary-drawer"'), '抽屉收起时不占 DOM');
     assert.ok(!html.includes('data-testid="agent-task-panel"'), '主栏不再常驻任务面板');
     assert.ok(!html.includes('data-testid="agent-tool-inventory"'), '工具库存不在主栏');
     // 工具库存确实在抽屉内：直接渲染抽屉历史视图验证归属。
@@ -661,6 +663,58 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.match(drawerHtml, /search_resources/, '抽屉内显示工具名');
   });
 
+  it('S11 抽屉整列换页：打开面只有抽屉，不含欢迎/composer/资源引用', () => {
+    // SSR 下 drawerView 是内部 state（null），侧边栏挂载面即主面；抽屉面用
+    // 直接渲染验证——开关、标题独占一行，且不携带主栏任何元素。
+    const drawerHtml = renderToStaticMarkup(
+      <AgentSecondaryDrawer
+        open={true}
+        view="settings"
+        onClose={() => undefined}
+        onSwitchView={() => undefined}
+        task={render0Task()}
+        tools={[]}
+        permissionLockReason="由主进程锁定为计划模式"
+        settings={{
+          provider: 'mock',
+          thinking: 'normal',
+          permissionMode: 'plan',
+          permissionLockReason: '锁',
+          onProviderChange: () => undefined,
+          onThinkingChange: () => undefined
+        }}
+      />
+    );
+    assert.match(drawerHtml, /aria-label="模型服务设置"/, '设置面标题');
+    assert.match(drawerHtml, /aria-label="抽屉视图"/, '历史/设置切换在抽屉顶栏');
+    assert.match(drawerHtml, /aria-pressed="true"/, '当前视图按下态');
+    assert.ok(!drawerHtml.includes('agent__composer'), '抽屉面不含 composer');
+    assert.ok(!drawerHtml.includes('agent-composer-context'), '抽屉面不含资源引用条');
+    assert.ok(!drawerHtml.includes('agent-empty-state'), '抽屉面不含欢迎三勾');
+    // 历史/设置互相可达：历史视图里也有切换控件（不再只有「模型设置」一个方向）。
+    const historyHtml = renderToStaticMarkup(
+      <AgentSecondaryDrawer
+        open={true}
+        view="history"
+        onClose={() => undefined}
+        onSwitchView={() => undefined}
+        task={render0Task()}
+        tools={[]}
+        permissionLockReason="由主进程锁定为计划模式"
+        settings={{
+          provider: 'mock',
+          thinking: 'normal',
+          permissionMode: 'plan',
+          permissionLockReason: '锁',
+          onProviderChange: () => undefined,
+          onThinkingChange: () => undefined
+        }}
+      />
+    );
+    assert.match(historyHtml, /aria-label="抽屉视图"/, '历史视图顶栏也有切换');
+    assert.ok(!historyHtml.includes('agent__composer'), '历史面不含 composer');
+  });
+
   it('关闭 dock 不取消 main-owned task：收起仍保留消息流，取消控件只在抽屉', () => {
     const running = {
       ...INITIAL_AGENT_TASK_STATE,
@@ -684,7 +738,27 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     const html = render({ task: { ...render0Task(), task: running } });
     assert.match(html, /data-testid="composer-stop"/, '运行中停止键在 composer');
     assert.ok(!html.includes('data-testid="agent-task-cancel"'), '任务级取消不在主栏');
-    assert.match(html, /agent-secondary-drawer/, '取消控件在二级抽屉');
+    // 取消控件只存在于抽屉视图（打开时才有）：直接渲染抽屉验证归属。
+    const cancelHtml = renderToStaticMarkup(
+      <AgentSecondaryDrawer
+        open={true}
+        view="settings"
+        onClose={() => undefined}
+        onSwitchView={() => undefined}
+        task={render0Task()}
+        tools={[]}
+        permissionLockReason="由主进程锁定为计划模式"
+        settings={{
+          provider: 'mock',
+          thinking: 'normal',
+          permissionMode: 'plan',
+          permissionLockReason: '锁',
+          onProviderChange: () => undefined,
+          onThinkingChange: () => undefined
+        }}
+      />
+    );
+    assert.match(cancelHtml, /data-testid="agent-task-cancel"/, '任务级取消在二级抽屉');
   });
 });
 
