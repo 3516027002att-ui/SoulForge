@@ -34,7 +34,15 @@ export interface AgentToolBridgeOptions {
 
 export interface AgentToolBridge {
   tools: AgentToolDefinition[];
-  executeTool: (call: ToolCall) => Promise<{ ok: boolean; content: string; code?: string }>;
+  /**
+   * 执行一次工具调用。`contextOverride` 由宿主（main）在需要注入生产上下文的
+   * 调用（如回滚：session / 生产 store / 备份目录 / 用户确认凭据）时提供，
+   * 与桥闭包里的基础 context 浅合并；纯读工具调用不传即行为不变。
+   */
+  executeTool: (
+    call: ToolCall,
+    contextOverride?: Partial<ToolContext>
+  ) => Promise<{ ok: boolean; content: string; code?: string }>;
 }
 
 const PARALLEL_SAFE_LEVELS = new Set(['read', 'analyze']);
@@ -52,7 +60,8 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
   }));
 
   const executeTool = async (
-    call: ToolCall
+    call: ToolCall,
+    contextOverride?: Partial<ToolContext>
   ): Promise<{ ok: boolean; content: string; code?: string }> => {
     let input: unknown = {};
     try {
@@ -67,7 +76,7 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         })
       };
     }
-    const result = await registry.run(call.name, input, context);
+    const result = await registry.run(call.name, input, { ...context, ...contextOverride });
     if (result.ok) {
       return { ok: true, content: JSON.stringify(result.data ?? null) };
     }
