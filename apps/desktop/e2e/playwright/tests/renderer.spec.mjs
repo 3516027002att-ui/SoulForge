@@ -1059,11 +1059,18 @@ test('S8：Agent dock 可缩到 200px（下限 200，上限 620，默认 440）'
   const { app, window } = await launchApp();
   // localStorage 可能持久化了上一轮的 dock 宽度（agentDock UI key）：清掉后重载，
   // 「默认 440」断言不受上一轮运行影响。
-  await window.evaluate(() => {
+  //
+  // 清两次：App 的持久化 effect 是异步 flush 的，第一次清理可能被它把旧宽度
+  // 写回（实测竞态：清理 → persist effect 写回旧值 → reload 后恢复 effect 又
+  // 读到旧值，440 断言稳定失败）。等 flush 完再清一次，reload 时才是干净的。
+  const clearDockKeys = () => window.evaluate(() => {
     for (const key of Object.keys(localStorage)) {
       if (key.startsWith('soulforge.ui.agentDock.v1.')) localStorage.removeItem(key);
     }
   });
+  await clearDockKeys();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await clearDockKeys();
   await window.reload();
   // localStorage 可能持久化了上一轮的收起状态：先确保 dock 展开，resizer 才可交互。
   const agentToggle = window.getByRole('button', { name: 'AI Agent 面板' });
