@@ -13,10 +13,12 @@ import {
   DEFERRED_PREVIEW_TARGET_RELEASE,
   classifyWorkspaceOpen,
   isDeferredPreviewEditorKind,
-  PARAM_PAGE_SIZE
+  PARAM_PAGE_SIZE,
+  mergeCiteHits
 } from '@soulforge/shared';
 import type {
   AgentResourceReference,
+  CiteHit,
   Diagnostic,
   MsbMapEventLike,
   MsbModelLike,
