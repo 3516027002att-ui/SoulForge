@@ -68,11 +68,7 @@ import { VfxWorkbenchPanel, type VfxFileView } from './editors/VfxWorkbenchPanel
 import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
-import {
-  mapEmevdEnvelopeToDocument,
-  type BridgeEmevdEnvelopeLike
-} from './emevd/mapEmevdEnvelope.js';
-import { alignEmevdDocumentAnchors } from './emevd/alignEmevdDocumentAnchors.js';
+import { emevdPendingTabFromFullDocument } from './emevd/emevdPendingTab.js';
 import {
   ChangeControlStore,
   type CandidateChange,
@@ -844,7 +840,7 @@ export function App(): ReactElement {
       if (typeof bridge.readParamDocument === 'function') readContract.add('param');
       if (typeof bridge.readGparamDocument === 'function') readContract.add('gparam');
       if (typeof bridge.readFmgDocument === 'function') readContract.add('text');
-      if (typeof bridge.readEmevdDocument === 'function') readContract.add('event');
+      if (typeof bridge.readEmevdFullDocument === 'function') readContract.add('event');
       if (typeof bridge.readMsbDocument === 'function') readContract.add('map');
       if (typeof bridge.inspectContainerTree === 'function') readContract.add('container');
       if (typeof bridge.listScriptContainerEntriesPage === 'function') readContract.add('script');
@@ -1297,23 +1293,30 @@ export function App(): ReactElement {
         setEventOpenFailure(null);
         return;
       }
-      if (!bridge || typeof bridge.readEmevdDocument !== 'function') {
+      if (!bridge || typeof bridge.readEmevdFullDocument !== 'function') {
         setEventPendingTab(null);
         setEventOpenFailure(null);
         return;
       }
       try {
-        const result = await bridge.readEmevdDocument(target.sourceUri) as {
-          ok?: boolean;
-          data?: BridgeEmevdEnvelopeLike | null;
-          diagnostics?: Array<{ code?: string; message?: string }>;
-        };
+        // S18-B：一次读到底。以前这里是两次 IPC —— 先 readEmevdDocument 拿有界
+        // envelope 投影（128 事件 / 每事件最多 64 条指令样本），再
+        // readEmevdFullDocument 拿权威源码。第一次读的指令样本默认只覆盖前 256
+        // 条指令，真实 common.emevd 的 33266 条指令里，256 条之后的事件全被
+        // mapEmevdEnvelopeToDocument 误标「整段未知」，gutter 标记几乎全是假的。
+        // 现在事件数、sourceHash 与 gutter 判据都由 full 的 outline 给
+        // （unknownCount 按完整 EMEDF registry 逐条判定，覆盖 4096 个事件），
+        // 那条 envelope 通道 renderer 不再使用。
+        const full = await bridge.readEmevdFullDocument(
+          target.sourceUri,
+          `renderer-${target.sourceUri}-${Date.now()}`
+        );
         if (cancelled) return;
-        if (!result?.ok || !result.data) {
+        if (!full?.ok) {
           // S15：保留 Bridge 原始 code + 可行动 message（KRAK 缺原版时是「到「开始」
           // 页选择含 sekiro.exe 的原版目录」），面板正文按 code + 人话 + 下一步渲染，
           // 不再出现假 `resource "file://…"` 伪源码或「详情见底部日志」。
-          const bridgeDiag = result?.diagnostics?.[0];
+          const bridgeDiag = full?.diagnostics?.[0];
           setEventOpenFailure({
             document: eventTabShortTitle(target.relativePath),
             code: bridgeDiag?.code ?? 'EMEVD_LIVE_READ_FAILED',
@@ -1343,52 +1346,34 @@ export function App(): ReactElement {
           return;
         }
         setEventOpenFailure(null);
-        const doc = mapEmevdEnvelopeToDocument(target.sourceUri, result.data, { maxEvents: 128 });
-        // Load the authoritative bounded full-document DSL template; renderer
-        // never receives the full document itself (EVENT-30A bounded outline).
+        // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script 只读 /
+        // none 失败关闭）。
         let dslTemplate: string | null = null;
         let dslTemplateTruncated = false;
         let dslTemplateTotalLines = 0;
-        // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script 只读 /
-        // none 失败关闭）。
         let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
-        if (typeof bridge.readEmevdFullDocument === 'function') {
-          const full = await bridge.readEmevdFullDocument(
-            target.sourceUri,
-            `renderer-${target.sourceUri}-${Date.now()}`
-          );
-          if (cancelled) return;
-          if (full?.ok && full.dslTemplate) {
-            dslTemplate = full.dslTemplate;
-            dslTemplateTruncated = full.dslTemplateTruncated ?? false;
-            dslTemplateTotalLines = full.dslTemplateTotalLines ?? 0;
-            // 主进程返回 sourceStyle 时以它为准；旧 fixture/历史通道没有该字段时
-            // 按模板内容推断：`$Event(` 开头是 DarkScript 反汇编（只读），否则按旧
-            // hash DSL 处理（可编辑）。
-            sourceStyle = full.sourceStyle
-              ?? (/^\$Event\(/m.test(full.dslTemplate) ? 'dark-script' : 'patch-dsl');
-          } else if (full?.ok && full.dslTemplate === null) {
-            // EMEDF 缺失失败关闭：不提供伪解码（dslTemplate null + 诊断）。
-            sourceStyle = 'none';
-          } else {
-            pushToast(full?.diagnostics?.[0]?.message ?? '完整文档 DSL 模板加载失败', 'warn');
-          }
+        if (full.dslTemplate) {
+          dslTemplate = full.dslTemplate;
+          dslTemplateTruncated = full.dslTemplateTruncated ?? false;
+          dslTemplateTotalLines = full.dslTemplateTotalLines ?? 0;
+          // 主进程返回 sourceStyle 时以它为准；旧 fixture/历史通道没有该字段时
+          // 按模板内容推断：`$Event(` 开头是 DarkScript 反汇编（只读），否则按旧
+          // hash DSL 处理（可编辑）。
+          sourceStyle = full.sourceStyle
+            ?? (/^\$Event\(/m.test(full.dslTemplate) ? 'dark-script' : 'patch-dsl');
         }
-        setEventPendingTab({
+        // dslTemplate === null 是 EMEDF 缺失的失败关闭（不提供伪解码）：
+        // sourceStyle 留 'none'，工作台显示可行动说明（EMEDF_MISSING_SOURCE）。
+        setEventPendingTab(emevdPendingTabFromFullDocument({
           tabId: target.sourceUri,
           title: eventTabShortTitle(target.relativePath),
           resourceUri: target.sourceUri,
-          // EVENT-30B：envelope 投影的事件没有 anchor，而 diagnostic gutter /
-          // Go to Event 要靠 `event @e:<localNodeId>` 命中事件；权威锚源是
-          // dslTemplate 本身（readEmevdFullDocument 来自同一份 Bridge 文档）。
-          document: alignEmevdDocumentAnchors(doc, dslTemplate),
-          sourceHash: result.data.sourceHash ?? null,
-          live: true,
+          full,
           dslTemplate,
           dslTemplateTruncated,
           dslTemplateTotalLines,
           sourceStyle
-        });
+        }));
       } catch (error) {
         if (cancelled) return;
         setEventPendingTab(null);
@@ -3106,25 +3091,21 @@ export function App(): ReactElement {
                       `renderer-${tab.resourceUri}-${Date.now()}`
                     );
                     if (reload?.ok && reload.dslTemplate) {
-                      const refreshed = await bridge.readEmevdDocument(tab.resourceUri) as {
-                        ok?: boolean;
-                        data?: BridgeEmevdEnvelopeLike | null;
-                      };
+                      // S18-B：刷新与打开同一路径 —— 只读一次 full，document /
+                      // gutter 判据 / sourceHash 全部由 reload 的 outline 出；
+                      // 不再为刷新另走 readEmevdDocument 拿 envelope 投影。
                       setEventPendingTab({
                         ...tab,
-                        document: refreshed?.ok && refreshed.data
-                          ? alignEmevdDocumentAnchors(
-                              mapEmevdEnvelopeToDocument(tab.resourceUri, refreshed.data, { maxEvents: 128 }),
-                              reload.dslTemplate
-                            )
-                          : tab.document,
-                        sourceHash: refreshed?.ok && refreshed.data
-                          ? refreshed.data.sourceHash ?? tab.sourceHash
-                          : tab.sourceHash,
-                        dslTemplate: reload.dslTemplate,
-                        dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
-                        dslTemplateTotalLines: reload.dslTemplateTotalLines ?? 0,
-                        sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
+                        ...emevdPendingTabFromFullDocument({
+                          tabId: tab.tabId,
+                          title: tab.title,
+                          resourceUri: tab.resourceUri,
+                          full: reload,
+                          dslTemplate: reload.dslTemplate,
+                          dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
+                          dslTemplateTotalLines: reload.dslTemplateTotalLines ?? 0,
+                          sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
+                        })
                       });
                       return {
                         ok: true,

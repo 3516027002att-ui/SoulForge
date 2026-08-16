@@ -23,7 +23,7 @@ import {
   useState,
   type ReactElement
 } from 'react';
-import type { EmevdEditorDocument, EmevdEventIr } from '@soulforge/shared';
+import type { EmevdEditorDocument } from '@soulforge/shared';
 import type { EmedfCompletionItem } from '@soulforge/core';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { EditorState, type Extension } from '@codemirror/state';
@@ -65,12 +65,38 @@ export interface EventSourceSubmitResult {
   nextDslTemplate?: string;
 }
 
+/**
+ * 事件块的 gutter 判据行（按文档顺序）。
+ *
+ * 工作台只需要「第 N 个事件块是哪个 eventId、有几条未知指令」。以前它从
+ * `document.events` 里 filter 出来，逼着 App 为此保留一份带指令体的投影 ——
+ * 而那份投影只能来自另一次 `readEmevdDocument`（EVENT-30A envelope 默认只采样
+ * 256 条指令，第 256 条之后的事件会被整段误判为「全未知」，1730 事件的真实
+ * 文件里几乎每个 gutter 标记都是假的）。
+ *
+ * 现在改由 `readEmevdFullDocument` 的 outline 直接给：unknownCount 是主进程按
+ * 完整 EMEDF registry 逐条判的，覆盖 4096 个事件（实测最大 common_func 2124）。
+ */
+export interface EventWarningRow {
+  eventId: number;
+  /** 该事件里 EMEDF 无定义的指令条数；0 表示不打标记。 */
+  warnings: number;
+}
+
 /** 一个逻辑 EMEVD 文档标签的只读数据（App 侧维护，renderer 只展示与编辑）。 */
 export interface EventSourceTabData {
   tabId: string;
   title: string;
   resourceUri: string;
   document: EmevdEditorDocument;
+  /**
+   * gutter 判据。live 文档由 outline 给（权威）；缺省时退回按 `document.events`
+   * 现算，保持只读 demo / 读取失败 / 单测里手搓文档的既有行为。
+   *
+   * 显式带 `| undefined`：换文档时必须能把上一份判据清掉（`exactOptionalPropertyTypes`
+   * 下「不写这个键」与「写 undefined」是两件事，而合并 tab 时只能后者）。
+   */
+  eventWarnings?: readonly EventWarningRow[] | undefined;
   sourceHash: string | null;
   live: boolean;
   dslTemplate: string | null;
@@ -147,38 +173,47 @@ function baselineText(tab: EventSourceTabData): string {
 }
 
 /**
+ * 取一个标签的 gutter 判据行：优先用 App 下发的 outline 派生行（live 文档），
+ * 否则按 `document.events` 现算（只读 demo / 读取失败 / 单测手搓文档）。
+ */
+export function eventWarningRowsOf(tab: EventSourceTabData): readonly EventWarningRow[] {
+  if (tab.eventWarnings) return tab.eventWarnings;
+  return tab.document.events.map((event) => ({
+    eventId: event.eventId,
+    warnings: event.instructions.reduce((n, instruction) => n + (instruction.unknown ? 1 : 0), 0)
+  }));
+}
+
+/**
  * 定位 doc 里每个事件块的首行（1-based 行号），供 gutter 标记与 Go to Event。
  *
- * 兼容两种形态：
- * - 旧 Patch-DSL：`event @e:<anchor>`（有 anchor 的文档）；
- * - R3/P4 DarkScript3 式：`$Event(` —— 模板按 document.events 顺序渲染，
- *   所以按出现顺序映射到事件。
+ * 三种锚形态都要认，且都按「块出现顺序 = rows 顺序」对齐：
+ * - `$Event(`：R3/P4 DarkScript3 式模板，本身不带锚，只能按顺序。
+ * - `event @e:<eventId>`：`renderSource` 在文档没挂锚时的形态，锚就是十进制 eventId。
+ * - `event @e:<localNodeId>`：挂过 stableIdentity 的形态，锚是 24 位 hex，跟 eventId
+ *   无关，从 rows 里查不到。
+ *
+ * 所以锚能解析成已知 eventId 就按锚取（模板重排也不会错位），否则退回按顺序取。
+ * 原实现在锚查不到时直接 `continue`，等于「文档没挂锚 → 整列标记静默消失」；
+ * 而生产路径正好就是没挂锚的那种，标记全靠 `$Event(` 分支才没露出来。
  * 行号随 draft 编辑变化，故在 draft 变化时重建。
  */
-function indexEventLines(text: string, events: EmevdEventIr[]): Map<number, EventLineInfo> {
-  const byAnchor = new Map<string, EmevdEventIr>();
-  for (const event of events) {
-    if (event.anchor?.localNodeId) byAnchor.set(event.anchor.localNodeId, event);
-  }
+export function indexEventLines(
+  text: string,
+  rows: readonly EventWarningRow[]
+): Map<number, EventLineInfo> {
+  const byEventId = new Map<string, EventWarningRow>();
+  for (const row of rows) byEventId.set(String(row.eventId), row);
   const map = new Map<number, EventLineInfo>();
   const lines = text.split('\n');
-  let darkScriptIndex = 0;
+  let blockIndex = 0;
   for (let i = 0; i < lines.length; i += 1) {
     const anchorMatch = /^event\s+@e:(\S+)/.exec(lines[i]!);
-    if (anchorMatch) {
-      const event = byAnchor.get(anchorMatch[1]!);
-      if (!event) continue;
-      const warnings = event.instructions.filter((instruction) => instruction.unknown).length;
-      if (warnings > 0) map.set(i + 1, { eventId: event.eventId, warnings });
-      continue;
-    }
-    if (/^\$Event\(/.test(lines[i]!)) {
-      const event = events[darkScriptIndex];
-      darkScriptIndex += 1;
-      if (!event) continue;
-      const warnings = event.instructions.filter((instruction) => instruction.unknown).length;
-      if (warnings > 0) map.set(i + 1, { eventId: event.eventId, warnings });
-    }
+    if (!anchorMatch && !/^\$Event\(/.test(lines[i]!)) continue;
+    const row = (anchorMatch ? byEventId.get(anchorMatch[1]!) : undefined) ?? rows[blockIndex];
+    blockIndex += 1;
+    if (!row) continue;
+    if (row.warnings > 0) map.set(i + 1, { eventId: row.eventId, warnings: row.warnings });
   }
   return map;
 }
@@ -470,6 +505,10 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         const merged: InternalTab = {
           ...existing,
           document: pending.document,
+          // 必须显式跟着 document 走：`...existing` 会留住上一次的 gutter 判据，
+          // 重开/提交后拿旧行给新文本打标记。pending 没有时也要清掉（undefined
+          // = 回退到按 document.events 现算）。
+          eventWarnings: pending.eventWarnings,
           sourceHash: pending.sourceHash,
           live: pending.live,
           dslTemplate: pending.dslTemplate,
@@ -493,8 +532,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, createExtensionsFor]);
 
-  const syncGutterInfo = useCallback((text: string, events: EmevdEventIr[]) => {
-    eventLineInfoRef.current = indexEventLines(text, events);
+  const syncGutterInfo = useCallback((text: string, rows: readonly EventWarningRow[]) => {
+    eventLineInfoRef.current = indexEventLines(text, rows);
     const view = viewRef.current;
     if (view) {
       (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
@@ -505,7 +544,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
   useEffect(() => {
     if (!activeTab) return;
-    syncGutterInfo(activeTab.draft, activeTab.document.events);
+    syncGutterInfo(activeTab.draft, eventWarningRowsOf(activeTab));
   }, [activeTab, syncGutterInfo]);
 
   /** 挂载 EditorView（一次）；后续经 setState 换 tab state。 */
@@ -559,7 +598,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       )
     );
     view.setState(nextState);
-    syncGutterInfo(next, pending.document.events);
+    syncGutterInfo(next, eventWarningRowsOf(pending));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, activeTabId]);
 
@@ -607,7 +646,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           )
         );
         viewRef.current?.setState(nextState);
-        syncGutterInfo(nextText, activeTab.document.events);
+        syncGutterInfo(nextText, eventWarningRowsOf(activeTab));
         // S14：应用即备份可回滚；不再出现 Bridge / 补丁引擎字样。
         setStatus('已应用，可回滚。');
       } else {

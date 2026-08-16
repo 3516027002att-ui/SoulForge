@@ -1609,6 +1609,17 @@ function registerFixtureIpc() {
   // unknown（read-only），驱动 diagnostic gutter 的 warning 标记；menu 是干净
   // 文档（无未知指令）。未登记资源结构化失败，绝不显示为空文档。
   function makeFixtureEmevdBank({ events, instructionsSample, dslTemplate }) {
+    // S18-B：renderer 的 gutter 判据来自 full 响应的 outline（unknownCount 主进程
+    // 按完整 EMEDF 逐条判）。fixture 同构模拟：样本缺失的指令 → unknown。
+    function unknownCountOf(event) {
+      if (!event.instructionCount) return 0;
+      const start = event.instructionStartIndex ?? -1;
+      let unknown = 0;
+      for (let i = 0; i < event.instructionCount; i += 1) {
+        if (!(instructionsSample ?? []).some((sample) => sample.index === start + i)) unknown += 1;
+      }
+      return unknown;
+    }
     const bank = {
       sourceHash: 'fixture-emevd-0001',
       events,
@@ -1622,6 +1633,24 @@ function registerFixtureIpc() {
           events: this.events,
           instructionsSample: this.instructionsSample ?? [],
           authority: 'fixture'
+        };
+      },
+      outline(sourceUri) {
+        return {
+          schemaVersion: 1,
+          resourceUri: sourceUri,
+          eventCount: this.events.length,
+          instructionTotal: (this.instructionsSample ?? []).length,
+          truncated: false,
+          limit: 4096,
+          events: this.events.map((event) => ({
+            eventUri: `${sourceUri}#event/${event.id}`,
+            eventId: event.id,
+            restBehavior: event.restBehavior ?? 0,
+            layer: event.layer ?? -1,
+            instructionCount: event.instructionCount ?? 0,
+            unknownCount: unknownCountOf(event)
+          }))
         };
       }
     };
@@ -1710,6 +1739,22 @@ function registerFixtureIpc() {
     track('resource.readEmevdFullDocument');
     const bank = emevdBank(sourceUri);
     if (!bank) {
+      // S15：KRAK 压缩地图事件（未挂原版）的失败样本 —— 与真实 Bridge 的
+      // DcxNativeDocument 可行动句同构，面板正文原样展示。S18-B 后 renderer
+      // 只走 readEmevdFullDocument（readEmevdDocument 通道 renderer 不再使用），
+      // 失败分支必须在这里（readEmevdDocument stub 仍保留供 IPC 契约追踪）。
+      if (String(sourceUri).endsWith('krak.emevd.dcx')) {
+        return {
+          ok: false,
+          sourceUri,
+          diagnostics: [{
+            severity: 'error',
+            code: 'EMEVD_DOCUMENT_READ_FAILED',
+            message: '这份事件是 KRAK 压缩，需要 Oodle 运行时解压：到「开始」页选择含 sekiro.exe 的原版游戏目录后再打开。',
+            sourceUri
+          }]
+        };
+      }
       return {
         ok: false,
         sourceUri,
@@ -1732,7 +1777,7 @@ function registerFixtureIpc() {
       sourceHash: bank.sourceHash,
       sourceFormat: 'emevd',
       outerFileHash: null,
-      outline: null,
+      outline: bank.outline(sourceUri),
       diagnostics: []
     };
   });
