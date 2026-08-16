@@ -99,13 +99,70 @@ export function createSekiroFixtureEmedf(): EmedfRegistry {
   };
 }
 
+/* ------------------------------------------------------------------ */
+/*  Registry 索引（每个 registry 对象一次，之后 O(1)）                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 一个 registry 对象的派生索引：校验结论 + bank→id→def 查表。
+ *
+ * 为什么需要它：`decodeInstructionArgs` 原本每次调用都跑一遍
+ * `validateEmedfRegistry`（O(指令数 × 参数数)，正则 + Set）再跑一遍
+ * `instructions.filter`（O(指令数)）。反汇编 common.emevd 要解码 33266 条指令，
+ * 实测这两项占反汇编总耗时 9.0 s 中的 ~9.5 s（双重解码各付一次），
+ * 即整个「打开事件文件」的 83%。索引化后同样 33266 次解码实测 3.9 ms。
+ *
+ * 缓存键是 registry 对象本身（WeakMap，registry 不可达即回收）。语义前提：
+ * registry 交给本模块后不再原地改写 —— 仓库内所有构造点（emedfExternalAdapter
+ * 的 parse、createSekiroFixtureEmedf、以及 smoke 里的 duplicate 负例）都是
+ * 新建对象，没有 push/splice 改已交出的 registry。若将来出现原地改写，
+ * 索引会滞后，必须改成新建 registry 对象。
+ */
+interface EmedfRegistryIndex {
+  validation: EmedfRegistryValidationResult;
+  /** bank → id → def；仅当 validation.ok 时填充（校验保证 bank:id 唯一）。 */
+  byBankId: Map<number, Map<number, EmedfInstructionDef>>;
+}
+
+const registryIndexCache = new WeakMap<EmedfRegistry, EmedfRegistryIndex>();
+
+function buildRegistryIndex(registry: EmedfRegistry): EmedfRegistryIndex {
+  const validation = validateEmedfRegistryUncached(registry);
+  const byBankId = new Map<number, Map<number, EmedfInstructionDef>>();
+  if (validation.ok) {
+    // 校验已保证 bank:id 不重复，所以这里直接建表即可保持
+    // findInstructionDef 的「恰好一条匹配才返回」语义。
+    for (const instruction of registry.instructions) {
+      let byId = byBankId.get(instruction.bank);
+      if (!byId) {
+        byId = new Map<number, EmedfInstructionDef>();
+        byBankId.set(instruction.bank, byId);
+      }
+      byId.set(instruction.id, instruction);
+    }
+  }
+  return { validation, byBankId };
+}
+
+/** 取（或建）registry 索引。非对象 registry 不进 WeakMap，退化为每次重建。 */
+function registryIndexOf(registry: EmedfRegistry): EmedfRegistryIndex {
+  if (!registry || typeof registry !== 'object') return buildRegistryIndex(registry);
+  const cached = registryIndexCache.get(registry);
+  if (cached) return cached;
+  const built = buildRegistryIndex(registry);
+  registryIndexCache.set(registry, built);
+  return built;
+}
+
 export function findInstructionDef(
   registry: EmedfRegistry,
   bank: number,
   id: number
 ): EmedfInstructionDef | undefined {
-  const matches = registry.instructions.filter((item) => item.bank === bank && item.id === id);
-  return matches.length === 1 ? matches[0] : undefined;
+  const index = registryIndexOf(registry);
+  // registry 非法（含 bank:id 重复）时索引为空表，与原实现「重复即 undefined」
+  // 一致：调用方会拿到 EMEDF_UNKNOWN_INSTRUCTION 或上游的校验错误码。
+  return index.byBankId.get(bank)?.get(id);
 }
 
 /**
@@ -118,9 +175,11 @@ export function decodeInstructionArgs(
   id: number,
   args: Buffer
 ): DecodeResult {
-  const registryValidation = validateEmedfRegistry(registry);
-  if (!registryValidation.ok) return registryValidation;
-  const def = findInstructionDef(registry, bank, id);
+  // 校验与查表都走 registryIndexOf 的缓存：热路径（反汇编 33266 条指令）里
+  // 这两项原本各自 O(registry)，现在是一次 WeakMap 命中 + 两次 Map.get。
+  const index = registryIndexOf(registry);
+  if (!index.validation.ok) return index.validation;
+  const def = index.byBankId.get(bank)?.get(id);
   if (!def) {
     return {
       ok: false,
@@ -284,9 +343,9 @@ export function encodeInstructionArgs(
   id: number,
   values: Record<string, number | boolean>
 ): EncodeResult {
-  const registryValidation = validateEmedfRegistry(registry);
-  if (!registryValidation.ok) return registryValidation;
-  const def = findInstructionDef(registry, bank, id);
+  const index = registryIndexOf(registry);
+  if (!index.validation.ok) return index.validation;
+  const def = index.byBankId.get(bank)?.get(id);
   if (!def) {
     return {
       ok: false,
@@ -475,7 +534,18 @@ export function varargCount(def: EmedfInstructionDef, totalLength: number): numb
   return remaining / stride;
 }
 
+/**
+ * 校验 registry。结果按 registry 对象缓存（见 EmedfRegistryIndex 的语义前提）：
+ * 同一个 registry 对象反复校验只付一次全量遍历成本。判据本身在
+ * `validateEmedfRegistryUncached` 里，缓存不改变任何结论。
+ */
 export function validateEmedfRegistry(
+  registry: EmedfRegistry
+): EmedfRegistryValidationResult {
+  return registryIndexOf(registry).validation;
+}
+
+function validateEmedfRegistryUncached(
   registry: EmedfRegistry
 ): EmedfRegistryValidationResult {
   if (!registry || registry.schemaVersion !== 1 || registry.game !== 'sekiro'
