@@ -51,7 +51,8 @@ import type {
   RendererContainerTreeSummary,
   ScriptContainerEntryPage,
   ScriptContainerEvidence,
-  ScriptEntryPlaintextView
+  ScriptEntryPlaintextView,
+  CiteHit
 } from '@soulforge/shared';
 import { EDITOR_DOCUMENT_IPC_CHANNELS } from '@soulforge/shared';
 
@@ -747,6 +748,14 @@ const api = {
     selection: EditorSelectionContext
   ): Promise<AgentResourceReferenceCreateIpcResult> =>
     ipcRenderer.invoke('agent.resourceReference.create', { selection }),
+  /**
+   * S10 引用框选签发：把框选命中的 data-cite 节点（CiteHit[]）交给 main 解码合并
+   * 并签发 opaque token（与资源引用同形态）。renderer 不拼 label、不伪造 token。
+   */
+  createAgentCitation: (
+    hits: readonly CiteHit[]
+  ): Promise<AgentResourceReferenceCreateIpcResult> =>
+    ipcRenderer.invoke('agent.citation.create', { hits }),
   onAiAgentEvent: (callback: (envelope: AiAgentEventEnvelope) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, envelope: AiAgentEventEnvelope): void => {
       callback(envelope);

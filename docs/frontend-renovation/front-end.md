@@ -1739,6 +1739,17 @@ export declare function reduceAgentComposer(
 
 允许转换固定为：`idle/composing + PROMPT_CHANGED`、`composing + SUBMIT → submitting`、`submitting + STREAM_STARTED → streaming`、`streaming + TOOL_STARTED → tool-running`、`tool-running + TOOL_FINISHED → streaming`、`streaming/tool-running + APPROVAL_REQUIRED → awaiting-approval`、`awaiting-approval + APPROVE → committing`、`awaiting-approval + REJECT → idle`、`committing + COMMIT_FINISHED → verifying`、`verifying + VERIFY_FINISHED → idle`、`streaming + STREAM_FINISHED → idle`、任意活动态 `+ FAIL → failed`、任意活动态 `+ STOP → idle`、`failed + RESET → composing/idle`。其他组合必须返回原状态并记录开发诊断；不允许用多个互不约束的 boolean 表示同一状态机。
 
+### 12.12 S10「引用」框选（2026-08-16 裁定）
+
+`@` / `#` 两个文本插入钮**合成一个「引用」框选钮**（composer 工具栏固定五项：引用 | 附件 | 模型 | Plan | 发送/停止）。引用是语义实体，不是文本 token——与带 `data-cite` 的 DOM 做矩形相交（不做 OCR、不做截图像素识别）。
+
+- **范围**：点「引用」只把**中央编辑区**盖半透明暗幕 + 十字框选光标（editor-area 内 absolute 覆盖；Agent dock 是 flex 兄弟，保持明亮）。Esc / 再点「引用」取消。
+- **命中**：按下拖出矩形、松开结算；相交面积 > 0 的 `data-cite` 节点都算中。PARAM 先行：行 `{kind:'param-row', library, table, rowId, name?}`、字段 `{kind:'param-field', library, table, rowId, fieldId, label, value}`（JSON 只含逻辑 id，禁止绝对路径；读取失败的 param 不给 data-cite）。
+- **合并**（shared `mergeCiteHits`）：字段命中锚定行（字段栏永远显示选中行的字段，框里扫到的其他行是误框，丢弃不并入）；无字段命中取第一行；同字段去重。一次框选一条 chip，可多次点「引用」累加，chip 可叉掉。
+- **可见标签**（shared `formatParamCiteLabel`，固定格式）：`param/<库短名>/<表名>/<行id>-<行名>【<字段中文>：<值>】…`；字段按框中的字段列出，框中只有行则只到行名；库短名用 `gameparam` 这类逻辑名，绝不出 `D:\...`。
+- **签发**：renderer 把命中交 `agent.citation.create`，main 解码合并 + 拼 label + 签发与资源引用同形态的 opaque token（`agentReferenceRegistry` 记录 citation）；提交时 `ai.agent.run` 用注册表里的 citation 重拼系统提示行（不信任 renderer 回传 label），模型能看到哪张表哪一行哪些字段。
+- **对不上的域**：框选无命中（工具条/无 data-cite 区域）→「这块还不能引用」，不瞎编、不发无谓 IPC。
+
 ---
 
 ## 13. GameParam 打开链路

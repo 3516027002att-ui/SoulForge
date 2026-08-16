@@ -205,6 +205,11 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   // agentReferenceRegistry 校验 token）。它是用户显式添加的 Agent 输入上下文，
   // 不随切换工作区/文件清空——清空会让进行中的 Agent 任务丢失已引用资源。
   setAgentResources: 'Agent 资源引用草稿；属于 Agent 那次运行的输入上下文，与当前资源文档无关，跨工作区保留',
+  // S10 引用框选：暗幕开关与待签发命中是 Agent 输入侧的瞬时交互态（框选结算即
+  // 清空/消费），不属于任何资源文档；切换工作区时框选模式立即取消是合理行为，
+  // 但由用户动作与 Esc 控制，不进文档复位。
+  setCiteSelecting: 'S10 引用框选暗幕开关，Agent 交互瞬时态，随用户动作/Esc 取消',
+  setPendingCiteHits: 'S10 引用框选待签发命中，AgentSidebar 消费后清空，非文档态',
   setCmdkOpen: '命令面板状态',
   setCmdkQuery: '命令面板状态',
   setCmdkIndex: '命令面板状态',

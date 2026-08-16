@@ -1057,6 +1057,14 @@ test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模�
 
 test('S8：Agent dock 可缩到 200px（下限 200，上限 620，默认 440）', async () => {
   const { app, window } = await launchApp();
+  // localStorage 可能持久化了上一轮的 dock 宽度（agentDock UI key）：清掉后重载，
+  // 「默认 440」断言不受上一轮运行影响。
+  await window.evaluate(() => {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('soulforge.ui.agentDock.v1.')) localStorage.removeItem(key);
+    }
+  });
+  await window.reload();
   // localStorage 可能持久化了上一轮的收起状态：先确保 dock 展开，resizer 才可交互。
   const agentToggle = window.getByRole('button', { name: 'AI Agent 面板' });
   if ((await agentToggle.getAttribute('aria-pressed')) === 'false') {
@@ -2090,6 +2098,86 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
 
   // 同尺寸对照截图（§2.4 步骤 6：以相同窗口尺寸保存 SoulForge 对照截图）。
   await window.screenshot({ path: 'test-results/10-param-workbench.png' });
+  await app.close();
+});
+
+test('S10：引用框选——@/# 合成「引用」，PARAM 行+字段框选生成引用 chip，发送后标签随会话可见', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 打开 PARAM 工作台，选中 ActionGuideParam 第 100 行（行与字段都可引用）。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'param/gameparam/gameparam.parambnd.dcx');
+  await window.locator('.wb-list .wb-row', { hasText: 'ActionGuideParam' }).click();
+  await window.locator('.wb-virtual-row', { hasText: '100' }).click();
+  const atkProp = window.locator('.wb-prop', { hasText: '攻击力' });
+  await expect(atkProp).toBeVisible();
+
+  // 1) Composer 工具栏（S10 拍死）：@/# 两钮已合成一个「引用」钮。
+  const citeButton = window.getByRole('button', { name: '引用框选' });
+  await expect(citeButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(window.getByRole('button', { name: '添加 Agent 参与者' })).toHaveCount(0);
+  await expect(window.getByRole('button', { name: '添加当前文件上下文' })).toHaveCount(0);
+
+  // 2) 点「引用」：中央编辑区盖暗幕（Agent 区不盖——发送按钮仍可见可点）。
+  await citeButton.click();
+  await expect(window.getByTestId('cite-scrim')).toBeVisible();
+  await expect(citeButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(window.getByRole('button', { name: '发送' })).toBeVisible();
+
+  // 3) Esc 取消框选（拍死行为），再点「引用」重新进入。
+  await window.keyboard.press('Escape');
+  await expect(window.getByTestId('cite-scrim')).toHaveCount(0);
+  await expect(citeButton).toHaveAttribute('aria-pressed', 'false');
+
+  // 4) 空框选（框住没有 data-cite 的标签条空白区）：提示「这块还不能引用」，
+  //    不瞎编引用、不产生 chip。
+  await citeButton.click();
+  const tabbarBox = await window.locator('.tabbar').boundingBox();
+  // 布局可能横向溢出窗口（editor-area 起点为负）：鼠标坐标必须钳制到可见区。
+  const tabbarX = Math.max(0, tabbarBox.x);
+  await window.mouse.move(tabbarX + 40, tabbarBox.y + 12);
+  await window.mouse.down();
+  await window.mouse.move(tabbarX + 160, tabbarBox.y + 20, { steps: 4 });
+  await window.mouse.up();
+  // 引用 chip 在资源引用块内（.ctx-chip 也匹配常驻的上下文 chip：#files / #文件）。
+  const refChips = window.locator('[data-testid="agent-resource-references"] .ctx-chip');
+  await expect(window.locator('.toast--warn').filter({ hasText: '这块还不能引用' })).toHaveCount(1);
+  await expect(window.getByTestId('cite-scrim')).toHaveCount(0);
+  await expect(refChips).toHaveCount(0);
+
+  // 5) 框住行 100 与「攻击力」字段：松开结算 → 一条引用 chip（固定格式逻辑
+  //    标签：param/<库短名>/<表名>/<行id>-<行名>【<字段中文>：<值>】，无磁盘路径）。
+  await citeButton.click();
+  const rowBox = await window.getByRole('row', { name: /100 引导-基础/ }).boundingBox();
+  const fieldBox = await atkProp.boundingBox();
+  // 布局可能横向溢出窗口：拖拽起终点都钳制到可见区。
+  const dragX = Math.max(0, rowBox.x + 30);
+  const dragEndX = Math.min(window.viewportSize?.width ?? 1280, fieldBox.x + fieldBox.width - 30);
+  await window.mouse.move(dragX, rowBox.y + 5);
+  await window.mouse.down();
+  await window.mouse.move(dragEndX, fieldBox.y + fieldBox.height - 5, { steps: 6 });
+  await window.mouse.up();
+  // 拖框从行 100 盖到「攻击力」字段：命中的同表同行字段（name/behavior/攻击力）
+  // 全部按框选顺序并入 label（S10：「字段按框中的字段列出」）。
+  await expect(refChips).toContainText('param/gameparam/ActionGuideParam/100-引导-基础');
+  await expect(refChips).toContainText('【攻击力：0】');
+  await expect(refChips).toContainText('【behavior：1】');
+  expect(await refChips.innerText()).not.toContain('\\');
+  await expect.poll(async () => (await ipcCalls(app))['agent.citation.create'] ?? 0).toBeGreaterThan(0);
+
+  // 6) 发送：引用 chip 随 runAiAgent 提交（fixture 记录 resources 数量；生产侧
+  //    main 校验 token 后把引用拼进系统提示——模型能看到哪张表哪一行哪些字段）。
+  await window.locator('.agent__composer textarea').fill('看看这条引用');
+  await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.run:resources=1'] ?? 0)
+    .toBeGreaterThan(0);
+
+  // 7) chip 可叉掉（一次框选一条引用 chip，可多次框选累加、逐条移除）。
+  await window.locator('[data-testid="agent-resource-references"] .ctx-chip__remove').first().click();
+  await expect(refChips).toHaveCount(0);
+
+  await window.screenshot({ path: 'test-results/s10-cite-select.png' });
   await app.close();
 });
 

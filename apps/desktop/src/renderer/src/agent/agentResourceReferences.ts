@@ -13,7 +13,7 @@
  * 拒绝），签发的 opaque token 不携带路径。本模块只消费 main 返回的
  * AgentResourceReference，不触碰 token 内容。
  */
-import type { AgentResourceReference, EditorSelectionContext } from '@soulforge/shared';
+import type { AgentResourceReference, CiteHit, EditorSelectionContext } from '@soulforge/shared';
 import type { SoulForgeApi } from '../../../preload/index.js';
 
 /** §12.11：resources 最多 16 个（SubmitAgentRunRequest 的 decoder 上限）。 */
@@ -106,6 +106,35 @@ export async function createResourceReferenceFlow(
     dispatch({
       type: 'create-failed',
       message: error instanceof Error ? error.message : '创建资源引用失败。'
+    });
+    return;
+  }
+  dispatch(result.ok
+    ? { type: 'create-succeeded', reference: result.reference }
+    : { type: 'create-failed', message: `${result.error.code}：${result.error.message}` });
+}
+
+/** preload 的 createAgentCitation 签名（S10 引用框选；main 解码合并 + 签发）。 */
+export type CreateCitation = SoulForgeApi['createAgentCitation'];
+
+/**
+ * S10 引用框选：「框选命中 → main 签发 opaque token → 写进草稿」的编排，与
+ * createResourceReferenceFlow 同构——main 返回的 AgentResourceReference 与资源
+ * 引用同形态，共用同一个草稿 reducer（chip 去重、§12.11 上限、诊断展示）。
+ */
+export async function createCitationFlow(
+  create: CreateCitation,
+  hits: readonly CiteHit[],
+  dispatch: (event: AgentResourceReferenceDraftEvent) => void
+): Promise<void> {
+  dispatch({ type: 'create-requested' });
+  let result: Awaited<ReturnType<CreateCitation>>;
+  try {
+    result = await create(hits);
+  } catch (error) {
+    dispatch({
+      type: 'create-failed',
+      message: error instanceof Error ? error.message : '创建引用失败。'
     });
     return;
   }

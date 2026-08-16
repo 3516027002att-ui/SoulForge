@@ -8,11 +8,13 @@ export interface AgentComposerToolbarProps {
   sendDisabled: boolean;
   onSend: () => void;
   onStop: () => void;
-  /** '@' 插入 Agent 参与者标记——真实回调：直接写入 prompt。 */
-  onInsertMention: () => void;
-  /** '#' 插入当前文件上下文标记——真实回调：写入 prompt；无选区时 disabled。 */
-  onInsertContext: () => void;
-  contextDisabled: boolean;
+  /**
+   * S10 引用框选开关：`@`/`#` 合成一个「引用」钮。点开 = 中央编辑区盖半透明
+   * 暗幕 + 十字框选光标；再点 / Esc 取消。真实回调：App 持有 citeSelecting。
+   */
+  onToggleCiteSelect: () => void;
+  /** 框选模式当前是否开启（按钮按下态，e2e 用 aria-pressed 断言）。 */
+  citeSelecting: boolean;
   /**
    * 附件的诚实禁用原因。附件需要 main 下发的 renderer-safe 引用 token（60C
    * 接线），60B 不渲染假装可用的假功能，只给 disabled + 说明。
@@ -29,9 +31,11 @@ export interface AgentComposerToolbarProps {
 /**
  * 三层 Composer 的第三层「底部工具栏」（§12.6）。
  *
- * 固定六项顺序：`@ | # | 附件 | 模型选择 | 推理/Plan | 发送/停止`。
- * 未打通真实链路的项给诚实 disabled + title 说明（附件、无选区时的 #），
- * 不伪造「已接通」状态（§12.6「未打通真实链路的控件必须隐藏」的精神）。
+ * 固定五项顺序：`引用 | 附件 | 模型选择 | 推理/Plan | 发送/停止`。
+ * S10 把 `@`（插入 Agent 参与者）与 `#`（插入当前文件上下文）合成一个「引用」
+ * 框选钮——引用是语义实体（data-cite 矩形相交），不是文本 token；附件仍未接通
+ * 真实链路，给诚实 disabled + title 说明（§12.6「未打通真实链路的控件必须隐藏」
+ * 的精神：不渲染假装可用的假功能）。
  */
 export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactElement {
   const {
@@ -39,9 +43,8 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
     sendDisabled,
     onSend,
     onStop,
-    onInsertMention,
-    onInsertContext,
-    contextDisabled,
+    onToggleCiteSelect,
+    citeSelecting,
     attachmentReason,
     modelLabel,
     onOpenModelSettings,
@@ -52,22 +55,15 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
     <div className="agent-composer__toolbar" role="toolbar" aria-label="Composer 工具栏">
       <button
         type="button"
-        className="composer-tool-btn"
-        onClick={onInsertMention}
-        aria-label="添加 Agent 参与者"
-        title="在输入中插入 @Agent 参与者标记"
+        className={`composer-tool-btn${citeSelecting ? ' is-active' : ''}`}
+        onClick={onToggleCiteSelect}
+        aria-pressed={citeSelecting}
+        aria-label="引用框选"
+        title={citeSelecting
+          ? '框选模式已开启：在中央编辑区拖拽框住要引用的行或字段（Esc 或再次点击取消）'
+          : '在中央编辑区拖拽框住要引用的行或字段，生成一条引用'}
       >
-        @
-      </button>
-      <button
-        type="button"
-        className="composer-tool-btn"
-        onClick={onInsertContext}
-        disabled={contextDisabled}
-        aria-label="添加当前文件上下文"
-        title={contextDisabled ? '没有已选中的逻辑资源' : '在输入中插入当前文件上下文标记'}
-      >
-        #
+        引用
       </button>
       <button
         type="button"

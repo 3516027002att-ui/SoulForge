@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:editor-catalog-schema": "tsc -p tsconfig.json && node dist/editor-catalog.test.js",
     "test:flver-pages": "tsc -p tsconfig.json && node dist/flver-editor.test.js",
-    "test:tpf-pages": "tsc -p tsconfig.json && node dist/tpf-editor.test.js"
+    "test:tpf-pages": "tsc -p tsconfig.json && node dist/tpf-editor.test.js",
+    "test:citations": "tsc -p tsconfig.json && node dist/citations.test.js"
   }
 }

@@ -16,6 +16,7 @@ import {
 } from '@soulforge/shared';
 import type {
   AgentResourceReference,
+  CiteHit,
   Diagnostic,
   MsbMapEventLike,
   MsbModelLike,
@@ -26,6 +27,7 @@ import type {
   ParamFieldDef,
   ResourceKind
 } from '@soulforge/shared';
+import { mergeCiteHits } from '@soulforge/shared';
 import type {
   AnalyzeWorkspaceSummary,
   DirectorySelection,
@@ -98,6 +100,7 @@ import { AmbientField } from './theme/AmbientField.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
+import { CiteSelectScrim } from './agent/CiteSelectScrim.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
 import { resolveKeybinding } from './keybindings/applyKeybinding.js';
 import type {
@@ -314,6 +317,13 @@ export function App(): ReactElement {
   // AGENT-60D 提交期消费点：AgentSidebar 草稿里 §12.11 的 opaque 资源引用冒泡到
   // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
   const [agentResources, setAgentResources] = useState<readonly AgentResourceReference[]>([]);
+  /**
+   * S10 引用框选：citeSelecting = 中央编辑区暗幕开/关（「引用」钮与暗幕共享这一
+   * 状态）；pendingCiteHits = 暗幕结算出的命中，交 AgentSidebar 经
+   * agent.citation.create 换成 main 签发的 opaque 引用（消费后清空）。
+   */
+  const [citeSelecting, setCiteSelecting] = useState(false);
+  const [pendingCiteHits, setPendingCiteHits] = useState<readonly CiteHit[] | null>(null);
   /**
    * EVENT-30B：最近一次打开/刷新的 EMEVD 逻辑文档标签（有界 DSL 投影 + 派生
    * document）。工作台按 tabId 去重合并；renderer 永不持有文件系统路径或完整
@@ -1734,6 +1744,22 @@ export function App(): ReactElement {
     window.setTimeout(() => {
       setToasts((list) => list.filter((toast) => toast.id !== id));
     }, 4200);
+  }
+
+  /**
+   * S10 引用框选结算：暗幕收集命中后这里先本地合并把关——没有任何可引用节点
+   * （框了不支持引用的域，如工具条/无 data-cite 区域）直接提示「这块还不能
+   * 引用」，不发无谓 IPC；能合并的交给 AgentSidebar 经 agent.citation.create
+   * 换 main 签发的 opaque 引用（main 再解码校验一遍，renderer 不伪造 token）。
+   */
+  function handleCiteSettle(hits: CiteHit[]): void {
+    setCiteSelecting(false);
+    const citation = mergeCiteHits(hits);
+    if (citation === null) {
+      pushToast('这块还不能引用：框选里没有可引用的 PARAM 行或字段。', 'warn');
+      return;
+    }
+    setPendingCiteHits(hits);
   }
 
   async function sendAgentPrompt(): Promise<void> {
@@ -3558,6 +3584,15 @@ export function App(): ReactElement {
               </div>
             </div>
           </div>
+          {/* S10 引用框选暗幕：只盖中央编辑区（editor-area 已有 position:relative；
+              Agent dock 是 editor-area 之外的 flex 兄弟，天然保持明亮）。Esc /
+              再点「引用」取消；结算后由 handleCiteSettle 把关与签发。 */}
+          {citeSelecting && (
+            <CiteSelectScrim
+              onSettle={(hits) => void handleCiteSettle(hits)}
+              onCancel={() => setCiteSelecting(false)}
+            />
+          )}
         </main>
 
         {/* ══════════ Agent 面板 ══════════ */}
@@ -3619,6 +3654,10 @@ export function App(): ReactElement {
           onThinkingChange={setAiThinking}
           onPromptChange={setAiPrompt}
           onSend={() => void sendAgentPrompt()}
+          citeSelecting={citeSelecting}
+          onToggleCiteSelect={() => setCiteSelecting((selecting) => !selecting)}
+          pendingCiteHits={pendingCiteHits}
+          onCiteHitsConsumed={() => setPendingCiteHits(null)}
           onNewTask={startNewAgentTask}
           onToggleExpand={() => {
             setAgentExpanded((expanded) => !expanded);

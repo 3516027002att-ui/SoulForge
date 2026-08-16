@@ -136,7 +136,11 @@ import {
   type FmgEntryPage,
   logicalFmgTableName,
   type ScriptEntryPlaintextView,
-  type ScriptSourceView
+  type ScriptSourceView,
+  decodeCiteHits,
+  formatParamCiteLabel,
+  mergeCiteHits,
+  type ParamCitation
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -8208,11 +8212,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   const agentSessionsBaseDir = join(app.getPath('userData'), 'agent');
   const activeAgentRuns = new Map<string, AbortController>();
   /**
-   * main 签发的 opaque 资源引用 token 注册表（AGENT-60C）。key = token 串，
-   * value = 签发作用域（webContents.id）+ tokenId。renderer 提交资源引用时，main
-   * 先查本表再比对 sender —— 跨 sender token 在本层被拒，不依赖 renderer 自觉。
+   * main 签发的 opaque 资源引用 token 注册表（AGENT-60C / S10）。key = token 串，
+   * value = 签发作用域（webContents.id）+ tokenId；引用框选（S10）额外带 main
+   * 解码合并后的 citation，提交时由 main 自己重新拼进系统提示（不信任 renderer
+   * 回传的 label）。renderer 提交资源引用时，main 先查本表再比对 sender ——
+   * 跨 sender token 在本层被拒，不依赖 renderer 自觉。
    */
-  const agentReferenceRegistry = new Map<string, { ownerId: string; tokenId: string }>();
+  const agentReferenceRegistry = new Map<
+    string,
+    { ownerId: string; tokenId: string; citation?: ParamCitation }
+  >();
 
   /**
    * Approval requests awaiting a renderer answer, keyed `sessionId:callId`.
@@ -8303,6 +8312,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // 这是 agent 通道，不是 param/format 读取，**不得**返回 BACKUP_READ_FORBIDDEN。
     const resources = request.resources ?? [];
     const ownerId = String(_event.sender.id);
+    // S10：引用框选（param 域）随 resources 提交；main 用注册表里自己解码合并的
+    // citation 重拼系统提示行，不信任 renderer 回传的 label。
+    const citationLines: string[] = [];
     for (const reference of resources) {
       const registered = agentReferenceRegistry.get(reference.token);
       if (registered === undefined || registered.tokenId === undefined) {
@@ -8320,6 +8332,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           ok: false,
           error: { code: 'AGENT_TOKEN_SENDER_MISMATCH', message: '资源引用属于其他发送方，拒绝提交。' }
         };
+      }
+      if (registered.citation !== undefined) {
+        citationLines.push(formatParamCiteLabel(registered.citation));
       }
     }
     const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === request.configId);
@@ -8390,6 +8405,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         `最近一次事件打开失败（用户期望你直接说明原因与下一步，不用翻日志）：` +
         `文档 ${request.eventOpenFailure.document}，[${request.eventOpenFailure.code}] ` +
         `${request.eventOpenFailure.message}`
+      );
+    }
+    if (citationLines.length > 0) {
+      // S10：框选引用是用户显式选给模型看的行/字段（PARAM 先行），随系统提示
+      // 附带；label 由 main 从注册表里的 citation 重拼，renderer 回传值不参与。
+      systemPromptParts.push(
+        `用户框选引用（回答时可直接引用这些行/字段）：${citationLines.join('；')}`
       );
     }
     const systemPrompt = systemPromptParts.filter((part) => part.trim().length > 0).join('\n\n');
@@ -8790,4 +8812,63 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       return { ok: true, reference };
     }
   );
+
+  /**
+   * S10 引用框选签发（PARAM 先行）。
+   *
+   * renderer 把框选命中的 `data-cite` 节点（CiteHit[]）交给 main；main 解码 +
+   * 合并成一条 citation（跨表/跨行拒绝），拼固定格式逻辑标签，签发与资源引用同
+   * 形态的 opaque token。提交时（ai.agent.run）main 用注册表里的 citation 重拼
+   * 系统提示行 —— 模型看到的是哪张表哪一行哪些字段，label 由 main 生成，renderer
+   * 不参与拼接，也不携带任何路径。
+   *
+   * 校验边界（诚实声明）：结构与标识符在 main 校验（绝对路径 / 非法 kind /
+   * 非法标识符拒收）；行/字段的存在性来自 renderer 已显示的工作台数据（数据本身
+   * 是 main 下发的，renderer 只是把看到的行与字段框给 main），main 不再重读表。
+   * 这是 agent 通道，不是 param/format 读取，**不得**返回 BACKUP_READ_FORBIDDEN。
+   */
+  handle('agent.citation.create', async (event, request: unknown): Promise<AgentResourceReferenceCreateIpcResult> => {
+    if (!activeIndex) {
+      return { ok: false, error: { code: 'WORKSPACE_REQUIRED', message: '这次工具需要先打开 Mod 工作区。' } };
+    }
+    const hitsValue = typeof request === 'object' && request !== null
+      ? (request as Record<string, unknown>).hits
+      : undefined;
+    let citation: ParamCitation | null = null;
+    try {
+      citation = mergeCiteHits(decodeCiteHits(hitsValue));
+    } catch (error) {
+      return {
+        ok: false,
+        error: { code: 'INVALID_INPUT', message: error instanceof Error ? error.message : '引用框选格式非法。' }
+      };
+    }
+    if (citation === null) {
+      return {
+        ok: false,
+        error: {
+          code: 'CITATION_UNSUPPORTED',
+          message: '这块还不能引用：框选命中跨了不同的表或行，或没有可引用的节点。'
+        }
+      };
+    }
+    const tokenId = randomUUID();
+    const ownerId = String(event.sender.id);
+    const label = formatParamCiteLabel(citation);
+    const token = mintAgentReferenceToken({
+      kind: 'citation',
+      tokenId,
+      ownerId,
+      domain: 'param',
+      label
+    });
+    const reference: AgentResourceReference = {
+      token,
+      domain: 'param',
+      label,
+      expiresAt: agentReferenceExpiresAt()
+    };
+    agentReferenceRegistry.set(token, { ownerId, tokenId, citation });
+    return { ok: true, reference };
+  });
 }

@@ -690,6 +690,24 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 /* ═══════════ 编辑器区 ═══════════ */
 .editor-area { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--forge-1); position: relative; }
 
+/* ══ S10 引用框选暗幕（只盖中央编辑区） ══ */
+.cite-scrim {
+  position: absolute; inset: 0; z-index: 60;
+  background: color-mix(in srgb, var(--forge-0) 62%, transparent);
+  cursor: crosshair;
+}
+.cite-scrim__hint {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  padding: 3px 10px; border-radius: var(--radius-s);
+  background: var(--forge-2); border: 1px solid var(--line);
+  color: var(--ink-1); font-size: 11px; pointer-events: none; white-space: nowrap;
+}
+.cite-select-box {
+  position: fixed; z-index: 61; pointer-events: none;
+  border: 1px solid var(--ember-text);
+  background: color-mix(in srgb, var(--ember-text) 18%, transparent);
+}
+
 .tabbar {
   flex: none; display: flex; align-items: flex-end; overflow-x: auto; overflow-y: hidden;
   min-height: 34px;
@@ -1572,9 +1590,11 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   min-height: 72px;
 }
 .agent-composer__toolbar { display: flex; align-items: center; gap: 5px; min-height: 26px; }
-.composer-tool-btn { width: 24px; height: 24px; display: grid; place-items: center; color: var(--ink-2); border-radius: var(--radius-s); }
+.composer-tool-btn { width: 24px; height: 24px; display: grid; place-items: center; color: var(--ink-2); border-radius: var(--radius-s); font-size: 11px; }
 .composer-tool-btn:hover:not(:disabled) { color: var(--ink-0); background: var(--control-hover-bg); }
 .composer-tool-btn:disabled { opacity: .4; cursor: default; }
+/* S10：引用框选钮的按下态——框选模式开启时保持醒目，e2e 用 aria-pressed 断言。 */
+.composer-tool-btn.is-active { color: var(--ember-text); background: var(--control-hover-bg); outline: 1px solid var(--ember-text); }
 .composer-model-btn {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px 7px; font-size: 10.5px; color: var(--ink-2);

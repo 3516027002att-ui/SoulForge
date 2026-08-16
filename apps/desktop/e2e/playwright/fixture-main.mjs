@@ -29,7 +29,7 @@
  * - SF_TEST_BROWSER_PREVIEW=1：创建无 preload 窗口，模拟普通浏览器预览表面。
  */
 import { app, BrowserWindow, ipcMain } from 'electron';
-import { logicalFmgTableName } from '@soulforge/shared';
+import { logicalFmgTableName, decodeCiteHits, formatParamCiteLabel, mergeCiteHits } from '@soulforge/shared';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
@@ -2104,6 +2104,32 @@ function registerFixtureIpc() {
     };
   });
 
+  // S10：引用框选签发（与生产同形态：main 解码合并 + 拼逻辑标签 + 签 opaque
+  // token）。token 不携带路径；label 由 main 侧 shared 纯函数生成，renderer 的
+  // 命中 JSON 只含逻辑 id。
+  handleTrusted('agent.citation.create', (_event, request) => {
+    track('agent.citation.create');
+    const hits = request && typeof request === 'object' ? request.hits : undefined;
+    let citation = null;
+    try {
+      citation = mergeCiteHits(decodeCiteHits(hits));
+    } catch {
+      return { ok: false, error: { code: 'INVALID_INPUT', message: '引用框选格式非法。' } };
+    }
+    if (citation === null) {
+      return { ok: false, error: { code: 'CITATION_UNSUPPORTED', message: '这块还不能引用。' } };
+    }
+    return {
+      ok: true,
+      reference: {
+        token: `agent-cite:fixture:${citation.table}-${citation.rowId}`,
+        domain: 'param',
+        label: formatParamCiteLabel(citation),
+        expiresAt: 4102444800000
+      }
+    };
+  });
+
   /* ── AI agent 会话（合成，不调用任何模型）─────────────────────────────────
      这里**不跑真实模型**，只驱动 renderer 的推送折叠与取消链路：run 受理后按
      计时器推 turn-started / tool-call / delta，cancel 停掉计时器并推终态。
@@ -2149,6 +2175,14 @@ function registerFixtureIpc() {
     pushAgentEvent(window, sessionId, { type: 'session-accepted', mode: 'plan' });
 
     const prompt = request.prompt ?? '';
+
+    // S10：引用框选随 resources 提交（main 侧校验 token 并注入系统提示）。fixture
+    // 记录提交的资源引用数，让 e2e 能断言「引用真的随任务提交」（生产侧 main 把
+    // 引用拼进系统提示，模型能看到哪张表哪一行哪些字段）。
+    const resourceLabels = (request.resources ?? [])
+      .map((reference) => reference?.label)
+      .filter((label) => typeof label === 'string' && label !== '');
+    track(`ai.agent.run:resources=${resourceLabels.length}`);
 
     // AGENT-60D 审批态：停在 approval-requested，等 ai.agent.approval.respond 推进。
     if (prompt.includes('审批')) {
@@ -2210,7 +2244,8 @@ function registerFixtureIpc() {
       type: 'tool-call-end', step: 1, callId: 'fixture-call-1', name: 'search_resources', ok: true
     });
     scheduleAgentEvent(window, sessionId, 360, {
-      type: 'agent-message-delta', step: 1, text: '合成增量文本'
+      type: 'agent-message-delta', step: 1,
+      text: resourceLabels.length > 0 ? `合成增量文本（引用：${resourceLabels.join('、')}）` : '合成增量文本'
     });
     // 刻意**不**自动推终态：任务停在运行中，取消用例才有可取消的对象。
     return { ok: true, sessionId };
