@@ -105,6 +105,26 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
     >
       <div className="agent-drawer__header">
         <strong>{view === 'history' ? 'Agent 历史' : '模型服务设置'}</strong>
+        {/* S11：顶栏自足——历史/设置互相可切，标题独占一行，不再依赖主栏。
+            打开设置只看见设置表单；欢迎与 composer 在 AgentSidebar 整列换页卸掉。 */}
+        <div className="agent-drawer__switch" role="group" aria-label="抽屉视图">
+          <button
+            type="button"
+            className="agent-drawer__switch-btn"
+            aria-pressed={view === 'history'}
+            onClick={() => onSwitchView('history')}
+          >
+            历史
+          </button>
+          <button
+            type="button"
+            className="agent-drawer__switch-btn"
+            aria-pressed={view === 'settings'}
+            onClick={() => onSwitchView('settings')}
+          >
+            设置
+          </button>
+        </div>
         <button type="button" className="agent-icon-btn" onClick={onClose} aria-label="关闭抽屉">×</button>
       </div>
 

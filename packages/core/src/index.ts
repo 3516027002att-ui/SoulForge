@@ -91,6 +91,7 @@ export * from './emevd/emedfCompletionCatalog.js';
 export * from './emevd/stableIdentity.js';
 export * from './script/scriptContainerEvidence.js';
 export * from './script/plaintextScriptEntry.js';
+export * from './script/dsLuaDecompilerLocator.js';
 export * from './script/plaintextScriptEdit.js';
 export * from './emevd/dslTokenizer.js';
 export * from './emevd/dslParser.js';
@@ -120,6 +121,7 @@ export * from './backup/index.js';
 export * from './audit-log/index.js';
 export * from './transactions/index.js';
 export * from './vfs/index.js';
+export * from './tae/taeEventTemplate.js';
 
 // `./testing/*` is deliberately NOT re-exported here. The production barrel is
 // what electron-builder ships, and re-exporting harness helpers would drag

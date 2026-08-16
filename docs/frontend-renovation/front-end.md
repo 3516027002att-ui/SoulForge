@@ -212,7 +212,7 @@ D:\mystream\Sekiro Shadows Die Twice\tools\smithbox\Smithbox-2.2.4-2026-07-24-a\
 | --- | --- | --- |
 | Yapped Rune Bear | `D:\mystream\Sekiro Shadows Die Twice\tools\Yapped Rune Bear v2.14.1` | PARAM 行/字段交互的次级核对 |
 | Yabber | `D:\mystream\Sekiro Shadows Die Twice\tools\Yabber 1.3.1\Yabber.exe` | BND/DCX 容器层级和操作结果的次级核对 |
-| DSLuaDecompiler | `D:\mystream\Sekiro Shadows Die Twice\tools\hks解码\DSLuaDecompiler.exe` | Script 格式与只读反编译工作流对照 |
+| DSLuaDecompiler | `D:\mystream\Sekiro Shadows Die Twice\tools\DSLuaDecompiler\DSLuaDecompiler.exe`（v1.1.5；旧拷贝在 `tools\hks解码\`） | Script 格式对照 + S16 脚本 IDE 的本机读入反编译器（main 定位与 spawn，见 §10.2） |
 
 次级工具不得覆盖 Smithbox/DarkScript3 的主 UI 结论，也不得成为 production parser/writer authority。
 
@@ -314,11 +314,12 @@ Smithbox 顶栏还有本文没有做成一等域的编辑器。映射固定如�
 领域编辑器栏                                  Start / PARAM / Text / ...（R1 裁定后无独立 GPARAM）
 文档标签栏                                    逻辑文档，不是每个磁盘文件
 主工作区                                      唯一 full-bleed 编辑器 + 右侧 Agent dock
-Problems / Output                             底部 dock
-状态栏                                        workspace / selection / revision / transaction
 ```
 
 中央区域一次只能渲染一个编辑器。日常编辑器必须贴合 client area，不得再套外层圆角 panel。
+**日常壳无底栏（S12 用户裁定）**：没有状态栏、没有 64 KiB 预览条、没有「原始字节与证据」
+折叠区、没有底部日志 dock——中央编辑区与右侧 Agent dock 贴窗口底。64 KiB / hex /
+诊断数据属于 main 与 Agent 引用等开发者通道，不得再占编辑壳。
 
 ### 3.2 一级领域
 
@@ -1147,12 +1148,15 @@ GPARAM 与 PARAM 可共享搜索、diff 和 Change Review 基础设施，但不�
 ### 9.1 固定结构（§2.5）
 
 ```text
-左：Text Categories ~379px（min 220）；Toolbar 叠在 Categories 下方
-右上：Text Entries 占剩余宽度，约 55% 高度（min 240）
-右下：Text 正文占剩余宽度，约 45% 高度（min 200）
+Text Categories | Text Entries | Text（三列竖排，各自独立滚动）
 ```
 
-这是「左树 + 右上条目 + 右下正文」，不是四条竖栏。当前 `FmgWorkbenchPanel` 的横向四栏骨架必须改成这个拓扑。
+**S13 裁定（2026-08-16）**：对照 Smithbox Text 的三列竖排；不再是「左树 + 右上
+条目/右下正文」两栏，也不要左栏底下空 Tools。Categories = 语言筛选在顶上 +
+表名平铺一行一表（逻辑表名，main 投影：basename 去 `.fmg`、同名加序号；Bridge
+内层名可以是原构建机绝对路径 `N:\GR\…\item.fmg`，出 renderer 前必须投影，
+**永不把路径打码占位当表名**）；Entries = ID + 文本预览（可搜、可增删）；Text =
+选中条目全文。
 
 ### 9.2 固定选择链
 
@@ -1168,10 +1172,10 @@ language
 
 ### 9.3 必须复制
 
-- 左侧 Categories：语言分组、container、FMG logical file list；
-- 右上 Entries：ID 与预览文本；
-- 右下 Text：正文编辑（叠在 Entries 下面，不是第四竖栏）；
-- Tools 叠在 Categories 下方或作为 Categories 栏内折叠组；
+- 左侧 Categories：语言筛选（顶上）+ 平铺表名列表（一行一表，逻辑表名）；
+- 中栏 Entries：ID 与预览文本；
+- 右栏 Text：正文编辑；
+- 不做独立 Tools 栏/块（S13 已删）；
 - 每区搜索和独立滚动；
 - Unicode、IME、换行和 dirty 状态。
 
@@ -1212,30 +1216,49 @@ Yabber 只作容器层级和结果对照；SoulForge 的生产读写仍由 Bridg
 
 ### 10.2 Script
 
-Smithbox Script Editor 是文件列表 + 源码。SoulForge 默认：
+Smithbox Script Editor 是文件列表 + 源码。SoulForge 默认（S16 裁定，2026-08-16）：
 
 ```text
-Container / Files | Source / Read-only Disassembly（主区 flex）| 可选 Symbols / Metadata
+luabnd 容器:    Files（分页条目表）| Source（可编辑源码 IDE）
+独立 .hks/.lua: Source（单栏）
 ```
 
-工具未接通则隐藏，不要为凑四栏造 Tools 空栏。
+删掉了旧三栏的 Container / Metadata 与「用户提供字节的整内层替换」表单；不造
+Tools/Symbols 空栏。写入形态是「源码 IDE」而不是字节替换：
 
-- plaintext Lua/HKS 按真实 encoding、BOM、newline、NUL policy 显示；
-- bytecode 只显示真实反编译或明确的只读字节视图；
-- 没有 compiler 时不得把反编译文本伪装成可回写源码；
-- 符号、引用和跳转只使用真实解析结果；
-- DSLuaDecompiler 只作交互对照，不成为写入依赖。
+- plaintext Lua / 独立 .hks 里的明文按真实 encoding 显示（main 判定，renderer
+  只收文本）；
+- `\x1bLua` 字节码条目由 main 进程调本机 DSLuaDecompiler（v1.1.5，只读定位：
+  显式 `SOULFORGE_DSLUADECOMPILER_PATH` → 固定候选 → 兄弟 tools 扫描 → 旧
+  hks解码拷贝）反编译为 Lua 文本（`--console` stdout，`DOTNET_ROLL_FORWARD=
+  LatestMajor`，有界 8 MiB + 超时 kill）；反编译失败给结构化原因（找不到/超时/
+  退出码/截断），绝不显示 fake hex、不把字节码伪装成可编辑源码；非 Lua 字节码
+  只读；
+- 可编辑源码 = 明文或反编译文本；Ctrl+S 应用（同 S14 话术「正在应用…」「已应用，
+  可回滚。」），容器条目经 Patch Engine `replaceContainerChild`（回传 child/
+  container hash 乐观校验，写回 plaintext Lua），独立文件走 `saveTextResource`；
+- 形态识别在 renderer 探 `listScriptContainerEntriesPage`（容器格式未知即独立
+  文件）；内层地址构造、hash 与回滚都在 main；
+- DSLuaDecompiler 是**读入依赖**（打开即反编译），不是 writer/compiler：SoulForge
+  不重编译、不执行脚本，写回什么字节由用户编辑的源码决定。
 
 ### 10.3 动作域（Talk / Behavior / TimeAct / Animation 合并）
 
 T3（2026-08-15）把 Talk、HKX Behavior、TimeAct、Animation 合并为单一「动作」域（`behavior`）。顶栏只有「动作」，没有「行为」和「动画」；侧栏列 `anibnd|tae` 逻辑库。工作台按真实结构（对照 DSAS），不要套通用四栏：
 
 ```text
-动作:  Animations（动画 id 列表，hkxName 去扩展，如 a000_003013）| 词条 + 详情 | 预览（只读）
+动作:  Animations（动画 id 列表，hkx 茎去扩展，如 a000_003013）| 词条 | 预览（只读），详情沉三栏底 footer
 ```
 
-- 左栏列动画 id 列表（虚拟滚动）；中栏列当前动画的词条事件文本列表（`PlaySound_ByStateInfo` 等，能解出中文副名就显示），选中后在中栏下方详情列出 Start Frame / End Frame / Id 与能解出的全部字段；解不出的字段写「未解码」+ 原始 hex/数字，禁止编造 SoundType 含义。
-- 右栏是只读 3D：有伴生 `c5030.chrbnd.dcx` 且现有 FLVER 预览能挂就挂；否则空态「预览不可用」+ 诊断。不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
+S17（2026-08-15）拍死五件事（对照 DSAS）：
+
+1. **三栏真拖**：`WorkbenchLayout` 量栏内容宽（不含 4px 分隔条），拖拽/键盘监听用 propsRef + 空依赖 useCallback 稳定挂载——面板每次 render 新建 `columns` 数组不再拆装监听；拖完仍可再拖，松手不弹回。
+2. **动画命名**：hkxName 茎合法（ASCII 文件名）用茎；乱码/空/非文件名字符丢弃，回退 `a000_` + 至少 6 位 animId（`a000_000600`）。禁止「动画 N」、禁止乱码。C# 侧名字指针在 animFileInfo+0x10（UTF-16LE；+0x00 是 0/1 链接标志，旧码读它当指针吐乱码）。
+3. **词条行**：`{完整 typeId}  {类型名}`（`0 JumpTable`），类型名来自本机 DSAS `TAE.Template.SDT.xml`（main 只读解析注入，同 Yapped 只读模式，不提交 XML 入库）；无模板名显示「未命名」。行内元信息是帧，不显示秒。
+4. **词条详情下沉 footer**：选中词条时三栏底下（WorkbenchLayout footer，占用 S12 卸掉的 64 KiB 条位置）出现 起始帧/结束帧（主标签帧，可附 ≈秒小字）、完整 typeId + 类型名、事件下标、全部参数字段——按模板布局解码（Bridge 4 字节槽对齐，字段名 + 值 + kind）；解不出写「未解码」+ 有界 hex，禁止编造字段含义。帧编辑（update-event-times）留在 footer，输入用帧、提交内部秒；insert-event 已移除。中栏不再有 DetailsSection / Inspector 第三栏。
+5. **右栏挂伴生 chrbnd 模型**：查找顺序 overlay `chr/<id>.chrbnd.dcx` → 已挂载原版同样相对路径（原版只读）；Bridge FLVER 读命令支持 chrbnd 容器（DCX→BND4→首个 .flver 子项，与 ffxbnd/anibnd 同构）；挂上现有 FLVER 只读预览（readFlverMesh/Skeleton/Dummies 走 `chrbnd:` 虚拟 sourceUri）。两边都没有：空态「没有找到 c1130 的模型（chrbnd）」；未挂原版且 overlay 也没有：空态写明去「开始」页挂原版。不要假 FBX、不要可编辑骨骼。
+
+- 左栏列动画 id 列表（虚拟滚动）；中栏列当前动画的词条事件列表（`{typeId} {类型名}`）；右栏是只读 3D 预览（有 chrbnd 才有模型）。不要时间轴图、不要 Inspector 第三栏、不要 64 KiB 条。
 - 打开 `*.anibnd.dcx` / `.tae` 都走 TAE 读链；`*.anibnd.dcx` 由 Bridge 从 BND4 容器提取主 TAE，**不落 BND4 通用容器页**。
 - 没有真实结构 read 时先完成对应 read 卡，不用通用资源列表冒充；
 - writer 缺失时保留完整只读专业工作台，而不是空白页面。
@@ -1354,7 +1377,7 @@ Bottom Composer
 
 ```css
 --agent-dock-default: 440px;
---agent-dock-min: 340px;
+--agent-dock-min: 200px;
 --agent-dock-max: 620px;
 --agent-header-height: 48px;
 --agent-resizer-width: 4px;
@@ -1371,7 +1394,7 @@ Bottom Composer
 - workspace 级持久化；
 - 鼠标拖动或键盘每次 16px；
 - 普通状态只有 1px 左分隔线；
-- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 340–620；
+- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 200–620（S8 下限从 340 收到 200：够放「引用 + 发送」）；
 - `Ctrl+J` 显示/隐藏；
 - 隐藏不取消任务、不清除审批。
 
@@ -1478,6 +1501,12 @@ Agent
 [Agent icon] @Agent [Ask / Plan / Edit]
 ```
 
+**S9 裁定（2026-08-16）**：Ask/Plan/Edit 模式菜单 portal 挂 `document.body` +
+`position:fixed`（锚点取 trigger rect；窗口 resize 重锚；视口太矮自动翻到 trigger
+上方）。旧实现 `position:absolute; bottom: calc(100%+5px)` 挂在 composer 内，被
+`.agent` / composer 的 `overflow:hidden` 裁掉（「点 Ask 弹窗被挡住」）。Esc / 点
+外侧关闭；关闭时清锚点，重开不闪旧坐标。不做独立 BrowserWindow。
+
 输入区：
 
 - 正文最小 72px；
@@ -1580,6 +1609,8 @@ AgentSidebar
 ```
 
 保留 `AgentSidebar` 外部导出名。`AgentTaskPanel` 不再作为顶部常驻控制台；任务进度、取消和审批进入消息流。模型服务、工具库存、会话历史和开发设置进入 `AgentSecondaryDrawer`。
+
+**S11 裁定（2026-08-16）**：抽屉是 Agent 列的第二个面（欢迎/对话 ↔ 抽屉）——打开时整列换页，欢迎、资源引用条、composer 全部卸掉，禁止半透明抽屉盖在欢迎 + composer 上（旧实现 `position:absolute` 叠一层，浅色主题 `--forge-0` 只有 8% 白，下层全透出）。抽屉占 `conversation` grid 区（header 以下 1fr），顶栏自带 历史|设置 视图切换 + ×，标题独占一行不与欢迎「Agent」抢行；关闭恢复原面，composer 仍在。
 
 组件不得全部塞回一个超大 `AgentSidebar.tsx`。60A–60D 必须按上述边界拆文件，并为每个有状态组件提供独立 reducer 或纯状态转换测试。
 
@@ -1708,6 +1739,17 @@ export declare function reduceAgentComposer(
 
 允许转换固定为：`idle/composing + PROMPT_CHANGED`、`composing + SUBMIT → submitting`、`submitting + STREAM_STARTED → streaming`、`streaming + TOOL_STARTED → tool-running`、`tool-running + TOOL_FINISHED → streaming`、`streaming/tool-running + APPROVAL_REQUIRED → awaiting-approval`、`awaiting-approval + APPROVE → committing`、`awaiting-approval + REJECT → idle`、`committing + COMMIT_FINISHED → verifying`、`verifying + VERIFY_FINISHED → idle`、`streaming + STREAM_FINISHED → idle`、任意活动态 `+ FAIL → failed`、任意活动态 `+ STOP → idle`、`failed + RESET → composing/idle`。其他组合必须返回原状态并记录开发诊断；不允许用多个互不约束的 boolean 表示同一状态机。
 
+### 12.12 S10「引用」框选（2026-08-16 裁定）
+
+`@` / `#` 两个文本插入钮**合成一个「引用」框选钮**（composer 工具栏固定五项：引用 | 附件 | 模型 | Plan | 发送/停止）。引用是语义实体，不是文本 token——与带 `data-cite` 的 DOM 做矩形相交（不做 OCR、不做截图像素识别）。
+
+- **范围**：点「引用」只把**中央编辑区**盖半透明暗幕 + 十字框选光标（editor-area 内 absolute 覆盖；Agent dock 是 flex 兄弟，保持明亮）。Esc / 再点「引用」取消。
+- **命中**：按下拖出矩形、松开结算；相交面积 > 0 的 `data-cite` 节点都算中。PARAM 先行：行 `{kind:'param-row', library, table, rowId, name?}`、字段 `{kind:'param-field', library, table, rowId, fieldId, label, value}`（JSON 只含逻辑 id，禁止绝对路径；读取失败的 param 不给 data-cite）。
+- **合并**（shared `mergeCiteHits`）：字段命中锚定行（字段栏永远显示选中行的字段，框里扫到的其他行是误框，丢弃不并入）；无字段命中取第一行；同字段去重。一次框选一条 chip，可多次点「引用」累加，chip 可叉掉。
+- **可见标签**（shared `formatParamCiteLabel`，固定格式）：`param/<库短名>/<表名>/<行id>-<行名>【<字段中文>：<值>】…`；字段按框中的字段列出，框中只有行则只到行名；库短名用 `gameparam` 这类逻辑名，绝不出 `D:\...`。
+- **签发**：renderer 把命中交 `agent.citation.create`，main 解码合并 + 拼 label + 签发与资源引用同形态的 opaque token（`agentReferenceRegistry` 记录 citation）；提交时 `ai.agent.run` 用注册表里的 citation 重拼系统提示行（不信任 renderer 回传 label），模型能看到哪张表哪一行哪些字段。
+- **对不上的域**：框选无命中（工具条/无 data-cite 区域）→「这块还不能引用」，不瞎编、不发无谓 IPC。
+
 ---
 
 ## 13. GameParam 打开链路
@@ -1806,7 +1848,7 @@ export type EditTransactionState =
   | { kind: 'failed'; operationId: string; phase: string; reasonCode: string };
 ```
 
-状态栏和 Change Review 必须显示当前状态。局部失败保留其他 pane 和已加载数据。
+Change Review 必须显示当前状态。局部失败保留其他 pane 和已加载数据。
 
 ### 14.3 能力状态
 
@@ -2182,7 +2224,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 | `apps/desktop/src/renderer/src/workbench/selectEditor.ts` | **已落地** ROUTE-06 完整：artifact-role prefilter → confirmed-leaf 优先 → candidate 落 Files | 保持 |
 | `apps/desktop/src/renderer/src/workbench/ParamWorkbench.tsx` | **已落地** 四栏 Params/Rows/Fields/Tools：右侧工具栈（诚实空态）、逻辑库标题、局部失败 param 保留；e2e 钉 flex 0.2/0.29/0.35/0.16 | 保持 |
 | `apps/desktop/src/renderer/src/workbench/GparamWorkbench.tsx` | **已落地** §8.1 五区 Files/Groups/Fields/Values/Toolbar；e2e 钉五区 + 无合并栏 | 保持 |
-| `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | **已落地** §9.1 左 Categories + 右上 Entries(55%) + 右下 Text(45%)；e2e TEXT-20B/20C 通过 | 保持 |
+| `apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx` | **已落地** §9.1（S13）Categories \| Entries \| Text 三列 + 逻辑表名投影；e2e TEXT-20B/20C 通过 | 保持 |
 | `apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx` | **已落地** §11：CodeMirror 6、无四钮（T4）、Ctrl+F 走 CM search、EMEDF autocomplete+hover；非 260/320 三栏 | 保持 |
 | `apps/desktop/src/renderer/src/editors/EmevdFourViewPanel.tsx` | **已落地** 保持断开；未取得 scope 裁定前不删除文件 | 保持断开 |
 | `apps/desktop/src/main/ipc.ts` | **已落地** ROOT-07：复用 `prepareBridgeRoots`；只读 handler 只传已验证 roots，staging 显式走 `prepareBridgeRoots(…,'stage')` | 保持 |
@@ -2238,7 +2280,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 1440px
 1920px
 200% system/browser zoom
-340 / 440 / 620px Agent widths
+200 / 440 / 620px Agent widths（S8 下限 200）
 ```
 
 窄窗口策略：
@@ -2413,7 +2455,7 @@ SHELL-09 → SHELL-10
 #### SHELL-10 — 键位跟域走（T7）
 
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/keybindings/keymapTable.ts`；`[CREATE] apps/desktop/src/renderer/src/keybindings/applyKeybinding.ts`；`[CREATE] apps/desktop/src/renderer/src/keybindings/keymapTable.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] docs/frontend-renovation/front-end.md`。
-- **Steps**：renderer 键位表模块（壳层三键 / 共用编辑 / PARAM/文本 / 事件 / 地图·模型视口 / 动作）；App.tsx 写死的 Ctrl+K/J/B 并入表；window keydown 输入框/textarea/contenteditable/Agent composer 内不抢工作台键，壳层三键始终生效；状态栏右侧显示套名「壳层 · PARAM」。
+- **Steps**：renderer 键位表模块（壳层三键 / 共用编辑 / PARAM/文本 / 事件 / 地图·模型视口 / 动作）；App.tsx 写死的 Ctrl+K/J/B 并入表；window keydown 输入框/textarea/contenteditable/Agent composer 内不抢工作台键，壳层三键始终生效。（S12 后日常壳无底栏，键位套名不再显示在状态栏；套名是纯内部概念。）
 - **Rules**：键位跟域走——没有视口的页不得抢 WASD；视口键仅指针在视口内命中；Alt+D 等能力不存在的键照常可命中但 UI 不得造假按钮。
 - **Tests**：`npm run test:renderer-unit`（keymapTable.test.ts）；`npm run typecheck`。
 
@@ -2482,7 +2524,7 @@ SHELL-09 → SHELL-10
 #### TEXT-20B — Smithbox Text 工作台
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx`；`[MODIFY after TEXT-20A] apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：把现有横向四栏改成 §9.1：左 Categories（语言/container/FMG + 其下 Toolbar），右上 Entries，右下 Text。IME、Unicode、按 ID/文本搜索、独立滚动、父级切换清理。
+- **Steps**：按 §9.1（S13）：Categories | Entries | Text 三列；Categories 顶上语言筛选 + 平铺表名（逻辑名），无缩进树、无 Tools 块；表名投影在 main（shared `logicalFmgTableName`），renderer 不二次解析路径。IME、Unicode、按 ID/文本搜索、独立滚动、父级切换清理。
 - **Negative DOM**：`menu/**/*.tpf.dcx` 不出现；无物理目录 tab、主区 evidence/hex、未接线 Tools、正文第四竖栏。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；完成 language→container→table→entry→content；Entries 在 Content 上方；全链键盘/IME/Unicode；无匹配与真空表分离；同尺寸截图。
 - **Done**：选择链完整，拓扑与 §2.5 Text 一致。
@@ -2504,6 +2546,21 @@ SHELL-09 → SHELL-10
 - **Tests**：`npm run bridge:verify:emevd`、`npm run test:emevd-full-document`；覆盖 partial projection、unknown instruction、bounded outline 和绝对路径脱敏。
 
 #### EVENT-30B — DarkScript3 source workbench
+
+> **S14/S15（2026-08-15，用户裁定）取代本卡的「只读展示」条款**：
+> - 源码**可编辑**，`Ctrl+S`（或等价）直接应用；不要「编译并提交」按钮、不要审查对话框、不要出现 Bridge / 补丁引擎字样（底层仍经 typed mutation → Patch Engine，应用前自动备份，失败或撤销走审计与回滚）。
+> - 删橙色眉题（`.event-source__header` / eyebrow / 就绪）与黄条（`.event-source__notice`）。
+> - 内层标签只显示短名（`common` / `m11_02_71_10`），禁止 `event/….emevd.dcx`。
+> - 读取失败时编辑区正文给 `code + 人话 + 下一步`（KRAK 缺原版：到「开始」页选择含 sekiro.exe 的原版目录），禁止假 `resource "file://…"` 伪源码与「详情见底部日志」；失败随 `eventOpenFailure` 附进 Agent 系统提示，Agent 能直接复述原因和下一步。
+> - 编不了的指令：该行标未解码，不锁整份只读、不假成功写盘。
+
+> **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
+> - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
+> - **B**：renderer 打开只打一枪——`readEmevdDocument` envelope 双读删除，事件数 / sourceHash / gutter 判据全部由 `readEmevdFullDocument` 的 outline 给（`unknownCount` 按完整 EMEDF 逐条判，不再有 256 条采样造成的假「整段未知」）；`mapEmevdEnvelope` / `alignEmevdDocumentAnchors` 删除，`indexEventLines` 按 `$Event(` 出现顺序映射。
+> - **C**：反汇编单次解码（`DecodeStatus` 化，折叠与渲染共用一份结果）+ EMEDF registry 索引（WeakMap：校验 + bank→id→def，33266 条指令从 9s 级降到 4ms 级）+ `renderEmevdDarkScriptAsync` 分片让出（可取消，不返回半成品）。
+> - **D**：sanitizer 源码字段豁免——`dslTemplate` / `text` 等是内容不是元数据，不做整串路径替换（S13 口径）；路径防线只留键名与诊断 message。
+> - **E**：CodeMirror 禁首帧 `EditorState.create(全文)`——首帧只灌 400 行前缀，常驻 interval 每 16ms `view.dispatch` 追加一片；`indexEventLines` 增量更新不整篇 split；dirty（用户编辑）一次性补全；tab 切回走缓存 state 零 parse。
+> - **F**：领域切换只开 `filesForDomain` 第一份（common_func 不预加载）；main 按 sourceHash 缓存反汇编文本，切回零解析（缓存失效 = 写入 / hash 变）。
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。
 - **Dependencies**：在 `apps/desktop/package.json` 加入 exact 版本 `@codemirror/state@6.7.1`、`@codemirror/view@6.43.8`、`@codemirror/language@6.12.4`、`@codemirror/search@6.7.1`、`@codemirror/commands@6.10.4`、`@codemirror/autocomplete@6.20.3`、`@lezer/highlight@1.2.3`，并更新根 lockfile。
@@ -2530,8 +2587,8 @@ SHELL-09 → SHELL-10
 #### SCRIPT-41
 
 - **Allowed**：`[MODIFY] packages/shared/src/script-container.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEntry.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEdit.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`；`[MODIFY] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：按 §10.2：Container/Files | Source/只读反汇编主区 | 可选 Symbols。encoding/BOM/newline/NUL 明示；bytecode 不伪装可编译；不要为空凑 Tools 栏。
-- **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、renderer unit/E2E。
+- **Steps**：按 §10.2（S16）：luabnd 容器 `Files | Source` 两栏 / 独立 `.hks/.lua` 单 Source；打开即按字节判定，`\x1bLua` 字节码由 main 调本机 DSLuaDecompiler 反编译为 Lua 文本；反编译失败给结构化原因，不显示 fake hex、不把字节码伪装成可编辑源码；明文与反编译文本均可编辑，Ctrl+S 应用（同 S14 话术）并保留回滚，容器条目经 `replaceContainerChild`、独立文件经 `saveTextResource`；形态识别与内层地址构造都在 main。
+- **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、renderer unit/E2E（S16 脚本 IDE 两用例）。
 
 ### 18.19 MAP/ASSET 独立卡
 
@@ -2547,6 +2604,7 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/MsbScenePanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/MsbScenePanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
 - **Output**：`Map Object List | Viewport | Properties`（§2.5）。选择、gizmo、属性和 camera 与 Smithbox 流程对照；Asset Browser / Prefabs 等有真实能力再加。writer 未就绪时无保存动作。
+- **S19 裁定（2026-08-15）**：Bridge `read-msb-document` / `write-msb` 必须先 native 解 DCX（与 EMEVD 同一套 `DcxNativeDocument`）再认 `"MSB "` 魔数——磁盘上的 `.msb.dcx` 头是 `DCX\0`。mods 里 DFLT 不挂原版也能开；原版 KRAK 挂原版 + Oodle 后同样能开。读取失败在面板内给 `code + 人话 + 下一步`（如「KRAK，到开始页选原版」），不得「详情见底部日志」。冒烟至少一条直接对 `.msb.dcx` 调 `read-msb-document`，禁止先在 TS 里 `decompressDfltDcx` 再喂。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；tree/viewport/inspector 联动、无 writer action、resize/keyboard 和对照截图。
 - **S19 失败面已落地**：打开失败（KRAK 缺 Oodle / 其它读取错误）时左栏显示 code + 人话 + 下一步，viewport 不再假 0 实体；同一份结构化失败随下一次 Agent 任务提交（main 校验后进系统提示），Agent 能直接解释原因与下一步。
 
@@ -2674,7 +2732,7 @@ SHELL-09 → SHELL-10
 #### AGENT-60A — dock shell 与欢迎区
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockResizer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockHeader.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentConversationViewport.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentWelcome.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`。
-- **Steps**：实现 48px header / minmax conversation / bottom composer grid；340/440/620px、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
+- **Steps**：实现 48px header / minmax conversation / bottom composer grid；200/440/620px（S8）、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
 - **Tests**：idle 440×900 截图；340/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
 
 #### AGENT-60B — 三层 Composer
@@ -2740,7 +2798,7 @@ SHELL-09 → SHELL-10
 ### 19.3 其他成熟编辑器
 
 - [ ] Container 是 SoulForge 自有：`Containers | Entries | Preview`，child 只产生受确认的语义投影；
-- [ ] Script 是 `Container/Files | Source/只读反汇编`，bytecode 不伪装可编辑源码；
+- [ ] Script 是 `Files | Source` 两栏（luabnd）或单 Source（独立 .hks/.lua），`\x1bLua` 字节码经本机 DSLuaDecompiler 反编译为 Lua 文本，bytecode 不伪装可编辑源码（§10.2 S16）；
 - [ ] Map 是 `Map Object List | Viewport | Properties`；
 - [ ] Model 是左树栈、viewport、Properties，材质槽选择能定位关联项；
 - [ ] Texture 是 container list + texture list + viewer + properties；`menu/**/*.tpf.dcx` 只能到此或 Files；
@@ -2777,7 +2835,7 @@ SHELL-09 → SHELL-10
 
 - [ ] 1024/1280/1440/1920 可用；
 - [ ] 200% 缩放无遮挡；
-- [ ] 340/440/620px Agent 无溢出；
+- [ ] 200/440/620px Agent 无溢出（S8 下限 200）；
 - [ ] pane resizer 支持鼠标和键盘；
 - [ ] 所有列表、树、表格、编辑器和 toolbar 可仅用键盘操作；
 - [ ] focus-visible 清晰；

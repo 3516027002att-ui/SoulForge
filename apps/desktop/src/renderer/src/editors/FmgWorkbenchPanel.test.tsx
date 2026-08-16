@@ -42,30 +42,35 @@ function render(entries: unknown[] = []): string {
   );
 }
 
-describe('FmgWorkbenchPanel 初始结构（挂载即有的 §9.1 骨架：左 Categories + 右上 Entries + 右下 Text）', () => {
+describe('FmgWorkbenchPanel 初始结构（挂载即有的 §9.1 S13 骨架：Categories | Entries | Text 三列）', () => {
   it('区域名是「FMG 本地化工作台」', () => {
     assert.match(render(), /aria-label="FMG 本地化工作台"/);
   });
 
-  it('§9.1 拓扑：Text Categories 左栏 + 右上 Text Entries + 右下 Text Content，不是四条竖栏', () => {
+  it('S13 拓扑：Text Categories | Text Entries | Text 三列竖排，不是左树 + 右上下两块', () => {
     const html = render();
     assert.match(html, /aria-label="Text Categories"/);
     assert.match(html, /aria-label="Text Entries"/);
-    assert.match(html, /aria-label="Text Content"/);
-    // 右区是上下两块（entries 在上、text 在下）；Tools 叠在 Categories 下方，
-    // 不是独立第四竖栏。
-    assert.match(html, /fmg-right__pane--entries/);
-    assert.match(html, /fmg-right__pane--text/);
-    assert.match(html, /fmg-categories__toolbar/);
+    assert.match(html, /aria-label="Text"/);
+    // 右区不再是 fmg-right 上下两块；左栏底下没有空 Tools 块。
+    assert.doesNotMatch(html, /fmg-right__pane--entries/);
+    assert.doesNotMatch(html, /fmg-right__pane--text/);
+    assert.doesNotMatch(html, /fmg-categories__toolbar/);
+    assert.doesNotMatch(html, /暂无已接通的工具/);
+  });
+
+  it('语言是 Categories 顶上筛选：combobox 挂载即有', () => {
+    const html = render();
+    assert.match(html, /aria-label="文本语言"/);
   });
 
   it('工具条面包屑是「文本」', () => {
     assert.match(render(), /<b>文本<\/b>/);
   });
 
-  it('未选表时不伪装错误：显式「先选择语言、容器与文本表」muted 空态', () => {
+  it('未选表时不伪装错误：显式「先选择语言与文本表」muted 空态', () => {
     const html = render();
-    assert.match(html, /先选择语言、容器与文本表/);
+    assert.match(html, /先选择语言与文本表/);
     assert.doesNotMatch(html, /danger/);
   });
 });
@@ -99,6 +104,14 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     assert.match(panelSource, /setPageError\(result\.diagnostics/);
     assert.match(panelSource, /setPageEntries\(\[\]\)/);
     assert.match(panelSource, /if \(liveMode\) return;/);
+  });
+
+  it('S13：表名是 main 投影的逻辑名——renderer 不出现「[本机路径已隐藏]」当表名', () => {
+    // 表名投影（basename 去 .fmg）在 main（ipc readTextCatalog + shared
+    // logicalFmgTableName）；renderer 只消费 catalog.tables[].entryName。
+    assert.doesNotMatch(panelSource, /\[本机路径已隐藏\]/);
+    assert.match(panelSource, /table\.entryName/);
+    assert.doesNotMatch(panelSource, /logicalFmgTableName\(/);
   });
 
   it('语言缺失：typed ID 来自 Bridge metadata，renderer 不解析 msg/ 路径', () => {

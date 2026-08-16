@@ -85,26 +85,6 @@ export function formatBytes(bytes: number): string {
   return `${Number.isInteger(mib) ? mib : mib.toFixed(1)} MiB`;
 }
 
-/**
- * 预览被截断时的状态文案。
- *
- * 原文案是「预览只读取文件前缀，确保大型 DCX/BND 等二进制文件也能安全打开」——
- * 它解释了**为什么**截断，却没回答**截断到什么程度**。anti-ai-design 的状态优先
- * 原则要求界面能回答「已解析多少」，而用户看不到数字就无法判断自己看到的是
- * 全部的一半还是万分之一。
- *
- * fileSize 缺失时只报已读量并明说总量未知，不猜、不省略这个事实。
- */
-export function formatPreviewTruncation(bytesRead: number, fileSize?: number): string {
-  const shown = `已读取前 ${formatBytes(bytesRead)}`;
-  if (fileSize === undefined || !Number.isFinite(fileSize) || fileSize <= 0) {
-    return `${shown}；文件总大小未知，预览只覆盖前缀。`;
-  }
-  const pct = fileSize > 0 ? (bytesRead / fileSize) * 100 : 0;
-  const pctText = pct >= 10 ? pct.toFixed(0) : pct >= 0.1 ? pct.toFixed(1) : '<0.1';
-  return `${shown} / 共 ${formatBytes(fileSize)}（${pctText}%）；预览只覆盖前缀，未读部分不参与解析与编辑判定。`;
-}
-
 /** 列表被硬截断时的状态文案输入。 */
 export interface ListTruncationInput {
   /** 过滤后的真实总数（不是原始总数——用户看到的比例要对得上当前筛选）。 */

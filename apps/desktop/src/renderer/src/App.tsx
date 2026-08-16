@@ -101,6 +101,7 @@ import { AmbientField } from './theme/AmbientField.js';
 import { shouldShowEditorWelcome } from './theme/editorWelcome.js';
 import { Me3RuntimePanel } from './runtime/Me3RuntimePanel.js';
 import { AgentSidebar } from './agent/AgentSidebar.js';
+import { CiteSelectScrim } from './agent/CiteSelectScrim.js';
 import { clampAgentDockWidth } from './agent/AgentDockResizer.js';
 import { resolveKeybinding } from './keybindings/applyKeybinding.js';
 import type {
@@ -304,6 +305,13 @@ export function App(): ReactElement {
   // AGENT-60D 提交期消费点：AgentSidebar 草稿里 §12.11 的 opaque 资源引用冒泡到
   // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
   const [agentResources, setAgentResources] = useState<readonly AgentResourceReference[]>([]);
+  /**
+   * S10 引用框选：citeSelecting = 中央编辑区暗幕开/关（「引用」钮与暗幕共享这一
+   * 状态）；pendingCiteHits = 暗幕结算出的命中，交 AgentSidebar 经
+   * agent.citation.create 换成 main 签发的 opaque 引用（消费后清空）。
+   */
+  const [citeSelecting, setCiteSelecting] = useState(false);
+  const [pendingCiteHits, setPendingCiteHits] = useState<readonly CiteHit[] | null>(null);
   // S12 卸掉状态栏后 status 无显示出口。setStatus 调用点仍保留（流程记录），
   // S15 失败句机制（编辑区 code + 人话 + 下一步）接手时会系统性清理。
   const [, setStatus] = useState('就绪');
@@ -1750,6 +1758,21 @@ export function App(): ReactElement {
     }, 4200);
   }
 
+  /**
+   * S10 引用框选结算：暗幕收集命中后这里先本地合并把关——没有任何可引用节点
+   * 直接提示「这块还不能引用」，不发无谓 IPC；能合并的交给 AgentSidebar 经
+   * agent.citation.create 换 main 签发的 opaque 引用。
+   */
+  function handleCiteSettle(hits: CiteHit[]): void {
+    setCiteSelecting(false);
+    const citation = mergeCiteHits(hits);
+    if (citation === null) {
+      pushToast('这块还不能引用：框选里没有可引用的 PARAM 行或字段。', 'warn');
+      return;
+    }
+    setPendingCiteHits(hits);
+  }
+
   async function sendAgentPrompt(): Promise<void> {
     // T6-1：Composer「发送」= 真正跑 Agent loop（现有 runAgentTask），不再只生成
     // 本地草稿。空输入 / 没配模型由 runAgentTask 自己说明，不在这里拦。
@@ -2187,6 +2210,26 @@ export function App(): ReactElement {
       setMsgRows(extractMsgRows(refreshed));
     }
     setStatus(`已回滚 ${result.restoredFiles.length} 个文件`);
+    pushToast(`已回滚 ${result.restoredFiles.length} 个文件`);
+  }
+
+  /** 文件级回滚：把某次操作里的单个文件恢复到操作前状态。 */
+  async function rollbackFileOp(opId: string, targetUri: string): Promise<void> {
+    if (!bridge) {
+      announceDesktopOnly('文件回滚');
+      return;
+    }
+    if (typeof bridge.rollbackFile !== 'function') {
+      pushToast('当前预加载未暴露文件级回滚。', 'warn');
+      return;
+    }
+    const result = await bridge.rollbackFile(opId, targetUri);
+    await refreshOperationHistory();
+    if (!result.ok) {
+      pushToast(`文件回滚失败：${result.diagnostics.map((d: Diagnostic) => d.message).join('; ') || targetUri}`, 'warn');
+      return;
+    }
+    pushToast(`已回滚文件（${result.restoredFiles.length} 个）`);
   }
 
   function updateMsgRow(index: number, patch: Partial<EditableMsgRow>): void {
@@ -2787,6 +2830,25 @@ export function App(): ReactElement {
                         <button type="button" className="btn btn--ghost btn--sm" onClick={() => void rollbackOp(entry.opId)}>
                           回滚
                         </button>
+                        <details className="audit-entry__files">
+                          <summary>文件级回滚（{entry.fileCount}）</summary>
+                          {entry.changedPaths.map((path) => (
+                            <div key={`${entry.opId}:${path}`} className="audit-entry__file">
+                              <span className="audit-entry__file-path" title={path}>{shortenPath(path)}</span>
+                              {path === '[本机路径已隐藏]' ? (
+                                <span className="audit-entry__file-hint">路径未脱敏映射，不可单文件回滚</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn btn--ghost btn--sm"
+                                  onClick={() => void rollbackFileOp(entry.opId, path)}
+                                >
+                                  回滚此文件
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </details>
                       </div>
                     )}
                   </div>
@@ -3624,6 +3686,12 @@ export function App(): ReactElement {
               </div>
             </div>
           </div>
+          {citeSelecting && (
+            <CiteSelectScrim
+              onSettle={(hits) => void handleCiteSettle(hits)}
+              onCancel={() => setCiteSelecting(false)}
+            />
+          )}
         </main>
 
         {/* ══════════ Agent 面板 ══════════ */}
@@ -3685,6 +3753,10 @@ export function App(): ReactElement {
           onThinkingChange={setAiThinking}
           onPromptChange={setAiPrompt}
           onSend={() => void sendAgentPrompt()}
+          citeSelecting={citeSelecting}
+          onToggleCiteSelect={() => setCiteSelecting((selecting) => !selecting)}
+          pendingCiteHits={pendingCiteHits}
+          onCiteHitsConsumed={() => setPendingCiteHits(null)}
           onNewTask={startNewAgentTask}
           onToggleExpand={() => {
             setAgentExpanded((expanded) => !expanded);

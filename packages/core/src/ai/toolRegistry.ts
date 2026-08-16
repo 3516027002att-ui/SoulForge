@@ -1,5 +1,6 @@
 import type {
   AiToolPermissionLevel,
+  ConfirmationReceipt,
   IndexedFile,
   PatchMode,
   PatchProposal,
@@ -7,8 +8,9 @@ import type {
   ResourceKind
 } from '@soulforge/shared';
 import { createPatchProposal, dryRunPatchProposal } from '../patch/patchEngine.js';
-import { getDefaultOperationLogStore } from '../patch/operationLog.js';
+import { getDefaultOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
+import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import { buildGraphPatchFromProposal, summarizeGraphPatch } from '../patch/graphPatch.js';
 import { assessEditRisk, evaluateWriterGate, resolveWriterContract } from '../patch/writerContract.js';
 import type { RagChunkFamily, RagCorpus } from '@soulforge/shared';
@@ -29,6 +31,18 @@ export interface ToolContext {
   mode: 'plan' | 'normal' | 'fullPermission';
   /** Optional durable/in-memory RAG corpus. Absent falls back to building from the index. */
   rag?: RagCorpus;
+  /**
+   * 主进程注入的「真实写/回滚」上下文。纯读工具不需要；写级工具（回滚等）
+   * 缺省时干净失败（ROLLBACK_CONTEXT_REQUIRED），绝不用内存 store 冒充生产
+   * 通道 —— 之前 rollback_operation 只带内存 store 且无 confirmation，恒以
+   * EDIT_CONFIRMATION_REQUIRED 失败，属于半成品，本次接通。
+   */
+  session?: WorkspaceSession;
+  operationLogStore?: OperationLogStore;
+  backupBaseDir?: string;
+  recoveryDir?: string;
+  /** 用户对本次具体写操作的确认凭据（main 原生对话框签发，绑定操作 ID）。 */
+  confirmation?: ConfirmationReceipt;
 }
 
 export interface ToolDescriptor {
@@ -708,7 +722,9 @@ export function createDefaultToolRegistry(): ToolRegistry {
     run: async (_input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
-      const store = getDefaultOperationLogStore();
+      // 优先用主进程注入的生产 SQLite store；没有注入时退回内存 store（测试/离线
+      // 形态），不再把「内存空日志」冒充生产日志 —— 主进程 ai.runAgent 已注入。
+      const store = context.operationLogStore ?? getDefaultOperationLogStore();
       return ok({
         operations: await store.list(ws.workspaceId),
         history: await store.history(ws.workspaceId)
@@ -722,14 +738,41 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permission: 'rollback',
     permissionLevel: 'rollback',
     inputSchema: { opId: 'string' },
-    run: async (input) => {
+    run: async (input, context) => {
       const value = asRecord(input);
       const opId = asString(value.opId);
       if (!opId) return fail('INVALID_INPUT', 'rollback_operation requires opId.');
-      return ok(await rollbackOperation({
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
+      // 回滚必须走生产上下文：session（可写路径权威校验）、持久 store（幂等与
+      // 审计）、备份/恢复目录（逆向事务的还原点）。缺任一即干净失败，绝不回退
+      // 到内存 store —— 那会把「没有备份」伪装成「已回滚」。
+      if (!context.session || !context.operationLogStore || !context.backupBaseDir || !context.recoveryDir) {
+        return fail(
+          'ROLLBACK_CONTEXT_REQUIRED',
+          '回滚需要主进程注入的生产上下文（session / operationLogStore / backupBaseDir / recoveryDir）。'
+        );
+      }
+      const result = await rollbackOperation({
         opId,
-        store: getDefaultOperationLogStore()
-      }));
+        store: context.operationLogStore,
+        session: context.session,
+        backupBaseDir: context.backupBaseDir,
+        recoveryDir: context.recoveryDir,
+        author: 'ai',
+        ...(context.confirmation ? { confirmation: context.confirmation } : {})
+      });
+      // rollbackOperation 返回自带 ok 字段的结果对象，不能再用 ok() 整体包装
+      // —— 那会把失败状态（EDIT_CONFIRMATION_REQUIRED 等）吞成 ToolResult.ok=true。
+      if (!result.ok) {
+        const diagnostic = result.diagnostics[0];
+        return fail(
+          diagnostic?.code ?? 'ROLLBACK_FAILED',
+          diagnostic?.message ?? '回滚失败。',
+          { opId: result.opId }
+        );
+      }
+      return ok(result);
     }
   });
 

@@ -2590,3 +2590,421 @@ test('EVENT-30B：event→PARAM 切离事件域必须发出取消 IPC', async ()
   expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
   await app.close();
 });
+
+test('S16 脚本 IDE：容器 Files|Source 两栏，明文/反编译可编辑，Ctrl+S 应用', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // S16：脚本容器资源从 Files 领域选择，进入 Files | Source 两栏脚本 IDE。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'script/m25_00_00_00.luabnd.dcx');
+  // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
+  await expect(window.getByLabel('脚本容器工作台')).toBeVisible();
+
+  // 两栏（不用三栏/四栏模板：无 Container、Metadata、Tools/Symbols）。
+  await expect(window.getByRole('region', { name: 'Files' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Source' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Container / Files' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: 'Metadata' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
+
+  // 明文条目：可编辑源码 + 形态明示。
+  await window.getByRole('row', { name: /goal_list\.lua/ }).click();
+  const source = window.getByRole('region', { name: 'Source' });
+  await expect(source).toContainText('goal_list.lua');
+  await expect(source).toContainText('明文源码');
+  await expect(source).toContainText('goal = { name = "合成目标"');
+
+  // 编辑 → Ctrl+S 应用（S14 话术）+ 未保存标记。
+  await window.locator('[data-editor-engine="codemirror"] .cm-content').click();
+  await window.keyboard.press('Control+End');
+  await window.keyboard.type('\n-- e2e 追加');
+  await expect(window.locator('.scp-dirty')).toHaveText('未保存');
+  await window.keyboard.press('Control+s');
+  await expect(window.getByTestId('scp-status')).toHaveText('已应用，可回滚。');
+
+  // 字节码条目：本机 DSLuaDecompiler 反编译文本（来源明示，不是 fake hex）。
+  await window.getByRole('row', { name: /battle\.lua/ }).click();
+  await expect(source).toContainText('反编译源码');
+  await expect(source).toContainText('DSLuaDecompiler');
+  await expect(source).toContainText('function BattleStart()');
+  await expect(source).toContainText('SetHp(1000)');
+
+  await window.screenshot({ path: 'test-results/06-script-workbench.png' });
+  await app.close();
+});
+
+
+test('S16 脚本 IDE：独立 .hks 单 Source，打开即反编译，Ctrl+S 应用', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 独立脚本文件（.hks）：单 Source 栏，不落容器分页。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'script/c0000_common.hks');
+  await expect(window.getByLabel('脚本编辑')).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Files' })).toHaveCount(0);
+
+  const source = window.getByRole('region', { name: 'Source' });
+  await expect(source).toContainText('c0000_common.hks');
+  await expect(source).toContainText('反编译源码');
+  await expect(source).toContainText('BEH_ADD_NONE = 0');
+  await expect(source).toContainText('可编辑 · Ctrl+S 应用');
+
+  // 编辑 → Ctrl+S 应用。
+  await window.locator('[data-editor-engine="codemirror"] .cm-content').click();
+  await window.keyboard.press('Control+End');
+  await window.keyboard.type('\n-- standalone 追加');
+  await window.keyboard.press('Control+s');
+  await expect(window.getByTestId('scp-status')).toHaveText('已应用，可回滚。');
+
+  await window.screenshot({ path: 'test-results/06-script-standalone.png' });
+  await app.close();
+});
+
+
+test('动作工作台三栏（TAE）：动画 → 词条事件选择链，详情沉 footer，参数体按模板解码', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // T3 / S17（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从 Files 领域选择，
+  // 进入三栏动作工作台（Animations | 词条 | 预览（只读）），详情沉三栏底 footer。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'action/c0000.tae');
+  // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
+  await expect(window.getByLabel('动作工作台')).toBeVisible();
+
+  // 三栏（grok T3，无 Inspector 第三栏 / 无 Tools 空栏 / 无时间轴图）。
+  await expect(window.getByRole('region', { name: 'Animations' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Events / 词条' })).toBeVisible();
+  await expect(window.getByRole('region', { name: '预览（只读）' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Inspector' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: 'Timeline / Events' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
+
+  // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类）。
+  // S17：合法 hkx 茎用茎（a0000）；无 hkxName 回退 a000_+6 位 animId（禁止「动画 N」）。
+  const left = window.getByRole('region', { name: 'Animations' });
+  await expect(left.getByRole('row', { name: /a0000/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /a000_000001/ })).toBeVisible();
+  await expect(left.getByRole('row', { name: /动画 / })).toHaveCount(0);
+
+  // 未选中动画时中栏提示先选动画，不出事件行。
+  const middle = window.getByRole('region', { name: 'Events / 词条' });
+  await expect(window.getByTestId('tae-events-pick-animation')).toBeVisible();
+
+  // 选中动画 0 → 中栏词条事件列表：`{typeId} {类型名}`（无模板名显示「未命名」），
+  // 行内是帧元信息（S17 不再显示 0s → 1s）。
+  await left.getByRole('row', { name: /a0000/ }).click();
+  await expect(middle.getByText(/词条 · 动画 0/)).toBeVisible();
+  await expect(middle.getByRole('row', { name: /^1 / })).toBeVisible();
+  await expect(middle.getByRole('row', { name: /0 → 30 帧/ })).toBeVisible();
+
+  // 选中词条事件 → 三栏底 footer：起始帧/结束帧/完整类型/下标/参数字段。
+  await middle.getByRole('row', { name: /^1 / }).click();
+  const footer = window.getByTestId('tae-event-footer');
+  const footerMeta = footer.locator('.tae-footer__meta');
+  await expect(footerMeta.getByText(/起始帧/)).toBeVisible();
+  await expect(footerMeta.getByText(/结束帧/)).toBeVisible();
+  await expect(footerMeta.getByText(/事件下标 0/)).toBeVisible();
+  // 参数体按模板解码展示字段名+值；解不出时「未解码」+ hex 兜底（二者必居其一）。
+  const fields = window.getByTestId('tae-event-fields');
+  await expect(fields).toBeVisible();
+  await expect(fields.getByText('参数字段')).toBeVisible();
+
+  // 右栏：伴生 chrbnd 解析（fixture 工作区无模型且通常未挂原版）→ 诚实空态给下一步。
+  await expect(window.getByTestId('tae-chrbnd-absent')).toBeVisible();
+  await expect(window.getByTestId('tae-chrbnd-absent')).toContainText('chrbnd');
+  // 右栏始终只读：无输入、无按钮。
+  const preview = window.getByRole('region', { name: '预览（只读）' });
+  await expect(preview.locator('input, button')).toHaveCount(0);
+
+  // ANIMATION-56C event write（收进 footer）：帧编辑 → update-event-times（内部秒）。
+  await expect(window.getByTestId('tae-event-editor')).toBeVisible();
+  const startInput = window.getByLabel('新开始帧');
+  await expect(startInput).toHaveValue('0');
+  await startInput.fill('15');
+  await window.getByRole('button', { name: '更新事件时间' }).click();
+  await expect(window.getByTestId('tae-write-notice')).toContainText('事件时间已更新并重读验证');
+
+  await window.screenshot({ path: 'test-results/18-animation-workbench.png' });
+  await app.close();
+});
+
+
+test('S8：Agent dock 可缩到 200px（下限 200，上限 620，默认 440）', async () => {
+  const { app, window } = await launchApp();
+  // localStorage 可能持久化了上一轮的 dock 宽度（agentDock UI key）：清掉后重载，
+  // 「默认 440」断言不受上一轮运行影响。
+  //
+  // 清两次：App 的持久化 effect 是异步 flush 的，第一次清理可能被它把旧宽度
+  // 写回（实测竞态：清理 → persist effect 写回旧值 → reload 后恢复 effect 又
+  // 读到旧值，440 断言稳定失败）。等 flush 完再清一次，reload 时才是干净的。
+  const clearDockKeys = () => window.evaluate(() => {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('soulforge.ui.agentDock.v1.')) localStorage.removeItem(key);
+    }
+  });
+  await clearDockKeys();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await clearDockKeys();
+  await window.reload();
+  // localStorage 可能持久化了上一轮的收起状态：先确保 dock 展开，resizer 才可交互。
+  const agentToggle = window.getByRole('button', { name: 'AI Agent 面板' });
+  if ((await agentToggle.getAttribute('aria-pressed')) === 'false') {
+    await agentToggle.click();
+  }
+  // resizer 在（aria 值与 App/样式同一常量）。
+  const resizer = window.locator('.agent-dock-resizer');
+  await expect(resizer).toHaveAttribute('aria-valuemin', '200');
+  await expect(resizer).toHaveAttribute('aria-valuemax', '620');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '440');
+  await resizer.focus();
+  await window.keyboard.press('End');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '620');
+  // Home → 200：够放「引用 + 发送」，不是 0、不是一条缝。
+  await window.keyboard.press('Home');
+  await expect(resizer).toHaveAttribute('aria-valuenow', '200');
+  await window.screenshot({ path: 'test-results/08-agent-min-200.png' });
+  await app.close();
+});
+
+
+test('S9：Ask 菜单 portal 到 body 不被裁切，Esc/外侧点击/选中均关闭', async () => {
+  const { app, window } = await launchApp();
+  // localStorage 可能持久化了上一轮的收起状态：先确保 dock 展开。
+  const agentToggle = window.getByRole('button', { name: 'AI Agent 面板' });
+  if ((await agentToggle.getAttribute('aria-pressed')) === 'false') {
+    await agentToggle.click();
+  }
+  const trigger = window.locator('.agent-mode-trigger');
+  await expect(trigger).toContainText('Ask');
+  await trigger.click();
+
+  // 菜单是 body 直接子级（portal）：不再被 .agent/composer 的 overflow:hidden 裁掉。
+  const menu = window.locator('body > .agent-mode-menu');
+  await expect(menu).toHaveCount(1);
+  await expect(menu).toContainText('Plan');
+  await expect(menu).toContainText('Edit');
+  // 完整落在视口内（矮窗口自动翻到 trigger 上方）。
+  // 完整落在视口内（不依赖固定窗口高：矮窗口自动翻到 trigger 上方）。
+  const fullyVisible = await window.evaluate(() => {
+    const rect = document.querySelector('.agent-mode-menu').getBoundingClientRect();
+    return rect.top >= 0 && rect.bottom <= window.innerHeight;
+  });
+  expect(fullyVisible).toBe(true);
+
+  // Esc 关闭。
+  await window.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+
+  // 再开，点外侧关闭。
+  await trigger.click();
+  await expect(menu).toHaveCount(1);
+  await window.locator('.agent-composer__participant').click({ position: { x: 200, y: 2 } }).catch(() => undefined);
+  await window.locator('[data-testid="agent-empty-state"], .agent-message, .ab-item').first().click({ position: { x: 5, y: 5 } });
+  await expect(menu).toHaveCount(0);
+
+  // 再开，选 Plan：菜单项真实可点（被裁掉的菜单点不到），模式切到 Plan。
+  await trigger.click();
+  await menu.getByRole('option', { name: /Plan/ }).click();
+  await expect(trigger).toContainText('Plan');
+  await expect(menu).toHaveCount(0);
+
+  // 矮窗口：菜单向下放会越出窗口底，应翻到 trigger 上方且完整可见。
+  await window.setViewportSize({ width: 633, height: 379 });
+  // Electron 窗口 resize 异步落地：等真实 innerHeight 与 trigger 新布局到位再点开。
+  await expect.poll(() => window.evaluate(() => window.innerHeight)).toBe(379);
+  await expect.poll(() => window.evaluate(() =>
+    document.querySelector('.agent-mode-trigger').getBoundingClientRect().top
+  )).toBeLessThan(400);
+  await trigger.click();
+  await expect(menu).toHaveCount(1);
+  // 等锚点/翻转 effect 落地（重开不再用旧坐标渲染）。
+  await expect.poll(() => window.evaluate(() =>
+    parseFloat(document.querySelector('.agent-mode-menu').style.top) || 0
+  )).toBeLessThan(400);
+  const flippedVisible = await window.evaluate(() => {
+    const rect = document.querySelector('.agent-mode-menu').getBoundingClientRect();
+    const trigger = document.querySelector('.agent-mode-trigger').getBoundingClientRect();
+    return {
+      visible: rect.top >= 0 && rect.bottom <= window.innerHeight,
+      aboveTrigger: rect.bottom <= trigger.top + 1,
+      menuTop: rect.top, menuBottom: rect.bottom, menuHeight: rect.height,
+      triggerTop: trigger.top, triggerBottom: trigger.bottom,
+      innerHeight: window.innerHeight
+    };
+  });
+
+  expect(flippedVisible.visible).toBe(true);
+  expect(flippedVisible.aboveTrigger).toBe(true);
+  await window.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+
+  await app.close();
+});
+
+
+test('S10：引用框选——@/# 合成「引用」，PARAM 行+字段框选生成引用 chip，发送后标签随会话可见', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 打开 PARAM 工作台，选中 ActionGuideParam 第 100 行（行与字段都可引用）。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'param/gameparam/gameparam.parambnd.dcx');
+  await window.locator('.wb-list .wb-row', { hasText: 'ActionGuideParam' }).click();
+  await window.locator('.wb-virtual-row', { hasText: '100' }).click();
+  const atkProp = window.locator('.wb-prop', { hasText: '攻击力' });
+  await expect(atkProp).toBeVisible();
+
+  // 1) Composer 工具栏（S10 拍死）：@/# 两钮已合成一个「引用」钮。
+  const citeButton = window.getByRole('button', { name: '引用框选' });
+  await expect(citeButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(window.getByRole('button', { name: '添加 Agent 参与者' })).toHaveCount(0);
+  await expect(window.getByRole('button', { name: '添加当前文件上下文' })).toHaveCount(0);
+
+  // 2) 点「引用」：中央编辑区盖暗幕（Agent 区不盖——发送按钮仍可见可点）。
+  await citeButton.click();
+  await expect(window.getByTestId('cite-scrim')).toBeVisible();
+  await expect(citeButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(window.getByRole('button', { name: '发送' })).toBeVisible();
+
+  // 3) Esc 取消框选（拍死行为），再点「引用」重新进入。
+  await window.keyboard.press('Escape');
+  await expect(window.getByTestId('cite-scrim')).toHaveCount(0);
+  await expect(citeButton).toHaveAttribute('aria-pressed', 'false');
+
+  // 4) 空框选（框住没有 data-cite 的标签条空白区）：提示「这块还不能引用」，
+  //    不瞎编引用、不产生 chip。
+  await citeButton.click();
+  const tabbarBox = await window.locator('.tabbar').boundingBox();
+  // 布局可能横向溢出窗口（editor-area 起点为负）：鼠标坐标必须钳制到可见区。
+  const tabbarX = Math.max(0, tabbarBox.x);
+  await window.mouse.move(tabbarX + 40, tabbarBox.y + 12);
+  await window.mouse.down();
+  await window.mouse.move(tabbarX + 160, tabbarBox.y + 20, { steps: 4 });
+  await window.mouse.up();
+  // 引用 chip 在资源引用块内（.ctx-chip 也匹配常驻的上下文 chip：#files / #文件）。
+  const refChips = window.locator('[data-testid="agent-resource-references"] .ctx-chip');
+  await expect(window.locator('.toast--warn').filter({ hasText: '这块还不能引用' })).toHaveCount(1);
+  await expect(window.getByTestId('cite-scrim')).toHaveCount(0);
+  await expect(refChips).toHaveCount(0);
+
+  // 5) 框住行 100 与「攻击力」字段：松开结算 → 一条引用 chip（固定格式逻辑
+  //    标签：param/<库短名>/<表名>/<行id>-<行名>【<字段中文>：<值>】，无磁盘路径）。
+  await citeButton.click();
+  const rowBox = await window.getByRole('row', { name: /100 引导-基础/ }).boundingBox();
+  const fieldBox = await atkProp.boundingBox();
+  // 布局可能横向溢出窗口：拖拽起终点都钳制到可见区。
+  const dragX = Math.max(0, rowBox.x + 30);
+  const dragEndX = Math.min(window.viewportSize?.width ?? 1280, fieldBox.x + fieldBox.width - 30);
+  await window.mouse.move(dragX, rowBox.y + 5);
+  await window.mouse.down();
+  await window.mouse.move(dragEndX, fieldBox.y + fieldBox.height - 5, { steps: 6 });
+  await window.mouse.up();
+  // 拖框从行 100 盖到「攻击力」字段：命中的同表同行字段（name/behavior/攻击力）
+  // 全部按框选顺序并入 label（S10：「字段按框中的字段列出」）。
+  await expect(refChips).toContainText('param/gameparam/ActionGuideParam/100-引导-基础');
+  await expect(refChips).toContainText('【攻击力：0】');
+  await expect(refChips).toContainText('【behavior：1】');
+  expect(await refChips.innerText()).not.toContain('\\');
+  await expect.poll(async () => (await ipcCalls(app))['agent.citation.create'] ?? 0).toBeGreaterThan(0);
+
+  // 6) 发送：引用 chip 随 runAiAgent 提交（fixture 记录 resources 数量；生产侧
+  //    main 校验 token 后把引用拼进系统提示——模型能看到哪张表哪一行哪些字段）。
+  await window.locator('.agent__composer textarea').fill('看看这条引用');
+  await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
+  await expect.poll(async () => (await ipcCalls(app))['ai.agent.run:resources=1'] ?? 0)
+    .toBeGreaterThan(0);
+
+  // 7) chip 可叉掉（一次框选一条引用 chip，可多次框选累加、逐条移除）。
+  await window.locator('[data-testid="agent-resource-references"] .ctx-chip__remove').first().click();
+  await expect(refChips).toHaveCount(0);
+
+  await window.screenshot({ path: 'test-results/s10-cite-select.png' });
+  await app.close();
+});
+
+
+test('S14/S15：事件失败读取给 code + 人话 + 下一步，无假 resource 伪源码，无 Bridge 字样', async () => {
+  const { app, window, pageErrors, consoleErrors } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 打开 KRAK 失败样本（fixture 模拟「未挂原版」的 KRAK 可行动句）。
+  await window.locator('[data-domain="files"]').click();
+  await selectFileItem(window, 'event/krak.emevd.dcx');
+  const workbench = window.locator('[aria-label="Event 源码工作台"]');
+  await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();
+
+  // S14：没有橙色眉题 / 黄条 / 只读标签 / 编译并提交按钮。
+  await expect(workbench.locator('.event-source__header')).toHaveCount(0);
+  await expect(workbench.locator('.event-source__notice')).toHaveCount(0);
+  await expect(workbench.getByText('反汇编源码只读')).toHaveCount(0);
+  await expect(workbench.getByRole('button', { name: '编译并提交' })).toHaveCount(0);
+
+  // S15：正文是可行动句（KRAK → 去「开始」页挂原版），不出现假 resource 伪源码、
+  // 不出现「详情见底部日志」、不出现 Bridge / 补丁引擎字样。
+  const content = workbench.locator('.esw-source__host .cm-content');
+  await expect(content).toContainText('KRAK 压缩');
+  await expect(content).toContainText('sekiro.exe');
+  await expect(content).toContainText('[EMEVD_DOCUMENT_READ_FAILED]');
+  await expect(content).not.toContainText('resource "file://');
+  await expect(content).not.toContainText('详情见底部日志');
+  await expect(workbench).not.toContainText('Bridge');
+  await expect(workbench).not.toContainText('补丁引擎');
+
+  // 标签是短名（krak），不显示 event/… 路径。
+  await expect(workbench.locator('[role="tab"]').first()).toContainText('krak');
+
+  expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
+  expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
+
+  await window.screenshot({ path: 'test-results/12-event-krak-failure.png' });
+  await app.close();
+});
+
+
+test('S-FILE-ROLLBACK：审计面板文件级回滚 UI 走 rollbackFile 通道，回滚后条目置为已回滚', async () => {
+  const { app, window, pageErrors, consoleErrors } = await launchApp({ SF_FIXTURE_OPERATIONS: '1' });
+  await openFixtureWorkspace(window);
+  // 打开审计与回滚面板（活动栏入口）。
+  await window.getByRole('button', { name: '审计与回滚' }).click();
+
+  // 种子历史：两条 committed 记录。
+  const entries = window.locator('.audit-entry');
+  await expect(entries).toHaveCount(2);
+  await expect(entries.nth(0)).toContainText('fixture 写入：item.fmg 文本');
+  await expect(entries.nth(0).locator('.op-status')).toHaveText('已提交');
+
+  // 第一条：两个文件行 + 两个「回滚此文件」按钮（details 默认收起，先展开）。
+  await entries.nth(0).locator('.audit-entry__files summary').click();
+  const firstFiles = entries.nth(0).locator('.audit-entry__file');
+  await expect(firstFiles).toHaveCount(2);
+  await expect(firstFiles.nth(0)).toContainText('item.fmg');
+  await expect(firstFiles.nth(0).getByRole('button', { name: '回滚此文件' })).toBeVisible();
+  await expect(firstFiles.nth(1)).toContainText('menu.fmg');
+  await expect(firstFiles.nth(1).getByRole('button', { name: '回滚此文件' })).toBeVisible();
+
+  // 第二条：路径未脱敏映射 → 只显示提示，不提供回滚按钮。
+  const secondFiles = entries.nth(1).locator('.audit-entry__file');
+  await expect(secondFiles).toHaveCount(1);
+  await expect(secondFiles.getByRole('button', { name: '回滚此文件' })).toHaveCount(0);
+  await expect(secondFiles.locator('.audit-entry__file-hint')).toHaveText('路径未脱敏映射，不可单文件回滚');
+
+  // 点击第一项第一文件的「回滚此文件」→ 成功反馈（toast）。
+  await firstFiles.nth(0).getByRole('button', { name: '回滚此文件' }).click();
+  await expect(window.locator('.toast--ok').filter({ hasText: '已回滚文件' })).toHaveCount(1);
+
+  // 刷新后该条目变为「已回滚」，动作区（含文件级回滚列表）随 committed 条件消失。
+  await window.getByRole('button', { name: '刷新' }).click();
+  await expect(entries.nth(0).locator('.op-status')).toHaveText('已回滚');
+  await expect(entries.nth(0).locator('.audit-entry__actions')).toHaveCount(0);
+  // 未触碰的条目保持 committed，仍可单文件回滚。
+  await expect(entries.nth(1).locator('.op-status')).toHaveText('已提交');
+
+  expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
+  expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
+
+  await window.screenshot({ path: 'test-results/file-rollback-audit.png' });
+  await app.close();
+});

@@ -52,7 +52,8 @@ import type {
   RendererContainerTreeSummary,
   ScriptContainerEntryPage,
   ScriptContainerEvidence,
-  ScriptEntryPlaintextView
+  ScriptEntryPlaintextView,
+  CiteHit
 } from '@soulforge/shared';
 import { EDITOR_DOCUMENT_IPC_CHANNELS } from '@soulforge/shared';
 
@@ -202,9 +203,32 @@ const api = {
     entryName: string
   ): Promise<ScriptEntryPlaintextView> =>
     ipcRenderer.invoke('resource.readScriptEntryPlaintext', sourceUri, entryName),
+  readScriptSource: (
+    sourceUri: string,
+    entryName?: string
+  ): Promise<import('@soulforge/shared').ScriptSourceView> =>
+    ipcRenderer.invoke('resource.readScriptSource', sourceUri, entryName),
+  saveScriptSource: (
+    sourceUri: string,
+    entryName: string | undefined,
+    expectedChildHash: string | undefined,
+    expectedContainerHash: string | undefined,
+    sourceText: string
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke(
+      'resource.saveScriptSource',
+      sourceUri,
+      entryName,
+      expectedChildHash,
+      expectedContainerHash,
+      sourceText
+    ),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
     ipcRenderer.invoke('operation.rollback', opId),
+  /** 文件级回滚：把某次已提交操作里的单个文件恢复到操作前状态。 */
+  rollbackFile: (opId: string, targetUri: string): Promise<RollbackOperationIpcResult> =>
+    ipcRenderer.invoke('operation.rollbackFile', opId, targetUri),
   readEmevdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readEmevdDocument', sourceUri),
   applyEmevdMutation: (
@@ -352,6 +376,8 @@ const api = {
     ipcRenderer.invoke('resource.readFlverDummies', sourceUri),
   readFlverTextureSlots: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverTextureSlots', sourceUri),
+  resolveChrbndPreview: (animSourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.resolveChrbndPreview', animSourceUri),
   applyMsbMutation: (
     sourceUri: string,
     expectedHash: string,
@@ -806,6 +832,14 @@ const api = {
     selection: EditorSelectionContext
   ): Promise<AgentResourceReferenceCreateIpcResult> =>
     ipcRenderer.invoke('agent.resourceReference.create', { selection }),
+  /**
+   * S10 引用框选签发：把框选命中的 data-cite 节点（CiteHit[]）交给 main 解码合并
+   * 并签发 opaque token（与资源引用同形态）。renderer 不拼 label、不伪造 token。
+   */
+  createAgentCitation: (
+    hits: readonly CiteHit[]
+  ): Promise<AgentResourceReferenceCreateIpcResult> =>
+    ipcRenderer.invoke('agent.citation.create', { hits }),
   onAiAgentEvent: (callback: (envelope: AiAgentEventEnvelope) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, envelope: AiAgentEventEnvelope): void => {
       callback(envelope);

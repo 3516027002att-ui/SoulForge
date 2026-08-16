@@ -81,6 +81,49 @@ export interface ParamRowLine {
   dataHexPreview?: string;
 }
 
+/**
+ * S10 引用框选 data-cite（PARAM 先行）：行与字段是可引用节点，JSON 只含逻辑 id
+ * （library/table/rowId/fieldId/name/label/value），禁止绝对路径。paramName 为
+ * null（该 param 读取失败）时不给 data-cite——「这块还不能引用」的诚实态，
+ * 不瞎编。table 用 param 条目名（去 `.param` 后缀），与引用标签固定格式一致。
+ */
+function stripParamExtension(name: string): string {
+  return name.replace(/\.param$/i, '');
+}
+
+function citeRowAttr(row: ParamRowLine, paramName: string | null): Record<string, string> {
+  if (paramName === null) return {};
+  return {
+    'data-cite': JSON.stringify({
+      kind: 'param-row',
+      library: 'gameparam',
+      table: stripParamExtension(paramName),
+      rowId: row.id,
+      ...(row.name !== undefined && row.name !== '' ? { name: row.name } : {})
+    })
+  };
+}
+
+function citeFieldAttr(
+  field: ParamFieldDef,
+  shown: string,
+  rowId: number,
+  paramName: string | null
+): Record<string, string> {
+  if (paramName === null) return {};
+  return {
+    'data-cite': JSON.stringify({
+      kind: 'param-field',
+      library: 'gameparam',
+      table: stripParamExtension(paramName),
+      rowId,
+      fieldId: field.id,
+      label: field.name,
+      value: shown
+    })
+  };
+}
+
 export interface ParamWorkbenchProps {
   /** 容器资源 URI（parambnd.dcx）。 */
   containerUri: string;
@@ -827,6 +870,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                           isTabEntry: isRowTabEntry(virtualRow.index, selectedRowId !== null),
                           onSelect: () => setSelectedRowId(row.id)
                         })}
+                        {...(citeRowAttr(row, paramName))}
                       >
                         <span className="wb-row__id">{row.id}</span>
                         {selectedRowId === row.id && props.onApplyRowNameMutation && row.dataBase64
@@ -941,7 +985,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 // 放开会让用户以为改得动，提交后才发现被编码器拒绝。
                 const editable = canCommitFields && decoded?.editable === true;
                 return (
-                  <div className="wb-prop" key={field.id}>
+                  <div className="wb-prop" key={field.id} {...citeFieldAttr(field, shown, selectedRowId, paramName)}>
                     <span
                       className="wb-prop__name"
                       title={decoded?.diagnostic

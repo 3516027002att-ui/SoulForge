@@ -279,10 +279,15 @@ internal sealed class TaeNativeDocument
             }
 
             // ── HKX name (best-effort from anim file info) ──
+            // S17：实测 mods 与原版两份 c1130 TAE（DFLT/KRAK 各一）——名字指针
+            // 在 animFileInfo +0x10，UTF-16LE 双零终止（`a000_000000.hkt`）；
+            // +0x00 是 0/1 链接标志，旧码读它当指针，a=1 时整段乱码（「葉」）。
+            // 别名动画（a=1，指针指向下一条 fileInfo）解出的是下条数据，语义上
+            // 就是无自有名字 —— 解出非文件名即由上层丢弃回退 a000_ + animId。
             string? hkxName = null;
-            if (animFileInfoOffset > 0 && animFileInfoOffset + 8 <= source.Length)
+            if (animFileInfoOffset > 0 && animFileInfoOffset + 0x18 <= source.Length)
             {
-                var namePtr = ReadInt64(source, checked((int)animFileInfoOffset));
+                var namePtr = ReadInt64(source, checked((int)animFileInfoOffset + 0x10));
                 if (namePtr > 0 && namePtr + 2 <= source.Length)
                 {
                     try { hkxName = ReadNameZ(source, checked((int)namePtr)); }
@@ -371,11 +376,16 @@ internal sealed class TaeNativeDocument
             TotalGroupCount);
     }
 
-    public object ToEnvelope(TaeRoundTripReport? report = null, IReadOnlyList<Diagnostic>? extraDiagnostics = null)
+    public object ToEnvelope(
+        TaeRoundTripReport? report = null,
+        IReadOnlyList<Diagnostic>? extraDiagnostics = null,
+        IReadOnlyDictionary<int, TaeFieldLayout[]>? templateLayouts = null)
     {
         report ??= VerifyRoundTrip();
         const int sampleLimit = 20;
         const int timelineEventLimit = 200; // 每动画事件时间表上限（bounded 分页）
+        // S17：参数体 hex 预览上限（无模板布局时的兜底截断）。
+        const int paramHexLimit = 64;
         var invalidTimeRangeCount = CountInvalidTimeRanges();
         // 合并上游诊断（如 anibnd 提取 TAE 的 TAE_FROM_ANIBND_EXTRACTED），
         // 使预览面板能显示提取来源而不是只见文档自身诊断。
@@ -406,11 +416,24 @@ internal sealed class TaeNativeDocument
                 groupCount = a.EventGroupCount,
                 timesCount = a.TimesCount,
                 hkxName = a.HkxName,
-                events = a.Events.Take(timelineEventLimit).Select(e => new
+                events = a.Events.Take(timelineEventLimit).Select(e =>
                 {
-                    startTime = e.StartTime,
-                    endTime = e.EndTime,
-                    eventTypeId = e.EventTypeId
+                    // S17：参数体按模板布局解码（4 字节槽对齐）；无模板时给有界 hex。
+                    var decodedFields = templateLayouts != null
+                        && templateLayouts.TryGetValue(e.EventTypeId, out var layout)
+                        && layout.Length > 0
+                        && DecodeParamFields(e, layout, out var decoded)
+                        ? decoded
+                        : null;
+                    return new
+                    {
+                        startTime = e.StartTime,
+                        endTime = e.EndTime,
+                        eventTypeId = e.EventTypeId,
+                        parameterDecoded = decodedFields != null,
+                        templateFields = decodedFields,
+                        parameterBytesHex = ParameterBytesHex(e, paramHexLimit)
+                    };
                 }).ToArray(),
                 eventsTruncated = a.Events.Count > timelineEventLimit
             }).ToArray(),
@@ -420,6 +443,63 @@ internal sealed class TaeNativeDocument
             diagnostics = diagnostics,
             authority = invalidTimeRangeCount > 0 ? "partial" : "candidate"
         };
+    }
+
+    /// <summary>
+    /// S17：按模板布局解码事件参数体。TAE 参数体字段按 4 字节槽连续排列
+    /// （与 DSAS TAE.Template.SDT.xml 的字段声明顺序一致）；越界即截断，
+    /// 剩余字段不再假装解码。返回 true 表示整份布局全部解出。
+    /// </summary>
+    private bool DecodeParamFields(TaeEvent e, TaeFieldLayout[] layout, out object[] fields)
+    {
+        fields = Array.Empty<object>();
+        if (e.ParameterDataOffset <= 0 || e.ParameterDataOffset >= SourceBytes.Length) return false;
+        var offset = checked((int)e.ParameterDataOffset);
+        var decoded = new object[layout.Length];
+        for (var i = 0; i < layout.Length; i++)
+        {
+            var field = layout[i];
+            if (offset + field.SlotSize > SourceBytes.Length)
+            {
+                // 布局越界：诚实截断，不编造剩余字段。
+                return false;
+            }
+            decoded[i] = new
+            {
+                name = field.Name,
+                kind = field.Kind,
+                value = ReadFieldValue(SourceBytes, offset, field)
+            };
+            offset += field.SlotSize;
+        }
+        fields = decoded;
+        return true;
+    }
+
+    private static object ReadFieldValue(byte[] source, int offset, TaeFieldLayout field)
+    {
+        switch (field.Kind)
+        {
+            case "s32": return ReadInt32(source, offset);
+            case "u32": return unchecked((uint)ReadInt32(source, offset));
+            case "f32": return ReadFloat32(source, offset);
+            case "s16": return unchecked((short)(source[offset] | (source[offset + 1] << 8)));
+            case "u16": return unchecked((ushort)(source[offset] | (source[offset + 1] << 8)));
+            case "s8": return unchecked((sbyte)source[offset]);
+            case "u8": return source[offset];
+            case "b": return source[offset] != 0;
+            default: return "未解码";
+        }
+    }
+
+    /// <summary>参数体有界 hex 预览（无模板布局时的兜底，S17）。</summary>
+    private string ParameterBytesHex(TaeEvent e, int limit)
+    {
+        if (e.ParameterDataOffset <= 0 || e.ParameterDataOffset >= SourceBytes.Length) return "";
+        var offset = checked((int)e.ParameterDataOffset);
+        var length = Math.Min(limit, SourceBytes.Length - offset);
+        if (length <= 0) return "";
+        return Convert.ToHexString(SourceBytes.AsSpan(offset, length)).ToLowerInvariant();
     }
 
     /// <summary>
@@ -494,6 +574,10 @@ internal sealed class TaeNativeDocument
 }
 
 // ── Records ──
+
+/// <summary>S17：TAE 事件参数体的模板字段布局（来自本机 DSAS TAE.Template.SDT.xml，
+/// 由 main 解析后传入；SlotSize 为 4 字节槽）。</summary>
+internal sealed record TaeFieldLayout(string Name, string Kind, int SlotSize);
 
 internal sealed record TaeAnimation(
     long AnimId,

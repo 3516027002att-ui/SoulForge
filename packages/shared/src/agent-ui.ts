@@ -226,7 +226,7 @@ export function agentSelectionSummary(selection: EditorSelectionContext | null):
 // 跨 sender 的 opaque 引用 token（附件 / 资源）
 // ---------------------------------------------------------------------------
 
-export type AgentReferenceTokenKind = 'attachment' | 'resource';
+export type AgentReferenceTokenKind = 'attachment' | 'resource' | 'citation';
 
 /** 引用 token 默认 TTL：30 分钟。 */
 export const AGENT_REFERENCE_TOKEN_TTL_MS = 30 * 60_000;
@@ -321,7 +321,9 @@ export function parseAgentReferenceToken(token: string): AgentReferenceTokenPayl
   const kind = r.kind;
   const v = r.v;
   if (v !== 1) throw new AgentReferenceTokenError('引用 token 版本不兼容。');
-  if (kind !== 'attachment' && kind !== 'resource') throw new AgentReferenceTokenError('引用 token 类型非法。');
+  if (kind !== 'attachment' && kind !== 'resource' && kind !== 'citation') {
+    throw new AgentReferenceTokenError('引用 token 类型非法。');
+  }
   const tokenId = expectStableId(r.tokenId, 'AgentReferenceToken.tokenId');
   const ownerId = expectStableId(r.ownerId, 'AgentReferenceToken.ownerId');
   if (typeof r.exp !== 'number' || !Number.isFinite(r.exp)) {

@@ -1,6 +1,7 @@
+import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +30,8 @@ import {
   applyYappedFieldOverlay,
   readYappedSdtDefsIndex,
   readYappedSdtRowNamesIndex,
+  readTaeEventTemplateFile,
+  type TaeEventTemplateInfo,
   type YappedParamOverlay,
   type YappedSourceDiagnostic,
   listRolloutSessions,
@@ -49,6 +52,7 @@ import {
   decodePlaintext,
   classifyScriptEntry,
   magicLabel,
+  locateDsLuaDecompilerSync,
   normalizePageWindow,
   sanitizeEntryName,
   applyParamFieldMutation,
@@ -86,6 +90,7 @@ import {
   replaceContainerChild,
   resolveOperationLogStorePath,
   resolveResourceCapabilities,
+  rollbackFile,
   rollbackOperation,
   roundTripContainer,
   runBridge,
@@ -141,7 +146,13 @@ import {
   type DecideAgentApprovalRequest,
   type EditorSelectionContext,
   type FmgEntryPage,
-  type ScriptEntryPlaintextView
+  logicalFmgTableName,
+  type ScriptEntryPlaintextView,
+  type ScriptSourceView,
+  decodeCiteHits,
+  formatParamCiteLabel,
+  mergeCiteHits,
+  type ParamCitation
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -949,6 +960,50 @@ function locateUserEmedfSync(): string | null {
   return null;
 }
 
+/**
+ * S17（2026-08-15）：动作域 TAE 的伴生 chrbnd 只读解析。
+ *
+ * 虚拟 sourceUri 形如 `chrbnd:chr/c1130.chrbnd.dcx` —— renderer 只持有这个
+ * 逻辑标识，真实路径永远留在 main。查找顺序：overlay 根 → 已挂载原版根
+ * （原版只读）。拒绝 `..` 等越界片段。找不到返回 null，由调用方给空态文案。
+ */
+function resolveChrbndVirtualFile(sourceUri: string): { absolutePath: string; relativePath: string } | null {
+  if (!sourceUri.startsWith('chrbnd:')) return null;
+  const relativePath = sourceUri.slice('chrbnd:'.length).replace(/[/\\]+/g, '/').replace(/^[/\\]+/, '');
+  if (!relativePath || relativePath.split('/').some((segment) => segment === '..' || segment === '')) {
+    return null;
+  }
+  const overlay = activeSession?.layers.overlayRoot?.trim();
+  if (overlay) {
+    const candidate = join(overlay, relativePath);
+    try {
+      if (existsSync(candidate)) return { absolutePath: candidate, relativePath };
+    } catch {
+      // 不可读，继续下一个候选。
+    }
+  }
+  const base = activeSession?.layers.baseRoot?.trim();
+  if (base) {
+    const candidate = join(base, relativePath);
+    try {
+      if (existsSync(candidate)) return { absolutePath: candidate, relativePath };
+    } catch {
+      // 不可读。
+    }
+  }
+  return null;
+}
+
+/**
+ * S17：FLVER 读通道的资源解析 —— 先走已索引文件，再走 chrbnd 虚拟标识
+ * （伴生模型预览）。返回 null 时调用方按 RESOURCE_NOT_INDEXED 处理。
+ */
+function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relativePath: string } | null {
+  const indexed = indexedFiles.find((item) => item.sourceUri === sourceUri);
+  if (indexed) return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath };
+  return resolveChrbndVirtualFile(sourceUri);
+}
+
 let cachedEmevdRegistry: ReturnType<typeof resolveEmevdRegistry> | null = null;
 function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
   if (!cachedEmevdRegistry) {
@@ -1543,6 +1598,121 @@ async function verifiedStageRoots(
   return { allowedRoots: [...roots.allowedRoots], writableRoots: [...roots.writableRoots], diagnostics: [] };
 }
 
+/**
+ * S16 脚本 IDE：HKS 字节码反编译（main 进程 spawn 本机 DSLuaDecompiler.exe）。
+ *
+ * `DSLuaDecompiler <file> --console` 把 Lua 字节码反编译到 stdout；发行目标
+ * net7，本机可能只有 .NET 6/8，故注入 DOTNET_ROLL_FORWARD=LatestMajor。
+ * stdout 有界（8 MiB）、超时 kill；一切失败结构化返回，不抛给 renderer。
+ */
+export interface DsLuaDecompileRunResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  exitCode: number | null;
+  spawnFailure: string | null;
+  truncated: boolean;
+}
+
+export async function runDsLuaDecompilerCapture(
+  exePath: string,
+  hksPath: string,
+  timeoutMs: number
+): Promise<DsLuaDecompileRunResult> {
+  return await new Promise((resolveResult) => {
+    let settled = false;
+    let stdout = Buffer.alloc(0);
+    let stderr = Buffer.alloc(0);
+    let truncated = false;
+    let child: ReturnType<typeof spawn> | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    const stdoutLimit = 8 * 1024 * 1024;
+    const settle = (result: DsLuaDecompileRunResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolveResult(result);
+    };
+    const current = (exitCode: number | null, extra: Partial<DsLuaDecompileRunResult>): DsLuaDecompileRunResult => ({
+      ok: exitCode === 0 && !truncated,
+      stdout: stdout.toString('utf8'),
+      stderr: stderr.toString('utf8'),
+      timedOut: false,
+      exitCode,
+      spawnFailure: null,
+      truncated,
+      ...extra
+    });
+    timer = setTimeout(() => {
+      try { child?.kill(); } catch { /* 超时终止，尽力而为 */ }
+      settle(current(null, { timedOut: true }));
+    }, timeoutMs);
+    try {
+      child = spawn(exePath, [hksPath, '--console'], {
+        cwd: dirname(exePath),
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, DOTNET_ROLL_FORWARD: 'LatestMajor' }
+      });
+    } catch (error) {
+      settle({
+        ok: false,
+        stdout: '',
+        stderr: String(error),
+        timedOut: false,
+        exitCode: null,
+        spawnFailure: error instanceof Error ? error.message : String(error),
+        truncated: false
+      });
+      return;
+    }
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = stdoutLimit - stdout.length;
+      if (bytes.length > remaining) truncated = true;
+      if (remaining > 0) stdout = Buffer.concat([stdout, bytes.subarray(0, remaining)]);
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const remaining = stdoutLimit - stderr.length;
+      if (bytes.length > remaining) truncated = true;
+      if (remaining > 0) stderr = Buffer.concat([stderr, bytes.subarray(0, remaining)]);
+    });
+    child.once('error', (error) => {
+      settle({
+        ok: false,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+        exitCode: null,
+        spawnFailure: error.message,
+        truncated: false
+      });
+    });
+    child.once('close', (code) => {
+      settle(current(code, {}));
+    });
+  });
+}
+
+/** 反编译器命中来源的人类可读标识（renderer 展示用，不含路径）。 */
+function decompilerLabel(origin: 'explicit' | 'v1.1.5' | 'tools-scan' | 'legacy' | 'none'): string {
+  switch (origin) {
+    case 'explicit':
+      return 'DSLuaDecompiler（显式路径）';
+    case 'v1.1.5':
+      return 'DSLuaDecompiler v1.1.5';
+    case 'tools-scan':
+      return 'DSLuaDecompiler（tools 扫描）';
+    case 'legacy':
+      return 'DSLuaDecompiler（hks解码目录）';
+    default:
+      return 'DSLuaDecompiler';
+  }
+}
+
 function rejectNonSekiroNativeWrite(sourceUri: string, file?: IndexedFile): RendererSaveResult | null {
   if (activeSession?.meta.game === 'sekiro' && file?.game === 'sekiro') return null;
   return {
@@ -1652,7 +1822,12 @@ function consumeDirectorySelection(
 }
 
 async function requestWriteConfirmation(input: {
-  event: IpcMainInvokeEvent;
+  /**
+   * 弹对话框的宿主窗口。UI 通道（IPC handler）有 sender；AI 工具执行路径没有
+   * IPC event（executeTool 由 runAgentSession 内部调用），缺省时用无父窗口的
+   * dialog.showMessageBox —— 确认语义一致，只是不模态于某个窗口。
+   */
+  event?: IpcMainInvokeEvent;
   resourceLabel: string;
   sourceUri: string;
   actionLabel: string;
@@ -1660,7 +1835,7 @@ async function requestWriteConfirmation(input: {
   extraSubjects?: string[];
 }): Promise<ConfirmationReceipt | null> {
   if (!activeWorkspaceSessionId) return null;
-  const parent = BrowserWindow.fromWebContents(input.event.sender);
+  const parent = input.event ? BrowserWindow.fromWebContents(input.event.sender) : null;
   const options = {
     type: 'warning' as const,
     title: '确认高风险写入',
@@ -2476,6 +2651,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * renderer only ever receives a DSL template string, a documentInstanceId and
    * the bounded outline, never the full document.
    */
+
+  /** S18-F：反汇编文本缓存（sourceHash → 文本）。容量 4：common / common_func
+   * 各一份加余量；写回后 hash 变自然落新 key，旧 key 按插入序淘汰。 */
+  const EMEVD_DISASSEMBLY_CACHE_CAPACITY = 4;
+  const emevdDisassemblyCache = new Map<string, {
+    text: string;
+    truncated: boolean;
+    totalLines: number;
+  }>();
+
   handle(
     'resource.readEmevdFullDocument',
     async (event, sourceUri: string, documentInstanceId: string, loadFullDslTemplate?: boolean) => {
@@ -3073,7 +3258,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const languageId = catalog.languageId || hint.languageId || 'unknown';
       const containerKind = catalog.containerKind || hint.containerKind || 'unknown';
       const containerId = catalog.containerId || `text:${languageId}:${containerKind}`;
+      // S13：Bridge 的表名可能是原构建机绝对路径（N:\GR\…\Title_Items.fmg）。
+      // 出 renderer 前投影为逻辑表名（basename、去 .fmg、同名加序号）；renderer
+      // 永不看到「[本机路径已隐藏]」当表名。tableId（stableId）仍是路由标识。
+      const seenTableNames = new Set<string>();
       const tables = catalog.tables.map((table) => {
+        const entryName = logicalFmgTableName(table.entryName, table.entryIndex ?? 0, seenTableNames);
         const ref: TextTableRef = {
           tableId: table.stableId,
           languageId,
@@ -3081,12 +3271,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           containerKind,
           sourceUri: file.sourceUri,
           entryIndex: table.entryIndex,
-          entryName: table.entryName
+          entryName
         };
         textTableRefs.set(ref.tableId, ref);
         return {
           tableId: table.stableId,
-          entryName: table.entryName,
+          entryName,
           entryCount: table.entryCount,
           sourceUri: file.sourceUri,
           entryIndex: table.entryIndex
@@ -3380,16 +3570,40 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
     const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    // S17：DSAS 模板（本机只读，可选增强）→ templateLayouts 给 Bridge 解码参数体。
+    const byEventTypeId = await loadTaeEventTemplate();
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-tae-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
+      ...taeTemplateLayoutsOption(byEventTypeId),
       ...(activeSession?.layers.baseRoot
         ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
         : {})
     });
-    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+    // 事件类型名表（`0 JumpTable` 的「类型名」）：只投影文档实际出现过的
+    // eventTypeId，模板缺的 id 不出现，渲染器回退裸 `{typeId}`。
+    let eventTypeNames: Record<string, string> | undefined;
+    if (result.parseStatus !== 'failed' && result.data && byEventTypeId) {
+      const data = result.data as { eventTypes?: number[] };
+      const present = (data.eventTypes ?? []).filter(
+        (id): id is number => byEventTypeId.has(id)
+      );
+      if (present.length > 0) {
+        eventTypeNames = Object.fromEntries(
+          present.map((id) => [String(id), byEventTypeId.get(id)!.name])
+        );
+      }
+    }
+    return sanitizeRendererValue({
+      ok: result.parseStatus !== 'failed',
+      sourceUri,
+      relativePath: file.relativePath,
+      data: result.data,
+      ...(eventTypeNames ? { eventTypeNames } : {}),
+      diagnostics: result.diagnostics
+    });
   });
 
   /**
@@ -3623,7 +3837,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverDocument', async (_event, sourceUri: string) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER。', sourceUri }] };
     }
@@ -3737,7 +3951,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverMesh', async (_event, sourceUri: string, meshIndex: number) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 网格。', sourceUri }] };
     }
@@ -3754,7 +3968,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverSkeleton', async (_event, sourceUri: string) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 骨骼层级。', sourceUri }] };
     }
@@ -3770,7 +3984,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverDummies', async (_event, sourceUri: string) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 挂点。', sourceUri }] };
     }
@@ -3786,7 +4000,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   handle('resource.readFlverTextureSlots', async (_event, sourceUri: string) => {
-    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    const file = resolveFlverReadFile(sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FLVER 纹理槽位。', sourceUri }] };
     }
@@ -3799,6 +4013,57 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       timeoutMs: 120_000
     });
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
+  /**
+   * S17：动作域 TAE 的伴生 chrbnd 解析（overlay → 已挂载原版，原版只读）。
+   * renderer 传动作文件 sourceUri；main 按同相对路径推 `chr/<id>.chrbnd.dcx`
+   * 并探存在性，返回虚拟 sourceUri（`chrbnd:<relative>`）供 FLVER 读通道用。
+   * 两边都没有时给空态文案：未挂原版时指引去「开始」页挂载。
+   */
+  handle('resource.resolveChrbndPreview', async (_event, animSourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === animSourceUri);
+    if (!file) {
+      return { ok: false, reason: 'no-anim' as const, message: '未找到该动作文件。' };
+    }
+    const relative = file.relativePath.replace(/\\/g, '/');
+    const dir = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';
+    const stem = (relative.split('/').pop() ?? '').replace(/\.(tae|anibnd)(\.dcx)?$/i, '');
+    const candidates = [`${stem}.chrbnd.dcx`, `${stem}.chrbnd`]
+      .map((name) => (dir ? `${dir}/${name}` : name))
+      .map((name) => name.replace(/\//g, sep));
+    const overlay = activeSession?.layers.overlayRoot?.trim();
+    if (overlay) {
+      for (const candidate of candidates) {
+        try {
+          if (existsSync(join(overlay, candidate))) {
+            return { ok: true, origin: 'overlay' as const, chrbndSourceUri: `chrbnd:${candidate.replace(/\\/g, '/')}` };
+          }
+        } catch {
+          // 继续下一个候选。
+        }
+      }
+    }
+    const base = activeSession?.layers.baseRoot?.trim();
+    if (base) {
+      for (const candidate of candidates) {
+        try {
+          if (existsSync(join(base, candidate))) {
+            return { ok: true, origin: 'base' as const, chrbndSourceUri: `chrbnd:${candidate.replace(/\\/g, '/')}` };
+          }
+        } catch {
+          // 继续下一个候选。
+        }
+      }
+    }
+    if (!base) {
+      return {
+        ok: false,
+        reason: 'base-not-mounted' as const,
+        message: `没有找到 ${stem} 的模型（chrbnd），且未挂载原版游戏目录；到「开始」页选择含 sekiro.exe 的目录后再试。`
+      };
+    }
+    return { ok: false, reason: 'none' as const, message: `没有找到 ${stem} 的模型（chrbnd）。` };
   });
 
   handle(
@@ -4065,6 +4330,104 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
     return null;
   };
+
+  /* ------------------------------------------------------------------ */
+  /*  本机 DSAnimStudio TAE 词条只读导入（S17 动作域）                    */
+  /*                                                                    */
+  /*  DSAnimStudio 的 Res\\TAE.Template.SDT.xml 是 Sekiro 事件类型词条表：  */
+  /*  `0 JumpTable` 这类事件行「类型名」的来源，也带每类事件参数体的      */
+  /*  字段布局（name/kind/slotSize），随 read-tae-document 的             */
+  /*  templateLayouts 选项传给 Bridge 解码参数体。                        */
+  /*                                                                    */
+  /*  同 Yapped：本机第三方工具安装目录，只读、不入库、失败降级 ——        */
+  /*  拿不到就事件行显示裸 `{typeId}`、参数体不解码，绝不把「词条不可用」 */
+  /*  升级成「TAE 不可用」。                                              */
+  /* ------------------------------------------------------------------ */
+
+  /** S17 固定候选：本机 DSAnimStudio 发布包真实落地（grok 已求证存在）。 */
+  const TAE_TEMPLATE_FIXED_CANDIDATES = [
+    'D:\\mystream\\Sekiro Shadows Die Twice\\tools\\DSAnimStudio-4.9.9[Build 4999]'
+      + '\\Res\\TAE.Template.SDT.xml'
+  ];
+
+  /** TAE 模板在 tools/<一层子目录> 下的相对候选（DSAS 装在 Res/ 下）。 */
+  const TAE_TEMPLATE_RELATIVE_CANDIDATES = [
+    'Res\\TAE.Template.SDT.xml',
+    'TAE.Template.SDT.xml',
+    'Res\\TAE.Template.xml'
+  ];
+
+  /**
+   * 定位本机 DSAnimStudio 的 `TAE.Template.SDT.xml`。
+   *
+   * 候选顺序：SOULFORGE_TAE_TEMPLATE_PATH 显式环境变量 → 固定候选 → 已挂载
+   * 会话兄弟 tools/<一层子目录>/Res/。找不到返回 null，由调用方降级到裸
+   * typeId —— 这是可选增强，绝不能把「词条不可用」升级成「TAE 不可用」。
+   */
+  const locateTaeTemplatePathSync = (): string | null => {
+    const probe = (candidate: string): boolean => {
+      try {
+        return existsSync(candidate);
+      } catch {
+        return false;
+      }
+    };
+    const explicit = process.env.SOULFORGE_TAE_TEMPLATE_PATH?.trim();
+    if (explicit) {
+      const candidate = resolve(explicit);
+      if (probe(candidate)) return candidate;
+    }
+    for (const candidate of TAE_TEMPLATE_FIXED_CANDIDATES) {
+      if (probe(candidate)) return candidate;
+    }
+    const roots: string[] = [];
+    pushToolsSubdirs(roots, activeSession?.layers.baseRoot);
+    const overlay = activeSession?.layers.overlayRoot?.trim();
+    if (overlay) pushToolsSubdirs(roots, dirname(dirname(overlay)));
+    const gameRootEnv = process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim();
+    if (gameRootEnv) pushToolsSubdirs(roots, gameRootEnv);
+    for (const root of roots) {
+      for (const relative of TAE_TEMPLATE_RELATIVE_CANDIDATES) {
+        const candidate = join(root, relative);
+        if (probe(candidate)) return candidate;
+      }
+    }
+    return null;
+  };
+
+  let taeTemplateCache: {
+    loaded: true;
+    /** eventTypeId → 词条；null 表示本机无模板或读不到。 */
+    byEventTypeId: ReadonlyMap<number, TaeEventTemplateInfo> | null;
+  } | null = null;
+
+  /**
+   * 惰性读本机 TAE 模板索引并缓存。只读一次（73KB 单文件），每次读 TAE
+   * 都重跑会让打开卡顿。空/缺失回 null，不抛 —— 失败降级到裸 typeId。
+   */
+  const loadTaeEventTemplate = async (): Promise<ReadonlyMap<number, TaeEventTemplateInfo> | null> => {
+    if (taeTemplateCache) return taeTemplateCache.byEventTypeId;
+    const templatePath = locateTaeTemplatePathSync();
+    const result = templatePath ? await readTaeEventTemplateFile(templatePath) : null;
+    taeTemplateCache = {
+      loaded: true,
+      byEventTypeId: result?.ok ? result.byEventTypeId : null
+    };
+    return taeTemplateCache.byEventTypeId;
+  };
+
+  /** read-tae-document 的 bridge options：templateLayouts（无模板时省略）。 */
+  const taeTemplateLayoutsOption = (byEventTypeId: ReadonlyMap<number, TaeEventTemplateInfo> | null) =>
+    byEventTypeId
+      ? {
+          templateLayouts: Object.fromEntries(
+            [...byEventTypeId.entries()].map(([id, info]) => [
+              String(id),
+              info.fields.map((field) => ({ name: field.name, kind: field.kind, slotSize: field.slotSize }))
+            ])
+          )
+        }
+      : {};
 
   let yappedOverlayCache: {
     loaded: true;
@@ -7847,6 +8210,269 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   );
 
+  /**
+   * S16 脚本 IDE：源码视图（容器条目或独立脚本文件）。
+   *
+   * 明文条目按真实 encoding 返回文本；`\x1bLua` 字节码条目调本机
+   * DSLuaDecompiler 反编译为 Lua 文本（main spawn，renderer 只收文本）；
+   * 反编译不可用/失败/其他字节码 → kind='failure' 结构化原因，绝不把字节码
+   * 呈现为可编辑源码。容器条目同时回传 child/container hash 供保存时做
+   * 乐观并发校验。
+   */
+  handle(
+    'resource.readScriptSource',
+    async (_event, sourceUri: string, entryName?: string): Promise<ScriptSourceView> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      const logicalName = entryName ?? (file ? basename(file.relativePath) : 'script');
+      const failure = (code: string, message: string, diagnostics?: StructuredDiagnostic[]): ScriptSourceView => ({
+        ok: false,
+        logicalName,
+        kind: 'failure',
+        writeSupported: false,
+        diagnostics: diagnostics ?? [{ severity: 'error' as const, code, message, sourceUri }]
+      });
+      if (!file) {
+        return failure('RESOURCE_NOT_INDEXED', '资源未索引，无法读取脚本源码。');
+      }
+      if (!activeSession) {
+        return failure('WORKSPACE_NOT_OPEN', '需要已打开的工作区才能读取脚本源码。');
+      }
+      let bytes: Uint8Array;
+      let childHash: string | undefined;
+      let containerHash: string | undefined;
+      if (entryName) {
+        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+        const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
+        if (!read.ok || !read.bytes) {
+          return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本容器条目失败。', read.diagnostics);
+        }
+        bytes = read.bytes;
+        childHash = read.hash;
+        const tree = await inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
+        containerHash = tree.ok && tree.tree?.rootHash ? tree.tree.rootHash : undefined;
+      } else {
+        // 独立脚本文件（.hks/.lua）：有界整读。
+        try {
+          const fileStat = await stat(file.absolutePath);
+          if (fileStat.size > 64 * 1024 * 1024) {
+            return failure('SCRIPT_SOURCE_TOO_LARGE', '脚本文件超过 64 MiB 有界读取上限，未打开。');
+          }
+          bytes = new Uint8Array(await readFile(file.absolutePath));
+        } catch (error) {
+          return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本文件失败。', [{
+            severity: 'error' as const,
+            code: 'SCRIPT_SOURCE_READ_FAILED',
+            message: error instanceof Error ? error.message : String(error),
+            sourceUri
+          }]);
+        }
+      }
+      const verdict = classifyPlaintextBytes(bytes);
+      const containerFields = entryName
+        ? {
+            containerUri: sourceUri,
+            entryName,
+            ...(childHash !== undefined ? { childHash } : {}),
+            ...(containerHash !== undefined ? { containerHash } : {})
+          }
+        : {};
+      if (verdict.isPlaintext) {
+        const contentEnd = bytes.length - verdict.trailingPaddingBytes;
+        return {
+          ok: true,
+          logicalName,
+          kind: 'plaintext',
+          sourceText: decodePlaintext(bytes.subarray(0, contentEnd), verdict.detectedEncoding),
+          decompiled: false,
+          ...containerFields,
+          writeSupported: true,
+          diagnostics: verdict.diagnostics
+        };
+      }
+      if (!verdict.luaBytecodeMagic) {
+        return failure('SCRIPT_SOURCE_BYTECODE_UNSUPPORTED',
+          '该条目是其他类型字节码（非 Lua），本版不提供反编译，只读。', [{
+            severity: 'error' as const,
+            code: 'SCRIPT_SOURCE_BYTECODE_UNSUPPORTED',
+            message: `判定依据：${verdict.code ?? '非明文'}`,
+            sourceUri
+          }]);
+      }
+      // Lua 字节码：本机 DSLuaDecompiler 反编译（只读定位，找不到给结构化失败）。
+      const probe = locateDsLuaDecompilerSync({
+        baseRoot: activeSession.layers.baseRoot ?? null,
+        overlayRoot: activeSession.layers.overlayRoot ?? null,
+        gameRootEnv: process.env.SOULFORGE_SEKIRO_GAME_ROOT?.trim() ?? null
+      });
+      if (!probe.exePath) {
+        return failure('SCRIPT_DECOMPILER_NOT_FOUND',
+          '本机找不到 DSLuaDecompiler：该脚本是 Lua 字节码，需要反编译器才能编辑。请把 DSLuaDecompiler.exe 放到 Sekiro 兄弟 tools 目录，或设置 SOULFORGE_DSLUADECOMPILER_PATH。');
+      }
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'SCRIPT_DECOMPILE_STAGING_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return failure('SCRIPT_DECOMPILE_STAGING_FAILED', '无法准备反编译暂存目录。', stage.diagnostics);
+      }
+      const stageRoot = stage.writableRoots[0];
+      if (!stageRoot) {
+        return failure('SCRIPT_DECOMPILE_STAGING_FAILED', '反编译暂存目录未就绪。', stage.diagnostics);
+      }
+      const tmpPath = join(stageRoot, `s16-decompile-${randomUUID()}.hks`);
+      await writeFile(tmpPath, Buffer.from(bytes));
+      const decompiled = await runDsLuaDecompilerCapture(probe.exePath, tmpPath, 120_000);
+      await unlink(tmpPath).catch(() => { /* 暂存清理尽力而为 */ });
+      if (!decompiled.ok) {
+        if (decompiled.timedOut) {
+          return failure('SCRIPT_DECOMPILE_TIMED_OUT', '反编译超时（120 秒），请稍后重试。');
+        }
+        if (decompiled.spawnFailure) {
+          return failure('SCRIPT_DECOMPILE_SPAWN_FAILED', `反编译器无法启动：${decompiled.spawnFailure}`);
+        }
+        if (decompiled.truncated) {
+          return failure('SCRIPT_DECOMPILE_OUTPUT_TRUNCATED', '反编译输出超过 8 MiB 有界上限，未返回文本。');
+        }
+        const tail = decompiled.stderr.trim().split(/\r?\n/).slice(-5).join('\n');
+        return failure('SCRIPT_DECOMPILE_FAILED',
+          `反编译失败（退出码 ${decompiled.exitCode ?? '未知'}）${tail ? `：${tail}` : ''}`);
+      }
+      return {
+        ok: true,
+        logicalName,
+        kind: 'decompiled',
+        sourceText: decompiled.stdout,
+        decompiled: true,
+        decompiler: decompilerLabel(probe.origin),
+        ...containerFields,
+        writeSupported: true,
+        diagnostics: []
+      };
+    }
+  );
+
+  /**
+   * S16 脚本 IDE：保存源码。
+   *
+   * 容器条目 → replaceContainerChild（Patch Engine，expected hashes 乐观校验，
+   * 写回 plaintext Lua）；独立脚本文件 → saveTextResource 链。与 resource.saveText
+   * 同一确认/操作日志/回滚通道。
+   */
+  handle(
+    'resource.saveScriptSource',
+    async (
+      event,
+      sourceUri: string,
+      entryName: string | undefined,
+      expectedChildHash: string | undefined,
+      expectedContainerHash: string | undefined,
+      sourceText: string
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: 'Resource must be indexed before script source save.',
+            sourceUri
+          }]
+        };
+      }
+      if (!activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'WORKSPACE_NOT_OPEN',
+            message: '需要已打开的工作区才能保存脚本源码。',
+            sourceUri
+          }]
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      if (entryName) {
+        const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+        if (gameBlocked) return gameBlocked;
+        let containerHash = expectedContainerHash;
+        let childHash = expectedChildHash;
+        if (!containerHash || !childHash) {
+          // 渲染器没带回 hash（异常路径）：主进程现取，不裸奔乐观校验。
+          const tree = await inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
+          containerHash = tree.ok && tree.tree?.rootHash ? tree.tree.rootHash : '';
+          const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+          const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
+          childHash = read.hash ?? '';
+        }
+        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+        const confirmation = await requestWriteConfirmation({
+          event,
+          resourceLabel: `${file.relativePath} / ${entryName}`,
+          sourceUri,
+          actionLabel: '保存脚本源码',
+          payloadHash: createHash('sha256')
+            .update(`${containerHash}\n${childHash}\n${sourceText}`)
+            .digest('hex')
+        });
+        if (!confirmation) return cancelledWrite(sourceUri);
+        const result = await replaceContainerChild({
+          file,
+          childUri,
+          expectedContainerHash: containerHash,
+          expectedChildHash: childHash,
+          newContentBase64: Buffer.from(sourceText, 'utf8').toString('base64'),
+          confirmation,
+          session: activeSession,
+          operationLog,
+          ...storage
+        });
+        if (result.ok) {
+          containerChildrenCache.clear();
+          scriptContainerEntriesCache.clear();
+        }
+        return toRendererSaveResult(result, indexedFiles);
+      }
+      let result = await saveTextResource({
+        file,
+        newText: sourceText,
+        session: activeSession,
+        operationLog,
+        ...storage
+      });
+      if (!result.ok && result.requiresConfirmation) {
+        const confirmation = await requestWriteConfirmation({
+          event,
+          resourceLabel: file.relativePath,
+          sourceUri,
+          actionLabel: '保存脚本源码',
+          payloadHash: createHash('sha256').update(sourceText).digest('hex')
+        });
+        if (!confirmation) return cancelledWrite(sourceUri);
+        result = await saveTextResource({
+          file,
+          newText: sourceText,
+          confirmation,
+          session: activeSession,
+          operationLog,
+          ...storage
+        });
+      }
+      if (result.ok) {
+        const refreshed = await openResourcePreview({
+          file,
+          inspectNative: true,
+          parseStructured: true,
+          ...(activeSession.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+        });
+        const index = indexedFiles.findIndex((item) => item.sourceUri === sourceUri);
+        if (index >= 0) indexedFiles[index] = refreshed.file;
+      }
+      return toRendererSaveResult(result, indexedFiles);
+    }
+  );
+
   handle('operation.list', async (): Promise<RendererPatchHistoryEntry[]> => {
     if (!activeSession || !activeOperationLog) return [];
     const history = await activeOperationLog.history(activeSession.meta.workspaceId);
@@ -7913,6 +8539,89 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
     const result = await rollbackOperation({
       opId,
+      store: activeOperationLog,
+      session: activeSession,
+      confirmation,
+      ...storage
+    });
+
+    return {
+      ok: result.ok,
+      opId: result.opId,
+      ...(result.inverseOpId ? { inverseOpId: result.inverseOpId } : {}),
+      restoredFiles: result.restoredFiles.map((path) => {
+        return indexedFiles.find((file) => file.absolutePath === path)?.sourceUri ?? '[本机路径已隐藏]';
+      }),
+      diagnostics: sanitizeDiagnostics(result.diagnostics)
+    };
+  });
+
+  handle('operation.rollbackFile', async (_event, opId: string, targetUri: string): Promise<RollbackOperationIpcResult> => {
+    if (!activeSession || !activeOperationLog) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'WORKSPACE_NOT_OPEN',
+          message: 'Open a workspace before rolling back a file.'
+        }]
+      };
+    }
+
+    const sourceOperation = await activeOperationLog.get(opId);
+    if (!sourceOperation) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'OPERATION_NOT_FOUND',
+          message: '找不到要回滚的操作。'
+        }]
+      };
+    }
+    const fileRecord = sourceOperation.files.find((file) => file.targetUri === targetUri);
+    if (!fileRecord) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'ROLLBACK_FILE_NOT_FOUND',
+          message: `操作 ${opId} 中不存在资源 ${targetUri}。`
+        }]
+      };
+    }
+    const confirmation = await requestWriteConfirmation({
+      event: _event,
+      resourceLabel: `${sourceOperation.title} · ${targetUri}`,
+      sourceUri: targetUri,
+      actionLabel: '回滚该文件',
+      payloadHash: createHash('sha256').update(`${opId}:${targetUri}`).digest('hex'),
+      extraSubjects: [`ROLLBACK_FILE:${opId}:${targetUri}`]
+    });
+    if (!confirmation) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'warning',
+          code: 'WRITE_CONFIRMATION_CANCELLED',
+          message: '用户取消了该文件的回滚。'
+        }]
+      };
+    }
+
+    const storage = durableStoragePaths(activeSession.meta.workspaceId);
+
+    const result = await rollbackFile({
+      opId,
+      targetUri,
       store: activeOperationLog,
       session: activeSession,
       confirmation,
@@ -8251,11 +8960,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    */
   const activeAgentRuns = new Map<string, { controller: AbortController; ownerId: number }>();
   /**
-   * main 签发的 opaque 资源引用 token 注册表（AGENT-60C）。key = token 串，
-   * value = 签发作用域（webContents.id）+ tokenId。renderer 提交资源引用时，main
-   * 先查本表再比对 sender —— 跨 sender token 在本层被拒，不依赖 renderer 自觉。
+   * main 签发的 opaque 资源引用 token 注册表（AGENT-60C / S10）。key = token 串，
+   * value = 签发作用域（webContents.id）+ tokenId；引用框选（S10）额外带 main
+   * 解码合并后的 citation，提交时由 main 自己重新拼进系统提示（不信任 renderer
+   * 回传的 label）。renderer 提交资源引用时，main 先查本表再比对 sender ——
+   * 跨 sender token 在本层被拒，不依赖 renderer 自觉。
    */
-  const agentReferenceRegistry = new Map<string, { ownerId: string; tokenId: string }>();
+  const agentReferenceRegistry = new Map<
+    string,
+    { ownerId: string; tokenId: string; citation?: ParamCitation }
+  >();
 
   /**
    * Approval requests awaiting a renderer answer, keyed `sessionId:callId`.
@@ -8346,6 +9060,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // 这是 agent 通道，不是 param/format 读取，**不得**返回 BACKUP_READ_FORBIDDEN。
     const resources = request.resources ?? [];
     const ownerId = String(_event.sender.id);
+    // S10：引用框选（param 域）随 resources 提交；main 用注册表里自己解码合并的
+    // citation 重拼系统提示行，不信任 renderer 回传的 label。
+    const citationLines: string[] = [];
     for (const reference of resources) {
       const registered = agentReferenceRegistry.get(reference.token);
       if (registered === undefined || registered.tokenId === undefined) {
@@ -8363,6 +9080,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           ok: false,
           error: { code: 'AGENT_TOKEN_SENDER_MISMATCH', message: '资源引用属于其他发送方，拒绝提交。' }
         };
+      }
+      if (registered.citation !== undefined) {
+        citationLines.push(formatParamCiteLabel(registered.citation));
       }
     }
     const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === request.configId);
@@ -8417,6 +9137,61 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       context: { ...currentToolContext(), mode }
     });
 
+    // AI 回滚接通：rollback_operation 走与 UI 操作级回滚完全相同的通道 ——
+    // main 弹原生确认对话框（subject 绑定 ROLLBACK_OPERATION:<opId>，签发的
+    // ConfirmationReceipt 与 rollbackSelected 的校验一致），并把生产上下文
+    // （真实 SQLite store / session / 备份与恢复目录）注入工具执行。审批卡
+    // （agentLoop 的 rollback 级 gate）是「允许调这个工具」，这里的对话框是
+    // 「确认这一次具体回滚」——双重防线，回滚是高危险不可逆操作。
+    {
+      const rawExecuteTool = bridge.executeTool;
+      bridge.executeTool = async (call) => {
+        if (call.name !== 'rollback_operation') return rawExecuteTool(call);
+        let input: Record<string, unknown> = {};
+        try {
+          input = call.argumentsJson.trim() === '' ? {} : JSON.parse(call.argumentsJson);
+        } catch {
+          // 参数解析交给 registry 的 INVALID_INPUT 报错，这里只需拿 opId 弹框。
+        }
+        const opId = typeof input.opId === 'string' ? input.opId : '';
+        if (opId === '' || !activeSession || !activeOperationLog) {
+          return rawExecuteTool(call);
+        }
+        const storage = durableStoragePaths(activeSession.meta.workspaceId);
+        const sourceOperation = await activeOperationLog.get(opId);
+        if (!sourceOperation) {
+          return rawExecuteTool(call);
+        }
+        const confirmation = await requestWriteConfirmation({
+          resourceLabel: sourceOperation.title,
+          sourceUri: sourceOperation.files[0]?.targetUri ?? `operation://${opId}`,
+          actionLabel: '回滚操作',
+          payloadHash: createHash('sha256').update(opId).digest('hex'),
+          extraSubjects: [`ROLLBACK_OPERATION:${opId}`]
+        });
+        if (!confirmation) {
+          return {
+            ok: false,
+            code: 'WRITE_CONFIRMATION_CANCELLED',
+            content: JSON.stringify({
+              ok: false,
+              error: {
+                code: 'WRITE_CONFIRMATION_CANCELLED',
+                message: '用户在原生确认对话框中取消了回滚操作。'
+              }
+            })
+          };
+        }
+        return rawExecuteTool(call, {
+          session: activeSession,
+          operationLogStore: activeOperationLog,
+          backupBaseDir: storage.backupBaseDir,
+          recoveryDir: storage.recoveryDir,
+          confirmation
+        });
+      };
+    }
+
     let resumeFrom: ResumedRollout | undefined;
     if (request.resumeSessionPath !== undefined) {
       const resolved = resolveSessionPath(request.resumeSessionPath);
@@ -8460,6 +9235,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       systemPromptParts.push(
         `最近一次资源打开失败：${failure.kind}（${failure.code}）document=${failure.document}。`
         + `${failure.message}。用户可能正想问为什么打不开；请直接解释原因和下一步，不要要求用户复制日志。`
+      );
+    }
+    if (citationLines.length > 0) {
+      // S10：框选引用是用户显式选给模型看的行/字段（PARAM 先行），随系统提示
+      // 附带；label 由 main 从注册表里的 citation 重拼，renderer 回传值不参与。
+      systemPromptParts.push(
+        `用户框选引用（回答时可直接引用这些行/字段）：${citationLines.join('；')}`
       );
     }
     const systemPrompt = systemPromptParts.filter((part) => part.trim().length > 0).join('\n\n');
@@ -8881,4 +9663,63 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       return { ok: true, reference };
     }
   );
+
+  /**
+   * S10 引用框选签发（PARAM 先行）。
+   *
+   * renderer 把框选命中的 `data-cite` 节点（CiteHit[]）交给 main；main 解码 +
+   * 合并成一条 citation（跨表/跨行拒绝），拼固定格式逻辑标签，签发与资源引用同
+   * 形态的 opaque token。提交时（ai.agent.run）main 用注册表里的 citation 重拼
+   * 系统提示行 —— 模型看到的是哪张表哪一行哪些字段，label 由 main 生成，renderer
+   * 不参与拼接，也不携带任何路径。
+   *
+   * 校验边界（诚实声明）：结构与标识符在 main 校验（绝对路径 / 非法 kind /
+   * 非法标识符拒收）；行/字段的存在性来自 renderer 已显示的工作台数据（数据本身
+   * 是 main 下发的，renderer 只是把看到的行与字段框给 main），main 不再重读表。
+   * 这是 agent 通道，不是 param/format 读取，**不得**返回 BACKUP_READ_FORBIDDEN。
+   */
+  handle('agent.citation.create', async (event, request: unknown): Promise<AgentResourceReferenceCreateIpcResult> => {
+    if (!activeIndex) {
+      return { ok: false, error: { code: 'WORKSPACE_REQUIRED', message: '这次工具需要先打开 Mod 工作区。' } };
+    }
+    const hitsValue = typeof request === 'object' && request !== null
+      ? (request as Record<string, unknown>).hits
+      : undefined;
+    let citation: ParamCitation | null = null;
+    try {
+      citation = mergeCiteHits(decodeCiteHits(hitsValue));
+    } catch (error) {
+      return {
+        ok: false,
+        error: { code: 'INVALID_INPUT', message: error instanceof Error ? error.message : '引用框选格式非法。' }
+      };
+    }
+    if (citation === null) {
+      return {
+        ok: false,
+        error: {
+          code: 'CITATION_UNSUPPORTED',
+          message: '这块还不能引用：框选命中跨了不同的表或行，或没有可引用的节点。'
+        }
+      };
+    }
+    const tokenId = randomUUID();
+    const ownerId = String(event.sender.id);
+    const label = formatParamCiteLabel(citation);
+    const token = mintAgentReferenceToken({
+      kind: 'citation',
+      tokenId,
+      ownerId,
+      domain: 'param',
+      label
+    });
+    const reference: AgentResourceReference = {
+      token,
+      domain: 'param',
+      label,
+      expiresAt: agentReferenceExpiresAt()
+    };
+    agentReferenceRegistry.set(token, { ownerId, tokenId, citation });
+    return { ok: true, reference };
+  });
 }

@@ -17,6 +17,7 @@ import type {
 import type {
   AgentMessageDto,
   AgentResourceReference,
+  CiteHit,
   EditorSelectionContext
 } from '@soulforge/shared';
 import { AgentTaskPanelProps } from './AgentTaskPanel.js';
@@ -33,6 +34,7 @@ import { AgentComposer, type AgentInteractionMode } from './AgentComposer.js';
 import { AgentContextPicker } from './AgentContextPicker.js';
 import { AgentResourceReferencePicker } from './AgentResourceReferencePicker.js';
 import {
+  createCitationFlow,
   createInitialResourceReferenceDraft,
   createResourceReferenceFlow,
   reduceAgentResourceReferenceDraft
@@ -99,6 +101,19 @@ export interface AgentSidebarProps {
   onThinkingChange: (thinking: AiThinkingLevel) => void;
   onPromptChange: (prompt: string) => void;
   onSend: () => void;
+  /**
+   * S10 引用框选：当前是否处于框选模式（中央编辑区暗幕在 App 渲染，这里只做
+   * Composer「引用」钮的按下态与开关转发）。
+   */
+  citeSelecting?: boolean;
+  onToggleCiteSelect?: () => void;
+  /**
+   * S10 引用框选待签发命中：App 在暗幕结算后把命中集合交给面板，面板经
+   * agent.citation.create 换 main 签发的 opaque token 写进资源引用草稿；消费后
+   * 回调 onCiteHitsConsumed（App 清空，避免重复签发）。
+   */
+  pendingCiteHits?: readonly CiteHit[] | null;
+  onCiteHitsConsumed?: () => void;
   onNewTask?: () => void;
   onToggleExpand?: () => void;
   interactionMode?: AgentInteractionMode;
@@ -192,6 +207,10 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     onThinkingChange,
     onPromptChange,
     onSend,
+    citeSelecting = false,
+    onToggleCiteSelect = () => undefined,
+    pendingCiteHits = null,
+    onCiteHitsConsumed,
     onNewTask,
     onToggleExpand,
     interactionMode = 'ask',
@@ -287,6 +306,27 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     dispatchResourceDraft({ type: 'remove', token });
   }
 
+  // S10 引用框选签发：App 结算后把命中交过来（一次性），本面板经 main 换 opaque
+  // token 写进与资源引用同一个草稿（chip 去重 / 上限 / 诊断共用）。成功或失败都
+  // 立即回调 onCiteHitsConsumed——命中只处理一次，重复签发由 main 的 tokenId
+  // 与 registry 兜底，不靠 renderer 计数。
+  useEffect(() => {
+    if (pendingCiteHits === undefined || pendingCiteHits === null) return;
+    const rendererBridgeNow = getRendererBridge();
+    if (rendererBridgeNow === null || rendererBridgeNow.createAgentCitation === undefined) {
+      dispatchResourceDraft({
+        type: 'create-failed',
+        message: '创建引用需要桌面桥接能力（Electron 桌面版）。'
+      });
+    } else {
+      void createCitationFlow(rendererBridgeNow.createAgentCitation, pendingCiteHits, dispatchResourceDraft);
+    }
+    onCiteHitsConsumed?.();
+    // pendingCiteHits 只消费一次：App 在 onCiteHitsConsumed 里清空，命中数组本身
+    // 不参与依赖（消费后立即回调，避免同一数组触发第二次签发）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCiteHits, onCiteHitsConsumed]);
+
   /** 从任务态派生 §12.5 工具活动行（单行折叠）。 */
   const toolActivities = taskState.toolCalls.slice(-AGENT_TOOL_CALL_LIMIT).map((call) => ({
     id: call.callId,
@@ -361,100 +401,108 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
         onToggleExpand={onToggleExpand ?? (() => undefined)}
         onClose={onClose}
       />
-      <AgentConversationViewport
-        idle={emptyWelcome}
-        messages={messages}
-        {...(onLoadOlderMessages !== undefined ? { onLoadOlder: onLoadOlderMessages } : {})}
-        toolActivities={toolActivities}
-        approvals={approvals}
-        failure={failure}
-        status={statusText}
-      >
-        {goal !== null && (
-          <article className="agent-message agent-message--user">
-            <div className="agent-message__meta">你</div>
-            <p>{goal}</p>
-          </article>
-        )}
-        {idleNotice !== null && (
-          <div className="agent-message agent-message--system" role="status" data-testid="agent-idle-notice">
-            <span>{idleNotice}</span>
-          </div>
-        )}
-        {busy && (
-          <div className="agent-message agent-message--system" role="status">
-            <span className="spinner" aria-hidden="true"></span>
-            <span>正在准备计划草稿…</span>
-          </div>
-        )}
-        {draft !== null && (
-          <article className="agent-message agent-message--agent">
-            <div className="agent-message__meta">Agent · 计划草稿</div>
-            <strong>{draft.title}</strong>
-            <p>{draft.summary}</p>
-            {draftNextActions.length > 0 && (
-              <ul className="agent-message__actions">
-                {draftNextActions.map((action) => <li key={action}>{action}</li>)}
-              </ul>
+      {/* S11：抽屉打开时整列换页——欢迎/对话、资源引用、composer 全部卸掉，
+          禁止半透明抽屉盖在欢迎 + composer 上（旧 .agent-secondary-drawer
+          用 position:absolute 叠一层，浅色主题 --forge-0 只有 8% 白，欢迎三勾
+          与发送框全部透出来）。关闭恢复原来的面。 */}
+      {drawerView === null ? (
+        <>
+          <AgentConversationViewport
+            idle={emptyWelcome}
+            messages={messages}
+            {...(onLoadOlderMessages !== undefined ? { onLoadOlder: onLoadOlderMessages } : {})}
+            toolActivities={toolActivities}
+            approvals={approvals}
+            failure={failure}
+            status={statusText}
+          >
+            {goal !== null && (
+              <article className="agent-message agent-message--user">
+                <div className="agent-message__meta">你</div>
+                <p>{goal}</p>
+              </article>
             )}
-          </article>
-        )}
-        {taskState.rolloutFileName !== null && (
-          <p className="muted" data-testid="agent-rollout-file">会话记录：{taskState.rolloutFileName}</p>
-        )}
-      </AgentConversationViewport>
+            {idleNotice !== null && (
+              <div className="agent-message agent-message--system" role="status" data-testid="agent-idle-notice">
+                <span>{idleNotice}</span>
+              </div>
+            )}
+            {busy && (
+              <div className="agent-message agent-message--system" role="status">
+                <span className="spinner" aria-hidden="true"></span>
+                <span>正在准备计划草稿…</span>
+              </div>
+            )}
+            {draft !== null && (
+              <article className="agent-message agent-message--agent">
+                <div className="agent-message__meta">Agent · 计划草稿</div>
+                <strong>{draft.title}</strong>
+                <p>{draft.summary}</p>
+                {draftNextActions.length > 0 && (
+                  <ul className="agent-message__actions">
+                    {draftNextActions.map((action) => <li key={action}>{action}</li>)}
+                  </ul>
+                )}
+              </article>
+            )}
+            {taskState.rolloutFileName !== null && (
+              <p className="muted" data-testid="agent-rollout-file">会话记录：{taskState.rolloutFileName}</p>
+            )}
+          </AgentConversationViewport>
 
-      {/* §12.10 组件树：上下文选择 + 资源引用选择（opaque token，不泄漏绝对路径）。 */}
-      <div className="agent-composer-context" data-testid="agent-composer-context">
-        <AgentContextPicker
-          selection={effectiveSelection}
-          {...(onClearContext !== undefined ? { onClear: onClearContext } : {})}
+          {/* §12.10 组件树：上下文选择 + 资源引用选择（opaque token，不泄漏绝对路径）。 */}
+          <div className="agent-composer-context" data-testid="agent-composer-context">
+            <AgentContextPicker
+              selection={effectiveSelection}
+              {...(onClearContext !== undefined ? { onClear: onClearContext } : {})}
+            />
+            <AgentResourceReferencePicker
+              resources={resourceDraft.resources}
+              selection={effectiveSelection}
+              creating={resourceDraft.creating}
+              error={resourceDraft.error}
+              {...(resourceCreateCapable ? { onCreate: handleCreateResource } : {})}
+              onRemove={handleRemoveResource}
+            />
+          </div>
+
+          <AgentComposer
+            prompt={prompt}
+            onPromptChange={onPromptChange}
+            onSend={onSend}
+            onStop={task.onCancel}
+            streaming={taskRunning}
+            awaitingApproval={awaitingApproval}
+            permissionMode={permissionMode}
+            permissionLockReason={permissionLockReason}
+            interactionMode={interactionMode}
+            onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
+            modelLabel={modelLabel}
+            onOpenModelSettings={() => openDrawer('settings')}
+            citeSelecting={citeSelecting}
+            onToggleCiteSelect={onToggleCiteSelect}
+            contextLabel={contextLabel}
+          />
+        </>
+      ) : (
+        <AgentSecondaryDrawer
+          open
+          view={drawerView}
+          onClose={closeDrawer}
+          onSwitchView={setDrawerView}
+          task={task}
+          tools={tools}
+          permissionLockReason={permissionLockReason}
+          settings={{
+            provider,
+            thinking,
+            permissionMode,
+            permissionLockReason,
+            onProviderChange,
+            onThinkingChange
+          }}
         />
-        <AgentResourceReferencePicker
-          resources={resourceDraft.resources}
-          selection={effectiveSelection}
-          creating={resourceDraft.creating}
-          error={resourceDraft.error}
-          {...(resourceCreateCapable ? { onCreate: handleCreateResource } : {})}
-          onRemove={handleRemoveResource}
-        />
-      </div>
-
-      <AgentComposer
-        prompt={prompt}
-        onPromptChange={onPromptChange}
-        onSend={onSend}
-        onStop={task.onCancel}
-        streaming={taskRunning}
-        awaitingApproval={awaitingApproval}
-        permissionMode={permissionMode}
-        permissionLockReason={permissionLockReason}
-        interactionMode={interactionMode}
-        onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
-        modelLabel={modelLabel}
-        onOpenModelSettings={() => openDrawer('settings')}
-        selectedFilePath={selectedFilePath}
-        contextLabel={contextLabel}
-      />
-
-      {/* §12.10 组件树：模型服务 / 工具库存 / 会话历史 / 开发设置迁到二级抽屉。 */}
-      <AgentSecondaryDrawer
-        open={drawerView !== null}
-        view={drawerView ?? 'settings'}
-        onClose={closeDrawer}
-        onSwitchView={setDrawerView}
-        task={task}
-        tools={tools}
-        permissionLockReason={permissionLockReason}
-        settings={{
-          provider,
-          thinking,
-          permissionMode,
-          permissionLockReason,
-          onProviderChange,
-          onThinkingChange
-        }}
-      />
+      )}
     </aside>
   );
 }

@@ -32,4 +32,6 @@ export * from './vfx-editor.js';
 export * from './scene-ir.js';
 export * from './msb-entity-registry.js';
 export * from './script-container.js';
+export * from './fmg-names.js';
+export * from './citations.js';
 export * from './container-workbench.js';

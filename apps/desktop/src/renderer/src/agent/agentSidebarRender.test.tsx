@@ -51,7 +51,7 @@ function render(overrides: Partial<AgentSidebarProps> = {}): string {
   const props: AgentSidebarProps = {
     open: true,
     agentWidth: 440,
-    agentMinWidth: 340,
+    agentMinWidth: 200,
     agentMaxWidth: 620,
     onAgentWidthChange: () => undefined,
     busy: false,
@@ -144,14 +144,13 @@ describe('Composer 三层结构（§12.6）', () => {
     assert.match(html, /class="agent__composer"[\s\S]*?<textarea/);
   });
 
-  it('toolbar 固定六项按 @ | # | 附件 | 模型 | Plan | 发送/停止 顺序', () => {
+  it('toolbar 固定五项按 引用 | 附件 | 模型 | Plan | 发送/停止 顺序（S10：@/# 合成引用框选）', () => {
     const html = render();
     const toolbarStart = html.indexOf('class="agent-composer__toolbar"');
     assert.ok(toolbarStart >= 0, 'toolbar 层必须存在');
     const region = html.slice(toolbarStart);
     const markers = [
-      'aria-label="添加 Agent 参与者"', // @
-      'aria-label="添加当前文件上下文"', // #
+      'aria-label="引用框选"', // S10：@/# 合成「引用」框选钮
       'aria-label="添加附件"', // attachment
       'aria-label="模型服务设置"', // model
       'data-testid="composer-plan-mode"', // plan
@@ -160,9 +159,12 @@ describe('Composer 三层结构（§12.6）', () => {
     let prev = -1;
     for (const marker of markers) {
       const idx = region.indexOf(marker);
-      assert.ok(idx > prev, `toolbar 六项应按固定顺序出现，${marker} 顺序错误`);
+      assert.ok(idx > prev, `toolbar 五项应按固定顺序出现，${marker} 顺序错误`);
       prev = idx;
     }
+    // S10 拍死：工具栏不再有 @ / # 两个钮（引用是语义实体，不是文本 token）。
+    assert.ok(!region.includes('aria-label="添加 Agent 参与者"'), '@ 按钮已移除');
+    assert.ok(!region.includes('aria-label="添加当前文件上下文"'), '# 按钮已移除');
   });
 
   it('空输入时发送按钮 disabled，非空时可用（§12.6）', () => {
@@ -176,17 +178,17 @@ describe('Composer 三层结构（§12.6）', () => {
   it('未打通的能力诚实 disabled：附件按钮常驻 disabled 而不是假装可用', () => {
     const html = render();
     const attachmentButton = /<button[^>]*aria-label="添加附件"[^>]*>/.exec(html)?.[0];
-    assert.ok(attachmentButton, '附件按钮必须存在（固定六项之一）');
+    assert.ok(attachmentButton, '附件按钮必须存在（固定五项之一）');
     assert.ok(attachmentButton.includes('disabled'), '附件能力未接通（60C），应诚实 disabled');
   });
 
-  it('未选中资源时 # 按钮 disabled，选中后可用', () => {
-    const noSelection = render();
-    const disabledContext = /<button[^>]*aria-label="添加当前文件上下文"[^>]*>/.exec(noSelection)?.[0];
-    assert.ok(disabledContext?.includes('disabled'), '未选中资源时 # 按钮应 disabled');
-    const withSelection = render({ selectedFilePath: 'm12b/fmg/fmg_item_dlc01.msgbnd.dcx' });
-    const enabledContext = /<button[^>]*aria-label="添加当前文件上下文"[^>]*>/.exec(withSelection)?.[0];
-    assert.ok(enabledContext !== undefined && !enabledContext.includes('disabled'), '选中资源后 # 按钮应可用');
+  it('S10：引用框选钮默认抬起，citeSelecting 时按下（aria-pressed）', () => {
+    const idle = render();
+    const idleButton = /<button[^>]*aria-label="引用框选"[^>]*>/.exec(idle)?.[0];
+    assert.ok(idleButton?.includes('aria-pressed="false"'), '默认应为抬起态');
+    const active = render({ citeSelecting: true });
+    const activeButton = /<button[^>]*aria-label="引用框选"[^>]*>/.exec(active)?.[0];
+    assert.ok(activeButton?.includes('aria-pressed="true"'), '框选模式开启时应为按下态');
   });
 });
 
@@ -197,7 +199,7 @@ describe('AgentDockResizer（§12.2）', () => {
     assert.match(html, /aria-orientation="vertical"/);
     assert.match(html, /aria-label="调整 Agent 面板宽度"/);
     assert.match(html, /aria-valuenow="440"/);
-    assert.match(html, /aria-valuemin="340"/);
+    assert.match(html, /aria-valuemin="200"/);
     assert.match(html, /aria-valuemax="620"/);
   });
 
@@ -212,21 +214,21 @@ describe('AgentDockResizer（§12.2）', () => {
     assert.match(closedHtml, /class="agent is-collapsed"/);
   });
 
-  it('宽度收敛到 340/620 并取整', () => {
+  it('宽度收敛到 200/620 并取整（S8：下限 200px）', () => {
     assert.equal(AGENT_DOCK_KEYBOARD_STEP, 16, '键盘每次 16px（§12.2）');
-    assert.equal(clampAgentDockWidth(440, 340, 620), 440);
-    assert.equal(clampAgentDockWidth(330, 340, 620), 340);
-    assert.equal(clampAgentDockWidth(700, 340, 620), 620);
-    assert.equal(clampAgentDockWidth(441.6, 340, 620), 442);
+    assert.equal(clampAgentDockWidth(440, 200, 620), 440);
+    assert.equal(clampAgentDockWidth(190, 200, 620), 200, '低于下限收敛到 200');
+    assert.equal(clampAgentDockWidth(700, 200, 620), 620);
+    assert.equal(clampAgentDockWidth(441.6, 200, 620), 442);
   });
 
   it('键盘 ArrowLeft/Right 每次 16px，Home/End 到边界', () => {
-    assert.equal(dockWidthForResizeKey('ArrowLeft', 440, 340, 620), 456);
-    assert.equal(dockWidthForResizeKey('ArrowRight', 440, 340, 620), 424);
-    assert.equal(dockWidthForResizeKey('ArrowLeft', 610, 340, 620), 620, '超过上限收敛到 620');
-    assert.equal(dockWidthForResizeKey('ArrowRight', 345, 340, 620), 340, '低于下限收敛到 340');
-    assert.equal(dockWidthForResizeKey('Home', 500, 340, 620), 340);
-    assert.equal(dockWidthForResizeKey('End', 400, 340, 620), 620);
+    assert.equal(dockWidthForResizeKey('ArrowLeft', 440, 200, 620), 456);
+    assert.equal(dockWidthForResizeKey('ArrowRight', 440, 200, 620), 424);
+    assert.equal(dockWidthForResizeKey('ArrowLeft', 610, 200, 620), 620, '超过上限收敛到 620');
+    assert.equal(dockWidthForResizeKey('ArrowRight', 210, 200, 620), 200, '低于下限收敛到 200');
+    assert.equal(dockWidthForResizeKey('Home', 500, 200, 620), 200);
+    assert.equal(dockWidthForResizeKey('End', 400, 200, 620), 620);
   });
 });
 
@@ -634,7 +636,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
       }]
     };
     const html = render({ task: { ...render0Task(), task: running } });
-    assert.match(html, /data-testid="agent-secondary-drawer"/, '二级抽屉挂载');
+    // S11：抽屉收起时不渲染（整列换页）——主栏不常驻任务面板/工具库存，抽屉
+    // 只在打开时作为第二个面出现。
+    assert.ok(!html.includes('data-testid="agent-secondary-drawer"'), '抽屉收起时不占 DOM');
     assert.ok(!html.includes('data-testid="agent-task-panel"'), '主栏不再常驻任务面板');
     assert.ok(!html.includes('data-testid="agent-tool-inventory"'), '工具库存不在主栏');
     // 工具库存确实在抽屉内：直接渲染抽屉历史视图验证归属。
@@ -661,6 +665,58 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.match(drawerHtml, /search_resources/, '抽屉内显示工具名');
   });
 
+  it('S11 抽屉整列换页：打开面只有抽屉，不含欢迎/composer/资源引用', () => {
+    // SSR 下 drawerView 是内部 state（null），侧边栏挂载面即主面；抽屉面用
+    // 直接渲染验证——开关、标题独占一行，且不携带主栏任何元素。
+    const drawerHtml = renderToStaticMarkup(
+      <AgentSecondaryDrawer
+        open={true}
+        view="settings"
+        onClose={() => undefined}
+        onSwitchView={() => undefined}
+        task={render0Task()}
+        tools={[]}
+        permissionLockReason="由主进程锁定为计划模式"
+        settings={{
+          provider: 'mock',
+          thinking: 'normal',
+          permissionMode: 'plan',
+          permissionLockReason: '锁',
+          onProviderChange: () => undefined,
+          onThinkingChange: () => undefined
+        }}
+      />
+    );
+    assert.match(drawerHtml, /aria-label="模型服务设置"/, '设置面标题');
+    assert.match(drawerHtml, /aria-label="抽屉视图"/, '历史/设置切换在抽屉顶栏');
+    assert.match(drawerHtml, /aria-pressed="true"/, '当前视图按下态');
+    assert.ok(!drawerHtml.includes('agent__composer'), '抽屉面不含 composer');
+    assert.ok(!drawerHtml.includes('agent-composer-context'), '抽屉面不含资源引用条');
+    assert.ok(!drawerHtml.includes('agent-empty-state'), '抽屉面不含欢迎三勾');
+    // 历史/设置互相可达：历史视图里也有切换控件（不再只有「模型设置」一个方向）。
+    const historyHtml = renderToStaticMarkup(
+      <AgentSecondaryDrawer
+        open={true}
+        view="history"
+        onClose={() => undefined}
+        onSwitchView={() => undefined}
+        task={render0Task()}
+        tools={[]}
+        permissionLockReason="由主进程锁定为计划模式"
+        settings={{
+          provider: 'mock',
+          thinking: 'normal',
+          permissionMode: 'plan',
+          permissionLockReason: '锁',
+          onProviderChange: () => undefined,
+          onThinkingChange: () => undefined
+        }}
+      />
+    );
+    assert.match(historyHtml, /aria-label="抽屉视图"/, '历史视图顶栏也有切换');
+    assert.ok(!historyHtml.includes('agent__composer'), '历史面不含 composer');
+  });
+
   it('关闭 dock 不取消 main-owned task：收起仍保留消息流，取消控件只在抽屉', () => {
     const running = {
       ...INITIAL_AGENT_TASK_STATE,
@@ -684,7 +740,27 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     const html = render({ task: { ...render0Task(), task: running } });
     assert.match(html, /data-testid="composer-stop"/, '运行中停止键在 composer');
     assert.ok(!html.includes('data-testid="agent-task-cancel"'), '任务级取消不在主栏');
-    assert.match(html, /agent-secondary-drawer/, '取消控件在二级抽屉');
+    // 取消控件只存在于抽屉视图（打开时才有）：直接渲染抽屉验证归属。
+    const cancelHtml = renderToStaticMarkup(
+      <AgentSecondaryDrawer
+        open={true}
+        view="settings"
+        onClose={() => undefined}
+        onSwitchView={() => undefined}
+        task={render0Task()}
+        tools={[]}
+        permissionLockReason="由主进程锁定为计划模式"
+        settings={{
+          provider: 'mock',
+          thinking: 'normal',
+          permissionMode: 'plan',
+          permissionLockReason: '锁',
+          onProviderChange: () => undefined,
+          onThinkingChange: () => undefined
+        }}
+      />
+    );
+    assert.match(cancelHtml, /data-testid="agent-task-cancel"/, '任务级取消在二级抽屉');
   });
 });
 
