@@ -99,7 +99,12 @@ for (const test of tests) {
     // （"Dynamic require of util is not supported"）。留给 Node 自己解析即可 ——
     // 渲染期断言（*.test.tsx 用 react-dom/server 真渲染面板）依赖这一条，
     // 否则整个文件在导入阶段就崩，表现为「测试文件级失败」而非断言失败。
-    external: ['node:*', 'react', 'react-dom', 'react-dom/server', 'react/jsx-runtime'],
+    //
+    // better-sqlite3 / bindings 是原生 CJS 模块：bundle 会把它们包进 __commonJS
+    // 并把 require('fs') 变成运行期抛错的动态 require。renderer 单测从不真正
+    // 调用 sqlite（core 的 index 导出被面板的运行时 import 拉进依赖图），
+    // 同样留给 Node 运行时惰性解析。
+    external: ['node:*', 'react', 'react-dom', 'react-dom/server', 'react/jsx-runtime', 'better-sqlite3', 'bindings'],
     jsx: 'automatic',
     // 打包后 import.meta.url 指向 node_modules/.cache，任何靠它推算仓库相对路径的
     // 测试都会 ENOENT。注入编译期常量而不是让测试自己猜：靠 process.cwd() 会随

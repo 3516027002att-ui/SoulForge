@@ -2562,6 +2562,12 @@ SHELL-09 → SHELL-10
 > - `isSourceReadOnly` 只剩打开失败类（非 live / 无 dslTemplate），`sourceStyle === 'dark-script'` 不再是只读判据。
 > - 新增 `runEmevdDarkScriptCompilerSmoke`（no-op / 事件头 / 指令参数 / fail-closed 诊断 / 部分应用）。
 
+> **S31 落地（2026-08-17，事件 IDE：右栏词义 + 多列对照）**：
+> - 右栏词义（`.esw-inspector`，独立滚动）：选中一条语句（或 WaitFor 折叠块，跨行自动合并）后，显示指令名、bank:id 与每个参数的 EMEDF 名/类型/当前值；conditionGroup 簿记参数标「（折叠隐藏）」；同名指令（不同 bank:id）全部列出不猜歧义；目录匹配不到的名字诚实标「未解码」。数据只来自已下发的 EMEDF 完成目录 + 源码行，不重复灌 IPC。
+> - 多列对照：`分栏 1/2/3` 循环按钮；多列 = 激活 tab 排前 + 其余 tab 按打开顺序并排，每列独立 EditorView（独立滚动/光标/dirty），列数可关回单列。不做「同一文件双视口」——两份独立 state 的文档同步会引入造假的编辑语义。
+> - 跳转对应文本（`$Event(id)` / 指令实参 → FMG/事件）是后半截：需要事件/FMG 索引，未接入前不挂假灯泡。
+> - 文件头与 `EventSourceTabData.sourceStyle` 注释同步去掉「只读」表述。
+
 > **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
 > - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
 > - **B**：renderer 打开只打一枪——`readEmevdDocument` envelope 双读删除，事件数 / sourceHash / gutter 判据全部由 `readEmevdFullDocument` 的 outline 给（`unknownCount` 按完整 EMEDF 逐条判，不再有 256 条采样造成的假「整段未知」）；`mapEmevdEnvelope` / `alignEmevdDocumentAnchors` 删除，`indexEventLines` 按 `$Event(` 出现顺序映射。
