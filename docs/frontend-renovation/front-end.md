@@ -1236,7 +1236,10 @@ Tools/Symbols 空栏。写入形态是「源码 IDE」而不是字节替换：
   只读；
 - 可编辑源码 = 明文或反编译文本；Ctrl+S 应用（同 S14 话术「正在应用…」「已应用，
   可回滚。」），容器条目经 Patch Engine `replaceContainerChild`（回传 child/
-  container hash 乐观校验，写回 plaintext Lua），独立文件走 `saveTextResource`；
+  container hash 乐观校验），独立文件走 `saveRawReplace`；写回编码必须跟打开时
+  一致（`encodeScriptSourceForWriteback`：ascii / utf8 / utf8-bom / shift_jis
+  走 `encodePlaintext`，混合编码只改纯 ASCII 行并原样保留高位字节，反编译
+  LuaQ/LuaP 写 UTF-8 明文，不要自研编译器）；
 - 形态识别在 renderer 探 `listScriptContainerEntriesPage`（容器格式未知即独立
   文件）；内层地址构造、hash 与回滚都在 main；
 - DSLuaDecompiler 是**读入依赖**（打开即反编译），不是 writer/compiler：SoulForge
@@ -2591,8 +2594,8 @@ SHELL-09 → SHELL-10
 #### SCRIPT-41
 
 - **Allowed**：`[MODIFY] packages/shared/src/script-container.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEntry.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEdit.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`；`[MODIFY] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：按 §10.2（S16）：luabnd 容器 `Files | Source` 两栏 / 独立 `.hks/.lua` 单 Source；打开即按字节判定，`\x1bLua` 字节码由 main 调本机 DSLuaDecompiler 反编译为 Lua 文本；反编译失败给结构化原因，不显示 fake hex、不把字节码伪装成可编辑源码；明文与反编译文本均可编辑，Ctrl+S 应用（同 S14 话术）并保留回滚，容器条目经 `replaceContainerChild`、独立文件经 `saveTextResource`；形态识别与内层地址构造都在 main。
-- **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、renderer unit/E2E（S16 脚本 IDE 两用例）。
+- **Steps**：按 §10.2（S16 + S34）：luabnd 容器 `Files | Source` 两栏 / 独立 `.hks/.lua` 单 Source；打开即按字节判定，`\x1bLua` 字节码由 main 调本机 DSLuaDecompiler 反编译为 Lua 文本；反编译失败给结构化原因，不显示 fake hex、不把字节码伪装成可编辑源码；明文与反编译文本均可编辑，Ctrl+S 应用（同 S14 话术）并保留回滚，容器条目经 `replaceContainerChild`、独立文件经 `saveRawReplace`；写回编码跟打开时一致（`encodeScriptSourceForWriteback`）；形态识别与内层地址构造都在 main。
+- **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、`npm run test:plaintext-script-edit`（含写回 4 例）、renderer unit/E2E（S16 脚本 IDE 两用例）。
 
 ### 18.19 MAP/ASSET 独立卡
 

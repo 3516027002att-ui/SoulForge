@@ -177,6 +177,8 @@ export interface ScriptSourceView {
   containerHash?: string;
   /** 是否支持把 sourceText 写回（容器条目 / 独立脚本文件均可写）。 */
   writeSupported: boolean;
+  /** 打开时判定的编码；保存必须用回这一套。字节码反编译为 utf8 明文。 */
+  encoding?: ScriptEntryEncoding | 'utf8';
   diagnostics: Diagnostic[];
 }
 

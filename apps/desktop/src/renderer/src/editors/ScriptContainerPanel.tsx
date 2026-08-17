@@ -41,8 +41,9 @@ import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js
  *
  * 写回：Ctrl+S 应用（同 S14 话术「正在应用…」「已应用，可回滚。」），容器条目
  * 走 Patch Engine replaceContainerChild（回传 child/container hash 乐观校验），
- * 独立文件走 saveTextResource。反编译失败/非 Lua 字节码给结构化原因，
- * 绝不把字节码呈现为可编辑源码。
+ * 独立文件走 saveRawReplace。打开时哪套编码（ascii / utf8 / utf8-bom /
+ * shift_jis / mixed-unknown / 反编译 utf8），保存必须用回那套；混合编码只改
+ * 纯 ASCII 行。反编译失败/非 Lua 字节码给结构化原因，绝不把字节码呈现为可编辑源码。
  */
 
 export interface ScriptContainerPanelProps {
@@ -430,6 +431,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
             {source.kind === 'decompiled' && source.decompiler && (
               <span title="反编译在 main 进程进行，renderer 只收文本">{source.decompiler}</span>
             )}
+            {source.encoding && <span className="muted">{source.encoding}</span>}
             {source.ok && source.writeSupported && (
               <span className="muted" title="Ctrl+S 直接应用，应用前自动备份，可回滚">可编辑 · Ctrl+S 应用</span>
             )}

@@ -50,6 +50,7 @@ import {
   analyzePlaintextLineEndings,
   classifyPlaintextBytes,
   decodePlaintext,
+  encodeScriptSourceForWriteback,
   classifyScriptEntry,
   magicLabel,
   locateDsLuaDecompilerSync,
@@ -8447,6 +8448,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           kind: 'plaintext',
           sourceText: decodePlaintext(bytes.subarray(0, contentEnd), verdict.detectedEncoding),
           decompiled: false,
+          encoding: verdict.detectedEncoding,
           ...containerFields,
           writeSupported: true,
           diagnostics: verdict.diagnostics
@@ -8504,6 +8506,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         kind: 'decompiled',
         sourceText: decompiled.stdout,
         decompiled: true,
+        encoding: 'utf8',
         decompiler: decompilerLabel(probe.origin),
         ...containerFields,
         writeSupported: true,
@@ -8515,9 +8518,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   /**
    * S16 脚本 IDE：保存源码。
    *
-   * 容器条目 → replaceContainerChild（Patch Engine，expected hashes 乐观校验，
-   * 写回 plaintext Lua）；独立脚本文件 → saveTextResource 链。与 resource.saveText
-   * 同一确认/操作日志/回滚通道。
+   * 容器条目 → replaceContainerChild（Patch Engine，expected hashes 乐观校验）；
+   * 独立脚本文件 → saveRawReplace。两边都先重读原字节，再
+   * encodeScriptSourceForWriteback：明文按打开时编码，混合编码只改 ASCII 行，
+   * 反编译文本写 UTF-8 明文。不弹系统确认。
    */
   handle(
     'resource.saveScriptSource',
@@ -8559,24 +8563,44 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       if (entryName) {
         const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
         if (gameBlocked) return gameBlocked;
+        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+        const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
+        if (!read.ok || !read.bytes) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: read.diagnostics.length > 0
+              ? read.diagnostics
+              : [{ severity: 'error', code: 'SCRIPT_SOURCE_READ_FAILED', message: '写回前无法重读原条目字节。', sourceUri }]
+          };
+        }
         let containerHash = expectedContainerHash;
-        let childHash = expectedChildHash;
-        if (!containerHash || !childHash) {
-          // 渲染器没带回 hash（异常路径）：主进程现取，不裸奔乐观校验。
+        let childHash = expectedChildHash || read.hash || '';
+        if (!containerHash) {
           const tree = await inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
           containerHash = tree.ok && tree.tree?.rootHash ? tree.tree.rootHash : '';
-          const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
-          const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
-          childHash = read.hash ?? '';
         }
-        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+        const encoded = encodeScriptSourceForWriteback(read.bytes, sourceText);
+        if (!encoded.ok) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: encoded.diagnostics.map((item) => ({
+              severity: item.severity,
+              code: item.code,
+              message: item.message,
+              sourceUri
+            }))
+          };
+        }
         const confirmation = await requestWriteConfirmation({
           event,
           resourceLabel: `${file.relativePath} / ${entryName}`,
           sourceUri,
           actionLabel: '保存脚本源码',
           payloadHash: createHash('sha256')
-            .update(`${containerHash}\n${childHash}\n${sourceText}`)
+            .update(`${containerHash}\n${childHash}\n`)
+            .update(encoded.bytes)
             .digest('hex')
         });
         if (!confirmation) return cancelledWrite(sourceUri);
@@ -8585,7 +8609,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           childUri,
           expectedContainerHash: containerHash,
           expectedChildHash: childHash,
-          newContentBase64: Buffer.from(sourceText, 'utf8').toString('base64'),
+          newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
           confirmation,
           session: activeSession,
           operationLog,
@@ -8597,31 +8621,52 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
         return toRendererSaveResult(result, indexedFiles);
       }
-      let result = await saveTextResource({
+      let originalBytes: Uint8Array;
+      try {
+        originalBytes = new Uint8Array(await readFile(file.absolutePath));
+      } catch (error) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'SCRIPT_SOURCE_READ_FAILED',
+            message: error instanceof Error ? error.message : '写回前无法读取独立脚本文件。',
+            sourceUri
+          }]
+        };
+      }
+      const encoded = encodeScriptSourceForWriteback(originalBytes, sourceText);
+      if (!encoded.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: encoded.diagnostics.map((item) => ({
+            severity: item.severity,
+            code: item.code,
+            message: item.message,
+            sourceUri
+          }))
+        };
+      }
+      const confirmation = await requestWriteConfirmation({
+        event,
+        resourceLabel: file.relativePath,
+        sourceUri,
+        actionLabel: '保存脚本源码',
+        payloadHash: createHash('sha256').update(encoded.bytes).digest('hex')
+      });
+      if (!confirmation) return cancelledWrite(sourceUri);
+      const result = await saveRawReplace({
         file,
-        newText: sourceText,
+        expectedHash: createHash('sha256').update(originalBytes).digest('hex'),
+        newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
+        confirmation,
         session: activeSession,
         operationLog,
-        ...storage
+        ...storage,
+        title: `保存脚本源码 ${file.relativePath}`
       });
-      if (!result.ok && result.requiresConfirmation) {
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: file.relativePath,
-          sourceUri,
-          actionLabel: '保存脚本源码',
-          payloadHash: createHash('sha256').update(sourceText).digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
-        result = await saveTextResource({
-          file,
-          newText: sourceText,
-          confirmation,
-          session: activeSession,
-          operationLog,
-          ...storage
-        });
-      }
       if (result.ok) {
         const refreshed = await openResourcePreview({
           file,
