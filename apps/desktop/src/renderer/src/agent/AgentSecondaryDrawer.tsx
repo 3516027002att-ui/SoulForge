@@ -1,5 +1,5 @@
 import { useRef, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
-import type { AiPermissionMode, AiProvider, AiThinkingLevel, ToolDescriptor } from '@soulforge/core';
+import type { AiPermissionMode, AiProvider, ToolDescriptor } from '@soulforge/core';
 import {
   FOCUSABLE_SELECTOR,
   isTrappableElement,
@@ -14,11 +14,9 @@ export type AgentSecondaryDrawerView = 'history' | 'settings';
 
 export interface AgentSecondaryDrawerSettingsProps {
   provider: AiProvider;
-  thinking: AiThinkingLevel;
   permissionMode: AiPermissionMode;
   permissionLockReason: string;
   onProviderChange: (provider: AiProvider) => void;
-  onThinkingChange: (thinking: AiThinkingLevel) => void;
 }
 
 export interface AgentSecondaryDrawerProps {

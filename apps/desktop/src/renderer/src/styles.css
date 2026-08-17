@@ -1555,9 +1555,11 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 
 .agent__composer {
+  /* S32：一块圆角输入卡（对照 Codex VS Code 扩展 012748）——不再是贴在面板
+     顶部的平条。participant 条并入底部工具行，输入区在上。 */
   grid-area: composer; min-width: 0;
-  border-top: 1px solid var(--line); padding: 10px 12px 12px;
-  display: flex; flex-direction: column; gap: 7px;
+  margin: 8px; border: 1px solid var(--line); border-radius: 12px;
+  padding: 8px 10px 8px; display: flex; flex-direction: column; gap: 7px;
   background: var(--forge-2);
   /* §12.6：整个 Composer 不超过 40vh；超出由中间层滚动承接。 */
   max-height: var(--agent-composer-max-height); overflow: hidden;

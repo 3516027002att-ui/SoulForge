@@ -1198,6 +1198,11 @@ export interface AiAgentRunRequest {
   /** Byte ceiling for Context Broker output; ignored unless useContextBroker. */
   contextMaxBytes?: number;
   /**
+   * S32：本次任务的思考强度（关/快/普通/深/极致），优先于服务级默认。
+   * 作用于下一次 runAgentTask，不要求用户进设置页。
+   */
+  thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+  /**
    * RAG auto-search: before each model call, retrieve workspace evidence from
    * the most recent user message and inject a [rag-evidence] system message.
    * Default false; requires an analyzed workspace (activeRag corpus).
@@ -9287,7 +9292,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ...(stored.topP !== undefined ? { topP: stored.topP } : {}),
       ...(stored.topK !== undefined ? { topK: stored.topK } : {}),
       ...(stored.maxTokens !== undefined ? { maxTokens: stored.maxTokens } : {}),
-      ...(stored.thinkingLevel !== undefined ? { thinkingLevel: stored.thinkingLevel } : {})
+      // S32：请求级思考强度优先于服务级默认（输入条改了就用新的）。
+      ...(request.thinkingLevel !== undefined
+        ? { thinkingLevel: request.thinkingLevel }
+        : stored.thinkingLevel !== undefined
+          ? { thinkingLevel: stored.thinkingLevel }
+          : {})
     };
     const contextWindowTokens = stored.contextWindowTokens;
     const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey });

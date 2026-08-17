@@ -44,7 +44,7 @@ import type {
   AiPermissionMode,
   AiProvider,
   AiSidebarDraft,
-  AiThinkingLevel,
+  ModelThinkingLevel,
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
@@ -412,7 +412,7 @@ export function App(): ReactElement {
   const [paramRowDataSize, setParamRowDataSize] = useState<number>(16);
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
-  const [aiThinking, setAiThinking] = useState<AiThinkingLevel>('normal');
+  const [aiThinking, setAiThinking] = useState<ModelThinkingLevel>('normal');
   const [aiMode] = useState<AiPermissionMode>('plan');
   const [aiPrompt, setAiPrompt] = useState('解释当前资源的证据链，并给出下一步安全修改计划。');
   const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);
@@ -2362,7 +2362,9 @@ export function App(): ReactElement {
       ...(lastOpenFailure ? { openFailure: lastOpenFailure } : {}),
       // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
       // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
-      ...(agentResources.length > 0 ? { resources: agentResources } : {})
+      ...(agentResources.length > 0 ? { resources: agentResources } : {}),
+      // S32：输入条的思考强度随任务提交（优先于服务级默认）。
+      thinkingLevel: aiThinking
     });
     if (!result.ok) {
       setAgentTask({

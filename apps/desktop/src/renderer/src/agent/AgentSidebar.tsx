@@ -10,7 +10,7 @@ import type {
   AiPermissionMode,
   AiProvider,
   AiSidebarDraft,
-  AiThinkingLevel,
+  ModelThinkingLevel,
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
@@ -59,7 +59,7 @@ export interface AgentSidebarProps {
   onAgentWidthChange: (width: number) => void;
   busy: boolean;
   provider: AiProvider;
-  thinking: AiThinkingLevel;
+  thinking: ModelThinkingLevel;
   permissionMode: AiPermissionMode;
   permissionLockReason: string;
   goal: string | null;
@@ -98,7 +98,7 @@ export interface AgentSidebarProps {
   eventUri: string;
   onEventUriChange: (uri: string) => void;
   onProviderChange: (provider: AiProvider) => void;
-  onThinkingChange: (thinking: AiThinkingLevel) => void;
+  onThinkingChange: (thinking: ModelThinkingLevel) => void;
   onPromptChange: (prompt: string) => void;
   onSend: () => void;
   /**
@@ -482,6 +482,8 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             citeSelecting={citeSelecting}
             onToggleCiteSelect={onToggleCiteSelect}
             contextLabel={contextLabel}
+            thinking={thinking}
+            onThinkingChange={onThinkingChange}
           />
         </>
       ) : (
@@ -495,11 +497,9 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
           permissionLockReason={permissionLockReason}
           settings={{
             provider,
-            thinking,
             permissionMode,
             permissionLockReason,
-            onProviderChange,
-            onThinkingChange
+            onProviderChange
           }}
         />
       )}

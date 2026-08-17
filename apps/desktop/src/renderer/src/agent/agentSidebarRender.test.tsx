@@ -117,15 +117,16 @@ describe('Agent 壳层遵循右 dock 信息架构（§12.1/12.3）', () => {
   });
 });
 
-describe('Composer 三层结构（§12.6）', () => {
-  it('participant / prompt+chips / toolbar 三层按顺序渲染', () => {
+describe('Composer 结构（§12.6 / S32 输入卡）', () => {
+  it('S32 一块圆角输入卡：输入区在前、工具行在后，参与者条并入工具行', () => {
     const html = render();
-    const participantIdx = html.indexOf('agent-composer__participant');
     const bodyIdx = html.indexOf('agent-composer__body');
     const toolbarIdx = html.indexOf('agent-composer__toolbar');
-    assert.ok(participantIdx >= 0, '第一层 participant 存在');
-    assert.ok(bodyIdx > participantIdx, '第二层 prompt+chips 在 participant 之后');
-    assert.ok(toolbarIdx > bodyIdx, '第三层 toolbar 在 prompt+chips 之后');
+    assert.ok(bodyIdx >= 0, '输入区存在');
+    assert.ok(toolbarIdx > bodyIdx, '工具行在输入区之后');
+    // participant 条不再独立一层：模式/权限下拉进工具行。
+    const toolbarRegion = html.slice(toolbarIdx);
+    assert.match(toolbarRegion, /agent-composer__participant/, '参与者条（权限下拉）在工具行内');
     assert.match(html, /data-testid="agent-composer"/);
   });
 
@@ -144,7 +145,7 @@ describe('Composer 三层结构（§12.6）', () => {
     assert.match(html, /class="agent__composer"[\s\S]*?<textarea/);
   });
 
-  it('toolbar 固定五项按 引用 | 附件 | 模型 | Plan | 发送/停止 顺序（S10：@/# 合成引用框选）', () => {
+  it('S32 工具行顺序：引用 | 附件 | 权限 | 模型 | 思考 | 发送（模型与思考是两个控件）', () => {
     const html = render();
     const toolbarStart = html.indexOf('class="agent-composer__toolbar"');
     assert.ok(toolbarStart >= 0, 'toolbar 层必须存在');
@@ -152,8 +153,9 @@ describe('Composer 三层结构（§12.6）', () => {
     const markers = [
       'aria-label="引用框选"', // S10：@/# 合成「引用」框选钮
       'aria-label="添加附件"', // attachment
+      'class="agent-mode-select"', // 权限（Ask/Plan/Edit 下拉）
       'aria-label="模型服务设置"', // model
-      'data-testid="composer-plan-mode"', // plan
+      'aria-label="思考强度"', // S32：思考强度独立控件
       '>发送<' // send/stop
     ];
     let prev = -1;
@@ -653,11 +655,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         permissionLockReason="由主进程锁定为计划模式"
         settings={{
           provider: 'mock',
-          thinking: 'normal',
           permissionMode: 'plan',
           permissionLockReason: '锁',
-          onProviderChange: () => undefined,
-          onThinkingChange: () => undefined
+          onProviderChange: () => undefined
         }}
       />
     );
@@ -679,11 +679,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         permissionLockReason="由主进程锁定为计划模式"
         settings={{
           provider: 'mock',
-          thinking: 'normal',
           permissionMode: 'plan',
           permissionLockReason: '锁',
-          onProviderChange: () => undefined,
-          onThinkingChange: () => undefined
+          onProviderChange: () => undefined
         }}
       />
     );
@@ -719,11 +717,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         permissionLockReason="由主进程锁定为计划模式"
         settings={{
           provider: 'mock',
-          thinking: 'normal',
           permissionMode: 'plan',
           permissionLockReason: '锁',
-          onProviderChange: () => undefined,
-          onThinkingChange: () => undefined
+          onProviderChange: () => undefined
         }}
       />
     );
@@ -766,11 +762,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         permissionLockReason="由主进程锁定为计划模式"
         settings={{
           provider: 'mock',
-          thinking: 'normal',
           permissionMode: 'plan',
           permissionLockReason: '锁',
-          onProviderChange: () => undefined,
-          onThinkingChange: () => undefined
+          onProviderChange: () => undefined
         }}
       />
     );
