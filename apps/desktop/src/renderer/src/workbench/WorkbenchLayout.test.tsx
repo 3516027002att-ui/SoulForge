@@ -18,8 +18,8 @@ const layoutSource = readFileSync(
 );
 
 const columns: WorkbenchColumnSpec[] = [
-  { id: 'rows', title: 'ROWS', initialWidth: 260, minWidth: 260 },
-  { id: 'fields', title: 'FIELDS', initialFlex: 1 }
+  { id: 'rows', title: 'ROWS', initialWidth: 260, minWidth: 260, children: null },
+  { id: 'fields', title: 'FIELDS', initialFlex: 1, children: null }
 ];
 
 describe('S27 栏宽回归（WorkbenchLayout）', () => {

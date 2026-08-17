@@ -2119,6 +2119,18 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 .wb-enum-option__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* S28：PARAM 工作台内保存提示条。成功几秒消失、失败常驻；绝对定位不占布局。 */
+.param-workbench { position: relative; min-width: 0; min-height: 0; }
+.wb-toast {
+  position: absolute; top: 8px; right: 12px; z-index: 30;
+  max-width: min(420px, 80vw);
+  padding: 6px 12px; font-size: 12px;
+  background: var(--forge-3); border: 1px solid; border-radius: var(--radius-m);
+  box-shadow: var(--shadow-float);
+}
+.wb-toast--ok { border-color: var(--ok); color: var(--ok); }
+.wb-toast--error { border-color: var(--danger); color: var(--danger-text); }
+
 /* ── 工具栏（最右栏：分组按钮）── */
 .wb-tools { display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; }
 .wb-tools__item {

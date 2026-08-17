@@ -2452,6 +2452,7 @@ SHELL-09 → SHELL-10
 - **S33 落地（2026-08-17，去活动栏四图标 + 开始侧栏）**：活动栏删除 资源浏览器/搜索/暂存区/审计 四个 `ab-item`（只剩 Agent + 设置贴底，不留 48px 空条）；点顶栏「开始」时左侧侧栏 = 开始页全部功能（打开/更换 Mod、选/换/清原版——S22 当场生效、工作区名、原版挂载状态）+ 折叠「工具」（搜索 Ctrl+K / 暂存区 / 审计与回滚）+ 工作区资源树（上限 120 条，单击打开，更多引导到「文件」领域）；搜索只走 Ctrl+K；换工作区不用回中央页。新增 App.test.tsx 壳层源码断言。
 - **S26 落地（2026-08-17，历史/设置叠字）**：抽屉打开时 `AgentDockHeader` 整条卸掉（抽屉自带「Agent 历史 / 模型服务设置」标题 + 关闭），同一时刻只有一个页面标题；抽屉背景从 8% `--forge-0` 换成不透明 `--forge-1`（浅色主题 8% 白透字是叠字根因）；历史/设置互相切换在抽屉自己的顶栏。测试锁「抽屉面不含产品名 + CSS 用不透明背景」。
 - **S27 落地（2026-08-17，中间工作台栏宽跳变）**：`maxWidthFor` 在容器未布局（clientWidth ≤ 0）时返回无穷大——不再把栏写成 0（点选换 hint / 换虚拟列表后第一次拖分隔条塌成一条缝的根因）；像素模式 style 同时带 `minWidth`（ROWS 不会窄到只显示「除…」）；量出的起始宽度与键盘步进都 `Math.max(minWidth, …)` 钳住；点选（`setSelectedEntry`/`setSelectedRowId`）不触碰 widths、不给 layout 加 `key={selectedEntry}`（ParamWorkbench 已核实无 setWidths/无重挂）。新增 WorkbenchLayout.test.tsx 回归。
+- **S28 落地（2026-08-17，PARAM 保存提示 + 枚举能关）**：行备注汉化可编辑沿用既有链（native `row.name` 优先，Bridge 没解码出的行回落本机 Yapped Names 条目名表，日文 Shift-JIS 不覆盖中文）+ 选中行名字输入框（Enter/失焦提交、Esc 取消、空串清名）。保存提示：字段/行名/CSV 导入三条写入通道的成功统一为「已保存」工作台内浮条（`role=status`，成功 2.5s 自消），失败走 error 浮条常驻直到下次操作；删掉常驻 footer 的「已提交到变更候选」旧文案。枚举能关：筛选框 Esc、点击列表/展开钮之外任意处（document pointerdown，`closest('.wb-enum-list, .wb-enum-toggle')` 判内）、换行、换 param、关 tab 全部收起。新增 ParamWorkbench.test.tsx S28 源码断言。
 - **Negative source tests**：无 `domainForFile`、`filterFilesForDomain(files)`、`visibleFiles.length` 领域计数。
 - **Done**：顶部无 `PARAM 36`，PARAM 入口直接打开逻辑库。
 

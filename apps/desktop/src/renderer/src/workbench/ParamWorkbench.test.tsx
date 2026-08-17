@@ -214,3 +214,32 @@ function stripComments(code: string): string {
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
+
+describe('S28 保存提示 + 枚举能关（010741）', () => {
+  const source = stripComments(readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'ParamWorkbench.tsx'),
+    'utf8'
+  ));
+
+  it('保存成功给短时提示「已保存」，失败走 error 提示（不自动消失）', () => {
+    // 三条写入通道（字段、行名、CSV 导入）成功都走 showToast('已保存', 'ok')。
+    assert.ok(source.includes("showToast('已保存', 'ok')"), '成功路径必须有「已保存」提示');
+    // 失败一律 error 种类：toast 只在 kind==='ok' 时设消失计时器。
+    assert.ok(source.includes("kind === 'ok'"), '只有成功提示才自动消失');
+    assert.ok(source.includes('window.setTimeout(() => setToast(null), 2500)'), '成功提示几秒后自清');
+    // 不再把提交结果写进常驻 footer。
+    assert.ok(!source.includes('已提交到变更候选'), '旧的常驻「变更候选」文案必须移除');
+    assert.ok(!source.includes('commitMessage'), 'commitMessage 状态已删除');
+  });
+
+  it('toast 渲染为工作台内浮条（role=status，成功/失败两种形态）', () => {
+    assert.ok(source.includes('className={`wb-toast wb-toast--${toast.kind}`}'), 'toast 按种类着色');
+    assert.ok(source.includes('role="status"'), 'toast 可被读屏播报');
+  });
+
+  it('枚举列表能关：Esc、点击外部、换行都收起', () => {
+    assert.ok(source.includes("document.addEventListener('pointerdown', onPointerDown)"), '点击外部监听在场');
+    assert.ok(source.includes("target.closest('.wb-enum-list, .wb-enum-toggle')"), '点击列表内部不误关');
+    assert.ok(source.includes("if (event.key === 'Escape')"), 'Esc 关闭在场');
+  });
+});
