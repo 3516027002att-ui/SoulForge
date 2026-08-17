@@ -19,6 +19,37 @@ export interface FmgEntryRow {
   text: string;
 }
 
+/**
+ * S30：FMG 文本的显示投影（011833）。
+ *
+ * FMG 字符串池里 `<?...?>` 是文件真实字节 —— 游戏用它嵌入图标 / 地名 /
+ * BMSG 等引用（packages/core 的 fmgReferenceIntegrity 记录同一语法），
+ * 不是脏数据。列表里原样显示会被当成乱码正文；这里只投影**显示层**，
+ * 编辑框仍保留原文（写回保真，用户可编辑标签本身）。
+ *
+ * 投影规则：
+ *   `<?null?>`        → 空（「无内容」标记 = 空槽/空串，地名表 47 槽里
+ *                       1100、1102–1120 等 offset=0 空槽就是它）
+ *   `<?placeName@N?>` → [地名 N]
+ *   `<?kgiconKc@N?>`  → [图标 N]
+ *   `<?bmsg?>`        → [BMSG]
+ *   其他 `<?name@N?>` → [name N]
+ */
+const FMG_TAG_PATTERN = /<\?([A-Za-z][A-Za-z0-9_]*)(?:@(-?\d+))?\?>/g;
+
+export function projectFmgDisplayText(text: string): string {
+  return text.replace(FMG_TAG_PATTERN, (_whole, name: string, num?: string) => {
+    if (name === 'null') return '';
+    const suffix = num !== undefined ? ` ${num}` : '';
+    switch (name) {
+      case 'placeName': return `[地名${suffix}]`;
+      case 'kgiconKc': return `[图标${suffix}]`;
+      case 'bmsg': return '[BMSG]';
+      default: return `[${name}${suffix}]`;
+    }
+  });
+}
+
 export interface FmgWorkbenchPanelProps {
   resourceUri: string;
   /**
@@ -445,21 +476,29 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           <span>ID</span>
           <span>文本</span>
         </div>
-        {pageEntries.map((row, rowIndex) => (
-          <div
-            key={rowIndex}
-            className="binder-child-row"
-            {...selectableRowAttributes({
-              selected: row.id === selectedId,
-              isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
-              onSelect: () => setSelectedId(row.id)
-            })}
-          >
-            <span>{row.id}</span>
-            <span>{row.text.slice(0, 80)}</span>
-          </div>
-        ))}
-        {pageEntries.length === 0 && !loading && (
+        {pageEntries.map((row, rowIndex) => {
+          // S30：列表显示投影文本（图标/地名/空标记不再是乱码正文）；
+          // 投影为空的槽（<?null?> / 空串）弱化为 —，行与 ID 照常在场 ——
+          // 地名表 47 槽的 41 个空槽因此看得见，不是「缺漏」。
+          const projected = projectFmgDisplayText(row.text).slice(0, 80);
+          return (
+            <div
+              key={rowIndex}
+              className="binder-child-row"
+              {...selectableRowAttributes({
+                selected: row.id === selectedId,
+                isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
+                onSelect: () => setSelectedId(row.id)
+              })}
+            >
+              <span>{row.id}</span>
+              {projected
+                ? <span>{projected}</span>
+                : <span className="muted">—</span>}
+            </div>
+          );
+        })}
+        {pageEntries.length === 0 && !loading && !pageError && !containerFailed && (
           hasSelection
             ? query.trim().length > 0
               ? <p className="muted">没有匹配的条目。</p>

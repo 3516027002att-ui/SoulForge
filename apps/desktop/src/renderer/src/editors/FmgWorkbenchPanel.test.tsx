@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { FmgWorkbenchPanel } from './FmgWorkbenchPanel.js';
+import { FmgWorkbenchPanel, projectFmgDisplayText } from './FmgWorkbenchPanel.js';
 
 // node 环境没有 window；getRendererRuntime 会读 window.soulforge。设为空对象 →
 // browser-preview 表面 → bridge 为 null → live 路径短路，SSR 输出纯初始结构
@@ -95,6 +95,27 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     assert.match(panelSource, /当前页无条目。/);
     assert.match(panelSource, /没有匹配的条目。/);
     assert.match(panelSource, /pageError && <p className="danger">/);
+  });
+
+  it('S30：空态与失败互斥 —— 失败时只显示 danger 诊断，不叠加「当前页无条目」', () => {
+    // 011738「左栏 1 条、点开中栏 0 条」的一半根因：分页失败时
+    // pageError danger 与 muted 空态同时渲染，看起来像「表打不开/空表混着来」。
+    assert.match(panelSource, /pageEntries\.length === 0 && !loading && !pageError && !containerFailed/);
+  });
+
+  it('S30：FMG 标签投影（011833）—— 图标/地名/BMSG 显示为占位，<?null?> 为空槽', () => {
+    assert.equal(projectFmgDisplayText('<?null?>'), '');
+    assert.equal(projectFmgDisplayText('<?kgiconKc@18?>'), '[图标 18]');
+    assert.equal(projectFmgDisplayText('<?placeName@1000?>'), '[地名 1000]');
+    assert.equal(projectFmgDisplayText('<?bmsg?>'), '[BMSG]');
+    assert.equal(projectFmgDisplayText('获得 <?kgiconKc@18?> 后可用'), '获得 [图标 18] 后可用');
+    // 投影只影响显示层：面板里列表走投影，编辑框仍绑原文（写回保真）。
+    assert.match(panelSource, /projectFmgDisplayText\(row\.text\)/);
+    assert.match(panelSource, /value=\{selected\.text\}/);
+  });
+
+  it('S30：空槽行与 ID 照常在场，文本列弱化为 —（地名 47 槽的 41 个空槽可见）', () => {
+    assert.match(panelSource, /className="muted">—</);
   });
 
   it('parse failure：live 失败只上抛诊断、不伪装条目，不回退 demo entries', () => {
