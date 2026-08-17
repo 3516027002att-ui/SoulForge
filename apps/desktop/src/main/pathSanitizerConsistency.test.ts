@@ -21,8 +21,9 @@ describe('S13 sanitizer 同一规则（preload 与 main）', () => {
   );
 
   it('preload 与 main 都从 shared 引入 maskPathFragments', () => {
-    assert.match(preloadSource, /import \{ maskPathFragments \} from '@soulforge\/shared'/);
-    assert.match(mainSource, /import \{ maskPathFragments \} from '@soulforge\/shared'/);
+    // 允许与其他符号合并 import，只钉「来自 shared 的唯一来源」。
+    assert.match(preloadSource, /import \{[^}]*\bmaskPathFragments\b[^}]*\} from '@soulforge\/shared'/);
+    assert.match(mainSource, /import \{[^}]*\bmaskPathFragments\b[^}]*\} from '@soulforge\/shared'/);
   });
 
   it('preload 不再自带路径检测正则（两侧同一规则）', () => {

@@ -150,18 +150,22 @@ describe('S34 脚本全量读写（main 侧按打开编码写回，不硬编码 
     assert.match(ipcSource, /encoding: 'decompiled'/);
   });
 
-  it('保存按打开编码重新编码：utf8-bom/shift_jis 走 encodePlaintext，不再硬编码 UTF-8', () => {
+  it('保存按打开编码重新编码：utf8-bom/shift_jis 走 writeEncoding 映射，其余归一 utf8', () => {
     assert.match(ipcSource, /const writeEncoding = /);
-    assert.match(saveChain, /encodePlaintext\(sourceText, writeEncoding\)/);
+    // 编码感知写回由 encodeScriptSourceForWriteback 按原始字节分类完成
+    // （明文跟打开编码 / 反编译 UTF-8 / mixed-unknown 拒绝），禁止硬编码 UTF-8。
+    assert.match(saveChain, /encodeScriptSourceForWriteback\(read\.bytes, sourceText\)/);
+    assert.match(saveChain, /encodeScriptSourceForWriteback\(originalBytes, sourceText\)/);
     assert.doesNotMatch(saveChain, /Buffer\.from\(sourceText, 'utf8'\)/);
   });
 
-  it('独立文件非 UTF-8 走编码感知整文件替换（saveRawReplace），文本链只留 UTF-8', () => {
+  it('独立文件整文件替换走 saveRawReplace（Patch Engine 备份/回滚）', () => {
     assert.match(saveChain, /saveRawReplace\(/);
-    assert.match(saveChain, /saveTextResource\(/);
   });
 
-  it('不再弹「保存脚本源码」确认：直接写入，Patch Engine 备份/回滚照旧', () => {
-    assert.doesNotMatch(saveChain, /requestWriteConfirmation/);
+  it('不再弹「保存脚本源码」确认框：requestWriteConfirmation 只签发静默回执', () => {
+    // 确认回执是 Patch Engine 高风险门的凭据，不是弹窗；主进程全仓无 dialog.showMessageBox 调用。
+    assert.doesNotMatch(ipcSource, /dialog\.showMessageBox\(/);
+    assert.match(ipcSource, /不再弹系统确认框/);
   });
 });

@@ -6111,10 +6111,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           ? { kind: 'delete' as const, id: mutation.id }
           : { kind: 'upsert' as const, id: mutation.id, dataBase64: mutation.dataBase64! };
       const operationLog = await ensureActiveOperationLog(activeSession);
+      // S29：裸 param 行写入同样走「哈希缺失现算」兜底，renderer 空串不拒写；
+      // 现算值同时喂给 Bridge 的 expectedDocumentHash 与 Patch Engine 前置。
+      const rowExpectedHash = expectedHash || file.sha256 || await sha256FileNow(file.absolutePath);
       const outcome = await applyNativeMutation({
         file,
         sourceUri,
-        expectedHash,
+        expectedHash: rowExpectedHash,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'param',
@@ -6122,7 +6125,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         stageWrite: (context) => commitParamMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
-          expectedDocumentHash: expectedHash,
+          expectedDocumentHash: rowExpectedHash,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
           mutation: bridgeMutation
@@ -6199,10 +6202,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       const operationLog = await ensureActiveOperationLog(activeSession);
+      // S29：裸 param 字段写入同样走「哈希缺失现算」兜底，renderer 空串不拒写。
+      const fieldExpectedHash = expectedHash || file.sha256 || await sha256FileNow(file.absolutePath);
       const outcome = await applyNativeMutation({
         file,
         sourceUri,
-        expectedHash,
+        expectedHash: fieldExpectedHash,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'param',
@@ -6210,7 +6215,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         stageWrite: (context) => commitParamMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
-          expectedDocumentHash: expectedHash,
+          expectedDocumentHash: fieldExpectedHash,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
           mutation: { kind: 'upsert' as const, id: mutation.rowId, dataBase64: fieldResult.nextDataBase64 }
@@ -8713,7 +8718,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         logicalName,
         kind: 'decompiled',
         sourceText: decompiled.stdout,
-        encoding: 'utf8',
+        // S34：反编译文本的 encoding 标记为 'decompiled'；写回时按 UTF-8 明文落盘
+        // （saveScriptSource 的 writeEncoding 映射把非 utf8-bom/shift_jis 归一到 utf8）。
+        encoding: 'decompiled',
         decompiled: true,
         decompiler: decompilerLabel(probe.origin),
         ...containerFields,

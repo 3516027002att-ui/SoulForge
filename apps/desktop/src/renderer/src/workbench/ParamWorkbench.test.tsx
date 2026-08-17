@@ -192,7 +192,9 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
   it('S29：bool / 1bit 走 checkbox，点一下 commitField，s32/f32 仍是文本框', () => {
     assert.match(workbenchSource, /isParamCheckboxField/);
     assert.match(workbenchSource, /type="checkbox"/);
-    assert.match(workbenchSource, /commitField\(field, event\.target\.checked \? '1' : '0'\)/);
+    // bool 传 boolean（core 写器按 truthy 判定，字符串 'false' 会误写成 1）；
+    // 1bit 传 '1'/'0' 字符串。
+    assert.match(workbenchSource, /commitField\(field, field\.type === 'bool' \? checked : next\)/);
     assert.doesNotMatch(workbenchSource, /type === 's32'[\s\S]{0,40}checkbox/);
   });
 });
@@ -266,7 +268,13 @@ describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
   ));
 
   it('bool 与 1bit 字段渲染为打勾（checkbox），不再用数字框', () => {
-    assert.ok(workbenchSource.includes("field.type === 'bool' || field.bitfield?.bitWidth === 1"), 'isBoolLike 判定在场');
+    // 判定唯一来源是共享 helper paramCheckboxField.ts（bool 整字段或 1bit 位域）。
+    assert.ok(workbenchSource.includes('isParamCheckboxField'), '共享打勾判定在场');
+    const helperSource = stripComments(readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'paramCheckboxField.ts'),
+      'utf8'
+    ));
+    assert.ok(helperSource.includes("field.type === 'bool' || field.bitfield?.bitWidth === 1"), 'isParamCheckboxField 判定在场');
     assert.ok(workbenchSource.includes('type="checkbox"'), '打勾控件在场');
     assert.ok(workbenchSource.includes('onChange'), '打勾即提交');
   });

@@ -1520,7 +1520,7 @@ export function App(): ReactElement {
     rowDataBase64: string;
     definition: unknown;
   }): Promise<{ ok: boolean; diagnostics?: Array<{ code: string; message: string }> }> {
-    if (!paramSourceHash || !selectedFile) {
+    if (!selectedFile) {
       return {
         ok: false,
         diagnostics: [{ code: 'PARAM_FIELD_NO_LIVE_DOCUMENT', message: '需要实时 PARAM 文档才能提交字段。' }]
@@ -1538,10 +1538,11 @@ export function App(): ReactElement {
         diagnostics: [{ code: 'PRELOAD_MISSING', message: '当前预加载未暴露 applyParamFieldMutation。' }]
       };
     }
-    setStatus('正在经 Bridge/补丁引擎提交 PARAM 字段…');
+    setStatus('正在保存 PARAM 字段…');
+    // S29：哈希只留 main 做并发凭据，renderer 空串不拒写（main 写时现算兜底）。
     const result = await bridge.applyParamFieldMutation(
       selectedFile.sourceUri,
-      paramSourceHash,
+      paramSourceHash ?? '',
       {
         rowId: input.rowId,
         fieldId: input.fieldId,
@@ -1553,7 +1554,8 @@ export function App(): ReactElement {
     if (result.ok) {
       await reloadParamRowsFromSource();
       await refreshOperationHistory();
-      setStatus(`PARAM 字段 ${input.fieldId} 已提交并重读。`);
+      setStatus(`PARAM 字段 ${input.fieldId} 已保存。`);
+      pushToast('已保存');
       return { ok: true, diagnostics: result.diagnostics ?? [] };
     }
     return {
@@ -2185,19 +2187,32 @@ export function App(): ReactElement {
     setStatus(nextPreview ? `已打开 ${file.relativePath}` : '无法预览该资源');
   }
 
-  /** 文本编辑「保存」= 生成候选变更，进入审查队列；实际写入由变更队列提交执行。 */
-  function saveCurrentText(): void {
+  /**
+   * 文本编辑「保存」= 直接写盘（S29：与 FMG/容器 PARAM 同一把尺子，不再进审查队列）。
+   * 底层仍走 saveTextResource → Patch Engine（自动备份、可回滚）。
+   */
+  async function saveCurrentText(): Promise<void> {
     if (!selectedFile || !preview) return;
-    changeStore.propose({
-      kind: 'text',
-      sourceUri: selectedFile.sourceUri,
-      target: selectedFile.relativePath,
-      summary: `全文更新（${editText.length} 字符）`,
-      oldValue: lastSavedText.length > 40 ? `${lastSavedText.slice(0, 40)}…` : lastSavedText,
-      newValue: editText,
-      payload: {}
-    });
-    setStatus('变更已进入审查队列：批准后暂存，写入时自动备份。');
+    if (!bridge) {
+      setStatus(describeBridgeAbsence(`保存 ${selectedFile.relativePath}`));
+      return;
+    }
+    const result = await bridge.saveTextResource(selectedFile.sourceUri, editText);
+    if (!result.ok) {
+      const message = result.diagnostics?.[0]?.message ?? '文本写入失败。';
+      setStatus(`保存失败：${message}`);
+      pushToast(`保存失败：${message}`, 'warn');
+      return;
+    }
+    const refreshed = await bridge.openResourcePreview(selectedFile.sourceUri);
+    setPreview(refreshed);
+    const text = refreshed?.text ?? editText;
+    setEditText(text);
+    setLastSavedText(text);
+    setMsgRows(extractMsgRows(refreshed));
+    await refreshOperationHistory();
+    setStatus('已保存。');
+    pushToast('已保存');
   }
 
   /** 变更队列写入执行器：按 kind 调用对应 IPC，保留 hash 前置条件与重读。 */
@@ -3220,7 +3235,7 @@ export function App(): ReactElement {
               <div className="text-editor-toolbar">
                 <strong>文本编辑器</strong>
                 <div>
-                  <button type="button" disabled={!editDirty} onClick={() => saveCurrentText()}>生成变更候选</button>
+                  <button type="button" disabled={!editDirty} onClick={() => void saveCurrentText()}>保存</button>
                   <button type="button" disabled={!editDirty} onClick={() => setEditText(lastSavedText)}>还原</button>
                 </div>
               </div>
@@ -3463,48 +3478,70 @@ export function App(): ReactElement {
                 rows={paramRows}
                 live={paramLive}
                 onMutation={(mutation) => {
-                  if (!paramLive || !paramSourceHash || !selectedFile) {
-                    setStatus('当前 PARAM 未实时加载，不能生成候选变更；请先选中可解析资源。');
+                  if (!paramLive || !selectedFile) {
+                    setStatus('当前 PARAM 未实时加载，不能写入；请先选中可解析资源。');
                     return;
                   }
-                  if (mutation.kind === 'param_row_delete') {
-                    changeStore.propose({
-                      kind: 'param-row',
-                      sourceUri: selectedFile.sourceUri,
-                      target: `${selectedFile.relativePath}#${mutation.id}`,
-                      summary: `删除行 ${mutation.id}`,
-                      oldValue: `行 ${mutation.id}`,
-                      newValue: '（删除）',
-                      payload: { op: 'delete', id: mutation.id }
-                    });
-                    setStatus('PARAM 行删除候选已进入审查队列。');
+                  if (!bridge) {
+                    setStatus(describeBridgeAbsence('写入 PARAM 行'));
                     return;
                   }
-                  // Duplicate/upsert payload: the paged table carries the full row
-                  // bytes (dataBase64); fall back to the App-side payload map
-                  // for rows outside the current page.
-                  const payload =
-                    mutation.dataBase64
-                    ?? paramRowPayloads.get(mutation.id)
-                    ?? (mutation.sourceId !== undefined
-                      ? paramRowPayloads.get(mutation.sourceId)
-                      : undefined);
-                  if (!payload) {
-                    setStatus('缺少 row dataBase64，无法生成候选（截断行）。');
-                    return;
-                  }
-                  changeStore.propose({
-                    kind: 'param-row',
-                    sourceUri: selectedFile.sourceUri,
-                    target: `${selectedFile.relativePath}#${mutation.id}`,
-                    summary: mutation.sourceId !== undefined
-                      ? `复制行 ${mutation.sourceId} → ${mutation.id}`
-                      : `写入行 ${mutation.id}`,
-                    oldValue: '',
-                    newValue: `行 ${mutation.id}（${payload.length} 字节 base64）`,
-                    payload: { op: 'upsert', id: mutation.id, dataBase64: payload }
-                  });
-                  setStatus('PARAM 行候选已进入审查队列。');
+                  // S29：裸 .param 行增删/复制与容器 PARAM、FMG 同一把尺子 ——
+                  // 直接 applyParamMutation → Patch Engine，不进审查队列。
+                  const target = selectedFile;
+                  const run = async (): Promise<void> => {
+                    if (mutation.kind === 'param_row_delete') {
+                      const result = await bridge.applyParamMutation(
+                        target.sourceUri,
+                        paramSourceHash ?? '',
+                        { kind: 'delete', id: mutation.id }
+                      );
+                      if (!result.ok) {
+                        const message = result.diagnostics?.[0]?.message ?? 'PARAM 行删除失败。';
+                        setStatus(`PARAM 行删除失败：${message}`);
+                        pushToast(`PARAM 行删除失败：${message}`, 'warn');
+                        return;
+                      }
+                      await reloadParamRowsFromSource();
+                      await refreshOperationHistory();
+                      setStatus(`PARAM 行 ${mutation.id} 已删除并保存。`);
+                      pushToast('已保存');
+                      return;
+                    }
+                    // Duplicate/upsert payload: the paged table carries the full row
+                    // bytes (dataBase64); fall back to the App-side payload map
+                    // for rows outside the current page.
+                    const payload =
+                      mutation.dataBase64
+                      ?? paramRowPayloads.get(mutation.id)
+                      ?? (mutation.sourceId !== undefined
+                        ? paramRowPayloads.get(mutation.sourceId)
+                        : undefined);
+                    if (!payload) {
+                      setStatus('缺少 row dataBase64，无法写入（截断行）。');
+                      return;
+                    }
+                    const result = await bridge.applyParamMutation(
+                      target.sourceUri,
+                      paramSourceHash ?? '',
+                      { kind: 'upsert', id: mutation.id, dataBase64: payload }
+                    );
+                    if (!result.ok) {
+                      const message = result.diagnostics?.[0]?.message ?? 'PARAM 行写入失败。';
+                      setStatus(`PARAM 行写入失败：${message}`);
+                      pushToast(`PARAM 行写入失败：${message}`, 'warn');
+                      return;
+                    }
+                    await reloadParamRowsFromSource();
+                    await refreshOperationHistory();
+                    setStatus(
+                      mutation.sourceId !== undefined
+                        ? `PARAM 行 ${mutation.sourceId} 已复制到 ${mutation.id} 并保存。`
+                        : `PARAM 行 ${mutation.id} 已保存。`
+                    );
+                    pushToast('已保存');
+                  };
+                  void run();
                 }}
               />
               {/* 字段定义的来源与限制必须写在字段表旁边，而不是只存在状态里。
@@ -3535,26 +3572,15 @@ export function App(): ReactElement {
                 getRowDataBase64={(rowId) => paramRowPayloads.get(rowId)}
                 {...(paramLive && selectedFile
                   ? {
-                    onApplyFieldMutation: async (input: {
+                    // S29：裸 .param 字段直写（applyParamFieldMutation → Patch Engine），
+                    // 不进审查队列；状态/重读由 applyParamFieldMutationFromPanel 负责。
+                    onApplyFieldMutation: (input: {
                       rowId: number;
                       fieldId: string;
                       value: number | string | boolean;
                       rowDataBase64: string;
                       definition: unknown;
-                    }) => {
-                      const target = selectedFile;
-                      changeStore.propose({
-                        kind: 'param-field',
-                        sourceUri: target.sourceUri,
-                        target: `${target.relativePath}#${input.rowId}.${input.fieldId}`,
-                        summary: `${input.fieldId} → ${String(input.value)}`,
-                        oldValue: '',
-                        newValue: String(input.value),
-                        payload: { ...input }
-                      });
-                      setStatus('PARAM 字段候选已进入审查队列。');
-                      return { ok: true, diagnostics: [] };
-                    }
+                    }) => applyParamFieldMutationFromPanel(input)
                   }
                   : {})}
               />
