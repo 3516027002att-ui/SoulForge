@@ -3543,10 +3543,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             ? { kind: 'add' as const, id: mutation.id, text: mutation.text ?? '' }
             : { kind: 'upsert' as const, id: mutation.id, text: mutation.text ?? '' };
       const operationLog = await ensureActiveOperationLog(activeSession);
+      // S29：能打开就能写。renderer 可能没带回 hash（此前它有权据此拒写），
+      // main 在写时现算兜底。现算值只用于并发保护凭据，head 真漂移（别人改过）
+      // 仍会被写链的 hash 比较拒绝；「从来没算过」不是拒写理由。
+      const expectedHashNow = expectedHash || file.sha256 || await sha256FileNow(file.absolutePath);
       const outcome = await applyNativeMutation({
         file,
         sourceUri,
-        expectedHash,
+        expectedHash: expectedHashNow,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'fmg',
@@ -3554,7 +3558,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         stageWrite: (context) => commitFmgMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
-          expectedDocumentHash: expectedHash,
+          expectedDocumentHash: expectedHashNow,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
           mutation: bridgeMutation,
@@ -3563,7 +3567,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         title: `FMG mutation ${mutation.kind} ${mutation.id}`,
         confirmActionLabel: '提交 FMG 变更'
       }, {
-        confirm: electronConfirmationPort(event),
+        // S29：日常 FMG 写入不弹「高风险确认」；备份/回滚仍经 Patch Engine。
         commit: sessionCommitPort(activeSession, operationLog, storage)
       });
       if (outcome.status === 'committed' && outcome.result.ok) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { FMG_PAGE_SIZE } from '@soulforge/shared';
 import type { FmgEntryPage } from '@soulforge/shared';
 import type { SoulForgeApi } from '../../../preload/index.js';
@@ -199,6 +199,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   // ── 父级切换清理：逐级清空下游选择与状态，杜绝跨表残留 ──
   function handleSelectLanguage(languageId: string): void {
     if (languageId === selectedLanguageId) return;
+    commitDraftRef.current();
     setSelectedLanguageId(languageId);
     setSelectedContainerId(null);
     setSelectedTableId(null);
@@ -211,6 +212,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
 
   function handleSelectContainer(containerId: string): void {
     if (containerId === selectedContainerId) return;
+    commitDraftRef.current();
     setSelectedContainerId(containerId);
     setSelectedTableId(null);
     setSelectedId(null);
@@ -222,6 +224,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
 
   function handleSelectTable(tableId: string): void {
     if (tableId === selectedTableId) return;
+    commitDraftRef.current();
     setSelectedTableId(tableId);
     setSelectedId(null);
     setPage(0);
@@ -295,19 +298,32 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   }, [catalog, selectedLanguageId, selectedContainerId]);
   const containerFailed = selectedContainer?.parseStatus === 'failed';
 
+  // S29：编辑只落到本地草稿，失焦 / Ctrl+S 再提交一次（直写，不先进审查队列）。
+  // 切换条目 / 翻页 / 换表前先提交当前草稿，避免选中行换掉后草稿被吞。
+  const [draftText, setDraftText] = useState<string | null>(null);
+  const commitDraftRef = useRef<() => void>(() => {});
+
   function updateText(text: string): void {
     if (selectedId === null) return;
     setPageEntries((prev) => prev.map((row) => (row.id === selectedId ? { ...row, text } : row)));
+    setDraftText(text);
+  }
+
+  function commitDraft(): void {
+    if (selectedId === null || draftText === null) return;
     props.onMutation?.({
       kind: 'fmg_entry_upsert',
       id: selectedId,
-      text,
+      text: draftText,
       ...(selectedTableId !== null ? { tableId: selectedTableId } : {})
     });
+    setDraftText(null);
   }
+  commitDraftRef.current = commitDraft;
 
   function addEntry(): void {
     if (selectedTableId === null) return;
+    commitDraft();
     const id = maxId + 1;
     setPageEntries((prev) => [...prev, { id, text: '' }]);
     setMaxId(id);
@@ -317,6 +333,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
 
   function deleteSelected(): void {
     if (selectedId === null) return;
+    setDraftText(null);
     const id = selectedId;
     setPageEntries((prev) => prev.filter((row) => row.id !== id));
     setSelectedId(null);
@@ -507,7 +524,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
               {...selectableRowAttributes({
                 selected: row.id === selectedId,
                 isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
-                onSelect: () => setSelectedId(row.id)
+                onSelect: () => { commitDraftRef.current(); setSelectedId(row.id); }
               })}
               {...citeEntryAttr(row.id, selectedTableId, row.text)}
             >
@@ -534,8 +551,16 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
       <label className="stack gap" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         编辑 ID {selected.id}
         <textarea
-          value={selected.text}
+          value={draftText ?? selected.text}
           onChange={(e) => updateText(e.target.value)}
+          onBlur={() => commitDraftRef.current()}
+          onKeyDown={(e) => {
+            // S29：Ctrl+S 直接提交本表当前编辑（与 PARAM 行备注同一把尺子）。
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+              e.preventDefault();
+              commitDraftRef.current();
+            }
+          }}
           spellCheck={false}
           style={{ flex: 1, minHeight: 120, resize: 'none' }}
         />

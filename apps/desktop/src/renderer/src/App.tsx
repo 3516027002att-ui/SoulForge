@@ -2169,13 +2169,11 @@ export function App(): ReactElement {
         return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
       }
       case 'fmg': {
-        if (!fmgSourceHash) {
-          return { ok: false, diagnostics: [{ code: 'FMG_NO_LIVE_HASH', message: 'FMG 实时 hash 缺失，拒绝写入。' }] };
-        }
         const payload = change.payload as { op: 'upsert' | 'add' | 'delete'; id: number; text?: string; tableId?: string };
+        // S29：缺哈希不再由 renderer 拒写，main 写时现算兜底。
         const result = await bridge.applyFmgMutation(
           change.sourceUri,
-          fmgSourceHash,
+          fmgSourceHash ?? '',
           {
             kind: payload.op,
             id: payload.id,
@@ -2196,13 +2194,10 @@ export function App(): ReactElement {
         return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
       }
       case 'param-row': {
-        if (!paramSourceHash) {
-          return { ok: false, diagnostics: [{ code: 'PARAM_NO_LIVE_HASH', message: 'PARAM 实时 hash 缺失，拒绝写入。' }] };
-        }
         const payload = change.payload as { op: 'upsert' | 'delete'; id: number; dataBase64?: string };
         const result = await bridge.applyParamMutation(
           change.sourceUri,
-          paramSourceHash,
+          paramSourceHash ?? '',
           payload.op === 'delete'
             ? { kind: 'delete', id: payload.id }
             : { kind: 'upsert', id: payload.id, dataBase64: payload.dataBase64 ?? '' }
@@ -3316,37 +3311,52 @@ export function App(): ReactElement {
               {/* 同上：删掉「实时 Bridge FMG · hash … / 空条目（未选中可解析 FMG
                   或读取失败）」标题行。 */}
               <FmgWorkbenchPanel
-                key={`${selectedFile?.sourceUri ?? ''}:${fmgLive ? 'live' : 'empty'}:${fmgSourceHash ?? ''}`}
+                key={selectedFile?.sourceUri ?? ''}
                 resourceUri={selectedFile?.sourceUri ?? ''}
                 entries={fmgEntries}
                 live={fmgLive}
-                onMutation={(mutation) => {
-                  if (!fmgLive || !fmgSourceHash || !selectedFile) {
-                    setStatus('当前 FMG 未实时加载，不能生成候选变更；请先选中可解析资源。');
+                onMutation={async (mutation) => {
+                  if (!fmgLive || !selectedFile) {
+                    setStatus('当前 FMG 未实时加载，不能写入；请先选中可解析资源。');
                     return;
                   }
+                  if (!bridge || typeof bridge.applyFmgMutation !== 'function') {
+                    setStatus('FMG 写入通道不可用。');
+                    return;
+                  }
+                  // S29：能打开就能写。哈希是 main 侧并发保护凭据，缺了由
+                  // main 写时现算；不再是 renderer 的写入前置条件。条目编辑
+                  // 直接落 Patch Engine，不先进审查队列。
                   const op = mutation.kind === 'fmg_entry_delete' ? 'delete'
                     : mutation.kind === 'fmg_entry_add' ? 'add' : 'upsert';
-                  const oldText = op === 'upsert'
-                    ? (fmgEntries.find((entry) => entry.id === mutation.id)?.text ?? '')
-                    : '';
-                  changeStore.propose({
-                    kind: 'fmg',
-                    sourceUri: selectedFile.sourceUri,
-                    target: `${selectedFile.relativePath}#${mutation.id}`,
-                    summary: op === 'delete'
-                      ? `删除条目 ${mutation.id}`
-                      : `${mutation.text ?? ''}`,
-                    oldValue: op === 'delete' ? oldText || `条目 ${mutation.id}` : oldText,
-                    newValue: op === 'delete' ? '（删除）' : mutation.text ?? '',
-                    payload: {
-                      op,
+                  const result = await bridge.applyFmgMutation(
+                    selectedFile.sourceUri,
+                    fmgSourceHash ?? '',
+                    {
+                      kind: op,
                       id: mutation.id,
-                      ...(mutation.text !== undefined ? { text: mutation.text } : {}),
-                      ...(mutation.tableId !== undefined ? { tableId: mutation.tableId } : {})
+                      ...(mutation.text !== undefined ? { text: mutation.text } : {})
+                    },
+                    mutation.tableId
+                  );
+                  if (result.ok) {
+                    setStatus(mutation.kind === 'fmg_entry_delete'
+                      ? '条目已删除。'
+                      : '已保存。');
+                    pushToast(mutation.kind === 'fmg_entry_delete' ? '条目已删除' : '已保存');
+                    // 重读条目与 live 哈希：直写后闭包里的 fmgEntries 已过期。
+                    const reload = await bridge.readFmgDocument(selectedFile.sourceUri) as {
+                      ok?: boolean;
+                      data?: { sourceHash?: string; entries?: Array<{ id: number; text: string }> } | null;
+                    };
+                    if (reload?.ok && reload.data) {
+                      if (reload.data.entries) setFmgEntries(reload.data.entries);
+                      setFmgSourceHash(reload.data.sourceHash ?? null);
                     }
-                  });
-                  setStatus('FMG 候选变更已进入审查队列。');
+                  } else {
+                    const message = result.diagnostics?.[0]?.message ?? 'FMG 写入失败。';
+                    setStatus(`FMG 写入失败：${message}`);
+                  }
                 }}
               />
             </>
