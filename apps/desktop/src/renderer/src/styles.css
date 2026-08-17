@@ -770,9 +770,18 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .domain-browse-placeholder p { margin-top: 8px; }
 .domain-browse-placeholder .muted { font-size: 11px; color: var(--ink-3); }
 
+.tae-preview-host { height: 240px; min-height: 180px; display: flex; flex-direction: column; }
+.tae-preview-host .flver-viewer,
+.tae-preview-host canvas { flex: 1; min-height: 160px; width: 100%; }
+
 .event-source-workbench {
   display: flex; flex-direction: column; min-height: 0; height: 100%;
   border: 1px solid var(--line); background: var(--forge-1);
+}
+.event-source-workbench .workbench {
+  border: none;
+  flex: 1;
+  height: auto;
 }
 .event-source__section-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--line); background: var(--forge-2); font-size: 11px; }
 /* S14：.event-source__header 眉题/Eyebrow 已删（源码区直接顶到文件标签底下）。
@@ -811,9 +820,34 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .toolbar-button.is-active { border-color: var(--ember); color: var(--ember-text); background: var(--ember-soft); }
 
 .esw-body { flex: 1 1 0; min-height: 64px; display: flex; align-items: stretch; }
-.esw-source { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.esw-source { flex: 1; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; position: relative; }
 .esw-source__host { flex: 1; min-height: 0; overflow: hidden; background: var(--forge-0); }
 .esw-source__host .cm-editor { height: 100%; }
+.esw-split-picker { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-2); }
+.esw-split-picker select { font: 11px var(--font-ui, inherit); }
+.esw-pane-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--line); flex: none; }
+.esw-meaning__block { padding: 10px 12px; font-size: 12px; line-height: 1.5; }
+.esw-meaning__block strong { display: block; margin-bottom: 4px; }
+.esw-meaning__empty { padding: 12px; }
+.esw-meaning__args { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.esw-meaning__args li { padding: 6px 0; border-top: 1px solid var(--line); }
+.esw-meaning__args .toolbar-button { margin-top: 6px; }
+.esw-source__loading {
+  margin: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--forge-1);
+  color: var(--ink-2);
+  font-size: 11px;
+}
+.esw-source__preview {
+  margin: 0;
+  max-height: 100%;
+  overflow: auto;
+  white-space: pre;
+  font: 12px/1.45 var(--font-mono, ui-monospace, monospace);
+  color: var(--ink-1);
+}
 .esw-outline { width: 220px; min-width: 160px; max-width: 320px; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
 .esw-outline__list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px; }
 .esw-outline__item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; gap: 2px; padding: 7px; text-align: left; border-left: 2px solid transparent; border-radius: var(--radius-s); }
@@ -1578,10 +1612,8 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .agent-mode-select { position: relative; }
 .agent-mode-trigger { display: inline-flex; align-items: center; gap: 5px; padding: 2px 5px; color: var(--ink-2); font-size: 11px; border-radius: var(--radius-s); }
 .agent-mode-trigger:hover { color: var(--ink-0); background: var(--control-hover-bg); }
-/* S9：菜单已 createPortal 到 document.body —— 锚点是 viewport 坐标
-   （getBoundingClientRect），必须 position:fixed 才不会随页面滚动漂移；
-   absolute 相对初始包含块，滚动后菜单会错位。top/left 由组件 inline 提供。 */
-.agent-mode-menu { position: fixed; left: 0; bottom: calc(100% + 5px); z-index: 5; min-width: 190px; padding: 4px; border: 1px solid var(--line-strong); background: var(--forge-3); box-shadow: var(--shadow-float); }
+/* S9：菜单已 createPortal 到 document.body。top/left 由组件 inline 提供。 */
+.agent-mode-menu { position: fixed; z-index: 50; min-width: 190px; padding: 4px; border: 1px solid var(--line-strong); background: var(--forge-3); box-shadow: var(--shadow-float); }
 .agent-mode-menu button { display: flex; flex-direction: column; align-items: flex-start; width: 100%; gap: 1px; padding: 6px 8px; text-align: left; border-radius: var(--radius-s); }
 .agent-mode-menu button:hover, .agent-mode-menu button[aria-selected="true"] { background: var(--ember-soft); }
 .agent-mode-menu strong { font-size: 11px; }
@@ -1618,6 +1650,27 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .composer-hint { font-size: 10.5px; color: var(--ink-3); }
 
 .agent-history, .agent-settings-drawer { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+.agent-settings-drawer label,
+.model-service-form label,
+.stack.gap label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.agent-settings-drawer label input,
+.agent-settings-drawer label select,
+.model-service-form label input,
+.model-service-form label select {
+  width: 100%;
+}
+.model-service-form__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
 .agent-history__actions { display: flex; gap: 6px; margin-bottom: 10px; }
 .agent-history__item { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
 .agent-history__item > div:first-child { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -1881,6 +1934,12 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; overscroll-behavior: contain; }
+.workbench__column-body:has(> .esw-source) {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
 .workbench__footer {
   flex: none; padding: 6px 10px; border-top: 1px solid var(--line);
   background: var(--forge-1);
@@ -1955,7 +2014,11 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
    Text 45% 上下两块，各带独立滚动宿主。column-body 只做宿主，滚动权交给内层。
    极矮视口下右区两块 min-height 之和超出栏高，.fmg-right 兜底可滚，内容不丢。 */
 .workbench__column-body:has(> .fmg-categories),
-.workbench__column-body:has(> .fmg-right) { overflow: hidden; }
+.workbench__column-body:has(> .fmg-entries),
+.workbench__column-body:has(> .fmg-text) {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
 
 .fmg-categories { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .fmg-categories__search { flex: none; padding: 4px 8px 0; }
@@ -2099,6 +2162,15 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
    MSB 属性那种真 enum 才该用下拉。 */
 .wb-prop__value { position: relative; display: flex; align-items: center; gap: 2px; }
 .wb-prop__value input { flex: 1; min-width: 0; }
+.wb-prop__value input[type="checkbox"],
+.wb-prop__check {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  margin: 0;
+  accent-color: var(--ember);
+}
 .wb-enum-toggle {
   flex: none; width: 16px; padding: 0; line-height: 1;
   color: var(--ink-2); background: none; border: none; cursor: pointer;

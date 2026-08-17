@@ -73,7 +73,7 @@ describe('固定键位表完整性', () => {
 
   it('事件域含规格要求的键', () => {
     const keys = keysOf(domainKeybindings('event')).join('|');
-    for (const required of ['Ctrl+F', 'Ctrl+H', 'Ctrl+Space', 'Ctrl+W', 'Ctrl+Tab']) {
+    for (const required of ['Ctrl+S', 'Ctrl+F', 'Ctrl+H', 'Ctrl+Space', 'Ctrl+W', 'Ctrl+Tab']) {
       assert.ok(keys.includes(required), `事件域缺 ${required}`);
     }
   });

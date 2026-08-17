@@ -1,26 +1,11 @@
 /**
- * DarkScript3-style EMEVD source compiler (S14).
+ * DarkScript3 式源码 → 现有 typed mutation plan。
  *
- * Compiles the user-edited `$Event(...)` source back into a typed
- * `EmevdMutationPlan` by aligning the edited text against the *rendered shape*
- * of the authority document — the same per-event line split and wait-block
- * folding that `darkScriptRenderer` produces. There is deliberately no
- * DarkScript → binary full re-compiler: instruction insertion/deletion and
- * edits inside a folded `WaitFor(...)` block (whose condition-group bookkeeping
- * args are hidden by the renderer) cannot be expressed as typed mutations, so
- * those cases fail closed with a per-line structured diagnostic — never by
- * locking the whole document read-only, never by pretending a write happened.
- *
- * Alignment is positional: event blocks are matched by order, and within an
- * event each rendered line (canonicalized) is matched by order. A structural
- * change in one event (line count differs) skips only that event's instruction
- * writes; its header (`$Event(id, rest, ...)`) still compiles when unchanged
- * in shape. This keeps a single-event edit applyable without demanding the
- * whole file be identical to the last render.
- *
- * This module is a pure function of (sourceText, document, registry): no
- * filesystem, no side effects.
+ * 只编译能对齐到权威文档的改动：改事件 id / rest、改已有指令的固定参数。
+ * 新增/删除/重排事件或指令、编不回的行：该行 warning「未解码」，不写盘、
+ * 不把整份文件锁死。空改动是成功（没有 mutation）。
  */
+
 import { createHash } from 'node:crypto';
 import type {
   EmevdDslCompileRequest,
@@ -28,364 +13,135 @@ import type {
   EmevdDslDiagnostic,
   EmevdDslDocument,
   EmevdDslLiteral,
+  EmevdDslSourcePosition,
   EmevdDslSourceSpan,
   EmevdEditorDocument,
   EmevdMutationPlan,
   EmevdPlannedMutation
 } from '@soulforge/shared';
-import type { EmedfRegistry } from './emedfSchema.js';
 import {
-  decodeForRender,
-  renderInstructionLine,
-  renderWaitBlock,
-  splitIntoSpans,
-  toPascalCase,
-  type DecodedInstruction
+  analyzeDarkScriptEvent,
+  type DarkScriptEventItem
 } from './darkScriptRenderer.js';
-import { findInstructionDef } from './emedfSchema.js';
-import { createEmevdDslDiagnostic as diagnostic } from './dslTokenizer.js';
-import { validateTypedLiteral } from './dslCompiler.js';
+import { fingerprintEmedfRegistry } from './dslCompiler.js';
+import type { DecodedArg, EmedfRegistry } from './emedfSchema.js';
 import {
   computeEmevdEventFingerprint,
   computeEmevdInstructionFingerprint,
   formatEmevdAnchor
 } from './stableIdentity.js';
 
-function hashText(value: string): string {
-  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+export function looksLikeDarkScript(source: string): boolean {
+  return /\$Event\s*\(/.test(source);
 }
 
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+interface ParsedArg {
+  value: EmevdDslLiteral;
+  span: EmevdDslSourceSpan;
 }
-
-/* ------------------------------------------------------------------ */
-/*  Event block splitting                                             */
-/* ------------------------------------------------------------------ */
-
-interface ParsedEventBlock {
-  /** 1-based 行号（用户文本）。 */
-  headerLine: number;
-  eventId: number;
-  restBehavior: number;
-  /** 规范化后的指令行（不含注释/空白行；WaitFor 多行块已合并为单行）。 */
-  body: string[];
-  /** 每条 body 行的原始行号范围（诊断定位用）。 */
-  bodyLines: Array<{ start: number; end: number }>;
-}
-
-/**
- * 切出 `$Event(id, rest, function() {` … `});` 块。返回的 body 是规范化
- * 指令行序列：trim + 压缩空白；`//` 注释行与空行丢弃；从 `WaitFor(` 到 `);`
- * 的多行块合并为单行。解析失败的块不进结果（调用方按块号对不齐给诊断）。
- */
-export function splitDarkScriptEventBlocks(text: string): {
-  blocks: ParsedEventBlock[];
-  diagnostics: EmevdDslDiagnostic[];
-} {
-  const diagnostics: EmevdDslDiagnostic[] = [];
-  const blocks: ParsedEventBlock[] = [];
-  const lines = text.split('\n');
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index]!;
-    const header = /^\s*\$Event\(\s*(\d+)\s*,\s*([^,]+?)\s*,\s*function\s*\(\s*\)\s*\{\s*$/.exec(line);
-    if (!header) {
-      index += 1;
-      continue;
-    }
-    const headerLine = index + 1;
-    const eventId = Number(header[1]);
-    const restText = header[2]!.trim();
-    const restMatch = /^\s*(\d+)\s*(?:\/\*.*?\*\/)?\s*$/.exec(restText);
-    const restBehavior = restMatch
-      ? Number(restMatch[1])
-      : (restText === 'Default' ? 0 : restText === 'Restart' ? 1 : Number.NaN);
-
-    const body: string[] = [];
-    const bodyLines: Array<{ start: number; end: number }> = [];
-    index += 1;
-    let blockText: string[] = [];
-    let blockStart = 0;
-    let closed = false;
-    while (index < lines.length) {
-      const bodyLine = lines[index]!;
-      if (/^\s*\}\);\s*$/.test(bodyLine)) {
-        closed = true;
-        index += 1;
-        break;
-      }
-      const trimmed = bodyLine.trim();
-      if (trimmed === '' || trimmed.startsWith('//')) {
-        index += 1;
-        continue;
-      }
-      // 普通调用单行即完；WaitFor( 折叠块累积到以 `);` 结尾的末行。
-      if (blockText.length === 0) blockStart = index + 1;
-      blockText.push(trimmed);
-      if (/\);\s*$/.test(trimmed)) {
-        body.push(canonicalizeCall(blockText.join(' ')));
-        bodyLines.push({ start: blockStart, end: index + 1 });
-        blockText = [];
-      }
-      index += 1;
-    }
-    if (!closed) {
-      diagnostics.push(diagnostic(
-        'EMEVD_DSL_UNTERMINATED_EVENT',
-        `$Event( 块在行 ${headerLine} 没有闭合的 });。`,
-        spanFor(headerLine, headerLine, text)
-      ));
-      continue;
-    }
-    if (Number.isNaN(restBehavior)) {
-      diagnostics.push(diagnostic(
-        'EMEVD_DSL_REST_BEHAVIOR_UNPARSEABLE',
-        `行 ${headerLine} 的 rest behavior「${restText}」无法解析（只认 Default / Restart / 数字）。`,
-        spanFor(headerLine, headerLine, text)
-      ));
-      continue;
-    }
-    blocks.push({ headerLine, eventId, restBehavior, body, bodyLines });
-  }
-  return { blocks, diagnostics };
-}
-
-/** 调用文本规范化：去所有空白（含换行折叠），便于跨格式比对。 */
-function canonicalizeCall(text: string): string {
-  return text.replace(/\s+/g, '');
-}
-
-/** 0-based 行号 → 源 span。 */
-function spanFor(startLine: number, endLine: number, source: string): EmevdDslSourceSpan {
-  const lines = source.split('\n');
-  const startOffset = lines.slice(0, startLine - 1).reduce((n, l) => n + l.length + 1, 0);
-  const endOffset = lines.slice(0, endLine).reduce((n, l) => n + l.length + 1, 0);
-  return {
-    start: { offset: startOffset, line: startLine, column: 1 },
-    end: { offset: endOffset, line: endLine, column: 1 }
-  };
-}
-
-/* ------------------------------------------------------------------ */
-/*  Document-side canonical shape                                     */
-/* ------------------------------------------------------------------ */
-
-/** 文档侧每个事件的「规范指令行」：与渲染输出同构，供逐行对齐。 */
-function documentEventShape(event: EmevdEditorDocument['events'][number], registry: EmedfRegistry): {
-  eventId: number;
-  restBehavior: number;
-  lines: Array<{
-    canonical: string;
-    /** 普通指令行对应的 DecodedInstruction；WaitFor 折叠块为 null。 */
-    decoded: DecodedInstruction | null;
-    wait?: { predicates: DecodedInstruction[]; anchor: DecodedInstruction };
-    instruction: EmevdEditorDocument['events'][number]['instructions'][number] | null;
-  }>;
-} {
-  const lines: Array<{
-    canonical: string;
-    decoded: DecodedInstruction | null;
-    wait?: { predicates: DecodedInstruction[]; anchor: DecodedInstruction };
-    instruction: EmevdEditorDocument['events'][number]['instructions'][number] | null;
-  }> = [];
-  const spans = splitIntoSpans(event.instructions, registry);
-  for (const span of spans) {
-    if (span.kind === 'ordinary') {
-      for (const item of span.instructions) {
-        // 失败态（unknown / base64-invalid / decode-failed）渲染成注释行，
-        // 用户侧解析同样丢弃注释——两侧都不计，行数才对得上。
-        if (item.status.kind !== 'ok') continue;
-        lines.push({
-          canonical: canonicalizeCall(renderInstructionLine(item)),
-          decoded: item,
-          instruction: item.instruction
-        });
-      }
-    } else {
-      lines.push({
-        canonical: canonicalizeCall(renderWaitBlock(span).join(' ')),
-        decoded: null,
-        wait: span,
-        instruction: null
-      });
-    }
-  }
-  return { eventId: event.eventId, restBehavior: event.restBehavior, lines };
-}
-
-/* ------------------------------------------------------------------ */
-/*  User-side line parsing                                            */
-/* ------------------------------------------------------------------ */
 
 interface ParsedCall {
   name: string;
-  args: EmevdDslLiteral[];
+  args: ParsedArg[];
+  span: EmevdDslSourceSpan;
 }
 
-/**
- * 解析 `Name(a, b, true);` 调用行。数字（含负零/小数）与 true/false 之外
- * 的参数返回 null（调用方诊断「参数无法解析」）。
- */
-export function parseDarkScriptCall(canonical: string): ParsedCall | null {
-  const match = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*;?$/.exec(canonical);
-  if (!match) return null;
-  const name = match[1]!;
-  const raw = match[2]!.trim();
-  if (raw === '') return { name, args: [] };
-  const args: EmevdDslLiteral[] = [];
-  for (const part of raw.split(',')) {
-    const token = part.trim();
-    if (token === 'true') {
-      args.push(true);
-    } else if (token === 'false') {
-      args.push(false);
-    } else if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(token)) {
-      const value = Number(token);
-      if (!Number.isFinite(value)) return null;
-      args.push(value);
-    } else {
-      return null;
-    }
-  }
-  return { name, args };
+type ParsedStatement =
+  | { kind: 'call'; call: ParsedCall; span: EmevdDslSourceSpan }
+  | { kind: 'wait-for'; predicates: ParsedCall[]; span: EmevdDslSourceSpan }
+  | { kind: 'comment'; text: string; span: EmevdDslSourceSpan };
+
+interface ParsedEvent {
+  eventId: number;
+  restBehavior: number;
+  statements: ParsedStatement[];
+  span: EmevdDslSourceSpan;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Compiler                                                          */
-/* ------------------------------------------------------------------ */
+interface SourceIndex {
+  positionAt(offset: number): EmevdDslSourcePosition;
+  span(from: number, to: number): EmevdDslSourceSpan;
+}
 
 export function compileEmevdDarkScript(
   request: EmevdDslCompileRequest,
   document: EmevdEditorDocument,
   registry?: EmedfRegistry
 ): EmevdDslCompileResult {
-  const { blocks, diagnostics: parseDiagnostics } = splitDarkScriptEventBlocks(request.sourceText);
-  const diagnostics = [...parseDiagnostics];
-
+  const source = request.sourceText;
+  const index = makeSourceIndex(source);
+  const fileSpan = index.span(0, source.length);
+  const diagnostics: EmevdDslDiagnostic[] = [];
   const add = (item: EmevdDslDiagnostic): void => { diagnostics.push(item); };
-  if (request.mode !== 'dark-script') {
-    add(diagnostic('EMEVD_DSL_MODE_UNSUPPORTED', 'Only dark-script mode is supported.', zeroSpan()));
+
+  if (request.mode !== 'patch') {
+    add(error('EMEVD_DSL_MODE_UNSUPPORTED', 'Only patch mode is supported.', fileSpan));
   }
   if (request.resourceUri !== document.resourceUri) {
-    add(diagnostic('EMEVD_DSL_RESOURCE_MISMATCH', 'Resource URI does not match the opened document.', zeroSpan(), {
+    add(error('EMEVD_DSL_RESOURCE_MISMATCH', 'Resource URI does not match the opened document.', fileSpan, {
       resourceUri: request.resourceUri
     }));
   }
   if (document.documentInstanceId === undefined || request.documentInstanceId !== document.documentInstanceId) {
-    add(diagnostic(
-      'EMEVD_DSL_DOCUMENT_INSTANCE_MISMATCH',
-      'Document instance is missing or stale.',
-      zeroSpan(),
-      { resourceUri: request.resourceUri }
-    ));
+    add(error('EMEVD_DSL_DOCUMENT_INSTANCE_MISMATCH', 'Document instance is missing or stale.', fileSpan, {
+      resourceUri: request.resourceUri
+    }));
   }
   if (request.baseRevision !== document.revision) {
-    add(diagnostic('EMEVD_DSL_STALE_REVISION', 'Base revision is stale.', zeroSpan(), {
+    add(error('EMEVD_DSL_STALE_REVISION', 'Base revision is stale.', fileSpan, {
       resourceUri: request.resourceUri
     }));
   }
   if (!registry) {
-    add(diagnostic('EMEVD_DSL_SCHEMA_REQUIRED', 'EMEDF schema is required.', zeroSpan(), {
+    add(error('EMEVD_DSL_SCHEMA_REQUIRED', 'EMEDF schema is required.', fileSpan, {
       resourceUri: request.resourceUri
     }));
-    return { ok: false, diagnostics: diagnostics.sort(compareDiagnostics) };
+  }
+
+  const actualSchemaFingerprint = registry ? fingerprintEmedfRegistry(registry) : undefined;
+  if (
+    actualSchemaFingerprint !== undefined
+    && request.emedfSchemaFingerprint !== actualSchemaFingerprint
+  ) {
+    add(error('EMEVD_DSL_SCHEMA_CHANGED', 'EMEDF schema fingerprint changed.', fileSpan, {
+      resourceUri: request.resourceUri
+    }));
+  }
+
+  const parsed = parseDarkScriptEvents(source, index, add);
+  const ast = emptyAst(request, fileSpan);
+
+  if (diagnostics.some((item) => item.severity === 'error') || !registry || !actualSchemaFingerprint) {
+    return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
   }
 
   const operations: EmevdPlannedMutation[] = [];
-  const eventByAnchor = new Map<string, EmevdEditorDocument['events'][number]>();
-  for (const event of document.events) {
-    if (event.anchor) eventByAnchor.set(formatEmevdAnchor('event', event.anchor), event);
-  }
-
-  // 按顺序对齐事件块。块数不一致只影响对不上的块（诊断），其余照常编译。
-  const eventCount = Math.max(document.events.length, blocks.length);
-  for (let i = 0; i < eventCount; i += 1) {
-    const docEvent = document.events[i];
-    const userBlock = blocks[i];
-    if (docEvent && !userBlock) {
-      add(diagnostic(
-        'EMEVD_DSL_EVENT_BLOCK_REMOVED',
-        `事件 #${i + 1}（${docEvent.eventId}）的 $Event 块被删除；增量写链不支持删除事件。`,
-        zeroSpan(),
-        docEvent.anchor
-          ? { resourceUri: request.resourceUri, targetAnchor: formatEmevdAnchor('event', docEvent.anchor) }
-          : { resourceUri: request.resourceUri }
-      ));
-      continue;
-    }
-    if (!docEvent && userBlock) {
-      add(diagnostic(
-        'EMEVD_DSL_EVENT_BLOCK_ADDED',
-        `新增的 $Event 块（行 ${userBlock.headerLine}，id ${userBlock.eventId}）无法写入；增量写链不支持新增事件。`,
-        spanFor(userBlock.headerLine, userBlock.headerLine, request.sourceText),
-        { resourceUri: request.resourceUri }
-      ));
-      continue;
-    }
-    if (!docEvent || !userBlock) continue;
-
-    compileEventHeader(
-      docEvent,
-      userBlock,
-      operations,
-      diagnostics,
-      request.sourceText,
-      request.resourceUri
-    );
-
-    // 指令体：按反汇编形状逐行对齐。行数不同 = 结构变化，整事件指令跳过。
-    const docShape = documentEventShape(docEvent, registry);
-    if (docShape.lines.length !== userBlock.body.length) {
-      add(diagnostic(
-        'EMEVD_DSL_INSTRUCTION_COUNT_CHANGED',
-        `事件 ${docEvent.eventId}（行 ${userBlock.headerLine}）的指令条数变了（文档 ${docShape.lines.length} 行 → 编辑 ${userBlock.body.length} 行）；`
-          + '增量写链不支持新增/删除指令，该事件的指令改动未写入。',
-        spanFor(userBlock.headerLine, userBlock.headerLine, request.sourceText),
-        { resourceUri: request.resourceUri }
-      ));
-      continue;
-    }
-    for (let j = 0; j < docShape.lines.length; j += 1) {
-      const docLine = docShape.lines[j]!;
-      const userCanonical = userBlock.body[j]!;
-      const userSpan = spanFor(userBlock.bodyLines[j]!.start, userBlock.bodyLines[j]!.end, request.sourceText);
-      if (docLine.canonical === userCanonical) continue;
-      compileLineChange(
-        docLine,
-        userCanonical,
-        userSpan,
-        docEvent,
-        registry,
-        operations,
-        diagnostics,
-        request.resourceUri
-      );
-    }
+  const paired = pairEvents(parsed, document.events, add, request.resourceUri);
+  for (const pair of paired) {
+    compilePairedEvent(pair.parsed, pair.documentEvent, registry, operations, add, request.resourceUri);
   }
 
   if (diagnostics.some((item) => item.severity === 'error')) {
-    return { ok: false, diagnostics: diagnostics.sort(compareDiagnostics) };
+    return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
+  }
+
+  const hasUndecoded = diagnostics.some((item) => item.code === 'DARKSCRIPT_LINE_UNDECODED');
+  if (operations.length === 0 && hasUndecoded) {
+    return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
   }
 
   const touchedEvents = unique(operations.map((operation) => operation.eventAnchor));
   const touchedInstructions = unique(operations.flatMap((operation) =>
     operation.kind === 'set_instruction_arg' ? [operation.instructionAnchor] : []
   ));
-  const sourceFingerprint = hashText(stableJson({
-    mode: 'dark-script',
-    blocks: blocks.map((block) => ({ eventId: block.eventId, restBehavior: block.restBehavior, body: block.body }))
-  }));
+  const sourceFingerprint = hashText(source);
   const planWithoutFingerprint = {
     schemaVersion: 1 as const,
     resourceUri: request.resourceUri,
     documentInstanceId: request.documentInstanceId,
     baseRevision: request.baseRevision,
     sourceFingerprint,
-    schemaFingerprint: fingerprint(registry),
+    schemaFingerprint: actualSchemaFingerprint,
     operations,
     impact: {
       touchedEvents,
@@ -397,240 +153,521 @@ export function compileEmevdDarkScript(
   };
   const plan: EmevdMutationPlan = {
     ...planWithoutFingerprint,
-    planFingerprint: hashText(stableJson({
-      ...planWithoutFingerprint,
-      operations: planWithoutFingerprint.operations.map(({ sourceSpan: _span, ...op }) => op)
-    }))
+    planFingerprint: hashText(stableJson(planWithoutFingerprint))
   };
-  // 编译结果的 ast 是事件块摘要（编译器按位置对齐，没有 patch-DSL 的 anchor 语义）。
-  const ast: EmevdDslDocument = {
+  return { ok: true, ast, plan, diagnostics: diagnostics.sort(compareDiagnostics) };
+}
+
+function compilePairedEvent(
+  parsed: ParsedEvent,
+  event: EmevdEditorDocument['events'][number],
+  registry: EmedfRegistry,
+  operations: EmevdPlannedMutation[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): void {
+  if (!event.anchor) {
+    add(warn('DARKSCRIPT_LINE_UNDECODED', '事件没有稳定锚，不能写入。', parsed.span, {
+      resourceUri
+    }));
+    return;
+  }
+  const eventAnchor = formatEmevdAnchor('event', event.anchor);
+  const eventHash = computeEmevdEventFingerprint(event);
+
+  if (parsed.eventId !== event.eventId) {
+    operations.push({
+      kind: 'set_event_id',
+      eventAnchor,
+      target: event.anchor,
+      targetPreconditionHash: eventHash,
+      sourceSpan: parsed.span,
+      before: event.eventId,
+      after: parsed.eventId
+    });
+  }
+  if (parsed.restBehavior !== event.restBehavior) {
+    operations.push({
+      kind: 'set_event_rest_behavior',
+      eventAnchor,
+      target: event.anchor,
+      targetPreconditionHash: eventHash,
+      sourceSpan: parsed.span,
+      before: event.restBehavior,
+      after: parsed.restBehavior
+    });
+  }
+
+  const shape = analyzeDarkScriptEvent(event, registry);
+  if (parsed.statements.length !== shape.length) {
+    add(warn(
+      'DARKSCRIPT_LINE_UNDECODED',
+      `事件 ${event.eventId} 的指令条数对不上权威文档（源码 ${parsed.statements.length}，文档 ${shape.length}），整段未解码。`,
+      parsed.span,
+      { resourceUri, targetAnchor: eventAnchor }
+    ));
+    return;
+  }
+
+  for (let i = 0; i < shape.length; i += 1) {
+    compileStatement(parsed.statements[i]!, shape[i]!, eventAnchor, operations, add, resourceUri);
+  }
+}
+
+function compileStatement(
+  statement: ParsedStatement,
+  item: DarkScriptEventItem,
+  eventAnchor: string,
+  operations: EmevdPlannedMutation[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): void {
+  if (statement.kind === 'comment' && item.kind === 'opaque') {
+    if (normalizeComment(statement.text) !== normalizeComment(item.comment)) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', '未解码指令只能保持原注释，不能改写成别的内容。', statement.span, {
+        resourceUri,
+        targetAnchor: eventAnchor
+      }));
+    }
+    return;
+  }
+  if (statement.kind === 'wait-for' && item.kind === 'wait-for') {
+    if (statement.predicates.length !== item.predicates.length) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', 'WaitFor 谓词数量对不上，该行未解码。', statement.span, {
+        resourceUri,
+        targetAnchor: eventAnchor
+      }));
+      return;
+    }
+    for (let i = 0; i < item.predicates.length; i += 1) {
+      emitCallArgMutations(
+        statement.predicates[i]!,
+        item.predicates[i]!.displayName,
+        item.predicates[i]!.visibleArgs,
+        item.predicates[i]!.instruction,
+        eventAnchor,
+        operations,
+        add,
+        resourceUri
+      );
+    }
+    return;
+  }
+  if (statement.kind === 'call' && item.kind === 'call') {
+    emitCallArgMutations(
+      statement.call,
+      item.displayName,
+      item.args,
+      item.instruction,
+      eventAnchor,
+      operations,
+      add,
+      resourceUri
+    );
+    return;
+  }
+  add(warn('DARKSCRIPT_LINE_UNDECODED', '这一行对不上权威文档里的指令，未解码。', statement.span, {
+    resourceUri,
+    targetAnchor: eventAnchor
+  }));
+}
+
+function emitCallArgMutations(
+  call: ParsedCall,
+  expectedName: string,
+  expectedArgs: readonly DecodedArg[],
+  instruction: EmevdEditorDocument['events'][number]['instructions'][number],
+  eventAnchor: string,
+  operations: EmevdPlannedMutation[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): void {
+  if (call.name !== expectedName) {
+    add(warn(
+      'DARKSCRIPT_LINE_UNDECODED',
+      `指令名 ${call.name} 对不上 ${expectedName}，该行未解码。`,
+      call.span,
+      { resourceUri, targetAnchor: eventAnchor }
+    ));
+    return;
+  }
+  if (!instruction.anchor) {
+    add(warn('DARKSCRIPT_LINE_UNDECODED', '指令没有稳定锚，不能写入。', call.span, {
+      resourceUri,
+      targetAnchor: eventAnchor
+    }));
+    return;
+  }
+  if (call.args.length !== expectedArgs.length) {
+    add(warn(
+      'DARKSCRIPT_LINE_UNDECODED',
+      `参数个数对不上（源码 ${call.args.length}，文档 ${expectedArgs.length}），该行未解码。`,
+      call.span,
+      { resourceUri, targetAnchor: eventAnchor }
+    ));
+    return;
+  }
+  const instructionAnchor = formatEmevdAnchor('instruction', instruction.anchor);
+  const hash = computeEmevdInstructionFingerprint(instruction);
+  for (let i = 0; i < expectedArgs.length; i += 1) {
+    const expected = expectedArgs[i]!;
+    const got = call.args[i]!;
+    if (typeof expected.value !== typeof got.value) {
+      add(error(
+        'DARKSCRIPT_ARG_TYPE',
+        `参数 ${expected.name} 类型不匹配。`,
+        got.span,
+        { resourceUri, targetAnchor: instructionAnchor }
+      ));
+      continue;
+    }
+    if (!Object.is(expected.value, got.value)) {
+      operations.push({
+        kind: 'set_instruction_arg',
+        eventAnchor,
+        instructionAnchor,
+        target: instruction.anchor,
+        targetPreconditionHash: hash,
+        sourceSpan: got.span,
+        bank: instruction.bank,
+        id: instruction.id,
+        argument: expected.name,
+        before: expected.value,
+        after: got.value
+      });
+    }
+  }
+}
+
+function pairEvents(
+  parsed: ParsedEvent[],
+  documentEvents: readonly EmevdEditorDocument['events'][number][],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): Array<{ parsed: ParsedEvent; documentEvent: EmevdEditorDocument['events'][number] }> {
+  const remaining = [...documentEvents];
+  const pairs: Array<{ parsed: ParsedEvent; documentEvent: EmevdEditorDocument['events'][number] }> = [];
+  const leftovers: ParsedEvent[] = [];
+  for (const event of parsed) {
+    const index = remaining.findIndex((item) => item.eventId === event.eventId);
+    if (index >= 0) {
+      pairs.push({ parsed: event, documentEvent: remaining.splice(index, 1)[0]! });
+    } else {
+      leftovers.push(event);
+    }
+  }
+  while (leftovers.length > 0 && remaining.length > 0) {
+    pairs.push({ parsed: leftovers.shift()!, documentEvent: remaining.shift()! });
+  }
+  for (const extra of leftovers) {
+    add(warn(
+      'DARKSCRIPT_LINE_UNDECODED',
+      `新增事件 ${extra.eventId} 本版不能写入，该块未解码。`,
+      extra.span,
+      { resourceUri }
+    ));
+  }
+  for (const missing of remaining) {
+    add(warn(
+      'DARKSCRIPT_LINE_UNDECODED',
+      `权威文档里的事件 ${missing.eventId} 在源码里被删了，删除事件本版不能写入。`,
+      extraOrFileSpan(parsed),
+      { resourceUri }
+    ));
+  }
+  return pairs;
+}
+
+function extraOrFileSpan(parsed: ParsedEvent[]): EmevdDslSourceSpan {
+  const last = parsed[parsed.length - 1];
+  return last?.span ?? {
+    start: { offset: 0, line: 1, column: 1 },
+    end: { offset: 0, line: 1, column: 1 }
+  };
+}
+
+function parseDarkScriptEvents(
+  source: string,
+  index: SourceIndex,
+  add: (item: EmevdDslDiagnostic) => void
+): ParsedEvent[] {
+  const events: ParsedEvent[] = [];
+  let offset = 0;
+  const header = /\$Event\(\s*(-?\d+)\s*,\s*(Default|Restart|-?\d+)(?:\s*\/\*[\s\S]*?\*\/)?\s*,\s*function\s*\(\s*\)\s*\{/g;
+  while (offset <= source.length) {
+    header.lastIndex = offset;
+    const match = header.exec(source);
+    if (!match) break;
+    const headerStart = match.index;
+    const headerEnd = header.lastIndex;
+    const close = findEventClose(source, headerEnd);
+    if (close < 0) {
+      add(error('DARKSCRIPT_PARSE', '事件块没有对应的 `});`。', index.span(headerStart, source.length)));
+      break;
+    }
+    const restRaw = match[2]!;
+    const restBehavior = restRaw === 'Default' ? 0 : restRaw === 'Restart' ? 1 : Number(restRaw);
+    const body = source.slice(headerEnd, close);
+    const statements = parseStatements(body, headerEnd, index, add);
+    events.push({
+      eventId: Number(match[1]),
+      restBehavior,
+      statements,
+      span: index.span(headerStart, close + 3)
+    });
+    offset = close + 3;
+  }
+  if (events.length === 0 && /\$Event\s*\(/.test(source)) {
+    add(error('DARKSCRIPT_PARSE', '没有解析到完整的 $Event 块。', index.span(0, source.length)));
+  }
+  return events;
+}
+
+function findEventClose(source: string, from: number): number {
+  const needle = '\n});';
+  let search = from;
+  while (search < source.length) {
+    const at = source.indexOf(needle, search);
+    if (at < 0) {
+      return source.startsWith('});', from) ? from : source.endsWith('\n});') ? source.lastIndexOf('\n});') + 1 : -1;
+    }
+    return at + 1;
+  }
+  return -1;
+}
+
+function parseStatements(
+  body: string,
+  bodyStart: number,
+  index: SourceIndex,
+  add: (item: EmevdDslDiagnostic) => void
+): ParsedStatement[] {
+  const statements: ParsedStatement[] = [];
+  let i = 0;
+  while (i < body.length) {
+    while (i < body.length && /\s/.test(body[i]!)) i += 1;
+    if (i >= body.length) break;
+    if (body.startsWith('//', i)) {
+      const nl = body.indexOf('\n', i);
+      const end = nl < 0 ? body.length : nl;
+      const text = body.slice(i, end).trim();
+      statements.push({
+        kind: 'comment',
+        text,
+        span: index.span(bodyStart + i, bodyStart + end)
+      });
+      i = end;
+      continue;
+    }
+    const start = i;
+    const sliced = scanBalancedStatement(body, i);
+    if (!sliced) {
+      add(error('DARKSCRIPT_PARSE', '无法解析的语句。', index.span(bodyStart + i, bodyStart + body.length)));
+      break;
+    }
+    i = sliced.end;
+    const raw = body.slice(start, sliced.end).trim();
+    const span = index.span(bodyStart + start, bodyStart + sliced.end);
+    const wait = parseWaitFor(raw, span, bodyStart + start, index, add);
+    if (wait) {
+      statements.push(wait);
+      continue;
+    }
+    const call = parseCall(raw, span);
+    if (call) {
+      statements.push({ kind: 'call', call, span });
+      continue;
+    }
+    add(warn('DARKSCRIPT_LINE_UNDECODED', '无法识别的语句，未解码。', span));
+  }
+  return statements;
+}
+
+function scanBalancedStatement(body: string, start: number): { end: number } | null {
+  let depth = 0;
+  let i = start;
+  while (i < body.length) {
+    const ch = body[i]!;
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    else if (ch === ';' && depth === 0) return { end: i + 1 };
+    i += 1;
+  }
+  return null;
+}
+
+function parseWaitFor(
+  raw: string,
+  span: EmevdDslSourceSpan,
+  absoluteStart: number,
+  index: SourceIndex,
+  add: (item: EmevdDslDiagnostic) => void
+): ParsedStatement | null {
+  const match = /^WaitFor\s*\(([\s\S]*)\)\s*;$/.exec(raw);
+  if (!match) return null;
+  const inner = match[1]!.trim();
+  if (/^[A-Z][A-Za-z0-9_]*\s*\(/.test(inner) && !inner.includes('&&')) {
+    const call = parseCall(`${inner};`, span);
+    if (!call) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', 'WaitFor 里的谓词无法解析，未解码。', span));
+      return { kind: 'wait-for', predicates: [], span };
+    }
+    return { kind: 'wait-for', predicates: [call], span };
+  }
+  const parts = splitTopLevel(inner, '&&');
+  const predicates: ParsedCall[] = [];
+  let cursor = raw.indexOf('(') + 1;
+  for (const part of parts) {
+    const local = part.trim();
+    const rel = raw.indexOf(local, cursor);
+    const callSpan = rel >= 0
+      ? index.span(absoluteStart + rel, absoluteStart + rel + local.length)
+      : span;
+    const call = parseCall(`${local};`, callSpan);
+    if (!call) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', 'WaitFor 里的谓词无法解析，未解码。', callSpan));
+      return { kind: 'wait-for', predicates: [], span };
+    }
+    predicates.push(call);
+    cursor = rel >= 0 ? rel + local.length : cursor;
+  }
+  return { kind: 'wait-for', predicates, span };
+}
+
+function parseCall(raw: string, span: EmevdDslSourceSpan): ParsedCall | null {
+  const match = /^([A-Z][A-Za-z0-9_]*)\s*\(([\s\S]*)\)\s*;$/.exec(raw.trim());
+  if (!match) return null;
+  const argsRaw = match[2]!.trim();
+  if (argsRaw.length === 0) return { name: match[1]!, args: [], span };
+  const parts = splitTopLevel(argsRaw, ',');
+  const args: ParsedArg[] = [];
+  for (const part of parts) {
+    const literal = parseLiteral(part.trim());
+    if (literal === undefined) return null;
+    args.push({ value: literal, span });
+  }
+  return { name: match[1]!, args, span };
+}
+
+function parseLiteral(text: string): EmevdDslLiteral | undefined {
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+  if (text === '-0') return -0;
+  if (/^-?\d+$/.test(text)) {
+    const value = Number(text);
+    return Number.isSafeInteger(value) ? value : undefined;
+  }
+  if (/^-?\d+\.\d+(?:e[+-]?\d+)?$/i.test(text)) {
+    const value = Number(text);
+    return Number.isFinite(value) ? value : undefined;
+  }
+  return undefined;
+}
+
+function splitTopLevel(text: string, separator: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    else if (depth === 0 && text.startsWith(separator, i)) {
+      parts.push(text.slice(start, i));
+      i += separator.length - 1;
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts.filter((part) => part.trim().length > 0);
+}
+
+function normalizeComment(text: string): string {
+  return text.replace(/^\s*\/\/\s*/, '').trim();
+}
+
+function makeSourceIndex(source: string): SourceIndex {
+  const starts = [0];
+  for (let i = 0; i < source.length; i += 1) {
+    if (source[i] === '\n') starts.push(i + 1);
+  }
+  const positionAt = (offset: number): EmevdDslSourcePosition => {
+    const clamped = Math.max(0, Math.min(offset, source.length));
+    let low = 0;
+    let high = starts.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high + 1) / 2);
+      if (starts[mid]! <= clamped) low = mid;
+      else high = mid - 1;
+    }
+    return { offset: clamped, line: low + 1, column: clamped - starts[low]! + 1 };
+  };
+  return {
+    positionAt,
+    span(from: number, to: number) {
+      return { start: positionAt(from), end: positionAt(to) };
+    }
+  };
+}
+
+function emptyAst(request: EmevdDslCompileRequest, span: EmevdDslSourceSpan): EmevdDslDocument {
+  return {
     schemaVersion: 1,
     resourceUri: request.resourceUri,
     baseRevision: request.baseRevision,
     emedfSchemaFingerprint: request.emedfSchemaFingerprint,
-    events: blocks.map((block) => ({
-      anchor: '',
-      operations: [],
-      instructions: [],
-      span: spanFor(block.headerLine, block.headerLine, request.sourceText)
-    })),
-    span: zeroSpan()
+    events: [],
+    span
   };
-  return { ok: true, ast, diagnostics: diagnostics.sort(compareDiagnostics), plan };
 }
 
-function fingerprint(registry: EmedfRegistry): string {
-  const normalized = {
-    schemaVersion: registry.schemaVersion,
-    game: registry.game,
-    origin: registry.origin,
-    instructions: [...registry.instructions]
-      .sort((a, b) => a.bank - b.bank || a.id - b.id || a.name.localeCompare(b.name))
-      .map((instruction) => ({
-        bank: instruction.bank,
-        id: instruction.id,
-        name: instruction.name,
-        args: instruction.args.map((arg) => ({ name: arg.name, type: arg.type }))
-      }))
-  };
-  return hashText(stableJson(normalized));
-}
-
-function compileEventHeader(
-  docEvent: EmevdEditorDocument['events'][number],
-  userBlock: ParsedEventBlock,
-  operations: EmevdPlannedMutation[],
-  diagnostics: EmevdDslDiagnostic[],
-  sourceText: string,
-  resourceUri: string
-): void {
-  const add = (item: EmevdDslDiagnostic): void => { diagnostics.push(item); };
-  const anchor = docEvent.anchor;
-  if (!anchor) {
-    add(diagnostic(
-      'EMEVD_DSL_ANCHOR_NOT_FOUND',
-      `事件 ${docEvent.eventId} 没有稳定锚，无法写入事件头。`,
-      spanFor(userBlock.headerLine, userBlock.headerLine, sourceText),
-      { resourceUri }
-    ));
-    return;
-  }
-  const eventAnchor = formatEmevdAnchor('event', anchor);
-  const precondition = computeEmevdEventFingerprint(docEvent);
-  if (!Number.isSafeInteger(userBlock.eventId) || userBlock.eventId < 0) {
-    add(diagnostic('EMEVD_DSL_INTEGER_OUT_OF_RANGE', 'Event ID must be a non-negative safe integer.', spanFor(userBlock.headerLine, userBlock.headerLine, sourceText), { resourceUri }));
-  } else if (userBlock.eventId !== docEvent.eventId) {
-    operations.push({
-      kind: 'set_event_id',
-      eventAnchor,
-      target: anchor,
-      targetPreconditionHash: precondition,
-      sourceSpan: spanFor(userBlock.headerLine, userBlock.headerLine, sourceText),
-      before: docEvent.eventId,
-      after: userBlock.eventId
-    });
-  }
-  if (!Number.isInteger(userBlock.restBehavior) || userBlock.restBehavior < 0 || userBlock.restBehavior > 255) {
-    add(diagnostic('EMEVD_DSL_INTEGER_OUT_OF_RANGE', 'Rest behavior must fit u8.', spanFor(userBlock.headerLine, userBlock.headerLine, sourceText), { resourceUri }));
-  } else if (userBlock.restBehavior !== docEvent.restBehavior) {
-    operations.push({
-      kind: 'set_event_rest_behavior',
-      eventAnchor,
-      target: anchor,
-      targetPreconditionHash: precondition,
-      sourceSpan: spanFor(userBlock.headerLine, userBlock.headerLine, sourceText),
-      before: docEvent.restBehavior,
-      after: userBlock.restBehavior
-    });
-  }
-}
-
-function compileLineChange(
-  docLine: Awaited<ReturnType<typeof documentEventShape>>['lines'][number],
-  userCanonical: string,
-  userSpan: EmevdDslSourceSpan,
-  docEvent: EmevdEditorDocument['events'][number],
-  registry: EmedfRegistry,
-  operations: EmevdPlannedMutation[],
-  diagnostics: EmevdDslDiagnostic[],
-  resourceUri: string
-): void {
-  const add = (item: EmevdDslDiagnostic): void => { diagnostics.push(item); };
-
-  // WaitFor 折叠块：condition group 簿记参数在渲染时被隐藏，无法还原。
-  if (docLine.wait) {
-    add(diagnostic(
-      'EMEVD_DSL_WAITFOR_READONLY',
-      `WaitFor( 折叠块被修改（${userCanonical}）。折叠块的条件组参数在源码里不可见，`
-        + '无法写回；请保持折叠块原样，直接修改其外部的普通指令。',
-      userSpan,
-      { resourceUri }
-    ));
-    return;
-  }
-  const decoded = docLine.decoded;
-  const instruction = docLine.instruction;
-  if (!decoded || !instruction) return;
-  if (decoded.status.kind !== 'ok') {
-    add(diagnostic(
-      'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY',
-      `行 ${userCanonical}：文档里这条指令（bank=${decoded.bank} id=${decoded.id}）未解码，无法写回。`,
-      userSpan,
-      { resourceUri }
-    ));
-    return;
-  }
-  const userCall = parseDarkScriptCall(userCanonical);
-  if (!userCall) {
-    add(diagnostic(
-      'EMEVD_DSL_LINE_UNPARSEABLE',
-      `行 ${userCanonical} 无法解析为调用（参数必须是数字或 true/false）。`,
-      userSpan,
-      { resourceUri }
-    ));
-    return;
-  }
-  if (userCall.name !== toPascalCase(decoded.name)) {
-    add(diagnostic(
-      'EMEVD_DSL_INSTRUCTION_NAME_CHANGED',
-      `指令名从 ${toPascalCase(decoded.name)} 改成了 ${userCall.name}；增量写链不支持替换指令。`,
-      userSpan,
-      { resourceUri }
-    ));
-    return;
-  }
-  if (userCall.args.length !== decoded.args.length) {
-    add(diagnostic(
-      'EMEVD_DSL_ARG_COUNT_MISMATCH',
-      `${userCall.name} 参数个数不对（文档 ${decoded.args.length} 个，编辑 ${userCall.args.length} 个）。`,
-      userSpan,
-      { resourceUri }
-    ));
-    return;
-  }
-  const anchor = instruction.anchor;
-  if (!anchor) {
-    add(diagnostic(
-      'EMEVD_DSL_ANCHOR_NOT_FOUND',
-      `指令 ${userCall.name}（行内位置 ${userSpan.start.line}）没有稳定锚，无法写回。`,
-      userSpan,
-      { resourceUri }
-    ));
-    return;
-  }
-  const def = findInstructionDef(registry, decoded.bank, decoded.id);
-  if (!def) {
-    add(diagnostic(
-      'EMEVD_DSL_UNKNOWN_INSTRUCTION_READONLY',
-      `指令 ${userCall.name} 没有 EMEDF schema，无法写回。`,
-      userSpan,
-      { resourceUri }
-    ));
-    return;
-  }
-  const eventAnchor = docEvent.anchor ? formatEmevdAnchor('event', docEvent.anchor) : '';
-  if (!eventAnchor) {
-    add(diagnostic(
-      'EMEVD_DSL_ANCHOR_PRECONDITION_FAILED',
-      `事件 ${docEvent.eventId} 没有稳定锚。`,
-      userSpan,
-      { resourceUri }
-    ));
-    return;
-  }
-  const precondition = computeEmevdInstructionFingerprint(instruction);
-  for (let k = 0; k < decoded.args.length; k += 1) {
-    const arg = decoded.args[k]!;
-    const userValue = userCall.args[k]!;
-    // vararg 尾部是整体不透明载荷，与 patch-DSL 同一把尺子：只读。
-    const argDef = def.args[k];
-    if (argDef?.vararg) {
-      if (!Object.is(arg.value, userValue)) {
-        add(diagnostic(
-          'EMEVD_DSL_VARARG_ARG_READONLY',
-          `参数 ${arg.name} 是变长尾部，只能整体保留；请改固定参数。`,
-          userSpan,
-          { resourceUri }
-        ));
-      }
-      continue;
-    }
-    const valueError = validateTypedLiteral(arg.type, userValue);
-    if (valueError) {
-      add(diagnostic(valueError.code, valueError.message, userSpan, {
-        resourceUri,
-        targetAnchor: formatEmevdAnchor('instruction', anchor)
-      }));
-      continue;
-    }
-    if (Object.is(arg.value, userValue)) continue;
-    operations.push({
-      kind: 'set_instruction_arg',
-      eventAnchor,
-      instructionAnchor: formatEmevdAnchor('instruction', anchor),
-      target: anchor,
-      targetPreconditionHash: precondition,
-      sourceSpan: userSpan,
-      bank: decoded.bank,
-      id: decoded.id,
-      argument: arg.name,
-      before: arg.value,
-      after: userValue
-    });
-  }
-}
-
-function zeroSpan(): EmevdDslSourceSpan {
+function error(
+  code: string,
+  message: string,
+  span: EmevdDslSourceSpan,
+  extra?: { resourceUri?: string; targetAnchor?: string }
+): EmevdDslDiagnostic {
   return {
-    start: { offset: 0, line: 0, column: 0 },
-    end: { offset: 0, line: 0, column: 0 }
+    severity: 'error',
+    code,
+    message,
+    span,
+    ...(extra?.resourceUri !== undefined ? { resourceUri: extra.resourceUri } : {}),
+    ...(extra?.targetAnchor !== undefined ? { targetAnchor: extra.targetAnchor } : {})
   };
+}
+
+function warn(
+  code: string,
+  message: string,
+  span: EmevdDslSourceSpan,
+  extra?: { resourceUri?: string; targetAnchor?: string }
+): EmevdDslDiagnostic {
+  return {
+    severity: 'warning',
+    code,
+    message,
+    span,
+    ...(extra?.resourceUri !== undefined ? { resourceUri: extra.resourceUri } : {}),
+    ...(extra?.targetAnchor !== undefined ? { targetAnchor: extra.targetAnchor } : {})
+  };
+}
+
+function compareDiagnostics(left: EmevdDslDiagnostic, right: EmevdDslDiagnostic): number {
+  return left.span.start.offset - right.span.start.offset || left.code.localeCompare(right.code);
 }
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-function compareDiagnostics(a: EmevdDslDiagnostic, b: EmevdDslDiagnostic): number {
-  return a.span.start.offset - b.span.start.offset || a.code.localeCompare(b.code) || a.message.localeCompare(b.message);
+function hashText(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
 }

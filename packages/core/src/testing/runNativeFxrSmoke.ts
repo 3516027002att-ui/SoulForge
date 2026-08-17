@@ -401,6 +401,154 @@ function buildSyntheticFxr(): Uint8Array {
   return buf;
 }
 
+/**
+ * 根 + 紧随其后的孩子、section4Count≥2。
+ * 旧实现把每个槽都当根再递归孩子，0x140 会被判成假环。
+ */
+function buildSyntheticFxrWithAdjacentChild(): Uint8Array {
+  const size = 0x218;
+  const buf = new Uint8Array(size);
+  const view = new DataView(buf.buffer);
+  const u16 = (o: number, v: number): void => view.setUint16(o, v, true);
+  const i16 = (o: number, v: number): void => view.setInt16(o, v, true);
+  const u32 = (o: number, v: number): void => view.setUint32(o, v, true);
+  const i32 = (o: number, v: number): void => view.setInt32(o, v, true);
+
+  buf.set([0x46, 0x58, 0x52, 0x00], 0x00);
+  i16(0x04, 0);
+  u16(0x06, 5);
+  i32(0x08, 1);
+  i32(0x0C, 0x00094F00);
+  i32(0x10, 0x090); i32(0x14, 1);
+  i32(0x18, 0x0A0); i32(0x1C, 1);
+  i32(0x20, 0x0B0); i32(0x24, 1);
+  i32(0x28, 0x110); i32(0x2C, 2); // Section4 两槽：根 + 孩子
+  i32(0x30, 0x000); i32(0x34, 0);
+  i32(0x38, 0x170); i32(0x3C, 1);
+  i32(0x40, 0x1B0); i32(0x44, 1);
+  i32(0x48, 0x1D8); i32(0x4C, 1);
+  i32(0x50, 0x000); i32(0x54, 0);
+  i32(0x58, 0x000); i32(0x5C, 0);
+  i32(0x60, 0x1F8); i32(0x64, 8);
+  i32(0x68, 1);
+  i32(0x6C, 0);
+  i32(0x70, 0x000); i32(0x74, 0);
+  i32(0x78, 0x000); i32(0x7C, 0);
+  i32(0x80, 0x000); i32(0x84, 0);
+  i32(0x88, 0);
+  i32(0x8C, 0);
+
+  i32(0x090 + 0x00, 0);
+  i32(0x090 + 0x04, 1);
+  i32(0x090 + 0x08, 0x0A0);
+  i32(0x090 + 0x0C, 0);
+
+  i32(0x0A0 + 0x00, 0);
+  i32(0x0A0 + 0x04, 1);
+  i32(0x0A0 + 0x08, 0x0B0);
+  i32(0x0A0 + 0x0C, 0);
+
+  i16(0x0B0 + 0x00, 11);
+  buf[0x0B0 + 0x02] = 0;
+  buf[0x0B0 + 0x03] = 1;
+  i32(0x0B0 + 0x04, 0);
+  i32(0x0B0 + 0x08, -1);
+  i32(0x0B0 + 0x0C, 0);
+  i32(0x0B0 + 0x10, 0x0100FFFC);
+  i32(0x0B0 + 0x14, 0);
+  i32(0x0B0 + 0x18, 1);
+  i32(0x0B0 + 0x1C, 0);
+  i32(0x0B0 + 0x20, 0x1F8);
+  i32(0x0B0 + 0x38, 0x0100FFFC);
+  i32(0x0B0 + 0x3C, 0);
+  i32(0x0B0 + 0x40, 1);
+  i32(0x0B0 + 0x44, 0);
+  i32(0x0B0 + 0x48, 0x1FC);
+
+  // 根 0x110：孩子紧随其后在 0x140
+  i16(0x110 + 0x00, 2000);
+  buf[0x110 + 0x02] = 0;
+  buf[0x110 + 0x03] = 1;
+  i32(0x110 + 0x04, 0);
+  i32(0x110 + 0x08, 0);
+  i32(0x110 + 0x0C, 1);
+  i32(0x110 + 0x10, 1);
+  i32(0x110 + 0x14, 0);
+  i32(0x110 + 0x18, 0x000);
+  i32(0x110 + 0x1C, 0);
+  i32(0x110 + 0x20, 0x170);
+  i32(0x110 + 0x24, 0);
+  i32(0x110 + 0x28, 0x140);
+  i32(0x110 + 0x2C, 0);
+
+  // 孩子 0x140
+  i16(0x140 + 0x00, 2001);
+  buf[0x140 + 0x02] = 0;
+  buf[0x140 + 0x03] = 1;
+  i32(0x140 + 0x04, 0);
+  i32(0x140 + 0x08, 0);
+  i32(0x140 + 0x0C, 0);
+  i32(0x140 + 0x10, 0);
+  i32(0x140 + 0x14, 0);
+  i32(0x140 + 0x18, 0);
+  i32(0x140 + 0x1C, 0);
+  i32(0x140 + 0x20, 0);
+  i32(0x140 + 0x24, 0);
+  i32(0x140 + 0x28, 0);
+  i32(0x140 + 0x2C, 0);
+
+  i16(0x170 + 0x00, 0);
+  buf[0x170 + 0x02] = 0;
+  buf[0x170 + 0x03] = 1;
+  i32(0x170 + 0x04, 0);
+  i32(0x170 + 0x08, 2);
+  i32(0x170 + 0x0C, 0);
+  i32(0x170 + 0x10, 1);
+  i32(0x170 + 0x14, 0);
+  i32(0x170 + 0x18, 0);
+  i32(0x170 + 0x1C, 0);
+  i32(0x170 + 0x20, 0x200);
+  i32(0x170 + 0x24, 0);
+  i32(0x170 + 0x28, 0x000);
+  i32(0x170 + 0x2C, 0);
+  i32(0x170 + 0x30, 0x1B0);
+
+  i16(0x1B0 + 0x00, 0);
+  buf[0x1B0 + 0x02] = 0;
+  buf[0x1B0 + 0x03] = 1;
+  i32(0x1B0 + 0x04, 0);
+  i32(0x1B0 + 0x08, 2);
+  i32(0x1B0 + 0x0C, 0);
+  i32(0x1B0 + 0x10, 0x208);
+  i32(0x1B0 + 0x14, 0);
+  i32(0x1B0 + 0x18, 0x1D8);
+  i32(0x1B0 + 0x1C, 0);
+  i32(0x1B0 + 0x20, 1);
+  i32(0x1B0 + 0x24, 0);
+
+  u16(0x1D8 + 0x00, 0xD050);
+  buf[0x1D8 + 0x02] = 0;
+  buf[0x1D8 + 0x03] = 1;
+  i32(0x1D8 + 0x04, 0);
+  i32(0x1D8 + 0x08, 2);
+  i32(0x1D8 + 0x0C, 0);
+  i32(0x1D8 + 0x10, 0x210);
+  i32(0x1D8 + 0x14, 0);
+  i32(0x1D8 + 0x18, 0x000);
+  i32(0x1D8 + 0x1C, 0);
+
+  i32(0x1F8 + 0x00, 0x3F800000);
+  i32(0x1F8 + 0x04, 0x40000000);
+  i32(0x1F8 + 0x08, 0x00000001);
+  i32(0x1F8 + 0x0C, 0x00000002);
+  i32(0x1F8 + 0x10, 0x00000003);
+  i32(0x1F8 + 0x14, 0x00000004);
+  i32(0x1F8 + 0x18, 0x00000005);
+  i32(0x1F8 + 0x1C, 0x00000006);
+
+  return buf;
+}
+
 async function readFxr(path: string, allowedRoots: string[], oodleRuntimeRoot?: string): Promise<FxrEnvelope> {
   const result = await runBridge<FxrEnvelope>({
     command: FX_READ_COMMAND,
@@ -495,12 +643,33 @@ async function syntheticLeg(): Promise<void> {
       throw new Error(`合成 FXR 的 Section12-14 恒空，unparsedGaps 应如实登记 empty-samples gap：${JSON.stringify(gaps)}`);
     }
 
+    const adjacentPath = join(workspace.root, 'synthetic_smoke_adjacent_child.fxr');
+    await writeFile(adjacentPath, buildSyntheticFxrWithAdjacentChild());
+    const adjacent = await readFxr(adjacentPath, [workspace.root]);
+    assertThreePages(adjacent);
+    if (adjacent.sectionCounts?.section4 !== 2) {
+      throw new Error(`adjacent-child section4Count 应为 2，实际 ${adjacent.sectionCounts?.section4}`);
+    }
+    if (adjacent.rootNodeCount !== 1) {
+      throw new Error(`adjacent-child rootNodeCount 应为 1，实际 ${adjacent.rootNodeCount}`);
+    }
+    if (adjacent.totalNodeCount !== 2) {
+      throw new Error(`adjacent-child totalNodeCount 应为 2，实际 ${adjacent.totalNodeCount}`);
+    }
+    const adjacentRoot = adjacent.effect?.nodes?.[0];
+    if (adjacentRoot?.typeId !== 2000) {
+      throw new Error(`adjacent-child 根 typeId 应为 2000，实际 ${adjacentRoot?.typeId}`);
+    }
+    if (adjacentRoot?.childCount !== 1 || adjacentRoot.children?.[0]?.typeId !== 2001) {
+      throw new Error(`adjacent-child 必须解析出 type 2001 的紧随孩子，不得判假环：${JSON.stringify(adjacentRoot)}`);
+    }
+
     console.log(JSON.stringify({
       ok: true,
       status: 'synthetic-fixture',
       syntheticFixture: true,
       fixtureRole: 'fxr-primary',
-      message: `FXR synthetic fixture 读取验证通过（${d.rootNodeCount} roots, ${d.hostCount} hosts, ${d.propertyCount} properties, ${d.section11ValueCount} section11 values）`,
+      message: `FXR synthetic fixture 读取验证通过（${d.rootNodeCount} roots, ${d.hostCount} hosts, ${d.propertyCount} properties, ${d.section11ValueCount} section11 values；adjacent-child roots=${adjacent.rootNodeCount} nodes=${adjacent.totalNodeCount}）`,
       format: d.format,
       version: d.version,
       resourceId: d.resourceId,

@@ -72,6 +72,23 @@ export function readRecentPath(filePath: string, kind: RecentPathKind): string |
  * 写失败静默忽略：记不住上次位置只是少了个便利，不该让「打开工作区」这个
  * 主流程失败。真正需要报错的写入（Mod 资源）走 Patch Engine，不经这里。
  */
+/** 忘掉某类目录。清除原版挂载时必须调用，否则下次启动会把旧 base 再挂回来。 */
+export function clearRecentPath(filePath: string, kind: RecentPathKind): void {
+  let existing: RecentPathsFile = {};
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as RecentPathsFile;
+    if (typeof parsed === 'object' && parsed !== null) existing = parsed;
+  } catch {
+    return;
+  }
+  delete existing[kind];
+  try {
+    writeFileSync(filePath, JSON.stringify(existing, null, 2), 'utf8');
+  } catch {
+    // 与 writeRecentPath 相同：偏好写失败不打断主流程。
+  }
+}
+
 export function writeRecentPath(filePath: string, kind: RecentPathKind, directory: string): void {
   if (typeof directory !== 'string' || !isAbsolute(directory)) return;
   let existing: RecentPathsFile = {};

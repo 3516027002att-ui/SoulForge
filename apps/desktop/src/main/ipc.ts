@@ -41,7 +41,6 @@ import {
   commitEmevdMutationViaBridge,
   fingerprintEmedfRegistry,
   readFullEmevdDocumentViaBridge,
-  renderEmevdDarkScript,
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
   listEmedfCompletionItems,
@@ -51,6 +50,7 @@ import {
   classifyPlaintextBytes,
   decodePlaintext,
   encodePlaintext,
+  encodeScriptSourceForWriteback,
   classifyScriptEntry,
   magicLabel,
   locateDsLuaDecompilerSync,
@@ -125,7 +125,6 @@ import {
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification
 } from '@soulforge/core';
-import * as SoulForgeCore from '@soulforge/core';
 import {
   CONTAINER_PAGE_SIZE,
   FMG_PAGE_SIZE,
@@ -205,9 +204,11 @@ import {
   type RendererSaveResult
 } from './rendererDto.js';
 import { commitEmevdFullDocument, EmevdAuthorityCache } from './emevdAuthorityCache.js';
+import { renderEmevdDarkScriptAsync } from './emevdDarkScriptWorkerHost.js';
 import { EmevdOpenSlots } from './emevdOpenSlots.js';
+import { EmevdSourceTokens } from './emevdSourceTokens.js';
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
-import { readRecentPath, writeRecentPath } from './recentPaths.js';
+import { clearRecentPath, readRecentPath, writeRecentPath } from './recentPaths.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
@@ -260,19 +261,6 @@ function readFullEmevdDocument(input: EmevdFullReadInput): Promise<EmevdFullRead
   ) as Promise<EmevdFullReadResult>;
 }
 
-type DarkScriptAsyncFn = (
-  document: EmevdEditorDocument,
-  registry: Parameters<typeof renderEmevdDarkScript>[1],
-  options?: { signal?: AbortSignal }
-) => Promise<{ text: string; truncated: boolean; totalLines: number; cancelled?: boolean }>;
-
-const renderEmevdDarkScriptAsync: DarkScriptAsyncFn =
-  (SoulForgeCore as { renderEmevdDarkScriptAsync?: DarkScriptAsyncFn }).renderEmevdDarkScriptAsync
-  ?? (async (document, registry) => {
-    const text = renderEmevdDarkScript(document, registry);
-    return { text, truncated: false, totalLines: text.split('\n').length };
-  });
-
 /**
  * 打开事件文档的在飞请求槽，**按 renderer 窗口分槽**。
  *
@@ -298,6 +286,7 @@ const renderEmevdDarkScriptAsync: DarkScriptAsyncFn =
  * 确认，无法证伪。
  */
 const activeEmevdOpens = new EmevdOpenSlots();
+const emevdSourceTokens = new EmevdSourceTokens();
 
 /**
  * 取消不是解析失败：`cancelled: true` 让 renderer 走静默丢弃分支，而不是把「用户
@@ -1008,6 +997,57 @@ function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relati
   return resolveChrbndVirtualFile(sourceUri);
 }
 
+function logicalMapModelName(raw: string): string {
+  const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
+  return base.replace(/\.(flver|dcx|chrbnd|objbnd)$/i, '');
+}
+
+function resolveMapModelFile(
+  mapRelativePath: string,
+  modelName: string,
+  sibPath?: string
+): { absolutePath: string; relativePath: string; kind: 'flver' | 'chrbnd' } | null {
+  const names = [...new Set(
+    [modelName, sibPath ?? '']
+      .map((value) => logicalMapModelName(value))
+      .filter((value) => value.length > 0)
+  )];
+  const mapStem = basename(mapRelativePath).replace(/\.msb(\.dcx)?$/i, '');
+  const mapId = /^m\d{2}_\d{2}_\d{2}_\d{2}$/i.test(mapStem) ? mapStem : null;
+  const candidates: Array<{ rel: string; kind: 'flver' | 'chrbnd' }> = [];
+  for (const name of names) {
+    if (mapId) {
+      candidates.push({ rel: `map/${mapId}/${name}.flver.dcx`, kind: 'flver' });
+      candidates.push({ rel: `map/${mapId}/${name}.flver`, kind: 'flver' });
+    }
+    candidates.push({ rel: `map/${name}.flver.dcx`, kind: 'flver' });
+    if (/^c\d/i.test(name)) candidates.push({ rel: `chr/${name}.chrbnd.dcx`, kind: 'chrbnd' });
+    if (/^o\d/i.test(name)) candidates.push({ rel: `obj/${name}.objbnd.dcx`, kind: 'chrbnd' });
+  }
+  const normalize = (value: string): string => value.replace(/\\/g, '/').toLowerCase();
+  for (const candidate of candidates) {
+    const indexed = indexedFiles.find((item) => {
+      const rel = normalize(item.relativePath);
+      return rel === normalize(candidate.rel) || rel.endsWith(`/${normalize(candidate.rel)}`);
+    });
+    if (indexed) {
+      return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath, kind: candidate.kind };
+    }
+  }
+  const overlay = activeSession?.layers.overlayRoot?.trim();
+  const base = activeSession?.layers.baseRoot?.trim();
+  for (const root of [overlay, base]) {
+    if (!root) continue;
+    for (const candidate of candidates) {
+      const absolutePath = join(root, candidate.rel);
+      if (safeExists(absolutePath)) {
+        return { absolutePath, relativePath: candidate.rel, kind: candidate.kind };
+      }
+    }
+  }
+  return null;
+}
+
 let cachedEmevdRegistry: ReturnType<typeof resolveEmevdRegistry> | null = null;
 function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
   if (!cachedEmevdRegistry) {
@@ -1348,6 +1388,8 @@ export interface DirectorySelection {
 export interface OpenWorkspaceScanOptions {
   overlaySelectionId: string;
   baseSelectionId?: string;
+  /** 显式卸掉原版：不带 base，并忘掉最近一次原版目录。 */
+  clearBase?: boolean;
 }
 
 interface DirectorySelectionRecord extends DirectorySelection {
@@ -1856,21 +1898,7 @@ async function requestWriteConfirmation(input: {
   extraSubjects?: string[];
 }): Promise<ConfirmationReceipt | null> {
   if (!activeWorkspaceSessionId) return null;
-  const parent = input.event ? BrowserWindow.fromWebContents(input.event.sender) : null;
-  const options = {
-    type: 'warning' as const,
-    title: '确认高风险写入',
-    message: `确认${input.actionLabel}“${input.resourceLabel}”吗？`,
-    detail: '操作将只通过补丁引擎写入 Mod 覆盖层，并执行验证、备份和可回滚检查。原生格式证据不足时仍会阻断。',
-    buttons: ['取消', '继续'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true
-  };
-  const decision = parent
-    ? await dialog.showMessageBox(parent, options)
-    : await dialog.showMessageBox(options);
-  if (decision.response !== 1) return null;
+  // 日常 PARAM/FMG/GPARAM/脚本写入不再弹系统确认框；备份与回滚仍在 Patch Engine。
   return createConfirmationReceipt({
     subjects: [
       'MAIN_NATIVE_DIALOG_CONFIRMED',
@@ -1967,6 +1995,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       if (selection.ownerWebContentsId === webContents.id) directorySelections.delete(selectionId);
     }
     activeEmevdOpens.dispose(webContents.id);
+    emevdSourceTokens.dropWindow(webContents.id);
     // 窗口销毁 = 用户强制中断：取消该窗口发起的 agent 运行，并把它的挂起
     // 审批按拒绝结算（无人回答 ≠ 同意执行写入）。其他窗口的运行不受影响。
     for (const [sessionId, entry] of activeAgentRuns) {
@@ -2251,12 +2280,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       options: OpenWorkspaceScanOptions
     ): Promise<RendererWorkspaceScanResult> => {
       const overlaySelection = consumeDirectorySelection(event, options.overlaySelectionId, 'overlay');
-      const baseSelection = options.baseSelectionId
-        ? consumeDirectorySelection(event, options.baseSelectionId, 'base')
-        : undefined;
+      if (options.clearBase === true) clearRecentPath(recentPathsFile, 'base');
+      const baseSelection = options.clearBase === true
+        ? undefined
+        : options.baseSelectionId
+          ? consumeDirectorySelection(event, options.baseSelectionId, 'base')
+          : undefined;
 
       if (activeSession) await disposeBridgeDaemonPool();
       emevdFullDocuments.clear();
+      emevdDisassemblyCache.clear();
       activeSession = await openWorkspaceSession({
         overlayRoot: overlaySelection.absolutePath,
         ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}),
@@ -2704,10 +2737,30 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * 当时确实有一份在飞的读被中止 —— 没有也不是错误（用户可能已经读完了），所以
    * `ok` 恒真，两者分开报。
    */
-  handle('resource.cancelEmevdFullDocument', async (event) => ({
-    ok: true,
-    cancelled: activeEmevdOpens.cancel(event.sender.id)
-  }));
+  handle('resource.cancelEmevdFullDocument', async (event) => {
+    const cancelled = activeEmevdOpens.cancel(event.sender.id);
+    emevdSourceTokens.dropWindow(event.sender.id);
+    return { ok: true, cancelled };
+  });
+
+  handle(
+    'resource.readEmevdSourceSlice',
+    async (event, token: string, fromLine: number, lineCount: number) => {
+      if (typeof token !== 'string' || token.length === 0) {
+        return {
+          ok: false,
+          code: 'EMEVD_SOURCE_TOKEN_EXPIRED',
+          message: '源码切片令牌无效。'
+        };
+      }
+      return emevdSourceTokens.readSlice(
+        token,
+        event.sender.id,
+        Number(fromLine),
+        Number(lineCount)
+      );
+    }
+  );
 
   /**
    * Assemble the authoritative full EMEVD editor document in main via
@@ -2726,6 +2779,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     truncated: boolean;
     totalLines: number;
   }>();
+
+  function cacheEmevdDisassembly(
+    cacheKey: string | null,
+    entry: { text: string; truncated: boolean; totalLines: number }
+  ): void {
+    if (!cacheKey) return;
+    // 命中已有 key 时先删再插，保持 LRU 语义：刷新 common 不该把 common_func 挤掉。
+    emevdDisassemblyCache.delete(cacheKey);
+    emevdDisassemblyCache.set(cacheKey, entry);
+    while (emevdDisassemblyCache.size > EMEVD_DISASSEMBLY_CACHE_CAPACITY) {
+      const oldestKey = emevdDisassemblyCache.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      emevdDisassemblyCache.delete(oldestKey);
+    }
+  }
 
   handle(
     'resource.readEmevdFullDocument',
@@ -2804,11 +2872,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // R3/P4 裁定：反汇编必须是 DarkScript3 式（EMEDF 函数名）；没 EMEDF 失败
       // 关闭——不再下发 hash 伪源码（旧 renderEmevdPatchDslBounded 输出已从
       // production 入口移除，底层 dslCompiler/typed 写链保留）。
-      // T4：一次出完整 DarkScript 文本，不做 2000 行截断——事件源码不再有
-      // 「加载完整源码」按钮与截断黄条；全量 IPC 下发 70K+ 行文本可行，
-      // 渲染成本集中在打开时一次完成（loadFullDslTemplate 参数保留以兼容
-      // 既有 IPC 契约与 core smoke，不再影响行为）。
+      // 3.1：首包只回 outline + 前 400 行 + opaque source token，全文不进
+      // 第一次 IPC。3.3：反汇编在 worker_threads（renderEmevdDarkScriptAsync）。
+      // loadFullDslTemplate 参数保留以兼容既有 IPC 契约与 core smoke，不再
+      // 把 70K 行一次塞回 renderer。
       let dslTemplate: string | null = null;
+      let sourcePrefix: string | null = null;
+      let sourceToken: string | null = null;
       let dslTemplateTruncated = false;
       let dslTemplateTotalLines = 0;
       let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
@@ -2819,18 +2889,43 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceUri
       }));
       if (registryResolution.origin === 'imported') {
-        // 分片异步反汇编：真实 common 这一步约 75 ms，同步跑会让主进程事件循环
-        // 整段停摆，期间到达的取消信号只能排队。输出与同步入口逐字节相同。
-        const bounded = await renderEmevdDarkScriptAsync(
-          full.document,
-          registryResolution.registry,
-          { signal: openController.signal }
-        );
-        if (bounded.cancelled) return emevdOpenCancelled(sourceUri);
-        dslTemplate = bounded.text;
-        dslTemplateTruncated = bounded.truncated;
-        dslTemplateTotalLines = bounded.totalLines;
-        sourceStyle = 'dark-script';
+        const disassemblyCacheKey = full.sourceHash
+          ? `${full.sourceHash}::${fingerprintEmedfRegistry(registryResolution.registry)}`
+          : null;
+        const cachedDisassembly = disassemblyCacheKey
+          ? emevdDisassemblyCache.get(disassemblyCacheKey)
+          : undefined;
+        let fullText: string | null = null;
+        if (cachedDisassembly) {
+          fullText = cachedDisassembly.text;
+          dslTemplateTruncated = cachedDisassembly.truncated;
+          dslTemplateTotalLines = cachedDisassembly.totalLines;
+          sourceStyle = 'dark-script';
+        } else {
+          const bounded = await renderEmevdDarkScriptAsync(
+            full.document,
+            registryResolution.registry,
+            { signal: openController.signal }
+          );
+          if (bounded.cancelled) return emevdOpenCancelled(sourceUri);
+          fullText = bounded.text;
+          dslTemplateTruncated = bounded.truncated;
+          dslTemplateTotalLines = bounded.totalLines;
+          sourceStyle = 'dark-script';
+          cacheEmevdDisassembly(disassemblyCacheKey, {
+            text: bounded.text,
+            truncated: bounded.truncated,
+            totalLines: bounded.totalLines
+          });
+        }
+        if (fullText !== null) {
+          const stored = emevdSourceTokens.put(event.sender.id, sourceUri, fullText, {
+            truncated: dslTemplateTruncated
+          });
+          sourceToken = stored.token;
+          sourcePrefix = stored.prefix;
+          dslTemplateTotalLines = stored.totalLines;
+        }
       } else {
         responseDiagnostics.push({
           severity: 'error' as const,
@@ -2842,6 +2937,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           sourceUri
         });
       }
+      if (openController.signal.aborted) {
+        if (sourceToken) emevdSourceTokens.dropToken(sourceToken);
+        return emevdOpenCancelled(sourceUri);
+      }
       if (!commitEmevdFullDocument(
         emevdFullDocuments,
         sourceUri,
@@ -2849,6 +2948,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         openController.signal,
         full.sourceHash ?? null
       )) {
+        if (sourceToken) emevdSourceTokens.dropToken(sourceToken);
         return emevdOpenCancelled(sourceUri);
       }
       activeEmevdOpens.finish(event.sender.id, sourceUri, openController);
@@ -2860,6 +2960,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         eventCount: full.document.events.length,
         instructionCount: full.instructionTotal,
         dslTemplate,
+        sourcePrefix,
+        sourceToken,
+        sourceTotalLines: dslTemplateTotalLines,
         sourceStyle,
         dslTemplateTruncated,
         dslTemplateTotalLines,
@@ -3634,6 +3737,63 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     });
   });
 
+  handle(
+    'resource.readMapPartFlverPreview',
+    async (
+      _event,
+      mapSourceUri: string,
+      modelName: string,
+      sibPath?: string
+    ): Promise<{
+      ok: boolean;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === mapSourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          diagnostics: [{
+            severity: 'error',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: '资源未索引，无法定位地图模型。',
+            sourceUri: mapSourceUri
+          }]
+        };
+      }
+      const resolved = resolveMapModelFile(file.relativePath, modelName, sibPath);
+      const baseRoot = activeSession?.layers.baseRoot?.trim();
+      if (!resolved) {
+        return {
+          ok: false,
+          diagnostics: [{
+            severity: 'error',
+            code: 'MAP_FLVER_NOT_FOUND',
+            message: baseRoot
+              ? `没有找到该 part 的模型（${logicalMapModelName(modelName)}）。`
+              : `没有找到该 part 的模型（${logicalMapModelName(modelName)}）。overlay 没有这份 FLVER，到「开始」页挂原版后再试。`
+          }]
+        };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(resolved.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      const command = resolved.kind === 'chrbnd' ? 'read-chrbnd-flver-preview' : 'read-flver-mesh';
+      const result = await runBridge<Record<string, unknown>>({
+        command,
+        filePath: resolved.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        timeoutMs: 120_000,
+        ...(baseRoot ? { oodleRuntimeRoot: baseRoot } : {}),
+        ...(resolved.kind === 'flver' ? { commandOptions: { meshIndex: 0 } } : { commandOptions: { meshIndex: 0 } })
+      });
+      return {
+        ok: result.parseStatus !== 'failed',
+        ...(result.data !== undefined ? { data: result.data } : {}),
+        diagnostics: result.diagnostics
+      };
+    }
+  );
+
   handle('resource.readTaeDocument', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
@@ -3990,13 +4150,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
     const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    const selectedName = typeof entryName === 'string' && entryName.trim() ? entryName.trim() : undefined;
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-fxr-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
       // S24：ffxbnd 效果库按子项名精确读取；缺省取容器内第一条 .fxr。
-      ...(entryName ? { commandOptions: { entryName } } : {}),
+      ...(selectedName ? { commandOptions: { entryName: selectedName } } : {}),
       ...(activeSession?.layers.baseRoot
         ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
         : {})
@@ -8496,6 +8657,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           sourceText: decodePlaintext(bytes.subarray(0, contentEnd), verdict.detectedEncoding),
           encoding: verdict.detectedEncoding,
           decompiled: false,
+          encoding: verdict.detectedEncoding,
           ...containerFields,
           writeSupported: true,
           diagnostics: verdict.diagnostics
@@ -8554,6 +8716,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceText: decompiled.stdout,
         encoding: 'decompiled',
         decompiled: true,
+        encoding: 'utf8',
         decompiler: decompilerLabel(probe.origin),
         ...containerFields,
         writeSupported: true,
@@ -8565,9 +8728,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   /**
    * S16 脚本 IDE：保存源码。
    *
-   * 容器条目 → replaceContainerChild（Patch Engine，expected hashes 乐观校验，
-   * 写回 plaintext Lua）；独立脚本文件 → saveTextResource 链。与 resource.saveText
-   * 同一确认/操作日志/回滚通道。
+   * 容器条目 → replaceContainerChild（Patch Engine，expected hashes 乐观校验）；
+   * 独立脚本文件 → saveRawReplace。两边都先重读原字节，再
+   * encodeScriptSourceForWriteback：明文按打开时编码，混合编码只改 ASCII 行，
+   * 反编译文本写 UTF-8 明文。不弹系统确认。
    */
   handle(
     'resource.saveScriptSource',
@@ -8617,44 +8781,54 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       if (entryName) {
         const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
         if (gameBlocked) return gameBlocked;
+        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
+        const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
+        if (!read.ok || !read.bytes) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: read.diagnostics.length > 0
+              ? read.diagnostics
+              : [{ severity: 'error', code: 'SCRIPT_SOURCE_READ_FAILED', message: '写回前无法重读原条目字节。', sourceUri }]
+          };
+        }
         let containerHash = expectedContainerHash;
-        let childHash = expectedChildHash;
-        if (!containerHash || !childHash) {
-          // 渲染器没带回 hash（异常路径）：主进程现取，不裸奔乐观校验。
+        let childHash = expectedChildHash || read.hash || '';
+        if (!containerHash) {
           const tree = await inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
           containerHash = tree.ok && tree.tree?.rootHash ? tree.tree.rootHash : '';
-          const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
-          const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
-          childHash = read.hash ?? '';
         }
-        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
-        const encoded = encodePlaintext(sourceText, writeEncoding);
+        const encoded = encodeScriptSourceForWriteback(read.bytes, sourceText);
         if (!encoded.ok) {
           return {
             ok: false,
             changedFiles: [],
-            diagnostics: [{
-              severity: 'error' as const,
-              code: encoded.code,
-              message: encoded.message,
+            diagnostics: encoded.diagnostics.map((item) => ({
+              severity: item.severity,
+              code: item.code,
+              message: item.message,
               sourceUri
-            }]
+            }))
           };
         }
-        // S29/S34：不再弹「保存脚本源码」确认 —— 写入经 Patch Engine 备份/回滚，
-        // replaceContainerChild 仍要求 receipt 凭据，这里直接构造（无交互）。
+        const confirmation = await requestWriteConfirmation({
+          event,
+          resourceLabel: `${file.relativePath} / ${entryName}`,
+          sourceUri,
+          actionLabel: '保存脚本源码',
+          payloadHash: createHash('sha256')
+            .update(`${containerHash}\n${childHash}\n`)
+            .update(encoded.bytes)
+            .digest('hex')
+        });
+        if (!confirmation) return cancelledWrite(sourceUri);
         const result = await replaceContainerChild({
           file,
           childUri,
           expectedContainerHash: containerHash,
           expectedChildHash: childHash,
           newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
-          confirmation: createConfirmationReceipt({
-            subjects: [sourceUri, 'script-source-save'],
-            riskLevel: 'caution',
-            sourceUri,
-            note: '脚本源码保存（按打开编码写回）'
-          }),
+          confirmation,
           session: activeSession,
           operationLog,
           ...storage
@@ -8665,41 +8839,52 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
         return toRendererSaveResult(result, indexedFiles);
       }
-      // 独立脚本文件：UTF-8 走文本保存链；utf8-bom/shift_jis 走编码感知的
-      // 整文件字节替换（saveTextResource 恒按 UTF-8 落盘，会改写字节）。
-      let result: SaveTextResourceResult;
-      if (writeEncoding === 'utf8') {
-        result = await saveTextResource({
-          file,
-          newText: sourceText,
-          session: activeSession,
-          operationLog,
-          ...storage
-        });
-      } else {
-        const encoded = encodePlaintext(sourceText, writeEncoding);
-        if (!encoded.ok) {
-          return {
-            ok: false,
-            changedFiles: [],
-            diagnostics: [{
-              severity: 'error' as const,
-              code: encoded.code,
-              message: encoded.message,
-              sourceUri
-            }]
-          };
-        }
-        result = await saveRawReplace({
-          file,
-          expectedHash: file.sha256 ?? await sha256FileNow(file.absolutePath),
-          newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
-          title: `保存脚本源码（${writeEncoding}）`,
-          session: activeSession,
-          operationLog,
-          ...storage
-        });
+      let originalBytes: Uint8Array;
+      try {
+        originalBytes = new Uint8Array(await readFile(file.absolutePath));
+      } catch (error) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'SCRIPT_SOURCE_READ_FAILED',
+            message: error instanceof Error ? error.message : '写回前无法读取独立脚本文件。',
+            sourceUri
+          }]
+        };
       }
+      const encoded = encodeScriptSourceForWriteback(originalBytes, sourceText);
+      if (!encoded.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: encoded.diagnostics.map((item) => ({
+            severity: item.severity,
+            code: item.code,
+            message: item.message,
+            sourceUri
+          }))
+        };
+      }
+      const confirmation = await requestWriteConfirmation({
+        event,
+        resourceLabel: file.relativePath,
+        sourceUri,
+        actionLabel: '保存脚本源码',
+        payloadHash: createHash('sha256').update(encoded.bytes).digest('hex')
+      });
+      if (!confirmation) return cancelledWrite(sourceUri);
+      const result = await saveRawReplace({
+        file,
+        expectedHash: createHash('sha256').update(originalBytes).digest('hex'),
+        newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
+        confirmation,
+        session: activeSession,
+        operationLog,
+        ...storage,
+        title: `保存脚本源码 ${file.relativePath}`
+      });
       if (result.ok) {
         const refreshed = await openResourcePreview({
           file,

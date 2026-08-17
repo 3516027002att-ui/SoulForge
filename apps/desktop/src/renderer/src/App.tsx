@@ -78,6 +78,7 @@ import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
 import { emevdPendingTabFromFullDocument } from './emevd/emevdPendingTab.js';
+import { assembleEmevdSource } from './emevd/assembleEmevdSource.js';
 import {
   ChangeControlStore,
   type CandidateChange,
@@ -161,6 +162,13 @@ const WELCOME_DRAFT_LIMIT = 5;
 /** 命令面板（Ctrl K）列出的资源命中条数。命中总数由截断说明报出。 */
 const CMDK_RESOURCE_HIT_LIMIT = 8;
 
+/** 事件内层标签只留短名：`event/common.emevd.dcx` → `common`。 */
+function eventDocumentTitle(relativePath: string): string {
+  const normalized = relativePath.replace(/\\/g, '/');
+  const base = normalized.slice(normalized.lastIndexOf('/') + 1);
+  return base.replace(/\.emevd(?:\.dcx)?$/i, '') || base;
+}
+
 /** 无实时 MSB 数据时的空 parts（真实数据经 Bridge 读取后填充）。 */
 const EMPTY_MSB_PARTS: MsbPartTransformLike[] = [];
 
@@ -203,6 +211,8 @@ const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
 /** S33：开始侧栏资源树的上限（树太大不能一次全渲，其余引导到「文件」领域）。 */
 const START_SIDEBAR_FILE_LIMIT = 120;
+/** 开始侧栏审计折叠区只列最近若干条，完整列表仍在原审计面板。 */
+const START_SIDEBAR_AUDIT_LIMIT = 8;
 
 function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
   // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
@@ -352,6 +362,12 @@ export function App(): ReactElement {
    * document（bounded outline + 有界模板）。
    */
   const [eventPendingTab, setEventPendingTab] = useState<EventSourceTabData | null>(null);
+  /** EVENT-30B：读 EMEVD 在飞标志。打开期间工作台显示可行动等待态，而不是空壳。 */
+  const [eventOpening, setEventOpening] = useState(false);
+  /** 3.1 前缀：全文未齐时先画 $Event，不建 CodeMirror。 */
+  const [eventSourcePreview, setEventSourcePreview] = useState<string | null>(null);
+  /** 打开请求代次：切文件/切域时旧请求的 finally 不得把新请求的 opening 清掉。 */
+  const eventOpenRequestRef = useRef(0);
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
   const [esdData, setEsdData] = useState<Record<string, unknown> | null>(null);
   const [flverData, setFlverData] = useState<Record<string, unknown> | null>(null);
@@ -485,7 +501,11 @@ export function App(): ReactElement {
       // 会被错误地显示为可写。授权判定必须由新文档的 fieldDefsOrigin 重新给出。
       setParamFieldDefsOrigin('fixture');
     },
-    emevd: () => setEventPendingTab(null),
+    emevd: () => {
+      setEventPendingTab(null);
+      setEventOpening(false);
+      setEventSourcePreview(null);
+    },
     msb: () => {
       setMsbParts(EMPTY_MSB_PARTS);
       setMsbModels([]);
@@ -1189,10 +1209,12 @@ export function App(): ReactElement {
           diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
           data?: {
             sourceHash?: string;
-            models?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
+            models?: Array<{ name: string; nativeOffset?: number; offset?: number; typeId: number; sibPath?: string }>;
             parts?: Array<{
               name: string;
               nativeOffset?: number;
+              offset?: number;
+              modelIndex?: number;
               posX: number;
               posY: number;
               posZ: number;
@@ -1245,7 +1267,8 @@ export function App(): ReactElement {
         setLastOpenFailure(null);
         setMsbParts(result.data.parts.map((p) => ({
           name: p.name,
-          ...(p.nativeOffset === undefined ? {} : { nativeOffset: p.nativeOffset }),
+          ...((p.nativeOffset ?? p.offset) === undefined ? {} : { nativeOffset: p.nativeOffset ?? p.offset }),
+          ...(typeof p.modelIndex === 'number' ? { modelIndex: p.modelIndex } : {}),
           posX: p.posX,
           posY: p.posY,
           posZ: p.posZ,
@@ -1256,8 +1279,9 @@ export function App(): ReactElement {
         })));
         setMsbModels((result.data.models ?? []).map((model) => ({
           name: model.name,
-          ...(model.nativeOffset === undefined ? {} : { nativeOffset: model.nativeOffset }),
-          typeId: model.typeId
+          ...((model.nativeOffset ?? model.offset) === undefined ? {} : { nativeOffset: model.nativeOffset ?? model.offset }),
+          typeId: model.typeId,
+          ...(model.sibPath ? { sibPath: model.sibPath.replace(/\\/g, '/').split('/').pop() ?? model.sibPath } : {})
         })));
         setMsbRegions((result.data.regions ?? []).map((r) => ({
           name: r.name,
@@ -1306,14 +1330,22 @@ export function App(): ReactElement {
       const target = selectedFile;
       if (!target || !shouldLoadEmevd(target)) {
         setEventPendingTab(null);
+        setEventSourcePreview(null);
+        setEventOpening(false);
         // S15：事件没在打开，上一份事件失败不再对当前选区成立（Agent 元数据同理）。
         setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
         return;
       }
       if (!bridge || typeof bridge.readEmevdFullDocument !== 'function') {
         setEventPendingTab(null);
+        setEventSourcePreview(null);
+        setEventOpening(false);
         return;
       }
+      const requestId = eventOpenRequestRef.current + 1;
+      eventOpenRequestRef.current = requestId;
+      setEventOpening(true);
+      setEventSourcePreview(null);
       setStatus(`正在读取 EMEVD：${target.relativePath}`);
       try {
         // 一次读到底。以前这里是两次 IPC：先 readEmevdDocument 拿有界 envelope
@@ -1374,24 +1406,39 @@ export function App(): ReactElement {
           return;
         }
         setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
-        let dslTemplate: string | null = null;
-        let dslTemplateTruncated = false;
-        let dslTemplateTotalLines = 0;
-        // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script 只读 /
+        if (full.sourcePrefix) setEventSourcePreview(full.sourcePrefix);
+        const assembled = await assembleEmevdSource({
+          dslTemplate: full.dslTemplate ?? null,
+          sourcePrefix: full.sourcePrefix ?? null,
+          sourceToken: full.sourceToken ?? null,
+          sourceTotalLines: full.sourceTotalLines ?? full.dslTemplateTotalLines,
+          isCancelled: () => cancelled || eventOpenRequestRef.current !== requestId,
+          readSlice: async (token, fromLine, lineCount) => {
+            if (typeof bridge.readEmevdSourceSlice !== 'function') {
+              return { ok: false };
+            }
+            return bridge.readEmevdSourceSlice(token, fromLine, lineCount);
+          }
+        });
+        if (cancelled || eventOpenRequestRef.current !== requestId || assembled.cancelled) return;
+        let dslTemplate: string | null = assembled.text;
+        let dslTemplateTruncated = full.dslTemplateTruncated ?? false;
+        let dslTemplateTotalLines = full.dslTemplateTotalLines
+          ?? (dslTemplate ? dslTemplate.split('\n').length : 0);
+        // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script /
         // none 失败关闭）。
-        let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
-        if (full.dslTemplate) {
-          dslTemplate = full.dslTemplate;
-          dslTemplateTruncated = full.dslTemplateTruncated ?? false;
-          dslTemplateTotalLines = full.dslTemplateTotalLines ?? 0;
-          // 主进程返回 sourceStyle 时以它为准；旧 fixture/历史通道没有该字段时
-          // 按模板内容推断：`$Event(` 开头是 DarkScript 反汇编（只读），否则按旧
-          // hash DSL 处理（可编辑）。
-          sourceStyle = full.sourceStyle
-            ?? (/^\$Event\(/m.test(full.dslTemplate) ? 'dark-script' : 'patch-dsl');
+        let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = full.sourceStyle ?? 'none';
+        if (dslTemplate && sourceStyle === 'none') {
+          sourceStyle = /^\$Event\(/m.test(dslTemplate) ? 'dark-script' : 'patch-dsl';
         }
-        // dslTemplate === null 是 EMEDF 缺失的失败关闭（不提供伪解码）：
-        // sourceStyle 留 'none'，工作台显示可行动说明。
+        // 拼不出全文且不是 EMEDF 失败关闭：当作打开失败，不要拿前缀建编辑器。
+        if (!dslTemplate && sourceStyle === 'dark-script') {
+          setEventSourcePreview(null);
+          setEventPendingTab(null);
+          setStatus('事件源码切片未齐，未打开编辑器。');
+          return;
+        }
+        setEventSourcePreview(null);
         setEventPendingTab(emevdPendingTabFromFullDocument({
           tabId: target.sourceUri,
           title: eventTabShortTitle(target.relativePath),
@@ -1411,6 +1458,10 @@ export function App(): ReactElement {
         if (cancelled) return;
         setEventPendingTab(null);
         setStatus(error instanceof Error ? error.message : 'EMEVD 读取异常');
+      } finally {
+        // 只有最新一代请求能清 opening：旧请求被 cancel 后迟到返回时，
+        // UI 已经在等新请求，不能把等待态清成假就绪。
+        if (eventOpenRequestRef.current === requestId) setEventOpening(false);
       }
     }
     void loadEmevd();
@@ -1551,6 +1602,8 @@ export function App(): ReactElement {
         parts?: Array<{
           name: string;
           nativeOffset?: number;
+          offset?: number;
+          modelIndex?: number;
           posX: number;
           posY: number;
           posZ: number;
@@ -1567,7 +1620,7 @@ export function App(): ReactElement {
           posY: number;
           posZ: number;
         }>;
-        models?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
+        models?: Array<{ name: string; nativeOffset?: number; offset?: number; typeId: number; sibPath?: string }>;
         events?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
         modelCount?: number;
         partCount?: number;
@@ -1578,7 +1631,8 @@ export function App(): ReactElement {
     if (reload?.ok && reload.data?.parts?.length) {
       setMsbParts(reload.data.parts.map((p) => ({
         name: p.name,
-        ...(p.nativeOffset === undefined ? {} : { nativeOffset: p.nativeOffset }),
+        ...((p.nativeOffset ?? p.offset) === undefined ? {} : { nativeOffset: p.nativeOffset ?? p.offset }),
+        ...(typeof p.modelIndex === 'number' ? { modelIndex: p.modelIndex } : {}),
         posX: p.posX,
         posY: p.posY,
         posZ: p.posZ,
@@ -1597,8 +1651,9 @@ export function App(): ReactElement {
       })));
       setMsbModels((reload.data.models ?? []).map((model) => ({
         name: model.name,
-        ...(model.nativeOffset === undefined ? {} : { nativeOffset: model.nativeOffset }),
-        typeId: model.typeId
+        ...((model.nativeOffset ?? model.offset) === undefined ? {} : { nativeOffset: model.nativeOffset ?? model.offset }),
+        typeId: model.typeId,
+        ...(model.sibPath ? { sibPath: model.sibPath.replace(/\\/g, '/').split('/').pop() ?? model.sibPath } : {})
       })));
       setMsbEvents((reload.data.events ?? []).map((event) => ({
         name: event.name,
@@ -1710,7 +1765,7 @@ export function App(): ReactElement {
     }
   }
 
-  function clearBaseDirectory(): void {
+  async function clearBaseDirectory(): Promise<void> {
     setBaseRootChoice(null);
     if (workspace) {
       // S22：清原版同样当场生效（同一 overlay 重挂一个不带 base 的 session）。
@@ -2010,6 +2065,8 @@ export function App(): ReactElement {
     if (domain === 'project') {
       setSelectedFile(null);
       setCenterView('project');
+      setSidebarView('explorer');
+      setSidebarCollapsed(false);
       setStatus('开始页');
       return;
     }
@@ -2956,10 +3013,10 @@ export function App(): ReactElement {
                   onClick={() => void chooseBaseDirectory()}
                   {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
                 >
-                  {baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录'}
+                  {sessionMeta?.baseMounted || baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录'}
                 </button>
-                {baseRootChoice && (
-                  <button type="button" className="btn btn--ghost btn--sm" onClick={clearBaseDirectory}>清除选择</button>
+                {(sessionMeta?.baseMounted || baseRootChoice) && (
+                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => void clearBaseDirectory()}>清除</button>
                 )}
               </div>
               <div className="setting-row">
@@ -3074,7 +3131,7 @@ export function App(): ReactElement {
               browserPreview={isBrowserPreview}
               onOpenWorkspace={() => void openWorkspace()}
               onChooseBaseDirectory={() => void chooseBaseDirectory()}
-              onClearBaseDirectory={clearBaseDirectory}
+              onClearBaseDirectory={() => void clearBaseDirectory()}
             />
           )}
           {activeEditor === 'gparam' && (
@@ -3235,77 +3292,8 @@ export function App(): ReactElement {
               />
             </>
           )}
-          {showEventWorkbench && (
-            <>
-              {/* 同 map：删掉「实时 Bridge 文档 · hash … / 空文档（未选中可解析的
-                  EMEVD 或读取失败）」。hash 前缀属于证据，读取失败原因进日志区。 */}
-              <EventSourceWorkbenchPanel
-                /* EVENT-30B：工作台自己管理多文档标签与 dirty；App 只按资源 URI
-                   提供最近一次打开/刷新的有界投影（pendingTab），并把 DSL 提交能力
-                   上抛。key 固定，切资源时工作台不重挂载，标签与未提交编辑得以保留。 */
-                pendingTab={eventPendingTab}
-                onDslSubmit={async (tab, sourceText) => {
-                  if (!tab.live) {
-                    return {
-                      ok: false,
-                      diagnostics: [{ severity: 'error', code: 'EMEVD_DSL_NO_LIVE_DOCUMENT', message: '需要实时 EMEVD 文档才能提交 DSL。' }]
-                    };
-                  }
-                  if (!bridge) {
-                    return {
-                      ok: false,
-                      diagnostics: [{ severity: 'error', code: 'BRIDGE_UNAVAILABLE', message: describeBridgeAbsence('提交 EMEVD DSL') }]
-                    };
-                  }
-                  if (typeof bridge.submitEmevdDslPlan !== 'function') {
-                    return {
-                      ok: false,
-                      diagnostics: [{ severity: 'error', code: 'PRELOAD_MISSING', message: '当前预加载未暴露 submitEmevdDslPlan。' }]
-                    };
-                  }
-                  const result = await bridge.submitEmevdDslPlan(
-                    tab.resourceUri,
-                    sourceText,
-                    tab.sourceStyle === 'dark-script' ? 'dark-script' : 'patch'
-                  );
-                  if (result.ok) {
-                    // 同 loadEmevd：提交后重读也只发一次。以前这里紧跟一次
-                    // readEmevdDocument 去换 sourceHash 与 gutter 判据，两者现在
-                    // 都在 reload 的响应里（sourceHash / outline）。
-                    const reload = await bridge.readEmevdFullDocument(
-                      tab.resourceUri,
-                      `renderer-${tab.resourceUri}-${Date.now()}`
-                    );
-                    if (reload?.ok && reload.dslTemplate) {
-                      setEventPendingTab(emevdPendingTabFromFullDocument({
-                        tabId: tab.tabId,
-                        title: tab.title,
-                        resourceUri: tab.resourceUri,
-                        full: reload,
-                        dslTemplate: reload.dslTemplate,
-                        dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
-                        dslTemplateTotalLines: reload.dslTemplateTotalLines ?? 0,
-                        sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
-                      }));
-                      return {
-                        ok: true,
-                        diagnostics: result.diagnostics ?? [],
-                        nextDslTemplate: reload.dslTemplate
-                      };
-                    }
-                  }
-                  return {
-                    ok: result.ok,
-                    diagnostics: result.diagnostics ?? [{
-                      severity: 'error',
-                      code: 'EMEVD_DSL_SUBMIT_FAILED',
-                      message: 'DSL 提交失败。'
-                    }]
-                  };
-                }}
-              />
-            </>
-          )}
+          {/* EVENT-30B 事件工作台移出本边界：它跨资源/跨编辑域保留 tab 与
+              EditorState，不能用 activeEditor key 每次重建。 */}
           {showTextWorkbench && (
             <>
               {/* 同上：删掉「实时 Bridge FMG · hash … / 空条目（未选中可解析 FMG
@@ -3408,7 +3396,7 @@ export function App(): ReactElement {
                 // renderer 不再以「缺哈希」拒绝已经画出来的字段。
                 const saved = await bridge.applyContainerParamFieldMutation(
                   paramWorkbenchFile.sourceUri,
-                  input.expectedContainerHash,
+                  input.expectedContainerHash || '',
                   {
                     entryIndex: input.entryIndex,
                     expectedChildHash: input.expectedChildHash,
@@ -3442,7 +3430,7 @@ export function App(): ReactElement {
                 // S29：哈希由 main 写时现算兜底，缺哈希不再挡行名写入。
                 const saved = await bridge.applyContainerParamRowNameMutation(
                   paramWorkbenchFile.sourceUri,
-                  input.expectedContainerHash,
+                  input.expectedContainerHash || '',
                   {
                     entryIndex: input.entryIndex,
                     expectedChildHash: input.expectedChildHash,
@@ -3685,6 +3673,97 @@ export function App(): ReactElement {
           {activeEditor === 'binary' && !isMaterialFile && !isVfxFile && !selectedFile && (
             <p className="muted">这个格式还没有专用编辑器。</p>
           )}
+          </PanelErrorBoundary>
+          {/*
+            EVENT-30B：事件工作台常驻挂载。切到 PARAM/MAP 域时只是 hidden，不卸载，
+            因此 tab、dirty、每个 tab 的 EditorState 与用户滚动位置都保留。
+          */}
+          <PanelErrorBoundary key="panel-boundary:event" label="Event 源码工作台">
+            <div hidden={!showEventWorkbench}>
+              <EventSourceWorkbenchPanel
+                /* EVENT-30B：工作台自己管理多文档标签与 dirty；App 只按资源 URI
+                   提供最近一次打开/刷新的有界投影（pendingTab），并把 DSL 提交能力
+                   上抛。key 固定，切资源时工作台不重挂载，标签与未提交编辑得以保留。 */
+                active={showEventWorkbench}
+                opening={eventOpening}
+                openingPreview={eventSourcePreview}
+                pendingTab={eventPendingTab}
+                onDslSubmit={async (tab, sourceText) => {
+                  if (!tab.live) {
+                    return {
+                      ok: false,
+                      diagnostics: [{ severity: 'error', code: 'EMEVD_DSL_NO_LIVE_DOCUMENT', message: '需要实时 EMEVD 文档才能提交 DSL。' }]
+                    };
+                  }
+                  if (!bridge) {
+                    return {
+                      ok: false,
+                      diagnostics: [{ severity: 'error', code: 'BRIDGE_UNAVAILABLE', message: describeBridgeAbsence('提交 EMEVD DSL') }]
+                    };
+                  }
+                  if (typeof bridge.submitEmevdDslPlan !== 'function') {
+                    return {
+                      ok: false,
+                      diagnostics: [{ severity: 'error', code: 'PRELOAD_MISSING', message: '当前预加载未暴露 submitEmevdDslPlan。' }]
+                    };
+                  }
+                  const result = await bridge.submitEmevdDslPlan(
+                    tab.resourceUri,
+                    sourceText,
+                    tab.sourceStyle === 'dark-script' ? 'dark-script' : 'patch'
+                  );
+                  if (result.ok) {
+                    // 同 loadEmevd：提交后重读也只发一次。以前这里紧跟一次
+                    // readEmevdDocument 去换 sourceHash 与 gutter 判据，两者现在
+                    // 都在 reload 的响应里（sourceHash / outline）。
+                    const reload = await bridge.readEmevdFullDocument(
+                      tab.resourceUri,
+                      `renderer-${tab.resourceUri}-${Date.now()}`
+                    );
+                    if (reload?.ok) {
+                      const assembled = await assembleEmevdSource({
+                        dslTemplate: reload.dslTemplate ?? null,
+                        sourcePrefix: reload.sourcePrefix ?? null,
+                        sourceToken: reload.sourceToken ?? null,
+                        sourceTotalLines: reload.sourceTotalLines ?? reload.dslTemplateTotalLines,
+                        readSlice: async (token, fromLine, lineCount) => {
+                          if (typeof bridge.readEmevdSourceSlice !== 'function') {
+                            return { ok: false };
+                          }
+                          return bridge.readEmevdSourceSlice(token, fromLine, lineCount);
+                        }
+                      });
+                      if (assembled.text) {
+                        setEventPendingTab(emevdPendingTabFromFullDocument({
+                          tabId: tab.tabId,
+                          title: tab.title,
+                          resourceUri: tab.resourceUri,
+                          full: reload,
+                          dslTemplate: assembled.text,
+                          dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
+                          dslTemplateTotalLines: reload.dslTemplateTotalLines
+                            ?? assembled.text.split('\n').length,
+                          sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
+                        }));
+                        return {
+                          ok: true,
+                          diagnostics: result.diagnostics ?? [],
+                          nextDslTemplate: assembled.text
+                        };
+                      }
+                    }
+                  }
+                  return {
+                    ok: result.ok,
+                    diagnostics: result.diagnostics ?? [{
+                      severity: 'error',
+                      code: 'EMEVD_DSL_SUBMIT_FAILED',
+                      message: 'DSL 提交失败。'
+                    }]
+                  };
+                }}
+              />
+            </div>
           </PanelErrorBoundary>
                 </div>
               </div>

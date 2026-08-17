@@ -1,15 +1,10 @@
 /**
- * EVENT-30B — DarkScript3 式 Event 源码工作台（S14 可编辑）。
+ * EVENT-30B — DarkScript3 式 Event 源码工作台。
  *
  * 布局对照 DarkScript3（§11），不是 260/320 三栏：
  *   [文档标签栏] 逻辑文档标签（EMEVD 文档，§3.4），带 dirty 标记与关闭
- *   [工具条]     查找：Ctrl+F · 保存状态（无「编译并提交」，无只读锁）
- *   [主区]       CodeMirror 6 源码占满（T4：无四钮、无 Outline/Inspector/Problems）
- *
- * S14：`$Event` 源码可编辑。Ctrl+S 直接把当前文本交给 App → main 按
- * 「反汇编形状对齐」编译成 typed mutation → Patch Engine（备份/回滚照旧），
- * UI 不提 Bridge / 补丁引擎。编不了的指令（增删、WaitFor 折叠块内容变化、
- * 未解码指令）由编译器给结构化诊断，不锁整份文档、不假成功写盘。
+ *   [工具条]     Ctrl+F 查找 · Ctrl+S 应用
+ *   [主区]       源码（可并排第二视口）+ 右栏词义（S31）
  *
  * Negative DOM（EVENT-30B）：Flow / Hex / Raw Bytes 不在默认 viewport；原始
  * bytes 只能经 Developer Diagnostics 打开（本面板不提供）；查找替换 / Outline /
@@ -29,19 +24,17 @@ import {
   type ReactElement
 } from 'react';
 import type { EmevdEditorDocument } from '@soulforge/shared';
-// 深路径 import：core 的 index 是 export * 全量导出（会把 node:path 等浏览器
-// 不可用模块拉进 renderer bundle）；parseDarkScriptCall 是纯文本解析，只拉
-// darkScriptCompiler 的依赖链（链上 node:crypto 由 vite alias 打桩）。
-import { parseDarkScriptCall } from '@soulforge/core/dist/emevd/darkScriptCompiler.js';
 import type { EmedfCompletionItem } from '@soulforge/core';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { createCompleteSourceState } from '../emevd/emevdSourceMount.js';
 import {
-  appendSourceSlices,
-  emptyEventLineScan,
-  indexEventLinesIncremental,
-  splitSourceForFirstFrame,
-  type EventLineScanState
-} from '../emevd/emevdSourceMount.js';
+  indexEventHeaders,
+  inspectSourceLine,
+  resolveEventJump,
+  type EventJump,
+  type LineInspection
+} from '../emevd/eventSourceNavigate.js';
+import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { EditorState, type Extension } from '@codemirror/state';
 import {
   EditorView,
@@ -61,6 +54,7 @@ import {
   StreamLanguage,
   bracketMatching,
   foldGutter,
+  foldService,
   indentOnInput,
   syntaxHighlighting
 } from '@codemirror/language';
@@ -79,117 +73,6 @@ export interface EventSourceSubmitResult {
   ok: boolean;
   diagnostics: Array<{ severity: string; code: string; message: string }>;
   nextDslTemplate?: string;
-}
-
-/* ------------------------------------------------------------------ */
-/*  S31 右栏词义：选中语句 → 指令名/bank:id/每个参数名+类型+当前值   */
-/* ------------------------------------------------------------------ */
-
-/** 一个用户的实参值（源码文本里解析出的数字/布尔）。 */
-export interface InspectorArgValue {
-  name: string;
-  type: string;
-  /** 当前值展示文本。'（折叠隐藏）' 表示折叠块隐藏了 conditionGroup 簿记参数。 */
-  value: string;
-  vararg?: boolean;
-  hidden?: boolean;
-}
-
-/** 右栏里一条可展示的指令（同名指令可能命中多个 bank:id）。 */
-export interface InspectorRow {
-  name: string;
-  bank: number;
-  id: number;
-  args: InspectorArgValue[];
-}
-
-export interface EventInspectorState {
-  tabId: string;
-  lineNumber: number;
-  /** 该行属于 WaitFor( 折叠块时非空。 */
-  waitFor?: boolean;
-  rows: InspectorRow[];
-  /** EMEDF 目录里匹配不到指令名（诚实未解码，不编）。 */
-  unknownNames: string[];
-  unparseable?: string;
-}
-
-/** 一行的解析结果（纯函数，可单测）。 */
-export type InspectorLineResult =
-  | { kind: 'call'; call: { name: string; args: Array<number | boolean> } }
-  | { kind: 'wait'; predicates: Array<{ name: string; args: Array<number | boolean> }> }
-  | { kind: 'none' }
-  | { kind: 'unparseable'; canonical: string };
-
-/** 真值展示：数字按反汇编格式（负零保留）。 */
-function literalText(value: number | boolean): string {
-  if (typeof value === 'boolean') return value ? 'true' : 'false';
-  return Object.is(value, -0) ? '-0' : String(value);
-}
-
-/** 解析一条规范化调用（`Name(a, b);`）。 */
-export function parseInspectorCall(canonical: string): InspectorLineResult {
-  if (canonical.startsWith('$Event(') || canonical.startsWith('//')) return { kind: 'none' };
-  if (canonical.startsWith('WaitFor(')) {
-    const match = /^WaitFor\(\s*(.*?)\s*\)\s*;?$/.exec(canonical);
-    if (!match) return { kind: 'unparseable', canonical };
-    const inner = match[1]!.trim();
-    if (inner === '') return { kind: 'wait', predicates: [] };
-    const predicates: Array<{ name: string; args: Array<number | boolean> }> = [];
-    for (const part of inner.split('&&')) {
-      const call = parseDarkScriptCall(part.trim());
-      if (!call) return { kind: 'unparseable', canonical };
-      predicates.push(call);
-    }
-    return { kind: 'wait', predicates };
-  }
-  const call = parseDarkScriptCall(canonical);
-  return call ? { kind: 'call', call } : { kind: 'unparseable', canonical };
-}
-
-/**
- * 把解析结果渲染成词义行：用 EMEDF 目录按名字匹配 bank:id 与参数定义。
- * 同名指令（不同 bank:id）全部列出；匹配不到的名字进 `unknownNames`（诚实句）。
- * conditionGroup 簿记参数在折叠块里被渲染隐藏，这里标「（折叠隐藏）」。
- */
-export function buildInspectorRows(
-  result: Extract<InspectorLineResult, { kind: 'call' | 'wait' }>,
-  catalog: readonly EmedfCompletionItem[]
-): { rows: InspectorRow[]; unknownNames: string[] } {
-  const calls: Array<{ name: string; args: Array<number | boolean> }> = result.kind === 'call'
-    ? [result.call]
-    : result.predicates;
-  const rows: InspectorRow[] = [];
-  const unknownNames: string[] = [];
-  for (const call of calls) {
-    const defs = catalog.filter((item) => item.name === call.name);
-    if (defs.length === 0) {
-      unknownNames.push(call.name);
-      continue;
-    }
-    for (const def of defs) {
-      const args: InspectorArgValue[] = [];
-      let valueIndex = 0;
-      for (const argDef of def.args) {
-        const hidden = /conditiongroup/i.test(argDef.name);
-        if (hidden && call.args.length !== def.args.length) {
-          // 折叠块隐藏了簿记参数：值不可见，标出来而不是猜。
-          args.push({ name: argDef.name, type: argDef.type, value: '（折叠隐藏）', ...(argDef.vararg ? { vararg: true } : {}), hidden: true });
-          continue;
-        }
-        const value = call.args[valueIndex];
-        valueIndex += 1;
-        args.push({
-          name: argDef.name,
-          type: argDef.type,
-          value: value === undefined ? '—' : literalText(value),
-          ...(argDef.vararg ? { vararg: true } : {})
-        });
-      }
-      rows.push({ name: def.name, bank: def.bank, id: def.id, args });
-    }
-  }
-  return { rows, unknownNames };
 }
 
 /**
@@ -230,10 +113,10 @@ export interface EventSourceTabData {
   dslTemplateTruncated: boolean;
   dslTemplateTotalLines: number;
   /**
-   * 源码形态：
-   * - 'dark-script'：EMEDF 反汇编的 DarkScript3 式源码（S14 可编辑，不设只读锁）；
+   * 源码形态（R3/P4 裁定）：
+   * - 'dark-script'：EMEDF 反汇编的 DarkScript3 式源码，可编辑（S14）；
    * - 'patch-dsl'：旧 hash DSL（历史路径）；
-   * - 'none'：EMEDF 缺失失败关闭（不提供伪解码，也不可编）。
+   * - 'none'：EMEDF 缺失失败关闭（不提供伪解码）。
    */
   sourceStyle?: 'dark-script' | 'patch-dsl' | 'none' | undefined;
 }
@@ -241,6 +124,12 @@ export interface EventSourceTabData {
 export interface EventSourceWorkbenchPanelProps {
   /** App 最近一次打开/刷新的 EMEVD 文档；工作台按 tabId 去重后追加或更新标签。 */
   pendingTab: EventSourceTabData | null;
+  /** 面板当前是否在可视工作区。不可见时 App 用 hidden 包住但保持挂载。 */
+  active?: boolean | undefined;
+  /** App 侧是否正在读 EMEVD（Bridge 分页读 + worker 反汇编 + 切片拼齐）。 */
+  opening?: boolean | undefined;
+  /** 全文未齐时的只读前缀（不是 EditorState）。 */
+  openingPreview?: string | null | undefined;
   onDslSubmit?: (
     tab: EventSourceTabData,
     sourceText: string
@@ -252,31 +141,16 @@ interface InternalTab extends EventSourceTabData {
   dirty: boolean;
   /** 当前源码文本（含用户编辑）。 */
   draft: string;
-  /** 该标签的 CodeMirror 状态（含 undo/redo 历史），切换标签时保留。 */
+  /**
+   * 该标签的 CodeMirror 状态（含 undo/redo 历史），切换标签时保留。
+   * 文档从首帧起就是完整全文：不存在 sourceFillTarget / 分片追加态。
+   */
   editorState: EditorState;
-  /** 增量灌入的目标全文。null 表示已齐或无需再灌。 */
-  sourceFillTarget: string | null;
 }
 
 interface EventLineInfo {
   eventId: number;
   warnings: number;
-}
-
-/**
- * S10 扩展：EMEVD 脚本文档（源码区）是可引用节点。script 用 tabId（逻辑
- * URI，非本机绝对路径——main 的 decodeCiteHit 按非路径校验），label 用
- * 短标题（如 common）。框选源码任意区域即命中该文档。
- */
-function citeScriptAttr(tabId: string, title: string): Record<string, string> {
-  return {
-    'data-cite': JSON.stringify({
-      kind: 'event-script',
-      library: 'event',
-      script: tabId,
-      label: title
-    })
-  };
 }
 
 /** 无 dslTemplate（只读 demo / 读取失败 / EMEDF 缺失失败关闭）时的结构化投影基线。 */
@@ -335,13 +209,7 @@ export function readFailureSource(document: EmevdEditorDocument): string | null 
   return lines.join('\n');
 }
 
-/**
- * S14：`$Event` 源码可编辑，不再因反汇编形态锁只读。仍不可编的只剩打开失败类
- * （非 live）与 EMEDF 缺失（无 dslTemplate）。sourceStyle 不再是只读判据。
- */
-export function isSourceReadOnly(
-  tab: Pick<EventSourceTabData, 'live' | 'dslTemplate' | 'sourceStyle'>
-): boolean {
+export function isSourceReadOnly(tab: Pick<EventSourceTabData, 'live' | 'dslTemplate' | 'sourceStyle'>): boolean {
   return !tab.live || tab.dslTemplate === null;
 }
 
@@ -388,34 +256,88 @@ export function indexEventLines(
   const byEventId = new Map<string, EventWarningRow>();
   for (const row of rows) byEventId.set(String(row.eventId), row);
   const map = new Map<number, EventLineInfo>();
-  const lines = text.split('\n');
   let blockIndex = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const anchorMatch = /^event\s+@e:(\S+)/.exec(lines[i]!);
-    if (!anchorMatch && !/^\$Event\(/.test(lines[i]!)) continue;
-    const row = (anchorMatch ? byEventId.get(anchorMatch[1]!) : undefined) ?? rows[blockIndex];
-    blockIndex += 1;
-    if (!row) continue;
-    if (row.warnings > 0) map.set(i + 1, { eventId: row.eventId, warnings: row.warnings });
+  let lineNumber = 1;
+  let lineStart = 0;
+
+  // 流式扫行：七万行文档不额外 split 出一整份字符串数组。
+  while (lineStart <= text.length) {
+    const nl = text.indexOf('\n', lineStart);
+    const line = nl < 0 ? text.slice(lineStart) : text.slice(lineStart, nl);
+    const anchorMatch = /^event\s+@e:(\S+)/.exec(line);
+    if (anchorMatch || /^\$Event\(/.test(line)) {
+      const row = (anchorMatch ? byEventId.get(anchorMatch[1]!) : undefined) ?? rows[blockIndex];
+      blockIndex += 1;
+      if (row && row.warnings > 0) map.set(lineNumber, { eventId: row.eventId, warnings: row.warnings });
+    }
+    if (nl < 0) break;
+    lineStart = nl + 1;
+    lineNumber += 1;
   }
   return map;
 }
 
 /** DarkScript 风格高亮：注释灰、指令名强调、数字亮色、字符串绿、只读注释加深。 */
-const darkScriptStyle = HighlightStyle.define([
+export const darkScriptStyle = HighlightStyle.define([
   { tag: tags.comment, color: 'var(--ink-3)', fontStyle: 'italic' },
   { tag: tags.lineComment, color: 'var(--ink-3)', fontStyle: 'italic' },
+  { tag: tags.blockComment, color: 'var(--ink-3)', fontStyle: 'italic' },
+  { tag: tags.controlKeyword, color: 'var(--ember-text)', fontWeight: '700' },
   { tag: tags.keyword, color: 'var(--ember-text)', fontWeight: '600' },
   { tag: tags.atom, color: 'var(--ember-text)' },
+  { tag: tags.function(tags.variableName), color: 'var(--ink-0)', fontWeight: '600' },
+  { tag: tags.className, color: 'var(--ember-text)', fontStyle: 'italic' },
+  { tag: tags.local(tags.variableName), color: 'var(--ink-2)' },
+  { tag: tags.bool, color: 'var(--ok)' },
   { tag: tags.number, color: 'var(--ok)' },
   { tag: tags.string, color: 'var(--ok)' },
   { tag: tags.propertyName, color: 'var(--ink-0)' },
-  { tag: tags.function(tags.variableName), color: 'var(--ink-0)', fontWeight: '600' },
   { tag: tags.variableName, color: 'var(--ink-1)' },
   { tag: tags.punctuation, color: 'var(--ink-3)' },
   { tag: tags.operator, color: 'var(--ember-text)' },
   { tag: tags.invalid, color: 'var(--danger-text)', fontWeight: '600' }
 ]);
+
+/**
+ * DarkScript3 式源码的流式词法。
+ * 枚举通道覆盖 ComparisonType.Equal 一类 Namespace.Name；形参覆盖 X0_4。
+ */
+export const darkScriptStreamLanguage = StreamLanguage.define({
+  name: 'dark-script',
+  tokenTable: {
+    eventHeader: tags.controlKeyword,
+    controlKeyword: tags.controlKeyword,
+    instruction: tags.function(tags.variableName),
+    enumMember: tags.className,
+    formalParameter: tags.local(tags.variableName),
+    bool: tags.bool,
+    readOnlyComment: tags.invalid
+  },
+  token(stream) {
+    if (stream.match(/^\/\/.*/)) {
+      return /^\/\/\s*(?:unknown|BASE64_INVALID|[A-Z][A-Z0-9_]{3,})\s+bank=/.test(stream.current())
+        ? 'readOnlyComment'
+        : 'lineComment';
+    }
+    if (stream.match(/^\/\*[\s\S]*?\*\//)) return 'blockComment';
+    if (stream.match(/^\s+/)) return null;
+    if (stream.match(/^\$Event\(/)) return 'eventHeader';
+    if (stream.match(/^"(?:[^"\\]|\\.)*"/)) return 'string';
+    if (stream.match(/^\b(?:true|false)\b/)) return 'bool';
+    if (stream.match(/^\b(?:Default|Restart)\b/)) return 'atom';
+    if (stream.match(/^\b(?:WaitFor)\b/)) return 'controlKeyword';
+    if (stream.match(/^\b(?:function|return|if|else|while|for)\b/)) return 'keyword';
+    if (stream.match(/^[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+/)) return 'enumMember';
+    if (stream.match(/^X\d+_\d+/)) return 'formalParameter';
+    if (stream.match(/^[A-Z][A-Za-z0-9_]*(?=\s*\()/)) return 'instruction';
+    if (stream.match(/^[A-Za-z_][A-Za-z0-9_]*/)) return 'variableName';
+    if (stream.match(/^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/i)) return 'number';
+    if (stream.match(/^[{}()\[\],;]/)) return 'punctuation';
+    if (stream.match(/^(?:&&|\|\||[!<>=]=?|[-+*\/])/)) return 'operator';
+    stream.next();
+    return null;
+  }
+});
 
 /**
  * EMEVD Patch-DSL 流式词法（renderEmevdPatchDsl 的输出语法）：
@@ -444,6 +366,23 @@ const emevdDslStreamLanguage = StreamLanguage.define({
   }
 });
 
+/** `$Event(` 块折叠：事件头行可折叠到对应的 `});`，折叠后事件边界仍在视口中。 */
+export function eventBlockFoldRange(
+  state: EditorState,
+  lineStart: number,
+  lineEnd: number
+): { from: number; to: number } | null {
+  const startLine = state.doc.lineAt(lineStart);
+  if (!/^\$Event\(/.test(startLine.text)) return null;
+  for (let lineNumber = startLine.number + 1; lineNumber <= state.doc.lines; lineNumber += 1) {
+    const candidate = state.doc.line(lineNumber);
+    if (/^\}\)\;/.test(candidate.text)) return { from: lineEnd, to: candidate.from };
+  }
+  return null;
+}
+
+const eventBlockFolding = foldService.of(eventBlockFoldRange);
+
 /** gutter 的未知指令 warning 记号。toDOM 只在浏览器渲染 CM 时调用（SSR 不跑 effect）。 */
 class EventDiagMarker extends GutterMarker {
   constructor(
@@ -457,7 +396,7 @@ class EventDiagMarker extends GutterMarker {
     const element = document.createElement('span');
     element.className = 'cm-event-diag__warn';
     element.textContent = '⚑';
-    element.title = `Event ${this.eventId}：${this.warnings} 条未知指令`;
+    element.title = `Event ${this.eventId}：${this.warnings} 条未知指令（read-only）`;
     return element;
   }
 }
@@ -563,18 +502,23 @@ function createHoverTooltipSource(
   };
 }
 
-function buildEditorExtensions(
+export function buildEditorExtensions(
   onDocChange: (text: string, state: EditorState) => void,
   readOnly: boolean,
+  sourceStyle: EventSourceTabData['sourceStyle'],
   getCatalog: () => EmedfCompletionItem[],
-  onSave: () => void,
-  onSelection: (state: EditorState) => void
+  onSave?: () => void,
+  onCursor?: (lineText: string) => void
 ): Extension[] {
+  const sourceLanguage = sourceStyle === 'dark-script'
+    ? darkScriptStreamLanguage
+    : emevdDslStreamLanguage;
   const extensions: Extension[] = [
     lineNumbers(),
     highlightActiveLineGutter(),
     highlightActiveLine(),
     foldGutter(),
+    eventBlockFolding,
     bracketMatching(),
     indentOnInput(),
     drawSelection(),
@@ -583,7 +527,7 @@ function buildEditorExtensions(
     closeBrackets(),
     search({ top: true }),
     syntaxHighlighting(darkScriptStyle),
-    emevdDslStreamLanguage,
+    sourceLanguage,
     eventDiagGutter,
     EditorState.readOnly.of(readOnly),
     // T4-3：EMEDF 指令名补全（Ctrl+Space + 输入时）与悬停参数名列表。
@@ -591,12 +535,21 @@ function buildEditorExtensions(
     autocompletion({ override: [createCompletionSource(getCatalog)] }),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) onDocChange(update.state.doc.toString(), update.state);
-      // S31：光标移动也刷新右侧词义栏（选中语句 → 参数说明）。
-      if (update.selectionSet || update.docChanged) onSelection(update.state);
+      if (onCursor && (update.selectionSet || update.docChanged || update.focusChanged)) {
+        const line = update.state.doc.lineAt(update.state.selection.main.head);
+        onCursor(line.text);
+      }
     }),
     keymap.of([
-      // S14：Ctrl+S 直接保存当前源码（App → main → Patch Engine，UI 不提 Bridge）。
-      { key: 'Mod-s', run: () => { onSave(); return true; } },
+      ...(onSave
+        ? [{
+            key: 'Mod-s',
+            run: () => {
+              onSave();
+              return true;
+            }
+          }]
+        : []),
       ...closeBracketsKeymap,
       ...defaultKeymap,
       ...searchKeymap,
@@ -620,45 +573,147 @@ function buildEditorExtensions(
   return extensions;
 }
 
+function revealLine(view: EditorView | null, lineNumber: number): void {
+  if (!view) return;
+  const safe = Math.max(1, Math.min(lineNumber, view.state.doc.lines));
+  const line = view.state.doc.line(safe);
+  view.dispatch({
+    selection: { anchor: line.from },
+    effects: EditorView.scrollIntoView(line.from, { y: 'center' })
+  });
+  view.focus();
+}
+
+function EventMeaningPane(props: {
+  inspection: LineInspection;
+  jump: EventJump | null;
+  onJumpEvent: (eventId: number) => void;
+  documentTitle: string;
+}): ReactElement {
+  const { inspection, jump, onJumpEvent, documentTitle } = props;
+  if (inspection.kind === 'empty') {
+    return <p className="muted esw-meaning__empty">把光标放在一条指令或 $Event 头上。</p>;
+  }
+  if (inspection.kind === 'event-header') {
+    return (
+      <div
+        className="esw-meaning__block"
+        data-cite={JSON.stringify({
+          kind: 'event-line',
+          document: documentTitle,
+          eventId: inspection.eventId,
+          line: 1
+        })}
+      >
+        <strong>$Event({inspection.eventId})</strong>
+        <p className="muted">事件块头。rest 是 Default / Restart。</p>
+      </div>
+    );
+  }
+  if (inspection.kind === 'undecoded') {
+    return (
+      <div className="esw-meaning__block">
+        <strong>未解码</strong>
+        <p className="muted">{inspection.text}</p>
+      </div>
+    );
+  }
+  if (inspection.kind === 'wait-for') {
+    return (
+      <div className="esw-meaning__block">
+        <strong>WaitFor</strong>
+        <p className="muted">条件折叠。下面是被折进去的谓词，不是单独一条可写指令。</p>
+        {inspection.predicates.length === 0
+          ? <p className="muted">谓词无法解析。</p>
+          : (
+            <ul className="esw-meaning__args">
+              {inspection.predicates.map((predicate, index) => (
+                <li key={`${predicate.name}-${index}`}>
+                  <code>{predicate.name}</code>
+                  <span className="muted"> {predicate.args.join(', ')}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+      </div>
+    );
+  }
+  return (
+    <div className="esw-meaning__block">
+      <strong>{inspection.name}</strong>
+      {inspection.unknown
+        ? <p className="muted">未解码：本机 EMEDF 里没有这条指令。</p>
+        : (
+          <p className="muted">
+            {inspection.bank !== undefined ? `bank ${inspection.bank}:${inspection.id}` : 'EMEDF 指令'}
+          </p>
+        )}
+      {inspection.args.length > 0 && (
+        <ul className="esw-meaning__args">
+          {inspection.args.map((arg) => (
+            <li key={arg.name}>
+              <div>
+                <code>{arg.name}</code>
+                <span className="muted"> : {arg.type}</span>
+              </div>
+              <div>{arg.value || '（空）'}</div>
+              {arg.role === 'event-id' && arg.eventId !== undefined && (
+                <button type="button" className="toolbar-button" onClick={() => onJumpEvent(arg.eventId!)}>
+                  转到 $Event({arg.eventId})
+                </button>
+              )}
+              {arg.role === 'fmg-id' && (
+                <p className="muted">insufficient_evidence：事件面板没有 FMG 表，不能跳文本条目。</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {jump && jump.kind === 'hit' && (
+        <p className="muted">目标在 {jump.title} 第 {jump.line} 行。</p>
+      )}
+      {jump && jump.kind === 'insufficient_evidence' && (
+        <p className="muted">{jump.message}</p>
+      )}
+    </div>
+  );
+}
+
 export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps): ReactElement {
   const [tabs, setTabs] = useState<InternalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState('就绪');
   const [completionItems, setCompletionItems] = useState<EmedfCompletionItem[]>([]);
+  const [splitTabId, setSplitTabId] = useState<string | null>(null);
+  const [inspection, setInspection] = useState<LineInspection>({ kind: 'empty' });
+  const [jump, setJump] = useState<EventJump | null>(null);
+  const [inspectPane, setInspectPane] = useState<'a' | 'b'>('a');
 
-  /** S31 多列：每个 tab 列一个 host + 一个 EditorView（独立滚动/光标）。 */
-  const hostsRef = useRef<Map<string, HTMLDivElement>>(new Map());
-  const viewsRef = useRef<Map<string, EditorView>>(new Map());
-  /** S31：并排源码列数（1 = 单列，2/3 = 多列对照）。 */
-  const [columnCount, setColumnCount] = useState(1);
-  const [inspector, setInspector] = useState<EventInspectorState | null>(null);
+  const editorHostRef = useRef<HTMLDivElement>(null);
+  const splitHostRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const viewBRef = useRef<EditorView | null>(null);
+  const pendingRevealRef = useRef<{ pane: 'a' | 'b'; line: number } | null>(null);
   /** T4-3：EMEDF 指令名目录，经 ref 供 CM extensions 闭包读最新值（异步到达）。 */
   const completionItemsRef = useRef<EmedfCompletionItem[]>([]);
   completionItemsRef.current = completionItems;
   /** 每 tab 的 event 块行映射，gutter 经该 ref 读取（CM 闭包拿不到 React state）。 */
   const eventLineInfoRef = useRef<Map<number, EventLineInfo>>(new Map());
-  const eventLineScanRef = useRef<EventLineScanState>(emptyEventLineScan());
-  const sourceFillGenerationRef = useRef(0);
   /** 始终指向最新 commitDraft，供各 tab 的 CM extensions 闭包安全调用。 */
   const commitDraftRef = useRef<(tabId: string, text: string, state: EditorState) => void>(() => {});
-  /** S14：Ctrl+S keymap 经该 ref 调最新 save（闭包拿不到 React state）。 */
-  const saveSourceRef = useRef<() => void>(() => {});
+  const submitSourceRef = useRef<() => Promise<void>>(async () => {});
 
   const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? null;
-
-  /**
-   * S31 多列对照：单列 = 激活 tab；多列 = 激活 tab 排前，其余按打开顺序补足。
-   * 每列自己的 EditorView（独立滚动/光标），列间不共享选中/光标。
-   */
-  const visibleTabs = useMemo(() => {
-    if (!activeTab) return [];
-    if (columnCount <= 1) return [activeTab];
-    const others = tabs.filter((tab) => tab.tabId !== activeTabId);
-    return [activeTab, ...others].slice(0, columnCount);
-  }, [tabs, activeTabId, columnCount, activeTab]);
-  /** 供挂载 effect 用：列集合变化才重建 view，编辑/灌入不触发。 */
-  const visibleTabsKey = visibleTabs.map((tab) => tab.tabId).join(',');
+  const splitTab = splitTabId ? tabs.find((tab) => tab.tabId === splitTabId) ?? null : null;
+  const eventIndexes = useMemo(
+    () => tabs.map((tab) => ({
+      tabId: tab.tabId,
+      title: tab.title,
+      headers: indexEventHeaders(tab.draft)
+    })),
+    [tabs]
+  );
 
   /** T4-3：从主进程拉取本机 EMEDF 指令名目录（只读公开字段，一次性）。 */
   useEffect(() => {
@@ -689,96 +744,54 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, []);
   commitDraftRef.current = commitDraft;
 
-  /** 每个 tab 的 extensions 绑定自己的 tabId；运行时经 ref 调最新 commitDraft 与 save。 */
-  const createExtensionsFor = useCallback((tabId: string, readOnly: boolean): Extension[] => {
+  /** 每个 tab 的 extensions 绑定自己的 tabId；运行时经 ref 调最新 commitDraft。 */
+  const createExtensionsFor = useCallback((
+    tabId: string,
+    readOnly: boolean,
+    sourceStyle: EventSourceTabData['sourceStyle'],
+    pane: 'a' | 'b' = 'a'
+  ): Extension[] => {
+    const isSatellite = tabId.endsWith(':sat');
     return buildEditorExtensions(
-      (text, state) => commitDraftRef.current(tabId, text, state),
+      (text, state) => {
+        if (!isSatellite) commitDraftRef.current(tabId, text, state);
+      },
       readOnly,
+      sourceStyle,
       () => completionItemsRef.current,
-      () => saveSourceRef.current(),
-      (state) => selectionAtRef.current(tabId, state)
+      isSatellite ? undefined : () => { void submitSourceRef.current(); },
+      (lineText) => {
+        setInspectPane(pane);
+        setInspection(inspectSourceLine(lineText, completionItemsRef.current));
+        setJump(null);
+      }
     );
   }, []);
 
   /**
-   * S31：光标所在行的词义刷新。把选中行所在的「逻辑行」整块取出（WaitFor
-   * 折叠块跨多行时合并），解析后在右栏显示指令名、bank:id 与每个参数的值。
+   * 把 App 给的 pending tab 并入 tabs（去重 + 保留 dirty/draft）并激活。
+   *
+   * 文档模型是原子提交：新标签从第一帧就持有完整 `dslTemplate`。没有 400 行前缀、
+   * 没有 sourceFillTarget、没有 16ms 分片 dispatch —— 打开完成的定义就是全文可滚、
+   * 可搜、可跳，与成熟本地编辑器一致。
    */
-  const selectionAtRef = useRef<(tabId: string, state: EditorState) => void>(() => {});
-  const handleSelectionAt = useCallback((tabId: string, state: EditorState) => {
-    if (tabId !== activeTabId) {
-      return;
-    }
-    const pos = state.selection.main.head;
-    const line = state.doc.lineAt(pos);
-    const lineNumber = line.number;
-    const lines = state.doc.toString().split('\n');
-    const trimmed = line.text.trim();
-    if (trimmed === '' || trimmed.startsWith('//')) {
-      setInspector(null);
-      return;
-    }
-    // 定位选中行所属的源码块：单行调用即自身；WaitFor( 折叠块向上/向下补齐。
-    const zeroBased = lineNumber - 1;
-    let start = zeroBased;
-    let end = zeroBased;
-    if (/^WaitFor\(/.test(trimmed) && !/\);?\s*$/.test(trimmed)) {
-      let cursor = zeroBased + 1;
-      while (cursor < lines.length && !/\);?\s*$/.test(lines[cursor]!)) cursor += 1;
-      end = Math.min(lines.length - 1, cursor);
-    } else if (/^&&/.test(trimmed)) {
-      let cursor = zeroBased - 1;
-      while (cursor >= 0 && !/^WaitFor\(/.test(lines[cursor]!)) cursor -= 1;
-      start = Math.max(0, cursor);
-      let forward = zeroBased + 1;
-      while (forward < lines.length && !/\);?\s*$/.test(lines[forward]!)) forward += 1;
-      end = Math.min(lines.length - 1, forward);
-    }
-    const block = lines.slice(start, end + 1).join(' ').replace(/\s+/g, '');
-    const parsed = parseInspectorCall(block);
-    let next: EventInspectorState;
-    if (parsed.kind === 'none') {
-      next = { tabId, lineNumber, rows: [], unknownNames: [] };
-    } else if (parsed.kind === 'call' || parsed.kind === 'wait') {
-      const { rows, unknownNames } = buildInspectorRows(parsed, completionItemsRef.current);
-      next = {
-        tabId,
-        lineNumber,
-        ...(parsed.kind === 'wait' ? { waitFor: true as const } : {}),
-        rows,
-        unknownNames
-      };
-    } else {
-      next = { tabId, lineNumber, rows: [], unknownNames: [], unparseable: parsed.canonical };
-    }
-    setInspector(current =>
-      current
-      && current.tabId === tabId
-      && current.lineNumber === lineNumber
-      && current.unparseable === next.unparseable
-      && JSON.stringify(current.rows) === JSON.stringify(next.rows)
-      && (current.waitFor ?? false) === (next.waitFor ?? false)
-        ? current
-        : next
-    );
-  }, [activeTabId]);
-  selectionAtRef.current = handleSelectionAt;
-
-  /** 把 App 给的 pending tab 并入 tabs（去重 + 保留 dirty/draft）并激活。 */
   useEffect(() => {
     const pending = props.pendingTab;
     if (!pending) return;
     const base = baselineText(pending);
+    const readOnly = isSourceReadOnly(pending);
+    const createIncomingState = () => createCompleteSourceState(
+      base,
+      createExtensionsFor(pending.tabId, readOnly, pending.sourceStyle)
+    );
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === pending.tabId);
       if (index >= 0) {
         const existing = previous[index]!;
+        const sourceChanged = existing.draft !== base;
         const merged: InternalTab = {
           ...existing,
           document: pending.document,
-          // 必须显式跟着 document 走：`...existing` 会留住上一次的 gutter 判据，
-          // 重开/提交后拿旧行给新文本打标记。pending 没有时也要清掉（undefined
-          // = 回退到按 document.events 现算）。
           eventWarnings: pending.eventWarnings,
           sourceHash: pending.sourceHash,
           live: pending.live,
@@ -786,20 +799,19 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           dslTemplateTruncated: pending.dslTemplateTruncated,
           dslTemplateTotalLines: pending.dslTemplateTotalLines,
           sourceStyle: pending.sourceStyle,
-          sourceFillTarget: existing.sourceFillTarget
+          // dirty 标签的用户编辑是唯一允许偏离基线的状态；干净标签收到新基线时
+          // 一次提交成完整 EditorState，不再走「先换短前缀、再后台灌」的状态机。
+          ...(sourceChanged && !existing.dirty
+            ? { draft: base, editorState: createIncomingState() }
+            : {})
         };
         return previous.map((tab, i) => (i === index ? merged : tab));
       }
-      const { head, rest } = splitSourceForFirstFrame(base);
       const created: InternalTab = {
         ...pending,
         dirty: false,
-        draft: head,
-        sourceFillTarget: rest.length > 0 ? base : null,
-        editorState: EditorState.create({
-          doc: head,
-          extensions: createExtensionsFor(pending.tabId, isSourceReadOnly(pending))
-        })
+        draft: base,
+        editorState: createIncomingState()
       };
       return [...previous, created];
     });
@@ -807,11 +819,10 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, createExtensionsFor]);
 
-  const applyEventLineScan = useCallback((scan: EventLineScanState) => {
-    eventLineScanRef.current = scan;
-    eventLineInfoRef.current = scan.map;
-    // S31 多列：所有在挂的 view 都刷新 gutter 判据。
-    for (const view of viewsRef.current.values()) {
+  const applyEventLineInfo = useCallback((map: Map<number, EventLineInfo>) => {
+    eventLineInfoRef.current = map;
+    const view = viewRef.current;
+    if (view) {
       (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
         eventLineInfoRef.current;
       view.requestMeasure();
@@ -819,58 +830,114 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, []);
 
   const syncGutterInfo = useCallback((text: string, rows: readonly EventWarningRow[]) => {
-    applyEventLineScan(indexEventLinesIncremental(emptyEventLineScan(), text, rows));
-  }, [applyEventLineScan]);
+    // 全文一次扫描：gutter 判据与文档同步完整，不随「下半份还没到」变化。
+    applyEventLineInfo(indexEventLines(text, rows));
+  }, [applyEventLineInfo]);
 
   useEffect(() => {
     if (!activeTab) return;
-    // 灌入进行中由 onSlice 增量扫新 chunk。这里若用 draft（仍是首帧前缀）
-    // 从空状态重扫，会把已扫到的 gutter 整表清掉，并随 setTabs 退化成 O(N²)。
-    if (activeTab.sourceFillTarget !== null) return;
     syncGutterInfo(activeTab.draft, eventWarningRowsOf(activeTab));
-  }, [activeTabId, activeTab?.draft, activeTab?.sourceFillTarget, activeTab?.eventWarnings, syncGutterInfo]);
+  }, [activeTabId, activeTab?.draft, activeTab?.eventWarnings, syncGutterInfo]);
 
-  /** S31 多列：确保当前渲染的每个 tab 列都有 EditorView，并同步其 state。 */
+  /** 挂载 EditorView（一次）；后续经 setState 换 tab state。 */
   useEffect(() => {
-    for (const tab of visibleTabs) {
-      const host = hostsRef.current.get(tab.tabId);
-      if (!host) continue;
-      let view = viewsRef.current.get(tab.tabId);
-      if (!view) {
-        view = new EditorView({ parent: host, state: tab.editorState });
-        (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
-          eventLineInfoRef.current;
-        viewsRef.current.set(tab.tabId, view);
-      } else if (view.state !== tab.editorState) {
-        view.setState(tab.editorState);
-      }
-    }
-    // 卸载的列（tab 已关闭或移出分栏）destroy 对应 view。
-    for (const [tabId, view] of viewsRef.current) {
-      if (!hostsRef.current.has(tabId)) {
-        view.destroy();
-        viewsRef.current.delete(tabId);
-      }
+    if (!editorHostRef.current) return;
+    const host = editorHostRef.current;
+    const view = new EditorView({
+      parent: host,
+      state: EditorState.create({ doc: '', extensions: [] })
+    });
+    (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
+      eventLineInfoRef.current;
+    viewRef.current = view;
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 激活 tab 切换：换入该 tab 缓存的 per-tab CM state。 */
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !activeTab) return;
+    if (view.state === activeTab.editorState) return;
+    view.setState(activeTab.editorState);
+    (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
+      eventLineInfoRef.current;
+    const pending = pendingRevealRef.current;
+    if (pending?.pane === 'a') {
+      pendingRevealRef.current = null;
+      revealLine(view, pending.line);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleTabsKey, visibleTabs]);
+  }, [activeTabId]);
 
-  /** 提交/加载完整模板/mutation 后 App 回灌 pendingTab → 更新激活 tab 的基线（保留 dirty）。 */
+  useEffect(() => {
+    if (!splitTabId || !splitHostRef.current) return;
+    const host = splitHostRef.current;
+    const view = new EditorView({
+      parent: host,
+      state: EditorState.create({ doc: '', extensions: [] })
+    });
+    viewBRef.current = view;
+    return () => {
+      view.destroy();
+      viewBRef.current = null;
+    };
+  }, [splitTabId !== null]);
+
+  useEffect(() => {
+    const view = viewBRef.current;
+    if (!view || !splitTab) return;
+    if (splitTab.tabId === activeTabId) {
+      view.setState(createCompleteSourceState(
+        splitTab.draft,
+        createExtensionsFor(`${splitTab.tabId}:sat`, true, splitTab.sourceStyle, 'b')
+      ));
+    } else {
+      view.setState(splitTab.editorState);
+    }
+    const pending = pendingRevealRef.current;
+    if (pending?.pane === 'b') {
+      pendingRevealRef.current = null;
+      revealLine(view, pending.line);
+    }
+    // 只在分栏目标/主栏切换时换 state。依赖 editorState 会在每次按键 setState，光标被掐掉。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitTabId, activeTabId, createExtensionsFor]);
+
+  useEffect(() => {
+    const view = viewBRef.current;
+    if (!view || !splitTab || splitTab.tabId !== activeTabId) return;
+    if (view.state.doc.toString() === splitTab.draft) return;
+    const top = view.scrollDOM.scrollTop;
+    view.setState(createCompleteSourceState(
+      splitTab.draft,
+      createExtensionsFor(`${splitTab.tabId}:sat`, true, splitTab.sourceStyle, 'b')
+    ));
+    view.scrollDOM.scrollTop = top;
+  }, [splitTab?.draft, splitTabId, activeTabId, createExtensionsFor]);
+
+  /**
+   * 提交/加载完整模板/mutation 后 App 回灌 pendingTab → 更新激活 tab 的基线。
+   *
+   * 第一个 effect 已经把所有干净 tab 的 `draft` 换成完整基线；这里只补两件事：
+   * 把新 EditorState 换进同一个 EditorView（不销毁、不重挂），并同步 gutter。
+   */
   useEffect(() => {
     const pending = props.pendingTab;
     if (!pending || !activeTabId || pending.tabId !== activeTabId) return;
-    const view = viewsRef.current.get(activeTabId);
+    const view = viewRef.current;
     if (!view) return;
     const current = tabs.find((tab) => tab.tabId === activeTabId);
     if (!current || current.dirty) return;
     const next = baselineText(pending);
-    if (current.sourceFillTarget === next) return;
-    if (next === current.draft && current.sourceFillTarget === null) return;
-    const { head, rest } = splitSourceForFirstFrame(next);
-    const nextState = EditorState.create({
-      doc: head,
-      extensions: createExtensionsFor(activeTabId, isSourceReadOnly(pending))
-    });
+    if (next === current.draft) return;
+    const nextState = createCompleteSourceState(
+      next,
+      createExtensionsFor(activeTabId, isSourceReadOnly(pending), pending.sourceStyle)
+    );
     setTabs((previous) =>
       previous.map((tab) =>
         tab.tabId === activeTabId
@@ -880,70 +947,42 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
               eventWarnings: pending.eventWarnings,
               sourceHash: pending.sourceHash,
               dslTemplate: pending.dslTemplate,
-              draft: head,
+              draft: next,
               dirty: false,
-              sourceFillTarget: rest.length > 0 ? next : null,
               editorState: nextState
             }
           : tab
       )
     );
     view.setState(nextState);
-    syncGutterInfo(head, eventWarningRowsOf(pending));
+    syncGutterInfo(next, eventWarningRowsOf(pending));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, activeTabId]);
 
-  /** 后台把剩余源码灌进当前 tab。取消/切走会中止这一代填充。 */
+  /** 面板从 hidden 回到可视工作区时，让 CodeMirror 按真实布局重测。 */
   useEffect(() => {
-    const tab = tabs.find((item) => item.tabId === activeTabId);
-    if (!tab || tab.dirty || tab.sourceFillTarget === null) return;
-    const remaining = tab.sourceFillTarget.slice(tab.editorState.doc.length);
-    if (remaining.length === 0) return;
-    const generation = sourceFillGenerationRef.current + 1;
-    sourceFillGenerationRef.current = generation;
-    const controller = new AbortController();
-    const rows = eventWarningRowsOf(tab);
-    void appendSourceSlices({
-      state: tab.editorState,
-      rest: remaining,
-      signal: controller.signal,
-      onSlice: (state, chunk) => {
-        if (sourceFillGenerationRef.current !== generation) return;
-        applyEventLineScan(indexEventLinesIncremental(eventLineScanRef.current, chunk, rows));
-        const view = viewsRef.current.get(tab.tabId);
-        if (view && view.state !== state) view.setState(state);
-      }
-    }).then((result) => {
-      if (sourceFillGenerationRef.current !== generation || result.cancelled) return;
-      setTabs((previous) =>
-        previous.map((item) =>
-          item.tabId === tab.tabId
-            ? {
-                ...item,
-                draft: result.state.doc.toString(),
-                editorState: result.state,
-                sourceFillTarget: null
-              }
-            : item
-        )
-      );
-      const view = viewsRef.current.get(tab.tabId);
-      if (view) view.setState(result.state);
-    });
-    return () => {
-      controller.abort();
+    if (props.active === false) return;
+    const view = viewRef.current;
+    if (view) view.requestMeasure();
+  }, [props.active, activeTabId]);
+
+  useEffect(() => {
+    const host = editorHostRef.current;
+    if (!host) return;
+    const onFocusOut = (event: FocusEvent): void => {
+      const next = event.relatedTarget;
+      if (next instanceof Node && host.contains(next)) return;
+      const tab = tabs.find((item) => item.tabId === activeTabId);
+      if (!tab || !tab.dirty || isSourceReadOnly(tab)) return;
+      void submitSourceRef.current();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId, activeTab?.sourceFillTarget, activeTab?.dirty]);
+    host.addEventListener('focusout', onFocusOut);
+    return () => host.removeEventListener('focusout', onFocusOut);
+  }, [activeTabId, tabs]);
 
   function activateTab(tabId: string): void {
     setActiveTabId(tabId);
   }
-
-  /** S31：切 tab 后右栏词义清空（避免上一文档的语句说明残留）。 */
-  useEffect(() => {
-    setInspector(null);
-  }, [activeTabId]);
 
   function closeTab(tabId: string): void {
     setTabs((previous) => {
@@ -955,108 +994,81 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       }
       return next;
     });
+    if (splitTabId === tabId) setSplitTabId(null);
+  }
+
+  function jumpToEvent(eventId: number): void {
+    const result = resolveEventJump(
+      eventId,
+      eventIndexes,
+      inspectPane === 'b' ? (splitTabId ?? undefined) : (activeTabId ?? undefined)
+    );
+    setJump(result);
+    if (result.kind !== 'hit') return;
+    if (result.tabId === activeTabId) {
+      revealLine(viewRef.current, result.line);
+      return;
+    }
+    if (result.tabId === splitTabId) {
+      revealLine(viewBRef.current, result.line);
+      return;
+    }
+    pendingRevealRef.current = { pane: 'b', line: result.line };
+    setSplitTabId(result.tabId);
   }
 
   async function submitSource(): Promise<void> {
-    if (!activeTab || !props.onDslSubmit || submitting) return;
+    if (!activeTab || !props.onDslSubmit || submitting || isSourceReadOnly(activeTab)) return;
     setSubmitting(true);
-    setStatus('保存中…');
+    setStatus('正在应用…');
     try {
       const result = await props.onDslSubmit(activeTab, activeTab.draft);
       if (result.ok) {
         const nextText = result.nextDslTemplate ?? activeTab.draft;
-        const { head, rest } = splitSourceForFirstFrame(nextText);
-        const nextState = EditorState.create({
-          doc: head,
-          extensions: createExtensionsFor(activeTab.tabId, isSourceReadOnly(activeTab))
-        });
+        const nextState = createCompleteSourceState(
+          nextText,
+          createExtensionsFor(activeTab.tabId, isSourceReadOnly(activeTab), activeTab.sourceStyle)
+        );
         setTabs((previous) =>
           previous.map((tab) =>
             tab.tabId === activeTab.tabId
               ? {
                   ...tab,
                   dirty: false,
-                  draft: head,
+                  draft: nextText,
                   dslTemplate: nextText,
                   dslTemplateTruncated: false,
                   dslTemplateTotalLines: nextText.split('\n').length,
-                  sourceFillTarget: rest.length > 0 ? nextText : null,
                   editorState: nextState
                 }
               : tab
           )
         );
-        viewsRef.current.get(activeTab.tabId)?.setState(nextState);
-        // 保存刚成功、App 还没回灌 pendingTab：先按保存前的判据行给新文本打标记，
-        // 下一轮 pendingTab 到达时会用权威 outline 覆盖。
-        syncGutterInfo(head, eventWarningRowsOf(activeTab));
-        setStatus('已保存（可回滚）');
+        viewRef.current?.setState(nextState);
+        syncGutterInfo(nextText, eventWarningRowsOf(activeTab));
+        setStatus('已应用，可回滚。');
       } else {
-        setStatus(result.diagnostics[0]?.message ?? '保存被拒绝。');
+        setStatus(result.diagnostics[0]?.message ?? '应用失败。');
       }
     } catch (error) {
-      setStatus(`保存异常：${error instanceof Error ? error.message : String(error)}`);
+      setStatus(`应用异常：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setSubmitting(false);
     }
   }
-  // S14：Ctrl+S keymap 经 ref 取最新 save（闭包不持有本次渲染的 activeTab）。
-  saveSourceRef.current = () => { void submitSource(); };
+  submitSourceRef.current = submitSource;
 
   const readOnly = activeTab
     ? (!activeTab.live || activeTab.dslTemplate === null)
     : true;
 
-  /** S31 右栏词义：选中语句 → 指令名/bank:id/参数值。 */
-  const renderInspector = (state: EventInspectorState | null): ReactElement => {
-    if (!state) {
-      return <div className="esw-inspector__empty">选中一条语句查看参数说明。</div>;
-    }
-    if (state.unparseable) {
-      return (
-        <div className="esw-inspector__empty">
-          这一行无法单独解析成调用（可能是 WaitFor 折叠块中间行或残缺行），选中整条语句再试。
-        </div>
-      );
-    }
-    if (state.rows.length === 0 && state.unknownNames.length === 0) {
-      return <div className="esw-inspector__empty">事件头或注释行没有参数说明。</div>;
-    }
-    return (
-      <div className="esw-inspector__body">
-        {state.waitFor === true && (
-          <div className="esw-inspector__fold">WaitFor( 折叠块：等待 MAIN 条件组满足后继续。</div>
-        )}
-        {state.rows.map((row, index) => (
-          <div className="esw-inspector__row" key={`${row.name}-${row.bank}-${row.id}-${index}`}>
-            <div className="esw-inspector__row-head">
-              <strong>{row.name}</strong>
-              <span className="muted">bank {row.bank}:{row.id}</span>
-            </div>
-            <ul className="esw-inspector__args">
-              {row.args.map((arg) => (
-                <li key={arg.name}>
-                  <span className="esw-inspector__arg">{arg.name}</span>
-                  <span className="muted">
-                    {arg.type}{arg.vararg ? '…' : ''}{arg.hidden ? ' · 折叠隐藏' : ''}
-                  </span>
-                  <span className="esw-inspector__value">{arg.value}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-        {state.unknownNames.map((name) => (
-          <div className="esw-inspector__unknown" key={name}>
-            未解码：EMEDF 目录里没有 {name} 的定义，无法解释它的参数。
-          </div>
-        ))}
-      </div>
-    );
-  };
+  const visibleStatus = props.opening
+    ? '正在读取 EMEVD（Bridge → worker 反汇编 → 切片拼齐 → 一次提交缓冲）…'
+    : status;
 
   return (
     <section className="event-source-workbench" aria-label="Event 源码工作台">
+
       <div className="esw-tabs" role="tablist" aria-label="事件文档标签">
         {tabs.map((tab) => (
           <button
@@ -1082,68 +1094,111 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
             </span>
           </button>
         ))}
-        {tabs.length === 0 && <span className="muted esw-tabs__empty">暂无打开的事件文档。</span>}
-      </div>
-
-      <div className="esw-toolbar">
-        <div className="esw-toolbar__group">
-          <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 走 CodeMirror search keymap">
-            查找：Ctrl+F
+        {tabs.length === 0 && (
+          <span className="muted esw-tabs__empty">
+            {props.opening ? '正在打开事件文档；在完整缓冲提交前不显示空编辑器。' : '暂无打开的事件文档。'}
           </span>
-          <span className="muted" style={{ fontSize: 11 }} title="Ctrl+S 保存当前源码">
-            保存：Ctrl+S
-          </span>
-          <button
-            type="button"
-            className="esw-toolbar__split"
-            title="并排多份事件源码对照，每列独立滚动与光标"
-            onClick={() => setColumnCount((count) => (count >= 3 ? 1 : count + 1))}
-          >
-            分栏 {columnCount}
-          </button>
-          {status !== '就绪' && (
-            <span className="muted" style={{ fontSize: 11 }} role="status">
-              {status}
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div className="esw-body">
-        {visibleTabs.length === 0 ? (
-          <section className="esw-source" aria-label="事件源码">
-            <div className="esw-source__host" data-editor-engine="codemirror" />
-          </section>
-        ) : (
-          visibleTabs.map((tab) => (
-          <section
-            className="esw-source"
-            key={tab.tabId}
-            aria-label="事件源码"
-            {...citeScriptAttr(tab.tabId, tab.title)}
-          >
-            <div
-              ref={(element) => {
-                if (element) hostsRef.current.set(tab.tabId, element);
-                else hostsRef.current.delete(tab.tabId);
-              }}
-              className="esw-source__host"
-              data-editor-engine="codemirror"
-              data-tab-id={tab.tabId}
-            />
-            {tab.live && tab.dslTemplate === null && (
-              <div className="event-source__notice event-source__notice--blocked" role="alert">
-                事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
-                sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
-              </div>
-            )}
-          </section>
-          ))
         )}
-        <section className="esw-inspector" aria-label="事件源码说明">
-          {renderInspector(inspector)}
-        </section>
       </div>
+
+      <WorkbenchLayout
+        label="Event 源码工作台"
+        toolbar={(
+          <div className="esw-toolbar__group">
+            <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 走 CodeMirror search keymap">
+              查找：Ctrl+F
+            </span>
+            {!readOnly && (
+              <span className="muted" style={{ fontSize: 11 }} title="Ctrl+S 或失焦直接应用，应用前自动备份，可回滚">
+                Ctrl+S 应用
+              </span>
+            )}
+            {tabs.length > 0 && (
+              <label className="esw-split-picker">
+                并排
+                <select
+                  aria-label="并排对照"
+                  value={splitTabId ?? ''}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setSplitTabId(next.length > 0 ? next : null);
+                  }}
+                >
+                  <option value="">关</option>
+                  {tabs.map((tab) => (
+                    <option key={tab.tabId} value={tab.tabId}>
+                      {tab.title}{tab.tabId === activeTabId ? '（本文件第二视口）' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <span className="muted" style={{ fontSize: 11 }}>{visibleStatus}</span>
+          </div>
+        )}
+        columns={[
+          {
+            id: 'source-a',
+            title: activeTab?.title ?? '源码',
+            minWidth: 240,
+            initialFlex: 2,
+            children: (
+              <section className="esw-source" aria-label="事件源码">
+                <div ref={editorHostRef} className="esw-source__host" data-editor-engine="codemirror" />
+                {props.opening && !activeTab && (
+                  <div className="esw-source__loading" role="status">
+                    {props.openingPreview ? (
+                      <pre className="esw-source__preview">{props.openingPreview}</pre>
+                    ) : (
+                      '正在读取并反汇编完整 EMEVD；就绪后将在一次提交中显示全文。'
+                    )}
+                  </div>
+                )}
+                {activeTab?.live && activeTab.dslTemplate === null && (
+                  <div className="event-source__notice event-source__notice--blocked" role="alert">
+                    事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
+                    sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
+                  </div>
+                )}
+              </section>
+            )
+          },
+          ...(splitTab
+            ? [{
+                id: 'source-b',
+                title: splitTab.title,
+                ...(splitTab.tabId === activeTabId ? { hint: '第二视口' } : {}),
+                minWidth: 240,
+                initialFlex: 2,
+                children: (
+                  <section className="esw-source" aria-label="对照源码">
+                    <div className="esw-pane-bar">
+                      <span className="muted">{splitTab.title}</span>
+                      <button type="button" className="toolbar-button" onClick={() => setSplitTabId(null)}>
+                        关闭分栏
+                      </button>
+                    </div>
+                    <div ref={splitHostRef} className="esw-source__host" data-editor-engine="codemirror" />
+                  </section>
+                )
+              }]
+            : []),
+          {
+            id: 'meaning',
+            title: '词义',
+            minWidth: 200,
+            initialWidth: 280,
+            children: (
+              <EventMeaningPane
+                inspection={inspection}
+                jump={jump}
+                onJumpEvent={jumpToEvent}
+                documentTitle={activeTab?.title ?? 'event'}
+              />
+            )
+          }
+        ]}
+      />
     </section>
   );
 }

@@ -1,12 +1,12 @@
-import type {
-  BridgeResult,
-  Diagnostic,
-  EditorCatalogSummary,
-  EditorDocumentResult,
-  IndexedFile,
-  PatchHistoryEntry,
-  ResourcePreview,
-  SaveTextResourceResult
+import {
+  type BridgeResult,
+  type Diagnostic,
+  type EditorCatalogSummary,
+  type EditorDocumentResult,
+  type IndexedFile,
+  type PatchHistoryEntry,
+  type ResourcePreview,
+  type SaveTextResourceResult
 } from '@soulforge/shared';
 import { maskPathFragments } from '@soulforge/shared';
 
@@ -43,6 +43,8 @@ export type RendererPatchHistoryEntry = Omit<
 
 const SOURCE_TEXT_KEYS = new Set([
   'dslTemplate',
+  'sourcePrefix',
+  'sliceText',
   'draft',
   'nextDslTemplate'
 ]);

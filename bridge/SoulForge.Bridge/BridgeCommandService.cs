@@ -1284,50 +1284,89 @@ internal sealed class BridgeCommandService
                     var dcx = DcxNativeDocument.Read(file, oodleRuntimeRoot);
                     fxrPayload = dcx.Payload;
                 }
+                object[] containerEntries = Array.Empty<object>();
+                int? selectedEntryIndex = null;
+                string? selectedEntryName = null;
                 if (fxrPayload.AsSpan(0, 4).SequenceEqual("BND4"u8))
                 {
                     var binder = Bnd4NativeDocument.Read(fxrPayload);
-                    // S24：ffxbnd 效果库按 entryName 精确取子项（UI 逐条打开）；
-                    // 缺省取第一条 .fxr（向后兼容）。
-                    var entryName = OptionString("entryName", "");
-                    var entry = entryName.Length > 0
-                        ? binder.Entries.FirstOrDefault(e =>
-                            e.Name.Equals(entryName, StringComparison.OrdinalIgnoreCase)
-                            || e.Name.EndsWith(entryName, StringComparison.OrdinalIgnoreCase))
-                        : binder.Entries.FirstOrDefault(e =>
-                            e.Name.EndsWith(".fxr", StringComparison.OrdinalIgnoreCase));
-                    if (entry is null)
+                    var fxrEntries = binder.Entries
+                        .Where(e => e.Name.EndsWith(".fxr", StringComparison.OrdinalIgnoreCase))
+                        .ToArray();
+                    if (fxrEntries.Length == 0)
                         throw new InvalidDataException("BND4 容器中没有 .fxr 子项。");
-                    fxrPayload = binder.GetStoredBytes(entry.Index);
+                    containerEntries = fxrEntries
+                        .Select(e => (object)new { entryIndex = e.Index, entryName = e.Name })
+                        .ToArray();
+                    var wantName = OptionString("entryName", "");
+                    var wantIndex = OptionInt("entryIndex", -1);
+                    Bnd4Entry? selected = null;
+                    if (!string.IsNullOrEmpty(wantName))
+                    {
+                        selected = fxrEntries.FirstOrDefault(e =>
+                            string.Equals(BinderEntryBasename(e.Name), BinderEntryBasename(wantName), StringComparison.OrdinalIgnoreCase)
+                            || e.Name.EndsWith(wantName, StringComparison.OrdinalIgnoreCase));
+                    }
+                    else if (wantIndex >= 0)
+                    {
+                        selected = fxrEntries.FirstOrDefault(e => e.Index == wantIndex);
+                    }
+                    selected ??= fxrEntries[0];
+                    selectedEntryIndex = selected.Index;
+                    selectedEntryName = selected.Name;
+                    try
+                    {
+                        fxrPayload = binder.GetStoredBytes(selected.Index);
+                    }
+                    catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+                    {
+                        return BridgeResult<object>.Failed(
+                            file, "sfx", "FXR_DOCUMENT_READ_FAILED",
+                            ex.Message,
+                            new { containerEntries, selectedEntryIndex, selectedEntryName });
+                    }
                 }
-                var document = FxrNativeDocument.Read(fxrPayload);
-                var roundTrip = document.VerifyRoundTrip();
-                var diagnostics = new List<Diagnostic>
+                try
                 {
-                    new Diagnostic(
-                        roundTrip.Consistent ? "info" : "error",
-                        roundTrip.Consistent ? "FXR_DOCUMENT_ROUNDTRIP_VERIFIED" : "FXR_DOCUMENT_ROUNDTRIP_FAILED",
-                        roundTrip.Consistent
-                            ? $"FXR3 只读重解析确定性通过；rootNodes={document.RootNodeCount}, nodes={document.TotalSection4NodeCount}, hosts={document.Hosts.Count}, properties={document.Section7Total}。本项只证明同一份字节解析两遍一致，不构成解析完整性声明。"
-                            : "FXR3 只读往返语义不一致。",
-                        BridgeResult<object>.MakeSourceUri(file),
-                        roundTrip)
-                };
-                // 能力边界必须单列诊断，不能只靠 authority 降级：消费方常只读
-                // authority，而「哪几项没解析全」才是排查入口（硬约束 8）。
-                var fxrUnparsedGaps = document.UnparsedGaps();
-                if (fxrUnparsedGaps.Length > 0)
-                {
-                    diagnostics.Add(new Diagnostic(
-                        "warning",
-                        "FXR_STRUCTURE_NOT_PARSED_IN_SCOPE",
-                        $"FXR3 刻意不解析以下区间：{string.Join("; ", fxrUnparsedGaps)}。"
-                        + "Section11 无 schema 按不透明 int 数组上报；Section9/Section12-14"
-                        + "未在真实样本验证。authority 已降为 partial。",
-                        BridgeResult<object>.MakeSourceUri(file),
-                        new { unparsedGaps = fxrUnparsedGaps }));
+                    var document = FxrNativeDocument.Read(fxrPayload);
+                    var roundTrip = document.VerifyRoundTrip();
+                    var diagnostics = new List<Diagnostic>
+                    {
+                        new Diagnostic(
+                            roundTrip.Consistent ? "info" : "error",
+                            roundTrip.Consistent ? "FXR_DOCUMENT_ROUNDTRIP_VERIFIED" : "FXR_DOCUMENT_ROUNDTRIP_FAILED",
+                            roundTrip.Consistent
+                                ? $"FXR3 只读重解析确定性通过；rootNodes={document.RootNodeCount}, nodes={document.TotalSection4NodeCount}, hosts={document.Hosts.Count}, properties={document.Section7Total}。本项只证明同一份字节解析两遍一致，不构成解析完整性声明。"
+                                : "FXR3 只读往返语义不一致。",
+                            BridgeResult<object>.MakeSourceUri(file),
+                            roundTrip)
+                    };
+                    // 能力边界必须单列诊断，不能只靠 authority 降级：消费方常只读
+                    // authority，而「哪几项没解析全」才是排查入口（硬约束 8）。
+                    var fxrUnparsedGaps = document.UnparsedGaps();
+                    if (fxrUnparsedGaps.Length > 0)
+                    {
+                        diagnostics.Add(new Diagnostic(
+                            "warning",
+                            "FXR_STRUCTURE_NOT_PARSED_IN_SCOPE",
+                            $"FXR3 刻意不解析以下区间：{string.Join("; ", fxrUnparsedGaps)}。"
+                            + "Section11 无 schema 按不透明 int 数组上报；Section9/Section12-14"
+                            + "未在真实样本验证。authority 已降为 partial。",
+                            BridgeResult<object>.MakeSourceUri(file),
+                            new { unparsedGaps = fxrUnparsedGaps }));
+                    }
+                    return BridgeResult<object>.Partial(
+                        file, "sfx", diagnostics.ToArray(),
+                        document.ToEnvelope(roundTrip, containerEntries, selectedEntryIndex, selectedEntryName));
                 }
-                return BridgeResult<object>.Partial(file, "sfx", diagnostics.ToArray(), document.ToEnvelope(roundTrip));
+                catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+                {
+                    // 一条子项解析失败不得抹掉同包兄弟列表。
+                    return BridgeResult<object>.Failed(
+                        file, "sfx", "FXR_DOCUMENT_READ_FAILED",
+                        ex.Message,
+                        new { containerEntries, selectedEntryIndex, selectedEntryName });
+                }
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
@@ -2096,6 +2135,13 @@ internal sealed class BridgeCommandService
         var fileName = name.Replace('\\', '/').Split('/').LastOrDefault() ?? name;
         var dot = fileName.LastIndexOf('.');
         return dot >= 0 && dot < fileName.Length - 1 ? fileName[dot..].ToLowerInvariant() : "(none)";
+    }
+
+    private static string BinderEntryBasename(string name)
+    {
+        var normalized = name.Replace('\\', '/');
+        var slash = normalized.LastIndexOf('/');
+        return slash >= 0 ? normalized[(slash + 1)..] : normalized;
     }
 
     private static async Task<BridgeResult<object>> InspectEnvelopeAsync(

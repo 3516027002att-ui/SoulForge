@@ -182,6 +182,20 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     // effect 不跑 → 预览初始态是「正在查找伴生模型（chrbnd）…」。
     assert.match(html, /正在查找伴生模型（chrbnd）…/);
     assert.doesNotMatch(html, /本夜不挂/);
+    assert.doesNotMatch(html, /预览不可用/);
+    assert.doesNotMatch(html, /见底部日志/);
+  });
+
+  it('S17：源码挂 FlverViewer，有网格时出现预览宿主', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'TaeWorkbenchPanel.tsx'),
+      'utf8'
+    );
+    assert.match(source, /FlverViewer/);
+    assert.match(source, /tae-preview-host/);
+    assert.match(source, /模型已挂，动画播放未接入/);
+    assert.doesNotMatch(source, /本夜不挂/);
+    assert.doesNotMatch(source, /见底部日志/);
   });
 
   it('S17：有网格数据时右栏渲染 FlverViewer 预览宿主；空态是可行动句', () => {

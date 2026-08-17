@@ -1060,7 +1060,8 @@ Params 20% (min 180) | Rows 29% (min 260) | Fields 35% (min 320)
 
 - 字段名（左，中文 DisplayName 优先：本机 Yapped Defs 的 `DisplayName` 覆盖为字段 `name`；Yapped 缺的字段用 Smithbox **英文** Annotation，禁止用日文 DisplayName 当主标签）；
 - 悬停 Description（字段名 span 的 `title` 取 `description`，无 description 时回落字段名）；
-- 当前值（可编辑，已有 input；行宽与定义一致即自动授信放行，去掉「必须先点信任」路径）；
+- 当前值（可编辑；行宽与定义一致即自动授信放行，去掉「必须先点信任」路径）；
+- `bool` 与 `bitWidth === 1` 画 checkbox，点一下即 `commitField`（0/1），不等失焦；s32/f32 仍是输入框；
 - 对照值或原始值；
 - 枚举名称；
 - 类型、范围和说明；
@@ -1236,7 +1237,10 @@ Tools/Symbols 空栏。写入形态是「源码 IDE」而不是字节替换：
   只读；
 - 可编辑源码 = 明文或反编译文本；Ctrl+S 应用（同 S14 话术「正在应用…」「已应用，
   可回滚。」），容器条目经 Patch Engine `replaceContainerChild`（回传 child/
-  container hash 乐观校验，写回 plaintext Lua），独立文件走 `saveTextResource`；
+  container hash 乐观校验），独立文件走 `saveRawReplace`；写回编码必须跟打开时
+  一致（`encodeScriptSourceForWriteback`：ascii / utf8 / utf8-bom / shift_jis
+  走 `encodePlaintext`，混合编码只改纯 ASCII 行并原样保留高位字节，反编译
+  LuaQ/LuaP 写 UTF-8 明文，不要自研编译器）；
 - 形态识别在 renderer 探 `listScriptContainerEntriesPage`（容器格式未知即独立
   文件）；内层地址构造、hash 与回滚都在 main；
 - DSLuaDecompiler 是**读入依赖**（打开即反编译），不是 writer/compiler：SoulForge
@@ -1394,7 +1398,7 @@ Bottom Composer
 - workspace 级持久化；
 - 鼠标拖动或键盘每次 16px；
 - 普通状态只有 1px 左分隔线；
-- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 200–620（S8 下限从 340 收到 200：够放「引用 + 发送」）；
+- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 160–620（S8 下限从 340 收到 160：窄到一条工具栏宽）；
 - `Ctrl+J` 显示/隐藏；
 - 隐藏不取消任务、不清除审批。
 
@@ -2280,7 +2284,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 1440px
 1920px
 200% system/browser zoom
-200 / 440 / 620px Agent widths（S8 下限 200）
+160 / 440 / 620px Agent widths（S8 下限 160）
 ```
 
 窄窗口策略：
@@ -2564,11 +2568,15 @@ SHELL-09 → SHELL-10
 #### EVENT-30B — DarkScript3 source workbench
 
 > **S14/S15（2026-08-15，用户裁定）取代本卡的「只读展示」条款**：
-> - 源码**可编辑**，`Ctrl+S`（或等价）直接应用；不要「编译并提交」按钮、不要审查对话框、不要出现 Bridge / 补丁引擎字样（底层仍经 typed mutation → Patch Engine，应用前自动备份，失败或撤销走审计与回滚）。
-> - 删橙色眉题（`.event-source__header` / eyebrow / 就绪）与黄条（`.event-source__notice`）。
+> - 源码**可编辑**，`Ctrl+S`（或失焦）直接应用；不要「编译并提交」按钮、不要审查对话框、不要出现 Bridge / 补丁引擎字样（底层仍经 typed mutation → Patch Engine，应用前自动备份，失败或撤销走审计与回滚）。
+> - 删橙色眉题（`.event-source__header` / eyebrow / 就绪）与黄条（`.event-source__notice`）。EMEDF 缺失的失败 alert 可留。
 > - 内层标签只显示短名（`common` / `m11_02_71_10`），禁止 `event/….emevd.dcx`。
 > - 读取失败时编辑区正文给 `code + 人话 + 下一步`（KRAK 缺原版：到「开始」页选择含 sekiro.exe 的原版目录），禁止假 `resource "file://…"` 伪源码与「详情见底部日志」；失败随 `eventOpenFailure` 附进 Agent 系统提示，Agent 能直接复述原因和下一步。
 > - 编不了的指令：该行标未解码，不锁整份只读、不假成功写盘。
+>
+> **S14 已落地（2026-08-17）**：去头 / 去日常黄条 / `$Event` 可编辑 / `Ctrl+S` 与失焦走 `compileEmevdDarkScript` → 现有 typed plan → Patch Engine。能对齐的改动（事件 id、rest、已有指令固定参数）可写；新增/删除/重排事件或指令、改未解码注释 = `DARKSCRIPT_LINE_UNDECODED`，不写盘。查找只留键盘 `Ctrl+F`。
+>
+> **S31 已落地（2026-08-17）**：右栏词义（指令名 / EMEDF 参数名 / 类型 / 当前值）；`WorkbenchLayout` 源码+对照+词义独立滚动；并排最多两列（另一已打开 tab，或本文件只读第二视口），不再灌 IPC。`$Event(id)` 行号索引一遍建成；光标在 `eventId` 参数上可转到已打开文档里的对应事件。FMG/PARAM 名表不在事件面板里 → `insufficient_evidence`，不挂假灯泡。
 
 > **S14 落地（2026-08-17）**：
 > - 去头去黄条：`.event-source__header`（eyebrow + h2）、日常 `.event-source__notice`、「反汇编源码只读」标签与「编译并提交」按钮已删；工具条只留查找/保存提示与 `role="status"` 状态句；EMEDF 缺失的失败 alert（`--blocked`）保留。
@@ -2587,9 +2595,9 @@ SHELL-09 → SHELL-10
 > **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
 > - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
 > - **B**：renderer 打开只打一枪——`readEmevdDocument` envelope 双读删除，事件数 / sourceHash / gutter 判据全部由 `readEmevdFullDocument` 的 outline 给（`unknownCount` 按完整 EMEDF 逐条判，不再有 256 条采样造成的假「整段未知」）；`mapEmevdEnvelope` / `alignEmevdDocumentAnchors` 删除，`indexEventLines` 按 `$Event(` 出现顺序映射。
-> - **C**：反汇编单次解码（`DecodeStatus` 化，折叠与渲染共用一份结果）+ EMEDF registry 索引（WeakMap：校验 + bank→id→def，33266 条指令从 9s 级降到 4ms 级）+ `renderEmevdDarkScriptAsync` 分片让出（可取消，不返回半成品）。
-> - **D**：sanitizer 源码字段豁免——`dslTemplate` / `text` 等是内容不是元数据，不做整串路径替换（S13 口径）；路径防线只留键名与诊断 message。
-> - **E**：CodeMirror 禁首帧 `EditorState.create(全文)`——首帧只灌 400 行前缀，常驻 interval 每 16ms `view.dispatch` 追加一片；`indexEventLines` 增量更新不整篇 split；dirty（用户编辑）一次性补全；tab 切回走缓存 state 零 parse。
+> - **C**：反汇编单次解码（`DecodeStatus` 化，折叠与渲染共用一份结果）+ EMEDF registry 索引（WeakMap：校验 + bank→id→def，33266 条指令从 9s 级降到 4ms 级）+ `renderEmevdDarkScriptAsync` 派到 `worker_threads`（3.3，取消 terminate，不返回半成品）。
+> - **D**：sanitizer 源码字段豁免——`dslTemplate` / `sourcePrefix` / `sliceText` 等是内容不是元数据，不做整串路径替换（S13 口径）；路径防线只留键名与诊断 message。
+> - **E**：CodeMirror 原子全文缓冲（S19 / `docs/algorithm1.md`）——App 用 `sourceToken` + `readEmevdSourceSlice` 拼齐全文后一次 `EditorState.create`（3.1 首包只有前 400 行，面板禁止分片 `dispatch`）。切域 hidden 常驻挂载，保留 tab / dirty / EditorState / 滚动。`indexEventLines` 流式扫行。
 > - **F**：领域切换只开 `filesForDomain` 第一份（common_func 不预加载）；main 按 sourceHash 缓存反汇编文本，切回零解析（缓存失效 = 写入 / hash 变）。
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。
@@ -2617,8 +2625,8 @@ SHELL-09 → SHELL-10
 #### SCRIPT-41
 
 - **Allowed**：`[MODIFY] packages/shared/src/script-container.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEntry.ts`；`[MODIFY] packages/core/src/script/plaintextScriptEdit.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`；`[MODIFY] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/ScriptContainerPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
-- **Steps**：按 §10.2（S16）：luabnd 容器 `Files | Source` 两栏 / 独立 `.hks/.lua` 单 Source；打开即按字节判定，`\x1bLua` 字节码由 main 调本机 DSLuaDecompiler 反编译为 Lua 文本；反编译失败给结构化原因，不显示 fake hex、不把字节码伪装成可编辑源码；明文与反编译文本均可编辑，Ctrl+S 应用（同 S14 话术）并保留回滚，容器条目经 `replaceContainerChild`、独立文件经 `saveTextResource`；形态识别与内层地址构造都在 main。
-- **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、renderer unit/E2E（S16 脚本 IDE 两用例）。
+- **Steps**：按 §10.2（S16 + S34）：luabnd 容器 `Files | Source` 两栏 / 独立 `.hks/.lua` 单 Source；打开即按字节判定，`\x1bLua` 字节码由 main 调本机 DSLuaDecompiler 反编译为 Lua 文本；反编译失败给结构化原因，不显示 fake hex、不把字节码伪装成可编辑源码；明文与反编译文本均可编辑，Ctrl+S 应用（同 S14 话术）并保留回滚，容器条目经 `replaceContainerChild`、独立文件经 `saveRawReplace`；写回编码跟打开时一致（`encodeScriptSourceForWriteback`）；形态识别与内层地址构造都在 main。
+- **Tests**：`npm run test:script-container-evidence`、`npm run test:plaintext-script-write`、`npm run test:plaintext-script-edit`（含写回 4 例）、renderer unit/E2E（S16 脚本 IDE 两用例）。
 
 ### 18.19 MAP/ASSET 独立卡
 
@@ -2721,6 +2729,7 @@ SHELL-09 → SHELL-10
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/editors/VfxWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/VfxWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
 - **Output**：Effect / Particle list | 真实预览（没有就不做假 viewport）| Inspector。已知/未知 node 状态明确。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；known/unknown node、selection chain、preview isolation、no fake graph 和参考截图。
+- **S24**：左栏在 ffxbnd 下多一组「包内效果」；中栏继续诚实空态，不要假粒子 viewport。
 
 #### VFX-54C — FXR write
 
@@ -2758,7 +2767,7 @@ SHELL-09 → SHELL-10
   - 动画名：合法 hkx 茎直接用，乱码/空白/「葉」一律丢弃显示数字 id（`isLegalHkxStem`/`animationIdLabel` 可单测）；列表主标签是 id/hkx 茎，右侧显示事件数。
   - 词条行：`{完整 typeId} {类型名}`（如 `0 JumpTable`），类型名来自本机 `TAE.Template.SDT.xml`（main 解析，renderer 只拿逻辑名；无模板「未命名」）；列表不再出现秒区间与「事…」截断。
   - 中栏详情整块移除（DetailsSection/TaeEventEditor/新增事件入口删除），详情下沉到 `WorkbenchLayout` footer：起始帧/结束帧（30fps，主标签帧 + ≈ 秒小字）、完整 typeId + 类型名、事件下标、参数字段（按模板解码；无模板「未解码」+ 原始 hex，禁止编造 SoundType）；时间编辑保留在 footer（标签起始帧/结束帧，内部仍走 update-event-times 秒）。
-  - 预览挂伴生 chrbnd：overlay `chr/<id>.chrbnd.dcx` → 原版同相对路径；两边都没有给可行动空态（未挂原版写明去「开始」页）。骨骼动画播放未接入，预览如实标注静态模型（不假装播放）。
+  - 预览挂伴生 chrbnd：overlay `chr/<id>.chrbnd.dcx` → 原版同相对路径；右栏挂现有 `FlverViewer`（`injectedMesh` 跳过按 sourceUri 再读）。`read-tae-event-params` / `read-chrbnd-flver-preview` 已进 `AdvertisedCommands`。没模型写人话空态（去「开始」页挂原版），禁止「见底部日志」/「预览不可用」。骨骼动画播放未接入，预览如实写「模型已挂，动画播放未接入」。
   - `WorkbenchLayout` 拖栏修复：量栏内容宽（不含 4px 分隔条）、上限扣除分隔条总宽、window 监听不再随 `columns` 新数组反复拆装——PARAM/文本/动作同一套布局组件一并受益。
   - **S17 3D 落地（2026-08-17）**：`read-chrbnd-flver-preview` / `read-tae-event-params` 登记进 `AdvertisedCommands`（广告门禁三方一致，44 条）；右栏挂上现有 `FlverViewer`——`read-chrbnd-flver-preview` 一次返回网格/骨骼/挂点（base64 typed buffers），经 `FlverViewer` 新增的 `externalMeshData` / `externalBones` props 直画（不走 readFlverMesh IPC）；无网格时给可行动空态（「到开始页挂原版」/「没有找到该模型的网格数据」），删「见底部日志」与「本夜不挂」注释；动画播放未接入明说「模型已挂，动画播放未接入」，不假装在播。另修合并 7c5639a 把 `BridgeCommandService.IsDcxFile` 回退成 private 导致的 S18 会话缓存编译红（固定 internal）。
 
@@ -2772,9 +2781,9 @@ SHELL-09 → SHELL-10
 #### AGENT-60A — dock shell 与欢迎区
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockResizer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockHeader.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentConversationViewport.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentWelcome.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`。
-- **Steps**：实现 48px header / minmax conversation / bottom composer grid；200/440/620px（S8）、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
+- **Steps**：实现 48px header / minmax conversation / bottom composer grid；96/440/620px（S8）、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
 - **S8 落地（2026-08-17）**：Agent 下限从 340 收到 96px（约一条工具栏宽，不是 0、不留点不着的缝）；`AGENT_MIN_WIDTH` / `--agent-dock-min` / 持久化恢复 clamp 与相关测试 340 边界同步改；composer 工具条 `flex-wrap: wrap`，窄列时按钮换行、不许裁掉，也不许为保布局把下限抬回去。上限仍 620、默认 440。
-- **Tests**：idle 440×900 截图；340/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
+- **Tests**：idle 440×900 截图；96/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
 
 #### AGENT-60B — 三层 Composer
 
@@ -2878,7 +2887,7 @@ SHELL-09 → SHELL-10
 
 - [ ] 1024/1280/1440/1920 可用；
 - [ ] 200% 缩放无遮挡；
-- [ ] 200/440/620px Agent 无溢出（S8 下限 200）；
+- [ ] 160/440/620px Agent 无溢出（S8 下限 160）；
 - [ ] pane resizer 支持鼠标和键盘；
 - [ ] 所有列表、树、表格、编辑器和 toolbar 可仅用键盘操作；
 - [ ] focus-visible 清晰；
