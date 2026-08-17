@@ -40,6 +40,7 @@ import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js
 import { base64ToUint8Array } from '../utils/binary.js';
 // 复用 ParamDefPanel 的解码器：解码权威必须单一（见该处导出注释）。
 import { decodeFieldView } from '../editors/ParamDefPanel.js';
+import { isParamCheckboxChecked, isParamCheckboxField } from './paramCheckboxField.js';
 import { WorkbenchLayout, type WorkbenchColumnSpec } from './WorkbenchLayout.js';
 
 /** 容器内的一个 param 条目。 */
@@ -692,9 +693,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         fieldId: field.id,
         // 数值字段按数值提交；解析失败时原样传字符串，由 main 侧的编码器给出
         // 结构化诊断，而不是在这里悄悄改成 0。
-        value: /^(u?int|f(loat|32|64)|[su]\d+)/i.test(field.type) && raw.trim() !== '' && !Number.isNaN(Number(raw))
-          ? Number(raw)
-          : raw,
+        value: isParamCheckboxField(field)
+          ? (raw.trim() === '1' || raw.trim().toLowerCase() === 'true')
+          : /^(u?int|f(loat|32|64)|[su]\d+)/i.test(field.type) && raw.trim() !== '' && !Number.isNaN(Number(raw))
+            ? Number(raw)
+            : raw,
         rowDataBase64: selectedRow.dataBase64,
         definition
       });
@@ -1031,8 +1034,26 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                         对照结论：参照工具的只读列用「相同控件 + ReadOnly flag +
                         变色」，全仓无 BeginDisabled。理由是 disabled/span 都会丢掉
                         焦点与文本选中 —— 用户无法复制对照列或不可编辑字段的值，
-                        而「把这个数值抄到别处」正是只读列最常见的用途。 */}
+                        而「把这个数值抄到别处」正是只读列最常见的用途。
+                        bool / 1bit 是 checkbox，点一下就 commitField，不等失焦。 */}
                     <span className="wb-prop__value">
+                      {isParamCheckboxField(field) ? (
+                        <input
+                          type="checkbox"
+                          checked={isParamCheckboxChecked(shown)}
+                          className={editable
+                            ? 'wb-prop__check'
+                            : (decoded?.diagnostic ? 'wb-prop__check is-readonly diag-warn' : 'wb-prop__check is-readonly')}
+                          onChange={(event) => {
+                            if (!editable) return;
+                            void commitField(field, event.target.checked ? '1' : '0');
+                          }}
+                          disabled={editable && committing}
+                          aria-label={`${field.name}${editable ? '' : '（只读）'}`}
+                          aria-readonly={!editable}
+                          title={decoded?.diagnostic ?? shown}
+                        />
+                      ) : (
                       <input
                         value={shown === '' && !editable ? '—' : shown}
                         readOnly={!editable}
@@ -1052,9 +1073,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                         aria-readonly={!editable}
                         title={decoded?.diagnostic ?? shown}
                       />
+                      )}
                       {/* 枚举选值入口：只在有值表且字段可编辑时出现。
-                          空值表的枚举没有可选项，给个按钮会点开一个空列表。 */}
-                      {editable && enumMeta && enumMeta.values.length > 0 && (
+                          空值表的枚举没有可选项，给个按钮会点开一个空列表。
+                          勾选框字段不给 ▾。 */}
+                      {editable && !isParamCheckboxField(field) && enumMeta && enumMeta.values.length > 0 && (
                         <button
                           type="button"
                           className="wb-enum-toggle"

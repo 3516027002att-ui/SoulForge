@@ -188,6 +188,13 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     assert.ok(!workbenchSource.includes('BACKUP_READ_FORBIDDEN'), 'ParamWorkbench 不应包含 backup 拒绝码');
     assert.ok(!workbenchSource.includes('isParamBackupPath'), 'ParamWorkbench 不应自行判定 backup 路径');
   });
+
+  it('S29：bool / 1bit 走 checkbox，点一下 commitField，s32/f32 仍是文本框', () => {
+    assert.match(workbenchSource, /isParamCheckboxField/);
+    assert.match(workbenchSource, /type="checkbox"/);
+    assert.match(workbenchSource, /commitField\(field, event\.target\.checked \? '1' : '0'\)/);
+    assert.doesNotMatch(workbenchSource, /type === 's32'[\s\S]{0,40}checkbox/);
+  });
 });
 
 /**

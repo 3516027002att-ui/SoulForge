@@ -1060,7 +1060,8 @@ Params 20% (min 180) | Rows 29% (min 260) | Fields 35% (min 320)
 
 - 字段名（左，中文 DisplayName 优先：本机 Yapped Defs 的 `DisplayName` 覆盖为字段 `name`；Yapped 缺的字段用 Smithbox **英文** Annotation，禁止用日文 DisplayName 当主标签）；
 - 悬停 Description（字段名 span 的 `title` 取 `description`，无 description 时回落字段名）；
-- 当前值（可编辑，已有 input；行宽与定义一致即自动授信放行，去掉「必须先点信任」路径）；
+- 当前值（可编辑；行宽与定义一致即自动授信放行，去掉「必须先点信任」路径）；
+- `bool` 与 `bitWidth === 1` 画 checkbox，点一下即 `commitField`（0/1），不等失焦；s32/f32 仍是输入框；
 - 对照值或原始值；
 - 枚举名称；
 - 类型、范围和说明；

@@ -2117,6 +2117,15 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
    MSB 属性那种真 enum 才该用下拉。 */
 .wb-prop__value { position: relative; display: flex; align-items: center; gap: 2px; }
 .wb-prop__value input { flex: 1; min-width: 0; }
+.wb-prop__value input[type="checkbox"],
+.wb-prop__check {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  margin: 0;
+  accent-color: var(--ember);
+}
 .wb-enum-toggle {
   flex: none; width: 16px; padding: 0; line-height: 1;
   color: var(--ink-2); background: none; border: none; cursor: pointer;
