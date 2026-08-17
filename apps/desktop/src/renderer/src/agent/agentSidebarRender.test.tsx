@@ -693,6 +693,20 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.ok(!drawerHtml.includes('agent__composer'), '抽屉面不含 composer');
     assert.ok(!drawerHtml.includes('agent-composer-context'), '抽屉面不含资源引用条');
     assert.ok(!drawerHtml.includes('agent-empty-state'), '抽屉面不含欢迎三勾');
+    // S25：设置页只放模型服务表单——运行任务/取消/权限黄条/会话级思考强度全部离开。
+    assert.ok(!drawerHtml.includes('运行任务'), '设置页没有运行任务按钮');
+    assert.ok(!drawerHtml.includes('取消任务'), '设置页没有取消任务按钮');
+    assert.ok(!drawerHtml.includes('agent-task-permission'), '设置页没有权限黄条');
+    assert.ok(!drawerHtml.includes('agent-session-controls'), '设置页没有会话级控件');
+    // 一列表单：协议 → 服务地址 → 模型 ID → 显示名称 → 密钥 → 高级 → 页脚按钮。
+    assert.match(drawerHtml, /协议（API 格式）/);
+    assert.match(drawerHtml, /服务地址/);
+    assert.match(drawerHtml, /模型 ID/);
+    assert.match(drawerHtml, /显示名称/);
+    assert.match(drawerHtml, /API 密钥/);
+    assert.match(drawerHtml, />取消</, '页脚取消按钮');
+    assert.match(drawerHtml, />重置</, '页脚重置按钮');
+    assert.match(drawerHtml, />保存</, '页脚保存按钮');
     // 历史/设置互相可达：历史视图里也有切换控件（不再只有「模型设置」一个方向）。
     const historyHtml = renderToStaticMarkup(
       <AgentSecondaryDrawer
@@ -744,7 +758,7 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     const cancelHtml = renderToStaticMarkup(
       <AgentSecondaryDrawer
         open={true}
-        view="settings"
+        view="history"
         onClose={() => undefined}
         onSwitchView={() => undefined}
         task={render0Task()}
@@ -760,7 +774,7 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         }}
       />
     );
-    assert.match(cancelHtml, /data-testid="agent-task-cancel"/, '任务级取消在二级抽屉');
+    assert.match(cancelHtml, /data-testid="agent-task-cancel"/, '任务级取消在二级抽屉(历史页)');
   });
 });
 

@@ -2769,6 +2769,7 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/agent/AgentComposer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentParticipantBar.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentContextChipList.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentPromptEditor.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentComposerToolbar.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/agentComposerState.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`。
 - **Steps**：participant / prompt+chips / toolbar 三层；IME composing 禁止 Enter 发送；toolbar 固定 `@ | # | attachment | model | plan | send/stop`；每项按真实 callback/capability gating。
+- **S25 落地（2026-08-17，模型服务设置照 010517 一列表单）**：设置页只放模型服务表单——运行任务/取消任务/权限黄条移到历史页（`AgentSessionControls` 会话级控件随 S32 输入条提供日常入口）；字段顺序协议 → 服务地址 → 模型 ID → 显示名称 → API 密钥 → 高级选项 → 页脚（取消/重置/保存）；label 独占一行、控件 100% 宽；「获取模型列表」挂在模型 ID 行的辅助动作；重置 = 回初值 + 从 main 重读。保存契约与脱敏/safeStorage 不变。
 - **Tests**：Enter/Shift+Enter/IME、auto-grow 40vh cap、空输入 disabled、streaming stop；源码和 DOM 均不存在 `microphone|MediaRecorder|getUserMedia|speech recognition|audio IPC`。
 
 #### AGENT-60C — selection context、资源引用和流式任务

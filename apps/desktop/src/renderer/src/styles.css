@@ -874,6 +874,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 /* 布局辅助 */
 .row.gap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .stack.gap { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+/* S25：设置表单一列表单——标签独占一行、控件 100% 宽（照 010517 的信息结构）。 */
+.agent-settings-drawer .stack.gap > label,
+.model-service-footer + .list { display: flex; flex-direction: column; gap: 4px; }
+.agent-settings-drawer .stack.gap > label { font-size: 11px; color: var(--ink-2); }
+.agent-settings-drawer .stack.gap > label > input,
+.agent-settings-drawer .stack.gap > label > select { width: 100%; }
+.agent-settings-drawer .model-service-footer { margin-top: 4px; }
 .column.gap { display: flex; flex-direction: column; gap: 8px; }
 .pager { margin-top: 8px; }
 .pager button { min-width: 64px; }
