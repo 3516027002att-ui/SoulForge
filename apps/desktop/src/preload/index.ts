@@ -57,6 +57,7 @@ import type {
   CiteHit
 } from '@soulforge/shared';
 import { EDITOR_DOCUMENT_IPC_CHANNELS } from '@soulforge/shared';
+import { maskPathFragments } from '@soulforge/shared';
 
 /** Path-bearing fields that must never cross the context bridge to the renderer. */
 const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
@@ -68,14 +69,10 @@ const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
   'backupPath'
 ]);
 
-/** Mask absolute filesystem paths that may appear inside diagnostic strings. */
+/** Mask absolute filesystem paths that may appear inside diagnostic strings.
+ *  S13：与 main 共用 shared 的同一规则 —— 只打码路径片段，保留上下文。 */
 function maskAbsolutePathString(value: string): string {
-  const containsWindowsDrivePath = /(^|[\s('"=])(?:[A-Za-z]:[\\/])/.test(value);
-  const containsUncOrDevicePath = /(^|[\s('"=])\\\\(?:[?.]\\)?[^\\/\s]+[\\/]/.test(value);
-  const containsAbsoluteFileUri = /file:\/\/\/[A-Za-z]:\//i.test(value);
-  return containsWindowsDrivePath || containsUncOrDevicePath || containsAbsoluteFileUri
-    ? '[本机路径已隐藏]'
-    : value;
+  return maskPathFragments(value);
 }
 
 function stripPathFields<T>(value: T): T {
