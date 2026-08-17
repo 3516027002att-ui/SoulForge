@@ -619,7 +619,30 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   useEffect(() => {
     setEnumOpenFieldId(null);
     setEnumFilter('');
-  }, [selectedRowId]);
+  }, [selectedRowId, selectedEntry]);
+
+  useEffect(() => {
+    if (enumOpenFieldId === null) return;
+    function onKey(event: KeyboardEvent): void {
+      if (event.key === 'Escape') {
+        setEnumOpenFieldId(null);
+        setEnumFilter('');
+      }
+    }
+    function onPointerDown(event: PointerEvent): void {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('.wb-enum-list') || target.closest('[data-enum-toggle]')) return;
+      setEnumOpenFieldId(null);
+      setEnumFilter('');
+    }
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, [enumOpenFieldId]);
 
   /**
    * 行表虚拟化。
@@ -676,7 +699,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         definition
       });
       setCommitMessage(result.ok
-        ? `字段 ${field.name} 已提交到变更候选。`
+        ? `已保存：${field.name}`
         : (result.message ?? `字段 ${field.name} 提交失败。`));
       if (result.ok) {
         setDrafts((current) => {
@@ -722,7 +745,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         rowDataBase64: row.dataBase64
       });
       setCommitMessage(result.ok
-        ? `行 ${row.id} 的名字已提交到变更候选。`
+        ? `已保存：行 ${row.id} 的名字`
         : (result.message ?? `行 ${row.id} 的名字提交失败。`));
       setRowNameDraft(null);
       if (result.ok) loadRows();
@@ -1035,6 +1058,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                         <button
                           type="button"
                           className="wb-enum-toggle"
+                          data-enum-toggle=""
                           aria-expanded={enumOpen}
                           aria-label={`选择 ${field.name} 的枚举值`}
                           onClick={() => {

@@ -53,6 +53,7 @@ import {
   isFxrDocument,
   projectFxrDocumentPages,
   type Diagnostic,
+  type FxrContainerEntry,
   type FxrDocument,
   type FxrHostWire,
   type FxrNodeWire
@@ -108,6 +109,12 @@ const EDIT_VALUE_RENDER_LIMIT = 32;
 export function vfxFileDisplayName(file: VfxFileView): string {
   const base = file.relativePath.split(/[\\/]/).pop() ?? file.relativePath;
   return base.replace(/\.fxr(\.dcx)?$/i, '');
+}
+
+/** ffxbnd 子项逻辑名：只留 basename，去掉 .fxr。 */
+export function vfxContainerEntryLabel(entryName: string): string {
+  const base = entryName.split(/[\\/]/).pop() ?? entryName;
+  return base.replace(/\.fxr$/i, '');
 }
 
 /** 从 unparsedGaps 解析未知类型集合（权威信号来自 C# 解析器的 gap 登记）。 */
@@ -369,6 +376,13 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
   const [selectedUri, setSelectedUri] = useState<string | null>(props.initialUri ?? null);
   /** 选中文件的读取结果；null 表示未选或失败。 */
   const [document, setDocument] = useState<FxrDocument | null>(props.initialDocument ?? null);
+  /** ffxbnd 包内 .fxr 子项；裸 .fxr 为空。失败时仍保留，方便点兄弟项。 */
+  const [containerEntries, setContainerEntries] = useState<FxrContainerEntry[]>(
+    props.initialDocument?.containerEntries ?? []
+  );
+  const [selectedEntryName, setSelectedEntryName] = useState<string | undefined>(
+    props.initialDocument?.selectedEntryName ?? undefined
+  );
   /** 文件 → 读取失败诊断；失败文件保留在列表并标记。 */
   const [readFailure, setReadFailure] = useState<{ code: string; message: string } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -388,18 +402,29 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
     if (selectedUri === null) {
       setDocument(null);
       setReadFailure(null);
+      setContainerEntries([]);
       return;
     }
     let cancelled = false;
     setLoading(true);
-    bridge.readFxrDocument(selectedUri)
+    const read = selectedEntryName
+      ? bridge.readFxrDocument(selectedUri, selectedEntryName)
+      : bridge.readFxrDocument(selectedUri);
+    read
       .then((raw) => {
         if (cancelled) return;
         const result = raw as {
           ok: boolean;
           data?: unknown;
+          containerEntries?: FxrContainerEntry[];
           diagnostics?: Array<{ code?: string; message?: string }>;
         };
+        const listed = result.containerEntries
+          ?? (result.data && typeof result.data === 'object'
+            ? (result.data as FxrDocument).containerEntries
+            : undefined)
+          ?? [];
+        if (listed.length > 0) setContainerEntries(listed);
         if (result.ok && result.data && isFxrDocument(result.data)) {
           setDocument(result.data);
           setReadFailure(null);
@@ -423,13 +448,14 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [bridge, selectedUri, reloadKey]);
+  }, [bridge, selectedUri, selectedEntryName, reloadKey]);
 
-  // 新文件 → 选中态回到文件级统计，清空写回态。
+  // 新文件 → 选中态回到文件级统计，清空写回态与子项选择。
   useEffect(() => {
     setSelection(null);
     setDrafts({});
     setCommitOutcome(null);
+    setSelectedEntryName(undefined);
   }, [selectedUri]);
 
   const pages = useMemo(
@@ -718,6 +744,30 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                   </span>
                 </div>
               ))}
+              {containerEntries.length > 0 && (
+                <>
+                  <div className="wb-list__group-label">包内效果（{containerEntries.length}）</div>
+                  {containerEntries.map((entry) => {
+                    const currentName = selectedEntryName ?? containerEntries[0]?.entryName;
+                    const selected = currentName === entry.entryName;
+                    const failed = selected && readFailure !== null;
+                    return (
+                      <div
+                        key={`${entry.entryIndex}:${entry.entryName}`}
+                        className={failed ? 'wb-row wb-row--failed' : 'wb-row'}
+                        {...selectableRowAttributes({
+                          selected,
+                          isTabEntry: false,
+                          onSelect: () => setSelectedEntryName(entry.entryName)
+                        })}
+                        data-testid="vfx-container-entry"
+                      >
+                        <span className="wb-row__name">{vfxContainerEntryLabel(entry.entryName)}</span>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
               {selectedUri === null && <p className="wb-empty">先在最左栏选择一个 FXR 文件。</p>}
               {selectedUri !== null && loading && <p className="wb-empty">加载中…</p>}
               {selectedUri !== null && !loading && readFailure && (
@@ -727,7 +777,10 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                     {readFailure.message}
                   </p>
                   <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
-                    {readFailure.code}；其他 FXR 文件不受影响。
+                    {readFailure.code}
+                    {containerEntries.length > 1
+                      ? '；同包其他效果仍可点开。'
+                      : '；其他 FXR 文件不受影响。'}
                   </p>
                 </>
               )}

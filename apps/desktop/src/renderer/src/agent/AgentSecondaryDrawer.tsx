@@ -7,7 +7,6 @@ import {
 } from '../a11y/focusTrap.js';
 import { ModelServiceSettingsPanel } from '../editors/ModelServiceSettingsPanel.js';
 import { formatPageRange } from '../format/uiText.js';
-import { AgentSessionControls } from './AgentSessionControls.js';
 import type { AgentTaskPanelProps } from './AgentTaskPanel.js';
 import { AGENT_SESSION_PAGE_SIZE, isAgentTaskCancellable } from './agentTaskState.js';
 
@@ -65,7 +64,6 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
     historyPage * AGENT_SESSION_PAGE_SIZE,
     historyPage * AGENT_SESSION_PAGE_SIZE + AGENT_SESSION_PAGE_SIZE
   );
-  const cancellable = isAgentTaskCancellable(task.task);
 
   function trapTab(event: ReactKeyboardEvent): void {
     const container = drawerRef.current;
@@ -133,6 +131,15 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
           <div className="agent-history__actions">
             <button type="button" className="btn btn--ghost btn--sm" onClick={task.onRefreshSessions}>刷新</button>
             <button type="button" className="btn btn--ghost btn--sm" onClick={() => onSwitchView('settings')}>模型设置</button>
+            <button
+              type="button"
+              className="btn btn--danger btn--sm"
+              data-testid="agent-task-cancel"
+              disabled={!isAgentTaskCancellable(task.task)}
+              onClick={task.onCancel}
+            >
+              取消任务
+            </button>
           </div>
           {task.sessionsError !== null && <p className="danger">{task.sessionsError}</p>}
           <p className="muted" data-testid="agent-sessions-range">
@@ -185,60 +192,6 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
         </div>
       ) : (
         <div className="agent-settings-drawer">
-          {/* 模型服务选择 + 运行控件（从主栏移入抽屉，§12.10）。 */}
-          <div className="agent-controls">
-            <label className="agent-controls__label" htmlFor="agent-task-service">模型服务</label>
-            <select
-              id="agent-task-service"
-              value={task.selectedServiceId ?? ''}
-              onChange={(event) => task.onSelectService(event.target.value)}
-              aria-label="运行任务使用的模型服务"
-            >
-              {task.services.length === 0 && <option value="">尚未添加模型服务</option>}
-              {task.services.map((service) => (
-                <option key={service.id} value={service.id}>
-                  {service.displayName}{service.hasCredential ? '' : '（未配置凭据）'}
-                </option>
-              ))}
-            </select>
-            <p className="agent-task__lock" data-testid="agent-task-permission">
-              权限模式：{task.task.mode ?? '计划模式（主进程锁定）'}。{permissionLockReason}
-            </p>
-          </div>
-          <div className="row gap">
-            <button
-              type="button"
-              className="btn btn--primary btn--sm"
-              disabled={task.runBlocker !== null}
-              title={task.runBlocker ?? '运行 AI 任务'}
-              data-testid="agent-task-run"
-              onClick={task.onRun}
-            >
-              运行任务
-            </button>
-            <button
-              type="button"
-              className="btn btn--danger btn--sm"
-              disabled={!cancellable}
-              title={cancellable ? '取消当前任务' : '没有可取消的任务'}
-              data-testid="agent-task-cancel"
-              onClick={task.onCancel}
-            >
-              取消任务
-            </button>
-          </div>
-          {task.runBlocker !== null && (
-            <p className="muted" data-testid="agent-task-blocker">{task.runBlocker}</p>
-          )}
-
-          <AgentSessionControls
-            provider={settings.provider}
-            thinking={settings.thinking}
-            permissionMode={settings.permissionMode}
-            permissionLockReason={settings.permissionLockReason}
-            onProviderChange={settings.onProviderChange}
-            onThinkingChange={settings.onThinkingChange}
-          />
           <ModelServiceSettingsPanel />
         </div>
       )}

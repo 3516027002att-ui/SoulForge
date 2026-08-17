@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MsbScenePanel } from './MsbScenePanel.js';
+import { MsbScenePanel, resolvePartModelName } from './MsbScenePanel.js';
 
 // node 环境没有 window；getRendererRuntime 读 window.soulforge。设为空对象 →
 // bridge 为 null → live 路径短路，SSR 输出纯初始结构（effect 不跑）。
@@ -100,6 +100,20 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.match(html, /提交 part 位置/);
     assert.match(html, /disabled/);
     assert.match(html, /MSB 写入未开放：微调仅为本地预览，不会写入。/);
+  });
+
+  it('视口状态不再写「无绝对路径」', () => {
+    const html = render({
+      parts: [{ name: 'ground', posX: 0, posY: 0, posZ: 0, modelIndex: 0 }],
+      models: [{ name: 'm10_00_00_00_000000' }]
+    });
+    assert.doesNotMatch(html, /无绝对路径/);
+    assert.doesNotMatch(html, /见底部日志/);
+  });
+
+  it('resolvePartModelName 按 modelIndex 取逻辑名', () => {
+    assert.equal(resolvePartModelName({ modelIndex: 1 }, [{ name: 'a' }, { name: 'm10_00_00_00_000080' }]), 'm10_00_00_00_000080');
+    assert.equal(resolvePartModelName({}, [{ name: 'a' }]), null);
   });
 
   it('viewport 只承载 proxy scene 宿主：SSR 下不渲染 canvas/假预览', () => {

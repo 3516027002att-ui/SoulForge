@@ -24,8 +24,12 @@ export interface AgentComposerToolbarProps {
   modelLabel: string;
   /** 打开模型服务设置抽屉（真实既有能力：AgentSessionControls）。 */
   onOpenModelSettings: () => void;
-  /** 当前交互模式（Ask/Plan/Edit）——「推理/Plan 显示真实运行模式」。 */
+  /** 思考强度，与模型钮拆开。 */
+  thinkingLabel: string;
+  onCycleThinking: () => void;
+  /** 当前交互模式（Ask/Plan/Edit）。 */
   planLabel: string;
+  onCyclePlan: () => void;
 }
 
 /**
@@ -48,7 +52,10 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
     attachmentReason,
     modelLabel,
     onOpenModelSettings,
-    planLabel
+    thinkingLabel,
+    onCycleThinking,
+    planLabel,
+    onCyclePlan
   } = props;
 
   return (
@@ -63,7 +70,7 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
           ? '框选模式已开启：在中央编辑区拖拽框住要引用的行或字段（Esc 或再次点击取消）'
           : '在中央编辑区拖拽框住要引用的行或字段，生成一条引用'}
       >
-        引用
+        +
       </button>
       <button
         type="button"
@@ -71,30 +78,41 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
         disabled
         aria-label="添加附件"
         title={attachmentReason}
+        hidden
       >
-        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-          <path
-            d="M8.2 4.4v6.4a1.9 1.9 0 0 1-3.8 0V5.4a3.3 3.3 0 0 1 6.6 0v6.3"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.4"
-            strokeLinecap="round"
-          />
-        </svg>
+        附件
       </button>
       <button
         type="button"
+        className="composer-mode-btn"
+        data-testid="composer-plan-mode"
+        onClick={onCyclePlan}
+        aria-label="权限模式"
+        title={`权限：${planLabel}`}
+      >
+        {planLabel}
+      </button>
+      <span className="composer-spacer"></span>
+      <button
+        type="button"
         className="composer-model-btn"
+        data-testid="composer-model-btn"
         onClick={onOpenModelSettings}
-        aria-label="模型服务设置"
+        aria-label="模型"
         title="打开模型服务设置"
       >
         <span className="composer-model-label">{modelLabel}</span>
       </button>
-      <span className="composer-mode" data-testid="composer-plan-mode" title="当前交互模式">
-        {planLabel}
-      </span>
-      <span className="composer-spacer"></span>
+      <button
+        type="button"
+        className="composer-thinking-btn"
+        data-testid="composer-thinking-btn"
+        onClick={onCycleThinking}
+        aria-label="思考强度"
+        title="思考强度（与模型分开选择）"
+      >
+        {thinkingLabel}
+      </button>
       {action === 'awaiting' ? (
         <span className="composer-awaiting" data-testid="composer-awaiting">等待你在上方批准</span>
       ) : action === 'stop' ? (

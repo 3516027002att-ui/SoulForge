@@ -26,6 +26,7 @@ import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   VfxWorkbenchPanel,
+  vfxContainerEntryLabel,
   buildVfxFieldSetMutation,
   flattenFxrNodes,
   fxrCommitNotice,
@@ -294,7 +295,26 @@ describe('VfxWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     const html = render();
     assert.match(html, /先在最左栏选择一个 FXR 文件/);
   });
+});
 
+describe('ffxbnd 包内子项', () => {
+  it('列出包内 .fxr 逻辑名，不出现打包机路径', () => {
+    const html = renderLoaded(makeDocument({
+      containerEntries: [
+        { entryIndex: 0, entryName: 'f0000.fxr' },
+        { entryIndex: 1, entryName: 'f0001.fxr' }
+      ],
+      selectedEntryName: 'f0000.fxr'
+    }), null, 'fixture://sfx/sfxbnd_commoneffects.ffxbnd.dcx');
+    assert.match(html, /包内效果（2）/);
+    assert.match(html, /data-testid="vfx-container-entry"/);
+    assert.match(html, />f0000</);
+    assert.match(html, />f0001</);
+    assert.doesNotMatch(html, /INTERROOT|N:\\GR/);
+  });
+});
+
+describe('VfxWorkbenchPanel 未加载文档', () => {
   it('未加载文档时无任何 type=button 与编辑输入框（编辑控件以读到的文档为前提）', () => {
     const html = render();
     assert.doesNotMatch(html, /type="button"/);
@@ -314,6 +334,13 @@ describe('vfxFileDisplayName（显示名去 .fxr，不做假名字）', () => {
 
   it('无后缀文件保留原名（不猜格式）', () => {
     assert.equal(vfxFileDisplayName({ sourceUri: 'fixture://sfx/unknown', relativePath: 'sfx/unknown' }), 'unknown');
+  });
+});
+
+describe('vfxContainerEntryLabel（ffxbnd 子项逻辑名）', () => {
+  it('只留 basename 并去掉 .fxr', () => {
+    assert.equal(vfxContainerEntryLabel('N:\\GR\\data\\INTERROOT_win64\\sfx\\f0000.fxr'), 'f0000');
+    assert.equal(vfxContainerEntryLabel('f0001.fxr'), 'f0001');
   });
 });
 
@@ -529,7 +556,7 @@ describe('VFX-54C vfx-field-set 接线', () => {
 
   it('ok=true 后重读:read effect 依赖 reloadKey 刷新触发器', () => {
     assert.match(panelSource, /reloadKey/);
-    assert.match(panelSource, /\[bridge, selectedUri, reloadKey\]/);
+    assert.match(panelSource, /\[bridge, selectedUri, selectedEntryName, reloadKey\]/);
     assert.match(panelSource, /setReloadKey\(\(k\) => k \+ 1\)/);
   });
 

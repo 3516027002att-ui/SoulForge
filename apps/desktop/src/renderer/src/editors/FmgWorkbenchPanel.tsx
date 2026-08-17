@@ -19,6 +19,23 @@ export interface FmgEntryRow {
   text: string;
 }
 
+const KGICON_MAP: Record<string, string> = {
+  '16': '[R1]',
+  '17': '[R2]',
+  '18': '[L1]',
+  '19': '[L2]',
+  '20': '[△]',
+  '21': '[○]',
+  '22': '[×]',
+  '23': '[□]'
+};
+
+/** 列表预览：把官方 FMG 键位标签投影成可读字，磁盘原文不动。 */
+export function previewFmgMarkup(text: string): string {
+  if (text === '<?null?>' || text.trim() === '') return '';
+  return text.replace(/<\?kgiconKc@(\d+)\?>/g, (_all, id: string) => KGICON_MAP[id] ?? `[键${id}]`);
+}
+
 export interface FmgWorkbenchPanelProps {
   resourceUri: string;
   /**
@@ -454,16 +471,21 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
               isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
               onSelect: () => setSelectedId(row.id)
             })}
+            data-cite={JSON.stringify({
+              kind: 'fmg-entry',
+              library: selectedContainerId ?? 'item',
+              id: row.id
+            })}
           >
             <span>{row.id}</span>
-            <span>{row.text.slice(0, 80)}</span>
+            <span>{previewFmgMarkup(row.text).slice(0, 80)}</span>
           </div>
         ))}
         {pageEntries.length === 0 && !loading && (
           hasSelection
             ? query.trim().length > 0
               ? <p className="muted">没有匹配的条目。</p>
-              : <p className="muted">当前页无条目。</p>
+              : <p className="muted">这张表没有已填写的条目（只狼这份 FMG 里这类表常常是空骨架），可用「新建空槽」填写。</p>
             : <p className="muted">先选择语言与文本表。</p>
         )}
       </div>

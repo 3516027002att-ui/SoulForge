@@ -167,7 +167,11 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
       .filter((column) => column.id !== columnId)
       .reduce((sum, column) => sum + (column.minWidth ?? DEFAULT_MIN_WIDTH), 0);
     const resizerTotal = (columns.length - 1) * RESIZER_WIDTH;
-    return Math.max(0, container.clientWidth - othersMin - resizerTotal);
+    if (container.clientWidth <= 0) return Number.POSITIVE_INFINITY;
+    return Math.max(
+      columns.find((column) => column.id === columnId)?.minWidth ?? DEFAULT_MIN_WIDTH,
+      container.clientWidth - othersMin - resizerTotal
+    );
   }
 
   const onPointerMove = useCallback((event: PointerEvent) => {
@@ -305,7 +309,11 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
                * 比例模式下拖拽无法表达「就这么宽」。
                */
               style={typeof width === 'number'
-                ? { flex: '0 0 auto', width: `${width}px` }
+                ? {
+                    flex: '0 0 auto',
+                    width: `${Math.max(column.minWidth ?? DEFAULT_MIN_WIDTH, width)}px`,
+                    minWidth: `${column.minWidth ?? DEFAULT_MIN_WIDTH}px`
+                  }
                 : {
                     flex: `${column.initialFlex ?? 1} 1 0`,
                     minWidth: `${column.minWidth ?? DEFAULT_MIN_WIDTH}px`

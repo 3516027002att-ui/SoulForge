@@ -115,6 +115,12 @@ export interface FxrHostWire {
   valuesTruncated: boolean;
 }
 
+/** ffxbnd 包内一条 .fxr 子项（逻辑名，禁止绝对路径）。 */
+export interface FxrContainerEntry {
+  entryIndex: number;
+  entryName: string;
+}
+
 /** read-fxr-document 的完整 envelope。 */
 export interface FxrDocument {
   format: 'FXR3';
@@ -154,6 +160,10 @@ export interface FxrDocument {
   layoutWarnings: string[];
   roundTrip: FxrRoundTripReport;
   authority: 'native-verified' | 'candidate' | 'fixture-confirmed' | 'unsupported' | 'partial';
+  /** ffxbnd 包内全部 .fxr；裸 .fxr 为空或缺省。 */
+  containerEntries?: FxrContainerEntry[];
+  selectedEntryIndex?: number | null;
+  selectedEntryName?: string | null;
 }
 
 /** effect page：文档头 + 根节点树。 */

@@ -10,7 +10,8 @@
  * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后在中栏下方
  * 详情列出 Start Frame / End Frame / Id 与能解出的全部字段；解不出的字段写
  * 「未解码」+ 原始数值，禁止编造 SoundType 含义。右栏是只读 3D 预览：TAE/anibnd
- * 不是模型文件，本夜不挂伴生 chrbnd 的 FLVER，诚实空态「预览不可用」+ 文档诊断。
+ * 不是模型文件：右栏挂伴生 chrbnd 的只读 FLVER 网格。没有模型时给人话空态，
+ * 未挂原版则提示去「开始」页挂载。动画播放未接入，不假装在播。
  * 不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
  *
  * ── 事件参数体未解码是刻意边界 ──
@@ -53,6 +54,7 @@ import {
 import { formatListTruncation } from '../format/uiText.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
+import { FlverViewer, type FlverViewerInjectedMesh } from './FlverViewer.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 
 /** 动画表渲染上限（上游数据截断；列表本身由布局栏滚动承载）。 */
@@ -375,7 +377,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     error: string | null;
     meshCount: number;
     boneCount: number;
-  }>({ loading: true, error: null, meshCount: 0, boneCount: 0 });
+    mesh: FlverViewerInjectedMesh | null;
+  }>({ loading: true, error: null, meshCount: 0, boneCount: 0, mesh: null });
 
   const document = useMemo(() => {
     const source = refreshedDocument ?? props.data;
@@ -390,7 +393,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   useEffect(() => {
     setRefreshedDocument(null);
     setEventParams(null);
-    setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0 });
+    setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, mesh: null });
   }, [props.resourceUri, props.data]);
 
   /** S17：词条名目录一次拉取（模板只读本机；失败时列表显示数字 id + 「未命名」）。 */
@@ -465,37 +468,68 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   /** S17：伴生 chrbnd FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动错误）。 */
   useEffect(() => {
     if (!document) {
-      setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0 });
+      setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, mesh: null });
       return;
     }
     const bridge = getRendererBridge();
     if (!bridge || typeof bridge.readTaeChrbndPreview !== 'function') return;
     let cancelled = false;
-    setPreview({ loading: true, error: null, meshCount: 0, boneCount: 0 });
+    setPreview({ loading: true, error: null, meshCount: 0, boneCount: 0, mesh: null });
     bridge.readTaeChrbndPreview(props.resourceUri, 0).then((raw) => {
       if (cancelled) return;
       const result = raw as {
         ok?: boolean;
-        data?: { meshCount?: number; boneCount?: number };
+        data?: {
+          meshCount?: number;
+          boneCount?: number;
+          positionsBase64?: string;
+          indicesBase64?: string;
+          uvsBase64?: string;
+          normalsBase64?: string;
+          boneWeightsBase64?: string;
+          boneIndicesBase64?: string;
+          vertexCount?: number;
+        };
         diagnostics?: Array<{ message?: string }>;
       };
       if (result.ok && result.data) {
+        const mesh = result.data.positionsBase64
+          ? {
+              positionsBase64: result.data.positionsBase64,
+              indicesBase64: result.data.indicesBase64 ?? '',
+              uvsBase64: result.data.uvsBase64,
+              normalsBase64: result.data.normalsBase64,
+              boneWeightsBase64: result.data.boneWeightsBase64,
+              boneIndicesBase64: result.data.boneIndicesBase64,
+              vertexCount: result.data.vertexCount ?? 0
+            }
+          : null;
         setPreview({
           loading: false,
           error: null,
           meshCount: result.data.meshCount ?? 0,
-          boneCount: result.data.boneCount ?? 0
+          boneCount: result.data.boneCount ?? 0,
+          mesh
         });
       } else {
         setPreview({
           loading: false,
-          error: result.diagnostics?.[0]?.message ?? '模型预览不可用。',
+          error: result.diagnostics?.[0]?.message ?? '没有找到该角色的模型（chrbnd）。',
           meshCount: 0,
-          boneCount: 0
+          boneCount: 0,
+          mesh: null
         });
       }
     }).catch(() => {
-      if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', meshCount: 0, boneCount: 0 });
+      if (!cancelled) {
+        setPreview({
+          loading: false,
+          error: '模型预览读取异常。到「开始」页确认已挂载含 sekiro.exe 的原版目录。',
+          meshCount: 0,
+          boneCount: 0,
+          mesh: null
+        });
+      }
     });
     return () => {
       cancelled = true;
@@ -675,9 +709,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       })}
                     >
                       <span className="wb-row__name">{animationIdLabel(animation)}</span>
-                      <span className="wb-row__meta">
-                        {animation.hkxName ? `id ${animation.animId}` : `${animation.eventCount} 事件`}
-                      </span>
+                      <span className="wb-row__meta">{animation.eventCount} 事件</span>
                     </div>
                   ))}
                   {animationsTruncation && (
@@ -753,20 +785,27 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                 <>
                   {preview.loading && <p className="wb-empty">正在查找伴生模型（chrbnd）…</p>}
                   {!preview.loading && preview.error !== null && (
-                    <>
-                      <p className="wb-empty" data-testid="tae-preview-unavailable">
-                        预览不可用
-                      </p>
-                      <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-error">
-                        {preview.error}
-                      </p>
-                    </>
+                    <p className="wb-empty" data-testid="tae-preview-error">
+                      {preview.error}
+                    </p>
                   )}
-                  {!preview.loading && preview.error === null && (
+                  {!preview.loading && preview.error === null && preview.mesh !== null && (
+                    <div data-testid="tae-preview-host" className="tae-preview-host">
+                      <FlverViewer
+                        meshCount={preview.meshCount}
+                        boneCount={preview.boneCount}
+                        injectedMesh={preview.mesh}
+                      />
+                      <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
+                        模型已挂，动画播放未接入
+                      </p>
+                    </div>
+                  )}
+                  {!preview.loading && preview.error === null && preview.mesh === null && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
                       {preview.meshCount > 0
-                        ? `已挂伴生模型：${preview.meshCount} meshes / ${preview.boneCount} bones（只读；骨骼动画播放未接入）`
-                        : '已找到伴生模型（chrbnd），但未解析出可显示网格。'}
+                        ? '已找到伴生模型，但未解析出可显示网格。'
+                        : '没有找到该角色的模型（chrbnd）。'}
                     </p>
                   )}
                   {isPartial && invalidRangeCount > 0 && (
@@ -786,7 +825,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   )}
                   {document.diagnostics.length > 0 && !(isPartial && invalidRangeCount > 0) && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-diagnostics">
-                      {document.diagnostics.length} 条文档诊断（见底部日志）。
+                      {document.diagnostics.length} 条文档诊断。
                     </p>
                   )}
                 </>

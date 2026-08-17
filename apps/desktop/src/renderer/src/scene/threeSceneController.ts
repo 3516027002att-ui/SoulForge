@@ -48,6 +48,8 @@ export interface ThreeSceneHandle {
 
 export interface ProxySceneHandle extends ThreeSceneHandle {
   setDrawList: (list: SceneDrawList) => void;
+  /** 用真实 FLVER 网格替换某个 proxy 盒子；找不到 id 则忽略。 */
+  replaceItemMesh: (id: string, mesh: FlverSceneMesh) => void;
 }
 
 export interface FlverSceneHandle extends ThreeSceneHandle {
@@ -216,6 +218,14 @@ export async function mountThreeProxyScene(input: {
     },
     setSelected: (id) => core.setSelected(id),
     setDrawList,
+    replaceItemMesh: (id, mesh) => {
+      const previous = core.meshes.get(id);
+      if (previous) {
+        core.root.remove(previous);
+        core.meshes.delete(id);
+      }
+      core.addMesh(id, createFlverMesh(core.three, core.track, mesh));
+    },
     dispose: core.disposeAll
   };
 }

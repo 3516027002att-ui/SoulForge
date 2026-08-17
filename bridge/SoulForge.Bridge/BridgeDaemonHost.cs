@@ -535,6 +535,7 @@ internal static class BridgeDaemonHost
         "read-emevd-document", "write-emevd", "read-msb-document", "write-msb",
         "read-tpf-document", "export-tpf-texture", "read-tpf-texture-preview",
         "write-tpf-texture-replace", "read-tae-document",
+        "read-tae-event-params", "read-chrbnd-flver-preview",
         "read-flver-document", "read-flver-mesh", "read-flver-skeleton",
         "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
         "write-esd-document", "write-tae-document",

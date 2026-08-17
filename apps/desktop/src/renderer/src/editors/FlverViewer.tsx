@@ -14,6 +14,16 @@ function decodeBase64Safe(base64: string): Uint8Array {
   return decodeBase64ToUint8Array(base64);
 }
 
+export interface FlverViewerInjectedMesh {
+  positionsBase64: string;
+  indicesBase64: string;
+  uvsBase64?: string | undefined;
+  normalsBase64?: string | undefined;
+  boneWeightsBase64?: string | undefined;
+  boneIndicesBase64?: string | undefined;
+  vertexCount: number;
+}
+
 export interface FlverViewerProps {
   sourceUri?: string;
   meshIndex?: number;
@@ -24,6 +34,8 @@ export interface FlverViewerProps {
   textureBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
   boneIndicesBase64?: string | undefined;
+  /** 已由其它 IPC 取回的网格（chrbnd 预览），有则不再走 readFlverMesh。 */
+  injectedMesh?: FlverViewerInjectedMesh | undefined;
 }
 
 interface MeshData {
@@ -129,6 +141,19 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
 
   // Load mesh data via IPC when sourceUri or meshIndex changes.
   useEffect(() => {
+    if (props.injectedMesh?.positionsBase64) {
+      setMeshError(null);
+      setMeshData({
+        positionsBase64: props.injectedMesh.positionsBase64,
+        indicesBase64: props.injectedMesh.indicesBase64,
+        uvsBase64: props.injectedMesh.uvsBase64,
+        normalsBase64: props.injectedMesh.normalsBase64,
+        boneWeightsBase64: props.injectedMesh.boneWeightsBase64,
+        boneIndicesBase64: props.injectedMesh.boneIndicesBase64,
+        vertexCount: props.injectedMesh.vertexCount
+      });
+      return;
+    }
     if (!props.sourceUri || bridge === null || typeof bridge.readFlverMesh !== 'function') return;
     setMeshData(null);
     setMeshError(null);
@@ -157,7 +182,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         setMeshError(error instanceof Error ? error.message : '网格加载失败');
       }
     })();
-  }, [props.sourceUri, props.meshIndex, bridge]);
+  }, [props.sourceUri, props.meshIndex, props.injectedMesh, bridge]);
 
   // Decode texture bytes (base64 → DDS parse / RGBA fallback) into semantic form.
   // 渲染器对象（CompressedTexture / DataTexture）由投影层构造并纳入 dispose。

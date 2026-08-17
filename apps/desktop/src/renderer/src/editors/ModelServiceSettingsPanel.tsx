@@ -203,20 +203,10 @@ export function ModelServiceSettingsPanel(): ReactElement {
   }
 
   return (
-    <section className="panel" aria-label="模型服务">
-      <header className="panel-header">
-        <h3>模型服务</h3>
-        <span className="muted">
-          加密存储：{encryptionOk ? '可用（safeStorage）' : '不可用'}
-        </span>
-      </header>
+    <section className="panel model-service-form" aria-label="添加或编辑模型服务">
       <div className="stack gap">
         <label>
-          显示名称
-          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-        </label>
-        <label>
-          协议
+          协议（API 格式）
           <select
             value={protocol}
             onChange={(e) => setProtocol(e.target.value as 'openai-compatible' | 'anthropic-compatible')}
@@ -230,7 +220,7 @@ export function ModelServiceSettingsPanel(): ReactElement {
           <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
         </label>
         <label>
-          模型
+          模型 ID
           <input
             list={modelListId}
             value={model}
@@ -249,6 +239,10 @@ export function ModelServiceSettingsPanel(): ReactElement {
           </button>
           <span className="muted">从服务 API 拉取（GET /v1/models）</span>
         </div>
+        <label>
+          显示名称
+          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </label>
         <label>
           API 密钥（仅写入，不回显）
           <input
@@ -353,7 +347,10 @@ export function ModelServiceSettingsPanel(): ReactElement {
             </p>
           </div>
         </details>
-        <button type="button" onClick={() => void save()}>保存模型服务</button>
+        <div className="model-service-form__footer">
+          <span className="muted">加密存储：{encryptionOk ? '可用（safeStorage）' : '不可用'}</span>
+          <button type="button" className="btn btn--primary btn--sm" onClick={() => void save()}>保存</button>
+        </div>
       </div>
       <ul className="list">
         {rows.map((row) => (

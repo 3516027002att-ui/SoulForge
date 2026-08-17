@@ -214,7 +214,9 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setCmdkIndex: '命令面板状态',
   setToasts: '通知',
   setOpenTabs: '标签页',
-  setFilePage: '资源浏览器页码，由过滤条件变化的 effect 自行复位（跨资源族共用，不属于某一族的文档态）'
+  setFilePage: '资源浏览器页码，由过滤条件变化的 effect 自行复位（跨资源族共用，不属于某一族的文档态）',
+  setCiteSelecting: 'S10 引用框选开关，属于 Agent 输入交互，不是资源文档态',
+  setPendingCiteHits: 'S10 引用框选命中草稿，随框选会话覆盖，不随资源族复位'
 });
 
 export function assertDocumentResetCoverage(appSource: string): ResetCoverageReport {

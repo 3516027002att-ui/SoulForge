@@ -11,9 +11,111 @@ import {
   type PartLike,
   type SceneManifest
 } from '../scene/sceneManifestBrowser.js';
-import { mountThreeProxyScene, type ThreeSceneHandle } from '../scene/threeSceneController.js';
+import {
+  mountThreeProxyScene,
+  type FlverSceneMesh,
+  type ProxySceneHandle
+} from '../scene/threeSceneController.js';
 import { formatListTruncation } from '../format/uiText.js';
+import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
+
+/** 视口一次最多替换这么多独特模型，避免 128 个 FLVER 同时打满 Bridge。 */
+const MAP_MESH_LOAD_LIMIT = 48;
+
+export function resolvePartModelName(
+  part: { modelIndex?: number },
+  models: Array<{ name: string }>
+): string | null {
+  if (typeof part.modelIndex !== 'number' || part.modelIndex < 0) return null;
+  return models[part.modelIndex]?.name ?? null;
+}
+
+function decodeBase64F32(value: string | undefined): Float32Array | undefined {
+  if (!value) return undefined;
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
+
+function decodeBase64Index(value: string | undefined): Uint16Array | Uint32Array | undefined {
+  if (!value) return undefined;
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  if (bytes.byteLength % 4 === 0) return new Uint32Array(bytes.buffer);
+  return new Uint16Array(bytes.buffer);
+}
+
+async function loadPartMeshes(
+  handle: ProxySceneHandle,
+  input: {
+    mapResourceUri: string;
+    parts: PartLike[];
+    models: Array<{ name: string; sibPath?: string }>;
+    drawList: ReturnType<typeof buildSceneDrawList>;
+    cancelled: boolean;
+  }
+): Promise<{ loaded: number; missing: number; needBase: boolean }> {
+  const bridge = getRendererBridge();
+  if (!bridge || typeof bridge.readMapPartFlverPreview !== 'function') {
+    return { loaded: 0, missing: 0, needBase: false };
+  }
+  const usage = new Map<string, string[]>();
+  const sibByModel = new Map(input.models.map((model) => [model.name, model.sibPath]));
+  for (const part of input.parts) {
+    const modelName = resolvePartModelName(part, input.models);
+    if (!modelName) continue;
+    const list = usage.get(modelName) ?? [];
+    list.push(part.name);
+    usage.set(modelName, list);
+  }
+  const ranked = [...usage.keys()].sort((left, right) => Number(/^m/i.test(right)) - Number(/^m/i.test(left)));
+  const selectedModels = ranked.slice(0, MAP_MESH_LOAD_LIMIT);
+  let loaded = 0;
+  let missing = 0;
+  let needBase = false;
+  for (const modelName of selectedModels) {
+    if (input.cancelled) break;
+    try {
+      const sibPath = sibByModel.get(modelName);
+      const raw = await (sibPath
+        ? bridge.readMapPartFlverPreview(input.mapResourceUri, modelName, sibPath)
+        : bridge.readMapPartFlverPreview(input.mapResourceUri, modelName)) as {
+        ok?: boolean;
+        data?: { positionsBase64?: string; indicesBase64?: string; vertexCount?: number };
+        diagnostics?: Array<{ code?: string; message?: string }>;
+      };
+      const positions = decodeBase64F32(raw.data?.positionsBase64);
+      if (!raw.ok || !positions || positions.length < 9) {
+        missing += 1;
+        if (raw.diagnostics?.some((diag) => (diag.message ?? '').includes('开始'))) needBase = true;
+        continue;
+      }
+      const indices = decodeBase64Index(raw.data?.indicesBase64);
+      for (const partName of usage.get(modelName) ?? []) {
+        const draw = input.drawList.items.find((item) => item.label === partName && item.entityKind === 'msb-part');
+        if (!draw) continue;
+        const mesh: FlverSceneMesh = {
+          id: draw.id,
+          label: draw.label,
+          position: draw.position,
+          rotation: draw.rotation,
+          scale: draw.scale,
+          positions,
+          ...(indices ? { indices } : {}),
+          vertexCount: raw.data?.vertexCount ?? Math.floor(positions.length / 3)
+        };
+        handle.replaceItemMesh(draw.id, mesh);
+      }
+      loaded += 1;
+    } catch {
+      missing += 1;
+    }
+  }
+  return { loaded, missing, needBase };
+}
 
 /** 左栏 Map Object List 里的实体分类。 */
 type MsbEntityKind = 'msb-model' | 'msb-event' | 'msb-part' | 'msb-region';
@@ -91,7 +193,7 @@ export interface MsbScenePanelProps {
  */
 export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const handleRef = useRef<ThreeSceneHandle | null>(null);
+  const handleRef = useRef<ProxySceneHandle | null>(null);
   const [manifest, setManifest] = useState<SceneManifest | null>(null);
   const [selected, setSelected] = useState<SelectedEntity | null>(null);
   const [status, setStatus] = useState('正在初始化 3D 场景…');
@@ -178,17 +280,30 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         if (!node) return;
         setSelected({ id: node.id, label: node.label, kind: node.kind });
       }
-    }).then((handle) => {
+    }).then(async (handle) => {
       if (cancelled) {
         handle.dispose();
         return;
       }
       handleRef.current = handle;
       const partial = sceneManifest.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL');
-      setStatus(
-        `3D 代理场景已加载（${drawList.itemCount} 节点 / ${sceneManifest.entityCount} 实体）`
-        + (partial ? ' · Bridge 实体预览为 partial' : '')
-      );
+      const meshSummary = await loadPartMeshes(handle, {
+        mapResourceUri: props.mapResourceUri,
+        parts: props.parts,
+        models: props.models ?? [],
+        drawList,
+        cancelled
+      });
+      if (cancelled) return;
+      const pieces = [
+        meshSummary.loaded > 0
+          ? `已挂 ${meshSummary.loaded} 个模型`
+          : '视口仍是代理盒子',
+        meshSummary.missing > 0 ? `${meshSummary.missing} 个没有找到模型` : null,
+        meshSummary.needBase ? '到「开始」页挂原版后再试' : null,
+        partial ? 'Bridge 实体预览为 partial' : null
+      ].filter((item): item is string => item !== null);
+      setStatus(pieces.join(' · '));
     }).catch((error: unknown) => {
       setStatus(error instanceof Error ? error.message : '3D 场景初始化失败');
     });
@@ -463,7 +578,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                 {props.openFailure
                   ? props.openFailure.message
                   : (nodeCount > 0
-                      ? `节点 ${nodeCount} · region ${regions.length} · 无绝对路径`
+                      ? `节点 ${nodeCount} · region ${regions.length}${status ? ` · ${status}` : ''}`
                       : status)}
               </p>
               {(selected?.kind === 'msb-part' || selected?.kind === 'msb-region') ? (

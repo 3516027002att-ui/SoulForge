@@ -391,16 +391,18 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
         maxWidth={agentMaxWidth}
         onWidthChange={onAgentWidthChange}
       />
-      <AgentDockHeader
-        busy={taskRunning || awaitingApproval}
-        statusText={headerState ?? ''}
-        historyOpen={drawerView === 'history'}
-        expanded={expanded}
-        onToggleHistory={() => (drawerView === 'history' ? closeDrawer() : openDrawer('history'))}
-        onNewTask={onNewTask ?? (() => undefined)}
-        onToggleExpand={onToggleExpand ?? (() => undefined)}
-        onClose={onClose}
-      />
+      {drawerView === null && (
+        <AgentDockHeader
+          busy={taskRunning || awaitingApproval}
+          statusText={headerState ?? ''}
+          historyOpen={false}
+          expanded={expanded}
+          onToggleHistory={() => openDrawer('history')}
+          onNewTask={onNewTask ?? (() => undefined)}
+          onToggleExpand={onToggleExpand ?? (() => undefined)}
+          onClose={onClose}
+        />
+      )}
       {/* S11：抽屉打开时整列换页——欢迎/对话、资源引用、composer 全部卸掉，
           禁止半透明抽屉盖在欢迎 + composer 上（旧 .agent-secondary-drawer
           用 position:absolute 叠一层，浅色主题 --forge-0 只有 8% 白，欢迎三勾
@@ -479,6 +481,8 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
             modelLabel={modelLabel}
             onOpenModelSettings={() => openDrawer('settings')}
+            thinking={thinking}
+            onThinkingChange={onThinkingChange}
             citeSelecting={citeSelecting}
             onToggleCiteSelect={onToggleCiteSelect}
             contextLabel={contextLabel}

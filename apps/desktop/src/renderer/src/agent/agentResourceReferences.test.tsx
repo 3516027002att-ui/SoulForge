@@ -272,7 +272,7 @@ describe('AgentSidebar 资源引用接线（桥接可用）', () => {
     const props: AgentSidebarProps = {
       open: true,
       agentWidth: 440,
-      agentMinWidth: 340,
+      agentMinWidth: 160,
       agentMaxWidth: 620,
       onAgentWidthChange: () => undefined,
       busy: false,

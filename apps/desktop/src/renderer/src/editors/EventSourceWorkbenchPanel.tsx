@@ -586,14 +586,23 @@ function EventMeaningPane(props: {
   inspection: LineInspection;
   jump: EventJump | null;
   onJumpEvent: (eventId: number) => void;
+  documentTitle: string;
 }): ReactElement {
-  const { inspection, jump, onJumpEvent } = props;
+  const { inspection, jump, onJumpEvent, documentTitle } = props;
   if (inspection.kind === 'empty') {
     return <p className="muted esw-meaning__empty">把光标放在一条指令或 $Event 头上。</p>;
   }
   if (inspection.kind === 'event-header') {
     return (
-      <div className="esw-meaning__block">
+      <div
+        className="esw-meaning__block"
+        data-cite={JSON.stringify({
+          kind: 'event-line',
+          document: documentTitle,
+          eventId: inspection.eventId,
+          line: 1
+        })}
+      >
         <strong>$Event({inspection.eventId})</strong>
         <p className="muted">事件块头。rest 是 Default / Restart。</p>
       </div>
@@ -1178,6 +1187,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                 inspection={inspection}
                 jump={jump}
                 onJumpEvent={jumpToEvent}
+                documentTitle={activeTab?.title ?? 'event'}
               />
             )
           }

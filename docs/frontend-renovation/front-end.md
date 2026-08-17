@@ -1394,7 +1394,7 @@ Bottom Composer
 - workspace 级持久化；
 - 鼠标拖动或键盘每次 16px；
 - 普通状态只有 1px 左分隔线；
-- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 200–620（S8 下限从 340 收到 200：够放「引用 + 发送」）；
+- 始终文档流右列（不 overlay），开着挤窄编辑区，左缘可拖 160–620（S8 下限从 340 收到 160：窄到一条工具栏宽）；
 - `Ctrl+J` 显示/隐藏；
 - 隐藏不取消任务、不清除审批。
 
@@ -2280,7 +2280,7 @@ renderer 不能构造 roundtrip expectation、Bridge command、locator 或恢复
 1440px
 1920px
 200% system/browser zoom
-200 / 440 / 620px Agent widths（S8 下限 200）
+160 / 440 / 620px Agent widths（S8 下限 160）
 ```
 
 窄窗口策略：
@@ -2611,6 +2611,7 @@ SHELL-09 → SHELL-10
 - **S19 裁定（2026-08-15）**：Bridge `read-msb-document` / `write-msb` 必须先 native 解 DCX（与 EMEVD 同一套 `DcxNativeDocument`）再认 `"MSB "` 魔数——磁盘上的 `.msb.dcx` 头是 `DCX\0`。mods 里 DFLT 不挂原版也能开；原版 KRAK 挂原版 + Oodle 后同样能开。读取失败在面板内给 `code + 人话 + 下一步`（如「KRAK，到开始页选原版」），不得「详情见底部日志」。冒烟至少一条直接对 `.msb.dcx` 调 `read-msb-document`，禁止先在 TS 里 `decompressDfltDcx` 再喂。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；tree/viewport/inspector 联动、无 writer action、resize/keyboard 和对照截图。
 - **S19 失败面已落地**：打开失败（KRAK 缺 Oodle / 其它读取错误）时左栏显示 code + 人话 + 下一步，viewport 不再假 0 实体；同一份结构化失败随下一次 Agent 任务提交（main 校验后进系统提示），Agent 能直接解释原因与下一步。
+- **S23 已落地**：视口按 part 的 `modelIndex` 读 overlay / 原版旁路 FLVER（`readMapPartFlverPreview`），有网格就替换 proxy 盒子；找不到写「没有找到该 part 的模型」，未挂原版写去「开始」页。状态不再写「无绝对路径」。写入仍按 V0.6 关。
 
 #### MAP-50C — MSB write
 
@@ -2680,12 +2681,14 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[CREATE] packages/shared/src/vfx-editor.ts`；`[MODIFY] packages/shared/src/index.ts`；`[CREATE] bridge/SoulForge.Bridge/FxrNativeDocument.cs`；`[MODIFY] bridge/SoulForge.Bridge/BridgeCommandService.cs`；`[MODIFY] bridge/SoulForge.Bridge/BridgeDaemonHost.cs`；`[CREATE] packages/core/src/testing/runNativeFxrSmoke.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`；`[MODIFY] packages/core/package.json`；`[MODIFY] package.json`。
 - **Output/Tests**：effect/node/field tree；新增 root `bridge:verify:fxr` 并运行 `npm run bridge:verify:fxr`；unknown node layout 为 partial/blocked。
+- **S24 已落地**：Section4 是扁平表 + 指针树，已访问槽不再当第二棵根（避免 0x140 假环）；合成夹具补「根 + 紧随孩子、count≥2」。ffxbnd 列出全部 `.fxr` 子项（逻辑名经 `sanitizeEntryName`），一条失败只红那一条。
 
 #### VFX-54B — Smithbox-style VFX workbench
 
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/editors/VfxWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/VfxWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
 - **Output**：Effect / Particle list | 真实预览（没有就不做假 viewport）| Inspector。已知/未知 node 状态明确。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；known/unknown node、selection chain、preview isolation、no fake graph 和参考截图。
+- **S24**：左栏在 ffxbnd 下多一组「包内效果」；中栏继续诚实空态，不要假粒子 viewport。
 
 #### VFX-54C — FXR write
 
@@ -2723,7 +2726,7 @@ SHELL-09 → SHELL-10
   - 动画名：合法 hkx 茎直接用，乱码/空白/「葉」一律丢弃显示数字 id（`isLegalHkxStem`/`animationIdLabel` 可单测）；列表主标签是 id/hkx 茎，右侧显示事件数。
   - 词条行：`{完整 typeId} {类型名}`（如 `0 JumpTable`），类型名来自本机 `TAE.Template.SDT.xml`（main 解析，renderer 只拿逻辑名；无模板「未命名」）；列表不再出现秒区间与「事…」截断。
   - 中栏详情整块移除（DetailsSection/TaeEventEditor/新增事件入口删除），详情下沉到 `WorkbenchLayout` footer：起始帧/结束帧（30fps，主标签帧 + ≈ 秒小字）、完整 typeId + 类型名、事件下标、参数字段（按模板解码；无模板「未解码」+ 原始 hex，禁止编造 SoundType）；时间编辑保留在 footer（标签起始帧/结束帧，内部仍走 update-event-times 秒）。
-  - 预览挂伴生 chrbnd：overlay `chr/<id>.chrbnd.dcx` → 原版同相对路径；两边都没有给可行动空态（未挂原版写明去「开始」页）。骨骼动画播放未接入，预览如实标注静态模型（不假装播放）。
+  - 预览挂伴生 chrbnd：overlay `chr/<id>.chrbnd.dcx` → 原版同相对路径；右栏挂现有 `FlverViewer`（`injectedMesh` 跳过按 sourceUri 再读）。`read-tae-event-params` / `read-chrbnd-flver-preview` 已进 `AdvertisedCommands`。没模型写人话空态（去「开始」页挂原版），禁止「见底部日志」/「预览不可用」。骨骼动画播放未接入，预览如实写「模型已挂，动画播放未接入」。
   - `WorkbenchLayout` 拖栏修复：量栏内容宽（不含 4px 分隔条）、上限扣除分隔条总宽、window 监听不再随 `columns` 新数组反复拆装——PARAM/文本/动作同一套布局组件一并受益。
 
 #### ANIMATION-56C — TAE event write
@@ -2736,8 +2739,8 @@ SHELL-09 → SHELL-10
 #### AGENT-60A — dock shell 与欢迎区
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockResizer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockHeader.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentConversationViewport.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentWelcome.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`。
-- **Steps**：实现 48px header / minmax conversation / bottom composer grid；200/440/620px（S8）、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
-- **Tests**：idle 440×900 截图；340/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
+- **Steps**：实现 48px header / minmax conversation / bottom composer grid；160/440/620px（S8）、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
+- **Tests**：idle 440×900 截图；160/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
 
 #### AGENT-60B — 三层 Composer
 
@@ -2839,7 +2842,7 @@ SHELL-09 → SHELL-10
 
 - [ ] 1024/1280/1440/1920 可用；
 - [ ] 200% 缩放无遮挡；
-- [ ] 200/440/620px Agent 无溢出（S8 下限 200）；
+- [ ] 160/440/620px Agent 无溢出（S8 下限 160）；
 - [ ] pane resizer 支持鼠标和键盘；
 - [ ] 所有列表、树、表格、编辑器和 toolbar 可仅用键盘操作；
 - [ ] focus-visible 清晰；

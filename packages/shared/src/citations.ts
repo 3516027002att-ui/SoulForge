@@ -36,6 +36,17 @@ export type CiteHit =
       fieldId: string;
       label: string;
       value: string;
+    }
+  | {
+      kind: 'fmg-entry';
+      library: string;
+      id: number;
+    }
+  | {
+      kind: 'event-line';
+      document: string;
+      eventId?: number;
+      line: number;
     };
 
 /** 一次框选合并后的单条引用（一行 + 其命中的字段子集）。 */
@@ -66,6 +77,21 @@ export function decodeCiteHit(raw: unknown): CiteHit {
   if (typeof raw !== 'object' || raw === null) throw new Error('引用命中必须是对象。');
   const record = raw as Record<string, unknown>;
   const kind = record.kind;
+  if (kind === 'fmg-entry') {
+    const library = typeof record.library === 'string' ? record.library : '';
+    const id = typeof record.id === 'number' && Number.isFinite(record.id) ? record.id : null;
+    if (library === '' || ABSOLUTE_PATH_RE.test(library)) throw new Error('fmg-entry library 非法。');
+    if (id === null) throw new Error('fmg-entry 缺少 id。');
+    return { kind: 'fmg-entry', library, id };
+  }
+  if (kind === 'event-line') {
+    const document = typeof record.document === 'string' ? record.document : '';
+    const line = typeof record.line === 'number' && Number.isFinite(record.line) ? record.line : null;
+    if (document === '' || ABSOLUTE_PATH_RE.test(document)) throw new Error('event-line document 非法。');
+    if (line === null) throw new Error('event-line 缺少 line。');
+    const eventId = typeof record.eventId === 'number' && Number.isFinite(record.eventId) ? record.eventId : undefined;
+    return { kind: 'event-line', document, line, ...(eventId === undefined ? {} : { eventId }) };
+  }
   if (kind !== 'param-row' && kind !== 'param-field') {
     throw new Error(`不支持的引用命中类型：${String(kind)}`);
   }

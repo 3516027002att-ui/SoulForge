@@ -380,12 +380,16 @@ internal sealed class FxrNativeDocument
         }
 
         // ── Section4 递归树 ──
-        var rootNodes = new List<FxrSection4Node>(section4Count);
+        var rootNodes = new List<FxrSection4Node>();
         var visited4 = new HashSet<int>();
         var nodeCount = 0;
+        // Section4 是扁平表 + 指针树。只从尚未访问过的槽起步当根；
+        // 子节点住在下一格时不要再当第二棵根走进去，否则 0x140 会被判成假环。
         for (var i = 0; i < section4Count; i++)
         {
-            rootNodes.Add(ParseSection4Node(source, section4Offset + i * Section4Size, 0,
+            var slotOffset = section4Offset + i * Section4Size;
+            if (visited4.Contains(slotOffset)) continue;
+            rootNodes.Add(ParseSection4Node(source, slotOffset, 0,
                 visited4, ref nodeCount, gaps));
         }
 
@@ -758,7 +762,11 @@ internal sealed class FxrNativeDocument
     //  Envelope（effect / node / field 三页）
     // ══════════════════════════════════════════════════════════════
 
-    public object ToEnvelope(FxrRoundTripReport? report = null)
+    public object ToEnvelope(
+        FxrRoundTripReport? report = null,
+        object[]? containerEntries = null,
+        int? selectedEntryIndex = null,
+        string? selectedEntryName = null)
     {
         report ??= VerifyRoundTrip();
         // 顺序要紧：authority 触发 UnparsedGaps 计算；先算再读 gaps 保持一致。
@@ -871,7 +879,11 @@ internal sealed class FxrNativeDocument
             unparsedGaps = gaps,
             layoutWarnings = _layoutWarnings.ToArray(),
             roundTrip = report,
-            authority
+            authority,
+            // ffxbnd 包内全部 .fxr 子项（裸 .fxr 为空）。逻辑名由 TS 侧 sanitize。
+            containerEntries = containerEntries ?? Array.Empty<object>(),
+            selectedEntryIndex,
+            selectedEntryName
         };
     }
 

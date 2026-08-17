@@ -35,3 +35,4 @@ export * from './script-container.js';
 export * from './fmg-names.js';
 export * from './citations.js';
 export * from './container-workbench.js';
+export * from './sanitizeRendererPath.js';

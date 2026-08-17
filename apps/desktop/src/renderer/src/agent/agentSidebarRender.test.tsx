@@ -51,7 +51,7 @@ function render(overrides: Partial<AgentSidebarProps> = {}): string {
   const props: AgentSidebarProps = {
     open: true,
     agentWidth: 440,
-    agentMinWidth: 200,
+    agentMinWidth: 160,
     agentMaxWidth: 620,
     onAgentWidthChange: () => undefined,
     busy: false,
@@ -144,25 +144,24 @@ describe('Composer 三层结构（§12.6）', () => {
     assert.match(html, /class="agent__composer"[\s\S]*?<textarea/);
   });
 
-  it('toolbar 固定五项按 引用 | 附件 | 模型 | Plan | 发送/停止 顺序（S10：@/# 合成引用框选）', () => {
+  it('toolbar 上同时有模型钮和思考强度钮（S32）', () => {
     const html = render();
     const toolbarStart = html.indexOf('class="agent-composer__toolbar"');
     assert.ok(toolbarStart >= 0, 'toolbar 层必须存在');
     const region = html.slice(toolbarStart);
     const markers = [
-      'aria-label="引用框选"', // S10：@/# 合成「引用」框选钮
-      'aria-label="添加附件"', // attachment
-      'aria-label="模型服务设置"', // model
-      'data-testid="composer-plan-mode"', // plan
-      '>发送<' // send/stop
+      'aria-label="引用框选"',
+      'aria-label="权限模式"',
+      'data-testid="composer-model-btn"',
+      'data-testid="composer-thinking-btn"',
+      '>发送<'
     ];
     let prev = -1;
     for (const marker of markers) {
       const idx = region.indexOf(marker);
-      assert.ok(idx > prev, `toolbar 五项应按固定顺序出现，${marker} 顺序错误`);
+      assert.ok(idx > prev, `toolbar 应按 + / 权限 / 模型 / 思考 / 发送 顺序，${marker} 顺序错误`);
       prev = idx;
     }
-    // S10 拍死：工具栏不再有 @ / # 两个钮（引用是语义实体，不是文本 token）。
     assert.ok(!region.includes('aria-label="添加 Agent 参与者"'), '@ 按钮已移除');
     assert.ok(!region.includes('aria-label="添加当前文件上下文"'), '# 按钮已移除');
   });
@@ -199,7 +198,7 @@ describe('AgentDockResizer（§12.2）', () => {
     assert.match(html, /aria-orientation="vertical"/);
     assert.match(html, /aria-label="调整 Agent 面板宽度"/);
     assert.match(html, /aria-valuenow="440"/);
-    assert.match(html, /aria-valuemin="200"/);
+    assert.match(html, /aria-valuemin="160"/);
     assert.match(html, /aria-valuemax="620"/);
   });
 
@@ -214,21 +213,21 @@ describe('AgentDockResizer（§12.2）', () => {
     assert.match(closedHtml, /class="agent is-collapsed"/);
   });
 
-  it('宽度收敛到 200/620 并取整（S8：下限 200px）', () => {
+  it('宽度收敛到 160/620 并取整（S8：下限 160px）', () => {
     assert.equal(AGENT_DOCK_KEYBOARD_STEP, 16, '键盘每次 16px（§12.2）');
-    assert.equal(clampAgentDockWidth(440, 200, 620), 440);
-    assert.equal(clampAgentDockWidth(190, 200, 620), 200, '低于下限收敛到 200');
-    assert.equal(clampAgentDockWidth(700, 200, 620), 620);
-    assert.equal(clampAgentDockWidth(441.6, 200, 620), 442);
+    assert.equal(clampAgentDockWidth(440, 160, 620), 440);
+    assert.equal(clampAgentDockWidth(150, 160, 620), 160, '低于下限收敛到 160');
+    assert.equal(clampAgentDockWidth(700, 160, 620), 620);
+    assert.equal(clampAgentDockWidth(441.6, 160, 620), 442);
   });
 
   it('键盘 ArrowLeft/Right 每次 16px，Home/End 到边界', () => {
-    assert.equal(dockWidthForResizeKey('ArrowLeft', 440, 200, 620), 456);
-    assert.equal(dockWidthForResizeKey('ArrowRight', 440, 200, 620), 424);
-    assert.equal(dockWidthForResizeKey('ArrowLeft', 610, 200, 620), 620, '超过上限收敛到 620');
-    assert.equal(dockWidthForResizeKey('ArrowRight', 210, 200, 620), 200, '低于下限收敛到 200');
-    assert.equal(dockWidthForResizeKey('Home', 500, 200, 620), 200);
-    assert.equal(dockWidthForResizeKey('End', 400, 200, 620), 620);
+    assert.equal(dockWidthForResizeKey('ArrowLeft', 440, 160, 620), 456);
+    assert.equal(dockWidthForResizeKey('ArrowRight', 440, 160, 620), 424);
+    assert.equal(dockWidthForResizeKey('ArrowLeft', 610, 160, 620), 620, '超过上限收敛到 620');
+    assert.equal(dockWidthForResizeKey('ArrowRight', 170, 160, 620), 160, '低于下限收敛到 160');
+    assert.equal(dockWidthForResizeKey('Home', 500, 160, 620), 160);
+    assert.equal(dockWidthForResizeKey('End', 400, 160, 620), 620);
   });
 });
 
@@ -693,6 +692,8 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.ok(!drawerHtml.includes('agent__composer'), '抽屉面不含 composer');
     assert.ok(!drawerHtml.includes('agent-composer-context'), '抽屉面不含资源引用条');
     assert.ok(!drawerHtml.includes('agent-empty-state'), '抽屉面不含欢迎三勾');
+    assert.ok(!drawerHtml.includes('data-testid="agent-task-run"'), '设置页没有运行任务按钮');
+    assert.ok(!drawerHtml.includes('AgentSessionControls'), '设置页不再塞思考/权限控件');
     // 历史/设置互相可达：历史视图里也有切换控件（不再只有「模型设置」一个方向）。
     const historyHtml = renderToStaticMarkup(
       <AgentSecondaryDrawer
@@ -744,7 +745,7 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     const cancelHtml = renderToStaticMarkup(
       <AgentSecondaryDrawer
         open={true}
-        view="settings"
+        view="history"
         onClose={() => undefined}
         onSwitchView={() => undefined}
         task={render0Task()}
@@ -760,7 +761,7 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         }}
       />
     );
-    assert.match(cancelHtml, /data-testid="agent-task-cancel"/, '任务级取消在二级抽屉');
+    assert.match(cancelHtml, /data-testid="agent-task-cancel"/, '任务级取消在历史页');
   });
 });
 

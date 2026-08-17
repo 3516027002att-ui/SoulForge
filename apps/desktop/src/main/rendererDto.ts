@@ -1,12 +1,13 @@
-import type {
-  BridgeResult,
-  Diagnostic,
-  EditorCatalogSummary,
-  EditorDocumentResult,
-  IndexedFile,
-  PatchHistoryEntry,
-  ResourcePreview,
-  SaveTextResourceResult
+import {
+  maskAbsolutePathSpans,
+  type BridgeResult,
+  type Diagnostic,
+  type EditorCatalogSummary,
+  type EditorDocumentResult,
+  type IndexedFile,
+  type PatchHistoryEntry,
+  type ResourcePreview,
+  type SaveTextResourceResult
 } from '@soulforge/shared';
 
 export type RendererIndexedFile = Omit<
@@ -217,12 +218,7 @@ export function sanitizeRendererValue(value: unknown): unknown {
  * 「源码里提到过这个函数名」。
  */
 function sanitizeRendererString(value: string): string {
-  const containsWindowsDrivePath = /(?<![A-Za-z0-9])[A-Za-z]:[\\/]/.test(value);
-  const containsUncOrDevicePath = /\\\\(?:[?.]\\)?[^\\/\s]+[\\/]/.test(value);
-  const containsAbsoluteFileUri = /file:\/\/\/[A-Za-z]:\//i.test(value);
-  return containsWindowsDrivePath || containsUncOrDevicePath || containsAbsoluteFileUri
-    ? '[本机路径已隐藏]'
-    : value;
+  return maskAbsolutePathSpans(value);
 }
 
 function pathToResourceLabel(path: string, files: readonly IndexedFile[]): string {

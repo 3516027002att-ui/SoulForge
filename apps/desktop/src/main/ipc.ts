@@ -205,7 +205,7 @@ import {
 import { commitEmevdFullDocument, EmevdAuthorityCache } from './emevdAuthorityCache.js';
 import { EmevdOpenSlots } from './emevdOpenSlots.js';
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
-import { readRecentPath, writeRecentPath } from './recentPaths.js';
+import { clearRecentPath, readRecentPath, writeRecentPath } from './recentPaths.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
 import { ModelServiceCredentialVault } from './modelServiceCredentials.js';
 import { MainMe3RuntimeGateway } from './me3RuntimeGateway.js';
@@ -1004,6 +1004,57 @@ function resolveFlverReadFile(sourceUri: string): { absolutePath: string; relati
   return resolveChrbndVirtualFile(sourceUri);
 }
 
+function logicalMapModelName(raw: string): string {
+  const base = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
+  return base.replace(/\.(flver|dcx|chrbnd|objbnd)$/i, '');
+}
+
+function resolveMapModelFile(
+  mapRelativePath: string,
+  modelName: string,
+  sibPath?: string
+): { absolutePath: string; relativePath: string; kind: 'flver' | 'chrbnd' } | null {
+  const names = [...new Set(
+    [modelName, sibPath ?? '']
+      .map((value) => logicalMapModelName(value))
+      .filter((value) => value.length > 0)
+  )];
+  const mapStem = basename(mapRelativePath).replace(/\.msb(\.dcx)?$/i, '');
+  const mapId = /^m\d{2}_\d{2}_\d{2}_\d{2}$/i.test(mapStem) ? mapStem : null;
+  const candidates: Array<{ rel: string; kind: 'flver' | 'chrbnd' }> = [];
+  for (const name of names) {
+    if (mapId) {
+      candidates.push({ rel: `map/${mapId}/${name}.flver.dcx`, kind: 'flver' });
+      candidates.push({ rel: `map/${mapId}/${name}.flver`, kind: 'flver' });
+    }
+    candidates.push({ rel: `map/${name}.flver.dcx`, kind: 'flver' });
+    if (/^c\d/i.test(name)) candidates.push({ rel: `chr/${name}.chrbnd.dcx`, kind: 'chrbnd' });
+    if (/^o\d/i.test(name)) candidates.push({ rel: `obj/${name}.objbnd.dcx`, kind: 'chrbnd' });
+  }
+  const normalize = (value: string): string => value.replace(/\\/g, '/').toLowerCase();
+  for (const candidate of candidates) {
+    const indexed = indexedFiles.find((item) => {
+      const rel = normalize(item.relativePath);
+      return rel === normalize(candidate.rel) || rel.endsWith(`/${normalize(candidate.rel)}`);
+    });
+    if (indexed) {
+      return { absolutePath: indexed.absolutePath, relativePath: indexed.relativePath, kind: candidate.kind };
+    }
+  }
+  const overlay = activeSession?.layers.overlayRoot?.trim();
+  const base = activeSession?.layers.baseRoot?.trim();
+  for (const root of [overlay, base]) {
+    if (!root) continue;
+    for (const candidate of candidates) {
+      const absolutePath = join(root, candidate.rel);
+      if (safeExists(absolutePath)) {
+        return { absolutePath, relativePath: candidate.rel, kind: candidate.kind };
+      }
+    }
+  }
+  return null;
+}
+
 let cachedEmevdRegistry: ReturnType<typeof resolveEmevdRegistry> | null = null;
 function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
   if (!cachedEmevdRegistry) {
@@ -1327,6 +1378,8 @@ export interface DirectorySelection {
 export interface OpenWorkspaceScanOptions {
   overlaySelectionId: string;
   baseSelectionId?: string;
+  /** 显式卸掉原版：不带 base，并忘掉最近一次原版目录。 */
+  clearBase?: boolean;
 }
 
 interface DirectorySelectionRecord extends DirectorySelection {
@@ -1835,21 +1888,7 @@ async function requestWriteConfirmation(input: {
   extraSubjects?: string[];
 }): Promise<ConfirmationReceipt | null> {
   if (!activeWorkspaceSessionId) return null;
-  const parent = input.event ? BrowserWindow.fromWebContents(input.event.sender) : null;
-  const options = {
-    type: 'warning' as const,
-    title: '确认高风险写入',
-    message: `确认${input.actionLabel}“${input.resourceLabel}”吗？`,
-    detail: '操作将只通过补丁引擎写入 Mod 覆盖层，并执行验证、备份和可回滚检查。原生格式证据不足时仍会阻断。',
-    buttons: ['取消', '继续'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true
-  };
-  const decision = parent
-    ? await dialog.showMessageBox(parent, options)
-    : await dialog.showMessageBox(options);
-  if (decision.response !== 1) return null;
+  // 日常 PARAM/FMG/GPARAM/脚本写入不再弹系统确认框；备份与回滚仍在 Patch Engine。
   return createConfirmationReceipt({
     subjects: [
       'MAIN_NATIVE_DIALOG_CONFIRMED',
@@ -2230,9 +2269,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       options: OpenWorkspaceScanOptions
     ): Promise<RendererWorkspaceScanResult> => {
       const overlaySelection = consumeDirectorySelection(event, options.overlaySelectionId, 'overlay');
-      const baseSelection = options.baseSelectionId
-        ? consumeDirectorySelection(event, options.baseSelectionId, 'base')
-        : undefined;
+      if (options.clearBase === true) clearRecentPath(recentPathsFile, 'base');
+      const baseSelection = options.clearBase === true
+        ? undefined
+        : options.baseSelectionId
+          ? consumeDirectorySelection(event, options.baseSelectionId, 'base')
+          : undefined;
 
       if (activeSession) await disposeBridgeDaemonPool();
       emevdFullDocuments.clear();
@@ -3595,6 +3637,63 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     });
   });
 
+  handle(
+    'resource.readMapPartFlverPreview',
+    async (
+      _event,
+      mapSourceUri: string,
+      modelName: string,
+      sibPath?: string
+    ): Promise<{
+      ok: boolean;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === mapSourceUri);
+      if (!file) {
+        return {
+          ok: false,
+          diagnostics: [{
+            severity: 'error',
+            code: 'RESOURCE_NOT_INDEXED',
+            message: '资源未索引，无法定位地图模型。',
+            sourceUri: mapSourceUri
+          }]
+        };
+      }
+      const resolved = resolveMapModelFile(file.relativePath, modelName, sibPath);
+      const baseRoot = activeSession?.layers.baseRoot?.trim();
+      if (!resolved) {
+        return {
+          ok: false,
+          diagnostics: [{
+            severity: 'error',
+            code: 'MAP_FLVER_NOT_FOUND',
+            message: baseRoot
+              ? `没有找到该 part 的模型（${logicalMapModelName(modelName)}）。`
+              : `没有找到该 part 的模型（${logicalMapModelName(modelName)}）。overlay 没有这份 FLVER，到「开始」页挂原版后再试。`
+          }]
+        };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(resolved.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      const command = resolved.kind === 'chrbnd' ? 'read-chrbnd-flver-preview' : 'read-flver-mesh';
+      const result = await runBridge<Record<string, unknown>>({
+        command,
+        filePath: resolved.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        timeoutMs: 120_000,
+        ...(baseRoot ? { oodleRuntimeRoot: baseRoot } : {}),
+        ...(resolved.kind === 'flver' ? { commandOptions: { meshIndex: 0 } } : { commandOptions: { meshIndex: 0 } })
+      });
+      return {
+        ok: result.parseStatus !== 'failed',
+        ...(result.data !== undefined ? { data: result.data } : {}),
+        diagnostics: result.diagnostics
+      };
+    }
+  );
+
   handle('resource.readTaeDocument', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
@@ -3849,23 +3948,55 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
 
-  handle('resource.readFxrDocument', async (_event, sourceUri: string) => {
+  handle('resource.readFxrDocument', async (_event, sourceUri: string, entryName?: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FXR。', sourceUri }] };
     }
     const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    const selectedName = typeof entryName === 'string' && entryName.trim() ? entryName.trim() : undefined;
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-fxr-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
+      ...(selectedName ? { commandOptions: { entryName: selectedName } } : {}),
       ...(activeSession?.layers.baseRoot
         ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
         : {})
     });
-    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+    const data = result.data && typeof result.data === 'object'
+      ? { ...(result.data as Record<string, unknown>) }
+      : {};
+    const detailsWithEntries = result.diagnostics
+      ?.map((diag) => (diag as { details?: unknown }).details)
+      .find((details) => details && typeof details === 'object' && Array.isArray((details as { containerEntries?: unknown }).containerEntries));
+    const rawEntries = Array.isArray(data.containerEntries)
+      ? data.containerEntries
+      : detailsWithEntries && typeof detailsWithEntries === 'object'
+        ? (detailsWithEntries as { containerEntries?: unknown }).containerEntries
+        : [];
+    const seen = new Set<string>();
+    const containerEntries = Array.isArray(rawEntries)
+      ? rawEntries.map((raw, index) => {
+          const rec = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+          const entryIndex = typeof rec.entryIndex === 'number' ? rec.entryIndex : index;
+          return {
+            entryIndex,
+            entryName: sanitizeEntryName(String(rec.entryName ?? rec.name ?? ''), entryIndex, seen)
+          };
+        })
+      : [];
+    if (Object.keys(data).length > 0) data.containerEntries = containerEntries;
+    return sanitizeRendererValue({
+      ok: result.parseStatus !== 'failed',
+      sourceUri,
+      relativePath: file.relativePath,
+      data: result.parseStatus !== 'failed' ? data : undefined,
+      containerEntries,
+      diagnostics: result.diagnostics
+    });
   });
 
   handle('resource.readFlverDocument', async (_event, sourceUri: string) => {

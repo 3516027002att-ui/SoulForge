@@ -205,9 +205,11 @@ const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 
 const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: string }> = [];
 
-const AGENT_MIN_WIDTH = 340;
+const AGENT_MIN_WIDTH = 160;
 const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
+/** 开始侧栏审计折叠区只列最近若干条，完整列表仍在原审计面板。 */
+const START_SIDEBAR_AUDIT_LIMIT = 8;
 
 function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
   // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
@@ -1191,10 +1193,12 @@ export function App(): ReactElement {
           diagnostics?: Array<{ severity?: string; code?: string; message?: string }>;
           data?: {
             sourceHash?: string;
-            models?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
+            models?: Array<{ name: string; nativeOffset?: number; offset?: number; typeId: number; sibPath?: string }>;
             parts?: Array<{
               name: string;
               nativeOffset?: number;
+              offset?: number;
+              modelIndex?: number;
               posX: number;
               posY: number;
               posZ: number;
@@ -1247,7 +1251,8 @@ export function App(): ReactElement {
         setLastOpenFailure(null);
         setMsbParts(result.data.parts.map((p) => ({
           name: p.name,
-          ...(p.nativeOffset === undefined ? {} : { nativeOffset: p.nativeOffset }),
+          ...((p.nativeOffset ?? p.offset) === undefined ? {} : { nativeOffset: p.nativeOffset ?? p.offset }),
+          ...(typeof p.modelIndex === 'number' ? { modelIndex: p.modelIndex } : {}),
           posX: p.posX,
           posY: p.posY,
           posZ: p.posZ,
@@ -1258,8 +1263,9 @@ export function App(): ReactElement {
         })));
         setMsbModels((result.data.models ?? []).map((model) => ({
           name: model.name,
-          ...(model.nativeOffset === undefined ? {} : { nativeOffset: model.nativeOffset }),
-          typeId: model.typeId
+          ...((model.nativeOffset ?? model.offset) === undefined ? {} : { nativeOffset: model.nativeOffset ?? model.offset }),
+          typeId: model.typeId,
+          ...(model.sibPath ? { sibPath: model.sibPath.replace(/\\/g, '/').split('/').pop() ?? model.sibPath } : {})
         })));
         setMsbRegions((result.data.regions ?? []).map((r) => ({
           name: r.name,
@@ -1562,6 +1568,8 @@ export function App(): ReactElement {
         parts?: Array<{
           name: string;
           nativeOffset?: number;
+          offset?: number;
+          modelIndex?: number;
           posX: number;
           posY: number;
           posZ: number;
@@ -1578,7 +1586,7 @@ export function App(): ReactElement {
           posY: number;
           posZ: number;
         }>;
-        models?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
+        models?: Array<{ name: string; nativeOffset?: number; offset?: number; typeId: number; sibPath?: string }>;
         events?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
         modelCount?: number;
         partCount?: number;
@@ -1589,7 +1597,8 @@ export function App(): ReactElement {
     if (reload?.ok && reload.data?.parts?.length) {
       setMsbParts(reload.data.parts.map((p) => ({
         name: p.name,
-        ...(p.nativeOffset === undefined ? {} : { nativeOffset: p.nativeOffset }),
+        ...((p.nativeOffset ?? p.offset) === undefined ? {} : { nativeOffset: p.nativeOffset ?? p.offset }),
+        ...(typeof p.modelIndex === 'number' ? { modelIndex: p.modelIndex } : {}),
         posX: p.posX,
         posY: p.posY,
         posZ: p.posZ,
@@ -1608,8 +1617,9 @@ export function App(): ReactElement {
       })));
       setMsbModels((reload.data.models ?? []).map((model) => ({
         name: model.name,
-        ...(model.nativeOffset === undefined ? {} : { nativeOffset: model.nativeOffset }),
-        typeId: model.typeId
+        ...((model.nativeOffset ?? model.offset) === undefined ? {} : { nativeOffset: model.nativeOffset ?? model.offset }),
+        typeId: model.typeId,
+        ...(model.sibPath ? { sibPath: model.sibPath.replace(/\\/g, '/').split('/').pop() ?? model.sibPath } : {})
       })));
       setMsbEvents((reload.data.events ?? []).map((event) => ({
         name: event.name,
@@ -1673,6 +1683,27 @@ export function App(): ReactElement {
     pushToast(message, 'warn');
   }
 
+  async function remountBaseLayer(
+    overlaySelectionId: string,
+    baseSelectionId: string | undefined,
+    clearBase: boolean
+  ): Promise<void> {
+    if (!bridge) return;
+    setStatus(clearBase ? '正在卸下原版目录…' : '正在挂载原版目录…');
+    const result = await bridge.scanWorkspace({
+      overlaySelectionId,
+      ...(baseSelectionId ? { baseSelectionId } : {}),
+      ...(clearBase ? { clearBase: true } : {})
+    });
+    setWorkspace(result);
+    setSessionMeta(result.session ?? null);
+    setAllFiles(result.files);
+    setFiles(result.files);
+    // 同一 overlay，只换 base：打开中的文档要按新的 oodleRuntimeRoot 再读一遍。
+    setSelectedFile((current) => (current ? { ...current } : null));
+    setStatus(result.session.baseMounted ? '原版目录已挂载（只读）。' : '原版目录未挂载。');
+  }
+
   async function chooseBaseDirectory(): Promise<void> {
     if (!bridge) {
       announceDesktopOnly('选择原版目录');
@@ -1682,7 +1713,19 @@ export function App(): ReactElement {
       const selection = await bridge.openBaseDialog();
       if (!selection) return;
       setBaseRootChoice(selection);
-      setStatus(`已选择只读原版游戏目录：${selection.label}（下次打开 Mod 工作区时生效）`);
+      if (workspace) {
+        const last = typeof bridge.lastWorkspaceSelection === 'function'
+          ? await bridge.lastWorkspaceSelection()
+          : null;
+        if (!last?.overlay) {
+          setStatus('找不到当前工作区凭据，无法当场挂载原版目录。');
+          return;
+        }
+        await remountBaseLayer(last.overlay.selectionId, selection.selectionId, false);
+        setBaseRootChoice(null);
+        return;
+      }
+      setStatus('已选择只读原版游戏目录。打开 Mod 工作区时一并挂载。');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(`选择原版目录失败：${message}`);
@@ -1690,8 +1733,22 @@ export function App(): ReactElement {
     }
   }
 
-  function clearBaseDirectory(): void {
+  async function clearBaseDirectory(): Promise<void> {
     setBaseRootChoice(null);
+    if (workspace && bridge && typeof bridge.lastWorkspaceSelection === 'function') {
+      try {
+        const last = await bridge.lastWorkspaceSelection();
+        if (last?.overlay) {
+          await remountBaseLayer(last.overlay.selectionId, undefined, true);
+          return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(`卸下原版目录失败：${message}`);
+        pushToast(`卸下原版目录失败：${message}`, 'warn');
+        return;
+      }
+    }
     setStatus('已清除原版游戏目录选择');
   }
 
@@ -1984,6 +2041,8 @@ export function App(): ReactElement {
     if (domain === 'project') {
       setSelectedFile(null);
       setCenterView('project');
+      setSidebarView('explorer');
+      setSidebarCollapsed(false);
       setStatus('开始页');
       return;
     }
@@ -2143,13 +2202,10 @@ export function App(): ReactElement {
         return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
       }
       case 'fmg': {
-        if (!fmgSourceHash) {
-          return { ok: false, diagnostics: [{ code: 'FMG_NO_LIVE_HASH', message: 'FMG 实时 hash 缺失，拒绝写入。' }] };
-        }
         const payload = change.payload as { op: 'upsert' | 'add' | 'delete'; id: number; text?: string; tableId?: string };
         const result = await bridge.applyFmgMutation(
           change.sourceUri,
-          fmgSourceHash,
+          fmgSourceHash ?? '',
           {
             kind: payload.op,
             id: payload.id,
@@ -2170,13 +2226,10 @@ export function App(): ReactElement {
         return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
       }
       case 'param-row': {
-        if (!paramSourceHash) {
-          return { ok: false, diagnostics: [{ code: 'PARAM_NO_LIVE_HASH', message: 'PARAM 实时 hash 缺失，拒绝写入。' }] };
-        }
         const payload = change.payload as { op: 'upsert' | 'delete'; id: number; dataBase64?: string };
         const result = await bridge.applyParamMutation(
           change.sourceUri,
-          paramSourceHash,
+          paramSourceHash ?? '',
           payload.op === 'delete'
             ? { kind: 'delete', id: payload.id }
             : { kind: 'upsert', id: payload.id, dataBase64: payload.dataBase64 ?? '' }
@@ -2562,59 +2615,6 @@ export function App(): ReactElement {
       <div className="shell" ref={shellRef}>
         {/* ══════════ 活动栏 ══════════ */}
         <nav className="activitybar" aria-label="主导航">
-          <button
-            type="button"
-            className={sidebarView === 'explorer' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('explorer')}
-            title="资源浏览器"
-            aria-label="资源浏览器"
-            aria-current={sidebarView === 'explorer' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.2h9A1.5 1.5 0 0 1 21 8.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'search' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('search')}
-            title="搜索"
-            aria-label="搜索"
-            aria-current={sidebarView === 'search' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-              <path d="M15.8 15.8L20 20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'staging' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('staging')}
-            title="暂存区"
-            aria-label={pendingChangeCount > 0 ? `暂存区（${pendingChangeCount} 项待处理）` : '暂存区'}
-            aria-current={sidebarView === 'staging' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-              <path d="M12 12l8-4.5M12 12L4 7.5M12 12v9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-            </svg>
-            {pendingChangeCount > 0 && <span className="ab-badge" aria-hidden="true">{pendingChangeCount}</span>}
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'audit' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('audit')}
-            title="审计与回滚"
-            aria-label="审计与回滚"
-            aria-current={sidebarView === 'audit' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M12 3a9 9 0 1 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-              <path d="M12 7v5l3.2 2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-              <path d="M18.5 2.5v4h-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
           <div className="ab-spacer"></div>
           <button
             type="button"
@@ -2727,7 +2727,47 @@ export function App(): ReactElement {
                   )}
                 </>
               ) : activeDomain === 'project' ? (
-                <p className="empty-hint" data-testid="start-sidebar-hint">在中央开始页打开工作区。</p>
+                <div className="start-sidebar" data-testid="start-sidebar">
+                  <StartWorkspacePanel
+                    workspaceLabel={workspace?.workspaceLabel ?? sessionMeta?.workspaceLabel ?? null}
+                    baseRootChoiceLabel={baseRootChoice?.label ?? sessionMeta?.baseLabel ?? null}
+                    baseMounted={sessionMeta?.baseMounted ?? false}
+                    browserPreview={isBrowserPreview}
+                    onOpenWorkspace={() => void openWorkspace()}
+                    onChooseBaseDirectory={() => void chooseBaseDirectory()}
+                    onClearBaseDirectory={() => void clearBaseDirectory()}
+                  />
+                  <p className="muted" style={{ fontSize: 11 }}>搜索请按 Ctrl+K。</p>
+                  <details>
+                    <summary>暂存区{pendingChangeCount > 0 ? `（${pendingChangeCount}）` : ''}</summary>
+                    <ChangeQueuePanel
+                      state={changeState}
+                      actions={{
+                        approve: (id) => { changeStore.approve(id); },
+                        reject: (id) => { changeStore.reject(id); },
+                        undoToDraft: (id) => { changeStore.undoToDraft(id); },
+                        discard: (id) => { changeStore.discard(id); },
+                        clearTerminal: () => { changeStore.clearTerminal(); },
+                        commit: () => { void commitStagedChanges(); }
+                      }}
+                    />
+                  </details>
+                  <details>
+                    <summary>审计与回滚</summary>
+                    {!workspace && <p className="empty-hint">打开工作区并完成至少一次补丁提交后可在此回滚。</p>}
+                    {workspace && operationHistory.length === 0 && (
+                      <p className="empty-hint">尚无已记录操作。</p>
+                    )}
+                    {operationHistory.slice(0, START_SIDEBAR_AUDIT_LIMIT).map((entry) => (
+                      <div key={entry.opId} className="audit-entry">
+                        <div className="audit-entry__title">{entry.title}</div>
+                        {entry.status === 'committed' && (
+                          <button type="button" className="btn btn--ghost btn--sm" onClick={() => void rollbackOp(entry.opId)}>回滚</button>
+                        )}
+                      </div>
+                    ))}
+                  </details>
+                </div>
               ) : (
                 <DomainLibraryList
                   files={domainLibraries}
@@ -2910,10 +2950,10 @@ export function App(): ReactElement {
                   onClick={() => void chooseBaseDirectory()}
                   {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
                 >
-                  {baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录'}
+                  {sessionMeta?.baseMounted || baseRootChoice ? '更换原版游戏目录' : '选择原版游戏目录'}
                 </button>
-                {baseRootChoice && (
-                  <button type="button" className="btn btn--ghost btn--sm" onClick={clearBaseDirectory}>清除选择</button>
+                {(sessionMeta?.baseMounted || baseRootChoice) && (
+                  <button type="button" className="btn btn--ghost btn--sm" onClick={() => void clearBaseDirectory()}>清除</button>
                 )}
               </div>
               <div className="setting-row">
@@ -3028,7 +3068,7 @@ export function App(): ReactElement {
               browserPreview={isBrowserPreview}
               onOpenWorkspace={() => void openWorkspace()}
               onChooseBaseDirectory={() => void chooseBaseDirectory()}
-              onClearBaseDirectory={clearBaseDirectory}
+              onClearBaseDirectory={() => void clearBaseDirectory()}
             />
           )}
           {activeEditor === 'gparam' && (
@@ -3274,16 +3314,9 @@ export function App(): ReactElement {
                 if (!bridge || typeof bridge.applyContainerParamFieldMutation !== 'function') {
                   return { ok: false, message: '容器 PARAM 字段写入通道不可用。' };
                 }
-                if (!input.expectedContainerHash || !input.expectedChildHash) {
-                  // 缺哈希就不能保证并发安全，宁可拒绝也不无保护地写。
-                  return {
-                    ok: false,
-                    message: '缺少容器或条目哈希，拒绝写入（无法保证并发安全）。请重新选择该 param。'
-                  };
-                }
                 const saved = await bridge.applyContainerParamFieldMutation(
                   paramWorkbenchFile.sourceUri,
-                  input.expectedContainerHash,
+                  input.expectedContainerHash || '',
                   {
                     entryIndex: input.entryIndex,
                     expectedChildHash: input.expectedChildHash,
@@ -3314,15 +3347,9 @@ export function App(): ReactElement {
                 if (!bridge || typeof bridge.applyContainerParamRowNameMutation !== 'function') {
                   return { ok: false, message: '容器 PARAM 行名写入通道不可用。' };
                 }
-                if (!input.expectedContainerHash || !input.expectedChildHash) {
-                  return {
-                    ok: false,
-                    message: '缺少容器或条目哈希，拒绝写入（无法保证并发安全）。请重新选择该 param。'
-                  };
-                }
                 const saved = await bridge.applyContainerParamRowNameMutation(
                   paramWorkbenchFile.sourceUri,
-                  input.expectedContainerHash,
+                  input.expectedContainerHash || '',
                   {
                     entryIndex: input.entryIndex,
                     expectedChildHash: input.expectedChildHash,

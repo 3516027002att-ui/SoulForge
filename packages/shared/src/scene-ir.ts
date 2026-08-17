@@ -42,6 +42,8 @@ export interface MsbPartTransformLike extends MsbNativeEntityLike {
   scaleX?: number;
   scaleY?: number;
   scaleZ?: number;
+  /** 指向 models[] 下标；用来找 part 对应的 FLVER。 */
+  modelIndex?: number;
 }
 
 export interface MsbRegionLike extends MsbNativeEntityLike {

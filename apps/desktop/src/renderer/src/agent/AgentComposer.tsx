@@ -27,6 +27,8 @@ export interface AgentComposerProps {
   /** 当前模型服务展示名（真实已配置服务）。 */
   modelLabel: string;
   onOpenModelSettings: () => void;
+  thinking: import('@soulforge/core').AiThinkingLevel;
+  onThinkingChange: (thinking: import('@soulforge/core').AiThinkingLevel) => void;
   /** S10 引用框选开关（App 持有 citeSelecting；中央编辑区暗幕在 App 渲染）。 */
   citeSelecting: boolean;
   onToggleCiteSelect: () => void;
@@ -64,6 +66,8 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
     onInteractionModeChange,
     modelLabel,
     onOpenModelSettings,
+    thinking,
+    onThinkingChange,
     citeSelecting,
     onToggleCiteSelect,
     contextLabel
@@ -109,7 +113,19 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
         attachmentReason="文件附件尚未接通（60C 只接资源引用）；当前文件可经上方「+ 资源引用」添加 main 签发的 opaque 引用。"
         modelLabel={modelLabel}
         onOpenModelSettings={onOpenModelSettings}
+        thinkingLabel={thinking === 'fast' ? '快' : thinking === 'deep' ? '深' : thinking === 'extreme' ? '极致' : '普通'}
+        onCycleThinking={() => {
+          const order = ['fast', 'normal', 'deep', 'extreme'] as const;
+          const next = order[(order.indexOf(thinking) + 1) % order.length] ?? 'normal';
+          onThinkingChange(next);
+        }}
         planLabel={interactionModeLabel(interactionMode)}
+        onCyclePlan={() => {
+          const order: AgentInteractionMode[] = ['ask', 'plan', 'edit'];
+          const current = order.includes(interactionMode) ? interactionMode : 'ask';
+          const next = order[(order.indexOf(current) + 1) % order.length] ?? 'ask';
+          onInteractionModeChange?.(next);
+        }}
       />
     </div>
   );

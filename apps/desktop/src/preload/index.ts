@@ -55,7 +55,7 @@ import type {
   ScriptEntryPlaintextView,
   CiteHit
 } from '@soulforge/shared';
-import { EDITOR_DOCUMENT_IPC_CHANNELS } from '@soulforge/shared';
+import { EDITOR_DOCUMENT_IPC_CHANNELS, maskAbsolutePathSpans } from '@soulforge/shared';
 
 /** Path-bearing fields that must never cross the context bridge to the renderer. */
 const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
@@ -69,12 +69,7 @@ const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
 
 /** Mask absolute filesystem paths that may appear inside diagnostic strings. */
 function maskAbsolutePathString(value: string): string {
-  const containsWindowsDrivePath = /(^|[\s('"=])(?:[A-Za-z]:[\\/])/.test(value);
-  const containsUncOrDevicePath = /(^|[\s('"=])\\\\(?:[?.]\\)?[^\\/\s]+[\\/]/.test(value);
-  const containsAbsoluteFileUri = /file:\/\/\/[A-Za-z]:\//i.test(value);
-  return containsWindowsDrivePath || containsUncOrDevicePath || containsAbsoluteFileUri
-    ? '[本机路径已隐藏]'
-    : value;
+  return maskAbsolutePathSpans(value);
 }
 
 function stripPathFields<T>(value: T): T {
@@ -338,6 +333,8 @@ const api = {
     ipcRenderer.invoke('resource.applyFmgMutation', sourceUri, expectedHash, mutation, tableId),
   readMsbDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMsbDocument', sourceUri),
+  readMapPartFlverPreview: (mapSourceUri: string, modelName: string, sibPath?: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readMapPartFlverPreview', mapSourceUri, modelName, sibPath),
   readTaeDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeDocument', sourceUri),
   /** S17：词条名目录（main 解析本机 TAE.Template.SDT.xml；renderer 只拿逻辑名）。 */
@@ -353,8 +350,8 @@ const api = {
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
   readMtdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMtdDocument', sourceUri),
-  readFxrDocument: (sourceUri: string): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readFxrDocument', sourceUri),
+  readFxrDocument: (sourceUri: string, entryName?: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readFxrDocument', sourceUri, entryName),
   readFlverDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverDocument', sourceUri),
   readTpfDocument: (sourceUri: string): Promise<unknown> =>
