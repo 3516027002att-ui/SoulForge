@@ -2762,6 +2762,7 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockResizer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockHeader.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentConversationViewport.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentWelcome.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`。
 - **Steps**：实现 48px header / minmax conversation / bottom composer grid；200/440/620px（S8）、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
+- **S8 落地（2026-08-17）**：Agent 下限从 340 收到 96px（约一条工具栏宽，不是 0、不留点不着的缝）；`AGENT_MIN_WIDTH` / `--agent-dock-min` / 持久化恢复 clamp 与相关测试 340 边界同步改；composer 工具条 `flex-wrap: wrap`，窄列时按钮换行、不许裁掉，也不许为保布局把下限抬回去。上限仍 620、默认 440。
 - **Tests**：idle 440×900 截图；340/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
 
 #### AGENT-60B — 三层 Composer

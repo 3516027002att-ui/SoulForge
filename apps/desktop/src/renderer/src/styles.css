@@ -15,7 +15,7 @@
 
   /* Agent dock 外壳（§12.2 初值；参考图缺失，未对照 TRAE 实测） */
   --agent-dock-default: 440px;
-  --agent-dock-min: 340px;
+  --agent-dock-min: 96px; /* S8:下限约一条工具栏宽 */
   --agent-dock-max: 620px;
   --agent-header-height: 48px;
   --agent-resizer-width: 4px;
@@ -1584,7 +1584,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   /* §12.6：正文最小 72px；自动增长由 AgentPromptEditor 的 grow 逻辑钉住 40vh。 */
   min-height: 72px;
 }
-.agent-composer__toolbar { display: flex; align-items: center; gap: 5px; min-height: 26px; }
+.agent-composer__toolbar { display: flex; align-items: center; gap: 5px; min-height: 26px; flex-wrap: wrap; } /* S8:窄列时工具钮换行,不许裁掉 */
 .composer-tool-btn { width: 24px; height: 24px; display: grid; place-items: center; color: var(--ink-2); border-radius: var(--radius-s); }
 .composer-tool-btn:hover:not(:disabled) { color: var(--ink-0); background: var(--control-hover-bg); }
 .composer-tool-btn:disabled { opacity: .4; cursor: default; }

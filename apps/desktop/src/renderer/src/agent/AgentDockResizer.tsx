@@ -17,7 +17,7 @@ export type AgentDockResizeKey = 'ArrowLeft' | 'ArrowRight' | 'Home' | 'End';
  * 宽度收敛到 [minWidth, maxWidth]，并取整。
  *
  * 独立成纯函数：reload 恢复、拖拽、键盘三处共用同一个口径，任何一处绕过
- * 这个收敛都会让 340/620 边界在界面上不一致。
+ * 这个收敛都会让 min/max 边界在界面上不一致。
  */
 export function clampAgentDockWidth(value: number, minWidth: number, maxWidth: number): number {
   return Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
