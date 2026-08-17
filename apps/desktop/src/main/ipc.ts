@@ -50,6 +50,7 @@ import {
   analyzePlaintextLineEndings,
   classifyPlaintextBytes,
   decodePlaintext,
+  encodePlaintext,
   classifyScriptEntry,
   magicLabel,
   locateDsLuaDecompilerSync,
@@ -178,6 +179,7 @@ import type {
   RagChunkFamily,
   RagRetrieveResult,
   ResourceKind,
+  SaveTextResourceResult,
   StructuredDiagnostic
 } from '@soulforge/shared';
 import type {
@@ -8488,6 +8490,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           logicalName,
           kind: 'plaintext',
           sourceText: decodePlaintext(bytes.subarray(0, contentEnd), verdict.detectedEncoding),
+          encoding: verdict.detectedEncoding,
           decompiled: false,
           ...containerFields,
           writeSupported: true,
@@ -8545,6 +8548,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         logicalName,
         kind: 'decompiled',
         sourceText: decompiled.stdout,
+        encoding: 'decompiled',
         decompiled: true,
         decompiler: decompilerLabel(probe.origin),
         ...containerFields,
@@ -8569,7 +8573,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       entryName: string | undefined,
       expectedChildHash: string | undefined,
       expectedContainerHash: string | undefined,
-      sourceText: string
+      sourceText: string,
+      encoding?: string
     ): Promise<RendererSaveResult> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file) {
@@ -8596,6 +8601,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }]
         };
       }
+      // S34：按打开编码写回。encoding 来自 readScriptSource：明文条目是检测到的
+      // 编码，decompiled/ascii/utf8 一律按 UTF-8 落盘（反编译文本写回明文 Lua；
+      // ascii 是 UTF-8 子集，编码后字节一致）。mixed-unknown 在 encodePlaintext
+      // 内拒绝 —— 解码-编码往返会丢字节，禁止文本级写回。
+      const writeEncoding = (encoding === 'utf8-bom' || encoding === 'shift_jis')
+        ? encoding
+        : 'utf8';
       const operationLog = await ensureActiveOperationLog(activeSession);
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       if (entryName) {
@@ -8612,23 +8624,33 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           childHash = read.hash ?? '';
         }
         const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: `${file.relativePath} / ${entryName}`,
-          sourceUri,
-          actionLabel: '保存脚本源码',
-          payloadHash: createHash('sha256')
-            .update(`${containerHash}\n${childHash}\n${sourceText}`)
-            .digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
+        const encoded = encodePlaintext(sourceText, writeEncoding);
+        if (!encoded.ok) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error' as const,
+              code: encoded.code,
+              message: encoded.message,
+              sourceUri
+            }]
+          };
+        }
+        // S29/S34：不再弹「保存脚本源码」确认 —— 写入经 Patch Engine 备份/回滚，
+        // replaceContainerChild 仍要求 receipt 凭据，这里直接构造（无交互）。
         const result = await replaceContainerChild({
           file,
           childUri,
           expectedContainerHash: containerHash,
           expectedChildHash: childHash,
-          newContentBase64: Buffer.from(sourceText, 'utf8').toString('base64'),
-          confirmation,
+          newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
+          confirmation: createConfirmationReceipt({
+            subjects: [sourceUri, 'script-source-save'],
+            riskLevel: 'caution',
+            sourceUri,
+            note: '脚本源码保存（按打开编码写回）'
+          }),
           session: activeSession,
           operationLog,
           ...storage
@@ -8639,26 +8661,36 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
         return toRendererSaveResult(result, indexedFiles);
       }
-      let result = await saveTextResource({
-        file,
-        newText: sourceText,
-        session: activeSession,
-        operationLog,
-        ...storage
-      });
-      if (!result.ok && result.requiresConfirmation) {
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: file.relativePath,
-          sourceUri,
-          actionLabel: '保存脚本源码',
-          payloadHash: createHash('sha256').update(sourceText).digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
+      // 独立脚本文件：UTF-8 走文本保存链；utf8-bom/shift_jis 走编码感知的
+      // 整文件字节替换（saveTextResource 恒按 UTF-8 落盘，会改写字节）。
+      let result: SaveTextResourceResult;
+      if (writeEncoding === 'utf8') {
         result = await saveTextResource({
           file,
           newText: sourceText,
-          confirmation,
+          session: activeSession,
+          operationLog,
+          ...storage
+        });
+      } else {
+        const encoded = encodePlaintext(sourceText, writeEncoding);
+        if (!encoded.ok) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error' as const,
+              code: encoded.code,
+              message: encoded.message,
+              sourceUri
+            }]
+          };
+        }
+        result = await saveRawReplace({
+          file,
+          expectedHash: file.sha256 ?? await sha256FileNow(file.absolutePath),
+          newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
+          title: `保存脚本源码（${writeEncoding}）`,
           session: activeSession,
           operationLog,
           ...storage

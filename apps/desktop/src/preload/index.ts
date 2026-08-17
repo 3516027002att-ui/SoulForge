@@ -219,7 +219,8 @@ const api = {
     entryName: string | undefined,
     expectedChildHash: string | undefined,
     expectedContainerHash: string | undefined,
-    sourceText: string
+    sourceText: string,
+    encoding?: string
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke(
       'resource.saveScriptSource',
@@ -227,7 +228,8 @@ const api = {
       entryName,
       expectedChildHash,
       expectedContainerHash,
-      sourceText
+      sourceText,
+      encoding
     ),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
