@@ -161,7 +161,9 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
    */
   function maxWidthFor(columnId: string): number {
     const container = columnsRef.current;
-    if (!container) return Number.POSITIVE_INFINITY;
+    // S27：容器尚未布局（clientWidth 0）时不得把栏写成 0 —— 点选换 hint / 换虚拟
+    // 列表后第一次拖分隔条，若此时量到 0 会把栏塌成一条缝且拖不回来。
+    if (!container || container.clientWidth <= 0) return Number.POSITIVE_INFINITY;
     const columns = columnsForDragRef.current;
     const othersMin = columns
       .filter((column) => column.id !== columnId)
@@ -214,8 +216,10 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
       const slot = (event.currentTarget as HTMLElement).parentElement;
       const measured = measureColumnWidth(slot);
       if (measured === undefined) return;
-      startWidth = measured;
-      setWidths((current) => ({ ...current, [column.id]: measured }));
+      // S27：量出的宽度同样不得低于该栏 minWidth（栏被其它栏挤窄时）。
+      const clamped = Math.max(column.minWidth ?? DEFAULT_MIN_WIDTH, measured);
+      startWidth = clamped;
+      setWidths((current) => ({ ...current, [column.id]: clamped }));
     }
     dragState.current = {
       columnId: column.id,
@@ -240,7 +244,7 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
       const slot = (event.currentTarget as HTMLElement).parentElement;
       const fromDom = measureColumnWidth(slot);
       if (fromDom === undefined) return;
-      measured = fromDom;
+      measured = Math.max(column.minWidth ?? DEFAULT_MIN_WIDTH, fromDom);
     }
     const minWidth = column.minWidth ?? DEFAULT_MIN_WIDTH;
     if (event.key === 'ArrowLeft') {
@@ -305,7 +309,13 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
                * 比例模式下拖拽无法表达「就这么宽」。
                */
               style={typeof width === 'number'
-                ? { flex: '0 0 auto', width: `${width}px` }
+                // S27：像素模式也必须守 minWidth —— 否则拖拽/写入把栏压到只显示
+                // 「除…」一个字，且写入时已 Math.max(minWidth, …) 钳住。
+                ? {
+                    flex: '0 0 auto',
+                    width: `${width}px`,
+                    minWidth: `${column.minWidth ?? DEFAULT_MIN_WIDTH}px`
+                  }
                 : {
                     flex: `${column.initialFlex ?? 1} 1 0`,
                     minWidth: `${column.minWidth ?? DEFAULT_MIN_WIDTH}px`
