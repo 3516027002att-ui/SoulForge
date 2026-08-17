@@ -217,3 +217,21 @@ describe('S20 三栏独立滚动 + TEXT 不被 Agent 挡（234048）', () => {
     assert.match(cssSource, /\.workbench__columns \{[^}]*overflow-x: auto;/s);
   });
 });
+
+describe('S10 扩展：FMG 条目行是可引用节点（data-cite）', () => {
+  const panelSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'FmgWorkbenchPanel.tsx'),
+    'utf8'
+  );
+
+  it('条目行挂 data-cite（text-entry：table=typed tableId，entryId=行 id）', () => {
+    assert.match(panelSource, /citeEntryAttr\(row\.id, selectedTableId, row\.text\)/);
+    assert.match(panelSource, /kind: 'text-entry'/);
+    assert.match(panelSource, /library: 'text'/);
+  });
+
+  it('未选表时不挂 data-cite（诚实态），text 用显示投影文本', () => {
+    assert.match(panelSource, /if \(tableId === null\) return \{\};/);
+    assert.match(panelSource, /text: projected/);
+  });
+});

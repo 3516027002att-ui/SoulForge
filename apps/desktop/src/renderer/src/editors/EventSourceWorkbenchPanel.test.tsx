@@ -428,3 +428,21 @@ describe('S31 右栏词义：选中语句 → EMEDF 参数说明（纯函数）'
     assert.match(panelSource, /每个 tab 列一个 host \+ 一个 EditorView/);
   });
 });
+
+describe('S10 扩展：事件源码区是可引用节点（data-cite）', () => {
+  const panelSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
+    'utf8'
+  );
+
+  it('源码区 section 挂 data-cite（event-script：script=tabId 逻辑 URI，label=短标题）', () => {
+    assert.match(panelSource, /citeScriptAttr\(tab\.tabId, tab\.title\)/);
+    assert.match(panelSource, /kind: 'event-script'/);
+    assert.match(panelSource, /library: 'event'/);
+  });
+
+  it('data-cite 只含逻辑 id：script 来自 tabId（sourceUri），不带本机绝对路径', () => {
+    assert.doesNotMatch(panelSource, /data-cite.*absolutePath/s);
+    assert.match(panelSource, /script: tabId/);
+  });
+});

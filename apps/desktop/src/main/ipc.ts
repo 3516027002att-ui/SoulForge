@@ -151,9 +151,9 @@ import {
   type ScriptEntryPlaintextView,
   type ScriptSourceView,
   decodeCiteHits,
-  formatParamCiteLabel,
+  formatCitationLabel,
   mergeCiteHits,
-  type ParamCitation
+  type Citation
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -9205,7 +9205,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    */
   const agentReferenceRegistry = new Map<
     string,
-    { ownerId: string; tokenId: string; citation?: ParamCitation }
+    { ownerId: string; tokenId: string; citation?: Citation }
   >();
 
   /**
@@ -9319,7 +9319,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       if (registered.citation !== undefined) {
-        citationLines.push(formatParamCiteLabel(registered.citation));
+        citationLines.push(formatCitationLabel(registered.citation));
       }
     }
     const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === request.configId);
@@ -9927,7 +9927,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const hitsValue = typeof request === 'object' && request !== null
       ? (request as Record<string, unknown>).hits
       : undefined;
-    let citation: ParamCitation | null = null;
+    let citation: Citation | null = null;
     try {
       citation = mergeCiteHits(decodeCiteHits(hitsValue));
     } catch (error) {
@@ -9947,17 +9947,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
     const tokenId = randomUUID();
     const ownerId = String(event.sender.id);
-    const label = formatParamCiteLabel(citation);
+    const label = formatCitationLabel(citation);
+    // S10：引用领域随命中种类 —— param 行/字段、text 条目、event 脚本。
+    const domain = citation.kind === 'param' ? 'param' : citation.kind;
     const token = mintAgentReferenceToken({
       kind: 'citation',
       tokenId,
       ownerId,
-      domain: 'param',
+      domain,
       label
     });
     const reference: AgentResourceReference = {
       token,
-      domain: 'param',
+      domain,
       label,
       expiresAt: agentReferenceExpiresAt()
     };

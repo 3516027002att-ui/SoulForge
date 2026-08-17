@@ -36,10 +36,43 @@ export type CiteHit =
       fieldId: string;
       label: string;
       value: string;
+    }
+  | {
+      /** S10 扩展：FMG 条目行。table 用 typed tableId（stableId，含冒号是合法的）。 */
+      kind: 'text-entry';
+      library: string;
+      table: string;
+      entryId: number;
+      text?: string;
+    }
+  | {
+      /** S10 扩展：EMEVD 脚本文档（源码区）。script 用逻辑 URI（tabId）。 */
+      kind: 'event-script';
+      library: string;
+      script: string;
+      label: string;
     };
 
-/** 一次框选合并后的单条引用（一行 + 其命中的字段子集）。 */
+/** 一次框选合并后的单条引用（param 行 + 字段子集 / 文本条目 / 事件脚本）。 */
+export type Citation =
+  | ParamCitation
+  | {
+      kind: 'text';
+      library: string;
+      table: string;
+      entryId: number;
+      text?: string;
+    }
+  | {
+      kind: 'event';
+      library: string;
+      script: string;
+      label: string;
+    };
+
+/** param 引用：一行 + 其命中的字段子集（S10 拍死形态）。 */
 export interface ParamCitation {
+  kind: 'param';
   library: string;
   table: string;
   rowId: number;
@@ -66,16 +99,35 @@ export function decodeCiteHit(raw: unknown): CiteHit {
   if (typeof raw !== 'object' || raw === null) throw new Error('引用命中必须是对象。');
   const record = raw as Record<string, unknown>;
   const kind = record.kind;
-  if (kind !== 'param-row' && kind !== 'param-field') {
+  if (kind !== 'param-row' && kind !== 'param-field' && kind !== 'text-entry' && kind !== 'event-script') {
     throw new Error(`不支持的引用命中类型：${String(kind)}`);
   }
   const library = typeof record.library === 'string' ? record.library : '';
+  if (library === '') throw new Error('引用命中缺少 library。');
+  requireIdentifier(library, 'library');
+  // table/script 不是白名单标识符：FMG stableId 带冒号（text:ja:item:...）、
+  // 事件 script 是逻辑 URI（file://…，不含盘符）。只禁绝对路径形态。
+  if (kind === 'text-entry') {
+    const table = typeof record.table === 'string' ? record.table : '';
+    const entryId = typeof record.entryId === 'number' && Number.isFinite(record.entryId) ? record.entryId : null;
+    if (table === '') throw new Error('引用命中缺少 table。');
+    if (entryId === null) throw new Error('引用命中缺少条目 id。');
+    requireNonPath(table, 'table');
+    const text = typeof record.text === 'string' && record.text.trim() !== '' ? record.text : undefined;
+    return { kind, library, table, entryId, ...(text !== undefined ? { text } : {}) };
+  }
+  if (kind === 'event-script') {
+    const script = typeof record.script === 'string' ? record.script : '';
+    const label = typeof record.label === 'string' && record.label.trim() !== '' ? record.label : '';
+    if (script === '') throw new Error('引用命中缺少 script。');
+    if (label === '') throw new Error('引用命中缺少脚本标签。');
+    requireNonPath(script, 'script');
+    return { kind, library, script, label };
+  }
   const table = typeof record.table === 'string' ? record.table : '';
   const rowId = typeof record.rowId === 'number' && Number.isFinite(record.rowId) ? record.rowId : null;
-  if (library === '') throw new Error('引用命中缺少 library。');
   if (table === '') throw new Error('引用命中缺少 table。');
   if (rowId === null) throw new Error('引用命中缺少行 id。');
-  requireIdentifier(library, 'library');
   requireIdentifier(table, 'table');
   if (kind === 'param-row') {
     const name = typeof record.name === 'string' && record.name.trim() !== '' ? record.name : undefined;
@@ -87,6 +139,16 @@ export function decodeCiteHit(raw: unknown): CiteHit {
   if (fieldId === '') throw new Error('引用命中缺少字段 id。');
   requireIdentifier(fieldId, 'fieldId');
   return { kind, library, table, rowId, fieldId, label, value };
+}
+
+/** 非路径校验：逻辑地址允许冒号/点/斜杠（file:// 相对 URI），但禁盘符与反斜杠前缀。 */
+function requireNonPath(value: string, fieldName: string): void {
+  if (ABSOLUTE_PATH_RE.test(value)) {
+    throw new Error(`${fieldName} 不得包含绝对路径。`);
+  }
+  if (/^[a-zA-Z]:/.test(value)) {
+    throw new Error(`${fieldName} 不得包含盘符。`);
+  }
 }
 
 /** 解码整批框选命中（空数组视为非法——空框选不产生引用）。 */
@@ -108,39 +170,89 @@ export function decodeCiteHits(value: unknown): CiteHit[] {
 /**
  * 把一次框选的命中合并成一条引用。
  *
- * 锚定策略（S10 拍死「一次框选一条 chip」）：字段命中锚定行——字段栏永远显示
+ * param 锚定策略（S10 拍死「一次框选一条 chip」）：字段命中锚定行——字段栏永远显示
  * **选中行**的字段，框里扫到的其他行（同表不同 rowId）是误框，丢弃不并入；
  * 无字段命中时取第一行。跨表字段/行（当前 UI 不会出现，防御性处理）同样按
  * 锚定的 library+table+rowId 过滤。同字段去重（框选重叠时同一字段命中多次）。
- * 没有任何行与字段命中时返回 null（「这块还不能引用」）。
+ *
+ * S10 扩展：text-entry / event-script 命中各自成一条（文本条目行、事件脚本
+ * 文档都是单节点粒度，无行/字段合并）；同 key 重复命中（框选重叠）去重。
+ * 混合 kind 的框选（正常 UI 不会出现）取第一组，不跨 kind 合并。
+ * 没有任何可引用命中时返回 null（「这块还不能引用」）。
  */
-export function mergeCiteHits(hits: readonly CiteHit[]): ParamCitation | null {
+export function mergeCiteHits(hits: readonly CiteHit[]): Citation | null {
   const rows = hits.filter((hit): hit is Extract<CiteHit, { kind: 'param-row' }> => hit.kind === 'param-row');
   const fields = hits.filter(
     (hit): hit is Extract<CiteHit, { kind: 'param-field' }> => hit.kind === 'param-field'
   );
-  const anchor = fields[0] ?? rows[0];
-  if (anchor === undefined) return null;
-  const anchorRow = rows.find(
-    (hit) => hit.library === anchor.library && hit.table === anchor.table && hit.rowId === anchor.rowId
-  );
-  const seenFieldIds = new Set<string>();
-  const mergedFields: ParamCitation['fields'] = [];
-  for (const field of fields) {
-    if (field.library !== anchor.library || field.table !== anchor.table || field.rowId !== anchor.rowId) {
-      continue;
+  if (fields.length > 0 || rows.length > 0) {
+    const anchor = fields[0] ?? rows[0];
+    if (anchor === undefined) return null;
+    const anchorRow = rows.find(
+      (hit) => hit.library === anchor.library && hit.table === anchor.table && hit.rowId === anchor.rowId
+    );
+    const seenFieldIds = new Set<string>();
+    const mergedFields: ParamCitation['fields'] = [];
+    for (const field of fields) {
+      if (field.library !== anchor.library || field.table !== anchor.table || field.rowId !== anchor.rowId) {
+        continue;
+      }
+      if (seenFieldIds.has(field.fieldId)) continue;
+      seenFieldIds.add(field.fieldId);
+      mergedFields.push({ fieldId: field.fieldId, label: field.label, value: field.value });
     }
-    if (seenFieldIds.has(field.fieldId)) continue;
-    seenFieldIds.add(field.fieldId);
-    mergedFields.push({ fieldId: field.fieldId, label: field.label, value: field.value });
+    return {
+      kind: 'param',
+      library: anchor.library,
+      table: anchor.table,
+      rowId: anchor.rowId,
+      ...(anchorRow?.name !== undefined ? { rowName: anchorRow.name } : {}),
+      fields: mergedFields
+    };
   }
+  const textEntries = hits.filter(
+    (hit): hit is Extract<CiteHit, { kind: 'text-entry' }> => hit.kind === 'text-entry'
+  );
+  if (textEntries.length > 0) {
+    const anchor = textEntries[0]!;
+    const same = textEntries.find(
+      (hit) => hit.library === anchor.library && hit.table === anchor.table && hit.entryId === anchor.entryId
+    );
+    return {
+      kind: 'text',
+      library: anchor.library,
+      table: anchor.table,
+      entryId: anchor.entryId,
+      ...(same?.text !== undefined ? { text: same.text } : {})
+    };
+  }
+  const eventScripts = hits.filter(
+    (hit): hit is Extract<CiteHit, { kind: 'event-script' }> => hit.kind === 'event-script'
+  );
+  if (eventScripts.length === 0) return null;
   return {
-    library: anchor.library,
-    table: anchor.table,
-    rowId: anchor.rowId,
-    ...(anchorRow?.name !== undefined ? { rowName: anchorRow.name } : {}),
-    fields: mergedFields
+    kind: 'event',
+    library: eventScripts[0]!.library,
+    script: eventScripts[0]!.script,
+    label: eventScripts[0]!.label
   };
+}
+
+/**
+ * 引用的固定可见标签：
+ * - param：`param/<库短名>/<表名>/<行id>-<行名>【<字段中文>：<值>】…`
+ * - text：`text/<库>/<表>/<条目id>`
+ * - event：`event/<库>/<脚本>`（label 是短名）
+ * 库短名用 `gameparam` 这类逻辑名，绝不出 `D:\...`。
+ */
+export function formatCitationLabel(citation: Citation): string {
+  if (citation.kind === 'text') {
+    return `text/${citation.library}/${citation.table}/${citation.entryId}`;
+  }
+  if (citation.kind === 'event') {
+    return `event/${citation.library}/${citation.script}`;
+  }
+  return formatParamCiteLabel(citation);
 }
 
 /**

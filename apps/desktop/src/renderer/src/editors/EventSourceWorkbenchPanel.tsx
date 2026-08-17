@@ -259,6 +259,22 @@ interface EventLineInfo {
   warnings: number;
 }
 
+/**
+ * S10 扩展：EMEVD 脚本文档（源码区）是可引用节点。script 用 tabId（逻辑
+ * URI，非本机绝对路径——main 的 decodeCiteHit 按非路径校验），label 用
+ * 短标题（如 common）。框选源码任意区域即命中该文档。
+ */
+function citeScriptAttr(tabId: string, title: string): Record<string, string> {
+  return {
+    'data-cite': JSON.stringify({
+      kind: 'event-script',
+      library: 'event',
+      script: tabId,
+      label: title
+    })
+  };
+}
+
 /** 无 dslTemplate（只读 demo / 读取失败 / EMEDF 缺失失败关闭）时的结构化投影基线。 */
 function renderSource(document: EmevdEditorDocument): string {
   const lines = [`resource ${JSON.stringify(document.resourceUri)}`];
@@ -1096,7 +1112,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           </section>
         ) : (
           visibleTabs.map((tab) => (
-          <section className="esw-source" key={tab.tabId} aria-label="事件源码">
+          <section
+            className="esw-source"
+            key={tab.tabId}
+            aria-label="事件源码"
+            {...citeScriptAttr(tab.tabId, tab.title)}
+          >
             <div
               ref={(element) => {
                 if (element) hostsRef.current.set(tab.tabId, element);

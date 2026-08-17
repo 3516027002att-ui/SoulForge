@@ -1818,7 +1818,7 @@ export function App(): ReactElement {
     setCiteSelecting(false);
     const citation = mergeCiteHits(hits);
     if (citation === null) {
-      pushToast('这块还不能引用：框选里没有可引用的 PARAM 行或字段。', 'warn');
+      pushToast('这块还不能引用：框选里没有可引用的行、条目或脚本文档。', 'warn');
       return;
     }
     setPendingCiteHits(hits);

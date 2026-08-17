@@ -50,6 +50,25 @@ export function projectFmgDisplayText(text: string): string {
   });
 }
 
+/**
+ * S10 扩展：FMG 条目行是可引用节点。table 用 typed tableId（stableId，含冒号
+ * 是合法形态，main 的 decodeCiteHit 按非路径校验）；text 用显示投影文本
+ * （前 80 字，图标/地名标签已投影）。未选表时不挂 data-cite（诚实态）。
+ */
+function citeEntryAttr(entryId: number, tableId: string | null, text: string): Record<string, string> {
+  if (tableId === null) return {};
+  const projected = projectFmgDisplayText(text).slice(0, 80);
+  return {
+    'data-cite': JSON.stringify({
+      kind: 'text-entry',
+      library: 'text',
+      table: tableId,
+      entryId,
+      ...(projected ? { text: projected } : {})
+    })
+  };
+}
+
 export interface FmgWorkbenchPanelProps {
   resourceUri: string;
   /**
@@ -490,6 +509,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
                 isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
                 onSelect: () => setSelectedId(row.id)
               })}
+              {...citeEntryAttr(row.id, selectedTableId, row.text)}
             >
               <span>{row.id}</span>
               {projected

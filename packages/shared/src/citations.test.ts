@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   decodeCiteHit,
   decodeCiteHits,
+  formatCitationLabel,
   formatParamCiteLabel,
   mergeCiteHits,
   type CiteHit,
@@ -73,6 +74,7 @@ test('mergeCiteHits：行 + 多个字段合并成一条引用，字段按框选�
   };
   const citation = mergeCiteHits([fieldHit, rowHit, secondField]);
   assert.deepEqual(citation, {
+    kind: 'param',
     library: 'gameparam',
     table: 'SpEffectParam',
     rowId: 3400,
@@ -86,12 +88,13 @@ test('mergeCiteHits：行 + 多个字段合并成一条引用，字段按框选�
 
 test('mergeCiteHits：同字段重复命中只保留一条（框选重叠）', () => {
   const citation = mergeCiteHits([rowHit, fieldHit, fieldHit]);
-  assert.equal(citation?.fields.length, 1);
+  assert.equal(citation?.kind === 'param' ? citation.fields.length : -1, 1);
 });
 
 test('mergeCiteHits：只有行 → 合并出无字段引用', () => {
   const citation = mergeCiteHits([rowHit]);
   assert.deepEqual(citation, {
+    kind: 'param',
     library: 'gameparam',
     table: 'SpEffectParam',
     rowId: 3400,
@@ -102,8 +105,9 @@ test('mergeCiteHits：只有行 → 合并出无字段引用', () => {
 
 test('mergeCiteHits：只有字段 → 引用保留行 id，rowName 缺省', () => {
   const citation = mergeCiteHits([fieldHit]);
-  assert.equal(citation?.rowId, 3400);
-  assert.equal(citation?.rowName, undefined);
+  assert.equal(citation?.kind, 'param');
+  assert.equal(citation?.kind === 'param' ? citation.rowId : null, 3400);
+  assert.equal(citation?.kind === 'param' ? citation.rowName : 'unset', undefined);
 });
 
 test('mergeCiteHits：框选扫到其他行视为误框——字段命中锚定行，其余行丢弃不并入', () => {
@@ -113,6 +117,7 @@ test('mergeCiteHits：框选扫到其他行视为误框——字段命中锚定�
   };
   const citation = mergeCiteHits([rowHit, otherRow, fieldHit]);
   assert.deepEqual(citation, {
+    kind: 'param',
     library: 'gameparam',
     table: 'SpEffectParam',
     rowId: 3400,
@@ -127,6 +132,7 @@ test('mergeCiteHits：只有行时取第一行为锚，其余行丢弃（一次�
   };
   const citation = mergeCiteHits([rowHit, secondRow]);
   assert.deepEqual(citation, {
+    kind: 'param',
     library: 'gameparam',
     table: 'SpEffectParam',
     rowId: 3400,
@@ -141,6 +147,7 @@ test('mergeCiteHits：完全没有行也没有字段返回 null', () => {
 
 test('formatParamCiteLabel：行 + 字段，S10 拍死格式', () => {
   const citation: ParamCitation = {
+    kind: 'param',
     library: 'gameparam',
     table: 'SpEffectParam',
     rowId: 3400,
@@ -158,20 +165,21 @@ test('formatParamCiteLabel：行 + 字段，S10 拍死格式', () => {
 
 test('formatParamCiteLabel：只有行 → 只到行名', () => {
   assert.equal(
-    formatParamCiteLabel({ library: 'gameparam', table: 'SpEffectParam', rowId: 3400, rowName: '噬神', fields: [] }),
+    formatParamCiteLabel({ kind: 'param', library: 'gameparam', table: 'SpEffectParam', rowId: 3400, rowName: '噬神', fields: [] }),
     'param/gameparam/SpEffectParam/3400-噬神'
   );
 });
 
 test('formatParamCiteLabel：行无名字 → 省略行名段', () => {
   assert.equal(
-    formatParamCiteLabel({ library: 'gameparam', table: 'SpEffectParam', rowId: 3400, fields: [] }),
+    formatParamCiteLabel({ kind: 'param', library: 'gameparam', table: 'SpEffectParam', rowId: 3400, fields: [] }),
     'param/gameparam/SpEffectParam/3400'
   );
 });
 
 test('formatParamCiteLabel：标签不含磁盘路径形态', () => {
   const label = formatParamCiteLabel({
+    kind: 'param',
     library: 'gameparam',
     table: 'ActionGuideParam',
     rowId: 100,
@@ -183,4 +191,75 @@ test('formatParamCiteLabel：标签不含磁盘路径形态', () => {
   assert.ok(!/^[a-zA-Z]:/.test(label));
   assert.ok(!label.startsWith('/'));
   assert.ok(!label.includes('..'));
+});
+
+/* ── S10 扩展：text-entry / event-script ─────────────────────────── */
+
+const textHit: CiteHit = {
+  kind: 'text-entry',
+  library: 'text',
+  table: 'text:ja:item:item.msgbnd:6',
+  entryId: 1000,
+  text: '龙泉河畔 平田宅邸'
+};
+const eventHit: CiteHit = {
+  kind: 'event-script',
+  library: 'event',
+  script: 'file://workspace/event/common.emevd.dcx',
+  label: 'common'
+};
+
+test('decodeCiteHit：接受 text-entry（table 带冒号 stableId）与 event-script（逻辑 URI script）', () => {
+  assert.deepEqual(decodeCiteHit(textHit), textHit);
+  assert.deepEqual(decodeCiteHit(eventHit), eventHit);
+});
+
+test('decodeCiteHit：text-entry 缺 entryId / table 空时拒绝；table 含盘符拒绝', () => {
+  assert.throws(() => decodeCiteHit({ ...textHit, entryId: undefined }), /条目 id/);
+  assert.throws(() => decodeCiteHit({ ...textHit, table: '' }), /table/);
+  assert.throws(() => decodeCiteHit({ ...textHit, table: 'D:\\x' }), /绝对路径|盘符/);
+});
+
+test('decodeCiteHit：event-script 缺 label 拒绝；script 含盘符拒绝', () => {
+  assert.throws(() => decodeCiteHit({ ...eventHit, label: '' }), /脚本标签/);
+  assert.throws(() => decodeCiteHit({ ...eventHit, script: 'D:\\x\\common' }), /绝对路径|盘符/);
+});
+
+test('mergeCiteHits：text-entry 命中 → text 引用（重复命中去重）', () => {
+  assert.deepEqual(mergeCiteHits([textHit]), {
+    kind: 'text',
+    library: 'text',
+    table: 'text:ja:item:item.msgbnd:6',
+    entryId: 1000,
+    text: '龙泉河畔 平田宅邸'
+  });
+  const dup = mergeCiteHits([textHit, textHit]);
+  assert.equal(dup?.kind === 'text' ? dup.entryId : null, 1000);
+});
+
+test('mergeCiteHits：event-script 命中 → event 引用', () => {
+  assert.deepEqual(mergeCiteHits([eventHit]), {
+    kind: 'event',
+    library: 'event',
+    script: 'file://workspace/event/common.emevd.dcx',
+    label: 'common'
+  });
+});
+
+test('mergeCiteHits：混合 kind 不跨类合并，取第一组', () => {
+  const citation = mergeCiteHits([textHit, eventHit]);
+  assert.equal(citation?.kind, 'text');
+});
+
+test('formatCitationLabel：text/event 形态，param 走原格式', () => {
+  assert.equal(formatCitationLabel({
+    kind: 'text', library: 'text', table: 'text:ja:item:item.msgbnd:6', entryId: 1000
+  }), 'text/text/text:ja:item:item.msgbnd:6/1000');
+  assert.equal(formatCitationLabel({
+    kind: 'event', library: 'event', script: 'file://workspace/event/common.emevd.dcx', label: 'common'
+  }), 'event/event/file://workspace/event/common.emevd.dcx');
+  assert.equal(
+    formatCitationLabel({ kind: 'param', library: 'gameparam', table: 'T', rowId: 1, fields: [] }),
+    'param/gameparam/T/1'
+  );
 });
