@@ -1,4 +1,5 @@
 import { app, BrowserWindow, Menu } from 'electron';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { disposeBridgeDaemonPool } from '@soulforge/core';
@@ -31,6 +32,13 @@ const TITLEBAR_OVERLAY = {
   height: 40
 } as const;
 
+/** 开发态使用 electron.exe 时也读取 SoulForge 图标；缺少资源时回退为 Electron 默认行为。 */
+function resolveWindowIconPath(): string | undefined {
+  if (process.platform === 'darwin') return undefined;
+  const iconPath = join(here, '../../build/icon.ico');
+  return existsSync(iconPath) ? iconPath : undefined;
+}
+
 function createWindow(): void {
   // Electron 默认挂一套 File / Edit / View / Window 菜单。Windows 上会占掉
   // 一整条系统菜单栏，叠在应用自绘 titlebar 上面。macOS 保留系统菜单，
@@ -49,6 +57,7 @@ function createWindow(): void {
     minHeight: 640,
     show: false,
     title: 'SoulForge',
+    icon: resolveWindowIconPath(),
     backgroundColor: TITLEBAR_OVERLAY.color,
     autoHideMenuBar: true,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
@@ -127,6 +136,10 @@ function resolveDevelopmentRendererUrl(): string | null {
     throw new Error('ELECTRON_RENDERER_URL_UNTRUSTED');
   }
   return url.href;
+}
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.soulforge.app');
 }
 
 app.whenReady().then(() => {

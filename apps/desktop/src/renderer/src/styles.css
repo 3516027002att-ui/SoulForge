@@ -303,7 +303,7 @@ kbd {
   -webkit-app-region: drag; position: relative; z-index: 40;
 }
 .titlebar__brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.brand-mark { color: var(--ember-text); flex: none; }
+.brand-mark { display: block; flex: none; width: 16px; height: 16px; object-fit: contain; }
 .brand-name { font-weight: 600; letter-spacing: .01em; }
 .brand-tag { font-size: 11px; color: var(--ink-3); white-space: nowrap; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; }
 .titlebar__center { flex: 1; display: flex; justify-content: center; }
@@ -1184,7 +1184,7 @@ pre.tool-output {
 .editor-welcome.is-hidden { display: none; }
 .welcome { width: min(720px, 92%); color: var(--ink-1); animation: rise-in var(--dur-trans) var(--ease-standard); }
 .welcome__head { display: flex; align-items: center; gap: 10px; }
-.welcome-mark { color: var(--ember-text); flex: none; }
+.welcome-mark { display: block; flex: none; width: 26px; height: 26px; object-fit: contain; }
 .welcome__head h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink-0); }
 .welcome__ws { font-size: 11px; color: var(--ink-2); font-family: var(--font-mono); }
 .welcome__stats { font-size: 12px; color: var(--ink-2); margin: 8px 0 20px; }

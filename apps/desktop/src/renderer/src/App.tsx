@@ -162,6 +162,9 @@ const WELCOME_DRAFT_LIMIT = 5;
 /** 命令面板（Ctrl K）列出的资源命中条数。命中总数由截断说明报出。 */
 const CMDK_RESOURCE_HIT_LIMIT = 8;
 
+/** SoulForge 产品图标：标题栏和欢迎页使用透明 S 形标志。 */
+const SOULFORGE_ICON_URL = new URL('./assets/soulforge-icon.png', import.meta.url).href;
+
 /** 事件内层标签只留短名：`event/common.emevd.dcx` → `common`。 */
 function eventDocumentTitle(relativePath: string): string {
   const normalized = relativePath.replace(/\\/g, '/');
@@ -2612,10 +2615,7 @@ export function App(): ReactElement {
       {/* ══════════ 标题栏 ══════════ */}
       <header className="titlebar">
         <div className="titlebar__brand">
-          <svg className="brand-mark" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-            <path d="M12 2 L21 7 V17 L12 22 L3 17 V7 Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-            <path d="M12 7 L16.5 9.6 V14.4 L12 17 L7.5 14.4 V9.6 Z" fill="currentColor" opacity=".85" />
-          </svg>
+          <img className="brand-mark" src={SOULFORGE_ICON_URL} width="16" height="16" alt="" aria-hidden="true" />
           <span className="brand-name">SoulForge</span>
           <span className="brand-tag" title={sessionMeta?.workspaceLabel ?? workspace?.workspaceLabel ?? '未打开工作区'}>
             {workspace?.workspaceLabel ?? '未打开工作区'} · {sessionMeta?.game ?? 'sekiro'}
@@ -3773,10 +3773,7 @@ export function App(): ReactElement {
             <div className={`editor-welcome${showEditorWelcome ? '' : ' is-hidden'}`}>
               <div className="welcome">
                 <div className="welcome__head">
-                  <svg viewBox="0 0 24 24" width="26" height="26" className="welcome-mark" aria-hidden="true">
-                    <path d="M12 2 L21 7 V17 L12 22 L3 17 V7 Z" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-                    <path d="M12 7 L16.5 9.6 V14.4 L12 17 L7.5 14.4 V9.6 Z" fill="currentColor" opacity=".8" />
-                  </svg>
+                  <img src={SOULFORGE_ICON_URL} width="26" height="26" className="welcome-mark" alt="" aria-hidden="true" />
                   <h1>SoulForge</h1>
                   <span className="welcome__ws">{workspace?.workspaceLabel ?? '未打开工作区'} · {sessionMeta?.game ?? 'sekiro'}</span>
                 </div>
