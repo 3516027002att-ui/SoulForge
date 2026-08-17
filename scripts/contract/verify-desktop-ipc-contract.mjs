@@ -44,6 +44,7 @@ const REQUIRED_READ_WRITE_CHANNELS = Object.freeze([
   'resource.readEmevdDocument',
   'resource.applyEmevdMutation',
   'resource.readEmevdFullDocument',
+  'resource.readEmevdSourceSlice',
   'resource.submitEmevdDslPlan'
 ]);
 
@@ -85,6 +86,7 @@ const REQUIRED_PRELOAD_WIRING = Object.freeze({
   readEmevdDocument: 'resource.readEmevdDocument',
   applyEmevdMutation: 'resource.applyEmevdMutation',
   readEmevdFullDocument: 'resource.readEmevdFullDocument',
+  readEmevdSourceSlice: 'resource.readEmevdSourceSlice',
   cancelEmevdFullDocument: 'resource.cancelEmevdFullDocument',
   submitEmevdDslPlan: 'resource.submitEmevdDslPlan',
   readFmgPage: 'resource.readFmgPage',

@@ -15,6 +15,7 @@ export type ResourceOpenIpcMethod =
   | 'readFmgDocument'
   | 'readEmevdDocument'
   | 'readEmevdFullDocument'
+  | 'readEmevdSourceSlice'
   | 'readMsbDocument'
   | 'readGparamDocument'
   | 'readTaeDocument'
@@ -87,11 +88,9 @@ const IPC_BY_KIND: Record<WorkspaceOpenKind, readonly ResourceOpenIpcMethod[]> =
   'param-rows': ['openResourcePreview', 'readParamPage'],
   gparam: ['openResourcePreview', 'readGparamDocument'],
   fmg: ['openResourcePreview', 'readFmgDocument'],
-  // 打开事件文档只发一次 readEmevdFullDocument：它自带 outline（事件计数 +
-  // 每事件未知指令数）与 authority，renderer 不再为这些标量另发一次
-  // readEmevdDocument。那个 channel/preload 方法仍然保留（契约门禁与 preload
-  // 面探针都要它），只是不在打开路径上。
-  emevd: ['openResourcePreview', 'readEmevdFullDocument'],
+  // 打开事件文档：一次 readEmevdFullDocument 拿 outline + 前缀 + token，
+  // 其余行走 readEmevdSourceSlice。不再为标量另发 readEmevdDocument。
+  emevd: ['openResourcePreview', 'readEmevdFullDocument', 'readEmevdSourceSlice'],
   msb: ['openResourcePreview', 'readMsbDocument'],
   script: ['openResourcePreview', 'scriptContainerEvidence'],
   'plain-text': ['openResourcePreview'],

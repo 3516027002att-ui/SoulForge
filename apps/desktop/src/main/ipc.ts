@@ -41,7 +41,6 @@ import {
   commitEmevdMutationViaBridge,
   fingerprintEmedfRegistry,
   readFullEmevdDocumentViaBridge,
-  renderEmevdDarkScript,
   submitEmevdDslPlanViaFourView,
   resolveEmevdRegistry,
   listEmedfCompletionItems,
@@ -125,7 +124,6 @@ import {
   type ScriptContainerEntryEvidence,
   type ScriptEntryClassification
 } from '@soulforge/core';
-import * as SoulForgeCore from '@soulforge/core';
 import {
   CONTAINER_PAGE_SIZE,
   FMG_PAGE_SIZE,
@@ -204,7 +202,9 @@ import {
   type RendererSaveResult
 } from './rendererDto.js';
 import { commitEmevdFullDocument, EmevdAuthorityCache } from './emevdAuthorityCache.js';
+import { renderEmevdDarkScriptAsync } from './emevdDarkScriptWorkerHost.js';
 import { EmevdOpenSlots } from './emevdOpenSlots.js';
+import { EmevdSourceTokens } from './emevdSourceTokens.js';
 import { OperationLogUtilityClient } from './operationLogUtilityClient.js';
 import { clearRecentPath, readRecentPath, writeRecentPath } from './recentPaths.js';
 import { executeRecoveryCleanup } from './recoveryCleanup.js';
@@ -257,19 +257,6 @@ function readFullEmevdDocument(input: EmevdFullReadInput): Promise<EmevdFullRead
   ) as Promise<EmevdFullReadResult>;
 }
 
-type DarkScriptAsyncFn = (
-  document: EmevdEditorDocument,
-  registry: Parameters<typeof renderEmevdDarkScript>[1],
-  options?: { signal?: AbortSignal }
-) => Promise<{ text: string; truncated: boolean; totalLines: number; cancelled?: boolean }>;
-
-const renderEmevdDarkScriptAsync: DarkScriptAsyncFn =
-  (SoulForgeCore as { renderEmevdDarkScriptAsync?: DarkScriptAsyncFn }).renderEmevdDarkScriptAsync
-  ?? (async (document, registry) => {
-    const text = renderEmevdDarkScript(document, registry);
-    return { text, truncated: false, totalLines: text.split('\n').length };
-  });
-
 /**
  * 打开事件文档的在飞请求槽，**按 renderer 窗口分槽**。
  *
@@ -295,6 +282,7 @@ const renderEmevdDarkScriptAsync: DarkScriptAsyncFn =
  * 确认，无法证伪。
  */
 const activeEmevdOpens = new EmevdOpenSlots();
+const emevdSourceTokens = new EmevdSourceTokens();
 
 /**
  * 取消不是解析失败：`cancelled: true` 让 renderer 走静默丢弃分支，而不是把「用户
@@ -1986,6 +1974,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       if (selection.ownerWebContentsId === webContents.id) directorySelections.delete(selectionId);
     }
     activeEmevdOpens.dispose(webContents.id);
+    emevdSourceTokens.dropWindow(webContents.id);
     // 窗口销毁 = 用户强制中断：取消该窗口发起的 agent 运行，并把它的挂起
     // 审批按拒绝结算（无人回答 ≠ 同意执行写入）。其他窗口的运行不受影响。
     for (const [sessionId, entry] of activeAgentRuns) {
@@ -2682,10 +2671,30 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * 当时确实有一份在飞的读被中止 —— 没有也不是错误（用户可能已经读完了），所以
    * `ok` 恒真，两者分开报。
    */
-  handle('resource.cancelEmevdFullDocument', async (event) => ({
-    ok: true,
-    cancelled: activeEmevdOpens.cancel(event.sender.id)
-  }));
+  handle('resource.cancelEmevdFullDocument', async (event) => {
+    const cancelled = activeEmevdOpens.cancel(event.sender.id);
+    emevdSourceTokens.dropWindow(event.sender.id);
+    return { ok: true, cancelled };
+  });
+
+  handle(
+    'resource.readEmevdSourceSlice',
+    async (event, token: string, fromLine: number, lineCount: number) => {
+      if (typeof token !== 'string' || token.length === 0) {
+        return {
+          ok: false,
+          code: 'EMEVD_SOURCE_TOKEN_EXPIRED',
+          message: '源码切片令牌无效。'
+        };
+      }
+      return emevdSourceTokens.readSlice(
+        token,
+        event.sender.id,
+        Number(fromLine),
+        Number(lineCount)
+      );
+    }
+  );
 
   /**
    * Assemble the authoritative full EMEVD editor document in main via
@@ -2797,11 +2806,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       // R3/P4 裁定：反汇编必须是 DarkScript3 式（EMEDF 函数名）；没 EMEDF 失败
       // 关闭——不再下发 hash 伪源码（旧 renderEmevdPatchDslBounded 输出已从
       // production 入口移除，底层 dslCompiler/typed 写链保留）。
-      // T4：一次出完整 DarkScript 文本，不做 2000 行截断——事件源码不再有
-      // 「加载完整源码」按钮与截断黄条；全量 IPC 下发 70K+ 行文本可行，
-      // 渲染成本集中在打开时一次完成（loadFullDslTemplate 参数保留以兼容
-      // 既有 IPC 契约与 core smoke，不再影响行为）。
+      // 3.1：首包只回 outline + 前 400 行 + opaque source token，全文不进
+      // 第一次 IPC。3.3：反汇编在 worker_threads（renderEmevdDarkScriptAsync）。
+      // loadFullDslTemplate 参数保留以兼容既有 IPC 契约与 core smoke，不再
+      // 把 70K 行一次塞回 renderer。
       let dslTemplate: string | null = null;
+      let sourcePrefix: string | null = null;
+      let sourceToken: string | null = null;
       let dslTemplateTruncated = false;
       let dslTemplateTotalLines = 0;
       let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
@@ -2818,8 +2829,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         const cachedDisassembly = disassemblyCacheKey
           ? emevdDisassemblyCache.get(disassemblyCacheKey)
           : undefined;
+        let fullText: string | null = null;
         if (cachedDisassembly) {
-          dslTemplate = cachedDisassembly.text;
+          fullText = cachedDisassembly.text;
           dslTemplateTruncated = cachedDisassembly.truncated;
           dslTemplateTotalLines = cachedDisassembly.totalLines;
           sourceStyle = 'dark-script';
@@ -2830,7 +2842,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             { signal: openController.signal }
           );
           if (bounded.cancelled) return emevdOpenCancelled(sourceUri);
-          dslTemplate = bounded.text;
+          fullText = bounded.text;
           dslTemplateTruncated = bounded.truncated;
           dslTemplateTotalLines = bounded.totalLines;
           sourceStyle = 'dark-script';
@@ -2839,6 +2851,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             truncated: bounded.truncated,
             totalLines: bounded.totalLines
           });
+        }
+        if (fullText !== null) {
+          const stored = emevdSourceTokens.put(event.sender.id, sourceUri, fullText, {
+            truncated: dslTemplateTruncated
+          });
+          sourceToken = stored.token;
+          sourcePrefix = stored.prefix;
+          dslTemplateTotalLines = stored.totalLines;
         }
       } else {
         responseDiagnostics.push({
@@ -2851,6 +2871,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           sourceUri
         });
       }
+      if (openController.signal.aborted) {
+        if (sourceToken) emevdSourceTokens.dropToken(sourceToken);
+        return emevdOpenCancelled(sourceUri);
+      }
       if (!commitEmevdFullDocument(
         emevdFullDocuments,
         sourceUri,
@@ -2858,6 +2882,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         openController.signal,
         full.sourceHash ?? null
       )) {
+        if (sourceToken) emevdSourceTokens.dropToken(sourceToken);
         return emevdOpenCancelled(sourceUri);
       }
       activeEmevdOpens.finish(event.sender.id, sourceUri, openController);
@@ -2869,6 +2894,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         eventCount: full.document.events.length,
         instructionCount: full.instructionTotal,
         dslTemplate,
+        sourcePrefix,
+        sourceToken,
+        sourceTotalLines: dslTemplateTotalLines,
         sourceStyle,
         dslTemplateTruncated,
         dslTemplateTotalLines,

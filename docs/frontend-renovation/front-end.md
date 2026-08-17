@@ -2564,9 +2564,9 @@ SHELL-09 → SHELL-10
 > **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
 > - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
 > - **B**：renderer 打开只打一枪——`readEmevdDocument` envelope 双读删除，事件数 / sourceHash / gutter 判据全部由 `readEmevdFullDocument` 的 outline 给（`unknownCount` 按完整 EMEDF 逐条判，不再有 256 条采样造成的假「整段未知」）；`mapEmevdEnvelope` / `alignEmevdDocumentAnchors` 删除，`indexEventLines` 按 `$Event(` 出现顺序映射。
-> - **C**：反汇编单次解码（`DecodeStatus` 化，折叠与渲染共用一份结果）+ EMEDF registry 索引（WeakMap：校验 + bank→id→def，33266 条指令从 9s 级降到 4ms 级）+ `renderEmevdDarkScriptAsync` 分片让出（可取消，不返回半成品）。
-> - **D**：sanitizer 源码字段豁免——`dslTemplate` / `text` 等是内容不是元数据，不做整串路径替换（S13 口径）；路径防线只留键名与诊断 message。
-> - **E**：CodeMirror 原子全文缓冲（S19 / `docs/algorithm1.md`）——文本到达 renderer 后一次 `EditorState.create`；没有 400 行前缀、没有分片 `dispatch`。切域 hidden 常驻挂载，保留 tab / dirty / EditorState / 滚动。`indexEventLines` 流式扫行。
+> - **C**：反汇编单次解码（`DecodeStatus` 化，折叠与渲染共用一份结果）+ EMEDF registry 索引（WeakMap：校验 + bank→id→def，33266 条指令从 9s 级降到 4ms 级）+ `renderEmevdDarkScriptAsync` 派到 `worker_threads`（3.3，取消 terminate，不返回半成品）。
+> - **D**：sanitizer 源码字段豁免——`dslTemplate` / `sourcePrefix` / `sliceText` 等是内容不是元数据，不做整串路径替换（S13 口径）；路径防线只留键名与诊断 message。
+> - **E**：CodeMirror 原子全文缓冲（S19 / `docs/algorithm1.md`）——App 用 `sourceToken` + `readEmevdSourceSlice` 拼齐全文后一次 `EditorState.create`（3.1 首包只有前 400 行，面板禁止分片 `dispatch`）。切域 hidden 常驻挂载，保留 tab / dirty / EditorState / 滚动。`indexEventLines` 流式扫行。
 > - **F**：领域切换只开 `filesForDomain` 第一份（common_func 不预加载）；main 按 sourceHash 缓存反汇编文本，切回零解析（缓存失效 = 写入 / hash 变）。
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。

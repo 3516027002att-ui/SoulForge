@@ -181,6 +181,7 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.doesNotMatch(panelSource, /splitSourceForFirstFrame/);
     assert.doesNotMatch(panelSource, /sourceFillTarget:/);
     assert.match(panelSource, /createCompleteSourceState/);
+    assert.match(panelSource, /openingPreview/);
   });
 
   it('S19：DarkScript 多通道词法与 $Event 折叠存在', () => {

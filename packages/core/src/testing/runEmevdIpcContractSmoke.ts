@@ -47,6 +47,12 @@ function main(): void {
   if (!ipc.includes('renderEmevdDarkScriptAsync')) {
     throw new Error('main 必须走分片异步 DarkScript3 反汇编入口（不得在主进程同步反汇编）。');
   }
+  if (!ipc.includes('readEmevdSourceSlice') || !ipc.includes('sourceToken')) {
+    throw new Error('main 必须提供 sourceToken + readEmevdSourceSlice（3.1 不得一次回全文）。');
+  }
+  if (!ipc.includes('emevdDarkScriptWorkerHost') && !ipc.includes('worker_threads')) {
+    throw new Error('main 必须把反汇编派到 worker（3.3），不得只在主线程拼 7 万行。');
+  }
   if (ipc.includes('renderEmevdDarkScriptBounded')) {
     throw new Error('production 入口不得残留同步有界反汇编调用（会重新引入 75 ms 停摆）。');
   }

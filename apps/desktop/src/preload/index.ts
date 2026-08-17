@@ -248,8 +248,13 @@ const api = {
     revision?: number;
     eventCount?: number;
     instructionCount?: number;
-    /** R3/P4 裁定：DarkScript3 式源码；EMEDF 缺失时失败关闭为 null（不再给伪解码）。 */
+    /** R3/P4 裁定：DarkScript3 式源码；3.1 起首包不再带全文，全文走 sourceToken。 */
     dslTemplate?: string | null;
+    /** 前 400 行，供首屏看见 $Event；其余走 readEmevdSourceSlice。 */
+    sourcePrefix?: string | null;
+    /** 只活在 main 的 opaque 令牌，不是路径。 */
+    sourceToken?: string | null;
+    sourceTotalLines?: number;
     /**
      * 源码形态：'dark-script'（EMEDF 反汇编，只读展示）、'patch-dsl'（旧 hash
      * DSL，仅历史路径）、'none'（EMEDF 缺失失败关闭）。
@@ -298,6 +303,21 @@ const api = {
    */
   cancelEmevdFullDocument: (): Promise<{ ok: boolean; cancelled: boolean }> =>
     ipcRenderer.invoke('resource.cancelEmevdFullDocument'),
+  readEmevdSourceSlice: (
+    token: string,
+    fromLine: number,
+    lineCount: number
+  ): Promise<{
+    ok?: boolean;
+    cancelled?: boolean;
+    code?: string;
+    message?: string;
+    fromLine?: number;
+    lineCount?: number;
+    totalLines?: number;
+    eof?: boolean;
+    sliceText?: string;
+  }> => ipcRenderer.invoke('resource.readEmevdSourceSlice', token, fromLine, lineCount),
   submitEmevdDslPlan: (sourceUri: string, sourceText: string): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
   readEmedfCompletionCatalog: (): Promise<{

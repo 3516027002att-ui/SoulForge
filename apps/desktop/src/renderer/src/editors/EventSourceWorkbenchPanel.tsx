@@ -126,8 +126,10 @@ export interface EventSourceWorkbenchPanelProps {
   pendingTab: EventSourceTabData | null;
   /** 面板当前是否在可视工作区。不可见时 App 用 hidden 包住但保持挂载。 */
   active?: boolean | undefined;
-  /** App 侧是否正在读 EMEVD（Bridge 分页读 + 主进程反汇编 + IPC）。 */
+  /** App 侧是否正在读 EMEVD（Bridge 分页读 + worker 反汇编 + 切片拼齐）。 */
   opening?: boolean | undefined;
+  /** 全文未齐时的只读前缀（不是 EditorState）。 */
+  openingPreview?: string | null | undefined;
   onDslSubmit?: (
     tab: EventSourceTabData,
     sourceText: string
@@ -1061,7 +1063,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     : true;
 
   const visibleStatus = props.opening
-    ? '正在读取 EMEVD（Bridge → 反汇编 → IPC → 一次提交缓冲）…'
+    ? '正在读取 EMEVD（Bridge → worker 反汇编 → 切片拼齐 → 一次提交缓冲）…'
     : status;
 
   return (
@@ -1145,7 +1147,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                 <div ref={editorHostRef} className="esw-source__host" data-editor-engine="codemirror" />
                 {props.opening && !activeTab && (
                   <div className="esw-source__loading" role="status">
-                    正在读取并反汇编完整 EMEVD；就绪后将在一次提交中显示全文。
+                    {props.openingPreview ? (
+                      <pre className="esw-source__preview">{props.openingPreview}</pre>
+                    ) : (
+                      '正在读取并反汇编完整 EMEVD；就绪后将在一次提交中显示全文。'
+                    )}
                   </div>
                 )}
                 {activeTab?.live && activeTab.dslTemplate === null && (

@@ -29,6 +29,7 @@
  * - SF_TEST_BROWSER_PREVIEW=1：创建无 preload 窗口，模拟普通浏览器预览表面。
  */
 import { app, BrowserWindow, ipcMain } from 'electron';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
@@ -1734,6 +1735,7 @@ function registerFixtureIpc() {
     arrivalIndex === 0 ? EMEVD_OPEN_DELAY_MS : Math.round(EMEVD_OPEN_DELAY_MS / 4)
   );
   let activeEmevdOpen = null;
+  const fixtureEmevdSourceTokens = new Map();
 
   /*
    * 打开事件文档的观测记录，测试经 app.evaluate(() => global.__fixtureEmevdOpenLog) 读。
@@ -1801,6 +1803,9 @@ function registerFixtureIpc() {
       };
     }
     noteEmevdSettled(sourceUri, false);
+    const lines = bank.dslTemplate.split('\n');
+    const sourceToken = randomUUID();
+    fixtureEmevdSourceTokens.set(sourceToken, { lines, sourceUri });
     return {
       ok: true,
       sourceUri,
@@ -1808,9 +1813,13 @@ function registerFixtureIpc() {
       revision: 0,
       eventCount: bank.events.length,
       instructionCount: bank.events.reduce((sum, e) => sum + (e.instructionCount ?? 0), 0),
-      dslTemplate: bank.dslTemplate,
+      dslTemplate: null,
+      sourcePrefix: lines.slice(0, 400).join('\n'),
+      sourceToken,
+      sourceTotalLines: lines.length,
+      sourceStyle: 'dark-script',
       dslTemplateTruncated: false,
-      dslTemplateTotalLines: bank.dslTemplate.split('\n').length,
+      dslTemplateTotalLines: lines.length,
       sourceHash: bank.sourceHash,
       sourceFormat: 'emevd',
       outerFileHash: null,
@@ -1818,6 +1827,25 @@ function registerFixtureIpc() {
       authority: 'fixture',
       outline: bank.outline(),
       diagnostics: []
+    };
+  });
+
+  handleTrusted('resource.readEmevdSourceSlice', (_event, token, fromLine, lineCount) => {
+    track('resource.readEmevdSourceSlice');
+    const entry = fixtureEmevdSourceTokens.get(token);
+    if (!entry) {
+      return { ok: false, code: 'EMEVD_SOURCE_TOKEN_EXPIRED', message: '源码切片令牌已失效。' };
+    }
+    const start = Number(fromLine) || 0;
+    const count = Number(lineCount) || 0;
+    const slice = entry.lines.slice(start, start + count);
+    return {
+      ok: true,
+      fromLine: start,
+      lineCount: slice.length,
+      totalLines: entry.lines.length,
+      eof: start + slice.length >= entry.lines.length,
+      sliceText: slice.join('\n')
     };
   });
 

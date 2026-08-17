@@ -43,6 +43,8 @@ export type RendererPatchHistoryEntry = Omit<
 
 const SOURCE_TEXT_KEYS = new Set([
   'dslTemplate',
+  'sourcePrefix',
+  'sliceText',
   'draft',
   'nextDslTemplate'
 ]);

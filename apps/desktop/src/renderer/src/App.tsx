@@ -78,6 +78,7 @@ import { ScriptContainerPanel } from './editors/ScriptContainerPanel.js';
 import { Bnd4WorkbenchPanel } from './editors/Bnd4WorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
 import { emevdPendingTabFromFullDocument } from './emevd/emevdPendingTab.js';
+import { assembleEmevdSource } from './emevd/assembleEmevdSource.js';
 import {
   ChangeControlStore,
   type CandidateChange,
@@ -351,6 +352,8 @@ export function App(): ReactElement {
   const [eventPendingTab, setEventPendingTab] = useState<EventSourceTabData | null>(null);
   /** EVENT-30B：读 EMEVD 在飞标志。打开期间工作台显示可行动等待态，而不是空壳。 */
   const [eventOpening, setEventOpening] = useState(false);
+  /** 3.1 前缀：全文未齐时先画 $Event，不建 CodeMirror。 */
+  const [eventSourcePreview, setEventSourcePreview] = useState<string | null>(null);
   /** 打开请求代次：切文件/切域时旧请求的 finally 不得把新请求的 opening 清掉。 */
   const eventOpenRequestRef = useRef(0);
   const [taeData, setTaeData] = useState<Record<string, unknown> | null>(null);
@@ -489,6 +492,7 @@ export function App(): ReactElement {
     emevd: () => {
       setEventPendingTab(null);
       setEventOpening(false);
+      setEventSourcePreview(null);
     },
     msb: () => {
       setMsbParts(EMPTY_MSB_PARTS);
@@ -1314,6 +1318,7 @@ export function App(): ReactElement {
       const target = selectedFile;
       if (!target || !shouldLoadEmevd(target)) {
         setEventPendingTab(null);
+        setEventSourcePreview(null);
         setEventOpening(false);
         // S15：事件没在打开，上一份事件失败不再对当前选区成立（Agent 元数据同理）。
         setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
@@ -1321,12 +1326,14 @@ export function App(): ReactElement {
       }
       if (!bridge || typeof bridge.readEmevdFullDocument !== 'function') {
         setEventPendingTab(null);
+        setEventSourcePreview(null);
         setEventOpening(false);
         return;
       }
       const requestId = eventOpenRequestRef.current + 1;
       eventOpenRequestRef.current = requestId;
       setEventOpening(true);
+      setEventSourcePreview(null);
       setStatus(`正在读取 EMEVD：${target.relativePath}`);
       try {
         // 一次读到底。以前这里是两次 IPC：先 readEmevdDocument 拿有界 envelope
@@ -1387,24 +1394,39 @@ export function App(): ReactElement {
           return;
         }
         setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
-        let dslTemplate: string | null = null;
-        let dslTemplateTruncated = false;
-        let dslTemplateTotalLines = 0;
-        // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script 只读 /
+        if (full.sourcePrefix) setEventSourcePreview(full.sourcePrefix);
+        const assembled = await assembleEmevdSource({
+          dslTemplate: full.dslTemplate ?? null,
+          sourcePrefix: full.sourcePrefix ?? null,
+          sourceToken: full.sourceToken ?? null,
+          sourceTotalLines: full.sourceTotalLines ?? full.dslTemplateTotalLines,
+          isCancelled: () => cancelled || eventOpenRequestRef.current !== requestId,
+          readSlice: async (token, fromLine, lineCount) => {
+            if (typeof bridge.readEmevdSourceSlice !== 'function') {
+              return { ok: false };
+            }
+            return bridge.readEmevdSourceSlice(token, fromLine, lineCount);
+          }
+        });
+        if (cancelled || eventOpenRequestRef.current !== requestId || assembled.cancelled) return;
+        let dslTemplate: string | null = assembled.text;
+        let dslTemplateTruncated = full.dslTemplateTruncated ?? false;
+        let dslTemplateTotalLines = full.dslTemplateTotalLines
+          ?? (dslTemplate ? dslTemplate.split('\n').length : 0);
+        // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script /
         // none 失败关闭）。
-        let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = 'none';
-        if (full.dslTemplate) {
-          dslTemplate = full.dslTemplate;
-          dslTemplateTruncated = full.dslTemplateTruncated ?? false;
-          dslTemplateTotalLines = full.dslTemplateTotalLines ?? 0;
-          // 主进程返回 sourceStyle 时以它为准；旧 fixture/历史通道没有该字段时
-          // 按模板内容推断：`$Event(` 开头是 DarkScript 反汇编（只读），否则按旧
-          // hash DSL 处理（可编辑）。
-          sourceStyle = full.sourceStyle
-            ?? (/^\$Event\(/m.test(full.dslTemplate) ? 'dark-script' : 'patch-dsl');
+        let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = full.sourceStyle ?? 'none';
+        if (dslTemplate && sourceStyle === 'none') {
+          sourceStyle = /^\$Event\(/m.test(dslTemplate) ? 'dark-script' : 'patch-dsl';
         }
-        // dslTemplate === null 是 EMEDF 缺失的失败关闭（不提供伪解码）：
-        // sourceStyle 留 'none'，工作台显示可行动说明。
+        // 拼不出全文且不是 EMEDF 失败关闭：当作打开失败，不要拿前缀建编辑器。
+        if (!dslTemplate && sourceStyle === 'dark-script') {
+          setEventSourcePreview(null);
+          setEventPendingTab(null);
+          setStatus('事件源码切片未齐，未打开编辑器。');
+          return;
+        }
+        setEventSourcePreview(null);
         setEventPendingTab(emevdPendingTabFromFullDocument({
           tabId: target.sourceUri,
           title: eventDocumentTitle(target.relativePath),
@@ -3605,6 +3627,7 @@ export function App(): ReactElement {
                    上抛。key 固定，切资源时工作台不重挂载，标签与未提交编辑得以保留。 */
                 active={showEventWorkbench}
                 opening={eventOpening}
+                openingPreview={eventSourcePreview}
                 pendingTab={eventPendingTab}
                 onDslSubmit={async (tab, sourceText) => {
                   if (!tab.live) {
@@ -3634,22 +3657,37 @@ export function App(): ReactElement {
                       tab.resourceUri,
                       `renderer-${tab.resourceUri}-${Date.now()}`
                     );
-                    if (reload?.ok && reload.dslTemplate) {
-                      setEventPendingTab(emevdPendingTabFromFullDocument({
-                        tabId: tab.tabId,
-                        title: tab.title,
-                        resourceUri: tab.resourceUri,
-                        full: reload,
-                        dslTemplate: reload.dslTemplate,
-                        dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
-                        dslTemplateTotalLines: reload.dslTemplateTotalLines ?? 0,
-                        sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
-                      }));
-                      return {
-                        ok: true,
-                        diagnostics: result.diagnostics ?? [],
-                        nextDslTemplate: reload.dslTemplate
-                      };
+                    if (reload?.ok) {
+                      const assembled = await assembleEmevdSource({
+                        dslTemplate: reload.dslTemplate ?? null,
+                        sourcePrefix: reload.sourcePrefix ?? null,
+                        sourceToken: reload.sourceToken ?? null,
+                        sourceTotalLines: reload.sourceTotalLines ?? reload.dslTemplateTotalLines,
+                        readSlice: async (token, fromLine, lineCount) => {
+                          if (typeof bridge.readEmevdSourceSlice !== 'function') {
+                            return { ok: false };
+                          }
+                          return bridge.readEmevdSourceSlice(token, fromLine, lineCount);
+                        }
+                      });
+                      if (assembled.text) {
+                        setEventPendingTab(emevdPendingTabFromFullDocument({
+                          tabId: tab.tabId,
+                          title: tab.title,
+                          resourceUri: tab.resourceUri,
+                          full: reload,
+                          dslTemplate: assembled.text,
+                          dslTemplateTruncated: reload.dslTemplateTruncated ?? false,
+                          dslTemplateTotalLines: reload.dslTemplateTotalLines
+                            ?? assembled.text.split('\n').length,
+                          sourceStyle: reload.sourceStyle ?? tab.sourceStyle ?? 'none'
+                        }));
+                        return {
+                          ok: true,
+                          diagnostics: result.diagnostics ?? [],
+                          nextDslTemplate: assembled.text
+                        };
+                      }
                     }
                   }
                   return {

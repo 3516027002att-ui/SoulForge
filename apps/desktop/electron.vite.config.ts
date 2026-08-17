@@ -15,6 +15,7 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(here, 'src/main/index.ts'),
+          emevdDarkScriptWorker: resolve(here, 'src/main/emevdDarkScriptWorker.ts'),
           databaseUtility: resolve(here, 'src/main/databaseUtility.ts'),
           ...(includeDatabaseUtilitySmoke
             ? { databaseUtilitySmoke: resolve(here, 'src/main/databaseUtilitySmoke.ts') }
