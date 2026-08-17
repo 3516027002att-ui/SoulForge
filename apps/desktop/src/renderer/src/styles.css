@@ -1578,7 +1578,10 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .agent-mode-select { position: relative; }
 .agent-mode-trigger { display: inline-flex; align-items: center; gap: 5px; padding: 2px 5px; color: var(--ink-2); font-size: 11px; border-radius: var(--radius-s); }
 .agent-mode-trigger:hover { color: var(--ink-0); background: var(--control-hover-bg); }
-.agent-mode-menu { position: absolute; left: 0; bottom: calc(100% + 5px); z-index: 5; min-width: 190px; padding: 4px; border: 1px solid var(--line-strong); background: var(--forge-3); box-shadow: var(--shadow-float); }
+/* S9：菜单已 createPortal 到 document.body —— 锚点是 viewport 坐标
+   （getBoundingClientRect），必须 position:fixed 才不会随页面滚动漂移；
+   absolute 相对初始包含块，滚动后菜单会错位。top/left 由组件 inline 提供。 */
+.agent-mode-menu { position: fixed; left: 0; bottom: calc(100% + 5px); z-index: 5; min-width: 190px; padding: 4px; border: 1px solid var(--line-strong); background: var(--forge-3); box-shadow: var(--shadow-float); }
 .agent-mode-menu button { display: flex; flex-direction: column; align-items: flex-start; width: 100%; gap: 1px; padding: 6px 8px; text-align: left; border-radius: var(--radius-s); }
 .agent-mode-menu button:hover, .agent-mode-menu button[aria-selected="true"] { background: var(--ember-soft); }
 .agent-mode-menu strong { font-size: 11px; }

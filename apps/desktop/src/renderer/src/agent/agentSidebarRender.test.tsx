@@ -835,3 +835,24 @@ function render0Task(): AgentSidebarProps['task'] {
     approvalError: null
   };
 }
+
+describe('S9：Ask 菜单 portal 后 CSS 用 fixed（锚点是 viewport 坐标）', () => {
+  it('agent-mode-menu 是 position:fixed，不是 absolute（absolute 相对初始包含块，滚动漂移）', () => {
+    const css = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'),
+      'utf8'
+    );
+    assert.match(css, /\.agent-mode-menu \{ position: fixed;/);
+    assert.doesNotMatch(css, /\.agent-mode-menu \{ position: absolute;/);
+  });
+
+  it('菜单已 portal 到 document.body，锚点取 viewport 坐标（getBoundingClientRect）', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'agent', 'AgentParticipantBar.tsx'),
+      'utf8'
+    );
+    assert.match(source, /createPortal\(/);
+    assert.match(source, /document\.body/);
+    assert.match(source, /getBoundingClientRect\(\)/);
+  });
+});
