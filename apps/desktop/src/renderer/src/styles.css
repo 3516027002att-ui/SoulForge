@@ -860,6 +860,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 
 /* ── 编辑器卡片（生产 React 面板，作用域限定在编辑视口内） ── */
 .viewer-content .panel {
+  /* S20：panel 填满视口（flex:1 + min-height:0），工作台 height:100% 才有参照，
+     三栏各自的 column-body 成为滚动宿主，长列表不再把整页顶出滚动条。 */
+  flex: 1; min-height: 0;
   border: 1px solid var(--line); border-radius: 0;
   background: var(--forge-1); padding: 8px 12px;
   display: flex; flex-direction: column; gap: 10px;
@@ -1847,7 +1850,12 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 /* min-height: 0 是必需的：flex 子项默认 min-height:auto，栏内长列表会把容器撑高
    而不是自己滚动。漏掉它的表现正是「整页出现第二个滚动条」。 */
-.workbench__columns { flex: 1; display: flex; min-height: 0; align-items: stretch; }
+.workbench__columns {
+  /* S20：窄主区（Agent 打开时）三栏 minWidth 总和可能超出容器 ——
+     允许横向滚动，TEXT 列可滚到而不是被 overflow:hidden 切掉。 */
+  flex: 1; display: flex; min-height: 0; align-items: stretch;
+  overflow-x: auto; overflow-y: hidden;
+}
 .workbench__column-slot { display: flex; min-width: 0; min-height: 0; position: relative; }
 .workbench__column {
   flex: 1; display: flex; flex-direction: column;
@@ -1869,7 +1877,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   font-size: 10px; color: var(--ink-3); margin-left: auto;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; }
+.workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; overscroll-behavior: contain; }
 .workbench__footer {
   flex: none; padding: 6px 10px; border-top: 1px solid var(--line);
   background: var(--forge-1);
@@ -2143,13 +2151,10 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .wb-tools__item:disabled { color: var(--ink-3); cursor: not-allowed; }
 .wb-tools__item:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }
 
-/* 面板内嵌工作台：给一个确定高度，否则 flex:1 无参照物，栏体会塌成内容高度，
-   独立滚动失效（表现为长列表把整页顶出滚动条）。
-   用 min-height 而不是 vh 高度：实测 `height: 62vh` 会把内容顶高，
-   e2e 的按钮四态用例因此拿不到顶部资源栏 tab 的 :active（元素被推离
-   指针按下的坐标）。视口单位在嵌套滚动容器里不可靠 —— 它相对视口而非
-   容器，容器本身已在滚动区内时会叠加出比预期高得多的盒子。 */
-.panel > .workbench { min-height: 420px; }
+/* S20：删掉旧 min-height: 420px 妥协 —— 它只在「panel 无高度参照」时兜底，
+   且极矮视口下会把工作台顶出滚动条（整页滚、三栏连体）。
+   参照已由 .viewer-content .panel { flex:1; min-height:0 } 提供，
+   工作台 height:100% 生效，三栏各自 column-body 独立滚动。 */
 
 /* 状态栏里的可点项：外观与静态 st-item 一致，但有 hover/focus 反馈。
    诊断计数此前是死文本（显示「1035 条诊断」却点不开），现在是日志开关。 */

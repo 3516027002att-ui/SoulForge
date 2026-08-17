@@ -173,3 +173,26 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     assert.match(panelSource, /selectedTableId !== null \? \{ tableId: selectedTableId \} : \{\}/);
   });
 });
+
+describe('S20 三栏独立滚动 + TEXT 不被 Agent 挡（234048）', () => {
+  const cssSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'),
+    'utf8'
+  );
+
+  it('panel 填满视口：.viewer-content .panel 有 flex:1 + min-height:0（工作台高度参照）', () => {
+    assert.match(cssSource, /\.viewer-content \.panel \{[^}]*flex: 1; min-height: 0;/s);
+  });
+
+  it('不再用 min-height: 420px 妥协（旧规则把工作台顶出滚动条 → 三栏滚轮连体）', () => {
+    assert.doesNotMatch(cssSource, /^[ \t]*min-height: 420px;/m);
+  });
+
+  it('三栏各自独立滚动：column-body 是滚动宿主且 overscroll-behavior: contain', () => {
+    assert.match(cssSource, /\.workbench__column-body \{[^}]*overflow: auto;[^}]*overscroll-behavior: contain;/s);
+  });
+
+  it('窄主区（Agent 打开）下 columns 可横向滚动，TEXT 列不被 overflow:hidden 切掉', () => {
+    assert.match(cssSource, /\.workbench__columns \{[^}]*overflow-x: auto;/s);
+  });
+});
