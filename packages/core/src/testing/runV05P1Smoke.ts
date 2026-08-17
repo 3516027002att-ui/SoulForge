@@ -107,26 +107,30 @@ async function mainInWorkspace(root: string): Promise<void> {
     throw new Error('Structured writer must fail with STRUCTURED_WRITER_NOT_IMPLEMENTED.');
   }
 
-  // 4) Backup requires confirmation receipt
+  // 4) S29：能打开就能写 —— 备份文件风险照报，但不再要求确认 receipt
   const bakRisk = assessEditRisk(bakFile);
   if (bakRisk.level !== 'high' && bakRisk.level !== 'caution') {
     throw new Error(`Backup risk should be elevated, got ${bakRisk.level}`);
   }
-  const denied = await saveTextResource({
+  const direct = await saveTextResource({
     file: bakFile,
     newText: 'bak-v2\n',
     session,
     operationLog: store,
-    // 本段预期被确认门拦下、不落还原点；仍显式指定，避免将来改成可通过时重新泄漏。
+    // 本段预期直接写入、不弹确认；仍显式指定备份目录，避免落系统临时目录无人清理。
     backupBaseDir: join(root, 'backups')
   });
-  if (denied.ok || !denied.requiresConfirmation) {
-    throw new Error('Backup save without confirmation must require confirmation.');
+  if (!direct.ok || direct.requiresConfirmation) {
+    throw new Error('S29: backup save must write directly without confirmation requirement.');
   }
-  if (!denied.diagnostics.some((d) => d.code === 'EDIT_CONFIRMATION_REQUIRED')) {
-    throw new Error('Expected EDIT_CONFIRMATION_REQUIRED diagnostic.');
+  if ((await readFile(bakPath, 'utf8')) !== 'bak-v2\n') {
+    throw new Error('Backup file content not updated after direct save.');
+  }
+  if (!direct.graph || direct.graph.summary.fileCount !== 1) {
+    throw new Error('Save result must include patch graph summary.');
   }
 
+  // receipt 参数保留兼容（旧调用方仍可传），但不再是写入前提。
   const receipt = createConfirmationReceipt({
     subjects: [bakFile.sourceUri, ...bakRisk.reasons, bakRisk.level],
     riskLevel: bakRisk.level,
@@ -135,21 +139,17 @@ async function mainInWorkspace(root: string): Promise<void> {
   });
   const confirmed = await saveTextResource({
     file: bakFile,
-    newText: 'bak-v2\n',
+    newText: 'bak-v3\n',
     session,
     operationLog: store,
     confirmation: receipt,
-    // 提交会建还原点；不指定时落系统临时目录且有意保留，无人清理。
     backupBaseDir: join(root, 'backups')
   });
   if (!confirmed.ok) {
     throw new Error(`Confirmed backup save failed: ${confirmed.diagnostics.map((d) => d.message).join('; ')}`);
   }
-  if ((await readFile(bakPath, 'utf8')) !== 'bak-v2\n') {
+  if ((await readFile(bakPath, 'utf8')) !== 'bak-v3\n') {
     throw new Error('Backup file content not updated after confirmed save.');
-  }
-  if (!confirmed.graph || confirmed.graph.summary.fileCount !== 1) {
-    throw new Error('Save result must include patch graph summary.');
   }
 
   // 5) Truncated preview blocked

@@ -3394,13 +3394,8 @@ export function App(): ReactElement {
                 if (!bridge || typeof bridge.applyContainerParamFieldMutation !== 'function') {
                   return { ok: false, message: '容器 PARAM 字段写入通道不可用。' };
                 }
-                if (!input.expectedContainerHash || !input.expectedChildHash) {
-                  // 缺哈希就不能保证并发安全，宁可拒绝也不无保护地写。
-                  return {
-                    ok: false,
-                    message: '缺少容器或条目哈希，拒绝写入（无法保证并发安全）。请重新选择该 param。'
-                  };
-                }
+                // S29：哈希是 main 侧并发保护凭据，缺了由 main 写时现算 ——
+                // renderer 不再以「缺哈希」拒绝已经画出来的字段。
                 const saved = await bridge.applyContainerParamFieldMutation(
                   paramWorkbenchFile.sourceUri,
                   input.expectedContainerHash,
@@ -3434,12 +3429,7 @@ export function App(): ReactElement {
                 if (!bridge || typeof bridge.applyContainerParamRowNameMutation !== 'function') {
                   return { ok: false, message: '容器 PARAM 行名写入通道不可用。' };
                 }
-                if (!input.expectedContainerHash || !input.expectedChildHash) {
-                  return {
-                    ok: false,
-                    message: '缺少容器或条目哈希，拒绝写入（无法保证并发安全）。请重新选择该 param。'
-                  };
-                }
+                // S29：哈希由 main 写时现算兜底，缺哈希不再挡行名写入。
                 const saved = await bridge.applyContainerParamRowNameMutation(
                   paramWorkbenchFile.sourceUri,
                   input.expectedContainerHash,

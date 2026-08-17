@@ -669,6 +669,14 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const virtualRows = rowVirtualizer.getVirtualItems();
 
   /**
+   * S29：bool 与 1bit 位字段用打勾（grok §1-9「布尔和 1bit 用打勾，不要数字框」）。
+   * 1bit 是标量类型 + bitfield.bitWidth===1（bitOffset 任意）。
+   */
+  function isBoolLike(field: ParamFieldDef): boolean {
+    return field.type === 'bool' || field.bitfield?.bitWidth === 1;
+  }
+
+  /**
    * 提交一个字段。
    *
    * explicitValue 用于枚举选值：点选后立即提交时，setDrafts 还没生效
@@ -676,7 +684,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * 表现为「选了枚举值但提交的是旧值」，且没有任何报错。
    * 输入框失焦提交仍走 drafts（那时 state 已更新）。
    */
-  async function commitField(field: ParamFieldDef, explicitValue?: string): Promise<void> {
+  async function commitField(field: ParamFieldDef, explicitValue?: string | boolean): Promise<void> {
     if (!canCommitFields || !definition || !selectedRow?.dataBase64 || selectedRow === null) return;
     if (!props.onApplyFieldMutation || selectedEntry === null) return;
     const raw = explicitValue ?? drafts[field.id];
@@ -691,10 +699,18 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         rowId: selectedRow.id,
         fieldId: field.id,
         // 数值字段按数值提交；解析失败时原样传字符串，由 main 侧的编码器给出
-        // 结构化诊断，而不是在这里悄悄改成 0。
-        value: /^(u?int|f(loat|32|64)|[su]\d+)/i.test(field.type) && raw.trim() !== '' && !Number.isNaN(Number(raw))
-          ? Number(raw)
-          : raw,
+        // 结构化诊断，而不是在这里悄悄改成 0。bool 字段把 'true'/'false'/'1'/'0'
+        // 归一成 boolean —— core 写器按 truthy 判定，字符串 'false' 会误写为 1。
+        value: field.type === 'bool'
+          ? (typeof raw === 'boolean'
+            ? raw
+            : (raw.trim().toLowerCase() === 'true' || raw.trim() === '1'))
+          : (typeof raw === 'string'
+            && /^(u?int|f(loat|32|64)|[su]\d+)/i.test(field.type)
+            && raw.trim() !== ''
+            && !Number.isNaN(Number(raw))
+            ? Number(raw)
+            : raw),
         rowDataBase64: selectedRow.dataBase64,
         definition
       });
@@ -1037,25 +1053,52 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                         焦点与文本选中 —— 用户无法复制对照列或不可编辑字段的值，
                         而「把这个数值抄到别处」正是只读列最常见的用途。 */}
                     <span className="wb-prop__value">
-                      <input
-                        value={shown === '' && !editable ? '—' : shown}
-                        readOnly={!editable}
-                        className={editable
-                          ? undefined
-                          : (decoded?.diagnostic ? 'is-readonly diag-warn' : 'is-readonly')}
-                        onChange={(event) => {
-                          if (!editable) return;
-                          setDrafts((current) => ({ ...current, [field.id]: event.target.value }));
-                        }}
-                        onBlur={() => {
-                          if (editable && drafts[field.id] !== undefined) void commitField(field);
-                        }}
-                        // disabled 只表达「提交中」这个瞬时状态，不表达只读。
-                        disabled={editable && committing}
-                        aria-label={`${field.name} 值${editable ? '' : '（只读）'}`}
-                        aria-readonly={!editable}
-                        title={decoded?.diagnostic ?? shown}
-                      />
+                      {/* S29：bool 与 1bit 字段用打勾而不是数字框（grok §1-9）。
+                          点勾即直接写入（§1-10），不需要失焦。 */}
+                      {isBoolLike(field) ? (
+                        <input
+                          type="checkbox"
+                          checked={draft !== undefined
+                            ? (field.type === 'bool' ? draft === 'true' : draft === '1')
+                            : (decoded?.display === 'true' || decoded?.display === '1')}
+                          disabled={!editable || committing}
+                          aria-label={`${field.name} 值${editable ? '' : '（只读）'}`}
+                          aria-readonly={!editable}
+                          title={decoded?.diagnostic ?? shown}
+                          onChange={(event) => {
+                            if (!editable) return;
+                            const checked = event.target.checked;
+                            // 保持与输入框同一条 draft 链：失焦/枚举的提交语义一致。
+                            const next = field.type === 'bool'
+                              ? (checked ? 'true' : 'false')
+                              : (checked ? '1' : '0');
+                            setDrafts((current) => ({ ...current, [field.id]: next }));
+                            // bool 传 boolean（core 写器按 truthy 判定，字符串 'false'
+                            // 会被误写成 1）；1bit 传 '0'/'1' 字符串。
+                            void commitField(field, field.type === 'bool' ? checked : next);
+                          }}
+                        />
+                      ) : (
+                        <input
+                          value={shown === '' && !editable ? '—' : shown}
+                          readOnly={!editable}
+                          className={editable
+                            ? undefined
+                            : (decoded?.diagnostic ? 'is-readonly diag-warn' : 'is-readonly')}
+                          onChange={(event) => {
+                            if (!editable) return;
+                            setDrafts((current) => ({ ...current, [field.id]: event.target.value }));
+                          }}
+                          onBlur={() => {
+                            if (editable && drafts[field.id] !== undefined) void commitField(field);
+                          }}
+                          // disabled 只表达「提交中」这个瞬时状态，不表达只读。
+                          disabled={editable && committing}
+                          aria-label={`${field.name} 值${editable ? '' : '（只读）'}`}
+                          aria-readonly={!editable}
+                          title={decoded?.diagnostic ?? shown}
+                        />
+                      )}
                       {/* 枚举选值入口：只在有值表且字段可编辑时出现。
                           空值表的枚举没有可选项，给个按钮会点开一个空列表。 */}
                       {editable && enumMeta && enumMeta.values.length > 0 && (

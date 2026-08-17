@@ -243,3 +243,46 @@ describe('S28 保存提示 + 枚举能关（010741）', () => {
     assert.ok(source.includes("if (event.key === 'Escape')"), 'Esc 关闭在场');
   });
 });
+
+describe('S29 能打开就能写（grok §1-9/§1-10）', () => {
+  const workbenchSource = stripComments(readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'ParamWorkbench.tsx'),
+    'utf8'
+  ));
+  const appSource = stripComments(readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
+    'utf8'
+  ));
+  const ipcSource = stripComments(readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
+    'utf8'
+  ));
+
+  it('bool 与 1bit 字段渲染为打勾（checkbox），不再用数字框', () => {
+    assert.ok(workbenchSource.includes("field.type === 'bool' || field.bitfield?.bitWidth === 1"), 'isBoolLike 判定在场');
+    assert.ok(workbenchSource.includes('type="checkbox"'), '打勾控件在场');
+    assert.ok(workbenchSource.includes('onChange'), '打勾即提交');
+  });
+
+  it('bool 值归一成 boolean 提交（core 写器按 truthy 判定，字符串 false 会误写为 1）', () => {
+    assert.ok(workbenchSource.includes("typeof raw === 'boolean'"), 'boolean 原样透传');
+    assert.ok(workbenchSource.includes("raw.trim().toLowerCase() === 'true' || raw.trim() === '1'"), '文本 true/1 归一为 boolean');
+  });
+
+  it('renderer 不再拿「缺少容器或条目哈希」拒绝写入', () => {
+    assert.ok(!appSource.includes('缺少容器或条目哈希'), '哈希拒写文案已删除');
+  });
+
+  it('main 侧缺哈希写时现算（sha256FileNow 兜底，不挡写入）', () => {
+    assert.ok(ipcSource.includes('async function sha256FileNow'), '现算 helper 在场');
+    assert.ok(ipcSource.includes('file.sha256 ?? await sha256FileNow(file.absolutePath)'), '容器哈希现算兜底');
+    assert.ok(ipcSource.includes('|| await sha256FileNow(unpacked.child.absolutePath)'), '条目哈希现算兜底');
+  });
+
+  it('main 不再弹「确认高风险写入」（确认端口从 PARAM 链拆除）', () => {
+    // 容器 PARAM 三条通道（字段/行名/批量导入）不再把 electronConfirmationPort
+    // 接进 applyNativeMutation —— 那是「高风险写入」弹窗的唯一入口。
+    const fieldChain = ipcSource.slice(ipcSource.indexOf('resource.applyContainerParamFieldMutation'));
+    assert.ok(!fieldChain.includes('electronConfirmationPort'), '字段链无确认端口');
+  });
+});

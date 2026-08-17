@@ -1059,6 +1059,18 @@ function deriveDocumentOwnerKey(event: IpcMainInvokeEvent): string {
     .digest('hex');
 }
 
+/**
+ * S29：写时对文件内容现算 sha256（小写 hex，与 C# SourceHash/Hash 同算法）。
+ *
+ * 哈希是并发保护凭据而不是写入门禁：渲染器拿到的 containerHash/childHash
+ * 偶发为空（索引没扫到 sha256、Bridge 没报 contentHash）时，不再拒绝写入，
+ * 直接在 main 侧现算。缺哈希时并发保护退化为「写前读到的就是写时文件」，
+ * 但 Patch Engine 的 HASH_MISMATCH 备份/回滚照旧兜底。
+ */
+async function sha256FileNow(filePath: string): Promise<string> {
+  return createHash('sha256').update(await readFile(filePath)).digest('hex');
+}
+
 /** §4.3 域 → 资源 kind 的粗粒度匹配（CAT-05 的 Catalog 校验落地后替换）。 */
 const DOMAIN_RESOURCE_KINDS: Record<string, readonly string[]> = {
   param: ['param', 'container'],
@@ -6146,10 +6158,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
 
       // 解包目标条目：write-param 需要一个裸 param 作为输入基底。
+      // S29：容器哈希缺失时现算（索引没扫到 sha256 的罕见情况），不挡写入。
+      const containerHashNow = file.sha256 ?? await sha256FileNow(file.absolutePath);
       const unpacked = await unpackContainerParamChild({
         containerPath: file.absolutePath,
         containerUri,
-        containerHash: file.sha256 ?? expectedContainerHash,
+        containerHash: containerHashNow,
         entry: { index: mutation.entryIndex }
       });
       if (!unpacked.ok) {
@@ -6195,7 +6209,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               // 说明「读与写之间条目被改过」，拒绝写入。实测（probeParamWrite）缺它会
               // 恒定 PARAM_STAGING_WRITE_FAILED。unpacked.child.storedContentHash 就是
               // 该裸 param 文件的 SourceHash（entry ContentHash 对存储字节取哈希）。
-              expectedDocumentHash: unpacked.child.storedContentHash,
+              // S29：storedContentHash 缺失时对解包文件现算（写前读到的就是写时文件）。
+              expectedDocumentHash: unpacked.child.storedContentHash
+                || await sha256FileNow(unpacked.child.absolutePath),
               mutation: 'upsert',
               id: mutation.rowId,
               dataBase64: fieldResult.nextDataBase64
@@ -6237,7 +6253,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const outcome = await applyNativeMutation({
         file,
         sourceUri: containerUri,
-        expectedHash: expectedContainerHash,
+        expectedHash: containerHashNow,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'parambnd',
@@ -6253,9 +6269,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             commandOptions: {
               outputPath: context.outputPath,
               mutation: 'replace',
-              expectedContainerHash,
+              expectedContainerHash: containerHashNow,
               entryIndex: mutation.entryIndex,
-              expectedChildHash: mutation.expectedChildHash,
+              // S29：child 哈希缺失时现算（解包文件即条目存储字节，与 C# Hash 同算法）。
+              expectedChildHash: mutation.expectedChildHash
+                || await sha256FileNow(unpacked.child.absolutePath),
               contentBase64: mutatedChildBase64
             },
             ...oodle
@@ -6272,7 +6290,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           + ` in ${unpacked.child.name}`,
         confirmActionLabel: '提交容器内 PARAM 字段变更'
       }, {
-        confirm: electronConfirmationPort(event),
+        // S29：确认端口不再接入 —— writerContract 不再要求「高风险写入」确认，
+        // 弹窗由 applyNativeMutation 的 requiresConfirmation 分支驱动，端口已无效果。
         commit: sessionCommitPort(activeSession, operationLog, storage)
       });
 
@@ -6356,10 +6375,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
 
       // 解包目标条目：write-param 需要一个裸 param 作为输入基底。
+      // S29：容器哈希缺失时现算（索引没扫到 sha256 的罕见情况），不挡写入。
+      const containerHashNow = file.sha256 ?? await sha256FileNow(file.absolutePath);
       const unpacked = await unpackContainerParamChild({
         containerPath: file.absolutePath,
         containerUri,
-        containerHash: file.sha256 ?? expectedContainerHash,
+        containerHash: containerHashNow,
         entry: { index: mutation.entryIndex }
       });
       if (!unpacked.ok) {
@@ -6400,7 +6421,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             timeoutMs: 120_000,
             commandOptions: {
               outputPath: context.outputPath,
-              expectedDocumentHash: unpacked.child.storedContentHash,
+              // S29：storedContentHash 缺失时对解包文件现算（写前读到的就是写时文件）。
+              expectedDocumentHash: unpacked.child.storedContentHash
+                || await sha256FileNow(unpacked.child.absolutePath),
               mutation: 'upsert',
               id: mutation.rowId,
               dataBase64: mutation.rowDataBase64,
@@ -6443,7 +6466,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const outcome = await applyNativeMutation({
         file,
         sourceUri: containerUri,
-        expectedHash: expectedContainerHash,
+        expectedHash: containerHashNow,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'parambnd',
@@ -6459,9 +6482,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             commandOptions: {
               outputPath: context.outputPath,
               mutation: 'replace',
-              expectedContainerHash,
+              expectedContainerHash: containerHashNow,
               entryIndex: mutation.entryIndex,
-              expectedChildHash: mutation.expectedChildHash,
+              // S29：child 哈希缺失时现算（解包文件即条目存储字节，与 C# Hash 同算法）。
+              expectedChildHash: mutation.expectedChildHash
+                || await sha256FileNow(unpacked.child.absolutePath),
               contentBase64: renamedChildBase64
             },
             ...oodle
@@ -6477,7 +6502,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         title: `PARAM row name for row ${mutation.rowId} in ${unpacked.child.name}`,
         confirmActionLabel: '提交容器内 PARAM 行名变更'
       }, {
-        confirm: electronConfirmationPort(event),
+        // S29：不再接确认端口（见字段链注释）。
         commit: sessionCommitPort(activeSession, operationLog, storage)
       });
 
@@ -6611,6 +6636,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ? { oodleRuntimeRoot: session.layers.baseRoot }
       : {};
 
+    // S29：容器哈希缺失时现算，不挡写入。
+    const containerHashNow = input.file.sha256 ?? await sha256FileNow(input.file.absolutePath);
+    const childHashNow = input.expectedChildHash
+      || await sha256FileNow(input.unpackedChild.absolutePath);
+
     const paramStage = await stageBridgeOutput({
       stagingRoot: storage.stagingRoot,
       prefix: 'param-import',
@@ -6625,7 +6655,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           timeoutMs: 120_000,
           commandOptions: {
             outputPath: context.outputPath,
-            expectedDocumentHash: input.unpackedChild.storedContentHash,
+            // S29：storedContentHash 缺失时现算（写前读到的就是写时文件）。
+            expectedDocumentHash: input.unpackedChild.storedContentHash
+              || await sha256FileNow(input.unpackedChild.absolutePath),
             mutations: input.mutations
           }
         });
@@ -6664,7 +6696,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const outcome = await applyNativeMutation({
       file: input.file,
       sourceUri: input.containerUri,
-      expectedHash: input.expectedContainerHash,
+      expectedHash: containerHashNow,
       stagingRoot: storage.stagingRoot,
       allowedRoots: () => [...stage.allowedRoots],
       stagingPrefix: 'parambnd',
@@ -6680,9 +6712,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           commandOptions: {
             outputPath: context.outputPath,
             mutation: 'replace',
-            expectedContainerHash: input.expectedContainerHash,
+            expectedContainerHash: containerHashNow,
             entryIndex: input.entryIndex,
-            expectedChildHash: input.expectedChildHash,
+            expectedChildHash: childHashNow,
             contentBase64: childBase64
           },
           ...oodle
@@ -6698,7 +6730,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       title: input.title,
       confirmActionLabel: input.confirmActionLabel
     }, {
-      confirm: electronConfirmationPort(event),
+      // S29：不再接确认端口（见字段链注释）。
       commit: sessionCommitPort(session, operationLog, storage)
     });
 
