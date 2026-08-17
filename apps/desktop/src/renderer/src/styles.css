@@ -1510,10 +1510,11 @@ pre.tool-output {
 
 /* 二级抽屉：复用旧 .agent-drawer 的对话框形态。 */
 .agent-secondary-drawer {
+  /* S26：抽屉打开时 AgentDockHeader 已卸掉，抽屉是 aside 里唯一的整列内容。
+     背景必须不透明（浅色主题 --forge-0 是 8% 白，会把底下字透出来叠字）。 */
   position: absolute; inset: 0; z-index: 6;
   display: flex; flex-direction: column;
-  background: var(--forge-0);
-  border-left: 1px solid var(--line);
+  background: var(--forge-1);
 }
 .agent-secondary-drawer.is-hidden { display: none; }
 

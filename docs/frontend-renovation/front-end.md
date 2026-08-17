@@ -2450,6 +2450,7 @@ SHELL-09 → SHELL-10
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/navigation/domainNavigation.ts`；`[MODIFY] apps/desktop/src/renderer/src/navigation/DomainNavigationBar.tsx`；`[CREATE] apps/desktop/src/renderer/src/navigation/domainNavigation.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/navigation/WorkspaceResourceBar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/navigation/resourceFamilies.ts`；`[MODIFY] apps/desktop/src/renderer/src/format/uiText.ts`；`[MODIFY] apps/desktop/src/renderer/src/format/uiText.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
 - **Steps**：领域栏仅接 `DomainSummary[]`；删除物理计数；语义领域不渲染全局 resource browser；Files 独占物理浏览；editor full-bleed；pane 独立滚动。
 - **S33 落地（2026-08-17，去活动栏四图标 + 开始侧栏）**：活动栏删除 资源浏览器/搜索/暂存区/审计 四个 `ab-item`（只剩 Agent + 设置贴底，不留 48px 空条）；点顶栏「开始」时左侧侧栏 = 开始页全部功能（打开/更换 Mod、选/换/清原版——S22 当场生效、工作区名、原版挂载状态）+ 折叠「工具」（搜索 Ctrl+K / 暂存区 / 审计与回滚）+ 工作区资源树（上限 120 条，单击打开，更多引导到「文件」领域）；搜索只走 Ctrl+K；换工作区不用回中央页。新增 App.test.tsx 壳层源码断言。
+- **S26 落地（2026-08-17，历史/设置叠字）**：抽屉打开时 `AgentDockHeader` 整条卸掉（抽屉自带「Agent 历史 / 模型服务设置」标题 + 关闭），同一时刻只有一个页面标题；抽屉背景从 8% `--forge-0` 换成不透明 `--forge-1`（浅色主题 8% 白透字是叠字根因）；历史/设置互相切换在抽屉自己的顶栏。测试锁「抽屉面不含产品名 + CSS 用不透明背景」。
 - **Negative source tests**：无 `domainForFile`、`filterFilesForDomain(files)`、`visibleFiles.length` 领域计数。
 - **Done**：顶部无 `PARAM 36`，PARAM 入口直接打开逻辑库。
 

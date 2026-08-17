@@ -705,6 +705,15 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.match(drawerHtml, />取消</, '页脚取消按钮');
     assert.match(drawerHtml, />重置</, '页脚重置按钮');
     assert.match(drawerHtml, />保存</, '页脚保存按钮');
+    // S26：抽屉面没有主栏产品名（AgentDockHeader 已卸掉），同一时刻只有一个标题。
+    assert.ok(!drawerHtml.includes('agent-dock-header__product'), '抽屉面不含主栏产品名');
+    assert.ok(!drawerHtml.includes('>SoulForge<'), '抽屉面不含 SoulForge 产品名');
+    // 抽屉背景必须不透明：浅色主题 8% --forge-0 会把底下字透出来（叠字根因）。
+    assert.match(
+      readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'), 'utf8'),
+      /\.agent-secondary-drawer \{[\s\S]*?background: var\(--forge-1\);/,
+      '抽屉背景是不透明实色'
+    );
     // 历史/设置互相可达：历史视图里也有切换控件（不再只有「模型设置」一个方向）。
     const historyHtml = renderToStaticMarkup(
       <AgentSecondaryDrawer
