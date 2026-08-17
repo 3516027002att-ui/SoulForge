@@ -16,7 +16,9 @@
     "baseUrl": ".",
     "paths": {
       "@soulforge/shared": ["packages/shared/src/index.ts"],
-      "@soulforge/core": ["packages/core/src/index.ts"]
+      "@soulforge/shared/dist/*": ["packages/shared/src/*"],
+      "@soulforge/core": ["packages/core/src/index.ts"],
+      "@soulforge/core/dist/*": ["packages/core/src/*"]
     }
   }
 }

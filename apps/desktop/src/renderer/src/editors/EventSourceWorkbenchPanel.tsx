@@ -29,7 +29,11 @@ import {
   type ReactElement
 } from 'react';
 import type { EmevdEditorDocument } from '@soulforge/shared';
-import { parseDarkScriptCall, type EmedfCompletionItem } from '@soulforge/core';
+// 深路径 import：core 的 index 是 export * 全量导出（会把 node:path 等浏览器
+// 不可用模块拉进 renderer bundle）；parseDarkScriptCall 是纯文本解析，只拉
+// darkScriptCompiler 的依赖链（链上 node:crypto 由 vite alias 打桩）。
+import { parseDarkScriptCall } from '@soulforge/core/dist/emevd/darkScriptCompiler.js';
+import type { EmedfCompletionItem } from '@soulforge/core';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import {
   appendSourceSlices,

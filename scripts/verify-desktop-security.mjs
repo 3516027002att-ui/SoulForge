@@ -40,8 +40,7 @@ const checks = [
   ['渲染 DTO 删除绝对路径', files.rendererDto.includes("'absolutePath'")],
   ['渲染 DTO 删除源路径', files.rendererDto.includes("'sourcePath'")],
   ['渲染 DTO 脱敏字符串中的绝对路径', files.rendererDto.includes('sanitizeRendererString(item.message)')
-    && files.rendererDto.includes('containsWindowsDrivePath')
-    && files.rendererDto.includes('containsUncOrDevicePath')],
+    && files.rendererDto.includes('maskPathFragments')],
   ['旧确认 IPC 已删除', !files.ipc.includes("'resource.createConfirmation'")],
   ['main 确认绑定资源与风险', files.ipc.includes('input.sourceUri')
     && files.ipc.includes("'ALL_RISKS'")],

@@ -56,6 +56,18 @@ sealed record BridgeResult<T>(string SourceUri, string SourcePath, string Game, 
         return new BridgeResult<T>(MakeSourceUri(sourcePath), sourcePath, GameUnknown, resourceKind, "partial", diagnostics.ToArray(), data);
     }
 
+    public static BridgeResult<T> Ok(string sourcePath, string resourceKind, T data)
+    {
+        return new BridgeResult<T>(
+            MakeSourceUri(sourcePath),
+            sourcePath,
+            GameUnknown,
+            resourceKind,
+            "ok",
+            Array.Empty<Diagnostic>(),
+            data);
+    }
+
     public static string MakeSourceUri(string sourcePath)
     {
         if (string.IsNullOrWhiteSpace(sourcePath))

@@ -8,10 +8,27 @@ const includeDatabaseUtilitySmoke = process.env.SOULFORGE_BUILD_DATABASE_UTILITY
 const includeMe3RuntimeGatewaySmoke = process.env.SOULFORGE_BUILD_ME3_GATEWAY_SMOKE === '1';
 const includeMe3SekiroSessionSmoke = process.env.SOULFORGE_BUILD_ME3_SEKIRO_SESSION_SMOKE === '1';
 
+/**
+ * workspace 包解析固定到本仓库的 packages（相对路径，git worktree 与主仓库
+ * checkout 都成立）：node_modules 里的 @soulforge/* 链接可能指向另一个
+ * checkout 的 dist，新导出会被旧 dist 挡住（worktree 实测）。
+ */
+const workspacePackageAlias = {
+  '@soulforge/shared': resolve(here, '../../packages/shared'),
+  '@soulforge/core': resolve(here, '../../packages/core')
+};
+
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    // @soulforge/shared/core 打进 bundle（排除 external）：external 化后运行期
+    // require 解析到 node_modules 链接的 dist（worktree 下可能是别的 checkout），
+    // alias + exclude 让构建与运行都走本仓库 packages。
+    plugins: [externalizeDepsPlugin({ exclude: ['@soulforge/shared', '@soulforge/core'] })],
+    resolve: { alias: workspacePackageAlias },
     build: {
+      // core 打进 bundle 后其 sqlite 绑定是运行期动态 require（.native 路径），
+      // 让 commonjs 插件原样保留而不是试图解析目标。
+      commonjsOptions: { ignoreDynamicRequires: true },
       rollupOptions: {
         input: {
           index: resolve(here, 'src/main/index.ts'),
@@ -31,6 +48,7 @@ export default defineConfig({
   },
   preload: {
     plugins: [externalizeDepsPlugin({ exclude: ['@soulforge/shared'] })],
+    resolve: { alias: workspacePackageAlias },
     // @soulforge/shared 必须打进 bundle 而不是 external：
     // DOCSTORE-04 起 preload 运行时引用 EDITOR_DOCUMENT_IPC_CHANNELS（§14.4
     // 契约的通道权威），external 化后产物是 require('@soulforge/shared')，
@@ -63,6 +81,14 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(here, 'src/renderer'),
+    resolve: {
+      alias: {
+        ...workspacePackageAlias,
+        // core 的 EMEVD DSL 模块顶层 import node:crypto（浏览器没有）；renderer
+        // 只调用其中的纯解析（parseDarkScriptCall），见 runtime/nodeCryptoShim.ts。
+        'node:crypto': resolve(here, 'src/renderer/src/runtime/nodeCryptoShim.ts')
+      }
+    },
     plugins: [react()]
   }
 });
