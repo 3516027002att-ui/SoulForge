@@ -4,7 +4,7 @@
  * 布局对照 DarkScript3（§11），不是 260/320 三栏：
  *   [文档标签栏] 逻辑文档标签（EMEVD 文档，§3.4），带 dirty 标记与关闭
  *   [工具条]     Ctrl+F 查找 · Ctrl+S 应用
- *   [主区]       CodeMirror 6 源码占满（T4：无四钮、无 Outline/Inspector/Problems）
+ *   [主区]       源码（可并排第二视口）+ 右栏词义（S31）
  *
  * Negative DOM（EVENT-30B）：Flow / Hex / Raw Bytes 不在默认 viewport；原始
  * bytes 只能经 Developer Diagnostics 打开（本面板不提供）；查找替换 / Outline /
@@ -18,6 +18,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactElement
@@ -26,6 +27,14 @@ import type { EmevdEditorDocument } from '@soulforge/shared';
 import type { EmedfCompletionItem } from '@soulforge/core';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { createCompleteSourceState } from '../emevd/emevdSourceMount.js';
+import {
+  indexEventHeaders,
+  inspectSourceLine,
+  resolveEventJump,
+  type EventJump,
+  type LineInspection
+} from '../emevd/eventSourceNavigate.js';
+import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { EditorState, type Extension } from '@codemirror/state';
 import {
   EditorView,
@@ -496,7 +505,8 @@ export function buildEditorExtensions(
   readOnly: boolean,
   sourceStyle: EventSourceTabData['sourceStyle'],
   getCatalog: () => EmedfCompletionItem[],
-  onSave?: () => void
+  onSave?: () => void,
+  onCursor?: (lineText: string) => void
 ): Extension[] {
   const sourceLanguage = sourceStyle === 'dark-script'
     ? darkScriptStreamLanguage
@@ -523,6 +533,10 @@ export function buildEditorExtensions(
     autocompletion({ override: [createCompletionSource(getCatalog)] }),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) onDocChange(update.state.doc.toString(), update.state);
+      if (onCursor && (update.selectionSet || update.docChanged || update.focusChanged)) {
+        const line = update.state.doc.lineAt(update.state.selection.main.head);
+        onCursor(line.text);
+      }
     }),
     keymap.of([
       ...(onSave
@@ -557,15 +571,119 @@ export function buildEditorExtensions(
   return extensions;
 }
 
+function revealLine(view: EditorView | null, lineNumber: number): void {
+  if (!view) return;
+  const safe = Math.max(1, Math.min(lineNumber, view.state.doc.lines));
+  const line = view.state.doc.line(safe);
+  view.dispatch({
+    selection: { anchor: line.from },
+    effects: EditorView.scrollIntoView(line.from, { y: 'center' })
+  });
+  view.focus();
+}
+
+function EventMeaningPane(props: {
+  inspection: LineInspection;
+  jump: EventJump | null;
+  onJumpEvent: (eventId: number) => void;
+}): ReactElement {
+  const { inspection, jump, onJumpEvent } = props;
+  if (inspection.kind === 'empty') {
+    return <p className="muted esw-meaning__empty">把光标放在一条指令或 $Event 头上。</p>;
+  }
+  if (inspection.kind === 'event-header') {
+    return (
+      <div className="esw-meaning__block">
+        <strong>$Event({inspection.eventId})</strong>
+        <p className="muted">事件块头。rest 是 Default / Restart。</p>
+      </div>
+    );
+  }
+  if (inspection.kind === 'undecoded') {
+    return (
+      <div className="esw-meaning__block">
+        <strong>未解码</strong>
+        <p className="muted">{inspection.text}</p>
+      </div>
+    );
+  }
+  if (inspection.kind === 'wait-for') {
+    return (
+      <div className="esw-meaning__block">
+        <strong>WaitFor</strong>
+        <p className="muted">条件折叠。下面是被折进去的谓词，不是单独一条可写指令。</p>
+        {inspection.predicates.length === 0
+          ? <p className="muted">谓词无法解析。</p>
+          : (
+            <ul className="esw-meaning__args">
+              {inspection.predicates.map((predicate, index) => (
+                <li key={`${predicate.name}-${index}`}>
+                  <code>{predicate.name}</code>
+                  <span className="muted"> {predicate.args.join(', ')}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+      </div>
+    );
+  }
+  return (
+    <div className="esw-meaning__block">
+      <strong>{inspection.name}</strong>
+      {inspection.unknown
+        ? <p className="muted">未解码：本机 EMEDF 里没有这条指令。</p>
+        : (
+          <p className="muted">
+            {inspection.bank !== undefined ? `bank ${inspection.bank}:${inspection.id}` : 'EMEDF 指令'}
+          </p>
+        )}
+      {inspection.args.length > 0 && (
+        <ul className="esw-meaning__args">
+          {inspection.args.map((arg) => (
+            <li key={arg.name}>
+              <div>
+                <code>{arg.name}</code>
+                <span className="muted"> : {arg.type}</span>
+              </div>
+              <div>{arg.value || '（空）'}</div>
+              {arg.role === 'event-id' && arg.eventId !== undefined && (
+                <button type="button" className="toolbar-button" onClick={() => onJumpEvent(arg.eventId!)}>
+                  转到 $Event({arg.eventId})
+                </button>
+              )}
+              {arg.role === 'fmg-id' && (
+                <p className="muted">insufficient_evidence：事件面板没有 FMG 表，不能跳文本条目。</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {jump && jump.kind === 'hit' && (
+        <p className="muted">目标在 {jump.title} 第 {jump.line} 行。</p>
+      )}
+      {jump && jump.kind === 'insufficient_evidence' && (
+        <p className="muted">{jump.message}</p>
+      )}
+    </div>
+  );
+}
+
 export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps): ReactElement {
   const [tabs, setTabs] = useState<InternalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState('就绪');
   const [completionItems, setCompletionItems] = useState<EmedfCompletionItem[]>([]);
+  const [splitTabId, setSplitTabId] = useState<string | null>(null);
+  const [inspection, setInspection] = useState<LineInspection>({ kind: 'empty' });
+  const [jump, setJump] = useState<EventJump | null>(null);
+  const [inspectPane, setInspectPane] = useState<'a' | 'b'>('a');
 
   const editorHostRef = useRef<HTMLDivElement>(null);
+  const splitHostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const viewBRef = useRef<EditorView | null>(null);
+  const pendingRevealRef = useRef<{ pane: 'a' | 'b'; line: number } | null>(null);
   /** T4-3：EMEDF 指令名目录，经 ref 供 CM extensions 闭包读最新值（异步到达）。 */
   const completionItemsRef = useRef<EmedfCompletionItem[]>([]);
   completionItemsRef.current = completionItems;
@@ -576,6 +694,15 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const submitSourceRef = useRef<() => Promise<void>>(async () => {});
 
   const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? null;
+  const splitTab = splitTabId ? tabs.find((tab) => tab.tabId === splitTabId) ?? null : null;
+  const eventIndexes = useMemo(
+    () => tabs.map((tab) => ({
+      tabId: tab.tabId,
+      title: tab.title,
+      headers: indexEventHeaders(tab.draft)
+    })),
+    [tabs]
+  );
 
   /** T4-3：从主进程拉取本机 EMEDF 指令名目录（只读公开字段，一次性）。 */
   useEffect(() => {
@@ -607,13 +734,26 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   commitDraftRef.current = commitDraft;
 
   /** 每个 tab 的 extensions 绑定自己的 tabId；运行时经 ref 调最新 commitDraft。 */
-  const createExtensionsFor = useCallback((tabId: string, readOnly: boolean, sourceStyle: EventSourceTabData['sourceStyle']): Extension[] => {
+  const createExtensionsFor = useCallback((
+    tabId: string,
+    readOnly: boolean,
+    sourceStyle: EventSourceTabData['sourceStyle'],
+    pane: 'a' | 'b' = 'a'
+  ): Extension[] => {
+    const isSatellite = tabId.endsWith(':sat');
     return buildEditorExtensions(
-      (text, state) => commitDraftRef.current(tabId, text, state),
+      (text, state) => {
+        if (!isSatellite) commitDraftRef.current(tabId, text, state);
+      },
       readOnly,
       sourceStyle,
       () => completionItemsRef.current,
-      () => { void submitSourceRef.current(); }
+      isSatellite ? undefined : () => { void submitSourceRef.current(); },
+      (lineText) => {
+        setInspectPane(pane);
+        setInspection(inspectSourceLine(lineText, completionItemsRef.current));
+        setJump(null);
+      }
     );
   }, []);
 
@@ -714,8 +854,59 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     view.setState(activeTab.editorState);
     (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
       eventLineInfoRef.current;
+    const pending = pendingRevealRef.current;
+    if (pending?.pane === 'a') {
+      pendingRevealRef.current = null;
+      revealLine(view, pending.line);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
+
+  useEffect(() => {
+    if (!splitTabId || !splitHostRef.current) return;
+    const host = splitHostRef.current;
+    const view = new EditorView({
+      parent: host,
+      state: EditorState.create({ doc: '', extensions: [] })
+    });
+    viewBRef.current = view;
+    return () => {
+      view.destroy();
+      viewBRef.current = null;
+    };
+  }, [splitTabId !== null]);
+
+  useEffect(() => {
+    const view = viewBRef.current;
+    if (!view || !splitTab) return;
+    if (splitTab.tabId === activeTabId) {
+      view.setState(createCompleteSourceState(
+        splitTab.draft,
+        createExtensionsFor(`${splitTab.tabId}:sat`, true, splitTab.sourceStyle, 'b')
+      ));
+    } else {
+      view.setState(splitTab.editorState);
+    }
+    const pending = pendingRevealRef.current;
+    if (pending?.pane === 'b') {
+      pendingRevealRef.current = null;
+      revealLine(view, pending.line);
+    }
+    // 只在分栏目标/主栏切换时换 state。依赖 editorState 会在每次按键 setState，光标被掐掉。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitTabId, activeTabId, createExtensionsFor]);
+
+  useEffect(() => {
+    const view = viewBRef.current;
+    if (!view || !splitTab || splitTab.tabId !== activeTabId) return;
+    if (view.state.doc.toString() === splitTab.draft) return;
+    const top = view.scrollDOM.scrollTop;
+    view.setState(createCompleteSourceState(
+      splitTab.draft,
+      createExtensionsFor(`${splitTab.tabId}:sat`, true, splitTab.sourceStyle, 'b')
+    ));
+    view.scrollDOM.scrollTop = top;
+  }, [splitTab?.draft, splitTabId, activeTabId, createExtensionsFor]);
 
   /**
    * 提交/加载完整模板/mutation 后 App 回灌 pendingTab → 更新激活 tab 的基线。
@@ -792,6 +983,27 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       }
       return next;
     });
+    if (splitTabId === tabId) setSplitTabId(null);
+  }
+
+  function jumpToEvent(eventId: number): void {
+    const result = resolveEventJump(
+      eventId,
+      eventIndexes,
+      inspectPane === 'b' ? (splitTabId ?? undefined) : (activeTabId ?? undefined)
+    );
+    setJump(result);
+    if (result.kind !== 'hit') return;
+    if (result.tabId === activeTabId) {
+      revealLine(viewRef.current, result.line);
+      return;
+    }
+    if (result.tabId === splitTabId) {
+      revealLine(viewBRef.current, result.line);
+      return;
+    }
+    pendingRevealRef.current = { pane: 'b', line: result.line };
+    setSplitTabId(result.tabId);
   }
 
   async function submitSource(): Promise<void> {
@@ -878,36 +1090,99 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         )}
       </div>
 
-      <div className="esw-toolbar">
-        <div className="esw-toolbar__group">
-          <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 走 CodeMirror search keymap">
-            查找：Ctrl+F
-          </span>
-          {!readOnly && (
-            <span className="muted" style={{ fontSize: 11 }} title="Ctrl+S 或失焦直接应用，应用前自动备份，可回滚">
-              Ctrl+S 应用
+      <WorkbenchLayout
+        label="Event 源码工作台"
+        toolbar={(
+          <div className="esw-toolbar__group">
+            <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 走 CodeMirror search keymap">
+              查找：Ctrl+F
             </span>
-          )}
-          <span className="muted" style={{ fontSize: 11 }}>{visibleStatus}</span>
-        </div>
-      </div>
-
-      <div className="esw-body">
-        <section className="esw-source" aria-label="事件源码">
-          <div ref={editorHostRef} className="esw-source__host" data-editor-engine="codemirror" />
-          {props.opening && !activeTab && (
-            <div className="esw-source__loading" role="status">
-              正在读取并反汇编完整 EMEVD；就绪后将在一次提交中显示全文。
-            </div>
-          )}
-          {activeTab?.live && activeTab.dslTemplate === null && (
-            <div className="event-source__notice event-source__notice--blocked" role="alert">
-              事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
-              sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
-            </div>
-          )}
-        </section>
-      </div>
+            {!readOnly && (
+              <span className="muted" style={{ fontSize: 11 }} title="Ctrl+S 或失焦直接应用，应用前自动备份，可回滚">
+                Ctrl+S 应用
+              </span>
+            )}
+            {tabs.length > 0 && (
+              <label className="esw-split-picker">
+                并排
+                <select
+                  aria-label="并排对照"
+                  value={splitTabId ?? ''}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setSplitTabId(next.length > 0 ? next : null);
+                  }}
+                >
+                  <option value="">关</option>
+                  {tabs.map((tab) => (
+                    <option key={tab.tabId} value={tab.tabId}>
+                      {tab.title}{tab.tabId === activeTabId ? '（本文件第二视口）' : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <span className="muted" style={{ fontSize: 11 }}>{visibleStatus}</span>
+          </div>
+        )}
+        columns={[
+          {
+            id: 'source-a',
+            title: activeTab?.title ?? '源码',
+            minWidth: 240,
+            initialFlex: 2,
+            children: (
+              <section className="esw-source" aria-label="事件源码">
+                <div ref={editorHostRef} className="esw-source__host" data-editor-engine="codemirror" />
+                {props.opening && !activeTab && (
+                  <div className="esw-source__loading" role="status">
+                    正在读取并反汇编完整 EMEVD；就绪后将在一次提交中显示全文。
+                  </div>
+                )}
+                {activeTab?.live && activeTab.dslTemplate === null && (
+                  <div className="event-source__notice event-source__notice--blocked" role="alert">
+                    事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
+                    sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
+                  </div>
+                )}
+              </section>
+            )
+          },
+          ...(splitTab
+            ? [{
+                id: 'source-b',
+                title: splitTab.title,
+                ...(splitTab.tabId === activeTabId ? { hint: '第二视口' } : {}),
+                minWidth: 240,
+                initialFlex: 2,
+                children: (
+                  <section className="esw-source" aria-label="对照源码">
+                    <div className="esw-pane-bar">
+                      <span className="muted">{splitTab.title}</span>
+                      <button type="button" className="toolbar-button" onClick={() => setSplitTabId(null)}>
+                        关闭分栏
+                      </button>
+                    </div>
+                    <div ref={splitHostRef} className="esw-source__host" data-editor-engine="codemirror" />
+                  </section>
+                )
+              }]
+            : []),
+          {
+            id: 'meaning',
+            title: '词义',
+            minWidth: 200,
+            initialWidth: 280,
+            children: (
+              <EventMeaningPane
+                inspection={inspection}
+                jump={jump}
+                onJumpEvent={jumpToEvent}
+              />
+            )
+          }
+        ]}
+      />
     </section>
   );
 }

@@ -115,6 +115,10 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
     'utf8'
   );
+  const navigateSource = readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'emevd', 'eventSourceNavigate.ts'),
+    'utf8'
+  );
 
   it('不再用 textarea 兜底编辑（source-fallback 消失，只保留 CodeMirror 挂载位）', () => {
     assert.doesNotMatch(panelSource, /data-editor-engine="source-fallback"/);
@@ -186,6 +190,16 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.match(panelSource, /eventBlockFoldRange/);
     assert.match(panelSource, /ComparisonType/);
     assert.match(panelSource, /X\d+_\d+/);
+  });
+
+  it('S31：词义列、并排分栏、事件头索引；没有假灯泡', () => {
+    assert.match(panelSource, /title: '词义'/);
+    assert.match(panelSource, /并排对照/);
+    assert.match(panelSource, /indexEventHeaders/);
+    assert.match(panelSource, /insufficient_evidence/);
+    assert.doesNotMatch(panelSource, /lightbulb|Move to file/i);
+    assert.match(navigateSource, /classifyArgRole/);
+    assert.match(navigateSource, /eventid/i);
   });
 
   it('S14：没有橙色头、日常黄条、「编译并提交」和只读锁', () => {

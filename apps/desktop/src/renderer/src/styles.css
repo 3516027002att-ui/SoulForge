@@ -774,6 +774,11 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
   display: flex; flex-direction: column; min-height: 0; height: 100%;
   border: 1px solid var(--line); background: var(--forge-1);
 }
+.event-source-workbench .workbench {
+  border: none;
+  flex: 1;
+  height: auto;
+}
 .event-source__header { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .event-source__eyebrow { color: var(--ember-text); font: 10px var(--font-mono); letter-spacing: .1em; }
 .event-source__header h2 { margin-top: 3px; font-size: 13px; font-weight: 600; }
@@ -809,9 +814,18 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .toolbar-button.is-active { border-color: var(--ember); color: var(--ember-text); background: var(--ember-soft); }
 
 .esw-body { flex: 1 1 0; min-height: 64px; display: flex; align-items: stretch; }
-.esw-source { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.esw-source { flex: 1; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; position: relative; }
 .esw-source__host { flex: 1; min-height: 0; overflow: hidden; background: var(--forge-0); }
 .esw-source__host .cm-editor { height: 100%; }
+.esw-split-picker { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-2); }
+.esw-split-picker select { font: 11px var(--font-ui, inherit); }
+.esw-pane-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--line); flex: none; }
+.esw-meaning__block { padding: 10px 12px; font-size: 12px; line-height: 1.5; }
+.esw-meaning__block strong { display: block; margin-bottom: 4px; }
+.esw-meaning__empty { padding: 12px; }
+.esw-meaning__args { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.esw-meaning__args li { padding: 6px 0; border-top: 1px solid var(--line); }
+.esw-meaning__args .toolbar-button { margin-top: 6px; }
 .esw-source__loading {
   margin: 12px;
   padding: 10px 12px;
@@ -1856,6 +1870,12 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; }
+.workbench__column-body:has(> .esw-source) {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
 .workbench__footer {
   flex: none; padding: 6px 10px; border-top: 1px solid var(--line);
   background: var(--forge-1);

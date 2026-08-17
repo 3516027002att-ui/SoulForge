@@ -2555,6 +2555,8 @@ SHELL-09 → SHELL-10
 > - 编不了的指令：该行标未解码，不锁整份只读、不假成功写盘。
 >
 > **S14 已落地（2026-08-17）**：去头 / 去日常黄条 / `$Event` 可编辑 / `Ctrl+S` 与失焦走 `compileEmevdDarkScript` → 现有 typed plan → Patch Engine。能对齐的改动（事件 id、rest、已有指令固定参数）可写；新增/删除/重排事件或指令、改未解码注释 = `DARKSCRIPT_LINE_UNDECODED`，不写盘。查找只留键盘 `Ctrl+F`。
+>
+> **S31 已落地（2026-08-17）**：右栏词义（指令名 / EMEDF 参数名 / 类型 / 当前值）；`WorkbenchLayout` 源码+对照+词义独立滚动；并排最多两列（另一已打开 tab，或本文件只读第二视口），不再灌 IPC。`$Event(id)` 行号索引一遍建成；光标在 `eventId` 参数上可转到已打开文档里的对应事件。FMG/PARAM 名表不在事件面板里 → `insufficient_evidence`，不挂假灯泡。
 
 > **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
 > - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
