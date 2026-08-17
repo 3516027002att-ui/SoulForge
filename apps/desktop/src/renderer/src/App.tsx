@@ -201,6 +201,8 @@ const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: strin
 const AGENT_MIN_WIDTH = 96; // S8:下限收到约一条工具栏宽,不要 340
 const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
+/** S33：开始侧栏资源树的上限（树太大不能一次全渲，其余引导到「文件」领域）。 */
+const START_SIDEBAR_FILE_LIMIT = 120;
 
 function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
   // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
@@ -2586,61 +2588,11 @@ export function App(): ReactElement {
       />
 
       <div className="shell" ref={shellRef}>
-        {/* ══════════ 活动栏 ══════════ */}
+        {/* ══════════ 活动栏 ══════════
+            S33：资源浏览器/搜索/暂存/审计四图标已删——资源浏览器并进顶栏「开始」
+            （开始态侧栏 = 资源树 + 开始页全部功能），搜索只走 Ctrl+K，
+            暂存/审计进开始侧栏的折叠区。活动栏只剩 Agent 与设置，贴底。 */}
         <nav className="activitybar" aria-label="主导航">
-          <button
-            type="button"
-            className={sidebarView === 'explorer' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('explorer')}
-            title="资源浏览器"
-            aria-label="资源浏览器"
-            aria-current={sidebarView === 'explorer' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.2h9A1.5 1.5 0 0 1 21 8.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'search' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('search')}
-            title="搜索"
-            aria-label="搜索"
-            aria-current={sidebarView === 'search' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-              <path d="M15.8 15.8L20 20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'staging' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('staging')}
-            title="暂存区"
-            aria-label={pendingChangeCount > 0 ? `暂存区（${pendingChangeCount} 项待处理）` : '暂存区'}
-            aria-current={sidebarView === 'staging' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-              <path d="M12 12l8-4.5M12 12L4 7.5M12 12v9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-            </svg>
-            {pendingChangeCount > 0 && <span className="ab-badge" aria-hidden="true">{pendingChangeCount}</span>}
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'audit' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('audit')}
-            title="审计与回滚"
-            aria-label="审计与回滚"
-            aria-current={sidebarView === 'audit' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M12 3a9 9 0 1 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-              <path d="M12 7v5l3.2 2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-              <path d="M18.5 2.5v4h-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
           <div className="ab-spacer"></div>
           <button
             type="button"
@@ -2753,7 +2705,80 @@ export function App(): ReactElement {
                   )}
                 </>
               ) : activeDomain === 'project' ? (
-                <p className="empty-hint" data-testid="start-sidebar-hint">在中央开始页打开工作区。</p>
+                /* S33：开始态侧栏 = 开始页全部功能（打开/更换 Mod、选/换/清原版、
+                   工作区名、挂载状态）+ 折叠工具（搜索/暂存/审计）+ 资源树。
+                   换工作区不用回中央页。 */
+                <div className="start-sidebar" data-testid="start-sidebar">
+                  <div className="start-sidebar__block">
+                    <p className="start-sidebar__workspace">
+                      工作区：{workspace?.workspaceLabel ?? '未打开'}
+                      <span className={sessionMeta?.baseMounted ? 'pill pill--ok' : 'pill'}>
+                        原版：{sessionMeta?.baseMounted ? '已挂载（只读）' : '未挂载'}
+                      </span>
+                    </p>
+                    <div className="start-sidebar__actions">
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--block"
+                        data-testid="open-workspace"
+                        onClick={() => void openWorkspace()}
+                        {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
+                      >
+                        {workspace ? '更换 Mod 工作区' : '打开 Mod 工作区'}
+                      </button>
+                      <div className="row gap">
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          data-testid="choose-base-directory"
+                          onClick={() => void chooseBaseDirectory()}
+                          {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
+                        >
+                          {baseRootChoice ? '更换原版目录' : '选择原版目录'}
+                        </button>
+                        {baseRootChoice && (
+                          <button type="button" className="btn btn--ghost btn--sm" onClick={clearBaseDirectory}>
+                            清除
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <details className="start-sidebar__tools" data-testid="start-sidebar-tools">
+                      <summary>工具</summary>
+                      <div className="start-sidebar__tools-list">
+                        <button type="button" className="btn btn--ghost btn--sm" onClick={focusSearchPanel}>搜索（Ctrl+K）</button>
+                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => activateSidebarView('staging')}>
+                          暂存区{pendingChangeCount > 0 ? `（${pendingChangeCount}）` : ''}
+                        </button>
+                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => activateSidebarView('audit')}>审计与回滚</button>
+                      </div>
+                    </details>
+                  </div>
+                  {workspace && indexedFiles.length > 0 && (
+                    <>
+                      <div className="wb-list__group-label">工作区资源</div>
+                      <div className="file-list" data-testid="start-sidebar-file-list">
+                        {indexedFiles.slice(0, START_SIDEBAR_FILE_LIMIT).map((file) => (
+                          <button
+                            type="button"
+                            key={file.sourceUri}
+                            className={selectedFile?.sourceUri === file.sourceUri ? 'file-item selected' : 'file-item'}
+                            onClick={() => void selectFile(file)}
+                          >
+                            <span className="file-item__name">{file.relativePath}</span>
+                            <small className="file-item__meta">{file.resourceKind}</small>
+                          </button>
+                        ))}
+                        {indexedFiles.length > START_SIDEBAR_FILE_LIMIT && (
+                          <p className="muted" style={{ fontSize: 10, padding: '4px 8px' }}>
+                            共 {indexedFiles.length} 个资源，更多请到「文件」领域浏览。
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  {!workspace && <p className="empty-hint">打开 Mod 工作区后，这里会列出工作区资源。</p>}
+                </div>
               ) : (
                 <DomainLibraryList
                   files={domainLibraries}
