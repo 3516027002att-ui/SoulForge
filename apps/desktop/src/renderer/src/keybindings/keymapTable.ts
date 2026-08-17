@@ -84,6 +84,7 @@ const TEXT_ENTRIES: readonly TableEntry[] = [
 // ---------------------------------------------------------------------------
 
 const EVENT_ENTRIES: readonly TableEntry[] = [
+  { id: 'event.apply', label: '应用', keys: 'Ctrl+S', scope: 'domain', domain: 'event', matchKeys: ['Ctrl+s'] },
   { id: 'event.find', label: '查找（键盘）', keys: 'Ctrl+F', scope: 'domain', domain: 'event', matchKeys: ['Ctrl+f'] },
   { id: 'event.replace', label: '替换（键盘）', keys: 'Ctrl+H', scope: 'domain', domain: 'event', matchKeys: ['Ctrl+h'] },
   { id: 'event.complete', label: '补全', keys: 'Ctrl+Space', scope: 'domain', domain: 'event', matchKeys: ['Ctrl+Space'] },

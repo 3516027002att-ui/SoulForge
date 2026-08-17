@@ -187,6 +187,15 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.match(panelSource, /ComparisonType/);
     assert.match(panelSource, /X\d+_\d+/);
   });
+
+  it('S14：没有橙色头、日常黄条、「编译并提交」和只读锁', () => {
+    assert.doesNotMatch(panelSource, /EVENT \/ SOURCE/);
+    assert.doesNotMatch(panelSource, /编译并提交/);
+    assert.doesNotMatch(panelSource, /本版只读展示/);
+    assert.doesNotMatch(panelSource, /写入仍经 Bridge/);
+    assert.match(panelSource, /Ctrl\+S 应用/);
+    assert.match(panelSource, /已应用，可回滚/);
+  });
 });
 
 describe('S15 事件失败面：读取失败时源码区给可行动句，禁止假 resource 源码', () => {
@@ -264,12 +273,12 @@ describe('S15 事件失败面：读取失败时源码区给可行动句，禁止
 });
 
 describe('DarkScript 源码只读（按钮层与 CodeMirror 创建共用同一判据）', () => {
-  it('live DarkScript 也必须只读，不能只靠 !live', () => {
+  it('S14：live DarkScript 可编辑，不能再靠 sourceStyle 锁死', () => {
     assert.equal(isSourceReadOnly({
       live: true,
       dslTemplate: '$Event(0, Default, function() {});',
       sourceStyle: 'dark-script'
-    }), true);
+    }), false);
   });
 
   it('未标记 dark-script 的 live 模板仍可编辑（写链保留给 patch-dsl）', () => {
@@ -278,5 +287,18 @@ describe('DarkScript 源码只读（按钮层与 CodeMirror 创建共用同一�
       dslTemplate: '$Resource file://event/common.emevd',
       sourceStyle: 'patch-dsl'
     }), false);
+  });
+
+  it('非 live 或没有模板仍只读（失败关闭 / demo）', () => {
+    assert.equal(isSourceReadOnly({
+      live: false,
+      dslTemplate: '$Event(0, Default, function() {});',
+      sourceStyle: 'dark-script'
+    }), true);
+    assert.equal(isSourceReadOnly({
+      live: true,
+      dslTemplate: null,
+      sourceStyle: 'none'
+    }), true);
   });
 });

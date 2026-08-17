@@ -18,6 +18,7 @@ import type { OperationLogStore } from '../patch/operationLog.js';
 import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 import { mutateInstructionArg } from '../emevd/emedfSchema.js';
+import { compileEmevdDarkScript, looksLikeDarkScript } from '../emevd/darkScriptCompiler.js';
 import { compileEmevdPatchDsl } from '../emevd/dslCompiler.js';
 import { attachEmevdStableIdentity, formatEmevdAnchor } from '../emevd/stableIdentity.js';
 import { decodeStrictBase64 } from '../util/base64.js';
@@ -412,11 +413,21 @@ export interface EmevdDslPlanSubmitResult {
 export async function submitEmevdDslPlanViaFourView(
   input: EmevdDslPlanSubmitRequest
 ): Promise<EmevdDslPlanSubmitResult> {
-  const compiled: EmevdDslCompileResult = compileEmevdPatchDsl(
-    input.compileRequest,
-    input.document,
-    input.registry
-  );
+  const compiled: EmevdDslCompileResult = looksLikeDarkScript(input.compileRequest.sourceText)
+    ? compileEmevdDarkScript(input.compileRequest, input.document, input.registry)
+    : compileEmevdPatchDsl(input.compileRequest, input.document, input.registry);
+  if (compiled.ok && compiled.plan && compiled.plan.operations.length === 0) {
+    return {
+      ok: true,
+      plan: compiled.plan,
+      nextDocument: input.document,
+      diagnostics: compiled.diagnostics.map((d) => ({
+        severity: d.severity,
+        code: d.code,
+        message: d.message
+      }))
+    };
+  }
   if (!compiled.ok || !compiled.plan) {
     return {
       ok: false,

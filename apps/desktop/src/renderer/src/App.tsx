@@ -161,6 +161,13 @@ const WELCOME_DRAFT_LIMIT = 5;
 /** 命令面板（Ctrl K）列出的资源命中条数。命中总数由截断说明报出。 */
 const CMDK_RESOURCE_HIT_LIMIT = 8;
 
+/** 事件内层标签只留短名：`event/common.emevd.dcx` → `common`。 */
+function eventDocumentTitle(relativePath: string): string {
+  const normalized = relativePath.replace(/\\/g, '/');
+  const base = normalized.slice(normalized.lastIndexOf('/') + 1);
+  return base.replace(/\.emevd(?:\.dcx)?$/i, '') || base;
+}
+
 /** 无实时 MSB 数据时的空 parts（真实数据经 Bridge 读取后填充）。 */
 const EMPTY_MSB_PARTS: MsbPartTransformLike[] = [];
 
@@ -1352,7 +1359,7 @@ export function App(): ReactElement {
           });
           setEventPendingTab({
             tabId: target.sourceUri,
-            title: target.relativePath,
+            title: eventDocumentTitle(target.relativePath),
             resourceUri: target.sourceUri,
             document: {
               ...EMPTY_EMEVD_DOCUMENT,
@@ -1394,7 +1401,7 @@ export function App(): ReactElement {
         // sourceStyle 留 'none'，工作台显示可行动说明。
         setEventPendingTab(emevdPendingTabFromFullDocument({
           tabId: target.sourceUri,
-          title: target.relativePath,
+          title: eventDocumentTitle(target.relativePath),
           resourceUri: target.sourceUri,
           full,
           dslTemplate,

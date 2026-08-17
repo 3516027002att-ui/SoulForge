@@ -3,7 +3,7 @@
  *
  * 布局对照 DarkScript3（§11），不是 260/320 三栏：
  *   [文档标签栏] 逻辑文档标签（EMEVD 文档，§3.4），带 dirty 标记与关闭
- *   [工具条]     反汇编只读标签 / 编译并提交（旧 patch-dsl 路径）· Ctrl+F 走 CM search
+ *   [工具条]     Ctrl+F 查找 · Ctrl+S 应用
  *   [主区]       CodeMirror 6 源码占满（T4：无四钮、无 Outline/Inspector/Problems）
  *
  * Negative DOM（EVENT-30B）：Flow / Hex / Raw Bytes 不在默认 viewport；原始
@@ -105,7 +105,7 @@ export interface EventSourceTabData {
   dslTemplateTotalLines: number;
   /**
    * 源码形态（R3/P4 裁定）：
-   * - 'dark-script'：EMEDF 反汇编的 DarkScript3 式源码，只读展示；
+   * - 'dark-script'：EMEDF 反汇编的 DarkScript3 式源码，可编辑（S14）；
    * - 'patch-dsl'：旧 hash DSL（历史路径）；
    * - 'none'：EMEDF 缺失失败关闭（不提供伪解码）。
    */
@@ -199,7 +199,7 @@ export function readFailureSource(document: EmevdEditorDocument): string | null 
 }
 
 export function isSourceReadOnly(tab: Pick<EventSourceTabData, 'live' | 'dslTemplate' | 'sourceStyle'>): boolean {
-  return !tab.live || tab.dslTemplate === null || tab.sourceStyle === 'dark-script';
+  return !tab.live || tab.dslTemplate === null;
 }
 
 export function baselineText(tab: EventSourceTabData): string {
@@ -495,7 +495,8 @@ export function buildEditorExtensions(
   onDocChange: (text: string, state: EditorState) => void,
   readOnly: boolean,
   sourceStyle: EventSourceTabData['sourceStyle'],
-  getCatalog: () => EmedfCompletionItem[]
+  getCatalog: () => EmedfCompletionItem[],
+  onSave?: () => void
 ): Extension[] {
   const sourceLanguage = sourceStyle === 'dark-script'
     ? darkScriptStreamLanguage
@@ -524,6 +525,15 @@ export function buildEditorExtensions(
       if (update.docChanged) onDocChange(update.state.doc.toString(), update.state);
     }),
     keymap.of([
+      ...(onSave
+        ? [{
+            key: 'Mod-s',
+            run: () => {
+              onSave();
+              return true;
+            }
+          }]
+        : []),
       ...closeBracketsKeymap,
       ...defaultKeymap,
       ...searchKeymap,
@@ -563,6 +573,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const eventLineInfoRef = useRef<Map<number, EventLineInfo>>(new Map());
   /** 始终指向最新 commitDraft，供各 tab 的 CM extensions 闭包安全调用。 */
   const commitDraftRef = useRef<(tabId: string, text: string, state: EditorState) => void>(() => {});
+  const submitSourceRef = useRef<() => Promise<void>>(async () => {});
 
   const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? null;
 
@@ -601,7 +612,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       (text, state) => commitDraftRef.current(tabId, text, state),
       readOnly,
       sourceStyle,
-      () => completionItemsRef.current
+      () => completionItemsRef.current,
+      () => { void submitSourceRef.current(); }
     );
   }, []);
 
@@ -752,6 +764,20 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     if (view) view.requestMeasure();
   }, [props.active, activeTabId]);
 
+  useEffect(() => {
+    const host = editorHostRef.current;
+    if (!host) return;
+    const onFocusOut = (event: FocusEvent): void => {
+      const next = event.relatedTarget;
+      if (next instanceof Node && host.contains(next)) return;
+      const tab = tabs.find((item) => item.tabId === activeTabId);
+      if (!tab || !tab.dirty || isSourceReadOnly(tab)) return;
+      void submitSourceRef.current();
+    };
+    host.addEventListener('focusout', onFocusOut);
+    return () => host.removeEventListener('focusout', onFocusOut);
+  }, [activeTabId, tabs]);
+
   function activateTab(tabId: string): void {
     setActiveTabId(tabId);
   }
@@ -769,9 +795,9 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }
 
   async function submitSource(): Promise<void> {
-    if (!activeTab || !props.onDslSubmit || submitting) return;
+    if (!activeTab || !props.onDslSubmit || submitting || isSourceReadOnly(activeTab)) return;
     setSubmitting(true);
-    setStatus('源码提交中（compile → plan → staging）…');
+    setStatus('正在应用…');
     try {
       const result = await props.onDslSubmit(activeTab, activeTab.draft);
       if (result.ok) {
@@ -797,26 +823,21 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         );
         viewRef.current?.setState(nextState);
         syncGutterInfo(nextText, eventWarningRowsOf(activeTab));
-        setStatus('源码已通过提交管线；等待文档刷新。');
+        setStatus('已应用，可回滚。');
       } else {
-        setStatus(result.diagnostics[0]?.message ?? '源码提交被拒绝。');
+        setStatus(result.diagnostics[0]?.message ?? '应用失败。');
       }
     } catch (error) {
-      setStatus(`源码提交异常：${error instanceof Error ? error.message : String(error)}`);
+      setStatus(`应用异常：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setSubmitting(false);
     }
   }
+  submitSourceRef.current = submitSource;
 
   const readOnly = activeTab
-    ? (!activeTab.live || activeTab.dslTemplate === null || activeTab.sourceStyle === 'dark-script')
+    ? (!activeTab.live || activeTab.dslTemplate === null)
     : true;
-
-  /**
-   * R3/P4 裁定：DarkScript3 反汇编源码只读展示（没有对应的 DarkScript 编译器，
-   * 编辑后无法提交）。写链保留给 future 的 DarkScript 编译器。
-   */
-  const darkScriptReadOnly = activeTab?.sourceStyle === 'dark-script';
 
   const visibleStatus = props.opening
     ? '正在读取 EMEVD（Bridge → 反汇编 → IPC → 一次提交缓冲）…'
@@ -824,13 +845,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
   return (
     <section className="event-source-workbench" aria-label="Event 源码工作台">
-      <header className="event-source__header">
-        <div>
-          <span className="event-source__eyebrow">EVENT / SOURCE</span>
-          <h2>事件源码工作台</h2>
-        </div>
-        <span className="muted">{visibleStatus}</span>
-      </header>
 
       <div className="esw-tabs" role="tablist" aria-label="事件文档标签">
         {tabs.map((tab) => (
@@ -869,20 +883,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 走 CodeMirror search keymap">
             查找：Ctrl+F
           </span>
-          {darkScriptReadOnly ? (
-            <span className="muted" style={{ fontSize: 11 }} title="EMEDF 反汇编源码只读展示；写入仍经 Bridge 写链。">
-              反汇编源码只读
+          {!readOnly && (
+            <span className="muted" style={{ fontSize: 11 }} title="Ctrl+S 或失焦直接应用，应用前自动备份，可回滚">
+              Ctrl+S 应用
             </span>
-          ) : (
-            <button
-              type="button"
-              className="primary-action"
-              disabled={!props.onDslSubmit || submitting || readOnly}
-              onClick={() => void submitSource()}
-            >
-              {submitting ? '提交中…' : '编译并提交'}
-            </button>
           )}
+          <span className="muted" style={{ fontSize: 11 }}>{visibleStatus}</span>
         </div>
       </div>
 
@@ -898,12 +904,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
             <div className="event-source__notice event-source__notice--blocked" role="alert">
               事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
               sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
-            </div>
-          )}
-          {darkScriptReadOnly && (
-            <div className="event-source__notice">
-              DarkScript3 式反汇编源码（指令名来自用户本机 EMEDF）。本版只读展示；
-              写入仍经 Bridge 与补丁引擎。
             </div>
           )}
         </section>

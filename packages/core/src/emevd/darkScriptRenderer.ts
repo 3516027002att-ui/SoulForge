@@ -489,6 +489,76 @@ function isConditionGroupArg(arg: DecodedArg): boolean {
  */
 const pascalCaseCache = new Map<string, string>();
 
+/** 与反汇编输出同一套 PascalCase，编译器按这个名字回对齐指令。 */
+export function darkScriptInstructionName(name: string): string {
+  return toPascalCase(name);
+}
+
+export type DarkScriptEventItem =
+  | {
+      kind: 'call';
+      instruction: EmevdInstructionIr;
+      displayName: string;
+      args: DecodedArg[];
+    }
+  | {
+      kind: 'wait-for';
+      predicates: Array<{
+        instruction: EmevdInstructionIr;
+        displayName: string;
+        visibleArgs: DecodedArg[];
+      }>;
+      anchor: EmevdInstructionIr;
+    }
+  | {
+      kind: 'opaque';
+      instruction: EmevdInstructionIr;
+      comment: string;
+    };
+
+/**
+ * 把一个事件拆成与反汇编逐行对应的形状，供 DarkScript 编译器按位置对齐。
+ * 折叠规则与 `renderEventLines` 共用 `splitIntoSpans`，禁止第二套 WaitFor 判定。
+ */
+export function analyzeDarkScriptEvent(
+  event: EmevdEventIr,
+  registry: EmedfRegistry
+): DarkScriptEventItem[] {
+  const spans = splitIntoSpans(event.instructions, registry);
+  const items: DarkScriptEventItem[] = [];
+  for (const span of spans) {
+    if (span.kind === 'wait-block') {
+      items.push({
+        kind: 'wait-for',
+        predicates: span.predicates.map((predicate) => ({
+          instruction: predicate.instruction,
+          displayName: toPascalCase(predicate.name),
+          visibleArgs: predicate.args.filter((arg) => !isConditionGroupArg(arg))
+        })),
+        anchor: span.anchor.instruction
+      });
+      continue;
+    }
+    for (const item of span.instructions) {
+      if (item.status.kind !== 'ok') {
+        items.push({
+          kind: 'opaque',
+          instruction: item.instruction,
+          comment: renderInstructionLine(item)
+        });
+      } else {
+        items.push({
+          kind: 'call',
+          instruction: item.instruction,
+          displayName: toPascalCase(item.name),
+          args: item.args
+        });
+      }
+    }
+  }
+  return items;
+}
+
 function toPascalCase(name: string): string {
   const cached = pascalCaseCache.get(name);
   if (cached !== undefined) return cached;

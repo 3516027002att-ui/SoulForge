@@ -2548,18 +2548,20 @@ SHELL-09 → SHELL-10
 #### EVENT-30B — DarkScript3 source workbench
 
 > **S14/S15（2026-08-15，用户裁定）取代本卡的「只读展示」条款**：
-> - 源码**可编辑**，`Ctrl+S`（或等价）直接应用；不要「编译并提交」按钮、不要审查对话框、不要出现 Bridge / 补丁引擎字样（底层仍经 typed mutation → Patch Engine，应用前自动备份，失败或撤销走审计与回滚）。
-> - 删橙色眉题（`.event-source__header` / eyebrow / 就绪）与黄条（`.event-source__notice`）。
+> - 源码**可编辑**，`Ctrl+S`（或失焦）直接应用；不要「编译并提交」按钮、不要审查对话框、不要出现 Bridge / 补丁引擎字样（底层仍经 typed mutation → Patch Engine，应用前自动备份，失败或撤销走审计与回滚）。
+> - 删橙色眉题（`.event-source__header` / eyebrow / 就绪）与黄条（`.event-source__notice`）。EMEDF 缺失的失败 alert 可留。
 > - 内层标签只显示短名（`common` / `m11_02_71_10`），禁止 `event/….emevd.dcx`。
 > - 读取失败时编辑区正文给 `code + 人话 + 下一步`（KRAK 缺原版：到「开始」页选择含 sekiro.exe 的原版目录），禁止假 `resource "file://…"` 伪源码与「详情见底部日志」；失败随 `eventOpenFailure` 附进 Agent 系统提示，Agent 能直接复述原因和下一步。
 > - 编不了的指令：该行标未解码，不锁整份只读、不假成功写盘。
+>
+> **S14 已落地（2026-08-17）**：去头 / 去日常黄条 / `$Event` 可编辑 / `Ctrl+S` 与失焦走 `compileEmevdDarkScript` → 现有 typed plan → Patch Engine。能对齐的改动（事件 id、rest、已有指令固定参数）可写；新增/删除/重排事件或指令、改未解码注释 = `DARKSCRIPT_LINE_UNDECODED`，不写盘。查找只留键盘 `Ctrl+F`。
 
 > **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
 > - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
 > - **B**：renderer 打开只打一枪——`readEmevdDocument` envelope 双读删除，事件数 / sourceHash / gutter 判据全部由 `readEmevdFullDocument` 的 outline 给（`unknownCount` 按完整 EMEDF 逐条判，不再有 256 条采样造成的假「整段未知」）；`mapEmevdEnvelope` / `alignEmevdDocumentAnchors` 删除，`indexEventLines` 按 `$Event(` 出现顺序映射。
 > - **C**：反汇编单次解码（`DecodeStatus` 化，折叠与渲染共用一份结果）+ EMEDF registry 索引（WeakMap：校验 + bank→id→def，33266 条指令从 9s 级降到 4ms 级）+ `renderEmevdDarkScriptAsync` 分片让出（可取消，不返回半成品）。
 > - **D**：sanitizer 源码字段豁免——`dslTemplate` / `text` 等是内容不是元数据，不做整串路径替换（S13 口径）；路径防线只留键名与诊断 message。
-> - **E**：CodeMirror 禁首帧 `EditorState.create(全文)`——首帧只灌 400 行前缀，常驻 interval 每 16ms `view.dispatch` 追加一片；`indexEventLines` 增量更新不整篇 split；dirty（用户编辑）一次性补全；tab 切回走缓存 state 零 parse。
+> - **E**：CodeMirror 原子全文缓冲（S19 / `docs/algorithm1.md`）——文本到达 renderer 后一次 `EditorState.create`；没有 400 行前缀、没有分片 `dispatch`。切域 hidden 常驻挂载，保留 tab / dirty / EditorState / 滚动。`indexEventLines` 流式扫行。
 > - **F**：领域切换只开 `filesForDomain` 第一份（common_func 不预加载）；main 按 sourceHash 缓存反汇编文本，切回零解析（缓存失效 = 写入 / hash 变）。
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。
