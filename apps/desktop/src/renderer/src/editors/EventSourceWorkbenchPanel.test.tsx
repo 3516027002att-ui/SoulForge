@@ -170,6 +170,23 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.match(panelSource, /tabId: string/);
     assert.match(panelSource, /按 tabId 去重/);
   });
+
+  it('S19：文档原子提交 —— 不允许 400 行前缀 / 分片追加 / sourceFillTarget 回归', () => {
+    assert.doesNotMatch(panelSource, /SOURCE_PREFIX_LINES|SOURCE_SLICE_LINES/);
+    assert.doesNotMatch(panelSource, /appendSourceSlices/);
+    assert.doesNotMatch(panelSource, /splitSourceForFirstFrame/);
+    assert.doesNotMatch(panelSource, /sourceFillTarget:/);
+    assert.match(panelSource, /createCompleteSourceState/);
+  });
+
+  it('S19：DarkScript 多通道词法与 $Event 折叠存在', () => {
+    assert.match(panelSource, /darkScriptStreamLanguage/);
+    assert.match(panelSource, /tokenTable/);
+    assert.match(panelSource, /foldService/);
+    assert.match(panelSource, /eventBlockFoldRange/);
+    assert.match(panelSource, /ComparisonType/);
+    assert.match(panelSource, /X\d+_\d+/);
+  });
 });
 
 describe('S15 事件失败面：读取失败时源码区给可行动句，禁止假 resource 源码', () => {

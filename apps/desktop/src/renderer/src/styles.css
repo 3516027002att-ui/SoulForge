@@ -812,6 +812,14 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .esw-source { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
 .esw-source__host { flex: 1; min-height: 0; overflow: hidden; background: var(--forge-0); }
 .esw-source__host .cm-editor { height: 100%; }
+.esw-source__loading {
+  margin: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--forge-1);
+  color: var(--ink-2);
+  font-size: 11px;
+}
 .esw-outline { width: 220px; min-width: 160px; max-width: 320px; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
 .esw-outline__list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px; }
 .esw-outline__item { display: flex; flex-direction: column; align-items: flex-start; width: 100%; gap: 2px; padding: 7px; text-align: left; border-left: 2px solid transparent; border-radius: var(--radius-s); }

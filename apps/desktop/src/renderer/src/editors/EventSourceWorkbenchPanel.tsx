@@ -18,7 +18,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ReactElement
@@ -26,13 +25,7 @@ import {
 import type { EmevdEditorDocument } from '@soulforge/shared';
 import type { EmedfCompletionItem } from '@soulforge/core';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
-import {
-  appendSourceSlices,
-  emptyEventLineScan,
-  indexEventLinesIncremental,
-  splitSourceForFirstFrame,
-  type EventLineScanState
-} from '../emevd/emevdSourceMount.js';
+import { createCompleteSourceState } from '../emevd/emevdSourceMount.js';
 import { EditorState, type Extension } from '@codemirror/state';
 import {
   EditorView,
@@ -52,6 +45,7 @@ import {
   StreamLanguage,
   bracketMatching,
   foldGutter,
+  foldService,
   indentOnInput,
   syntaxHighlighting
 } from '@codemirror/language';
@@ -121,6 +115,10 @@ export interface EventSourceTabData {
 export interface EventSourceWorkbenchPanelProps {
   /** App 最近一次打开/刷新的 EMEVD 文档；工作台按 tabId 去重后追加或更新标签。 */
   pendingTab: EventSourceTabData | null;
+  /** 面板当前是否在可视工作区。不可见时 App 用 hidden 包住但保持挂载。 */
+  active?: boolean | undefined;
+  /** App 侧是否正在读 EMEVD（Bridge 分页读 + 主进程反汇编 + IPC）。 */
+  opening?: boolean | undefined;
   onDslSubmit?: (
     tab: EventSourceTabData,
     sourceText: string
@@ -132,10 +130,11 @@ interface InternalTab extends EventSourceTabData {
   dirty: boolean;
   /** 当前源码文本（含用户编辑）。 */
   draft: string;
-  /** 该标签的 CodeMirror 状态（含 undo/redo 历史），切换标签时保留。 */
+  /**
+   * 该标签的 CodeMirror 状态（含 undo/redo 历史），切换标签时保留。
+   * 文档从首帧起就是完整全文：不存在 sourceFillTarget / 分片追加态。
+   */
   editorState: EditorState;
-  /** 增量灌入的目标全文。null 表示已齐或无需再灌。 */
-  sourceFillTarget: string | null;
 }
 
 interface EventLineInfo {
@@ -246,34 +245,88 @@ export function indexEventLines(
   const byEventId = new Map<string, EventWarningRow>();
   for (const row of rows) byEventId.set(String(row.eventId), row);
   const map = new Map<number, EventLineInfo>();
-  const lines = text.split('\n');
   let blockIndex = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    const anchorMatch = /^event\s+@e:(\S+)/.exec(lines[i]!);
-    if (!anchorMatch && !/^\$Event\(/.test(lines[i]!)) continue;
-    const row = (anchorMatch ? byEventId.get(anchorMatch[1]!) : undefined) ?? rows[blockIndex];
-    blockIndex += 1;
-    if (!row) continue;
-    if (row.warnings > 0) map.set(i + 1, { eventId: row.eventId, warnings: row.warnings });
+  let lineNumber = 1;
+  let lineStart = 0;
+
+  // 流式扫行：七万行文档不额外 split 出一整份字符串数组。
+  while (lineStart <= text.length) {
+    const nl = text.indexOf('\n', lineStart);
+    const line = nl < 0 ? text.slice(lineStart) : text.slice(lineStart, nl);
+    const anchorMatch = /^event\s+@e:(\S+)/.exec(line);
+    if (anchorMatch || /^\$Event\(/.test(line)) {
+      const row = (anchorMatch ? byEventId.get(anchorMatch[1]!) : undefined) ?? rows[blockIndex];
+      blockIndex += 1;
+      if (row && row.warnings > 0) map.set(lineNumber, { eventId: row.eventId, warnings: row.warnings });
+    }
+    if (nl < 0) break;
+    lineStart = nl + 1;
+    lineNumber += 1;
   }
   return map;
 }
 
 /** DarkScript 风格高亮：注释灰、指令名强调、数字亮色、字符串绿、只读注释加深。 */
-const darkScriptStyle = HighlightStyle.define([
+export const darkScriptStyle = HighlightStyle.define([
   { tag: tags.comment, color: 'var(--ink-3)', fontStyle: 'italic' },
   { tag: tags.lineComment, color: 'var(--ink-3)', fontStyle: 'italic' },
+  { tag: tags.blockComment, color: 'var(--ink-3)', fontStyle: 'italic' },
+  { tag: tags.controlKeyword, color: 'var(--ember-text)', fontWeight: '700' },
   { tag: tags.keyword, color: 'var(--ember-text)', fontWeight: '600' },
   { tag: tags.atom, color: 'var(--ember-text)' },
+  { tag: tags.function(tags.variableName), color: 'var(--ink-0)', fontWeight: '600' },
+  { tag: tags.className, color: 'var(--ember-text)', fontStyle: 'italic' },
+  { tag: tags.local(tags.variableName), color: 'var(--ink-2)' },
+  { tag: tags.bool, color: 'var(--ok)' },
   { tag: tags.number, color: 'var(--ok)' },
   { tag: tags.string, color: 'var(--ok)' },
   { tag: tags.propertyName, color: 'var(--ink-0)' },
-  { tag: tags.function(tags.variableName), color: 'var(--ink-0)', fontWeight: '600' },
   { tag: tags.variableName, color: 'var(--ink-1)' },
   { tag: tags.punctuation, color: 'var(--ink-3)' },
   { tag: tags.operator, color: 'var(--ember-text)' },
   { tag: tags.invalid, color: 'var(--danger-text)', fontWeight: '600' }
 ]);
+
+/**
+ * DarkScript3 式源码的流式词法。
+ * 枚举通道覆盖 ComparisonType.Equal 一类 Namespace.Name；形参覆盖 X0_4。
+ */
+export const darkScriptStreamLanguage = StreamLanguage.define({
+  name: 'dark-script',
+  tokenTable: {
+    eventHeader: tags.controlKeyword,
+    controlKeyword: tags.controlKeyword,
+    instruction: tags.function(tags.variableName),
+    enumMember: tags.className,
+    formalParameter: tags.local(tags.variableName),
+    bool: tags.bool,
+    readOnlyComment: tags.invalid
+  },
+  token(stream) {
+    if (stream.match(/^\/\/.*/)) {
+      return /^\/\/\s*(?:unknown|BASE64_INVALID|[A-Z][A-Z0-9_]{3,})\s+bank=/.test(stream.current())
+        ? 'readOnlyComment'
+        : 'lineComment';
+    }
+    if (stream.match(/^\/\*[\s\S]*?\*\//)) return 'blockComment';
+    if (stream.match(/^\s+/)) return null;
+    if (stream.match(/^\$Event\(/)) return 'eventHeader';
+    if (stream.match(/^"(?:[^"\\]|\\.)*"/)) return 'string';
+    if (stream.match(/^\b(?:true|false)\b/)) return 'bool';
+    if (stream.match(/^\b(?:Default|Restart)\b/)) return 'atom';
+    if (stream.match(/^\b(?:WaitFor)\b/)) return 'controlKeyword';
+    if (stream.match(/^\b(?:function|return|if|else|while|for)\b/)) return 'keyword';
+    if (stream.match(/^[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+/)) return 'enumMember';
+    if (stream.match(/^X\d+_\d+/)) return 'formalParameter';
+    if (stream.match(/^[A-Z][A-Za-z0-9_]*(?=\s*\()/)) return 'instruction';
+    if (stream.match(/^[A-Za-z_][A-Za-z0-9_]*/)) return 'variableName';
+    if (stream.match(/^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/i)) return 'number';
+    if (stream.match(/^[{}()\[\],;]/)) return 'punctuation';
+    if (stream.match(/^(?:&&|\|\||[!<>=]=?|[-+*\/])/)) return 'operator';
+    stream.next();
+    return null;
+  }
+});
 
 /**
  * EMEVD Patch-DSL 流式词法（renderEmevdPatchDsl 的输出语法）：
@@ -301,6 +354,23 @@ const emevdDslStreamLanguage = StreamLanguage.define({
     return null;
   }
 });
+
+/** `$Event(` 块折叠：事件头行可折叠到对应的 `});`，折叠后事件边界仍在视口中。 */
+export function eventBlockFoldRange(
+  state: EditorState,
+  lineStart: number,
+  lineEnd: number
+): { from: number; to: number } | null {
+  const startLine = state.doc.lineAt(lineStart);
+  if (!/^\$Event\(/.test(startLine.text)) return null;
+  for (let lineNumber = startLine.number + 1; lineNumber <= state.doc.lines; lineNumber += 1) {
+    const candidate = state.doc.line(lineNumber);
+    if (/^\}\)\;/.test(candidate.text)) return { from: lineEnd, to: candidate.from };
+  }
+  return null;
+}
+
+const eventBlockFolding = foldService.of(eventBlockFoldRange);
 
 /** gutter 的未知指令 warning 记号。toDOM 只在浏览器渲染 CM 时调用（SSR 不跑 effect）。 */
 class EventDiagMarker extends GutterMarker {
@@ -421,16 +491,21 @@ function createHoverTooltipSource(
   };
 }
 
-function buildEditorExtensions(
+export function buildEditorExtensions(
   onDocChange: (text: string, state: EditorState) => void,
   readOnly: boolean,
+  sourceStyle: EventSourceTabData['sourceStyle'],
   getCatalog: () => EmedfCompletionItem[]
 ): Extension[] {
+  const sourceLanguage = sourceStyle === 'dark-script'
+    ? darkScriptStreamLanguage
+    : emevdDslStreamLanguage;
   const extensions: Extension[] = [
     lineNumbers(),
     highlightActiveLineGutter(),
     highlightActiveLine(),
     foldGutter(),
+    eventBlockFolding,
     bracketMatching(),
     indentOnInput(),
     drawSelection(),
@@ -439,7 +514,7 @@ function buildEditorExtensions(
     closeBrackets(),
     search({ top: true }),
     syntaxHighlighting(darkScriptStyle),
-    emevdDslStreamLanguage,
+    sourceLanguage,
     eventDiagGutter,
     EditorState.readOnly.of(readOnly),
     // T4-3：EMEDF 指令名补全（Ctrl+Space + 输入时）与悬停参数名列表。
@@ -486,8 +561,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   completionItemsRef.current = completionItems;
   /** 每 tab 的 event 块行映射，gutter 经该 ref 读取（CM 闭包拿不到 React state）。 */
   const eventLineInfoRef = useRef<Map<number, EventLineInfo>>(new Map());
-  const eventLineScanRef = useRef<EventLineScanState>(emptyEventLineScan());
-  const sourceFillGenerationRef = useRef(0);
   /** 始终指向最新 commitDraft，供各 tab 的 CM extensions 闭包安全调用。 */
   const commitDraftRef = useRef<(tabId: string, text: string, state: EditorState) => void>(() => {});
 
@@ -523,29 +596,39 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   commitDraftRef.current = commitDraft;
 
   /** 每个 tab 的 extensions 绑定自己的 tabId；运行时经 ref 调最新 commitDraft。 */
-  const createExtensionsFor = useCallback((tabId: string, readOnly: boolean): Extension[] => {
+  const createExtensionsFor = useCallback((tabId: string, readOnly: boolean, sourceStyle: EventSourceTabData['sourceStyle']): Extension[] => {
     return buildEditorExtensions(
       (text, state) => commitDraftRef.current(tabId, text, state),
       readOnly,
+      sourceStyle,
       () => completionItemsRef.current
     );
   }, []);
 
-  /** 把 App 给的 pending tab 并入 tabs（去重 + 保留 dirty/draft）并激活。 */
+  /**
+   * 把 App 给的 pending tab 并入 tabs（去重 + 保留 dirty/draft）并激活。
+   *
+   * 文档模型是原子提交：新标签从第一帧就持有完整 `dslTemplate`。没有 400 行前缀、
+   * 没有 sourceFillTarget、没有 16ms 分片 dispatch —— 打开完成的定义就是全文可滚、
+   * 可搜、可跳，与成熟本地编辑器一致。
+   */
   useEffect(() => {
     const pending = props.pendingTab;
     if (!pending) return;
     const base = baselineText(pending);
+    const readOnly = isSourceReadOnly(pending);
+    const createIncomingState = () => createCompleteSourceState(
+      base,
+      createExtensionsFor(pending.tabId, readOnly, pending.sourceStyle)
+    );
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === pending.tabId);
       if (index >= 0) {
         const existing = previous[index]!;
+        const sourceChanged = existing.draft !== base;
         const merged: InternalTab = {
           ...existing,
           document: pending.document,
-          // 必须显式跟着 document 走：`...existing` 会留住上一次的 gutter 判据，
-          // 重开/提交后拿旧行给新文本打标记。pending 没有时也要清掉（undefined
-          // = 回退到按 document.events 现算）。
           eventWarnings: pending.eventWarnings,
           sourceHash: pending.sourceHash,
           live: pending.live,
@@ -553,20 +636,19 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           dslTemplateTruncated: pending.dslTemplateTruncated,
           dslTemplateTotalLines: pending.dslTemplateTotalLines,
           sourceStyle: pending.sourceStyle,
-          sourceFillTarget: existing.sourceFillTarget
+          // dirty 标签的用户编辑是唯一允许偏离基线的状态；干净标签收到新基线时
+          // 一次提交成完整 EditorState，不再走「先换短前缀、再后台灌」的状态机。
+          ...(sourceChanged && !existing.dirty
+            ? { draft: base, editorState: createIncomingState() }
+            : {})
         };
         return previous.map((tab, i) => (i === index ? merged : tab));
       }
-      const { head, rest } = splitSourceForFirstFrame(base);
       const created: InternalTab = {
         ...pending,
         dirty: false,
-        draft: head,
-        sourceFillTarget: rest.length > 0 ? base : null,
-        editorState: EditorState.create({
-          doc: head,
-          extensions: createExtensionsFor(pending.tabId, isSourceReadOnly(pending))
-        })
+        draft: base,
+        editorState: createIncomingState()
       };
       return [...previous, created];
     });
@@ -574,9 +656,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, createExtensionsFor]);
 
-  const applyEventLineScan = useCallback((scan: EventLineScanState) => {
-    eventLineScanRef.current = scan;
-    eventLineInfoRef.current = scan.map;
+  const applyEventLineInfo = useCallback((map: Map<number, EventLineInfo>) => {
+    eventLineInfoRef.current = map;
     const view = viewRef.current;
     if (view) {
       (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
@@ -586,16 +667,14 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, []);
 
   const syncGutterInfo = useCallback((text: string, rows: readonly EventWarningRow[]) => {
-    applyEventLineScan(indexEventLinesIncremental(emptyEventLineScan(), text, rows));
-  }, [applyEventLineScan]);
+    // 全文一次扫描：gutter 判据与文档同步完整，不随「下半份还没到」变化。
+    applyEventLineInfo(indexEventLines(text, rows));
+  }, [applyEventLineInfo]);
 
   useEffect(() => {
     if (!activeTab) return;
-    // 灌入进行中由 onSlice 增量扫新 chunk。这里若用 draft（仍是首帧前缀）
-    // 从空状态重扫，会把已扫到的 gutter 整表清掉，并随 setTabs 退化成 O(N²)。
-    if (activeTab.sourceFillTarget !== null) return;
     syncGutterInfo(activeTab.draft, eventWarningRowsOf(activeTab));
-  }, [activeTabId, activeTab?.draft, activeTab?.sourceFillTarget, activeTab?.eventWarnings, syncGutterInfo]);
+  }, [activeTabId, activeTab?.draft, activeTab?.eventWarnings, syncGutterInfo]);
 
   /** 挂载 EditorView（一次）；后续经 setState 换 tab state。 */
   useEffect(() => {
@@ -626,7 +705,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
-  /** 提交/加载完整模板/mutation 后 App 回灌 pendingTab → 更新激活 tab 的基线（保留 dirty）。 */
+  /**
+   * 提交/加载完整模板/mutation 后 App 回灌 pendingTab → 更新激活 tab 的基线。
+   *
+   * 第一个 effect 已经把所有干净 tab 的 `draft` 换成完整基线；这里只补两件事：
+   * 把新 EditorState 换进同一个 EditorView（不销毁、不重挂），并同步 gutter。
+   */
   useEffect(() => {
     const pending = props.pendingTab;
     if (!pending || !activeTabId || pending.tabId !== activeTabId) return;
@@ -635,13 +719,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     const current = tabs.find((tab) => tab.tabId === activeTabId);
     if (!current || current.dirty) return;
     const next = baselineText(pending);
-    if (current.sourceFillTarget === next) return;
-    if (next === current.draft && current.sourceFillTarget === null) return;
-    const { head, rest } = splitSourceForFirstFrame(next);
-    const nextState = EditorState.create({
-      doc: head,
-      extensions: createExtensionsFor(activeTabId, isSourceReadOnly(pending))
-    });
+    if (next === current.draft) return;
+    const nextState = createCompleteSourceState(
+      next,
+      createExtensionsFor(activeTabId, isSourceReadOnly(pending), pending.sourceStyle)
+    );
     setTabs((previous) =>
       previous.map((tab) =>
         tab.tabId === activeTabId
@@ -651,61 +733,24 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
               eventWarnings: pending.eventWarnings,
               sourceHash: pending.sourceHash,
               dslTemplate: pending.dslTemplate,
-              draft: head,
+              draft: next,
               dirty: false,
-              sourceFillTarget: rest.length > 0 ? next : null,
               editorState: nextState
             }
           : tab
       )
     );
     view.setState(nextState);
-    syncGutterInfo(head, eventWarningRowsOf(pending));
+    syncGutterInfo(next, eventWarningRowsOf(pending));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, activeTabId]);
 
-  /** 后台把剩余源码灌进当前 tab。取消/切走会中止这一代填充。 */
+  /** 面板从 hidden 回到可视工作区时，让 CodeMirror 按真实布局重测。 */
   useEffect(() => {
-    const tab = tabs.find((item) => item.tabId === activeTabId);
-    if (!tab || tab.dirty || tab.sourceFillTarget === null) return;
-    const remaining = tab.sourceFillTarget.slice(tab.editorState.doc.length);
-    if (remaining.length === 0) return;
-    const generation = sourceFillGenerationRef.current + 1;
-    sourceFillGenerationRef.current = generation;
-    const controller = new AbortController();
-    const rows = eventWarningRowsOf(tab);
-    void appendSourceSlices({
-      state: tab.editorState,
-      rest: remaining,
-      signal: controller.signal,
-      onSlice: (state, chunk) => {
-        if (sourceFillGenerationRef.current !== generation) return;
-        applyEventLineScan(indexEventLinesIncremental(eventLineScanRef.current, chunk, rows));
-        const view = viewRef.current;
-        if (view && view.state !== state) view.setState(state);
-      }
-    }).then((result) => {
-      if (sourceFillGenerationRef.current !== generation || result.cancelled) return;
-      setTabs((previous) =>
-        previous.map((item) =>
-          item.tabId === tab.tabId
-            ? {
-                ...item,
-                draft: result.state.doc.toString(),
-                editorState: result.state,
-                sourceFillTarget: null
-              }
-            : item
-        )
-      );
-      const view = viewRef.current;
-      if (view) view.setState(result.state);
-    });
-    return () => {
-      controller.abort();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId, activeTab?.sourceFillTarget, activeTab?.dirty]);
+    if (props.active === false) return;
+    const view = viewRef.current;
+    if (view) view.requestMeasure();
+  }, [props.active, activeTabId]);
 
   function activateTab(tabId: string): void {
     setActiveTabId(tabId);
@@ -731,31 +776,27 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       const result = await props.onDslSubmit(activeTab, activeTab.draft);
       if (result.ok) {
         const nextText = result.nextDslTemplate ?? activeTab.draft;
-        const { head, rest } = splitSourceForFirstFrame(nextText);
-        const nextState = EditorState.create({
-          doc: head,
-          extensions: createExtensionsFor(activeTab.tabId, isSourceReadOnly(activeTab))
-        });
+        const nextState = createCompleteSourceState(
+          nextText,
+          createExtensionsFor(activeTab.tabId, isSourceReadOnly(activeTab), activeTab.sourceStyle)
+        );
         setTabs((previous) =>
           previous.map((tab) =>
             tab.tabId === activeTab.tabId
               ? {
                   ...tab,
                   dirty: false,
-                  draft: head,
+                  draft: nextText,
                   dslTemplate: nextText,
                   dslTemplateTruncated: false,
                   dslTemplateTotalLines: nextText.split('\n').length,
-                  sourceFillTarget: rest.length > 0 ? nextText : null,
                   editorState: nextState
                 }
               : tab
           )
         );
         viewRef.current?.setState(nextState);
-        // 提交刚成功、App 还没回灌 pendingTab：先按提交前的判据行给新文本打标记，
-        // 下一轮 pendingTab 到达时会用权威 outline 覆盖。
-        syncGutterInfo(head, eventWarningRowsOf(activeTab));
+        syncGutterInfo(nextText, eventWarningRowsOf(activeTab));
         setStatus('源码已通过提交管线；等待文档刷新。');
       } else {
         setStatus(result.diagnostics[0]?.message ?? '源码提交被拒绝。');
@@ -777,6 +818,10 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
    */
   const darkScriptReadOnly = activeTab?.sourceStyle === 'dark-script';
 
+  const visibleStatus = props.opening
+    ? '正在读取 EMEVD（Bridge → 反汇编 → IPC → 一次提交缓冲）…'
+    : status;
+
   return (
     <section className="event-source-workbench" aria-label="Event 源码工作台">
       <header className="event-source__header">
@@ -784,7 +829,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           <span className="event-source__eyebrow">EVENT / SOURCE</span>
           <h2>事件源码工作台</h2>
         </div>
-        <span className="muted">{status}</span>
+        <span className="muted">{visibleStatus}</span>
       </header>
 
       <div className="esw-tabs" role="tablist" aria-label="事件文档标签">
@@ -812,7 +857,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
             </span>
           </button>
         ))}
-        {tabs.length === 0 && <span className="muted esw-tabs__empty">暂无打开的事件文档。</span>}
+        {tabs.length === 0 && (
+          <span className="muted esw-tabs__empty">
+            {props.opening ? '正在打开事件文档；在完整缓冲提交前不显示空编辑器。' : '暂无打开的事件文档。'}
+          </span>
+        )}
       </div>
 
       <div className="esw-toolbar">
@@ -840,6 +889,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       <div className="esw-body">
         <section className="esw-source" aria-label="事件源码">
           <div ref={editorHostRef} className="esw-source__host" data-editor-engine="codemirror" />
+          {props.opening && !activeTab && (
+            <div className="esw-source__loading" role="status">
+              正在读取并反汇编完整 EMEVD；就绪后将在一次提交中显示全文。
+            </div>
+          )}
           {activeTab?.live && activeTab.dslTemplate === null && (
             <div className="event-source__notice event-source__notice--blocked" role="alert">
               事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的

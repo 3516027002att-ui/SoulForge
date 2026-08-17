@@ -2236,6 +2236,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
       if (activeSession) await disposeBridgeDaemonPool();
       emevdFullDocuments.clear();
+      emevdDisassemblyCache.clear();
       activeSession = await openWorkspaceSession({
         overlayRoot: overlaySelection.absolutePath,
         ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}),
@@ -2661,6 +2662,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     totalLines: number;
   }>();
 
+  function cacheEmevdDisassembly(
+    cacheKey: string | null,
+    entry: { text: string; truncated: boolean; totalLines: number }
+  ): void {
+    if (!cacheKey) return;
+    // 命中已有 key 时先删再插，保持 LRU 语义：刷新 common 不该把 common_func 挤掉。
+    emevdDisassemblyCache.delete(cacheKey);
+    emevdDisassemblyCache.set(cacheKey, entry);
+    while (emevdDisassemblyCache.size > EMEVD_DISASSEMBLY_CACHE_CAPACITY) {
+      const oldestKey = emevdDisassemblyCache.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      emevdDisassemblyCache.delete(oldestKey);
+    }
+  }
+
   handle(
     'resource.readEmevdFullDocument',
     async (event, sourceUri: string, documentInstanceId: string, loadFullDslTemplate?: boolean) => {
@@ -2753,18 +2769,34 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         sourceUri
       }));
       if (registryResolution.origin === 'imported') {
-        // 分片异步反汇编：真实 common 这一步约 75 ms，同步跑会让主进程事件循环
-        // 整段停摆，期间到达的取消信号只能排队。输出与同步入口逐字节相同。
-        const bounded = await renderEmevdDarkScriptAsync(
-          full.document,
-          registryResolution.registry,
-          { signal: openController.signal }
-        );
-        if (bounded.cancelled) return emevdOpenCancelled(sourceUri);
-        dslTemplate = bounded.text;
-        dslTemplateTruncated = bounded.truncated;
-        dslTemplateTotalLines = bounded.totalLines;
-        sourceStyle = 'dark-script';
+        const disassemblyCacheKey = full.sourceHash
+          ? `${full.sourceHash}::${fingerprintEmedfRegistry(registryResolution.registry)}`
+          : null;
+        const cachedDisassembly = disassemblyCacheKey
+          ? emevdDisassemblyCache.get(disassemblyCacheKey)
+          : undefined;
+        if (cachedDisassembly) {
+          dslTemplate = cachedDisassembly.text;
+          dslTemplateTruncated = cachedDisassembly.truncated;
+          dslTemplateTotalLines = cachedDisassembly.totalLines;
+          sourceStyle = 'dark-script';
+        } else {
+          const bounded = await renderEmevdDarkScriptAsync(
+            full.document,
+            registryResolution.registry,
+            { signal: openController.signal }
+          );
+          if (bounded.cancelled) return emevdOpenCancelled(sourceUri);
+          dslTemplate = bounded.text;
+          dslTemplateTruncated = bounded.truncated;
+          dslTemplateTotalLines = bounded.totalLines;
+          sourceStyle = 'dark-script';
+          cacheEmevdDisassembly(disassemblyCacheKey, {
+            text: bounded.text,
+            truncated: bounded.truncated,
+            totalLines: bounded.totalLines
+          });
+        }
       } else {
         responseDiagnostics.push({
           severity: 'error' as const,
