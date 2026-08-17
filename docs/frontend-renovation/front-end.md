@@ -2449,8 +2449,24 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/navigation/domainNavigation.ts`；`[MODIFY] apps/desktop/src/renderer/src/navigation/DomainNavigationBar.tsx`；`[CREATE] apps/desktop/src/renderer/src/navigation/domainNavigation.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/navigation/WorkspaceResourceBar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/navigation/resourceFamilies.ts`；`[MODIFY] apps/desktop/src/renderer/src/format/uiText.ts`；`[MODIFY] apps/desktop/src/renderer/src/format/uiText.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`。
 - **Steps**：领域栏仅接 `DomainSummary[]`；删除物理计数；语义领域不渲染全局 resource browser；Files 独占物理浏览；editor full-bleed；pane 独立滚动。
+- **S33 落地（2026-08-17，去活动栏四图标 + 开始侧栏）**：活动栏删除 资源浏览器/搜索/暂存区/审计 四个 `ab-item`（只剩 Agent + 设置贴底，不留 48px 空条）；点顶栏「开始」时左侧侧栏 = 开始页全部功能（打开/更换 Mod、选/换/清原版——S22 当场生效、工作区名、原版挂载状态）+ 折叠「工具」（搜索 Ctrl+K / 暂存区 / 审计与回滚）+ 工作区资源树（上限 120 条，单击打开，更多引导到「文件」领域）；搜索只走 Ctrl+K；换工作区不用回中央页。新增 App.test.tsx 壳层源码断言。
+- **S26 落地（2026-08-17，历史/设置叠字）**：抽屉打开时 `AgentDockHeader` 整条卸掉（抽屉自带「Agent 历史 / 模型服务设置」标题 + 关闭），同一时刻只有一个页面标题；抽屉背景从 8% `--forge-0` 换成不透明 `--forge-1`（浅色主题 8% 白透字是叠字根因）；历史/设置互相切换在抽屉自己的顶栏。测试锁「抽屉面不含产品名 + CSS 用不透明背景」。
+- **S27 落地（2026-08-17，中间工作台栏宽跳变）**：`maxWidthFor` 在容器未布局（clientWidth ≤ 0）时返回无穷大——不再把栏写成 0（点选换 hint / 换虚拟列表后第一次拖分隔条塌成一条缝的根因）；像素模式 style 同时带 `minWidth`（ROWS 不会窄到只显示「除…」）；量出的起始宽度与键盘步进都 `Math.max(minWidth, …)` 钳住；点选（`setSelectedEntry`/`setSelectedRowId`）不触碰 widths、不给 layout 加 `key={selectedEntry}`（ParamWorkbench 已核实无 setWidths/无重挂）。新增 WorkbenchLayout.test.tsx 回归。
+- **S28 落地（2026-08-17，PARAM 保存提示 + 枚举能关）**：行备注汉化可编辑沿用既有链（native `row.name` 优先，Bridge 没解码出的行回落本机 Yapped Names 条目名表，日文 Shift-JIS 不覆盖中文）+ 选中行名字输入框（Enter/失焦提交、Esc 取消、空串清名）。保存提示：字段/行名/CSV 导入三条写入通道的成功统一为「已保存」工作台内浮条（`role=status`，成功 2.5s 自消），失败走 error 浮条常驻直到下次操作；删掉常驻 footer 的「已提交到变更候选」旧文案。枚举能关：筛选框 Esc、点击列表/展开钮之外任意处（document pointerdown，`closest('.wb-enum-list, .wb-enum-toggle')` 判内）、换行、换 param、关 tab 全部收起。新增 ParamWorkbench.test.tsx S28 源码断言。
+- **S29 落地（2026-08-17，能打开就能写）**：① bool/1bit 字段渲染为打勾（`type==='bool'` 或 `bitfield.bitWidth===1`），点勾即直接写入，不再用数字框；bool 提交归一成 boolean（core 写器按 truthy 判定，字符串 `'false'` 原样传会被误写为 1，文本输入路径一并归一）。② renderer 删除「缺少容器或条目哈希」拒写门（App.tsx 两条 + FMG_NO_LIVE_HASH/PARAM_NO_LIVE_HASH 全删），哈希缺了由 main 写时现算：新增 `sha256FileNow`（小写 hex，与 C# SourceHash/Hash 同算法），字段/行名/批量导入三通道对 `expectedContainerHash`/`expectedChildHash`/`expectedDocumentHash` 全部现算兜底。③ 拆除「确认高风险写入」弹窗：`evaluateRawWriterGate`/`evaluateWriterGate` 不再要求确认 receipt（风险评估仍随结果返回供 UI 展示），`applyNativeMutation` 的 confirm 端口改为可选，容器 PARAM 三条链不再接入 `electronConfirmationPort`；`isValidConfirmation` 删除。④ **FMG 条目直写（2026-08-17 晚补）**：`FmgWorkbenchPanel` 编辑落地为草稿（打字只改本地 `draftText`），失焦 / `Ctrl+S` / 换行 / 换表 / 翻页时提交一次 `fmg_entry_upsert` —— 不再每次按键都 propose 进审查队列；`App.tsx` 的 FMG `onMutation` 直接调 `bridge.applyFmgMutation`（`fmgSourceHash ?? ''` 交给 main 现算兜底），成功 toast「已保存」并重读回源与 live hash，失败显示具体原因；main 侧 `applyFmgMutation` 同时撤掉 `electronConfirmationPort`（备份/回滚仍经 Patch Engine）。P1 smoke 第 4 段改为断言「备份文件直接写入成功」。
+- **S34 落地（2026-08-17，脚本全量读写按打开编码写回）**：`ScriptSourceView` 增加 `encoding`（明文条目=检测编码 ascii/utf8/utf8-bom/shift_jis/mixed-unknown，反编译条目=`decompiled`）；`saveScriptSource` 接收该编码，容器条目写回从硬编码 `Buffer.from(text,'utf8')` 改为 `encodePlaintext`（utf8-bom 重加 BOM、shift_jis 走 CP932 表，mixed-unknown 拒绝——解码-编码往返丢字节，禁止文本级写回），独立文件非 UTF-8 走 `saveRawReplace` 编码感知整文件替换（文本链只留 UTF-8）；同时拆掉脚本保存的「确认高风险写入」弹窗（`requestWriteConfirmation`），容器条目凭据改为无交互 receipt，写入经 Patch Engine 备份/回滚照旧。DSLuaDecompiler 仍是读入依赖：反编译文本写回原槽即明文 Lua 字节，不重编译不执行。
+- **S20 落地（2026-08-17，文本三栏独立滚动 + TEXT 不被 Agent 挡）**：根因是 `.viewer-content .panel` 无高度参照 → 工作台 `height:100%` 失效 → 三栏塌成内容高度、column-body 永不溢出 → 整页被长列表顶出滚动条（「三栏滚轮连体」），旧 `min-height:420px` 只是缓解且矮视口仍整页滚。修复：`.viewer-content .panel` 加 `flex:1; min-height:0`（填满视口，工作台高度锁定，三栏 column-body 各自成为滚动宿主），删 `min-height:420px` 妥协，`column-body` 加 `overscroll-behavior:contain`（栏内滚到边界不连动）；窄主区（Agent 打开）下 `.workbench__columns` 加 `overflow-x:auto`，三栏 minWidth 总和超出时可横向滚到 TEXT，不再被 `overflow:hidden` 切得只剩标题。
+- **S30 落地（2026-08-17，文本空表诚实空态 + FMG 标签投影）**：① 空态与失败互斥：分页失败时只显示 danger 诊断，不再叠加「当前页无条目/先选择语言与文本表」muted 空态（011738「像打不开」的一半根因——之前两态同时渲染）。② FMG 标签显示投影（011833）：`<?null?>` → 空（空槽/空标记），`<?placeName@N?>` → `[地名 N]`，`<?kgiconKc@N?>` → `[图标 N]`，`<?bmsg?>` → `[BMSG]`，其他 `<?name@N?>` → `[name N]` —— 只投影列表显示层，编辑框仍绑原文（写回保真，标签可编辑）；这些标签是文件真实 UTF-16 字节（fmgReferenceIntegrity 同语法），不是解码乱码。③ 地名缺漏：空槽行与 ID 照常在场、文本列弱化为 `—` —— 47 槽 6 条有字的地名表（1100、1102–1120 是 offset=0 空槽）打开后 41 个空槽可见，不再像「缺了」；entryCount 保持槽数语义（47），与 Bridge FmgNativeDocument 逐槽（含空槽）一致。
+- **S9 落地（2026-08-17，Ask 菜单 CSS fixed）**：`.agent-mode-menu` 从 `position:absolute` 改 `position:fixed` —— 菜单已 createPortal 到 document.body，锚点是 trigger 的 viewport 坐标（getBoundingClientRect），absolute 相对初始包含块、页面滚动后菜单会漂移错位，fixed 与视口坐标一致。组件侧锚点与上翻逻辑（S9 回放 stale top 修复）不动。
+- **S13 落地（2026-08-17，sanitizer 只打码路径片段）**：新增 `packages/shared/src/path-sanitizer.ts` 的 `maskPathFragments` —— preload 与 main 共用同一规则，删除两侧各自维护的路径正则（preload 旧正则字符类漏全角冒号/CJK 前缀）。行为从「检测到路径整条替换」改为「只打码路径片段、保留上下文」：`写入失败：D:\workspace\mod\a.fmg 被占用` → `写入失败：[本机路径已隐藏] 被占用`。覆盖盘符绝对路径 / UNC / 设备路径 / 盘符 file URI；路径内汉字不终止（D:\游戏\mods\a.fmg 整段打码）；工作区相对 URI（file:///workspace/…）不打码。新增 shared 单测（7 条）+ main/preload 一致性断言（4 条）；verify-desktop-security-runtime.mjs 的真实载荷断言（不得含 D:\mystream/D:\workspace）在片段替换下保持成立。
+- **S10 扩展落地（2026-08-17，事件/文本 data-cite）**：PARAM 先行后把引用框选扩展到事件与文本。`citations.ts` 的 `CiteHit` 增加 `text-entry`（FMG 条目行：table=typed stableId 含冒号合法、entryId、显示投影文本）与 `event-script`（EMEVD 源码区：script=tabId 逻辑 URI、label=短标题），`mergeCiteHits` 返回 `Citation` union（param 锚定合并保持原样，text/event 单节点成条、重复命中去重、混合 kind 不跨类合并），新增 `formatCitationLabel`；`decodeCiteHit` 对 table/script 走「非路径」校验（stableId 带冒号、逻辑 URI 无盘符都是合法的，白名单标识符校验只留 library/fieldId）。main `agent.citation.create` 按 kind 分 domain（param/text/event），引用注册表与提示词拼接用 `formatCitationLabel`。FmgWorkbenchPanel 条目行、EventSourceWorkbenchPanel 源码区挂 data-cite（未选表/失败不挂，诚实态）。citations 单测 26 条 + 面板断言（renderer-unit 744 全过，core test exit=0）。
 - **Negative source tests**：无 `domainForFile`、`filterFilesForDomain(files)`、`visibleFiles.length` 领域计数。
 - **Done**：顶部无 `PARAM 36`，PARAM 入口直接打开逻辑库。
+
+> **S22 落地（2026-08-17，原版目录选完当场生效）**：
+> - 新增 `workspace.remountBase(baseSelectionId | null)` IPC：工作区已打开时保留 overlay、只重建 base 层（dispose daemon 池、清 EMEVD 文档缓存与编辑器 handle），新 `oodleRuntimeRoot` / 只读原版层立即生效 —— 动作预览、KRAK 事件、原版 chrbnd 不必重启。
+> - `chooseBaseDirectory` / `clearBaseDirectory` 在工作区已打开时立即重挂；`mountWorkspace` 的「下次打开生效」文案删除。开始页状态只分「已挂载（只读）」/「未挂载」，「待打开生效」「原版（下次打开生效）」删除。
+> - 重挂后 renderer 更新 `workspace.session` / `workspaceSessionId` 并清空打开中的编辑态（旧文档 handle 已作废）。原版仍只读（写链只允许 overlay，layer 语义未动）。
 
 #### SHELL-10 — 键位跟域走（T7）
 
@@ -2554,6 +2570,20 @@ SHELL-09 → SHELL-10
 > - 读取失败时编辑区正文给 `code + 人话 + 下一步`（KRAK 缺原版：到「开始」页选择含 sekiro.exe 的原版目录），禁止假 `resource "file://…"` 伪源码与「详情见底部日志」；失败随 `eventOpenFailure` 附进 Agent 系统提示，Agent 能直接复述原因和下一步。
 > - 编不了的指令：该行标未解码，不锁整份只读、不假成功写盘。
 
+> **S14 落地（2026-08-17）**：
+> - 去头去黄条：`.event-source__header`（eyebrow + h2）、日常 `.event-source__notice`、「反汇编源码只读」标签与「编译并提交」按钮已删；工具条只留查找/保存提示与 `role="status"` 状态句；EMEDF 缺失的失败 alert（`--blocked`）保留。
+> - 可编辑写链：新增 `packages/core/src/emevd/darkScriptCompiler.ts` —— 按「反汇编形状逐事件逐行对齐」把 `$Event` 文本编译成 typed mutation（`set_event_id` / `set_event_rest_behavior` / `set_instruction_arg`），再走既有 `submitEmevdDslPlanViaFourView` → Patch Engine（备份/回滚照旧）。`compileRequest.mode` 扩展为 `'patch' | 'dark-script'`；`Ctrl+S` 直接保存，无审查对话框、无 Bridge/补丁引擎字样。
+> - 编不了的部分不锁整份：指令增删（`EMEVD_DSL_INSTRUCTION_COUNT_CHANGED`）、WaitFor 折叠块内容变化（`EMEVD_DSL_WAITFOR_READONLY`）、指令名替换（`EMEVD_DSL_INSTRUCTION_NAME_CHANGED`）、vararg 尾部修改（`EMEVD_DSL_VARARG_ARG_READONLY`）都是结构化诊断；未知指令/失败态渲染为注释行，两侧解析都丢弃。没有 DarkScript → 二进制全量编译器，不做假成功写盘。
+> - 内层标签短名：`event/common.emevd.dcx` → `common`（App 文件标签已承载完整资源）。
+> - `isSourceReadOnly` 只剩打开失败类（非 live / 无 dslTemplate），`sourceStyle === 'dark-script'` 不再是只读判据。
+> - 新增 `runEmevdDarkScriptCompilerSmoke`（no-op / 事件头 / 指令参数 / fail-closed 诊断 / 部分应用）。
+
+> **S31 落地（2026-08-17，事件 IDE：右栏词义 + 多列对照）**：
+> - 右栏词义（`.esw-inspector`，独立滚动）：选中一条语句（或 WaitFor 折叠块，跨行自动合并）后，显示指令名、bank:id 与每个参数的 EMEDF 名/类型/当前值；conditionGroup 簿记参数标「（折叠隐藏）」；同名指令（不同 bank:id）全部列出不猜歧义；目录匹配不到的名字诚实标「未解码」。数据只来自已下发的 EMEDF 完成目录 + 源码行，不重复灌 IPC。
+> - 多列对照：`分栏 1/2/3` 循环按钮；多列 = 激活 tab 排前 + 其余 tab 按打开顺序并排，每列独立 EditorView（独立滚动/光标/dirty），列数可关回单列。不做「同一文件双视口」——两份独立 state 的文档同步会引入造假的编辑语义。
+> - 跳转对应文本（`$Event(id)` / 指令实参 → FMG/事件）是后半截：需要事件/FMG 索引，未接入前不挂假灯泡。
+> - 文件头与 `EventSourceTabData.sourceStyle` 注释同步去掉「只读」表述。
+
 > **S18（2026-08-16，common/common_func 打开卡顿重写，规格见 `锐评/event-common-load.md`）**：
 > - **A**：Bridge 文档会话缓存（`EmevdDocumentCache`，realpath+mtime+length 键）——同一文件连续分页只解压/解析一次，`EMEVD_SESSION_READ_COUNTS` 诊断计数为证。
 > - **B**：renderer 打开只打一枪——`readEmevdDocument` envelope 双读删除，事件数 / sourceHash / gutter 判据全部由 `readEmevdFullDocument` 的 outline 给（`unknownCount` 按完整 EMEDF 逐条判，不再有 256 条采样造成的假「整段未知」）；`mapEmevdEnvelope` / `alignEmevdDocumentAnchors` 删除，`indexEventLines` 按 `$Event(` 出现顺序映射。
@@ -2607,6 +2637,11 @@ SHELL-09 → SHELL-10
 - **S19 裁定（2026-08-15）**：Bridge `read-msb-document` / `write-msb` 必须先 native 解 DCX（与 EMEVD 同一套 `DcxNativeDocument`）再认 `"MSB "` 魔数——磁盘上的 `.msb.dcx` 头是 `DCX\0`。mods 里 DFLT 不挂原版也能开；原版 KRAK 挂原版 + Oodle 后同样能开。读取失败在面板内给 `code + 人话 + 下一步`（如「KRAK，到开始页选原版」），不得「详情见底部日志」。冒烟至少一条直接对 `.msb.dcx` 调 `read-msb-document`，禁止先在 TS 里 `decompressDfltDcx` 再喂。
 - **Tests**：`npm run test:renderer-unit`、`npm run test:renderer-e2e`；tree/viewport/inspector 联动、无 writer action、resize/keyboard 和对照截图。
 - **S19 失败面已落地**：打开失败（KRAK 缺 Oodle / 其它读取错误）时左栏显示 code + 人话 + 下一步，viewport 不再假 0 实体；同一份结构化失败随下一次 Agent 任务提交（main 校验后进系统提示），Agent 能直接解释原因与下一步。
+- **S23 落地（2026-08-17，viewport 读 part 模型）**：
+  - 新增 Bridge `read-map-part-flver-preview`（广告门禁三方一致，45 条）：mapbnd（DCX→BND4）内按 `<modelName>.flver` 条目取 FLVER 网格/骨骼一次返回；KRAK 缺 Oodle 给可行动失败码。
+  - 新增 IPC `resource.readMapPartMesh`：overlay `map/<mapId>/` 下的 `*.mapbnd.dcx` 优先，原版同相对路径次之（KRAK 由 Bridge 解）；全部失败给「没有找到该 part 的模型」/「未挂原版 → 去开始页挂原版」。
+  - `SceneDrawItem.mesh`（base64 typed buffers）+ `createProxyMesh` 用真实几何替换 proxy 盒子；MsbScenePanel 打开时预取前 12 个 part、选中 part 补载，`setDrawList` 渐进更新。
+  - 状态句删「无绝对路径」/「见底部日志」，改为「N 个 part 已挂模型 / M 个没找到（线框）」。写入仍按 V0.6 延期。
 
 #### MAP-50C — MSB write
 
@@ -2676,6 +2711,10 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[CREATE] packages/shared/src/vfx-editor.ts`；`[MODIFY] packages/shared/src/index.ts`；`[CREATE] bridge/SoulForge.Bridge/FxrNativeDocument.cs`；`[MODIFY] bridge/SoulForge.Bridge/BridgeCommandService.cs`；`[MODIFY] bridge/SoulForge.Bridge/BridgeDaemonHost.cs`；`[CREATE] packages/core/src/testing/runNativeFxrSmoke.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`；`[MODIFY] packages/core/package.json`；`[MODIFY] package.json`。
 - **Output/Tests**：effect/node/field tree；新增 root `bridge:verify:fxr` 并运行 `npm run bridge:verify:fxr`；unknown node layout 为 partial/blocked。
+- **S24 落地（2026-08-17，Section4 假循环 + 包内多 FXR 列表）**：
+  - Section4 的 count 是整张扁平表（槽 = section4Offset + i*0x30），子节点就住在紧随其后的槽里。旧实现把每个槽都当根递归，孩子先被父节点走一遍、再被 i 循环当第二棵根走一遍 → visited 撞出「假环」把整包判死（真实 commoneffects 的 offset 0x140 正是这个形态）。现在先扫 childOffset 引用定根（根 = 未被引用的槽），递归用「递归栈」判真环（孩子指祖先）、「已访问」跳过共享槽。
+  - 新增回归 fixture「根 + 紧随其后的孩子、count≥2」：解析必须得 1 根 / 2 节点，而不是 FXR_DOCUMENT_READ_FAILED（`runNativeFxrSmoke` 合成路径必过）。
+  - ffxbnd 效果库：新命令 `list-ffxbnd-entries`（广告门禁三方一致，46 条）列包内 .fxr 子项；`read-fxr-document` 支持 `entryName` 精确取子项。VfxWorkbenchPanel 左栏在文件条目下展开子项列表，默认打开第一条，一条失败只红那一条，其余仍可点开。
 
 #### VFX-54B — Smithbox-style VFX workbench
 
@@ -2721,6 +2760,7 @@ SHELL-09 → SHELL-10
   - 中栏详情整块移除（DetailsSection/TaeEventEditor/新增事件入口删除），详情下沉到 `WorkbenchLayout` footer：起始帧/结束帧（30fps，主标签帧 + ≈ 秒小字）、完整 typeId + 类型名、事件下标、参数字段（按模板解码；无模板「未解码」+ 原始 hex，禁止编造 SoundType）；时间编辑保留在 footer（标签起始帧/结束帧，内部仍走 update-event-times 秒）。
   - 预览挂伴生 chrbnd：overlay `chr/<id>.chrbnd.dcx` → 原版同相对路径；两边都没有给可行动空态（未挂原版写明去「开始」页）。骨骼动画播放未接入，预览如实标注静态模型（不假装播放）。
   - `WorkbenchLayout` 拖栏修复：量栏内容宽（不含 4px 分隔条）、上限扣除分隔条总宽、window 监听不再随 `columns` 新数组反复拆装——PARAM/文本/动作同一套布局组件一并受益。
+  - **S17 3D 落地（2026-08-17）**：`read-chrbnd-flver-preview` / `read-tae-event-params` 登记进 `AdvertisedCommands`（广告门禁三方一致，44 条）；右栏挂上现有 `FlverViewer`——`read-chrbnd-flver-preview` 一次返回网格/骨骼/挂点（base64 typed buffers），经 `FlverViewer` 新增的 `externalMeshData` / `externalBones` props 直画（不走 readFlverMesh IPC）；无网格时给可行动空态（「到开始页挂原版」/「没有找到该模型的网格数据」），删「见底部日志」与「本夜不挂」注释；动画播放未接入明说「模型已挂，动画播放未接入」，不假装在播。另修合并 7c5639a 把 `BridgeCommandService.IsDcxFile` 回退成 private 导致的 S18 会话缓存编译红（固定 internal）。
 
 #### ANIMATION-56C — TAE event write
 
@@ -2733,12 +2773,15 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockResizer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentDockHeader.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentConversationViewport.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentWelcome.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`。
 - **Steps**：实现 48px header / minmax conversation / bottom composer grid；200/440/620px（S8）、4px resizer、16px keyboard resize、workspace persistence；Agent 始终文档流右列、不 overlay；只使用第 12.4 节固定欢迎文案。
+- **S8 落地（2026-08-17）**：Agent 下限从 340 收到 96px（约一条工具栏宽，不是 0、不留点不着的缝）；`AGENT_MIN_WIDTH` / `--agent-dock-min` / 持久化恢复 clamp 与相关测试 340 边界同步改；composer 工具条 `flex-wrap: wrap`，窄列时按钮换行、不许裁掉，也不许为保布局把下限抬回去。上限仍 620、默认 440。
 - **Tests**：idle 440×900 截图；340/620、Ctrl+J、drag/keyboard resize、hide/show 不清状态；无旧 task panel/tool count/session count。
 
 #### AGENT-60B — 三层 Composer
 
 - **Allowed**：`[CREATE] apps/desktop/src/renderer/src/agent/AgentComposer.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentParticipantBar.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentContextChipList.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentPromptEditor.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/AgentComposerToolbar.tsx`；`[CREATE] apps/desktop/src/renderer/src/agent/agentComposerState.test.ts`；`[MODIFY] apps/desktop/src/renderer/src/agent/AgentSidebar.tsx`；`[MODIFY] apps/desktop/src/renderer/src/agent/agentSidebarRender.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`。
 - **Steps**：participant / prompt+chips / toolbar 三层；IME composing 禁止 Enter 发送；toolbar 固定 `@ | # | attachment | model | plan | send/stop`；每项按真实 callback/capability gating。
+- **S25 落地（2026-08-17，模型服务设置照 010517 一列表单）**：设置页只放模型服务表单——运行任务/取消任务/权限黄条移到历史页（`AgentSessionControls` 会话级控件随 S32 输入条提供日常入口）；字段顺序协议 → 服务地址 → 模型 ID → 显示名称 → API 密钥 → 高级选项 → 页脚（取消/重置/保存）；label 独占一行、控件 100% 宽；「获取模型列表」挂在模型 ID 行的辅助动作；重置 = 回初值 + 从 main 重读。保存契约与脱敏/safeStorage 不变。
+- **S32 落地（2026-08-17，输入条照 Codex VS Code 扩展 012748）**：`.agent__composer` 改为一块圆角输入卡（margin + border-radius，participant 条不再是独立一层）；工具行顺序 `+ 引用 | 附件 | 权限（Ask/Plan/Edit 下拉）| 弹性空白 | 模型 | 思考 | 发送`——模型与思考是两个独立控件，禁止合成「5.5 中」；思考档位关/快/普通/深/极致（`ModelThinkingLevel`，含 off 映射），改了就随下一次 `runAiAgent` 的 `thinkingLevel` 提交（main 侧优先于服务级默认，agentLoop sampling 通道），不用进设置页；窄列（S8）下工具行 `flex-wrap` 换行，两个入口都在。
 - **Tests**：Enter/Shift+Enter/IME、auto-grow 40vh cap、空输入 disabled、streaming stop；源码和 DOM 均不存在 `microphone|MediaRecorder|getUserMedia|speech recognition|audio IPC`。
 
 #### AGENT-60C — selection context、资源引用和流式任务

@@ -13,6 +13,7 @@
  */
 
 import type { SceneDrawList } from './sceneManifestBrowser.js';
+import { decodeBase64ToUint8Array } from '../utils/binary.js';
 import type {
   BoxGeometry,
   BufferGeometry,
@@ -27,6 +28,13 @@ import type {
 } from 'three';
 
 type ThreeModule = typeof import('three');
+
+/** base64 → Float32Array（S23：mapbnd 提取的网格 typed buffer）。 */
+function decodeBase64F32(base64: string, expectedCount: number): Float32Array {
+  const bytes = decodeBase64ToUint8Array(base64);
+  const view = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.length / 4));
+  return view.length >= expectedCount ? view : new Float32Array(expectedCount);
+}
 
 export type RendererBackend = 'webgpu' | 'webgl2';
 
@@ -543,9 +551,38 @@ async function createRealRenderer(
 }
 
 function createProxyMesh(three: ThreeModule, track: ResourceTracker, item: SceneDrawList['items'][number]): Object3D {
-  const geometry: BoxGeometry | SphereGeometry = item.primitive === 'sphere'
-    ? track(new three.SphereGeometry(0.5, 12, 10))
-    : track(new three.BoxGeometry(1, 1, 1));
+  // S23：part 带有真实 FLVER 网格（mapbnd 提取）时画真实几何，替代 proxy 盒子。
+  const geometry = item.mesh
+    ? (() => {
+        const buffer = track(new three.BufferGeometry());
+        buffer.setAttribute('position', new three.BufferAttribute(
+          decodeBase64F32(item.mesh.positionsBase64, item.mesh.vertexCount * 3),
+          3
+        ));
+        if (item.mesh.indicesBase64) {
+          const indexBytes = decodeBase64ToUint8Array(item.mesh.indicesBase64);
+          const view = indexBytes.length % 2 === 0
+            ? new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexBytes.length / 2)
+            : null;
+          if (view) buffer.setIndex(new three.BufferAttribute(view, 1));
+        }
+        if (item.mesh.uvsBase64) {
+          const uvCount = item.mesh.vertexCount * 2;
+          buffer.setAttribute('uv', new three.BufferAttribute(decodeBase64F32(item.mesh.uvsBase64, uvCount), 2));
+        }
+        if (item.mesh.normalsBase64) {
+          buffer.setAttribute('normal', new three.BufferAttribute(
+            decodeBase64F32(item.mesh.normalsBase64, item.mesh.vertexCount * 3),
+            3
+          ));
+        } else {
+          buffer.computeVertexNormals();
+        }
+        return buffer;
+      })()
+    : (item.primitive === 'sphere'
+        ? track(new three.SphereGeometry(0.5, 12, 10))
+        : track(new three.BoxGeometry(1, 1, 1)));
   const material = track(new three.MeshStandardMaterial({
     color: new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2]),
     roughness: 0.65,

@@ -5,7 +5,7 @@ export interface StartWorkspacePanelProps {
   workspaceLabel: string | null;
   /** 已选原版目录的显示名；null = 未选择。 */
   baseRootChoiceLabel: string | null;
-  /** 原版目录是否已挂载（只读）。未挂载但有选择时显示「待打开生效」。 */
+  /** 原版目录是否已挂载（只读）。S22：选/换/清原版当场重挂，不再有「待打开生效」。 */
   baseMounted: boolean;
   browserPreview: boolean;
   onOpenWorkspace: () => void;
@@ -69,13 +69,9 @@ export function StartWorkspacePanel({
           工作区：{workspaceLabel ?? '未打开'}
         </span>
         <span className={baseMounted ? 'pill pill--ok' : 'pill'}>
-          原版：{baseMounted ? '已挂载（只读）' : baseRootChoiceLabel ? '待打开生效' : '未挂载'}
+          {/* S22：选/换/清原版当场重挂，状态只分「已挂载（只读）」/「未挂载」。 */}
+          原版：{baseMounted ? '已挂载（只读）' : '未挂载'}
         </span>
-        {baseRootChoiceLabel && !baseMounted && (
-          <p className="explorer-base-note" title={baseRootChoiceLabel}>
-            原版（下次打开生效）：{baseRootChoiceLabel}
-          </p>
-        )}
       </div>
     </section>
   );

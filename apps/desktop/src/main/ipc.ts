@@ -50,6 +50,7 @@ import {
   analyzePlaintextLineEndings,
   classifyPlaintextBytes,
   decodePlaintext,
+  encodePlaintext,
   classifyScriptEntry,
   magicLabel,
   locateDsLuaDecompilerSync,
@@ -150,9 +151,9 @@ import {
   type ScriptEntryPlaintextView,
   type ScriptSourceView,
   decodeCiteHits,
-  formatParamCiteLabel,
+  formatCitationLabel,
   mergeCiteHits,
-  type ParamCitation
+  type Citation
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -178,6 +179,7 @@ import type {
   RagChunkFamily,
   RagRetrieveResult,
   ResourceKind,
+  SaveTextResourceResult,
   StructuredDiagnostic
 } from '@soulforge/shared';
 import type {
@@ -229,6 +231,8 @@ let activeRag: RagCorpus | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
+/** 当前 overlay 的显示 label：remountBase 重建 session 时沿用（scan 时登记）。 */
+let activeOverlayLabel = '';
 /**
  * Authoritative full EMEVD editor documents keyed by sourceUri. Assembled in
  * main via paginated Bridge reads; the renderer only ever edits DSL text and
@@ -1057,6 +1061,18 @@ function deriveDocumentOwnerKey(event: IpcMainInvokeEvent): string {
     .digest('hex');
 }
 
+/**
+ * S29：写时对文件内容现算 sha256（小写 hex，与 C# SourceHash/Hash 同算法）。
+ *
+ * 哈希是并发保护凭据而不是写入门禁：渲染器拿到的 containerHash/childHash
+ * 偶发为空（索引没扫到 sha256、Bridge 没报 contentHash）时，不再拒绝写入，
+ * 直接在 main 侧现算。缺哈希时并发保护退化为「写前读到的就是写时文件」，
+ * 但 Patch Engine 的 HASH_MISMATCH 备份/回滚照旧兜底。
+ */
+async function sha256FileNow(filePath: string): Promise<string> {
+  return createHash('sha256').update(await readFile(filePath)).digest('hex');
+}
+
 /** §4.3 域 → 资源 kind 的粗粒度匹配（CAT-05 的 Catalog 校验落地后替换）。 */
 const DOMAIN_RESOURCE_KINDS: Record<string, readonly string[]> = {
   param: ['param', 'container'],
@@ -1195,6 +1211,11 @@ export interface AiAgentRunRequest {
   useContextBroker?: boolean;
   /** Byte ceiling for Context Broker output; ignored unless useContextBroker. */
   contextMaxBytes?: number;
+  /**
+   * S32：本次任务的思考强度（关/快/普通/深/极致），优先于服务级默认。
+   * 作用于下一次 runAgentTask，不要求用户进设置页。
+   */
+  thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
   /**
    * RAG auto-search: before each model call, retrieve workspace evidence from
    * the most recent user message and inject a [rag-evidence] system message.
@@ -2307,6 +2328,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         throw error;
       }
       indexedFiles = result.files;
+      activeOverlayLabel = overlaySelection.label;
       activeIndex = new WorkspaceIndex(activeSession.meta.workspaceId);
       activeIndex.setFiles(result.files);
       await refreshRagAfterScan(database, activeIndex);
@@ -2319,6 +2341,50 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         session: {
           workspaceSessionId: activeWorkspaceSessionId,
           workspaceLabel: overlaySelection.label,
+          game: activeSession.meta.game,
+          openedAt: activeSession.meta.openedAt,
+          baseMounted: !activeSession.meta.baseMissing,
+          ...(baseSelection ? { baseLabel: baseSelection.label } : {})
+        }
+      };
+    }
+  );
+
+  /**
+   * S22：工作区已打开时重挂原版目录（保留 overlay，只换 base 层）。
+   *
+   * 选/换/清原版不再「下次打开生效」：这里重建 session（dispose daemon 池、
+   * 清 EMEVD 文档缓存与编辑器 handle），新的 oodleRuntimeRoot / 原版只读层
+   * 立即生效 —— 动作预览、KRAK 事件、原版 chrbnd 不必重启就能走到新 base。
+   * baseSelectionId 为 null = 卸载原版层。原版永远只读（openWorkspaceSession
+   * 的 layer 语义不变，写链只允许 overlay）。
+   */
+  handle(
+    'workspace.remountBase',
+    async (event, baseSelectionId: string | null): Promise<{
+      workspaceSessionId: string;
+      session: RendererWorkspaceSession;
+    }> => {
+      if (!activeSession) throw new Error('请先打开工作区。');
+      const baseSelection = baseSelectionId
+        ? consumeDirectorySelection(event, baseSelectionId, 'base')
+        : undefined;
+      await disposeBridgeDaemonPool();
+      emevdFullDocuments.clear();
+      clearEditorPageCaches();
+      editorDocumentStore = null;
+      activeWorkspaceSessionId = randomUUID();
+      activeSession = await openWorkspaceSession({
+        overlayRoot: activeSession.layers.overlayRoot,
+        ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}),
+        game: activeSession.meta.game
+      });
+      const workspaceLabel = activeOverlayLabel || activeSession.meta.game;
+      return {
+        workspaceSessionId: activeWorkspaceSessionId,
+        session: {
+          workspaceSessionId: activeWorkspaceSessionId,
+          workspaceLabel,
           game: activeSession.meta.game,
           openedAt: activeSession.meta.openedAt,
           baseMounted: !activeSession.meta.baseMissing,
@@ -2837,7 +2903,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    */
   handle(
     'resource.submitEmevdDslPlan',
-    async (event, sourceUri: string, sourceText: string): Promise<RendererSaveResult> => {
+    // S14：mode 决定编译前端 —— 'dark-script'（$Event 源码）或 'patch'（旧 hash DSL）。
+    async (event, sourceUri: string, sourceText: string, mode: 'patch' | 'dark-script' = 'patch'): Promise<RendererSaveResult> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file || !activeSession) {
         return {
@@ -2918,7 +2985,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           baseRevision: fresh.revision,
           emedfSchemaFingerprint: schemaFingerprint,
           sourceText,
-          mode: 'patch'
+          mode
         },
         document: fresh,
         registry,
@@ -3476,10 +3543,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             ? { kind: 'add' as const, id: mutation.id, text: mutation.text ?? '' }
             : { kind: 'upsert' as const, id: mutation.id, text: mutation.text ?? '' };
       const operationLog = await ensureActiveOperationLog(activeSession);
+      // S29：能打开就能写。renderer 可能没带回 hash（此前它有权据此拒写），
+      // main 在写时现算兜底。现算值只用于并发保护凭据，head 真漂移（别人改过）
+      // 仍会被写链的 hash 比较拒绝；「从来没算过」不是拒写理由。
+      const expectedHashNow = expectedHash || file.sha256 || await sha256FileNow(file.absolutePath);
       const outcome = await applyNativeMutation({
         file,
         sourceUri,
-        expectedHash,
+        expectedHash: expectedHashNow,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'fmg',
@@ -3487,7 +3558,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         stageWrite: (context) => commitFmgMutationViaBridge({
           sourcePath: file.absolutePath,
           outputPath: context.outputPath,
-          expectedDocumentHash: expectedHash,
+          expectedDocumentHash: expectedHashNow,
           allowedRoots: context.allowedRoots,
           writableRoots: context.writableRoots,
           mutation: bridgeMutation,
@@ -3496,7 +3567,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         title: `FMG mutation ${mutation.kind} ${mutation.id}`,
         confirmActionLabel: '提交 FMG 变更'
       }, {
-        confirm: electronConfirmationPort(event),
+        // S29：日常 FMG 写入不弹「高风险确认」；备份/回滚仍经 Patch Engine。
         commit: sessionCommitPort(activeSession, operationLog, storage)
       });
       if (outcome.status === 'committed' && outcome.result.ok) {
@@ -3605,6 +3676,101 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       diagnostics: result.diagnostics
     });
   });
+
+  /**
+   * S23：地图 viewport 读 part 模型——按 modelName 在 mapbnd 容器里取 FLVER 网格。
+   *
+   * 候选顺序：overlay `map/<mapId>/<mapId>_*.mapbnd.dcx` → 原版同相对路径
+   * （KRAK 由 Bridge 用 oodleRuntimeRoot 解）。全部失败给可行动诊断：
+   * 「没有找到该 part 的模型」/「未挂原版且 overlay 无 mapbnd → 去开始页挂原版」。
+   */
+  handle(
+    'resource.readMapPartMesh',
+    async (_event, msbSourceUri: string, modelName: string): Promise<{
+      ok: boolean;
+      sourceUri?: string;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === msbSourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          diagnostics: [{ severity: 'error' as const, code: 'MAP_PART_MSB_NOT_INDEXED', message: 'MSB 资源未索引，无法定位地图模型目录。', sourceUri: msbSourceUri }]
+        };
+      }
+      const baseName = basename(file.relativePath);
+      const mapId = baseName.replace(/\.msb(\.dcx)?$/i, '');
+      if (!mapId) {
+        return {
+          ok: false,
+          diagnostics: [{ severity: 'error' as const, code: 'MAP_PART_MAP_ID_UNKNOWN', message: '无法从 MSB 文件名推断地图 id。', sourceUri: msbSourceUri }]
+        };
+      }
+      const overlayDir = join(activeSession.layers.overlayRoot, 'map', mapId);
+      const baseDir = activeSession.layers.baseRoot
+        ? join(activeSession.layers.baseRoot, 'map', mapId)
+        : null;
+      const candidateDirs = [
+        ...(safeExists(overlayDir) ? [{ dir: overlayDir, fromBase: false }] : []),
+        ...(baseDir && safeExists(baseDir) ? [{ dir: baseDir, fromBase: true }] : [])
+      ];
+      if (candidateDirs.length === 0) {
+        const baseHint = activeSession.layers.baseRoot
+          ? `map/${mapId}/ 目录下没有模型文件。`
+          : `overlay 的 map/${mapId}/ 下没有模型文件，且尚未挂载原版目录——到「开始」页选择含 sekiro.exe 的原版目录后可尝试读取原版模型。`;
+        return {
+          ok: false,
+          diagnostics: [{ severity: 'error' as const, code: 'MAP_PART_NO_MODEL_DIR', message: `没有找到 ${modelName} 的模型（mapbnd）：${baseHint}`, sourceUri: msbSourceUri }]
+        };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+
+      for (const { dir, fromBase } of candidateDirs) {
+        let mapbnds: string[];
+        try {
+          mapbnds = readdirSync(dir)
+            // mapbnd 命名 `<mapId>_<6位编号>.mapbnd.dcx`，mapId 本身含下划线，
+            // 只按后缀过滤。
+            .filter((name) => /\.mapbnd\.dcx$/i.test(name))
+            .sort()
+            .map((name) => join(dir, name));
+        } catch {
+          mapbnds = [];
+        }
+        for (const mapbndPath of mapbnds) {
+          const result = await runBridge<Record<string, unknown>>({
+            command: 'read-map-part-flver-preview',
+            filePath: mapbndPath,
+            allowedRoots: roots.allowedRoots,
+            timeoutMs: 120_000,
+            ...(fromBase && activeSession?.layers.baseRoot
+              ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+              : {}),
+            commandOptions: { modelName }
+          });
+          if (result.parseStatus !== 'failed' && result.data) {
+            return {
+              ok: true,
+              sourceUri: msbSourceUri,
+              data: result.data,
+              diagnostics: result.diagnostics
+            };
+          }
+        }
+      }
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error' as const,
+          code: 'MAP_PART_MODEL_NOT_FOUND',
+          message: `没有找到 ${modelName} 的模型（map/${mapId}/ 下的 mapbnd 容器）；该 part 用线框占位显示。`,
+          sourceUri: msbSourceUri
+        }]
+      };
+    }
+  );
 
   /**
    * S17：词条名目录。main 从本机 TAE.Template.SDT.xml 解析 eventTypeId → 名称；
@@ -3817,7 +3983,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
 
-  handle('resource.readFxrDocument', async (_event, sourceUri: string) => {
+  handle('resource.readFxrDocument', async (_event, sourceUri: string, entryName?: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FXR。', sourceUri }] };
@@ -3826,6 +3992,31 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-fxr-document',
+      filePath: file.absolutePath,
+      allowedRoots: roots.allowedRoots,
+      timeoutMs: 120_000,
+      // S24：ffxbnd 效果库按子项名精确读取；缺省取容器内第一条 .fxr。
+      ...(entryName ? { commandOptions: { entryName } } : {}),
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
+  /**
+   * S24：ffxbnd 效果库的 .fxr 子项清单。一条失败不再整包判死——左栏逐条列出，
+   * 每条独立打开，失败只红那一条。
+   */
+  handle('resource.listFxrEntries', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法列出 FXR 条目。', sourceUri }] };
+    }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    const result = await runBridge<{ entries?: string[] }>({
+      command: 'list-ffxbnd-entries',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
@@ -5973,10 +6164,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
 
       // 解包目标条目：write-param 需要一个裸 param 作为输入基底。
+      // S29：容器哈希缺失时现算（索引没扫到 sha256 的罕见情况），不挡写入。
+      const containerHashNow = file.sha256 ?? await sha256FileNow(file.absolutePath);
       const unpacked = await unpackContainerParamChild({
         containerPath: file.absolutePath,
         containerUri,
-        containerHash: file.sha256 ?? expectedContainerHash,
+        containerHash: containerHashNow,
         entry: { index: mutation.entryIndex }
       });
       if (!unpacked.ok) {
@@ -6022,7 +6215,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               // 说明「读与写之间条目被改过」，拒绝写入。实测（probeParamWrite）缺它会
               // 恒定 PARAM_STAGING_WRITE_FAILED。unpacked.child.storedContentHash 就是
               // 该裸 param 文件的 SourceHash（entry ContentHash 对存储字节取哈希）。
-              expectedDocumentHash: unpacked.child.storedContentHash,
+              // S29：storedContentHash 缺失时对解包文件现算（写前读到的就是写时文件）。
+              expectedDocumentHash: unpacked.child.storedContentHash
+                || await sha256FileNow(unpacked.child.absolutePath),
               mutation: 'upsert',
               id: mutation.rowId,
               dataBase64: fieldResult.nextDataBase64
@@ -6064,7 +6259,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const outcome = await applyNativeMutation({
         file,
         sourceUri: containerUri,
-        expectedHash: expectedContainerHash,
+        expectedHash: containerHashNow,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'parambnd',
@@ -6080,9 +6275,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             commandOptions: {
               outputPath: context.outputPath,
               mutation: 'replace',
-              expectedContainerHash,
+              expectedContainerHash: containerHashNow,
               entryIndex: mutation.entryIndex,
-              expectedChildHash: mutation.expectedChildHash,
+              // S29：child 哈希缺失时现算（解包文件即条目存储字节，与 C# Hash 同算法）。
+              expectedChildHash: mutation.expectedChildHash
+                || await sha256FileNow(unpacked.child.absolutePath),
               contentBase64: mutatedChildBase64
             },
             ...oodle
@@ -6099,7 +6296,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           + ` in ${unpacked.child.name}`,
         confirmActionLabel: '提交容器内 PARAM 字段变更'
       }, {
-        confirm: electronConfirmationPort(event),
+        // S29：确认端口不再接入 —— writerContract 不再要求「高风险写入」确认，
+        // 弹窗由 applyNativeMutation 的 requiresConfirmation 分支驱动，端口已无效果。
         commit: sessionCommitPort(activeSession, operationLog, storage)
       });
 
@@ -6183,10 +6381,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
 
       // 解包目标条目：write-param 需要一个裸 param 作为输入基底。
+      // S29：容器哈希缺失时现算（索引没扫到 sha256 的罕见情况），不挡写入。
+      const containerHashNow = file.sha256 ?? await sha256FileNow(file.absolutePath);
       const unpacked = await unpackContainerParamChild({
         containerPath: file.absolutePath,
         containerUri,
-        containerHash: file.sha256 ?? expectedContainerHash,
+        containerHash: containerHashNow,
         entry: { index: mutation.entryIndex }
       });
       if (!unpacked.ok) {
@@ -6227,7 +6427,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             timeoutMs: 120_000,
             commandOptions: {
               outputPath: context.outputPath,
-              expectedDocumentHash: unpacked.child.storedContentHash,
+              // S29：storedContentHash 缺失时对解包文件现算（写前读到的就是写时文件）。
+              expectedDocumentHash: unpacked.child.storedContentHash
+                || await sha256FileNow(unpacked.child.absolutePath),
               mutation: 'upsert',
               id: mutation.rowId,
               dataBase64: mutation.rowDataBase64,
@@ -6270,7 +6472,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const outcome = await applyNativeMutation({
         file,
         sourceUri: containerUri,
-        expectedHash: expectedContainerHash,
+        expectedHash: containerHashNow,
         stagingRoot: storage.stagingRoot,
         allowedRoots: () => [...stage.allowedRoots],
         stagingPrefix: 'parambnd',
@@ -6286,9 +6488,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             commandOptions: {
               outputPath: context.outputPath,
               mutation: 'replace',
-              expectedContainerHash,
+              expectedContainerHash: containerHashNow,
               entryIndex: mutation.entryIndex,
-              expectedChildHash: mutation.expectedChildHash,
+              // S29：child 哈希缺失时现算（解包文件即条目存储字节，与 C# Hash 同算法）。
+              expectedChildHash: mutation.expectedChildHash
+                || await sha256FileNow(unpacked.child.absolutePath),
               contentBase64: renamedChildBase64
             },
             ...oodle
@@ -6304,7 +6508,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         title: `PARAM row name for row ${mutation.rowId} in ${unpacked.child.name}`,
         confirmActionLabel: '提交容器内 PARAM 行名变更'
       }, {
-        confirm: electronConfirmationPort(event),
+        // S29：不再接确认端口（见字段链注释）。
         commit: sessionCommitPort(activeSession, operationLog, storage)
       });
 
@@ -6438,6 +6642,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ? { oodleRuntimeRoot: session.layers.baseRoot }
       : {};
 
+    // S29：容器哈希缺失时现算，不挡写入。
+    const containerHashNow = input.file.sha256 ?? await sha256FileNow(input.file.absolutePath);
+    const childHashNow = input.expectedChildHash
+      || await sha256FileNow(input.unpackedChild.absolutePath);
+
     const paramStage = await stageBridgeOutput({
       stagingRoot: storage.stagingRoot,
       prefix: 'param-import',
@@ -6452,7 +6661,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           timeoutMs: 120_000,
           commandOptions: {
             outputPath: context.outputPath,
-            expectedDocumentHash: input.unpackedChild.storedContentHash,
+            // S29：storedContentHash 缺失时现算（写前读到的就是写时文件）。
+            expectedDocumentHash: input.unpackedChild.storedContentHash
+              || await sha256FileNow(input.unpackedChild.absolutePath),
             mutations: input.mutations
           }
         });
@@ -6491,7 +6702,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const outcome = await applyNativeMutation({
       file: input.file,
       sourceUri: input.containerUri,
-      expectedHash: input.expectedContainerHash,
+      expectedHash: containerHashNow,
       stagingRoot: storage.stagingRoot,
       allowedRoots: () => [...stage.allowedRoots],
       stagingPrefix: 'parambnd',
@@ -6507,9 +6718,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           commandOptions: {
             outputPath: context.outputPath,
             mutation: 'replace',
-            expectedContainerHash: input.expectedContainerHash,
+            expectedContainerHash: containerHashNow,
             entryIndex: input.entryIndex,
-            expectedChildHash: input.expectedChildHash,
+            expectedChildHash: childHashNow,
             contentBase64: childBase64
           },
           ...oodle
@@ -6525,7 +6736,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       title: input.title,
       confirmActionLabel: input.confirmActionLabel
     }, {
-      confirm: electronConfirmationPort(event),
+      // S29：不再接确认端口（见字段链注释）。
       commit: sessionCommitPort(session, operationLog, storage)
     });
 
@@ -8283,6 +8494,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           logicalName,
           kind: 'plaintext',
           sourceText: decodePlaintext(bytes.subarray(0, contentEnd), verdict.detectedEncoding),
+          encoding: verdict.detectedEncoding,
           decompiled: false,
           ...containerFields,
           writeSupported: true,
@@ -8340,6 +8552,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         logicalName,
         kind: 'decompiled',
         sourceText: decompiled.stdout,
+        encoding: 'decompiled',
         decompiled: true,
         decompiler: decompilerLabel(probe.origin),
         ...containerFields,
@@ -8364,7 +8577,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       entryName: string | undefined,
       expectedChildHash: string | undefined,
       expectedContainerHash: string | undefined,
-      sourceText: string
+      sourceText: string,
+      encoding?: string
     ): Promise<RendererSaveResult> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
       if (!file) {
@@ -8391,6 +8605,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }]
         };
       }
+      // S34：按打开编码写回。encoding 来自 readScriptSource：明文条目是检测到的
+      // 编码，decompiled/ascii/utf8 一律按 UTF-8 落盘（反编译文本写回明文 Lua；
+      // ascii 是 UTF-8 子集，编码后字节一致）。mixed-unknown 在 encodePlaintext
+      // 内拒绝 —— 解码-编码往返会丢字节，禁止文本级写回。
+      const writeEncoding = (encoding === 'utf8-bom' || encoding === 'shift_jis')
+        ? encoding
+        : 'utf8';
       const operationLog = await ensureActiveOperationLog(activeSession);
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       if (entryName) {
@@ -8407,23 +8628,33 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           childHash = read.hash ?? '';
         }
         const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: `${file.relativePath} / ${entryName}`,
-          sourceUri,
-          actionLabel: '保存脚本源码',
-          payloadHash: createHash('sha256')
-            .update(`${containerHash}\n${childHash}\n${sourceText}`)
-            .digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
+        const encoded = encodePlaintext(sourceText, writeEncoding);
+        if (!encoded.ok) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error' as const,
+              code: encoded.code,
+              message: encoded.message,
+              sourceUri
+            }]
+          };
+        }
+        // S29/S34：不再弹「保存脚本源码」确认 —— 写入经 Patch Engine 备份/回滚，
+        // replaceContainerChild 仍要求 receipt 凭据，这里直接构造（无交互）。
         const result = await replaceContainerChild({
           file,
           childUri,
           expectedContainerHash: containerHash,
           expectedChildHash: childHash,
-          newContentBase64: Buffer.from(sourceText, 'utf8').toString('base64'),
-          confirmation,
+          newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
+          confirmation: createConfirmationReceipt({
+            subjects: [sourceUri, 'script-source-save'],
+            riskLevel: 'caution',
+            sourceUri,
+            note: '脚本源码保存（按打开编码写回）'
+          }),
           session: activeSession,
           operationLog,
           ...storage
@@ -8434,26 +8665,36 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
         return toRendererSaveResult(result, indexedFiles);
       }
-      let result = await saveTextResource({
-        file,
-        newText: sourceText,
-        session: activeSession,
-        operationLog,
-        ...storage
-      });
-      if (!result.ok && result.requiresConfirmation) {
-        const confirmation = await requestWriteConfirmation({
-          event,
-          resourceLabel: file.relativePath,
-          sourceUri,
-          actionLabel: '保存脚本源码',
-          payloadHash: createHash('sha256').update(sourceText).digest('hex')
-        });
-        if (!confirmation) return cancelledWrite(sourceUri);
+      // 独立脚本文件：UTF-8 走文本保存链；utf8-bom/shift_jis 走编码感知的
+      // 整文件字节替换（saveTextResource 恒按 UTF-8 落盘，会改写字节）。
+      let result: SaveTextResourceResult;
+      if (writeEncoding === 'utf8') {
         result = await saveTextResource({
           file,
           newText: sourceText,
-          confirmation,
+          session: activeSession,
+          operationLog,
+          ...storage
+        });
+      } else {
+        const encoded = encodePlaintext(sourceText, writeEncoding);
+        if (!encoded.ok) {
+          return {
+            ok: false,
+            changedFiles: [],
+            diagnostics: [{
+              severity: 'error' as const,
+              code: encoded.code,
+              message: encoded.message,
+              sourceUri
+            }]
+          };
+        }
+        result = await saveRawReplace({
+          file,
+          expectedHash: file.sha256 ?? await sha256FileNow(file.absolutePath),
+          newContentBase64: Buffer.from(encoded.bytes).toString('base64'),
+          title: `保存脚本源码（${writeEncoding}）`,
           session: activeSession,
           operationLog,
           ...storage
@@ -8968,7 +9209,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    */
   const agentReferenceRegistry = new Map<
     string,
-    { ownerId: string; tokenId: string; citation?: ParamCitation }
+    { ownerId: string; tokenId: string; citation?: Citation }
   >();
 
   /**
@@ -9082,7 +9323,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         };
       }
       if (registered.citation !== undefined) {
-        citationLines.push(formatParamCiteLabel(registered.citation));
+        citationLines.push(formatCitationLabel(registered.citation));
       }
     }
     const stored = (await modelServiceVault.listConfigs()).find((config) => config.id === request.configId);
@@ -9119,7 +9360,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ...(stored.topP !== undefined ? { topP: stored.topP } : {}),
       ...(stored.topK !== undefined ? { topK: stored.topK } : {}),
       ...(stored.maxTokens !== undefined ? { maxTokens: stored.maxTokens } : {}),
-      ...(stored.thinkingLevel !== undefined ? { thinkingLevel: stored.thinkingLevel } : {})
+      // S32：请求级思考强度优先于服务级默认（输入条改了就用新的）。
+      ...(request.thinkingLevel !== undefined
+        ? { thinkingLevel: request.thinkingLevel }
+        : stored.thinkingLevel !== undefined
+          ? { thinkingLevel: stored.thinkingLevel }
+          : {})
     };
     const contextWindowTokens = stored.contextWindowTokens;
     const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey });
@@ -9685,7 +9931,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const hitsValue = typeof request === 'object' && request !== null
       ? (request as Record<string, unknown>).hits
       : undefined;
-    let citation: ParamCitation | null = null;
+    let citation: Citation | null = null;
     try {
       citation = mergeCiteHits(decodeCiteHits(hitsValue));
     } catch (error) {
@@ -9705,17 +9951,19 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
     const tokenId = randomUUID();
     const ownerId = String(event.sender.id);
-    const label = formatParamCiteLabel(citation);
+    const label = formatCitationLabel(citation);
+    // S10：引用领域随命中种类 —— param 行/字段、text 条目、event 脚本。
+    const domain = citation.kind === 'param' ? 'param' : citation.kind;
     const token = mintAgentReferenceToken({
       kind: 'citation',
       tokenId,
       ownerId,
-      domain: 'param',
+      domain,
       label
     });
     const reference: AgentResourceReference = {
       token,
-      domain: 'param',
+      domain,
       label,
       expiresAt: agentReferenceExpiresAt()
     };

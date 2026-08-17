@@ -11,6 +11,7 @@ import type {
   DirectorySelection,
   OpenWorkspaceScanOptions,
   RendererWorkspaceScanResult,
+  RendererWorkspaceSession,
   RollbackOperationIpcResult,
   TextCatalogResponse
 } from '../main/ipc.js';
@@ -56,6 +57,7 @@ import type {
   CiteHit
 } from '@soulforge/shared';
 import { EDITOR_DOCUMENT_IPC_CHANNELS } from '@soulforge/shared';
+import { maskPathFragments } from '@soulforge/shared';
 
 /** Path-bearing fields that must never cross the context bridge to the renderer. */
 const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
@@ -67,14 +69,10 @@ const RENDERER_FORBIDDEN_PATH_KEYS = new Set([
   'backupPath'
 ]);
 
-/** Mask absolute filesystem paths that may appear inside diagnostic strings. */
+/** Mask absolute filesystem paths that may appear inside diagnostic strings.
+ *  S13：与 main 共用 shared 的同一规则 —— 只打码路径片段，保留上下文。 */
 function maskAbsolutePathString(value: string): string {
-  const containsWindowsDrivePath = /(^|[\s('"=])(?:[A-Za-z]:[\\/])/.test(value);
-  const containsUncOrDevicePath = /(^|[\s('"=])\\\\(?:[?.]\\)?[^\\/\s]+[\\/]/.test(value);
-  const containsAbsoluteFileUri = /file:\/\/\/[A-Za-z]:\//i.test(value);
-  return containsWindowsDrivePath || containsUncOrDevicePath || containsAbsoluteFileUri
-    ? '[本机路径已隐藏]'
-    : value;
+  return maskPathFragments(value);
 }
 
 function stripPathFields<T>(value: T): T {
@@ -129,6 +127,11 @@ const api = {
   openBaseDialog: (): Promise<DirectorySelection | null> => ipcRenderer.invoke('workspace.openBaseDialog'),
   scanWorkspace: (options: OpenWorkspaceScanOptions): Promise<RendererWorkspaceScanResult> =>
     ipcRenderer.invoke('workspace.scan', options),
+  // S22：工作区已打开时重挂原版目录（baseSelectionId=null 卸载原版层），当场生效。
+  remountBase: (baseSelectionId: string | null): Promise<{
+    workspaceSessionId: string;
+    session: RendererWorkspaceSession;
+  }> => ipcRenderer.invoke('workspace.remountBase', baseSelectionId),
   detectMe3: (): Promise<import('@soulforge/core').RuntimeCapability> =>
     ipcRenderer.invoke('runtime.detectMe3'),
   prepareMe3Profile: (): Promise<import('@soulforge/core').RuntimeOperationResult<import('@soulforge/core').RuntimeProfileRef>> =>
@@ -213,7 +216,8 @@ const api = {
     entryName: string | undefined,
     expectedChildHash: string | undefined,
     expectedContainerHash: string | undefined,
-    sourceText: string
+    sourceText: string,
+    encoding?: string
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke(
       'resource.saveScriptSource',
@@ -221,7 +225,8 @@ const api = {
       entryName,
       expectedChildHash,
       expectedContainerHash,
-      sourceText
+      sourceText,
+      encoding
     ),
   listOperations: (): Promise<RendererPatchHistoryEntry[]> => ipcRenderer.invoke('operation.list'),
   rollbackOperation: (opId: string): Promise<RollbackOperationIpcResult> =>
@@ -303,8 +308,8 @@ const api = {
    */
   cancelEmevdFullDocument: (): Promise<{ ok: boolean; cancelled: boolean }> =>
     ipcRenderer.invoke('resource.cancelEmevdFullDocument'),
-  submitEmevdDslPlan: (sourceUri: string, sourceText: string): Promise<RendererSaveResult> =>
-    ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText),
+  submitEmevdDslPlan: (sourceUri: string, sourceText: string, mode: 'patch' | 'dark-script' = 'patch'): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.submitEmevdDslPlan', sourceUri, sourceText, mode),
   readEmedfCompletionCatalog: (): Promise<{
     ok: boolean;
     origin: 'imported' | 'fixture';
@@ -349,12 +354,18 @@ const api = {
   /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。 */
   readTaeChrbndPreview: (sourceUri: string, meshIndex: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri, meshIndex),
+  // S23：按 modelName 在 mapbnd 容器里取 part 的 FLVER 网格（地图 viewport）。
+  readMapPartMesh: (msbSourceUri: string, modelName: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readMapPartMesh', msbSourceUri, modelName),
   readEsdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
   readMtdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMtdDocument', sourceUri),
-  readFxrDocument: (sourceUri: string): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readFxrDocument', sourceUri),
+  readFxrDocument: (sourceUri: string, entryName?: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readFxrDocument', sourceUri, entryName),
+  // S24：ffxbnd 效果库的 .fxr 子项清单（逻辑名）。
+  listFxrEntries: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.listFxrEntries', sourceUri),
   readFlverDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverDocument', sourceUri),
   readTpfDocument: (sourceUri: string): Promise<unknown> =>

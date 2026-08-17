@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react';
-import type { AiPermissionMode } from '@soulforge/core';
+import type { AiPermissionMode, ModelThinkingLevel } from '@soulforge/core';
 import { AgentParticipantBar, interactionModeLabel, type AgentInteractionMode } from './AgentParticipantBar.js';
 import { AgentContextChipList, type AgentContextChip } from './AgentContextChipList.js';
 import {
@@ -32,6 +32,9 @@ export interface AgentComposerProps {
   onToggleCiteSelect: () => void;
   /** 已选中逻辑资源的域标签（chip 展示；选区元数据随 runAiAgent 提交，不入 prompt）。 */
   contextLabel: string;
+  /** S32：思考强度（关/快/普通/深/极致），与模型拆成两个控件。 */
+  thinking: ModelThinkingLevel;
+  onThinkingChange: (thinking: ModelThinkingLevel) => void;
 }
 
 /**
@@ -66,7 +69,9 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
     onOpenModelSettings,
     citeSelecting,
     onToggleCiteSelect,
-    contextLabel
+    contextLabel,
+    thinking,
+    onThinkingChange
   } = props;
 
   const action = composerActionState({ prompt, streaming, awaitingApproval });
@@ -82,12 +87,6 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
 
   return (
     <div className="agent__composer" data-testid="agent-composer" aria-label="Agent 输入区">
-      <AgentParticipantBar
-        mode={interactionMode}
-        onModeChange={(mode) => onInteractionModeChange?.(mode)}
-        permissionMode={permissionMode}
-        permissionLockReason={permissionLockReason}
-      />
       <div className="agent-composer__body">
         <AgentContextChipList chips={chips} />
         <AgentPromptEditor
@@ -109,7 +108,12 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
         attachmentReason="文件附件尚未接通（60C 只接资源引用）；当前文件可经上方「+ 资源引用」添加 main 签发的 opaque 引用。"
         modelLabel={modelLabel}
         onOpenModelSettings={onOpenModelSettings}
-        planLabel={interactionModeLabel(interactionMode)}
+        interactionMode={interactionMode}
+        onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
+        permissionMode={permissionMode}
+        permissionLockReason={permissionLockReason}
+        thinking={thinking}
+        onThinkingChange={onThinkingChange}
       />
     </div>
   );

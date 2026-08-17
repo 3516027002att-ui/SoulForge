@@ -9,8 +9,11 @@
  * 中栏列当前动画的词条事件列表——envelope 只有 eventTypeId 与起止时间，词条文本名
  * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后在中栏下方
  * 详情列出 Start Frame / End Frame / Id 与能解出的全部字段；解不出的字段写
- * 「未解码」+ 原始数值，禁止编造 SoundType 含义。右栏是只读 3D 预览：TAE/anibnd
- * 不是模型文件，本夜不挂伴生 chrbnd 的 FLVER，诚实空态「预览不可用」+ 文档诊断。
+ * 「未解码」+ 原始数值，禁止编造 SoundType 含义。
+ * 右栏是只读 3D 预览（S17）：`read-chrbnd-flver-preview`（已登记进
+ * AdvertisedCommands）从 overlay 或原版 chr/<id>.chrbnd.dcx 取伴生 FLVER，
+ * 挂进现有 FlverViewer 画网格。两边都没有 chrbnd 时给可行动空态（去「开始」页
+ * 挂原版）；动画播放未接入，空态明说「模型已挂，动画播放未接入」，不假装在播。
  * 不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
  *
  * ── 事件参数体未解码是刻意边界 ──
@@ -54,6 +57,7 @@ import { formatListTruncation } from '../format/uiText.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
+import { FlverViewer } from './FlverViewer.js';
 
 /** 动画表渲染上限（上游数据截断；列表本身由布局栏滚动承载）。 */
 const ANIMATION_RENDER_LIMIT = 200;
@@ -375,7 +379,25 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     error: string | null;
     meshCount: number;
     boneCount: number;
-  }>({ loading: true, error: null, meshCount: 0, boneCount: 0 });
+    /** chrbnd 里 FLVER 的网格/骨骼数据（有网格时右栏直接画）。 */
+    mesh:
+      | {
+          positionsBase64: string;
+          indicesBase64: string;
+          uvsBase64?: string;
+          normalsBase64?: string;
+          boneWeightsBase64?: string;
+          boneIndicesBase64?: string;
+          vertexCount: number;
+        }
+      | null;
+    bones: Array<{
+      name: string;
+      parentIndex: number;
+      translation: [number, number, number];
+      rotation: [number, number, number];
+    }>;
+  }>({ loading: true, error: null, meshCount: 0, boneCount: 0, mesh: null, bones: [] });
 
   const document = useMemo(() => {
     const source = refreshedDocument ?? props.data;
@@ -390,7 +412,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   useEffect(() => {
     setRefreshedDocument(null);
     setEventParams(null);
-    setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0 });
+    setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, mesh: null, bones: [] });
   }, [props.resourceUri, props.data]);
 
   /** S17：词条名目录一次拉取（模板只读本机；失败时列表显示数字 id + 「未命名」）。 */
@@ -465,18 +487,34 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   /** S17：伴生 chrbnd FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动错误）。 */
   useEffect(() => {
     if (!document) {
-      setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0 });
+      setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, mesh: null, bones: [] });
       return;
     }
     const bridge = getRendererBridge();
     if (!bridge || typeof bridge.readTaeChrbndPreview !== 'function') return;
     let cancelled = false;
-    setPreview({ loading: true, error: null, meshCount: 0, boneCount: 0 });
+    setPreview({ loading: true, error: null, meshCount: 0, boneCount: 0, mesh: null, bones: [] });
     bridge.readTaeChrbndPreview(props.resourceUri, 0).then((raw) => {
       if (cancelled) return;
       const result = raw as {
         ok?: boolean;
-        data?: { meshCount?: number; boneCount?: number };
+        data?: {
+          meshCount?: number;
+          boneCount?: number;
+          positionsBase64?: string;
+          indicesBase64?: string;
+          uvsBase64?: string;
+          normalsBase64?: string;
+          boneWeightsBase64?: string;
+          boneIndicesBase64?: string;
+          vertexCount?: number;
+          bones?: Array<{
+            name: string;
+            parentIndex: number;
+            translation: number[];
+            rotation: number[];
+          }>;
+        };
         diagnostics?: Array<{ message?: string }>;
       };
       if (result.ok && result.data) {
@@ -484,18 +522,37 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           loading: false,
           error: null,
           meshCount: result.data.meshCount ?? 0,
-          boneCount: result.data.boneCount ?? 0
+          boneCount: result.data.boneCount ?? 0,
+          mesh: result.data.positionsBase64
+            ? {
+                positionsBase64: result.data.positionsBase64,
+                indicesBase64: result.data.indicesBase64 ?? '',
+                ...(result.data.uvsBase64 ? { uvsBase64: result.data.uvsBase64 } : {}),
+                ...(result.data.normalsBase64 ? { normalsBase64: result.data.normalsBase64 } : {}),
+                ...(result.data.boneWeightsBase64 ? { boneWeightsBase64: result.data.boneWeightsBase64 } : {}),
+                ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
+                vertexCount: result.data.vertexCount ?? 0
+              }
+            : null,
+          bones: (result.data.bones ?? []).map((bone) => ({
+            name: bone.name,
+            parentIndex: bone.parentIndex,
+            translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
+            rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
+          }))
         });
       } else {
         setPreview({
           loading: false,
           error: result.diagnostics?.[0]?.message ?? '模型预览不可用。',
           meshCount: 0,
-          boneCount: 0
+          boneCount: 0,
+          mesh: null,
+          bones: []
         });
       }
     }).catch(() => {
-      if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', meshCount: 0, boneCount: 0 });
+      if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', meshCount: 0, boneCount: 0, mesh: null, bones: [] });
     });
     return () => {
       cancelled = true;
@@ -762,11 +819,27 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       </p>
                     </>
                   )}
-                  {!preview.loading && preview.error === null && (
+                  {!preview.loading && preview.error === null && preview.mesh !== null && (
+                    <div className="tae-preview__viewport" data-testid="tae-preview-viewport">
+                      <FlverViewer
+                        meshIndex={0}
+                        meshCount={preview.meshCount}
+                        boneCount={preview.boneCount}
+                        externalMeshData={preview.mesh}
+                        externalBones={preview.bones}
+                      />
+                    </div>
+                  )}
+                  {!preview.loading && preview.error === null && preview.mesh === null && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
                       {preview.meshCount > 0
-                        ? `已挂伴生模型：${preview.meshCount} meshes / ${preview.boneCount} bones（只读；骨骼动画播放未接入）`
-                        : '已找到伴生模型（chrbnd），但未解析出可显示网格。'}
+                        ? `已找到伴生模型（chrbnd）：${preview.meshCount} meshes / ${preview.boneCount} bones，但该网格数据不可用。`
+                        : '没有找到该模型的网格数据（chrbnd 内无 FLVER 网格）。'}
+                    </p>
+                  )}
+                  {!preview.loading && preview.error === null && preview.mesh !== null && (
+                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-mesh-note">
+                      模型已挂，动画播放未接入（骨骼动画预览尚未实现）。
                     </p>
                   )}
                   {isPartial && invalidRangeCount > 0 && (
@@ -786,7 +859,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   )}
                   {document.diagnostics.length > 0 && !(isPartial && invalidRangeCount > 0) && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-diagnostics">
-                      {document.diagnostics.length} 条文档诊断（见底部日志）。
+                      {document.diagnostics.length} 条文档诊断。
                     </p>
                   )}
                 </>

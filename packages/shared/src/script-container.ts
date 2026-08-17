@@ -163,6 +163,12 @@ export interface ScriptSourceView {
   kind: 'plaintext' | 'decompiled' | 'failure';
   /** 可编辑源码文本（plaintext / decompiled 时存在）。 */
   sourceText?: string;
+  /**
+   * 打开时的字节编码（S34「按打开编码写回」）：
+   * 明文条目为检测到的编码；反编译条目为 'decompiled'（写回明文 Lua，
+   * 与编码无关）；失败条目无此字段。
+   */
+  encoding?: 'ascii' | 'utf8' | 'utf8-bom' | 'shift_jis' | 'mixed-unknown' | 'decompiled';
   /** sourceText 是否为反编译器输出（非原文件文本）。 */
   decompiled?: boolean;
   /** 反编译器人类可读标识，如 "DSLuaDecompiler v1.1.5"。 */

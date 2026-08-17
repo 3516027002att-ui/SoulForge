@@ -24,7 +24,9 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   EventSourceWorkbenchPanel,
   baselineText,
+  buildInspectorRows,
   isSourceReadOnly,
+  parseInspectorCall,
   type EventSourceTabData
 } from './EventSourceWorkbenchPanel.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
@@ -246,20 +248,201 @@ describe('S15 事件失败面：读取失败时源码区给可行动句，禁止
   });
 });
 
-describe('DarkScript 源码只读（按钮层与 CodeMirror 创建共用同一判据）', () => {
-  it('live DarkScript 也必须只读，不能只靠 !live', () => {
+describe('S14：DarkScript 源码可编辑（去橙头 / 去黄条 / 去只读锁）', () => {
+  it('live DarkScript 不再只读：$Event 源码可编辑（写链是反汇编形状对齐编译器）', () => {
     assert.equal(isSourceReadOnly({
       live: true,
       dslTemplate: '$Event(0, Default, function() {});',
       sourceStyle: 'dark-script'
+    }), false);
+  });
+
+  it('不可编只剩两类：非 live（读取失败）与无 dslTemplate（EMEDF 缺失失败关闭）', () => {
+    assert.equal(isSourceReadOnly({
+      live: false,
+      dslTemplate: 'x',
+      sourceStyle: 'dark-script'
+    }), true);
+    assert.equal(isSourceReadOnly({
+      live: true,
+      dslTemplate: null,
+      sourceStyle: 'dark-script'
     }), true);
   });
 
-  it('未标记 dark-script 的 live 模板仍可编辑（写链保留给 patch-dsl）', () => {
-    assert.equal(isSourceReadOnly({
-      live: true,
-      dslTemplate: '$Resource file://event/common.emevd',
-      sourceStyle: 'patch-dsl'
-    }), false);
+  it('没有橙色头（EVENT / SOURCE 眉题与 h2 都不渲染）', () => {
+    const html = render();
+    assert.doesNotMatch(html, /EVENT \/ SOURCE/);
+    assert.doesNotMatch(html, /event-source__header/);
+    assert.doesNotMatch(html, />事件源码工作台<\/h2>/);
+  });
+
+  it('没有日常黄条（只读展示 / 写入仍经 Bridge 与补丁引擎 字样不出现）', () => {
+    const html = render();
+    assert.doesNotMatch(html, /反汇编源码只读/);
+    assert.doesNotMatch(html, /本版只读展示/);
+    assert.doesNotMatch(html, /写入仍经 Bridge/);
+    assert.doesNotMatch(html, /补丁引擎/);
+  });
+
+  it('没有「编译并提交」按钮；工具条只留查找/保存提示', () => {
+    const html = render();
+    assert.doesNotMatch(html, />编译并提交</);
+    assert.doesNotMatch(html, /提交中…/);
+    assert.match(html, /查找：Ctrl\+F/);
+    assert.match(html, /保存：Ctrl\+S/);
+  });
+
+  it('Ctrl+S 进 CodeMirror keymap（Mod-s 保存当前源码）', () => {
+    const panelSource = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
+      'utf8'
+    );
+    assert.match(panelSource, /key: 'Mod-s'/);
+  });
+
+  it('保存失败提示是结构化诊断，不带「见底部日志」', () => {
+    const html = render();
+    // 就绪态不渲染 status；有状态变化时 role="status" 承载诊断文案。
+    assert.doesNotMatch(html, /见底部日志/);
+    const panelSource = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
+      'utf8'
+    );
+    assert.match(panelSource, /role="status"/);
+  });
+});
+
+describe('S31 右栏词义：选中语句 → EMEDF 参数说明（纯函数）', () => {
+  it('parseInspectorCall：普通调用行解析出名字与参数值', () => {
+    const result = parseInspectorCall('InitializeEvent(0,77770001,0)');
+    assert.equal(result.kind, 'call');
+    if (result.kind === 'call') {
+      assert.equal(result.call.name, 'InitializeEvent');
+      assert.deepEqual(result.call.args, [0, 77770001, 0]);
+    }
+  });
+
+  it('parseInspectorCall：WaitFor 折叠块拆成 predicate 列表（数字/布尔）', () => {
+    const result = parseInspectorCall('WaitFor(IfPlayerHasItem(6,2498)&&IfCharacterHasSpEffect(10000,127800));');
+    assert.equal(result.kind, 'wait');
+    if (result.kind === 'wait') {
+      assert.equal(result.predicates.length, 2);
+      assert.deepEqual(result.predicates[0]!.args, [6, 2498]);
+      assert.deepEqual(result.predicates[1]!.args, [10000, 127800]);
+    }
+  });
+
+  it('parseInspectorCall：事件头 / 注释 / 空行 → none', () => {
+    assert.equal(parseInspectorCall('$Event(0,Default,function(){').kind, 'none');
+    assert.equal(parseInspectorCall('//unknownbank=9999id=7').kind, 'none');
+  });
+
+  it('parseInspectorCall：无法解析的行 → unparseable', () => {
+    assert.equal(parseInspectorCall('&&IfCharacterHasSpEffect(10000,127800));').kind, 'unparseable');
+    assert.equal(parseInspectorCall('Name(abc);').kind, 'unparseable');
+  });
+
+  it('buildInspectorRows：命中 EMEDF 目录 → 每参数名/类型/当前值', () => {
+    const catalog = [{
+      name: 'InitializeEvent', bank: 2000, id: 0,
+      args: [
+        { name: 'eventSlotId', type: 's32' as const },
+        { name: 'eventId', type: 'u32' as const },
+        { name: 'params', type: 'u32' as const, vararg: true }
+      ]
+    }];
+    const { rows, unknownNames } = buildInspectorRows(
+      { kind: 'call', call: { name: 'InitializeEvent', args: [9, 77770002, 0] } },
+      catalog
+    );
+    assert.equal(unknownNames.length, 0);
+    assert.equal(rows.length, 1);
+    const row = rows[0]!;
+    assert.equal(row.bank, 2000);
+    assert.equal(row.id, 0);
+    assert.equal(row.args.length, 3);
+    assert.deepEqual(row.args.map((a) => [a.name, a.value]), [
+      ['eventSlotId', '9'],
+      ['eventId', '77770002'],
+      ['params', '0']
+    ]);
+  });
+
+  it('buildInspectorRows：同名的不同 bank:id 全部列出（不猜歧义）', () => {
+    const catalog = [
+      { name: 'IfPlayerHasItem', bank: 4, id: 10, args: [{ name: 'resultConditionGroup', type: 's8' as const }, { name: 'itemType', type: 'u32' as const }, { name: 'itemId', type: 'u32' as const }] },
+      { name: 'IfPlayerHasItem', bank: 5, id: 77, args: [{ name: 'other', type: 's8' as const }] }
+    ];
+    const { rows } = buildInspectorRows(
+      { kind: 'call', call: { name: 'IfPlayerHasItem', args: [1, 6, 2498] } },
+      catalog
+    );
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.map((r) => r.bank), [4, 5]);
+  });
+
+  it('buildInspectorRows：WaitFor predicate 的 conditionGroup 簿记参数标「折叠隐藏」', () => {
+    const catalog = [{
+      name: 'IfPlayerHasItem', bank: 4, id: 10,
+      args: [
+        { name: 'resultConditionGroup', type: 's8' as const },
+        { name: 'itemType', type: 'u32' as const },
+        { name: 'itemId', type: 'u32' as const }
+      ]
+    }];
+    const { rows } = buildInspectorRows(
+      { kind: 'wait', predicates: [{ name: 'IfPlayerHasItem', args: [6, 2498] }] },
+      catalog
+    );
+    const args = rows[0]!.args;
+    assert.equal(args[0]!.hidden, true);
+    assert.equal(args[0]!.value, '（折叠隐藏）');
+    assert.deepEqual(args.slice(1).map((a) => a.value), ['6', '2498']);
+  });
+
+  it('buildInspectorRows：目录匹配不到的名字进 unknownNames（诚实未解码）', () => {
+    const { rows, unknownNames } = buildInspectorRows(
+      { kind: 'call', call: { name: 'MysteryOp', args: [1] } },
+      []
+    );
+    assert.equal(rows.length, 0);
+    assert.deepEqual(unknownNames, ['MysteryOp']);
+  });
+
+  it('SSR 骨架含词义栏与空态', () => {
+    const html = render();
+    assert.match(html, /aria-label="事件源码说明"/);
+    assert.match(html, /选中一条语句查看参数说明。/);
+  });
+
+  it('分栏按钮与每列独立 host（data-tab-id）存在，列间不共享编辑器', () => {
+    const html = render();
+    assert.match(html, /分栏 1/);
+    const panelSource = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
+      'utf8'
+    );
+    assert.match(panelSource, /data-tab-id=\{tab\.tabId\}/);
+    assert.match(panelSource, /setColumnCount/);
+    assert.match(panelSource, /每个 tab 列一个 host \+ 一个 EditorView/);
+  });
+});
+
+describe('S10 扩展：事件源码区是可引用节点（data-cite）', () => {
+  const panelSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
+    'utf8'
+  );
+
+  it('源码区 section 挂 data-cite（event-script：script=tabId 逻辑 URI，label=短标题）', () => {
+    assert.match(panelSource, /citeScriptAttr\(tab\.tabId, tab\.title\)/);
+    assert.match(panelSource, /kind: 'event-script'/);
+    assert.match(panelSource, /library: 'event'/);
+  });
+
+  it('data-cite 只含逻辑 id：script 来自 tabId（sourceUri），不带本机绝对路径', () => {
+    assert.doesNotMatch(panelSource, /data-cite.*absolutePath/s);
+    assert.match(panelSource, /script: tabId/);
   });
 });

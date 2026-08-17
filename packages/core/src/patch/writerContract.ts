@@ -193,27 +193,13 @@ export function evaluateRawWriterGate(input: {
     reasons,
     { ...raw, requiresConfirmation: true },
     diagnostics,
-    true,
+    // S29：不再以「高风险写入确认」挡写入 —— 哈希并发保护与 Patch Engine
+    // 备份/回滚照旧，能打开的资源就能直接写（grok §1-10）。
+    false,
     caps.isPackedOrNative
-      ? 'High-risk raw write of native/packed format. Requires confirmation. Not native roundtrip safe.'
-      : 'Raw write requires confirmation and hash precondition.'
+      ? 'High-risk raw write of native/packed format. Not native roundtrip safe.'
+      : 'Raw write requires hash precondition.'
   );
-
-  const receiptOk = isValidConfirmation(input.confirmation, risk, input.file.sourceUri);
-  if (!receiptOk) {
-    diagnostics.push({
-      severity: 'error',
-      code: 'EDIT_CONFIRMATION_REQUIRED',
-      message: 'Raw write requires an explicit risk confirmation receipt before Patch Engine commit.',
-      sourceUri: input.file.sourceUri,
-      details: {
-        riskLevel: level,
-        operation: input.operation,
-        reasons
-      }
-    });
-    return { ok: false, risk: { ...risk, allowWithConfirmation: true }, diagnostics };
-  }
 
   return { ok: true, risk, diagnostics };
 }
@@ -373,20 +359,8 @@ export function evaluateWriterGate(input: WriterGateInput): WriterGateResult {
     return { ok: false, risk, diagnostics };
   }
 
-  if (risk.contract.requiresConfirmation || risk.level === 'caution' || risk.level === 'high') {
-    const receiptOk = isValidConfirmation(input.confirmation, risk, input.file.sourceUri);
-    if (!receiptOk) {
-      diagnostics.push({
-        severity: 'error',
-        code: 'EDIT_CONFIRMATION_REQUIRED',
-        message: 'This edit requires an explicit risk confirmation receipt before Patch Engine commit.',
-        sourceUri: input.file.sourceUri,
-        details: { riskLevel: risk.level, reasons: risk.reasons }
-      });
-      return { ok: false, risk: { ...risk, allowWithConfirmation: true }, diagnostics };
-    }
-  }
-
+  // S29：不再以「高风险/需确认」弹窗挡文本写 —— 能打开、能编的资源直接写
+  // （grok §1-10）。风险评估仍随结果返回，供 UI 展示。
   return { ok: true, risk, diagnostics };
 }
 
@@ -453,30 +427,6 @@ function defaultSummary(level: EditRiskLevel, reasons: string[], contract: Write
     return contract.notes ?? `Write blocked (${reasons.join(', ') || 'no writer'}).`;
   }
   return `Edit risk ${level}: ${reasons.join(', ') || 'confirmation required'}. ${contract.notes ?? ''}`.trim();
-}
-
-function isValidConfirmation(
-  receipt: ConfirmationReceipt | null | undefined,
-  risk: EditRiskAssessment,
-  sourceUri: string
-): boolean {
-  if (!receipt) return false;
-  if (!receipt.id || !receipt.confirmedAt || !Array.isArray(receipt.subjects) || receipt.subjects.length === 0) {
-    return false;
-  }
-  if (receipt.riskLevel !== risk.level && !(receipt.riskLevel === 'high' && risk.level === 'caution')) {
-    // Allow a higher-severity receipt to cover a lower residual risk.
-    const order: EditRiskLevel[] = ['safe', 'caution', 'high', 'blocked'];
-    if (order.indexOf(receipt.riskLevel) < order.indexOf(risk.level)) return false;
-  }
-  if (receipt.sourceUri && receipt.sourceUri !== sourceUri) return false;
-  const subjectSet = new Set(receipt.subjects);
-  // Receipt must acknowledge the resource and at least one risk reason (or a blanket ACK).
-  const acknowledgesResource = subjectSet.has(sourceUri) || subjectSet.has('resource');
-  const acknowledgesRisk = risk.reasons.some((reason) => subjectSet.has(reason))
-    || subjectSet.has('ALL_RISKS')
-    || subjectSet.has(risk.level);
-  return acknowledgesResource && acknowledgesRisk;
 }
 
 /** Placeholder structured writer registry — empty until real implementations land. */

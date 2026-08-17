@@ -269,8 +269,18 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
 
   const [selectedRowId, setSelectedRowId] = useState<number | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [commitMessage, setCommitMessage] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
+  /** S28：工作台内短时保存提示（成功几秒后消失）；失败留在原处直到下次操作。 */
+  const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  function showToast(text: string, kind: 'ok' | 'error'): void {
+    setToast({ text, kind });
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    // 失败不自动消失：用户要能读到原因；成功几秒后自己消失。
+    if (kind === 'ok') {
+      toastTimerRef.current = window.setTimeout(() => setToast(null), 2500);
+    }
+  }
   /** 行名编辑草稿：非 null 表示正在编辑选中行的名字。 */
   const [rowNameDraft, setRowNameDraft] = useState<string | null>(null);
   const [rowNameCommitting, setRowNameCommitting] = useState(false);
@@ -311,7 +321,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     setRowQuery('');
     setSelectedRowId(null);
     setDrafts({});
-    setCommitMessage(null);
+    setToast(null);
     // 连续列表必须清：残留会让新 param 的列表里混着上一个 param 的行，
     // 而两者行宽通常不同，选中后字段会按错误的定义解码。
     setLoadedRows([]);
@@ -324,7 +334,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
 
   useEffect(() => {
     setDrafts({});
-    setCommitMessage(null);
     setRowNameDraft(null);
   }, [selectedRowId]);
 
@@ -621,6 +630,21 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
     setEnumFilter('');
   }, [selectedRowId]);
 
+  // S28：点击枚举列表/展开钮之外任意处收起列表（换字段、点其他行、
+  // 关 tab 都走到这里）。列表本身用 capture 阶段冒泡到 document，target
+  // 是否在列表或按钮内由调用点判断。
+  useEffect(() => {
+    if (enumOpenFieldId === null) return;
+    function onPointerDown(event: PointerEvent): void {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('.wb-enum-list, .wb-enum-toggle')) return;
+      setEnumOpenFieldId(null);
+      setEnumFilter('');
+    }
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [enumOpenFieldId]);
+
   /**
    * 行表虚拟化。
    *
@@ -645,6 +669,14 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const virtualRows = rowVirtualizer.getVirtualItems();
 
   /**
+   * S29：bool 与 1bit 位字段用打勾（grok §1-9「布尔和 1bit 用打勾，不要数字框」）。
+   * 1bit 是标量类型 + bitfield.bitWidth===1（bitOffset 任意）。
+   */
+  function isBoolLike(field: ParamFieldDef): boolean {
+    return field.type === 'bool' || field.bitfield?.bitWidth === 1;
+  }
+
+  /**
    * 提交一个字段。
    *
    * explicitValue 用于枚举选值：点选后立即提交时，setDrafts 还没生效
@@ -652,13 +684,12 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * 表现为「选了枚举值但提交的是旧值」，且没有任何报错。
    * 输入框失焦提交仍走 drafts（那时 state 已更新）。
    */
-  async function commitField(field: ParamFieldDef, explicitValue?: string): Promise<void> {
+  async function commitField(field: ParamFieldDef, explicitValue?: string | boolean): Promise<void> {
     if (!canCommitFields || !definition || !selectedRow?.dataBase64 || selectedRow === null) return;
     if (!props.onApplyFieldMutation || selectedEntry === null) return;
     const raw = explicitValue ?? drafts[field.id];
     if (raw === undefined) return;
     setCommitting(true);
-    setCommitMessage(null);
     try {
       const result = await props.onApplyFieldMutation({
         paramName: paramName ?? '',
@@ -668,26 +699,35 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         rowId: selectedRow.id,
         fieldId: field.id,
         // 数值字段按数值提交；解析失败时原样传字符串，由 main 侧的编码器给出
-        // 结构化诊断，而不是在这里悄悄改成 0。
-        value: /^(u?int|f(loat|32|64)|[su]\d+)/i.test(field.type) && raw.trim() !== '' && !Number.isNaN(Number(raw))
-          ? Number(raw)
-          : raw,
+        // 结构化诊断，而不是在这里悄悄改成 0。bool 字段把 'true'/'false'/'1'/'0'
+        // 归一成 boolean —— core 写器按 truthy 判定，字符串 'false' 会误写为 1。
+        value: field.type === 'bool'
+          ? (typeof raw === 'boolean'
+            ? raw
+            : (raw.trim().toLowerCase() === 'true' || raw.trim() === '1'))
+          : (typeof raw === 'string'
+            && /^(u?int|f(loat|32|64)|[su]\d+)/i.test(field.type)
+            && raw.trim() !== ''
+            && !Number.isNaN(Number(raw))
+            ? Number(raw)
+            : raw),
         rowDataBase64: selectedRow.dataBase64,
         definition
       });
-      setCommitMessage(result.ok
-        ? `字段 ${field.name} 已提交到变更候选。`
-        : (result.message ?? `字段 ${field.name} 提交失败。`));
+      // S28：保存成功给短时提示（几秒消失），失败留在屏幕上直到下次操作。
       if (result.ok) {
+        showToast('已保存', 'ok');
         setDrafts((current) => {
           const next = { ...current };
           delete next[field.id];
           return next;
         });
         loadRows();
+      } else {
+        showToast(result.message ?? `字段 ${field.name} 提交失败。`, 'error');
       }
     } catch (error) {
-      setCommitMessage(error instanceof Error ? error.message : '字段提交异常。');
+      showToast(error instanceof Error ? error.message : '字段提交异常。', 'error');
     } finally {
       setCommitting(false);
     }
@@ -710,7 +750,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       return;
     }
     setRowNameCommitting(true);
-    setCommitMessage(null);
     try {
       const result = await props.onApplyRowNameMutation({
         paramName: paramName ?? '',
@@ -721,13 +760,15 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         name: normalized,
         rowDataBase64: row.dataBase64
       });
-      setCommitMessage(result.ok
-        ? `行 ${row.id} 的名字已提交到变更候选。`
-        : (result.message ?? `行 ${row.id} 的名字提交失败。`));
       setRowNameDraft(null);
-      if (result.ok) loadRows();
+      if (result.ok) {
+        showToast('已保存', 'ok');
+        loadRows();
+      } else {
+        showToast(result.message ?? `行 ${row.id} 的名字提交失败。`, 'error');
+      }
     } catch (error) {
-      setCommitMessage(error instanceof Error ? error.message : '行名提交异常。');
+      showToast(error instanceof Error ? error.message : '行名提交异常。', 'error');
     } finally {
       setRowNameCommitting(false);
     }
@@ -741,21 +782,23 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * 直接写盘。
    */
   async function runCsvIo(
-    action: () => Promise<{ ok: boolean; message?: string; diagnostics?: Array<{ message?: string; severity?: string }> }>
+    action: () => Promise<{ ok: boolean; message?: string; diagnostics?: Array<{ message?: string; severity?: string }> }>,
+    successText: string
   ): Promise<void> {
     if (!bridge || ioBusy) return;
     setIoBusy(true);
-    setCommitMessage(null);
     try {
       const result = await action();
       const primary = result.diagnostics?.find(
         (diagnostic) => diagnostic.severity === 'error' || diagnostic.severity === 'info'
       );
-      setCommitMessage(result.ok
-        ? (primary?.message ?? '操作完成。')
-        : (primary?.message ?? result.message ?? '操作失败，容器未修改。'));
+      if (result.ok) {
+        showToast(primary?.message ?? successText, 'ok');
+      } else {
+        showToast(primary?.message ?? result.message ?? '操作失败，容器未修改。', 'error');
+      }
     } catch (error) {
-      setCommitMessage(error instanceof Error ? error.message : 'CSV 导入导出异常。');
+      showToast(error instanceof Error ? error.message : 'CSV 导入导出异常。', 'error');
     } finally {
       setIoBusy(false);
     }
@@ -1010,25 +1053,52 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                         焦点与文本选中 —— 用户无法复制对照列或不可编辑字段的值，
                         而「把这个数值抄到别处」正是只读列最常见的用途。 */}
                     <span className="wb-prop__value">
-                      <input
-                        value={shown === '' && !editable ? '—' : shown}
-                        readOnly={!editable}
-                        className={editable
-                          ? undefined
-                          : (decoded?.diagnostic ? 'is-readonly diag-warn' : 'is-readonly')}
-                        onChange={(event) => {
-                          if (!editable) return;
-                          setDrafts((current) => ({ ...current, [field.id]: event.target.value }));
-                        }}
-                        onBlur={() => {
-                          if (editable && drafts[field.id] !== undefined) void commitField(field);
-                        }}
-                        // disabled 只表达「提交中」这个瞬时状态，不表达只读。
-                        disabled={editable && committing}
-                        aria-label={`${field.name} 值${editable ? '' : '（只读）'}`}
-                        aria-readonly={!editable}
-                        title={decoded?.diagnostic ?? shown}
-                      />
+                      {/* S29：bool 与 1bit 字段用打勾而不是数字框（grok §1-9）。
+                          点勾即直接写入（§1-10），不需要失焦。 */}
+                      {isBoolLike(field) ? (
+                        <input
+                          type="checkbox"
+                          checked={draft !== undefined
+                            ? (field.type === 'bool' ? draft === 'true' : draft === '1')
+                            : (decoded?.display === 'true' || decoded?.display === '1')}
+                          disabled={!editable || committing}
+                          aria-label={`${field.name} 值${editable ? '' : '（只读）'}`}
+                          aria-readonly={!editable}
+                          title={decoded?.diagnostic ?? shown}
+                          onChange={(event) => {
+                            if (!editable) return;
+                            const checked = event.target.checked;
+                            // 保持与输入框同一条 draft 链：失焦/枚举的提交语义一致。
+                            const next = field.type === 'bool'
+                              ? (checked ? 'true' : 'false')
+                              : (checked ? '1' : '0');
+                            setDrafts((current) => ({ ...current, [field.id]: next }));
+                            // bool 传 boolean（core 写器按 truthy 判定，字符串 'false'
+                            // 会被误写成 1）；1bit 传 '0'/'1' 字符串。
+                            void commitField(field, field.type === 'bool' ? checked : next);
+                          }}
+                        />
+                      ) : (
+                        <input
+                          value={shown === '' && !editable ? '—' : shown}
+                          readOnly={!editable}
+                          className={editable
+                            ? undefined
+                            : (decoded?.diagnostic ? 'is-readonly diag-warn' : 'is-readonly')}
+                          onChange={(event) => {
+                            if (!editable) return;
+                            setDrafts((current) => ({ ...current, [field.id]: event.target.value }));
+                          }}
+                          onBlur={() => {
+                            if (editable && drafts[field.id] !== undefined) void commitField(field);
+                          }}
+                          // disabled 只表达「提交中」这个瞬时状态，不表达只读。
+                          disabled={editable && committing}
+                          aria-label={`${field.name} 值${editable ? '' : '（只读）'}`}
+                          aria-readonly={!editable}
+                          title={decoded?.diagnostic ?? shown}
+                        />
+                      )}
                       {/* 枚举选值入口：只在有值表且字段可编辑时出现。
                           空值表的枚举没有可选项，给个按钮会点开一个空列表。 */}
                       {editable && enumMeta && enumMeta.values.length > 0 && (
@@ -1051,6 +1121,14 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                             placeholder="筛选值或名称"
                             aria-label="筛选枚举值"
                             autoFocus
+                            onKeyDown={(event) => {
+                              // S28：Esc 收起列表（回到输入框继续改数值）。
+                              if (event.key === 'Escape') {
+                                event.stopPropagation();
+                                setEnumOpenFieldId(null);
+                                setEnumFilter('');
+                              }
+                            }}
                           />
                           <div className="wb-enum-list__options">
                             {enumOptions.length === 0 && (
@@ -1097,7 +1175,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
 
   const footerMessages = [
     ...pageDiagnostics,
-    ...(commitMessage ? [commitMessage] : []),
     // 页面级字段诊断（P1）：readContainerParamPage 随页下发，主进程在
     // resolveTrustedParamDefinition 里区分「包不可用/类型不存在/行宽不符/尚未授信」。
     ...(selectedRowId !== null && definition === null && pageFieldDefsDiagnostic
@@ -1115,7 +1192,20 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   ];
 
   return (
-    <WorkbenchLayout
+    <div className="param-workbench">
+      {/* S28：保存提示条。成功几秒后自动消失；失败（kind=error）留在原处
+          直到下一次操作，让用户有时间读到原因。绝对定位在整台左上角，
+          不占布局。 */}
+      {toast !== null && (
+        <div
+          className={`wb-toast wb-toast--${toast.kind}`}
+          role="status"
+          aria-live="polite"
+        >
+          {toast.text}
+        </div>
+      )}
+      <WorkbenchLayout
       label="PARAM 工作台"
       columns={columns}
       toolbar={
@@ -1138,7 +1228,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
               void runCsvIo(() =>
-                bridge.exportParamRowsCsv(props.containerUri, containerHash, selectedEntry)
+                bridge.exportParamRowsCsv(props.containerUri, containerHash, selectedEntry),
+                '已导出'
               );
             }}
           >导出行</button>
@@ -1152,7 +1243,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               void runCsvIo(() =>
                 bridge.importParamRowsCsv(
                   props.containerUri, containerHash, selectedEntry, childHash
-                )
+                ),
+                '已保存'
               );
             }}
           >导入行</button>
@@ -1164,7 +1256,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
             onClick={() => {
               if (!bridge || selectedEntry === null) return;
               void runCsvIo(() =>
-                bridge.exportParamNamesCsv(props.containerUri, containerHash, selectedEntry)
+                bridge.exportParamNamesCsv(props.containerUri, containerHash, selectedEntry),
+                '已导出'
               );
             }}
           >导出备注</button>
@@ -1178,7 +1271,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               void runCsvIo(() =>
                 bridge.importParamNamesCsv(
                   props.containerUri, containerHash, selectedEntry, childHash
-                )
+                ),
+                '已保存'
               );
             }}
           >导入备注</button>
@@ -1196,5 +1290,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
           }
         : {})}
     />
+    </div>
   );
 }

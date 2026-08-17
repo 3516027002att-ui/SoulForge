@@ -260,7 +260,9 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         source.entryName,
         source.childHash,
         source.containerHash,
-        draftRef.current
+        draftRef.current,
+        // S34：按打开编码写回 —— main 侧用这个编码重新编码文本落盘。
+        source.encoding
       );
       if (result.ok) {
         setDirty(false);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { FMG_PAGE_SIZE } from '@soulforge/shared';
 import type { FmgEntryPage } from '@soulforge/shared';
 import type { SoulForgeApi } from '../../../preload/index.js';
@@ -17,6 +17,56 @@ type TextContainerNode = TextCatalogResponse['languages'][number]['containers'][
 export interface FmgEntryRow {
   id: number;
   text: string;
+}
+
+/**
+ * S30：FMG 文本的显示投影（011833）。
+ *
+ * FMG 字符串池里 `<?...?>` 是文件真实字节 —— 游戏用它嵌入图标 / 地名 /
+ * BMSG 等引用（packages/core 的 fmgReferenceIntegrity 记录同一语法），
+ * 不是脏数据。列表里原样显示会被当成乱码正文；这里只投影**显示层**，
+ * 编辑框仍保留原文（写回保真，用户可编辑标签本身）。
+ *
+ * 投影规则：
+ *   `<?null?>`        → 空（「无内容」标记 = 空槽/空串，地名表 47 槽里
+ *                       1100、1102–1120 等 offset=0 空槽就是它）
+ *   `<?placeName@N?>` → [地名 N]
+ *   `<?kgiconKc@N?>`  → [图标 N]
+ *   `<?bmsg?>`        → [BMSG]
+ *   其他 `<?name@N?>` → [name N]
+ */
+const FMG_TAG_PATTERN = /<\?([A-Za-z][A-Za-z0-9_]*)(?:@(-?\d+))?\?>/g;
+
+export function projectFmgDisplayText(text: string): string {
+  return text.replace(FMG_TAG_PATTERN, (_whole, name: string, num?: string) => {
+    if (name === 'null') return '';
+    const suffix = num !== undefined ? ` ${num}` : '';
+    switch (name) {
+      case 'placeName': return `[地名${suffix}]`;
+      case 'kgiconKc': return `[图标${suffix}]`;
+      case 'bmsg': return '[BMSG]';
+      default: return `[${name}${suffix}]`;
+    }
+  });
+}
+
+/**
+ * S10 扩展：FMG 条目行是可引用节点。table 用 typed tableId（stableId，含冒号
+ * 是合法形态，main 的 decodeCiteHit 按非路径校验）；text 用显示投影文本
+ * （前 80 字，图标/地名标签已投影）。未选表时不挂 data-cite（诚实态）。
+ */
+function citeEntryAttr(entryId: number, tableId: string | null, text: string): Record<string, string> {
+  if (tableId === null) return {};
+  const projected = projectFmgDisplayText(text).slice(0, 80);
+  return {
+    'data-cite': JSON.stringify({
+      kind: 'text-entry',
+      library: 'text',
+      table: tableId,
+      entryId,
+      ...(projected ? { text: projected } : {})
+    })
+  };
 }
 
 export interface FmgWorkbenchPanelProps {
@@ -149,6 +199,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   // ── 父级切换清理：逐级清空下游选择与状态，杜绝跨表残留 ──
   function handleSelectLanguage(languageId: string): void {
     if (languageId === selectedLanguageId) return;
+    commitDraftRef.current();
     setSelectedLanguageId(languageId);
     setSelectedContainerId(null);
     setSelectedTableId(null);
@@ -161,6 +212,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
 
   function handleSelectContainer(containerId: string): void {
     if (containerId === selectedContainerId) return;
+    commitDraftRef.current();
     setSelectedContainerId(containerId);
     setSelectedTableId(null);
     setSelectedId(null);
@@ -172,6 +224,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
 
   function handleSelectTable(tableId: string): void {
     if (tableId === selectedTableId) return;
+    commitDraftRef.current();
     setSelectedTableId(tableId);
     setSelectedId(null);
     setPage(0);
@@ -245,19 +298,32 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   }, [catalog, selectedLanguageId, selectedContainerId]);
   const containerFailed = selectedContainer?.parseStatus === 'failed';
 
+  // S29：编辑只落到本地草稿，失焦 / Ctrl+S 再提交一次（直写，不先进审查队列）。
+  // 切换条目 / 翻页 / 换表前先提交当前草稿，避免选中行换掉后草稿被吞。
+  const [draftText, setDraftText] = useState<string | null>(null);
+  const commitDraftRef = useRef<() => void>(() => {});
+
   function updateText(text: string): void {
     if (selectedId === null) return;
     setPageEntries((prev) => prev.map((row) => (row.id === selectedId ? { ...row, text } : row)));
+    setDraftText(text);
+  }
+
+  function commitDraft(): void {
+    if (selectedId === null || draftText === null) return;
     props.onMutation?.({
       kind: 'fmg_entry_upsert',
       id: selectedId,
-      text,
+      text: draftText,
       ...(selectedTableId !== null ? { tableId: selectedTableId } : {})
     });
+    setDraftText(null);
   }
+  commitDraftRef.current = commitDraft;
 
   function addEntry(): void {
     if (selectedTableId === null) return;
+    commitDraft();
     const id = maxId + 1;
     setPageEntries((prev) => [...prev, { id, text: '' }]);
     setMaxId(id);
@@ -267,6 +333,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
 
   function deleteSelected(): void {
     if (selectedId === null) return;
+    setDraftText(null);
     const id = selectedId;
     setPageEntries((prev) => prev.filter((row) => row.id !== id));
     setSelectedId(null);
@@ -445,21 +512,30 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           <span>ID</span>
           <span>文本</span>
         </div>
-        {pageEntries.map((row, rowIndex) => (
-          <div
-            key={rowIndex}
-            className="binder-child-row"
-            {...selectableRowAttributes({
-              selected: row.id === selectedId,
-              isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
-              onSelect: () => setSelectedId(row.id)
-            })}
-          >
-            <span>{row.id}</span>
-            <span>{row.text.slice(0, 80)}</span>
-          </div>
-        ))}
-        {pageEntries.length === 0 && !loading && (
+        {pageEntries.map((row, rowIndex) => {
+          // S30：列表显示投影文本（图标/地名/空标记不再是乱码正文）；
+          // 投影为空的槽（<?null?> / 空串）弱化为 —，行与 ID 照常在场 ——
+          // 地名表 47 槽的 41 个空槽因此看得见，不是「缺漏」。
+          const projected = projectFmgDisplayText(row.text).slice(0, 80);
+          return (
+            <div
+              key={rowIndex}
+              className="binder-child-row"
+              {...selectableRowAttributes({
+                selected: row.id === selectedId,
+                isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),
+                onSelect: () => { commitDraftRef.current(); setSelectedId(row.id); }
+              })}
+              {...citeEntryAttr(row.id, selectedTableId, row.text)}
+            >
+              <span>{row.id}</span>
+              {projected
+                ? <span>{projected}</span>
+                : <span className="muted">—</span>}
+            </div>
+          );
+        })}
+        {pageEntries.length === 0 && !loading && !pageError && !containerFailed && (
           hasSelection
             ? query.trim().length > 0
               ? <p className="muted">没有匹配的条目。</p>
@@ -475,8 +551,16 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
       <label className="stack gap" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
         编辑 ID {selected.id}
         <textarea
-          value={selected.text}
+          value={draftText ?? selected.text}
           onChange={(e) => updateText(e.target.value)}
+          onBlur={() => commitDraftRef.current()}
+          onKeyDown={(e) => {
+            // S29：Ctrl+S 直接提交本表当前编辑（与 PARAM 行备注同一把尺子）。
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+              e.preventDefault();
+              commitDraftRef.current();
+            }
+          }}
           spellCheck={false}
           style={{ flex: 1, minHeight: 120, resize: 'none' }}
         />

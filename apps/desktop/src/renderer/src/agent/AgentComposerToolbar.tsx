@@ -1,4 +1,7 @@
 import type { ReactElement } from 'react';
+import type { AiPermissionMode, ModelThinkingLevel } from '@soulforge/core';
+import { AGENT_THINKING_LEVELS, thinkingLevelLabel } from './agentThinking.js';
+import { AgentParticipantBar, type AgentInteractionMode } from './AgentParticipantBar.js';
 import type { ComposerAction } from './AgentPromptEditor.js';
 
 export interface AgentComposerToolbarProps {
@@ -24,8 +27,14 @@ export interface AgentComposerToolbarProps {
   modelLabel: string;
   /** 打开模型服务设置抽屉（真实既有能力：AgentSessionControls）。 */
   onOpenModelSettings: () => void;
-  /** 当前交互模式（Ask/Plan/Edit）——「推理/Plan 显示真实运行模式」。 */
-  planLabel: string;
+  /** 当前交互模式（Ask/Plan/Edit）——S32 作为权限下拉进底栏。 */
+  interactionMode: AgentInteractionMode;
+  onInteractionModeChange?: (mode: AgentInteractionMode) => void;
+  permissionMode: AiPermissionMode;
+  permissionLockReason: string;
+  /** S32：思考强度（关/快/普通/深/极致）——与模型拆成两个控件。 */
+  thinking: ModelThinkingLevel;
+  onThinkingChange: (thinking: ModelThinkingLevel) => void;
 }
 
 /**
@@ -48,7 +57,12 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
     attachmentReason,
     modelLabel,
     onOpenModelSettings,
-    planLabel
+    interactionMode,
+    onInteractionModeChange,
+    permissionMode,
+    permissionLockReason,
+    thinking,
+    onThinkingChange
   } = props;
 
   return (
@@ -82,6 +96,13 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
           />
         </svg>
       </button>
+      <AgentParticipantBar
+        mode={interactionMode}
+        onModeChange={(mode) => onInteractionModeChange?.(mode)}
+        permissionMode={permissionMode}
+        permissionLockReason={permissionLockReason}
+      />
+      <span className="composer-spacer"></span>
       <button
         type="button"
         className="composer-model-btn"
@@ -91,10 +112,18 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
       >
         <span className="composer-model-label">{modelLabel}</span>
       </button>
-      <span className="composer-mode" data-testid="composer-plan-mode" title="当前交互模式">
-        {planLabel}
-      </span>
-      <span className="composer-spacer"></span>
+      <label className="composer-thinking" title="思考强度（作用于下一次任务）">
+        <span className="composer-tool-label">思考</span>
+        <select
+          aria-label="思考强度"
+          value={thinking}
+          onChange={(event) => onThinkingChange(event.target.value as ModelThinkingLevel)}
+        >
+          {AGENT_THINKING_LEVELS.map((level) => (
+            <option key={level} value={level}>{thinkingLevelLabel(level)}</option>
+          ))}
+        </select>
+      </label>
       {action === 'awaiting' ? (
         <span className="composer-awaiting" data-testid="composer-awaiting">等待你在上方批准</span>
       ) : action === 'stop' ? (

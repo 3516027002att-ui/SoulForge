@@ -117,15 +117,16 @@ describe('Agent 壳层遵循右 dock 信息架构（§12.1/12.3）', () => {
   });
 });
 
-describe('Composer 三层结构（§12.6）', () => {
-  it('participant / prompt+chips / toolbar 三层按顺序渲染', () => {
+describe('Composer 结构（§12.6 / S32 输入卡）', () => {
+  it('S32 一块圆角输入卡：输入区在前、工具行在后，参与者条并入工具行', () => {
     const html = render();
-    const participantIdx = html.indexOf('agent-composer__participant');
     const bodyIdx = html.indexOf('agent-composer__body');
     const toolbarIdx = html.indexOf('agent-composer__toolbar');
-    assert.ok(participantIdx >= 0, '第一层 participant 存在');
-    assert.ok(bodyIdx > participantIdx, '第二层 prompt+chips 在 participant 之后');
-    assert.ok(toolbarIdx > bodyIdx, '第三层 toolbar 在 prompt+chips 之后');
+    assert.ok(bodyIdx >= 0, '输入区存在');
+    assert.ok(toolbarIdx > bodyIdx, '工具行在输入区之后');
+    // participant 条不再独立一层：模式/权限下拉进工具行。
+    const toolbarRegion = html.slice(toolbarIdx);
+    assert.match(toolbarRegion, /agent-composer__participant/, '参与者条（权限下拉）在工具行内');
     assert.match(html, /data-testid="agent-composer"/);
   });
 
@@ -144,7 +145,7 @@ describe('Composer 三层结构（§12.6）', () => {
     assert.match(html, /class="agent__composer"[\s\S]*?<textarea/);
   });
 
-  it('toolbar 固定五项按 引用 | 附件 | 模型 | Plan | 发送/停止 顺序（S10：@/# 合成引用框选）', () => {
+  it('S32 工具行顺序：引用 | 附件 | 权限 | 模型 | 思考 | 发送（模型与思考是两个控件）', () => {
     const html = render();
     const toolbarStart = html.indexOf('class="agent-composer__toolbar"');
     assert.ok(toolbarStart >= 0, 'toolbar 层必须存在');
@@ -152,8 +153,9 @@ describe('Composer 三层结构（§12.6）', () => {
     const markers = [
       'aria-label="引用框选"', // S10：@/# 合成「引用」框选钮
       'aria-label="添加附件"', // attachment
+      'class="agent-mode-select"', // 权限（Ask/Plan/Edit 下拉）
       'aria-label="模型服务设置"', // model
-      'data-testid="composer-plan-mode"', // plan
+      'aria-label="思考强度"', // S32：思考强度独立控件
       '>发送<' // send/stop
     ];
     let prev = -1;
@@ -653,11 +655,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         permissionLockReason="由主进程锁定为计划模式"
         settings={{
           provider: 'mock',
-          thinking: 'normal',
           permissionMode: 'plan',
           permissionLockReason: '锁',
-          onProviderChange: () => undefined,
-          onThinkingChange: () => undefined
+          onProviderChange: () => undefined
         }}
       />
     );
@@ -679,11 +679,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         permissionLockReason="由主进程锁定为计划模式"
         settings={{
           provider: 'mock',
-          thinking: 'normal',
           permissionMode: 'plan',
           permissionLockReason: '锁',
-          onProviderChange: () => undefined,
-          onThinkingChange: () => undefined
+          onProviderChange: () => undefined
         }}
       />
     );
@@ -693,6 +691,29 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     assert.ok(!drawerHtml.includes('agent__composer'), '抽屉面不含 composer');
     assert.ok(!drawerHtml.includes('agent-composer-context'), '抽屉面不含资源引用条');
     assert.ok(!drawerHtml.includes('agent-empty-state'), '抽屉面不含欢迎三勾');
+    // S25：设置页只放模型服务表单——运行任务/取消/权限黄条/会话级思考强度全部离开。
+    assert.ok(!drawerHtml.includes('运行任务'), '设置页没有运行任务按钮');
+    assert.ok(!drawerHtml.includes('取消任务'), '设置页没有取消任务按钮');
+    assert.ok(!drawerHtml.includes('agent-task-permission'), '设置页没有权限黄条');
+    assert.ok(!drawerHtml.includes('agent-session-controls'), '设置页没有会话级控件');
+    // 一列表单：协议 → 服务地址 → 模型 ID → 显示名称 → 密钥 → 高级 → 页脚按钮。
+    assert.match(drawerHtml, /协议（API 格式）/);
+    assert.match(drawerHtml, /服务地址/);
+    assert.match(drawerHtml, /模型 ID/);
+    assert.match(drawerHtml, /显示名称/);
+    assert.match(drawerHtml, /API 密钥/);
+    assert.match(drawerHtml, />取消</, '页脚取消按钮');
+    assert.match(drawerHtml, />重置</, '页脚重置按钮');
+    assert.match(drawerHtml, />保存</, '页脚保存按钮');
+    // S26：抽屉面没有主栏产品名（AgentDockHeader 已卸掉），同一时刻只有一个标题。
+    assert.ok(!drawerHtml.includes('agent-dock-header__product'), '抽屉面不含主栏产品名');
+    assert.ok(!drawerHtml.includes('>SoulForge<'), '抽屉面不含 SoulForge 产品名');
+    // 抽屉背景必须不透明：浅色主题 8% --forge-0 会把底下字透出来（叠字根因）。
+    assert.match(
+      readFileSync(join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'), 'utf8'),
+      /\.agent-secondary-drawer \{[\s\S]*?background: var\(--forge-1\);/,
+      '抽屉背景是不透明实色'
+    );
     // 历史/设置互相可达：历史视图里也有切换控件（不再只有「模型设置」一个方向）。
     const historyHtml = renderToStaticMarkup(
       <AgentSecondaryDrawer
@@ -705,11 +726,9 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         permissionLockReason="由主进程锁定为计划模式"
         settings={{
           provider: 'mock',
-          thinking: 'normal',
           permissionMode: 'plan',
           permissionLockReason: '锁',
-          onProviderChange: () => undefined,
-          onThinkingChange: () => undefined
+          onProviderChange: () => undefined
         }}
       />
     );
@@ -744,7 +763,7 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
     const cancelHtml = renderToStaticMarkup(
       <AgentSecondaryDrawer
         open={true}
-        view="settings"
+        view="history"
         onClose={() => undefined}
         onSwitchView={() => undefined}
         task={render0Task()}
@@ -752,15 +771,13 @@ describe('AGENT-60D 消息流四态与 Change Review（§12.5/§12.9/§12.10）'
         permissionLockReason="由主进程锁定为计划模式"
         settings={{
           provider: 'mock',
-          thinking: 'normal',
           permissionMode: 'plan',
           permissionLockReason: '锁',
-          onProviderChange: () => undefined,
-          onThinkingChange: () => undefined
+          onProviderChange: () => undefined
         }}
       />
     );
-    assert.match(cancelHtml, /data-testid="agent-task-cancel"/, '任务级取消在二级抽屉');
+    assert.match(cancelHtml, /data-testid="agent-task-cancel"/, '任务级取消在二级抽屉(历史页)');
   });
 });
 
@@ -818,3 +835,24 @@ function render0Task(): AgentSidebarProps['task'] {
     approvalError: null
   };
 }
+
+describe('S9：Ask 菜单 portal 后 CSS 用 fixed（锚点是 viewport 坐标）', () => {
+  it('agent-mode-menu 是 position:fixed，不是 absolute（absolute 相对初始包含块，滚动漂移）', () => {
+    const css = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'),
+      'utf8'
+    );
+    assert.match(css, /\.agent-mode-menu \{ position: fixed;/);
+    assert.doesNotMatch(css, /\.agent-mode-menu \{ position: absolute;/);
+  });
+
+  it('菜单已 portal 到 document.body，锚点取 viewport 坐标（getBoundingClientRect）', () => {
+    const source = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'agent', 'AgentParticipantBar.tsx'),
+      'utf8'
+    );
+    assert.match(source, /createPortal\(/);
+    assert.match(source, /document\.body/);
+    assert.match(source, /getBoundingClientRect\(\)/);
+  });
+});

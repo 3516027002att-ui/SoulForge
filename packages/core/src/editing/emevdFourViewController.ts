@@ -19,6 +19,7 @@ import type { WorkspaceSession } from '../workspace/workspaceSession.js';
 import type { EmedfRegistry } from '../emevd/emedfSchema.js';
 import { mutateInstructionArg } from '../emevd/emedfSchema.js';
 import { compileEmevdPatchDsl } from '../emevd/dslCompiler.js';
+import { compileEmevdDarkScript } from '../emevd/darkScriptCompiler.js';
 import { attachEmevdStableIdentity, formatEmevdAnchor } from '../emevd/stableIdentity.js';
 import { decodeStrictBase64 } from '../util/base64.js';
 import {
@@ -412,11 +413,11 @@ export interface EmevdDslPlanSubmitResult {
 export async function submitEmevdDslPlanViaFourView(
   input: EmevdDslPlanSubmitRequest
 ): Promise<EmevdDslPlanSubmitResult> {
-  const compiled: EmevdDslCompileResult = compileEmevdPatchDsl(
-    input.compileRequest,
-    input.document,
-    input.registry
-  );
+  // S14：dark-script 模式走「反汇编形状对齐」编译器（$Event 文本 → typed
+  // mutation），patch 模式保留旧 hash DSL 按 anchor 增量写。
+  const compiled: EmevdDslCompileResult = input.compileRequest.mode === 'dark-script'
+    ? compileEmevdDarkScript(input.compileRequest, input.document, input.registry)
+    : compileEmevdPatchDsl(input.compileRequest, input.document, input.registry);
   if (!compiled.ok || !compiled.plan) {
     return {
       ok: false,

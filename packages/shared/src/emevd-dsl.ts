@@ -73,7 +73,13 @@ export interface EmevdDslCompileRequest {
   baseRevision: number;
   emedfSchemaFingerprint: string;
   sourceText: string;
-  mode: 'patch';
+  /**
+   * 'patch'：旧 hash Patch-DSL（`event @e:` / `instruction @i:` 按 anchor 增量写）。
+   * 'dark-script'：DarkScript3 式 `$Event(...)` 源码，按「反汇编形状逐事件逐行对齐」
+   *   编译成 typed mutation（S14）。没有 DarkScript → 二进制全量编译器，因此
+   *   指令增删与 WaitFor 折叠块内容变化会给出结构化诊断，不锁整份文档。
+   */
+  mode: 'patch' | 'dark-script';
 }
 
 interface EmevdPlannedMutationBase {

@@ -472,7 +472,7 @@ function normalizePlanForFingerprint(
   };
 }
 
-function validateTypedLiteral(
+export function validateTypedLiteral(
   type: EmedfArgType,
   value: EmevdDslLiteral
 ): { code: string; message: string } | undefined {

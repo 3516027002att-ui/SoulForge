@@ -112,6 +112,7 @@ export type BridgeCommandName =
   | 'read-tae-document'
   | 'read-tae-event-params'
   | 'read-chrbnd-flver-preview'
+  | 'read-map-part-flver-preview'
   | 'read-tpf-document'
   | 'export-tpf-texture'
   | 'read-tpf-texture-preview'
@@ -129,6 +130,7 @@ export type BridgeCommandName =
   | 'read-mtd-document'
   | 'write-mtd-document'
   | 'read-fxr-document'
+  | 'list-ffxbnd-entries'
   | 'capabilities'
   | 'health';
 

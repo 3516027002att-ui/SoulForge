@@ -116,6 +116,12 @@ describe('Negative source tests（S16 契约）', () => {
     assert.match(panelSource, /'已应用，可回滚。'/);
   });
 
+  it('S34：保存时把打开编码回传 main（按打开编码写回），renderer 不自编码', () => {
+    assert.match(panelSource, /source\.encoding/);
+    assert.doesNotMatch(panelSource, /new TextEncoder\(\)/);
+    assert.doesNotMatch(panelSource, /encodePlaintext\(/);
+  });
+
   it('容器形态是两栏 Files | Source：没有 Container/Metadata 栏', () => {
     // 旧三栏（Container/Files、Source/只读反汇编、Metadata）与「用户提供字节的
     // 整内层替换」表单已随 S16 删除。
@@ -124,5 +130,38 @@ describe('Negative source tests（S16 契约）', () => {
     assert.doesNotMatch(panelSource, /'Source \/ 只读反汇编'/);
     assert.match(panelSource, /id: 'files', title: 'Files'/);
     assert.match(panelSource, /id: 'source', title: 'Source'/);
+  });
+});
+
+describe('S34 脚本全量读写（main 侧按打开编码写回，不硬编码 UTF-8）', () => {
+  const ipcSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
+    'utf8'
+  );
+  // 从 saveScriptSource 注册处切片到下一个 handler（operation.list）：
+  // 容器条目分支与独立文件分支都在这个 handler 里，后面的 handler 不算。
+  const saveChain = ipcSource.slice(
+    ipcSource.indexOf('resource.saveScriptSource'),
+    ipcSource.indexOf("handle('operation.list'")
+  );
+
+  it('读取回传 encoding：明文=检测编码，反编译=decompiled', () => {
+    assert.match(ipcSource, /encoding: verdict\.detectedEncoding/);
+    assert.match(ipcSource, /encoding: 'decompiled'/);
+  });
+
+  it('保存按打开编码重新编码：utf8-bom/shift_jis 走 encodePlaintext，不再硬编码 UTF-8', () => {
+    assert.match(ipcSource, /const writeEncoding = /);
+    assert.match(saveChain, /encodePlaintext\(sourceText, writeEncoding\)/);
+    assert.doesNotMatch(saveChain, /Buffer\.from\(sourceText, 'utf8'\)/);
+  });
+
+  it('独立文件非 UTF-8 走编码感知整文件替换（saveRawReplace），文本链只留 UTF-8', () => {
+    assert.match(saveChain, /saveRawReplace\(/);
+    assert.match(saveChain, /saveTextResource\(/);
+  });
+
+  it('不再弹「保存脚本源码」确认：直接写入，Patch Engine 备份/回滚照旧', () => {
+    assert.doesNotMatch(saveChain, /requestWriteConfirmation/);
   });
 });

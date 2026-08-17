@@ -15,7 +15,7 @@
 
   /* Agent dock 外壳（§12.2 初值；参考图缺失，未对照 TRAE 实测） */
   --agent-dock-default: 440px;
-  --agent-dock-min: 340px;
+  --agent-dock-min: 96px; /* S8:下限约一条工具栏宽 */
   --agent-dock-max: 620px;
   --agent-header-height: 48px;
   --agent-resizer-width: 4px;
@@ -774,10 +774,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
   display: flex; flex-direction: column; min-height: 0; height: 100%;
   border: 1px solid var(--line); background: var(--forge-1);
 }
-.event-source__header { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
-.event-source__eyebrow { color: var(--ember-text); font: 10px var(--font-mono); letter-spacing: .1em; }
-.event-source__header h2 { margin-top: 3px; font-size: 13px; font-weight: 600; }
 .event-source__section-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--line); background: var(--forge-2); font-size: 11px; }
+/* S14：.event-source__header 眉题/Eyebrow 已删（源码区直接顶到文件标签底下）。
+   .event-source__notice 只保留 EMEDF 缺失的失败 alert（.--blocked）。 */
+.esw-toolbar__split { background: transparent; border: 1px solid var(--line); color: var(--ink-2); font-size: 10.5px; border-radius: var(--radius-s); padding: 1px 8px; cursor: pointer; }
+.esw-toolbar__split:hover { color: var(--ink-0); border-color: var(--ink-2); }
+.esw-body:has(> .esw-source:nth-child(n+2)) .esw-source { border-left: 1px solid var(--line); }
 .event-source__notice { padding: 7px 9px; color: var(--warn); background: var(--warn-soft); font-size: 10.5px; line-height: 1.5; border-top: 1px solid var(--line); }
 .event-source__notice button { margin-left: 5px; }
 
@@ -819,7 +821,17 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .esw-outline__item.is-selected { color: var(--ink-0); border-left-color: var(--ember); background: var(--ember-soft); }
 .esw-outline__item strong { font-size: 11px; }
 .esw-outline__item span { color: var(--ink-3); font: 10px var(--font-mono); }
-.esw-inspector { width: 240px; min-width: 200px; max-width: 340px; border-left: 1px solid var(--line); display: flex; flex-direction: column; overflow-y: auto; }
+.esw-inspector { width: 240px; min-width: 200px; max-width: 340px; border-left: 1px solid var(--line); display: flex; flex-direction: column; overflow-y: auto; padding: 8px 10px; gap: 8px; font-size: 11px; }
+.esw-inspector__empty { color: var(--ink-3); padding: 6px 2px; line-height: 1.6; }
+.esw-inspector__fold { color: var(--ember-text); font: 10px var(--font-mono); padding: 4px 6px; background: var(--ember-soft); border-radius: var(--radius-s); }
+.esw-inspector__row { border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--forge-1); }
+.esw-inspector__row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+.esw-inspector__row-head strong { font-size: 12px; font-family: var(--font-mono); }
+.esw-inspector__args { list-style: none; margin: 0; padding: 4px 8px 6px; display: grid; gap: 3px; }
+.esw-inspector__args li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: baseline; }
+.esw-inspector__arg { font-family: var(--font-mono); color: var(--ink-0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.esw-inspector__value { font-family: var(--font-mono); color: var(--ok); }
+.esw-inspector__unknown { color: var(--warn); padding: 6px 2px; line-height: 1.6; }
 .event-source__facts { display: grid; gap: 5px; padding: 9px; font-size: 11px; }
 .event-source__facts > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; }
 .event-source__facts dt { color: var(--ink-3); }
@@ -848,6 +860,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 
 /* ── 编辑器卡片（生产 React 面板，作用域限定在编辑视口内） ── */
 .viewer-content .panel {
+  /* S20：panel 填满视口（flex:1 + min-height:0），工作台 height:100% 才有参照，
+     三栏各自的 column-body 成为滚动宿主，长列表不再把整页顶出滚动条。 */
+  flex: 1; min-height: 0;
   border: 1px solid var(--line); border-radius: 0;
   background: var(--forge-1); padding: 8px 12px;
   display: flex; flex-direction: column; gap: 10px;
@@ -862,6 +877,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 /* 布局辅助 */
 .row.gap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .stack.gap { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+/* S25：设置表单一列表单——标签独占一行、控件 100% 宽（照 010517 的信息结构）。 */
+.agent-settings-drawer .stack.gap > label,
+.model-service-footer + .list { display: flex; flex-direction: column; gap: 4px; }
+.agent-settings-drawer .stack.gap > label { font-size: 11px; color: var(--ink-2); }
+.agent-settings-drawer .stack.gap > label > input,
+.agent-settings-drawer .stack.gap > label > select { width: 100%; }
+.agent-settings-drawer .model-service-footer { margin-top: 4px; }
 .column.gap { display: flex; flex-direction: column; gap: 8px; }
 .pager { margin-top: 8px; }
 .pager button { min-width: 64px; }
@@ -1491,10 +1513,11 @@ pre.tool-output {
 
 /* 二级抽屉：复用旧 .agent-drawer 的对话框形态。 */
 .agent-secondary-drawer {
+  /* S26：抽屉打开时 AgentDockHeader 已卸掉，抽屉是 aside 里唯一的整列内容。
+     背景必须不透明（浅色主题 --forge-0 是 8% 白，会把底下字透出来叠字）。 */
   position: absolute; inset: 0; z-index: 6;
   display: flex; flex-direction: column;
-  background: var(--forge-0);
-  border-left: 1px solid var(--line);
+  background: var(--forge-1);
 }
 .agent-secondary-drawer.is-hidden { display: none; }
 
@@ -1536,9 +1559,11 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 
 .agent__composer {
+  /* S32：一块圆角输入卡（对照 Codex VS Code 扩展 012748）——不再是贴在面板
+     顶部的平条。participant 条并入底部工具行，输入区在上。 */
   grid-area: composer; min-width: 0;
-  border-top: 1px solid var(--line); padding: 10px 12px 12px;
-  display: flex; flex-direction: column; gap: 7px;
+  margin: 8px; border: 1px solid var(--line); border-radius: 12px;
+  padding: 8px 10px 8px; display: flex; flex-direction: column; gap: 7px;
   background: var(--forge-2);
   /* §12.6：整个 Composer 不超过 40vh；超出由中间层滚动承接。 */
   max-height: var(--agent-composer-max-height); overflow: hidden;
@@ -1553,7 +1578,10 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .agent-mode-select { position: relative; }
 .agent-mode-trigger { display: inline-flex; align-items: center; gap: 5px; padding: 2px 5px; color: var(--ink-2); font-size: 11px; border-radius: var(--radius-s); }
 .agent-mode-trigger:hover { color: var(--ink-0); background: var(--control-hover-bg); }
-.agent-mode-menu { position: absolute; left: 0; bottom: calc(100% + 5px); z-index: 5; min-width: 190px; padding: 4px; border: 1px solid var(--line-strong); background: var(--forge-3); box-shadow: var(--shadow-float); }
+/* S9：菜单已 createPortal 到 document.body —— 锚点是 viewport 坐标
+   （getBoundingClientRect），必须 position:fixed 才不会随页面滚动漂移；
+   absolute 相对初始包含块，滚动后菜单会错位。top/left 由组件 inline 提供。 */
+.agent-mode-menu { position: fixed; left: 0; bottom: calc(100% + 5px); z-index: 5; min-width: 190px; padding: 4px; border: 1px solid var(--line-strong); background: var(--forge-3); box-shadow: var(--shadow-float); }
 .agent-mode-menu button { display: flex; flex-direction: column; align-items: flex-start; width: 100%; gap: 1px; padding: 6px 8px; text-align: left; border-radius: var(--radius-s); }
 .agent-mode-menu button:hover, .agent-mode-menu button[aria-selected="true"] { background: var(--ember-soft); }
 .agent-mode-menu strong { font-size: 11px; }
@@ -1572,7 +1600,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   /* §12.6：正文最小 72px；自动增长由 AgentPromptEditor 的 grow 逻辑钉住 40vh。 */
   min-height: 72px;
 }
-.agent-composer__toolbar { display: flex; align-items: center; gap: 5px; min-height: 26px; }
+.agent-composer__toolbar { display: flex; align-items: center; gap: 5px; min-height: 26px; flex-wrap: wrap; } /* S8:窄列时工具钮换行,不许裁掉 */
 .composer-tool-btn { width: 24px; height: 24px; display: grid; place-items: center; color: var(--ink-2); border-radius: var(--radius-s); }
 .composer-tool-btn:hover:not(:disabled) { color: var(--ink-0); background: var(--control-hover-bg); }
 .composer-tool-btn:disabled { opacity: .4; cursor: default; }
@@ -1825,7 +1853,12 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 /* min-height: 0 是必需的：flex 子项默认 min-height:auto，栏内长列表会把容器撑高
    而不是自己滚动。漏掉它的表现正是「整页出现第二个滚动条」。 */
-.workbench__columns { flex: 1; display: flex; min-height: 0; align-items: stretch; }
+.workbench__columns {
+  /* S20：窄主区（Agent 打开时）三栏 minWidth 总和可能超出容器 ——
+     允许横向滚动，TEXT 列可滚到而不是被 overflow:hidden 切掉。 */
+  flex: 1; display: flex; min-height: 0; align-items: stretch;
+  overflow-x: auto; overflow-y: hidden;
+}
 .workbench__column-slot { display: flex; min-width: 0; min-height: 0; position: relative; }
 .workbench__column {
   flex: 1; display: flex; flex-direction: column;
@@ -1847,7 +1880,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   font-size: 10px; color: var(--ink-3); margin-left: auto;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; }
+.workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; overscroll-behavior: contain; }
 .workbench__footer {
   flex: none; padding: 6px 10px; border-top: 1px solid var(--line);
   background: var(--forge-1);
@@ -2028,6 +2061,22 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .esd-partial summary, .tae-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
 .esd-partial ul, .tae-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
 
+/* S33：开始态侧栏——开始页四件事 + 折叠工具 + 资源树。 */
+.start-sidebar { display: flex; flex-direction: column; gap: 8px; padding: 8px; min-height: 0; }
+.start-sidebar__block { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.start-sidebar__workspace { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11px; font-weight: 600; margin: 0; }
+.start-sidebar__actions { display: flex; flex-direction: column; gap: 6px; }
+.start-sidebar__tools summary { cursor: pointer; color: var(--ink-2); font-size: 11px; }
+.start-sidebar__tools-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 0 0 4px; }
+
+/* S17：动作预览右栏的 3D 视口宿主（FlverViewer 撑满列宽）。 */
+.tae-preview__viewport { flex: 1; min-height: 240px; position: relative; }
+.tae-preview__viewport > div { position: absolute; inset: 0; }
+
+/* S24：ffxbnd 效果库的 .fxr 子项列表（文件条目下缩进展开）。 */
+.vfx-entries { padding-left: 14px; border-left: 2px solid var(--line); margin-left: 10px; }
+.vfx-entries .wb-row--child { font-size: 11px; }
+
 /* ── 跨表引用跳转（param 字段的值是另一张表的行 id）── */
 /* 独占网格第 2 列的第二行：字段名列留空，跳转钮与上方的值输入框左对齐，
    视觉上「这个值指向那张表」。
@@ -2081,6 +2130,18 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 .wb-enum-option__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* S28：PARAM 工作台内保存提示条。成功几秒消失、失败常驻；绝对定位不占布局。 */
+.param-workbench { position: relative; min-width: 0; min-height: 0; }
+.wb-toast {
+  position: absolute; top: 8px; right: 12px; z-index: 30;
+  max-width: min(420px, 80vw);
+  padding: 6px 12px; font-size: 12px;
+  background: var(--forge-3); border: 1px solid; border-radius: var(--radius-m);
+  box-shadow: var(--shadow-float);
+}
+.wb-toast--ok { border-color: var(--ok); color: var(--ok); }
+.wb-toast--error { border-color: var(--danger); color: var(--danger-text); }
+
 /* ── 工具栏（最右栏：分组按钮）── */
 .wb-tools { display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; }
 .wb-tools__item {
@@ -2093,13 +2154,10 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .wb-tools__item:disabled { color: var(--ink-3); cursor: not-allowed; }
 .wb-tools__item:focus-visible { outline: 2px solid var(--ember); outline-offset: -1px; }
 
-/* 面板内嵌工作台：给一个确定高度，否则 flex:1 无参照物，栏体会塌成内容高度，
-   独立滚动失效（表现为长列表把整页顶出滚动条）。
-   用 min-height 而不是 vh 高度：实测 `height: 62vh` 会把内容顶高，
-   e2e 的按钮四态用例因此拿不到顶部资源栏 tab 的 :active（元素被推离
-   指针按下的坐标）。视口单位在嵌套滚动容器里不可靠 —— 它相对视口而非
-   容器，容器本身已在滚动区内时会叠加出比预期高得多的盒子。 */
-.panel > .workbench { min-height: 420px; }
+/* S20：删掉旧 min-height: 420px 妥协 —— 它只在「panel 无高度参照」时兜底，
+   且极矮视口下会把工作台顶出滚动条（整页滚、三栏连体）。
+   参照已由 .viewer-content .panel { flex:1; min-height:0 } 提供，
+   工作台 height:100% 生效，三栏各自 column-body 独立滚动。 */
 
 /* 状态栏里的可点项：外观与静态 st-item 一致，但有 hover/focus 反馈。
    诊断计数此前是死文本（显示「1035 条诊断」却点不开），现在是日志开关。 */

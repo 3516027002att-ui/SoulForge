@@ -24,6 +24,27 @@ export interface FlverViewerProps {
   textureBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
   boneIndicesBase64?: string | undefined;
+  /**
+   * S17：动作预览——chrbnd 里 FLVER 的网格数据由 `read-chrbnd-flver-preview`
+   * 一次性返回（base64 typed buffers），提供时不再走 readFlverMesh IPC。
+   * sourceUri 仍可同时给（dummies 拉取不适用 chrbnd 场景，跳过）。
+   */
+  externalMeshData?: {
+    positionsBase64: string;
+    indicesBase64: string;
+    uvsBase64?: string | undefined;
+    normalsBase64?: string | undefined;
+    boneWeightsBase64?: string | undefined;
+    boneIndicesBase64?: string | undefined;
+    vertexCount: number;
+  } | undefined;
+  /** S17：外部骨骼层级（与 externalMeshData 同源），提供时跳过 readFlverSkeleton。 */
+  externalBones?: Array<{
+    name: string;
+    parentIndex: number;
+    translation: [number, number, number];
+    rotation: [number, number, number];
+  }> | undefined;
 }
 
 interface MeshData {
@@ -102,7 +123,12 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   // Load skeleton hierarchy via IPC when sourceUri changes.
   // Parent-relative transforms; world transforms are projected by the scene
   // controller (renderer layer), keeping the semantic scene pure typed data.
+  // S17：externalBones（chrbnd 预览）直接使用，不走 IPC。
   useEffect(() => {
+    if (props.externalBones) {
+      setSkeletonBones(props.externalBones);
+      return;
+    }
     if (!props.sourceUri || bridge === null || typeof bridge.readFlverSkeleton !== 'function') return;
     setSkeletonBones(null);
     void (async () => {
@@ -128,7 +154,21 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   }, [props.sourceUri, bridge]);
 
   // Load mesh data via IPC when sourceUri or meshIndex changes.
+  // S17：externalMeshData（chrbnd 预览）直接使用，不走 IPC。
   useEffect(() => {
+    if (props.externalMeshData) {
+      setMeshData({
+        positionsBase64: props.externalMeshData.positionsBase64,
+        indicesBase64: props.externalMeshData.indicesBase64,
+        uvsBase64: props.externalMeshData.uvsBase64 ?? undefined,
+        normalsBase64: props.externalMeshData.normalsBase64 ?? undefined,
+        boneWeightsBase64: props.externalMeshData.boneWeightsBase64 ?? undefined,
+        boneIndicesBase64: props.externalMeshData.boneIndicesBase64 ?? undefined,
+        vertexCount: props.externalMeshData.vertexCount
+      });
+      setMeshError(null);
+      return;
+    }
     if (!props.sourceUri || bridge === null || typeof bridge.readFlverMesh !== 'function') return;
     setMeshData(null);
     setMeshError(null);

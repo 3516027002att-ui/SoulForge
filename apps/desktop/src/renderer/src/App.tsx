@@ -13,10 +13,12 @@ import {
   DEFERRED_PREVIEW_TARGET_RELEASE,
   classifyWorkspaceOpen,
   isDeferredPreviewEditorKind,
-  PARAM_PAGE_SIZE
+  PARAM_PAGE_SIZE,
+  mergeCiteHits
 } from '@soulforge/shared';
 import type {
   AgentResourceReference,
+  CiteHit,
   Diagnostic,
   MsbMapEventLike,
   MsbModelLike,
@@ -42,7 +44,7 @@ import type {
   AiPermissionMode,
   AiProvider,
   AiSidebarDraft,
-  AiThinkingLevel,
+  ModelThinkingLevel,
   ToolDescriptor,
   ToolResult
 } from '@soulforge/core';
@@ -196,14 +198,26 @@ const EMPTY_FMG_ENTRIES: Array<{ id: number; text: string }> = [];
 
 const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: string }> = [];
 
-const AGENT_MIN_WIDTH = 340;
+const AGENT_MIN_WIDTH = 96; // S8:下限收到约一条工具栏宽,不要 340
 const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
+/** S33：开始侧栏资源树的上限（树太大不能一次全渲，其余引导到「文件」领域）。 */
+const START_SIDEBAR_FILE_LIMIT = 120;
 
 function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
   // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
   const uiKey = workspaceSessionId ?? 'preview';
   return `soulforge.ui.agentDock.v1.${uiKey}.${field}`;
+}
+
+/**
+ * S14：事件文档标签短名 —— `event/common.emevd.dcx` → `common`、
+ * `m11_02_71_10.emevd.dcx` → `m11_02_71_10`。App 文件标签已承载完整资源，
+ * 工作台内层 tab 只留短名，不再重复整条相对路径。
+ */
+function eventTabShortTitle(relativePath: string): string {
+  const base = relativePath.split(/[\\/]/).pop() ?? relativePath;
+  return base.replace(/\.emevd(\.dcx)?$/i, '').replace(/\.dcx$/i, '');
 }
 
 /**
@@ -400,7 +414,7 @@ export function App(): ReactElement {
   const [paramRowDataSize, setParamRowDataSize] = useState<number>(16);
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
-  const [aiThinking, setAiThinking] = useState<AiThinkingLevel>('normal');
+  const [aiThinking, setAiThinking] = useState<ModelThinkingLevel>('normal');
   const [aiMode] = useState<AiPermissionMode>('plan');
   const [aiPrompt, setAiPrompt] = useState('解释当前资源的证据链，并给出下一步安全修改计划。');
   const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);
@@ -1338,7 +1352,7 @@ export function App(): ReactElement {
           });
           setEventPendingTab({
             tabId: target.sourceUri,
-            title: target.relativePath,
+            title: eventTabShortTitle(target.relativePath),
             resourceUri: target.sourceUri,
             document: {
               ...EMPTY_EMEVD_DOCUMENT,
@@ -1380,7 +1394,7 @@ export function App(): ReactElement {
         // sourceStyle 留 'none'，工作台显示可行动说明。
         setEventPendingTab(emevdPendingTabFromFullDocument({
           tabId: target.sourceUri,
-          title: target.relativePath,
+          title: eventTabShortTitle(target.relativePath),
           resourceUri: target.sourceUri,
           full,
           dslTemplate,
@@ -1648,6 +1662,32 @@ export function App(): ReactElement {
     pushToast(message, 'warn');
   }
 
+  /**
+   * S22：工作区已打开时，重挂原版目录（保留 overlay，只换 base 层）当场生效，
+   * 不用重启。session 重建后旧文档 handle 作废，清掉打开中的编辑态。
+   */
+  async function remountBase(baseSelection: DirectorySelection | null): Promise<void> {
+    if (!bridge || !workspace || typeof bridge.remountBase !== 'function') return;
+    const currentSessionId = workspace.workspaceSessionId;
+    try {
+      const result = await bridge.remountBase(baseSelection?.selectionId ?? null);
+      setWorkspace((previous) =>
+        previous && previous.workspaceSessionId === currentSessionId
+          ? { ...previous, workspaceSessionId: result.workspaceSessionId, session: result.session }
+          : previous
+      );
+      setSessionMeta(result.session);
+      setOpenTabs([]);
+      setSelectedFile(null);
+      setPreview(null);
+      resetAllDocuments(documentResetActions);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`重挂原版目录失败：${message}`);
+      pushToast(`重挂原版目录失败：${message}`, 'warn');
+    }
+  }
+
   async function chooseBaseDirectory(): Promise<void> {
     if (!bridge) {
       announceDesktopOnly('选择原版目录');
@@ -1657,7 +1697,12 @@ export function App(): ReactElement {
       const selection = await bridge.openBaseDialog();
       if (!selection) return;
       setBaseRootChoice(selection);
-      setStatus(`已选择只读原版游戏目录：${selection.label}（下次打开 Mod 工作区时生效）`);
+      if (workspace) {
+        await remountBase(selection);
+        setStatus(`已挂载只读原版游戏目录：${selection.label}`);
+      } else {
+        setStatus(`已选择只读原版游戏目录：${selection.label}`);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatus(`选择原版目录失败：${message}`);
@@ -1667,7 +1712,13 @@ export function App(): ReactElement {
 
   function clearBaseDirectory(): void {
     setBaseRootChoice(null);
-    setStatus('已清除原版游戏目录选择');
+    if (workspace) {
+      // S22：清原版同样当场生效（同一 overlay 重挂一个不带 base 的 session）。
+      void remountBase(null);
+      setStatus('已卸载原版游戏目录（当前工作区保持打开）');
+    } else {
+      setStatus('已清除原版游戏目录选择');
+    }
   }
 
   function openCmdk(): void {
@@ -1767,7 +1818,7 @@ export function App(): ReactElement {
     setCiteSelecting(false);
     const citation = mergeCiteHits(hits);
     if (citation === null) {
-      pushToast('这块还不能引用：框选里没有可引用的 PARAM 行或字段。', 'warn');
+      pushToast('这块还不能引用：框选里没有可引用的行、条目或脚本文档。', 'warn');
       return;
     }
     setPendingCiteHits(hits);
@@ -2118,13 +2169,11 @@ export function App(): ReactElement {
         return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
       }
       case 'fmg': {
-        if (!fmgSourceHash) {
-          return { ok: false, diagnostics: [{ code: 'FMG_NO_LIVE_HASH', message: 'FMG 实时 hash 缺失，拒绝写入。' }] };
-        }
         const payload = change.payload as { op: 'upsert' | 'add' | 'delete'; id: number; text?: string; tableId?: string };
+        // S29：缺哈希不再由 renderer 拒写，main 写时现算兜底。
         const result = await bridge.applyFmgMutation(
           change.sourceUri,
-          fmgSourceHash,
+          fmgSourceHash ?? '',
           {
             kind: payload.op,
             id: payload.id,
@@ -2145,13 +2194,10 @@ export function App(): ReactElement {
         return { ok: result.ok, diagnostics: mapDiag(result.diagnostics) };
       }
       case 'param-row': {
-        if (!paramSourceHash) {
-          return { ok: false, diagnostics: [{ code: 'PARAM_NO_LIVE_HASH', message: 'PARAM 实时 hash 缺失，拒绝写入。' }] };
-        }
         const payload = change.payload as { op: 'upsert' | 'delete'; id: number; dataBase64?: string };
         const result = await bridge.applyParamMutation(
           change.sourceUri,
-          paramSourceHash,
+          paramSourceHash ?? '',
           payload.op === 'delete'
             ? { kind: 'delete', id: payload.id }
             : { kind: 'upsert', id: payload.id, dataBase64: payload.dataBase64 ?? '' }
@@ -2313,7 +2359,9 @@ export function App(): ReactElement {
       ...(lastOpenFailure ? { openFailure: lastOpenFailure } : {}),
       // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
       // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
-      ...(agentResources.length > 0 ? { resources: agentResources } : {})
+      ...(agentResources.length > 0 ? { resources: agentResources } : {}),
+      // S32：输入条的思考强度随任务提交（优先于服务级默认）。
+      thinkingLevel: aiThinking
     });
     if (!result.ok) {
       setAgentTask({
@@ -2535,61 +2583,11 @@ export function App(): ReactElement {
       />
 
       <div className="shell" ref={shellRef}>
-        {/* ══════════ 活动栏 ══════════ */}
+        {/* ══════════ 活动栏 ══════════
+            S33：资源浏览器/搜索/暂存/审计四图标已删——资源浏览器并进顶栏「开始」
+            （开始态侧栏 = 资源树 + 开始页全部功能），搜索只走 Ctrl+K，
+            暂存/审计进开始侧栏的折叠区。活动栏只剩 Agent 与设置，贴底。 */}
         <nav className="activitybar" aria-label="主导航">
-          <button
-            type="button"
-            className={sidebarView === 'explorer' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('explorer')}
-            title="资源浏览器"
-            aria-label="资源浏览器"
-            aria-current={sidebarView === 'explorer' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.2h9A1.5 1.5 0 0 1 21 8.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'search' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('search')}
-            title="搜索"
-            aria-label="搜索"
-            aria-current={sidebarView === 'search' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-              <path d="M15.8 15.8L20 20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'staging' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('staging')}
-            title="暂存区"
-            aria-label={pendingChangeCount > 0 ? `暂存区（${pendingChangeCount} 项待处理）` : '暂存区'}
-            aria-current={sidebarView === 'staging' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-              <path d="M12 12l8-4.5M12 12L4 7.5M12 12v9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-            </svg>
-            {pendingChangeCount > 0 && <span className="ab-badge" aria-hidden="true">{pendingChangeCount}</span>}
-          </button>
-          <button
-            type="button"
-            className={sidebarView === 'audit' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
-            onClick={() => activateSidebarView('audit')}
-            title="审计与回滚"
-            aria-label="审计与回滚"
-            aria-current={sidebarView === 'audit' && !sidebarCollapsed ? true : undefined}
-          >
-            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-              <path d="M12 3a9 9 0 1 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-              <path d="M12 7v5l3.2 2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-              <path d="M18.5 2.5v4h-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
           <div className="ab-spacer"></div>
           <button
             type="button"
@@ -2702,7 +2700,80 @@ export function App(): ReactElement {
                   )}
                 </>
               ) : activeDomain === 'project' ? (
-                <p className="empty-hint" data-testid="start-sidebar-hint">在中央开始页打开工作区。</p>
+                /* S33：开始态侧栏 = 开始页全部功能（打开/更换 Mod、选/换/清原版、
+                   工作区名、挂载状态）+ 折叠工具（搜索/暂存/审计）+ 资源树。
+                   换工作区不用回中央页。 */
+                <div className="start-sidebar" data-testid="start-sidebar">
+                  <div className="start-sidebar__block">
+                    <p className="start-sidebar__workspace">
+                      工作区：{workspace?.workspaceLabel ?? '未打开'}
+                      <span className={sessionMeta?.baseMounted ? 'pill pill--ok' : 'pill'}>
+                        原版：{sessionMeta?.baseMounted ? '已挂载（只读）' : '未挂载'}
+                      </span>
+                    </p>
+                    <div className="start-sidebar__actions">
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--block"
+                        data-testid="open-workspace"
+                        onClick={() => void openWorkspace()}
+                        {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
+                      >
+                        {workspace ? '更换 Mod 工作区' : '打开 Mod 工作区'}
+                      </button>
+                      <div className="row gap">
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          data-testid="choose-base-directory"
+                          onClick={() => void chooseBaseDirectory()}
+                          {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
+                        >
+                          {baseRootChoice ? '更换原版目录' : '选择原版目录'}
+                        </button>
+                        {baseRootChoice && (
+                          <button type="button" className="btn btn--ghost btn--sm" onClick={clearBaseDirectory}>
+                            清除
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <details className="start-sidebar__tools" data-testid="start-sidebar-tools">
+                      <summary>工具</summary>
+                      <div className="start-sidebar__tools-list">
+                        <button type="button" className="btn btn--ghost btn--sm" onClick={focusSearchPanel}>搜索（Ctrl+K）</button>
+                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => activateSidebarView('staging')}>
+                          暂存区{pendingChangeCount > 0 ? `（${pendingChangeCount}）` : ''}
+                        </button>
+                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => activateSidebarView('audit')}>审计与回滚</button>
+                      </div>
+                    </details>
+                  </div>
+                  {workspace && indexedFiles.length > 0 && (
+                    <>
+                      <div className="wb-list__group-label">工作区资源</div>
+                      <div className="file-list" data-testid="start-sidebar-file-list">
+                        {indexedFiles.slice(0, START_SIDEBAR_FILE_LIMIT).map((file) => (
+                          <button
+                            type="button"
+                            key={file.sourceUri}
+                            className={selectedFile?.sourceUri === file.sourceUri ? 'file-item selected' : 'file-item'}
+                            onClick={() => void selectFile(file)}
+                          >
+                            <span className="file-item__name">{file.relativePath}</span>
+                            <small className="file-item__meta">{file.resourceKind}</small>
+                          </button>
+                        ))}
+                        {indexedFiles.length > START_SIDEBAR_FILE_LIMIT && (
+                          <p className="muted" style={{ fontSize: 10, padding: '4px 8px' }}>
+                            共 {indexedFiles.length} 个资源，更多请到「文件」领域浏览。
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  {!workspace && <p className="empty-hint">打开 Mod 工作区后，这里会列出工作区资源。</p>}
+                </div>
               ) : (
                 <DomainLibraryList
                   files={domainLibraries}
@@ -3192,7 +3263,11 @@ export function App(): ReactElement {
                       diagnostics: [{ severity: 'error', code: 'PRELOAD_MISSING', message: '当前预加载未暴露 submitEmevdDslPlan。' }]
                     };
                   }
-                  const result = await bridge.submitEmevdDslPlan(tab.resourceUri, sourceText);
+                  const result = await bridge.submitEmevdDslPlan(
+                    tab.resourceUri,
+                    sourceText,
+                    tab.sourceStyle === 'dark-script' ? 'dark-script' : 'patch'
+                  );
                   if (result.ok) {
                     // 同 loadEmevd：提交后重读也只发一次。以前这里紧跟一次
                     // readEmevdDocument 去换 sourceHash 与 gutter 判据，两者现在
@@ -3236,37 +3311,52 @@ export function App(): ReactElement {
               {/* 同上：删掉「实时 Bridge FMG · hash … / 空条目（未选中可解析 FMG
                   或读取失败）」标题行。 */}
               <FmgWorkbenchPanel
-                key={`${selectedFile?.sourceUri ?? ''}:${fmgLive ? 'live' : 'empty'}:${fmgSourceHash ?? ''}`}
+                key={selectedFile?.sourceUri ?? ''}
                 resourceUri={selectedFile?.sourceUri ?? ''}
                 entries={fmgEntries}
                 live={fmgLive}
-                onMutation={(mutation) => {
-                  if (!fmgLive || !fmgSourceHash || !selectedFile) {
-                    setStatus('当前 FMG 未实时加载，不能生成候选变更；请先选中可解析资源。');
+                onMutation={async (mutation) => {
+                  if (!fmgLive || !selectedFile) {
+                    setStatus('当前 FMG 未实时加载，不能写入；请先选中可解析资源。');
                     return;
                   }
+                  if (!bridge || typeof bridge.applyFmgMutation !== 'function') {
+                    setStatus('FMG 写入通道不可用。');
+                    return;
+                  }
+                  // S29：能打开就能写。哈希是 main 侧并发保护凭据，缺了由
+                  // main 写时现算；不再是 renderer 的写入前置条件。条目编辑
+                  // 直接落 Patch Engine，不先进审查队列。
                   const op = mutation.kind === 'fmg_entry_delete' ? 'delete'
                     : mutation.kind === 'fmg_entry_add' ? 'add' : 'upsert';
-                  const oldText = op === 'upsert'
-                    ? (fmgEntries.find((entry) => entry.id === mutation.id)?.text ?? '')
-                    : '';
-                  changeStore.propose({
-                    kind: 'fmg',
-                    sourceUri: selectedFile.sourceUri,
-                    target: `${selectedFile.relativePath}#${mutation.id}`,
-                    summary: op === 'delete'
-                      ? `删除条目 ${mutation.id}`
-                      : `${mutation.text ?? ''}`,
-                    oldValue: op === 'delete' ? oldText || `条目 ${mutation.id}` : oldText,
-                    newValue: op === 'delete' ? '（删除）' : mutation.text ?? '',
-                    payload: {
-                      op,
+                  const result = await bridge.applyFmgMutation(
+                    selectedFile.sourceUri,
+                    fmgSourceHash ?? '',
+                    {
+                      kind: op,
                       id: mutation.id,
-                      ...(mutation.text !== undefined ? { text: mutation.text } : {}),
-                      ...(mutation.tableId !== undefined ? { tableId: mutation.tableId } : {})
+                      ...(mutation.text !== undefined ? { text: mutation.text } : {})
+                    },
+                    mutation.tableId
+                  );
+                  if (result.ok) {
+                    setStatus(mutation.kind === 'fmg_entry_delete'
+                      ? '条目已删除。'
+                      : '已保存。');
+                    pushToast(mutation.kind === 'fmg_entry_delete' ? '条目已删除' : '已保存');
+                    // 重读条目与 live 哈希：直写后闭包里的 fmgEntries 已过期。
+                    const reload = await bridge.readFmgDocument(selectedFile.sourceUri) as {
+                      ok?: boolean;
+                      data?: { sourceHash?: string; entries?: Array<{ id: number; text: string }> } | null;
+                    };
+                    if (reload?.ok && reload.data) {
+                      if (reload.data.entries) setFmgEntries(reload.data.entries);
+                      setFmgSourceHash(reload.data.sourceHash ?? null);
                     }
-                  });
-                  setStatus('FMG 候选变更已进入审查队列。');
+                  } else {
+                    const message = result.diagnostics?.[0]?.message ?? 'FMG 写入失败。';
+                    setStatus(`FMG 写入失败：${message}`);
+                  }
                 }}
               />
             </>
@@ -3314,13 +3404,8 @@ export function App(): ReactElement {
                 if (!bridge || typeof bridge.applyContainerParamFieldMutation !== 'function') {
                   return { ok: false, message: '容器 PARAM 字段写入通道不可用。' };
                 }
-                if (!input.expectedContainerHash || !input.expectedChildHash) {
-                  // 缺哈希就不能保证并发安全，宁可拒绝也不无保护地写。
-                  return {
-                    ok: false,
-                    message: '缺少容器或条目哈希，拒绝写入（无法保证并发安全）。请重新选择该 param。'
-                  };
-                }
+                // S29：哈希是 main 侧并发保护凭据，缺了由 main 写时现算 ——
+                // renderer 不再以「缺哈希」拒绝已经画出来的字段。
                 const saved = await bridge.applyContainerParamFieldMutation(
                   paramWorkbenchFile.sourceUri,
                   input.expectedContainerHash,
@@ -3354,12 +3439,7 @@ export function App(): ReactElement {
                 if (!bridge || typeof bridge.applyContainerParamRowNameMutation !== 'function') {
                   return { ok: false, message: '容器 PARAM 行名写入通道不可用。' };
                 }
-                if (!input.expectedContainerHash || !input.expectedChildHash) {
-                  return {
-                    ok: false,
-                    message: '缺少容器或条目哈希，拒绝写入（无法保证并发安全）。请重新选择该 param。'
-                  };
-                }
+                // S29：哈希由 main 写时现算兜底，缺哈希不再挡行名写入。
                 const saved = await bridge.applyContainerParamRowNameMutation(
                   paramWorkbenchFile.sourceUri,
                   input.expectedContainerHash,

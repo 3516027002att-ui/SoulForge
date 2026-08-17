@@ -339,7 +339,10 @@ async function timersRunDuringAsyncRender(registry: EmedfRegistry): Promise<Reco
  * 像一份完整文档：编辑器会把它当成文件全文渲染，用户看到的是一份被静默截断的源码。
  */
 async function cancellationYieldsNoPartialSource(registry: EmedfRegistry): Promise<Record<string, unknown>> {
-  const document = createLargeDocument(4000);
+  // 与 timersRunDuringAsyncRender 同规格：20_000 事件同步渲染约 80 ms，缺省
+  // 8 ms 预算下达 10 个切片，第一次让出必然落在渲染中途。4000 事件在快机器上
+  // 同步渲染不足 8 ms，异步侧一次让出都不会发生，「让出期间被取消」测不到。
+  const document = createLargeDocument(20_000);
   const full = renderEmevdDarkScriptBounded(document, registry, undefined);
   if (full.text.length < 10_000) throw new Error('取消回归的样本太小，中途中止不一定发生在渲染过程中');
 

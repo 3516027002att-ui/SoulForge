@@ -170,6 +170,8 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setAgentOpen: 'Agent 抽屉开关',
   setStatus: '状态栏文案',
   setParamRowDataSize: '行宽由 paramdef 决定，复位为 0 会让 UI 显示错误的 0 字节；保留上次值直到新文档赋值',
+  setCiteSelecting: '引用框选暗幕激活态：一次框选的生命周期，与资源文档内容无关',
+  setPendingCiteHits: '引用框选结算出的命中，交 AgentSidebar 消费即清空，非文档态',
   setAiProvider: 'AI 会话配置',
   setAiThinking: '同上',
   setAiPrompt: '同上',

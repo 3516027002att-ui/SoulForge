@@ -183,6 +183,23 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
     assert.match(html, /正在查找伴生模型（chrbnd）…/);
     assert.doesNotMatch(html, /本夜不挂/);
   });
+
+  it('S17：有网格数据时右栏渲染 FlverViewer 预览宿主；空态是可行动句', () => {
+    const html = render();
+    const panelSource = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'TaeWorkbenchPanel.tsx'),
+      'utf8'
+    );
+    assert.match(panelSource, /FlverViewer/);
+    assert.match(panelSource, /tae-preview__viewport/);
+    assert.match(panelSource, /data-testid="tae-preview-viewport"/);
+    // 模型挂上但动画还不能播：明说「未接入」，不假装在播。
+    assert.match(panelSource, /模型已挂，动画播放未接入/);
+    // 无「见底部日志」推诿句；「预览不可用」不再是必须空态（有可行动错误句时才有）。
+    assert.doesNotMatch(panelSource, /见底部日志/);
+    assert.doesNotMatch(panelSource, /本夜不挂/);
+    assert.doesNotMatch(html, />预览不可用</);
+  });
 });
 
 describe('animationIdLabel / isLegalHkxStem / secondsToFrame（动画标签与帧换算纯逻辑）', () => {

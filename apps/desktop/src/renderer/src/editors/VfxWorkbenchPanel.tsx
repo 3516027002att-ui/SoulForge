@@ -371,6 +371,10 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
   const [document, setDocument] = useState<FxrDocument | null>(props.initialDocument ?? null);
   /** 文件 → 读取失败诊断；失败文件保留在列表并标记。 */
   const [readFailure, setReadFailure] = useState<{ code: string; message: string } | null>(null);
+  /** S24：选中文件是 ffxbnd 效果库时的 .fxr 子项清单（逻辑名）。null = 未加载/非容器。 */
+  const [fxrEntries, setFxrEntries] = useState<string[] | null>(null);
+  /** S24：当前打开的子项（ffxbnd 时）。null = 打开容器第一个子项/裸 .fxr。 */
+  const [selectedEntry, setSelectedEntry] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [selection, setSelection] = useState<VfxSelection | null>(props.initialSelection ?? null);
   /** VFX-54C：值编辑草稿（key = vfxEditTargetKey；未提交前保留用户输入）。 */
@@ -382,7 +386,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
   /** 写回成功后自增，驱动 read effect 重新读取（ok=true → 重读）。 */
   const [reloadKey, setReloadKey] = useState(0);
 
-  // ── 读取选中文件 ──
+  // ── 读取选中文件（ffxbnd 容器时按子项精确读取）──
   useEffect(() => {
     if (!bridge || typeof bridge.readFxrDocument !== 'function') return;
     if (selectedUri === null) {
@@ -392,7 +396,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
     }
     let cancelled = false;
     setLoading(true);
-    bridge.readFxrDocument(selectedUri)
+    bridge.readFxrDocument(selectedUri, selectedEntry ?? undefined)
       .then((raw) => {
         if (cancelled) return;
         const result = raw as {
@@ -423,7 +427,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [bridge, selectedUri, reloadKey]);
+  }, [bridge, selectedUri, selectedEntry, reloadKey]);
 
   // 新文件 → 选中态回到文件级统计，清空写回态。
   useEffect(() => {
@@ -489,6 +493,28 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
 
   function selectFile(uri: string): void {
     setSelectedUri(uri);
+    setSelectedEntry(null);
+    // S24：ffxbnd 效果库 → 先列 .fxr 子项（一条失败不再整包判死）。
+    const isBundle = /\.ffxbnd(\.dcx)?$/i.test(uri);
+    setFxrEntries(null);
+    if (isBundle && bridge && typeof bridge.listFxrEntries === 'function') {
+      void bridge.listFxrEntries(uri).then((raw) => {
+        const result = raw as { ok?: boolean; data?: { entries?: string[] } };
+        if (result.ok && Array.isArray(result.data?.entries)) {
+          setFxrEntries(result.data!.entries!);
+          if (result.data!.entries!.length > 0) {
+            // 默认打开第一个子项：打开效果库就能看到内容。
+            setSelectedEntry(result.data!.entries![0]!);
+          }
+        }
+      }).catch(() => {
+        // 列表失败：不阻断——fallback 到旧行为（容器第一条）。
+      });
+    }
+  }
+
+  function selectFxrEntry(entry: string): void {
+    setSelectedEntry(entry);
   }
 
   function selectNode(nodeId: string): void {
@@ -704,18 +730,42 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                 <p className="wb-empty">工作区中没有 FXR 文件。</p>
               )}
               {props.files.map((file, index) => (
-                <div
-                  key={file.sourceUri}
-                  className="wb-row"
-                  {...selectableRowAttributes({
-                    selected: selectedUri === file.sourceUri,
-                    isTabEntry: isRowTabEntry(index, selectedUri !== null),
-                    onSelect: () => selectFile(file.sourceUri)
-                  })}
-                >
-                  <span className="wb-row__name" title={file.relativePath}>
-                    {vfxFileDisplayName(file)}
-                  </span>
+                <div key={file.sourceUri}>
+                  <div
+                    className="wb-row"
+                    {...selectableRowAttributes({
+                      selected: selectedUri === file.sourceUri && selectedEntry === null,
+                      isTabEntry: isRowTabEntry(index, selectedUri !== null),
+                      onSelect: () => selectFile(file.sourceUri)
+                    })}
+                  >
+                    <span className="wb-row__name" title={file.relativePath}>
+                      {vfxFileDisplayName(file)}
+                    </span>
+                  </div>
+                  {/* S24：ffxbnd 效果库展开 .fxr 子项列表，一条失败只红那一条。 */}
+                  {selectedUri === file.sourceUri && fxrEntries !== null && (
+                    <div className="vfx-entries" data-testid="vfx-ffxbnd-entries">
+                      {fxrEntries.length === 0 && (
+                        <p className="wb-empty">效果库里没有 .fxr 子项。</p>
+                      )}
+                      {fxrEntries.map((entry) => (
+                        <div
+                          key={entry}
+                          className="wb-row wb-row--child"
+                          {...selectableRowAttributes({
+                            selected: selectedEntry === entry,
+                            isTabEntry: false,
+                            onSelect: () => selectFxrEntry(entry)
+                          })}
+                        >
+                          <span className="wb-row__name" title={entry}>
+                            {entry.replace(/\.fxr$/i, '')}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
               {selectedUri === null && <p className="wb-empty">先在最左栏选择一个 FXR 文件。</p>}

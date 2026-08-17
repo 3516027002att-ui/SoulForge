@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { FmgWorkbenchPanel } from './FmgWorkbenchPanel.js';
+import { FmgWorkbenchPanel, projectFmgDisplayText } from './FmgWorkbenchPanel.js';
 
 // node 环境没有 window；getRendererRuntime 会读 window.soulforge。设为空对象 →
 // browser-preview 表面 → bridge 为 null → live 路径短路，SSR 输出纯初始结构
@@ -95,6 +95,28 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     assert.match(panelSource, /当前页无条目。/);
     assert.match(panelSource, /没有匹配的条目。/);
     assert.match(panelSource, /pageError && <p className="danger">/);
+  });
+
+  it('S30：空态与失败互斥 —— 失败时只显示 danger 诊断，不叠加「当前页无条目」', () => {
+    // 011738「左栏 1 条、点开中栏 0 条」的一半根因：分页失败时
+    // pageError danger 与 muted 空态同时渲染，看起来像「表打不开/空表混着来」。
+    assert.match(panelSource, /pageEntries\.length === 0 && !loading && !pageError && !containerFailed/);
+  });
+
+  it('S30：FMG 标签投影（011833）—— 图标/地名/BMSG 显示为占位，<?null?> 为空槽', () => {
+    assert.equal(projectFmgDisplayText('<?null?>'), '');
+    assert.equal(projectFmgDisplayText('<?kgiconKc@18?>'), '[图标 18]');
+    assert.equal(projectFmgDisplayText('<?placeName@1000?>'), '[地名 1000]');
+    assert.equal(projectFmgDisplayText('<?bmsg?>'), '[BMSG]');
+    assert.equal(projectFmgDisplayText('获得 <?kgiconKc@18?> 后可用'), '获得 [图标 18] 后可用');
+    // 投影只影响显示层：面板里列表走投影，编辑框仍绑原文（写回保真）。
+    // S29 草稿编辑：绑 draftText ?? selected.text —— 草稿也存原文，未编辑时回落选中行原文。
+    assert.match(panelSource, /projectFmgDisplayText\(row\.text\)/);
+    assert.match(panelSource, /value=\{draftText \?\? selected\.text\}/);
+  });
+
+  it('S30：空槽行与 ID 照常在场，文本列弱化为 —（地名 47 槽的 41 个空槽可见）', () => {
+    assert.match(panelSource, /className="muted">—</);
   });
 
   it('parse failure：live 失败只上抛诊断、不伪装条目，不回退 demo entries', () => {
@@ -171,5 +193,91 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     // demo 模式（无选中表）允许省略 tableId：exactOptionalPropertyTypes 下用
     // 条件展开而不是显式 undefined。
     assert.match(panelSource, /selectedTableId !== null \? \{ tableId: selectedTableId \} : \{\}/);
+  });
+
+  it('S29 直写：编辑落地为草稿，失焦 / Ctrl+S / 换行时才提交一次（不每键 propose）', () => {
+    // 打字只更新本地草稿：onChange 走 updateText 不再直接 onMutation；
+    // 提交集中在 commitDraft（失焦 / Ctrl+S / 换行 / 换表 / 翻页前调用）。
+    assert.match(panelSource, /const \[draftText, setDraftText\]/);
+    assert.match(panelSource, /onChange=\{\(e\) => updateText\(e\.target\.value\)\}/);
+    assert.match(panelSource, /onBlur=\{\(\) => commitDraftRef\.current\(\)\}/);
+    assert.match(panelSource, /commitDraftRef\.current\(\)/);
+    // 提交仍走 onMutation（fmg_entry_upsert），面板内没有应用层写盘。
+    assert.doesNotMatch(panelSource, /applyFmgMutation/);
+    const upsertSite = panelSource.indexOf('fmg_entry_upsert');
+    assert.ok(upsertSite >= 0, 'commitDraft 内必须有 fmg_entry_upsert 出口');
+  });
+});
+
+describe('S29 能打开就能写：FMG 直写不进审查队列（App 装配层）', () => {
+  const appSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
+    'utf8'
+  );
+  const fmgHandlerStart = appSource.indexOf('onMutation={async (mutation) => {');
+  const loadFmgStart = appSource.indexOf('function loadFmg');
+
+  it('FMG 条目编辑直接调 applyFmgMutation，不再 propose 进审查队列', () => {
+    assert.ok(fmgHandlerStart >= 0, 'FmgWorkbenchPanel 直写 handler 未找到，断言失锚');
+    const handler = appSource.slice(fmgHandlerStart, fmgHandlerStart + 2200);
+    assert.match(handler, /bridge\.applyFmgMutation/);
+    assert.doesNotMatch(handler, /changeStore\.propose/);
+    assert.doesNotMatch(handler, /进入审查队列/);
+    assert.doesNotMatch(handler, /FMG 候选变更/);
+  });
+
+  it('哈希缺了交给 main 现算：renderer 以 fmgSourceHash ?? \'\' 透传，不再拒写', () => {
+    assert.ok(fmgHandlerStart >= 0, 'FmgWorkbenchPanel 直写 handler 未找到，断言失锚');
+    const handler = appSource.slice(fmgHandlerStart, fmgHandlerStart + 2200);
+    assert.match(handler, /fmgSourceHash \?\? ''/);
+    assert.doesNotMatch(handler, /FMG_NO_LIVE_HASH|缺少容器或条目哈希|请重新选择/);
+  });
+
+  it('成功后 toast「已保存」并重读回源；applyStagedChange 里 fmg/param-row 不再有 NO_LIVE_HASH', () => {
+    assert.doesNotMatch(appSource, /FMG_NO_LIVE_HASH/);
+    assert.doesNotMatch(appSource, /PARAM_NO_LIVE_HASH/);
+    assert.match(appSource, /pushToast\(mutation\.kind === 'fmg_entry_delete' \? '条目已删除' : '已保存'\)/);
+    assert.ok(loadFmgStart >= 0, 'loadFmg 函数未找到，断言失锚');
+  });
+});
+
+describe('S20 三栏独立滚动 + TEXT 不被 Agent 挡（234048）', () => {
+  const cssSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'),
+    'utf8'
+  );
+
+  it('panel 填满视口：.viewer-content .panel 有 flex:1 + min-height:0（工作台高度参照）', () => {
+    assert.match(cssSource, /\.viewer-content \.panel \{[^}]*flex: 1; min-height: 0;/s);
+  });
+
+  it('不再用 min-height: 420px 妥协（旧规则把工作台顶出滚动条 → 三栏滚轮连体）', () => {
+    assert.doesNotMatch(cssSource, /^[ \t]*min-height: 420px;/m);
+  });
+
+  it('三栏各自独立滚动：column-body 是滚动宿主且 overscroll-behavior: contain', () => {
+    assert.match(cssSource, /\.workbench__column-body \{[^}]*overflow: auto;[^}]*overscroll-behavior: contain;/s);
+  });
+
+  it('窄主区（Agent 打开）下 columns 可横向滚动，TEXT 列不被 overflow:hidden 切掉', () => {
+    assert.match(cssSource, /\.workbench__columns \{[^}]*overflow-x: auto;/s);
+  });
+});
+
+describe('S10 扩展：FMG 条目行是可引用节点（data-cite）', () => {
+  const panelSource = readFileSync(
+    join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'FmgWorkbenchPanel.tsx'),
+    'utf8'
+  );
+
+  it('条目行挂 data-cite（text-entry：table=typed tableId，entryId=行 id）', () => {
+    assert.match(panelSource, /citeEntryAttr\(row\.id, selectedTableId, row\.text\)/);
+    assert.match(panelSource, /kind: 'text-entry'/);
+    assert.match(panelSource, /library: 'text'/);
+  });
+
+  it('未选表时不挂 data-cite（诚实态），text 用显示投影文本', () => {
+    assert.match(panelSource, /if \(tableId === null\) return \{\};/);
+    assert.match(panelSource, /text: projected/);
   });
 });

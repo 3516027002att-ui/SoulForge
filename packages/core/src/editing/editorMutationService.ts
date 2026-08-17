@@ -243,10 +243,13 @@ function normalizeStagingDiagnostics(
  *
  * 确认重试只做一次：`requiresConfirmation` 是门槛而非重试信号，循环重试会把
  * 「凭据不被接受」变成无限弹窗。第二次仍要求确认则如实返回该结果。
+ *
+ * S29：confirm 端口可选 —— 不再接端口的链（如容器 PARAM）即使底层 writer
+ * 仍报 requiresConfirmation，也直接返回该结果而不弹「高风险写入」确认。
  */
 export async function applyNativeMutation<T extends { ok: boolean }>(
   request: NativeMutationRequest<T>,
-  ports: { confirm: WriteConfirmationPort; commit: RawReplaceCommitPort }
+  ports: { confirm?: WriteConfirmationPort; commit: RawReplaceCommitPort }
 ): Promise<NativeMutationOutcome> {
   const staged = await stageBridgeOutput({
     stagingRoot: request.stagingRoot,
@@ -270,7 +273,7 @@ export async function applyNativeMutation<T extends { ok: boolean }>(
     title: request.title
   });
 
-  if (!result.ok && result.requiresConfirmation) {
+  if (!result.ok && result.requiresConfirmation && ports.confirm) {
     const confirmation = await ports.confirm.requestConfirmation({
       resourceLabel: request.file.relativePath,
       sourceUri: request.sourceUri,

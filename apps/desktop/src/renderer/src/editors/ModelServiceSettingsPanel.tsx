@@ -41,7 +41,12 @@ function parseOptionalNumber(raw: string): number | undefined {
  * provider 默认值。模型名支持「获取模型列表」从服务 API 拉取（GET /v1/models），
  * 失败时仍可手动输入。
  */
-export function ModelServiceSettingsPanel(): ReactElement {
+export interface ModelServiceSettingsPanelProps {
+  /** S25：页脚「取消」= 关闭设置视图（AgentSecondaryDrawer 传入）。 */
+  onCancel?: () => void;
+}
+
+export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPanelProps = {}): ReactElement {
   const bridge = getRendererBridge();
   const [rows, setRows] = useState<ModelServiceDto[]>([]);
   const [encryptionOk, setEncryptionOk] = useState(false);
@@ -85,6 +90,27 @@ export function ModelServiceSettingsPanel(): ReactElement {
       setStatus(error instanceof Error ? error.message : '加载模型服务失败');
     });
   }, []);
+
+  /** S25：重置 = 表单回到初值并从 main 重读已存服务（未保存的草稿丢弃）。 */
+  function reset(): void {
+    setDisplayName('本地兼容模型服务');
+    setProtocol('openai-compatible');
+    setBaseUrl('http://127.0.0.1:11434');
+    setModel('local-model');
+    setApiKey('');
+    setThinkingLevel('off');
+    setContextWindowTokens('');
+    setMaxTokens('');
+    setTemperature('');
+    setTopP('');
+    setTopK('');
+    setEmbeddingModel('');
+    setModelOptions([]);
+    setStatus('表单已重置。');
+    void refresh().catch((error: unknown) => {
+      setStatus(error instanceof Error ? error.message : '重读模型服务失败');
+    });
+  }
 
   async function fetchModels(): Promise<void> {
     if (!bridge) {
@@ -211,12 +237,10 @@ export function ModelServiceSettingsPanel(): ReactElement {
         </span>
       </header>
       <div className="stack gap">
+        {/* S25：字段顺序照 010517 的信息结构——协议 → 地址 → 模型 → 名称 → 密钥 →
+            高级 → 页脚。每个 label 独占一行（CSS 竖排），控件 100% 宽。 */}
         <label>
-          显示名称
-          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-        </label>
-        <label>
-          协议
+          协议（API 格式）
           <select
             value={protocol}
             onChange={(e) => setProtocol(e.target.value as 'openai-compatible' | 'anthropic-compatible')}
@@ -227,10 +251,10 @@ export function ModelServiceSettingsPanel(): ReactElement {
         </label>
         <label>
           服务地址
-          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="http://127.0.0.1:11434" />
         </label>
         <label>
-          模型
+          模型 ID
           <input
             list={modelListId}
             value={model}
@@ -250,6 +274,10 @@ export function ModelServiceSettingsPanel(): ReactElement {
           <span className="muted">从服务 API 拉取（GET /v1/models）</span>
         </div>
         <label>
+          显示名称
+          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </label>
+        <label>
           API 密钥（仅写入，不回显）
           <input
             type="password"
@@ -262,7 +290,7 @@ export function ModelServiceSettingsPanel(): ReactElement {
           <summary>高级选项</summary>
           <div className="stack gap">
             <label>
-              思考强度
+              思考强度（服务级默认）
               <select
                 aria-label="思考强度"
                 value={thinkingLevel}
@@ -353,7 +381,13 @@ export function ModelServiceSettingsPanel(): ReactElement {
             </p>
           </div>
         </details>
-        <button type="button" onClick={() => void save()}>保存模型服务</button>
+        <div className="row gap model-service-footer">
+          {onCancel !== undefined && (
+            <button type="button" onClick={onCancel}>取消</button>
+          )}
+          <button type="button" onClick={reset}>重置</button>
+          <button type="button" className="btn btn--primary" onClick={() => void save()}>保存</button>
+        </div>
       </div>
       <ul className="list">
         {rows.map((row) => (
