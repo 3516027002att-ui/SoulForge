@@ -286,7 +286,32 @@ export function applyEmevdPlanToDocument(
   }
 
   const events = document.events.map((event) => ({ ...event, instructions: [...event.instructions] }));
-  for (const operation of plan.operations) {
+  // 结构性 op 有应用顺序依赖：删除（按锚，与顺序无关）要先于插入（下标按
+  // 「删除已应用后」的列表计算），insert_event 要先于指向新事件的
+  // insert_instruction。这里按 rank 排一遍，不依赖 plan.operations 的顺序。
+  const rank = (kind: string): number => {
+    switch (kind) {
+      case 'set_instruction_arg': return 0;
+      case 'delete_instruction': return 1;
+      case 'insert_event': return 2;
+      case 'insert_instruction': return 3;
+      case 'delete_event': return 4;
+      case 'set_event_rest_behavior': return 5;
+      case 'set_event_id': return 6;
+      default: return 7;
+    }
+  };
+  const ordered = [...plan.operations].sort((a, b) => rank(a.kind) - rank(b.kind));
+  const findEventIndex = (anchor: string, eventId: number): number => {
+    if (anchor !== '') {
+      return events.findIndex(
+        (event) => event.anchor && formatEmevdAnchor('event', event.anchor) === anchor
+      );
+    }
+    // insert_event 新建的事件没有文档锚，按 eventId 找。
+    return events.findIndex((event) => event.eventId === eventId);
+  };
+  for (const operation of ordered) {
     if (operation.kind === 'set_event_id') {
       const index = events.findIndex(
         (event) => event.anchor && formatEmevdAnchor('event', event.anchor) === operation.eventAnchor
@@ -347,6 +372,58 @@ export function applyEmevdPlanToDocument(
         argsBase64: mutated.args.toString('base64')
       };
       events[eventIndex] = { ...event, instructions };
+    } else if (operation.kind === 'delete_instruction') {
+      const eventIndex = findEventIndex(operation.eventAnchor, operation.eventId);
+      const event = eventIndex >= 0 ? events[eventIndex] : undefined;
+      if (event === undefined) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的事件锚不存在。' };
+      }
+      const instrIndex = event.instructions.findIndex(
+        (instr) => instr.anchor
+          && formatEmevdAnchor('instruction', instr.anchor) === operation.instructionAnchor
+      );
+      if (instrIndex < 0) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的指令锚不存在。' };
+      }
+      const instructions = [...event.instructions];
+      instructions.splice(instrIndex, 1);
+      events[eventIndex] = { ...event, instructions };
+    } else if (operation.kind === 'insert_event') {
+      if (events.some((event) => event.eventId === operation.eventId)) {
+        return { ok: false, code: 'EMEVD_EVENT_ID_DUPLICATE', message: '计划产生重复事件 ID。' };
+      }
+      events.push({
+        eventUri: `${document.resourceUri}#event/${operation.eventId}`,
+        eventId: operation.eventId,
+        restBehavior: operation.restBehavior,
+        layer: 0,
+        instructions: []
+      });
+    } else if (operation.kind === 'insert_instruction') {
+      const eventIndex = findEventIndex(operation.eventAnchor, operation.eventId);
+      const event = eventIndex >= 0 ? events[eventIndex] : undefined;
+      if (event === undefined) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的事件锚不存在。' };
+      }
+      const at = Math.max(0, Math.min(operation.index, event.instructions.length));
+      const instructions = [...event.instructions];
+      instructions.splice(at, 0, {
+        instructionUri: `${event.eventUri}/instr/${at}`,
+        bank: operation.bank,
+        id: operation.id,
+        argsBase64: operation.argsBase64,
+        unknown: false
+      });
+      events[eventIndex] = { ...event, instructions };
+    } else if (operation.kind === 'delete_event') {
+      const eventIndex = findEventIndex(operation.eventAnchor, operation.eventId);
+      if (eventIndex < 0) {
+        return { ok: false, code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND', message: '计划引用的事件锚不存在。' };
+      }
+      if (events.length <= 1) {
+        return { ok: false, code: 'EMEVD_EVENT_LAST', message: '不能删除最后一个事件。' };
+      }
+      events.splice(eventIndex, 1);
     }
   }
 
@@ -424,6 +501,17 @@ export async function submitEmevdDslPlanViaFourView(
       ok: true,
       plan: compiled.plan,
       nextDocument: input.document,
+      // 空计划也给出 commit 形状（0 mutation + EMEVD_PLAN_EMPTY），调用方不必
+      // 区分「没提交」与「提交了但什么都没改」。
+      commit: {
+        ok: true,
+        mutationCount: 0,
+        diagnostics: [{
+          severity: 'info',
+          code: 'EMEVD_PLAN_EMPTY',
+          message: '计划中没有需要执行的 mutation。'
+        }]
+      },
       diagnostics: compiled.diagnostics.map((d) => ({
         severity: d.severity,
         code: d.code,

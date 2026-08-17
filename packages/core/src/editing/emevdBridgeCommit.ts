@@ -31,6 +31,21 @@ export type EmevdBridgeNativeMutation =
       instructionIndex: number;
       argsBase64: string;
       eventId?: number;
+    }
+  | {
+      /** 事件内插入一条指令；instructionIndex 是该事件内的位置（删除已应用后）。 */
+      kind: 'insert_instruction';
+      eventId: number;
+      instructionIndex: number;
+      bank: number;
+      id: number;
+      argsBase64: string;
+    }
+  | {
+      /** 删除事件内一条指令；instructionIndex 是原始文档中该事件内的下标。 */
+      kind: 'delete_instruction';
+      eventId: number;
+      instructionIndex: number;
     };
 
 export interface EmevdBridgeCommitResult {
@@ -222,6 +237,23 @@ function buildMutationPayload(
       instructionIndex: m.instructionIndex,
       argsBase64: m.argsBase64,
       ...(m.eventId !== undefined ? { eventId: m.eventId } : {})
+    };
+  }
+  if ('kind' in m && m.kind === 'insert_instruction') {
+    return {
+      mutation: 'insert_instruction',
+      eventId: m.eventId,
+      instructionIndex: m.instructionIndex,
+      bank: m.bank,
+      id: m.id,
+      argsBase64: m.argsBase64
+    };
+  }
+  if ('kind' in m && m.kind === 'delete_instruction') {
+    return {
+      mutation: 'delete_instruction',
+      eventId: m.eventId,
+      instructionIndex: m.instructionIndex
     };
   }
   throw new Error(`EMEVD_BRIDGE_MUTATION_UNSUPPORTED: ${(m as { kind: string }).kind}`);

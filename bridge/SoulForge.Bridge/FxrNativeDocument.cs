@@ -795,7 +795,8 @@ internal sealed class FxrNativeDocument
     //  Envelope（effect / node / field 三页）
     // ══════════════════════════════════════════════════════════════
 
-    public object ToEnvelope(FxrRoundTripReport? report = null)
+    public object ToEnvelope(FxrRoundTripReport? report = null,
+        object[]? containerEntries = null, int? selectedEntryIndex = null, string? selectedEntryName = null)
     {
         report ??= VerifyRoundTrip();
         // 顺序要紧：authority 触发 UnparsedGaps 计算；先算再读 gaps 保持一致。
@@ -908,6 +909,10 @@ internal sealed class FxrNativeDocument
             unparsedGaps = gaps,
             layoutWarnings = _layoutWarnings.ToArray(),
             roundTrip = report,
+            // ffxbnd 容器入口：renderer 侧栏列出子项并记住当前选中项（vfx-editor.ts）。
+            containerEntries = containerEntries ?? Array.Empty<object>(),
+            selectedEntryIndex,
+            selectedEntryName,
             authority
         };
     }

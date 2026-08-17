@@ -67,8 +67,8 @@ export function compileEmevdPatchDsl(
   if (!ast) return { ok: false, diagnostics };
 
   const add = (item: EmevdDslDiagnostic): void => { diagnostics.push(item); };
-  if (request.mode !== 'patch') {
-    add(diagnostic('EMEVD_DSL_MODE_UNSUPPORTED', 'Only patch mode is supported.', ast.span));
+  if (request.mode !== 'patch' && request.mode !== 'dark-script') {
+    add(diagnostic('EMEVD_DSL_MODE_UNSUPPORTED', `Unsupported compile mode: ${String(request.mode)}.`, ast.span));
   }
   if (request.resourceUri !== document.resourceUri || ast.resourceUri !== request.resourceUri) {
     add(diagnostic('EMEVD_DSL_RESOURCE_MISMATCH', 'Resource URI does not match the opened document.', ast.span, {
@@ -290,7 +290,9 @@ export function compileEmevdPatchDsl(
   validateEventIdReferences(document, operations, registry, diagnostics, request.resourceUri);
   validateConditionGroupReferences(document, registry, diagnostics, request.resourceUri);
 
-  const touchedEvents = unique(operations.map((operation) => operation.eventAnchor));
+  const touchedEvents = unique(operations.map((operation) =>
+    'eventAnchor' in operation ? operation.eventAnchor : `event:${(operation as { eventId: number }).eventId}`
+  ));
   const touchedInstructions = unique(operations.flatMap((operation) =>
     operation.kind === 'set_instruction_arg' ? [operation.instructionAnchor] : []
   ));

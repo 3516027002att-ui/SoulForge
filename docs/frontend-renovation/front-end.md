@@ -2576,6 +2576,8 @@ SHELL-09 → SHELL-10
 >
 > **S14 已落地（2026-08-17）**：去头 / 去日常黄条 / `$Event` 可编辑 / `Ctrl+S` 与失焦走 `compileEmevdDarkScript` → 现有 typed plan → Patch Engine。能对齐的改动（事件 id、rest、已有指令固定参数）可写；新增/删除/重排事件或指令、改未解码注释 = `DARKSCRIPT_LINE_UNDECODED`，不写盘。查找只留键盘 `Ctrl+F`。
 >
+> **S14 增删落地（2026-08-17 二轮）**：① 合并回归修复——`compileEmevdDarkScript` / `compileEmevdPatchDsl` 曾只认 `mode: 'patch'`，UI 传 `'dark-script'` 导致日常 Ctrl+S 必红 `EMEVD_DSL_MODE_UNSUPPORTED`；两个编译器现接受两种枚举（分发本就按 `looksLikeDarkScript` 内容判定）。② 指令/事件增删——编译器对事件体做 LCS 行对齐：新增行若能按 EMEDF 唯一命名、无 vararg、参数个数/类型全对上则编码为 `insert_instruction`，删除行生成 `delete_instruction`，新增/删除 `$Event` 块生成 `insert_event`（add_event + 逐行 insert）/ `delete_event`；写不了的行（新增 WaitFor 折叠块、vararg、查不到的指令名）标「未解码」并抑制该事件全部结构性改动（只保留已对齐行参数写入），不写半截状态。③ C# Bridge `write-emevd` 新增 `insert_instruction` / `delete_instruction`（事件内下标 + 参数引用 ±1 重映射；被事件参数引用的指令拒绝删除），带原始文档对照的重读校验。④ 另修两个 main 上已有的合并回归：FXR `ToEnvelope` 丢 `containerEntries` 导致 bridge 编译失败；no-op plan 短路缺 `commit`/`EMEVD_PLAN_EMPTY` 导致 `runEmevdPlanCommitSmoke` 红。验证：`runDarkScriptCompilerSmoke`（增删/新事件/改 id/不可编码抑制）、新增 `runEmevdInstructionStructuralSmoke`（`npm run test:emevd-instruction-structural -w @soulforge/core`，Bridge 实写 synthetic EMEVD 重读核对）。
+>
 > **S31 已落地（2026-08-17）**：右栏词义（指令名 / EMEDF 参数名 / 类型 / 当前值）；`WorkbenchLayout` 源码+对照+词义独立滚动；并排最多两列（另一已打开 tab，或本文件只读第二视口），不再灌 IPC。`$Event(id)` 行号索引一遍建成；光标在 `eventId` 参数上可转到已打开文档里的对应事件。FMG/PARAM 名表不在事件面板里 → `insufficient_evidence`，不挂假灯泡。
 
 > **S14 落地（2026-08-17）**：
