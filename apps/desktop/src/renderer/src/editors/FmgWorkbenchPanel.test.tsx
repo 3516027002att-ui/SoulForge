@@ -92,7 +92,10 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     // 否则 parse failure 会被伪装成「空表」或「无匹配」——这正是 TEXT-20A Done
     // 禁止的「失败不返回 0 entries」。
     assert.match(panelSource, /pageEntries\.length === 0 && !loading/);
-    assert.match(panelSource, /这张表没有已填写的条目/);
+    // 真空表的空态文案是「当前页无条目。」（S30 后与失败诊断互斥渲染）；
+    // 旧文案「这张表没有已填写的条目」已从面板删除，不要再钉回来。
+    assert.match(panelSource, /当前页无条目。/);
+    assert.doesNotMatch(panelSource, /这张表没有已填写的条目/);
     assert.match(panelSource, /没有匹配的条目。/);
     assert.match(panelSource, /pageError && <p className="danger">/);
   });

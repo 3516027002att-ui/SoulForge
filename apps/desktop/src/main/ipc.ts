@@ -1561,6 +1561,8 @@ interface TextCatalogEnvelope {
     entryIndex: number;
     entryName: string;
     entryCount: number;
+    /** S30：非空文本条数（「N 槽 · M 有字」的 M）；旧 Bridge 不报时缺省。 */
+    filledCount?: number;
     formatVersion?: number;
   }>;
   entries?: Array<{ id: number; text: string }>;
@@ -1628,6 +1630,8 @@ interface TextContainerNode {
     tableId: string;
     entryName: string;
     entryCount: number;
+    /** S30：非空文本条数；Bridge 未上报时缺省（renderer 回落「N 条」）。 */
+    filledCount?: number;
     sourceUri: string;
     entryIndex: number;
   }>;
@@ -3448,6 +3452,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           tableId: table.stableId,
           entryName,
           entryCount: table.entryCount,
+          ...(table.filledCount !== undefined ? { filledCount: table.filledCount } : {}),
           sourceUri: file.sourceUri,
           entryIndex: table.entryIndex
         };
