@@ -8657,7 +8657,6 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           sourceText: decodePlaintext(bytes.subarray(0, contentEnd), verdict.detectedEncoding),
           encoding: verdict.detectedEncoding,
           decompiled: false,
-          encoding: verdict.detectedEncoding,
           ...containerFields,
           writeSupported: true,
           diagnostics: verdict.diagnostics
@@ -8714,9 +8713,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         logicalName,
         kind: 'decompiled',
         sourceText: decompiled.stdout,
-        encoding: 'decompiled',
-        decompiled: true,
         encoding: 'utf8',
+        decompiled: true,
         decompiler: decompilerLabel(probe.origin),
         ...containerFields,
         writeSupported: true,

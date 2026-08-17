@@ -165,10 +165,9 @@ export interface ScriptSourceView {
   sourceText?: string;
   /**
    * 打开时的字节编码（S34「按打开编码写回」）：
-   * 明文条目为检测到的编码；反编译条目为 'decompiled'（写回明文 Lua，
-   * 与编码无关）；失败条目无此字段。
+   * 明文条目为检测到的编码；反编译条目为 'utf8'（写回明文 Lua）。
    */
-  encoding?: 'ascii' | 'utf8' | 'utf8-bom' | 'shift_jis' | 'mixed-unknown' | 'decompiled';
+  encoding?: ScriptEntryEncoding | 'utf8' | 'decompiled';
   /** sourceText 是否为反编译器输出（非原文件文本）。 */
   decompiled?: boolean;
   /** 反编译器人类可读标识，如 "DSLuaDecompiler v1.1.5"。 */
@@ -183,8 +182,6 @@ export interface ScriptSourceView {
   containerHash?: string;
   /** 是否支持把 sourceText 写回（容器条目 / 独立脚本文件均可写）。 */
   writeSupported: boolean;
-  /** 打开时判定的编码；保存必须用回这一套。字节码反编译为 utf8 明文。 */
-  encoding?: ScriptEntryEncoding | 'utf8';
   diagnostics: Diagnostic[];
 }
 

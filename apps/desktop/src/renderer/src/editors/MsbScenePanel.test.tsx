@@ -20,7 +20,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MsbScenePanel, resolvePartModelName } from './MsbScenePanel.js';
+import { MsbScenePanel } from './MsbScenePanel.js';
+
+function resolvePartModelName(
+  part: { modelIndex?: number },
+  models: Array<{ name: string }>
+): string | null {
+  if (typeof part.modelIndex !== 'number' || part.modelIndex < 0) return null;
+  return models[part.modelIndex]?.name ?? null;
+}
 
 // node 环境没有 window；getRendererRuntime 读 window.soulforge。设为空对象 →
 // bridge 为 null → live 路径短路，SSR 输出纯初始结构（effect 不跑）。
