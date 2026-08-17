@@ -2044,6 +2044,10 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .tae-preview__viewport { flex: 1; min-height: 240px; position: relative; }
 .tae-preview__viewport > div { position: absolute; inset: 0; }
 
+/* S24：ffxbnd 效果库的 .fxr 子项列表（文件条目下缩进展开）。 */
+.vfx-entries { padding-left: 14px; border-left: 2px solid var(--line); margin-left: 10px; }
+.vfx-entries .wb-row--child { font-size: 11px; }
+
 /* ── 跨表引用跳转（param 字段的值是另一张表的行 id）── */
 /* 独占网格第 2 列的第二行：字段名列留空，跳转钮与上方的值输入框左对齐，
    视觉上「这个值指向那张表」。

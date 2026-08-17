@@ -257,6 +257,7 @@ internal static class BridgeDaemonHost
         "write-esd-document",
         "write-tae-document",
         "write-fxr-document",
+        "list-ffxbnd-entries",
         "export-tpf-texture",
         "extract-bnd4-child"
     };
@@ -540,6 +541,7 @@ internal static class BridgeDaemonHost
         "read-flver-texture-slots", "read-flver-dummies", "read-esd-document",
         "write-esd-document", "write-tae-document",
         "write-fxr-document",
+        "list-ffxbnd-entries",
         "read-mtd-document", "write-mtd-document", "read-fxr-document",
         "export-event", "export-map", "export-param",
         "export-msg", "probe-oodle", "probe-document-locator"

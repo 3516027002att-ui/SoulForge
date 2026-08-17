@@ -3960,7 +3960,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
   });
 
-  handle('resource.readFxrDocument', async (_event, sourceUri: string) => {
+  handle('resource.readFxrDocument', async (_event, sourceUri: string, entryName?: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 FXR。', sourceUri }] };
@@ -3969,6 +3969,31 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-fxr-document',
+      filePath: file.absolutePath,
+      allowedRoots: roots.allowedRoots,
+      timeoutMs: 120_000,
+      // S24：ffxbnd 效果库按子项名精确读取；缺省取容器内第一条 .fxr。
+      ...(entryName ? { commandOptions: { entryName } } : {}),
+      ...(activeSession?.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {})
+    });
+    return sanitizeRendererValue({ ok: result.parseStatus !== 'failed', sourceUri, relativePath: file.relativePath, data: result.data, diagnostics: result.diagnostics });
+  });
+
+  /**
+   * S24：ffxbnd 效果库的 .fxr 子项清单。一条失败不再整包判死——左栏逐条列出，
+   * 每条独立打开，失败只红那一条。
+   */
+  handle('resource.listFxrEntries', async (_event, sourceUri: string) => {
+    const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+    if (!file) {
+      return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法列出 FXR 条目。', sourceUri }] };
+    }
+    const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+    if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+    const result = await runBridge<{ entries?: string[] }>({
+      command: 'list-ffxbnd-entries',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,

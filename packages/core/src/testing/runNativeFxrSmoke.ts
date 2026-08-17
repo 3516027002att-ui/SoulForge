@@ -146,6 +146,115 @@ interface FxrEnvelope {
 }
 
 /**
+ * S24 回归 fixture：「根 + 紧随其后的孩子，section4 count≥2」。
+ *
+ * Section4 的 count 是整张扁平表（槽 = section4Offset + i*0x30），孩子就住在
+ * 紧随根的下一个槽里。旧实现把每个槽都当根递归 → 孩子先被父节点走过、再被
+ * i 循环当第二棵根走一遍 → visited 撞出「假环」整包判死（真实 commoneffects
+ * 的 offset 0x140 正是这个形态）。本 fixture 只含 Section4 树，其余 section
+ * 恒空：根 0x90（childCount=1 → 0xC0）、孩子 0xC0（无子）。解析必须得到
+ * 1 个根 / 2 个节点，而不是 FXR_DOCUMENT_READ_FAILED。
+ */
+function buildSyntheticFxrWithChild(): Uint8Array {
+  const size = 0x170; // 0x90 头 + S1(0x10) + S2(0x10) + S3(0x60) + 2×0x30 槽
+  const buf = new Uint8Array(size);
+  const view = new DataView(buf.buffer);
+  const u16 = (o: number, v: number): void => view.setUint16(o, v, true);
+  const i16 = (o: number, v: number): void => view.setInt16(o, v, true);
+  const u32 = (o: number, v: number): void => view.setUint32(o, v, true);
+  const i32 = (o: number, v: number): void => view.setInt32(o, v, true);
+
+  // ── 文件头 0x90 ──
+  buf.set([0x46, 0x58, 0x52, 0x00], 0x00); // "FXR\0"
+  i16(0x04, 0);
+  u16(0x06, 5); // version = 5
+  i32(0x08, 1);
+  i32(0x0C, 0x00094F00); // id
+  i32(0x10, 0x090); i32(0x14, 1); // Section1（恒 1 条）
+  i32(0x18, 0x0A0); i32(0x1C, 1); // Section2
+  i32(0x20, 0x0B0); i32(0x24, 1); // Section3
+  i32(0x28, 0x110); i32(0x2C, 2); // Section4（根 + 紧随其后的孩子）
+  i32(0x30, 0); i32(0x34, 0); // Section5 空
+  i32(0x38, 0); i32(0x3C, 0); // Section6 空
+  i32(0x40, 0); i32(0x44, 0); // Section7 空
+  i32(0x48, 0); i32(0x4C, 0); // Section8 空
+  i32(0x50, 0); i32(0x54, 0); // Section9 空
+  i32(0x58, 0); i32(0x5C, 0); // Section10 空
+  i32(0x60, 0); i32(0x64, 0); // Section11 空
+  i32(0x68, 1);
+  i32(0x6C, 0);
+  i32(0x70, 0); i32(0x74, 0); // Section12 空
+  i32(0x78, 0); i32(0x7C, 0); // Section13 空
+  i32(0x80, 0); i32(0x84, 0); // Section14 空
+  i32(0x88, 0);
+  i32(0x8C, 0);
+
+  // ── Section1 (0x090) ──
+  i32(0x090 + 0x00, 0);
+  i32(0x090 + 0x04, 1); // section2Count
+  i32(0x090 + 0x08, 0x0A0);
+  i32(0x090 + 0x0C, 0);
+
+  // ── Section2 (0x0A0) ──
+  i32(0x0A0 + 0x00, 0);
+  i32(0x0A0 + 0x04, 1); // section3Count
+  i32(0x0A0 + 0x08, 0x0B0);
+  i32(0x0A0 + 0x0C, 0);
+
+  // ── Section3 (0x0B0, 0x60) —— section11 引用置空，避免越界 ──
+  i16(0x0B0 + 0x00, 11);
+  buf[0x0B0 + 0x02] = 0;
+  buf[0x0B0 + 0x03] = 1;
+  i32(0x0B0 + 0x04, 0);
+  i32(0x0B0 + 0x08, -1);
+  i32(0x0B0 + 0x0C, 0);
+  i32(0x0B0 + 0x10, 0x0100FFFC);
+  i32(0x0B0 + 0x14, 0);
+  i32(0x0B0 + 0x18, 0);
+  i32(0x0B0 + 0x1C, 0);
+  i32(0x0B0 + 0x20, 0); // section11Offset1 = 0（count 0）
+  i32(0x0B0 + 0x38, 0x0100FFFC);
+  i32(0x0B0 + 0x3C, 0);
+  i32(0x0B0 + 0x40, 0);
+  i32(0x0B0 + 0x44, 0);
+  i32(0x0B0 + 0x48, 0); // section11Offset2 = 0（count 0）
+
+  // ── Section4 槽 0：根 (0x110) ──
+  i16(0x110 + 0x00, 2000); // type id（闭集）
+  buf[0x110 + 0x02] = 0;
+  buf[0x110 + 0x03] = 1;
+  i32(0x110 + 0x04, 0);
+  i32(0x110 + 0x08, 0); // section5Count
+  i32(0x110 + 0x0C, 0); // section6Count
+  i32(0x110 + 0x10, 1); // childCount = 1
+  i32(0x110 + 0x14, 0);
+  i32(0x110 + 0x18, 0); // section5Offset
+  i32(0x110 + 0x1C, 0);
+  i32(0x110 + 0x20, 0); // section6Offset
+  i32(0x110 + 0x24, 0);
+  i32(0x110 + 0x28, 0x140); // childOffset = 紧随其后的槽
+  i32(0x110 + 0x2C, 0);
+
+  // ── Section4 槽 1：孩子 (0x140) ──
+  i16(0x140 + 0x00, 2000);
+  buf[0x140 + 0x02] = 0;
+  buf[0x140 + 0x03] = 1;
+  i32(0x140 + 0x04, 0);
+  i32(0x140 + 0x08, 0);
+  i32(0x140 + 0x0C, 0);
+  i32(0x140 + 0x10, 0); // childCount = 0
+  i32(0x140 + 0x14, 0);
+  i32(0x140 + 0x18, 0);
+  i32(0x140 + 0x1C, 0);
+  i32(0x140 + 0x20, 0);
+  i32(0x140 + 0x24, 0);
+  i32(0x140 + 0x28, 0);
+  i32(0x140 + 0x2C, 0);
+
+  return buf;
+}
+
+/**
  * 构造一个微小、合法、显式 syntheticFixture 标记的合成 FXR3 文件。
  *
  * 布局严格按逆向结论：文件头 0x90，Section1(1)→Section2(1)→Section3(1) 链，
@@ -329,6 +438,22 @@ async function syntheticLeg(): Promise<void> {
     await writeFile(syntheticPath, buildSyntheticFxr());
     const d = await readFxr(syntheticPath, [workspace.root]);
     assertThreePages(d);
+
+    // S24 回归：根 + 紧随其后的孩子（section4 count≥2）——旧实现会因假环
+    // 整包 FXR_DOCUMENT_READ_FAILED；现在必须解析出 1 根 / 2 节点。
+    const childPath = join(workspace.root, 'synthetic_root_child.fxr');
+    await writeFile(childPath, buildSyntheticFxrWithChild());
+    const dc = await readFxr(childPath, [workspace.root]);
+    if (dc.rootNodeCount !== 1) {
+      throw new Error(`根+孩子 fixture 的 rootNodeCount 应为 1，实际 ${dc.rootNodeCount}（假环未消除？）`);
+    }
+    if (dc.totalNodeCount !== 2) {
+      throw new Error(`根+孩子 fixture 的 totalNodeCount 应为 2，实际 ${dc.totalNodeCount}`);
+    }
+    const childRoot = dc.effect?.nodes?.[0];
+    if (childRoot?.children?.length !== 1) {
+      throw new Error(`根+孩子 fixture 的根应有 1 个子节点，实际 ${childRoot?.children?.length}`);
+    }
 
     // 合成语料结构应如实解析出来（不是「读出来了但空壳」）。
     if (d.rootNodeCount !== 1) throw new Error(`rootNodeCount 应为 1，实际 ${d.rootNodeCount}`);

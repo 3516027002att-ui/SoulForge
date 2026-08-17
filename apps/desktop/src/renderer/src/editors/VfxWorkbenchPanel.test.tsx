@@ -529,7 +529,7 @@ describe('VFX-54C vfx-field-set 接线', () => {
 
   it('ok=true 后重读:read effect 依赖 reloadKey 刷新触发器', () => {
     assert.match(panelSource, /reloadKey/);
-    assert.match(panelSource, /\[bridge, selectedUri, reloadKey\]/);
+    assert.match(panelSource, /\[bridge, selectedUri, selectedEntry, reloadKey\]/);
     assert.match(panelSource, /setReloadKey\(\(k\) => k \+ 1\)/);
   });
 
@@ -547,14 +547,16 @@ describe('Negative source tests（VFX-54B/54C）', () => {
     'utf8'
   );
 
-  it('桥接调用只有两个通道：read-fxr-document 读入 + commitFxrFieldSet 写回', () => {
+  it('桥接调用只有三个通道：read-fxr-document 读入 + listFxrEntries 子项列表 + commitFxrFieldSet 写回', () => {
     const bridgeCalls = [...panelSource.matchAll(/bridge\.(\w+)\s*\(/g)]
       .map((m) => m[1])
       .filter((name): name is string => name !== undefined);
     assert.ok(bridgeCalls.includes('readFxrDocument'), 'read 通道缺失');
+    // S24：ffxbnd 效果库先列 .fxr 子项（一条失败不再整包判死）。
+    assert.ok(bridgeCalls.includes('listFxrEntries'), 'listFxrEntries 通道缺失');
     assert.ok(bridgeCalls.includes('commitFxrFieldSet'), 'vfx-field-set 写回通道缺失');
     const unDeclared = bridgeCalls.filter(
-      (name) => name !== 'readFxrDocument' && name !== 'commitFxrFieldSet'
+      (name) => name !== 'readFxrDocument' && name !== 'listFxrEntries' && name !== 'commitFxrFieldSet'
     );
     assert.deepEqual(unDeclared, [], `发现未声明的桥接调用：${unDeclared.join(', ')}`);
   });

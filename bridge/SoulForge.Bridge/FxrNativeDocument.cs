@@ -380,13 +380,35 @@ internal sealed class FxrNativeDocument
         }
 
         // ── Section4 递归树 ──
+        // S24：Section4 的 count 是**整张扁平表**（槽 = section4Offset + i*0x30），
+        // 子节点就住在紧随其后的槽里。旧实现把每个槽都当根递归，孩子先被父节点
+        // 走一遍、再被 i 循环当第二棵根走一遍 → visited 撞出「假环」把整包判死。
+        // 现在先扫一遍所有槽的 childOffset 引用，根 = 未被任何父引用的槽；递归时
+        // 用「递归栈」判真环（孩子指祖先），用「已访问」跳过共享/重复槽。
+        var referenced4 = new HashSet<int>();
+        for (var i = 0; i < section4Count; i++)
+        {
+            var off = section4Offset + i * Section4Size;
+            ValidateRange(source, off, 1, Section4Size, "Section4 节点");
+            var childCount = ReadInt32(source, off + 0x10);
+            var childOffset = ReadInt32(source, off + 0x28);
+            if (childCount <= 0 || childOffset <= 0) continue;
+            ValidateRange(source, childOffset, childCount, Section4Size, "Section4 子节点");
+            for (var c = 0; c < childCount; c++)
+            {
+                referenced4.Add(childOffset + c * Section4Size);
+            }
+        }
         var rootNodes = new List<FxrSection4Node>(section4Count);
         var visited4 = new HashSet<int>();
+        var stack4 = new HashSet<int>();
         var nodeCount = 0;
         for (var i = 0; i < section4Count; i++)
         {
-            rootNodes.Add(ParseSection4Node(source, section4Offset + i * Section4Size, 0,
-                visited4, ref nodeCount, gaps));
+            var off = section4Offset + i * Section4Size;
+            if (referenced4.Contains(off)) continue;
+            rootNodes.Add(ParseSection4Node(source, off, 0,
+                stack4, visited4, ref nodeCount, gaps));
         }
 
         // ── 从树收集 FFXDrawEntityHost（Section6）与属性树 ──
@@ -423,13 +445,15 @@ internal sealed class FxrNativeDocument
 
     /// <summary>
     /// 递归解析一个 Section4 节点。子节点紧随父节点（offset = 父 + 0x30）是实测布局，
-    /// 但解析以节点内 +0x28 字段为准并校验范围。防环：visited 按绝对偏移去重，
-    /// 重复访问即失败关闭。
+    /// 但解析以节点内 +0x28 字段为准并校验范围。
+    /// 防环（S24）：`stack` 是当前递归栈（祖先链），重复 = 真环失败关闭；`visited`
+    /// 是全局已访问表，已被其它父/根走过的槽直接跳过（扁平表共享布局不是错误）。
     /// </summary>
     private static FxrSection4Node ParseSection4Node(
         byte[] source,
         int offset,
         int depth,
+        HashSet<int> stack,
         HashSet<int> visited,
         ref int nodeCount,
         SortedSet<string> gaps)
@@ -438,42 +462,55 @@ internal sealed class FxrNativeDocument
             throw new InvalidDataException($"FXR Section4 树深度超过安全上限 {MaxTreeDepth}。");
         if (nodeCount >= MaxSection4Nodes)
             throw new InvalidDataException($"FXR Section4 节点总数超过安全上限 {MaxSection4Nodes}。");
+        if (!stack.Add(offset))
+            throw new InvalidDataException($"FXR Section4 树出现循环引用（offset 0x{offset:X} 指向祖先）。");
         if (!visited.Add(offset))
-            throw new InvalidDataException($"FXR Section4 树出现循环引用（offset 0x{offset:X} 被重复访问）。");
+        {
+            // 已被其它树访问过：共享/扁平布局，跳过而不是判死。
+            stack.Remove(offset);
+            return new FxrSection4Node(0, 0, 0, 0, 0, 0, 0, new List<FxrSection4Node>());
+        }
         nodeCount++;
 
-        ValidateRange(source, offset, 1, Section4Size, "Section4 节点");
-
-        var typeId = ReadInt16(source, offset + 0x00);
-        var section5Count = ReadInt32(source, offset + 0x08);
-        var section6Count = ReadInt32(source, offset + 0x0C);
-        var childCount = ReadInt32(source, offset + 0x10);
-        var section5Offset = ReadInt32(source, offset + 0x18);
-        var section6Offset = ReadInt32(source, offset + 0x20);
-        var childOffset = ReadInt32(source, offset + 0x28);
-
-        if (!Section4Types.Contains(typeId))
-            gaps.Add($"unknown-type:section4:{typeId}");
-
-        if (section5Count is < 0 or > MaxSection23Count)
-            throw new InvalidDataException($"FXR Section4[{offset:X}] section5Count {section5Count} 越界。");
-        if (section6Count is < 0 or > MaxSection6Count)
-            throw new InvalidDataException($"FXR Section4[{offset:X}] section6Count {section6Count} 越界。");
-        if (childCount is < 0 or > MaxSection4Nodes)
-            throw new InvalidDataException($"FXR Section4[{offset:X}] childCount {childCount} 越界。");
-        ValidateRange(source, section5Offset, section5Count, Section5Size, "Section5 (via Section4)");
-        ValidateRange(source, section6Offset, section6Count, Section6Size, "Section6 (via Section4)");
-        ValidateRange(source, childOffset, childCount, Section4Size, "Section4 子节点");
-
-        var children = new List<FxrSection4Node>(childCount);
-        for (var c = 0; c < childCount; c++)
+        try
         {
-            children.Add(ParseSection4Node(source, childOffset + c * Section4Size, depth + 1,
-                visited, ref nodeCount, gaps));
-        }
+            ValidateRange(source, offset, 1, Section4Size, "Section4 节点");
 
-        return new FxrSection4Node(typeId, section5Count, section6Count, childCount,
-            section5Offset, section6Offset, childOffset, children);
+            var typeId = ReadInt16(source, offset + 0x00);
+            var section5Count = ReadInt32(source, offset + 0x08);
+            var section6Count = ReadInt32(source, offset + 0x0C);
+            var childCount = ReadInt32(source, offset + 0x10);
+            var section5Offset = ReadInt32(source, offset + 0x18);
+            var section6Offset = ReadInt32(source, offset + 0x20);
+            var childOffset = ReadInt32(source, offset + 0x28);
+
+            if (!Section4Types.Contains(typeId))
+                gaps.Add($"unknown-type:section4:{typeId}");
+
+            if (section5Count is < 0 or > MaxSection23Count)
+                throw new InvalidDataException($"FXR Section4[{offset:X}] section5Count {section5Count} 越界。");
+            if (section6Count is < 0 or > MaxSection6Count)
+                throw new InvalidDataException($"FXR Section4[{offset:X}] section6Count {section6Count} 越界。");
+            if (childCount is < 0 or > MaxSection4Nodes)
+                throw new InvalidDataException($"FXR Section4[{offset:X}] childCount {childCount} 越界。");
+            ValidateRange(source, section5Offset, section5Count, Section5Size, "Section5 (via Section4)");
+            ValidateRange(source, section6Offset, section6Count, Section6Size, "Section6 (via Section4)");
+            ValidateRange(source, childOffset, childCount, Section4Size, "Section4 子节点");
+
+            var children = new List<FxrSection4Node>(childCount);
+            for (var c = 0; c < childCount; c++)
+            {
+                children.Add(ParseSection4Node(source, childOffset + c * Section4Size, depth + 1,
+                    stack, visited, ref nodeCount, gaps));
+            }
+
+            return new FxrSection4Node(typeId, section5Count, section6Count, childCount,
+                section5Offset, section6Offset, childOffset, children);
+        }
+        finally
+        {
+            stack.Remove(offset);
+        }
     }
 
     private static void CollectHosts(

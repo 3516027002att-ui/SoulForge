@@ -362,8 +362,11 @@ const api = {
     ipcRenderer.invoke('resource.readEsdDocument', sourceUri),
   readMtdDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMtdDocument', sourceUri),
-  readFxrDocument: (sourceUri: string): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readFxrDocument', sourceUri),
+  readFxrDocument: (sourceUri: string, entryName?: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readFxrDocument', sourceUri, entryName),
+  // S24：ffxbnd 效果库的 .fxr 子项清单（逻辑名）。
+  listFxrEntries: (sourceUri: string): Promise<unknown> =>
+    ipcRenderer.invoke('resource.listFxrEntries', sourceUri),
   readFlverDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readFlverDocument', sourceUri),
   readTpfDocument: (sourceUri: string): Promise<unknown> =>

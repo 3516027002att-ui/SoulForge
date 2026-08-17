@@ -2700,6 +2700,10 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[CREATE] packages/shared/src/vfx-editor.ts`；`[MODIFY] packages/shared/src/index.ts`；`[CREATE] bridge/SoulForge.Bridge/FxrNativeDocument.cs`；`[MODIFY] bridge/SoulForge.Bridge/BridgeCommandService.cs`；`[MODIFY] bridge/SoulForge.Bridge/BridgeDaemonHost.cs`；`[CREATE] packages/core/src/testing/runNativeFxrSmoke.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] apps/desktop/src/preload/index.ts`；`[MODIFY] packages/core/package.json`；`[MODIFY] package.json`。
 - **Output/Tests**：effect/node/field tree；新增 root `bridge:verify:fxr` 并运行 `npm run bridge:verify:fxr`；unknown node layout 为 partial/blocked。
+- **S24 落地（2026-08-17，Section4 假循环 + 包内多 FXR 列表）**：
+  - Section4 的 count 是整张扁平表（槽 = section4Offset + i*0x30），子节点就住在紧随其后的槽里。旧实现把每个槽都当根递归，孩子先被父节点走一遍、再被 i 循环当第二棵根走一遍 → visited 撞出「假环」把整包判死（真实 commoneffects 的 offset 0x140 正是这个形态）。现在先扫 childOffset 引用定根（根 = 未被引用的槽），递归用「递归栈」判真环（孩子指祖先）、「已访问」跳过共享槽。
+  - 新增回归 fixture「根 + 紧随其后的孩子、count≥2」：解析必须得 1 根 / 2 节点，而不是 FXR_DOCUMENT_READ_FAILED（`runNativeFxrSmoke` 合成路径必过）。
+  - ffxbnd 效果库：新命令 `list-ffxbnd-entries`（广告门禁三方一致，46 条）列包内 .fxr 子项；`read-fxr-document` 支持 `entryName` 精确取子项。VfxWorkbenchPanel 左栏在文件条目下展开子项列表，默认打开第一条，一条失败只红那一条，其余仍可点开。
 
 #### VFX-54B — Smithbox-style VFX workbench
 

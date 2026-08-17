@@ -1287,8 +1287,15 @@ internal sealed class BridgeCommandService
                 if (fxrPayload.AsSpan(0, 4).SequenceEqual("BND4"u8))
                 {
                     var binder = Bnd4NativeDocument.Read(fxrPayload);
-                    var entry = binder.Entries.FirstOrDefault(e =>
-                        e.Name.EndsWith(".fxr", StringComparison.OrdinalIgnoreCase));
+                    // S24：ffxbnd 效果库按 entryName 精确取子项（UI 逐条打开）；
+                    // 缺省取第一条 .fxr（向后兼容）。
+                    var entryName = OptionString("entryName", "");
+                    var entry = entryName.Length > 0
+                        ? binder.Entries.FirstOrDefault(e =>
+                            e.Name.Equals(entryName, StringComparison.OrdinalIgnoreCase)
+                            || e.Name.EndsWith(entryName, StringComparison.OrdinalIgnoreCase))
+                        : binder.Entries.FirstOrDefault(e =>
+                            e.Name.EndsWith(".fxr", StringComparison.OrdinalIgnoreCase));
                     if (entry is null)
                         throw new InvalidDataException("BND4 容器中没有 .fxr 子项。");
                     fxrPayload = binder.GetStoredBytes(entry.Index);
@@ -1325,6 +1332,44 @@ internal sealed class BridgeCommandService
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {
                 return BridgeResult<object>.Failed(file, "sfx", "FXR_DOCUMENT_READ_FAILED", ex.Message);
+            }
+        }
+
+        if (command == "list-ffxbnd-entries")
+        {
+            // S24：ffxbnd 效果库的 .fxr 子项清单（逻辑名，UI 左栏逐条列出）。
+            // 只列条目名，不解析任何 effect——一条失败不应把整包判死。
+            try
+            {
+                var sourceBytes = File.ReadAllBytes(file);
+                var payload = sourceBytes;
+                if (payload.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+                {
+                    payload = DcxNativeDocument.Read(file, oodleRuntimeRoot).Payload;
+                }
+                if (payload.Length < 4 || !payload.AsSpan(0, 4).SequenceEqual("BND4"u8))
+                {
+                    return BridgeResult<object>.Failed(file, "sfx", "FFXBND_BND4_EXPECTED", "输入不是 ffxbnd 容器（解 DCX 后必须是 BND4）。");
+                }
+                var binder = Bnd4NativeDocument.Read(payload);
+                var entries = binder.Entries
+                    .Where(e => e.Name.EndsWith(".fxr", StringComparison.OrdinalIgnoreCase))
+                    .Select(e => e.Name)
+                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                return BridgeResult<object>.Ok(file, "sfx", new { entries });
+            }
+            catch (OodleRuntimeUnavailableException)
+            {
+                return BridgeResult<object>.Failed(
+                    file,
+                    "sfx",
+                    "FFXBND_KRAK_OODLE_UNAVAILABLE",
+                    "这份效果库（ffxbnd）是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再列条目。");
+            }
+            catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+            {
+                return BridgeResult<object>.Failed(file, "sfx", "FFXBND_LIST_FAILED", ex.Message);
             }
         }
 

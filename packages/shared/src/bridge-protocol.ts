@@ -130,6 +130,7 @@ export type BridgeCommandName =
   | 'read-mtd-document'
   | 'write-mtd-document'
   | 'read-fxr-document'
+  | 'list-ffxbnd-entries'
   | 'capabilities'
   | 'health';
 
