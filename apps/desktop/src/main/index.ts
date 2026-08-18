@@ -50,6 +50,7 @@ function createWindow(): void {
   const rendererFilePath = join(here, '../renderer/index.html');
   const developmentRendererUrl = resolveDevelopmentRendererUrl();
   const rendererDocumentUrl = developmentRendererUrl ?? pathToFileURL(rendererFilePath).href;
+  const iconPath = resolveWindowIconPath();
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -57,7 +58,7 @@ function createWindow(): void {
     minHeight: 640,
     show: false,
     title: 'SoulForge',
-    icon: resolveWindowIconPath(),
+    ...(iconPath !== undefined ? { icon: iconPath } : {}),
     backgroundColor: TITLEBAR_OVERLAY.color,
     autoHideMenuBar: true,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
