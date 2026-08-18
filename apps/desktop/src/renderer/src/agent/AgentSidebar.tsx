@@ -60,6 +60,8 @@ export interface AgentSidebarProps {
   busy: boolean;
   provider: AiProvider;
   thinking: ModelThinkingLevel;
+  /** 8-A：当前选中模型服务的协议，决定思考强度表（无服务时上层给 openai-compatible）。 */
+  protocol: 'openai-compatible' | 'anthropic-compatible';
   permissionMode: AiPermissionMode;
   permissionLockReason: string;
   goal: string | null;
@@ -182,6 +184,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     busy,
     provider,
     thinking,
+    protocol,
     permissionMode,
     permissionLockReason,
     goal,
@@ -489,6 +492,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             contextLabel={contextLabel}
             thinking={thinking}
             onThinkingChange={onThinkingChange}
+            protocol={protocol}
           />
         </>
       ) : (

@@ -1,6 +1,11 @@
 import { useEffect, useState, type ReactElement } from 'react';
 import type { ModelThinkingLevel } from '@soulforge/core';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
+import {
+  convergeThinkingLevel,
+  thinkingLevelsForProtocol,
+  thinkingLevelLabel
+} from '../agent/agentThinking.js';
 
 interface ModelServiceDto {
   id: string;
@@ -265,7 +270,12 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
           协议（API 格式）
           <select
             value={protocol}
-            onChange={(e) => setProtocol(e.target.value as 'openai-compatible' | 'anthropic-compatible')}
+            onChange={(e) => {
+              const next = e.target.value as 'openai-compatible' | 'anthropic-compatible';
+              setProtocol(next);
+              // 8-C：换协议时收敛非法档（如 Anthropic 的 extreme → OpenAI 的 High）。
+              setThinkingLevel((level) => convergeThinkingLevel(level, next));
+            }}
           >
             <option value="openai-compatible">OpenAI 兼容</option>
             <option value="anthropic-compatible">Anthropic 兼容</option>
@@ -327,17 +337,16 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                 value={thinkingLevel}
                 onChange={(e) => setThinkingLevel(e.target.value as ModelThinkingLevel)}
               >
-                <option value="off">关闭</option>
-                <option value="fast">快速</option>
-                <option value="normal">普通</option>
-                <option value="deep">深入</option>
-                <option value="extreme">极致</option>
+                {thinkingLevelsForProtocol(protocol).map((level) => (
+                  <option key={level} value={level}>{thinkingLevelLabel(level, protocol)}</option>
+                ))}
               </select>
             </label>
             <p className="muted">
-              按协议映射：OpenAI → reasoning_effort（fast/normal/deep/extreme 映射
-              low/medium/high/high）；Anthropic → thinking budget（2048/4096/8192/16384
-              token）。旧模型不支持 thinking 参数，请保持「关闭」。
+              {protocol === 'anthropic-compatible'
+                ? 'Anthropic protocol: thinking budget_tokens = 2048 / 4096 / 8192 / 16384.'
+                : 'OpenAI protocol: reasoning_effort = low / medium / high (deep/extreme both map to high).'}
+              {' '}旧模型不支持 thinking 参数，请保持「关闭」（Off）。
             </p>
             <label>
               上下文长度（token）

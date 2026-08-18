@@ -1,6 +1,11 @@
 import type { ReactElement } from 'react';
 import type { AiPermissionMode, ModelThinkingLevel } from '@soulforge/core';
-import { AGENT_THINKING_LEVELS, thinkingLevelLabel } from './agentThinking.js';
+import {
+  convergeThinkingLevel,
+  thinkingLevelsForProtocol,
+  thinkingLevelLabel,
+  type ThinkingProtocol
+} from './agentThinking.js';
 import { AgentParticipantBar, type AgentInteractionMode } from './AgentParticipantBar.js';
 import type { ComposerAction } from './AgentPromptEditor.js';
 
@@ -35,6 +40,11 @@ export interface AgentComposerToolbarProps {
   /** S32：思考强度（关/快/普通/深/极致）——与模型拆成两个控件。 */
   thinking: ModelThinkingLevel;
   onThinkingChange: (thinking: ModelThinkingLevel) => void;
+  /**
+   * 8-A：当前选中模型服务的协议；决定思考强度表（OpenAI effort / Anthropic
+   * budget）。没有服务时上层传 'openai-compatible'。
+   */
+  protocol: ThinkingProtocol;
 }
 
 /**
@@ -62,8 +72,14 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
     permissionMode,
     permissionLockReason,
     thinking,
-    onThinkingChange
+    onThinkingChange,
+    protocol
   } = props;
+
+  // 8-B/8-C：按协议选表，并把不在表里的当前值收敛掉，<select> 不许出现
+  // 一个不在 option 里的 value。
+  const thinkingOptions = thinkingLevelsForProtocol(protocol);
+  const effectiveThinking = convergeThinkingLevel(thinking, protocol);
 
   return (
     <div className="agent-composer__toolbar" role="toolbar" aria-label="Composer 工具栏">
@@ -129,14 +145,14 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
         <span className="composer-model-label">{modelLabel}</span>
       </button>
       <label className="composer-thinking" title="思考强度（作用于下一次任务）">
-        <span className="composer-tool-label">思考</span>
+        <span className="composer-tool-label">Think</span>
         <select
           aria-label="思考强度"
-          value={thinking}
+          value={effectiveThinking}
           onChange={(event) => onThinkingChange(event.target.value as ModelThinkingLevel)}
         >
-          {AGENT_THINKING_LEVELS.map((level) => (
-            <option key={level} value={level}>{thinkingLevelLabel(level)}</option>
+          {thinkingOptions.map((level) => (
+            <option key={level} value={level}>{thinkingLevelLabel(level, protocol)}</option>
           ))}
         </select>
       </label>

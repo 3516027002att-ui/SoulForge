@@ -1296,11 +1296,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               导入备注（行名，对照 Yapped Export/Import Names）。对话框都在 main 侧，
               导入写入走 Patch Engine。未选表时按钮禁用（没有可操作的表格目标）。 */}
           <span className="toolbar-spacer" style={{ flex: 1 }}></span>
-          {definition !== null && (
-            <span className="muted" style={{ fontSize: 11 }} title="行宽与定义一致即自动授信">
-              字段元数据已自动授信
-            </span>
-          )}
           {/* 问题 4：对照本地参数编辑器（Yapped/Smithbox）行级工具。未选表时全部
               禁用；选表未选行时「新建行」可用（新 id = 当前表最大 id + 1），
               复制/删除仍禁用。写入走 onApplyRowMutation → Patch Engine。 */}

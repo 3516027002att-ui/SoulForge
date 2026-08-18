@@ -6,10 +6,16 @@ export interface DomainNavigationBarProps {
   /** §4.1：只接收 DomainSummary[]，不接收 files；顶部无物理计数（§3.3）。 */
   domains: readonly DomainSummary[];
   onSelect: (domain: EditorDomainId) => void;
+  /**
+   * 6-B：资源栏是否正在打开（`!sidebarCollapsed && sidebarView==='explorer'`）。
+   * 「开始」不再是页后，它的选中态跟着资源栏的开闭走，而不是
+   * `activeDomain==='project'`。
+   */
+  resourceSidebarOpen: boolean;
 }
 
 /** 顶层工作域导航；只消费 catalog 生成的领域摘要，不接触任何物理文件数据。 */
-export function DomainNavigationBar({ domain, domains, onSelect }: DomainNavigationBarProps): ReactElement {
+export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebarOpen }: DomainNavigationBarProps): ReactElement {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const visible = domains.filter((entry) => entry.visibility !== 'hidden');
 
@@ -28,7 +34,9 @@ export function DomainNavigationBar({ domain, domains, onSelect }: DomainNavigat
     <nav className="domain-bar" aria-label="工作域导航">
       <div className="domain-bar__tabs" role="tablist" aria-label="工作区工作域" data-testid="domain-bar">
         {visible.map((entry, index) => {
-          const selected = entry.domain === domain;
+          // 6-B：「开始」的选中态 = 资源栏打开（6-A 后它只召唤资源栏，不再是一页）；
+          // 其余领域仍按 activeDomain 判定。
+          const selected = entry.domain === 'project' ? resourceSidebarOpen : entry.domain === domain;
           const disabled = entry.visibility === 'disabled';
           const description = capabilityDescription(entry);
           return (
