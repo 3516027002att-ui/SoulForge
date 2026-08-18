@@ -1,8 +1,10 @@
 /**
- * 把 3.1 的前缀 + slice IPC 拼成完整 DarkScript 文本。
+ * 把 3.1 的前缀 + slice IPC 拼成完整 DarkScript 文本 —— S35 起只作「拉齐」
+ * 用（提交后的重读回灌），不再是打开路径：打开首帧只有前缀 + opaque token，
+ * 按视口增量灌入与「查找/提交/脏标记时拉齐」走 incrementalSourceInjection。
  *
- * 常量放在 App 侧模块，禁止进 EventSourceWorkbenchPanel：面板只接收完整
- * dslTemplate，一次 EditorState.create。
+ * 常量仍在这里定义，incrementalSourceInjection 复用同一口径，避免两套
+ * SOURCE_PREFIX_LINES / SOURCE_SLICE_LINES 漂移。
  */
 
 export const SOURCE_PREFIX_LINES = 400;

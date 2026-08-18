@@ -1,9 +1,14 @@
 /**
- * S19：DarkScript 源码原子挂载的单测。
+ * DarkScript 源码原子挂载的单测（完整缓冲路径）。
  *
- * 断言对象不是「分片怎么切」，而是「分片态不存在」：一次 createCompleteSourceState
- * 之后，doc.length / doc.toString() / doc.lines 立即等于完整文件。这个测试在
- * 1.3MB / 2.2 万行样本上执行，刻意覆盖真实 common_func 级文档。
+ * 断言对象不是「分片怎么切」，而是「完整缓冲没有分片态」：一次
+ * createCompleteSourceState 之后，doc.length / doc.toString() / doc.lines 立即
+ * 等于完整文件。这个测试在 1.3MB / 2.2 万行样本上执行，刻意覆盖真实
+ * common_func 级文档。
+ *
+ * S35（event-common-load.md §3.2）后完整缓冲仍是「拉齐后 / 提交后重读回灌 /
+ * 小文档首帧」的挂载方式；超长文档打开首帧的 400 行前缀与按视口续载走
+ * incrementalSourceInjection.ts（有独立单测），不在本文件。
  */
 
 import assert from 'node:assert/strict';

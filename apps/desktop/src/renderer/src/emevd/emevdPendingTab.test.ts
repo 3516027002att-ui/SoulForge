@@ -190,6 +190,43 @@ describe('emevdPendingTabFromFullDocument', () => {
     const codes = truncated.document.diagnostics.map((d) => d.code);
     assert.ok(codes.includes('EMEVD_OUTLINE_TRUNCATED'));
   });
+
+  it('S35：带 sourceToken 时透传增量源字段（dslTemplate 保持 null，不拼全文）', () => {
+    const tab = emevdPendingTabFromFullDocument({
+      tabId: 'file://event/common.emevd',
+      title: 'common',
+      resourceUri: 'file://event/common.emevd',
+      full: fullOf(outlineOf([{ eventId: 50, instructionCount: 3, unknownCount: 1 }])),
+      dslTemplate: null,
+      dslTemplateTruncated: false,
+      dslTemplateTotalLines: 70_000,
+      sourceStyle: 'dark-script',
+      sourceToken: 'tok-1',
+      sourcePrefix: 'L0\nL1\nL2',
+      sourceTotalLines: 70_000
+    });
+    assert.equal(tab.dslTemplate, null);
+    assert.equal(tab.sourceToken, 'tok-1');
+    assert.equal(tab.sourcePrefix, 'L0\nL1\nL2');
+    assert.equal(tab.sourceTotalLines, 70_000);
+  });
+
+  it('S35：无 token 时不带增量源字段（提交后重读回灌 / 失败关闭）', () => {
+    const tab = emevdPendingTabFromFullDocument({
+      tabId: 't',
+      title: 't',
+      resourceUri: 'file://event/common.emevd',
+      full: fullOf(outlineOf([{ eventId: 50, instructionCount: 1, unknownCount: 0 }])),
+      dslTemplate: '$Event(50, Default, function() {\n});',
+      dslTemplateTruncated: false,
+      dslTemplateTotalLines: 2,
+      sourceStyle: 'dark-script'
+    });
+    assert.equal('sourceToken' in tab, false);
+    assert.equal('sourcePrefix' in tab, false);
+    assert.equal('sourceTotalLines' in tab, false);
+    assert.equal(tab.dslTemplate, '$Event(50, Default, function() {\n});');
+  });
 });
 
 describe('eventWarningRowsOf 回退（只读 demo / 读取失败 / 手搓文档）', () => {

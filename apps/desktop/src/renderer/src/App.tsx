@@ -1410,24 +1410,20 @@ export function App(): ReactElement {
         }
         setLastOpenFailure((current) => current?.kind === 'event-open-failed' ? null : current);
         if (full.sourcePrefix) setEventSourcePreview(full.sourcePrefix);
-        const assembled = await assembleEmevdSource({
-          dslTemplate: full.dslTemplate ?? null,
-          sourcePrefix: full.sourcePrefix ?? null,
-          sourceToken: full.sourceToken ?? null,
-          sourceTotalLines: full.sourceTotalLines ?? full.dslTemplateTotalLines,
-          isCancelled: () => cancelled || eventOpenRequestRef.current !== requestId,
-          readSlice: async (token, fromLine, lineCount) => {
-            if (typeof bridge.readEmevdSourceSlice !== 'function') {
-              return { ok: false };
-            }
-            return bridge.readEmevdSourceSlice(token, fromLine, lineCount);
-          }
-        });
-        if (cancelled || eventOpenRequestRef.current !== requestId || assembled.cancelled) return;
-        let dslTemplate: string | null = assembled.text;
+        // S35（event-common-load.md §3.2）：打开不再拼 7 万行全文 —— 首帧只给
+        // 前缀 + opaque token，全文由工作台按视口续载；查找（Ctrl+F）/ 提交 /
+        // 脏标记时才拉齐。禁止为了「查找要全文」在打开时同步拉全文。
+        const hasIncrementalSource = Boolean(
+          full.sourceToken && full.sourcePrefix !== undefined && full.sourcePrefix !== null
+        );
+        let dslTemplate: string | null = null;
+        if (!hasIncrementalSource) {
+          dslTemplate = full.dslTemplate ?? null;
+        }
         let dslTemplateTruncated = full.dslTemplateTruncated ?? false;
-        let dslTemplateTotalLines = full.dslTemplateTotalLines
-          ?? (dslTemplate ? dslTemplate.split('\n').length : 0);
+        let dslTemplateTotalLines = hasIncrementalSource
+          ? full.sourceTotalLines ?? full.dslTemplateTotalLines ?? 0
+          : full.dslTemplateTotalLines ?? (dslTemplate ? dslTemplate.split('\n').length : 0);
         // R3/P4 裁定：源码形态由主进程按 EMEDF 可用性裁定（dark-script /
         // none 失败关闭）。
         let sourceStyle: 'dark-script' | 'patch-dsl' | 'none' = full.sourceStyle ?? 'none';
@@ -1435,7 +1431,8 @@ export function App(): ReactElement {
           sourceStyle = /^\$Event\(/m.test(dslTemplate) ? 'dark-script' : 'patch-dsl';
         }
         // 拼不出全文且不是 EMEDF 失败关闭：当作打开失败，不要拿前缀建编辑器。
-        if (!dslTemplate && sourceStyle === 'dark-script') {
+        // （增量源有 token + 前缀，不算「拼不出全文」。）
+        if (!dslTemplate && sourceStyle === 'dark-script' && !hasIncrementalSource) {
           setEventSourcePreview(null);
           setEventPendingTab(null);
           setStatus('事件源码切片未齐，未打开编辑器。');
@@ -1450,7 +1447,14 @@ export function App(): ReactElement {
           dslTemplate,
           dslTemplateTruncated,
           dslTemplateTotalLines,
-          sourceStyle
+          sourceStyle,
+          ...(hasIncrementalSource
+            ? {
+                sourceToken: full.sourceToken,
+                sourcePrefix: full.sourcePrefix,
+                sourceTotalLines: dslTemplateTotalLines
+              }
+            : {})
         }));
         setStatus(
           `已加载 EMEVD：${full.eventCount ?? full.outline?.eventCount ?? 0} 事件 / `

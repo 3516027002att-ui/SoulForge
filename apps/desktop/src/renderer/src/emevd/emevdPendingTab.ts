@@ -62,6 +62,14 @@ export interface EmevdPendingTabInput {
   dslTemplateTruncated: boolean;
   dslTemplateTotalLines: number;
   sourceStyle: 'dark-script' | 'patch-dsl' | 'none';
+  /**
+   * S35 增量源（超长 EMEVD）：打开回包只带前 400 行 + opaque token，全文按
+   * 视口续载。dslTemplate 为 null 且带 sourceToken 时，工作台用 sourcePrefix
+   * 建首帧缓冲。提交后的重读回灌走完整 dslTemplate，不传这三项。
+   */
+  sourceToken?: string | null;
+  sourcePrefix?: string | null;
+  sourceTotalLines?: number;
 }
 
 /** outline 行 → gutter 判据行（顺序即文档顺序，与 `$Event(` 出现顺序一致）。 */
@@ -115,6 +123,13 @@ export function emevdPendingTabFromFullDocument(
     dslTemplate: input.dslTemplate,
     dslTemplateTruncated: input.dslTemplateTruncated,
     dslTemplateTotalLines: input.dslTemplateTotalLines,
-    sourceStyle: input.sourceStyle
+    sourceStyle: input.sourceStyle,
+    ...(input.sourceToken !== undefined && input.sourceToken !== null
+      ? {
+          sourceToken: input.sourceToken,
+          sourcePrefix: input.sourcePrefix ?? null,
+          sourceTotalLines: input.sourceTotalLines ?? input.dslTemplateTotalLines
+        }
+      : {})
   };
 }
