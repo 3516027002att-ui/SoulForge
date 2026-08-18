@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import type { ModelThinkingLevel } from '@soulforge/core';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
 
@@ -20,8 +20,31 @@ interface ModelServiceDto {
   embeddingModel?: string;
 }
 
+/** 回环地址判据。地址串和已保存服务共用同一份，不许各写一遍正则。 */
+function isLoopbackBaseUrl(baseUrl: string): boolean {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?([/?#]|$)/i.test(baseUrl.trim());
+}
+
 function isLoopbackService(row: ModelServiceDto): boolean {
-  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?([/?#]|$)/i.test(row.baseUrl);
+  return isLoopbackBaseUrl(row.baseUrl);
+}
+
+/** 错误码 → 人话。原始响应体可能是整页 HTML，不能进单行状态栏。 */
+const MODEL_LIST_ERROR_TEXT: Record<string, string> = {
+  MODEL_SERVICE_AUTH_ERROR: 'API Key 无效或无权限（HTTP 401/403）。',
+  MODEL_SERVICE_RATE_LIMITED: '被限流（HTTP 429），稍后重试。',
+  MODEL_SERVICE_SERVER_ERROR: '服务端错误（HTTP 5xx）。',
+  MODEL_SERVICE_HTTP_ERROR: '服务地址不对或该服务不提供模型列表（HTTP 4xx）。',
+  MODEL_SERVICE_RESPONSE_PARSE_FAILED: '返回内容不是合法 JSON。',
+  MODEL_SERVICE_TIMEOUT: '请求超时。',
+  MODEL_SERVICE_NETWORK_ERROR: '网络不可达，检查地址与代理。',
+  MODEL_SERVICE_CANCELLED: '已取消。',
+  MODEL_SERVICE_REQUEST_FAILED: '请求失败。'
+};
+
+function describeModelListError(error: { code: string; message: string }): string {
+  const friendly = MODEL_LIST_ERROR_TEXT[error.code] ?? '获取模型列表失败。';
+  return `${friendly}（${error.code}）`;
 }
 
 /** 空串/非数字 → undefined（不随保存下发）；合法数字原样返回。 */
@@ -50,10 +73,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
   const bridge = getRendererBridge();
   const [rows, setRows] = useState<ModelServiceDto[]>([]);
   const [encryptionOk, setEncryptionOk] = useState(false);
-  const [displayName, setDisplayName] = useState('本地兼容模型服务');
+  const [displayName, setDisplayName] = useState('模型服务');
   const [protocol, setProtocol] = useState<'openai-compatible' | 'anthropic-compatible'>('openai-compatible');
-  const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:11434');
-  const [model, setModel] = useState('local-model');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [model, setModel] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [status, setStatus] = useState('');
 
@@ -70,7 +93,6 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
   // 模型列表（GET /v1/models）。
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
-  const modelListId = useId();
 
   async function refresh(): Promise<void> {
     if (!bridge) {
@@ -93,10 +115,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
 
   /** S25：重置 = 表单回到初值并从 main 重读已存服务（未保存的草稿丢弃）。 */
   function reset(): void {
-    setDisplayName('本地兼容模型服务');
+    setDisplayName('模型服务');
     setProtocol('openai-compatible');
-    setBaseUrl('http://127.0.0.1:11434');
-    setModel('local-model');
+    setBaseUrl('');
+    setModel('');
     setApiKey('');
     setThinkingLevel('off');
     setContextWindowTokens('');
@@ -130,10 +152,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
       });
       if (result.ok) {
         setModelOptions(result.models.map((entry) => entry.id));
-        setStatus(`找到 ${result.models.length} 个可用模型，点击输入框下拉选择，或手动输入。`);
+        setStatus(`找到 ${result.models.length} 个可用模型，点击列表选择，或手动输入。`);
       } else {
         setModelOptions([]);
-        setStatus(`获取模型列表失败：${result.error.message}`);
+        setStatus(`获取模型列表失败：${describeModelListError(result.error)}`);
       }
     } catch (error) {
       setModelOptions([]);
@@ -256,23 +278,32 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
         <label>
           模型 ID
           <input
-            list={modelListId}
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder="可点击下拉选择，或手动输入"
+            placeholder="gpt-4.1"
           />
         </label>
-        <datalist id={modelListId}>
-          {modelOptions.map((id) => (
-            <option key={id} value={id} />
-          ))}
-        </datalist>
         <div className="row gap">
           <button type="button" onClick={() => void fetchModels()} disabled={fetchingModels}>
             {fetchingModels ? '获取中…' : '获取模型列表'}
           </button>
           <span className="muted">从服务 API 拉取（GET /v1/models）</span>
         </div>
+        {modelOptions.length > 0 && (
+          <ul className="model-pick-list" aria-label="可用模型">
+            {modelOptions.map((id) => (
+              <li key={id}>
+                <button
+                  type="button"
+                  className={id === model ? 'is-selected' : undefined}
+                  onClick={() => setModel(id)}
+                >
+                  {id}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <label>
           显示名称
           <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
@@ -416,8 +447,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
           </li>
         ))}
       </ul>
-      {!rows.some(isLoopbackService) && (
-        <p className="muted">未配置本地模型：真实本地模型需保存回环地址（127.0.0.1 / localhost）服务配置。</p>
+      {/* 只在「当前填的就是回环地址、却还没存过任何回环服务」时提示。
+          不能只看 rows：用户配远程服务时这句话跟他无关。 */}
+      {isLoopbackBaseUrl(baseUrl) && !rows.some(isLoopbackService) && (
+        <p className="muted">当前地址是本机回环，保存后即成为可用的本地模型服务。</p>
       )}
       <p className="muted">{status}</p>
     </section>
