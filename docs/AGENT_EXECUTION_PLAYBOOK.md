@@ -151,7 +151,7 @@ Q6 选定后立即把该行 lifecycle 从 `ready` 改为 `active`，并在 §13.
 
 1. 先完成公开行为与许可证裁定（如 me3、Oodle 的接口边界）。
 2. 定义 contract（如 `GameRuntimeAdapter`）+ detect / capability 返回结构化诊断。
-3. 不实现 Mod loader、不启动真实游戏、不分发运行库。
+3. 自实现 Mod loader 须走独立切片与验证（2026-08-18 用户裁定放开，见 releases.json unfreezeRuling）；不启动真实游戏（无对应 authority）、不分发运行库。
 4. 写 contract smoke + 缺失/错误版本的失败关闭测试。
 5. L6 记 contract `fixture-confirmed`；不证明真实运行成功路径。
 

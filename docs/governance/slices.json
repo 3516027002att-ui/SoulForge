@@ -362,7 +362,7 @@
       ],
       "blockerRefs": [],
       "goal": "已定义 renderer-independent GameRuntimeAdapter、contract-only me3 detect、精确版本 policy、闭集 gateway DTO、超时/取消/竞态、输出上限、异常脱敏和未实现操作失败关闭",
-      "hardPrerequisites": "不实现 Mod loader；不发现或启动真实 me3/Sekiro；匹配 fixture 仍不得启用 profile/launch",
+      "hardPrerequisites": "本切片 contract-only：不发现或启动真实 me3/Sekiro；匹配 fixture 仍不得启用 profile/launch",
       "entryPoints": [
         "packages/core/src/runtime/gameRuntimeAdapter.ts",
         "packages/core/src/runtime/me3RuntimeAdapter.ts",

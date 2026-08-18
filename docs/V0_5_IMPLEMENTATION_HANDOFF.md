@@ -969,7 +969,7 @@ V0.5 不要求代表性硬件档位、真实大地图性能预算或原生后端
 | `W-FLVER-READ-01` | `completed` | `native-verified` | — | `E-ASSET` | FLVER/TPF 只读 native document 已在登记多样本上验证完成（FLVER 11 samples / 572 meshes，TPF 4 texbnd / 52 textures，byte-identical 往返与多样本布局覆盖）；MTD 只读 XML 投影保持 candidate；collision/navigation 定位完成（corpus 无源文件，属真实缺口）｜已完成证据：V0.6 承接交付完成：FLVER native document parser 多样本只读验证（11 samples / 572 meshes，单样本 346 bones / 36 materials / 36 meshes / 182,865 faces，byte-identical roundtrip）；TPF native document parser 多样本验证（4 texbnd / 52 textures，单样本 16 textures，格式从实际字节读出）；MTD 只读 XML 结构投影 MtdNativeDocument（candidate，DTD/外部实体拒绝、大小/元素上限、重复解析一致性验证）；collision/navigation 侦察确认 corpus 无 hkx/hkt/nav/nvmtx/col 源文件（Sekiro 碰撞与导航位于游戏本体 archive），c1020_c.clm2 存在于 chrbnd 但解析器未实现，属真实缺口 | 已满足：合法 corpus root/registry 已可用；布局冲突失败关闭；内层扩展名计数不构成 native document；MTD 语义读取不构成 native authority | `bridge/SoulForge.Bridge/FlverNativeDocument.cs`、`bridge/SoulForge.Bridge/TpfNativeDocument.cs`、`bridge/SoulForge.Bridge/MtdNativeDocument.cs`、`bridge/SoulForge.Bridge/BridgeCommandService.cs` | `npm run bridge:verify:flver`、`npm run bridge:verify:flver-multi`、`npm run bridge:verify:tpf`、`npm run bridge:verify:tpf-multi`、`npm run bridge:verify:collision-nav`、`npm run bridge:build` | cap=`native-verified`（登记样本集）；MTD 仍为 candidate，native writer 不开放；collision/navigation 为真实缺口（corpus 无源文件可验） |
 | `W-AI-REAL-01` | `superseded` | `unverified` | — | `G-AGENT` | 历史切片原要求两类真实 provider 凭据和人工 live smoke；用户已裁定真实账号/凭据不属于 V0.5 验收，默认配置留空 | 由 `W-AI-CONFORMANCE-02` 取代；不得把取消 live smoke 写成 provider adapter 已完成 | `packages/core/src/model-services`、`apps/desktop/src/main/modelServiceCredentials.ts` | 历史验收不再执行 | cap=`unverified`；不产生功能 authority |
 | `W-AI-CONFORMANCE-02` | `completed` | `partial` | — | `G-AGENT` | 已完成双协议错误分类（6 种错误码：TIMEOUT/NETWORK/RATE_LIMITED/SERVER/AUTH/PARSE）、AbortSignal 超时、agent loop 取消/限额、10 case conformance smoke | 不内置 endpoint/key；写工具仍需 native validator/Patch Engine；真实服务账号不属于 V0.5 验收 | `packages/core/src/model-services/errorClassification.ts`、`packages/core/src/model-services`、`packages/core/src/testing/runAiConformanceSmoke.ts` | `npm run test:ai-conformance`、`npm run test:ai-fake-loop`、`npm run test:openai-responses`、`npm run test:model-service-configuration` | cap=`partial`；离线 conformance 不证明第三方服务可用性或 native mutation authority |
-| `W-ME3-ADAPTER-01` | `completed` | `fixture-confirmed` | — | `H-RUNTIME` | 已定义 renderer-independent GameRuntimeAdapter、contract-only me3 detect、精确版本 policy、闭集 gateway DTO、超时/取消/竞态、输出上限、异常脱敏和未实现操作失败关闭 | 不实现 Mod loader；不发现或启动真实 me3/Sekiro；匹配 fixture 仍不得启用 profile/launch | `packages/core/src/runtime/gameRuntimeAdapter.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、`packages/core/src/testing/runMe3RuntimeAdapterSmoke.ts` | `npm run test:me3-runtime-adapter` | cap=`fixture-confirmed`；adapter contract only，native runtime authority=false |
+| `W-ME3-ADAPTER-01` | `completed` | `fixture-confirmed` | — | `H-RUNTIME` | 已定义 renderer-independent GameRuntimeAdapter、contract-only me3 detect、精确版本 policy、闭集 gateway DTO、超时/取消/竞态、输出上限、异常脱敏和未实现操作失败关闭 | 本切片 contract-only：不发现或启动真实 me3/Sekiro；匹配 fixture 仍不得启用 profile/launch | `packages/core/src/runtime/gameRuntimeAdapter.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、`packages/core/src/testing/runMe3RuntimeAdapterSmoke.ts` | `npm run test:me3-runtime-adapter` | cap=`fixture-confirmed`；adapter contract only，native runtime authority=false |
 | `W-ME3-MAIN-DETECT-02` | `completed` | `fixture-confirmed` | — | `H-RUNTIME` | desktop main 已实现固定工具槽、固定 --version 的 privileged detection gateway，并把脱敏结果接入 core adapter/IPC/preload；真实 0.12.1 probe 保持 exit-zero-unverified | `W-ME3-ADAPTER-01` 已完成；main 独占真实路径与进程权限；本切片不启动游戏 | `apps/desktop/src/main/me3RuntimeGateway.ts`、`apps/desktop/src/main/ipc.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts` | `npm run test:me3-runtime-gateway`、`npm run test:desktop-security`、`npm run test:me3-runtime-adapter` | cap=`fixture-confirmed`；只证明受限 production detection gateway，不证明 runtime 会话可用 |
 | `W-ME3-PROFILE-03` | `completed` | `fixture-confirmed` | — | `H-RUNTIME` | 已实现 profile 创建（me3 profile create -g sekiro）、launch（me3 launch -d）、diagnostics、terminate（taskkill /T /F）；gateway 扩展 createProfile/launchGame/`terminateProcess`；IPC 四通道；25 case smoke 通过 | `W-ME3-MAIN-DETECT-02` 已完成；不得只凭版本字符串或 exit 0 启用；所有路径/PID/argv 继续 main-only | `apps/desktop/src/main/me3RuntimeGateway.ts`、`packages/core/src/runtime/me3RuntimeAdapter.ts`、`apps/desktop/src/main/ipc.ts` | `npm run test:me3-runtime-adapter`、`npm run test:me3-runtime-gateway` | cap=`partial`；只提升实际完成且重读/回滚验证的运行操作 |
 | `W-RENDER-BENCH-01` | `superseded` | `unverified` | — | `I-RENDER` | 历史切片原要求代表性硬件/地图与量化性能基线；用户已裁定其不属于 V0.5 验收 | 由 `W-RENDER-FUNCTIONAL-02` 取代；性能优化可独立推进但不得恢复为隐含 Gate | `packages/core/src/scene` | 历史验收不再执行 | cap=`unverified`；不产生渲染 authority |
@@ -1248,7 +1248,7 @@ npm run build
 
 <!-- SOULFORGE_PROJECTION_BEGIN:command-index -->
 
-全部 181 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
+全部 182 条已登记验证命令按层级列出。层级顺序即执行顺序（先快后慢，早失败早停）。
 
 一次跑完某一层：`node scripts/verify.mjs --tier <层级>`；跑全部：`npm run verify:all`。
 
@@ -1277,7 +1277,7 @@ npm run test:verify-entrypoint
 npm run verify:audit
 ~~~
 
-**unit**（53 条）
+**unit**（54 条）
 
 ~~~powershell
 npm run test
@@ -1318,6 +1318,7 @@ npm run test:openai-responses
 npm run test:param-msb-write-ipc-contract
 npm run test:performance-baseline
 npm run test:preload-surface-ruling
+npm run test:rag
 npm run test:recent-paths
 npm run test:renderer-reachability
 npm run test:renderer-unit
@@ -1587,7 +1588,6 @@ entries[]:
 - 在完全权限中绕过 Patch Engine；
 - 长期保留两套 production parser、协议、数据库或写入主干；
 - 把 Three.js renderer object 当作权威场景文档；
-- 自行实现 Mod loader 取代 me3，除非未来有独立、明确的用户裁定。
 
 ---
 
@@ -1901,7 +1901,7 @@ V0.5 完成不是路线状态的主观汇总。发布候选必须提交一张按
 | `SCOPE-ASSET-OPEN-CONVERSION` | `E-ASSET` | `REL-E`（`passed`） | `deferred` | `V0.5` → 延期 `V0.6` | `candidate` | 0 | 4 | FLVER/TPF/MTD native 资源到 glTF/GLB/PNG/TGA/DDS/描述清单的只读导出矩阵（延期至 V0.6） |
 | `SCOPE-EDITORS` | `F-EDITORS` | `REL-F`（`passed`） | `supported` | `V0.5` | `partial` | 12 | 8 | BND4、FMG、PARAM、EMEVD 四个 typed mutation 语义编辑器，script 只读证据视图加整个内层文件替换，以及共享只读 Hex 证据视图 |
 | `SCOPE-AI` | `G-AGENT` | `REL-G`（`passed`） | `supported` | `V0.5` | `unverified` | 12 | 7 | OpenAI-compatible 与 Anthropic-compatible 服务对语义文档的证据化读取与受控 typed mutation 循环 |
-| `SCOPE-RUNTIME` | `H-RUNTIME` | `REL-H`（`open`） | `supported` | `V0.5` | `fixture-confirmed` | 8 | 4 | 通过能力探测兼容的可替换 me3 GameRuntimeAdapter 检测、profile、启动、日志、终止与回滚后复启 |
+| `SCOPE-RUNTIME` | `H-RUNTIME` | `REL-H`（`open`） | `supported` | `V0.5` | `fixture-confirmed` | 8 | 3 | 通过能力探测兼容的可替换 me3 GameRuntimeAdapter 检测、profile、启动、日志、终止与回滚后复启 |
 | `SCOPE-RELEASE` | `H-RUNTIME` | `REL-H`（`open`） | `supported` | `V0.5` | `partial` | 7 | 5 | Windows 10/11 x64 NSIS 的打包、确定性 manifest/hash、干净机安装、覆盖升级、卸载与 runtime 完整性；代码签名不属于验收范围 |
 | `SCOPE-RENDERING` | `I-RENDER` | `REL-I`（`passed`） | `supported` | `V0.6` | `partial` | 5 | 6 | renderer-independent semantic scene、Three.js WebGPU 主后端与 WebGL2 自动回退（V0.6 承接交付） |
 | `SCOPE-COMPLIANCE` | `H-RUNTIME` | `REL-COMPLIANCE`（`passed`） | `supported` | `V0.5` | `partial` | 6 | 6 | 项目所有者控制机器上的内部测试构建、内容安全、installer manifest/hash、许可证 inventory 与禁止外部分发边界；代码签名不属于验收范围 |

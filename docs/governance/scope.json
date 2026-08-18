@@ -63,7 +63,8 @@
     "sourceRelease": "v0.12.1",
     "sourceArtifactSha256": "b1c11659b0cfde73062b2fa134a8ac499f3e713fe82d9014401289677ace7323",
     "provisioningResponsibility": "project-engineering",
-    "compatibilityPolicy": "capability-probe-fail-closed"
+    "compatibilityPolicy": "capability-probe-fail-closed",
+    "revisionNote": "2026-08-18 用户裁定（releases.json unfreezeRuling 第三次追加）：撤销「不自实现 Mod loader 取代 me3」禁令，允许自行实现 Mod loader（须经独立切片、requiredValidation、Patch Engine 与审计边界，不得写入原版游戏目录）；me3 仍为当前已集成路线，GameRuntimeAdapter 保持可替换接口。"
   },
   "renderingAcceptancePolicy": {
     "status": "user-approved",
@@ -1114,7 +1115,6 @@
         "terminate"
       ],
       "unsupportedOperations": [
-        "implement-mod-loader",
         "write-original-game",
         "assume-compatible-from-version-or-exit-code",
         "launch-with-missing-or-ambiguous-capability"
@@ -1125,7 +1125,9 @@
         "EV-H-GATES-7BD"
       ],
       "registryRefs": [],
-      "openRulings": [],
+      "openRulings": [
+        "2026-08-18 用户裁定撤销 implement-mod-loader 禁令（AGENTS.md 与交接书 §16 同步移除，releases.json unfreezeRuling 第三次追加）；允许自行实现 Mod loader，实现范围、authority 与 requiredValidation 待独立切片定义。"
+      ],
       "nonClaims": [
         "能力探测兼容策略已纳入目标范围，但裁定时 authorityAtRuling 为 fixture-confirmed；裁定时 production gateway、真实 me3 profile/launch/diagnostics/terminate 与 Sekiro 启动尚未验证。"
       ],
