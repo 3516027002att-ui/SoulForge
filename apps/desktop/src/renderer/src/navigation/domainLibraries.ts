@@ -1,5 +1,6 @@
 /**
- * 语义领域的逻辑库列表（按后缀，与既有 workbench / selectEditor 判据同口径）。
+ * 语义领域的逻辑库列表（按后缀 / 路径段，与既有 workbench / selectEditor
+ * 判据同口径；S39 起 script/behavior 两个域按路径段细分）。
  *
  * 这不是 renderer 自行做 EditorCatalog：领域栏仍只消费 DomainSummary。
  * 这里只把已经索引到的文件投影成「该领域可打开的逻辑库」，供侧栏点选。
@@ -40,17 +41,27 @@ export function isMapDocumentPath(relativePath: string): boolean {
   return /\.msb(\.dcx)?$/i.test(relativePath);
 }
 
+/**
+ * S39（2026-08-18）：脚本域按路径段判定——只有 `script/` 目录下的
+ * `.luabnd(.dcx)` 容器与明文 `.lua` 才进「脚本」侧栏。`action/script/*.hks`
+ * 是动作脚本，归「动作」域（见 isBehaviorLibraryPath）；`script/talk/*.talkesdbnd.dcx`
+ * 走 ESD，也不进脚本域。裸 `.hks` 一律不是脚本库（即使带 .dcx）。
+ */
 export function isScriptLibraryPath(relativePath: string): boolean {
-  return /\.(luabnd|hks|lua)(\.dcx)?$/i.test(relativePath);
+  if (!/(?:^|[\\/])script[\\/]/i.test(relativePath)) return false;
+  return /\.(luabnd|lua)(\.dcx)?$/i.test(relativePath);
 }
 
 /**
  * 行为/动作域：T3（2026-08-15）行为 + 动画合并为「动作」，侧栏列
- * `anibnd|tae`（与隐藏域 animation 同口径）。behbnd/esd/hkxbnd 不再进
- * 动作侧栏，需要时走「文件」域（grok T3）。
+ * `anibnd|tae`（与隐藏域 animation 同口径）；S39（2026-08-18）追加
+ * `action/` 路径下的 `.hks`（如 `action/script/c0000_transition.hks`），
+ * 与 anibnd/tae 一起进动作侧栏，点开仍走脚本 IDE（selectEditor 'script'）。
+ * behbnd/esd/hkxbnd 不进动作侧栏，需要时走「文件」域（grok T3）。
  */
 export function isBehaviorLibraryPath(relativePath: string): boolean {
-  return /\.(tae|anibnd)(\.dcx)?$/i.test(relativePath);
+  return /\.(tae|anibnd)(\.dcx)?$/i.test(relativePath)
+    || (/(?:^|[\\/])action[\\/]/i.test(relativePath) && /\.hks(\.dcx)?$/i.test(relativePath));
 }
 
 /** 动画域（T3 后顶栏隐藏，保留给隐藏域/测试）。 */

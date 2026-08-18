@@ -74,8 +74,11 @@ const FAMILY_RULES: ReadonlyArray<{ suffix: string; familyId: string; openKind: 
   { suffix: '.flver.dcx', familyId: '.flver.dcx', openKind: 'flver' },
   { suffix: '.flver', familyId: '.flver', openKind: 'flver' },
   { suffix: '.param', familyId: '.param', openKind: 'param-rows' },
-  { suffix: '.hks', familyId: '.hks', openKind: 'plain-text' },
-  { suffix: '.lua', familyId: '.lua', openKind: 'plain-text' },
+  // S39（2026-08-18）：裸 .hks/.lua 与 selectEditor 同口径——点开走脚本 IDE
+  // （与 .luabnd.dcx 同一读链）。侧栏归属由 domainLibraries 按路径段另行分类
+  // （action/script/*.hks 进「动作」域），不影响打开路由。
+  { suffix: '.hks', familyId: '.hks', openKind: 'script' },
+  { suffix: '.lua', familyId: '.lua', openKind: 'script' },
   { suffix: '.bak', familyId: '.bak', openKind: 'history' }
 ];
 
