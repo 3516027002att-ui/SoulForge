@@ -687,6 +687,29 @@ const api = {
     mutation
   ),
   /**
+   * 容器内 param 的**行级**写入（问题 4）：新建行 / 复制当前行 / 删除当前行。
+   *
+   * 与字段/行名写入同一条 Patch 链（write-param add/delete → write-bnd4 →
+   * Patch Engine）。rowId 由渲染器按「当前表最大 id + 1」给出；add/copy 携带
+   * 整行字节（copy = 当前行原样，add = 行宽 0 行），delete 不带字节。
+   */
+  applyContainerParamRowMutations: (
+    containerUri: string,
+    expectedContainerHash: string,
+    mutation: {
+      kind: 'add' | 'copy' | 'delete';
+      entryIndex: number;
+      expectedChildHash: string;
+      rowId: number;
+      rowDataBase64: string;
+    }
+  ): Promise<RendererSaveResult> => ipcRenderer.invoke(
+    'resource.applyContainerParamRowMutations',
+    containerUri,
+    expectedContainerHash,
+    mutation
+  ),
+  /**
    * T5-4：导出行（CSV，主进程保存对话框）。表头 id,name,<字段内部 id>…。
    * 导出是新建文件、不走 Patch Engine，但禁止写进游戏目录 / Mod 工作区。
    */

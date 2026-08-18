@@ -3610,6 +3610,37 @@ export function App(): ReactElement {
                 setStatus(`PARAM 行名写入失败：${message}`);
                 return { ok: false, message };
               }}
+              onApplyRowMutation={async (input) => {
+                /*
+                 * 容器内 param 的**行级**写入（问题 4）：新建/复制/删除当前行。
+                 * 与字段/行名写入同一条 Patch 链（write-param add/delete →
+                 * write-bnd4 → Patch Engine），不经 fs.writeFile、不经 changeStore。
+                 */
+                if (!bridge || typeof bridge.applyContainerParamRowMutations !== 'function') {
+                  return { ok: false, message: '容器 PARAM 行级写入通道不可用。' };
+                }
+                // S29：哈希由 main 写时现算兜底，缺哈希不挡行级写入。
+                const saved = await bridge.applyContainerParamRowMutations(
+                  paramWorkbenchFile.sourceUri,
+                  input.expectedContainerHash || '',
+                  {
+                    kind: input.kind,
+                    entryIndex: input.entryIndex,
+                    expectedChildHash: input.expectedChildHash,
+                    rowId: input.rowId,
+                    rowDataBase64: input.rowDataBase64
+                  }
+                );
+                const label = input.kind === 'add' ? '新建' : input.kind === 'copy' ? '复制' : '删除';
+                if (saved.ok) {
+                  setStatus(`PARAM ${label}行已保存：${input.paramName} 行 ${input.rowId}。`);
+                  void refreshOperationHistory();
+                  return { ok: true };
+                }
+                const message = saved.diagnostics?.[0]?.message ?? 'PARAM 行级写入失败。';
+                setStatus(`PARAM ${label}行失败：${message}`);
+                return { ok: false, message };
+              }}
             />
           )}
           {activeEditor === 'param-rows' && (

@@ -6689,6 +6689,224 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   );
 
   /**
+   * 容器内 PARAM 的**行级**写入：新建行 / 复制当前行 / 删除当前行（问题 4）。
+   *
+   * 与 resource.applyContainerParamRowNameMutation（T5-3）、
+   * resource.applyContainerParamFieldMutation 走同一条 Patch 链，
+   * 禁止 fs.writeFile、禁止 changeStore —— 只有 applyNativeMutation 的
+   * commit port（Patch Engine）能落盘：
+   *
+   *   ① write-param（C#）—— add/copy 用 mutation='add' 带新 id 与整行字节新增一行
+   *      （ParamNativeDocument.ApplyCompactMutations 的 add 分支：id 已存在会拒绝，
+   *      不会静默覆盖）；delete 用 mutation='delete' 按 id 移除（id 不存在会拒绝）。
+   *      产出改过的裸 param（暂存，C# 侧重读验证 PARAM_STAGING_WRITE_VERIFIED）；
+   *   ② write-bnd4 replace（C#）—— 按 entryIndex 把裸 param 塞回容器副本；
+   *   ③ 真正落盘由 applyNativeMutation 的 commit port（Patch Engine）完成，
+   *      含备份与回滚元数据。
+   *
+   * rowId 由渲染器按「当前表最大 id + 1」给出（不跳过空洞，对照 Yapped）；
+   * add/copy 必须携带整行字节（copy = 当前行原样；add = 长度=行宽的 0 行），
+   * 长度由 C# 侧对 RowDataSize 校验。旧布局（无行头）PARAM 不支持行数变更，
+   * C# add/delete 会返回结构化失败，不会破坏无损性。
+   */
+  handle(
+    'resource.applyContainerParamRowMutations',
+    async (
+      event,
+      containerUri: string,
+      expectedContainerHash: string,
+      mutation: {
+        kind: 'add' | 'copy' | 'delete';
+        entryIndex: number;
+        expectedChildHash: string;
+        rowId: number;
+        rowDataBase64: string;
+      }
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === containerUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入容器内 PARAM 行。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(containerUri, file);
+      if (gameBlocked) return gameBlocked;
+      if (mutation.kind !== 'add' && mutation.kind !== 'copy' && mutation.kind !== 'delete') {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_ROW_MUTATION_INVALID',
+            message: '行级写入必须显式声明 add / copy / delete 之一。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+      if (mutation.kind !== 'delete'
+        && (typeof mutation.rowDataBase64 !== 'string' || mutation.rowDataBase64.length === 0)) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'PARAM_ROW_DATA_MISSING',
+            message: `${mutation.kind === 'copy' ? '复制' : '新建'}行需要整行字节`
+              + '（copy = 当前行原样，add = 行宽 0 行）。',
+            sourceUri: containerUri
+          }]
+        };
+      }
+
+      // 解包目标条目：write-param 需要一个裸 param 作为输入基底。
+      // S29：容器哈希缺失时现算（索引没扫到 sha256 的罕见情况），不挡写入。
+      const containerHashNow = file.sha256 ?? await sha256FileNow(file.absolutePath);
+      const unpacked = await unpackContainerParamChild({
+        containerPath: file.absolutePath,
+        containerUri,
+        containerHash: containerHashNow,
+        entry: { index: mutation.entryIndex }
+      });
+      if (!unpacked.ok) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: sanitizeDiagnostics(unpacked.diagnostics)
+        };
+      }
+
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'PARAM_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const oodle = activeSession.layers.baseRoot
+        ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+        : {};
+
+      // ① 暂存区产出改过行的裸 param。add/copy → add（新 id 已存在会被 C# 拒绝）；
+      //    delete → delete（id 不存在会被 C# 拒绝）。
+      const patchOptions = mutation.kind === 'delete'
+        ? { mutation: 'delete' as const, id: mutation.rowId }
+        : { mutation: 'add' as const, id: mutation.rowId, dataBase64: mutation.rowDataBase64 };
+      const paramStage = await stageBridgeOutput({
+        stagingRoot: storage.stagingRoot,
+        prefix: 'param-row',
+        fileName: `${basename(unpacked.child.name)}.rows-${mutation.kind}`,
+        allowedRoots: () => [...stage.allowedRoots],
+        write: async (context) => {
+          const written = await runBridge<Record<string, unknown>>({
+            command: 'write-param',
+            filePath: unpacked.child.absolutePath,
+            allowedRoots: context.allowedRoots,
+            writableRoots: context.writableRoots,
+            timeoutMs: 120_000,
+            commandOptions: {
+              outputPath: context.outputPath,
+              // S29：storedContentHash 缺失时对解包文件现算（写前读到的就是写时文件）。
+              expectedDocumentHash: unpacked.child.storedContentHash
+                || await sha256FileNow(unpacked.child.absolutePath),
+              ...patchOptions
+            }
+          });
+          return {
+            ok: written.parseStatus !== 'failed'
+              && written.diagnostics.some(
+                (diagnostic) => diagnostic.code === 'PARAM_STAGING_WRITE_VERIFIED'
+              ),
+            diagnostics: written.diagnostics
+          };
+        }
+      });
+      if (!paramStage.ok || !paramStage.bytes) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [
+            ...sanitizeDiagnostics(paramStage.result?.diagnostics ?? []),
+            ...paramStage.diagnostics.map((diagnostic) => ({
+              severity: 'error' as const,
+              code: diagnostic.code,
+              message: diagnostic.message,
+              sourceUri: containerUri
+            })),
+            {
+              severity: 'error' as const,
+              code: 'PARAM_ROW_STAGE_FAILED',
+              message: '行级改动未能产出裸 param 暂存文件，容器未被修改。',
+              sourceUri: containerUri
+            }
+          ]
+        };
+      }
+      const mutatedChildBase64 = paramStage.bytes.toString('base64');
+
+      // ② 把裸 param 塞回容器，经 Patch Engine 提交重打包后的容器。
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri: containerUri,
+        expectedHash: containerHashNow,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'parambnd',
+        stagingFileName: `${basename(file.relativePath)}.repacked`,
+        stageWrite: async (context) => {
+          const written = await runBridge<Record<string, unknown>>({
+            command: 'write-bnd4',
+            filePath: file.absolutePath,
+            resourceUri: containerUri,
+            allowedRoots: context.allowedRoots,
+            writableRoots: context.writableRoots,
+            timeoutMs: 180_000,
+            commandOptions: {
+              outputPath: context.outputPath,
+              mutation: 'replace',
+              expectedContainerHash: containerHashNow,
+              entryIndex: mutation.entryIndex,
+              // S29：child 哈希缺失时现算（解包文件即条目存储字节，与 C# Hash 同算法）。
+              expectedChildHash: mutation.expectedChildHash
+                || await sha256FileNow(unpacked.child.absolutePath),
+              contentBase64: mutatedChildBase64
+            },
+            ...oodle
+          });
+          return {
+            ok: written.parseStatus !== 'failed'
+              && written.diagnostics.some(
+                (diagnostic) => diagnostic.code === 'BND4_STAGING_WRITE_VERIFIED'
+              ),
+            diagnostics: written.diagnostics
+          };
+        },
+        title: `PARAM row ${mutation.kind} ${mutation.rowId} in ${unpacked.child.name}`,
+        confirmActionLabel: '提交容器内 PARAM 行级变更'
+      }, {
+        // S29：不再接确认端口（见字段链注释）。
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+
+      if (outcome.status === 'committed' && outcome.result.ok) {
+        paramPageCache.delete(containerUri);
+        containerChildrenCache.clear();
+        unpackedParamCache.clear();
+      }
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  /**
    * 解包容器内 param 并全量读出（T5-4 导入导出的公共前置）。
    *
    * 与 resource.readContainerParamPage 同一条前置链：unpackContainerParamChild
