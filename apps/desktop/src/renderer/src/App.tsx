@@ -11,6 +11,7 @@ import {
 } from 'react';
 import {
   classifyWorkspaceOpen,
+  EDITOR_DOMAIN_IDS,
   PARAM_PAGE_SIZE,
   mergeCiteHits
 } from '@soulforge/shared';
@@ -228,6 +229,21 @@ function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open'
   // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
   const uiKey = workspaceSessionId ?? 'preview';
   return `soulforge.ui.agentDock.v1.${uiKey}.${field}`;
+}
+
+/**
+ * 6-C：外壳（shell）工作域的持久化 key。
+ *
+ * 与 Agent dock 共用同一个 opaque workspaceSessionId 前缀；**不把绝对路径写入
+ * localStorage**（renderer 硬约束）。sourceUri 是索引里的 opaque URI，可以存；
+ * 真实游戏目录 / 窗口坐标一律不碰。
+ */
+function shellUiStorageKey(
+  workspaceSessionId: string | undefined,
+  field: 'domain' | 'sourceUri' | 'sidebarCollapsed'
+): string {
+  const uiKey = workspaceSessionId ?? 'preview';
+  return `soulforge.ui.shell.v1.${uiKey}.${field}`;
 }
 
 /**
@@ -773,6 +789,22 @@ export function App(): ReactElement {
     }
   }, [agentOpen, agentWidth, workspace?.workspaceSessionId]);
 
+  /** 6-C：随 activeDomain / 选中资源 / 侧栏折叠写入上次外壳状态。 */
+  useEffect(() => {
+    if (workspace === null) return;
+    try {
+      const sessionId = workspace.workspaceSessionId;
+      // 有工作区时开始不是页，不要把 domain 写成 project。
+      if (activeDomain !== 'project') {
+        window.localStorage.setItem(shellUiStorageKey(sessionId, 'domain'), activeDomain);
+      }
+      window.localStorage.setItem(shellUiStorageKey(sessionId, 'sourceUri'), selectedFile?.sourceUri ?? '');
+      window.localStorage.setItem(shellUiStorageKey(sessionId, 'sidebarCollapsed'), String(sidebarCollapsed));
+    } catch {
+      // 持久化是增强能力，不应阻塞渲染或任务状态。
+    }
+  }, [workspace, activeDomain, selectedFile?.sourceUri, sidebarCollapsed]);
+
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
       // 三条关闭路径之一：Escape 关闭命令面板，走统一出口保证焦点归还。
@@ -873,7 +905,8 @@ export function App(): ReactElement {
         setAgentServices(services.map((service) => ({
           id: service.id,
           displayName: service.displayName,
-          hasCredential: service.hasCredential
+          hasCredential: service.hasCredential,
+          protocol: service.protocol
         })));
         setAgentTools(toolList);
         // 默认选中第一个已配置凭据的服务：未配置凭据的服务会被主进程以
@@ -1990,6 +2023,41 @@ export function App(): ReactElement {
   }
 
   /**
+   * 6-C：恢复上次退出前的工作域 + 选中资源 + 侧栏折叠。
+   *
+   * 只在 mountWorkspace 完成「索引写入 allFiles / files」后调用——那时
+   * workspaceSessionId 与索引都已就位，此时调 selectFile 才找得到文件。
+   * localStorage 读失败吞掉（与 Agent dock 一致），不弹窗、不跳页。
+   */
+  function restoreLastShellState(workspaceSessionId: string, index: readonly RendererIndexedFile[]): void {
+    try {
+      const savedCollapsed = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'sidebarCollapsed'));
+      const savedDomain = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'domain'));
+      const savedSourceUri = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'sourceUri'));
+      if (savedCollapsed !== null) setSidebarCollapsed(savedCollapsed === 'true');
+      if (savedDomain === null) return;
+      // 必须是合法领域值，且不是 project（有工作区时开始不是页）。非法/无记录保持现状。
+      if (!EDITOR_DOMAIN_IDS.includes(savedDomain as EditorDomainId)) return;
+      const domain = savedDomain as EditorDomainId;
+      if (domain === 'project') return;
+      setSidebarView('explorer');
+      if (savedSourceUri !== null && savedSourceUri !== '') {
+        const match = index.find((file) => file.sourceUri === savedSourceUri);
+        if (match) {
+          setActiveDomain(domain);
+          setCenterView('resource');
+          void selectFile(match);
+          return;
+        }
+      }
+      // 文件不在索引或无记录：只恢复领域（走 selectDomain 的「打开首选逻辑库」路径）。
+      selectDomain(domain);
+    } catch {
+      // 读失败吞掉，保持现状。
+    }
+  }
+
+  /**
    * 用已有的目录选择凭据挂载工作区。
    *
    * 手动打开与启动自动挂载共用这一段 —— 两份挂载逻辑必然漂移，而漂移的表现是
@@ -2046,6 +2114,9 @@ export function App(): ReactElement {
         : ' · 未挂载原版游戏目录';
       setBaseRootChoice(null);
       const restoredPrefix = origin === 'restored' ? '已恢复上次的工作区：' : '';
+      // 6-C：索引已回来，恢复上次退出前的工作域 + 选中资源 + 侧栏折叠。
+      // 放在全部 reset 之后，保证恢复值不被上面任一 setState 覆盖。
+      restoreLastShellState(result.workspaceSessionId, result.files);
       setStatus(`${restoredPrefix}已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2131,6 +2202,16 @@ export function App(): ReactElement {
   }
 
   function selectDomain(domain: EditorDomainId): void {
+    // 有工作区：开始 = 召唤资源栏，不是一页。必须赶在「切工作域会丢编辑视图」
+    // 的确认与 setActiveDomain 之前 return——不切工作域，自然没有编辑态丢失，
+    // 中央 StartWorkspacePanel 也不能挂上（6-A）。
+    if (domain === 'project' && workspace !== null) {
+      setSidebarView('explorer');
+      setSidebarCollapsed((collapsed) =>
+        !collapsed && sidebarView === 'explorer' ? true : false
+      );
+      return;
+    }
     if (domain !== activeDomain && editDirty) {
       const confirmed = window.confirm('当前文本有未生成变更的修改，切换工作域将保留草稿但可能离开编辑视图。继续？');
       if (!confirmed) return;
@@ -2138,6 +2219,7 @@ export function App(): ReactElement {
     setActiveDomain(domain);
     setBnd4Forced(false);
     if (domain === 'project') {
+      // 无工作区：才落到开始页（打开工作区的落点）。
       setSelectedFile(null);
       setCenterView('project');
       setSidebarView('explorer');
@@ -2768,6 +2850,9 @@ export function App(): ReactElement {
     ? `已索引 ${allFiles.length} 个资源 · ${workspace.workspaceLabel}${analysis ? ` · 已解析 ${analysis.parsedFiles}` : ''}`
     : '未打开 Mod 工作区 · 从左侧资源浏览器打开';
   const lastOperation = operationHistory.length > 0 ? operationHistory[0] : null;
+  // 8-A：Composer 思考强度按当前选中服务的协议换表；没有服务时当 openai-compatible。
+  const activeAgentProtocol = agentServices
+    .find((service) => service.id === agentServiceId)?.protocol ?? 'openai-compatible';
   const sidebarStyle = { '--sidebar-w': `${sidebarWidth}px` } as CSSProperties;
   const agentStyle = { '--agent-w': `${agentWidth}px` } as CSSProperties;
 
@@ -2800,6 +2885,7 @@ export function App(): ReactElement {
         domain={activeDomain}
         domains={domainSummaries}
         onSelect={selectDomain}
+        resourceSidebarOpen={!sidebarCollapsed && sidebarView === 'explorer'}
       />
 
       <div className="shell" ref={shellRef}>
@@ -3257,21 +3343,8 @@ export function App(): ReactElement {
           </div>
           <div className="editor-viewport">
             <div className="editor-pane is-active">
-              <div className="pane-toolbar">
-                <span className="crumb">
-                  <b>{centerView === 'operations'
-                    ? '任务与历史'
-                    : centerView === 'project'
-                      ? '开始'
-                      : domainLabel(activeDomain)}</b>
-                  {/* R1/P7 裁定：面包屑用逻辑名，物理相对路径只进 tooltip。 */}
-                  {selectedFile
-                    ? <span title={selectedFile.relativePath}> · {libraryDisplayName(selectedFile.relativePath)}</span>
-                    : ' · 资源预览'}
-                </span>
-                <span className="toolbar-spacer"></span>
-                {hasUncommittedChanges && <span className="pill pill--warn">未写入变更</span>}
-              </div>
+              {/* 10-A：tab 下面的面包屑行整块删除（`PARAM · gameparam` 与 tab 重复，
+                  未写入变更圆点已在 tab__dirty 上，不靠这行活着）。 */}
               <div className="pane-content">
                 <div className="viewer-content">
           {/* 面板级错误边界：任何一个资源族面板抛异常时只降级它自己，不带走整个界面。
@@ -4046,6 +4119,7 @@ export function App(): ReactElement {
           busy={aiBusy}
           provider={aiProvider}
           thinking={aiThinking}
+          protocol={activeAgentProtocol}
           permissionMode={aiMode}
           permissionLockReason={AI_PERMISSION_LOCK_REASON}
           goal={agentGoal}

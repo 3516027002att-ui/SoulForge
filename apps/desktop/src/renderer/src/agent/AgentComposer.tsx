@@ -35,6 +35,8 @@ export interface AgentComposerProps {
   /** S32：思考强度（关/快/普通/深/极致），与模型拆成两个控件。 */
   thinking: ModelThinkingLevel;
   onThinkingChange: (thinking: ModelThinkingLevel) => void;
+  /** 8-A：当前服务协议（OpenAI effort / Anthropic budget），透传给工具栏换表。 */
+  protocol: 'openai-compatible' | 'anthropic-compatible';
 }
 
 /**
@@ -71,7 +73,8 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
     onToggleCiteSelect,
     contextLabel,
     thinking,
-    onThinkingChange
+    onThinkingChange,
+    protocol
   } = props;
 
   const action = composerActionState({ prompt, streaming, awaitingApproval });
@@ -114,6 +117,7 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
         permissionLockReason={permissionLockReason}
         thinking={thinking}
         onThinkingChange={onThinkingChange}
+        protocol={protocol}
       />
     </div>
   );

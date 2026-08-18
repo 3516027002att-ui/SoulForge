@@ -42,6 +42,8 @@ export interface ModelServiceChoice {
   id: string;
   displayName: string;
   hasCredential: boolean;
+  /** 8-A：protocol 决定 Composer 思考强度换表（OpenAI effort / Anthropic budget）。 */
+  protocol: 'openai-compatible' | 'anthropic-compatible';
 }
 
 export interface AgentTaskPanelProps {

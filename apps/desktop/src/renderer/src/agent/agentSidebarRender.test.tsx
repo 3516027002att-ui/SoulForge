@@ -57,6 +57,7 @@ function render(overrides: Partial<AgentSidebarProps> = {}): string {
     busy: false,
     provider: 'mock',
     thinking: 'normal',
+    protocol: 'openai-compatible',
     permissionMode: 'plan',
     permissionLockReason: '由主进程锁定为计划模式；renderer 不能抬高授权。',
     goal: null,
@@ -816,7 +817,7 @@ function approvalFixture(): AgentTaskState {
 function render0Task(): AgentSidebarProps['task'] {
   return {
     task: INITIAL_AGENT_TASK_STATE,
-    services: [{ id: 'svc-1', displayName: '本地兼容模型服务', hasCredential: true }],
+    services: [{ id: 'svc-1', displayName: '本地兼容模型服务', hasCredential: true, protocol: 'openai-compatible' }],
     selectedServiceId: 'svc-1',
     runBlocker: null,
     sessions: [],

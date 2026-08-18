@@ -152,11 +152,11 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   expect(bodyText).not.toContain('SFX 特效');
   expect(bodyText).not.toContain('角色资源');
 
-  // 文件工作域独占物理浏览，但不把 resourceKind 变成顶层按钮。
-  await window.locator('[data-domain="files"]').click();
+  // 问题 14：顶栏不再有「文件」域入口；物理资源从开始侧栏资源树（.file-item）
+  // 定位，不把 resourceKind 变成顶层按钮。
   const files = window.locator('.file-item');
   await expect(files.filter({ hasText: 'sfx/f0000.sfxbnd.dcx' })).toHaveCount(1);
-  await expect(window.locator('.status-bar')).toContainText('文件');
+  await expect(window.locator('[data-testid="start-sidebar-file-list"]')).toBeVisible();
 
   // 语义领域不渲染 Files 物理列表（.file-item），改走逻辑库。
   await window.locator('[data-domain="event"]').click();
@@ -203,11 +203,11 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   await app.close();
 });
 
-test('文件工作域可定位 ai 资源，且不与 Agent 面板冲突', async () => {
+test('开始侧栏资源树可定位 ai 资源，且不与 Agent 面板冲突', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-domain="files"]').click();
+  // 问题 14：资源从开始侧栏资源树定位（顶栏不再有「文件」域入口）。
   const files = window.locator('.file-item');
   await expect(files.filter({ hasText: 'ai/m10.aibnd.dcx' })).toHaveCount(1);
 
@@ -215,7 +215,7 @@ test('文件工作域可定位 ai 资源，且不与 Agent 面板冲突', async 
   await expect(window.locator('.agent__composer textarea')).toBeVisible();
   // §12.3：Agent dock header 左侧产品名是 SoulForge（不是 "Agent"）。
   await expect(window.locator('.agent__header')).toContainText('SoulForge');
-  await expect(window.locator('.status-bar')).toContainText('文件');
+  await expect(window.locator('[data-testid="start-sidebar-file-list"]')).toBeVisible();
   await app.close();
 });
 
@@ -224,7 +224,6 @@ test('BND 外形文件自动进入容器工作台；命令面板可强制以 BND
   await openFixtureWorkspace(window);
 
   // SHELL-09：物理浏览只在 Files 领域；容器领域不再有文件列表。
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'chr/sample.chrbnd.dcx');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region;
   // 工作台根用 getByLabel,列级 section 仍用 getByRole('region')。
@@ -246,8 +245,7 @@ test('脚本容器进入三栏工作台：明文按 encoding 显示，字节码�
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // SCRIPT-41：脚本容器资源从 Files 领域选择，进入三栏脚本工作台。
-  await window.locator('[data-domain="files"]').click();
+  // SCRIPT-41：脚本容器资源从开始侧栏资源树选择，进入三栏脚本工作台。
   await selectFileItem(window, 'script/m25_00_00_00.luabnd.dcx');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('脚本容器工作台')).toBeVisible();
@@ -279,8 +277,7 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // MAP-50B：MSB 地图资源从 Files 领域选择，进入三栏地图工作台。
-  await window.locator('[data-domain="files"]').click();
+  // MAP-50B：MSB 地图资源从开始侧栏资源树选择，进入三栏地图工作台。
   await selectFileItem(window, 'map/m10.msb.dcx');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('MSB 地图工作台')).toBeVisible();
@@ -337,8 +334,7 @@ test('FLVER 模型工作台三栏：树栈↔viewport↔属性联动，材质槽
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // MODEL-51B：FLVER 模型资源从 Files 领域选择，进入三栏模型工作台。
-  await window.locator('[data-domain="files"]').click();
+  // MODEL-51B：FLVER 模型资源从开始侧栏资源树选择，进入三栏模型工作台。
   await selectFileItem(window, 'chr/c1000.flver');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('FLVER 模型工作台')).toBeVisible();
@@ -399,8 +395,7 @@ test('Material 工作台三栏：File list → Material list → Properties/Valu
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // MATERIAL-53B：MTD 材质资源从 Files 领域选择，进入三栏材质工作台。
-  await window.locator('[data-domain="files"]').click();
+  // MATERIAL-53B：MTD 材质资源从开始侧栏资源树选择，进入三栏材质工作台。
   await selectFileItem(window, 'material/materials.mtd');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('Material 工作台')).toBeVisible();
@@ -463,8 +458,7 @@ test('Behavior 工作台三栏：机器 → 状态 → 条件/转移选择链，
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // BEHAVIOR-55B：ESD 状态机资源从 Files 领域选择，进入三栏行为工作台。
-  await window.locator('[data-domain="files"]').click();
+  // BEHAVIOR-55B：ESD 状态机资源从开始侧栏资源树选择，进入三栏行为工作台。
   await selectFileItem(window, 'ai/m10.esd');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('Behavior 工作台')).toBeVisible();
@@ -520,9 +514,8 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // T3（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从 Files 领域选择，
+  // T3（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从开始侧栏资源树选择，
   // 进入三栏动作工作台（Animations | Events / 词条 + 详情 | 预览（只读））。
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'action/c0000.tae');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('动作工作台')).toBeVisible();
@@ -614,8 +607,7 @@ test('VFX 工作台三栏：Effect / Particle list → 真实预览空态 → In
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // VFX-54B：FXR 特效资源从 Files 领域选择，进入三栏 VFX 工作台。
-  await window.locator('[data-domain="files"]').click();
+  // VFX-54B：FXR 特效资源从开始侧栏资源树选择，进入三栏 VFX 工作台。
   await selectFileItem(window, 'sfx/f0000.fxr');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('VFX 工作台')).toBeVisible();
@@ -689,8 +681,7 @@ test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', asy
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // SHELL-09：文本领域不渲染物理浏览器；msg 文件从 Files 领域选择。
-  await window.locator('[data-domain="files"]').click();
+  // SHELL-09：文本领域不渲染物理浏览器；msg 文件从开始侧栏资源树选择。
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
 
   await window.getByRole('row', { name: /伤药葫芦/ }).click();
@@ -797,7 +788,6 @@ test('纯键盘可完成 FMG 编辑：行选择不再阻断编辑态', async () 
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
 
   const row = window.getByRole('row', { name: /伤药葫芦/ });
@@ -853,7 +843,6 @@ test('写入失败：保留诊断，状态为 failed，可重新批准', async (
   const { app, window } = await launchApp({ SF_TEST_APPLY_FAIL: '1' });
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
   await window.getByRole('row', { name: /返回骨片/ }).click();
   const editor = window.locator('label', { hasText: '编辑 ID 101' }).locator('textarea');
@@ -883,8 +872,7 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 从 Files 领域打开 msgbnd：目录链自动定位到该容器第一个表（item.fmg）。
-  await window.locator('[data-domain="files"]').click();
+  // 从开始侧栏资源树打开 msgbnd：目录链自动定位到该容器第一个表（item.fmg）。
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
 
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
@@ -941,8 +929,7 @@ test('TEXT-20C：真空表新增经 review 队列落盘，写按 tableId 路由�
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 从 Files 打开 msgbnd：TEXT-20C 起 live 门禁以 sourceHash 为准，真空表也 live。
-  await window.locator('[data-domain="files"]').click();
+  // 从开始侧栏资源树打开 msgbnd：TEXT-20C 起 live 门禁以 sourceHash 为准，真空表也 live。
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
   await expect(fmgPanel).toBeVisible();
@@ -1240,14 +1227,14 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可点击文件工作域并保持可操作。22 = fixture 合成样本数
+    // 窄屏仍可定位物理资源：开始侧栏资源树全量列出（≤ START_SIDEBAR_FILE_LIMIT）。
+    // 22 = fixture 合成样本数
     // （PARAM-10B 加 gameparam.parambnd.dcx，GPARAM-11B 加 3 个 gparam.dcx，
     // EVENT-30B 加 event/menu.emevd，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx，
     // MAP-50B 加 map/m10.msb.dcx，MODEL-51B 加 chr/c1000.flver，TEXTURE-52B 加
     // menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，MATERIAL-53B 加
     // material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，VFX-54B 加
     // sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22）。
-    await window.locator('[data-domain="files"]').click();
     await expect(window.locator('.file-item')).toHaveCount(22);
   }
 
@@ -1489,7 +1476,6 @@ test('主题表面：普通 pane/数据行/主工作台去卡片化，无圆角�
 
   // 复用变更状态机配方：打开 FMG 工作台并造一个 draft 变更，让 .workbench、
   // .binder-child-row 与 .cq-row 同时在场；.viewer-content .panel 若存在则一并采样。
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
   await window.getByRole('row', { name: /伤药葫芦/ }).click();
   const editor = window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea');
@@ -1548,13 +1534,18 @@ test('主题表面：普通 pane/数据行/主工作台去卡片化，无圆角�
  *
  * 断言的是**用户能看到什么**：DOM 里真的只有一页节点、翻页真的换内容、说明里的
  * 数字与真实总数一致。只断言「pager 存在」不够——一个点了不换页的 pager 也满足。
+ *
+ * 问题 14 后置：这两条测的是 Files 域的物理浏览分页（`[data-panel-id="explorer"]`
+ * 的 search-box / pager / page-range），而该浏览的顶栏入口已被移除（「文件」不再
+ * 出现在顶栏）。开始侧栏资源树与 Ctrl+K 都只会选文件、不落进 Files 物理浏览，
+ * 所以两条用例在当前壳层里没有可到达的入口路径。按任务约束不得把「文件」加回
+ * 顶栏来迁就测试，故改为 skip 并保留正文，待接入 Files 物理浏览的新入口后恢复。
  */
-test('大工作区：文件列表分页，且标题栏与导航报出真实规模', async () => {
+test.skip('大工作区：文件列表分页，且标题栏与导航报出真实规模', async () => {
   const { app, window, pageErrors, consoleErrors } = await launchApp({
     SF_TEST_LARGE_WORKSPACE: '1'
   });
   await openFixtureWorkspace(window);
-  await window.locator('[data-domain="files"]').click();
 
   // 一次只建一页 DOM：这是硬约束 17 的实质，不是「有个 pager 控件」。
   const items = window.locator('.file-item');
@@ -1605,10 +1596,11 @@ test('大工作区：文件列表分页，且标题栏与导航报出真实规�
   await app.close();
 });
 
-test('大工作区：过滤后页码复位，且搜索结果显式说明被截断', async () => {
+// 问题 14 后置：同样测 Files 物理浏览（search-box/pager/page-range），入口已随
+// 「文件」顶栏移除而不可达，skip 保留正文（见上方「大工作区：分页与截断说明」）。
+test.skip('大工作区：过滤后页码复位，且搜索结果显式说明被截断', async () => {
   const { app, window } = await launchApp({ SF_TEST_LARGE_WORKSPACE: '1' });
   await openFixtureWorkspace(window);
-  await window.locator('[data-domain="files"]').click();
 
   const range = window.locator('[data-testid="file-list-page-range"]');
   await window.locator('[data-panel-id="explorer"] .search-box input').fill('m0');
@@ -1889,8 +1881,7 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 从 Files 领域选 parambnd 容器，打开 Param Workbench。
-  await window.locator('[data-domain="files"]').click();
+  // 从开始侧栏资源树选 parambnd 容器，打开 Param Workbench。
   await selectFileItem(window, 'param/gameparam/gameparam.parambnd.dcx');
 
   // 三栏同时存在（T5-4 删第四栏 Tools：Params/Rows/Fields）。
@@ -2016,8 +2007,7 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 从 Files 领域选 gparam 文件，打开 GPARAM Workbench。
-  await window.locator('[data-domain="files"]').click();
+  // 从开始侧栏资源树选 gparam 文件，打开 GPARAM Workbench。
   await selectFileItem(window, 'param/drawparam/m10_00.gparam.dcx');
 
   // Agent 面板是文档流右列，默认展开会挤窄右侧 Fields/Values 两栏的点击目标。
@@ -2106,7 +2096,6 @@ test('GPARAM typed 写回：值行编辑 → Toolbar 保存 → 重读新值，�
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'param/drawparam/m10_00.gparam.dcx');
   await closeAgentPanel(window);
 
@@ -2161,8 +2150,7 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 从 Files 领域选 tpf 文件，打开 Texture Workbench。
-  await window.locator('[data-domain="files"]').click();
+  // 从开始侧栏资源树选 tpf 文件，打开 Texture Workbench。
   await selectFileItem(window, 'menu/start.tpf.dcx');
 
   // Agent 面板是文档流右列，默认展开会挤窄右侧 Viewer/Properties 栏的点击目标。
@@ -2241,7 +2229,6 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function openEventWorkbench(window, fileName) {
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, fileName);
   const workbench = window.locator('[aria-label="Event 源码工作台"]');
   await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();
@@ -2369,7 +2356,6 @@ test('EVENT-30B：多 tab 各自 dirty，切 tab 保留未提交编辑', async (
 
   // 打开第二个事件文档 → 新 tab 出现并被激活（无 dirty）。事件工作台跨资源
   // 保留标签：切 Files 领域再选 menu.emevd 不应卸载工作台。
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'event/menu.emevd');
   const tabs = workbench.locator('[role="tab"]');
   await expect(tabs).toHaveCount(2);
@@ -2464,7 +2450,6 @@ test('EVENT-30B：快速切换 common → menu，旧请求被取消且不覆盖 
     SF_TEST_EMEVD_OPEN_DELAY_MS: String(delayMs)
   });
   await openFixtureWorkspace(window);
-  await window.locator('[data-domain="files"]').click();
   await closeAgentPanel(window);
 
   // 快速切换：点 common 后**不等**工作台挂载就点 menu。
@@ -2570,7 +2555,6 @@ test('EVENT-30B：event→PARAM 切离事件域必须发出取消 IPC', async ()
     SF_TEST_EMEVD_OPEN_DELAY_MS: String(delayMs)
   });
   await openFixtureWorkspace(window);
-  await window.locator('[data-domain="files"]').click();
   await closeAgentPanel(window);
   await window.locator('.file-item', { hasText: 'event/common.emevd' }).click();
   await expect.poll(
@@ -2595,8 +2579,7 @@ test('S16 脚本 IDE：容器 Files|Source 两栏，明文/反编译可编辑，
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // S16：脚本容器资源从 Files 领域选择，进入 Files | Source 两栏脚本 IDE。
-  await window.locator('[data-domain="files"]').click();
+  // S16：脚本容器资源从开始侧栏资源树选择，进入 Files | Source 两栏脚本 IDE。
   await selectFileItem(window, 'script/m25_00_00_00.luabnd.dcx');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('脚本容器工作台')).toBeVisible();
@@ -2640,7 +2623,6 @@ test('S16 脚本 IDE：独立 .hks 单 Source，打开即反编译，Ctrl+S 应�
   await openFixtureWorkspace(window);
 
   // 独立脚本文件（.hks）：单 Source 栏，不落容器分页。
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'script/c0000_common.hks');
   await expect(window.getByLabel('脚本编辑')).toBeVisible();
   await expect(window.getByRole('region', { name: 'Files' })).toHaveCount(0);
@@ -2667,9 +2649,8 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，详情
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // T3 / S17（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从 Files 领域选择，
+  // T3 / S17（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从开始侧栏资源树选择，
   // 进入三栏动作工作台（Animations | 词条 | 预览（只读）），详情沉三栏底 footer。
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'action/c0000.tae');
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('动作工作台')).toBeVisible();
@@ -2850,7 +2831,6 @@ test('S10：引用框选——@/# 合成「引用」，PARAM 行+字段框选生
   await openFixtureWorkspace(window);
 
   // 打开 PARAM 工作台，选中 ActionGuideParam 第 100 行（行与字段都可引用）。
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'param/gameparam/gameparam.parambnd.dcx');
   await window.locator('.wb-list .wb-row', { hasText: 'ActionGuideParam' }).click();
   await window.locator('.wb-virtual-row', { hasText: '100' }).click();
@@ -2931,7 +2911,6 @@ test('S14/S15：事件失败读取给 code + 人话 + 下一步，无假 resourc
   await openFixtureWorkspace(window);
 
   // 打开 KRAK 失败样本（fixture 模拟「未挂原版」的 KRAK 可行动句）。
-  await window.locator('[data-domain="files"]').click();
   await selectFileItem(window, 'event/krak.emevd.dcx');
   const workbench = window.locator('[aria-label="Event 源码工作台"]');
   await expect(workbench.locator('[data-editor-engine="codemirror"] .cm-editor')).toBeVisible();

@@ -54,6 +54,18 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
     assert.ok(!html.includes('1 library'), 'library 计数必须删除');
     assert.ok(!html.includes('行大小'), '行大小必须删除');
     assert.ok(!html.includes('gameparam.parambnd.dcx'), '容器文件名不得出现在 DOM');
+    // 10-B：工具条左上角的授信句整段删除。
+    assert.ok(!html.includes('字段元数据已自动授信'), '授信句必须删除');
+  });
+
+  it('10-B（source）：授信句不得存在于 ParamWorkbench 源码（负向扰动会红）', () => {
+    // SSR 里 definition 恒为 null，授信句被「definition !== null」挡在渲染之外，
+    // 光靠 html 断言无法感知把句子加回去。补一条源码断言：句子一回来就读得到。
+    const source = readFileSync(
+      join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'workbench', 'ParamWorkbench.tsx'),
+      'utf8'
+    );
+    assert.ok(!source.includes('字段元数据已自动授信'), '字段元数据已自动授信 必须从 ParamWorkbench.tsx 删除');
   });
 
   it('三栏 Params/Rows/Fields 同时存在（T5-4 删第四栏 Tools）', () => {

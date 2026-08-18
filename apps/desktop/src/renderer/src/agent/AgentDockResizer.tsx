@@ -5,8 +5,8 @@ import {
   type ReactElement
 } from 'react';
 
-/** dock 左缘拖拽手柄宽度（§12.2 初值，未对照 TRAE 实测）。 */
-export const AGENT_DOCK_RESIZER_WIDTH = 4;
+/** dock 左缘拖拽手柄宽度（§12.2 初值；6/9 加宽到 12px，命中区更好抓，仍在 dock 内侧）。 */
+export const AGENT_DOCK_RESIZER_WIDTH = 12;
 /** 键盘一次 resize 的像素步长（§12.2：鼠标拖动或键盘每次 16px）。 */
 export const AGENT_DOCK_KEYBOARD_STEP = 16;
 

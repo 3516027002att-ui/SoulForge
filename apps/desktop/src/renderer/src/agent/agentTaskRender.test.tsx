@@ -38,7 +38,7 @@ function feed(state: AgentTaskState, ...events: AgentTaskEventEnvelope['event'][
 function render(overrides: Partial<AgentTaskPanelProps> = {}): string {
   const props: AgentTaskPanelProps = {
     task: INITIAL_AGENT_TASK_STATE,
-    services: [{ id: 'svc-1', displayName: '本地兼容模型服务', hasCredential: true }],
+    services: [{ id: 'svc-1', displayName: '本地兼容模型服务', hasCredential: true, protocol: 'openai-compatible' }],
     selectedServiceId: 'svc-1',
     runBlocker: null,
     sessions: [],

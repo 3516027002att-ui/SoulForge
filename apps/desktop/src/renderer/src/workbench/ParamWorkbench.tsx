@@ -1217,11 +1217,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
               导入备注（行名，对照 Yapped Export/Import Names）。对话框都在 main 侧，
               导入写入走 Patch Engine。未选表时按钮禁用（没有可导入导出的目标）。 */}
           <span className="toolbar-spacer" style={{ flex: 1 }}></span>
-          {definition !== null && (
-            <span className="muted" style={{ fontSize: 11 }} title="行宽与定义一致即自动授信">
-              字段元数据已自动授信
-            </span>
-          )}
           <button
             type="button"
             className="toolbar-button"

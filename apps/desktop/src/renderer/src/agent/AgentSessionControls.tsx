@@ -1,5 +1,10 @@
 import type { ReactElement } from 'react';
 import type { AiPermissionMode, AiProvider, AiThinkingLevel } from '@soulforge/core';
+import {
+  convergeThinkingLevel,
+  thinkingLevelsForProtocol,
+  thinkingLevelLabel
+} from './agentThinking.js';
 
 export interface AgentSessionControlsProps {
   provider: AiProvider;
@@ -39,6 +44,11 @@ export function AgentSessionControls({
   onProviderChange,
   onThinkingChange
 }: AgentSessionControlsProps): ReactElement {
+  // 8-B：草稿生成器的思考表按 provider 换（mock 用 OpenAI 表；Anthropic →
+  // token budget，OpenAI/mock → reasoning_effort）。标签用英文。
+  const thinkingProtocol = provider === 'anthropic' ? 'anthropic-compatible' : 'openai-compatible';
+  const thinkingOptions = thinkingLevelsForProtocol(thinkingProtocol);
+  const effectiveThinking = convergeThinkingLevel(thinking, thinkingProtocol) as AiThinkingLevel;
   return (
     <div className="agent-controls">
       <div className="agent-controls__row">
@@ -68,14 +78,13 @@ export function AgentSessionControls({
         <label className="agent-controls__label" htmlFor="agent-thinking">思考强度</label>
         <select
           id="agent-thinking"
-          value={thinking}
+          value={effectiveThinking}
           onChange={(event) => onThinkingChange(event.target.value as AiThinkingLevel)}
           aria-label="思考强度"
         >
-          <option value="fast">快速</option>
-          <option value="normal">普通</option>
-          <option value="deep">深入</option>
-          <option value="extreme">极致</option>
+          {thinkingOptions.map((level) => (
+            <option key={level} value={level}>{thinkingLevelLabel(level, thinkingProtocol)}</option>
+          ))}
         </select>
       </div>
       <div className="agent-controls__row">

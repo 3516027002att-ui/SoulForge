@@ -18,7 +18,7 @@
   --agent-dock-min: 96px; /* S8:下限约一条工具栏宽 */
   --agent-dock-max: 620px;
   --agent-header-height: 48px;
-  --agent-resizer-width: 4px;
+  --agent-resizer-width: 12px;
   --agent-side-padding: 16px;
   --agent-composer-min-height: 168px;
   --agent-composer-max-height: min(320px, 40vh);
@@ -453,7 +453,7 @@ kbd {
   position: relative; overflow: hidden;
   transition: margin-left var(--dur-trans) var(--ease-standard);
 }
-.sidebar.is-collapsed { margin-left: calc(-1 * var(--sidebar-w)); border-right-color: transparent; }
+.sidebar.is-collapsed { margin-left: calc(-1 * var(--sidebar-w)); border-right-color: transparent; pointer-events: none; visibility: hidden; }
 .sidebar-resizer {
   position: absolute; top: 0; right: -2px; width: 5px; height: 100%;
   cursor: col-resize; pointer-events: auto; z-index: 5;

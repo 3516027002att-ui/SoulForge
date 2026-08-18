@@ -90,11 +90,13 @@ export function buildDomainSummaries(input: BuildDomainSummariesInput): readonly
     return {
       domain,
       label: DOMAIN_LABELS[domain],
-      // R1 + T3 裁定：顶栏删除独立「GPARAM」与「动画」；GPARAM 并入左侧
-      // 「参数」逻辑库，动画并入「动作」（行为标签）。域本身仍可路由
-      // （打开 gparam/anibnd/tae 文件时工作台照常），只是不在顶栏/命令面板
-      // 提供一级入口。这不是 display:none 藏 UI —— 规范投影已同步（front-end.md）。
-      visibility: domain === 'gparam' || domain === 'animation' ? 'hidden' : 'visible',
+      // R1 + T3 + 14 裁定：顶栏删除独立「GPARAM」「动画」与「文件」。GPARAM 并入
+      // 左侧「参数」逻辑库，动画并入「动作」（行为标签）。文件仍可路由（resourceMode
+      // 物理浏览 / Ctrl+K 命令面板搜路径 / 开始侧栏资源树照常），只是不在顶栏/命令
+      // 面板提供一级入口。这不是 display:none 藏 UI —— 规范投影已同步（front-end.md）。
+      visibility: domain === 'gparam' || domain === 'animation' || domain === 'files'
+        ? 'hidden'
+        : 'visible',
       capability,
       defaultTarget: null
     };

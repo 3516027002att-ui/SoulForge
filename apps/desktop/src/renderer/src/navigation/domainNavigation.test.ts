@@ -46,14 +46,17 @@ describe('buildDomainSummaries', () => {
     ]);
   });
 
-  it('project 与 files 始终存在且 read-ready，不依赖 read contract（§3.2）', () => {
+  it('project 始终存在且 read-ready 可见；files 存在且 read-ready 但 visibility hidden（问题 14）', () => {
     const empty = buildDomainSummaries({ readContract: new Set(), runtimeReady: false });
-    for (const domain of ['project', 'files'] as const) {
-      const entry = empty.find((item) => item.domain === domain);
-      assert.ok(entry, `${domain} 必须存在`);
-      assert.equal(entry.visibility, 'visible');
-      assert.equal(entry.capability, 'read-ready');
-    }
+    const project = empty.find((item) => item.domain === 'project');
+    assert.ok(project, 'project 必须存在');
+    assert.equal(project.visibility, 'visible');
+    assert.equal(project.capability, 'read-ready');
+    // 14：files 枚举仍在、仍 read-ready（物理浏览/Ctrl+K 路由不拆），只是顶栏隐藏。
+    const files = empty.find((item) => item.domain === 'files');
+    assert.ok(files, 'files 必须存在');
+    assert.equal(files.capability, 'read-ready');
+    assert.equal(files.visibility, 'hidden');
   });
 
   it('read contract 已注册且运行条件满足 → read-ready', () => {
@@ -83,11 +86,11 @@ describe('buildDomainSummaries', () => {
     for (const entry of summaries) assert.equal(entry.defaultTarget, null);
   });
 
-  it('R1 + T3 裁定：GPARAM 与动画从领域顶栏隐藏，其余 visible（合并入「参数」「动作」）', () => {
+  it('R1 + T3 + 14 裁定：GPARAM / 动画 / 文件从领域顶栏隐藏，其余 visible', () => {
     const summaries = buildDomainSummaries({ readContract: new Set(), runtimeReady: true });
     for (const entry of summaries) {
-      if (entry.domain === 'gparam' || entry.domain === 'animation') {
-        assert.equal(entry.visibility, 'hidden', `${entry.domain} 必须按 R1/T3 裁定从顶栏隐藏`);
+      if (entry.domain === 'gparam' || entry.domain === 'animation' || entry.domain === 'files') {
+        assert.equal(entry.visibility, 'hidden', `${entry.domain} 必须按 R1/T3/14 裁定从顶栏隐藏`);
       } else {
         assert.equal(entry.visibility, 'visible');
       }
