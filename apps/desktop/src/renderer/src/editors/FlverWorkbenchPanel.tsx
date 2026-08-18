@@ -24,8 +24,9 @@ import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js
  * 材质槽与 viewport 的同步是**绑定关系**驱动的：材质（或纹理槽）选中后，
  * viewport 渲染第一个引用该材质的 mesh——与 Smithbox 里「选材质看它贴在哪」一致。
  *
- * FLVER 是 V0.6 延期的只读预览族（shared DEFERRED_PREVIEW_EDITOR_KINDS）：
- * footer 不渲染任何写入动作，只显式标注延期状态。
+ * S38 开闸：write-flver material-slot-set 写链（mesh 材质槽 → 目标材质）经
+ * `resource.applyFlverMutation` → Patch Engine 提交，直接落盘、可回滚。只开放
+ * 已接线的材质槽字段；骨骼权重等未接线字段不出现写入口，不假装能编。
  *
  * partial model：authority 为 partial 时，unparsedGaps/layoutWarnings 必须对用户
  * 可见（不能伪装成「完整解析的空模型」）——与硬约束 7 的 partial 严格区分同一条红线。
@@ -34,6 +35,9 @@ import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js
 export interface FlverWorkbenchPanelProps {
   resourceUri: string;
   data: FlverDocument | null;
+  /** S38：mesh 材质槽写回（mesh:N → material:N；FLVER 每 mesh 只有 slot 0）。 */
+  onMaterialSlotSet?: (input: { meshStableId: string; materialStableId: string }) => void;
+  saving?: boolean;
 }
 
 type FlverSelectionKind = 'mesh' | 'material' | 'texture' | 'bone';
@@ -84,6 +88,8 @@ interface TreeGroup {
 
 export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactElement {
   const [selected, setSelected] = useState<SelectedItem | null>(null);
+  /** S38 写入口草稿：mesh 材质槽的目标材质下标；越界值在提交前被钳制。 */
+  const [draftMaterialIndex, setDraftMaterialIndex] = useState<number>(0);
 
   const document = useMemo(
     () => (props.data && isFlverDocument(props.data) ? props.data : null),
@@ -155,6 +161,18 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
 
   function selectItem(kind: FlverSelectionKind, index: number, label: string): void {
     setSelected({ kind, index, label });
+  }
+
+  /** S38：mesh 材质槽写回（slotIndex 恒 0；目标材质下标越界则钳制为 0）。 */
+  function submitMaterialSlot(mesh: FlverMeshWire | undefined): void {
+    if (!props.onMaterialSlotSet || mesh === undefined) return;
+    const target = Number.isFinite(draftMaterialIndex)
+      ? Math.min(Math.max(Math.trunc(draftMaterialIndex), 0), Math.max(materials.length - 1, 0))
+      : 0;
+    props.onMaterialSlotSet({
+      meshStableId: `mesh:${mesh.index}`,
+      materialStableId: `material:${target}`
+    });
   }
 
   const num = (value: number | undefined): string =>
@@ -329,6 +347,33 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                   <span>{value}</span>
                 </div>
               ))}
+              {selected.kind === 'mesh' && props.onMaterialSlotSet && (
+                <div className="flver-slot-write" role="row">
+                  <span className="muted">材质槽</span>
+                  <label className="flver-slot-write__form">
+                    <input
+                      type="number"
+                      min={0}
+                      max={Math.max(materials.length - 1, 0)}
+                      value={draftMaterialIndex}
+                      aria-label={`目标材质（0-${Math.max(materials.length - 1, 0)}）`}
+                      onChange={(event) => {
+                        const parsed = Number(event.target.value);
+                        setDraftMaterialIndex(Number.isFinite(parsed) ? parsed : 0);
+                      }}
+                      disabled={props.saving}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => submitMaterialSlot(meshes[selected.index])}
+                      disabled={props.saving || materials.length === 0}
+                    >
+                      {props.saving ? '提交中…' : '应用材质槽'}
+                    </button>
+                  </label>
+                  <p className="muted">写回 mesh[{selected.index}] 的材质引用（slot 0），直接进 Patch Engine，可回滚。</p>
+                </div>
+              )}
             </div>
           ) : (
             <p className="muted">在左侧模型层级中选择一个网格、材质、纹理槽或骨骼后显示属性。</p>
@@ -338,8 +383,9 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
       footer={
         <div className="row gap">
           <p className="muted" role="note">
-            FLVER 编辑已延期至 V0.6：本版仅提供只读预览与网格/材质槽选择，无写回入口。
-            既有 flver-material-slot-set typed mutation 写链已在本版关闭，主进程会拒绝写入请求。
+            {props.onMaterialSlotSet
+              ? '材质槽修改在 Properties 栏点「应用材质槽」直接写入，经 Patch Engine 提交、可回滚。'
+              : '仅提供只读预览与网格/材质槽选择；写入口未开放。'}
           </p>
         </div>
       }

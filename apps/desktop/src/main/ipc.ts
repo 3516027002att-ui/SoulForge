@@ -4457,8 +4457,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
-      const deferredBlocked = rejectDeferredPreviewEditorWrite('msb', sourceUri);
-      if (deferredBlocked) return deferredBlocked;
+      // S36 开闸：msb 不再延期，write-msb 写链经 applyNativeMutation →
+      // Patch Engine 提交（备份/确认/回滚元数据与其余语义编辑器同一范式）。
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       const stage = await verifiedStageRoots(activeSession, storage, 'MSB_STAGING_PREPARE_FAILED');
       if (stage.diagnostics.length > 0) {
@@ -4523,12 +4523,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
-      // MODEL-51C 只交付 native 写基础设施，不改变编辑器延期裁定：FLVER 仍是
-      // V0.6 延期的只读预览（editorCapabilityContract flver 块不动）。此 handler
-      // 是 main-only 预埋（不加 preload 暴露，renderer 不可达）；万一将来被误接，
-      // 这里也失败关闭，不会静默放行写回。
-      const deferredBlocked = rejectDeferredPreviewEditorWrite('flver', sourceUri);
-      if (deferredBlocked) return deferredBlocked;
+      // S38 开闸：write-flver material-slot-set 经 applyNativeMutation → Patch
+      // Engine 提交（editorCapabilityContract flver 块已翻 releaseWriteEnabled）。
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       const stage = await verifiedStageRoots(activeSession, storage, 'FLVER_STAGING_PREPARE_FAILED');
       if (stage.diagnostics.length > 0) {

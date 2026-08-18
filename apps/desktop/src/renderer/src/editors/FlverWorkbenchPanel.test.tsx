@@ -181,15 +181,38 @@ describe('Negative source tests（MODEL-51B 四类覆盖）', () => {
     'utf8'
   );
 
-  it('deferred（V0.6 只读预览）时无保存动作：footer 只有延期提示，没有任何写入控件', () => {
+  it('S38 开闸后无延期文案：footer 不再标注「延期至 V0.6 / 主进程拒绝写入」', () => {
     const html = render();
-    assert.match(html, /只读预览与网格\/材质槽选择，无写回入口/);
-    // 写回是显式声明的「不存在」，不是控件：不出现任何按钮/输入框/提交动作。
+    assert.doesNotMatch(html, /已延期至|只读预览与网格\/材质槽选择，无写回入口|主进程会拒绝写入请求/);
+    assert.match(html, /写入口未开放|直接写入/);
+  });
+
+  it('未传 onMaterialSlotSet 时不渲染写入控件，也不冒充可写', () => {
+    const html = render();
     assert.doesNotMatch(html, /<button/);
     assert.doesNotMatch(html, /type="number"/);
-    assert.doesNotMatch(html, /提交|保存/);
-    // 既有 flver-material-slot-set typed mutation 写链在本版关闭，主进程拒绝写入。
-    assert.match(html, /主进程会拒绝写入请求/);
+  });
+
+  it('传 onMaterialSlotSet 时 footer 说明写入口形态', () => {
+    const html = renderToStaticMarkup(
+      <FlverWorkbenchPanel
+        resourceUri="fixture://chr/c1000.flver"
+        data={makeDocument()}
+        onMaterialSlotSet={() => undefined}
+      />
+    );
+    assert.match(html, /材质槽修改在 Properties 栏点「应用材质槽」直接写入/);
+    assert.doesNotMatch(html, /已延期至/);
+  });
+
+  it('mesh 属性区含材质槽写 UI（选中态渲染；SSR 初始无选中，用源码断言存在）', () => {
+    // 写 UI 在 selected.kind === 'mesh' 分支，SSR 静态渲染看不到选中态，因此
+    // 钉源码：按钮、slot 0 恒定、目标材质钳制都在面板内，而不是假装在别处。
+    assert.match(panelSource, /应用材质槽/);
+    assert.match(panelSource, /slotIndex/);
+    assert.doesNotMatch(panelSource, /slotIndex=1|slotIndex: 1/);
+    assert.match(panelSource, /meshStableId: `mesh:\$\{mesh\.index\}`/);
+    assert.match(panelSource, /materialStableId: `material:\$\{target\}`/);
   });
 
   it('viewport 只承载 FlverViewer 宿主：SSR 下不渲染 canvas/假预览', () => {

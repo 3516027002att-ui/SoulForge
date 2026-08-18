@@ -24,6 +24,7 @@ function main(): void {
   assertInventoryDerivedFromCapabilities(inventory);
   assertFrozenScopeInventory(inventory);
   assertDeferredPreviewEditorsAreReadOnly();
+  assertReopenedWriteEditors();
   assertReadOnlyHexAndAssetExclusions();
   assertScaleContractsMatchCurrentSources();
   assertFunctionalSchemasHaveNoQuantitativeThresholds(schemas);
@@ -201,14 +202,15 @@ function assertFrozenScopeInventory(inventory: ReleaseEditorInventoryItem[]): vo
 }
 
 /**
- * 已延期至 V0.6 的编辑器允许保留面板，但必须同时满足：
- * 不在 V0.5 冻结清单内、写路径关闭、带 V0.6 只读预览标记。
- * MSB 已有经真实文档验证的 typed mutation 写链，因此这里逐项断言
+ * 已延期、仅保留标记只读预览的编辑器允许保留面板，但必须同时满足：
+ * 不在冻结发布清单内、写路径关闭、带延期只读预览标记。
+ * S36/S38 已开闸：msb 与 flver 不再属于延期预览族（写链放行由下方
+ * assertReopenedWriteEditors 正向断言），此处只对 tae/esd 逐项断言
  * `releaseWriteEnabled=false` 与 `editorAllowsMutation` 实际拒绝，
- * 避免冻结清单外仍存在可写编辑器。
+ * 避免冻结清单外仍存在可写编辑器或延期清单漂移。
  */
 function assertDeferredPreviewEditorsAreReadOnly(): void {
-  const expectedDeferred: EditorKind[] = ['msb', 'tae', 'esd', 'flver'];
+  const expectedDeferred: EditorKind[] = ['tae', 'esd'];
   const actualDeferred = [...listDeferredPreviewEditors()];
   if (JSON.stringify(actualDeferred) !== JSON.stringify(expectedDeferred)) {
     throw new Error(
@@ -261,6 +263,51 @@ function assertDeferredPreviewEditorsAreReadOnly(): void {
   }
 }
 
+/**
+ * S36/S38 已开闸编辑器（msb/flver）的正向断言：写链放行，且不再被
+ * shared 投影标记为延期预览。这些编辑器不在冻结发布清单内（frozen
+ * inventory 不变），但必须能实际放行其 typed mutation，否则开闸只是
+ * 纸面改动——把「仍延期」回归成「开闸后又被误关」都能在这里炸掉。
+ */
+function assertReopenedWriteEditors(): void {
+  const msb = EDITOR_CAPABILITY_CONTRACTS.msb;
+  if (msb.proposedReleaseEditorId !== null || msb.proposalOrder !== null) {
+    throw new Error('msb reopened for write must stay outside the frozen release editor list');
+  }
+  if (msb.releaseWriteEnabled !== true || msb.deferredPreview !== null) {
+    throw new Error('msb must be write-enabled without a deferred preview contract (S36)');
+  }
+  if (isDeferredPreviewEditorKind('msb')) {
+    throw new Error('shared deferred projection must not mark msb after S36 reopened writes');
+  }
+  for (const mutationKind of msb.mutationKinds) {
+    if (!editorAllowsMutation('msb', mutationKind)) {
+      throw new Error(`msb must allow its implemented mutation ${mutationKind} after S36`);
+    }
+  }
+
+  const flver = EDITOR_CAPABILITY_CONTRACTS.flver;
+  // flver 不在 ProposedReleaseEditorId 联合内，类型层面已锁定 proposedReleaseEditorId
+  // 为 null，无需再比较；proposalOrder 保留运行时断言防漂移。
+  if (flver.proposalOrder !== null) {
+    throw new Error('flver reopened for write must stay outside the frozen release editor list');
+  }
+  if (flver.releaseWriteEnabled !== true || flver.deferredPreview !== null) {
+    throw new Error('flver must be write-enabled without a deferred preview contract (S38)');
+  }
+  if (!flver.mutationKinds.includes('flver_material_slot_set')) {
+    throw new Error('flver must declare its implemented material-slot-set mutation after S38');
+  }
+  if (isDeferredPreviewEditorKind('flver')) {
+    throw new Error('shared deferred projection must not mark flver after S38 reopened writes');
+  }
+  for (const mutationKind of flver.mutationKinds) {
+    if (!editorAllowsMutation('flver', mutationKind)) {
+      throw new Error(`flver must allow its implemented mutation ${mutationKind} after S38`);
+    }
+  }
+}
+
 function assertReadOnlyHexAndAssetExclusions(): void {
   const hex = EDITOR_CAPABILITY_CONTRACTS.hex;
   const raw = EDITOR_CAPABILITY_CONTRACTS.raw;
@@ -271,7 +318,7 @@ function assertReadOnlyHexAndAssetExclusions(): void {
     throw new Error('Hex/raw evidence views must not expose release editor mutations');
   }
   if (flver.proposedReleaseEditorId !== null) {
-    throw new Error('FLVER is a read-only asset view, not one of the frozen V0.5 semantic editors');
+    throw new Error('FLVER 已开闸写入（S38）但仍不在冻结发布编辑器清单内');
   }
 
   const root = resolve('../..');

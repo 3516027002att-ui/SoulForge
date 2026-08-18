@@ -10,9 +10,7 @@ import {
   type ReactElement
 } from 'react';
 import {
-  DEFERRED_PREVIEW_TARGET_RELEASE,
   classifyWorkspaceOpen,
-  isDeferredPreviewEditorKind,
   PARAM_PAGE_SIZE,
   mergeCiteHits
 } from '@soulforge/shared';
@@ -1597,8 +1595,9 @@ export function App(): ReactElement {
   }
 
   /**
-   * MSB 写路径当前为延期只读预览（V0.6 治理承接后开闸），函数保留接线。
-   * 实际是否放行以 IPC 返回为准：主进程在 deferredPreview 门禁下 fail-closed。
+   * S36 开闸：MSB 写链恢复放行（write-msb → Patch Engine）。
+   * 实际是否成功以 IPC 返回为准：主进程在进入 Patch Engine 前仍做
+   * Sekiro 工作区、暂存根与哈希并发保护校验。
    */
   async function applyMsbNativeMutationAndReload(
     mutation: MsbNativeMutation,
@@ -1739,6 +1738,51 @@ export function App(): ReactElement {
       },
       `transform ${input.partName}`
     );
+  }
+
+  /**
+   * S38：FLVER 材质槽写回（write-flver material-slot-set，直接落 Patch Engine）。
+   * 哈希缺失时按 S29 规则透传空串，由 main 写时现算；成功后重读文档刷新视图。
+   */
+  async function applyFlverMaterialSlotSetAndReload(input: {
+    meshStableId: string;
+    materialStableId: string;
+  }): Promise<void> {
+    if (!selectedFile || !flverData) {
+      setStatus('尚未打开可写的 FLVER 文档。');
+      return;
+    }
+    if (!bridge) {
+      setStatus(describeBridgeAbsence('提交 FLVER 材质槽'));
+      return;
+    }
+    if (typeof bridge.applyFlverMutation !== 'function') {
+      setStatus('当前预加载未暴露 applyFlverMutation。');
+      return;
+    }
+    const flverSourceHash = typeof flverData === 'object'
+      ? (flverData as { sourceHash?: unknown }).sourceHash
+      : undefined;
+    setStatus(`正在提交 FLVER 材质槽 ${input.meshStableId}…`);
+    const result = await bridge.applyFlverMutation(
+      selectedFile.sourceUri,
+      typeof flverSourceHash === 'string' ? flverSourceHash : '',
+      { kind: 'material-slot-set', meshStableId: input.meshStableId, slotIndex: 0, materialStableId: input.materialStableId }
+    );
+    if (!result.ok) {
+      setStatus(result.diagnostics?.[0]?.message ?? 'FLVER 材质槽提交失败');
+      return;
+    }
+    const reload = await bridge.readFlverDocument(selectedFile.sourceUri) as {
+      ok?: boolean;
+      data?: Record<string, unknown>;
+    };
+    if (reload.ok && reload.data) {
+      setFlverData(reload.data);
+    }
+    await refreshOperationHistory();
+    setStatus('已保存。');
+    pushToast('已保存');
   }
 
   /** Electron-only 操作在 browser-preview 表面的统一可见降级：不抛异常、不静默。 */
@@ -3391,23 +3435,18 @@ export function App(): ReactElement {
                 sourceCounts={msbSourceCounts}
                 maxNodes={2000}
                 openFailure={lastOpenFailure?.kind === 'msb-open-failed' ? lastOpenFailure : null}
-                writeEnabled={!isDeferredPreviewEditorKind('msb')
-                  && msbLive
+                writeEnabled={msbLive
                   && Boolean(msbSourceHash)
                   && Boolean(selectedFile)}
-                {...(isDeferredPreviewEditorKind('msb')
-                  ? { deferredPreviewRelease: DEFERRED_PREVIEW_TARGET_RELEASE }
-                  : {
-                      onPartPositionCommit: (input: MsbPositionCommitInput) => {
-                        void commitMsbPosition(input, 'set_part_position');
-                      },
-                      onRegionPositionCommit: (input: MsbPositionCommitInput) => {
-                        void commitMsbPosition(input, 'set_region_position');
-                      },
-                      onPartTransformCommit: (input: MsbTransformCommitInput) => {
-                        void commitMsbTransform(input);
-                      }
-                    })}
+                onPartPositionCommit={(input: MsbPositionCommitInput) => {
+                  void commitMsbPosition(input, 'set_part_position');
+                }}
+                onRegionPositionCommit={(input: MsbPositionCommitInput) => {
+                  void commitMsbPosition(input, 'set_region_position');
+                }}
+                onPartTransformCommit={(input: MsbTransformCommitInput) => {
+                  void commitMsbTransform(input);
+                }}
               />
             </>
           )}
@@ -3763,7 +3802,12 @@ export function App(): ReactElement {
             <EsdWorkbenchPanel resourceUri={selectedFile.sourceUri} data={esdData as never} />
           )}
           {activeEditor === 'flver' && selectedFile && (
-            <FlverWorkbenchPanel resourceUri={selectedFile.sourceUri} data={flverData as never} />
+            <FlverWorkbenchPanel
+              key={`flver-wb:${selectedFile?.sourceUri ?? 'none'}:${flverData !== null}`}
+              resourceUri={selectedFile.sourceUri}
+              data={flverData as never}
+              onMaterialSlotSet={(input) => { void applyFlverMaterialSlotSetAndReload(input); }}
+            />
           )}
           {activeEditor === 'tpf' && (
             <TpfWorkbenchPanel

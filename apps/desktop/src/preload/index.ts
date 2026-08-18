@@ -427,6 +427,21 @@ const api = {
     }
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.applyMsbMutation', sourceUri, expectedHash, mutation),
+  /**
+   * S38：write-flver material-slot-set 写回（与 main resource.applyFlverMutation
+   * 通道一致；mesh 越界 / no-op / layoutWarnings 非空由 C# 侧 fail-closed 拒绝）。
+   */
+  applyFlverMutation: (
+    sourceUri: string,
+    expectedHash: string,
+    mutation: {
+      kind: 'material-slot-set';
+      meshStableId: string;
+      slotIndex: number;
+      materialStableId: string;
+    }
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.applyFlverMutation', sourceUri, expectedHash, mutation),
   readParamDocument: (sourceUri: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readParamDocument', sourceUri),
   readGparamDocument: (sourceUri: string): Promise<unknown> =>
