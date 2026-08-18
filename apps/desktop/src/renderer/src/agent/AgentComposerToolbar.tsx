@@ -77,7 +77,23 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
           ? '框选模式已开启：在中央编辑区拖拽框住要引用的行或字段（Esc 或再次点击取消）'
           : '在中央编辑区拖拽框住要引用的行或字段，生成一条引用'}
       >
-        引用
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path
+            d="M3.5 3.5h9v9h-9z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeDasharray="2.6 1.8"
+            strokeLinecap="round"
+          />
+          <path
+            d="M6.4 8h3.2M8 6.4v3.2"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+          />
+        </svg>
       </button>
       <button
         type="button"
