@@ -144,7 +144,8 @@ function createMainStub(record) {
       getAppPath: () => join(repoRoot, 'apps', 'desktop'),
       whenReady: () => Promise.resolve(),
       on(eventName) { record.appEvents.push(eventName); },
-      quit() {}
+      quit() {},
+      setAppUserModelId(id) { record.appUserModelIds.push(id); }
     },
     ipcMain: {
       handle(channel, listener) {
@@ -187,6 +188,7 @@ export async function observeMainSurface() {
     duplicateChannels: [],
     ipcMainOnChannels: [],
     appEvents: [],
+    appUserModelIds: [],
     browserWindowOptions: [],
     loadedRendererTargets: [],
     sentChannels: []

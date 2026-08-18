@@ -134,6 +134,34 @@ function makeParamRow(id, name, behaviorValue) {
   buf.writeUInt8(behaviorValue, 68);
   return { id, name, dataBase64: buf.toString('base64'), dataHash: `fixture-param-row-${id}` };
 }
+
+// 问题 5-E：生产 BehaviorParam 是 5275 行 / 221 字段，默认 fixture 最大 25 行 /
+// 4 字段，用户报的「打开慢」「等待空白」在这个量级都不出现。这里提供
+// SF_TEST_LARGE_PARAM=1 才启用的大表样本（合成、微小、明确标记，AGENTS.md §15）。
+// id * 10 是故意的：筛选 id 子串才有非平凡命中。字段每 7 个挂一次 BEHAVIOR
+// 枚举：全挂会把枚举成本放大成不真实的形态。
+const LARGE_PARAM = process.env.SF_TEST_LARGE_PARAM === '1';
+const LARGE_PARAM_ROW_COUNT = 5275;
+const LARGE_PARAM_FIELD_COUNT = 221;
+const LARGE_PARAM_FILLER_COUNT = 134;
+
+function makeLargeParamRows() {
+  return Array.from({ length: LARGE_PARAM_ROW_COUNT }, (_unused, index) =>
+    makeParamRow(index * 10, `合成行-${index}`, index % 3)
+  );
+}
+
+function makeLargeParamFieldDefs() {
+  return Array.from({ length: LARGE_PARAM_FIELD_COUNT }, (_unused, index) => ({
+    id: `lf_${index}`,
+    name: `合成字段_${index}`,
+    type: 'u8',
+    offset: index,
+    size: 1,
+    description: `合成字段 ${index} 的说明文本（悬停可见）`,
+    ...(index % 7 === 0 ? { enumRef: 'BEHAVIOR' } : {})
+  }));
+}
 const paramTables = [
   {
     entryIndex: 0,
@@ -152,7 +180,26 @@ const paramTables = [
     typeName: 'ACTION_GUIDE_PARAM_ST',
     rows: Array.from({ length: 25 }, (_, i) => makeParamRow(500 + i, `武器-${i + 1}`, i % 3))
   },
-  { entryIndex: 2, name: 'BrokenParam', broken: true }
+  { entryIndex: 2, name: 'BrokenParam', broken: true },
+  // 问题 5-E 大表开关：默认关闭（默认套件左栏保持 3 项，现有 PARAM e2e 不
+  // 变慢不变脆）。只在 param-perf.spec.mjs 自己的 env 里打开。
+  ...(LARGE_PARAM
+    ? [
+        {
+          entryIndex: 3,
+          name: 'BehaviorParam',
+          typeName: 'BEHAVIOR_PARAM_ST',
+          rows: makeLargeParamRows(),
+          fieldDefs: makeLargeParamFieldDefs()
+        },
+        ...Array.from({ length: LARGE_PARAM_FILLER_COUNT }, (_unused, index) => ({
+          entryIndex: 4 + index,
+          name: `FillerParam_${String(index).padStart(3, '0')}`,
+          typeName: 'ACTION_GUIDE_PARAM_ST',
+          rows: []
+        }))
+      ]
+    : [])
 ];
 const paramFieldDefsFixture = [
   { id: 'f_id', name: 'id', type: 'u32', offset: 0, size: 4 },
@@ -565,8 +612,15 @@ function registerFixtureIpc() {
     };
   });
 
-  handleTrusted('resource.readContainerParamPage', (_event, containerUri, entryIndex, page, pageSize, query, loadAll) => {
+  handleTrusted('resource.readContainerParamPage', async (_event, containerUri, entryIndex, page, pageSize, query, loadAll) => {
     track('resource.readContainerParamPage');
+    // 问题 5-E：SF_TEST_PARAM_READ_DELAY_MS 只在 spec 自己的 env 里设，用来
+    // 稳定复现「打开大表后、行出来之前」的等待窗口（默认 fixture 73ms 就答完，
+    // 加载指示器那条测试抢不到那一帧）。
+    const delayMs = Number(process.env.SF_TEST_PARAM_READ_DELAY_MS ?? 0);
+    if (Number.isFinite(delayMs) && delayMs > 0) {
+      await new Promise((resolve) => { setTimeout(resolve, delayMs); });
+    }
     const failure = (message, code) => ({
       ok: false,
       containerUri, entryIndex, page: 0, pageSize: 0, pageCount: 0,
@@ -601,7 +655,8 @@ function registerFixtureIpc() {
         childHash: `fixture-child-hash-${entryIndex}`,
         // P1：字段定义随容器 PARAM 下发（与生产 main 的 resolveTrustedParamDefinition
         // 同字段面；fixture 统一用合成定义，明确标记 synthetic）。
-        fieldDefs: paramFieldDefsFixture,
+        // 大表用表自己的 221 字段定义：回落到默认 4 个就测不出字段栏成本。
+        fieldDefs: table.fieldDefs ?? paramFieldDefsFixture,
         fieldEnums: paramFieldEnumsFixture,
         fieldDefsDiagnostic: null,
         fieldDefsOrigin: 'fixture',

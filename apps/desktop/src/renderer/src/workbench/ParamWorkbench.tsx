@@ -881,6 +881,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                 />
               </div>
               {rowsError && <p className="wb-empty diag-error">{rowsError}</p>}
+              {rowsLoading && (
+                <p className="wb-empty" role="status">读取行数据…</p>
+              )}
               {!rowsLoading && !rowsError && visibleRows.length === 0 && (
                 <p className="wb-empty">没有匹配的行。</p>
               )}
@@ -950,9 +953,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
                     );
                   })}
                 </div>
-                {rowsLoading && visibleRows.length > 0 && (
-                  <p className="wb-empty" style={{ padding: '4px 10px' }}>加载中…</p>
-                )}
               </div>
             </>
           )}
