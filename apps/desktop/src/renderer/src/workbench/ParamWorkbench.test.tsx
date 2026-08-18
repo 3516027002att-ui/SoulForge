@@ -64,12 +64,14 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
     assert.ok(!html.includes('aria-label="Tools"'), '第四栏 Tools 必须删除');
   });
 
-  it('三栏按 §7.1 固定比例与最小宽度渲染（20/29/35，180/260/320）', () => {
+  it('三栏按 §7.1 固定比例与最小宽度渲染（20/29/35，180/260/240）', () => {
     const html = render();
     // React SSR 的 style 序列化无空格（flex:0.2 1 0;min-width:180px）。
+    // Fields 下限 320→240（问题 3：Agent 拉宽后主区装不下 760，FIELDS 被挤
+    // 出可视区；与 FMG 文本列同档，窄主区仍可横向滚动兜底）。
     assert.match(html, /style="flex:0\.2 1 0;min-width:180px"/);
     assert.match(html, /style="flex:0\.29 1 0;min-width:260px"/);
-    assert.match(html, /style="flex:0\.35 1 0;min-width:320px"/);
+    assert.match(html, /style="flex:0\.35 1 0;min-width:240px"/);
   });
 
   it('左栏有容器内 param 筛选输入', () => {

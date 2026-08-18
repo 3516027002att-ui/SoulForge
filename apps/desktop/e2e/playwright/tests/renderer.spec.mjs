@@ -2732,7 +2732,7 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，详情
 });
 
 
-test('S8：Agent dock 可缩到 200px（下限 200，上限 620，默认 440）', async () => {
+test('S8：Agent dock 可缩到 96px（下限 96，上限 620，默认 440）', async () => {
   const { app, window } = await launchApp();
   // localStorage 可能持久化了上一轮的 dock 宽度（agentDock UI key）：清掉后重载，
   // 「默认 440」断言不受上一轮运行影响。
@@ -2756,16 +2756,16 @@ test('S8：Agent dock 可缩到 200px（下限 200，上限 620，默认 440）'
   }
   // resizer 在（aria 值与 App/样式同一常量）。
   const resizer = window.locator('.agent-dock-resizer');
-  await expect(resizer).toHaveAttribute('aria-valuemin', '200');
+  await expect(resizer).toHaveAttribute('aria-valuemin', '96');
   await expect(resizer).toHaveAttribute('aria-valuemax', '620');
   await expect(resizer).toHaveAttribute('aria-valuenow', '440');
   await resizer.focus();
   await window.keyboard.press('End');
   await expect(resizer).toHaveAttribute('aria-valuenow', '620');
-  // Home → 200：够放「引用 + 发送」，不是 0、不是一条缝。
+  // Home → 96：够放「引用 + 发送」，不是 0、不是一条缝。
   await window.keyboard.press('Home');
-  await expect(resizer).toHaveAttribute('aria-valuenow', '200');
-  await window.screenshot({ path: 'test-results/08-agent-min-200.png' });
+  await expect(resizer).toHaveAttribute('aria-valuenow', '96');
+  await window.screenshot({ path: 'test-results/08-agent-min-96.png' });
   await app.close();
 });
 
