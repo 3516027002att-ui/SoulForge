@@ -878,20 +878,21 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
   await expect(fmgPanel).toBeVisible();
 
-  // §9.1 拓扑：左 Text Categories + 右区（右上 Text Entries / 右下 Text Content），不是四条竖栏。
+  // §9.1 拓扑（S13）：左 Text Categories + 中 Text Entries + 右 Text 三栏竖排。
   const columns = fmgPanel.locator('.workbench__column');
-  await expect(columns).toHaveCount(2);
+  await expect(columns).toHaveCount(3);
   await expect(columns.nth(0).locator('.workbench__column-title')).toContainText('Text Categories');
-  await expect(columns.nth(1).locator('.workbench__column-title')).toContainText('Text');
+  await expect(columns.nth(1).locator('.workbench__column-title')).toContainText('Text Entries');
+  await expect(columns.nth(2).locator('.workbench__column-title')).toHaveText('Text');
   const entriesPane = fmgPanel.getByRole('region', { name: 'Text Entries' });
   await expect(entriesPane.locator('h3')).toContainText('Text Entries');
-  const textPane = fmgPanel.getByRole('region', { name: 'Text Content' });
-  await expect(textPane.locator('h3')).toContainText('Text Content');
 
-  // 目录树三层可见：语言银行 → 容器 → 表。
-  await expect(fmgPanel.getByRole('row', { name: /zhocn/ })).toBeVisible();
-  await expect(fmgPanel.getByRole('row', { name: /test-msgbnd/ })).toBeVisible();
+  // 11-B：目录按容器分组 —— item / menu 两组必须同时在场（组头可见、可点），
+  // 每组下面有自己的表行；menu 不再被埋成「item 的续集」。
+  await expect(fmgPanel.getByRole('button', { name: 'item 组' })).toBeVisible();
+  await expect(fmgPanel.getByRole('button', { name: 'menu 组' })).toBeVisible();
   await expect(fmgPanel.getByRole('row', { name: /item\.fmg/ })).toBeVisible();
+  await expect(fmgPanel.getByRole('row', { name: /menu\.fmg/ })).toBeVisible();
 
   // 自动定位命中 item.fmg：条目 100/101 立即可见，选中后可编辑。
   const row100 = fmgPanel.getByRole('row', { name: /伤药葫芦/ });
@@ -915,17 +916,16 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   await expect(entriesColumn).toContainText('没有匹配的条目');
   await entriesColumn.locator('input[aria-label="筛选 FMG"]').fill('');
 
-  // Negative DOM：文本目录树不出现 tpf/texbnd；Tools 栏诚实空态。
+  // Negative DOM：文本目录树不出现 tpf/texbnd（S13 左栏已无 Tools 空态文案）。
   const workbenchText = await fmgPanel.innerText();
   expect(workbenchText).not.toContain('.tpf');
   expect(workbenchText).not.toContain('texbnd');
-  await expect(fmgPanel.getByRole('region', { name: 'Text Categories' })).toContainText('暂无已接通的工具');
 
   await window.screenshot({ path: 'test-results/text-20b-s91-topology.png' });
   await app.close();
 });
 
-test('TEXT-20C：真空表新增经 review 队列落盘，写按 tableId 路由且 sibling 表不被改动', async () => {
+test('TEXT-20C：真空表新增直写落盘，写按 tableId 路由且 sibling 表不被改动（S29 直写）', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
@@ -939,22 +939,18 @@ test('TEXT-20C：真空表新增经 review 队列落盘，写按 tableId 路由�
   const entriesTable = fmgPanel.locator('.binder-child-table');
   await expect(entriesTable).toContainText('当前页无条目');
 
-  // 新增一条：面板生成 id=1 空条目并自动选中（进入编辑态）；add 后被同 id 的
-  // upsert 替换，queue 里始终只有一条。
+  // 新增一条：面板生成 id=1 空条目并自动选中（进入编辑态）。
   await fmgPanel.getByRole('region', { name: 'Text Entries' }).getByRole('button', { name: '新增' }).click();
-  await window.locator('label', { hasText: '编辑 ID 1' }).locator('textarea').fill('菜单说明·新增');
+  const editor = window.locator('label', { hasText: '编辑 ID 1' }).locator('textarea');
+  await expect(editor).toBeVisible();
+  await editor.fill('菜单说明·新增');
 
-  const queue = window.locator('.change-queue');
-  await expect(queue.locator('.cq-row')).toHaveCount(1);
-  await expect(queue.locator('.cq-summary')).toContainText('菜单说明·新增');
+  // S29：编辑直写，不先进审查队列。换表触发的 commitDraft 把 id=1 的 upsert 经
+  // applyFmgMutation（带 tableId）落到 fixture 的 menu 表。
+  await fmgPanel.getByRole('row', { name: /item\.fmg/ }).click();
+  await expect(fmgPanel.getByRole('row', { name: /伤药葫芦/ })).toBeVisible();
 
-  // 提交：App 侧按 selectedTableId 把 tableId 传给 applyFmgMutation → fixture 路由到 menu 表。
-  await queue.getByRole('button', { name: '批准入暂存' }).click();
-  await queue.getByTestId('cq-commit').click();
-  await expect(window.locator('.status-bar')).toContainText('写入完成');
-
-  // 提交后面板按新 sourceHash 重挂载并自动定位回首表（item.fmg）；切到 menu.fmg
-  // 重读：新增条目自 fixture.menuEntries 可见（真空表写后不被伪装回 0 条）。
+  // 切回 menu.fmg 重读：新增条目自 fixture.menuEntries 可见（真空表写后不被伪装回 0 条）。
   await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
   await expect(entriesTable).toContainText('菜单说明·新增');
 
@@ -2063,11 +2059,11 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   expect(scrollHosts).toHaveLength(5);
   expect(scrollHosts.every((value) => value === 'auto' || value === 'hidden')).toBe(true);
 
-  // §7.8 标题形态；负向清单：无物理路径 / .bak / PARAM 表 / 合并的 Fields/Values 单栏。
+  // §7.8 标题形态；负向清单：无物理路径 / .bak / PARAM 表 / 合并的 Fields/Values。
+  // 11-C：workbench 可见文本里不再出现「Graphics Parameters」crumb。
   // 物理路径只允许出现在 title（metadata details），可见文本是显示名。
-  const gparamCrumb = window.locator('.crumb', { hasText: 'Graphics Parameters' });
-  await expect(gparamCrumb).toContainText('3 banks');
   const workbenchText = await window.locator('.workbench').innerText();
+  expect(workbenchText).not.toContain('Graphics Parameters');
   expect(workbenchText).not.toContain('.gparam.dcx');
   expect(workbenchText).not.toContain('.bak');
   expect(workbenchText).not.toContain('Game Parameters'); // PARAM 工作台标题不串台
@@ -2182,22 +2178,25 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
   await closeAgentPanel(window);
 
   // 四栏同时存在（§2.5：Container list | Texture list | Viewer | Properties）。
-  await expect(window.locator('.workbench')).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Containers' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Textures' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Viewer' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Properties' })).toBeVisible();
+  // 事件工作台常驻 DOM（hidden 切显隐），.workbench 会命中多个，必须限定到
+  // Texture 工作台自身。
+  const textureWorkbench = window.locator('.workbench[aria-label="Texture 工作台"]');
+  await expect(textureWorkbench).toBeVisible();
+  await expect(textureWorkbench.getByRole('region', { name: 'Containers' })).toBeVisible();
+  await expect(textureWorkbench.getByRole('region', { name: 'Textures' })).toBeVisible();
+  await expect(textureWorkbench.getByRole('region', { name: 'Viewer' })).toBeVisible();
+  await expect(textureWorkbench.getByRole('region', { name: 'Properties' })).toBeVisible();
 
-  // §2.5 标题形态；负向清单：无物理路径（可见文本里）。
-  const tpfCrumb = window.locator('.crumb', { hasText: 'Texture' });
-  await expect(tpfCrumb).toContainText('2 containers');
-  const workbenchText = await window.locator('.workbench').innerText();
+  // 11-C：工作台可见文本不含「Texture · N containers」crumb；负向清单：
+  // 无物理路径（可见文本里）。领域栏上的「纹理」tab 不属于工作台，不受影响。
+  const workbenchText = await textureWorkbench.innerText();
+  expect(workbenchText).not.toContain('Texture · ');
   expect(workbenchText).not.toContain('.tpf.dcx');
 
   // Containers 栏列出全部 tpf 容器；打开时默认选中当前文件，Textures 栏出现纹理。
-  await expect(window.locator('.wb-list .wb-row', { hasText: 'start' })).toBeVisible();
-  await expect(window.locator('.wb-list .wb-row', { hasText: 'broken' })).toBeVisible();
-  await expect(window.locator('.wb-list .wb-row', { hasText: 'm_00_title' })).toBeVisible();
+  await expect(textureWorkbench.locator('.wb-list .wb-row', { hasText: 'start' })).toBeVisible();
+  await expect(textureWorkbench.locator('.wb-list .wb-row', { hasText: 'broken' })).toBeVisible();
+  await expect(textureWorkbench.locator('.wb-list .wb-row', { hasText: 'm_00_title' })).toBeVisible();
 
   // 选择纹理 → Viewer 生成预览（受界 data URI），Properties 显示元数据。
   await window.locator('.wb-list .wb-row', { hasText: 'm_01_icon' }).click();

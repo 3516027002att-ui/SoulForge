@@ -224,9 +224,23 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
               }
             }
           }
-          // S13：语言是 Categories 顶上筛选；没命中资源定位时默认第一个语言。
+          // S13 + 11-B：语言是 Categories 顶上筛选；没命中资源定位时默认第一个
+          // 语言，并默认选中 item 组第一张表 —— 不再钉死 Files 侧栏的 first file
+          //（那会把 menu 埋在 item 之下，用户以为「文本 = item」）。
           if (result.languages.length > 0 && selectedLanguageId === null) {
-            setSelectedLanguageId(result.languages[0]!.languageId);
+            const language = result.languages[0]!;
+            setSelectedLanguageId(language.languageId);
+            const preferred = (language.containers.find(
+              (container) => container.parseStatus === 'confirmed'
+                && container.containerKind.toLowerCase() === 'item'
+                && container.tables.length > 0
+            ) ?? language.containers.find(
+              (container) => container.parseStatus === 'confirmed' && container.tables.length > 0
+            ));
+            if (preferred) {
+              setSelectedContainerId(preferred.containerId);
+              setSelectedTableId(preferred.tables[0]!.tableId);
+            }
           }
         } else {
           setCatalogError(result.diagnostics?.[0]?.message ?? '文本目录读取失败。');
@@ -502,47 +516,61 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     });
   }
 
-  // ── 左栏 Categories（S13）：语言筛选在顶上，表名平铺为一行一表 ──
-  // 不再用「语言 → 容器 → 表」缩进树把表名挤没，也不要左栏底下空 Tools。
+  // ── 左栏 Categories（S13 + 11-B）：语言筛选在顶上，表名按容器分组 ──
+  // 11-B：不再把 item / menu 两个容器的表平铺成一列（menu 会被埋成「item 的续
+  // 集」，用户以为「文本 = item」）。按 containerKind 分组，组头可见、可点（点
+  // 组头选该容器第一张表）；读取失败的容器整组保留，不伪装成 0 张表。
   // 表名是 main 投影的逻辑名（shared logicalFmgTableName），renderer 不做二次解析。
   const selectedLanguage = catalog?.languages.find((l) => l.languageId === selectedLanguageId) ?? null;
-  const categoryRows = useMemo(() => {
+  const categoryGroups = useMemo(() => {
     if (!catalog || selectedLanguage === null) return [];
     const q = treeQuery.trim().toLowerCase();
-    const rows: Array<{
+    const groups: Array<{
       key: string;
-      label: string;
-      meta: string;
-      title: string;
+      containerKind: string;
       failed: boolean;
       selected: boolean;
-      onSelect: () => void;
+      onSelectGroup: () => void;
+      tables: Array<{
+        key: string;
+        label: string;
+        meta: string;
+        title: string;
+        selected: boolean;
+        onSelect: () => void;
+      }>;
     }> = [];
     for (const container of selectedLanguage.containers) {
       const contHit = !q || container.containerKind.toLowerCase().includes(q);
+      if (!contHit) continue;
       if (container.parseStatus !== 'confirmed') {
-        if (contHit) {
-          rows.push({
-            key: `container:${container.containerId}`,
-            label: container.containerKind,
-            meta: '读取失败',
-            title: container.containerKind,
-            failed: true,
-            selected: selectedContainerId === container.containerId,
-            onSelect: () => handleSelectContainer(container.containerId)
-          });
-        }
+        // 11-B：失败的容器组头留下（「menu / 读取失败」），点组头看诊断。
+        groups.push({
+          key: `container:${container.containerId}`,
+          containerKind: container.containerKind,
+          failed: true,
+          selected: selectedContainerId === container.containerId,
+          onSelectGroup: () => handleSelectContainer(container.containerId),
+          tables: []
+        });
         continue;
       }
+      const tables: Array<{
+        key: string;
+        label: string;
+        meta: string;
+        title: string;
+        selected: boolean;
+        onSelect: () => void;
+      }> = [];
       for (const table of container.tables) {
         const label = table.entryName;
         if (q && !contHit && !label.toLowerCase().includes(q)) continue;
-        rows.push({
+        tables.push({
           key: `table:${table.tableId}`,
           label,
-          meta: `${container.containerKind} · ${formatSlotCount(table.entryCount, table.filledCount)}`,
+          meta: formatSlotCount(table.entryCount, table.filledCount),
           title: `${container.containerKind} / ${label}`,
-          failed: false,
           selected: table.tableId === selectedTableId,
           onSelect: () => {
             // 选表即选其容器：容器读取失败/诊断跟随表所属容器。
@@ -551,8 +579,26 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           }
         });
       }
+      if (tables.length === 0) continue;
+      groups.push({
+        key: `container:${container.containerId}`,
+        containerKind: container.containerKind,
+        failed: false,
+        selected: selectedContainerId === container.containerId,
+        onSelectGroup: () => {
+          // 11-B：点组头选该容器第一张表。
+          const first = container.tables[0];
+          if (first) {
+            setSelectedContainerId(container.containerId);
+            handleSelectTable(first.tableId);
+          } else {
+            handleSelectContainer(container.containerId);
+          }
+        },
+        tables
+      });
     }
-    return rows;
+    return groups;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [catalog, selectedLanguage, selectedLanguageId, selectedContainerId, selectedTableId, treeQuery]);
 
@@ -590,21 +636,46 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         {catalog && selectedLanguage === null && (
           <p className="wb-empty">先选择语言。</p>
         )}
-        {categoryRows.map((row, index) => (
+        {categoryGroups.map((group) => (
           <div
-            key={row.key}
-            className={row.failed ? 'wb-row wb-row--failed' : 'wb-row'}
-            {...selectableRowAttributes({
-              selected: row.selected,
-              isTabEntry: isRowTabEntry(index, categoryRows.some((r) => r.selected)),
-              onSelect: row.onSelect
-            })}
+            key={group.key}
+            className="fmg-group"
+            data-container-kind={group.containerKind.toLowerCase()}
           >
-            <span className="wb-row__name" title={row.title}>{row.label}</span>
-            <span className="wb-row__meta">{row.meta}</span>
+            <button
+              type="button"
+              className={group.selected
+                ? 'fmg-group__header fmg-group__header--selected'
+                : 'fmg-group__header'}
+              aria-label={`${group.containerKind} 组`}
+              title={`${group.containerKind}：${group.failed ? '读取失败，点此查看诊断' : '选择该容器第一张表'}`}
+              onClick={group.onSelectGroup}
+            >
+              <span className="fmg-group__name">{group.containerKind}</span>
+              <span className="fmg-group__meta">
+                {group.failed ? '读取失败' : `${group.tables.length} 张表`}
+              </span>
+            </button>
+            {group.tables.map((row, index) => (
+              <div
+                key={row.key}
+                className="wb-row"
+                {...selectableRowAttributes({
+                  selected: row.selected,
+                  isTabEntry: isRowTabEntry(
+                    index,
+                    categoryGroups.some((g) => g.tables.some((t) => t.selected))
+                  ),
+                  onSelect: row.onSelect
+                })}
+              >
+                <span className="wb-row__name" title={row.title}>{row.label}</span>
+                <span className="wb-row__meta">{row.meta}</span>
+              </div>
+            ))}
           </div>
         ))}
-        {catalog && !catalogLoading && categoryRows.length === 0 && (
+        {catalog && !catalogLoading && categoryGroups.length === 0 && (
           <p className="wb-empty">当前语言没有匹配的表。</p>
         )}
       </div>
@@ -762,16 +833,6 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     <section className="panel" aria-label="FMG 本地化工作台">
       <WorkbenchLayout
         label="FMG 文本工作台"
-        toolbar={
-          <>
-            <span className="crumb"><b>文本</b></span>
-            <span className="muted" style={{ fontSize: 11 }}>
-              {catalog
-                ? `${catalog.title}`
-                : `${formatSlotCount(entryCount, selectedTable?.filledCount)} · 每页 ${FMG_PAGE_SIZE}`}
-            </span>
-          </>
-        }
         columns={columns}
       />
     </section>

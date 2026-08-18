@@ -883,16 +883,6 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           />
         ) : null
       }
-      toolbar={
-        <>
-          <span className="crumb">动作 · {fileLabel(props.resourceUri)}</span>
-          {document && (
-            <span className="muted" style={{ fontSize: 11 }}>
-              {pages?.animations.animationCount ?? 0} anims · {eventsPage?.totalEventCount ?? 0} events · {authority}
-            </span>
-          )}
-        </>
-      }
     />
   );
 }

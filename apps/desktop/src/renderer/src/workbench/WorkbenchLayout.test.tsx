@@ -30,7 +30,8 @@ describe('S27 栏宽回归（WorkbenchLayout）', () => {
     assert.match(html, /ROWS/);
     assert.match(html, /FIELDS/);
     assert.match(html, /role="separator"/);
-    assert.match(html, /恢复默认栏宽/);
+    // 11-C：恢复默认栏宽 入口已整块移除（栏仍可拖拽，只是没有一键恢复）。
+    assert.doesNotMatch(html, /恢复默认栏宽/);
   });
 
   it('像素模式也必须守 minWidth：style 同时带 width 与 minWidth', () => {

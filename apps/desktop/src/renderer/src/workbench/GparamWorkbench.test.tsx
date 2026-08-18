@@ -47,9 +47,9 @@ describe('GparamWorkbench 初始结构（挂载即有的五区骨架）', () => 
     assert.match(html, /aria-label="GPARAM 工作台"/);
   });
 
-  it('标题是 §7.8 正确形态：Graphics Parameters · N banks，物理路径只在 title', () => {
+  it('11-C：可见文本不含「Graphics Parameters」crumb，物理路径仍只在 title', () => {
     const html = render();
-    assert.match(html, /Graphics Parameters · 2 banks/);
+    assert.doesNotMatch(html, /Graphics Parameters/);
     // 物理路径只允许出现在 title 属性（metadata details）。
     assert.match(html, /title="param\/drawparam\/m10_00\.gparam\.dcx"/);
     // 可见文本里是去扩展的显示名，而不是文件名带扩展。

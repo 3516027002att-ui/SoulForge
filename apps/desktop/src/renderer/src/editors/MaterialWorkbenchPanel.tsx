@@ -542,17 +542,6 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
           )
         }
       ]}
-      toolbar={
-        <>
-          <span className="crumb">Material · {props.files.length} files</span>
-          {document && (
-            <span className="muted" style={{ fontSize: 11 }}>
-              {pages?.material.name ?? ''} · {document.authority}
-              {document.roundTrip?.consistent ? ' · round-trip ✓' : ''}
-            </span>
-          )}
-        </>
-      }
     />
   );
 }

@@ -674,16 +674,6 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
           )
         }
       ]}
-      toolbar={
-        <>
-          <span className="crumb">Behavior · {fileLabel(props.resourceUri)}</span>
-          {document && (
-            <span className="muted" style={{ fontSize: 11 }}>
-              {states?.stateCount ?? 0} states · {conditionSamples.length} conds · {authority}
-            </span>
-          )}
-        </>
-      }
     />
   );
 }

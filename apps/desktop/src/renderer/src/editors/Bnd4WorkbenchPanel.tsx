@@ -697,13 +697,6 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   return (
     <WorkbenchLayout
       label="BND4 容器工作台"
-      toolbar={
-        <span className="muted">
-          {totalChildren > 0
-            ? `BND4 容器 · ${totalChildren} 个子项 · 三栏：容器 / 条目 / 预览`
-            : '选择左侧容器资源后显示工作台'}
-        </span>
-      }
       columns={[
         { id: 'containers', title: 'Containers', initialWidth: 280, minWidth: 200, children: containersColumn },
         { id: 'entries', title: 'Entries', initialFlex: 1, minWidth: 260, children: entriesColumn },

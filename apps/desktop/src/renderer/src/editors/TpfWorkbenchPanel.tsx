@@ -640,17 +640,6 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
     <WorkbenchLayout
       label="Texture 工作台"
       columns={columns}
-      toolbar={
-        <>
-          <span className="crumb">Texture · {props.containers.length} containers</span>
-          {document && (
-            <span className="muted" style={{ fontSize: 11 }}>
-              {document.textureCount} textures · {document.authority}
-              {document.roundTrip?.byteIdentical ? ' · round-trip ✓' : ''}
-            </span>
-          )}
-        </>
-      }
     />
   );
 }
