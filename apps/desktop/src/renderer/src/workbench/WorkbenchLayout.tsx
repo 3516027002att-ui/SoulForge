@@ -40,6 +40,16 @@ export interface WorkbenchColumnSpec {
   title: string;
   /** 标题右侧的次要说明，例如条目数。 */
   hint?: string;
+  /**
+   * 可访问名（12-D）：不出现在画面上的栏名，标题为空（hideHeader）时用来给
+   * `<section>` 与分隔条命名，防止屏幕阅读器拿到空名。缺省退回 title。
+   */
+  ariaLabel?: string;
+  /**
+   * 不渲染栏头（12-D：栏标题与页面其它位置重复身份时用；可访问名仍保留）。
+   * 空 title 且不 hideHeader 会留一条 5px 高的空白 header，应配合一并隐藏。
+   */
+  hideHeader?: boolean;
   /** 栏内容。 */
   children: ReactNode;
   /**
@@ -271,6 +281,7 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
         {props.columns.map((column, index) => {
           const width = widths[column.id];
           const isLast = index === props.columns.length - 1;
+          const columnLabel = column.ariaLabel ?? column.title;
           return (
             <div
               key={column.id}
@@ -296,11 +307,13 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
                     minWidth: `${column.minWidth ?? DEFAULT_MIN_WIDTH}px`
                   }}
             >
-              <section className="workbench__column" aria-label={column.title}>
-                <header className="workbench__column-header">
-                  <h3 className="workbench__column-title">{column.title}</h3>
-                  {column.hint && <span className="workbench__column-hint">{column.hint}</span>}
-                </header>
+              <section className="workbench__column" aria-label={columnLabel}>
+                {!column.hideHeader && (
+                  <header className="workbench__column-header">
+                    <h3 className="workbench__column-title">{column.title}</h3>
+                    {column.hint && <span className="workbench__column-hint">{column.hint}</span>}
+                  </header>
+                )}
                 <div className="workbench__column-body">{column.children}</div>
               </section>
               {/* 分隔条对所有非末栏都出现，不再要求该栏已是像素模式 ——
@@ -311,7 +324,7 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
                   className="workbench__resizer"
                   role="separator"
                   aria-orientation="vertical"
-                  aria-label={`调整${column.title}栏宽`}
+                  aria-label={`调整${columnLabel}栏宽`}
                   tabIndex={0}
                   /* separator 的当前值要报给辅助技术，否则键盘调宽时用户听不到
                      任何变化反馈。未进入像素模式（尚未拖过）时无确切数值，

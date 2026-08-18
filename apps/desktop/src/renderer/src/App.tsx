@@ -2241,7 +2241,7 @@ export function App(): ReactElement {
       if (domain === 'files') setStatus('文件：物理浏览');
       return;
     }
-    // 有成熟工作台的领域：直接打开首选逻辑库，而不是留下「等待接线」占位。
+    // 有成熟工作台的领域：直接打开首选文件，而不是留下「等待接线」占位。
     // 侧栏仍用 library-item 而不是 Files 的 .file-item。
     const indexed = allFiles.length > 0 ? allFiles : files;
     if (domain === 'param') {
@@ -2249,7 +2249,7 @@ export function App(): ReactElement {
       if (preferred) {
         setCenterView('resource');
         void selectFile(preferred);
-        setStatus('PARAM：逻辑库工作台');
+        setStatus('PARAM：已打开参数工作台');
         return;
       }
     }
@@ -2260,7 +2260,7 @@ export function App(): ReactElement {
       setSelectedFile(null);
       setPreview(null);
       setCenterView('resource');
-      setStatus('文本：逻辑库工作台');
+      setStatus('文本：已打开文本工作台');
       return;
     }
     if (domain === 'event') {
@@ -2284,7 +2284,7 @@ export function App(): ReactElement {
     }
     const capability = domainSummaries.find((entry) => entry.domain === domain)?.capability ?? 'deferred';
     setStatus(capability === 'read-ready'
-      ? `${domainLabel(domain)}：逻辑库工作域（等待成熟工作台接线）`
+      ? `${domainLabel(domain)}：等待成熟工作台接线`
       : `${domainLabel(domain)}：${capability === 'deferred' ? 'read contract 尚未接线' : '运行条件不满足'}`);
   }
 
@@ -2937,14 +2937,15 @@ export function App(): ReactElement {
             <div className="panel__header">
               <h2 className="panel__title">资源浏览器</h2>
               {/* SHELL-09：数量只在 Files 物理浏览内出现且带语义单位（§3.3）；
-                  语义领域不显示任何文件数。 */}
-              <span className="panel__hint">
-                {activeDomain === 'files'
-                  ? `${formatFilesCount(physicalBrowseFiles.length)}${physicalBrowseFiles.length > FILE_LIST_PAGE_SIZE ? ` · 本页 ${pagedFiles.length}` : ''}`
-                  : activeDomain === 'project'
-                    ? '开始'
-                    : `${domainLabel(activeDomain)} · 逻辑库`}
-              </span>
+                 语义领域不显示任何文件数。12-E：语义领域不再拼「XX 逻辑库」，
+                 hint 为空时不渲染空 span；project 的「开始」按问题 6 处理。 */}
+              {activeDomain === 'files' ? (
+                <span className="panel__hint">
+                  {formatFilesCount(physicalBrowseFiles.length)}{physicalBrowseFiles.length > FILE_LIST_PAGE_SIZE ? ` · 本页 ${pagedFiles.length}` : ''}
+                </span>
+              ) : activeDomain === 'project' ? (
+                <span className="panel__hint">开始</span>
+              ) : null}
               <SidebarCloseButton onClose={() => setSidebarCollapsed(true)} />
             </div>
             <div className="panel__body panel__body--pad">
@@ -3094,8 +3095,8 @@ export function App(): ReactElement {
                   selectedUri={selectedFile?.sourceUri ?? null}
                   emptyHint={
                     workspace
-                      ? `${domainLabel(activeDomain)} 工作区里还没有可打开的逻辑库。可到「文件」领域按路径浏览。`
-                      : '打开 Mod 工作区后，这里会列出该领域的逻辑库。'
+                      ? `${domainLabel(activeDomain)} 工作区里还没有可打开的文件。可到「文件」领域按路径浏览。`
+                      : '打开 Mod 工作区后，这里会列出该领域可打开的资源。'
                   }
                   onSelect={(file) => {
                     const match = indexedFiles.find((item) => item.sourceUri === file.sourceUri);
@@ -3441,15 +3442,15 @@ export function App(): ReactElement {
             && !paramWorkbenchFile && !showTextWorkbench && !showEventWorkbench && (
             activeDomain === 'files'
               ? <p className="muted">在左侧选择一个文件开始编辑。</p>
-              : <section className="domain-placeholder" data-testid="domain-editor-placeholder" aria-label={`${domainLabel(activeDomain)} 工作域`}>
-                  <span className="domain-placeholder__eyebrow">DOMAIN / {domainLabel(activeDomain)}</span>
-                  <h2>{domainLabel(activeDomain)} 逻辑库工作域</h2>
-                  <p>
-                    {domainLibraries.length > 0
-                      ? '从左侧逻辑库打开资源，或按 Ctrl K 搜索。'
-                      : '当前工作区没有该领域的逻辑库；可到「文件」领域按路径浏览。'}
-                  </p>
-                </section>
+            : <section className="domain-placeholder" data-testid="domain-editor-placeholder" aria-label={`${domainLabel(activeDomain)} 工作域`}>
+                <span className="domain-placeholder__eyebrow">DOMAIN / {domainLabel(activeDomain)}</span>
+                <h2>从左侧打开一个文件</h2>
+                <p>
+                  {domainLibraries.length > 0
+                    ? '从左侧选择已打开的资源，或按 Ctrl K 搜索。'
+                    : '从左侧选择一个文件开始编辑，可到「文件」领域按路径浏览。'}
+                </p>
+              </section>
           )}
           {/* Structured preview / 原生格式检查 / 原始字节视图在 S12 前曾常驻此面板，
               把编辑器挤到滚动区外。S12 拍死：编辑壳不再展示证据投影与 hex 视图，

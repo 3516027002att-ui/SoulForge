@@ -210,7 +210,11 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
   });
 
   it('S31：词义列、并排分栏、事件头索引；没有假灯泡', () => {
-    assert.match(panelSource, /title: '词义'/);
+    // 12-D：可见栏标题不再是「词义」；可访问名用不出现在画面上的「指令说明」，
+    // 栏头（源码栏 + 词义栏）一并隐藏，避免和 esw-tab / App tab 重复身份。
+    assert.doesNotMatch(panelSource, /title: '词义'/);
+    assert.match(panelSource, /ariaLabel: '指令说明'/);
+    assert.match(panelSource, /hideHeader: true/);
     assert.match(panelSource, /并排对照/);
     assert.match(panelSource, /indexEventHeaders/);
     assert.match(panelSource, /insufficient_evidence/);
@@ -405,6 +409,11 @@ describe('S31 词义列：fmg-id / param-id 实参的跳转 UI（SSR）', () => 
 });
 
 describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口续载）', () => {
+  const repoRoot = process.cwd();
+  const panelSource = readFileSync(
+    join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
+    'utf8'
+  );
   const incrementalTab: EventSourceTabData = {
     tabId: 'file://event/common.emevd',
     title: 'common',
@@ -455,5 +464,22 @@ describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口�
 
   it('只读失败句不受增量源影响（非 live + token 仍只读）', () => {
     assert.equal(isSourceReadOnly({ ...incrementalTab, live: false }), true);
+  });
+
+  it('12-A：EMEDF 缺失横幅只留给真没 token 的 live tab（增量源 tab 不渲染）', () => {
+    // SSR 不跑 effect（tabs 为空、activeTab 为 null），横幅 JSX 需源码级锁定：
+    // 条件带上 !activeTab.sourceToken —— 增量源 tab（dslTemplate null 但持
+    // sourceToken）加载中不得画「未找到用户本机 EMEDF」，那是不全的错归因。
+    assert.match(panelSource, /activeTab\?\.live && activeTab\.dslTemplate === null && !activeTab\.sourceToken/);
+  });
+
+  it('12-A：挂载/切回前台即对增量源 tab 后台拉齐（首帧仍只带前缀）', () => {
+    // SSR 无法跑 effect；源码级钉住接线：activeTabId 变化时对未拉齐的增量源调
+    // ensureTabComplete（内部循环 fetchNextSourceSlice / fetchAllRemainingSource
+    // 直到 eof），追加走 sourceFillAnnotation + addToHistory:false。
+    assert.match(panelSource, /incrementalSourcesRef\.current\.get\(activeTabId\)/);
+    assert.match(panelSource, /ensureTabCompleteRef\.current\(activeTabId\)/);
+    // 首帧缓冲仍是前缀，不把全量塞进第一次 IPC。
+    assert.equal(baselineText(incrementalTab), 'L0\nL1\nL2');
   });
 });

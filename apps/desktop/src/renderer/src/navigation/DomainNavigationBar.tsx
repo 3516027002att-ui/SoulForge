@@ -67,5 +67,5 @@ export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebar
 function capabilityDescription(entry: DomainSummary): string {
   if (entry.capability === 'deferred') return `${entry.label}：read contract 尚未接线`;
   if (entry.capability === 'runtime-blocked') return `${entry.label}：read contract 已注册，但当前运行条件不满足`;
-  return `${entry.label}：${entry.defaultTarget ? '可直接打开' : '逻辑库工作域'}`;
+  return `${entry.label}：${entry.defaultTarget ? '可直接打开' : '从左侧打开一个文件'}`;
 }

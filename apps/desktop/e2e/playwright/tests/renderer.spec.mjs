@@ -2384,8 +2384,9 @@ test('EVENT-30B：diagnostic gutter 标注未知指令，编辑 dirty 后提交�
   await expect(dirtyTab).toHaveCount(1);
   await expect(workbench.locator('[role="tab"]').first()).toContainText('common');
 
-  // 提交：fixture 接受（合成写回），dirty 清空、源码替换为已提交文本。
-  await workbench.getByRole('button', { name: '编译并提交' }).click();
+  // 提交：S14 起没有「编译并提交」按钮，应用走 Ctrl+S（或失焦）。fixture 接受
+  // （合成写回），dirty 清空、源码替换为已提交文本。
+  await window.keyboard.press('Control+S');
   await expect(dirtyTab).toHaveCount(0);
   await expect(workbench.locator('.esw-source__host .cm-content')).toContainText('// fixture e2e dirty');
 

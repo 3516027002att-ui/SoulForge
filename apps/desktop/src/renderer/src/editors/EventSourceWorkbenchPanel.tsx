@@ -1191,6 +1191,24 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
+  /**
+   * 12-A：打开并挂上前缀后，后台把剩余部分一次拉齐到 eof —— 不等用户滚到边。
+   *
+   * 首包仍只有 400 行前缀（前缀行数常量不变，禁止改大冒充全量）；挂载 /
+   * 切回前台即对增量源 tab 调 ensureTabComplete（内部循环
+   * fetchNextSourceSlice / fetchAllRemainingSource），追加走现有
+   * sourceFillAnnotation + addToHistory:false，不置 dirty、不进 undo。
+   * 在飞 Promise 共享：Ctrl+F / 提交 / 脏标记的拉齐复用同一次。「滚近底部续载」
+   * 仍作为滚动加速保留，但不是唯一通路；用户看得见全文优先于必须滚到边才续载。
+   */
+  useEffect(() => {
+    if (!activeTabId) return;
+    const incremental = incrementalSourcesRef.current.get(activeTabId);
+    if (!incremental || isIncrementalSourceComplete(incremental)) return;
+    void ensureTabCompleteRef.current(activeTabId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, props.pendingTab]);
+
   useEffect(() => {
     if (!splitTabId || !splitHostRef.current) return;
     const host = splitHostRef.current;
@@ -1416,7 +1434,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const readOnly = activeTab ? isSourceReadOnly(activeTab) : true;
 
   const incrementalInfo = (activeTab && activeTab.sourceComplete === false && activeTab.sourceLoadedLines > 0)
-    ? ` · 已加载 ${activeTab.sourceLoadedLines.toLocaleString()} / ${activeTab.sourceTotalLines.toLocaleString()} 行，滚近底部续载`
+    ? ` · 已加载 ${activeTab.sourceLoadedLines.toLocaleString()} / ${activeTab.sourceTotalLines.toLocaleString()} 行，后台拉取剩余`
     : '';
   const visibleStatus = props.opening
     ? '正在读取 EMEVD（Bridge → worker 反汇编 → 首帧前缀，全文按视口续载）…'
@@ -1496,6 +1514,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           {
             id: 'source-a',
             title: activeTab?.title ?? '源码',
+            // 12-D：标题已画进 esw-tab / App tab，栏头再画一次是重复身份 —— 隐藏。
+            hideHeader: true,
             minWidth: 240,
             initialFlex: 2,
             children: (
@@ -1510,7 +1530,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                     )}
                   </div>
                 )}
-                {activeTab?.live && activeTab.dslTemplate === null && (
+                {activeTab?.live && activeTab.dslTemplate === null && !activeTab.sourceToken && (
                   <div className="event-source__notice event-source__notice--blocked" role="alert">
                     事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
                     sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
@@ -1541,18 +1561,25 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
             : []),
           {
             id: 'meaning',
-            title: '词义',
+            // 12-D：用户不要「词义」这个名字。可见标题留空且不渲染栏头，
+            // 可访问名用不出现在画面上的「指令说明」（栏是 section，不能空名）。
+            title: '',
+            ariaLabel: '指令说明',
+            hideHeader: true,
             minWidth: 200,
             initialWidth: 280,
             children: (
-              <EventMeaningPane
-                inspection={inspection}
-                jump={jump}
-                resourceJump={resourceJump}
-                onJumpEvent={jumpToEvent}
-                onJumpResource={jumpToResource}
-                documentTitle={activeTab?.title ?? 'event'}
-              />
+              // 12-C：.esw-meaning 提供稳定可见分隔与独立滚动/背景的样式锚点。
+              <div className="esw-meaning">
+                <EventMeaningPane
+                  inspection={inspection}
+                  jump={jump}
+                  resourceJump={resourceJump}
+                  onJumpEvent={jumpToEvent}
+                  onJumpResource={jumpToResource}
+                  documentTitle={activeTab?.title ?? 'event'}
+                />
+              </div>
             )
           }
         ]}

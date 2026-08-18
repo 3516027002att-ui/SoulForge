@@ -1940,6 +1940,22 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   flex-direction: column;
   padding: 0;
 }
+/* 12-C：词义列与源码列之间一条稳定可见的分隔（末栏的 border-right 已被
+   :last-child 拿掉，改在词义列左侧补 border-left）；背景用 --forge-1，和源码
+   host 的 --forge-0 区分开，两栏一眼可分，滚轮不再落在「看起来是编辑器」
+   的右侧空白上。滚动仍归各栏自己的 body（源码列 body overflow:hidden，
+   滚轮只进 .cm-scroller；词义列 body overflow:auto 自己滚）。 */
+.workbench__column:has(> .workbench__column-body > .esw-meaning) {
+  border-left: 1px solid var(--line);
+}
+.workbench__column-body:has(> .esw-meaning) {
+  padding: 0;
+}
+.esw-meaning {
+  flex: 1;
+  min-height: 100%;
+  background: var(--forge-1);
+}
 .workbench__footer {
   flex: none; padding: 6px 10px; border-top: 1px solid var(--line);
   background: var(--forge-1);

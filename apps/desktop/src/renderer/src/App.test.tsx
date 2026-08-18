@@ -57,4 +57,13 @@ describe('S33 壳层：活动栏四图标删除，开始侧栏承接开始页功
     assert.match(appSource, /data-testid="start-sidebar-file-list"/);
     assert.match(appSource, /START_SIDEBAR_FILE_LIMIT/);
   });
+
+  it('12-E：侧栏不再拼「XX · 逻辑库」（所有语义域都删，Files 数量与 project「开始」仍在）', () => {
+    // 用户点名的是侧栏头那句「XX · 逻辑库」：这一句所有域都删，且不留空 hint span。
+    assert.doesNotMatch(appSource, /\$\{domainLabel\(activeDomain\)\} · 逻辑库/);
+    assert.doesNotMatch(appSource, /逻辑库工作域/);
+    assert.doesNotMatch(appSource, /逻辑库工作台/);
+    // Files 数量保留。
+    assert.match(appSource, /formatFilesCount\(physicalBrowseFiles\.length\)/);
+  });
 });

@@ -1224,7 +1224,10 @@ function resolveMapModelFile(
 
 let cachedEmevdRegistry: ReturnType<typeof resolveEmevdRegistry> | null = null;
 function getEmevdRegistry(): ReturnType<typeof resolveEmevdRegistry> {
-  if (!cachedEmevdRegistry) {
+  // 12-B：只有「imported」才算成功缓存。origin 为 fixture（首次查找时文件还不在 /
+  // 路径暂时不可读 / 解析失败）不得缓存 —— 用户把文件放回或修好后再开同一份事件
+  // 文档要立即生效，不能把失败钉死到进程退出。
+  if (!cachedEmevdRegistry || cachedEmevdRegistry.origin !== 'imported') {
     cachedEmevdRegistry = resolveEmevdRegistry(locateUserEmedfSync());
   }
   return cachedEmevdRegistry;
