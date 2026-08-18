@@ -144,10 +144,13 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.doesNotMatch(html, /Raw Bytes/);
   });
 
-  it('T4：查找走 CodeMirror search keymap（Ctrl+F），不渲染工具条查找钮', () => {
+  it('T4：查找走 CodeMirror search keymap（Ctrl+F），不渲染工具条查找钮；S35 起先拉齐未加载部分再开查找面板', () => {
     assert.match(panelSource, /from '@codemirror\/search'/);
     assert.match(panelSource, /searchKeymap/);
-    assert.doesNotMatch(panelSource, /openSearchPanel/);
+    // S35（event-common-load.md §3.2）：Ctrl+F 先 ensureTabComplete 一次拉齐，
+    // 再 openSearchPanel —— 禁止为「查找要全文」在打开时同步拉全文。
+    assert.match(panelSource, /openSearchPanel/);
+    assert.match(panelSource, /ensureTabCompleteRef/);
   });
 
   it('T4-3：EMEDF 指令名 autocomplete（Ctrl+Space + 输入时）与悬停参数名列表', () => {
@@ -180,11 +183,19 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.match(panelSource, /按 tabId 去重/);
   });
 
-  it('S19：文档原子提交 —— 不允许 400 行前缀 / 分片追加 / sourceFillTarget 回归', () => {
+  it('S35：增量源按视口续载；完整缓冲仍是原子提交（无 16ms 分片 / sourceFillTarget 回归）', () => {
+    // S35（event-common-load.md §3.2）打开首帧只有 400 行前缀，全文按视口
+    // 续载；但增量灌入**不是** S18 的 16ms interval 分片，也没有
+    // sourceFillTarget 状态机。常量定义留在 assembleEmevdSource /
+    // incrementalSourceInjection，面板不直接引用字面常量。
     assert.doesNotMatch(panelSource, /SOURCE_PREFIX_LINES|SOURCE_SLICE_LINES/);
     assert.doesNotMatch(panelSource, /appendSourceSlices/);
     assert.doesNotMatch(panelSource, /splitSourceForFirstFrame/);
     assert.doesNotMatch(panelSource, /sourceFillTarget:/);
+    assert.doesNotMatch(panelSource, /setInterval/);
+    assert.match(panelSource, /incrementalSourceInjection/);
+    assert.match(panelSource, /isNearLoadedBottom/);
+    assert.match(panelSource, /fetchAllRemainingSource/);
     assert.match(panelSource, /createCompleteSourceState/);
     assert.match(panelSource, /openingPreview/);
   });
@@ -390,5 +401,59 @@ describe('S31 词义列：fmg-id / param-id 实参的跳转 UI（SSR）', () => 
     assert.match(html, /有 2 个已打开的文本表匹配「物品名」，无法确定目标。/);
     // 不足证据与命中互斥：同一块里不再出现「目标在 …」。
     assert.doesNotMatch(html, /目标在/);
+  });
+});
+
+describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口续载）', () => {
+  const incrementalTab: EventSourceTabData = {
+    tabId: 'file://event/common.emevd',
+    title: 'common',
+    resourceUri: 'file://event/common.emevd',
+    document: DOCUMENT,
+    sourceHash: 'sha256:abc',
+    live: true,
+    dslTemplate: null,
+    dslTemplateTruncated: false,
+    dslTemplateTotalLines: 70_000,
+    sourceStyle: 'dark-script',
+    sourceToken: 'tok',
+    sourcePrefix: 'L0\nL1\nL2',
+    sourceTotalLines: 70_000
+  };
+
+  it('增量源 tab（dslTemplate null + sourceToken）是 live 可编辑的，不是失败关闭', () => {
+    assert.equal(isSourceReadOnly(incrementalTab), false);
+  });
+
+  it('EMEDF 缺失失败关闭（无 token 无模板）仍是只读', () => {
+    assert.equal(isSourceReadOnly({
+      ...incrementalTab,
+      sourceToken: null
+    }), true);
+  });
+
+  it('baselineText 对增量源返回 sourcePrefix（首帧不拼全文、不触发 slice IPC）', () => {
+    assert.equal(baselineText(incrementalTab), 'L0\nL1\nL2');
+  });
+
+  it('提交后重读回灌走完整 dslTemplate（无 token 字段）', () => {
+    const complete: EventSourceTabData = {
+      tabId: incrementalTab.tabId,
+      title: incrementalTab.title,
+      resourceUri: incrementalTab.resourceUri,
+      document: DOCUMENT,
+      sourceHash: 'sha256:abc',
+      live: true,
+      dslTemplate: '$Event(0, Default, function() {\n});',
+      dslTemplateTruncated: false,
+      dslTemplateTotalLines: 2,
+      sourceStyle: 'dark-script'
+    };
+    assert.equal(isSourceReadOnly(complete), false);
+    assert.equal(baselineText(complete), '$Event(0, Default, function() {\n});');
+  });
+
+  it('只读失败句不受增量源影响（非 live + token 仍只读）', () => {
+    assert.equal(isSourceReadOnly({ ...incrementalTab, live: false }), true);
   });
 });

@@ -1,3 +1,12 @@
+/**
+ * assembleEmevdSource 单测。
+ *
+ * S35（event-common-load.md §3.2）后本函数只作「拉齐」用：App 提交后的重读
+ * 回灌仍走它把 token 切片拼成完整模板；打开路径（首帧前缀 + 按视口续载）已
+ * 移到 incrementalSourceInjection.ts，不在本文件覆盖。拼接口径（'\n' 分隔、
+ * eof/lineCount 推进）两处共用同一常量与语义。
+ */
+
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 

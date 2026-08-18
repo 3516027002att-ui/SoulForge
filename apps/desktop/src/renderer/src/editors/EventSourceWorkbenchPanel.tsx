@@ -14,6 +14,12 @@
  * （有界 DSL 投影 + 派生 document）按资源 URI 提供标签；提交以 `EventSourceTabData`
  * 上抛，由 App 走 Bridge → Patch 管线。dirty 与编辑文本（draft）只在工作台内部，
  * 跨 tab 隔离（per-tab EditorState 缓存 undo/redo 历史）。
+ *
+ * S35（超长 EMEVD，规格 event-common-load.md §3.2）：打开回包只有 outline +
+ * 前 400 行 + opaque source token，不再预先灌完 7 万行。面板首帧用前缀建缓冲，
+ * 滚近已加载底部时按视口续拉一片（一片一次追加，无 16ms 分片）；查找（Ctrl+F）/
+ * 提交 / 脏标记时才把未加载部分一次拉齐。追加永远发生在文档末尾，不扰动用户
+ * 编辑、光标与滚动位置。
  */
 import {
   useCallback,
@@ -28,6 +34,16 @@ import type { EmedfCompletionItem } from '@soulforge/core';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { createCompleteSourceState } from '../emevd/emevdSourceMount.js';
 import {
+  appendSourceTail,
+  createIncrementalSourceState,
+  fetchAllRemainingSource,
+  fetchNextSourceSlice,
+  isIncrementalSourceComplete,
+  isNearLoadedBottom,
+  sourceFillAnnotation,
+  type IncrementalSourceState
+} from '../emevd/incrementalSourceInjection.js';
+import {
   fmgSemanticOf,
   indexEventHeaders,
   inspectSourceLine,
@@ -40,7 +56,7 @@ import {
   type ResourceJumpResult
 } from '../emevd/eventSourceNavigate.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
-import { EditorState, type Extension } from '@codemirror/state';
+import { EditorState, Transaction, type Extension } from '@codemirror/state';
 import {
   EditorView,
   GutterMarker,
@@ -71,7 +87,11 @@ import {
   type CompletionContext,
   type CompletionResult
 } from '@codemirror/autocomplete';
-import { search, searchKeymap } from '@codemirror/search';
+import {
+  search,
+  searchKeymap,
+  openSearchPanel
+} from '@codemirror/search';
 import { tags } from '@lezer/highlight';
 
 export interface EventSourceSubmitResult {
@@ -124,6 +144,15 @@ export interface EventSourceTabData {
    * - 'none'：EMEDF 缺失失败关闭（不提供伪解码）。
    */
   sourceStyle?: 'dark-script' | 'patch-dsl' | 'none' | undefined;
+  /**
+   * S35 增量源（超长 EMEVD）：打开首帧只有前 400 行 + opaque source token，
+   * 全文按视口续载（incrementalSourceInjection）。有 sourceToken 且 dslTemplate
+   * 为 null 时，首帧缓冲 = sourcePrefix；查找（Ctrl+F）/ 提交 / 脏标记时才拉齐。
+   * 提交后的重读回灌走完整 dslTemplate，不带这三项。
+   */
+  sourceToken?: string | null;
+  sourcePrefix?: string | null;
+  sourceTotalLines?: number;
 }
 
 export interface EventSourceWorkbenchPanelProps {
@@ -153,9 +182,17 @@ interface InternalTab extends EventSourceTabData {
   draft: string;
   /**
    * 该标签的 CodeMirror 状态（含 undo/redo 历史），切换标签时保留。
-   * 文档从首帧起就是完整全文：不存在 sourceFillTarget / 分片追加态。
+   * 完整缓冲（拉齐后 / 提交后 / 小文档）一次 createCompleteSourceState；
+   * S35 增量源首帧只有前缀，续载经 dispatch / EditorState.update 追加并
+   * 同步回 editorState —— 不存在 sourceFillTarget / 16ms 分片态。
    */
   editorState: EditorState;
+  /** S35：增量源已加载行数（首帧 = 前缀行数；续载后随追加增长）。 */
+  sourceLoadedLines: number;
+  /** S35：增量源全文总行数（main 口径）。 */
+  sourceTotalLines: number;
+  /** S35：增量源是否已拉齐（无 token 的 tab 恒为 true）。 */
+  sourceComplete: boolean;
 }
 
 interface EventLineInfo {
@@ -219,11 +256,17 @@ export function readFailureSource(document: EmevdEditorDocument): string | null 
   return lines.join('\n');
 }
 
-export function isSourceReadOnly(tab: Pick<EventSourceTabData, 'live' | 'dslTemplate' | 'sourceStyle'>): boolean {
-  return !tab.live || tab.dslTemplate === null;
+export function isSourceReadOnly(tab: Pick<EventSourceTabData, 'live' | 'dslTemplate' | 'sourceStyle' | 'sourceToken'>): boolean {
+  // S35：增量源 tab（dslTemplate 为 null 但持有 sourceToken）是 live 可编辑的，
+  // 与「EMEDF 缺失失败关闭（无 token 无模板）」区分开。
+  return !tab.live || (tab.dslTemplate === null && !tab.sourceToken);
 }
 
 export function baselineText(tab: EventSourceTabData): string {
+  // S35：增量源首帧只有前缀；全文按视口续载，不在这里拼（打开时禁止同步拉全文）。
+  if (tab.sourceToken && tab.sourcePrefix !== undefined && tab.sourcePrefix !== null) {
+    return tab.sourcePrefix;
+  }
   // live 但 dslTemplate 缺失 = EMEDF 缺失（主进程失败关闭，不给伪源码）。
   if (tab.live && tab.dslTemplate === null) return EMEDF_MISSING_SOURCE;
   // S15：读取失败（非 live 且无模板）→ 可行动失败句，禁止假 resource 源码。
@@ -518,7 +561,9 @@ export function buildEditorExtensions(
   sourceStyle: EventSourceTabData['sourceStyle'],
   getCatalog: () => EmedfCompletionItem[],
   onSave?: () => void,
-  onCursor?: (lineText: string) => void
+  onCursor?: (lineText: string) => void,
+  onViewportNearEnd?: (view: EditorView) => void,
+  onFindRequest?: (view: EditorView) => void
 ): Extension[] {
   const sourceLanguage = sourceStyle === 'dark-script'
     ? darkScriptStreamLanguage
@@ -544,8 +589,18 @@ export function buildEditorExtensions(
     hoverTooltip(createHoverTooltipSource(getCatalog)),
     autocompletion({ override: [createCompletionSource(getCatalog)] }),
     EditorView.updateListener.of((update) => {
-      if (update.docChanged) onDocChange(update.state.doc.toString(), update.state);
-      if (onCursor && (update.selectionSet || update.docChanged || update.focusChanged)) {
+      // S35：增量源续载/拉齐的追加带 sourceFillAnnotation，不是用户编辑 ——
+      // 不置 dirty、不进 undo、不触发「脏标记 → 拉齐」递归。
+      const isSourceFill = update.transactions.some(
+        (transaction) => transaction.annotation(sourceFillAnnotation) === true
+      );
+      if (update.docChanged && !isSourceFill) onDocChange(update.state.doc.toString(), update.state);
+      // S35：视口滚动（geometryChanged / viewportChanged）时探测「滚近已加载
+      // 底部」→ 面板续拉下一片；scrollDOM 原生事件再兜一道（见挂载 effect）。
+      if (onViewportNearEnd && (update.geometryChanged || update.viewportChanged)) {
+        onViewportNearEnd(update.view);
+      }
+      if (onCursor && !isSourceFill && (update.selectionSet || update.docChanged || update.focusChanged)) {
         const line = update.state.doc.lineAt(update.state.selection.main.head);
         onCursor(line.text);
       }
@@ -560,6 +615,18 @@ export function buildEditorExtensions(
             }
           }]
         : []),
+      // S35：Ctrl+F 先把未加载部分一次拉齐，再开 CodeMirror 查找面板 ——
+      // 禁止为「查找要全文」在打开时同步拉全文。本条目在 searchKeymap 之前
+      // 注册，同名键先注册者生效。
+          ...(onFindRequest
+            ? [{
+                key: 'Mod-f',
+                run: (view: EditorView) => {
+                  onFindRequest(view);
+                  return true;
+                }
+              }]
+            : []),
       ...closeBracketsKeymap,
       ...defaultKeymap,
       ...searchKeymap,
@@ -741,9 +808,22 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   /** 始终指向最新 commitDraft，供各 tab 的 CM extensions 闭包安全调用。 */
   const commitDraftRef = useRef<(tabId: string, text: string, state: EditorState) => void>(() => {});
   const submitSourceRef = useRef<() => Promise<void>>(async () => {});
+  /** S35：最新 tabs / activeTabId，供异步拉片落地时判断「该 tab 是否仍在前台」。 */
+  const tabsRef = useRef<InternalTab[]>([]);
+  const activeTabIdRef = useRef<string | null>(null);
+  /** S35：每 tab 的增量源推进状态（操作权威，ref 供回调闭包读最新值）。 */
+  const incrementalSourcesRef = useRef<Map<string, IncrementalSourceState>>(new Map());
+  /** S35：单片续载在飞 Promise：同一 tab 同时只拉一片，避免重复取同一行区间。 */
+  const slicePromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+  /** S35：拉齐在飞 Promise：提交 / 查找 / 脏标记并发时共享同一次拉齐。 */
+  const fillPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+  const maybeFillMoreRef = useRef<(view: EditorView) => void>(() => {});
+  const ensureTabCompleteRef = useRef<(tabId: string) => Promise<void>>(async () => {});
 
   const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? null;
   const splitTab = splitTabId ? tabs.find((tab) => tab.tabId === splitTabId) ?? null : null;
+  tabsRef.current = tabs;
+  activeTabIdRef.current = activeTabId;
   const eventIndexes = useMemo(
     () => tabs.map((tab) => ({
       tabId: tab.tabId,
@@ -771,6 +851,157 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     };
   }, []);
 
+  /** S35：经 bridge 拉源文件切片；bridge 缺失时按失败关闭（不重试空转）。 */
+  const readSliceFromBridge = useCallback(
+    async (token: string, fromLine: number, lineCount: number) => {
+      const bridge = getRendererBridge();
+      if (!bridge || typeof bridge.readEmevdSourceSlice !== 'function') return { ok: false };
+      return bridge.readEmevdSourceSlice(token, fromLine, lineCount);
+    },
+    []
+  );
+
+  /** S35：续载/拉齐落地 —— 把最新 EditorState 与行数同步回 tab（不置 dirty）。 */
+  const commitSourceFill = useCallback((
+    tabId: string,
+    state: EditorState,
+    loadedLines: number,
+    complete: boolean
+  ) => {
+    setTabs((previous) =>
+      previous.map((tab) =>
+        tab.tabId === tabId
+          ? {
+              ...tab,
+              draft: state.doc.toString(),
+              editorState: state,
+              sourceLoadedLines: loadedLines,
+              sourceComplete: complete
+            }
+          : tab
+      )
+    );
+  }, []);
+
+  /**
+   * S35：把「文件后半」文本追加进指定 tab 的缓冲。
+   *
+   * - 该 tab 仍在前台 → 对活动视图**单次 dispatch** 追加（不换 EditorState 对象；
+   *   append 在文档末尾，已加载内容、光标与滚动位置都保持）；
+   * - 已切走 / 关闭 → 对该 tab 的 EditorState 做函数式 update，下次激活时
+   *   view.setState 换入。
+   *
+   * 追加事务带 sourceFillAnnotation（不置 dirty、不进词义行回调），并显式
+   * `Transaction.addToHistory.of(false)` —— CodeMirror 的 history 只认
+   * addToHistory=false 才不入 undo/redo，自定义 annotation 拦不住 Ctrl+Z 把
+   * 追加的文本当用户编辑撤销掉。
+   */
+  const applyRestText = useCallback((tabId: string, restText: string | null, complete: boolean) => {
+    if (!restText || restText.length === 0) {
+      if (complete) {
+        const tab = tabsRef.current.find((item) => item.tabId === tabId);
+        if (tab) commitSourceFill(tabId, tab.editorState, tab.editorState.doc.lines, true);
+      }
+      return;
+    }
+    const fillAnnotations = [
+      sourceFillAnnotation.of(true),
+      Transaction.addToHistory.of(false)
+    ];
+    const view = viewRef.current;
+    if (view && activeTabIdRef.current === tabId) {
+      view.dispatch({
+        ...appendSourceTail(view.state, restText),
+        annotations: fillAnnotations
+      });
+      commitSourceFill(tabId, view.state, view.state.doc.lines, complete);
+      return;
+    }
+    const tab = tabsRef.current.find((item) => item.tabId === tabId);
+    if (!tab) return;
+    const nextState = tab.editorState.update({
+      ...appendSourceTail(tab.editorState, restText),
+      annotations: fillAnnotations
+    }).state;
+    commitSourceFill(tabId, nextState, nextState.doc.lines, complete);
+  }, [commitSourceFill]);
+
+  /** S35：拉一片（一行 400 条口径的切片，常量在 incrementalSourceInjection）并追加；落地后下一轮视口事件再拉。 */
+  const fillOneSlice = useCallback(async (tabId: string) => {
+    const current = incrementalSourcesRef.current.get(tabId);
+    if (!current || isIncrementalSourceComplete(current)) return;
+    const step = await fetchNextSourceSlice(current, readSliceFromBridge);
+    // 换代 / 关标签：旧世代结果作废，不得覆盖新世代 ref、不得追加进新缓冲。
+    const live = incrementalSourcesRef.current.get(tabId);
+    if (!live || live.token !== step.state.token) return;
+    incrementalSourcesRef.current.set(tabId, step.state);
+    if (step.cancelled || step.state.failed) {
+      if (step.state.failed && !step.cancelled) {
+        setStatus('增量源码续载失败（令牌已失效或 Bridge 不可用），只展示已加载部分。');
+      }
+      return;
+    }
+    applyRestText(tabId, step.sliceText, step.state.eof);
+  }, [applyRestText, readSliceFromBridge]);
+
+  /** S35：单片续载的飞行通道登记（与拉齐共享「单飞行通道」，防重复取行区间）。 */
+  const fillOneSliceGuarded = useCallback((tabId: string): Promise<void> => {
+    const promise = fillOneSlice(tabId).finally(() => {
+      if (slicePromisesRef.current.get(tabId) === promise) slicePromisesRef.current.delete(tabId);
+    });
+    slicePromisesRef.current.set(tabId, promise);
+    return promise;
+  }, [fillOneSlice]);
+
+  /**
+   * S35：一次拉齐 —— 把未加载部分全部取回并**单次**追加（无 16ms 分片）。
+   * 并发调用（提交 / 查找 / 脏标记）共享同一个在飞 Promise。
+   *
+   * 与视口续载共用「单飞行通道」：先在飞单片落地（取最新 nextFromLine 起点），
+   * 拉齐在飞期间 maybeFillMore 让路；落地后再核对 token 仍属当前世代，避免
+   * 旧世代文本被追加进新打开的缓冲。
+   */
+  const ensureTabComplete = useCallback(async (tabId: string): Promise<void> => {
+    const inFlight = fillPromisesRef.current.get(tabId);
+    if (inFlight) return inFlight;
+    const promise = (async () => {
+      const pendingSlice = slicePromisesRef.current.get(tabId);
+      if (pendingSlice) await pendingSlice;
+      const current = incrementalSourcesRef.current.get(tabId);
+      if (!current || isIncrementalSourceComplete(current)) return;
+      const all = await fetchAllRemainingSource(current, readSliceFromBridge);
+      const live = incrementalSourcesRef.current.get(tabId);
+      if (!live || live.token !== all.state.token) return;
+      incrementalSourcesRef.current.set(tabId, all.state);
+      if (all.cancelled || all.state.failed) {
+        if (all.state.failed && !all.cancelled) {
+          setStatus('增量源码拉齐失败（令牌已失效或 Bridge 不可用），只展示已加载部分。');
+        }
+        return;
+      }
+      applyRestText(tabId, all.restText, all.state.eof);
+    })();
+    fillPromisesRef.current.set(tabId, promise);
+    void promise.finally(() => {
+      if (fillPromisesRef.current.get(tabId) === promise) fillPromisesRef.current.delete(tabId);
+    });
+    return promise;
+  }, [applyRestText, readSliceFromBridge]);
+  ensureTabCompleteRef.current = ensureTabComplete;
+
+  /** S35：视口近底探测 → 续拉下一片（updateListener 与 scrollDOM 两路共用）。 */
+  const maybeFillMore = useCallback((view: EditorView) => {
+    const tabId = activeTabIdRef.current;
+    if (!tabId) return;
+    const state = incrementalSourcesRef.current.get(tabId);
+    if (!state || isIncrementalSourceComplete(state)) return;
+    // 单飞行通道：拉齐在飞时视口续载一律让路（拉齐会覆盖全部剩余行）。
+    if (fillPromisesRef.current.has(tabId) || slicePromisesRef.current.has(tabId)) return;
+    if (!isNearLoadedBottom(view)) return;
+    void fillOneSliceGuarded(tabId);
+  }, [fillOneSliceGuarded]);
+  maybeFillMoreRef.current = maybeFillMore;
+
   const commitDraft = useCallback((tabId: string, text: string, state: EditorState) => {
     setTabs((previous) =>
       previous.map((tab) =>
@@ -779,7 +1010,10 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         tab.tabId === tabId ? { ...tab, dirty: true, draft: text, editorState: state } : tab
       )
     );
-  }, []);
+    // S35：用户一动手（脏标记）就把未加载部分一次拉齐 —— 否则提交只会带上
+    // 已加载前缀，把文件截短。在飞拉齐共享同一 Promise，不会重复拉。
+    void ensureTabComplete(tabId);
+  }, [ensureTabComplete]);
   commitDraftRef.current = commitDraft;
 
   /** 每个 tab 的 extensions 绑定自己的 tabId；运行时经 ref 调最新 commitDraft。 */
@@ -803,6 +1037,18 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         setInspection(inspectSourceLine(lineText, completionItemsRef.current));
         setJump(null);
         setResourceJump(null);
+      },
+      // S35：主视口才驱动按视口续载；只读对照视口不拉片（内容随 tab 状态同步）。
+      isSatellite ? undefined : (view) => maybeFillMoreRef.current(view),
+      // S35：Ctrl+F 先把未加载部分一次拉齐，再开查找面板。
+      isSatellite ? undefined : (view) => {
+        const targetTabId = activeTabIdRef.current;
+        if (!targetTabId) return;
+        void ensureTabCompleteRef.current(targetTabId).then(() => {
+          if (viewRef.current === view && activeTabIdRef.current === targetTabId) {
+            openSearchPanel(view);
+          }
+        });
       }
     );
   }, []);
@@ -810,23 +1056,38 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   /**
    * 把 App 给的 pending tab 并入 tabs（去重 + 保留 dirty/draft）并激活。
    *
-   * 文档模型是原子提交：新标签从第一帧就持有完整 `dslTemplate`。没有 400 行前缀、
-   * 没有 sourceFillTarget、没有 16ms 分片 dispatch —— 打开完成的定义就是全文可滚、
-   * 可搜、可跳，与成熟本地编辑器一致。
+   * S35 文档模型：带 sourceToken 的 tab 是**增量源** —— 首帧缓冲只有前 400 行
+   * 前缀，全文按视口续载（incrementalSourceInjection），查找（Ctrl+F）/ 提交 /
+   * 脏标记时才一次拉齐。无 token 的 tab（小文档 / 提交后重读回灌 / 失败关闭）
+   * 仍是原子提交：首帧即完整 dslTemplate。
    */
   useEffect(() => {
     const pending = props.pendingTab;
     if (!pending) return;
     const base = baselineText(pending);
     const readOnly = isSourceReadOnly(pending);
+    const incremental = createIncrementalSourceState({
+      sourcePrefix: pending.sourcePrefix,
+      sourceToken: pending.sourceToken,
+      sourceTotalLines: pending.sourceTotalLines ?? pending.dslTemplateTotalLines
+    });
     const createIncomingState = () => createCompleteSourceState(
       base,
       createExtensionsFor(pending.tabId, readOnly, pending.sourceStyle)
     );
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === pending.tabId);
-      if (index >= 0) {
-        const existing = previous[index]!;
+      // 换代（token 变化）且 tab 脏着：不能把新文件的剩余部分续进旧编辑缓冲，
+      // 停掉增量源（旧 token 在 main 也已作废），内容与状态保持用户侧旧世代。
+      const existing = index >= 0 ? previous[index] : undefined;
+      const tokenChanged = existing !== undefined
+        && existing.sourceToken !== (pending.sourceToken ?? null);
+      if (incremental && existing !== undefined && !(tokenChanged && existing.dirty)) {
+        incrementalSourcesRef.current.set(pending.tabId, incremental);
+      } else {
+        incrementalSourcesRef.current.delete(pending.tabId);
+      }
+      if (existing) {
         const sourceChanged = existing.draft !== base;
         const merged: InternalTab = {
           ...existing,
@@ -838,10 +1099,17 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           dslTemplateTruncated: pending.dslTemplateTruncated,
           dslTemplateTotalLines: pending.dslTemplateTotalLines,
           sourceStyle: pending.sourceStyle,
-          // dirty 标签的用户编辑是唯一允许偏离基线的状态；干净标签收到新基线时
-          // 一次提交成完整 EditorState，不再走「先换短前缀、再后台灌」的状态机。
+          sourceToken: pending.sourceToken ?? null,
+          sourcePrefix: pending.sourcePrefix ?? null,
+          sourceTotalLines: pending.sourceTotalLines ?? pending.dslTemplateTotalLines ?? 0,
+          // 干净标签收到新基线时一次提交成完整/前缀缓冲；脏标签保留用户编辑。
           ...(sourceChanged && !existing.dirty
-            ? { draft: base, editorState: createIncomingState() }
+            ? {
+                draft: base,
+                editorState: createIncomingState(),
+                sourceLoadedLines: incremental?.nextFromLine ?? 0,
+                sourceComplete: incremental ? incremental.eof : true
+              }
             : {})
         };
         return previous.map((tab, i) => (i === index ? merged : tab));
@@ -850,6 +1118,9 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         ...pending,
         dirty: false,
         draft: base,
+        sourceLoadedLines: incremental?.nextFromLine ?? 0,
+        sourceTotalLines: incremental?.totalLines ?? pending.dslTemplateTotalLines ?? 0,
+        sourceComplete: incremental ? incremental.eof : true,
         editorState: createIncomingState()
       };
       return [...previous, created];
@@ -869,7 +1140,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, []);
 
   const syncGutterInfo = useCallback((text: string, rows: readonly EventWarningRow[]) => {
-    // 全文一次扫描：gutter 判据与文档同步完整，不随「下半份还没到」变化。
+    // 对已加载文本做一次扫描：S35 增量源下 gutter 判据随续载逐段补齐，
+    // 判据行（outline）本身始终完整。
     applyEventLineInfo(indexEventLines(text, rows));
   }, [applyEventLineInfo]);
 
@@ -889,7 +1161,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
       eventLineInfoRef.current;
     viewRef.current = view;
+    // S35：滚动兜底 —— updateListener 的 geometryChanged 覆盖大部分滚动形态，
+    // scrollDOM 原生事件再兜一道（两路共用同一近底判定，在飞标记防重复拉片）。
+    const onScrollerScroll = (): void => maybeFillMoreRef.current(view);
+    view.scrollDOM.addEventListener('scroll', onScrollerScroll, { passive: true });
     return () => {
+      view.scrollDOM.removeEventListener('scroll', onScrollerScroll);
       view.destroy();
       viewRef.current = null;
     };
@@ -909,6 +1186,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       pendingRevealRef.current = null;
       revealLine(view, pending.line);
     }
+    // S35：切回一个增量 tab 时若视口正落在已加载末尾附近，立即续载。
+    maybeFillMoreRef.current(view);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
@@ -1024,6 +1303,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }
 
   function closeTab(tabId: string): void {
+    // S35：关标签即作废增量源（与 main 侧 dropWindow 同一语义），在飞拉片落地
+    // 时找不到 tab 自然丢弃。
+    incrementalSourcesRef.current.delete(tabId);
+    fillPromisesRef.current.delete(tabId);
+    slicePromisesRef.current.delete(tabId);
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === tabId);
       const next = previous.filter((tab) => tab.tabId !== tabId);
@@ -1076,13 +1360,25 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     setSubmitting(true);
     setStatus('正在应用…');
     try {
-      const result = await props.onDslSubmit(activeTab, activeTab.draft);
+      // S35：提交前必须拉齐 —— 否则 draft 只有已加载部分，会把文件截短。
+      await ensureTabCompleteRef.current(activeTab.tabId);
+      const incremental = incrementalSourcesRef.current.get(activeTab.tabId);
+      if (incremental && !incremental.eof) {
+        setStatus('增量源码未拉齐（令牌已失效或 Bridge 不可用），已取消提交；重新打开该文件后再试。');
+        return;
+      }
+      // 拉齐后从该 tab 的 EditorState 取权威文本（视图可能已切走）。
+      const current = tabsRef.current.find((tab) => tab.tabId === activeTab.tabId);
+      const sourceText = current ? current.editorState.doc.toString() : activeTab.draft;
+      const result = await props.onDslSubmit(activeTab, sourceText);
       if (result.ok) {
-        const nextText = result.nextDslTemplate ?? activeTab.draft;
+        const nextText = result.nextDslTemplate ?? sourceText;
         const nextState = createCompleteSourceState(
           nextText,
           createExtensionsFor(activeTab.tabId, isSourceReadOnly(activeTab), activeTab.sourceStyle)
         );
+        // 提交后重读回灌完整模板：旧 token 已作废，tab 转为完整缓冲。
+        incrementalSourcesRef.current.delete(activeTab.tabId);
         setTabs((previous) =>
           previous.map((tab) =>
             tab.tabId === activeTab.tabId
@@ -1093,6 +1389,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                   dslTemplate: nextText,
                   dslTemplateTruncated: false,
                   dslTemplateTotalLines: nextText.split('\n').length,
+                  sourceToken: null,
+                  sourcePrefix: null,
+                  sourceTotalLines: 0,
+                  sourceLoadedLines: nextText.split('\n').length,
+                  sourceComplete: true,
                   editorState: nextState
                 }
               : tab
@@ -1112,13 +1413,14 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }
   submitSourceRef.current = submitSource;
 
-  const readOnly = activeTab
-    ? (!activeTab.live || activeTab.dslTemplate === null)
-    : true;
+  const readOnly = activeTab ? isSourceReadOnly(activeTab) : true;
 
+  const incrementalInfo = (activeTab && activeTab.sourceComplete === false && activeTab.sourceLoadedLines > 0)
+    ? ` · 已加载 ${activeTab.sourceLoadedLines.toLocaleString()} / ${activeTab.sourceTotalLines.toLocaleString()} 行，滚近底部续载`
+    : '';
   const visibleStatus = props.opening
-    ? '正在读取 EMEVD（Bridge → worker 反汇编 → 切片拼齐 → 一次提交缓冲）…'
-    : status;
+    ? '正在读取 EMEVD（Bridge → worker 反汇编 → 首帧前缀，全文按视口续载）…'
+    : `${status}${incrementalInfo}`;
 
   return (
     <section className="event-source-workbench" aria-label="Event 源码工作台">
@@ -1150,7 +1452,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         ))}
         {tabs.length === 0 && (
           <span className="muted esw-tabs__empty">
-            {props.opening ? '正在打开事件文档；在完整缓冲提交前不显示空编辑器。' : '暂无打开的事件文档。'}
+            {props.opening ? '正在打开事件文档…' : '暂无打开的事件文档。'}
           </span>
         )}
       </div>
@@ -1159,7 +1461,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         label="Event 源码工作台"
         toolbar={(
           <div className="esw-toolbar__group">
-            <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 走 CodeMirror search keymap">
+            <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 先把未加载部分拉齐，再开 CodeMirror 查找面板">
               查找：Ctrl+F
             </span>
             {!readOnly && (
@@ -1204,7 +1506,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                     {props.openingPreview ? (
                       <pre className="esw-source__preview">{props.openingPreview}</pre>
                     ) : (
-                      '正在读取并反汇编完整 EMEVD；就绪后将在一次提交中显示全文。'
+                      '正在读取并反汇编 EMEVD；就绪后先显示前缀，全文按视口续载。'
                     )}
                   </div>
                 )}
