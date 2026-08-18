@@ -376,6 +376,25 @@ describe('selectEditor', () => {
     );
   });
 
+  it('S39：action/script/*.hks 仍走脚本 IDE（侧栏归「动作」不改变打开路由）', () => {
+    assert.equal(
+      selectEditor(input({
+        resourceMode: 'behavior',
+        selectedFile: file('action/script/c0000_transition.hks', 'action', 'hks', '.hks')
+      })),
+      'script',
+      'action/script/*.hks 点开仍是脚本 IDE'
+    );
+    assert.equal(
+      selectEditor(input({
+        resourceMode: 'behavior',
+        selectedFile: file('action/script/c0000_transition.hks', 'action', 'unknown', '.hks')
+      })),
+      'script',
+      '缺 formatKind 的裸 .hks 也落脚本 IDE'
+    );
+  });
+
   it('无专属编辑器的容器落进通用容器视图', () => {
     assert.equal(
       selectEditor(input({
@@ -438,6 +457,7 @@ describe('selectEditor', () => {
       file('map/m10.msb.dcx', 'map', 'msb'),
       file('event/common.emevd.dcx', 'event', 'emevd'),
       file('script/luabnd.dcx', 'script', 'lua'),
+      file('action/script/c0000_transition.hks', 'action', 'hks', '.hks'),
       file('sfx/f0000.sfxbnd.dcx', 'sfx'),
       file('chr/c1000.tae', 'chr', 'unknown', '.tae'),
       file('chr/c5030/c5030.anibnd.dcx', 'chr', 'bnd', '.anibnd.dcx'),

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   filesForDomain,
+  isBehaviorLibraryPath,
   isParamContainerPath,
+  isScriptLibraryPath,
   libraryDisplayName,
   paramLibraryGroups,
   pickPreferredParamContainer
@@ -59,10 +61,11 @@ describe('domainLibraries', () => {
     assert.equal(libraryDisplayName('action/c5030.tae'), 'c5030');
   });
 
-  it('T3：动作域（behavior）侧栏列 anibnd|tae，esd/behbnd/chrbnd 不进动作', () => {
+  it('T3+S39：动作域侧栏列 anibnd|tae 与 action/ 下的 hks，esd/behbnd/chrbnd 不进动作', () => {
     const files = [
       { relativePath: 'chr/c5030/c5030.anibnd.dcx' },
       { relativePath: 'action/c5030.tae' },
+      { relativePath: 'action/script/c0000_transition.hks' },
       { relativePath: 'chr/c5030/c5030.chrbnd.dcx' },
       { relativePath: 'ai/m10.esd' },
       { relativePath: 'chr/c5030/c5030.behbnd.dcx' },
@@ -71,13 +74,13 @@ describe('domainLibraries', () => {
     ];
     assert.deepEqual(
       filesForDomain('behavior', files).map((file) => file.relativePath),
-      ['chr/c5030/c5030.anibnd.dcx', 'action/c5030.tae'],
-      '动作侧栏只列 anibnd 与 tae'
+      ['chr/c5030/c5030.anibnd.dcx', 'action/c5030.tae', 'action/script/c0000_transition.hks'],
+      '动作侧栏列 anibnd、tae 与 action/ 下的 hks'
     );
     assert.deepEqual(
       filesForDomain('animation', files).map((file) => file.relativePath),
       ['chr/c5030/c5030.anibnd.dcx', 'action/c5030.tae'],
-      '隐藏的 animation 域保留同口径（可路由）'
+      '隐藏的 animation 域保留同口径（仅 anibnd|tae，不含 hks）'
     );
     // anibnd/chrbnd 都是复合后缀（\.chrbnd/\.anibnd 不匹配字面 \.bnd），
     // 不进通用容器域侧栏；字面 .bnd 仍进容器域。
@@ -86,6 +89,45 @@ describe('domainLibraries', () => {
       ['other/generic.bnd.dcx'],
       'anibnd 不进容器域（T3 走动作）；chrbnd 也不进（保持现状）'
     );
+  });
+
+  it('S39：脚本域只列 script/ 下的 luabnd/lua；hks 与 talkesdbnd 不进脚本', () => {
+    const files = [
+      { relativePath: 'script/aicommon.luabnd.dcx' },
+      { relativePath: 'script/m10_00_00_00.luabnd' },
+      { relativePath: 'script/m10_00_00_00.lua' },
+      { relativePath: 'action/script/c0000_transition.hks' },
+      { relativePath: 'action/c0000.hks' },
+      { relativePath: 'script/talk/m10_00_00_00.talkesdbnd.dcx' },
+      { relativePath: 'other/notes.lua' },
+      { relativePath: 'event/common.emevd' }
+    ];
+    assert.deepEqual(
+      filesForDomain('script', files).map((file) => file.relativePath),
+      ['script/aicommon.luabnd.dcx', 'script/m10_00_00_00.luabnd', 'script/m10_00_00_00.lua'],
+      '脚本侧栏只列 script/ 目录下的 luabnd 容器与明文 lua'
+    );
+    assert.deepEqual(
+      filesForDomain('behavior', files).map((file) => file.relativePath),
+      ['action/script/c0000_transition.hks', 'action/c0000.hks'],
+      'action/ 路径下的 hks 都进动作域，不重复进脚本域'
+    );
+    assert.deepEqual(
+      filesForDomain('container', files).map((file) => file.relativePath),
+      [],
+      'talkesdbnd / lua / hks 都不进通用容器域'
+    );
+  });
+
+  it('S39 完成标准：action/script/*.hks 进动作不进脚本，talkesdbnd 不进脚本', () => {
+    assert.equal(isScriptLibraryPath('action/script/c0000_transition.hks'), false);
+    assert.equal(isBehaviorLibraryPath('action/script/c0000_transition.hks'), true);
+    assert.equal(isScriptLibraryPath('script/talk/m10_00_00_00.talkesdbnd.dcx'), false);
+    assert.equal(isScriptLibraryPath('script/aicommon.luabnd.dcx'), true);
+    assert.equal(isScriptLibraryPath('script/m10_00_00_00.lua'), true);
+    assert.equal(isScriptLibraryPath('other/notes.lua'), false);
+    assert.equal(isBehaviorLibraryPath('action/c0000.hks'), true);
+    assert.equal(isBehaviorLibraryPath('chr/c5030/c5030.anibnd.dcx'), true);
   });
 
   it('参数域分组：PARAM 与 GPARAM 两个常驻组，GPARAM 默认折叠且带 bank 数', () => {

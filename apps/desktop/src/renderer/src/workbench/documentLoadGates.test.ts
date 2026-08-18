@@ -9,6 +9,7 @@ import {
   shouldLoadFxr,
   shouldLoadMsb,
   shouldLoadParam,
+  shouldLoadScript,
   shouldLoadTae,
   shouldLoadTpf
 } from './documentLoadGates.js';
@@ -49,6 +50,11 @@ describe('documentLoadGates', () => {
     assert.equal(shouldLoadFxr(fx), true);
     assert.equal(planResourceOpen(fx).editorId, 'vfx');
     assert.equal(shouldLoadTae(file('chr/c0000.anibnd.dcx', 'chr', 'bnd', '.anibnd.dcx')), true);
+    // S39：action/script/*.hks 走脚本读链（openKind 'script'，与 selectEditor 同口径；
+    // 侧栏归属「动作」由 domainLibraries 按路径段分类，不影响打开路由）。
+    const hks = file('action/script/c0000_transition.hks', 'action', 'hks', '.hks');
+    assert.equal(classifyWorkspaceOpen('action/script/c0000_transition.hks').openKind, 'script');
+    assert.equal(shouldLoadScript(hks), true);
   });
 
   it('gfx / behbnd / bak 不是语义打开', () => {
