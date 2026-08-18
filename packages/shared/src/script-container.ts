@@ -176,6 +176,11 @@ export interface ScriptSourceView {
   containerUri?: string;
   /** 容器内条目名。 */
   entryName?: string;
+  /**
+   * 容器内条目的 BND4 entryIndex（13-A：读链以 index 为主键，不打码后的名字；
+   * 保存后重读时回传这个索引，保持选中条目稳定）。
+   */
+  entryIndex?: number;
   /** 容器内条目替换所需的子项 hash（save 时回传做乐观并发校验）。 */
   childHash?: string;
   /** 容器根 hash（save 时回传做乐观并发校验）。 */
