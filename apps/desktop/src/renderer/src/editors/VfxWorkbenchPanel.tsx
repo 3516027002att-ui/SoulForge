@@ -1070,21 +1070,6 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
           )
         }
       ]}
-      toolbar={
-        <>
-          <span className="crumb">
-            VFX · {document
-              ? `${document.totalNodeCount} nodes · ${document.hostCount} particles`
-              : (selectedUri ? fileLabel : `${props.files.length} files`)}
-          </span>
-          {document && (
-            <span className="muted" style={{ fontSize: 11 }}>
-              {fileLabel} · {document.authority}
-              {document.roundTrip?.consistent ? ' · round-trip ✓' : ''}
-            </span>
-          )}
-        </>
-      }
     />
   );
 }

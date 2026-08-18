@@ -210,12 +210,6 @@ export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
     <WorkbenchLayout
       label="MSB 地图数据工作台"
       columns={columns}
-      toolbar={
-        <>
-          <span className="crumb"><b>地图数据</b>{` · ${props.sourcePath}`}</span>
-          <span className="toolbar-spacer" style={{ flex: 1 }}></span>
-        </>
-      }
     />
   );
 }

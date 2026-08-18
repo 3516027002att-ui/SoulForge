@@ -63,6 +63,9 @@ const fixtureFiles = [
   makeFile({ dir: 'event', name: 'common.emevd', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.emevd', compoundExtension: '.emevd' }),
   makeFile({ dir: 'event', name: 'menu.emevd', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.emevd', compoundExtension: '.emevd' }),
   makeFile({ dir: 'msg', name: 'test.msgbnd.dcx', kind: 'msg', formatKind: 'fmg', formatLabel: 'FMG', extension: '.dcx', compoundExtension: '.msgbnd.dcx' }),
+  // 11-B：文本目录按容器分组 —— item / menu 两个容器都要在。menu.msgbnd.dcx 是
+  // menu 容器的载体（左栏 menu 组下面的 menu.fmg 真空表）。
+  makeFile({ dir: 'msg', name: 'menu.msgbnd.dcx', kind: 'msg', formatKind: 'fmg', formatLabel: 'FMG', extension: '.dcx', compoundExtension: '.msgbnd.dcx' }),
   makeFile({ dir: 'action', name: 'c0000.tae', kind: 'action', formatKind: 'unknown', formatLabel: 'TAE', extension: '.tae', compoundExtension: '.tae' }),
   makeFile({ dir: 'ai', name: 'm10.aibnd.dcx', kind: 'ai', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.aibnd.dcx' }),
   makeFile({ dir: 'sfx', name: 'f0000.sfxbnd.dcx', kind: 'sfx', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.sfxbnd.dcx' }),
@@ -2525,30 +2528,44 @@ function registerFixtureIpc() {
     };
   });
 
-  // TEXT-20B：§9.1 文本工作台走目录链。fixture 只登记一个 msgbnd 容器（zhocn
-  // 语言），含两张表：item.fmg 挂 fixture.fmg.entries（写入后重读即见新文本），
-  // menu.fmg 是真空表（0 条，用于「真空表 ≠ 失败」断言）。与生产 main 的
+  // TEXT-20B：§9.1 文本工作台走目录链。fixture 登记 **两个** msgbnd 容器（zhocn
+  // 语言）：item 容器挂 item.fmg（fixture.fmg.entries，写入后重读即见新文本），
+  // menu 容器挂 menu.fmg（真空表，用于「真空表 ≠ 失败」断言）。11-B 之后左栏
+  // 按容器分组，两个容器必须都在，否则 menu 组消失。与生产 main 的
   // readTextCatalog / readFmgTablePage 同语义：typed tableId 定位，条目由 main
   // 端按完整表过滤后分页。
   handleTrusted('resource.readTextCatalog', () => ({
     ok: true,
     libraryId: 'game-text',
-    title: 'Text · 1 languages · 1 container',
+    title: 'Text · 1 languages · 2 containers',
     languages: [{
       languageId: 'zhocn',
-      containers: [{
-        containerId: 'text:zhocn:test-msgbnd',
-        containerKind: 'test-msgbnd',
-        sourceUri: 'fixture://msg/test.msgbnd.dcx',
-        relativePath: 'msg/test.msgbnd.dcx',
-        parseStatus: 'confirmed',
-        tableCount: 2,
-        tables: [
-          { tableId: 'text:zhocn:test-msgbnd:0-item.fmg', entryName: 'item.fmg', entryCount: fixture.fmg.entries.length, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 0 },
-          { tableId: 'text:zhocn:test-msgbnd:1-menu.fmg', entryName: 'menu.fmg', entryCount: 0, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 1 }
-        ],
-        diagnostics: []
-      }]
+      containers: [
+        {
+          containerId: 'text:zhocn:item',
+          containerKind: 'item',
+          sourceUri: 'fixture://msg/test.msgbnd.dcx',
+          relativePath: 'msg/test.msgbnd.dcx',
+          parseStatus: 'confirmed',
+          tableCount: 1,
+          tables: [
+            { tableId: 'text:zhocn:item:0-item.fmg', entryName: 'item.fmg', entryCount: fixture.fmg.entries.length, sourceUri: 'fixture://msg/test.msgbnd.dcx', entryIndex: 0 }
+          ],
+          diagnostics: []
+        },
+        {
+          containerId: 'text:zhocn:menu',
+          containerKind: 'menu',
+          sourceUri: 'fixture://msg/menu.msgbnd.dcx',
+          relativePath: 'msg/menu.msgbnd.dcx',
+          parseStatus: 'confirmed',
+          tableCount: 1,
+          tables: [
+            { tableId: 'text:zhocn:menu:0-menu.fmg', entryName: 'menu.fmg', entryCount: 0, sourceUri: 'fixture://msg/menu.msgbnd.dcx', entryIndex: 0 }
+          ],
+          diagnostics: []
+        }
+      ]
     }],
     diagnostics: []
   }));

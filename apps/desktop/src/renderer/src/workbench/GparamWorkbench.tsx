@@ -480,16 +480,6 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
     <WorkbenchLayout
       label="GPARAM 工作台"
       columns={columns}
-      toolbar={
-        <>
-          <span className="crumb">Graphics Parameters · {props.banks.length} banks</span>
-          {document && (
-            <span className="muted" style={{ fontSize: 11 }}>
-              {document.groupCount} groups · {document.roundTrip?.byteIdentical ? 'round-trip ✓' : ''}
-            </span>
-          )}
-        </>
-      }
     />
   );
 }

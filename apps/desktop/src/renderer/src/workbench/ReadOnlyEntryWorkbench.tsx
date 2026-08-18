@@ -207,18 +207,6 @@ export function ReadOnlyEntryWorkbench(props: ReadOnlyEntryWorkbenchProps): Reac
     <WorkbenchLayout
       label={props.label}
       columns={columns}
-      toolbar={
-        <>
-          <span className="crumb"><b>{props.kindLabel}</b></span>
-          {props.summary && (
-            <span className="muted" style={{ fontSize: 11 }}>{props.summary}</span>
-          )}
-          <span className="toolbar-spacer" style={{ flex: 1 }}></span>
-          {props.deferredPreviewRelease && (
-            <span className="pill pill--warn">{props.deferredPreviewRelease} 只读</span>
-          )}
-        </>
-      }
       {...(footerParts.length > 0
         ? {
             footer: (

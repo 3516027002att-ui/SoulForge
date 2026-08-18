@@ -716,6 +716,12 @@ export function App(): ReactElement {
       : null;
   const showTextWorkbench = activeEditor === 'text'
     || (activeDomain === 'text' && activeEditor === 'empty' && workspace !== null);
+  // 11-B：打开文本域（未选具体文件）也进 live 目录链 —— readTextCatalog 扫全部
+  // zhocn msgbnd，不依赖选中文件；否则「文本→item」的第一步就做不出来。
+  const fmgPanelLive = fmgLive
+    || (activeDomain === 'text' && activeEditor === 'empty'
+      && typeof bridge?.readTextCatalog === 'function'
+      && typeof bridge?.readFmgTablePage === 'function');
   const showEventWorkbench = activeEditor === 'event'
     || (activeDomain === 'event' && activeEditor === 'empty' && workspace !== null);
   // T2：开始页（project 域）接管空工作区，欢迎层不再覆盖它 —— 欢迎层只在
@@ -2248,13 +2254,14 @@ export function App(): ReactElement {
       }
     }
     if (domain === 'text') {
-      const first = filesForDomain('text', indexed)[0];
-      if (first) {
-        setCenterView('resource');
-        void selectFile(first);
-        setStatus('文本：逻辑库工作台');
-        return;
-      }
+      // 11-B：打开文本域不再 selectFile(first) 把工作台钉死在 item。FMG 工作台
+      // 自己拉完整目录（readTextCatalog 扫全部 zhocn msgbnd），默认选中 item 组
+      // 第一张表；侧栏仍列出 item.msgbnd / menu.msgbnd，点哪个就定位到那一组。
+      setSelectedFile(null);
+      setPreview(null);
+      setCenterView('resource');
+      setStatus('文本：逻辑库工作台');
+      return;
     }
     if (domain === 'event') {
       const first = filesForDomain('event', indexed)[0];
@@ -3533,7 +3540,7 @@ export function App(): ReactElement {
                 key={selectedFile?.sourceUri ?? ''}
                 resourceUri={selectedFile?.sourceUri ?? ''}
                 entries={fmgEntries}
-                live={fmgLive}
+                live={fmgPanelLive}
                 revealRequest={fmgRevealRequest}
                 onRevealHandled={() => setFmgRevealRequest(null)}
                 onMutation={async (mutation) => {

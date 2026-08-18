@@ -64,8 +64,9 @@ describe('FmgWorkbenchPanel 初始结构（挂载即有的 §9.1 S13 骨架：Ca
     assert.match(html, /aria-label="文本语言"/);
   });
 
-  it('工具条面包屑是「文本」', () => {
-    assert.match(render(), /<b>文本<\/b>/);
+  it('11-C：工具条面包屑已删除（不再有「文本」crumb）', () => {
+    assert.doesNotMatch(render(), /<b>文本<\/b>/);
+    assert.doesNotMatch(render(), /Text · \d+ languages/);
   });
 
   it('未选表时不伪装错误：显式「先选择语言与文本表」muted 空态', () => {
@@ -137,6 +138,19 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     assert.doesNotMatch(panelSource, /\[本机路径已隐藏\]/);
     assert.match(panelSource, /table\.entryName/);
     assert.doesNotMatch(panelSource, /logicalFmgTableName\(/);
+  });
+
+  it('11-B：左栏按容器分组（item/menu 组头可见可点），不再把表全部平铺', () => {
+    // 组头是独立可点的元素，不是把容器塞进平铺行；点组头选该容器第一张表。
+    assert.match(panelSource, /fmg-group__header/);
+    assert.match(panelSource, /onSelectGroup/);
+    assert.match(panelSource, /组头选该容器第一张表/);
+    assert.match(panelSource, /container\.tables\[0\]/);
+    // 读取失败的容器整组保留，不伪装成 0 张表。
+    assert.match(panelSource, /读取失败/);
+    assert.match(panelSource, /parseStatus !== 'confirmed'/);
+    // 打开文本域不钉死第一份文件：默认选中 item 组第一张表。
+    assert.match(panelSource, /containerKind\.toLowerCase\(\) === 'item'/);
   });
 
   it('语言缺失：typed ID 来自 Bridge metadata，renderer 不解析 msg/ 路径', () => {

@@ -2026,6 +2026,26 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .fmg-categories__tree { flex: 1 1 0; min-height: 0; overflow-y: auto; }
 .fmg-categories__toolbar { flex: none; border-top: 1px solid var(--line); background: var(--forge-1); }
 
+/* 11-B：文本目录按容器分组 —— item / menu 各一组，组头可见、可点。 */
+.fmg-group { display: flex; flex-direction: column; }
+.fmg-group__header {
+  display: flex; align-items: baseline; gap: 8px;
+  width: 100%; padding: 5px 10px 4px; margin: 2px 0;
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  color: var(--ink-2); text-transform: uppercase; text-align: left;
+  border-left: 2px solid var(--line);
+}
+.fmg-group__header:hover { background: var(--forge-hover); }
+.fmg-group__header:focus-visible { outline: 2px solid var(--ember); outline-offset: -2px; }
+.fmg-group__header--selected {
+  background: var(--ember-soft); border-left-color: var(--ember); color: var(--ink-0);
+}
+.fmg-group__meta {
+  margin-left: auto; font-size: 10px; font-weight: 400;
+  color: var(--ink-3); text-transform: none;
+}
+
 .fmg-right { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow-y: auto; }
 .fmg-right__pane { display: flex; flex-direction: column; min-height: 0; }
 .fmg-right__pane--entries { flex: 55 1 0; min-height: 240px; }

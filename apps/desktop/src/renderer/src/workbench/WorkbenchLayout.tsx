@@ -264,34 +264,9 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
     }
   }
 
-  /** P1 裁定：恢复初始栏宽（initialWidth 回到声明值，其余回到比例/自适应模式）。 */
-  function resetWidths(): void {
-    const initial: ColumnWidths = {};
-    for (const column of props.columns) {
-      if (typeof column.initialWidth === 'number') initial[column.id] = column.initialWidth;
-    }
-    setWidths(initial);
-  }
-
-  const hasCustomWidths = Object.keys(widths).length > 0;
-
   return (
     <div className="workbench" aria-label={props.label}>
       {props.toolbar && <div className="workbench__toolbar">{props.toolbar}</div>}
-      {/* P1 裁定：栏宽被拖过（进入像素模式）时提供恢复入口；被旧版本拖出窗口的
-          栏也能由此拉回默认比例。只在确实需要时出现，不常驻占空间。 */}
-      {hasCustomWidths && (
-        <div className="workbench__layout-actions">
-          <button
-            type="button"
-            className="secondary-action"
-            onClick={resetWidths}
-            title="把全部栏宽恢复为初始比例/初值"
-          >
-            恢复默认栏宽
-          </button>
-        </div>
-      )}
       <div className="workbench__columns" ref={columnsRef}>
         {props.columns.map((column, index) => {
           const width = widths[column.id];

@@ -65,9 +65,9 @@ describe('TpfWorkbenchPanel 初始结构（挂载即有的骨架）', () => {
     assert.match(html, /title="menu\/start\.tpf\.dcx"/);
   });
 
-  it('标题是 §2.5 正确形态：Texture · N containers', () => {
+  it('11-C：可见文本不含「Texture · N containers」crumb', () => {
     const html = render();
-    assert.match(html, /Texture · 2 containers/);
+    assert.doesNotMatch(html, /Texture · \d+ containers/);
   });
 
   it('未选容器时各栏给出引导空态', () => {
