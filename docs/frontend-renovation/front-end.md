@@ -1254,6 +1254,8 @@ T3（2026-08-15）把 Talk、HKX Behavior、TimeAct、Animation 合并为单一�
 动作:  Animations（动画 id 列表，hkx 茎去扩展，如 a000_003013）| 词条 | 预览（只读），详情沉三栏底 footer
 ```
 
+> **S39 落地（2026-08-18，脚本/动作的 Lua 拆开）**：`isScriptLibraryPath` 从「只看后缀」改为「路径含 `script/` 且 `.luabnd`/`.lua`」——`action/script/*.hks` 不再误入「脚本」侧栏，`script/talk/*.talkesdbnd.dcx` 继续走 ESD 不进脚本；`isBehaviorLibraryPath` 加入 `action/` 下的 `.hks`（和 `anibnd|tae` 一起进「动作」侧栏）。点开仍走同一套脚本 IDE（`selectEditor` 的 `hks → script` 判据不变）。
+
 S17（2026-08-15）拍死五件事（对照 DSAS）：
 
 1. **三栏真拖**：`WorkbenchLayout` 量栏内容宽（不含 4px 分隔条），拖拽/键盘监听用 propsRef + 空依赖 useCallback 稳定挂载——面板每次 render 新建 `columns` 数组不再拆装监听；拖完仍可再拖，松手不弹回。
@@ -2603,6 +2605,8 @@ SHELL-09 → SHELL-10
 > - **D**：sanitizer 源码字段豁免——`dslTemplate` / `sourcePrefix` / `sliceText` 等是内容不是元数据，不做整串路径替换（S13 口径）；路径防线只留键名与诊断 message。
 > - **E**：CodeMirror 原子全文缓冲（S19 / `docs/algorithm1.md`）——App 用 `sourceToken` + `readEmevdSourceSlice` 拼齐全文后一次 `EditorState.create`（3.1 首包只有前 400 行，面板禁止分片 `dispatch`）。切域 hidden 常驻挂载，保留 tab / dirty / EditorState / 滚动。`indexEventLines` 流式扫行。
 > - **F**：领域切换只开 `filesForDomain` 第一份（common_func 不预加载）；main 按 sourceHash 缓存反汇编文本，切回零解析（缓存失效 = 写入 / hash 变）。
+>
+> **S35（3.2）落地（2026-08-18，打开只灌首屏前缀，滚近底部/查找/提交再拉齐）**：`loadEmevd` 打开不再 `assembleEmevdSource` 拼 7 万行。首帧只给 `sourcePrefix` + opaque `sourceToken`，工作台按视口续载；Ctrl+F / 提交 / 脏标记才一次拉齐。不改 `pageSize`，面板禁止分片 `dispatch`。
 
 - **Allowed**：`[MODIFY] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.tsx`；`[CREATE] apps/desktop/src/renderer/src/editors/EventSourceWorkbenchPanel.test.tsx`；`[MODIFY] apps/desktop/src/renderer/src/App.tsx`；`[MODIFY] apps/desktop/src/renderer/src/styles.css`；`[MODIFY] apps/desktop/e2e/playwright/tests/renderer.spec.mjs`；`[MODIFY] apps/desktop/package.json`；`[MODIFY] package-lock.json`。
 - **Dependencies**：在 `apps/desktop/package.json` 加入 exact 版本 `@codemirror/state@6.7.1`、`@codemirror/view@6.43.8`、`@codemirror/language@6.12.4`、`@codemirror/search@6.7.1`、`@codemirror/commands@6.10.4`、`@codemirror/autocomplete@6.20.3`、`@lezer/highlight@1.2.3`，并更新根 lockfile。
@@ -2660,6 +2664,7 @@ SHELL-09 → SHELL-10
 - **Allowed**：`[MODIFY] bridge/SoulForge.Bridge/MsbNativeWriter.cs`；`[MODIFY] packages/core/src/editing/msbBridgeCommit.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`。
 - **Flow/Tests**：`map-entity-upsert/delete` → outer stage/Patch/reopen/sibling verify/rollback；`npm run bridge:verify:msb-writer` 加 reopen-failure before-image 恢复。
 - **S19 已落地**：`write-msb` 与 write-emevd 同一套 —— 外层 `.msb.dcx` 源先 `DcxNativeDocument.Read`（带 Oodle），payload 再读/写，暂存产物仍包回 DCX outer（`sourceFormat: 'dcx'`，`outerFileHash`/`payloadHash` 分列）；TS 侧不实现第二套 DCX 解压。冒烟直读 `.msb.dcx` 并断言暂存产物是 `DCX\0` 外层。
+- **S36 开闸（2026-08-18）**：`DEFERRED_PREVIEW_EDITOR_KINDS` 拿掉 `msb`；`EDITOR_CAPABILITY_CONTRACTS.msb.releaseWriteEnabled=true`；面板 `writeEnabled` 跟 live hash；`applyMsbMutation` → Patch Engine。不再写「MSB 编辑已延期至 V0.6」。
 
 #### MODEL-51A — FLVER read
 
@@ -2676,6 +2681,8 @@ SHELL-09 → SHELL-10
 
 - **Allowed**：`[CREATE] bridge/SoulForge.Bridge/FlverNativeWriter.cs`；`[CREATE] packages/core/src/editing/flverBridgeCommit.ts`；`[CREATE] packages/core/src/testing/runNativeFlverWriterSmoke.ts`；`[MODIFY] apps/desktop/src/main/ipc.ts`；`[MODIFY] packages/core/package.json`；`[MODIFY] package.json`。
 - **Flow/Tests**：`flver-material-slot-set` → Patch/reopen/sibling verify/rollback；新增 root `bridge:verify:flver-writer` 并运行 `npm run bridge:verify:flver-writer`，该命令调用 writer smoke 编译产物。
+- **S38 开闸（2026-08-18）**：`DEFERRED_PREVIEW_EDITOR_KINDS` 拿掉 `flver`；`releaseWriteEnabled=true`；只开放已接线的 `flver_material_slot_set`。footer 不再写「延期至 V0.6」。骨骼权重不开放。
+- **S37 本机写回（2026-08-18）**：`c1130.anibnd` 抽出 `c1130.tae`，对不共享时间槽的事件做 `update-event-times`，重读时间命中，覆盖层字节未改（回滚=丢弃暂存）。共享槽仍 fail-closed。参数体不假装能编。治理契约仍标 TAE 为 V0.6 只读，IPC 实写未走延期拒绝。
 
 #### TEXTURE-52A — TPF/DDS read
 
@@ -2727,6 +2734,7 @@ SHELL-09 → SHELL-10
   - Section4 的 count 是整张扁平表（槽 = section4Offset + i*0x30），子节点就住在紧随其后的槽里。旧实现把每个槽都当根递归，孩子先被父节点走一遍、再被 i 循环当第二棵根走一遍 → visited 撞出「假环」把整包判死（真实 commoneffects 的 offset 0x140 正是这个形态）。现在先扫 childOffset 引用定根（根 = 未被引用的槽），递归用「递归栈」判真环（孩子指祖先）、「已访问」跳过共享槽。
   - 新增回归 fixture「根 + 紧随其后的孩子、count≥2」：解析必须得 1 根 / 2 节点，而不是 FXR_DOCUMENT_READ_FAILED（`runNativeFxrSmoke` 合成路径必过）。
   - ffxbnd 效果库：新命令 `list-ffxbnd-entries`（广告门禁三方一致，46 条）列包内 .fxr 子项；`read-fxr-document` 支持 `entryName` 精确取子项。VfxWorkbenchPanel 左栏在文件条目下展开子项列表，默认打开第一条，一条失败只红那一条，其余仍可点开。
+  - **S40 修补（2026-08-18）**：`list-ffxbnd-entries` 曾误进 `DiskWritingCommands`，daemon 强制 `options.outputPath`，IPC 列目录不传路径 → 左栏 `BRIDGE_OUTPUT_PATH_REQUIRED`。已从写盘注册表移除，广告表保留。
 
 #### VFX-54B — Smithbox-style VFX workbench
 
