@@ -257,7 +257,8 @@ internal static class BridgeDaemonHost
         "write-esd-document",
         "write-tae-document",
         "write-fxr-document",
-        "list-ffxbnd-entries",
+        // list-ffxbnd-entries 是纯只读列目录，不得进写盘集合。
+        // 误登记会强制 options.outputPath，IPC 不传时左栏永远 BRIDGE_OUTPUT_PATH_REQUIRED。
         "export-tpf-texture",
         "extract-bnd4-child"
     };
