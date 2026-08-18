@@ -50,6 +50,9 @@ function createWindow(): void {
   const rendererFilePath = join(here, '../renderer/index.html');
   const developmentRendererUrl = resolveDevelopmentRendererUrl();
   const rendererDocumentUrl = developmentRendererUrl ?? pathToFileURL(rendererFilePath).href;
+  // exactOptionalPropertyTypes 下不能显式传 undefined 给可选 icon；缺少资源时
+  // 直接不给该键，回退为 Electron 默认行为（与 resolveWindowIconPath 注释同口径）。
+  const windowIconPath = resolveWindowIconPath();
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -57,7 +60,7 @@ function createWindow(): void {
     minHeight: 640,
     show: false,
     title: 'SoulForge',
-    icon: resolveWindowIconPath(),
+    ...(windowIconPath !== undefined ? { icon: windowIconPath } : {}),
     backgroundColor: TITLEBAR_OVERLAY.color,
     autoHideMenuBar: true,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
