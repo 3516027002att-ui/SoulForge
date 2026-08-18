@@ -34,7 +34,7 @@ export function AgentContextChipList(props: AgentContextChipListProps): ReactEle
           key={`${chip.kind}:${index}`}
           title={chip.title ?? chip.label}
         >
-          <span aria-hidden="true">{chip.kind}</span>{chip.label}
+          <span aria-hidden="true">{chip.kind}</span><span className="ctx-chip__label">{chip.label}</span>
         </span>
       ))}
     </div>

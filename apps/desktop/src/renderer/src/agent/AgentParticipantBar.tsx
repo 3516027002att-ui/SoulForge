@@ -99,7 +99,7 @@ export function AgentParticipantBar(props: AgentParticipantBarProps): ReactEleme
 
   return (
     <div className="agent-composer__participant">
-      <span className="agent-participant">@Agent</span>
+      <span className="agent-participant" title="当前 Agent 会话（占位，参与者选择后续接线）">@Agent</span>
       <div className="agent-mode-select">
         <button
           type="button"

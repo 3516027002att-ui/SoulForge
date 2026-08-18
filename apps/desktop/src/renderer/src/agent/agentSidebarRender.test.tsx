@@ -133,7 +133,7 @@ describe('Composer 结构（§12.6 / S32 输入卡）', () => {
 
   it('participant 层 = @Agent + 模式选择 + 权限锁定', () => {
     const html = render();
-    assert.match(html, /class="agent-participant">@Agent</);
+    assert.match(html, /class="agent-participant"[^>]*>@Agent</);
     assert.match(html, /class="agent-mode-select"/);
     assert.match(html, /class="composer-permission"/);
   });
