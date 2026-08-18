@@ -52,7 +52,8 @@ export type EditorMutationKind =
   | 'emevd_set_rest_behavior'
   | 'emevd_update_id'
   | 'msb_set_part_position'
-  | 'msb_set_part_transform';
+  | 'msb_set_part_transform'
+  | 'flver_material_slot_set';
 
 /** 延期编辑器的目标里程碑。 */
 export const DEFERRED_PREVIEW_TARGET_RELEASE = 'V0.6' as const;
@@ -63,8 +64,8 @@ export type DeferredPreviewTargetRelease = typeof DEFERRED_PREVIEW_TARGET_RELEAS
  * `docs/V0_5_IMPLEMENTATION_HANDOFF.md` §18.2.1
  * `SCOPE-EDITORS.deferredPreviewEditors.editorIds` 对应。
  *
- * S36 已开闸：msb（write-msb typed mutation）恢复写入，不再出现在本清单；
- * tae/esd/flver 保持延期只读。
+ * S36/S38 已开闸：msb（write-msb typed mutation）与 flver（write-flver
+ * material-slot-set）恢复写入，不再出现在本清单；tae/esd 保持延期只读。
  *
  * 放在 shared 而非 core：renderer 需要在运行时读取该清单来打标并隐藏
  * 提交入口，而 core 含 Node-only 模块，不能进入浏览器包。core 的能力
@@ -73,8 +74,7 @@ export type DeferredPreviewTargetRelease = typeof DEFERRED_PREVIEW_TARGET_RELEAS
  */
 export const DEFERRED_PREVIEW_EDITOR_KINDS = [
   'tae',
-  'esd',
-  'flver'
+  'esd'
 ] as const satisfies readonly EditorKind[];
 
 export type DeferredPreviewEditorKind = typeof DEFERRED_PREVIEW_EDITOR_KINDS[number];
