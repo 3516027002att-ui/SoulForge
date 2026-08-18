@@ -207,9 +207,10 @@ const api = {
     ipcRenderer.invoke('resource.readScriptEntryPlaintext', sourceUri, entryName),
   readScriptSource: (
     sourceUri: string,
-    entryName?: string
+    entryName?: string,
+    entryIndex?: number
   ): Promise<import('@soulforge/shared').ScriptSourceView> =>
-    ipcRenderer.invoke('resource.readScriptSource', sourceUri, entryName),
+    ipcRenderer.invoke('resource.readScriptSource', sourceUri, entryName, entryIndex),
   saveScriptSource: (
     sourceUri: string,
     entryName: string | undefined,

@@ -862,6 +862,120 @@ interface ScriptInventoryDataLike {
   resourceKindDistribution?: Record<string, number>;
 }
 
+/**
+ * 把 Bridge 枚举行映射成 renderer-safe 脚本条目 DTO。
+ *
+ * Sekiro luabnd 内层名是构建机绝对路径（如
+ * `N:\NTC\data\Target\INTERROOT_win64\script\ai\out\bin\goal_list.lua`），直接
+ * 出站会被 sanitizeRendererValue 的 maskPathFragments 打成 `[本机路径已隐藏]`。
+ * 因此出站名一律经 sanitizeEntryName 液化到 basename（重名加 `#index`，与
+ * PARAM 解包 / enumerateNativeContainerEntries 同口径）；分类与扩展名仍按
+ * 原始名判定（液化名带 `#index` 后缀会污染扩展名解析）。
+ */
+function scriptEntryEvidenceFromBridge(
+  entry: ScriptDcxEntryLike | ScriptInventoryEntryLike,
+  size: number,
+  seen: Set<string>
+): ScriptContainerEntryEvidence {
+  const rawName = entry.name ?? `entry_${entry.index ?? 0}`;
+  const name = sanitizeEntryName(rawName, entry.index ?? 0, seen);
+  const classification = classifyScriptEntry(rawName);
+  return {
+    name,
+    index: entry.index ?? 0,
+    size,
+    extension: rawName.split('.').pop()?.toLowerCase() ?? '',
+    classification,
+    magicLabel: magicLabel(classification)
+  };
+}
+
+/**
+ * 脚本容器内子项按 BND4 `entryIndex` 用 Bridge native 读链取真实字节
+ * （13-A：luabnd 里的 Lua 必须能点开看到反编译文本）。
+ *
+ * 枚举走 `read-dcx-document`（与 listScriptContainerEntriesPage / PARAM
+ * unpackContainerParamChild 同源，只读），取字节走 `snapshot-bnd4-child`
+ * （与 core scriptContainerEvidence 的 magic 采样同命令，返回完整
+ * contentBase64）。刻意**不**走 readContainerChild → readSyntheticBnd：
+ * 合成 SFBN 只认 TS 合成 BND，真 luabnd 无 SFBN 标记必失败（红字英文
+ * `not authoritative`），反编译器一行都吃不到字节。
+ *
+ * 返回的 `name` 是 sanitizeEntryName 液化的 basename（内层名是构建机绝对路径，
+ * 直接入 DTO 会被打码成 `[本机路径已隐藏]`）；`rawName`/`storedContentHash`
+ * 供主进程内部使用。
+ */
+interface ReadScriptContainerChildResult {
+  ok: true;
+  bytes: Uint8Array;
+  rawName: string;
+  /** sanitizeEntryName 液化的 basename（DTO 出站名）。 */
+  name: string;
+  storedContentHash: string;
+  diagnostics: StructuredDiagnostic[];
+}
+async function readScriptContainerChildByIndex(input: {
+  containerPath: string;
+  containerUri: string;
+  entryIndex: number;
+  allowedRoots: string[];
+}): Promise<ReadScriptContainerChildResult | { ok: false; diagnostics: StructuredDiagnostic[] }> {
+  const dcx = await runBridge<ScriptDcxDocumentLike>({
+    command: 'read-dcx-document',
+    filePath: input.containerPath,
+    resourceUri: input.containerUri,
+    allowedRoots: input.allowedRoots,
+    timeoutMs: 60_000
+  });
+  if (dcx.parseStatus === 'failed') {
+    return { ok: false, diagnostics: sanitizeDiagnostics(dcx.diagnostics) };
+  }
+  const entries = dcx.data?.nested?.entries ?? [];
+  const target = entries.find((entry) => (entry.index ?? -1) === input.entryIndex);
+  if (!target || !target.name) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error' as const,
+        code: 'SCRIPT_SOURCE_ENTRY_NOT_FOUND',
+        message: `脚本容器内没有索引 ${input.entryIndex} 的条目。`,
+        sourceUri: input.containerUri
+      }]
+    };
+  }
+  const snapshot = await runBridge<{ contentBase64?: string }>({
+    command: 'snapshot-bnd4-child',
+    filePath: input.containerPath,
+    resourceUri: input.containerUri,
+    allowedRoots: input.allowedRoots,
+    timeoutMs: 120_000,
+    commandOptions: { entryIndex: input.entryIndex }
+  });
+  if (snapshot.parseStatus === 'failed' || !snapshot.data?.contentBase64) {
+    return {
+      ok: false,
+      diagnostics: [
+        ...sanitizeDiagnostics(snapshot.diagnostics),
+        {
+          severity: 'error' as const,
+          code: 'SCRIPT_SOURCE_CHILD_SNAPSHOT_FAILED',
+          message: `读取脚本容器条目 ${target.name}（索引 ${input.entryIndex}）字节失败。`,
+          sourceUri: input.containerUri
+        }
+      ]
+    };
+  }
+  const name = sanitizeEntryName(target.name, input.entryIndex, new Set());
+  return {
+    ok: true,
+    bytes: new Uint8Array(Buffer.from(snapshot.data.contentBase64, 'base64')),
+    rawName: target.name,
+    name,
+    storedContentHash: target.contentHash ?? '',
+    diagnostics: []
+  };
+}
+
 function clearEditorPageCaches(): void {
   fmgPageCache.clear();
   paramPageCache.clear();
@@ -8430,18 +8544,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           }
           const data = inventory.data ?? {};
           const rawEntries = data.entries ?? data.sampleEntries ?? [];
-          const entries: ScriptContainerEntryEvidence[] = rawEntries.map((entry) => {
-            const name = entry.name ?? `entry_${entry.index ?? 0}`;
-            const classification = classifyScriptEntry(name);
-            return {
-              name,
-              index: entry.index ?? 0,
-              size: entry.uncompressedSize ?? 0,
-              extension: name.split('.').pop()?.toLowerCase() ?? '',
-              classification,
-              magicLabel: magicLabel(classification)
-            };
-          });
+          const seen = new Set<string>();
+          const entries: ScriptContainerEntryEvidence[] = rawEntries.map((entry) =>
+            scriptEntryEvidenceFromBridge(entry, entry.uncompressedSize ?? 0, seen)
+          );
           cached = {
             containerFormat: data.format ?? 'BND4',
             entryCount: data.entryCount ?? rawEntries.length,
@@ -8451,18 +8557,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             diagnostics: inventory.diagnostics
           };
         } else {
-          const entries: ScriptContainerEntryEvidence[] = nested.entries.map((entry) => {
-            const name = entry.name ?? `entry_${entry.index ?? 0}`;
-            const classification = classifyScriptEntry(name);
-            return {
-              name,
-              index: entry.index ?? 0,
-              size: entry.uncompressedSize ?? entry.compressedSize ?? 0,
-              extension: name.split('.').pop()?.toLowerCase() ?? '',
-              classification,
-              magicLabel: magicLabel(classification)
-            };
-          });
+          const seen = new Set<string>();
+          const entries: ScriptContainerEntryEvidence[] = nested.entries.map((entry) =>
+            scriptEntryEvidenceFromBridge(
+              entry,
+              entry.uncompressedSize ?? entry.compressedSize ?? 0,
+              seen
+            )
+          );
           cached = {
             containerFormat: dcx.data?.format
               ? `${dcx.data.format}->${nested.format ?? 'BND4'}`
@@ -8596,12 +8698,18 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * 反编译不可用/失败/其他字节码 → kind='failure' 结构化原因，绝不把字节码
    * 呈现为可编辑源码。容器条目同时回传 child/container hash 供保存时做
    * 乐观并发校验。
+   *
+   * 容器子项以 **entryIndex** 为主键（renderer 手里只有打码后的名字，
+   * `#bnd/child/<name>` 对不上任何真实子项），字节走 native 读链
+   * readScriptContainerChildByIndex（snapshot-bnd4-child），**不**走
+   * readContainerChild → readSyntheticBnd——合成 SFBN 只认 TS 合成 BND，
+   * 真 luabnd 必失败（英文 not authoritative），反编译器吃不到字节。
    */
   handle(
     'resource.readScriptSource',
-    async (_event, sourceUri: string, entryName?: string): Promise<ScriptSourceView> => {
+    async (_event, sourceUri: string, entryName?: string, entryIndex?: number): Promise<ScriptSourceView> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
-      const logicalName = entryName ?? (file ? basename(file.relativePath) : 'script');
+      let logicalName = entryName ?? (file ? basename(file.relativePath) : 'script');
       const failure = (code: string, message: string, diagnostics?: StructuredDiagnostic[]): ScriptSourceView => ({
         ok: false,
         logicalName,
@@ -8618,14 +8726,29 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       let bytes: Uint8Array;
       let childHash: string | undefined;
       let containerHash: string | undefined;
-      if (entryName) {
-        const childUri = `${sourceUri}#bnd/child/${encodeURIComponent(entryName)}`;
-        const read = await readContainerChild(file.absolutePath, childUri, { relativePath: file.relativePath });
-        if (!read.ok || !read.bytes) {
-          return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本容器条目失败。', read.diagnostics);
+      let resolvedEntryIndex: number | undefined = entryIndex;
+      if (entryIndex !== undefined) {
+        // 容器子项：按 BND4 entryIndex 用 native 读链取真实字节（13-A）。
+        const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+        if (roots.diagnostics.length > 0) {
+          return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本容器条目失败。', roots.diagnostics);
         }
-        bytes = read.bytes;
-        childHash = read.hash;
+        const child = await readScriptContainerChildByIndex({
+          containerPath: file.absolutePath,
+          containerUri: sourceUri,
+          entryIndex,
+          allowedRoots: roots.allowedRoots
+        });
+        if (!child.ok) {
+          return failure('SCRIPT_SOURCE_READ_FAILED', '读取脚本容器条目失败。', child.diagnostics);
+        }
+        bytes = child.bytes;
+        childHash = child.storedContentHash || undefined;
+        // native 枚举给出的液化 basename 是权威名（renderer 传进来的名字只作回显）。
+        logicalName = child.name;
+        entryName = child.name;
+        // 容器根 hash：真实 BND 的 inspectContainerTree 给不出（只认合成标记），
+        // 取不到就留空，保存乐观并发校验以子项哈希为主。
         const tree = await inspectContainerTree(file.absolutePath, { relativePath: file.relativePath });
         containerHash = tree.ok && tree.tree?.rootHash ? tree.tree.rootHash : undefined;
       } else {
@@ -8646,10 +8769,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
       }
       const verdict = classifyPlaintextBytes(bytes);
-      const containerFields = entryName
+      const containerFields = resolvedEntryIndex !== undefined
         ? {
             containerUri: sourceUri,
             entryName,
+            entryIndex: resolvedEntryIndex,
             ...(childHash !== undefined ? { childHash } : {}),
             ...(containerHash !== undefined ? { containerHash } : {})
           }

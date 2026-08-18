@@ -61,6 +61,15 @@ function sourceKindLabel(source: ScriptSourceView): string {
   return '不可编辑';
 }
 
+/**
+ * 只取 error 级诊断作为页级红字。容器的 diagnostics[0] 经常是
+ * 「DCX 完整 payload 重建…通过」这类 info——它不是失败，不该涂红。
+ */
+function firstPageError(diagnostics: readonly { severity?: string; message: string }[]): string | null {
+  const error = diagnostics.find((d) => d.severity === 'error');
+  return error ? error.message : null;
+}
+
 function buildScriptEditorExtensions(
   onDocChange: (text: string) => void,
   onSave: () => void
@@ -112,7 +121,8 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   const [entriesComplete, setEntriesComplete] = useState(true);
   const [pageLoading, setPageLoading] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+  /** 当前选中的容器条目（index 是读链主键，不打码后的名字）。 */
+  const [selectedEntry, setSelectedEntry] = useState<{ name: string; index: number } | null>(null);
   /** 当前展示的源码视图。 */
   const [source, setSource] = useState<ScriptSourceView | null>(null);
   const [sourceLoading, setSourceLoading] = useState(false);
@@ -141,6 +151,13 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   const probeMode = useCallback(async (): Promise<void> => {
     setMode(null);
     setPageError(null);
+    // 独立 .hks / .lua 单文件：按后缀直接 standalone，不对单文件调分页通道
+    // （避免「仅部分条目」「输入不是容器」的误探测，见问题 13 截图 2）。
+    const rawUri = props.resourceUri.toLowerCase();
+    if (/\.hks$/i.test(rawUri) || /\.lua$/i.test(rawUri)) {
+      setMode('standalone');
+      return;
+    }
     if (bridge === null || typeof bridge.listScriptContainerEntriesPage !== 'function') {
       // 通道不可用时按独立文件读（readScriptSource 不依赖分页通道）。
       setMode('standalone');
@@ -156,9 +173,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         setEntryCount(result.entryCount);
         setPageSummary(result.classificationSummary);
         setEntriesComplete(result.entriesComplete);
-        if (result.diagnostics.length > 0) {
-          setPageError(result.diagnostics[0]?.message ?? null);
-        }
+        setPageError(firstPageError(result.diagnostics));
       } else {
         setMode('standalone');
       }
@@ -180,8 +195,8 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
 
   /* ── 源码读取（容器条目或独立文件）────────────────────────────── */
   // 容器内条目的内层地址（uri 井号片段）由主进程构造，渲染器只传
-  // resourceUri + entryName。
-  const loadSource = useCallback(async (entryName: string | null): Promise<void> => {
+  // resourceUri + 条目名 + entryIndex（index 是 native 读链的主键）。
+  const loadSource = useCallback(async (entry: { name: string; index: number } | null): Promise<void> => {
     if (props.resourceUri === '') {
       setSource(null);
       setSourceError(null);
@@ -196,7 +211,11 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     setSourceError(null);
     setSource(null);
     try {
-      const view = await bridge.readScriptSource(props.resourceUri, entryName ?? undefined);
+      const view = await bridge.readScriptSource(
+        props.resourceUri,
+        entry ? entry.name : undefined,
+        entry ? entry.index : undefined
+      );
       setSource(view);
       if (view.ok && view.sourceText !== undefined) {
         draftRef.current = view.sourceText;
@@ -271,7 +290,12 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         await props.onMutationCommitted?.();
         // 重新读取基线：写回后条目字节变了（容器内是 plaintext Lua），
         // 拿新的 child/container hash 与真实文本做下一次乐观校验。
-        void loadSource(source.entryName ?? null);
+        // 容器条目按 entryIndex 重读（保存回传的 index 是 native 读链主键）。
+        void loadSource(
+          source.entryName !== undefined && source.entryIndex !== undefined
+            ? { name: source.entryName, index: source.entryIndex }
+            : null
+        );
       } else {
         setStatus(result.diagnostics?.[0]?.message ?? '应用失败。');
       }
@@ -303,9 +327,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         setEntryCount(result.entryCount);
         setPageSummary(result.classificationSummary);
         setEntriesComplete(result.entriesComplete);
-        if (result.diagnostics.length > 0) {
-          setPageError(result.diagnostics[0]?.message ?? null);
-        }
+        setPageError(firstPageError(result.diagnostics));
       } else {
         setPageEntries([]);
         setPageError(result.diagnostics?.[0]?.message ?? '脚本容器条目分页读取失败。');
@@ -323,21 +345,25 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
       && !window.confirm('当前脚本有未保存修改，翻页将丢失这些修改。继续翻页？')) {
       return;
     }
-    setSelectedName(null);
+    setSelectedEntry(null);
     setSource(null);
     setStatus('');
     await loadPage(next);
   }
 
-  function selectEntry(name: string): void {
-    if (name === selectedName) return;
+  function selectEntry(entry: { name: string; index: number }): void {
+    if (selectedEntry
+      && entry.name === selectedEntry.name
+      && entry.index === selectedEntry.index) {
+      return;
+    }
     if (dirtyRef.current
       && !window.confirm('当前脚本有未保存修改，切换条目将丢弃这些修改。继续切换？')) {
       return;
     }
-    setSelectedName(name);
+    setSelectedEntry(entry);
     setStatus('');
-    void loadSource(name);
+    void loadSource(entry);
   }
 
   const summaryChips = useMemo(() => {
@@ -396,13 +422,13 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         {pageEntries.map((entry, rowIndex) => (
           <div
             key={`${entry.index}-${entry.name}`}
-            className={entry.name === selectedName
+            className={entry.index === selectedEntry?.index
               ? 'script-entry-row selected'
               : 'script-entry-row'}
             {...selectableRowAttributes({
-              selected: entry.name === selectedName,
-              isTabEntry: isRowTabEntry(rowIndex, selectedName !== null),
-              onSelect: () => selectEntry(entry.name)
+              selected: entry.index === selectedEntry?.index,
+              isTabEntry: isRowTabEntry(rowIndex, selectedEntry !== null),
+              onSelect: () => selectEntry({ name: entry.name, index: entry.index })
             })}
           >
             <span title={entry.name}>{entry.name}</span>
