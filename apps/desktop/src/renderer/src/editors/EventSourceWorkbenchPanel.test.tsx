@@ -22,11 +22,16 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  EventMeaningPane,
   EventSourceWorkbenchPanel,
   baselineText,
   isSourceReadOnly,
   type EventSourceTabData
 } from './EventSourceWorkbenchPanel.js';
+import type {
+  LineInspection,
+  ResourceJumpResult
+} from '../emevd/eventSourceNavigate.js';
 import type { EmevdEditorDocument } from '@soulforge/shared';
 
 // node 环境没有 window；组件 SSR 不读 window（CM 不在服务端挂载），但置空对象
@@ -201,6 +206,12 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.doesNotMatch(panelSource, /lightbulb|Move to file/i);
     assert.match(navigateSource, /classifyArgRole/);
     assert.match(navigateSource, /eventid/i);
+    // S31：fmg/param 实参不再是假死路 —— 有跳转按钮与 param-id 分类，
+    // 旧「事件面板没有 FMG 表，不能跳」死路文案已删除。
+    assert.doesNotMatch(panelSource, /事件面板没有 FMG 表，不能跳/);
+    assert.match(panelSource, /转到文本条目/);
+    assert.match(panelSource, /转到 PARAM 行/);
+    assert.match(navigateSource, /param-id/);
   });
 
   it('S14：没有橙色头、日常黄条、「编译并提交」和只读锁', () => {
@@ -315,5 +326,69 @@ describe('DarkScript 源码只读（按钮层与 CodeMirror 创建共用同一�
       dslTemplate: null,
       sourceStyle: 'none'
     }), true);
+  });
+});
+
+describe('S31 词义列：fmg-id / param-id 实参的跳转 UI（SSR）', () => {
+  const INSTRUCTION: LineInspection = {
+    kind: 'instruction',
+    name: 'CreateItem',
+    bank: 5,
+    id: 0,
+    args: [
+      { name: 'itemNameId', type: 's32', value: '1100', role: 'fmg-item-name-id', resourceId: 1100 },
+      { name: 'messageId', type: 's32', value: '1', role: 'fmg-text-id', resourceId: 1 },
+      { name: 'paramId', type: 's32', value: '3300', role: 'param-id', resourceId: 3300 },
+      { name: 'slotNumber', type: 's32', value: '0', role: 'none' }
+    ],
+    unknown: false
+  };
+
+  function renderPane(
+    inspection: LineInspection,
+    resourceJump: ResourceJumpResult | null = null
+  ): string {
+    return renderToStaticMarkup(
+      <EventMeaningPane
+        inspection={inspection}
+        jump={null}
+        resourceJump={resourceJump}
+        onJumpEvent={() => {}}
+        onJumpResource={() => {}}
+        documentTitle="common"
+      />
+    );
+  }
+
+  it('fmg 系与 param 系实参渲染跳转按钮，不再画「没有 FMG 表」死路', () => {
+    const html = renderPane(INSTRUCTION);
+    assert.match(html, />转到文本条目 1100<\/button>/);
+    assert.match(html, />转到文本条目 1<\/button>/);
+    assert.match(html, />转到 PARAM 行 3300<\/button>/);
+    assert.doesNotMatch(html, /事件面板没有 FMG 表，不能跳/);
+    // 非目标角色不渲染跳转。
+    assert.doesNotMatch(html, /转到文本条目 0/);
+  });
+
+  it('resourceJump 命中时给出目标位置（资源 + 表名）', () => {
+    const html = renderPane(INSTRUCTION, {
+      kind: 'hit',
+      resourceUri: 'fixture://msg/zhocn/item.msgbnd.dcx',
+      title: 'item',
+      detail: 'Item Name',
+      tableId: 'zh:item:Item Name'
+    });
+    assert.match(html, /目标在 item（Item Name）。/);
+  });
+
+  it('resourceJump 不足证据时展示 insufficient_evidence 文案', () => {
+    const html = renderPane(INSTRUCTION, {
+      kind: 'insufficient_evidence',
+      code: 'insufficient_evidence',
+      message: '有 2 个已打开的文本表匹配「物品名」，无法确定目标。'
+    });
+    assert.match(html, /有 2 个已打开的文本表匹配「物品名」，无法确定目标。/);
+    // 不足证据与命中互斥：同一块里不再出现「目标在 …」。
+    assert.doesNotMatch(html, /目标在/);
   });
 });

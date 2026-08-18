@@ -79,6 +79,13 @@ export interface FmgWorkbenchPanelProps {
   entries: FmgEntryRow[];
   /** True when the source is a live Bridge FMG document (catalog-fetchable). */
   live?: boolean;
+  /**
+   * S31：外部 reveal 请求 —— 选中 tableId 对应表并定位到 entryId 条目。
+   * 面板消费后经 onRevealHandled 通知 App 清除（一次性）。
+   */
+  revealRequest?: { tableId: string; entryId: number } | null | undefined;
+  /** S31：reveal 请求已处理（无论命中或不足证据）后回调，App 据此清除请求。 */
+  onRevealHandled?: () => void;
   onMutation?: (mutation: {
     kind: 'fmg_entry_upsert' | 'fmg_entry_delete' | 'fmg_entry_add';
     id: number;
@@ -88,10 +95,39 @@ export interface FmgWorkbenchPanelProps {
   }) => void;
 }
 
+/**
+ * S31：在文本目录里按 typed tableId 找表所在的语言/容器。
+ * 纯函数（无 DOM、无 IPC），供 reveal 与单测共用。
+ */
+export function findTableInCatalog(
+  catalog: TextCatalogResponse,
+  tableId: string
+): { languageId: string; containerId: string; tableId: string } | null {
+  for (const language of catalog.languages) {
+    for (const container of language.containers) {
+      const table = container.tables.find((candidate) => candidate.tableId === tableId);
+      if (table) {
+        return {
+          languageId: language.languageId,
+          containerId: container.containerId,
+          tableId: table.tableId
+        };
+      }
+    }
+  }
+  return null;
+}
+
 /*
  * 分页页大小（硬约束 17）来自 @soulforge/shared，与主进程 `resource.readFmgTablePage`
  * 用同一常量。此前两侧各写一遍 100，改一侧不报错，症状是分页错位或末页重复。
  */
+
+/**
+ * S31：reveal 宽读的扫描窗口。normalizePageWindow 不设上限，取「一次拿全过滤
+ * 结果」的足够大值；过滤条件是精确条目 id，返回量本身很小。
+ */
+const REVEAL_SCAN_PAGE_SIZE = 100_000;
 
 /**
  * FMG 本地化工作台（TEXT-20B；S13 对照 Smithbox Text Editor 三列竖排）：
@@ -153,6 +189,14 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   const [loading, setLoading] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  /** S31：外部 reveal 的不足证据说明（面板内可见，不猜测、不跳错条目）。 */
+  const [revealError, setRevealError] = useState<string | null>(null);
+  /** S31：条目列表容器，reveal 滚动定位用。 */
+  const entriesListRef = useRef<HTMLDivElement | null>(null);
+  /** S31：宽读定位出的目标条目所在页（null = 还没定页）。 */
+  const [revealTargetPage, setRevealTargetPage] = useState<number | null>(null);
+  /** S31：当前 pageEntries 属于哪一页（读回窗口后登记，判 reveal 窗口是否到位）。 */
+  const [loadedPage, setLoadedPage] = useState<number | null>(null);
 
   // ── 目录加载：唯一入口是 Bridge readTextCatalog ──
   useEffect(() => {
@@ -205,6 +249,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     setSelectedTableId(null);
     setSelectedId(null);
     setPage(0);
+    setLoadedPage(null);
     setQuery('');
     setPageEntries([]);
     setPageError(null);
@@ -217,6 +262,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     setSelectedTableId(null);
     setSelectedId(null);
     setPage(0);
+    setLoadedPage(null);
     setQuery('');
     setPageEntries([]);
     setPageError(null);
@@ -228,6 +274,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     setSelectedTableId(tableId);
     setSelectedId(null);
     setPage(0);
+    setLoadedPage(null);
     setQuery('');
     setPageEntries([]);
     setPageError(null);
@@ -253,6 +300,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           setEntryCount(result.entryCount);
           setMaxId(result.maxId);
           setPage(result.page);
+          setLoadedPage(result.page);
           setPageError(null);
         }
         setLoading(false);
@@ -287,8 +335,110 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     setPageCount(demoPageCount);
     setEntryCount(demoFiltered.length);
     setMaxId(props.entries.reduce((max, row) => Math.max(max, row.id), 0));
+    setLoadedPage(clamped);
     if (clamped !== page) setPage(clamped);
   }, [liveMode, demoFiltered, props.entries, page]);
+
+  /**
+   * S31：外部 reveal 第一步 —— 目录就绪后选中目标表，并把筛选设为精确条目 id。
+   *
+   * 接着用一次宽读（整张过滤结果）定位目标条目在过滤列表里的精确索引，换算成
+   * 分页窗口页 —— 只信「第 0 页必含目标」对短 id 不成立（id 5 会命中几十上百条
+   * 含「5」的条目），宁可在这一步多读一次，也不让面板停在错误的窗口。
+   */
+  useEffect(() => {
+    const request = props.revealRequest;
+    if (!request) return;
+    if (!liveMode) {
+      setRevealError('insufficient_evidence：文本目录不可用（browser-preview），无法定位条目。');
+      props.onRevealHandled?.();
+      return;
+    }
+    if (!catalog) {
+      // 目录还在加载；读取失败时给不足证据，避免请求永久悬挂。
+      if (catalogError) {
+        setRevealError('insufficient_evidence：文本目录读取失败，无法定位条目。');
+        props.onRevealHandled?.();
+      }
+      return;
+    }
+    commitDraftRef.current();
+    const found = findTableInCatalog(catalog, request.tableId);
+    if (!found) {
+      setRevealError(`insufficient_evidence：文本目录里没有目标表，条目 ${request.entryId} 无法定位。`);
+      props.onRevealHandled?.();
+      return;
+    }
+    setRevealError(null);
+    setSelectedLanguageId(found.languageId);
+    setSelectedContainerId(found.containerId);
+    setSelectedTableId(found.tableId);
+    setSelectedId(null);
+    setPage(0);
+    setLoadedPage(null);
+    setQuery(String(request.entryId));
+    setRevealTargetPage(null);
+    let cancelled = false;
+    bridge?.readFmgTablePage(request.tableId, 0, REVEAL_SCAN_PAGE_SIZE, String(request.entryId))
+      .then((result: FmgEntryPage) => {
+        if (cancelled) return;
+        if (!result.ok) {
+          // 常规分页会给出同样的诊断面；这里不重复报，只清掉 reveal 挂起态。
+          setRevealError('insufficient_evidence：文本表读取失败，无法定位条目。');
+          props.onRevealHandled?.();
+          return;
+        }
+        const index = result.entries.findIndex((entry) => entry.id === request.entryId);
+        if (index < 0) {
+          setRevealError(`insufficient_evidence：已打开的表里没有条目 ${request.entryId}。`);
+          props.onRevealHandled?.();
+          return;
+        }
+        setRevealTargetPage(Math.floor(index / FMG_PAGE_SIZE));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRevealError('insufficient_evidence：文本表读取异常，无法定位条目。');
+        props.onRevealHandled?.();
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.revealRequest, catalog, catalogError, liveMode, bridge]);
+
+  /**
+   * S31：外部 reveal 第二步 —— 目标窗口（表 + 精确 id 过滤 + 定位页）就绪后
+   * 选中目标条目并滚动。窗口还没到 / 宽读还没定页 / 用户改了筛选时不判；
+   * 窗口里没有目标条目就是表里确实没有，不猜别的行。
+   *
+   * 注意短 id 的过滤结果可能跨多页（id 5 会命中几十上百条含「5」的条目），
+   * 宽读定出目标页后这里先把分页翻过去，等该页窗口（loadedPage）到位再判。
+   */
+  useEffect(() => {
+    const request = props.revealRequest;
+    if (!request) return;
+    if (selectedTableId !== request.tableId) return;
+    if (query !== String(request.entryId)) return;
+    if (revealTargetPage === null) return;
+    if (page !== revealTargetPage) {
+      if (!loading) setPage(revealTargetPage);
+      return;
+    }
+    if (loading || loadedPage !== revealTargetPage) return;
+    const row = pageEntries.find((entry) => entry.id === request.entryId);
+    if (row) {
+      setSelectedId(row.id);
+      setRevealError(null);
+      const element = entriesListRef.current?.querySelector(`[data-fmg-entry-id="${row.id}"]`);
+      element?.scrollIntoView({ block: 'center' });
+      props.onRevealHandled?.();
+      return;
+    }
+    setRevealError(`insufficient_evidence：已打开的表里没有条目 ${request.entryId}。`);
+    props.onRevealHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.revealRequest, selectedTableId, query, page, revealTargetPage, loadedPage, loading, pageEntries]);
 
   const selected = pageEntries.find((row) => row.id === selectedId) ?? null;
   const selectedContainer = useMemo(() => {
@@ -510,12 +660,13 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         {loading && <span className="muted">加载中…</span>}
       </div>
       {pageError && <p className="danger">{pageError}</p>}
+      {revealError && <p className="muted">{revealError}</p>}
       {containerFailed && (
         <p className="danger">
           {selectedContainer?.diagnostics?.[0]?.message ?? '该容器读取失败。'}
         </p>
       )}
-      <div className="binder-child-table" role="table">
+      <div className="binder-child-table" role="table" ref={entriesListRef}>
         <div className="binder-child-row binder-child-header" role="row">
           <span>ID</span>
           <span>文本</span>
@@ -529,6 +680,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
             <div
               key={rowIndex}
               className="binder-child-row"
+              data-fmg-entry-id={row.id}
               {...selectableRowAttributes({
                 selected: row.id === selectedId,
                 isTabEntry: isRowTabEntry(rowIndex, selectedId !== null),

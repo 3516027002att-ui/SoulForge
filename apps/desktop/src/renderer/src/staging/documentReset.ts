@@ -55,7 +55,18 @@ export const DOCUMENT_FAMILIES: readonly DocumentFamily[] = Object.freeze([
  */
 export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly string[]>> =
   Object.freeze({
-    fmg: Object.freeze(['setFmgEntries', 'setFmgSourceHash', 'setFmgLive']),
+    // S31 追加：setTextCatalog 是文本域共享的目录缓存（同一工作区跨文件复用），
+    // 随 fmg 族清空后跳转路径会 lazy 重取——不清的话切到新工作区会用旧目录把
+    // 文本跳转误判成 insufficient_evidence。setFmgRevealRequest 是一次性 reveal
+    // 请求，随 fmg 族清空避免残留到别的文本文件面板上误触发定位（App 在
+    // switchToOpenTab 之后才下发，先清后设不冲突）。
+    fmg: Object.freeze([
+      'setFmgEntries',
+      'setFmgSourceHash',
+      'setFmgLive',
+      'setTextCatalog',
+      'setFmgRevealRequest'
+    ]),
     param: Object.freeze([
       'setParamRows',
       'setParamTypeName',
@@ -74,7 +85,10 @@ export const DOCUMENT_STATE_SETTERS: Readonly<Record<DocumentFamily, readonly st
       // 授信来源同样属于「当前这个 param 文档」的状态，必须随资源切换清掉：
       // 上一个 param 的 origin 若是 imported 而残留下来，新 param 的字段会被
       // 错误地显示为可写 —— 那正是授权门要挡住的形态（按未校验的字段偏移写入）。
-      'setParamFieldDefsOrigin'
+      'setParamFieldDefsOrigin',
+      // S31：一次性 PARAM reveal 请求，随 param 族清空避免残留到别的 param
+      // 表面板误滚动（App 在 switchToOpenTab 之后才下发，先清后设不冲突）。
+      'setParamRevealRowId'
     ]),
     // EVENT-30B：EMEVD 编辑态收敛为单个 pendingTab（工作台内部自持 tabs/dirty/
     // draft/per-tab EditorState）。复位即清空 pendingTab；工作台收到 null 后回到

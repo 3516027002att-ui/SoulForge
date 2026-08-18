@@ -19,6 +19,13 @@ export interface ParamTablePanelProps {
   rows: ParamRowView[];
   /** True when the source is a live Bridge PARAM document (loadAll-fetchable). */
   live?: boolean;
+  /**
+   * S31：外部 reveal 请求 —— 滚动定位到该行 id。面板消费后经 onRevealHandled
+   * 通知 App 清除（一次性，避免用户后续筛选/滚动被反复拽回）。
+   */
+  revealRowId?: number | null | undefined;
+  /** S31：reveal 请求已处理（无论命中或不足证据）后回调，App 据此清除请求。 */
+  onRevealHandled?: () => void;
   onMutation?: (mutation: {
     kind: 'param_row_upsert' | 'param_row_delete';
     id: number;
@@ -105,6 +112,31 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
     overscan: 12
   });
 
+  /**
+   * S31：外部 reveal —— 行存在则清掉筛选并滚到该行；表里确实没有该行则给
+   * insufficient_evidence（面板内可见，不猜测、不跳到别的行）。
+   */
+  const [revealMissed, setRevealMissed] = useState<string | null>(null);
+  useEffect(() => {
+    const target = props.revealRowId;
+    if (target === null || target === undefined) return;
+    if (loading) return; // 全量行还没到齐：等加载完成的那一轮再判。
+    const index = visibleRows.findIndex((row) => row.id === target);
+    if (index >= 0) {
+      setRevealMissed(null);
+      virtualizer.scrollToIndex(index, { align: 'center' });
+    } else if (sourceRows.some((row) => row.id === target)) {
+      // 行存在但被当前筛选挡住：清掉筛选让行可见；不处理请求，下一轮
+      // visibleRows 含目标行后再滚（否则行出现了但永远不滚到）。
+      setQuery('');
+      return;
+    } else {
+      setRevealMissed(`insufficient_evidence：PARAM 表里没有行 ${target}。`);
+    }
+    props.onRevealHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.revealRowId, loading, visibleRows, sourceRows]);
+
   function deleteRow(id: number): void {
     setAllRows((prev) => prev.filter((row) => row.id !== id));
     props.onMutation?.({ kind: 'param_row_delete', id });
@@ -148,6 +180,7 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
         {loading && <span className="muted">加载中…</span>}
       </div>
       {pageError && <p className="danger">{pageError}</p>}
+      {revealMissed && <p className="muted">{revealMissed}</p>}
       <div className="binder-child-table" role="table">
         <div className="binder-child-row binder-child-header" role="row">
           <span>ID</span>

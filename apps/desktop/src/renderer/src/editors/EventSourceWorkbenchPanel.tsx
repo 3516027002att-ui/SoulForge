@@ -28,11 +28,16 @@ import type { EmedfCompletionItem } from '@soulforge/core';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { createCompleteSourceState } from '../emevd/emevdSourceMount.js';
 import {
+  fmgSemanticOf,
   indexEventHeaders,
   inspectSourceLine,
+  insufficientEvidence,
+  isFmgRole,
   resolveEventJump,
   type EventJump,
-  type LineInspection
+  type LineInspection,
+  type ResourceJumpRequest,
+  type ResourceJumpResult
 } from '../emevd/eventSourceNavigate.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { EditorState, type Extension } from '@codemirror/state';
@@ -134,6 +139,11 @@ export interface EventSourceWorkbenchPanelProps {
     tab: EventSourceTabData,
     sourceText: string
   ) => Promise<EventSourceSubmitResult>;
+  /**
+   * S31：文本 / PARAM 实参跳转。App 只切到 openTabs 里已打开的资源并下发
+   * reveal 请求，工作区不新开磁盘文件；对不上时返回 insufficient_evidence。
+   */
+  onJumpResource?: (request: ResourceJumpRequest) => Promise<ResourceJumpResult>;
 }
 
 interface InternalTab extends EventSourceTabData {
@@ -584,13 +594,19 @@ function revealLine(view: EditorView | null, lineNumber: number): void {
   view.focus();
 }
 
-function EventMeaningPane(props: {
+/**
+ * 词义列。S31：fmg-id / param-id 实参不再是死路 —— 有跳转按钮，实际命中与否
+ * 由 App 按 openTabs 判定，结果以 hit / insufficient_evidence 回到本列。
+ */
+export function EventMeaningPane(props: {
   inspection: LineInspection;
   jump: EventJump | null;
+  resourceJump: ResourceJumpResult | null;
   onJumpEvent: (eventId: number) => void;
+  onJumpResource: (request: ResourceJumpRequest) => void;
   documentTitle: string;
 }): ReactElement {
-  const { inspection, jump, onJumpEvent, documentTitle } = props;
+  const { inspection, jump, resourceJump, onJumpEvent, onJumpResource, documentTitle } = props;
   if (inspection.kind === 'empty') {
     return <p className="muted esw-meaning__empty">把光标放在一条指令或 $Event 头上。</p>;
   }
@@ -662,8 +678,23 @@ function EventMeaningPane(props: {
                   转到 $Event({arg.eventId})
                 </button>
               )}
-              {arg.role === 'fmg-id' && (
-                <p className="muted">insufficient_evidence：事件面板没有 FMG 表，不能跳文本条目。</p>
+              {isFmgRole(arg.role) && arg.resourceId !== undefined && (
+                <button
+                  type="button"
+                  className="toolbar-button"
+                  onClick={() => onJumpResource({ kind: 'fmg', semantic: fmgSemanticOf(arg.role), id: arg.resourceId! })}
+                >
+                  转到文本条目 {arg.resourceId}
+                </button>
+              )}
+              {arg.role === 'param-id' && arg.resourceId !== undefined && (
+                <button
+                  type="button"
+                  className="toolbar-button"
+                  onClick={() => onJumpResource({ kind: 'param', id: arg.resourceId! })}
+                >
+                  转到 PARAM 行 {arg.resourceId}
+                </button>
               )}
             </li>
           ))}
@@ -674,6 +705,12 @@ function EventMeaningPane(props: {
       )}
       {jump && jump.kind === 'insufficient_evidence' && (
         <p className="muted">{jump.message}</p>
+      )}
+      {resourceJump && resourceJump.kind === 'hit' && (
+        <p className="muted">目标在 {resourceJump.title}（{resourceJump.detail ?? '已定位'}）。</p>
+      )}
+      {resourceJump && resourceJump.kind === 'insufficient_evidence' && (
+        <p className="muted">{resourceJump.message}</p>
       )}
     </div>
   );
@@ -688,6 +725,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const [splitTabId, setSplitTabId] = useState<string | null>(null);
   const [inspection, setInspection] = useState<LineInspection>({ kind: 'empty' });
   const [jump, setJump] = useState<EventJump | null>(null);
+  const [resourceJump, setResourceJump] = useState<ResourceJumpResult | null>(null);
   const [inspectPane, setInspectPane] = useState<'a' | 'b'>('a');
 
   const editorHostRef = useRef<HTMLDivElement>(null);
@@ -764,6 +802,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         setInspectPane(pane);
         setInspection(inspectSourceLine(lineText, completionItemsRef.current));
         setJump(null);
+        setResourceJump(null);
       }
     );
   }, []);
@@ -1017,6 +1056,21 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     setSplitTabId(result.tabId);
   }
 
+  /**
+   * S31：文本条目 / PARAM 行跳转。命中与否由 App 判定（openTabs + 文本目录），
+   * 结果回到词义列展示；App 未接线时给 insufficient_evidence，不画假死路。
+   */
+  function jumpToResource(request: ResourceJumpRequest): void {
+    const pending = props.onJumpResource?.(request);
+    if (!pending) {
+      setResourceJump(insufficientEvidence('跳转通道不可用：事件面板没有接线到已打开的资源。'));
+      return;
+    }
+    pending
+      .then(setResourceJump)
+      .catch(() => setResourceJump(insufficientEvidence('跳转失败：目标资源解析异常。')));
+  }
+
   async function submitSource(): Promise<void> {
     if (!activeTab || !props.onDslSubmit || submitting || isSourceReadOnly(activeTab)) return;
     setSubmitting(true);
@@ -1192,7 +1246,9 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
               <EventMeaningPane
                 inspection={inspection}
                 jump={jump}
+                resourceJump={resourceJump}
                 onJumpEvent={jumpToEvent}
+                onJumpResource={jumpToResource}
                 documentTitle={activeTab?.title ?? 'event'}
               />
             )

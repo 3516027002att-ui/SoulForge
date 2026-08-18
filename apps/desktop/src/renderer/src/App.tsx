@@ -33,7 +33,8 @@ import type {
   AnalyzeWorkspaceSummary,
   DirectorySelection,
   RendererWorkspaceScanResult,
-  RendererWorkspaceSession
+  RendererWorkspaceSession,
+  TextCatalogResponse
 } from '../../main/ipc.js';
 import type {
   RendererIndexedFile,
@@ -66,6 +67,14 @@ import {
 } from './editors/EventSourceWorkbenchPanel.js';
 import { FmgWorkbenchPanel } from './editors/FmgWorkbenchPanel.js';
 import { ParamTablePanel } from './editors/ParamTablePanel.js';
+import {
+  findCatalogContainer,
+  resolveFmgJump,
+  resolveParamJump,
+  type ResourceJumpRequest,
+  type ResourceJumpResult,
+  type TextContainerRef
+} from './emevd/eventSourceNavigate.js';
 import { WorkbenchOpsPanel } from './editors/WorkbenchOpsPanel.js';
 import { ParamDefPanel } from './editors/ParamDefPanel.js';
 import { TaeWorkbenchPanel } from './editors/TaeWorkbenchPanel.js';
@@ -462,6 +471,12 @@ export function App(): ReactElement {
   const [cmdkIndex, setCmdkIndex] = useState(0);
   const [toasts, setToasts] = useState<Array<{ id: number; text: string; kind: 'ok' | 'warn' }>>([]);
   const [openTabs, setOpenTabs] = useState<RendererIndexedFile[]>([]);
+  /** S31：文本目录缓存（事件实参 → 已打开文本表的匹配用，只读 metadata）。 */
+  const [textCatalog, setTextCatalog] = useState<TextCatalogResponse | null>(null);
+  /** S31：PARAM 面板的外部 reveal 请求（行 id）；面板处理后经回调清除。 */
+  const [paramRevealRowId, setParamRevealRowId] = useState<number | null>(null);
+  /** S31：FMG 面板的外部 reveal 请求（表 + 条目 id）；面板处理后经回调清除。 */
+  const [fmgRevealRequest, setFmgRevealRequest] = useState<{ tableId: string; entryId: number } | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const cmdkInputRef = useRef<HTMLInputElement>(null);
   const cmdkDialogRef = useRef<HTMLDivElement>(null);
@@ -488,6 +503,11 @@ export function App(): ReactElement {
       setFmgEntries(EMPTY_FMG_ENTRIES);
       setFmgSourceHash(null);
       setFmgLive(false);
+      // S31：文本目录缓存与一次性 reveal 请求随 fmg 族清空——前者避免跨工作区
+      // 用旧目录把文本跳转误判成 insufficient_evidence，后者避免请求残留到别的
+      // 文本文件面板上误触发定位（App 在 switchToOpenTab 之后才下发，先清后设）。
+      setTextCatalog(null);
+      setFmgRevealRequest(null);
     },
     param: () => {
       setParamRows(EMPTY_PARAM_ROWS);
@@ -503,6 +523,8 @@ export function App(): ReactElement {
       // 授信来源回落到只读：上一个 param 的 'imported' 若残留，新 param 的字段
       // 会被错误地显示为可写。授权判定必须由新文档的 fieldDefsOrigin 重新给出。
       setParamFieldDefsOrigin('fixture');
+      // S31：一次性 PARAM reveal 请求随 param 族清空，避免残留到别的表误滚动。
+      setParamRevealRowId(null);
     },
     emevd: () => {
       setEventPendingTab(null);
@@ -2191,6 +2213,84 @@ export function App(): ReactElement {
   }
 
   /**
+   * S31：切到 openTabs 里已打开的资源（文本 / PARAM 跳转目标）。
+   *
+   * 与 selectFile 的差异：不追加 openTabs（目标必须已在其中）、不调
+   * openResourcePreview（那是「打开文档」的读链，跳转不应新开磁盘文件）。
+   * 选中文件切换后，param/fmg 各自的 load effect 会按 selectedFile 重读。
+   */
+  function switchToOpenTab(file: RendererIndexedFile): void {
+    setSelectedFile(file);
+    setPreview(null);
+    setEditText('');
+    setLastSavedText('');
+    setMsgRows([]);
+    setSaveDiagnostics([]);
+    setAiDraft(null);
+    setAgentIdleNotice(null);
+    resetAllDocuments(documentResetActions);
+    setBnd4Forced(false);
+    setCenterView('resource');
+  }
+
+  /**
+   * S31：事件面板「文本条目 / PARAM 行」跳转。
+   *
+   * 目标只能来自 openTabs：文本实参按语义匹配已打开文本表（表名证据，不猜
+   * 数字），PARAM 实参要求恰好一个已打开 PARAM 文档。命中后切 tab 并下发
+   * reveal 请求给目标面板；对不上返回 insufficient_evidence，不新开文件。
+   */
+  async function jumpToResource(request: ResourceJumpRequest): Promise<ResourceJumpResult> {
+    if (request.kind === 'param') {
+      const openParams = openTabs.filter((tab) => shouldLoadParam(tab));
+      const result = resolveParamJump(
+        request.id,
+        openParams.map((tab) => ({ sourceUri: tab.sourceUri, title: libraryDisplayName(tab.relativePath) }))
+      );
+      if (result.kind === 'hit') {
+        const target = openParams.find((tab) => tab.sourceUri === result.resourceUri);
+        if (target) {
+          switchToOpenTab(target);
+          setFmgRevealRequest(null);
+          setParamRevealRowId(request.id);
+        }
+      }
+      return result;
+    }
+    let catalog = textCatalog;
+    if (!catalog && bridge && typeof bridge.readTextCatalog === 'function') {
+      try {
+        const fetched = await bridge.readTextCatalog();
+        if (fetched.ok) {
+          catalog = fetched;
+          setTextCatalog(fetched);
+        }
+      } catch {
+        // 目录不可用 → resolveFmgJump 会按空目录给 insufficient_evidence。
+      }
+    }
+    const openText = openTabs.filter((tab) => shouldLoadFmg(tab));
+    const containers: TextContainerRef[] = openText.map((tab) => {
+      const node = catalog ? findCatalogContainer(catalog, tab.sourceUri) : null;
+      return {
+        sourceUri: tab.sourceUri,
+        title: libraryDisplayName(tab.relativePath),
+        tables: node?.tables ?? []
+      };
+    });
+    const result = resolveFmgJump(request.semantic, request.id, containers);
+    if (result.kind === 'hit' && result.tableId !== undefined) {
+      const target = openText.find((tab) => tab.sourceUri === result.resourceUri);
+      if (target) {
+        switchToOpenTab(target);
+        setParamRevealRowId(null);
+        setFmgRevealRequest({ tableId: result.tableId, entryId: request.id });
+      }
+    }
+    return result;
+  }
+
+  /**
    * 文本编辑「保存」= 直接写盘（S29：与 FMG/容器 PARAM 同一把尺子，不再进审查队列）。
    * 底层仍走 saveTextResource → Patch Engine（自动备份、可回滚）。
    */
@@ -3318,6 +3418,8 @@ export function App(): ReactElement {
                 resourceUri={selectedFile?.sourceUri ?? ''}
                 entries={fmgEntries}
                 live={fmgLive}
+                revealRequest={fmgRevealRequest}
+                onRevealHandled={() => setFmgRevealRequest(null)}
                 onMutation={async (mutation) => {
                   if (!fmgLive || !selectedFile) {
                     setStatus('当前 FMG 未实时加载，不能写入；请先选中可解析资源。');
@@ -3477,6 +3579,8 @@ export function App(): ReactElement {
                 resourceUri={selectedFile?.sourceUri ?? ''}
                 rows={paramRows}
                 live={paramLive}
+                revealRowId={paramRevealRowId}
+                onRevealHandled={() => setParamRevealRowId(null)}
                 onMutation={(mutation) => {
                   if (!paramLive || !selectedFile) {
                     setStatus('当前 PARAM 未实时加载，不能写入；请先选中可解析资源。');
@@ -3714,6 +3818,7 @@ export function App(): ReactElement {
                 opening={eventOpening}
                 openingPreview={eventSourcePreview}
                 pendingTab={eventPendingTab}
+                onJumpResource={jumpToResource}
                 onDslSubmit={async (tab, sourceText) => {
                   if (!tab.live) {
                     return {
