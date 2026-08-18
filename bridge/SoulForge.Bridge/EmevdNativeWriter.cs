@@ -36,7 +36,7 @@ internal static class EmevdNativeWriter
         var rebuilt = document.ApplyMutations(patches);
         await AtomicWriteAsync(outputPath, rebuilt, cancellationToken);
         var reread = EmevdNativeDocument.ReadFile(outputPath);
-        VerifyMutations(reread, patches);
+        VerifyMutations(document, reread, patches);
         return new
         {
             mutationCount = patches.Count,
@@ -90,7 +90,7 @@ internal static class EmevdNativeWriter
         // Re-open the staged outer artifact natively and verify every mutation.
         var rereadDcx = DcxNativeDocument.Read(outputPath, oodleRuntimeRoot);
         var reread = EmevdNativeDocument.Read(rereadDcx.Payload);
-        VerifyMutations(reread, patches);
+        VerifyMutations(document, reread, patches);
         return new
         {
             mutationCount = patches.Count,
@@ -127,7 +127,7 @@ internal static class EmevdNativeWriter
         }
     }
 
-    private static void VerifyMutations(EmevdNativeDocument reread, List<EmevdPatch> patches)
+    private static void VerifyMutations(EmevdNativeDocument original, EmevdNativeDocument reread, List<EmevdPatch> patches)
     {
         // Build the id rename map (original -> final) so verification can locate
         // events renamed by update_id even when a later patch references the old id.
@@ -172,6 +172,36 @@ internal static class EmevdNativeWriter
             {
                 if (reread.Events.Any(e => e.Id == patch.EventId))
                     throw new InvalidDataException("EMEVD delete 后事件仍存在。");
+            }
+            else if (patch.Kind == "insert_instruction")
+            {
+                var targetId = ResolveFinalId(patch.EventId, renameMap);
+                var ev = reread.Events.FirstOrDefault(e => e.Id == targetId);
+                if (ev is null) throw new InvalidDataException("EMEVD insert_instruction 后找不到事件。");
+                var at = checked((int)patch.InstructionIndex!.Value);
+                if (at < 0 || at >= ev.InstructionCount)
+                    throw new InvalidDataException("EMEVD insert_instruction 后该位置没有指令。");
+                var start = checked((int)(ev.InstructionsOffset / EmevdNativeDocument.InstructionSize));
+                var written = reread.Instructions[start + at];
+                var expected = Convert.FromBase64String(patch.ArgsBase64!);
+                if (written.Bank != patch.Bank!.Value || written.Id != patch.Id!.Value
+                    || !written.Args.AsSpan().SequenceEqual(expected))
+                    throw new InvalidDataException("EMEVD insert_instruction 后该位置指令内容与预期不一致。");
+            }
+            else if (patch.Kind == "delete_instruction")
+            {
+                // 精确口径：该事件的指令总数 = 原始数 - 本批删除数 + 本批插入数。
+                var targetId = ResolveFinalId(patch.EventId, renameMap);
+                var ev = reread.Events.FirstOrDefault(e => e.Id == targetId);
+                if (ev is null) throw new InvalidDataException("EMEVD delete_instruction 后找不到事件。");
+                var before = original.Events.FirstOrDefault(e => e.Id == patch.EventId)
+                    ?? throw new InvalidDataException("EMEVD delete_instruction 的原始事件不存在。");
+                var deletes = patches.Count(p =>
+                    p.Kind == "delete_instruction" && p.EventId == patch.EventId);
+                var inserts = patches.Count(p =>
+                    p.Kind == "insert_instruction" && p.EventId == patch.EventId);
+                if (ev.InstructionCount != before.InstructionCount - deletes + inserts)
+                    throw new InvalidDataException("EMEVD delete_instruction 后指令数与预期不一致。");
             }
         }
     }
@@ -233,6 +263,27 @@ internal static class EmevdNativeWriter
         {
             var eventId = RequiredLong(item, "eventId");
             return new EmevdPatch(kind, eventId, null, null);
+        }
+
+        if (kind is "insert_instruction")
+        {
+            var eventId = RequiredLong(item, "eventId");
+            var index = RequiredLong(item, "instructionIndex");
+            var bank = RequiredLong(item, "bank");
+            var id = RequiredLong(item, "id");
+            // 零参数指令（如 EndEvent）的 argsBase64 是空串，允许为空。
+            var argsBase64 = item.TryGetProperty("argsBase64", out var argsEl)
+                && argsEl.ValueKind == JsonValueKind.String
+                ? argsEl.GetString()!
+                : throw new InvalidDataException("options.argsBase64 是必填字符串。");
+            return new EmevdPatch(kind, eventId, null, null, index, argsBase64, bank, id);
+        }
+
+        if (kind is "delete_instruction")
+        {
+            var eventId = RequiredLong(item, "eventId");
+            var index = RequiredLong(item, "instructionIndex");
+            return new EmevdPatch(kind, eventId, null, null, index);
         }
 
         var eventIdRequired = RequiredLong(item, "eventId");

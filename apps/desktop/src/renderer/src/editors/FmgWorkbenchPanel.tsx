@@ -297,6 +297,14 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     return language?.containers.find((c) => c.containerId === selectedContainerId) ?? null;
   }, [catalog, selectedLanguageId, selectedContainerId]);
   const containerFailed = selectedContainer?.parseStatus === 'failed';
+  // S30：「N 槽 · M 有字」——槽数与有字数都来自 Bridge 目录元数据；
+  // 旧 Bridge 不上报 filledCount 时回落「N 条」。
+  const selectedTable = useMemo(() => {
+    if (!selectedContainer || selectedTableId === null) return null;
+    return selectedContainer.tables.find((table) => table.tableId === selectedTableId) ?? null;
+  }, [selectedContainer, selectedTableId]);
+  const formatSlotCount = (slots: number, filled: number | undefined): string =>
+    filled === undefined ? `${slots} 条` : `${slots} 槽 · ${filled} 有字`;
 
   // S29：编辑只落到本地草稿，失焦 / Ctrl+S 再提交一次（直写，不先进审查队列）。
   // 切换条目 / 翻页 / 换表前先提交当前草稿，避免选中行换掉后草稿被吞。
@@ -382,7 +390,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         rows.push({
           key: `table:${table.tableId}`,
           label,
-          meta: `${container.containerKind} · ${table.entryCount} 条`,
+          meta: `${container.containerKind} · ${formatSlotCount(table.entryCount, table.filledCount)}`,
           title: `${container.containerKind} / ${label}`,
           failed: false,
           selected: table.tableId === selectedTableId,
@@ -584,7 +592,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     {
       id: 'entries',
       title: 'Text Entries',
-      hint: selectedTableId !== null ? `${entryCount} 条` : '',
+      hint: selectedTableId !== null ? formatSlotCount(entryCount, selectedTable?.filledCount) : '',
       initialFlex: 2,
       minWidth: 240,
       children: entriesColumn
@@ -608,7 +616,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
             <span className="muted" style={{ fontSize: 11 }}>
               {catalog
                 ? `${catalog.title}`
-                : `${entryCount} 条 · 每页 ${FMG_PAGE_SIZE}`}
+                : `${formatSlotCount(entryCount, selectedTable?.filledCount)} · 每页 ${FMG_PAGE_SIZE}`}
             </span>
           </>
         }

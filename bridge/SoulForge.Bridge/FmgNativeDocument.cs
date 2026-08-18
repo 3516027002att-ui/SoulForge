@@ -402,6 +402,9 @@ internal sealed class FmgTextCatalogReader
                 EntryIndex: i,
                 EntryName: entry.Name,
                 EntryCount: fmg.Entries.Count,
+                // S30：「N 槽 · M 有字」——空槽（null/空文本）不计入 FilledCount，
+                // 地名表 47 槽 6 条有字不再像「缺了」。
+                FilledCount: fmg.Entries.Count(e => !string.IsNullOrEmpty(e.Text)),
                 FormatVersion: fmg.VersionMarker);
             tables.Add(table);
             tableByIndex[i] = table;
@@ -497,5 +500,5 @@ internal sealed record FmgTextCatalogDto(
     string? TableSourceHash,
     string Authority);
 
-internal sealed record FmgTextTableDto(string StableId, int EntryIndex, string EntryName, int EntryCount, int FormatVersion);
+internal sealed record FmgTextTableDto(string StableId, int EntryIndex, string EntryName, int EntryCount, int FilledCount, int FormatVersion);
 internal sealed record FmgTextEntryDto(int Id, string Text);

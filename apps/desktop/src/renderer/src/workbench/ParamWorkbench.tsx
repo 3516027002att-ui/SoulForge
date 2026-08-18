@@ -40,6 +40,7 @@ import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js
 import { base64ToUint8Array } from '../utils/binary.js';
 // 复用 ParamDefPanel 的解码器：解码权威必须单一（见该处导出注释）。
 import { decodeFieldView } from '../editors/ParamDefPanel.js';
+import { isParamCheckboxField } from './paramCheckboxField.js';
 import { WorkbenchLayout, type WorkbenchColumnSpec } from './WorkbenchLayout.js';
 
 /** 容器内的一个 param 条目。 */
@@ -673,7 +674,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * 1bit 是标量类型 + bitfield.bitWidth===1（bitOffset 任意）。
    */
   function isBoolLike(field: ParamFieldDef): boolean {
-    return field.type === 'bool' || field.bitfield?.bitWidth === 1;
+    // S29：判定唯一来源是 paramCheckboxField.ts（bool 整字段或 1bit 位域）。
+    return isParamCheckboxField(field);
   }
 
   /**

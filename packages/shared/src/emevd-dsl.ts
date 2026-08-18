@@ -110,6 +110,37 @@ export type EmevdPlannedMutation =
       argument: string;
       before: EmevdDslLiteral;
       after: EmevdDslLiteral;
+    })
+  | (EmevdPlannedMutationBase & {
+      kind: 'insert_instruction';
+      /** 空串表示目标是同一份计划里 insert_event 新建的事件。 */
+      eventAnchor: string;
+      eventId: number;
+      /** 插入位置：该事件「删除已应用后」的指令列表下标。 */
+      index: number;
+      bank: number;
+      id: number;
+      argsBase64: string;
+    })
+  | (EmevdPlannedMutationBase & {
+      kind: 'delete_instruction';
+      eventAnchor: string;
+      eventId: number;
+      instructionAnchor: string;
+      /** 删除位置：原始文档中该事件内的指令下标。 */
+      index: number;
+      bank: number;
+      id: number;
+    })
+  | (EmevdPlannedMutationBase & {
+      kind: 'insert_event';
+      eventId: number;
+      restBehavior: number;
+    })
+  | (EmevdPlannedMutationBase & {
+      kind: 'delete_event';
+      eventAnchor: string;
+      eventId: number;
     });
 
 export interface EmevdMutationPlan {

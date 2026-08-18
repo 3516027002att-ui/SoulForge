@@ -1,9 +1,12 @@
 /**
  * DarkScript3 式源码 → 现有 typed mutation plan。
  *
- * 只编译能对齐到权威文档的改动：改事件 id / rest、改已有指令的固定参数。
- * 新增/删除/重排事件或指令、编不回的行：该行 warning「未解码」，不写盘、
- * 不把整份文件锁死。空改动是成功（没有 mutation）。
+ * 对齐规则：$Event 块按「反汇编形状」逐事件对齐；事件体内做 LCS 行对齐 —
+ * 已对齐的行只写参数/id/rest 差异；多出来的行编码成 insert_instruction（EMEDF
+ * 可编码的固定参数指令），删掉行生成 delete_instruction；新增/删除 $Event 块
+ * 生成 insert_event / delete_event。写不了的行（新增 WaitFor 折叠块、vararg
+ * 指令、EMEDF 里查不到的名字、改了未解码注释）标 warning「未解码」，并且该事件
+ * 的结构性改动整体抑制（只保留已对齐行的参数写入），不锁整份文件、不假成功。
  */
 
 import { createHash } from 'node:crypto';
@@ -17,14 +20,22 @@ import type {
   EmevdDslSourceSpan,
   EmevdEditorDocument,
   EmevdMutationPlan,
+  EmevdNodeAnchor,
   EmevdPlannedMutation
 } from '@soulforge/shared';
 import {
   analyzeDarkScriptEvent,
+  darkScriptInstructionName,
   type DarkScriptEventItem
 } from './darkScriptRenderer.js';
 import { fingerprintEmedfRegistry } from './dslCompiler.js';
-import type { DecodedArg, EmedfRegistry } from './emedfSchema.js';
+import {
+  encodeEmedfArgs,
+  hasVararg,
+  type DecodedArg,
+  type EmedfInstructionDef,
+  type EmedfRegistry
+} from './emedfSchema.js';
 import {
   computeEmevdEventFingerprint,
   computeEmevdInstructionFingerprint,
@@ -74,8 +85,8 @@ export function compileEmevdDarkScript(
   const diagnostics: EmevdDslDiagnostic[] = [];
   const add = (item: EmevdDslDiagnostic): void => { diagnostics.push(item); };
 
-  if (request.mode !== 'patch') {
-    add(error('EMEVD_DSL_MODE_UNSUPPORTED', 'Only patch mode is supported.', fileSpan));
+  if (request.mode !== 'patch' && request.mode !== 'dark-script') {
+    add(error('EMEVD_DSL_MODE_UNSUPPORTED', `Unsupported compile mode: ${String(request.mode)}.`, fileSpan));
   }
   if (request.resourceUri !== document.resourceUri) {
     add(error('EMEVD_DSL_RESOURCE_MISMATCH', 'Resource URI does not match the opened document.', fileSpan, {
@@ -116,9 +127,31 @@ export function compileEmevdDarkScript(
   }
 
   const operations: EmevdPlannedMutation[] = [];
-  const paired = pairEvents(parsed, document.events, add, request.resourceUri);
-  for (const pair of paired) {
+  const pairing = pairEvents(parsed, document.events);
+  for (const pair of pairing.pairs) {
     compilePairedEvent(pair.parsed, pair.documentEvent, registry, operations, add, request.resourceUri);
+  }
+  // 新增事件：先 insert_event，再按源码顺序 insert_instruction。有任何一行
+  // 编码不了就整个新事件抑制（不写半截事件），各行给「未解码」warning。
+  for (const added of pairing.added) {
+    compileAddedEvent(added, document, registry, operations, add, request.resourceUri);
+  }
+  // 删除事件：源码里整块没出现的权威文档事件。
+  for (const missing of pairing.deleted) {
+    if (!missing.anchor) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', `事件 ${missing.eventId} 没有稳定锚，删除不能写入。`, fileSpan, {
+        resourceUri: request.resourceUri
+      }));
+      continue;
+    }
+    operations.push({
+      kind: 'delete_event',
+      eventAnchor: formatEmevdAnchor('event', missing.anchor),
+      eventId: missing.eventId,
+      target: missing.anchor,
+      targetPreconditionHash: computeEmevdEventFingerprint(missing),
+      sourceSpan: fileSpan
+    });
   }
 
   if (diagnostics.some((item) => item.severity === 'error')) {
@@ -130,9 +163,13 @@ export function compileEmevdDarkScript(
     return { ok: false, ast, diagnostics: diagnostics.sort(compareDiagnostics) };
   }
 
-  const touchedEvents = unique(operations.map((operation) => operation.eventAnchor));
+  const touchedEvents = unique(operations.map((operation) =>
+    operation.kind === 'insert_event' ? `new:${operation.eventId}` : operation.eventAnchor
+  ).filter((anchor) => anchor.length > 0));
   const touchedInstructions = unique(operations.flatMap((operation) =>
-    operation.kind === 'set_instruction_arg' ? [operation.instructionAnchor] : []
+    operation.kind === 'set_instruction_arg' || operation.kind === 'delete_instruction'
+      ? [operation.instructionAnchor]
+      : []
   ));
   const sourceFingerprint = hashText(source);
   const planWithoutFingerprint = {
@@ -146,8 +183,10 @@ export function compileEmevdDarkScript(
     impact: {
       touchedEvents,
       touchedInstructions,
-      inserts: 0,
-      deletes: 0,
+      inserts: operations.filter((operation) =>
+        operation.kind === 'insert_event' || operation.kind === 'insert_instruction').length,
+      deletes: operations.filter((operation) =>
+        operation.kind === 'delete_event' || operation.kind === 'delete_instruction').length,
       argumentWrites: operations.filter((operation) => operation.kind === 'set_instruction_arg').length
     }
   };
@@ -199,19 +238,274 @@ function compilePairedEvent(
   }
 
   const shape = analyzeDarkScriptEvent(event, registry);
-  if (parsed.statements.length !== shape.length) {
-    add(warn(
-      'DARKSCRIPT_LINE_UNDECODED',
-      `事件 ${event.eventId} 的指令条数对不上权威文档（源码 ${parsed.statements.length}，文档 ${shape.length}），整段未解码。`,
-      parsed.span,
-      { resourceUri, targetAnchor: eventAnchor }
-    ));
-    return;
+  const diff = alignStatements(parsed.statements, shape);
+
+  // 先把插入行全部试编码；任何一行编码不了，本事件的结构性改动（增/删）整体
+  // 抑制，只保留已对齐行的参数写入 —— 不写「删了旧的却写不进新的」的半截状态。
+  const encodings = new Map<ParsedStatement, { bank: number; id: number; argsBase64: string }>();
+  let blocked = false;
+  for (const entry of diff) {
+    if (entry.kind !== 'insert') continue;
+    if (entry.statement.kind === 'comment') continue; // 纯注释，无二进制语义，忽略
+    if (entry.statement.kind === 'wait-for') {
+      add(warn(
+        'DARKSCRIPT_LINE_UNDECODED',
+        '新增 WaitFor 折叠块本版不能写入（条件组簿记无法从源码重建），该块未解码。',
+        entry.statement.span,
+        { resourceUri, targetAnchor: eventAnchor }
+      ));
+      blocked = true;
+      continue;
+    }
+    const encoded = encodeInsertedCall(entry.statement.call, registry);
+    if (!encoded.ok) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', `新增指令 ${entry.statement.call.name} 不能写入：${encoded.reason}`, entry.statement.span, {
+        resourceUri,
+        targetAnchor: eventAnchor
+      }));
+      blocked = true;
+      continue;
+    }
+    encodings.set(entry.statement, { bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64 });
   }
 
-  for (let i = 0; i < shape.length; i += 1) {
-    compileStatement(parsed.statements[i]!, shape[i]!, eventAnchor, operations, add, resourceUri);
+  // 已对齐行：照旧逐行编参数差异。
+  for (const entry of diff) {
+    if (entry.kind === 'match') {
+      compileStatement(entry.statement, entry.item, eventAnchor, operations, add, resourceUri);
+    }
   }
+  if (blocked) return;
+
+  // 删除：原始文档里有、源码里没了的行（wait-for 块 = 谓词 + anchor 全部指令）。
+  for (const entry of diff) {
+    if (entry.kind !== 'delete') continue;
+    for (const instruction of itemInstructions(entry.item)) {
+      if (!instruction.anchor) {
+        add(warn('DARKSCRIPT_LINE_UNDECODED', '待删指令没有稳定锚，删除不能写入。', parsed.span, {
+          resourceUri,
+          targetAnchor: eventAnchor
+        }));
+        continue;
+      }
+      const index = event.instructions.indexOf(instruction);
+      if (index < 0) continue;
+      operations.push({
+        kind: 'delete_instruction',
+        eventAnchor,
+        eventId: event.eventId,
+        instructionAnchor: formatEmevdAnchor('instruction', instruction.anchor),
+        index,
+        bank: instruction.bank,
+        id: instruction.id,
+        target: instruction.anchor,
+        targetPreconditionHash: computeEmevdInstructionFingerprint(instruction),
+        sourceSpan: parsed.span
+      });
+    }
+  }
+
+  // 插入：位置按「删除已应用后」的指令列表计算。
+  let slot = 0;
+  for (const entry of diff) {
+    if (entry.kind === 'match') {
+      slot += itemInstructions(entry.item).length;
+      continue;
+    }
+    if (entry.kind !== 'insert') continue;
+    if (entry.statement.kind !== 'call') continue;
+    const encoded = encodings.get(entry.statement);
+    if (!encoded) continue;
+    operations.push({
+      kind: 'insert_instruction',
+      eventAnchor,
+      eventId: event.eventId,
+      index: slot,
+      bank: encoded.bank,
+      id: encoded.id,
+      argsBase64: encoded.argsBase64,
+      target: event.anchor!,
+      targetPreconditionHash: eventHash,
+      sourceSpan: entry.statement.span
+    });
+    slot += 1;
+  }
+}
+
+/** 一个 shape 行对应事件指令列表里的指令（wait-for = 谓词们 + anchor）。 */
+function itemInstructions(item: DarkScriptEventItem): EmevdEditorDocument['events'][number]['instructions'][number][] {
+  if (item.kind === 'wait-for') {
+    return [...item.predicates.map((predicate) => predicate.instruction), item.anchor];
+  }
+  return [item.instruction];
+}
+
+/**
+ * 新增事件的编译：insert_event + 逐行 insert_instruction。
+ * 任一行编码不了 → 整个事件抑制（不写空壳/半截事件），各行给「未解码」warning。
+ */
+function compileAddedEvent(
+  parsed: ParsedEvent,
+  document: EmevdEditorDocument,
+  registry: EmedfRegistry,
+  operations: EmevdPlannedMutation[],
+  add: (item: EmevdDslDiagnostic) => void,
+  resourceUri: string
+): void {
+  const encodable: Array<{ call: ParsedCall; bank: number; id: number; argsBase64: string }> = [];
+  let blocked = false;
+  for (const statement of parsed.statements) {
+    if (statement.kind === 'comment') continue;
+    if (statement.kind === 'wait-for') {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', '新增事件里的 WaitFor 折叠块不能写入，该事件未解码。', statement.span, { resourceUri }));
+      blocked = true;
+      continue;
+    }
+    const encoded = encodeInsertedCall(statement.call, registry);
+    if (!encoded.ok) {
+      add(warn('DARKSCRIPT_LINE_UNDECODED', `新增事件 ${parsed.eventId} 的 ${statement.call.name} 不能写入：${encoded.reason}`, statement.span, { resourceUri }));
+      blocked = true;
+      continue;
+    }
+    encodable.push({ call: statement.call, bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64 });
+  }
+  if (blocked) return;
+  if (document.events.some((event) => event.eventId === parsed.eventId)) {
+    add(warn('DARKSCRIPT_LINE_UNDECODED', `事件 ID ${parsed.eventId} 已存在，新增事件未写入。`, parsed.span, { resourceUri }));
+    return;
+  }
+  const syntheticAnchor: EmevdNodeAnchor = {
+    documentInstanceId: document.documentInstanceId ?? '',
+    localNodeId: `new-event-${parsed.eventId}`,
+    sourceFingerprint: ''
+  };
+  operations.push({
+    kind: 'insert_event',
+    eventId: parsed.eventId,
+    restBehavior: parsed.restBehavior,
+    target: syntheticAnchor,
+    targetPreconditionHash: '',
+    sourceSpan: parsed.span
+  });
+  encodable.forEach((entry, index) => {
+    operations.push({
+      kind: 'insert_instruction',
+      eventAnchor: '',
+      eventId: parsed.eventId,
+      index,
+      bank: entry.bank,
+      id: entry.id,
+      argsBase64: entry.argsBase64,
+      target: syntheticAnchor,
+      targetPreconditionHash: '',
+      sourceSpan: entry.call.span
+    });
+  });
+}
+
+/**
+ * 把新增的指令调用行编码成（bank, id, args）。
+ * 只有 EMEDF 里名字唯一、无 vararg、参数个数/类型全对上的指令可以插入。
+ */
+function encodeInsertedCall(
+  call: ParsedCall,
+  registry: EmedfRegistry
+): { ok: true; bank: number; id: number; argsBase64: string } | { ok: false; reason: string } {
+  const candidates = registry.instructions.filter((def) => darkScriptInstructionName(def.name) === call.name);
+  if (candidates.length === 0) return { ok: false, reason: 'EMEDF 里查不到这个指令名' };
+  if (candidates.length > 1) return { ok: false, reason: 'EMEDF 里同名指令不唯一，无法确定 bank/id' };
+  const def: EmedfInstructionDef = candidates[0]!;
+  if (hasVararg(def)) return { ok: false, reason: 'vararg 指令的尾部长度由观察值决定，本版不能新增' };
+  if (call.args.length !== def.args.length) {
+    return { ok: false, reason: `参数个数对不上（源码 ${call.args.length}，schema ${def.args.length}）` };
+  }
+  const values: Record<string, number | boolean> = {};
+  for (let i = 0; i < def.args.length; i += 1) {
+    const argDef = def.args[i]!;
+    const got = call.args[i]!;
+    if (argDef.type === 'bool' ? typeof got.value !== 'boolean' : typeof got.value !== 'number') {
+      return { ok: false, reason: `参数 ${argDef.name} 类型不匹配` };
+    }
+    values[argDef.name] = got.value;
+  }
+  const encoded = encodeEmedfArgs(def, values);
+  if (!encoded.ok) return { ok: false, reason: encoded.message };
+  return { ok: true, bank: def.bank, id: def.id, argsBase64: encoded.args.toString('base64') };
+}
+
+type StatementDiffEntry =
+  | { kind: 'match'; statement: ParsedStatement; item: DarkScriptEventItem }
+  | { kind: 'delete'; item: DarkScriptEventItem }
+  | { kind: 'insert'; statement: ParsedStatement };
+
+function statementKey(statement: ParsedStatement): string {
+  if (statement.kind === 'comment') return 'opaque';
+  if (statement.kind === 'wait-for') return `wait-for:${statement.predicates.map((predicate) => predicate.name).join(',')}`;
+  return `call:${statement.call.name}`;
+}
+
+function itemKey(item: DarkScriptEventItem): string {
+  if (item.kind === 'opaque') return 'opaque';
+  if (item.kind === 'wait-for') return `wait-for:${item.predicates.map((predicate) => predicate.displayName).join(',')}`;
+  return `call:${item.displayName}`;
+}
+
+/**
+ * LCS 行对齐：把源码语句序列和反汇编形状序列按行身份对齐。
+ * 输出是源码顺序的 match/delete/insert 混合序列（delete 插在被删行的原位置）。
+ */
+function alignStatements(statements: ParsedStatement[], items: DarkScriptEventItem[]): StatementDiffEntry[] {
+  const n = statements.length;
+  const m = items.length;
+  if (n === 0 && m === 0) return [];
+  if (n === 0) return items.map((item) => ({ kind: 'delete' as const, item }));
+  if (m === 0) return statements.map((statement) => ({ kind: 'insert' as const, statement }));
+  const a = statements.map(statementKey);
+  const b = items.map(itemKey);
+  // 超大事件（>2000×2000）退化为「公共前缀 + 公共后缀 + 中段全替换」，
+  // 避免 LCS 全表内存；中段 replace 等价于 delete-all + insert-all。
+  if (n * m > 4_000_000) {
+    let prefix = 0;
+    while (prefix < n && prefix < m && a[prefix] === b[prefix]) prefix += 1;
+    let suffix = 0;
+    while (suffix < n - prefix && suffix < m - prefix && a[n - 1 - suffix] === b[m - 1 - suffix]) suffix += 1;
+    const out: StatementDiffEntry[] = [];
+    for (let i = 0; i < prefix; i += 1) out.push({ kind: 'match', statement: statements[i]!, item: items[i]! });
+    for (let j = prefix; j < m - suffix; j += 1) out.push({ kind: 'delete', item: items[j]! });
+    for (let i = prefix; i < n - suffix; i += 1) out.push({ kind: 'insert', statement: statements[i]! });
+    for (let k = 0; k < suffix; k += 1) {
+      out.push({ kind: 'match', statement: statements[n - suffix + k]!, item: items[m - suffix + k]! });
+    }
+    return out;
+  }
+  const width = m + 1;
+  const table = new Int32Array((n + 1) * width);
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      table[i * width + j] = a[i] === b[j]
+        ? table[(i + 1) * width + j + 1]! + 1
+        : Math.max(table[(i + 1) * width + j]!, table[i * width + j + 1]!);
+    }
+  }
+  const out: StatementDiffEntry[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      out.push({ kind: 'match', statement: statements[i]!, item: items[j]! });
+      i += 1;
+      j += 1;
+    } else if (table[(i + 1) * width + j]! >= table[i * width + j + 1]!) {
+      out.push({ kind: 'insert', statement: statements[i]! });
+      i += 1;
+    } else {
+      out.push({ kind: 'delete', item: items[j]! });
+      j += 1;
+    }
+  }
+  while (i < n) { out.push({ kind: 'insert', statement: statements[i]! }); i += 1; }
+  while (j < m) { out.push({ kind: 'delete', item: items[j]! }); j += 1; }
+  return out;
 }
 
 function compileStatement(
@@ -339,14 +633,20 @@ function emitCallArgMutations(
   }
 }
 
+interface EventPairing {
+  pairs: Array<{ parsed: ParsedEvent; documentEvent: EmevdEditorDocument['events'][number] }>;
+  /** 源码里有、文档里没有的事件（等数量时优先按位置当成改 id）。 */
+  added: ParsedEvent[];
+  /** 文档里有、源码里没有的事件。 */
+  deleted: EmevdEditorDocument['events'][number][];
+}
+
 function pairEvents(
   parsed: ParsedEvent[],
-  documentEvents: readonly EmevdEditorDocument['events'][number][],
-  add: (item: EmevdDslDiagnostic) => void,
-  resourceUri: string
-): Array<{ parsed: ParsedEvent; documentEvent: EmevdEditorDocument['events'][number] }> {
+  documentEvents: readonly EmevdEditorDocument['events'][number][]
+): EventPairing {
   const remaining = [...documentEvents];
-  const pairs: Array<{ parsed: ParsedEvent; documentEvent: EmevdEditorDocument['events'][number] }> = [];
+  const pairs: EventPairing['pairs'] = [];
   const leftovers: ParsedEvent[] = [];
   for (const event of parsed) {
     const index = remaining.findIndex((item) => item.eventId === event.eventId);
@@ -356,34 +656,12 @@ function pairEvents(
       leftovers.push(event);
     }
   }
+  // 数量相等的「多出来 ↔ 缺下来」按位置配对：这是改事件 id 的场景，
+  // 配对后走 set_event_id，保留原事件的全部指令。
   while (leftovers.length > 0 && remaining.length > 0) {
     pairs.push({ parsed: leftovers.shift()!, documentEvent: remaining.shift()! });
   }
-  for (const extra of leftovers) {
-    add(warn(
-      'DARKSCRIPT_LINE_UNDECODED',
-      `新增事件 ${extra.eventId} 本版不能写入，该块未解码。`,
-      extra.span,
-      { resourceUri }
-    ));
-  }
-  for (const missing of remaining) {
-    add(warn(
-      'DARKSCRIPT_LINE_UNDECODED',
-      `权威文档里的事件 ${missing.eventId} 在源码里被删了，删除事件本版不能写入。`,
-      extraOrFileSpan(parsed),
-      { resourceUri }
-    ));
-  }
-  return pairs;
-}
-
-function extraOrFileSpan(parsed: ParsedEvent[]): EmevdDslSourceSpan {
-  const last = parsed[parsed.length - 1];
-  return last?.span ?? {
-    start: { offset: 0, line: 1, column: 1 },
-    end: { offset: 0, line: 1, column: 1 }
-  };
+  return { pairs, added: leftovers, deleted: remaining };
 }
 
 function parseDarkScriptEvents(

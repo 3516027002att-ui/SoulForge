@@ -820,7 +820,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     </>
                   )}
                   {!preview.loading && preview.error === null && preview.mesh !== null && (
-                    <div className="tae-preview__viewport" data-testid="tae-preview-viewport">
+                    <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
                       <FlverViewer
                         meshIndex={0}
                         meshCount={preview.meshCount}

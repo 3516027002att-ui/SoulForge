@@ -10,7 +10,7 @@ internal sealed class EmevdNativeDocument
 {
     private const int HeaderSize = 0x90;
     private const int EventSize = 0x30;
-    private const int InstructionSize = 0x20;
+    internal const int InstructionSize = 0x20;
     private const int ParameterSize = 0x20;
     private const int MaxEvents = 200_000;
     private const int MaxInstructions = 2_000_000;
@@ -598,6 +598,59 @@ internal sealed class EmevdNativeDocument
                     needsGc = true;
                     break;
                 }
+                case "insert_instruction":
+                {
+                    // 指令插入：index 是「该事件内」的位置（删除已应用后的列表），
+                    // 与 DarkScript3 在事件体内插入一行的公开行为一致。
+                    if (patch.InstructionIndex is null || patch.Bank is null || patch.Id is null)
+                        throw new InvalidDataException("insert_instruction 需要 instructionIndex / bank / id。");
+                    if (patch.ArgsBase64 is null)
+                        throw new InvalidDataException("insert_instruction 需要 argsBase64。");
+                    var idx = builds.FindIndex(e => e.Id == patch.EventId);
+                    if (idx < 0) throw new InvalidDataException($"EMEVD 事件 ID {patch.EventId} 不存在。");
+                    byte[] args;
+                    try { args = Convert.FromBase64String(patch.ArgsBase64); }
+                    catch (FormatException ex) { throw new InvalidDataException("argsBase64 非法。", ex); }
+                    var ev = builds[idx];
+                    var at = checked((int)patch.InstructionIndex.Value);
+                    if (at < 0 || at > ev.Instructions.Count)
+                        throw new InvalidDataException($"EMEVD 事件 {patch.EventId} 插入位置 {at} 越界（0..{ev.Instructions.Count}）。");
+                    ev.Instructions.Insert(at, new EmevdInstructionBuild(
+                        checked((int)patch.Bank.Value), checked((int)patch.Id.Value), 0, args));
+                    // 事件参数按指令下标引用：插入点及其之后整体 +1。
+                    for (var pi = 0; pi < ev.Parameters.Count; pi++)
+                    {
+                        var p = ev.Parameters[pi];
+                        if (p.InstructionIndex >= at)
+                            ev.Parameters[pi] = p with { InstructionIndex = p.InstructionIndex + 1 };
+                    }
+                    needsGc = true;
+                    break;
+                }
+                case "delete_instruction":
+                {
+                    if (patch.InstructionIndex is null)
+                        throw new InvalidDataException("delete_instruction 需要 instructionIndex。");
+                    var idx = builds.FindIndex(e => e.Id == patch.EventId);
+                    if (idx < 0) throw new InvalidDataException($"EMEVD 事件 ID {patch.EventId} 不存在。");
+                    var ev = builds[idx];
+                    var at = checked((int)patch.InstructionIndex.Value);
+                    if (at < 0 || at >= ev.Instructions.Count)
+                        throw new InvalidDataException($"EMEVD 事件 {patch.EventId} 删除位置 {at} 越界（0..{ev.Instructions.Count - 1}）。");
+                    // 有事件参数挂在这条指令上时拒绝删除（孤儿参数会破坏事件语义），不静默丢掉。
+                    if (ev.Parameters.Any(p => p.InstructionIndex == at))
+                        throw new InvalidDataException(
+                            $"EMEVD 事件 {patch.EventId} 指令 {at} 仍被事件参数引用，不能删除。");
+                    ev.Instructions.RemoveAt(at);
+                    for (var pi = 0; pi < ev.Parameters.Count; pi++)
+                    {
+                        var p = ev.Parameters[pi];
+                        if (p.InstructionIndex > at)
+                            ev.Parameters[pi] = p with { InstructionIndex = p.InstructionIndex - 1 };
+                    }
+                    needsGc = true;
+                    break;
+                }
                 default:
                     throw new InvalidDataException($"未知或尚未支持的 EMEVD mutation：{patch.Kind}。");
             }
@@ -845,7 +898,9 @@ internal sealed record EmevdPatch(
     long? RestBehavior,
     long? NewEventId,
     long? InstructionIndex = null,
-    string? ArgsBase64 = null);
+    string? ArgsBase64 = null,
+    long? Bank = null,
+    long? Id = null);
 
 internal sealed record EmevdRoundTripReport(
     bool ByteIdentical,

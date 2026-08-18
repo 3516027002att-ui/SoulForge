@@ -93,15 +93,21 @@ export interface EmevdPlanCommitResult {
 interface BridgeMutationWithOrder {
   mutation: EmevdBridgeNativeMutation;
   order: number;
+  /** 同 order 内的稳定次序（事件内下标升/降序）。 */
+  tiebreak?: number;
 }
 
 /**
  * Convert an EmevdMutationPlan into an ordered array of Bridge-native mutations.
  *
- * Ordering guarantees:
- * 1. set_instruction_args (grouped per instruction, multiple args merged)
- * 2. set_rest_behavior
- * 3. update_id (last, because it changes the eventId that other mutations reference)
+ * Ordering guarantees（C# writer 顺序应用，全局指令下标会随结构变化漂移）:
+ * 0. set_instruction_args — 全局下标，必须在任何结构改动之前（按原始文档计算）
+ * 1. delete_instruction — 事件内下标，同一事件内按下标降序
+ * 2. insert_event（add_event 空事件，供后续 insert 引用）
+ * 3. insert_instruction — 事件内下标（删除已应用后的列表），同一事件内升序
+ * 4. delete_event — 放在指令级改动之后（其指令已随事件一起消失）
+ * 5. set_rest_behavior
+ * 6. update_id — 最后（改的是其他 mutation 引用的 eventId）
  */
 export function planToBridgeMutations(
   plan: EmevdMutationPlan,
@@ -136,6 +142,11 @@ export function planToBridgeMutations(
     changes: Array<{ argument: string; value: number | boolean }>;
   }>();
 
+  const deleteInstructionMutations: BridgeMutationWithOrder[] = [];
+  const insertEventIds = new Set<number>();
+  const insertEventMutations: BridgeMutationWithOrder[] = [];
+  const insertInstructionMutations: BridgeMutationWithOrder[] = [];
+  const deleteEventMutations: BridgeMutationWithOrder[] = [];
   const restBehaviorMutations: BridgeMutationWithOrder[] = [];
   const eventIdMutations: BridgeMutationWithOrder[] = [];
 
@@ -176,7 +187,7 @@ export function planToBridgeMutations(
           eventId: event.eventId,
           restBehavior: operation.after
         },
-        order: 1
+        order: 5
       });
     } else if (operation.kind === 'set_event_id') {
       const event = eventByAnchor.get(operation.eventAnchor);
@@ -193,7 +204,84 @@ export function planToBridgeMutations(
           eventId: event.eventId,
           newEventId: operation.after
         },
+        order: 6
+      });
+    } else if (operation.kind === 'delete_instruction') {
+      const event = eventByAnchor.get(operation.eventAnchor);
+      if (!event) {
+        return {
+          ok: false,
+          code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND',
+          message: `事件锚 ${operation.eventAnchor} 在文档中未找到。`
+        };
+      }
+      deleteInstructionMutations.push({
+        mutation: {
+          kind: 'delete_instruction',
+          eventId: operation.eventId,
+          instructionIndex: operation.index
+        },
+        order: 1,
+        // 同一事件内按下标降序，前面的删除不会移动后面的下标。
+        tiebreak: operation.eventId * 1_000_000 - operation.index
+      });
+    } else if (operation.kind === 'insert_event') {
+      if (eventIdExists(document, operation.eventId) || insertEventIds.has(operation.eventId)) {
+        return {
+          ok: false,
+          code: 'EMEVD_PLAN_EVENT_ID_DUPLICATE',
+          message: `新增事件 ID ${operation.eventId} 已存在。`
+        };
+      }
+      insertEventIds.add(operation.eventId);
+      insertEventMutations.push({
+        mutation: {
+          kind: 'add_event',
+          newEventId: operation.eventId,
+          restBehavior: operation.restBehavior
+        },
         order: 2
+      });
+    } else if (operation.kind === 'insert_instruction') {
+      if (operation.eventAnchor !== '' && !eventByAnchor.has(operation.eventAnchor)) {
+        return {
+          ok: false,
+          code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND',
+          message: `事件锚 ${operation.eventAnchor} 在文档中未找到。`
+        };
+      }
+      if (operation.eventAnchor === '' && !insertEventIds.has(operation.eventId)) {
+        return {
+          ok: false,
+          code: 'EMEVD_PLAN_EVENT_NOT_PLANNED',
+          message: `insert_instruction 引用的事件 ${operation.eventId} 不在计划的新增事件里。`
+        };
+      }
+      insertInstructionMutations.push({
+        mutation: {
+          kind: 'insert_instruction',
+          eventId: operation.eventId,
+          instructionIndex: operation.index,
+          bank: operation.bank,
+          id: operation.id,
+          argsBase64: operation.argsBase64
+        },
+        order: 3,
+        // 同一事件内按下标升序，依序插入。
+        tiebreak: operation.eventId * 1_000_000 + operation.index
+      });
+    } else if (operation.kind === 'delete_event') {
+      const event = eventByAnchor.get(operation.eventAnchor);
+      if (!event) {
+        return {
+          ok: false,
+          code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND',
+          message: `事件锚 ${operation.eventAnchor} 在文档中未找到。`
+        };
+      }
+      deleteEventMutations.push({
+        mutation: { kind: 'delete_event', eventId: operation.eventId },
+        order: 4
       });
     }
   }
@@ -241,11 +329,23 @@ export function planToBridgeMutations(
     });
   }
 
-  const all = [...instructionMutations, ...restBehaviorMutations, ...eventIdMutations]
-    .sort((a, b) => a.order - b.order)
+  const all = [
+    ...instructionMutations,
+    ...deleteInstructionMutations,
+    ...insertEventMutations,
+    ...insertInstructionMutations,
+    ...deleteEventMutations,
+    ...restBehaviorMutations,
+    ...eventIdMutations
+  ]
+    .sort((a, b) => a.order - b.order || (a.tiebreak ?? 0) - (b.tiebreak ?? 0))
     .map((item) => item.mutation);
 
   return { ok: true, mutations: all };
+}
+
+function eventIdExists(document: EmevdEditorDocument, eventId: number): boolean {
+  return document.events.some((event) => event.eventId === eventId);
 }
 
 export interface EmevdPlanStageResult {
