@@ -37,7 +37,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import type { ParamDefDocument, ParamFieldDef } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
-import { base64ToUint8Array } from '../utils/binary.js';
+import { base64ToUint8Array, uint8ArrayToBase64 } from '../utils/binary.js';
 // 复用 ParamDefPanel 的解码器：解码权威必须单一（见该处导出注释）。
 import { decodeFieldView } from '../editors/ParamDefPanel.js';
 import { isParamCheckboxField } from './paramCheckboxField.js';
@@ -180,6 +180,23 @@ export interface ParamWorkbenchProps {
     name: string;
     rowDataBase64: string;
   }) => Promise<{ ok: boolean; message?: string }>;
+  /**
+   * 行级写入出口（问题 4）：新建行 / 复制当前行 / 删除当前行。
+   *
+   * 与字段/行名写入同一条 Patch 链（write-param add/delete → write-bnd4 →
+   * Patch Engine），缺省即行级只读。rowId 由本组件按「当前表最大 id + 1」给出
+   * （不跳过空洞，对照 Yapped）；add/copy 携带整行字节（copy = 当前行原样，
+   * add = 行宽 0 行），delete 不带字节。
+   */
+  onApplyRowMutation?: (input: {
+    paramName: string;
+    entryIndex: number;
+    expectedContainerHash: string;
+    expectedChildHash: string;
+    kind: 'add' | 'copy' | 'delete';
+    rowId: number;
+    rowDataBase64: string;
+  }) => Promise<{ ok: boolean; message?: string }>;
 }
 
 /** 字段全量渲染（用户裁定 2026-08-14）：字段不再分页，一次全部显示。 */
@@ -287,6 +304,8 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const [rowNameCommitting, setRowNameCommitting] = useState(false);
   /** CSV 导入导出（T5-4）进行中标记：防止重复点击。 */
   const [ioBusy, setIoBusy] = useState(false);
+  /** 问题 4：新建/复制/删除行进行中标记：防止重复提交。 */
+  const [rowMutationBusy, setRowMutationBusy] = useState(false);
 
   // ── 左栏：容器内 param 列表 ──
   useEffect(() => {
@@ -777,6 +796,61 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   }
 
   /**
+   * 行级写入（问题 4）：新建行 / 复制当前行 / 删除当前行。
+   *
+   * 与字段/行名写入同一条 Patch 链：onApplyRowMutation 由宿主接到
+   * applyContainerParamRowMutations → write-param add/delete → write-bnd4 →
+   * Patch Engine（本组件始终不直接写盘）。
+   *
+   * 新行 id = 当前表最大 id + 1（不跳过空洞，对照 Yapped）。add/copy 需要整行
+   * 字节：copy = 当前行原样；add = 长度=行宽的 0 行（新建一条空行）。delete 只
+   * 需要 row id，行字节不发。成功后重读行列表；新建/复制把焦点落到新行。
+   */
+  async function commitRowMutation(kind: 'add' | 'copy' | 'delete'): Promise<void> {
+    if (!props.onApplyRowMutation || selectedEntry === null) return;
+    if ((kind === 'copy' || kind === 'delete') && selectedRow === null) return;
+    if (kind === 'copy' && !selectedRow?.dataBase64) return;
+    setRowMutationBusy(true);
+    try {
+      let targetId = 0;
+      let rowDataBase64 = '';
+      if (kind === 'add' || kind === 'copy') {
+        targetId = loadedRows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
+        rowDataBase64 = kind === 'copy'
+          ? (selectedRow?.dataBase64 ?? '')
+          : uint8ArrayToBase64(new Uint8Array(Math.max(rowDataSize, 0)));
+      } else {
+        targetId = selectedRow?.id ?? 0;
+      }
+      const result = await props.onApplyRowMutation({
+        paramName: paramName ?? '',
+        entryIndex: selectedEntry,
+        expectedContainerHash: containerHash,
+        expectedChildHash: childHash,
+        kind,
+        rowId: targetId,
+        rowDataBase64
+      });
+      const label = kind === 'add' ? '新建' : kind === 'copy' ? '复制' : '删除';
+      if (result.ok) {
+        showToast(`${label}行已保存`, 'ok');
+        loadRows();
+        if (kind === 'delete') {
+          setSelectedRowId(null);
+        } else {
+          setSelectedRowId(targetId);
+        }
+      } else {
+        showToast(result.message ?? `${label}行失败。`, 'error');
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '行级写入异常。', 'error');
+    } finally {
+      setRowMutationBusy(false);
+    }
+  }
+
+  /**
    * CSV 导入导出（T5-4）的统一提交与反馈。
    *
    * 对话框在 main 侧（save/open dialog）；这里只触发 bridge 方法并把结果诊断
@@ -1213,15 +1287,40 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       toolbar={
         <>
           {/* T5-4：删掉旧的「Game Parameters · 1 library · N tables」crumb、类型名、
-              行大小。换成 CSV 导入导出工具条：导出行/导入行（字段值）、导出备注/
+              行大小。换成真实工具条：新建行/复制当前行/删除当前行（问题 4，写入走
+              onApplyRowMutation → Patch Engine）+ 导出行/导入行（字段值）、导出备注/
               导入备注（行名，对照 Yapped Export/Import Names）。对话框都在 main 侧，
-              导入写入走 Patch Engine。未选表时按钮禁用（没有可导入导出的目标）。 */}
+              导入写入走 Patch Engine。未选表时按钮禁用（没有可操作的表格目标）。 */}
           <span className="toolbar-spacer" style={{ flex: 1 }}></span>
           {definition !== null && (
             <span className="muted" style={{ fontSize: 11 }} title="行宽与定义一致即自动授信">
               字段元数据已自动授信
             </span>
           )}
+          {/* 问题 4：对照本地参数编辑器（Yapped/Smithbox）行级工具。未选表时全部
+              禁用；选表未选行时「新建行」可用（新 id = 当前表最大 id + 1），
+              复制/删除仍禁用。写入走 onApplyRowMutation → Patch Engine。 */}
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={rowMutationBusy || selectedEntry === null}
+            title="新建一行（id = 当前表最大 id + 1，字节全 0）"
+            onClick={() => { void commitRowMutation('add'); }}
+          >新建行</button>
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={rowMutationBusy || selectedEntry === null || selectedRow === null}
+            title="复制当前行到新 id（整行字节原样）"
+            onClick={() => { void commitRowMutation('copy'); }}
+          >复制当前行</button>
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={rowMutationBusy || selectedEntry === null || selectedRow === null}
+            title="删除当前行（经 Patch Engine，含备份与回滚）"
+            onClick={() => { void commitRowMutation('delete'); }}
+          >删除当前行</button>
           <button
             type="button"
             className="toolbar-button"

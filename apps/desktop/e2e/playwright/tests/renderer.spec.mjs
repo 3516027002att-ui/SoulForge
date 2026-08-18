@@ -1917,17 +1917,22 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   });
   expect(scrollHosts.every((value) => value === 'auto' || value === 'hidden')).toBe(true);
 
-  // T5-4 工具条：导出行 / 导入行 / 导出备注 / 导入备注 四个真实按钮；未选表时禁用
-  // （没有可导入导出的目标）。不再有「Game Parameters · 1 library · N tables」
-  // crumb、类型名、行大小。
+  // T5-4 + 问题 4 工具条：新建行/复制当前行/删除当前行 + 导出行/导入行/导出备注/
+  // 导入备注 七个真实按钮；未选表时全部禁用（没有可操作的表格目标）。不再有
+  // 「Game Parameters · 1 library · N tables」crumb、类型名、行大小。
   const toolbarButtons = window.locator('.workbench__toolbar .toolbar-button, .pane-toolbar .toolbar-button');
-  await expect(toolbarButtons).toHaveCount(4);
-  await expect(toolbarButtons.nth(0)).toHaveText('导出行');
-  await expect(toolbarButtons.nth(1)).toHaveText('导入行');
-  await expect(toolbarButtons.nth(2)).toHaveText('导出备注');
-  await expect(toolbarButtons.nth(3)).toHaveText('导入备注');
+  await expect(toolbarButtons).toHaveCount(7);
+  await expect(toolbarButtons.nth(0)).toHaveText('新建行');
+  await expect(toolbarButtons.nth(1)).toHaveText('复制当前行');
+  await expect(toolbarButtons.nth(2)).toHaveText('删除当前行');
+  await expect(toolbarButtons.nth(3)).toHaveText('导出行');
+  await expect(toolbarButtons.nth(4)).toHaveText('导入行');
+  await expect(toolbarButtons.nth(5)).toHaveText('导出备注');
+  await expect(toolbarButtons.nth(6)).toHaveText('导入备注');
   // 未选表：全部禁用（真实功能的禁用态，不是 §7.6 的假按钮）。
   await expect(toolbarButtons.nth(0)).toBeDisabled();
+  await expect(toolbarButtons.nth(2)).toBeDisabled();
+  await expect(toolbarButtons.nth(3)).toBeDisabled();
   const workbenchText = await window.locator('.workbench').innerText();
   expect(workbenchText).not.toContain('Game Parameters');
   expect(workbenchText).not.toContain('行大小');
@@ -1943,8 +1948,9 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   expect(virtualScrollOverflow).toBe('auto');
   await window.locator('.wb-virtual-row', { hasText: '100' }).click();
 
-  // 选中表后工具条按钮解除禁用（导出行/导入行已可点击目标）。
+  // 选中表后工具条按钮解除禁用（新建行可用；导出行/导入行已可点击目标）。
   await expect(toolbarButtons.nth(0)).toBeEnabled();
+  await expect(toolbarButtons.nth(3)).toBeEnabled();
 
   // 字段类型控件：enum 字段按类型渲染——原始值留在 input（只读），
   // 当前值标签（枚举标签「攻击」）显示在字段名旁，不是裸自由文本。
@@ -1996,6 +2002,25 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导入备注' }).click();
   await expect(footer).toContainText('fixture 导入 ActionGuideParam（4 行）行名完成。');
   await expect.poll(async () => (await ipcCalls(app))['param.importNamesCsv'] ?? 0).toBeGreaterThan(0);
+
+  // 问题 4：行级工具（新建行/复制当前行/删除当前行）真实触发 bridge。fixture 走
+  // 合成内存态（就地增删 paramTables 行），重读即见 —— 与行名/CSV 的 fixture
+  // 同一套约定（不真写盘）。字段栏行名输入框的 aria-label 暴露当前选中的行。
+  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '新建行' }).click();
+  await expect.poll(async () =>
+    (await ipcCalls(app))['resource.applyContainerParamRowMutations'] ?? 0
+  ).toBeGreaterThan(0);
+  // ActionGuideParam 行 id 为 100..103，新建行取最大 id + 1 = 104；成功后自动选中
+  // 新行，字段栏出现该行的名字输入框（不依赖滚动位置）。
+  await expect(window.getByLabel('行 104 的名字')).toBeVisible();
+
+  // 复制当前行（选中的行 104 → 新 id 105），焦点落到新行。
+  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '复制当前行' }).click();
+  await expect(window.getByLabel('行 105 的名字')).toBeVisible();
+
+  // 删除当前行（行 105）：删除后选择清空，回到「先在中栏选择一行。」空态。
+  await window.locator('.workbench__toolbar .toolbar-button', { hasText: '删除当前行' }).click();
+  await expect(window.locator('.wb-empty', { hasText: '先在中栏选择一行。' })).toBeVisible();
 
   // 父选区清理：切到 EquipParamWeapon 后字段栏清空回空态。
   await window.locator('.wb-list .wb-row', { hasText: 'EquipParamWeapon' }).click();

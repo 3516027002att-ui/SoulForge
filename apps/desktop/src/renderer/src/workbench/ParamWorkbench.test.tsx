@@ -83,16 +83,19 @@ describe('ParamWorkbench 初始结构（挂载即有的骨架）', () => {
     assert.equal(html.match(/先在左栏选择一个 param。/g)?.length ?? 0, 2);
   });
 
-  it('工具条（T5-4）：导出行/导入行/导出备注/导入备注 四个真实按钮，未选表时禁用', () => {
+  it('工具条（T5-4 + 问题 4）：新建行/复制当前行/删除当前行 + 导出行/导入行/导出备注/导入备注 七个真实按钮，未选表时禁用', () => {
     const html = render();
-    // SSR 初始 selectedEntry=null，四个按钮 disabled（没有可导入导出的目标）。
+    // SSR 初始 selectedEntry=null，全部按钮 disabled（没有可操作的表格目标）。
     // 这是真实功能的禁用态，不是 §7.6 禁止的「未接通工具的假按钮」。
+    assert.ok(html.includes('>新建行</button>'), '缺少新建行按钮');
+    assert.ok(html.includes('>复制当前行</button>'), '缺少复制当前行按钮');
+    assert.ok(html.includes('>删除当前行</button>'), '缺少删除当前行按钮');
     assert.ok(html.includes('>导出行</button>'), '缺少导出行按钮');
     assert.ok(html.includes('>导入行</button>'), '缺少导入行按钮');
     assert.ok(html.includes('>导出备注</button>'), '缺少导出备注按钮');
     assert.ok(html.includes('>导入备注</button>'), '缺少导入备注按钮');
     const buttons = html.match(/<button/g) ?? [];
-    assert.equal(buttons.length, 4, '工具条应恰好 4 个按钮');
+    assert.equal(buttons.length, 7, '工具条应恰好 7 个按钮');
   });
 
   it('容器物理路径/文件名不进可见 DOM（§7.3/§7.8 禁止列表）', () => {

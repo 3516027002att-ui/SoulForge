@@ -688,6 +688,49 @@ function registerFixtureIpc() {
     };
   });
 
+  // 问题 4：容器内 PARAM 行级写入（新建行/复制当前行/删除当前行）。fixture 走
+  // 合成内存态：就地增删 paramTables 行的 rows，重读即见 —— 与行名/CSV 的
+  // fixture 同一套约定（不真写盘）。
+  handleTrusted('resource.applyContainerParamRowMutations', (_event, containerUri, _expectedContainerHash, mutation) => {
+    track('resource.applyContainerParamRowMutations');
+    if (containerUri !== fixtureParamUri) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'CONTAINER_NOT_FOUND', message: `fixture 未登记的容器：${containerUri}`, containerUri }]
+      };
+    }
+    const table = paramTables.find((t) => t.entryIndex === mutation?.entryIndex);
+    const kind = mutation?.kind;
+    if (!table || !table.rows || !['add', 'copy', 'delete'].includes(kind)) {
+      return {
+        ok: false, changedFiles: [],
+        diagnostics: [{ severity: 'error', code: 'PARAM_ROW_MUTATION_INVALID', message: 'fixture 行级写入目标无效。', containerUri }]
+      };
+    }
+    if (kind === 'delete') {
+      const before = table.rows.length;
+      table.rows = table.rows.filter((r) => r.id !== mutation.rowId);
+      if (table.rows.length === before) {
+        return {
+          ok: false, changedFiles: [],
+          diagnostics: [{ severity: 'error', code: 'PARAM_ROW_NOT_FOUND', message: `fixture 找不到行 ${mutation.rowId}。`, containerUri }]
+        };
+      }
+    } else {
+      table.rows.push({
+        id: mutation.rowId,
+        name: '',
+        dataBase64: mutation.rowDataBase64,
+        dataHash: `fixture-param-row-${mutation.rowId}`
+      });
+    }
+    return {
+      ok: true,
+      changedFiles: [{ sourceUri: containerUri, sourcePath: 'param/gameparam/gameparam.parambnd.dcx', changed: true }],
+      diagnostics: []
+    };
+  });
+
   // T5-4/T5-6：CSV 导入导出。fixture 不真开对话框、不写盘，返回成功诊断；
   // 渲染器 footer 据此显示「操作完成」类文案（与生产 RendererSaveResult 同面）。
   function csvOk(code, message) {
