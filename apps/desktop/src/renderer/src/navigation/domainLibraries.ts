@@ -53,15 +53,22 @@ export function isScriptLibraryPath(relativePath: string): boolean {
 }
 
 /**
+ * 动作脚本（HKS）判定：`action/` 路径下的 `.hks(.dcx)`（如
+ * `action/script/c0000_transition.hks`）。独立半判据，供动作侧栏分组用。
+ */
+export function isActionScriptPath(relativePath: string): boolean {
+  return (/(?:^|[\\/])action[\\/]/i.test(relativePath) && /\.hks(\.dcx)?$/i.test(relativePath));
+}
+
+/**
  * 行为/动作域：T3（2026-08-15）行为 + 动画合并为「动作」，侧栏列
  * `anibnd|tae`（与隐藏域 animation 同口径）；S39（2026-08-18）追加
- * `action/` 路径下的 `.hks`（如 `action/script/c0000_transition.hks`），
- * 与 anibnd/tae 一起进动作侧栏，点开仍走脚本 IDE（selectEditor 'script'）。
- * behbnd/esd/hkxbnd 不进动作侧栏，需要时走「文件」域（grok T3）。
+ * `action/` 路径下的 `.hks`，与 anibnd/tae 一起进动作侧栏，点开仍走
+ * 脚本 IDE（selectEditor 'script'）。behbnd/esd/hkxbnd 不进动作侧栏，
+ * 需要时走「文件」域（grok T3）。
  */
 export function isBehaviorLibraryPath(relativePath: string): boolean {
-  return /\.(tae|anibnd)(\.dcx)?$/i.test(relativePath)
-    || (/(?:^|[\\/])action[\\/]/i.test(relativePath) && /\.hks(\.dcx)?$/i.test(relativePath));
+  return isAnimationLibraryPath(relativePath) || isActionScriptPath(relativePath);
 }
 
 /** 动画域（T3 后顶栏隐藏，保留给隐藏域/测试）。 */
@@ -134,6 +141,19 @@ export function pickPreferredParamContainer<T extends { relativePath: string }>(
   return gameparam ?? containers[0] ?? null;
 }
 
+/**
+ * 动作域首选动画库（13-B）：优先 `chr/c0000.anibnd.dcx`，没有则列表里第一个
+ * anibnd。只挑 anibnd 不挑 tae —— 点「动作」默认进 TAE 工作台（动画 + 词条 +
+ * 预览），而不是点中列表第一项 HKS 进脚本 IDE。
+ */
+export function pickPreferredAnimation<T extends { relativePath: string }>(
+  files: readonly T[]
+): T | null {
+  const anibnds = files.filter((file) => /\.anibnd(\.dcx)?$/i.test(file.relativePath));
+  const c0000 = anibnds.find((file) => /(?:^|[\\/])c0000\.anibnd(\.dcx)?$/i.test(file.relativePath));
+  return c0000 ?? anibnds[0] ?? null;
+}
+
 /** 侧栏显示名：去掉复合扩展，物理路径只进 title。 */
 export function libraryDisplayName(relativePath: string): string {
   const base = relativePath.split(/[\\/]/).pop() ?? relativePath;
@@ -178,6 +198,33 @@ export function paramLibraryGroups<T extends { relativePath: string }>(
       label: 'GPARAM',
       ...(gparamFiles.length > 0 ? { hint: `${gparamFiles.length} banks` } : {}),
       files: gparamFiles,
+      defaultCollapsed: true
+    }
+  ];
+}
+
+/**
+ * 动作域的分组（13-B）：「动画」（anibnd|tae，默认展开）+「动作脚本」（action/
+ * 下的 hks，默认折叠）。S39 把 HKS 与 anibnd/tae 拼进同一侧栏时 HKS 按字母排在
+ * 前面，点「动作」再点第一项就落到脚本 IDE——分组把动画组放前，动画/词条回到
+ * 动作页首屏；HKS 组默认折上，要改动作脚本再点开。
+ */
+export function behaviorLibraryGroups<T extends { relativePath: string }>(
+  files: readonly T[]
+): Array<DomainLibraryGroup<T>> {
+  const animFiles = files.filter((file) => isAnimationLibraryPath(file.relativePath));
+  const scriptFiles = files.filter((file) => isActionScriptPath(file.relativePath));
+  return [
+    {
+      id: 'animation',
+      label: '动画',
+      files: animFiles
+    },
+    {
+      id: 'action-script',
+      label: '动作脚本',
+      ...(scriptFiles.length > 0 ? { hint: `${scriptFiles.length} 个` } : {}),
+      files: scriptFiles,
       defaultCollapsed: true
     }
   ];

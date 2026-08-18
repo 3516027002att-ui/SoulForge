@@ -103,9 +103,11 @@ import { buildDomainSummaries, domainLabel } from './navigation/domainNavigation
 import { DomainNavigationBar } from './navigation/DomainNavigationBar.js';
 import { DomainLibraryList } from './navigation/DomainLibraryList.js';
 import {
+  behaviorLibraryGroups,
   filesForDomain,
   libraryDisplayName,
   paramLibraryGroups,
+  pickPreferredAnimation,
   pickPreferredParamContainer
 } from './navigation/domainLibraries.js';
 import { AmbientField } from './theme/AmbientField.js';
@@ -496,6 +498,10 @@ export function App(): ReactElement {
   const cmdkDialogRef = useRef<HTMLDivElement>(null);
   /** 命令面板打开前的焦点位置；关闭时归还，避免焦点掉回文档开头。 */
   const cmdkReturnFocusRef = useRef<HTMLElement | null>(null);
+  // 13-C：顶栏 tab 条。ref 供非被动 wheel 监听挂载；dragRef 记录拖拽起点
+  //（startX 视口坐标 + 按下时的 scrollLeft），指针移动换算成横向滚动。
+  const tabbarRef = useRef<HTMLDivElement>(null);
+  const tabbarDragRef = useRef<{ startX: number; startScrollLeft: number } | null>(null);
   const toastIdRef = useRef(0);
   const prevPendingCountRef = useRef(0);
 
@@ -700,13 +706,23 @@ export function App(): ReactElement {
   );
   // R1 裁定（用户修正）：参数域侧栏是两级——只有 PARAM 与 GPARAM 两个常驻项，
   // GPARAM 组默认折叠、点开才出现各 bank 子选项；不能把 gparam 平铺把 gameparam
-  // 挤到下面。其他域不分组，保持平铺。
-  const paramGroups = useMemo(
-    () => (activeDomain === 'param' ? paramLibraryGroups(indexedFiles) : undefined),
+  // 挤到下面。13-B：动作域同形态——「动画」（anibnd|tae，默认展开）+「动作脚本」
+  // （action/ 下 hks，默认折叠），HKS 不再按字母排在动画前面。其他域不分组，保持平铺。
+  const domainGroups = useMemo(
+    () => (activeDomain === 'param'
+      ? paramLibraryGroups(indexedFiles)
+      : activeDomain === 'behavior'
+        ? behaviorLibraryGroups(indexedFiles)
+        : undefined),
     [activeDomain, indexedFiles]
   );
   const preferredParamContainer = useMemo(
     () => pickPreferredParamContainer(indexedFiles),
+    [indexedFiles]
+  );
+  // 13-B：动作域默认打开的首选动画库（chr/c0000.anibnd.dcx，没有则第一个 anibnd）。
+  const preferredAnimationContainer = useMemo(
+    () => pickPreferredAnimation(indexedFiles),
     [indexedFiles]
   );
   const paramWorkbenchFile = activeEditor === 'param-container' && selectedFile
@@ -1969,6 +1985,48 @@ export function App(): ReactElement {
     window.addEventListener('pointerup', handleUp);
   }
 
+  /**
+   * 13-C：tabbar 指针按住拖 = 横向滚。
+   *
+   * 在 tabbar 上按下（左键）记起点，pointermove 时按位移负向换算 scrollLeft——
+   * 手指/指针向右拖，内容向左滚。点击 tab（按下即抬起且几乎不动）不触发位移，
+   * 点击选择语义保留。
+   */
+  function startTabbarDrag(event: ReactPointerEvent<HTMLDivElement>): void {
+    if (event.button !== 0) return;
+    const el = event.currentTarget;
+    tabbarDragRef.current = { startX: event.clientX, startScrollLeft: el.scrollLeft };
+  }
+
+  function moveTabbarDrag(event: ReactPointerEvent<HTMLDivElement>): void {
+    const drag = tabbarDragRef.current;
+    if (!drag) return;
+    event.currentTarget.scrollLeft = drag.startScrollLeft - (event.clientX - drag.startX);
+    event.preventDefault();
+  }
+
+  function endTabbarDrag(): void {
+    tabbarDragRef.current = null;
+  }
+
+  /**
+   * 13-C：滚轮（含竖向滚轮）在 tabbar 上改 scrollLeft。
+   *
+   * 用原生非被动 wheel 监听才能 preventDefault——否则竖向滚轮会落到下方工作台，
+   * 与 tabbar 本身完全不滚横向冲突。deltaY + deltaX 都折算进 scrollLeft。
+   */
+  useEffect(() => {
+    const el = tabbarRef.current;
+    if (!el) return undefined;
+    const onWheel = (event: WheelEvent): void => {
+      el.scrollLeft += event.deltaY + event.deltaX;
+      event.preventDefault();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+
   function pushToast(text: string, kind: 'ok' | 'warn' = 'ok'): void {
     toastIdRef.current += 1;
     const id = toastIdRef.current;
@@ -2269,6 +2327,20 @@ export function App(): ReactElement {
         setCenterView('resource');
         void selectFile(first);
         setStatus('事件：源码工作台');
+        return;
+      }
+    }
+    if (domain === 'behavior') {
+      // 13-B：点「动作」自动打开首选 anibnd（chr/c0000.anibnd.dcx，没有则第一个
+      // anibnd），进 TAE 工作台（动画 | 词条 | 预览）。绝不能 selectFile 第一个
+      // HKS —— S39 后 HKS 按字母排前面，默认点它只会落到脚本 IDE，动画/词条
+      // 被挤到列表下面（用户反馈「动作不显示动画、词条」）。
+      // selectFile 走的 selectEditor 对 .anibnd/.tae 早返 'tae'，不会落 BND 容器页。
+      const preferred = preferredAnimationContainer;
+      if (preferred) {
+        setCenterView('resource');
+        void selectFile(preferred);
+        setStatus('动作：已打开动画工作台');
         return;
       }
     }
@@ -3091,7 +3163,7 @@ export function App(): ReactElement {
               ) : (
                 <DomainLibraryList
                   files={domainLibraries}
-                  {...(paramGroups ? { groups: paramGroups } : {})}
+                  {...(domainGroups ? { groups: domainGroups } : {})}
                   selectedUri={selectedFile?.sourceUri ?? null}
                   emptyHint={
                     workspace
@@ -3316,7 +3388,20 @@ export function App(): ReactElement {
 
         {/* ══════════ 编辑器主区 ══════════ */}
         <main className="editor-area">
-          <div className="tabbar" role="tablist" aria-label="打开的资源">
+          {/* 13-C：tabbar 露出底边横条可拖（styles.css 删掉了 scrollbar-width: none /
+              ::-webkit-scrollbar display:none）；指针按住拖 = 横向滚，滚轮（含竖向）
+              在 tabbar 上改 scrollLeft，不让竖向滚轮落到下方工作台。 */}
+          <div
+            ref={tabbarRef}
+            className="tabbar"
+            role="tablist"
+            aria-label="打开的资源"
+            onPointerDown={startTabbarDrag}
+            onPointerMove={moveTabbarDrag}
+            onPointerUp={endTabbarDrag}
+            onPointerLeave={endTabbarDrag}
+            onPointerCancel={endTabbarDrag}
+          >
             {openTabs.map((tab) => {
               const isActive = selectedFile?.sourceUri === tab.sourceUri;
               // R1/P7 裁定：文档标签显示逻辑名（去复合扩展），物理路径只进 title。

@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  behaviorLibraryGroups,
   filesForDomain,
+  isActionScriptPath,
   isBehaviorLibraryPath,
   isParamContainerPath,
   isScriptLibraryPath,
   libraryDisplayName,
   paramLibraryGroups,
+  pickPreferredAnimation,
   pickPreferredParamContainer
 } from './domainLibraries.js';
 
@@ -161,5 +164,82 @@ describe('domainLibraries', () => {
     assert.equal(groups.length, 2);
     assert.equal(groups[1]!.files.length, 0);
     assert.equal(groups[1]!.hint, undefined);
+  });
+
+  it('13-B：动作域分组为「动画」+「动作脚本」两组，HKS 组默认折叠', () => {
+    const files = [
+      { relativePath: 'chr/c5030/c5030.anibnd.dcx' },
+      { relativePath: 'action/c5030.tae' },
+      { relativePath: 'action/script/c0000_transition.hks' },
+      { relativePath: 'action/c0000.hks' },
+      { relativePath: 'event/common.emevd' }
+    ];
+    const groups = behaviorLibraryGroups(files);
+    assert.equal(groups.length, 2, '动作域必须是「动画」/「动作脚本」两个组');
+    assert.equal(groups[0]!.id, 'animation');
+    assert.equal(groups[0]!.label, '动画');
+    assert.equal(groups[0]!.defaultCollapsed, undefined, '动画组默认展开（不折叠）');
+    assert.deepEqual(
+      groups[0]!.files.map((file) => file.relativePath),
+      ['chr/c5030/c5030.anibnd.dcx', 'action/c5030.tae'],
+      '动画组只收 anibnd|tae，不收 hks'
+    );
+    assert.equal(groups[1]!.id, 'action-script');
+    assert.equal(groups[1]!.label, '动作脚本');
+    assert.equal(groups[1]!.defaultCollapsed, true, '动作脚本组默认折叠');
+    assert.equal(groups[1]!.hint, '2 个');
+    assert.deepEqual(
+      groups[1]!.files.map((file) => file.relativePath),
+      ['action/script/c0000_transition.hks', 'action/c0000.hks'],
+      '动作脚本组只收 action/ 下的 hks，不收 anibnd/tae'
+    );
+    // 分组不改变文件归集：行为域仍同时包含动画与 HKS。
+    assert.deepEqual(
+      filesForDomain('behavior', files).map((file) => file.relativePath),
+      ['chr/c5030/c5030.anibnd.dcx', 'action/c5030.tae', 'action/script/c0000_transition.hks', 'action/c0000.hks'],
+      '13-B 分组后动作域仍包含 HKS 与 anibnd（只分组，不滤域）'
+    );
+  });
+
+  it('13-B：动作域首选 chr/c0000.anibnd.dcx，没有则第一个 anibnd，且不挑 tae', () => {
+    const files = [
+      { relativePath: 'action/c0000_transition.hks' },
+      { relativePath: 'chr/c0000/c0000.anibnd.dcx' },
+      { relativePath: 'action/c5030.tae' }
+    ];
+    assert.equal(
+      pickPreferredAnimation(files)?.relativePath,
+      'chr/c0000/c0000.anibnd.dcx',
+      '优先 c0000.anibnd.dcx（即使 HKS 排前面也不选第一个 HKS）'
+    );
+    assert.equal(
+      pickPreferredAnimation([
+        { relativePath: 'action/c5030.tae' },
+        { relativePath: 'action/c0000_transition.hks' }
+      ]),
+      null,
+      '只有 tae/hks 没有 anibnd 时返回 null（首选与兜底都只挑 anibnd）'
+    );
+    assert.equal(
+      pickPreferredAnimation([
+        { relativePath: 'chr/c0000/c0000.anibnd.dcx' },
+        { relativePath: 'chr/c5030/c5030.anibnd.dcx' }
+      ])?.relativePath,
+      'chr/c0000/c0000.anibnd.dcx',
+      '多个 anibnd 仍优先 c0000'
+    );
+    assert.equal(
+      pickPreferredAnimation([{ relativePath: 'event/common.emevd' }]),
+      null,
+      '无动画文件返回 null'
+    );
+  });
+
+  it('13-B：动作脚本半判据（isActionScriptPath）与动作域判据同口径', () => {
+    assert.equal(isActionScriptPath('action/script/c0000_transition.hks'), true);
+    assert.equal(isActionScriptPath('action/c0000.hks'), true);
+    assert.equal(isActionScriptPath('action/c0000.hks.dcx'), true);
+    assert.equal(isActionScriptPath('chr/c0000/c0000.anibnd.dcx'), false);
+    assert.equal(isActionScriptPath('script/aicommon.luabnd.dcx'), false);
   });
 });

@@ -695,9 +695,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
   flex: none; display: flex; align-items: flex-end; overflow-x: auto; overflow-y: hidden;
   min-height: 34px;
   background: var(--forge-1); border-bottom: 1px solid var(--line);
-  scrollbar-width: none;
 }
-.tabbar::-webkit-scrollbar { display: none; }
 .tab {
   flex: none; display: flex; align-items: center; gap: 8px;
   padding: 8px 12px 8px 16px; max-width: 200px;
