@@ -964,7 +964,11 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       title: 'Fields',
       hint: definition ? `${fields.length} 个字段` : (typeName ? '无字段定义' : ''),
       initialFlex: 0.35,
-      minWidth: 320,
+      // 问题 3：320 → 240（与 FMG 文本列同档）。Agent 拉宽后主区装不下
+      // 180+260+320=760，FIELDS 被挤出可视区像是被 Agent 盖住；降下限后
+      // 默认侧栏宽度下三栏可完整入屏，更窄时仍可横向滚动（.workbench__columns
+      // overflow-x: auto）兜底，不裁内容。
+      minWidth: 240,
       children: (
         <div className="wb-props">
           {/* 选中的 param 读不出来时，右栏给出结构化原因而不是空白。
