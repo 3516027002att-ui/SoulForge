@@ -59,9 +59,12 @@ export const DEFERRED_PREVIEW_TARGET_RELEASE = 'V0.6' as const;
 export type DeferredPreviewTargetRelease = typeof DEFERRED_PREVIEW_TARGET_RELEASE;
 
 /**
- * 已移出 V0.5 范围、仅保留标记只读预览的编辑器。与
+ * 已移出当前版本范围、仅保留标记只读预览的编辑器。与
  * `docs/V0_5_IMPLEMENTATION_HANDOFF.md` §18.2.1
  * `SCOPE-EDITORS.deferredPreviewEditors.editorIds` 对应。
+ *
+ * S36 已开闸：msb（write-msb typed mutation）恢复写入，不再出现在本清单；
+ * tae/esd/flver 保持延期只读。
  *
  * 放在 shared 而非 core：renderer 需要在运行时读取该清单来打标并隐藏
  * 提交入口，而 core 含 Node-only 模块，不能进入浏览器包。core 的能力
@@ -69,7 +72,6 @@ export type DeferredPreviewTargetRelease = typeof DEFERRED_PREVIEW_TARGET_RELEAS
  * smoke 断言，避免出现两份可漂移的清单。
  */
 export const DEFERRED_PREVIEW_EDITOR_KINDS = [
-  'msb',
   'tae',
   'esd',
   'flver'

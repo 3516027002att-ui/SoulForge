@@ -10,9 +10,7 @@ import {
   type ReactElement
 } from 'react';
 import {
-  DEFERRED_PREVIEW_TARGET_RELEASE,
   classifyWorkspaceOpen,
-  isDeferredPreviewEditorKind,
   PARAM_PAGE_SIZE,
   mergeCiteHits
 } from '@soulforge/shared';
@@ -1571,8 +1569,9 @@ export function App(): ReactElement {
   }
 
   /**
-   * MSB 写路径当前为延期只读预览（V0.6 治理承接后开闸），函数保留接线。
-   * 实际是否放行以 IPC 返回为准：主进程在 deferredPreview 门禁下 fail-closed。
+   * S36 开闸：MSB 写链恢复放行（write-msb → Patch Engine）。
+   * 实际是否成功以 IPC 返回为准：主进程在进入 Patch Engine 前仍做
+   * Sekiro 工作区、暂存根与哈希并发保护校验。
    */
   async function applyMsbNativeMutationAndReload(
     mutation: MsbNativeMutation,
@@ -3287,23 +3286,18 @@ export function App(): ReactElement {
                 sourceCounts={msbSourceCounts}
                 maxNodes={2000}
                 openFailure={lastOpenFailure?.kind === 'msb-open-failed' ? lastOpenFailure : null}
-                writeEnabled={!isDeferredPreviewEditorKind('msb')
-                  && msbLive
+                writeEnabled={msbLive
                   && Boolean(msbSourceHash)
                   && Boolean(selectedFile)}
-                {...(isDeferredPreviewEditorKind('msb')
-                  ? { deferredPreviewRelease: DEFERRED_PREVIEW_TARGET_RELEASE }
-                  : {
-                      onPartPositionCommit: (input: MsbPositionCommitInput) => {
-                        void commitMsbPosition(input, 'set_part_position');
-                      },
-                      onRegionPositionCommit: (input: MsbPositionCommitInput) => {
-                        void commitMsbPosition(input, 'set_region_position');
-                      },
-                      onPartTransformCommit: (input: MsbTransformCommitInput) => {
-                        void commitMsbTransform(input);
-                      }
-                    })}
+                onPartPositionCommit={(input: MsbPositionCommitInput) => {
+                  void commitMsbPosition(input, 'set_part_position');
+                }}
+                onRegionPositionCommit={(input: MsbPositionCommitInput) => {
+                  void commitMsbPosition(input, 'set_region_position');
+                }}
+                onPartTransformCommit={(input: MsbTransformCommitInput) => {
+                  void commitMsbTransform(input);
+                }}
               />
             </>
           )}

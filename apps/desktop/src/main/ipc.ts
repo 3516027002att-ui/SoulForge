@@ -4457,8 +4457,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
       if (gameBlocked) return gameBlocked;
-      const deferredBlocked = rejectDeferredPreviewEditorWrite('msb', sourceUri);
-      if (deferredBlocked) return deferredBlocked;
+      // S36 开闸：msb 不再延期，write-msb 写链经 applyNativeMutation →
+      // Patch Engine 提交（备份/确认/回滚元数据与其余语义编辑器同一范式）。
       const storage = durableStoragePaths(activeSession.meta.workspaceId);
       const stage = await verifiedStageRoots(activeSession, storage, 'MSB_STAGING_PREPARE_FAILED');
       if (stage.diagnostics.length > 0) {

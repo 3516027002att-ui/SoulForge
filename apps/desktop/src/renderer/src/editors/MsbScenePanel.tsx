@@ -76,11 +76,6 @@ export interface MsbScenePanelProps {
    * 与 App.tsx 的 lastOpenFailure 同源，绝不含绝对路径。
    */
   openFailure?: { code: string; message: string } | null;
-  /**
-   * 非空表示该编辑器已延期至指定里程碑，本版仅作标记只读预览：
-   * 面板隐藏全部提交入口并显式标注延期状态。
-   */
-  deferredPreviewRelease?: 'V0.6';
 }
 
 /**
@@ -91,8 +86,9 @@ export interface MsbScenePanelProps {
  * camera（旋转/缩放/平移）走 OrbitControls。没有真实能力时不假造：
  * transform gizmo / 资产浏览器 / Prefabs 等在本版不出现（§10.6）。
  *
- * 写链未就绪（msb 处于 deferred）时整个 footer 不渲染任何保存动作，
- * 只显式标注延期状态——与「writer 未就绪时无保存动作」一致。
+ * S36 开闸：msb 写入恢复（write-msb → Patch Engine），footer 渲染
+ * part/region 位置微调与 part transform 提交入口。写入是否可用由
+ * `writeEnabled` 决定（实时加载 + 已选中资源），按钮在未选中目标时禁用。
  */
 export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -111,7 +107,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     scaleZ: number;
   }>({ rotX: 0, rotY: 0, rotZ: 0, scaleX: 1, scaleY: 1, scaleZ: 1 });
   const regions = props.regions ?? [];
-  const deferredRelease = props.deferredPreviewRelease;
   /** S23：最近一次 drawList（mesh 渐进加载后重建用）。 */
   const drawListRef = useRef<ReturnType<typeof buildSceneDrawList> | null>(null);
   /** S23：已加载到真实网格的 part（item id → mesh 数据）。 */
@@ -625,128 +620,119 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         }
       ]}
       footer={
-        deferredRelease ? (
-          <div className="row gap">
-            <p className="muted" role="note">
-              MSB 编辑已延期至 {deferredRelease}：本版仅提供只读预览，无位置提交入口。
-              既有 write-msb typed mutation 写链已在本版关闭，主进程会拒绝写入请求。
-            </p>
+        <div className="row gap">
+          <div className="row gap" aria-label="part 位置微调">
+            <label>
+              ΔX
+              <input
+                type="number"
+                step="0.1"
+                value={nudge.x}
+                onChange={(e) => setNudge((n) => ({ ...n, x: Number(e.target.value) || 0 }))}
+              />
+            </label>
+            <label>
+              ΔY
+              <input
+                type="number"
+                step="0.1"
+                value={nudge.y}
+                onChange={(e) => setNudge((n) => ({ ...n, y: Number(e.target.value) || 0 }))}
+              />
+            </label>
+            <label>
+              ΔZ
+              <input
+                type="number"
+                step="0.1"
+                value={nudge.z}
+                onChange={(e) => setNudge((n) => ({ ...n, z: Number(e.target.value) || 0 }))}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={selected?.kind !== 'msb-part'}
+              onClick={commitNudge}
+            >
+              提交 part 位置
+            </button>
+            <button
+              type="button"
+              disabled={selected?.kind !== 'msb-region'}
+              onClick={commitRegionNudge}
+            >
+              提交 region 位置
+            </button>
           </div>
-        ) : (
-          <div className="row gap">
-            <div className="row gap" aria-label="part 位置微调">
-              <label>
-                ΔX
-                <input
-                  type="number"
-                  step="0.1"
-                  value={nudge.x}
-                  onChange={(e) => setNudge((n) => ({ ...n, x: Number(e.target.value) || 0 }))}
-                />
-              </label>
-              <label>
-                ΔY
-                <input
-                  type="number"
-                  step="0.1"
-                  value={nudge.y}
-                  onChange={(e) => setNudge((n) => ({ ...n, y: Number(e.target.value) || 0 }))}
-                />
-              </label>
-              <label>
-                ΔZ
-                <input
-                  type="number"
-                  step="0.1"
-                  value={nudge.z}
-                  onChange={(e) => setNudge((n) => ({ ...n, z: Number(e.target.value) || 0 }))}
-                />
-              </label>
-              <button
-                type="button"
-                disabled={selected?.kind !== 'msb-part'}
-                onClick={commitNudge}
-              >
-                提交 part 位置
-              </button>
-              <button
-                type="button"
-                disabled={selected?.kind !== 'msb-region'}
-                onClick={commitRegionNudge}
-              >
-                提交 region 位置
-              </button>
-            </div>
-            <div className="row gap" aria-label="part transform 微调">
-              <label>
-                rotX
-                <input
-                  type="number"
-                  step="1"
-                  value={transform.rotX}
-                  onChange={(e) => setTransform((t) => ({ ...t, rotX: Number(e.target.value) || 0 }))}
-                />
-              </label>
-              <label>
-                rotY
-                <input
-                  type="number"
-                  step="1"
-                  value={transform.rotY}
-                  onChange={(e) => setTransform((t) => ({ ...t, rotY: Number(e.target.value) || 0 }))}
-                />
-              </label>
-              <label>
-                rotZ
-                <input
-                  type="number"
-                  step="1"
-                  value={transform.rotZ}
-                  onChange={(e) => setTransform((t) => ({ ...t, rotZ: Number(e.target.value) || 0 }))}
-                />
-              </label>
-              <label>
-                scaleX
-                <input
-                  type="number"
-                  step="0.1"
-                  value={transform.scaleX}
-                  onChange={(e) => setTransform((t) => ({ ...t, scaleX: Number(e.target.value) || 1 }))}
-                />
-              </label>
-              <label>
-                scaleY
-                <input
-                  type="number"
-                  step="0.1"
-                  value={transform.scaleY}
-                  onChange={(e) => setTransform((t) => ({ ...t, scaleY: Number(e.target.value) || 1 }))}
-                />
-              </label>
-              <label>
-                scaleZ
-                <input
-                  type="number"
-                  step="0.1"
-                  value={transform.scaleZ}
-                  onChange={(e) => setTransform((t) => ({ ...t, scaleZ: Number(e.target.value) || 1 }))}
-                />
-              </label>
-              <button
-                type="button"
-                disabled={selected?.kind !== 'msb-part'}
-                onClick={commitTransform}
-              >
-                提交 part transform
-              </button>
-            </div>
-            <p className="muted">
-              {props.writeEnabled
-                ? '实时模式：part/region 位置微调经 Bridge write-msb → Patch Engine 提交。'
-                : 'MSB 写入未开放：微调仅为本地预览，不会写入。'}
-            </p>
+          <div className="row gap" aria-label="part transform 微调">
+            <label>
+              rotX
+              <input
+                type="number"
+                step="1"
+                value={transform.rotX}
+                onChange={(e) => setTransform((t) => ({ ...t, rotX: Number(e.target.value) || 0 }))}
+              />
+            </label>
+            <label>
+              rotY
+              <input
+                type="number"
+                step="1"
+                value={transform.rotY}
+                onChange={(e) => setTransform((t) => ({ ...t, rotY: Number(e.target.value) || 0 }))}
+              />
+            </label>
+            <label>
+              rotZ
+              <input
+                type="number"
+                step="1"
+                value={transform.rotZ}
+                onChange={(e) => setTransform((t) => ({ ...t, rotZ: Number(e.target.value) || 0 }))}
+              />
+            </label>
+            <label>
+              scaleX
+              <input
+                type="number"
+                step="0.1"
+                value={transform.scaleX}
+                onChange={(e) => setTransform((t) => ({ ...t, scaleX: Number(e.target.value) || 1 }))}
+              />
+            </label>
+            <label>
+              scaleY
+              <input
+                type="number"
+                step="0.1"
+                value={transform.scaleY}
+                onChange={(e) => setTransform((t) => ({ ...t, scaleY: Number(e.target.value) || 1 }))}
+              />
+            </label>
+            <label>
+              scaleZ
+              <input
+                type="number"
+                step="0.1"
+                value={transform.scaleZ}
+                onChange={(e) => setTransform((t) => ({ ...t, scaleZ: Number(e.target.value) || 1 }))}
+              />
+            </label>
+            <button
+              type="button"
+              disabled={selected?.kind !== 'msb-part'}
+              onClick={commitTransform}
+            >
+              提交 part transform
+            </button>
           </div>
-        )
+          <p className="muted">
+            {props.writeEnabled
+              ? '实时模式：part/region 位置微调经 Bridge write-msb → Patch Engine 提交。'
+              : 'MSB 写入未开放：微调仅为本地预览，不会写入。'}
+          </p>
+        </div>
       }
     />
   );

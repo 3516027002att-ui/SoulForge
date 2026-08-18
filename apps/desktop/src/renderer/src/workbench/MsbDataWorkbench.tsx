@@ -12,14 +12,12 @@
  * 于是「地图里这个 ObjAct 的 Entity ID 是多少」这类问题在界面上无从回答。
  * 两者并存，不互相替代。
  *
- * ── 只读，且如实标注 ──
+ * ── 只读浏览，写入在 MsbScenePanel ──
  *
- * MSB 编辑已由治理层延期至 V0.6（shared 的 DEFERRED_PREVIEW_EDITOR_KINDS，
- * 对应 scope.json 的范围裁定）。本组件因此不提供任何提交入口，属性值以只读
- * 呈现并显示延期横幅。把它做成好用的只读工作台不等于假装可编辑 —— 后者更糟：
- * 用户会改完才发现没生效。
- *
- * 放开写入是改产品范围，不是前端能单方面决定的事。
+ * MSB 写入已由 S36 开闸（write-msb → Patch Engine），但提交入口在姊妹组件
+ * MsbScenePanel（三维代理场景：part/region 位置微调与 part transform）。
+ * 本组件是属性对照表，专注只读浏览；属性值以只读呈现，不重复造第二套
+ * 提交入口——改数值交给场景面板的 typed mutation，这里不假装能编辑。
  */
 
 import { useMemo, useState, type ReactElement } from 'react';
@@ -41,8 +39,6 @@ export interface MsbDataWorkbenchProps {
   sourcePath: string;
   /** 各类别的条目。键即左栏类别名。 */
   categories: Array<{ id: string; label: string; entries: MsbEntryLike[] }>;
-  /** 非空表示该编辑器已延期至指定里程碑。 */
-  deferredPreviewRelease?: 'V0.6';
 }
 
 /**
@@ -218,23 +214,8 @@ export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
         <>
           <span className="crumb"><b>地图数据</b>{` · ${props.sourcePath}`}</span>
           <span className="toolbar-spacer" style={{ flex: 1 }}></span>
-          {props.deferredPreviewRelease && (
-            <span className="pill pill--warn">
-              {props.deferredPreviewRelease} 只读
-            </span>
-          )}
         </>
       }
-      {...(props.deferredPreviewRelease
-        ? {
-            footer: (
-              <span className="muted" style={{ fontSize: 11 }} role="note">
-                MSB 编辑已延期至 {props.deferredPreviewRelease}：本版仅提供只读浏览，
-                属性值不可修改，也不提供提交入口。
-              </span>
-            )
-          }
-        : {})}
     />
   );
 }

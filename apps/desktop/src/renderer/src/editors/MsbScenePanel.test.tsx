@@ -7,10 +7,11 @@
  *
  * 1. SSR 结构：三栏 Map Object List | Viewport | Properties 挂载即存在，
  *    没有为凑四栏造 Tools 空栏；未加载 MSB 数据时左栏是显式 muted 空态而不是错误；
- * 2. Negative source：deferred（msb 目前处于延期只读预览）时整个 footer 只有延期
- *    提示，没有任何保存动作；viewport 只承载 proxy scene 宿主（SSR 下无 canvas、
+ * 2. Negative source：S36 开闸后 footer 恒为提交入口形态（part/region 位置微调与
+ *    part transform），writeEnabled 关闭时按钮禁用并显式标注「写入未开放」，绝不
+ *    静默假装已保存；viewport 只承载 proxy scene 宿主（SSR 下无 canvas、
  *    无假缩略图/假预览）；左栏对象列表由 scene manifest 派生而不是 renderer 扫字节；
- *    唯一写路径（非 deferred）也只走 Bridge commit 回调，不自行解析字节。
+ *    写路径只走 Bridge commit 回调，不自行解析字节。
  *
  * 真实 live 链路（Bridge → ipc → readMsbDocument → mountThreeProxyScene）由
  * bridge:verify:msb-all 与 E2E 覆盖，本文件只钉 renderer 侧的展示与接线约束。
@@ -94,13 +95,12 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     'utf8'
   );
 
-  it('deferred（只读预览）时无保存动作：整个 footer 只有延期提示', () => {
-    const html = render({ deferredPreviewRelease: 'V0.6' });
-    assert.match(html, /只读预览，无位置提交入口/);
-    assert.doesNotMatch(html, /提交 part 位置/);
-    assert.doesNotMatch(html, /提交 region 位置/);
-    assert.doesNotMatch(html, /提交 part transform/);
-    assert.doesNotMatch(html, /type="number"/);
+  it('S36 开闸后不再有延期分支：footer 恒为提交入口形态', () => {
+    const html = render();
+    assert.doesNotMatch(html, /已延期至|只读预览，无位置提交入口/);
+    assert.match(html, /提交 part 位置/);
+    assert.match(html, /提交 region 位置/);
+    assert.match(html, /提交 part transform/);
   });
 
   it('非 deferred 时才出现提交入口，且 writer 未开放时按钮存在但仅本地预览', () => {

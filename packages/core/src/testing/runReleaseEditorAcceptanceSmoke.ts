@@ -24,6 +24,7 @@ function main(): void {
   assertInventoryDerivedFromCapabilities(inventory);
   assertFrozenScopeInventory(inventory);
   assertDeferredPreviewEditorsAreReadOnly();
+  assertReopenedWriteEditors();
   assertReadOnlyHexAndAssetExclusions();
   assertScaleContractsMatchCurrentSources();
   assertFunctionalSchemasHaveNoQuantitativeThresholds(schemas);
@@ -201,14 +202,15 @@ function assertFrozenScopeInventory(inventory: ReleaseEditorInventoryItem[]): vo
 }
 
 /**
- * 已延期至 V0.6 的编辑器允许保留面板，但必须同时满足：
- * 不在 V0.5 冻结清单内、写路径关闭、带 V0.6 只读预览标记。
- * MSB 已有经真实文档验证的 typed mutation 写链，因此这里逐项断言
+ * 已延期、仅保留标记只读预览的编辑器允许保留面板，但必须同时满足：
+ * 不在冻结发布清单内、写路径关闭、带延期只读预览标记。
+ * S36 已开闸：msb 不再属于延期预览族（写链放行由下方
+ * assertReopenedWriteEditors 正向断言），此处只对 tae/esd/flver 逐项断言
  * `releaseWriteEnabled=false` 与 `editorAllowsMutation` 实际拒绝，
- * 避免冻结清单外仍存在可写编辑器。
+ * 避免冻结清单外仍存在可写编辑器或延期清单漂移。
  */
 function assertDeferredPreviewEditorsAreReadOnly(): void {
-  const expectedDeferred: EditorKind[] = ['msb', 'tae', 'esd', 'flver'];
+  const expectedDeferred: EditorKind[] = ['tae', 'esd', 'flver'];
   const actualDeferred = [...listDeferredPreviewEditors()];
   if (JSON.stringify(actualDeferred) !== JSON.stringify(expectedDeferred)) {
     throw new Error(
@@ -258,6 +260,30 @@ function assertDeferredPreviewEditorsAreReadOnly(): void {
     || script.deferredPreview !== null
     || script.mutationKinds.length !== 0) {
     throw new Error('script editor must stay in V0.5 as whole-inner-file replacement without typed mutation');
+  }
+}
+
+/**
+ * S36/S38 已开闸编辑器（msb/flver）的正向断言：写链放行，且不再被
+ * shared 投影标记为延期预览。这些编辑器不在冻结发布清单内（frozen
+ * inventory 不变），但必须能实际放行其 typed mutation，否则开闸只是
+ * 纸面改动——把「仍延期」回归成「开闸后又被误关」都能在这里炸掉。
+ */
+function assertReopenedWriteEditors(): void {
+  const msb = EDITOR_CAPABILITY_CONTRACTS.msb;
+  if (msb.proposedReleaseEditorId !== null || msb.proposalOrder !== null) {
+    throw new Error('msb reopened for write must stay outside the frozen release editor list');
+  }
+  if (msb.releaseWriteEnabled !== true || msb.deferredPreview !== null) {
+    throw new Error('msb must be write-enabled without a deferred preview contract (S36)');
+  }
+  if (isDeferredPreviewEditorKind('msb')) {
+    throw new Error('shared deferred projection must not mark msb after S36 reopened writes');
+  }
+  for (const mutationKind of msb.mutationKinds) {
+    if (!editorAllowsMutation('msb', mutationKind)) {
+      throw new Error(`msb must allow its implemented mutation ${mutationKind} after S36`);
+    }
   }
 }
 

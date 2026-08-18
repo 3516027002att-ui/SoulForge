@@ -40,10 +40,10 @@ export function normalizePageWindow(
 }
 
 /**
- * V0.5 冻结发布编辑器清单，与
+ * 冻结发布编辑器清单，与
  * `docs/V0_5_IMPLEMENTATION_HANDOFF.md` §18.2.1 `SCOPE-EDITORS.editorIds`
- * 逐项对应。msb/tae/esd/flver 已延期至 V0.6，只保留标记只读预览，
- * 因此不再出现在本联合类型中。
+ * 逐项对应。msb 已开闸写入但不在本清单（S36 只解除写入延期，
+ * 不改变冻结发布清单）；flver/tae/esd 仍延期至 V0.6，只保留标记只读预览。
  */
 export type ProposedReleaseEditorId =
   | 'bnd4'
@@ -205,12 +205,12 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     proposedReleaseEditorId: null,
     proposalOrder: null,
     documentAuthority: 'bridge-native-document',
-    // 已实现并经真实 MSB 验证过的 typed mutation。V0.5 延期为只读预览，
-    // 因此 releaseWriteEnabled=false，写路径在 store 层失败关闭；
-    // V0.6 恢复时只需把该标记翻回 true，无需重建写链。
+    // 已实现并经真实 MSB 验证过的 typed mutation。S36 开闸：write-msb 写链
+    // 恢复放行（releaseWriteEnabled=true、deferredPreview=null），写入口经
+    // 主进程 resource.applyMsbMutation → Patch Engine 提交。
     mutationKinds: ['msb_set_part_position', 'msb_set_part_transform'],
-    releaseWriteEnabled: false,
-    deferredPreview: DEFERRED_TO_V06_READONLY_PREVIEW,
+    releaseWriteEnabled: true,
+    deferredPreview: null,
     revisionContract: 'monotonic-reject-stale',
     scalePrimitives: ['chunking', 'bounded-window'],
     scaleAccess: 'bounded-window',
