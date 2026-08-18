@@ -63,7 +63,10 @@ async function openFixtureWorkspace(window) {
   // T2：打开工作区入口从侧栏移到中央开始页；窄窗口（633px）下 Agent dock
   // 默认展开会压缩中央编辑区，先收 Agent 让开始页按钮可见可点。
   await closeAgentPanel(window);
-  await window.getByRole('button', { name: '打开 Mod 工作区' }).click();
+  // S33 起开始态侧栏与中央开始页各有一个「打开 Mod 工作区」按钮（同名同
+  // testid），裸 getByRole/getByTestId 会 strict mode violation：收窄到中央
+  // 开始页 region（aria-label「开始」）再定位。
+  await window.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
   /*
    * 挂载完成的等待信号。
    *
@@ -157,7 +160,6 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   const files = window.locator('.file-item');
   await expect(files.filter({ hasText: 'sfx/f0000.sfxbnd.dcx' })).toHaveCount(1);
   await expect(window.locator('[data-testid="start-sidebar-file-list"]')).toBeVisible();
-
   // 语义领域不渲染 Files 物理列表（.file-item），改走逻辑库。
   await window.locator('[data-domain="event"]').click();
   await expect(window.locator('.file-item')).toHaveCount(0);
@@ -167,8 +169,9 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   // PARAM 入口直接打开 GameParam 逻辑库工作台，仍不显示物理文件列表。
   await window.locator('[data-domain="param"]').click();
   await expect(window.locator('.file-item')).toHaveCount(0);
-  await expect(window.locator('.workbench')).toBeVisible();
-  await expect(window.locator('.workbench')).toContainText('Params');
+  // EVENT-30B 起事件源码工作台常驻挂载，裸 .workbench 命中两个元素：收窄到 PARAM 工作台。
+  await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
+  await expect(window.getByLabel('PARAM 工作台')).toContainText('Params');
   expect(await window.locator('.domain-tab__count').count()).toBe(0);
 
   // R1 修正（用户裁定）：参数域侧栏是两级——只有 PARAM 与 GPARAM 两个常驻项，
@@ -447,7 +450,8 @@ test('Material 工作台三栏：File list → Material list → Properties/Valu
   await expect(pathRow.getByText('tex/base.dds', { exact: true })).toBeVisible();
 
   // 独立滚动：三个栏各自是滚动宿主（WorkbenchLayout 每栏 overflow-y auto）。
-  const columnBodies = window.locator('.workbench__column-body');
+  // EVENT-30B 起事件源码工作台常驻挂载，全局计数会多算它的栏：收窄到 Material 工作台。
+  const columnBodies = window.getByLabel('Material 工作台').locator('.workbench__column-body');
   await expect(columnBodies).toHaveCount(3);
 
   await window.screenshot({ path: 'test-results/16-material-workbench.png' });
@@ -532,7 +536,9 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   // hkxName 去扩展作主标签。
   const left = window.getByRole('region', { name: 'Animations' });
   await expect(left.getByRole('row', { name: /a0000/ })).toBeVisible();
-  await expect(left.getByRole('row', { name: /动画 1/ })).toBeVisible();
+  // S17：无 hkxName 的动画行名改用干净数字 id（禁止「动画 N」）——第二动画行
+  // 显示为「1」（meta「1 事件」），不再是「动画 1」。
+  await expect(left.getByRole('row', { name: /1 事件/ })).toBeVisible();
 
   // 未选中动画时中栏提示先选动画，不出事件行。
   const middle = window.getByRole('region', { name: 'Events / 词条' });
@@ -597,7 +603,8 @@ test('anibnd 容器打开走动作工作台：不落 BND4 容器页，提取来�
   // 选中动画 0 → 中栏词条事件列表可用（动作/词条/预览三栏联动）。
   await left.getByRole('row', { name: /a000_003013/ }).click();
   const middle = window.getByRole('region', { name: 'Events / 词条' });
-  await expect(middle.getByRole('row', { name: /事件类型 7/ }).first()).toBeVisible();
+  // S17：词条行名是「eventTypeId + 模板名」，fixture 无模板目录 → 「7 未命名」。
+  await expect(middle.getByRole('row', { name: /7 未命名/ }).first()).toBeVisible();
 
   await window.screenshot({ path: 'test-results/18b-anibnd-action-workbench.png' });
   await app.close();
@@ -699,7 +706,8 @@ test('变更状态机：候选 → 批准 → 暂存 → 校验 → 写入', asy
 
   await queue.getByTestId('cq-commit').click();
   await expect(queue.locator('.cq-row').first()).toHaveAttribute('data-status', 'written');
-  await expect(window.locator('.status-bar')).toContainText('写入完成');
+  // S12 移除状态栏：写入反馈的现行载体是 toast（App.commitStagedChanges → pushToast）。
+  await expect(window.locator('.toast-root')).toContainText('写入完成');
 
   // 写入后 FMG 面板重读：fixture 内存语料已含新文本。
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
@@ -951,7 +959,8 @@ test('TEXT-20C：真空表新增经 review 队列落盘，写按 tableId 路由�
   // 提交：App 侧按 selectedTableId 把 tableId 传给 applyFmgMutation → fixture 路由到 menu 表。
   await queue.getByRole('button', { name: '批准入暂存' }).click();
   await queue.getByTestId('cq-commit').click();
-  await expect(window.locator('.status-bar')).toContainText('写入完成');
+  // S12 移除状态栏：写入反馈的现行载体是 toast（App.commitStagedChanges → pushToast）。
+  await expect(window.locator('.toast-root')).toContainText('写入完成');
 
   // 提交后面板按新 sourceHash 重挂载并自动定位回首表（item.fmg）；切到 menu.fmg
   // 重读：新增条目自 fixture.menuEntries 可见（真空表写后不被伪装回 0 条）。
@@ -1070,7 +1079,8 @@ test('Electron：workspace.openDialog 被调用；用户取消时安静返回', 
   // 取消路径：不显示错误，不打开工作区。
   const cancelled = await launchApp({ SF_TEST_CANCEL_DIALOG: '1' });
   await closeAgentPanel(cancelled.window);
-  await cancelled.window.getByRole('button', { name: '打开 Mod 工作区' }).click();
+  // 与 openFixtureWorkspace 同因：侧栏与开始页各有一个同名按钮，收窄到开始页。
+  await cancelled.window.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
   await expect(cancelled.window.locator('.toast--warn')).toHaveCount(0);
   await expect(cancelled.window.locator('.titlebar')).toContainText('未打开工作区');
   const cancelledCalls = await ipcCalls(cancelled.app);
@@ -1144,8 +1154,10 @@ test('browser-preview 表面：可见降级提示，无 pageerror / console erro
   await expect(window.locator('.runtime-notice')).toContainText('浏览器预览：文件系统功能仅在 SoulForge 桌面版可用');
 
   // 两个目录按钮保持可聚焦，标记 aria-disabled。
-  const openWorkspaceButton = window.getByTestId('open-workspace');
-  const chooseBaseButton = window.getByTestId('choose-base-directory');
+  // 侧栏与开始页各有一个 open-workspace 按钮，收窄到开始页 region。
+  const openWorkspaceButton = window.getByRole('region', { name: '开始' }).getByTestId('open-workspace');
+  // 侧栏与开始页各有一个 choose-base-directory 按钮，同样收窄到开始页 region。
+  const chooseBaseButton = window.getByRole('region', { name: '开始' }).getByTestId('choose-base-directory');
   await expect(openWorkspaceButton).toHaveAttribute('aria-disabled', 'true');
   await expect(chooseBaseButton).toHaveAttribute('aria-disabled', 'true');
 
@@ -1161,7 +1173,8 @@ test('browser-preview 表面：可见降级提示，无 pageerror / console erro
   await chooseBaseButton.evaluate((element) => element.focus());
   await expect(chooseBaseButton).toBeFocused();
   await window.keyboard.press('Enter');
-  await expect(window.locator('.status-bar')).toContainText('浏览器预览：「选择原版目录」仅在 SoulForge 桌面版可用');
+  // S12 移除状态栏：降级反馈的现行载体是 toast（announceDesktopOnly → pushToast warn）。
+  await expect(window.locator('.toast-root')).toContainText('浏览器预览：「选择原版目录」仅在 SoulForge 桌面版可用');
 
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
@@ -1249,12 +1262,11 @@ test('按钮四态：rest 无阴影，hover/active/focus-visible 才有层次反
   await openFixtureWorkspace(window);
 
   const tab = window.locator('[data-domain="event"]');
-  const activityButton = window.getByRole('button', { name: '资源浏览器' });
+  // S33 移除活动栏四图标后「资源浏览器」按钮已不存在；只测现行 domain tab。
   const shadowOf = (locator) => locator.evaluate((element) => getComputedStyle(element).boxShadow);
 
   // rest：与背景融合，无阴影。
   expect(await shadowOf(tab)).toBe('none');
-  expect(await shadowOf(activityButton)).toBe('none');
   await window.screenshot({ path: 'test-results/09-buttons-rest.png' });
 
   // hover：出现低层阴影与轻微表面差（真实指针输入偶发竞态，轮询重试）。
@@ -1886,15 +1898,19 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
 
   // 三栏同时存在（T5-4 删第四栏 Tools：Params/Rows/Fields）。
   // WorkbenchLayout 根是 div（.workbench），各栏是带 aria-label 的 section（region）。
-  await expect(window.locator('.workbench')).toBeVisible();
+  // EVENT-30B 起事件源码工作台常驻挂载（hidden 不卸载），裸 .workbench 会命中
+  // 两个元素：收窄到 PARAM 工作台（aria-label）。
+  await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
   await expect(window.getByRole('region', { name: 'Params' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Rows' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // §7.1 比例在运行期成立（computed flex-grow，未被拖拽覆盖时）；拖拽后转像素是允许路径。
+  // EVENT-30B 起事件源码工作台常驻挂载，全局选择会多算它的栏：收窄到 PARAM 工作台。
   const growRatios = await window.evaluate(() => {
-    const slots = [...document.querySelectorAll('.workbench__column-slot')];
+    const workbenchEl = document.querySelector('.workbench[aria-label="PARAM 工作台"]');
+    const slots = [...workbenchEl.querySelectorAll('.workbench__column-slot')];
     return slots.map((slot) => getComputedStyle(slot).flexGrow);
   });
   expect(growRatios).toEqual(['0.2', '0.29', '0.35']);
@@ -1903,7 +1919,9 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   // 虚拟栏（Rows）把滚动权交给内部 .wb-virtual-scroll（body hidden + 内部 auto）。
   // 两者都不得是 visible —— visible 意味着滚整页。
   const scrollHosts = await window.evaluate(() => {
-    const bodies = [...document.querySelectorAll('.workbench__column-body')];
+    // EVENT-30B 起事件源码工作台常驻挂载，全局选择会多算它的栏：收窄到 PARAM 工作台。
+    const workbenchEl = document.querySelector('.workbench[aria-label="PARAM 工作台"]');
+    const bodies = [...workbenchEl.querySelectorAll('.workbench__column-body')];
     return bodies.map((body) => getComputedStyle(body).overflowY);
   });
   expect(scrollHosts.every((value) => value === 'auto' || value === 'hidden')).toBe(true);
@@ -1924,7 +1942,8 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await expect(toolbarButtons.nth(0)).toBeDisabled();
   await expect(toolbarButtons.nth(2)).toBeDisabled();
   await expect(toolbarButtons.nth(3)).toBeDisabled();
-  const workbenchText = await window.locator('.workbench').innerText();
+  // EVENT-30B 起事件源码工作台常驻挂载，裸 .workbench 命中两个元素：收窄到 PARAM 工作台。
+  const workbenchText = await window.getByLabel('PARAM 工作台').innerText();
   expect(workbenchText).not.toContain('Game Parameters');
   expect(workbenchText).not.toContain('行大小');
   expect(workbenchText).not.toContain('gameparam.parambnd.dcx');
@@ -1967,8 +1986,8 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await expect(rowNameInput).toBeVisible();
   await rowNameInput.fill('引导-改名');
   await rowNameInput.press('Enter');
-  await expect(window.locator('.workbench__footer'))
-    .toContainText('行 100 的名字已提交到变更候选。');
+  // S28：保存成功走工作台内 toast（role=status，class .wb-toast--ok），workbench footer 已移除。
+  await expect(window.locator('.wb-toast--ok')).toContainText('已保存');
   await expect.poll(async () =>
     (await ipcCalls(app))['resource.applyContainerParamRowNameMutation'] ?? 0
   ).toBeGreaterThan(0);
@@ -1976,22 +1995,22 @@ test('PARAM 工作台三栏 + CSV 工具条：选择链、父选区清理、虚�
   await expect(window.getByLabel('行 100 的名字')).toHaveValue('引导-改名');
 
   // T5-4/T5-6：CSV 工具条四个按钮真实触发 bridge（fixture 不真开对话框/不写盘，
-  // 只回成功诊断）。footer 显示各操作的完成文案，且对应 channel 被调用。
-  const footer = window.locator('.workbench__footer');
+  // 只回成功诊断）。S28 起反馈走 toast：诊断的首条 info/error message 上浮。
+  const feedback = window.locator('.wb-toast--ok');
   await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导出行' }).click();
-  await expect(footer).toContainText('fixture 导出 ActionGuideParam（4 行）行数据。');
+  await expect(feedback).toContainText('fixture 导出 ActionGuideParam（4 行）行数据。');
   await expect.poll(async () => (await ipcCalls(app))['param.exportRowsCsv'] ?? 0).toBeGreaterThan(0);
 
   await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导出备注' }).click();
-  await expect(footer).toContainText('fixture 导出 ActionGuideParam（4 行）行名。');
+  await expect(feedback).toContainText('fixture 导出 ActionGuideParam（4 行）行名。');
   await expect.poll(async () => (await ipcCalls(app))['param.exportNamesCsv'] ?? 0).toBeGreaterThan(0);
 
   await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导入行' }).click();
-  await expect(footer).toContainText('fixture 导入 ActionGuideParam（4 行）行数据完成。');
+  await expect(feedback).toContainText('fixture 导入 ActionGuideParam（4 行）行数据完成。');
   await expect.poll(async () => (await ipcCalls(app))['param.importRowsCsv'] ?? 0).toBeGreaterThan(0);
 
   await window.locator('.workbench__toolbar .toolbar-button', { hasText: '导入备注' }).click();
-  await expect(footer).toContainText('fixture 导入 ActionGuideParam（4 行）行名完成。');
+  await expect(feedback).toContainText('fixture 导入 ActionGuideParam（4 行）行名完成。');
   await expect.poll(async () => (await ipcCalls(app))['param.importNamesCsv'] ?? 0).toBeGreaterThan(0);
 
   // 问题 4：行级工具（新建行/复制当前行/删除当前行）真实触发 bridge。fixture 走
@@ -2040,7 +2059,8 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   await closeAgentPanel(window);
 
   // 五区同时存在（§18.15 11B：Files/Groups/Fields/Values/Toolbar；§8.1 禁止合并 Fields/Values）。
-  await expect(window.locator('.workbench')).toBeVisible();
+  // EVENT-30B 起事件源码工作台常驻挂载，裸 .workbench 命中两个元素：收窄到 GPARAM 工作台。
+  await expect(window.getByLabel('GPARAM 工作台')).toBeVisible();
   await expect(window.getByRole('region', { name: 'Files' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Groups' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();
@@ -2049,15 +2069,19 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   await expect(window.getByRole('region', { name: 'Fields/Values' })).toHaveCount(0);
 
   // §8.1 比例在运行期成立（computed flex-grow；§2.5 停靠折算 ≈ 0.27/0.13/0.17/0.24/0.19）。
+  // EVENT-30B 起事件源码工作台常驻挂载，全局选择会多算它的栏：收窄到 GPARAM 工作台。
   const growRatios = await window.evaluate(() => {
-    const slots = [...document.querySelectorAll('.workbench__column-slot')];
+    const workbenchEl = document.querySelector('.workbench[aria-label="GPARAM 工作台"]');
+    const slots = [...workbenchEl.querySelectorAll('.workbench__column-slot')];
     return slots.map((slot) => getComputedStyle(slot).flexGrow);
   });
   expect(growRatios).toEqual(['0.27', '0.13', '0.17', '0.24', '0.19']);
 
   // 独立滚动：每栏的滚动权在栏内，不泄给整页（5 栏 5 个滚动宿主）。
+  // EVENT-30B 起事件源码工作台常驻挂载，全局选择会多算它的栏：收窄到 GPARAM 工作台。
   const scrollHosts = await window.evaluate(() => {
-    const bodies = [...document.querySelectorAll('.workbench__column-body')];
+    const workbenchEl = document.querySelector('.workbench[aria-label="GPARAM 工作台"]');
+    const bodies = [...workbenchEl.querySelectorAll('.workbench__column-body')];
     return bodies.map((body) => getComputedStyle(body).overflowY);
   });
   expect(scrollHosts).toHaveLength(5);
@@ -2067,7 +2091,8 @@ test('GPARAM 工作台五区：bank→group→field→value 选择链、父选�
   // 物理路径只允许出现在 title（metadata details），可见文本是显示名。
   const gparamCrumb = window.locator('.crumb', { hasText: 'Graphics Parameters' });
   await expect(gparamCrumb).toContainText('3 banks');
-  const workbenchText = await window.locator('.workbench').innerText();
+  // EVENT-30B 起事件源码工作台常驻挂载，裸 .workbench 命中两个元素：收窄到 GPARAM 工作台。
+  const workbenchText = await window.getByLabel('GPARAM 工作台').innerText();
   expect(workbenchText).not.toContain('.gparam.dcx');
   expect(workbenchText).not.toContain('.bak');
   expect(workbenchText).not.toContain('Game Parameters'); // PARAM 工作台标题不串台
@@ -2125,7 +2150,7 @@ test('GPARAM typed 写回：值行编辑 → Toolbar 保存 → 重读新值，�
   await closeAgentPanel(window);
 
   // 打开默认 bank（m10_00）：LightSet → Directional Light Angle0（float3 × 2 值）。
-  await expect(window.locator('.workbench')).toBeVisible();
+  await expect(window.getByLabel('GPARAM 工作台')).toBeVisible();
   await window.locator('.wb-list .wb-row', { hasText: 'LightSet ParamEditor' }).click();
   await window.locator('.wb-list .wb-row', { hasText: 'Directional Light Angle0' }).click();
 
@@ -2182,7 +2207,8 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
   await closeAgentPanel(window);
 
   // 四栏同时存在（§2.5：Container list | Texture list | Viewer | Properties）。
-  await expect(window.locator('.workbench')).toBeVisible();
+  // EVENT-30B 起事件源码工作台常驻挂载，裸 .workbench 命中两个元素：收窄到 Texture 工作台。
+  await expect(window.getByLabel('Texture 工作台')).toBeVisible();
   await expect(window.getByRole('region', { name: 'Containers' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Textures' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Viewer' })).toBeVisible();
@@ -2191,7 +2217,7 @@ test('TPF 工作台四栏：container→texture 选择链、预览与元数据�
   // §2.5 标题形态；负向清单：无物理路径（可见文本里）。
   const tpfCrumb = window.locator('.crumb', { hasText: 'Texture' });
   await expect(tpfCrumb).toContainText('2 containers');
-  const workbenchText = await window.locator('.workbench').innerText();
+  const workbenchText = await window.getByLabel('Texture 工作台').innerText();
   expect(workbenchText).not.toContain('.tpf.dcx');
 
   // Containers 栏列出全部 tpf 容器；打开时默认选中当前文件，Textures 栏出现纹理。
@@ -2266,10 +2292,12 @@ test('EVENT-30B：事件源码工作台挂载，CodeMirror 主区 + 逻辑文档
   const workbench = await openEventWorkbench(window, 'event/common.emevd');
 
   // 文档标签 = 逻辑 EMEVD 文档（tabId=资源 URI），不是物理文件计数。
+  // 显示名走 libraryDisplayName（event/common.emevd → common），路径不进 tab 文本。
   const tablist = workbench.locator('[role="tablist"]');
   await expect(tablist).toBeVisible();
   await expect(tablist.locator('[role="tab"]')).toHaveCount(1);
-  await expect(tablist.locator('[role="tab"]').first()).toContainText('event/common.emevd');
+  await expect(tablist.locator('[role="tab"]').first()).toContainText('common');
+  await expect(tablist.locator('[role="tab"]').first()).not.toContainText('event/');
 
   // CodeMirror 6 主区渲染 DSL 源码：资源行、事件块、指令行都在。
   const host = workbench.locator('[data-editor-engine="codemirror"]');
@@ -2356,7 +2384,7 @@ test('EVENT-30B：diagnostic gutter 标注未知指令，编辑 dirty 后提交�
   await window.keyboard.type('\n// fixture e2e dirty', { delay: 0 });
   const dirtyTab = workbench.locator('[role="tab"] .esw-tab__dirty');
   await expect(dirtyTab).toHaveCount(1);
-  await expect(workbench.locator('[role="tab"]').first()).toContainText('event/common.emevd');
+  await expect(workbench.locator('[role="tab"]').first()).toContainText('common');
 
   // 提交：fixture 接受（合成写回），dirty 清空、源码替换为已提交文本。
   await workbench.getByRole('button', { name: '编译并提交' }).click();
@@ -2384,8 +2412,8 @@ test('EVENT-30B：多 tab 各自 dirty，切 tab 保留未提交编辑', async (
   await selectFileItem(window, 'event/menu.emevd');
   const tabs = workbench.locator('[role="tab"]');
   await expect(tabs).toHaveCount(2);
-  await expect(tabs.first()).toContainText('event/common.emevd');
-  await expect(tabs.nth(1)).toContainText('event/menu.emevd');
+  await expect(tabs.first()).toContainText('common');
+  await expect(tabs.nth(1)).toContainText('menu');
   await expect(workbench.locator('.esw-source__host .cm-content')).toContainText('event @e:ev100');
 
   // 切回 common：dirty 仍在，未提交编辑还在（per-tab EditorState 隔离）。
@@ -2399,9 +2427,9 @@ test('EVENT-30B：多 tab 各自 dirty，切 tab 保留未提交编辑', async (
   await expect(tabs.first().locator('.esw-tab__dirty')).toHaveCount(1);
 
   // 关闭 menu tab → 只剩 common。
-  await workbench.getByRole('button', { name: '关闭 event/menu.emevd' }).click();
+  await workbench.getByRole('button', { name: '关闭 menu' }).click();
   await expect(workbench.locator('[role="tab"]')).toHaveCount(1);
-  await expect(workbench.locator('[role="tab"]')).toContainText('event/common.emevd');
+  await expect(workbench.locator('[role="tab"]')).toContainText('common');
 
   await window.screenshot({ path: 'test-results/12-event-multitab.png' });
   await app.close();
@@ -2565,7 +2593,7 @@ test('EVENT-30B：快速切换 common → menu，旧请求被取消且不覆盖 
   // 标签只剩 menu：common 的响应被丢弃，从未成为标签。
   const tabs = workbench.locator('[role="tab"]');
   await expect(tabs).toHaveCount(1);
-  await expect(tabs.first()).toContainText('event/menu.emevd');
+  await expect(tabs.first()).toContainText('menu');
 
   expect(pageErrors, `pageerror: ${pageErrors.join('\n')}`).toEqual([]);
   expect(consoleErrors, `console error: ${consoleErrors.join('\n')}`).toEqual([]);
@@ -2971,7 +2999,8 @@ test('S14/S15：事件失败读取给 code + 人话 + 下一步，无假 resourc
 test('S-FILE-ROLLBACK：审计面板文件级回滚 UI 走 rollbackFile 通道，回滚后条目置为已回滚', async () => {
   const { app, window, pageErrors, consoleErrors } = await launchApp({ SF_FIXTURE_OPERATIONS: '1' });
   await openFixtureWorkspace(window);
-  // 打开审计与回滚面板（活动栏入口）。
+  // 打开审计与回滚面板：S33 起活动栏四图标删除，审计入口在开始侧栏「工具」折叠区。
+  await window.getByTestId('start-sidebar-tools').locator('summary').click();
   await window.getByRole('button', { name: '审计与回滚' }).click();
 
   // 种子历史：两条 committed 记录。

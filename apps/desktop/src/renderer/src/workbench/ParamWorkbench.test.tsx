@@ -201,6 +201,18 @@ describe('PARAM-10A negative source tests（§18.14）', () => {
     assert.ok(workbenchSource.includes('容器内其他 param 不受影响'), '失败说明不能夸大影响范围');
   });
 
+  it('加载指示器在虚拟容器外、无行数守卫（问题 5-A）', () => {
+    // 首次打开大表时一行都没有，指示器被 visibleRows.length > 0 挡住就是
+    // 永远不出现；且指示器必须和筛选框/空态同一层（虚拟容器外面），不能藏
+    // 在数万像素的 sizer 后面。role=status 是 e2e 找节点的锚。
+    assert.ok(workbenchSource.includes('读取行数据…'), '加载指示器必须用「读取行数据…」文案');
+    assert.ok(workbenchSource.includes('role="status"'), '加载指示器必须带 role="status"');
+    assert.doesNotMatch(workbenchSource, /rowsLoading && visibleRows\.length > 0/,
+      '指示器不得带 visibleRows.length > 0 守卫');
+    assert.doesNotMatch(workbenchSource, /style=\{\{ padding: '4px 10px' \}\}>加载中…/,
+      '虚拟容器内的旧「加载中…」指示器必须删除');
+  });
+
   it('backup 拒绝只属于 IPC 层：组件不得自行拼拒绝逻辑', () => {
     assert.ok(!workbenchSource.includes('BACKUP_READ_FORBIDDEN'), 'ParamWorkbench 不应包含 backup 拒绝码');
     assert.ok(!workbenchSource.includes('isParamBackupPath'), 'ParamWorkbench 不应自行判定 backup 路径');

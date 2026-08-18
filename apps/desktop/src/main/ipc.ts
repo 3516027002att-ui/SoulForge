@@ -420,6 +420,52 @@ interface UnpackedParamChild {
 }
 const unpackedParamCache = new Map<string, UnpackedParamChild>();
 
+/**
+ * 容器条目表备忘（问题 5-B）。
+ *
+ * unpackedParamCache 的键要条目哈希（storedContentHash），而条目哈希只能从
+ * read-dcx-document 来 —— 于是每次点表都会先跑一遍整包解压（game-side 的
+ * KRAK，几十 MB），然后才轮到解包缓存判定，缓存命中时解压已经付过了。
+ * 这里把「容器 URI + 容器哈希 → 已 sanitize 的条目表」备忘下来，键不带
+ * entryIndex：整张表属于容器，不属于某一条。失败路径不写入，一次瞬时失败
+ * 不能被钉住。
+ */
+type MemoizedParamEntryTable = Array<{
+  index: number;
+  name: string;
+  storedContentHash: string;
+}>;
+const paramEntryTableCache = new Map<string, MemoizedParamEntryTable>();
+
+/**
+ * 容器通道 readContainerParamPage 的 loadAll 文档 LRU（问题 5-C）。
+ *
+ * 裸文件通道有 paramAllCache；容器通道没有对应缓存，回头再点同一张表还要
+ * 重跑 read-param-document（includeAllPayloads：全表 + 全部行字节，帧上限
+ * 32 MiB）。不要复用 paramAllCache：它按裸文件 sourceUri 存、无容量上限，
+ * 一个 parambnd 138 张表全留下会到几百 MiB。上限 4 是裁定，不许放宽。
+ * 分页路径（loadAll 假）与失败路径禁止写入：分页行恒无字节，混进全量缓存
+ * 会让「行有没有 dataBase64」变成运气。
+ */
+const CONTAINER_PARAM_ALL_CACHE_LIMIT = 4;
+const containerParamAllCache = new Map<string, CachedParamDocument>();
+const takeContainerParamAll = (key: string): CachedParamDocument | undefined => {
+  const hit = containerParamAllCache.get(key);
+  if (!hit) return undefined;
+  containerParamAllCache.delete(key);
+  containerParamAllCache.set(key, hit);
+  return hit;
+};
+const putContainerParamAll = (key: string, value: CachedParamDocument): void => {
+  containerParamAllCache.delete(key);
+  containerParamAllCache.set(key, value);
+  while (containerParamAllCache.size > CONTAINER_PARAM_ALL_CACHE_LIMIT) {
+    const oldest = containerParamAllCache.keys().next();
+    if (oldest.done) break;
+    containerParamAllCache.delete(oldest.value);
+  }
+};
+
 type CachedContainerChildren = Awaited<
   ReturnType<typeof listContainerChildren>
 >['children'];
@@ -681,36 +727,46 @@ async function unpackContainerParamChild(input: {
     : {};
 
   // ── 第一步：枚举条目，把「名字」解析成索引 ──
-  const dcx = await runBridge<NativeDcxEnvelopeLike>({
-    command: 'read-dcx-document',
-    filePath: input.containerPath,
-    resourceUri: input.containerUri,
-    allowedRoots,
-    timeoutMs: 120_000,
-    ...oodle
-  });
-  if (dcx.parseStatus === 'failed') {
-    return { ok: false, diagnostics: sanitizeDiagnostics(dcx.diagnostics) };
-  }
-  const entries = dcx.data?.nested?.entries ?? [];
-  if (entries.length === 0) {
-    return {
-      ok: false,
-      diagnostics: [{
-        severity: 'error',
-        code: 'PARAM_UNPACK_CONTAINER_EMPTY',
-        message: 'Bridge 未返回容器内 BND4 条目表；该资源可能不是 param 容器。',
-        sourceUri: input.containerUri
-      }]
-    };
-  }
+  // 条目表按「容器 URI + 容器哈希」备忘（paramEntryTableCache）：整张表属于
+  // 容器，不属于某一条。备忘命中时跳过 read-dcx-document —— 否则每次点表都
+  // 先把整个 parambnd（game-side 是 KRAK，几十 MB）解压一遍，然后才发现
+  // 解包缓存命中（问题 5-B）。失败路径不 set：一次瞬时失败不能被钉住。
+  const entryTableKey = `${input.containerUri}#${input.containerHash}`;
+  let named = paramEntryTableCache.get(entryTableKey);
+  const entryTableReused = named !== undefined;
+  if (!named) {
+    const dcx = await runBridge<NativeDcxEnvelopeLike>({
+      command: 'read-dcx-document',
+      filePath: input.containerPath,
+      resourceUri: input.containerUri,
+      allowedRoots,
+      timeoutMs: 120_000,
+      ...oodle
+    });
+    if (dcx.parseStatus === 'failed') {
+      return { ok: false, diagnostics: sanitizeDiagnostics(dcx.diagnostics) };
+    }
+    const entries = dcx.data?.nested?.entries ?? [];
+    if (entries.length === 0) {
+      return {
+        ok: false,
+        diagnostics: [{
+          severity: 'error',
+          code: 'PARAM_UNPACK_CONTAINER_EMPTY',
+          message: 'Bridge 未返回容器内 BND4 条目表；该资源可能不是 param 容器。',
+          sourceUri: input.containerUri
+        }]
+      };
+    }
 
-  const seen = new Set<string>();
-  const named = entries.map((entry, position) => ({
-    index: entry.index ?? position,
-    name: sanitizeEntryName(entry.name ?? `entry_${position}`, entry.index ?? position, seen),
-    storedContentHash: entry.contentHash ?? ''
-  }));
+    const seen = new Set<string>();
+    named = entries.map((entry, position) => ({
+      index: entry.index ?? position,
+      name: sanitizeEntryName(entry.name ?? `entry_${position}`, entry.index ?? position, seen),
+      storedContentHash: entry.contentHash ?? ''
+    }));
+    paramEntryTableCache.set(entryTableKey, named);
+  }
   // 先把联合类型解到局部常量再比较：直接在回调里访问 input.entry.index
   // 拿不到窄化后的类型（回调边界会丢失 `'index' in` 的判别结果）。
   const wanted = input.entry;
@@ -744,7 +800,8 @@ async function unpackContainerParamChild(input: {
       diagnostics: [{
         severity: 'info',
         code: 'PARAM_UNPACK_CACHE_HIT',
-        message: `复用已解包的 ${cachedChild.name}。`,
+        message: `复用已解包的 ${cachedChild.name}。`
+          + (entryTableReused ? '（条目表亦复用，本次未解压容器）' : '（本次重新枚举了条目表）'),
         sourceUri: input.containerUri
       }]
     };
@@ -815,7 +872,8 @@ async function unpackContainerParamChild(input: {
     diagnostics: [{
       severity: 'info',
       code: 'PARAM_UNPACK_COMPLETE',
-      message: `已解包 ${target.name}（条目 ${target.index}/${entries.length}）。`,
+      message: `已解包 ${target.name}（条目 ${target.index}/${named.length}）。`
+        + (entryTableReused ? '（条目表复用，本次未枚举容器）' : '（本次重新枚举了条目表）'),
       sourceUri: input.containerUri
     }]
   };
@@ -981,6 +1039,8 @@ function clearEditorPageCaches(): void {
   paramPageCache.clear();
   paramAllCache.clear();
   containerChildrenCache.clear();
+  paramEntryTableCache.clear();
+  containerParamAllCache.clear();
   scriptContainerEntriesCache.clear();
 }
 
@@ -6586,6 +6646,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         // 容器变了：行缓存、条目缓存与解包缓存全部失效，否则下一次读会拿到旧字节。
         paramPageCache.delete(containerUri);
         containerChildrenCache.clear();
+        paramEntryTableCache.clear();
+        containerParamAllCache.clear();
         unpackedParamCache.clear();
       }
       return toSaveResultFromOutcome(outcome, indexedFiles);
@@ -6796,6 +6858,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       if (outcome.status === 'committed' && outcome.result.ok) {
         paramPageCache.delete(containerUri);
         containerChildrenCache.clear();
+        paramEntryTableCache.clear();
+        containerParamAllCache.clear();
         unpackedParamCache.clear();
       }
       return toSaveResultFromOutcome(outcome, indexedFiles);
@@ -7243,6 +7307,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       paramPageCache.delete(input.containerUri);
       paramAllCache.delete(input.containerUri);
       containerChildrenCache.clear();
+      paramEntryTableCache.clear();
+      containerParamAllCache.clear();
       unpackedParamCache.clear();
     }
     return toSaveResultFromOutcome(outcome, indexedFiles);
@@ -7971,10 +8037,15 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       });
       if (!file) return failure('RESOURCE_NOT_INDEXED', '资源未索引，无法读取容器内 param。');
 
+      // 缓存键用的容器哈希：file.sha256 缺失时退化为路径摘要（解包、条目表备忘、
+      // 文档 LRU 共用同一份）。回给渲染器的 containerHash 仍是 file.sha256 ?? '' ——
+      // 那一处故意在缺哈希时留空（要喂 write-bnd4 的并发保护），两套哈希不许合并。
+      const cacheContainerHash =
+        file.sha256 ?? createHash('sha256').update(file.absolutePath).digest('hex');
       const unpacked = await unpackContainerParamChild({
         containerPath: file.absolutePath,
         containerUri,
-        containerHash: file.sha256 ?? createHash('sha256').update(file.absolutePath).digest('hex'),
+        containerHash: cacheContainerHash,
         entry: { index: entryIndex }
       });
       if (!unpacked.ok) {
@@ -8006,43 +8077,64 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
       // ── 全表读：只为 id/name 索引与跨页搜索（行字节恒缺，见 readParamPage 注释）。
       //    loadAll（用户裁定 2026-08-14）：includeAllPayloads 一次拿回全表 +
-      //    全部行字节（帧上限提到 32 MiB 绝对上限），renderer 打开表即全量。──
-      const full = await runBridge<{
-        sourceHash?: string;
-        typeName?: string;
-        rowCount?: number;
-        rowDataSize?: number;
-        rows?: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
-        authority?: string;
-      }>({
-        command: 'read-param-document',
-        filePath: paramPath,
-        allowedRoots,
-        timeoutMs: 120_000,
-        commandOptions: loadAll ? { includeAllPayloads: true } : {},
-        ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {})
-      });
-      if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
-        return failure(
-          'PARAM_DOCUMENT_READ_FAILED',
-          `解包后的 ${unpacked.child.name} 无法解析为 PARAM。`,
-          sanitizeDiagnostics(full.diagnostics)
-        );
+      //    全部行字节（帧上限提到 32 MiB 绝对上限），renderer 打开表即全量。
+      //    回头再点同一张表不重跑 read-param-document：containerParamAllCache
+      //    LRU 备忘 loadAll 文档（问题 5-C）。分页路径（loadAll 假）与失败路径
+      //    禁止写缓存：分页行恒无字节，混进全量缓存会让「行有没有 dataBase64」
+      //    变成运气。字段定义不随 doc 缓存，信任裁决按当次策略现算。
+      const docCacheKey = `${containerUri}#${cacheContainerHash}#${entryIndex}`;
+      let doc = loadAll ? takeContainerParamAll(docCacheKey) : undefined;
+      const docReused = doc !== undefined;
+      if (!doc) {
+        const full = await runBridge<{
+          sourceHash?: string;
+          typeName?: string;
+          rowCount?: number;
+          rowDataSize?: number;
+          rows?: Array<{ id: number; dataBase64?: string | null; dataHash: string; name?: string }>;
+          authority?: string;
+        }>({
+          command: 'read-param-document',
+          filePath: paramPath,
+          allowedRoots,
+          timeoutMs: 120_000,
+          commandOptions: loadAll ? { includeAllPayloads: true } : {},
+          ...(loadAll ? { maxFrameBytes: 32 * 1024 * 1024 } : {})
+        });
+        if (full.parseStatus === 'failed' || !full.data?.sourceHash) {
+          return failure(
+            'PARAM_DOCUMENT_READ_FAILED',
+            `解包后的 ${unpacked.child.name} 无法解析为 PARAM。`,
+            sanitizeDiagnostics(full.diagnostics)
+          );
+        }
+
+        const parsedRows = (full.data.rows ?? []).slice(0, MAX_PAGED_PARAM_ROWS);
+        doc = {
+          sourceHash: full.data.sourceHash,
+          typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
+          rowDataSize: full.data.rowDataSize ?? 0,
+          rowCount: full.data.rowCount ?? parsedRows.length,
+          rows: parsedRows,
+          ...(full.data.authority ? { authority: full.data.authority } : {})
+        };
+        if (loadAll) putContainerParamAll(docCacheKey, doc);
       }
 
       // P1 裁定：容器工作台走 readContainerParamPage，渲染器的 FIELDS 栏只从
       // fieldDefs 拿定义，而这条通道此前根本没返回。这里复用与
       // resource.readParamDocument 完全相同的 resolveTrustedParamDefinition 与
       // 逐字段映射（包校验 + 行宽核对 + 用户信任策略三层都不绕过）。
-      const containerTypeName = full.data.typeName ?? '';
+      // UNKNOWN_PARAM 按空串走「无定义」分支（等价于原来的 full.data.typeName ?? ''）。
+      const containerTypeName = doc.typeName === 'UNKNOWN_PARAM' ? '' : doc.typeName;
       const resolvedContainerDef = containerTypeName
-        ? await resolveTrustedParamDefinition(containerTypeName, full.data.rowDataSize ?? 0)
+        ? await resolveTrustedParamDefinition(containerTypeName, doc.rowDataSize)
         : { document: null, trusted: false, diagnostic: null };
       const containerParamDef = resolvedContainerDef.document;
       // 行宽已在 resolveTrustedParamDefinition 内核对：拿到 document 即行宽一致。
       const containerRowWidthMatches = containerParamDef !== null;
 
-      const allRows = (full.data.rows ?? []).slice(0, MAX_PAGED_PARAM_ROWS);
+      const allRows = doc.rows;
       const q = (query ?? '').trim().toLowerCase();
       const filtered = q.length === 0
         ? allRows
@@ -8066,9 +8158,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           paramName: unpacked.child.name,
           containerHash: file.sha256 ?? '',
           childHash: unpacked.child.storedContentHash,
-          sourceHash: full.data.sourceHash,
-          typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
-          rowDataSize: full.data.rowDataSize ?? 0,
+          sourceHash: doc.sourceHash,
+          typeName: doc.typeName,
+          rowDataSize: doc.rowDataSize,
           fieldDefs: containerRowWidthMatches && containerParamDef
             ? containerParamDef.fields.map((field) => ({
                 id: field.id,
@@ -8116,9 +8208,22 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
                 : (yappedName ? { name: yappedName, nameOrigin: 'yapped' as const } : {}))
             };
           }),
-          rowsTruncated: (full.data.rowCount ?? allRows.length) > allRows.length,
-          ...(full.data.authority ? { authority: full.data.authority } : {}),
-          diagnostics: [...unpacked.diagnostics]
+          rowsTruncated: (doc.rowCount ?? allRows.length) > allRows.length,
+          ...(doc.authority ? { authority: doc.authority } : {}),
+          // 问题 5-C 的核对锚：用户真实工作区里第二次点同一张表，诊断应出现
+          // PARAM_DOC_CACHE_HIT（本会话未重跑 read-param-document）；第一次是
+          // PARAM_DOC_CACHE_MISS。分页路径不加这条。
+          diagnostics: [
+            ...unpacked.diagnostics,
+            {
+              severity: 'info' as const,
+              code: docReused ? 'PARAM_DOC_CACHE_HIT' : 'PARAM_DOC_CACHE_MISS',
+              message: docReused
+                ? `复用已解析的 ${unpacked.child.name} 全量文档（本次未重跑 read-param-document）。`
+                : `已解析 ${unpacked.child.name} 全量文档（${allRows.length} 行）。`,
+              sourceUri: containerUri
+            }
+          ]
         };
       }
 
@@ -8181,9 +8286,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
          */
         containerHash: file.sha256 ?? '',
         childHash: unpacked.child.storedContentHash,
-        sourceHash: full.data.sourceHash,
-        typeName: full.data.typeName ?? 'UNKNOWN_PARAM',
-        rowDataSize: full.data.rowDataSize ?? 0,
+        sourceHash: doc.sourceHash,
+        typeName: doc.typeName,
+        rowDataSize: doc.rowDataSize,
         // P1 裁定：字段定义与枚举随容器 PARAM 一起下发，映射与
         // resource.readParamDocument 完全一致（含 bitfield/enumRef/refs/min/max 的
         // 条件展开与 enum label 字段名）。渲染器据此渲染 FIELDS 栏，而不是空列。
@@ -8235,8 +8340,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               ...(row.name ? { name: row.name } : {})
             };
           }),
-        rowsTruncated: (full.data.rowCount ?? allRows.length) > allRows.length,
-        ...(full.data.authority ? { authority: full.data.authority } : {}),
+        rowsTruncated: (doc.rowCount ?? allRows.length) > allRows.length,
+        ...(doc.authority ? { authority: doc.authority } : {}),
         diagnostics: [...unpacked.diagnostics, ...pageByteDiagnostics]
       };
     }
@@ -8589,6 +8694,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       });
       if (result.ok) {
         containerChildrenCache.clear();
+        paramEntryTableCache.clear();
+        containerParamAllCache.clear();
         scriptContainerEntriesCache.clear();
       }
       return toRendererSaveResult(result, indexedFiles);
@@ -9183,6 +9290,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         });
         if (result.ok) {
           containerChildrenCache.clear();
+          paramEntryTableCache.clear();
+          containerParamAllCache.clear();
           scriptContainerEntriesCache.clear();
         }
         return toRendererSaveResult(result, indexedFiles);
