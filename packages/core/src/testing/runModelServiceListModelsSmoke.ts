@@ -150,6 +150,60 @@ async function main(): Promise<void> {
   expect(emptyResult.ok, 'empty data -> ok');
   expect(emptyResult.models.length === 0, 'empty data -> empty list');
 
+  // 8. baseUrl 归一化：用户填 `https://h/zen/go` 还是 `https://h/zen/go/v1`，
+  //    最终请求 URL 都必须**全等**于 `https://h/zen/go/v1/models`。
+  //    旧断言用 endsWith('/v1/models')，`/v1/v1/models` 也能命中，把拼接 bug
+  //    放了过去；这里记录 mock 收到的完整 URL 做全等比较，不许 endsWith/includes。
+  const capturedUrls: string[] = [];
+  function urlRecordingFetch(payload: unknown): typeof fetch {
+    return (async (input: string | URL | Request) => {
+      capturedUrls.push(String(input));
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => payload,
+        text: async () => JSON.stringify(payload)
+      } as unknown as Response;
+    }) as typeof fetch;
+  }
+  const baseUrlInputs = ['https://h/zen/go', 'https://h/zen/go/v1'];
+  const normalizeCases: Array<{
+    label: string;
+    list: (baseUrl: string) => Promise<ModelListResult>;
+  }> = [
+    {
+      label: 'openai-compatible',
+      list: (baseUrl) => new OpenAiCompatibleAdapter({
+        baseUrl, apiKey: 'k', model: 'x', fetchImpl: urlRecordingFetch(validPayload)
+      }).listModels()
+    },
+    {
+      label: 'anthropic-compatible',
+      list: (baseUrl) => new AnthropicCompatibleAdapter({
+        baseUrl, apiKey: 'k', model: 'x', fetchImpl: urlRecordingFetch(validPayload)
+      }).listModels()
+    },
+    {
+      label: 'openai-responses',
+      list: (baseUrl) => new OpenAiResponsesAdapter({
+        baseUrl, apiKey: 'k', model: 'x', fetchImpl: urlRecordingFetch(validPayload)
+      }).listModels()
+    }
+  ];
+  for (const adapterCase of normalizeCases) {
+    for (const input of baseUrlInputs) {
+      capturedUrls.length = 0;
+      const result = await adapterCase.list(input);
+      expect(result.ok, `${adapterCase.label} listModels ok for ${input}`);
+      expect(capturedUrls.length === 1, `${adapterCase.label} exactly one request for ${input}`);
+      expect(
+        capturedUrls[0] === 'https://h/zen/go/v1/models',
+        `${adapterCase.label} url for baseUrl ${input} must equal https://h/zen/go/v1/models, got ${capturedUrls[0]}`
+      );
+    }
+  }
+
   console.log(JSON.stringify({
     ok: true,
     status: 'fixture-confirmed',

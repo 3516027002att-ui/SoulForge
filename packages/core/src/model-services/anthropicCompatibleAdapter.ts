@@ -21,6 +21,7 @@ import {
   errorStreamEvent,
   type ModelServiceDiagnostic
 } from './errorClassification.js';
+import { normalizeServiceBaseUrl } from './baseUrlJoin.js';
 
 export interface AnthropicCompatibleAdapterOptions {
   baseUrl: string;
@@ -39,7 +40,7 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
   private readonly apiVersion: string;
 
   constructor(options: AnthropicCompatibleAdapterOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/$/, '');
+    this.baseUrl = normalizeServiceBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.fetchImpl = options.fetchImpl ?? fetch;

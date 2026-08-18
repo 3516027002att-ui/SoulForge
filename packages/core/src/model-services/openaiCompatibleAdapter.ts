@@ -22,6 +22,7 @@ import {
   errorResult,
   errorStreamEvent
 } from './errorClassification.js';
+import { normalizeServiceBaseUrl } from './baseUrlJoin.js';
 
 export interface OpenAiCompatibleAdapterOptions {
   baseUrl: string;
@@ -38,7 +39,7 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: OpenAiCompatibleAdapterOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/$/, '');
+    this.baseUrl = normalizeServiceBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.fetchImpl = options.fetchImpl ?? fetch;

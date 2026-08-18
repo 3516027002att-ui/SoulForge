@@ -2472,3 +2472,20 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   background: var(--forge-2);
 }
 
+/* ══════════ 模型服务设置：可用模型选择列表（ISSUE-2E） ══════════
+   常驻可见的单选列表，超过约 8 项时自身滚动，不撑破抽屉；选中项高亮。
+   仅新增 .model-pick-list / .model-pick-list .is-selected，不动既有规则。 */
+.model-pick-list {
+  max-height: 12rem;
+  overflow-y: auto;
+  margin: 0.5rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.model-pick-list .is-selected {
+  background: var(--forge-hover);
+  outline: 1px solid var(--accent);
+  border-radius: var(--radius-s);
+}
+
