@@ -38,7 +38,8 @@ const PAGE_SIZE_CONSUMERS: ReadonlyArray<{
     symbol: 'FMG_PAGE_SIZE',
     files: [
       'apps/desktop/src/main/ipc.ts',
-      'apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx',
+      // FmgWorkbenchPanel 3-C 起一次拿全表（REVEAL_SCAN_PAGE_SIZE 100000），
+      // 不再分页消费该常量（同 PARAM 的 ParamTablePanel 先例）。
       'apps/desktop/e2e/editorFunctionalSmokeMain.mjs'
     ]
   },
@@ -139,8 +140,10 @@ describe('页大小只有一个定义处', () => {
   });
 
   it('对账能发现 import 被摘掉（负向：从 import 块里删掉符号）', () => {
-    const source = readRepoFile('apps/desktop/src/renderer/src/editors/FmgWorkbenchPanel.tsx');
-    const stripped = source.replace(/import\s*\{\s*FMG_PAGE_SIZE\s*\}\s*from\s*'@soulforge\/shared';/, '');
+    // FMG 面板 3-C 起全量加载，不再消费 FMG_PAGE_SIZE；负向靶标改用仍在消费它的
+    // ipc.ts（多符号 import 块，用通用替换摘掉该标识符）。
+    const source = readRepoFile('apps/desktop/src/main/ipc.ts');
+    const stripped = source.replace(/\bFMG_PAGE_SIZE\b/g, '');
     assert.notEqual(stripped, source, '注入失败：靶标已变，请更新本用例');
     const sharedImports = [...stripped.matchAll(/import\s*\{([^}]*)\}\s*from\s*'@soulforge\/shared'/g)]
       .map((match) => match[1] ?? '')

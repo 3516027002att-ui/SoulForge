@@ -140,17 +140,32 @@ describe('Negative source tests（TEXT-20B 五类失败覆盖）', () => {
     assert.doesNotMatch(panelSource, /logicalFmgTableName\(/);
   });
 
-  it('11-B：左栏按容器分组（item/menu 组头可见可点），不再把表全部平铺', () => {
-    // 组头是独立可点的元素，不是把容器塞进平铺行；点组头选该容器第一张表。
-    assert.match(panelSource, /fmg-group__header/);
-    assert.match(panelSource, /onSelectGroup/);
-    assert.match(panelSource, /组头选该容器第一张表/);
-    assert.match(panelSource, /container\.tables\[0\]/);
-    // 读取失败的容器整组保留，不伪装成 0 张表。
-    assert.match(panelSource, /读取失败/);
+  it('3-B：Categories 只列资源浏览器点开的容器，不再分 item/menu 组', () => {
+    // 过滤条件就是 typed 字段：container.sourceUri === props.resourceUri；
+    // 点开一个容器就只列那一个，不做 item+menu 平铺。
+    assert.match(panelSource, /container\.sourceUri === props\.resourceUri/);
+    // 组头与「点组头选表」机制整体移除：不再画 fmg-group__header / onSelectGroup，
+    // 也没有「默认选中 item 组第一张表」。
+    assert.doesNotMatch(panelSource, /fmg-group__header/);
+    assert.doesNotMatch(panelSource, /onSelectGroup/);
+    assert.doesNotMatch(panelSource, /containerKind\.toLowerCase\(\) === 'item'/);
+    // 没有 resourceUri 时不列任何容器（不回落「默认 item 组」），走空态等用户在
+    // 资源浏览器点 item / menu。live 的跨容器过滤由 e2e 覆盖（SSR 无目录可证）。
+    assert.match(panelSource, /在左侧资源浏览器点 item 或 menu/);
+    // 读取失败的容器保留诊断面（不伪装成 0 张表）。
     assert.match(panelSource, /parseStatus !== 'confirmed'/);
-    // 打开文本域不钉死第一份文件：默认选中 item 组第一张表。
-    assert.match(panelSource, /containerKind\.toLowerCase\(\) === 'item'/);
+  });
+
+  it('3-A：界面不再画「N 槽 · M 有字」，语言下拉不强调容器数，筛选只按表名', () => {
+    // HTML 不得含 槽 / 有字（SSR 骨架层面即可拦截，live 目录面由 e2e 覆盖）。
+    const html = render();
+    assert.doesNotMatch(html, /槽|有字/);
+    // 源码不再有 formatSlotCount 与行尾 meta 槽/有字。
+    assert.doesNotMatch(panelSource, /formatSlotCount/);
+    assert.doesNotMatch(panelSource, /wb-row__meta/);
+    // 语言下拉不再强调容器数；筛选 placeholder 只按表名。
+    assert.doesNotMatch(panelSource, /containers\.length\} 容器/);
+    assert.match(panelSource, /placeholder="筛选表名"/);
   });
 
   it('语言缺失：typed ID 来自 Bridge metadata，renderer 不解析 msg/ 路径', () => {

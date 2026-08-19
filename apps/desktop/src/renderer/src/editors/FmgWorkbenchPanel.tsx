@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { FMG_PAGE_SIZE } from '@soulforge/shared';
 import type { FmgEntryPage } from '@soulforge/shared';
 import type { SoulForgeApi } from '../../../preload/index.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
@@ -119,13 +118,15 @@ export function findTableInCatalog(
 }
 
 /*
- * 分页页大小（硬约束 17）来自 @soulforge/shared，与主进程 `resource.readFmgTablePage`
- * 用同一常量。此前两侧各写一遍 100，改一侧不报错，症状是分页错位或末页重复。
+ * 3-C 起 renderer 不再分页：选中表后一次拿全量（REVEAL_SCAN_PAGE_SIZE，main 已
+ * 缓存整表）。shared 的 FMG_PAGE_SIZE 仍被主进程 readFmgTablePage 当缺省页大小，
+ * 但 renderer 已不消费它。
  */
 
 /**
  * S31：reveal 宽读的扫描窗口。normalizePageWindow 不设上限，取「一次拿全过滤
- * 结果」的足够大值；过滤条件是精确条目 id，返回量本身很小。
+ * 结果」的足够大值；过滤条件是精确条目 id，返回量本身很小。3-C 起这个窗口也
+ * 用于主表读取（选中表后一次拿全量）。
  */
 const REVEAL_SCAN_PAGE_SIZE = 100_000;
 
@@ -179,11 +180,10 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   // ── 左树搜索（§9.3 每区搜索）：只过滤目录行显示，不动选择链 ──
   const [treeQuery, setTreeQuery] = useState('');
 
-  // ── 条目分页（与 `resource.readFmgTablePage` 的窗口对应）──
+  // ── 选中表条目：全量列表（3-C 不再分页）──
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
   const [pageEntries, setPageEntries] = useState<FmgEntryRow[]>([]);
-  const [pageCount, setPageCount] = useState(1);
   const [entryCount, setEntryCount] = useState(0);
   const [maxId, setMaxId] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -210,37 +210,26 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         setCatalogLoading(false);
         if (result.ok) {
           setCatalog(result);
-          // 从 Files 领域打开时自动定位到该容器第一个表；不命中则保持未选，
-          // 用户手动走语言 → 容器 → 表链。
+          // 从 Files 领域点开具体 msgbnd 时，Categories 只列该容器的表（3-B：
+          // 资源浏览器点开什么就是什么）；空 container 也选中容器，让中栏能报诊断。
           if (props.resourceUri) {
             for (const language of result.languages) {
               for (const container of language.containers) {
-                if (container.sourceUri === props.resourceUri && container.tables.length > 0) {
+                if (container.sourceUri === props.resourceUri) {
                   setSelectedLanguageId(language.languageId);
                   setSelectedContainerId(container.containerId);
-                  setSelectedTableId(container.tables[0]!.tableId);
+                  if (container.tables.length > 0) {
+                    setSelectedTableId(container.tables[0]!.tableId);
+                  }
                   return;
                 }
               }
             }
           }
-          // S13 + 11-B：语言是 Categories 顶上筛选；没命中资源定位时默认第一个
-          // 语言，并默认选中 item 组第一张表 —— 不再钉死 Files 侧栏的 first file
-          //（那会把 menu 埋在 item 之下，用户以为「文本 = item」）。
+          // 3-B：没点具体 msgbnd（resourceUri 空）时不回落「默认 item 组」——只
+          // 默认选语言，Categories 走空态，等用户在左侧资源浏览器点 item / menu。
           if (result.languages.length > 0 && selectedLanguageId === null) {
-            const language = result.languages[0]!;
-            setSelectedLanguageId(language.languageId);
-            const preferred = (language.containers.find(
-              (container) => container.parseStatus === 'confirmed'
-                && container.containerKind.toLowerCase() === 'item'
-                && container.tables.length > 0
-            ) ?? language.containers.find(
-              (container) => container.parseStatus === 'confirmed' && container.tables.length > 0
-            ));
-            if (preferred) {
-              setSelectedContainerId(preferred.containerId);
-              setSelectedTableId(preferred.tables[0]!.tableId);
-            }
+            setSelectedLanguageId(result.languages[0]!.languageId);
           }
         } else {
           setCatalogError(result.diagnostics?.[0]?.message ?? '文本目录读取失败。');
@@ -294,39 +283,39 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     setPageError(null);
   }
 
-  // ── 选中表：条目分页读取（query 在 main 端作用于完整表，覆盖所有页）──
+  // ── 选中表：一次拿回该表全部条目（3-C：不再分页。main 已缓存整表，renderer
+  // 用 100_000 的扫描窗口拿全量；query 在 main 端作用于完整表）──
   useEffect(() => {
     if (!liveMode || bridge === null || selectedTableId === null) return;
     let cancelled = false;
     setLoading(true);
     setPageError(null);
-    bridge.readFmgTablePage(selectedTableId, page, FMG_PAGE_SIZE, query)
+    bridge.readFmgTablePage(selectedTableId, 0, REVEAL_SCAN_PAGE_SIZE, query)
       .then((result: FmgEntryPage) => {
         if (cancelled) return;
         if (!result.ok) {
           // parse failure：只上抛诊断、绝不返回「0 条空表」伪装成功
           //（TEXT-20A Done 禁止）。demo 回退被 liveMode 挡在门外。
-          setPageError(result.diagnostics?.[0]?.message ?? 'FMG 表分页读取失败。');
+          setPageError(result.diagnostics?.[0]?.message ?? 'FMG 表读取失败。');
           setPageEntries([]);
         } else {
           setPageEntries(result.entries);
-          setPageCount(result.pageCount);
           setEntryCount(result.entryCount);
           setMaxId(result.maxId);
-          setPage(result.page);
-          setLoadedPage(result.page);
+          setPage(0);
+          setLoadedPage(0);
           setPageError(null);
         }
         setLoading(false);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setPageError(error instanceof Error ? error.message : 'FMG 表分页读取异常。');
+        setPageError(error instanceof Error ? error.message : 'FMG 表读取异常。');
         setPageEntries([]);
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [liveMode, bridge, selectedTableId, page, query]);
+  }, [liveMode, bridge, selectedTableId, query]);
 
   // ── Demo/fallback（无 live 目录：browser-preview）──
   const demoFiltered = useMemo(() => {
@@ -339,26 +328,21 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
 
   useEffect(() => {
     if (liveMode) return;
-    const demoPageCount = Math.max(1, Math.ceil(demoFiltered.length / FMG_PAGE_SIZE));
-    const clamped = Math.min(Math.max(0, page), demoPageCount - 1);
-    const slice = demoFiltered.slice(
-      clamped * FMG_PAGE_SIZE,
-      clamped * FMG_PAGE_SIZE + FMG_PAGE_SIZE
-    );
-    setPageEntries(slice);
-    setPageCount(demoPageCount);
+    // 3-C：demo 也是全量渲染（无分页切片）。
+    setPageEntries(demoFiltered);
     setEntryCount(demoFiltered.length);
     setMaxId(props.entries.reduce((max, row) => Math.max(max, row.id), 0));
-    setLoadedPage(clamped);
-    if (clamped !== page) setPage(clamped);
-  }, [liveMode, demoFiltered, props.entries, page]);
+    setPage(0);
+    setLoadedPage(0);
+  }, [liveMode, demoFiltered, props.entries]);
 
   /**
    * S31：外部 reveal 第一步 —— 目录就绪后选中目标表，并把筛选设为精确条目 id。
    *
-   * 接着用一次宽读（整张过滤结果）定位目标条目在过滤列表里的精确索引，换算成
-   * 分页窗口页 —— 只信「第 0 页必含目标」对短 id 不成立（id 5 会命中几十上百条
-   * 含「5」的条目），宁可在这一步多读一次，也不让面板停在错误的窗口。
+   * 接着用一次宽读（整张过滤结果）确认目标条目存在；3-C 起主窗口页恒为 0
+   * （主读取 effect 一次拿全量过滤结果），宽读只负责「是否真存在」，不再换算分页页
+   * —— 只信「第 0 页必含目标」对短 id 不成立（id 5 会命中几十上百条含「5」
+   * 的条目），宁可在这一步多读一次。
    */
   useEffect(() => {
     const request = props.revealRequest;
@@ -408,7 +392,8 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           props.onRevealHandled?.();
           return;
         }
-        setRevealTargetPage(Math.floor(index / FMG_PAGE_SIZE));
+        // 3-C：主窗口页恒为 0（全表一次进 DOM），reveal 无需翻页。
+        setRevealTargetPage(0);
       })
       .catch(() => {
         if (cancelled) return;
@@ -422,12 +407,12 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
   }, [props.revealRequest, catalog, catalogError, liveMode, bridge]);
 
   /**
-   * S31：外部 reveal 第二步 —— 目标窗口（表 + 精确 id 过滤 + 定位页）就绪后
-   * 选中目标条目并滚动。窗口还没到 / 宽读还没定页 / 用户改了筛选时不判；
-   * 窗口里没有目标条目就是表里确实没有，不猜别的行。
+   * S31：外部 reveal 第二步 —— 目标表 + 精确 id 过滤 + 全量窗口就绪后选中目标
+   * 条目并滚动。窗口还没到位 / 宽读还没确认 / 用户改了筛选时不判；窗口里没有
+   * 目标条目就是表里确实没有，不猜别的行。
    *
-   * 注意短 id 的过滤结果可能跨多页（id 5 会命中几十上百条含「5」的条目），
-   * 宽读定出目标页后这里先把分页翻过去，等该页窗口（loadedPage）到位再判。
+   * 3-C 起主窗口页恒为 0：reveal 第一步宽读确认目标存在后会置 revealTargetPage=0，
+   * 等主读取 effect 的全量过滤结果（loadedPage=0）到位，直接在 pageEntries 里找。
    */
   useEffect(() => {
     const request = props.revealRequest;
@@ -461,14 +446,8 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     return language?.containers.find((c) => c.containerId === selectedContainerId) ?? null;
   }, [catalog, selectedLanguageId, selectedContainerId]);
   const containerFailed = selectedContainer?.parseStatus === 'failed';
-  // S30：「N 槽 · M 有字」——槽数与有字数都来自 Bridge 目录元数据；
-  // 旧 Bridge 不上报 filledCount 时回落「N 条」。
-  const selectedTable = useMemo(() => {
-    if (!selectedContainer || selectedTableId === null) return null;
-    return selectedContainer.tables.find((table) => table.tableId === selectedTableId) ?? null;
-  }, [selectedContainer, selectedTableId]);
-  const formatSlotCount = (slots: number, filled: number | undefined): string =>
-    filled === undefined ? `${slots} 条` : `${slots} 槽 · ${filled} 有字`;
+  // 3-A：目录元数据里的 filledCount / entryCount（Bridge 仍上报，RAG/Agent 用）
+  // 不再画成「槽 / 有字」；表名一行只留表名。
 
   // S29：编辑只落到本地草稿，失焦 / Ctrl+S 再提交一次（直写，不先进审查队列）。
   // 切换条目 / 翻页 / 换表前先提交当前草稿，避免选中行换掉后草稿被吞。
@@ -516,91 +495,34 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     });
   }
 
-  // ── 左栏 Categories（S13 + 11-B）：语言筛选在顶上，表名按容器分组 ──
-  // 11-B：不再把 item / menu 两个容器的表平铺成一列（menu 会被埋成「item 的续
-  // 集」，用户以为「文本 = item」）。按 containerKind 分组，组头可见、可点（点
-  // 组头选该容器第一张表）；读取失败的容器整组保留，不伪装成 0 张表。
+  // ── 左栏 Categories（3-B）：语言筛选在顶上。资源浏览器点开哪个容器，就只列
+  // 那一个容器里的表（container.sourceUri === props.resourceUri）；没有具体
+  // msgbnd（resourceUri 空）时不列任何容器，走空态。不再有 ITEM/MENU 组头，
+  // 也不再平铺两个容器 33 张表。
   // 表名是 main 投影的逻辑名（shared logicalFmgTableName），renderer 不做二次解析。
   const selectedLanguage = catalog?.languages.find((l) => l.languageId === selectedLanguageId) ?? null;
-  const categoryGroups = useMemo(() => {
-    if (!catalog || selectedLanguage === null) return [];
+  const categoryContainer = selectedLanguage?.containers.find(
+    (container) => container.sourceUri === props.resourceUri
+  ) ?? null;
+  const categoryTables = useMemo(() => {
+    if (!catalog || selectedLanguage === null || categoryContainer === null) return [];
+    if (categoryContainer.parseStatus !== 'confirmed') return [];
     const q = treeQuery.trim().toLowerCase();
-    const groups: Array<{
-      key: string;
-      containerKind: string;
-      failed: boolean;
-      selected: boolean;
-      onSelectGroup: () => void;
-      tables: Array<{
-        key: string;
-        label: string;
-        meta: string;
-        title: string;
-        selected: boolean;
-        onSelect: () => void;
-      }>;
-    }> = [];
-    for (const container of selectedLanguage.containers) {
-      const contHit = !q || container.containerKind.toLowerCase().includes(q);
-      if (!contHit) continue;
-      if (container.parseStatus !== 'confirmed') {
-        // 11-B：失败的容器组头留下（「menu / 读取失败」），点组头看诊断。
-        groups.push({
-          key: `container:${container.containerId}`,
-          containerKind: container.containerKind,
-          failed: true,
-          selected: selectedContainerId === container.containerId,
-          onSelectGroup: () => handleSelectContainer(container.containerId),
-          tables: []
-        });
-        continue;
-      }
-      const tables: Array<{
-        key: string;
-        label: string;
-        meta: string;
-        title: string;
-        selected: boolean;
-        onSelect: () => void;
-      }> = [];
-      for (const table of container.tables) {
-        const label = table.entryName;
-        if (q && !contHit && !label.toLowerCase().includes(q)) continue;
-        tables.push({
-          key: `table:${table.tableId}`,
-          label,
-          meta: formatSlotCount(table.entryCount, table.filledCount),
-          title: `${container.containerKind} / ${label}`,
-          selected: table.tableId === selectedTableId,
-          onSelect: () => {
-            // 选表即选其容器：容器读取失败/诊断跟随表所属容器。
-            setSelectedContainerId(container.containerId);
-            handleSelectTable(table.tableId);
-          }
-        });
-      }
-      if (tables.length === 0) continue;
-      groups.push({
-        key: `container:${container.containerId}`,
-        containerKind: container.containerKind,
-        failed: false,
-        selected: selectedContainerId === container.containerId,
-        onSelectGroup: () => {
-          // 11-B：点组头选该容器第一张表。
-          const first = container.tables[0];
-          if (first) {
-            setSelectedContainerId(container.containerId);
-            handleSelectTable(first.tableId);
-          } else {
-            handleSelectContainer(container.containerId);
-          }
-        },
-        tables
-      });
-    }
-    return groups;
+    return categoryContainer.tables
+      .filter((table) => !q || table.entryName.toLowerCase().includes(q))
+      .map((table) => ({
+        key: `table:${table.tableId}`,
+        label: table.entryName,
+        title: `${categoryContainer.containerKind} / ${table.entryName}`,
+        selected: table.tableId === selectedTableId,
+        onSelect: () => {
+          // 选表即选其容器：容器读取失败/诊断跟随表所属容器。
+          setSelectedContainerId(categoryContainer.containerId);
+          handleSelectTable(table.tableId);
+        }
+      }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [catalog, selectedLanguage, selectedLanguageId, selectedContainerId, selectedTableId, treeQuery]);
+  }, [catalog, selectedLanguage, categoryContainer, selectedContainerId, selectedTableId, treeQuery]);
 
   const categoriesColumn = (
     <>
@@ -615,7 +537,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
             {catalog?.languages.length === 0 && <option value="">无语言</option>}
             {catalog?.languages.map((language) => (
               <option key={language.languageId} value={language.languageId}>
-                {language.languageId}（{language.containers.length} 容器）
+                {language.languageId}
               </option>
             ))}
           </select>
@@ -623,7 +545,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         <input
           value={treeQuery}
           onChange={(e) => setTreeQuery(e.target.value)}
-          placeholder="筛选表名 / 容器"
+          placeholder="筛选表名"
           aria-label="筛选文本表"
         />
       </div>
@@ -636,57 +558,37 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         {catalog && selectedLanguage === null && (
           <p className="wb-empty">先选择语言。</p>
         )}
-        {categoryGroups.map((group) => (
+        {catalog && !catalogLoading && !props.resourceUri && (
+          <p className="wb-empty">在左侧资源浏览器点 item 或 menu</p>
+        )}
+        {categoryContainer && categoryContainer.parseStatus !== 'confirmed' && (
+          <p className="wb-empty diag-warn">该容器读取失败，查看中栏诊断。</p>
+        )}
+        {categoryTables.map((row, index) => (
           <div
-            key={group.key}
-            className="fmg-group"
-            data-container-kind={group.containerKind.toLowerCase()}
+            key={row.key}
+            className="wb-row"
+            {...selectableRowAttributes({
+              selected: row.selected,
+              isTabEntry: isRowTabEntry(index, categoryTables.some((t) => t.selected)),
+              onSelect: row.onSelect
+            })}
           >
-            <button
-              type="button"
-              className={group.selected
-                ? 'fmg-group__header fmg-group__header--selected'
-                : 'fmg-group__header'}
-              aria-label={`${group.containerKind} 组`}
-              title={`${group.containerKind}：${group.failed ? '读取失败，点此查看诊断' : '选择该容器第一张表'}`}
-              onClick={group.onSelectGroup}
-            >
-              <span className="fmg-group__name">{group.containerKind}</span>
-              <span className="fmg-group__meta">
-                {group.failed ? '读取失败' : `${group.tables.length} 张表`}
-              </span>
-            </button>
-            {group.tables.map((row, index) => (
-              <div
-                key={row.key}
-                className="wb-row"
-                {...selectableRowAttributes({
-                  selected: row.selected,
-                  isTabEntry: isRowTabEntry(
-                    index,
-                    categoryGroups.some((g) => g.tables.some((t) => t.selected))
-                  ),
-                  onSelect: row.onSelect
-                })}
-              >
-                <span className="wb-row__name" title={row.title}>{row.label}</span>
-                <span className="wb-row__meta">{row.meta}</span>
-              </div>
-            ))}
+            <span className="wb-row__name" title={row.title}>{row.label}</span>
           </div>
         ))}
-        {catalog && !catalogLoading && categoryGroups.length === 0 && (
+        {catalog && !catalogLoading && props.resourceUri && categoryTables.length === 0 && (
           <p className="wb-empty">当前语言没有匹配的表。</p>
         )}
       </div>
     </>
   );
 
-  // ── 中栏：分页条目表（真空表 / 无匹配 / 未选择三种空态分离）──  // ── 中栏：分页条目表（真空表 / 无匹配 / 未选择三种空态分离）──
+  // ── 中栏：全量条目表（真空表 / 无匹配 / 未选择三种空态分离，3-C 不再分页）──
   const hasSelection = selectedTableId !== null;
   const entriesColumn = (
     <>
-      <div style={{ padding: '4px 8px', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      <div style={{ padding: '4px 8px', display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
           value={query}
           onChange={(e) => {
@@ -709,25 +611,6 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
           disabled={selectedId === null}
           onClick={deleteSelected}
         >删除</button>
-      </div>
-      <div className="row gap pager" style={{ padding: '0 8px 4px' }}>
-        <button
-          type="button"
-          className="secondary-action"
-          disabled={page <= 0 || loading}
-          onClick={() => setPage((p) => p - 1)}
-        >
-          上一页
-        </button>
-        <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
-        <button
-          type="button"
-          className="secondary-action"
-          disabled={page >= pageCount - 1 || loading}
-          onClick={() => setPage((p) => p + 1)}
-        >
-          下一页
-        </button>
         {loading && <span className="muted">加载中…</span>}
       </div>
       {pageError && <p className="danger">{pageError}</p>}
@@ -815,7 +698,8 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     {
       id: 'entries',
       title: 'Text Entries',
-      hint: selectedTableId !== null ? formatSlotCount(entryCount, selectedTable?.filledCount) : '',
+      // 3-A：hint 不再报「槽 · 有字」；总数如要报只给光秃数字（3-C），不加单位。
+      hint: selectedTableId !== null && entryCount > 0 ? String(entryCount) : '',
       initialFlex: 2,
       minWidth: 240,
       children: entriesColumn
