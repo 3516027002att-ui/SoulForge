@@ -6,8 +6,11 @@ import type {
   MsgExport,
   ParamExport,
   ParamFieldSymbol,
-  ParseStatus
+  ParseStatus,
+  TaeExport,
+  TaeEventSymbol
 } from '@soulforge/shared';
+import { formatAnimCode, formatChrId, formatMapArea } from '@soulforge/shared';
 import type { WorkspaceIndex } from './workspaceIndex.js';
 import { isKnownResourceKind } from '../workspace/resourceKinds.js';
 
@@ -94,6 +97,13 @@ export function ingestBridgeResult(index: WorkspaceIndex, result: BridgeResult<u
     const parsed = parseMsgExport(result.data, result.sourceUri);
     diagnostics.push(...parsed.diagnostics);
     if (parsed.value) index.upsertMsgExport(parsed.value);
+    return { accepted: Boolean(parsed.value), parseStatus: parsed.value ? result.parseStatus : 'partial', diagnostics };
+  }
+
+  if (result.resourceKind === 'action') {
+    const parsed = parseTaeExport(result.data, result.sourceUri, result.sourcePath);
+    diagnostics.push(...parsed.diagnostics);
+    if (parsed.value) index.upsertTaeExport(parsed.value);
     return { accepted: Boolean(parsed.value), parseStatus: parsed.value ? result.parseStatus : 'partial', diagnostics };
   }
 
@@ -216,21 +226,210 @@ function parseMsgExport(value: unknown, sourceUri: string): ParsedValue<MsgExpor
   };
 }
 
+/**
+ * 把 read-tae-document 信封投影成 TaeExport（问题 6-C）。
+ *
+ * 拒绝条件（缺口 4）：animationsTruncated / eventsTruncated 为 true 时索引必须
+ * 拒绝该文档 —— 缺失的 anims / events 无法被地址点名，把残缺当完整会在检索里
+ * 假装整份动画都被索引了。拒绝返回 partial / 空 value，不吞异常。
+ */
+function parseTaeExport(value: unknown, sourceUri: string, sourcePath: string | undefined): ParsedValue<TaeExport> {
+  const record = asRecord(value);
+  const chrId = formatChrId(sourcePath ?? '') ?? formatChrId(sourceUri) ?? null;
+  if (!chrId) {
+    return {
+      diagnostics: [{
+        severity: 'error',
+        code: 'TAE_CHR_ID_UNKNOWN',
+        message: 'TAE 文档无法从路径提取角色 id（期望 cXXXX）。缺少 chr 的 TAE 不可地址点名。',
+        sourceUri
+      }]
+    };
+  }
+  const animationsRaw = record.animations;
+  if (!Array.isArray(animationsRaw)) {
+    return { diagnostics: [missingField(sourceUri, 'animations')] };
+  }
+  if (record.animationsTruncated === true) {
+    return {
+      diagnostics: [{
+        severity: 'error',
+        code: 'TAE_INDEX_TRUNCATED',
+        message: 'TAE 动画采样被截断（animationsTruncated），禁止把残缺当完整索引。',
+        sourceUri
+      }]
+    };
+  }
+
+  const animations: TaeExport['animations'] = [];
+  for (let animIndex = 0; animIndex < animationsRaw.length; animIndex += 1) {
+    const anim = asRecord(animationsRaw[animIndex]);
+    const animId = asNumber(anim.animId);
+    if (animId === null) {
+      return { diagnostics: [invalidField(sourceUri, `animations[${animIndex}].animId`)] };
+    }
+    const eventsRaw = anim.events;
+    if (!Array.isArray(eventsRaw) || anim.eventsTruncated === true) {
+      return {
+        diagnostics: [{
+          severity: 'error',
+          code: 'TAE_INDEX_TRUNCATED',
+          message: `动画 animId=${animId} 的事件表被截断或缺失（eventsTruncated），禁止把残缺当完整索引。`,
+          sourceUri
+        }]
+      };
+    }
+    const code = formatAnimCode(animId);
+    const events: TaeEventSymbol[] = eventsRaw.map((eventRaw, eventIndex) => {
+      const event = asRecord(eventRaw);
+      const startTime = asNumber(event.startTime) ?? 0;
+      const endTime = asNumber(event.endTime) ?? startTime;
+      const eventTypeId = asNumber(event.eventTypeId);
+      const templateFields = Array.isArray(event.templateFields) ? event.templateFields : null;
+      const fields = templateFields
+        ? templateFields.flatMap((field) => {
+          const fieldRecord = asRecord(field);
+          const name = asString(fieldRecord.name);
+          if (!name) return [];
+          return [{ name, value: parseScalar(fieldRecord.value) }];
+        })
+        : [];
+      const result: TaeEventSymbol = {
+        uri: `action://${chrId}/${code}/e${String(eventIndex)}`,
+        index: eventIndex,
+        eventTypeId: eventTypeId ?? 0,
+        ...(asString(event.typeName) ? { typeName: asString(event.typeName) } : {}),
+        startTime,
+        endTime,
+        startFrame: frameFromSeconds(startTime),
+        endFrame: frameFromSeconds(endTime),
+        ...(fields.length > 0 ? { fields } : {}),
+        ...(asString(event.parameterBytesHex) ? { parameterBytesHex: asString(event.parameterBytesHex) } : {})
+      };
+      return result;
+    });
+    animations.push({
+      animId,
+      code,
+      ...(asString(anim.hkxName) ? { hkxName: asString(anim.hkxName) } : {}),
+      events
+    });
+  }
+
+  return {
+    value: { chrId, sourceUri, animations },
+    diagnostics: []
+  };
+}
+
+/**
+ * 把 read-msb-document 的 parts[] / regions[] 投影成 MapExport 需要的 data 形状
+ * （问题 6-B：生产 analyze 走 export-map，而 export-map 未实现，故在桌面打开 MSB
+ * 时用 read-msb-document 喂 MapExport，不要实现 C# export-map）。
+ */
+export function mapExportFromMsbDocument(input: {
+  mapId: string;
+  sourceUri: string;
+  parts?: Array<{
+    name?: string | number;
+    typeId?: number;
+    modelIndex?: number;
+    posX?: number;
+    posY?: number;
+    posZ?: number;
+    rotX?: number;
+    rotY?: number;
+    rotZ?: number;
+    scaleX?: number;
+    scaleY?: number;
+    scaleZ?: number;
+  }>;
+  regions?: Array<{
+    name?: string | number;
+    typeId?: number;
+    posX?: number;
+    posY?: number;
+    posZ?: number;
+  }>;
+}): MapExport {
+  const entities: MapExport['entities'] = (input.parts ?? []).map((part) => {
+    const name = String(part.name ?? '');
+    const kind = mapKindFromTypeId(part.typeId);
+    const position = vector3(part.posX, part.posY, part.posZ);
+    const rotation = vector3(part.rotX, part.rotY, part.rotZ);
+    const scale = vector3(part.scaleX, part.scaleY, part.scaleZ);
+    return {
+      uri: `map://${input.mapId}/part/${name}`,
+      sourceUri: input.sourceUri,
+      mapId: input.mapId,
+      name,
+      kind,
+      ...(part.modelIndex === undefined ? {} : { modelIndex: part.modelIndex }),
+      ...(position ? { position } : {}),
+      ...(rotation ? { rotation } : {}),
+      ...(scale ? { scale } : {}),
+      ...(formatMapArea(input.mapId) ? { areaId: formatMapArea(input.mapId) } : {})
+    };
+  });
+  const regions: MapExport['regions'] = (input.regions ?? []).map((region) => {
+    const name = String(region.name ?? '');
+    return {
+      uri: `map://${input.mapId}/region/${name}`,
+      sourceUri: input.sourceUri,
+      mapId: input.mapId,
+      name,
+      ...(vector3(region.posX, region.posY, region.posZ) ? { position: vector3(region.posX, region.posY, region.posZ)! } : {})
+    };
+  });
+  return { mapId: input.mapId, entities, regions };
+}
+
+/** MSB part typeId → MapEntitySymbol.kind（Sekiro 通用布局；未知回落 unknown）。 */
+function mapKindFromTypeId(typeId: number | undefined): MapExport['entities'][number]['kind'] {
+  if (typeId === undefined) return 'unknown';
+  if (typeId >= 1000 && typeId < 1100) return 'mapPiece';
+  if (typeId >= 1100 && typeId < 1200) return 'object';
+  if (typeId >= 1200 && typeId < 1300) return 'character';
+  if (typeId >= 1300 && typeId < 1400) return 'collision';
+  if (typeId === 1410) return 'asset';
+  return 'unknown';
+}
+
+function vector3(x: number | undefined, y: number | undefined, z: number | undefined): [number, number, number] | null {
+  if (x === undefined || y === undefined || z === undefined) return null;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+  return [x, y, z];
+}
+
+/** 对外帧 = Math.round(seconds * 30)。非有限秒数返回 0，不编造。 */
+function frameFromSeconds(seconds: number): number {
+  return Number.isFinite(seconds) ? Math.round(seconds * 30) : 0;
+}
+
 function parseMapEntity(value: unknown, sourceUri: string, mapId: string, index: number): MapExport['entities'][number] {
   const record = asRecord(value);
   const entityId = asNumber(record.entityId);
   const position = asVector3(record.position);
   const rotation = asVector3(record.rotation);
+  const scale = asVector3(record.scale) ?? asScalarVector3(record.scaleX, record.scaleY, record.scaleZ);
+  const name = asString(record.name, `entity_${index}`);
+  // 问题 6-B：默认 uri 优先 `map://<mapId>/part/<name>`（新代码只写 /part/ 与 /region/）。
+  const uri = asString(record.uri) || `map://${mapId}/part/${name}`;
+  const areaFromRecord = asString(record.areaId);
+  const area = areaFromRecord || formatMapArea(mapId);
   return {
-    uri: asString(record.uri) || `map://${mapId}/entity/${String(entityId ?? index)}`,
+    uri,
     sourceUri: asString(record.sourceUri) || sourceUri,
     mapId,
     ...(entityId === null ? {} : { entityId }),
-    name: asString(record.name, `entity_${index}`),
+    name,
     kind: isMapEntityKind(record.kind) ? record.kind : 'unknown',
     ...(asString(record.model) ? { model: asString(record.model) } : {}),
+    ...(asNumber(record.modelIndex) === null ? {} : { modelIndex: asNumber(record.modelIndex) as number }),
     ...(position ? { position } : {}),
     ...(rotation ? { rotation } : {}),
+    ...(scale ? { scale } : {}),
+    ...(area ? { areaId: area } : {}),
     ...(record.raw === undefined ? {} : { raw: record.raw })
   };
 }
@@ -241,7 +440,7 @@ function parseMapRegion(value: unknown, sourceUri: string, mapId: string, index:
   const position = asVector3(record.position);
   const rotation = asVector3(record.rotation);
   return {
-    uri: asString(record.uri) || `map://${mapId}/region/${String(entityId ?? index)}`,
+    uri: asString(record.uri) || `map://${mapId}/region/${asString(record.name, `region_${index}`)}`,
     sourceUri: asString(record.sourceUri) || sourceUri,
     mapId,
     ...(entityId === null ? {} : { entityId }),
@@ -323,6 +522,20 @@ function asVector3(value: unknown): [number, number, number] | null {
   if (!Array.isArray(value) || value.length !== 3) return null;
   const [x, y, z] = value;
   return typeof x === 'number' && typeof y === 'number' && typeof z === 'number' ? [x, y, z] : null;
+}
+
+/** MSB parts 的 scaleX/scaleY/scaleZ 独立字段合成向量（全缺返回 null）。 */
+function asScalarVector3(
+  x: unknown,
+  y: unknown,
+  z: unknown
+): [number, number, number] | null {
+  if (x === undefined && y === undefined && z === undefined) return null;
+  const nx = asNumber(x);
+  const ny = asNumber(y);
+  const nz = asNumber(z);
+  if (nx === null || ny === null || nz === null) return null;
+  return [nx, ny, nz];
 }
 
 function isRole(value: unknown): value is NonNullable<EventExport['events'][number]['instructions'][number]['args'][number]['role']> {

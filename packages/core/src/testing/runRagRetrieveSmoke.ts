@@ -7,6 +7,7 @@ import { runAgentToolLoop } from '../model-services/agentLoop.js';
 import type { ModelServiceAdapter, ModelServiceConfig } from '../model-services/types.js';
 import { buildRagCorpus, createRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
+import { parseRagQuery } from '../rag/queryParse.js';
 import { loadRagCorpus, persistRagCorpus } from '../rag/persist.js';
 import { openWorkspaceDatabase } from '../storage/sqliteDatabase.js';
 import { WorkspaceDataRepository } from '../storage/workspaceDataRepository.js';
@@ -91,6 +92,41 @@ function main(): Promise<void> {
     if (!prefixOnlyHit.ok
       || !prefixOnlyHit.hits.some((hit) => hit.reasons.includes('id-prefix:110080'))) {
       throw new Error(`id-prefix reason must fire when body lacks the full id: ${JSON.stringify(prefixOnlyHit)}`);
+    }
+
+    // --- 问题6：动作 / 地图按参数同构编址（内存 corpus；sqlite open 之前必须全过）---
+    const ragQueryMap = parseRagQuery('m11_01_00_00');
+    if (!ragQueryMap.terms.includes('m11_01_00_00') && !ragQueryMap.phrases.includes('m11_01_00_00')) {
+      throw new Error(`parseRagQuery must keep atomic map block m11_01_00_00: ${JSON.stringify(ragQueryMap)}`);
+    }
+    const ragQueryAction = parseRagQuery('c1050#A0200');
+    if (!ragQueryAction.terms.includes('c1050') || !ragQueryAction.terms.includes('a0200')) {
+      throw new Error(`parseRagQuery must keep action address parts c1050 / a0200: ${JSON.stringify(ragQueryAction)}`);
+    }
+
+    const chrHit = retrieveEvidence(corpus, 'c1050');
+    if (!chrHit.ok || !chrHit.hits.some((hit) => hit.chunk.symbolUri === 'action://c1050/A0200/e0')) {
+      throw new Error(`c1050 must retrieve the TAE event: ${JSON.stringify(chrHit)}`);
+    }
+    const animHit = retrieveEvidence(corpus, 'A0200');
+    if (!animHit.ok || !animHit.hits.some((hit) => hit.chunk.symbolUri === 'action://c1050/A0200/e0')) {
+      throw new Error(`A0200 must retrieve the TAE event: ${JSON.stringify(animHit)}`);
+    }
+    const eventAddrHit = retrieveEvidence(corpus, 'c1050#A0200');
+    if (!eventAddrHit.ok || !eventAddrHit.hits.some((hit) => hit.chunk.symbolUri === 'action://c1050/A0200/e0')) {
+      throw new Error(`c1050#A0200 must retrieve the TAE event: ${JSON.stringify(eventAddrHit)}`);
+    }
+    const soundHit = retrieveEvidence(corpus, '105011001');
+    if (!soundHit.ok || !soundHit.hits.some((hit) => hit.chunk.family === 'tae_event')) {
+      throw new Error(`SoundID 105011001 must numeric-hit the TAE event: ${JSON.stringify(soundHit)}`);
+    }
+    const mapBlockHit = retrieveEvidence(corpus, 'm11_01_00_00');
+    if (!mapBlockHit.ok || !mapBlockHit.hits.some((hit) => hit.chunk.symbolUri === 'map://m11_01_00_00/part/c1050_0000')) {
+      throw new Error(`m11_01_00_00 must retrieve the m11 part: ${JSON.stringify(mapBlockHit)}`);
+    }
+    const mapAreaHit = retrieveEvidence(corpus, 'M11');
+    if (!mapAreaHit.ok || !mapAreaHit.hits.some((hit) => hit.chunk.symbolUri === 'map://m11_01_00_00/part/c1050_0000')) {
+      throw new Error(`M11 must retrieve the m11 part: ${JSON.stringify(mapAreaHit)}`);
     }
 
     const leaked = findPathLeak(corpus, workspace.root) ?? findPathLeak(eventHit, 'D:\\') ?? findPathLeak(eventHit, 'C:\\');
@@ -272,6 +308,8 @@ function buildSyntheticIndex(): WorkspaceIndex {
   index.setFiles([makeFile('event/common.emevd.dcx', 'event', 'file://synthetic/event/common.emevd.dcx')]);
   assertAccepted(ingestBridgeResult(index, makeEventExport()));
   assertAccepted(ingestBridgeResult(index, makeMapExport()));
+  assertAccepted(ingestBridgeResult(index, makeMapExportM11()));
+  assertAccepted(ingestBridgeResult(index, makeTaeExport()));
   assertAccepted(ingestBridgeResult(index, makeParamExport()));
   assertAccepted(ingestBridgeResult(index, makeMsgExport()));
   index.rebuildReferences({ enableNumericFallback: true });
@@ -369,6 +407,81 @@ function makeMapExport(): BridgeResult<unknown> {
         name: 'boss_phase_2',
         shape: 'box'
       }]
+    }
+  };
+}
+
+/** 问题 6：完整地图块（m11_01_00_00）→ 默认 /part/ uri（不再 /entity/）。 */
+function makeMapExportM11(): BridgeResult<unknown> {
+  return {
+    sourceUri: 'file://synthetic/map/m11_01_00_00/m11_01_00_00.msb.dcx',
+    sourcePath: 'map/m11_01_00_00/m11_01_00_00.msb.dcx',
+    game: 'sekiro',
+    resourceKind: 'map',
+    parseStatus: 'parsed',
+    diagnostics: [],
+    data: {
+      mapId: 'm11_01_00_00',
+      entities: [{
+        sourceUri: 'file://synthetic/map/m11_01_00_00/m11_01_00_00.msb.dcx',
+        name: 'c1050_0000',
+        kind: 'character',
+        model: 'c1050',
+        modelIndex: 3,
+        position: [12.5, 0, -3.2],
+        rotation: [0, 90, 0],
+        scale: [1, 1, 1]
+      }],
+      regions: [{
+        sourceUri: 'file://synthetic/map/m11_01_00_00/m11_01_00_00.msb.dcx',
+        name: 'boss_phase_2',
+        shape: 'box'
+      }]
+    }
+  };
+}
+
+/** 问题 6：TAE 信封（非截断）→ action://c1050/A0200/e0，SoundID 进 numericIds。 */
+function makeTaeExport(): BridgeResult<unknown> {
+  return {
+    sourceUri: 'file://synthetic/anibnd/c1050.anibnd.dcx',
+    sourcePath: 'chr/c1050.anibnd.dcx',
+    game: 'sekiro',
+    resourceKind: 'action',
+    parseStatus: 'parsed',
+    diagnostics: [],
+    data: {
+      format: 'TAE',
+      version: '0x0001000D',
+      sourceSize: 1234,
+      sourceHash: 'tae-synthetic-hash',
+      animationCount: 1,
+      totalEventCount: 1,
+      totalGroupCount: 0,
+      animationsTruncated: false,
+      eventTypes: [128],
+      animations: [{
+        animId: 200,
+        eventCount: 1,
+        groupCount: 0,
+        timesCount: 1,
+        hkxName: 'a000_020000',
+        events: [{
+          startTime: 14.6,
+          endTime: 14.7,
+          eventTypeId: 128,
+          typeName: 'PlaySound_General',
+          parameterDecoded: true,
+          templateFields: [
+            { name: 'SoundType', kind: 's32', value: 1 },
+            { name: 'SoundID', kind: 's32', value: 105011001 }
+          ]
+        }],
+        eventsTruncated: false
+      }],
+      roundTrip: { byteIdentical: true, semanticIdentical: true, sourceHash: 'h', animationCount: 1, totalEventCount: 1, totalGroupCount: 0 },
+      diagnostics: [],
+      authority: 'candidate'
     }
   };
 }

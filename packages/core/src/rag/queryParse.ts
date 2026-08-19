@@ -1,3 +1,5 @@
+import { extractAtomicAddressTokens } from '@soulforge/shared';
+
 export interface ParsedRagQuery {
   raw: string;
   terms: string[];
@@ -23,6 +25,12 @@ export function parseRagQuery(raw: string): ParsedRagQuery {
   let remainder = trimmed;
   for (const uri of uris) remainder = remainder.replaceAll(uri, ' ');
   remainder = remainder.replace(QUOTED_PATTERN, ' ');
+
+  // 完整原子地址（带 `#` 或下划线四段块）进 phrases：m11_01_00_00 作为一个
+  // 不可拆的短语，命中索引 / 正文里同一个原子词（问题 6）。
+  for (const atomic of extractAtomicAddressTokens(remainder)) {
+    if (atomic.includes('#') || atomic.includes('_')) phrases.push(atomic);
+  }
 
   const numericIds = uniqueNumbers(matchAll(remainder, NUMERIC_PATTERN).map((value) => Number(value)));
   const terms = tokenize(remainder).filter((term) => !/^\d+$/.test(term));
@@ -61,8 +69,17 @@ function pushBigrams(run: string, out: string[]): void {
 }
 
 export function tokenize(value: string): string[] {
-  return unique(
-    value
+  // 先抽原子地址（c1050 / A0200 / a000_020000 / M11 / m11_01_00_00 / 带 # 完整
+  // 地址），这些 token 原样保留，不交给下面的 replaceAll 切词，避免 m11_01_00_00
+  // 被拆成 m11 01 00 00、a000_020000 被拆成 a000 与 020000。原子 token 一律小写、
+  // 保持下划线（问题 6 缺口 1）。
+  const atomic = extractAtomicAddressTokens(value);
+  let remainder = value;
+  for (const token of atomic) {
+    remainder = remainder.replace(new RegExp(escapeRegExp(token), 'gi'), ' ');
+  }
+  const sliced = unique(
+    remainder
       .toLowerCase()
       .replaceAll('_', ' ')
       .replaceAll(':', ' ')
@@ -74,6 +91,11 @@ export function tokenize(value: string): string[] {
       .map((token) => token.trim())
       .filter((token) => token.length > 2 || /^\d+$/.test(token))
   );
+  return unique([...atomic, ...sliced]);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function matchAll(value: string, pattern: RegExp): string[] {

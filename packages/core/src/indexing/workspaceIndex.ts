@@ -11,6 +11,8 @@ import type {
   ReferenceEdge,
   ResourceKind,
   SymbolBundle,
+  TaeEventSymbol,
+  TaeExport,
   TextEntrySymbol
 } from '@soulforge/shared';
 import { buildReferenceGraph, type ReferenceBuildOptions, type ReferenceBuildResult } from '../references/referenceBuilder.js';
@@ -61,6 +63,7 @@ export class WorkspaceIndex {
   private mapExports: MapExport[] = [];
   private paramExports: ParamExport[] = [];
   private msgExports: MsgExport[] = [];
+  private taeExports: TaeExport[] = [];
   private references: ReferenceEdge[] = [];
 
   constructor(workspaceId: string) {
@@ -90,6 +93,11 @@ export class WorkspaceIndex {
     this.msgExports = replaceByKey(this.msgExports, key, (item) => item.category ?? 'default', value);
   }
 
+  /** 照 upsertMapExport 抄：TAE 一份 anibnd 一个 TaeExport，按 sourceUri 替换。 */
+  upsertTaeExport(value: TaeExport): void {
+    this.taeExports = replaceByKey(this.taeExports, value.sourceUri, (item) => item.sourceUri, value);
+  }
+
   rebuildReferences(options: ReferenceBuildOptions = {}): ReferenceBuildResult {
     const result = buildReferenceGraph(this.toSymbolBundle(), options);
     this.references = result.edges;
@@ -101,7 +109,8 @@ export class WorkspaceIndex {
       ...(this.eventExports.length > 0 ? { events: this.eventExports } : {}),
       ...(this.mapExports.length > 0 ? { maps: this.mapExports } : {}),
       ...(this.paramExports.length > 0 ? { params: this.paramExports } : {}),
-      ...(this.msgExports.length > 0 ? { msgs: this.msgExports } : {})
+      ...(this.msgExports.length > 0 ? { msgs: this.msgExports } : {}),
+      ...(this.taeExports.length > 0 ? { tae: this.taeExports } : {})
     };
   }
 
@@ -166,6 +175,12 @@ export class WorkspaceIndex {
 
   searchTextEntries(query: string, limit = 100): Array<SearchResult<TextEntrySymbol>> {
     return searchSymbols(this.msgExports.flatMap((item) => item.entries), query, limit, textEntrySearchText);
+  }
+
+  /** 问题 6-C/D：按地址（action://c1050/A0200/e0 / c1050#A0200.e0）、类型名与字段值搜 TAE 词条。 */
+  searchTaeEvents(query: string, limit = 100): Array<SearchResult<TaeEventSymbol>> {
+    const events = this.taeExports.flatMap((item) => item.animations.flatMap((anim) => anim.events));
+    return searchSymbols(events, query, limit, taeEventSearchText);
   }
 
   lookupTextEntries(textId: number, category?: string): TextEntrySymbol[] {
@@ -271,6 +286,18 @@ function paramRowSearchText(row: ParamRowSymbol): string {
 
 function textEntrySearchText(entry: TextEntrySymbol): string {
   return [entry.uri, entry.category, entry.textId, entry.confidence, entry.text].filter(Boolean).join(' ');
+}
+
+function taeEventSearchText(event: TaeEventSymbol): string {
+  return [
+    event.uri,
+    event.index,
+    event.eventTypeId,
+    event.typeName,
+    event.startFrame,
+    event.endFrame,
+    ...(event.fields ?? []).map((field) => `${field.name}:${String(field.value)}`)
+  ].filter((value) => value !== undefined && value !== null && String(value).length > 0).join(' ');
 }
 
 function emptyKindCounts(): Record<ResourceKind, number> {

@@ -13,7 +13,8 @@ export type RagChunkFamily =
   | 'map_entity'
   | 'map_region'
   | 'param_row'
-  | 'text_entry';
+  | 'text_entry'
+  | 'tae_event';
 
 export const RAG_CHUNK_FAMILIES: readonly RagChunkFamily[] = [
   'file',
@@ -21,7 +22,8 @@ export const RAG_CHUNK_FAMILIES: readonly RagChunkFamily[] = [
   'map_entity',
   'map_region',
   'param_row',
-  'text_entry'
+  'text_entry',
+  'tae_event'
 ];
 
 export interface RagChunk {
