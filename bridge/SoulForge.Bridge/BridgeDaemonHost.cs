@@ -237,7 +237,7 @@ internal static class BridgeDaemonHost
     /// （Bnd4NativeWriter.ExtractChild → File.WriteAllBytes）却漏在链外。
     /// 漏掉的后果不是报错而是**没有 writable-root 校验**：输出路径只受
     /// AllowedRoots 约束，而 AllowedRoots 必须包含原版游戏目录（Oodle 需要），
-    /// 于是指向游戏目录的 outputPath 会被放行——直接违反「原版游戏目录永远只读」。
+    /// 于是指向工作区外（含未打开的游戏目录）的 outputPath 会被放行。
     ///
     /// if 链的问题在于「新增写命令时必须记得同步改它」，而漏改既不会有编译错误
     /// 也不会有测试失败。注册表把它变成一处显式声明，并由 VerifyDiskWriteRegistry
@@ -307,7 +307,7 @@ internal static class BridgeDaemonHost
             throw new InvalidOperationException(
                 "BRIDGE_DISK_WRITE_REGISTRY_INCOMPLETE: 能力声明里的写命令未登记进"
                 + $" DiskWritingCommands：{string.Join(", ", missing)}。"
-                + "未登记的写命令会完全跳过 writable-root 校验，直接违反「原版游戏目录永远只读」。");
+                + "未登记的写命令会完全跳过 writable-root 校验，写入会落到未打开的路径。");
         }
     }
 

@@ -3094,7 +3094,7 @@ export function App(): ReactElement {
                     <p className="start-sidebar__workspace">
                       工作区：{workspace?.workspaceLabel ?? '未打开'}
                       <span className={sessionMeta?.baseMounted ? 'pill pill--ok' : 'pill'}>
-                        原版：{sessionMeta?.baseMounted ? '已挂载（只读）' : '未挂载'}
+                        原版：{sessionMeta?.baseMounted ? '已挂载' : '未挂载'}
                       </span>
                     </p>
                     <div className="start-sidebar__actions">
@@ -3324,7 +3324,7 @@ export function App(): ReactElement {
               {/* 模型、思考强度与权限模式已迁入右侧 Agent 面板；此处只保留工作区与安全基础设施设置。 */}
               <div className="setting-row">
                 <div>
-                  <div className="setting-name">原版游戏目录（只读）</div>
+                  <div className="setting-name">原版游戏目录</div>
                   <div className="setting-desc">
                     {sessionMeta?.baseLabel
                       ?? baseRootChoice?.label

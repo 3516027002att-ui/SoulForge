@@ -124,7 +124,7 @@ const PLAINTEXT_TARGETS = Object.freeze([
 
 const NON_CLAIMS = [
   '不声明字节码条目可源码级编辑:唯一真阻塞是缺 HKS 重编译器。',
-  '原版游戏目录只读:真实语料被复制到临时 overlay 后才改动,游戏目录全程只被读取。',
+  '测试用副本:真实语料被复制到临时 overlay 后才改动,本机语料全程只被读取。',
   'Shift-JIS 条目(三个 *nameid.txt)的写入用由解码器反推出的 CP932 表(见'
     + ' encodeShiftJis),已实测解码→编码往返逐字节一致。CP932 覆盖不到的字符'
     + '会以 PLAINTEXT_SHIFT_JIS_CHAR_UNMAPPABLE 拒绝而不是替换成 ?。'
@@ -213,7 +213,7 @@ async function verifyContainerEntry(
   const targetRelative = relativeContainerPath.replace(/^mods\//, '');
   await mkdir(join(overlay, dirname(targetRelative)), { recursive: true });
   const target = join(overlay, targetRelative);
-  // 复制而非原地改：原版游戏目录只读。
+  // 复制而非原地改：smoke 不改本机语料。
   await copyFile(sourceContainer, target);
   const originalContainer = await readFile(target);
   const containerHash = sha256(originalContainer);

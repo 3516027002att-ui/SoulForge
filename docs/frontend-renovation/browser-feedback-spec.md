@@ -265,7 +265,7 @@ Electron 中保持真实流程：
 8. `styles.css`：删除 `.mode-tabs`，增加顶部资源栏、Agent 设置区和 browser-preview 提示样式。
 9. Playwright fixture 与测试：覆盖目录导航、Agent 设置迁移和两种运行表面。
 
-不要修改 Patch Engine、Bridge native writer、原版只读策略或主进程权限策略。
+不要修改 Patch Engine、Bridge native writer 或主进程权限策略。
 
 ## 10. 验收标准
 

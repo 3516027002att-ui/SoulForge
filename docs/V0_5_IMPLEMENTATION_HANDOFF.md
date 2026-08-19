@@ -117,7 +117,7 @@ lastReviewedAt
 - 简单、机械、低风险且边界清晰的 DTO、测试样板、序列化、机械重命名和胶水代码可以交给辅助代码生成工具。
 - 前端视觉、交互和布局优先交给专门的前端 Agent。没有可用前端 Agent 时，主 Agent 可以在既定数据契约、安全边界和可运行验收标准内实施，但必须补齐真实视觉、交互和响应式验证。
 - 任何辅助输出都必须由主 Agent 审查、集成并运行真实验证；辅助工具的成功输出不构成 SoulForge authority 或完成证据。
-- 上述分工只影响实施方式，不放宽原版只读、路径隔离、Patch Engine、native authority、结构化诊断、凭据和私有资产边界。
+- 上述分工只影响实施方式，不放宽工作区写入闸门、路径隔离、Patch Engine、native authority、结构化诊断、凭据和私有资产边界。
 
 ---
 
@@ -136,7 +136,7 @@ SoulForge 面向 Sekiro 和 FromSoftware Mod，目标不是简单复制 Smithbox
 最终体验：
 
 ~~~text
-打开 Mod 覆盖目录 + 原版只读目录
+打开 Mod 工作区目录 + 可选原版目录
   -> 建立虚拟资源树
   -> 按需读取 packed game data
   -> 渐进建立索引、引用图和证据包
@@ -167,7 +167,7 @@ SoulForge 不急于上线。V0.5 是长期整合里程碑，不是为了赶时�
 
 ### 2.1 工作区边界
 
-- 原版游戏目录永远只读。
+- 当前打开的工作区可以写入（工作区可以位于游戏安装目录内）。
 - Mod 覆盖目录是用户资源输出层。
 - renderer 不得直接访问文件系统，也不得获得真实绝对路径。
 - 数据库、缓存、日志、备份和恢复元数据只能进入应用数据目录，不能旁路写入 Mod 工作区。
@@ -351,7 +351,7 @@ SoulForge V0.5（文本优先）
 
 - Electron sandbox、CSP、导航、窗口、权限和 IPC sender 边界；
 - main 持有目录选择和高风险确认；
-- Mod 覆盖层可写、原版目录只读；
+- 当前打开的工作区可写；
 - canonical / realpath / junction 越界防护；
 - PatchIR + `WorkspaceTransaction` production commit 主干；
 - text、raw range、whole-file 和 container child 修改路径；

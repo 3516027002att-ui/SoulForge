@@ -275,7 +275,6 @@ export function Me3RuntimePanel(): ReactElement {
 
       <p className="muted">
         SoulForge 不自行实现 mod loader；运行能力通过可替换 GameRuntimeAdapter 集成。
-        本面板不写入原版游戏目录。
       </p>
     </section>
   );

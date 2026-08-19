@@ -168,7 +168,7 @@ Smithbox 是 Dear ImGui **可拆停靠**。SoulForge 复制的是它的**默认�
 - Oodle 只能从用户本地只读 base runtime 解析并由 main/Bridge 使用；不得复制到 Mod 工作区。KRAK 写缺少合规 compressor 时必须失败关闭；
 - 外部 metadata 只能由用户本地导入；必须记录 game/tool 版本、digest、license 和 provenance。版本或 digest 不匹配时允许只读诊断，禁止写；
 - synthetic fixture 必须微小、合法构造并明确标记；fixture 只能验证结构实现，不能替代真实 native corpus roundtrip；
-- 原版游戏根始终只读；数据库、缓存、日志、备份和恢复元数据不得写入 Mod 工作区；
+- 写入目标是当前打开的工作区；数据库、缓存、日志、备份和恢复元数据不得写入 Mod 工作区；
 - writer/converter 只写 main-owned staging；用户 Mod 的最终 create/replace/delete 只能由 Patch Engine 执行。
 
 ---
@@ -1262,7 +1262,7 @@ S17（2026-08-15）拍死五件事（对照 DSAS）：
 2. **动画命名**：hkxName 茎合法（ASCII 文件名）用茎；乱码/空/非文件名字符丢弃，回退 `a000_` + 至少 6 位 animId（`a000_000600`）。禁止「动画 N」、禁止乱码。C# 侧名字指针在 animFileInfo+0x10（UTF-16LE；+0x00 是 0/1 链接标志，旧码读它当指针吐乱码）。
 3. **词条行**：`{完整 typeId}  {类型名}`（`0 JumpTable`），类型名来自本机 DSAS `TAE.Template.SDT.xml`（main 只读解析注入，同 Yapped 只读模式，不提交 XML 入库）；无模板名显示「未命名」。行内元信息是帧，不显示秒。
 4. **词条详情下沉 footer**：选中词条时三栏底下（WorkbenchLayout footer，占用 S12 卸掉的 64 KiB 条位置）出现 起始帧/结束帧（主标签帧，可附 ≈秒小字）、完整 typeId + 类型名、事件下标、全部参数字段——按模板布局解码（Bridge 4 字节槽对齐，字段名 + 值 + kind）；解不出写「未解码」+ 有界 hex，禁止编造字段含义。帧编辑（update-event-times）留在 footer，输入用帧、提交内部秒；insert-event 已移除。中栏不再有 DetailsSection / Inspector 第三栏。
-5. **右栏挂伴生 chrbnd 模型**：查找顺序 overlay `chr/<id>.chrbnd.dcx` → 已挂载原版同样相对路径（原版只读）；Bridge FLVER 读命令支持 chrbnd 容器（DCX→BND4→首个 .flver 子项，与 ffxbnd/anibnd 同构）；挂上现有 FLVER 只读预览（readFlverMesh/Skeleton/Dummies 走 `chrbnd:` 虚拟 sourceUri）。两边都没有：空态「没有找到 c1130 的模型（chrbnd）」；未挂原版且 overlay 也没有：空态写明去「开始」页挂原版。不要假 FBX、不要可编辑骨骼。
+5. **右栏挂伴生 chrbnd 模型**：查找顺序 overlay `chr/<id>.chrbnd.dcx` → 已挂载原版同样相对路径；Bridge FLVER 读命令支持 chrbnd 容器（DCX→BND4→首个 .flver 子项，与 ffxbnd/anibnd 同构）；挂上现有 FLVER 只读预览（readFlverMesh/Skeleton/Dummies 走 `chrbnd:` 虚拟 sourceUri）。两边都没有：空态「没有找到 c1130 的模型（chrbnd）」；未挂原版且 overlay 也没有：空态写明去「开始」页挂原版。不要假 FBX、不要可编辑骨骼。
 
 - 左栏列动画 id 列表（虚拟滚动）；中栏列当前动画的词条事件列表（`{typeId} {类型名}`）；右栏是只读 3D 预览（有 chrbnd 才有模型）。不要时间轴图、不要 Inspector 第三栏、不要 64 KiB 条。
 - 打开 `*.anibnd.dcx` / `.tae` 都走 TAE 读链；`*.anibnd.dcx` 由 Bridge 从 BND4 容器提取主 TAE，**不落 BND4 通用容器页**。
@@ -2473,8 +2473,8 @@ SHELL-09 → SHELL-10
 
 > **S22 落地（2026-08-17，原版目录选完当场生效）**：
 > - 新增 `workspace.remountBase(baseSelectionId | null)` IPC：工作区已打开时保留 overlay、只重建 base 层（dispose daemon 池、清 EMEVD 文档缓存与编辑器 handle），新 `oodleRuntimeRoot` / 只读原版层立即生效 —— 动作预览、KRAK 事件、原版 chrbnd 不必重启。
-> - `chooseBaseDirectory` / `clearBaseDirectory` 在工作区已打开时立即重挂；`mountWorkspace` 的「下次打开生效」文案删除。开始页状态只分「已挂载（只读）」/「未挂载」，「待打开生效」「原版（下次打开生效）」删除。
-> - 重挂后 renderer 更新 `workspace.session` / `workspaceSessionId` 并清空打开中的编辑态（旧文档 handle 已作废）。原版仍只读（写链只允许 overlay，layer 语义未动）。
+> - `chooseBaseDirectory` / `clearBaseDirectory` 在工作区已打开时立即重挂；`mountWorkspace` 的「下次打开生效」文案删除。开始页状态只分「已挂载」/「未挂载」，「待打开生效」「原版（下次打开生效）」删除。
+> - 重挂后 renderer 更新 `workspace.session` / `workspaceSessionId` 并清空打开中的编辑态（旧文档 handle 已作废）。写链目标是当前打开的工作区。
 
 #### SHELL-10 — 键位跟域走（T7）
 
@@ -2891,7 +2891,7 @@ SHELL-09 → SHELL-10
 - [ ] Change Review 显示操作、目标、diff、影响、验证、备份、回滚；
 - [ ] 提交后原生复读失败触发自动回滚；
 - [ ] renderer 无文件系统权限；
-- [ ] 原版目录只读；
+- [ ] 只写当前打开的工作区；
 - [ ] writer 只写 main staging；
 - [ ] 用户 Mod 提交只经 Patch Engine。
 

@@ -46,6 +46,43 @@ async function runFoundationChecks(root: string): Promise<void> {
   const overlayWrite = session.resolveWritablePath(overlayFile);
   if (!overlayWrite.ok) throw new Error('Overlay path must be writable.');
 
+  // Opened workspace nested inside a mounted game tree (Sekiro\\mods).
+  // The old gate matched base first and rejected the opened mods folder.
+  const nestedGame = join(root, 'sekiro-install');
+  const nestedMods = join(nestedGame, 'mods');
+  await mkdir(join(nestedMods, 'param'), { recursive: true });
+  await mkdir(join(nestedGame, 'param'), { recursive: true });
+  const nestedOverlayFile = join(nestedMods, 'param', 'gameparam.txt');
+  const nestedVanillaFile = join(nestedGame, 'param', 'gameparam.txt');
+  await writeFile(nestedOverlayFile, 'mod-v1\n', 'utf8');
+  await writeFile(nestedVanillaFile, 'vanilla\n', 'utf8');
+  const nestedSession = await openWorkspaceSession({
+    overlayRoot: nestedMods,
+    baseRoot: nestedGame,
+    game: 'sekiro'
+  });
+  if (!nestedSession.isOverlayPath(nestedOverlayFile)) {
+    throw new Error('Nested mods path must be classified as overlay.');
+  }
+  if (nestedSession.isBasePath(nestedOverlayFile)) {
+    throw new Error('Nested mods path must not be classified as base.');
+  }
+  const nestedWrite = nestedSession.resolveWritablePath(nestedOverlayFile);
+  if (!nestedWrite.ok) {
+    throw new Error(`Opened nested workspace must be writable: ${JSON.stringify(nestedWrite.diagnostics)}`);
+  }
+  const nestedAsBaseLayer = nestedSession.resolveWritablePath(nestedOverlayFile, 'base');
+  if (!nestedAsBaseLayer.ok) {
+    throw new Error('Opened workspace path stays writable even if caller passes layer=base.');
+  }
+  const nestedVanillaWrite = nestedSession.resolveWritablePath(nestedVanillaFile);
+  if (nestedVanillaWrite.ok) {
+    throw new Error('Vanilla sibling outside the opened mods folder must stay unwritable.');
+  }
+  if (!nestedVanillaWrite.diagnostics.some((item) => item.code === 'WRITE_TO_BASE_FORBIDDEN')) {
+    throw new Error('Expected WRITE_TO_BASE_FORBIDDEN for vanilla sibling outside opened workspace.');
+  }
+
   // Keep memory store for foundation path; disk reopen is covered by runV05PersistSmoke.
   const store = new MemoryOperationLogStore();
   const fileStoreProbe = openFileOperationLogStore(join(root, 'probe-operation-log.json'));

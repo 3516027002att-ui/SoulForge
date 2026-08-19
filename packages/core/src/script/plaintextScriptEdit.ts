@@ -18,11 +18,9 @@
  *   ② 按声明的编辑动作产出新文本,并用同一编码编回字节;
  *   ③ 产出带哈希前置条件的 PatchIR 操作,交给 Patch Engine。
  *
- * ── 游戏目录只读 ──
- *
  * 读取源字节的容器路径由调用方给出,本模块不写它;产出的操作只描述
- * Mod 侧目标。原版游戏目录永远只读这条硬约束由 Patch Engine 与
- * allowedRoots 共同强制,本模块不重复实现,也不提供任何绕过参数。
+ * 当前打开工作区里的目标。写入闸门由 Patch Engine 与 allowedRoots 强制,
+ * 本模块不重复实现,也不提供任何绕过参数。
  */
 
 import { createHash } from 'node:crypto';

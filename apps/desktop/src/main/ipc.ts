@@ -1131,8 +1131,8 @@ function locateUserEmedfSync(): string | null {
  * S17（2026-08-15）：动作域 TAE 的伴生 chrbnd 只读解析。
  *
  * 虚拟 sourceUri 形如 `chrbnd:chr/c1130.chrbnd.dcx` —— renderer 只持有这个
- * 逻辑标识，真实路径永远留在 main。查找顺序：overlay 根 → 已挂载原版根
- * （原版只读）。拒绝 `..` 等越界片段。找不到返回 null，由调用方给空态文案。
+ * 逻辑标识，真实路径永远留在 main。查找顺序：overlay 根 → 已挂载原版根。
+ * 拒绝 `..` 等越界片段。找不到返回 null，由调用方给空态文案。
  */
 function resolveChrbndVirtualFile(sourceUri: string): { absolutePath: string; relativePath: string } | null {
   if (!sourceUri.startsWith('chrbnd:')) return null;
@@ -2444,7 +2444,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   handle('workspace.openBaseDialog', async (event): Promise<DirectorySelection | null> => {
     const remembered = readRecentPath(recentPathsFile, 'base');
     const result = await dialog.showOpenDialog({
-      title: '打开原版游戏目录（只读，可选）',
+      title: '打开原版游戏目录（可选）',
       properties: ['openDirectory'],
       ...(remembered ? { defaultPath: remembered } : {})
     });
@@ -2568,10 +2568,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * S22：工作区已打开时重挂原版目录（保留 overlay，只换 base 层）。
    *
    * 选/换/清原版不再「下次打开生效」：这里重建 session（dispose daemon 池、
-   * 清 EMEVD 文档缓存与编辑器 handle），新的 oodleRuntimeRoot / 原版只读层
+   * 清 EMEVD 文档缓存与编辑器 handle），新的 oodleRuntimeRoot / 原版挂载层
    * 立即生效 —— 动作预览、KRAK 事件、原版 chrbnd 不必重启就能走到新 base。
-   * baseSelectionId 为 null = 卸载原版层。原版永远只读（openWorkspaceSession
-   * 的 layer 语义不变，写链只允许 overlay）。
+   * baseSelectionId 为 null = 卸载原版层。写入目标是当前打开的工作区。
    */
   handle(
     'workspace.remountBase',
@@ -4550,7 +4549,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
   });
 
   /**
-   * S17：动作域 TAE 的伴生 chrbnd 解析（overlay → 已挂载原版，原版只读）。
+   * S17：动作域 TAE 的伴生 chrbnd 解析（overlay → 已挂载原版）。
    * renderer 传动作文件 sourceUri；main 按同相对路径推 `chr/<id>.chrbnd.dcx`
    * 并探存在性，返回虚拟 sourceUri（`chrbnd:<relative>`）供 FLVER 读通道用。
    * 两边都没有时给空态文案：未挂原版时指引去「开始」页挂载。
@@ -10189,7 +10188,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
      * way the agent touches the workspace" boundary.
      *
      * Path resolution goes through activeSession.resolveWritablePath, so the
-     * read-only-base-game constraint is enforced by the existing mechanism
+     * opened-workspace write gate is enforced by the existing mechanism
      * rather than a second check written here. An unresolvable path yields null
      * (no diff) rather than an error: failing to *preview* a change must never
      * decide whether it gets approved.
@@ -10229,8 +10228,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
       // 用 Secure 版而不是同步版：同步 resolveWritablePath 的注释写明它只是
       // **词法预检**，权威检查是 resolveWritablePathSecure（会解析 junction 与
-      // symlink）。一个指向原版游戏目录的 symlink 能骗过词法检查——这里只是读，
-      // 但「游戏目录只读」这条边界该由权威机制守，不该因为「只是预览」就放宽。
+      // symlink）。工作区外路径由权威机制拒绝，不该因为「只是预览」就放宽。
       const writable = await activeSession.resolveWritablePathSecure(targetPath, 'overlay');
       if (!writable.ok || typeof writable.absolutePath !== 'string') return null;
       const resolvedPath = writable.absolutePath;

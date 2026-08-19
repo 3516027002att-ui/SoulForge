@@ -29,7 +29,7 @@
 
 - [ ] 我没有在 Patch Engine 之外用 `fs.writeFile` 改 Mod 资源；writer/converter 只写 main 控制的暂存根。
 - [ ] renderer 不碰文件系统、不拿真实绝对路径；`THREE.Object3D` / React state 不作权威场景文档。
-- [ ] 原版游戏目录只读；数据库/缓存/日志/恢复元数据不写进 Mod 工作区。
+- [ ] 只写当前打开的工作区；数据库/缓存/日志/恢复元数据不写进 Mod 工作区。
 - [ ] 未知字段无法无损保留 → 不开 writer；no-op roundtrip 不成立 → 停。
 - [ ] 不让 fixture / candidate 冒充 native；不让 raw replace 冒充 native writer。
 - [ ] `unsupported` / `failed` / `partial` / `blocked` 返回**结构化诊断**，不吞异常、不猜默认值。

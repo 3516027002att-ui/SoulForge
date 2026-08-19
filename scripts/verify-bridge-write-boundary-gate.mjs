@@ -2,7 +2,7 @@
 /**
  * Bridge 写盘边界门禁。
  *
- * 守的是硬约束 2/3：原版游戏目录永远只读，且 Mod 工作区不得被写入旁路文件。
+ * 守的是硬约束：写入必须落在允许的根内，且 Mod 工作区不得被写入旁路文件。
  * Bridge 侧的执行点是 BridgeDaemonHost 对 options.outputPath 做
  * writable-root 校验——但那段校验此前是六个 Equals 串成的 if 链，而
  * extract-bnd4-child 同样按 outputPath 落盘却漏在链外。

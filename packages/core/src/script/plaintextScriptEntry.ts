@@ -30,8 +30,8 @@
  *     实测它是 `\x1bLuaP` 字节码(可打印率 0.6121)。
  *
  * game 侧 12 个容器在本次扫描里全部读取失败(KRAK/Oodle 需要
- * oodleRuntimeRoot,未传)。这不影响本模块:源码级写只写 Mod 暂存区,
- * 原版游戏目录永远只读。但结论的覆盖面是 **mod 侧**,不是全量。
+ * oodleRuntimeRoot,未传)。这不影响本模块:源码级写只写当前打开
+ * 工作区的暂存区。结论的覆盖面是 **mod 侧**,不是全量。
  */
 
 import type { StructuredDiagnostic } from '@soulforge/shared';

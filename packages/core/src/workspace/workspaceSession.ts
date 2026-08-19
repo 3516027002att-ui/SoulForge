@@ -27,7 +27,8 @@ export interface WorkspaceSession {
   isBasePath(absolutePath: string): boolean;
   /**
    * Resolve a path that is allowed for Patch Engine writes.
-   * Base paths are always rejected; only overlay (or explicit staging) is writable.
+   * Opened overlay paths win even when they are nested inside a mounted game
+   * tree. Staging is the only other writable layer.
    */
   resolveWritablePath(absolutePath: string, layer?: OverlayLayer): ResolveWritablePathResult;
   /**
@@ -43,8 +44,10 @@ export interface WorkspaceSession {
 }
 
 /**
- * v0.5 workspace session: native ModEngine overlay is writable, optional game
- * install is read-only base. All Patch Engine writes must target overlay.
+ * v0.5 workspace session: the opened Mod workspace (overlay) is writable.
+ * Overlay may sit inside a mounted game install (e.g. Sekiro\\mods); those
+ * opened paths stay writable. Sibling files that are only in the mounted game
+ * tree and not in the opened workspace stay rejected.
  *
  * The paths exposed through `layers` stay in the namespace selected by the
  * caller. This matters on Windows, where `realpath()` may expand an 8.3 alias
@@ -93,6 +96,10 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
       return isInsideSelectedOrPhysicalRoot(overlayRoot, physicalOverlayRoot, absolutePath);
     },
     isBasePath(absolutePath: string): boolean {
+      // Opened overlay wins. A mods folder inside the game tree is overlay, not base.
+      if (isInsideSelectedOrPhysicalRoot(overlayRoot, physicalOverlayRoot, absolutePath)) {
+        return false;
+      }
       return baseRoot && physicalBaseRoot
         ? isInsideSelectedOrPhysicalRoot(baseRoot, physicalBaseRoot, absolutePath)
         : false;
@@ -100,16 +107,11 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
     resolveWritablePath(absolutePath: string, layer: OverlayLayer = 'overlay'): ResolveWritablePathResult {
       const diagnostics: Diagnostic[] = [];
       const resolved = resolve(absolutePath);
-
-      if (layer === 'base') {
-        diagnostics.push({
-          severity: 'error',
-          code: 'WRITE_TO_BASE_FORBIDDEN',
-          message: 'Base game directory is read-only. All writes must target the Mod overlay.',
-          details: { absolutePath: resolved, layer }
-        });
-        return { ok: false, layer, diagnostics };
-      }
+      const insideOpenedWorkspace = isInsideSelectedOrPhysicalRoot(
+        overlayRoot,
+        physicalOverlayRoot,
+        resolved
+      );
 
       if (layer === 'staging') {
         if (stagingRoot && isPathInside(stagingRoot, resolved)) {
@@ -126,29 +128,33 @@ export async function openWorkspaceSession(options: OpenWorkspaceSessionOptions)
         return { ok: false, layer, diagnostics };
       }
 
-      if (baseRoot
-        && physicalBaseRoot
-        && isInsideSelectedOrPhysicalRoot(baseRoot, physicalBaseRoot, resolved)) {
+      // Opened workspace first. Nested mods (Sekiro\\mods) used to match the
+      // mounted game tree and get WRITE_TO_BASE_FORBIDDEN even though the user
+      // opened the mods folder.
+      if (insideOpenedWorkspace) {
+        return { ok: true, absolutePath: resolved, layer: 'overlay', diagnostics };
+      }
+
+      if (layer === 'base'
+        || (baseRoot
+          && physicalBaseRoot
+          && isInsideSelectedOrPhysicalRoot(baseRoot, physicalBaseRoot, resolved))) {
         diagnostics.push({
           severity: 'error',
           code: 'WRITE_TO_BASE_FORBIDDEN',
-          message: 'Refusing to write into the read-only base game directory.',
-          details: { absolutePath: resolved, baseRoot }
+          message: '这个文件不在当前打开的工作区里，无法写入。',
+          details: { absolutePath: resolved, ...(baseRoot ? { baseRoot } : {}) }
         });
         return { ok: false, layer: 'overlay', diagnostics };
       }
 
-      if (!isInsideSelectedOrPhysicalRoot(overlayRoot, physicalOverlayRoot, resolved)) {
-        diagnostics.push({
-          severity: 'error',
-          code: 'WRITE_OUTSIDE_OVERLAY',
-          message: 'Writable paths must stay inside the Mod overlay root.',
-          details: { absolutePath: resolved, overlayRoot }
-        });
-        return { ok: false, layer: 'overlay', diagnostics };
-      }
-
-      return { ok: true, absolutePath: resolved, layer: 'overlay', diagnostics };
+      diagnostics.push({
+        severity: 'error',
+        code: 'WRITE_OUTSIDE_OVERLAY',
+        message: 'Writable paths must stay inside the opened Mod workspace.',
+        details: { absolutePath: resolved, overlayRoot }
+      });
+      return { ok: false, layer: 'overlay', diagnostics };
     },
     async resolveWritablePathSecure(
       absolutePath: string,
