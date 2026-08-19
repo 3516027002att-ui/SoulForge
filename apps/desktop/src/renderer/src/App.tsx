@@ -2131,10 +2131,9 @@ export function App(): ReactElement {
       }
     }
     if (domain === 'text') {
-      // 11-B：打开文本域不再 selectFile(first) 把工作台钉死在 item。FMG 工作台
-      // 自己拉完整目录（readTextCatalog 扫全部 zhocn msgbnd），默认选中 item 组
-      // 第一张表；侧栏仍列出 item.msgbnd / menu.msgbnd，点哪个就定位到那一组。
-      setSelectedFile(null);
+      // 3-B：打开文本域时保留上次选中的 msgbnd（有就留，Categories 只列那一个
+      // 容器的表）；没有选中文件就让 Categories 走空态，等用户在左侧资源浏览器
+      // 点 item / menu。绝不自动 selectFile(item) 把工作台钉死在某个容器。
       setPreview(null);
       setCenterView('resource');
       setStatus('文本：已打开文本工作台');
