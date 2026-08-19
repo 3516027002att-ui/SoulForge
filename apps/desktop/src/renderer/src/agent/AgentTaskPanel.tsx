@@ -1,11 +1,9 @@
 import type { ReactElement } from 'react';
 import type { ToolDescriptor } from '@soulforge/core';
-import { formatBytes, formatListTruncation, formatPageRange } from '../format/uiText.js';
+import { formatBytes } from '../format/uiText.js';
 import { AgentApprovalPanel } from './AgentApprovalPanel.js';
 import type { AgentApprovalUserDecision } from './agentTaskState.js';
 import {
-  AGENT_SESSION_PAGE_SIZE,
-  AGENT_TOOL_CALL_LIMIT,
   describeAgentTaskStatus,
   isAgentTaskCancellable,
   type AgentTaskState
@@ -54,7 +52,6 @@ export interface AgentTaskPanelProps {
   /** 运行不可用的原因；null 表示可运行。由 describeRunBlocker 产出。 */
   runBlocker: string | null;
   sessions: AgentSessionRow[];
-  sessionsPage: number;
   sessionsError: string | null;
   sessionDetail: AgentSessionDetail | null;
   /** 主进程锁定的权限模式说明；renderer 不得在此之外另给授权入口。 */
@@ -64,7 +61,6 @@ export interface AgentTaskPanelProps {
   onRun: () => void;
   onCancel: () => void;
   onRefreshSessions: () => void;
-  onSessionsPageChange: (page: number) => void;
   onLoadSession: (sessionPath: string) => void;
   onResumeSession: (sessionPath: string) => void;
   /** 回答一条审批请求。 */
@@ -85,24 +81,19 @@ function toolCallRowClass(status: 'running' | 'ok' | 'failed'): string {
   return 'agent-log__row';
 }
 
-/** 参数展示上限；超出截断并说明。长参数会把日志区挤满。 */
-const TOOL_ARGUMENTS_DISPLAY_LIMIT = 1_200;
-
 /**
  * 参数展示：能解析成 JSON 就缩进显示，否则原样回显。
  *
  * 刻意不在解析失败时隐藏内容：模型发出的非法 JSON 正是需要被看见的东西，
- * 藏起来会让「模型一直发坏参数」变成一个查不到原因的失败。
+ * 藏起来会让「模型一直发坏参数」变成一个查不到原因的失败。参数放在
+ * `<details>` 折叠里，展开即可看全文（问题 5：单条文本不截断）。
  */
 function formatToolArguments(argumentsJson: string): string {
-  let text = argumentsJson;
   try {
-    text = JSON.stringify(JSON.parse(argumentsJson), null, 2);
+    return JSON.stringify(JSON.parse(argumentsJson), null, 2);
   } catch {
-    text = argumentsJson;
+    return argumentsJson;
   }
-  if (text.length <= TOOL_ARGUMENTS_DISPLAY_LIMIT) return text;
-  return `${text.slice(0, TOOL_ARGUMENTS_DISPLAY_LIMIT)}\n…（已截断 ${text.length - TOOL_ARGUMENTS_DISPLAY_LIMIT} 字符，完整参数在会话文件里）`;
 }
 
 /**
@@ -130,7 +121,6 @@ export function AgentTaskPanel({
   selectedServiceId,
   runBlocker,
   sessions,
-  sessionsPage,
   sessionsError,
   sessionDetail,
   permissionLockReason,
@@ -139,7 +129,6 @@ export function AgentTaskPanel({
   onRun,
   onCancel,
   onRefreshSessions,
-  onSessionsPageChange,
   onLoadSession,
   onResumeSession,
   onRespondApproval,
@@ -147,19 +136,6 @@ export function AgentTaskPanel({
   approvalError
 }: AgentTaskPanelProps): ReactElement {
   const cancellable = isAgentTaskCancellable(task);
-  const shownToolCalls = task.toolCalls.slice(-AGENT_TOOL_CALL_LIMIT);
-  const toolCallTruncation = formatListTruncation({
-    total: task.toolCalls.length,
-    shown: shownToolCalls.length,
-    noun: '次工具调用',
-    hint: '只保留最近的调用；完整记录在会话文件里'
-  });
-  const pageCount = Math.max(1, Math.ceil(sessions.length / AGENT_SESSION_PAGE_SIZE));
-  const page = Math.min(sessionsPage, pageCount - 1);
-  const pageSessions = sessions.slice(
-    page * AGENT_SESSION_PAGE_SIZE,
-    page * AGENT_SESSION_PAGE_SIZE + AGENT_SESSION_PAGE_SIZE
-  );
 
   return (
     <div className="agent-block" data-testid="agent-task-panel">
@@ -278,7 +254,7 @@ export function AgentTaskPanel({
 
       {task.toolCalls.length > 0 && (
         <div className="agent-log" data-testid="agent-task-tool-calls">
-          {shownToolCalls.map((call) => (
+          {task.toolCalls.map((call) => (
             <div key={call.callId} className={toolCallRowClass(call.status)}>
               {call.status === 'running' && <span className="spinner" aria-hidden="true"></span>}
               <span>
@@ -287,7 +263,8 @@ export function AgentTaskPanel({
               </span>
               {/* 参数折叠展示：只显示工具名时，「读了哪个文件」「写了什么」
                   全都看不见，用户无法判断 agent 是否在做自己要的事。参数在
-                  loop 侧已脱敏（agentLoop 的 redactSecrets 在 push 时执行）。 */}
+                  loop 侧已脱敏（agentLoop 的 redactSecrets 在 push 时执行）。
+                  展开即看全文（问题 5：不截断）。 */}
               {call.argumentsJson !== undefined && call.argumentsJson !== '' && (
                 <details className="agent-log__args">
                   <summary>参数</summary>
@@ -298,11 +275,6 @@ export function AgentTaskPanel({
               )}
             </div>
           ))}
-          {toolCallTruncation !== null && (
-            <div className="agent-log__row is-warn" data-testid="agent-tool-calls-truncation">
-              <span>{toolCallTruncation}</span>
-            </div>
-          )}
         </div>
       )}
 
@@ -326,40 +298,15 @@ export function AgentTaskPanel({
       <details data-testid="agent-session-history">
         <summary>会话历史 {sessions.length} 条</summary>
         {sessionsError !== null && <p className="danger">{sessionsError}</p>}
-        <p className="muted" data-testid="agent-sessions-range">
-          {formatPageRange({
-            page,
-            pageSize: AGENT_SESSION_PAGE_SIZE,
-            total: sessions.length,
-            noun: '会话'
-          })}
-        </p>
-        <div className="row gap pager">
-          <button
-            type="button"
-            disabled={page <= 0}
-            onClick={() => onSessionsPageChange(page - 1)}
-          >
-            上一页
-          </button>
-          <span className="muted">{sessions.length > 0 ? page + 1 : 0}/{pageCount}</span>
-          <button
-            type="button"
-            disabled={page >= pageCount - 1}
-            onClick={() => onSessionsPageChange(page + 1)}
-          >
-            下一页
-          </button>
-        </div>
         {/* 主进程只回最近 50 条（ipc.ts:3034 的 listRolloutSessions(dir, 50)）。
             这不是渲染截断而是数据源上限，必须说明，否则用户会把 50 当成全部。 */}
         <p className="muted" data-testid="agent-sessions-source-limit">
           会话列表只回报最近 50 个会话文件；更早的记录仍在磁盘上，但不在此列表内。
         </p>
         <div className="agent-log">
-          {pageSessions.length === 0
+          {sessions.length === 0
             ? <div className="agent-log__row"><span className="muted">没有会话记录</span></div>
-            : pageSessions.map((session) => (
+            : sessions.map((session) => (
                 <div key={session.sessionPath} className="agent-log__row">
                   {/* 文件名必须显示：只给时间戳与消息数时，同一分钟里的多个会话
                       在界面上无法区分，「承接哪一个」就成了盲选。 */}

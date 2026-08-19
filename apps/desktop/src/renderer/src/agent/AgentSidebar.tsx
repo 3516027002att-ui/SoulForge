@@ -22,7 +22,6 @@ import type {
 } from '@soulforge/shared';
 import { AgentTaskPanelProps } from './AgentTaskPanel.js';
 import {
-  AGENT_TOOL_CALL_LIMIT,
   describeAgentTaskStatus,
   isAgentTaskActive
 } from './agentTaskState.js';
@@ -76,10 +75,8 @@ export interface AgentSidebarProps {
    * 缺省时由 selectedFilePath/contextLabel 投影一个 'files' 域选区作为过渡。
    */
   selection?: EditorSelectionContext | null;
-  /** §12.11 已装配消息流（bounded pages）；非空时视口渲染 AgentMessageList。 */
+  /** §12.11 已装配消息流（全量渲染）；非空时视口渲染 AgentMessageList。 */
   messages?: readonly AgentMessageDto[];
-  /** 消息流「加载更早消息」的真实回调（透传给 AgentMessageList）。 */
-  onLoadOlderMessages?: () => void;
   /** main 已签发的 opaque 资源引用。 */
   resources?: readonly AgentResourceReference[];
   /** 把当前语义选区作为资源引用加入（main 侧签发 opaque token）。 */
@@ -195,7 +192,6 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     selectedFilePath,
     selection = null,
     messages = [],
-    onLoadOlderMessages,
     resources = [],
     onCreateResource,
     onRemoveResource,
@@ -330,8 +326,8 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingCiteHits, onCiteHitsConsumed]);
 
-  /** 从任务态派生 §12.5 工具活动行（单行折叠）。 */
-  const toolActivities = taskState.toolCalls.slice(-AGENT_TOOL_CALL_LIMIT).map((call) => ({
+  /** 从任务态派生 §12.5 工具活动行（单行折叠；全量，不再按 20 条截断）。 */
+  const toolActivities = taskState.toolCalls.map((call) => ({
     id: call.callId,
     summary: call.name,
     status: call.status === 'ok' ? 'succeeded' as const : call.status === 'failed' ? 'failed' as const : 'running' as const,
@@ -418,7 +414,6 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
           <AgentConversationViewport
             idle={emptyWelcome}
             messages={messages}
-            {...(onLoadOlderMessages !== undefined ? { onLoadOlder: onLoadOlderMessages } : {})}
             toolActivities={toolActivities}
             approvals={approvals}
             failure={failure}

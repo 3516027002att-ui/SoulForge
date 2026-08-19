@@ -7,8 +7,9 @@
  *  - renderer 安全白名单：绝对路径、raw parser / Hex dump 不得进入 DTO 或 DOM；
  *  - 跨 sender 的 opaque 引用 token（附件 / 资源）：签发、解析、跨 sender 拒绝；
  *  - §12.11 严格 event seq：重复 / 倒序丢弃并记结构化诊断；
- *  - bounded message pages（硬约束 17 大列表分页）：窗口、游标、追加去重；
- *  - scroll threshold：贴底自动滚动 / 顶部触发加载更早；
+ *  - message pages（运输分页）：窗口、游标、追加去重；消息全量保留——
+ *    不因条数上限丢弃更早消息（问题 5：显示不设限）；
+ *  - scroll threshold：贴底自动滚动；
  *  - resume：承接会话时从尾部回放。
  *
  * §12.11 的 named DTO 类型与 runtime decoder 位于 editor-protocol.ts，本模块重新
@@ -456,13 +457,11 @@ export function createAgentStreamSeqTracker(): AgentStreamSeqTracker {
 }
 
 // ---------------------------------------------------------------------------
-// bounded message pages（硬约束 17 大列表分页）
+// message pages（运输分页；消息全量保留）
 // ---------------------------------------------------------------------------
 
-/** §12.11 limit 默认值（decoder 限制 1..100）。 */
+/** §12.11 limit 默认值（decoder 限制 1..100，用于运输分页请求）。 */
 export const AGENT_MESSAGE_PAGE_SIZE = 50;
-/** 视口最多保留的消息条数；超出后丢弃最老消息（分页前提是有界）。 */
-export const AGENT_MESSAGE_RETAIN_LIMIT = 200;
 
 export function clampAgentMessagePageLimit(limit: number): number {
   if (!Number.isInteger(limit)) return AGENT_MESSAGE_PAGE_SIZE;
@@ -555,13 +554,11 @@ export interface AppendAgentMessagePageResult {
   readonly messages: readonly AgentMessageDto[];
   readonly added: number;
   readonly replaced: number;
-  /** 超出 RETAIN_LIMIT 被丢弃的最老消息 id。 */
-  readonly dropped: readonly string[];
 }
 
 /**
- * 流式增量合并：按 id 去重（同 id 视为 streaming 更新替换旧值），新消息追加到尾部；
- * 总长度超过 RETAIN_LIMIT 时丢弃最老消息，保持视口有界。
+ * 流式增量合并：按 id 去重（同 id 视为 streaming 更新替换旧值），新消息追加到尾部。
+ * 消息**全量保留**，不因条数上限丢弃更早消息（问题 5：显示不设限）。
  */
 export function appendAgentMessagePage(
   prev: readonly AgentMessageDto[],
@@ -581,11 +578,7 @@ export function appendAgentMessagePage(
       added += 1;
     }
   }
-  const dropped = messages.length > AGENT_MESSAGE_RETAIN_LIMIT
-    ? messages.slice(0, messages.length - AGENT_MESSAGE_RETAIN_LIMIT).map((message) => message.id)
-    : [];
-  if (dropped.length > 0) messages = messages.slice(-AGENT_MESSAGE_RETAIN_LIMIT);
-  return { messages, added, replaced, dropped };
+  return { messages, added, replaced };
 }
 
 /** §12.11 AgentMessagePageRequest 的构造（limit 收敛到 1..100）。 */
@@ -679,7 +672,7 @@ function applyAssembledEvent(messages: readonly AgentMessageDto[], event: AgentS
  * 把一段 §12.11 AgentStreamEvent 装配成有序消息列表：
  *  - 严格 seq：重复 / 倒序事件丢弃并记诊断（不重放）；
  *  - 同 id 增量更新（delta 追加、finished 关流、tool/approval 替换）；
- *  - 输出有界（RETAIN_LIMIT）。
+ *  - 消息全量保留（不因条数上限丢弃更早消息）。
  */
 export function reduceAgentStreamToMessages(events: readonly AgentStreamEvent[]): AgentStreamAssemblyResult {
   let state = createAgentStreamSeqState();

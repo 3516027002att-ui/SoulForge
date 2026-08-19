@@ -1,5 +1,4 @@
 import type { ReactElement } from 'react';
-import { formatBytes } from '../format/uiText.js';
 import {
   approvalSeverity,
   classifyDiffLines,
@@ -194,15 +193,10 @@ export function AgentApprovalPanel({
               {entry.preview.newText !== null && (
                 // diff 在手时默认折叠：两者内容重叠，展开两份会让卡片翻倍。
                 // diff 缺失时展开——那时它是唯一能看到的内容。
+                // 预览是全文（问题 5：不截断），details 展开即看完整内容。
                 <details open={entry.diff === null}>
                   <summary>将写入的完整内容</summary>
                   <pre className="tool-output" data-testid="agent-approval-newtext">{entry.preview.newText}</pre>
-                  {entry.preview.truncatedBytes > 0 && (
-                    <p className="muted" data-testid="agent-approval-truncation">
-                      预览已截断，另有 {formatBytes(entry.preview.truncatedBytes)} 未显示。
-                      完整内容会在提交前经 Patch Engine 校验。
-                    </p>
-                  )}
                 </details>
               )}
               {entry.preview.targetPath === null
