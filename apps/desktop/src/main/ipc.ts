@@ -2136,17 +2136,34 @@ function sessionCommitPort(
   storage: { backupBaseDir: string; recoveryDir: string }
 ): RawReplaceCommitPort {
   return {
-    commit: (input) => saveRawReplace({
-      file: input.file,
-      expectedHash: input.expectedHash,
-      newContentBase64: input.newContentBase64,
-      title: input.title,
-      ...(input.confirmation ? { confirmation: input.confirmation } : {}),
-      session,
-      operationLog,
-      backupBaseDir: storage.backupBaseDir,
-      recoveryDir: storage.recoveryDir
-    })
+    commit: (input) => {
+      // 工作台按钮就是确认。S29 拆掉了弹窗，但 file_replace 对 parambnd 等
+      // 打包格式仍要一张 receipt；不补的话新建/删行会停在
+      // EDIT_CONFIRMATION_REQUIRED（Files Mode raw/high-risk…）。
+      const confirmation = input.confirmation ?? createConfirmationReceipt({
+        subjects: [
+          'MAIN_WORKBENCH_COMMIT',
+          input.file.sourceUri,
+          'ALL_RISKS',
+          ...(activeWorkspaceSessionId ? [`WORKSPACE_SESSION:${activeWorkspaceSessionId}`] : []),
+          `TITLE:${input.title}`
+        ],
+        riskLevel: 'high',
+        sourceUri: input.file.sourceUri,
+        note: '工作台提交视为已确认'
+      });
+      return saveRawReplace({
+        file: input.file,
+        expectedHash: input.expectedHash,
+        newContentBase64: input.newContentBase64,
+        title: input.title,
+        confirmation,
+        session,
+        operationLog,
+        backupBaseDir: storage.backupBaseDir,
+        recoveryDir: storage.recoveryDir
+      });
+    }
   };
 }
 
