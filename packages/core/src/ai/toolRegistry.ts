@@ -277,7 +277,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
   registry.register({
     name: 'retrieve_evidence',
     description:
-      'Hybrid retrieve over the workspace evidence index: exact IDs, lexical text, and one-hop reference expansion. Use this before specialized search_* tools when the question names a flag, entity, event, textId, or unknown resource.',
+      'Hybrid retrieve over the workspace evidence index: exact IDs, lexical text, and one-hop reference expansion. '
+        + 'Addresses are param-like: cXXXX / cXXXX#AXXXX(.eN) for actions, MXX / mAA_BB_CC_DD '
+        + '(or mAA_BB_CC_DD#partName) for maps. Use this before specialized search_* tools when the '
+        + 'question names a flag, entity, event, textId, unknown resource, anim code, or map block.',
     permission: 'read',
     permissionLevel: 'read',
     inputSchema: {
@@ -347,6 +350,22 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       return ok(ws.searchMapEntities(asString(value.query, ''), asNumber(value.limit, 50)));
+    }
+  });
+
+  registry.register({
+    name: 'search_tae_events',
+    description: 'Search parsed TAE animation events by address (c1050#A0200.e0), anim code, '
+      + 'frame, SoundID, or type name. TAE events live inside anibnd; do not unpack BND or '
+      + 'treat anibnd as text.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { query: 'string', limit: 'number?' },
+    run: (input, context) => {
+      const ws = context.workspaceIndex;
+      if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
+      const value = asRecord(input);
+      return ok(ws.searchTaeEvents(asString(value.query, ''), asNumber(value.limit, 50)));
     }
   });
 

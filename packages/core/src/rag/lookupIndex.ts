@@ -8,6 +8,7 @@
  * a candidate set before the existing scorer runs.
  */
 import type { RagChunk, RagChunkFamily, RagCorpus } from '@soulforge/shared';
+import { extractAtomicAddressTokens } from '@soulforge/shared';
 import { cjkBigrams, tokenize } from './queryParse.js';
 
 export interface RagLookupIndex {
@@ -56,6 +57,12 @@ export function buildLookupIndex(chunks: readonly RagChunk[]): RagLookupIndex {
     }
     for (const token of tokenize(text)) {
       push(byToken, token, index);
+    }
+    // 问题 6：把原子地址（cXXXX / AXXXX / MXX / mAA_BB_CC_DD / 带 # 完整地址）
+    // 额外推进 byToken —— tokenize 已含它们，这里独立再推一次，保证即使旧索引
+    // 文本里地址没被抽成原子词，至少查询侧能对上新的正文。
+    for (const atomic of extractAtomicAddressTokens(text)) {
+      push(byToken, atomic, index);
     }
     for (const bigram of cjkBigrams(text)) {
       push(byToken, bigram, index);

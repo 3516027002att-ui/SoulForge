@@ -123,7 +123,9 @@ import {
   WorkspaceIndex,
   type WorkspaceSession,
   type ScriptContainerEntryEvidence,
-  type ScriptEntryClassification
+  type ScriptEntryClassification,
+  ingestBridgeResult,
+  mapExportFromMsbDocument
 } from '@soulforge/core';
 import {
   CONTAINER_PAGE_SIZE,
@@ -3901,16 +3903,34 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const result = await readMsbDocumentViaBridge({
       sourcePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      maxParts: 256,
-      maxRegions: 128,
-      maxModels: 128,
-      maxEvents: 128,
+      // 问题 6-B / 4-A：索引与完整图都不再截断（缺 4：显示上限渗进索引=假装完整）。
       // P5 裁定：真实游戏 .msb.dcx 是 KRAK 压缩，缺 Oodle 运行时读不出实体表
       // （表现为 3D 代理场景 0 节点 / 0 实体）。
       ...(activeSession?.layers.baseRoot
         ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
         : {})
     });
+    // 问题 6-B：生产 analyze 的 export-map 未实现，桌面打开 MSB 时用
+    // read-msb-document 的 parts[] 喂 MapExport（最小 hunk，不实现 C# export-map）。
+    if (result.ok && result.data && activeIndex) {
+      const mapId = basename(file.relativePath).replace(/\.msb(\.dcx)?$/i, '');
+      if (mapId) {
+        ingestBridgeResult(activeIndex, {
+          sourceUri,
+          sourcePath: file.relativePath,
+          game: file.game,
+          resourceKind: 'map',
+          parseStatus: 'parsed',
+          diagnostics: asBasicDiagnostics(result.diagnostics),
+          data: mapExportFromMsbDocument({
+            mapId,
+            sourceUri,
+            parts: result.data.parts,
+            regions: result.data.regions
+          })
+        });
+      }
+    }
     return sanitizeRendererValue({
       ok: result.ok,
       sourceUri,
@@ -4011,6 +4031,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
         : {})
     });
+    // 问题 6-C：打开 anibnd 成功读到 TAE 信封时 ingest 一次（最小 hunk，renderer
+    // 不建索引）。envelope 采样截断（animationsTruncated / eventsTruncated）时
+    // ingestBridgeResult 会按缺口 4 fail-closed 拒绝，不把残缺当完整；这里不因
+    // 索引结果改变 IPC 返回。
+    if (result.parseStatus !== 'failed' && result.data && activeIndex) {
+      ingestBridgeResult(activeIndex, {
+        sourceUri,
+        sourcePath: file.relativePath,
+        game: file.game,
+        resourceKind: 'action',
+        parseStatus: 'parsed',
+        diagnostics: asBasicDiagnostics(result.diagnostics),
+        data: result.data
+      });
+    }
     // 事件类型名表（`0 JumpTable` 的「类型名」）：只投影文档实际出现过的
     // eventTypeId，模板缺的 id 不出现，渲染器回退裸 `{typeId}`。
     let eventTypeNames: Record<string, string> | undefined;
@@ -4034,6 +4069,18 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       diagnostics: result.diagnostics
     });
   });
+
+  /** Bridge 诊断 → 基础 Diagnostic 形状（ingest 用，不携带 renderer 冗余字段）。 */
+  function asBasicDiagnostics(
+    items: Array<{ severity: string; code: string; message: string; sourceUri?: string }>
+  ): Array<{ severity: 'error' | 'warning' | 'info'; code: string; message: string; sourceUri?: string }> {
+    return items.map((item) => ({
+      severity: item.severity === 'warning' || item.severity === 'info' ? item.severity : 'error',
+      code: item.code,
+      message: item.message,
+      ...(item.sourceUri ? { sourceUri: item.sourceUri } : {})
+    }));
+  }
 
   /**
    * S23：地图 viewport 读 part 模型——按 modelName 在 mapbnd 容器里取 FLVER 网格。

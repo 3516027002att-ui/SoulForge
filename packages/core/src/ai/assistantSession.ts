@@ -162,6 +162,11 @@ function recommendTools(prompt: string, tools: ToolDescriptor[], mode: AiPermiss
     names.add('search_map_entities');
   }
 
+  if (lower.includes('动作') || lower.includes('tae') || lower.includes('anibnd') || lower.includes('词条')
+    || /c\d{4}/.test(lower) || /a\d{4}/.test(lower)) {
+    names.add('search_tae_events');
+  }
+
   if (lower.includes('param') || lower.includes('参数') || lower.includes('speffect') || lower.includes('goods')
     || lower.includes('手里剑') || lower.includes('子弹') || lower.includes('躯干')) {
     names.add('search_param_rows');
@@ -215,6 +220,7 @@ function reasonForTool(name: string): string {
     search_events: '查找候选事件入口。',
     explain_event: '生成证据优先的事件解释输入。',
     search_map_entities: '查找地图实体、区域和可见命名候选。',
+    search_tae_events: '按动作地址（cXXXX#AXXXX.eN）或 SoundID 查找 TAE 词条。',
     search_param_rows: '查找参数行候选或已确认行。',
     read_param_fields: '读取容器内 PARAM 的 live 字段值。',
     mutate_param_fields: '按绝对值改 PARAM 字段并经 Patch Engine 提交。',

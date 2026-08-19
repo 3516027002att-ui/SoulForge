@@ -101,7 +101,7 @@
     "test:native-edit-facade": "tsc -b ../shared . && node dist/testing/runNativeEditFacadeSmoke.js",
     "test:performance-baseline": "tsc -b ../shared . && node dist/testing/runPerformanceBaselineSmoke.js",
     "test:real-mod-readonly-preview": "tsc -b ../shared . && node dist/testing/runRealModOpenSmoke.js ../../mods",
-    "test:rag": "tsc -b ../shared . && node dist/testing/runRagRetrieveSmoke.js && node dist/testing/runRagEmbeddingSmoke.js",
+    "test:rag": "tsc -b ../shared . && node dist/testing/runSoulAddressSmoke.js && node dist/testing/runRagRetrieveSmoke.js && node dist/testing/runRagEmbeddingSmoke.js",
     "test:rag-embedding": "tsc -b ../shared . && node dist/testing/runRagEmbeddingSmoke.js",
     "test:workspace-completeness": "tsc -b ../shared . && node dist/testing/runWorkspaceCompletenessMatrixSmoke.js",
     "test:reference-confidence": "tsc -b ../shared . && node dist/testing/runSyntheticConfirmedReferenceSmoke.js",

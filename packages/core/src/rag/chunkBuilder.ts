@@ -10,9 +10,19 @@ import type {
   RagCorpus,
   ReferenceEdge,
   ResourceKind,
+  TaeAnimSymbol,
+  TaeEventSymbol,
+  TaeExport,
   TextEntrySymbol
 } from '@soulforge/shared';
-import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
+import {
+  formatActionAddress,
+  formatAnimCode,
+  formatMapAddress,
+  formatMapArea,
+  formatMapBlock,
+  RAG_CHUNK_FAMILIES
+} from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { attachLookupIndex } from './lookupIndex.js';
 
@@ -34,6 +44,11 @@ export function buildRagCorpus(index: WorkspaceIndex, now = new Date().toISOStri
   for (const mapExport of symbols.maps ?? []) {
     for (const entity of mapExport.entities) chunks.push(mapEntityChunk(index.workspaceId, entity));
     for (const region of mapExport.regions) chunks.push(mapRegionChunk(index.workspaceId, region));
+  }
+  for (const taeExport of symbols.tae ?? []) {
+    for (const anim of taeExport.animations) {
+      for (const event of anim.events) chunks.push(taeEventChunk(index.workspaceId, taeExport, anim, event));
+    }
   }
   for (const paramExport of symbols.params ?? []) {
     for (const row of paramExport.rows) chunks.push(paramRowChunk(index.workspaceId, row));
@@ -145,20 +160,26 @@ function eventChunk(workspaceId: string, event: EventSymbol): RagChunk {
 }
 
 function mapEntityChunk(workspaceId: string, entity: MapEntitySymbol): RagChunk {
+  const block = formatMapBlock(entity.mapId) ?? entity.mapId.toLowerCase();
+  const area = formatMapArea(block) || entity.areaId || '';
+  const modelSuffix = entity.modelIndex !== undefined ? ` modelIndex ${entity.modelIndex}` : '';
   const body = [
-    `entity ${entity.entityId ?? 'unnamed'}`,
-    `name ${entity.name}`,
-    `kind ${entity.kind}`,
-    entity.model ? `model ${entity.model}` : '',
-    `map ${entity.mapId}`,
-    entity.position ? `position ${entity.position.join(' ')}` : ''
+    area ? `area ${area}` : '',
+    `map ${block}`,
+    `part ${entity.name} kind ${entity.kind}`,
+    entity.model ? `model ${entity.model}${modelSuffix}` : (entity.modelIndex !== undefined ? `modelIndex ${entity.modelIndex}` : ''),
+    entity.position ? `pos ${entity.position.join(' ')}` : '',
+    [entity.rotation ? `rot ${entity.rotation.join(' ')}` : '', entity.scale ? `scale ${entity.scale.join(' ')}` : '']
+      .filter(Boolean).join(' '),
+    entity.sourceUri ? `source ${relativeSourcePath(entity.sourceUri)}` : '',
+    `address ${formatMapAddress({ block, name: entity.name })}`
   ].filter(Boolean).join('\n');
   return makeChunk({
     workspaceId,
     sourceUri: entity.sourceUri,
     symbolUri: entity.uri,
     family: 'map_entity',
-    title: `${entity.mapId} ${entity.name}`,
+    title: formatMapAddress({ block, name: entity.name }),
     body,
     numericIds: collectNumbers([entity.entityId]),
     resourceKind: 'map'
@@ -166,23 +187,74 @@ function mapEntityChunk(workspaceId: string, entity: MapEntitySymbol): RagChunk 
 }
 
 function mapRegionChunk(workspaceId: string, region: MapRegionSymbol): RagChunk {
+  const block = formatMapBlock(region.mapId) ?? region.mapId.toLowerCase();
+  const area = formatMapArea(block);
   const body = [
-    `region ${region.entityId ?? 'unnamed'}`,
-    `name ${region.name}`,
-    region.shape ? `shape ${region.shape}` : '',
-    `map ${region.mapId}`,
-    region.position ? `position ${region.position.join(' ')}` : ''
+    area ? `area ${area}` : '',
+    `map ${block}`,
+    `region ${region.name}${region.shape ? ` shape ${region.shape}` : ''}`,
+    region.position ? `pos ${region.position.join(' ')}` : '',
+    region.rotation ? `rot ${region.rotation.join(' ')}` : '',
+    region.sourceUri ? `source ${relativeSourcePath(region.sourceUri)}` : '',
+    `address ${formatMapAddress({ block, name: region.name })}`
   ].filter(Boolean).join('\n');
   return makeChunk({
     workspaceId,
     sourceUri: region.sourceUri,
     symbolUri: region.uri,
     family: 'map_region',
-    title: `${region.mapId} region ${region.name}`,
+    title: formatMapAddress({ block, name: region.name }),
     body,
     numericIds: collectNumbers([region.entityId]),
     resourceKind: 'map'
   });
+}
+
+/**
+ * TAE 词条块（问题 6-C）。家族 tae_event（EMEVD 仍叫 event，勿改旧含义）。
+ * 字段给全、不套 MAX_FIELDS / MAX_INSTRUCTIONS —— 词条字段通常很少。
+ * numericIds 收 animId、eventTypeId、帧、以及所有可 Number.isFinite 的字段值
+ * （SoundID 必须在）。
+ */
+function taeEventChunk(workspaceId: string, taeExport: TaeExport, anim: TaeAnimSymbol, event: TaeEventSymbol): RagChunk {
+  const address = formatActionAddress({ chr: taeExport.chrId, animId: anim.animId, eventIndex: event.index });
+  const lines = [
+    `chr ${taeExport.chrId}`,
+    `anim ${anim.code} animId ${anim.animId}${anim.hkxName ? ` hkx ${anim.hkxName}` : ''}`,
+    `event e${event.index} type ${event.eventTypeId}${event.typeName ? ` ${event.typeName}` : ''}`,
+    `startFrame ${event.startFrame} endFrame ${event.endFrame} startTime ${trimNumber(event.startTime)} endTime ${trimNumber(event.endTime)}`,
+    ...(event.fields ?? []).map((field) => `${field.name} ${field.value}`),
+    ...(event.fields && event.fields.length > 0 ? [] : event.parameterBytesHex ? [`undecoded hex=${event.parameterBytesHex}`] : []),
+    taeExport.sourceUri ? `source ${relativeSourcePath(taeExport.sourceUri)}` : '',
+    `address ${address}`
+  ].filter(Boolean);
+  const numericFieldValues = (event.fields ?? []).map((field) => field.value);
+  return makeChunk({
+    workspaceId,
+    sourceUri: taeExport.sourceUri,
+    symbolUri: event.uri,
+    family: 'tae_event',
+    title: address,
+    body: lines.join('\n'),
+    numericIds: collectNumbers([
+      anim.animId,
+      event.eventTypeId,
+      event.startFrame,
+      event.endFrame,
+      ...numericFieldValues
+    ]),
+    resourceKind: 'action'
+  });
+}
+
+function trimNumber(value: number): string {
+  return Number.isFinite(value) ? String(Number(value.toFixed(3))) : '0';
+}
+
+/** 把 file:// uri 降级为相对路径样式的 source 文本（渲染器安全：不泄漏绝对路径）。 */
+function relativeSourcePath(sourceUri: string): string {
+  if (sourceUri.startsWith('file://')) return sourceUri.slice('file://'.length);
+  return sourceUri;
 }
 
 function paramRowChunk(workspaceId: string, row: ParamRowSymbol): RagChunk {
