@@ -277,7 +277,7 @@ describe('AgentSidebar 资源引用接线（桥接可用）', () => {
       onAgentWidthChange: () => undefined,
       busy: false,
       provider: 'mock',
-      thinking: 'normal',
+      thinking: 'medium',
       protocol: 'openai-compatible',
       permissionMode: 'plan',
       permissionLockReason: '由主进程锁定为计划模式；renderer 不能抬高授权。',

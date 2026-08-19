@@ -7,7 +7,16 @@ export function modelServiceLabel(provider: AiProvider): string {
 }
 
 export function thinkingLabel(level: AiThinkingLevel): string {
-  return ({ fast: '快速', normal: '普通', deep: '深入', extreme: '极致' } as const)[level];
+  return ({
+    off: '关闭',
+    none: 'none',
+    minimal: 'minimal',
+    low: '低',
+    medium: '普通',
+    high: '高',
+    xhigh: 'xhigh',
+    max: '极致'
+  } as const)[level];
 }
 
 export function permissionModeLabel(mode: AiPermissionMode): string {

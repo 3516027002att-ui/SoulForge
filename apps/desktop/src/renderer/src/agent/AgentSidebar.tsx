@@ -26,7 +26,6 @@ import {
   describeAgentTaskStatus,
   isAgentTaskActive
 } from './agentTaskState.js';
-import { modelServiceLabel } from './agentLabels.js';
 import { AgentDockResizer } from './AgentDockResizer.js';
 import { AgentDockHeader } from './AgentDockHeader.js';
 import { AgentConversationViewport } from './AgentConversationViewport.js';
@@ -376,7 +375,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     : null;
 
   const selectedService = task.services.find((service) => service.id === task.selectedServiceId);
-  const modelLabel = selectedService?.displayName ?? modelServiceLabel(provider);
+  void selectedService;
   const headerState = awaitingApproval ? '等待批准' : taskRunning ? '执行中' : undefined;
 
   return (
@@ -406,6 +405,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
           onToggleHistory={() => openDrawer('history')}
           onNewTask={onNewTask ?? (() => undefined)}
           onToggleExpand={onToggleExpand ?? (() => undefined)}
+          onOpenSettings={() => openDrawer('settings')}
           onClose={onClose}
         />
       )}
@@ -481,12 +481,8 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             onStop={task.onCancel}
             streaming={taskRunning}
             awaitingApproval={awaitingApproval}
-            permissionMode={permissionMode}
-            permissionLockReason={permissionLockReason}
             interactionMode={interactionMode}
             onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
-            modelLabel={modelLabel}
-            onOpenModelSettings={() => openDrawer('settings')}
             citeSelecting={citeSelecting}
             onToggleCiteSelect={onToggleCiteSelect}
             contextLabel={contextLabel}

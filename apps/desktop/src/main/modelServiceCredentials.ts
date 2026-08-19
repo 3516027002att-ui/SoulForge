@@ -7,6 +7,8 @@ import { safeStorage } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { migrateThinkingLevel } from '@soulforge/core';
+import type { ModelThinkingLevel } from '@soulforge/core';
 
 export interface StoredModelServiceConfig {
   id: string;
@@ -24,7 +26,9 @@ export interface StoredModelServiceConfig {
   maxTokens?: number;
   /** 上下文预算（token）：agent 侧自动压缩触发阈值。 */
   contextWindowTokens?: number;
-  thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+  /** 思考强度（采样/能力参数）。类型只写官方 effort 值；旧 vault 的遗留档由
+      listConfigs 读路径兼容映射，写路径只写新值。 */
+  thinkingLevel?: ModelThinkingLevel;
   /**
    * 该服务同时用作 embedding（POST /v1/embeddings，仅 openai-compatible 支持）。
    * 配置后 workspace 语料可生成向量索引，检索走 RRF 混合（lexical + 向量）。
@@ -32,7 +36,10 @@ export interface StoredModelServiceConfig {
   embeddingModel?: string;
 }
 
-const THINKING_LEVELS: ReadonlySet<string> = new Set(['off', 'fast', 'normal', 'deep', 'extreme']);
+const THINKING_LEVELS: ReadonlySet<string> = new Set([
+  'off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+  'fast', 'normal', 'deep', 'extreme'
+]);
 
 function isValidOptionalNumber(value: unknown, min: number, max: number): boolean {
   return value === undefined
@@ -127,7 +134,14 @@ export class ModelServiceCredentialVault {
 
   async listConfigs(): Promise<StoredModelServiceConfig[]> {
     const vault = await this.load();
-    return structuredClone(vault.configs);
+    // 读路径兼容：旧 vault 里的遗留档（fast/normal/deep/extreme）在这里映射成官方档，
+    // 下游（renderer DTO / sampling）只看到官方 effort 值；写路径照旧只写新值。
+    // migrateThinkingLevel 对官方值幂等，只有遗留档才发生转换。
+    return structuredClone(vault.configs).map((config) => (
+      config.thinkingLevel !== undefined
+        ? { ...config, thinkingLevel: migrateThinkingLevel(config.thinkingLevel) }
+        : config
+    ));
   }
 
   async upsertConfig(input: {

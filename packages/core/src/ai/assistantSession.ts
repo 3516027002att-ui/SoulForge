@@ -1,9 +1,14 @@
 import type { ResourceKind } from '@soulforge/shared';
 import type { ToolContext, ToolDescriptor } from './toolRegistry.js';
 import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
+import type { ModelThinkingLevel } from '../model-services/types.js';
 
 export type AiProvider = 'mock' | 'openai' | 'anthropic';
-export type AiThinkingLevel = 'fast' | 'normal' | 'deep' | 'extreme';
+/**
+ * 思考档位与官方 effort 表对齐（types.ts 的 ModelThinkingLevel 是唯一权威）。
+ * 旧档 fast/normal/deep/extreme 只在读路径兼容，写路径只写官方值。
+ */
+export type AiThinkingLevel = ModelThinkingLevel;
 export type AiPermissionMode = ToolContext['mode'];
 
 export interface AiSidebarSettings {

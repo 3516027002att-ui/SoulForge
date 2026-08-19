@@ -56,7 +56,7 @@ function render(overrides: Partial<AgentSidebarProps> = {}): string {
     onAgentWidthChange: () => undefined,
     busy: false,
     provider: 'mock',
-    thinking: 'normal',
+    thinking: 'medium',
     protocol: 'openai-compatible',
     permissionMode: 'plan',
     permissionLockReason: '由主进程锁定为计划模式；renderer 不能抬高授权。',
@@ -91,7 +91,8 @@ describe('Agent 壳层遵循右 dock 信息架构（§12.1/12.3）', () => {
     assert.match(html, /title="展开 Agent"/);
     assert.match(html, /class="agent__header-separator"/);
     assert.match(html, /title="关闭"/);
-    assert.ok(!html.includes('Agent 设置'), '设置不应占据 header');
+    // 2-E：设置入口从底栏「模型服务」按钮搬到 header 右上角齿轮。
+    assert.match(html, /aria-label="模型服务设置"/, 'header 必须有模型服务设置齿轮');
     // 反向前提:欢迎标题才是 Agent,header 不该把「Agent」当产品名重复一遍。
     const headerElement = /<header class="agent__header">([\s\S]*?)<\/header>/.exec(html)?.[1] ?? '';
     assert.ok(!headerElement.includes('>Agent<'), 'header 文本不应出现独立的 >Agent< 标题');
@@ -110,11 +111,13 @@ describe('Agent 壳层遵循右 dock 信息架构（§12.1/12.3）', () => {
     assert.match(html, /aria-label="Agent 会话记录"/);
   });
 
-  it('composer 把交互意图与权限锁定分开显示', () => {
+  it('composer 不再显示权限锁定字（2-B）与 @Agent（2-C）', () => {
     const html = render();
-    assert.match(html, /@Agent/);
+    assert.ok(!html.includes('权限：'), '不应再显示「权限：」');
+    assert.ok(!html.includes('计划模式'), '不应再显示「计划模式」');
+    assert.ok(!html.includes('composer-permission'), '不应再显示 composer-permission');
+    assert.ok(!html.includes('@Agent'), '不应再显示 @Agent 占位');
     assert.match(html, /Ask/);
-    assert.match(html, /权限：计划模式（主进程锁定）/);
   });
 });
 
@@ -131,11 +134,12 @@ describe('Composer 结构（§12.6 / S32 输入卡）', () => {
     assert.match(html, /data-testid="agent-composer"/);
   });
 
-  it('participant 层 = @Agent + 模式选择 + 权限锁定', () => {
+  it('participant 层 = Ask/Plan/Edit 模式选择；不再有 @Agent / 权限锁定（2-B/2-C）', () => {
     const html = render();
-    assert.match(html, /class="agent-participant"[^>]*>@Agent</);
+    assert.ok(!html.includes('@Agent'), '不应再显示 @Agent');
+    assert.ok(!html.includes('class="agent-participant"'), '不应再渲染 agent-participant 占位');
     assert.match(html, /class="agent-mode-select"/);
-    assert.match(html, /class="composer-permission"/);
+    assert.ok(!html.includes('class="composer-permission"'), '不应再显示权限锁定');
   });
 
   it('prompt+chips 层 = context chips + 自动增高 textarea', () => {
@@ -146,7 +150,7 @@ describe('Composer 结构（§12.6 / S32 输入卡）', () => {
     assert.match(html, /class="agent__composer"[\s\S]*?<textarea/);
   });
 
-  it('S32 工具行顺序：引用 | 附件 | 权限 | 模型 | 思考 | 发送（模型与思考是两个控件）', () => {
+  it('2-A/2-D/2-E 工具行顺序：引用 | 附件 | 模式(Ask/Plan/Edit) | effort | 发送', () => {
     const html = render();
     const toolbarStart = html.indexOf('class="agent-composer__toolbar"');
     assert.ok(toolbarStart >= 0, 'toolbar 层必须存在');
@@ -154,9 +158,8 @@ describe('Composer 结构（§12.6 / S32 输入卡）', () => {
     const markers = [
       'aria-label="引用框选"', // S10：@/# 合成「引用」框选钮
       'aria-label="添加附件"', // attachment
-      'class="agent-mode-select"', // 权限（Ask/Plan/Edit 下拉）
-      'aria-label="模型服务设置"', // model
-      'aria-label="思考强度"', // S32：思考强度独立控件
+      'class="agent-mode-select"', // Ask/Plan/Edit 下拉（2-B 后不再携带权限锁定）
+      'aria-label="effort"', // 2-D：思考强度标签与 aria-label 都是 effort
       '>发送<' // send/stop
     ];
     let prev = -1;
@@ -165,6 +168,10 @@ describe('Composer 结构（§12.6 / S32 输入卡）', () => {
       assert.ok(idx > prev, `toolbar 五项应按固定顺序出现，${marker} 顺序错误`);
       prev = idx;
     }
+    // 2-E：底栏「模型服务」按钮（含未配置时的「离线计划」文案）已删除，入口在 header
+    // 右上角齿轮。composer 不得残留任何「离线计划」文案或 composer-model-btn。
+    assert.ok(!region.includes('composer-model-btn'), '离线计划按钮已从 composer 移除');
+    assert.ok(!region.includes('离线计划'), 'composer 不含「离线计划」文案');
     // S10 拍死：工具栏不再有 @ / # 两个钮（引用是语义实体，不是文本 token）。
     assert.ok(!region.includes('aria-label="添加 Agent 参与者"'), '@ 按钮已移除');
     assert.ok(!region.includes('aria-label="添加当前文件上下文"'), '# 按钮已移除');
@@ -343,9 +350,10 @@ describe('等待审批在标题栏与输入区都可见', () => {
     assert.ok(!html.includes('data-testid="composer-stop"'));
   });
 
-  it('输入区常驻显示当前权限模式', () => {
+  it('输入区不再常驻权限锁定字（2-B）：composer 无 composer-permission', () => {
     const html = render();
-    assert.match(html, /class="composer-permission"/);
+    assert.ok(!html.includes('class="composer-permission"'), '权限锁定说明已删除');
+    assert.ok(!html.includes('权限：'), '权限字不得再出现在 composer');
   });
 });
 

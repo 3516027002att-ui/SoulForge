@@ -1,84 +1,66 @@
 import type { ModelThinkingLevel } from '@soulforge/core';
 
 /**
- * S32：思考强度档位（关/快/普通/深/极致，顺序即下拉顺序）。
+ * 2-A：思考强度锁官方 effort 档（2026-08-19 对照 OpenAI / Anthropic 文档核实）。
  *
- * 8-B：这是**内部枚举的完整档位集合**，不代表任何协议下都能全给。UI 选表请用
- * thinkingLevelsForProtocol(protocol)：OpenAI 只有 3 档 effort（deep/extreme 都会
- * 发成 high，UI 不得同时给两档），Anthropic 四档 budget 全给。
+ * OpenAI 官方 effort 全档：off(none/minimal/low/medium/high/xhigh/max)。
+ * Anthropic 官方 effort：off/low/medium/high/xhigh/max（没有 none/minimal，
+ * 也没有 budget_tokens 数字）。注意 `off` 是产品语义（字段不下发），不是官方档。
+ *
+ * 这套表是 UI 的唯一来源；旧档 fast/normal/deep/extreme 已从产品移除，只在读
+ * 旧配置时按 fast→low / normal→medium / deep→high / extreme→max 兼容映射
+ * （见 types.ts 的 migrateThinkingLevel），这里不再单独翻译。
  */
 export const AGENT_THINKING_LEVELS: readonly ModelThinkingLevel[] = [
   'off',
-  'fast',
-  'normal',
-  'deep',
-  'extreme'
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max'
 ] as const;
 
 /** OpenAI / Anthropic 两种服务协议的判别类型。 */
 export type ThinkingProtocol = 'openai-compatible' | 'anthropic-compatible';
 
 /**
- * 8-B：按协议给出当前服务可选档位表。
+ * 按协议给出当前服务可选档位表。
  *
- * OpenAI 只有 3 档 effort（reasoning_effort = low/medium/high）；deep/extreme 都会
- * 发成 high，所以 OpenAI 下拉不得同时给「深」和「极致」两个假档。Anthropic 四档
- * token budget 全给。
+ * OpenAI 兼容：官方全档 `off, none, minimal, low, medium, high, xhigh, max`。
+ * Anthropic 兼容：官方表 `off, low, medium, high, xhigh, max`（none/minimal 是
+ * OpenAI 专有，Anthropic 官方表没有）。某个具体模型是否支持某一档由服务端决定，
+ * 适配器在请求失败时会降档并在 diagnostics 说明——UI 始终显示完整官方阶梯，
+ * 不能因为怕 400 就把 max 从下拉拿掉（用户点名 max 不见了）。
  */
 export function thinkingLevelsForProtocol(
   protocol: ThinkingProtocol
 ): readonly ModelThinkingLevel[] {
-  if (protocol === 'openai-compatible') return AGENT_THINKING_LEVELS.filter((level) => level !== 'extreme');
-  return AGENT_THINKING_LEVELS;
+  if (protocol === 'openai-compatible') return AGENT_THINKING_LEVELS;
+  return AGENT_THINKING_LEVELS.filter((level) => level !== 'none' && level !== 'minimal');
 }
 
 /**
- * 8-B：思考强度的可见标签（英文）。
- *
- * OpenAI → Off/Low/Medium/High；Anthropic → Off/2048/4096/8192/16384（budget_tokens）。
- * 内部枚举 ModelThinkingLevel 不变，两条 resolve（resolveOpenAiReasoningEffort /
- * resolveAnthropicThinkingBudget）也不变——这里只是换表 + 换标签。
+ * 思考强度的可见标签：英文官方值（不翻译成「极致」）。`off` 显示成 `Off`，
+ * 其余原样显示（`none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`）。
  */
 export function thinkingLevelLabel(
   level: ModelThinkingLevel,
-  protocol: ThinkingProtocol
+  _protocol: ThinkingProtocol
 ): string {
-  if (protocol === 'openai-compatible') {
-    switch (level) {
-      case 'off':
-        return 'Off';
-      case 'fast':
-        return 'Low';
-      case 'normal':
-        return 'Medium';
-      case 'deep':
-        return 'High';
-      default:
-        return 'High';
-    }
-  }
-  switch (level) {
-    case 'off':
-      return 'Off';
-    case 'fast':
-      return '2048';
-    case 'normal':
-      return '4096';
-    case 'deep':
-      return '8192';
-    case 'extreme':
-      return '16384';
-  }
+  return level === 'off' ? 'Off' : level;
 }
 
 /**
- * 8-C：当前值不在新表的档位列表里时收敛到 'deep'（OpenAI 下对应 High；
- * Anthropic 下对应 8192，两表都是合法档）。
+ * 2-A：当前值不在新表的档位列表里时收敛到合法默认档 'medium'（OpenAI 与
+ * Anthropic 两表都有 medium）。旧档值在进入 UI 前已被读路径 migrateThinkingLevel
+ * 映射成官方值，这里不再处理 legacy。
  */
 export function convergeThinkingLevel(
   level: ModelThinkingLevel,
   protocol: ThinkingProtocol
 ): ModelThinkingLevel {
   const table = thinkingLevelsForProtocol(protocol);
-  return (table as readonly ModelThinkingLevel[]).includes(level) ? level : 'deep';
+  return (table as readonly ModelThinkingLevel[]).includes(level) ? level : 'medium';
 }

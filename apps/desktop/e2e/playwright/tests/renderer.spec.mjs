@@ -1063,7 +1063,7 @@ test('TEXT-20C：真空表新增直写落盘，写按 tableId 路由且 sibling 
   await app.close();
 });
 
-test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模型设置', async () => {
+test('设置归属：通用设置无模型控件，Agent 顶栏齿轮打开模型服务设置抽屉', async () => {
   const { app, window } = await launchApp();
 
   // 通用设置面板：只保留工作区与安全基础设施。
@@ -1076,34 +1076,16 @@ test('设置归属：通用设置无模型控件，Agent 历史抽屉承载模�
   expect(settingsText).not.toContain('模型服务');
   expect(settingsText).not.toContain('运行 / 权限模式');
 
-  // 设置不出现在 Agent header；从历史抽屉进入模型设置。
-  await expect(window.locator('details.agent-settings')).toHaveCount(0);
-  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
-  const history = window.locator('.agent-secondary-drawer:not(.is-hidden)');
-  await expect(history).toContainText('Agent 历史');
-  await history.getByRole('button', { name: '模型设置' }).click();
-  await expect(window.locator('.agent-secondary-drawer:not(.is-hidden)')).toContainText('模型服务设置');
-
-  // 模型/思考强度/权限模式仍保留在专用设置抽屉。
-  await expect(window.locator('#agent-provider')).toBeVisible();
-  await expect(window.locator('#agent-thinking')).toBeVisible();
-  await expect(window.locator('#agent-permission')).toBeDisabled();
-  await expect(window.locator('.agent-controls__lock')).toContainText('主进程锁定');
-  // mock 不显示为真实本地模型。
-  await expect(window.locator('#agent-provider')).toContainText('离线计划（不调用模型）');
-  await expect(window.locator('.agent-controls__hint')).toContainText('不运行任何本地或远程模型');
-  // 作用范围必须写在控件旁：此前这个下拉与 AgentTaskPanel 的模型服务下拉同名
-  // 「模型服务」并排出现，而两者指向不同后端——在这里选 Anthropic 不影响任务。
-  await expect(window.locator('[data-testid="agent-draft-scope"]')).toContainText('仅用于生成计划草稿');
-
-  // 关闭再打开后设置不丢失。
-  await window.locator('#agent-thinking').selectOption('deep');
-  await window.locator('#agent-provider').selectOption('openai');
-  await window.getByRole('button', { name: '关闭抽屉' }).click();
-  await window.getByRole('button', { name: '打开 Agent 历史' }).click();
-  await window.locator('.agent-secondary-drawer:not(.is-hidden)').getByRole('button', { name: '模型设置' }).click();
-  await expect(window.locator('#agent-provider')).toHaveValue('openai');
-  await expect(window.locator('#agent-thinking')).toHaveValue('deep');
+  // 2-E：Agent 顶栏右上角齿轮 = 模型服务设置入口（不再藏在底栏「离线计划」按钮）。
+  await window.getByRole('button', { name: '模型服务设置' }).click();
+  const drawer = window.locator('.agent-secondary-drawer:not(.is-hidden)');
+  await expect(drawer).toContainText('模型服务设置');
+  // 模型服务表单（S25）在设置抽屉：服务地址 / 密钥 / 高级选项都在。
+  await expect(drawer.locator('label', { hasText: '服务地址' })).toBeVisible();
+  await expect(drawer.locator('label', { hasText: 'API 密钥（仅写入，不回显）' })).toBeVisible();
+  await expect(drawer.getByTestId('model-service-advanced')).toBeVisible();
+  // 草稿生成器（#agent-provider）不是模型服务设置，也不在设置抽屉。
+  await expect(window.locator('#agent-provider')).toHaveCount(0);
 
   await window.screenshot({ path: 'test-results/06-agent-settings.png' });
   await app.close();
@@ -1120,15 +1102,15 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   // 高级选项默认收起：details 无 open 属性，内部控件不可见。
   await expect(advanced).toBeVisible();
   expect(await advanced.evaluate((el) => el.open)).toBe(false);
-  await expect(advanced.getByLabel('思考强度')).not.toBeVisible();
+  await expect(advanced.getByLabel('effort')).not.toBeVisible();
 
   // 点击「高级选项」展开。
   await advanced.locator('summary').click();
   expect(await advanced.evaluate((el) => el.open)).toBe(true);
-  await expect(advanced.getByLabel('思考强度')).toBeVisible();
+  await expect(advanced.getByLabel('effort')).toBeVisible();
 
-  // 配置采样参数：思考强度 deep、上下文/输出长度、temperature/topP/topK、embedding。
-  await advanced.getByLabel('思考强度').selectOption('deep');
+  // 配置采样参数：effort=high（官方档）、上下文/输出长度、temperature/topP/topK、embedding。
+  await advanced.getByLabel('effort').selectOption('high');
   await advanced.getByLabel('上下文长度（token）').fill('16000');
   await advanced.getByLabel('输出长度（token）').fill('2048');
   await advanced.getByLabel('temperature').fill('0.7');
@@ -1136,16 +1118,25 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   await advanced.getByLabel('topK').fill('5');
   await advanced.getByLabel('Embedding 模型').fill('fixture-embed-model');
 
+  // 服务地址 / 模型必须先填：2-E 起 baseUrl 空不 upsert、不拉模型列表
+  // （「请先填写服务地址再获取模型列表」是产品正确行为）。同时它也是
+  // 这次保存要落进 vault 的配置字段。
+  await drawer.locator('label', { hasText: '服务地址' }).locator('input').fill('http://127.0.0.1:3999');
+  await drawer.locator('label', { hasText: '模型 ID' }).locator('input').fill('fixture-model');
+
   // 保存：fixture upsert echo 输入，状态文案确认保存成功。填密钥让
   // fixture 返回 hasCredential=true（「生成向量索引」按钮依赖它）。
+  // S25 起页脚按钮文本是「保存」（不再是「保存模型服务」）；自动保存也在场，
+  // 但这里显式点「保存」做立即 flush 后再断言手动保存文案。
   await drawer.getByLabel('API 密钥（仅写入，不回显）').fill('fixture-api-key');
-  await drawer.getByRole('button', { name: '保存模型服务' }).click();
-  await expect(drawer).toContainText('已保存模型服务：本地兼容模型服务');
+  await drawer.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(drawer).toContainText('已保存模型服务：');
 
-  // 获取模型列表：fixture 返回两个可用模型，datalist 填入可选项。
+  // 获取模型列表：fixture 返回两个可用模型。S25 起渲染为可点击列表
+  // （.model-pick-list，不再是 datalist）。
   await drawer.getByRole('button', { name: '获取模型列表' }).click();
   await expect(drawer).toContainText('找到 2 个可用模型');
-  await expect(drawer.locator('datalist option')).toHaveCount(2);
+  await expect(drawer.locator('.model-pick-list button')).toHaveCount(2);
 
   // 已保存服务带 embedding 模型：列表项显示 embedding 标记与「生成向量索引」按钮。
   await expect(drawer.locator('.list')).toContainText('embedding: fixture-embed-model');
@@ -1153,6 +1144,45 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   await expect(drawer).toContainText('向量索引完成：6 个块（失败 0），模型 fixture-embed-model，维度 384。');
 
   await window.screenshot({ path: 'test-results/06b-model-service-advanced.png' });
+  await app.close();
+});
+
+test('2-A/2-D/2-E：composer 用 effort 下拉、无离线计划按钮；模型设置自动保存', async () => {
+  const { app, window } = await launchApp();
+
+  // composer 底部工具行：effort 下拉（官方档），不再是 Think/思考强度。
+  const composer = window.locator('.agent__composer');
+  await expect(composer.getByLabel('effort')).toBeVisible();
+  // 2-D：可见标签是 effort（全小写），不是 Think。
+  await expect(composer.locator('.composer-tool-label')).toHaveText('effort');
+  // 2-E：底栏「离线计划」模型按钮已删除；composer 不含该文案。
+  await expect(composer.locator('.composer-model-btn')).toHaveCount(0);
+  await expect(composer).not.toContainText('离线计划');
+  // 2-B/2-C：composer 不再显示 @Agent 与权限锁定字。
+  await expect(composer).not.toContainText('@Agent');
+  await expect(composer).not.toContainText('权限：');
+
+  // 2-E：顶栏齿轮直接打开模型服务设置；填地址+模型后 debounce 自动保存，
+  // 不点「保存」也应出现「已自动保存：」文案（fixture upsert echo displayName）。
+  await window.getByRole('button', { name: '模型服务设置' }).click();
+  const drawer = window.locator('.agent-secondary-drawer:not(.is-hidden)');
+  await expect(drawer).toContainText('模型服务设置');
+  await drawer.locator('label', { hasText: '服务地址' }).locator('input').fill('http://127.0.0.1:3999');
+  await drawer.locator('label', { hasText: '模型 ID' }).locator('input').fill('auto-save-model');
+  // 不点保存：等 debounce（450ms）后 assert 自动保存文案出现。
+  await expect(drawer).toContainText('已自动保存：', { timeout: 5000 });
+  // 自动保存确实调了 upsertModelService（fixture 记录 IPC 调用）。
+  await expect.poll(async () => (await ipcCalls(app))['modelService.upsert'] ?? 0).toBeGreaterThan(0);
+
+  // baseUrl 为空 + 只填 apiKey：不得自动保存空服务（不额外触发 upsert 增长）。
+  const callsBefore = (await ipcCalls(app))['modelService.upsert'] ?? 0;
+  await drawer.locator('label', { hasText: '服务地址' }).locator('input').fill('');
+  await drawer.getByLabel('API 密钥（仅写入，不回显）').fill('key-without-baseurl');
+  await window.waitForTimeout(800);
+  const callsAfter = (await ipcCalls(app))['modelService.upsert'] ?? 0;
+  expect(callsAfter).toBe(callsBefore);
+
+  await window.screenshot({ path: 'test-results/06c-auto-save-effort.png' });
   await app.close();
 });
 
@@ -1840,7 +1870,9 @@ test('AI 任务：工具清单不污染 Agent 对话，且界面不提供抬高�
   // 普通对话不渲染工具库存；工具调用只在任务状态面板出现。
   await expect(window.locator('[data-testid="agent-tool-inventory"]')).toHaveCount(0);
   await expect(window.locator('.agent-welcome')).toBeVisible();
-  await expect(window.locator('.composer-permission')).toContainText('主进程锁定');
+  // 2-B：composer 不再显示「权限：…（主进程锁定）」——交互模式与主进程权限是两套。
+  await expect(window.locator('.composer-permission')).toHaveCount(0);
+  await expect(window.locator('.agent__composer')).not.toContainText('权限：');
   // 全页不得出现可抬高授权的 fullPermission 选项。
   expect(await window.locator('option[value="fullPermission"]').count()).toBe(0);
 

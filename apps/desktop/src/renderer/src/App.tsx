@@ -423,7 +423,8 @@ export function App(): ReactElement {
   const [paramRowDataSize, setParamRowDataSize] = useState<number>(16);
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
-  const [aiThinking, setAiThinking] = useState<ModelThinkingLevel>('normal');
+  // 2-A：思考档用官方 effort 值（默认 medium；旧档 normal 已迁移，写路径只写官方值）。
+  const [aiThinking, setAiThinking] = useState<ModelThinkingLevel>('medium');
   const [aiMode] = useState<AiPermissionMode>('plan');
   const [aiPrompt, setAiPrompt] = useState('解释当前资源的证据链，并给出下一步安全修改计划。');
   const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);

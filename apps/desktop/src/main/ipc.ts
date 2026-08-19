@@ -1429,10 +1429,10 @@ export interface AiAgentRunRequest {
   /** Byte ceiling for Context Broker output; ignored unless useContextBroker. */
   contextMaxBytes?: number;
   /**
-   * S32：本次任务的思考强度（关/快/普通/深/极致），优先于服务级默认。
-   * 作用于下一次 runAgentTask，不要求用户进设置页。
+   * 2-A：本次任务的思考强度（官方 effort 档：off/none/minimal/low/medium/high/xhigh/max），
+   * 优先于服务级默认。作用于下一次 runAgentTask，不要求用户进设置页。
    */
-  thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+  thinkingLevel?: 'off' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /**
    * RAG auto-search: before each model call, retrieve workspace evidence from
    * the most recent user message and inject a [rag-evidence] system message.
@@ -9664,7 +9664,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         topK?: number;
         maxTokens?: number;
         contextWindowTokens?: number;
-        thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+        thinkingLevel?: 'off' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
         embeddingModel?: string;
       }
     ) => {
