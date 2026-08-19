@@ -106,9 +106,14 @@ test('生产 IPC 链路：打开工作区 → 扫描 → 界面反映索引结�
   expect(result.fileCount).toBe(1);
   expect(result.hasSessionId).toBe(true);
 
-  // 界面必须反映真实扫描结果，而不是停在空态。S12：状态栏已卸载，
-  // 「已索引」信号改等开始页出现（mountWorkspace 完成后 activeDomain 落回 project）。
-  await expect(window.locator('.project-overview'), { timeout: 15_000 }).toBeVisible();
+  // 界面必须反映真实扫描结果，而不是停在空态。S12：状态栏已卸载。
+  // 问题 1：「已索引」信号不再等开始页出现——mountWorkspace 完成后 activeDomain
+  // 落到上次领域（无记录默认 param），**不再落回 project**。改等标题栏
+  // workspace-switcher 出现工作区名。
+  await expect(window.locator('.workspace-switcher__trigger'), { timeout: 15_000 }).toContainText('e2e-overlay');
+  // 有工作区后顶栏不得有「开始」（project 隐藏）；activeDomain 不是 project。
+  await expect(window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="project"]')).toHaveCount(0);
+  await expect(window.locator('.project-overview')).toHaveCount(0);
 
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);

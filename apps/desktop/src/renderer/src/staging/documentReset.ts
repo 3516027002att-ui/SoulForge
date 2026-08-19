@@ -228,6 +228,7 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setCmdkOpen: '命令面板状态',
   setCmdkQuery: '命令面板状态',
   setCmdkIndex: '命令面板状态',
+  setWorkspaceSwitcherOpen: '标题栏 workspace-switcher 菜单开合（问题 1）：纯 UI 状态，与资源文档无关，切换工作区时会重新渲染闭合',
   setToasts: '通知',
   setOpenTabs: '标签页',
   setFilePage: '资源浏览器页码，由过滤条件变化的 effect 自行复位（跨资源族共用，不属于某一族的文档态）'

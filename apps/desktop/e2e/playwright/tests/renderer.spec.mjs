@@ -60,37 +60,28 @@ async function ipcCalls(app) {
 }
 
 async function openFixtureWorkspace(window) {
-  // T2：打开工作区入口从侧栏移到中央开始页；窄窗口（633px）下 Agent dock
-  // 默认展开会压缩中央编辑区，先收 Agent 让开始页按钮可见可点。
+  // T2：无工作区（首次打开）时中央开始页（region aria-label「开始」）是大入口；
+  // 窄窗口（633px）下 Agent dock 默认展开会压缩中央编辑区，先收 Agent 让
+  // 开始页按钮可见可点。
   await closeAgentPanel(window);
-  // S33 起开始态侧栏与中央开始页各有一个「打开 Mod 工作区」按钮（同名同
-  // testid），裸 getByRole/getByTestId 会 strict mode violation：收窄到中央
-  // 开始页 region（aria-label「开始」）再定位。
   await window.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
   /*
-   * 挂载完成的等待信号。
+   * 挂载完成 + 默认领域落点的等待信号（问题 1）。
    *
-   * 原判据是 `.status-bar` 含「已索引」。S12 把状态栏整块摘掉了（styles.css 还留着
-   * 那条 `.status-bar` 规则，但 renderer 里没有任何元素带这个 class，「已索引」只
-   * 出现在两个 JS 字符串里），于是这个等待**永远不会 resolve** —— 全部 40 个调用
-   * 点都卡在这一行超时。产品结构不为测试回退（不恢复状态栏），改判据。
+   * 旧判据是 `.project-overview h1` 出现工作区名——开始页标题。问题 1 后开始页
+   * 只在无工作区出现：有工作区时 activeDomain 落到上次领域（无记录默认 param），
+   * 中央不再挂 StartWorkspacePanel。所以挂载信号改为：
    *
-   * 两段等待对应 mountWorkspace 的两个阶段，与原判据同语义：
-   *
-   * 1. 开始页标题出现工作区名 —— scanWorkspace 已 resolve。App.tsx 里
-   *    setWorkspace / setAllFiles / setFiles 与标题所需的 workspace 在同一个批次
-   *    提交，所以标题一变，下游 `.file-item` 点击所需的文件数据必然已在。
-   * 2. `.welcome__stats` 出现「已解析」—— analyzeWorkspace 已 resolve
-   *    （那段文案由 `analysis ? ...` 控制，analysis 为 null 时整段不出现）。
-   *    原判据的「已索引」也是 analyze 之后才写进状态栏的，这一段把那层前提补回来，
-   *    避免测试在 analyze 在飞时开始交互、被中途的 setState 重渲染打断。
-   *
-   * `.welcome__stats` 所在的 `.editor-welcome` 在工作区打开后是 `display:none`，
-   * 但 toContainText 读 textContent、不做可见性检查，所以隐藏不影响判据。这里刻意
-   * 不改成可见元素：shell 里没有第二个消费 analysis 的 DOM 节点，为测试新增一个就
-   * 是「为测试改产品结构」。
+   * 1. 标题栏 workspace-switcher 出现工作区名 —— scanWorkspace 已 resolve
+   *    （setWorkspace 与标题所需字段同一批次提交）。
+   * 2. PARAM 工作台可见 —— 无上次领域时默认进 param 的落点已定（activeDomain
+   *    不是 project），gameparam 已在工作台。
+   * 3. `.welcome__stats` 出现「已解析」—— analyzeWorkspace 已 resolve（防止测试
+   *    在 analyze 在飞时交互、被中途 setState 重渲染打断）。welcome 层在工作区
+   *    打开后是 display:none，但 toContainText 读 textContent、不做可见性检查。
    */
-  await expect(window.locator('.project-overview h1')).toHaveText('fixture-workspace');
+  await expect(window.locator('.workspace-switcher__trigger')).toContainText('fixture-workspace', { timeout: 20_000 });
+  await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
   await expect(window.locator('.welcome__stats')).toContainText('已解析');
 }
 
@@ -107,9 +98,19 @@ async function closeAgentPanel(window) {
   }
 }
 
+/**
+ * 问题 1 起按真实用户路径打开任意资源：Ctrl+K 命令面板按相对路径搜索 → 回车打开。
+ * 开始态侧栏资源树已拆（有工作区后「开始」不是页），非语义文件（chrbnd / notes /
+ * esd / sfxbnd / 非 zhocn 文本）没有语义领域可点，只有命令面板能跨领域定位。
+ */
 async function selectFileItem(window, text) {
   await closeAgentPanel(window);
-  await window.locator('.file-item', { hasText: text }).click();
+  await window.keyboard.press('Control+k');
+  await window.locator('.cmdk__input-wrap input').fill(text);
+  // 唯一命中后回车打开：输入完整相对路径时命令全部过滤掉（没有命令含路径），
+  // 第 0 项就是该资源命中。
+  await expect(window.locator('.cmdk-item').filter({ hasText: text })).toHaveCount(1);
+  await window.keyboard.press('Enter');
 }
 
 test('空工作区：无演示数据，变更队列为空态', async () => {
@@ -127,21 +128,26 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 工作区打开后欢迎层必须让出编辑区，否则开始页与工作台被半透明层盖住。
+  // 工作区打开后欢迎层必须让出编辑区，否则工作台被半透明层盖住。
   await expect(window.locator('.editor-welcome')).toBeHidden();
-  await expect(window.locator('.project-overview')).toBeVisible();
+  // 问题 1：有工作区后开始页不再挂中央（activeDomain 落到 param），.project-overview 不渲染。
+  await expect(window.locator('.project-overview')).toHaveCount(0);
+  await expect(window.locator('[data-testid="start-sidebar"]')).toHaveCount(0);
 
   // 左侧不再有 .mode-tabs；顶部工作域栏存在且为 tablist。
   await expect(window.locator('.mode-tabs')).toHaveCount(0);
   const tabs = window.locator('[data-testid="domain-bar"] [role="tab"]');
   // R1 裁定（2026-08-14）：GPARAM 从领域顶栏移除（并入左侧「参数」逻辑库），
   // T3 裁定（2026-08-15）：行为 + 动画合并为「动作」，animation 从顶栏隐藏
-  // （与 GPARAM 同口径），固定顺序快照 13 项。
-  await expect(tabs).toHaveCount(13);
+  // （与 GPARAM 同口径）；问题 1：有工作区后「开始」（project）与文件同口径隐藏
+  // （换文件夹走标题栏 workspace-switcher）。固定顺序快照 11 项。
+  await expect(tabs).toHaveCount(11);
   await expect(tabs).toHaveText([
-    /开始/, /PARAM/, /文本/, /事件/, /地图/, /脚本/, /动作/,
-    /模型/, /纹理/, /材质/, /VFX/, /容器/, /文件/
+    /PARAM/, /文本/, /事件/, /地图/, /脚本/, /动作/,
+    /模型/, /纹理/, /材质/, /VFX/, /容器/
   ]);
+  // 问题 1：有工作区后顶栏不得出现「开始」，也不得残留 data-domain="project" 入口。
+  await expect(window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="project"]')).toHaveCount(0);
 
   // §18.13 Done：顶部无「PARAM 36」之类的物理计数（§3.3 领域栏不显示无单位文件数）。
   await expect(window.locator('.domain-tab__count')).toHaveCount(0);
@@ -155,12 +161,10 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   expect(bodyText).not.toContain('SFX 特效');
   expect(bodyText).not.toContain('角色资源');
 
-  // 问题 14：顶栏不再有「文件」域入口；物理资源从开始侧栏资源树（.file-item）
-  // 定位，不把 resourceKind 变成顶层按钮。
-  const files = window.locator('.file-item');
-  await expect(files.filter({ hasText: 'sfx/f0000.sfxbnd.dcx' })).toHaveCount(1);
-  await expect(window.locator('[data-testid="start-sidebar-file-list"]')).toBeVisible();
-  // 语义领域不渲染 Files 物理列表（.file-item），改走逻辑库。
+  // 问题 14 + 问题 1：顶栏没有「文件」域入口，也没有开始态侧栏资源树——语义领域
+  // 侧栏只列该领域逻辑库（.library-item），不把资源 kind 变成顶层按钮；非领域资源
+  // 经 Ctrl+K 搜索定位（见 selectFileItem）。
+  await expect(window.locator('.file-item')).toHaveCount(0);
   await window.locator('[data-domain="event"]').click();
   await expect(window.locator('.file-item')).toHaveCount(0);
   await expect(window.locator('[data-testid="domain-library-list"]')).toBeVisible();
@@ -206,19 +210,24 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   await app.close();
 });
 
-test('开始侧栏资源树可定位 ai 资源，且不与 Agent 面板冲突', async () => {
+test('开始态侧栏已拆：资源经 Ctrl+K 搜索定位，不与 Agent 面板冲突', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 问题 14：资源从开始侧栏资源树定位（顶栏不再有「文件」域入口）。
-  const files = window.locator('.file-item');
-  await expect(files.filter({ hasText: 'ai/m10.aibnd.dcx' })).toHaveCount(1);
+  // 问题 1 + 14：开始态侧栏资源树已拆（有工作区后「开始」不是页），不把
+  // resourceKind 变成侧栏入口；任意文件（含 ai/aibnd 这类无语义领域的）经
+  // Ctrl+K 命令面板按路径定位。
+  await expect(window.locator('[data-testid="start-sidebar"]')).toHaveCount(0);
+  await window.keyboard.press('Control+k');
+  await window.locator('.cmdk__input-wrap input').fill('ai/m10.aibnd.dcx');
+  await expect(window.locator('.cmdk-item').filter({ hasText: 'ai/m10.aibnd.dcx' })).toHaveCount(1);
+  await window.keyboard.press('Escape');
+  await expect(window.locator('.cmdk-overlay')).not.toHaveClass(/is-open/);
 
   // Agent 面板仍是独立右侧面板，中央没有占用 AI 页面。
   await expect(window.locator('.agent__composer textarea')).toBeVisible();
   // §12.3：Agent dock header 左侧产品名是 SoulForge（不是 "Agent"）。
   await expect(window.locator('.agent__header')).toContainText('SoulForge');
-  await expect(window.locator('[data-testid="start-sidebar-file-list"]')).toBeVisible();
   await app.close();
 });
 
@@ -1063,6 +1072,31 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   await app.close();
 });
 
+test('问题 1：有工作区后在 PARAM 页，标题栏 workspace-switcher 可换 Mod 工作区', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+  const before = (await ipcCalls(app))['workspace.openDialog'] ?? 0;
+
+  // 有工作区且在 PARAM：workspace-switcher 常驻可见可点（任何领域都在）。
+  await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
+  await expect(window.getByTestId('workspace-switcher')).toBeVisible();
+  await expect(window.getByTestId('workspace-switcher')).toBeEnabled();
+
+  // 点开菜单：就是旧开始页的三件事（打开/更换 Mod、选/换原版；已选原版才出清除）。
+  await window.getByTestId('workspace-switcher').locator('button').first().click();
+  await expect(window.getByTestId('workspace-switcher-menu')).toBeVisible();
+  await expect(window.getByTestId('switcher-open-workspace')).toContainText('更换 Mod 工作区');
+  await expect(window.getByTestId('switcher-choose-base-directory')).toContainText('选择原版目录');
+
+  // 点「更换 Mod 工作区」→ 走现有 openWorkspace 路径（dialog stub），菜单关闭。
+  await window.getByTestId('switcher-open-workspace').click();
+  await expect(window.getByTestId('workspace-switcher-menu')).toHaveCount(0);
+  const after = (await ipcCalls(app))['workspace.openDialog'] ?? 0;
+  expect(after).toBeGreaterThan(before);
+
+  await app.close();
+});
+
 test('Electron：workspace.openDialog 被调用；用户取消时安静返回', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
@@ -1074,7 +1108,7 @@ test('Electron：workspace.openDialog 被调用；用户取消时安静返回', 
   // 取消路径：不显示错误，不打开工作区。
   const cancelled = await launchApp({ SF_TEST_CANCEL_DIALOG: '1' });
   await closeAgentPanel(cancelled.window);
-  // 与 openFixtureWorkspace 同因：侧栏与开始页各有一个同名按钮，收窄到开始页。
+  // 首次打开（无工作区）中央开始页是大入口；open-workspace 在「开始」region 内。
   await cancelled.window.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
   await expect(cancelled.window.locator('.toast--warn')).toHaveCount(0);
   await expect(cancelled.window.locator('.titlebar')).toContainText('未打开工作区');
@@ -1148,10 +1182,8 @@ test('browser-preview 表面：可见降级提示，无 pageerror / console erro
   // 资源浏览器显示运行表面降级提示。
   await expect(window.locator('.runtime-notice')).toContainText('浏览器预览：文件系统功能仅在 SoulForge 桌面版可用');
 
-  // 两个目录按钮保持可聚焦，标记 aria-disabled。
-  // 侧栏与开始页各有一个 open-workspace 按钮，收窄到开始页 region。
+  // 两个目录按钮保持可聚焦，标记 aria-disabled（首次打开中央开始页的大入口）。
   const openWorkspaceButton = window.getByRole('region', { name: '开始' }).getByTestId('open-workspace');
-  // 侧栏与开始页各有一个 choose-base-directory 按钮，同样收窄到开始页 region。
   const chooseBaseButton = window.getByRole('region', { name: '开始' }).getByTestId('choose-base-directory');
   await expect(openWorkspaceButton).toHaveAttribute('aria-disabled', 'true');
   await expect(chooseBaseButton).toHaveAttribute('aria-disabled', 'true');
@@ -1235,15 +1267,10 @@ test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async ()
       const scrolled = await bar.evaluate((element) => element.scrollLeft);
       expect(scrolled).toBeGreaterThan(0);
     }
-    // 窄屏仍可定位物理资源：开始侧栏资源树全量列出（≤ START_SIDEBAR_FILE_LIMIT）。
-    // 22 = fixture 合成样本数
-    // （PARAM-10B 加 gameparam.parambnd.dcx，GPARAM-11B 加 3 个 gparam.dcx，
-    // EVENT-30B 加 event/menu.emevd，SCRIPT-41 加 script/m25_00_00_00.luabnd.dcx，
-    // MAP-50B 加 map/m10.msb.dcx，MODEL-51B 加 chr/c1000.flver，TEXTURE-52B 加
-    // menu/start.tpf.dcx 与 menu/broken.tpf.dcx 从 16 变 18，MATERIAL-53B 加
-    // material/materials.mtd、BEHAVIOR-55B 加 ai/m10.esd 从 18 变 20，VFX-54B 加
-    // sfx/f0000.fxr 从 20 变 21，T3 加 chr/c5030.anibnd.dcx 从 21 变 22）。
-    await expect(window.locator('.file-item')).toHaveCount(22);
+    // 窄屏仍可定位资源：语义领域侧栏列出该领域逻辑库（问题 1 起开始态侧栏资源树
+    // 已拆，任意文件经 Ctrl+K 搜索定位）；标题栏 workspace-switcher 仍常驻。
+    await expect(window.locator('.library-item').first()).toBeVisible();
+    await expect(window.getByTestId('workspace-switcher')).toBeVisible();
   }
 
   await window.setViewportSize({ width: 653, height: 694 });
@@ -2505,8 +2532,11 @@ test('EVENT-30B：快速切换 common → menu，旧请求被取消且不覆盖 
   await closeAgentPanel(window);
 
   // 快速切换：点 common 后**不等**工作台挂载就点 menu。
-  await window.locator('.file-item', { hasText: 'event/common.emevd' }).click();
-  await window.locator('.file-item', { hasText: 'event/menu.emevd' }).click();
+  // 问题 1：开始侧栏资源树已拆，事件文件从「事件」领域逻辑库点（只列该领域
+  // library-item；切换事件域会首选打开 common.emevd，再点 menu 形成两次并发打开）。
+  await window.locator('[data-domain="event"]').click();
+  await window.locator('.library-item', { hasText: 'event/common.emevd' }).click();
+  await window.locator('.library-item', { hasText: 'event/menu.emevd' }).click();
 
   /*
    * 竞态前提断言 —— 必须在 UI 断言之前，且不能与 UI 断言共用分支。
@@ -2608,7 +2638,8 @@ test('EVENT-30B：event→PARAM 切离事件域必须发出取消 IPC', async ()
   });
   await openFixtureWorkspace(window);
   await closeAgentPanel(window);
-  await window.locator('.file-item', { hasText: 'event/common.emevd' }).click();
+  // 问题 1：开始侧栏资源树已拆；进事件域（自动首选打开 common.emevd）作为唯一一次 EMEVD 打开。
+  await window.locator('[data-domain="event"]').click();
   await expect.poll(
     async () => (await emevdOpenLog(app))?.arrivals.length ?? 0,
     { timeout: 10_000 }
@@ -2998,9 +3029,8 @@ test('S14/S15：事件失败读取给 code + 人话 + 下一步，无假 resourc
 test('S-FILE-ROLLBACK：审计面板文件级回滚 UI 走 rollbackFile 通道，回滚后条目置为已回滚', async () => {
   const { app, window, pageErrors, consoleErrors } = await launchApp({ SF_FIXTURE_OPERATIONS: '1' });
   await openFixtureWorkspace(window);
-  // 打开审计与回滚面板：S33 起活动栏四图标删除，审计入口在开始侧栏「工具」折叠区。
-  await window.getByTestId('start-sidebar-tools').locator('summary').click();
-  await window.getByRole('button', { name: '审计与回滚' }).click();
+  // 打开审计与回滚面板：问题 1 起开始态侧栏已拆，审计入口回到活动栏 ab-item。
+  await window.locator('.activitybar [aria-label="审计与回滚"]').click();
 
   // 种子历史：两条 committed 记录。
   const entries = window.locator('.audit-entry');

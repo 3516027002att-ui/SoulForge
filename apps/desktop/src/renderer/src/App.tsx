@@ -222,10 +222,6 @@ const EMPTY_PARAM_ROWS: Array<{ id: number; name?: string; dataHexPreview: strin
 const AGENT_MIN_WIDTH = 96; // S8:下限收到约一条工具栏宽,不要 340
 const AGENT_MAX_WIDTH = 620;
 const AGENT_DEFAULT_WIDTH = 440;
-/** S33：开始侧栏资源树的上限（树太大不能一次全渲，其余引导到「文件」领域）。 */
-const START_SIDEBAR_FILE_LIMIT = 120;
-/** 开始侧栏审计折叠区只列最近若干条，完整列表仍在原审计面板。 */
-const START_SIDEBAR_AUDIT_LIMIT = 8;
 
 function agentUiStorageKey(workspaceSessionId: string | undefined, field: 'open' | 'width'): string {
   // workspaceSessionId 是 main 发出的 opaque UI key；不把绝对路径写入 localStorage。
@@ -484,6 +480,9 @@ export function App(): ReactElement {
   const shellRef = useRef<HTMLDivElement>(null);
   const [cmdkOpen, setCmdkOpen] = useState(false);
   const [cmdkQuery, setCmdkQuery] = useState('');
+  // 问题 1：标题栏 workspace-switcher 菜单开合。有工作区后换文件夹的唯一常驻入口
+  // （任何领域都在）；点菜单项 / 点遮罩关闭。
+  const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
   const [cmdkIndex, setCmdkIndex] = useState(0);
   const [toasts, setToasts] = useState<Array<{ id: number; text: string; kind: 'ok' | 'warn' }>>([]);
   const [openTabs, setOpenTabs] = useState<RendererIndexedFile[]>([]);
@@ -967,9 +966,12 @@ export function App(): ReactElement {
     }
     return buildDomainSummaries({
       readContract,
-      runtimeReady: !isBrowserPreview
+      runtimeReady: !isBrowserPreview,
+      // 问题 1：有工作区后「开始」不再是页，project 从领域顶栏隐藏（换文件夹走
+      // 标题栏 workspace-switcher）。无工作区（首次打开）仍 visible。
+      hasWorkspace: workspace !== null
     });
-  }, [bridge, isBrowserPreview]);
+  }, [bridge, isBrowserPreview, workspace]);
 
   /**
    * 物理浏览列表：只存在于 Files 领域（§18.13 Steps：Files 独占物理浏览；
@@ -2092,18 +2094,22 @@ export function App(): ReactElement {
    * 只在 mountWorkspace 完成「索引写入 allFiles / files」后调用——那时
    * workspaceSessionId 与索引都已就位，此时调 selectFile 才找得到文件。
    * localStorage 读失败吞掉（与 Agent dock 一致），不弹窗、不跳页。
+   *
+   * 问题 1：返回 boolean —— 是否真的恢复了「非 project 的合法领域」。mountWorkspace
+   * 用它决定默认领域：没有合法上次记录（缺省 / 非法 / 上次就是 project）时
+   * 默认进 param（截图里的主工作台），**禁止**有工作区后把 activeDomain 留在 project。
    */
-  function restoreLastShellState(workspaceSessionId: string, index: readonly RendererIndexedFile[]): void {
+  function restoreLastShellState(workspaceSessionId: string, index: readonly RendererIndexedFile[]): boolean {
     try {
       const savedCollapsed = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'sidebarCollapsed'));
       const savedDomain = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'domain'));
       const savedSourceUri = window.localStorage.getItem(shellUiStorageKey(workspaceSessionId, 'sourceUri'));
       if (savedCollapsed !== null) setSidebarCollapsed(savedCollapsed === 'true');
-      if (savedDomain === null) return;
+      if (savedDomain === null) return false;
       // 必须是合法领域值，且不是 project（有工作区时开始不是页）。非法/无记录保持现状。
-      if (!EDITOR_DOMAIN_IDS.includes(savedDomain as EditorDomainId)) return;
+      if (!EDITOR_DOMAIN_IDS.includes(savedDomain as EditorDomainId)) return false;
       const domain = savedDomain as EditorDomainId;
-      if (domain === 'project') return;
+      if (domain === 'project') return false;
       setSidebarView('explorer');
       if (savedSourceUri !== null && savedSourceUri !== '') {
         const match = index.find((file) => file.sourceUri === savedSourceUri);
@@ -2111,13 +2117,15 @@ export function App(): ReactElement {
           setActiveDomain(domain);
           setCenterView('resource');
           void selectFile(match);
-          return;
+          return true;
         }
       }
       // 文件不在索引或无记录：只恢复领域（走 selectDomain 的「打开首选逻辑库」路径）。
       selectDomain(domain);
+      return true;
     } catch {
       // 读失败吞掉，保持现状。
+      return false;
     }
   }
 
@@ -2146,8 +2154,8 @@ export function App(): ReactElement {
       setSessionMeta(result.session ?? null);
       setAllFiles(result.files);
       setFiles(result.files);
-      setActiveDomain('project');
-      setCenterView('project');
+      // 问题 1：不先把 activeDomain/centerView 写回 project —— 有工作区后「开始」
+      // 不是页，落点交给下方的 restoreLastShellState（上次领域）或 param 默认。
       setSidebarView('explorer');
       setSelectedFile(null);
       setPreview(null);
@@ -2180,7 +2188,23 @@ export function App(): ReactElement {
       const restoredPrefix = origin === 'restored' ? '已恢复上次的工作区：' : '';
       // 6-C：索引已回来，恢复上次退出前的工作域 + 选中资源 + 侧栏折叠。
       // 放在全部 reset 之后，保证恢复值不被上面任一 setState 覆盖。
-      restoreLastShellState(result.workspaceSessionId, result.files);
+      const restoredDomain = restoreLastShellState(result.workspaceSessionId, result.files);
+      if (!restoredDomain) {
+        // 问题 1：没有合法上次领域（缺省 / 非法 / 上次是 project）→ 默认进 param
+        // （截图里的主工作台），**禁止**有工作区后把 activeDomain 留在 project。
+        // 直接用本次扫描的真实索引 result.files 落 param 首选容器，避开 mountWorkspace
+        // 闭包里 allFiles/files 仍是旧值的回读问题（selectDomain 走的是旧快照）。
+        const preferred = pickPreferredParamContainer(result.files);
+        setActiveDomain('param');
+        setPreview(null);
+        if (preferred) {
+          setCenterView('resource');
+          void selectFile(preferred);
+        } else {
+          setSelectedFile(null);
+          setCenterView('resource');
+        }
+      }
       setStatus(`${restoredPrefix}已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2266,16 +2290,6 @@ export function App(): ReactElement {
   }
 
   function selectDomain(domain: EditorDomainId): void {
-    // 有工作区：开始 = 召唤资源栏，不是一页。必须赶在「切工作域会丢编辑视图」
-    // 的确认与 setActiveDomain 之前 return——不切工作域，自然没有编辑态丢失，
-    // 中央 StartWorkspacePanel 也不能挂上（6-A）。
-    if (domain === 'project' && workspace !== null) {
-      setSidebarView('explorer');
-      setSidebarCollapsed((collapsed) =>
-        !collapsed && sidebarView === 'explorer' ? true : false
-      );
-      return;
-    }
     if (domain !== activeDomain && editDirty) {
       const confirmed = window.confirm('当前文本有未生成变更的修改，切换工作域将保留草稿但可能离开编辑视图。继续？');
       if (!confirmed) return;
@@ -2283,7 +2297,9 @@ export function App(): ReactElement {
     setActiveDomain(domain);
     setBnd4Forced(false);
     if (domain === 'project') {
-      // 无工作区：才落到开始页（打开工作区的落点）。
+      // 问题 1：只有无工作区（首次打开，没选过工作区也没有工作 mods 文件夹）才落
+      // 开始页（打开工作区的落点）。有工作区后 project 不在顶栏，selectDomain
+      // 也不会被引用——不再有「有工作区 + project 只折资源栏」的旁路（旧 6-A）。
       setSelectedFile(null);
       setCenterView('project');
       setSidebarView('explorer');
@@ -2946,9 +2962,62 @@ export function App(): ReactElement {
         <div className="titlebar__brand">
           <img className="brand-mark" src={SOULFORGE_ICON_URL} width="16" height="16" alt="" aria-hidden="true" />
           <span className="brand-name">SoulForge</span>
-          <span className="brand-tag" title={sessionMeta?.workspaceLabel ?? workspace?.workspaceLabel ?? '未打开工作区'}>
-            {workspace?.workspaceLabel ?? '未打开工作区'} · {sessionMeta?.game ?? 'sekiro'}
-          </span>
+          {/* 问题 1：不可点的品牌标签 → 壳层常驻的 workspace-switcher 按钮/菜单。
+              有工作区后换 Mod 工作区 / 原版目录的任何领域入口都在这里（打开/更换
+              Mod、选择/更换/清原版三件事与旧开始页同一套 handler）。 */}
+          <div className="workspace-switcher" data-testid="workspace-switcher">
+            <button
+              type="button"
+              className="workspace-switcher__trigger"
+              onClick={() => setWorkspaceSwitcherOpen((open) => !open)}
+              aria-haspopup="menu"
+              aria-expanded={workspaceSwitcherOpen}
+              title={sessionMeta?.workspaceLabel ?? workspace?.workspaceLabel ?? '未打开工作区'}
+            >
+              <span className="workspace-switcher__label">{workspace?.workspaceLabel ?? '未打开工作区'}</span>
+              <span className="workspace-switcher__game"> · {sessionMeta?.game ?? 'sekiro'}</span>
+              <span className="workspace-switcher__caret" aria-hidden="true">▾</span>
+            </button>
+            {workspaceSwitcherOpen && (
+              <>
+                <div
+                  className="workspace-switcher__backdrop"
+                  onClick={() => setWorkspaceSwitcherOpen(false)}
+                  aria-hidden="true"
+                />
+                <div className="workspace-switcher__menu" role="menu" data-testid="workspace-switcher-menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-testid="switcher-open-workspace"
+                    onClick={() => { setWorkspaceSwitcherOpen(false); void openWorkspace(); }}
+                    {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
+                  >
+                    {workspace ? '更换 Mod 工作区' : '打开 Mod 工作区'}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-testid="switcher-choose-base-directory"
+                    onClick={() => { setWorkspaceSwitcherOpen(false); void chooseBaseDirectory(); }}
+                    {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
+                  >
+                    {baseRootChoice ? '更换原版目录' : '选择原版目录'}
+                  </button>
+                  {baseRootChoice && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-testid="switcher-clear-base-directory"
+                      onClick={() => { setWorkspaceSwitcherOpen(false); clearBaseDirectory(); }}
+                    >
+                      清除原版目录
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
         </div>
         <div className="titlebar__center">
           <button type="button" className="cmdk-trigger" onClick={openCmdk} title="命令面板">
@@ -2966,16 +3035,42 @@ export function App(): ReactElement {
         domain={activeDomain}
         domains={domainSummaries}
         onSelect={selectDomain}
-        resourceSidebarOpen={!sidebarCollapsed && sidebarView === 'explorer'}
       />
 
       <div className="shell" ref={shellRef}>
         {/* ══════════ 活动栏 ══════════
-            S33：资源浏览器/搜索/暂存/审计四图标已删——资源浏览器并进顶栏「开始」
-            （开始态侧栏 = 资源树 + 开始页全部功能），搜索只走 Ctrl+K，
-            暂存/审计进开始侧栏的折叠区。活动栏只剩 Agent 与设置，贴底。 */}
+            问题 1：开始态侧栏已拆掉（有工作区后「开始」不是页），搜索继续只走
+            Ctrl+K，暂存区 / 审计与回滚作为 ab-item 回到活动栏（贴底、Agent 齿轮
+            上方；第八个图标不用——搜索不进活动栏）。资源浏览器并入各领域资源树。 */}
         <nav className="activitybar" aria-label="主导航">
           <div className="ab-spacer"></div>
+          <button
+            type="button"
+            className={sidebarView === 'staging' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
+            onClick={() => activateSidebarView('staging')}
+            title={`暂存区${pendingChangeCount > 0 ? `（${pendingChangeCount}）` : ''}`}
+            aria-label="暂存区"
+            aria-current={sidebarView === 'staging' && !sidebarCollapsed ? true : undefined}
+          >
+            {pendingChangeCount > 0 && <span className="ab-badge">{pendingChangeCount}</span>}
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path d="M4 5h16v14H4z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+              <path d="M8 9h8M8 13h8M8 17h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={sidebarView === 'audit' && !sidebarCollapsed ? 'ab-item is-active' : 'ab-item'}
+            onClick={() => activateSidebarView('audit')}
+            title="审计与回滚"
+            aria-label="审计与回滚"
+            aria-current={sidebarView === 'audit' && !sidebarCollapsed ? true : undefined}
+          >
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
           <button
             type="button"
             className={agentOpen ? 'ab-item is-active' : 'ab-item'}
@@ -3088,80 +3183,13 @@ export function App(): ReactElement {
                   )}
                 </>
               ) : activeDomain === 'project' ? (
-                /* S33：开始态侧栏 = 开始页全部功能（打开/更换 Mod、选/换/清原版、
-                   工作区名、挂载状态）+ 折叠工具（搜索/暂存/审计）+ 资源树。
-                   换工作区不用回中央页。 */
-                <div className="start-sidebar" data-testid="start-sidebar">
-                  <div className="start-sidebar__block">
-                    <p className="start-sidebar__workspace">
-                      工作区：{workspace?.workspaceLabel ?? '未打开'}
-                      <span className={sessionMeta?.baseMounted ? 'pill pill--ok' : 'pill'}>
-                        原版：{sessionMeta?.baseMounted ? '已挂载' : '未挂载'}
-                      </span>
-                    </p>
-                    <div className="start-sidebar__actions">
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--block"
-                        data-testid="open-workspace"
-                        onClick={() => void openWorkspace()}
-                        {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
-                      >
-                        {workspace ? '更换 Mod 工作区' : '打开 Mod 工作区'}
-                      </button>
-                      <div className="row gap">
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--sm"
-                          data-testid="choose-base-directory"
-                          onClick={() => void chooseBaseDirectory()}
-                          {...(isBrowserPreview ? { 'aria-disabled': true } : {})}
-                        >
-                          {baseRootChoice ? '更换原版目录' : '选择原版目录'}
-                        </button>
-                        {baseRootChoice && (
-                          <button type="button" className="btn btn--ghost btn--sm" onClick={clearBaseDirectory}>
-                            清除
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    <details className="start-sidebar__tools" data-testid="start-sidebar-tools">
-                      <summary>工具</summary>
-                      <div className="start-sidebar__tools-list">
-                        <button type="button" className="btn btn--ghost btn--sm" onClick={focusSearchPanel}>搜索（Ctrl+K）</button>
-                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => activateSidebarView('staging')}>
-                          暂存区{pendingChangeCount > 0 ? `（${pendingChangeCount}）` : ''}
-                        </button>
-                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => activateSidebarView('audit')}>审计与回滚</button>
-                      </div>
-                    </details>
-                  </div>
-                  {workspace && indexedFiles.length > 0 && (
-                    <>
-                      <div className="wb-list__group-label">工作区资源</div>
-                      <div className="file-list" data-testid="start-sidebar-file-list">
-                        {indexedFiles.slice(0, START_SIDEBAR_FILE_LIMIT).map((file) => (
-                          <button
-                            type="button"
-                            key={file.sourceUri}
-                            className={selectedFile?.sourceUri === file.sourceUri ? 'file-item selected' : 'file-item'}
-                            onClick={() => void selectFile(file)}
-                          >
-                            <span className="file-item__name">{file.relativePath}</span>
-                            <small className="file-item__meta">{file.resourceKind}</small>
-                          </button>
-                        ))}
-                        {indexedFiles.length > START_SIDEBAR_FILE_LIMIT && (
-                          <p className="muted" style={{ fontSize: 10, padding: '4px 8px' }}>
-                            共 {indexedFiles.length} 个资源，更多请到「文件」领域浏览。
-                          </p>
-                        )}
-                      </div>
-                    </>
-                  )}
-                  {!workspace && <p className="empty-hint">打开 Mod 工作区后，这里会列出工作区资源。</p>}
-                </div>
+                /* 问题 1：开始态侧栏已拆掉。有工作区后「开始」不是页（project 从顶栏
+                   隐藏，activeDomain 也不会是 project）；这里只在无工作区的首次冷启动
+                   命中——中央 StartWorkspacePanel 是大入口，侧栏只留一行引导文案。
+                   暂存区 / 审计与回滚入口在活动栏 ab-item，搜索走 Ctrl+K。 */
+                <p className="empty-hint">
+                  打开 Mod 工作区后，这里会列出该领域的可打开资源。
+                </p>
               ) : (
                 <DomainLibraryList
                   files={domainLibraries}
