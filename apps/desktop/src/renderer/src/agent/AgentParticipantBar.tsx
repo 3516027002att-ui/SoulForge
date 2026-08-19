@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { createPortal } from 'react-dom';
-import type { AiPermissionMode } from '@soulforge/core';
-import { permissionModeLabel } from './agentLabels.js';
 
 export type AgentInteractionMode = 'ask' | 'plan' | 'edit';
 
@@ -23,14 +21,16 @@ export interface AgentParticipantBarProps {
   mode: AgentInteractionMode;
   /** 真实回调：交互模式（Ask/Plan/Edit）由 App 持有，这里是 mode 菜单的入口。 */
   onModeChange: (mode: AgentInteractionMode) => void;
-  permissionMode: AiPermissionMode;
-  permissionLockReason: string;
 }
 
 /**
- * 三层 Composer 的第一层「参与者条」（§12.6）：`[Agent icon] @Agent [Ask / Plan / Edit]`。
+ * 三层 Composer 的第一层「模式选择」（§12.6）：`[Ask / Plan / Edit]` 下拉。
  * 模式选择只做本地开合状态；选中的模式回传给 App（60B 只保证按钮按真实 callback
- * 存在，真实能力接线由后续卡片承担）。右侧常驻权限锁定说明，与交互意图分开显示。
+ * 存在，真实能力接线由后续卡片承担）。
+ *
+ * 2-B：已删除「权限：计划模式（主进程锁定）」说明段——交互模式（Ask/Plan/Edit）与
+ * 主进程锁死的 permissionMode 是两套东西，那段字永远显示「计划模式」且与交互意图
+ * 无关；2-C：已删除 @Agent 占位 span。
  *
  * S9：菜单用 portal 挂到 `document.body` + `position:fixed`。旧实现是
  * `position:absolute; bottom: calc(100% + 5px)` 挂在 composer 内，父级 `.agent` /
@@ -38,7 +38,7 @@ export interface AgentParticipantBarProps {
  * Esc / 点外侧关闭；不做独立 BrowserWindow。
  */
 export function AgentParticipantBar(props: AgentParticipantBarProps): ReactElement {
-  const { mode, onModeChange, permissionMode, permissionLockReason } = props;
+  const { mode, onModeChange } = props;
   const [modeOpen, setModeOpen] = useState(false);
   /** 菜单锚点（trigger 按钮的 viewport 坐标），打开时取一次。 */
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
@@ -99,7 +99,6 @@ export function AgentParticipantBar(props: AgentParticipantBarProps): ReactEleme
 
   return (
     <div className="agent-composer__participant">
-      <span className="agent-participant" title="当前 Agent 会话（占位，参与者选择后续接线）">@Agent</span>
       <div className="agent-mode-select">
         <button
           type="button"
@@ -138,10 +137,6 @@ export function AgentParticipantBar(props: AgentParticipantBarProps): ReactEleme
           document.body
         )}
       </div>
-      <span className="composer-spacer"></span>
-      <span className="composer-permission" title={permissionLockReason}>
-        权限：{permissionModeLabel(permissionMode)}（主进程锁定）
-      </span>
     </div>
   );
 }

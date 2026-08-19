@@ -10,32 +10,93 @@ export type ModelServiceProtocol = 'openai-compatible' | 'anthropic-compatible';
 export type AgentPermissionMode = 'plan' | 'normal' | 'full';
 
 /**
- * 思考强度：统一档位，各适配器映射到协议字段。
- * `off` 是不下发任何 thinking 参数（旧模型不支持时保证请求不失败），也是默认值。
+ * 旧配置里的遗留档位（fast/normal/deep/extreme）。只在读路径兼容映射，
+ * 写路径只写官方 effort 值（fast→low、normal→medium、deep→high、extreme→max）。
  */
-export type ModelThinkingLevel = 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+export type LegacyThinkingLevel = 'fast' | 'normal' | 'deep' | 'extreme';
 
 /**
- * OpenAI Chat Completions `reasoning_effort` 映射；off/未配置返回 undefined（不下发）。
- * OpenAI 只有三档，deep/extreme 都收敛到 high。
+ * 思考强度：官方 effort 档位（2026-08-19 对照 OpenAI / Anthropic 文档核实）。
+ * `off` 是不下发任何 effort / thinking 字段，也是默认值。
+ * `none` / `minimal` 是 OpenAI-only；`xhigh` / `max` 是官方档，禁止折成 high。
+ * Anthropic 协议只有 off/low/medium/high/xhigh/max（官方没有 none/minimal）。
  */
-export function resolveOpenAiReasoningEffort(
-  level: ModelThinkingLevel | undefined
-): 'low' | 'medium' | 'high' | undefined {
+export type ModelThinkingLevel =
+  | 'off'
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
+
+export function isModelThinkingLevel(value: string): value is ModelThinkingLevel {
+  return value === 'off' || value === 'none' || value === 'minimal'
+    || value === 'low' || value === 'medium' || value === 'high'
+    || value === 'xhigh' || value === 'max';
+}
+
+/** 读路径兼容：遗留档 → 官方档；未知值回退默认档 medium。 */
+export function migrateThinkingLevel(level: string): ModelThinkingLevel {
   switch (level) {
     case 'fast': return 'low';
     case 'normal': return 'medium';
-    case 'deep':
-    case 'extreme': return 'high';
-    default: return undefined;
+    case 'deep': return 'high';
+    case 'extreme': return 'max';
+    default: return isModelThinkingLevel(level) ? level : 'medium';
+  }
+}
+
+export type OpenAiReasoningEffort = Exclude<ModelThinkingLevel, 'off'>;
+
+/**
+ * OpenAI 兼容（chat `reasoning_effort` / responses `reasoning.effort`）映射；
+ * off/未配置返回 undefined（不下发）。官方值原样下发，禁止把 max 折成 high。
+ * 遗留档（fast/normal/deep/extreme）读路径兼容映射（deep→high、extreme→max）。
+ */
+export function resolveOpenAiReasoningEffort(
+  level: ModelThinkingLevel | LegacyThinkingLevel | undefined
+): OpenAiReasoningEffort | undefined {
+  if (level === undefined || level === 'off') return undefined;
+  switch (level) {
+    case 'fast': return 'low';
+    case 'normal': return 'medium';
+    case 'deep': return 'high';
+    case 'extreme': return 'max';
+    default: return level;
+  }
+}
+
+export type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/**
+ * Anthropic `output_config.effort` 映射；off/未配置返回 undefined（不下发）。
+ * none/minimal 是 OpenAI 专有档，Anthropic 不下发。遗留档读路径兼容映射。
+ */
+export function resolveAnthropicEffort(
+  level: ModelThinkingLevel | LegacyThinkingLevel | undefined
+): AnthropicEffort | undefined {
+  if (level === undefined || level === 'off') return undefined;
+  switch (level) {
+    case 'fast': return 'low';
+    case 'normal': return 'medium';
+    case 'deep': return 'high';
+    case 'extreme': return 'max';
+    case 'none':
+    case 'minimal': return undefined;
+    default: return level;
   }
 }
 
 /**
- * Anthropic `thinking.budget_tokens` 映射；off/未配置返回 undefined（不下发）。
- * Anthropic 要求 budget 最低 1024，且 max_tokens 必须大于 budget。
+ * 遗留 `thinking.budget_tokens` 映射：仅「明确仍走 manual extended thinking」的
+ * 内部路径可用；**UI 与下拉不得再走这条路**（2026 的 Anthropic 用 output_config.effort，
+ * budget_tokens 数字不得冒充 effort）。
  */
-export function resolveAnthropicThinkingBudget(level: ModelThinkingLevel | undefined): number | undefined {
+export function resolveAnthropicThinkingBudget(
+  level: ModelThinkingLevel | LegacyThinkingLevel | undefined
+): number | undefined {
   switch (level) {
     case 'fast': return 2048;
     case 'normal': return 4096;

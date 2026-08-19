@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react';
-import type { AiPermissionMode, ModelThinkingLevel } from '@soulforge/core';
+import type { ModelThinkingLevel } from '@soulforge/core';
 import {
   convergeThinkingLevel,
   thinkingLevelsForProtocol,
@@ -28,21 +28,15 @@ export interface AgentComposerToolbarProps {
    * 接线），60B 不渲染假装可用的假功能，只给 disabled + 说明。
    */
   attachmentReason: string;
-  /** 当前模型服务的展示名（已配置服务的 displayName；无则回退 provider 标签）。 */
-  modelLabel: string;
-  /** 打开模型服务设置抽屉（真实既有能力：AgentSessionControls）。 */
-  onOpenModelSettings: () => void;
   /** 当前交互模式（Ask/Plan/Edit）——S32 作为权限下拉进底栏。 */
   interactionMode: AgentInteractionMode;
   onInteractionModeChange?: (mode: AgentInteractionMode) => void;
-  permissionMode: AiPermissionMode;
-  permissionLockReason: string;
-  /** S32：思考强度（关/快/普通/深/极致）——与模型拆成两个控件。 */
+  /** 2-A：思考强度（官方 effort 档）——下拉控件，off/none/minimal/low/medium/high/xhigh/max。 */
   thinking: ModelThinkingLevel;
   onThinkingChange: (thinking: ModelThinkingLevel) => void;
   /**
    * 8-A：当前选中模型服务的协议；决定思考强度表（OpenAI effort / Anthropic
-   * budget）。没有服务时上层传 'openai-compatible'。
+   * effort）。没有服务时上层传 'openai-compatible'。
    */
   protocol: ThinkingProtocol;
 }
@@ -50,7 +44,12 @@ export interface AgentComposerToolbarProps {
 /**
  * 三层 Composer 的第三层「底部工具栏」（§12.6）。
  *
- * 固定五项顺序：`引用 | 附件 | 模型选择 | 推理/Plan | 发送/停止`。
+ * 固定五项顺序：`引用 | 附件 | Ask/Plan/Edit | effort | 发送/停止`。
+ * 2-B：删掉了「权限：计划模式（主进程锁定）」说明段与相关 props；2-C：删掉了
+ * @Agent 占位 span；2-D：思考强度标签从 Think 改成 effort（全小写，aria-label 同步）；
+ * 2-E：删掉了底栏「模型服务」按钮（设置入口移到 AgentDockHeader 右上角齿轮），
+ * modelLabel / onOpenModelSettings 随之摘掉。
+ *
  * S10 把 `@`（插入 Agent 参与者）与 `#`（插入当前文件上下文）合成一个「引用」
  * 框选钮——引用是语义实体（data-cite 矩形相交），不是文本 token；附件仍未接通
  * 真实链路，给诚实 disabled + title 说明（§12.6「未打通真实链路的控件必须隐藏」
@@ -65,18 +64,14 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
     onToggleCiteSelect,
     citeSelecting,
     attachmentReason,
-    modelLabel,
-    onOpenModelSettings,
     interactionMode,
     onInteractionModeChange,
-    permissionMode,
-    permissionLockReason,
     thinking,
     onThinkingChange,
     protocol
   } = props;
 
-  // 8-B/8-C：按协议选表，并把不在表里的当前值收敛掉，<select> 不许出现
+  // 2-A/8-C：按协议选表，并把不在表里的当前值收敛掉，<select> 不许出现
   // 一个不在 option 里的 value。
   const thinkingOptions = thinkingLevelsForProtocol(protocol);
   const effectiveThinking = convergeThinkingLevel(thinking, protocol);
@@ -131,23 +126,12 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
       <AgentParticipantBar
         mode={interactionMode}
         onModeChange={(mode) => onInteractionModeChange?.(mode)}
-        permissionMode={permissionMode}
-        permissionLockReason={permissionLockReason}
       />
       <span className="composer-spacer"></span>
-      <button
-        type="button"
-        className="composer-model-btn"
-        onClick={onOpenModelSettings}
-        aria-label="模型服务设置"
-        title="打开模型服务设置"
-      >
-        <span className="composer-model-label">{modelLabel}</span>
-      </button>
-      <label className="composer-thinking" title="思考强度（作用于下一次任务）">
-        <span className="composer-tool-label">Think</span>
+      <label className="composer-thinking" title="effort（作用于下一次任务）">
+        <span className="composer-tool-label">effort</span>
         <select
-          aria-label="思考强度"
+          aria-label="effort"
           value={effectiveThinking}
           onChange={(event) => onThinkingChange(event.target.value as ModelThinkingLevel)}
         >

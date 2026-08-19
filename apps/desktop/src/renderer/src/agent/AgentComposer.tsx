@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react';
-import type { AiPermissionMode, ModelThinkingLevel } from '@soulforge/core';
+import type { ModelThinkingLevel } from '@soulforge/core';
 import { AgentParticipantBar, interactionModeLabel, type AgentInteractionMode } from './AgentParticipantBar.js';
 import { AgentContextChipList, type AgentContextChip } from './AgentContextChipList.js';
 import {
@@ -20,30 +20,25 @@ export interface AgentComposerProps {
   onStop: () => void;
   streaming: boolean;
   awaitingApproval: boolean;
-  permissionMode: AiPermissionMode;
-  permissionLockReason: string;
   interactionMode: AgentInteractionMode;
   onInteractionModeChange?: (mode: AgentInteractionMode) => void;
-  /** 当前模型服务展示名（真实已配置服务）。 */
-  modelLabel: string;
-  onOpenModelSettings: () => void;
   /** S10 引用框选开关（App 持有 citeSelecting；中央编辑区暗幕在 App 渲染）。 */
   citeSelecting: boolean;
   onToggleCiteSelect: () => void;
   /** 已选中逻辑资源的域标签（chip 展示；选区元数据随 runAiAgent 提交，不入 prompt）。 */
   contextLabel: string;
-  /** S32：思考强度（关/快/普通/深/极致），与模型拆成两个控件。 */
+  /** 2-A：思考强度（官方 effort 档），与模型拆成两个控件。 */
   thinking: ModelThinkingLevel;
   onThinkingChange: (thinking: ModelThinkingLevel) => void;
-  /** 8-A：当前服务协议（OpenAI effort / Anthropic budget），透传给工具栏换表。 */
+  /** 8-A：当前服务协议（OpenAI / Anthropic effort 表），透传给工具栏换表。 */
   protocol: 'openai-compatible' | 'anthropic-compatible';
 }
 
 /**
  * 三层 Composer（§12.6）：
- *   第一层 participant —— AgentParticipantBar
+ *   第一层 participant —— AgentParticipantBar（Ask/Plan/Edit 模式选择）
  *   第二层 prompt+chips —— AgentContextChipList + AgentPromptEditor
- *   第三层 toolbar —— AgentComposerToolbar（引用 | 附件 | 模型 | Plan | 发送/停止）
+ *   第三层 toolbar —— AgentComposerToolbar（引用 | 附件 | 模式 | effort | 发送/停止）
  *
  * 输入状态机（发送/停止/等待、IME composing 守卫、grow cap、空输入 disabled）
  * 在 AgentPromptEditor.tsx 里做成纯函数，由 agentComposerState.test.ts 直接覆盖；
@@ -63,12 +58,8 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
     onStop,
     streaming,
     awaitingApproval,
-    permissionMode,
-    permissionLockReason,
     interactionMode,
     onInteractionModeChange,
-    modelLabel,
-    onOpenModelSettings,
     citeSelecting,
     onToggleCiteSelect,
     contextLabel,
@@ -109,12 +100,8 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
         onToggleCiteSelect={onToggleCiteSelect}
         citeSelecting={citeSelecting}
         attachmentReason="文件附件尚未接通（60C 只接资源引用）；当前文件可经上方「+ 资源引用」添加 main 签发的 opaque 引用。"
-        modelLabel={modelLabel}
-        onOpenModelSettings={onOpenModelSettings}
         interactionMode={interactionMode}
         onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
-        permissionMode={permissionMode}
-        permissionLockReason={permissionLockReason}
         thinking={thinking}
         onThinkingChange={onThinkingChange}
         protocol={protocol}

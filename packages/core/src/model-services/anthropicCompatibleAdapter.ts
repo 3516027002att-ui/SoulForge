@@ -11,7 +11,7 @@ import type {
   StreamEvent,
   ToolDefinition
 } from './types.js';
-import { resolveAnthropicThinkingBudget } from './types.js';
+import { resolveAnthropicEffort } from './types.js';
 import {
   classifyFetchError,
   classifyHttpError,
@@ -377,26 +377,21 @@ function buildMessagesBody(model: string, request: ModelCompleteRequest, stream:
     messages.push({ role: message.role, content: message.content });
   }
 
-  // Extended thinking（claude-3-7+）：启用时 Anthropic 要求 temperature 必须为 1
-  // （省略即默认 1，故强制不下发），且 max_tokens 必须大于 budget_tokens。
-  const thinkingBudget = resolveAnthropicThinkingBudget(request.thinkingLevel);
-  const maxTokens = thinkingBudget !== undefined
-    ? Math.max(request.maxTokens ?? DEFAULT_MAX_TOKENS, thinkingBudget * 2)
-    : (request.maxTokens ?? DEFAULT_MAX_TOKENS);
+  // 2026 官方 effort：走 output_config.effort。off/未配置 → 不下发，也不要再自动塞
+  // thinking.budget_tokens（预算数字不是 effort UI）。none/minimal 是 OpenAI 专有档。
+  const effort = resolveAnthropicEffort(request.thinkingLevel);
 
   return {
     model,
     stream,
-    max_tokens: maxTokens,
+    max_tokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
     messages,
     ...(system ? { system } : {}),
     ...(request.tools?.length ? { tools: request.tools.map(toAnthropicTool) } : {}),
-    ...(request.temperature !== undefined && thinkingBudget === undefined ? { temperature: request.temperature } : {}),
+    ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
     ...(request.topP !== undefined ? { top_p: request.topP } : {}),
     ...(request.topK !== undefined ? { top_k: request.topK } : {}),
-    ...(thinkingBudget !== undefined
-      ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } }
-      : {})
+    ...(effort !== undefined ? { output_config: { effort } } : {})
   };
 }
 

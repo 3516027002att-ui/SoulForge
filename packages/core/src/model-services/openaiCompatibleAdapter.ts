@@ -275,6 +275,7 @@ function buildChatBody(model: string, request: ModelCompleteRequest, stream: boo
     ...(request.topP !== undefined ? { top_p: request.topP } : {}),
     // topK 不下发：OpenAI Chat Completions 协议无 top_k 字段，官方 API 传了会 400；
     // 兼容服务里也只有 Anthropic 协议映射 top_k（UI 已标注「仅 Anthropic 生效」）。
+    // reasoning_effort：官方值原样下发（off → undefined → 字段缺席），禁止折档。
     ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {})
   };
 }

@@ -27,7 +27,8 @@ import type {
   EmedfCompletionItem,
   ResourceCapabilityMatrix,
   ToolDescriptor,
-  ToolResult
+  ToolResult,
+  ModelThinkingLevel
 } from '@soulforge/core';
 import type {
   AgentResourceReference,
@@ -805,7 +806,7 @@ const api = {
     topK?: number;
     maxTokens?: number;
     contextWindowTokens?: number;
-    thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+    thinkingLevel?: ModelThinkingLevel;
   }>> => ipcRenderer.invoke('modelService.list'),
   modelServiceEncryptionAvailable: (): Promise<boolean> =>
     ipcRenderer.invoke('modelService.encryptionAvailable'),
@@ -821,7 +822,7 @@ const api = {
     topK?: number;
     maxTokens?: number;
     contextWindowTokens?: number;
-    thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+    thinkingLevel?: ModelThinkingLevel;
   }): Promise<{
     id: string;
     displayName: string;
@@ -836,7 +837,7 @@ const api = {
     topK?: number;
     maxTokens?: number;
     contextWindowTokens?: number;
-    thinkingLevel?: 'off' | 'fast' | 'normal' | 'deep' | 'extreme';
+    thinkingLevel?: ModelThinkingLevel;
   }> => ipcRenderer.invoke('modelService.upsert', input),
   deleteModelService: (configId: string): Promise<{ ok: true }> =>
     ipcRenderer.invoke('modelService.delete', configId),

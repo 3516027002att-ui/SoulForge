@@ -1,6 +1,7 @@
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { ModelThinkingLevel } from '@soulforge/core';
 import { describeBridgeAbsence, getRendererBridge } from '../runtime/rendererRuntime.js';
+import type { SoulForgeApi } from '../../../preload/index.js';
 import {
   convergeThinkingLevel,
   thinkingLevelsForProtocol,
@@ -60,14 +61,40 @@ function parseOptionalNumber(raw: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
+/** upsertModelService 的输入类型（renderer 只走 bridge，不碰文件系统/凭据文件）。 */
+type ModelServiceUpsertInput = Parameters<SoulForgeApi['upsertModelService']>[0];
+
+/** 表单字段快照：debounce 触发时与卸载 flush 时从 ref 读，避免闭包抓到旧值。 */
+interface FormSnapshot {
+  displayName: string;
+  protocol: 'openai-compatible' | 'anthropic-compatible';
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  thinkingLevel: ModelThinkingLevel;
+  contextWindowTokens: string;
+  maxTokens: string;
+  temperature: string;
+  topP: string;
+  topK: string;
+  embeddingModel: string;
+}
+
+/** 自动保存防抖间隔（输入停止后 400–600ms 再写，避免每个按键打 IPC）。 */
+const AUTO_SAVE_DEBOUNCE_MS = 450;
+
 /**
  * 模型服务设置：只展示 hasCredential，密钥仅在保存时一次性交给 main 加密。
  * 保存、删除与脱敏 DTO 契约不变；browser-preview 表面返回可见诊断。
  *
- * 高级选项（思考强度 / 上下文长度 / 输出长度 / temperature / topP / topK）
- * 默认收起，点击「高级选项」展开；未填写的项不随保存下发，运行时用
- * provider 默认值。模型名支持「获取模型列表」从服务 API 拉取（GET /v1/models），
- * 失败时仍可手动输入。
+ * 2-A：思考强度锁官方 effort 表（OpenAI 全档 / Anthropic 官方表，无 budget 数字）。
+ *
+ * 2-E：会写入服务配置的字段（protocol/baseUrl/model/displayName/apiKey/数字/effort）
+ * 做 400–600ms debounce 自动 save()：输入停止后再写，不每个按键打 IPC。
+ * 硬约束：baseUrl 为空不 upsert；apiKey 为空不传（不得用 '' 覆盖已加密凭据）；
+ * 校验失败（temperature 越界等）不写盘、保留 setStatus 错误；关抽屉/切走前 flush
+ * 一次未写完的 debounce。成功后状态文案一行「已自动保存：<displayName>」，不模态、
+ * 不 toast 刷屏。renderer 只走 bridge.upsertModelService，不碰真实绝对路径。
  */
 export interface ModelServiceSettingsPanelProps {
   /** S25：页脚「取消」= 关闭设置视图（AgentSecondaryDrawer 传入）。 */
@@ -99,6 +126,42 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
 
+  // 2-E：本表单会话已创建/更新的服务 id。自动保存与手动保存共用它，避免同一表单
+  // 反复保存时在 vault 里堆出一串同内容的新配置（后续保存带 id = 更新而不是新建）。
+  const savedIdRef = useRef<string | null>(null);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 最新表单值快照：debounce 触发与卸载 flush 时从这里读，闭包不抓旧 state。
+  const formRef = useRef<FormSnapshot>({
+    displayName: '模型服务',
+    protocol: 'openai-compatible',
+    baseUrl: '',
+    model: '',
+    apiKey: '',
+    thinkingLevel: 'off',
+    contextWindowTokens: '',
+    maxTokens: '',
+    temperature: '',
+    topP: '',
+    topK: '',
+    embeddingModel: ''
+  });
+  useEffect(() => {
+    formRef.current = {
+      displayName,
+      protocol,
+      baseUrl,
+      model,
+      apiKey,
+      thinkingLevel,
+      contextWindowTokens,
+      maxTokens,
+      temperature,
+      topP,
+      topK,
+      embeddingModel
+    };
+  });
+
   async function refresh(): Promise<void> {
     if (!bridge) {
       setStatus(describeBridgeAbsence('模型服务管理'));
@@ -118,8 +181,111 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
     });
   }, []);
 
+  /**
+   * 校验并构造 upsert 载荷。校验失败返回 null：已留下 setStatus 错误文案，不写盘。
+   * apiKey 为空时不带 apiKey 字段（绝不把 '' 覆盖到已加密凭据上）。
+   */
+  function buildSavePayload(values: FormSnapshot): ModelServiceUpsertInput | null {
+    const parsedTemperature = parseOptionalNumber(values.temperature);
+    if (parsedTemperature !== undefined && (parsedTemperature < 0 || parsedTemperature > 2)) {
+      setStatus('temperature 需在 0–2 之间。');
+      return null;
+    }
+    const parsedTopP = parseOptionalNumber(values.topP);
+    if (parsedTopP !== undefined && (parsedTopP < 0 || parsedTopP > 1)) {
+      setStatus('topP 需在 0–1 之间。');
+      return null;
+    }
+    const parsedTopK = parseOptionalNumber(values.topK);
+    if (parsedTopK !== undefined && parsedTopK < 1) {
+      setStatus('topK 需 ≥ 1。');
+      return null;
+    }
+    const parsedMaxTokens = parseOptionalNumber(values.maxTokens);
+    if (parsedMaxTokens !== undefined && parsedMaxTokens < 1) {
+      setStatus('输出长度需 ≥ 1。');
+      return null;
+    }
+    const parsedContextWindow = parseOptionalNumber(values.contextWindowTokens);
+    if (parsedContextWindow !== undefined && parsedContextWindow < 1) {
+      setStatus('上下文长度需 ≥ 1。');
+      return null;
+    }
+    return {
+      ...(savedIdRef.current !== null ? { id: savedIdRef.current } : {}),
+      displayName: values.displayName,
+      protocol: values.protocol,
+      baseUrl: values.baseUrl,
+      model: values.model,
+      ...(values.apiKey ? { apiKey: values.apiKey } : {}),
+      ...(parsedTemperature !== undefined ? { temperature: parsedTemperature } : {}),
+      ...(parsedTopP !== undefined ? { topP: parsedTopP } : {}),
+      ...(parsedTopK !== undefined ? { topK: parsedTopK } : {}),
+      ...(parsedMaxTokens !== undefined ? { maxTokens: parsedMaxTokens } : {}),
+      ...(parsedContextWindow !== undefined ? { contextWindowTokens: parsedContextWindow } : {}),
+      ...(values.thinkingLevel !== 'off' ? { thinkingLevel: values.thinkingLevel } : {}),
+      ...(values.embeddingModel.trim() !== '' ? { embeddingModel: values.embeddingModel.trim() } : {})
+    };
+  }
+
+  async function runSave(payload: ModelServiceUpsertInput): Promise<void> {
+    if (!bridge || !payload) return;
+    try {
+      const saved = await bridge.upsertModelService(payload);
+      savedIdRef.current = saved.id;
+      setStatus(`已自动保存：${saved.displayName}`);
+      await refresh();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '自动保存失败');
+    }
+  }
+
+  /** 2-E：立即 flush 一次未写完的 debounce（读最新表单快照，校验失败不写盘）。 */
+  function flushAutoSave(): void {
+    if (autoSaveTimerRef.current !== null) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    const values = formRef.current;
+    if (values.baseUrl.trim() === '') return; // baseUrl 空不 upsert（避免存一堆空服务）。
+    const payload = buildSavePayload(values);
+    if (payload === null) return; // 校验失败：保留 setStatus 错误，不写盘。
+    void runSave(payload);
+  }
+
+  /** 2-E：对写入配置的字段做 debounce 自动保存（输入停止 AUTO_SAVE_DEBOUNCE_MS 后再写）。 */
+  function scheduleAutoSave(): void {
+    if (autoSaveTimerRef.current !== null) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      flushAutoSave();
+    }, AUTO_SAVE_DEBOUNCE_MS);
+  }
+
+  // 2-E：卸载（取消 / 关抽屉 / 切视图）前 flush 一次未写完的 debounce，否则用户填完
+  // 立刻关还会丢。依赖为空数组：只在这个 effect 卸载时跑，读 formRef 拿最新值。
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimerRef.current !== null) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+        const values = formRef.current;
+        if (values.baseUrl.trim() === '') return;
+        const payload = buildSavePayload(values);
+        if (payload === null) return;
+        void runSave(payload);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** S25：重置 = 表单回到初值并从 main 重读已存服务（未保存的草稿丢弃）。 */
   function reset(): void {
+    if (autoSaveTimerRef.current !== null) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    savedIdRef.current = null;
     setDisplayName('模型服务');
     setProtocol('openai-compatible');
     setBaseUrl('');
@@ -170,51 +336,21 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
     }
   }
 
+  /** 手动「保存」= 立即 flush（自动保存的另一触发点是防抖内的每字段改动）。 */
   async function save(): Promise<void> {
     if (!bridge) {
       setStatus(describeBridgeAbsence('保存模型服务'));
       return;
     }
-    const parsedTemperature = parseOptionalNumber(temperature);
-    if (parsedTemperature !== undefined && (parsedTemperature < 0 || parsedTemperature > 2)) {
-      setStatus('temperature 需在 0–2 之间。');
-      return;
+    if (autoSaveTimerRef.current !== null) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
     }
-    const parsedTopP = parseOptionalNumber(topP);
-    if (parsedTopP !== undefined && (parsedTopP < 0 || parsedTopP > 1)) {
-      setStatus('topP 需在 0–1 之间。');
-      return;
-    }
-    const parsedTopK = parseOptionalNumber(topK);
-    if (parsedTopK !== undefined && parsedTopK < 1) {
-      setStatus('topK 需 ≥ 1。');
-      return;
-    }
-    const parsedMaxTokens = parseOptionalNumber(maxTokens);
-    if (parsedMaxTokens !== undefined && parsedMaxTokens < 1) {
-      setStatus('输出长度需 ≥ 1。');
-      return;
-    }
-    const parsedContextWindow = parseOptionalNumber(contextWindowTokens);
-    if (parsedContextWindow !== undefined && parsedContextWindow < 1) {
-      setStatus('上下文长度需 ≥ 1。');
-      return;
-    }
+    const payload = buildSavePayload(formRef.current);
+    if (payload === null) return;
     try {
-      const saved = await bridge.upsertModelService({
-        displayName,
-        protocol,
-        baseUrl,
-        model,
-        ...(apiKey ? { apiKey } : {}),
-        ...(parsedTemperature !== undefined ? { temperature: parsedTemperature } : {}),
-        ...(parsedTopP !== undefined ? { topP: parsedTopP } : {}),
-        ...(parsedTopK !== undefined ? { topK: parsedTopK } : {}),
-        ...(parsedMaxTokens !== undefined ? { maxTokens: parsedMaxTokens } : {}),
-        ...(parsedContextWindow !== undefined ? { contextWindowTokens: parsedContextWindow } : {}),
-        ...(thinkingLevel !== 'off' ? { thinkingLevel } : {}),
-        ...(embeddingModel.trim() !== '' ? { embeddingModel: embeddingModel.trim() } : {})
-      });
+      const saved = await bridge.upsertModelService(payload);
+      savedIdRef.current = saved.id;
       setApiKey('');
       setStatus(`已保存模型服务：${saved.displayName}（凭据=${saved.hasCredential ? '已加密' : '无'}）`);
       await refresh();
@@ -273,8 +409,9 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
             onChange={(e) => {
               const next = e.target.value as 'openai-compatible' | 'anthropic-compatible';
               setProtocol(next);
-              // 8-C：换协议时收敛非法档（如 Anthropic 的 extreme → OpenAI 的 High）。
+              // 2-A：换协议时收敛非法档（如 Anthropic 没有的 none/minimal → medium）。
               setThinkingLevel((level) => convergeThinkingLevel(level, next));
+              scheduleAutoSave();
             }}
           >
             <option value="openai-compatible">OpenAI 兼容</option>
@@ -283,13 +420,23 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
         </label>
         <label>
           服务地址
-          <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="http://127.0.0.1:11434" />
+          <input
+            value={baseUrl}
+            onChange={(e) => {
+              setBaseUrl(e.target.value);
+              scheduleAutoSave();
+            }}
+            placeholder="http://127.0.0.1:11434"
+          />
         </label>
         <label>
           模型 ID
           <input
             value={model}
-            onChange={(e) => setModel(e.target.value)}
+            onChange={(e) => {
+              setModel(e.target.value);
+              scheduleAutoSave();
+            }}
             placeholder="gpt-4.1"
           />
         </label>
@@ -306,7 +453,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                 <button
                   type="button"
                   className={id === model ? 'is-selected' : undefined}
-                  onClick={() => setModel(id)}
+                  onClick={() => {
+                    setModel(id);
+                    scheduleAutoSave();
+                  }}
                 >
                   {id}
                 </button>
@@ -316,14 +466,23 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
         )}
         <label>
           显示名称
-          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+          <input
+            value={displayName}
+            onChange={(e) => {
+              setDisplayName(e.target.value);
+              scheduleAutoSave();
+            }}
+          />
         </label>
         <label>
           API 密钥（仅写入，不回显）
           <input
             type="password"
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => {
+              setApiKey(e.target.value);
+              scheduleAutoSave();
+            }}
             autoComplete="off"
           />
         </label>
@@ -331,11 +490,14 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
           <summary>高级选项</summary>
           <div className="stack gap">
             <label>
-              思考强度（服务级默认）
+              effort（服务级默认）
               <select
-                aria-label="思考强度"
+                aria-label="effort"
                 value={thinkingLevel}
-                onChange={(e) => setThinkingLevel(e.target.value as ModelThinkingLevel)}
+                onChange={(e) => {
+                  setThinkingLevel(e.target.value as ModelThinkingLevel);
+                  scheduleAutoSave();
+                }}
               >
                 {thinkingLevelsForProtocol(protocol).map((level) => (
                   <option key={level} value={level}>{thinkingLevelLabel(level, protocol)}</option>
@@ -344,9 +506,9 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
             </label>
             <p className="muted">
               {protocol === 'anthropic-compatible'
-                ? 'Anthropic protocol: thinking budget_tokens = 2048 / 4096 / 8192 / 16384.'
-                : 'OpenAI protocol: reasoning_effort = low / medium / high (deep/extreme both map to high).'}
-              {' '}旧模型不支持 thinking 参数，请保持「关闭」（Off）。
+                ? 'Anthropic protocol: output_config.effort = low / medium / high / xhigh / max.'
+                : 'OpenAI protocol: reasoning_effort = none / minimal / low / medium / high / xhigh / max.'}
+              {' '}型号是否支持某一档由服务端决定；「off」= 字段不下发。
             </p>
             <label>
               上下文长度（token）
@@ -355,7 +517,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                 min={1}
                 step={1}
                 value={contextWindowTokens}
-                onChange={(e) => setContextWindowTokens(e.target.value)}
+                onChange={(e) => {
+                  setContextWindowTokens(e.target.value);
+                  scheduleAutoSave();
+                }}
                 placeholder="不填则不限"
               />
             </label>
@@ -367,7 +532,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                 min={1}
                 step={1}
                 value={maxTokens}
-                onChange={(e) => setMaxTokens(e.target.value)}
+                onChange={(e) => {
+                  setMaxTokens(e.target.value);
+                  scheduleAutoSave();
+                }}
                 placeholder="不填用 provider 默认"
               />
             </label>
@@ -379,7 +547,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                 max={2}
                 step={0.1}
                 value={temperature}
-                onChange={(e) => setTemperature(e.target.value)}
+                onChange={(e) => {
+                  setTemperature(e.target.value);
+                  scheduleAutoSave();
+                }}
                 placeholder="0 – 2"
               />
             </label>
@@ -391,7 +562,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                 max={1}
                 step={0.05}
                 value={topP}
-                onChange={(e) => setTopP(e.target.value)}
+                onChange={(e) => {
+                  setTopP(e.target.value);
+                  scheduleAutoSave();
+                }}
                 placeholder="0 – 1"
               />
             </label>
@@ -402,7 +576,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                 min={1}
                 step={1}
                 value={topK}
-                onChange={(e) => setTopK(e.target.value)}
+                onChange={(e) => {
+                  setTopK(e.target.value);
+                  scheduleAutoSave();
+                }}
                 placeholder="≥ 1"
               />
             </label>
@@ -411,7 +588,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
               Embedding 模型
               <input
                 value={embeddingModel}
-                onChange={(e) => setEmbeddingModel(e.target.value)}
+                onChange={(e) => {
+                  setEmbeddingModel(e.target.value);
+                  scheduleAutoSave();
+                }}
                 placeholder="不填则不启用语义检索"
               />
             </label>
