@@ -1659,6 +1659,21 @@ function registerFixtureIpc() {
     return { ok: true, data: { ...doc }, diagnostics: [] };
   });
 
+  // 问题4-C：词条详情参数体拉取（合成 stub）。fixture 无 DSAS 模板目录 → 走
+  // 「未解码 + hex」边界：fields 空、undecodedHex 非空，让 e2e 断言「参数体
+  // 未解码边界必须明示（不伪装成完整解析）」成立。
+  handleTrusted('resource.readTaeEventParams', (_event, sourceUri, animId, eventIndex) => ({
+    ok: true,
+    data: {
+      eventTypeId: animId === 0 && eventIndex === 0 ? 1 : 7,
+      templateName: null,
+      fields: [],
+      tailHex: null,
+      undecodedHex: '48 00 00 00 4C 00 00 00'
+    },
+    diagnostics: []
+  }));
+
   // ANIMATION-56B：TAE 事件时间/新增写回（合成内存态，明确标记 synthetic）。
   // update-event-times 按 animId + eventIndex 命中 events 就地更新 startTime/endTime；
   // insert-event 以 templateEventIndex 为模板，eventTypeId 必须一致（C# fail-closed），

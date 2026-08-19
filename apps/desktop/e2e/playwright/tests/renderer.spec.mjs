@@ -549,21 +549,21 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   // 选中动画 0 → 中栏词条事件列表。
   await left.getByRole('row', { name: /a0000/ }).click();
   await expect(middle.getByText(/词条 · 动画 0/)).toBeVisible();
-  await expect(middle.getByRole('row', { name: /事件类型 1/ })).toBeVisible();
+  await expect(middle.getByRole('row', { name: /1 未命名/ })).toBeVisible();
   // 问题4-C：词条行 meta 是帧区间（主单位帧）。
   await expect(middle.getByRole('row', { name: /帧 0–30/ })).toBeVisible();
 
   // 问题4-C：选中词条事件 → 详情收在 Events 栏下半（可关抽屉），只留一套起始/结束帧。
-  await middle.getByRole('row', { name: /事件类型 1/ }).click();
+  await middle.getByRole('row', { name: /1 未命名/ }).click();
   const details = window.getByTestId('tae-details');
   await expect(details).toBeVisible();
   // 起始帧 / 结束帧各出现一次（主单位帧，旁边小字 ≈ 秒）。
   await expect(details.getByText('起始帧')).toHaveCount(1);
   await expect(details.getByText('结束帧')).toHaveCount(1);
-  await expect(details.getByText('事件类型')).toBeVisible();
+  await expect(details.getByText('事件类型', { exact: true })).toBeVisible();
   await expect(details.getByText('事件下标')).toBeVisible();
   // 事件参数体未解码边界必须明示（不伪装成完整解析）。
-  await expect(details.getByText('参数体')).toBeVisible();
+  await expect(details.getByText('参数体', { exact: true })).toBeVisible();
   await expect(details.getByText(/未解码/)).toBeVisible();
 
   // 右栏是只读预览空态 + 诊断（不挂伴生 chrbnd 的 FLVER）。
@@ -578,7 +578,7 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(window.getByTestId('tae-details')).toHaveCount(0);
 
   // ANIMATION-56C event write：详情里的时间编辑入口——输入按帧编辑，提交 /30 换秒。
-  await middle.getByRole('row', { name: /事件类型 1/ }).click();
+  await middle.getByRole('row', { name: /1 未命名/ }).click();
   await expect(window.getByTestId('tae-event-editor')).toBeVisible();
   const startInput = window.getByLabel('新起始帧');
   await expect(startInput).toHaveValue('0');
