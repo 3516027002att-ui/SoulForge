@@ -104,9 +104,10 @@ describe('ESD 状态组表全量渲染（问题 5：显示不再设限）', () =
   });
 
   it('全量渲染所有状态组行（DOM 一次全给，栏自己滚动，不做条数上限）', () => {
-    // renderToStaticMarkup 把 className prop 输出为 class 属性。
-    const rows = [...html.matchAll(/class="[^"]*wb-row/g)].length;
-    assert.ok(rows >= total, `实际渲染 ${rows} 行 wb-row，不得低于总数 ${total}`);
+    // 精确数「状态组 N」行（renderToStaticMarkup 输出 class 属性，且 wb-row__name/
+    // meta 会污染宽泛的 class 计数，必须按文本锚定到行本身）。
+    const rows = [...html.matchAll(/状态组 \d+?<\/span>/g)].length;
+    assert.ok(rows >= total, `实际渲染 ${rows} 行状态组，不得低于总数 ${total}`);
   });
 });
 
