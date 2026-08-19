@@ -160,11 +160,15 @@ function recommendTools(prompt: string, tools: ToolDescriptor[], mode: AiPermiss
 
   if (lower.includes('map') || lower.includes('地图') || lower.includes('msb') || lower.includes('entity') || lower.includes('区域')) {
     names.add('search_map_entities');
+    names.add('read_msb_parts');
+    names.add('mutate_msb_part_transform');
   }
 
   if (lower.includes('动作') || lower.includes('tae') || lower.includes('anibnd') || lower.includes('词条')
     || /c\d{4}/.test(lower) || /a\d{4}/.test(lower)) {
     names.add('search_tae_events');
+    names.add('read_tae_events');
+    names.add('mutate_tae_event_times');
   }
 
   if (lower.includes('param') || lower.includes('参数') || lower.includes('speffect') || lower.includes('goods')
@@ -221,6 +225,10 @@ function reasonForTool(name: string): string {
     explain_event: '生成证据优先的事件解释输入。',
     search_map_entities: '查找地图实体、区域和可见命名候选。',
     search_tae_events: '按动作地址（cXXXX#AXXXX.eN）或 SoundID 查找 TAE 词条。',
+    read_tae_events: '按地址（c1050#A0200.e0）读 TAE 词条的帧/时间与已解码字段。',
+    mutate_tae_event_times: '按地址改 TAE 词条起始/结束帧，经 Patch Engine 提交。',
+    read_msb_parts: '按地址（m11_01_00_00#c1050_0000）读 MSB part 的位置/旋转/缩放。',
+    mutate_msb_part_transform: '按地址改 MSB part 变换，经 Patch Engine 提交。',
     search_param_rows: '查找参数行候选或已确认行。',
     read_param_fields: '读取容器内 PARAM 的 live 字段值。',
     mutate_param_fields: '按绝对值改 PARAM 字段并经 Patch Engine 提交。',

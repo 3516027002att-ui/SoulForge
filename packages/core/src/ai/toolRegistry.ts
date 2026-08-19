@@ -24,6 +24,8 @@ import { nativeEditSessionFromContext } from '../editing/nativeEditSession.js';
 import { readParamFields, setParamFields, type ParamFieldEdit } from '../param/containerParamEdit.js';
 import { readFmgEntries, setFmgEntries, type FmgEntryEdit } from '../editing/fmgEdit.js';
 import { applyEmevdDsl, readEmevdOutline } from '../editing/emevdEdit.js';
+import { readTaeEvents, setTaeEventTimes } from '../editing/taeEdit.js';
+import { readMsbParts, setMsbPartTransform, type MsbPartTransformEdit } from '../editing/msbEdit.js';
 import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
 import { buildRagCorpus } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
@@ -920,6 +922,91 @@ export function createDefaultToolRegistry(): ToolRegistry {
   });
 
   registry.register({
+    name: 'read_tae_events',
+    description: 'Read TAE animation events by address strings (c1050#A0200.e0; one per file). '
+      + 'Events live inside anibnd; do not unpack BND or treat anibnd as text.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { file: 'string', /* 可选地址过滤 */ addresses: 'array?' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const addresses = asStringList(value.addresses);
+      if (!file) return fail('INVALID_INPUT', 'read_tae_events 需要 file。');
+      const result = await readTaeEvents({ edit: edit.session, file, ...(addresses.length > 0 ? { addresses } : {}) });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'mutate_tae_event_times',
+    description: 'Set TAE event start/end frames through Patch Engine (write-tae-document '
+      + 'update-event-times). edits: [{ address: c1050#A0200.e0, startFrame?, endFrame? }]. '
+      + 'Frames are 30fps; converting to seconds happens in the facade. Undecoded param fields are not settable.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: { file: 'string', edits: 'array' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const edits = asTaeTimeEdits(value.edits);
+      if (!file) return fail('INVALID_INPUT', 'mutate_tae_event_times 需要 file。');
+      if (!edits.ok) return fail(edits.code, edits.message);
+      if (edits.edits.length === 0) return fail('INVALID_INPUT', 'mutate_tae_event_times 需要非空 edits 数组。');
+      const result = await setTaeEventTimes({ edit: edit.session, file, edits: edits.edits });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'read_msb_parts',
+    description: 'Read MSB map parts by address strings (m11_01_00_00#c1050_0000; one per file). '
+      + 'Returns part position/rotation/scale. Do not feed msb to propose_text_patch.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { file: 'string', /* 可选地址过滤 */ addresses: 'array?' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const addresses = asStringList(value.addresses);
+      if (!file) return fail('INVALID_INPUT', 'read_msb_parts 需要 file。');
+      const result = await readMsbParts({ edit: edit.session, file, ...(addresses.length > 0 ? { addresses } : {}) });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'mutate_msb_part_transform',
+    description: 'Set MSB part position/rotation/scale through Patch Engine (write-msb '
+      + 'msb_set_part_position / msb_set_part_transform). edits: [{ address: m11_01_00_00#c1050_0000, posX?, posY?, posZ?, rotX?, rotY?, rotZ?, scaleX?, scaleY?, scaleZ? }].',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: { file: 'string', edits: 'array' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const edits = asMsbTransformEdits(value.edits);
+      if (!file) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要 file。');
+      if (!edits.ok) return fail(edits.code, edits.message);
+      if (edits.edits.length === 0) return fail('INVALID_INPUT', 'mutate_msb_part_transform 需要非空 edits 数组。');
+      const result = await setMsbPartTransform({ edit: edit.session, file, edits: edits.edits });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      return ok(result);
+    }
+  });
+
+  registry.register({
     name: 'commit_patch',
     description: 'Commit a PatchProposal through Patch Engine (staging, backup, hash check, rollback metadata). '
       + 'Pass the object returned by propose_text_patch. Does not write until the user approves in the Agent panel.',
@@ -1157,6 +1244,12 @@ function nativeFormatHint(targetUri: string, targetPath: string): string | null 
   if (/\.emevd(\.dcx)?(\b|$)/.test(haystack)) {
     return '这是 EMEVD 事件，请用 apply_emevd_dsl，不要把二进制当文本补丁。';
   }
+  if (/\.(anibnd|tae)(\.dcx)?(\b|$)/.test(haystack)) {
+    return '这是 TAE 动作文档，请用 read_tae_events / mutate_tae_event_times，不要把 anibnd/tae 当文本补丁。';
+  }
+  if (/\.msb(\.dcx)?(\b|$)/.test(haystack)) {
+    return '这是 MSB 地图文档，请用 read_msb_parts / mutate_msb_part_transform，不要把 msb 当文本补丁。';
+  }
   if (/\.(dcx|bnd)\b/.test(haystack)) {
     return '这是打包原生格式，禁止 propose_text_patch。请用对应的 PARAM / FMG / EMEVD / 明文脚本门面。';
   }
@@ -1214,6 +1307,60 @@ function asFmgEdits(value: unknown): { ok: true; edits: FmgEntryEdit[] } | { ok:
       return { ok: false, code: 'INVALID_INPUT', message: `${table}#${id} 的 text 必须是字符串。` };
     }
     edits.push({ table, id, text });
+  }
+  return { ok: true, edits };
+}
+
+function asTaeTimeEdits(value: unknown): { ok: true; edits: Array<{ address: string; startFrame?: number; endFrame?: number }> } | { ok: false; code: string; message: string } {
+  if (!Array.isArray(value)) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_tae_event_times 的 edits 必须是数组。' };
+  }
+  const edits: Array<{ address: string; startFrame?: number; endFrame?: number }> = [];
+  for (const item of value) {
+    const record = asRecord(item);
+    const address = asString(record.address);
+    if (!address) {
+      return { ok: false, code: 'INVALID_INPUT', message: '每条 edit 需要 address（格式 c1050#A0200.e0）。' };
+    }
+    const edit: { address: string; startFrame?: number; endFrame?: number } = { address };
+    if (record.startFrame !== undefined) {
+      const frame = asNumber(record.startFrame, Number.NaN);
+      if (!Number.isFinite(frame)) return { ok: false, code: 'INVALID_INPUT', message: `${address}.startFrame 必须是有限数字。` };
+      edit.startFrame = frame;
+    }
+    if (record.endFrame !== undefined) {
+      const frame = asNumber(record.endFrame, Number.NaN);
+      if (!Number.isFinite(frame)) return { ok: false, code: 'INVALID_INPUT', message: `${address}.endFrame 必须是有限数字。` };
+      edit.endFrame = frame;
+    }
+    edits.push(edit);
+  }
+  return { ok: true, edits };
+}
+
+const MSB_TRANSFORM_FIELDS = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ', 'scaleX', 'scaleY', 'scaleZ'] as const;
+
+function asMsbTransformEdits(value: unknown): { ok: true; edits: MsbPartTransformEdit[] } | { ok: false; code: string; message: string } {
+  if (!Array.isArray(value)) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_msb_part_transform 的 edits 必须是数组。' };
+  }
+  const edits: MsbPartTransformEdit[] = [];
+  for (const item of value) {
+    const record = asRecord(item);
+    const address = asString(record.address);
+    if (!address) {
+      return { ok: false, code: 'INVALID_INPUT', message: '每条 edit 需要 address（格式 m11_01_00_00#c1050_0000）。' };
+    }
+    const edit: MsbPartTransformEdit = { address };
+    for (const field of MSB_TRANSFORM_FIELDS) {
+      if (record[field] === undefined) continue;
+      const raw = record[field];
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+        return { ok: false, code: 'INVALID_INPUT', message: `${address}.${field} 必须是有限数字。` };
+      }
+      Object.assign(edit, { [field]: raw });
+    }
+    edits.push(edit);
   }
   return { ok: true, edits };
 }

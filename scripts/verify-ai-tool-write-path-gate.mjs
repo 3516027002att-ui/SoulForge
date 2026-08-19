@@ -55,7 +55,13 @@ const CONTROLLED_ENTRIES = Object.freeze([
   // fs.writeFile Mod 资源。
   'setParamFields',
   'setFmgEntries',
-  'applyEmevdDsl'
+  'applyEmevdDsl',
+  // TAE / MSB 门面（问题 6-F）：mutate_tae_event_times → setTaeEventTimes（包
+  // write-tae-document update-event-times）、mutate_msb_part_transform →
+  // setMsbPartTransform（包 write-msb），落盘均经 applyNativeMutation → Patch
+  // Engine，定义在 editing/ 下，不直接写盘。
+  'setTaeEventTimes',
+  'setMsbPartTransform'
 ]);
 
 /** 禁止在注册表里直接出现的写盘调用。 */

@@ -5,6 +5,8 @@
  *   node scripts/sf-edit.mjs param read|set ...
  *   node scripts/sf-edit.mjs fmg   read|set ...
  *   node scripts/sf-edit.mjs emevd read|apply-dsl ...
+ *   node scripts/sf-edit.mjs tae   read|set --file chr/c1050.anibnd.dcx --set c1050#A0200.e0.startFrame=438
+ *   node scripts/sf-edit.mjs msb   read|set --file map/m11_01_00_00/m11_01_00_00.msb.dcx --set m11_01_00_00#c1050_0000.posX=12.5
  */
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -13,9 +15,15 @@ import { applyEmevdDsl, readEmevdOutline } from '../packages/core/dist/editing/e
 import { openNativeEditSession } from '../packages/core/dist/editing/nativeEditSession.js';
 import { readFmgEntries, setFmgEntries } from '../packages/core/dist/editing/fmgEdit.js';
 import { readParamFields, setParamFields } from '../packages/core/dist/param/containerParamEdit.js';
+import { readTaeEvents, setTaeEventTimes } from '../packages/core/dist/editing/taeEdit.js';
+import { readMsbParts, setMsbPartTransform } from '../packages/core/dist/editing/msbEdit.js';
 
 const PARAM_SET_RE = /^([^#]+)#(\d+)\.([A-Za-z0-9_]+)=(.*)$/u;
 const FMG_SET_RE = /^([^#]+)#(\d+)=(.*)$/u;
+const TAE_SET_RE = /^(c\d{4}#A\d+\.e\d+)\.([A-Za-z0-9_]+)=(.*)$/u;
+const MSB_SET_RE = /^(m\d{2}_\d{2}_\d{2}_\d{2}#[^.\s]+)\.([A-Za-z0-9_]+)=(.*)$/u;
+const TAE_SETTABLE_FIELDS = ['startFrame', 'endFrame'];
+const MSB_TRANSFORM_FIELDS = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ', 'scaleX', 'scaleY', 'scaleZ'];
 
 function fail(code, message, extra) {
   console.log(JSON.stringify({ ok: false, error: { code, message }, ...extra }, null, 2));
@@ -98,6 +106,42 @@ function parseFmgSets(flags) {
   return edits;
 }
 
+function parseTaeSets(flags) {
+  const edits = [];
+  for (const raw of flagStrings(flags, 'set')) {
+    const match = TAE_SET_RE.exec(raw);
+    if (!match) {
+      fail('TAE_SET_SYNTAX', `无法解析 --set ${raw}，格式为 cXXXX#AXXXX.eN.startFrame=帧`);
+      return null;
+    }
+    const field = match[2];
+    if (!TAE_SETTABLE_FIELDS.includes(field)) {
+      fail('TAE_SET_FIELD_READONLY', `TAE 门面只开放 ${TAE_SETTABLE_FIELDS.join(' / ')}（未解码参数不开放 set）：${field}`);
+      return null;
+    }
+    edits.push({ address: match[1], [field]: Number(match[3]) });
+  }
+  return edits;
+}
+
+function parseMsbSets(flags) {
+  const edits = [];
+  for (const raw of flagStrings(flags, 'set')) {
+    const match = MSB_SET_RE.exec(raw);
+    if (!match) {
+      fail('MSB_SET_SYNTAX', `无法解析 --set ${raw}，格式为 mAA_BB_CC_DD#part.posX=值`);
+      return null;
+    }
+    const field = match[2];
+    if (!MSB_TRANSFORM_FIELDS.includes(field)) {
+      fail('MSB_SET_FIELD_UNKNOWN', `MSB 门面只接受变换字段 ${MSB_TRANSFORM_FIELDS.join(' / ')}：${field}`);
+      return null;
+    }
+    edits.push({ address: match[1], [field]: Number(match[3]) });
+  }
+  return edits;
+}
+
 function printResult(result) {
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
@@ -108,10 +152,12 @@ async function main() {
   const kind = argv[0];
   const action = argv[1];
   const { flags } = argMap(argv.slice(2));
-  const usage = '用法: node scripts/sf-edit.mjs param|fmg|emevd <read|set|apply-dsl> --workspace <mods> ...';
-  if ((kind !== 'param' && kind !== 'fmg' && kind !== 'emevd')
-    || (kind !== 'emevd' && action !== 'read' && action !== 'set')
-    || (kind === 'emevd' && action !== 'read' && action !== 'apply-dsl')) {
+  const usage = '用法: node scripts/sf-edit.mjs param|fmg|emevd|tae|msb <read|set|apply-dsl> --workspace <mods> ...';
+  const kindOk = ['param', 'fmg', 'emevd', 'tae', 'msb'].includes(kind);
+  const actionOk = kind === 'emevd'
+    ? (action === 'read' || action === 'apply-dsl')
+    : (action === 'read' || action === 'set');
+  if (!kindOk || !actionOk) {
     fail('SF_EDIT_USAGE', usage);
     return;
   }
@@ -182,6 +228,46 @@ async function main() {
       ...(containerPath ? { containerPath } : {}),
       ...(lang ? { lang } : {})
     }));
+    return;
+  }
+  if (kind === 'tae') {
+    const file = flags.get('file');
+    if (typeof file !== 'string' || file.length === 0) {
+      fail('SF_EDIT_FILE_REQUIRED', 'tae 需要 --file（anibnd，如 chr/c1050.anibnd.dcx）。');
+      return;
+    }
+    if (action === 'read') {
+      const addresses = asList(flags.get('addr'));
+      printResult(await readTaeEvents({ edit, file, ...(addresses.length > 0 ? { addresses } : {}) }));
+      return;
+    }
+    const edits = parseTaeSets(flags);
+    if (!edits) return;
+    if (edits.length === 0) {
+      fail('TAE_EDIT_EMPTY', 'tae set 需要 --set cXXXX#AXXXX.eN.startFrame=帧');
+      return;
+    }
+    printResult(await setTaeEventTimes({ edit, file, edits }));
+    return;
+  }
+  if (kind === 'msb') {
+    const file = flags.get('file');
+    if (typeof file !== 'string' || file.length === 0) {
+      fail('SF_EDIT_FILE_REQUIRED', 'msb 需要 --file（msb，如 map/m11_01_00_00/m11_01_00_00.msb.dcx）。');
+      return;
+    }
+    if (action === 'read') {
+      const addresses = asList(flags.get('addr'));
+      printResult(await readMsbParts({ edit, file, ...(addresses.length > 0 ? { addresses } : {}) }));
+      return;
+    }
+    const edits = parseMsbSets(flags);
+    if (!edits) return;
+    if (edits.length === 0) {
+      fail('MSB_EDIT_EMPTY', 'msb set 需要 --set mAA_BB_CC_DD#part.posX=值');
+      return;
+    }
+    printResult(await setMsbPartTransform({ edit, file, edits }));
     return;
   }
   const file = flags.get('file');
