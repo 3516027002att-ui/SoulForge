@@ -59,15 +59,7 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
     return first ? { view: 'flow', eventUri: first } : { view: 'flow' };
   });
   const [status, setStatus] = useState('就绪');
-  // Event list is paged (hard constraint 17: large tables must not be
-  // materialized in one render pass).
-  const EVENTS_PAGE_SIZE = 200;
-  const [eventsPage, setEventsPage] = useState(0);
-  const eventPageCount = Math.max(1, Math.ceil(document.events.length / EVENTS_PAGE_SIZE));
-  const pageEvents = document.events.slice(
-    eventsPage * EVENTS_PAGE_SIZE,
-    Math.min((eventsPage + 1) * EVENTS_PAGE_SIZE, document.events.length)
-  );
+  // Event list rendered in full (问题 5：显示不设限，不再按 200 一页切)。
   const [dslEdit, setDslEdit] = useState<string | null>(null);
   const [submittingDsl, setSubmittingDsl] = useState(false);
 
@@ -89,8 +81,6 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
   }
 
   function selectEvent(eventUri: string): void {
-    const index = document.events.findIndex((event) => event.eventUri === eventUri);
-    if (index >= 0) setEventsPage(Math.floor(index / EVENTS_PAGE_SIZE));
     setSelection((prev) => ({ ...prev, eventUri, view: prev.view === 'bytes' ? 'bytes' : prev.view }));
   }
 
@@ -161,7 +151,7 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
 
       {selection.view === 'flow' && (
         <ul className="list">
-          {pageEvents.map((event) => (
+          {document.events.map((event) => (
             <li key={event.eventUri}>
               <button type="button" onClick={() => selectEvent(event.eventUri)}>
                 事件 {event.eventId} · rest={event.restBehavior} · {event.instructions.length} 指令
@@ -180,7 +170,7 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
             <span>URI</span>
           </div>
           {/* 行选择必须键盘可达：四视图的指令/字节视图都以选中事件为前提。 */}
-          {pageEvents.map((event, rowIndex) => (
+          {document.events.map((event, rowIndex) => (
             <div
               key={event.eventUri}
               className="binder-child-row"
@@ -196,30 +186,6 @@ export function EmevdFourViewPanel(props: EmevdFourViewPanelProps): ReactElement
               <span title={event.eventUri}>{event.eventUri.slice(-24)}</span>
             </div>
           ))}
-        </div>
-      )}
-
-      {(selection.view === 'flow' || selection.view === 'table') && document.events.length > EVENTS_PAGE_SIZE && (
-        <div className="row gap">
-          <button
-            type="button"
-            disabled={eventsPage <= 0}
-            onClick={() => setEventsPage((page) => Math.max(0, page - 1))}
-          >
-            上一页
-          </button>
-          <span className="muted">
-            事件 {eventsPage * EVENTS_PAGE_SIZE + 1}–
-            {Math.min((eventsPage + 1) * EVENTS_PAGE_SIZE, document.events.length)} / {document.events.length}
-            （每页 {EVENTS_PAGE_SIZE}）
-          </span>
-          <button
-            type="button"
-            disabled={eventsPage >= eventPageCount - 1}
-            onClick={() => setEventsPage((page) => Math.min(eventPageCount - 1, page + 1))}
-          >
-            下一页
-          </button>
         </div>
       )}
 

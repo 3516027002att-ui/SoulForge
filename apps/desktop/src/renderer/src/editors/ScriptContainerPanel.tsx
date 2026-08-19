@@ -112,15 +112,12 @@ function buildScriptEditorExtensions(
 
 export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactElement {
   const [mode, setMode] = useState<'container' | 'standalone' | null>(null);
-  /** Paginated entry table served by `resource.listScriptContainerEntriesPage`. */
-  const [pageEntries, setPageEntries] = useState<ScriptContainerEntryEvidence[]>([]);
-  const [page, setPage] = useState(0);
-  const [pageCount, setPageCount] = useState(1);
+  /** 全部容器条目：跨页累积后的全量列表（显示不设限，栏自己滚动）。 */
+  const [entries, setEntries] = useState<ScriptContainerEntryEvidence[]>([]);
   const [entryCount, setEntryCount] = useState(0);
-  const [pageSummary, setPageSummary] = useState<Record<string, number> | null>(null);
+  const [classificationSummary, setClassificationSummary] = useState<Record<string, number> | null>(null);
   const [entriesComplete, setEntriesComplete] = useState(true);
-  const [pageLoading, setPageLoading] = useState(false);
-  const [pageError, setPageError] = useState<string | null>(null);
+  const [entriesError, setEntriesError] = useState<string | null>(null);
   /** 当前选中的容器条目（index 是读链主键，不打码后的名字）。 */
   const [selectedEntry, setSelectedEntry] = useState<{ name: string; index: number } | null>(null);
   /** 当前展示的源码视图。 */
@@ -147,10 +144,10 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
     setDirtyState(value);
   }
 
-  /* ── 形态识别：容器（分页条目表）还是独立脚本文件（单 Source） ──── */
+  /* ── 形态识别：容器（全量条目表）还是独立脚本文件（单 Source） ──── */
   const probeMode = useCallback(async (): Promise<void> => {
     setMode(null);
-    setPageError(null);
+    setEntriesError(null);
     // 独立 .hks / .lua 单文件：按后缀直接 standalone，不对单文件调分页通道
     // （避免「仅部分条目」「输入不是容器」的误探测，见问题 13 截图 2）。
     const rawUri = props.resourceUri.toLowerCase();
@@ -167,20 +164,31 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
       const result = await bridge.listScriptContainerEntriesPage(props.resourceUri, 0, SCRIPT_PAGE_SIZE);
       if (result.ok && result.containerFormat !== 'unknown') {
         setMode('container');
-        setPageEntries(result.entries);
-        setPage(result.page);
-        setPageCount(result.pageCount);
         setEntryCount(result.entryCount);
-        setPageSummary(result.classificationSummary);
+        setClassificationSummary(result.classificationSummary);
         setEntriesComplete(result.entriesComplete);
-        setPageError(firstPageError(result.diagnostics));
+        setEntriesError(firstPageError(result.diagnostics));
+        // 运输分页：一页装不下时按页取，但显示层看到的必须是全表 —— 把其余页
+        // 累积成一份完整列表，再一次 map 全量渲染（显示不设限，栏自己滚动）。
+        let all: ScriptContainerEntryEvidence[] = [...result.entries];
+        if (result.pageCount > 1) {
+          for (let nextPage = 1; nextPage < result.pageCount; nextPage += 1) {
+            const page = await bridge.listScriptContainerEntriesPage(props.resourceUri, nextPage, SCRIPT_PAGE_SIZE);
+            if (!page.ok) {
+              setEntriesError(page.diagnostics?.[0]?.message ?? '脚本容器条目分页读取失败。');
+              break;
+            }
+            all = [...all, ...page.entries];
+          }
+        }
+        setEntries(all);
       } else {
         setMode('standalone');
       }
     } catch (error) {
       // 反编译入口优先：容器探测失败按独立文件尝试，读不出再报错。
       setMode('standalone');
-      setPageError(error instanceof Error ? error.message : '脚本资源形态识别异常。');
+      setEntriesError(error instanceof Error ? error.message : '脚本资源形态识别异常。');
     }
   }, [props.resourceUri, bridge]);
 
@@ -309,48 +317,6 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
 
   submitRef.current = () => { void submitSource(); };
 
-  /* ── 分页 ─────────────────────────────────────────────────────── */
-  const loadPage = useCallback(async (targetPage: number): Promise<void> => {
-    if (bridge === null || typeof bridge.listScriptContainerEntriesPage !== 'function') return;
-    setPageLoading(true);
-    setPageError(null);
-    try {
-      const result = await bridge.listScriptContainerEntriesPage(
-        props.resourceUri,
-        targetPage,
-        SCRIPT_PAGE_SIZE
-      );
-      if (result.ok) {
-        setPageEntries(result.entries);
-        setPage(result.page);
-        setPageCount(result.pageCount);
-        setEntryCount(result.entryCount);
-        setPageSummary(result.classificationSummary);
-        setEntriesComplete(result.entriesComplete);
-        setPageError(firstPageError(result.diagnostics));
-      } else {
-        setPageEntries([]);
-        setPageError(result.diagnostics?.[0]?.message ?? '脚本容器条目分页读取失败。');
-      }
-    } catch (error) {
-      setPageEntries([]);
-      setPageError(error instanceof Error ? error.message : '脚本容器条目分页读取异常。');
-    } finally {
-      setPageLoading(false);
-    }
-  }, [props.resourceUri, bridge]);
-
-  async function changePage(next: number): Promise<void> {
-    if (dirtyRef.current
-      && !window.confirm('当前脚本有未保存修改，翻页将丢失这些修改。继续翻页？')) {
-      return;
-    }
-    setSelectedEntry(null);
-    setSource(null);
-    setStatus('');
-    await loadPage(next);
-  }
-
   function selectEntry(entry: { name: string; index: number }): void {
     if (selectedEntry
       && entry.name === selectedEntry.name
@@ -367,16 +333,16 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
   }
 
   const summaryChips = useMemo(() => {
-    if (!pageSummary) return [];
+    if (!classificationSummary) return [];
     return SCRIPT_CLASSIFICATION_ORDER
-      .filter((classification) => (pageSummary[classification] ?? 0) > 0)
+      .filter((classification) => (classificationSummary[classification] ?? 0) > 0)
       .map((classification) => ({
         classification,
-        count: pageSummary[classification] ?? 0
+        count: classificationSummary[classification] ?? 0
       }));
-  }, [pageSummary]);
+  }, [classificationSummary]);
 
-  /* ── 左栏：Files（容器条目分页表）────────────────────────────── */
+  /* ── 左栏：Files（容器条目全量表）────────────────────────────── */
   const filesColumn = (
     <div className="stack gap script-files">
       <div className="native-chip-row">
@@ -388,29 +354,14 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
         {summaryChips.length === 0 && <span className="muted">无分类统计</span>}
       </div>
       <div className="row gap pager">
-        <button
-          type="button"
-          disabled={page <= 0 || pageLoading}
-          onClick={() => void changePage(page - 1)}
-        >
-          上一页
-        </button>
-        <span className="muted">{pageCount > 0 ? page + 1 : 0}/{pageCount}</span>
-        <button
-          type="button"
-          disabled={page >= pageCount - 1 || pageLoading}
-          onClick={() => void changePage(page + 1)}
-        >
-          下一页
-        </button>
-        {pageLoading && <span className="muted">加载中…</span>}
+        <span className="muted">{entryCount > 0 ? `共 ${entryCount} 条条目` : ''}</span>
       </div>
       {!entriesComplete && (
         <p className="muted">仅部分条目（不是完整列表）。</p>
       )}
-      {pageError && <p className="danger">{pageError}</p>}
-      {!pageLoading && !pageError && pageEntries.length === 0 && (
-        <p className="muted">当前页无条目。</p>
+      {entriesError && <p className="danger">{entriesError}</p>}
+      {!entriesError && entries.length === 0 && (
+        <p className="muted">无条目。</p>
       )}
       <div className="script-entry-table" role="table">
         <div className="script-entry-row script-entry-header" role="row">
@@ -419,7 +370,7 @@ export function ScriptContainerPanel(props: ScriptContainerPanelProps): ReactEle
           <span>大小</span>
           <span>索引</span>
         </div>
-        {pageEntries.map((entry, rowIndex) => (
+        {entries.map((entry, rowIndex) => (
           <div
             key={`${entry.index}-${entry.name}`}
             className={entry.index === selectedEntry?.index

@@ -83,12 +83,9 @@ interface ContainerDiagnosticsView {
  */
 export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement {
   const [root, setRoot] = useState<RendererContainerTreeSummary | null>(null);
-  const [pageChildren, setPageChildren] = useState<RendererContainerChild[]>([]);
+  /** 全部子项：跨页累积后的一次全量列表（显示不设限，栏自己滚动）。 */
+  const [children, setChildren] = useState<RendererContainerChild[]>([]);
   const [totalChildren, setTotalChildren] = useState(0);
-  const [page, setPage] = useState(0);
-  const [pageCount, setPageCount] = useState(1);
-  const [pageLoading, setPageLoading] = useState(false);
-  const [pageError, setPageError] = useState<string | null>(null);
   const [listDiagnostics, setListDiagnostics] = useState<Diagnostic[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -105,8 +102,6 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   const [replaceBytes, setReplaceBytes] = useState('');
   const [replacing, setReplacing] = useState(false);
   const [replaceResult, setReplaceResult] = useState<ReplaceResultView | null>(null);
-  /** 分页通道缺失时的降级说明。为 null 表示正常分页路径。 */
-  const [degraded, setDegraded] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<ContainerDiagnosticsView | null>(null);
 
   /**
@@ -158,9 +153,10 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   }, [props.resourceUri]);
 
   /*
-   * 页大小（硬约束 17）来自 @soulforge/shared，与主进程
+   * 页大小（跨进程运输契约）来自 @soulforge/shared，与主进程
    * `resource.listContainerChildrenPage` 同一常量——此前是函数体内的局部
-   * 字面量 50，与主进程各写一遍。
+   * 字面量 50，与主进程各写一遍。本组件保留按页取（BND 一帧装不下时按页取），
+   * 但会把全部页累积成一份完整列表再渲染——显示层看到的必须是全表。
    */
 
   const bridge = getRendererBridge();
@@ -168,25 +164,21 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   const load = useCallback(async (): Promise<void> => {
     if (!props.resourceUri) {
       setRoot(null);
-      setPageChildren([]);
+      setChildren([]);
       setTotalChildren(0);
-      setPage(0);
-      setPageCount(1);
       setListDiagnostics([]);
       setLoadError(null);
-      setDegraded(null);
       return;
     }
     if (bridge === null) {
       setRoot(null);
-      setPageChildren([]);
+      setChildren([]);
       setTotalChildren(0);
       setLoadError(describeBridgeAbsence('读取 BND4 容器'));
       return;
     }
     setLoading(true);
     setLoadError(null);
-    setDegraded(null);
     try {
       const treePromise = bridge.inspectContainerTree(props.resourceUri);
       const pagePromise = typeof bridge.listContainerChildrenPage === 'function'
@@ -195,45 +187,42 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
       const [tree, firstPage] = await Promise.all([treePromise, pagePromise]);
       setRoot(tree);
       if (firstPage && firstPage.ok) {
-        setPageChildren(firstPage.children);
-        setTotalChildren(firstPage.totalCount);
-        setPageCount(firstPage.pageCount);
-        setPage(firstPage.page);
+        // 运输分页：跨页累积全部子项（第一页 + 其余页），再一次 map 全量渲染。
+        let all: RendererContainerChild[] = [...firstPage.children];
+        if (firstPage.pageCount > 1) {
+          try {
+            for (let nextPage = 1; nextPage < firstPage.pageCount; nextPage += 1) {
+              const page = await bridge.listContainerChildrenPage(
+                props.resourceUri,
+                nextPage,
+                CONTAINER_PAGE_SIZE,
+                false
+              );
+              if (!page.ok) {
+                setListDiagnostics(page.diagnostics ?? []);
+                break;
+              }
+              all = [...all, ...page.children];
+            }
+          } catch (error) {
+            setListDiagnostics([{
+              severity: 'error',
+              code: 'CHILD_PAGE_ACCUMULATE',
+              message: error instanceof Error ? error.message : '子项分页累积异常。'
+            }]);
+          }
+        }
+        setChildren(all);
+        setTotalChildren(firstPage.totalCount ?? all.length);
         setListDiagnostics([...(tree.diagnostics ?? []), ...(firstPage.diagnostics ?? [])]);
-        if (!tree.ok && firstPage.children.length === 0) {
+        if (!tree.ok && all.length === 0) {
           setLoadError(tree.diagnostics?.[0]?.message ?? '容器读取失败。');
         }
       } else {
-        // 分页通道不可用：退回全量列表，但**真实截断到一页**并显式说明。
-        //
-        // 此前这里把全量结果整块塞进 pageChildren，同时按 ceil(len/PAGE) 算出
-        // pageCount 照常渲染翻页按钮——而 changePage 在该路径开头就 return。
-        // 结果是「按钮可见但点不动」，且首屏一次性渲染全部子项（大容器可达数千
-        // 条 DOM）。两个问题都不会报错，用户只看到界面卡住且翻页无反应。
-        //
-        // 硬约束 17 要求大规模访问必须分页；分页通道缺失时正确的降级是「少给、
-        // 说清」，不是「全给、装作能翻页」。
+        // 分页通道不可用：退回全量读取，同一次渲染全部子项（不再截断到一页）。
         const list = await bridge.listContainerChildren(props.resourceUri);
-        const truncated = list.children.length > CONTAINER_PAGE_SIZE;
-        setPageChildren(list.children.slice(0, CONTAINER_PAGE_SIZE));
+        setChildren(list.children);
         setTotalChildren(list.children.length);
-        // pageCount=1：翻页按钮据此禁用，不再出现点不动的控件。
-        setPageCount(1);
-        setPage(0);
-        /*
-         * 只在真的看不到全部子项时提示，且不提「分页通道」。
-         *
-         * 此前无论截断与否都显示「分页通道不可用：…」——未截断时那句话没有任何
-         * 用户价值：数据全在，只是内部走了另一条读取路径。用户实测截图里正是这句
-         * 占着主区（「分页通道不可用：已退回全量读取（本容器子项数未超过单页）」），
-         * 而它既不说明问题也不给出动作。
-         *
-         * 截断是真需要告知的（否则用户把部分当全部），但措辞要说清后果而不是
-         * 内部原因：用户要知道的是「还有多少没显示」，不是哪条通道不可用。
-         */
-        setDegraded(truncated
-          ? `共 ${list.children.length} 个子项，当前仅显示前 ${CONTAINER_PAGE_SIZE} 个。`
-          : null);
         setListDiagnostics([...(tree.diagnostics ?? []), ...(list.diagnostics ?? [])]);
         if (!tree.ok && list.children.length === 0) {
           setLoadError(tree.diagnostics?.[0]?.message ?? '容器读取失败。');
@@ -241,7 +230,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
       }
     } catch (error) {
       setRoot(null);
-      setPageChildren([]);
+      setChildren([]);
       setTotalChildren(0);
       setLoadError(error instanceof Error ? error.message : '容器读取异常。');
     } finally {
@@ -249,39 +238,13 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
     }
   }, [props.resourceUri, bridge]);
 
-  async function changePage(next: number): Promise<void> {
-    if (bridge === null || typeof bridge.listContainerChildrenPage !== 'function') return;
-    setPageLoading(true);
-    setPageError(null);
-    try {
-      const result = await bridge.listContainerChildrenPage(
-        props.resourceUri,
-        next,
-        CONTAINER_PAGE_SIZE,
-        false
-      );
-      if (result.ok) {
-        setPageChildren(result.children);
-        setTotalChildren(result.totalCount);
-        setPageCount(result.pageCount);
-        setPage(result.page);
-      } else {
-        setPageError(result.diagnostics?.[0]?.message ?? '容器子项分页读取失败。');
-      }
-    } catch (error) {
-      setPageError(error instanceof Error ? error.message : '容器子项分页读取异常。');
-    } finally {
-      setPageLoading(false);
-    }
-  }
-
   useEffect(() => {
     void load();
   }, [load]);
 
   const selectedChild = useMemo(
-    () => pageChildren.find((child) => child.childUri === selectedChildUri) ?? null,
-    [pageChildren, selectedChildUri]
+    () => children.find((child) => child.childUri === selectedChildUri) ?? null,
+    [children, selectedChildUri]
   );
 
   /**
@@ -511,29 +474,11 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
   /* ── 中栏：Entries（稳定 child identity：childId + childUri）──────── */
   const entriesColumn = (
     <div className="stack gap">
-      {degraded !== null && <p className="muted">{degraded}</p>}
       <div className="row gap pager">
-        <button
-          type="button"
-          disabled={page <= 0 || pageLoading}
-          onClick={() => void changePage(page - 1)}
-        >
-          上一页
-        </button>
         <span className="muted">
-          {pageCount > 0 ? page + 1 : 0}/{pageCount}
-          {totalChildren > 0 && ` · 共 ${totalChildren} 项`}
+          {totalChildren > 0 && `共 ${totalChildren} 项`}
         </span>
-        <button
-          type="button"
-          disabled={page >= pageCount - 1 || pageLoading}
-          onClick={() => void changePage(page + 1)}
-        >
-          下一页
-        </button>
-        {pageLoading && <span className="muted">加载中…</span>}
       </div>
-      {pageError && <p className="danger">{pageError}</p>}
       <div className="binder-child-table script-entry-table" role="table">
         <div className="binder-child-row binder-child-header script-entry-row" role="row">
           <span>名称</span>
@@ -544,7 +489,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
           <span>嵌套</span>
           <span>替换</span>
         </div>
-        {pageChildren.map((child, rowIndex) => (
+        {children.map((child, rowIndex) => (
           <div
             key={child.childUri}
             className={child.childUri === selectedChildUri
@@ -567,7 +512,7 @@ export function Bnd4WorkbenchPanel(props: Bnd4WorkbenchPanelProps): ReactElement
             <span>{child.canReplace ? '可' : '只读'}</span>
           </div>
         ))}
-        {pageChildren.length === 0 && !loading && <p className="muted">无子项列表。</p>}
+        {children.length === 0 && !loading && <p className="muted">无子项列表。</p>}
       </div>
       {listDiagnostics.length > 0 && (
         <div className="save-diagnostics">

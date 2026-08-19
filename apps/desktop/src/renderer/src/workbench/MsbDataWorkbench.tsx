@@ -41,21 +41,11 @@ export interface MsbDataWorkbenchProps {
   categories: Array<{ id: string; label: string; entries: MsbEntryLike[] }>;
 }
 
-/**
- * 条目渲染上限。
- *
- * 硬约束 17：大表必须分页/虚拟化。真实 MSB 的 part 数可达数千，一次性建出
- * 全部行会让首屏卡顿。这里用分页而非虚拟滚动 —— 分页的实现面小得多，
- * 而本组件是只读浏览，不需要连续滚动的手感。
- */
-const ENTRY_PAGE_SIZE = 100;
-
 export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
   const [categoryId, setCategoryId] = useState<string | null>(
     props.categories.find((category) => category.entries.length > 0)?.id ?? null
   );
   const [entryFilter, setEntryFilter] = useState('');
-  const [entryPage, setEntryPage] = useState(0);
   const [selectedName, setSelectedName] = useState<string | null>(null);
 
   const activeCategory = useMemo(
@@ -69,13 +59,6 @@ export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
     if (!needle) return entries;
     return entries.filter((entry) => entry.name.toLowerCase().includes(needle));
   }, [activeCategory, entryFilter]);
-
-  const pageCount = Math.max(1, Math.ceil(filteredEntries.length / ENTRY_PAGE_SIZE));
-  const clampedPage = Math.min(entryPage, pageCount - 1);
-  const visibleEntries = useMemo(
-    () => filteredEntries.slice(clampedPage * ENTRY_PAGE_SIZE, (clampedPage + 1) * ENTRY_PAGE_SIZE),
-    [filteredEntries, clampedPage]
-  );
 
   const selectedEntry = useMemo(
     () => filteredEntries.find((entry) => entry.name === selectedName) ?? null,
@@ -103,7 +86,6 @@ export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
                 isTabEntry: isRowTabEntry(index, categoryId !== null),
                 onSelect: () => {
                   setCategoryId(category.id);
-                  setEntryPage(0);
                   setEntryFilter('');
                   setSelectedName(null);
                 }
@@ -132,32 +114,14 @@ export function MsbDataWorkbench(props: MsbDataWorkbenchProps): ReactElement {
                   value={entryFilter}
                   onChange={(event) => {
                     setEntryFilter(event.target.value);
-                    setEntryPage(0);
                   }}
                   placeholder="筛选条目名"
                   aria-label={`筛选 ${activeCategory.label} 条目`}
                   style={{ width: '100%' }}
                 />
               </div>
-              {pageCount > 1 && (
-                <div style={{ padding: '0 8px 4px', display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <button
-                    type="button"
-                    className="secondary-action"
-                    disabled={clampedPage <= 0}
-                    onClick={() => setEntryPage((page) => Math.max(0, page - 1))}
-                  >上一页</button>
-                  <span className="muted" style={{ fontSize: 11 }}>{clampedPage + 1}/{pageCount}</span>
-                  <button
-                    type="button"
-                    className="secondary-action"
-                    disabled={clampedPage >= pageCount - 1}
-                    onClick={() => setEntryPage((page) => page + 1)}
-                  >下一页</button>
-                </div>
-              )}
-              {visibleEntries.length === 0 && <p className="wb-empty">无匹配条目。</p>}
-              {visibleEntries.map((entry, index) => (
+              {filteredEntries.length === 0 && <p className="wb-empty">无匹配条目。</p>}
+              {filteredEntries.map((entry, index) => (
                 <div
                   key={`${entry.name}:${index}`}
                   className="wb-row"
