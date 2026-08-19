@@ -590,6 +590,32 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await app.close();
 });
 
+test('问题4-D：动作工作台动画长列表全量渲染，栏内可滚到最后一条', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 长列表 fixture：213 个动画（超旧 ANIMATION_RENDER_LIMIT=200，硬规则 10 不许砍、
+  // 不许虚拟滚动）。
+  await selectFileItem(window, 'action/c9999.tae');
+  await expect(window.getByLabel('动作工作台')).toBeVisible();
+
+  const left = window.getByRole('region', { name: 'Animations' });
+  // 栏头 hint 报真实总数（213 animations），不是被砍掉的 200。
+  await expect(left.getByText('213 animations')).toBeVisible();
+  // 全量渲染：Animations 栏里 213 个动画行都进 DOM，不许 slice(0, 200)。
+  await expect(left.getByRole('row')).toHaveCount(213);
+  // 行主标签是完整 hkx 茎（a999_000000…），不是裁成首字母的 `a`。
+  await expect(left.getByRole('row', { name: /a999_000000/ })).toBeVisible();
+  // 栏内能滚到最后一条（213 条的最后），证明列表没有被砍掉末尾。
+  // scrollIntoViewIfNeeded 在 overflow-y:auto 的列表容器里把末行滚进视口。
+  const lastRow = left.getByRole('row', { name: /a999_000212/ });
+  await lastRow.scrollIntoViewIfNeeded();
+  await expect(lastRow).toBeVisible();
+
+  await window.screenshot({ path: 'test-results/18d-tae-long-list.png' });
+  await app.close();
+});
+
 test('anibnd 容器打开走动作工作台：不落 BND4 容器页，提取来源诊断可见', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);

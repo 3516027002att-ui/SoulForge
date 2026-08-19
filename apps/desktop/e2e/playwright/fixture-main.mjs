@@ -67,6 +67,9 @@ const fixtureFiles = [
   // menu 容器的载体（左栏 menu 组下面的 menu.fmg 真空表）。
   makeFile({ dir: 'msg', name: 'menu.msgbnd.dcx', kind: 'msg', formatKind: 'fmg', formatLabel: 'FMG', extension: '.dcx', compoundExtension: '.msgbnd.dcx' }),
   makeFile({ dir: 'action', name: 'c0000.tae', kind: 'action', formatKind: 'unknown', formatLabel: 'TAE', extension: '.tae', compoundExtension: '.tae' }),
+  // 问题4-D：长列表 fixture（213 个动画，超旧 ANIMATION_RENDER_LIMIT=200），
+  // 驱动「动画列表全量渲染、栏内滚到最后一条」的 e2e 断言（硬规则 10 不许砍）。
+  makeFile({ dir: 'action', name: 'c9999.tae', kind: 'action', formatKind: 'unknown', formatLabel: 'TAE', extension: '.tae', compoundExtension: '.tae' }),
   makeFile({ dir: 'ai', name: 'm10.aibnd.dcx', kind: 'ai', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.aibnd.dcx' }),
   makeFile({ dir: 'sfx', name: 'f0000.sfxbnd.dcx', kind: 'sfx', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.sfxbnd.dcx' }),
   makeFile({ dir: 'chr', name: 'sample.chrbnd.dcx', kind: 'chr', formatKind: 'bnd', formatLabel: 'BND4', extension: '.dcx', compoundExtension: '.chrbnd.dcx' }),
@@ -1606,6 +1609,36 @@ function registerFixtureIpc() {
         message: '从 anibnd 容器提取 TAE（BND4 内 1 个 TAE 条目，本次打开 id=5000000）。hkx 未读取。',
         sourceUri: 'fixture://chr/c5030.anibnd.dcx'
       }],
+      authority: 'candidate'
+    },
+    // 问题4-D：长列表 TAE（213 动画，超旧 ANIMATION_RENDER_LIMIT=200）。标称
+    // animationsTruncated:false + animationCount 213，e2e 断言全量渲染且栏内能
+    // 滚到最后一条 a999_000212；列表被砍回 200 时此测试必须红。
+    'fixture://action/c9999.tae': {
+      format: 'TAE',
+      version: '0x20',
+      sourceSize: 65536,
+      sourceHash: 'fixture-tae-long-list-hash-0003',
+      animationCount: 213,
+      totalEventCount: 213,
+      totalGroupCount: 0,
+      animations: Array.from({ length: 213 }, (_unused, i) => ({
+        animId: i,
+        eventCount: 1,
+        groupCount: 0,
+        timesCount: 1,
+        hkxName: `a999_${String(i).padStart(6, '0')}.hkx`,
+        events: [{ startTime: 0, endTime: 1, eventTypeId: 5 }],
+        eventsTruncated: false
+      })),
+      animationsTruncated: false,
+      eventTypes: [5],
+      roundTrip: {
+        byteIdentical: true, semanticIdentical: true,
+        sourceHash: 'fixture-tae-long-list-hash-0003', rebuiltHash: 'fixture-tae-long-list-hash-0003',
+        animationCount: 213, totalEventCount: 213, totalGroupCount: 0
+      },
+      diagnostics: [],
       authority: 'candidate'
     }
   };
