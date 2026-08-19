@@ -61,16 +61,27 @@ async function closeAgentPanel(window) {
 async function openWorkspace(window) {
   await closeAgentPanel(window);
   await window.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
-  await expect(window.locator('.project-overview h1')).toHaveText('fixture-workspace');
+  // 问题 1：开始页只在无工作区出现；挂载完成信号改等标题栏 workspace-switcher
+  // 出现工作区名（旧判据 .project-overview h1 是有工作区后不再渲染的开始页）。
+  await expect(window.locator('.workspace-switcher__trigger'), { timeout: 20_000 }).toContainText('fixture-workspace');
   await expect(window.locator('.welcome__stats')).toContainText('已解析');
+}
+
+async function openEsdFile(window) {
+  // 问题 1/14：有工作区后侧栏不再渲染 .file-item（语义领域只列逻辑库），
+  // ai/m10.esd 非顶层领域，经 Ctrl+K 命令面板按相对路径打开（同 renderer.spec
+  // 的 selectFileItem）。
+  await closeAgentPanel(window);
+  await window.keyboard.press('Control+k');
+  await window.locator('.cmdk__input-wrap input').fill('ai/m10.esd');
+  await expect(window.locator('.cmdk-item').filter({ hasText: 'ai/m10.esd' })).toHaveCount(1);
+  await window.keyboard.press('Enter');
 }
 
 test('ESD 长列表：260 个状态组全量渲染，栏可滚到最后一条，无截断说明', async () => {
   const { app, window } = await launchApp();
   await openWorkspace(window);
-
-  await closeAgentPanel(window);
-  await window.locator('.file-item', { hasText: 'ai/m10.esd' }).click();
+  await openEsdFile(window);
   await expect(window.getByLabel('Behavior 工作台')).toBeVisible();
 
   const left = window.getByRole('region', { name: 'Files / Machines / States' });

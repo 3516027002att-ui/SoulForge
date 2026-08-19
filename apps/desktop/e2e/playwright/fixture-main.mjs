@@ -2256,6 +2256,55 @@ function registerFixtureIpc() {
       }]
     };
   });
+  // S16 脚本 IDE 走 readScriptSource（替代 readScriptEntryPlaintext）。
+  // fixture 镜像 ScriptSourceView：goal_list.lua 明文可编辑、battle.lua 是
+  // Lua 字节码，经 fixture 的假 DSLuaDecompiler 反编译为 Lua（同无反编译器
+  // 环境走 SCRIPT_DECOMPILER_NOT_FOUND 的结构化只读失败）。
+  handleTrusted('resource.readScriptSource', (_event, sourceUri, entryName) => {
+    if (entryName === 'goal_list.lua') {
+      return {
+        ok: true,
+        logicalName: 'goal_list.lua',
+        kind: 'plaintext',
+        sourceText: '-- SoulForge synthetic plaintext fixture (explicitly constructed)\r\n'
+          + '-- 目标列表示例：goal_list.lua\r\n'
+          + 'local goal = { name = "合成目标", id = 100 }\r\n',
+        encoding: 'utf8',
+        decompiled: false,
+        containerUri: sourceUri,
+        entryName: 'goal_list.lua',
+        writeSupported: true,
+        diagnostics: [{ severity: 'info', code: 'PLAINTEXT_CONFIRMED', message: '条目确认为明文。' }]
+      };
+    }
+    if (entryName === 'battle.lua') {
+      return {
+        ok: true,
+        logicalName: 'battle.lua',
+        kind: 'decompiled',
+        sourceText: 'function BattleStart()\n  SetHp(1000)\nend\n',
+        encoding: 'decompiled',
+        decompiled: true,
+        decompiler: 'DSLuaDecompiler v1.1.5 (fixture stub)',
+        containerUri: sourceUri,
+        entryName: 'battle.lua',
+        writeSupported: true,
+        diagnostics: []
+      };
+    }
+    return {
+      ok: false,
+      logicalName: entryName ?? 'script',
+      kind: 'failure',
+      containerUri: sourceUri,
+      entryName,
+      writeSupported: false,
+      diagnostics: [{
+        severity: 'error', code: 'SCRIPT_SOURCE_BYTECODE_UNSUPPORTED',
+        message: '该条目是其他类型字节码，fixture 无反编译器，只读。'
+      }]
+    };
+  });
   handleTrusted('operation.list', () => []);
   handleTrusted('operation.rollback', (_event, opId) => ({
     ok: false,
