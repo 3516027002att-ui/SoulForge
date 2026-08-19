@@ -65,7 +65,7 @@ const MODE_CEILINGS: ReadonlyArray<readonly [
   AiToolPermissionLevel
 ]> = [
   ['plan', 'validate'],
-  ['normal', 'validate'],
+  ['normal', 'commit'],
   ['fullPermission', 'rollback']
 ];
 
@@ -77,17 +77,11 @@ for (const [mode, ceiling] of MODE_CEILINGS) {
   );
 }
 
-// plan 与 normal 都不得允许 commit / rollback —— 这两级只能由 fullPermission
-// 打开，而即便打开也不能绕过 Patch Engine（硬约束 11，本文件不覆盖那一条）。
-for (const mode of ['plan', 'normal'] as const) {
-  for (const level of ['commit', 'rollback'] as const) {
-    check(
-      `ceiling/${mode}-denies-${level}`,
-      !isAiToolPermissionAllowed(level, mode),
-      `${mode} 模式不得允许 ${level}`
-    );
-  }
-}
+// plan 不得提交或回滚。normal（Edit）可提交，仍不得回滚。
+check('ceiling/plan-denies-commit', !isAiToolPermissionAllowed('commit', 'plan'));
+check('ceiling/plan-denies-rollback', !isAiToolPermissionAllowed('rollback', 'plan'));
+check('ceiling/normal-allows-commit', isAiToolPermissionAllowed('commit', 'normal'));
+check('ceiling/normal-denies-rollback', !isAiToolPermissionAllowed('rollback', 'normal'));
 // fullPermission 必须允许全部级别，否则「完全权限」名不副实。
 for (const level of AI_TOOL_PERMISSION_ORDER) {
   check(

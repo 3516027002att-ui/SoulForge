@@ -2745,7 +2745,9 @@ export function App(): ReactElement {
       // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
       ...(agentResources.length > 0 ? { resources: agentResources } : {}),
       // S32：输入条的思考强度随任务提交（优先于服务级默认）。
-      thinkingLevel: aiThinking
+      thinkingLevel: aiThinking,
+      // Ask/Plan = 只读计划；Edit = 可经 Patch Engine 提交（仍要 Agent 审批卡）。
+      mode: agentInteractionMode === 'edit' ? 'normal' : 'plan'
     });
     if (!result.ok) {
       setAgentTask({

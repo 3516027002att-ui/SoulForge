@@ -175,6 +175,12 @@ async function runFoundationChecks(root: string): Promise<void> {
   if (isAiToolPermissionAllowed('commit', 'plan')) {
     throw new Error('Plan mode must not allow commit.');
   }
+  if (!isAiToolPermissionAllowed('commit', 'normal')) {
+    throw new Error('Normal / Edit mode should allow commit.');
+  }
+  if (isAiToolPermissionAllowed('rollback', 'normal')) {
+    throw new Error('Normal / Edit mode must not allow rollback.');
+  }
   if (!isAiToolPermissionAllowed('rollback', 'fullPermission')) {
     throw new Error('Full permission should allow rollback tools.');
   }

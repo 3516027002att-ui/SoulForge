@@ -50,7 +50,8 @@ const PERMISSION_RANK: Record<AiToolPermissionLevel, number> = {
  */
 export function maxPermissionForMode(mode: PatchMode | 'plan' | 'normal' | 'fullPermission'): AiToolPermissionLevel {
   if (mode === 'plan') return 'validate';
-  if (mode === 'normal') return 'validate';
+  // Edit / normal：可经 Patch Engine 提交，不可回滚。回滚仍只给 fullPermission。
+  if (mode === 'normal') return 'commit';
   return 'rollback';
 }
 

@@ -10053,6 +10053,27 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     {
       const rawExecuteTool = bridge.executeTool;
       bridge.executeTool = async (call) => {
+        if (call.name === 'commit_patch') {
+          if (!activeSession || !activeOperationLog) return rawExecuteTool(call);
+          const storage = durableStoragePaths(activeSession.meta.workspaceId);
+          const confirmation = createConfirmationReceipt({
+            subjects: [
+              'AGENT_COMMIT_APPROVED',
+              'ALL_RISKS',
+              ...(activeWorkspaceSessionId ? [`WORKSPACE_SESSION:${activeWorkspaceSessionId}`] : []),
+              'TITLE:commit_patch'
+            ],
+            riskLevel: 'high',
+            note: 'Agent 审批卡通过后签发的写入回执'
+          });
+          return rawExecuteTool(call, {
+            session: activeSession,
+            operationLogStore: activeOperationLog,
+            backupBaseDir: storage.backupBaseDir,
+            recoveryDir: storage.recoveryDir,
+            confirmation
+          });
+        }
         if (call.name !== 'rollback_operation') return rawExecuteTool(call);
         let input: Record<string, unknown> = {};
         try {
