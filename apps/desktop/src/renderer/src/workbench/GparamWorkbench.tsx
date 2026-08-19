@@ -58,8 +58,7 @@ export interface GparamWorkbenchProps {
   initialUri?: string;
 }
 
-/** 每栏分页大小：Groups/Params 数量随 bank 不同可达数百，硬约束 17 要求分页。 */
-const LIST_PAGE_SIZE = 60;
+/** Groups / Fields 全量渲染，由栏自身 overflow-y:auto 滚动承载，不做条数上限。 */
 
 /** bank 显示名：文件名去扩展，物理路径只在 title/details。 */
 function bankDisplayName(file: GparamBankView): string {
@@ -177,23 +176,12 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
     return () => { cancelled = true; };
   }, [bridge, selectedBankUri, refreshToken]);
 
-  // ── 本地分页（Groups / Fields 都可能有数百条）──
-  const [groupPage, setGroupPage] = useState(0);
-  const [fieldPage, setFieldPage] = useState(0);
-  useEffect(() => { setGroupPage(0); }, [selectedBankUri]);
-  useEffect(() => { setFieldPage(0); }, [selectedGroupId]);
-
   const groups = document?.groups ?? [];
-  const groupPageCount = Math.max(1, Math.ceil(groups.length / LIST_PAGE_SIZE));
-  const groupSlice = groups.slice(groupPage * LIST_PAGE_SIZE, (groupPage + 1) * LIST_PAGE_SIZE);
-
   const selectedGroup = useMemo(
     () => document?.groups.find((g) => g.groupId === selectedGroupId) ?? null,
     [document, selectedGroupId]
   );
   const fields = selectedGroup?.params ?? [];
-  const fieldPageCount = Math.max(1, Math.ceil(fields.length / LIST_PAGE_SIZE));
-  const fieldSlice = fields.slice(fieldPage * LIST_PAGE_SIZE, (fieldPage + 1) * LIST_PAGE_SIZE);
 
   const selectedParam = useMemo(
     () => selectedGroup?.params.find((p) => p.paramId === selectedParamId) ?? null,
@@ -314,7 +302,7 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
           {selectedBankUri !== null && !loading && !bankError && document === null && (
             <p className="wb-empty">这个 bank 读不出来。</p>
           )}
-          {selectedBankUri !== null && !loading && !bankError && document !== null && groupSlice.map((group, index) => (
+          {selectedBankUri !== null && !loading && !bankError && document !== null && groups.map((group, index) => (
             <div
               key={group.groupId}
               className="wb-row"
@@ -330,12 +318,8 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
               <span className="wb-row__meta">{group.paramCount} params</span>
             </div>
           ))}
-          {selectedBankUri !== null && !loading && !bankError && document !== null && groupPageCount > 1 && (
-            <div className="wb-pager">
-              <button type="button" disabled={groupPage === 0} onClick={() => setGroupPage(groupPage - 1)}>‹</button>
-              <span>{groupPage + 1}/{groupPageCount}</span>
-              <button type="button" disabled={groupPage >= groupPageCount - 1} onClick={() => setGroupPage(groupPage + 1)}>›</button>
-            </div>
+          {groups.length === 0 && selectedBankUri !== null && !loading && !bankError && document !== null && (
+            <p className="wb-empty">这个 bank 没有数据组。</p>
           )}
         </div>
       )
@@ -349,7 +333,7 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
       children: (
         <div className="wb-list">
           {selectedGroupId === null && <p className="wb-empty">先在中栏选择一个 group。</p>}
-          {selectedGroupId !== null && fieldSlice.map((param, index) => (
+          {selectedGroupId !== null && fields.map((param, index) => (
             <div
               key={param.paramId}
               className="wb-row"
@@ -365,12 +349,8 @@ export function GparamWorkbench(props: GparamWorkbenchProps): ReactElement {
               <span className="wb-row__meta">{param.type} · {param.valueCount} 值</span>
             </div>
           ))}
-          {selectedGroupId !== null && fieldPageCount > 1 && (
-            <div className="wb-pager">
-              <button type="button" disabled={fieldPage === 0} onClick={() => setFieldPage(fieldPage - 1)}>‹</button>
-              <span>{fieldPage + 1}/{fieldPageCount}</span>
-              <button type="button" disabled={fieldPage >= fieldPageCount - 1} onClick={() => setFieldPage(fieldPage + 1)}>›</button>
-            </div>
+          {selectedGroupId !== null && fields.length === 0 && (
+            <p className="wb-empty">这个 group 没有字段。</p>
           )}
         </div>
       )

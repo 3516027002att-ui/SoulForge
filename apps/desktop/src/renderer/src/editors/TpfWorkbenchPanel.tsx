@@ -39,7 +39,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
-import { formatListTruncation } from '../format/uiText.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { WorkbenchLayout, type WorkbenchColumnSpec } from '../workbench/WorkbenchLayout.js';
@@ -59,8 +58,7 @@ export interface TpfWorkbenchPanelProps {
   initialUri?: string;
 }
 
-/** 每栏分页大小：纹理数量随包不同可达数百，硬约束 17 要求分页。 */
-const LIST_PAGE_SIZE = 60;
+/** Textures 栏全量渲染，由栏自身 overflow-y:auto 滚动承载，不做条数上限。 */
 
 /** container 显示名：文件名去扩展，物理路径只在 title/details。 */
 function containerDisplayName(file: TpfContainerView): string {
@@ -371,14 +369,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
     return () => { cancelled = true; };
   }, [bridge, replaceSourceUri, ddsSources]);
 
-  // ── 本地分页（Textures 可能有数百条）──
-  const [texturePage, setTexturePage] = useState(0);
-  useEffect(() => { setTexturePage(0); }, [selectedContainerUri]);
-
   const textures = document?.textures ?? [];
-  const texturePageCount = Math.max(1, Math.ceil(textures.length / LIST_PAGE_SIZE));
-  const textureSlice = textures.slice(texturePage * LIST_PAGE_SIZE, (texturePage + 1) * LIST_PAGE_SIZE);
-
   const selectedTexture = useMemo(
     () => textures.find((tex) => tex.index === selectedTextureIndex) ?? null,
     [textures, selectedTextureIndex]
@@ -429,15 +420,6 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
       setReplaceSubmitting(false);
     }
   }, [bridge, document, selectedContainerUri, selectedTextureIndex, replaceSourceBase64, replaceSubmitting]);
-
-  // 截断说明：全量纹理数 vs 本页显示数。分页与截断是两层——这里只报
-  // 「还有多少没显示」，静默截断会让用户把部分数据当成全部。
-  const truncationNote = formatListTruncation({
-    total: textures.length,
-    shown: Math.min(textureSlice.length, LIST_PAGE_SIZE),
-    noun: '个纹理',
-    hint: '翻页查看其余纹理'
-  });
 
   const properties: Array<readonly [string, string]> = selectedTexture
     ? [
@@ -501,10 +483,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
           )}
           {selectedContainerUri !== null && !loading && !containerError && document !== null && (
             <>
-              {truncationNote && (
-                <p className="muted" data-testid="tpf-truncation">{truncationNote}</p>
-              )}
-              {textureSlice.map((tex, index) => (
+              {textures.map((tex, index) => (
                 <div
                   key={tex.index}
                   className="wb-row"
@@ -518,14 +497,7 @@ export function TpfWorkbenchPanel(props: TpfWorkbenchPanelProps): ReactElement {
                   <span className="wb-row__meta">{tex.width}×{tex.height} · {tex.ddsFourCC}</span>
                 </div>
               ))}
-              {textureSlice.length === 0 && <p className="wb-empty">这个容器没有纹理条目。</p>}
-              {texturePageCount > 1 && (
-                <div className="wb-pager">
-                  <button type="button" disabled={texturePage === 0} onClick={() => setTexturePage(texturePage - 1)}>‹</button>
-                  <span>{texturePage + 1}/{texturePageCount}</span>
-                  <button type="button" disabled={texturePage >= texturePageCount - 1} onClick={() => setTexturePage(texturePage + 1)}>›</button>
-                </div>
-              )}
+              {textures.length === 0 && <p className="wb-empty">这个容器没有纹理条目。</p>}
             </>
           )}
         </div>

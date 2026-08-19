@@ -232,9 +232,11 @@ describe('Negative source tests（BEHAVIOR-55B）', () => {
     assert.doesNotMatch(panelSource, /contentBase64|dataBase64|applyEsd/);
   });
 
-  it('截断说明走 formatListTruncation 且保留 esd-truncation testId', () => {
-    assert.match(panelSource, /formatListTruncation/);
-    assert.match(panelSource, /data-testid="esd-truncation"/);
+  it('列表全量渲染：不再 formatListTruncation 截断，也没有 esd-truncation testId（问题 5）', () => {
+    assert.doesNotMatch(panelSource, /formatListTruncation/);
+    assert.doesNotMatch(panelSource, /data-testid="esd-truncation"/);
+    assert.doesNotMatch(panelSource, /esd-conditions-truncation|esd-commands-truncation/);
+    assert.match(panelSource, /const visibleStateGroups = stateGroups;/);
   });
 });
 

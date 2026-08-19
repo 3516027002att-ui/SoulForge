@@ -63,9 +63,8 @@ function assertTruncationVisible(
   );
 }
 
-describe('ESD 状态组表超上限时渲染截断说明', () => {
+describe('ESD 状态组表全量渲染（问题 5：显示不再设限）', () => {
   const total = 260;
-  const shown = 200;
   const html = renderToStaticMarkup(
     <EsdWorkbenchPanel
       resourceUri="synthetic://esd"
@@ -99,13 +98,14 @@ describe('ESD 状态组表超上限时渲染截断说明', () => {
     />
   );
 
-  it('渲染出带真实数字的截断说明', () => {
-    assertTruncationVisible(html, { testId: 'esd-truncation', total, shown });
+  it('不再渲染截断说明：即使数据超过旧上限也没有 esd-truncation', () => {
+    assert.doesNotMatch(html, /data-testid="esd-truncation"/);
+    assert.doesNotMatch(html, /还?有.*条没|显示.*共|未显示/);
   });
 
-  it('只渲染上限条行，不是全量（DOM 规模必须被挡住）', () => {
-    const rows = [...html.matchAll(/<tr/g)].length;
-    assert.ok(rows <= shown + 1, `实际渲染 ${rows} 个 tr（含表头），不得接近 ${total}`);
+  it('全量渲染所有状态组行（DOM 一次全给，栏自己滚动，不做条数上限）', () => {
+    const rows = [...html.matchAll(/className="wb-row"/g)].length;
+    assert.ok(rows >= total, `实际渲染 ${rows} 行 wb-row，不得低于总数 ${total}`);
   });
 });
 

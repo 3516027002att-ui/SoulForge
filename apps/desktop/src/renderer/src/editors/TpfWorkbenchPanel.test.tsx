@@ -150,9 +150,11 @@ describe('Negative source tests（TEXTURE-52B）', () => {
     assert.doesNotMatch(workbenchSource, /previewFailure && \(\s*<div className="wb-list"/);
   });
 
-  it('截断说明走 formatListTruncation 且保留 tpf-truncation testId（listTruncation 契约）', () => {
-    assert.match(workbenchSource, /formatListTruncation/);
-    assert.match(workbenchSource, /data-testid="tpf-truncation"/);
+  it('纹理列表全量渲染：不再分页/截断，也没有 tpf-truncation testId（问题 5）', () => {
+    assert.doesNotMatch(workbenchSource, /formatListTruncation/);
+    assert.doesNotMatch(workbenchSource, /data-testid="tpf-truncation"/);
+    assert.doesNotMatch(workbenchSource, /LIST_PAGE_SIZE|textureSlice|wb-pager/);
+    assert.match(workbenchSource, /textures\.map\(\(tex, index\)/);
   });
 });
 
