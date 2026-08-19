@@ -291,15 +291,6 @@ export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
         </p>
       )}
       <div className="wb-props">
-        {/* TEMP NEGATIVE PERTURBATION: 把只读那对起始/结束帧加回去 */}
-        <div className="wb-prop">
-          <span className="wb-prop__name">起始帧</span>
-          <span className="wb-prop__value wb-prop__value--readonly">{secondsToFrame(event.startTime)}</span>
-        </div>
-        <div className="wb-prop">
-          <span className="wb-prop__name">结束帧</span>
-          <span className="wb-prop__value wb-prop__value--readonly">{secondsToFrame(event.endTime)}</span>
-        </div>
         <div className="wb-prop">
           <span className="wb-prop__name">起始帧</span>
           <span className="wb-prop__value">
