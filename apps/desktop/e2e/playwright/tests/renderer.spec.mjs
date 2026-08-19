@@ -549,21 +549,21 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   // 选中动画 0 → 中栏词条事件列表。
   await left.getByRole('row', { name: /a0000/ }).click();
   await expect(middle.getByText(/词条 · 动画 0/)).toBeVisible();
-  await expect(middle.getByRole('row', { name: /事件类型 1/ })).toBeVisible();
+  await expect(middle.getByRole('row', { name: /1 未命名/ })).toBeVisible();
   // 问题4-C：词条行 meta 是帧区间（主单位帧）。
   await expect(middle.getByRole('row', { name: /帧 0–30/ })).toBeVisible();
 
   // 问题4-C：选中词条事件 → 详情收在 Events 栏下半（可关抽屉），只留一套起始/结束帧。
-  await middle.getByRole('row', { name: /事件类型 1/ }).click();
+  await middle.getByRole('row', { name: /1 未命名/ }).click();
   const details = window.getByTestId('tae-details');
   await expect(details).toBeVisible();
   // 起始帧 / 结束帧各出现一次（主单位帧，旁边小字 ≈ 秒）。
   await expect(details.getByText('起始帧')).toHaveCount(1);
   await expect(details.getByText('结束帧')).toHaveCount(1);
-  await expect(details.getByText('事件类型')).toBeVisible();
+  await expect(details.getByText('事件类型', { exact: true })).toBeVisible();
   await expect(details.getByText('事件下标')).toBeVisible();
   // 事件参数体未解码边界必须明示（不伪装成完整解析）。
-  await expect(details.getByText('参数体')).toBeVisible();
+  await expect(details.getByText('参数体', { exact: true })).toBeVisible();
   await expect(details.getByText(/未解码/)).toBeVisible();
 
   // 右栏是只读预览空态 + 诊断（不挂伴生 chrbnd 的 FLVER）。
@@ -578,7 +578,7 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(window.getByTestId('tae-details')).toHaveCount(0);
 
   // ANIMATION-56C event write：详情里的时间编辑入口——输入按帧编辑，提交 /30 换秒。
-  await middle.getByRole('row', { name: /事件类型 1/ }).click();
+  await middle.getByRole('row', { name: /1 未命名/ }).click();
   await expect(window.getByTestId('tae-event-editor')).toBeVisible();
   const startInput = window.getByLabel('新起始帧');
   await expect(startInput).toHaveValue('0');
@@ -587,6 +587,32 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await expect(window.getByTestId('tae-write-notice')).toContainText('事件时间已更新并重读验证');
 
   await window.screenshot({ path: 'test-results/18-animation-workbench.png' });
+  await app.close();
+});
+
+test('问题4-D：动作工作台动画长列表全量渲染，栏内可滚到最后一条', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 长列表 fixture：213 个动画（超旧 ANIMATION_RENDER_LIMIT=200，硬规则 10 不许砍、
+  // 不许虚拟滚动）。
+  await selectFileItem(window, 'action/c9999.tae');
+  await expect(window.getByLabel('动作工作台')).toBeVisible();
+
+  const left = window.getByRole('region', { name: 'Animations' });
+  // 栏头 hint 报真实总数（213 animations），不是被砍掉的 200。
+  await expect(left.getByText('213 animations')).toBeVisible();
+  // 全量渲染：Animations 栏里 213 个动画行都进 DOM，不许 slice(0, 200)。
+  await expect(left.getByRole('row')).toHaveCount(213);
+  // 行主标签是完整 hkx 茎（a999_000000…），不是裁成首字母的 `a`。
+  await expect(left.getByRole('row', { name: /a999_000000/ })).toBeVisible();
+  // 栏内能滚到最后一条（213 条的最后），证明列表没有被砍掉末尾。
+  // scrollIntoViewIfNeeded 在 overflow-y:auto 的列表容器里把末行滚进视口。
+  const lastRow = left.getByRole('row', { name: /a999_000212/ });
+  await lastRow.scrollIntoViewIfNeeded();
+  await expect(lastRow).toBeVisible();
+
+  await window.screenshot({ path: 'test-results/18d-tae-long-list.png' });
   await app.close();
 });
 
@@ -2763,73 +2789,6 @@ test('S16 脚本 IDE：独立 .hks 单 Source，打开即反编译，Ctrl+S 应�
   await app.close();
 });
 
-
-test('动作工作台三栏（TAE）：动画 → 词条事件选择链，详情沉 footer，参数体按模板解码', async () => {
-  const { app, window } = await launchApp();
-  await openFixtureWorkspace(window);
-
-  // T3 / S17（2026-08-15）：行为 + 动画合并为「动作」。TAE 资源从开始侧栏资源树选择，
-  // 进入三栏动作工作台（Animations | 词条 | 预览（只读）），详情沉三栏底 footer。
-  await selectFileItem(window, 'action/c0000.tae');
-  // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
-  await expect(window.getByLabel('动作工作台')).toBeVisible();
-
-  // 三栏（grok T3，无 Inspector 第三栏 / 无 Tools 空栏 / 无时间轴图）。
-  await expect(window.getByRole('region', { name: 'Animations' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Events / 词条' })).toBeVisible();
-  await expect(window.getByRole('region', { name: '预览（只读）' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Inspector' })).toHaveCount(0);
-  await expect(window.getByRole('region', { name: 'Timeline / Events' })).toHaveCount(0);
-  await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
-
-  // 动画列表由 fixture envelope 的 pages 投影派生（不按 chr/action 目录分类）。
-  // S17：合法 hkx 茎用茎（a0000）；无 hkxName 回退 a000_+6 位 animId（禁止「动画 N」）。
-  const left = window.getByRole('region', { name: 'Animations' });
-  await expect(left.getByRole('row', { name: /a0000/ })).toBeVisible();
-  await expect(left.getByRole('row', { name: /a000_000001/ })).toBeVisible();
-  await expect(left.getByRole('row', { name: /动画 / })).toHaveCount(0);
-
-  // 未选中动画时中栏提示先选动画，不出事件行。
-  const middle = window.getByRole('region', { name: 'Events / 词条' });
-  await expect(window.getByTestId('tae-events-pick-animation')).toBeVisible();
-
-  // 选中动画 0 → 中栏词条事件列表：`{typeId} {类型名}`（无模板名显示「未命名」），
-  // 行内是帧元信息（S17 不再显示 0s → 1s）。
-  await left.getByRole('row', { name: /a0000/ }).click();
-  await expect(middle.getByText(/词条 · 动画 0/)).toBeVisible();
-  await expect(middle.getByRole('row', { name: /^1 / })).toBeVisible();
-  await expect(middle.getByRole('row', { name: /0 → 30 帧/ })).toBeVisible();
-
-  // 选中词条事件 → 三栏底 footer：起始帧/结束帧/完整类型/下标/参数字段。
-  await middle.getByRole('row', { name: /^1 / }).click();
-  const footer = window.getByTestId('tae-event-footer');
-  const footerMeta = footer.locator('.tae-footer__meta');
-  await expect(footerMeta.getByText(/起始帧/)).toBeVisible();
-  await expect(footerMeta.getByText(/结束帧/)).toBeVisible();
-  await expect(footerMeta.getByText(/事件下标 0/)).toBeVisible();
-  // 参数体按模板解码展示字段名+值；解不出时「未解码」+ hex 兜底（二者必居其一）。
-  const fields = window.getByTestId('tae-event-fields');
-  await expect(fields).toBeVisible();
-  await expect(fields.getByText('参数字段')).toBeVisible();
-
-  // 右栏：伴生 chrbnd 解析（fixture 工作区无模型且通常未挂原版）→ 诚实空态给下一步。
-  await expect(window.getByTestId('tae-chrbnd-absent')).toBeVisible();
-  await expect(window.getByTestId('tae-chrbnd-absent')).toContainText('chrbnd');
-  // 右栏始终只读：无输入、无按钮。
-  const preview = window.getByRole('region', { name: '预览（只读）' });
-  await expect(preview.locator('input, button')).toHaveCount(0);
-
-  // ANIMATION-56C event write（收进 footer）：帧编辑 → update-event-times（内部秒）。
-  await expect(window.getByTestId('tae-event-editor')).toBeVisible();
-  const startInput = window.getByLabel('新开始帧');
-  await expect(startInput).toHaveValue('0');
-  await startInput.fill('15');
-  await window.getByRole('button', { name: '更新事件时间' }).click();
-  await expect(window.getByTestId('tae-write-notice')).toContainText('事件时间已更新并重读验证');
-
-  await window.screenshot({ path: 'test-results/18-animation-workbench.png' });
-  await app.close();
-});
 
 
 test('S8：Agent dock 可缩到 96px（下限 96，上限 620，默认 440）', async () => {
