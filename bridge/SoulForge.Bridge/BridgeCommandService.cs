@@ -282,10 +282,22 @@ internal sealed class BridgeCommandService
                 // 全量载荷（用户裁定 2026-08-14）：打开表后一次加载全部行与行字节。
                 // 只对显式请求生效；缺省保持既有 32 行 / 512 KB 门控（守护进程帧上限）。
                 var includeAllPayloads = OptionBool("includeAllPayloads", false);
+                int[]? rowIds = null;
+                if (optionsIsObject && options.TryGetProperty("rowIds", out var rowIdsElement)
+                    && rowIdsElement.ValueKind == JsonValueKind.Array)
+                {
+                    var ids = new List<int>();
+                    foreach (var item in rowIdsElement.EnumerateArray())
+                    {
+                        if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var id))
+                            ids.Add(id);
+                    }
+                    if (ids.Count > 0) rowIds = ids.ToArray();
+                }
                 // Detect legacy header-embedded type-name layout and fail closed with a clear code.
                 return BridgeResult<object>.Partial(file, "param", diagnostics,
                     document.ToEnvelope(roundTrip, rowPageSize: rowPageSize, rowPage: rowPage,
-                        includeAllPayloads: includeAllPayloads));
+                        includeAllPayloads: includeAllPayloads, rowIds: rowIds));
             }
             catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
             {

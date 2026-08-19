@@ -97,6 +97,8 @@
     "test:param-msb-write-ipc-contract": "tsc -b ../shared . && node dist/testing/runParamMsbWriteIpcContractSmoke.js",
     "test:paramdef-layout": "tsc -b ../shared . && node dist/testing/runParamdefLayoutSmoke.js",
     "test:param-field-mutation": "tsc -b ../shared . && node dist/testing/runParamFieldMutationSmoke.js",
+    "test:container-param-edit": "tsc -b ../shared . && node dist/testing/runContainerParamEditSmoke.js",
+    "test:native-edit-facade": "tsc -b ../shared . && node dist/testing/runNativeEditFacadeSmoke.js",
     "test:performance-baseline": "tsc -b ../shared . && node dist/testing/runPerformanceBaselineSmoke.js",
     "test:real-mod-readonly-preview": "tsc -b ../shared . && node dist/testing/runRealModOpenSmoke.js ../../mods",
     "test:rag": "tsc -b ../shared . && node dist/testing/runRagRetrieveSmoke.js && node dist/testing/runRagEmbeddingSmoke.js",

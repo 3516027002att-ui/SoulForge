@@ -40,6 +40,7 @@ const REGISTRY = join(root, 'packages', 'core', 'src', 'ai', 'toolRegistry.ts');
 /** 受控写入入口。每一个都必须在 patch/ 或 transactions/ 下有定义（判据③）。 */
 const CONTROLLED_ENTRIES = Object.freeze([
   'createPatchProposal',
+  'commitPatchProposal',
   'dryRunPatchProposal',
   'rollbackOperation',
   // 明文脚本条目的源码级编辑编排层。它只产出 PatchIR 操作,落盘仍由
@@ -48,7 +49,13 @@ const CONTROLLED_ENTRIES = Object.freeze([
   // 只 import node:crypto、@soulforge/shared 类型与同目录的判定模块。
   // 本门禁抓到过它:新增工具时它是 propose 等级却不在清单里,报了
   // AI_WRITE_TOOL_BYPASSES_PATCH_ENGINE —— 那道判据是对的,加入前先核实了不写盘。
-  'buildPlaintextScriptEdit'
+  'buildPlaintextScriptEdit',
+  // PARAM 字段门面：run 体只调 setParamFields，落盘仍经 applyNativeMutation →
+  // saveRawReplace → Patch Engine。定义在 param/ 下，加入前已核实该文件不直接
+  // fs.writeFile Mod 资源。
+  'setParamFields',
+  'setFmgEntries',
+  'applyEmevdDsl'
 ]);
 
 /** 禁止在注册表里直接出现的写盘调用。 */
@@ -108,7 +115,7 @@ for (const entry of CONTROLLED_ENTRIES) {
   // 而不写盘(加入清单前已核实其写盘调用数为 0)。目录清单的作用是保证
   // 「清单指向的符号真实存在」,不是断言它必须在某个目录 —— 但也不能放宽成
   // 全仓搜索,否则任何同名函数都能冒充受控入口。
-  const found = ['patch', 'transactions', 'backup', 'script'].some((dir) => {
+  const found = ['patch', 'transactions', 'backup', 'script', 'param', 'editing'].some((dir) => {
     const dirPath = join(root, 'packages', 'core', 'src', dir);
     if (!existsSync(dirPath)) return false;
     // 浅扫该目录下的 .ts，找 export 定义

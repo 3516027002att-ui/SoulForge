@@ -486,7 +486,7 @@ internal sealed class ParamNativeDocument
         return Rebuild(rows);
     }
 
-    public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0, bool includeAllPayloads = false)
+    public object ToEnvelope(ParamRoundTripReport? report = null, int rowPreviewLimit = 32, int rowPage = 0, int rowPageSize = 0, bool includeAllPayloads = false, int[]? rowIds = null)
     {
         // Large params (multi-MB / wide rows) must not dump payloads into one NDJSON frame.
         // 载荷上限按「本次实际返回多少行」算，而不是按全表行数。
@@ -505,6 +505,44 @@ internal sealed class ParamNativeDocument
         // 一个 900 字节宽但只请求 3 行的页，比一个 100 字节宽请求 500 行的页小得多。
         var includePayload = RowDataSize > 0;
         var totalRows = Rows.Count;
+        var idFilter = rowIds is { Length: > 0 } ? new HashSet<int>(rowIds) : null;
+
+        // Id filter is for Agent/CLI targeted reads: return only those rows
+        // with payloads. Pagination still applies when no ids are requested.
+        if (idFilter is not null)
+        {
+            var filtered = Rows.Where(row => idFilter.Contains(row.Id)).ToArray();
+            return new
+            {
+                format = "PARAM",
+                typeName = TypeName,
+                dataVersion = DataVersion,
+                rowCount = totalRows,
+                rowDataSize = RowDataSize,
+                layout = Layout == ParamLayout.Legacy ? "legacy" : "compact",
+                sourceSize = SourceBytes.Length,
+                sourceHash = SourceHash,
+                rows = filtered.Select(r => new
+                {
+                    r.Id,
+                    r.Name,
+                    dataBase64 = includePayload ? Convert.ToBase64String(r.Data) : null,
+                    dataHash = Hash(r.Data)
+                }).ToArray(),
+                rowPreviewLimit,
+                rowsTruncated = false,
+                payloadsIncluded = includePayload,
+                rowPage = 0,
+                rowPageSize = filtered.Length,
+                rowTotal = totalRows,
+                rowPageCount = 1,
+                requestedRowCount = idFilter.Count,
+                returnedRowCount = filtered.Length,
+                roundTrip = report ?? VerifyRoundTrip(),
+                authority = report is { SemanticIdentical: true } ? "native-verified" : "candidate",
+                fieldLayout = "raw-row-bytes-without-paramdef"
+            };
+        }
 
         // Pagination: when rowPageSize > 0, return only the requested page.
         var effectivePageSize = rowPageSize > 0 ? rowPageSize : totalRows;

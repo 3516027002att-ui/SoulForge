@@ -1,5 +1,6 @@
 import type { ResourceKind } from '@soulforge/shared';
 import type { ToolContext, ToolDescriptor } from './toolRegistry.js';
+import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
 
 export type AiProvider = 'mock' | 'openai' | 'anthropic';
 export type AiThinkingLevel = 'fast' | 'normal' | 'deep' | 'extreme';
@@ -153,25 +154,34 @@ function recommendTools(prompt: string, tools: ToolDescriptor[], mode: AiPermiss
   if (lower.includes('event') || lower.includes('事件') || lower.includes('emevd')) {
     names.add('search_events');
     names.add('explain_event');
+    names.add('read_emevd_outline');
+    names.add('apply_emevd_dsl');
   }
 
   if (lower.includes('map') || lower.includes('地图') || lower.includes('msb') || lower.includes('entity') || lower.includes('区域')) {
     names.add('search_map_entities');
   }
 
-  if (lower.includes('param') || lower.includes('参数') || lower.includes('speffect') || lower.includes('goods')) {
+  if (lower.includes('param') || lower.includes('参数') || lower.includes('speffect') || lower.includes('goods')
+    || lower.includes('手里剑') || lower.includes('子弹') || lower.includes('躯干')) {
     names.add('search_param_rows');
+    names.add('read_param_fields');
+    names.add('mutate_param_fields');
   }
 
   if (lower.includes('text') || lower.includes('msg') || lower.includes('文本') || lower.includes('台词') || lower.includes('fmg')) {
     names.add('search_text_entries');
     names.add('lookup_text_id');
     names.add('find_text_references');
+    names.add('read_fmg_entries');
+    names.add('mutate_fmg_entries');
   }
 
   if (lower.includes('改') || lower.includes('patch') || lower.includes('修改') || lower.includes('替换')) {
     names.add('propose_text_patch');
     names.add('validate_patch');
+    names.add('read_param_fields');
+    names.add('mutate_param_fields');
   }
 
   if (names.size === 1) {
@@ -190,8 +200,10 @@ function recommendTools(prompt: string, tools: ToolDescriptor[], mode: AiPermiss
 }
 
 function isDescriptorAllowed(tool: ToolDescriptor, mode: AiPermissionMode): boolean {
-  if (tool.permission === 'read') return true;
-  if (tool.permission === 'plan') return mode === 'plan' || mode === 'normal' || mode === 'fullPermission';
+  if (tool.permissionLevel) return isAiToolPermissionAllowed(tool.permissionLevel, mode);
+  if (tool.permission === 'read' || tool.permission === 'plan' || tool.permission === 'write') {
+    return isAiToolPermissionAllowed(legacyPermissionToLevel(tool.permission), mode);
+  }
   return mode === 'fullPermission';
 }
 
@@ -204,6 +216,12 @@ function reasonForTool(name: string): string {
     explain_event: '生成证据优先的事件解释输入。',
     search_map_entities: '查找地图实体、区域和可见命名候选。',
     search_param_rows: '查找参数行候选或已确认行。',
+    read_param_fields: '读取容器内 PARAM 的 live 字段值。',
+    mutate_param_fields: '按绝对值改 PARAM 字段并经 Patch Engine 提交。',
+    read_fmg_entries: '读取已确认 FMG 表的 live 词条。',
+    mutate_fmg_entries: '按绝对值改 FMG 词条并经 Patch Engine 提交。',
+    read_emevd_outline: '读取事件文件的事件 ID 与指令数。',
+    apply_emevd_dsl: '编译并提交 EMEVD DSL，不覆盖二进制。',
     search_text_entries: '查找文本条目。',
     lookup_text_id: '按 textId 精确定位文本。',
     find_text_references: '找出文本被哪些事件或符号引用。',

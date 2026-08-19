@@ -20,6 +20,10 @@ import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
 import { ALL_RESOURCE_KINDS } from '../workspace/resourceKinds.js';
 import { buildTextAiContext, renderTextAiPrompt } from './aiContextBuilder.js';
 import { buildPlaintextScriptEdit } from '../script/plaintextScriptEdit.js';
+import { nativeEditSessionFromContext } from '../editing/nativeEditSession.js';
+import { readParamFields, setParamFields, type ParamFieldEdit } from '../param/containerParamEdit.js';
+import { readFmgEntries, setFmgEntries, type FmgEntryEdit } from '../editing/fmgEdit.js';
+import { applyEmevdDsl, readEmevdOutline } from '../editing/emevdEdit.js';
 import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
 import { buildRagCorpus } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
@@ -508,6 +512,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
       if (!targetUri || !targetPath || newText === undefined) {
         return fail('INVALID_INPUT', 'propose_text_patch requires targetUri, targetPath, and newText.');
       }
+      const nativeHint = nativeFormatHint(targetUri, targetPath);
+      if (nativeHint) {
+        return fail('USE_NATIVE_EDIT_FACADE', nativeHint);
+      }
 
       const proposal = createPatchProposal({
         workspaceId,
@@ -716,6 +724,183 @@ export function createDefaultToolRegistry(): ToolRegistry {
   });
 
   registry.register({
+    name: 'read_param_fields',
+    description: 'Read live PARAM field values from the opened gameparam container. '
+      + 'Pass table name, row ids and field ids. Do not parse Smithbox XML or unpack BND yourself.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: {
+      table: 'string',
+      rowIds: 'array',
+      fieldIds: 'array',
+      containerPath: 'string?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const table = asString(value.table);
+      const rowIds = asIdList(value.rowIds);
+      const fieldIds = asStringList(value.fieldIds);
+      if (!table || rowIds.length === 0 || fieldIds.length === 0) {
+        return fail('INVALID_INPUT', 'read_param_fields 需要 table、rowIds、fieldIds。');
+      }
+      const containerPath = asOptionalString(value.containerPath);
+      const result = await readParamFields({
+        edit: edit.session,
+        queries: [{ table, rowIds, fieldIds }],
+        ...(containerPath ? { containerPath } : {})
+      });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'mutate_param_fields',
+    description: 'Set absolute PARAM field values through Patch Engine (write-param + write-bnd4). '
+      + 'edits: [{ table, rowId, fieldId, value }]. Never multiply current values. '
+      + 'Do not parse Smithbox XML, scan BND, or write file_replace by hand.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: {
+      edits: 'array',
+      containerPath: 'string?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const edits = asParamEdits(value.edits);
+      if (!edits.ok) return fail(edits.code, edits.message);
+      const containerPath = asOptionalString(value.containerPath);
+      const result = await setParamFields({
+        edit: edit.session,
+        edits: edits.edits,
+        ...(containerPath ? { containerPath } : {})
+      });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'read_fmg_entries',
+    description: 'Read live FMG text entries from a confirmed msgbnd table. '
+      + 'Pass table name (logical, e.g. Title) and entry ids. Do not treat FMG as UTF-8.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: {
+      table: 'string',
+      ids: 'array',
+      containerPath: 'string?',
+      lang: 'string?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const table = asString(value.table);
+      const ids = asIdList(value.ids);
+      if (!table || ids.length === 0) {
+        return fail('INVALID_INPUT', 'read_fmg_entries 需要 table、ids。');
+      }
+      const containerPath = asOptionalString(value.containerPath);
+      const lang = asOptionalString(value.lang);
+      const result = await readFmgEntries({
+        edit: edit.session,
+        table,
+        ids,
+        ...(containerPath ? { containerPath } : {}),
+        ...(lang ? { lang } : {})
+      });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'mutate_fmg_entries',
+    description: 'Set FMG entry text through Patch Engine (write-fmg mutations[]). '
+      + 'edits: [{ table, id, text }]. One table per call. Do not propose_text_patch on .fmg/.msgbnd.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: {
+      edits: 'array',
+      containerPath: 'string?',
+      lang: 'string?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const edits = asFmgEdits(value.edits);
+      if (!edits.ok) return fail(edits.code, edits.message);
+      const containerPath = asOptionalString(value.containerPath);
+      const lang = asOptionalString(value.lang);
+      const result = await setFmgEntries({
+        edit: edit.session,
+        edits: edits.edits,
+        ...(containerPath ? { containerPath } : {}),
+        ...(lang ? { lang } : {})
+      });
+      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'read_emevd_outline',
+    description: 'Read event IDs and instruction counts from an overlay EMEVD file. '
+      + 'Does not parse a second native format; uses Bridge read-emevd-document.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { file: 'string' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const file = asString(asRecord(input).file);
+      if (!file) return fail('INVALID_INPUT', 'read_emevd_outline 需要 file。');
+      const result = await readEmevdOutline({ edit: edit.session, file });
+      if (!result.ok) return fail(result.error?.code ?? 'EMEVD_READ_FAILED', result.error?.message ?? '读取失败。');
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'apply_emevd_dsl',
+    description: 'Compile and commit an EMEVD DSL (patch or DarkScript) through the existing '
+      + 'four-view submit path. Do not overwrite .emevd.dcx as text. Requires imported EMEDF.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: {
+      file: 'string',
+      dsl: 'string',
+      mode: 'enum:patch|dark-script?',
+      emedfPath: 'string?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const dsl = asString(value.dsl);
+      if (!file || !dsl) return fail('INVALID_INPUT', 'apply_emevd_dsl 需要 file 与 dsl。');
+      const mode = value.mode === 'dark-script' ? 'dark-script' as const : 'patch' as const;
+      const emedfPath = asOptionalString(value.emedfPath);
+      const result = await applyEmevdDsl({
+        edit: edit.session,
+        file,
+        dsl,
+        mode,
+        ...(emedfPath ? { emedfPath } : {})
+      });
+      if (!result.ok) return fail(result.error?.code ?? 'EMEVD_DSL_REJECTED', result.error?.message ?? '提交失败。');
+      return ok(result);
+    }
+  });
+
+  registry.register({
     name: 'commit_patch',
     description: 'Commit a PatchProposal through Patch Engine (staging, backup, hash check, rollback metadata). '
       + 'Pass the object returned by propose_text_patch. Does not write until the user approves in the Agent panel.',
@@ -910,6 +1095,110 @@ function asOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function requireEditSession(
+  context: ToolContext,
+  purpose: 'read' | 'write'
+): { ok: true; session: ReturnType<typeof nativeEditSessionFromContext> } | ToolResult<never> {
+  if (!context.session) {
+    return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
+  }
+  if (purpose === 'write') {
+    if (!context.operationLogStore || !context.backupBaseDir || !context.recoveryDir) {
+      return fail(
+        'COMMIT_CONTEXT_REQUIRED',
+        '提交需要主进程注入的生产上下文（session / operationLogStore / backupBaseDir / recoveryDir）。'
+      );
+    }
+    if (!context.confirmation?.id || context.confirmation.subjects.length === 0) {
+      return fail('EDIT_CONFIRMATION_REQUIRED', '提交需要用户在 Agent 审批卡确认后签发的写入回执。');
+    }
+  }
+  const backupBaseDir = context.backupBaseDir ?? join(context.session.layers.overlayRoot, '.soulforge-staging', 'backups');
+  const recoveryDir = context.recoveryDir ?? join(context.session.layers.overlayRoot, '.soulforge-staging', 'recovery');
+  return {
+    ok: true,
+    session: nativeEditSessionFromContext({
+      session: context.session,
+      operationLog: context.operationLogStore ?? getDefaultOperationLogStore(),
+      backupBaseDir,
+      recoveryDir,
+      ...(context.confirmation ? { confirmation: context.confirmation } : {})
+    })
+  };
+}
+
+function nativeFormatHint(targetUri: string, targetPath: string): string | null {
+  const haystack = `${targetUri} ${targetPath}`.toLowerCase();
+  if (/\.(parambnd|param)(\.dcx)?(\b|$)/.test(haystack) || haystack.includes('gameparam')) {
+    return '这是 PARAM 容器，请用 read_param_fields / mutate_param_fields，不要走文本补丁。';
+  }
+  if (/\.(fmg|msgbnd)(\.dcx)?(\b|$)/.test(haystack)) {
+    return '这是 FMG 文本表，请用 FMG 门面（mutate_fmg_entries），不要把词条当 UTF-8 文件覆盖。';
+  }
+  if (/\.emevd(\.dcx)?(\b|$)/.test(haystack)) {
+    return '这是 EMEVD 事件，请用 apply_emevd_dsl，不要把二进制当文本补丁。';
+  }
+  if (/\.(dcx|bnd)\b/.test(haystack)) {
+    return '这是打包原生格式，禁止 propose_text_patch。请用对应的 PARAM / FMG / EMEVD / 明文脚本门面。';
+  }
+  return null;
+}
+
+function asIdList(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => (typeof item === 'number' ? item : Number(item)))
+    .filter((item) => Number.isInteger(item));
+}
+
+function asStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+}
+
+function asParamEdits(value: unknown): { ok: true; edits: ParamFieldEdit[] } | { ok: false; code: string; message: string } {
+  if (!Array.isArray(value) || value.length === 0) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_param_fields 需要非空 edits 数组。' };
+  }
+  const edits: ParamFieldEdit[] = [];
+  for (const item of value) {
+    const record = asRecord(item);
+    const table = asString(record.table);
+    const fieldId = asString(record.fieldId);
+    const rowId = asNumber(record.rowId, Number.NaN);
+    if (!table || !fieldId || !Number.isInteger(rowId)) {
+      return { ok: false, code: 'INVALID_INPUT', message: '每条 edit 需要 table、rowId、fieldId、value。' };
+    }
+    const raw = record.value;
+    if (typeof raw !== 'number' && typeof raw !== 'string' && typeof raw !== 'boolean') {
+      return { ok: false, code: 'INVALID_INPUT', message: `${table}#${rowId}.${fieldId} 的 value 必须是数字、字符串或布尔。` };
+    }
+    edits.push({ table, rowId, fieldId, value: raw });
+  }
+  return { ok: true, edits };
+}
+
+function asFmgEdits(value: unknown): { ok: true; edits: FmgEntryEdit[] } | { ok: false; code: string; message: string } {
+  if (!Array.isArray(value) || value.length === 0) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_fmg_entries 需要非空 edits 数组。' };
+  }
+  const edits: FmgEntryEdit[] = [];
+  for (const item of value) {
+    const record = asRecord(item);
+    const table = asString(record.table);
+    const text = typeof record.text === 'string' ? record.text : '';
+    const id = asNumber(record.id, Number.NaN);
+    if (!table || !Number.isInteger(id)) {
+      return { ok: false, code: 'INVALID_INPUT', message: '每条 edit 需要 table、id、text。' };
+    }
+    if (typeof record.text !== 'string') {
+      return { ok: false, code: 'INVALID_INPUT', message: `${table}#${id} 的 text 必须是字符串。` };
+    }
+    edits.push({ table, id, text });
+  }
+  return { ok: true, edits };
+}
+
 function asNumber(value: unknown, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim().length > 0) {
@@ -966,6 +1255,7 @@ export const ENUM_FIELD_NORMALIZERS: Record<string, (value: string) => string> =
   // fallback would make that one value indistinguishable between "accepted"
   // and "rejected then defaulted".
   'propose_text_patch.mode': (value) => asPatchMode(value, '__unaccepted__' as PatchMode),
+  'apply_emevd_dsl.mode': (value) => (value === 'patch' || value === 'dark-script' ? value : '__unaccepted__'),
   // The handler passes any string through (`typeof === 'string'`), so all
   // declared values are accepted. The declaration is deliberately narrower
   // than the handler here: narrowing only under-promises to the model, which

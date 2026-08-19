@@ -185,6 +185,8 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:paramdef-layout': 'synthetic',
   'test:param-metadata-mismatch': 'synthetic',
   'test:param-field-mutation': 'synthetic',
+  'test:container-param-edit': 'synthetic',
+  'test:native-edit-facade': 'synthetic',
   'test:emevd-plan-production': 'synthetic',
   'test:emevd-full-document': 'synthetic',
   'test:emevd-coverage': 'synthetic',

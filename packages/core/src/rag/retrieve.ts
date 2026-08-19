@@ -9,6 +9,7 @@ import type {
 } from '@soulforge/shared';
 import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
 import { parseRagQuery, type ParsedRagQuery } from './queryParse.js';
+import { collectIndexedCandidates, ensureLookupIndex } from './lookupIndex.js';
 
 const DEFAULT_LIMIT = 8;
 const MAX_LIMIT = 32;
@@ -37,9 +38,12 @@ export function retrieveEvidence(
 
   const parsed = parseRagQuery(trimmed);
   const families = normalizeFamilies(options.families);
-  const candidates = families
+  const lookup = ensureLookupIndex(corpus);
+  const indexed = collectIndexedCandidates(corpus.chunks, lookup, parsed, families);
+  const hasKeys = parsed.numericIds.length + parsed.terms.length + parsed.phrases.length + parsed.uris.length > 0;
+  const candidates = hasKeys ? indexed : (families
     ? corpus.chunks.filter((chunk) => families.has(chunk.family))
-    : corpus.chunks;
+    : corpus.chunks);
   const excerptChars = clampInt(options.excerptChars, DEFAULT_EXCERPT, 120, 1_200);
   const limit = clampInt(options.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
 
@@ -53,7 +57,7 @@ export function retrieveEvidence(
   const primary = scored.slice(0, limit);
   const expand = options.expandReferences !== false;
   const expanded = expand
-    ? expandHits(primary, corpus.chunks, corpus.references, excerptChars, limit)
+    ? expandHits(primary, lookup.bySymbolUri, corpus.references, excerptChars, limit)
     : primary;
   const truncated = scored.length > expanded.length;
 
@@ -172,14 +176,12 @@ function isIdPrefixMatch(queryId: number, candidate: number): boolean {
 
 function expandHits(
   primary: readonly RagHit[],
-  chunks: readonly RagChunk[],
+  byUri: ReadonlyMap<string, RagChunk>,
   references: readonly ReferenceEdge[],
   excerptChars: number,
   limit: number
 ): RagHit[] {
   if (primary.length === 0 || references.length === 0) return [...primary];
-  const byUri = new Map<string, RagChunk>();
-  for (const chunk of chunks) byUri.set(chunk.symbolUri, chunk);
   const seen = new Set(primary.map((hit) => hit.chunk.chunkId));
   const extra: RagHit[] = [];
 

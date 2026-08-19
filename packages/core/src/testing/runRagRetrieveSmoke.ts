@@ -212,6 +212,44 @@ VALUES (?, ?, ?, ?, ?)`).run(index.workspaceId, workspace.root, 'sekiro', now, n
     });
     if (missRun.finishReason !== 'stop') throw new Error(`rag miss run failed: ${missRun.finishReason}`);
 
+    const fatChunks: RagChunk[] = [];
+    for (let i = 0; i < 8_000; i += 1) {
+      fatChunks.push({
+        chunkId: `rag:param_row:fat-${i}`,
+        workspaceId: index.workspaceId,
+        sourceUri: `file://synthetic/param/fat.param`,
+        symbolUri: `param://Fat/${i}`,
+        family: 'param_row',
+        title: `Fat ${i}`,
+        body: `param Fat row ${i} filler-${i}`,
+        numericIds: [i],
+        contentHash: `fat-${i}`
+      });
+    }
+    fatChunks.push({
+      chunkId: 'rag:param_row:needle',
+      workspaceId: index.workspaceId,
+      sourceUri: 'file://synthetic/param/needle.param',
+      symbolUri: 'param://Needle/999001',
+      family: 'param_row',
+      title: 'Needle 999001',
+      body: 'param Needle row 999001',
+      numericIds: [999001],
+      contentHash: 'needle'
+    });
+    const fat = createRagCorpus({
+      workspaceId: index.workspaceId,
+      builtAt: new Date().toISOString(),
+      chunks: fatChunks
+    });
+    const fatHit = retrieveEvidence(fat, '999001');
+    if (!fatHit.ok || !fatHit.hits.some((hit) => hit.chunk.symbolUri === 'param://Needle/999001')) {
+      throw new Error(`indexed retrieve missed the needle: ${JSON.stringify(fatHit)}`);
+    }
+    if (fatHit.stats.scanned > 8) {
+      throw new Error(`indexed retrieve must not scan the whole corpus, scanned=${fatHit.stats.scanned}`);
+    }
+
     console.log(JSON.stringify({
       ok: true,
       message: 'workspace RAG retrieve smoke: ok',

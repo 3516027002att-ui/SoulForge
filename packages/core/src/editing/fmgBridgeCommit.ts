@@ -30,18 +30,56 @@ export interface FmgBridgeCommitResult {
   diagnostics: Array<{ severity: string; code: string; message: string }>;
 }
 
+export interface FmgBridgeBatchCommitRequest {
+  sourcePath: string;
+  outputPath: string;
+  expectedDocumentHash: string;
+  allowedRoots: string[];
+  writableRoots: string[];
+  mutations: FmgBridgeMutation[];
+  entryIndex?: number;
+  timeoutMs?: number;
+  oodleRuntimeRoot?: string;
+}
+
 export async function commitFmgMutationViaBridge(
   request: FmgBridgeCommitRequest
 ): Promise<FmgBridgeCommitResult> {
+  return commitFmgMutationsViaBridge({
+    sourcePath: request.sourcePath,
+    outputPath: request.outputPath,
+    expectedDocumentHash: request.expectedDocumentHash,
+    allowedRoots: request.allowedRoots,
+    writableRoots: request.writableRoots,
+    mutations: [request.mutation],
+    ...(request.entryIndex !== undefined ? { entryIndex: request.entryIndex } : {}),
+    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
+  });
+}
+
+/** Batch upsert/delete/add. C# writer already accepts `mutations[]`. */
+export async function commitFmgMutationsViaBridge(
+  request: FmgBridgeBatchCommitRequest
+): Promise<FmgBridgeCommitResult> {
+  if (request.mutations.length === 0) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'FMG_MUTATION_EMPTY',
+        message: 'write-fmg 需要至少一条 mutation。'
+      }]
+    };
+  }
   const commandOptions: Record<string, unknown> = {
     outputPath: request.outputPath,
     expectedDocumentHash: request.expectedDocumentHash,
-    mutation: request.mutation.kind,
-    id: request.mutation.id
+    mutations: request.mutations.map((mutation) => (
+      mutation.kind === 'delete'
+        ? { kind: 'delete', id: mutation.id }
+        : { kind: mutation.kind, id: mutation.id, text: mutation.text }
+    ))
   };
-  if (request.mutation.kind === 'upsert' || request.mutation.kind === 'add') {
-    commandOptions.text = request.mutation.text;
-  }
   if (request.entryIndex !== undefined) {
     commandOptions.entryIndex = request.entryIndex;
   }
@@ -55,6 +93,7 @@ export async function commitFmgMutationViaBridge(
     allowedRoots: request.allowedRoots,
     writableRoots: request.writableRoots,
     timeoutMs: request.timeoutMs ?? 60_000,
+    ...(request.oodleRuntimeRoot ? { oodleRuntimeRoot: request.oodleRuntimeRoot } : {}),
     commandOptions
   });
   const ok = result.diagnostics.some(

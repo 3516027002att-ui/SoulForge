@@ -72,6 +72,8 @@
     "test:resource-index-diagnostics": "npm run test:resource-index-diagnostics -w @soulforge/core",
     "test:paramdef-layout": "npm run test:paramdef-layout -w @soulforge/core",
     "test:param-field-mutation": "npm run test:param-field-mutation -w @soulforge/core",
+    "test:container-param-edit": "npm run test:container-param-edit -w @soulforge/core",
+    "test:native-edit-facade": "npm run test:native-edit-facade -w @soulforge/core",
     "test:param-metadata-mismatch": "npm run test:param-metadata-mismatch -w @soulforge/core",
     "test:smithbox-param-metadata-source": "npm run test:smithbox-param-metadata-source -w @soulforge/core",
     "test:me3-runtime-adapter": "npm run test:me3-runtime-adapter -w @soulforge/core",

@@ -31,6 +31,16 @@ export interface ParamBridgeCommitRequest {
   timeoutMs?: number;
 }
 
+export interface ParamBridgeBatchCommitRequest {
+  sourcePath: string;
+  outputPath: string;
+  expectedDocumentHash: string;
+  allowedRoots: string[];
+  writableRoots: string[];
+  mutations: ParamBridgeMutation[];
+  timeoutMs?: number;
+}
+
 export interface ParamBridgeCommitResult {
   ok: boolean;
   outputHash?: string;
@@ -41,14 +51,30 @@ export interface ParamBridgeCommitResult {
 export async function commitParamMutationViaBridge(
   request: ParamBridgeCommitRequest
 ): Promise<ParamBridgeCommitResult> {
-  const commandOptions: Record<string, unknown> = {
+  return commitParamMutationsViaBridge({
+    sourcePath: request.sourcePath,
     outputPath: request.outputPath,
     expectedDocumentHash: request.expectedDocumentHash,
-    mutation: request.mutation.kind,
-    id: request.mutation.id
-  };
-  if (request.mutation.kind === 'upsert') {
-    commandOptions.dataBase64 = request.mutation.dataBase64;
+    allowedRoots: request.allowedRoots,
+    writableRoots: request.writableRoots,
+    mutations: [request.mutation],
+    ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {})
+  });
+}
+
+/** Batch upsert/delete. Bridge already accepts `mutations[]`; this is the TS wrapper. */
+export async function commitParamMutationsViaBridge(
+  request: ParamBridgeBatchCommitRequest
+): Promise<ParamBridgeCommitResult> {
+  if (request.mutations.length === 0) {
+    return {
+      ok: false,
+      diagnostics: [{
+        severity: 'error',
+        code: 'PARAM_MUTATION_EMPTY',
+        message: 'write-param 需要至少一条 mutation。'
+      }]
+    };
   }
   const result = await runBridge<{
     outputHash?: string;
@@ -59,7 +85,15 @@ export async function commitParamMutationViaBridge(
     allowedRoots: request.allowedRoots,
     writableRoots: request.writableRoots,
     timeoutMs: request.timeoutMs ?? 60_000,
-    commandOptions
+    commandOptions: {
+      outputPath: request.outputPath,
+      expectedDocumentHash: request.expectedDocumentHash,
+      mutations: request.mutations.map((mutation) => (
+        mutation.kind === 'upsert'
+          ? { kind: 'upsert', id: mutation.id, dataBase64: mutation.dataBase64 }
+          : { kind: 'delete', id: mutation.id }
+      ))
+    }
   });
   const ok = result.diagnostics.some(
     (d) => d.code === BRIDGE_STAGING_WRITE_VERIFIED_CODES.param
@@ -81,6 +115,10 @@ export async function readParamDocumentViaBridge(input: {
   allowedRoots: string[];
   timeoutMs?: number;
   maxRows?: number;
+  /** When set, Bridge returns only these rows with payloads. */
+  rowIds?: number[];
+  includeAllPayloads?: boolean;
+  maxFrameBytes?: number;
 }): Promise<{
   ok: boolean;
   data?: {
@@ -107,7 +145,12 @@ export async function readParamDocumentViaBridge(input: {
     command: 'read-param-document',
     filePath: input.sourcePath,
     allowedRoots: input.allowedRoots,
-    timeoutMs: input.timeoutMs ?? 60_000
+    timeoutMs: input.timeoutMs ?? 60_000,
+    ...(input.maxFrameBytes !== undefined ? { maxFrameBytes: input.maxFrameBytes } : {}),
+    commandOptions: {
+      ...(input.rowIds && input.rowIds.length > 0 ? { rowIds: input.rowIds } : {}),
+      ...(input.includeAllPayloads ? { includeAllPayloads: true } : {})
+    }
   });
   if (result.parseStatus === 'failed' || !result.data?.sourceHash) {
     return {
@@ -119,7 +162,9 @@ export async function readParamDocumentViaBridge(input: {
       }))
     };
   }
-  const maxRows = input.maxRows ?? 500;
+  const maxRows = input.rowIds && input.rowIds.length > 0
+    ? Math.max(input.rowIds.length, input.maxRows ?? 0)
+    : (input.maxRows ?? 500);
   const rows = (result.data.rows ?? []).slice(0, maxRows).map((r) => ({
     id: r.id,
     dataBase64: r.dataBase64,

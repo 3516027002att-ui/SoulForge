@@ -27,6 +27,11 @@ export interface HybridVectorSource {
 const RRF_K = 60;
 /** 向量侧候选上限：lexical 之外只允许这么多纯向量命中进入融合。 */
 const VECTOR_CANDIDATE_MULTIPLIER = 2;
+/**
+ * 全库余弦只在小语料上跑。真实工作区上万块时，Agent 默认路径是词法倒排；
+ * 大库的纯向量命中改为只给词法候选打分，避免每次查询扫完所有 embedding。
+ */
+const VECTOR_FULL_SCAN_LIMIT = 2048;
 
 export function retrieveEvidenceHybrid(
   corpus: RagCorpus | null | undefined,
@@ -46,9 +51,10 @@ export function retrieveEvidenceHybrid(
   const limit = clampLimit(options.limit);
   const chunkById = new Map(corpus.chunks.map((chunk) => [chunk.chunkId, chunk]));
 
-  // 向量侧：全量余弦，取 top limit×2（纯向量命中也可能有价值）。
   const vectorScored: Array<{ chunkId: string; similarity: number }> = [];
-  for (const chunk of corpus.chunks) {
+  const scanAll = vectorSource.vectors.size <= VECTOR_FULL_SCAN_LIMIT;
+  const vectorTargets = scanAll ? corpus.chunks : lexical.hits.map((hit) => hit.chunk);
+  for (const chunk of vectorTargets) {
     const vector = vectorSource.vectors.get(chunk.chunkId);
     if (!vector) continue;
     const similarity = cosineSimilarity(vectorSource.queryVector, vector);

@@ -1,9 +1,9 @@
 import { useEffect, useRef, type ReactElement } from 'react';
 
 /**
- * 流光溢彩白 V3：OpenO1 frontend-preview 的 WebGL 虹彩着色器。
+ * 流光溢彩白 V3：全窗口 WebGL 虹彩环境场。
  *
- * 只提供材质，不复制参考页的布局/圆角/hero。WebGL 失败或暗色主题时退回
+ * 只提供材质，不带动布局/圆角/hero。WebGL 失败或暗色主题时退回
  * styles.css 的 body 伪元素。动画只改 uniform time；reduced-motion 停在静帧。
  */
 const VERTEX = `

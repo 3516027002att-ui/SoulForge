@@ -10053,7 +10053,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     {
       const rawExecuteTool = bridge.executeTool;
       bridge.executeTool = async (call) => {
-        if (call.name === 'commit_patch') {
+        if (call.name === 'commit_patch' || call.name === 'mutate_param_fields'
+          || call.name === 'mutate_fmg_entries' || call.name === 'apply_emevd_dsl') {
           if (!activeSession || !activeOperationLog) return rawExecuteTool(call);
           const storage = durableStoragePaths(activeSession.meta.workspaceId);
           const confirmation = createConfirmationReceipt({
@@ -10061,7 +10062,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
               'AGENT_COMMIT_APPROVED',
               'ALL_RISKS',
               ...(activeWorkspaceSessionId ? [`WORKSPACE_SESSION:${activeWorkspaceSessionId}`] : []),
-              'TITLE:commit_patch'
+              `TITLE:${call.name}`
             ],
             riskLevel: 'high',
             note: 'Agent 审批卡通过后签发的写入回执'

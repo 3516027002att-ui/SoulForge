@@ -1,0 +1,6 @@
+动作与地图的 Agent 编址（cXXXX / AXXXX / MXXX / mxxxx）
+====================================================
+
+正式稿：动作与地图Agent编址.docx（含第 9 节 Flash 施工单）
+执行清单（给 flash 的分刀改法）：../锐评/grok.txt 问题 6
+重生成：python build-addressing-spec.py

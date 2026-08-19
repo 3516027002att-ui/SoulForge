@@ -14,6 +14,7 @@ import type {
 } from '@soulforge/shared';
 import { RAG_CHUNK_FAMILIES } from '@soulforge/shared';
 import type { WorkspaceIndex } from '../indexing/workspaceIndex.js';
+import { attachLookupIndex } from './lookupIndex.js';
 
 const MAX_BODY_CHARS = 1_800;
 const MAX_INSTRUCTIONS = 24;
@@ -57,13 +58,15 @@ export function createRagCorpus(input: {
 }): RagCorpus {
   const byFamily = emptyFamilyCounts();
   for (const chunk of input.chunks) byFamily[chunk.family] += 1;
-  return {
+  const corpus: RagCorpus = {
     workspaceId: input.workspaceId,
     builtAt: input.builtAt,
     chunks: [...input.chunks],
     references: [...(input.references ?? [])],
     stats: { total: input.chunks.length, byFamily }
   };
+  attachLookupIndex(corpus);
+  return corpus;
 }
 
 export function mergeCatalogAndPersisted(catalog: RagCorpus, persisted: RagCorpus): RagCorpus {

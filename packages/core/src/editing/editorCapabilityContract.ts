@@ -176,6 +176,7 @@ export const EDITOR_CAPABILITY_CONTRACTS = {
     scaleDimensions: ['rows'],
     contractSources: [
       'packages/core/src/editing/paramBridgeCommit.ts',
+      'packages/core/src/param/containerParamEdit.ts',
       'apps/desktop/src/main/ipc.ts',
       'bridge/SoulForge.Bridge/ParamNativeDocument.cs'
     ]

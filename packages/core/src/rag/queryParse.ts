@@ -38,7 +38,7 @@ export function parseRagQuery(raw: string): ParsedRagQuery {
 }
 
 /** 连续 CJK 片段切 2 字 bigram；非 CJK 字符打断片段。 */
-function cjkBigrams(value: string): string[] {
+export function cjkBigrams(value: string): string[] {
   const bigrams: string[] = [];
   let run = '';
   for (const char of value) {
@@ -60,7 +60,7 @@ function pushBigrams(run: string, out: string[]): void {
   }
 }
 
-function tokenize(value: string): string[] {
+export function tokenize(value: string): string[] {
   return unique(
     value
       .toLowerCase()
