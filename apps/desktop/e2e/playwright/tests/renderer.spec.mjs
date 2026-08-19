@@ -13,6 +13,7 @@
  */
 import { test, expect, _electron as electron } from '@playwright/test';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,6 +21,30 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtureMain = path.resolve(here, '../fixture-main.mjs');
 const outRenderer = path.resolve(here, '../../../out/renderer/index.html');
 const hasBuild = fs.existsSync(outRenderer);
+
+/*
+ * 全 spec 共用一个临时 userData（与 production-main.spec.mjs 的隔离同构）。
+ *
+ * 为什么必须隔离：默认 userData 与生产 dev 运行、其他 worktree 的 e2e 共用同一个
+ * Chromium profile —— 并发 Electron 实例互抢 leveldb 锁，shell 状态（App.tsx 6-C
+ * 经 localStorage 存上次工作域/选中资源）跨运行残留，「打开工作区 / 打开后停在哪」
+ * 变成非确定性行为（实测同一套件两次运行挂在两个不同位置）。临时目录恢复 CI
+ * 「干净 runner」语义。文件内各测试仍共用这一个目录：跨测试的持久化语义与 CI
+ * 单次运行一致，不破坏任何依赖运行内状态的测试。
+ */
+const sharedUserDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-e2e-renderer-'));
+
+test.afterAll(() => {
+  // Windows 上刚退出的 Electron 可能仍持有 profile 文件句柄：rmSync 会 EPERM。
+  // 清理失败不影响测试结果 —— 重试后吞掉，留给 tmp 自身的回收。
+  try {
+    fs.rmSync(sharedUserDataDir, {
+      recursive: true, force: true, maxRetries: 5, retryDelay: 200
+    });
+  } catch {
+    // 忽略：临时目录残留不构成本套件的失败。
+  }
+});
 
 test.describe.configure({ mode: 'serial' });
 
@@ -30,7 +55,7 @@ test.beforeEach(({ }, testInfo) => {
 
 async function launchApp(env = {}) {
   const app = await electron.launch({
-    args: [fixtureMain],
+    args: [fixtureMain, `--user-data-dir=${sharedUserDataDir}`],
     env: { ...process.env, ...env }
   });
   const window = await app.firstWindow();
@@ -147,8 +172,9 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   const tabs = window.locator('[data-testid="domain-bar"] [role="tab"]');
   // R1 裁定（2026-08-14）：GPARAM 从领域顶栏移除（并入左侧「参数」逻辑库），
   // T3 裁定（2026-08-15）：行为 + 动画合并为「动作」，animation 从顶栏隐藏
-  // （与 GPARAM 同口径）；问题 1：有工作区后「开始」（project）与文件同口径隐藏
-  // （换文件夹走标题栏 workspace-switcher）。固定顺序快照 11 项。
+  // （与 GPARAM 同口径）；问题 14：文件域隐藏；问题 1：有工作区后「开始」
+  // （project）与文件同口径隐藏（换文件夹走标题栏 workspace-switcher）。
+  // 固定顺序快照 11 项。
   await expect(tabs).toHaveCount(11);
   await expect(tabs).toHaveText([
     /PARAM/, /文本/, /事件/, /地图/, /脚本/, /动作/,

@@ -8,7 +8,13 @@
  */
 
 export const SOURCE_PREFIX_LINES = 400;
-export const SOURCE_SLICE_LINES = 400;
+/**
+ * 单片续载行数。400 行时实测快速滚动追不上：一次续载 IPC（几十 ms）只补
+ * 400 行，滚得快时视口撞到已加载末尾等下一片，出现空白。提到 1200 行后，
+ * 单次 IPC 补 3 倍内容，同样滚动速度下留出的余量足以覆盖 IPC 往返。
+ * main 侧 readSlice 按请求的 lineCount 切片，不受 400 限制。
+ */
+export const SOURCE_SLICE_LINES = 1200;
 
 export interface EmevdSourceSliceView {
   ok?: boolean;

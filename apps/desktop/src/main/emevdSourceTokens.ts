@@ -8,7 +8,8 @@
 import { randomUUID } from 'node:crypto';
 
 export const SOURCE_PREFIX_LINES = 400;
-export const SOURCE_SLICE_LINES = 400;
+/** 与 renderer 的 assembleEmevdSource.SOURCE_SLICE_LINES 同口径（单片续载行数）。 */
+export const SOURCE_SLICE_LINES = 1200;
 
 export interface EmevdSourcePutResult {
   token: string;
