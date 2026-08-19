@@ -227,8 +227,7 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
   const unparsedGapCount = document?.unparsedGaps?.length ?? 0;
   const layoutWarningCount = document?.layoutWarnings?.length ?? 0;
   const isPartial = authority === 'partial';
-  // 用具名切片而非 `.slice(0, N).map(` 连写：listTruncation gate 把裸连写视为
-  // 静默截断（此处最多展示前 8 条缺口，且必须配 summary 说明总数）。
+  // 缺口全量渲染（栏自身滚动）；不再用 slice 抽前 8 条（问题 5：显示不设限）。
   const visibleGaps = document?.unparsedGaps ?? [];
 
   return (
