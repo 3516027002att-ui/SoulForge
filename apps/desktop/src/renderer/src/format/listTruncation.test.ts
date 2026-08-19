@@ -1,28 +1,24 @@
 /**
- * 列表截断说明与分页文案的单元测试。
+ * 列表截断与分页文案的单元测试（问题 5 之后）。
  *
- * 这组断言存在的理由是一个实测缺陷：renderer 里十余处列表用静默
- * `slice(0, 24/32/40/60/80/100/200)` 截断，只靠容器 `overflow-y: auto` 挡住视觉，
- * **用户无从得知数据被砍**。anti-ai-design §4「状态优先于概念」要求界面必须能
- * 回答「已解析多少」；只显示前 N 条却不说总数，用户会把部分当成全部——这与硬
- * 约束 7「必须严格区分 partial 与完整」是同一条红线。
+ * 旧版这组断言的立论是「截断必须说出来」：renderer 十余处列表静默
+ * `slice(0, N)`，只靠容器 overflow 挡住视觉，用户无从得知数据被砍，所以界面
+ * 必须报「已解析 N，显示前 M」。问题 5 推翻了这个决定：**正确行为是不再截断**
+ * ——列表 `array.map` 全量进 DOM，栏自己滚动。因此这里不再锁「截断说明必须
+ * 出现」，而是锁「源码不得再按条数砍显示」。
  *
- * 断言按「用户能否回答『我漏看了多少』」组织，而不是按「函数是否返回字符串」：
- * 返回一句「还有更多」在类型上合法，但仍然回答不了那个问题。
- *
- * 除了纯函数契约，这里还对真实源码做**渲染站点对账**：光测 helper 不够——
- * helper 全绿而调用方压根没接，症状与改动前完全一样。对账抓的正是这种形态。
+ * - 纯函数契约（formatListTruncation）保留：该 helper 在 5a 面板收敛前仍被
+ *   使用，测试保证其行为与文档一致；
+ * - 渲染站点对账从「必须出现 *-truncation」改为「已全量渲染的站点不得再
+ *   `slice(0, 数字)` 后直接 map」；
+ * - 分页规模常量断言（FILE_LIST_PAGE_SIZE < 9111 之类）整组删除：资源浏览器
+ *   已全量渲染，不再有页大小常量。
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
-import {
-  FILE_LIST_PAGE_SIZE,
-  SEARCH_HIT_LIMIT,
-  formatListTruncation,
-  formatPageRange
-} from './uiText.js';
+import { formatListTruncation } from './uiText.js';
 
 /** renderer 源码根，由测试入口在编译期注入（不能用 import.meta.url：打包后指向缓存目录）。 */
 declare const __SOULFORGE_RENDERER_ROOT__: string;
@@ -31,127 +27,48 @@ function readRendererSource(relativePath: string): string {
   return readFileSync(resolve(__SOULFORGE_RENDERER_ROOT__, relativePath), 'utf8');
 }
 
-describe('formatListTruncation', () => {
+describe('formatListTruncation（5a 面板收敛前仍在使用，保契约）', () => {
   it('没截断时返回 null（调用方据此不渲染说明）', () => {
     assert.equal(formatListTruncation({ total: 10, shown: 10, noun: '条' }), null);
     assert.equal(formatListTruncation({ total: 3, shown: 10, noun: '条' }), null);
     assert.equal(formatListTruncation({ total: 0, shown: 0, noun: '条' }), null);
   });
 
-  it('截断时同时报出总数、显示数和未显示数', () => {
+  it('截断时同时报出总数、显示数和未显示数（helper 仍按此契约产出）', () => {
     const text = formatListTruncation({ total: 518, shown: 80, noun: '条' });
     assert.ok(text, '截断必须产出说明');
-    assert.match(text, /518/, '必须报真实总数：用户要回答「已解析多少」');
+    assert.match(text, /518/, '必须报真实总数');
     assert.match(text, /80/, '必须报实际显示数');
-    assert.match(text, /438/, '必须报未显示数：只给总数与显示数要用户自己做减法');
-  });
-
-  it('文案是具体数字，不是「还有更多」这类回答不了问题的说法', () => {
-    const text = formatListTruncation({ total: 9111, shown: 200, noun: '个资源' }) ?? '';
-    assert.doesNotMatch(text, /更多|若干|部分数据|等等/, '模糊量词回答不了「漏看多少」');
-  });
-
-  it('给了 hint 时附上可用动作；没给时不编造动作', () => {
-    const withHint = formatListTruncation({
-      total: 100, shown: 10, noun: '条', hint: '用搜索框缩小范围'
-    }) ?? '';
-    assert.match(withHint, /用搜索框缩小范围/);
-
-    const withoutHint = formatListTruncation({ total: 100, shown: 10, noun: '条' }) ?? '';
-    assert.doesNotMatch(
-      withoutHint,
-      /搜索框|分页|翻页/,
-      '面板没有该控件时提示「用搜索框」属于编造可用动作（anti-ai-design §2）'
-    );
-  });
-
-  it('非有限数不产出说明（NaN 会渲染出「已解析 NaN 条」）', () => {
-    assert.equal(formatListTruncation({ total: Number.NaN, shown: 10, noun: '条' }), null);
-    assert.equal(formatListTruncation({ total: 10, shown: Number.NaN, noun: '条' }), null);
-  });
-
-  it('恰好等于上限时不报截断（边界：off-by-one 会让每个满页都误报）', () => {
-    assert.equal(formatListTruncation({ total: 200, shown: 200, noun: '个资源' }), null);
-    assert.ok(formatListTruncation({ total: 201, shown: 200, noun: '个资源' }));
+    assert.match(text, /438/, '必须报未显示数');
   });
 });
 
-describe('formatPageRange', () => {
-  it('报出本页覆盖区间、总数、页码与页大小', () => {
-    const text = formatPageRange({ page: 2, pageSize: 200, total: 9111, noun: '资源' });
-    assert.match(text, /401–600/, '必须报本页覆盖的区间，否则用户不知道漏看了哪一段');
-    assert.match(text, /9111/, '必须报总数');
-    assert.match(text, /第 3\/46 页/, '必须报当前页与总页数');
-    assert.match(text, /每页 200/);
-  });
+describe('显示层不得再按条数砍列表（问题 5）', () => {
+  /**
+   * 已全量渲染的列表站点。判据：这些文件里不得再出现
+   * `slice(0, <数字>)` 后紧跟 `.map(` 的「截断后直接渲染」形态。
+   *
+   * 刻意只登记本轮已改为全量渲染的站点；5a/问题 3/4 未合入前，ESD/FLVER/VFX/
+   * 材质/TPF/FMG/TAE/MSB 场景等面板仍处收敛中，不在此表内（对账扫实际源码，
+   * 不为绿假装它们已不截断）。
+   */
+  const NO_RENDER_SLICE_SITES: ReadonlyArray<{ file: string; why: string }> = [
+    { file: 'App.tsx', why: '资源浏览器文件列表、搜索结果、命令面板命中、欢迎页待审查摘要全量渲染' },
+    { file: 'components/PreviewCards.tsx', why: '预览卡片各列表全量 map' },
+    { file: 'workbench/MsbDataWorkbench.tsx', why: 'MSB 条目列表不再 100 一页' },
+    { file: 'workbench/ReadOnlyEntryWorkbench.tsx', why: '只读条目列表不再 100 一页' },
+    { file: 'editors/Bnd4WorkbenchPanel.tsx', why: 'BND4 子项跨页累积后全量渲染' },
+    { file: 'editors/ScriptContainerPanel.tsx', why: '脚本容器条目跨页累积后全量渲染' },
+    { file: 'editors/ParamDefPanel.tsx', why: 'PARAM 行表不再 20 行翻页' },
+    { file: 'editors/EmevdFourViewPanel.tsx', why: 'EMEVD 四视图事件表不再 200 一页' },
+    { file: 'agent/AgentMessageList.tsx', why: 'Agent 消息全量渲染，不再窗口分页' },
+    { file: 'agent/AgentTaskPanel.tsx', why: '会话历史与工具调用全量渲染' },
+    { file: 'agent/AgentSecondaryDrawer.tsx', why: '会话历史全量渲染，不再每 10 条一页' }
+  ];
 
-  it('末页按真实总数收口，不报越界区间', () => {
-    const text = formatPageRange({ page: 45, pageSize: 200, total: 9111, noun: '资源' });
-    assert.match(text, /9001–9111/, '末页上界必须是 total，不是 (page+1)*pageSize');
-  });
-
-  it('空集合明说没有，不报「1–0 / 共 0」', () => {
-    assert.equal(formatPageRange({ page: 0, pageSize: 200, total: 0, noun: '资源' }), '没有资源');
-  });
-
-  it('单页刚好整除时页数不多算一页', () => {
-    const text = formatPageRange({ page: 0, pageSize: 200, total: 200, noun: '资源' });
-    assert.match(text, /第 1\/1 页/);
-    assert.match(text, /1–200/);
-  });
-});
-
-/**
- * 每个曾经静默截断的渲染站点，登记「文件 → 必须出现的截断说明锚点」。
- *
- * 锚点用 data-testid 而不是文案字面量：文案会改，而 testid 是断言与 e2e 共用的
- * 稳定契约。用正则且不含裸换行——源文件是 CRLF，含 `\n` 的字面量匹配会静默失配，
- * 那会让本组断言恒绿。
- */
-const TRUNCATION_RENDER_SITES: ReadonlyArray<{
-  file: string;
-  testId: string;
-  why: string;
-}> = [
-  { file: 'App.tsx', testId: 'search-truncation', why: '搜索结果此前静默 slice(0, 60)' },
-  { file: 'App.tsx', testId: 'welcome-draft-truncation', why: '欢迎页待审查摘要此前静默 slice(0, 5)' },
-  { file: 'App.tsx', testId: 'cmdk-truncation', why: '命令面板资源命中此前静默 slice(0, 8)' },
-  { file: 'components/PreviewCards.tsx', testId: 'preview-truncation', why: '预览卡片此前 8 处静默 slice' },
-  { file: 'editors/EsdWorkbenchPanel.tsx', testId: 'esd-truncation', why: '状态组表此前静默 slice(0, 200)' },
-  { file: 'editors/TaeWorkbenchPanel.tsx', testId: 'tae-truncation', why: '动画表此前静默 slice(0, 200)' },
-  { file: 'editors/FlverWorkbenchPanel.tsx', testId: 'flver-truncation', why: '材质/骨骼/网格三表此前静默截断' },
-  { file: 'editors/TpfWorkbenchPanel.tsx', testId: 'tpf-truncation', why: '纹理表截断说明须与其他面板同口径' },
-  { file: 'editors/MsbScenePanel.tsx', testId: 'msb-region-truncation', why: 'region 表原为手写文案，不报未显示数' }
-];
-
-describe('截断说明必须真的接进渲染站点', () => {
-  for (const site of TRUNCATION_RENDER_SITES) {
-    it(`${site.file} 渲染 ${site.testId}（${site.why}）`, () => {
-      const source = readRendererSource(site.file);
-      assert.match(
-        source,
-        new RegExp(`data-testid="${site.testId}"`),
-        `${site.file} 必须渲染截断说明；helper 全绿而调用方没接，症状与改动前完全一样`
-      );
-    });
-  }
-
-  it('每个登记站点都调用统一 helper，不各写一份文案', () => {
-    for (const site of TRUNCATION_RENDER_SITES) {
-      const source = readRendererSource(site.file);
-      assert.match(
-        source,
-        /formatListTruncation/,
-        `${site.file} 必须走 formatListTruncation：手写文案会让各面板口径分叉`
-      );
-    }
-  });
-
-  it('这些文件里不得再出现静默的数字截断（负向靶标：裸 slice(0, 数字)）', () => {
-    // 只查列表渲染用的 slice，不查字符串省略（那是正当的单值截断）。
-    // 判据：`.slice(0, <字面数字>)` 紧跟 `.map(` —— 即「截断后直接渲染」。
+  it('这些文件不得再「slice(0, 数字) 后直接 map」渲染列表（负向靶标）', () => {
     const offenders: string[] = [];
-    for (const site of TRUNCATION_RENDER_SITES) {
+    for (const site of NO_RENDER_SLICE_SITES) {
       const source = readRendererSource(site.file);
       const pattern = /\.slice\(0,\s*\d+\)\s*\.map\(/g;
       for (const match of source.matchAll(pattern)) {
@@ -161,92 +78,51 @@ describe('截断说明必须真的接进渲染站点', () => {
     assert.deepEqual(
       offenders,
       [],
-      '截断上限必须是具名常量且配套说明；裸字面量 slice 后直接 map 正是本轮要消除的形态'
+      '这些站点已改为全量渲染；重新引入 slice(0, N) 后直接 map 正是本条要消除的形态'
     );
   });
 
-  it('对账能发现「说明被摘掉」（负向：抹掉 testid 后必须报红）', () => {
-    const site = TRUNCATION_RENDER_SITES[0];
+  it('这些文件不得声明 RENDER_LIMIT / LIST_PAGE_SIZE 之类渲染上限常量', () => {
+    const offenders: string[] = [];
+    for (const site of NO_RENDER_SLICE_SITES) {
+      const source = readRendererSource(site.file);
+      if (/render_limit|_PAGE_SIZE\s*=\s*\d+|_RENDER_LIMIT/i.test(source)) {
+        // 允许运输契约常量（CONTAINER_PAGE_SIZE / SCRIPT_PAGE_SIZE 跨进程页大小）。
+        const transport = /CONTAINER_PAGE_SIZE|SCRIPT_PAGE_SIZE|PARAM_PAGE_SIZE|FMG_PAGE_SIZE/.test(source);
+        if (!transport) {
+          offenders.push(site.file);
+        }
+      }
+    }
+    assert.deepEqual(offenders, [], '显示层不得再有按条数砍的渲染上限常量');
+  });
+
+  it('对账能发现重新引入的截断（负向扰动：注入 slice(0, 200).map 必须红）', () => {
+    const site = NO_RENDER_SLICE_SITES[0];
     assert.ok(site, '登记表为空，本组断言没有靶标');
     const source = readRendererSource(site.file);
-    const stripped = source.replace(
-      new RegExp(`data-testid="${site.testId}"`),
-      'data-testid="renamed"'
-    );
-    assert.notEqual(stripped, source, '注入失败：靶标已变，请更新本用例');
-    assert.doesNotMatch(
-      stripped,
-      new RegExp(`data-testid="${site.testId}"`),
-      '判据必须在说明被摘掉后报红，否则上面每条站点断言形同虚设'
-    );
-  });
-});
-
-describe('资源浏览器分页必须真的接进 App.tsx', () => {
-  const source = (): string => readRendererSource('App.tsx');
-
-  it('文件列表渲染分页切片，不是全量 visibleFiles.map', () => {
-    const text = source();
-    assert.match(
-      text,
-      /\{pagedFiles\.map\(/,
-      '必须渲染分页后的切片：visibleFiles 规模等于用户选的目录（实测整树 9111 文件）'
-    );
-    assert.doesNotMatch(
-      text,
-      /\{visibleFiles\.map\(/,
-      'visibleFiles 全量 map 是本项要消除的形态——只靠 CSS overflow 挡住视觉，DOM 仍全量建出'
-    );
+    const injected = `${source}\n{renderedList.slice(0, 200).map((row) => row)}\n`;
+    const pattern = /\.slice\(0,\s*\d+\)\s*\.map\(/g;
+    const matches = [...injected.matchAll(pattern)];
+    assert.ok(matches.length > 0, '注入失败：判据没有抓到 slice(0, N).map，本用例形同虚设');
   });
 
-  it('渲染分页导航控件（截断而不给翻页入口等于砍掉数据）', () => {
-    assert.match(source(), /data-testid="file-list-pager"/);
-    assert.match(source(), /data-testid="file-list-page-range"/);
-  });
-
-  it('页码随过滤条件复位（否则改过滤词会停在越界空页，看起来与「没有匹配」一样）', () => {
-    const text = source();
-    const effect = /useEffect\(\(\) => \{\s*setFilePage\(0\);\s*\},\s*\[([^\]]*)\]\)/.exec(text);
-    assert.ok(effect, '找不到页码复位 effect，靶标已失效');
-    for (const dependency of ['resourceMode', 'query']) {
+  it('App.tsx 不再渲染截断说明 testid（search / cmdk / welcome-draft）', () => {
+    const source = readRendererSource('App.tsx');
+    for (const testid of ['search-truncation', 'cmdk-truncation', 'welcome-draft-truncation']) {
       assert.ok(
-        effect[1]?.includes(dependency),
-        `复位依赖必须含 ${dependency}：该值一变，原页码就可能越界`
+        !source.includes(`data-testid="${testid}"`),
+        `App.tsx 不应再渲染 ${testid}；重新出现说明截断说明被利旧`
       );
     }
   });
 
-  it('页码越界被夹紧，不直接用裸 filePage 取切片', () => {
-    const text = source();
-    assert.match(text, /clampedFilePage/, '必须存在夹紧后的页码');
-    // SHELL-09 把 visibleFiles 改名 physicalBrowseFiles（Files 独占物理浏览）；
-    // 断言的是「切片用夹紧页码」这个形态，不是具体变量名。
+  it('资源浏览器全量渲染：App.tsx 对过滤后的完整集合直接 map，且不再有页大小常量', () => {
+    const source = readRendererSource('App.tsx');
     assert.match(
-      text,
-      /pagedFiles\s*=\s*useMemo\(\s*\(\)\s*=>\s*\w+\.slice\(\s*clampedFilePage/,
-      '切片必须用夹紧后的页码：裸页码越界会渲染空列表，与「没有资源」无法区分'
+      source,
+      /\{physicalBrowseFiles\.map\(/,
+      '文件列表必须对完整集合全量 map（问题 5：显示不设限）'
     );
-  });
-});
-
-describe('资源浏览器分页规模常量', () => {
-  it('页大小是有限正整数，且远小于实测最大工作区规模（9111 文件）', () => {
-    assert.ok(Number.isInteger(FILE_LIST_PAGE_SIZE) && FILE_LIST_PAGE_SIZE > 0);
-    assert.ok(
-      FILE_LIST_PAGE_SIZE < 9111,
-      '页大小若不小于实测最大规模，分页等于没分页'
-    );
-  });
-
-  it('搜索结果上限是有限正整数', () => {
-    assert.ok(Number.isInteger(SEARCH_HIT_LIMIT) && SEARCH_HIT_LIMIT > 0);
-  });
-
-  it('9111 个文件按此页大小分页后，单页 DOM 规模等于页大小', () => {
-    const total = 9111;
-    const pageCount = Math.ceil(total / FILE_LIST_PAGE_SIZE);
-    const lastPageSize = total - (pageCount - 1) * FILE_LIST_PAGE_SIZE;
-    assert.ok(pageCount > 1, '实测规模必须真的跨页，否则本组断言没有靶标');
-    assert.ok(lastPageSize > 0 && lastPageSize <= FILE_LIST_PAGE_SIZE);
   });
 });
