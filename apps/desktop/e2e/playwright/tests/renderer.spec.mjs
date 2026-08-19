@@ -876,11 +876,11 @@ test('写入失败：保留诊断，状态为 failed，可重新批准', async (
   await app.close();
 });
 
-test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右下 Text）走完 language→container→table→entry→content 全链', async () => {
+test('TEXT-20B：§9.1 文本工作台（左 Categories + 中 Entries + 右 Text）走完 language→container→table→entry→content 全链；3-B 只列当前容器', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 从开始侧栏资源树打开 msgbnd：目录链自动定位到该容器第一个表（item.fmg）。
+  // 从开始侧栏资源树打开 item 容器 msgbnd：目录链自动定位到该容器第一个表（item.fmg）。
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
 
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
@@ -895,12 +895,19 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   const entriesPane = fmgPanel.getByRole('region', { name: 'Text Entries' });
   await expect(entriesPane.locator('h3')).toContainText('Text Entries');
 
-  // 11-B：目录按容器分组 —— item / menu 两组必须同时在场（组头可见、可点），
-  // 每组下面有自己的表行；menu 不再被埋成「item 的续集」。
-  await expect(fmgPanel.getByRole('button', { name: 'item 组' })).toBeVisible();
-  await expect(fmgPanel.getByRole('button', { name: 'menu 组' })).toBeVisible();
+  // 3-B：点开 item 容器后 Categories 只列该容器的表 —— 不再有 ITEM/MENU 组头，
+  // 不再出现 menu 容器里的表（menu.fmg / menu-long.fmg）。
+  await expect(fmgPanel.getByRole('button', { name: 'item 组' })).toHaveCount(0);
+  await expect(fmgPanel.getByRole('button', { name: 'menu 组' })).toHaveCount(0);
+  await expect(fmgPanel.locator('.fmg-group__header')).toHaveCount(0);
   await expect(fmgPanel.getByRole('row', { name: /item\.fmg/ })).toBeVisible();
-  await expect(fmgPanel.getByRole('row', { name: /menu\.fmg/ })).toBeVisible();
+  await expect(fmgPanel.getByRole('row', { name: /menu\.fmg/ })).toHaveCount(0);
+
+  // 3-A：界面不再画「N 槽 · M 有字」「N 张表」这类目录元数据噪音。
+  const categoriesText = await fmgPanel.getByRole('region', { name: 'Text Categories' }).innerText();
+  expect(categoriesText).not.toContain('槽');
+  expect(categoriesText).not.toContain('有字');
+  expect(categoriesText).not.toContain('张表');
 
   // 自动定位命中 item.fmg：条目 100/101 立即可见，选中后可编辑。
   const row100 = fmgPanel.getByRole('row', { name: /伤药葫芦/ });
@@ -908,15 +915,22 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   await row100.click();
   await expect(window.locator('label', { hasText: '编辑 ID 100' }).locator('textarea')).toBeVisible();
 
-  // 切换表 → 父级切换清理：item.fmg 的条目被清空；menu.fmg 真空表显示空态而非失败。
-  await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
+  // 3-B：换容器走左侧资源浏览器 —— 点 menu.msgbnd 后 Categories 换成 menu 容器（
+  // menu.fmg / menu-long.fmg），item 的表不再在场。
+  await selectFileItem(window, 'msg/menu.msgbnd.dcx');
+  await expect(fmgPanel.getByRole('row', { name: /menu\.fmg/ })).toBeVisible();
+  await expect(fmgPanel.getByRole('row', { name: /menu-long\.fmg/ })).toBeVisible();
+  await expect(fmgPanel.getByRole('row', { name: /item\.fmg/ })).toHaveCount(0);
+
+  // 真空表显示空态而非失败。
   const entriesColumn = fmgPanel.getByRole('region', { name: 'Text Entries' });
+  await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
   await expect(entriesColumn).toContainText('当前页无条目');
   await expect(entriesColumn).not.toContainText('伤药葫芦');
   await expect(entriesColumn).not.toContainText('danger');
 
-  // 切回 item.fmg：条目恢复（清理不破坏切回路径）。
-  await fmgPanel.getByRole('row', { name: /item\.fmg/ }).click();
+  // 切回 item 容器：条目恢复（清理不破坏切回路径）。
+  await selectFileItem(window, 'msg/test.msgbnd.dcx');
   await expect(fmgPanel.getByRole('row', { name: /伤药葫芦/ })).toBeVisible();
 
   // 无匹配搜索与真空表分离：搜索无命中显示「没有匹配的条目」。
@@ -933,16 +947,58 @@ test('TEXT-20B：§9.1 文本工作台（左 Categories + 右上 Entries + 右�
   await app.close();
 });
 
-test('TEXT-20C：真空表新增直写落盘，写按 tableId 路由且 sibling 表不被改动（S29 直写）', async () => {
+test('3-C：文本长表一次给全 —— menu-long.fmg 130 条全量渲染，无分页条，空槽 ID 在且文本 —，筛选可命中后段 ID', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
-  // 从开始侧栏资源树打开 msgbnd：TEXT-20C 起 live 门禁以 sourceHash 为准，真空表也 live。
+  await selectFileItem(window, 'msg/menu.msgbnd.dcx');
+  const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
+  await expect(fmgPanel).toBeVisible();
+
+  // 点开长表：130 条 > 100，应一次全量渲染。
+  await fmgPanel.getByRole('row', { name: /menu-long\.fmg/ }).click();
+  const entriesColumn = fmgPanel.getByRole('region', { name: 'Text Entries' });
+
+  // 3-C：无分页条（无上一页 / 下一页 / N/M）。
+  await expect(fmgPanel.getByRole('button', { name: '上一页' })).toHaveCount(0);
+  await expect(fmgPanel.getByRole('button', { name: '下一页' })).toHaveCount(0);
+  const entriesText = await entriesColumn.innerText();
+  expect(entriesText).not.toMatch(/\d+\/\d+/);
+
+  // 全量行数：表头 + 130 条（id 200–329）都在 DOM，未按 100 切片。
+  await expect(fmgPanel.locator('.binder-child-table [role="row"]')).toHaveCount(131);
+
+  // 最后一条能滚到视口（column 自己 overflow-y auto，不依赖分页条）。
+  const lastRow = fmgPanel.locator('[data-fmg-entry-id="329"]');
+  await expect(lastRow).toBeVisible();
+  await lastRow.scrollIntoViewIfNeeded();
+  await expect(lastRow).toBeInViewport();
+
+  // 空槽（i%25===7 → text ''）ID 照常在场，文本列为 —。
+  const emptyRow = fmgPanel.locator('[data-fmg-entry-id="207"]');
+  await expect(emptyRow).toBeVisible();
+  await expect(emptyRow).toContainText('—');
+
+  // 3-C：筛选后段 ID 能命中，不必先翻到第 N 页。
+  await entriesColumn.locator('input[aria-label="筛选 FMG"]').fill('329');
+  await expect(fmgPanel.locator('[data-fmg-entry-id="329"]')).toBeVisible();
+  await expect(fmgPanel.locator('[data-fmg-entry-id="200"]')).toHaveCount(0);
+
+  await window.screenshot({ path: 'test-results/text-3c-fmg-long-table.png' });
+  await app.close();
+});
+
+test('TEXT-20C：真空表新增直写落盘，写按 tableId 路由且 sibling 表不被改动（S29 直写，3-B 跨容器走资源浏览器）', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  // 从开始侧栏资源树打开 item 容器：TEXT-20C 起 live 门禁以 sourceHash 为准，真空表也 live。
   await selectFileItem(window, 'msg/test.msgbnd.dcx');
   const fmgPanel = window.getByRole('region', { name: 'FMG 本地化工作台' });
   await expect(fmgPanel).toBeVisible();
 
-  // menu.fmg 是真空表：显示「当前页无条目」而非失败（真空表 ≠ 不可编辑）。
+  // 3-B：跨容器切表走资源浏览器 —— 切到 menu 容器后 menu.fmg 真空表可用。
+  await selectFileItem(window, 'msg/menu.msgbnd.dcx');
   await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
   const entriesTable = fmgPanel.locator('.binder-child-table');
   await expect(entriesTable).toContainText('当前页无条目');
@@ -953,18 +1009,19 @@ test('TEXT-20C：真空表新增直写落盘，写按 tableId 路由且 sibling 
   await expect(editor).toBeVisible();
   await editor.fill('菜单说明·新增');
 
-  // S29：编辑直写，不先进审查队列。换表触发的 commitDraft 把 id=1 的 upsert 经
-  // applyFmgMutation（带 tableId）落到 fixture 的 menu 表。
-  await fmgPanel.getByRole('row', { name: /item\.fmg/ }).click();
+  // S29：编辑直写，不先进审查队列。失焦（onBlur → commitDraft）把 id=1 的 upsert
+  // 经 applyFmgMutation（带 tableId）落到 fixture 的 menu 表。
+  await editor.blur();
+  await expect(entriesTable).toContainText('菜单说明·新增');
+
+  // sibling：menu 写不触及 item.fmg，切回 item 容器后 100/101 仍在。
+  await selectFileItem(window, 'msg/test.msgbnd.dcx');
   await expect(fmgPanel.getByRole('row', { name: /伤药葫芦/ })).toBeVisible();
 
   // 切回 menu.fmg 重读：新增条目自 fixture.menuEntries 可见（真空表写后不被伪装回 0 条）。
+  await selectFileItem(window, 'msg/menu.msgbnd.dcx');
   await fmgPanel.getByRole('row', { name: /menu\.fmg/ }).click();
   await expect(entriesTable).toContainText('菜单说明·新增');
-
-  // sibling：menu 写不触及 item.fmg，100/101 仍在。
-  await fmgPanel.getByRole('row', { name: /item\.fmg/ }).click();
-  await expect(fmgPanel.getByRole('row', { name: /伤药葫芦/ })).toBeVisible();
 
   await window.screenshot({ path: 'test-results/text-20c-empty-table-write.png' });
   await app.close();

@@ -302,7 +302,14 @@ const fixture = {
     entries: [
       { id: 100, text: '伤药葫芦' },
       { id: 101, text: '返回骨片' }
-    ]
+    ],
+    // 3-C：menu 容器里的一张长表（130 条 > 100，id 200–329）。含空槽
+    //（i % 25 === 7 → text ''），供 e2e 验证「一次拿全 + 空槽 ID 在且文本 —」。
+    // 只读样本，写链不需要路由它。
+    longEntries: Array.from({ length: 130 }, (_, i) => ({
+      id: 200 + i,
+      text: i % 25 === 7 ? '' : `长文本 ${200 + i}`
+    }))
   }
 };
 
@@ -2559,9 +2566,10 @@ function registerFixtureIpc() {
           sourceUri: 'fixture://msg/menu.msgbnd.dcx',
           relativePath: 'msg/menu.msgbnd.dcx',
           parseStatus: 'confirmed',
-          tableCount: 1,
+          tableCount: 2,
           tables: [
-            { tableId: 'text:zhocn:menu:0-menu.fmg', entryName: 'menu.fmg', entryCount: 0, sourceUri: 'fixture://msg/menu.msgbnd.dcx', entryIndex: 0 }
+            { tableId: 'text:zhocn:menu:0-menu.fmg', entryName: 'menu.fmg', entryCount: 0, sourceUri: 'fixture://msg/menu.msgbnd.dcx', entryIndex: 0 },
+            { tableId: 'text:zhocn:menu:1-menu-long.fmg', entryName: 'menu-long.fmg', entryCount: fixture.fmg.longEntries.length, sourceUri: 'fixture://msg/menu.msgbnd.dcx', entryIndex: 1 }
           ],
           diagnostics: []
         }
@@ -2574,8 +2582,10 @@ function registerFixtureIpc() {
     if (fixture.fmg.menuEntries === undefined) fixture.fmg.menuEntries = [];
     // TEXT-20C：menu.fmg 是真空表，但写链（applyFmgMutation 按 tableId 路由到
     // menuEntries）落盘后重读必须可见——「真空表可新增」是 live 门禁放行的结果，
-    // 不能让分页读取把它伪装回 0 条。
-    const source = tableId.includes('menu') ? fixture.fmg.menuEntries : fixture.fmg.entries;
+    // 不能让分页读取把它伪装回 0 条。3-C：menu-long.fmg 是长表（130 条只读）。
+    const source = tableId.includes('menu-long')
+      ? fixture.fmg.longEntries
+      : tableId.includes('menu') ? fixture.fmg.menuEntries : fixture.fmg.entries;
     const q = (query ?? '').trim().toLowerCase();
     const filtered = q.length === 0
       ? source
