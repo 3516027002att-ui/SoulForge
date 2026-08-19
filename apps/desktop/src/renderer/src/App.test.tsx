@@ -1,5 +1,6 @@
 /**
- * App 壳层源码断言（S33）：活动栏四图标已删，开始侧栏承接开始页功能。
+ * App 壳层源码断言（问题 1）：开始页只在首次打开（无工作区）出现；换文件夹
+ * 走标题栏 workspace-switcher；暂存/审计入口回到活动栏。
  *
  * App.tsx 需要真实 bridge + Electron 才能 SSR 完整渲染，这里做源码级断言
  * （与 FmgWorkbenchPanel 的 Negative source tests 同一范式）：锁的是 DOM
@@ -14,48 +15,68 @@ const appSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
   'utf8'
 );
+// buildDomainSummaries 的 visibility 逻辑在 domainNavigation.ts（App.tsx 只传 hasWorkspace）。
+const domainNavigationSource = readFileSync(
+  join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'navigation', 'domainNavigation.ts'),
+  'utf8'
+);
 
-describe('S33 壳层：活动栏四图标删除，开始侧栏承接开始页功能', () => {
-  it('活动栏不再有 资源浏览器 / 搜索 / 暂存区 / 审计与回滚 四个按钮', () => {
+describe('问题 1 壳层：开始页只在首次打开；换文件夹走 workspace-switcher；暂存/审计回活动栏', () => {
+  it('活动栏包含 暂存区 / 审计与回滚（ab-item），搜索仍只走 Ctrl+K，不残留「开始」式资源栏开关', () => {
     // 只检查活动栏区块（nav.activitybar 到侧栏 aside 之间）——侧栏面板本身的
     // aria-label 是面板标题，不属于活动栏按钮。
     const activitybarRegion = appSource.slice(
       appSource.indexOf('className="activitybar"'),
       appSource.indexOf('<aside')
     );
-    assert.doesNotMatch(activitybarRegion, /aria-label="资源浏览器"/);
+    assert.match(activitybarRegion, /aria-label="暂存区"/);
+    assert.match(activitybarRegion, /aria-label="审计与回滚"/);
+    assert.match(activitybarRegion, /aria-label="AI Agent 面板"/);
+    assert.match(activitybarRegion, /aria-label="设置"/);
+    // 搜索不进活动栏（走 Ctrl+K，不加第四个图标）。
     assert.doesNotMatch(activitybarRegion, /aria-label="搜索"/);
-    assert.doesNotMatch(activitybarRegion, /aria-label="暂存区/);
-    assert.doesNotMatch(activitybarRegion, /aria-label="审计与回滚"/);
+    // 活动栏与 Agent 之间不再有任何「开始」图标残留。
+    assert.doesNotMatch(activitybarRegion, /aria-label="开始"/);
   });
 
-  it('活动栏只剩 Agent 与设置（贴底），不残留 48px 空条', () => {
-    assert.match(appSource, /aria-label="AI Agent 面板"/);
-    assert.match(appSource, /aria-label="设置"/);
-    // 四个 ab-item 按钮删除后,ab-spacer 直接顶到 Agent。
-    const activitybar = appSource.slice(appSource.indexOf('className="activitybar"'));
-    const agentIdx = activitybar.indexOf('aria-label="AI Agent 面板"');
-    assert.ok(agentIdx > 0, '活动栏里仍有 Agent 入口');
+  it('有工作区后「开始」不是页：project 从顶栏隐藏，selectDomain 不再有「召唤资源栏」旁路', () => {
+    // App.tsx 把 hasWorkspace 传给 buildDomainSummaries（有工作区后 project 的
+    // visibility 隐藏在 domainNavigation.ts 判定；无工作区仍 visible）。
+    assert.match(appSource, /hasWorkspace: workspace !== null/);
+    assert.match(domainNavigationSource, /domain === 'project' && input\.hasWorkspace === true/);
+    // 点「开始」不再以 resourceSidebarOpen 当选中态（DomainNavigationBar 已删该 prop）。
+    assert.doesNotMatch(appSource, /resourceSidebarOpen/);
+    // 旧的「有工作区 + project 提前 return 只折资源栏」整段已删除。
+    assert.doesNotMatch(appSource, /召唤资源栏/);
   });
 
-  it('开始态侧栏包含开始页四件事：打开/更换 Mod、选/换/清原版、工作区名、挂载状态', () => {
-    assert.match(appSource, /data-testid="start-sidebar"/);
-    assert.match(appSource, /data-testid="open-workspace"/);
-    assert.match(appSource, /data-testid="choose-base-directory"/);
-    assert.match(appSource, /工作区：\{workspace\?\.workspaceLabel/);
-    assert.match(appSource, /原版：\{sessionMeta\?\.baseMounted/);
+  it('标题栏不可点品牌标签换成 workspace-switcher 按钮/菜单（打开/更换 Mod、选/换/清原版）', () => {
+    assert.match(appSource, /data-testid="workspace-switcher"/);
+    assert.match(appSource, /data-testid="switcher-open-workspace"/);
+    assert.match(appSource, /data-testid="switcher-choose-base-directory"/);
+    assert.match(appSource, /data-testid="switcher-clear-base-directory"/);
+    assert.match(appSource, /void openWorkspace\(\)/);
+    assert.match(appSource, /void chooseBaseDirectory\(\)/);
+    assert.match(appSource, /clearBaseDirectory\(\)/);
+    // 旧的不可点品牌标签已移除。
+    assert.doesNotMatch(appSource, /className="brand-tag"/);
   });
 
-  it('搜索/暂存/审计进开始侧栏折叠区，搜索仍只走 Ctrl+K', () => {
-    assert.match(appSource, /data-testid="start-sidebar-tools"/);
-    assert.match(appSource, /搜索（Ctrl\+K）/);
-    assert.match(appSource, /activateSidebarView\('staging'\)/);
-    assert.match(appSource, /activateSidebarView\('audit'\)/);
+  it('开始态侧栏已拆：源码不得再有 start-sidebar / start-sidebar-tools / start-sidebar-file-list', () => {
+    assert.doesNotMatch(appSource, /data-testid="start-sidebar"/);
+    assert.doesNotMatch(appSource, /data-testid="start-sidebar-tools"/);
+    assert.doesNotMatch(appSource, /data-testid="start-sidebar-file-list"/);
+    assert.doesNotMatch(appSource, /START_SIDEBAR_FILE_LIMIT/);
   });
 
-  it('开始侧栏带资源树（工作区资源列表，单击打开）', () => {
-    assert.match(appSource, /data-testid="start-sidebar-file-list"/);
-    assert.match(appSource, /START_SIDEBAR_FILE_LIMIT/);
+  it('mountWorkspace 不把 activeDomain 落回 project：恢复失败时默认进 param', () => {
+    // 有工作区后挂载不得「先写回 project 再指望恢复」——旧实现
+    // `setActiveDomain('project'); setCenterView('project');` 的顺序已删除。
+    assert.doesNotMatch(appSource, /setActiveDomain\('project'\)/);
+    // restore 返回 boolean；没有合法上次领域 → 默认 param。
+    assert.match(appSource, /const restoredDomain = restoreLastShellState/);
+    assert.match(appSource, /if \(!restoredDomain\)/);
+    assert.match(appSource, /setActiveDomain\('param'\)/);
   });
 
   it('12-E：侧栏不再拼「XX · 逻辑库」（所有语义域都删，Files 数量与 project「开始」仍在）', () => {

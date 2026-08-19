@@ -305,7 +305,32 @@ kbd {
 .titlebar__brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .brand-mark { display: block; flex: none; width: 16px; height: 16px; object-fit: contain; }
 .brand-name { font-weight: 600; letter-spacing: .01em; }
-.brand-tag { font-size: 11px; color: var(--ink-3); white-space: nowrap; max-width: 30ch; overflow: hidden; text-overflow: ellipsis; }
+.workspace-switcher { position: relative; display: flex; align-items: center; min-width: 0; }
+.workspace-switcher__trigger {
+  -webkit-app-region: no-drag;
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
+  max-width: 36ch; padding: 2px 6px;
+  font-size: 11px; color: var(--ink-3); white-space: nowrap;
+  border-radius: var(--radius-s);
+  transition: color var(--dur-micro), background var(--dur-micro), box-shadow var(--dur-micro);
+}
+.workspace-switcher__trigger:hover { color: var(--ink-1); background: var(--control-hover-bg); box-shadow: var(--control-hover-shadow); }
+.workspace-switcher__trigger[aria-expanded='true'] { color: var(--ink-1); background: var(--ember-soft); }
+.workspace-switcher__label { overflow: hidden; text-overflow: ellipsis; }
+.workspace-switcher__caret { font-size: 9px; opacity: .7; }
+.workspace-switcher__backdrop { position: fixed; inset: 0; z-index: 39; }
+.workspace-switcher__menu {
+  -webkit-app-region: no-drag;
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 41;
+  display: flex; flex-direction: column; min-width: 180px; padding: 4px;
+  background: var(--forge-2); border: 1px solid var(--line); border-radius: var(--radius-m);
+  box-shadow: var(--control-hover-shadow);
+}
+.workspace-switcher__menu button[role='menuitem'] {
+  text-align: left; padding: 6px 10px; font-size: 12px; color: var(--ink-2);
+  border-radius: var(--radius-s);
+}
+.workspace-switcher__menu button[role='menuitem']:hover { color: var(--ink-0); background: var(--control-hover-bg); }
 .titlebar__center { flex: 1; display: flex; justify-content: center; }
 .cmdk-trigger {
   -webkit-app-region: no-drag;
@@ -1854,7 +1879,8 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 /* ═══════════ 响应式 ═══════════ */
 @media (max-width: 920px) {
   .sidebar { --sidebar-w: 224px; }
-  .brand-tag { display: none; }
+  /* 问题 1：workspace-switcher 是换文件夹的唯一常驻入口，窄屏不能藏按钮；只收窄标签。 */
+  .workspace-switcher__label { max-width: 20ch; }
 }
 @media (max-width: 720px) {
   .cmdk-trigger span { display: none; }
@@ -2166,13 +2192,6 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .esd-partial summary, .tae-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
 .esd-partial ul, .tae-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
 
-/* S33：开始态侧栏——开始页四件事 + 折叠工具 + 资源树。 */
-.start-sidebar { display: flex; flex-direction: column; gap: 8px; padding: 8px; min-height: 0; }
-.start-sidebar__block { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px; display: flex; flex-direction: column; gap: 8px; }
-.start-sidebar__workspace { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11px; font-weight: 600; margin: 0; }
-.start-sidebar__actions { display: flex; flex-direction: column; gap: 6px; }
-.start-sidebar__tools summary { cursor: pointer; color: var(--ink-2); font-size: 11px; }
-.start-sidebar__tools-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 0 0 4px; }
 
 /* S17：动作预览右栏的 3D 视口宿主（FlverViewer 撑满列宽）。
    问题4-A：预览区（.tae-preview-body）吃满栏高——FlverViewer 高度跟栏走，不写死
