@@ -1025,16 +1025,25 @@ test('模型服务高级选项：默认收起，展开可配置采样参数并�
   await advanced.getByLabel('topK').fill('5');
   await advanced.getByLabel('Embedding 模型').fill('fixture-embed-model');
 
+  // 服务地址 / 模型必须先填：2-E 起 baseUrl 空不 upsert、不拉模型列表
+  // （「请先填写服务地址再获取模型列表」是产品正确行为）。同时它也是
+  // 这次保存要落进 vault 的配置字段。
+  await drawer.locator('label', { hasText: '服务地址' }).locator('input').fill('http://127.0.0.1:3999');
+  await drawer.locator('label', { hasText: '模型 ID' }).locator('input').fill('fixture-model');
+
   // 保存：fixture upsert echo 输入，状态文案确认保存成功。填密钥让
   // fixture 返回 hasCredential=true（「生成向量索引」按钮依赖它）。
+  // S25 起页脚按钮文本是「保存」（不再是「保存模型服务」）；自动保存也在场，
+  // 但这里显式点「保存」做立即 flush 后再断言手动保存文案。
   await drawer.getByLabel('API 密钥（仅写入，不回显）').fill('fixture-api-key');
-  await drawer.getByRole('button', { name: '保存模型服务' }).click();
+  await drawer.getByRole('button', { name: '保存', exact: true }).click();
   await expect(drawer).toContainText('已保存模型服务：');
 
-  // 获取模型列表：fixture 返回两个可用模型，datalist 填入可选项。
+  // 获取模型列表：fixture 返回两个可用模型。S25 起渲染为可点击列表
+  // （.model-pick-list，不再是 datalist）。
   await drawer.getByRole('button', { name: '获取模型列表' }).click();
   await expect(drawer).toContainText('找到 2 个可用模型');
-  await expect(drawer.locator('datalist option')).toHaveCount(2);
+  await expect(drawer.locator('.model-pick-list button')).toHaveCount(2);
 
   // 已保存服务带 embedding 模型：列表项显示 embedding 标记与「生成向量索引」按钮。
   await expect(drawer.locator('.list')).toContainText('embedding: fixture-embed-model');

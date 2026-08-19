@@ -2444,6 +2444,7 @@ function registerFixtureIpc() {
   });
   // 合成保存：echo 输入（含高级选项字段），供「保存模型服务」与高级选项 e2e 使用。
   handleTrusted('modelService.upsert', (_event, input) => {
+    track('modelService.upsert');
     const saved = {
       id: input.id ?? 'fixture-saved',
       displayName: input.displayName,
