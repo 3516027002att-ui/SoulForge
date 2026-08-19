@@ -595,8 +595,10 @@ describe('Negative source tests（VFX-54B/54C）', () => {
     assert.doesNotMatch(panelSource, /readFile\(/);
   });
 
-  it('截断说明走 formatListTruncation 且保留 vfx 专属 testId', () => {
-    assert.match(panelSource, /formatListTruncation/);
-    assert.match(panelSource, /data-testid="vfx-node-truncation"/);
+  it('节点/host/属性/可编辑值全量渲染：不再截断，也没有 vfx-node/host-truncation testId（问题 5）', () => {
+    assert.doesNotMatch(panelSource, /formatListTruncation/);
+    assert.doesNotMatch(panelSource, /data-testid="vfx-(node|host|property|edit)-truncation"/);
+    assert.match(panelSource, /const visibleFlatNodes = flatNodes;/);
+    assert.match(panelSource, /const visibleHosts = hosts;/);
   });
 });
