@@ -142,12 +142,8 @@ import {
   type EditableMsgRow
 } from './format/msgRows.js';
 import {
-  FILE_LIST_PAGE_SIZE,
-  SEARCH_HIT_LIMIT,
   filterFilesForMode,
   formatFilesCount,
-  formatListTruncation,
-  formatPageRange,
   operationStatusLabel,
   shortenPath
 } from './format/uiText.js';
@@ -165,12 +161,6 @@ type CenterView = 'project' | 'resource' | 'operations' | 'settings';
 
 /** P0 安全收口：权限模式由主进程锁定，renderer 不得自行切换。 */
 const AI_PERMISSION_LOCK_REASON = 'P0 安全收口期间由主进程锁定为计划模式；renderer 不能抬高授权。';
-
-/** 欢迎页「待审查变更」摘要显示条数。摘要之外的条数由截断说明报出。 */
-const WELCOME_DRAFT_LIMIT = 5;
-
-/** 命令面板（Ctrl K）列出的资源命中条数。命中总数由截断说明报出。 */
-const CMDK_RESOURCE_HIT_LIMIT = 8;
 
 /** SoulForge 产品图标：标题栏和欢迎页使用透明 S 形标志。 */
 const SOULFORGE_ICON_URL = new URL('./assets/soulforge-icon.png', import.meta.url).href;
@@ -435,7 +425,6 @@ export function App(): ReactElement {
   const [agentServices, setAgentServices] = useState<ModelServiceChoice[]>([]);
   const [agentServiceId, setAgentServiceId] = useState<string | null>(null);
   const [agentSessions, setAgentSessions] = useState<AgentSessionRow[]>([]);
-  const [agentSessionsPage, setAgentSessionsPage] = useState(0);
   const [agentSessionsError, setAgentSessionsError] = useState<string | null>(null);
   const [agentSessionDetail, setAgentSessionDetail] = useState<AgentSessionDetail | null>(null);
   const [respondingApprovalCallId, setRespondingApprovalCallId] = useState<string | null>(null);
@@ -952,69 +941,26 @@ export function App(): ReactElement {
   );
 
   /**
-   * 资源浏览器分页。
-   *
-   * 此前 `visibleFiles.map` 无分页无上限，只靠 `.file-list` 的 `overflow-y: auto`
-   * 挡住视觉——DOM 仍然全量建出。规模不可控（实测整个只狼解包树 9111 个文件），
-   * 属于硬约束 17 明确要求分页/虚拟化的场景。
-   *
-   * 页码必须随过滤条件复位，否则「停在第 30 页时改过滤词」会得到一个空页面，
-   * 而空页面看起来与「没有匹配资源」完全一样——用户无法区分是真没有还是页码
-   * 越界了。
+   * 资源浏览器文件列表全量渲染（问题 5：显示不设限）。`physicalBrowseFiles` 是
+   * 过滤后的完整集合，直接 `.map` 进 DOM，由 `.file-list` 的 overflow-y: auto
+   * 滚动；不再按每页 200 切。
    */
-  const [filePage, setFilePage] = useState(0);
-  const filePageCount = Math.max(1, Math.ceil(physicalBrowseFiles.length / FILE_LIST_PAGE_SIZE));
-  const clampedFilePage = Math.min(filePage, filePageCount - 1);
-  useEffect(() => {
-    setFilePage(0);
-  }, [activeDomain, query, resourceMode, allFiles, files]);
-  const pagedFiles = useMemo(
-    () => physicalBrowseFiles.slice(
-      clampedFilePage * FILE_LIST_PAGE_SIZE,
-      clampedFilePage * FILE_LIST_PAGE_SIZE + FILE_LIST_PAGE_SIZE
-    ),
-    [physicalBrowseFiles, clampedFilePage]
-  );
   /**
    * 搜索面板的全局命中（不受领域限制）：搜索是定位手段，不是当前领域过滤。
-   * 只取前 SEARCH_HIT_LIMIT 条渲染，总数由 searchTruncationNote 报出。
+   * 全量渲染匹配项（显示不设限），列表自身滚动。
    */
   const searchHits = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return [];
     const base = allFiles.length > 0 ? allFiles : files;
-    return base
-      .filter((file) => file.relativePath.toLowerCase().includes(normalized)
-        || file.resourceKind.toLowerCase().includes(normalized)
-        || file.formatLabel.toLowerCase().includes(normalized))
-      .slice(0, SEARCH_HIT_LIMIT);
-  }, [allFiles, files, query]);
-  const globalSearchTotal = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return 0;
-    const base = allFiles.length > 0 ? allFiles : files;
     return base.filter((file) => file.relativePath.toLowerCase().includes(normalized)
       || file.resourceKind.toLowerCase().includes(normalized)
-      || file.formatLabel.toLowerCase().includes(normalized)).length;
+      || file.formatLabel.toLowerCase().includes(normalized));
   }, [allFiles, files, query]);
   /**
-   * 欢迎页「待审查变更」摘要条数。摘要不是队列本体——完整队列在暂存区面板，
-   * 所以这里保留截断，但必须说清还有多少没显示（否则 5 条与 50 条长得一样，
-   * 用户会以为只剩 5 个待审）。
+   * 欢迎页「待审查变更」摘要：全量渲染（显示不设限）。完整队列另在暂存区面板。
    */
   const draftChanges = changeState.items.filter((item) => item.status === 'draft');
-  const draftTruncationNote = formatListTruncation({
-    total: draftChanges.length,
-    shown: Math.min(draftChanges.length, WELCOME_DRAFT_LIMIT),
-    noun: '项待审查变更',
-    hint: '完整队列见暂存区面板'
-  });
-  const searchTruncationNote = formatListTruncation({
-    total: globalSearchTotal,
-    shown: searchHits.length,
-    noun: '个资源',
-    hint: '缩小关键字，或到 Files 领域分页浏览全部'
-  });
 
   useEffect(() => {
     let cancelled = false;
@@ -2532,7 +2478,6 @@ export function App(): ReactElement {
     }
     setAgentSessionsError(null);
     setAgentSessions(result.sessions);
-    setAgentSessionsPage(0);
   }
 
   /**
@@ -2726,24 +2671,14 @@ export function App(): ReactElement {
     (command) => !cmdkNormalized || command.label.toLowerCase().includes(cmdkNormalized)
   );
   /**
-   * 命令面板的资源命中。
-   *
-   * 保留 8 条上限：命令面板是「快速跳转」而不是浏览器，列长了反而选不动。但必须
-   * 说清命中总数——此前静默截断，用户敲了个宽泛关键字看到 8 条，会以为工作区里
-   * 只有这 8 个匹配文件（实测整树 9111 文件，宽泛关键字可命中数千）。
+   * 命令面板的资源命中：全量渲染（显示不设限）。此前按 8 条上限截断并补说明，
+   * 命令面板列由 .cmdk__list 自身滚动，匹配项一次给全。
    */
   const cmdkAllResourceMatches = cmdkNormalized
     ? (allFiles.length > 0 ? allFiles : files)
         .filter((file) => file.relativePath.toLowerCase().includes(cmdkNormalized))
     : [];
-  const cmdkResourceHits = cmdkAllResourceMatches.slice(0, CMDK_RESOURCE_HIT_LIMIT);
-  const cmdkTruncationNote = formatListTruncation({
-    total: cmdkAllResourceMatches.length,
-    shown: cmdkResourceHits.length,
-    noun: '个资源',
-    hint: '到资源浏览器按目录分页浏览，或用更精确的关键字'
-  });
-  const cmdkItemCount = filteredCmdkCommands.length + cmdkResourceHits.length;
+  const cmdkItemCount = filteredCmdkCommands.length + cmdkAllResourceMatches.length;
   const selectedCmdkIndex = Math.min(cmdkIndex, Math.max(0, cmdkItemCount - 1));
 
   function runCmdkItem(index: number): void {
@@ -2755,7 +2690,7 @@ export function App(): ReactElement {
       }
       return;
     }
-    const file = cmdkResourceHits[index - filteredCmdkCommands.length];
+    const file = cmdkAllResourceMatches[index - filteredCmdkCommands.length];
     if (file) {
       setCmdkOpen(false);
       void selectFile(file);
@@ -2929,7 +2864,7 @@ export function App(): ReactElement {
                  hint 为空时不渲染空 span；project 的「开始」按问题 6 处理。 */}
               {activeDomain === 'files' ? (
                 <span className="panel__hint">
-                  {formatFilesCount(physicalBrowseFiles.length)}{physicalBrowseFiles.length > FILE_LIST_PAGE_SIZE ? ` · 本页 ${pagedFiles.length}` : ''}
+                  {formatFilesCount(physicalBrowseFiles.length)}
                 </span>
               ) : activeDomain === 'project' ? (
                 <span className="panel__hint">开始</span>
@@ -2954,9 +2889,10 @@ export function App(): ReactElement {
                   </div>
                   {/* SHELL-09：物理 taxonomy 只出现在 Files 领域（§16 resourceFamilies
                       从领域栏 production 依赖中移除）。资源族过滤条已断开：Files 物理
-                      浏览由搜索框（路径/类型子串）+ .file-list 承载。 */}
+                      浏览由搜索框（路径/类型子串）+ .file-list 承载。显示不设限：
+                      过滤后的完整集合一次 map，由 .file-list 自身滚动。 */}
                   <div className="file-list">
-                    {pagedFiles.map((file) => (
+                    {physicalBrowseFiles.map((file) => (
                       <button
                         type="button"
                         key={file.sourceUri}
@@ -2971,35 +2907,6 @@ export function App(): ReactElement {
                       <p className="empty-hint">当前目录没有匹配资源。可切换到 all 或调整路径过滤。</p>
                     )}
                   </div>
-                  {/* 分页导航：只在真的超过一页时出现，避免小工作区多一排无意义控件。 */}
-                  {physicalBrowseFiles.length > FILE_LIST_PAGE_SIZE && (
-                    <div className="row gap pager" data-testid="file-list-pager">
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--sm"
-                        disabled={clampedFilePage <= 0}
-                        onClick={() => setFilePage((page) => Math.max(0, page - 1))}
-                      >
-                        上一页
-                      </button>
-                      <span className="muted" data-testid="file-list-page-range">
-                        {formatPageRange({
-                          page: clampedFilePage,
-                          pageSize: FILE_LIST_PAGE_SIZE,
-                          total: physicalBrowseFiles.length,
-                          noun: '资源'
-                        })}
-                      </span>
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--sm"
-                        disabled={clampedFilePage >= filePageCount - 1}
-                        onClick={() => setFilePage((page) => Math.min(filePageCount - 1, page + 1))}
-                      >
-                        下一页
-                      </button>
-                    </div>
-                  )}
                 </>
               ) : activeDomain === 'project' ? (
                 /* 问题 1：开始态侧栏已拆掉。有工作区后「开始」不是页（project 从顶栏
@@ -3057,9 +2964,6 @@ export function App(): ReactElement {
                   <p className="empty-hint">输入关键字，按路径 / 类型检索工作区资源；回车调用资源搜索。</p>
                 )}
                 {query.trim() !== '' && searchHits.length === 0 && <p className="empty-hint">无匹配结果。</p>}
-                {query.trim() !== '' && searchTruncationNote && (
-                  <p className="muted" data-testid="search-truncation">{searchTruncationNote}</p>
-                )}
                 {query.trim() !== '' && searchHits.map((file) => (
                   <button type="button" key={file.sourceUri} className="search-hit" onClick={() => void selectFile(file)}>
                     <div className="search-hit__path">{file.relativePath}</div>
@@ -3997,9 +3901,7 @@ export function App(): ReactElement {
                   {draftChanges.length === 0 ? (
                     <p className="empty-hint welcome-empty">没有待审查的变更。</p>
                   ) : (
-                    draftChanges
-                      .slice(0, WELCOME_DRAFT_LIMIT)
-                      .map((item) => (
+                    draftChanges.map((item) => (
                         <div className="review-row" key={item.id}>
                           <span className="review-row__target" title={item.sourceUri}>{item.target}</span>
                           <span className="review-row__delta">{item.summary}</span>
@@ -4015,9 +3917,6 @@ export function App(): ReactElement {
                           </button>
                         </div>
                       ))
-                  )}
-                  {draftTruncationNote && (
-                    <p className="muted" data-testid="welcome-draft-truncation">{draftTruncationNote}</p>
                   )}
                 </section>
 
@@ -4103,14 +4002,12 @@ export function App(): ReactElement {
               active: isAgentTaskActive(agentTask)
             }),
             sessions: agentSessions,
-            sessionsPage: agentSessionsPage,
             sessionsError: agentSessionsError,
             sessionDetail: agentSessionDetail,
             onSelectService: setAgentServiceId,
             onRun: () => void runAgentTask(),
             onCancel: () => void cancelAgentTask(),
             onRefreshSessions: () => void refreshAgentSessions(),
-            onSessionsPageChange: setAgentSessionsPage,
             onLoadSession: (sessionPath) => void loadAgentSession(sessionPath),
             onResumeSession: (sessionPath) => void runAgentTask(sessionPath),
             onRespondApproval: (callId, decision) => void respondAgentApproval(callId, decision),
@@ -4201,7 +4098,7 @@ export function App(): ReactElement {
                 {command.hint && <span className="cmdk-item__hint">{command.hint}</span>}
               </button>
             ))}
-            {cmdkResourceHits.map((file, index) => {
+            {cmdkAllResourceMatches.map((file, index) => {
               const itemIndex = filteredCmdkCommands.length + index;
               return (
                 <button
@@ -4219,9 +4116,6 @@ export function App(): ReactElement {
                 </button>
               );
             })}
-            {cmdkTruncationNote && (
-              <p className="muted cmdk-truncation" data-testid="cmdk-truncation">{cmdkTruncationNote}</p>
-            )}
           </div>
         </div>
       </div>

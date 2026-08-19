@@ -1,21 +1,10 @@
-import { useLayoutEffect, useRef, useState, type ReactElement } from 'react';
+import { useLayoutEffect, useRef, type ReactElement } from 'react';
 import type { AgentMessageDto } from '@soulforge/shared';
-import {
-  AGENT_MESSAGE_PAGE_SIZE,
-  agentMessageTail,
-  agentMessageWindow,
-  agentOlderCursor,
-  parseAgentMessageCursor,
-  shouldAgentAutoScroll
-} from '@soulforge/shared';
+import { shouldAgentAutoScroll } from '@soulforge/shared';
 
 export interface AgentMessageListProps {
   /** 已装配的 §12.11 消息流（严格 seq 过滤在 reduceAgentStreamToMessages 层完成）。 */
   messages: readonly AgentMessageDto[];
-  /** 每页条数；默认 AGENT_MESSAGE_PAGE_SIZE（50），收敛 1..100。 */
-  pageSize?: number;
-  /** 点击「加载更早消息」的真实回调；缺省不渲染该按钮。 */
-  onLoadOlder?: () => void;
 }
 
 function messageBody(message: AgentMessageDto): ReactElement {
@@ -69,23 +58,19 @@ function messageClassName(message: AgentMessageDto): string {
 }
 
 /**
- * §12.10 组件树里的 AgentMessageList：bounded message pages + scroll threshold。
+ * §12.10 组件树里的 AgentMessageList：消息**全量渲染**（问题 5：显示不设限）。
  *
- * - 只渲染有界窗口（agentMessageTail / agentMessageWindow，硬约束 17）；
- * - 「加载更早消息」只在前一页存在且挂载了真实回调时出现；
- * - 新消息到达时，仅当用户已贴底（shouldAgentAutoScroll）才跟随到最新尾部，
+ * - `messages.map` 全量进 DOM，由栏自身滚动；不再按 50 条一页、不再「加载更早
+ *   消息」假分页；
+ * - 新消息到达时，仅当用户已贴底（shouldAgentAutoScroll）才跟随滚动到底部，
  *   向上滚动阅读历史时不被强行拉回；
  * - 严格 event seq 与消息装配在 reduceAgentStreamToMessages（shared agent-ui）
  *   完成，本组件只消费装配结果，不重复实现。
  */
-export function AgentMessageList(props: AgentMessageListProps): ReactElement {
-  const { messages, pageSize = AGENT_MESSAGE_PAGE_SIZE, onLoadOlder } = props;
+export function AgentMessageList({ messages }: AgentMessageListProps): ReactElement {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [startIndex, setStartIndex] = useState<number>(
-    () => agentMessageTail(messages, pageSize).startIndex
-  );
 
-  // 新消息到达：用户已贴底才跟随到最新尾部，否则保留当前阅读窗口。
+  // 新消息到达：用户已贴底才滚动到底部，否则保留当前阅读位置。
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (element === null || typeof window === 'undefined') return;
@@ -96,22 +81,8 @@ export function AgentMessageList(props: AgentMessageListProps): ReactElement {
     });
     if (nearBottom) {
       element.scrollTop = element.scrollHeight;
-      setStartIndex(agentMessageTail(messages, pageSize).startIndex);
     }
-  }, [messages, pageSize]);
-
-  const window = agentMessageWindow(messages, startIndex, pageSize);
-  const olderCursor = agentOlderCursor(window, pageSize);
-  const hasOlder = olderCursor !== null;
-
-  function loadOlder(): void {
-    const cursor = olderCursor;
-    if (cursor === null) return;
-    const index = parseAgentMessageCursor(cursor);
-    if (index === null) return;
-    setStartIndex(index);
-    onLoadOlder?.();
-  }
+  }, [messages]);
 
   return (
     <div
@@ -122,32 +93,14 @@ export function AgentMessageList(props: AgentMessageListProps): ReactElement {
       aria-label="Agent 消息流"
       ref={scrollRef}
     >
-      {hasOlder && onLoadOlder !== undefined && (
-        <div className="agent-message-list__pager">
-          <button type="button" className="btn btn--ghost btn--sm" onClick={loadOlder}>
-            加载更早消息
-          </button>
-        </div>
-      )}
-      {window.items.length === 0 && (
+      {messages.length === 0 && (
         <p className="empty-hint" data-testid="agent-message-list-empty">暂无消息。</p>
       )}
-      {window.items.map((message) => (
+      {messages.map((message) => (
         <article className={messageClassName(message)} key={message.id} data-testid={`agent-message-${message.id}`}>
           {messageBody(message)}
         </article>
       ))}
-      {window.hasNewer && (
-        <div className="agent-message-list__pager">
-          <button
-            type="button"
-            className="btn btn--ghost btn--sm"
-            onClick={() => setStartIndex(window.endIndex)}
-          >
-            查看更新消息
-          </button>
-        </div>
-      )}
     </div>
   );
 }

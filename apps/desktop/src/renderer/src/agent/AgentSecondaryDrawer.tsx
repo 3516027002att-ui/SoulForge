@@ -6,9 +6,8 @@ import {
   nextTrappedFocusIndex
 } from '../a11y/focusTrap.js';
 import { ModelServiceSettingsPanel } from '../editors/ModelServiceSettingsPanel.js';
-import { formatPageRange } from '../format/uiText.js';
 import type { AgentTaskPanelProps } from './AgentTaskPanel.js';
-import { AGENT_SESSION_PAGE_SIZE, isAgentTaskCancellable } from './agentTaskState.js';
+import { isAgentTaskCancellable } from './agentTaskState.js';
 
 export type AgentSecondaryDrawerView = 'history' | 'settings';
 
@@ -56,12 +55,6 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
 
   const drawerRef = useRef<HTMLDivElement>(null);
 
-  const historyPageCount = Math.max(1, Math.ceil(task.sessions.length / AGENT_SESSION_PAGE_SIZE));
-  const historyPage = Math.min(task.sessionsPage, historyPageCount - 1);
-  const pageSessions = task.sessions.slice(
-    historyPage * AGENT_SESSION_PAGE_SIZE,
-    historyPage * AGENT_SESSION_PAGE_SIZE + AGENT_SESSION_PAGE_SIZE
-  );
   const cancellable = isAgentTaskCancellable(task.task);
 
   function trapTab(event: ReactKeyboardEvent): void {
@@ -177,22 +170,9 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
             <button type="button" className="btn btn--ghost btn--sm" onClick={() => onSwitchView('settings')}>模型设置</button>
           </div>
           {task.sessionsError !== null && <p className="danger">{task.sessionsError}</p>}
-          <p className="muted" data-testid="agent-sessions-range">
-            {formatPageRange({
-              page: historyPage,
-              pageSize: AGENT_SESSION_PAGE_SIZE,
-              total: task.sessions.length,
-              noun: '会话'
-            })}
-          </p>
           <p className="muted" data-testid="agent-sessions-source-limit">会话列表只回报最近 50 个会话文件。</p>
-          <div className="row gap pager">
-            <button type="button" disabled={historyPage <= 0} onClick={() => task.onSessionsPageChange(historyPage - 1)}>上一页</button>
-            <span className="muted">{task.sessions.length > 0 ? historyPage + 1 : 0}/{historyPageCount}</span>
-            <button type="button" disabled={historyPage >= historyPageCount - 1} onClick={() => task.onSessionsPageChange(historyPage + 1)}>下一页</button>
-          </div>
           {task.sessions.length === 0 && <p className="empty-hint">暂无会话记录。</p>}
-          {pageSessions.map((session) => (
+          {task.sessions.map((session) => (
             <div className="agent-history__item" key={session.sessionPath}>
               <div>
                 <strong>{session.fileName}</strong>

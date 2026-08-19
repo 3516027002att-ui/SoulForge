@@ -43,10 +43,8 @@ export interface AgentConversationFailure {
 export interface AgentConversationViewportProps {
   /** 空闲欢迎态（无消息且无活动任务）是否显示。 */
   idle: boolean;
-  /** §12.11 已装配消息流；非空时优先渲染 AgentMessageList（bounded pages）。 */
+  /** §12.11 已装配消息流；非空时优先渲染 AgentMessageList（全量渲染）。 */
   messages?: readonly AgentMessageDto[];
-  /** 「加载更早消息」回调（透传给 AgentMessageList）。 */
-  onLoadOlder?: () => void;
   /** 任务态派生的工具活动（§12.5 默认单行折叠）。 */
   toolActivities?: readonly AgentConversationToolActivity[];
   /** 待审批（Change Review 是消息流唯一强边界卡）。 */
@@ -73,7 +71,6 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
   const {
     idle,
     messages = [],
-    onLoadOlder,
     toolActivities = [],
     approvals = [],
     failure = null,
@@ -137,10 +134,7 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
       )}
 
       {hasMessages ? (
-        <AgentMessageList
-          messages={messages}
-          {...(onLoadOlder !== undefined ? { onLoadOlder } : {})}
-        />
+        <AgentMessageList messages={messages} />
       ) : idle ? (
         <AgentWelcome />
       ) : (

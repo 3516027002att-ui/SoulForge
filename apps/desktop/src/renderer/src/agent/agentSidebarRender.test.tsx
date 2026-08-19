@@ -481,7 +481,7 @@ describe('§12.8/§12.11 上下文、资源引用与消息流（AGENT-60C）', (
     assert.ok(addButton.includes('disabled'), '无 onCreate 回调时添加资源引用应 disabled');
   });
 
-  it('消息流渲染 AgentMessageList，只渲染有界尾部页', () => {
+  it('消息流渲染 AgentMessageList，全量渲染（问题 5：不再只渲染尾部页）', () => {
     const messages: AgentMessageDto[] = Array.from({ length: 120 }, (_, index) => ({
       id: `m${index}`,
       kind: 'assistant',
@@ -489,11 +489,12 @@ describe('§12.8/§12.11 上下文、资源引用与消息流（AGENT-60C）', (
       streaming: false,
       createdAt: '2026-01-01T00:00:00.000Z'
     }));
-    const html = render({ messages, onLoadOlderMessages: () => undefined });
+    const html = render({ messages });
     assert.match(html, /data-testid="agent-message-list"/);
-    assert.ok(!html.includes('agent-message-m0'), '最老消息不应出现在尾部页（bounded）');
-    assert.ok(html.includes('agent-message-m119'), '最新消息应出现在尾部页');
-    assert.match(html, /加载更早消息/);
+    assert.ok(html.includes('agent-message-m0'), '最老消息也应渲染（全量，不按尾部页截断）');
+    assert.ok(html.includes('agent-message-m119'), '最新消息应渲染');
+    assert.ok(!html.includes('加载更早消息'), '不再有「加载更早消息」假分页按钮');
+    assert.ok(!html.includes('查看更新消息'), '不再有「查看更新消息」按钮');
   });
 
   it('消息流为空时回落欢迎态 / legacy 内容', () => {
@@ -829,14 +830,12 @@ function render0Task(): AgentSidebarProps['task'] {
     selectedServiceId: 'svc-1',
     runBlocker: null,
     sessions: [],
-    sessionsPage: 0,
     sessionsError: null,
     sessionDetail: null,
     onSelectService: () => undefined,
     onRun: () => undefined,
     onCancel: () => undefined,
     onRefreshSessions: () => undefined,
-    onSessionsPageChange: () => undefined,
     onLoadSession: () => undefined,
     onResumeSession: () => undefined,
     onRespondApproval: () => undefined,

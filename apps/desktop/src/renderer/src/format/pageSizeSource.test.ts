@@ -47,8 +47,9 @@ const PAGE_SIZE_CONSUMERS: ReadonlyArray<{
     symbol: 'PARAM_PAGE_SIZE',
     files: [
       'apps/desktop/src/main/ipc.ts',
-      // ParamTablePanel 已全量加载（用户裁定 2026-08-14），不再分页消费该常量。
-      'apps/desktop/src/renderer/src/editors/ParamDefPanel.tsx',
+      // ParamDefPanel 已全量渲染行表（问题 5），不再分页消费该常量；PARAM_PAGE_SIZE
+      // 只作为跨进程运输契约保留（App 打开一张 param 经 includeAllPayloads 一次取回）。
+      'apps/desktop/src/renderer/src/App.tsx',
       'apps/desktop/e2e/editorFunctionalSmokeMain.mjs'
     ]
   },

@@ -15,42 +15,10 @@ import type {
   ResourceStructuredPreview
 } from '@soulforge/shared';
 import type { RendererBridgeResult } from '../../../main/rendererDto.js';
-import { formatListTruncation } from '../format/uiText.js';
 
-/**
- * 预览卡片各列表的渲染上限。
- *
- * 这些卡片是**证据摘要**，不是浏览器：完整浏览由对应工作台面板（分页通道）承担，
- * 所以这里保留硬截断而不加分页控件。但截断必须说出来——此前是静默 slice，用户
- * 看到 24 条会以为总共 24 条，而实际可能是 518 条里的前 24 条。
- */
-const PREVIEW_LIMITS = {
-  events: 24,
-  paramRows: 32,
-  mapEntities: 32,
-  mapRegions: 32,
-  textEntries: 24,
-  binderChildRows: 80,
-  containerHints: 40,
-  inspectionLayers: 6,
-  inspectionEvidence: 12,
-  /** 行 tooltip 里列出的字段数（不是渲染列表，说明写在 title 文本里）。 */
-  paramFieldsInTooltip: 6
-} as const;
-
-/** 截断说明的统一渲染。null 说明没截断，什么都不渲染。 */
-function TruncationNote(
-  { total, shown, noun, hint }: { total: number; shown: number; noun: string; hint?: string }
-): ReactElement | null {
-  const text = formatListTruncation({
-    total,
-    shown,
-    noun,
-    ...(hint ? { hint } : {})
-  });
-  if (!text) return null;
-  return <p className="muted preview-truncation" data-testid="preview-truncation">{text}</p>;
-}
+/** 行 tooltip 摘要里列出的字段数（tooltip 是单值预览不是渲染列表，说明写在
+ *  title 文本里并报出字段总数）。 */
+const PARAM_FIELDS_TOOLTIP_MAX = 6;
 
 export function StructuredPreviewCard({ preview }: { preview: ResourceStructuredPreview }): ReactElement {
   const eventCount = preview.events?.reduce((total, eventExport) => total + eventExport.events.length, 0) ?? 0;
@@ -87,14 +55,8 @@ export function StructuredPreviewCard({ preview }: { preview: ResourceStructured
       {preview.events && preview.events.length > 0 && (
         <details>
           <summary>Events</summary>
-          <TruncationNote
-            total={eventCount}
-            shown={Math.min(eventCount, PREVIEW_LIMITS.events)}
-            noun="个事件"
-            hint="完整事件表见 EMEVD 四视图编辑器"
-          />
           <div className="structured-symbol-list">
-            {preview.events.flatMap((eventExport) => eventExport.events).slice(0, PREVIEW_LIMITS.events).map((event) => (
+            {preview.events.flatMap((eventExport) => eventExport.events).map((event) => (
               <span key={event.uri}>{event.eventId}{event.name ? ` · ${event.name}` : ''} · {event.instructions.length} instr</span>
             ))}
           </div>
@@ -103,14 +65,8 @@ export function StructuredPreviewCard({ preview }: { preview: ResourceStructured
       {paramRows.length > 0 && (
         <details>
           <summary>Param rows</summary>
-          <TruncationNote
-            total={paramRows.length}
-            shown={Math.min(paramRows.length, PREVIEW_LIMITS.paramRows)}
-            noun="行"
-            hint="完整行表见 PARAM 工作台（分页通道）"
-          />
           <div className="structured-symbol-list">
-            {paramRows.slice(0, PREVIEW_LIMITS.paramRows).map((row) => (
+            {paramRows.map((row) => (
               <span key={row.uri} title={formatParamFieldPreview(row.fields)}>
                 {row.paramName} · {row.rowId}{row.rowName ? ` · ${row.rowName}` : ''} · {row.fields?.length ?? 0} field(s)
               </span>
@@ -121,14 +77,8 @@ export function StructuredPreviewCard({ preview }: { preview: ResourceStructured
       {mapEntities.length > 0 && (
         <details>
           <summary>Map entities</summary>
-          <TruncationNote
-            total={mapEntities.length}
-            shown={Math.min(mapEntities.length, PREVIEW_LIMITS.mapEntities)}
-            noun="个实体"
-            hint="完整清单见 MSB 场景面板"
-          />
           <div className="structured-symbol-list">
-            {mapEntities.slice(0, PREVIEW_LIMITS.mapEntities).map((entity) => (
+            {mapEntities.map((entity) => (
               <span key={entity.uri} title={formatVectorPreview(entity.position)}>
                 {entity.mapId} · {entity.entityId ?? 'candidate'} · {entity.kind} · {entity.name}{entity.model ? ` · ${entity.model}` : ''}
               </span>
@@ -139,14 +89,8 @@ export function StructuredPreviewCard({ preview }: { preview: ResourceStructured
       {mapRegions.length > 0 && (
         <details>
           <summary>Map regions</summary>
-          <TruncationNote
-            total={mapRegions.length}
-            shown={Math.min(mapRegions.length, PREVIEW_LIMITS.mapRegions)}
-            noun="个区域"
-            hint="完整清单见 MSB 场景面板"
-          />
           <div className="structured-symbol-list">
-            {mapRegions.slice(0, PREVIEW_LIMITS.mapRegions).map((region) => (
+            {mapRegions.map((region) => (
               <span key={region.uri} title={formatVectorPreview(region.position)}>
                 {region.mapId} · {region.entityId ?? 'candidate'} · {region.name}{region.shape ? ` · ${region.shape}` : ''}
               </span>
@@ -157,14 +101,8 @@ export function StructuredPreviewCard({ preview }: { preview: ResourceStructured
       {preview.msgs && preview.msgs.length > 0 && (
         <details>
           <summary>Text entries</summary>
-          <TruncationNote
-            total={msgCount}
-            shown={Math.min(msgCount, PREVIEW_LIMITS.textEntries)}
-            noun="条文本"
-            hint="完整条目见 FMG 工作台（分页通道）"
-          />
           <div className="structured-symbol-list">
-            {preview.msgs.flatMap((msgExport) => msgExport.entries).slice(0, PREVIEW_LIMITS.textEntries).map((entry) => (
+            {preview.msgs.flatMap((msgExport) => msgExport.entries).map((entry) => (
               <span key={entry.uri}>{entry.textId} · {entry.text.slice(0, 80)}</span>
             ))}
           </div>
@@ -210,7 +148,7 @@ function collectMapEntities(maps: MapExport[] | undefined): MapExport['entities'
  */
 function formatParamFieldPreview(fields: ParamExport['rows'][number]['fields']): string {
   if (!fields || fields.length === 0) return 'No typed fields are available yet.';
-  const shown = fields.slice(0, PREVIEW_LIMITS.paramFieldsInTooltip);
+  const shown = fields.slice(0, PARAM_FIELDS_TOOLTIP_MAX);
   const summary = shown.map((field) => `${field.name}=${String(field.value)}`).join(', ');
   const hidden = fields.length - shown.length;
   return hidden > 0
@@ -278,7 +216,7 @@ function BinderChildTable({ hints }: { hints: ContainerReadHint[] }): ReactEleme
           <span>Packed</span>
           <span>Unpacked</span>
         </div>
-        {rows.slice(0, PREVIEW_LIMITS.binderChildRows).map((row, index) => (
+        {rows.map((row, index) => (
           <div className="binder-child-row" role="row" key={`${row.name ?? 'child'}-${row.id ?? index}-${index}`}>
             <span>{row.id ?? '—'}</span>
             <span title={row.name ?? ''}>{row.name ?? 'unknown'}</span>
@@ -289,12 +227,6 @@ function BinderChildTable({ hints }: { hints: ContainerReadHint[] }): ReactEleme
           </div>
         ))}
       </div>
-      <TruncationNote
-        total={rows.length}
-        shown={Math.min(rows.length, PREVIEW_LIMITS.binderChildRows)}
-        noun="个子项"
-        hint="完整子项表见 BND4 容器工作台（分页通道）"
-      />
       <p className="muted">子文件表是只读 inventory。替换 child、重打包和写回要等 BND writer contract。</p>
     </details>
   );
@@ -352,17 +284,12 @@ function ContainerHintList({ title, hints }: { title: string; hints: ContainerRe
     <details>
       <summary>{title}</summary>
       <div className="container-hint-list">
-        {hints.slice(0, PREVIEW_LIMITS.containerHints).map((hint, index) => (
+        {hints.map((hint, index) => (
           <span key={`${hint.kind}-${hint.offset}-${index}`} title={JSON.stringify(hint.raw ?? {})}>
             {hint.offset.toString(16).padStart(8, '0')} · {hint.label} · {hint.resourceKind ?? hint.rootFormat ?? 'unknown'} · {hint.confidence}
           </span>
         ))}
       </div>
-      <TruncationNote
-        total={hints.length}
-        shown={Math.min(hints.length, PREVIEW_LIMITS.containerHints)}
-        noun="条线索"
-      />
     </details>
   );
 }
@@ -418,29 +345,19 @@ export function NativeInspectionCard({ inspection }: { inspection: RendererBridg
       {layers.length > 0 && (
         <>
           <div className="native-chip-row">
-            {layers.slice(0, PREVIEW_LIMITS.inspectionLayers).map((layer, index) => (
+            {layers.map((layer, index) => (
               <span key={`${layer.format ?? 'layer'}-${index}`} title={describeLayer(layer)}>
                 {layer.format ?? '未知'} · {layer.confidence ?? '未知'}
               </span>
             ))}
           </div>
-          <TruncationNote
-            total={layers.length}
-            shown={Math.min(layers.length, PREVIEW_LIMITS.inspectionLayers)}
-            noun="层容器"
-          />
         </>
       )}
       {evidence.length > 0 && (
         <details>
           <summary>证据线索</summary>
-          <TruncationNote
-            total={evidence.length}
-            shown={Math.min(evidence.length, PREVIEW_LIMITS.inspectionEvidence)}
-            noun="条证据"
-          />
           <ul className="native-evidence-list">
-            {evidence.slice(0, PREVIEW_LIMITS.inspectionEvidence).map((item, index) => (
+            {evidence.map((item, index) => (
               <li key={`${item.kind ?? 'evidence'}-${index}`}>
                 <strong>{item.kind ?? '未知'}</strong>
                 <span>offset={item.offset ?? 0}</span>

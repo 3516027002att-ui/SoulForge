@@ -6,7 +6,8 @@
  *  - 跨 sender token/handle 拒绝（validateAgentReferenceScope SENDER_MISMATCH）；
  *  - 绝对路径、raw parser / Hex 不进入 DTO（selectionRendererSafetyIssues 负向）；
  *  - 重复 / 倒序 seq 不重放（reduceAgentStreamToMessages / applyAgentStreamSeq）；
- *  - bounded message pages（sliceAgentMessagePage / agentMessageTail / append…）。
+ *  - message pages（sliceAgentMessagePage / agentMessageTail / append…：
+ *    运输分页，消息全量保留）。
  *
  * 无 DOM、无 IPC；DOM 侧负向断言在 agentSidebarRender.test.tsx。
  */
@@ -15,7 +16,6 @@ import { describe, it } from 'node:test';
 import type { AgentMessageDto, AgentStreamEvent, EditorSelectionContext } from '@soulforge/shared';
 import {
   AGENT_MESSAGE_PAGE_SIZE,
-  AGENT_MESSAGE_RETAIN_LIMIT,
   AGENT_RESUME_TAIL_MESSAGES,
   AGENT_SCROLL_THRESHOLD_PX,
   agentMessageTail,
@@ -242,7 +242,7 @@ describe('§12.11 严格 event seq：重复 / 倒序 seq 不重放', () => {
   });
 });
 
-describe('bounded message pages（硬约束 17 大列表分页）', () => {
+describe('message pages（运输分页；消息全量保留）', () => {
   it('sliceAgentMessagePage 按 limit 分页，nextCursor 指示后续', () => {
     const messages = makeMessages(120);
     const page1 = sliceAgentMessagePage(messages, null, AGENT_MESSAGE_PAGE_SIZE);
@@ -286,12 +286,12 @@ describe('bounded message pages（硬约束 17 大列表分页）', () => {
     assert.equal(assistantMarkdown(result.messages, 'm2'), 'b');
   });
 
-  it('appendAgentMessagePage 超过 RETAIN_LIMIT 丢弃最老消息', () => {
-    const many = makeMessages(AGENT_MESSAGE_RETAIN_LIMIT + 50);
+  it('appendAgentMessagePage 全量保留——不再因条数上限丢弃更早消息（问题 5）', () => {
+    const many = makeMessages(300);
     const result = appendAgentMessagePage([], many);
-    assert.equal(result.messages.length, AGENT_MESSAGE_RETAIN_LIMIT);
-    assert.equal(result.dropped.length, 50);
-    assert.equal(result.messages[0]?.id, 'm50', '最老的 50 条被丢弃');
+    assert.equal(result.messages.length, 300, '全部消息必须保留，最老的不得被丢弃');
+    assert.equal(result.messages[0]?.id, 'm0', '最老消息仍应在列表里');
+    assert.equal(result.messages[result.messages.length - 1]?.id, 'm299');
   });
 
   it('limit 收敛到 1..100', () => {
@@ -326,7 +326,7 @@ describe('scroll threshold 与 resume', () => {
     assert.equal(request.limit, AGENT_MESSAGE_PAGE_SIZE);
   });
 
-  it('消息装配结果有序且有界', () => {
+  it('消息装配结果有序且全量保留（不按条数上限丢弃更早消息）', () => {
     const events: AgentStreamEvent[] = Array.from({ length: 250 }, (_, index) => ({
       seq: index + 1,
       sessionId: 's1',
@@ -335,8 +335,8 @@ describe('scroll threshold 与 resume', () => {
     }));
     const result = reduceAgentStreamToMessages(events);
     assert.equal(result.dropped.length, 0);
-    assert.equal(result.messages.length, AGENT_MESSAGE_RETAIN_LIMIT, '装配结果不超过 RETAIN_LIMIT');
-    assert.equal(result.messages[0]?.id, 'm50', '最老的 50 条被丢弃');
+    assert.equal(result.messages.length, 250, '装配结果必须保留全部消息，不得按 RETAIN_LIMIT 丢弃');
+    assert.equal(result.messages[0]?.id, 'm0', '最老消息保留');
     assert.equal(result.messages[result.messages.length - 1]?.id, 'm249', '最新消息保留');
   });
 });

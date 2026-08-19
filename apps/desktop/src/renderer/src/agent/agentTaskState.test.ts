@@ -12,8 +12,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-  AGENT_TOOL_CALL_LIMIT,
-  APPROVAL_PREVIEW_TEXT_LIMIT,
   INITIAL_AGENT_TASK_STATE,
   approvalSeverity,
   classifyDiffLines,
@@ -232,15 +230,6 @@ describe('运行前置条件给出结构化原因，不静默禁用', () => {
   });
 });
 
-describe('工具调用列表上限是有限正整数', () => {
-  it('上限可用于截断说明', () => {
-    assert.ok(
-      Number.isInteger(AGENT_TOOL_CALL_LIMIT) && AGENT_TOOL_CALL_LIMIT > 0,
-      `上限必须是正整数，实际 ${AGENT_TOOL_CALL_LIMIT}`
-    );
-  });
-});
-
 describe('审批请求折叠成待办队列', () => {
   it('approval-requested 入队，approval-resolved 出队并留下记录', () => {
     const requested = feed(startAgentTask(SESSION), { type: 'turn-started', step: 1 }, {
@@ -448,11 +437,11 @@ describe('审批预览只从参数里已有的字段提取', () => {
     assert.equal(preview?.changeCount, 1);
   });
 
-  it('超长内容截断并报告截了多少', () => {
-    const long = 'x'.repeat(APPROVAL_PREVIEW_TEXT_LIMIT + 500);
+  it('超长内容保留全文（问题 5：不截断，由界面展开/折叠看全文）', () => {
+    const long = 'x'.repeat(10_000);
     const preview = extractApprovalPreview(JSON.stringify({ targetPath: 'a', newText: long }));
-    assert.equal(preview?.newText?.length, APPROVAL_PREVIEW_TEXT_LIMIT);
-    assert.equal(preview?.truncatedBytes, 500);
+    assert.equal(preview?.newText?.length, 10_000, '必须保留完整内容，不得切成前若干字符');
+    assert.equal(preview?.truncatedBytes, 0);
   });
 
   it('参数不是 JSON 或不含可识别字段时返回 null，而不是编一个预览', () => {

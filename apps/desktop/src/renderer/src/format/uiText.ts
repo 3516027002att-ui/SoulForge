@@ -40,22 +40,9 @@ export function filterFilesForMode(
 }
 
 /**
- * 资源浏览器每页文件数。
- *
- * 为什么是分页而不是虚拟化：`scanWorkspace`（packages/core/src/workspace/scanWorkspace.ts）
- * 递归遍历工作区且**没有扩展名过滤、没有上限**，所以规模等于用户选的目录——
- * 实测 `mods/` 子目录 237 个文件，整个只狼解包树 9111 个文件。9111 个 `<button>`
- * 一次性建出属于硬约束 17 要挡的形态，但它同时也是**分页足以解决**的量级：
- * 每页 200 时最多 200 个 DOM 节点，与虚拟化的常驻节点数同一数量级，却不需要
- * 引入新依赖、不需要接管滚动容器、不会破坏浏览器原生的 Ctrl+F 与焦点顺序。
- *
- * 200 的取法：侧栏可视高度约容纳 15–20 行，一页 200 行意味着滚动约 10 屏——
- * 大于「翻页太频繁」的阈值，又远小于「DOM 过重」的阈值。
+ * 资源浏览器文件列表与搜索结果都全量渲染（问题 5：显示不设限），不再有分页
+ * 或条数上限常量。列表自身 overflow-y: auto 滚动；筛选作用于完整集合。
  */
-export const FILE_LIST_PAGE_SIZE = 200;
-
-/** 搜索结果面板的渲染上限。搜索是定位手段，不是浏览手段，故只截断不分页。 */
-export const SEARCH_HIT_LIMIT = 60;
 
 export function shortenPath(path: string): string {
   const normalized = path.replaceAll('\\', '/');
@@ -117,23 +104,4 @@ export function formatListTruncation(input: ListTruncationInput): string | null 
   const hidden = total - shown;
   const suffix = input.hint ? `；${input.hint}` : '';
   return `已解析 ${total} ${noun}，显示前 ${shown} ${noun}（${hidden} ${noun}未显示）${suffix}。`;
-}
-
-/**
- * 分页导航的位置文案：回答「当前在第几页、这一页覆盖第几到第几、总共多少」。
- *
- * 只报页码（「第 3/12 页」）不够：用户无法判断自己漏看了哪一段。
- */
-export function formatPageRange(input: {
-  page: number;
-  pageSize: number;
-  total: number;
-  noun: string;
-}): string {
-  const { page, pageSize, total, noun } = input;
-  if (total <= 0) return `没有${noun}`;
-  const first = page * pageSize + 1;
-  const last = Math.min((page + 1) * pageSize, total);
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  return `${noun} ${first}–${last} / 共 ${total}（第 ${page + 1}/${pageCount} 页，每页 ${pageSize}）`;
 }

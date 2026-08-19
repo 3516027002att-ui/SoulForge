@@ -1859,7 +1859,7 @@ test('AI 任务：运行发起后进度事件真的更新消息流，取消真�
   await app.close();
 });
 
-test('AI 任务：会话历史分页、载入与承接各自走对应 IPC', async () => {
+test('AI 任务：会话历史全量渲染、载入与承接各自走对应 IPC', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
 
@@ -1868,21 +1868,15 @@ test('AI 任务：会话历史分页、载入与承接各自走对应 IPC', asyn
   await history.getByRole('button', { name: '刷新' }).click();
   await expect.poll(async () => (await ipcCalls(app))['ai.agent.sessions'] ?? 0).toBeGreaterThan(0);
 
-  // 分页文案必须回答「这一页覆盖第几到第几、共多少」。fixture 给 23 条、每页 10，
-  // 确实跨过阈值——先断言前提成立，再断言目标，避免断言掉进永假分支。
-  const range = window.locator('[data-testid="agent-sessions-range"]');
-  await expect(range).toContainText('共 23');
-  await expect(range).toContainText('会话 1–10');
+  // 问题 5：会话历史全量渲染（不再每 10 条一页）。fixture 给 23 条，首尾都可见。
   await expect(history).toContainText('fixture-rollout-0000.jsonl');
+  await expect(history).toContainText('fixture-rollout-0022.jsonl');
+  // 不再有会话分页控件，也不再有「第 N 条区间」位置文案。
+  await expect(history.getByRole('button', { name: '下一页' })).toHaveCount(0);
+  await expect(history.getByText('会话 1–', { exact: false })).toHaveCount(0);
 
   // 数据源上限必须明说：主进程只回最近 50 个会话文件。
   await expect(window.locator('[data-testid="agent-sessions-source-limit"]')).toContainText('最近 50 个会话文件');
-
-  // 翻页真的换内容。
-  await history.getByRole('button', { name: '下一页' }).click();
-  await expect(range).toContainText('会话 11–20');
-  await expect(history).toContainText('fixture-rollout-0010.jsonl');
-  await expect(history).not.toContainText('fixture-rollout-0000.jsonl');
 
   // 载入：走 ai.agent.session.load，详情报出真实条数与「只取尾部若干条」。
   await history.getByRole('button', { name: '查看' }).first().click();

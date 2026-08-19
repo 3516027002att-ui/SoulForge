@@ -18,10 +18,10 @@
  * （写回链尚未接通），所以延期横幅由调用方按实际情况传入，本组件不替它们
  * 编造理由 —— 把「延期」和「未实现」混成一句话会让用户无法判断该等还是该报 bug。
  *
- * ── 分页 ──
+ * ── 全量渲染 ──
  *
- * 硬约束 17。真实语料的条目数不可控（ESD 状态组、TAE 动画都可达数千），
- * 一次性建全部行会让首屏卡顿。只读浏览用分页足够，不需要虚拟滚动的手感。
+ * 条目列表直接 `filtered.map` 全量进 DOM，由栏自身　overflow-y: auto 滚动；
+ * 不再按条数分页（显示不设限）。
  */
 
 import { useMemo, useState, type ReactElement, type ReactNode } from 'react';
@@ -69,11 +69,8 @@ export interface ReadOnlyEntryWorkbenchProps {
   emptyHint: string;
 }
 
-const ENTRY_PAGE_SIZE = 100;
-
 export function ReadOnlyEntryWorkbench(props: ReadOnlyEntryWorkbenchProps): ReactElement {
   const [filter, setFilter] = useState('');
-  const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
@@ -84,12 +81,6 @@ export function ReadOnlyEntryWorkbench(props: ReadOnlyEntryWorkbenchProps): Reac
       || (entry.meta ?? '').toLowerCase().includes(needle));
   }, [props.entries, filter]);
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / ENTRY_PAGE_SIZE));
-  const clampedPage = Math.min(page, pageCount - 1);
-  const visible = useMemo(
-    () => filtered.slice(clampedPage * ENTRY_PAGE_SIZE, (clampedPage + 1) * ENTRY_PAGE_SIZE),
-    [filtered, clampedPage]
-  );
   const selected = useMemo(
     () => props.entries.find((entry) => entry.id === selectedId) ?? null,
     [props.entries, selectedId]
@@ -110,34 +101,14 @@ export function ReadOnlyEntryWorkbench(props: ReadOnlyEntryWorkbenchProps): Reac
               <div style={{ padding: '4px 8px' }}>
                 <input
                   value={filter}
-                  onChange={(event) => {
-                    setFilter(event.target.value);
-                    setPage(0);
-                  }}
+                  onChange={(event) => setFilter(event.target.value)}
                   placeholder={props.filterPlaceholder}
                   aria-label={props.filterPlaceholder}
                   style={{ width: '100%' }}
                 />
               </div>
-              {pageCount > 1 && (
-                <div style={{ padding: '0 8px 4px', display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <button
-                    type="button"
-                    className="secondary-action"
-                    disabled={clampedPage <= 0}
-                    onClick={() => setPage((current) => Math.max(0, current - 1))}
-                  >上一页</button>
-                  <span className="muted" style={{ fontSize: 11 }}>{clampedPage + 1}/{pageCount}</span>
-                  <button
-                    type="button"
-                    className="secondary-action"
-                    disabled={clampedPage >= pageCount - 1}
-                    onClick={() => setPage((current) => current + 1)}
-                  >下一页</button>
-                </div>
-              )}
-              {visible.length === 0 && <p className="wb-empty">无匹配条目。</p>}
-              {visible.map((entry, index) => (
+              {filtered.length === 0 && <p className="wb-empty">无匹配条目。</p>}
+              {filtered.map((entry, index) => (
                 <div
                   key={entry.id}
                   className="wb-row"

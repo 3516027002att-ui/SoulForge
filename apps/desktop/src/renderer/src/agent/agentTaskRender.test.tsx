@@ -42,7 +42,6 @@ function render(overrides: Partial<AgentTaskPanelProps> = {}): string {
     selectedServiceId: 'svc-1',
     runBlocker: null,
     sessions: [],
-    sessionsPage: 0,
     sessionsError: null,
     sessionDetail: null,
     permissionLockReason: '由主进程锁定为计划模式；renderer 不能抬高授权。',
@@ -51,7 +50,6 @@ function render(overrides: Partial<AgentTaskPanelProps> = {}): string {
     onRun: () => undefined,
     onCancel: () => undefined,
     onRefreshSessions: () => undefined,
-    onSessionsPageChange: () => undefined,
     onLoadSession: () => undefined,
     onResumeSession: () => undefined,
     onRespondApproval: () => undefined,
@@ -204,7 +202,7 @@ describe('运行前置不满足时给可见原因', () => {
   });
 });
 
-describe('会话历史分页与数据源上限说明', () => {
+describe('会话历史全量渲染与数据源上限说明', () => {
   const sessions = Array.from({ length: 23 }, (_unused, index) => ({
     sessionPath: `2026/08/08/rollout-${String(index).padStart(4, '0')}.jsonl`,
     fileName: `rollout-${String(index).padStart(4, '0')}.jsonl`,
@@ -218,16 +216,13 @@ describe('会话历史分页与数据源上限说明', () => {
     modifiedAt: `2026-08-08T10:${String(index).padStart(2, '0')}:00.000Z`
   }));
 
-  it('分页文案报出区间与总数，翻页换内容', () => {
-    const first = render({ sessions, sessionsPage: 0 });
-    assert.match(first, /data-testid="agent-sessions-range"/);
-    assert.match(first, /会话 1–10 \/ 共 23/, '必须回答「这一页覆盖第几到第几」');
-    assert.match(first, /rollout-0000\.jsonl/);
-    assert.ok(!first.includes('rollout-0010.jsonl'), '第一页不该出现第二页的条目');
-
-    const second = render({ sessions, sessionsPage: 1 });
-    assert.match(second, /rollout-0010\.jsonl/, '翻页必须换内容');
-    assert.ok(!second.includes('rollout-0000.jsonl'));
+  it('会话历史全量渲染（问题 5：不再每 10 条一页）', () => {
+    const html = render({ sessions });
+    assert.match(html, /rollout-0000\.jsonl/, '最老的会话应可见');
+    assert.match(html, /rollout-0022\.jsonl/, '最近的会话应可见——不再分页截断');
+    assert.ok(!html.includes('会话 1–10'), '不应再报告分页区间');
+    const visibleCount = (html.match(/rollout-\d{4}\.jsonl/g) ?? []).length;
+    assert.equal(visibleCount, 23, '23 条会话应全部渲染');
   });
 
   it('明说数据源只回最近 50 个会话（不是渲染截断）', () => {
@@ -242,8 +237,8 @@ describe('会话历史分页与数据源上限说明', () => {
   });
 });
 
-describe('工具调用超上限时显式说明截断', () => {
-  it('报真实总数与未显示数', () => {
+describe('工具调用列表全量渲染（问题 5：不再按 20 条截断）', () => {
+  it('全部工具调用都渲染，且不出现截断说明', () => {
     let task = startAgentTask(SESSION);
     const total = 26;
     for (let index = 0; index < total; index += 1) {
@@ -253,13 +248,10 @@ describe('工具调用超上限时显式说明截断', () => {
         { type: 'tool-call-end', step: 1, callId: `c${index}`, name: `tool_${index}`, ok: true }
       );
     }
-    // 先断言前提成立：数据确实跨过了上限。前提不成立时截断说明本就不该出现，
-    // 那种情况下「断言没报红」证明不了判据有效（本仓库已记录的假绿形态）。
-    assert.ok(task.toolCalls.length > 20, `前提不成立：只有 ${task.toolCalls.length} 次调用，未跨过上限`);
     const html = render({ task });
-    assert.match(html, /data-testid="agent-tool-calls-truncation"/);
-    assert.match(html, new RegExp(String(total)), '必须报真实总数');
-    assert.match(html, new RegExp(String(total - 20)), '必须报未显示数');
+    assert.equal((html.match(/tool_\d+/g) ?? []).length, total, '全部工具调用必须渲染，不得只留最近 20 条');
+    assert.ok(!html.includes('agent-tool-calls-truncation'), '不再出现截断说明');
+    assert.ok(!html.includes('未显示'), '不再出现未显示计数');
   });
 });
 

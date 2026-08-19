@@ -116,10 +116,11 @@ export function classifyDiffLines(unifiedDiff: string): DiffLineView[] {
 export interface AgentApprovalPreview {
   targetPath: string | null;
   targetUri: string | null;
-  /** 新内容;超过阈值时截断,并由 truncatedBytes 说明截了多少。 */
+  /** 新内容全文（问题 5：单条文本预览不再截断；过长由界面展开/折叠展示）。 */
   newText: string | null;
+  /** 保留字段：始终为 0（不再截断）。 */
   truncatedBytes: number;
-  /** 参数里声明的改动条目数(PatchProposal.changes 的长度)。 */
+  /** 参数里声明的改动条目数（PatchProposal.changes 的长度）。 */
   changeCount: number | null;
 }
 
@@ -146,8 +147,7 @@ export type AgentApprovalDecisionKind =
 export type AgentApprovalUserDecision =
   | 'once' | 'always' | 'reject' | 'never' | 'abort';
 
-/** 预览里 newText 的展示上限;超出部分截断并说明。 */
-export const APPROVAL_PREVIEW_TEXT_LIMIT = 2_000;
+/** 预览里 newText 不再有展示上限（问题 5：单条文本用展开/折叠看全文，不截断）。 */
 
 /**
  * 从工具参数里提取改动预览。
@@ -182,16 +182,12 @@ export function extractApprovalPreview(argumentsJson: string): AgentApprovalPrev
     return null;
   }
 
-  const truncatedBytes = rawText !== undefined && rawText.length > APPROVAL_PREVIEW_TEXT_LIMIT
-    ? rawText.length - APPROVAL_PREVIEW_TEXT_LIMIT
-    : 0;
   return {
     targetPath: targetPath ?? null,
     targetUri: targetUri ?? null,
-    newText: rawText === undefined
-      ? null
-      : rawText.slice(0, APPROVAL_PREVIEW_TEXT_LIMIT),
-    truncatedBytes,
+    newText: rawText ?? null,
+    // 不再截断：保留字段恒为 0，界面侧若仍引用说明文案已无意义。
+    truncatedBytes: 0,
     changeCount: changes === null ? null : changes.length
   };
 }
@@ -247,12 +243,6 @@ export const INITIAL_AGENT_TASK_STATE: AgentTaskState = Object.freeze({
   pendingApprovals: [],
   approvalDecisions: []
 });
-
-/** 工具调用列表的渲染上限；超出部分由 formatListTruncation 显式说明。 */
-export const AGENT_TOOL_CALL_LIMIT = 20;
-
-/** 会话列表每页条数（纯 renderer 展示粒度，无对侧消费者）。 */
-export const AGENT_SESSION_PAGE_SIZE = 10;
 
 /** 已回答审批的保留条数;超出丢弃最早的。完整记录在会话文件里。 */
 export const AGENT_APPROVAL_DECISION_LIMIT = 20;
