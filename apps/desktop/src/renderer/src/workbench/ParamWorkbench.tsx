@@ -32,7 +32,7 @@
  * 「元数据包与真实 PARAM 的字段偏移是否对得上」，绕过它等于往错误偏移写数值。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { ParamDefDocument, ParamFieldDef } from '@soulforge/shared';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
@@ -199,6 +199,194 @@ export interface ParamWorkbenchProps {
   }) => Promise<{ ok: boolean; message?: string }>;
 }
 
+/** Rows 栏 props。回调全部要求引用稳定（宿主用 useCallback 给），memo 才拦得住。 */
+interface ParamRowsColumnProps {
+  /** null = 尚未选择 param，显示占位提示。 */
+  selectedEntry: number | null;
+  visibleRows: ParamRowLine[];
+  rowsLoading: boolean;
+  rowsError: string | null;
+  rowQuery: string;
+  onRowQueryChange: (value: string) => void;
+  selectedRowId: number | null;
+  onSelectRow: (id: number) => void;
+  /** 当前 param 条目名（S10 引用 data-cite 用）。 */
+  paramName: string | null;
+  /** 行名写入出口是否接通（缺省即行名只读）。 */
+  rowNameEditable: boolean;
+  /** 行名提交（宿主侧走 Patch Engine + toast + 重载）。名字已 trim。 */
+  onCommitRowName: (row: ParamRowLine, normalizedName: string) => Promise<void>;
+}
+
+/**
+ * Rows 栏：行表虚拟化内置，整体 memo。
+ *
+ * ── 为什么从 ParamWorkbench 拆出来 ──
+ *
+ * 虚拟滚动器订阅滚动事件。挂在主组件上时，**每个滚动帧都整体重渲染三栏**
+ * —— 右栏字段可达数百个受控输入（字段全量渲染是用户裁定），帧耗时撑爆后
+ * overscan 消耗完而新行还没渲染出来，快速滚动就露空白。拆出后滚动只重渲染
+ * 本栏视口内的几十行，左栏 param 列表与右栏字段不再陪跑。
+ *
+ * ── 行 key 用虚拟化下标而不是 row.id ──
+ *
+ * 真实语料行 id 会重复（实测 10 个 param 共 52 行重复 id，如 CutsceneParam
+ * 的 10000000 出现两次）。重复 key 让 React 协调复用错 DOM，重复 id 的行
+ * 进出虚拟化窗口时表现就是行空白/串行。下标是虚拟化位置的稳定锚：全量数据
+ * 加载后不会原地重排，切换 param 时整张列表连同 sizer 高度一起换掉。
+ *
+ * ── overscan 30 ──
+ *
+ * 行高锁定 22px（等高；可变高度要测量模式，param 行信息量固定，锁等高 +
+ * 溢出省略号更稳）。overscan 30 ≈ 660px 视口外预渲染，快速滚轮/拖动单次
+ * 位移通常落得进来；行本身廉价，预渲染成本可忽略。
+ */
+const ParamRowsColumn = memo(function ParamRowsColumn({
+  selectedEntry,
+  visibleRows,
+  rowsLoading,
+  rowsError,
+  rowQuery,
+  onRowQueryChange,
+  selectedRowId,
+  onSelectRow,
+  paramName,
+  rowNameEditable,
+  onCommitRowName
+}: ParamRowsColumnProps): ReactElement {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** 行名编辑草稿：非 null 表示正在编辑选中行的名字。 */
+  const [rowNameDraft, setRowNameDraft] = useState<string | null>(null);
+  const [rowNameCommitting, setRowNameCommitting] = useState(false);
+
+  // 换选中行即收起上一行的草稿（宿主在 selectedRowId 变化时会重置 drafts，
+  // 行名草稿同理，落在栏内自治）。
+  useEffect(() => {
+    setRowNameDraft(null);
+  }, [selectedRowId]);
+
+  const virtualizer = useVirtualizer({
+    count: visibleRows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 22,
+    overscan: 30
+  });
+  const virtualRows = virtualizer.getVirtualItems();
+
+  /**
+   * 提交一个行名（T5-3）。草稿语义在栏内闭环：名字没变（或只去掉首尾空白）
+   * 不发请求直接收起；有变化才交给宿主的 Patch 链。
+   */
+  async function commitDraftName(row: ParamRowLine, rawName: string): Promise<void> {
+    if (!rowNameEditable || !row.dataBase64) return;
+    const normalized = rawName.trim();
+    if (normalized === (row.name ?? '')) {
+      setRowNameDraft(null);
+      return;
+    }
+    setRowNameCommitting(true);
+    try {
+      await onCommitRowName(row, normalized);
+      setRowNameDraft(null);
+    } finally {
+      setRowNameCommitting(false);
+    }
+  }
+
+  return (
+    <div className="wb-list wb-list--virtual">
+      {selectedEntry === null && <p className="wb-empty">先在左栏选择一个 param。</p>}
+      {selectedEntry !== null && (
+        <>
+          <div style={{ padding: '4px 8px', display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input
+              value={rowQuery}
+              onChange={(event) => onRowQueryChange(event.target.value)}
+              placeholder="筛选 id / name（全量数据本地过滤）"
+              aria-label="筛选 PARAM 行 id 或 name（全量数据本地过滤）"
+              style={{ flex: 1, minWidth: 0 }}
+            />
+          </div>
+          {rowsError && <p className="wb-empty diag-error">{rowsError}</p>}
+          {rowsLoading && (
+            <p className="wb-empty" role="status">读取行数据…</p>
+          )}
+          {!rowsLoading && !rowsError && visibleRows.length === 0 && (
+            <p className="wb-empty">没有匹配的行。</p>
+          )}
+          {/* 虚拟滚动：全量数据一次在手，DOM 只保留可见行 + overscan。
+              role=grid + aria-rowcount 给出**总行数**而不是渲染数 ——
+              否则屏幕阅读器会播报「共 20 行」而实际有 5275 行。 */}
+          <div
+            ref={scrollRef}
+            className="wb-virtual-scroll"
+            role="grid"
+            aria-rowcount={visibleRows.length}
+            aria-label="PARAM 行列表"
+          >
+            <div
+              className="wb-virtual-sizer"
+              style={{ height: `${virtualizer.getTotalSize()}px` }}
+            >
+              {virtualRows.map((virtualRow) => {
+                const row = visibleRows[virtualRow.index];
+                if (!row) return null;
+                return (
+                  <div
+                    key={virtualRow.index}
+                    className="wb-row wb-virtual-row"
+                    style={{
+                      height: `${virtualRow.size}px`,
+                      transform: `translateY(${virtualRow.start}px)`
+                    }}
+                    aria-rowindex={virtualRow.index + 1}
+                    {...selectableRowAttributes({
+                      selected: selectedRowId === row.id,
+                      isTabEntry: isRowTabEntry(virtualRow.index, selectedRowId !== null),
+                      onSelect: () => onSelectRow(row.id)
+                    })}
+                    {...(citeRowAttr(row, paramName))}
+                  >
+                    <span className="wb-row__id">{row.id}</span>
+                    {selectedRowId === row.id && rowNameEditable && row.dataBase64
+                      ? (
+                        <input
+                          className="wb-row__name-input"
+                          value={rowNameDraft ?? row.name ?? ''}
+                          aria-label={`行 ${row.id} 的名字`}
+                          disabled={rowNameCommitting}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => setRowNameDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.stopPropagation();
+                              void commitDraftName(row, event.currentTarget.value);
+                            } else if (event.key === 'Escape') {
+                              event.stopPropagation();
+                              setRowNameDraft(null);
+                            }
+                          }}
+                          onBlur={() => {
+                            if (rowNameDraft !== null) void commitDraftName(row, rowNameDraft);
+                          }}
+                        />
+                      )
+                      : (
+                        <span className="wb-row__name" title={row.name ?? ''}>
+                          {row.name ?? '—'}
+                        </span>
+                      )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+});
+
 /** 字段全量渲染（用户裁定 2026-08-14）：字段不再分页，一次全部显示。 */
 export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   const bridge = getRendererBridge();
@@ -232,8 +420,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    */
   const [rows, setRows] = useState<ParamRowLine[]>([]);
   const [loadedRows, setLoadedRows] = useState<ParamRowLine[]>([]);
-  /** 行栏滚动容器。虚拟化器要它测量视口与滚动位置。 */
-  const rowScrollRef = useRef<HTMLDivElement | null>(null);
   /**
    * 筛选输入的 debounce 值。
    *
@@ -291,17 +477,16 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   /** S28：工作台内短时保存提示（成功几秒后消失）；失败留在原处直到下次操作。 */
   const [toast, setToast] = useState<{ text: string; kind: 'ok' | 'error' } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
-  function showToast(text: string, kind: 'ok' | 'error'): void {
+  // useCallback：commitRowName 是 memo 化的 ParamRowsColumn 的 prop，
+  // showToast 不稳定会把整台重渲染泄进中栏行表。
+  const showToast = useCallback((text: string, kind: 'ok' | 'error'): void => {
     setToast({ text, kind });
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     // 失败不自动消失：用户要能读到原因；成功几秒后自己消失。
     if (kind === 'ok') {
       toastTimerRef.current = window.setTimeout(() => setToast(null), 2500);
     }
-  }
-  /** 行名编辑草稿：非 null 表示正在编辑选中行的名字。 */
-  const [rowNameDraft, setRowNameDraft] = useState<string | null>(null);
-  const [rowNameCommitting, setRowNameCommitting] = useState(false);
+  }, []);
   /** CSV 导入导出（T5-4）进行中标记：防止重复点击。 */
   const [ioBusy, setIoBusy] = useState(false);
   /** 问题 4：新建/复制/删除行进行中标记：防止重复提交。 */
@@ -354,7 +539,7 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
 
   useEffect(() => {
     setDrafts({});
-    setRowNameDraft(null);
+    // 行名草稿随选中行重置的语义落在 ParamRowsColumn 内（栏内自治）。
   }, [selectedRowId]);
 
   /*
@@ -666,29 +851,6 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
   }, [enumOpenFieldId]);
 
   /**
-   * 行表虚拟化。
-   *
-   * 为什么必须虚拟化：BehaviorParam 有 5275 行（用户裁定全量加载后，数据一次
-   * 全部在手，但 DOM 仍只渲染视口行）。对照 Smithbox 的取舍 —— 它一次全画
-   * 5275 行（ImGui 每帧重建，无 DOM 节点成本），并且刻意**不**给 param 行用
-   * clipper（因为它的行带 decorator，高度不齐一）。DOM 下全画不可行：每行是
-   * 真实节点。全量数据 + 虚拟滚动 = 一次加载到位 + DOM 有界。
-   *
-   * 行高锁定 22px（等高）：可变高度要测量模式，而 param 行的信息量固定
-   * （id + name），锁等高 + 溢出省略号是更简单也更稳的选择。
-   *
-   * overscan 12：滚动时预渲染视口外 12 行，避免快速拖动出现空白。
-   */
-  const rowVirtualizer = useVirtualizer({
-    count: visibleRows.length,
-    getScrollElement: () => rowScrollRef.current,
-    estimateSize: () => 22,
-    overscan: 12
-  });
-
-  const virtualRows = rowVirtualizer.getVirtualItems();
-
-  /**
    * S29：bool 与 1bit 位字段用打勾（grok §1-9「布尔和 1bit 用打勾，不要数字框」）。
    * 1bit 是标量类型 + bitfield.bitWidth===1（bitOffset 任意）。
    */
@@ -760,17 +922,17 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
    * 与字段写入同一条 Patch 链：onApplyRowNameMutation 由宿主接到
    * applyContainerParamRowNameMutation → write-param upsert(带 name) →
    * write-bnd4 → Patch Engine。名字为空串 = 清掉该行名字（允许）。
-   * 名字没变（或只去掉首尾空白）时不发请求。
+   *
+   * 「名字没变即收起」与草稿/提交中状态都在 ParamRowsColumn 内闭环，到这里
+   * 的只有真正改了名字的提交。useCallback 是硬要求：中栏整体 memo，回调不稳定
+   * 会把本组件每次重渲染（字段草稿、枚举开合、toast）都泄进行表。
    */
-  async function commitRowName(row: ParamRowLine, rawName: string): Promise<void> {
+  const commitRowName = useCallback(async (
+    row: ParamRowLine,
+    normalizedName: string
+  ): Promise<void> => {
     if (!props.onApplyRowNameMutation || selectedEntry === null) return;
     if (!row.dataBase64) return;
-    const normalized = rawName.trim();
-    if (normalized === (row.name ?? '')) {
-      setRowNameDraft(null);
-      return;
-    }
-    setRowNameCommitting(true);
     try {
       const result = await props.onApplyRowNameMutation({
         paramName: paramName ?? '',
@@ -778,10 +940,9 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
         expectedContainerHash: containerHash,
         expectedChildHash: childHash,
         rowId: row.id,
-        name: normalized,
+        name: normalizedName,
         rowDataBase64: row.dataBase64
       });
-      setRowNameDraft(null);
       if (result.ok) {
         showToast('已保存', 'ok');
         loadRows();
@@ -790,10 +951,16 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       }
     } catch (error) {
       showToast(error instanceof Error ? error.message : '行名提交异常。', 'error');
-    } finally {
-      setRowNameCommitting(false);
     }
-  }
+  }, [
+    props.onApplyRowNameMutation, selectedEntry, paramName,
+    containerHash, childHash, showToast, loadRows
+  ]);
+
+  /** 中栏行筛选受控回写。稳定引用（memo 门槛，同 commitRowName 注释）。 */
+  const handleRowQueryChange = useCallback((value: string): void => setRowQuery(value), []);
+  /** 中栏行选中。稳定引用（memo 门槛，同 commitRowName 注释）。 */
+  const handleSelectRow = useCallback((id: number): void => setSelectedRowId(id), []);
 
   /**
    * 行级写入（问题 4）：新建行 / 复制当前行 / 删除当前行。
@@ -940,97 +1107,22 @@ export function ParamWorkbench(props: ParamWorkbenchProps): ReactElement {
       initialFlex: 0.29,
       minWidth: 260,
       children: (
-        // --virtual：本栏的滚动权交给内部虚拟容器，外层不滚（否则双滚动条）。
-        <div className="wb-list wb-list--virtual">
-          {selectedEntry === null && <p className="wb-empty">先在左栏选择一个 param。</p>}
-          {selectedEntry !== null && (
-            <>
-              <div style={{ padding: '4px 8px', display: 'flex', gap: 6, alignItems: 'center' }}>
-                <input
-                  value={rowQuery}
-                  onChange={(event) => setRowQuery(event.target.value)}
-                  placeholder="筛选 id / name（全量数据本地过滤）"
-                  aria-label="筛选 PARAM 行 id 或 name（全量数据本地过滤）"
-                  style={{ flex: 1, minWidth: 0 }}
-                />
-              </div>
-              {rowsError && <p className="wb-empty diag-error">{rowsError}</p>}
-              {rowsLoading && (
-                <p className="wb-empty" role="status">读取行数据…</p>
-              )}
-              {!rowsLoading && !rowsError && visibleRows.length === 0 && (
-                <p className="wb-empty">没有匹配的行。</p>
-              )}
-              {/* 虚拟滚动：全量数据一次在手，DOM 只保留可见行 + overscan。
-                  role=grid + aria-rowcount 给出**总行数**而不是渲染数 ——
-                  否则屏幕阅读器会播报「共 20 行」而实际有 5275 行。 */}
-              <div
-                ref={rowScrollRef}
-                className="wb-virtual-scroll"
-                role="grid"
-                aria-rowcount={visibleRows.length}
-                aria-label="PARAM 行列表"
-              >
-                <div
-                  className="wb-virtual-sizer"
-                  style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
-                >
-                  {virtualRows.map((virtualRow) => {
-                    const row = visibleRows[virtualRow.index];
-                    if (!row) return null;
-                    return (
-                      <div
-                        key={row.id}
-                        className="wb-row wb-virtual-row"
-                        style={{
-                          height: `${virtualRow.size}px`,
-                          transform: `translateY(${virtualRow.start}px)`
-                        }}
-                        aria-rowindex={virtualRow.index + 1}
-                        {...selectableRowAttributes({
-                          selected: selectedRowId === row.id,
-                          isTabEntry: isRowTabEntry(virtualRow.index, selectedRowId !== null),
-                          onSelect: () => setSelectedRowId(row.id)
-                        })}
-                        {...(citeRowAttr(row, paramName))}
-                      >
-                        <span className="wb-row__id">{row.id}</span>
-                        {selectedRowId === row.id && props.onApplyRowNameMutation && row.dataBase64
-                          ? (
-                            <input
-                              className="wb-row__name-input"
-                              value={rowNameDraft ?? row.name ?? ''}
-                              aria-label={`行 ${row.id} 的名字`}
-                              disabled={rowNameCommitting}
-                              onClick={(event) => event.stopPropagation()}
-                              onChange={(event) => setRowNameDraft(event.target.value)}
-                              onKeyDown={(event) => {
-                                if (event.key === 'Enter') {
-                                  event.stopPropagation();
-                                  void commitRowName(row, event.currentTarget.value);
-                                } else if (event.key === 'Escape') {
-                                  event.stopPropagation();
-                                  setRowNameDraft(null);
-                                }
-                              }}
-                              onBlur={() => {
-                                if (rowNameDraft !== null) void commitRowName(row, rowNameDraft);
-                              }}
-                            />
-                          )
-                          : (
-                            <span className="wb-row__name" title={row.name ?? ''}>
-                              {row.name ?? '—'}
-                            </span>
-                          )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </>
-          )}
-        </div>
+        // 行表整体包进 memo 化的 ParamRowsColumn：虚拟化器随之搬进去，滚动驱动
+        // 的重渲染被封在栏内，不再每帧拖着字段栏（数百受控输入）与左栏重渲染
+        // —— 那是快滚掉帧露白的根因（组件注释有完整因果）。
+        <ParamRowsColumn
+          selectedEntry={selectedEntry}
+          visibleRows={visibleRows}
+          rowsLoading={rowsLoading}
+          rowsError={rowsError}
+          rowQuery={rowQuery}
+          onRowQueryChange={handleRowQueryChange}
+          selectedRowId={selectedRowId}
+          onSelectRow={handleSelectRow}
+          paramName={paramName}
+          rowNameEditable={props.onApplyRowNameMutation !== undefined}
+          onCommitRowName={commitRowName}
+        />
       )
     },
     {

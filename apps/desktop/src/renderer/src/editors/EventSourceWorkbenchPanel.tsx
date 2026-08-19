@@ -948,6 +948,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const fillOneSliceGuarded = useCallback((tabId: string): Promise<void> => {
     const promise = fillOneSlice(tabId).finally(() => {
       if (slicePromisesRef.current.get(tabId) === promise) slicePromisesRef.current.delete(tabId);
+      // 链式预取：一片落地后视口仍贴近已加载底部（快速滚动或贴底拖滚动条）就
+      // 立刻拉下一片，不等下一次滚动事件——旧实现每片之间要等滚动事件再触发，
+      // 快滚时视口撞进「已加载末尾等 IPC」的空窗。maybeFillMore 自带单飞行
+      // 通道、拉齐让路与近底判定：远离底部 / eof / 失败时链条自动停止，不空转。
+      const view = viewRef.current;
+      if (view !== null && activeTabIdRef.current === tabId) maybeFillMoreRef.current(view);
     });
     slicePromisesRef.current.set(tabId, promise);
     return promise;

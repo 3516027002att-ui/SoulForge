@@ -30,6 +30,7 @@
  */
 import { test, expect, _electron as electron } from '@playwright/test';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -44,8 +45,14 @@ const VIEWPORT_WIDTH = 1280;
 const VIEWPORT_HEIGHT = 820;
 
 async function launchApp(env = {}) {
+  // userData 隔离（与 production-main.spec.mjs 同一范式）：默认 userData 与
+  // 生产 dev 运行、其他 worktree 的 e2e 共用，shell 状态（上次工作域/选中资源，
+  // App.tsx 6-C 经 localStorage 恢复）跨运行残留 —— 残留一旦命中 fixture-session，
+  // 打开工作区后会被直接恢复进别的领域，开始页 h1 断言就挂。临时目录让每次
+  // 运行都从全新 shell 状态开始。
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-e2e-param-perf-'));
   const app = await electron.launch({
-    args: [fixtureMain],
+    args: [fixtureMain, `--user-data-dir=${userDataDir}`],
     env: { ...process.env, ...env }
   });
   const window = await app.firstWindow();
@@ -60,7 +67,11 @@ async function launchApp(env = {}) {
   // 视口固定 1280×820：默认 633×379 下 Rows 只放得下约 10 行，测出来
   // 系统性偏乐观（overscan 恒盖住视口，露白永远 0）。
   await window.setViewportSize({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT });
-  return { app, window };
+  const cleanup = async () => {
+    await app.close().catch(() => undefined);
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  };
+  return { app, window, cleanup };
 }
 
 async function closeAgentPanel(window) {
@@ -79,7 +90,9 @@ async function openFixtureWorkspace(window) {
 }
 
 async function openParamContainer(window) {
-  await window.locator('[data-domain="files"]').click();
+  // 「files」域在当前 IA 里是 hidden（domainNavigation.ts 的 visibility 裁定），
+  // 域栏上没有它的 tab；资源树在开始侧栏直接可见，与 renderer.spec.mjs 的
+  // selectFileItem 同一走法：收 Agent 面板后直接点文件项。
   await closeAgentPanel(window);
   await window.locator('.file-item', { hasText: 'param/gameparam/gameparam.parambnd.dcx' }).click();
   await expect(window.getByRole('region', { name: 'Params' })).toBeVisible();
@@ -161,7 +174,7 @@ test.beforeEach(({ }, testInfo) => {
 test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快速下拉不卡顿', async () => {
   // SF_TEST_LARGE_PARAM 只能由本条自己打开（默认 fixture 3 张表，本测试没有对象）。
   test.setTimeout(180_000);
-  const { app, window } = await launchApp({ SF_TEST_LARGE_PARAM: '1' });
+  const { window, cleanup } = await launchApp({ SF_TEST_LARGE_PARAM: '1' });
   await openFixtureWorkspace(window);
   await openParamContainer(window);
   const hint = await openLargeParam(window);
@@ -196,14 +209,14 @@ test('大表（5275 行 / 221 字段）：打开即出行，且选中行后快�
   expect(fling.scrolled, `甩滚总位移 > 90000px（实测 ${fling.scrolled}px）`).toBeGreaterThan(90000);
   expect(jank.samples + fling.samples, '露白采样数 > 40（防零样本）').toBeGreaterThan(40);
 
-  await app.close();
+  await cleanup();
 });
 
 test('打开大表的等待期间：中栏给出加载反馈，而不是纯空白', async () => {
   test.setTimeout(120_000);
   // 2500ms 延迟只由本条自己的 env 打开：默认 fixture 73ms 就答完，
   // 「行出来之前」那一帧抢不到。
-  const { app, window } = await launchApp({
+  const { window, cleanup } = await launchApp({
     SF_TEST_LARGE_PARAM: '1',
     SF_TEST_PARAM_READ_DELAY_MS: '2500'
   });
@@ -228,5 +241,5 @@ test('打开大表的等待期间：中栏给出加载反馈，而不是纯空�
   await expect(status).toBeHidden();
   await expect(rowsRegion.locator('.workbench__column-hint')).toContainText('5275 行');
 
-  await app.close();
+  await cleanup();
 });
