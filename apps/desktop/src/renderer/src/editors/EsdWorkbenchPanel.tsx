@@ -44,17 +44,9 @@ import {
   type EsdConditionSampleWire,
   type EsdDocument
 } from '@soulforge/shared';
-import { formatListTruncation } from '../format/uiText.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
-
-/** 状态组表渲染上限（上游数据截断；列表本身由布局栏滚动承载）。 */
-const STATE_GROUP_RENDER_LIMIT = 200;
-/** 条件样本渲染上限。 */
-const CONDITION_RENDER_LIMIT = 200;
-/** 命令调用样本渲染上限。 */
-const COMMAND_RENDER_LIMIT = 200;
 
 /** 55C 写回所需的 bridge 表面（按用即取，测试可注入桩；不依赖完整 preload 类型）。 */
 export interface EsdTransitionEditBridge {
@@ -222,45 +214,21 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
     ? (selected?.machineGroupId ?? null)
     : null;
 
-  const visibleStateGroups = stateGroups.slice(0, STATE_GROUP_RENDER_LIMIT);
-  const stateGroupTruncation = formatListTruncation({
-    total: stateGroups.length,
-    shown: visibleStateGroups.length,
-    noun: '个状态组'
-  });
-
+  // 状态组 / 条件 / 命令全部渲染，栏本身 overflow-y:auto，不做条数上限。
+  const visibleStateGroups = stateGroups;
   const visibleConditions = conditionSamples
-    .filter((sample) => activeMachine === null || sample.sourceGroupId === activeMachine)
-    .slice(0, CONDITION_RENDER_LIMIT);
-  const filteredConditionCount = conditionSamples
-    .filter((sample) => activeMachine === null || sample.sourceGroupId === activeMachine)
-    .length;
-  const conditionsTruncation = formatListTruncation({
-    total: filteredConditionCount,
-    shown: visibleConditions.length,
-    noun: '个条件'
-  });
-
+    .filter((sample) => activeMachine === null || sample.sourceGroupId === activeMachine);
   const visibleCommands = commandSamples
     .map((sample, index) => ({ sample, index }))
-    .filter(({ sample }) => activeMachine === null || sample.sourceGroupId === activeMachine)
-    .slice(0, COMMAND_RENDER_LIMIT);
-  const filteredCommandCount = commandSamples
-    .filter((sample) => activeMachine === null || sample.sourceGroupId === activeMachine)
-    .length;
-  const commandsTruncation = formatListTruncation({
-    total: filteredCommandCount,
-    shown: visibleCommands.length,
-    noun: '个命令调用'
-  });
+    .filter(({ sample }) => activeMachine === null || sample.sourceGroupId === activeMachine);
 
   const authority = document?.authority;
   const isPartial = authority === 'partial';
   const gapCount = document?.unparsedGaps.length ?? 0;
   const shortfallCount = document?.coverageShortfalls.length ?? 0;
   const graphClosed = transitions?.closed ?? false;
-  const visibleGaps = (document?.unparsedGaps ?? []).slice(0, 8);
-  const visibleShortfalls = (document?.coverageShortfalls ?? []).slice(0, 8);
+  const visibleGaps = document?.unparsedGaps ?? [];
+  const visibleShortfalls = document?.coverageShortfalls ?? [];
 
   // ── 55C 编辑状态：换文件/换选中条件时归位 ──
   // 换文件丢弃上一份文件的重读结果与提交状态（props 驱动，不改 App）。
@@ -485,9 +453,6 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                       <span className="wb-row__meta">{group.stateCount} 状态</span>
                     </div>
                   ))}
-                  {stateGroupTruncation && (
-                    <p className="muted" data-testid="esd-truncation">{stateGroupTruncation}</p>
-                  )}
                   <div className="wb-list__group-label">States</div>
                   {selectedMachineRow ? (
                     <div className="wb-row">
@@ -551,9 +516,6 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                       </span>
                     </div>
                   ))}
-                  {conditionsTruncation && (
-                    <p className="muted" data-testid="esd-conditions-truncation">{conditionsTruncation}</p>
-                  )}
                   {visibleConditions.length === 0 && (
                     <p className="wb-empty">没有可显示的条件样本。</p>
                   )}
@@ -572,9 +534,6 @@ export function EsdWorkbenchPanel(props: EsdWorkbenchPanelProps): ReactElement {
                       <span className="wb-row__meta">{sample.slot} · {sample.argCount} 参数</span>
                     </div>
                   ))}
-                  {commandsTruncation && (
-                    <p className="muted" data-testid="esd-commands-truncation">{commandsTruncation}</p>
-                  )}
                   {visibleCommands.length === 0 && (
                     <p className="wb-empty">没有可显示的命令调用。</p>
                   )}
