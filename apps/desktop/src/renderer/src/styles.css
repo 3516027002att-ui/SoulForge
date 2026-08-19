@@ -1008,8 +1008,9 @@ pre.tool-output {
   grid-template-columns: 120px minmax(120px, 1fr);
   min-width: 260px;
 }
-.msb-viewport { display: flex; flex-direction: column; gap: 8px; }
-.msb-viewport .scene-host { width: 100%; }
+/* 问题4-A：地图 viewport 跟栏高走——scene-host 随栏伸缩，3D 场景不被压成固定小盒子 */
+.msb-viewport { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.msb-viewport .scene-host { flex: 1; min-height: 320px; width: 100%; }
 /* S19 失败面：地图打开失败的可行动错误块（code + 人话），复用 notice 视觉族 */
 .msb-open-failure {
   display: grid; gap: 4px; padding: 10px 12px;
