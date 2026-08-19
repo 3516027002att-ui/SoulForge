@@ -74,14 +74,20 @@ async function openFixtureWorkspace(window) {
   // 放大视口后侧栏与开始页有两个同名 open-workspace 按钮，裸 getByTestId
   // 会 strict mode violation：先收窄到开始页 region 再点。
   await window.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
-  await expect(window.locator('.project-overview h1')).toHaveText('fixture-workspace');
+  // 问题 1：开始页只在无工作区出现；挂载完成信号改等标题栏 workspace-switcher
+  // 出现工作区名（旧判据 .project-overview h1 是有工作区后不再渲染的开始页）。
+  await expect(window.locator('.workspace-switcher__trigger'), { timeout: 20_000 }).toContainText('fixture-workspace');
   await expect(window.locator('.welcome__stats')).toContainText('已解析');
 }
 
 async function openParamContainer(window) {
-  await window.locator('[data-domain="files"]').click();
+  // 问题 1/14：有工作区后「文件」域不在顶栏（与 GPARAM/动画同口径 hidden），
+  // 也不再需要物理定位 gameparam——PARAM 顶栏入口即打开 GameParam 逻辑库工作台。
+  // restoreLastShellState 可能把 activeDomain 留在 param 但 sourceUri 留在非
+  // PARAM 文件（重复点 param 是 no-op），先切去文本再切回 PARAM 强制挂工作台。
+  await window.locator('[data-domain="text"]').click();
+  await window.locator('[data-domain="param"]').click();
   await closeAgentPanel(window);
-  await window.locator('.file-item', { hasText: 'param/gameparam/gameparam.parambnd.dcx' }).click();
   await expect(window.getByRole('region', { name: 'Params' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Rows' })).toBeVisible();
   await expect(window.getByRole('region', { name: 'Fields' })).toBeVisible();

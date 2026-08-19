@@ -81,6 +81,14 @@ async function openFixtureWorkspace(window) {
    *    打开后是 display:none，但 toContainText 读 textContent、不做可见性检查。
    */
   await expect(window.locator('.workspace-switcher__trigger')).toContainText('fixture-workspace', { timeout: 20_000 });
+  // 恢复上次领域是正确产品行为（问题 1）：e2e 共享真实 userDataDir，上一个测试可能
+  // 已把 activeDomain 留在 动作/文本/…，且 restoreLastShellState 会连同上次选中
+  // 的 sourceUri 一起恢复（可能是一个非 PARAM 文件，如 other/notes.txt）。此时
+  // activeDomain 已是 param，重复点 param 是 no-op，PARAM 工作台不会挂载。
+  // 显式「切去文本 → 切回 PARAM」强制进入 PARAM 工作台，让依赖「从 PARAM 基线
+  // 出发」的断言在不同测试顺序下都确定。
+  await window.locator('[data-domain="text"]').click();
+  await window.locator('[data-domain="param"]').click();
   await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
   await expect(window.locator('.welcome__stats')).toContainText('已解析');
 }
@@ -262,15 +270,17 @@ test('脚本容器进入三栏工作台：明文按 encoding 显示，字节码�
   // WorkbenchLayout 根是 div(.workbench)带 aria-label,不是 section/region。
   await expect(window.getByLabel('脚本容器工作台')).toBeVisible();
 
-  // 三栏（不用四栏模板：无 Tools/Symbols 空栏）。
-  await expect(window.getByRole('region', { name: 'Container / Files' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Source / 只读反汇编' })).toBeVisible();
-  await expect(window.getByRole('region', { name: 'Metadata' })).toBeVisible();
+  // 两栏（S16 脚本 IDE 起：Files | Source，不用三栏/四栏模板：无
+  // Container / Files、Source / 只读反汇编、Metadata、Tools/Symbols 空栏）。
+  await expect(window.getByRole('region', { name: 'Files' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Source' })).toBeVisible();
+  await expect(window.getByRole('region', { name: 'Container / Files' })).toHaveCount(0);
+  await expect(window.getByRole('region', { name: 'Metadata' })).toHaveCount(0);
   await expect(window.getByRole('region', { name: 'Tools' })).toHaveCount(0);
 
   // 明文条目：中栏显示解码文本 + encoding/BOM/newline 明示。
   await window.getByRole('row', { name: /goal_list\.lua/ }).click();
-  const source = window.getByRole('region', { name: 'Source / 只读反汇编' });
+  const source = window.getByRole('region', { name: 'Source' });
   await expect(source).toContainText('明文');
   await expect(source).toContainText('UTF-8');
   await expect(source).toContainText('CRLF 3');
