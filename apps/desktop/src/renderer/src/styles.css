@@ -2187,13 +2187,6 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .esd-partial summary, .tae-partial summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
 .esd-partial ul, .tae-partial ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
 
-/* S33：开始态侧栏——开始页四件事 + 折叠工具 + 资源树。 */
-.start-sidebar { display: flex; flex-direction: column; gap: 8px; padding: 8px; min-height: 0; }
-.start-sidebar__block { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px; display: flex; flex-direction: column; gap: 8px; }
-.start-sidebar__workspace { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11px; font-weight: 600; margin: 0; }
-.start-sidebar__actions { display: flex; flex-direction: column; gap: 6px; }
-.start-sidebar__tools summary { cursor: pointer; color: var(--ink-2); font-size: 11px; }
-.start-sidebar__tools-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 0 0 4px; }
 
 /* S17：动作预览右栏的 3D 视口宿主（FlverViewer 撑满列宽）。 */
 .tae-preview__viewport { flex: 1; min-height: 240px; position: relative; }
