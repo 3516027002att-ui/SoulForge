@@ -309,9 +309,11 @@ test('MSB 地图工作台三栏：对象列表↔viewport↔属性联动，defer
   await expect(window.getByTestId('msb-selected-summary')).toContainText('已选择 region：r0001');
   await expect(properties).toContainText('Position Z');
 
-  // writer 未就绪（msb 处于延期只读预览）：无保存动作，只有延期提示。
-  await expect(window.getByRole('button', { name: '提交 part 位置' })).toHaveCount(0);
-  await expect(window.getByText(/MSB 编辑已延期至 V0.6/)).toContainText('只读预览');
+  // 问题4-B：地图工作台整条 footer（Δ 微调 / transform 输入 / 实时模式 /
+  // 三个提交按钮）已移除；Properties 栏保持只读属性表。
+  await expect(window.getByRole('button', { name: /提交 part 位置|提交 region 位置|提交 part transform/ })).toHaveCount(0);
+  await expect(window.getByText(/实时模式/)).toHaveCount(0);
+  await expect(window.locator('.workbench__footer')).toHaveCount(0);
 
   // resize/keyboard：分隔条可聚焦，方向键调宽真实生效（量 DOM 宽度前后）。
   // P1 裁定后方向键/拖拽受「其余栏 minWidth 之和」上限约束——窄窗口里其余栏
@@ -548,15 +550,18 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   await left.getByRole('row', { name: /a0000/ }).click();
   await expect(middle.getByText(/词条 · 动画 0/)).toBeVisible();
   await expect(middle.getByRole('row', { name: /事件类型 1/ })).toBeVisible();
-  await expect(middle.getByRole('row', { name: /0s → 1s/ })).toBeVisible();
+  // 问题4-C：词条行 meta 是帧区间（主单位帧）。
+  await expect(middle.getByRole('row', { name: /帧 0–30/ })).toBeVisible();
 
-  // 选中词条事件 → 中栏下方详情列出 Start Frame / End Frame / Id 等。
+  // 问题4-C：选中词条事件 → 详情收在 Events 栏下半（可关抽屉），只留一套起始/结束帧。
   await middle.getByRole('row', { name: /事件类型 1/ }).click();
   const details = window.getByTestId('tae-details');
-  await expect(details.getByText('Start Frame')).toBeVisible();
-  await expect(details.getByText('End Frame')).toBeVisible();
-  await expect(details.getByText('动画 Id')).toBeVisible();
-  await expect(details.getByText('事件类型 Id')).toBeVisible();
+  await expect(details).toBeVisible();
+  // 起始帧 / 结束帧各出现一次（主单位帧，旁边小字 ≈ 秒）。
+  await expect(details.getByText('起始帧')).toHaveCount(1);
+  await expect(details.getByText('结束帧')).toHaveCount(1);
+  await expect(details.getByText('事件类型')).toBeVisible();
+  await expect(details.getByText('事件下标')).toBeVisible();
   // 事件参数体未解码边界必须明示（不伪装成完整解析）。
   await expect(details.getByText('参数体')).toBeVisible();
   await expect(details.getByText(/未解码/)).toBeVisible();
@@ -568,11 +573,16 @@ test('动作工作台三栏（TAE）：动画 → 词条事件选择链，事件
   const preview = window.getByRole('region', { name: '预览（只读）' });
   await expect(preview.locator('input, button')).toHaveCount(0);
 
-  // ANIMATION-56C event write：选中词条事件后出现事件编辑入口，更新事件时间。
+  // 问题4-C：详情必须能关——点 × 关闭后详情不在，回到该动画。
+  await window.getByRole('button', { name: '关闭词条详情' }).click();
+  await expect(window.getByTestId('tae-details')).toHaveCount(0);
+
+  // ANIMATION-56C event write：详情里的时间编辑入口——输入按帧编辑，提交 /30 换秒。
+  await middle.getByRole('row', { name: /事件类型 1/ }).click();
   await expect(window.getByTestId('tae-event-editor')).toBeVisible();
-  const startInput = window.getByLabel('新开始时间');
+  const startInput = window.getByLabel('新起始帧');
   await expect(startInput).toHaveValue('0');
-  await startInput.fill('0.5');
+  await startInput.fill('15'); // 0.5 秒 × 30 = 帧 15
   await window.getByRole('button', { name: '更新事件时间' }).click();
   await expect(window.getByTestId('tae-write-notice')).toContainText('事件时间已更新并重读验证');
 

@@ -118,10 +118,8 @@ const TRUNCATION_RENDER_SITES: ReadonlyArray<{
   { file: 'App.tsx', testId: 'cmdk-truncation', why: '命令面板资源命中此前静默 slice(0, 8)' },
   { file: 'components/PreviewCards.tsx', testId: 'preview-truncation', why: '预览卡片此前 8 处静默 slice' },
   { file: 'editors/EsdWorkbenchPanel.tsx', testId: 'esd-truncation', why: '状态组表此前静默 slice(0, 200)' },
-  { file: 'editors/TaeWorkbenchPanel.tsx', testId: 'tae-truncation', why: '动画表此前静默 slice(0, 200)' },
   { file: 'editors/FlverWorkbenchPanel.tsx', testId: 'flver-truncation', why: '材质/骨骼/网格三表此前静默截断' },
-  { file: 'editors/TpfWorkbenchPanel.tsx', testId: 'tpf-truncation', why: '纹理表截断说明须与其他面板同口径' },
-  { file: 'editors/MsbScenePanel.tsx', testId: 'msb-region-truncation', why: 'region 表原为手写文案，不报未显示数' }
+  { file: 'editors/TpfWorkbenchPanel.tsx', testId: 'tpf-truncation', why: '纹理表截断说明须与其他面板同口径' }
 ];
 
 describe('截断说明必须真的接进渲染站点', () => {
@@ -179,6 +177,23 @@ describe('截断说明必须真的接进渲染站点', () => {
       new RegExp(`data-testid="${site.testId}"`),
       '判据必须在说明被摘掉后报红，否则上面每条站点断言形同虚设'
     );
+  });
+});
+
+describe('问题4-D/4-A：TAE/MSB 不再静默截断（显示层取消条数上限）', () => {
+  it('TaeWorkbenchPanel 源码不得再有 ANIMATION_RENDER_LIMIT / EVENT_RENDER_LIMIT', () => {
+    const source = readRendererSource('editors/TaeWorkbenchPanel.tsx');
+    assert.doesNotMatch(source, /const ANIMATION_RENDER_LIMIT\s*=/);
+    assert.doesNotMatch(source, /const EVENT_RENDER_LIMIT\s*=/);
+    assert.doesNotMatch(source, /animations\.slice\(0, 200\)/);
+  });
+
+  it('MsbScenePanel 源码不得再有 MAP_MESH_PREFETCH_LIMIT / GROUP_RENDER_LIMIT / 名字截断', () => {
+    const source = readRendererSource('editors/MsbScenePanel.tsx');
+    assert.doesNotMatch(source, /MAP_MESH_PREFETCH_LIMIT/);
+    assert.doesNotMatch(source, /GROUP_RENDER_LIMIT/);
+    assert.doesNotMatch(source, /\.slice\(0,\s*40\)/);
+    assert.doesNotMatch(source, /slice\(0, GROUP_RENDER_LIMIT\)/);
   });
 });
 

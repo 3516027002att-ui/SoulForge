@@ -5,16 +5,16 @@
  *
  * ── T3 重构（行为 + 动画合并为「动作」）──
  *
- * 左栏列动画 id（hkxName 去扩展，如 a000_003013；无 hkxName 用「动画 N」）。
+ * 左栏列动画 id（hkxName 去扩展，如 a000_003013；无 hkxName 用干净数字 id）。
  * 中栏列当前动画的词条事件列表——envelope 只有 eventTypeId 与起止时间，词条文本名
  * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后在中栏下方
- * 详情列出 Start Frame / End Frame / Id 与能解出的全部字段；解不出的字段写
- * 「未解码」+ 原始数值，禁止编造 SoundType 含义。
- * 右栏是只读 3D 预览（S17）：`read-chrbnd-flver-preview`（已登记进
- * AdvertisedCommands）从 overlay 或原版 chr/<id>.chrbnd.dcx 取伴生 FLVER，
- * 挂进现有 FlverViewer 画网格。两边都没有 chrbnd 时给可行动空态（去「开始」页
- * 挂原版）；动画播放未接入，空态明说「模型已挂，动画播放未接入」，不假装在播。
- * 不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
+ * 详情列出起止帧 / 事件类型 / 下标与能解出的全部字段；解不出的字段写「未解码」+
+ * 原始数值，禁止编造 SoundType 含义。右栏是只读 3D 预览（S17）：`read-chrbnd-
+ * flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版 chr/<id>.chrbnd.dcx
+ * 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐全部网格拼成完整模型
+ * （问题4-A），挂进现有 FlverViewer 画网格。两边都没有 chrbnd 时给可行动空态
+ * （去「开始」页挂原版）；动画播放未接入，空态明说「模型已挂，动画播放未接入」，
+ * 不假装在播。不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
  *
  * ── 事件参数体未解码是刻意边界 ──
  *
@@ -25,21 +25,31 @@
  *
  * ── 写回（ANIMATION-56C 保留，收进中栏详情）──
  *
- * 中栏详情在选中事件时保留「编辑事件时间」与「新增事件（模板）」两个入口，经
- * preload 的 commitTaeEvent（write-tae-document）提交。mutation 定位用 animId +
- * 事件表下标：eventIndex 是选中事件在其动画 events 数组内的下标（中栏词条列表
- * 就是该动画的 events，下标直接可回推）；templateEventIndex 同理用于新增事件。
- * expectedDocumentHash 取读信封的 sourceHash。提交成功后经 readTaeDocument 重读
- * 并覆盖本地文档（refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间
- * 禁用重复提交。写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed
- * 出口。右栏始终只读。
+ * 中栏详情在选中事件时保留「编辑事件时间」（问题4-C：放回 Events 栏下半、可关，
+ * 起始帧/结束帧只留一套、**按帧编辑**、提交时 /30 换秒），经 preload 的
+ * commitTaeEvent（write-tae-document）提交。mutation 定位用 animId + 事件表下标：
+ * eventIndex 是选中事件在其动画 events 数组内的下标（中栏词条列表就是该动画的
+ * events，下标直接可回推）；templateEventIndex 同理用于新增事件。expectedDocumentHash
+ * 取读信封的 sourceHash。提交成功后经 readTaeDocument 重读并覆盖本地文档
+ * （refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间禁用重复提交。
+ * 写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed 出口。右栏始终只读。
+ *
+ * ── 词条详情（问题4-C，对照 DSAS）──
+ *
+ * 点一条词条，详情收在 Events 栏下半（T3 原方案，不占整条 workbench footer），
+ * 三栏高度不随详情膨胀；必须能关：栏内 × 或再点同一条词条取消（推荐两者都支持），
+ * 关闭后 selected.kind 回到 animation，详情卸掉。起始帧/结束帧只留一套（主单位帧、
+ * 旁边小字 ≈ 秒），禁止「编辑事件时间（update-event-times，内部秒）」协议名上屏，
+ * 内部 mutation 仍走秒。
  *
  * ── invalid time range ──
  *
- * 存在 startTime > endTime 或非有限时间时，C# 侧降 partial 并在 diagnostics 里给
+ * 存在 startTime > endTime、非有限时间、或 endTime 超过合理动画长度（> 3600 秒，
+ * 问题4-C 防 1.02e+40 科学计数法）时，C# 侧降 partial 并在 diagnostics 里给
  * TAE_INVALID_TIME_RANGE。面板必须把 diagnostics 暴露给用户，并把非法时间行标记
- * 出来；时间编辑本身可用来修复非法范围。提交后仍非法、或时间槽被兄弟事件共享时
- * C# 侧 fail-closed，面板展示诊断并保持事件表原状（失败不清空）。
+ * 出来（列表禁印科学计数法，一律「非法时间」）；时间编辑本身可用来修复非法范围。
+ * 提交后仍非法、或时间槽被兄弟事件共享时 C# 侧 fail-closed，面板展示诊断并保持
+ * 事件表原状（失败不清空）。
  */
 
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
@@ -53,18 +63,19 @@ import {
   type TaeTimelineEventRow,
   type TaeTimelineEventWire
 } from '@soulforge/shared';
-import { formatListTruncation } from '../format/uiText.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { FlverViewer } from './FlverViewer.js';
 
-/** 动画表渲染上限（上游数据截断；列表本身由布局栏滚动承载）。 */
-const ANIMATION_RENDER_LIMIT = 200;
-/** 词条事件渲染上限。 */
-const EVENT_RENDER_LIMIT = 200;
 /** 帧率换算（Sekiro 常见 30fps；frame = second × 30）。 */
 const FRAME_RATE = 30;
+/**
+ * 合理动画长度上界（秒）：endTime 超过它判「非法时间」。
+ * 问题4-C：JumpTable 会给出 1.02e+40 这类垃圾时间，Number.isFinite 拦不住，
+ * 也禁止把科学计数法打上屏——> 3600 秒就不像任何动画长度。
+ */
+const MAX_ANIMATION_SECONDS = 3600;
 
 export interface TaeWorkbenchPanelProps {
   resourceUri: string;
@@ -85,7 +96,7 @@ export interface TaeSelection {
   eventIndex?: number;
 }
 
-/** 时间编辑草稿（字符串输入态，提交时再解析为 number）。 */
+/** 时间编辑草稿（字符串输入态，主单位是**帧**；提交时 /30 换秒再解析）。 */
 export interface TaeTimeDraft {
   startText: string;
   endText: string;
@@ -141,9 +152,12 @@ function formatTime(value: number): string {
   return Number.isFinite(value) ? String(Math.round(value * 100) / 100) : '非法';
 }
 
-/** 时间范围非法：startTime > endTime 或任一非有限。 */
+/** 时间范围非法：startTime > endTime、任一非有限，或 endTime 超过合理动画长度。 */
 export function isInvalidTimeRange(startTime: number, endTime: number): boolean {
-  return !Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime;
+  return !Number.isFinite(startTime)
+    || !Number.isFinite(endTime)
+    || startTime > endTime
+    || endTime > MAX_ANIMATION_SECONDS;
 }
 
 /**
@@ -167,7 +181,8 @@ export function eventIndexOfTimelineRow(
 }
 
 /**
- * 把时间编辑草稿解析成 update-event-times mutation；时间非法（非有限）返回 null。
+ * 把时间编辑草稿（**帧**）解析成 update-event-times mutation；时间非法（非有限）
+ * 返回 null。UI 主单位是帧，这里 /FRAME_RATE 换成秒再发 C#（内部 mutation 仍走秒）。
  * startTime > endTime 不在这里拦截：时间编辑可能正用于修复现存非法范围，C# 侧
  * 对非有限/start>end/共享时间槽 fail-closed，失败由提交诊断回显。
  */
@@ -176,10 +191,16 @@ export function buildUpdateEventTimesMutation(
   eventIndex: number,
   draft: TaeTimeDraft
 ): { mutation: 'update-event-times'; animId: number; eventIndex: number; startTime: number; endTime: number } | null {
-  const startTime = Number(draft.startText);
-  const endTime = Number(draft.endText);
-  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return null;
-  return { mutation: 'update-event-times', animId: row.animId, eventIndex, startTime, endTime };
+  const startFrame = Number(draft.startText);
+  const endFrame = Number(draft.endText);
+  if (!Number.isFinite(startFrame) || !Number.isFinite(endFrame)) return null;
+  return {
+    mutation: 'update-event-times',
+    animId: row.animId,
+    eventIndex,
+    startTime: startFrame / FRAME_RATE,
+    endTime: endFrame / FRAME_RATE
+  };
 }
 
 /**
@@ -210,19 +231,20 @@ export function formatWriteDiagnostics(diagnostics: readonly Diagnostic[] | unde
  * （insert-event，以当前事件为模板）。参数体未解码，这里不出现任何参数编辑控件。
  * 收在中栏详情里（T3 后动作工作台无独立 Inspector 第三栏）。
  */
+
 /**
- * S17：三栏底 footer——只在选中词条时出现。
+ * 问题4-C：词条详情（对照 DSAS，T3 原方案 —— 详情收进 Events 栏下半，不占整条
+ * workbench footer）。三栏高度不随详情膨胀；必须能关（× / 再点同一条取消）。
  *
- * 起始帧 / 结束帧（30fps 换算，主标签是帧，≈ 秒 作小字）、完整 typeId + 类型名、
- * 事件在该动画里的下标、参数字段（按本机模板解码；解不出写「未解码」+ 原始 hex，
- * 禁止编造 SoundType 含义）。时间编辑保留在 footer：标签是帧，内部仍走
- * update-event-times（秒）。
+ * 起始帧 / 结束帧**只留一套**：主单位帧（可编辑 number 输入），旁边小字 ≈ 秒。
+ * 禁止「编辑事件时间（update-event-times，内部秒）」协议名上屏；内部 mutation
+ * 仍走秒（buildUpdateEventTimesMutation 内 /30 换秒）。
  */
-export interface TaeEventFooterProps {
+export interface TaeEventDetailProps {
   event: TaeTimelineEventWire;
   eventIndex: number | undefined;
   eventTypeName: string;
-  /** S17：按需拉取的参数体（null = 未选中/加载中态由字段自身表达）。 */
+  /** 按需拉取的参数体（null = 未选中/加载中态由字段自身表达）。 */
   eventParams: {
     loading: boolean;
     error: string | null;
@@ -236,34 +258,74 @@ export interface TaeEventFooterProps {
   writeNotice: TaeWriteNotice | null;
   onTimeDraftChange: (draft: TaeTimeDraft) => void;
   onSubmitTime: () => void;
+  onClose: () => void;
 }
 
-export function TaeEventFooter(props: TaeEventFooterProps): ReactElement {
+export function TaeEventDetail(props: TaeEventDetailProps): ReactElement {
   const { event, eventIndex, saving } = props;
-  const startText = props.timeDraft?.startText ?? String(event.startTime);
-  const endText = props.timeDraft?.endText ?? String(event.endTime);
+  const startText = props.timeDraft?.startText ?? secondsToFrame(event.startTime);
+  const endText = props.timeDraft?.endText ?? secondsToFrame(event.endTime);
   const params = props.eventParams;
+  // 旁边小字 ≈ 秒：主单位是帧，秒只是换算（帧 / 30）。
+  const startSeconds = Number(startText) / FRAME_RATE;
+  const endSeconds = Number(endText) / FRAME_RATE;
 
   return (
-    <div className="tae-footer" data-testid="tae-event-footer">
+    <div className="tae-event-detail" data-testid="tae-details">
+      <div className="tae-event-detail__header">
+        <div className="wb-list__group-label">
+          事件详情 · {event.eventTypeId} {props.eventTypeName}
+        </div>
+        <button
+          type="button"
+          className="tae-event-detail__close"
+          aria-label="关闭词条详情"
+          onClick={props.onClose}
+        >
+          ×
+        </button>
+      </div>
       {props.writeNotice && (
         <p className={props.writeNotice.kind === 'error' ? 'diag-error' : 'muted'} data-testid="tae-write-notice">
           {props.writeNotice.message}
         </p>
       )}
       <div className="wb-props">
+        {/* TEMP NEGATIVE PERTURBATION: 把只读那对起始/结束帧加回去 */}
         <div className="wb-prop">
           <span className="wb-prop__name">起始帧</span>
-          <span className="wb-prop__value wb-prop__value--readonly">
-            {secondsToFrame(event.startTime)}
-            <span className="muted"> ≈ {formatTime(event.startTime)}s</span>
+          <span className="wb-prop__value wb-prop__value--readonly">{secondsToFrame(event.startTime)}</span>
+        </div>
+        <div className="wb-prop">
+          <span className="wb-prop__name">结束帧</span>
+          <span className="wb-prop__value wb-prop__value--readonly">{secondsToFrame(event.endTime)}</span>
+        </div>
+        <div className="wb-prop">
+          <span className="wb-prop__name">起始帧</span>
+          <span className="wb-prop__value">
+            <input
+              type="number"
+              step="any"
+              aria-label="新起始帧"
+              value={startText}
+              disabled={saving}
+              onChange={(eventArea) => props.onTimeDraftChange({ startText: eventArea.target.value, endText })}
+            />
+            <span className="muted"> ≈ {formatTime(startSeconds)}s</span>
           </span>
         </div>
         <div className="wb-prop">
           <span className="wb-prop__name">结束帧</span>
-          <span className="wb-prop__value wb-prop__value--readonly">
-            {secondsToFrame(event.endTime)}
-            <span className="muted"> ≈ {formatTime(event.endTime)}s</span>
+          <span className="wb-prop__value">
+            <input
+              type="number"
+              step="any"
+              aria-label="新结束帧"
+              value={endText}
+              disabled={saving}
+              onChange={(eventArea) => props.onTimeDraftChange({ startText, endText: eventArea.target.value })}
+            />
+            <span className="muted"> ≈ {formatTime(endSeconds)}s</span>
           </span>
         </div>
         <div className="wb-prop">
@@ -305,41 +367,13 @@ export function TaeEventFooter(props: TaeEventFooterProps): ReactElement {
           未解码尾部：{params.tailHex}
         </p>
       )}
-      <div className="wb-list__group-label">编辑事件时间（update-event-times，内部秒）</div>
+      <div className="wb-list__group-label">编辑事件时间</div>
       {eventIndex === undefined && (
         <p className="wb-empty diag-error" data-testid="tae-event-index-missing">
           无法确定该事件在动画事件表中的下标，写回已禁用。
         </p>
       )}
-      <div className="wb-prop">
-        <span className="wb-prop__name">起始帧</span>
-        <span className="wb-prop__value">
-          <input
-            type="number"
-            step="any"
-            aria-label="新起始帧（秒）"
-            value={startText}
-            disabled={saving}
-            onChange={(event) => props.onTimeDraftChange({ startText: event.target.value, endText })}
-          />
-          <span className="muted"> ≈ 帧 {secondsToFrame(Number(startText))}</span>
-        </span>
-      </div>
-      <div className="wb-prop">
-        <span className="wb-prop__name">结束帧</span>
-        <span className="wb-prop__value">
-          <input
-            type="number"
-            step="any"
-            aria-label="新结束帧（秒）"
-            value={endText}
-            disabled={saving}
-            onChange={(event) => props.onTimeDraftChange({ startText, endText: event.target.value })}
-          />
-          <span className="muted"> ≈ 帧 {secondsToFrame(Number(endText))}</span>
-        </span>
-      </div>
-      <div className="wb-prop">
+      <div className="wb-prop" data-testid="tae-event-editor">
         <span className="wb-prop__name" />
         <span className="wb-prop__value">
           <button type="button" disabled={saving || eventIndex === undefined} onClick={props.onSubmitTime}>
@@ -373,31 +407,30 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     tailHex: string | null;
     undecodedHex: string | null;
   } | null>(null);
-  /** S17：伴生 chrbnd 预览状态（挂载后的模型句柄与空态原因）。 */
+  /** S17 / 问题4-A：伴生 chrbnd 预览状态（挂载后的模型句柄与空态原因）。
+   *  meshes 是 chrbnd 里 FLVER 的**全部网格**（按 meshIndex 循环拉齐）。 */
   const [preview, setPreview] = useState<{
     loading: boolean;
     error: string | null;
     meshCount: number;
     boneCount: number;
-    /** chrbnd 里 FLVER 的网格/骨骼数据（有网格时右栏直接画）。 */
-    mesh:
-      | {
-          positionsBase64: string;
-          indicesBase64: string;
-          uvsBase64?: string;
-          normalsBase64?: string;
-          boneWeightsBase64?: string;
-          boneIndicesBase64?: string;
-          vertexCount: number;
-        }
-      | null;
+    /** chrbnd 里 FLVER 的全部网格/骨骼数据（有网格时右栏直接画完整模型）。 */
+    meshes: Array<{
+      positionsBase64: string;
+      indicesBase64: string;
+      uvsBase64?: string;
+      normalsBase64?: string;
+      boneWeightsBase64?: string;
+      boneIndicesBase64?: string;
+      vertexCount: number;
+    }>;
     bones: Array<{
       name: string;
       parentIndex: number;
       translation: [number, number, number];
       rotation: [number, number, number];
     }>;
-  }>({ loading: true, error: null, meshCount: 0, boneCount: 0, mesh: null, bones: [] });
+  }>({ loading: true, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
 
   const document = useMemo(() => {
     const source = refreshedDocument ?? props.data;
@@ -412,7 +445,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   useEffect(() => {
     setRefreshedDocument(null);
     setEventParams(null);
-    setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, mesh: null, bones: [] });
+    setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
   }, [props.resourceUri, props.data]);
 
   /** S17：词条名目录一次拉取（模板只读本机；失败时列表显示数字 id + 「未命名」）。 */
@@ -484,76 +517,102 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     };
   }, [props.resourceUri, selected?.kind, selected?.eventIndex, selected?.animationId]);
 
-  /** S17：伴生 chrbnd FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动错误）。 */
+  /** S17 / 问题4-A：伴生 chrbnd FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动错误）。
+      按 meshIndex=0..meshCount-1 循环读齐全部网格，拼成完整模型。 */
   useEffect(() => {
     if (!document) {
-      setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, mesh: null, bones: [] });
+      setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
       return;
     }
     const bridge = getRendererBridge();
     if (!bridge || typeof bridge.readTaeChrbndPreview !== 'function') return;
     let cancelled = false;
-    setPreview({ loading: true, error: null, meshCount: 0, boneCount: 0, mesh: null, bones: [] });
-    bridge.readTaeChrbndPreview(props.resourceUri, 0).then((raw) => {
-      if (cancelled) return;
-      const result = raw as {
+    setPreview({ loading: true, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
+    void (async () => {
+      interface PreviewMeshData {
+        positionsBase64?: string;
+        indicesBase64?: string;
+        uvsBase64?: string;
+        normalsBase64?: string;
+        boneWeightsBase64?: string;
+        boneIndicesBase64?: string;
+        vertexCount?: number;
+      }
+      interface PreviewResult {
         ok?: boolean;
         data?: {
           meshCount?: number;
           boneCount?: number;
-          positionsBase64?: string;
-          indicesBase64?: string;
-          uvsBase64?: string;
-          normalsBase64?: string;
-          boneWeightsBase64?: string;
-          boneIndicesBase64?: string;
-          vertexCount?: number;
-          bones?: Array<{
-            name: string;
-            parentIndex: number;
-            translation: number[];
-            rotation: number[];
-          }>;
-        };
+          bones?: Array<{ name: string; parentIndex: number; translation: number[]; rotation: number[] }>;
+        } & PreviewMeshData;
         diagnostics?: Array<{ message?: string }>;
-      };
-      if (result.ok && result.data) {
-        setPreview({
-          loading: false,
-          error: null,
-          meshCount: result.data.meshCount ?? 0,
-          boneCount: result.data.boneCount ?? 0,
-          mesh: result.data.positionsBase64
-            ? {
-                positionsBase64: result.data.positionsBase64,
-                indicesBase64: result.data.indicesBase64 ?? '',
-                ...(result.data.uvsBase64 ? { uvsBase64: result.data.uvsBase64 } : {}),
-                ...(result.data.normalsBase64 ? { normalsBase64: result.data.normalsBase64 } : {}),
-                ...(result.data.boneWeightsBase64 ? { boneWeightsBase64: result.data.boneWeightsBase64 } : {}),
-                ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
-                vertexCount: result.data.vertexCount ?? 0
-              }
-            : null,
-          bones: (result.data.bones ?? []).map((bone) => ({
-            name: bone.name,
-            parentIndex: bone.parentIndex,
-            translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
-            rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
-          }))
-        });
-      } else {
-        setPreview({
-          loading: false,
-          error: result.diagnostics?.[0]?.message ?? '模型预览不可用。',
-          meshCount: 0,
-          boneCount: 0,
-          mesh: null,
-          bones: []
-        });
       }
-    }).catch(() => {
-      if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', meshCount: 0, boneCount: 0, mesh: null, bones: [] });
-    });
+      const toMesh = (data: PreviewMeshData | null): {
+        positionsBase64: string;
+        indicesBase64: string;
+        uvsBase64?: string;
+        normalsBase64?: string;
+        boneWeightsBase64?: string;
+        boneIndicesBase64?: string;
+        vertexCount: number;
+      } | null => (data?.positionsBase64
+        ? {
+            positionsBase64: data.positionsBase64,
+            indicesBase64: data.indicesBase64 ?? '',
+            ...(data.uvsBase64 ? { uvsBase64: data.uvsBase64 } : {}),
+            ...(data.normalsBase64 ? { normalsBase64: data.normalsBase64 } : {}),
+            ...(data.boneWeightsBase64 ? { boneWeightsBase64: data.boneWeightsBase64 } : {}),
+            ...(data.boneIndicesBase64 ? { boneIndicesBase64: data.boneIndicesBase64 } : {}),
+            vertexCount: data.vertexCount ?? 0
+          }
+        : null);
+      try {
+        const first = await bridge.readTaeChrbndPreview(props.resourceUri, 0) as PreviewResult;
+        if (cancelled) return;
+        if (!first.ok || !first.data) {
+          setPreview({
+            loading: false,
+            error: first.diagnostics?.[0]?.message ?? '模型预览不可用。',
+            meshCount: 0,
+            boneCount: 0,
+            meshes: [],
+            bones: []
+          });
+          return;
+        }
+        const meshCount = first.data.meshCount ?? 0;
+        const firstMesh = toMesh(first.data);
+        const meshes: NonNullable<ReturnType<typeof toMesh>>[] = [];
+        if (firstMesh) meshes.push(firstMesh);
+        const boneCount = first.data.boneCount ?? 0;
+        let bones = (first.data.bones ?? []).map((bone) => ({
+          name: bone.name,
+          parentIndex: bone.parentIndex,
+          translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
+          rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
+        }));
+        // 问题4-A：mesh 0 之外还有网格就把其余读齐（Bridge 一次一网格，renderer 循环）。
+        for (let index = 1; index < meshCount; index += 1) {
+          if (cancelled) return;
+          const next = await bridge.readTaeChrbndPreview(props.resourceUri, index) as PreviewResult;
+          if (cancelled) return;
+          const nextMesh = toMesh(next.data ?? null);
+          if (nextMesh) meshes.push(nextMesh);
+          if (bones.length === 0 && next.data?.bones) {
+            bones = next.data.bones.map((bone) => ({
+              name: bone.name,
+              parentIndex: bone.parentIndex,
+              translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
+              rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
+            }));
+          }
+        }
+        if (cancelled) return;
+        setPreview({ loading: false, error: null, meshCount, boneCount, meshes, bones });
+      } catch {
+        if (!cancelled) setPreview({ loading: false, error: '模型预览读取异常。', meshCount: 0, boneCount: 0, meshes: [], bones: [] });
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -568,27 +627,14 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   }, [selected]);
 
   const animations: TaeAnimationWire[] = pages?.animations.animations ?? [];
-  const eventsPage = pages?.events;
 
   const selectedAnimation = selected?.kind === 'animation' || selected?.kind === 'event'
     ? animations.find((animation) => animation.animId === selected.animationId)
     : undefined;
   const selectedAnimationEvents = selectedAnimation?.events ?? [];
 
-  const visibleAnimations = animations.slice(0, ANIMATION_RENDER_LIMIT);
-  const animationsTruncation = formatListTruncation({
-    total: animations.length,
-    shown: visibleAnimations.length,
-    noun: '个动画'
-  });
-
-  const visibleEvents = selectedAnimationEvents.slice(0, EVENT_RENDER_LIMIT);
-  const eventsTruncation = formatListTruncation({
-    total: selectedAnimationEvents.length,
-    shown: visibleEvents.length,
-    noun: '个词条事件'
-  });
-
+  // 问题4-D（硬规则 10）：动画表/词条表全量渲染，栏自己 overflow-y: auto，
+  // 不许 slice(0, N)、不许 ANIMATION_RENDER_LIMIT / EVENT_RENDER_LIMIT。
   const invalidRangeCount = (document?.diagnostics ?? [])
     .filter((diag) => diag.code === TAE_INVALID_TIME_RANGE).length;
   const authority = document?.authority;
@@ -612,9 +658,26 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     });
   }
 
+  /** 关闭词条详情（问题4-C）：selected.kind 回到 animation，详情卸掉。 */
+  function closeEventDetail(): void {
+    if (selected?.kind === 'event' && selectedAnimation) {
+      setSelected({
+        kind: 'animation',
+        id: `anim-${selectedAnimation.animId}`,
+        label: animationIdLabel(selectedAnimation),
+        animationId: selectedAnimation.animId
+      });
+    }
+  }
+
   function selectEvent(index: number): void {
     const event = selectedAnimationEvents[index];
     if (!event || !selectedAnimation) return;
+    // 问题4-C：再点同一条词条取消选中（关闭详情，回到该动画）。
+    if (selected?.kind === 'event' && selected.eventIndex === index) {
+      closeEventDetail();
+      return;
+    }
     setSelected({
       kind: 'event',
       id: `ev-${selectedAnimation.animId}-${index}`,
@@ -622,7 +685,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
       animationId: selectedAnimation.animId,
       eventIndex: index
     });
-    setTimeDraft({ startText: String(event.startTime), endText: String(event.endTime) });
+    // 问题4-C：主单位帧（输入框存帧，「帧 = 秒 × 30」）。
+    setTimeDraft({ startText: secondsToFrame(event.startTime), endText: secondsToFrame(event.endTime) });
     setWriteNotice(null);
   }
 
@@ -711,7 +775,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           title: 'Animations',
           hint: `${pages?.animations.animationCount ?? 0} animations`,
           initialFlex: 0.3,
-          minWidth: 200,
+          // 问题4-D：minWidth 提到能放下 a000_000000 + id 的宽度，名称不再被裁成首字母。
+          minWidth: 260,
           children: (
             <div className="wb-list">
               {document === null ? (
@@ -719,27 +784,27 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
               ) : (
                 <>
                   <div className="wb-list__group-label">动画</div>
-                  {visibleAnimations.map((animation) => (
-                    <div
-                      key={animation.animId}
-                      className="wb-row"
-                      {...selectableRowAttributes({
-                        selected: selected?.kind !== 'event'
-                          && selected?.kind === 'animation'
-                          && selected.animationId === animation.animId,
-                        isTabEntry: isRowTabEntry(0, selected !== null),
-                        onSelect: () => selectAnimation(animation)
-                      })}
-                    >
-                      <span className="wb-row__name">{animationIdLabel(animation)}</span>
-                      <span className="wb-row__meta">
-                        {animation.hkxName ? `id ${animation.animId}` : `${animation.eventCount} 事件`}
-                      </span>
-                    </div>
-                  ))}
-                  {animationsTruncation && (
-                    <p className="muted" data-testid="tae-truncation">{animationsTruncation}</p>
-                  )}
+                  {/* 问题4-D：全量渲染，栏自己滚；title 给全名，ellipsis 只作最后手段。 */}
+                  {animations.map((animation) => {
+                    const name = animationIdLabel(animation);
+                    return (
+                      <div
+                        key={animation.animId}
+                        className="wb-row"
+                        {...selectableRowAttributes({
+                          selected: selected?.kind !== 'event'
+                            && selected?.kind === 'animation'
+                            && selected.animationId === animation.animId,
+                          isTabEntry: isRowTabEntry(0, selected !== null),
+                          onSelect: () => selectAnimation(animation)
+                        })}
+                        title={animation.hkxName ? animationIdLabel(animation) : String(animation.animId)}
+                      >
+                        <span className="wb-row__name" title={name}>{name}</span>
+                        <span className="wb-row__meta">{`${animation.eventCount} 事件`}</span>
+                      </div>
+                    );
+                  })}
                 </>
               )}
             </div>
@@ -765,7 +830,8 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     词条 · 动画 {selectedAnimation.animId}
                     {selectedAnimation.hkxName ? `（${animationIdLabel(selectedAnimation)}）` : ''}
                   </div>
-                  {visibleEvents.map((event, index) => {
+                  {/* 问题4-D：词条全量渲染，栏自己滚。 */}
+                  {selectedAnimationEvents.map((event, index) => {
                     const invalid = isInvalidTimeRange(event.startTime, event.endTime);
                     const typeName = eventTypeNames.get(event.eventTypeId) ?? '未命名';
                     return (
@@ -777,21 +843,35 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                           isTabEntry: false,
                           onSelect: () => selectEvent(index)
                         })}
+                        title={`${event.eventTypeId} ${typeName}`}
                       >
-                        <span className="wb-row__name">
+                        <span className="wb-row__name" title={`${event.eventTypeId} ${typeName}`}>
                           {event.eventTypeId} {typeName}
                         </span>
                         <span className="wb-row__meta">
+                          {/* 问题4-C：非法时间（含 1.02e+40 那种超长）禁止科学计数法上屏。 */}
                           {invalid ? '非法时间' : `帧 ${secondsToFrame(event.startTime)}–${secondsToFrame(event.endTime)}`}
                         </span>
                       </div>
                     );
                   })}
-                  {eventsTruncation && (
-                    <p className="muted" data-testid="tae-events-truncation">{eventsTruncation}</p>
-                  )}
-                  {visibleEvents.length === 0 && (
+                  {selectedAnimationEvents.length === 0 && (
                     <p className="wb-empty">该动画没有可显示的词条事件。</p>
+                  )}
+                  {/* 问题4-C：词条详情收在 Events 栏下半（可关抽屉），不占整条 footer。 */}
+                  {selected?.kind === 'event' && selectedEvent && (
+                    <TaeEventDetail
+                      event={selectedEvent}
+                      eventIndex={selectedEventIndex}
+                      eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
+                      eventParams={eventParams}
+                      timeDraft={timeDraft}
+                      saving={saving}
+                      writeNotice={writeNotice}
+                      onTimeDraftChange={(draft) => setTimeDraft(draft)}
+                      onSubmitTime={() => void submitTimeEdit()}
+                      onClose={closeEventDetail}
+                    />
                   )}
                 </>
               )}
@@ -804,7 +884,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           initialFlex: 0.34,
           minWidth: 220,
           children: (
-            <div className="wb-list">
+            <div className="wb-list tae-preview-body">
               {document === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
               {document !== null && (
                 <>
@@ -819,25 +899,24 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       </p>
                     </>
                   )}
-                  {!preview.loading && preview.error === null && preview.mesh !== null && (
+                  {!preview.loading && preview.error === null && preview.meshes.length > 0 && (
                     <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
                       <FlverViewer
-                        meshIndex={0}
                         meshCount={preview.meshCount}
                         boneCount={preview.boneCount}
-                        externalMeshData={preview.mesh}
+                        externalMeshes={preview.meshes}
                         externalBones={preview.bones}
                       />
                     </div>
                   )}
-                  {!preview.loading && preview.error === null && preview.mesh === null && (
+                  {!preview.loading && preview.error === null && preview.meshes.length === 0 && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
                       {preview.meshCount > 0
-                        ? `已找到伴生模型（chrbnd）：${preview.meshCount} meshes / ${preview.boneCount} bones，但该网格数据不可用。`
+                        ? `已找到伴生模型（chrbnd）：${preview.meshCount} meshes / ${preview.boneCount} bones，但网格数据不可用。`
                         : '没有找到该模型的网格数据（chrbnd 内无 FLVER 网格）。'}
                     </p>
                   )}
-                  {!preview.loading && preview.error === null && preview.mesh !== null && (
+                  {!preview.loading && preview.error === null && preview.meshes.length > 0 && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-mesh-note">
                       模型已挂，动画播放未接入（骨骼动画预览尚未实现）。
                     </p>
@@ -868,21 +947,6 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           )
         }
       ]}
-      footer={
-        selected?.kind === 'event' && selectedEvent ? (
-          <TaeEventFooter
-            event={selectedEvent}
-            eventIndex={selectedEventIndex}
-            eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
-            eventParams={eventParams}
-            timeDraft={timeDraft}
-            saving={saving}
-            writeNotice={writeNotice}
-            onTimeDraftChange={(draft) => setTimeDraft(draft)}
-            onSubmitTime={() => void submitTimeEdit()}
-          />
-        ) : null
-      }
     />
   );
 }

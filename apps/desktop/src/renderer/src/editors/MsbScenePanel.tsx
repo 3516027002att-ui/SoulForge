@@ -13,18 +13,11 @@ import {
   type SceneManifest
 } from '../scene/sceneManifestBrowser.js';
 import { mountThreeProxyScene, type ProxySceneHandle } from '../scene/threeSceneController.js';
-import { formatListTruncation } from '../format/uiText.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 
 /** 左栏 Map Object List 里的实体分类。 */
 type MsbEntityKind = 'msb-model' | 'msb-event' | 'msb-part' | 'msb-region';
-
-/** 单个对象分组渲染上限（硬约束 17：大规模列表不能一次性全渲）。 */
-const GROUP_RENDER_LIMIT = 40;
-
-/** S23：打开地图时默认预取的 part 模型数（每个 mapbnd 读一次 Bridge，串行）。 */
-const MAP_MESH_PREFETCH_LIMIT = 12;
 
 interface SelectedEntity {
   id: string;
@@ -43,33 +36,6 @@ export interface MsbScenePanelProps {
   events?: MsbMapEventLike[];
   sourceCounts?: MsbSceneSourceCounts;
   maxNodes?: number;
-  /** When set, enables structured part position nudge commits via parent (Patch Engine path). */
-  onPartPositionCommit?: (input: {
-    partName: string;
-    posX: number;
-    posY: number;
-    posZ: number;
-  }) => void;
-  onRegionPositionCommit?: (input: {
-    partName: string;
-    posX: number;
-    posY: number;
-    posZ: number;
-  }) => void;
-  /** When set, enables full part transform commits (position + rotation + scale). */
-  onPartTransformCommit?: (input: {
-    partName: string;
-    posX: number;
-    posY: number;
-    posZ: number;
-    rotX: number;
-    rotY: number;
-    rotZ: number;
-    scaleX: number;
-    scaleY: number;
-    scaleZ: number;
-  }) => void;
-  writeEnabled?: boolean;
   /**
    * S19 失败面：打开失败的结构化诊断（code + 人话 + 下一步）。非空时工作台
    * 显示可行动错误块（如 KRAK 缺 Oodle → 到「开始」页挂原版），不再假 0 实体。
@@ -86,9 +52,11 @@ export interface MsbScenePanelProps {
  * camera（旋转/缩放/平移）走 OrbitControls。没有真实能力时不假造：
  * transform gizmo / 资产浏览器 / Prefabs 等在本版不出现（§10.6）。
  *
- * S36 开闸：msb 写入恢复（write-msb → Patch Engine），footer 渲染
- * part/region 位置微调与 part transform 提交入口。写入是否可用由
- * `writeEnabled` 决定（实时加载 + 已选中资源），按钮在未选中目标时禁用。
+ * 问题4-A：打开地图默认按**全部** part 拉模型（可报进度「已挂 N / M」），不再只
+ * 预取前 12 个；对象列表 entries.map 全量渲染，名字不 slice 截断（窄栏用
+ * ellipsis + title 全名，但数据不砍），不写虚拟滚动。
+ * 问题4-B：地图写入入口（Δ 微调 / transform 输入 / 三个提交按钮 / 「实时模式」）
+ * 整段从本面板移除——Properties 栏保持只读属性表；写入另立案，不偷偷留一条。
  */
 export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -97,21 +65,13 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const [selected, setSelected] = useState<SelectedEntity | null>(null);
   const [status, setStatus] = useState('正在初始化 3D 场景…');
   const [nodeCount, setNodeCount] = useState(0);
-  const [nudge, setNudge] = useState({ x: 0.5, y: 0, z: 0 });
-  const [transform, setTransform] = useState<{
-    rotX: number;
-    rotY: number;
-    rotZ: number;
-    scaleX: number;
-    scaleY: number;
-    scaleZ: number;
-  }>({ rotX: 0, rotY: 0, rotZ: 0, scaleX: 1, scaleY: 1, scaleZ: 1 });
   const regions = props.regions ?? [];
   /** S23：最近一次 drawList（mesh 渐进加载后重建用）。 */
   const drawListRef = useRef<ReturnType<typeof buildSceneDrawList> | null>(null);
   /** S23：已加载到真实网格的 part（item id → mesh 数据）。 */
   const loadedMeshesRef = useRef<Map<string, NonNullable<SceneDrawItem['mesh']>>>(new Map());
-  const [meshStatus, setMeshStatus] = useState<{ loaded: number; missing: number } | null>(null);
+  /** 问题4-A：part 模型加载进度（loaded / total，total 是全部 part 数）。 */
+  const [meshStatus, setMeshStatus] = useState<{ loaded: number; missing: number; total: number } | null>(null);
   /** S23：刷新场景里的 part 网格（每加载/选中一个就渐进 setDrawList）。 */
   const applyLoadedMeshes = useCallback((base: ReturnType<typeof buildSceneDrawList> | null) => {
     if (!base || !handleRef.current) return;
@@ -228,9 +188,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   ]);
 
   /**
-   * S23：地图 part 模型渐进加载——mapbnd 里按 part 名取 FLVER 网格，
+   * S23 / 问题4-A：地图 part 模型渐进加载——mapbnd 里按 part 名取 FLVER 网格，
    * 加载到的 part 用真实几何替换 proxy 盒子（`setDrawList` 渐进更新），
    * 没有模型或未挂原版的 part 保持线框并汇总一句可行动状态。
+   * 问题4-A：不再只预取前 12 个——打开地图后按**全部** part 串行拉模型
+   * （可排队长任务，meshStatus 报「已挂 N / M」），显示不许再设限。
    */
   useEffect(() => {
     const bridge = getRendererBridge();
@@ -240,7 +202,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     const parts = base.items.filter((item) => item.entityKind === 'msb-part');
     if (parts.length === 0) return;
     let cancelled = false;
-    const targets = parts.slice(0, MAP_MESH_PREFETCH_LIMIT);
+    // 全部 part 都挂（不 slice、不设上限；每个 mapbnd 读一次 Bridge，串行）。
+    const targets = parts;
     setMeshStatus(null);
     void (async () => {
       let loaded = 0;
@@ -281,7 +244,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         }
         applyLoadedMeshes(drawListRef.current);
       }
-      if (!cancelled) setMeshStatus({ loaded, missing });
+      if (!cancelled) setMeshStatus({ loaded, missing, total: targets.length });
     })();
     return () => {
       cancelled = true;
@@ -327,26 +290,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.kind, selected?.id, selected?.label, props.mapResourceUri, applyLoadedMeshes]);
 
-  function resolveSelectedPart(): PartLike | null {
-    if (selected?.kind !== 'msb-part') return null;
-    return props.parts.find((part) => part.name === selected.label) ?? null;
-  }
-
-  // 选中 part 变化时同步 transform 编辑字段（rotation 为角度，scale 为倍率）。
-  useEffect(() => {
-    const part = resolveSelectedPart();
-    if (!part) return;
-    setTransform({
-      rotX: part.rotX ?? 0,
-      rotY: part.rotY ?? 0,
-      rotZ: part.rotZ ?? 0,
-      scaleX: part.scaleX ?? 1,
-      scaleY: part.scaleY ?? 1,
-      scaleZ: part.scaleZ ?? 1
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, props.parts]);
-
   /**
    * 选中左栏对象：更新选中态，part/region 同时驱动 viewport 线框高亮。
    * model/event 没有可绘制节点，viewport 不动（对照 Smithbox：只有放置对象才有 3D 句柄）。
@@ -356,70 +299,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     if (entity.kind === 'msb-part' || entity.kind === 'msb-region') {
       handleRef.current?.setSelected(entity.id);
     }
-  }
-
-  function commitNudge(): void {
-    const part = resolveSelectedPart();
-    if (!part) {
-      setStatus('请先选择一个 part 节点。');
-      return;
-    }
-    if (!props.writeEnabled || !props.onPartPositionCommit) {
-      setStatus('MSB 写入在当前版本未开放：位置微调仅为本地预览，不会写入。');
-      return;
-    }
-    const next = {
-      partName: part.name,
-      posX: part.posX + nudge.x,
-      posY: part.posY + nudge.y,
-      posZ: part.posZ + nudge.z
-    };
-    setStatus(`正在提交 part 位置：${part.name}`);
-    props.onPartPositionCommit(next);
-  }
-
-  function commitRegionNudge(): void {
-    const region = regions.find((r) => r.name === selected?.label && selected.kind === 'msb-region');
-    if (!region) {
-      setStatus('请先选择一个 region。');
-      return;
-    }
-    if (!props.writeEnabled || !props.onRegionPositionCommit) {
-      setStatus('MSB 写入在当前版本未开放：region 位置微调仅为本地预览，不会写入。');
-      return;
-    }
-    props.onRegionPositionCommit({
-      partName: region.name,
-      posX: region.posX + nudge.x,
-      posY: region.posY + nudge.y,
-      posZ: region.posZ + nudge.z
-    });
-    setStatus(`正在提交 region 位置：${region.name}`);
-  }
-
-  function commitTransform(): void {
-    const part = resolveSelectedPart();
-    if (!part) {
-      setStatus('请先选择一个 part 节点。');
-      return;
-    }
-    if (!props.writeEnabled || !props.onPartTransformCommit) {
-      setStatus('MSB 写入在当前版本未开放：transform 更新仅为本地预览，不会写入。');
-      return;
-    }
-    props.onPartTransformCommit({
-      partName: part.name,
-      posX: part.posX,
-      posY: part.posY,
-      posZ: part.posZ,
-      rotX: transform.rotX,
-      rotY: transform.rotY,
-      rotZ: transform.rotZ,
-      scaleX: transform.scaleX,
-      scaleY: transform.scaleY,
-      scaleZ: transform.scaleZ
-    });
-    setStatus(`正在提交 part transform：${part.name}`);
   }
 
   /**
@@ -518,14 +397,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               ) : manifest === null ? (
                 <p className="muted">未加载 MSB 数据：请先在资源浏览器里选择一个 map 资源。</p>
               ) : groupedEntities.map((group, groupIndex) => {
-                // 硬约束 17：对象列表也可能上千条，分组内条目要分页而不是一次全渲；
-                // 超限必须报「已显示多少」，不能静默 slice（守门 site 锚点 region）。
-                const visible = group.entries.slice(0, GROUP_RENDER_LIMIT);
-                const truncationNote = formatListTruncation({
-                  total: group.entries.length,
-                  shown: visible.length,
-                  noun: `个 ${group.label}`
-                });
+                /* 问题4-A（硬规则 10）：对象列表全量渲染，不分组 slice、不设上限、
+                   不写虚拟滚动；名字给全（窄栏 ellipsis + title 全名），数据不砍。 */
                 return (
                   <details key={group.id} className="msb-object-group" open={group.entries.length > 0}>
                     <summary className="msb-object-group__summary">
@@ -535,33 +408,25 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                     {group.entries.length === 0 ? (
                       <p className="muted msb-object-group__empty">无 {group.label} 实体</p>
                     ) : (
-                      <>
-                        <div className="binder-child-table" role="table" aria-label={`${group.label} 实体`}>
-                          {visible.map((entity, index) => (
-                            <div
-                              key={entity.id}
-                              className="binder-child-row msb-object-row"
-                              {...selectableRowAttributes({
-                                selected: selected?.id === entity.id,
-                                isTabEntry: groupIndex === 0 && isRowTabEntry(index, selected !== null),
-                                onSelect: () => selectEntity(entity)
-                              })}
-                              style={selected?.id === entity.id
-                                ? { outline: '1px solid var(--ember)' }
-                                : undefined}
-                            >
-                              <span title={entity.label}>{entity.label.slice(0, 40)}</span>
-                            </div>
-                          ))}
-                        </div>
-                        {truncationNote && (
-                          group.id === 'region' ? (
-                            <p className="muted" data-testid="msb-region-truncation">{truncationNote}</p>
-                          ) : (
-                            <p className="muted" data-testid={`${group.id}-truncation`}>{truncationNote}</p>
-                          )
-                        )}
-                      </>
+                      <div className="binder-child-table" role="table" aria-label={`${group.label} 实体`}>
+                        {group.entries.map((entity, index) => (
+                          <div
+                            key={entity.id}
+                            className="binder-child-row msb-object-row"
+                            {...selectableRowAttributes({
+                              selected: selected?.id === entity.id,
+                              isTabEntry: groupIndex === 0 && isRowTabEntry(index, selected !== null),
+                              onSelect: () => selectEntity(entity)
+                            })}
+                            style={selected?.id === entity.id
+                              ? { outline: '1px solid var(--ember)' }
+                              : undefined}
+                            title={entity.label}
+                          >
+                            <span className="msb-object-name" title={entity.label}>{entity.label}</span>
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </details>
                 );
@@ -583,7 +448,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                           const meshNote = meshStatus === null
                             ? ''
                             : meshStatus.loaded > 0
-                              ? ` · ${meshStatus.loaded} 个 part 已挂模型${meshStatus.missing > 0 ? `，${meshStatus.missing} 个没找到（线框）` : ''}`
+                              ? ` · 已挂 ${meshStatus.loaded} / ${meshStatus.total} 个 part 模型${meshStatus.missing > 0 ? `，${meshStatus.missing} 个没找到（线框）` : ''}`
                               : meshStatus.missing > 0
                                 ? ' · 没有找到 part 模型（线框）；未挂原版时可到「开始」页挂载后重开'
                                 : '';
@@ -619,121 +484,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           )
         }
       ]}
-      footer={
-        <div className="row gap">
-          <div className="row gap" aria-label="part 位置微调">
-            <label>
-              ΔX
-              <input
-                type="number"
-                step="0.1"
-                value={nudge.x}
-                onChange={(e) => setNudge((n) => ({ ...n, x: Number(e.target.value) || 0 }))}
-              />
-            </label>
-            <label>
-              ΔY
-              <input
-                type="number"
-                step="0.1"
-                value={nudge.y}
-                onChange={(e) => setNudge((n) => ({ ...n, y: Number(e.target.value) || 0 }))}
-              />
-            </label>
-            <label>
-              ΔZ
-              <input
-                type="number"
-                step="0.1"
-                value={nudge.z}
-                onChange={(e) => setNudge((n) => ({ ...n, z: Number(e.target.value) || 0 }))}
-              />
-            </label>
-            <button
-              type="button"
-              disabled={selected?.kind !== 'msb-part'}
-              onClick={commitNudge}
-            >
-              提交 part 位置
-            </button>
-            <button
-              type="button"
-              disabled={selected?.kind !== 'msb-region'}
-              onClick={commitRegionNudge}
-            >
-              提交 region 位置
-            </button>
-          </div>
-          <div className="row gap" aria-label="part transform 微调">
-            <label>
-              rotX
-              <input
-                type="number"
-                step="1"
-                value={transform.rotX}
-                onChange={(e) => setTransform((t) => ({ ...t, rotX: Number(e.target.value) || 0 }))}
-              />
-            </label>
-            <label>
-              rotY
-              <input
-                type="number"
-                step="1"
-                value={transform.rotY}
-                onChange={(e) => setTransform((t) => ({ ...t, rotY: Number(e.target.value) || 0 }))}
-              />
-            </label>
-            <label>
-              rotZ
-              <input
-                type="number"
-                step="1"
-                value={transform.rotZ}
-                onChange={(e) => setTransform((t) => ({ ...t, rotZ: Number(e.target.value) || 0 }))}
-              />
-            </label>
-            <label>
-              scaleX
-              <input
-                type="number"
-                step="0.1"
-                value={transform.scaleX}
-                onChange={(e) => setTransform((t) => ({ ...t, scaleX: Number(e.target.value) || 1 }))}
-              />
-            </label>
-            <label>
-              scaleY
-              <input
-                type="number"
-                step="0.1"
-                value={transform.scaleY}
-                onChange={(e) => setTransform((t) => ({ ...t, scaleY: Number(e.target.value) || 1 }))}
-              />
-            </label>
-            <label>
-              scaleZ
-              <input
-                type="number"
-                step="0.1"
-                value={transform.scaleZ}
-                onChange={(e) => setTransform((t) => ({ ...t, scaleZ: Number(e.target.value) || 1 }))}
-              />
-            </label>
-            <button
-              type="button"
-              disabled={selected?.kind !== 'msb-part'}
-              onClick={commitTransform}
-            >
-              提交 part transform
-            </button>
-          </div>
-          <p className="muted">
-            {props.writeEnabled
-              ? '实时模式：part/region 位置微调经 Bridge write-msb → Patch Engine 提交。'
-              : 'MSB 写入未开放：微调仅为本地预览，不会写入。'}
-          </p>
-        </div>
-      }
     />
   );
 }

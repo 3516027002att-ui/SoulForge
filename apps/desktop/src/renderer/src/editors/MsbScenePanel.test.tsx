@@ -95,19 +95,19 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     'utf8'
   );
 
-  it('S36 开闸后不再有延期分支：footer 恒为提交入口形态', () => {
+  it('问题4-B：footer 整段移除——不出现实时模式/提交按钮/微调输入', () => {
     const html = render();
-    assert.doesNotMatch(html, /已延期至|只读预览，无位置提交入口/);
-    assert.match(html, /提交 part 位置/);
-    assert.match(html, /提交 region 位置/);
-    assert.match(html, /提交 part transform/);
+    assert.doesNotMatch(html, /实时模式/);
+    assert.doesNotMatch(html, /提交 part 位置/);
+    assert.doesNotMatch(html, /提交 region 位置/);
+    assert.doesNotMatch(html, /提交 part transform/);
+    assert.doesNotMatch(html, /ΔX|rotX|scaleX/);
   });
 
-  it('非 deferred 时才出现提交入口，且 writer 未开放时按钮存在但仅本地预览', () => {
-    const html = render({ writeEnabled: false });
-    assert.match(html, /提交 part 位置/);
-    assert.match(html, /disabled/);
-    assert.match(html, /MSB 写入未开放：微调仅为本地预览，不会写入。/);
+  it('问题4-B：面板不再自行渲染任何写入口（无输入框/无按钮）', () => {
+    const html = render();
+    assert.doesNotMatch(html, /type="number"/);
+    assert.doesNotMatch(html, /<button/);
   });
 
   it('视口状态不再写「无绝对路径」', () => {
@@ -133,14 +133,16 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.doesNotMatch(html, /假预览|fakePreview/);
   });
 
-  it('S23：状态句不再写「无绝对路径」，part 模型加载走 mapbnd 读链', () => {
+  it('S23/问题4-A：part 模型加载走 mapbnd 读链，按全部 part 报进度「已挂 N / M」', () => {
     const html = render();
     assert.doesNotMatch(html, /无绝对路径/);
     assert.doesNotMatch(html, /见底部日志/);
     assert.match(panelSource, /readMapPartMesh/);
     assert.match(panelSource, /mapbnd/);
     assert.match(panelSource, /applyLoadedMeshes/);
-    assert.match(panelSource, /已挂模型/);
+    // 进度句：已挂 loaded / total。
+    assert.match(panelSource, /已挂 \$\{meshStatus\.loaded\} \/ \$\{meshStatus\.total\}/);
+    assert.match(panelSource, /const targets = parts;/);
   });
 
   it('左栏对象列表由 scene manifest 派生，renderer 不扫字节、不猜格式', () => {
@@ -158,10 +160,20 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.match(panelSource, /handleRef\.current\?\.setSelected\(entity\.id\)/);
   });
 
-  it('写路径只走 Bridge commit 回调，不在 renderer 侧碰字节', () => {
-    // commitNudge/commitTransform 只构造参数交给 onPartPositionCommit 等回调。
-    assert.match(panelSource, /props\.onPartPositionCommit/);
-    assert.match(panelSource, /props\.onPartTransformCommit/);
+  it('问题4-B：面板不再持有地图写入回调/写路径', () => {
+    assert.doesNotMatch(panelSource, /onPartPositionCommit/);
+    assert.doesNotMatch(panelSource, /onPartTransformCommit/);
+    assert.doesNotMatch(panelSource, /writeEnabled/);
     assert.doesNotMatch(panelSource, /writeMsbDocument\(/);
+  });
+
+  it('问题4-A：不再有预取/分组渲染上限；对象列表全量、名字不 slice 截断', () => {
+    assert.doesNotMatch(panelSource, /MAP_MESH_PREFETCH_LIMIT/);
+    assert.doesNotMatch(panelSource, /GROUP_RENDER_LIMIT/);
+    assert.doesNotMatch(panelSource, /\.slice\(0,\s*\d+\)\s*\.map\(/);
+    assert.doesNotMatch(panelSource, /\.slice\(0,\s*40\)/);
+    assert.doesNotMatch(panelSource, /data-testid="msb-region-truncation"/);
+    assert.match(panelSource, /group\.entries\.map\(/);
+    assert.match(panelSource, /title=\{entity\.label\}/);
   });
 });

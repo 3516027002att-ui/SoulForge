@@ -109,7 +109,7 @@ describe('ESD 状态组表超上限时渲染截断说明', () => {
   });
 });
 
-describe('TAE 动画表超上限时渲染截断说明', () => {
+describe('TAE 动画表（问题4-D：不再截断，超上限也全量渲染，栏自己滚）', () => {
   const total = 250;
   const html = renderToStaticMarkup(
     <TaeWorkbenchPanel
@@ -133,8 +133,10 @@ describe('TAE 动画表超上限时渲染截断说明', () => {
     />
   );
 
-  it('渲染出带真实数字的截断说明', () => {
-    assertTruncationVisible(html, { testId: 'tae-truncation', total, shown: 200 });
+  it('超上限也全量渲染：250 条动画都在 DOM，不再出现截断说明', () => {
+    assert.doesNotMatch(html, /data-testid="tae-truncation"/);
+    const rows = [...html.matchAll(/class="wb-row"/g)].length;
+    assert.equal(rows, total, `动画行必须全量进 DOM（${total} 行），不许 slice(0, 200)`);
   });
 });
 

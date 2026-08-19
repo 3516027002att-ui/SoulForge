@@ -3901,10 +3901,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     const result = await readMsbDocumentViaBridge({
       sourcePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
-      maxParts: 256,
-      maxRegions: 128,
-      maxModels: 128,
-      maxEvents: 128,
+      // 问题4-A：不再传 maxParts/maxRegions/maxModels/maxEvents —— 走
+      // msbBridgeRead 默认完整表（调用方不传就是无窗口），左栏/场景实体不许砍。
       // P5 裁定：真实游戏 .msb.dcx 是 KRAK 压缩，缺 Oodle 运行时读不出实体表
       // （表现为 3D 代理场景 0 节点 / 0 实体）。
       ...(activeSession?.layers.baseRoot
@@ -3982,7 +3980,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         allowedRoots: roots.allowedRoots,
         timeoutMs: 120_000,
         ...(baseRoot ? { oodleRuntimeRoot: baseRoot } : {}),
-        ...(resolved.kind === 'flver' ? { commandOptions: { meshIndex: 0 } } : { commandOptions: { meshIndex: 0 } })
+        // 问题4-A：预览不再留 1 万顶点门禁——拉到能装下地图构件的量
+        // （对照 flverToGlb 已在用 1_000_000 / 3_000_000）。meshIndex=0 返回
+        // meshCount，调用方按需循环读齐全部网格。
+        commandOptions: { meshIndex: 0, maxVertices: 1_000_000, maxIndices: 3_000_000 }
       });
       return {
         ok: result.parseStatus !== 'failed',
@@ -4085,6 +4086,87 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
 
+      /**
+       * 问题4-A：每个 map part 把该 FLVER 的**全部网格**读齐。
+       * Bridge 一次一网格（返回 meshCount），main 循环 meshIndex=0..meshCount-1，
+       * 再按顶点偏移把各网格合并成单一静态网格返回（地图 part 无骨骼动画、
+       * 各网格共享同一模型变换，合并后视觉与分别画一致）。索引按项目渲染管线
+       * 的 Uint16 假设偏移拼接；总顶点超 65534（Uint16 索引上限）或索引非 16 位
+       * 时退回 mesh0 单网格（那种超大 part 地形多为单网格，属边缘而不是碎片）。
+       */
+      const readAllPartMeshes = async (
+        mapbndPath: string,
+        fromBase: boolean
+      ): Promise<Record<string, unknown> | null> => {
+        const runForMesh = async (meshIndex: number): Promise<{ ok: boolean; data?: Record<string, unknown> }> => {
+          const raw = await runBridge<Record<string, unknown>>({
+            command: 'read-map-part-flver-preview',
+            filePath: mapbndPath,
+            allowedRoots: roots.allowedRoots,
+            timeoutMs: 120_000,
+            ...(fromBase && activeSession?.layers.baseRoot
+              ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+              : {}),
+            commandOptions: { modelName, meshIndex, maxVertices: 1_000_000, maxIndices: 3_000_000 }
+          });
+          return { ok: raw.parseStatus !== 'failed', ...(raw.data ? { data: raw.data } : {}) };
+        };
+        const first = await runForMesh(0);
+        if (!first.ok || !first.data) return null;
+        const meshCount = Number(first.data.meshCount ?? 1);
+        if (meshCount <= 1) return first.data;
+        const meshes: Array<Record<string, unknown>> = [first.data];
+        for (let meshIndex = 1; meshIndex < meshCount; meshIndex += 1) {
+          const next = await runForMesh(meshIndex);
+          if (next.ok && next.data) meshes.push(next.data);
+        }
+        try {
+          let totalVertexCount = 0;
+          const positionBuffers: Buffer[] = [];
+          const uvBuffers: Buffer[] = [];
+          const normalBuffers: Buffer[] = [];
+          const indexChunks: Uint16Array[] = [];
+          for (const mesh of meshes) {
+            const vertexCount = Number(mesh.vertexCount ?? 0);
+            const pos = typeof mesh.positionsBase64 === 'string' ? Buffer.from(mesh.positionsBase64, 'base64') : null;
+            if (!pos || vertexCount <= 0) continue;
+            // 索引按 Uint16 偏移拼接（项目渲染管线的既有假设）。
+            const idx = typeof mesh.indicesBase64 === 'string' ? Buffer.from(mesh.indicesBase64, 'base64') : null;
+            if (idx) {
+              if (idx.length % 2 !== 0) return null; // 非 16/32 位的压缩索引不支持
+              // 总顶点超 Uint16 索引上限时退回 mesh0（超大 part 地形多为单网格）。
+              if (totalVertexCount + vertexCount > 65535) return null;
+              const u16 = new Uint16Array(idx.buffer, idx.byteOffset, idx.length / 2);
+              const shifted = new Uint16Array(u16.length);
+              for (let i = 0; i < u16.length; i += 1) shifted[i] = u16[i]! + totalVertexCount;
+              indexChunks.push(shifted);
+            }
+            positionBuffers.push(pos);
+            if (typeof mesh.uvsBase64 === 'string') uvBuffers.push(Buffer.from(mesh.uvsBase64, 'base64'));
+            if (typeof mesh.normalsBase64 === 'string') normalBuffers.push(Buffer.from(mesh.normalsBase64, 'base64'));
+            totalVertexCount += vertexCount;
+          }
+          if (positionBuffers.length === 0) return null;
+          const mergedPositions = Buffer.concat(positionBuffers).toString('base64');
+          const mergedUvs = uvBuffers.length > 0 ? Buffer.concat(uvBuffers).toString('base64') : undefined;
+          const mergedNormals = normalBuffers.length > 0 ? Buffer.concat(normalBuffers).toString('base64') : undefined;
+          const indices = indexChunks.length > 0 ? indexChunks.flatMap((chunk) => Array.from(chunk)) : undefined;
+          const indicesBase64 = indices && indices.length > 0
+            ? Buffer.from(new Uint16Array(indices).buffer).toString('base64')
+            : undefined;
+          return {
+            vertexCount: totalVertexCount,
+            ...(mergedPositions ? { positionsBase64: mergedPositions } : {}),
+            ...(indicesBase64 ? { indicesBase64 } : {}),
+            ...(mergedUvs ? { uvsBase64: mergedUvs } : {}),
+            ...(mergedNormals ? { normalsBase64: mergedNormals } : {}),
+            meshCount: 1
+          };
+        } catch {
+          return null; // 合并失败退 mesh0（见上注释）
+        }
+      };
+
       for (const { dir, fromBase } of candidateDirs) {
         let mapbnds: string[];
         try {
@@ -4098,7 +4180,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           mapbnds = [];
         }
         for (const mapbndPath of mapbnds) {
-          const result = await runBridge<Record<string, unknown>>({
+          const first = await runBridge<Record<string, unknown>>({
             command: 'read-map-part-flver-preview',
             filePath: mapbndPath,
             allowedRoots: roots.allowedRoots,
@@ -4106,16 +4188,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             ...(fromBase && activeSession?.layers.baseRoot
               ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
               : {}),
-            commandOptions: { modelName }
+            commandOptions: { modelName, maxVertices: 1_000_000, maxIndices: 3_000_000 }
           });
-          if (result.parseStatus !== 'failed' && result.data) {
-            return {
-              ok: true,
-              sourceUri: msbSourceUri,
-              data: result.data,
-              diagnostics: result.diagnostics
-            };
-          }
+          if (first.parseStatus === 'failed' || !first.data) continue;
+          const data = await readAllPartMeshes(mapbndPath, fromBase);
+          return {
+            ok: true,
+            sourceUri: msbSourceUri,
+            data: data ?? first.data,
+            diagnostics: first.diagnostics
+          };
         }
       }
       return {
@@ -4290,7 +4372,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         allowedRoots: roots.allowedRoots,
         timeoutMs: 120_000,
         ...(baseRoot ? { oodleRuntimeRoot: baseRoot } : {}),
-        commandOptions: { meshIndex }
+        // 问题4-A：动作预览不留 1 万顶点门禁（对照 flverToGlb 的 1M/3M）。
+        // renderer 按 meshIndex=0..meshCount-1 循环调用，拼齐完整模型。
+        commandOptions: { meshIndex, maxVertices: 1_000_000, maxIndices: 3_000_000 }
       });
       // handle() 包装器统一 sanitize；这里只组装结构化结果。
       return {
