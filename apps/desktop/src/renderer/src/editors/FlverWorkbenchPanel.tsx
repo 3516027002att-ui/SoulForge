@@ -9,7 +9,6 @@ import {
   type FlverTextureSlotWire
 } from '@soulforge/shared';
 import { FlverViewer } from './FlverViewer.js';
-import { formatListTruncation } from '../format/uiText.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 
@@ -70,8 +69,7 @@ export function resolveViewportMeshIndex(
   return first?.index ?? 0;
 }
 
-/** 单个分组渲染上限（硬约束 17：大规模列表不能一次性全渲）。 */
-const GROUP_RENDER_LIMIT = 40;
+/** 单分组全部渲染；列表由 .flver-tree-list 滚动承载，不做条数上限。 */
 
 interface TreeEntry {
   id: string;
@@ -229,9 +227,8 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
   const unparsedGapCount = document?.unparsedGaps?.length ?? 0;
   const layoutWarningCount = document?.layoutWarnings?.length ?? 0;
   const isPartial = authority === 'partial';
-  // 用具名切片而非 `.slice(0, N).map(` 连写：listTruncation gate 把裸连写视为
-  // 静默截断（此处最多展示前 8 条缺口，且必须配 summary 说明总数）。
-  const visibleGaps = (document?.unparsedGaps ?? []).slice(0, 8);
+  // 缺口全量渲染（栏自身滚动）；不再用 slice 抽前 8 条（问题 5：显示不设限）。
+  const visibleGaps = document?.unparsedGaps ?? [];
 
   return (
     <WorkbenchLayout
@@ -249,14 +246,8 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                 <p className="muted">选择 .flver 文件以查看 3D 模型数据。</p>
               ) : (
                 treeGroups.map((group) => {
-                  // 硬约束 17：分组条目可能上千，要分页而不是一次全渲；超限必须报
-                  // 「已显示多少」（锚点 mesh 组用字面量 testid，守门见 listTruncation.test.ts）。
-                  const visible = group.entries.slice(0, GROUP_RENDER_LIMIT);
-                  const truncationNote = formatListTruncation({
-                    total: group.entries.length,
-                    shown: visible.length,
-                    noun: `个 ${group.label}`
-                  });
+                  // 分组条目全部渲染，栏自身滚动；不得 slice 后渲染。
+                  const visible = group.entries;
                   return (
                     <details key={group.id} className="flver-tree-group" open={group.entries.length > 0}>
                       <summary className="flver-tree-group__summary">
@@ -281,18 +272,11 @@ export function FlverWorkbenchPanel(props: FlverWorkbenchPanelProps): ReactEleme
                                   ? { outline: '1px solid var(--ember)' }
                                   : undefined}
                               >
-                                <span title={entry.label}>{entry.label.slice(0, 40)}</span>
+                                <span title={entry.label}>{entry.label}</span>
                                 <span className="muted">{entry.sub}</span>
                               </div>
                             ))}
                           </div>
-                          {truncationNote && (
-                            group.id === 'mesh' ? (
-                              <p className="muted" data-testid="flver-truncation">{truncationNote}</p>
-                            ) : (
-                              <p className="muted" data-testid={`${group.id}-truncation`}>{truncationNote}</p>
-                            )
-                          )}
                         </>
                       )}
                     </details>

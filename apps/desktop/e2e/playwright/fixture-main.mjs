@@ -1481,6 +1481,24 @@ function registerFixtureIpc() {
     }
   };
 
+  // 问题 5：SF_TEST_LARGE_ESD=1 时把 m10.esd 扩为 260 个状态组（超旧上限 200），
+  // 验证 ESD 状态组表全量渲染、可滚到最后一条、不出现备选截断说明。合成、
+  // 微小、明确标记（AGENTS.md §15）；只在独立 spec 的 env 里开，不影响默认套件。
+  if (process.env.SF_TEST_LARGE_ESD === '1' && fixtureEsdDocs['fixture://ai/m10.esd']) {
+    const doc = fixtureEsdDocs['fixture://ai/m10.esd'];
+    const total = 260;
+    fixtureEsdDocs['fixture://ai/m10.esd'] = {
+      ...doc,
+      stateGroupCount: total,
+      stateCount: total * 2,
+      parsedStateCount: total * 2,
+      parsedStateRecordCount: total * 2 + 2,
+      declaredStateGroupCount: total,
+      declaredStateCount: total * 2,
+      stateGroups: Array.from({ length: total }, (_unused, i) => ({ groupId: i, stateCount: 2 }))
+    };
+  }
+
   handleTrusted('resource.readEsdDocument', (_event, sourceUri) => {
     track('resource.readEsdDocument');
     const doc = fixtureEsdDocs[sourceUri];

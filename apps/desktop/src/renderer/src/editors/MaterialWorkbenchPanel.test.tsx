@@ -277,8 +277,11 @@ describe('Negative source tests（MATERIAL-53B / 53C）', () => {
     assert.doesNotMatch(panelSource, /readFile\(/);
   });
 
-  it('截断说明走 formatListTruncation 且保留 mtd-truncation testId', () => {
-    assert.match(panelSource, /formatListTruncation/);
-    assert.match(panelSource, /data-testid="mtd-truncation"/);
+  it('属性/纹理引用全量渲染：不再 formatListTruncation 截断，也没有 mtd-truncation testId（问题 5）', () => {
+    assert.doesNotMatch(panelSource, /formatListTruncation/);
+    assert.doesNotMatch(panelSource, /data-testid="mtd-truncation"/);
+    assert.doesNotMatch(panelSource, /mtd-texture-truncation/);
+    assert.match(panelSource, /const visiblePropertyRows = propertyRows;/);
+    assert.match(panelSource, /const visibleTextureRefs = textureRefs;/);
   });
 });

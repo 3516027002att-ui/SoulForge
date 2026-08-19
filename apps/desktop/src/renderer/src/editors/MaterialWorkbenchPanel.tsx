@@ -43,7 +43,6 @@ import {
   type MaterialPropertyWire,
   type MtdDocument
 } from '@soulforge/shared';
-import { formatListTruncation } from '../format/uiText.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
@@ -63,10 +62,7 @@ export interface MaterialWorkbenchPanelProps {
   initialUri?: string;
 }
 
-/** 属性列表单组渲染上限（硬约束 17：大表不能一次全渲，超限必须报未显示数）。 */
-const PROPERTY_RENDER_LIMIT = 200;
-/** 纹理引用渲染上限（同硬约束 17）。 */
-const TEXTURE_REF_RENDER_LIMIT = 200;
+// 属性 / 纹理引用一律全量渲染，栏自身滚动，不做条数上限。
 
 /** MTD 显示名：文件名去 .mtd，物理路径只在 title/details。 */
 function materialFileDisplayName(file: MaterialFileView): string {
@@ -260,18 +256,8 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
   const textureRefs = pages?.textureReferences.textureRefs ?? [];
   const propertyRows = useMemo(() => materialPropertyRows(properties), [properties]);
 
-  const visiblePropertyRows = propertyRows.slice(0, PROPERTY_RENDER_LIMIT);
-  const propertyTruncation = formatListTruncation({
-    total: propertyRows.length,
-    shown: visiblePropertyRows.length,
-    noun: '个属性'
-  });
-  const visibleTextureRefs = textureRefs.slice(0, TEXTURE_REF_RENDER_LIMIT);
-  const textureRefTruncation = formatListTruncation({
-    total: textureRefs.length,
-    shown: visibleTextureRefs.length,
-    noun: '个纹理引用'
-  });
+  const visiblePropertyRows = propertyRows;
+  const visibleTextureRefs = textureRefs;
 
   const authority = document?.authority;
   // MTD 的正常 authority 上限就是 candidate（schema 禁止推断）；只有 partial 才
@@ -279,7 +265,7 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
   const isPartial = authority === 'partial';
   const unparsedGaps = document?.unparsedGaps ?? [];
   const layoutWarnings = document?.layoutWarnings ?? [];
-  const visibleGaps = unparsedGaps.slice(0, 8);
+  const visibleGaps = unparsedGaps;
 
   function selectMaterial(): void {
     setSelection({ kind: 'material', label: materialLabel });
@@ -428,9 +414,6 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
                       <span className="wb-row__meta">{ref.type ?? '—'}</span>
                     </div>
                   ))}
-                  {textureRefTruncation && (
-                    <p className="muted" data-testid="mtd-texture-truncation">{textureRefTruncation}</p>
-                  )}
                   {visibleTextureRefs.length === 0 && (
                     <p className="wb-empty">这个材质没有纹理引用。</p>
                   )}
@@ -505,9 +488,6 @@ export function MaterialWorkbenchPanel(props: MaterialWorkbenchPanelProps): Reac
                         );
                       })}
                   </div>
-                  {propertyTruncation && (
-                    <p className="muted" data-testid="mtd-truncation">{propertyTruncation}</p>
-                  )}
                   {isPartial && (unparsedGaps.length > 0 || layoutWarnings.length > 0) && (
                     <details className="mtd-partial" data-testid="mtd-partial-gaps">
                       <summary>

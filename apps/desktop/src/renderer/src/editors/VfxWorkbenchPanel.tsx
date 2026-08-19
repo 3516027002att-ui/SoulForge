@@ -57,7 +57,6 @@ import {
   type FxrHostWire,
   type FxrNodeWire
 } from '@soulforge/shared';
-import { formatListTruncation } from '../format/uiText.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { isRowTabEntry, selectableRowAttributes } from '../a11y/selectableRow.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
@@ -84,7 +83,7 @@ export interface VfxWorkbenchPanelProps {
   initialSelection?: VfxSelection | null;
 }
 
-/** Effect 节点树扁平化后的一行（树太大不能一次全渲，见 NODE_RENDER_LIMIT）。 */
+/** Effect 节点树扁平化后的一行（全部渲染，栏自身滚动）。 */
 export interface FlatFxrNode {
   /** 树路径，如 "0" / "0.2" / "1.0.3"，稳定 identity。 */
   id: string;
@@ -93,16 +92,8 @@ export interface FlatFxrNode {
   node: FxrNodeWire;
 }
 
-/** 属性列表渲染上限（硬约束 17：大表不能一次全渲，超限必须报未显示数）。 */
-const NODE_RENDER_LIMIT = 500;
-/** 粒子（host）渲染上限。 */
-const HOST_RENDER_LIMIT = 200;
-/** 每个 host 的属性渲染上限。 */
-const PROPERTY_RENDER_LIMIT = 200;
-/** 每个属性值的预览条数（值是 Section11 不透明 int 数组，只需摘要）。 */
-const VALUE_PREVIEW_LIMIT = 8;
-/** 每个值数组可编辑条目的渲染上限（大数组不能一次全渲，超限报未显示数）。 */
-const EDIT_VALUE_RENDER_LIMIT = 32;
+// 节点 / host / 属性 / 可编辑值一律全量渲染，栏自身 overflow-y:auto，不做条数上限。
+
 
 /** FXR 显示名：去 .fxr/.fxr.dcx，物理路径只在 title/details。 */
 export function vfxFileDisplayName(file: VfxFileView): string {
@@ -164,11 +155,10 @@ export interface VfxSelection {
   label: string;
 }
 
-/** 属性值摘要：只显示前 N 个 int，超限给省略号。 */
-export function fxrValuePreview(values: number[], limit: number): string {
+/** 属性值摘要：显示全部 int，用省略占位只处理空数组。 */
+export function fxrValuePreview(values: number[]): string {
   if (values.length === 0) return '—';
-  const shown = values.slice(0, limit).join(', ');
-  return values.length > limit ? `${shown}, …` : shown;
+  return values.join(', ');
 }
 
 // ── VFX-54C：vfx-field-set 写回 —— 结构性地址 / 已知布局门 / 提交结果 ──
@@ -455,26 +445,16 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
 
   const rootNodes = pages?.effect.nodes ?? [];
   const flatNodes = useMemo(() => flattenFxrNodes(rootNodes), [rootNodes]);
-  const visibleFlatNodes = flatNodes.slice(0, NODE_RENDER_LIMIT);
-  const nodeTruncation = formatListTruncation({
-    total: flatNodes.length,
-    shown: visibleFlatNodes.length,
-    noun: '个节点'
-  });
+  const visibleFlatNodes = flatNodes;
 
   const hosts: FxrHostWire[] = pages?.fields.hosts ?? [];
-  const visibleHosts = hosts.slice(0, HOST_RENDER_LIMIT);
-  const hostTruncation = formatListTruncation({
-    total: hosts.length,
-    shown: visibleHosts.length,
-    noun: '个粒子（Section6 host）'
-  });
+  const visibleHosts = hosts;
 
   const isPartial = document?.authority === 'partial';
   const unparsedGaps = document?.unparsedGaps ?? [];
   const layoutWarnings = document?.layoutWarnings ?? [];
-  const visibleGaps = unparsedGaps.slice(0, 8);
-  const visibleWarnings = layoutWarnings.slice(0, 8);
+  const visibleGaps = unparsedGaps;
+  const visibleWarnings = layoutWarnings;
 
   const selectedNode = selection?.kind === 'node' && selection.id !== undefined
     ? (flatNodes.find((item) => item.id === selection.id) ?? null)
@@ -608,7 +588,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
       .finally(() => setCommitting(false));
   }
 
-  /** 一个值数组的可编辑行（known host 下按 container 编译结构性地址）。 */
+  /** 一个值数组的可编辑行（known host 下按 container 编译结构性地址；值全量渲染）。 */
   function renderValueRows(options: {
     container: VfxFieldContainer;
     hostIndex: number;
@@ -618,7 +598,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
     valuesTruncated: boolean;
     labelPrefix: string;
   }): ReactElement {
-    const shownValues = options.values.slice(0, EDIT_VALUE_RENDER_LIMIT);
+    const shownValues = options.values;
     return (
       <>
         {shownValues.map((value, valueIndex) => {
@@ -644,14 +624,9 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
             />
           );
         })}
-        {options.values.length > EDIT_VALUE_RENDER_LIMIT && (
-          <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
-            前 {EDIT_VALUE_RENDER_LIMIT} 个可编辑；其余 {options.values.length - EDIT_VALUE_RENDER_LIMIT} 个未显示。
-          </p>
-        )}
         {options.valuesTruncated && (
           <p className="muted" style={{ fontSize: 10, padding: '0 10px' }}>
-            该值数组上游已截断（valuesTruncated），只显示前 {shownValues.length} 个。
+            该值数组上游已截断（valuesTruncated），仅提供 {shownValues.length} 个值。
           </p>
         )}
       </>
@@ -706,7 +681,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
   }
 
   const visibleProperties = selectedHost
-    ? selectedHost.properties.slice(0, PROPERTY_RENDER_LIMIT)
+    ? selectedHost.properties
     : [];
 
   return (
@@ -816,9 +791,6 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                       </div>
                     );
                   })}
-                  {nodeTruncation && (
-                    <p className="muted" data-testid="vfx-node-truncation">{nodeTruncation}</p>
-                  )}
                   <div className="wb-list__group-label">Particles（Section6 host · {hosts.length}）</div>
                   {visibleHosts.length === 0 && (
                     <p className="wb-empty">这个 effect 没有可显示的粒子 host 样本。</p>
@@ -842,9 +814,6 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                       </div>
                     );
                   })}
-                  {hostTruncation && (
-                    <p className="muted" data-testid="vfx-host-truncation">{hostTruncation}</p>
-                  )}
                 </>
               )}
             </div>
@@ -981,7 +950,7 @@ export function VfxWorkbenchPanel(props: VfxWorkbenchPanelProps): ReactElement {
                                 <span className="wb-prop__enum"> · s11×{prop.section11Count} · s8×{prop.section8Count}</span>
                               </span>
                               <span className="wb-prop__value wb-prop__value--readonly">
-                                {fxrValuePreview(prop.values, VALUE_PREVIEW_LIMIT)}
+                                {fxrValuePreview(prop.values)}
                               </span>
                             </div>
                             {editable && (

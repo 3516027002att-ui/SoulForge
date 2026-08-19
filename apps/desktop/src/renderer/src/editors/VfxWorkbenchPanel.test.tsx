@@ -380,16 +380,16 @@ describe('flattenFxrNodes（递归树扁平化，稳定路径 id）', () => {
 });
 
 describe('fxrValuePreview（Section11 不透明 int 数组摘要）', () => {
-  it('超限时给省略号', () => {
-    assert.equal(fxrValuePreview([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 8), '0, 1, 2, 3, 4, 5, 6, 7, …');
+  it('全量显示所有值，不做省略（问题 5：显示不再设限）', () => {
+    assert.equal(fxrValuePreview([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]), '0, 1, 2, 3, 4, 5, 6, 7, 8, 9');
   });
 
-  it('未超限时全量显示', () => {
-    assert.equal(fxrValuePreview([10, 11], 8), '10, 11');
+  it('小数组长度的全量显示', () => {
+    assert.equal(fxrValuePreview([10, 11]), '10, 11');
   });
 
   it('空数组显示占位，不编造值', () => {
-    assert.equal(fxrValuePreview([], 8), '—');
+    assert.equal(fxrValuePreview([]), '—');
   });
 });
 
@@ -595,8 +595,10 @@ describe('Negative source tests（VFX-54B/54C）', () => {
     assert.doesNotMatch(panelSource, /readFile\(/);
   });
 
-  it('截断说明走 formatListTruncation 且保留 vfx 专属 testId', () => {
-    assert.match(panelSource, /formatListTruncation/);
-    assert.match(panelSource, /data-testid="vfx-node-truncation"/);
+  it('节点/host/属性/可编辑值全量渲染：不再截断，也没有 vfx-node/host-truncation testId（问题 5）', () => {
+    assert.doesNotMatch(panelSource, /formatListTruncation/);
+    assert.doesNotMatch(panelSource, /data-testid="vfx-(node|host|property|edit)-truncation"/);
+    assert.match(panelSource, /const visibleFlatNodes = flatNodes;/);
+    assert.match(panelSource, /const visibleHosts = hosts;/);
   });
 });
