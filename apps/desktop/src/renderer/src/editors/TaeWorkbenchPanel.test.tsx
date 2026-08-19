@@ -261,6 +261,12 @@ describe('isInvalidTimeRange（时间范围合法性判据）', () => {
     assert.equal(isInvalidTimeRange(Number.NaN, 2), true);
     assert.equal(isInvalidTimeRange(0, Number.POSITIVE_INFINITY), true);
   });
+
+  it('问题4-C：endTime 超过合理动画长度（> 3600 秒）判非法——防 1.02e+40 上屏', () => {
+    assert.equal(isInvalidTimeRange(10, 3600), false);
+    assert.equal(isInvalidTimeRange(10, 3601), true);
+    assert.equal(isInvalidTimeRange(10, 1.02e40), true);
+  });
 });
 
 describe('authority 语义（partial 非法时间范围必须暴露）', () => {
@@ -301,72 +307,73 @@ describe('authority 语义（partial 非法时间范围必须暴露）', () => {
   });
 });
 
-describe('S17 footer 写回接线（typed event write，收进三栏底 footer）', () => {
-  it('事件选中后三栏底出现 footer：起始帧/结束帧/事件类型/下标/时间编辑', () => {
+describe('问题4-C 词条详情（收在 Events 栏下半，可关，只留一套帧；typed event write）', () => {
+  it('选中词条后详情可见：起始帧/结束帧各出现一次，主单位帧、小字 ≈ 秒', () => {
     const html = renderWithSelection();
-    assert.match(html, /data-testid="tae-event-footer"/);
-    assert.match(html, /编辑事件时间（update-event-times，内部秒）/);
-    assert.match(html, /更新事件时间/);
-    // 起始帧/结束帧是主标签（≈ 秒是小字）；0s→帧0、1s→帧30。
-    assert.match(html, /起始帧/);
-    assert.match(html, /结束帧/);
-    // 帧为主标签（0 / 30），≈ 秒为小字。
-    assert.match(html, />0\s*<span/);
+    assert.match(html, /data-testid="tae-details"/);
+    // 详情收在 Events 栏，不再占整条 workbench footer。
+    assert.doesNotMatch(html, /data-testid="tae-event-footer"/);
+    // 只留一套：起始帧 / 结束帧 各出现一次（标签字面量，避开 aria-label="新起始帧"）。
+    assert.equal((html.match(/>起始帧<\/span>/g) ?? []).length, 1);
+    assert.equal((html.match(/>结束帧<\/span>/g) ?? []).length, 1);
+    // 主单位帧：输入框是帧（0 / 30），旁边小字 ≈ 0s / ≈ 1s。
+    assert.match(html, /value="0"/);
+    assert.match(html, /value="30"/);
     assert.match(html, /≈ 0s/);
-    assert.match(html, />30\s*<span/);
     assert.match(html, /≈ 1s/);
     assert.match(html, /事件下标/);
     assert.match(html, /参数体/);
-    // 新增事件入口已删（S17：中栏详情整块移除，footer 只留时间编辑）。
-    assert.doesNotMatch(html, /新增事件/);
-    // footer 编辑输入：起始帧 + 结束帧 = 2 个 number 输入。
+    assert.match(html, /事件类型/);
+    // 编辑入口仍在（问题4-C：可编辑的那两个 number 输入就是唯一一套帧）。
+    assert.match(html, /编辑事件时间/);
+    assert.match(html, /更新事件时间/);
     const inputs = html.match(/type="number"/g) ?? [];
     assert.equal(inputs.length, 2);
   });
 
-  it('参数体区只读：footer 不出现参数编辑控件', () => {
+  it('禁止协议名与内部单位上屏：不得含 update-event-times / 内部秒', () => {
     const html = renderWithSelection();
-    // SSR 下参数 effect 不跑 → 显示读取中；无参数输入框（总输入恒为 2 个时间）。
+    assert.doesNotMatch(html, /update-event-times/);
+    assert.doesNotMatch(html, /内部秒/);
+  });
+
+  it('有可访问的关闭入口（×）；关闭后详情节点不在', () => {
+    const html = renderWithSelection();
+    assert.match(html, /aria-label="关闭词条详情"/);
+    // 静态 SSR 下关闭按钮在；「再点同一条取消」是 selectEvent 的 toggle，由源码断言。
+    assert.match(html, /关闭词条详情/);
+  });
+
+  it('参数体区只读：详情不出现参数编辑控件（SSR 下拉取中）', () => {
+    const html = renderWithSelection();
     const inputs = html.match(/type="number"/g) ?? [];
     assert.equal(inputs.length, 2);
     assert.doesNotMatch(html, /type="checkbox"/);
   });
 
-  it('提交期间禁用重复提交：saving 时按钮 disabled', () => {
-    const html = renderToStaticMarkup(
-      <TaeWorkbenchPanel
-        resourceUri="fixture://action/c0000.tae"
-        data={makeDocument()}
-        initialSelection={{
-          kind: 'event', id: 'ev-0-0', label: '1 未命名',
-          animationId: 0, eventIndex: 0
-        }}
-      />
-    );
-    // SSR 下 saving 恒 false；断言按钮在保存中禁用由组件内部 saving 门禁承担，
-    // 这里验证「事件下标缺失时按钮禁用」路径（eventIndex undefined）。
+  it('事件下标缺失时写回禁用', () => {
     const missing = renderToStaticMarkup(
       <TaeWorkbenchPanel
         resourceUri="fixture://action/c0000.tae"
         data={makeDocument()}
         initialSelection={{
-          kind: 'event', id: 'ev-0-0', label: '1 未命名',
+          kind: 'event', id: 'ev-0-0', label: '事件类型 1 @0s',
           animationId: 99, eventIndex: 0
         }}
       />
     );
-    // animId 99 不存在 → selectedEvent undefined → 无 footer。
-    assert.doesNotMatch(missing, /data-testid="tae-event-footer"/);
+    // animId 99 不存在 → selectedEvent undefined → 无详情。
+    assert.doesNotMatch(missing, /data-testid="tae-details"/);
   });
 
-  it('buildUpdateEventTimesMutation：animId + eventIndex + startTime + endTime 正确', () => {
+  it('buildUpdateEventTimesMutation：草稿是帧，提交时 /30 换成秒', () => {
     const row: TaeTimelineEventRow = { animId: 3, startTime: 0, endTime: 1, eventTypeId: 7 };
     assert.deepEqual(
-      buildUpdateEventTimesMutation(row, 2, { startText: '1.25', endText: '2.5' }),
-      { mutation: 'update-event-times', animId: 3, eventIndex: 2, startTime: 1.25, endTime: 2.5 }
+      buildUpdateEventTimesMutation(row, 2, { startText: '30', endText: '60' }),
+      { mutation: 'update-event-times', animId: 3, eventIndex: 2, startTime: 1, endTime: 2 }
     );
-    // 非有限时间 → null（不把非法输入发往 C#）。
-    assert.equal(buildUpdateEventTimesMutation(row, 0, { startText: 'abc', endText: '2' }), null);
+    // 非有限（帧草稿含 '—'/非法字符）→ null（不把非法输入发往 C#）。
+    assert.equal(buildUpdateEventTimesMutation(row, 0, { startText: 'abc', endText: '30' }), null);
   });
 
   it('buildInsertEventMutation：templateEventIndex + eventTypeId + startTime + endTime 正确', () => {
@@ -460,8 +467,21 @@ describe('Negative source tests（ANIMATION-56B / ANIMATION-56C）', () => {
     assert.match(panelSource, /diag-error/);
   });
 
-  it('截断说明走 formatListTruncation 且保留 tae-truncation testId', () => {
-    assert.match(panelSource, /formatListTruncation/);
-    assert.match(panelSource, /data-testid="tae-truncation"/);
+  it('问题4-D：动画/词条表不再截断——源码不得再有 RENDER_LIMIT / 静默 slice / tae-truncation', () => {
+    assert.doesNotMatch(panelSource, /const ANIMATION_RENDER_LIMIT\s*=/);
+    assert.doesNotMatch(panelSource, /const EVENT_RENDER_LIMIT\s*=/);
+    assert.doesNotMatch(panelSource, /\.slice\(0,\s*\d+\)\s*\.map\(/);
+    assert.doesNotMatch(panelSource, /data-testid="tae-truncation"/);
+    assert.doesNotMatch(panelSource, /data-testid="tae-events-truncation"/);
+    // 全量渲染：直接 animations.map / selectedAnimationEvents.map。
+    assert.match(panelSource, /animations\.map\(/);
+    assert.match(panelSource, /selectedAnimationEvents\.map\(/);
+  });
+
+  it('问题4-A：预览按 meshCount 迭代全部网格，不再只画 mesh[0] 碎片', () => {
+    assert.match(panelSource, /for \(let index = 1; index < meshCount; index \+= 1\)/);
+    assert.match(panelSource, /readTaeChrbndPreview\(props\.resourceUri, index\)/);
+    assert.match(panelSource, /externalMeshes/);
+    assert.doesNotMatch(panelSource, /meshIndex=\{0\}/);
   });
 });

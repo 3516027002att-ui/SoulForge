@@ -286,41 +286,6 @@ const EMPTY_PARAM_DEF: ParamDefDocument = {
   fields: []
 };
 
-interface MsbPositionCommitInput {
-  partName: string;
-  posX: number;
-  posY: number;
-  posZ: number;
-}
-
-interface MsbTransformCommitInput {
-  partName: string;
-  posX: number;
-  posY: number;
-  posZ: number;
-  rotX: number;
-  rotY: number;
-  rotZ: number;
-  scaleX: number;
-  scaleY: number;
-  scaleZ: number;
-}
-
-/** applyMsbMutation 支持的原生 MSB mutation 形态（与 preload 通道一致）。 */
-type MsbNativeMutation = {
-  kind: 'set_part_position' | 'set_part_transform' | 'set_region_position';
-  partName: string;
-  posX?: number;
-  posY?: number;
-  posZ?: number;
-  rotX?: number;
-  rotY?: number;
-  rotZ?: number;
-  scaleX?: number;
-  scaleY?: number;
-  scaleZ?: number;
-};
-
 export function App(): ReactElement {
   // 运行表面在页面生命周期内稳定：Electron 桥接或 browser-preview 降级。
   const runtime = getRendererRuntime();
@@ -412,7 +377,7 @@ export function App(): ReactElement {
     regions: 0,
     events: 0
   });
-  const [msbLive, setMsbLive] = useState(false);
+  const [, setMsbLive] = useState(false);
   const [msbSourceHash, setMsbSourceHash] = useState<string | null>(null);
   const [paramTypeName, setParamTypeName] = useState('');
   const [paramRows, setParamRows] = useState(EMPTY_PARAM_ROWS);
@@ -1647,152 +1612,6 @@ export function App(): ReactElement {
         message: diagnostic.message
       }))
     };
-  }
-
-  /**
-   * S36 开闸：MSB 写链恢复放行（write-msb → Patch Engine）。
-   * 实际是否成功以 IPC 返回为准：主进程在进入 Patch Engine 前仍做
-   * Sekiro 工作区、暂存根与哈希并发保护校验。
-   */
-  async function applyMsbNativeMutationAndReload(
-    mutation: MsbNativeMutation,
-    label: string
-  ): Promise<void> {
-    if (!msbLive || !msbSourceHash || !selectedFile) {
-      setStatus('MSB 写入仅在实时模式可用。');
-      return;
-    }
-    if (!bridge) {
-      setStatus(describeBridgeAbsence(`提交 MSB ${label}`));
-      return;
-    }
-    if (typeof bridge.applyMsbMutation !== 'function') {
-      setStatus('当前预加载未暴露 applyMsbMutation。');
-      return;
-    }
-    setStatus(`正在提交 MSB ${label}…`);
-    const result = await bridge.applyMsbMutation(
-      selectedFile.sourceUri,
-      msbSourceHash,
-      mutation
-    );
-    if (!result.ok) {
-      setStatus(result.diagnostics?.[0]?.message ?? `MSB ${label} 提交失败`);
-      return;
-    }
-    const reload = await bridge.readMsbDocument(selectedFile.sourceUri) as {
-      ok?: boolean;
-      data?: {
-        sourceHash?: string;
-        parts?: Array<{
-          name: string;
-          nativeOffset?: number;
-          offset?: number;
-          modelIndex?: number;
-          posX: number;
-          posY: number;
-          posZ: number;
-          rotX?: number;
-          scaleX?: number;
-          scaleY?: number;
-          scaleZ?: number;
-        }>;
-        regions?: Array<{
-          name: string;
-          nativeOffset?: number;
-          typeId: number;
-          posX: number;
-          posY: number;
-          posZ: number;
-        }>;
-        models?: Array<{ name: string; nativeOffset?: number; offset?: number; typeId: number; sibPath?: string }>;
-        events?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
-        modelCount?: number;
-        partCount?: number;
-        regionCount?: number;
-        eventCount?: number;
-      } | null;
-    };
-    if (reload?.ok && reload.data?.parts?.length) {
-      setMsbParts(reload.data.parts.map((p) => ({
-        name: p.name,
-        ...((p.nativeOffset ?? p.offset) === undefined ? {} : { nativeOffset: p.nativeOffset ?? p.offset }),
-        ...(typeof p.modelIndex === 'number' ? { modelIndex: p.modelIndex } : {}),
-        posX: p.posX,
-        posY: p.posY,
-        posZ: p.posZ,
-        rotX: p.rotX ?? 0,
-        scaleX: p.scaleX ?? 1,
-        scaleY: p.scaleY ?? 1,
-        scaleZ: p.scaleZ ?? 1
-      })));
-      setMsbRegions((reload.data.regions ?? []).map((r) => ({
-        name: r.name,
-        ...(r.nativeOffset === undefined ? {} : { nativeOffset: r.nativeOffset }),
-        typeId: r.typeId,
-        posX: r.posX,
-        posY: r.posY,
-        posZ: r.posZ
-      })));
-      setMsbModels((reload.data.models ?? []).map((model) => ({
-        name: model.name,
-        ...((model.nativeOffset ?? model.offset) === undefined ? {} : { nativeOffset: model.nativeOffset ?? model.offset }),
-        typeId: model.typeId,
-        ...(model.sibPath ? { sibPath: model.sibPath.replace(/\\/g, '/').split('/').pop() ?? model.sibPath } : {})
-      })));
-      setMsbEvents((reload.data.events ?? []).map((event) => ({
-        name: event.name,
-        ...(event.nativeOffset === undefined ? {} : { nativeOffset: event.nativeOffset }),
-        typeId: event.typeId
-      })));
-      setMsbSourceCounts({
-        models: reload.data.modelCount ?? reload.data.models?.length ?? 0,
-        parts: reload.data.partCount ?? reload.data.parts.length,
-        regions: reload.data.regionCount ?? reload.data.regions?.length ?? 0,
-        events: reload.data.eventCount ?? reload.data.events?.length ?? 0
-      });
-      setMsbSourceHash(reload.data.sourceHash ?? null);
-      setStatus(`MSB ${label} 已提交并重读。`);
-    } else {
-      setStatus('MSB 已提交，但重读失败。');
-    }
-    await refreshOperationHistory();
-  }
-
-  async function commitMsbPosition(
-    input: MsbPositionCommitInput,
-    kind: 'set_part_position' | 'set_region_position'
-  ): Promise<void> {
-    const label = kind === 'set_region_position' ? 'region' : 'part';
-    await applyMsbNativeMutationAndReload(
-      {
-        kind,
-        partName: input.partName,
-        posX: input.posX,
-        posY: input.posY,
-        posZ: input.posZ
-      },
-      `${label} 位置`
-    );
-  }
-
-  async function commitMsbTransform(input: MsbTransformCommitInput): Promise<void> {
-    await applyMsbNativeMutationAndReload(
-      {
-        kind: 'set_part_transform',
-        partName: input.partName,
-        posX: input.posX,
-        posY: input.posY,
-        posZ: input.posZ,
-        rotX: input.rotX,
-        rotY: input.rotY,
-        rotZ: input.rotZ,
-        scaleX: input.scaleX,
-        scaleY: input.scaleY,
-        scaleZ: input.scaleZ
-      },
-      `transform ${input.partName}`
-    );
   }
 
   /**
@@ -3603,18 +3422,6 @@ export function App(): ReactElement {
                 sourceCounts={msbSourceCounts}
                 maxNodes={2000}
                 openFailure={lastOpenFailure?.kind === 'msb-open-failed' ? lastOpenFailure : null}
-                writeEnabled={msbLive
-                  && Boolean(msbSourceHash)
-                  && Boolean(selectedFile)}
-                onPartPositionCommit={(input: MsbPositionCommitInput) => {
-                  void commitMsbPosition(input, 'set_part_position');
-                }}
-                onRegionPositionCommit={(input: MsbPositionCommitInput) => {
-                  void commitMsbPosition(input, 'set_region_position');
-                }}
-                onPartTransformCommit={(input: MsbTransformCommitInput) => {
-                  void commitMsbTransform(input);
-                }}
               />
             </>
           )}

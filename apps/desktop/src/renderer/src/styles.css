@@ -768,7 +768,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .domain-browse-placeholder p { margin-top: 8px; }
 .domain-browse-placeholder .muted { font-size: 11px; color: var(--ink-3); }
 
-.tae-preview-host { height: 240px; min-height: 180px; display: flex; flex-direction: column; }
+.tae-preview-host { display: flex; flex-direction: column; }
 .tae-preview-host .flver-viewer,
 .tae-preview-host canvas { flex: 1; min-height: 160px; width: 100%; }
 
@@ -998,6 +998,10 @@ pre.tool-output {
 .msb-object-row {
   grid-template-columns: minmax(120px, 1fr);
   min-width: 150px;
+}
+/* 问题4-A：对象名字给全——数据不 slice；窄栏 ellipsis + title 全名。 */
+.msb-object-name {
+  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* 属性行：Name / Value 两列（覆盖 binder-child-row 的六列默认模板） */
 .msb-property-row {
@@ -2169,9 +2173,30 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 .start-sidebar__tools summary { cursor: pointer; color: var(--ink-2); font-size: 11px; }
 .start-sidebar__tools-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 0 0 4px; }
 
-/* S17：动作预览右栏的 3D 视口宿主（FlverViewer 撑满列宽）。 */
+/* S17：动作预览右栏的 3D 视口宿主（FlverViewer 撑满列宽）。
+   问题4-A：预览区（.tae-preview-body）吃满栏高——FlverViewer 高度跟栏走，不写死
+   300px；完整模型（全部网格）拼进同一个 viewer，叠加字不裁切。 */
+.tae-preview-body { height: 100%; min-height: 240px; }
 .tae-preview__viewport { flex: 1; min-height: 240px; position: relative; }
 .tae-preview__viewport > div { position: absolute; inset: 0; }
+
+/* 问题4-C：词条详情收在 Events 栏下半（可关抽屉），不占整条 workbench footer。
+   起始帧/结束帧只留一套（主单位帧，旁边小字 ≈ 秒）。 */
+.tae-event-detail {
+  margin: 8px 8px 4px; padding: 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--forge-1);
+}
+.tae-event-detail__header {
+  display: flex; align-items: center; gap: 8px;
+}
+.tae-event-detail__close {
+  flex: none; margin-left: auto; padding: 1px 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-s, 3px);
+  background: transparent; color: var(--ink-2); font-size: 14px; line-height: 1;
+  cursor: pointer;
+}
+.tae-event-detail__close:hover { color: var(--ink-0); border-color: var(--accent); }
 
 /* S24：ffxbnd 效果库的 .fxr 子项列表（文件条目下缩进展开）。 */
 .vfx-entries { padding-left: 14px; border-left: 2px solid var(--line); margin-left: 10px; }

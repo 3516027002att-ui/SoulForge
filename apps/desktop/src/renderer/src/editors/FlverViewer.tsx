@@ -38,6 +38,20 @@ export interface FlverViewerProps {
     boneIndicesBase64?: string | undefined;
     vertexCount: number;
   } | undefined;
+  /**
+   * 问题4-A：chrbnd 里 FLVER 的**全部网格**（renderer 按 meshIndex=0..meshCount-1
+   * 循环读取后拼齐）。提供时把每个网格都投进同一个语义场景，相机框全覆盖；
+   * 不播动画、不做假播放头。externalMeshData 只用于单网格回退。
+   */
+  externalMeshes?: Array<{
+    positionsBase64: string;
+    indicesBase64: string;
+    uvsBase64?: string | undefined;
+    normalsBase64?: string | undefined;
+    boneWeightsBase64?: string | undefined;
+    boneIndicesBase64?: string | undefined;
+    vertexCount: number;
+  }> | undefined;
   /** S17：外部骨骼层级（与 externalMeshData 同源），提供时跳过 readFlverSkeleton。 */
   externalBones?: Array<{
     name: string;
@@ -85,7 +99,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<FlverSceneHandle | null>(null);
   const contentRef = useRef<FlverSemanticScene>(EMPTY_SCENE);
-  const [meshData, setMeshData] = useState<MeshData | null>(null);
+  const [meshDataList, setMeshDataList] = useState<MeshData[] | null>(null);
   const [meshError, setMeshError] = useState<string | null>(null);
   const [skeletonBones, setSkeletonBones] = useState<SkeletonBone[] | null>(null);
   const [dummyPoints, setDummyPoints] = useState<DummyPoint[] | null>(null);
@@ -154,23 +168,21 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   }, [props.sourceUri, bridge]);
 
   // Load mesh data via IPC when sourceUri or meshIndex changes.
-  // S17：externalMeshData（chrbnd 预览）直接使用，不走 IPC。
+  // S17：externalMeshData（chrbnd 预览）直接使用，不走 IPC；
+  // 问题4-A：externalMeshes（chrbnd 全部网格）同样直接使用，不走 IPC。
   useEffect(() => {
+    if (props.externalMeshes && props.externalMeshes.length > 0) {
+      setMeshDataList(props.externalMeshes.map(toMeshData));
+      setMeshError(null);
+      return;
+    }
     if (props.externalMeshData) {
-      setMeshData({
-        positionsBase64: props.externalMeshData.positionsBase64,
-        indicesBase64: props.externalMeshData.indicesBase64,
-        uvsBase64: props.externalMeshData.uvsBase64 ?? undefined,
-        normalsBase64: props.externalMeshData.normalsBase64 ?? undefined,
-        boneWeightsBase64: props.externalMeshData.boneWeightsBase64 ?? undefined,
-        boneIndicesBase64: props.externalMeshData.boneIndicesBase64 ?? undefined,
-        vertexCount: props.externalMeshData.vertexCount
-      });
+      setMeshDataList([toMeshData(props.externalMeshData)]);
       setMeshError(null);
       return;
     }
     if (!props.sourceUri || bridge === null || typeof bridge.readFlverMesh !== 'function') return;
-    setMeshData(null);
+    setMeshDataList(null);
     setMeshError(null);
     const idx = props.meshIndex ?? 0;
     void (async () => {
@@ -181,15 +193,15 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
           diagnostics?: Array<{ message: string }>;
         };
         if (result.ok && result.data?.positionsBase64) {
-          setMeshData({
+          setMeshDataList([{
             positionsBase64: result.data.positionsBase64,
             indicesBase64: result.data.indicesBase64 ?? '',
-            uvsBase64: result.data.uvsBase64 ?? undefined,
-            normalsBase64: result.data.normalsBase64 ?? undefined,
-            boneWeightsBase64: result.data.boneWeightsBase64 ?? undefined,
-            boneIndicesBase64: result.data.boneIndicesBase64 ?? undefined,
+            ...(result.data.uvsBase64 ? { uvsBase64: result.data.uvsBase64 } : {}),
+            ...(result.data.normalsBase64 ? { normalsBase64: result.data.normalsBase64 } : {}),
+            ...(result.data.boneWeightsBase64 ? { boneWeightsBase64: result.data.boneWeightsBase64 } : {}),
+            ...(result.data.boneIndicesBase64 ? { boneIndicesBase64: result.data.boneIndicesBase64 } : {}),
             vertexCount: result.data.vertexCount ?? 0
-          });
+          }]);
         } else {
           setMeshError(result.diagnostics?.[0]?.message ?? '网格数据不可用');
         }
@@ -197,7 +209,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
         setMeshError(error instanceof Error ? error.message : '网格加载失败');
       }
     })();
-  }, [props.sourceUri, props.meshIndex, bridge]);
+  }, [props.sourceUri, props.meshIndex, props.externalMeshData, props.externalMeshes, bridge]);
 
   // Decode texture bytes (base64 → DDS parse / RGBA fallback) into semantic form.
   // 渲染器对象（CompressedTexture / DataTexture）由投影层构造并纳入 dispose。
@@ -219,8 +231,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
   // Rebuild the renderer-independent semantic scene whenever source data changes.
   useEffect(() => {
     const scene = buildSemanticScene({
-      meshData,
-      meshIndex: props.meshIndex ?? 0,
+      meshes: meshDataList ?? [],
       skeleton: skeletonBones ?? [],
       dummies: dummyPoints ?? [],
       boundingBox: props.boundingBox,
@@ -228,7 +239,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
     });
     contentRef.current = scene;
     handleRef.current?.setScene(scene);
-  }, [meshData, skeletonBones, dummyPoints, props.boundingBox, texture, props.meshIndex]);
+  }, [meshDataList, skeletonBones, dummyPoints, props.boundingBox, texture]);
 
   // Mount the Three projection layer once; later data updates flow through setScene.
   useEffect(() => {
@@ -270,10 +281,17 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
     };
   }, []);
 
-  const meshLabel = `mesh[${props.meshIndex ?? 0}]`;
+  // 多网格（问题4-A）：叠加字报「全部网格 + 总顶点数」，不显示假播放头。
+  const meshSummary = meshDataList && meshDataList.length > 0
+    ? (meshDataList.length === 1
+        ? `${meshDataList[0]?.vertexCount ?? 0} verts`
+        : `${meshDataList.length} meshes · 总 ${
+            meshDataList.reduce((sum, mesh) => sum + (mesh.vertexCount || 0), 0)
+          } verts`)
+    : null;
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: 300, background: '#1a1d23', borderRadius: 4 }}>
+    <div style={{ position: 'relative', width: '100%', height: '100%', background: '#1a1d23', borderRadius: 4 }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
       <div style={{
         position: 'absolute', top: 8, left: 8, color: '#8899aa', fontSize: 12,
@@ -281,7 +299,7 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       }}>
         FLVER 3D 预览 · {props.boneCount ?? 0} bones · {props.meshCount ?? 0} meshes
         {' · '}{backend === 'detecting' ? 'backend…' : `backend ${backend}`}
-        {meshData ? ` · ${meshLabel} ${meshData.vertexCount} verts` : meshError ? ` · ${meshError}` : ''}
+        {meshSummary ? ` · ${meshSummary}` : meshError ? ` · ${meshError}` : ''}
         {sceneError ? ` · ${sceneError}` : ''}
       </div>
       {selected ? (
@@ -303,33 +321,32 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
 }
 
 function buildSemanticScene(input: {
-  meshData: MeshData | null;
-  meshIndex: number;
+  meshes: MeshData[];
   skeleton: SkeletonBone[];
   dummies: DummyPoint[];
   boundingBox?: { min: number[]; max: number[] } | undefined;
   texture: FlverSceneTexture | null;
 }): FlverSemanticScene {
   const meshes: FlverSceneMesh[] = [];
-  if (input.meshData) {
-    const positions = decodeFloat32Array(input.meshData.positionsBase64);
+  for (const [index, meshData] of input.meshes.entries()) {
+    const positions = decodeFloat32Array(meshData.positionsBase64);
     const mesh: FlverSceneMesh = {
-      id: `mesh-${input.meshIndex}`,
-      label: `mesh[${input.meshIndex}]`,
+      id: `mesh-${index}`,
+      label: `mesh[${index}]`,
       position: [0, 0, 0],
       rotation: [0, 0, 0],
       scale: [1, 1, 1],
       positions,
-      vertexCount: input.meshData.vertexCount || positions.length / 3,
+      vertexCount: meshData.vertexCount || positions.length / 3,
       wireframeOverlay: true
     };
-    if (input.meshData.uvsBase64) mesh.uvs = decodeFloat32Array(input.meshData.uvsBase64);
-    if (input.meshData.normalsBase64) mesh.normals = decodeFloat32Array(input.meshData.normalsBase64);
-    if (input.meshData.indicesBase64) mesh.indices = decodeUint16Array(input.meshData.indicesBase64);
-    if (input.meshData.boneWeightsBase64) {
-      mesh.vertexColors = boneWeightColors(input.meshData.boneWeightsBase64, positions.length / 3);
-    } else if (input.meshData.boneIndicesBase64) {
-      mesh.vertexColors = boneIndexColors(input.meshData.boneIndicesBase64, positions.length / 3);
+    if (meshData.uvsBase64) mesh.uvs = decodeFloat32Array(meshData.uvsBase64);
+    if (meshData.normalsBase64) mesh.normals = decodeFloat32Array(meshData.normalsBase64);
+    if (meshData.indicesBase64) mesh.indices = decodeUint16Array(meshData.indicesBase64);
+    if (meshData.boneWeightsBase64) {
+      mesh.vertexColors = boneWeightColors(meshData.boneWeightsBase64, positions.length / 3);
+    } else if (meshData.boneIndicesBase64) {
+      mesh.vertexColors = boneIndexColors(meshData.boneIndicesBase64, positions.length / 3);
     }
     if (input.texture) mesh.texture = input.texture;
     meshes.push(mesh);
@@ -352,6 +369,27 @@ function buildSemanticScene(input: {
     ...(bones.length > 0 ? { bones } : {}),
     ...(dummies.length > 0 ? { dummies } : {}),
     bounds
+  };
+}
+
+/** 把外部/IPC 返回的单个网格的 DTO 规整成内部 MeshData（问题4-A 参数复用）。 */
+function toMeshData(input: {
+  positionsBase64: string;
+  indicesBase64: string;
+  uvsBase64?: string | undefined;
+  normalsBase64?: string | undefined;
+  boneWeightsBase64?: string | undefined;
+  boneIndicesBase64?: string | undefined;
+  vertexCount: number;
+}): MeshData {
+  return {
+    positionsBase64: input.positionsBase64,
+    indicesBase64: input.indicesBase64,
+    uvsBase64: input.uvsBase64 ?? undefined,
+    normalsBase64: input.normalsBase64 ?? undefined,
+    boneWeightsBase64: input.boneWeightsBase64 ?? undefined,
+    boneIndicesBase64: input.boneIndicesBase64 ?? undefined,
+    vertexCount: input.vertexCount
   };
 }
 
