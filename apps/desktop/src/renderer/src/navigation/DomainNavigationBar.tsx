@@ -6,10 +6,15 @@ export interface DomainNavigationBarProps {
   /** §4.1：只接收 DomainSummary[]，不接收 files；顶部无物理计数（§3.3）。 */
   domains: readonly DomainSummary[];
   onSelect: (domain: EditorDomainId) => void;
+  /**
+   * 「开始」的选中态跟着资源栏开闭走（`!sidebarCollapsed && sidebarView==='explorer'`），
+   * 不是 `activeDomain==='project'`。有工作区后开始只召唤资源栏，不是一页。
+   */
+  resourceSidebarOpen: boolean;
 }
 
 /** 顶层工作域导航；只消费 catalog 生成的领域摘要，不接触任何物理文件数据。 */
-export function DomainNavigationBar({ domain, domains, onSelect }: DomainNavigationBarProps): ReactElement {
+export function DomainNavigationBar({ domain, domains, onSelect, resourceSidebarOpen }: DomainNavigationBarProps): ReactElement {
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const visible = domains.filter((entry) => entry.visibility !== 'hidden');
 
@@ -28,9 +33,8 @@ export function DomainNavigationBar({ domain, domains, onSelect }: DomainNavigat
     <nav className="domain-bar" aria-label="工作域导航">
       <div className="domain-bar__tabs" role="tablist" aria-label="工作区工作域" data-testid="domain-bar">
         {visible.map((entry, index) => {
-          // 6-B→问题 1：有工作区后「开始」（project）已从顶栏隐藏（visibility
-          // hidden），选中态恒按 activeDomain 判定，不再有「资源栏开关」角色。
-          const selected = entry.domain === domain;
+          // 「开始」的选中态 = 资源栏打开；其余领域仍按 activeDomain。
+          const selected = entry.domain === 'project' ? resourceSidebarOpen : entry.domain === domain;
           const disabled = entry.visibility === 'disabled';
           const description = capabilityDescription(entry);
           return (

@@ -114,8 +114,8 @@ test('生产 IPC 链路：打开工作区 → 扫描 → 界面反映索引结�
   // workspace-switcher 出现工作区名。
   await window.getByRole('region', { name: '开始' }).getByTestId('open-workspace').click();
   await expect(window.locator('.workspace-switcher__trigger'), { timeout: 15_000 }).toContainText('e2e-overlay');
-  // 有工作区后顶栏不得有「开始」（project 隐藏）；activeDomain 不是 project。
-  await expect(window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="project"]')).toHaveCount(0);
+  // 有工作区后中央开始页消失，但顶栏「开始」仍在（只召唤资源栏，不切页）。
+  await expect(window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="project"]')).toHaveCount(1);
   await expect(window.locator('.project-overview')).toHaveCount(0);
 
   expect(pageErrors).toEqual([]);

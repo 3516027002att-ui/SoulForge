@@ -3,7 +3,7 @@
  *
  * 布局对照 DarkScript3（§11），不是 260/320 三栏：
  *   [文档标签栏] 逻辑文档标签（EMEVD 文档，§3.4），带 dirty 标记与关闭
- *   [工具条]     Ctrl+F 查找 · Ctrl+S 应用
+ *   [工具条]     保存 / 撤回 · Ctrl+F 查找 · Ctrl+S 保存
  *   [主区]       源码（可并排第二视口）+ 右栏词义（S31）
  *
  * Negative DOM（EVENT-30B）：Flow / Hex / Raw Bytes 不在默认 viewport；原始
@@ -17,8 +17,8 @@
  *
  * S35（超长 EMEVD，规格 event-common-load.md §3.2）：打开回包只有 outline +
  * 前 400 行 + opaque source token，不再预先灌完 7 万行。面板首帧用前缀建缓冲，
- * 滚近已加载底部时按视口续拉一片（一片一次追加，无 16ms 分片）；查找（Ctrl+F）/
- * 提交 / 脏标记时才把未加载部分一次拉齐。追加永远发生在文档末尾，不扰动用户
+ * 随后按片后台续载，每片立刻追加进编辑器（不等滚到边、也不等全部拉齐）。
+ * 查找（Ctrl+F）/ 提交 / 脏标记仍一次拉齐。追加永远发生在文档末尾，不扰动用户
  * 编辑、光标与滚动位置。
  */
 import {
@@ -180,6 +180,8 @@ interface InternalTab extends EventSourceTabData {
   dirty: boolean;
   /** 当前源码文本（含用户编辑）。 */
   draft: string;
+  /** 最近一次干净文本（打开时的缓冲 / 续载追加 / 保存成功）。撤回回到这里。 */
+  lastSavedText: string;
   /**
    * 该标签的 CodeMirror 状态（含 undo/redo 历史），切换标签时保留。
    * 完整缓冲（拉齐后 / 提交后 / 小文档）一次 createCompleteSourceState；
@@ -650,6 +652,12 @@ export function buildEditorExtensions(
   return extensions;
 }
 
+function appendSavedText(saved: string, rest: string): string {
+  if (rest.length === 0) return saved;
+  const needsSeparator = saved.length > 0 && !saved.endsWith('\n');
+  return `${needsSeparator ? `${saved}\n` : saved}${rest}`;
+}
+
 function revealLine(view: EditorView | null, lineNumber: number): void {
   if (!view) return;
   const safe = Math.max(1, Math.min(lineNumber, view.state.doc.lines));
@@ -817,8 +825,14 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const slicePromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   /** S35：拉齐在飞 Promise：提交 / 查找 / 脏标记并发时共享同一次拉齐。 */
   const fillPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+  /**
+   * 打开后按片后台续载（每片立刻追加）。与 ensureTabComplete 互斥：
+   * 一次拉齐在飞时切片循环让路，避免同一区间拉两次。
+   */
+  const backgroundFillPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   const maybeFillMoreRef = useRef<(view: EditorView) => void>(() => {});
   const ensureTabCompleteRef = useRef<(tabId: string) => Promise<void>>(async () => {});
+  const fillRemainingInSlicesRef = useRef<(tabId: string) => Promise<void>>(async () => {});
 
   const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? null;
   const splitTab = splitTabId ? tabs.find((tab) => tab.tabId === splitTabId) ?? null : null;
@@ -866,20 +880,25 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     tabId: string,
     state: EditorState,
     loadedLines: number,
-    complete: boolean
+    complete: boolean,
+    restText?: string | null
   ) => {
     setTabs((previous) =>
-      previous.map((tab) =>
-        tab.tabId === tabId
-          ? {
-              ...tab,
-              draft: state.doc.toString(),
-              editorState: state,
-              sourceLoadedLines: loadedLines,
-              sourceComplete: complete
-            }
-          : tab
-      )
+      previous.map((tab) => {
+        if (tab.tabId !== tabId) return tab;
+        const nextDraft = state.doc.toString();
+        const nextSaved = tab.dirty
+          ? (restText && restText.length > 0 ? appendSavedText(tab.lastSavedText, restText) : tab.lastSavedText)
+          : nextDraft;
+        return {
+          ...tab,
+          draft: nextDraft,
+          lastSavedText: nextSaved,
+          editorState: state,
+          sourceLoadedLines: loadedLines,
+          sourceComplete: complete
+        };
+      })
     );
   }, []);
 
@@ -914,7 +933,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         ...appendSourceTail(view.state, restText),
         annotations: fillAnnotations
       });
-      commitSourceFill(tabId, view.state, view.state.doc.lines, complete);
+      commitSourceFill(tabId, view.state, view.state.doc.lines, complete, restText);
       return;
     }
     const tab = tabsRef.current.find((item) => item.tabId === tabId);
@@ -923,7 +942,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       ...appendSourceTail(tab.editorState, restText),
       annotations: fillAnnotations
     }).state;
-    commitSourceFill(tabId, nextState, nextState.doc.lines, complete);
+    commitSourceFill(tabId, nextState, nextState.doc.lines, complete, restText);
   }, [commitSourceFill]);
 
   /** S35：拉一片（一行 400 条口径的切片，常量在 incrementalSourceInjection）并追加；落地后下一轮视口事件再拉。 */
@@ -946,12 +965,13 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
   /** S35：单片续载的飞行通道登记（与拉齐共享「单飞行通道」，防重复取行区间）。 */
   const fillOneSliceGuarded = useCallback((tabId: string): Promise<void> => {
+    const existing = slicePromisesRef.current.get(tabId);
+    if (existing) return existing;
     const promise = fillOneSlice(tabId).finally(() => {
       if (slicePromisesRef.current.get(tabId) === promise) slicePromisesRef.current.delete(tabId);
       // 链式预取：一片落地后视口仍贴近已加载底部（快速滚动或贴底拖滚动条）就
-      // 立刻拉下一片，不等下一次滚动事件——旧实现每片之间要等滚动事件再触发，
-      // 快滚时视口撞进「已加载末尾等 IPC」的空窗。maybeFillMore 自带单飞行
-      // 通道、拉齐让路与近底判定：远离底部 / eof / 失败时链条自动停止，不空转。
+      // 立刻拉下一片，不等下一次滚动事件。后台按片循环在飞时 maybeFillMore
+      // 让路，避免同一片拉两次。
       const view = viewRef.current;
       if (view !== null && activeTabIdRef.current === tabId) maybeFillMoreRef.current(view);
     });
@@ -995,14 +1015,45 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, [applyRestText, readSliceFromBridge]);
   ensureTabCompleteRef.current = ensureTabComplete;
 
+  /**
+   * 打开后按片把剩余源码灌进编辑器。每片落地即追加，滚动条立刻变长；
+   * 不再等 fetchAllRemainingSource 整段结束才 dispatch —— 那会让用户在
+   * 前 400 行干等到切走再切回来。
+   */
+  const fillRemainingInSlices = useCallback((tabId: string): Promise<void> => {
+    const existing = backgroundFillPromisesRef.current.get(tabId);
+    if (existing) return existing;
+    const promise = (async () => {
+      while (true) {
+        // Ctrl+F / 提交 / 脏标记的一次拉齐优先，切片循环让路。
+        if (fillPromisesRef.current.has(tabId)) return;
+        const current = incrementalSourcesRef.current.get(tabId);
+        if (!current || isIncrementalSourceComplete(current)) return;
+        await fillOneSliceGuarded(tabId);
+      }
+    })();
+    backgroundFillPromisesRef.current.set(tabId, promise);
+    void promise.finally(() => {
+      if (backgroundFillPromisesRef.current.get(tabId) === promise) {
+        backgroundFillPromisesRef.current.delete(tabId);
+      }
+    });
+    return promise;
+  }, [fillOneSliceGuarded]);
+  fillRemainingInSlicesRef.current = fillRemainingInSlices;
+
   /** S35：视口近底探测 → 续拉下一片（updateListener 与 scrollDOM 两路共用）。 */
   const maybeFillMore = useCallback((view: EditorView) => {
     const tabId = activeTabIdRef.current;
     if (!tabId) return;
     const state = incrementalSourcesRef.current.get(tabId);
     if (!state || isIncrementalSourceComplete(state)) return;
-    // 单飞行通道：拉齐在飞时视口续载一律让路（拉齐会覆盖全部剩余行）。
-    if (fillPromisesRef.current.has(tabId) || slicePromisesRef.current.has(tabId)) return;
+    // 单飞行通道：拉齐或后台按片循环在飞时视口续载让路。
+    if (
+      fillPromisesRef.current.has(tabId)
+      || slicePromisesRef.current.has(tabId)
+      || backgroundFillPromisesRef.current.has(tabId)
+    ) return;
     if (!isNearLoadedBottom(view)) return;
     void fillOneSliceGuarded(tabId);
   }, [fillOneSliceGuarded]);
@@ -1013,7 +1064,14 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       previous.map((tab) =>
         // 同步最新 CM state：切换 tab 时 view.setState(activeTab.editorState)
         // 换入的是缓存 state，若编辑后不更新它，切回来会回退到未编辑的模板。
-        tab.tabId === tabId ? { ...tab, dirty: true, draft: text, editorState: state } : tab
+        tab.tabId === tabId
+          ? {
+              ...tab,
+              dirty: text !== tab.lastSavedText,
+              draft: text,
+              editorState: state
+            }
+          : tab
       )
     );
     // S35：用户一动手（脏标记）就把未加载部分一次拉齐 —— 否则提交只会带上
@@ -1081,20 +1139,36 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       base,
       createExtensionsFor(pending.tabId, readOnly, pending.sourceStyle)
     );
+    const existingLive = tabsRef.current.find((tab) => tab.tabId === pending.tabId);
+    const tokenChanged = existingLive !== undefined
+      && existingLive.sourceToken !== (pending.sourceToken ?? null);
+    const keepFilled = Boolean(
+      existingLive
+      && !existingLive.dirty
+      && existingLive.sourceHash === pending.sourceHash
+      && existingLive.sourceLoadedLines > (incremental?.nextFromLine ?? 0)
+    );
+    // 必须在 setTabs 之外同步写入：12-A 的按片续载和本 effect 同一次 commit
+    // 里跑，updater 里写 ref 会赶不上。同源已灌过前缀之后的内容保留推进状态。
+    if (!keepFilled) {
+      if (incremental && !(existingLive && tokenChanged && existingLive.dirty)) {
+        incrementalSourcesRef.current.set(pending.tabId, incremental);
+      } else {
+        incrementalSourcesRef.current.delete(pending.tabId);
+      }
+    }
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === pending.tabId);
       // 换代（token 变化）且 tab 脏着：不能把新文件的剩余部分续进旧编辑缓冲，
       // 停掉增量源（旧 token 在 main 也已作废），内容与状态保持用户侧旧世代。
       const existing = index >= 0 ? previous[index] : undefined;
-      const tokenChanged = existing !== undefined
-        && existing.sourceToken !== (pending.sourceToken ?? null);
-      if (incremental && existing !== undefined && !(tokenChanged && existing.dirty)) {
-        incrementalSourcesRef.current.set(pending.tabId, incremental);
-      } else {
-        incrementalSourcesRef.current.delete(pending.tabId);
-      }
       if (existing) {
         const sourceChanged = existing.draft !== base;
+        const retainFilled = Boolean(
+          !existing.dirty
+          && existing.sourceHash === pending.sourceHash
+          && existing.sourceLoadedLines > (incremental?.nextFromLine ?? 0)
+        );
         const merged: InternalTab = {
           ...existing,
           document: pending.document,
@@ -1108,10 +1182,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           sourceToken: pending.sourceToken ?? null,
           sourcePrefix: pending.sourcePrefix ?? null,
           sourceTotalLines: pending.sourceTotalLines ?? pending.dslTemplateTotalLines ?? 0,
-          // 干净标签收到新基线时一次提交成完整/前缀缓冲；脏标签保留用户编辑。
-          ...(sourceChanged && !existing.dirty
+          // 干净标签收到新基线时一次提交成完整/前缀缓冲；已按片灌过的同源
+          // 缓冲和脏标签都保留，避免切走再点回来被打回 400 行前缀。
+          ...(sourceChanged && !existing.dirty && !retainFilled
             ? {
                 draft: base,
+                lastSavedText: base,
                 editorState: createIncomingState(),
                 sourceLoadedLines: incremental?.nextFromLine ?? 0,
                 sourceComplete: incremental ? incremental.eof : true
@@ -1124,6 +1200,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         ...pending,
         dirty: false,
         draft: base,
+        lastSavedText: base,
         sourceLoadedLines: incremental?.nextFromLine ?? 0,
         sourceTotalLines: incremental?.totalLines ?? pending.dslTemplateTotalLines ?? 0,
         sourceComplete: incremental ? incremental.eof : true,
@@ -1198,20 +1275,18 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, [activeTabId]);
 
   /**
-   * 12-A：打开并挂上前缀后，后台把剩余部分一次拉齐到 eof —— 不等用户滚到边。
+   * 12-A：打开并挂上前缀后，按片后台续载到 eof —— 不等用户滚到边，也不等
+   * 整段拉齐才追加。fetchAllRemainingSource 一次 dispatch 会让前 400 行卡住
+   * 直到切走再切回来才看见全文；这里每片落地即 append。
    *
-   * 首包仍只有 400 行前缀（前缀行数常量不变，禁止改大冒充全量）；挂载 /
-   * 切回前台即对增量源 tab 调 ensureTabComplete（内部循环
-   * fetchNextSourceSlice / fetchAllRemainingSource），追加走现有
-   * sourceFillAnnotation + addToHistory:false，不置 dirty、不进 undo。
-   * 在飞 Promise 共享：Ctrl+F / 提交 / 脏标记的拉齐复用同一次。「滚近底部续载」
-   * 仍作为滚动加速保留，但不是唯一通路；用户看得见全文优先于必须滚到边才续载。
+   * 首包仍只有 400 行前缀（禁止改大冒充全量）。Ctrl+F / 提交 / 脏标记仍走
+   * ensureTabComplete 一次拉齐。
    */
   useEffect(() => {
     if (!activeTabId) return;
     const incremental = incrementalSourcesRef.current.get(activeTabId);
     if (!incremental || isIncrementalSourceComplete(incremental)) return;
-    void ensureTabCompleteRef.current(activeTabId);
+    void fillRemainingInSlicesRef.current(activeTabId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, props.pendingTab]);
 
@@ -1276,6 +1351,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     if (!current || current.dirty) return;
     const next = baselineText(pending);
     if (next === current.draft) return;
+    // 按片续载已经比前缀长：回灌前缀会把可见全文打回 400 行。
+    if (
+      current.sourceHash === pending.sourceHash
+      && current.sourceLoadedLines > 0
+      && current.draft.length > next.length
+    ) return;
     const nextState = createCompleteSourceState(
       next,
       createExtensionsFor(activeTabId, isSourceReadOnly(pending), pending.sourceStyle)
@@ -1290,6 +1371,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
               sourceHash: pending.sourceHash,
               dslTemplate: pending.dslTemplate,
               draft: next,
+              lastSavedText: next,
               dirty: false,
               editorState: nextState
             }
@@ -1308,20 +1390,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     if (view) view.requestMeasure();
   }, [props.active, activeTabId]);
 
-  useEffect(() => {
-    const host = editorHostRef.current;
-    if (!host) return;
-    const onFocusOut = (event: FocusEvent): void => {
-      const next = event.relatedTarget;
-      if (next instanceof Node && host.contains(next)) return;
-      const tab = tabs.find((item) => item.tabId === activeTabId);
-      if (!tab || !tab.dirty || isSourceReadOnly(tab)) return;
-      void submitSourceRef.current();
-    };
-    host.addEventListener('focusout', onFocusOut);
-    return () => host.removeEventListener('focusout', onFocusOut);
-  }, [activeTabId, tabs]);
-
   function activateTab(tabId: string): void {
     setActiveTabId(tabId);
   }
@@ -1332,6 +1400,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     incrementalSourcesRef.current.delete(tabId);
     fillPromisesRef.current.delete(tabId);
     slicePromisesRef.current.delete(tabId);
+    backgroundFillPromisesRef.current.delete(tabId);
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === tabId);
       const next = previous.filter((tab) => tab.tabId !== tabId);
@@ -1410,6 +1479,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                   ...tab,
                   dirty: false,
                   draft: nextText,
+                  lastSavedText: nextText,
                   dslTemplate: nextText,
                   dslTemplateTruncated: false,
                   dslTemplateTotalLines: nextText.split('\n').length,
@@ -1425,7 +1495,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         );
         viewRef.current?.setState(nextState);
         syncGutterInfo(nextText, eventWarningRowsOf(activeTab));
-        setStatus('已应用，可回滚。');
+        setStatus('已保存。');
       } else {
         setStatus(result.diagnostics[0]?.message ?? '应用失败。');
       }
@@ -1436,6 +1506,30 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     }
   }
   submitSourceRef.current = submitSource;
+
+  function revertSource(): void {
+    const tab = activeTab;
+    if (!tab || !tab.dirty || submitting || isSourceReadOnly(tab)) return;
+    const nextState = createCompleteSourceState(
+      tab.lastSavedText,
+      createExtensionsFor(tab.tabId, isSourceReadOnly(tab), tab.sourceStyle)
+    );
+    setTabs((previous) =>
+      previous.map((item) =>
+        item.tabId === tab.tabId
+          ? {
+              ...item,
+              dirty: false,
+              draft: tab.lastSavedText,
+              editorState: nextState
+            }
+          : item
+      )
+    );
+    viewRef.current?.setState(nextState);
+    syncGutterInfo(tab.lastSavedText, eventWarningRowsOf(tab));
+    setStatus('已撤回未保存的修改');
+  }
 
   const readOnly = activeTab ? isSourceReadOnly(activeTab) : true;
 
@@ -1485,14 +1579,33 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         label="Event 源码工作台"
         toolbar={(
           <div className="esw-toolbar__group">
+            {!readOnly && (
+              <>
+                <button
+                  type="button"
+                  className="toolbar-button"
+                  data-testid="esw-save"
+                  disabled={submitting || !activeTab?.dirty}
+                  title="保存（Ctrl+S）"
+                  onClick={() => { void submitSource(); }}
+                >
+                  保存
+                </button>
+                <button
+                  type="button"
+                  className="toolbar-button"
+                  data-testid="esw-revert"
+                  disabled={submitting || !activeTab?.dirty}
+                  title="撤回未保存的修改"
+                  onClick={() => revertSource()}
+                >
+                  撤回
+                </button>
+              </>
+            )}
             <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 先把未加载部分拉齐，再开 CodeMirror 查找面板">
               查找：Ctrl+F
             </span>
-            {!readOnly && (
-              <span className="muted" style={{ fontSize: 11 }} title="Ctrl+S 或失焦直接应用，应用前自动备份，可回滚">
-                Ctrl+S 应用
-              </span>
-            )}
             {tabs.length > 0 && (
               <label className="esw-split-picker">
                 并排

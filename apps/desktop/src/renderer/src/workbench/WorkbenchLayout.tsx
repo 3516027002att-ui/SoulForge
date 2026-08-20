@@ -225,9 +225,23 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
       // 量内容宽（不含分隔条），否则首拖会把 4px 分隔条宽度也写进像素模式。
       const slot = (event.currentTarget as HTMLElement).parentElement;
       const measured = measureColumnWidth(slot);
-      if (measured === undefined) return;
-      // S27：量出的宽度同样不得低于该栏 minWidth（栏被其它栏挤窄时）。
-      const clamped = Math.max(column.minWidth ?? DEFAULT_MIN_WIDTH, measured);
+      let clamped: number | undefined;
+      if (measured !== undefined) {
+        // S27：量出的宽度同样不得低于该栏 minWidth（栏被其它栏挤窄时）。
+        clamped = Math.max(column.minWidth ?? DEFAULT_MIN_WIDTH, measured);
+      } else {
+        // 首拖量到 0/隐藏（SSR/未布局/窄窗口被挤）时不得直接 abort —— 前版
+        // `if (measured===undefined) return` 导致首拖无反应。回退到按
+        // initialFlex 比例估算或 minWidth，避免「拖一下没动」的假死。
+        const container = columnsRef.current;
+        const totalFlex = columnsForDragRef.current.reduce((sum, col) => sum + (col.initialFlex ?? 1), 0);
+        const flexShare = (column.initialFlex ?? 1) / (totalFlex || 1);
+        const estimated = container && container.clientWidth > 0
+          ? Math.max(0, container.clientWidth - (columnsForDragRef.current.length - 1) * RESIZER_WIDTH) * flexShare
+          : undefined;
+        const fallback = estimated !== undefined && estimated > 0 ? estimated : (column.minWidth ?? DEFAULT_MIN_WIDTH);
+        clamped = Math.max(column.minWidth ?? DEFAULT_MIN_WIDTH, Math.round(fallback));
+      }
       startWidth = clamped;
       setWidths((current) => ({ ...current, [column.id]: clamped }));
     }
@@ -237,6 +251,12 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
       startWidth,
       minWidth: column.minWidth ?? DEFAULT_MIN_WIDTH
     };
+    // 捕获指针：指针移出 4px 分隔条命中区时仍收 move/up，避免「拖一下就断」。
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture?.((event as unknown as { pointerId: number }).pointerId);
+    } catch {
+      // 非 PointerEvent 环境（如测试）忽略。
+    }
   }
 
   /**
@@ -321,6 +341,7 @@ export function WorkbenchLayout(props: WorkbenchLayoutProps): ReactElement {
                   startResize 会从 DOM 量出当前宽度并转入像素模式。 */}
               {!isLast && (
                 <div
+                  style={{ touchAction: 'none', cursor: 'col-resize' }}
                   className="workbench__resizer"
                   role="separator"
                   aria-orientation="vertical"

@@ -84,6 +84,8 @@ export interface SceneNode extends MsbSemanticSceneEntity {
   position: [number, number, number];
   rotation: [number, number, number];
   scale: [number, number, number];
+  /** 指向 manifest.models 的下标；仅 msb-part 有效，用于解析真实 FLVER 的 modelName。 */
+  modelIndex?: number;
 }
 
 export interface SceneManifest extends SceneResourceMetadata {
@@ -95,6 +97,8 @@ export interface SceneManifest extends SceneResourceMetadata {
   nodeCount: number;
   entities: MsbSemanticSceneEntity[];
   nodes: SceneNode[];
+  /** 模型表，与 SceneNode.modelIndex 联动；用于在 draw 阶段按 modelName 去重拉取 FLVER。 */
+  models?: MsbModelLike[];
   sourceCounts: MsbSceneSourceCounts;
   projectedCounts: MsbSceneSourceCounts;
   chunkSize: number;
@@ -111,6 +115,8 @@ export interface SceneDrawItem {
   scale: [number, number, number];
   sourceResourceUri: string;
   colorRgb: [number, number, number];
+  /** 按 models[modelIndex].name 解析出的 FLVER 名（用于按模型去重的真实网格拉取）；缺省保持线框。 */
+  modelName?: string;
   /**
    * S23：该节点对应的真实 FLVER 网格（mapbnd 里按 modelName 提取的 base64
    * typed buffers）。提供时投影层用真实几何替换 proxy 盒子；缺省保持盒子。
@@ -227,6 +233,9 @@ export function buildMsbSceneManifest(input: SceneResourceMetadata & {
   for (const part of input.parts) {
     const entity = createEntity('msb-part', part);
     const node = toSceneNode(entity, part);
+    if (typeof part.modelIndex === 'number' && Number.isFinite(part.modelIndex)) {
+      node.modelIndex = part.modelIndex;
+    }
     entities.push(node);
     drawable.push(node);
   }
@@ -278,6 +287,7 @@ export function buildMsbSceneManifest(input: SceneResourceMetadata & {
     nodeCount: nodes.length,
     entities,
     nodes,
+    ...(models.length > 0 ? { models } : {}),
     sourceCounts,
     projectedCounts,
     chunkSize,
@@ -317,17 +327,25 @@ export function buildSceneDrawList(
       message: `调用方显式请求有界窗口 ${maxItems} 项，render packet 已截断（非默认行为）。`
     });
   }
-  const items: SceneDrawItem[] = selected.map((node) => ({
-    id: node.id,
-    label: node.label,
-    entityKind: node.kind,
-    primitive: node.kind === 'msb-region' ? 'sphere' : 'box',
-    position: node.position,
-    rotation: node.rotation,
-    scale: sanitizeScale(node.scale),
-    sourceResourceUri: node.sourceResourceUri,
-    colorRgb: colorForEntity(node.id, node.kind)
-  }));
+  const items: SceneDrawItem[] = selected.map((node) => {
+    const modelName = node.kind === 'msb-part'
+      && typeof node.modelIndex === 'number'
+      && manifest.models?.[node.modelIndex]?.name
+      ? manifest.models[node.modelIndex]!.name
+      : undefined;
+    return {
+      id: node.id,
+      label: node.label,
+      entityKind: node.kind,
+      primitive: node.kind === 'msb-region' ? 'sphere' : 'box',
+      position: node.position,
+      rotation: node.rotation,
+      scale: sanitizeScale(node.scale),
+      sourceResourceUri: node.sourceResourceUri,
+      colorRgb: colorForEntity(node.id, node.kind),
+      ...(modelName ? { modelName } : {})
+    };
+  });
   const packet: SceneDrawList = {
     sourceUri: manifest.sourceUri,
     sourcePath: manifest.sourcePath,

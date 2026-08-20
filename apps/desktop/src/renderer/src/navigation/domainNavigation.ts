@@ -60,13 +60,6 @@ export interface BuildDomainSummariesInput {
    * 已注册契约的领域标 runtime-blocked（§3.2「运行条件满足」）。
    */
   readonly runtimeReady: boolean;
-  /**
-   * 是否已挂载工作区。有工作区后「开始」不再是页（问题 1）：project 与
-   * GPARAM / 动画 / 文件同口径从领域顶栏隐藏，换文件夹改走标题栏
-   * workspace-switcher。缺省 false（无工作区时 project 仍 visible，首次
-   * 打开应用没有选择工作区时中央仍显示开始页）。
-   */
-  readonly hasWorkspace?: boolean;
 }
 
 /**
@@ -99,13 +92,11 @@ export function buildDomainSummaries(input: BuildDomainSummariesInput): readonly
       label: DOMAIN_LABELS[domain],
       // R1 + T3 + 14 裁定：顶栏删除独立「GPARAM」「动画」与「文件」。GPARAM 并入
       // 左侧「参数」逻辑库，动画并入「动作」（行为标签）。文件仍可路由（resourceMode
-      // 物理浏览 / Ctrl+K 命令面板搜路径 / 开始页资源树照常），只是不在顶栏/命令
-      // 面板提供一级入口。这不是 display:none 藏 UI —— 规范投影已同步（front-end.md）。
-      // 问题 1：有工作区后「开始」不再是页，project 与它们同口径隐藏——换 Mod 工作区
-      // / 原版目录改走标题栏 workspace-switcher（任何领域都在），不再把换文件夹锁在
-      // 开始态侧栏。无工作区（首次打开）时 project 保持 visible，中央仍渲染开始页。
+      // 物理浏览 / Ctrl+K 命令面板搜路径），只是不在顶栏/命令面板提供一级入口。
+      // 这不是 display:none 藏 UI —— 规范投影已同步（front-end.md）。
+      // 「开始」（project）必须留在顶栏：有工作区后它只召唤/折叠左侧资源栏，
+      // 不是一页；换文件夹走标题栏 workspace-switcher。不得按 hasWorkspace 隐藏。
       visibility: domain === 'gparam' || domain === 'animation' || domain === 'files'
-        || (domain === 'project' && input.hasWorkspace === true)
         ? 'hidden'
         : 'visible',
       capability,

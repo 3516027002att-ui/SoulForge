@@ -213,7 +213,14 @@ internal sealed class MsbNativeDocument
             var posZ = ReadFloat(source, t + 8);
             if (!IsFinite(posX) || !IsFinite(posY) || !IsFinite(posZ))
                 throw new InvalidDataException($"MSB region {name} 位置不是有限浮点。");
-            regions.Add(new MsbRegion(off, name, typeId, posX, posY, posZ));
+            // Region rotation/scale 位于 t+0x0C/0x1C，与 Part 同布局，后续 scene-ir 可用。
+            var rotX = ReadFloat(source, t + 12);
+            var rotY = ReadFloat(source, t + 16);
+            var rotZ = ReadFloat(source, t + 20);
+            var scaleX = ReadFloat(source, t + 28);
+            var scaleY = ReadFloat(source, t + 32);
+            var scaleZ = ReadFloat(source, t + 36);
+            regions.Add(new MsbRegion(off, name, typeId, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ));
         }
         return regions;
     }
@@ -254,10 +261,12 @@ internal sealed class MsbNativeDocument
             if (!IsFinite(posX) || !IsFinite(posY) || !IsFinite(posZ))
                 throw new InvalidDataException($"MSB part {name} 位置不是有限浮点。");
             var rotX = ReadFloat(source, off + PartRotationOffset);
+            var rotY = ReadFloat(source, off + PartRotationOffset + 4);
+            var rotZ = ReadFloat(source, off + PartRotationOffset + 8);
             var scaleX = ReadFloat(source, off + PartScaleOffset);
             var scaleY = ReadFloat(source, off + PartScaleOffset + 4);
             var scaleZ = ReadFloat(source, off + PartScaleOffset + 8);
-            parts.Add(new MsbPart(off, name, typeId, modelIndex, posX, posY, posZ, rotX, scaleX, scaleY, scaleZ));
+            parts.Add(new MsbPart(off, name, typeId, modelIndex, posX, posY, posZ, rotX, rotY, rotZ, scaleX, scaleY, scaleZ));
         }
         return parts;
     }
@@ -364,6 +373,8 @@ internal sealed class MsbNativeDocument
                         if (patch.PosY is not null) WriteFloat(rebuilt, baseOff + 4, patch.PosY.Value);
                         if (patch.PosZ is not null) WriteFloat(rebuilt, baseOff + 8, patch.PosZ.Value);
                         if (patch.RotX is not null) WriteFloat(rebuilt, part.Offset + PartRotationOffset, patch.RotX.Value);
+                        if (patch.RotY is not null) WriteFloat(rebuilt, part.Offset + PartRotationOffset + 4, patch.RotY.Value);
+                        if (patch.RotZ is not null) WriteFloat(rebuilt, part.Offset + PartRotationOffset + 8, patch.RotZ.Value);
                         if (patch.ScaleX is not null) WriteFloat(rebuilt, part.Offset + PartScaleOffset, patch.ScaleX.Value);
                         if (patch.ScaleY is not null) WriteFloat(rebuilt, part.Offset + PartScaleOffset + 4, patch.ScaleY.Value);
                         if (patch.ScaleZ is not null) WriteFloat(rebuilt, part.Offset + PartScaleOffset + 8, patch.ScaleZ.Value);
@@ -494,6 +505,8 @@ internal sealed class MsbNativeDocument
             p.PosY,
             p.PosZ,
             p.RotX,
+            p.RotY,
+            p.RotZ,
             p.ScaleX,
             p.ScaleY,
             p.ScaleZ
@@ -505,7 +518,13 @@ internal sealed class MsbNativeDocument
             r.TypeId,
             r.PosX,
             r.PosY,
-            r.PosZ
+            r.PosZ,
+            r.RotX,
+            r.RotY,
+            r.RotZ,
+            r.ScaleX,
+            r.ScaleY,
+            r.ScaleZ
         }).ToArray(),
         events = Events.Select(e => new
         {
@@ -600,6 +619,8 @@ internal sealed record MsbPart(
     float PosY,
     float PosZ,
     float RotX,
+    float RotY,
+    float RotZ,
     float ScaleX,
     float ScaleY,
     float ScaleZ);
@@ -609,7 +630,13 @@ internal sealed record MsbRegion(
     int TypeId,
     float PosX,
     float PosY,
-    float PosZ);
+    float PosZ,
+    float RotX,
+    float RotY,
+    float RotZ,
+    float ScaleX,
+    float ScaleY,
+    float ScaleZ);
 internal sealed record MsbMapEvent(
     int Offset,
     string Name,
@@ -629,6 +656,8 @@ internal sealed record MsbPatch(
     float? PosY,
     float? PosZ,
     float? RotX,
+    float? RotY,
+    float? RotZ,
     float? ScaleX,
     float? ScaleY,
     float? ScaleZ);

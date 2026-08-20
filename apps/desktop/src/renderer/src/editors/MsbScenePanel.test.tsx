@@ -142,7 +142,9 @@ describe('Negative source tests（MAP-50B 五类覆盖）', () => {
     assert.match(panelSource, /applyLoadedMeshes/);
     // 进度句：已挂 loaded / total。
     assert.match(panelSource, /已挂 \$\{meshStatus\.loaded\} \/ \$\{meshStatus\.total\}/);
-    assert.match(panelSource, /const targets = parts;/);
+    // S23 去重：按 modelName 去重后串行拉取，同一 FLVER 只读一次
+    assert.match(panelSource, /byModel/);
+    assert.match(panelSource, /distinctModelNames/);
   });
 
   it('左栏对象列表由 scene manifest 派生，renderer 不扫字节、不猜格式', () => {

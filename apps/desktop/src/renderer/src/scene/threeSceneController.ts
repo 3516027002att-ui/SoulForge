@@ -445,6 +445,16 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     resources.length = 0;
   };
 
+  let lastBounds: FlverSceneBounds | null = null;
+  const syncTarget = (bounds: FlverSceneBounds): void => {
+    if (controls && typeof (controls as unknown as { target?: { set(x:number,y:number,z:number):void } }).target?.set === 'function') {
+      const t = (controls as unknown as { target: { set(x:number,y:number,z:number):void } }).target;
+      t.set(bounds.center[0], bounds.center[1], bounds.center[2]);
+    }
+  };
+  // 时序：先 syncTarget 再 camera.position.set 再 controls.update，OrbitControls 的 target 不再被后续帧覆盖导致跳变。
+  // 首次 mount 时 lastBounds 即在 frameToBounds 首帧赋值；后续 model 渐进加载通过 setDrawList 二次调用
+  // frameToBounds（bounds 不变时保持居中，不额外归零视角）。
   const frameToBounds = (bounds: FlverSceneBounds): void => {
     const [cx, cy, cz] = bounds.center;
     const span = Math.max(
@@ -453,11 +463,12 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       bounds.max[2] - bounds.min[2],
       20
     );
+    lastBounds = bounds;
+    syncTarget(bounds);
     camera.position.set(cx + span * 0.8, cy + span * 0.6, cz + span * 0.8);
     camera.lookAt(cx, cy, cz);
+    if (controls) controls.update();
   };
-
-  // Orbit controls for rotate/zoom/pan.
   void import('three/examples/jsm/controls/OrbitControls.js')
     .then((module) => {
       if (disposed) return;
@@ -465,14 +476,67 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         OrbitControls: new (
           camera: PerspectiveCamera,
           element: HTMLElement
-        ) => { enableDamping: boolean; dampingFactor: number; update(): void; dispose(): void };
+        ) => { target: { set(x:number,y:number,z:number):void; clone(): { x:number;y:number;z:number }; add(v:{x:number;y:number;z:number}):void }; enableDamping: boolean; dampingFactor: number; update(): void; dispose(): void };
       };
       const orbit = new OrbitControls(camera, canvas as unknown as HTMLElement);
       orbit.enableDamping = true;
       orbit.dampingFactor = 0.08;
       controls = orbit;
+      if (lastBounds) syncTarget(lastBounds);
     })
     .catch(() => undefined);
+
+  // WASD 连续漫游：pressed Set + rAF delta，避免 keydown 重复的 30Hz 卡顿；复用 Vector3 避免每帧分配
+  // 统一用 pressed 含 'shift'，不再单独维护 shiftHeld 双轨（易丢：keydown 只记 shiftHeld，rAF 只读 shiftHeld，
+  // 但 keyup 时按 'shift' 与 shiftKey 同步两套逻辑错位，导致加速态卡住或丢）。
+  const pressed = new Set<string>();
+  const reusableForward = new three.Vector3();
+  const reusableRight = new three.Vector3();
+  const reusableUp = new three.Vector3(0, 1, 0);
+  const reusableDir = new three.Vector3();
+  const reusableWorldUp = new three.Vector3(0, 1, 0);
+
+  const isTypingTarget = (target: EventTarget | null): boolean =>
+    target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.isContentEditable);
+
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (isTypingTarget(event.target)) return;
+    const key = event.key.toLowerCase();
+    // 每帧以 pressed.has('shift') 为唯一加速判据：同步 event.shiftKey 到 Set，避免 Shift+W 时序丢键
+    if (event.shiftKey) pressed.add('shift');
+    else pressed.delete('shift');
+    if (key === 'shift') {
+      pressed.add('shift');
+      return;
+    }
+    if (['w','a','s','d','q','e'].includes(key)) {
+      pressed.add(key);
+      event.preventDefault();
+      return;
+    }
+    if (key === 'f' || key === 'r') {
+      if (lastBounds) { event.preventDefault(); frameToBounds(lastBounds); }
+      return;
+    }
+  };
+  const onKeyUp = (event: KeyboardEvent): void => {
+    const key = event.key.toLowerCase();
+    pressed.delete(key);
+    if (key === 'shift') pressed.delete('shift');
+    if (!event.shiftKey) pressed.delete('shift');
+  };
+  const onWindowBlur = (): void => { pressed.clear(); };
+  const onDblClick = (): void => { if (lastBounds) frameToBounds(lastBounds); };
+  const onCanvasClick = (): void => canvas.focus();
+  canvas.tabIndex = 0;
+  // 事件挂 window，保证拖拽/分隔条拖动期间不丢焦
+  if (typeof window !== 'undefined') {
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
+  }
+  canvas.addEventListener('dblclick', onDblClick);
+  canvas.addEventListener('click', onCanvasClick);
 
   const raycaster = new three.Raycaster();
   const pointer = new three.Vector2();
@@ -494,22 +558,83 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   canvas.addEventListener('click', onClick);
 
   const onResize = (): void => setSize();
-  window.addEventListener('resize', onResize);
+  if (typeof window !== 'undefined') window.addEventListener('resize', onResize);
+  // ResizeObserver：WorkbenchLayout 分隔条拖动时容器尺寸变化，实时刷新 camera.aspect
+  // 观察对象与实际 flex 贡献者一致：scene-host 自身 + 父 .msb-viewport + 祖先 .workbench__columns。
+  // 仅观察 scene-host 时，若 .workbench__column-body 的 flex 尚未把高度传到 host，拖动首帧会丢一帧重刷；
+  // 同时观察父层可保证「列宽改写 → 祖先 clientWidth 变化 → host clientHeight 变化」任一路径都触发 setSize。
+  let resizeObserver: ResizeObserver | null = null;
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => setSize());
+    resizeObserver.observe(input.container);
+    const hostParent = input.container.parentElement;
+    if (hostParent) resizeObserver.observe(hostParent);
+    const columnsContainer = input.container.closest('.workbench__columns') as HTMLElement | null;
+    if (columnsContainer) resizeObserver.observe(columnsContainer);
+  }
   setSize();
 
-  const tick = (): void => {
+  let lastTick = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const tick = (now?: number): void => {
     if (disposed) return;
+    const current = typeof now === 'number' ? now : (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    let delta = (current - lastTick) / 1000;
+    lastTick = current;
+    // clamp 防止切 tab 后 delta 爆炸瞬移
+    if (delta > 0.1) delta = 0.1;
+    if (delta < 0) delta = 0;
+    const deltaFps = delta * 60;
+    if (pressed.size > 0 && lastBounds) {
+      const span = Math.max(
+        lastBounds.max[0]-lastBounds.min[0],
+        lastBounds.max[1]-lastBounds.min[1],
+        lastBounds.max[2]-lastBounds.min[2],
+        20
+      );
+      // 超大地图上 span*0.04 会瞬移穿模，clamp 上限保留可操作感
+      let speed = Math.min(span * 0.04 * deltaFps, 18 * deltaFps);
+      // 下限保底：极小 bounds 上 0.04*span 过慢，clamp 下限至少 1.2*deltaFps
+      speed = Math.max(speed, 1.2 * deltaFps);
+      if (pressed.has('shift')) speed *= 3;
+      camera.getWorldDirection(reusableForward);
+      // 右向量 = forward × worldUp
+      reusableRight.crossVectors(reusableForward, reusableWorldUp).normalize();
+      reusableDir.set(0, 0, 0);
+      if (pressed.has('w')) reusableDir.add(reusableForward);
+      if (pressed.has('s')) reusableDir.sub(reusableForward);
+      if (pressed.has('a')) reusableDir.sub(reusableRight);
+      if (pressed.has('d')) reusableDir.add(reusableRight);
+      if (pressed.has('q')) reusableDir.sub(reusableUp);
+      if (pressed.has('e')) reusableDir.add(reusableUp);
+      if (reusableDir.x !== 0 || reusableDir.y !== 0 || reusableDir.z !== 0) {
+        reusableDir.normalize().multiplyScalar(speed);
+        camera.position.add(reusableDir);
+        if (controls && (controls as unknown as { target: { add(v:{x:number;y:number;z:number}):void } }).target) {
+          const t = (controls as unknown as { target: { add(v:{x:number;y:number;z:number}):void } }).target;
+          t.add(reusableDir as unknown as {x:number;y:number;z:number});
+        }
+      }
+    }
     controls?.update();
     renderer.render(scene, camera);
-    raf = requestAnimationFrame(tick);
+    raf = requestAnimationFrame(tick as FrameRequestCallback);
   };
-  tick();
+  tick(lastTick);
 
   const disposeAll = (): void => {
     disposed = true;
     cancelAnimationFrame(raf);
     canvas.removeEventListener('click', onClick);
-    if (typeof window !== 'undefined') window.removeEventListener('resize', onResize);
+    canvas.removeEventListener('dblclick', onDblClick);
+    canvas.removeEventListener('click', onCanvasClick);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onWindowBlur);
+    }
+    resizeObserver?.disconnect();
+    resizeObserver = null;
     controls?.dispose();
     clearContent();
     for (const resource of staticResources) resource.dispose();
@@ -560,39 +685,60 @@ async function createRealRenderer(
   return new three.WebGLRenderer({ canvas, antialias: true, alpha: false });
 }
 
+/**
+ * S23 去重缓存：同一 FLVER（如 m000010 的地形）被几十个 part 共享，
+ * 旧实现每 instance 都 new 一个 BufferGeometry + 解一次 base64，
+ * 既占显存也卡解码。现按 positionsBase64 等入参缓存同一 BufferGeometry，
+ * 多实例共享 geometry（mesh 仍独立，仅共享顶点缓冲）。
+ */
+const proxyGeometryCache = new Map<string, BufferGeometry>();
+function geometryCacheKey(item: SceneDrawList['items'][number]): string | null {
+  if (!item.mesh) return null;
+  return [
+    item.mesh.positionsBase64.slice(0, 64),
+    String(item.mesh.vertexCount),
+    item.mesh.indicesBase64?.slice(0, 32) ?? '',
+    item.mesh.uvsBase64?.slice(0, 32) ?? '',
+    item.mesh.normalsBase64?.slice(0, 32) ?? ''
+  ].join('|');
+}
 function createProxyMesh(three: ThreeModule, track: ResourceTracker, item: SceneDrawList['items'][number]): Object3D {
   // S23：part 带有真实 FLVER 网格（mapbnd 提取）时画真实几何，替代 proxy 盒子。
-  const geometry = item.mesh
-    ? (() => {
-        const buffer = track(new three.BufferGeometry());
-        buffer.setAttribute('position', new three.BufferAttribute(
-          decodeBase64F32(item.mesh.positionsBase64, item.mesh.vertexCount * 3),
-          3
-        ));
-        if (item.mesh.indicesBase64) {
-          const indexBytes = decodeBase64ToUint8Array(item.mesh.indicesBase64);
-          const view = indexBytes.length % 2 === 0
-            ? new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexBytes.length / 2)
-            : null;
-          if (view) buffer.setIndex(new three.BufferAttribute(view, 1));
-        }
-        if (item.mesh.uvsBase64) {
-          const uvCount = item.mesh.vertexCount * 2;
-          buffer.setAttribute('uv', new three.BufferAttribute(decodeBase64F32(item.mesh.uvsBase64, uvCount), 2));
-        }
-        if (item.mesh.normalsBase64) {
-          buffer.setAttribute('normal', new three.BufferAttribute(
-            decodeBase64F32(item.mesh.normalsBase64, item.mesh.vertexCount * 3),
+  const cacheKey = geometryCacheKey(item);
+  const geometry = cacheKey && proxyGeometryCache.has(cacheKey)
+    ? proxyGeometryCache.get(cacheKey)!
+    : item.mesh
+      ? (() => {
+          const buffer = track(new three.BufferGeometry());
+          buffer.setAttribute('position', new three.BufferAttribute(
+            decodeBase64F32(item.mesh.positionsBase64, item.mesh.vertexCount * 3),
             3
           ));
-        } else {
-          buffer.computeVertexNormals();
-        }
-        return buffer;
-      })()
-    : (item.primitive === 'sphere'
-        ? track(new three.SphereGeometry(0.5, 12, 10))
-        : track(new three.BoxGeometry(1, 1, 1)));
+          if (item.mesh.indicesBase64) {
+            const indexBytes = decodeBase64ToUint8Array(item.mesh.indicesBase64);
+            const view = indexBytes.length % 2 === 0
+              ? new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexBytes.length / 2)
+              : null;
+            if (view) buffer.setIndex(new three.BufferAttribute(view, 1));
+          }
+          if (item.mesh.uvsBase64) {
+            const uvCount = item.mesh.vertexCount * 2;
+            buffer.setAttribute('uv', new three.BufferAttribute(decodeBase64F32(item.mesh.uvsBase64, uvCount), 2));
+          }
+          if (item.mesh.normalsBase64) {
+            buffer.setAttribute('normal', new three.BufferAttribute(
+              decodeBase64F32(item.mesh.normalsBase64, item.mesh.vertexCount * 3),
+              3
+            ));
+          } else {
+            buffer.computeVertexNormals();
+          }
+          if (cacheKey) proxyGeometryCache.set(cacheKey, buffer);
+          return buffer;
+        })()
+      : (item.primitive === 'sphere'
+          ? track(new three.SphereGeometry(0.5, 12, 10))
+          : track(new three.BoxGeometry(1, 1, 1)));
   const material = track(new three.MeshStandardMaterial({
     color: new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2]),
     roughness: 0.65,

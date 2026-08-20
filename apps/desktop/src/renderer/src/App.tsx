@@ -921,12 +921,9 @@ export function App(): ReactElement {
     }
     return buildDomainSummaries({
       readContract,
-      runtimeReady: !isBrowserPreview,
-      // 问题 1：有工作区后「开始」不再是页，project 从领域顶栏隐藏（换文件夹走
-      // 标题栏 workspace-switcher）。无工作区（首次打开）仍 visible。
-      hasWorkspace: workspace !== null
+      runtimeReady: !isBrowserPreview
     });
-  }, [bridge, isBrowserPreview, workspace]);
+  }, [bridge, isBrowserPreview]);
 
   /**
    * 物理浏览列表：只存在于 Files 领域（§18.13 Steps：Files 独占物理浏览；
@@ -1211,6 +1208,8 @@ export function App(): ReactElement {
               posY: number;
               posZ: number;
               rotX?: number;
+              rotY?: number;
+              rotZ?: number;
               scaleX?: number;
               scaleY?: number;
               scaleZ?: number;
@@ -1222,6 +1221,12 @@ export function App(): ReactElement {
               posX: number;
               posY: number;
               posZ: number;
+              rotX?: number;
+              rotY?: number;
+              rotZ?: number;
+              scaleX?: number;
+              scaleY?: number;
+              scaleZ?: number;
             }>;
             events?: Array<{ name: string; nativeOffset?: number; typeId: number }>;
             modelCount?: number;
@@ -1265,6 +1270,8 @@ export function App(): ReactElement {
           posY: p.posY,
           posZ: p.posZ,
           rotX: p.rotX ?? 0,
+          rotY: p.rotY ?? 0,
+          rotZ: p.rotZ ?? 0,
           scaleX: p.scaleX ?? 1,
           scaleY: p.scaleY ?? 1,
           scaleZ: p.scaleZ ?? 1
@@ -1281,7 +1288,13 @@ export function App(): ReactElement {
           typeId: r.typeId,
           posX: r.posX,
           posY: r.posY,
-          posZ: r.posZ
+          posZ: r.posZ,
+          rotX: r.rotX ?? 0,
+          rotY: r.rotY ?? 0,
+          rotZ: r.rotZ ?? 0,
+          scaleX: r.scaleX ?? 1,
+          scaleY: r.scaleY ?? 1,
+          scaleZ: r.scaleZ ?? 1
         })));
         setMsbEvents((result.data.events ?? []).map((event) => ({
           name: event.name,
@@ -2056,6 +2069,16 @@ export function App(): ReactElement {
   }
 
   function selectDomain(domain: EditorDomainId): void {
+    // 有工作区：开始 = 召唤资源栏，不是一页。必须赶在 dirty 确认与
+    // setActiveDomain 之前 return——不切工作域，中央 StartWorkspacePanel
+    // 也不能挂上。侧栏关了之后再打开靠这个按钮（或 Ctrl+B）。
+    if (domain === 'project' && workspace !== null) {
+      setSidebarView('explorer');
+      setSidebarCollapsed((collapsed) =>
+        !collapsed && sidebarView === 'explorer' ? true : false
+      );
+      return;
+    }
     if (domain !== activeDomain && editDirty) {
       const confirmed = window.confirm('当前文本有未生成变更的修改，切换工作域将保留草稿但可能离开编辑视图。继续？');
       if (!confirmed) return;
@@ -2063,9 +2086,7 @@ export function App(): ReactElement {
     setActiveDomain(domain);
     setBnd4Forced(false);
     if (domain === 'project') {
-      // 问题 1：只有无工作区（首次打开，没选过工作区也没有工作 mods 文件夹）才落
-      // 开始页（打开工作区的落点）。有工作区后 project 不在顶栏，selectDomain
-      // 也不会被引用——不再有「有工作区 + project 只折资源栏」的旁路（旧 6-A）。
+      // 无工作区：才落到开始页（打开工作区的落点）。
       setSelectedFile(null);
       setCenterView('project');
       setSidebarView('explorer');
@@ -2188,7 +2209,7 @@ export function App(): ReactElement {
     setMsgRows(extractMsgRows(nextPreview));
     const openPlan = planResourceOpen(file);
     if (openPlan.ipcMethods.includes('readTaeDocument') && typeof bridge.readTaeDocument === 'function') {
-      const result = await bridge.readTaeDocument(file.sourceUri) as { ok: boolean; data?: Record<string, unknown> };
+      const result = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(file.sourceUri, { animationPage: 0, animationPageSize: 1000 }) as { ok: boolean; data?: Record<string, unknown> };
       if (result.ok && result.data) setTaeData(result.data);
     }
     if (openPlan.ipcMethods.includes('readEsdDocument') && typeof bridge.readEsdDocument === 'function') {
@@ -2789,6 +2810,7 @@ export function App(): ReactElement {
         domain={activeDomain}
         domains={domainSummaries}
         onSelect={selectDomain}
+        resourceSidebarOpen={!sidebarCollapsed && sidebarView === 'explorer'}
       />
 
       <div className="shell" ref={shellRef}>
@@ -2909,8 +2931,8 @@ export function App(): ReactElement {
                   </div>
                 </>
               ) : activeDomain === 'project' ? (
-                /* 问题 1：开始态侧栏已拆掉。有工作区后「开始」不是页（project 从顶栏
-                   隐藏，activeDomain 也不会是 project）；这里只在无工作区的首次冷启动
+                /* 开始态侧栏已拆。有工作区后点「开始」只折资源栏、不把
+                   activeDomain 写成 project，所以这段只在无工作区的首次冷启动
                    命中——中央 StartWorkspacePanel 是大入口，侧栏只留一行引导文案。
                    暂存区 / 审计与回滚入口在活动栏 ab-item，搜索走 Ctrl+K。 */
                 <p className="empty-hint">
@@ -3795,7 +3817,7 @@ export function App(): ReactElement {
             因此 tab、dirty、每个 tab 的 EditorState 与用户滚动位置都保留。
           */}
           <PanelErrorBoundary key="panel-boundary:event" label="Event 源码工作台">
-            <div hidden={!showEventWorkbench}>
+            <div hidden={!showEventWorkbench} className="event-source-host">
               <EventSourceWorkbenchPanel
                 /* EVENT-30B：工作台自己管理多文档标签与 dirty；App 只按资源 URI
                    提供最近一次打开/刷新的有界投影（pendingTab），并把 DSL 提交能力

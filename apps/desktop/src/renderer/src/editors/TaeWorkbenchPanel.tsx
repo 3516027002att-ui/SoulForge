@@ -1,20 +1,21 @@
 /**
  * ANIMATION-56B / T3（2026-08-15）：动作工作台（grok T3，对照 DSAS）。
  *
- * 三栏：`Animations | 词条 + 详情 | 预览（只读）`。
+ * 上三栏 + 底部终端：`[Animations | Events | Preview]` + 底部可拖动详情面板。
  *
- * ── T3 重构（行为 + 动画合并为「动作」）──
+ * ── T3 重构（行为 + 动画合并为「动作」）+ 底部 IDE 终端式详情 ──
  *
- * 左栏列动画 id（hkxName 去扩展，如 a000_003013；无 hkxName 用干净数字 id）。
- * 中栏列当前动画的词条事件列表——envelope 只有 eventTypeId 与起止时间，词条文本名
- * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后在中栏下方
- * 详情列出起止帧 / 事件类型 / 下标与能解出的全部字段；解不出的字段写「未解码」+
- * 原始数值，禁止编造 SoundType 含义。右栏是只读 3D 预览（S17）：`read-chrbnd-
- * flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版 chr/<id>.chrbnd.dcx
- * 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐全部网格拼成完整模型
- * （问题4-A），挂进现有 FlverViewer 画网格。两边都没有 chrbnd 时给可行动空态
- * （去「开始」页挂原版）；动画播放未接入，空态明说「模型已挂，动画播放未接入」，
- * 不假装在播。不要时间轴图、不要 Inspector 第三栏（详情收进中栏）、不要 64 KiB 条。
+ * 左栏列动画 id（hkxName 去扩展，如 a000_003013；无 hkxName 用 a000_ + 6位 id）。
+ * 次栏列当前动画的词条事件列表——envelope 只有 eventTypeId 与起止时间，词条文本名
+ * （PlaySound_ByStateInfo 等）当前未解码，诚实显示「事件类型 N」；选中后详情在
+ * 底部独立面板展示（起止帧 / 事件类型 / 下标与能解出的全部字段；解不出的字段写
+ * 「未解码」+ 原始数值，禁止编造 SoundType 含义），支持拖拽调高、独立滚动。
+ * 右栏是只读 3D 预览（S17）：
+ * `read-chrbnd-flver-preview`（已登记进 AdvertisedCommands）从 overlay 或原版
+ * chr/<id>.chrbnd.dcx 取伴生 FLVER，renderer 按 meshIndex=0..meshCount-1 循环读齐
+ * 全部网格拼成完整模型（问题4-A），挂进现有 FlverViewer 画网格。两边都没有
+ * chrbnd 时给可行动空态（去「开始」页挂原版）；动画播放未接入，空态明说
+ * 「模型已挂，动画播放未接入」，不假装在播。不要时间轴图、不要 64 KiB 条。
  *
  * ── 事件参数体未解码是刻意边界 ──
  *
@@ -23,9 +24,9 @@
  * 伪装成「读出了 hitbox/SFX/VFX 参数」——缺 eventTypeId 逐类布局就不能开放参数
  * 编辑。ANIMATION-56C 写回只开放已解码字段（事件时间 / 按模板新增事件）。
  *
- * ── 写回（ANIMATION-56C 保留，收进中栏详情）──
+ * ── 写回（ANIMATION-56C 保留，收进详情栏）──
  *
- * 中栏详情在选中事件时保留「编辑事件时间」（问题4-C：放回 Events 栏下半、可关，
+ * 详情栏在选中事件时保留「编辑事件时间」（问题4-C：独立第四栏前的第三栏、可关，
  * 起始帧/结束帧只留一套、**按帧编辑**、提交时 /30 换秒），经 preload 的
  * commitTaeEvent（write-tae-document）提交。mutation 定位用 animId + 事件表下标：
  * eventIndex 是选中事件在其动画 events 数组内的下标（中栏词条列表就是该动画的
@@ -34,13 +35,19 @@
  * （refreshedDocument）；失败展示 diagnostics + 回滚提示。提交期间禁用重复提交。
  * 写回不经过通用文本保存/字节直写，只有 commitTaeEvent 一个 typed 出口。右栏始终只读。
  *
- * ── 词条详情（问题4-C，对照 DSAS）──
+ * ── 词条详情（底部 IDE 终端式面板，对照 DSAS）──
  *
- * 点一条词条，详情收在 Events 栏下半（T3 原方案，不占整条 workbench footer），
- * 三栏高度不随详情膨胀；必须能关：栏内 × 或再点同一条词条取消（推荐两者都支持），
- * 关闭后 selected.kind 回到 animation，详情卸掉。起始帧/结束帧只留一套（主单位帧、
- * 旁边小字 ≈ 秒），禁止「编辑事件时间（update-event-times，内部秒）」协议名上屏，
- * 内部 mutation 仍走秒。
+ * 点一条词条，详情沉到底部独立面板展示（独立滚动，不与词条/动画列表共享滚动）；
+ * 未选中时显示「选中词条以编辑」空态。必须能关：栏内 × 或再点同一条词条取消
+ * （两者都支持），关闭后 selected.kind 回到 animation，详情卸掉。面板高度受控
+ * state（默认 280px，min 160 max 60% 视口），顶部 6px drag handle 支持 pointer
+ * 拖拽调高。起始帧/结束帧只留一套（主单位帧、旁边小字 ≈ 秒），禁止
+ * 「编辑事件时间（update-event-times，内部秒）」协议名上屏，内部 mutation 仍走秒。
+ *
+ * ── 分页 ──
+ *
+ * 首次加载用 pageSize=1000 拉全量（覆盖 c0000 939）；若 envelope 仍截断
+ * （animationsTruncated），展示警示并提供「加载更多」分页按钮逐页追加。
  *
  * ── invalid time range ──
  *
@@ -52,7 +59,7 @@
  * 事件表原状（失败不清空）。
  */
 
-import { useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import {
   isTaeDocument,
   projectTaeDocumentPages,
@@ -127,19 +134,19 @@ function fileLabel(resourceUri: string): string {
  * 一律不认作合法茎。
  */
 export function isLegalHkxStem(value: string): boolean {
+  if (value.length < 3) return false;
   return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value);
 }
 
 /**
  * 动画 id 显示名（S17）：
- * - 合法 hkx 茎（去 .hkx 扩展，如 a000_003013）直接用；
- * - 乱码 / 空 / 非文件名字符（「葉」、尾随空格、UTF-16 误读）一律丢弃，
- *   显示干净的数字 id（`600`），禁止「动画 600」、禁止「葉」。
+ * - 合法 hkx 茎（去 .hkx/.hkt 扩展，如 a000_003013）直接用；
+ * - 乱码 / 空 / 过短（"a"）/ 非文件名字符一律丢弃，回退为 a000_ + 6位 animId。
  */
 export function animationIdLabel(animation: TaeAnimationWire): string {
-  const base = (animation.hkxName ?? '').replace(/\.hkx$/i, '');
+  const base = (animation.hkxName ?? '').replace(/\.(hkx|hkt)$/i, '');
   if (isLegalHkxStem(base)) return base;
-  return String(animation.animId);
+  return `a000_${String(animation.animId).padStart(6, '0')}`;
 }
 
 /** 秒 → 帧（30fps）。非有限返回 '—'，不编造数值。 */
@@ -227,14 +234,13 @@ export function formatWriteDiagnostics(diagnostics: readonly Diagnostic[] | unde
 }
 
 /**
- * 中栏详情里的写回区：时间编辑（update-event-times）+ 新增事件
+ * 详情栏里的写回区：时间编辑（update-event-times）+ 新增事件
  * （insert-event，以当前事件为模板）。参数体未解码，这里不出现任何参数编辑控件。
- * 收在中栏详情里（T3 后动作工作台无独立 Inspector 第三栏）。
+ * 详情栏独立滚动，不与词条列表共享滚动容器。
  */
 
 /**
- * 问题4-C：词条详情（对照 DSAS，T3 原方案 —— 详情收进 Events 栏下半，不占整条
- * workbench footer）。三栏高度不随详情膨胀；必须能关（× / 再点同一条取消）。
+ * 词条详情（独立第三栏，对照 DSAS）。详情在独立栏展示，未选中显示空态。
  *
  * 起始帧 / 结束帧**只留一套**：主单位帧（可编辑 number 输入），旁边小字 ≈ 秒。
  * 禁止「编辑事件时间（update-event-times，内部秒）」协议名上屏；内部 mutation
@@ -381,6 +387,10 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const [selected, setSelected] = useState<TaeSelection | null>(props.initialSelection ?? null);
   /** 提交成功后本地重读的文档（优先于 props.data；换文件/App 重读时清空）。 */
   const [refreshedDocument, setRefreshedDocument] = useState<TaeDocument | null>(null);
+  /** App 传入的原始文档之外，分页「加载更多」追加的增量文档片段（合并到本地展示）。 */
+  const [paginatedAnimations, setPaginatedAnimations] = useState<TaeAnimationWire[]>([]);
+  const [paginationNotice, setPaginationNotice] = useState<string | null>(null);
+  const [paginationLoading, setPaginationLoading] = useState(false);
   /** 选中事件的时间编辑草稿（null = 未编辑/未选中）。 */
   const [timeDraft, setTimeDraft] = useState<TaeTimeDraft | null>(null);
   /** 提交进行中：禁用重复提交。 */
@@ -427,14 +437,26 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     const source = refreshedDocument ?? props.data;
     return source && isTaeDocument(source) ? source : null;
   }, [refreshedDocument, props.data]);
+  const mergedDocument = useMemo(() => {
+    if (!document) return null;
+    if (paginatedAnimations.length === 0) return document;
+    const base = document as TaeDocument;
+    return {
+      ...base,
+      animations: [...base.animations, ...paginatedAnimations],
+      animationsTruncated: false
+    } as TaeDocument;
+  }, [document, paginatedAnimations]);
   const pages = useMemo(
-    () => (document ? projectTaeDocumentPages(document) : null),
-    [document]
+    () => (mergedDocument ? projectTaeDocumentPages(mergedDocument) : null),
+    [mergedDocument]
   );
 
   // 换文件或 App 重新传入数据时丢弃本地重读缓存（避免跨文件残留旧文档）。
   useEffect(() => {
     setRefreshedDocument(null);
+    setPaginatedAnimations([]);
+    setPaginationNotice(null);
     setEventParams(null);
     setPreview({ loading: false, error: null, meshCount: 0, boneCount: 0, meshes: [], bones: [] });
   }, [props.resourceUri, props.data]);
@@ -617,6 +639,42 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     }
   }, [selected]);
 
+  // 底部 IDE 终端式详情面板（高度受控，拖拽 handle 调整）。
+  const BOTTOM_DETAILS_MIN = 160;
+  const BOTTOM_DETAILS_DEFAULT = 280;
+  const [detailsHeight, setDetailsHeight] = useState(BOTTOM_DETAILS_DEFAULT);
+  const detailsDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  const handleBottomDetailsPointerDown = useCallback((event: React.PointerEvent) => {
+    detailsDragRef.current = { startY: event.clientY, startHeight: detailsHeight };
+    try {
+      (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    } catch {
+      // 非 pointer 环境忽略。
+    }
+  }, [detailsHeight]);
+
+  useEffect(() => {
+    function onMove(event: PointerEvent): void {
+      const drag = detailsDragRef.current;
+      if (!drag) return;
+      const delta = drag.startY - event.clientY; // 向上拖 → 高度增加
+      const viewportH = typeof window !== 'undefined' ? window.innerHeight : 900;
+      const max = Math.max(BOTTOM_DETAILS_MIN, Math.floor(viewportH * 0.6));
+      const next = Math.min(max, Math.max(BOTTOM_DETAILS_MIN, drag.startHeight + delta));
+      setDetailsHeight(next);
+    }
+    function onUp(): void {
+      detailsDragRef.current = null;
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, []);
+
   const animations: TaeAnimationWire[] = pages?.animations.animations ?? [];
 
   const selectedAnimation = selected?.kind === 'animation' || selected?.kind === 'event'
@@ -624,14 +682,13 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     : undefined;
   const selectedAnimationEvents = selectedAnimation?.events ?? [];
 
-  // 问题4-D（硬规则 10）：动画表/词条表全量渲染，栏自己 overflow-y: auto，
-  // 不许 slice(0, N)、不许 ANIMATION_RENDER_LIMIT / EVENT_RENDER_LIMIT。
-  const invalidRangeCount = (document?.diagnostics ?? [])
+  const invalidRangeCount = (mergedDocument?.diagnostics ?? [])
     .filter((diag) => diag.code === TAE_INVALID_TIME_RANGE).length;
-  const authority = document?.authority;
+  const authority = mergedDocument?.authority;
   const isPartial = authority === 'partial';
   // 具名切片而非连写：listTruncation gate 把裸 `.slice(0, N).map(` 视为静默截断。
-  const visibleDiagnostics = (document?.diagnostics ?? []).slice(0, 8);
+  const visibleDiagnostics = (mergedDocument?.diagnostics ?? []).slice(0, 8);
+  const isAnimationsTruncated = mergedDocument?.animationsTruncated === true;
 
   const selectedEventIndex = selected?.kind === 'event'
     ? (selected.eventIndex ?? undefined)
@@ -681,14 +738,48 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     setWriteNotice(null);
   }
 
+  async function loadMoreAnimations(): Promise<void> {
+    const bridge = getRendererBridge();
+    if (!bridge || typeof bridge.readTaeDocument !== 'function' || !mergedDocument) return;
+    const currentCount = mergedDocument.animations.length;
+    const pageSize = 1000;
+    const nextPage = Math.floor(currentCount / pageSize);
+    setPaginationLoading(true);
+    setPaginationNotice(null);
+    try {
+      const raw = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(props.resourceUri, { animationPage: nextPage, animationPageSize: pageSize }) as { ok?: boolean; data?: unknown };
+      if (raw.ok && raw.data && isTaeDocument(raw.data)) {
+        const nextDoc = raw.data as TaeDocument;
+        if (nextDoc.animations.length === 0) {
+          setPaginationNotice('没有更多动画。');
+        } else {
+          setPaginatedAnimations((prev) => [...prev, ...nextDoc.animations]);
+          if (nextDoc.animationsTruncated) {
+            setPaginationNotice(`已加载 ${currentCount + nextDoc.animations.length} / ${nextDoc.animationCount}，仍有剩余。`);
+          } else {
+            setPaginationNotice(null);
+          }
+        }
+      } else {
+        setPaginationNotice('加载更多失败。');
+      }
+    } catch {
+      setPaginationNotice('加载更多异常。');
+    } finally {
+      setPaginationLoading(false);
+    }
+  }
+
   /** 提交成功后的重读：经 bridge 直读最新 envelope 并放入本地缓存。 */
   async function refreshAfterCommit(): Promise<boolean> {
     const bridge = getRendererBridge();
     if (!bridge || typeof bridge.readTaeDocument !== 'function') return false;
     try {
-      const raw = await bridge.readTaeDocument(props.resourceUri) as { ok?: boolean; data?: unknown };
+      const raw = await (bridge.readTaeDocument as (uri: string, opts?: { animationPage?: number; animationPageSize?: number }) => Promise<unknown>)(props.resourceUri, { animationPage: 0, animationPageSize: 1000 }) as { ok?: boolean; data?: unknown };
       if (raw.ok && raw.data && isTaeDocument(raw.data)) {
         setRefreshedDocument(raw.data);
+        setPaginatedAnimations([]);
+        setPaginationNotice(null);
         return true;
       }
     } catch {
@@ -710,7 +801,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     }>,
     successMessage: string
   ): Promise<void> {
-    if (document === null) {
+    if (mergedDocument === null) {
       setWriteNotice({ kind: 'error', message: '当前没有可写回的 TAE 文档。' });
       return;
     }
@@ -722,7 +813,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     setSaving(true);
     setWriteNotice(null);
     try {
-      const raw = await bridge.commitTaeEvent(props.resourceUri, document.sourceHash, mutations);
+      const raw = await bridge.commitTaeEvent(props.resourceUri, mergedDocument.sourceHash, mutations);
       const result = raw as { ok?: boolean; diagnostics?: Diagnostic[] };
       if (result.ok) {
         const refreshed = await refreshAfterCommit();
@@ -765,17 +856,15 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           id: 'animations',
           title: 'Animations',
           hint: `${pages?.animations.animationCount ?? 0} animations`,
-          initialFlex: 0.3,
-          // 问题4-D：minWidth 提到能放下 a000_000000 + id 的宽度，名称不再被裁成首字母。
-          minWidth: 260,
+          initialFlex: 0.22,
+          minWidth: 220,
           children: (
             <div className="wb-list">
-              {document === null ? (
+              {mergedDocument === null ? (
                 <p className="wb-empty">选择 .tae / .anibnd.dcx 文件以查看动画事件数据。</p>
               ) : (
                 <>
                   <div className="wb-list__group-label">动画</div>
-                  {/* 问题4-D：全量渲染，栏自己滚；title 给全名，ellipsis 只作最后手段。 */}
                   {animations.map((animation) => {
                     const name = animationIdLabel(animation);
                     return (
@@ -796,6 +885,24 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       </div>
                     );
                   })}
+                  {isAnimationsTruncated && (
+                    <div className="wb-list__group-label" data-testid="tae-animations-truncated">
+                      动画列表已截断（仍有未加载项）
+                    </div>
+                  )}
+                  {paginationNotice && (
+                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-pagination-notice">{paginationNotice}</p>
+                  )}
+                  {isAnimationsTruncated && (
+                    <button
+                      type="button"
+                      disabled={paginationLoading}
+                      onClick={() => void loadMoreAnimations()}
+                      data-testid="tae-load-more"
+                    >
+                      {paginationLoading ? '加载中…' : '加载更多'}
+                    </button>
+                  )}
                 </>
               )}
             </div>
@@ -805,23 +912,22 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           id: 'events',
           title: 'Events / 词条',
           hint: selectedAnimation ? `${selectedAnimationEvents.length} events` : '—',
-          initialFlex: 0.36,
-          minWidth: 240,
+          initialFlex: 0.28,
+          minWidth: 220,
           children: (
             <div className="wb-list">
-              {document === null && <p className="wb-empty">先选择 .tae / .anibnd.dcx 文件。</p>}
-              {document !== null && selectedAnimation === undefined && (
+              {mergedDocument === null && <p className="wb-empty">先选择 .tae / .anibnd.dcx 文件。</p>}
+              {mergedDocument !== null && selectedAnimation === undefined && (
                 <p className="wb-empty" data-testid="tae-events-pick-animation">
                   选中左侧动画以查看其词条事件列表。
                 </p>
               )}
-              {document !== null && selectedAnimation !== undefined && (
+              {mergedDocument !== null && selectedAnimation !== undefined && (
                 <>
                   <div className="wb-list__group-label">
                     词条 · 动画 {selectedAnimation.animId}
                     {selectedAnimation.hkxName ? `（${animationIdLabel(selectedAnimation)}）` : ''}
                   </div>
-                  {/* 问题4-D：词条全量渲染，栏自己滚。 */}
                   {selectedAnimationEvents.map((event, index) => {
                     const invalid = isInvalidTimeRange(event.startTime, event.endTime);
                     const typeName = eventTypeNames.get(event.eventTypeId) ?? '未命名';
@@ -840,7 +946,6 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                           {event.eventTypeId} {typeName}
                         </span>
                         <span className="wb-row__meta">
-                          {/* 问题4-C：非法时间（含 1.02e+40 那种超长）禁止科学计数法上屏。 */}
                           {invalid ? '非法时间' : `帧 ${secondsToFrame(event.startTime)}–${secondsToFrame(event.endTime)}`}
                         </span>
                       </div>
@@ -849,22 +954,34 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   {selectedAnimationEvents.length === 0 && (
                     <p className="wb-empty">该动画没有可显示的词条事件。</p>
                   )}
-                  {/* 问题4-C：词条详情收在 Events 栏下半（可关抽屉），不占整条 footer。 */}
-                  {selected?.kind === 'event' && selectedEvent && (
-                    <TaeEventDetail
-                      event={selectedEvent}
-                      eventIndex={selectedEventIndex}
-                      eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
-                      eventParams={eventParams}
-                      timeDraft={timeDraft}
-                      saving={saving}
-                      writeNotice={writeNotice}
-                      onTimeDraftChange={(draft) => setTimeDraft(draft)}
-                      onSubmitTime={() => void submitTimeEdit()}
-                      onClose={closeEventDetail}
-                    />
-                  )}
                 </>
+              )}
+            </div>
+          )
+        },
+        {
+          id: 'details',
+          title: '详情',
+          hint: selected?.kind === 'event' ? '词条详情' : '—',
+          initialFlex: 0.28,
+          minWidth: 240,
+          children: (
+            <div className="wb-list">
+              {selected?.kind === 'event' && selectedEvent ? (
+                <TaeEventDetail
+                  event={selectedEvent}
+                  eventIndex={selectedEventIndex}
+                  eventTypeName={eventTypeNames.get(selectedEvent.eventTypeId) ?? '未命名'}
+                  eventParams={eventParams}
+                  timeDraft={timeDraft}
+                  saving={saving}
+                  writeNotice={writeNotice}
+                  onTimeDraftChange={(draft) => setTimeDraft(draft)}
+                  onSubmitTime={() => void submitTimeEdit()}
+                  onClose={closeEventDetail}
+                />
+              ) : (
+                <p className="wb-empty" data-testid="tae-details-empty">选中词条以编辑</p>
               )}
             </div>
           )
@@ -872,12 +989,12 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         {
           id: 'preview',
           title: '预览（只读）',
-          initialFlex: 0.34,
+          initialFlex: 0.22,
           minWidth: 220,
           children: (
             <div className="wb-list tae-preview-body">
-              {document === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
-              {document !== null && (
+              {mergedDocument === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
+              {mergedDocument !== null && (
                 <>
                   {preview.loading && <p className="wb-empty">正在查找伴生模型（chrbnd）…</p>}
                   {!preview.loading && preview.error !== null && (
@@ -900,11 +1017,26 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       />
                     </div>
                   )}
-                  {!preview.loading && preview.error === null && preview.meshes.length === 0 && (
+                  {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount > 0 && (
+                    <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
+                      <FlverViewer
+                        meshCount={0}
+                        boneCount={preview.boneCount}
+                        externalMeshes={[]}
+                        externalBones={preview.bones}
+                      />
+                    </div>
+                  )}
+                  {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount === 0 && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
                       {preview.meshCount > 0
                         ? `已找到伴生模型（chrbnd）：${preview.meshCount} meshes / ${preview.boneCount} bones，但网格数据不可用。`
                         : '没有找到该模型的网格数据（chrbnd 内无 FLVER 网格）。'}
+                    </p>
+                  )}
+                  {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount > 0 && (
+                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-skeleton-note">
+                      该模型为骨骼装配体（{preview.boneCount} bones），网格由 partsbnd 装配，当前仅预览骨骼。
                     </p>
                   )}
                   {!preview.loading && preview.error === null && preview.meshes.length > 0 && (
@@ -927,9 +1059,9 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                       </ul>
                     </details>
                   )}
-                  {document.diagnostics.length > 0 && !(isPartial && invalidRangeCount > 0) && (
+                  {mergedDocument.diagnostics.length > 0 && !(isPartial && invalidRangeCount > 0) && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-diagnostics">
-                      {document.diagnostics.length} 条文档诊断。
+                      {mergedDocument.diagnostics.length} 条文档诊断。
                     </p>
                   )}
                 </>

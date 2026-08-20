@@ -797,14 +797,26 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .tae-preview-host .flver-viewer,
 .tae-preview-host canvas { flex: 1; min-height: 160px; width: 100%; }
 
+/* 事件工作台必须自己吃满 pane 高度：外层 .viewer-content 默认 overflow-y:auto，
+   若这里随 400/7 万行源码撑高，源码列和右侧词义列会跟同一个父滚动条走。 */
+.event-source-host:not([hidden]) {
+  flex: 1 1 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.viewer-content:has(.event-source-host:not([hidden])) {
+  overflow: hidden;
+}
 .event-source-workbench {
-  display: flex; flex-direction: column; min-height: 0; height: 100%;
+  display: flex; flex-direction: column; min-height: 0; height: 100%; flex: 1;
   border: 1px solid var(--line); background: var(--forge-1);
 }
 .event-source-workbench .workbench {
   border: none;
   flex: 1;
-  height: auto;
+  min-height: 0;
 }
 .event-source__section-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--line); background: var(--forge-2); font-size: 11px; }
 /* S14：.event-source__header 眉题/Eyebrow 已删（源码区直接顶到文件标签底下）。
@@ -841,6 +853,8 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .toolbar-button { padding: 4px 8px; font-size: 10.5px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--forge-1); color: var(--ink-2); cursor: pointer; }
 .toolbar-button:hover { background: var(--control-hover-bg); color: var(--ink-1); }
 .toolbar-button.is-active { border-color: var(--ember); color: var(--ember-text); background: var(--ember-soft); }
+.toolbar-button:disabled { opacity: .45; cursor: default; }
+.toolbar-button:disabled:hover { background: var(--forge-1); color: var(--ink-2); }
 
 .esw-body { flex: 1 1 0; min-height: 64px; display: flex; align-items: stretch; }
 .esw-source { flex: 1; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; position: relative; }
@@ -1033,9 +1047,13 @@ pre.tool-output {
   grid-template-columns: 120px minmax(120px, 1fr);
   min-width: 260px;
 }
-/* 问题4-A：地图 viewport 跟栏高走——scene-host 随栏伸缩，3D 场景不被压成固定小盒子 */
-.msb-viewport { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
-.msb-viewport .scene-host { flex: 1; min-height: 320px; width: 100%; }
+/* 视口与漫游：msb-viewport 整栏纵向填满，scene-host 随栏伸缩不固定比例；不强制 aspect。 */
+/* 视口与漫游：msb-viewport 整栏纵向填满，scene-host 随栏伸缩不固定比例；不强制 aspect。
+   .workbench__column-body 本身是 flex:1 / overflow:auto，若不把高度传给子 flex 容器，
+   在有 padding 的情况下会出现“竖长条/窄条”—— 因此 .msb-viewport 用 flex:1 1 0 + height:100%
+   双保险，gap 不再导致首帧收缩；scene-host 用 flex:1 1 0 保证拖动时宽度跟随 .workbench__columns 变化。 */
+.msb-viewport { flex: 1 1 0; min-height: 0; min-width: 0; height: 100%; width: 100%; display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.msb-viewport .scene-host { flex: 1 1 0; min-height: 200px; min-width: 0; width: 100%; height: 100%; display: block; }
 /* S19 失败面：地图打开失败的可行动错误块（code + 人话），复用 notice 视觉族 */
 .msb-open-failure {
   display: grid; gap: 4px; padding: 10px 12px;
@@ -1966,6 +1984,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .workbench__column-body { flex: 1; overflow: auto; min-height: 0; padding: 2px 0; overscroll-behavior: contain; }
+.workbench__column-body:has(> .msb-viewport) { display: flex; flex-direction: column; overflow: hidden; padding: 6px; }
 .workbench__column-body:has(> .esw-source) {
   overflow: hidden;
   display: flex;
@@ -1982,10 +2001,12 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 }
 .workbench__column-body:has(> .esw-meaning) {
   padding: 0;
+  overflow-y: auto;
+  min-height: 0;
 }
 .esw-meaning {
   flex: 1;
-  min-height: 100%;
+  min-height: 0;
   background: var(--forge-1);
 }
 .workbench__footer {
@@ -1997,7 +2018,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
    四栏布局看起来像被粗边框割开。键盘可聚焦（方向键调宽），因为拖拽对键盘不可达，
    而栏宽决定字段名会不会被截断到认不出。 */
 .workbench__resizer {
-  flex: none; width: 4px; cursor: col-resize;
+  flex: none; width: 4px; cursor: col-resize; touch-action: none;
   background: transparent; position: relative; z-index: 1;
 }
 .workbench__resizer::after {

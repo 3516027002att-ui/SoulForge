@@ -16,6 +16,24 @@ import { mountThreeProxyScene, type ProxySceneHandle } from '../scene/threeScene
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 
+/**
+ * 按 models[modelIndex].name 解析真实 FLVER 名。
+ * 供 SceneDrawItem 去重加载使用：优先取 item.modelName（来自 buildSceneDrawList 的
+ * manifest.models[modelIndex]），缺省时回退到 props.models[modelIndex]。
+ * 返回 undefined 时该 part 保持线框，不发起 Bridge。
+ */
+export function resolvePartModelName(
+  part: { label?: string; modelName?: string; modelIndex?: number } | string,
+  models?: MsbModelLike[]
+): string | undefined {
+  if (typeof part === 'string') return undefined;
+  if (part.modelName) return part.modelName;
+  if (typeof part.modelIndex === 'number' && models?.[part.modelIndex]?.name) {
+    return models[part.modelIndex]!.name;
+  }
+  return undefined;
+}
+
 /** 左栏 Map Object List 里的实体分类。 */
 type MsbEntityKind = 'msb-model' | 'msb-event' | 'msb-part' | 'msb-region';
 
@@ -68,15 +86,18 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const regions = props.regions ?? [];
   /** S23：最近一次 drawList（mesh 渐进加载后重建用）。 */
   const drawListRef = useRef<ReturnType<typeof buildSceneDrawList> | null>(null);
-  /** S23：已加载到真实网格的 part（item id → mesh 数据）。 */
+  /** 按 modelName 去重后的网格：modelName → mesh。同一模型只读一次 Bridge，多 part 共享引用。 */
+  const loadedModelMeshesRef = useRef<Map<string, NonNullable<SceneDrawItem['mesh']>>>(new Map());
+  /** S23：已加载到真实网格的 part（item id → mesh 数据），值与 loadedModelMeshesRef 共享引用。 */
   const loadedMeshesRef = useRef<Map<string, NonNullable<SceneDrawItem['mesh']>>>(new Map());
   /** 问题4-A：part 模型加载进度（loaded / total，total 是全部 part 数）。 */
   const [meshStatus, setMeshStatus] = useState<{ loaded: number; missing: number; total: number } | null>(null);
-  /** S23：刷新场景里的 part 网格（每加载/选中一个就渐进 setDrawList）。 */
+  /** S23：刷新场景里的 part 网格（每加载/选中一个就渐进 setDrawList）。按 id 共享同一 mesh 引用。 */
   const applyLoadedMeshes = useCallback((base: ReturnType<typeof buildSceneDrawList> | null) => {
     if (!base || !handleRef.current) return;
     const updated: SceneDrawItem[] = base.items.map((item) => {
-      const mesh = loadedMeshesRef.current.get(item.id);
+      const mesh = loadedMeshesRef.current.get(item.id)
+        ?? (item.modelName ? loadedModelMeshesRef.current.get(item.modelName) : undefined);
       return mesh ? { ...item, mesh } : item;
     });
     handleRef.current.setDrawList({ ...base, items: updated });
@@ -188,11 +209,15 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   ]);
 
   /**
-   * S23 / 问题4-A：地图 part 模型渐进加载——mapbnd 里按 part 名取 FLVER 网格，
-   * 加载到的 part 用真实几何替换 proxy 盒子（`setDrawList` 渐进更新），
-   * 没有模型或未挂原版的 part 保持线框并汇总一句可行动状态。
-   * 问题4-A：不再只预取前 12 个——打开地图后按**全部** part 串行拉模型
-   * （可排队长任务，meshStatus 报「已挂 N / M」），显示不许再设限。
+   * S23 / 去重加载：按 modelName 去重，同一 FLVER 只读一次 Bridge，多 part 共享 mesh 引用。
+   *
+   * 根因：旧实现把 part.label 当 modelName 传给 readMapPartMesh，而 main 的
+   * read-map-part-flver-preview 在 mapbnd 内按 *.flver 后缀匹配，永远 miss。
+   * 正确是 models[part.modelIndex].name，现已透传为 SceneDrawItem.modelName
+   * （buildSceneDrawList 从 manifest.models[modelIndex] 填充）；无 modelName
+   * 的 part 保持线框，不发起 Bridge。
+   * loadedMeshesRef 仍以 part id 为 key，但值引用共享自 loadedModelMeshesRef 的同一对象。
+   * 读取仍走 readMapPartMesh（扫描 map/<mapId>/*.mapbnd.dcx，overlay→原版回退）。
    */
   useEffect(() => {
     const bridge = getRendererBridge();
@@ -202,20 +227,42 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     const parts = base.items.filter((item) => item.entityKind === 'msb-part');
     if (parts.length === 0) return;
     let cancelled = false;
-    // 全部 part 都挂（不 slice、不设上限；每个 mapbnd 读一次 Bridge，串行）。
-    const targets = parts;
+    // 按 modelName 去重：同一模型只请求一次；无 modelName 的 part 计入 missing（线框）。
+    const byModel = new Map<string, typeof parts>();
+    let missingFromNoModel = 0;
+    for (const item of parts) {
+      const modelName = item.modelName
+        ?? resolvePartModelName(item as { modelName?: string; modelIndex?: number }, props.models);
+      if (!modelName) {
+        missingFromNoModel += 1;
+        continue;
+      }
+      const list = byModel.get(modelName);
+      if (list) list.push(item);
+      else byModel.set(modelName, [item]);
+    }
+    const distinctModelNames = [...byModel.keys()];
+    const totalPartCount = parts.length;
     setMeshStatus(null);
     void (async () => {
       let loaded = 0;
-      let missing = 0;
-      for (const item of targets) {
-        if (cancelled) return;
-        if (loadedMeshesRef.current.has(item.id)) {
-          if (loadedMeshesRef.current.get(item.id)) loaded += 1;
-          continue;
+      let missing = missingFromNoModel;
+      // 已有缓存的模型：直接共享到其全部 part。
+      for (const [modelName, itemsForModel] of byModel) {
+        const cached = loadedModelMeshesRef.current.get(modelName);
+        if (!cached) continue;
+        for (const item of itemsForModel) {
+          if (!loadedMeshesRef.current.has(item.id)) loadedMeshesRef.current.set(item.id, cached);
         }
+        loaded += itemsForModel.length;
+      }
+      if (loaded > 0 || missing > 0) applyLoadedMeshes(drawListRef.current);
+      // 串行拉取未缓存的去重模型（仍走 readMapPartMesh 的 mapbnd 扫描路径）。
+      for (const modelName of distinctModelNames) {
+        if (cancelled) return;
+        if (loadedModelMeshesRef.current.has(modelName)) continue;
         try {
-          const raw = await bridge.readMapPartMesh(props.mapResourceUri, item.label) as {
+          const raw = await bridge.readMapPartMesh(props.mapResourceUri, modelName) as {
             ok?: boolean;
             data?: {
               positionsBase64?: string;
@@ -227,41 +274,55 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           };
           if (cancelled) return;
           if (raw.ok && raw.data?.positionsBase64) {
-            loadedMeshesRef.current.set(item.id, {
+            const mesh: NonNullable<SceneDrawItem['mesh']> = {
               positionsBase64: raw.data.positionsBase64,
               ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
               ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
               ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
               vertexCount: raw.data.vertexCount ?? 0
-            });
-            loaded += 1;
+            };
+            loadedModelMeshesRef.current.set(modelName, mesh);
+            const itemsForModel = byModel.get(modelName) ?? [];
+            for (const item of itemsForModel) loadedMeshesRef.current.set(item.id, mesh);
+            loaded += itemsForModel.length;
           } else {
-            missing += 1;
+            missing += (byModel.get(modelName)?.length ?? 1);
           }
         } catch {
           if (cancelled) return;
-          missing += 1;
+          missing += (byModel.get(modelName)?.length ?? 1);
         }
         applyLoadedMeshes(drawListRef.current);
       }
-      if (!cancelled) setMeshStatus({ loaded, missing, total: targets.length });
+      if (!cancelled) setMeshStatus({ loaded, missing, total: totalPartCount });
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.mapResourceUri, props.parts]);
+  }, [props.mapResourceUri, props.parts, props.models]);
 
-  /** S23：选中 part 时补载它的模型（预取窗口外的 part 点开也能看）。 */
+  /** S23：选中 part 时按 modelName 补载（预取窗口外的 part 点开也能看，去重共享）。 */
   useEffect(() => {
     if (selected?.kind !== 'msb-part') return;
     const bridge = getRendererBridge();
     if (!bridge || typeof bridge.readMapPartMesh !== 'function' || !props.mapResourceUri) return;
     if (loadedMeshesRef.current.has(selected.id)) return;
+    const base = drawListRef.current;
+    const item = base?.items.find((candidate) => candidate.id === selected.id) as SceneDrawItem | undefined;
+    const modelName = item?.modelName
+      ?? (item ? resolvePartModelName(item as { modelName?: string; modelIndex?: number }, props.models) : undefined);
+    if (!modelName) return;
+    if (loadedModelMeshesRef.current.has(modelName)) {
+      const mesh = loadedModelMeshesRef.current.get(modelName)!;
+      loadedMeshesRef.current.set(selected.id, mesh);
+      applyLoadedMeshes(drawListRef.current);
+      return;
+    }
     let cancelled = false;
     void (async () => {
       try {
-        const raw = await bridge.readMapPartMesh(props.mapResourceUri, selected.label) as {
+        const raw = await bridge.readMapPartMesh(props.mapResourceUri, modelName) as {
           ok?: boolean;
           data?: {
             positionsBase64?: string;
@@ -272,13 +333,22 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           };
         };
         if (cancelled || !raw.ok || !raw.data?.positionsBase64) return;
-        loadedMeshesRef.current.set(selected.id, {
+        const mesh: NonNullable<SceneDrawItem['mesh']> = {
           positionsBase64: raw.data.positionsBase64,
           ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
           ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
           ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
           vertexCount: raw.data.vertexCount ?? 0
-        });
+        };
+        loadedModelMeshesRef.current.set(modelName, mesh);
+        loadedMeshesRef.current.set(selected.id, mesh);
+        if (base) {
+          for (const candidate of base.items) {
+            if (candidate.modelName === modelName && !loadedMeshesRef.current.has(candidate.id)) {
+              loadedMeshesRef.current.set(candidate.id, mesh);
+            }
+          }
+        }
         applyLoadedMeshes(drawListRef.current);
       } catch {
         // 选中补载失败保持线框（预取汇总已说明情况）。
@@ -288,7 +358,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.kind, selected?.id, selected?.label, props.mapResourceUri, applyLoadedMeshes]);
+  }, [selected?.kind, selected?.id, selected?.label, props.mapResourceUri, applyLoadedMeshes, props.models]);
 
   /**
    * 选中左栏对象：更新选中态，part/region 同时驱动 viewport 线框高亮。
@@ -439,7 +509,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           title: 'Viewport',
           children: (
             <div className="msb-viewport">
-              <div ref={hostRef} className="scene-host" style={{ minHeight: 320, background: '#1a1d23' }} />
+              <div ref={hostRef} className="scene-host" style={{ flex: 1, width: '100%', height: '100%', minHeight: 200, background: '#1a1d23' }} />
               <p className="muted">
                 {props.openFailure
                   ? props.openFailure.message
@@ -452,7 +522,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                               : meshStatus.missing > 0
                                 ? ' · 没有找到 part 模型（线框）；未挂原版时可到「开始」页挂载后重开'
                                 : '';
-                          return `节点 ${nodeCount} · region ${regions.length}${meshNote}`;
+                          return `节点 ${nodeCount} · region ${regions.length}${meshNote} · 漫游：WASD 前后左右 / Q下降 E上升 / F居中 / 右键拖拽旋转 / 滚轮缩放`;
                         })()
                       : status)}
               </p>

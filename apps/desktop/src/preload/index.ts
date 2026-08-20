@@ -366,8 +366,8 @@ const api = {
     ipcRenderer.invoke('resource.readMsbDocument', sourceUri),
   readMapPartFlverPreview: (mapSourceUri: string, modelName: string, sibPath?: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMapPartFlverPreview', mapSourceUri, modelName, sibPath),
-  readTaeDocument: (sourceUri: string): Promise<unknown> =>
-    ipcRenderer.invoke('resource.readTaeDocument', sourceUri),
+  readTaeDocument: (sourceUri: string, options?: { animationPage?: number; animationPageSize?: number }): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeDocument', sourceUri, options),
   /** S17：词条名目录（main 解析本机 TAE.Template.SDT.xml；renderer 只拿逻辑名）。 */
   readTaeTemplateCatalog: (): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeTemplateCatalog'),

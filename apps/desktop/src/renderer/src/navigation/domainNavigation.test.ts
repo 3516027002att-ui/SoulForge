@@ -86,7 +86,7 @@ describe('buildDomainSummaries', () => {
     for (const entry of summaries) assert.equal(entry.defaultTarget, null);
   });
 
-  it('R1 + T3 + 14 裁定：GPARAM / 动画 / 文件从领域顶栏隐藏，其余 visible', () => {
+  it('R1 + T3 + 14 裁定：GPARAM / 动画 / 文件从领域顶栏隐藏，其余 visible（含开始）', () => {
     const summaries = buildDomainSummaries({ readContract: new Set(), runtimeReady: true });
     for (const entry of summaries) {
       if (entry.domain === 'gparam' || entry.domain === 'animation' || entry.domain === 'files') {
@@ -95,6 +95,16 @@ describe('buildDomainSummaries', () => {
         assert.equal(entry.visibility, 'visible');
       }
     }
+  });
+
+  it('project 不按工作区挂载隐藏：开始是顶栏资源栏开关', () => {
+    const navSource = readFileSync(join(navigationDir, 'domainNavigation.ts'), 'utf8');
+    assert.doesNotMatch(navSource, /domain === 'project' && input\.hasWorkspace/);
+    assert.equal(
+      buildDomainSummaries({ readContract: new Set(), runtimeReady: true })
+        .find((item) => item.domain === 'project')?.visibility,
+      'visible'
+    );
   });
 
   it('T3 裁定：behavior 的中文标签是「动作」（行为 + 动画合并）', () => {
@@ -149,10 +159,11 @@ describe('物理浏览归属（§18.13 Steps：语义领域不渲染全局 resou
     assert.ok(!text.includes('RendererIndexedFile'), 'domainNavigation 不得引用物理文件类型');
   });
 
-  it('DomainNavigationBar 只接收 DomainSummary[]，props 中无 files', () => {
+  it('DomainNavigationBar 只接收 DomainSummary[]，props 中无 files；开始选中态走 resourceSidebarOpen', () => {
     const text = stripComments(readFileSync(join(navigationDir, 'DomainNavigationBar.tsx'), 'utf8'));
     assert.ok(!text.includes('RendererIndexedFile'), 'DomainNavigationBar 不得引用物理文件类型');
     assert.ok(text.includes('domains: readonly DomainSummary[]'), 'DomainNavigationBar 必须声明 domains: readonly DomainSummary[]');
+    assert.ok(text.includes('resourceSidebarOpen'), '开始的选中态必须跟资源栏开闭走');
   });
 });
 

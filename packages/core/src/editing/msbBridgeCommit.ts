@@ -13,6 +13,8 @@ export type MsbBridgeMutation =
       posY?: number;
       posZ?: number;
       rotX?: number;
+      rotY?: number;
+      rotZ?: number;
       scaleX?: number;
       scaleY?: number;
       scaleZ?: number;
@@ -57,6 +59,8 @@ export async function commitMsbMutationViaBridge(
     if (m.posY !== undefined) commandOptions.posY = m.posY;
     if (m.posZ !== undefined) commandOptions.posZ = m.posZ;
     if (m.rotX !== undefined) commandOptions.rotX = m.rotX;
+    if (m.rotY !== undefined) commandOptions.rotY = m.rotY;
+    if (m.rotZ !== undefined) commandOptions.rotZ = m.rotZ;
     if (m.scaleX !== undefined) commandOptions.scaleX = m.scaleX;
     if (m.scaleY !== undefined) commandOptions.scaleY = m.scaleY;
     if (m.scaleZ !== undefined) commandOptions.scaleZ = m.scaleZ;

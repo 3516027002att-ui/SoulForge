@@ -17,6 +17,8 @@ export interface MsbBridgePart {
   posY: number;
   posZ: number;
   rotX?: number;
+  rotY?: number;
+  rotZ?: number;
   scaleX?: number;
   scaleY?: number;
   scaleZ?: number;
@@ -29,6 +31,12 @@ export interface MsbBridgeRegion {
   posX: number;
   posY: number;
   posZ: number;
+  rotX?: number;
+  rotY?: number;
+  rotZ?: number;
+  scaleX?: number;
+  scaleY?: number;
+  scaleZ?: number;
 }
 
 export interface MsbBridgeModel {
@@ -135,6 +143,8 @@ export async function readMsbDocumentViaBridge(input: {
     posY: Number(p.posY ?? 0),
     posZ: Number(p.posZ ?? 0),
     ...(p.rotX !== undefined ? { rotX: Number(p.rotX) } : {}),
+    ...(p.rotY !== undefined ? { rotY: Number(p.rotY) } : {}),
+    ...(p.rotZ !== undefined ? { rotZ: Number(p.rotZ) } : {}),
     ...(p.scaleX !== undefined ? { scaleX: Number(p.scaleX) } : {}),
     ...(p.scaleY !== undefined ? { scaleY: Number(p.scaleY) } : {}),
     ...(p.scaleZ !== undefined ? { scaleZ: Number(p.scaleZ) } : {})
@@ -145,7 +155,13 @@ export async function readMsbDocumentViaBridge(input: {
     typeId: Number(r.typeId ?? 0),
     posX: Number(r.posX ?? 0),
     posY: Number(r.posY ?? 0),
-    posZ: Number(r.posZ ?? 0)
+    posZ: Number(r.posZ ?? 0),
+    ...(r.rotX !== undefined ? { rotX: Number(r.rotX) } : {}),
+    ...(r.rotY !== undefined ? { rotY: Number(r.rotY) } : {}),
+    ...(r.rotZ !== undefined ? { rotZ: Number(r.rotZ) } : {}),
+    ...(r.scaleX !== undefined ? { scaleX: Number(r.scaleX) } : {}),
+    ...(r.scaleY !== undefined ? { scaleY: Number(r.scaleY) } : {}),
+    ...(r.scaleZ !== undefined ? { scaleZ: Number(r.scaleZ) } : {})
   }));
   const events = (result.data.events ?? []).slice(0, maxEvents).map((event) => ({
     name: String(event.name ?? ''),

@@ -174,6 +174,10 @@ internal static class MsbNativeWriter
                 throw new InvalidDataException("MSB posZ 未按预期更新。");
             if (patch.RotX is not null && Math.Abs(part.RotX - patch.RotX.Value) > 0.0001f)
                 throw new InvalidDataException("MSB rotX 未按预期更新。");
+            if (patch.RotY is not null && Math.Abs(part.RotY - patch.RotY.Value) > 0.0001f)
+                throw new InvalidDataException("MSB rotY 未按预期更新。");
+            if (patch.RotZ is not null && Math.Abs(part.RotZ - patch.RotZ.Value) > 0.0001f)
+                throw new InvalidDataException("MSB rotZ 未按预期更新。");
             if (patch.ScaleX is not null && Math.Abs(part.ScaleX - patch.ScaleX.Value) > 0.0001f)
                 throw new InvalidDataException("MSB scaleX 未按预期更新。");
             if (patch.ScaleY is not null && Math.Abs(part.ScaleY - patch.ScaleY.Value) > 0.0001f)
@@ -211,6 +215,8 @@ internal static class MsbNativeWriter
             OptionalFloat(item, "posY"),
             OptionalFloat(item, "posZ"),
             OptionalFloat(item, "rotX"),
+            OptionalFloat(item, "rotY"),
+            OptionalFloat(item, "rotZ"),
             OptionalFloat(item, "scaleX"),
             OptionalFloat(item, "scaleY"),
             OptionalFloat(item, "scaleZ"));

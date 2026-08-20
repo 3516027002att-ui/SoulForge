@@ -168,6 +168,15 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.match(panelSource, /_eventLineInfo/);
   });
 
+  it('不自动保存：无失焦提交；工具条有保存/撤回，Ctrl+S 仍走 submitSource', () => {
+    assert.doesNotMatch(panelSource, /addEventListener\('focusout'/);
+    assert.doesNotMatch(panelSource, /失焦直接应用/);
+    assert.match(panelSource, /data-testid="esw-save"/);
+    assert.match(panelSource, /data-testid="esw-revert"/);
+    assert.match(panelSource, /function revertSource/);
+    assert.match(panelSource, /title="保存（Ctrl\+S）"/);
+  });
+
   it('多 tab dirty 标记 per-tab（esw-tab__dirty），dirty 只在工作台内部维护', () => {
     assert.match(panelSource, /esw-tab__dirty/);
     assert.match(panelSource, /dirty: boolean/);
@@ -229,13 +238,16 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.match(navigateSource, /param-id/);
   });
 
-  it('S14：没有橙色头、日常黄条、「编译并提交」和只读锁', () => {
+  it('S14：没有橙色头、日常黄条、「编译并提交」和只读锁；保存走按键/Ctrl+S，不自动保存', () => {
     assert.doesNotMatch(panelSource, /EVENT \/ SOURCE/);
     assert.doesNotMatch(panelSource, /编译并提交/);
     assert.doesNotMatch(panelSource, /本版只读展示/);
     assert.doesNotMatch(panelSource, /写入仍经 Bridge/);
-    assert.match(panelSource, /Ctrl\+S 应用/);
-    assert.match(panelSource, /已应用，可回滚/);
+    assert.doesNotMatch(panelSource, /Ctrl\+S 应用/);
+    assert.doesNotMatch(panelSource, /已应用，可回滚/);
+    assert.match(panelSource, /data-testid="esw-save"/);
+    assert.match(panelSource, /data-testid="esw-revert"/);
+    assert.match(panelSource, /已保存。/);
   });
 });
 
@@ -473,13 +485,44 @@ describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口�
     assert.match(panelSource, /activeTab\?\.live && activeTab\.dslTemplate === null && !activeTab\.sourceToken/);
   });
 
-  it('12-A：挂载/切回前台即对增量源 tab 后台拉齐（首帧仍只带前缀）', () => {
-    // SSR 无法跑 effect；源码级钉住接线：activeTabId 变化时对未拉齐的增量源调
-    // ensureTabComplete（内部循环 fetchNextSourceSlice / fetchAllRemainingSource
-    // 直到 eof），追加走 sourceFillAnnotation + addToHistory:false。
+  it('12-A：挂载/切回前台即对增量源 tab 按片后台续载（首帧仍只带前缀）', () => {
+    // SSR 无法跑 effect；源码级钉住接线：activeTabId 变化时走 fillRemainingInSlices
+    // （每片立刻 append），不得再对打开路径调 ensureTabComplete 一次拉齐——
+    // 那会让前 400 行卡住直到切走再切回来。
     assert.match(panelSource, /incrementalSourcesRef\.current\.get\(activeTabId\)/);
-    assert.match(panelSource, /ensureTabCompleteRef\.current\(activeTabId\)/);
+    assert.match(panelSource, /fillRemainingInSlicesRef\.current\(activeTabId\)/);
+    assert.match(panelSource, /fillRemainingInSlices/);
+    const mountEffect = panelSource.slice(
+      panelSource.indexOf('12-A：打开并挂上前缀后'),
+      panelSource.indexOf('if (!splitTabId || !splitHostRef.current)')
+    );
+    assert.match(mountEffect, /fillRemainingInSlicesRef\.current\(activeTabId\)/);
+    assert.doesNotMatch(mountEffect, /ensureTabCompleteRef\.current\(activeTabId\)/);
     // 首帧缓冲仍是前缀，不把全量塞进第一次 IPC。
     assert.equal(baselineText(incrementalTab), 'L0\nL1\nL2');
+  });
+
+  it('12-C：事件工作台有独立高度宿主，源码列与词义列不跟 viewer-content 一起滚', () => {
+    const appSource = readFileSync(
+      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'App.tsx'),
+      'utf8'
+    );
+    const css = readFileSync(
+      join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'styles.css'),
+      'utf8'
+    );
+    assert.match(appSource, /className="event-source-host"/);
+    assert.match(css, /\.viewer-content:has\(\.event-source-host:not\(\[hidden\]\)\)/);
+    const hostRule = css.slice(
+      css.indexOf('.event-source-host:not([hidden])'),
+      css.indexOf('.event-source-workbench {')
+    );
+    assert.match(hostRule, /overflow:\s*hidden/);
+    const workbenchOverride = css.slice(
+      css.indexOf('.event-source-workbench .workbench {'),
+      css.indexOf('.event-source__section-header')
+    );
+    assert.doesNotMatch(workbenchOverride, /height:\s*auto/);
+    assert.match(workbenchOverride, /min-height:\s*0/);
   });
 });

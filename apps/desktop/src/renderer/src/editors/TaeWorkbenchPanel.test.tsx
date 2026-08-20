@@ -117,17 +117,17 @@ function renderWithSelection(): string {
   );
 }
 
-describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () => {
+describe('TaeWorkbenchPanel 初始结构（挂载即有的四栏骨架）', () => {
   it('工作台根的可访问名是「动作工作台」', () => {
     assert.match(render(), /aria-label="动作工作台"/);
   });
 
-  it('三栏 Animations | Events / 词条 | 预览（只读）同时存在，无 Timeline/Inspector/Tools', () => {
+  it('四栏 Animations | Events / 词条 | 详情 | 预览（只读）同时存在，无 Timeline/Inspector/Tools', () => {
     const html = render();
     assert.match(html, /aria-label="Animations"/);
     assert.match(html, /aria-label="Events \/ 词条"/);
+    assert.match(html, /aria-label="详情"/);
     assert.match(html, /aria-label="预览（只读）"/);
-    // T3：不要时间轴图、不要 Inspector 第三栏。
     assert.doesNotMatch(html, /aria-label="Timeline \/ Events"/);
     assert.doesNotMatch(html, /aria-label="Inspector"/);
     assert.doesNotMatch(html, /aria-label="Files \/ Animations"/);
@@ -142,38 +142,36 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
 
   it('动画列表由 pages 投影派生（hkxName 去扩展），不按 chr/action 目录分类', () => {
     const html = render();
-    // a0000.hkx → a0000（去扩展主标签）；anim 1 无合法 hkx 茎 → 干净数字 id「1」，
-    // 禁止「动画 1」（S17）。
+    // a0000.hkx → a0000（去扩展主标签）；anim 1 无合法 hkx 茎 → a000_ 回退。
     assert.match(html, />a0000</);
-    assert.match(html, />1</);
+    assert.match(html, />a000_000001</);
     assert.doesNotMatch(html, />a0000\.hkx</);
     assert.doesNotMatch(html, />动画 1</);
     assert.doesNotMatch(html, />chr\//);
     assert.doesNotMatch(html, />action\//);
   });
 
-  it('词条组在选中动画前提示先选动画，未选中事件时不渲染按钮/输入框', () => {
+  it('词条组在选中动画前提示先选动画，详情栏显示空态', () => {
     const html = render();
     assert.match(html, /data-testid="tae-events-pick-animation"/);
     assert.match(html, /选中左侧动画以查看其词条事件列表/);
-    assert.doesNotMatch(html, /type="button"/);
-    assert.doesNotMatch(html, /<input|type="number"/);
-    assert.doesNotMatch(html, /提交|保存/);
+    assert.match(html, /data-testid="tae-details-empty"/);
+    assert.match(html, /选中词条以编辑/);
   });
 
   it('选中动画后中栏出现词条事件列表（`{typeId} {类型名}`，无模板类型名「未命名」）', () => {
     const html = renderAnimationSelected();
     assert.match(html, /词条 · 动画 0/);
-    // 无模板目录（SSR 不拉 IPC）→ 类型名「未命名」；列表不出现秒区间（S17）。
     assert.match(html, />1 未命名</);
     assert.match(html, />2 未命名</);
     assert.doesNotMatch(html, />0s → 1s</);
-    assert.doesNotMatch(html, /data-testid="tae-details"/);
+    assert.match(html, /data-testid="tae-details-empty"/);
   });
 
-  it('未选中词条事件时三栏底不出现 footer', () => {
+  it('未选中词条事件时详情栏为空态，不出现更新按钮', () => {
     const html = renderAnimationSelected();
-    assert.doesNotMatch(html, /data-testid="tae-event-footer"/);
+    assert.match(html, /data-testid="tae-details-empty"/);
+    assert.match(html, /选中词条以编辑/);
     assert.doesNotMatch(html, /更新事件时间/);
   });
 
@@ -217,21 +215,25 @@ describe('TaeWorkbenchPanel 初始结构（挂载即有的三栏骨架）', () =
 });
 
 describe('animationIdLabel / isLegalHkxStem / secondsToFrame（动画标签与帧换算纯逻辑）', () => {
-  it('合法 hkx 茎去扩展直接用；乱码/空/非文件名字符一律丢弃显示数字 id（S17）', () => {
+  it('合法 hkx 茎去扩展直接用；乱码/空/过短/非文件名字符一律丢弃显示 a000_ 回退', () => {
     assert.equal(animationIdLabel({ animId: 3, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'a000_003013.hkx', events: [], eventsTruncated: false }), 'a000_003013');
-    // 无 hkxName → 干净数字 id（旧行为是「动画 4」）。
-    assert.equal(animationIdLabel({ animId: 4, eventCount: 0, groupCount: 0, timesCount: 0, events: [], eventsTruncated: false }), '4');
-    // 乱码（旧 UTF-16 误读）→ 数字 id，禁止「葉」。
-    assert.equal(animationIdLabel({ animId: 610, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: '葉', events: [], eventsTruncated: false }), '610');
-    // 含空白的占位名（如 "AE "）→ 数字 id。
-    assert.equal(animationIdLabel({ animId: 700, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'AE ', events: [], eventsTruncated: false }), '700');
-    // 空串 → 数字 id。
-    assert.equal(animationIdLabel({ animId: 9, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: '', events: [], eventsTruncated: false }), '9');
+    assert.equal(animationIdLabel({ animId: 3, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'a000_003013.hkt', events: [], eventsTruncated: false }), 'a000_003013');
+    // 无 hkxName → a000_ 回退
+    assert.equal(animationIdLabel({ animId: 4, eventCount: 0, groupCount: 0, timesCount: 0, events: [], eventsTruncated: false }), 'a000_000004');
+    // 乱码（旧 UTF-16 误读）→ a000_ 回退
+    assert.equal(animationIdLabel({ animId: 610, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: '葉', events: [], eventsTruncated: false }), 'a000_000610');
+    // 含空白的占位名（如 "AE "）→ a000_ 回退
+    assert.equal(animationIdLabel({ animId: 700, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'AE ', events: [], eventsTruncated: false }), 'a000_000700');
+    // 空串 → a000_ 回退
+    assert.equal(animationIdLabel({ animId: 9, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: '', events: [], eventsTruncated: false }), 'a000_000009');
+    // 单字母 "a"（旧截断残留）→ a000_ 回退
+    assert.equal(animationIdLabel({ animId: 10, eventCount: 0, groupCount: 0, timesCount: 0, hkxName: 'a', events: [], eventsTruncated: false }), 'a000_000010');
   });
 
-  it('isLegalHkxStem：ASCII 文件名茎合法，空白/乱码/空不合法', () => {
+  it('isLegalHkxStem：ASCII 文件名茎合法，空白/乱码/空/过短不合法', () => {
     assert.equal(isLegalHkxStem('a000_003013'), true);
     assert.equal(isLegalHkxStem('a0000'), true);
+    assert.equal(isLegalHkxStem('a'), false);
     assert.equal(isLegalHkxStem('葉'), false);
     assert.equal(isLegalHkxStem('AE '), false);
     assert.equal(isLegalHkxStem(''), false);
@@ -307,12 +309,12 @@ describe('authority 语义（partial 非法时间范围必须暴露）', () => {
   });
 });
 
-describe('问题4-C 词条详情（收在 Events 栏下半，可关，只留一套帧；typed event write）', () => {
+describe('问题4-C 词条详情（独立详情栏，可关，只留一套帧；typed event write）', () => {
   it('选中词条后详情可见：起始帧/结束帧各出现一次，主单位帧、小字 ≈ 秒', () => {
     const html = renderWithSelection();
     assert.match(html, /data-testid="tae-details"/);
-    // 详情收在 Events 栏，不再占整条 workbench footer。
-    assert.doesNotMatch(html, /data-testid="tae-event-footer"/);
+    assert.match(html, /aria-label="详情"/);
+    assert.doesNotMatch(html, /data-testid="tae-details-empty"/);
     // 只留一套：起始帧 / 结束帧 各出现一次（标签字面量，避开 aria-label="新起始帧"）。
     assert.equal((html.match(/>起始帧<\/span>/g) ?? []).length, 1);
     assert.equal((html.match(/>结束帧<\/span>/g) ?? []).length, 1);
@@ -324,7 +326,6 @@ describe('问题4-C 词条详情（收在 Events 栏下半，可关，只留一�
     assert.match(html, /事件下标/);
     assert.match(html, /参数体/);
     assert.match(html, /事件类型/);
-    // 编辑入口仍在（问题4-C：可编辑的那两个 number 输入就是唯一一套帧）。
     assert.match(html, /编辑事件时间/);
     assert.match(html, /更新事件时间/);
     const inputs = html.match(/type="number"/g) ?? [];

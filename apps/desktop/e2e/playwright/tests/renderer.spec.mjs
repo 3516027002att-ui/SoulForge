@@ -172,16 +172,15 @@ test('顶部工作域栏：逻辑 IA、固定顺序、无物理计数（SHELL-09
   const tabs = window.locator('[data-testid="domain-bar"] [role="tab"]');
   // R1 裁定（2026-08-14）：GPARAM 从领域顶栏移除（并入左侧「参数」逻辑库），
   // T3 裁定（2026-08-15）：行为 + 动画合并为「动作」，animation 从顶栏隐藏
-  // （与 GPARAM 同口径）；问题 14：文件域隐藏；问题 1：有工作区后「开始」
-  // （project）与文件同口径隐藏（换文件夹走标题栏 workspace-switcher）。
-  // 固定顺序快照 11 项。
-  await expect(tabs).toHaveCount(11);
+  // （与 GPARAM 同口径）；问题 14：文件域隐藏。
+  // 「开始」必须留在顶栏：有工作区后只召唤资源栏，不是一页。
+  // 固定顺序快照 12 项。
+  await expect(tabs).toHaveCount(12);
   await expect(tabs).toHaveText([
-    /PARAM/, /文本/, /事件/, /地图/, /脚本/, /动作/,
+    /开始/, /PARAM/, /文本/, /事件/, /地图/, /脚本/, /动作/,
     /模型/, /纹理/, /材质/, /VFX/, /容器/
   ]);
-  // 问题 1：有工作区后顶栏不得出现「开始」，也不得残留 data-domain="project" 入口。
-  await expect(window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="project"]')).toHaveCount(0);
+  await expect(window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="project"]')).toHaveCount(1);
 
   // §18.13 Done：顶部无「PARAM 36」之类的物理计数（§3.3 领域栏不显示无单位文件数）。
   await expect(window.locator('.domain-tab__count')).toHaveCount(0);
@@ -1182,6 +1181,37 @@ test('2-A/2-D/2-E：composer 用 effort 下拉、无离线计划按钮；模型�
   await app.close();
 });
 
+test('有工作区后点顶栏「开始」只开关资源栏，不切回开始页', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+
+  const startTab = window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="project"]');
+  const sidebar = window.locator('aside.sidebar');
+  await expect(startTab).toBeVisible();
+  await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
+  await expect(window.locator('.project-overview')).toHaveCount(0);
+
+  const hiddenBefore = await sidebar.evaluate((el) => getComputedStyle(el).visibility === 'hidden');
+  if (hiddenBefore) {
+    await startTab.click();
+    await expect(sidebar).toHaveCSS('visibility', 'visible');
+  }
+  await expect(sidebar).toHaveCSS('visibility', 'visible');
+  await expect(window.locator('[aria-label="资源浏览器"]')).toBeVisible();
+
+  await startTab.click();
+  await expect(sidebar).toHaveCSS('visibility', 'hidden');
+  await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
+  await expect(window.locator('.project-overview')).toHaveCount(0);
+
+  await startTab.click();
+  await expect(sidebar).toHaveCSS('visibility', 'visible');
+  await expect(window.locator('[aria-label="资源浏览器"]')).toBeVisible();
+  await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
+
+  await app.close();
+});
+
 test('问题 1：有工作区后在 PARAM 页，标题栏 workspace-switcher 可换 Mod 工作区', async () => {
   const { app, window } = await launchApp();
   await openFixtureWorkspace(window);
@@ -1325,25 +1355,31 @@ test('键盘导航：方向键/Home/End/Enter 选择，Escape 关闭命令面板
   await openFixtureWorkspace(window);
 
   const tabs = window.locator('[data-testid="domain-bar"] [role="tab"]');
-  await tabs.first().focus();
-  await expect(tabs.first()).toBeFocused();
+  const startTab = window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="project"]');
+  const paramTab = window.locator('[data-testid="domain-bar"] [role="tab"][data-domain="param"]');
+  await startTab.focus();
+  await expect(startTab).toBeFocused();
 
-  // ArrowRight 移动焦点，Enter 选择。
+  // ArrowRight 移动焦点，Enter 选择领域（PARAM 仍是当前工作域）。
   await window.keyboard.press('ArrowRight');
-  await expect(tabs.nth(1)).toBeFocused();
+  await expect(paramTab).toBeFocused();
   await window.keyboard.press('Enter');
-  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(paramTab).toHaveAttribute('aria-selected', 'true');
 
-  // End/Home。
+  // End/Home。Home 落到「开始」——它是资源栏开关，Enter 只折侧栏，不切页。
   await window.keyboard.press('End');
   await expect(tabs.last()).toBeFocused();
   await window.keyboard.press('Home');
-  await expect(tabs.first()).toBeFocused();
+  await expect(startTab).toBeFocused();
+  const sidebar = window.locator('aside.sidebar');
+  const hiddenBefore = await sidebar.evaluate((el) => getComputedStyle(el).visibility === 'hidden');
   await window.keyboard.press('Enter');
-  await expect(tabs.first()).toHaveAttribute('aria-selected', 'true');
+  await expect(sidebar).toHaveCSS('visibility', hiddenBefore ? 'visible' : 'hidden');
+  await expect(window.getByLabel('PARAM 工作台')).toBeVisible();
+  await expect(window.locator('.project-overview')).toHaveCount(0);
 
   // 键盘焦点出现独立焦点环（outline），与 hover 阴影可区分。
-  const outline = await tabs.first().evaluate((element) => getComputedStyle(element).outlineStyle);
+  const outline = await startTab.evaluate((element) => getComputedStyle(element).outlineStyle);
   expect(outline).toBe('solid');
 
   // Escape 关闭命令面板。
@@ -2513,13 +2549,41 @@ test('EVENT-30B：diagnostic gutter 标注未知指令，编辑 dirty 后提交�
   await expect(dirtyTab).toHaveCount(1);
   await expect(workbench.locator('[role="tab"]').first()).toContainText('common');
 
-  // 提交：S14 起没有「编译并提交」按钮，应用走 Ctrl+S（或失焦）。fixture 接受
+  // 提交：不自动保存。应用走 Ctrl+S 或工具条「保存」。fixture 接受
   // （合成写回），dirty 清空、源码替换为已提交文本。
   await window.keyboard.press('Control+S');
   await expect(dirtyTab).toHaveCount(0);
   await expect(workbench.locator('.esw-source__host .cm-content')).toContainText('// fixture e2e dirty');
 
   await window.screenshot({ path: 'test-results/12-event-dirty-submit.png' });
+  await app.close();
+});
+
+test('EVENT-30B：不自动保存；撤回丢掉未保存修改，保存按键提交', async () => {
+  const { app, window } = await launchApp();
+  await openFixtureWorkspace(window);
+  const workbench = await openEventWorkbench(window, 'event/common.emevd');
+  const content = workbench.locator('.esw-source__host .cm-content');
+  const marker = '// e2e revert-then-save';
+
+  await content.click();
+  await window.keyboard.press('End');
+  await window.keyboard.type(`\n${marker}`, { delay: 0 });
+  await expect(workbench.locator('[role="tab"] .esw-tab__dirty')).toHaveCount(1);
+  await expect(content).toContainText(marker);
+
+  await workbench.getByTestId('esw-revert').click();
+  await expect(workbench.locator('[role="tab"] .esw-tab__dirty')).toHaveCount(0);
+  await expect(content).not.toContainText(marker);
+
+  await content.click();
+  await window.keyboard.press('End');
+  await window.keyboard.type(`\n${marker}`, { delay: 0 });
+  await expect(workbench.locator('[role="tab"] .esw-tab__dirty')).toHaveCount(1);
+  await workbench.getByTestId('esw-save').click();
+  await expect(workbench.locator('[role="tab"] .esw-tab__dirty')).toHaveCount(0);
+  await expect(content).toContainText(marker);
+
   await app.close();
 });
 

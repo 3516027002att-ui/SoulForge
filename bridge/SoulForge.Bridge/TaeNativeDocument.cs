@@ -287,11 +287,16 @@ internal sealed class TaeNativeDocument
             string? hkxName = null;
             if (animFileInfoOffset > 0 && animFileInfoOffset + 0x18 <= source.Length)
             {
-                var namePtr = ReadInt64(source, checked((int)animFileInfoOffset + 0x10));
-                if (namePtr > 0 && namePtr + 2 <= source.Length)
+                // flag at +0x00 == 1 表示别名链接，无自有名字
+                var aliasFlag = ReadInt64(source, checked((int)animFileInfoOffset));
+                if (aliasFlag != 1)
                 {
-                    try { hkxName = ReadNameZ(source, checked((int)namePtr)); }
-                    catch (InvalidDataException) { /* best-effort */ }
+                    var namePtr = ReadInt64(source, checked((int)animFileInfoOffset + 0x10));
+                    if (namePtr > 0 && namePtr + 2 <= source.Length)
+                    {
+                        try { hkxName = ReadNameUtf16Z(source, checked((int)namePtr)); }
+                        catch (InvalidDataException) { /* best-effort */ }
+                    }
                 }
             }
 
@@ -379,10 +384,11 @@ internal sealed class TaeNativeDocument
     public object ToEnvelope(
         TaeRoundTripReport? report = null,
         IReadOnlyList<Diagnostic>? extraDiagnostics = null,
-        IReadOnlyDictionary<int, TaeFieldLayout[]>? templateLayouts = null)
+        IReadOnlyDictionary<int, TaeFieldLayout[]>? templateLayouts = null,
+        int? animationPage = null,
+        int? animationPageSize = null)
     {
         report ??= VerifyRoundTrip();
-        const int sampleLimit = 20;
         const int timelineEventLimit = 200; // 每动画事件时间表上限（bounded 分页）
         // S17：参数体 hex 预览上限（无模板布局时的兜底截断）。
         const int paramHexLimit = 64;
@@ -409,7 +415,9 @@ internal sealed class TaeNativeDocument
             animationCount = Animations.Count,
             totalEventCount = TotalEventCount,
             totalGroupCount = TotalGroupCount,
-            animations = Animations.Take(sampleLimit).Select(a => new
+            animations = (animationPage.HasValue && animationPageSize.HasValue
+                ? Animations.Skip(animationPage.Value * animationPageSize.Value).Take(animationPageSize.Value)
+                : Animations).Select(a => new
             {
                 animId = a.AnimId,
                 eventCount = a.EventCount,
@@ -437,7 +445,9 @@ internal sealed class TaeNativeDocument
                 }).ToArray(),
                 eventsTruncated = a.Events.Count > timelineEventLimit
             }).ToArray(),
-            animationsTruncated = Animations.Count > sampleLimit,
+            animationsTruncated = animationPage.HasValue && animationPageSize.HasValue
+                ? Animations.Count > (animationPage.Value + 1) * animationPageSize.Value
+                : false,
             eventTypes = EventTypes,
             roundTrip = report,
             diagnostics = diagnostics,
@@ -539,34 +549,21 @@ internal sealed class TaeNativeDocument
     /// 全 ASCII 直接按 ASCII；含高位字节时按 Shift-JIS（Sekiro 日文名，与 PARAM
     /// 的 CreateShiftJisEncoding 同一套注册）。
     /// </summary>
-    private static string? ReadNameZ(byte[] source, int offset)
+    private static string? ReadNameUtf16Z(byte[] source, int offset)
     {
         var end = offset;
-        while (end < source.Length && source[end] != 0)
+        while (end + 1 < source.Length && !(source[end] == 0 && source[end + 1] == 0))
         {
-            end++;
-            if (end - offset > 1024)
+            end += 2;
+            if (end - offset > 2048)
                 throw new InvalidDataException("TAE 动画名未终止或过长。");
         }
-        if (end >= source.Length)
+        if (end + 1 >= source.Length)
             throw new InvalidDataException("TAE 动画名未以空终止。");
         if (end == offset) return null;
-        var bytes = source.AsSpan(offset, end - offset);
-        var isAscii = true;
-        for (var i = 0; i < bytes.Length; i++)
-        {
-            if (bytes[i] >= 0x80) { isAscii = false; break; }
-        }
-        if (isAscii) return Encoding.ASCII.GetString(bytes);
-        try
-        {
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-            return Encoding.GetEncoding(932).GetString(bytes);
-        }
-        catch (Exception)
-        {
-            return Encoding.UTF8.GetString(bytes);
-        }
+        var text = Encoding.Unicode.GetString(source, offset, end - offset);
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        return text;
     }
 
     private static string Hash(byte[] bytes) =>

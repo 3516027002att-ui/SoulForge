@@ -804,7 +804,55 @@ internal sealed class BridgeCommandService
                         BridgeResult<object>.MakeSourceUri(file),
                         roundTrip)
                 }.Concat(extractionDiagnostics).ToArray();
-                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip, extractionDiagnostics));
+                // 分页参数（默认全量）：animationPage / animationPageSize；兼容 pageSize 别名。
+                int? animationPage = null;
+                int? animationPageSize = null;
+                if (optionsIsObject)
+                {
+                    if (options.TryGetProperty("animationPage", out var pageEl)
+                        && pageEl.ValueKind == JsonValueKind.Number
+                        && pageEl.TryGetInt32(out var parsedPage)
+                        && parsedPage >= 0)
+                        animationPage = parsedPage;
+                    if (options.TryGetProperty("animationPageSize", out var sizeEl)
+                        && sizeEl.ValueKind == JsonValueKind.Number
+                        && sizeEl.TryGetInt32(out var parsedSize)
+                        && parsedSize > 0)
+                        animationPageSize = parsedSize;
+                    else if (options.TryGetProperty("pageSize", out var altSizeEl)
+                        && altSizeEl.ValueKind == JsonValueKind.Number
+                        && altSizeEl.TryGetInt32(out var altParsedSize)
+                        && altParsedSize > 0)
+                        animationPageSize = altParsedSize;
+                }
+                IReadOnlyDictionary<int, TaeFieldLayout[]>? templateLayouts = null;
+                if (optionsIsObject
+                    && options.TryGetProperty("templateLayouts", out var layoutsEl)
+                    && layoutsEl.ValueKind == JsonValueKind.Object)
+                {
+                    var dict = new Dictionary<int, TaeFieldLayout[]>();
+                    foreach (var prop in layoutsEl.EnumerateObject())
+                    {
+                        if (!int.TryParse(prop.Name, out var typeId)) continue;
+                        if (prop.Value.ValueKind != JsonValueKind.Array) continue;
+                        var list = new List<TaeFieldLayout>();
+                        foreach (var fieldEl in prop.Value.EnumerateArray())
+                        {
+                            if (fieldEl.ValueKind != JsonValueKind.Object) continue;
+                            if (!fieldEl.TryGetProperty("name", out var nameEl) || nameEl.ValueKind != JsonValueKind.String) continue;
+                            if (!fieldEl.TryGetProperty("kind", out var kindEl) || kindEl.ValueKind != JsonValueKind.String) continue;
+                            if (!fieldEl.TryGetProperty("slotSize", out var slotEl) || slotEl.ValueKind != JsonValueKind.Number) continue;
+                            var name = nameEl.GetString();
+                            var kind = kindEl.GetString();
+                            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(kind)) continue;
+                            if (!slotEl.TryGetInt32(out var slotSize)) continue;
+                            list.Add(new TaeFieldLayout(name, kind, slotSize));
+                        }
+                        if (list.Count > 0) dict[typeId] = list.ToArray();
+                    }
+                    if (dict.Count > 0) templateLayouts = dict;
+                }
+                return BridgeResult<object>.Partial(file, "action", diagnostics, document.ToEnvelope(roundTrip, extractionDiagnostics, templateLayouts, animationPage, animationPageSize));
             }
             catch (TaeEntryMissingException)
             {
@@ -871,6 +919,36 @@ internal sealed class BridgeCommandService
                 var meshIndex = OptionInt("meshIndex", 0);
                 var maxVertices = OptionInt("maxVertices", 10_000);
                 var maxIndices = OptionInt("maxIndices", 30_000);
+                // c1001 这类占位 FLVER meshCount=0，属于正常可打开（空模型），不得判 failed。
+                // 审慎修复：meshCount==0 时直接返回骨骼/空网格，延续已提取语义，不改他处流程。
+                if (flver.MeshCount == 0)
+                {
+                    return BridgeResult<object>.Partial(file, "chr", new[]
+                    {
+                        new Diagnostic("info", "CHRBND_FLVER_PREVIEW_EMPTY",
+                            $"chrbnd 内 FLVER 为空模型：meshCount=0 bones={flver.BoneCount}，已返回骨骼。",
+                            BridgeResult<object>.MakeSourceUri(file))
+                    }, new
+                    {
+                        meshIndex = -1,
+                        vertexCount = 0,
+                        positionsBase64 = (string?)null,
+                        indicesBase64 = (string?)null,
+                        uvsBase64 = (string?)null,
+                        normalsBase64 = (string?)null,
+                        boneWeightsBase64 = (string?)null,
+                        boneIndicesBase64 = (string?)null,
+                        bones = flver.Bones.Select(b => new
+                        {
+                            name = b.Name,
+                            parentIndex = b.ParentIndex,
+                            translation = new[] { b.TranslationX, b.TranslationY, b.TranslationZ },
+                            rotation = new[] { b.RotationX, b.RotationY, b.RotationZ }
+                        }).ToArray(),
+                        boneCount = flver.BoneCount,
+                        meshCount = flver.MeshCount
+                    });
+                }
                 var positions = flver.GetMeshPositionsBase64(meshIndex, maxVertices);
                 if (positions == null)
                     return BridgeResult<object>.Failed(file, "chr", "FLVER_MESH_NOT_FOUND", $"网格索引 {meshIndex} 超出范围或数据不可用。");
@@ -944,9 +1022,40 @@ internal sealed class BridgeCommandService
                     return BridgeResult<object>.Failed(file, "map", "MAPBND_BND4_EXPECTED", "mapbnd 解 DCX 后必须是 BND4 容器。");
                 }
                 var binder = Bnd4NativeDocument.Read(payload);
-                var entry = binder.Entries.FirstOrDefault(item =>
-                    item.Name.StartsWith(modelName, StringComparison.OrdinalIgnoreCase)
-                    && item.Name.EndsWith(".flver", StringComparison.OrdinalIgnoreCase));
+                // modelName 可能含 Windows 路径，条目名是完整 N:\... 路径；应按后缀匹配而非开头。
+                // 追加：m000010 这类 MSB 短名（m + 6位）与 mapbnd 长名 m10_00_00_00_000010
+                // 的映射。条目如 .../m10_00_00_00_000010/m10_00_00_00_000010.flver，其
+                // 尾段的 000010 恰是短名去前缀 m 后的 suffix。优先用包含匹配兜住短名。
+                var variants = new List<string> { modelName };
+                var baseName = System.IO.Path.GetFileName(modelName.Replace('\\', '/'));
+                if (!string.Equals(baseName, modelName, StringComparison.Ordinal))
+                    variants.Add(baseName);
+                var shortMatch = System.Text.RegularExpressions.Regex.Match(
+                    baseName, @"^m(\d{6})$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (shortMatch.Success)
+                {
+                    var suffix = shortMatch.Groups[1].Value;
+                    variants.Add(suffix);
+                    variants.Add(suffix + ".flver");
+                }
+                Bnd4Entry? entry = null;
+                foreach (var variant in variants)
+                {
+                    entry = binder.Entries.FirstOrDefault(item =>
+                        item.Name.EndsWith(variant, StringComparison.OrdinalIgnoreCase)
+                        || item.Name.EndsWith(variant + ".flver", StringComparison.OrdinalIgnoreCase));
+                    if (entry is not null) break;
+                }
+                if (entry is null)
+                {
+                    foreach (var variant in variants)
+                    {
+                        entry = binder.Entries.FirstOrDefault(item =>
+                            item.Name.IndexOf(variant, StringComparison.OrdinalIgnoreCase) >= 0
+                            && item.Name.EndsWith(".flver", StringComparison.OrdinalIgnoreCase));
+                        if (entry is not null) break;
+                    }
+                }
                 if (entry is null)
                 {
                     return BridgeResult<object>.Failed(

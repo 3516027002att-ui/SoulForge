@@ -26,6 +26,8 @@ export interface MsbPartSnapshot {
   posY: number;
   posZ: number;
   rotX?: number;
+  rotY?: number;
+  rotZ?: number;
   scaleX?: number;
   scaleY?: number;
   scaleZ?: number;
@@ -67,6 +69,8 @@ interface MsbTransformMutation {
   posY?: number;
   posZ?: number;
   rotX?: number;
+  rotY?: number;
+  rotZ?: number;
   scaleX?: number;
   scaleY?: number;
   scaleZ?: number;
@@ -98,6 +102,8 @@ export async function readMsbParts(input: {
     posY: part.posY,
     posZ: part.posZ,
     ...(part.rotX !== undefined ? { rotX: part.rotX } : {}),
+    ...(part.rotY !== undefined ? { rotY: part.rotY } : {}),
+    ...(part.rotZ !== undefined ? { rotZ: part.rotZ } : {}),
     ...(part.scaleX !== undefined ? { scaleX: part.scaleX } : {}),
     ...(part.scaleY !== undefined ? { scaleY: part.scaleY } : {}),
     ...(part.scaleZ !== undefined ? { scaleZ: part.scaleZ } : {})
@@ -174,6 +180,8 @@ export async function setMsbPartTransform(input: {
       posY: part.posY,
       posZ: part.posZ,
       ...(part.rotX !== undefined ? { rotX: part.rotX } : {}),
+      ...(part.rotY !== undefined ? { rotY: part.rotY } : {}),
+      ...(part.rotZ !== undefined ? { rotZ: part.rotZ } : {}),
       ...(part.scaleX !== undefined ? { scaleX: part.scaleX } : {}),
       ...(part.scaleY !== undefined ? { scaleY: part.scaleY } : {}),
       ...(part.scaleZ !== undefined ? { scaleZ: part.scaleZ } : {})
@@ -185,6 +193,8 @@ export async function setMsbPartTransform(input: {
       ...(edit.posY !== undefined ? { posY: edit.posY } : {}),
       ...(edit.posZ !== undefined ? { posZ: edit.posZ } : {}),
       ...(edit.rotX !== undefined ? { rotX: edit.rotX } : {}),
+      ...(edit.rotY !== undefined ? { rotY: edit.rotY } : {}),
+      ...(edit.rotZ !== undefined ? { rotZ: edit.rotZ } : {}),
       ...(edit.scaleX !== undefined ? { scaleX: edit.scaleX } : {}),
       ...(edit.scaleY !== undefined ? { scaleY: edit.scaleY } : {}),
       ...(edit.scaleZ !== undefined ? { scaleZ: edit.scaleZ } : {})
@@ -250,6 +260,8 @@ export async function setMsbPartTransform(input: {
           posY: part.posY,
           posZ: part.posZ,
           ...(part.rotX !== undefined ? { rotX: part.rotX } : {}),
+          ...(part.rotY !== undefined ? { rotY: part.rotY } : {}),
+          ...(part.rotZ !== undefined ? { rotZ: part.rotZ } : {}),
           ...(part.scaleX !== undefined ? { scaleX: part.scaleX } : {}),
           ...(part.scaleY !== undefined ? { scaleY: part.scaleY } : {}),
           ...(part.scaleZ !== undefined ? { scaleZ: part.scaleZ } : {})
@@ -269,6 +281,8 @@ export async function setMsbPartTransform(input: {
         posY: mutation.posY ?? old?.posY ?? 0,
         posZ: mutation.posZ ?? old?.posZ ?? 0,
         ...(mutation.rotX !== undefined ? { rotX: mutation.rotX } : old?.rotX !== undefined ? { rotX: old.rotX } : {}),
+        ...(mutation.rotY !== undefined ? { rotY: mutation.rotY } : old?.rotY !== undefined ? { rotY: old.rotY } : {}),
+        ...(mutation.rotZ !== undefined ? { rotZ: mutation.rotZ } : old?.rotZ !== undefined ? { rotZ: old.rotZ } : {}),
         ...(mutation.scaleX !== undefined ? { scaleX: mutation.scaleX } : old?.scaleX !== undefined ? { scaleX: old.scaleX } : {}),
         ...(mutation.scaleY !== undefined ? { scaleY: mutation.scaleY } : old?.scaleY !== undefined ? { scaleY: old.scaleY } : {}),
         ...(mutation.scaleZ !== undefined ? { scaleZ: mutation.scaleZ } : old?.scaleZ !== undefined ? { scaleZ: old.scaleZ } : {})

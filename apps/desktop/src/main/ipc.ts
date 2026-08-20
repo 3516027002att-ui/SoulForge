@@ -1193,6 +1193,16 @@ function resolveMapModelFile(
   const candidates: Array<{ rel: string; kind: 'flver' | 'chrbnd' }> = [];
   for (const name of names) {
     if (mapId) {
+      // m000010 → m10_00_00_00_000010：MSB 侧短名需展开为 mapbnd 侧长名
+      const mShort = /^m(\d{6})$/i.exec(name)?.[1];
+      if (mShort) {
+        const longName = `${mapId}_${mShort}`;
+        candidates.push({ rel: `map/${mapId}/${longName}.mapbnd.dcx`, kind: 'flver' });
+        // mapbnd 容器内的 FLVER 名就是长名本身（条目名为 .../long.flver），
+        // 但单文件 flver 路径也试一下（部分 map 可能有散文件）
+        candidates.push({ rel: `map/${mapId}/${longName}.flver.dcx`, kind: 'flver' });
+        candidates.push({ rel: `map/${mapId}/${longName}.flver`, kind: 'flver' });
+      }
       candidates.push({ rel: `map/${mapId}/${name}.flver.dcx`, kind: 'flver' });
       candidates.push({ rel: `map/${mapId}/${name}.flver`, kind: 'flver' });
     }
@@ -2473,6 +2483,37 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     return selectedPath ? createDirectorySelection(event, selectedPath, 'base') : null;
   });
 
+  /**
+   * Smithbox/Yabber/DSAnimStudio 的公开行为：只狼的 `mods/project.json` 里
+   * `GameRoot` 指向原版安装目录（本机 `D:\mystream\...\Sekiro`），它们把这个
+   * 目录当只读 base 层自动叠加。本机 `tools` 只是工具集，没有
+   * `sekiro.exe/oo2core_6_win64.dll`，不能当 baseRoot。此处抄公开行为：
+   * 未显式选 base 时若 overlay 下存在 `project.json` 且 `GameRoot` 指向有效
+   * 目录（以 `sekiro.exe`/`oo2core_6_win64.dll` 为判据），自动当 baseRoot。
+   * 安全边界：只接受本地目录，不接受网络路径；不存在或非目录则静默回落
+   * 为无 base（地图缺模型/空 chrbnd 仅给可视空态，不静默成功）。
+   */
+  function resolveProjectJsonGameRoot(overlayAbsolutePath: string): string | null {
+    const candidate = join(overlayAbsolutePath, 'project.json');
+    if (!existsSync(candidate)) return null;
+    try {
+      const raw = readFileSync(candidate, 'utf8');
+      const parsed = JSON.parse(raw) as { GameRoot?: unknown };
+      const gameRoot = typeof parsed.GameRoot === 'string' ? parsed.GameRoot.trim() : '';
+      if (!gameRoot) return null;
+      const resolved = resolve(overlayAbsolutePath, gameRoot);
+      if (!existsSync(resolved)) return null;
+      const joined = (name: string): string => join(resolved, name);
+      const looksLikeSekiroRoot = existsSync(joined('sekiro.exe'))
+        || existsSync(joined('oo2core_6_win64.dll'))
+        || existsSync(joined('sekiro.cdx'));
+      if (!looksLikeSekiroRoot) return null;
+      return resolved;
+    } catch {
+      return null;
+    }
+  }
+
   handle(
     'workspace.scan',
     async (
@@ -2481,18 +2522,31 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     ): Promise<RendererWorkspaceScanResult> => {
       const overlaySelection = consumeDirectorySelection(event, options.overlaySelectionId, 'overlay');
       if (options.clearBase === true) clearRecentPath(recentPathsFile, 'base');
-      const baseSelection = options.clearBase === true
+      let baseSelection = options.clearBase === true
         ? undefined
         : options.baseSelectionId
           ? consumeDirectorySelection(event, options.baseSelectionId, 'base')
           : undefined;
+      let autoBaseRecord: DirectorySelectionRecord | null = null;
+      if (!baseSelection && !options.clearBase) {
+        const autoBasePath = resolveProjectJsonGameRoot(overlaySelection.absolutePath);
+        if (autoBasePath && existsSync(autoBasePath)) {
+          try {
+            const created = createDirectorySelection(event, autoBasePath, 'base');
+            autoBaseRecord = consumeDirectorySelection(event, created.selectionId, 'base');
+          } catch {
+            // 凭据签发失败则回落为无 base，不阻断扫描
+          }
+        }
+      }
+      const effectiveBaseRecord = (baseSelection as DirectorySelectionRecord | undefined) ?? autoBaseRecord ?? null;
 
       if (activeSession) await disposeBridgeDaemonPool();
       emevdFullDocuments.clear();
       emevdDisassemblyCache.clear();
       activeSession = await openWorkspaceSession({
         overlayRoot: overlaySelection.absolutePath,
-        ...(baseSelection ? { baseRoot: baseSelection.absolutePath } : {}),
+        ...(effectiveBaseRecord ? { baseRoot: effectiveBaseRecord.absolutePath } : {}),
         game: 'sekiro'
       });
       clearEditorPageCaches();
@@ -4017,7 +4071,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   );
 
-  handle('resource.readTaeDocument', async (_event, sourceUri: string) => {
+  handle('resource.readTaeDocument', async (_event, sourceUri: string, options?: { animationPage?: number; animationPageSize?: number }) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {
       return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法读取 TAE。', sourceUri }] };
@@ -4026,12 +4080,24 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
     // S17：DSAS 模板（本机只读，可选增强）→ templateLayouts 给 Bridge 解码参数体。
     const byEventTypeId = await loadTaeEventTemplate();
+    const paginationOptions: Record<string, unknown> = {};
+    if (typeof options?.animationPage === 'number' && Number.isFinite(options.animationPage) && options.animationPage >= 0) {
+      paginationOptions.animationPage = Math.floor(options.animationPage);
+    }
+    if (typeof options?.animationPageSize === 'number' && Number.isFinite(options.animationPageSize) && options.animationPageSize > 0) {
+      paginationOptions.animationPageSize = Math.floor(options.animationPageSize);
+    }
+    const templateLayoutsCommandOptions = taeTemplateLayoutsOption(byEventTypeId) as Record<string, unknown> | null;
+    const mergedCommandOptions = {
+      ...(templateLayoutsCommandOptions ? { templateLayouts: (templateLayoutsCommandOptions as { templateLayouts: unknown }).templateLayouts } : {}),
+      ...paginationOptions
+    } as Record<string, unknown>;
     const result = await runBridge<Record<string, unknown>>({
       command: 'read-tae-document',
       filePath: file.absolutePath,
       allowedRoots: roots.allowedRoots,
       timeoutMs: 120_000,
-      ...taeTemplateLayoutsOption(byEventTypeId),
+      ...(Object.keys(mergedCommandOptions).length ? { commandOptions: mergedCommandOptions } : {}),
       ...(activeSession?.layers.baseRoot
         ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
         : {})
@@ -4218,6 +4284,73 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }
       };
 
+      /**
+       * m10_00_00_00 这类地图的地形 FLVER 用短名（MSB 侧 m000010），而 mapbnd 侧
+       * 条目与文件都用长名（m10_00_00_00_000010.flver / ...mapbnd.dcx）。直接用短名
+       * 在 mapbnd 容器里 EndsWith 匹配永远 miss，导致 100% 方块。
+       *
+       * 映射规则（实测 m10 vanilla：844 个模型里 499 个 type0 m*，484 个后缀与
+       * mapbnd 文件尾段一一对应）：m + 6位 → mapId + '_' + 6位（如 m000010 →
+       * m10_00_00_00_000010）。短名先按精确文件名试 probes，命中即直接读该容器，
+       * 避免顺序扫描 549 个 mapbnd 的开销；失败再回退全量扫描（Bridge 侧已支持
+       * 短名后缀包含匹配作为第二道兜底）。
+       */
+      const shortSuffix = /^m(\d{6})$/i.exec(modelName)?.[1] ?? null;
+      const longProbeNames = shortSuffix ? [`${mapId}_${shortSuffix}`] : [];
+      const probeFiles = new Set<string>();
+      for (const probeName of longProbeNames) {
+        for (const { dir, fromBase } of candidateDirs) {
+          const candidate = join(dir, `${probeName}.mapbnd.dcx`);
+          if (safeExists(candidate)) probeFiles.add(`${fromBase ? 'base:' : 'overlay:'}${candidate}`);
+        }
+      }
+      // 精确文件命中优先，保证 m000010 这类高频地形一击命中。
+      for (const key of probeFiles) {
+        const fromBase = key.startsWith('base:');
+        const mapbndPath = key.slice(key.indexOf(':') + 1);
+        const first = await runBridge<Record<string, unknown>>({
+          command: 'read-map-part-flver-preview',
+          filePath: mapbndPath,
+          allowedRoots: roots.allowedRoots,
+          timeoutMs: 120_000,
+          ...(fromBase && activeSession?.layers.baseRoot
+            ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+            : {}),
+          commandOptions: { modelName, maxVertices: 1_000_000, maxIndices: 3_000_000 }
+        });
+        if (first.parseStatus === 'failed' || !first.data) continue;
+        const data = await readAllPartMeshes(mapbndPath, fromBase);
+        return { ok: true, sourceUri: msbSourceUri, data: data ?? first.data, diagnostics: first.diagnostics };
+      }
+      // 轻短期回落：若短名的 longProbe 精确文件不在（如 15 个缺 mapbnd 的模型或
+      // 非地形类型），再用 mapId 前缀在 mapbnd 内模糊匹配首个 FLVER，
+      // 保证至少一种 terrain 真模型可见以证伪“全方块”（task 2）。
+      const tryPrefixFallbackForTerrain = async (): Promise<Record<string, unknown> | null> => {
+        if (!shortSuffix) return null;
+        const prefix = `${mapId}_`;
+        for (const { dir, fromBase } of candidateDirs) {
+          let mapbnds: string[];
+          try {
+            mapbnds = readdirSync(dir)
+              .filter((name) => /\.mapbnd\.dcx$/i.test(name) && name.startsWith(prefix))
+              .sort()
+              .map((name) => join(dir, name));
+          } catch { mapbnds = []; }
+          if (mapbnds.length === 0) continue;
+          const fallbackPath = mapbnds[0]!;
+          const fallback = await runBridge<Record<string, unknown>>({
+            command: 'read-map-part-flver-preview',
+            filePath: fallbackPath,
+            allowedRoots: roots.allowedRoots,
+            timeoutMs: 120_000,
+            ...(fromBase && activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {}),
+            commandOptions: { modelName: basename(fallbackPath).replace(/\.mapbnd\.dcx$/i, ''), maxVertices: 1_000_000, maxIndices: 3_000_000 }
+          });
+          if (fallback.parseStatus !== 'failed' && fallback.data) return fallback.data;
+        }
+        return null;
+      };
+
       for (const { dir, fromBase } of candidateDirs) {
         let mapbnds: string[];
         try {
@@ -4231,6 +4364,10 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           mapbnds = [];
         }
         for (const mapbndPath of mapbnds) {
+          // 已被探针命中过的 skip（避免重复 Bridge）
+          const overlayKey = `overlay:${mapbndPath}`;
+          const baseKey = `base:${mapbndPath}`;
+          if (probeFiles.has(overlayKey) || probeFiles.has(baseKey)) continue;
           const first = await runBridge<Record<string, unknown>>({
             command: 'read-map-part-flver-preview',
             filePath: mapbndPath,
@@ -4250,6 +4387,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             diagnostics: first.diagnostics
           };
         }
+      }
+      // 仍未命中且是地形短名：用前缀回落任意 FLVER 兜底，避免 100% 方块。
+      if (shortSuffix) {
+        const fallbackData = await tryPrefixFallbackForTerrain();
+        if (fallbackData) return { ok: true, sourceUri: msbSourceUri, data: fallbackData, diagnostics: [] };
       }
       return {
         ok: false,
