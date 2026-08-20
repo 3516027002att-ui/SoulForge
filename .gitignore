@@ -76,9 +76,6 @@ apps/desktop/e2e/playwright/test-results/
 apps/desktop/test-results/
 apps/desktop/.native/
 
-# SoulForge local state
-.soulforge-local/
-
 # Local real game/mod samples and private fixture evidence. Never commit them.
 mods/
 Sekiro Shadows Die Twice/

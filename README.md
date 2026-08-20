@@ -36,18 +36,110 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 不不不你不应该看这些，因为暂时没人来contribute，所以这些文档都是写给agents看的
 
-## 快速开始（开发者 / 尝鲜）
+## 快速开始（从零开始）
 
-当前没有面向普通玩家的正式安装包。想自己跑起来，需要 Node.js 与 .NET 10：
+> 本节假设你**没用过 PowerShell、Node.js、.NET**。跟着一步步点鼠标就行，不懂原理也能跑起来。当前没有面向普通玩家的正式安装包，需要自己在电脑上编译一次。
+
+### 第 0 步：确认你的电脑
+
+- 系统：Windows 10 或 Windows 11（其他系统暂不支持）。
+- 磁盘：至少预留 5 GB 空闲（用来放依赖和编译产物）。
+- 网络：能正常访问互联网（安装过程要下载东西）。
+
+### 第 1 步：打开 PowerShell
+
+PowerShell 就是 Windows 自带的“黑窗口”，用来敲命令，不用怕：
+
+1. 按键盘 `Win + S` 搜索 `PowerShell`，打开 **Windows PowerShell** 或 **Terminal（终端）**。
+2. 如果看到蓝底或黑底、能打字的窗口，就对了。后续所有命令都在这里粘贴、按回车执行。
+
+> 小技巧：粘贴时用 `Ctrl + V`，复制时用 `Ctrl + C`；卡住了按 `Ctrl + C` 可中断。
+
+### 第 2 步：安装 Node.js（含 npm）
+
+Node.js 是运行本项目前端/构建脚本的环境，`npm` 是它自带的包管理器。
+
+1. 打开 https://nodejs.org/zh-cn → 下载 **LTS（长期支持版）**，一路“下一步”安装（保持默认勾选即可）。
+2. 装完**重新打开**一个 PowerShell 窗口，粘贴以下命令验证：
 
 ~~~powershell
+node -v
+npm -v
+~~~
+
+能看到类似 `v22.x.x` 和 `10.x.x` 的版本号即成功。若提示“不是内部命令”，说明没装好或没重启终端，重装一次并重启电脑再试。
+
+### 第 3 步：安装 .NET 10 SDK
+
+.NET 10 是编译桌面端（SoulForge.exe）必需的工具。
+
+1. 打开 https://dotnet.microsoft.com/download/dotnet/10.0 → 找到 **.NET 10 SDK** → 下载 **Windows x64 Installer**，一路“下一步”安装。
+2. 装完同样**重新打开** PowerShell，验证：
+
+~~~powershell
+dotnet --version
+~~~
+
+应显示 `10.x.xxx`。若显示 `9.x` 或更低，说明装成了旧版，请确认下载的是 10.0 SDK。
+
+> 注意：.NET Runtime（运行时）和 SDK 是两回事，必须装 **SDK**，否则 `dotnet build` 会失败。
+
+### 第 4 步：下载 SoulForge 源码
+
+二选一（推荐前者）：
+
+**方式 A - 用 Git（会用 Git 的人）：**
+~~~powershell
+git clone https://github.com/3516027002att-ui/SoulForge.git
+cd SoulForge
+~~~
+
+**方式 B - 直接下载 ZIP（不会 Git 也行）：**
+1. 打开本仓库首页 → 绿色按钮 `Code` → `Download ZIP`。
+2. 解压到任意**不含中文和空格**的路径，例如 `D:\SoulForge`。
+3. 在该文件夹空白处右键 → `在终端中打开`。
+
+### 第 5 步：安装依赖并编译
+
+在 SoulForge 根目录（能看到 `package.json` 的那层）依次执行，每行粘贴后按回车，等上一条跑完再跑下一条：
+
+~~~powershell
+# 1. 安装依赖（第一次会比较慢，耐心等到出现 done / completed）
 npm install
+
+# 2. 检查类型（确保代码没写错，没报错即通过）
 npm run typecheck
+
+# 3. 跑一遍测试（可选，新手可跳过）
 npm test
+
+# 4. 编译出可执行文件（会在根目录生成 SoulForge.exe）
 npm run build
+~~~
+
+> 常见报错：
+> - `npm : 无法加载文件 ... 因为在此系统上禁止运行脚本` → 以管理员身份打开 PowerShell 执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 后重试。
+> - 网络超时/ `ECONNRESET` → 多试几次 `npm install`，或切换网络/开代理。
+> - `dotnet: command not found` → 没装好 .NET 10 SDK，回到第 3 步。
+
+### 第 6 步：运行
+
+编译成功后：
+
+- 双击根目录下的 `SoulForge.exe` 即可启动；
+
+或想边看日志边跑（开发者常用）：
+
+~~~powershell
 npm run dev
 ~~~
-下载好各种依赖之后，双击SoulForge.exe就行了
+
+首次启动若被 Windows Defender 拦截，点“更多信息”→“仍要运行”（因尚未做代码签名，属正常现象）。
+
+### 还跑不起来？
+
+1. 把 PowerShell 里的**完整报错信息**复制下来。
+2. 发邮件到 `3516027002att@gmail.com`（见文末），附上你的系统版本与三条验证命令的输出（`node -v` / `npm -v` / `dotnet --version`）。
 
 ## 支持的版本
 
