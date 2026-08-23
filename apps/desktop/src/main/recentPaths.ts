@@ -28,8 +28,8 @@
  * 功能，不该因为一个过期路径就打不开对话框。
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute } from 'node:path';
 
 /** 记住的目录类别。 */
 export type RecentPathKind = 'overlay' | 'base';
@@ -41,38 +41,75 @@ interface RecentPathsFile {
   base?: string;
 }
 
+const DEFAULT_CANDIDATE_PATHS: Record<RecentPathKind, readonly string[]> = {
+  overlay: [
+    'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro\\mods',
+    'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sekiro\\mods'
+  ],
+  base: [
+    'D:\\mystream\\Sekiro Shadows Die Twice\\Sekiro',
+    'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sekiro'
+  ]
+};
+
 /**
- * 读出某类目录上次的位置。
+ * 读出某类目录上次的位置（只读用户真正选过并持久化的记录）。
  *
  * 返回 undefined 的情形一律当「没有记录」：文件不存在、JSON 坏了、值不是
  * 绝对路径、目录已不存在。坏掉的偏好文件不该让对话框打不开，所以不抛异常。
  */
 export function readRecentPath(filePath: string, kind: RecentPathKind): string | undefined {
-  let parsed: RecentPathsFile;
+  let parsed: RecentPathsFile = {};
+  let fileRead = false;
   try {
     parsed = JSON.parse(readFileSync(filePath, 'utf8')) as RecentPathsFile;
+    fileRead = true;
   } catch {
-    return undefined;
+    fileRead = false;
   }
-  if (typeof parsed !== 'object' || parsed === null) return undefined;
-  const value = parsed[kind];
-  if (typeof value !== 'string' || value.trim() === '') return undefined;
-  // 只接受绝对路径：相对路径的解析基准取决于进程 cwd，作为 defaultPath 会
-  // 指向不可预期的位置。
-  if (!isAbsolute(value)) return undefined;
-  // 目录可能已被删除或盘符已变（外置硬盘、U 盘）。失效就当没记录，
-  // 让对话框回落系统默认，而不是打开一个空白的无效位置。
-  if (!existsSync(value)) return undefined;
-  return value;
+  if (fileRead && typeof parsed === 'object' && parsed !== null) {
+    const value = parsed[kind];
+    if (typeof value === 'string' && value.trim() !== '') {
+      if (isAbsolute(value) && existsSync(value)) {
+        return value;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 /**
- * 记下某类目录的最新位置。
- *
- * 写失败静默忽略：记不住上次位置只是少了个便利，不该让「打开工作区」这个
- * 主流程失败。真正需要报错的写入（Mod 资源）走 Patch Engine，不经这里。
+ * 对话框初次打开时的默认起始目录（defaultPath）。
+ * 若用户此前选过则优先返回用户上次选过的目录的上一级父目录（若存在），
+ * 避免 Windows 原生文件夹选择器直接钻入目录内部导致无法一键点击选择；
+ * 若无记录，探测标准已知 Sekiro 路径的上一级作为对话框起始位置（但不写回偏好文件）。
  */
-/** 忘掉某类目录。清除原版挂载时必须调用，否则下次启动会把旧 base 再挂回来。 */
+export function getDialogDefaultPath(filePath: string, kind: RecentPathKind): string | undefined {
+  const remembered = readRecentPath(filePath, kind);
+  if (remembered) {
+    const parent = dirname(remembered);
+    if (parent && parent !== remembered && existsSync(parent)) {
+      return parent;
+    }
+    return remembered;
+  }
+
+  const candidate = DEFAULT_CANDIDATE_PATHS[kind]?.find((pathCandidate) => existsSync(pathCandidate));
+  if (candidate) {
+    const parent = dirname(candidate);
+    if (parent && parent !== candidate && existsSync(parent)) {
+      return parent;
+    }
+    return candidate;
+  }
+
+  return undefined;
+}
+
+/**
+ * 忘掉某类目录。清除原版挂载时必须调用，否则下次启动会把旧 base 再挂回来。
+ */
 export function clearRecentPath(filePath: string, kind: RecentPathKind): void {
   let existing: RecentPathsFile = {};
   try {
@@ -83,12 +120,19 @@ export function clearRecentPath(filePath: string, kind: RecentPathKind): void {
   }
   delete existing[kind];
   try {
+    mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, JSON.stringify(existing, null, 2), 'utf8');
   } catch {
     // 与 writeRecentPath 相同：偏好写失败不打断主流程。
   }
 }
 
+/**
+ * 记下某类目录的最新位置。
+ *
+ * 写失败静默忽略：记不住上次位置只是少了个便利，不该让「打开工作区」这个
+ * 主流程失败。真正需要报错的写入（Mod 资源）走 Patch Engine，不经这里。
+ */
 export function writeRecentPath(filePath: string, kind: RecentPathKind, directory: string): void {
   if (typeof directory !== 'string' || !isAbsolute(directory)) return;
   let existing: RecentPathsFile = {};
@@ -100,6 +144,7 @@ export function writeRecentPath(filePath: string, kind: RecentPathKind, director
   }
   existing[kind] = directory;
   try {
+    mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, JSON.stringify(existing, null, 2), 'utf8');
   } catch {
     // 见函数注释：不因偏好写入失败中断主流程。

@@ -71,7 +71,7 @@ export class BridgeDaemonClient {
    */
   private inFlight = 0;
 
-  private constructor(private readonly options: BridgeDaemonClientOptions) {
+  private constructor(public readonly options: BridgeDaemonClientOptions) {
     this.negotiatedMaxFrameBytes = options.maxFrameBytes ?? 1024 * 1024;
     this.child = spawn(options.executable, [...(options.args ?? []), 'daemon'], {
       cwd: options.cwd,

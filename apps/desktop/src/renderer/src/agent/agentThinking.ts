@@ -22,8 +22,8 @@ export const AGENT_THINKING_LEVELS: readonly ModelThinkingLevel[] = [
   'max'
 ] as const;
 
-/** OpenAI / Anthropic 两种服务协议的判别类型。 */
-export type ThinkingProtocol = 'openai-compatible' | 'anthropic-compatible';
+/** OpenAI / Anthropic 三种服务协议的判别类型。 */
+export type ThinkingProtocol = 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
 
 /**
  * 按协议给出当前服务可选档位表。
@@ -37,8 +37,8 @@ export type ThinkingProtocol = 'openai-compatible' | 'anthropic-compatible';
 export function thinkingLevelsForProtocol(
   protocol: ThinkingProtocol
 ): readonly ModelThinkingLevel[] {
-  if (protocol === 'openai-compatible') return AGENT_THINKING_LEVELS;
-  return AGENT_THINKING_LEVELS.filter((level) => level !== 'none' && level !== 'minimal');
+  if (protocol === 'anthropic-compatible') return AGENT_THINKING_LEVELS.filter((level) => level !== 'none' && level !== 'minimal');
+  return AGENT_THINKING_LEVELS;
 }
 
 /**

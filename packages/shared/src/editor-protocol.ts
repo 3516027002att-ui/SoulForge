@@ -321,9 +321,11 @@ export type AgentStreamEvent =
   | { seq: number; sessionId: string; kind: 'approval-updated'; message: AgentMessageDto }
   | { seq: number; sessionId: string; kind: 'run-failed'; reasonCode: string; retryable: boolean };
 
+export type AgentAttachmentMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'text/plain';
+
 export interface AgentAttachmentReference {
   readonly token: string;
-  readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp';
+  readonly mediaType: AgentAttachmentMediaType;
   readonly byteLength: number;
   readonly expiresAt: string;
 }
@@ -445,7 +447,7 @@ export function decodeAgentAttachmentReference(value: unknown, path = 'AgentAtta
   rejectAbsolutePath(token, `${path}.token`);
   return {
     token,
-    mediaType: expectEnum(valueOf(r, 'mediaType', path), ['image/png', 'image/jpeg', 'image/webp'], `${path}.mediaType`),
+    mediaType: expectEnum(valueOf(r, 'mediaType', path), ['image/png', 'image/jpeg', 'image/webp', 'text/plain'], `${path}.mediaType`),
     byteLength: expectNumber(r.byteLength, `${path}.byteLength`),
     expiresAt: expectString(r.expiresAt, `${path}.expiresAt`)
   };

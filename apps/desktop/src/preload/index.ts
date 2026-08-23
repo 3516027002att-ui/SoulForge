@@ -6,6 +6,7 @@ import type {
   AiAgentRunRequest,
   AiAgentSessionListIpcResult,
   AiAgentSessionLoadIpcResult,
+  AgentAttachmentCreateIpcResult,
   AgentResourceReferenceCreateIpcResult,
   AnalyzeWorkspaceSummary,
   DirectorySelection,
@@ -28,7 +29,11 @@ import type {
   ResourceCapabilityMatrix,
   ToolDescriptor,
   ToolResult,
-  ModelThinkingLevel
+  ModelThinkingLevel,
+  MemoryEntry,
+  DoctorReport,
+  AutoFixResult,
+  DoctorOptions
 } from '@soulforge/core';
 import type {
   AgentResourceReference,
@@ -795,7 +800,7 @@ const api = {
   listModelServices: (): Promise<Array<{
     id: string;
     displayName: string;
-    protocol: 'openai-compatible' | 'anthropic-compatible';
+    protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
     baseUrl: string;
     model: string;
     hasCredential: boolean;
@@ -813,7 +818,7 @@ const api = {
   upsertModelService: (input: {
     id?: string;
     displayName: string;
-    protocol: 'openai-compatible' | 'anthropic-compatible';
+    protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
     baseUrl: string;
     model: string;
     apiKey?: string;
@@ -826,7 +831,7 @@ const api = {
   }): Promise<{
     id: string;
     displayName: string;
-    protocol: 'openai-compatible' | 'anthropic-compatible';
+    protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
     baseUrl: string;
     model: string;
     hasCredential: boolean;
@@ -866,7 +871,7 @@ const api = {
    * endpoint 安全校验，key 只在本次调用内使用。
    */
   listModelModels: (input: {
-    protocol: 'openai-compatible' | 'anthropic-compatible';
+    protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
     baseUrl: string;
     apiKey?: string;
   }): Promise<
@@ -912,6 +917,18 @@ const api = {
     hits: readonly CiteHit[]
   ): Promise<AgentResourceReferenceCreateIpcResult> =>
     ipcRenderer.invoke('agent.citation.create', { hits }),
+  /**
+   * 附件：main 弹原生文件对话框，把文件拷到 userData/agent/attachments，签发 opaque token。
+   * renderer 只拿到 token / 媒体类型 / 字节数 / 显示名，没有绝对路径。
+   */
+  createAgentAttachment: (): Promise<AgentAttachmentCreateIpcResult> =>
+    ipcRenderer.invoke('agent.attachment.create'),
+  listAiMemories: (): Promise<{ ok: true; entries: MemoryEntry[] } | { ok: false; error: { code: string; message: string } }> =>
+    ipcRenderer.invoke('ai.memory.list'),
+  saveAiMemory: (entry: { id?: string; topic: string; summary: string; details?: string; tags?: string[] }): Promise<{ ok: true; entry: MemoryEntry } | { ok: false; error: { code: string; message: string } }> =>
+    ipcRenderer.invoke('ai.memory.save', entry),
+  deleteAiMemory: (idOrTopic: string): Promise<{ ok: true; deleted: boolean } | { ok: false; error: { code: string; message: string } }> =>
+    ipcRenderer.invoke('ai.memory.delete', idOrTopic),
   onAiAgentEvent: (callback: (envelope: AiAgentEventEnvelope) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, envelope: AiAgentEventEnvelope): void => {
       callback(envelope);
@@ -920,7 +937,11 @@ const api = {
     return () => {
       ipcRenderer.removeListener('ai:agent:event', listener);
     };
-  }
+  },
+  doctorDiagnose: (options?: DoctorOptions): Promise<DoctorReport> =>
+    ipcRenderer.invoke('doctor.diagnose', options),
+  doctorAutoFix: (options?: DoctorOptions): Promise<AutoFixResult> =>
+    ipcRenderer.invoke('doctor.autoFix', options)
 };
 
 contextBridge.exposeInMainWorld('soulforge', api);

@@ -25,6 +25,9 @@ import {
   markAgentTaskCancelling,
   reduceAgentTaskEvent,
   startAgentTask,
+  buildAgentConversationItems,
+  formatAgentDuration,
+  describeAgentThinkingLabel,
   type AgentTaskEventEnvelope,
   type AgentTaskState
 } from './agentTaskState.js';
@@ -64,6 +67,19 @@ describe('进度事件真的推进状态', () => {
       { type: 'agent-message-delta', step: 1, text: '再三字' }
     );
     assert.equal(state.deltaChars, 7);
+    assert.equal(state.narrations.length, 1);
+    assert.equal(state.narrations[0]?.text, '前四个字再三字');
+  });
+
+  it('思考增量与正文分开累积', () => {
+    const state = feed(
+      startAgentTask(SESSION),
+      { type: 'agent-thinking-delta', step: 1, text: '先查表' },
+      { type: 'agent-thinking-delta', step: 1, text: '再对字段' },
+      { type: 'agent-message-delta', step: 1, text: '我先查 Param。' }
+    );
+    assert.equal(state.thinkingText, '先查表再对字段');
+    assert.equal(state.narrations[0]?.text, '我先查 Param。');
   });
 
   it('工具调用 begin/end 配对，失败码被保留', () => {
@@ -184,25 +200,29 @@ describe('取消：可用性判据与中间态', () => {
 });
 
 describe('状态文案回答四个问题：在跑/进度/失败原因/可否取消', () => {
-  it('运行中报步号并明说可取消', () => {
+  it('运行中报进度并明说可取消', () => {
     const text = describeAgentTaskStatus(feed(
       startAgentTask(SESSION),
       { type: 'turn-started', step: 4 },
       { type: 'agent-message-delta', step: 4, text: '十个字十个字' }
     ));
-    assert.match(text, /第 4 步/);
+    assert.match(text, /任务进行中/);
     assert.match(text, /可随时取消/);
   });
 
-  it('结束时报总步数与失败的工具调用次数', () => {
-    const text = describeAgentTaskStatus(feed(
+  it('结束时报正常结束原因，取消时报已被取消', () => {
+    const stopped = describeAgentTaskStatus(feed(
       startAgentTask(SESSION),
       { type: 'tool-call-begin', step: 1, callId: 'c1', name: 'commit_patch' },
       { type: 'tool-call-end', step: 1, callId: 'c1', name: 'commit_patch', ok: false, code: 'DENIED' },
       { type: 'session-done', finishReason: 'stop', steps: 3, rolloutFileName: 'c.jsonl' }
     ));
-    assert.match(text, /共 3 步/);
-    assert.match(text, /1 次工具调用失败/);
+    assert.match(stopped, /正常结束/);
+    const cancelled = describeAgentTaskStatus(feed(
+      startAgentTask(SESSION),
+      { type: 'session-done', finishReason: 'cancelled', steps: 1, rolloutFileName: 'c.jsonl' }
+    ));
+    assert.match(cancelled, /已被取消/);
   });
 
   it('不使用无证据形容词（anti-ai-design §2）', () => {
@@ -450,5 +470,114 @@ describe('审批预览只从参数里已有的字段提取', () => {
     assert.equal(extractApprovalPreview('"a string"'), null);
     assert.equal(extractApprovalPreview('[1,2]'), null);
     assert.equal(extractApprovalPreview('{"query":"unrelated"}'), null);
+  });
+});
+
+describe('对话时间线：口播与工具按步交织，思考可折叠', () => {
+  it('formatAgentDuration 用可读短格式', () => {
+    assert.equal(formatAgentDuration(0), '0s');
+    assert.equal(formatAgentDuration(12_000), '12s');
+    assert.equal(formatAgentDuration(72_000), '1m 12s');
+    assert.equal(formatAgentDuration(3_600_000), '1h');
+  });
+
+  it('完成后思考标签是已思考 + 时长', () => {
+    const started = startAgentTask(SESSION, 1_000);
+    const done = feed(started, { type: 'session-done', finishReason: 'stop', steps: 1, rolloutFileName: 'x.jsonl' });
+    const label = describeAgentThinkingLabel({ ...done, startedAt: 1_000, endedAt: 13_000 }, 13_000);
+    assert.equal(label, '已思考 12s');
+  });
+
+  it('时间线顺序：用户 → 思考 → 口播 → 工具，不含会话文件名', () => {
+    const state = feed(
+      startAgentTask(SESSION, 1_000),
+      { type: 'turn-started', step: 1 },
+      { type: 'agent-thinking-delta', step: 1, text: '先搜表' },
+      { type: 'agent-message-delta', step: 1, text: '我先查伤药相关 Param。' },
+      { type: 'tool-call-begin', step: 1, callId: 'c1', name: 'search_param_rows' },
+      { type: 'tool-call-end', step: 1, callId: 'c1', name: 'search_param_rows', ok: true },
+      { type: 'session-done', finishReason: 'stop', steps: 1, rolloutFileName: 'secret.jsonl' }
+    );
+    const items = buildAgentConversationItems({
+      goal: '狼接仙到道具时报错',
+      task: { ...state, startedAt: 1_000, endedAt: 5_000 }
+    });
+    const kinds = items.map((item) => item.kind);
+    assert.deepEqual(kinds, ['user', 'thinking', 'assistant', 'tools']);
+    assert.equal(items[0]?.kind === 'user' ? items[0].text : '', '狼接仙到道具时报错');
+    assert.equal(items[2]?.kind === 'assistant' ? items[2].text : '', '我先查伤药相关 Param。');
+    assert.ok(!JSON.stringify(items).includes('secret.jsonl'), '时间线不得带会话记录文件名');
+  });
+
+  it('多轮对话：第一轮完成后开启第二轮，时间线保留第一轮并拼接第二轮实时内容', () => {
+    // 第一轮任务
+    const turn1Session = 'session-turn-1';
+    const turn1Started = startAgentTask(turn1Session, 1_000);
+    const turn1Done = [
+      { type: 'turn-started' as const, step: 1 },
+      { type: 'agent-thinking-delta' as const, step: 1, text: '分析 mod 目录' },
+      { type: 'agent-message-delta' as const, step: 1, text: '当前 Mod 区包含 12 个文件。' },
+      { type: 'tool-call-begin' as const, step: 1, callId: 'call-1', name: 'search_resources' },
+      { type: 'tool-call-end' as const, step: 1, callId: 'call-1', name: 'search_resources', ok: true },
+      { type: 'session-done' as const, finishReason: 'stop', steps: 1, rolloutFileName: 'sessions/2026/08/21/rollout-turn1.jsonl' }
+    ].reduce((current, event) => reduceAgentTaskEvent(current, { sessionId: turn1Session, event }), turn1Started);
+
+    assert.equal(turn1Done.phase, 'done');
+    assert.equal(turn1Done.rolloutFileName, 'sessions/2026/08/21/rollout-turn1.jsonl');
+
+    // 发起第二轮任务，传入第一轮状态和提示词
+    const turn2Session = 'session-turn-2';
+    const turn2Started = startAgentTask(turn2Session, 10_000, turn1Done, '当前 Mod 区有什么文件？');
+    assert.equal(turn2Started.phase, 'accepted');
+    assert.equal(turn2Started.lastRolloutPath, 'sessions/2026/08/21/rollout-turn1.jsonl');
+    assert.equal(turn2Started.historyItems.length > 0, true, '第一轮的条目必须已归档进 historyItems');
+
+    // 模拟第二轮事件流
+    const turn2Done = [
+      { type: 'turn-started' as const, step: 1 },
+      { type: 'agent-thinking-delta' as const, step: 1, text: '检索具体 param 文件' },
+      { type: 'agent-message-delta' as const, step: 1, text: '找到 gameparam.parambnd.dcx 文件。' },
+      { type: 'session-done' as const, finishReason: 'stop', steps: 1, rolloutFileName: 'sessions/2026/08/21/rollout-turn2.jsonl' }
+    ].reduce((current, event) => reduceAgentTaskEvent(current, { sessionId: turn2Session, event }), turn2Started);
+
+    // 构建完整多轮对话时间线
+    const fullTimeline = buildAgentConversationItems({
+      goal: '帮我找下具体的 param 文件在哪里',
+      task: turn2Done
+    });
+
+    const userMessages = fullTimeline.filter((item) => item.kind === 'user');
+    const assistantMessages = fullTimeline.filter((item) => item.kind === 'assistant');
+
+    assert.equal(userMessages.length, 2, '多轮对话时间线必须呈现全部 2 轮用户问题');
+    assert.equal(userMessages[0]?.kind === 'user' ? userMessages[0].text : '', '当前 Mod 区有什么文件？');
+    assert.equal(userMessages[1]?.kind === 'user' ? userMessages[1].text : '', '帮我找下具体的 param 文件在哪里');
+
+    assert.equal(assistantMessages.length, 2, '多轮对话时间线必须呈现全部 2 轮模型回复');
+    assert.equal(assistantMessages[0]?.kind === 'assistant' ? assistantMessages[0].text : '', '当前 Mod 区包含 12 个文件。');
+    assert.equal(assistantMessages[1]?.kind === 'assistant' ? assistantMessages[1].text : '', '找到 gameparam.parambnd.dcx 文件。');
+  });
+
+  it('多轮对话：发起第三轮持续累积历史，新会话重置清空历史', () => {
+    // 模拟前两轮归档
+    const prevTurn = {
+      ...INITIAL_AGENT_TASK_STATE,
+      phase: 'done' as const,
+      rolloutFileName: 'sessions/turn2.jsonl',
+      historyItems: [{ kind: 'user' as const, text: '问题一' }, { kind: 'assistant' as const, step: 1, text: '回答一' }],
+      narrations: [{ step: 1, text: '回答二' }],
+      thinkingText: '思考二'
+    };
+
+    // 开启第三轮
+    const turn3 = startAgentTask('session-turn-3', 20_000, prevTurn, '问题二');
+    assert.equal(turn3.historyItems.length, 4, '前两轮的 4 条消息全部保留在 historyItems 中');
+    assert.equal(turn3.lastRolloutPath, 'sessions/turn2.jsonl');
+
+    // 重置新会话
+    const reset = INITIAL_AGENT_TASK_STATE;
+    assert.equal(reset.historyItems.length, 0);
+    assert.equal(reset.lastRolloutPath, null);
+    assert.equal(reset.sessionId, null);
   });
 });

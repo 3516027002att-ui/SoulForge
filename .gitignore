@@ -64,6 +64,14 @@ apps/*/src/**/*.d.ts.map
 
 # Local dev launcher (compiled from scripts/launch-soulforge.cs). Do not commit binaries.
 /SoulForge.exe
+/SoulForge.Doctor.exe
+/SoulForge.Launcher.exe
+*.pdb
+
+# IDE and assistant local directories
+.kiro/
+.playwright-mcp/
+.zcode/
 
 # Electron/app artifacts
 release/

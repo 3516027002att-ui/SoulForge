@@ -31,6 +31,7 @@ export * from './editing/vfxBridgeCommit.js';
 export * from './editing/tpfBridgeCommit.js';
 export * from './editing/msbBridgeRead.js';
 export * from './editing/msbBridgeCommit.js';
+export * from './editing/mapService.js';
 export * from './editing/workbenchProjections.js';
 export * from './editing/bridgeStaging.js';
 export * from './editing/editorMutationService.js';
@@ -128,6 +129,9 @@ export * from './audit-log/index.js';
 export * from './transactions/index.js';
 export * from './vfs/index.js';
 export * from './tae/taeEventTemplate.js';
+export * from './memory/memoryTypes.js';
+export * from './memory/memoryStore.js';
+export * from './doctor/doctorService.js';
 
 // `./testing/*` is deliberately NOT re-exported here. The production barrel is
 // what electron-builder ships, and re-exporting harness helpers would drag

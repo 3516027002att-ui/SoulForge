@@ -23,9 +23,12 @@ export interface AgentComposerToolbarProps {
   onToggleCiteSelect: () => void;
   /** 框选模式当前是否开启（按钮按下态，e2e 用 aria-pressed 断言）。 */
   citeSelecting: boolean;
+  /** 附件点击；缺省或 attachmentDisabled 时按钮诚实 disabled。 */
+  onAttach?: () => void;
+  attachmentDisabled?: boolean;
   /**
-   * 附件的诚实禁用原因。附件需要 main 下发的 renderer-safe 引用 token（60C
-   * 接线），60B 不渲染假装可用的假功能，只给 disabled + 说明。
+   * 附件禁用原因（title）。桌面版接通后说明「添加图片或文本」；
+   * 浏览器预览说明仅桌面可用。
    */
   attachmentReason: string;
   /** 当前交互模式（Ask/Plan/Edit）——S32 作为权限下拉进底栏。 */
@@ -51,9 +54,8 @@ export interface AgentComposerToolbarProps {
  * modelLabel / onOpenModelSettings 随之摘掉。
  *
  * S10 把 `@`（插入 Agent 参与者）与 `#`（插入当前文件上下文）合成一个「引用」
- * 框选钮——引用是语义实体（data-cite 矩形相交），不是文本 token；附件仍未接通
- * 真实链路，给诚实 disabled + title 说明（§12.6「未打通真实链路的控件必须隐藏」
- * 的精神：不渲染假装可用的假功能）。
+ * 框选钮——引用是语义实体（data-cite 矩形相交），不是文本 token。附件走 main
+ * 签发的 opaque token；无 onAttach 时诚实 disabled。
  */
 export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactElement {
   const {
@@ -63,6 +65,8 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
     onStop,
     onToggleCiteSelect,
     citeSelecting,
+    onAttach,
+    attachmentDisabled = true,
     attachmentReason,
     interactionMode,
     onInteractionModeChange,
@@ -109,7 +113,8 @@ export function AgentComposerToolbar(props: AgentComposerToolbarProps): ReactEle
       <button
         type="button"
         className="composer-tool-btn"
-        disabled
+        disabled={attachmentDisabled || onAttach === undefined}
+        onClick={() => onAttach?.()}
         aria-label="添加附件"
         title={attachmentReason}
       >

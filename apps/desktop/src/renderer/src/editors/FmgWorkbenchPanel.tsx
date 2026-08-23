@@ -348,14 +348,14 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     const request = props.revealRequest;
     if (!request) return;
     if (!liveMode) {
-      setRevealError('insufficient_evidence：文本目录不可用（browser-preview），无法定位条目。');
+      setRevealError('文本目录不可用（预览模式），无法定位条目。');
       props.onRevealHandled?.();
       return;
     }
     if (!catalog) {
       // 目录还在加载；读取失败时给不足证据，避免请求永久悬挂。
       if (catalogError) {
-        setRevealError('insufficient_evidence：文本目录读取失败，无法定位条目。');
+        setRevealError('文本目录读取失败，无法定位条目。');
         props.onRevealHandled?.();
       }
       return;
@@ -363,7 +363,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
     commitDraftRef.current();
     const found = findTableInCatalog(catalog, request.tableId);
     if (!found) {
-      setRevealError(`insufficient_evidence：文本目录里没有目标表，条目 ${request.entryId} 无法定位。`);
+      setRevealError(`文本目录里没有目标表，条目 ${request.entryId} 无法定位。`);
       props.onRevealHandled?.();
       return;
     }
@@ -382,13 +382,13 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
         if (cancelled) return;
         if (!result.ok) {
           // 常规分页会给出同样的诊断面；这里不重复报，只清掉 reveal 挂起态。
-          setRevealError('insufficient_evidence：文本表读取失败，无法定位条目。');
+          setRevealError('文本表读取失败，无法定位条目。');
           props.onRevealHandled?.();
           return;
         }
         const index = result.entries.findIndex((entry) => entry.id === request.entryId);
         if (index < 0) {
-          setRevealError(`insufficient_evidence：已打开的表里没有条目 ${request.entryId}。`);
+          setRevealError(`已打开的表里没有条目 ${request.entryId}。`);
           props.onRevealHandled?.();
           return;
         }
@@ -397,7 +397,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
       })
       .catch(() => {
         if (cancelled) return;
-        setRevealError('insufficient_evidence：文本表读取异常，无法定位条目。');
+        setRevealError('文本表读取异常，无法定位条目。');
         props.onRevealHandled?.();
       });
     return () => {
@@ -434,7 +434,7 @@ export function FmgWorkbenchPanel(props: FmgWorkbenchPanelProps): ReactElement {
       props.onRevealHandled?.();
       return;
     }
-    setRevealError(`insufficient_evidence：已打开的表里没有条目 ${request.entryId}。`);
+    setRevealError(`已打开的表里没有条目 ${request.entryId}。`);
     props.onRevealHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.revealRequest, selectedTableId, query, page, revealTargetPage, loadedPage, loading, pageEntries]);

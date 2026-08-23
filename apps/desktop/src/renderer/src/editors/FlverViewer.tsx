@@ -59,6 +59,8 @@ export interface FlverViewerProps {
     translation: [number, number, number];
     rotation: [number, number, number];
   }> | undefined;
+  /** 动画播放时间点（驱动骨骼蒙皮动画位姿） */
+  playbackTime?: number | undefined;
 }
 
 interface MeshData {
@@ -280,6 +282,13 @@ export function FlverViewer(props: FlverViewerProps): ReactElement {
       handleRef.current = null;
     };
   }, []);
+
+  // 动画播放推进（驱动骨骼蒙皮动画位姿）
+  useEffect(() => {
+    if (typeof props.playbackTime === 'number') {
+      handleRef.current?.setPlaybackTime?.(props.playbackTime);
+    }
+  }, [props.playbackTime]);
 
   // 多网格（问题4-A）：叠加字报「全部网格 + 总顶点数」，不显示假播放头。
   const meshSummary = meshDataList && meshDataList.length > 0

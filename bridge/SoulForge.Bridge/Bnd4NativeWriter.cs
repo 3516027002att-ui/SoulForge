@@ -1,14 +1,37 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 
 internal static class Bnd4NativeWriter
 {
+    private static readonly ConcurrentDictionary<string, (long Length, DateTime LastWriteUtc, DcxNativeDocument Dcx, Bnd4NativeDocument Binder)> BinderCache = new(StringComparer.OrdinalIgnoreCase);
+
+    public static (DcxNativeDocument Dcx, Bnd4NativeDocument Binder) GetCachedBinder(string sourcePath, string? oodleRuntimeRoot)
+    {
+        var info = new FileInfo(sourcePath);
+        if (info.Exists && BinderCache.TryGetValue(sourcePath, out var cached) && cached.Length == info.Length && cached.LastWriteUtc == info.LastWriteTimeUtc)
+        {
+            return (cached.Dcx, cached.Binder);
+        }
+        var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
+        var binder = Bnd4NativeDocument.Read(dcx.Payload);
+        if (info.Exists)
+        {
+            BinderCache[sourcePath] = (info.Length, info.LastWriteTimeUtc, dcx, binder);
+        }
+        return (dcx, binder);
+    }
+
+    public static void InvalidateCache(string sourcePath)
+    {
+        BinderCache.TryRemove(sourcePath, out _);
+    }
+
     public static object SnapshotChild(string sourcePath, JsonElement options, string? oodleRuntimeRoot)
     {
-        var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
+        var (dcx, binder) = GetCachedBinder(sourcePath, oodleRuntimeRoot);
         if (dcx.CompressionFormat is not ("DFLT" or "KRAK"))
             throw new NotSupportedException($"BND4 snapshot 不支持 {dcx.CompressionFormat} 外层压缩。");
-        var binder = Bnd4NativeDocument.Read(dcx.Payload);
         var index = ResolveEntryIndex(options, binder);
         var entry = binder.Entries[index];
         if (options.TryGetProperty("expectedChildHash", out var expectedHashElement)
@@ -91,6 +114,8 @@ internal static class Bnd4NativeWriter
             File.Move(temporary, outputPath, overwrite: true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        InvalidateCache(outputPath);
+        InvalidateCache(sourcePath);
         var reread = DcxNativeDocument.Read(outputPath, oodleRuntimeRoot);
         var rereadBinder = Bnd4NativeDocument.Read(reread.Payload);
         if (reread.PayloadHash != Hash(rebuiltBinder) || rereadBinder.Entries.Count != entries.Count)
@@ -233,8 +258,7 @@ internal static class Bnd4NativeWriter
         {
             throw new InvalidDataException("extract-bnd4-child 需要已校验的 outputPath。");
         }
-        var dcx = DcxNativeDocument.Read(sourcePath, oodleRuntimeRoot);
-        var binder = Bnd4NativeDocument.Read(dcx.Payload);
+        var (dcx, binder) = GetCachedBinder(sourcePath, oodleRuntimeRoot);
         var index = ResolveEntryIndex(options, binder);
         var entry = binder.Entries[index];
         var bytes = binder.GetStoredBytes(index);

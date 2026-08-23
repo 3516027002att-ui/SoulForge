@@ -30,6 +30,9 @@
  */
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { randomUUID } from 'node:crypto';
+// S10 引用框选：fixture 签发 citation 时复用 shared 构建产物的解码/合并/标签
+// 函数，保证标签格式与生产 main 同源不漂移。
+import { decodeCiteHits, mergeCiteHits, formatCitationLabel } from '../../../../packages/shared/dist/index.js';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
@@ -39,6 +42,8 @@ const outRoot = path.resolve(here, '../../out');
 const APPLY_FAIL = process.env.SF_TEST_APPLY_FAIL === '1';
 const CANCEL_DIALOG = process.env.SF_TEST_CANCEL_DIALOG === '1';
 const BROWSER_PREVIEW = process.env.SF_TEST_BROWSER_PREVIEW === '1';
+// S-FILE-ROLLBACK：种子两条 committed 操作历史，供审计面板文件级回滚用例。
+const FIXTURE_OPERATIONS = process.env.SF_FIXTURE_OPERATIONS === '1';
 
 /** Synthetic fixture corpus — tiny, constructed, explicitly labeled (AGENTS.md §15). */
 function makeFile({ dir, name, kind, formatKind, formatLabel, extension, compoundExtension, size = 2048 }) {
@@ -62,6 +67,8 @@ function makeFile({ dir, name, kind, formatKind, formatLabel, extension, compoun
 const fixtureFiles = [
   makeFile({ dir: 'event', name: 'common.emevd', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.emevd', compoundExtension: '.emevd' }),
   makeFile({ dir: 'event', name: 'menu.emevd', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.emevd', compoundExtension: '.emevd' }),
+  // S14/S15：KRAK 压缩失败样本（合成「未挂原版」的可行动失败态，明确标记）。
+  makeFile({ dir: 'event', name: 'krak.emevd.dcx', kind: 'event', formatKind: 'emevd', formatLabel: 'EMEVD', extension: '.dcx', compoundExtension: '.emevd.dcx' }),
   makeFile({ dir: 'msg', name: 'test.msgbnd.dcx', kind: 'msg', formatKind: 'fmg', formatLabel: 'FMG', extension: '.dcx', compoundExtension: '.msgbnd.dcx' }),
   // 11-B：文本目录按容器分组 —— item / menu 两个容器都要在。menu.msgbnd.dcx 是
   // menu 容器的载体（左栏 menu 组下面的 menu.fmg 真空表）。
@@ -87,6 +94,8 @@ const fixtureFiles = [
   // SCRIPT-41 fixture：脚本容器。formatKind 用 'script'（不是 'bnd'），legacy
   // 推断才会命中 `.luabnd.dcx` → script 编辑器而不是 container。
   makeFile({ dir: 'script', name: 'm25_00_00_00.luabnd.dcx', kind: 'script', formatKind: 'script', formatLabel: 'SCRIPT BND', extension: '.dcx', compoundExtension: '.luabnd.dcx' }),
+  // S16 独立脚本：单 Source、打开即反编译。
+  makeFile({ dir: 'script', name: 'c0000_common.hks', kind: 'script', formatKind: 'script', formatLabel: 'HKS', extension: '.hks', compoundExtension: '.hks' }),
   // MAP-50B fixture：MSB 地图样本。基础 fixture 此前没有 map 文件，msb 工作台在
   // E2E 里进不去；这里补一个可被 readMsbDocument stub 命中的合成样本
   // （微小、合法构造、明确标记，AGENTS.md §15）。大工作区合成的 mXXXX 是 4 位补零，
@@ -1943,6 +1952,20 @@ function registerFixtureIpc() {
       atMs: Math.round(performance.now()),
       sourceUri
     });
+    // S14/S15：KRAK 压缩样本返回可读失败句（code + 人话 + 下一步），不返回假源码；
+    // 方括号 code 随 message 下发，e2e 据此断言失败面形态。
+    if (sourceUri.includes('krak')) {
+      return {
+        ok: false,
+        sourceUri,
+        diagnostics: [{
+          severity: 'error',
+          code: 'EMEVD_DOCUMENT_READ_FAILED',
+          message: '[EMEVD_DOCUMENT_READ_FAILED] 这份事件是 KRAK 压缩，到「开始」页选择含 sekiro.exe 的原版目录后再打开。',
+          sourceUri
+        }]
+      };
+    }
     const bank = emevdBank(sourceUri);
     if (!bank) {
       return {
@@ -2273,6 +2296,9 @@ function registerFixtureIpc() {
         decompiled: false,
         containerUri: sourceUri,
         entryName: 'goal_list.lua',
+        // 保存后 renderer 按 entryName+entryIndex 重读基线；缺 index 会落
+        // loadSource(null)，容器 uri 无 entryName 命中失败分支。
+        entryIndex: 0,
         writeSupported: true,
         diagnostics: [{ severity: 'info', code: 'PLAINTEXT_CONFIRMED', message: '条目确认为明文。' }]
       };
@@ -2288,6 +2314,22 @@ function registerFixtureIpc() {
         decompiler: 'DSLuaDecompiler v1.1.5 (fixture stub)',
         containerUri: sourceUri,
         entryName: 'battle.lua',
+        entryIndex: 1,
+        writeSupported: true,
+        diagnostics: []
+      };
+    }
+    // S16 独立 .hks：单 Source、打开即反编译（合成反编译文本，明确标记 fixture）。
+    if (sourceUri.toLowerCase().endsWith('.hks')) {
+      return {
+        ok: true,
+        logicalName: sourceUri.split('/').pop() ?? 'script',
+        kind: 'decompiled',
+        sourceText: '-- SoulForge synthetic decompiled fixture (explicitly constructed)\nBEH_ADD_NONE = 0\n',
+        encoding: 'decompiled',
+        decompiled: true,
+        decompiler: 'DSLuaDecompiler v1.1.5 (fixture stub)',
+        containerUri: sourceUri,
         writeSupported: true,
         diagnostics: []
       };
@@ -2305,7 +2347,52 @@ function registerFixtureIpc() {
       }]
     };
   });
-  handleTrusted('operation.list', () => []);
+  // S16 脚本 IDE 写回镜像：fixture 不落盘，只记调用并回成功；renderer 成功分支
+  // 只看 result.ok，随后经 readScriptSource 重读基线（fixture 返回不变文本）。
+  handleTrusted('resource.saveScriptSource', (_event, sourceUri, entryName) => {
+    track('resource.saveScriptSource');
+    return {
+      ok: true,
+      changedFiles: [{ sourceUri, sourcePath: entryName ?? 'script', changed: true }],
+      diagnostics: []
+    };
+  });
+  // S-FILE-ROLLBACK 审计种子：第一条两文件可单文件回滚；第二条路径未脱敏映射
+  // （[本机路径已隐藏]），面板只给提示不给按钮。rollbackFile 后第一条转 rolled_back。
+  let fixtureOp1RolledBack = false;
+  handleTrusted('operation.list', () => {
+    if (!FIXTURE_OPERATIONS) return [];
+    return [
+      {
+        opId: 'fixture-op-1',
+        title: 'fixture 写入：item.fmg 文本',
+        author: 'user',
+        mode: 'commit',
+        status: fixtureOp1RolledBack ? 'rolled_back' : 'committed',
+        createdAt: '2026-08-21T08:00:00.000Z',
+        committedAt: '2026-08-21T08:00:01.000Z',
+        ...(fixtureOp1RolledBack ? { rolledBackAt: '2026-08-21T09:00:00.000Z' } : {}),
+        fileCount: 2,
+        changedPaths: ['msg/zhocn/item.fmg', 'msg/zhocn/menu.fmg']
+      },
+      {
+        opId: 'fixture-op-2',
+        title: 'fixture 写入：未脱敏路径样本',
+        author: 'user',
+        mode: 'commit',
+        status: 'committed',
+        createdAt: '2026-08-21T08:10:00.000Z',
+        committedAt: '2026-08-21T08:10:01.000Z',
+        fileCount: 1,
+        changedPaths: ['[本机路径已隐藏]']
+      }
+    ];
+  });
+  handleTrusted('operation.rollbackFile', (_event, opId, targetUri) => {
+    track('operation.rollbackFile');
+    if (opId === 'fixture-op-1') fixtureOp1RolledBack = true;
+    return { ok: true, opId, restoredFiles: [targetUri], diagnostics: [] };
+  });
   handleTrusted('operation.rollback', (_event, opId) => ({
     ok: false,
     opId,
@@ -2324,6 +2411,15 @@ function registerFixtureIpc() {
   // 与生产同形态：preload 传 { selection } 包裹，main 解 selection 后做安全校验。
   // fixture 只镜像路径形式白名单——files 域 + 相对路径；绝对路径 / raw parser /
   // Hex dump 域拒绝（生产是 selectionRendererSafetyIssues）。token 不携带路径。
+  handleTrusted('agent.attachment.create', () => {
+    track('agent.attachment.create');
+    return {
+      ok: false,
+      cancelled: true,
+      error: { code: 'ATTACHMENT_CANCELLED', message: '未选择文件。' }
+    };
+  });
+
   handleTrusted('agent.resourceReference.create', (_event, request) => {
     track('agent.resourceReference.create');
     const selection = request && typeof request === 'object' ? request.selection : undefined;
@@ -2343,6 +2439,32 @@ function registerFixtureIpc() {
         token: `agent-ref:fixture:${documentId}`,
         domain: 'files',
         label: `fixture 资源引用：${documentId}`,
+        expiresAt: 4102444800000
+      }
+    };
+  });
+
+  // S10 引用框选签发：与生产同形态（main 侧解码 + 合并 + 拼标签），fixture 复用
+  // shared 构建产物保证标签格式不漂移；跨表/跨行或无命中如实拒绝。
+  handleTrusted('agent.citation.create', (_event, request) => {
+    track('agent.citation.create');
+    const hitsValue = request && typeof request === 'object' ? request.hits : undefined;
+    const citation = mergeCiteHits(decodeCiteHits(hitsValue));
+    if (citation === null) {
+      return {
+        ok: false,
+        error: {
+          code: 'CITATION_UNSUPPORTED',
+          message: '这块还不能引用：框选命中跨了不同的表或行，或没有可引用的节点。'
+        }
+      };
+    }
+    return {
+      ok: true,
+      reference: {
+        token: `agent-cite:fixture:${randomUUID()}`,
+        domain: citation.kind === 'param' ? 'param' : citation.kind,
+        label: formatCitationLabel(citation),
         expiresAt: 4102444800000
       }
     };
@@ -2387,6 +2509,10 @@ function registerFixtureIpc() {
     // 生产侧 request.mode 省略时落到 'plan'（ipc.ts:2967）。renderer 若开始传
     // fullPermission，这里的记账会让它在断言中现形。
     track(`ai.agent.run:mode=${request.mode ?? 'absent'}`);
+    // S10：opaque 资源引用随任务提交（App 在 resources 非空时透传）。
+    if (Array.isArray(request.resources) && request.resources.length > 0) {
+      track(`ai.agent.run:resources=${request.resources.length}`);
+    }
     agentSessionSeq += 1;
     const sessionId = `fixture-session-${agentSessionSeq}`;
     const window = BrowserWindow.fromWebContents(event.sender);

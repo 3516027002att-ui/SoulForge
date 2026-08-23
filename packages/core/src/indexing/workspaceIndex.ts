@@ -88,9 +88,27 @@ export class WorkspaceIndex {
     this.paramExports = replaceByKey(this.paramExports, value.paramName.toLowerCase(), (item) => item.paramName.toLowerCase(), value);
   }
 
+  /** Merge a partial live PARAM read without erasing rows indexed earlier. */
+  mergeParamRows(value: ParamExport): void {
+    const key = value.paramName.toLowerCase();
+    const existing = this.paramExports.find((item) => item.paramName.toLowerCase() === key);
+    const rows = new Map((existing?.rows ?? []).map((row) => [row.rowId, row]));
+    for (const row of value.rows) rows.set(row.rowId, row);
+    this.upsertParamExport({ paramName: value.paramName, rows: [...rows.values()] });
+  }
+
   upsertMsgExport(value: MsgExport): void {
     const key = value.category ?? 'default';
     this.msgExports = replaceByKey(this.msgExports, key, (item) => item.category ?? 'default', value);
+  }
+
+  /** Merge a partial live FMG read without erasing entries indexed earlier. */
+  mergeMsgEntries(value: MsgExport): void {
+    const key = value.category ?? 'default';
+    const existing = this.msgExports.find((item) => (item.category ?? 'default') === key);
+    const entries = new Map((existing?.entries ?? []).map((entry) => [entry.textId, entry]));
+    for (const entry of value.entries) entries.set(entry.textId, entry);
+    this.upsertMsgExport({ ...(value.category ? { category: value.category } : {}), entries: [...entries.values()] });
   }
 
   /** 照 upsertMapExport 抄：TAE 一份 anibnd 一个 TaeExport，按 sourceUri 替换。 */
@@ -234,8 +252,34 @@ export class WorkspaceIndex {
   }
 }
 
+const SEKIRO_SEARCH_SYNONYMS: ReadonlyArray<[RegExp, string]> = [
+  [/鬼[刑型]部/g, '鬼形部 鬼庭形部雅孝 50800000 Gyoubu'],
+  [/形部/g, '鬼形部 鬼庭形部雅孝 50800000 Gyoubu'],
+  [/雅孝/g, '鬼庭形部雅孝 50800000'],
+  [/蝴蝶夫人|阿蝶/g, '幻影之蝶 50900000 Butterfly'],
+  [/弦一郎/g, '苇名弦一郎 51100000 11000000 Genichiro'],
+  [/狮子猿/g, '狮子猿 51000000 51000100 Ape Guardian'],
+  [/巨型忍者|义父|枭/g, '巨型忍者 枭 50600000 50601000 Father Owl'],
+  [/一心|剑圣/g, '苇名一心 剑圣 54000000 54300000 Isshin'],
+  [/破戒僧/g, '破戒僧 50000000 50100000 Monk'],
+  [/赤鬼/g, '赤鬼 50210000 50210080 Ogre'],
+  [/火牛|樱牛/g, '火牛 樱牛 50100000 50100100 Bull'],
+  [/佐濑甚助|居合哥/g, '佐濑甚助 10100000 Jinsuke']
+];
+
+function expandSearchQuery(query: string): string {
+  let expanded = query;
+  for (const [pattern, replacement] of SEKIRO_SEARCH_SYNONYMS) {
+    if (pattern.test(query)) {
+      expanded += ` ${replacement}`;
+    }
+  }
+  return expanded;
+}
+
 function searchSymbols<T>(items: T[], query: string, limit: number, toText: (item: T) => string): Array<SearchResult<T>> {
-  const normalized = normalizeSearch(query);
+  const expandedQuery = expandSearchQuery(query);
+  const normalized = normalizeSearch(expandedQuery);
   const results: Array<SearchResult<T>> = [];
   for (const item of items) {
     const text = toText(item);
@@ -254,6 +298,17 @@ function scoreText(text: string, query: string): number {
     if (normalized === term) score += 100;
     else if (normalized.startsWith(term)) score += 40;
     else if (normalized.includes(term)) score += 12;
+    else if (term.length >= 2) {
+      let cjkMatchCount = 0;
+      for (const ch of term) {
+        if (/[\u4e00-\u9fa5]/.test(ch) && normalized.includes(ch)) {
+          cjkMatchCount++;
+        }
+      }
+      if (cjkMatchCount >= 2) {
+        score += cjkMatchCount * 3;
+      }
+    }
   }
   return score;
 }
@@ -261,7 +316,20 @@ function scoreText(text: string, query: string): number {
 function makeHighlights(text: string, query: string): string[] {
   if (query.length === 0) return [];
   const normalized = normalizeSearch(text);
-  return query.split(' ').filter((term) => term.length > 0 && normalized.includes(term));
+  const terms = query.split(' ').filter(Boolean);
+  const highlights: string[] = [];
+  for (const term of terms) {
+    if (term.length > 0 && normalized.includes(term)) {
+      highlights.push(term);
+    } else {
+      for (const ch of term) {
+        if (/[\u4e00-\u9fa5]/.test(ch) && normalized.includes(ch)) {
+          highlights.push(ch);
+        }
+      }
+    }
+  }
+  return [...new Set(highlights)];
 }
 
 function sortAndLimit<T>(results: Array<SearchResult<T>>, limit: number): Array<SearchResult<T>> {

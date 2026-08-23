@@ -70,7 +70,7 @@ export async function runBridge<T = unknown>(options: RunBridgeOptions): Promise
       maxFrameBytes: options.maxFrameBytes ?? 16 * 1024 * 1024,
       maxConcurrency: 2,
       startupTimeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    });
+    }, launch);
     const payload = await client.request<BridgeResult<T>>({
       payload: {
         command: options.command,
@@ -110,10 +110,64 @@ export async function disposeBridgeDaemonPool(): Promise<void> {
   }));
 }
 
+async function findCoveringClient(
+  launch: { executable: string; args: string[] },
+  allowedRoots: string[],
+  writableRoots: string[],
+  oodleRuntimeRoot?: string,
+  maxFrameBytes?: number
+): Promise<BridgeDaemonClient | undefined> {
+  const normAllowed = allowedRoots.map((r) => resolve(r));
+  const normWritable = writableRoots.map((r) => resolve(r));
+  for (const [key, promise] of clients.entries()) {
+    try {
+      const client = await promise;
+      if (client.isClosed) {
+        clients.delete(key);
+        continue;
+      }
+      if (client.options.executable !== launch.executable) continue;
+      if (oodleRuntimeRoot && client.options.oodleRuntimeRoot !== resolve(oodleRuntimeRoot)) continue;
+      if (maxFrameBytes && (client.options.maxFrameBytes ?? 0) < maxFrameBytes) continue;
+
+      const clientAllowed = client.options.allowedRoots.map((r) => resolve(r));
+      const allAllowedCovered = normAllowed.every((root) => isCoveredBy(root, clientAllowed));
+      if (!allAllowedCovered) continue;
+
+      const clientWritable = (client.options.writableRoots ?? []).map((r) => resolve(r));
+      const allWritableCovered = normWritable.every((root) => isCoveredBy(root, clientWritable));
+      if (!allWritableCovered) continue;
+
+      return client;
+    } catch {
+      clients.delete(key);
+    }
+  }
+  return undefined;
+}
+
+function isCoveredBy(target: string, roots: string[]): boolean {
+  const normalizedTarget = resolve(target).toLowerCase();
+  return roots.some((root) => {
+    const normalizedRoot = resolve(root).toLowerCase();
+    return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(normalizedRoot + (process.platform === 'win32' ? '\\' : '/'));
+  });
+}
+
 async function getOrCreateClient(
   key: string,
-  options: Parameters<typeof BridgeDaemonClient.start>[0]
+  options: Parameters<typeof BridgeDaemonClient.start>[0],
+  launch: { executable: string; args: string[] }
 ): Promise<BridgeDaemonClient> {
+  const covering = await findCoveringClient(
+    launch,
+    options.allowedRoots,
+    options.writableRoots ?? [],
+    options.oodleRuntimeRoot,
+    options.maxFrameBytes
+  );
+  if (covering) return covering;
+
   const existing = clients.get(key);
   if (existing) {
     const client = await existing;

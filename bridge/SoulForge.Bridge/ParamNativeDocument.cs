@@ -314,6 +314,11 @@ internal sealed class ParamNativeDocument
                 continue;
             }
             var encoded = EncodeParamRowName(name!, nextRows[i].NameBytes, nextRows[i].NameEncoding);
+            // 2-byte alignment for string pool entries (required for UTF-16LE in Sekiro 64-bit runtime).
+            if ((cursor & 1) != 0)
+            {
+                cursor++;
+            }
             rowNameOffsets[i] = cursor;
             rowNameBytes.Add(encoded);
             cursor += encoded.Length;
@@ -327,7 +332,7 @@ internal sealed class ParamNativeDocument
         WriteUInt16(rebuilt, 6, Unk06);
         WriteUInt16(rebuilt, 8, DataVersion);
         WriteUInt16(rebuilt, 10, (ushort)nextRows.Count);
-        WriteInt32(rebuilt, 0x10, nameOffset);
+        WriteInt64(rebuilt, 0x10, nameOffset);
 
         for (var i = 0; i < nextRows.Count; i++)
         {
@@ -335,10 +340,8 @@ internal sealed class ParamNativeDocument
             var dataOff = firstDataOffset + i * RowDataSize;
             WriteInt32(rebuilt, o, nextRows[i].Id);
             WriteInt32(rebuilt, o + 4, 0);
-            WriteInt32(rebuilt, o + 8, dataOff);
-            WriteInt32(rebuilt, o + 12, 0);
-            WriteInt32(rebuilt, o + 16, rowNameOffsets[i]);
-            WriteInt32(rebuilt, o + 20, 0);
+            WriteInt64(rebuilt, o + 8, dataOff);
+            WriteInt64(rebuilt, o + 16, rowNameOffsets[i]);
             nextRows[i].Data.CopyTo(rebuilt, dataOff);
         }
         typeNameBytes.CopyTo(rebuilt, nameOffset);
@@ -793,6 +796,7 @@ internal sealed class ParamNativeDocument
     private static int ReadInt32(byte[] source, int offset) => BinaryPrimitives.ReadInt32LittleEndian(source.AsSpan(offset, 4));
     private static ushort ReadUInt16(byte[] source, int offset) => BinaryPrimitives.ReadUInt16LittleEndian(source.AsSpan(offset, 2));
     private static void WriteInt32(byte[] target, int offset, int value) => BinaryPrimitives.WriteInt32LittleEndian(target.AsSpan(offset, 4), value);
+    private static void WriteInt64(byte[] target, int offset, long value) => BinaryPrimitives.WriteInt64LittleEndian(target.AsSpan(offset, 8), value);
     private static void WriteUInt16(byte[] target, int offset, ushort value) => BinaryPrimitives.WriteUInt16LittleEndian(target.AsSpan(offset, 2), value);
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 }

@@ -131,7 +131,7 @@ export function AgentApprovalPanel({
               {entry.permissionLevel} · {describeApprovalLevel(entry.permissionLevel)}
             </span>
           </div>
-          <p className="agent-approval__step">第 {entry.step} 步请求执行。批准或拒绝后任务才会继续。</p>
+          <p className="agent-approval__step">请求执行。批准或拒绝后任务才会继续。</p>
 
           {/* 改动 diff 预览。
               主进程读当前文件、用 createUnifiedDiff 算出 before/after 两侧的

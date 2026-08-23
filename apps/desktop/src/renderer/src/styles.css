@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════════
-   SoulForge Renderer — 锻造台设计系统（原型 a2bf265 视觉基底）
-   方向：Precision & Density（精密仪器 · Linear/Raycast 一脉）
-   色彩世界：钢铁(steel) · 灰烬(ash) · 余火(ember) · 和纸(paper)
+   SoulForge Renderer — 流光溢彩白（liuguang-banlan-ui）设计系统
+   规范：https://github.com/3516027002att-ui/liuguang-banlan-ui
+   方向：流光溢彩白（Radiant White）整块连续画布，后续接入五彩斑斓黑
    深度策略：borders-only（单一 hairline 体系，浮层才用阴影）
    ═══════════════════════════════════════════════════════════ */
 
@@ -13,9 +13,9 @@
   --sidebar-w: 264px;
   --agent-w: 440px;
 
-  /* Agent dock 外壳（§12.2 初值；参考图缺失，未对照 TRAE 实测） */
+  /* Agent dock 外壳 */
   --agent-dock-default: 440px;
-  --agent-dock-min: 96px; /* S8:下限约一条工具栏宽 */
+  --agent-dock-min: 96px;
   --agent-dock-max: 620px;
   --agent-header-height: 48px;
   --agent-resizer-width: 12px;
@@ -43,7 +43,7 @@
   --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, "SF Mono", monospace;
 }
 
-/* ── 暗色：钢铁与余火（ tinted steel foundation ） ── */
+/* ── 暗色底座（后续扩展为五彩斑斓黑） ── */
 [data-theme="dark"] {
   color-scheme: dark;
   /* 表面层级：0 画布 / 1 卡片·面板 / 2 浮层 / 3 叠层（逐级微亮） */
@@ -56,18 +56,17 @@
   /* 描边 */
   --line: oklch(100% 0 0 / 0.07);
   --line-strong: oklch(100% 0 0 / 0.14);
-  /* 墨色：四级文本层级（标尺经 WCAG AA 对比度求解：
-     ink-2/ink-3 在 forge-0 上 ≥4.5:1） */
+  /* 墨色：四级文本层级 */
   --ink-0: oklch(92% 0.008 262);
   --ink-1: oklch(72% 0.012 262);
   --ink-2: oklch(66% 0.012 262);
   --ink-3: oklch(58% 0.01 262);
-  /* 余火：唯一 accent */
+  /* 强调色 */
   --ember: oklch(74% 0.15 48);
   --ember-text: oklch(81% 0.13 48);
   --ember-soft: color-mix(in oklch, var(--ember), transparent 86%);
   --ember-glow: 0 0 0 1px color-mix(in oklch, var(--ember), transparent 55%), 0 0 20px color-mix(in oklch, var(--ember), transparent 82%);
-  /* 语义（暗色降彩）；*-text 为小文本 AA 变体；on-* 为填充色上的前景 */
+  /* 语义 */
   --ok: oklch(75% 0.12 158);
   --ok-soft: color-mix(in oklch, var(--ok), transparent 88%);
   --warn: oklch(78% 0.12 85);
@@ -79,33 +78,33 @@
   --on-danger: oklch(16% 0.02 25);
   --diff-add-bg: color-mix(in oklch, var(--ok), transparent 90%);
   --diff-del-bg: color-mix(in oklch, var(--danger), transparent 90%);
-  /* 浮层阴影（仅 overlay 使用） */
+  /* 浮层阴影 */
   --shadow-float:
     0 0 0 0.5px oklch(0% 0 0 / 0.2),
     0 4px 12px oklch(0% 0 0 / 0.35),
     0 12px 32px oklch(0% 0 0 / 0.3);
-  /* 低存在感控件四态（§3.1）：静止与背景融合，阴影只出现在交互态 */
+  /* 低存在感控件四态 */
   --control-rest-bg: transparent;
   --control-hover-bg: var(--forge-hover);
   --control-active-bg: var(--forge-active);
   --control-hover-shadow: 0 1px 2px rgb(0 0 0 / 0.24), 0 4px 10px rgb(0 0 0 / 0.14);
   --control-active-shadow: 0 1px 2px rgb(0 0 0 / 0.28), 0 3px 8px rgb(0 0 0 / 0.18);
-  /* 主操作填充（与 light 共享 token；dark 下回退到余火填充，观感不变） */
+  /* 主操作填充 */
   --primary-fill: var(--ember);
   --primary-fill-hover: color-mix(in oklch, var(--ember), white 10%);
   --on-primary: var(--on-ember);
 }
 
-/* ── 亮色：流光溢彩白（ radiant white foundation ）
-   同一种白的四个深度，不是四种组件颜色；环境流光透过白色表面轻微可见。
-   文字用不透明墨色，小字在实际合成背景上 ≥4.5:1（规格 §5.2 / §5.3）。 ── */
+/* ── 亮色：流光溢彩白（ radiant white foundation — liuguang-banlan-ui ）
+   整块连续画布，同一种白的四个深度，环境流光透过白色表面轻微可见。
+   文字用不透明墨色，小字在实际合成背景上 ≥4.5:1。 ── */
 [data-theme="light"] {
   color-scheme: light;
 
-  /* 连续窗口画布（窗口 90% 以上视觉面积的中性暖白；原生窗口同值 #FBFBF9） */
+  /* 连续窗口画布（整块中性暖白画布 #FBFBF9） */
   --canvas: oklch(98.7% 0.0025 92);
 
-  /* 同一种白的四个深度：0 最底层 / 1 常驻 chrome·pane / 2 输入与密集内容保护 /
+  /* 同一种白的四个深度：0 最底层画布 / 1 常驻 chrome·pane / 2 输入与密集内容保护 /
      3 modal·menu·cmdk·toast。值是不透明度，让环境流光按表面层级轻微透出。 */
   --forge-0: rgb(255 255 255 / 0.08); /* 连续画布 / 最底层 */
   --forge-1: rgb(255 255 255 / 0.38); /* 常驻 chrome / pane */
@@ -114,17 +113,17 @@
   --forge-hover: rgb(255 255 255 / 0.30);
   --forge-active: rgb(255 255 255 / 0.55);
 
-  /* hairline：锻造接缝 */
+  /* hairline：精细接缝 */
   --line: oklch(20% 0.01 255 / 0.06);
   --line-strong: oklch(20% 0.01 255 / 0.12);
 
-  /* 四级不透明墨色；小字不得低于 4.5:1 */
+  /* 四级不透明墨色 */
   --ink-0: oklch(26% 0.015 262);
   --ink-1: oklch(44% 0.015 262);
   --ink-2: oklch(48% 0.012 262);
   --ink-3: oklch(54% 0.010 262);
 
-  /* 唯一品牌强调：余火 */
+  /* 强调色 */
   --ember: oklch(50% 0.17 45);
   --ember-text: oklch(47% 0.16 45);
   --ember-soft: color-mix(in oklch, var(--ember), transparent 92%);
@@ -132,10 +131,7 @@
     0 0 0 1px color-mix(in oklch, var(--ember), transparent 68%),
     0 0 12px color-mix(in oklch, var(--ember), transparent 92%);
 
-  /* 语义状态：降彩但清楚。
-     --warn 从 §5.2 基线 55% 调暗到 51%：§13.4 对比度实测 warn 小字在珊瑚
-     ambient 热区 4.39、叠 --warn-soft 软底后 3.99，均低于小字 4.5 门；调暗后
-     bare-coral 5.21、soft-coral 4.68（§5.3 修正顺序第 1 条，修正日志见报告）。 */
+  /* 语义状态 */
   --ok: oklch(52% 0.10 158);
   --ok-soft: color-mix(in oklch, var(--ok), transparent 92%);
   --warn: oklch(51% 0.11 80);
@@ -148,7 +144,7 @@
   --diff-add-bg: color-mix(in oklch, var(--ok), transparent 94%);
   --diff-del-bg: color-mix(in oklch, var(--danger), transparent 94%);
 
-  /* 主操作是中性墨色，不用余火填充；每个任务区域最多一个 */
+  /* 主操作是中性墨色；每个任务区域最多一个 */
   --primary-fill: oklch(22% 0.008 255 / 0.94);
   --primary-fill-hover: oklch(16% 0.008 255 / 0.97);
   --on-primary: oklch(99% 0 0);
@@ -263,7 +259,7 @@ html[data-theme="light"][data-ambient="shader"] body::after {
   display: none;
 }
 
-/* 焦点可见性（键盘可达）：2px 余火焦点环，与 hover 阴影/选中态可区分。
+/* 焦点可见性（键盘可达）：焦点环，与 hover 阴影/选中态可区分。
    input/textarea/select 不用 outline，改用边框 + 焦点环阴影（见下方输入基线）。 */
 :focus-visible { outline: 2px solid var(--ember-text); outline-offset: 2px; border-radius: var(--radius-s); }
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; }
@@ -367,8 +363,8 @@ kbd {
 }
 
 /* ═══════════ 顶部资源目录栏（titlebar 下方、shell 上方） ═══════════
-   单行紧凑标签，窄窗口水平滚动不换行；当前项余火色细下划线。
-   四态遵循 §3.1 低存在感控件语言。 */
+   单行紧凑标签，窄窗口水平滚动不换行；当前项细下划线。
+   四态遵循低存在感控件语言。 */
 .resource-bar {
   flex: none; display: flex; align-items: center; gap: 8px;
   padding: 0 12px; height: 34px;
@@ -763,10 +759,10 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .project-overview,
 .domain-placeholder {
   max-width: 760px; width: 100%; margin: auto; padding: 28px 32px;
-  border-left: 2px solid var(--ember); background: transparent;
+  background: transparent;
 }
 .domain-placeholder__eyebrow {
-  color: var(--ember-text); font: 10px var(--font-mono); letter-spacing: .12em;
+  color: var(--ink-2); font: 10px var(--font-mono); letter-spacing: .12em;
 }
 .project-overview h1,
 .domain-placeholder h2 { margin-top: 10px; font-size: 20px; font-weight: 600; color: var(--ink-0); }
@@ -778,17 +774,16 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
   display: flex; flex-direction: column; gap: 6px; margin-top: 20px; max-width: 340px;
   font-size: 12px; color: var(--ink-2);
 }
-.domain-placeholder { border-left-color: var(--warn); }
 .domain-placeholder .muted { display: block; margin-top: 12px; font-size: 11px; line-height: 1.6; }
 
 /* SHELL-09：语义领域在资源浏览器侧栏内的占位（不渲染物理文件列表） */
 .domain-browse-placeholder {
   flex: 1 1 0; min-height: 0; overflow-y: auto;
-  padding: 18px 16px; border-left: 2px solid var(--warn);
+  padding: 18px 16px;
   background: var(--forge-1); color: var(--ink-2); font-size: 12px; line-height: 1.7;
 }
 .domain-browse-placeholder .domain-placeholder__eyebrow {
-  color: var(--ember-text); font: 10px var(--font-mono); letter-spacing: .12em;
+  color: var(--ink-2); font: 10px var(--font-mono); letter-spacing: .12em;
 }
 .domain-browse-placeholder p { margin-top: 8px; }
 .domain-browse-placeholder .muted { font-size: 11px; color: var(--ink-3); }
@@ -830,10 +825,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 /* EVENT-30B DarkScript3 式源码 IDE：文档标签 + 源码主区 + 查找替换；Outline /
    Inspector 仅显式打开；Problems 底部 dock。不做 260/320 固定三栏。 */
 .esw-tabs {
-  display: flex; align-items: stretch; gap: 2px; padding: 6px 6px 0; border-bottom: 1px solid var(--line); background: var(--forge-2); overflow-x: auto;
-  /* tab 按钮是点击目标，不可被极矮视口下的 flex 压缩压扁（实测 tabs 被压到 7px，
-     tab 按钮溢出容器，中心点落在容器外被 header 拦截，Playwright 点击超时）。 */
-  flex: none;
+  display: none;
 }
 .esw-tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid transparent; border-bottom: none; border-radius: var(--radius-s) var(--radius-s) 0 0; background: transparent; color: var(--ink-3); font-size: 11px; cursor: pointer; white-space: nowrap; }
 .esw-tab:hover { background: var(--control-hover-bg); color: var(--ink-1); }
@@ -1311,10 +1303,8 @@ pre.tool-output {
 }
 .agent__title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
 .agent-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
-  animation: pulse 2.4s ease-in-out infinite;
+  display: none;
 }
-.agent-dot.is-busy { background: var(--ember); animation-duration: .9s; }
 .agent__header-actions { display: flex; align-items: center; gap: 4px; }
 /* §12.3：28×28 按钮、16px 图标；默认无背景无边框，hover 只显示一级表面色 */
 .agent-icon-btn {
@@ -1400,17 +1390,17 @@ pre.tool-output {
 }
 .agent-welcome li { position: relative; padding-left: 22px; line-height: 1.8; }
 .agent-welcome li::before { content: "✓"; position: absolute; left: 0; color: var(--ok); }
-.agent-message { padding: 10px 12px; border: 0; border-left: 2px solid transparent; background: var(--forge-1); font-size: 12px; line-height: 1.6; user-select: text; }
-.agent-message--user { border-left: 2px solid var(--line-strong); }
-.agent-message--agent { border-left: 2px solid var(--ember); }
-.agent-message--system { display: flex; align-items: center; gap: 8px; color: var(--ink-2); }
+.agent-message { padding: 6px 0; border: 0; background: transparent; font-size: 13px; line-height: 1.65; user-select: text; }
+.agent-message--user { background: var(--forge-2); border-radius: 8px; padding: 8px 12px; margin: 4px 0; border: 0; }
+.agent-message--agent { background: transparent; border: 0; }
+.agent-message--system { display: flex; align-items: center; gap: 8px; color: var(--ink-2); background: transparent; border: 0; }
 .agent-message__meta { margin-bottom: 3px; color: var(--ink-3); font: 10px var(--font-mono); }
 .agent-message__actions { margin: 6px 0 0; padding-left: 17px; color: var(--ink-1); }
 
 /* 任务块：目标 / 证据 / 日志，替代聊天气泡 */
 .task-goal {
   padding: 8px 12px; font-size: 12.5px; line-height: 1.6; color: var(--ink-0);
-  border-left: 2px solid var(--ember); background: var(--forge-1);
+  border-left: 2px solid var(--line-strong); background: var(--forge-1);
   border-radius: 0;
   animation: msg-in var(--dur-trans) var(--ease-standard);
   user-select: text;
@@ -1487,30 +1477,25 @@ pre.tool-output {
    消息流四态组件：工具活动行（默认单行折叠）、Change Review 审批卡、
    失败态有界诊断、回到底部按钮、二级抽屉。 */
 
-/* 工具活动行：默认折叠为单行摘要（§12.5）。 */
+/* 工具活动行：无框流式输出（§12.5 流式）。 */
 .agent-tool-activity {
-  border: 1px solid var(--line);
-  border-left-width: 3px;
-  border-radius: 4px;
-  padding: 4px 8px;
-  background: var(--forge-2);
+  border: none;
+  border-radius: 0;
+  padding: 2px 0;
+  background: transparent;
   max-width: 100%;
 }
-.agent-tool-activity.is-running { border-left-color: var(--ember-text); }
-.agent-tool-activity.is-succeeded { border-left-color: var(--ok); }
-.agent-tool-activity.is-failed { border-left-color: var(--danger); }
+.agent-tool-activity.is-running,
+.agent-tool-activity.is-succeeded,
+.agent-tool-activity.is-failed { border-left-color: transparent; }
 .agent-tool-activity__details > summary {
   display: flex; align-items: center; gap: 8px;
   list-style: none; cursor: pointer; font-size: 12px; line-height: 1.5;
 }
 .agent-tool-activity__details > summary::-webkit-details-marker { display: none; }
 .agent-tool-activity__dot {
-  width: 8px; height: 8px; flex: none; border-radius: 50%;
-  background: var(--ink-3);
+  display: none;
 }
-.agent-tool-activity__dot.is-running { background: var(--ember-text); animation: pulse 1s ease-in-out infinite; }
-.agent-tool-activity__dot.is-succeeded { background: var(--ok); }
-.agent-tool-activity__dot.is-failed { background: var(--danger); }
 .agent-tool-activity__step { flex: none; color: var(--ink-3); font: 10px var(--font-mono); }
 .agent-tool-activity__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
 .agent-tool-status { flex: none; font-size: 10px; font-family: var(--font-mono); color: var(--ink-3); }
@@ -1518,11 +1503,36 @@ pre.tool-output {
 .agent-tool-status--succeeded { color: var(--ok); }
 .agent-tool-status--failed { color: var(--danger); }
 .agent-tool-activity__detail {
-  margin-top: 6px; padding: 6px 8px; border-top: 1px solid var(--line);
-  max-height: 220px; overflow: auto;
+  margin-top: 4px; padding: 4px 0 4px 16px; border-top: none;
+  max-height: 360px; overflow: auto;
 }
 .agent-tool-activity__detail-label { font-size: 10px; color: var(--ink-3); margin-bottom: 4px; }
 .agent-tool-activity__detail .tool-output { margin: 0; white-space: pre-wrap; word-break: break-all; }
+
+.agent-compact-summary {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--ink-3); padding: 4px 0;
+}
+.agent-thinking {
+  font-size: 12px; color: var(--ink-3); padding: 2px 0 6px;
+}
+.agent-thinking.is-live {
+  display: flex; align-items: center; gap: 6px; color: var(--ink-2);
+}
+.agent-thinking > summary {
+  cursor: pointer; color: var(--ink-2); font-size: 12px; list-style: none;
+}
+.agent-thinking > summary::-webkit-details-marker { display: none; }
+.agent-thinking > summary::before { content: "▸ "; color: var(--ink-3); }
+.agent-thinking[open] > summary::before { content: "▾ "; }
+.agent-thinking__body {
+  margin-top: 6px; white-space: pre-wrap; color: var(--ink-2);
+  font-size: 12.5px; line-height: 1.65; max-height: 240px; overflow: auto;
+}
+.agent-tool-chip-row {
+  display: flex; flex-direction: column; gap: 2px; padding: 2px 0;
+}
+.agent-message__markdown { white-space: pre-wrap; }
 
 /* Change Review 审批卡：消息流唯一强边界卡（§12.5/§12.9）。 */
 .agent-approval-card {
@@ -1601,6 +1611,166 @@ pre.tool-output {
 }
 .agent-secondary-drawer.is-hidden { display: none; }
 
+/* ── 项目长期记忆抽屉 (Codex MEMORY.md) ── */
+.agent-memory-drawer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 12px 16px;
+  gap: 12px;
+  color: var(--ink-1);
+}
+.agent-memory-drawer__header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-memory-drawer__hint {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  margin: 0;
+}
+.agent-memory-drawer__toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.agent-memory-drawer__search {
+  flex: 1;
+  padding: 5px 10px;
+  font-size: 12px;
+  background: var(--forge-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  color: var(--ink-0);
+}
+.agent-memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.agent-memory-item {
+  background: var(--forge-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.04);
+  transition: border-color var(--dur-micro);
+}
+.agent-memory-item:hover {
+  border-color: var(--line-strong);
+}
+.agent-memory-item__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.agent-memory-item__title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.agent-memory-item__topic {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-s);
+  background: var(--ember-soft);
+  color: var(--ember-text);
+  border: 1px solid color-mix(in oklch, var(--ember), transparent 75%);
+}
+.agent-memory-item__summary {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-0);
+  line-height: 1.4;
+}
+.agent-memory-item__actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.agent-memory-item__details {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-1);
+  background: var(--forge-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+.agent-memory-item__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.agent-memory-tag {
+  font-size: 10.5px;
+  color: var(--ink-2);
+  background: var(--forge-1);
+  border: 1px solid var(--line);
+  padding: 1px 6px;
+  border-radius: var(--radius-s);
+}
+.agent-memory-editor-form {
+  background: var(--forge-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-m);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: var(--shadow-float);
+}
+.agent-memory-editor-form__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-0);
+  margin-bottom: 2px;
+}
+.agent-memory-editor-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 550;
+  color: var(--ink-1);
+}
+.agent-memory-editor-form input,
+.agent-memory-editor-form textarea {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+  background: var(--forge-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-s);
+  color: var(--ink-0);
+}
+.agent-memory-editor-form textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+.agent-memory-editor-form__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+
 
 /* 证据与格式检查折叠区：排在编辑器之后，默认收起。
    它们是给 AI 与排查用的证据投影，不是日常编辑要看的内容。 */
@@ -1675,6 +1845,11 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 /* 1-D：省略号必须落在内部 label 上——inline-flex 容器的 text-overflow 不生效，
    超长 chip 在任何宽度下都会溢出而不是显示省略号。 */
 .ctx-chip__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-chip__remove {
+  flex: none; width: 16px; height: 16px; display: grid; place-items: center;
+  color: var(--ink-2); border-radius: var(--radius-s); font-size: 12px; line-height: 1;
+}
+.ctx-chip__remove:hover { color: var(--ink-0); background: var(--control-hover-bg); }
 .agent__composer textarea {
   width: 100%; resize: none; padding: 8px 12px; font-size: 12.5px; line-height: 1.55;
   background: var(--forge-1); border: 1px solid var(--line);
@@ -1851,7 +2026,7 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
   width: min(560px, 92vw); background: var(--forge-3); border: 1px solid var(--line-strong);
   border-radius: var(--radius-modal); box-shadow: var(--shadow-float); overflow: hidden;
 }
-/* 命令面板是唯一「召唤入口」：聚焦时着余火微光 */
+/* 命令面板（Command Palette）：聚焦时高亮微光 */
 .cmdk:focus-within { border-color: color-mix(in oklch, var(--ember), transparent 60%); box-shadow: var(--ember-glow), var(--shadow-float); }
 .cmdk__input-wrap { display: flex; align-items: center; gap: 8px; padding: 12px 16px; color: var(--ink-2); border-bottom: 1px solid var(--line); }
 .cmdk__input-wrap input { flex: 1; background: none; border: none; outline: none; font-size: 13.5px; box-shadow: none; }
@@ -1893,6 +2068,27 @@ details.agent-block > summary.agent-block__label { cursor: pointer; }
 @keyframes toast-out { to { opacity: 0; transform: translateX(24px); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+
+/* S10 引用框选暗幕：只盖中央编辑区（.editor-area 已 position:relative），
+   Agent dock 是 main 之外的 flex 兄弟，天然保持明亮。无此规则时暗幕是
+   文档流里的零高 div，拖拽事件落不到它上。 */
+.cite-scrim {
+  position: absolute; inset: 0; z-index: 60;
+  background: color-mix(in srgb, var(--forge-0) 62%, transparent);
+  cursor: crosshair;
+}
+.cite-scrim__hint {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  font-size: 11px; color: var(--ink-2); pointer-events: none;
+  background: var(--forge-2); border: 1px solid var(--line);
+  border-radius: var(--radius-s); padding: 3px 10px;
+}
+/* 选区矩形用 clientX/Y 定位，必须 fixed 才与坐标同系。 */
+.cite-select-box {
+  position: fixed; z-index: 61; pointer-events: none;
+  border: 1px solid var(--ember);
+  background: color-mix(in srgb, var(--ember-soft) 45%, transparent);
+}
 
 /* ═══════════ 响应式 ═══════════ */
 @media (max-width: 920px) {

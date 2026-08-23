@@ -33,8 +33,7 @@ export interface OpenAiResponsesAdapterOptions {
 }
 
 export class OpenAiResponsesAdapter implements ModelServiceAdapter {
-  /** Uses openai-compatible protocol tag for agent audit isolation until dedicated enum lands. */
-  readonly protocol = 'openai-compatible' as const;
+  readonly protocol = 'openai-responses' as const;
   readonly transport = 'openai-responses' as const;
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -192,6 +191,16 @@ export class OpenAiResponsesAdapter implements ModelServiceAdapter {
             continue;
           }
           const eventType = event.type ?? '';
+          if (
+            (eventType === 'response.reasoning_summary_text.delta'
+              || eventType === 'response.reasoning_text.delta'
+              || eventType === 'response.reasoning.delta')
+            && typeof event.delta === 'string'
+            && event.delta.length > 0
+          ) {
+            yield { type: 'thinking-delta', text: event.delta };
+            continue;
+          }
           if (eventType === 'response.output_text.delta' && typeof event.delta === 'string') {
             yield { type: 'text-delta', text: event.delta };
             continue;
@@ -325,8 +334,9 @@ function buildResponsesBody(
     ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
     ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
     ...(request.topP !== undefined ? { top_p: request.topP } : {}),
-    // Responses API 的思考档位走 reasoning.effort；topK 协议无此字段不下发。
-    ...(reasoningEffort !== undefined ? { reasoning: { effort: reasoningEffort } } : {})
+    // Responses API 的思考档位走 reasoning.effort；要可见的思考摘要时带 summary=auto。
+    // topK 协议无此字段不下发。
+    ...(reasoningEffort !== undefined ? { reasoning: { effort: reasoningEffort, summary: 'auto' } } : {})
   };
 }
 
@@ -360,6 +370,20 @@ function toResponsesInputItem(message: ChatMessage): Record<string, unknown> {
           call_id: call.id,
           name: call.name,
           arguments: call.argumentsJson
+        }))
+      ]
+    };
+  }
+  // 多模态：user 消息带图像时 content 用 input_* parts（data URL 内联）。
+  if (message.role === 'user' && message.images && message.images.length > 0) {
+    return {
+      type: 'message',
+      role: 'user',
+      content: [
+        { type: 'input_text', text: message.content },
+        ...message.images.map((image) => ({
+          type: 'input_image',
+          image_url: `data:${image.mediaType};base64,${image.dataBase64}`
         }))
       ]
     };

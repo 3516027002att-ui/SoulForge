@@ -5,7 +5,7 @@
 
 import type { RagRetrieveResult } from '@soulforge/shared';
 
-export type ModelServiceProtocol = 'openai-compatible' | 'anthropic-compatible';
+export type ModelServiceProtocol = 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
 
 export type AgentPermissionMode = 'plan' | 'normal' | 'full';
 
@@ -124,12 +124,23 @@ export interface ModelServiceCredentialRef {
   secretRef: string;
 }
 
+/** 用户消息携带的视觉内容（base64 内联，adapter 按协议序列化）。 */
+export interface ChatMessageImage {
+  mediaType: string;
+  dataBase64: string;
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   name?: string;
   toolCallId?: string;
   toolCalls?: ToolCall[];
+  /**
+   * 多模态图像（仅 user 消息有意义）。只随模型请求下发，不进 rollout 与
+   * renderer 推送——持久记录保持文本形态。
+   */
+  images?: readonly ChatMessageImage[];
 }
 
 export interface ToolCall {
@@ -160,6 +171,7 @@ export interface ToolDefinition {
 
 export type StreamEvent =
   | { type: 'text-delta'; text: string }
+  | { type: 'thinking-delta'; text: string }
   | { type: 'tool-call'; toolCall: ToolCall }
   | { type: 'message-stop'; finishReason: 'stop' | 'tool_use' | 'length' | 'cancelled' | 'error' }
   | { type: 'error'; code: string; message: string }
@@ -326,6 +338,7 @@ export interface ApprovalResponse {
 export type AgentEvent =
   | { type: 'turn-started'; step: number }
   | { type: 'agent-message-delta'; step: number; text: string }
+  | { type: 'agent-thinking-delta'; step: number; text: string }
   | { type: 'tool-call-begin'; step: number; callId: string; name: string; argumentsJson?: string }
   | { type: 'tool-call-end'; step: number; callId: string; name: string; ok: boolean; code?: string }
   | {
@@ -382,6 +395,18 @@ export type RolloutItem =
       replacementHistory?: ChatMessage[];
     }
   | { type: 'interrupted'; at: string }
+  | {
+      /**
+       * Durable terminal record for one agent run.  Older rollouts simply do
+       * not have this item; resume must therefore keep it optional.
+       */
+      type: 'turn-complete';
+      at: string;
+      finishReason: string;
+      taskStatus: 'completed' | 'partial' | 'cancelled' | 'error';
+      steps: number;
+      diagnostics: Array<{ severity: 'info' | 'warning' | 'error'; code: string; message: string }>;
+    }
   | { type: 'rollback-marker'; at: string; keepLastUserTurns: number };
 
 /** Minimal sink the agent loop needs; RolloutRecorder implements it. */
@@ -416,7 +441,10 @@ export interface AgentRunRequest {
   tools: ToolDefinition[];
   permissionMode: AgentPermissionMode;
   /** Tool executor returns tool result content or policy denial. */
-  executeTool: (call: ToolCall) => Promise<{ ok: boolean; content: string; code?: string }>;
+  executeTool: (
+    call: ToolCall,
+    contextOverride?: Record<string, unknown>
+  ) => Promise<{ ok: boolean; content: string; code?: string }>;
   maxSteps?: number;
   signal?: AbortSignal;
   /** Per-LLM-call timeout in milliseconds. */

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { createPortal } from 'react-dom';
 
-export type AgentInteractionMode = 'ask' | 'plan' | 'edit';
+export type AgentInteractionMode = 'ask' | 'plan' | 'edit' | 'bypass';
 
 export const AGENT_INTERACTION_MODES: ReadonlyArray<{
   id: AgentInteractionMode;
@@ -10,7 +10,8 @@ export const AGENT_INTERACTION_MODES: ReadonlyArray<{
 }> = [
   { id: 'ask', label: 'Ask', description: '只读问答与解释' },
   { id: 'plan', label: 'Plan', description: '形成提案，不直接写入' },
-  { id: 'edit', label: 'Edit', description: '在权限约束内提出编辑' }
+  { id: 'edit', label: 'Edit', description: '编辑并逐项审批确认' },
+  { id: 'bypass', label: 'Bypass', description: '⚡ 免审批全自动提交修改' }
 ];
 
 export function interactionModeLabel(mode: AgentInteractionMode): string {

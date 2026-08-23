@@ -47,9 +47,6 @@ export function AgentResourceReferencePicker(props: AgentResourceReferencePicker
       aria-label="Agent 资源引用"
     >
       <div className="composer-context" aria-label="已引用的资源">
-        {resources.length === 0 && (
-          <span className="muted" data-testid="agent-resource-refs-empty">未引用资源</span>
-        )}
         {resources.map((reference) => (
           <span className="ctx-chip" key={reference.token} title={reference.label}>
             <span aria-hidden="true">#</span>

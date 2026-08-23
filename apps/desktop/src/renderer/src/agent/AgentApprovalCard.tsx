@@ -74,6 +74,8 @@ export function AgentApprovalCard(props: AgentApprovalCardProps): ReactElement {
   if (diff !== null) {
     impactParts.push(`+${diff.addedLines} / -${diff.removedLines} 行`);
     if (diff.newFile) impactParts.push('新文件');
+  } else if (preview?.changeCount !== null && preview?.changeCount !== undefined) {
+    impactParts.push(`${preview.changeCount} 处改动`);
   }
 
   return (
@@ -86,7 +88,7 @@ export function AgentApprovalCard(props: AgentApprovalCardProps): ReactElement {
         <strong>{toolName}</strong>
         <span className="agent-approval-card__level">{permissionLevel} · {describeApprovalLevel(permissionLevel)}</span>
       </div>
-      <p className="agent-approval-card__step">第 {step} 步请求执行。批准并提交后任务才会继续。</p>
+      <p className="agent-approval-card__step">请求执行。批准并提交后任务才会继续。</p>
 
       <dl className="agent-approval-card__review">
         <div className="agent-approval-card__row" data-testid="approval-row-operation">
@@ -101,7 +103,15 @@ export function AgentApprovalCard(props: AgentApprovalCardProps): ReactElement {
           <dt>diff</dt>
           <dd>
             {diff === null
-              ? unavailable('主进程未能为该调用生成 diff')
+              ? (preview?.newText !== null && preview?.newText !== undefined
+                ? (
+                  <div className="agent-approval-card__diff">
+                    <pre className="agent-approval-card__diff-body" data-testid="agent-approval-card-diff-body">
+                      {preview.newText}
+                    </pre>
+                  </div>
+                )
+                : unavailable('主进程未能为该调用生成 diff'))
               : (
                 <div className="agent-approval-card__diff">
                   <pre className="agent-approval-card__diff-body" data-testid="agent-approval-card-diff-body">

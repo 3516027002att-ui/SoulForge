@@ -13,7 +13,7 @@ import type { ModelThinkingLevel } from '@soulforge/core';
 export interface StoredModelServiceConfig {
   id: string;
   displayName: string;
-  protocol: 'openai-compatible' | 'anthropic-compatible';
+  protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
   baseUrl: string;
   model: string;
   hasCredential: boolean;
@@ -51,7 +51,7 @@ function isStoredConfig(value: unknown): value is StoredModelServiceConfig {
   return typeof value.id === 'string'
     && value.id.length > 0
     && typeof value.displayName === 'string'
-    && (value.protocol === 'openai-compatible' || value.protocol === 'anthropic-compatible')
+    && (value.protocol === 'openai-compatible' || value.protocol === 'openai-responses' || value.protocol === 'anthropic-compatible')
     && typeof value.baseUrl === 'string'
     && typeof value.model === 'string'
     && typeof value.hasCredential === 'boolean'

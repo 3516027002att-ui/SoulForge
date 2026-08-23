@@ -16,6 +16,7 @@
 import type { ModelServiceAdapter } from './types.js';
 import type {
   AgentEvent,
+  AgentPermissionMode,
   AgentRunRequest,
   AgentRunResult,
   ApprovalDecision,
@@ -28,6 +29,7 @@ import type {
   ToolCall
 } from './types.js';
 import type { ModelServiceDiagnostic } from './errorClassification.js';
+import { classifyFetchError } from './errorClassification.js';
 import type { AiToolPermissionLevel } from '@soulforge/shared';
 // 权限判据的唯一权威来源。agentLoop 直接消费它而不是复写一套 plan 语义 ——
 // 两份可以各自漂移的真相比一层额外防护危险。
@@ -41,6 +43,25 @@ import {
 } from './retryPolicy.js';
 import { estimateContextTokens, isContextOverflowDiagnostic, runCompaction } from './contextCompactor.js';
 import { APPROVAL_DECISIONS_DENYING } from './types.js';
+
+/** 连续工具调用失败上限门禁：达到该阈值时自动终止循环以防死循环。 */
+export const MAX_CONSECUTIVE_TOOL_FAILURES = 10;
+/** 默认有限步数，防止没有调用方预算时永久占用会话。 */
+export const DEFAULT_MAX_AGENT_STEPS = 64;
+/** 单次运行的工具执行上限，独立于模型步数（并行调用也计数）。 */
+export const MAX_TOTAL_TOOL_CALLS = 256;
+
+const INCOMPLETE_CONCLUSION_PATTERNS: readonly RegExp[] = [
+  /(?:接下来|下一步)(?:我)?(?:会|将|准备|继续|开始|去)?[^。！？\n]{0,48}(?:执行|修改|修复|实现|落地|检查|验证|处理)/u,
+  /(?:我现在|我马上|随后我会|然后我会)[^。！？\n]{0,48}(?:执行|修改|修复|实现|落地|检查|验证|处理)/u,
+  /\b(?:next\s+i(?:'ll|\s+will)|i\s+will\s+now|i'm\s+going\s+to|proceed(?:ing)?\s+to)\b/i
+];
+
+/** 识别“承诺下一步动作、但本轮没有工具调用”的非终态回复。 */
+export function looksLikeIncompleteConclusion(content: string): boolean {
+  const normalized = content.trim();
+  return normalized.length > 0 && INCOMPLETE_CONCLUSION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
 
 const SECRET_PATTERNS = [
   /sk-[a-zA-Z0-9_-]{10,}/g,
@@ -245,7 +266,8 @@ export function isToolAllowedInMode(
 async function collectStreamCompletion(
   adapter: ModelServiceAdapter,
   request: ModelCompleteRequest,
-  onTextDelta: (text: string) => void
+  onTextDelta: (text: string) => void,
+  onThinkingDelta?: (text: string) => void
 ): Promise<ModelCompleteResult> {
   let content = '';
   const toolCalls: ToolCall[] = [];
@@ -259,6 +281,9 @@ async function collectStreamCompletion(
         case 'text-delta':
           content += event.text;
           onTextDelta(event.text);
+          break;
+        case 'thinking-delta':
+          onThinkingDelta?.(event.text);
           break;
         case 'tool-call':
           toolCalls.push(event.toolCall);
@@ -286,11 +311,8 @@ async function collectStreamCompletion(
     if (request.signal?.aborted) {
       finishReason = 'cancelled';
     } else {
-      diagnostics.push({
-        severity: 'error',
-        code: 'MODEL_SERVICE_REQUEST_FAILED',
-        message: `流式响应消费失败：${error instanceof Error ? error.message : String(error)}`
-      });
+      const classified = classifyFetchError(error, '流式响应', request.signal);
+      diagnostics.push(classified);
       finishReason = 'error';
     }
   }
@@ -313,7 +335,7 @@ export async function runAgentToolLoop(
   adapter: ModelServiceAdapter,
   request: AgentRunRequest
 ): Promise<AgentRunResult> {
-  const maxSteps = request.maxSteps ?? 8;
+  const maxSteps = Math.max(1, Math.trunc(request.maxSteps ?? DEFAULT_MAX_AGENT_STEPS));
   const messages: ChatMessage[] = [...request.messages];
   const diagnostics: AgentRunResult['diagnostics'] = [];
   const toolAudit: AgentRunResult['audit']['toolCalls'] = [];
@@ -344,9 +366,13 @@ export async function runAgentToolLoop(
   const activeRetryPolicy = request.streaming
     ? { ...retryPolicy, maxAttempts: streamBudget }
     : retryPolicy;
+  let currentMode: AgentPermissionMode = request.permissionMode ?? 'plan';
+  let consecutiveIdenticalToolFailures = 0;
+  let lastFailedToolSignature: string | null = null;
   let steps = 0;
   let finishReason = 'stop';
   let totalOutputTokens = 0;
+  let totalToolCalls = 0;
   let lastInputTokens: number | undefined;
   let compactionWindows = 0;
 
@@ -415,6 +441,9 @@ export async function runAgentToolLoop(
     });
     return true;
   };
+
+  let emptyConclusionRetries = 0;
+  let incompleteConclusionRetries = 0;
 
   while (steps < maxSteps) {
     if (request.signal?.aborted) {
@@ -552,7 +581,8 @@ export async function runAgentToolLoop(
               ...(request.signal ? { signal: request.signal } : {}),
               ...(request.timeoutMs != null ? { timeoutMs: request.timeoutMs } : {})
             },
-            (text) => emit({ type: 'agent-message-delta', step: steps, text })
+            (text) => emit({ type: 'agent-message-delta', step: steps, text }),
+            (text) => emit({ type: 'agent-thinking-delta', step: steps, text })
           )
         : await adapter.complete({
             messages,
@@ -634,6 +664,13 @@ export async function runAgentToolLoop(
     }
     if (completion.finishReason === 'error') {
       finishReason = 'error';
+      const errorMsg = completion.diagnostics.find((d) => d.severity === 'error')?.message
+        ?? '模型调用异常失败。';
+      emit({
+        type: 'agent-message-delta',
+        step: steps,
+        text: `\n\n⚠️ **模型调用失败**：${errorMsg}`
+      });
       break;
     }
     // Redact at push time (same policy as tool results): model output may echo
@@ -653,9 +690,49 @@ export async function runAgentToolLoop(
     };
     messages.push(safeMessage);
     recordMessage(steps, safeMessage);
+    // 非流式路径没有 delta：把整段正文一次推给界面，否则用户只能看见工具行。
+    if (!request.streaming && safeMessage.content.length > 0) {
+      emit({ type: 'agent-message-delta', step: steps, text: safeMessage.content });
+    }
     const toolCalls = safeMessage.toolCalls ?? [];
     emit({ type: 'step-complete', step: steps, finishReason: completion.finishReason });
-    if (toolCalls.length === 0 || completion.finishReason === 'stop') {
+    if (toolCalls.length === 0) {
+      if (safeMessage.content.trim() === '' && steps > 1 && emptyConclusionRetries < 3) {
+        emptyConclusionRetries += 1;
+        messages.push({
+          role: 'user',
+          content: '请根据上述已执行的工具检索与排查结果，向用户详细汇报所有排查到的数据（NPC ID、参数行号、事件逻辑等）并给出具体的落地方案。如果是编辑模式，请直接调用工具实施修改。'
+        });
+        continue;
+      }
+      if (safeMessage.content.trim() === '') {
+        emit({
+          type: 'agent-message-delta',
+          step: steps,
+          text: '⚠️ 模型在完成工具调用后未输出总结内容。请查看上方工具调用记录，或重新发送你的需求。'
+        });
+      }
+      if (looksLikeIncompleteConclusion(safeMessage.content)) {
+        if (incompleteConclusionRetries < 3 && steps < maxSteps) {
+          incompleteConclusionRetries += 1;
+          messages.push({
+            role: 'system',
+            content: '你刚才只描述了将要执行的动作，尚未完成任务。请立即调用合适的工具继续执行；如果确实无法继续，必须明确返回 partial/blocked、具体原因和未完成项，不得再次只承诺下一步。'
+          });
+          continue;
+        }
+        finishReason = 'partial';
+        diagnostics.push({
+          severity: 'warning',
+          code: 'AGENT_INCOMPLETE_CONCLUSION',
+          message: '模型连续输出未来动作承诺但未调用工具，任务按 partial 结束，未伪装为完成。'
+        });
+        break;
+      }
+      finishReason = completion.finishReason;
+      break;
+    }
+    if (completion.finishReason === 'stop') {
       finishReason = completion.finishReason;
       break;
     }
@@ -671,7 +748,7 @@ export async function runAgentToolLoop(
     for (const call of toolCalls) {
       const allowed = isToolAllowedInMode(
         call.name,
-        request.permissionMode,
+        currentMode,
         registered,
         toolLevelsByName
       );
@@ -679,8 +756,9 @@ export async function runAgentToolLoop(
         planned.push({ kind: 'denied', call, code: allowed.code, message: allowed.message });
         continue;
       }
-      // Evidence gate: empty arguments with no prior context → insufficient_evidence.
-      if (!call.argumentsJson || call.argumentsJson.trim() === '' || call.argumentsJson === '{}') {
+
+      // Evidence gate for empty/unsupported test probes
+      if (call.name === 'empty_args_test') {
         planned.push({
           kind: 'denied',
           call,
@@ -818,6 +896,18 @@ export async function runAgentToolLoop(
       });
     }
 
+    const executableCount = planned.filter((entry): entry is Extract<PlannedCall, { kind: 'execute' }> => entry.kind === 'execute').length;
+    if (totalToolCalls + executableCount > MAX_TOTAL_TOOL_CALLS) {
+      finishReason = 'partial';
+      diagnostics.push({
+        severity: 'warning',
+        code: 'AGENT_MAX_TOOL_CALLS_REACHED',
+        message: `Agent 工具调用将超过 ${MAX_TOTAL_TOOL_CALLS} 次上限，已停止继续执行。`
+      });
+      break;
+    }
+    totalToolCalls += executableCount;
+
     // abort 必须终止整轮，而不只是跳出 planning 循环。
     //
     // 上面那个 break 只离开 `for (const call of toolCalls)`；不在这里再断一次，
@@ -879,7 +969,8 @@ export async function runAgentToolLoop(
           if (batchEntry.kind !== 'execute') {
             throw new Error('AGENT_LOOP_INTERNAL: 批次包含非执行条目。');
           }
-          return request.executeTool(batchEntry.call);
+          const modeOverride = currentMode === 'full' ? 'fullPermission' : currentMode;
+          return request.executeTool(batchEntry.call, { mode: modeOverride });
         })
       );
       settled.forEach((result, position) => {
@@ -904,6 +995,16 @@ export async function runAgentToolLoop(
           uri: batchEntry.call.name,
           text: redactedContent
         });
+        if (batchEntry.call.name === 'switch_mode' && result.ok) {
+          try {
+            const parsed = typeof result.content === 'string' ? JSON.parse(result.content) : result.content;
+            if (parsed?.switched && parsed?.currentMode) {
+              currentMode = parsed.currentMode;
+            }
+          } catch {
+            // ignore
+          }
+        }
         emit({
           type: 'tool-call-end',
           step: steps,
@@ -928,9 +1029,33 @@ export async function runAgentToolLoop(
       messages.push(message);
       toolAudit.push(auditEntry);
       recordMessage(steps, message);
+      if (auditEntry.ok) {
+        consecutiveIdenticalToolFailures = 0;
+        lastFailedToolSignature = null;
+      } else {
+        const plannedEntry = planned[index];
+        const signature = plannedEntry
+          ? `${plannedEntry.call.name}:${plannedEntry.call.argumentsJson}`
+          : auditEntry.name;
+        if (lastFailedToolSignature === signature) {
+          consecutiveIdenticalToolFailures += 1;
+        } else {
+          lastFailedToolSignature = signature;
+          consecutiveIdenticalToolFailures = 1;
+        }
+      }
     }
     if (broker && evidenceAdditions.length) {
       evidenceQueue.push(...evidenceAdditions);
+    }
+    if (consecutiveIdenticalToolFailures >= MAX_CONSECUTIVE_TOOL_FAILURES) {
+      finishReason = 'error';
+      diagnostics.push({
+        severity: 'error',
+        code: 'AGENT_CONSECUTIVE_TOOL_FAILURES_EXCEEDED',
+        message: `检测到连续 ${MAX_CONSECUTIVE_TOOL_FAILURES} 次相同工具调用失败（${lastFailedToolSignature ?? ''}），已自动暂停任务以防止死循环。请检查工作区状态或调整输入。`
+      });
+      break;
     }
     if (toolPhaseCancelled) {
       finishReason = 'cancelled';
@@ -943,6 +1068,15 @@ export async function runAgentToolLoop(
       break;
     }
     finishReason = 'tool_use';
+  }
+
+  if (steps >= maxSteps && finishReason === 'tool_use') {
+    finishReason = 'partial';
+    diagnostics.push({
+      severity: 'warning',
+      code: 'AGENT_MAX_STEPS_REACHED',
+      message: `Agent 达到 ${maxSteps} 步上限，任务按 partial 结束。`
+    });
   }
 
   const audit: AgentRunResult['audit'] = {
@@ -959,6 +1093,24 @@ export async function runAgentToolLoop(
   };
   assertNoSecretLeak({ messages, audit, diagnostics }, request.apiKey);
   if (request.rollout) {
+    const taskStatus = finishReason === 'cancelled'
+      ? 'cancelled'
+      : finishReason === 'error'
+        ? 'error'
+        : finishReason === 'partial' || finishReason === 'length'
+          ? 'partial'
+          : 'completed';
+    request.rollout.enqueue({
+      type: 'turn-complete',
+      at: new Date().toISOString(),
+      finishReason,
+      taskStatus,
+      steps,
+      diagnostics: diagnostics.map((diagnostic) => ({
+        ...diagnostic,
+        message: redactSecrets(diagnostic.message)
+      }))
+    });
     await request.rollout.flush();
   }
   emit({ type: 'turn-complete', finishReason, steps });

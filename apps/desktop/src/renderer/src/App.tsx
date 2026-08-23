@@ -16,6 +16,7 @@ import {
   mergeCiteHits
 } from '@soulforge/shared';
 import type {
+  AgentAttachmentReference,
   AgentResourceReference,
   CiteHit,
   Diagnostic,
@@ -304,10 +305,17 @@ export function App(): ReactElement {
   const [agentOpen, setAgentOpen] = useState(true);
   const [agentWidth, setAgentWidth] = useState(440);
   const [agentExpanded, setAgentExpanded] = useState(false);
-  const [agentInteractionMode, setAgentInteractionMode] = useState<'ask' | 'plan' | 'edit'>('ask');
+  const [agentInteractionMode, setAgentInteractionMode] = useState<'ask' | 'plan' | 'edit' | 'bypass'>(() => {
+    try {
+      const saved = window.localStorage.getItem('soulforge:agentInteractionMode');
+      if (saved === 'ask' || saved === 'plan' || saved === 'edit' || saved === 'bypass') return saved;
+    } catch {}
+    return 'ask';
+  });
   // AGENT-60D 提交期消费点：AgentSidebar 草稿里 §12.11 的 opaque 资源引用冒泡到
   // App，runAgentTask 时随 runAiAgent 提交（main 按 agentReferenceRegistry 校验）。
   const [agentResources, setAgentResources] = useState<readonly AgentResourceReference[]>([]);
+  const [agentAttachments, setAgentAttachments] = useState<readonly AgentAttachmentReference[]>([]);
   /**
    * S10 引用框选：citeSelecting = 中央编辑区暗幕开/关（「引用」钮与暗幕共享这一
    * 状态）；pendingCiteHits = 暗幕结算出的命中，交 AgentSidebar 经
@@ -410,9 +418,16 @@ export function App(): ReactElement {
 
   const [aiProvider, setAiProvider] = useState<AiProvider>('mock');
   // 2-A：思考档用官方 effort 值（默认 medium；旧档 normal 已迁移，写路径只写官方值）。
-  const [aiThinking, setAiThinking] = useState<ModelThinkingLevel>('medium');
+  const [aiThinking, setAiThinking] = useState<ModelThinkingLevel>(() => {
+    try {
+      if (typeof window === 'undefined') return 'medium';
+      const saved = window.localStorage.getItem('soulforge.ui.aiThinking');
+      if (saved === 'off' || saved === 'none' || saved === 'minimal' || saved === 'low' || saved === 'medium' || saved === 'high' || saved === 'xhigh' || saved === 'max') return saved as ModelThinkingLevel;
+    } catch {}
+    return 'medium';
+  });
   const [aiMode] = useState<AiPermissionMode>('plan');
-  const [aiPrompt, setAiPrompt] = useState('解释当前资源的证据链，并给出下一步安全修改计划。');
+  const [aiPrompt, setAiPrompt] = useState('');
   const [aiDraft, setAiDraft] = useState<AiSidebarDraft | null>(null);
   // T6：无模型服务时的对话区说明（不卡输入框）。发送成功后 / 新任务 / 换工作区时清除。
   const [agentIdleNotice, setAgentIdleNotice] = useState<string | null>(null);
@@ -764,6 +779,12 @@ export function App(): ReactElement {
       // 持久化是增强能力，不应阻塞渲染或任务状态。
     }
   }, [agentOpen, agentWidth, workspace?.workspaceSessionId]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('soulforge.ui.aiThinking', aiThinking);
+    } catch {}
+  }, [aiThinking]);
 
   /** 6-C：随 activeDomain / 选中资源 / 侧栏折叠写入上次外壳状态。 */
   useEffect(() => {
@@ -1890,17 +1911,23 @@ export function App(): ReactElement {
       const domain = savedDomain as EditorDomainId;
       if (domain === 'project') return false;
       setSidebarView('explorer');
+      setCenterView('resource');
       if (savedSourceUri !== null && savedSourceUri !== '') {
         const match = index.find((file) => file.sourceUri === savedSourceUri);
         if (match) {
           setActiveDomain(domain);
-          setCenterView('resource');
           void selectFile(match);
           return true;
         }
       }
-      // 文件不在索引或无记录：只恢复领域（走 selectDomain 的「打开首选逻辑库」路径）。
-      selectDomain(domain);
+      // 文件不在索引或无记录：只恢复领域（走当前真实 index 寻找首选文件）。
+      setActiveDomain(domain);
+      if (domain === 'param') {
+        const preferred = pickPreferredParamContainer(index);
+        if (preferred) void selectFile(preferred);
+      } else if (domain === 'text') {
+        setPreview(null);
+      }
       return true;
     } catch {
       // 读失败吞掉，保持现状。
@@ -1933,8 +1960,8 @@ export function App(): ReactElement {
       setSessionMeta(result.session ?? null);
       setAllFiles(result.files);
       setFiles(result.files);
-      // 问题 1：不先把 activeDomain/centerView 写回 project —— 有工作区后「开始」
-      // 不是页，落点交给下方的 restoreLastShellState（上次领域）或 param 默认。
+      // 有工作区后「开始」不是页，必须立即进入 resource 视图
+      setCenterView('resource');
       setSidebarView('explorer');
       setSelectedFile(null);
       setPreview(null);
@@ -1954,37 +1981,48 @@ export function App(): ReactElement {
       // 工作区的 FMG 条目 / PARAM 行 / EMEVD 事件 / MSB 场景。
       resetAllDocuments(documentResetActions);
 
-      setStatus('正在构建轻量证据索引...');
-      const nextAnalysis = await bridge.analyzeWorkspace();
-      setAnalysis(nextAnalysis);
-      setTools(nextAnalysis?.tools ?? []);
-      setEventUri(nextAnalysis?.events?.[0]?.uri ?? '');
-      await refreshOperationHistory();
+      // 立即恢复上次退出前的工作域 + 选中资源，或默认打开首选 PARAM 容器，毫秒级展现工作台
+      const restoredDomain = restoreLastShellState(result.workspaceSessionId, result.files);
+      if (!restoredDomain) {
+        // 没有合法上次领域（缺省 / 非法 / 上次是 project）→ 默认进 param
+        const preferred = pickPreferredParamContainer(result.files);
+        setActiveDomain('param');
+        setPreview(null);
+        setCenterView('resource');
+        if (preferred) {
+          void selectFile(preferred);
+        } else {
+          setSelectedFile(null);
+        }
+      }
       const baseLabel = result.session.baseMounted
         ? ' · 已挂载只读原版游戏目录'
         : ' · 未挂载原版游戏目录';
       setBaseRootChoice(null);
       const restoredPrefix = origin === 'restored' ? '已恢复上次的工作区：' : '';
-      // 6-C：索引已回来，恢复上次退出前的工作域 + 选中资源 + 侧栏折叠。
-      // 放在全部 reset 之后，保证恢复值不被上面任一 setState 覆盖。
-      const restoredDomain = restoreLastShellState(result.workspaceSessionId, result.files);
-      if (!restoredDomain) {
-        // 问题 1：没有合法上次领域（缺省 / 非法 / 上次是 project）→ 默认进 param
-        // （截图里的主工作台），**禁止**有工作区后把 activeDomain 留在 project。
-        // 直接用本次扫描的真实索引 result.files 落 param 首选容器，避开 mountWorkspace
-        // 闭包里 allFiles/files 仍是旧值的回读问题（selectDomain 走的是旧快照）。
-        const preferred = pickPreferredParamContainer(result.files);
-        setActiveDomain('param');
-        setPreview(null);
-        if (preferred) {
-          setCenterView('resource');
-          void selectFile(preferred);
-        } else {
-          setSelectedFile(null);
-          setCenterView('resource');
+      setStatus(`${restoredPrefix}已索引并打开 ${result.files.length} 个文件${baseLabel}`);
+      const baseToastSuffix = result.session.baseMounted ? '（已挂载原版游戏目录）' : '';
+      pushToast(
+        origin === 'restored'
+          ? `已恢复 Mod 工作区「${result.workspaceLabel}」，共加载 ${result.files.length} 个文件${baseToastSuffix}`
+          : `已成功选择并打开 Mod 工作区「${result.workspaceLabel}」，共加载 ${result.files.length} 个文件${baseToastSuffix}`,
+        'ok'
+      );
+
+      // 后台静默构建深度分析与证据索引，不阻断主工作台展现与窗口交互
+      void (async () => {
+        try {
+          const nextAnalysis = await bridge.analyzeWorkspace();
+          setAnalysis(nextAnalysis);
+          setTools(nextAnalysis?.tools ?? []);
+          setEventUri(nextAnalysis?.events?.[0]?.uri ?? '');
+          await refreshOperationHistory();
+          setStatus(`${restoredPrefix}已就绪：已索引 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/资源${baseLabel}`);
+          pushToast(`RAG 知识库与符号索引构建完成（已解析 ${nextAnalysis?.parsedFiles ?? 0} 个资源）`, 'ok');
+        } catch {
+          // 后台分析静默降级
         }
-      }
-      setStatus(`${restoredPrefix}已索引并可打开 ${result.files.length} 个文件，解析 ${nextAnalysis?.parsedFiles ?? 0} 个文本/mock 资源${baseLabel}`);
+      })();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       /*
@@ -2514,11 +2552,16 @@ export function App(): ReactElement {
       announceDesktopOnly('运行 AI 任务');
       return;
     }
-    const prompt = aiPrompt.trim();
+    // 承接时输入框常为空：空 prompt 直接拦截会让「承接」点了没反应。
+    // 承接的语义是继续上一轮，故空输入发一条默认继续指令。
+    const prompt = resumeSessionPath !== undefined && aiPrompt.trim() === ''
+      ? '请继续上一轮会话的任务。'
+      : aiPrompt.trim();
     if (prompt === '') {
       setStatus('任务描述为空，未发起 AI 任务');
       return;
     }
+    setAiPrompt('');
     // T6：没配模型在对话里写说明（不卡输入框以外的整栏，也不整次拒绝成
     // WORKSPACE_NOT_ANALYZED）；输入框仍可编辑，配好后可直接再发。
     if (agentServiceId === null) {
@@ -2527,13 +2570,19 @@ export function App(): ReactElement {
       setStatus('尚未配置模型服务');
       return;
     }
-    setAgentIdleNotice(null);
-    setAgentTask(INITIAL_AGENT_TASK_STATE);
+    // 自动承接：若未显式传 resumeSessionPath，且当前会话已有完成的轮次（rolloutFileName 有值），
+    // 自动承接上一轮会话作为多轮对话推进；否则作为首轮发起。
+    const effectiveResumePath = resumeSessionPath ?? (
+      (agentTask.phase === 'done' || agentTask.phase === 'error') && agentTask.rolloutFileName
+        ? agentTask.rolloutFileName
+        : undefined
+    );
+
     setStatus('正在发起 AI 任务...');
     const result = await bridge.runAiAgent({
       configId: agentServiceId,
       prompt,
-      ...(resumeSessionPath !== undefined ? { resumeSessionPath } : {}),
+      ...(effectiveResumePath !== undefined ? { resumeSessionPath: effectiveResumePath } : {}),
       // T6-3：选区逻辑名/资源 kind 作为可选元数据随任务提交给模型；不自动插入
       // `#路径` chip（那会污染 prompt 文本，且选区只是参考不是默认任务对象）。
       ...(selectedFile
@@ -2545,23 +2594,32 @@ export function App(): ReactElement {
       // AGENT-60D：已添加的 §12.11 opaque 资源引用随任务提交（main 校验
       // agentReferenceRegistry 的跨 sender；空数组 = 无引用）。
       ...(agentResources.length > 0 ? { resources: agentResources } : {}),
+      ...(agentAttachments.length > 0 ? { attachments: agentAttachments } : {}),
+      streaming: true,
       // S32：输入条的思考强度随任务提交（优先于服务级默认）。
       thinkingLevel: aiThinking,
-      // Ask/Plan = 只读计划；Edit = 可经 Patch Engine 提交（仍要 Agent 审批卡）。
-      mode: agentInteractionMode === 'edit' ? 'normal' : 'plan'
+      // Ask/Plan = 只读计划；Edit = 可经 Patch Engine 提交（需审批卡）；Bypass = 全自动提交（免审批）。
+      mode: agentInteractionMode === 'bypass'
+        ? 'fullPermission'
+        : agentInteractionMode === 'edit'
+          ? 'normal'
+          : 'plan',
+      ...(agentInteractionMode === 'bypass' ? { approvalRequiredLevels: [] } : {})
     });
     if (!result.ok) {
-      setAgentTask({
-        ...INITIAL_AGENT_TASK_STATE,
+      setAgentTask((current) => ({
+        ...current,
         phase: 'error',
         error: { code: result.error.code, message: result.error.message }
-      });
+      }));
       setStatus(`AI 任务未发起：${result.error.code}`);
       pushToast(`AI 任务未发起：${result.error.message}`, 'warn');
       return;
     }
+    const previousTask = agentTask;
+    const previousGoal = agentGoal;
     setAgentGoal(prompt);
-    setAgentTask(startAgentTask(result.sessionId));
+    setAgentTask(startAgentTask(result.sessionId, Date.now(), previousTask, previousGoal));
     setStatus('AI 任务已发起，进度会在 Agent 面板更新');
   }
 
@@ -3374,7 +3432,6 @@ export function App(): ReactElement {
                 regions={msbRegions}
                 events={msbEvents}
                 sourceCounts={msbSourceCounts}
-                maxNodes={2000}
                 openFailure={lastOpenFailure?.kind === 'msb-open-failed' ? lastOpenFailure : null}
               />
             </>
@@ -4011,6 +4068,12 @@ export function App(): ReactElement {
           contextLabel={domainLabel(activeDomain)}
           selectedFilePath={selectedFile?.relativePath ?? null}
           onResourcesChange={setAgentResources}
+          onAttachmentsChange={(chips) => setAgentAttachments(chips.map((chip) => ({
+            token: chip.token,
+            mediaType: chip.mediaType,
+            byteLength: chip.byteLength,
+            expiresAt: chip.expiresAt
+          })))}
           tools={agentTools.length > 0 ? agentTools : tools}
           toolOutput={toolOutput}
           task={{
@@ -4052,7 +4115,12 @@ export function App(): ReactElement {
             setAgentWidth((width) => width >= AGENT_MAX_WIDTH ? AGENT_DEFAULT_WIDTH : AGENT_MAX_WIDTH);
           }}
           interactionMode={agentInteractionMode}
-          onInteractionModeChange={setAgentInteractionMode}
+          onInteractionModeChange={(mode) => {
+            setAgentInteractionMode(mode);
+            try {
+              window.localStorage.setItem('soulforge:agentInteractionMode', mode);
+            } catch {}
+          }}
           onClose={() => setAgentOpen(false)}
           onRunToolSearch={(toolQuery) => void runToolSearch(toolQuery)}
           onExplainEvent={(uri) => void explainEvent(uri)}

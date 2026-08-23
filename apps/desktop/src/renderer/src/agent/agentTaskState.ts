@@ -48,6 +48,22 @@ export interface AgentToolCallView {
   argumentsJson?: string;
 }
 
+/** 某一步模型对用户说的话。 */
+export interface AgentNarrationView {
+  step: number;
+  text: string;
+}
+
+/** 对话区时间线条目（纯数据，由 viewport 渲染）。 */
+export type AgentConversationItem =
+  | { kind: 'user'; text: string }
+  | { kind: 'notice'; text: string }
+  | { kind: 'thinking'; label: string; text: string; live: boolean }
+  | { kind: 'assistant'; step: number; text: string }
+  | { kind: 'tools'; step: number; calls: AgentToolCallView[] }
+  | { kind: 'compacted'; windows: number }
+  | { kind: 'draft'; title: string; summary: string; nextActions: readonly string[] };
+
 /** 一条待用户回答的审批请求。 */
 export interface AgentApprovalView {
   callId: string;
@@ -171,12 +187,49 @@ export function extractApprovalPreview(argumentsJson: string): AgentApprovalPrev
     ? firstChange as Record<string, unknown>
     : null;
 
-  const targetPath = pickString(record.targetPath) ?? pickString(changeRecord?.targetPath);
-  const targetUri = pickString(record.targetUri) ?? pickString(changeRecord?.targetUri);
+  let targetPath = pickString(record.targetPath) ?? pickString(changeRecord?.targetPath);
+  let targetUri = pickString(record.targetUri) ?? pickString(changeRecord?.targetUri);
   const structuredEdit = typeof changeRecord?.structuredEdit === 'object' && changeRecord.structuredEdit !== null
     ? changeRecord.structuredEdit as Record<string, unknown>
     : null;
-  const rawText = pickString(record.newText) ?? pickString(structuredEdit?.newText);
+  let rawText = pickString(record.newText) ?? pickString(structuredEdit?.newText);
+  let changeCount: number | null = changes === null ? null : changes.length;
+
+  // mutate_param_fields: edits: [{ table, rowId, fieldId, value }]
+  if (Array.isArray(record.edits) && record.edits.length > 0) {
+    const edits = record.edits as Array<Record<string, unknown>>;
+    targetPath = targetPath ?? pickString(record.containerPath) ?? 'param/gameparam/gameparam.parambnd.dcx';
+    const firstEdit = edits[0];
+    if (firstEdit && typeof firstEdit.table === 'string') {
+      targetUri = targetUri ?? `${firstEdit.table}#${firstEdit.rowId ?? '*'}`;
+    }
+    changeCount = edits.length;
+    if (rawText === undefined) {
+      rawText = edits
+        .map((e) => `${e.table ?? 'PARAM'}[${e.rowId ?? '?'}].${e.fieldId ?? 'field'} = ${JSON.stringify(e.value)}`)
+        .join('\n');
+    }
+  }
+
+  // apply_emevd_dsl: file, dsl
+  if (typeof record.file === 'string' && typeof record.dsl === 'string') {
+    targetPath = targetPath ?? record.file;
+    rawText = rawText ?? record.dsl;
+    changeCount = changeCount ?? 1;
+  }
+
+  // mutate_fmg_entries: table, entries
+  if (Array.isArray(record.entries) && record.entries.length > 0) {
+    const entries = record.entries as Array<Record<string, unknown>>;
+    targetPath = targetPath ?? pickString(record.containerPath) ?? 'msg';
+    if (typeof record.table === 'string') {
+      targetUri = targetUri ?? record.table;
+    }
+    changeCount = entries.length;
+    if (rawText === undefined) {
+      rawText = entries.map((e) => `[${e.id ?? '?'}] ${e.text ?? ''}`).join('\n');
+    }
+  }
 
   if (targetPath === undefined && targetUri === undefined && rawText === undefined && changes === null) {
     return null;
@@ -188,7 +241,7 @@ export function extractApprovalPreview(argumentsJson: string): AgentApprovalPrev
     newText: rawText ?? null,
     // 不再截断：保留字段恒为 0，界面侧若仍引用说明文案已无意义。
     truncatedBytes: 0,
-    changeCount: changes === null ? null : changes.length
+    changeCount
   };
 }
 
@@ -210,6 +263,14 @@ export interface AgentTaskState {
   toolCalls: AgentToolCallView[];
   /** 累计流式增量字符数：模型正在产出内容的可见证据。 */
   deltaChars: number;
+  /** 按步骤累积的模型正文（agent-message-delta），供对话区交织渲染。 */
+  narrations: AgentNarrationView[];
+  /** 模型思考/推理摘要（agent-thinking-delta），完成后折叠进「已思考」。 */
+  thinkingText: string;
+  /** 任务受理时刻（epoch ms）；idle 为 null。 */
+  startedAt: number | null;
+  /** 终态时刻（epoch ms）；未结束为 null。 */
+  endedAt: number | null;
   retry: { attempt: number; maxAttempts: number; delayMs: number; code: string } | null;
   compactedWindows: number;
   contextBytes: number | null;
@@ -224,6 +285,10 @@ export interface AgentTaskState {
   pendingApprovals: AgentApprovalView[];
   /** 已回答的审批记录(最近若干条),供用户回看自己批准过什么。 */
   approvalDecisions: AgentApprovalDecisionView[];
+  /** 多轮对话中已完成轮次的历史时间线条目集合。 */
+  historyItems: AgentConversationItem[];
+  /** 最近一次完成任务的 rollout 文件名/相对路径，供后续多轮次承接使用。 */
+  lastRolloutPath: string | null;
 }
 
 export const INITIAL_AGENT_TASK_STATE: AgentTaskState = Object.freeze({
@@ -236,20 +301,94 @@ export const INITIAL_AGENT_TASK_STATE: AgentTaskState = Object.freeze({
   error: null,
   toolCalls: [],
   deltaChars: 0,
+  narrations: [],
+  thinkingText: '',
+  startedAt: null,
+  endedAt: null,
   retry: null,
   compactedWindows: 0,
   contextBytes: null,
   rolloutFileName: null,
   pendingApprovals: [],
-  approvalDecisions: []
+  approvalDecisions: [],
+  historyItems: [],
+  lastRolloutPath: null
 });
 
 /** 已回答审批的保留条数;超出丢弃最早的。完整记录在会话文件里。 */
 export const AGENT_APPROVAL_DECISION_LIMIT = 20;
 
-/** 发起新任务：sessionId 已知，但还没有任何事件到达。 */
-export function startAgentTask(sessionId: string): AgentTaskState {
-  return { ...INITIAL_AGENT_TASK_STATE, sessionId, phase: 'accepted' };
+/** 提取已完成轮次的时间线条目集合，用于归档进历史记录。 */
+export function extractCompletedTurnItems(
+  task: AgentTaskState,
+  goal: string | null,
+  now: number = Date.now()
+): AgentConversationItem[] {
+  const items: AgentConversationItem[] = [];
+  if (goal !== null && goal !== '') {
+    items.push({ kind: 'user', text: goal });
+  }
+
+  const showThinking = task.thinkingText.length > 0;
+  if (showThinking) {
+    items.push({
+      kind: 'thinking',
+      label: describeAgentThinkingLabel(task, now),
+      text: task.thinkingText,
+      live: false
+    });
+  }
+
+  const steps = new Set<number>();
+  for (const narration of task.narrations) steps.add(narration.step);
+  for (const call of task.toolCalls) steps.add(call.step);
+  const orderedSteps = [...steps].sort((a, b) => a - b);
+  for (const step of orderedSteps) {
+    const narration = task.narrations.find((entry) => entry.step === step);
+    if (narration !== undefined && narration.text.trim() !== '') {
+      items.push({ kind: 'assistant', step, text: narration.text });
+    }
+    const calls = task.toolCalls.filter((call) => call.step === step);
+    if (calls.length > 0) items.push({ kind: 'tools', step, calls });
+  }
+
+  if (task.compactedWindows > 0) {
+    items.push({ kind: 'compacted', windows: task.compactedWindows });
+  }
+
+  if (task.phase === 'error' && task.error) {
+    items.push({ kind: 'notice', text: `任务失败：${task.error.code}——${task.error.message}` });
+  }
+
+  return items;
+}
+
+/** 发起新任务：sessionId 已知，若有上一轮已完成状态则归档其条目以保持多轮对话连贯。 */
+export function startAgentTask(
+  sessionId: string,
+  now: number = Date.now(),
+  previousState?: AgentTaskState,
+  previousGoal?: string | null
+): AgentTaskState {
+  let historyItems: AgentConversationItem[] = previousState?.historyItems ? [...previousState.historyItems] : [];
+  let lastRolloutPath: string | null = previousState?.lastRolloutPath ?? null;
+
+  if (previousState && (previousState.phase === 'done' || previousState.phase === 'error')) {
+    const completedItems = extractCompletedTurnItems(previousState, previousGoal ?? null, now);
+    historyItems = [...historyItems, ...completedItems];
+    if (previousState.rolloutFileName) {
+      lastRolloutPath = previousState.rolloutFileName;
+    }
+  }
+
+  return {
+    ...INITIAL_AGENT_TASK_STATE,
+    sessionId,
+    phase: 'accepted',
+    startedAt: now,
+    historyItems,
+    lastRolloutPath: previousState?.rolloutFileName ?? lastRolloutPath
+  };
 }
 
 /**
@@ -287,8 +426,12 @@ export function reduceAgentTaskEvent(
         phase: state.phase === 'cancelling' ? 'cancelling' : 'running',
         step: Math.max(state.step, event.step)
       };
-    case 'agent-message-delta':
-      return { ...state, deltaChars: state.deltaChars + event.text.length };
+    case 'agent-message-delta': {
+      const narrations = appendNarration(state.narrations, event.step, event.text);
+      return { ...state, deltaChars: state.deltaChars + event.text.length, narrations };
+    }
+    case 'agent-thinking-delta':
+      return { ...state, thinkingText: state.thinkingText + event.text };
     case 'tool-call-begin':
       return {
         ...state,
@@ -381,14 +524,16 @@ export function reduceAgentTaskEvent(
         finishReason: event.finishReason,
         steps: event.steps,
         rolloutFileName: event.rolloutFileName,
-        pendingApprovals: []
+        pendingApprovals: [],
+        endedAt: Date.now()
       };
     case 'session-error':
       return {
         ...state,
         phase: 'error',
         error: { code: event.code, message: event.message },
-        pendingApprovals: []
+        pendingApprovals: [],
+        endedAt: Date.now()
       };
     default:
       return state;
@@ -457,7 +602,6 @@ function describeFinishReason(reason: string): string {
  * （docs/frontend-renovation/anti-ai-design.md §2）。
  */
 export function describeAgentTaskStatus(state: AgentTaskState): string {
-  const toolPart = state.toolCalls.length > 0 ? `，已调用 ${state.toolCalls.length} 次工具` : '';
   switch (state.phase) {
     case 'idle':
       return '没有进行中的任务。';
@@ -467,7 +611,7 @@ export function describeAgentTaskStatus(state: AgentTaskState): string {
         return `等待你批准：要执行 ${first?.toolName ?? '未知工具'}`
           + `（${first?.permissionLevel ?? '未知等级'}）。批准或拒绝后任务才会继续。`;
       }
-      return `任务已受理，等待模型首次响应${toolPart}。可随时取消。`;
+      return `任务已受理，等待模型首次响应。可随时取消。`;
     case 'running': {
       // 等待审批必须先说：此时 loop 停在工具阶段等用户回答，与「模型在想」
       // 表面上都是「进行中」，但前者要用户动手才会继续。不区分的话，用户会
@@ -477,19 +621,18 @@ export function describeAgentTaskStatus(state: AgentTaskState): string {
         const more = state.pendingApprovals.length > 1
           ? `，另有 ${state.pendingApprovals.length - 1} 项排队`
           : '';
-        return `等待你批准：第 ${first?.step ?? state.step} 步要执行 ${first?.toolName ?? '未知工具'}`
+        return `等待你批准：要执行 ${first?.toolName ?? '未知工具'}`
           + `（${first?.permissionLevel ?? '未知等级'}）${more}。批准或拒绝后任务才会继续。`;
       }
       const output = state.deltaChars > 0 ? `，已产出 ${state.deltaChars} 字符` : '';
-      return `任务进行中：已进入第 ${state.step} 步${toolPart}${output}。可随时取消。`;
+      return `任务进行中${output}。可随时取消。`;
     }
     case 'cancelling':
-      return `已发出取消请求，等待主进程结束第 ${state.step} 步后停止。取消需要等当前步骤让出。`;
+      return `已发出取消请求，等待主进程结束当前步骤后停止。取消需要等当前步骤让出。`;
     case 'done': {
-      const failed = state.toolCalls.filter((call) => call.status === 'failed').length;
-      const failPart = failed > 0 ? `，其中 ${failed} 次工具调用失败` : '';
+      if (state.finishReason === 'cancelled') return '任务已结束（已被取消）。';
       const reason = state.finishReason === null ? '未回报结束原因' : describeFinishReason(state.finishReason);
-      return `任务已结束（${reason}）：共 ${state.steps ?? state.step} 步${toolPart}${failPart}。`;
+      return `任务已结束（${reason}）。`;
     }
     case 'error':
       return `任务失败：${state.error?.code ?? '未回报错误码'}——${state.error?.message ?? '未回报原因'}。`;
@@ -510,4 +653,105 @@ export function describeRunBlocker(input: {
   if (input.configId === null) return '尚未选择模型服务：请在模型服务管理里添加并配置凭据。';
   if (input.prompt.trim() === '') return '任务描述为空：请先写清要做什么。';
   return null;
+}
+
+function appendNarration(
+  narrations: readonly AgentNarrationView[],
+  step: number,
+  text: string
+): AgentNarrationView[] {
+  const last = narrations[narrations.length - 1];
+  if (last !== undefined && last.step === step) {
+    return [...narrations.slice(0, -1), { step, text: last.text + text }];
+  }
+  return [...narrations, { step, text }];
+}
+
+/** 把毫秒格式化成 `12s` / `1m 12s` / `1h 3m`。 */
+export function formatAgentDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  if (minutes > 0) return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  return `${seconds}s`;
+}
+
+export function describeAgentThinkingLabel(state: AgentTaskState, now: number = Date.now()): string {
+  const start = state.startedAt;
+  const end = state.endedAt ?? now;
+  const duration = start === null ? null : formatAgentDuration(end - start);
+  if (state.phase === 'done' || state.phase === 'error' || state.phase === 'idle') {
+    return duration === null ? '已思考' : `已思考 ${duration}`;
+  }
+  return duration === null ? '正在思考' : `正在思考 ${duration}`;
+}
+
+export interface BuildAgentConversationItemsInput {
+  goal: string | null;
+  idleNotice?: string | null;
+  draft?: { title: string; summary: string; nextActions: readonly string[] } | null;
+  busy?: boolean;
+  task: AgentTaskState;
+  now?: number;
+}
+
+/**
+ * 把任务态折成对话时间线：用户话 → 思考块 → 逐步「口播 + 工具」→ 压缩提示。
+ * 不含会话 jsonl 文件名。
+ */
+export function buildAgentConversationItems(
+  input: BuildAgentConversationItemsInput
+): AgentConversationItem[] {
+  const { goal, idleNotice = null, draft = null, busy = false, task, now = Date.now() } = input;
+  const items: AgentConversationItem[] = [];
+
+  // 先注入历史轮次的所有条目
+  if (task.historyItems && task.historyItems.length > 0) {
+    items.push(...task.historyItems);
+  }
+
+  if (goal !== null && goal !== '') items.push({ kind: 'user', text: goal });
+  if (idleNotice !== null && idleNotice !== '') items.push({ kind: 'notice', text: idleNotice });
+  if (busy) items.push({ kind: 'notice', text: '正在准备计划草稿…' });
+  if (draft !== null) {
+    items.push({
+      kind: 'draft',
+      title: draft.title,
+      summary: draft.summary,
+      nextActions: draft.nextActions
+    });
+  }
+
+  const showThinking = task.thinkingText.length > 0
+    || task.narrations.length > 0
+    || task.toolCalls.length > 0
+    || task.phase !== 'idle';
+  if (showThinking && (task.phase !== 'idle' || task.startedAt !== null || task.thinkingText.length > 0)) {
+    items.push({
+      kind: 'thinking',
+      label: describeAgentThinkingLabel(task, now),
+      text: task.thinkingText,
+      live: isAgentTaskActive(task)
+    });
+  }
+
+  const steps = new Set<number>();
+  for (const narration of task.narrations) steps.add(narration.step);
+  for (const call of task.toolCalls) steps.add(call.step);
+  const orderedSteps = [...steps].sort((a, b) => a - b);
+  for (const step of orderedSteps) {
+    const narration = task.narrations.find((entry) => entry.step === step);
+    if (narration !== undefined && narration.text.trim() !== '') {
+      items.push({ kind: 'assistant', step, text: narration.text });
+    }
+    const calls = task.toolCalls.filter((call) => call.step === step);
+    if (calls.length > 0) items.push({ kind: 'tools', step, calls });
+  }
+
+  if (task.compactedWindows > 0) {
+    items.push({ kind: 'compacted', windows: task.compactedWindows });
+  }
+  return items;
 }

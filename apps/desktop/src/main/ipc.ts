@@ -1569,6 +1569,23 @@ export type AgentResourceReferenceCreateIpcResult =
       };
     };
 
+export type AgentAttachmentCreateIpcResult =
+  | {
+      ok: true;
+      reference: {
+        token: string;
+        mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'text/plain';
+        byteLength: number;
+        expiresAt: string;
+      };
+      label: string;
+    }
+  | {
+      ok: false;
+      cancelled?: boolean;
+      error: { code: string; message: string };
+    };
+
 export interface DirectorySelection {
   selectionId: string;
   label: string;
@@ -1620,10 +1637,14 @@ async function ensureActiveOperationLog(session: WorkspaceSession): Promise<Oper
 }
 
 function currentToolContext(): ToolContext {
+  const storage = activeSession ? durableStoragePaths(activeSession.meta.workspaceId) : undefined;
   return {
     workspaceIndex: activeIndex,
     mode: activeAiMode,
-    ...(activeRag ? { rag: activeRag } : {})
+    ...(activeRag ? { rag: activeRag } : {}),
+    ...(activeSession ? { session: activeSession } : {}),
+    ...(activeOperationLog ? { operationLogStore: activeOperationLog } : {}),
+    ...(storage ? { backupBaseDir: storage.backupBaseDir, recoveryDir: storage.recoveryDir } : {})
   };
 }
 
@@ -2529,7 +2550,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           : undefined;
       let autoBaseRecord: DirectorySelectionRecord | null = null;
       if (!baseSelection && !options.clearBase) {
-        const autoBasePath = resolveProjectJsonGameRoot(overlaySelection.absolutePath);
+        let autoBasePath = resolveProjectJsonGameRoot(overlaySelection.absolutePath);
+        if (!autoBasePath || !existsSync(autoBasePath)) {
+          const parentDir = dirname(overlaySelection.absolutePath);
+          if (existsSync(join(parentDir, 'sekiro.exe')) || existsSync(join(parentDir, 'map')) || existsSync(join(parentDir, 'parts'))) {
+            autoBasePath = parentDir;
+          }
+        }
         if (autoBasePath && existsSync(autoBasePath)) {
           try {
             const created = createDirectorySelection(event, autoBasePath, 'base');
@@ -4183,16 +4210,17 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           diagnostics: [{ severity: 'error' as const, code: 'MAP_PART_MAP_ID_UNKNOWN', message: '无法从 MSB 文件名推断地图 id。', sourceUri: msbSourceUri }]
         };
       }
+      const overlayParent = dirname(activeSession.layers.overlayRoot);
+      const effectiveBase = activeSession.layers.baseRoot
+        ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'map')) ? overlayParent : null);
       const overlayDir = join(activeSession.layers.overlayRoot, 'map', mapId);
-      const baseDir = activeSession.layers.baseRoot
-        ? join(activeSession.layers.baseRoot, 'map', mapId)
-        : null;
+      const baseDir = effectiveBase ? join(effectiveBase, 'map', mapId) : null;
       const candidateDirs = [
         ...(safeExists(overlayDir) ? [{ dir: overlayDir, fromBase: false }] : []),
         ...(baseDir && safeExists(baseDir) ? [{ dir: baseDir, fromBase: true }] : [])
       ];
       if (candidateDirs.length === 0) {
-        const baseHint = activeSession.layers.baseRoot
+        const baseHint = effectiveBase
           ? `map/${mapId}/ 目录下没有模型文件。`
           : `overlay 的 map/${mapId}/ 下没有模型文件，且尚未挂载原版目录——到「开始」页选择含 sekiro.exe 的原版目录后可尝试读取原版模型。`;
         return {
@@ -4202,6 +4230,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }
       const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
 
       /**
        * 问题4-A：每个 map part 把该 FLVER 的**全部网格**读齐。
@@ -4221,8 +4250,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             filePath: mapbndPath,
             allowedRoots: roots.allowedRoots,
             timeoutMs: 120_000,
-            ...(fromBase && activeSession?.layers.baseRoot
-              ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+            ...(fromBase && effectiveBase
+              ? { oodleRuntimeRoot: effectiveBase }
               : {}),
             commandOptions: { modelName, meshIndex, maxVertices: 1_000_000, maxIndices: 3_000_000 }
           });
@@ -4313,8 +4342,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           filePath: mapbndPath,
           allowedRoots: roots.allowedRoots,
           timeoutMs: 120_000,
-          ...(fromBase && activeSession?.layers.baseRoot
-            ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+          ...(fromBase && effectiveBase
+            ? { oodleRuntimeRoot: effectiveBase }
             : {}),
           commandOptions: { modelName, maxVertices: 1_000_000, maxIndices: 3_000_000 }
         });
@@ -4343,7 +4372,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             filePath: fallbackPath,
             allowedRoots: roots.allowedRoots,
             timeoutMs: 120_000,
-            ...(fromBase && activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {}),
+            ...(fromBase && effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
             commandOptions: { modelName: basename(fallbackPath).replace(/\.mapbnd\.dcx$/i, ''), maxVertices: 1_000_000, maxIndices: 3_000_000 }
           });
           if (fallback.parseStatus !== 'failed' && fallback.data) return fallback.data;
@@ -4373,8 +4402,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
             filePath: mapbndPath,
             allowedRoots: roots.allowedRoots,
             timeoutMs: 120_000,
-            ...(fromBase && activeSession?.layers.baseRoot
-              ? { oodleRuntimeRoot: activeSession.layers.baseRoot }
+            ...(fromBase && effectiveBase
+              ? { oodleRuntimeRoot: effectiveBase }
               : {}),
             commandOptions: { modelName, maxVertices: 1_000_000, maxIndices: 3_000_000 }
           });
@@ -4534,17 +4563,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
     }> => {
       const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
-      if (!file) {
-        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引，无法定位伴生 chrbnd。', sourceUri }] };
+      if (!file || !activeSession) {
+        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引或工作区未打开，无法定位伴生 chrbnd。', sourceUri }] };
       }
       const stem = basename(file.relativePath).replace(/\.anibnd(\.dcx)?$/i, '');
       const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
       if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      const overlayParent = dirname(activeSession.layers.overlayRoot);
+      const effectiveBase = activeSession.layers.baseRoot?.trim()
+        ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'parts')) ? overlayParent : null);
+      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
+
       // 查找顺序：overlay 同目录 chr/<stem>.chrbnd.dcx → 已挂原版同样相对路径。
       const overlayCandidate = join(dirname(file.absolutePath), `${stem}.chrbnd.dcx`);
       const overlayExists = safeExists(overlayCandidate);
-      const baseRoot = activeSession?.layers.baseRoot?.trim();
-      const vanillaCandidate = baseRoot ? join(baseRoot, 'chr', `${stem}.chrbnd.dcx`) : null;
+      const vanillaCandidate = effectiveBase ? join(effectiveBase, 'chr', `${stem}.chrbnd.dcx`) : null;
       const vanillaExists = vanillaCandidate ? safeExists(vanillaCandidate) : false;
       if (!overlayExists && !vanillaExists) {
         return {
@@ -4552,7 +4585,7 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           diagnostics: [{
             severity: 'error' as const,
             code: 'CHRBND_NOT_FOUND',
-            message: baseRoot
+            message: effectiveBase
               ? `没有找到 ${stem} 的模型（chr/${stem}.chrbnd.dcx）：overlay 与原版目录都没有该文件。`
               : `没有找到 ${stem} 的模型（chrbnd）：overlay 没有该文件，且尚未挂载原版目录——到「开始」页选择含 sekiro.exe 的原版目录后可尝试读取原版模型。`
           }]
@@ -4564,17 +4597,76 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         filePath: chrbndPath,
         allowedRoots: roots.allowedRoots,
         timeoutMs: 120_000,
-        ...(baseRoot ? { oodleRuntimeRoot: baseRoot } : {}),
-        // 问题4-A：动作预览不留 1 万顶点门禁（对照 flverToGlb 的 1M/3M）。
-        // renderer 按 meshIndex=0..meshCount-1 循环调用，拼齐完整模型。
+        ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
         commandOptions: { meshIndex, maxVertices: 1_000_000, maxIndices: 3_000_000 }
       });
-      // handle() 包装器统一 sanitize；这里只组装结构化结果。
+      if (result.parseStatus === 'failed' || !result.data) {
+        return { ok: false, sourceUri, diagnostics: result.diagnostics };
+      }
+
+      // S17 / 只狼 c0000 玩家装配体增强：c0000 自身只有骨骼，mesh 在 parts/ 目录下。
+      // 自动扫描并组装只狼默认主角外观（身体 bd_m_9000、手臂 am_m_9000、腿部 lg_m_9000、头部 hd_m_9510、武器 wp_a_0300）。
+      const assembledMeshes: Array<Record<string, unknown>> = [];
+      if (stem.toLowerCase() === 'c0000' && Number(result.data.meshCount ?? 0) === 0) {
+        const partsSearchDirs = [
+          join(activeSession.layers.overlayRoot, 'parts'),
+          ...(effectiveBase ? [join(effectiveBase, 'parts')] : [])
+        ];
+        const defaultParts = ['bd_m_9000', 'am_m_9000', 'lg_m_9000', 'hd_m_9510', 'wp_a_0300'];
+        for (const partName of defaultParts) {
+          let partPath: string | null = null;
+          for (const dir of partsSearchDirs) {
+            const candidate = join(dir, `${partName}.partsbnd.dcx`);
+            if (safeExists(candidate)) {
+              partPath = candidate;
+              break;
+            }
+          }
+          if (!partPath) continue;
+          const firstPart = await runBridge<Record<string, unknown>>({
+            command: 'read-chrbnd-flver-preview',
+            filePath: partPath,
+            allowedRoots: roots.allowedRoots,
+            timeoutMs: 120_000,
+            ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+            commandOptions: { meshIndex: 0, maxVertices: 1_000_000, maxIndices: 3_000_000 }
+          });
+          if (firstPart.parseStatus !== 'failed' && firstPart.data?.positionsBase64) {
+            assembledMeshes.push(firstPart.data);
+            const subCount = Number(firstPart.data.meshCount ?? 1);
+            for (let subIdx = 1; subIdx < subCount; subIdx++) {
+              const nextSub = await runBridge<Record<string, unknown>>({
+                command: 'read-chrbnd-flver-preview',
+                filePath: partPath,
+                allowedRoots: roots.allowedRoots,
+                timeoutMs: 120_000,
+                ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+                commandOptions: { meshIndex: subIdx, maxVertices: 1_000_000, maxIndices: 3_000_000 }
+              });
+              if (nextSub.parseStatus !== 'failed' && nextSub.data?.positionsBase64) {
+                assembledMeshes.push(nextSub.data);
+              }
+            }
+          }
+        }
+      }
+
       return {
-        ok: result.parseStatus !== 'failed',
+        ok: true,
         sourceUri,
         relativePath: file.relativePath,
-        ...(result.data !== undefined ? { data: result.data } : {}),
+        data: {
+          ...result.data,
+          ...(assembledMeshes.length > 0
+            ? {
+                meshCount: assembledMeshes.length,
+                meshes: assembledMeshes,
+                positionsBase64: assembledMeshes[0]!.positionsBase64,
+                indicesBase64: assembledMeshes[0]!.indicesBase64,
+                vertexCount: assembledMeshes[0]!.vertexCount
+              }
+            : {})
+        },
         diagnostics: result.diagnostics
       };
     }
@@ -10601,9 +10693,11 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       signal: controller.signal,
       requestApproval,
       resolveApprovalDiff,
-      ...(request.approvalRequiredLevels
+      ...(Array.isArray(request.approvalRequiredLevels)
         ? { approvalRequiredLevels: request.approvalRequiredLevels }
-        : {}),
+        : mode === 'fullPermission'
+          ? { approvalRequiredLevels: [] }
+          : {}),
       ...(request.streaming === true ? { streaming: true } : {}),
       ...(request.timeoutMs != null && request.timeoutMs > 0
         ? { timeoutMs: Math.trunc(request.timeoutMs) }
@@ -10928,5 +11022,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     };
     agentReferenceRegistry.set(token, { ownerId, tokenId, citation });
     return { ok: true, reference };
+  });
+
+  handle('agent.attachment.create', async (): Promise<AgentAttachmentCreateIpcResult> => {
+    return { ok: false, cancelled: true, error: { code: 'ATTACHMENT_CANCELLED', message: '未选择附件文件。' } };
   });
 }

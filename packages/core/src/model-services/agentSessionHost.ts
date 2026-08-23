@@ -19,6 +19,7 @@ import type {
   ApprovalRequest,
   ApprovalResponse,
   ChatMessage,
+  ChatMessageImage,
   CompactionOptions,
   ContextBroker,
   ContextBrokerOptions,
@@ -77,6 +78,11 @@ export interface AgentSessionRunParams {
   ragSearch?: NonNullable<import('./types.js').AgentRunRequest['ragSearch']>;
   /** Prior rollout to continue from; its messages seed the new run. */
   resumeFrom?: ResumedRollout;
+  /**
+   * 用户随本条 prompt 提交的图像（多模态）。只挂在本轮 user 消息上下发给
+   * 模型，不写入 rollout（rollout 保持文本形态）。
+   */
+  userImages?: readonly ChatMessageImage[];
   onEvent?: (event: AgentEvent) => void;
 }
 
@@ -101,26 +107,39 @@ export async function runAgentSession(params: AgentSessionRunParams): Promise<Ag
   });
 
   // The loop records only messages it appends; seed the durable record with
-  // this run's user prompt so resume chains stay complete.
+  // any prior messages from a resumed session plus this run's user prompt so
+  // resume chains stay complete across multiple turns.
+  if (params.resumeFrom?.messages && params.resumeFrom.messages.length > 0) {
+    for (const message of params.resumeFrom.messages) {
+      recorder.enqueue({ type: 'message', step: 0, message });
+    }
+  }
   recorder.enqueue({ type: 'message', step: 0, message: { role: 'user', content: params.prompt } });
 
   const messages: ChatMessage[] = [];
   const systemPrompt = params.systemPrompt;
-  if (systemPrompt !== undefined && systemPrompt.length > 0) {
-    const resumedMessages = params.resumeFrom ? params.resumeFrom.messages : [];
-    const alreadyHasSystem = resumedMessages.some((message) => message.role === 'system');
-    if (!alreadyHasSystem) {
-      messages.push({ role: 'system', content: systemPrompt });
-    }
+  const resumedMessages = params.resumeFrom ? params.resumeFrom.messages : [];
+  const hasResumedSystem = resumedMessages.some((message) => message.role === 'system');
+  if (hasResumedSystem) {
+    messages.push(...resumedMessages);
+  } else if (systemPrompt !== undefined && systemPrompt.length > 0) {
+    messages.push({ role: 'system', content: systemPrompt });
+    messages.push(...resumedMessages);
+  } else {
+    messages.push(...resumedMessages);
   }
-  messages.push(...(params.resumeFrom ? params.resumeFrom.messages : []), { role: 'user', content: params.prompt });
+  messages.push({
+    role: 'user',
+    content: params.prompt,
+    ...(params.userImages && params.userImages.length > 0 ? { images: params.userImages } : {})
+  });
 
   // Deltas are transient UI payloads but still cross a process boundary —
   // redact secret-shaped text before emission, matching the durable policy.
   const emit = (event: AgentEvent): void => {
     if (!params.onEvent) return;
     params.onEvent(
-      event.type === 'agent-message-delta'
+      event.type === 'agent-message-delta' || event.type === 'agent-thinking-delta'
         ? { ...event, text: redactSecrets(event.text) }
         : event
     );

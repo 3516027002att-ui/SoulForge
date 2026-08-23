@@ -11,7 +11,7 @@ import {
 interface ModelServiceDto {
   id: string;
   displayName: string;
-  protocol: 'openai-compatible' | 'anthropic-compatible';
+  protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
   baseUrl: string;
   model: string;
   hasCredential: boolean;
@@ -67,7 +67,7 @@ type ModelServiceUpsertInput = Parameters<SoulForgeApi['upsertModelService']>[0]
 /** 表单字段快照：debounce 触发时与卸载 flush 时从 ref 读，避免闭包抓到旧值。 */
 interface FormSnapshot {
   displayName: string;
-  protocol: 'openai-compatible' | 'anthropic-compatible';
+  protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
   baseUrl: string;
   model: string;
   apiKey: string;
@@ -106,7 +106,7 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
   const [rows, setRows] = useState<ModelServiceDto[]>([]);
   const [encryptionOk, setEncryptionOk] = useState(false);
   const [displayName, setDisplayName] = useState('模型服务');
-  const [protocol, setProtocol] = useState<'openai-compatible' | 'anthropic-compatible'>('openai-compatible');
+  const [protocol, setProtocol] = useState<'openai-compatible' | 'openai-responses' | 'anthropic-compatible'>('openai-compatible');
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -407,15 +407,16 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
           <select
             value={protocol}
             onChange={(e) => {
-              const next = e.target.value as 'openai-compatible' | 'anthropic-compatible';
+              const next = e.target.value as 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
               setProtocol(next);
               // 2-A：换协议时收敛非法档（如 Anthropic 没有的 none/minimal → medium）。
               setThinkingLevel((level) => convergeThinkingLevel(level, next));
               scheduleAutoSave();
             }}
           >
-            <option value="openai-compatible">OpenAI 兼容</option>
-            <option value="anthropic-compatible">Anthropic 兼容</option>
+            <option value="openai-compatible">Chat Completions (/chat/completions)</option>
+            <option value="openai-responses">Responses (/responses)</option>
+            <option value="anthropic-compatible">Anthropic Messages (/v1/messages)</option>
           </select>
         </label>
         <label>
@@ -506,8 +507,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
             </label>
             <p className="muted">
               {protocol === 'anthropic-compatible'
-                ? 'Anthropic protocol: output_config.effort = low / medium / high / xhigh / max.'
-                : 'OpenAI protocol: reasoning_effort = none / minimal / low / medium / high / xhigh / max.'}
+                ? 'Anthropic Messages: output_config.effort = low / medium / high / xhigh / max.'
+                : protocol === 'openai-responses'
+                  ? 'Responses: reasoning.effort = none / minimal / low / medium / high / xhigh / max（/v1/responses）。'
+                  : 'Chat Completions: reasoning_effort = none / minimal / low / medium / high / xhigh / max（/v1/chat/completions）。'}
               {' '}型号是否支持某一档由服务端决定；「off」= 字段不下发。
             </p>
             <label>
@@ -521,10 +524,10 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
                   setContextWindowTokens(e.target.value);
                   scheduleAutoSave();
                 }}
-                placeholder="不填则不限"
+                placeholder="默认 500000（500K）"
               />
             </label>
-            <p className="muted">对话历史超过该长度时自动压缩后再请求模型。</p>
+            <p className="muted">建议填写模型的实际上下文长度（如 128000、200000 或 1000000）。不填默认 500K，达到设定长度的 80% 时会自动执行上下文摘要压缩。</p>
             <label>
               输出长度（token）
               <input
@@ -596,7 +599,7 @@ export function ModelServiceSettingsPanel({ onCancel }: ModelServiceSettingsPane
               />
             </label>
             <p className="muted">
-              仅 OpenAI 兼容协议支持（Anthropic 无 embedding API）。配置后可为工作区
+              仅 OpenAI 兼容协议（Chat Completions / Responses）支持（Anthropic 无 embedding API）。配置后可为工作区
               语料生成向量索引，检索自动升级为「词法 + 向量」RRF 混合。
             </p>
           </div>

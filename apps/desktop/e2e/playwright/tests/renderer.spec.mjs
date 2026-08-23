@@ -1393,6 +1393,10 @@ test('键盘导航：方向键/Home/End/Enter 选择，Escape 关闭命令面板
 
 test('窄窗口单行导航：653 / 768 / 1024 / 1440 宽度可操作', async () => {
   const { app, window } = await launchApp();
+  // 共享 userData 会继承上游用例写入的外壳状态（sidebarCollapsed 等，
+  // App 在打开工作区时读回）。本用例断言窄宽可操作，不断言继承的折叠态，
+  // 先清掉外壳状态再打开工作区，避免顺序依赖的假失败。
+  await window.evaluate(() => window.localStorage.clear());
   await openFixtureWorkspace(window);
 
   for (const [width, height] of [[653, 694], [768, 810], [1024, 768], [1440, 900]]) {
@@ -1842,14 +1846,15 @@ test('AI 任务：运行发起后进度事件真的更新消息流，取消真�
   expect((modeCalls['ai.agent.run:mode=plan'] ?? 0) + (modeCalls['ai.agent.run:mode=normal'] ?? 0)).toBeGreaterThan(0);
   expect(modeCalls['ai.agent.run:mode=fullPermission'] ?? 0).toBe(0);
 
-  // 3) 推送事件到达后消息流真的更新：步号、工具活动与产出量都必须出现。
+  // 3) 推送事件到达后消息流真的更新：工具活动与产出量都必须出现。
   //    fixture 按计时器推 turn-started(1) → tool-call → delta，且刻意不推终态。
-  await expect(status).toContainText('第 1 步');
+  await expect(status).toContainText('任务进行中');
   await expect(status).toContainText('可随时取消');
   const toolRow = window.locator('[data-testid="agent-tool-activity-fixture-call-1"]');
   await expect(toolRow).toContainText('search_resources');
   await expect(toolRow).toContainText('成功');
   await expect(status).toContainText('已产出 6 字符');
+  await expect(window.locator('.agent-message--agent')).toContainText('合成增量文本');
 
   // 4) 运行中停止必须可用——硬约束 16 的「可取消」在界面上成立（stop 只停当前生成）。
   await expect(stop).toBeVisible();
@@ -1862,7 +1867,7 @@ test('AI 任务：运行发起后进度事件真的更新消息流，取消真�
   // 6) 终态由主进程回报，界面据此收敛；取消后停止键消失。
   await expect(status).toContainText('已被取消');
   await expect(stop).toHaveCount(0);
-  await expect(window.locator('[data-testid="agent-rollout-file"]')).toContainText('fixture-rollout.jsonl');
+  await expect(window.locator('[data-testid="agent-thinking"]')).toContainText('已思考');
 
   await window.screenshot({ path: 'test-results/13-agent-task-run-cancel.png' });
   await app.close();
@@ -1945,7 +1950,7 @@ test('AGENT-60D：conversation 与 tool-running 两态渲染并保存截图', as
   await window.locator('.agent__composer textarea').fill('把伤药葫芦的持有上限调到 12');
   await window.locator('.agent__composer').getByRole('button', { name: '发送' }).click();
   await expect(window.locator('.agent-message--user')).toContainText('把伤药葫芦的持有上限调到 12');
-  await expect(window.locator('[data-testid="agent-task-status"]')).toContainText('第 1 步');
+  await expect(window.locator('[data-testid="agent-task-status"]')).toContainText('任务进行中');
   await expect(window.locator('[data-testid="agent-tool-activity-fixture-call-1"]')).toBeVisible();
   await window.screenshot({ path: 'test-results/60d-01-conversation.png' });
 
@@ -2014,9 +2019,10 @@ test('T6 冷启动：不打开工作区也能发送并收到模型回答', async
   // 用户目标进对话流；发送即运行。
   await expect(window.locator('.agent-message--user')).toContainText('只狼 SpEffect 怎么改');
   await expect.poll(async () => (await ipcCalls(app))['ai.agent.run'] ?? 0).toBeGreaterThan(0);
-  await expect(window.locator('[data-testid="agent-task-status"]')).toContainText('第 1 步');
+  await expect(window.locator('[data-testid="agent-task-status"]')).toContainText('任务进行中');
   await expect(window.locator('[data-testid="agent-tool-activity-fixture-call-1"]')).toBeVisible();
   await expect(window.locator('[data-testid="agent-task-status"]')).toContainText('已产出 6 字符');
+  await expect(window.locator('.agent-message--agent')).toContainText('合成增量文本');
 
   // 绝不该是「未打开工作区」错误。
   const bodyText = await window.locator('body').innerText();
@@ -2629,6 +2635,10 @@ test('EVENT-30B：多 tab 各自 dirty，切 tab 保留未提交编辑', async (
 
 test('EVENT-30B：打开一个事件文档只发一次 readEmevdFullDocument，且零次 readEmevdDocument', async () => {
   const { app, window } = await launchApp();
+  // 共享 userData 会继承上游 EVENT 用例持久化的上次选中事件文件；打开工作区时
+  // restoreLastShellState 会提前读它，污染「打开前零次」基线。本用例断言打开
+  // 动作本身的 IPC 计数，先清外壳状态再打开工作区。
+  await window.evaluate(() => window.localStorage.clear());
   await openFixtureWorkspace(window);
 
   // 打开前基线：两条 channel 都没被碰过。没有这一步，「恰好一次」可能是
@@ -2694,6 +2704,9 @@ test('EVENT-30B：快速切换 common → menu，旧请求被取消且不覆盖 
   const { app, window, pageErrors, consoleErrors } = await launchApp({
     SF_TEST_EMEVD_OPEN_DELAY_MS: String(delayMs)
   });
+  // 共享 userData 继承的上次选中事件文件会在打开工作区时被 restoreLastShellState
+  // 提前读一次，arrivals 基线从 0 变 1，并发/取消计数与间隔断言全失真。
+  await window.evaluate(() => window.localStorage.clear());
   await openFixtureWorkspace(window);
   await closeAgentPanel(window);
 
@@ -2802,6 +2815,9 @@ test('EVENT-30B：event→PARAM 切离事件域必须发出取消 IPC', async ()
   const { app, window, pageErrors, consoleErrors } = await launchApp({
     SF_TEST_EMEVD_OPEN_DELAY_MS: String(delayMs)
   });
+  // 共享 userData 继承的上次选中事件文件会在打开工作区时被 restoreLastShellState
+  // 提前读一次，arrivals 基线从 0 变 1，并发/取消计数与间隔断言全失真。
+  await window.evaluate(() => window.localStorage.clear());
   await openFixtureWorkspace(window);
   await closeAgentPanel(window);
   // 问题 1：开始侧栏资源树已拆；进事件域（自动首选打开 common.emevd）作为唯一一次 EMEVD 打开。
@@ -2848,7 +2864,8 @@ test('S16 脚本 IDE：容器 Files|Source 两栏，明文/反编译可编辑，
   await expect(source).toContainText('goal = { name = "合成目标"');
 
   // 编辑 → Ctrl+S 应用（S14 话术）+ 未保存标记。
-  await window.locator('[data-editor-engine="codemirror"] .cm-content').click();
+  // 挂在 Source 域内：继承态可能同时挂载事件工作台，页级 .cm-content 会歧义。
+  await source.locator('[data-editor-engine="codemirror"] .cm-content').click();
   await window.keyboard.press('Control+End');
   await window.keyboard.type('\n-- e2e 追加');
   await expect(window.locator('.scp-dirty')).toHaveText('未保存');
@@ -2883,7 +2900,8 @@ test('S16 脚本 IDE：独立 .hks 单 Source，打开即反编译，Ctrl+S 应�
   await expect(source).toContainText('可编辑 · Ctrl+S 应用');
 
   // 编辑 → Ctrl+S 应用。
-  await window.locator('[data-editor-engine="codemirror"] .cm-content').click();
+  // 挂在 Source 域内：继承态可能同时挂载事件工作台，页级 .cm-content 会歧义。
+  await source.locator('[data-editor-engine="codemirror"] .cm-content').click();
   await window.keyboard.press('Control+End');
   await window.keyboard.type('\n-- standalone 追加');
   await window.keyboard.press('Control+s');

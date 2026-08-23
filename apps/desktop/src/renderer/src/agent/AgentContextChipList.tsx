@@ -7,10 +7,13 @@ export interface AgentContextChip {
   label: string;
   /** hover 时的完整内容；缺省时用 label。 */
   title?: string;
+  /** 附件移除用；不渲染进 DOM。 */
+  token?: string;
 }
 
 export interface AgentContextChipListProps {
   chips: AgentContextChip[];
+  onRemove?: (token: string) => void;
 }
 
 /**
@@ -21,7 +24,7 @@ export interface AgentContextChipListProps {
  * 形式稳定展示，避免在未打通真实链路前伪造可交互能力。
  */
 export function AgentContextChipList(props: AgentContextChipListProps): ReactElement {
-  const { chips } = props;
+  const { chips, onRemove } = props;
   return (
     <div
       className="composer-context"
@@ -31,10 +34,20 @@ export function AgentContextChipList(props: AgentContextChipListProps): ReactEle
       {chips.map((chip, index) => (
         <span
           className="ctx-chip"
-          key={`${chip.kind}:${index}`}
+          key={`${chip.kind}:${chip.token ?? index}`}
           title={chip.title ?? chip.label}
         >
-          <span aria-hidden="true">{chip.kind}</span><span className="ctx-chip__label">{chip.label}</span>
+          <span className="ctx-chip__label">{chip.label}</span>
+          {onRemove !== undefined && chip.token !== undefined && (
+            <button
+              type="button"
+              className="ctx-chip__remove"
+              onClick={() => onRemove(chip.token as string)}
+              aria-label={`移除附件 ${chip.label}`}
+            >
+              ×
+            </button>
+          )}
         </span>
       ))}
     </div>

@@ -536,7 +536,10 @@ function createHoverTooltipSource(
   return (view, pos) => {
     const word = wordAtPos(view.state, pos);
     if (!word || word.text.length < 2) return null;
-    const matches = getCatalog().filter((item) => item.name === word.text);
+    const targetLower = word.text.toLowerCase();
+    const matches = getCatalog().filter(
+      (item) => item.name === word.text || item.name.toLowerCase() === targetLower
+    );
     if (matches.length === 0) return null;
     const element = document.createElement('div');
     element.className = 'cm-emedf-hover';
@@ -1575,8 +1578,10 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         )}
       </div>
 
+      {/* 外层 section 已持「Event 源码工作台」区域名；内层布局不重复同名
+          aria-label，否则页级 [aria-label=…] 定位命中两个节点。 */}
       <WorkbenchLayout
-        label="Event 源码工作台"
+        label="Event 源码工作台主区"
         toolbar={(
           <div className="esw-toolbar__group">
             {!readOnly && (

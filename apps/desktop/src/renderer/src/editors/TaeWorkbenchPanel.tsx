@@ -64,6 +64,10 @@ import {
   isTaeDocument,
   projectTaeDocumentPages,
   TAE_INVALID_TIME_RANGE,
+  AnimationPlaybackClock,
+  buildTaeTimelineTracks,
+  type TaeTimelineTrack,
+  type TaeTimelineBlock,
   type Diagnostic,
   type TaeAnimationWire,
   type TaeDocument,
@@ -399,6 +403,11 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
   const [writeNotice, setWriteNotice] = useState<TaeWriteNotice | null>(null);
   /** S17：词条名目录（eventTypeId → 模板名；无模板的类型不在表内 → 「未命名」）。 */
   const [eventTypeNames, setEventTypeNames] = useState<ReadonlyMap<number, string>>(new Map());
+  /** 动画播放器状态 */
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackTime, setPlaybackTime] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
+  const [isLooping, setIsLooping] = useState(true);
   /** S17：选中词条事件的参数体（按需拉取；无模板时 undecodedHex 非空）。 */
   const [eventParams, setEventParams] = useState<{
     loading: boolean;
@@ -594,9 +603,16 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           return;
         }
         const meshCount = first.data.meshCount ?? 0;
-        const firstMesh = toMesh(first.data);
         const meshes: NonNullable<ReturnType<typeof toMesh>>[] = [];
-        if (firstMesh) meshes.push(firstMesh);
+        if (Array.isArray((first.data as any).meshes) && (first.data as any).meshes.length > 0) {
+          for (const m of (first.data as any).meshes) {
+            const parsed = toMesh(m);
+            if (parsed) meshes.push(parsed);
+          }
+        } else {
+          const firstMesh = toMesh(first.data);
+          if (firstMesh) meshes.push(firstMesh);
+        }
         const boneCount = first.data.boneCount ?? 0;
         let bones = (first.data.bones ?? []).map((bone) => ({
           name: bone.name,
@@ -604,20 +620,22 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
           translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
           rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
         }));
-        // 问题4-A：mesh 0 之外还有网格就把其余读齐（Bridge 一次一网格，renderer 循环）。
-        for (let index = 1; index < meshCount; index += 1) {
-          if (cancelled) return;
-          const next = await bridge.readTaeChrbndPreview(props.resourceUri, index) as PreviewResult;
-          if (cancelled) return;
-          const nextMesh = toMesh(next.data ?? null);
-          if (nextMesh) meshes.push(nextMesh);
-          if (bones.length === 0 && next.data?.bones) {
-            bones = next.data.bones.map((bone) => ({
-              name: bone.name,
-              parentIndex: bone.parentIndex,
-              translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
-              rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
-            }));
+        // 问题4-A：若不是预装配体且 mesh 0 之外还有网格，就把其余读齐。
+        if (!Array.isArray((first.data as any).meshes)) {
+          for (let index = 1; index < meshCount; index += 1) {
+            if (cancelled) return;
+            const next = await bridge.readTaeChrbndPreview(props.resourceUri, index) as PreviewResult;
+            if (cancelled) return;
+            const nextMesh = toMesh(next.data ?? null);
+            if (nextMesh) meshes.push(nextMesh);
+            if (bones.length === 0 && next.data?.bones) {
+              bones = next.data.bones.map((bone) => ({
+                name: bone.name,
+                parentIndex: bone.parentIndex,
+                translation: [bone.translation[0] ?? 0, bone.translation[1] ?? 0, bone.translation[2] ?? 0] as [number, number, number],
+                rotation: [bone.rotation[0] ?? 0, bone.rotation[1] ?? 0, bone.rotation[2] ?? 0] as [number, number, number]
+              }));
+            }
           }
         }
         if (cancelled) return;
@@ -848,6 +866,99 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     await commitMutations([mutation], '事件时间已更新并重读验证。');
   }
 
+  // 计算当前选中动画的总时长（根据事件最大 endTime，或默认 2.0s）
+  const animDuration = useMemo(() => {
+    if (!selectedAnimationEvents || selectedAnimationEvents.length === 0) return 2.0;
+    let max = 0;
+    for (const ev of selectedAnimationEvents) {
+      if (Number.isFinite(ev.endTime) && ev.endTime > 0 && ev.endTime < MAX_ANIMATION_SECONDS) {
+        if (ev.endTime > max) max = ev.endTime;
+      }
+    }
+    return max > 0 ? Math.max(0.5, max) : 2.0;
+  }, [selectedAnimationEvents]);
+
+  // 权威播放时钟实例
+  const clockRef = useRef<AnimationPlaybackClock>(
+    new AnimationPlaybackClock({ fps: FRAME_RATE, duration: animDuration, loop: isLooping, playbackRate: playbackSpeed })
+  );
+
+  // 同步 duration / loop / speed 到权威时钟
+  useEffect(() => {
+    clockRef.current.setDuration(animDuration);
+  }, [animDuration]);
+
+  useEffect(() => {
+    clockRef.current.setLoop(isLooping);
+  }, [isLooping]);
+
+  useEffect(() => {
+    clockRef.current.setPlaybackRate(playbackSpeed);
+  }, [playbackSpeed]);
+
+  // 订阅时钟状态
+  useEffect(() => {
+    const unsub = clockRef.current.subscribe((state) => {
+      setPlaybackTime(state.currentTime);
+      setIsPlaying(state.isPlaying);
+    });
+    return unsub;
+  }, []);
+
+  // 切换动画时重置播放进度
+  useEffect(() => {
+    clockRef.current.stop();
+  }, [selected?.animationId]);
+
+  // 播放器 rAF 驱动权威时钟
+  useEffect(() => {
+    if (!isPlaying) return;
+    let last = performance.now();
+    let frameId: number;
+
+    const tick = (now: number) => {
+      const delta = (now - last) / 1000;
+      last = now;
+      clockRef.current.tick(delta);
+      frameId = requestAnimationFrame(tick);
+    };
+
+    frameId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frameId);
+  }, [isPlaying]);
+
+  // 快捷键监听：空格键切换播放/暂停
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        clockRef.current.togglePlay();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const totalFrames = Math.round(animDuration * FRAME_RATE);
+  const currentFrame = Math.round(playbackTime * FRAME_RATE);
+
+  const togglePlay = () => clockRef.current.togglePlay();
+  const resetPlayback = () => clockRef.current.stop();
+  const stepFrame = (frames: number) => clockRef.current.stepFrame(frames);
+  const seekSeconds = (secs: number) => clockRef.current.seek(secs);
+
+  // 构造结构化 Timeline Tracks
+  const timelineTracks = useMemo(() => {
+    if (!selectedAnimationEvents || selectedAnimationEvents.length === 0 || !selectedAnimation) return [];
+    const rows: TaeTimelineEventRow[] = selectedAnimationEvents.map((ev) => ({
+      animId: selectedAnimation.animId,
+      ...ev
+    }));
+    return buildTaeTimelineTracks(rows, mergedDocument?.diagnostics, { fps: FRAME_RATE });
+  }, [selectedAnimationEvents, selectedAnimation, mergedDocument?.diagnostics]);
+
   return (
     <WorkbenchLayout
       label="动作工作台"
@@ -931,10 +1042,16 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   {selectedAnimationEvents.map((event, index) => {
                     const invalid = isInvalidTimeRange(event.startTime, event.endTime);
                     const typeName = eventTypeNames.get(event.eventTypeId) ?? '未命名';
+                    const isTriggering = !invalid && event.startTime <= playbackTime && playbackTime <= event.endTime;
                     return (
                       <div
                         key={`${selectedAnimation.animId}-${index}`}
                         className={invalid ? 'wb-row wb-row--failed' : 'wb-row'}
+                        style={isTriggering ? {
+                          backgroundColor: 'rgba(224, 108, 58, 0.25)',
+                          borderLeft: '3px solid var(--ember, #e06c3a)',
+                          transition: 'background-color 0.1s ease'
+                        } : undefined}
                         {...selectableRowAttributes({
                           selected: selected?.kind === 'event' && selected.eventIndex === index,
                           isTabEntry: false,
@@ -943,7 +1060,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                         title={`${event.eventTypeId} ${typeName}`}
                       >
                         <span className="wb-row__name" title={`${event.eventTypeId} ${typeName}`}>
-                          {event.eventTypeId} {typeName}
+                          {isTriggering ? '⚡ ' : ''}{event.eventTypeId} {typeName}
                         </span>
                         <span className="wb-row__meta">
                           {invalid ? '非法时间' : `帧 ${secondsToFrame(event.startTime)}–${secondsToFrame(event.endTime)}`}
@@ -988,15 +1105,15 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
         },
         {
           id: 'preview',
-          title: '预览（只读）',
+          title: '动作 3D 预览',
           initialFlex: 0.22,
           minWidth: 220,
           children: (
-            <div className="wb-list tae-preview-body">
+            <div className="wb-list tae-preview-body" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
               {mergedDocument === null && <p className="wb-empty">选择 .tae / .anibnd.dcx 文件后查看预览。</p>}
               {mergedDocument !== null && (
                 <>
-                  {preview.loading && <p className="wb-empty">正在查找伴生模型（chrbnd）…</p>}
+                  {preview.loading && <p className="wb-empty">正在查找伴生模型（chrbnd）与装配部件（partsbnd）…</p>}
                   {!preview.loading && preview.error !== null && (
                     <>
                       <p className="wb-empty" data-testid="tae-preview-unavailable">
@@ -1008,25 +1125,129 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                     </>
                   )}
                   {!preview.loading && preview.error === null && preview.meshes.length > 0 && (
-                    <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
+                    <div className="tae-preview-host tae-preview__viewport" style={{ flex: 1, minHeight: 220 }} data-testid="tae-preview-viewport">
                       <FlverViewer
                         meshCount={preview.meshCount}
                         boneCount={preview.boneCount}
                         externalMeshes={preview.meshes}
                         externalBones={preview.bones}
+                        playbackTime={playbackTime}
                       />
                     </div>
                   )}
                   {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount > 0 && (
-                    <div className="tae-preview-host tae-preview__viewport" data-testid="tae-preview-viewport">
+                    <div className="tae-preview-host tae-preview__viewport" style={{ flex: 1, minHeight: 220 }} data-testid="tae-preview-viewport">
                       <FlverViewer
                         meshCount={0}
                         boneCount={preview.boneCount}
                         externalMeshes={[]}
                         externalBones={preview.bones}
+                        playbackTime={playbackTime}
                       />
                     </div>
                   )}
+                  {/* 统一 Authoritative 播放控制栏与 Timeline 轨道 */}
+                  <div className="tae-timeline-ctrl" style={{ padding: '8px 12px', background: 'var(--bg-secondary, #1e1e1e)', borderTop: '1px solid var(--border, #333)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <button type="button" onClick={togglePlay} style={{ padding: '2px 8px', fontWeight: 'bold' }} title="空格键播放/暂停">
+                          {isPlaying ? '⏸ 暂停' : '▶ 播放'}
+                        </button>
+                        <button type="button" onClick={resetPlayback} style={{ padding: '2px 6px' }} title="重置到开头">
+                          ⏹ 停止
+                        </button>
+                        <button type="button" onClick={() => stepFrame(-1)} style={{ padding: '2px 6px' }} title="上一帧">
+                          ⏮
+                        </button>
+                        <button type="button" onClick={() => stepFrame(1)} style={{ padding: '2px 6px' }} title="下一帧">
+                          ⏭
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsLooping(!isLooping)}
+                          style={{ padding: '2px 6px', color: isLooping ? 'var(--accent, #4caf50)' : 'var(--muted, #888)' }}
+                          title="循环播放"
+                        >
+                          🔁
+                        </button>
+                        <select
+                          value={playbackSpeed}
+                          onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
+                          style={{ background: 'var(--bg-input, #2a2a2a)', color: 'inherit', border: '1px solid var(--border, #444)', borderRadius: 3, padding: '2px 4px', fontSize: 11 }}
+                        >
+                          <option value={0.25}>0.25x</option>
+                          <option value={0.5}>0.5x</option>
+                          <option value={1.0}>1.0x</option>
+                          <option value={2.0}>2.0x</option>
+                        </select>
+                      </div>
+                      <div style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--text-secondary, #aaa)' }}>
+                        帧 {currentFrame} / {totalFrames} ({formatTime(playbackTime)}s / {formatTime(animDuration)}s)
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input
+                        type="range"
+                        min={0}
+                        max={totalFrames > 0 ? totalFrames : 100}
+                        value={currentFrame}
+                        onChange={(e) => {
+                          const f = Number(e.target.value);
+                          clockRef.current.seekFrame(f);
+                        }}
+                        style={{ flex: 1, cursor: 'pointer' }}
+                      />
+                    </div>
+                    {/* 多轨时间轴视觉呈现 */}
+                    {timelineTracks.length > 0 && (
+                      <div className="tae-tracks-container" style={{ maxHeight: 120, overflowY: 'auto', background: 'var(--bg-canvas, #141414)', border: '1px solid var(--border, #282828)', borderRadius: 4, padding: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {timelineTracks.map((track) => (
+                          <div key={`track-${track.trackIndex}`} style={{ position: 'relative', height: 20, background: 'rgba(255,255,255,0.03)', borderRadius: 2 }}>
+                            {track.blocks.map((block) => {
+                              const leftPercent = totalFrames > 0 ? (block.startFrame / totalFrames) * 100 : 0;
+                              const widthPercent = totalFrames > 0 ? Math.max(2, (block.durationFrames / totalFrames) * 100) : 10;
+                              const isTriggering = !block.hasError && block.startTime <= playbackTime && playbackTime <= block.endTime;
+                              const isSelected = selected?.kind === 'event' && selected.eventIndex === block.eventIndex;
+
+                              return (
+                                <div
+                                  key={block.id}
+                                  onClick={() => selectEvent(block.eventIndex)}
+                                  title={`${block.eventTypeId} (${block.startFrame}F - ${block.endFrame}F)${block.hasError ? ': ' + block.errorMessage : ''}`}
+                                  style={{
+                                    position: 'absolute',
+                                    left: `${leftPercent}%`,
+                                    width: `${widthPercent}%`,
+                                    height: '100%',
+                                    background: block.hasError
+                                      ? 'rgba(244, 67, 54, 0.7)'
+                                      : isSelected
+                                      ? 'var(--accent, #2196f3)'
+                                      : isTriggering
+                                      ? 'rgba(224, 108, 58, 0.85)'
+                                      : 'rgba(100, 149, 237, 0.5)',
+                                    border: isSelected ? '1px solid #fff' : '1px solid rgba(255,255,255,0.2)',
+                                    borderRadius: 2,
+                                    fontSize: 10,
+                                    color: '#fff',
+                                    whiteSpace: 'nowrap',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    padding: '1px 3px',
+                                    cursor: 'pointer',
+                                    boxSizing: 'border-box'
+                                  }}
+                                >
+                                  {block.eventTypeId}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount === 0 && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-ok">
                       {preview.meshCount > 0
@@ -1037,11 +1258,6 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
                   {!preview.loading && preview.error === null && preview.meshes.length === 0 && preview.boneCount > 0 && (
                     <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-skeleton-note">
                       该模型为骨骼装配体（{preview.boneCount} bones），网格由 partsbnd 装配，当前仅预览骨骼。
-                    </p>
-                  )}
-                  {!preview.loading && preview.error === null && preview.meshes.length > 0 && (
-                    <p className="muted" style={{ fontSize: 11 }} data-testid="tae-preview-mesh-note">
-                      模型已挂，动画播放未接入（骨骼动画预览尚未实现）。
                     </p>
                   )}
                   {isPartial && invalidRangeCount > 0 && (

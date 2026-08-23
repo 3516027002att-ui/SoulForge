@@ -814,12 +814,14 @@ internal sealed class BridgeCommandService
                         && pageEl.TryGetInt32(out var parsedPage)
                         && parsedPage >= 0)
                         animationPage = parsedPage;
-                    if (options.TryGetProperty("animationPageSize", out var sizeEl)
+                    if (optionsIsObject
+                        && options.TryGetProperty("animationPageSize", out var sizeEl)
                         && sizeEl.ValueKind == JsonValueKind.Number
                         && sizeEl.TryGetInt32(out var parsedSize)
                         && parsedSize > 0)
                         animationPageSize = parsedSize;
-                    else if (options.TryGetProperty("pageSize", out var altSizeEl)
+                    else if (optionsIsObject
+                        && options.TryGetProperty("pageSize", out var altSizeEl)
                         && altSizeEl.ValueKind == JsonValueKind.Number
                         && altSizeEl.TryGetInt32(out var altParsedSize)
                         && altParsedSize > 0)

@@ -38,6 +38,15 @@ function decodeBase64F32(base64: string, expectedCount: number): Float32Array {
 
 export type RendererBackend = 'webgpu' | 'webgl2';
 
+export type TransformMode = 'translate' | 'rotate' | 'scale';
+
+export interface TransformChangeEvent {
+  id: string;
+  position: [number, number, number];
+  rotation: [number, number, number];
+  scale: [number, number, number];
+}
+
 /** Minimal renderer surface shared by WebGPU / WebGL2 / headless fakes. */
 export interface ThreeRendererLike {
   setPixelRatio(ratio: number): void;
@@ -52,16 +61,26 @@ export interface ThreeSceneHandle {
   setSelected: (id: string | null) => void;
   selectedId: string | null;
   rendererBackend: RendererBackend;
+  setTransformMode?: (mode: TransformMode) => void;
 }
 
 export interface ProxySceneHandle extends ThreeSceneHandle {
   setDrawList: (list: SceneDrawList) => void;
   /** 用真实 FLVER 网格替换某个 proxy 盒子；找不到 id 则忽略。 */
   replaceItemMesh: (id: string, mesh: FlverSceneMesh) => void;
+  /** 按 modelName 批量更新场景内所有引用该模型的 Mesh 几何体（对齐 Smithbox 几何共享池） */
+  updateModelGeometry?: (modelName: string, geometryData: {
+    positionsBase64: string;
+    indicesBase64?: string | undefined;
+    uvsBase64?: string | undefined;
+    normalsBase64?: string | undefined;
+    vertexCount: number;
+  }) => void;
 }
 
 export interface FlverSceneHandle extends ThreeSceneHandle {
   setScene: (scene: FlverSemanticScene) => void;
+  setPlaybackTime?: (time: number) => void;
 }
 
 /** 未压缩 RGBA 纹理投影输入（typed bytes，不含渲染器对象）。 */
@@ -144,6 +163,7 @@ interface MountInput {
   /** Headless test seam: replaces GPU-backed renderer construction. */
   rendererFactory?: (canvas: HTMLCanvasElement) => ThreeRendererLike;
   onSelect?: (itemId: string | null) => void;
+  onTransformChange?: (event: TransformChangeEvent) => void;
   /**
    * Test seam: fires with the currently tracked disposables after each content
    * build, letting headless smoke assert every resource is disposed on release.
@@ -166,6 +186,7 @@ interface SceneCore {
   canvas: HTMLCanvasElement;
   selectedId: string | null;
   setSelected: (id: string | null, notify?: boolean) => void;
+  setTransformMode: (mode: TransformMode) => void;
   addMesh: (id: string, object: Object3D) => void;
   clearContent: () => void;
   frameToBounds: (bounds: FlverSceneBounds) => void;
@@ -185,33 +206,29 @@ export function resolveRendererBackend(
   return override ?? (gpuAvailable ? 'webgpu' : 'webgl2');
 }
 
-/**
- * Mount a WebGPU-first proxy scene with WebGL2 fallback.
- * Selection callback receives draw-item id (part URI fragment), never paths.
- */
-export async function mountThreeProxyScene(input: {
-  container: HTMLElement;
-  drawList: SceneDrawList;
-  onSelect?: (itemId: string | null) => void;
-  rendererBackend?: RendererBackend;
-  rendererFactory?: (canvas: HTMLCanvasElement) => ThreeRendererLike;
-  resourceAudit?: (resources: ReadonlyArray<{ dispose(): void }>) => void;
-}): Promise<ProxySceneHandle> {
+export async function mountThreeProxyScene(
+  input: MountInput & { drawList: SceneDrawList }
+): Promise<ProxySceneHandle> {
   const core = await mountSceneCore(input);
+  let initialFramed = false;
 
   const setDrawList = (list: SceneDrawList): void => {
     try {
       assertNoAbsolutePathLeak(list);
+      const prevSelected = core.selectedId;
       core.clearContent();
       for (const item of list.items) {
         core.addMesh(item.id, createProxyMesh(core.three, core.track, item));
       }
-      core.frameToBounds(list.bounds);
-      core.setSelected(null, false);
+      if (!initialFramed) {
+        core.frameToBounds(list.bounds);
+        initialFramed = true;
+      }
+      if (prevSelected) {
+        core.setSelected(prevSelected, false);
+      }
       input.resourceAudit?.([...core.resources]);
     } catch (error) {
-      // 内容构建失败（如 SCENE_ABSOLUTE_PATH_LEAK）也必须释放整个挂载：
-      // rAF 循环、事件监听、renderer 与静态资源，杜绝错误路径泄漏。
       core.disposeAll();
       throw error;
     }
@@ -225,6 +242,7 @@ export async function mountThreeProxyScene(input: {
       return core.selectedId;
     },
     setSelected: (id) => core.setSelected(id),
+    setTransformMode: (mode) => core.setTransformMode(mode),
     setDrawList,
     replaceItemMesh: (id, mesh) => {
       const previous = core.meshes.get(id);
@@ -233,6 +251,56 @@ export async function mountThreeProxyScene(input: {
         core.meshes.delete(id);
       }
       core.addMesh(id, createFlverMesh(core.three, core.track, mesh));
+    },
+    updateModelGeometry: (modelName, geometryData) => {
+      if (!geometryData.positionsBase64 || geometryData.vertexCount <= 0) return;
+      // 1. 创建并缓存该 modelName 的真实 BufferGeometry
+      const geometry = core.track(new core.three.BufferGeometry());
+      geometry.setAttribute('position', new core.three.BufferAttribute(
+        decodeBase64F32(geometryData.positionsBase64, geometryData.vertexCount * 3),
+        3
+      ));
+      if (geometryData.indicesBase64) {
+        const indexBytes = decodeBase64ToUint8Array(geometryData.indicesBase64);
+        const view = indexBytes.length % 2 === 0
+          ? new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexBytes.length / 2)
+          : null;
+        if (view) geometry.setIndex(new core.three.BufferAttribute(view, 1));
+      }
+      if (geometryData.uvsBase64) {
+        geometry.setAttribute('uv', new core.three.BufferAttribute(
+          decodeBase64F32(geometryData.uvsBase64, geometryData.vertexCount * 2),
+          2
+        ));
+      }
+      if (geometryData.normalsBase64) {
+        geometry.setAttribute('normal', new core.three.BufferAttribute(
+          decodeBase64F32(geometryData.normalsBase64, geometryData.vertexCount * 3),
+          3
+        ));
+      } else {
+        geometry.computeVertexNormals();
+      }
+
+      // 2. 真实模型材质（Smithbox 风格双面 PBR 材质）
+      const realMaterial = core.track(new core.three.MeshStandardMaterial({
+        color: new core.three.Color(0x9aa2ad),
+        roughness: 0.5,
+        metalness: 0.15,
+        side: core.three.DoubleSide
+      }));
+
+      // 3. 匹配并热替换所有关联该 modelName 的 Mesh
+      const cleanName = modelName.toLowerCase().replace(/\.mapbnd(\.dcx)?$/i, '');
+      for (const [id, meshObj] of core.meshes) {
+        const mesh = meshObj as import('three').Mesh;
+        const uModel = typeof mesh.userData?.modelName === 'string' ? mesh.userData.modelName.toLowerCase() : '';
+        const belongs = id.toLowerCase().includes(cleanName) || uModel === cleanName || uModel.includes(cleanName);
+        if (belongs && mesh.isMesh) {
+          mesh.geometry = geometry;
+          mesh.material = realMaterial;
+        }
+      }
     },
     dispose: core.disposeAll
   };
@@ -253,12 +321,43 @@ export async function mountFlverScene(input: {
   resourceAudit?: (resources: ReadonlyArray<{ dispose(): void }>) => void;
 }): Promise<FlverSceneHandle> {
   const core = await mountSceneCore(input);
+  let activeBones: Array<import('three').Bone> = [];
 
   const setScene = (semantic: FlverSemanticScene): void => {
     try {
       core.clearContent();
+      activeBones = [];
+
+      // 1. 构建 THREE.Bone 骨骼树
+      let skeleton: import('three').Skeleton | null = null;
+      if (semantic.bones && semantic.bones.length > 0) {
+        const threeBones: Array<import('three').Bone> = [];
+        for (const b of semantic.bones) {
+          const bone = new core.three.Bone();
+          bone.name = b.name;
+          bone.position.set(b.translation[0], b.translation[1], b.translation[2]);
+          bone.rotation.set(
+            (b.rotation[0] * Math.PI) / 180,
+            (b.rotation[1] * Math.PI) / 180,
+            (b.rotation[2] * Math.PI) / 180
+          );
+          threeBones.push(bone);
+        }
+        for (let i = 0; i < semantic.bones.length; i++) {
+          const parentIdx = semantic.bones[i]!.parentIndex;
+          if (parentIdx >= 0 && parentIdx < threeBones.length && parentIdx !== i) {
+            threeBones[parentIdx]!.add(threeBones[i]!);
+          } else {
+            core.root.add(threeBones[i]!);
+          }
+        }
+        skeleton = core.track(new core.three.Skeleton(threeBones));
+        activeBones = threeBones;
+      }
+
+      // 2. 创建网格（含 SkinnedMesh 绑定）
       for (const item of semantic.meshes) {
-        core.addMesh(item.id, createFlverMesh(core.three, core.track, item));
+        core.addMesh(item.id, createFlverMesh(core.three, core.track, item, skeleton));
       }
       createMarkers(core.three, core.track, core.markerGroup, semantic);
       core.frameToBounds(semantic.bounds);
@@ -269,6 +368,23 @@ export async function mountFlverScene(input: {
       throw error;
     }
   };
+
+  const updatePose = (t: number) => {
+    if (activeBones.length === 0) return;
+    const phase = t * Math.PI * 2;
+    for (let i = 0; i < activeBones.length; i++) {
+      const bone = activeBones[i]!;
+      const name = bone.name.toLowerCase();
+      if (name.includes('spine') || name.includes('pelvis') || name.includes('root') || i === 0) {
+        bone.position.y += Math.sin(phase * 2) * 0.001;
+      } else if (name.includes('arm') || name.includes('hand') || name.includes('wrist')) {
+        bone.rotation.z += Math.sin(phase) * 0.005;
+      } else if (name.includes('leg') || name.includes('foot') || name.includes('knee')) {
+        bone.rotation.x += Math.cos(phase) * 0.005;
+      }
+    }
+  };
+
   setScene(input.scene);
 
   return {
@@ -279,6 +395,9 @@ export async function mountFlverScene(input: {
     },
     setSelected: (id) => core.setSelected(id),
     setScene,
+    setPlaybackTime: (time: number) => {
+      updatePose(time);
+    },
     dispose: core.disposeAll
   };
 }
@@ -341,6 +460,15 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   let raf = 0;
   let disposed = false;
   let controls: { update(): void; dispose(): void } | null = null;
+  let transformControls: {
+    attach(object: Object3D): void;
+    detach(): void;
+    setMode(mode: 'translate' | 'rotate' | 'scale'): void;
+    getHelper?(): Object3D;
+    addEventListener(event: string, listener: (event: unknown) => void): void;
+    dispose(): void;
+    object?: Object3D;
+  } | null = null;
 
   const setSize = (): void => {
     const width = Math.max(input.container.clientWidth, 1);
@@ -425,17 +553,33 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     selectedId = id;
     restoreEmissive();
     clearHighlightObjects();
-    if (id) applyHighlight(id);
+    if (id) {
+      applyHighlight(id);
+      const target = meshes.get(id);
+      if (target && transformControls) {
+        transformControls.attach(target);
+      }
+    } else {
+      transformControls?.detach();
+    }
     if (notify) input.onSelect?.(id);
+  };
+
+  const setTransformMode = (mode: TransformMode): void => {
+    if (transformControls) transformControls.setMode(mode);
   };
 
   const addMesh = (id: string, object: Object3D): void => {
     object.userData.itemId = id;
     root.add(object);
     meshes.set(id, object);
+    if (selectedId === id && transformControls) {
+      transformControls.attach(object);
+    }
   };
 
   const clearContent = (): void => {
+    transformControls?.detach();
     restoreEmissive();
     clearHighlightObjects();
     for (const object of meshes.values()) root.remove(object);
@@ -452,9 +596,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       t.set(bounds.center[0], bounds.center[1], bounds.center[2]);
     }
   };
-  // 时序：先 syncTarget 再 camera.position.set 再 controls.update，OrbitControls 的 target 不再被后续帧覆盖导致跳变。
-  // 首次 mount 时 lastBounds 即在 frameToBounds 首帧赋值；后续 model 渐进加载通过 setDrawList 二次调用
-  // frameToBounds（bounds 不变时保持居中，不额外归零视角）。
+
   const frameToBounds = (bounds: FlverSceneBounds): void => {
     const [cx, cy, cz] = bounds.center;
     const span = Math.max(
@@ -469,6 +611,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     camera.lookAt(cx, cy, cz);
     if (controls) controls.update();
   };
+
   void import('three/examples/jsm/controls/OrbitControls.js')
     .then((module) => {
       if (disposed) return;
@@ -483,6 +626,57 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       orbit.dampingFactor = 0.08;
       controls = orbit;
       if (lastBounds) syncTarget(lastBounds);
+    })
+    .catch(() => undefined);
+
+  // 挂载 TransformControls (Gizmo)
+  void import('three/examples/jsm/controls/TransformControls.js')
+    .then((module) => {
+      if (disposed) return;
+      const { TransformControls } = module as unknown as {
+        TransformControls: new (
+          camera: PerspectiveCamera,
+          element: HTMLElement
+        ) => NonNullable<typeof transformControls>;
+      };
+      const tc = new TransformControls(camera, canvas as unknown as HTMLElement);
+      const helper = tc.getHelper ? tc.getHelper() : (tc as unknown as Object3D);
+      scene.add(helper);
+
+      tc.addEventListener('dragging-changed', (event: unknown) => {
+        const value = (event as { value?: boolean })?.value ?? false;
+        if (controls && typeof (controls as unknown as { enabled?: boolean }).enabled === 'boolean') {
+          (controls as unknown as { enabled: boolean }).enabled = !value;
+        }
+      });
+
+      tc.addEventListener('objectChange', () => {
+        const target = tc.object;
+        if (!target) return;
+        const itemId = (target.userData.itemId as string | undefined) ?? selectedId;
+        if (!itemId) return;
+        const pos: [number, number, number] = [
+          Math.round(target.position.x * 1e4) / 1e4,
+          Math.round(target.position.y * 1e4) / 1e4,
+          Math.round(target.position.z * 1e4) / 1e4
+        ];
+        const rot: [number, number, number] = [
+          Math.round(((target.rotation.x * 180) / Math.PI) * 1e4) / 1e4,
+          Math.round(((target.rotation.y * 180) / Math.PI) * 1e4) / 1e4,
+          Math.round(((target.rotation.z * 180) / Math.PI) * 1e4) / 1e4
+        ];
+        const scl: [number, number, number] = [
+          Math.round(target.scale.x * 1e4) / 1e4,
+          Math.round(target.scale.y * 1e4) / 1e4,
+          Math.round(target.scale.z * 1e4) / 1e4
+        ];
+        input.onTransformChange?.({ id: itemId, position: pos, rotation: rot, scale: scl });
+      });
+
+      transformControls = tc;
+      if (selectedId && meshes.has(selectedId)) {
+        tc.attach(meshes.get(selectedId)!);
+      }
     })
     .catch(() => undefined);
 
@@ -636,6 +830,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     resizeObserver?.disconnect();
     resizeObserver = null;
     controls?.dispose();
+    transformControls?.dispose();
     clearContent();
     for (const resource of staticResources) resource.dispose();
     renderer.dispose();
@@ -659,6 +854,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       return selectedId;
     },
     setSelected,
+    setTransformMode,
     addMesh,
     clearContent,
     frameToBounds,
@@ -739,12 +935,19 @@ function createProxyMesh(three: ThreeModule, track: ResourceTracker, item: Scene
       : (item.primitive === 'sphere'
           ? track(new three.SphereGeometry(0.5, 12, 10))
           : track(new three.BoxGeometry(1, 1, 1)));
+  const hasRealMesh = Boolean(item.mesh);
   const material = track(new three.MeshStandardMaterial({
-    color: new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2]),
-    roughness: 0.65,
-    metalness: 0.05
+    color: hasRealMesh ? new three.Color(0x8a929e) : new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2]),
+    roughness: hasRealMesh ? 0.55 : 0.65,
+    metalness: hasRealMesh ? 0.12 : 0.05,
+    side: hasRealMesh ? three.DoubleSide : three.FrontSide,
+    wireframe: !hasRealMesh,
+    transparent: !hasRealMesh,
+    opacity: !hasRealMesh ? 0.35 : 1.0
   }));
   const mesh = new three.Mesh(geometry, material);
+  mesh.userData.itemId = item.id;
+  if (item.modelName) mesh.userData.modelName = item.modelName;
   mesh.position.set(item.position[0], item.position[1], item.position[2]);
   mesh.rotation.set(
     (item.rotation[0] * Math.PI) / 180,
@@ -755,7 +958,12 @@ function createProxyMesh(three: ThreeModule, track: ResourceTracker, item: Scene
   return mesh;
 }
 
-function createFlverMesh(three: ThreeModule, track: ResourceTracker, item: FlverSceneMesh): Object3D {
+function createFlverMesh(
+  three: ThreeModule,
+  track: ResourceTracker,
+  item: FlverSceneMesh,
+  skeleton: import('three').Skeleton | null = null
+): Object3D {
   const geometry = track(new three.BufferGeometry());
   geometry.setAttribute('position', new three.BufferAttribute(item.positions, 3));
   if (item.uvs) geometry.setAttribute('uv', new three.BufferAttribute(item.uvs, 2));
@@ -765,16 +973,30 @@ function createFlverMesh(three: ThreeModule, track: ResourceTracker, item: Flver
   if (item.vertexColors) geometry.setAttribute('color', new three.BufferAttribute(item.vertexColors, 3));
 
   const texture = item.texture ? createTexture(three, track, item.texture) : null;
-  const meshIndex = Number.parseInt(item.id.replace(/\D+/g, '').slice(-3) || '0', 10) || 0;
-  const hue = (meshIndex * 137.508) % 360;
   const material = track(new three.MeshStandardMaterial({
-    color: texture ? 0xffffff : new three.Color().setHSL(hue / 360, 0.5, 0.55),
+    color: texture ? 0xffffff : new three.Color(0xb0b8c4),
+    roughness: 0.5,
+    metalness: 0.1,
     ...(texture ? { map: texture } : {}),
     wireframe: false,
     side: three.DoubleSide,
-    flatShading: !texture,
+    flatShading: false,
     vertexColors: Boolean(item.vertexColors)
   }));
+
+  if (skeleton) {
+    const skinned = new three.SkinnedMesh(geometry, material);
+    skinned.position.set(item.position[0], item.position[1], item.position[2]);
+    skinned.rotation.set(
+      (item.rotation[0] * Math.PI) / 180,
+      (item.rotation[1] * Math.PI) / 180,
+      (item.rotation[2] * Math.PI) / 180
+    );
+    skinned.scale.set(item.scale[0], item.scale[1], item.scale[2]);
+    skinned.bind(skeleton);
+    return skinned;
+  }
+
   const mesh = new three.Mesh(geometry, material);
   mesh.position.set(item.position[0], item.position[1], item.position[2]);
   mesh.rotation.set(

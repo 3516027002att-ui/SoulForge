@@ -387,8 +387,8 @@ function readScript(notePath: string): ScriptedToolCall {
 
 const EMPTY_ARGS = '{}';
 // Chain tools (stage/validate/commit/rollback) consume the shared transaction
-// state; a non-empty context marker lets them pass the agent loop evidence
-// gate (empty arguments = no prior context = insufficient_evidence).
+// state; this marker is retained for the scripted write matrix and is not a
+// substitute for the registry's own input/state diagnostics.
 const CHAIN_ARGS = JSON.stringify({ chainContext: 'matrix-write-chain' });
 
 async function runScriptedMatrix(
@@ -797,7 +797,7 @@ async function main(): Promise<void> {
         // after the session escalates; both decisions stay in the audit log.
         if (call.name === 'patch.commit'
           && !result.ok
-          && result.policyDecision.kind === 'deny'
+          && (result.policyDecision.kind === 'deny' || result.policyDecision.kind === 'require_confirmation')
           && ctx.mode === 'normal') {
           commitFirstDenied = true;
           ctx.mode = 'fullPermission';
@@ -835,7 +835,9 @@ async function main(): Promise<void> {
       const commitDecisions = decisions
         .filter((details) => details.toolName === 'patch.commit')
         .map((details) => details.decision?.code);
-      if (!commitDecisions.includes('POLICY_DENIED')) throw new Error('Case 12: missing POLICY_DENIED decision.');
+      if (!commitDecisions.includes('POLICY_DENIED') && !commitDecisions.includes('POLICY_CONFIRMATION_REQUIRED')) {
+        throw new Error('Case 12: missing POLICY_DENIED or POLICY_CONFIRMATION_REQUIRED decision.');
+      }
       if (!commitDecisions.includes('POLICY_ALLOW_FULL_PERMISSION')) {
         throw new Error('Case 12: missing confirmation-granted decision.');
       }
@@ -1092,8 +1094,8 @@ async function main(): Promise<void> {
     }
   }
 
-  // --- Case 19: full permission still passes the evidence gate and surfaces
-  // --- PATCH_ENGINE_REQUIRED refusals instead of bypassing executeTool.
+  // --- Case 19: full permission does not blanket-deny a declared zero-arg
+  // --- tool; missing transaction state is returned by the tool itself.
   {
     const registry = createScaffoldToolRegistry();
     const { root, notePath } = await createMatrixWorkspace();
@@ -1108,9 +1110,11 @@ async function main(): Promise<void> {
         tools: listMatrixTools(registry),
         executeTool
       });
-      if (executed.length !== 0) throw new Error('Case 19: empty-args commit must not reach executeTool.');
-      if (!gateRun.audit.toolCalls.some((call) => call.code === 'insufficient_evidence')) {
-        throw new Error('Case 19: missing insufficient_evidence audit entry.');
+      if (executed.length !== 1 || executed[0]!.name !== 'patch.commit') {
+        throw new Error(`Case 19: zero-arg commit must reach executeTool, got ${JSON.stringify(executed)}`);
+      }
+      if (!gateRun.audit.toolCalls.some((call) => call.code === 'NO_TRANSACTION')) {
+        throw new Error('Case 19: missing structured NO_TRANSACTION refusal.');
       }
 
       const engineRefusalScript: ScriptedToolCall[] = [

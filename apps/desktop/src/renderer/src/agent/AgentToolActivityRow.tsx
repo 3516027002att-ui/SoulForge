@@ -56,9 +56,6 @@ export function AgentToolActivityRow(props: AgentToolActivityRowProps): ReactEle
       >
         <summary className="agent-tool-activity__summary">
           <span className={`agent-tool-activity__dot is-${status}`} aria-hidden="true"></span>
-          {step !== undefined && (
-            <span className="agent-tool-activity__step">第 {step} 步</span>
-          )}
           <span className="agent-tool-activity__name">{summary}</span>
           <span className={`agent-tool-status agent-tool-status--${status}`} data-testid={`agent-tool-status-${id}`}>
             {statusLabel(status)}

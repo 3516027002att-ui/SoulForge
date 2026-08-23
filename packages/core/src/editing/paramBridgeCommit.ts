@@ -162,10 +162,15 @@ export async function readParamDocumentViaBridge(input: {
       }))
     };
   }
-  const maxRows = input.rowIds && input.rowIds.length > 0
-    ? Math.max(input.rowIds.length, input.maxRows ?? 0)
-    : (input.maxRows ?? 500);
-  const rows = (result.data.rows ?? []).slice(0, maxRows).map((r) => ({
+  const maxRows = input.maxRows ?? 500;
+  const effectiveMaxRows = input.rowIds && input.rowIds.length > 0
+    ? Math.max(input.rowIds.length, maxRows)
+    : maxRows;
+  const rawRows = result.data.rows ?? [];
+  const boundedRows = effectiveMaxRows === maxRows
+    ? rawRows.slice(0, maxRows)
+    : rawRows.slice(0, maxRows).concat(rawRows.slice(maxRows, effectiveMaxRows));
+  const rows = boundedRows.map((r) => ({
     id: r.id,
     dataBase64: r.dataBase64,
     dataHash: r.dataHash,

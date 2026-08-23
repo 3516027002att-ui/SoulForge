@@ -237,6 +237,8 @@ export class AnthropicCompatibleAdapter implements ModelServiceAdapter {
             const delta = event.delta;
             if (delta?.type === 'text_delta' && delta.text) {
               yield { type: 'text-delta', text: delta.text };
+            } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking.length > 0) {
+              yield { type: 'thinking-delta', text: delta.thinking };
             } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
               const index = event.index ?? 0;
               const current = toolAcc.get(index) ?? { id: '', name: '', args: '' };
@@ -317,7 +319,7 @@ interface AnthropicStreamEvent {
   type?: string;
   index?: number;
   content_block?: { type?: string; id?: string; name?: string };
-  delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
+  delta?: { type?: string; text?: string; thinking?: string; partial_json?: string; stop_reason?: string };
   message?: { usage?: { input_tokens?: number; output_tokens?: number } };
   usage?: { input_tokens?: number; output_tokens?: number };
   error?: { type?: string; message?: string };
@@ -372,6 +374,20 @@ function buildMessagesBody(model: string, request: ModelCompleteRequest, stream:
         });
       }
       messages.push({ role: 'assistant', content });
+      continue;
+    }
+    // 多模态：user 消息带图像时 content 用 parts（base64 source）。
+    if (message.role === 'user' && message.images && message.images.length > 0) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: message.content },
+          ...message.images.map((image) => ({
+            type: 'image',
+            source: { type: 'base64', media_type: image.mediaType, data: image.dataBase64 }
+          }))
+        ]
+      });
       continue;
     }
     messages.push({ role: message.role, content: message.content });

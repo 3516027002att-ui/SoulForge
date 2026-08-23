@@ -7,8 +7,8 @@
  */
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { basename, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { basename, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { logicalFmgTableName, type Diagnostic } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from './editorMutationService.js';
@@ -77,6 +77,13 @@ const TABLE_ALIASES: Record<string, readonly string[]> = {
   weapon: ['武器名'],
   weaponname: ['武器名'],
   武器名: ['武器名'],
+  npc: ['NPC名'],
+  npcname: ['NPC名'],
+  character: ['NPC名'],
+  charactername: ['NPC名'],
+  人物名: ['NPC名'],
+  角色名: ['NPC名'],
+  敌人名: ['NPC名'],
   description: ['アイテム説明'],
   itemdesc: ['アイテム説明'],
   说明: ['アイテム説明'],
@@ -114,23 +121,36 @@ export async function readFmgEntries(input: {
   const loaded = await loadTableEntries(input.edit, resolved);
   if (!loaded.ok) return loaded;
   const entries: FmgEntrySnapshot[] = [];
+  const missingIds: number[] = [];
   for (const id of input.ids) {
     const text = loaded.byId.get(id);
     if (text === undefined) {
-      return {
-        ok: false,
-        error: { code: 'FMG_ENTRY_NOT_FOUND', message: `${resolved.table}#${id} 不存在。` },
-        diagnostics: loaded.diagnostics
-      };
+      missingIds.push(id);
+      continue;
     }
     entries.push({ table: resolved.table, id, text });
+  }
+  if (entries.length === 0 && input.ids.length > 0) {
+    return {
+      ok: false,
+      error: { code: 'FMG_ENTRY_NOT_FOUND', message: `${resolved.table}#${input.ids.join(', ')} 均不存在。` },
+      diagnostics: loaded.diagnostics
+    };
+  }
+  const diagnostics = [...loaded.diagnostics];
+  if (missingIds.length > 0) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'FMG_ENTRY_PARTIAL_MISSING',
+      message: `${resolved.table} 未找到 ID：${missingIds.join(', ')}。`
+    });
   }
   return {
     ok: true,
     containerPath: resolved.containerPath,
     table: resolved.table,
     entries,
-    diagnostics: loaded.diagnostics
+    diagnostics
   };
 }
 
@@ -164,15 +184,22 @@ export async function setFmgEntries(input: {
   const before: FmgEntrySnapshot[] = [];
   const after: FmgEntrySnapshot[] = [];
   const mutations: FmgBridgeMutation[] = [];
+  const seenIds = new Set<number>();
   for (const edit of input.edits) {
-    const current = loaded.byId.get(edit.id);
-    if (current === undefined) {
+    if (seenIds.has(edit.id)) {
       return {
         ok: false,
-        error: { code: 'FMG_ENTRY_NOT_FOUND', message: `${resolved.table}#${edit.id} 不存在。` },
+        error: { code: 'FMG_DUPLICATE_EDIT_ID', message: `同一次请求重复编辑 ${resolved.table}#${edit.id}。` },
         diagnostics: loaded.diagnostics,
         before
       };
+    }
+    seenIds.add(edit.id);
+    const current = loaded.byId.get(edit.id);
+    if (current === undefined) {
+      after.push({ table: resolved.table, id: edit.id, text: edit.text });
+      mutations.push({ kind: 'add', id: edit.id, text: edit.text });
+      continue;
     }
     before.push({ table: resolved.table, id: edit.id, text: current });
     after.push({ table: resolved.table, id: edit.id, text: edit.text });
@@ -211,7 +238,7 @@ export async function setFmgEntries(input: {
       timeoutMs: 120_000,
       ...(input.edit.oodleRuntimeRoot ? { oodleRuntimeRoot: input.edit.oodleRuntimeRoot } : {})
     }),
-    title: `FMG set ${mutations.length} in ${resolved.table}`,
+    title: `FMG upsert ${mutations.length} in ${resolved.table}`,
     confirmActionLabel: '提交 FMG 变更'
   }, { commit: input.edit.commitPort });
 
@@ -255,8 +282,18 @@ async function resolveFmgTable(
   if (!wanted) {
     return { ok: false, error: { code: 'FMG_TABLE_REQUIRED', message: '需要表名。' }, diagnostics: [] };
   }
-  const containers = containerPath
-    ? [containerPath]
+  let cleanContainer = containerPath?.trim();
+  if (cleanContainer?.startsWith('file:///')) {
+    try {
+      cleanContainer = fileURLToPath(cleanContainer);
+    } catch {
+      cleanContainer = cleanContainer.slice(8);
+    }
+  } else if (cleanContainer?.startsWith('file://')) {
+    cleanContainer = cleanContainer.slice(7);
+  }
+  const containers = cleanContainer
+    ? [isAbsolute(cleanContainer) ? resolve(cleanContainer) : resolve(edit.session.layers.overlayRoot, cleanContainer)]
     : await findMsgbnds(edit.session.layers.overlayRoot, lang ?? 'zhocn');
   if (containers.length === 0) {
     return {

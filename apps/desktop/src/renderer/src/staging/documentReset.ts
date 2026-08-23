@@ -225,6 +225,7 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   // agentReferenceRegistry 校验 token）。它是用户显式添加的 Agent 输入上下文，
   // 不随切换工作区/文件清空——清空会让进行中的 Agent 任务丢失已引用资源。
   setAgentResources: 'Agent 资源引用草稿；属于 Agent 那次运行的输入上下文，与当前资源文档无关，跨工作区保留',
+  setAgentAttachments: 'Agent 附件草稿；属于 Agent 那次运行的输入上下文，与当前资源文档无关，跨工作区保留',
   setCmdkOpen: '命令面板状态',
   setCmdkQuery: '命令面板状态',
   setCmdkIndex: '命令面板状态',

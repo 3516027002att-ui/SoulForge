@@ -17,6 +17,21 @@ import { disposeOperationLogUtility, registerIpcHandlers } from './ipc.js';
  */
 export { sanitizeRendererValue } from './rendererDto.js';
 
+// 忽略 stdout/stderr 管道断开（EPIPE）错误，避免终端断开或无控制台挂载时崩溃弹窗
+process.stdout?.on('error', (err: NodeJS.ErrnoException) => {
+  if (err?.code === 'EPIPE') return;
+});
+process.stderr?.on('error', (err: NodeJS.ErrnoException) => {
+  if (err?.code === 'EPIPE') return;
+});
+process.on('uncaughtException', (err: Error & { code?: string }) => {
+  if (err?.code === 'EPIPE' || (typeof err?.message === 'string' && err.message.includes('EPIPE'))) {
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error('[SoulForge main process uncaught exception]', err);
+});
+
 const here = dirname(fileURLToPath(import.meta.url));
 let bridgeShutdownStarted = false;
 

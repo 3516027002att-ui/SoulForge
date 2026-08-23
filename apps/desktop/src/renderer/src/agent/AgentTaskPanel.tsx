@@ -41,7 +41,7 @@ export interface ModelServiceChoice {
   displayName: string;
   hasCredential: boolean;
   /** 8-A：protocol 决定 Composer 思考强度换表（OpenAI effort / Anthropic budget）。 */
-  protocol: 'openai-compatible' | 'anthropic-compatible';
+  protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
 }
 
 export interface AgentTaskPanelProps {
@@ -258,7 +258,7 @@ export function AgentTaskPanel({
             <div key={call.callId} className={toolCallRowClass(call.status)}>
               {call.status === 'running' && <span className="spinner" aria-hidden="true"></span>}
               <span>
-                第 {call.step} 步 · {call.name} · {toolCallStatusLabel(call.status)}
+                {call.name} · {toolCallStatusLabel(call.status)}
                 {call.code !== undefined ? ` · ${call.code}` : ''}
               </span>
               {/* 参数折叠展示：只显示工具名时，「读了哪个文件」「写了什么」

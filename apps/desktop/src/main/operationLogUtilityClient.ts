@@ -43,7 +43,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
 
   constructor(
     private readonly modulePath: string,
-    private readonly requestTimeoutMs = 15_000,
+    private readonly requestTimeoutMs = 60_000,
     private readonly nativeBindingPath?: string
   ) {}
 
@@ -273,7 +273,11 @@ export class OperationLogUtilityClient implements OperationLogStore {
       this.rejectAll(new Error(`数据库后台进程发生致命错误：${location}`));
     });
     child.stderr?.on('data', (chunk: Buffer | string) => {
-      process.stderr.write(`[SoulForge database utility] ${String(chunk)}`);
+      try {
+        process.stderr.write(`[SoulForge database utility] ${String(chunk)}`);
+      } catch {
+        // 忽略管道断开
+      }
     });
     this.process = child;
   }
@@ -300,10 +304,11 @@ export class OperationLogUtilityClient implements OperationLogStore {
       payload
     } as OperationLogUtilityRequest;
     return new Promise((resolve, reject) => {
+      const timeout = this.timeoutForMethod(method);
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error(`数据库后台请求超时：${method}`));
-      }, this.requestTimeoutMs);
+      }, timeout);
       this.pending.set(requestId, {
         resolve: resolve as (value: unknown) => void,
         reject,
@@ -317,6 +322,20 @@ export class OperationLogUtilityClient implements OperationLogStore {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  private timeoutForMethod(method: OperationLogUtilityMethod): number {
+    switch (method) {
+      case 'openWorkspace':
+      case 'replaceFiles':
+      case 'replaceRagChunks':
+      case 'replaceReferences':
+      case 'replaceDiagnostics':
+      case 'planRecoveryCleanup':
+        return Math.max(this.requestTimeoutMs, 120_000);
+      default:
+        return this.requestTimeoutMs;
+    }
   }
 
   private onMessage(message: unknown): void {

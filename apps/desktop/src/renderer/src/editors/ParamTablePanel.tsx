@@ -131,7 +131,7 @@ export function ParamTablePanel(props: ParamTablePanelProps): ReactElement {
       setQuery('');
       return;
     } else {
-      setRevealMissed(`insufficient_evidence：PARAM 表里没有行 ${target}。`);
+      setRevealMissed(`当前 PARAM 表中未找到行 ${target}。`);
     }
     props.onRevealHandled?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps

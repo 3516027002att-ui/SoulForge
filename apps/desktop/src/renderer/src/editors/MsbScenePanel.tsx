@@ -83,7 +83,13 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const [selected, setSelected] = useState<SelectedEntity | null>(null);
   const [status, setStatus] = useState('正在初始化 3D 场景…');
   const [nodeCount, setNodeCount] = useState(0);
+  const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
+  const [partsState, setPartsState] = useState<PartLike[]>(props.parts);
   const regions = props.regions ?? [];
+
+  useEffect(() => {
+    setPartsState(props.parts);
+  }, [props.parts]);
   /** S23：最近一次 drawList（mesh 渐进加载后重建用）。 */
   const drawListRef = useRef<ReturnType<typeof buildSceneDrawList> | null>(null);
   /** 按 modelName 去重后的网格：modelName → mesh。同一模型只读一次 Bridge，多 part 共享引用。 */
@@ -108,17 +114,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     const host = hostRef.current;
     if (!host) return;
 
-    // 未选中资源时不构建场景，直接进空态。
-    //
-    // 实测缺陷：App.tsx 传 `selectedFile?.sourceUri ?? ''`，未选文件时是空字符串；
-    // validateMetadata 要求 sourceUri 含 '://'，于是抛 SCENE_URI_INVALID。这个异常
-    // 在 useEffect 里同步抛出、无人捕获，会冒泡成未捕获错误并**炸掉整个 React 树**
-    // ——实测点资源栏的 map 目录后，界面全部元素消失（按钮不在 DOM、其余 tab 点不动、
-    // Tab 键无任何停靠点），等于应用白屏。
-    //
-    // 这里做两层：先空态早退（正常路径不该走到校验失败），再对构建过程兜 try/catch
-    // （投影校验是安全边界，它该继续 fail-closed，但失败必须呈现为面板内可读状态，
-    // 不能把整个界面带走）。
     if (!props.mapResourceUri || !props.mapResourceUri.includes('://')) {
       setStatus('未选中可解析的 MSB 资源：请先在资源浏览器里选择一个 map 资源。');
       setManifest(null);
@@ -136,19 +131,17 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         resourceKind: 'map',
         revision: props.revision,
         ...(props.models ? { models: props.models } : {}),
-        parts: props.parts,
+        parts: partsState,
         regions,
         ...(props.events ? { events: props.events } : {}),
         ...(props.sourceCounts ? { sourceCounts: props.sourceCounts } : {}),
-        maxNodes: props.maxNodes ?? 2000,
+        ...(props.maxNodes !== undefined ? { maxNodes: props.maxNodes } : {}),
         chunkSize: 512
       });
-      drawList = buildSceneDrawList(sceneManifest, { maxItems: props.maxNodes ?? 2000 });
+      drawList = buildSceneDrawList(sceneManifest, {
+        ...(props.maxNodes !== undefined ? { maxItems: props.maxNodes } : {})
+      });
     } catch (error) {
-      // 结构化呈现，不吞：把诊断码与消息给用户，同时留在 console 供排查。
-      // 注意 SceneProjectionError 的构造是 super(code)，所以 Error.message 里装的是
-      // **码**而不是人话；可读消息在 diagnostic.message。直接用 error.message 会把
-      // 「SCENE_URI_INVALID」当描述展示给用户。
       const code = error instanceof SceneProjectionError
         ? error.diagnostic.code
         : 'SCENE_BUILD_FAILED';
@@ -168,10 +161,30 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
       container: host,
       drawList,
       onSelect: (id) => {
-        // viewport 点击 → 左栏与右栏同步：用 manifest 里的实体补全 kind。
         const node = sceneManifest.nodes.find((candidate) => candidate.id === id) ?? null;
         if (!node) return;
         setSelected({ id: node.id, label: node.label, kind: node.kind });
+      },
+      onTransformChange: ({ id, position, rotation, scale }) => {
+        // 当 Gizmo 拖动时，同步更新选中的 Part 的坐标数据
+        setPartsState((prev) =>
+          prev.map((p) => {
+            const isMatch = p.name === id || `msb-part:${p.name}` === id || (selected?.id === id && p.name === selected.label);
+            if (!isMatch) return p;
+            return {
+              ...p,
+              posX: position[0],
+              posY: position[1],
+              posZ: position[2],
+              rotX: rotation[0],
+              rotY: rotation[1],
+              rotZ: rotation[2],
+              scaleX: scale[0],
+              scaleY: scale[1],
+              scaleZ: scale[2]
+            };
+          })
+        );
       }
     }).then((handle) => {
       if (cancelled) {
@@ -179,12 +192,83 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
         return;
       }
       handleRef.current = handle;
+      handle.setTransformMode?.(transformMode);
       drawListRef.current = drawList;
       const partial = sceneManifest.diagnostics.some((item) => item.code === 'SCENE_PROJECTION_PARTIAL');
       setStatus(
         `3D 场景已加载（${drawList.itemCount} 节点 / ${sceneManifest.entityCount} 实体）`
         + (partial ? ' · Bridge 实体预览为 partial' : '')
       );
+
+      // 场景挂载完成后立即启动去重模型并发拉取与热替换
+      const bridge = getRendererBridge();
+      if (bridge && typeof bridge.readMapPartMesh === 'function' && props.mapResourceUri) {
+        const parts = drawList.items.filter((item) => item.entityKind === 'msb-part');
+        if (parts.length > 0) {
+          const byModel = new Map<string, typeof parts>();
+          let missingFromNoModel = 0;
+          for (const item of parts) {
+            const modelName = item.modelName
+              ?? resolvePartModelName(item as { modelName?: string; modelIndex?: number }, props.models);
+            if (!modelName) {
+              missingFromNoModel += 1;
+              continue;
+            }
+            const list = byModel.get(modelName);
+            if (list) list.push(item);
+            else byModel.set(modelName, [item]);
+          }
+          const distinctModelNames = [...byModel.keys()];
+          const totalPartCount = parts.length;
+          void (async () => {
+            let loaded = 0;
+            let missing = missingFromNoModel;
+            const BATCH_SIZE = 8;
+            for (let i = 0; i < distinctModelNames.length; i += BATCH_SIZE) {
+              if (cancelled) return;
+              const chunk = distinctModelNames.slice(i, i + BATCH_SIZE);
+              await Promise.all(chunk.map(async (modelName) => {
+                if (loadedModelMeshesRef.current.has(modelName)) {
+                  const cached = loadedModelMeshesRef.current.get(modelName)!;
+                  handle.updateModelGeometry?.(modelName, cached);
+                  loaded += (byModel.get(modelName)?.length ?? 1);
+                  return;
+                }
+                try {
+                  const raw = await bridge.readMapPartMesh(props.mapResourceUri, modelName) as {
+                    ok?: boolean;
+                    data?: {
+                      positionsBase64?: string;
+                      indicesBase64?: string;
+                      uvsBase64?: string;
+                      normalsBase64?: string;
+                      vertexCount?: number;
+                    };
+                  };
+                  if (cancelled) return;
+                  if (raw.ok && raw.data?.positionsBase64) {
+                    const geometryData = {
+                      positionsBase64: raw.data.positionsBase64,
+                      ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
+                      ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
+                      ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
+                      vertexCount: raw.data.vertexCount ?? 0
+                    };
+                    loadedModelMeshesRef.current.set(modelName, geometryData as any);
+                    loaded += (byModel.get(modelName)?.length ?? 1);
+                    handle.updateModelGeometry?.(modelName, geometryData);
+                  } else {
+                    missing += (byModel.get(modelName)?.length ?? 1);
+                  }
+                } catch {
+                  if (!cancelled) missing += (byModel.get(modelName)?.length ?? 1);
+                }
+              }));
+              if (!cancelled) setMeshStatus({ loaded, missing, total: totalPartCount });
+            }
+          })();
+        }
+      }
     }).catch((error: unknown) => {
       setStatus(error instanceof Error ? error.message : '3D 场景初始化失败');
     });
@@ -201,106 +285,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     props.game,
     props.revision,
     props.models,
-    props.parts,
     props.regions,
     props.events,
     props.sourceCounts,
     props.maxNodes
   ]);
-
-  /**
-   * S23 / 去重加载：按 modelName 去重，同一 FLVER 只读一次 Bridge，多 part 共享 mesh 引用。
-   *
-   * 根因：旧实现把 part.label 当 modelName 传给 readMapPartMesh，而 main 的
-   * read-map-part-flver-preview 在 mapbnd 内按 *.flver 后缀匹配，永远 miss。
-   * 正确是 models[part.modelIndex].name，现已透传为 SceneDrawItem.modelName
-   * （buildSceneDrawList 从 manifest.models[modelIndex] 填充）；无 modelName
-   * 的 part 保持线框，不发起 Bridge。
-   * loadedMeshesRef 仍以 part id 为 key，但值引用共享自 loadedModelMeshesRef 的同一对象。
-   * 读取仍走 readMapPartMesh（扫描 map/<mapId>/*.mapbnd.dcx，overlay→原版回退）。
-   */
-  useEffect(() => {
-    const bridge = getRendererBridge();
-    if (!bridge || typeof bridge.readMapPartMesh !== 'function' || !props.mapResourceUri) return;
-    const base = drawListRef.current;
-    if (!base) return;
-    const parts = base.items.filter((item) => item.entityKind === 'msb-part');
-    if (parts.length === 0) return;
-    let cancelled = false;
-    // 按 modelName 去重：同一模型只请求一次；无 modelName 的 part 计入 missing（线框）。
-    const byModel = new Map<string, typeof parts>();
-    let missingFromNoModel = 0;
-    for (const item of parts) {
-      const modelName = item.modelName
-        ?? resolvePartModelName(item as { modelName?: string; modelIndex?: number }, props.models);
-      if (!modelName) {
-        missingFromNoModel += 1;
-        continue;
-      }
-      const list = byModel.get(modelName);
-      if (list) list.push(item);
-      else byModel.set(modelName, [item]);
-    }
-    const distinctModelNames = [...byModel.keys()];
-    const totalPartCount = parts.length;
-    setMeshStatus(null);
-    void (async () => {
-      let loaded = 0;
-      let missing = missingFromNoModel;
-      // 已有缓存的模型：直接共享到其全部 part。
-      for (const [modelName, itemsForModel] of byModel) {
-        const cached = loadedModelMeshesRef.current.get(modelName);
-        if (!cached) continue;
-        for (const item of itemsForModel) {
-          if (!loadedMeshesRef.current.has(item.id)) loadedMeshesRef.current.set(item.id, cached);
-        }
-        loaded += itemsForModel.length;
-      }
-      if (loaded > 0 || missing > 0) applyLoadedMeshes(drawListRef.current);
-      // 串行拉取未缓存的去重模型（仍走 readMapPartMesh 的 mapbnd 扫描路径）。
-      for (const modelName of distinctModelNames) {
-        if (cancelled) return;
-        if (loadedModelMeshesRef.current.has(modelName)) continue;
-        try {
-          const raw = await bridge.readMapPartMesh(props.mapResourceUri, modelName) as {
-            ok?: boolean;
-            data?: {
-              positionsBase64?: string;
-              indicesBase64?: string;
-              uvsBase64?: string;
-              normalsBase64?: string;
-              vertexCount?: number;
-            };
-          };
-          if (cancelled) return;
-          if (raw.ok && raw.data?.positionsBase64) {
-            const mesh: NonNullable<SceneDrawItem['mesh']> = {
-              positionsBase64: raw.data.positionsBase64,
-              ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
-              ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
-              ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
-              vertexCount: raw.data.vertexCount ?? 0
-            };
-            loadedModelMeshesRef.current.set(modelName, mesh);
-            const itemsForModel = byModel.get(modelName) ?? [];
-            for (const item of itemsForModel) loadedMeshesRef.current.set(item.id, mesh);
-            loaded += itemsForModel.length;
-          } else {
-            missing += (byModel.get(modelName)?.length ?? 1);
-          }
-        } catch {
-          if (cancelled) return;
-          missing += (byModel.get(modelName)?.length ?? 1);
-        }
-        applyLoadedMeshes(drawListRef.current);
-      }
-      if (!cancelled) setMeshStatus({ loaded, missing, total: totalPartCount });
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.mapResourceUri, props.parts, props.models]);
 
   /** S23：选中 part 时按 modelName 补载（预取窗口外的 part 点开也能看，去重共享）。 */
   useEffect(() => {
@@ -401,7 +390,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
 
   function propertiesFor(entity: SelectedEntity): Array<readonly [string, string]> {
     if (entity.kind === 'msb-part') {
-      const part = props.parts.find((candidate) => candidate.name === entity.label);
+      const part = partsState.find((candidate) => candidate.name === entity.label) ?? props.parts.find((c) => c.name === entity.label);
       return [
         ['Name', entity.label],
         ...(part?.typeId !== undefined ? [['Type ID', String(part.typeId)] as const] : []),
@@ -447,6 +436,11 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     ];
   }
 
+  function handleSwitchTransformMode(mode: 'translate' | 'rotate' | 'scale'): void {
+    setTransformMode(mode);
+    handleRef.current?.setTransformMode?.(mode);
+  }
+
   return (
     <WorkbenchLayout
       label="MSB 地图工作台"
@@ -467,8 +461,6 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               ) : manifest === null ? (
                 <p className="muted">未加载 MSB 数据：请先在资源浏览器里选择一个 map 资源。</p>
               ) : groupedEntities.map((group, groupIndex) => {
-                /* 问题4-A（硬规则 10）：对象列表全量渲染，不分组 slice、不设上限、
-                   不写虚拟滚动；名字给全（窄栏 ellipsis + title 全名），数据不砍。 */
                 return (
                   <details key={group.id} className="msb-object-group" open={group.entries.length > 0}>
                     <summary className="msb-object-group__summary">
@@ -508,7 +500,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           id: 'viewport',
           title: 'Viewport',
           children: (
-            <div className="msb-viewport">
+            <div className="msb-viewport" style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}>
               <div ref={hostRef} className="scene-host" style={{ flex: 1, width: '100%', height: '100%', minHeight: 200, background: '#1a1d23' }} />
               <p className="muted">
                 {props.openFailure
@@ -522,13 +514,13 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                               : meshStatus.missing > 0
                                 ? ' · 没有找到 part 模型（线框）；未挂原版时可到「开始」页挂载后重开'
                                 : '';
-                          return `节点 ${nodeCount} · region ${regions.length}${meshNote} · 漫游：WASD 前后左右 / Q下降 E上升 / F居中 / 右键拖拽旋转 / 滚轮缩放`;
+                          return `节点 ${nodeCount} · region ${regions.length}${meshNote} · 漫游：WASD 移动 / Q下降 E上升 / F居中 / Gizmo 拖拽编辑`;
                         })()
                       : status)}
               </p>
               {(selected?.kind === 'msb-part' || selected?.kind === 'msb-region') ? (
                 <p data-testid="msb-selected-summary">
-                  已选择 {selected.kind === 'msb-region' ? 'region' : 'part'}：{selected.label}
+                  已选择 {selected.kind === 'msb-region' ? 'region' : 'part'}：{selected.label}（已挂载 3D Transform Gizmo 拖拽句柄）
                 </p>
               ) : null}
             </div>
@@ -550,7 +542,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
               ))}
             </div>
           ) : (
-            <p className="muted">在左侧对象列表中选择一个对象后显示属性。</p>
+            <p className="muted">在左侧对象列表中选择一个对象后显示属性，可在 3D 视口中拖拽修改。</p>
           )
         }
       ]}

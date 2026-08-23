@@ -76,7 +76,11 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         })
       };
     }
-    const result = await registry.run(call.name, input, { ...context, ...contextOverride });
+    const effectiveContext: ToolContext = { ...context, ...contextOverride };
+    const result = await registry.run(call.name, input, effectiveContext);
+    if (effectiveContext.mode && effectiveContext.mode !== context.mode) {
+      context.mode = effectiveContext.mode;
+    }
     if (result.ok) {
       return { ok: true, content: JSON.stringify(result.data ?? null) };
     }

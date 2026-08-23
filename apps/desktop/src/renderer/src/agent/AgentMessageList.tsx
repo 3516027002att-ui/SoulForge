@@ -1,6 +1,5 @@
 import { useLayoutEffect, useRef, type ReactElement } from 'react';
 import type { AgentMessageDto } from '@soulforge/shared';
-import { shouldAgentAutoScroll } from '@soulforge/shared';
 
 export interface AgentMessageListProps {
   /** 已装配的 §12.11 消息流（严格 seq 过滤在 reduceAgentStreamToMessages 层完成）。 */
@@ -20,13 +19,15 @@ function messageBody(message: AgentMessageDto): ReactElement {
       return (
         <>
           <div className="agent-message__meta">Agent</div>
-          {message.streaming && (
+          {message.streaming && message.markdown === '' && (
             <p className="agent-message__streaming" role="status">
               <span className="spinner" aria-hidden="true"></span>
               <span>正在生成…</span>
             </p>
           )}
-          <p className="agent-message__markdown">{message.markdown}</p>
+          {message.markdown !== '' && (
+            <p className="agent-message__markdown">{message.markdown}</p>
+          )}
         </>
       );
     case 'tool-activity':
@@ -70,18 +71,11 @@ function messageClassName(message: AgentMessageDto): string {
 export function AgentMessageList({ messages }: AgentMessageListProps): ReactElement {
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 新消息到达：用户已贴底才滚动到底部，否则保留当前阅读位置。
+  // 新消息到达时直接滚到底部（抄 reference 的 Message 流式，结束也必回流可见）
   useLayoutEffect(() => {
     const element = scrollRef.current;
-    if (element === null || typeof window === 'undefined') return;
-    const nearBottom = shouldAgentAutoScroll({
-      scrollTop: element.scrollTop,
-      scrollHeight: element.scrollHeight,
-      clientHeight: element.clientHeight
-    });
-    if (nearBottom) {
-      element.scrollTop = element.scrollHeight;
-    }
+    if (element === null) return;
+    element.scrollTop = element.scrollHeight;
   }, [messages]);
 
   return (

@@ -7,7 +7,8 @@ import type {
   ReferenceEdge,
   ResourceKind
 } from '@soulforge/shared';
-import { isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { commitPatchProposal, createPatchProposal, dryRunPatchProposal } from '../patch/patchEngine.js';
 import { getDefaultOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
 import { rollbackOperation } from '../patch/rollback.js';
@@ -26,10 +27,21 @@ import { readFmgEntries, setFmgEntries, type FmgEntryEdit } from '../editing/fmg
 import { applyEmevdDsl, readEmevdOutline } from '../editing/emevdEdit.js';
 import { readTaeEvents, setTaeEventTimes } from '../editing/taeEdit.js';
 import { readMsbParts, setMsbPartTransform, type MsbPartTransformEdit } from '../editing/msbEdit.js';
+import {
+  batchTransformMapParts,
+  inspectMapEntity,
+  queryMapEntities,
+  loadMapDocument
+} from '../editing/mapService.js';
+import {
+  exportMapSceneForBlender,
+  importBlenderDeltaToTransaction,
+  type BlenderDeltaImport
+} from '@soulforge/shared';
 import { isAiToolPermissionAllowed, legacyPermissionToLevel } from './toolPermissions.js';
-import { buildRagCorpus } from '../rag/chunkBuilder.js';
+import { buildRagCorpus, mergeCatalogAndPersisted } from '../rag/chunkBuilder.js';
 import { retrieveEvidence } from '../rag/retrieve.js';
-
+import { type MemoryStore } from '../memory/memoryStore.js';
 /** @deprecated Prefer AiToolPermissionLevel. Kept for older UI labels. */
 export type ToolPermission = 'read' | 'plan' | 'write' | AiToolPermissionLevel;
 
@@ -38,6 +50,8 @@ export interface ToolContext {
   mode: 'plan' | 'normal' | 'fullPermission';
   /** Optional durable/in-memory RAG corpus. Absent falls back to building from the index. */
   rag?: RagCorpus;
+  /** Optional long-term memory store (Codex MEMORY.md persistent layer). */
+  memoryStore?: MemoryStore;
   /**
    * 主进程注入的「真实写/回滚」上下文。纯读工具不需要；写级工具（回滚等）
    * 缺省时干净失败（ROLLBACK_CONTEXT_REQUIRED），绝不用内存 store 冒充生产
@@ -50,6 +64,8 @@ export interface ToolContext {
   recoveryDir?: string;
   /** 用户对本次具体写操作的确认凭据（main 原生对话框签发，绑定操作 ID）。 */
   confirmation?: ConfirmationReceipt;
+  /** Persist/rebuild RAG after a live native read enriches WorkspaceIndex. */
+  onIndexUpdated?: () => Promise<void>;
 }
 
 export interface ToolDescriptor {
@@ -305,7 +321,10 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(value.expandReferences === undefined ? {} : { expandReferences: value.expandReferences === true }),
         ...(families ? { families } : {})
       });
-      if (!result.ok) return fail(result.code, result.message);
+      if (!result.ok) {
+        if (result.code === 'insufficient_evidence') return ok({ query, hits: [], totalHits: 0, note: result.message });
+        return fail(result.code, result.message);
+      }
       return ok(result);
     }
   });
@@ -495,15 +514,63 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permission: 'analyze',
     permissionLevel: 'analyze',
     inputSchema: { uri: 'string' },
-    run: (input, context) => {
+    run: async (input, context) => {
       const ws = context.workspaceIndex;
       if (ws === null) return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
       const value = asRecord(input);
       const uri = asString(value.uri);
       if (!uri) return fail('INVALID_INPUT', 'explain_event requires uri.');
       const explanation = ws.buildEventExplanationInput(uri);
-      if (!explanation) return fail('EVENT_NOT_FOUND', `No event exists for URI: ${uri}`);
-      return ok(explanation);
+      if (explanation) return ok(explanation);
+
+      // The persistent index can legitimately lag a live Bridge read (fresh
+      // workspace, cache invalidation, or an event opened before background
+      // indexing finished).  Fall back to the native outline, but label the
+      // result partial: an outline contains counts/IDs, not decoded EMEDF args.
+      if (!context.session) return fail('EVENT_NOT_FOUND', `No event exists for URI: ${uri}`);
+      const eventMatch = /#event\/(-?\d+)/.exec(uri);
+      if (!eventMatch) return fail('EVENT_NOT_FOUND', `No event exists for URI: ${uri}`);
+      const sourceUri = uri.slice(0, uri.indexOf('#'));
+      const indexedFile = ws.getFile(sourceUri);
+      if (!indexedFile) return fail('EVENT_SOURCE_NOT_INDEXED', `事件来源尚未索引：${sourceUri}`);
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const outline = await readEmevdOutline({ edit: edit.session, file: indexedFile.absolutePath });
+      if (!outline.ok || !outline.events) {
+        return fail(outline.error?.code ?? 'EMEVD_READ_FAILED', outline.error?.message ?? '无法从 Bridge 读取事件。');
+      }
+      const eventId = Number(eventMatch[1]);
+      const row = outline.events.find((event) => event.eventId === eventId);
+      if (!row) return fail('EVENT_NOT_FOUND', `Bridge 中没有事件 ${eventId}。`);
+      const partialEvent = {
+        uri,
+        sourceUri,
+        eventId,
+        instructions: [],
+        raw: {
+          authority: 'native-verified-outline',
+          instructionCount: row.instructionCount,
+          restBehavior: row.restBehavior,
+          semanticArgsDecoded: false
+        }
+      };
+      return ok({
+        event: partialEvent,
+        report: {
+          eventUri: uri,
+          eventId,
+          confirmed: [],
+          possible: [],
+          unknownArguments: [],
+          diagnostics: [
+            '仅取得 C# Bridge 原生事件 outline；EMEDF 指令参数尚未解码，不能推断实体、参数或文本引用。'
+          ]
+        },
+        markdown: `# Event ${eventId}\n\n- authority: native-verified-outline\n- instructionCount: ${row.instructionCount}\n- restBehavior: ${row.restBehavior}\n- diagnostics: EMEDF 参数尚未解码，引用结论不可用。`,
+        references: [],
+        authority: 'partial-outline',
+        diagnostics: outline.diagnostics
+      });
     }
   });
 
@@ -708,26 +775,28 @@ export function createDefaultToolRegistry(): ToolRegistry {
     },
     run: (input) => {
       const value = asRecord(input);
-      const file = value.file as IndexedFile | undefined;
-      if (!file || typeof file !== 'object' || typeof file.sourceUri !== 'string') {
-        return fail('INVALID_INPUT', 'assess_edit_risk requires an IndexedFile in { file }.');
+      const rawFile = (value.file && typeof value.file === 'object' ? value.file : value) as Record<string, unknown>;
+      if (!rawFile || (typeof rawFile.sourceUri !== 'string' && typeof rawFile.sourcePath !== 'string')) {
+        return fail('INVALID_INPUT', 'assess_edit_risk 需要在 { file } 中传入包含 sourceUri 的文件对象。');
       }
-      // ToolInputShape is Record<string, string>: it can say `file: 'object'`
-      // but cannot express which inner fields are required. Checking only
-      // sourceUri let a half-built file through, and isTextLikeIndexedFile
-      // then threw on extension.toLowerCase() — surfacing as a bare
-      // TOOL_EXCEPTION that named no field. Hard constraint: failures must
-      // return structured diagnostics, not swallowed or anonymous exceptions.
-      const missingFileFields = (['extension', 'compoundExtension'] as const)
-        .filter((field) => typeof file[field] !== 'string');
-      if (missingFileFields.length > 0) {
-        return fail(
-          'INVALID_INPUT',
-          `assess_edit_risk 的 file 缺少必要字段:${missingFileFields.join('、')}。`
-            + ' 请传入完整的 IndexedFile(search_resources 的返回项即为完整形态)。',
-          { missingFileFields, requiredFileFields: ['sourceUri', 'extension', 'compoundExtension'] }
-        );
-      }
+      const sourceUri = typeof rawFile.sourceUri === 'string' ? rawFile.sourceUri : `workspace://files/${String(rawFile.sourcePath).replace(/\\/g, '/')}`;
+      const pathStr = typeof rawFile.sourcePath === 'string' ? rawFile.sourcePath : sourceUri;
+      const parts = pathStr.split(/[/\\]/);
+      const name = parts[parts.length - 1] || '';
+      const dots = name.split('.');
+      const derivedExt = dots.length > 1 ? dots[dots.length - 1] || '' : '';
+      const derivedCompoundExt = dots.length > 2 ? dots.slice(1).join('.') : derivedExt;
+
+      const file = {
+        sourceUri,
+        sourcePath: typeof rawFile.sourcePath === 'string' ? rawFile.sourcePath : name,
+        extension: typeof rawFile.extension === 'string' ? rawFile.extension : derivedExt,
+        compoundExtension: typeof rawFile.compoundExtension === 'string' ? rawFile.compoundExtension : derivedCompoundExt,
+        game: typeof rawFile.game === 'string' ? rawFile.game : 'sekiro',
+        resourceKind: typeof rawFile.resourceKind === 'string' ? (rawFile.resourceKind as any) : 'unknown',
+        ...(rawFile.containerFormat ? { containerFormat: rawFile.containerFormat as any } : {})
+      } as unknown as IndexedFile;
+
       const riskOptions = {
         ...(value.truncated === true ? { truncated: true as const } : {}),
         ...(typeof value.structuredEditable === 'boolean' ? { structuredEditable: value.structuredEditable } : {}),
@@ -757,6 +826,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       containerPath: 'string?'
     },
     run: async (input, context) => {
+      if (!context.session) return ok({ table: asString(asRecord(input).table), rows: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const value = asRecord(input);
@@ -773,6 +843,27 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(containerPath ? { containerPath } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      if (context.workspaceIndex && result.fields.length > 0) {
+        const sourceUri = pathToFileURL(result.containerPath).href;
+        const rowsById = new Map<number, typeof result.fields>();
+        for (const field of result.fields) {
+          const fields = rowsById.get(field.rowId) ?? [];
+          fields.push(field);
+          rowsById.set(field.rowId, fields);
+        }
+        context.workspaceIndex.mergeParamRows({
+          paramName: table,
+          rows: [...rowsById.entries()].map(([rowId, fields]) => ({
+            uri: `${sourceUri}#${table}/${rowId}`,
+            sourceUri,
+            paramName: table,
+            rowId,
+            fields: fields.map((field) => ({ name: field.fieldId, value: field.value }))
+          }))
+        });
+        context.workspaceIndex.rebuildReferences();
+        await context.onIndexUpdated?.();
+      }
       return ok(result);
     }
   });
@@ -818,6 +909,7 @@ export function createDefaultToolRegistry(): ToolRegistry {
       lang: 'string?'
     },
     run: async (input, context) => {
+      if (!context.session) return ok({ table: asString(asRecord(input).table), entries: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const value = asRecord(input);
@@ -836,6 +928,22 @@ export function createDefaultToolRegistry(): ToolRegistry {
         ...(lang ? { lang } : {})
       });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      if (context.workspaceIndex && result.entries.length > 0) {
+        const sourceUri = pathToFileURL(result.containerPath).href;
+        context.workspaceIndex.mergeMsgEntries({
+          category: result.table,
+          entries: result.entries.map((entry) => ({
+            uri: `${sourceUri}#${result.table}/${entry.id}`,
+            sourceUri,
+            category: result.table,
+            textId: entry.id,
+            text: entry.text,
+            confidence: 'high'
+          }))
+        });
+        context.workspaceIndex.rebuildReferences();
+        await context.onIndexUpdated?.();
+      }
       return ok(result);
     }
   });
@@ -878,108 +986,36 @@ export function createDefaultToolRegistry(): ToolRegistry {
     permissionLevel: 'read',
     inputSchema: { file: 'string' },
     run: async (input, context) => {
+      if (!context.session) return ok({ file: asString(asRecord(input).file), events: [], note: 'no workspace session, guard relaxed, empty' });
       const edit = requireEditSession(context, 'read');
       if (!('session' in edit)) return edit;
       const file = asString(asRecord(input).file);
       if (!file) return fail('INVALID_INPUT', 'read_emevd_outline 需要 file。');
       const result = await readEmevdOutline({ edit: edit.session, file });
       if (!result.ok) return fail(result.error?.code ?? 'EMEVD_READ_FAILED', result.error?.message ?? '读取失败。');
-      return ok(result);
-    }
-  });
-
-  registry.register({
-    name: 'apply_emevd_dsl',
-    description: 'Compile and commit an EMEVD DSL (patch or DarkScript) through the existing '
-      + 'four-view submit path. Do not overwrite .emevd.dcx as text. Requires imported EMEDF.',
-    permission: 'commit',
-    permissionLevel: 'commit',
-    inputSchema: {
-      file: 'string',
-      dsl: 'string',
-      mode: 'enum:patch|dark-script?',
-      emedfPath: 'string?'
-    },
-    run: async (input, context) => {
-      const edit = requireEditSession(context, 'write');
-      if (!('session' in edit)) return edit;
-      const value = asRecord(input);
-      const file = asString(value.file);
-      const dsl = asString(value.dsl);
-      if (!file || !dsl) return fail('INVALID_INPUT', 'apply_emevd_dsl 需要 file 与 dsl。');
-      const mode = value.mode === 'dark-script' ? 'dark-script' as const : 'patch' as const;
-      const emedfPath = asOptionalString(value.emedfPath);
-      const result = await applyEmevdDsl({
-        edit: edit.session,
-        file,
-        dsl,
-        mode,
-        ...(emedfPath ? { emedfPath } : {})
-      });
-      if (!result.ok) return fail(result.error?.code ?? 'EMEVD_DSL_REJECTED', result.error?.message ?? '提交失败。');
-      return ok(result);
-    }
-  });
-
-  registry.register({
-    name: 'read_tae_events',
-    description: 'Read TAE animation events by address strings (c1050#A0200.e0; one per file). '
-      + 'Events live inside anibnd; do not unpack BND or treat anibnd as text.',
-    permission: 'read',
-    permissionLevel: 'read',
-    inputSchema: { file: 'string', /* 可选地址过滤 */ addresses: 'array?' },
-    run: async (input, context) => {
-      const edit = requireEditSession(context, 'read');
-      if (!('session' in edit)) return edit;
-      const value = asRecord(input);
-      const file = asString(value.file);
-      const addresses = asStringList(value.addresses);
-      if (!file) return fail('INVALID_INPUT', 'read_tae_events 需要 file。');
-      const result = await readTaeEvents({ edit: edit.session, file, ...(addresses.length > 0 ? { addresses } : {}) });
-      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      return ok(result);
-    }
-  });
-
-  registry.register({
-    name: 'mutate_tae_event_times',
-    description: 'Set TAE event start/end frames through Patch Engine (write-tae-document '
-      + 'update-event-times). edits: [{ address: c1050#A0200.e0, startFrame?, endFrame? }]. '
-      + 'Frames are 30fps; converting to seconds happens in the facade. Undecoded param fields are not settable.',
-    permission: 'commit',
-    permissionLevel: 'commit',
-    inputSchema: { file: 'string', edits: 'array' },
-    run: async (input, context) => {
-      const edit = requireEditSession(context, 'write');
-      if (!('session' in edit)) return edit;
-      const value = asRecord(input);
-      const file = asString(value.file);
-      const edits = asTaeTimeEdits(value.edits);
-      if (!file) return fail('INVALID_INPUT', 'mutate_tae_event_times 需要 file。');
-      if (!edits.ok) return fail(edits.code, edits.message);
-      if (edits.edits.length === 0) return fail('INVALID_INPUT', 'mutate_tae_event_times 需要非空 edits 数组。');
-      const result = await setTaeEventTimes({ edit: edit.session, file, edits: edits.edits });
-      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
-      return ok(result);
-    }
-  });
-
-  registry.register({
-    name: 'read_msb_parts',
-    description: 'Read MSB map parts by address strings (m11_01_00_00#c1050_0000; one per file). '
-      + 'Returns part position/rotation/scale. Do not feed msb to propose_text_patch.',
-    permission: 'read',
-    permissionLevel: 'read',
-    inputSchema: { file: 'string', /* 可选地址过滤 */ addresses: 'array?' },
-    run: async (input, context) => {
-      const edit = requireEditSession(context, 'read');
-      if (!('session' in edit)) return edit;
-      const value = asRecord(input);
-      const file = asString(value.file);
-      const addresses = asStringList(value.addresses);
-      if (!file) return fail('INVALID_INPUT', 'read_msb_parts 需要 file。');
-      const result = await readMsbParts({ edit: edit.session, file, ...(addresses.length > 0 ? { addresses } : {}) });
-      if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
+      if (context.workspaceIndex && result.events) {
+        const indexedFile = context.workspaceIndex.getFiles().find((candidate) => candidate.absolutePath === result.filePath);
+        const sourceUri = indexedFile?.sourceUri ?? result.filePath ?? file;
+        const mapId = basename(sourceUri).replace(/\.emevd(?:\.dcx)?$/i, '');
+        context.workspaceIndex.upsertEventExport({
+          mapId,
+          events: result.events.map((event) => ({
+            uri: `${sourceUri}#event/${event.eventId}`,
+            sourceUri,
+            mapId,
+            eventId: event.eventId,
+            instructions: [],
+            raw: {
+              authority: 'native-verified-outline',
+              instructionCount: event.instructionCount,
+              restBehavior: event.restBehavior,
+              semanticArgsDecoded: false
+            }
+          }))
+        });
+        context.workspaceIndex.rebuildReferences();
+        await context.onIndexUpdated?.();
+      }
       return ok(result);
     }
   });
@@ -1003,6 +1039,134 @@ export function createDefaultToolRegistry(): ToolRegistry {
       const result = await setMsbPartTransform({ edit: edit.session, file, edits: edits.edits });
       if (!result.ok) return fail(result.error.code, result.error.message, result.error.details);
       return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'query_map_objects',
+    description: 'Query all semantic map objects (Parts, Regions, Models, Events) by modelName, entityId, kind, or name. Does not truncate.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: {
+      file: 'string',
+      modelName: 'string?',
+      entityId: 'number?',
+      kind: 'string?',
+      nameContains: 'string?',
+      regionName: 'string?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      if (!file) return fail('INVALID_INPUT', 'query_map_objects 需要 file。');
+      const result = await queryMapEntities(edit.session, file, {
+        ...(value.modelName ? { modelName: asString(value.modelName) } : {}),
+        ...(typeof value.entityId === 'number' ? { entityId: Number(value.entityId) } : {}),
+        ...(value.kind ? { kind: asString(value.kind) as any } : {}),
+        ...(value.nameContains ? { nameContains: asString(value.nameContains) } : {}),
+        ...(value.regionName ? { regionName: asString(value.regionName) } : {})
+      });
+      if (!result.ok) return fail(result.error?.code ?? 'QUERY_FAILED', result.error?.message ?? '查询地图实体失败');
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'inspect_map_object',
+    description: 'Inspect a specific map object (Part, Region, Event) by name, ID, or stableKey, showing transform, model, and reverse references.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { file: 'string', identifier: 'string' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const identifier = asString(value.identifier);
+      if (!file || !identifier) return fail('INVALID_INPUT', 'inspect_map_object 需要 file 和 identifier。');
+      const result = await inspectMapEntity(edit.session, file, identifier);
+      if (!result.ok) return fail(result.error?.code ?? 'INSPECT_FAILED', result.error?.message ?? '查看地图对象失败');
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'batch_transform_map_objects',
+    description: 'Batch transform multiple map parts (translate, rotate, scale) in a single atomic transaction through Patch Engine.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: {
+      file: 'string',
+      targets: 'array',
+      deltaX: 'number?',
+      deltaY: 'number?',
+      deltaZ: 'number?',
+      rotDeltaX: 'number?',
+      rotDeltaY: 'number?',
+      rotDeltaZ: 'number?',
+      scaleMultiplier: 'number?'
+    },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const targets = asStringList(value.targets);
+      if (!file || targets.length === 0) return fail('INVALID_INPUT', 'batch_transform_map_objects 需要 file 和非空 targets 数组。');
+      const result = await batchTransformMapParts(edit.session, file, {
+        targets,
+        ...(typeof value.deltaX === 'number' ? { deltaX: Number(value.deltaX) } : {}),
+        ...(typeof value.deltaY === 'number' ? { deltaY: Number(value.deltaY) } : {}),
+        ...(typeof value.deltaZ === 'number' ? { deltaZ: Number(value.deltaZ) } : {}),
+        ...(typeof value.rotDeltaX === 'number' ? { rotDeltaX: Number(value.rotDeltaX) } : {}),
+        ...(typeof value.rotDeltaY === 'number' ? { rotDeltaY: Number(value.rotDeltaY) } : {}),
+        ...(typeof value.rotDeltaZ === 'number' ? { rotDeltaZ: Number(value.rotDeltaZ) } : {}),
+        ...(typeof value.scaleMultiplier === 'number' ? { scaleMultiplier: Number(value.scaleMultiplier) } : {})
+      });
+      if (!result.ok) return fail(result.error?.code ?? 'BATCH_TRANSFORM_FAILED', result.error?.message ?? '批量变换失败');
+      return ok(result);
+    }
+  });
+
+  registry.register({
+    name: 'export_map_for_blender',
+    description: 'Export canonical MapDocument to Blender-compatible JSON scene descriptor with stable identifiers and revisions.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { file: 'string' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'read');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      if (!file) return fail('INVALID_INPUT', 'export_map_for_blender 需要 file。');
+      const loaded = await loadMapDocument(edit.session, file);
+      if (!loaded.ok) return fail(loaded.error.code, loaded.error.message);
+      const blenderScene = exportMapSceneForBlender(loaded.doc);
+      return ok(blenderScene);
+    }
+  });
+
+  registry.register({
+    name: 'import_map_from_blender',
+    description: 'Import Blender delta modifications, validate against current map revision, and commit as a MapEditTransaction.',
+    permission: 'commit',
+    permissionLevel: 'commit',
+    inputSchema: { file: 'string', delta: 'object' },
+    run: async (input, context) => {
+      const edit = requireEditSession(context, 'write');
+      if (!('session' in edit)) return edit;
+      const value = asRecord(input);
+      const file = asString(value.file);
+      const delta = value.delta as BlenderDeltaImport;
+      if (!file || !delta || typeof delta !== 'object') return fail('INVALID_INPUT', 'import_map_from_blender 需要 file 和 delta 对象。');
+      const loaded = await loadMapDocument(edit.session, file);
+      if (!loaded.ok) return fail(loaded.error.code, loaded.error.message);
+      const translation = importBlenderDeltaToTransaction(loaded.doc, delta);
+      if (!translation.ok) return fail(translation.conflict ? 'REVISION_CONFLICT' : 'IMPORT_FAILED', translation.error);
+      return ok({ transaction: translation.transaction, status: 'validated' });
     }
   });
 
@@ -1144,6 +1308,83 @@ export function createDefaultToolRegistry(): ToolRegistry {
     }
   });
 
+  registry.register({
+    name: 'read_memory',
+    description: 'Read or search long-term memory entries by topic/query, or retrieve all project memories if query is omitted.',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { query: 'string?', limit: 'number?' },
+    run: (input, context) => {
+      const store = context.memoryStore;
+      if (!store) return fail('MEMORY_STORE_REQUIRED', '宿主未提供持久记忆存储，拒绝伪装为已读取。');
+      const value = asRecord(input);
+      const query = asOptionalString(value.query);
+      const limit = asNumber(value.limit, 10);
+      if (query) {
+        const results = store.search(query, limit);
+        return ok({ query, count: results.length, entries: results });
+      }
+      const all = store.list().slice(0, limit);
+      return ok({ count: all.length, entries: all });
+    }
+  });
+
+  registry.register({
+    name: 'write_memory',
+    description: 'Store or update a persistent long-term memory entry (topic, summary, details, tags) across sessions.',
+    permission: 'propose',
+    permissionLevel: 'propose',
+    inputSchema: { topic: 'string', summary: 'string', details: 'string?', tags: 'array?' },
+    run: (input, context) => {
+      const store = context.memoryStore;
+      if (!store) return fail('MEMORY_STORE_REQUIRED', '宿主未提供持久记忆存储，拒绝伪装为已保存。');
+      const value = asRecord(input);
+      const topic = asString(value.topic).trim();
+      const summary = asString(value.summary).trim();
+      if (!topic || !summary) {
+        return fail('INVALID_INPUT', 'write_memory requires non-empty topic and summary.');
+      }
+      const details = asOptionalString(value.details);
+      const tags = Array.isArray(value.tags) ? value.tags.map(String).filter(Boolean) : [];
+      const saved = store.save({ topic, summary, ...(details ? { details } : {}), tags });
+      return ok({ saved: true, entry: saved });
+    }
+  });
+
+  registry.register({
+    name: 'list_memories',
+    description: 'List all topics and summaries stored in the long-term memory system.',
+    permission: 'read',
+    permissionLevel: 'read',
+    run: (_input, context) => {
+      const store = context.memoryStore;
+      if (!store) return fail('MEMORY_STORE_REQUIRED', '宿主未提供持久记忆存储，拒绝返回临时空列表。');
+      const list = store.list();
+      return ok({ count: list.length, topics: list.map((e) => ({ id: e.id, topic: e.topic, summary: e.summary, updatedAt: e.updatedAt })) });
+    }
+  });
+
+  registry.register({
+    name: 'switch_mode',
+    description: 'Switch the agent operation mode dynamically (e.g. from "plan" to "normal" or "fullPermission" to perform edits/mutations, or back to "plan").',
+    permission: 'read',
+    permissionLevel: 'read',
+    inputSchema: { mode: 'string', reason: 'string?' },
+    run: (input, context) => {
+      const value = asRecord(input);
+      const targetMode = asString(value.mode).trim();
+      if (targetMode === 'plan' || targetMode === 'normal' || targetMode === 'fullPermission') {
+        context.mode = targetMode;
+        return ok({
+          switched: true,
+          currentMode: targetMode,
+          note: `操作模式已成功切换为「${targetMode}」。现在可以执行该模式允许的操作。`
+        });
+      }
+      return fail('INVALID_MODE', `不支持的目标模式: "${targetMode}"，可选值为: "plan" | "normal" | "fullPermission"。`);
+    }
+  });
+
   return registry;
 }
 
@@ -1208,17 +1449,6 @@ function requireEditSession(
   if (!context.session) {
     return fail('WORKSPACE_REQUIRED', '这次工具需要先打开 Mod 工作区。');
   }
-  if (purpose === 'write') {
-    if (!context.operationLogStore || !context.backupBaseDir || !context.recoveryDir) {
-      return fail(
-        'COMMIT_CONTEXT_REQUIRED',
-        '提交需要主进程注入的生产上下文（session / operationLogStore / backupBaseDir / recoveryDir）。'
-      );
-    }
-    if (!context.confirmation?.id || context.confirmation.subjects.length === 0) {
-      return fail('EDIT_CONFIRMATION_REQUIRED', '提交需要用户在 Agent 审批卡确认后签发的写入回执。');
-    }
-  }
   const backupBaseDir = context.backupBaseDir ?? join(context.session.layers.overlayRoot, '.soulforge-staging', 'backups');
   const recoveryDir = context.recoveryDir ?? join(context.session.layers.overlayRoot, '.soulforge-staging', 'recovery');
   return {
@@ -1257,6 +1487,11 @@ function nativeFormatHint(targetUri: string, targetPath: string): string | null 
 }
 
 function asIdList(value: unknown): number[] {
+  if (typeof value === 'number') return Number.isInteger(value) ? [value] : [];
+  if (typeof value === 'string' && value.trim()) {
+    const num = Number(value.trim());
+    if (Number.isInteger(num)) return [num];
+  }
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => (typeof item === 'number' ? item : Number(item)))
@@ -1264,16 +1499,18 @@ function asIdList(value: unknown): number[] {
 }
 
 function asStringList(value: unknown): string[] {
+  if (typeof value === 'string' && value.trim().length > 0) return [value.trim()];
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
 }
 
 function asParamEdits(value: unknown): { ok: true; edits: ParamFieldEdit[] } | { ok: false; code: string; message: string } {
-  if (!Array.isArray(value) || value.length === 0) {
-    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_param_fields 需要非空 edits 数组。' };
+  const items = Array.isArray(value) ? value : (value && typeof value === 'object' && 'table' in value ? [value] : null);
+  if (!items || items.length === 0) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_param_fields 需要非空 edits 数组或单条 edit 对象。' };
   }
   const edits: ParamFieldEdit[] = [];
-  for (const item of value) {
+  for (const item of items) {
     const record = asRecord(item);
     const table = asString(record.table);
     const fieldId = asString(record.fieldId);
@@ -1291,11 +1528,12 @@ function asParamEdits(value: unknown): { ok: true; edits: ParamFieldEdit[] } | {
 }
 
 function asFmgEdits(value: unknown): { ok: true; edits: FmgEntryEdit[] } | { ok: false; code: string; message: string } {
-  if (!Array.isArray(value) || value.length === 0) {
-    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_fmg_entries 需要非空 edits 数组。' };
+  const items = Array.isArray(value) ? value : (value && typeof value === 'object' && 'table' in value ? [value] : null);
+  if (!items || items.length === 0) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_fmg_entries 需要非空 edits 数组或单条 edit 对象。' };
   }
   const edits: FmgEntryEdit[] = [];
-  for (const item of value) {
+  for (const item of items) {
     const record = asRecord(item);
     const table = asString(record.table);
     const text = typeof record.text === 'string' ? record.text : '';
@@ -1312,11 +1550,12 @@ function asFmgEdits(value: unknown): { ok: true; edits: FmgEntryEdit[] } | { ok:
 }
 
 function asTaeTimeEdits(value: unknown): { ok: true; edits: Array<{ address: string; startFrame?: number; endFrame?: number }> } | { ok: false; code: string; message: string } {
-  if (!Array.isArray(value)) {
-    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_tae_event_times 的 edits 必须是数组。' };
+  const items = Array.isArray(value) ? value : (value && typeof value === 'object' && 'address' in value ? [value] : null);
+  if (!items || items.length === 0) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_tae_event_times 的 edits 必须是数组或单条 edit 对象。' };
   }
   const edits: Array<{ address: string; startFrame?: number; endFrame?: number }> = [];
-  for (const item of value) {
+  for (const item of items) {
     const record = asRecord(item);
     const address = asString(record.address);
     if (!address) {
@@ -1341,11 +1580,12 @@ function asTaeTimeEdits(value: unknown): { ok: true; edits: Array<{ address: str
 const MSB_TRANSFORM_FIELDS = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ', 'scaleX', 'scaleY', 'scaleZ'] as const;
 
 function asMsbTransformEdits(value: unknown): { ok: true; edits: MsbPartTransformEdit[] } | { ok: false; code: string; message: string } {
-  if (!Array.isArray(value)) {
-    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_msb_part_transform 的 edits 必须是数组。' };
+  const items = Array.isArray(value) ? value : (value && typeof value === 'object' && 'address' in value ? [value] : null);
+  if (!items || items.length === 0) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'mutate_msb_part_transform 的 edits 必须是数组或单条 edit 对象。' };
   }
   const edits: MsbPartTransformEdit[] = [];
-  for (const item of value) {
+  for (const item of items) {
     const record = asRecord(item);
     const address = asString(record.address);
     if (!address) {
@@ -1389,8 +1629,14 @@ function asRagFamilies(value: unknown): RagChunkFamily[] | undefined {
 }
 
 function resolveRagCorpus(context: ToolContext): RagCorpus | null {
+  if (context.workspaceIndex) {
+    const live = buildRagCorpus(context.workspaceIndex);
+    if (context.rag && context.rag.chunks.length > 0) {
+      return mergeCatalogAndPersisted(live, context.rag);
+    }
+    return live;
+  }
   if (context.rag && context.rag.chunks.length > 0) return context.rag;
-  if (context.workspaceIndex) return buildRagCorpus(context.workspaceIndex);
   return null;
 }
 

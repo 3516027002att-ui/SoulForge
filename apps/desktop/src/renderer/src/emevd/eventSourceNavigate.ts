@@ -150,13 +150,16 @@ export function inspectSourceLine(
     };
   }
 
-  const call = /^([A-Z][A-Za-z0-9_]*)\s*\(([\s\S]*)\)\s*;?$/.exec(trimmed);
+  // 允许单行谓词以 && 或 || 开头（如 WaitFor 块内的子行）
+  const stripped = trimmed.replace(/^(?:&&|\|\|)\s*/, '');
+  const call = /^([A-Z][A-Za-z0-9_]*)\s*\(([\s\S]*)\)\s*;?$/.exec(stripped);
   if (!call) return { kind: 'empty' };
 
   const name = call[1]!;
   const rawArgs = splitTopLevel(call[2] ?? '', ',').map((part) => part.trim()).filter(Boolean);
-  const matches = catalog.filter((item) => item.name === name);
-  if (matches.length === 0) {
+  const item = catalog.find((candidate) => candidate.name === name)
+    ?? catalog.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
+  if (!item) {
     return {
       kind: 'instruction',
       name,
@@ -169,7 +172,6 @@ export function inspectSourceLine(
       unknown: true
     };
   }
-  const item = matches[0]!;
   const args: InspectedArg[] = item.args.map((arg, index) => {
     const value = rawArgs[index] ?? '';
     const role = classifyArgRole(arg.name);

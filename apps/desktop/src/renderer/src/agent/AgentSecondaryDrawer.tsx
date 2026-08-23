@@ -6,10 +6,11 @@ import {
   nextTrappedFocusIndex
 } from '../a11y/focusTrap.js';
 import { ModelServiceSettingsPanel } from '../editors/ModelServiceSettingsPanel.js';
+import { AgentMemoryDrawer } from './AgentMemoryDrawer.js';
 import type { AgentTaskPanelProps } from './AgentTaskPanel.js';
 import { isAgentTaskCancellable } from './agentTaskState.js';
 
-export type AgentSecondaryDrawerView = 'history' | 'settings';
+export type AgentSecondaryDrawerView = 'history' | 'settings' | 'memory';
 
 export interface AgentSecondaryDrawerSettingsProps {
   provider: AiProvider;
@@ -34,12 +35,7 @@ export interface AgentSecondaryDrawerProps {
 /**
  * §12.10 组件树里的 AgentSecondaryDrawer —— 二级抽屉。
  *
- * 模型服务、工具库存、会话历史和开发设置从主栏移到这里（§12.10「模型服务、
- * 工具库存、会话历史和开发设置进入 AgentSecondaryDrawer」）。主栏只保留消息流：
- * 任务进度、取消和审批进入消息流，不再由顶部常驻控制台承担。
- *
- * 保留旧抽屉的焦点困住与 Escape 关闭（AgentSidebar 原内联实现迁来）。
- * 关闭抽屉**不**取消任何 main-owned 任务：任务生命周期归主进程，隐藏只收焦点。
+ * 模型服务、工具库存、会话历史、项目长期记忆和开发设置从主栏移到这里。
  */
 export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactElement {
   const {
@@ -76,12 +72,14 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
 
   if (!open) return <div className="agent-secondary-drawer is-hidden" data-testid="agent-secondary-drawer" aria-hidden="true" />;
 
+  const title = view === 'history' ? 'Agent 历史' : view === 'memory' ? '长期记忆 (Memory)' : '模型服务设置';
+
   return (
     <div
       className="agent-secondary-drawer"
       role="dialog"
       aria-modal="true"
-      aria-label={view === 'history' ? 'Agent 历史' : '模型服务设置'}
+      aria-label={title}
       data-testid="agent-secondary-drawer"
       ref={drawerRef}
       onKeyDown={(event) => {
@@ -94,9 +92,7 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
       }}
     >
       <div className="agent-drawer__header">
-        <strong>{view === 'history' ? 'Agent 历史' : '模型服务设置'}</strong>
-        {/* S11：顶栏自足——历史/设置互相可切，标题独占一行，不再依赖主栏。
-            打开设置只看见设置表单；欢迎与 composer 在 AgentSidebar 整列换页卸掉。 */}
+        <strong>{title}</strong>
         <div className="agent-drawer__switch" role="group" aria-label="抽屉视图">
           <button
             type="button"
@@ -105,6 +101,14 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
             onClick={() => onSwitchView('history')}
           >
             历史
+          </button>
+          <button
+            type="button"
+            className="agent-drawer__switch-btn"
+            aria-pressed={view === 'memory'}
+            onClick={() => onSwitchView('memory')}
+          >
+            记忆
           </button>
           <button
             type="button"
@@ -118,7 +122,9 @@ export function AgentSecondaryDrawer(props: AgentSecondaryDrawerProps): ReactEle
         <button type="button" className="agent-icon-btn" onClick={onClose} aria-label="关闭抽屉">×</button>
       </div>
 
-      {view === 'history' ? (
+      {view === 'memory' ? (
+        <AgentMemoryDrawer onClose={onClose} />
+      ) : view === 'history' ? (
         <div className="agent-history">
           {/* S25：运行任务/取消任务/权限状态从设置页移到历史页（设置页只剩表单）。 */}
           <div className="agent-controls">

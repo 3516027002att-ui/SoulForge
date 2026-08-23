@@ -1,5 +1,6 @@
 import { AnthropicCompatibleAdapter } from './anthropicCompatibleAdapter.js';
 import { OpenAiCompatibleAdapter } from './openaiCompatibleAdapter.js';
+import { OpenAiResponsesAdapter } from './openaiResponsesAdapter.js';
 import type {
   ModelServiceAdapter,
   ModelServiceConfig,
@@ -51,7 +52,7 @@ export function createConfiguredModelServiceAdapter(
   }
 
   const protocol = config.protocol as ModelServiceProtocol;
-  if (protocol !== 'openai-compatible' && protocol !== 'anthropic-compatible') {
+  if (protocol !== 'openai-compatible' && protocol !== 'openai-responses' && protocol !== 'anthropic-compatible') {
     return rejected(
       'invalid-configuration',
       'MODEL_SERVICE_PROTOCOL_UNSUPPORTED',
@@ -83,9 +84,10 @@ export function createConfiguredModelServiceAdapter(
     model: config.model.trim(),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {})
   };
-  const adapter = protocol === 'openai-compatible'
-    ? new OpenAiCompatibleAdapter(adapterOptions)
-    : new AnthropicCompatibleAdapter(adapterOptions);
+  let adapter: ModelServiceAdapter;
+  if (protocol === 'openai-compatible') adapter = new OpenAiCompatibleAdapter(adapterOptions);
+  else if (protocol === 'openai-responses') adapter = new OpenAiResponsesAdapter(adapterOptions);
+  else adapter = new AnthropicCompatibleAdapter(adapterOptions);
   return {
     ok: true,
     status: 'configured',

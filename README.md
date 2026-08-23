@@ -36,17 +36,35 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 不不不你不应该看这些，因为暂时没人来contribute，所以这些文档都是写给agents看的
 
-## 快速开始（从零开始）
+## 快速开始
 
-> 本节假设你**没用过 PowerShell、Node.js、.NET**。跟着一步步点鼠标就行，不懂原理也能跑起来。当前没有面向普通玩家的正式安装包，需要自己在电脑上编译一次。
+### 方式一：直接双击智能启动器（推荐，零配置）
 
-### 第 0 步：确认你的电脑
+如果你拿到的是编译好的发行包或本地仓库：
+
+1. **直接双击根目录下的 `SoulForge.Launcher.exe`**；
+2. 启动器会自动扫描并检测：
+   - 🎮 **《只狼》安装路径**（自动扫描 Steam 库、注册表与常见盘符）
+   - 🧩 **Oodle 解密库 (`oo2core_6_win64.dll`)**（自动从只狼目录安全提取与校验）
+   - ⚙️ **Mod 工作区**（自动初始化标准 `mods/` 文件夹与 `project.json`）
+   - 💻 **系统运行库**（VC++ 2015-2022 x64）
+3. 检测并自动补全完毕后，**将直接拉起 SoulForge 编辑器并自动载入工作区**，无需任何前置配置！
+
+> 提示：如果你只想进行环境体检，可在终端中执行 `.\SoulForge.Launcher.exe --check`。
+
+---
+
+### 方式二：从源码编译（开发者模式）
+
+> 本节假设你**没用过 PowerShell、Node.js、.NET**。跟着一步步点鼠标就行，不懂原理也能跑起来。
+
+#### 第 0 步：确认你的电脑
 
 - 系统：Windows 10 或 Windows 11（其他系统暂不支持）。
 - 磁盘：至少预留 5 GB 空闲（用来放依赖和编译产物）。
 - 网络：能正常访问互联网（安装过程要下载东西）。
 
-### 第 1 步：打开 PowerShell
+#### 第 1 步：打开 PowerShell
 
 PowerShell 就是 Windows 自带的“黑窗口”，用来敲命令，不用怕：
 
@@ -55,7 +73,7 @@ PowerShell 就是 Windows 自带的“黑窗口”，用来敲命令，不用怕
 
 > 小技巧：粘贴时用 `Ctrl + V`，复制时用 `Ctrl + C`；卡住了按 `Ctrl + C` 可中断。
 
-### 第 2 步：安装 Node.js（含 npm）
+#### 第 2 步：安装 Node.js（含 npm）
 
 Node.js 是运行本项目前端/构建脚本的环境，`npm` 是它自带的包管理器。
 
@@ -69,22 +87,20 @@ npm -v
 
 能看到类似 `v22.x.x` 和 `10.x.x` 的版本号即成功。若提示“不是内部命令”，说明没装好或没重启终端，重装一次并重启电脑再试。
 
-### 第 3 步：安装 .NET 10 SDK
+#### 第 3 步：安装 .NET SDK
 
-.NET 10 是编译桌面端（SoulForge.exe）必需的工具。
+.NET SDK 是编译桌面端底层 Native Bridge 与启动器必需的工具。
 
-1. 打开 https://dotnet.microsoft.com/download/dotnet/10.0 → 找到 **.NET 10 SDK** → 下载 **Windows x64 Installer**，一路“下一步”安装。
+1. 打开 https://dotnet.microsoft.com/download/dotnet → 下载 **.NET SDK**（.NET 6 / 8 / 10 均可），一路“下一步”安装。
 2. 装完同样**重新打开** PowerShell，验证：
 
 ~~~powershell
 dotnet --version
 ~~~
 
-应显示 `10.x.xxx`。若显示 `9.x` 或更低，说明装成了旧版，请确认下载的是 10.0 SDK。
-
 > 注意：.NET Runtime（运行时）和 SDK 是两回事，必须装 **SDK**，否则 `dotnet build` 会失败。
 
-### 第 4 步：下载 SoulForge 源码
+#### 第 4 步：下载 SoulForge 源码
 
 二选一（推荐前者）：
 
@@ -99,7 +115,7 @@ cd SoulForge
 2. 解压到任意**不含中文和空格**的路径，例如 `D:\SoulForge`。
 3. 在该文件夹空白处右键 → `在终端中打开`。
 
-### 第 5 步：安装依赖并编译
+#### 第 5 步：安装依赖并编译
 
 在 SoulForge 根目录（能看到 `package.json` 的那层）依次执行，每行粘贴后按回车，等上一条跑完再跑下一条：
 
@@ -113,22 +129,24 @@ npm run typecheck
 # 3. 跑一遍测试（可选，新手可跳过）
 npm test
 
-# 4. 编译出可执行文件（会在根目录生成 SoulForge.exe）
+# 4. 编译出桌面应用
 npm run build
+
+# 5. 编译根目录智能启动器（生成 SoulForge.Launcher.exe）
+npm run launcher:build
 ~~~
 
 > 常见报错：
 > - `npm : 无法加载文件 ... 因为在此系统上禁止运行脚本` → 以管理员身份打开 PowerShell 执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 后重试。
 > - 网络超时/ `ECONNRESET` → 多试几次 `npm install`，或切换网络/开代理。
-> - `dotnet: command not found` → 没装好 .NET 10 SDK，回到第 3 步。
+> - `dotnet: command not found` → 没装好 .NET SDK，回到第 3 步。
 
-### 第 6 步：运行
+#### 第 6 步：运行
 
 编译成功后：
 
-- 双击根目录下的 `SoulForge.exe` 即可启动；
-
-或想边看日志边跑（开发者常用）：
+- **直接双击根目录的 `SoulForge.Launcher.exe` 即可全自动检测、自愈环境并启动！**
+- 或想边看前端控制台日志边跑（开发者常用）：
 
 ~~~powershell
 npm run dev

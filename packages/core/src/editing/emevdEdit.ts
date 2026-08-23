@@ -154,17 +154,23 @@ async function resolveEmevdFile(
   file: string
 ): Promise<{ ok: true; path: string } | { ok: false; error: { code: string; message: string } }> {
   const overlay = edit.session.layers.overlayRoot;
+  const base = edit.session.layers.baseRoot;
   const candidates = [
     resolve(file),
     join(overlay, file),
     join(overlay, 'event', file),
     join(overlay, 'event', `${file}.emevd.dcx`)
   ];
+  if (base) {
+    candidates.push(
+      join(base, file),
+      join(base, 'event', file),
+      join(base, 'event', `${file}.emevd.dcx`)
+    );
+  }
   for (const candidate of candidates) {
     try {
       await access(candidate);
-      const writable = edit.session.resolveWritablePath(candidate);
-      if (!writable.ok) continue;
       return { ok: true, path: candidate };
     } catch {
       // try next

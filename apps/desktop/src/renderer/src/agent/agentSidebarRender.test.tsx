@@ -185,11 +185,11 @@ describe('Composer 结构（§12.6 / S32 输入卡）', () => {
     assert.ok(!/<button[^>]*disabled[^>]*>发送<\/button>/.test(filledHtml), '非空输入时发送按钮不应 disabled');
   });
 
-  it('未打通的能力诚实 disabled：附件按钮常驻 disabled 而不是假装可用', () => {
+  it('无桌面桥时附件按钮诚实 disabled，不假装可用', () => {
     const html = render();
     const attachmentButton = /<button[^>]*aria-label="添加附件"[^>]*>/.exec(html)?.[0];
     assert.ok(attachmentButton, '附件按钮必须存在（固定五项之一）');
-    assert.ok(attachmentButton.includes('disabled'), '附件能力未接通（60C），应诚实 disabled');
+    assert.ok(attachmentButton.includes('disabled'), 'browser-preview / 无 bridge 时附件应 disabled');
   });
 
   it('S10：引用框选钮默认抬起，citeSelecting 时按下（aria-pressed）', () => {
@@ -284,6 +284,33 @@ describe('区块顺序与默认折叠状态', () => {
     assert.ok(!active.includes('data-testid="agent-empty-state"'));
     assert.match(active, /data-testid="agent-tool-activity-c1"/, '运行中工具活动进入消息流');
     assert.match(active, /agent-tool-status--running/, '工具活动默认单行折叠，带运行徽标');
+  });
+
+  it('模型正文出现在对话区，会话 jsonl 文件名不出现', () => {
+    const running = {
+      ...INITIAL_AGENT_TASK_STATE,
+      sessionId: 's',
+      phase: 'done' as const,
+      finishReason: 'stop',
+      startedAt: 1_000,
+      endedAt: 13_000,
+      narrations: [{ step: 1, text: '我先查伤药相关 Param。' }],
+      thinkingText: '先搜表',
+      toolCalls: [{
+        callId: 'c1', name: 'search_param_rows', step: 1, status: 'ok' as const
+      }],
+      rolloutFileName: 'rollout-secret.jsonl'
+    };
+    const html = render({
+      goal: '狼接仙到道具时报错',
+      task: { ...render0Task(), task: running }
+    });
+    assert.match(html, /我先查伤药相关 Param。/, '模型必须说话，不能只剩工具行');
+    assert.match(html, /已思考 12s/);
+    assert.match(html, /search_param_rows/);
+    assert.ok(!html.includes('会话记录：'), '对话区不得显示会话 jsonl 文件名');
+    assert.ok(!html.includes('rollout-secret.jsonl'));
+    assert.ok(!html.includes('data-testid="agent-task-status"'), '正常结束后不再挂一条思考已完成状态行');
   });
 });
 
@@ -431,21 +458,21 @@ describe('§12.8/§12.11 上下文、资源引用与消息流（AGENT-60C）', (
     const html = render({ selection: leaking });
     assert.ok(!html.includes('D:\\mystream'), 'DOM 不应包含绝对路径');
     assert.ok(!html.includes('gameparam.parambnd.dcx'), '泄漏的 documentId 不应进入 DOM');
-    assert.match(html, /未选择逻辑资源/, '不合格选区应回退空态');
+    assert.ok(!html.includes('data-testid="agent-context-picker"'), '空的上下文 chip 已从输入区移除');
   });
 
   it('hex dump / raw parser 选区不进入 DOM', () => {
     const hex = { ...selection0('param'), documentId: '40 00 00 00 2C 01 00 00 00 00 00 00' };
     const html = render({ selection: hex });
     assert.ok(!html.includes('40 00 00 00'), 'hex dump 不应进入 DOM');
-    assert.match(html, /未选择逻辑资源/);
+    assert.ok(!html.includes('data-testid="agent-context-picker"'));
   });
 
-  it('安全选区以 opaque 摘要进入 DOM', () => {
+  it('安全选区不自动变成 # chip，添加资源引用按钮仍在', () => {
     const safe = { ...selection0('param'), documentId: 'm12b/param/gameparam.parambnd.dcx' };
     const html = render({ selection: safe });
-    assert.match(html, /param · m12b\/param\/gameparam\.parambnd\.dcx/);
-    assert.match(html, /data-testid="agent-context-picker"/);
+    assert.ok(!html.includes('data-testid="agent-context-picker"'), '# 开始 / 未选择逻辑资源 chip 已删除');
+    assert.match(html, /aria-label="添加资源引用"/);
   });
 
   it('资源引用只显示 opaque label，token 不进入 DOM', () => {

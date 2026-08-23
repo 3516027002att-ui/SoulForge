@@ -36,5 +36,7 @@ export * from './fmg-names.js';
 export * from './citations.js';
 export * from './container-workbench.js';
 export * from './soulAddress.js';
+export * from './map-document.js';
+export * from './animation-playback.js';
 export * from './path-sanitizer.js';
 export * from './sanitizeRendererPath.js';

@@ -210,6 +210,8 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
               choices?: Array<{
                 delta?: {
                   content?: string;
+                  reasoning_content?: string;
+                  reasoning?: string;
                   tool_calls?: Array<{
                     index?: number;
                     id?: string;
@@ -220,6 +222,10 @@ export class OpenAiCompatibleAdapter implements ModelServiceAdapter {
               }>;
             };
             const delta = json.choices?.[0]?.delta;
+            const reasoning = delta?.reasoning_content ?? delta?.reasoning;
+            if (typeof reasoning === 'string' && reasoning.length > 0) {
+              yield { type: 'thinking-delta', text: reasoning };
+            }
             if (delta?.content) yield { type: 'text-delta', text: delta.content };
             for (const toolDelta of delta?.tool_calls ?? []) {
               const index = toolDelta.index ?? 0;
@@ -294,6 +300,19 @@ function toOpenAiMessage(message: ChatMessage): Record<string, unknown> {
       role: 'tool',
       content: message.content,
       tool_call_id: message.toolCallId
+    };
+  }
+  // 多模态：user 消息带图像时 content 用 parts 数组（data URL 内联）。
+  if (message.role === 'user' && message.images && message.images.length > 0) {
+    return {
+      role: 'user',
+      content: [
+        { type: 'text', text: message.content },
+        ...message.images.map((image) => ({
+          type: 'image_url',
+          image_url: { url: `data:${image.mediaType};base64,${image.dataBase64}` }
+        }))
+      ]
     };
   }
   if (message.role === 'assistant' && message.toolCalls?.length) {

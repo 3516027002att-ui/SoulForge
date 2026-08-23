@@ -22,6 +22,7 @@ import type {
 } from '@soulforge/shared';
 import { AgentTaskPanelProps } from './AgentTaskPanel.js';
 import {
+  buildAgentConversationItems,
   describeAgentTaskStatus,
   isAgentTaskActive
 } from './agentTaskState.js';
@@ -29,7 +30,6 @@ import { AgentDockResizer } from './AgentDockResizer.js';
 import { AgentDockHeader } from './AgentDockHeader.js';
 import { AgentConversationViewport } from './AgentConversationViewport.js';
 import { AgentComposer, type AgentInteractionMode } from './AgentComposer.js';
-import { AgentContextPicker } from './AgentContextPicker.js';
 import { AgentResourceReferencePicker } from './AgentResourceReferencePicker.js';
 import {
   createCitationFlow,
@@ -37,6 +37,13 @@ import {
   createResourceReferenceFlow,
   reduceAgentResourceReferenceDraft
 } from './agentResourceReferences.js';
+import {
+  AGENT_ATTACHMENT_MAX,
+  createAgentAttachmentFlow,
+  createInitialAttachmentDraft,
+  reduceAgentAttachmentDraft,
+  type AgentAttachmentChip
+} from './agentAttachments.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import {
   AgentSecondaryDrawer,
@@ -59,7 +66,7 @@ export interface AgentSidebarProps {
   provider: AiProvider;
   thinking: ModelThinkingLevel;
   /** 8-A：当前选中模型服务的协议，决定思考强度表（无服务时上层给 openai-compatible）。 */
-  protocol: 'openai-compatible' | 'anthropic-compatible';
+  protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
   permissionMode: AiPermissionMode;
   permissionLockReason: string;
   goal: string | null;
@@ -88,6 +95,8 @@ export interface AgentSidebarProps {
    * 可选；不传则草稿仍是 AgentSidebar 内部私有态。
    */
   onResourcesChange?: (resources: readonly AgentResourceReference[]) => void;
+  /** 附件草稿变化（token 由 main 签发；App 随 runAiAgent 提交）。 */
+  onAttachmentsChange?: (attachments: readonly AgentAttachmentChip[]) => void;
   /** 清除当前 Agent 上下文。 */
   onClearContext?: () => void;
   tools: ToolDescriptor[];
@@ -195,6 +204,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     onCreateResource,
     onRemoveResource,
     onResourcesChange,
+    onAttachmentsChange,
     onClearContext,
     tools,
     toolOutput,
@@ -233,11 +243,23 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
   useEffect(() => {
     onResourcesChange?.(resourceDraft.resources);
   }, [resourceDraft.resources, onResourcesChange]);
+  const [attachmentDraft, dispatchAttachmentDraft] = useReducer(
+    reduceAgentAttachmentDraft,
+    undefined,
+    createInitialAttachmentDraft
+  );
+  useEffect(() => {
+    onAttachmentsChange?.(attachmentDraft.attachments);
+  }, [attachmentDraft.attachments, onAttachmentsChange]);
+  const [now, setNow] = useState(() => Date.now());
   // renderer 不伪造 token、不提交路径：只把 §12.8 选区交给 main 的
   // 'agent.resourceReference.create'（root 校验 + 白名单，token 不携带路径）。
   const rendererBridge = getRendererBridge();
   const bridgeCreateResourceReference = rendererBridge !== null
     ? rendererBridge.createAgentResourceReference
+    : null;
+  const bridgeCreateAttachment = rendererBridge !== null && rendererBridge.createAgentAttachment !== undefined
+    ? rendererBridge.createAgentAttachment
     : null;
   const resourceCreateCapable = onCreateResource !== undefined || bridgeCreateResourceReference !== null;
   const taskSurfaceVisible = isTaskSurfaceVisible(busy, goal, draft, task);
@@ -245,6 +267,11 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
   const awaitingApproval = taskState.pendingApprovals.length > 0;
   const taskActive = isAgentTaskActive(taskState);
   const taskRunning = busy || taskActive;
+  useEffect(() => {
+    if (!taskActive) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [taskActive]);
   // awaitingApproval ⊆ taskSurfaceVisible，所以空闲 = 没有任何任务表面内容。
   const emptyWelcome = !taskSurfaceVisible;
   // IPC 返回值来自边界外部；旧版 fixture/历史会话可能只有 steps 字段。
@@ -325,14 +352,16 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingCiteHits, onCiteHitsConsumed]);
 
-  /** 从任务态派生 §12.5 工具活动行（单行折叠；全量，不再按 20 条截断）。 */
-  const toolActivities = taskState.toolCalls.map((call) => ({
-    id: call.callId,
-    summary: call.name,
-    status: call.status === 'ok' ? 'succeeded' as const : call.status === 'failed' ? 'failed' as const : 'running' as const,
-    detail: call.argumentsJson ?? null,
-    step: call.step
-  }));
+  function handleCreateAttachment(): void {
+    if (bridgeCreateAttachment === null) {
+      dispatchAttachmentDraft({
+        type: 'create-failed',
+        message: '添加附件需要桌面桥接能力（Electron 桌面版）。'
+      });
+      return;
+    }
+    void createAgentAttachmentFlow(bridgeCreateAttachment, dispatchAttachmentDraft);
+  }
 
   /**
    * 从任务态派生 §12.9 Change Review 卡。批准/拒绝走真实 IPC：task.onRespondApproval
@@ -366,9 +395,19 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
   const failure = taskState.phase === 'error' && taskState.error !== null
     ? { code: taskState.error.code, message: taskState.error.message }
     : null;
-  const statusText = taskState.phase !== 'idle'
-    ? describeAgentTaskStatus(taskState)
-    : null;
+  const statusText = taskState.phase === 'idle'
+    || (taskState.phase === 'done' && taskState.finishReason !== 'cancelled')
+    ? null
+    : describeAgentTaskStatus(taskState);
+  const conversationItems = buildAgentConversationItems({
+    goal,
+    idleNotice: idleNotice ?? null,
+    draft: draft === null ? null : { title: draft.title, summary: draft.summary, nextActions: draftNextActions },
+    busy,
+    task: taskState,
+    now
+  });
+  void onClearContext;
 
   const selectedService = task.services.find((service) => service.id === task.selectedServiceId);
   void selectedService;
@@ -399,7 +438,10 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
           historyOpen={false}
           expanded={expanded}
           onToggleHistory={() => openDrawer('history')}
-          onNewTask={onNewTask ?? (() => undefined)}
+          onNewTask={() => {
+            dispatchAttachmentDraft({ type: 'reset' });
+            onNewTask?.();
+          }}
           onToggleExpand={onToggleExpand ?? (() => undefined)}
           onOpenSettings={() => openDrawer('settings')}
           onClose={onClose}
@@ -414,51 +456,13 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
           <AgentConversationViewport
             idle={emptyWelcome}
             messages={messages}
-            toolActivities={toolActivities}
+            conversationItems={conversationItems}
             approvals={approvals}
             failure={failure}
             status={statusText}
-          >
-            {goal !== null && (
-              <article className="agent-message agent-message--user">
-                <div className="agent-message__meta">你</div>
-                <p>{goal}</p>
-              </article>
-            )}
-            {idleNotice !== null && (
-              <div className="agent-message agent-message--system" role="status" data-testid="agent-idle-notice">
-                <span>{idleNotice}</span>
-              </div>
-            )}
-            {busy && (
-              <div className="agent-message agent-message--system" role="status">
-                <span className="spinner" aria-hidden="true"></span>
-                <span>正在准备计划草稿…</span>
-              </div>
-            )}
-            {draft !== null && (
-              <article className="agent-message agent-message--agent">
-                <div className="agent-message__meta">Agent · 计划草稿</div>
-                <strong>{draft.title}</strong>
-                <p>{draft.summary}</p>
-                {draftNextActions.length > 0 && (
-                  <ul className="agent-message__actions">
-                    {draftNextActions.map((action) => <li key={action}>{action}</li>)}
-                  </ul>
-                )}
-              </article>
-            )}
-            {taskState.rolloutFileName !== null && (
-              <p className="muted" data-testid="agent-rollout-file">会话记录：{taskState.rolloutFileName}</p>
-            )}
-          </AgentConversationViewport>
+          />
 
-          {/* §12.10 组件树：上下文选择 + 资源引用选择（opaque token，不泄漏绝对路径）。 */}
           <div className="agent-composer-context" data-testid="agent-composer-context">
-            <AgentContextPicker
-              selection={effectiveSelection}
-              {...(onClearContext !== undefined ? { onClear: onClearContext } : {})}
-            />
             <AgentResourceReferencePicker
               resources={resourceDraft.resources}
               selection={effectiveSelection}
@@ -480,7 +484,13 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             onInteractionModeChange={onInteractionModeChange ?? (() => undefined)}
             citeSelecting={citeSelecting}
             onToggleCiteSelect={onToggleCiteSelect}
-            contextLabel={contextLabel}
+            attachments={attachmentDraft.attachments}
+            attachmentCreating={attachmentDraft.creating}
+            {...(attachmentDraft.error !== null ? { attachmentError: attachmentDraft.error } : {})}
+            {...(bridgeCreateAttachment !== null && attachmentDraft.attachments.length < AGENT_ATTACHMENT_MAX
+              ? { onAttach: handleCreateAttachment }
+              : {})}
+            onRemoveAttachment={(token) => dispatchAttachmentDraft({ type: 'remove', token })}
             thinking={thinking}
             onThinkingChange={onThinkingChange}
             protocol={protocol}

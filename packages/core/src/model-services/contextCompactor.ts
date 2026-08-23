@@ -85,6 +85,37 @@ export function trimToolResultsForSummary(messages: readonly ChatMessage[]): Cha
   });
 }
 
+/**
+ * 历史轮次工具结果渐进修剪（Codex & OpenCode context management 机制）：
+ * 在多轮会话持续推进时，保留最近 keepLastTurns 轮的完整 tool 输出；
+ * 对于更早轮次（历史轮次）中超长（> maxCharsPerTool）的 tool 结果进行修剪，
+ * 将其缩减为带概要的片段，防止历史 tool 输出无谓消耗宝贵的上下文窗口。
+ */
+export function pruneHistoricalToolOutputs(
+  messages: readonly ChatMessage[],
+  keepLastTurns = 2,
+  maxCharsPerTool = 1500
+): ChatMessage[] {
+  const userIndices: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]?.role === 'user') userIndices.push(i);
+  }
+  const cutoffIndex = userIndices.length > keepLastTurns
+    ? userIndices[userIndices.length - keepLastTurns] ?? 0
+    : 0;
+
+  return messages.map((message, idx) => {
+    if (idx >= cutoffIndex || message.role !== 'tool' || message.content.length <= maxCharsPerTool) {
+      return message;
+    }
+    const truncated = message.content.slice(0, maxCharsPerTool);
+    return {
+      ...message,
+      content: `${truncated}\n… [历史工具输出已截断（原文共 ${message.content.length} 字符），保留核心摘要供上下文参考]`
+    };
+  });
+}
+
 export function estimateContextTokens(messages: ChatMessage[]): number {
   let total = 0;
   for (const message of messages) {
@@ -169,7 +200,14 @@ export function buildCompactedHistory(
     kept.unshift(message);
     tokens += cost;
   }
-  return [...systemMessages, ...kept, { role: 'user', content: `${prefix}\n${summary}` }];
+  return [
+    ...systemMessages,
+    ...kept,
+    {
+      role: 'user',
+      content: `${prefix}\n${summary}\n\n【说明】请基于上述已知事实与上下文摘要，继续推进并执行用户的原始任务；若已排查完毕或准备结束，请向用户清晰输出最终分析结论。`
+    }
+  ];
 }
 
 export async function runCompaction(

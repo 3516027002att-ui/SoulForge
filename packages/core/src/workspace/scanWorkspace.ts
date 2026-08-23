@@ -173,6 +173,9 @@ async function walkDirectory(
     const absolutePath = join(directoryPath, entry.name);
 
     if (entry.isDirectory()) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name.toLowerCase() === '$recycle.bin') {
+        continue;
+      }
       await walkDirectory(absolutePath, diagnostics, onFile, signal);
       continue;
     }

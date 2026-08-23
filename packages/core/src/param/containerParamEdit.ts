@@ -8,8 +8,8 @@
  */
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Diagnostic, ParamDefDocument } from '@soulforge/shared';
 import { runBridge } from '../bridge/runBridge.js';
 import { applyNativeMutation } from '../editing/editorMutationService.js';
@@ -51,7 +51,13 @@ export interface ParamEditFailure {
 }
 
 export type ParamReadResult =
-  | { ok: true; containerPath: string; fields: ParamFieldSnapshot[]; diagnostics: Diagnostic[] }
+  | {
+      ok: true;
+      containerPath: string;
+      fields: ParamFieldSnapshot[];
+      missingRows: Array<{ table: string; rowId: number }>;
+      diagnostics: Diagnostic[];
+    }
   | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] };
 
 export type ParamSetResult =
@@ -115,7 +121,19 @@ export async function resolveGameparamContainer(
   explicit?: string
 ): Promise<{ ok: true; path: string } | { ok: false; error: ParamEditFailure }> {
   if (explicit) {
-    const resolved = resolve(explicit);
+    let cleanPath = explicit.trim();
+    if (cleanPath.startsWith('file:///')) {
+      try {
+        cleanPath = fileURLToPath(cleanPath);
+      } catch {
+        cleanPath = cleanPath.slice(8);
+      }
+    } else if (cleanPath.startsWith('file://')) {
+      cleanPath = cleanPath.slice(7);
+    }
+    const resolved = isAbsolute(cleanPath)
+      ? resolve(cleanPath)
+      : resolve(overlayRoot, cleanPath);
     try {
       const info = await stat(resolved);
       if (!info.isFile()) {
@@ -167,30 +185,31 @@ export async function readParamFields(input: {
   if (!container.ok) return { ok: false, error: container.error, diagnostics: [] };
   const diagnostics: Diagnostic[] = [];
   const fields: ParamFieldSnapshot[] = [];
+  const missingRows: Array<{ table: string; rowId: number }> = [];
   const entries = await listParamEntries(input.edit, container.path);
   if (!entries.ok) return { ok: false, error: entries.error, diagnostics: entries.diagnostics };
   for (const query of input.queries) {
-    const loaded = await loadTableRows(input.edit, container.path, entries.entries, query.table, query.rowIds);
+    const loaded = await loadTableRows(input.edit, container.path, entries.entries, query.table, query.rowIds, true);
     if (!loaded.ok) return { ok: false, error: loaded.error, diagnostics: [...diagnostics, ...loaded.diagnostics] };
     diagnostics.push(...loaded.diagnostics);
     for (const rowId of query.rowIds) {
       const row = loaded.rows.get(rowId);
       if (!row) {
-        return {
-          ok: false,
-          error: { code: 'PARAM_ROW_NOT_FOUND', message: `${query.table}#${rowId} 不存在。` },
-          diagnostics
-        };
+        missingRows.push({ table: loaded.tableName, rowId });
+        continue;
       }
+      let foundAnyField = false;
       for (const fieldId of query.fieldIds) {
         const field = loaded.definition.fields.find((item) => item.id === fieldId);
         if (!field) {
-          return {
-            ok: false,
-            error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table}.${fieldId} 不在授信定义里。` },
-            diagnostics
-          };
+          diagnostics.push({
+            severity: 'warning',
+            code: 'PARAM_FIELD_NOT_FOUND',
+            message: `${query.table}.${fieldId} 不在授信定义里。`
+          });
+          continue;
         }
+        foundAnyField = true;
         fields.push({
           table: loaded.tableName,
           rowId,
@@ -199,9 +218,26 @@ export async function readParamFields(input: {
           value: readFieldValue(row.dataBase64, loaded.definition, fieldId)
         });
       }
+      if (!foundAnyField && query.fieldIds.length > 0) {
+        return {
+          ok: false,
+          error: { code: 'PARAM_FIELD_NOT_FOUND', message: `${query.table} 请求的字段均不在授信定义里（${query.fieldIds.join(', ')}）。` },
+          diagnostics
+        };
+      }
     }
   }
-  return { ok: true, containerPath: container.path, fields, diagnostics };
+  if (fields.length === 0 && missingRows.length > 0) {
+    return {
+      ok: false,
+      error: {
+        code: 'PARAM_ROW_NOT_FOUND',
+        message: `请求的 PARAM 行均不存在：${missingRows.map((row) => `${row.table}#${row.rowId}`).join(', ')}`
+      },
+      diagnostics
+    };
+  }
+  return { ok: true, containerPath: container.path, fields, missingRows, diagnostics };
 }
 
 export async function setParamFields(input: {
@@ -438,7 +474,8 @@ async function loadTableRows(
   containerPath: string,
   entries: ContainerEntry[],
   table: string,
-  rowIds: number[]
+  rowIds: number[],
+  allowMissingRows = false
 ): Promise<
   | {
       ok: true;
@@ -448,6 +485,7 @@ async function loadTableRows(
       rows: Map<number, { id: number; dataBase64: string }>;
       unpackedPath: string;
       sourceHash: string;
+      missingRows: number[];
       diagnostics: Diagnostic[];
     }
   | { ok: false; error: ParamEditFailure; diagnostics: Diagnostic[] }
@@ -526,6 +564,13 @@ async function loadTableRows(
     }
   }
   if (missing.length > 0) {
+    if (allowMissingRows && rows.size > 0) {
+      documentDiagnostics.push({
+        severity: 'warning',
+        code: 'PARAM_ROWS_PARTIAL_MISSING',
+        message: `${basename(entry.name.replace(/\\/g, '/'))} 未找到行：${missing.join(', ')}`
+      });
+    } else {
     return {
       ok: false,
       error: {
@@ -534,6 +579,7 @@ async function loadTableRows(
       },
       diagnostics: documentDiagnostics
     };
+    }
   }
   return {
     ok: true,
@@ -543,6 +589,7 @@ async function loadTableRows(
     rows,
     unpackedPath,
     sourceHash,
+    missingRows: missing,
     diagnostics: documentDiagnostics
   };
 }

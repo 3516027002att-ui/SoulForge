@@ -90,10 +90,38 @@ export function classifyFetchError(
       message: `${protocol} 网络连接失败：${error.message}`
     };
   }
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const errorCode = (error as { code?: string })?.code ?? '';
+  const errorCauseCode = ((error as { cause?: { code?: string } })?.cause?.code) ?? '';
+  const isTimeout = /timeout/i.test(rawMessage) || errorCode === 'ETIMEDOUT' || errorCauseCode === 'ETIMEDOUT';
+  if (isTimeout) {
+    return {
+      severity: 'error',
+      code: 'MODEL_SERVICE_TIMEOUT',
+      message: `${protocol} 请求超时：${rawMessage}`
+    };
+  }
+  const isNetworkLike =
+    /network|socket|connreset|timedout|connrefused|epipe|und_err|premature close|fetch failed|stream|disconnect|closed|eai_again|reset by peer|broken pipe/i.test(
+      rawMessage
+    ) ||
+    ['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_BODY_TIMEOUT', 'ERR_STREAM_PREMATURE_CLOSE'].includes(
+      errorCode
+    ) ||
+    ['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_BODY_TIMEOUT', 'ERR_STREAM_PREMATURE_CLOSE'].includes(
+      errorCauseCode
+    );
+  if (isNetworkLike) {
+    return {
+      severity: 'error',
+      code: 'MODEL_SERVICE_NETWORK_ERROR',
+      message: `${protocol} 网络连接中断：${rawMessage}`
+    };
+  }
   return {
     severity: 'error',
     code: 'MODEL_SERVICE_REQUEST_FAILED',
-    message: `${protocol} 请求失败：${error instanceof Error ? error.message : String(error)}`
+    message: `${protocol} 请求失败：${rawMessage}`
   };
 }
 

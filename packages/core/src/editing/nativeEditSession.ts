@@ -7,9 +7,10 @@
  * not parse native formats.
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, extname, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ConfirmationReceipt, IndexedFile, ResourceFormatKind, ResourceKind } from '@soulforge/shared';
 import { MemoryOperationLogStore, type OperationLogStore } from '../patch/operationLog.js';
@@ -65,17 +66,22 @@ export function nativeEditSessionFromContext(input: {
       });
     }
   };
+  const overlayParent = dirname(input.session.layers.overlayRoot);
+  const probedOodleRoot = input.session.layers.baseRoot
+    ?? (existsSync(join(overlayParent, 'oo2core_6_win64.dll')) || existsSync(join(overlayParent, 'sekiro.exe')) ? overlayParent : undefined);
+
   return {
     session: input.session,
     operationLog: input.operationLog,
     stagingRoot,
     backupBaseDir: input.backupBaseDir,
     recoveryDir: input.recoveryDir,
-    ...(input.session.layers.baseRoot ? { oodleRuntimeRoot: input.session.layers.baseRoot } : {}),
+    ...(probedOodleRoot ? { oodleRuntimeRoot: probedOodleRoot } : {}),
     commitPort,
     allowedRoots: () => [
       input.session.layers.overlayRoot,
       ...(input.session.layers.baseRoot ? [input.session.layers.baseRoot] : []),
+      ...(probedOodleRoot ? [probedOodleRoot] : []),
       join(input.backupBaseDir, '..')
     ],
     mintReceipt: mintNativeEditReceipt,
