@@ -461,10 +461,12 @@ function stripFragment(uri: string): string {
 }
 
 function sanitizeScale(scale: [number, number, number]): [number, number, number] {
-  return scale.map((value) => {
-    if (!Number.isFinite(value) || value === 0) return 1;
-    return Math.min(Math.max(Math.abs(value), 0.05), 50);
-  }) as [number, number, number];
+  // 忠实保留原始 MSB scale 语义，不做截断、不取绝对值、不强制改 0，仅对 NaN/Infinity 做有限数值保护
+  return [
+    Number.isFinite(scale[0]) ? scale[0] : 1,
+    Number.isFinite(scale[1]) ? scale[1] : 1,
+    Number.isFinite(scale[2]) ? scale[2] : 1
+  ];
 }
 
 function colorForEntity(id: string, kind: SceneNode['kind']): [number, number, number] {
@@ -496,9 +498,13 @@ function computeBounds(items: SceneDrawItem[]): SceneDrawList['bounds'] {
   if (items.length === 0) {
     return { min: [0, 0, 0], max: [0, 0, 0], center: [0, 0, 0] };
   }
+  // 优先仅基于主要实体（msb-part）计算紧致包围盒，防止远端辅助 Region / Event 把地图视觉中心拉向几公里外
+  const parts = items.filter((item) => item.entityKind === 'msb-part');
+  const targetItems = parts.length > 0 ? parts : items;
+
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-  for (const item of items) {
+  for (const item of targetItems) {
     for (let index = 0; index < 3; index += 1) {
       min[index] = Math.min(min[index]!, item.position[index]!);
       max[index] = Math.max(max[index]!, item.position[index]!);

@@ -94,20 +94,8 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const drawListRef = useRef<ReturnType<typeof buildSceneDrawList> | null>(null);
   /** 按 modelName 去重后的网格：modelName → mesh。同一模型只读一次 Bridge，多 part 共享引用。 */
   const loadedModelMeshesRef = useRef<Map<string, NonNullable<SceneDrawItem['mesh']>>>(new Map());
-  /** S23：已加载到真实网格的 part（item id → mesh 数据），值与 loadedModelMeshesRef 共享引用。 */
-  const loadedMeshesRef = useRef<Map<string, NonNullable<SceneDrawItem['mesh']>>>(new Map());
   /** 问题4-A：part 模型加载进度（loaded / total，total 是全部 part 数）。 */
   const [meshStatus, setMeshStatus] = useState<{ loaded: number; missing: number; total: number } | null>(null);
-  /** S23：刷新场景里的 part 网格（每加载/选中一个就渐进 setDrawList）。按 id 共享同一 mesh 引用。 */
-  const applyLoadedMeshes = useCallback((base: ReturnType<typeof buildSceneDrawList> | null) => {
-    if (!base || !handleRef.current) return;
-    const updated: SceneDrawItem[] = base.items.map((item) => {
-      const mesh = loadedMeshesRef.current.get(item.id)
-        ?? (item.modelName ? loadedModelMeshesRef.current.get(item.modelName) : undefined);
-      return mesh ? { ...item, mesh } : item;
-    });
-    handleRef.current.setDrawList({ ...base, items: updated });
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -291,21 +279,20 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     props.maxNodes
   ]);
 
-  /** S23：选中 part 时按 modelName 补载（预取窗口外的 part 点开也能看，去重共享）。 */
+  /** S23：选中 part 时按 modelName 补载（去重共享，直接热更新几何，绝不全量重新 setDrawList）。 */
   useEffect(() => {
-    if (selected?.kind !== 'msb-part') return;
+    if (selected?.kind !== 'msb-part' || !handleRef.current) return;
     const bridge = getRendererBridge();
     if (!bridge || typeof bridge.readMapPartMesh !== 'function' || !props.mapResourceUri) return;
-    if (loadedMeshesRef.current.has(selected.id)) return;
     const base = drawListRef.current;
     const item = base?.items.find((candidate) => candidate.id === selected.id) as SceneDrawItem | undefined;
     const modelName = item?.modelName
       ?? (item ? resolvePartModelName(item as { modelName?: string; modelIndex?: number }, props.models) : undefined);
     if (!modelName) return;
+
     if (loadedModelMeshesRef.current.has(modelName)) {
-      const mesh = loadedModelMeshesRef.current.get(modelName)!;
-      loadedMeshesRef.current.set(selected.id, mesh);
-      applyLoadedMeshes(drawListRef.current);
+      const cached = loadedModelMeshesRef.current.get(modelName)!;
+      handleRef.current.updateModelGeometry?.(modelName, cached);
       return;
     }
     let cancelled = false;
@@ -322,32 +309,25 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           };
         };
         if (cancelled || !raw.ok || !raw.data?.positionsBase64) return;
-        const mesh: NonNullable<SceneDrawItem['mesh']> = {
+        const meshData: NonNullable<SceneDrawItem['mesh']> = {
           positionsBase64: raw.data.positionsBase64,
           ...(raw.data.indicesBase64 ? { indicesBase64: raw.data.indicesBase64 } : {}),
           ...(raw.data.uvsBase64 ? { uvsBase64: raw.data.uvsBase64 } : {}),
           ...(raw.data.normalsBase64 ? { normalsBase64: raw.data.normalsBase64 } : {}),
           vertexCount: raw.data.vertexCount ?? 0
         };
-        loadedModelMeshesRef.current.set(modelName, mesh);
-        loadedMeshesRef.current.set(selected.id, mesh);
-        if (base) {
-          for (const candidate of base.items) {
-            if (candidate.modelName === modelName && !loadedMeshesRef.current.has(candidate.id)) {
-              loadedMeshesRef.current.set(candidate.id, mesh);
-            }
-          }
+        loadedModelMeshesRef.current.set(modelName, meshData);
+        if (handleRef.current) {
+          handleRef.current.updateModelGeometry?.(modelName, meshData);
         }
-        applyLoadedMeshes(drawListRef.current);
       } catch {
-        // 选中补载失败保持线框（预取汇总已说明情况）。
+        // 选中补载失败保持线框
       }
     })();
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.kind, selected?.id, selected?.label, props.mapResourceUri, applyLoadedMeshes, props.models]);
+  }, [selected?.kind, selected?.id, selected?.label, props.mapResourceUri, props.models]);
 
   /**
    * 选中左栏对象：更新选中态，part/region 同时驱动 viewport 线框高亮。

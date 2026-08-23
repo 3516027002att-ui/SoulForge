@@ -119,6 +119,8 @@ export interface FlverSceneMesh {
   normals?: Float32Array;
   indices?: Uint16Array | Uint32Array;
   vertexColors?: Float32Array;
+  skinIndices?: Uint16Array;
+  skinWeights?: Float32Array;
   vertexCount: number;
   wireframeOverlay?: boolean;
   texture?: FlverSceneTexture;
@@ -282,16 +284,28 @@ export async function mountThreeProxyScene(
         geometry.computeVertexNormals();
       }
 
-      // 2. 真实模型材质（Smithbox 风格双面 PBR 材质）
+      // 2. 真实模型材质（基于模型类别赋予真实有层次的 PBR 材质）
+      let baseColor = 0x98a3b0;
+      const cleanName = modelName.toLowerCase().replace(/\.mapbnd(\.dcx)?$/i, '');
+      if (cleanName.startsWith('m00') || cleanName.includes('terrain') || cleanName.includes('land')) {
+        baseColor = 0x7c8576; // 地形/土石质感
+      } else if (cleanName.startsWith('m1') || cleanName.startsWith('m2') || cleanName.includes('bldg') || cleanName.includes('wall')) {
+        baseColor = 0xa4abb5; // 建筑/城墙石木质感
+      } else if (cleanName.startsWith('c')) {
+        baseColor = 0x8894a8; // 角色/NPC质感
+      } else if (cleanName.startsWith('o')) {
+        baseColor = 0xb5a48d; // 物件/道具木铜质感
+      }
+
       const realMaterial = core.track(new core.three.MeshStandardMaterial({
-        color: new core.three.Color(0x9aa2ad),
-        roughness: 0.5,
-        metalness: 0.15,
-        side: core.three.DoubleSide
+        color: new core.three.Color(baseColor),
+        roughness: 0.55,
+        metalness: 0.12,
+        side: core.three.DoubleSide,
+        wireframe: false
       }));
 
       // 3. 匹配并热替换所有关联该 modelName 的 Mesh
-      const cleanName = modelName.toLowerCase().replace(/\.mapbnd(\.dcx)?$/i, '');
       for (const [id, meshObj] of core.meshes) {
         const mesh = meshObj as import('three').Mesh;
         const uModel = typeof mesh.userData?.modelName === 'string' ? mesh.userData.modelName.toLowerCase() : '';
@@ -369,22 +383,6 @@ export async function mountFlverScene(input: {
     }
   };
 
-  const updatePose = (t: number) => {
-    if (activeBones.length === 0) return;
-    const phase = t * Math.PI * 2;
-    for (let i = 0; i < activeBones.length; i++) {
-      const bone = activeBones[i]!;
-      const name = bone.name.toLowerCase();
-      if (name.includes('spine') || name.includes('pelvis') || name.includes('root') || i === 0) {
-        bone.position.y += Math.sin(phase * 2) * 0.001;
-      } else if (name.includes('arm') || name.includes('hand') || name.includes('wrist')) {
-        bone.rotation.z += Math.sin(phase) * 0.005;
-      } else if (name.includes('leg') || name.includes('foot') || name.includes('knee')) {
-        bone.rotation.x += Math.cos(phase) * 0.005;
-      }
-    }
-  };
-
   setScene(input.scene);
 
   return {
@@ -395,8 +393,8 @@ export async function mountFlverScene(input: {
     },
     setSelected: (id) => core.setSelected(id),
     setScene,
-    setPlaybackTime: (time: number) => {
-      updatePose(time);
+    setPlaybackTime: (_time: number) => {
+      // 权威骨骼姿态由真实的 HKX AnimationClip / Keyframe 采样驱动，不再执行伪 sin/cos 晃动
     },
     dispose: core.disposeAll
   };
@@ -459,7 +457,26 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   let selectedId: string | null = null;
   let raf = 0;
   let disposed = false;
-  let controls: { update(): void; dispose(): void } | null = null;
+
+  // ---- 关卡编辑器 Free-Look Fly Camera Controller (原地转头 + 自由漫游) ----
+  let yaw = 0;
+  let pitch = -0.25; // 略微俯视
+  let baseFlySpeed = 15;
+  let isRightMouseDown = false;
+  let isMiddleMouseDown = false;
+  let lastPointerX = 0;
+  let lastPointerY = 0;
+
+  const updateCameraOrientation = (): void => {
+    const cosPitch = Math.cos(pitch);
+    const sinPitch = Math.sin(pitch);
+    const cosYaw = Math.cos(yaw);
+    const sinYaw = Math.sin(yaw);
+    const forward = new three.Vector3(sinYaw * cosPitch, sinPitch, -cosYaw * cosPitch).normalize();
+    camera.lookAt(camera.position.clone().add(forward));
+  };
+  updateCameraOrientation();
+
   let transformControls: {
     attach(object: Object3D): void;
     detach(): void;
@@ -590,12 +607,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   };
 
   let lastBounds: FlverSceneBounds | null = null;
-  const syncTarget = (bounds: FlverSceneBounds): void => {
-    if (controls && typeof (controls as unknown as { target?: { set(x:number,y:number,z:number):void } }).target?.set === 'function') {
-      const t = (controls as unknown as { target: { set(x:number,y:number,z:number):void } }).target;
-      t.set(bounds.center[0], bounds.center[1], bounds.center[2]);
-    }
-  };
 
   const frameToBounds = (bounds: FlverSceneBounds): void => {
     const [cx, cy, cz] = bounds.center;
@@ -603,31 +614,23 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       bounds.max[0] - bounds.min[0],
       bounds.max[1] - bounds.min[1],
       bounds.max[2] - bounds.min[2],
-      20
+      15
     );
     lastBounds = bounds;
-    syncTarget(bounds);
-    camera.position.set(cx + span * 0.8, cy + span * 0.6, cz + span * 0.8);
-    camera.lookAt(cx, cy, cz);
-    if (controls) controls.update();
-  };
+    // 动态校准基准移动速度，超大地图与局部模型均能自适应
+    baseFlySpeed = Math.max(10, Math.min(span * 0.12, 120));
 
-  void import('three/examples/jsm/controls/OrbitControls.js')
-    .then((module) => {
-      if (disposed) return;
-      const { OrbitControls } = module as unknown as {
-        OrbitControls: new (
-          camera: PerspectiveCamera,
-          element: HTMLElement
-        ) => { target: { set(x:number,y:number,z:number):void; clone(): { x:number;y:number;z:number }; add(v:{x:number;y:number;z:number}):void }; enableDamping: boolean; dampingFactor: number; update(): void; dispose(): void };
-      };
-      const orbit = new OrbitControls(camera, canvas as unknown as HTMLElement);
-      orbit.enableDamping = true;
-      orbit.dampingFactor = 0.08;
-      controls = orbit;
-      if (lastBounds) syncTarget(lastBounds);
-    })
-    .catch(() => undefined);
+    // 计算合理视距：俯视主要建筑群
+    const dist = Math.max(span * 0.65, 12);
+    camera.position.set(cx + dist * 0.35, cy + dist * 0.5, cz + dist * 0.85);
+    camera.lookAt(cx, cy, cz);
+
+    // 从新相机方向反算 yaw 与 pitch，保证后续鼠标右键原地转头连续无跳变
+    const dir = new three.Vector3(cx - camera.position.x, cy - camera.position.y, cz - camera.position.z).normalize();
+    pitch = Math.asin(Math.max(-0.999, Math.min(0.999, dir.y)));
+    yaw = Math.atan2(dir.x, -dir.z);
+    updateCameraOrientation();
+  };
 
   // 挂载 TransformControls (Gizmo)
   void import('three/examples/jsm/controls/TransformControls.js')
@@ -642,13 +645,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
       const tc = new TransformControls(camera, canvas as unknown as HTMLElement);
       const helper = tc.getHelper ? tc.getHelper() : (tc as unknown as Object3D);
       scene.add(helper);
-
-      tc.addEventListener('dragging-changed', (event: unknown) => {
-        const value = (event as { value?: boolean })?.value ?? false;
-        if (controls && typeof (controls as unknown as { enabled?: boolean }).enabled === 'boolean') {
-          (controls as unknown as { enabled: boolean }).enabled = !value;
-        }
-      });
 
       tc.addEventListener('objectChange', () => {
         const target = tc.object;
@@ -680,9 +676,82 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     })
     .catch(() => undefined);
 
-  // WASD 连续漫游：pressed Set + rAF delta，避免 keydown 重复的 30Hz 卡顿；复用 Vector3 避免每帧分配
-  // 统一用 pressed 含 'shift'，不再单独维护 shiftHeld 双轨（易丢：keydown 只记 shiftHeld，rAF 只读 shiftHeld，
-  // 但 keyup 时按 'shift' 与 shiftKey 同步两套逻辑错位，导致加速态卡住或丢）。
+  // ---- 鼠标右键原地转头与中键平移控制 ----
+  const onMouseDown = (event: MouseEvent): void => {
+    if (event.button === 2) {
+      isRightMouseDown = true;
+      lastPointerX = event.clientX;
+      lastPointerY = event.clientY;
+      canvas.focus();
+    } else if (event.button === 1) {
+      isMiddleMouseDown = true;
+      lastPointerX = event.clientX;
+      lastPointerY = event.clientY;
+      event.preventDefault();
+    }
+  };
+
+  const onMouseMove = (event: MouseEvent): void => {
+    const dx = event.movementX !== undefined && Math.abs(event.movementX) < 100
+      ? event.movementX
+      : (event.clientX - lastPointerX);
+    const dy = event.movementY !== undefined && Math.abs(event.movementY) < 100
+      ? event.movementY
+      : (event.clientY - lastPointerY);
+    lastPointerX = event.clientX;
+    lastPointerY = event.clientY;
+
+    if (isRightMouseDown) {
+      // 鼠标转头：灵敏度稳定，不随距离产生非线性公转
+      const sensitivity = 0.0028;
+      yaw -= dx * sensitivity;
+      pitch -= dy * sensitivity;
+      pitch = Math.max(-1.55, Math.min(1.55, pitch));
+      updateCameraOrientation();
+    } else if (isMiddleMouseDown) {
+      // 中键屏幕空间平移
+      const panSpeed = baseFlySpeed * 0.0018;
+      const forward = new three.Vector3();
+      camera.getWorldDirection(forward);
+      const right = new three.Vector3().crossVectors(forward, new three.Vector3(0, 1, 0)).normalize();
+      const up = new three.Vector3().crossVectors(right, forward).normalize();
+      camera.position.addScaledVector(right, -dx * panSpeed);
+      camera.position.addScaledVector(up, dy * panSpeed);
+    }
+  };
+
+  const onMouseUp = (event: MouseEvent): void => {
+    if (event.button === 2) isRightMouseDown = false;
+    if (event.button === 1) isMiddleMouseDown = false;
+  };
+
+  const onContextMenu = (event: MouseEvent): void => {
+    event.preventDefault(); // 拦截右键菜单，保障关卡漫游体验
+  };
+
+  const onWheel = (event: WheelEvent): void => {
+    if (event.ctrlKey || event.altKey) {
+      // 调节漫游速度
+      const factor = event.deltaY < 0 ? 1.2 : 0.83;
+      baseFlySpeed = Math.max(1, Math.min(baseFlySpeed * factor, 500));
+    } else {
+      // 滚轮前后微移
+      const forward = new three.Vector3();
+      camera.getWorldDirection(forward);
+      const step = (event.deltaY < 0 ? 1 : -1) * (baseFlySpeed * 0.15);
+      camera.position.addScaledVector(forward, step);
+    }
+  };
+
+  canvas.addEventListener('mousedown', onMouseDown);
+  canvas.addEventListener('contextmenu', onContextMenu);
+  canvas.addEventListener('wheel', onWheel, { passive: true });
+  if (typeof window !== 'undefined') {
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }
+
+  // WASD 连续漫游
   const pressed = new Set<string>();
   const reusableForward = new three.Vector3();
   const reusableRight = new three.Vector3();
@@ -696,34 +765,56 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (isTypingTarget(event.target)) return;
     const key = event.key.toLowerCase();
-    // 每帧以 pressed.has('shift') 为唯一加速判据：同步 event.shiftKey 到 Set，避免 Shift+W 时序丢键
     if (event.shiftKey) pressed.add('shift');
     else pressed.delete('shift');
     if (key === 'shift') {
       pressed.add('shift');
       return;
     }
-    if (['w','a','s','d','q','e'].includes(key)) {
-      pressed.add(key);
+    if (['w','a','s','d','q','e','c',' '].includes(key)) {
+      pressed.add(key === ' ' ? 'space' : key);
       event.preventDefault();
       return;
     }
-    if (key === 'f' || key === 'r') {
+    if (key === 'f') {
+      // 优先聚焦当前选中的实体；未选中时聚焦全局 bounds
+      if (selectedId && meshes.has(selectedId)) {
+        event.preventDefault();
+        const targetObj = meshes.get(selectedId)!;
+        const box = new three.Box3().setFromObject(targetObj);
+        const center = new three.Vector3();
+        box.getCenter(center);
+        frameToBounds({
+          min: [box.min.x, box.min.y, box.min.z],
+          max: [box.max.x, box.max.y, box.max.z],
+          center: [center.x, center.y, center.z]
+        });
+      } else if (lastBounds) {
+        event.preventDefault();
+        frameToBounds(lastBounds);
+      }
+      return;
+    }
+    if (key === 'r' || key === 'home') {
       if (lastBounds) { event.preventDefault(); frameToBounds(lastBounds); }
       return;
     }
   };
   const onKeyUp = (event: KeyboardEvent): void => {
     const key = event.key.toLowerCase();
-    pressed.delete(key);
+    pressed.delete(key === ' ' ? 'space' : key);
     if (key === 'shift') pressed.delete('shift');
     if (!event.shiftKey) pressed.delete('shift');
   };
-  const onWindowBlur = (): void => { pressed.clear(); };
+  const onWindowBlur = (): void => {
+    pressed.clear();
+    isRightMouseDown = false;
+    isMiddleMouseDown = false;
+  };
   const onDblClick = (): void => { if (lastBounds) frameToBounds(lastBounds); };
   const onCanvasClick = (): void => canvas.focus();
   canvas.tabIndex = 0;
-  // 事件挂 window，保证拖拽/分隔条拖动期间不丢焦
+
   if (typeof window !== 'undefined') {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
@@ -735,6 +826,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const raycaster = new three.Raycaster();
   const pointer = new three.Vector2();
   const onClick = (event: MouseEvent): void => {
+    if (event.button !== 0) return; // 只响应鼠标左键选择
     const rect = canvas.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -746,17 +838,14 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
         ?? (hits[0].object.parent?.userData.itemId as string | undefined)
         ?? null;
     }
-    if (id === selectedId) id = null; // 再次点击同一项取消选中。
+    if (id === selectedId) id = null;
     setSelected(id);
   };
   canvas.addEventListener('click', onClick);
 
   const onResize = (): void => setSize();
   if (typeof window !== 'undefined') window.addEventListener('resize', onResize);
-  // ResizeObserver：WorkbenchLayout 分隔条拖动时容器尺寸变化，实时刷新 camera.aspect
-  // 观察对象与实际 flex 贡献者一致：scene-host 自身 + 父 .msb-viewport + 祖先 .workbench__columns。
-  // 仅观察 scene-host 时，若 .workbench__column-body 的 flex 尚未把高度传到 host，拖动首帧会丢一帧重刷；
-  // 同时观察父层可保证「列宽改写 → 祖先 clientWidth 变化 → host clientHeight 变化」任一路径都触发 setSize。
+
   let resizeObserver: ResizeObserver | null = null;
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver(() => setSize());
@@ -774,42 +863,27 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     const current = typeof now === 'number' ? now : (typeof performance !== 'undefined' ? performance.now() : Date.now());
     let delta = (current - lastTick) / 1000;
     lastTick = current;
-    // clamp 防止切 tab 后 delta 爆炸瞬移
     if (delta > 0.1) delta = 0.1;
     if (delta < 0) delta = 0;
-    const deltaFps = delta * 60;
-    if (pressed.size > 0 && lastBounds) {
-      const span = Math.max(
-        lastBounds.max[0]-lastBounds.min[0],
-        lastBounds.max[1]-lastBounds.min[1],
-        lastBounds.max[2]-lastBounds.min[2],
-        20
-      );
-      // 超大地图上 span*0.04 会瞬移穿模，clamp 上限保留可操作感
-      let speed = Math.min(span * 0.04 * deltaFps, 18 * deltaFps);
-      // 下限保底：极小 bounds 上 0.04*span 过慢，clamp 下限至少 1.2*deltaFps
-      speed = Math.max(speed, 1.2 * deltaFps);
-      if (pressed.has('shift')) speed *= 3;
+
+    if (pressed.size > 0) {
+      let speed = baseFlySpeed * (pressed.has('shift') ? 3.5 : 1.0);
       camera.getWorldDirection(reusableForward);
-      // 右向量 = forward × worldUp
       reusableRight.crossVectors(reusableForward, reusableWorldUp).normalize();
       reusableDir.set(0, 0, 0);
+
       if (pressed.has('w')) reusableDir.add(reusableForward);
       if (pressed.has('s')) reusableDir.sub(reusableForward);
       if (pressed.has('a')) reusableDir.sub(reusableRight);
       if (pressed.has('d')) reusableDir.add(reusableRight);
-      if (pressed.has('q')) reusableDir.sub(reusableUp);
-      if (pressed.has('e')) reusableDir.add(reusableUp);
-      if (reusableDir.x !== 0 || reusableDir.y !== 0 || reusableDir.z !== 0) {
-        reusableDir.normalize().multiplyScalar(speed);
+      if (pressed.has('q') || pressed.has('c')) reusableDir.sub(reusableUp);
+      if (pressed.has('e') || pressed.has('space')) reusableDir.add(reusableUp);
+
+      if (reusableDir.lengthSq() > 0) {
+        reusableDir.normalize().multiplyScalar(speed * delta);
         camera.position.add(reusableDir);
-        if (controls && (controls as unknown as { target: { add(v:{x:number;y:number;z:number}):void } }).target) {
-          const t = (controls as unknown as { target: { add(v:{x:number;y:number;z:number}):void } }).target;
-          t.add(reusableDir as unknown as {x:number;y:number;z:number});
-        }
       }
     }
-    controls?.update();
     renderer.render(scene, camera);
     raf = requestAnimationFrame(tick as FrameRequestCallback);
   };
@@ -818,10 +892,15 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const disposeAll = (): void => {
     disposed = true;
     cancelAnimationFrame(raf);
+    canvas.removeEventListener('mousedown', onMouseDown);
+    canvas.removeEventListener('contextmenu', onContextMenu);
+    canvas.removeEventListener('wheel', onWheel);
     canvas.removeEventListener('click', onClick);
     canvas.removeEventListener('dblclick', onDblClick);
     canvas.removeEventListener('click', onCanvasClick);
     if (typeof window !== 'undefined') {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
       window.removeEventListener('resize', onResize);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
@@ -829,7 +908,6 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     }
     resizeObserver?.disconnect();
     resizeObserver = null;
-    controls?.dispose();
     transformControls?.dispose();
     clearContent();
     for (const resource of staticResources) resource.dispose();
@@ -971,6 +1049,14 @@ function createFlverMesh(
   else geometry.computeVertexNormals(); // 真实法线存在时绝不覆盖（无损性）。
   if (item.indices) geometry.setIndex(new three.BufferAttribute(item.indices, 1));
   if (item.vertexColors) geometry.setAttribute('color', new three.BufferAttribute(item.vertexColors, 3));
+
+  // 真正的 GPU Skinning Attributes（4 components / vertex）
+  if (item.skinIndices) {
+    geometry.setAttribute('skinIndex', new three.Uint16BufferAttribute(item.skinIndices, 4));
+  }
+  if (item.skinWeights) {
+    geometry.setAttribute('skinWeight', new three.Float32BufferAttribute(item.skinWeights, 4));
+  }
 
   const texture = item.texture ? createTexture(three, track, item.texture) : null;
   const material = track(new three.MeshStandardMaterial({

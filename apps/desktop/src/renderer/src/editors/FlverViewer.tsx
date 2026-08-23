@@ -339,6 +339,7 @@ function buildSemanticScene(input: {
   const meshes: FlverSceneMesh[] = [];
   for (const [index, meshData] of input.meshes.entries()) {
     const positions = decodeFloat32Array(meshData.positionsBase64);
+    const vertexCount = meshData.vertexCount || Math.floor(positions.length / 3);
     const mesh: FlverSceneMesh = {
       id: `mesh-${index}`,
       label: `mesh[${index}]`,
@@ -346,17 +347,24 @@ function buildSemanticScene(input: {
       rotation: [0, 0, 0],
       scale: [1, 1, 1],
       positions,
-      vertexCount: meshData.vertexCount || positions.length / 3,
+      vertexCount,
       wireframeOverlay: true
     };
     if (meshData.uvsBase64) mesh.uvs = decodeFloat32Array(meshData.uvsBase64);
     if (meshData.normalsBase64) mesh.normals = decodeFloat32Array(meshData.normalsBase64);
     if (meshData.indicesBase64) mesh.indices = decodeUint16Array(meshData.indicesBase64);
-    if (meshData.boneWeightsBase64) {
-      mesh.vertexColors = boneWeightColors(meshData.boneWeightsBase64, positions.length / 3);
-    } else if (meshData.boneIndicesBase64) {
-      mesh.vertexColors = boneIndexColors(meshData.boneIndicesBase64, positions.length / 3);
+
+    // 真正的 GPU Skinning Attributes（4 components / vertex）
+    if (meshData.boneIndicesBase64) {
+      mesh.skinIndices = decodeSkinIndices(meshData.boneIndicesBase64, vertexCount);
     }
+    if (meshData.boneWeightsBase64) {
+      mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
+      mesh.vertexColors = boneWeightColors(meshData.boneWeightsBase64, vertexCount);
+    } else if (meshData.boneIndicesBase64) {
+      mesh.vertexColors = boneIndexColors(meshData.boneIndicesBase64, vertexCount);
+    }
+
     if (input.texture) mesh.texture = input.texture;
     meshes.push(mesh);
   }
@@ -456,6 +464,55 @@ function decodeUint16Array(base64: string): Uint16Array {
   const bytes = decodeBase64Safe(base64);
   const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   return new Uint16Array(copy);
+}
+
+function decodeSkinIndices(base64: string, vertexCount: number): Uint16Array {
+  const bytes = decodeBase64Safe(base64);
+  const result = new Uint16Array(vertexCount * 4);
+  if (bytes.length === vertexCount * 4) {
+    for (let i = 0; i < bytes.length; i++) {
+      result[i] = bytes[i]!;
+    }
+  } else if (bytes.length >= vertexCount * 8) {
+    const u16 = new Uint16Array(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength / 2, vertexCount * 4));
+    result.set(u16);
+  } else {
+    for (let i = 0; i < Math.min(bytes.length, vertexCount * 4); i++) {
+      result[i] = bytes[i]!;
+    }
+  }
+  return result;
+}
+
+function decodeSkinWeights(base64: string, vertexCount: number): Float32Array {
+  const bytes = decodeBase64Safe(base64);
+  const result = new Float32Array(vertexCount * 4);
+  if (bytes.length >= vertexCount * 16) {
+    const f32 = new Float32Array(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength / 4, vertexCount * 4));
+    result.set(f32);
+  } else if (bytes.length === vertexCount * 4) {
+    for (let i = 0; i < vertexCount; i++) {
+      const offset = i * 4;
+      const w0 = bytes[offset]! / 255;
+      const w1 = (bytes[offset + 1] ?? 0) / 255;
+      const w2 = (bytes[offset + 2] ?? 0) / 255;
+      const w3 = (bytes[offset + 3] ?? 0) / 255;
+      const sum = w0 + w1 + w2 + w3;
+      if (sum > 0) {
+        result[offset] = w0 / sum;
+        result[offset + 1] = w1 / sum;
+        result[offset + 2] = w2 / sum;
+        result[offset + 3] = w3 / sum;
+      } else {
+        result[offset] = 1.0;
+      }
+    }
+  } else {
+    for (let i = 0; i < vertexCount; i++) {
+      result[i * 4] = 1.0;
+    }
+  }
+  return result;
 }
 
 // 骨权重着色：主骨权重高为红（顶点紧绑单骨），分散为蓝。4 bytes/顶点 × 4 影响。
