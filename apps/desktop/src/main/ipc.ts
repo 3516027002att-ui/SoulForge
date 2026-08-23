@@ -234,6 +234,11 @@ let activeRag: RagCorpus | null = null;
 let activeSession: WorkspaceSession | null = null;
 let activeOperationLog: OperationLogUtilityClient | null = null;
 let activeWorkspaceSessionId: string | null = null;
+/** Prevent duplicate rollback dialogs/transactions while one request is in flight. */
+const activeRollbackRequests = new Set<string>();
+/** Provider configs may omit contextWindowTokens; keep compaction fail-safe by default. */
+const DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS = 500_000;
+const AGENT_CONTEXT_COMPACTION_RATIO = 0.8;
 /** 当前 overlay 的显示 label：remountBase 重建 session 时沿用（scan 时登记）。 */
 let activeOverlayLabel = '';
 /**
@@ -1424,8 +1429,6 @@ export interface AiAgentRunRequest {
    * left the session running until the user cancelled it by hand.
    */
   timeoutMs?: number;
-  /** Step ceiling. The loop's own default is 8 when unset. */
-  maxSteps?: number;
   /** Total output token budget across all steps; the loop stops when exceeded. */
   maxTotalOutputTokens?: number;
   /**
@@ -9848,10 +9851,14 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         .filter((entry) => entry.status === 'committed' && entry.inverseOfOpId)
         .map((entry) => entry.inverseOfOpId!)
     );
-    return history.map((entry) => toRendererHistoryEntry(
-      reversedOperationIds.has(entry.opId) ? { ...entry, status: 'rolled_back' } : entry,
-      indexedFiles
-    ));
+    // 逆事务属于实现细节，不作为第二条逻辑历史展示；原操作保留并标记为
+    // rolled_back。这样 UI 不会给 inverseOfOpId/rollbackScope 再渲染回滚按钮。
+    return history
+      .filter((entry) => !entry.inverseOfOpId && !entry.rollbackScope)
+      .map((entry) => toRendererHistoryEntry(
+        reversedOperationIds.has(entry.opId) ? { ...entry, status: 'rolled_back' } : entry,
+        indexedFiles
+      ));
   });
 
   handle('operation.rollback', async (_event, opId: string): Promise<RollbackOperationIpcResult> => {
@@ -9881,6 +9888,33 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    if (sourceOperation.inverseOfOpId || sourceOperation.rollbackScope) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'ROLLBACK_OF_ROLLBACK_FORBIDDEN',
+          message: '逆向事务不能再次回滚；请回滚原始逻辑操作。'
+        }]
+      };
+    }
+    const rollbackKey = `operation:${opId}`;
+    if (activeRollbackRequests.has(rollbackKey)) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'warning',
+          code: 'ROLLBACK_IN_PROGRESS',
+          message: '该操作的回滚请求正在处理中，请勿重复提交。'
+        }]
+      };
+    }
+    activeRollbackRequests.add(rollbackKey);
+    try {
     const confirmation = await requestWriteConfirmation({
       event: _event,
       resourceLabel: sourceOperation.title,
@@ -9921,6 +9955,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }),
       diagnostics: sanitizeDiagnostics(result.diagnostics)
     };
+    } finally {
+      activeRollbackRequests.delete(rollbackKey);
+    }
   });
 
   handle('operation.rollbackFile', async (_event, opId: string, targetUri: string): Promise<RollbackOperationIpcResult> => {
@@ -9950,6 +9987,18 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    if (sourceOperation.inverseOfOpId || sourceOperation.rollbackScope) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'error',
+          code: 'ROLLBACK_OF_ROLLBACK_FORBIDDEN',
+          message: '逆向事务不能再次回滚；请回滚原始逻辑操作。'
+        }]
+      };
+    }
     const fileRecord = sourceOperation.files.find((file) => file.targetUri === targetUri);
     if (!fileRecord) {
       return {
@@ -9963,6 +10012,21 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }]
       };
     }
+    const rollbackKey = `file:${opId}:${targetUri}`;
+    if (activeRollbackRequests.has(rollbackKey)) {
+      return {
+        ok: false,
+        opId,
+        restoredFiles: [],
+        diagnostics: [{
+          severity: 'warning',
+          code: 'ROLLBACK_IN_PROGRESS',
+          message: '该文件的回滚请求正在处理中，请勿重复提交。'
+        }]
+      };
+    }
+    activeRollbackRequests.add(rollbackKey);
+    try {
     const confirmation = await requestWriteConfirmation({
       event: _event,
       resourceLabel: `${sourceOperation.title} · ${targetUri}`,
@@ -10004,6 +10068,9 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       }),
       diagnostics: sanitizeDiagnostics(result.diagnostics)
     };
+    } finally {
+      activeRollbackRequests.delete(rollbackKey);
+    }
   });
 
   handle('ai.tools', async () => toolRegistry.list());
@@ -10026,6 +10093,22 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
   // Model service configs — renderer receives DTO without secrets.
   handle('modelService.list', async () => modelServiceVault.listConfigs());
+
+  handle('modelService.usageSummary', async () => {
+    await operationLogUtility.openAppDatabase(join(app.getPath('userData'), 'app.db'));
+    const summary = await operationLogUtility.providerUsageSummary();
+    return {
+      ...summary,
+      ...(summary.latestSession
+        ? {
+            latestSession: {
+              ...summary.latestSession,
+              active: activeAgentRuns.has(summary.latestSession.sessionId)
+            }
+          }
+        : {})
+    };
+  });
 
   handle('modelService.encryptionAvailable', async () => modelServiceVault.isEncryptionAvailable());
 
@@ -10325,7 +10408,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
    * ownerId 用于窗口销毁时只取消该窗口发起的运行——多窗口下 A 窗口关闭
    * 不得杀掉 B 窗口正在跑的会话。
    */
-  const activeAgentRuns = new Map<string, { controller: AbortController; ownerId: number }>();
+  const activeAgentRuns = new Map<string, {
+    controller: AbortController;
+    ownerId: number;
+    serviceId: string;
+    model: string;
+  }>();
   /**
    * main 签发的 opaque 资源引用 token 注册表（AGENT-60C / S10）。key = token 串，
    * value = 签发作用域（webContents.id）+ tokenId；引用框选（S10）额外带 main
@@ -10494,10 +10582,32 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
           : {})
     };
     const contextWindowTokens = stored.contextWindowTokens;
+    const effectiveAutoCompactTokenLimit = request.autoCompactTokenLimit != null
+      && request.autoCompactTokenLimit > 0
+      ? Math.trunc(request.autoCompactTokenLimit)
+      : Math.max(
+        1,
+        Math.trunc(
+          (contextWindowTokens != null && contextWindowTokens > 0
+            ? contextWindowTokens
+            : DEFAULT_AGENT_CONTEXT_WINDOW_TOKENS) * AGENT_CONTEXT_COMPACTION_RATIO
+        )
+      );
     const adapterResult = createConfiguredModelServiceAdapter({ config: modelConfig, apiKey });
     if (!adapterResult.ok) {
       const diagnostic = adapterResult.diagnostics[0];
       return { ok: false, error: { code: diagnostic?.code ?? 'MODEL_SERVICE_INVALID', message: diagnostic?.message ?? '模型服务配置无效。' } };
+    }
+    try {
+      await operationLogUtility.openAppDatabase(join(app.getPath('userData'), 'app.db'));
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: 'PROVIDER_USAGE_STORAGE_UNAVAILABLE',
+          message: `provider token 用量数据库不可用，未发起模型请求：${error instanceof Error ? error.message : String(error)}`
+        }
+      };
     }
     const mode: ToolContext['mode'] = request.mode === 'normal' || request.mode === 'fullPermission'
       ? request.mode
@@ -10506,7 +10616,8 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     // 需要工作区的工具干净失败，不整次拒绝（T6）。
     const bridge = createAgentToolBridge({
       registry: toolRegistry,
-      context: { ...currentToolContext(), mode }
+      context: { ...currentToolContext(), mode },
+      requireTextLookupBeforeStructuredDiscovery: /(?:boss|npc|enemy|elite|item|drop|角色|敌人|怪|精英|物品|道具|掉落|红点|忍杀|技能|鬼刑部|形部)/iu.test(request.prompt)
     });
 
     // AI 回滚接通：rollback_operation 走与 UI 操作级回滚完全相同的通道 ——
@@ -10642,7 +10753,12 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
 
     const sessionId = randomUUID();
     const controller = new AbortController();
-    activeAgentRuns.set(sessionId, { controller, ownerId: _event.sender.id });
+    activeAgentRuns.set(sessionId, {
+      controller,
+      ownerId: _event.sender.id,
+      serviceId: stored.id,
+      model: stored.model
+    });
     sendAgentEvent(sessionId, { type: 'session-accepted', mode });
 
     const permissionMode = mode === 'fullPermission' ? 'full' : mode;
@@ -10786,6 +10902,16 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       permissionMode,
       tools: bridge.tools,
       executeTool: bridge.executeTool,
+      recordProviderUsage: async (sample) => {
+        await operationLogUtility.recordProviderUsage({
+          eventId: `${sessionId}:${sample.callIndex}`,
+          sessionId,
+          serviceId: stored.id,
+          protocol: stored.protocol,
+          model: stored.model,
+          ...sample
+        });
+      },
       signal: controller.signal,
       requestApproval,
       resolveApprovalDiff,
@@ -10798,17 +10924,13 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
       ...(request.timeoutMs != null && request.timeoutMs > 0
         ? { timeoutMs: Math.trunc(request.timeoutMs) }
         : {}),
-      ...(request.maxSteps != null && request.maxSteps > 0
-        ? { maxSteps: Math.trunc(request.maxSteps) }
-        : {}),
       ...(request.maxTotalOutputTokens != null && request.maxTotalOutputTokens > 0
         ? { maxTotalOutputTokens: Math.trunc(request.maxTotalOutputTokens) }
         : {}),
-      ...(request.autoCompactTokenLimit != null && request.autoCompactTokenLimit > 0
-        ? { compaction: { autoCompactTokenLimit: Math.trunc(request.autoCompactTokenLimit) } }
-        : contextWindowTokens != null && contextWindowTokens > 0
-          ? { compaction: { autoCompactTokenLimit: Math.trunc(contextWindowTokens) } }
-          : {}),
+      // Always arm compaction. Missing provider metadata uses the same 500K
+      // default shown in settings and compacts at 80%; an explicit request
+      // override remains exact for deterministic callers/tests.
+      compaction: { autoCompactTokenLimit: effectiveAutoCompactTokenLimit },
       ...(Object.keys(sampling).length > 0 ? { sampling } : {}),
       ...(request.useRagSearch === true
         ? {

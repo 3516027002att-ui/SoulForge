@@ -12,11 +12,15 @@ import {
   OPERATION_LOG_UTILITY_PROTOCOL,
   type OpenWorkspaceDatabasePayload,
   type OperationLogUtilityRequest,
-  type OperationLogUtilityResponse
+  type OperationLogUtilityResponse,
+  type ProviderUsageAggregate,
+  type ProviderUsageEventPayload,
+  type ProviderUsageSummary
 } from './operationLogUtilityProtocol.js';
 
 let store: SqliteOperationLogStore | null = null;
 let appDatabase: SqliteDatabase | null = null;
+let appDatabasePath: string | null = null;
 let workspaceId: string | null = null;
 let durableRepository: DurableWorkspaceRepository | null = null;
 let workspaceDataRepository: WorkspaceDataRepository | null = null;
@@ -68,8 +72,15 @@ async function handleRequest(value: unknown): Promise<void> {
 
 async function dispatch(request: OperationLogUtilityRequest): Promise<unknown> {
   switch (request.method) {
+    case 'openAppDatabase':
+      return openAppDatabaseOnly(request.payload.appDatabasePath);
     case 'openWorkspace':
       return openWorkspace(request.payload);
+    case 'recordProviderUsage':
+      recordProviderUsage(request.payload.event);
+      return null;
+    case 'providerUsageSummary':
+      return providerUsageSummary();
     case 'health':
       return {
         ready: store !== null,
@@ -201,6 +212,7 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
     durableRepository = new DurableWorkspaceRepository(next.database, payload.workspaceId);
     workspaceDataRepository = new WorkspaceDataRepository(next.database, payload.workspaceId);
     appDatabase = nextAppDatabase;
+    appDatabasePath = payload.appDatabasePath;
     workspaceId = payload.workspaceId;
     return {
       workspaceId,
@@ -223,6 +235,150 @@ async function openWorkspace(payload: OpenWorkspaceDatabasePayload) {
   }
 }
 
+function openAppDatabaseOnly(databasePath: string): { appReady: true } {
+  if (appDatabase && appDatabasePath === databasePath) return { appReady: true };
+  const next = openAppDatabase(databasePath, {
+    ...(process.env.SOULFORGE_SQLITE_NATIVE_BINDING
+      ? { nativeBinding: process.env.SOULFORGE_SQLITE_NATIVE_BINDING }
+      : {})
+  });
+  appDatabase?.close();
+  appDatabase = next;
+  appDatabasePath = databasePath;
+  return { appReady: true };
+}
+
+function recordProviderUsage(event: ProviderUsageEventPayload): void {
+  for (const [field, value] of [
+    ['callIndex', event.callIndex],
+    ['currentContextTokens', event.currentContextTokens],
+    ...(event.inputTokens === undefined ? [] : [['inputTokens', event.inputTokens] as const]),
+    ...(event.outputTokens === undefined ? [] : [['outputTokens', event.outputTokens] as const])
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw codedError('PROVIDER_USAGE_INVALID', `${field} 必须是非负安全整数。`);
+    }
+  }
+  requireAppDatabase().prepare(`
+    INSERT INTO provider_usage_events (
+      event_id, session_id, service_id, protocol, model, call_index,
+      input_tokens, output_tokens, context_tokens, context_source,
+      provider_reported, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(event_id) DO NOTHING
+  `).run(
+    event.eventId,
+    event.sessionId,
+    event.serviceId,
+    event.protocol,
+    event.model,
+    event.callIndex,
+    event.inputTokens ?? null,
+    event.outputTokens ?? null,
+    event.currentContextTokens,
+    event.contextSource,
+    event.providerReported ? 1 : 0,
+    event.recordedAt
+  );
+}
+
+interface UsageAggregateRow {
+  service_id?: string;
+  protocol?: string;
+  model?: string;
+  calls: number;
+  reported_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  first_used_at: string | null;
+  last_used_at: string | null;
+}
+
+function providerUsageSummary(): ProviderUsageSummary {
+  const database = requireAppDatabase();
+  const totals = database.prepare(`
+    SELECT COUNT(*) AS calls,
+      COALESCE(SUM(provider_reported), 0) AS reported_calls,
+      COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+      COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+      MIN(created_at) AS first_used_at,
+      MAX(created_at) AS last_used_at
+    FROM provider_usage_events
+  `).get() as UsageAggregateRow;
+  const byServiceRows = database.prepare(`
+    SELECT service_id, protocol, model, COUNT(*) AS calls,
+      COALESCE(SUM(provider_reported), 0) AS reported_calls,
+      COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+      COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+      MIN(created_at) AS first_used_at,
+      MAX(created_at) AS last_used_at
+    FROM provider_usage_events
+    GROUP BY service_id, protocol, model
+    ORDER BY MAX(created_at) DESC
+  `).all() as UsageAggregateRow[];
+  const latest = database.prepare(`
+    SELECT session_id, service_id, protocol, model, call_index, context_tokens,
+      context_source
+    FROM provider_usage_events
+    ORDER BY created_at DESC, rowid DESC
+    LIMIT 1
+  `).get() as {
+    session_id: string;
+    service_id: string;
+    protocol: string;
+    model: string;
+    call_index: number;
+    context_tokens: number;
+    context_source: 'provider' | 'estimated';
+  } | undefined;
+
+  let latestSession: ProviderUsageSummary['latestSession'] = null;
+  if (latest) {
+    const row = database.prepare(`
+      SELECT COUNT(*) AS calls,
+        COALESCE(SUM(provider_reported), 0) AS reported_calls,
+        COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+        MIN(created_at) AS first_used_at,
+        MAX(created_at) AS last_used_at
+      FROM provider_usage_events
+      WHERE session_id = ?
+    `).get(latest.session_id) as UsageAggregateRow;
+    latestSession = {
+      sessionId: latest.session_id,
+      serviceId: latest.service_id,
+      protocol: latest.protocol,
+      model: latest.model,
+      ...usageNumbers(row),
+      lastCallIndex: Number(latest.call_index),
+      currentContextTokens: Number(latest.context_tokens),
+      contextSource: latest.context_source
+    };
+  }
+
+  return {
+    ...usageNumbers(totals),
+    byService: byServiceRows.map((row): ProviderUsageAggregate => ({
+      serviceId: row.service_id ?? '',
+      protocol: row.protocol ?? '',
+      model: row.model ?? '',
+      ...usageNumbers(row)
+    })),
+    latestSession
+  };
+}
+
+function usageNumbers(row: UsageAggregateRow): Omit<ProviderUsageAggregate, 'serviceId' | 'protocol' | 'model'> {
+  return {
+    calls: Number(row.calls),
+    reportedCalls: Number(row.reported_calls),
+    totalInputTokens: Number(row.total_input_tokens),
+    totalOutputTokens: Number(row.total_output_tokens),
+    firstUsedAt: row.first_used_at,
+    lastUsedAt: row.last_used_at
+  };
+}
+
 function requireStore(): SqliteOperationLogStore {
   if (!store) throw codedError('DATABASE_UTILITY_NOT_INITIALIZED', '工作区数据库尚未初始化。');
   return store;
@@ -238,6 +394,11 @@ function requireWorkspaceDataRepository(): WorkspaceDataRepository {
   return workspaceDataRepository;
 }
 
+function requireAppDatabase(): SqliteDatabase {
+  if (!appDatabase) throw codedError('DATABASE_UTILITY_NOT_INITIALIZED', '应用数据库尚未初始化。');
+  return appDatabase;
+}
+
 function closeStore(): void {
   store?.close();
   appDatabase?.close();
@@ -245,6 +406,7 @@ function closeStore(): void {
   durableRepository = null;
   workspaceDataRepository = null;
   appDatabase = null;
+  appDatabasePath = null;
   workspaceId = null;
 }
 

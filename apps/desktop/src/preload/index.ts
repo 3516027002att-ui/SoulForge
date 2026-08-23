@@ -340,6 +340,7 @@ const api = {
     ok: boolean;
     origin: 'imported' | 'fixture';
     items: EmedfCompletionItem[];
+    enums?: Record<string, import('@soulforge/core').EmedfEnumDef>;
   }> =>
     ipcRenderer.invoke('resource.readEmedfCompletionCatalog'),
   readFmgDocument: (sourceUri: string): Promise<unknown> =>
@@ -819,6 +820,41 @@ const api = {
     contextWindowTokens?: number;
     thinkingLevel?: ModelThinkingLevel;
   }>> => ipcRenderer.invoke('modelService.list'),
+  getProviderUsageSummary: (): Promise<{
+    calls: number;
+    reportedCalls: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    firstUsedAt: string | null;
+    lastUsedAt: string | null;
+    byService: Array<{
+      serviceId: string;
+      protocol: string;
+      model: string;
+      calls: number;
+      reportedCalls: number;
+      totalInputTokens: number;
+      totalOutputTokens: number;
+      firstUsedAt: string | null;
+      lastUsedAt: string | null;
+    }>;
+    latestSession: null | {
+      sessionId: string;
+      serviceId: string;
+      protocol: string;
+      model: string;
+      calls: number;
+      reportedCalls: number;
+      totalInputTokens: number;
+      totalOutputTokens: number;
+      firstUsedAt: string | null;
+      lastUsedAt: string | null;
+      lastCallIndex: number;
+      currentContextTokens: number;
+      contextSource: 'provider' | 'estimated';
+      active: boolean;
+    };
+  }> => ipcRenderer.invoke('modelService.usageSummary'),
   modelServiceEncryptionAvailable: (): Promise<boolean> =>
     ipcRenderer.invoke('modelService.encryptionAvailable'),
   upsertModelService: (input: {

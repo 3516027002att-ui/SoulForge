@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   EventMeaningPane,
@@ -93,28 +94,20 @@ describe('EventSourceWorkbenchPanel SSR 结构（DarkScript3 式骨架挂载即�
     assert.match(html, /暂无打开的事件文档。/);
   });
 
-  it('T4：无 查找替换 / Outline / Inspector / Problems 四钮，无「选中节点」面板', () => {
+  it('T4：具备 Outline、Problems 与格式化工具条按钮', () => {
     const html = render();
-    assert.doesNotMatch(html, />查找替换<\/button>/);
-    assert.doesNotMatch(html, />Outline<\/button>/);
-    assert.doesNotMatch(html, />Inspector<\/button>/);
-    assert.doesNotMatch(html, />Problems<\/button>/);
-    assert.doesNotMatch(html, /选中节点/);
+    assert.match(html, /data-testid="esw-toggle-outline"/);
+    assert.match(html, />Outline<\/button>/);
+    assert.match(html, /data-testid="esw-toggle-problems"/);
+    assert.match(html, /Problems/);
   });
 
   it('源码主区用 CodeMirror 引擎挂载位（data-editor-engine=codemirror）', () => {
     assert.match(render(), /data-editor-engine="codemirror"/);
   });
-
-  it('T4：Outline / Inspector / Problems 一律不渲染', () => {
-    const html = render();
-    assert.doesNotMatch(html, /aria-label="事件大纲"/);
-    assert.doesNotMatch(html, /aria-label="事件检查器"/);
-    assert.doesNotMatch(html, /aria-label="事件问题"/);
-  });
 });
 
-describe('Negative source tests（EVENT-30B 对照 §11）', () => {
+describe('IDE Language Service & Toolbar tests', () => {
   const repoRoot = process.cwd();
   const panelSource = readFileSync(
     join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'EventSourceWorkbenchPanel.tsx'),
@@ -131,12 +124,6 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.match(panelSource, /data-editor-engine="codemirror"/);
   });
 
-  it('不做 260/320 固定三栏：无 event-source__grid，也无 esw-dock（Problems 全删）', () => {
-    assert.doesNotMatch(panelSource, /event-source__grid/);
-    assert.doesNotMatch(panelSource, /event-source__problems/);
-    assert.doesNotMatch(panelSource, /esw-dock/);
-  });
-
   it('Flow / Hex / Raw Bytes 不在默认 viewport（SSR 骨架不含这些面板，原始 bytes 只能经 Developer Diagnostics）', () => {
     const html = render();
     assert.doesNotMatch(html, /\bFlow\b/);
@@ -144,20 +131,19 @@ describe('Negative source tests（EVENT-30B 对照 §11）', () => {
     assert.doesNotMatch(html, /Raw Bytes/);
   });
 
-  it('T4：查找走 CodeMirror search keymap（Ctrl+F），不渲染工具条查找钮；S35 起先拉齐未加载部分再开查找面板', () => {
+  it('查找走 CodeMirror search keymap（Ctrl+F），S35 起先拉齐未加载部分再开查找面板', () => {
     assert.match(panelSource, /from '@codemirror\/search'/);
     assert.match(panelSource, /searchKeymap/);
-    // S35（event-common-load.md §3.2）：Ctrl+F 先 ensureTabComplete 一次拉齐，
-    // 再 openSearchPanel —— 禁止为「查找要全文」在打开时同步拉全文。
     assert.match(panelSource, /openSearchPanel/);
     assert.match(panelSource, /ensureTabCompleteRef/);
   });
 
-  it('T4-3：EMEDF 指令名 autocomplete（Ctrl+Space + 输入时）与悬停参数名列表', () => {
+  it('T4-3：接入结构化 Language Service 补全、签名提示与悬停导航', () => {
     assert.match(panelSource, /readEmedfCompletionCatalog/);
-    assert.match(panelSource, /autocompletion\(\{ override: \[createCompletionSource/);
-    assert.match(panelSource, /hoverTooltip\(createHoverTooltipSource/);
-    assert.match(panelSource, /createCompletionSource/);
+    assert.match(panelSource, /emevdCompletionExtension/);
+    assert.match(panelSource, /signatureHelpExtension/);
+    assert.match(panelSource, /emevdDiagnosticsExtension/);
+    assert.match(panelSource, /emevdNavigationExtension/);
     // 只读 EMEDF 公开字段；不携带「加载完整源码」入口。
     assert.doesNotMatch(panelSource, /loadFullDslTemplate/);
   });
@@ -524,5 +510,103 @@ describe('S35 增量源（event-common-load.md §3.2：首帧前缀 + 按视口�
     );
     assert.doesNotMatch(workbenchOverride, /height:\s*auto/);
     assert.match(workbenchOverride, /min-height:\s*0/);
+  });
+});
+
+describe('IDE Components & Semantic Panel Tests', () => {
+  it('EventOutlinePane 正常渲染事件符号列表', async () => {
+    const { EventOutlinePane } = await import('./EventOutlinePane.js');
+    const html = renderToStaticMarkup(
+      <EventOutlinePane
+        symbols={[
+          {
+            eventId: 10000,
+            restBehavior: 'Default',
+            line: 1,
+            from: 0,
+            to: 100,
+            instructionCount: 5,
+            parameterSlots: ['X0_4'],
+            errors: 0,
+            warnings: 1
+          }
+        ]}
+        onSelectEvent={() => {}}
+      />
+    );
+    assert.match(html, /\$Event\(10000\)/);
+    assert.match(html, /Default/);
+    assert.match(html, /第 1 行 · 5 条指令/);
+    assert.match(html, /\[X0_4\]/);
+    assert.match(html, /⚠ 1/);
+  });
+
+  it('EventProblemsPane 正常渲染错误与警告', async () => {
+    const { EventProblemsPane } = await import('./EventProblemsPane.js');
+    const html = renderToStaticMarkup(
+      <EventProblemsPane
+        diagnostics={[
+          {
+            severity: 'error',
+            code: 'EMEVD_UNKNOWN_INSTRUCTION',
+            message: '未知指令 ShootBulelt',
+            from: 10,
+            to: 21,
+            line: 2
+          }
+        ]}
+        onSelectDiagnostic={() => {}}
+      />
+    );
+    assert.match(html, /未知指令 ShootBulelt/);
+    assert.match(html, /第 2 行/);
+    assert.match(html, /EMEVD_UNKNOWN_INSTRUCTION/);
+    assert.match(html, /错误 \(1\)/);
+  });
+
+  it('EventMeaningPane 消费 SignatureHelp 渲染结构化 Enum 和加粗活动参数', () => {
+    const html = renderToStaticMarkup(
+      <EventMeaningPane
+        inspection={{
+          kind: 'instruction',
+          name: 'IfParameterComparison',
+          bank: 0,
+          id: 1,
+          unknown: false,
+          args: [
+            { name: 'resultConditionGroup', type: 's8', value: '0', role: 'none' },
+            { name: 'comparisonType', type: 'u8', value: '0', role: 'none' }
+          ]
+        }}
+        signatureHelp={{
+          instructionName: 'IfParameterComparison',
+          bank: 0,
+          id: 1,
+          signatureLabel: 'IfParameterComparison(resultConditionGroup: s8, comparisonType: u8)',
+          activeParameterIndex: 1,
+          activeParameter: {
+            name: 'comparisonType',
+            type: 'u8',
+            enumName: 'ComparisonType',
+            enumMembers: [{ value: 0, name: 'Equal', label: 'Equal' }]
+          },
+          parameters: [
+            { name: 'resultConditionGroup', type: 's8' },
+            { name: 'comparisonType', type: 'u8', enumName: 'ComparisonType' }
+          ]
+        }}
+        jump={null}
+        resourceJump={null}
+        onJumpEvent={() => {}}
+        onJumpResource={() => {}}
+        documentTitle="test.emevd"
+      />
+    );
+
+    assert.match(html, /IfParameterComparison/);
+    assert.match(html, /bank 0:1/);
+    assert.match(html, /\[ComparisonType\]/);
+    assert.match(html, /is-active/);
+    assert.match(html, /Equal\(0\)/);
   });
 });

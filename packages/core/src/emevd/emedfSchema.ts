@@ -14,6 +14,17 @@ export type EmedfArgType =
   | 'f32'
   | 'bool';
 
+export interface EmedfEnumMember {
+  value: number;
+  name: string;
+  label?: string;
+}
+
+export interface EmedfEnumDef {
+  name: string;
+  members: EmedfEnumMember[];
+}
+
 export interface EmedfArgDef {
   name: string;
   type: EmedfArgType;
@@ -21,6 +32,13 @@ export interface EmedfArgDef {
   description?: string;
   /** True when this arg repeats zero or more times (vararg tail). */
   vararg?: boolean;
+  /** Name of the associated enum (e.g. "Comparison Type" or "ComparisonType"). */
+  enumName?: string;
+  default?: number;
+  min?: number;
+  max?: number;
+  increment?: number;
+  formatString?: string;
 }
 
 export interface EmedfInstructionDef {
@@ -35,6 +53,7 @@ export interface EmedfRegistry {
   game: 'sekiro';
   origin: 'fixture' | 'user-derived' | 'imported';
   instructions: EmedfInstructionDef[];
+  enums?: Record<string, EmedfEnumDef>;
 }
 
 export interface DecodedArg {

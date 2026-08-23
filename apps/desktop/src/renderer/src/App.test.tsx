@@ -21,6 +21,14 @@ const domainNavigationSource = readFileSync(
   join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'navigation', 'domainNavigation.ts'),
   'utf8'
 );
+const ipcSource = readFileSync(
+  join(process.cwd(), 'apps', 'desktop', 'src', 'main', 'ipc.ts'),
+  'utf8'
+);
+const workbenchOpsSource = readFileSync(
+  join(process.cwd(), 'apps', 'desktop', 'src', 'renderer', 'src', 'editors', 'WorkbenchOpsPanel.tsx'),
+  'utf8'
+);
 
 describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召唤资源栏；换文件夹走 workspace-switcher', () => {
   it('活动栏包含 暂存区 / 审计与回滚（ab-item），搜索仍只走 Ctrl+K，资源栏开关不在活动栏', () => {
@@ -86,5 +94,25 @@ describe('问题 1 壳层：开始页只在首次打开；顶栏「开始」召�
     assert.doesNotMatch(appSource, /逻辑库工作台/);
     // Files 数量保留。
     assert.match(appSource, /formatFilesCount\(physicalBrowseFiles\.length\)/);
+  });
+});
+
+describe('P0 回滚与会话续接防线', () => {
+  it('历史只投影逻辑操作，后端拒绝逆事务再次回滚', () => {
+    assert.match(ipcSource, /filter\(\(entry\) => !entry\.inverseOfOpId && !entry\.rollbackScope\)/);
+    assert.match(ipcSource, /ROLLBACK_OF_ROLLBACK_FORBIDDEN/);
+    assert.match(ipcSource, /ROLLBACK_IN_PROGRESS/);
+  });
+
+  it('所有回滚入口共享忙状态，快速多击不会重复提交', () => {
+    assert.match(appSource, /rollbackInFlightRef/);
+    assert.match(appSource, /disabled=\{rollbackInFlight !== null\}/);
+    assert.match(workbenchOpsSource, /rollbackBusy\?: boolean/);
+    assert.match(workbenchOpsSource, /disabled=\{props\.rollbackBusy === true\}/);
+  });
+
+  it('partial/max_steps 不会被普通发送隐式续接', () => {
+    assert.match(appSource, /canAutoResumeAgentTask\(agentTask\)/);
+    assert.doesNotMatch(appSource, /agentTask\.phase === 'done' \|\| agentTask\.phase === 'error'/);
   });
 });

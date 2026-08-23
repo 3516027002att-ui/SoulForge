@@ -133,6 +133,7 @@ export * from './action/taeAnimationBridge.js';
 export * from './memory/memoryTypes.js';
 export * from './memory/memoryStore.js';
 export * from './doctor/doctorService.js';
+export * from './emevd/language-service/index.js';
 
 // `./testing/*` is deliberately NOT re-exported here. The production barrel is
 // what electron-builder ships, and re-exporting harness helpers would drag

@@ -33,8 +33,28 @@ app.whenReady().then(async () => {
     resolve(here, '../../.native/better_sqlite3.node')
   );
   try {
+    const appDatabasePath = join(root, 'app.db');
+    await client.openAppDatabase(appDatabasePath);
+    const appOnlyHealth = await client.health();
+    if (appOnlyHealth.ready || !appOnlyHealth.appReady) {
+      throw new Error('Database utility app-only health handshake failed.');
+    }
+    await client.recordProviderUsage({
+      eventId: 'usage-session-1:1',
+      sessionId: 'usage-session-1',
+      serviceId: 'service-a',
+      protocol: 'openai-responses',
+      model: 'model-a',
+      callIndex: 1,
+      inputTokens: 120,
+      outputTokens: 30,
+      currentContextTokens: 120,
+      contextSource: 'provider',
+      providerReported: true,
+      recordedAt: '2026-08-23T00:00:00.000Z'
+    });
     await client.openWorkspace({
-      appDatabasePath: join(root, 'app.db'),
+      appDatabasePath,
       databasePath: join(root, 'workspace.db'),
       workspaceId,
       rootPath: overlayRoot,
@@ -45,7 +65,43 @@ app.whenReady().then(async () => {
       legacySemanticBackupDirectory: join(root, 'semantic-backups')
     });
     const health = await client.health();
-    await access(join(root, 'app.db'));
+    await access(appDatabasePath);
+    await client.recordProviderUsage({
+      eventId: 'usage-session-1:2',
+      sessionId: 'usage-session-1',
+      serviceId: 'service-a',
+      protocol: 'openai-responses',
+      model: 'model-a',
+      callIndex: 2,
+      inputTokens: 180,
+      outputTokens: 40,
+      currentContextTokens: 180,
+      contextSource: 'provider',
+      providerReported: true,
+      recordedAt: '2026-08-23T00:00:01.000Z'
+    });
+    // Idempotent replay must not double count the same provider request.
+    await client.recordProviderUsage({
+      eventId: 'usage-session-1:2',
+      sessionId: 'usage-session-1',
+      serviceId: 'service-a',
+      protocol: 'openai-responses',
+      model: 'model-a',
+      callIndex: 2,
+      inputTokens: 180,
+      outputTokens: 40,
+      currentContextTokens: 180,
+      contextSource: 'provider',
+      providerReported: true,
+      recordedAt: '2026-08-23T00:00:01.000Z'
+    });
+    const usage = await client.providerUsageSummary();
+    if (usage.calls !== 2 || usage.reportedCalls !== 2
+      || usage.totalInputTokens !== 300 || usage.totalOutputTokens !== 70
+      || usage.latestSession?.currentContextTokens !== 180
+      || usage.byService[0]?.serviceId !== 'service-a') {
+      throw new Error(`Database utility provider usage summary failed: ${JSON.stringify(usage)}`);
+    }
     const direct = makeRecord(workspaceId, 'direct-op');
     await client.record(direct);
     const records = await client.list(workspaceId);
@@ -189,6 +245,7 @@ app.whenReady().then(async () => {
       health,
       durableRepositories: true,
       indexRepositories: true,
+      providerUsage: usage,
       forcedRestart: true
     }, null, 2)}\n`);
     await client.dispose();

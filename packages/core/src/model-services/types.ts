@@ -200,6 +200,25 @@ export interface ModelCompleteResult {
   diagnostics: Array<{ severity: 'info' | 'warning' | 'error'; code: string; message: string }>;
 }
 
+/**
+ * One provider request's durable token accounting sample.
+ *
+ * `currentContextTokens` is the provider-reported input token count when the
+ * protocol returns one; otherwise it is the local pre-request estimate and
+ * `contextSource` makes that distinction explicit.  A call is still recorded
+ * when a provider omits usage so historical totals never silently turn an
+ * unreported request into a zero-token request.
+ */
+export interface ProviderUsageSample {
+  callIndex: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  currentContextTokens: number;
+  contextSource: 'provider' | 'estimated';
+  providerReported: boolean;
+  recordedAt: string;
+}
+
 /** 一个可用模型的目录条目（GET /v1/models 的 data[].id 投影）。 */
 export interface ModelListEntry {
   id: string;
@@ -382,6 +401,7 @@ export interface RolloutSessionMeta {
 export type RolloutItem =
   | { type: 'session-meta'; meta: RolloutSessionMeta }
   | { type: 'message'; step: number; message: ChatMessage }
+  | ({ type: 'provider-usage' } & ProviderUsageSample)
   | {
       type: 'compacted';
       at: string;

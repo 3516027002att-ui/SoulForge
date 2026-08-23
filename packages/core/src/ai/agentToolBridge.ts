@@ -30,6 +30,12 @@ import { toolInputShapeToJsonSchema, type ToolContext, type ToolRegistry } from 
 export interface AgentToolBridgeOptions {
   registry: ToolRegistry;
   context: ToolContext;
+  /**
+   * Entity/item discovery runs must attempt FMG/RAG text lookup before
+   * probing PARAM/MSB/EMEVD.  This is a runtime contract, not prompt advice:
+   * models that ignore the documented workflow receive a structured denial.
+   */
+  requireTextLookupBeforeStructuredDiscovery?: boolean;
 }
 
 export interface AgentToolBridge {
@@ -46,9 +52,117 @@ export interface AgentToolBridge {
 }
 
 const PARALLEL_SAFE_LEVELS = new Set(['read', 'analyze']);
+const TEXT_DISCOVERY_TOOLS = new Set(['search_text_entries', 'read_fmg_entries', 'retrieve_evidence']);
+const STRUCTURED_DISCOVERY_TOOLS = new Set([
+  'search_resources',
+  'search_param_rows',
+  'read_param_fields',
+  'query_map_objects',
+  'search_map_entities',
+  'read_msb_parts',
+  'read_emevd_outline',
+  'search_events'
+]);
+
+/**
+ * Discovery/outline results are context, not a dump of the entire index or
+ * native document. Keep the model-facing payload small and leave it enough
+ * stable identifiers/cursors to request the next page explicitly.
+ */
+export const MAX_BOUNDED_TOOL_RESULT_CHARS = 8_192;
+const BOUNDED_DISCOVERY_TOOLS = new Set([
+  'search_resources',
+  'search_events',
+  'search_map_entities',
+  'search_tae_events',
+  'search_param_rows',
+  'search_text_entries',
+  'query_map_objects',
+  'read_param_fields',
+  'read_fmg_entries',
+  'read_emevd_outline',
+  'read_msb_parts'
+]);
+const SUMMARY_ARRAY_LIMIT = 16;
+const SUMMARY_STRING_LIMIT = 320;
+
+function summarizeToolValue(value: unknown, depth = 0): unknown {
+  if (depth > 4) return typeof value === 'string' ? value.slice(0, SUMMARY_STRING_LIMIT) : '[depth-limited]';
+  if (typeof value === 'string') {
+    return value.length > SUMMARY_STRING_LIMIT
+      ? `${value.slice(0, SUMMARY_STRING_LIMIT)}…`
+      : value;
+  }
+  if (Array.isArray(value)) {
+    return {
+      items: value.slice(0, SUMMARY_ARRAY_LIMIT).map((item) => summarizeToolValue(item, depth + 1)),
+      returnedCount: Math.min(value.length, SUMMARY_ARRAY_LIMIT),
+      totalCount: value.length,
+      ...(value.length > SUMMARY_ARRAY_LIMIT ? { truncated: true } : {})
+    };
+  }
+  if (typeof value !== 'object' || value === null) return value;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  const output: Record<string, unknown> = {};
+  for (const key of keys.slice(0, 64)) {
+    output[key] = summarizeToolValue(record[key], depth + 1);
+  }
+  if (keys.length > 64) output.truncatedKeys = keys.length - 64;
+  return output;
+}
+
+function collectStableIdentifiers(value: unknown): { ids: string[]; cursors: Record<string, string> } {
+  const ids: string[] = [];
+  const cursors: Record<string, string> = {};
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 5 || node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.slice(0, 128).forEach((item) => walk(item, depth + 1));
+      return;
+    }
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      if (typeof child === 'string') {
+        if (/cursor|nextPage|pageToken/i.test(key)) cursors[key] = child;
+        if (/^(?:id|.*Id|uri|sourceUri|opId|eventId|rowId|textId|tableId)$/i.test(key) && ids.length < 128) {
+          ids.push(`${key}=${child}`);
+        }
+      } else {
+        walk(child, depth + 1);
+      }
+    }
+  };
+  walk(value, 0);
+  return { ids: [...new Set(ids)], cursors };
+}
+
+function boundedToolContent(name: string, data: unknown): string {
+  const raw = JSON.stringify(data ?? null);
+  if (!BOUNDED_DISCOVERY_TOOLS.has(name) || raw.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return raw;
+  const summary = summarizeToolValue(data);
+  const identifiers = collectStableIdentifiers(data);
+  const summarized = {
+    summary: `工具 ${name} 输出过大，已返回摘要；请使用返回的 ID 或游标继续分页查询。`,
+    truncated: true,
+    originalChars: raw.length,
+    data: summary,
+    ...identifiers
+  };
+  const encoded = JSON.stringify(summarized);
+  if (encoded.length <= MAX_BOUNDED_TOOL_RESULT_CHARS) return encoded;
+  // Never inject invalid JSON. If even the structured summary is too large,
+  // retain only the stable identifiers/cursor contract.
+  return JSON.stringify({
+    summary: `工具 ${name} 输出已截断；请使用 ID/游标继续查询。`,
+    truncated: true,
+    originalChars: raw.length,
+    ...identifiers
+  });
+}
 
 export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToolBridge {
   const { registry, context } = options;
+  let textLookupAttempted = false;
   const tools: AgentToolDefinition[] = registry.list().map((descriptor) => ({
     name: descriptor.name,
     description: descriptor.description,
@@ -76,13 +190,31 @@ export function createAgentToolBridge(options: AgentToolBridgeOptions): AgentToo
         })
       };
     }
+    if (TEXT_DISCOVERY_TOOLS.has(call.name)) textLookupAttempted = true;
+    if (
+      options.requireTextLookupBeforeStructuredDiscovery === true
+      && !textLookupAttempted
+      && STRUCTURED_DISCOVERY_TOOLS.has(call.name)
+    ) {
+      return {
+        ok: false,
+        code: 'TEXT_LOOKUP_REQUIRED',
+        content: JSON.stringify({
+          ok: false,
+          error: {
+            code: 'TEXT_LOOKUP_REQUIRED',
+            message: '本任务必须先调用 search_text_entries（或 retrieve_evidence）按名称查 FMG 文本，再查询 PARAM/MSB/EMEVD；不要猜测行号。'
+          }
+        })
+      };
+    }
     const effectiveContext: ToolContext = { ...context, ...contextOverride };
     const result = await registry.run(call.name, input, effectiveContext);
     if (effectiveContext.mode && effectiveContext.mode !== context.mode) {
       context.mode = effectiveContext.mode;
     }
     if (result.ok) {
-      return { ok: true, content: JSON.stringify(result.data ?? null) };
+      return { ok: true, content: boundedToolContent(call.name, result.data) };
     }
     return {
       ok: false,

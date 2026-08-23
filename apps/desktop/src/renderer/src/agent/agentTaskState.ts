@@ -655,6 +655,18 @@ export function describeRunBlocker(input: {
   return null;
 }
 
+/**
+ * 只有正常 stop 终态才允许下一次普通发送隐式承接历史。
+ * partial/length/cancelled/error 都必须由用户显式选择继续或开始新任务，
+ * 避免步数/输出预算耗尽后再次发送时悄悄复用旧上下文。
+ */
+export function canAutoResumeAgentTask(state: AgentTaskState): boolean {
+  return state.phase === 'done'
+    && state.finishReason === 'stop'
+    && typeof state.rolloutFileName === 'string'
+    && state.rolloutFileName.length > 0;
+}
+
 function appendNarration(
   narrations: readonly AgentNarrationView[],
   step: number,

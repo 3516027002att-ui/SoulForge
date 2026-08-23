@@ -111,3 +111,19 @@ describe('2-A effort 官方表契约（源码级）', () => {
     assert.ok(!source.includes('deep/extreme both map to high'), 'OpenAI 说明不得再写旧映射');
   });
 });
+
+describe('provider token usage 设置面契约', () => {
+  it('设置面展示历史总量、当前或最近会话上下文，并支持主动刷新', () => {
+    assert.match(source, /getProviderUsageSummary\(\)/, '设置面必须从 main 读取持久化 usage');
+    assert.match(source, /历史总用量/);
+    assert.match(source, /当前会话.*最近会话/s);
+    assert.match(source, /currentContextTokens/);
+    assert.match(source, /contextSource === 'provider'/, '必须区分 provider 报告与本地估算');
+    assert.match(source, /刷新用量/);
+  });
+
+  it('运行中的设置面会周期刷新，但不触发模型调用', () => {
+    assert.match(source, /setInterval\([\s\S]{0,160}refreshUsage\(\)[\s\S]{0,80}3_000/);
+    assert.ok(!source.includes('runAiAgent('), 'usage 刷新不得发起模型任务');
+  });
+});

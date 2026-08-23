@@ -21,7 +21,7 @@
  * 查找（Ctrl+F）/ 提交 / 脏标记仍一次拉齐。追加永远发生在文档末尾，不扰动用户
  * 编辑、光标与滚动位置。
  */
-import {
+import React, {
   useCallback,
   useEffect,
   useMemo,
@@ -30,7 +30,20 @@ import {
   type ReactElement
 } from 'react';
 import type { EmevdEditorDocument } from '@soulforge/shared';
-import type { EmedfCompletionItem } from '@soulforge/core';
+import type {
+  EmedfCompletionItem,
+  EmedfEnumDef,
+  EventSymbol,
+  EventDiagnostic,
+  EventCursorContext,
+  EventSignatureHelp
+} from '@soulforge/core';
+import {
+  analyzeCursorContext,
+  getSignatureHelp,
+  indexDocumentSymbols,
+  formatEventDocument
+} from '@soulforge/core/dist/emevd/language-service/index.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { createCompleteSourceState } from '../emevd/emevdSourceMount.js';
 import {
@@ -47,6 +60,7 @@ import {
   fmgSemanticOf,
   indexEventHeaders,
   inspectSourceLine,
+  inspectAtCursor,
   insufficientEvidence,
   isFmgRole,
   resolveEventJump,
@@ -55,6 +69,13 @@ import {
   type ResourceJumpRequest,
   type ResourceJumpResult
 } from '../emevd/eventSourceNavigate.js';
+import { emevdCompletionExtension } from '../emevd/cmCompletion.js';
+import { signatureHelpExtension, setSignatureHelpCatalogEffect } from '../emevd/cmSignatureHelp.js';
+import { emevdDiagnosticsExtension } from '../emevd/cmDiagnostics.js';
+import { emevdEditingCommandsExtension, formatDocument } from '../emevd/cmEditorCommands.js';
+import { emevdNavigationExtension } from '../emevd/cmNavigation.js';
+import { EventOutlinePane } from './EventOutlinePane.js';
+import { EventProblemsPane } from './EventProblemsPane.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 import { EditorState, Transaction, type Extension } from '@codemirror/state';
 import {
@@ -81,11 +102,8 @@ import {
 } from '@codemirror/language';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import {
-  autocompletion,
   closeBrackets,
-  closeBracketsKeymap,
-  type CompletionContext,
-  type CompletionResult
+  closeBracketsKeymap
 } from '@codemirror/autocomplete';
 import {
   search,
@@ -482,82 +500,19 @@ function renderArgSummary(item: EmedfCompletionItem): string {
     .join('，');
 }
 
-/** 取 pos 处标识符（含精确边界），无则 null。 */
-function wordAtPos(state: EditorState, pos: number): { from: number; to: number; text: string } | null {
-  const line = state.doc.lineAt(pos);
-  const relative = pos - line.from;
-  if (relative < 0 || relative > line.length) return null;
-  const re = /[A-Za-z_][A-Za-z0-9_]*/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(line.text)) !== null) {
-    const from = match.index;
-    const to = from + match[0].length;
-    if (from <= relative && relative <= to) {
-      return { from: line.from + from, to: line.from + to, text: match[0] };
-    }
-  }
-  return null;
-}
-
-/**
- * 指令名补全：只在大写开头的 PascalCase 词上触发（避免干扰参数名/数字/关键字）。
- * Ctrl+Space 显式触发时忽略前缀过滤。同名指令（不同 bank:id）全部列出。
- */
-function createCompletionSource(
-  getCatalog: () => EmedfCompletionItem[]
-): (context: CompletionContext) => CompletionResult | null {
-  return (context) => {
-    const word = context.matchBefore(/^[A-Za-z_][A-Za-z0-9_]*$/);
-    if (!word) return null;
-    if (!context.explicit && !/^[A-Z]/.test(word.text)) return null;
-    const items = getCatalog();
-    if (items.length === 0) return null;
-    const prefix = word.text.toLowerCase();
-    const matches = items.filter((item) => item.name.toLowerCase().startsWith(prefix));
-    if (matches.length === 0 && !context.explicit) return null;
-    return {
-      from: word.from,
-      options: matches.map((item) => ({
-        label: item.name,
-        detail: `bank ${item.bank}:${item.id}`,
-        info: `参数：${renderArgSummary(item)}`,
-        type: 'function',
-        boost: item.name === word.text ? 10 : 0,
-        apply: item.name
-      }))
-    };
-  };
-}
-
-/** 悬停在指令名上显示参数名列表。只读展示也有效。 */
-function createHoverTooltipSource(
-  getCatalog: () => EmedfCompletionItem[]
-): (view: EditorView, pos: number, side: -1 | 1) => Tooltip | null {
-  return (view, pos) => {
-    const word = wordAtPos(view.state, pos);
-    if (!word || word.text.length < 2) return null;
-    const targetLower = word.text.toLowerCase();
-    const matches = getCatalog().filter(
-      (item) => item.name === word.text || item.name.toLowerCase() === targetLower
-    );
-    if (matches.length === 0) return null;
-    const element = document.createElement('div');
-    element.className = 'cm-emedf-hover';
-    const title = document.createElement('strong');
-    title.textContent = word.text;
-    element.appendChild(title);
-    for (const item of matches) {
-      const row = document.createElement('div');
-      row.className = 'cm-emedf-hover__row';
-      row.textContent = `bank ${item.bank}:${item.id} — ${renderArgSummary(item)}`;
-      element.appendChild(row);
-    }
-    return {
-      pos: word.from,
-      end: word.to,
-      create: () => ({ dom: element })
-    };
-  };
+export interface EditorExtensionOptions {
+  onDocChange: (text: string, state: EditorState) => void;
+  readOnly: boolean;
+  sourceStyle: EventSourceTabData['sourceStyle'];
+  getCatalog: () => EmedfCompletionItem[];
+  getEnums: () => Record<string, EmedfEnumDef>;
+  getKnownEventIds: () => Array<{ eventId: number; title?: string }>;
+  onSave?: () => void;
+  onCursorPos?: (pos: number, lineText: string) => void;
+  onViewportNearEnd?: (view: EditorView) => void;
+  onFindRequest?: (view: EditorView) => void;
+  onDiagnosticsUpdate?: (diags: EventDiagnostic[]) => void;
+  onJumpToEvent: (eventId: number) => void;
 }
 
 export function buildEditorExtensions(
@@ -568,11 +523,21 @@ export function buildEditorExtensions(
   onSave?: () => void,
   onCursor?: (lineText: string) => void,
   onViewportNearEnd?: (view: EditorView) => void,
-  onFindRequest?: (view: EditorView) => void
+  onFindRequest?: (view: EditorView) => void,
+  getEnums?: () => Record<string, EmedfEnumDef>,
+  getKnownEventIds?: () => Array<{ eventId: number; title?: string }>,
+  onDiagnosticsUpdate?: (diags: EventDiagnostic[]) => void,
+  onJumpToEvent?: (eventId: number) => void,
+  onCursorPos?: (pos: number) => void
 ): Extension[] {
   const sourceLanguage = sourceStyle === 'dark-script'
     ? darkScriptStreamLanguage
     : emevdDslStreamLanguage;
+
+  const enumsGetter = getEnums ?? (() => ({}));
+  const eventIdsGetter = getKnownEventIds ?? (() => []);
+  const jumpHandler = onJumpToEvent ?? (() => {});
+
   const extensions: Extension[] = [
     lineNumbers(),
     highlightActiveLineGutter(),
@@ -590,9 +555,12 @@ export function buildEditorExtensions(
     sourceLanguage,
     eventDiagGutter,
     EditorState.readOnly.of(readOnly),
-    // T4-3：EMEDF 指令名补全（Ctrl+Space + 输入时）与悬停参数名列表。
-    hoverTooltip(createHoverTooltipSource(getCatalog)),
-    autocompletion({ override: [createCompletionSource(getCatalog)] }),
+    // IDE Language Service Extensions:
+    signatureHelpExtension(getCatalog, enumsGetter),
+    emevdCompletionExtension(getCatalog, enumsGetter, eventIdsGetter),
+    emevdDiagnosticsExtension(getCatalog, enumsGetter, onDiagnosticsUpdate),
+    emevdEditingCommandsExtension(),
+    emevdNavigationExtension(getCatalog, enumsGetter, { onJumpToEvent: jumpHandler }),
     EditorView.updateListener.of((update) => {
       // S35：增量源续载/拉齐的追加带 sourceFillAnnotation，不是用户编辑 ——
       // 不置 dirty、不进 undo、不触发「脏标记 → 拉齐」递归。
@@ -605,9 +573,11 @@ export function buildEditorExtensions(
       if (onViewportNearEnd && (update.geometryChanged || update.viewportChanged)) {
         onViewportNearEnd(update.view);
       }
-      if (onCursor && !isSourceFill && (update.selectionSet || update.docChanged || update.focusChanged)) {
-        const line = update.state.doc.lineAt(update.state.selection.main.head);
-        onCursor(line.text);
+      if (!isSourceFill && (update.selectionSet || update.docChanged || update.focusChanged)) {
+        const head = update.state.selection.main.head;
+        const line = update.state.doc.lineAt(head);
+        if (onCursor) onCursor(line.text);
+        if (onCursorPos) onCursorPos(head);
       }
     }),
     keymap.of([
@@ -623,15 +593,15 @@ export function buildEditorExtensions(
       // S35：Ctrl+F 先把未加载部分一次拉齐，再开 CodeMirror 查找面板 ——
       // 禁止为「查找要全文」在打开时同步拉全文。本条目在 searchKeymap 之前
       // 注册，同名键先注册者生效。
-          ...(onFindRequest
-            ? [{
-                key: 'Mod-f',
-                run: (view: EditorView) => {
-                  onFindRequest(view);
-                  return true;
-                }
-              }]
-            : []),
+      ...(onFindRequest
+        ? [{
+            key: 'Mod-f',
+            run: (view: EditorView) => {
+              onFindRequest(view);
+              return true;
+            }
+          }]
+        : []),
       ...closeBracketsKeymap,
       ...defaultKeymap,
       ...searchKeymap,
@@ -673,19 +643,21 @@ function revealLine(view: EditorView | null, lineNumber: number): void {
 }
 
 /**
- * 词义列。S31：fmg-id / param-id 实参不再是死路 —— 有跳转按钮，实际命中与否
- * 由 App 按 openTabs 判定，结果以 hit / insufficient_evidence 回到本列。
+ * 词义列 / 指令与参数说明面板。
+ * 共享 Language Service 统一语义模型（CursorContext & SignatureHelp），
+ * 支持实参角色跳转与结构化 Enum 候选展示。
  */
 export function EventMeaningPane(props: {
   inspection: LineInspection;
+  signatureHelp?: EventSignatureHelp | null;
   jump: EventJump | null;
   resourceJump: ResourceJumpResult | null;
   onJumpEvent: (eventId: number) => void;
   onJumpResource: (request: ResourceJumpRequest) => void;
   documentTitle: string;
 }): ReactElement {
-  const { inspection, jump, resourceJump, onJumpEvent, onJumpResource, documentTitle } = props;
-  if (inspection.kind === 'empty') {
+  const { inspection, signatureHelp, jump, resourceJump, onJumpEvent, onJumpResource, documentTitle } = props;
+  if (inspection.kind === 'empty' && !signatureHelp) {
     return <p className="muted esw-meaning__empty">把光标放在一条指令或 $Event 头上。</p>;
   }
   if (inspection.kind === 'event-header') {
@@ -732,50 +704,70 @@ export function EventMeaningPane(props: {
       </div>
     );
   }
+
+  const instructionName = signatureHelp?.instructionName ?? (inspection.kind === 'instruction' ? inspection.name : '');
+  const bankInfo = signatureHelp?.bank !== undefined
+    ? `bank ${signatureHelp.bank}:${signatureHelp.id}`
+    : (inspection.kind === 'instruction' && inspection.bank !== undefined ? `bank ${inspection.bank}:${inspection.id}` : 'EMEDF 指令');
+
   return (
     <div className="esw-meaning__block">
-      <strong>{inspection.name}</strong>
-      {inspection.unknown
-        ? <p className="muted">未解码：本机 EMEDF 里没有这条指令。</p>
-        : (
-          <p className="muted">
-            {inspection.bank !== undefined ? `bank ${inspection.bank}:${inspection.id}` : 'EMEDF 指令'}
-          </p>
-        )}
-      {inspection.args.length > 0 && (
+      <strong>{instructionName}</strong>
+      <p className="muted">{bankInfo}</p>
+      {signatureHelp?.docs && <p className="muted esw-meaning__doc">{signatureHelp.docs}</p>}
+
+      {inspection.kind === 'instruction' && inspection.args.length > 0 && (
         <ul className="esw-meaning__args">
-          {inspection.args.map((arg) => (
-            <li key={arg.name}>
-              <div>
-                <code>{arg.name}</code>
-                <span className="muted"> : {arg.type}</span>
-              </div>
-              <div>{arg.value || '（空）'}</div>
-              {arg.role === 'event-id' && arg.eventId !== undefined && (
-                <button type="button" className="toolbar-button" onClick={() => onJumpEvent(arg.eventId!)}>
-                  转到 $Event({arg.eventId})
-                </button>
-              )}
-              {isFmgRole(arg.role) && arg.resourceId !== undefined && (
-                <button
-                  type="button"
-                  className="toolbar-button"
-                  onClick={() => onJumpResource({ kind: 'fmg', semantic: fmgSemanticOf(arg.role), id: arg.resourceId! })}
-                >
-                  转到文本条目 {arg.resourceId}
-                </button>
-              )}
-              {arg.role === 'param-id' && arg.resourceId !== undefined && (
-                <button
-                  type="button"
-                  className="toolbar-button"
-                  onClick={() => onJumpResource({ kind: 'param', id: arg.resourceId! })}
-                >
-                  转到 PARAM 行 {arg.resourceId}
-                </button>
-              )}
-            </li>
-          ))}
+          {inspection.args.map((arg, idx) => {
+            const isParamActive = signatureHelp && signatureHelp.activeParameterIndex === idx;
+            const paramHelp = signatureHelp?.parameters[idx];
+            const enumName = (isParamActive ? signatureHelp?.activeParameter?.enumName : undefined) ?? paramHelp?.enumName;
+            const enumMembers = (isParamActive ? signatureHelp?.activeParameter?.enumMembers : undefined) ?? paramHelp?.enumMembers;
+            return (
+              <li key={arg.name} className={isParamActive ? 'esw-meaning__arg is-active' : 'esw-meaning__arg'}>
+                <div>
+                  <code>{arg.name}</code>
+                  <span className="muted"> : {arg.type}</span>
+                  {enumName && (
+                    <span className="esw-meaning__enum-badge"> [{enumName}]</span>
+                  )}
+                </div>
+                <div>{arg.value || '（空）'}</div>
+                {paramHelp?.description && (
+                  <div className="muted esw-meaning__arg-doc">{paramHelp.description}</div>
+                )}
+                {enumMembers && enumMembers.length > 0 && (
+                  <div className="muted esw-meaning__enum-list">
+                    可选值: {enumMembers.slice(0, 4).map((m) => `${m.name}(${m.value})`).join(', ')}
+                    {enumMembers.length > 4 ? '…' : ''}
+                  </div>
+                )}
+                {arg.role === 'event-id' && arg.eventId !== undefined && (
+                  <button type="button" className="toolbar-button" onClick={() => onJumpEvent(arg.eventId!)}>
+                    转到 $Event({arg.eventId})
+                  </button>
+                )}
+                {isFmgRole(arg.role) && arg.resourceId !== undefined && (
+                  <button
+                    type="button"
+                    className="toolbar-button"
+                    onClick={() => onJumpResource({ kind: 'fmg', semantic: fmgSemanticOf(arg.role), id: arg.resourceId! })}
+                  >
+                    转到文本条目 {arg.resourceId}
+                  </button>
+                )}
+                {arg.role === 'param-id' && arg.resourceId !== undefined && (
+                  <button
+                    type="button"
+                    className="toolbar-button"
+                    onClick={() => onJumpResource({ kind: 'param', id: arg.resourceId! })}
+                  >
+                    转到 PARAM 行 {arg.resourceId}
+                  </button>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
       {jump && jump.kind === 'hit' && (
@@ -800,20 +792,32 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState('就绪');
   const [completionItems, setCompletionItems] = useState<EmedfCompletionItem[]>([]);
+  const [enums, setEnums] = useState<Record<string, EmedfEnumDef>>({});
   const [splitTabId, setSplitTabId] = useState<string | null>(null);
   const [inspection, setInspection] = useState<LineInspection>({ kind: 'empty' });
+  const [signatureHelp, setSignatureHelp] = useState<EventSignatureHelp | null>(null);
+  const [cursorPos, setCursorPos] = useState<number>(0);
   const [jump, setJump] = useState<EventJump | null>(null);
   const [resourceJump, setResourceJump] = useState<ResourceJumpResult | null>(null);
   const [inspectPane, setInspectPane] = useState<'a' | 'b'>('a');
+
+  // IDE Panes & Modals
+  const [showOutline, setShowOutline] = useState(false);
+  const [showProblems, setShowProblems] = useState(false);
+  const [showSymbolModal, setShowSymbolModal] = useState(false);
+  const [diagnosticsMap, setDiagnosticsMap] = useState<Map<string, EventDiagnostic[]>>(new Map());
 
   const editorHostRef = useRef<HTMLDivElement>(null);
   const splitHostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const viewBRef = useRef<EditorView | null>(null);
   const pendingRevealRef = useRef<{ pane: 'a' | 'b'; line: number } | null>(null);
-  /** T4-3：EMEDF 指令名目录，经 ref 供 CM extensions 闭包读最新值（异步到达）。 */
+  /** T4-3：EMEDF 指令名目录与枚举映射，经 ref 供 CM extensions 闭包读最新值。 */
   const completionItemsRef = useRef<EmedfCompletionItem[]>([]);
   completionItemsRef.current = completionItems;
+  const enumsRef = useRef<Record<string, EmedfEnumDef>>({});
+  enumsRef.current = enums;
+
   /** 每 tab 的 event 块行映射，gutter 经该 ref 读取（CM 闭包拿不到 React state）。 */
   const eventLineInfoRef = useRef<Map<number, EventLineInfo>>(new Map());
   /** 始终指向最新 commitDraft，供各 tab 的 CM extensions 闭包安全调用。 */
@@ -841,6 +845,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const splitTab = splitTabId ? tabs.find((tab) => tab.tabId === splitTabId) ?? null : null;
   tabsRef.current = tabs;
   activeTabIdRef.current = activeTabId;
+
   const eventIndexes = useMemo(
     () => tabs.map((tab) => ({
       tabId: tab.tabId,
@@ -850,7 +855,17 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     [tabs]
   );
 
-  /** T4-3：从主进程拉取本机 EMEDF 指令名目录（只读公开字段，一次性）。 */
+  const documentSymbols = useMemo(() => {
+    if (!activeTab) return [];
+    return indexDocumentSymbols(activeTab.draft).symbols;
+  }, [activeTab?.draft]);
+
+  const currentDiagnostics = useMemo(() => {
+    if (!activeTabId) return [];
+    return diagnosticsMap.get(activeTabId) ?? [];
+  }, [activeTabId, diagnosticsMap]);
+
+  /** T4-3：从主进程拉取本机 EMEDF 指令名目录与结构化枚举。 */
   useEffect(() => {
     const bridge = getRendererBridge();
     if (!bridge) return;
@@ -858,7 +873,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     bridge
       .readEmedfCompletionCatalog()
       .then((result) => {
-        if (!cancelled && result.ok) setCompletionItems(result.items);
+        if (!cancelled && result.ok) {
+          setCompletionItems(result.items);
+          if (result.enums) {
+            setEnums(result.enums);
+          }
+        }
       })
       .catch(() => {
         // 目录拉取失败只影响补全/悬停，不阻断源码展示。
@@ -866,6 +886,18 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  /** 全局 Ctrl+Shift+O 唤起 Go to Symbol 弹窗。 */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'O' || e.key === 'o')) {
+        e.preventDefault();
+        setShowSymbolModal((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
   /** S35：经 bridge 拉源文件切片；bridge 缺失时按失败关闭（不重试空转）。 */
@@ -907,16 +939,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
 
   /**
    * S35：把「文件后半」文本追加进指定 tab 的缓冲。
-   *
-   * - 该 tab 仍在前台 → 对活动视图**单次 dispatch** 追加（不换 EditorState 对象；
-   *   append 在文档末尾，已加载内容、光标与滚动位置都保持）；
-   * - 已切走 / 关闭 → 对该 tab 的 EditorState 做函数式 update，下次激活时
-   *   view.setState 换入。
-   *
-   * 追加事务带 sourceFillAnnotation（不置 dirty、不进词义行回调），并显式
-   * `Transaction.addToHistory.of(false)` —— CodeMirror 的 history 只认
-   * addToHistory=false 才不入 undo/redo，自定义 annotation 拦不住 Ctrl+Z 把
-   * 追加的文本当用户编辑撤销掉。
    */
   const applyRestText = useCallback((tabId: string, restText: string | null, complete: boolean) => {
     if (!restText || restText.length === 0) {
@@ -948,12 +970,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     commitSourceFill(tabId, nextState, nextState.doc.lines, complete, restText);
   }, [commitSourceFill]);
 
-  /** S35：拉一片（一行 400 条口径的切片，常量在 incrementalSourceInjection）并追加；落地后下一轮视口事件再拉。 */
+  /** S35：拉一片并追加。 */
   const fillOneSlice = useCallback(async (tabId: string) => {
     const current = incrementalSourcesRef.current.get(tabId);
     if (!current || isIncrementalSourceComplete(current)) return;
     const step = await fetchNextSourceSlice(current, readSliceFromBridge);
-    // 换代 / 关标签：旧世代结果作废，不得覆盖新世代 ref、不得追加进新缓冲。
     const live = incrementalSourcesRef.current.get(tabId);
     if (!live || live.token !== step.state.token) return;
     incrementalSourcesRef.current.set(tabId, step.state);
@@ -966,15 +987,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     applyRestText(tabId, step.sliceText, step.state.eof);
   }, [applyRestText, readSliceFromBridge]);
 
-  /** S35：单片续载的飞行通道登记（与拉齐共享「单飞行通道」，防重复取行区间）。 */
+  /** S35：单片续载的飞行通道登记。 */
   const fillOneSliceGuarded = useCallback((tabId: string): Promise<void> => {
     const existing = slicePromisesRef.current.get(tabId);
     if (existing) return existing;
     const promise = fillOneSlice(tabId).finally(() => {
       if (slicePromisesRef.current.get(tabId) === promise) slicePromisesRef.current.delete(tabId);
-      // 链式预取：一片落地后视口仍贴近已加载底部（快速滚动或贴底拖滚动条）就
-      // 立刻拉下一片，不等下一次滚动事件。后台按片循环在飞时 maybeFillMore
-      // 让路，避免同一片拉两次。
       const view = viewRef.current;
       if (view !== null && activeTabIdRef.current === tabId) maybeFillMoreRef.current(view);
     });
@@ -982,14 +1000,7 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     return promise;
   }, [fillOneSlice]);
 
-  /**
-   * S35：一次拉齐 —— 把未加载部分全部取回并**单次**追加（无 16ms 分片）。
-   * 并发调用（提交 / 查找 / 脏标记）共享同一个在飞 Promise。
-   *
-   * 与视口续载共用「单飞行通道」：先在飞单片落地（取最新 nextFromLine 起点），
-   * 拉齐在飞期间 maybeFillMore 让路；落地后再核对 token 仍属当前世代，避免
-   * 旧世代文本被追加进新打开的缓冲。
-   */
+  /** S35：一次拉齐。 */
   const ensureTabComplete = useCallback(async (tabId: string): Promise<void> => {
     const inFlight = fillPromisesRef.current.get(tabId);
     if (inFlight) return inFlight;
@@ -1018,17 +1029,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, [applyRestText, readSliceFromBridge]);
   ensureTabCompleteRef.current = ensureTabComplete;
 
-  /**
-   * 打开后按片把剩余源码灌进编辑器。每片落地即追加，滚动条立刻变长；
-   * 不再等 fetchAllRemainingSource 整段结束才 dispatch —— 那会让用户在
-   * 前 400 行干等到切走再切回来。
-   */
+  /** 打开后按片后台续载到 eof。 */
   const fillRemainingInSlices = useCallback((tabId: string): Promise<void> => {
     const existing = backgroundFillPromisesRef.current.get(tabId);
     if (existing) return existing;
     const promise = (async () => {
       while (true) {
-        // Ctrl+F / 提交 / 脏标记的一次拉齐优先，切片循环让路。
         if (fillPromisesRef.current.has(tabId)) return;
         const current = incrementalSourcesRef.current.get(tabId);
         if (!current || isIncrementalSourceComplete(current)) return;
@@ -1045,13 +1051,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, [fillOneSliceGuarded]);
   fillRemainingInSlicesRef.current = fillRemainingInSlices;
 
-  /** S35：视口近底探测 → 续拉下一片（updateListener 与 scrollDOM 两路共用）。 */
+  /** S35：视口近底探测。 */
   const maybeFillMore = useCallback((view: EditorView) => {
     const tabId = activeTabIdRef.current;
     if (!tabId) return;
     const state = incrementalSourcesRef.current.get(tabId);
     if (!state || isIncrementalSourceComplete(state)) return;
-    // 单飞行通道：拉齐或后台按片循环在飞时视口续载让路。
     if (
       fillPromisesRef.current.has(tabId)
       || slicePromisesRef.current.has(tabId)
@@ -1065,8 +1070,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   const commitDraft = useCallback((tabId: string, text: string, state: EditorState) => {
     setTabs((previous) =>
       previous.map((tab) =>
-        // 同步最新 CM state：切换 tab 时 view.setState(activeTab.editorState)
-        // 换入的是缓存 state，若编辑后不更新它，切回来会回退到未编辑的模板。
         tab.tabId === tabId
           ? {
               ...tab,
@@ -1077,8 +1080,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           : tab
       )
     );
-    // S35：用户一动手（脏标记）就把未加载部分一次拉齐 —— 否则提交只会带上
-    // 已加载前缀，把文件截短。在飞拉齐共享同一 Promise，不会重复拉。
     void ensureTabComplete(tabId);
   }, [ensureTabComplete]);
   commitDraftRef.current = commitDraft;
@@ -1101,11 +1102,8 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       isSatellite ? undefined : () => { void submitSourceRef.current(); },
       (lineText) => {
         setInspectPane(pane);
-        setInspection(inspectSourceLine(lineText, completionItemsRef.current));
-        setJump(null);
-        setResourceJump(null);
       },
-      // S35：主视口才驱动按视口续载；只读对照视口不拉片（内容随 tab 状态同步）。
+      // S35：主视口才驱动按视口续载；只读对照视口不拉片。
       isSatellite ? undefined : (view) => maybeFillMoreRef.current(view),
       // S35：Ctrl+F 先把未加载部分一次拉齐，再开查找面板。
       isSatellite ? undefined : (view) => {
@@ -1116,18 +1114,32 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
             openSearchPanel(view);
           }
         });
+      },
+      () => enumsRef.current,
+      () => tabsRef.current.flatMap((t) => Array.from(indexEventHeaders(t.draft).keys()).map((id) => ({ eventId: id, title: t.title }))),
+      (diags) => {
+        if (!isSatellite) {
+          setDiagnosticsMap((prev) => new Map(prev).set(tabId, diags));
+        }
+      },
+      (eventId) => jumpToEvent(eventId),
+      (pos) => {
+        setCursorPos(pos);
+        if (activeTabIdRef.current) {
+          const tab = tabsRef.current.find((t) => t.tabId === activeTabIdRef.current);
+          const docText = tab ? tab.draft : '';
+          const ctx = analyzeCursorContext(docText, pos);
+          const sig = getSignatureHelp(ctx, completionItemsRef.current, enumsRef.current);
+          setSignatureHelp(sig);
+          setInspection(inspectAtCursor(docText, pos, completionItemsRef.current, enumsRef.current));
+          setJump(null);
+          setResourceJump(null);
+        }
       }
     );
   }, []);
 
-  /**
-   * 把 App 给的 pending tab 并入 tabs（去重 + 保留 dirty/draft）并激活。
-   *
-   * S35 文档模型：带 sourceToken 的 tab 是**增量源** —— 首帧缓冲只有前 400 行
-   * 前缀，全文按视口续载（incrementalSourceInjection），查找（Ctrl+F）/ 提交 /
-   * 脏标记时才一次拉齐。无 token 的 tab（小文档 / 提交后重读回灌 / 失败关闭）
-   * 仍是原子提交：首帧即完整 dslTemplate。
-   */
+  /** 把 App 给的 pending tab 并入 tabs。 */
   useEffect(() => {
     const pending = props.pendingTab;
     if (!pending) return;
@@ -1151,8 +1163,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       && existingLive.sourceHash === pending.sourceHash
       && existingLive.sourceLoadedLines > (incremental?.nextFromLine ?? 0)
     );
-    // 必须在 setTabs 之外同步写入：12-A 的按片续载和本 effect 同一次 commit
-    // 里跑，updater 里写 ref 会赶不上。同源已灌过前缀之后的内容保留推进状态。
     if (!keepFilled) {
       if (incremental && !(existingLive && tokenChanged && existingLive.dirty)) {
         incrementalSourcesRef.current.set(pending.tabId, incremental);
@@ -1162,8 +1172,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     }
     setTabs((previous) => {
       const index = previous.findIndex((tab) => tab.tabId === pending.tabId);
-      // 换代（token 变化）且 tab 脏着：不能把新文件的剩余部分续进旧编辑缓冲，
-      // 停掉增量源（旧 token 在 main 也已作废），内容与状态保持用户侧旧世代。
       const existing = index >= 0 ? previous[index] : undefined;
       if (existing) {
         const sourceChanged = existing.draft !== base;
@@ -1185,8 +1193,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           sourceToken: pending.sourceToken ?? null,
           sourcePrefix: pending.sourcePrefix ?? null,
           sourceTotalLines: pending.sourceTotalLines ?? pending.dslTemplateTotalLines ?? 0,
-          // 干净标签收到新基线时一次提交成完整/前缀缓冲；已按片灌过的同源
-          // 缓冲和脏标签都保留，避免切走再点回来被打回 400 行前缀。
           ...(sourceChanged && !existing.dirty && !retainFilled
             ? {
                 draft: base,
@@ -1226,8 +1232,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }, []);
 
   const syncGutterInfo = useCallback((text: string, rows: readonly EventWarningRow[]) => {
-    // 对已加载文本做一次扫描：S35 增量源下 gutter 判据随续载逐段补齐，
-    // 判据行（outline）本身始终完整。
     applyEventLineInfo(indexEventLines(text, rows));
   }, [applyEventLineInfo]);
 
@@ -1247,8 +1251,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     (view as unknown as { _eventLineInfo: Map<number, EventLineInfo> })._eventLineInfo =
       eventLineInfoRef.current;
     viewRef.current = view;
-    // S35：滚动兜底 —— updateListener 的 geometryChanged 覆盖大部分滚动形态，
-    // scrollDOM 原生事件再兜一道（两路共用同一近底判定，在飞标记防重复拉片）。
     const onScrollerScroll = (): void => maybeFillMoreRef.current(view);
     view.scrollDOM.addEventListener('scroll', onScrollerScroll, { passive: true });
     return () => {
@@ -1272,19 +1274,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       pendingRevealRef.current = null;
       revealLine(view, pending.line);
     }
-    // S35：切回一个增量 tab 时若视口正落在已加载末尾附近，立即续载。
     maybeFillMoreRef.current(view);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
-  /**
-   * 12-A：打开并挂上前缀后，按片后台续载到 eof —— 不等用户滚到边，也不等
-   * 整段拉齐才追加。fetchAllRemainingSource 一次 dispatch 会让前 400 行卡住
-   * 直到切走再切回来才看见全文；这里每片落地即 append。
-   *
-   * 首包仍只有 400 行前缀（禁止改大冒充全量）。Ctrl+F / 提交 / 脏标记仍走
-   * ensureTabComplete 一次拉齐。
-   */
+  /** 12-A：打开并挂上前缀后，按片后台续载到 eof。 */
   useEffect(() => {
     if (!activeTabId) return;
     const incremental = incrementalSourcesRef.current.get(activeTabId);
@@ -1323,7 +1317,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
       pendingRevealRef.current = null;
       revealLine(view, pending.line);
     }
-    // 只在分栏目标/主栏切换时换 state。依赖 editorState 会在每次按键 setState，光标被掐掉。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [splitTabId, activeTabId, createExtensionsFor]);
 
@@ -1339,12 +1332,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     view.scrollDOM.scrollTop = top;
   }, [splitTab?.draft, splitTabId, activeTabId, createExtensionsFor]);
 
-  /**
-   * 提交/加载完整模板/mutation 后 App 回灌 pendingTab → 更新激活 tab 的基线。
-   *
-   * 第一个 effect 已经把所有干净 tab 的 `draft` 换成完整基线；这里只补两件事：
-   * 把新 EditorState 换进同一个 EditorView（不销毁、不重挂），并同步 gutter。
-   */
   useEffect(() => {
     const pending = props.pendingTab;
     if (!pending || !activeTabId || pending.tabId !== activeTabId) return;
@@ -1354,7 +1341,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     if (!current || current.dirty) return;
     const next = baselineText(pending);
     if (next === current.draft) return;
-    // 按片续载已经比前缀长：回灌前缀会把可见全文打回 400 行。
     if (
       current.sourceHash === pending.sourceHash
       && current.sourceLoadedLines > 0
@@ -1386,7 +1372,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.pendingTab, activeTabId]);
 
-  /** 面板从 hidden 回到可视工作区时，让 CodeMirror 按真实布局重测。 */
   useEffect(() => {
     if (props.active === false) return;
     const view = viewRef.current;
@@ -1398,8 +1383,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
   }
 
   function closeTab(tabId: string): void {
-    // S35：关标签即作废增量源（与 main 侧 dropWindow 同一语义），在飞拉片落地
-    // 时找不到 tab 自然丢弃。
     incrementalSourcesRef.current.delete(tabId);
     fillPromisesRef.current.delete(tabId);
     slicePromisesRef.current.delete(tabId);
@@ -1436,10 +1419,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     setSplitTabId(result.tabId);
   }
 
-  /**
-   * S31：文本条目 / PARAM 行跳转。命中与否由 App 判定（openTabs + 文本目录），
-   * 结果回到词义列展示；App 未接线时给 insufficient_evidence，不画假死路。
-   */
   function jumpToResource(request: ResourceJumpRequest): void {
     const pending = props.onJumpResource?.(request);
     if (!pending) {
@@ -1456,14 +1435,12 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     setSubmitting(true);
     setStatus('正在应用…');
     try {
-      // S35：提交前必须拉齐 —— 否则 draft 只有已加载部分，会把文件截短。
       await ensureTabCompleteRef.current(activeTab.tabId);
       const incremental = incrementalSourcesRef.current.get(activeTab.tabId);
       if (incremental && !incremental.eof) {
         setStatus('增量源码未拉齐（令牌已失效或 Bridge 不可用），已取消提交；重新打开该文件后再试。');
         return;
       }
-      // 拉齐后从该 tab 的 EditorState 取权威文本（视图可能已切走）。
       const current = tabsRef.current.find((tab) => tab.tabId === activeTab.tabId);
       const sourceText = current ? current.editorState.doc.toString() : activeTab.draft;
       const result = await props.onDslSubmit(activeTab, sourceText);
@@ -1473,7 +1450,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           nextText,
           createExtensionsFor(activeTab.tabId, isSourceReadOnly(activeTab), activeTab.sourceStyle)
         );
-        // 提交后重读回灌完整模板：旧 token 已作废，tab 转为完整缓冲。
         incrementalSourcesRef.current.delete(activeTab.tabId);
         setTabs((previous) =>
           previous.map((tab) =>
@@ -1543,6 +1519,11 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
     ? '正在读取 EMEVD（Bridge → worker 反汇编 → 首帧前缀，全文按视口续载）…'
     : `${status}${incrementalInfo}`;
 
+  // Current active event symbol at cursor position
+  const activeSymbolAtCursor = useMemo(() => {
+    return documentSymbols.find((s) => s.from <= cursorPos && cursorPos <= s.to) ?? null;
+  }, [documentSymbols, cursorPos]);
+
   return (
     <section className="event-source-workbench" aria-label="Event 源码工作台">
 
@@ -1578,8 +1559,6 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
         )}
       </div>
 
-      {/* 外层 section 已持「Event 源码工作台」区域名；内层布局不重复同名
-          aria-label，否则页级 [aria-label=…] 定位命中两个节点。 */}
       <WorkbenchLayout
         label="Event 源码工作台主区"
         toolbar={(
@@ -1606,11 +1585,43 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                 >
                   撤回
                 </button>
+                <button
+                  type="button"
+                  className="toolbar-button"
+                  data-testid="esw-format"
+                  disabled={submitting}
+                  title="格式化文档（Alt+Shift+F）"
+                  onClick={() => { if (viewRef.current) formatDocument(viewRef.current); }}
+                >
+                  格式化
+                </button>
               </>
             )}
-            <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 先把未加载部分拉齐，再开 CodeMirror 查找面板">
-              查找：Ctrl+F
+
+            <button
+              type="button"
+              className={showOutline ? 'toolbar-button is-active' : 'toolbar-button'}
+              data-testid="esw-toggle-outline"
+              title="切换大纲侧栏（Ctrl+Shift+O 快速跳转）"
+              onClick={() => setShowOutline((v) => !v)}
+            >
+              Outline
+            </button>
+
+            <button
+              type="button"
+              className={showProblems ? 'toolbar-button is-active' : 'toolbar-button'}
+              data-testid="esw-toggle-problems"
+              title="切换问题诊断面板"
+              onClick={() => setShowProblems((v) => !v)}
+            >
+              Problems ({currentDiagnostics.length})
+            </button>
+
+            <span className="muted" style={{ fontSize: 11 }} title="Ctrl+F 查找替换 · Ctrl+Shift+O 符号搜索 · Ctrl+Shift+Space 参数提示">
+              快捷键: Ctrl+F 查找 · Ctrl+Shift+O 符号
             </span>
+
             {tabs.length > 0 && (
               <label className="esw-split-picker">
                 并排
@@ -1635,16 +1646,57 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           </div>
         )}
         columns={[
+          ...(showOutline
+            ? [{
+                id: 'outline',
+                title: '大纲',
+                ariaLabel: '事件大纲',
+                minWidth: 180,
+                initialWidth: 220,
+                children: (
+                  <EventOutlinePane
+                    symbols={documentSymbols}
+                    activeEventId={activeSymbolAtCursor?.eventId}
+                    onSelectEvent={(sym) => revealLine(viewRef.current, sym.line)}
+                    onClose={() => setShowOutline(false)}
+                  />
+                )
+              }]
+            : []),
           {
             id: 'source-a',
             title: activeTab?.title ?? '源码',
-            // 12-D：标题已画进 esw-tab / App tab，栏头再画一次是重复身份 —— 隐藏。
             hideHeader: true,
             minWidth: 240,
             initialFlex: 2,
             children: (
               <section className="esw-source" aria-label="事件源码">
+                {/* Sticky Header & Breadcrumb */}
+                {activeTab && (
+                  <div className="esw-sticky-header" role="navigation" aria-label="事件面包屑">
+                    <span className="esw-sticky-header__crumb esw-sticky-header__file">{activeTab.title}</span>
+                    <span className="esw-sticky-header__sep">&gt;</span>
+                    <button
+                      type="button"
+                      className="esw-sticky-header__crumb esw-sticky-header__event"
+                      title="点击跳转到事件头"
+                      onClick={() => {
+                        if (activeSymbolAtCursor) revealLine(viewRef.current, activeSymbolAtCursor.line);
+                      }}
+                    >
+                      {activeSymbolAtCursor ? `$Event(${activeSymbolAtCursor.eventId})` : '（事件全局）'}
+                    </button>
+                    {signatureHelp?.instructionName && (
+                      <>
+                        <span className="esw-sticky-header__sep">&gt;</span>
+                        <span className="esw-sticky-header__crumb esw-sticky-header__instr">{signatureHelp.instructionName}</span>
+                      </>
+                    )}
+                  </div>
+                )}
+
                 <div ref={editorHostRef} className="esw-source__host" data-editor-engine="codemirror" />
+
                 {props.opening && !activeTab && (
                   <div className="esw-source__loading" role="status">
                     {props.openingPreview ? (
@@ -1658,6 +1710,17 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
                   <div className="event-source__notice event-source__notice--blocked" role="alert">
                     事件源码反汇编已失败关闭：未找到用户本机 EMEDF（DarkScript3 的
                     sekiro-common.emedf.json）。配置后重新打开即可看到 DarkScript3 式源码。
+                  </div>
+                )}
+
+                {/* Bottom Problems Dock */}
+                {showProblems && (
+                  <div className="esw-problems-dock">
+                    <EventProblemsPane
+                      diagnostics={currentDiagnostics}
+                      onSelectDiagnostic={(diag) => revealLine(viewRef.current, diag.line)}
+                      onClose={() => setShowProblems(false)}
+                    />
                   </div>
                 )}
               </section>
@@ -1685,18 +1748,16 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
             : []),
           {
             id: 'meaning',
-            // 12-D：用户不要「词义」这个名字。可见标题留空且不渲染栏头，
-            // 可访问名用不出现在画面上的「指令说明」（栏是 section，不能空名）。
             title: '',
             ariaLabel: '指令说明',
             hideHeader: true,
             minWidth: 200,
             initialWidth: 280,
             children: (
-              // 12-C：.esw-meaning 提供稳定可见分隔与独立滚动/背景的样式锚点。
               <div className="esw-meaning">
                 <EventMeaningPane
                   inspection={inspection}
+                  signatureHelp={signatureHelp}
                   jump={jump}
                   resourceJump={resourceJump}
                   onJumpEvent={jumpToEvent}
@@ -1708,6 +1769,24 @@ export function EventSourceWorkbenchPanel(props: EventSourceWorkbenchPanelProps)
           }
         ]}
       />
+
+      {/* Ctrl+Shift+O Go to Symbol Modal */}
+      {showSymbolModal && (
+        <div className="esw-modal-backdrop" onClick={() => setShowSymbolModal(false)}>
+          <div className="esw-modal" onClick={(e) => e.stopPropagation()}>
+            <EventOutlinePane
+              symbols={documentSymbols}
+              activeEventId={activeSymbolAtCursor?.eventId}
+              isModal={true}
+              onSelectEvent={(sym) => {
+                revealLine(viewRef.current, sym.line);
+                setShowSymbolModal(false);
+              }}
+              onClose={() => setShowSymbolModal(false)}
+            />
+          </div>
+        </div>
+      )}
     </section>
   );
 }

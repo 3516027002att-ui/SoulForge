@@ -163,6 +163,7 @@ export const NON_DOCUMENT_SETTERS: Readonly<Record<string, string>> = Object.fre
   setSessionMeta: '会话元数据，同上',
   setBaseRootChoice: '目录选择，跨工作区保留是有意的',
   setOperationHistory: '写入历史，按工作区刷新而非清空',
+  setRollbackInFlight: '回滚请求锁由回滚函数的 finally 清理，不属于资源文档态',
   setAnalysis: '索引摘要，openWorkspace 自己赋值',
   setTools: 'AI 工具清单，与资源无关',
   setSelectedFile: '选中文件本身，不是文档态',

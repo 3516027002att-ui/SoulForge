@@ -46,10 +46,31 @@ import { APPROVAL_DECISIONS_DENYING } from './types.js';
 
 /** 连续工具调用失败上限门禁：达到该阈值时自动终止循环以防死循环。 */
 export const MAX_CONSECUTIVE_TOOL_FAILURES = 10;
-/** 默认有限步数，防止没有调用方预算时永久占用会话。 */
-export const DEFAULT_MAX_AGENT_STEPS = 64;
-/** 单次运行的工具执行上限，独立于模型步数（并行调用也计数）。 */
-export const MAX_TOTAL_TOOL_CALLS = 256;
+/** 语义上重复的发现失败预算；参数行号变化不能绕过该门禁。 */
+export const MAX_SEMANTIC_TOOL_FAILURES = 6;
+
+function semanticToolFailureSignature(
+  auditEntry: AgentRunResult['audit']['toolCalls'][number],
+  plannedEntry: { kind: 'denied' | 'execute'; call: ToolCall } | undefined
+): string | null {
+  if (auditEntry.ok) return null;
+  if (auditEntry.code === 'TEXT_LOOKUP_REQUIRED') return auditEntry.code;
+  const name = plannedEntry?.call.name ?? auditEntry.name;
+  if (name !== 'search_param_rows' && name !== 'read_param_fields') return null;
+  let input: unknown;
+  try {
+    input = plannedEntry?.call.argumentsJson ? JSON.parse(plannedEntry.call.argumentsJson) : null;
+  } catch {
+    input = null;
+  }
+  const table = input && typeof input === 'object' && !Array.isArray(input)
+    ? (input as Record<string, unknown>).table
+    : undefined;
+  if (typeof table !== 'string' || table.trim() === '') return 'PARAM_TABLE:unknown';
+  // Deliberately exclude rowIds/fieldIds/container paths: changing one row or
+  // absolute path is not new evidence that the table exists.
+  return `PARAM_TABLE:${table.trim().toLocaleLowerCase()}`;
+}
 
 const INCOMPLETE_CONCLUSION_PATTERNS: readonly RegExp[] = [
   /(?:接下来|下一步)(?:我)?(?:会|将|准备|继续|开始|去)?[^。！？\n]{0,48}(?:执行|修改|修复|实现|落地|检查|验证|处理)/u,
@@ -335,7 +356,13 @@ export async function runAgentToolLoop(
   adapter: ModelServiceAdapter,
   request: AgentRunRequest
 ): Promise<AgentRunResult> {
-  const maxSteps = Math.max(1, Math.trunc(request.maxSteps ?? DEFAULT_MAX_AGENT_STEPS));
+  // Production runs intentionally have no fixed step ceiling.  Explicit
+  // maxSteps remains an injectable deterministic-test/embedding control, but
+  // the desktop does not expose or populate it.  Completion, cancellation,
+  // provider errors, context/output budgets and loop guards remain terminal.
+  const maxSteps = request.maxSteps == null
+    ? null
+    : Math.max(1, Math.trunc(request.maxSteps));
   const messages: ChatMessage[] = [...request.messages];
   const diagnostics: AgentRunResult['diagnostics'] = [];
   const toolAudit: AgentRunResult['audit']['toolCalls'] = [];
@@ -369,10 +396,11 @@ export async function runAgentToolLoop(
   let currentMode: AgentPermissionMode = request.permissionMode ?? 'plan';
   let consecutiveIdenticalToolFailures = 0;
   let lastFailedToolSignature: string | null = null;
+  let consecutiveSemanticToolFailures = 0;
+  let lastSemanticToolFailure: string | null = null;
   let steps = 0;
   let finishReason = 'stop';
   let totalOutputTokens = 0;
-  let totalToolCalls = 0;
   let lastInputTokens: number | undefined;
   let compactionWindows = 0;
 
@@ -445,7 +473,7 @@ export async function runAgentToolLoop(
   let emptyConclusionRetries = 0;
   let incompleteConclusionRetries = 0;
 
-  while (steps < maxSteps) {
+  while (maxSteps === null || steps < maxSteps) {
     if (request.signal?.aborted) {
       finishReason = 'cancelled';
       recordInterrupted();
@@ -713,7 +741,7 @@ export async function runAgentToolLoop(
         });
       }
       if (looksLikeIncompleteConclusion(safeMessage.content)) {
-        if (incompleteConclusionRetries < 3 && steps < maxSteps) {
+        if (incompleteConclusionRetries < 3 && (maxSteps === null || steps < maxSteps)) {
           incompleteConclusionRetries += 1;
           messages.push({
             role: 'system',
@@ -896,18 +924,6 @@ export async function runAgentToolLoop(
       });
     }
 
-    const executableCount = planned.filter((entry): entry is Extract<PlannedCall, { kind: 'execute' }> => entry.kind === 'execute').length;
-    if (totalToolCalls + executableCount > MAX_TOTAL_TOOL_CALLS) {
-      finishReason = 'partial';
-      diagnostics.push({
-        severity: 'warning',
-        code: 'AGENT_MAX_TOOL_CALLS_REACHED',
-        message: `Agent 工具调用将超过 ${MAX_TOTAL_TOOL_CALLS} 次上限，已停止继续执行。`
-      });
-      break;
-    }
-    totalToolCalls += executableCount;
-
     // abort 必须终止整轮，而不只是跳出 planning 循环。
     //
     // 上面那个 break 只离开 `for (const call of toolCalls)`；不在这里再断一次，
@@ -1032,16 +1048,32 @@ export async function runAgentToolLoop(
       if (auditEntry.ok) {
         consecutiveIdenticalToolFailures = 0;
         lastFailedToolSignature = null;
+        consecutiveSemanticToolFailures = 0;
+        lastSemanticToolFailure = null;
       } else {
         const plannedEntry = planned[index];
-        const signature = plannedEntry
-          ? `${plannedEntry.call.name}:${plannedEntry.call.argumentsJson}`
-          : auditEntry.name;
+        // Workflow policy denials are semantic repetitions even when the model
+        // varies the forbidden tool or guesses another row id.  Keying this
+        // code by arguments would let an unbounded production loop evade the
+        // guard forever by changing one number each turn.
+        const signature = auditEntry.code === 'TEXT_LOOKUP_REQUIRED'
+          ? auditEntry.code
+          : plannedEntry
+            ? `${plannedEntry.call.name}:${plannedEntry.call.argumentsJson}`
+            : auditEntry.name;
         if (lastFailedToolSignature === signature) {
           consecutiveIdenticalToolFailures += 1;
         } else {
           lastFailedToolSignature = signature;
           consecutiveIdenticalToolFailures = 1;
+        }
+        const semanticSignature = semanticToolFailureSignature(auditEntry, plannedEntry);
+        if (semanticSignature !== null) {
+          consecutiveSemanticToolFailures += 1;
+          lastSemanticToolFailure = semanticSignature;
+        } else {
+          consecutiveSemanticToolFailures = 0;
+          lastSemanticToolFailure = null;
         }
       }
     }
@@ -1053,7 +1085,16 @@ export async function runAgentToolLoop(
       diagnostics.push({
         severity: 'error',
         code: 'AGENT_CONSECUTIVE_TOOL_FAILURES_EXCEEDED',
-        message: `检测到连续 ${MAX_CONSECUTIVE_TOOL_FAILURES} 次相同工具调用失败（${lastFailedToolSignature ?? ''}），已自动暂停任务以防止死循环。请检查工作区状态或调整输入。`
+        message: `检测到连续 ${MAX_CONSECUTIVE_TOOL_FAILURES} 次重复语义的工具调用失败（${lastFailedToolSignature ?? ''}），已自动暂停任务以防止死循环。请检查工作区状态或调整输入。`
+      });
+      break;
+    }
+    if (consecutiveSemanticToolFailures >= MAX_SEMANTIC_TOOL_FAILURES) {
+      finishReason = 'error';
+      diagnostics.push({
+        severity: 'error',
+        code: 'AGENT_SEMANTIC_TOOL_FAILURES_EXCEEDED',
+        message: `检测到连续 ${MAX_SEMANTIC_TOOL_FAILURES} 次语义重复的参数发现失败（${lastSemanticToolFailure ?? ''}），即使行号不同也已暂停任务；请先确认表名和文本证据。`
       });
       break;
     }
@@ -1070,7 +1111,7 @@ export async function runAgentToolLoop(
     finishReason = 'tool_use';
   }
 
-  if (steps >= maxSteps && finishReason === 'tool_use') {
+  if (maxSteps !== null && steps >= maxSteps && finishReason === 'tool_use') {
     finishReason = 'partial';
     diagnostics.push({
       severity: 'warning',

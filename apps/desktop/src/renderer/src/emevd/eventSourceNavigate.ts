@@ -128,6 +128,81 @@ export type LineInspection =
       predicates: Array<{ name: string; args: string[] }>;
     };
 
+import { analyzeCursorContext } from '@soulforge/core/dist/emevd/language-service/index.js';
+
+export function inspectAtCursor(
+  text: string,
+  pos: number,
+  catalog: readonly EmedfCompletionItem[],
+  enums?: Record<string, import('@soulforge/core').EmedfEnumDef>
+): LineInspection {
+  const ctx = analyzeCursorContext(text, pos);
+  if (ctx.isInComment) {
+    const line = text.slice(Math.max(0, pos - 50), Math.min(text.length, pos + 50)).split('\n')[0] ?? '';
+    return { kind: 'undecoded', text: line.trim() };
+  }
+
+  if (ctx.activeCall) {
+    const callName = ctx.activeCall.name;
+    if (callName === '$Event') {
+      return { kind: 'event-header', eventId: ctx.enclosingEvent?.eventId ?? 0 };
+    }
+    if (callName === 'WaitFor') {
+      return { kind: 'wait-for', predicates: [] };
+    }
+
+    const item = catalog.find((candidate) => candidate.name === callName)
+      ?? catalog.find((candidate) => candidate.name.toLowerCase() === callName.toLowerCase());
+
+    const rawArgs = ctx.activeCall.arguments.map((a) => a.text);
+
+    if (!item) {
+      return {
+        kind: 'instruction',
+        name: callName,
+        args: rawArgs.map((value, index) => ({
+          name: `arg${index}`,
+          type: 'unknown',
+          value,
+          role: 'none'
+        })),
+        unknown: true
+      };
+    }
+
+    const args: InspectedArg[] = item.args.map((arg, index) => {
+      const value = rawArgs[index] ?? '';
+      const role = classifyArgRole(arg.name);
+      const numeric = /^-?\d+$/.test(value);
+      const eventId = role === 'event-id' && numeric ? Number(value) : undefined;
+      const resourceId = (isFmgRole(role) || role === 'param-id') && numeric ? Number(value) : undefined;
+      return {
+        name: arg.name,
+        type: arg.type,
+        value,
+        role,
+        ...(eventId !== undefined ? { eventId } : {}),
+        ...(resourceId !== undefined ? { resourceId } : {})
+      };
+    });
+
+    return {
+      kind: 'instruction',
+      name: item.name,
+      bank: item.bank,
+      id: item.id,
+      args,
+      unknown: false
+    };
+  }
+
+  if (ctx.enclosingEvent) {
+    return { kind: 'event-header', eventId: ctx.enclosingEvent.eventId };
+  }
+
+  return { kind: 'empty' };
+}
+
 export function inspectSourceLine(
   line: string,
   catalog: readonly EmedfCompletionItem[]
@@ -153,48 +228,98 @@ export function inspectSourceLine(
   // 允许单行谓词以 && 或 || 开头（如 WaitFor 块内的子行）
   const stripped = trimmed.replace(/^(?:&&|\|\|)\s*/, '');
   const call = /^([A-Z][A-Za-z0-9_]*)\s*\(([\s\S]*)\)\s*;?$/.exec(stripped);
-  if (!call) return { kind: 'empty' };
-
-  const name = call[1]!;
-  const rawArgs = splitTopLevel(call[2] ?? '', ',').map((part) => part.trim()).filter(Boolean);
-  const item = catalog.find((candidate) => candidate.name === name)
-    ?? catalog.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
-  if (!item) {
+  if (call) {
+    const name = call[1]!;
+    const rawArgs = splitTopLevel(call[2] ?? '', ',').map((part) => part.trim()).filter(Boolean);
+    const item = catalog.find((candidate) => candidate.name === name)
+      ?? catalog.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
+    if (!item) {
+      return {
+        kind: 'instruction',
+        name,
+        args: rawArgs.map((value, index) => ({
+          name: `arg${index}`,
+          type: 'unknown',
+          value,
+          role: 'none'
+        })),
+        unknown: true
+      };
+    }
+    const args: InspectedArg[] = item.args.map((arg, index) => {
+      const value = rawArgs[index] ?? '';
+      const role = classifyArgRole(arg.name);
+      const numeric = /^-?\d+$/.test(value);
+      const eventId = role === 'event-id' && numeric ? Number(value) : undefined;
+      const resourceId = (isFmgRole(role) || role === 'param-id') && numeric ? Number(value) : undefined;
+      return {
+        name: arg.name,
+        type: arg.type,
+        value,
+        role,
+        ...(eventId !== undefined ? { eventId } : {}),
+        ...(resourceId !== undefined ? { resourceId } : {})
+      };
+    });
     return {
       kind: 'instruction',
-      name,
-      args: rawArgs.map((value, index) => ({
-        name: `arg${index}`,
-        type: 'unknown',
-        value,
-        role: 'none'
-      })),
-      unknown: true
+      name: item.name,
+      bank: item.bank,
+      id: item.id,
+      args,
+      unknown: false
     };
   }
-  const args: InspectedArg[] = item.args.map((arg, index) => {
-    const value = rawArgs[index] ?? '';
-    const role = classifyArgRole(arg.name);
-    const numeric = /^-?\d+$/.test(value);
-    const eventId = role === 'event-id' && numeric ? Number(value) : undefined;
-    const resourceId = (isFmgRole(role) || role === 'param-id') && numeric ? Number(value) : undefined;
+
+  // Fallback: Use analyzeCursorContext to tolerate unclosed and live editing calls
+  const ctx = analyzeCursorContext(trimmed, trimmed.length);
+  if (ctx.activeCall) {
+    const callName = ctx.activeCall.name;
+    const item = catalog.find((candidate) => candidate.name === callName)
+      ?? catalog.find((candidate) => candidate.name.toLowerCase() === callName.toLowerCase());
+    const rawArgs = ctx.activeCall.arguments.map((a) => a.text);
+
+    if (!item) {
+      return {
+        kind: 'instruction',
+        name: callName,
+        args: rawArgs.map((value, index) => ({
+          name: `arg${index}`,
+          type: 'unknown',
+          value,
+          role: 'none'
+        })),
+        unknown: true
+      };
+    }
+
+    const args: InspectedArg[] = item.args.map((arg, index) => {
+      const value = rawArgs[index] ?? '';
+      const role = classifyArgRole(arg.name);
+      const numeric = /^-?\d+$/.test(value);
+      const eventId = role === 'event-id' && numeric ? Number(value) : undefined;
+      const resourceId = (isFmgRole(role) || role === 'param-id') && numeric ? Number(value) : undefined;
+      return {
+        name: arg.name,
+        type: arg.type,
+        value,
+        role,
+        ...(eventId !== undefined ? { eventId } : {}),
+        ...(resourceId !== undefined ? { resourceId } : {})
+      };
+    });
+
     return {
-      name: arg.name,
-      type: arg.type,
-      value,
-      role,
-      ...(eventId !== undefined ? { eventId } : {}),
-      ...(resourceId !== undefined ? { resourceId } : {})
+      kind: 'instruction',
+      name: item.name,
+      bank: item.bank,
+      id: item.id,
+      args,
+      unknown: false
     };
-  });
-  return {
-    kind: 'instruction',
-    name,
-    bank: item.bank,
-    id: item.id,
-    args,
-    unknown: false
-  };
+  }
+
+  return { kind: 'empty' };
 }
 
 function parseWaitPredicates(inner: string): Array<{ name: string; args: string[] }> {

@@ -26,7 +26,9 @@ import {
   type OperationLogUtilityMethod,
   type OperationLogUtilityPayloadMap,
   type OperationLogUtilityRequest,
-  type OperationLogUtilityResultMap
+  type OperationLogUtilityResultMap,
+  type ProviderUsageEventPayload,
+  type ProviderUsageSummary
 } from './operationLogUtilityProtocol.js';
 
 interface PendingRequest {
@@ -39,6 +41,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
   private process: UtilityProcess | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private activeWorkspace: OpenWorkspaceDatabasePayload | null = null;
+  private activeAppDatabasePath: string | null = null;
   private opening: Promise<void> | null = null;
 
   constructor(
@@ -56,6 +59,25 @@ export class OperationLogUtilityClient implements OperationLogStore {
     } finally {
       this.opening = null;
     }
+  }
+
+  async openAppDatabase(appDatabasePath: string): Promise<void> {
+    if (this.opening) await this.opening;
+    if (this.process && this.activeAppDatabasePath === appDatabasePath) return;
+    this.opening = this.openAppDatabaseInternal(appDatabasePath);
+    try {
+      await this.opening;
+    } finally {
+      this.opening = null;
+    }
+  }
+
+  recordProviderUsage(event: ProviderUsageEventPayload): Promise<void> {
+    return this.request('recordProviderUsage', { event }).then(() => undefined);
+  }
+
+  providerUsageSummary(): Promise<ProviderUsageSummary> {
+    return this.request('providerUsageSummary', {});
   }
 
   async record(entry: OperationLogRecord): Promise<void> {
@@ -210,20 +232,24 @@ export class OperationLogUtilityClient implements OperationLogStore {
   /** Force a fresh utility process and reopen the same workspace; pending RPCs are never replayed. */
   async restart(): Promise<void> {
     const payload = this.activeWorkspace;
+    const appDatabasePath = this.activeAppDatabasePath;
     const child = this.process;
-    if (!payload || !child) throw new Error('数据库后台进程没有可恢复的活动工作区。');
+    if ((!payload && !appDatabasePath) || !child) throw new Error('数据库后台进程没有可恢复的活动数据库。');
     this.process = null;
     this.activeWorkspace = null;
+    this.activeAppDatabasePath = null;
     this.rejectAll(new Error('数据库后台进程正在重启；未完成请求不会自动重放。'));
     const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
     child.kill();
     await exited;
-    await this.openWorkspace(payload);
+    if (payload) await this.openWorkspace(payload);
+    else if (appDatabasePath) await this.openAppDatabase(appDatabasePath);
   }
 
   async dispose(): Promise<void> {
     const child = this.process;
     this.activeWorkspace = null;
+    this.activeAppDatabasePath = null;
     if (!child) return;
     try {
       await this.requestOn(child, 'close', {});
@@ -240,10 +266,26 @@ export class OperationLogUtilityClient implements OperationLogStore {
     try {
       await this.request('openWorkspace', payload);
       this.activeWorkspace = { ...payload };
+      this.activeAppDatabasePath = payload.appDatabasePath;
     } catch (error) {
       this.process?.kill();
       this.process = null;
       this.activeWorkspace = null;
+      this.activeAppDatabasePath = null;
+      throw error;
+    }
+  }
+
+  private async openAppDatabaseInternal(appDatabasePath: string): Promise<void> {
+    if (!this.process) this.spawn();
+    try {
+      await this.request('openAppDatabase', { appDatabasePath });
+      this.activeAppDatabasePath = appDatabasePath;
+    } catch (error) {
+      this.process?.kill();
+      this.process = null;
+      this.activeWorkspace = null;
+      this.activeAppDatabasePath = null;
       throw error;
     }
   }
@@ -266,6 +308,7 @@ export class OperationLogUtilityClient implements OperationLogStore {
       if (this.process !== child) return;
       this.process = null;
       this.activeWorkspace = null;
+      this.activeAppDatabasePath = null;
       this.rejectAll(new Error(`数据库后台进程意外退出（代码 ${code}）。`));
     });
     child.on('error', (_type, location) => {

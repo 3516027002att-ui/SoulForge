@@ -14,6 +14,7 @@ import { describe, it } from 'node:test';
 import {
   INITIAL_AGENT_TASK_STATE,
   approvalSeverity,
+  canAutoResumeAgentTask,
   classifyDiffLines,
   describeAgentTaskStatus,
   describeApprovalLevel,
@@ -121,6 +122,24 @@ describe('进度事件真的推进状态', () => {
     assert.equal(state.phase, 'done');
     assert.equal(state.steps, 2);
     assert.equal(state.rolloutFileName, 'rollout-0001.jsonl');
+  });
+
+  it('只有 stop 终态允许隐式承接，partial/max_steps 必须显式继续', () => {
+    const stopped = feed(
+      startAgentTask(SESSION),
+      { type: 'session-done', finishReason: 'stop', steps: 2, rolloutFileName: 'stop.jsonl' }
+    );
+    const partial = feed(
+      startAgentTask(SESSION),
+      { type: 'session-done', finishReason: 'partial', steps: 2, rolloutFileName: 'partial.jsonl' }
+    );
+    const length = feed(
+      startAgentTask(SESSION),
+      { type: 'session-done', finishReason: 'length', steps: 2, rolloutFileName: 'length.jsonl' }
+    );
+    assert.equal(canAutoResumeAgentTask(stopped), true);
+    assert.equal(canAutoResumeAgentTask(partial), false);
+    assert.equal(canAutoResumeAgentTask(length), false);
   });
 
   it('session-error 写错误码与原因，不吞异常', () => {
