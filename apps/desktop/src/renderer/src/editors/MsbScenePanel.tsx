@@ -15,6 +15,7 @@ import {
 import { mountThreeProxyScene, type ProxySceneHandle } from '../scene/threeSceneController.js';
 import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
+import type { MapEditTransaction } from '@soulforge/shared';
 
 /**
  * 按 models[modelIndex].name 解析真实 FLVER 名（mapbnd 容器读链）。
@@ -105,21 +106,35 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     setIsSaving(true);
     setSaveStatus('正在提交变换…');
     try {
-      const res = await (bridge as any).applyMsbMutation?.(props.mapResourceUri, props.revision, {
-        kind: 'set_part_transform',
-        partName: current.name,
-        posX: current.posX,
-        posY: current.posY,
-        posZ: current.posZ,
-        rotX: current.rotX,
-        rotY: current.rotY,
-        rotZ: current.rotZ,
-        scaleX: current.scaleX,
-        scaleY: current.scaleY,
-        scaleZ: current.scaleZ
-      });
+      const transaction: MapEditTransaction = {
+        id: `tx-gizmo-${Date.now()}`,
+        mapId: props.sourcePath,
+        baseRevision: props.revision,
+        description: `Human Gizmo 调整 Part [${partName}] 变换`,
+        author: 'human',
+        operations: [
+          {
+            kind: 'set_transform',
+            target: partName,
+            position: [current.posX, current.posY, current.posZ],
+            ...(current.rotX !== undefined || current.rotY !== undefined || current.rotZ !== undefined
+              ? { rotation: [current.rotX ?? 0, current.rotY ?? 0, current.rotZ ?? 0] as [number, number, number] }
+              : {}),
+            ...(current.scaleX !== undefined || current.scaleY !== undefined || current.scaleZ !== undefined
+              ? { scale: [current.scaleX ?? 1, current.scaleY ?? 1, current.scaleZ ?? 1] as [number, number, number] }
+              : {})
+          }
+        ],
+        timestamp: Date.now()
+      };
+      const res = await bridge.executeMapTransaction?.(props.mapResourceUri, props.revision, transaction);
       if (res?.ok) {
         setSaveStatus('变换已成功提交！');
+        // 重新加载权威 MapDocument
+        const reread = await (bridge.readMsbDocument?.(props.mapResourceUri) as Promise<{ ok: boolean; data?: { parts?: PartLike[] } } | undefined>);
+        if (reread?.ok && reread.data?.parts) {
+          setPartsState(reread.data.parts);
+        }
       } else {
         setSaveStatus(`提交失败：${res?.diagnostics?.[0]?.message ?? '未知错误'}`);
       }
@@ -128,7 +143,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
     } finally {
       setIsSaving(false);
     }
-  }, [partsState, props.mapResourceUri, props.revision]);
+  }, [partsState, props.mapResourceUri, props.revision, props.sourcePath]);
 
   const [meshStatus, setMeshStatus] = useState<{ loaded: number; missing: number; total: number } | null>(null);
 

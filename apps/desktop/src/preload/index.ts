@@ -60,7 +60,8 @@ import type {
   ScriptContainerEntryPage,
   ScriptContainerEvidence,
   ScriptEntryPlaintextView,
-  CiteHit
+  CiteHit,
+  MapEditTransaction
 } from '@soulforge/shared';
 import { EDITOR_DOCUMENT_IPC_CHANNELS, maskPathFragments } from '@soulforge/shared';
 
@@ -441,6 +442,12 @@ const api = {
     }
   ): Promise<RendererSaveResult> =>
     ipcRenderer.invoke('resource.applyMsbMutation', sourceUri, expectedHash, mutation),
+  executeMapTransaction: (
+    sourceUri: string,
+    expectedHash: string,
+    transaction: MapEditTransaction
+  ): Promise<RendererSaveResult> =>
+    ipcRenderer.invoke('resource.executeMapTransaction', sourceUri, expectedHash, transaction),
   /**
    * S38：write-flver material-slot-set 写回（与 main resource.applyFlverMutation
    * 通道一致；mesh 越界 / no-op / layoutWarnings 非空由 C# 侧 fail-closed 拒绝）。

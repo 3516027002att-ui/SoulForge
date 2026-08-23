@@ -355,73 +355,97 @@ export async function executeMapTransaction(
   for (const op of transaction.operations) {
     if (op.kind === 'set_transform') {
       const entity = loaded.sceneGraph.findEntity(op.target);
-      if (entity) {
-        if (entity.kind === 'part') {
-          mutations.push({
-            kind: 'set_part_transform',
-            partName: entity.name,
-            ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
-            ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
-            ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
-          });
-        } else if (entity.kind === 'region') {
-          mutations.push({
-            kind: 'set_region_transform',
-            partName: entity.name,
-            ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
-            ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
-            ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
-          });
-        }
+      if (!entity) {
+        return {
+          ok: false,
+          transactionId: transaction.id,
+          appliedOperations: 0,
+          error: { code: 'MAP_ENTITY_NOT_FOUND', message: `目标实体未找到: ${op.target}` }
+        };
+      }
+      if (entity.kind === 'part') {
+        mutations.push({
+          kind: 'set_part_transform',
+          partName: entity.name,
+          ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
+          ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
+          ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
+        });
+      } else if (entity.kind === 'region') {
+        mutations.push({
+          kind: 'set_region_transform',
+          partName: entity.name,
+          ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
+          ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
+          ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
+        });
       }
     } else if (op.kind === 'batch_transform') {
       for (const target of op.targets) {
         const entity = loaded.sceneGraph.findEntity(target);
-        if (entity && 'transform' in entity) {
-          const t = (entity as MapPartEntity | MapRegionEntity).transform;
-          const posX = op.positionDelta ? t.position[0] + op.positionDelta[0] : undefined;
-          const posY = op.positionDelta ? t.position[1] + op.positionDelta[1] : undefined;
-          const posZ = op.positionDelta ? t.position[2] + op.positionDelta[2] : undefined;
-          const rotX = op.rotationDelta ? t.rotation[0] + op.rotationDelta[0] : undefined;
-          const rotY = op.rotationDelta ? t.rotation[1] + op.rotationDelta[1] : undefined;
-          const rotZ = op.rotationDelta ? t.rotation[2] + op.rotationDelta[2] : undefined;
-          const scaleX = op.scaleDelta ? t.scale[0] + op.scaleDelta[0] : undefined;
-          const scaleY = op.scaleDelta ? t.scale[1] + op.scaleDelta[1] : undefined;
-          const scaleZ = op.scaleDelta ? t.scale[2] + op.scaleDelta[2] : undefined;
-          mutations.push({
-            kind: entity.kind === 'part' ? 'set_part_transform' : 'set_region_transform',
-            partName: entity.name,
-            ...(posX !== undefined ? { posX } : {}),
-            ...(posY !== undefined ? { posY } : {}),
-            ...(posZ !== undefined ? { posZ } : {}),
-            ...(rotX !== undefined ? { rotX } : {}),
-            ...(rotY !== undefined ? { rotY } : {}),
-            ...(rotZ !== undefined ? { rotZ } : {}),
-            ...(scaleX !== undefined ? { scaleX } : {}),
-            ...(scaleY !== undefined ? { scaleY } : {}),
-            ...(scaleZ !== undefined ? { scaleZ } : {})
-          });
+        if (!entity || !('transform' in entity)) {
+          return {
+            ok: false,
+            transactionId: transaction.id,
+            appliedOperations: 0,
+            error: { code: 'MAP_ENTITY_NOT_FOUND', message: `批量目标实体未找到: ${target}` }
+          };
         }
+        const t = (entity as MapPartEntity | MapRegionEntity).transform;
+        const posX = op.positionDelta ? t.position[0] + op.positionDelta[0] : undefined;
+        const posY = op.positionDelta ? t.position[1] + op.positionDelta[1] : undefined;
+        const posZ = op.positionDelta ? t.position[2] + op.positionDelta[2] : undefined;
+        const rotX = op.rotationDelta ? t.rotation[0] + op.rotationDelta[0] : undefined;
+        const rotY = op.rotationDelta ? t.rotation[1] + op.rotationDelta[1] : undefined;
+        const rotZ = op.rotationDelta ? t.rotation[2] + op.rotationDelta[2] : undefined;
+        const scaleX = op.scaleDelta ? t.scale[0] + op.scaleDelta[0] : undefined;
+        const scaleY = op.scaleDelta ? t.scale[1] + op.scaleDelta[1] : undefined;
+        const scaleZ = op.scaleDelta ? t.scale[2] + op.scaleDelta[2] : undefined;
+        mutations.push({
+          kind: entity.kind === 'part' ? 'set_part_transform' : 'set_region_transform',
+          partName: entity.name,
+          ...(posX !== undefined ? { posX } : {}),
+          ...(posY !== undefined ? { posY } : {}),
+          ...(posZ !== undefined ? { posZ } : {}),
+          ...(rotX !== undefined ? { rotX } : {}),
+          ...(rotY !== undefined ? { rotY } : {}),
+          ...(rotZ !== undefined ? { rotZ } : {}),
+          ...(scaleX !== undefined ? { scaleX } : {}),
+          ...(scaleY !== undefined ? { scaleY } : {}),
+          ...(scaleZ !== undefined ? { scaleZ } : {})
+        });
       }
     } else if (op.kind === 'change_model') {
       const part = loaded.sceneGraph.findPart(op.target);
-      if (part) {
-        mutations.push({
-          kind: 'change_model',
-          partName: part.name,
-          modelName: op.newModelName
-        });
+      if (!part) {
+        return {
+          ok: false,
+          transactionId: transaction.id,
+          appliedOperations: 0,
+          error: { code: 'MAP_PART_NOT_FOUND', message: `修改模型目标 Part 未找到: ${op.target}` }
+        };
       }
+      mutations.push({
+        kind: 'change_model',
+        partName: part.name,
+        modelName: op.newModelName
+      });
     } else if (op.kind === 'delete') {
       const entity = loaded.sceneGraph.findEntity(op.target);
-      if (entity) {
-        if (entity.kind === 'part') {
-          mutations.push({ kind: 'delete_part', partName: entity.name });
-        } else if (entity.kind === 'region') {
-          mutations.push({ kind: 'delete_region', partName: entity.name });
-        } else if (entity.kind === 'event') {
-          mutations.push({ kind: 'delete_event', partName: entity.name });
-        }
+      if (!entity) {
+        return {
+          ok: false,
+          transactionId: transaction.id,
+          appliedOperations: 0,
+          error: { code: 'MAP_ENTITY_NOT_FOUND', message: `删除目标实体未找到: ${op.target}` }
+        };
+      }
+      if (entity.kind === 'part') {
+        mutations.push({ kind: 'delete_part', partName: entity.name });
+      } else if (entity.kind === 'region') {
+        mutations.push({ kind: 'delete_region', partName: entity.name });
+      } else if (entity.kind === 'event') {
+        mutations.push({ kind: 'delete_event', partName: entity.name });
       }
     }
   }
@@ -437,45 +461,44 @@ export async function executeMapTransaction(
   const fileEntry = await edit.indexFile(loaded.filePath, 'map');
   const expectedHash = fileEntry.sha256 || loaded.doc.revision;
 
-  for (const mutation of mutations) {
-    const outcome = await applyNativeMutation({
-      file: { ...fileEntry, sha256: expectedHash },
-      sourceUri: fileEntry.sourceUri,
-      expectedHash,
-      stagingRoot: edit.stagingRoot,
-      allowedRoots: () => [...edit.allowedRoots()],
-      stagingPrefix: 'msb',
-      stagingFileName: `${basename(loaded.filePath)}.mut.msb`,
-      stageWrite: (context) => commitMsbMutationViaBridge({
-        sourcePath: loaded.filePath,
-        outputPath: context.outputPath,
-        expectedDocumentHash: expectedHash,
-        allowedRoots: context.allowedRoots,
-        writableRoots: context.writableRoots,
-        mutation,
-        timeoutMs: 120_000
-      }),
-      title: `MSB transaction [${transaction.id}] ${mutation.kind} on ${mutation.partName}`,
-      confirmActionLabel: '提交 MSB 地图事务'
-    }, { commit: edit.commitPort });
+  // Single batch staging & Patch commit
+  const outcome = await applyNativeMutation({
+    file: { ...fileEntry, sha256: expectedHash },
+    sourceUri: fileEntry.sourceUri,
+    expectedHash,
+    stagingRoot: edit.stagingRoot,
+    allowedRoots: () => [...edit.allowedRoots()],
+    stagingPrefix: 'msb',
+    stagingFileName: `${basename(loaded.filePath)}.mut.msb`,
+    stageWrite: (context) => commitMsbMutationViaBridge({
+      sourcePath: loaded.filePath,
+      outputPath: context.outputPath,
+      expectedDocumentHash: expectedHash,
+      allowedRoots: context.allowedRoots,
+      writableRoots: context.writableRoots,
+      mutations,
+      timeoutMs: 120_000
+    }),
+    title: `MSB transaction [${transaction.id}] (${mutations.length} mutations)`,
+    confirmActionLabel: '提交 MSB 地图事务'
+  }, { commit: edit.commitPort });
 
-    if (outcome.status !== 'committed' || !outcome.result.ok) {
-      const diagnostics = outcome.status === 'failed'
-        ? outcome.diagnostics
-        : outcome.status === 'committed'
-          ? outcome.result.diagnostics
-          : [{ severity: 'error' as const, code: 'MSB_WRITE_CANCELLED', message: '写入被取消。', sourceUri: fileEntry.sourceUri }];
-      return {
-        ok: false,
-        transactionId: transaction.id,
-        appliedOperations: 0,
-        error: {
-          code: diagnostics[0]?.code ?? 'MSB_WRITE_FAILED',
-          message: diagnostics[0]?.message ?? 'MSB 写入失败。',
-          details: diagnostics
-        }
-      };
-    }
+  if (outcome.status !== 'committed' || !outcome.result.ok) {
+    const diagnostics = outcome.status === 'failed'
+      ? outcome.diagnostics
+      : outcome.status === 'committed'
+        ? outcome.result.diagnostics
+        : [{ severity: 'error' as const, code: 'MSB_WRITE_CANCELLED', message: '写入被取消。', sourceUri: fileEntry.sourceUri }];
+    return {
+      ok: false,
+      transactionId: transaction.id,
+      appliedOperations: 0,
+      error: {
+        code: diagnostics[0]?.code ?? 'MSB_WRITE_FAILED',
+        message: diagnostics[0]?.message ?? 'MSB 写入失败。',
+        details: diagnostics
+      }
+    };
   }
 
   return {

@@ -75,6 +75,7 @@ import {
   type GparamFieldSetMutation,
   commitParamMutationViaBridge,
   commitMsbMutationViaBridge,
+  type MsbBridgeMutation,
   readFmgDocumentViaBridge,
   readParamDocumentViaBridge,
   readMsbDocumentViaBridge,
@@ -154,7 +155,13 @@ import {
   decodeCiteHits,
   formatCitationLabel,
   mergeCiteHits,
-  type Citation
+  type Citation,
+  type MapEditTransaction,
+  validateMapTransaction,
+  buildCanonicalMapDocument,
+  MapSceneGraph,
+  type MapPartEntity,
+  type MapRegionEntity
 } from '@soulforge/shared';
 import { prepareBridgeRoots, type BridgeRootSession, type PrepareBridgeRootsResult } from './bridgeRoots.js';
 import type {
@@ -5148,6 +5155,210 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
         }),
         title: `MSB mutation ${mutation.kind} ${mutation.partName}`,
         confirmActionLabel: '提交 MSB 变更'
+      }, {
+        confirm: electronConfirmationPort(event),
+        commit: sessionCommitPort(activeSession, operationLog, storage)
+      });
+      return toSaveResultFromOutcome(outcome, indexedFiles);
+    }
+  );
+
+  handle(
+    'resource.executeMapTransaction',
+    async (
+      event,
+      sourceUri: string,
+      expectedHash: string,
+      transaction: MapEditTransaction
+    ): Promise<RendererSaveResult> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: [{
+            severity: 'error',
+            code: 'MSB_WRITE_NO_SESSION',
+            message: '需要已打开的工作区才能写入 MSB。',
+            sourceUri
+          }]
+        };
+      }
+      const gameBlocked = rejectNonSekiroNativeWrite(sourceUri, file);
+      if (gameBlocked) return gameBlocked;
+
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, changedFiles: [], diagnostics: roots.diagnostics };
+      const docResult = await readMsbDocumentViaBridge({
+        sourcePath: file.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        ...(activeSession?.layers.baseRoot ? { oodleRuntimeRoot: activeSession.layers.baseRoot } : {})
+      });
+      if (!docResult.ok || !docResult.data) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: sanitizeDiagnostics(asBasicDiagnostics(docResult.diagnostics))
+        };
+      }
+
+      const mapDoc = buildCanonicalMapDocument({
+        sourceUri,
+        sourcePath: file.relativePath,
+        game: file.game,
+        revision: expectedHash,
+        models: docResult.data.models,
+        parts: docResult.data.parts.map((p) => ({
+          name: p.name,
+          typeId: p.typeId ?? 0,
+          modelIndex: p.modelIndex,
+          posX: p.posX,
+          posY: p.posY,
+          posZ: p.posZ,
+          rotX: p.rotX,
+          rotY: p.rotY,
+          rotZ: p.rotZ,
+          scaleX: p.scaleX,
+          scaleY: p.scaleY,
+          scaleZ: p.scaleZ
+        })),
+        regions: docResult.data.regions?.map((r) => ({
+          name: r.name,
+          typeId: r.typeId ?? 0,
+          posX: r.posX,
+          posY: r.posY,
+          posZ: r.posZ,
+          rotX: r.rotX,
+          rotY: r.rotY,
+          rotZ: r.rotZ,
+          scaleX: r.scaleX,
+          scaleY: r.scaleY,
+          scaleZ: r.scaleZ
+        }))
+      });
+
+      const validation = validateMapTransaction(mapDoc, transaction);
+      if (!validation.valid) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: validation.diagnostics.map((d) => ({
+            severity: d.severity,
+            code: d.code,
+            message: d.message,
+            sourceUri
+          }))
+        };
+      }
+
+      const sceneGraph = new MapSceneGraph(mapDoc);
+      const mutations: MsbBridgeMutation[] = [];
+      for (const op of transaction.operations) {
+        if (op.kind === 'set_transform') {
+          const entity = sceneGraph.findEntity(op.target);
+          if (entity) {
+            if (entity.kind === 'part') {
+              mutations.push({
+                kind: 'set_part_transform',
+                partName: entity.name,
+                ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
+                ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
+                ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
+              });
+            } else if (entity.kind === 'region') {
+              mutations.push({
+                kind: 'set_region_transform',
+                partName: entity.name,
+                ...(op.position ? { posX: op.position[0], posY: op.position[1], posZ: op.position[2] } : {}),
+                ...(op.rotation ? { rotX: op.rotation[0], rotY: op.rotation[1], rotZ: op.rotation[2] } : {}),
+                ...(op.scale ? { scaleX: op.scale[0], scaleY: op.scale[1], scaleZ: op.scale[2] } : {})
+              });
+            }
+          }
+        } else if (op.kind === 'batch_transform') {
+          for (const target of op.targets) {
+            const entity = sceneGraph.findEntity(target);
+            if (entity && 'transform' in entity) {
+              const t = (entity as MapPartEntity | MapRegionEntity).transform;
+              const posX = op.positionDelta ? t.position[0] + op.positionDelta[0] : undefined;
+              const posY = op.positionDelta ? t.position[1] + op.positionDelta[1] : undefined;
+              const posZ = op.positionDelta ? t.position[2] + op.positionDelta[2] : undefined;
+              const rotX = op.rotationDelta ? t.rotation[0] + op.rotationDelta[0] : undefined;
+              const rotY = op.rotationDelta ? t.rotation[1] + op.rotationDelta[1] : undefined;
+              const rotZ = op.rotationDelta ? t.rotation[2] + op.rotationDelta[2] : undefined;
+              const scaleX = op.scaleDelta ? t.scale[0] + op.scaleDelta[0] : undefined;
+              const scaleY = op.scaleDelta ? t.scale[1] + op.scaleDelta[1] : undefined;
+              const scaleZ = op.scaleDelta ? t.scale[2] + op.scaleDelta[2] : undefined;
+              mutations.push({
+                kind: entity.kind === 'part' ? 'set_part_transform' : 'set_region_transform',
+                partName: entity.name,
+                ...(posX !== undefined ? { posX } : {}),
+                ...(posY !== undefined ? { posY } : {}),
+                ...(posZ !== undefined ? { posZ } : {}),
+                ...(rotX !== undefined ? { rotX } : {}),
+                ...(rotY !== undefined ? { rotY } : {}),
+                ...(rotZ !== undefined ? { rotZ } : {}),
+                ...(scaleX !== undefined ? { scaleX } : {}),
+                ...(scaleY !== undefined ? { scaleY } : {}),
+                ...(scaleZ !== undefined ? { scaleZ } : {})
+              });
+            }
+          }
+        } else if (op.kind === 'change_model') {
+          const part = sceneGraph.findPart(op.target);
+          if (part) {
+            mutations.push({
+              kind: 'change_model',
+              partName: part.name,
+              modelName: op.newModelName
+            });
+          }
+        } else if (op.kind === 'delete') {
+          const entity = sceneGraph.findEntity(op.target);
+          if (entity) {
+            if (entity.kind === 'part') {
+              mutations.push({ kind: 'delete_part', partName: entity.name });
+            } else if (entity.kind === 'region') {
+              mutations.push({ kind: 'delete_region', partName: entity.name });
+            } else if (entity.kind === 'event') {
+              mutations.push({ kind: 'delete_event', partName: entity.name });
+            }
+          }
+        }
+      }
+
+      if (mutations.length === 0) {
+        return { ok: true, changedFiles: [], diagnostics: [] };
+      }
+
+      const storage = durableStoragePaths(activeSession.meta.workspaceId);
+      const stage = await verifiedStageRoots(activeSession, storage, 'MSB_STAGING_PREPARE_FAILED');
+      if (stage.diagnostics.length > 0) {
+        return {
+          ok: false,
+          changedFiles: [],
+          diagnostics: stage.diagnostics
+        };
+      }
+      const operationLog = await ensureActiveOperationLog(activeSession);
+      const outcome = await applyNativeMutation({
+        file,
+        sourceUri,
+        expectedHash,
+        stagingRoot: storage.stagingRoot,
+        allowedRoots: () => [...stage.allowedRoots],
+        stagingPrefix: 'msb',
+        stagingFileName: `${basename(file.relativePath)}.mut.msb`,
+        stageWrite: (context) => commitMsbMutationViaBridge({
+          sourcePath: file.absolutePath,
+          outputPath: context.outputPath,
+          expectedDocumentHash: expectedHash,
+          allowedRoots: context.allowedRoots,
+          writableRoots: context.writableRoots,
+          mutations
+        }),
+        title: `MSB transaction [${transaction.id}] (${mutations.length} 项修改)`,
+        confirmActionLabel: '提交 MSB 事务'
       }, {
         confirm: electronConfirmationPort(event),
         commit: sessionCommitPort(activeSession, operationLog, storage)

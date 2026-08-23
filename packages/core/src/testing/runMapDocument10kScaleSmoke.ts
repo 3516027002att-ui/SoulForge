@@ -146,16 +146,44 @@ export async function runMapDocument10kScaleSmoke(): Promise<void> {
     assert.equal(importResult.transaction.operations.length, 1);
   }
 
-  // Revision conflict test
-  const conflictDelta: BlenderDeltaImport = {
-    ...delta,
-    baseRevision: 'stale_hash'
+  // Test duplicate delta rejection (Section 4: fake duplicate capability removed)
+  const duplicateDelta: BlenderDeltaImport = {
+    schemaVersion: 1,
+    mapId: 'm10_00_00_00',
+    baseRevision: 'rev_10k_init',
+    importedAt: new Date().toISOString(),
+    mutations: [
+      {
+        stableKey: firstPart.stableKey,
+        action: 'duplicate',
+        position: [200, 10, -30]
+      }
+    ]
   };
-  const conflictResult = importBlenderDeltaToTransaction(doc, conflictDelta);
-  assert.equal(conflictResult.ok, false, 'Conflict revision must be rejected');
-  if (!conflictResult.ok) {
-    assert.equal(conflictResult.conflict, true);
+  const duplicateResult = importBlenderDeltaToTransaction(doc, duplicateDelta);
+  assert.equal(duplicateResult.ok, false, 'Duplicate delta must be rejected as unsupported');
+  if (!duplicateResult.ok) {
+    assert.match(duplicateResult.error, /MAP_DUPLICATE_UNSUPPORTED/, 'Error must contain MAP_DUPLICATE_UNSUPPORTED code');
   }
+
+  // Test multi-op batch transaction validation (Section 3: single batch atomic commit)
+  const batchTx: MapEditTransaction = {
+    id: 'tx-batch-1',
+    mapId: 'm10_00_00_00',
+    baseRevision: 'rev_10k_init',
+    description: 'Batch edit multiple parts and regions',
+    author: 'human',
+    operations: [
+      { kind: 'set_transform', target: doc.parts[0]!.stableKey, position: [10, 20, 30] },
+      { kind: 'set_transform', target: doc.parts[1]!.stableKey, rotation: [0, 90, 0] },
+      { kind: 'set_transform', target: doc.regions[0]!.stableKey, position: [100, 0, 100] },
+      { kind: 'change_model', target: doc.parts[2]!.stableKey, newModelName: 'm000001' },
+      { kind: 'delete', target: doc.parts[3]!.stableKey }
+    ],
+    timestamp: Date.now()
+  };
+  const batchValidation = validateMapTransaction(doc, batchTx);
+  assert.equal(batchValidation.valid, true, 'Batch transaction with 5 diverse operations must pass validation');
 
   console.log('[Smoke] 10k Scale MapDocument & SceneGraph Smoke PASSED.');
 }

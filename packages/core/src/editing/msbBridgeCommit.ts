@@ -36,8 +36,9 @@ export interface MsbBridgeCommitRequest {
   expectedDocumentHash: string;
   allowedRoots: string[];
   writableRoots: string[];
-  mutation: MsbBridgeMutation;
-  timeoutMs?: number;
+  mutation?: MsbBridgeMutation | undefined;
+  mutations?: MsbBridgeMutation[] | undefined;
+  timeoutMs?: number | undefined;
 }
 
 export interface MsbBridgeCommitResult {
@@ -48,31 +49,44 @@ export interface MsbBridgeCommitResult {
   diagnostics: Array<{ severity: string; code: string; message: string }>;
 }
 
-export async function commitMsbMutationViaBridge(
-  request: MsbBridgeCommitRequest
-): Promise<MsbBridgeCommitResult> {
-  const m = request.mutation;
-  const commandOptions: Record<string, unknown> = {
-    outputPath: request.outputPath,
-    expectedDocumentHash: request.expectedDocumentHash,
+function serializeMsbMutation(m: MsbBridgeMutation): Record<string, unknown> {
+  const item: Record<string, unknown> = {
     mutation: m.kind,
     partName: m.partName
   };
   // kind 是联合字面量判别，!== 链不能把 delete 变体从联合中整体剔除；
   // 'posX' in m 才是对「该成员带 transform 字段」的结构收窄。
   if ('posX' in m) {
-    if (m.posX !== undefined) commandOptions.posX = m.posX;
-    if (m.posY !== undefined) commandOptions.posY = m.posY;
-    if (m.posZ !== undefined) commandOptions.posZ = m.posZ;
-    if (m.rotX !== undefined) commandOptions.rotX = m.rotX;
-    if (m.rotY !== undefined) commandOptions.rotY = m.rotY;
-    if (m.rotZ !== undefined) commandOptions.rotZ = m.rotZ;
-    if (m.scaleX !== undefined) commandOptions.scaleX = m.scaleX;
-    if (m.scaleY !== undefined) commandOptions.scaleY = m.scaleY;
-    if (m.scaleZ !== undefined) commandOptions.scaleZ = m.scaleZ;
+    if (m.posX !== undefined) item.posX = m.posX;
+    if (m.posY !== undefined) item.posY = m.posY;
+    if (m.posZ !== undefined) item.posZ = m.posZ;
+    if (m.rotX !== undefined) item.rotX = m.rotX;
+    if (m.rotY !== undefined) item.rotY = m.rotY;
+    if (m.rotZ !== undefined) item.rotZ = m.rotZ;
+    if (m.scaleX !== undefined) item.scaleX = m.scaleX;
+    if (m.scaleY !== undefined) item.scaleY = m.scaleY;
+    if (m.scaleZ !== undefined) item.scaleZ = m.scaleZ;
   }
-  if ('modelName' in m && m.modelName !== undefined) commandOptions.modelName = m.modelName;
-  if ('modelIndex' in m && m.modelIndex !== undefined) commandOptions.modelIndex = m.modelIndex;
+  if ('modelName' in m && m.modelName !== undefined) item.modelName = m.modelName;
+  if ('modelIndex' in m && m.modelIndex !== undefined) item.modelIndex = m.modelIndex;
+  return item;
+}
+
+export async function commitMsbMutationViaBridge(
+  request: MsbBridgeCommitRequest
+): Promise<MsbBridgeCommitResult> {
+  const commandOptions: Record<string, unknown> = {
+    outputPath: request.outputPath,
+    expectedDocumentHash: request.expectedDocumentHash
+  };
+
+  if (request.mutations && request.mutations.length > 0) {
+    commandOptions.mutations = request.mutations.map(serializeMsbMutation);
+  } else if (request.mutation) {
+    Object.assign(commandOptions, serializeMsbMutation(request.mutation));
+  } else {
+    throw new Error('commitMsbMutationViaBridge requires mutation or mutations');
+  }
 
   const result = await runBridge<{
     outputHash?: string;

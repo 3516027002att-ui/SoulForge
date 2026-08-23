@@ -218,21 +218,9 @@ export type MapEditOperation =
       scaleDelta?: [number, number, number] | undefined;
     }
   | {
-      kind: 'set_property';
-      target: string;
-      property: string;
-      value: unknown;
-    }
-  | {
       kind: 'change_model';
       target: string;
       newModelName: string;
-    }
-  | {
-      kind: 'duplicate';
-      sourceTarget: string;
-      newName?: string | undefined;
-      transformOffset?: [number, number, number] | undefined;
     }
   | {
       kind: 'delete';
@@ -257,6 +245,10 @@ export interface MapTransactionValidationResult {
     message: string;
     target?: string | undefined;
   }>;
+}
+
+function assertNever(x: never): never {
+  throw new Error(`未处理的 MapEditOperation: ${JSON.stringify(x)}`);
 }
 
 /**
@@ -326,18 +318,6 @@ export function validateMapTransaction(
         }
         break;
       }
-      case 'duplicate': {
-        const source = sceneGraph.findEntity(op.sourceTarget);
-        if (!source) {
-          diagnostics.push({
-            severity: 'error',
-            code: 'MAP_SOURCE_NOT_FOUND',
-            message: `复制源实体不存在: ${op.sourceTarget}`,
-            target: op.sourceTarget
-          });
-        }
-        break;
-      }
       case 'delete': {
         const entity = sceneGraph.findEntity(op.target);
         if (!entity) {
@@ -362,6 +342,8 @@ export function validateMapTransaction(
         }
         break;
       }
+      default:
+        assertNever(op);
     }
   }
 
@@ -379,34 +361,26 @@ export interface BlenderObjectDto {
   soulAddress: string;
   entityKind: MapEntityKind;
   name: string;
-  typeId: number;
   modelName?: string | undefined;
-  position: [number, number, number];
-  rotation: [number, number, number];
-  scale: [number, number, number];
-  entityId?: number | undefined;
-  sourceRevision: string;
+  transform: Transform3D;
 }
 
 export interface BlenderSceneExport {
   schemaVersion: 1;
   mapId: string;
-  sourceUri: string;
   revision: string;
   exportedAt: string;
   objects: BlenderObjectDto[];
 }
 
-export interface BlenderObjectMutation {
+export interface BlenderMutationDto {
   stableKey: string;
   action: 'modify' | 'duplicate' | 'delete' | 'create';
   name?: string | undefined;
-  typeId?: number | undefined;
   modelName?: string | undefined;
   position?: [number, number, number] | undefined;
   rotation?: [number, number, number] | undefined;
   scale?: [number, number, number] | undefined;
-  entityId?: number | undefined;
 }
 
 export interface BlenderDeltaImport {
@@ -414,7 +388,7 @@ export interface BlenderDeltaImport {
   mapId: string;
   baseRevision: string;
   importedAt: string;
-  mutations: BlenderObjectMutation[];
+  mutations: BlenderMutationDto[];
 }
 
 /**
@@ -429,13 +403,8 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
       soulAddress: part.address,
       entityKind: 'part',
       name: part.name,
-      typeId: part.typeId,
       modelName: part.modelName,
-      position: [...part.transform.position],
-      rotation: [...part.transform.rotation],
-      scale: [...part.transform.scale],
-      ...(part.entityId !== undefined ? { entityId: part.entityId } : {}),
-      sourceRevision: doc.revision
+      transform: part.transform
     });
   }
 
@@ -445,19 +414,13 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
       soulAddress: region.address,
       entityKind: 'region',
       name: region.name,
-      typeId: region.typeId,
-      position: [...region.transform.position],
-      rotation: [...region.transform.rotation],
-      scale: [...region.transform.scale],
-      ...(region.entityId !== undefined ? { entityId: region.entityId } : {}),
-      sourceRevision: doc.revision
+      transform: region.transform
     });
   }
 
   return {
     schemaVersion: 1,
     mapId: doc.mapId,
-    sourceUri: doc.sourceUri,
     revision: doc.revision,
     exportedAt: new Date().toISOString(),
     objects
@@ -470,7 +433,11 @@ export function exportMapSceneForBlender(doc: MapDocument): BlenderSceneExport {
 export function importBlenderDeltaToTransaction(
   doc: MapDocument,
   delta: BlenderDeltaImport
-): { ok: true; transaction: MapEditTransaction } | { ok: false; error: string; conflict: boolean } {
+): { ok: true; transaction: MapEditTransaction } | { ok: false; error: string; conflict?: boolean } {
+  if (delta.schemaVersion !== 1) {
+    return { ok: false, error: `不支持的 Blender Delta schemaVersion: ${delta.schemaVersion}` };
+  }
+
   if (delta.mapId !== doc.mapId) {
     return {
       ok: false,
@@ -511,13 +478,11 @@ export function importBlenderDeltaToTransaction(
         break;
       }
       case 'duplicate': {
-        operations.push({
-          kind: 'duplicate',
-          sourceTarget: mut.stableKey,
-          ...(mut.name ? { newName: mut.name } : {}),
-          ...(mut.position ? { transformOffset: mut.position } : {})
-        });
-        break;
+        return {
+          ok: false,
+          conflict: false,
+          error: `MAP_DUPLICATE_UNSUPPORTED: 不支持复制实体操作 (${mut.stableKey})`
+        };
       }
       case 'delete': {
         operations.push({
