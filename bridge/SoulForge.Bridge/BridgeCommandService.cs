@@ -969,6 +969,7 @@ internal sealed class BridgeCommandService
                 {
                     meshIndex,
                     vertexCount = mesh.VertexCount,
+                    indexSize = flver.GetMeshIndexSize(meshIndex),
                     positionsBase64 = positions,
                     indicesBase64 = indices,
                     uvsBase64 = uvs,
@@ -1092,6 +1093,7 @@ internal sealed class BridgeCommandService
                     entryName = entry.Name,
                     meshIndex,
                     vertexCount = mesh.VertexCount,
+                    indexSize = flver.GetMeshIndexSize(meshIndex),
                     positionsBase64 = positions,
                     indicesBase64 = indices,
                     uvsBase64 = uvs,
@@ -1182,6 +1184,7 @@ internal sealed class BridgeCommandService
                     bufferLayoutIndex = mesh.BufferLayoutIndex,
                     materialIndex = mesh.MaterialIndex,
                     indexFormat = mesh.IndexFormat,
+                    indexSize = document.GetMeshIndexSize(meshIndex),
                     positionsBase64 = positions,
                     indicesBase64 = indices,
                     uvsBase64 = uvs,

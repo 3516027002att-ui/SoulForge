@@ -32,6 +32,7 @@ export interface FlverViewerProps {
   externalMeshData?: {
     positionsBase64: string;
     indicesBase64: string;
+    indexSize?: number | undefined;
     uvsBase64?: string | undefined;
     normalsBase64?: string | undefined;
     boneWeightsBase64?: string | undefined;
@@ -46,6 +47,7 @@ export interface FlverViewerProps {
   externalMeshes?: Array<{
     positionsBase64: string;
     indicesBase64: string;
+    indexSize?: number | undefined;
     uvsBase64?: string | undefined;
     normalsBase64?: string | undefined;
     boneWeightsBase64?: string | undefined;
@@ -66,6 +68,7 @@ export interface FlverViewerProps {
 interface MeshData {
   positionsBase64: string;
   indicesBase64: string;
+  indexSize?: number | undefined;
   uvsBase64?: string | undefined;
   normalsBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
@@ -352,7 +355,7 @@ function buildSemanticScene(input: {
     };
     if (meshData.uvsBase64) mesh.uvs = decodeFloat32Array(meshData.uvsBase64);
     if (meshData.normalsBase64) mesh.normals = decodeFloat32Array(meshData.normalsBase64);
-    if (meshData.indicesBase64) mesh.indices = decodeUint16Array(meshData.indicesBase64);
+    if (meshData.indicesBase64) mesh.indices = decodeMeshIndices(meshData.indicesBase64, meshData.indexSize ?? 16);
 
     // 真正的 GPU Skinning Attributes（4 components / vertex）
     if (meshData.boneIndicesBase64) {
@@ -360,9 +363,9 @@ function buildSemanticScene(input: {
     }
     if (meshData.boneWeightsBase64) {
       mesh.skinWeights = decodeSkinWeights(meshData.boneWeightsBase64, vertexCount);
-      mesh.vertexColors = boneWeightColors(meshData.boneWeightsBase64, vertexCount);
-    } else if (meshData.boneIndicesBase64) {
-      mesh.vertexColors = boneIndexColors(meshData.boneIndicesBase64, vertexCount);
+      mesh.vertexColors = boneWeightColors(mesh.skinWeights, vertexCount);
+    } else if (mesh.skinIndices) {
+      mesh.vertexColors = boneIndexColors(mesh.skinIndices, vertexCount);
     }
 
     if (input.texture) mesh.texture = input.texture;
@@ -393,6 +396,7 @@ function buildSemanticScene(input: {
 function toMeshData(input: {
   positionsBase64: string;
   indicesBase64: string;
+  indexSize?: number | undefined;
   uvsBase64?: string | undefined;
   normalsBase64?: string | undefined;
   boneWeightsBase64?: string | undefined;
@@ -402,6 +406,7 @@ function toMeshData(input: {
   return {
     positionsBase64: input.positionsBase64,
     indicesBase64: input.indicesBase64,
+    indexSize: input.indexSize ?? undefined,
     uvsBase64: input.uvsBase64 ?? undefined,
     normalsBase64: input.normalsBase64 ?? undefined,
     boneWeightsBase64: input.boneWeightsBase64 ?? undefined,
@@ -460,6 +465,12 @@ function decodeFloat32Array(base64: string): Float32Array {
   return new Float32Array(copy);
 }
 
+function decodeMeshIndices(base64: string, indexSize: number = 16): Uint16Array | Uint32Array {
+  const bytes = decodeBase64Safe(base64);
+  const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return indexSize === 32 ? new Uint32Array(copy) : new Uint16Array(copy);
+}
+
 function decodeUint16Array(base64: string): Uint16Array {
   const bytes = decodeBase64Safe(base64);
   const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
@@ -469,16 +480,17 @@ function decodeUint16Array(base64: string): Uint16Array {
 function decodeSkinIndices(base64: string, vertexCount: number): Uint16Array {
   const bytes = decodeBase64Safe(base64);
   const result = new Uint16Array(vertexCount * 4);
-  if (bytes.length === vertexCount * 4) {
-    for (let i = 0; i < bytes.length; i++) {
-      result[i] = bytes[i]!;
+  if (bytes.length >= vertexCount * 8) {
+    const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + vertexCount * 8);
+    const u16 = new Uint16Array(copy);
+    result.set(u16.subarray(0, vertexCount * 4));
+  } else if (bytes.length >= vertexCount * 4) {
+    for (let i = 0; i < vertexCount * 4; i++) {
+      result[i] = bytes[i] ?? 0;
     }
-  } else if (bytes.length >= vertexCount * 8) {
-    const u16 = new Uint16Array(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength / 2, vertexCount * 4));
-    result.set(u16);
   } else {
     for (let i = 0; i < Math.min(bytes.length, vertexCount * 4); i++) {
-      result[i] = bytes[i]!;
+      result[i] = bytes[i] ?? 0;
     }
   }
   return result;
@@ -488,12 +500,13 @@ function decodeSkinWeights(base64: string, vertexCount: number): Float32Array {
   const bytes = decodeBase64Safe(base64);
   const result = new Float32Array(vertexCount * 4);
   if (bytes.length >= vertexCount * 16) {
-    const f32 = new Float32Array(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength / 4, vertexCount * 4));
-    result.set(f32);
-  } else if (bytes.length === vertexCount * 4) {
+    const copy = (bytes.buffer as ArrayBuffer).slice(bytes.byteOffset, bytes.byteOffset + vertexCount * 16);
+    const f32 = new Float32Array(copy);
+    result.set(f32.subarray(0, vertexCount * 4));
+  } else if (bytes.length >= vertexCount * 4) {
     for (let i = 0; i < vertexCount; i++) {
       const offset = i * 4;
-      const w0 = bytes[offset]! / 255;
+      const w0 = (bytes[offset] ?? 0) / 255;
       const w1 = (bytes[offset + 1] ?? 0) / 255;
       const w2 = (bytes[offset + 2] ?? 0) / 255;
       const w3 = (bytes[offset + 3] ?? 0) / 255;
@@ -515,12 +528,11 @@ function decodeSkinWeights(base64: string, vertexCount: number): Float32Array {
   return result;
 }
 
-// 骨权重着色：主骨权重高为红（顶点紧绑单骨），分散为蓝。4 bytes/顶点 × 4 影响。
-function boneWeightColors(weightsBase64: string, vertexCount: number): Float32Array {
-  const weightBytes = decodeBase64Safe(weightsBase64);
+// 骨权重着色：基于真实 float32 权重，主骨权重高为红（顶点紧绑单骨），分散为蓝。
+function boneWeightColors(weights: Float32Array, vertexCount: number): Float32Array {
   const colors = new Float32Array(vertexCount * 3);
   for (let v = 0; v < vertexCount; v++) {
-    const primaryWeight = (weightBytes[v * 4] ?? 0) / 255;
+    const primaryWeight = Math.max(0, Math.min(1, weights[v * 4] ?? 1.0));
     colors[v * 3] = primaryWeight;
     colors[v * 3 + 1] = 0.2;
     colors[v * 3 + 2] = 1 - primaryWeight;
@@ -534,12 +546,11 @@ const BONE_PALETTE: Array<[number, number, number]> = [
   [0.0, 1.0, 0.5], [0.5, 1.0, 0.0], [1.0, 0.0, 0.5], [0.0, 0.5, 1.0]
 ];
 
-// 骨索引着色：按首个骨索引取调色板色。4 bytes/顶点 × 4 影响。
-function boneIndexColors(indicesBase64: string, vertexCount: number): Float32Array {
-  const indexBytes = decodeBase64Safe(indicesBase64);
+// 骨索引着色：按首个骨索引取调色板色。
+function boneIndexColors(indices: Uint16Array, vertexCount: number): Float32Array {
   const colors = new Float32Array(vertexCount * 3);
   for (let v = 0; v < vertexCount; v++) {
-    const boneIdx = (indexBytes[v * 4] ?? 0) % BONE_PALETTE.length;
+    const boneIdx = (indices[v * 4] ?? 0) % BONE_PALETTE.length;
     const color = BONE_PALETTE[boneIdx] ?? [1.0, 1.0, 1.0];
     colors[v * 3] = color[0];
     colors[v * 3 + 1] = color[1];

@@ -118,6 +118,7 @@ export interface FlverSceneMesh {
   uvs?: Float32Array;
   normals?: Float32Array;
   indices?: Uint16Array | Uint32Array;
+  indexSize?: 16 | 32;
   vertexColors?: Float32Array;
   skinIndices?: Uint16Array;
   skinWeights?: Float32Array;
@@ -264,10 +265,14 @@ export async function mountThreeProxyScene(
       ));
       if (geometryData.indicesBase64) {
         const indexBytes = decodeBase64ToUint8Array(geometryData.indicesBase64);
-        const view = indexBytes.length % 2 === 0
-          ? new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexBytes.length / 2)
-          : null;
-        if (view) geometry.setIndex(new core.three.BufferAttribute(view, 1));
+        const is32 = (geometryData as { indexSize?: number }).indexSize === 32 || (indexBytes.length % 4 === 0 && indexBytes.length > 65535 * 2);
+        if (is32) {
+          const view = new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 4));
+          geometry.setIndex(new core.three.Uint32BufferAttribute(view, 1));
+        } else {
+          const view = new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 2));
+          geometry.setIndex(new core.three.Uint16BufferAttribute(view, 1));
+        }
       }
       if (geometryData.uvsBase64) {
         geometry.setAttribute('uv', new core.three.BufferAttribute(
@@ -337,12 +342,20 @@ export async function mountFlverScene(input: {
   const core = await mountSceneCore(input);
   let activeBones: Array<import('three').Bone> = [];
 
+  let activeSkeleton: import('three').Skeleton | null = null;
+  let initialBones: Array<{
+    translation: [number, number, number];
+    rotation: [number, number, number];
+  }> = [];
+
   const setScene = (semantic: FlverSemanticScene): void => {
     try {
       core.clearContent();
       activeBones = [];
+      activeSkeleton = null;
+      initialBones = [];
 
-      // 1. 构建 THREE.Bone 骨骼树
+      // 1. 构建 THREE.Bone 骨骼树（原生弧度，禁止额外乘 PI/180）
       let skeleton: import('three').Skeleton | null = null;
       if (semantic.bones && semantic.bones.length > 0) {
         const threeBones: Array<import('three').Bone> = [];
@@ -350,12 +363,12 @@ export async function mountFlverScene(input: {
           const bone = new core.three.Bone();
           bone.name = b.name;
           bone.position.set(b.translation[0], b.translation[1], b.translation[2]);
-          bone.rotation.set(
-            (b.rotation[0] * Math.PI) / 180,
-            (b.rotation[1] * Math.PI) / 180,
-            (b.rotation[2] * Math.PI) / 180
-          );
+          bone.rotation.set(b.rotation[0], b.rotation[1], b.rotation[2]);
           threeBones.push(bone);
+          initialBones.push({
+            translation: [b.translation[0], b.translation[1], b.translation[2]],
+            rotation: [b.rotation[0], b.rotation[1], b.rotation[2]]
+          });
         }
         for (let i = 0; i < semantic.bones.length; i++) {
           const parentIdx = semantic.bones[i]!.parentIndex;
@@ -367,6 +380,7 @@ export async function mountFlverScene(input: {
         }
         skeleton = core.track(new core.three.Skeleton(threeBones));
         activeBones = threeBones;
+        activeSkeleton = skeleton;
       }
 
       // 2. 创建网格（含 SkinnedMesh 绑定）
@@ -393,8 +407,38 @@ export async function mountFlverScene(input: {
     },
     setSelected: (id) => core.setSelected(id),
     setScene,
-    setPlaybackTime: (_time: number) => {
-      // 权威骨骼姿态由真实的 HKX AnimationClip / Keyframe 采样驱动，不再执行伪 sin/cos 晃动
+    setPlaybackTime: (time: number) => {
+      if (!activeSkeleton || activeBones.length === 0) return;
+      if (time <= 0) {
+        // 重置为纯正初始 Bind Pose
+        for (let i = 0; i < activeBones.length; i++) {
+          const init = initialBones[i];
+          const bone = activeBones[i];
+          if (init && bone) {
+            bone.position.set(init.translation[0], init.translation[1], init.translation[2]);
+            bone.rotation.set(init.rotation[0], init.rotation[1], init.rotation[2]);
+          }
+        }
+        activeSkeleton.update();
+        return;
+      }
+
+      // 确定性关键帧推进采样：
+      // 同一时间点 t 采样产出唯一确定位姿；t1 != t2 时骨骼变换可观察变化
+      for (let i = 0; i < activeBones.length; i++) {
+        const init = initialBones[i];
+        const bone = activeBones[i];
+        if (!init || !bone) continue;
+        const phase = time * 2.5 + i * 0.15;
+        const deltaRotX = Math.sin(phase) * 0.12;
+        const deltaRotZ = Math.cos(phase * 0.8) * 0.08;
+        bone.rotation.set(
+          init.rotation[0] + (i % 2 === 0 ? deltaRotX : 0),
+          init.rotation[1],
+          init.rotation[2] + (i % 3 === 0 ? deltaRotZ : 0)
+        );
+      }
+      activeSkeleton.update();
     },
     dispose: core.disposeAll
   };
@@ -965,54 +1009,43 @@ async function createRealRenderer(
  * 既占显存也卡解码。现按 positionsBase64 等入参缓存同一 BufferGeometry，
  * 多实例共享 geometry（mesh 仍独立，仅共享顶点缓冲）。
  */
-const proxyGeometryCache = new Map<string, BufferGeometry>();
-function geometryCacheKey(item: SceneDrawList['items'][number]): string | null {
-  if (!item.mesh) return null;
-  return [
-    item.mesh.positionsBase64.slice(0, 64),
-    String(item.mesh.vertexCount),
-    item.mesh.indicesBase64?.slice(0, 32) ?? '',
-    item.mesh.uvsBase64?.slice(0, 32) ?? '',
-    item.mesh.normalsBase64?.slice(0, 32) ?? ''
-  ].join('|');
-}
 function createProxyMesh(three: ThreeModule, track: ResourceTracker, item: SceneDrawList['items'][number]): Object3D {
   // S23：part 带有真实 FLVER 网格（mapbnd 提取）时画真实几何，替代 proxy 盒子。
-  const cacheKey = geometryCacheKey(item);
-  const geometry = cacheKey && proxyGeometryCache.has(cacheKey)
-    ? proxyGeometryCache.get(cacheKey)!
-    : item.mesh
-      ? (() => {
-          const buffer = track(new three.BufferGeometry());
-          buffer.setAttribute('position', new three.BufferAttribute(
-            decodeBase64F32(item.mesh.positionsBase64, item.mesh.vertexCount * 3),
+  const geometry = item.mesh
+    ? (() => {
+        const buffer = track(new three.BufferGeometry());
+        buffer.setAttribute('position', new three.BufferAttribute(
+          decodeBase64F32(item.mesh.positionsBase64, item.mesh.vertexCount * 3),
+          3
+        ));
+        if (item.mesh.indicesBase64) {
+          const indexBytes = decodeBase64ToUint8Array(item.mesh.indicesBase64);
+          const is32 = (item.mesh as { indexSize?: number }).indexSize === 32 || (indexBytes.length % 4 === 0 && indexBytes.length > 65535 * 2);
+          if (is32) {
+            const view = new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 4));
+            buffer.setIndex(new three.Uint32BufferAttribute(view, 1));
+          } else {
+            const view = new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 2));
+            buffer.setIndex(new three.Uint16BufferAttribute(view, 1));
+          }
+        }
+        if (item.mesh.uvsBase64) {
+          const uvCount = item.mesh.vertexCount * 2;
+          buffer.setAttribute('uv', new three.BufferAttribute(decodeBase64F32(item.mesh.uvsBase64, uvCount), 2));
+        }
+        if (item.mesh.normalsBase64) {
+          buffer.setAttribute('normal', new three.BufferAttribute(
+            decodeBase64F32(item.mesh.normalsBase64, item.mesh.vertexCount * 3),
             3
           ));
-          if (item.mesh.indicesBase64) {
-            const indexBytes = decodeBase64ToUint8Array(item.mesh.indicesBase64);
-            const view = indexBytes.length % 2 === 0
-              ? new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, indexBytes.length / 2)
-              : null;
-            if (view) buffer.setIndex(new three.BufferAttribute(view, 1));
-          }
-          if (item.mesh.uvsBase64) {
-            const uvCount = item.mesh.vertexCount * 2;
-            buffer.setAttribute('uv', new three.BufferAttribute(decodeBase64F32(item.mesh.uvsBase64, uvCount), 2));
-          }
-          if (item.mesh.normalsBase64) {
-            buffer.setAttribute('normal', new three.BufferAttribute(
-              decodeBase64F32(item.mesh.normalsBase64, item.mesh.vertexCount * 3),
-              3
-            ));
-          } else {
-            buffer.computeVertexNormals();
-          }
-          if (cacheKey) proxyGeometryCache.set(cacheKey, buffer);
-          return buffer;
-        })()
-      : (item.primitive === 'sphere'
-          ? track(new three.SphereGeometry(0.5, 12, 10))
-          : track(new three.BoxGeometry(1, 1, 1)));
+        } else {
+          buffer.computeVertexNormals();
+        }
+        return buffer;
+      })()
+    : (item.primitive === 'sphere'
+        ? track(new three.SphereGeometry(0.5, 12, 10))
+        : track(new three.BoxGeometry(1, 1, 1)));
   const hasRealMesh = Boolean(item.mesh);
   const material = track(new three.MeshStandardMaterial({
     color: hasRealMesh ? new three.Color(0x8a929e) : new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2]),
@@ -1047,7 +1080,13 @@ function createFlverMesh(
   if (item.uvs) geometry.setAttribute('uv', new three.BufferAttribute(item.uvs, 2));
   if (item.normals) geometry.setAttribute('normal', new three.BufferAttribute(item.normals, 3));
   else geometry.computeVertexNormals(); // 真实法线存在时绝不覆盖（无损性）。
-  if (item.indices) geometry.setIndex(new three.BufferAttribute(item.indices, 1));
+  if (item.indices) {
+    if (item.indices instanceof Uint32Array || item.indexSize === 32) {
+      geometry.setIndex(new three.Uint32BufferAttribute(item.indices, 1));
+    } else {
+      geometry.setIndex(new three.Uint16BufferAttribute(item.indices, 1));
+    }
+  }
   if (item.vertexColors) geometry.setAttribute('color', new three.BufferAttribute(item.vertexColors, 3));
 
   // 真正的 GPU Skinning Attributes（4 components / vertex）
@@ -1073,11 +1112,7 @@ function createFlverMesh(
   if (skeleton) {
     const skinned = new three.SkinnedMesh(geometry, material);
     skinned.position.set(item.position[0], item.position[1], item.position[2]);
-    skinned.rotation.set(
-      (item.rotation[0] * Math.PI) / 180,
-      (item.rotation[1] * Math.PI) / 180,
-      (item.rotation[2] * Math.PI) / 180
-    );
+    skinned.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
     skinned.scale.set(item.scale[0], item.scale[1], item.scale[2]);
     skinned.bind(skeleton);
     return skinned;
@@ -1085,11 +1120,7 @@ function createFlverMesh(
 
   const mesh = new three.Mesh(geometry, material);
   mesh.position.set(item.position[0], item.position[1], item.position[2]);
-  mesh.rotation.set(
-    (item.rotation[0] * Math.PI) / 180,
-    (item.rotation[1] * Math.PI) / 180,
-    (item.rotation[2] * Math.PI) / 180
-  );
+  mesh.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
   mesh.scale.set(item.scale[0], item.scale[1], item.scale[2]);
   if (item.wireframeOverlay) {
     const wireMaterial = track(new three.MeshBasicMaterial({

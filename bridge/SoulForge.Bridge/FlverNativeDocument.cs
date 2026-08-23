@@ -527,6 +527,7 @@ internal sealed class FlverNativeDocument
     }
 
     /// <summary>提取网格骨骼权重（float[4] 每顶点，Byte4C=byte/255）为 base64。</summary>
+    /// <summary>提取网格骨骼权重（float[4] 每顶点，归一化）为 base64。</summary>
     public string? GetMeshBoneWeightsBase64(int meshIndex, int maxVertices = 10_000)
     {
         var plan = BuildMeshPlan(meshIndex);
@@ -547,20 +548,40 @@ internal sealed class FlverNativeDocument
                     weights[v * 4 + 3] = ReadByte(_source, (int)off + 3) / 255f;
                     break;
                 case TypeByte4A:
-                    weights[v * 4] = ReadSByte(_source, (int)off) / 127f;
-                    weights[v * 4 + 1] = ReadSByte(_source, (int)off + 1) / 127f;
-                    weights[v * 4 + 2] = ReadSByte(_source, (int)off + 2) / 127f;
-                    weights[v * 4 + 3] = ReadSByte(_source, (int)off + 3) / 127f;
+                    weights[v * 4] = Math.Max(0f, ReadSByte(_source, (int)off) / 127f);
+                    weights[v * 4 + 1] = Math.Max(0f, ReadSByte(_source, (int)off + 1) / 127f);
+                    weights[v * 4 + 2] = Math.Max(0f, ReadSByte(_source, (int)off + 2) / 127f);
+                    weights[v * 4 + 3] = Math.Max(0f, ReadSByte(_source, (int)off + 3) / 127f);
                     break;
                 case TypeUVPair:
                 case TypeShort4toFloat4A:
-                    weights[v * 4] = ReadInt16(_source, (int)off) / 32767f;
-                    weights[v * 4 + 1] = ReadInt16(_source, (int)off + 2) / 32767f;
-                    weights[v * 4 + 2] = ReadInt16(_source, (int)off + 4) / 32767f;
-                    weights[v * 4 + 3] = ReadInt16(_source, (int)off + 6) / 32767f;
+                    weights[v * 4] = Math.Max(0f, ReadInt16(_source, (int)off) / 32767f);
+                    weights[v * 4 + 1] = Math.Max(0f, ReadInt16(_source, (int)off + 2) / 32767f);
+                    weights[v * 4 + 2] = Math.Max(0f, ReadInt16(_source, (int)off + 4) / 32767f);
+                    weights[v * 4 + 3] = Math.Max(0f, ReadInt16(_source, (int)off + 6) / 32767f);
                     break;
                 default:
                     return null;
+            }
+
+            var w0 = float.IsFinite(weights[v * 4]) ? weights[v * 4] : 0f;
+            var w1 = float.IsFinite(weights[v * 4 + 1]) ? weights[v * 4 + 1] : 0f;
+            var w2 = float.IsFinite(weights[v * 4 + 2]) ? weights[v * 4 + 2] : 0f;
+            var w3 = float.IsFinite(weights[v * 4 + 3]) ? weights[v * 4 + 3] : 0f;
+            var sum = w0 + w1 + w2 + w3;
+            if (sum > 1e-5f)
+            {
+                weights[v * 4] = w0 / sum;
+                weights[v * 4 + 1] = w1 / sum;
+                weights[v * 4 + 2] = w2 / sum;
+                weights[v * 4 + 3] = w3 / sum;
+            }
+            else
+            {
+                weights[v * 4] = 1f;
+                weights[v * 4 + 1] = 0f;
+                weights[v * 4 + 2] = 0f;
+                weights[v * 4 + 3] = 0f;
             }
         }
         var bytes = new byte[weights.Length * 4];
@@ -568,38 +589,83 @@ internal sealed class FlverNativeDocument
         return Convert.ToBase64String(bytes);
     }
 
-    /// <summary>提取网格骨骼索引（4 字节/顶点原样）为 base64。</summary>
+    /// <summary>
+    /// 提取网格全局骨骼索引（uint16[4] 每顶点，经 Mesh.BoneIndices 局部调色板 remap）为 base64。
+    /// 输出字节长度为 vertexCount * 8 字节。
+    /// </summary>
     public string? GetMeshBoneIndicesBase64(int meshIndex, int maxVertices = 10_000)
     {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return null;
+        var mesh = Meshes[meshIndex];
         var plan = BuildMeshPlan(meshIndex);
         if (plan?.BoneIndices == null || plan.VertexCount <= 0) return null;
         var vertexCount = Math.Min(plan.VertexCount, maxVertices);
         var a = plan.BoneIndices;
-        var indices = new byte[vertexCount * 4];
+        var globalIndices = new ushort[vertexCount * 4];
+
+        ushort RemapBone(int localIdx)
+        {
+            if (mesh.BoneIndices.Count > 0)
+            {
+                if (localIdx >= 0 && localIdx < mesh.BoneIndices.Count)
+                {
+                    var g = mesh.BoneIndices[localIdx];
+                    return (ushort)(g >= 0 && g < Bones.Count ? g : (mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0));
+                }
+                return (ushort)(mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0);
+            }
+            if (localIdx >= 0 && localIdx < Bones.Count) return (ushort)localIdx;
+            return (ushort)(mesh.DefaultBoneIndex >= 0 && mesh.DefaultBoneIndex < Bones.Count ? mesh.DefaultBoneIndex : 0);
+        }
+
         for (var v = 0; v < vertexCount; v++)
         {
             var off = a.DataBase + (long)v * a.Stride + a.Offset;
             if (off < 0 || off + 4 > _source.Length) return null;
+            int r0, r1, r2, r3;
             if (a.Type == TypeShortBoneIndices)
             {
-                indices[v * 4] = ReadByte(_source, (int)off);
-                indices[v * 4 + 1] = ReadByte(_source, (int)off + 2);
-                indices[v * 4 + 2] = ReadByte(_source, (int)off + 4);
-                indices[v * 4 + 3] = ReadByte(_source, (int)off + 6);
+                if (off + 8 > _source.Length) return null;
+                r0 = ReadUInt16(_source, (int)off);
+                r1 = ReadUInt16(_source, (int)off + 2);
+                r2 = ReadUInt16(_source, (int)off + 4);
+                r3 = ReadUInt16(_source, (int)off + 6);
             }
             else if (a.Type is TypeByte4B or TypeByte4E)
             {
-                indices[v * 4] = ReadByte(_source, (int)off);
-                indices[v * 4 + 1] = ReadByte(_source, (int)off + 1);
-                indices[v * 4 + 2] = ReadByte(_source, (int)off + 2);
-                indices[v * 4 + 3] = ReadByte(_source, (int)off + 3);
+                r0 = ReadByte(_source, (int)off);
+                r1 = ReadByte(_source, (int)off + 1);
+                r2 = ReadByte(_source, (int)off + 2);
+                r3 = ReadByte(_source, (int)off + 3);
             }
             else
             {
                 return null;
             }
+
+            globalIndices[v * 4] = RemapBone(r0);
+            globalIndices[v * 4 + 1] = RemapBone(r1);
+            globalIndices[v * 4 + 2] = RemapBone(r2);
+            globalIndices[v * 4 + 3] = RemapBone(r3);
         }
-        return Convert.ToBase64String(indices);
+        var bytes = new byte[globalIndices.Length * 2];
+        Buffer.BlockCopy(globalIndices, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
+    /// <summary>获取网格主 FaceSet 的索引位宽（16 或 32 位）。</summary>
+    public int GetMeshIndexSize(int meshIndex)
+    {
+        if (meshIndex < 0 || meshIndex >= Meshes.Count) return 16;
+        var mesh = Meshes[meshIndex];
+        if (mesh.FaceSetIndices.Count == 0) return 16;
+        var candidates = mesh.FaceSetIndices
+            .Where(i => i >= 0 && i < _faceSets.Count)
+            .Select(i => _faceSets[i])
+            .ToList();
+        if (candidates.Count == 0) return 16;
+        var selected = candidates.FirstOrDefault(fs => fs.Flags == 0) ?? candidates[0];
+        return selected.IndexSize == 32 ? 32 : 16;
     }
 
     /// <summary>
