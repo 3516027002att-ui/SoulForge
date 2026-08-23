@@ -129,6 +129,7 @@ export * from './audit-log/index.js';
 export * from './transactions/index.js';
 export * from './vfs/index.js';
 export * from './tae/taeEventTemplate.js';
+export * from './action/taeAnimationBridge.js';
 export * from './memory/memoryTypes.js';
 export * from './memory/memoryStore.js';
 export * from './doctor/doctorService.js';

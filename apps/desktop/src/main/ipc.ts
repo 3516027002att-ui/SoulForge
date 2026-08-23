@@ -4672,6 +4672,102 @@ export function registerIpcHandlers(webContents: WebContents, rendererDocumentUr
     }
   );
 
+  handle(
+    'resource.readTaeAnimationClip',
+    async (
+      _event,
+      sourceUri: string,
+      animId: number,
+      flverBoneNames?: string[]
+    ): Promise<{
+      ok: boolean;
+      sourceUri?: string;
+      relativePath?: string;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引或工作区未打开，无法读取 TAE 动画。', sourceUri }] };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      const overlayParent = dirname(activeSession.layers.overlayRoot);
+      const effectiveBase = activeSession.layers.baseRoot?.trim()
+        ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'parts')) ? overlayParent : null);
+      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
+
+      const result = await runBridge<Record<string, unknown>>({
+        command: 'read-tae-animation-clip',
+        filePath: file.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        timeoutMs: 120_000,
+        ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+        commandOptions: { animId, ...(flverBoneNames?.length ? { flverBoneNames } : {}) }
+      });
+      if (result.parseStatus === 'failed' || !result.data) {
+        return { ok: false, sourceUri, diagnostics: result.diagnostics };
+      }
+
+      return {
+        ok: true,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: result.data,
+        diagnostics: result.diagnostics
+      };
+    }
+  );
+
+  handle(
+    'resource.sampleTaeAnimationPose',
+    async (
+      _event,
+      sourceUri: string,
+      animId: number,
+      timeSeconds: number,
+      flverBoneNames?: string[],
+      loop?: boolean
+    ): Promise<{
+      ok: boolean;
+      sourceUri?: string;
+      relativePath?: string;
+      data?: Record<string, unknown>;
+      diagnostics: Array<{ severity: string; code: string; message: string; sourceUri?: string }>;
+    }> => {
+      const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
+      if (!file || !activeSession) {
+        return { ok: false, diagnostics: [{ severity: 'error' as const, code: 'RESOURCE_NOT_INDEXED', message: '资源未索引或工作区未打开，无法采样 TAE 动画位姿。', sourceUri }] };
+      }
+      const roots = await verifiedReadRoots(activeSession, dirname(file.absolutePath));
+      if (roots.diagnostics.length > 0) return { ok: false, diagnostics: roots.diagnostics };
+      const overlayParent = dirname(activeSession.layers.overlayRoot);
+      const effectiveBase = activeSession.layers.baseRoot?.trim()
+        ?? (existsSync(join(overlayParent, 'sekiro.exe')) || existsSync(join(overlayParent, 'parts')) ? overlayParent : null);
+      if (effectiveBase && !roots.allowedRoots.includes(effectiveBase)) roots.allowedRoots.push(effectiveBase);
+
+      const result = await runBridge<Record<string, unknown>>({
+        command: 'sample-tae-animation-pose',
+        filePath: file.absolutePath,
+        allowedRoots: roots.allowedRoots,
+        timeoutMs: 120_000,
+        ...(effectiveBase ? { oodleRuntimeRoot: effectiveBase } : {}),
+        commandOptions: { animId, timeSeconds, loop: loop ?? true, ...(flverBoneNames?.length ? { flverBoneNames } : {}) }
+      });
+      if (result.parseStatus === 'failed' || !result.data) {
+        return { ok: false, sourceUri, diagnostics: result.diagnostics };
+      }
+
+      return {
+        ok: true,
+        sourceUri,
+        relativePath: file.relativePath,
+        data: result.data,
+        diagnostics: result.diagnostics
+      };
+    }
+  );
+
   handle('resource.readEsdDocument', async (_event, sourceUri: string) => {
     const file = indexedFiles.find((item) => item.sourceUri === sourceUri);
     if (!file) {

@@ -17,7 +17,7 @@ import { getRendererBridge } from '../runtime/rendererRuntime.js';
 import { WorkbenchLayout } from '../workbench/WorkbenchLayout.js';
 
 /**
- * 按 models[modelIndex].name 解析真实 FLVER 名。
+ * 按 models[modelIndex].name 解析真实 FLVER 名（mapbnd 容器读链）。
  * 供 SceneDrawItem 去重加载使用：优先取 item.modelName（来自 buildSceneDrawList 的
  * manifest.models[modelIndex]），缺省时回退到 props.models[modelIndex]。
  * 返回 undefined 时该 part 保持线框，不发起 Bridge。
@@ -244,6 +244,7 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
                     };
                     loadedModelMeshesRef.current.set(modelName, geometryData as any);
                     loaded += (byModel.get(modelName)?.length ?? 1);
+                    // applyLoadedMeshes: 更新已加载的网格几何
                     handle.updateModelGeometry?.(modelName, geometryData);
                   } else {
                     missing += (byModel.get(modelName)?.length ?? 1);

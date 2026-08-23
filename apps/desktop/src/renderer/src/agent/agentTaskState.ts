@@ -329,7 +329,7 @@ export function extractCompletedTurnItems(
     items.push({ kind: 'user', text: goal });
   }
 
-  const showThinking = task.thinkingText.length > 0;
+  const showThinking = typeof task.thinkingText === 'string' && task.thinkingText.length > 0;
   if (showThinking) {
     items.push({
       kind: 'thinking',

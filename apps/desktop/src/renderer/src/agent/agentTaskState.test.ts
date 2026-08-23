@@ -566,7 +566,7 @@ describe('对话时间线：口播与工具按步交织，思考可折叠', () =
       rolloutFileName: 'sessions/turn2.jsonl',
       historyItems: [{ kind: 'user' as const, text: '问题一' }, { kind: 'assistant' as const, step: 1, text: '回答一' }],
       narrations: [{ step: 1, text: '回答二' }],
-      thinkingText: '思考二'
+      thinkingText: ''
     };
 
     // 开启第三轮

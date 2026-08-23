@@ -81,6 +81,11 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
 export interface FlverSceneHandle extends ThreeSceneHandle {
   setScene: (scene: FlverSemanticScene) => void;
   setPlaybackTime?: (time: number) => void;
+  setPose?: (pose: Array<{
+    translation: [number, number, number];
+    rotation: [number, number, number, number] | [number, number, number];
+    scale?: [number, number, number] | undefined;
+  }>) => void;
 }
 
 /** 未压缩 RGBA 纹理投影输入（typed bytes，不含渲染器对象）。 */
@@ -417,26 +422,37 @@ export async function mountFlverScene(input: {
           if (init && bone) {
             bone.position.set(init.translation[0], init.translation[1], init.translation[2]);
             bone.rotation.set(init.rotation[0], init.rotation[1], init.rotation[2]);
+            bone.scale.set(1, 1, 1);
           }
         }
         activeSkeleton.update();
-        return;
       }
-
-      // 确定性关键帧推进采样：
-      // 同一时间点 t 采样产出唯一确定位姿；t1 != t2 时骨骼变换可观察变化
-      for (let i = 0; i < activeBones.length; i++) {
-        const init = initialBones[i];
+    },
+    setPose: (pose) => {
+      if (!activeSkeleton || activeBones.length === 0 || !pose || pose.length === 0) return;
+      for (let i = 0; i < activeBones.length && i < pose.length; i++) {
+        const transform = pose[i];
         const bone = activeBones[i];
-        if (!init || !bone) continue;
-        const phase = time * 2.5 + i * 0.15;
-        const deltaRotX = Math.sin(phase) * 0.12;
-        const deltaRotZ = Math.cos(phase * 0.8) * 0.08;
-        bone.rotation.set(
-          init.rotation[0] + (i % 2 === 0 ? deltaRotX : 0),
-          init.rotation[1],
-          init.rotation[2] + (i % 3 === 0 ? deltaRotZ : 0)
-        );
+        if (!transform || !bone) continue;
+
+        bone.position.set(transform.translation[0], transform.translation[1], transform.translation[2]);
+        if (transform.rotation.length === 4) {
+          bone.quaternion.set(
+            transform.rotation[0],
+            transform.rotation[1],
+            transform.rotation[2],
+            transform.rotation[3]
+          );
+        } else {
+          bone.rotation.set(
+            transform.rotation[0],
+            transform.rotation[1],
+            transform.rotation[2]
+          );
+        }
+        if (transform.scale) {
+          bone.scale.set(transform.scale[0], transform.scale[1], transform.scale[2]);
+        }
       }
       activeSkeleton.update();
     },

@@ -382,6 +382,12 @@ const api = {
   /** S17：伴生 chrbnd 的 FLVER 预览（overlay → 原版；KRAK 缺 Oodle 给可行动码）。 */
   readTaeChrbndPreview: (sourceUri: string, meshIndex: number): Promise<unknown> =>
     ipcRenderer.invoke('resource.readTaeChrbndPreview', sourceUri, meshIndex),
+  /** ACTION：读取 TAE 关联的真实 HKX 动画 Clip 数据 */
+  readTaeAnimationClip: (sourceUri: string, animId: number, flverBoneNames?: string[]): Promise<unknown> =>
+    ipcRenderer.invoke('resource.readTaeAnimationClip', sourceUri, animId, flverBoneNames),
+  /** ACTION：连续时间采样 TAE 动画位姿 */
+  sampleTaeAnimationPose: (sourceUri: string, animId: number, timeSeconds: number, flverBoneNames?: string[], loop?: boolean): Promise<unknown> =>
+    ipcRenderer.invoke('resource.sampleTaeAnimationPose', sourceUri, animId, timeSeconds, flverBoneNames, loop),
   // S23：按 modelName 在 mapbnd 容器里取 part 的 FLVER 网格（地图 viewport）。
   readMapPartMesh: (msbSourceUri: string, modelName: string): Promise<unknown> =>
     ipcRenderer.invoke('resource.readMapPartMesh', msbSourceUri, modelName),
