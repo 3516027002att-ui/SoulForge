@@ -173,8 +173,8 @@ internal static class TaeAnimationIdentityResolver
 
         var offset = checked((int)animFileInfoOffset);
         var rawType = ReadInt32(source, offset);
-        if (rawType is not (int)MiniHeaderType.Standard
-            and not (int)MiniHeaderType.ImportOtherAnim)
+        if (rawType != (int)MiniHeaderType.Standard
+            && rawType != (int)MiniHeaderType.ImportOtherAnim)
         {
             throw new NotSupportedException(
                 $"Unsupported TAE animation mini-header type {rawType} at 0x{offset:X}.");
