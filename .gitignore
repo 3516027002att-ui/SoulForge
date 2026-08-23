@@ -76,6 +76,7 @@ apps/*/src/**/*.d.ts.map
 # Electron/app artifacts
 release/
 *.log
+!docs/ai-logs/**
 
 # Playwright transient artifacts
 /test-results/
