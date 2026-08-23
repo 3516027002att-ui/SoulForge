@@ -672,7 +672,7 @@ internal static class BridgeDaemonHost
     }
 }
 
-internal sealed class BridgeOutboundFrameTooLargeException : Exception;
+internal sealed class BridgeOutboundFrameTooLargeException : Exception { }
 
 internal sealed class BridgeInboundFrame
 {

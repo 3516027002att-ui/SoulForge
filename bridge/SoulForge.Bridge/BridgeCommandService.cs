@@ -960,6 +960,40 @@ internal sealed class BridgeCommandService
                         new { animId, motionAnimId, sourceContainer, duration = animation.Duration, frameCount, frameDuration })
                 };
 
+                object? splineBlocksData = null;
+                object? interleavedTransformsData = null;
+                int maxFramesPerBlock = 0;
+
+                if (animation is HkxSplineCompressedAnimation scAnim && scAnim.Blocks != null)
+                {
+                    maxFramesPerBlock = scAnim.MaxFramesPerBlock;
+                    splineBlocksData = scAnim.Blocks.Select(b => new
+                    {
+                        tracks = b.Tracks.Select(t => new
+                        {
+                            staticPosition = new[] { t.StaticPosition.X, t.StaticPosition.Y, t.StaticPosition.Z },
+                            staticRotation = new[] { t.StaticRotation.X, t.StaticRotation.Y, t.StaticRotation.Z, t.StaticRotation.W },
+                            staticScale = new[] { t.StaticScale.X, t.StaticScale.Y, t.StaticScale.Z },
+                            positionX = t.PositionX == null ? null : new { degree = t.PositionX.Degree, knots = t.PositionX.Knots, controlPoints = t.PositionX.ControlPoints },
+                            positionY = t.PositionY == null ? null : new { degree = t.PositionY.Degree, knots = t.PositionY.Knots, controlPoints = t.PositionY.ControlPoints },
+                            positionZ = t.PositionZ == null ? null : new { degree = t.PositionZ.Degree, knots = t.PositionZ.Knots, controlPoints = t.PositionZ.ControlPoints },
+                            rotation = t.Rotation == null ? null : new { degree = t.Rotation.Degree, knots = t.Rotation.Knots, controlPoints = t.Rotation.ControlPoints.Select(q => new[] { q.X, q.Y, q.Z, q.W }).ToArray() },
+                            scaleX = t.ScaleX == null ? null : new { degree = t.ScaleX.Degree, knots = t.ScaleX.Knots, controlPoints = t.ScaleX.ControlPoints },
+                            scaleY = t.ScaleY == null ? null : new { degree = t.ScaleY.Degree, knots = t.ScaleY.Knots, controlPoints = t.ScaleY.ControlPoints },
+                            scaleZ = t.ScaleZ == null ? null : new { degree = t.ScaleZ.Degree, knots = t.ScaleZ.Knots, controlPoints = t.ScaleZ.ControlPoints }
+                        }).ToArray()
+                    }).ToArray();
+                }
+                else if (animation is HkxInterleavedAnimation iaAnim && iaAnim.Transforms != null)
+                {
+                    interleavedTransformsData = iaAnim.Transforms.Select(t => new
+                    {
+                        translation = new[] { t.Translation.X, t.Translation.Y, t.Translation.Z },
+                        rotation = new[] { t.Rotation.X, t.Rotation.Y, t.Rotation.Z, t.Rotation.W },
+                        scale = new[] { t.Scale.X, t.Scale.Y, t.Scale.Z }
+                    }).ToArray();
+                }
+
                 return BridgeResult<object>.Partial(file, "action", diagnostics.ToArray(), new
                 {
                     animId,
@@ -974,7 +1008,10 @@ internal sealed class BridgeCommandService
                     hkxBoneNames,
                     hkxReferencePose = hkxRefTransforms,
                     trackToHkxBone,
-                    hkxToFlverBoneMap = hkxToFlverMap
+                    hkxToFlverBoneMap = hkxToFlverMap,
+                    splineBlocks = splineBlocksData,
+                    interleavedTransforms = interleavedTransformsData,
+                    maxFramesPerBlock
                 });
             }
             catch (TaeEntryMissingException)
