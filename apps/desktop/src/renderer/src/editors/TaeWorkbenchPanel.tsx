@@ -66,6 +66,7 @@ import {
   TAE_INVALID_TIME_RANGE,
   AnimationPlaybackClock,
   ActionContinuousSampler,
+  eulerXYZToQuaternion,
   type TaeAnimationClipData,
   type BoneTransformData,
   buildTaeTimelineTracks,
@@ -919,7 +920,7 @@ export function TaeWorkbenchPanel(props: TaeWorkbenchPanelProps): ReactElement {
     if (!activeSampler || preview.boneCount === 0) return undefined;
     const refPose: BoneTransformData[] = preview.bones.map((b) => ({
       translation: b.translation,
-      rotation: [0, 0, 0, 1],
+      rotation: eulerXYZToQuaternion(b.rotation),
       scale: [1, 1, 1]
     }));
     return activeSampler.sampleFlverPose(playbackTime, preview.boneCount, refPose, isLooping);
