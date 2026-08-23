@@ -86,6 +86,7 @@ export const TIER_BY_SCRIPT = Object.freeze({
   'test:yapped-param-metadata-source': 'unit',
   'test:citations': 'unit',
   'test:path-sanitizer': 'unit',
+  'test:action-deterministic-seek': 'unit',
   // AI 工具权限阶梯的**生产**实现。ai-conformance 里有 5 个 case 断言的是
   // testing/harness 下自建的 evaluatePolicyGate/maxPermissionFromMode——那三个
   // 符号全仓只存在于测试目录，生产走 ai/toolPermissions.ts 的

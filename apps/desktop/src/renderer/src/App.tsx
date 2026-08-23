@@ -906,12 +906,12 @@ export function App(): ReactElement {
           protocol: service.protocol
         })));
         setAgentTools(toolList);
-        // 默认选中第一个已配置凭据的服务：未配置凭据的服务会被主进程以
-        // MODEL_SERVICE_UNCONFIGURED 拒绝（ipc.ts:2939），默认选它等于默认失败。
-        setAgentServiceId((current) => current
+        // 优先选中 test-service 免配置服务；未配置凭据的服务会被主进程拒绝。
+        const testService = services.find((service) => service.id === 'test-service' || service.displayName === 'test');
+        setAgentServiceId((current) => (testService ? testService.id : (current
           ?? services.find((service) => service.hasCredential)?.id
           ?? services[0]?.id
-          ?? null);
+          ?? null)));
       } catch (error) {
         setAgentSessionsError(error instanceof Error ? error.message : '读取模型服务或工具清单失败');
       }

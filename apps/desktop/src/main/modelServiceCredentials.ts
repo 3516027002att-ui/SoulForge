@@ -120,6 +120,13 @@ function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error.code === 'ENOENT';
 }
 
+import {
+  isTestConfigPresent,
+  getTestServiceConfig,
+  getTestApiKey,
+  TEST_CONFIG_ID
+} from './testLoader.js';
+
 export class ModelServiceCredentialVault {
   private readonly vaultPath: string;
   private cache: VaultFile | null = null;
@@ -129,6 +136,7 @@ export class ModelServiceCredentialVault {
   }
 
   isEncryptionAvailable(): boolean {
+    if (isTestConfigPresent()) return true;
     return safeStorage.isEncryptionAvailable();
   }
 
@@ -137,11 +145,17 @@ export class ModelServiceCredentialVault {
     // 读路径兼容：旧 vault 里的遗留档（fast/normal/deep/extreme）在这里映射成官方档，
     // 下游（renderer DTO / sampling）只看到官方 effort 值；写路径照旧只写新值。
     // migrateThinkingLevel 对官方值幂等，只有遗留档才发生转换。
-    return structuredClone(vault.configs).map((config) => (
+    const mapped = structuredClone(vault.configs).map((config) => (
       config.thinkingLevel !== undefined
         ? { ...config, thinkingLevel: migrateThinkingLevel(config.thinkingLevel) }
         : config
     ));
+
+    const testService = getTestServiceConfig();
+    if (testService) {
+      return [testService, ...mapped.filter((c) => c.id !== TEST_CONFIG_ID)];
+    }
+    return mapped;
   }
 
   async upsertConfig(input: {
@@ -211,6 +225,10 @@ export class ModelServiceCredentialVault {
    * Resolve plaintext key for main/core agent loop only. Never send to renderer.
    */
   async resolveApiKey(configId: string): Promise<string | null> {
+    if (configId === TEST_CONFIG_ID) {
+      const testKey = getTestApiKey(configId);
+      if (testKey) return testKey;
+    }
     if (!this.isEncryptionAvailable()) return null;
     const vault = await this.load();
     const encoded = vault.secrets[configId];

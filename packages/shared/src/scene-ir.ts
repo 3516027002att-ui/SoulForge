@@ -125,9 +125,12 @@ export interface SceneDrawItem {
   mesh?: {
     positionsBase64: string;
     indicesBase64?: string;
+    indexSize?: 16 | 32;
     uvsBase64?: string;
     normalsBase64?: string;
     vertexCount: number;
+    boundingBoxMin?: [number, number, number];
+    boundingBoxMax?: [number, number, number];
   };
 }
 
@@ -504,12 +507,73 @@ function computeBounds(items: SceneDrawItem[]): SceneDrawList['bounds'] {
 
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+
   for (const item of targetItems) {
-    for (let index = 0; index < 3; index += 1) {
-      min[index] = Math.min(min[index]!, item.position[index]!);
-      max[index] = Math.max(max[index]!, item.position[index]!);
+    const bMin = item.mesh?.boundingBoxMin;
+    const bMax = item.mesh?.boundingBoxMax;
+
+    if (bMin && bMax && Number.isFinite(bMin[0]) && Number.isFinite(bMax[0])) {
+      // 8 个局部 AABB 角点
+      const corners: Array<[number, number, number]> = [
+        [bMin[0], bMin[1], bMin[2]],
+        [bMin[0], bMin[1], bMax[2]],
+        [bMin[0], bMax[1], bMin[2]],
+        [bMin[0], bMax[1], bMax[2]],
+        [bMax[0], bMin[1], bMin[2]],
+        [bMax[0], bMin[1], bMax[2]],
+        [bMax[0], bMax[1], bMin[2]],
+        [bMax[0], bMax[1], bMax[2]]
+      ];
+
+      // 欧拉角 (度 -> 弧度)
+      const radX = (item.rotation[0] * Math.PI) / 180;
+      const radY = (item.rotation[1] * Math.PI) / 180;
+      const radZ = (item.rotation[2] * Math.PI) / 180;
+
+      const cx = Math.cos(radX), sx = Math.sin(radX);
+      const cy = Math.cos(radY), sy = Math.sin(radY);
+      const cz = Math.cos(radZ), sz = Math.sin(radZ);
+
+      for (const [lx, ly, lz] of corners) {
+        // 缩放
+        const scaledX = lx * item.scale[0];
+        const scaledY = ly * item.scale[1];
+        const scaledZ = lz * item.scale[2];
+
+        // 旋转 (XYZ Euler)
+        const x1 = scaledX;
+        const y1 = cx * scaledY - sx * scaledZ;
+        const z1 = sx * scaledY + cx * scaledZ;
+
+        const x2 = cy * x1 + sy * z1;
+        const y2 = y1;
+        const z2 = -sy * x1 + cy * z1;
+
+        const x3 = cz * x2 - sz * y2;
+        const y3 = sz * x2 + cz * y2;
+        const z3 = z2;
+
+        // 平移
+        const wx = x3 + item.position[0];
+        const wy = y3 + item.position[1];
+        const wz = z3 + item.position[2];
+
+        min[0] = Math.min(min[0], wx);
+        min[1] = Math.min(min[1], wy);
+        min[2] = Math.min(min[2], wz);
+
+        max[0] = Math.max(max[0], wx);
+        max[1] = Math.max(max[1], wy);
+        max[2] = Math.max(max[2], wz);
+      }
+    } else {
+      for (let index = 0; index < 3; index += 1) {
+        min[index] = Math.min(min[index]!, item.position[index]!);
+        max[index] = Math.max(max[index]!, item.position[index]!);
+      }
     }
   }
+
   return {
     min,
     max,

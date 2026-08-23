@@ -36,6 +36,9 @@ export interface AgentComposerProps {
   onThinkingChange: (thinking: ModelThinkingLevel) => void;
   /** 8-A：当前服务协议（OpenAI Chat/Responses / Anthropic effort 表），透传给工具栏换表。 */
   protocol: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
+  /** 是否已激活 test 免配置模式 */
+  testActive?: boolean | undefined;
+  placeholder?: string | undefined;
 }
 
 /**
@@ -63,11 +66,16 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
     onRemoveAttachment,
     thinking,
     onThinkingChange,
-    protocol
+    protocol,
+    testActive = false,
+    placeholder
   } = props;
 
   const action = composerActionState({ prompt, streaming, awaitingApproval });
   const sendDisabled = action === 'send' && isComposerSendDisabled(prompt);
+
+  const effectivePlaceholder = placeholder
+    ?? (testActive ? '已加载test，无需设置api即可使用' : COMPOSER_PLACEHOLDER);
 
   const chips: AgentContextChip[] = attachments.map((attachment) => ({
     kind: 'attachment',
@@ -88,7 +96,7 @@ export function AgentComposer(props: AgentComposerProps): ReactElement {
           onPromptChange={onPromptChange}
           onSend={onSend}
           streaming={streaming}
-          placeholder={COMPOSER_PLACEHOLDER}
+          placeholder={effectivePlaceholder}
           ariaLabel="向 Agent 对话"
         />
         {attachmentError !== null && (

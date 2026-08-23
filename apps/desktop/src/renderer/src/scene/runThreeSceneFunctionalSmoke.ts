@@ -115,6 +115,10 @@ class FakeElement {
   getRootNode(): DocumentLike {
     return fakeDocument;
   }
+  focus(): void {
+    /* no-op: headless */
+  }
+  tabIndex = 0;
   replaceChildren(): void {
     /* no-op: headless */
   }
@@ -169,6 +173,7 @@ function installDisposeCounter(): void {
   patch(three.BufferGeometry.prototype);
   patch(three.Material.prototype);
   patch(three.Texture.prototype);
+  patch(three.Skeleton.prototype);
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +308,7 @@ async function testProxyScene(record: (name: string) => void): Promise<void> {
   camera.position.set(16, 12, 16);
   camera.lookAt(0, 0, 0);
   camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
   const ndc = new three.Vector3(0, 0, 0).project(camera);
   const rect = container.getBoundingClientRect();
   const clientX = rect.left + ((ndc.x + 1) / 2) * rect.width;

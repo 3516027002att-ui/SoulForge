@@ -12,6 +12,7 @@
     "test:flver-pages": "tsc -p tsconfig.json && node dist/flver-editor.test.js",
     "test:tpf-pages": "tsc -p tsconfig.json && node dist/tpf-editor.test.js",
     "test:citations": "tsc -p tsconfig.json && node dist/citations.test.js",
-    "test:path-sanitizer": "tsc -p tsconfig.json && node dist/path-sanitizer.test.js"
+    "test:path-sanitizer": "tsc -p tsconfig.json && node dist/path-sanitizer.test.js",
+    "test:action-deterministic-seek": "tsc -p tsconfig.json && node dist/action-deterministic-seek.test.js"
   }
 }

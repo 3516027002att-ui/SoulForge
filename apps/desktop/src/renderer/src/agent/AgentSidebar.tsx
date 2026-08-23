@@ -455,6 +455,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
         <>
           <AgentConversationViewport
             idle={emptyWelcome}
+            testActive={task.selectedServiceId === 'test-service' || task.services.some((s) => s.id === 'test-service')}
             messages={messages}
             conversationItems={conversationItems}
             approvals={approvals}
@@ -494,6 +495,7 @@ export function AgentSidebar(props: AgentSidebarProps): ReactElement {
             thinking={thinking}
             onThinkingChange={onThinkingChange}
             protocol={protocol}
+            testActive={task.selectedServiceId === 'test-service' || task.services.some((s) => s.id === 'test-service')}
           />
         </>
       ) : (

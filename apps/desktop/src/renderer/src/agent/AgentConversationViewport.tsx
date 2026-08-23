@@ -43,6 +43,8 @@ export interface AgentConversationFailure {
 export interface AgentConversationViewportProps {
   /** 空闲欢迎态（无消息且无活动任务）是否显示。 */
   idle: boolean;
+  /** 是否已激活 test 模型免配置状态 */
+  testActive?: boolean | undefined;
   /** §12.11 已装配消息流；非空时优先渲染 AgentMessageList（全量渲染）。 */
   messages?: readonly AgentMessageDto[];
   /** 任务态派生的对话时间线（口播与工具按步交织）。 */
@@ -220,7 +222,7 @@ export function AgentConversationViewport(props: AgentConversationViewportProps)
       {hasMessages ? (
         <AgentMessageList messages={messages} />
       ) : idle && !hasTimeline ? (
-        <AgentWelcome />
+        <AgentWelcome testActive={props.testActive} />
       ) : hasTimeline ? (
         conversationItems.map((item, index) => renderConversationItem(item, index))
       ) : (

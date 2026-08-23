@@ -909,6 +909,145 @@ internal sealed class BridgeCommandService
             }
         }
 
+        if (command == "read-anibnd-hkx-animation")
+        {
+            try
+            {
+                var animId = OptionInt64("animId", -1);
+                var hkxName = OptionString("hkxName", "");
+                var boneCount = OptionInt("boneCount", 0);
+                var maxFrames = OptionInt("maxFrames", 10000);
+
+                var candidateFiles = new List<string> { file };
+                var dir = Path.GetDirectoryName(file) ?? "";
+                var fileName = Path.GetFileName(file);
+
+                if (IsAnibndPath(file) && !string.IsNullOrEmpty(dir))
+                {
+                    var prefix = fileName.Split('.')[0];
+                    var companions = Directory.GetFiles(dir, $"{prefix}*.anibnd.dcx")
+                        .Concat(Directory.GetFiles(dir, $"{prefix}*.anibnd"))
+                        .Where(f => !string.Equals(f, file, StringComparison.OrdinalIgnoreCase))
+                        .Distinct();
+                    candidateFiles.AddRange(companions);
+                }
+
+                byte[]? targetHkxBytes = null;
+                string foundInFile = file;
+                string matchedEntryName = "";
+
+                var patterns = new List<string>();
+                if (!string.IsNullOrWhiteSpace(hkxName))
+                {
+                    patterns.Add(hkxName);
+                    if (!hkxName.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase))
+                        patterns.Add(hkxName + ".hkx");
+                }
+                if (animId >= 0)
+                {
+                    patterns.Add($"a000_{animId:D6}.hkx");
+                    patterns.Add($"a00_{animId:D4}.hkx");
+                    patterns.Add($"a{animId:D6}.hkx");
+                    patterns.Add($"a000_{animId}.hkx");
+                    patterns.Add($"{animId:D6}.hkx");
+                    patterns.Add($"{animId}.hkx");
+                    patterns.Add($"a{animId}.hkx");
+                }
+
+                byte[]? compendiumBytes = null;
+                foreach (var candidateFile in candidateFiles)
+                {
+                    if (!File.Exists(candidateFile)) continue;
+                    try
+                    {
+                        var dcx = DcxNativeDocument.Read(candidateFile, oodleRuntimeRoot);
+                        var bnd4 = Bnd4NativeDocument.Read(dcx.Payload);
+                        foreach (var pattern in patterns)
+                        {
+                            var entry = bnd4.Entries.FirstOrDefault(e =>
+                                e.Name.EndsWith(pattern, StringComparison.OrdinalIgnoreCase) ||
+                                Path.GetFileName(e.Name).Equals(pattern, StringComparison.OrdinalIgnoreCase));
+                            if (entry != null)
+                            {
+                                targetHkxBytes = bnd4.GetStoredBytes(entry.Index);
+                                if (targetHkxBytes.Length >= 4 && targetHkxBytes.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+                                {
+                                    targetHkxBytes = DcxNativeDocument.Read(targetHkxBytes, oodleRuntimeRoot).Payload;
+                                }
+
+                                var compEntry = bnd4.Entries.FirstOrDefault(e => e.Id == 7000000 || e.Name.Contains("compendium.hkx", StringComparison.OrdinalIgnoreCase));
+                                if (compEntry != null)
+                                {
+                                    compendiumBytes = bnd4.GetStoredBytes(compEntry.Index);
+                                    if (compendiumBytes.Length >= 4 && compendiumBytes.AsSpan(0, 4).SequenceEqual("DCX\0"u8))
+                                    {
+                                        compendiumBytes = DcxNativeDocument.Read(compendiumBytes, oodleRuntimeRoot).Payload;
+                                    }
+                                }
+
+                                foundInFile = candidateFile;
+                                matchedEntryName = entry.Name;
+                                break;
+                            }
+                        }
+                        if (targetHkxBytes != null) break;
+                    }
+                    catch { }
+                }
+
+                if (targetHkxBytes == null)
+                {
+                    return BridgeResult<object>.Failed(file, "action", "HKX_ANIMATION_NOT_FOUND",
+                        $"在容器与伴生 anibnd 中未找到匹配 animId={animId} (hkxName={hkxName}) 的 HKX 条目。");
+                }
+
+                var (anim, diagError) = SoulForge.Bridge.HkxNativeAnimation.ReadFromHkxBytesWithDiag(targetHkxBytes, matchedEntryName, boneCount, compendiumBytes);
+                if (anim == null)
+                {
+                    return BridgeResult<object>.Failed(file, "action", "HKX_ANIMATION_DECODE_FAILED",
+                        $"HKX 动画条目 {matchedEntryName} 解析失败: {diagError}");
+                }
+
+                int totalFrames = Math.Min(anim.FrameCount, maxFrames);
+                var framePoses = new List<object[]>(totalFrames);
+                for (int f = 0; f < totalFrames; f++)
+                {
+                    var sampled = anim.SampleAllBones(f, loop: false);
+                    var boneList = new object[sampled.Length];
+                    for (int b = 0; b < sampled.Length; b++)
+                    {
+                        var pose = sampled[b];
+                        boneList[b] = new
+                        {
+                            p = new[] { pose.Px, pose.Py, pose.Pz },
+                            q = new[] { pose.Qx, pose.Qy, pose.Qz, pose.Qw },
+                            s = new[] { pose.Sx, pose.Sy, pose.Sz }
+                        };
+                    }
+                    framePoses.Add(boneList);
+                }
+
+                return BridgeResult<object>.Ok(foundInFile, "action", new
+                {
+                    animId,
+                    animName = anim.Name,
+                    sourceFile = Path.GetFileName(foundInFile),
+                    duration = anim.Duration,
+                    frameCount = anim.FrameCount,
+                    frameDuration = anim.FrameDuration,
+                    boneCount = anim.BoneToTrackMap.Length,
+                    trackCount = anim.TrackCount,
+                    trackToBoneMap = anim.TrackToBoneMap,
+                    boneToTrackMap = anim.BoneToTrackMap,
+                    poses = framePoses
+                });
+            }
+            catch (Exception ex)
+            {
+                return BridgeResult<object>.Failed(file, "action", "HKX_ANIMATION_ERROR", ex.Message, ex.ToString());
+            }
+        }
+
         if (command == "read-chrbnd-flver-preview")
         {
             try
@@ -940,6 +1079,8 @@ internal sealed class BridgeCommandService
                         normalsBase64 = (string?)null,
                         boneWeightsBase64 = (string?)null,
                         boneIndicesBase64 = (string?)null,
+                        boundingBoxMin = new[] { flver.BoundingBoxMinX, flver.BoundingBoxMinY, flver.BoundingBoxMinZ },
+                        boundingBoxMax = new[] { flver.BoundingBoxMaxX, flver.BoundingBoxMaxY, flver.BoundingBoxMaxZ },
                         bones = flver.Bones.Select(b => new
                         {
                             name = b.Name,
@@ -976,6 +1117,8 @@ internal sealed class BridgeCommandService
                     normalsBase64 = normals,
                     boneWeightsBase64 = boneWeights,
                     boneIndicesBase64 = boneIndices,
+                    boundingBoxMin = new[] { flver.BoundingBoxMinX, flver.BoundingBoxMinY, flver.BoundingBoxMinZ },
+                    boundingBoxMax = new[] { flver.BoundingBoxMaxX, flver.BoundingBoxMaxY, flver.BoundingBoxMaxZ },
                     bones = flver.Bones.Select(b => new
                     {
                         name = b.Name,
@@ -1100,6 +1243,8 @@ internal sealed class BridgeCommandService
                     normalsBase64 = normals,
                     boneWeightsBase64 = boneWeights,
                     boneIndicesBase64 = boneIndices,
+                    boundingBoxMin = new[] { flver.BoundingBoxMinX, flver.BoundingBoxMinY, flver.BoundingBoxMinZ },
+                    boundingBoxMax = new[] { flver.BoundingBoxMaxX, flver.BoundingBoxMaxY, flver.BoundingBoxMaxZ },
                     bones = flver.Bones.Select(b => new
                     {
                         name = b.Name,

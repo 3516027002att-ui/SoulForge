@@ -14,6 +14,11 @@
 
 import type { SceneDrawList } from './sceneManifestBrowser.js';
 import { decodeBase64ToUint8Array } from '../utils/binary.js';
+import {
+  type AuthoritativeAnimationClip,
+  sampleAuthoritativePose
+} from '@soulforge/shared';
+import { ModelResourcePool } from './modelResourcePool.js';
 import type {
   BoxGeometry,
   BufferGeometry,
@@ -80,6 +85,7 @@ export interface ProxySceneHandle extends ThreeSceneHandle {
 
 export interface FlverSceneHandle extends ThreeSceneHandle {
   setScene: (scene: FlverSemanticScene) => void;
+  setActiveAnimationClip?: (clip: AuthoritativeAnimationClip | null) => void;
   setPlaybackTime?: (time: number) => void;
 }
 
@@ -213,6 +219,7 @@ export async function mountThreeProxyScene(
   input: MountInput & { drawList: SceneDrawList }
 ): Promise<ProxySceneHandle> {
   const core = await mountSceneCore(input);
+  const resourcePool = new ModelResourcePool();
   let initialFramed = false;
 
   const setDrawList = (list: SceneDrawList): void => {
@@ -221,7 +228,7 @@ export async function mountThreeProxyScene(
       const prevSelected = core.selectedId;
       core.clearContent();
       for (const item of list.items) {
-        core.addMesh(item.id, createProxyMesh(core.three, core.track, item));
+        core.addMesh(item.id, createProxyMesh(core.three, core.track, item, resourcePool));
       }
       if (!initialFramed) {
         core.frameToBounds(list.bounds);
@@ -257,71 +264,30 @@ export async function mountThreeProxyScene(
     },
     updateModelGeometry: (modelName, geometryData) => {
       if (!geometryData.positionsBase64 || geometryData.vertexCount <= 0) return;
-      // 1. 创建并缓存该 modelName 的真实 BufferGeometry
-      const geometry = core.track(new core.three.BufferGeometry());
-      geometry.setAttribute('position', new core.three.BufferAttribute(
-        decodeBase64F32(geometryData.positionsBase64, geometryData.vertexCount * 3),
-        3
-      ));
-      if (geometryData.indicesBase64) {
-        const indexBytes = decodeBase64ToUint8Array(geometryData.indicesBase64);
-        const is32 = (geometryData as { indexSize?: number }).indexSize === 32 || (indexBytes.length % 4 === 0 && indexBytes.length > 65535 * 2);
-        if (is32) {
-          const view = new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 4));
-          geometry.setIndex(new core.three.Uint32BufferAttribute(view, 1));
-        } else {
-          const view = new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 2));
-          geometry.setIndex(new core.three.Uint16BufferAttribute(view, 1));
-        }
-      }
-      if (geometryData.uvsBase64) {
-        geometry.setAttribute('uv', new core.three.BufferAttribute(
-          decodeBase64F32(geometryData.uvsBase64, geometryData.vertexCount * 2),
-          2
-        ));
-      }
-      if (geometryData.normalsBase64) {
-        geometry.setAttribute('normal', new core.three.BufferAttribute(
-          decodeBase64F32(geometryData.normalsBase64, geometryData.vertexCount * 3),
-          3
-        ));
-      } else {
-        geometry.computeVertexNormals();
-      }
+      // 1. 使用共享资源池获取或创建 BufferGeometry 和 Material
+      const { geometry, material } = resourcePool.updateModelGeometry(
+        core.three,
+        core.track,
+        modelName,
+        geometryData
+      );
 
-      // 2. 真实模型材质（基于模型类别赋予真实有层次的 PBR 材质）
-      let baseColor = 0x98a3b0;
       const cleanName = modelName.toLowerCase().replace(/\.mapbnd(\.dcx)?$/i, '');
-      if (cleanName.startsWith('m00') || cleanName.includes('terrain') || cleanName.includes('land')) {
-        baseColor = 0x7c8576; // 地形/土石质感
-      } else if (cleanName.startsWith('m1') || cleanName.startsWith('m2') || cleanName.includes('bldg') || cleanName.includes('wall')) {
-        baseColor = 0xa4abb5; // 建筑/城墙石木质感
-      } else if (cleanName.startsWith('c')) {
-        baseColor = 0x8894a8; // 角色/NPC质感
-      } else if (cleanName.startsWith('o')) {
-        baseColor = 0xb5a48d; // 物件/道具木铜质感
-      }
-
-      const realMaterial = core.track(new core.three.MeshStandardMaterial({
-        color: new core.three.Color(baseColor),
-        roughness: 0.55,
-        metalness: 0.12,
-        side: core.three.DoubleSide,
-        wireframe: false
-      }));
-
-      // 3. 匹配并热替换所有关联该 modelName 的 Mesh
+      // 2. 匹配并热替换所有关联该 modelName 的 Mesh，共享 geometry 与 material
       for (const [id, meshObj] of core.meshes) {
         const mesh = meshObj as import('three').Mesh;
         const uModel = typeof mesh.userData?.modelName === 'string' ? mesh.userData.modelName.toLowerCase() : '';
         const belongs = id.toLowerCase().includes(cleanName) || uModel === cleanName || uModel.includes(cleanName);
         if (belongs && mesh.isMesh) {
           mesh.geometry = geometry;
-          mesh.material = realMaterial;
+          mesh.material = material;
         }
       }
     },
-    dispose: core.disposeAll
+    dispose: () => {
+      resourcePool.clear();
+      core.disposeAll();
+    }
   };
 }
 
@@ -399,6 +365,8 @@ export async function mountFlverScene(input: {
 
   setScene(input.scene);
 
+  let activeClip: AuthoritativeAnimationClip | null = null;
+
   return {
     canvas: core.canvas,
     rendererBackend: core.rendererBackend,
@@ -407,36 +375,37 @@ export async function mountFlverScene(input: {
     },
     setSelected: (id) => core.setSelected(id),
     setScene,
+    setActiveAnimationClip: (clip: AuthoritativeAnimationClip | null) => {
+      activeClip = clip;
+    },
     setPlaybackTime: (time: number) => {
       if (!activeSkeleton || activeBones.length === 0) return;
-      if (time <= 0) {
-        // 重置为纯正初始 Bind Pose
+      if (!activeClip || time <= 0) {
+        // 重置为初始 Bind Pose
         for (let i = 0; i < activeBones.length; i++) {
           const init = initialBones[i];
           const bone = activeBones[i];
           if (init && bone) {
             bone.position.set(init.translation[0], init.translation[1], init.translation[2]);
             bone.rotation.set(init.rotation[0], init.rotation[1], init.rotation[2]);
+            bone.scale.set(1, 1, 1);
           }
         }
         activeSkeleton.update();
         return;
       }
 
-      // 确定性关键帧推进采样：
-      // 同一时间点 t 采样产出唯一确定位姿；t1 != t2 时骨骼变换可观察变化
+      // 消费权威动画采样位姿（Havok Spline / De Boor 采样结果）
+      const poses = sampleAuthoritativePose(activeClip, time, true);
+      if (!poses) return;
+
       for (let i = 0; i < activeBones.length; i++) {
-        const init = initialBones[i];
         const bone = activeBones[i];
-        if (!init || !bone) continue;
-        const phase = time * 2.5 + i * 0.15;
-        const deltaRotX = Math.sin(phase) * 0.12;
-        const deltaRotZ = Math.cos(phase * 0.8) * 0.08;
-        bone.rotation.set(
-          init.rotation[0] + (i % 2 === 0 ? deltaRotX : 0),
-          init.rotation[1],
-          init.rotation[2] + (i % 3 === 0 ? deltaRotZ : 0)
-        );
+        const pose = poses[i];
+        if (!bone || !pose) continue;
+        bone.position.set(pose.p[0], pose.p[1], pose.p[2]);
+        bone.quaternion.set(pose.q[0], pose.q[1], pose.q[2], pose.q[3]);
+        bone.scale.set(pose.s[0], pose.s[1], pose.s[2]);
       }
       activeSkeleton.update();
     },
@@ -518,6 +487,7 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     const sinYaw = Math.sin(yaw);
     const forward = new three.Vector3(sinYaw * cosPitch, sinPitch, -cosYaw * cosPitch).normalize();
     camera.lookAt(camera.position.clone().add(forward));
+    camera.updateMatrixWorld(true);
   };
   updateCameraOrientation();
 
@@ -665,15 +635,15 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
     baseFlySpeed = Math.max(10, Math.min(span * 0.12, 120));
 
     // 计算合理视距：俯视主要建筑群
-    const dist = Math.max(span * 0.65, 12);
-    camera.position.set(cx + dist * 0.35, cy + dist * 0.5, cz + dist * 0.85);
+    const dist = Math.max(span * 1.0, 16);
+    camera.position.set(cx + dist, cy + dist * 0.75, cz + dist);
     camera.lookAt(cx, cy, cz);
+    camera.updateMatrixWorld(true);
 
     // 从新相机方向反算 yaw 与 pitch，保证后续鼠标右键原地转头连续无跳变
     const dir = new three.Vector3(cx - camera.position.x, cy - camera.position.y, cz - camera.position.z).normalize();
     pitch = Math.asin(Math.max(-0.999, Math.min(0.999, dir.y)));
     yaw = Math.atan2(dir.x, -dir.z);
-    updateCameraOrientation();
   };
 
   // 挂载 TransformControls (Gizmo)
@@ -870,10 +840,11 @@ async function mountSceneCore(input: MountInput): Promise<SceneCore> {
   const raycaster = new three.Raycaster();
   const pointer = new three.Vector2();
   const onClick = (event: MouseEvent): void => {
-    if (event.button !== 0) return; // 只响应鼠标左键选择
+    if ((event.button ?? 0) !== 0) return; // 只响应鼠标左键选择
     const rect = canvas.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    scene.updateMatrixWorld(true);
     raycaster.setFromCamera(pointer, camera);
     const hits = raycaster.intersectObjects([...meshes.values()], true);
     let id: string | null = null;
@@ -1009,53 +980,72 @@ async function createRealRenderer(
  * 既占显存也卡解码。现按 positionsBase64 等入参缓存同一 BufferGeometry，
  * 多实例共享 geometry（mesh 仍独立，仅共享顶点缓冲）。
  */
-function createProxyMesh(three: ThreeModule, track: ResourceTracker, item: SceneDrawList['items'][number]): Object3D {
-  // S23：part 带有真实 FLVER 网格（mapbnd 提取）时画真实几何，替代 proxy 盒子。
-  const geometry = item.mesh
-    ? (() => {
-        const buffer = track(new three.BufferGeometry());
-        buffer.setAttribute('position', new three.BufferAttribute(
-          decodeBase64F32(item.mesh.positionsBase64, item.mesh.vertexCount * 3),
-          3
-        ));
-        if (item.mesh.indicesBase64) {
-          const indexBytes = decodeBase64ToUint8Array(item.mesh.indicesBase64);
-          const is32 = (item.mesh as { indexSize?: number }).indexSize === 32 || (indexBytes.length % 4 === 0 && indexBytes.length > 65535 * 2);
-          if (is32) {
-            const view = new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 4));
-            buffer.setIndex(new three.Uint32BufferAttribute(view, 1));
-          } else {
-            const view = new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 2));
-            buffer.setIndex(new three.Uint16BufferAttribute(view, 1));
-          }
-        }
-        if (item.mesh.uvsBase64) {
-          const uvCount = item.mesh.vertexCount * 2;
-          buffer.setAttribute('uv', new three.BufferAttribute(decodeBase64F32(item.mesh.uvsBase64, uvCount), 2));
-        }
-        if (item.mesh.normalsBase64) {
-          buffer.setAttribute('normal', new three.BufferAttribute(
-            decodeBase64F32(item.mesh.normalsBase64, item.mesh.vertexCount * 3),
-            3
-          ));
+function createProxyMesh(
+  three: ThreeModule,
+  track: ResourceTracker,
+  item: SceneDrawList['items'][number],
+  resourcePool?: ModelResourcePool
+): Object3D {
+  let geometry: BufferGeometry;
+  let material: Material;
+
+  if (item.mesh) {
+    const key = item.modelName
+      ? item.modelName.toLowerCase().replace(/\.mapbnd(\.dcx)?$/i, '')
+      : `mesh_${item.id}`;
+    if (resourcePool) {
+      geometry = resourcePool.getOrCreateGeometry(three, track, key, item.mesh);
+      material = resourcePool.getDefaultRealMaterial(three, track);
+    } else {
+      geometry = track(new three.BufferGeometry());
+      geometry.setAttribute(
+        'position',
+        new three.BufferAttribute(decodeBase64F32(item.mesh.positionsBase64, item.mesh.vertexCount * 3), 3)
+      );
+      if (item.mesh.indicesBase64) {
+        const indexBytes = decodeBase64ToUint8Array(item.mesh.indicesBase64);
+        const is32 = item.mesh.indexSize === 32;
+        if (is32) {
+          const view = new Uint32Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 4));
+          geometry.setIndex(new three.Uint32BufferAttribute(view, 1));
         } else {
-          buffer.computeVertexNormals();
+          const view = new Uint16Array(indexBytes.buffer, indexBytes.byteOffset, Math.floor(indexBytes.length / 2));
+          geometry.setIndex(new three.Uint16BufferAttribute(view, 1));
         }
-        return buffer;
-      })()
-    : (item.primitive === 'sphere'
-        ? track(new three.SphereGeometry(0.5, 12, 10))
-        : track(new three.BoxGeometry(1, 1, 1)));
-  const hasRealMesh = Boolean(item.mesh);
-  const material = track(new three.MeshStandardMaterial({
-    color: hasRealMesh ? new three.Color(0x8a929e) : new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2]),
-    roughness: hasRealMesh ? 0.55 : 0.65,
-    metalness: hasRealMesh ? 0.12 : 0.05,
-    side: hasRealMesh ? three.DoubleSide : three.FrontSide,
-    wireframe: !hasRealMesh,
-    transparent: !hasRealMesh,
-    opacity: !hasRealMesh ? 0.35 : 1.0
-  }));
+      }
+      if (item.mesh.uvsBase64) {
+        geometry.setAttribute('uv', new three.BufferAttribute(decodeBase64F32(item.mesh.uvsBase64, item.mesh.vertexCount * 2), 2));
+      }
+      if (item.mesh.normalsBase64) {
+        geometry.setAttribute('normal', new three.BufferAttribute(decodeBase64F32(item.mesh.normalsBase64, item.mesh.vertexCount * 3), 3));
+      } else {
+        geometry.computeVertexNormals();
+      }
+      material = track(new three.MeshStandardMaterial({
+        color: new three.Color(0x8e97a3),
+        roughness: 0.55,
+        metalness: 0.12,
+        side: three.DoubleSide,
+        wireframe: false
+      }));
+    }
+  } else {
+    geometry = resourcePool
+      ? resourcePool.getPrimitiveGeometry(three, track, item.primitive === 'sphere' ? 'sphere' : 'box')
+      : (item.primitive === 'sphere'
+          ? track(new three.SphereGeometry(0.5, 12, 10))
+          : track(new three.BoxGeometry(1, 1, 1)));
+    material = track(new three.MeshStandardMaterial({
+      color: new three.Color(item.colorRgb[0], item.colorRgb[1], item.colorRgb[2]),
+      roughness: 0.65,
+      metalness: 0.05,
+      side: three.FrontSide,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.35
+    }));
+  }
+
   const mesh = new three.Mesh(geometry, material);
   mesh.userData.itemId = item.id;
   if (item.modelName) mesh.userData.modelName = item.modelName;

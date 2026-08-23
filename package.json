@@ -74,6 +74,7 @@
     "test:yapped-param-metadata-source": "npm run test:yapped-param-metadata-source -w @soulforge/core",
     "test:citations": "npm run test:citations -w @soulforge/shared",
     "test:path-sanitizer": "npm run test:path-sanitizer -w @soulforge/shared",
+    "test:action-deterministic-seek": "npm run test:action-deterministic-seek -w @soulforge/shared",
     "test:dds-convert-writeback": "npm run test:dds-convert-writeback -w @soulforge/core",
     "test:vault-encrypt-contract": "npm run test:vault-encrypt-contract -w @soulforge/core",
     "test:openai-responses": "npm run test:openai-responses -w @soulforge/core",

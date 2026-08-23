@@ -280,3 +280,53 @@ export function buildTaeTimelineTracks(
 
   return tracks;
 }
+
+/**
+ * Authoritative Bone Transform structure decoded from Havok HKX animation.
+ */
+export interface AuthoritativeBoneTransform {
+  p: [number, number, number];
+  q: [number, number, number, number];
+  s: [number, number, number];
+}
+
+/**
+ * Authoritative Animation Clip payload returned from Bridge / HKX decoder.
+ */
+export interface AuthoritativeAnimationClip {
+  animId: number;
+  animName: string;
+  sourceFile: string;
+  duration: number;
+  frameCount: number;
+  frameDuration: number;
+  trackCount: number;
+  boneCount: number;
+  poses: AuthoritativeBoneTransform[][];
+}
+
+/**
+ * Deterministically samples bone poses at a given continuous time.
+ */
+export function sampleAuthoritativePose(
+  clip: AuthoritativeAnimationClip,
+  time: number,
+  loop = true
+): AuthoritativeBoneTransform[] | null {
+  if (!clip || clip.frameCount <= 0 || !clip.poses || clip.poses.length === 0) {
+    return null;
+  }
+  const frameDur = clip.frameDuration > 0 ? clip.frameDuration : 1 / 30;
+  let frame = time / frameDur;
+  if (frame < 0) frame = 0;
+
+  let clampedFrameIndex: number;
+  if (loop && clip.frameCount > 1) {
+    clampedFrameIndex = Math.floor(frame) % (clip.frameCount - 1);
+  } else {
+    clampedFrameIndex = Math.min(Math.floor(frame), clip.frameCount - 1);
+  }
+
+  return clip.poses[clampedFrameIndex] ?? null;
+}
+
