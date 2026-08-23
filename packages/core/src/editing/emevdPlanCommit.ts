@@ -191,18 +191,24 @@ export function planToBridgeMutations(
         order: 5
       });
     } else if (operation.kind === 'set_event_parameters') {
-      const event = eventByAnchor.get(operation.eventAnchor);
-      if (!event) {
-        return {
-          ok: false,
-          code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND',
-          message: `事件锚 ${operation.eventAnchor} 在文档中未找到。`
-        };
+      let eventId: number;
+      if (operation.eventAnchor === '' && insertEventIds.has(operation.eventId)) {
+        eventId = operation.eventId;
+      } else {
+        const event = eventByAnchor.get(operation.eventAnchor);
+        if (!event) {
+          return {
+            ok: false,
+            code: 'EMEVD_PLAN_ANCHOR_NOT_FOUND',
+            message: `事件锚 ${operation.eventAnchor} 在文档中未找到。`
+          };
+        }
+        eventId = event.eventId;
       }
       setEventParametersMutations.push({
         mutation: {
           kind: 'set_event_parameters',
-          eventId: event.eventId,
+          eventId,
           parameters: operation.parameters
         },
         order: 5.5

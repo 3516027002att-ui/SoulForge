@@ -185,6 +185,159 @@ function main(): void {
     fail(JSON.stringify(opaque.diagnostics));
   }
 
+  // === P0 Parameter Binding Reindexing & Generation Tests ===
+  // 1. 前插指令导致已有 X 参数指令的 instructionIndex 重排（从 1 变 2）
+  const paramEventDoc = createEmevdEditorDocument({
+    resourceUri: 'file://event/param_test.emevd',
+    documentInstanceId: 'darkscript-param-test',
+    events: [
+      {
+        eventId: 100,
+        restBehavior: 0,
+        parameters: [
+          {
+            instructionIndex: 1,
+            targetStartByte: 8,
+            sourceStartByte: 0,
+            byteCount: 4,
+            unkId: 0
+          }
+        ],
+        instructions: [
+          {
+            bank: 2003,
+            id: 1,
+            argsBase64: '',
+            unknown: false
+          },
+          {
+            bank: 2000,
+            id: 6,
+            argsBase64: encoded.args.toString('base64'),
+            unknown: false
+          }
+        ]
+      }
+    ]
+  });
+
+  const paramSource = renderEmevdDarkScript(paramEventDoc, emedf);
+  if (!paramSource.includes('InitializeEvent(0, 77770001, X0_4)')) {
+    fail(`parameter render missing:\n${paramSource}`);
+  }
+
+  const paramReq = {
+    schemaVersion: 1 as const,
+    resourceUri: paramEventDoc.resourceUri,
+    documentInstanceId: paramEventDoc.documentInstanceId ?? 'darkscript-param-test',
+    baseRevision: paramEventDoc.revision,
+    emedfSchemaFingerprint: fingerprintEmedfRegistry(emedf),
+    sourceText: paramSource,
+    mode: 'dark-script' as const
+  };
+
+  // 在最前面插入 WaitFixedTimeFrames(10)
+  const paramSourceInserted = paramSource.replace(
+    '    EndEvent();',
+    '    WaitFixedTimeFrames(10);\n    EndEvent();'
+  );
+  const paramInsertResult = compileEmevdDarkScript({ ...paramReq, sourceText: paramSourceInserted }, paramEventDoc, emedf);
+  if (!paramInsertResult.ok) fail(`前插指令编译失败: ${JSON.stringify(paramInsertResult.diagnostics)}`);
+  const paramSetOp = paramInsertResult.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (!paramSetOp || paramSetOp.kind !== 'set_event_parameters') {
+    fail('前插指令后必须产生 set_event_parameters');
+  }
+  if (paramSetOp.parameters.length !== 1 || paramSetOp.parameters[0]!.instructionIndex !== 2) {
+    fail(`前插指令后 instructionIndex 必须从 1 变 2，得到: ${JSON.stringify(paramSetOp.parameters)}`);
+  }
+  if (paramSetOp.parameters[0]!.targetStartByte !== 8 || paramSetOp.parameters[0]!.sourceStartByte !== 0 || paramSetOp.parameters[0]!.byteCount !== 4) {
+    fail(`参数 offset/byteCount 错误: ${JSON.stringify(paramSetOp.parameters[0])}`);
+  }
+
+  // 2. 删除第一条指令导致已有 X 参数指令 instructionIndex 整体前移（从 1 变 0）
+  const paramSourceDeleted = paramSource.replace('    EndEvent();\n', '');
+  const paramDeleteResult = compileEmevdDarkScript({ ...paramReq, sourceText: paramSourceDeleted }, paramEventDoc, emedf);
+  if (!paramDeleteResult.ok) fail(`删除前置指令编译失败: ${JSON.stringify(paramDeleteResult.diagnostics)}`);
+  const paramDeleteSetOp = paramDeleteResult.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (!paramDeleteSetOp || paramDeleteSetOp.kind !== 'set_event_parameters') {
+    fail('删除前置指令后必须产生 set_event_parameters');
+  }
+  if (paramDeleteSetOp.parameters.length !== 1 || paramDeleteSetOp.parameters[0]!.instructionIndex !== 0) {
+    fail(`删除前置指令后 instructionIndex 必须从 1 变 0，得到: ${JSON.stringify(paramDeleteSetOp.parameters)}`);
+  }
+
+  // 3. 新插入指令中带 X 参数必须生成参数绑定
+  const paramSourceNewX = paramSource.replace(
+    '    InitializeEvent(0, 77770001, X0_4);',
+    '    InitializeEvent(0, 77770001, X0_4);\n    InitializeEvent(X4_4, 77770002, 0);'
+  );
+  const paramNewXResult = compileEmevdDarkScript({ ...paramReq, sourceText: paramSourceNewX }, paramEventDoc, emedf);
+  if (!paramNewXResult.ok) fail(`插入带 X 参数指令编译失败: ${JSON.stringify(paramNewXResult.diagnostics)}`);
+  const paramNewXSetOp = paramNewXResult.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (!paramNewXSetOp || paramNewXSetOp.kind !== 'set_event_parameters') {
+    fail('插入带 X 参数指令后必须产生 set_event_parameters');
+  }
+  if (paramNewXSetOp.parameters.length !== 2) {
+    fail(`必须包含 2 条参数绑定，得到: ${JSON.stringify(paramNewXSetOp.parameters)}`);
+  }
+  const newBinding = paramNewXSetOp.parameters.find((p) => p.sourceStartByte === 4);
+  if (!newBinding || newBinding.instructionIndex !== 2 || newBinding.targetStartByte !== 0 || newBinding.byteCount !== 4) {
+    fail(`新插入指令参数绑定错位: ${JSON.stringify(newBinding)}`);
+  }
+
+  // 4. 同一指令包含多个 X 参数
+  const multiParamSource = paramSource.replace(
+    '    InitializeEvent(0, 77770001, X0_4);',
+    '    InitializeEvent(X0_4, X4_4, X8_4);'
+  );
+  const multiParamResult = compileEmevdDarkScript({ ...paramReq, sourceText: multiParamSource }, paramEventDoc, emedf);
+  if (!multiParamResult.ok) fail(`多参数编译失败: ${JSON.stringify(multiParamResult.diagnostics)}`);
+  const multiParamSetOp = multiParamResult.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (!multiParamSetOp || multiParamSetOp.kind !== 'set_event_parameters' || multiParamSetOp.parameters.length !== 3) {
+    fail(`同一指令 3 参数必须生成 3 条绑定: ${JSON.stringify(multiParamSetOp?.parameters)}`);
+  }
+  if (multiParamSetOp.parameters[0]!.targetStartByte !== 0 || multiParamSetOp.parameters[1]!.targetStartByte !== 4 || multiParamSetOp.parameters[2]!.targetStartByte !== 8) {
+    fail(`多参数 targetStartByte 不正确: ${JSON.stringify(multiParamSetOp.parameters)}`);
+  }
+
+  // 5. 修改 X 符号（X0_4 -> X16_4）
+  const modSymbolSource = paramSource.replaceAll('X0_4', 'X16_4');
+  const modSymbolResult = compileEmevdDarkScript({ ...paramReq, sourceText: modSymbolSource }, paramEventDoc, emedf);
+  if (!modSymbolResult.ok) fail(`修改 X 符号编译失败: ${JSON.stringify(modSymbolResult.diagnostics)}`);
+  const modSymbolOp = modSymbolResult.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (!modSymbolOp || modSymbolOp.kind !== 'set_event_parameters' || modSymbolOp.parameters[0]!.sourceStartByte !== 16) {
+    fail(`修改 X 符号后 sourceStartByte 必须变 16: ${JSON.stringify(modSymbolOp?.parameters)}`);
+  }
+
+  // 6. X 改成 literal（绑定消失）
+  const xToLitSource = paramSource.replace('InitializeEvent(0, 77770001, X0_4);', 'InitializeEvent(0, 77770001, 12345);').replace('function(X0_4)', 'function()');
+  const xToLitResult = compileEmevdDarkScript({ ...paramReq, sourceText: xToLitSource }, paramEventDoc, emedf);
+  if (!xToLitResult.ok) fail(`X 改 literal 编译失败: ${JSON.stringify(xToLitResult.diagnostics)}`);
+  const xToLitOp = xToLitResult.plan.operations.find((op) => op.kind === 'set_event_parameters');
+  if (!xToLitOp || xToLitOp.kind !== 'set_event_parameters' || xToLitOp.parameters.length !== 0) {
+    fail(`X 改 literal 后参数表必须清空: ${JSON.stringify(xToLitOp?.parameters)}`);
+  }
+
+  // 7. 新增整个 Event 携带 X 参数
+  const addEventWithXSource = `${source}\n\n$Event(200, Default, function(X0_4, X4_4) {\n    InitializeEvent(X0_4, 10, X4_4);\n});`;
+  const addEventWithXResult = compileEmevdDarkScript({ ...request, sourceText: addEventWithXSource }, document, emedf);
+  if (!addEventWithXResult.ok) fail(`新增带 X 参数事件编译失败: ${JSON.stringify(addEventWithXResult.diagnostics)}`);
+  const addEventSetParamsOp = addEventWithXResult.plan.operations.find(
+    (op) => op.kind === 'set_event_parameters' && op.eventId === 200
+  );
+  if (!addEventSetParamsOp || addEventSetParamsOp.kind !== 'set_event_parameters') {
+    fail('新增带 X 参数事件必须生成 set_event_parameters');
+  }
+  if (addEventSetParamsOp.parameters.length !== 2) {
+    fail(`新增事件应有 2 条参数绑定，得到: ${JSON.stringify(addEventSetParamsOp.parameters)}`);
+  }
+  if (addEventSetParamsOp.parameters[0]!.instructionIndex !== 0 || addEventSetParamsOp.parameters[0]!.targetStartByte !== 0 || addEventSetParamsOp.parameters[0]!.sourceStartByte !== 0) {
+    fail(`新增事件参数 0 绑定错误: ${JSON.stringify(addEventSetParamsOp.parameters[0])}`);
+  }
+  if (addEventSetParamsOp.parameters[1]!.instructionIndex !== 0 || addEventSetParamsOp.parameters[1]!.targetStartByte !== 8 || addEventSetParamsOp.parameters[1]!.sourceStartByte !== 4) {
+    fail(`新增事件参数 1 绑定错误: ${JSON.stringify(addEventSetParamsOp.parameters[1])}`);
+  }
+
   process.stdout.write('darkScriptCompiler smoke: ok\n');
 }
 

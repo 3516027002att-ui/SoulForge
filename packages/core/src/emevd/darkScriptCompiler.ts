@@ -30,7 +30,10 @@ import {
 } from './darkScriptRenderer.js';
 import { fingerprintEmedfRegistry } from './dslCompiler.js';
 import {
+  align,
+  byteLengthOf,
   encodeEmedfArgs,
+  findInstructionDef,
   hasVararg,
   type DecodedArg,
   type EmedfInstructionDef,
@@ -243,7 +246,7 @@ function compilePairedEvent(
 
   // 先把插入行全部试编码；任何一行编码不了，本事件的结构性改动（增/删）整体
   // 抑制，只保留已对齐行的参数写入 —— 不写「删了旧的却写不进新的」的半截状态。
-  const encodings = new Map<ParsedStatement, { bank: number; id: number; argsBase64: string }>();
+  const encodings = new Map<ParsedStatement, { bank: number; id: number; argsBase64: string; def: EmedfInstructionDef }>();
   let blocked = false;
   for (const entry of diff) {
     if (entry.kind !== 'insert') continue;
@@ -267,7 +270,7 @@ function compilePairedEvent(
       blocked = true;
       continue;
     }
-    encodings.set(entry.statement, { bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64 });
+    encodings.set(entry.statement, { bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64, def: encoded.def });
   }
 
   // 已对齐行：照旧逐行编参数差异。
@@ -277,7 +280,156 @@ function compilePairedEvent(
     }
   }
 
-  // 收集事件参数绑定差异并生成 set_event_parameters
+  // 模拟最终指令语义序列（Final Instruction Sequence）并统一重建 Event Parameter table
+  const finalInstructions: FinalInstructionSemantic[] = [];
+  let currentFinalIdx = 0;
+
+  for (const entry of diff) {
+    if (entry.kind === 'delete') {
+      // 被删除的指令不进入最终序列
+      continue;
+    }
+
+    if (entry.kind === 'insert') {
+      if (entry.statement.kind === 'comment') continue;
+      if (entry.statement.kind === 'wait-for') continue;
+      if (entry.statement.kind === 'call') {
+        const call = entry.statement.call;
+        const candidates = registry.instructions.filter((def) => darkScriptInstructionName(def.name) === call.name);
+        const def = candidates.length === 1 ? candidates[0]! : undefined;
+        const layout = def ? getInstructionArgLayout(def) : [];
+        const argsInfo: FinalInstructionSemantic['args'] = [];
+
+        for (let i = 0; i < call.args.length; i++) {
+          const parsedArg = call.args[i]!;
+          const l = layout[i];
+          argsInfo.push({
+            name: l?.name ?? `arg${i}`,
+            targetStartByte: l?.targetStartByte,
+            byteCount: l?.byteCount,
+            value: parsedArg.value
+          });
+        }
+
+        const encoded = encodings.get(entry.statement);
+        finalInstructions.push({
+          finalInstructionIndex: currentFinalIdx++,
+          bank: def ? def.bank : 0,
+          id: def ? def.id : 0,
+          argsBase64: encoded?.argsBase64,
+          source: 'inserted',
+          call,
+          args: argsInfo
+        });
+      }
+      continue;
+    }
+
+    if (entry.kind === 'match') {
+      if (entry.statement.kind === 'comment' && entry.item.kind === 'opaque') {
+        finalInstructions.push({
+          finalInstructionIndex: currentFinalIdx++,
+          bank: entry.item.instruction.bank,
+          id: entry.item.instruction.id,
+          source: 'opaque',
+          instruction: entry.item.instruction,
+          args: []
+        });
+      } else if (entry.statement.kind === 'call' && entry.item.kind === 'call') {
+        const call = entry.statement.call;
+        const origInstrIdx = event.instructions.indexOf(entry.item.instruction);
+        const origParams = event.parameters?.filter((p) => p.instructionIndex === origInstrIdx) ?? [];
+        const decodedArgs = entry.item.args;
+        const def = findInstructionDef(registry, entry.item.instruction.bank, entry.item.instruction.id);
+        const layout = def ? getInstructionArgLayout(def) : [];
+
+        const argsInfo: FinalInstructionSemantic['args'] = [];
+        for (let i = 0; i < call.args.length && i < decodedArgs.length; i++) {
+          const parsedArg = call.args[i]!;
+          const decodedArg = decodedArgs[i]!;
+          const l = layout[i];
+          const startByte = decodedArg.startByte ?? l?.targetStartByte;
+          const byteCount = decodedArg.byteCount ?? l?.byteCount ?? (decodedArg.type ? byteLengthOf(decodedArg.type) : 4);
+          const origParam = startByte !== undefined ? origParams.find((p) => p.targetStartByte === startByte) : undefined;
+
+          argsInfo.push({
+            name: decodedArg.name,
+            targetStartByte: startByte,
+            byteCount,
+            value: parsedArg.value,
+            originalParam: origParam ? {
+              sourceStartByte: origParam.sourceStartByte,
+              byteCount: origParam.byteCount,
+              unkId: origParam.unkId ?? 0
+            } : undefined
+          });
+        }
+
+        finalInstructions.push({
+          finalInstructionIndex: currentFinalIdx++,
+          bank: entry.item.instruction.bank,
+          id: entry.item.instruction.id,
+          source: 'matched',
+          call,
+          instruction: entry.item.instruction,
+          args: argsInfo
+        });
+      } else if (entry.statement.kind === 'wait-for' && entry.item.kind === 'wait-for') {
+        for (let pIdx = 0; pIdx < entry.item.predicates.length; pIdx++) {
+          const predItem = entry.item.predicates[pIdx]!;
+          const predStmt = entry.statement.predicates[pIdx];
+          const origInstrIdx = event.instructions.indexOf(predItem.instruction);
+          const origParams = event.parameters?.filter((p) => p.instructionIndex === origInstrIdx) ?? [];
+          const def = findInstructionDef(registry, predItem.instruction.bank, predItem.instruction.id);
+          const layout = def ? getInstructionArgLayout(def) : [];
+
+          const argsInfo: FinalInstructionSemantic['args'] = [];
+          for (let i = 0; i < predItem.visibleArgs.length; i++) {
+            const arg = predItem.visibleArgs[i]!;
+            const parsedVal = predStmt?.args[i]?.value ?? arg.value;
+            const l = layout[i];
+            const startByte = arg.startByte ?? l?.targetStartByte;
+            const byteCount = arg.byteCount ?? l?.byteCount ?? (arg.type ? byteLengthOf(arg.type) : 4);
+            const origParam = startByte !== undefined ? origParams.find((p) => p.targetStartByte === startByte) : undefined;
+
+            argsInfo.push({
+              name: arg.name,
+              targetStartByte: startByte,
+              byteCount,
+              value: parsedVal,
+              originalParam: origParam ? {
+                sourceStartByte: origParam.sourceStartByte,
+                byteCount: origParam.byteCount,
+                unkId: origParam.unkId ?? 0
+              } : undefined
+            });
+          }
+
+          finalInstructions.push({
+            finalInstructionIndex: currentFinalIdx++,
+            bank: predItem.instruction.bank,
+            id: predItem.instruction.id,
+            source: 'matched',
+            call: predStmt,
+            instruction: predItem.instruction,
+            args: argsInfo
+          });
+        }
+
+        // wait-for anchor 指令（如 EndIf/Wait）
+        finalInstructions.push({
+          finalInstructionIndex: currentFinalIdx++,
+          bank: entry.item.anchor.bank,
+          id: entry.item.anchor.id,
+          source: 'matched',
+          instruction: entry.item.anchor,
+          args: []
+        });
+      }
+    }
+  }
+
+  // 收集事件参数绑定并生成 set_event_parameters
   const newParameters: Array<{
     instructionIndex: number;
     targetStartByte: number;
@@ -285,35 +437,33 @@ function compilePairedEvent(
     byteCount: number;
     unkId: number;
   }> = [];
-  let currentInstrIdx = 0;
-  for (const entry of diff) {
-    if (entry.kind === 'match') {
-      if (entry.statement.kind === 'call' && entry.item.kind === 'call') {
-        const c = entry.statement.call;
-        const decodedArgs = entry.item.args;
-        for (let i = 0; i < c.args.length && i < decodedArgs.length; i++) {
-          const val = c.args[i]?.value;
-          if (typeof val === 'string') {
-            const m = /^X(\d+)_(\d+)$/.exec(val);
-            if (m) {
-              const src = Number(m[1]);
-              const cnt = Number(m[2]);
-              const startByte = decodedArgs[i]?.startByte ?? 0;
-              newParameters.push({
-                instructionIndex: currentInstrIdx,
-                targetStartByte: startByte,
-                sourceStartByte: src,
-                byteCount: cnt,
-                unkId: 0
-              });
-            }
+
+  for (const instr of finalInstructions) {
+    for (const arg of instr.args) {
+      if (typeof arg.value === 'string') {
+        const m = /^X(\d+)_(\d+)$/.exec(arg.value);
+        if (m) {
+          const src = Number(m[1]);
+          const cnt = Number(m[2]);
+          if (arg.targetStartByte === undefined || Number.isNaN(arg.targetStartByte)) {
+            add(error(
+              'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
+              `指令 ${instr.call?.name ?? instr.id} 的参数 ${arg.name} 无法解析 targetStartByte，禁止写入。`,
+              instr.call?.span ?? parsed.span,
+              { resourceUri, targetAnchor: eventAnchor }
+            ));
+            blocked = true;
+            continue;
           }
+          const unkId = arg.originalParam?.unkId ?? 0;
+          newParameters.push({
+            instructionIndex: instr.finalInstructionIndex,
+            targetStartByte: arg.targetStartByte,
+            sourceStartByte: src,
+            byteCount: cnt,
+            unkId
+          });
         }
-        currentInstrIdx += 1;
-      } else if (entry.statement.kind === 'wait-for' && entry.item.kind === 'wait-for') {
-        currentInstrIdx += entry.item.predicates.length + 1;
-      } else {
-        currentInstrIdx += 1;
       }
     }
   }
@@ -322,7 +472,7 @@ function compilePairedEvent(
   const paramsChanged = oldParams.length !== newParameters.length ||
     newParameters.some((np, idx) => {
       const op = oldParams[idx];
-      return !op || op.instructionIndex !== np.instructionIndex || op.targetStartByte !== np.targetStartByte || op.sourceStartByte !== np.sourceStartByte || op.byteCount !== np.byteCount;
+      return !op || op.instructionIndex !== np.instructionIndex || op.targetStartByte !== np.targetStartByte || op.sourceStartByte !== np.sourceStartByte || op.byteCount !== np.byteCount || (op.unkId ?? 0) !== np.unkId;
     });
 
   if (paramsChanged && (newParameters.length > 0 || oldParams.length > 0)) {
@@ -394,6 +544,37 @@ function compilePairedEvent(
   }
 }
 
+interface FinalInstructionSemantic {
+  finalInstructionIndex: number;
+  bank: number;
+  id: number;
+  argsBase64?: string | undefined;
+  source: 'matched' | 'inserted' | 'opaque';
+  call?: ParsedCall | undefined;
+  instruction?: EmevdEditorDocument['events'][number]['instructions'][number] | undefined;
+  args: Array<{
+    name: string;
+    targetStartByte?: number | undefined;
+    byteCount?: number | undefined;
+    value: EmevdDslLiteral | string;
+    originalParam?: { sourceStartByte: number; byteCount: number; unkId: number } | undefined;
+  }>;
+}
+
+function getInstructionArgLayout(def: EmedfInstructionDef): Array<{ name: string; targetStartByte: number; byteCount: number }> {
+  let offset = 0;
+  const layout: Array<{ name: string; targetStartByte: number; byteCount: number }> = [];
+  for (const arg of def.args) {
+    if (arg.vararg) continue;
+    offset = align(offset, arg.type);
+    const startByte = offset;
+    const count = byteLengthOf(arg.type);
+    layout.push({ name: arg.name, targetStartByte: startByte, byteCount: count });
+    offset += count;
+  }
+  return layout;
+}
+
 /** 一个 shape 行对应事件指令列表里的指令（wait-for = 谓词们 + anchor）。 */
 function itemInstructions(item: DarkScriptEventItem): EmevdEditorDocument['events'][number]['instructions'][number][] {
   if (item.kind === 'wait-for') {
@@ -403,7 +584,7 @@ function itemInstructions(item: DarkScriptEventItem): EmevdEditorDocument['event
 }
 
 /**
- * 新增事件的编译：insert_event + 逐行 insert_instruction。
+ * 新增事件的编译：insert_event + 逐行 insert_instruction + set_event_parameters。
  * 任一行编码不了 → 整个事件抑制（不写空壳/半截事件），各行给「未解码」warning。
  */
 function compileAddedEvent(
@@ -414,7 +595,7 @@ function compileAddedEvent(
   add: (item: EmevdDslDiagnostic) => void,
   resourceUri: string
 ): void {
-  const encodable: Array<{ call: ParsedCall; bank: number; id: number; argsBase64: string }> = [];
+  const encodable: Array<{ call: ParsedCall; bank: number; id: number; argsBase64: string; def: EmedfInstructionDef }> = [];
   let blocked = false;
   for (const statement of parsed.statements) {
     if (statement.kind === 'comment') continue;
@@ -429,7 +610,7 @@ function compileAddedEvent(
       blocked = true;
       continue;
     }
-    encodable.push({ call: statement.call, bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64 });
+    encodable.push({ call: statement.call, bank: encoded.bank, id: encoded.id, argsBase64: encoded.argsBase64, def: encoded.def });
   }
   if (blocked) return;
   if (document.events.some((event) => event.eventId === parsed.eventId)) {
@@ -463,16 +644,67 @@ function compileAddedEvent(
       sourceSpan: entry.call.span
     });
   });
+
+  const newParameters: Array<{
+    instructionIndex: number;
+    targetStartByte: number;
+    sourceStartByte: number;
+    byteCount: number;
+    unkId: number;
+  }> = [];
+
+  encodable.forEach((entry, instructionIndex) => {
+    const layout = getInstructionArgLayout(entry.def);
+    for (let i = 0; i < entry.call.args.length; i++) {
+      const arg = entry.call.args[i]!;
+      if (typeof arg.value === 'string') {
+        const m = /^X(\d+)_(\d+)$/.exec(arg.value);
+        if (m) {
+          const src = Number(m[1]);
+          const cnt = Number(m[2]);
+          const l = layout[i];
+          if (!l || typeof l.targetStartByte !== 'number') {
+            add(error(
+              'EMEVD_PARAMETER_TARGET_OFFSET_UNRESOLVED',
+              `新增事件指令 ${entry.call.name} 参数无法解析 targetStartByte，禁止写入。`,
+              arg.span,
+              { resourceUri }
+            ));
+            return;
+          }
+          newParameters.push({
+            instructionIndex,
+            targetStartByte: l.targetStartByte,
+            sourceStartByte: src,
+            byteCount: cnt,
+            unkId: 0
+          });
+        }
+      }
+    }
+  });
+
+  if (newParameters.length > 0) {
+    operations.push({
+      kind: 'set_event_parameters',
+      eventAnchor: '',
+      eventId: parsed.eventId,
+      parameters: newParameters,
+      target: syntheticAnchor,
+      targetPreconditionHash: '',
+      sourceSpan: parsed.span
+    });
+  }
 }
 
 /**
- * 把新增的指令调用行编码成（bank, id, args）。
+ * 把新增的指令调用行编码成（bank, id, args, def）。
  * 只有 EMEDF 里名字唯一、无 vararg、参数个数/类型全对上的指令可以插入。
  */
 function encodeInsertedCall(
   call: ParsedCall,
   registry: EmedfRegistry
-): { ok: true; bank: number; id: number; argsBase64: string } | { ok: false; reason: string } {
+): { ok: true; bank: number; id: number; argsBase64: string; def: EmedfInstructionDef } | { ok: false; reason: string } {
   const candidates = registry.instructions.filter((def) => darkScriptInstructionName(def.name) === call.name);
   if (candidates.length === 0) return { ok: false, reason: 'EMEDF 里查不到这个指令名' };
   if (candidates.length > 1) return { ok: false, reason: 'EMEDF 里同名指令不唯一，无法确定 bank/id' };
@@ -499,7 +731,7 @@ function encodeInsertedCall(
   }
   const encoded = encodeEmedfArgs(def, values);
   if (!encoded.ok) return { ok: false, reason: encoded.message };
-  return { ok: true, bank: def.bank, id: def.id, argsBase64: encoded.args.toString('base64') };
+  return { ok: true, bank: def.bank, id: def.id, argsBase64: encoded.args.toString('base64'), def };
 }
 
 type StatementDiffEntry =

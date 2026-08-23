@@ -250,6 +250,26 @@ internal sealed class EmevdNativeDocument
             Instructions.Count);
     }
 
+    public IReadOnlyList<EmevdParameter> GetEventParameters(EmevdEvent ev)
+    {
+        var parameters = new List<EmevdParameter>();
+        if (ev.ParameterCount > 0)
+        {
+            var baseOff = checked((int)(ParametersOffset + ev.ParametersOffset));
+            for (var i = 0; i < ev.ParameterCount; i++)
+            {
+                var o = baseOff + i * ParameterSize;
+                parameters.Add(new EmevdParameter(
+                    ReadInt64(SourceBytes, o),
+                    ReadInt64(SourceBytes, o + 8),
+                    ReadInt64(SourceBytes, o + 16),
+                    ReadInt32(SourceBytes, o + 24),
+                    ReadInt32(SourceBytes, o + 28)));
+            }
+        }
+        return parameters;
+    }
+
     public byte[] RebuildEvents(IReadOnlyList<EmevdEvent> nextEvents)
     {
         if (nextEvents.Count != Events.Count)
@@ -637,8 +657,9 @@ internal sealed class EmevdNativeDocument
                     var at = checked((int)patch.InstructionIndex.Value);
                     if (at < 0 || at >= ev.Instructions.Count)
                         throw new InvalidDataException($"EMEVD 事件 {patch.EventId} 删除位置 {at} 越界（0..{ev.Instructions.Count - 1}）。");
-                    // 有事件参数挂在这条指令上时拒绝删除（孤儿参数会破坏事件语义），不静默丢掉。
-                    if (ev.Parameters.Any(p => p.InstructionIndex == at))
+                    // 有事件参数挂在这条指令上且本批不重设参数时拒绝删除（孤儿参数会破坏事件语义），不静默丢掉。
+                    var willSetParameters = patches.Any(p => p.Kind == "set_event_parameters" && p.EventId == patch.EventId);
+                    if (!willSetParameters && ev.Parameters.Any(p => p.InstructionIndex == at))
                         throw new InvalidDataException(
                             $"EMEVD 事件 {patch.EventId} 指令 {at} 仍被事件参数引用，不能删除。");
                     ev.Instructions.RemoveAt(at);
