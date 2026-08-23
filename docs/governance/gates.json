@@ -562,7 +562,8 @@
         "EV-REBASE-REANCHOR-20260808",
         "EV-MODLOADER-BAN-REVOKE-20260818",
         "EV-MAP-ANIM-SCALE-20260823",
-        "EV-MAP-ANIM-SCALE-20260823-FINAL"
+        "EV-MAP-ANIM-SCALE-20260823-FINAL",
+        "EV-ALIGN-MATURE-WORKBENCH-20260823-01"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
