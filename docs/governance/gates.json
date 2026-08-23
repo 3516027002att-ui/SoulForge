@@ -139,7 +139,8 @@
         "EV-VFX54C-GPARAM11B-20260814",
         "EV-REL-SCOPE-GOVCLI-MULTIGATE-20260814",
         "EV-MODLOADER-BAN-REVOKE-20260818",
-        "EV-MAP-ANIM-SCALE-20260823"
+        "EV-MAP-ANIM-SCALE-20260823",
+        "EV-MAP-ANIM-SCALE-20260823-FINAL"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -377,7 +378,8 @@
         "EV-REL-SCOPE-MATBIN-CLASSIFY-20260814",
         "EV-VFX54C-GPARAM11B-20260814",
         "EV-MODLOADER-BAN-REVOKE-20260818",
-        "EV-MAP-ANIM-SCALE-20260823"
+        "EV-MAP-ANIM-SCALE-20260823",
+        "EV-MAP-ANIM-SCALE-20260823-FINAL"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -411,7 +413,8 @@
         "EV-WORKBENCH-PARAM-TRUST-20260810",
         "EV-CONTAINER-PARAM-WRITEBACK-20260810",
         "EV-MODLOADER-BAN-REVOKE-20260818",
-        "EV-MAP-ANIM-SCALE-20260823"
+        "EV-MAP-ANIM-SCALE-20260823",
+        "EV-MAP-ANIM-SCALE-20260823-FINAL"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -472,7 +475,8 @@
         "EV-AGENT60D-TOOL-APPROVAL-DRAWER-20260814",
         "EV-VFX54C-GPARAM11B-20260814",
         "EV-MODLOADER-BAN-REVOKE-20260818",
-        "EV-MAP-ANIM-SCALE-20260823"
+        "EV-MAP-ANIM-SCALE-20260823",
+        "EV-MAP-ANIM-SCALE-20260823-FINAL"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
@@ -557,7 +561,8 @@
         "EV-REPACK-A11Y-20260807",
         "EV-REBASE-REANCHOR-20260808",
         "EV-MODLOADER-BAN-REVOKE-20260818",
-        "EV-MAP-ANIM-SCALE-20260823"
+        "EV-MAP-ANIM-SCALE-20260823",
+        "EV-MAP-ANIM-SCALE-20260823-FINAL"
       ],
       "blockerRefs": [],
       "scopeItemIds": [
