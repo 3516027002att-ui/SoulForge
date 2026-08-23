@@ -78,6 +78,14 @@ export const TIER_BY_SCRIPT = Object.freeze({
   test: 'unit',
   'test:ai-conformance': 'unit',
   'test:rag': 'unit',
+  'test:emevd-stable-identity': 'unit',
+  'test:csv': 'unit',
+  'test:emedf-completion-catalog': 'unit',
+  'test:emevd-instruction-structural': 'unit',
+  'test:s40-live': 'unit',
+  'test:yapped-param-metadata-source': 'unit',
+  'test:citations': 'unit',
+  'test:path-sanitizer': 'unit',
   // AI 工具权限阶梯的**生产**实现。ai-conformance 里有 5 个 case 断言的是
   // testing/harness 下自建的 evaluatePolicyGate/maxPermissionFromMode——那三个
   // 符号全仓只存在于测试目录，生产走 ai/toolPermissions.ts 的
@@ -564,6 +572,7 @@ export const EXCLUDED = Object.freeze({
     + '实测 2026-08-08）；跑一次 Release publish 要几分钟且产物不参与任何验证判据，'
     + '故不进 tier。若将来 release 链要用它，请一并把 runBridge.ts 的 Release 候选路径'
     + '纳入验证——那两条路径至今从未被生成过。',
+  'launcher:build': '启动器二进制发布构建，不是验证',
   'corpus:build-local-release': '生成本机 corpus registry，写 testdata，不是验证',
   'corpus:build-local-release:configured': '同上（被 wrapper 调用的内层）',
   // gov CLI 是治理数据的写入口，不是验证：跑它会改执行面板状态。
