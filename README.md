@@ -34,7 +34,7 @@ SoulForge 是给魂游（FromSoftware 的《只狼》《黑暗之魂》《艾尔
 
 ## 开发文档
 
-不不不你不应该看这些，因为暂时没人来contribute，所以这些文档都是写给agents看的
+开发与架构设计规范请参阅 [V0.5 实施交接书](docs/V0_5_IMPLEMENTATION_HANDOFF.md)。
 
 ## 快速开始
 
