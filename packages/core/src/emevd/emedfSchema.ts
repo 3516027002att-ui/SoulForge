@@ -60,6 +60,9 @@ export interface DecodedArg {
   name: string;
   type: EmedfArgType;
   value: number | boolean;
+  startByte?: number;
+  byteCount?: number;
+  parameterSymbol?: string;
 }
 
 export type DecodeResult =
@@ -239,6 +242,8 @@ export function decodeEmedfArgs(
     const decoded: DecodedArg[] = [];
     for (const arg of def.args) {
       offset = align(offset, arg.type);
+      const startByte = offset;
+      const byteCount = byteLengthOf(arg.type);
       if (arg.vararg) {
         // Only materialize a vararg element when the payload actually contains
         // one. The value is display-only: encode always preserves the original
@@ -247,12 +252,20 @@ export function decodeEmedfArgs(
         decoded.push({
           name: arg.name,
           type: arg.type,
-          value: count > 0 ? readArg(args, offset, arg.type).value : 0
+          value: count > 0 ? readArg(args, offset, arg.type).value : 0,
+          startByte,
+          byteCount
         });
         continue;
       }
       const value = readArg(args, offset, arg.type);
-      decoded.push({ name: arg.name, type: arg.type, value: value.value });
+      decoded.push({
+        name: arg.name,
+        type: arg.type,
+        value: value.value,
+        startByte,
+        byteCount
+      });
       offset = value.nextOffset;
     }
     return { ok: true, def, args: decoded };
@@ -631,12 +644,12 @@ function validateEmedfRegistryUncached(
   return { ok: true };
 }
 
-function align(offset: number, type: EmedfArgType): number {
+export function align(offset: number, type: EmedfArgType): number {
   const a = alignmentOf(type);
   return Math.ceil(offset / a) * a;
 }
 
-function alignmentOf(type: EmedfArgType): number {
+export function alignmentOf(type: EmedfArgType): number {
   switch (type) {
     case 'u8':
     case 's8':
@@ -650,7 +663,7 @@ function alignmentOf(type: EmedfArgType): number {
   }
 }
 
-function encodedSize(args: EmedfArgDef[]): number {
+export function encodedSize(args: EmedfArgDef[]): number {
   let offset = 0;
   for (const arg of args) {
     if (arg.vararg) continue;
@@ -659,7 +672,7 @@ function encodedSize(args: EmedfArgDef[]): number {
   return Math.ceil(offset / 4) * 4;
 }
 
-function byteLengthOf(type: EmedfArgType): number {
+export function byteLengthOf(type: EmedfArgType): number {
   switch (type) {
     case 'u8':
     case 's8':

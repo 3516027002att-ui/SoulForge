@@ -151,7 +151,7 @@ internal static class MsbNativeWriter
                 continue;
             }
 
-            if (patch.Kind == "set_region_position")
+            if (patch.Kind == "set_region_position" || patch.Kind == "set_region_transform")
             {
                 var region = reread.Regions.FirstOrDefault(r => r.Name == patch.PartName)
                     ?? throw new InvalidDataException($"MSB mutation 后找不到 region {patch.PartName}。");
@@ -161,6 +161,27 @@ internal static class MsbNativeWriter
                     throw new InvalidDataException("MSB region posY 未按预期更新。");
                 if (patch.PosZ is not null && Math.Abs(region.PosZ - patch.PosZ.Value) > 0.0001f)
                     throw new InvalidDataException("MSB region posZ 未按预期更新。");
+                if (patch.RotX is not null && Math.Abs(region.RotX - patch.RotX.Value) > 0.0001f)
+                    throw new InvalidDataException("MSB region rotX 未按预期更新。");
+                if (patch.RotY is not null && Math.Abs(region.RotY - patch.RotY.Value) > 0.0001f)
+                    throw new InvalidDataException("MSB region rotY 未按预期更新。");
+                if (patch.RotZ is not null && Math.Abs(region.RotZ - patch.RotZ.Value) > 0.0001f)
+                    throw new InvalidDataException("MSB region rotZ 未按预期更新。");
+                if (patch.ScaleX is not null && Math.Abs(region.ScaleX - patch.ScaleX.Value) > 0.0001f)
+                    throw new InvalidDataException("MSB region scaleX 未按预期更新。");
+                if (patch.ScaleY is not null && Math.Abs(region.ScaleY - patch.ScaleY.Value) > 0.0001f)
+                    throw new InvalidDataException("MSB region scaleY 未按预期更新。");
+                if (patch.ScaleZ is not null && Math.Abs(region.ScaleZ - patch.ScaleZ.Value) > 0.0001f)
+                    throw new InvalidDataException("MSB region scaleZ 未按预期更新。");
+                continue;
+            }
+
+            if (patch.Kind == "change_model" || patch.Kind == "set_part_model")
+            {
+                var partWithModel = reread.Parts.FirstOrDefault(p => p.Name == patch.PartName)
+                    ?? throw new InvalidDataException($"MSB mutation 后找不到 part {patch.PartName}。");
+                if (patch.ModelIndex is not null && partWithModel.ModelIndex != patch.ModelIndex.Value)
+                    throw new InvalidDataException("MSB part modelIndex 未按预期更新。");
                 continue;
             }
 
@@ -207,7 +228,7 @@ internal static class MsbNativeWriter
     private static MsbPatch ParsePatch(JsonElement item)
     {
         var kind = RequiredString(item, item.TryGetProperty("kind", out _) ? "kind" : "mutation").ToLowerInvariant();
-        var partName = RequiredString(item, "partName");
+        var partName = RequiredString(item, item.TryGetProperty("partName", out _) ? "partName" : "name");
         return new MsbPatch(
             kind,
             partName,
@@ -219,7 +240,10 @@ internal static class MsbNativeWriter
             OptionalFloat(item, "rotZ"),
             OptionalFloat(item, "scaleX"),
             OptionalFloat(item, "scaleY"),
-            OptionalFloat(item, "scaleZ"));
+            OptionalFloat(item, "scaleZ"),
+            OptionalString(item, "modelName") ?? OptionalString(item, "newModelName"),
+            OptionalInt(item, "modelIndex"),
+            OptionalInt(item, "entityId"));
     }
 
     private static void RequireHash(JsonElement options, string field, string actual, string label)
@@ -232,7 +256,15 @@ internal static class MsbNativeWriter
         => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString())
             ? value.GetString()! : throw new InvalidDataException($"options.{field} 是必填字符串。");
 
+    private static string? OptionalString(JsonElement options, string field)
+        => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString())
+            ? value.GetString() : null;
+
     private static float? OptionalFloat(JsonElement options, string field)
         => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number
             ? value.GetSingle() : null;
+
+    private static int? OptionalInt(JsonElement options, string field)
+        => options.TryGetProperty(field, out var value) && value.ValueKind == JsonValueKind.Number
+            ? value.GetInt32() : null;
 }

@@ -286,6 +286,25 @@ internal static class EmevdNativeWriter
             return new EmevdPatch(kind, eventId, null, null, index);
         }
 
+        if (kind is "set_event_parameters")
+        {
+            var eventId = RequiredLong(item, "eventId");
+            var parameters = new List<EmevdParameter>();
+            if (item.TryGetProperty("parameters", out var paramsEl) && paramsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var p in paramsEl.EnumerateArray())
+                {
+                    parameters.Add(new EmevdParameter(
+                        RequiredLong(p, "instructionIndex"),
+                        RequiredLong(p, "targetStartByte"),
+                        RequiredLong(p, "sourceStartByte"),
+                        (int)RequiredLong(p, "byteCount"),
+                        (int)(p.TryGetProperty("unkId", out var unk) && unk.ValueKind == JsonValueKind.Number ? unk.GetInt64() : 0)));
+                }
+            }
+            return new EmevdPatch(kind, eventId, null, null, null, null, null, null, parameters);
+        }
+
         var eventIdRequired = RequiredLong(item, "eventId");
         var restBehavior = OptionalUInt32(item, "restBehavior");
         long? newEventId = null;

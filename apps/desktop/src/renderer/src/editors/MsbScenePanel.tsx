@@ -94,7 +94,42 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
   const drawListRef = useRef<ReturnType<typeof buildSceneDrawList> | null>(null);
   /** 按 modelName 去重后的网格：modelName → mesh。同一模型只读一次 Bridge，多 part 共享引用。 */
   const loadedModelMeshesRef = useRef<Map<string, NonNullable<SceneDrawItem['mesh']>>>(new Map());
-  /** 问题4-A：part 模型加载进度（loaded / total，total 是全部 part 数）。 */
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
+  const handleSavePartTransform = useCallback(async (partName: string) => {
+    const current = partsState.find((p) => p.name === partName);
+    if (!current) return;
+    const bridge = getRendererBridge();
+    if (!bridge || !props.mapResourceUri) return;
+    setIsSaving(true);
+    setSaveStatus('正在提交变换…');
+    try {
+      const res = await (bridge as any).applyMsbMutation?.(props.mapResourceUri, props.revision, {
+        kind: 'set_part_transform',
+        partName: current.name,
+        posX: current.posX,
+        posY: current.posY,
+        posZ: current.posZ,
+        rotX: current.rotX,
+        rotY: current.rotY,
+        rotZ: current.rotZ,
+        scaleX: current.scaleX,
+        scaleY: current.scaleY,
+        scaleZ: current.scaleZ
+      });
+      if (res?.ok) {
+        setSaveStatus('变换已成功提交！');
+      } else {
+        setSaveStatus(`提交失败：${res?.diagnostics?.[0]?.message ?? '未知错误'}`);
+      }
+    } catch (err) {
+      setSaveStatus(`提交失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [partsState, props.mapResourceUri, props.revision]);
+
   const [meshStatus, setMeshStatus] = useState<{ loaded: number; missing: number; total: number } | null>(null);
 
   useEffect(() => {
@@ -514,13 +549,33 @@ export function MsbScenePanel(props: MsbScenePanelProps): ReactElement {
           initialFlex: 0.3,
           minWidth: 240,
           children: selected ? (
-            <div className="binder-child-table" role="table" aria-label={`${selected.label} 属性`}>
-              {propertiesFor(selected).map(([key, value]) => (
-                <div className="binder-child-row msb-property-row" role="row" key={key}>
-                  <span className="muted">{key}</span>
-                  <span>{value}</span>
+            <div className="msb-properties-panel">
+              <div className="binder-child-table" role="table" aria-label={`${selected.label} 属性`}>
+                {propertiesFor(selected).map(([key, value]) => (
+                  <div className="binder-child-row msb-property-row" role="row" key={key}>
+                    <span className="muted">{key}</span>
+                    <span>{value}</span>
+                  </div>
+                ))}
+              </div>
+              {selected.kind === 'msb-part' && (
+                <div style={{ marginTop: '16px', padding: '0 8px' }}>
+                  <button
+                    type="button"
+                    className="button button--primary"
+                    disabled={isSaving}
+                    onClick={() => void handleSavePartTransform(selected.label)}
+                    style={{ width: '100%', padding: '6px 12px' }}
+                  >
+                    {isSaving ? '正在提交…' : '提交 Part 变换到 Patch Engine'}
+                  </button>
+                  {saveStatus && (
+                    <p className="muted" style={{ marginTop: '8px', fontSize: '12px' }}>
+                      {saveStatus}
+                    </p>
+                  )}
                 </div>
-              ))}
+              )}
             </div>
           ) : (
             <p className="muted">在左侧对象列表中选择一个对象后显示属性，可在 3D 视口中拖拽修改。</p>

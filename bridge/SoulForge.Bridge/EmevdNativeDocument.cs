@@ -651,6 +651,17 @@ internal sealed class EmevdNativeDocument
                     needsGc = true;
                     break;
                 }
+                case "set_event_parameters":
+                {
+                    var idx = builds.FindIndex(e => e.Id == patch.EventId);
+                    if (idx < 0) throw new InvalidDataException($"EMEVD 事件 ID {patch.EventId} 不存在。");
+                    if (patch.Parameters is null)
+                        throw new InvalidDataException("set_event_parameters 需要 parameters。");
+                    var cur = builds[idx];
+                    builds[idx] = cur with { Parameters = patch.Parameters.ToList() };
+                    needsGc = true;
+                    break;
+                }
                 default:
                     throw new InvalidDataException($"未知或尚未支持的 EMEVD mutation：{patch.Kind}。");
             }
@@ -779,6 +790,23 @@ internal sealed class EmevdNativeDocument
         {
             var e = Events[i];
             var start = e.InstructionCount > 0 ? e.InstructionsOffset / InstructionSize : -1L;
+            var eventParams = new object[e.ParameterCount];
+            if (e.ParameterCount > 0)
+            {
+                var baseOff = checked((int)(ParametersOffset + e.ParametersOffset));
+                for (var pIdx = 0; pIdx < e.ParameterCount; pIdx++)
+                {
+                    var po = baseOff + pIdx * ParameterSize;
+                    eventParams[pIdx] = new
+                    {
+                        instructionIndex = ReadInt64(SourceBytes, po),
+                        targetStartByte = ReadInt64(SourceBytes, po + 8),
+                        sourceStartByte = ReadInt64(SourceBytes, po + 16),
+                        byteCount = ReadInt32(SourceBytes, po + 24),
+                        unkId = ReadInt32(SourceBytes, po + 28)
+                    };
+                }
+            }
             projected[i] = new
             {
                 id = e.Id,
@@ -787,6 +815,7 @@ internal sealed class EmevdNativeDocument
                 instructionStartIndex = start,
                 parameterCount = e.ParameterCount,
                 parametersOffset = e.ParametersOffset,
+                parameters = eventParams,
                 restBehavior = e.RestBehavior
             };
         }
@@ -900,7 +929,8 @@ internal sealed record EmevdPatch(
     long? InstructionIndex = null,
     string? ArgsBase64 = null,
     long? Bank = null,
-    long? Id = null);
+    long? Id = null,
+    List<EmevdParameter>? Parameters = null);
 
 internal sealed record EmevdRoundTripReport(
     bool ByteIdentical,

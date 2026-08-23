@@ -382,17 +382,52 @@ internal sealed class MsbNativeDocument
                     break;
                 }
                 case "set_region_position":
+                case "set_region_transform":
                 {
                     var index = Regions.ToList().FindIndex(r => r.Name == patch.PartName);
                     if (index < 0) throw new InvalidDataException($"MSB region 不存在：{patch.PartName}");
                     var region = Regions[index];
                     GuardRegisteredRegion(region);
-                    if (patch.PosX is null || patch.PosY is null || patch.PosZ is null)
-                        throw new InvalidDataException("set_region_position 需要 posX/posY/posZ。");
-                    var baseOff = region.Offset + RegionTransformOffset;
-                    WriteFloat(rebuilt, baseOff, patch.PosX.Value);
-                    WriteFloat(rebuilt, baseOff + 4, patch.PosY.Value);
-                    WriteFloat(rebuilt, baseOff + 8, patch.PosZ.Value);
+                    var t = region.Offset + RegionTransformOffset;
+                    if (patch.Kind == "set_region_position")
+                    {
+                        if (patch.PosX is null || patch.PosY is null || patch.PosZ is null)
+                            throw new InvalidDataException("set_region_position 需要 posX/posY/posZ。");
+                        WriteFloat(rebuilt, t, patch.PosX.Value);
+                        WriteFloat(rebuilt, t + 4, patch.PosY.Value);
+                        WriteFloat(rebuilt, t + 8, patch.PosZ.Value);
+                    }
+                    else
+                    {
+                        if (patch.PosX is not null) WriteFloat(rebuilt, t, patch.PosX.Value);
+                        if (patch.PosY is not null) WriteFloat(rebuilt, t + 4, patch.PosY.Value);
+                        if (patch.PosZ is not null) WriteFloat(rebuilt, t + 8, patch.PosZ.Value);
+                        if (patch.RotX is not null) WriteFloat(rebuilt, t + 12, patch.RotX.Value);
+                        if (patch.RotY is not null) WriteFloat(rebuilt, t + 16, patch.RotY.Value);
+                        if (patch.RotZ is not null) WriteFloat(rebuilt, t + 20, patch.RotZ.Value);
+                        if (patch.ScaleX is not null) WriteFloat(rebuilt, t + 28, patch.ScaleX.Value);
+                        if (patch.ScaleY is not null) WriteFloat(rebuilt, t + 32, patch.ScaleY.Value);
+                        if (patch.ScaleZ is not null) WriteFloat(rebuilt, t + 36, patch.ScaleZ.Value);
+                    }
+                    break;
+                }
+                case "set_part_model":
+                case "change_model":
+                {
+                    var index = Parts.ToList().FindIndex(p => p.Name == patch.PartName);
+                    if (index < 0) throw new InvalidDataException($"MSB part 不存在：{patch.PartName}");
+                    var part = Parts[index];
+                    GuardRegisteredPart(part);
+                    if (patch.ModelIndex is null && patch.ModelName is not null)
+                    {
+                        var mIdx = Models.ToList().FindIndex(m => m.Name == patch.ModelName);
+                        if (mIdx < 0) throw new InvalidDataException($"MSB model 不存在：{patch.ModelName}");
+                        WriteInt32(rebuilt, part.Offset + PartModelIndexOffset, mIdx);
+                    }
+                    else if (patch.ModelIndex is not null)
+                    {
+                        WriteInt32(rebuilt, part.Offset + PartModelIndexOffset, patch.ModelIndex.Value);
+                    }
                     break;
                 }
                 case "delete_part":
@@ -660,7 +695,10 @@ internal sealed record MsbPatch(
     float? RotZ,
     float? ScaleX,
     float? ScaleY,
-    float? ScaleZ);
+    float? ScaleZ,
+    string? ModelName = null,
+    int? ModelIndex = null,
+    int? EntityId = null);
 internal sealed record MsbRoundTripReport(
     bool ByteIdentical,
     bool SemanticIdentical,

@@ -47,7 +47,7 @@ export function looksLikeDarkScript(source: string): boolean {
 }
 
 interface ParsedArg {
-  value: EmevdDslLiteral;
+  value: EmevdDslLiteral | string;
   span: EmevdDslSourceSpan;
 }
 
@@ -65,6 +65,7 @@ type ParsedStatement =
 interface ParsedEvent {
   eventId: number;
   restBehavior: number;
+  parameterNames: string[];
   statements: ParsedStatement[];
   span: EmevdDslSourceSpan;
 }
@@ -275,6 +276,67 @@ function compilePairedEvent(
       compileStatement(entry.statement, entry.item, eventAnchor, operations, add, resourceUri);
     }
   }
+
+  // 收集事件参数绑定差异并生成 set_event_parameters
+  const newParameters: Array<{
+    instructionIndex: number;
+    targetStartByte: number;
+    sourceStartByte: number;
+    byteCount: number;
+    unkId: number;
+  }> = [];
+  let currentInstrIdx = 0;
+  for (const entry of diff) {
+    if (entry.kind === 'match') {
+      if (entry.statement.kind === 'call' && entry.item.kind === 'call') {
+        const c = entry.statement.call;
+        const decodedArgs = entry.item.args;
+        for (let i = 0; i < c.args.length && i < decodedArgs.length; i++) {
+          const val = c.args[i]?.value;
+          if (typeof val === 'string') {
+            const m = /^X(\d+)_(\d+)$/.exec(val);
+            if (m) {
+              const src = Number(m[1]);
+              const cnt = Number(m[2]);
+              const startByte = decodedArgs[i]?.startByte ?? 0;
+              newParameters.push({
+                instructionIndex: currentInstrIdx,
+                targetStartByte: startByte,
+                sourceStartByte: src,
+                byteCount: cnt,
+                unkId: 0
+              });
+            }
+          }
+        }
+        currentInstrIdx += 1;
+      } else if (entry.statement.kind === 'wait-for' && entry.item.kind === 'wait-for') {
+        currentInstrIdx += entry.item.predicates.length + 1;
+      } else {
+        currentInstrIdx += 1;
+      }
+    }
+  }
+
+  const oldParams = event.parameters ?? [];
+  const paramsChanged = oldParams.length !== newParameters.length ||
+    newParameters.some((np, idx) => {
+      const op = oldParams[idx];
+      return !op || op.instructionIndex !== np.instructionIndex || op.targetStartByte !== np.targetStartByte || op.sourceStartByte !== np.sourceStartByte || op.byteCount !== np.byteCount;
+    });
+
+  if (paramsChanged && (newParameters.length > 0 || oldParams.length > 0)) {
+    operations.push({
+      kind: 'set_event_parameters',
+      eventAnchor,
+      eventId: event.eventId,
+      parameters: newParameters,
+      target: event.anchor,
+      targetPreconditionHash: eventHash,
+      sourceSpan: parsed.span
+    });
+  }
+
   if (blocked) return;
 
   // 删除：原始文档里有、源码里没了的行（wait-for 块 = 谓词 + anchor 全部指令）。
@@ -423,6 +485,13 @@ function encodeInsertedCall(
   for (let i = 0; i < def.args.length; i += 1) {
     const argDef = def.args[i]!;
     const got = call.args[i]!;
+    if (typeof got.value === 'string' && /^X\d+_\d+$/.test(got.value)) {
+      values[argDef.name] = argDef.type === 'bool' ? false : 0;
+      continue;
+    }
+    if (typeof got.value === 'string') {
+      return { ok: false, reason: `参数 ${argDef.name} 类型不匹配` };
+    }
     if (argDef.type === 'bool' ? typeof got.value !== 'boolean' : typeof got.value !== 'number') {
       return { ok: false, reason: `参数 ${argDef.name} 类型不匹配` };
     }
@@ -606,7 +675,16 @@ function emitCallArgMutations(
   for (let i = 0; i < expectedArgs.length; i += 1) {
     const expected = expectedArgs[i]!;
     const got = call.args[i]!;
-    if (typeof expected.value !== typeof got.value) {
+    const expectedSym = expected.parameterSymbol;
+    const gotVal = got.value;
+
+    if (typeof gotVal === 'string') {
+      if (/^X\d+_\d+$/.test(gotVal)) {
+        if (expectedSym === gotVal) {
+          continue;
+        }
+        continue;
+      }
       add(error(
         'DARKSCRIPT_ARG_TYPE',
         `参数 ${expected.name} 类型不匹配。`,
@@ -615,7 +693,7 @@ function emitCallArgMutations(
       ));
       continue;
     }
-    if (!Object.is(expected.value, got.value)) {
+    if (expectedSym !== undefined) {
       operations.push({
         kind: 'set_instruction_arg',
         eventAnchor,
@@ -627,7 +705,32 @@ function emitCallArgMutations(
         id: instruction.id,
         argument: expected.name,
         before: expected.value,
-        after: got.value
+        after: gotVal
+      });
+      continue;
+    }
+    if (typeof expected.value !== typeof gotVal) {
+      add(error(
+        'DARKSCRIPT_ARG_TYPE',
+        `参数 ${expected.name} 类型不匹配。`,
+        got.span,
+        { resourceUri, targetAnchor: instructionAnchor }
+      ));
+      continue;
+    }
+    if (!Object.is(expected.value, gotVal)) {
+      operations.push({
+        kind: 'set_instruction_arg',
+        eventAnchor,
+        instructionAnchor,
+        target: instruction.anchor,
+        targetPreconditionHash: hash,
+        sourceSpan: got.span,
+        bank: instruction.bank,
+        id: instruction.id,
+        argument: expected.name,
+        before: expected.value,
+        after: gotVal
       });
     }
   }
@@ -671,7 +774,7 @@ function parseDarkScriptEvents(
 ): ParsedEvent[] {
   const events: ParsedEvent[] = [];
   let offset = 0;
-  const header = /\$Event\(\s*(-?\d+)\s*,\s*(Default|Restart|-?\d+)(?:\s*\/\*[\s\S]*?\*\/)?\s*,\s*function\s*\(\s*\)\s*\{/g;
+  const header = /\$Event\(\s*(-?\d+)\s*,\s*(Default|Restart|-?\d+)(?:\s*\/\*[\s\S]*?\*\/)?\s*,\s*function\s*\(([^)]*)\)\s*\{/g;
   while (offset <= source.length) {
     header.lastIndex = offset;
     const match = header.exec(source);
@@ -685,11 +788,16 @@ function parseDarkScriptEvents(
     }
     const restRaw = match[2]!;
     const restBehavior = restRaw === 'Default' ? 0 : restRaw === 'Restart' ? 1 : Number(restRaw);
+    const paramStr = match[3]?.trim() ?? '';
+    const parameterNames = paramStr.length > 0
+      ? paramStr.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+      : [];
     const body = source.slice(headerEnd, close);
     const statements = parseStatements(body, headerEnd, index, add);
     events.push({
       eventId: Number(match[1]),
       restBehavior,
+      parameterNames,
       statements,
       span: index.span(headerStart, close + 3)
     });
@@ -827,7 +935,7 @@ function parseCall(raw: string, span: EmevdDslSourceSpan): ParsedCall | null {
   return { name: match[1]!, args, span };
 }
 
-function parseLiteral(text: string): EmevdDslLiteral | undefined {
+function parseLiteral(text: string): EmevdDslLiteral | string | undefined {
   if (text === 'true') return true;
   if (text === 'false') return false;
   if (text === '-0') return -0;
@@ -838,6 +946,9 @@ function parseLiteral(text: string): EmevdDslLiteral | undefined {
   if (/^-?\d+\.\d+(?:e[+-]?\d+)?$/i.test(text)) {
     const value = Number(text);
     return Number.isFinite(value) ? value : undefined;
+  }
+  if (/^X\d+_\d+$/.test(text)) {
+    return text;
   }
   return undefined;
 }

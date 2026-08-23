@@ -7,7 +7,7 @@ import { runBridge } from '../bridge/runBridge.js';
 
 export type MsbBridgeMutation =
   | {
-      kind: 'set_part_position' | 'set_part_transform' | 'set_region_position';
+      kind: 'set_part_position' | 'set_part_transform' | 'set_region_position' | 'set_region_transform';
       partName: string;
       posX?: number;
       posY?: number;
@@ -18,6 +18,12 @@ export type MsbBridgeMutation =
       scaleX?: number;
       scaleY?: number;
       scaleZ?: number;
+    }
+  | {
+      kind: 'change_model' | 'set_part_model';
+      partName: string;
+      modelName?: string;
+      modelIndex?: number;
     }
   | {
       kind: 'delete_part' | 'delete_region' | 'delete_event';
@@ -65,6 +71,8 @@ export async function commitMsbMutationViaBridge(
     if (m.scaleY !== undefined) commandOptions.scaleY = m.scaleY;
     if (m.scaleZ !== undefined) commandOptions.scaleZ = m.scaleZ;
   }
+  if ('modelName' in m && m.modelName !== undefined) commandOptions.modelName = m.modelName;
+  if ('modelIndex' in m && m.modelIndex !== undefined) commandOptions.modelIndex = m.modelIndex;
 
   const result = await runBridge<{
     outputHash?: string;
