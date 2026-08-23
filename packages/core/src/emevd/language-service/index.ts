@@ -5,3 +5,4 @@ export * from './eventDiagnosticsEngine.js';
 export * from './eventQuickFixEngine.js';
 export * from './eventSymbolIndexer.js';
 export * from './eventFormatter.js';
+export * from './documentSemanticSnapshot.js';

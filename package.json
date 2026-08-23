@@ -75,6 +75,8 @@
     "test:s40-live": "npm run test:s40-live -w @soulforge/core",
     "test:yapped-param-metadata-source": "npm run test:yapped-param-metadata-source -w @soulforge/core",
     "test:citations": "npm run test:citations -w @soulforge/shared",
+    "test:darkscript-languageservice-scale": "npm run test:darkscript-languageservice-scale -w @soulforge/core",
+    "test:animation-playback-clock": "npm run test:animation-playback-clock -w @soulforge/core",
     "test:map-document-scale": "npm run test:map-document-scale -w @soulforge/core",
     "test:path-sanitizer": "npm run test:path-sanitizer -w @soulforge/shared",
     "test:dds-convert-writeback": "npm run test:dds-convert-writeback -w @soulforge/core",
